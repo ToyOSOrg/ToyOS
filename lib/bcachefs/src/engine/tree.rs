@@ -10,7 +10,8 @@ use alloc::vec::Vec;
 use super::bkey::{Bpos, Key};
 use super::mkfs::{BLOCK_SECTORS, FIRST_INODE, ROOT_INODE, ROOT_SNAPSHOT, ROOT_SUBVOLUME};
 use super::read::{hash, MAX_SYMLINK};
-use super::value::{self, inode_field, DirentType, Extent, InodeValue, Ptr, MAX_NAME};
+use super::value::mode::{S_IFDIR, S_IFLNK, S_IFREG};
+use super::value::{self, csum_type, inode_field, DirentType, Extent, InodeValue, Ptr, MAX_NAME};
 use super::{kind, Btree, Error, Result, SECTOR};
 use crate::crc32c::crc32c_zero;
 
@@ -55,10 +56,6 @@ impl Default for Tree<'_> {
     }
 }
 
-const S_IFDIR: u16 = 0o040000;
-const S_IFREG: u16 = 0o100000;
-const S_IFLNK: u16 = 0o120000;
-
 impl<'a> Tree<'a> {
     pub const ROOT: NodeRef = NodeRef(0);
 
@@ -87,7 +84,7 @@ impl<'a> Tree<'a> {
     /// Another name for the file or symlink `node`.
     pub fn link(&mut self, parent: NodeRef, name: &[u8], node: NodeRef) -> Result<()> {
         match self.nodes.get(node.0).map(|n| &n.content) {
-            None => return Err(Error::Invalid("a node of another tree")),
+            None => return Err(Error::Invalid("no node of this tree")),
             Some(Content::Dir(_)) => return Err(Error::Invalid("a hard link to a directory")),
             Some(_) => {}
         }
@@ -176,7 +173,7 @@ impl<'a> Tree<'a> {
                 let csum = crc32c_zero(&padded);
                 let ptr = Ptr { sector: at, dev: 0, gen: 0, cached: false, unwritten: false };
                 let key = Key { size: n as u32, ..Key::new(kind::EXTENT, Bpos::new(ino(i), done + n, ROOT_SNAPSHOT)) };
-                keys.push((Btree::Extents, key, Extent::encode(n as u32, CRC32C_DATA, csum, ptr)));
+                keys.push((Btree::Extents, key, Extent::encode(n as u32, csum_type::CRC32C, csum, ptr)));
                 extents.push(Placed { sector: at, node: i, from, to });
                 at += n;
                 done += n;
@@ -185,7 +182,9 @@ impl<'a> Tree<'a> {
         }
 
         // Dirents, each at its name's hash slot or the first free one after
-        // it. A node's back-reference is its first name.
+        // it. A node's back-reference is the first dirent written for it,
+        // directories taken in the order they were added and names in byte
+        // order.
         let mut backref = alloc::vec![(0u64, 0u64); self.nodes.len()];
         let mut subdirs = alloc::vec![0u64; self.nodes.len()];
         for (d, node) in self.nodes.iter().enumerate() {
@@ -255,8 +254,6 @@ impl<'a> Tree<'a> {
 
 /// Hash type 3, siphash, in an inode's flags.
 const SIPHASH: u64 = 3 << 20;
-/// Data checksum type 5: crc32c with no inversions.
-const CRC32C_DATA: u8 = 5;
 
 /// A tree's keys and the extents its data fills.
 pub(crate) struct Populated<'t, 'a> {
@@ -317,7 +314,7 @@ mod tests {
         let f = t.file(Tree::ROOT, b"f", b"x", META).unwrap();
         assert_eq!(t.link(Tree::ROOT, b"again", d), Err(Error::Invalid("a hard link to a directory")));
         assert_eq!(t.file(f, b"in-a-file", b"", META), Err(Error::Invalid("a parent that is no directory of this tree")));
-        assert_eq!(t.link(Tree::ROOT, b"x", NodeRef(99)), Err(Error::Invalid("a node of another tree")));
+        assert_eq!(t.link(Tree::ROOT, b"x", NodeRef(99)), Err(Error::Invalid("no node of this tree")));
     }
 
     #[test]

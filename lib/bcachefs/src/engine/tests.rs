@@ -273,6 +273,8 @@ fn rewrite_leaf(dev: &Image, btree: Btree, at: Bpos, bset_seq: u64, edit: impl F
     let crc = crate::crc32c::crc32c(&bytes[16..end]);
     bytes[..4].copy_from_slice(&crc.to_le_bytes());
     assert!(bytes.len() <= usize::from(ptr.written) * 512, "the rewrite outgrew the node's written sectors");
+    // Zeros over any later bset, which an upstream node may hold.
+    bytes.resize(usize::from(ptr.written) * 512, 0);
     let mut blocks = vec![[0u8; BLOCK]; bytes.len() / BLOCK];
     blocks.as_flattened_mut().copy_from_slice(&bytes);
     block_on_ready(dev.write(ptr.ptr.sector / 8, &blocks)).unwrap();
@@ -1116,4 +1118,44 @@ fn an_inode_size_near_2_64_is_checked_without_overflow() {
     let dev = small();
     edit_inode(&dev, FIRST + 2, |i| i.size = u64::MAX);
     assert!(!findings(&dev).iter().any(|f| matches!(f, Finding::Inode { rule: "extent past its size", .. })));
+}
+
+/// ToyOS volumes hold no need_discard or bucket_gens key, so those
+/// comparisons are held on the upstream fixture.
+#[test]
+fn an_alloc_need_discard_or_bucket_gens_key_off_its_derivation_is_found() {
+    let dev = small();
+    let mut changed = None;
+    rewrite_leaf(&dev, Btree::Alloc, Bpos::MIN, 0, |keys| {
+        let (k, v) = &mut keys[0];
+        v[16] ^= 1; // dirty sectors
+        changed = Some(k.pos);
+    });
+    assert!(findings(&dev).contains(&Finding::Derived { btree: Btree::Alloc, pos: changed.unwrap(), rule: "differs" }));
+
+    let dev = fixture("links.img.gz");
+    let mut gone = None;
+    rewrite_leaf(&dev, Btree::NeedDiscard, Bpos::MIN, 0, |keys| gone = keys.pop().map(|(k, _)| k.pos));
+    assert!(findings(&dev).contains(&Finding::Derived { btree: Btree::NeedDiscard, pos: gone.unwrap(), rule: "missing" }));
+
+    let dev = fixture("links.img.gz");
+    let mut changed = None;
+    rewrite_leaf(&dev, Btree::BucketGens, Bpos::MIN, 0, |keys| {
+        let (k, v) = &mut keys[0];
+        let i = v.iter().position(|&g| g != 0).unwrap();
+        v[i] += 1;
+        changed = Some(k.pos);
+    });
+    assert!(findings(&dev).contains(&Finding::Derived { btree: Btree::BucketGens, pos: changed.unwrap(), rule: "differs" }));
+}
+
+/// The ranges' listed order is the journal's ring.
+#[test]
+fn journal_buckets_keep_their_listed_order() {
+    let dev = formatted(8 << 20, None);
+    rewrite_superblock(&dev, |_, fields| {
+        let body = [(30u64, 4u64), (20, 8)].iter().flat_map(|(a, b)| [a.to_le_bytes(), b.to_le_bytes()].concat()).collect();
+        fields.iter_mut().find(|f| f.kind == 9).unwrap().body = body;
+    });
+    assert_eq!(block_on_ready(Volume::open(&dev)).unwrap().superblock().journal, [(30, 4), (20, 8)]);
 }

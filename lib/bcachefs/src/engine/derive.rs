@@ -109,7 +109,11 @@ impl<'a> Tally<'a> {
         if gen.is_some() && usage.gen != gen {
             self.findings.push(Finding::Bucket { bucket, rule: "pointers of two generations into one bucket" });
         }
+        let full = usage.dirty <= self.space.bucket;
         usage.dirty += sectors;
+        if full && usage.dirty > self.space.bucket {
+            self.findings.push(Finding::Bucket { bucket, rule: "more sectors than the bucket holds" });
+        }
     }
 
     fn count(&mut self, record: &[u8], counters: &[u64]) {

@@ -37,8 +37,9 @@ upstream and writes the specification, and a different agent implements from it.
 
 **Where it stands.** `lib/bcachefs/src/engine` reads clean single-device 1.39
 volumes, crc32c and ChaCha20/Poly1305, and formats a clean volume holding a tree
-of directories, files, symlinks and hard links, with all its allocator and
-accounting state, that upstream's `bcachefs fsck -n -K` passes. Its fsck derives
+of directories, files, symlinks and hard links (directories alone when
+encrypted), with all its allocator and accounting state, that upstream's
+`bcachefs fsck -n -K` passes. Its fsck derives
 that state from a volume's keys and compares, and the derivation agrees with
 what upstream stored in its own volumes. It replaced a read side written from
 upstream's headers. Its tests read volumes upstream's tools wrote

@@ -72,6 +72,39 @@ pub(crate) mod inode_field {
     pub const OPTIONS: [usize; 12] = [10, 11, 12, 13, 14, 15, 16, 17, 18, 24, 26, 27];
 }
 
+/// File-type bits of a mode.
+pub(crate) mod mode {
+    pub const S_IFMT: u16 = 0o170000;
+    pub const S_IFDIR: u16 = 0o040000;
+    pub const S_IFREG: u16 = 0o100000;
+    pub const S_IFLNK: u16 = 0o120000;
+}
+
+/// Checksum types, of metadata and of data alike.
+pub(crate) mod csum_type {
+    pub const NONE: u8 = 0;
+    /// CRC-32C with its inversions: metadata's type.
+    pub const CRC32C_NONZERO: u8 = 1;
+    pub const CRC64_NONZERO: u8 = 2;
+    pub const CHACHA_POLY_80: u8 = 3;
+    pub const CHACHA_POLY_128: u8 = 4;
+    /// CRC-32C with no inversions: data's type.
+    pub const CRC32C: u8 = 5;
+    pub const CRC64: u8 = 6;
+    pub const XXHASH: u8 = 7;
+
+    /// The checksum or MAC bytes a type stores.
+    pub fn bytes(t: u8) -> usize {
+        match t {
+            NONE => 0,
+            CRC32C_NONZERO | CRC32C => 4,
+            CRC64_NONZERO | CRC64 | XXHASH => 8,
+            CHACHA_POLY_80 => 10,
+            _ => 16,
+        }
+    }
+}
+
 /// Inode flag bits.
 pub(crate) mod inode_flag {
     pub const I_SECTORS_DIRTY: u64 = 1 << 6;
@@ -156,15 +189,16 @@ impl InodeValue {
 
 /// A directory entry's type: the target's mode type, or a subvolume.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[repr(u8)]
 pub enum DirentType {
-    Fifo,
-    Char,
-    Directory,
-    Block,
-    Regular,
-    Symlink,
-    Socket,
-    Subvolume,
+    Fifo = 1,
+    Char = 2,
+    Directory = 4,
+    Block = 6,
+    Regular = 8,
+    Symlink = 10,
+    Socket = 12,
+    Subvolume = 16,
 }
 
 impl DirentType {
@@ -174,30 +208,12 @@ impl DirentType {
     }
 
     pub(crate) fn bits(self) -> u8 {
-        match self {
-            DirentType::Fifo => 1,
-            DirentType::Char => 2,
-            DirentType::Directory => 4,
-            DirentType::Block => 6,
-            DirentType::Regular => 8,
-            DirentType::Symlink => 10,
-            DirentType::Socket => 12,
-            DirentType::Subvolume => 16,
-        }
+        self as u8
     }
 
     fn from_bits(bits: u8) -> Option<DirentType> {
-        Some(match bits {
-            1 => DirentType::Fifo,
-            2 => DirentType::Char,
-            4 => DirentType::Directory,
-            6 => DirentType::Block,
-            8 => DirentType::Regular,
-            10 => DirentType::Symlink,
-            12 => DirentType::Socket,
-            16 => DirentType::Subvolume,
-            _ => return None,
-        })
+        use DirentType::*;
+        [Fifo, Char, Directory, Block, Regular, Symlink, Socket, Subvolume].into_iter().find(|&t| t.bits() == bits)
     }
 }
 
@@ -310,11 +326,7 @@ impl Extent {
     /// Bytes of checksum the smallest entry for this extent's checksum
     /// type and size holds (A5.34): 4 in crc32, 10 in crc64, 16 in crc128.
     pub(crate) fn smallest_entry(crc: &Crc) -> usize {
-        let bytes = match crc.csum_type {
-            0 | 1 | 5 => 4,
-            3 => 10,
-            _ => 16,
-        };
+        let bytes = csum_type::bytes(crc.csum_type);
         if bytes <= 4 && crc.uncompressed <= CRC32_SECTORS && crc.nonce == 0 {
             4
         } else if bytes <= 10 && crc.uncompressed <= CRC64_SECTORS && crc.nonce <= 1023 {

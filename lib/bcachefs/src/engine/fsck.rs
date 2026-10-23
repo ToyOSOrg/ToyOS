@@ -2,9 +2,8 @@
 //! maintains, grown with each stage that adds one. It is built from the
 //! same facts as the writer, and the allocator and accounting state it
 //! expects comes from the same derivation mkfs writes (`derive`), so it
-//! judges ToyOS's consistency with itself; upstream's fsck is the
-//! independent judge, and an upstream volume's own derived btrees are
-//! that derivation's.
+//! judges ToyOS's consistency with itself; upstream's fsck, and the derived
+//! btrees upstream stored in its own volumes, are the independent oracles.
 
 use alloc::collections::{BTreeMap, BTreeSet};
 use alloc::vec::Vec;
@@ -16,7 +15,8 @@ use super::derive::{Space, Tally};
 use super::mkfs::{self, COMPAT_CLEAN, COMPAT_INITIALIZED, DOWNGRADE, EXTENT_TYPE_U64S, FEATURES};
 use super::read::{hash, read_bytes, Volume};
 use super::superblock::{field_type, member_flag, Superblock, HEADER};
-use super::value::{self, data_type, inode_field, inode_flag, AllocV4, Dirent, DirentType, Extent, InodeValue, NodePtr, Subvolume, SUBVOLUME_LIVE};
+use super::value::mode::{S_IFDIR, S_IFLNK, S_IFMT, S_IFREG};
+use super::value::{self, csum_type, data_type, inode_field, inode_flag, AllocV4, Dirent, DirentType, Extent, InodeValue, NodePtr, Subvolume, SUBVOLUME_LIVE};
 use super::{kind, le64, Btree, Result, SECTOR, VERSION};
 
 /// One way a volume departs from what ToyOS writes.
@@ -185,11 +185,6 @@ async fn root_world<D: BlockDev>(v: &Volume<D>) -> Result<Vec<Finding>> {
     Ok(found)
 }
 
-const S_IFMT: u16 = 0o170000;
-const S_IFDIR: u16 = 0o040000;
-const S_IFREG: u16 = 0o100000;
-const S_IFLNK: u16 = 0o120000;
-
 /// What one walk of every node collects: the tally, and each btree's keys
 /// that a later check compares, in the root subvolume's snapshot.
 struct Walk<'a> {
@@ -222,9 +217,10 @@ impl<'a> Walk<'a> {
     fn new(space: &'a Space, sb: &Superblock) -> Self {
         let clean = sb.clean.as_ref();
         let data_csum = match (sb.encrypted(), sb.flag(1, 9, 1), sb.flag(0, 44, 4)) {
-            (true, 1, _) => 4,
-            (true, _, _) => 3,
-            (false, _, option) => [0, 5, 6, 7].get(option as usize).copied().unwrap_or(u8::MAX),
+            (true, 1, _) => csum_type::CHACHA_POLY_128,
+            (true, _, _) => csum_type::CHACHA_POLY_80,
+            // The data checksum option: none, crc32c, crc64, xxhash.
+            (false, _, option) => [csum_type::NONE, csum_type::CRC32C, csum_type::CRC64, csum_type::XXHASH].get(option as usize).copied().unwrap_or(u8::MAX),
         };
         Walk {
             space,
@@ -463,7 +459,7 @@ impl<'a> Walk<'a> {
         // Each inode's extents: their sectors, the furthest end, overlaps.
         let mut data: BTreeMap<u64, (u64, u64)> = BTreeMap::new();
         let mut before: Option<(u64, u64)> = None;
-        for (&(ino, end), &(k, size)) in &self.extents {
+        for (&(ino, end), &(_, size)) in &self.extents {
             let pos = Bpos::new(ino, end, mkfs::ROOT_SNAPSHOT);
             let start = end.saturating_sub(u64::from(size));
             if before.is_some_and(|(i, e)| i == ino && start < e) {
@@ -472,9 +468,7 @@ impl<'a> Walk<'a> {
             before = Some((ino, end));
             let sums = data.entry(ino).or_default();
             sums.0 += u64::from(size);
-            if k != kind::RESERVATION {
-                sums.1 = sums.1.max(end);
-            }
+            sums.1 = sums.1.max(end);
             match self.inodes.get(&ino).map(|i| i.mode() & S_IFMT) {
                 None => found.push(Finding::Key { btree: Btree::Extents, pos, rule: "of no inode" }),
                 Some(S_IFREG | S_IFLNK) => {}
@@ -646,7 +640,7 @@ impl<'a> Walk<'a> {
         }
         for (pos, v) in &self.bucket_gens {
             let want = d.bucket_gens.get(&pos.offset).copied().unwrap_or([0; 256]);
-            if pos.inode != 0 || v[..] != want[..] {
+            if pos.inode != 0 || pos.offset >= s.nbuckets.div_ceil(256) || v[..] != want[..] {
                 put(Btree::BucketGens, *pos, "differs");
             }
         }

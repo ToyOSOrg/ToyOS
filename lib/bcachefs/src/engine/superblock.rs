@@ -261,7 +261,8 @@ pub struct Superblock {
     pub(crate) crypt: Option<Crypt>,
     pub(crate) blacklist: Vec<(u64, u64)>,
     pub(crate) replicas: Vec<Replicas>,
-    /// The journal's buckets: each range's first bucket and count.
+    /// The journal's buckets: each range's first bucket and count, in the
+    /// listed order, whose concatenation is the journal's ring.
     pub(crate) journal: Vec<(u64, u64)>,
 }
 
@@ -477,13 +478,14 @@ fn members(body: &[u8], header: &Header) -> Result<Member> {
 
 /// The journal's bucket ranges, which lie on the device.
 fn journal(body: &[u8], member: &Member) -> Result<Vec<(u64, u64)>> {
-    let mut ranges = pairs(body);
+    let ranges = pairs(body);
     let valid = ranges.iter().all(|&(start, count)| {
         count > 0 && start > 0 && start >= u64::from(member.first_bucket) && start.checked_add(count).is_some_and(|end| end <= member.nbuckets)
     });
     // Disjoint, so together they are at most the device's buckets.
-    ranges.sort_unstable();
-    if !valid || ranges.windows(2).any(|w| w[0].0 + w[0].1 > w[1].0) {
+    let mut sorted = ranges.clone();
+    sorted.sort_unstable();
+    if !valid || sorted.windows(2).any(|w| w[0].0 + w[0].1 > w[1].0) {
         return Err(Error::Corrupt("journal buckets"));
     }
     Ok(ranges)

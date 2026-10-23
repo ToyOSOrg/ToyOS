@@ -97,8 +97,8 @@ pub async fn mkfs(dev: &impl BlockDev, options: &Options<'_>, tree: &Tree<'_>, r
     if options.encryption.as_ref().is_some_and(|e| e.passphrase.contains(&0) || e.passphrase.ends_with(b"\n")) {
         return Err(Error::Invalid("passphrase holding NUL or ending in a newline"));
     }
-    // An encrypted extent needs a version never used before, which only
-    // the online data path allocates.
+    // An encrypted extent needs a version never used before, and mkfs
+    // allocates no extent versions.
     if options.encryption.is_some() && tree.has_data() {
         return Err(Error::Unsupported("file data or a symlink on an encrypted volume"));
     }
