@@ -25,18 +25,21 @@ pub(super) fn sha256_blocks(state: &mut [u32; 8], blocks: &[[u8; 64]]) -> bool {
 #[cfg(target_feature = "sha2")]
 #[target_feature(enable = "neon,sha2")]
 fn sha256(state: &mut [u32; 8], blocks: &[[u8; 64]]) {
-    let k: [uint32x4_t; 16] = core::array::from_fn(|i| {
+    let mut k = [vdupq_n_u32(0); 16];
+    for i in 0..16 {
         // SAFETY: four plain words.
-        unsafe { vld1q_u32(crate::hash::K256[4 * i..].as_ptr()) }
-    });
+        k[i] = unsafe { vld1q_u32(crate::hash::K256[4 * i..].as_ptr()) };
+    }
     // SAFETY: `state` holds eight plain words.
     let (mut abcd, mut efgh) = unsafe { (vld1q_u32(state.as_ptr()), vld1q_u32(state[4..].as_ptr())) };
     for block in blocks {
         let (saved_abcd, saved_efgh) = (abcd, efgh);
-        // SAFETY: the block's 64 bytes, read 16 at a time: its sixteen
-        // big-endian words, four to a vector.
-        let mut w: [uint32x4_t; 4] =
-            core::array::from_fn(|i| unsafe { vreinterpretq_u32_u8(vrev32q_u8(vld1q_u8(block[16 * i..].as_ptr()))) });
+        let mut w = [vdupq_n_u32(0); 4];
+        for i in 0..4 {
+            // SAFETY: the block's 64 bytes, read 16 at a time: its sixteen
+            // big-endian words, four to a vector.
+            w[i] = unsafe { vreinterpretq_u32_u8(vrev32q_u8(vld1q_u8(block[16 * i..].as_ptr()))) };
+        }
         for i in 0..16 {
             if i >= 4 {
                 // W[4i..4i+4] from the four groups before it, oldest first.
@@ -82,15 +85,20 @@ pub(super) fn sha512_blocks(state: &mut [u64; 8], blocks: &[[u8; 128]]) -> bool 
 #[cfg(target_feature = "sha3")]
 #[target_feature(enable = "neon,sha3")]
 fn sha512(state: &mut [u64; 8], blocks: &[[u8; 128]]) {
-    // SAFETY: `state` holds eight plain words.
-    let mut s: [uint64x2_t; 4] = core::array::from_fn(|i| unsafe { vld1q_u64(state[2 * i..].as_ptr()) });
+    let mut s = [vdupq_n_u64(0); 4];
+    for i in 0..4 {
+        // SAFETY: `state` holds eight plain words.
+        s[i] = unsafe { vld1q_u64(state[2 * i..].as_ptr()) };
+    }
     for block in blocks {
         let saved = s;
         let [mut ab, mut cd, mut ef, mut gh] = s;
-        // SAFETY: the block's 128 bytes, read 16 at a time: its sixteen
-        // big-endian words, two to a vector.
-        let mut w: [uint64x2_t; 8] =
-            core::array::from_fn(|i| unsafe { vreinterpretq_u64_u8(vrev64q_u8(vld1q_u8(block[16 * i..].as_ptr()))) });
+        let mut w = [vdupq_n_u64(0); 8];
+        for i in 0..8 {
+            // SAFETY: the block's 128 bytes, read 16 at a time: its sixteen
+            // big-endian words, two to a vector.
+            w[i] = unsafe { vreinterpretq_u64_u8(vrev64q_u8(vld1q_u8(block[16 * i..].as_ptr()))) };
+        }
         for i in 0..40 {
             if i >= 8 {
                 // W[2i] and W[2i+1]: the pair eight before, σ0 of the words

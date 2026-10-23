@@ -49,13 +49,14 @@ impl Multiplier {
         let [r0, r1, r2, r3, r4] = self.r;
         let [s1, s2, s3, s4] = self.s;
         let m = |a, b| _mm256_mul_epu32(a, b);
-        let sum = |terms: [__m256i; 5]| terms.into_iter().reduce(|a, b| _mm256_add_epi64(a, b)).unwrap();
+        let add = |a, b| _mm256_add_epi64(a, b);
+        let sum = |a, b, c, d, e| add(add(add(a, b), add(c, d)), e);
         let [h0, h1, h2, h3, h4] = h;
-        let d0 = sum([m(h0, r0), m(h1, s4), m(h2, s3), m(h3, s2), m(h4, s1)]);
-        let d1 = sum([m(h0, r1), m(h1, r0), m(h2, s4), m(h3, s3), m(h4, s2)]);
-        let d2 = sum([m(h0, r2), m(h1, r1), m(h2, r0), m(h3, s4), m(h4, s3)]);
-        let d3 = sum([m(h0, r3), m(h1, r2), m(h2, r1), m(h3, r0), m(h4, s4)]);
-        let d4 = sum([m(h0, r4), m(h1, r3), m(h2, r2), m(h3, r1), m(h4, r0)]);
+        let d0 = sum(m(h0, r0), m(h1, s4), m(h2, s3), m(h3, s2), m(h4, s1));
+        let d1 = sum(m(h0, r1), m(h1, r0), m(h2, s4), m(h3, s3), m(h4, s2));
+        let d2 = sum(m(h0, r2), m(h1, r1), m(h2, r0), m(h3, s4), m(h4, s3));
+        let d3 = sum(m(h0, r3), m(h1, r2), m(h2, r1), m(h3, r0), m(h4, s4));
+        let d4 = sum(m(h0, r4), m(h1, r3), m(h2, r2), m(h3, r1), m(h4, r0));
         [d0, d1, d2, d3, d4]
     }
 }
@@ -176,7 +177,10 @@ fn radix64([l0, l1, l2, l3, l4]: [u64; 5]) -> [u64; 3] {
 
 #[cfg(test)]
 mod tests {
+    use num_bigint::BigUint;
+
     use super::*;
+    use crate::poly1305::absorb;
 
     #[test]
     fn radix_round_trip_and_folds_above_2_130() {
@@ -185,5 +189,62 @@ mod tests {
         }
         // 2^130 + 7 ≡ 12.
         assert_eq!(radix64([7, 0, 0, 0, 1 << 26]), [12, 0, 0]);
+    }
+
+    /// The kernel against the portable rounds, 16 to 48 blocks, on seeded and
+    /// all-ones keys, accumulators (h2 at most 4, as between blocks) and
+    /// messages. `update` hands the kernel only runs of 16 blocks or more,
+    /// which `crate::poly1305`'s tests do not make. A host without AVX2
+    /// cannot test it, and says so rather than passing.
+    #[test]
+    fn the_avx2_blocks_match_the_portable_rounds() {
+        assert!(
+            super::super::features().avx2() || cfg!(feature = "portable"),
+            "this host's CPU has no AVX2, so nothing here can test the AVX2 Poly1305 kernel"
+        );
+        if cfg!(feature = "portable") {
+            return;
+        }
+        let mut seed = 0x2545_f491_4f6c_dd1du64;
+        let mut next = move || {
+            seed ^= seed << 13;
+            seed ^= seed >> 7;
+            seed ^= seed << 17;
+            seed
+        };
+        let clamp = 0x0fff_fffc_0fff_fffc_0fff_fffc_0fff_ffffu128;
+        for case in 0..400 {
+            let extreme = case % 4 == 1;
+            let r = if extreme { clamp } else { (u128::from(next()) << 64 | u128::from(next())) & clamp };
+            let (r0, r1) = (low(r), (r >> 64) as u64);
+            let r = [r0, r1, r1 + (r1 >> 2)];
+            let start = if extreme { [u64::MAX, u64::MAX, 4] } else { [next(), next(), next() % 5] };
+            let len = 16 + case % 33;
+            let mut message = std::vec![[0xffu8; 16]; len];
+            if case % 4 < 2 {
+                for block in &mut message {
+                    *block = (u128::from(next()) << 64 | u128::from(next())).to_le_bytes();
+                }
+            }
+            let mut expected = start;
+            for block in &message {
+                expected = absorb(expected, block, r, true);
+            }
+            let mut h = start;
+            // CPUID and XCR0 admitted AVX2 above.
+            let done = unsafe { blocks(&r, &mut h, &message) };
+            assert_eq!(done, len / 8 * 8, "case {case}, {len} blocks");
+            for block in &message[done..] {
+                h = absorb(h, block, r, true);
+            }
+            // Both are partially reduced: compare them modulo p.
+            assert_eq!(reduced(h), reduced(expected), "case {case}, {len} blocks");
+        }
+    }
+
+    /// h0 + h1·2^64 + h2·2^128 mod 2^130 - 5.
+    fn reduced([h0, h1, h2]: [u64; 3]) -> BigUint {
+        let h = (BigUint::from(h2) << 128u32) + (BigUint::from(h1) << 64u32) + BigUint::from(h0);
+        h % ((BigUint::from(1u8) << 130u32) - 5u8)
     }
 }
