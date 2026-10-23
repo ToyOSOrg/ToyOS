@@ -18,6 +18,8 @@ mod chacha;
 #[cfg(not(target_os = "uefi"))]
 mod montgomery;
 #[cfg(not(target_os = "uefi"))]
+mod p256;
+#[cfg(not(target_os = "uefi"))]
 mod poly1305;
 #[cfg(not(target_os = "uefi"))]
 mod sha;
@@ -176,6 +178,29 @@ pub(super) fn rsa_mul(a: &[u64], b: &[u64], m: &[u64], n0: u64, n: usize, out: &
     assert!(n.is_multiple_of(4) && n <= 64 && a.len() >= n && b.len() >= n && m.len() >= n && out.len() >= n);
     // CPUID admitted BMI2 and ADX, and the lengths are checked above.
     Some(unsafe { montgomery::mul(a, b, m, n0, n, out) })
+}
+
+/// P-256 field multiplication by `p256::mul` where BMI2 and ADX are
+/// admitted.
+#[cfg(not(target_os = "uefi"))]
+#[inline]
+pub(super) fn p256_mul(a: &[u64; 4], b: &[u64; 4]) -> Option<[u64; 4]> {
+    if !features().bmi2_adx() {
+        return None;
+    }
+    // CPUID admitted BMI2 and ADX.
+    Some(unsafe { p256::mul(a, b) })
+}
+
+/// P-256 field squaring by `p256::square`, as [`p256_mul`].
+#[cfg(not(target_os = "uefi"))]
+#[inline]
+pub(super) fn p256_square(a: &[u64; 4]) -> Option<[u64; 4]> {
+    if !features().bmi2_adx() {
+        return None;
+    }
+    // CPUID admitted BMI2 and ADX.
+    Some(unsafe { p256::square(a) })
 }
 
 /// A vector from 16 bytes by value. With no pointer there is no copy

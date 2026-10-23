@@ -303,6 +303,8 @@ const fn exponent<M: Modulus<N>, const N: usize>() -> [u64; N] {
 /// P-256's field arithmetic written out word by word: the shipped profile
 /// does not unroll the generic loops, and P-256 is the hot curve. Every step
 /// is the generic one's (`product`, `square_wide`, `redc`, `reduce`).
+/// Multiplication and squaring take the instruction paths where the CPU has
+/// them (`arch::p256_mul`, `arch::p256_square`).
 mod p256 {
     use super::{Form, Modulus, ct, mac};
     use crate::nist::P256Field;
@@ -334,6 +336,12 @@ mod p256 {
         out[2] = w[2];
         out[3] = w[3];
         out
+    }
+
+    /// A residue's array as four words, which N is here.
+    #[inline(always)]
+    fn four<const N: usize>(a: &[u64; N]) -> &[u64; 4] {
+        a.as_slice().try_into().expect("P-256 residues are four words")
     }
 
     /// v mod p for v + high 2^256 < 2p, p subtracted under a mask.
@@ -373,6 +381,9 @@ mod p256 {
     /// CIOS with P-256's reduction step, as `product`.
     #[inline(always)]
     pub(super) fn mul<const N: usize>(a: &[u64; N], b: &[u64; N]) -> [u64; N] {
+        if let Some(v) = crate::arch::p256_mul(four(a), four(b)) {
+            return words(v);
+        }
         let (mut t0, mut t1, mut t2, mut t3, mut high) = (0u64, 0u64, 0u64, 0u64, 0u64);
         macro_rules! row {
             ($ai:expr) => {{
@@ -402,6 +413,9 @@ mod p256 {
     /// reduction steps, as `square_wide` and `redc`.
     #[inline(always)]
     pub(super) fn square<const N: usize>(a: &[u64; N]) -> [u64; N] {
+        if let Some(v) = crate::arch::p256_square(four(a)) {
+            return words(v);
+        }
         let (t1, c) = mac(0, a[0], a[1], 0);
         let (t2, c) = mac(0, a[0], a[2], c);
         let (t3, t4) = mac(0, a[0], a[3], c);

@@ -335,6 +335,9 @@ fn field25519_largest_reachable_limbs_stay_within_their_bounds() {
 
 #[test]
 fn nist_fields_and_orders_match_integers() {
+    // Which P-256 field path this run checks, for a reader of `--nocapture`.
+    let kernel = crate::arch::p256_mul(&[0; 4], &[0; 4]).is_some() && crate::arch::p256_square(&[0; 4]).is_some();
+    std::println!("p-256 field path: {}", if kernel { "the BMI2/ADX kernels" } else { "portable" });
     check(&Montgomery::<P256Field, 4>(PhantomData), 1);
     check(&Montgomery::<P256Order, 4>(PhantomData), 2);
     check(&Montgomery::<P384Field, 6>(PhantomData), 3);

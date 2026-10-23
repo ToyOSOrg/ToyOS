@@ -68,6 +68,25 @@ pub(crate) fn rsa_mul(a: &[u64], b: &[u64], m: &[u64], n0: u64, n: usize, out: &
     })
 }
 
+/// a b / 2^256 mod P-256's p, for a, b < p, by an instruction path; `None`
+/// where the CPU has no such path. The time does not depend on a or b.
+#[inline]
+pub(crate) fn p256_mul(a: &[u64; 4], b: &[u64; 4]) -> Option<[u64; 4]> {
+    hosted!(x86_64::p256_mul(a, b), {
+        let _ = (a, b);
+        None
+    })
+}
+
+/// a^2 / 2^256 mod P-256's p, for a < p, as [`p256_mul`].
+#[inline]
+pub(crate) fn p256_square(a: &[u64; 4]) -> Option<[u64; 4]> {
+    hosted!(x86_64::p256_square(a), {
+        let _ = a;
+        None
+    })
+}
+
 /// GHASH key powers, (H^(i+1))' at index i in the instruction paths' form.
 pub(crate) type Powers = [u128; 16];
 
