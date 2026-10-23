@@ -31,7 +31,7 @@ struct Matrix {
 
 /// x^-1 `scale` mod p for x, scale < p, and zero for x = 0. The time depends
 /// on neither.
-pub(super) fn invert<M: Modulus<N>, const N: usize>(x: &[u64; N], scale: &[u64; N]) -> [u64; N] {
+pub(crate) fn invert<M: Modulus<N>, const N: usize>(x: &[u64; N], scale: &[u64; N]) -> [u64; N] {
     let n = limbs(N);
     let p: Limbs = const { split::<N>(&M::P) };
     // p^-1 mod 2^62, from N0 = -p^-1 mod 2^64.
@@ -213,6 +213,38 @@ fn join<const N: usize>(a: &Limbs) -> [u64; N] {
         }
     }
     out
+}
+
+/// PROBE (never lands): [`invert`] stopping after the first batch that
+/// leaves g zero, a variable-time form for public operands.
+pub(crate) fn invert_early<M: Modulus<N>, const N: usize>(x: &[u64; N], scale: &[u64; N]) -> [u64; N] {
+    let n = limbs(N);
+    let p: Limbs = const { split::<N>(&M::P) };
+    let inverse = M::N0.wrapping_neg() & MASK;
+    let mut f = p;
+    let mut g = split::<N>(x);
+    let mut d = [0; LIMBS];
+    let mut e = split::<N>(scale);
+    let mut eta = -1;
+    loop {
+        let t;
+        (eta, t) = divsteps(eta, f[0] as u64, g[0] as u64);
+        apply(&t, &mut f, &mut g, n);
+        update(&t, &mut d, &mut e, &p, inverse, n);
+        if g[..n].iter().all(|&l| l == 0) {
+            break;
+        }
+    }
+    add_if_negative(&mut d, &p, n);
+    negate_if(&mut d, ct::opaque((f[n - 1] >> 63) as u64), n);
+    add_if_negative(&mut d, &p, n);
+    join(&d)
+}
+
+/// PROBE (never lands): 2^255 - 19, for divsteps alone (no Montgomery form).
+pub(crate) struct P25519;
+impl Modulus<4> for P25519 {
+    const P: [u64; 4] = [0xffff_ffff_ffff_ffed, u64::MAX, u64::MAX, 0x7fff_ffff_ffff_ffff];
 }
 
 #[cfg(test)]

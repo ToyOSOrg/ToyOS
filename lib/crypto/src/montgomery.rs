@@ -10,7 +10,8 @@
 use crate::ct;
 use core::marker::PhantomData;
 
-mod divsteps;
+/// PROBE (never lands): visible to the probe.
+pub(crate) mod divsteps;
 
 /// An odd modulus p with 2^(64N-1) < p < 2^(64N), and its Montgomery
 /// constants for R = 2^(64N), evaluated at compile time.

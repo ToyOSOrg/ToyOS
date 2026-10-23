@@ -820,6 +820,9 @@ impl Curve<6> for P384 {
     );
 }
 
+/// PROBE (never lands).
+#[cfg(test)]
+mod probe;
 #[cfg(test)]
 mod tests {
     use super::*;
