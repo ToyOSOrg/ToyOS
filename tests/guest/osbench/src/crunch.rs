@@ -2,7 +2,10 @@
 //! of a fixed corpus (`miniz_oxide`), SHA-256 (`toyos-crypto`), a numeric
 //! kernel (a dense `f64` matrix product) and a compile-like task (`syn`
 //! parsing generated Rust). One thread, then one per CPU, each workload
-//! [`SLICE`] in its phase, with an idle cool-down after each phase.
+//! [`SLICE`] in its phase, with an idle cool-down after each phase. A parse
+//! is some 589,000 allocations and frees, so its all-core figure is the
+//! system allocator's under contention as much as the CPU's: the Linux build's
+//! static musl and ToyOS std's dlmalloc each serialise on one lock.
 //!
 //! **A laptop is not let overheat.** Where the system reads the package's
 //! temperature, a phase stops once it reaches `osbench_rules::heat`'s limit,
