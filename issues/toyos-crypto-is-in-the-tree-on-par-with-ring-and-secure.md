@@ -512,18 +512,22 @@ Not consumers:
      - A key decodes under section 5.1.3 (y below p, an x for it, x = 0
        only with the sign bit clear) and is not one of the eight points of
        order dividing 8. Mixed-order keys are taken.
-     - A signature is 64 bytes, R || S, with S below L (section 5.1.7) and
-       k = SHA-512(R || A || M) mod L over the bytes received. It is
-       accepted when [S]B - [k]A encodes to R's bytes: the cofactorless
-       equation section 5.1.7 permits, which also makes R decode
-       canonically. An R of order dividing 8 is refused.
+     - A signature is 64 bytes, R || S, with S below L (section 5.1.7). It
+       is accepted when [S]B - [k mod L]A encodes to R's bytes, for
+       k = SHA-512(R || A || M) over the bytes received; that also makes R
+       decode canonically. Section 6's reference `verify` reduces k, as
+       ring and `verify_strict` do; section 5.1.7's literal equation does
+       not, and the two differ only for a mixed-order A (speccheck case 3
+       fails the unreduced one). An R of order dividing 8 is refused.
      - Two refusals go beyond RFC 8032. Anyone can sign for a small-order
        key: R = [S]B verifies under it whenever 8 divides k. A small-order
        R is one RFC 8032 signing makes with probability about 2^-252, and
-       with a prime-order key only its holder can make one. Cofactorless
-       is the stricter of the equations section 5.1.7 allows; the two part
-       only where R or A has a torsion component, which RFC 8032's key
-       generation and signing never make.
+       with a prime-order key only its holder can make one; no security
+       requirement forces its refusal. **Awaiting the owner:** whether it
+       stays. It is kept meanwhile.
+     - Times 8, the reduced-k equation is the cofactored one, which accepts
+       more where R or A has a torsion component (cases 4 and 5); RFC
+       8032's key generation and signing make neither.
    - The edge corpus is Wycheproof's `ed25519` and the twelve cases of
      Chalkias et al., "Taming the many EdDSAs" (2020). Every Wycheproof
      verdict is the file's. `lib/crypto/tests/ed25519_verdicts.rs` gives
@@ -536,17 +540,19 @@ Not consumers:
        either sign), which section 5.1.3 refuses. Signing for one takes
        the discrete log of a point chosen by its y, so no signature verdict
        is known to differ. Every speccheck verdict is `verify_strict`'s.
-     - **ring differs on small-order and non-canonical keys and on a
-       small-order R.** It accepts a signature satisfying the cofactorless
-       equation under each of the 14 encodings of a small-order point,
-       including the 6 non-canonical ones (y of p or p + 1, and x = 0
-       signed). It accepts R = O with S = k a under an RFC 8032 key. In the
+     - **ring differs on small-order keys, non-canonical small-order keys
+       and a small-order R.** It accepts a signature satisfying the
+       cofactorless equation under each of the 14 encodings of a
+       small-order point, including the 6 non-canonical ones (y of p or
+       p + 1, and x = 0 signed). Whether it decodes the 20 mixed-order keys
+       with y of p or more is not known: no signature can show it. It accepts R = O with S = k a under an RFC 8032 key. In the
        speccheck cases that is 0 and 1 (small-order key), 2 (small-order R)
        and 11 (the key (0, -1) with x = 0 signed).
      - All three refuse cases 4 and 5 (only the cofactored equation
        holds), 6 and 7 (S of L or more), 8 and 9 (a non-canonical R) and
        10 (a non-canonical key under which ring's equation fails too), and
-       accept case 3, a mixed-order key and R satisfying both equations.
+       accept case 3, a mixed-order key and R satisfying the reduced-k and
+       cofactored equations.
    - The loader verifies a signed image on the T14 and the AMD bench, with
      its verification time measured on each. Done (#1019's probe image,
      #1016's evidence): 253,975 counter ticks on the T14 at its stated

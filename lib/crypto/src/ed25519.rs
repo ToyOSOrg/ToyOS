@@ -1,8 +1,6 @@
 //! RFC 8032 pure Ed25519, without a context or prehash. Verification's
-//! rules are [`PublicKey::from_bytes`]'s and [`PublicKey::verify`]'s;
-//! `tests/ed25519_verdicts.rs` holds each against the "Taming the many
-//! EdDSAs" cases and names where ring and ed25519-dalek's `verify_strict`
-//! differ. Verification's inputs are all public: it decodes, recodes and
+//! rules are [`PublicKey::from_bytes`]'s and [`PublicKey::verify`]'s.
+//! Verification's inputs are all public: it decodes, recodes and
 //! multiplies in variable time, through [`PublicScalar`] only. Signing
 //! (feature `sign`) and key generation multiply the base point by a
 //! fixed-base comb on a fixed schedule: every table entry of a row is read
@@ -556,16 +554,19 @@ impl PublicKey {
     pub fn as_bytes(&self) -> &[u8; 32] {
         &self.encoded
     }
-    /// RFC 8032 section 5.1.7 for a 64-byte R || S: S below L, and
-    /// k = SHA-512(R || A || M) mod L over the bytes received. It accepts
-    /// when [S]B - [k]A encodes to R's bytes, the cofactorless equation the
-    /// section permits; a non-canonical R, one off the curve or a negative
-    /// zero can never equal an encoding, so R decodes as section 5.1.3
-    /// requires. The cofactored equation accepts a superset, differing only
-    /// when R or A has a torsion component, which RFC 8032's key generation
-    /// and signing never make. Beyond RFC 8032, R of order dividing 8 is
-    /// refused; RFC 8032 signing makes one with probability about 2^-252,
-    /// and with a prime-order key only the key's holder can make one.
+    /// RFC 8032 section 5.1.7 for a 64-byte R || S, with S below L, and the
+    /// equation [S]B = R + [k mod L]A for k = SHA-512(R || A || M) over the
+    /// bytes received, reduced as section 6's reference `verify` reduces it.
+    /// It accepts when [S]B - [k mod L]A encodes to R's bytes; a
+    /// non-canonical R, one off the curve or a negative zero can never equal
+    /// an encoding, so R decodes as section 5.1.3 requires. Section 5.1.7's
+    /// literal equation takes k unreduced, which differs only for a
+    /// mixed-order A. Times 8 this equation is the cofactored one, which
+    /// accepts more where R or A has a torsion component; RFC 8032's key
+    /// generation and signing make neither. Beyond RFC 8032, R of order
+    /// dividing 8 is refused; RFC 8032 signing makes one with probability
+    /// about 2^-252, and with a prime-order key only the key's holder can
+    /// make one.
     pub fn verify(&self, message: &[u8], signature: &[u8]) -> Result<(), Error> {
         if signature.len() != 64 {
             return Err(Error::Length);

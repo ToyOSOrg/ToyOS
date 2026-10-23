@@ -89,7 +89,7 @@ fn speccheck_cases() {
         (SMALL_KEY, false, true, "small-order A and R, S = 0: a small-order key is refused; ring takes it"),
         (SMALL_KEY, false, true, "small-order A, mixed-order R: a small-order key is refused; ring takes it"),
         (BAD_SIGNATURE, false, true, "mixed-order A, small-order R: a small-order R is refused; ring takes it"),
-        (ACCEPTED, true, true, "mixed-order A and R satisfying [S]B = R + [k]A: RFC 8032 accepts mixed order"),
+        (ACCEPTED, true, true, "mixed-order A and R satisfying [S]B = R + [k mod L]A, as section 6 reduces k; section 5.1.7's unreduced k fails, as it may only for a mixed-order A"),
         (BAD_SIGNATURE, false, false, "mixed-order A and R satisfying only the cofactored equation: cofactorless"),
         (BAD_SIGNATURE, false, false, "mixed-order A, prime-order R, only the cofactored equation: cofactorless"),
         (BAD_SIGNATURE, false, false, "S of L or more (RFC 8032 section 5.1.7)"),

@@ -81,7 +81,7 @@ pub fn message<S: Signed + ?Sized>(signed: &S) -> Message {
 /// Why a signature does not vouch for what it is over.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Refused {
-    /// The key is not a point on the curve.
+    /// The key is not one `toyos_crypto::ed25519` accepts.
     Key,
     /// The signature is not the key's over these bytes in this namespace.
     Signature,
@@ -98,9 +98,7 @@ impl core::fmt::Display for Refused {
 
 /// Whether `signature` is `key`'s over `signed`, in its namespace.
 ///
-/// Under `toyos_crypto::ed25519`'s rules: a key that is small-order or not
-/// canonically encoded, and a signature with a non-canonical `R` or `S` or a
-/// small-order `R`, are refused.
+/// Under `toyos_crypto::ed25519`'s rules.
 pub fn verify<S: Signed + ?Sized>(key: &[u8; 32], signed: &S, signature: &[u8; SIGNATURE_BYTES]) -> Result<(), Refused> {
     let key = PublicKey::from_bytes(*key).map_err(|_| Refused::Key)?;
     key.verify(message(signed).as_bytes(), signature).map_err(|_| Refused::Signature)
