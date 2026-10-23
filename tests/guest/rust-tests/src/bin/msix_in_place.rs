@@ -5,9 +5,9 @@
 //! page included (PCI 3.0 §6.8.2: the table is read and written through a
 //! memory BAR).
 //!
-//! The functions are the benches' radios P1 of `issues/there-is-no-wifi.md`
-//! names, which no image drives, and QEMU's virtio NIC, which a guest row
-//! reads. A function an image's driver holds is no test's to claim.
+//! The functions are the radios P1 of `issues/there-is-no-wifi.md` names on
+//! the benches, which no image drives, and QEMU's virtio NIC, which a guest
+//! row reads.
 
 #[path = "../function.rs"]
 mod function;
