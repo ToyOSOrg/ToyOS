@@ -251,6 +251,13 @@ pub(super) fn tlb_ipi() {
     }
 }
 
+/// Ask one CPU to flush its TLB.
+pub(super) fn tlb_ipi_to(cpu_id: u32) {
+    if ENABLED.load(Ordering::Relaxed) {
+        send(Some(crate::smp::hardware_id(cpu_id)), 0x4000 | 0xFE);
+    }
+}
+
 /// Send the kick IPI to one CPU, waking it if halted.
 // Targeted, not broadcast: a broadcast kick would preempt every sibling per wake and cannot scale.
 pub fn kick_cpu(cpu_id: u32) {

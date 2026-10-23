@@ -94,8 +94,8 @@ pub const SYS_FUTEX_WAKE: u64 = 59;
 pub const SYS_FTRUNCATE: u64 = 60;
 pub const SYS_STACK_INFO: u64 = 61;
 pub const SYS_CPU_COUNT: u64 = 62;
-pub const SYS_MMAP: u64 = 63;
-pub const SYS_MUNMAP: u64 = 64;
+pub const SYS_VM_RESERVE: u64 = 63;
+pub const SYS_VM_RELEASE: u64 = 64;
 pub const SYS_READ_NONBLOCK: u64 = 66;
 pub const SYS_WRITE_NONBLOCK: u64 = 67;
 pub const SYS_EXIT: u64 = 72;
@@ -314,6 +314,9 @@ pub const SYS_PREAD: u64 = 138;
 /// Write a kernel file at an offset, whether or not its handle appends, and
 /// leaving the handle's offset where it is. See [`pwrite`].
 pub const SYS_PWRITE: u64 = 139;
+pub const SYS_VM_PROTECT: u64 = 140;
+pub const SYS_VM_DISCARD: u64 = 141;
+pub const SYS_VM_DECOMMIT: u64 = 142;
 
 /// Bins in the per-process syscall profile — one for every number this ABI
 /// issues, and one at the end for every number it does not.
@@ -321,13 +324,13 @@ pub const SYS_PWRITE: u64 = 139;
 /// **The profile's parts sum to its total, and that is the whole requirement.**
 /// A bin array narrower than the ABI reaches drops calls out of the line while
 /// the total goes on counting them.
-pub const SYSCALL_PROFILE_BINS: usize = 141;
+pub const SYSCALL_PROFILE_BINS: usize = 144;
 
 /// Where a number this ABI does not issue is counted. Merging is a degradation
 /// a reader can see in the line; dropping is one nobody can.
 pub const SYSCALL_PROFILE_OTHER: usize = SYSCALL_PROFILE_BINS - 1;
 
-const _: () = assert!(SYS_PWRITE < SYSCALL_PROFILE_OTHER as u64);
+const _: () = assert!(SYS_VM_DECOMMIT < SYSCALL_PROFILE_OTHER as u64);
 
 pub const WNOHANG: u64 = 1;
 /// Every bit `SYS_PROCESS_WAIT`'s flag word defines; a wait carrying another
@@ -697,48 +700,48 @@ impl core::ops::BitOrAssign for OpenFlags {
     fn bitor_assign(&mut self, rhs: Self) { self.0 |= rhs.0; }
 }
 
-/// Memory protection flags for [`mmap`].
-///
-/// What a mapping is created with is what it stays. `NONE` reserves the
-/// address range and commits nothing: any access to it faults, which is the
-/// guard page a libc asks for. Anything without `WRITE` is mapped read-only,
-/// and a store to it is a protection violation that kills the process.
+/// What pages of a process's own memory may be used for. No value is both
+/// writable and executable. `None` pages fault on any access.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct MmapProt(pub u64);
-
-impl MmapProt {
-    pub const NONE: Self = Self(0);
-    pub const READ: Self = Self(1);
-    pub const WRITE: Self = Self(2);
-    /// Every bit defined above; [`mmap`] refuses another `InvalidArgument`.
-    pub const KNOWN: Self = Self(Self::READ.0 | Self::WRITE.0);
-
-    pub const fn contains(self, flag: Self) -> bool { self.0 & flag.0 != 0 }
+#[repr(u64)]
+pub enum VmProt {
+    None = 0,
+    Read = 1,
+    ReadWrite = 2,
+    ReadExec = 3,
 }
 
-impl core::ops::BitOr for MmapProt {
-    type Output = Self;
-    fn bitor(self, rhs: Self) -> Self { Self(self.0 | rhs.0) }
+impl VmProt {
+    /// The protection a syscall argument names, `None` for a word that names none.
+    pub const fn from_u64(word: u64) -> Option<Self> {
+        Some(match word {
+            0 => Self::None,
+            1 => Self::Read,
+            2 => Self::ReadWrite,
+            3 => Self::ReadExec,
+            _ => return None,
+        })
+    }
 }
 
-/// Memory mapping flags for [`mmap`].
+/// Where [`vm_reserve`] places a range.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct MmapFlags(pub u64);
-
-impl MmapFlags {
-    pub const ANONYMOUS: Self = Self(1);
-    pub const PRIVATE: Self = Self(2);
-    pub const FIXED: Self = Self(4);
-    /// Every bit defined above; [`mmap`] refuses another `InvalidArgument`.
-    pub const KNOWN: Self = Self(Self::ANONYMOUS.0 | Self::PRIVATE.0 | Self::FIXED.0);
-
-    pub const fn contains(self, flag: Self) -> bool { self.0 & flag.0 != 0 }
+pub enum VmAt {
+    /// Wherever the space has room, at a multiple of `align`: a power of two,
+    /// and a page at least.
+    Anywhere { align: usize },
+    /// Exactly there, on a page, in place of whatever those pages held.
+    Fixed(*mut u8),
 }
 
-impl core::ops::BitOr for MmapFlags {
-    type Output = Self;
-    fn bitor(self, rhs: Self) -> Self { Self(self.0 | rhs.0) }
+impl VmAt {
+    /// Anywhere, on a page.
+    pub const ANYWHERE: Self = Self::Anywhere { align: PAGE_SIZE };
 }
+
+/// `VmAt`'s two kinds as the syscall's fourth argument.
+pub const VM_AT_ANYWHERE: u64 = 0;
+pub const VM_AT_FIXED: u64 = 1;
 
 /// Result of [`pipe`]: the read and write ends.
 #[derive(Debug, Clone, Copy)]
@@ -906,6 +909,10 @@ pub mod debug_action {
     /// whichever comes first.
     pub const TLB_ACK_DELAY_ARM: u64 = 12;
     pub const TLB_ACK_DELAY_DISARM: u64 = 13;
+    /// How many changes to the caller's own address space have reached
+    /// another CPU by interrupt: what a change no other CPU runs the space on
+    /// must leave as it was.
+    pub const SPACE_REACHED: u64 = 29;
     /// How many kernel objects of one kind are alive right now. The argument is
     /// an [`ObjectKind`](crate::handle::ObjectKind) word.
     ///
@@ -2346,39 +2353,70 @@ pub fn cpu_count() -> u32 {
     syscall(SYS_CPU_COUNT, 0, 0, 0, 0) as u32
 }
 
-/// Map private memory, zeroed and populated a page at a time as it is
-/// touched. Returns its address, or null on failure.
-///
-/// `size` is rounded up to whole [`PAGE_SIZE`]s. If `addr` is null, or
-/// `MmapFlags::FIXED` is not given, the kernel chooses the address. With
-/// `FIXED` and a non-null `addr` on a page, the mapping is placed at exactly
-/// that address and replaces whatever those pages held, as POSIX's
-/// `MAP_FIXED` does.
+/// `len` bytes of private memory, rounded up to whole [`PAGE_SIZE`]s, placed
+/// as `at` says. Any `prot` but `None` commits the pages: they read as zeros
+/// and are populated as they are touched. `None` reserves them, and
+/// [`vm_protect`] commits them later.
 ///
 /// # Safety
-/// Caller is responsible for managing the returned memory region, and for
-/// anything a `FIXED` mapping replaces.
-pub unsafe fn mmap(addr: *mut u8, size: usize, prot: MmapProt, flags: MmapFlags) -> *mut u8 {
-    let result = syscall(SYS_MMAP, addr as u64, size as u64, prot.0, flags.0);
-    if SyscallError::from_u64(result).is_some() { core::ptr::null_mut() } else {
-        core::ptr::with_exposed_provenance_mut(result as usize)
-    }
+/// A `Fixed` range replaces whatever those pages held, so nothing may still
+/// reach that.
+pub unsafe fn vm_reserve(len: usize, prot: VmProt, at: VmAt) -> Result<*mut u8, SyscallError> {
+    let (place, kind) = match at {
+        VmAt::Anywhere { align } => (align as u64, VM_AT_ANYWHERE),
+        VmAt::Fixed(addr) => (addr as u64, VM_AT_FIXED),
+    };
+    check(syscall(SYS_VM_RESERVE, len as u64, prot as u64, place, kind))
+        .map(|addr| core::ptr::with_exposed_provenance_mut(addr as usize))
 }
 
 /// Ranges one address space holds, each a run of pages with one kind and
 /// protection: a call that could pass it is `ResourceExhausted`.
 pub const MAX_RANGES: usize = 32_768;
 
-/// Take away every page of `[addr, addr + size)`, as POSIX's `munmap` does:
-/// any run of whole pages, across mappings and the holes between them. `addr`
-/// off a page, or a `size` of zero, is `InvalidArgument` and takes nothing;
-/// so does a space holding nearly [`MAX_RANGES`], `ResourceExhausted`, since
-/// cutting a range in two adds one.
+/// Take away every page of `[addr, addr + len)`, as POSIX's `munmap` does: any
+/// run of whole pages, across ranges and the holes between them. `addr` off a
+/// page, or a `len` of zero, is `InvalidArgument` and takes nothing; so does a
+/// space holding nearly [`MAX_RANGES`], `ResourceExhausted`, since cutting a
+/// range in two adds one.
 ///
 /// # Safety
 /// Nothing reaches those pages after this answers `Ok`.
-pub unsafe fn munmap(addr: *mut u8, size: usize) -> Result<(), SyscallError> {
-    check_unit(syscall(SYS_MUNMAP, addr as u64, size as u64, 0, 0))
+pub unsafe fn vm_release(addr: *mut u8, len: usize) -> Result<(), SyscallError> {
+    check_unit(syscall(SYS_VM_RELEASE, addr as u64, len as u64, 0, 0))
+}
+
+/// Give every page of `[addr, addr + len)` the protection `prot`, as POSIX's
+/// `mprotect` does. A reserved private page becomes committed unless `prot` is
+/// `None`; a committed one keeps its contents and its commitment whatever
+/// `prot` is. A page of a shared object takes no protection past what it was
+/// mapped with. Every page must be held (`BadAddress` otherwise), and either
+/// every page changes or none does.
+///
+/// # Safety
+/// No live reference into the range relies on an access `prot` takes away.
+pub unsafe fn vm_protect(addr: *mut u8, len: usize, prot: VmProt) -> Result<(), SyscallError> {
+    check_unit(syscall(SYS_VM_PROTECT, addr as u64, len as u64, prot as u64, 0))
+}
+
+/// Free the frames behind every page of `[addr, addr + len)` and keep the
+/// pages committed: the next touch of a private page reads zeros, as Linux's
+/// `MADV_DONTNEED` makes it. Every page must be held.
+///
+/// # Safety
+/// Nothing relies on the private pages' contents.
+pub unsafe fn vm_discard(addr: *mut u8, len: usize) -> Result<(), SyscallError> {
+    check_unit(syscall(SYS_VM_DISCARD, addr as u64, len as u64, 0, 0))
+}
+
+/// Free the frames and the commitment of every page of `[addr, addr + len)`,
+/// which must all be private memory: they are reserved again, faulting on any
+/// access until [`vm_protect`] commits them.
+///
+/// # Safety
+/// Nothing reaches those pages meanwhile.
+pub unsafe fn vm_decommit(addr: *mut u8, len: usize) -> Result<(), SyscallError> {
+    check_unit(syscall(SYS_VM_DECOMMIT, addr as u64, len as u64, 0, 0))
 }
 
 /// Non-blocking read. Returns bytes read, or `Err(WouldBlock)` if no data available.

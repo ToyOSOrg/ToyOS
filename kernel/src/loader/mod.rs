@@ -30,6 +30,7 @@ use alloc::vec::Vec;
 
 use crate::elf;
 use crate::object::{ops, HandleTable, KObjectRef};
+use crate::mm::space::CopySource;
 use crate::mm::{PAGE_2M, PAGE_BYTES};
 use crate::process::{
     Admission, ElfInfo, Endowments, OwnedAlloc, Parent, Pid, ProcessAccounting, ProcessData,
@@ -85,16 +86,17 @@ pub(crate) fn read_file_range(
 
 
 /// Commit one range of private memory per `PT_LOAD` segment at `image_start`
-/// plus its offset, its file bytes copied in and the rest of it zero.
+/// plus its offset, its file bytes and the rest of it zero, each page copied
+/// out of `source` at its first touch.
 ///
-/// `Err` when two segments would share a page, which their ranges cannot, or
-/// when the file's bytes cannot be read: checked before the first range, and
-/// a refusal after it leaves ranges in a space nothing runs in yet.
+/// `Err` when two segments would share a page, which their ranges cannot:
+/// checked before the first range, and a refusal after it leaves ranges in a
+/// space nothing runs in yet.
 fn load_segments(
     space: &mut crate::mm::space::AddressSpace,
     layout: &Layout,
     image_start: UserAddr,
-    backing: &dyn crate::file_backing::FileBacking,
+    source: &Arc<dyn CopySource>,
 ) -> Result<(), SyscallError> {
     use crate::mm::space::At;
 
@@ -102,28 +104,21 @@ fn load_segments(
         log!("spawn: PT_LOAD segments {} and {} contend for a page", a, b);
         return Err(SyscallError::InvalidArgument);
     }
-    let mut page = [0u8; PAGE_BYTES];
     for seg in layout.segments() {
         let (lo, hi) = seg.page_range(4096);
         let (seg_start, seg_end) = ((image_start + lo).raw(), (image_start + hi).raw());
         if seg_end == seg_start {
             continue;
         }
-        space.reserve(seg_end - seg_start, At::Fixed(UserAddr::new(seg_start)), segment_prot(seg))?;
         // The file's bytes from the segment's first page: the bytes of that
         // page before the segment are the file's too, as a linker lays them.
+        // Past the file's end and the segment's file size, the range reads
+        // zeros.
         let file_start = seg.file_offset() & !4095;
         let file_bytes = seg.filesz() + seg.file_offset() % 4096;
-        let mut done = 0;
-        while done < file_bytes {
-            if backing.read_page(file_start + done, &mut page).is_err() {
-                log!("spawn: the file's byte {} would not read", file_start + done);
-                return Err(SyscallError::NotFound);
-            }
-            let valid = (file_bytes - done).min(4096) as usize;
-            space.fill(seg_start + done, &page[..valid]);
-            done += 4096;
-        }
+        let copied = file_bytes.min(source.size().saturating_sub(file_start));
+        let at = At::Fixed(UserAddr::new(seg_start));
+        space.copy(seg_end - seg_start, at, segment_prot(seg), Arc::clone(source), file_start, copied)?;
     }
     Ok(())
 }
@@ -232,6 +227,13 @@ pub fn spawn<H>(
         return Err(SyscallError::InvalidArgument.into());
     };
 
+    // Taken before the child's space is locked: a file's snapshot takes the
+    // file cache's lock, which a user copy may hold while it takes a space's.
+    let Some(source) = backing.source() else {
+        log!("spawn: {}: the file is gone", path);
+        return Err(SyscallError::NotFound.into());
+    };
+
     let t1 = crate::clock::nanos_since_boot();
 
     let Some(child_pt) = crate::mm::space::Space::new_user() else {
@@ -259,7 +261,7 @@ pub fn spawn<H>(
                 path, extent.min(), layout.span());
             return Err(SyscallError::InvalidArgument.into());
         };
-        load_segments(&mut space, &layout, image_start, backing.as_ref())?;
+        load_segments(&mut space, &layout, image_start, &source)?;
         // Never executable, and a reserved guard below it, so running off the
         // stack's bottom faults instead of writing what lies there.
         let stack = space.reserve(STACK_GUARD + USER_STACK_SIZE as u64, At::ANYWHERE, Prot::None)?;

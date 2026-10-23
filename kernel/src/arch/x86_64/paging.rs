@@ -337,6 +337,15 @@ pub fn flush_tlb_all() {
     }
 }
 
+/// Flush this CPU's translation of the user page `va` in the space tagged
+/// `tag`, which this CPU runs.
+pub fn flush_user_page(tag: u16, va: u64) {
+    match pcid_active() {
+        Some(have) => crate::arch::cpu::invpcid(have, Invpcid::Address, tag, va),
+        None => crate::arch::cpu::invlpg(va),
+    }
+}
+
 /// Flush every TLB entry on this CPU but the global ones, all PCIDs: what a
 /// user-half change owes, since no user leaf is global.
 pub fn flush_tlb_user() {
@@ -374,11 +383,13 @@ impl Cr3 {
     /// # Safety
     /// The underlying page tables must be valid and live.
     pub unsafe fn activate(self) {
-        if pcid_active().is_some() {
-            crate::arch::cpu::write_cr3(self.0 | CR3_NOFLUSH);
-        } else {
-            crate::arch::cpu::write_cr3(self.0);
-        }
+        crate::arch::tlb::switching(self.pcid(), || {
+            if pcid_active().is_some() {
+                crate::arch::cpu::write_cr3(self.0 | CR3_NOFLUSH);
+            } else {
+                crate::arch::cpu::write_cr3(self.0);
+            }
+        });
     }
 
     /// Load CR3 with a flush; used during boot before PCID is enabled.
@@ -930,8 +941,12 @@ impl UserTables {
     /// Every CPU has dropped what it cached of `[start, end)` and of the
     /// tables `unlinked` took out before this returns: every CPU's user
     /// translations go, paging-structure caches with them.
-    pub fn shoot_down(&self, _start: u64, _end: u64, _unlinked: &Unlinked) {
-        crate::arch::tlb::shootdown(crate::invalidation::Origin::Unmap, crate::invalidation::Half::User);
+    /// Answers whether it reached another CPU.
+    pub fn shoot_down(&self, start: u64, end: u64, unlinked: &Unlinked) -> bool {
+        // A table taken away is cached apart from the leaves: by page is not
+        // enough for it.
+        let (start, end) = if unlinked.is_empty() { (start, end) } else { (0, u64::MAX) };
+        crate::arch::tlb::user_change(crate::invalidation::Origin::Unmap, self.pcid.value(), start, end)
     }
 }
 

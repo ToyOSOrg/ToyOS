@@ -55,6 +55,8 @@ reap-raise-relaxed = []
 shootdown-serve-relaxed = []
 # `src/shootdown.rs`'s `served` reads `Relaxed`, and `counters_round` reds.
 shootdown-served-relaxed = []
+# `src/tlb_tags.rs`'s `enter` loses its fence, and `tlb_tags` reds.
+tlb-tags-enter-relaxed = []
 # `src/log/shard.rs`'s publishing store goes `Relaxed`, and `log_record` reds.
 log-commit-release-off = []
 # `src/log/registry.rs`'s pointer store and load go `Relaxed`, and

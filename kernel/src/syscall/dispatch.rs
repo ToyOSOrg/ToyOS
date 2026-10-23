@@ -50,7 +50,10 @@ use super::proc::{
     spawn_place, sys_endowments, sys_exit, sys_nanosleep, sys_process_stats,
     sys_job_create, sys_job_own, sys_process_quit, sys_process_wait, sys_rt_enter, sys_spawn, sys_thread_exit, sys_thread_join, sys_thread_spawn,
 };
-use super::vm::{shared_image, sys_dlopen, sys_dlsym, sys_mmap, sys_munmap, sys_query_modules, sys_tls_alloc_block};
+use super::vm::{
+    shared_image, sys_dlopen, sys_dlsym, sys_query_modules, sys_tls_alloc_block, sys_vm_decommit, sys_vm_discard,
+    sys_vm_protect, sys_vm_release, sys_vm_reserve,
+};
 
 /// `sysret-ss-probe`, run once a boot on the first syscall: a park that
 /// switches away from it and back.
@@ -349,8 +352,11 @@ pub(crate) fn syscall_dispatch(num: u64, a1: u64, a2: u64, a3: u64, a4: u64) -> 
             Some(addr) => process::futex_wake(addr, a2),
             None => bad_addr,
         },
-        SYS_MMAP => sys_mmap(a1, a2, MmapProt(a3), MmapFlags(a4)),
-        SYS_MUNMAP => sys_munmap(a1, a2),
+        SYS_VM_RESERVE => sys_vm_reserve(a1, a2, a3, a4),
+        SYS_VM_RELEASE => sys_vm_release(a1, a2),
+        SYS_VM_PROTECT => sys_vm_protect(a1, a2, a3),
+        SYS_VM_DISCARD => sys_vm_discard(a1, a2),
+        SYS_VM_DECOMMIT => sys_vm_decommit(a1, a2),
         SYS_PREAD => {
             let Some(mut buf) = ctx.user_bytes_mut(UserAddr::new(a2), a3) else { return bad_addr };
             with_object(RawHandle(a1 as u32), Rights::READ, |o| ops::pread(o, a4, &mut buf))
@@ -559,6 +565,7 @@ pub(crate) fn syscall_dispatch(num: u64, a1: u64, a2: u64, a3: u64, a4: u64) -> 
             DA::CANARY_CHANGED => canary::changed() as u64,
             DA::TLB_ACK_DELAY_ARM => crate::arch::tlb::debug_arm_ack_delay(a2),
             DA::TLB_ACK_DELAY_DISARM => crate::arch::tlb::debug_disarm_ack_delay(),
+            DA::SPACE_REACHED => crate::process::current_address_space().usage().reached(),
             // The two leaks this object model accepts — a stranded Arc, the cross-pair
             // connection cycle — are visible in no other way than this census.
             // Per kind, not total: a total would hide one kind's leak behind another's churn.

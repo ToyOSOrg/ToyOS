@@ -21,12 +21,9 @@ These answer failure in their POSIX form and do nothing
   LLVM's `getDefaultStackSize` (`llvm/lib/Support/ProgramStack.cpp`) ignores
   the failure and reads the `rlimit` it did not get.
 - `gethostname`, `ENOSYS`: no host name is published to a process.
-- `msync` and `mprotect`, `ENOSYS`: no call answers which pages of a range are
-  mapped, and a mapping's protection is fixed when it is made.
-- `mmap` of a file, `ENODEV`, and of executable memory, `ENOTSUP`: the kernel
-  maps neither.
-- `madvise`'s `MADV_DONTNEED`, `ENOSYS`: no call discards a range's pages and
-  keeps it mapped, so it cannot read back as zeros as Linux's does.
+- `msync`, `ENOSYS`: no mapping is of a file, so there is nothing to write back.
+- `mmap` of a file, `ENODEV`, and `mmap` or `mprotect` of executable memory,
+  `ENOTSUP`: the kernel maps neither.
 - `fcntl` (`sdk/libc/src/fdreq.rs`): a record lock, `EINVAL`, POSIX's answer
   for a file that supports no locking; `F_GETFL`, `F_SETFL`, `F_GETOWN` and
   `F_SETOWN`, `ENOSYS`.

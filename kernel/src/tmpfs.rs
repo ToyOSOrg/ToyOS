@@ -7,6 +7,7 @@ use core::sync::atomic::{AtomicBool, Ordering};
 use crate::file_backing::FileBacking;
 use crate::file_cache::{self, FileId};
 use crate::fs_rename::{self, Committed, ReplaceRename};
+use crate::mm::space::CopySource;
 use crate::mm::PAGE_BYTES;
 use toyos_abi::syscall::SyscallError;
 
@@ -38,6 +39,13 @@ impl FileBacking for TmpfsBacking {
 
     fn file_size(&self) -> u64 {
         file_cache::size(self.file_id)
+    }
+
+    fn source(&self) -> Option<Arc<dyn CopySource>> {
+        if !self.alive.load(Ordering::Acquire) {
+            return None;
+        }
+        Some(Arc::new(file_cache::snapshot(self.file_id)?))
     }
 }
 

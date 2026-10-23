@@ -75,12 +75,18 @@ live split of a user leaf.
    hot paths' costs in `issues/user-memory-hot-paths-are-unmeasured-against-2-mib-pages.md`.
 4. **Demand-zero anonymous `mmap`.** Built, over 4 KiB pages only: a fault
    populates one page, unmapping a range no thread touched sends no IPI, and
-   `munmap` and a `FIXED` `mmap` take any run of pages, as POSIX does. What
+   `munmap` and a `FIXED` `mmap` take any run of pages, as POSIX does.
+   `vm_reserve`, `vm_protect`, `vm_discard`, `vm_decommit` and `vm_release`
+   are the calls, behind libc's `mmap`, `mprotect`, `madvise` and `munmap`
+   and std's allocator, which trims, and its thread stacks, each reserved
+   at the size asked with a guard page below. What
    remains of the stage's exit — `mmap` past what memory can hold refused at
    `mmap` — is the strict charge of the allocator track's migration
    (`issues/toyos-has-its-own-allocator.md`).
-5. **Shared text.** A spawn copies its program's segments into the process
-   whole; no fault reads a file. ROOT's read-only text shared zero-copy, from
+5. **Shared text.** A spawn copies each page of its program's segments into
+   the process at the page's first touch, out of the image object or out of
+   a snapshot of its `/tmp` file; no fault reads a file. ROOT's read-only
+   text shared zero-copy, from
    immutable sealed objects, is the next step. Exit: two processes of one
    binary hold its text once.
 6. **`/apps` image sharing.** The design is the owner's decision, owed when

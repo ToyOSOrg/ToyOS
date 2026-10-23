@@ -335,10 +335,13 @@ extern "sysv64" fn trap_dispatch(frame: *mut TrapFrame) {
     // is a double and then a triple fault, and a triple fault is a reset that
     // wrote nothing; the registers are what this entry can say without risking
     // that, and the report overwrites them if the machine gets that far. Every
-    // vector, the page fault included: a diagnostic that skips the commonest
-    // fault class is one that misses the answer, and a returning fault's record
-    // is simply overwritten by the next.
-    crate::blackbox::record_fault(&fault_of(frame));
+    // vector seals but a Ring 3 page fault, which every first touch of a page
+    // takes: it is served or ends its process through the crash path, which
+    // reports, and a fault inside its handler is a Ring 0 fault and seals.
+    let user_page_fault = Vector::from_raw(frame.vector) == Vector::PageFault && toyos_userbound::Ring::of_cs(frame.cs).is_user();
+    if !user_page_fault {
+        crate::blackbox::record_fault(&fault_of(frame));
+    }
     match Vector::from_raw(frame.vector) {
         Vector::DoubleFault => exceptions::double_fault_handler(frame),
         Vector::MachineCheck => exceptions::machine_check_handler(frame),

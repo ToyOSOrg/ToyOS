@@ -48,7 +48,7 @@ use std::time::Duration;
 
 use toyos::endow::{Endowments, SYSCAP_LABEL};
 use toyos::syscap::SysCap;
-use toyos_abi::syscall::{self, MmapFlags, MmapProt};
+use toyos_abi::syscall::{self, VmAt, VmProt};
 
 #[path = "../roster.rs"]
 mod roster;
@@ -406,12 +406,7 @@ fn orphaned_by_unmap(cap: &SysCap) {
     let regions: Vec<usize> = (0..STALE_FRAMES)
         .map(|i| {
             let ptr = unsafe {
-                syscall::mmap(
-                    std::ptr::null_mut(),
-                    PAGE_2M,
-                    MmapProt::READ | MmapProt::WRITE,
-                    MmapFlags::ANONYMOUS | MmapFlags::PRIVATE,
-                )
+                syscall::vm_reserve(PAGE_2M, VmProt::ReadWrite, VmAt::ANYWHERE).unwrap_or(core::ptr::null_mut())
             };
             assert!(!ptr.is_null(), "mmap #{i} for a futex word failed");
             // The word is the first in the region, so its offset in the frame
@@ -437,7 +432,7 @@ fn orphaned_by_unmap(cap: &SysCap) {
     // The unmap. Every frame behind these regions goes back to the PMM here,
     // and `mmap` hands the lowest free one to the next asker.
     for &addr in &regions {
-        unsafe { syscall::munmap(addr as *mut u8, PAGE_2M) }.expect("munmap a futex region");
+        unsafe { syscall::vm_release(addr as *mut u8, PAGE_2M) }.expect("munmap a futex region");
     }
 
     go.write_all(b"go\n").expect("tell the sweeper to go");
@@ -486,12 +481,7 @@ fn sweep() {
     let mut regions = Vec::new();
     for i in 0..SWEEP_FRAMES {
         let ptr = unsafe {
-            syscall::mmap(
-                std::ptr::null_mut(),
-                PAGE_2M,
-                MmapProt::READ | MmapProt::WRITE,
-                MmapFlags::ANONYMOUS | MmapFlags::PRIVATE,
-            )
+            syscall::vm_reserve(PAGE_2M, VmProt::ReadWrite, VmAt::ANYWHERE).unwrap_or(core::ptr::null_mut())
         };
         assert!(!ptr.is_null(), "sweeper mmap #{i} failed");
         let word = ptr as *const u32;
@@ -502,7 +492,7 @@ fn sweep() {
         regions.push(ptr);
     }
     for ptr in regions {
-        unsafe { syscall::munmap(ptr, PAGE_2M) }.expect("sweeper munmap");
+        unsafe { syscall::vm_release(ptr, PAGE_2M) }.expect("sweeper munmap");
     }
     assert!(
         stolen.is_empty(),

@@ -695,7 +695,9 @@ impl UserTables {
     /// Every CPU has dropped what it cached of `[start, end)` before this
     /// returns, and of the tables `unlinked` took out: a walk cache entry for
     /// another address under one of them is dropped only by the whole ASID.
-    pub fn shoot_down(&self, start: u64, end: u64, unlinked: &Unlinked) {
+    /// Answers whether it reached another CPU by interrupt: never, since
+    /// the invalidations broadcast in hardware.
+    pub fn shoot_down(&self, start: u64, end: u64, unlinked: &Unlinked) -> bool {
         const BY_PAGE: u64 = 64;
         let asid = self.asid.value();
         if !unlinked.is_empty() || (end - start) / PAGE_4K > BY_PAGE {
@@ -703,6 +705,7 @@ impl UserTables {
         } else {
             (start..end).step_by(PAGE_4K as usize).for_each(|va| tlb::page(asid, va));
         }
+        false
     }
 }
 

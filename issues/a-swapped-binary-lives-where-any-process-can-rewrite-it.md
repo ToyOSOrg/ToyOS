@@ -18,8 +18,10 @@ guarantee — only by nobody having rewritten it in between. Two windows:
   requester has hung up, milliseconds to two seconds later; a process that
   rewrites the file in that window runs its own bytes holding the service's
   manifest row — its device claims included.
-- **For the service's life.** The kernel pages a binary in on demand, and a
-  restore after a failed swap spawns the previous installed path again.
+- **For the service's life**, closed: a spawn from `/tmp` runs a snapshot of
+  the file taken at the spawn (`file_cache::Snapshot`), which no later write
+  reaches. A restore after a failed swap spawns the previous installed path
+  again, so it is the first window again.
 
 Nothing in the tree does either; the authority to ask for a swap is
 `/system/bin/swap`'s alone, and this is the one step of it the capability
@@ -37,8 +39,8 @@ track would have to rule on.
 The supervisor now hashes an installed binary again at every start — the swap's and a
 restore's — and refuses to start one that no longer holds what its path names
 (`toyos_swap::installed_digest`). That moves the first window from "until the
-requester hangs up" to the spawn syscall itself. The second is unchanged: the
-kernel still pages the running binary in from the file. A directory only the supervisor
+requester hangs up" to the spawn syscall itself, and the snapshot closed the
+second. A directory only the supervisor
 may write does not exist in this kernel: every writable mount is ambient, and
 gating one on the writer's identity would be pid-as-authority. So the exit
 condition above stands, and choosing between its three shapes is the owner's.

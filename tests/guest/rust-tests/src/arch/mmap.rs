@@ -1,30 +1,30 @@
-//! `SYS_MMAP` past `toyos_abi::syscall::mmap`, which answers every refusal with
-//! a null: here the kernel's error comes back by name.
+//! `SYS_VM_RESERVE` with words `toyos_abi::syscall::vm_reserve`'s types
+//! cannot spell, so a test can ask with an undefined one.
 
 #[cfg(target_arch = "x86_64")]
 pub use x86_64::*;
 
 #[cfg(target_arch = "x86_64")]
 mod x86_64 {
-    use toyos_abi::syscall::{MmapFlags, MmapProt, SyscallError, SYS_MMAP};
+    use toyos_abi::syscall::{SyscallError, SYS_VM_RESERVE};
 
-    /// The mapping's address, or the error the kernel refused it with.
+    /// The range's address, or the error the kernel refused it with.
     ///
     /// # Safety
-    /// A `FIXED` mapping replaces whatever this process has at `addr`.
-    pub unsafe fn raw(addr: u64, len: u64, prot: MmapProt, flags: MmapFlags) -> Result<u64, SyscallError> {
+    /// A fixed range replaces whatever this process has at `place`.
+    pub unsafe fn raw(len: u64, prot: u64, place: u64, kind: u64) -> Result<u64, SyscallError> {
         let ret: u64;
-        // SAFETY: the caller's for what a `FIXED` mapping replaces; no argument
+        // SAFETY: the caller's for what a fixed range replaces; no argument
         // is a pointer this call dereferences, and the `syscall` is the ABI's
         // (`toyos_abi::syscall`), which clobbers rax, rcx and r11.
         unsafe {
             core::arch::asm!(
                 "syscall",
-                in("rdi") SYS_MMAP,
-                in("rsi") addr,
-                in("rdx") len,
-                in("r8") prot.0,
-                in("r9") flags.0,
+                in("rdi") SYS_VM_RESERVE,
+                in("rsi") len,
+                in("rdx") prot,
+                in("r8") place,
+                in("r9") kind,
                 lateout("rax") ret,
                 out("rcx") _,
                 out("r11") _,

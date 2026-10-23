@@ -11,7 +11,7 @@ use std::process::Command;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering::{Acquire, Release}};
 
 use toyos_abi::end::{End, Fault};
-use toyos_abi::syscall::{mmap, munmap, MmapFlags, MmapProt};
+use toyos_abi::syscall::{self, VmAt, VmProt};
 
 const TRIALS: usize = 4;
 const PAGE: usize = 2 * 1024 * 1024;
@@ -60,7 +60,7 @@ fn judge() {
 /// A fresh page, written.
 fn written() -> *mut u8 {
     // SAFETY: a fresh anonymous mapping this function alone names.
-    let page = unsafe { mmap(core::ptr::null_mut(), PAGE, MmapProt::READ | MmapProt::WRITE, MmapFlags::ANONYMOUS | MmapFlags::PRIVATE) };
+    let page = unsafe { syscall::vm_reserve(PAGE, VmProt::ReadWrite, VmAt::ANYWHERE).unwrap_or(core::ptr::null_mut()) };
     assert!(!page.is_null(), "unmap_touch: mmap refused");
     // SAFETY: inside the mapping just made.
     unsafe { page.write_volatile(0x5A) };
@@ -87,7 +87,7 @@ fn seen() {
     }
     println!("{UNMAPPING}");
     // SAFETY: the mapping made above, whole; its reader's next read is the probe.
-    unsafe { munmap(page, PAGE) }.expect("unmap_touch: munmap refused");
+    unsafe { syscall::vm_release(page, PAGE) }.expect("unmap_touch: munmap refused");
     UNMAPPED.store(true, Release);
     // The reader's fault ends this process; this thread waits for it.
     loop {

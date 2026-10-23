@@ -69,28 +69,39 @@ impl<T: ?Sized> Object for alloc::sync::Arc<T> {
 
 /// What backs a range.
 #[derive(Clone, Debug)]
-pub enum Kind<O> {
+pub enum Kind<O, S = O> {
     /// Memory of this space's own, its frames recorded in the leaves that map
     /// them. Uncommitted, it is a reservation: no page of it can be touched.
     Private { committed: bool },
-    /// `object`'s bytes from `offset` on.
-    Object { object: O, offset: u64 },
+    /// `object`'s bytes from `offset` on, never given more than `max` allows.
+    Object { object: O, offset: u64, max: Prot },
+    /// Memory of this space's own, committed, whose every page starts as a
+    /// copy of `source` from `offset` on as far as the range's first `len`
+    /// bytes go, and zeros past them: taken at the page's first touch, as a
+    /// program's segments are.
+    Copy { source: S, offset: u64, len: u64 },
 }
 
 #[derive(Clone, Debug)]
-pub struct Entry<O> {
+pub struct Entry<O, S = O> {
     pub end: u64,
     pub prot: Prot,
-    pub kind: Kind<O>,
+    pub kind: Kind<O, S>,
 }
 
-impl<O: Object> Entry<O> {
+impl<O: Object, S: Object> Entry<O, S> {
+    /// Whether its pages are this space's own, committed: each owns a frame
+    /// once touched, and a promise of one before.
+    pub fn committed(&self) -> bool {
+        matches!(self.kind, Kind::Private { committed: true } | Kind::Copy { .. })
+    }
+
     /// Whether the range needs page tables: memory a fault or a copy can
     /// populate or reach.
     pub fn backed(&self) -> bool {
         match self.kind {
             Kind::Private { committed } => committed,
-            Kind::Object { .. } => true,
+            Kind::Object { .. } | Kind::Copy { .. } => true,
         }
     }
 
@@ -98,7 +109,12 @@ impl<O: Object> Entry<O> {
     fn tail(&self, start: u64, at: u64) -> Self {
         let kind = match &self.kind {
             Kind::Private { committed } => Kind::Private { committed: *committed },
-            Kind::Object { object, offset } => Kind::Object { object: object.clone(), offset: offset + (at - start) },
+            Kind::Object { object, offset, max } => {
+                Kind::Object { object: object.clone(), offset: offset + (at - start), max: *max }
+            }
+            Kind::Copy { source, offset, len } => {
+                Kind::Copy { source: source.clone(), offset: offset + (at - start), len: len.saturating_sub(at - start) }
+            }
         };
         Self { end: self.end, prot: self.prot, kind }
     }
@@ -108,25 +124,28 @@ impl<O: Object> Entry<O> {
         self.prot == next.prot
             && match (&self.kind, &next.kind) {
                 (Kind::Private { committed: a }, Kind::Private { committed: b }) => a == b,
-                (Kind::Object { object: a, offset: x }, Kind::Object { object: b, offset: y }) => {
-                    a.same(b) && x + (self.end - start) == *y
+                (Kind::Object { object: a, offset: x, max: m }, Kind::Object { object: b, offset: y, max: n }) => {
+                    a.same(b) && x + (self.end - start) == *y && m == n
+                }
+                (Kind::Copy { source: a, offset: x, len: l }, Kind::Copy { source: b, offset: y, len: k }) => {
+                    a.same(b) && x + (self.end - start) == *y && l.saturating_sub(self.end - start) == *k
                 }
                 _ => false,
             }
     }
 }
 
-pub struct Inventory<O> {
+pub struct Inventory<O, S = O> {
     floor: u64,
     top: u64,
-    entries: BTreeMap<u64, Entry<O>>,
+    entries: BTreeMap<u64, Entry<O, S>>,
     /// Free ranges by start, each to its end.
     free: BTreeMap<u64, u64>,
     /// The same ranges by `(length, start)`.
     by_len: BTreeSet<(u64, u64)>,
 }
 
-impl<O: Object> Inventory<O> {
+impl<O: Object, S: Object> Inventory<O, S> {
     /// Nothing held in `[floor, top)`, both on pages.
     pub fn new(floor: u64, top: u64) -> Self {
         assert!(floor.is_multiple_of(PAGE) && top.is_multiple_of(PAGE) && floor < top, "vm: {floor:#x}..{top:#x}");
@@ -158,14 +177,14 @@ impl<O: Object> Inventory<O> {
     }
 
     /// The entry holding `at`, and where it starts.
-    pub fn find(&self, at: u64) -> Option<(u64, &Entry<O>)> {
+    pub fn find(&self, at: u64) -> Option<(u64, &Entry<O, S>)> {
         let (&start, entry) = self.entries.range(..=at).next_back()?;
         (at < entry.end).then_some((start, entry))
     }
 
     /// Every entry `[start, end)` meets, in address order, each with where it
     /// starts: the first may start below `start` and the last end past `end`.
-    pub fn meeting(&self, start: u64, end: u64) -> impl Iterator<Item = (u64, &Entry<O>)> {
+    pub fn meeting(&self, start: u64, end: u64) -> impl Iterator<Item = (u64, &Entry<O, S>)> {
         let first = self.find(start).map(|(s, _)| s).unwrap_or(start);
         self.entries.range(first..end).map(|(&s, e)| (s, e))
     }
@@ -203,7 +222,7 @@ impl<O: Object> Inventory<O> {
     }
 
     /// Hold `[start, entry.end)`, which is free.
-    pub fn insert(&mut self, start: u64, entry: Entry<O>) {
+    pub fn insert(&mut self, start: u64, entry: Entry<O, S>) {
         assert!(self.holds(start, entry.end), "vm: {start:#x}..{:#x} is not pages of this space", entry.end);
         let (free_start, free_end) = self.free.range(..=start).next_back().map(|(&s, &e)| (s, e)).expect("vm: inserted over held memory");
         assert!(entry.end <= free_end, "vm: {start:#x}..{:#x} inserted over held memory", entry.end);
@@ -221,11 +240,11 @@ impl<O: Object> Inventory<O> {
 
     /// Take every entry out of `[start, end)`, cutting any that crosses its
     /// ends, and answer what was there, in address order.
-    pub fn remove(&mut self, start: u64, end: u64) -> Vec<(u64, Entry<O>)> {
+    pub fn remove(&mut self, start: u64, end: u64) -> Vec<(u64, Entry<O, S>)> {
         self.split_at(start);
         self.split_at(end);
         let starts: Vec<u64> = self.entries.range(start..end).map(|(&s, _)| s).collect();
-        let removed: Vec<(u64, Entry<O>)> =
+        let removed: Vec<(u64, Entry<O, S>)> =
             starts.into_iter().map(|s| (s, self.entries.remove(&s).expect("vm: a start just listed"))).collect();
         for (s, entry) in &removed {
             self.release(*s, entry.end);
@@ -235,7 +254,7 @@ impl<O: Object> Inventory<O> {
 
     /// Change every entry inside `[start, end)`, cutting any that crosses its
     /// ends, with `change`; neighbours that become one range are joined.
-    pub fn update(&mut self, start: u64, end: u64, mut change: impl FnMut(u64, &mut Entry<O>)) {
+    pub fn update(&mut self, start: u64, end: u64, mut change: impl FnMut(u64, &mut Entry<O, S>)) {
         self.split_at(start);
         self.split_at(end);
         for (&s, entry) in self.entries.range_mut(start..end) {
@@ -245,7 +264,7 @@ impl<O: Object> Inventory<O> {
     }
 
     /// Every entry, in address order.
-    pub fn entries(&self) -> impl Iterator<Item = (u64, &Entry<O>)> {
+    pub fn entries(&self) -> impl Iterator<Item = (u64, &Entry<O, S>)> {
         self.entries.iter().map(|(&s, e)| (s, e))
     }
 
@@ -334,7 +353,7 @@ mod tests {
     }
 
     fn object(end: u64, object: u32, offset: u64) -> Entry<Obj> {
-        Entry { end, prot: Prot::ReadWrite, kind: Kind::Object { object: Obj(object), offset } }
+        Entry { end, prot: Prot::ReadWrite, kind: Kind::Object { object: Obj(object), offset, max: Prot::ReadWrite } }
     }
 
     fn starts(v: &Inventory<Obj>) -> Vec<(u64, u64)> {
@@ -392,6 +411,24 @@ mod tests {
             other => panic!("{other:?}"),
         }
         assert_eq!(starts(&v), vec![(FLOOR, FLOOR + PAGE), (FLOOR + 6 * PAGE, FLOOR + 8 * PAGE)]);
+    }
+
+    /// A copied range cut in two keeps, in its tail, where the copy goes on
+    /// and how much of it is left; a tail past the copied bytes is all zeros;
+    /// and the halves made one again are the range they were.
+    #[test]
+    fn a_copied_range_cut_keeps_its_source_offset_and_length() {
+        let mut v = Inventory::new(FLOOR, TOP);
+        let copy = |end, offset, len| Entry { end, prot: Prot::ReadWrite, kind: Kind::Copy { source: Obj(7), offset, len } };
+        v.insert(FLOOR, copy(FLOOR + 4 * PAGE, 3 * PAGE, PAGE + 100));
+        v.update(FLOOR + PAGE, FLOOR + 2 * PAGE, |_, e| e.prot = Prot::Read);
+        let kind = |at| v.find(at).unwrap().1.kind.clone();
+        assert!(matches!(kind(FLOOR), Kind::Copy { offset, len, .. } if offset == 3 * PAGE && len == PAGE + 100));
+        assert!(matches!(kind(FLOOR + PAGE), Kind::Copy { offset, len, .. } if offset == 4 * PAGE && len == 100));
+        assert!(matches!(kind(FLOOR + 2 * PAGE), Kind::Copy { offset, len, .. } if offset == 5 * PAGE && len == 0));
+        assert!(v.find(FLOOR).unwrap().1.committed(), "a copied range is committed");
+        v.update(FLOOR + PAGE, FLOOR + 2 * PAGE, |_, e| e.prot = Prot::ReadWrite);
+        assert_eq!(starts(&v), vec![(FLOOR, FLOOR + 4 * PAGE)], "the cut halves did not join again");
     }
 
     #[test]

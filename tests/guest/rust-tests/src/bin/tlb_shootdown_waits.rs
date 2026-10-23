@@ -1,5 +1,5 @@
-//! A shootdown returns when every other CPU has flushed — and the paths that
-//! free memory are behind it.
+//! A shootdown returns when every CPU running the space has flushed — and the
+//! paths that free memory are behind it; one no other CPU runs reaches none.
 //!
 //! **Why this needs an actuator at all.** A correct wait and no wait whatsoever
 //! measure the same zero on a machine where every CPU answers in microseconds,
@@ -10,9 +10,12 @@
 //! is a small number here rather than an invisible one, and the set's *width*
 //! is assertable and not only its depth.
 //!
-//! **The precondition is the kernel's target set, and that set is every other
-//! CPU on the machine.** Nothing this process does puts a CPU into it or takes
-//! one out, so `SYS_CPU_COUNT` is the whole of the arrangement.
+//! **The target set is the CPUs running the space.** So the waits are timed
+//! while a spinning thread of this process runs on every other CPU the
+//! scheduler gives one, and the absence of a wait while this thread runs
+//! alone is counted (`SYS_DEBUG`'s `SPACE_REACHED`): no change reached
+//! another CPU. It runs on the test kernel: the `shared-debug` metal boot, and
+//! a q35 boot of the test kernel.
 //!
 //! **What is gated is the wait, not the harm.** A sibling reading through a
 //! stale translation is not constructible under TCG — the correct outcome is a
@@ -20,7 +23,7 @@
 //! the whole TLB within milliseconds — so what is measured is the property that
 //! closes the window: the free happens after the flush.
 
-use toyos_abi::syscall::{self, MmapFlags, MmapProt, SYS_DEBUG};
+use toyos_abi::syscall::{self, VmAt, VmProt, SYS_DEBUG};
 
 /// Long enough to read off a clock through two syscalls, short enough that a
 /// sweep of them is not a boot's worth of stalled CPU. The delay spins with
@@ -43,7 +46,7 @@ const TRIALS: u32 = 5;
 
 const PAGE_2M: usize = 2 * 1024 * 1024;
 
-use toyos_abi::syscall::debug_action::{TLB_ACK_DELAY_ARM as ARM, TLB_ACK_DELAY_DISARM as DISARM};
+use toyos_abi::syscall::debug_action::{SPACE_REACHED, TLB_ACK_DELAY_ARM as ARM, TLB_ACK_DELAY_DISARM as DISARM};
 
 fn debug(action: u64, arg: u64) -> u64 {
     let ret: u64;
@@ -92,15 +95,41 @@ fn timed(f: impl FnOnce()) -> u64 {
 
 fn map(size: usize) -> *mut u8 {
     let p = unsafe {
-        syscall::mmap(
-            core::ptr::null_mut(),
-            size,
-            MmapProt::READ | MmapProt::WRITE,
-            MmapFlags::ANONYMOUS | MmapFlags::PRIVATE,
-        )
+        syscall::vm_reserve(size, VmProt::ReadWrite, VmAt::ANYWHERE).unwrap_or(core::ptr::null_mut())
     };
     assert!(!p.is_null(), "mmap failed");
     p
+}
+
+/// A thread of this process spinning on each other CPU it is given, until
+/// told to stop: the CPUs a change to this space must reach.
+struct Spinners {
+    stop: std::sync::Arc<std::sync::atomic::AtomicBool>,
+    threads: Vec<std::thread::JoinHandle<()>>,
+}
+
+impl Spinners {
+    fn start(cpus: u32) -> Self {
+        let stop = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let threads = (1..cpus)
+            .map(|_| {
+                let stop = std::sync::Arc::clone(&stop);
+                std::thread::spawn(move || {
+                    while !stop.load(std::sync::atomic::Ordering::Relaxed) {
+                        core::hint::spin_loop();
+                    }
+                })
+            })
+            .collect();
+        Self { stop, threads }
+    }
+
+    fn stop(self) {
+        self.stop.store(true, std::sync::atomic::Ordering::Relaxed);
+        for t in self.threads {
+            t.join().expect("a spinner");
+        }
+    }
 }
 
 fn main() {
@@ -116,12 +145,13 @@ fn main() {
 
     // 1. `munmap`, which is the syscall the stage exists for: the pages go back
     //    to the PMM behind the flush.
+    let spinners = Spinners::start(cpus);
     let mut judged = false;
     for trial in 1..=TRIALS {
         let region = map(PAGE_2M);
         armed(cpus);
         let elapsed = timed(|| {
-            unsafe { syscall::munmap(region, PAGE_2M) }.expect("munmap");
+            unsafe { syscall::vm_release(region, PAGE_2M) }.expect("munmap");
         });
         if elapsed >= FLOOR_NANOS {
             judged = true;
@@ -141,27 +171,53 @@ fn main() {
     //    free: the address keeps its meaning and changes what it names, so a
     //    sibling holding the old translation writes into the wrong physical
     //    page with nothing ever faulting.
-    let placed = map(PAGE_2M);
-    armed(cpus);
-    let elapsed = timed(|| {
-        let p = unsafe {
-            syscall::mmap(
-                placed,
-                PAGE_2M,
-                MmapProt::READ | MmapProt::WRITE,
-                MmapFlags::ANONYMOUS | MmapFlags::PRIVATE | MmapFlags::FIXED,
-            )
-        };
-        assert_eq!(p, placed, "MAP_FIXED did not honour the address");
-    });
+    //    The page is touched first: a translation of a page never touched is
+    //    held by no CPU, so replacing it owes no flush.
+    //    Tried as `munmap` is: a spinner the scheduler has just moved off its
+    //    CPU is a target the change rightly does not wait for.
+    let mut judged = false;
+    for trial in 1..=TRIALS {
+        let placed = map(PAGE_2M);
+        unsafe { placed.write_volatile(1) };
+        armed(cpus);
+        let elapsed = timed(|| {
+            let p = unsafe {
+                syscall::vm_reserve(PAGE_2M, VmProt::ReadWrite, VmAt::Fixed(placed)).unwrap_or(core::ptr::null_mut())
+            };
+            assert_eq!(p, placed, "MAP_FIXED did not honour the address");
+        });
+        unsafe { syscall::vm_release(placed, PAGE_2M) }.expect("munmap the fixed mapping");
+        if elapsed >= FLOOR_NANOS {
+            judged = true;
+            break;
+        }
+        println!("trial {trial}: a fixed mmap returned in {elapsed}ns, under the {FLOOR_NANOS}ns floor");
+    }
     assert!(
-        elapsed >= FLOOR_NANOS,
-        "a fixed mmap returned in {elapsed}ns with every other CPU answering {DELAY_NANOS}ns \
-         late — it replaced the mapping without waiting for the flush",
+        judged,
+        "every one of {TRIALS} fixed mmaps returned in under {FLOOR_NANOS}ns with every other CPU \
+         answering {DELAY_NANOS}ns late — it replaced the mapping without waiting for the flush",
     );
-    unsafe { syscall::munmap(placed, PAGE_2M) }.expect("munmap the fixed mapping");
+    spinners.stop();
+
+    // 3. With no other thread of this process left, a change reaches no
+    //    other CPU: counted, not timed, since a guest's clock bounds nothing
+    //    from above.
+    let alone = map(PAGE_2M);
+    unsafe { alone.write_volatile(1) };
+    let before = debug(SPACE_REACHED, 0);
+    unsafe { syscall::vm_release(alone, PAGE_2M) }.expect("munmap alone");
+    let after = debug(SPACE_REACHED, 0);
+    assert_eq!(
+        after, before,
+        "a munmap no other CPU's thread could reach interrupted another CPU {} time(s)",
+        after - before,
+    );
 
     disarm();
 
-    println!("a shootdown waits for every other CPU, and munmap and a fixed mmap wait for it");
+    println!(
+        "a shootdown waits for every CPU running the space, munmap and a fixed mmap wait for it, \
+         and a space no other CPU runs waits for none"
+    );
 }

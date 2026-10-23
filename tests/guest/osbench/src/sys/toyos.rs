@@ -1,6 +1,6 @@
 use std::sync::atomic::AtomicU32;
 
-use toyos_abi::syscall::{self, MmapFlags, MmapProt};
+use toyos_abi::syscall::{self, VmAt, VmProt};
 
 /// ToyOS has no call that says which CPU runs a thread, so CPUs are named as
 /// the architecture's own instructions name them.
@@ -29,23 +29,21 @@ pub fn futex_wake(word: &AtomicU32, count: u32) -> u32 {
     u32::try_from(woken).expect("a wake count fits the count asked for")
 }
 
-/// ToyOS commits, zeroes and maps an anonymous range whole, in 2 MiB pages,
-/// before `mmap` answers.
+/// ToyOS commits an anonymous range whole and populates it a 4 KiB page at a
+/// time as it is touched.
 pub fn map_anon(len: usize) -> *mut u8 {
     // SAFETY: a fresh anonymous mapping aliases nothing.
-    let ptr =
-        unsafe { syscall::mmap(std::ptr::null_mut(), len, MmapProt::READ | MmapProt::WRITE, MmapFlags::ANONYMOUS) };
-    assert!(!ptr.is_null(), "mmap of {len} bytes was refused");
-    ptr
+    unsafe { syscall::vm_reserve(len, VmProt::ReadWrite, VmAt::ANYWHERE) }
+        .unwrap_or_else(|e| panic!("vm_reserve of {len} bytes was refused: {e:?}"))
 }
 
-/// Every ToyOS anonymous mapping is in 2 MiB pages.
+/// ToyOS maps no user memory in large pages yet: the same 4 KiB mapping.
 pub fn map_anon_huge(len: usize) -> *mut u8 {
     map_anon(len)
 }
 
 pub fn huge_backing() -> String {
-    "all".into()
+    "0KiB".into()
 }
 
 /// # Safety
@@ -53,7 +51,7 @@ pub fn huge_backing() -> String {
 /// reaches it afterwards.
 pub unsafe fn unmap(ptr: *mut u8, len: usize) {
     // SAFETY: as the caller promises.
-    unsafe { syscall::munmap(ptr, len) }.expect("munmap of a whole mapping");
+    unsafe { syscall::vm_release(ptr, len) }.expect("vm_release of a whole mapping");
 }
 
 /// Nothing a program can read: the kernel's frequency request and the
@@ -73,9 +71,8 @@ pub fn log_time_ns(monotonic: u64) -> u64 {
     monotonic + toyos_abi::clock::page().stamp_at_boot
 }
 
-/// ToyOS raises every thread stack to std's floor (`sys/thread.rs`'s
-/// `DEFAULT_MIN_STACK_SIZE`), whatever the builder asks.
-pub const STACK_FLOOR: &str = "2MiB";
+/// ToyOS gives a thread the stack its builder asks for, in whole pages.
+pub const STACK_FLOOR: &str = "none";
 
 /// What [`current_cpu`] names a CPU by, for the fields that print one.
 pub const CPU_NAMING: &str = "apic";
@@ -342,30 +339,21 @@ pub mod diag {
     }
 }
 
-/// ToyOS has no call that changes a mapping's protection: `toyos_abi`
-/// declares none.
-pub fn protect(_ptr: *mut u8, _len: usize, _writable: bool) -> Result<(), super::Refused> {
-    Err(super::Refused::Absent("toyos_abi has no mprotect: a mapping keeps the protection mmap gave it".into()))
+pub fn protect(ptr: *mut u8, len: usize, writable: bool) -> Result<(), super::Refused> {
+    let prot = if writable { VmProt::ReadWrite } else { VmProt::Read };
+    // SAFETY: the caller's mapping; a protection change moves no memory.
+    unsafe { syscall::vm_protect(ptr, len, prot) }.map_err(|e| super::Refused::Failed(format!("vm_protect: {e:?}")))
 }
 
-/// Give back part of a mapping, which ToyOS refuses: `munmap` takes a whole
-/// mapping (`toyos_abi::syscall::munmap`).
-///
 /// # Safety
 /// `ptr` and `len` lie inside one mapping from [`map_anon`] that nothing
 /// reaches in that range afterwards.
 pub unsafe fn unmap_part(ptr: *mut u8, len: usize) -> Result<(), super::Refused> {
     // SAFETY: as the caller promises.
-    unsafe { syscall::munmap(ptr, len) }.map_err(|e| match e {
-        syscall::SyscallError::InvalidArgument => {
-            super::Refused::Absent("munmap takes a whole mapping and answers InvalidArgument for a part".into())
-        }
-        e => super::Refused::Failed(format!("munmap of a part answered {e:?}")),
-    })
+    unsafe { syscall::vm_release(ptr, len) }.map_err(|e| super::Refused::Failed(format!("vm_release: {e:?}")))
 }
 
-/// A mapping whose first touch of each 4 KiB page is what is measured: every
-/// ToyOS anonymous mapping is in 2 MiB pages, committed inside `mmap`.
+/// A mapping that faults in 4 KiB pages, which every ToyOS anonymous mapping does.
 pub fn map_anon_4k(len: usize) -> *mut u8 {
     map_anon(len)
 }

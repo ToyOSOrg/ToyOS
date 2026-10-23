@@ -66,9 +66,8 @@ pub unsafe fn unmap(ptr: *mut u8, len: usize) {
     assert_eq!(unsafe { libc::munmap(ptr.cast(), len) }, 0);
 }
 
-/// An anonymous mapping with transparent huge pages asked for, which
-/// ToyOS's anonymous mappings always are; [`huge_backing`] says what the
-/// kernel gave.
+/// An anonymous mapping with transparent huge pages asked for;
+/// [`huge_backing`] says what the kernel gave.
 pub fn map_anon_huge(len: usize) -> *mut u8 {
     let ptr = map_anon(len);
     // SAFETY: an advice changes no contents.

@@ -202,8 +202,11 @@ fn with_page(write: impl FnOnce(&mut [u8; BYTES], u64, toyos_blackbox::Identity)
     // SAFETY: `at` is non-zero only where `arm` found the address on this
     // boot's parameter line, which is the box the loader allocated and which
     // `mm::init` was told to keep out of the allocator. The panic path holds
-    // `PAINTING` and the quiesce path has stopped every other CPU, so the one
-    // CPU still running is the only writer.
+    // `PAINTING` and the quiesce path has stopped every other CPU, so there
+    // one CPU writes. **An exception entry does not exclude another CPU's**:
+    // two CPUs taking a kernel-mode fault or an exception at once both write
+    // the box, and one record may tear the other's
+    // (`issues/two-cpus-faulting-at-once-write-one-black-box.md`).
     let page = unsafe { &mut *(at as *mut [u8; BYTES]) };
     // Both carried forward and neither verified: this runs where nothing may be
     // checked, and the checksum the write puts down is what covers them. A box

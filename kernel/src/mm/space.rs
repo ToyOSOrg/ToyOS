@@ -27,7 +27,28 @@ use crate::object::shm::SharedMemObject;
 use crate::sync::{Lock, LockGuard};
 use crate::UserAddr;
 
-type Inventory = vm::Inventory<Arc<SharedMemObject>>;
+type Inventory = vm::Inventory<Arc<SharedMemObject>, Arc<dyn CopySource>>;
+type SpaceEntry = Entry<Arc<SharedMemObject>, Arc<dyn CopySource>>;
+type SpaceKind = Kind<Arc<SharedMemObject>, Arc<dyn CopySource>>;
+
+/// The bytes a copied range's pages start as. A read runs under the space
+/// lock, from a fault or a user copy, so it may take no lock a user copy can
+/// hold, and it cannot fail: what it reads was fixed when the range was made.
+pub trait CopySource: Send + Sync {
+    fn size(&self) -> u64;
+    /// `out.len()` bytes from `offset`, all inside [`size`](Self::size).
+    fn read(&self, offset: u64, out: &mut [u8]);
+}
+
+impl CopySource for SharedMemObject {
+    fn size(&self) -> u64 {
+        SharedMemObject::size(self)
+    }
+
+    fn read(&self, offset: u64, out: &mut [u8]) {
+        SharedMemObject::read(self, offset, out)
+    }
+}
 
 /// Nothing is placed below this, so a null pointer and the pages above it
 /// fault.
@@ -64,9 +85,18 @@ pub struct Usage {
     /// Pages a fault populated, and the time faults took.
     faults: AtomicU64,
     fault_ns: AtomicU64,
+    /// Changes to the space's leaves that reached another CPU by interrupt,
+    /// for the test kernel's `SYS_DEBUG`.
+    #[cfg(feature = "test-actuators")]
+    reached: AtomicU64,
 }
 
 impl Usage {
+    #[cfg(feature = "test-actuators")]
+    pub fn reached(&self) -> u64 {
+        self.reached.load(Relaxed)
+    }
+
     pub fn resident_bytes(&self) -> u64 {
         self.resident.load(Relaxed) * PAGE_SIZE
     }
@@ -249,11 +279,23 @@ impl AddressSpace {
     /// `len` bytes of private memory, committed unless `prot` is `None`, which
     /// reserves the range and nothing more.
     pub fn reserve(&mut self, len: u64, at: At, prot: Prot) -> Result<UserAddr, SyscallError> {
+        self.private(len, at, prot, Kind::Private { committed: prot != Prot::None })
+    }
+
+    /// `len` bytes of private memory, committed, whose pages start as a copy
+    /// of `source` from `offset` as far as their first `copied` bytes go and
+    /// zeros past them, each taken at its first touch: a program's segment
+    /// read lazily out of its file.
+    pub fn copy(&mut self, len: u64, at: At, prot: Prot, source: Arc<dyn CopySource>, offset: u64, copied: u64) -> Result<UserAddr, SyscallError> {
+        self.private(len, at, prot, Kind::Copy { source, offset, len: copied })
+    }
+
+    fn private(&mut self, len: u64, at: At, prot: Prot, kind: SpaceKind) -> Result<UserAddr, SyscallError> {
         self.room_at(len, at)?;
         let start = self.locate(len, at)?;
-        let committed = prot != Prot::None;
-        self.inventory.insert(start, Entry { end: start + len, prot, kind: Kind::Private { committed } });
-        if committed {
+        let backed = !matches!(kind, Kind::Private { committed: false });
+        self.inventory.insert(start, Entry { end: start + len, prot, kind });
+        if backed {
             self.tables.build(start, start + len);
         }
         self.usage.made.fetch_add(1, Relaxed);
@@ -269,7 +311,7 @@ impl AddressSpace {
         }
         self.room_at(len, at)?;
         let start = self.locate(len, at)?;
-        self.inventory.insert(start, Entry { end: start + len, prot, kind: Kind::Object { object, offset } });
+        self.inventory.insert(start, Entry { end: start + len, prot, kind: Kind::Object { object, offset, max: prot } });
         self.tables.build(start, start + len);
         self.usage.made.fetch_add(1, Relaxed);
         Ok(UserAddr::new(start))
@@ -291,6 +333,101 @@ impl AddressSpace {
         self.usage.taken.fetch_add(1, Relaxed);
         // The objects go here, after every CPU has stopped reaching them.
         drop(removed);
+    }
+
+    /// Give every page of `[start, start + len)` protection `prot`: a reserved
+    /// private page is committed unless `prot` is `None`, and a committed one
+    /// keeps its frame and commitment whatever `prot` is. An object's page
+    /// takes nothing past what it was mapped with. All or nothing: every page
+    /// is held (`BadAddress`) and allowed `prot` (`PermissionDenied`) first.
+    /// Every CPU stops using a present leaf's old protection before this
+    /// returns, a widening included.
+    pub fn protect(&mut self, start: UserAddr, len: u64, prot: Prot) -> Result<(), SyscallError> {
+        let (start, end) = self.held(start, len)?;
+        self.room(start, end, 0)?;
+        let allowed = self.inventory.meeting(start, end).all(|(_, entry)| match entry.kind {
+            Kind::Object { max, .. } => prot.within(max),
+            Kind::Private { .. } | Kind::Copy { .. } => true,
+        });
+        if !allowed {
+            return Err(SyscallError::PermissionDenied);
+        }
+        let mut commits = false;
+        self.inventory.update(start, end, |_, entry| {
+            entry.prot = prot;
+            if let Kind::Private { committed } = &mut entry.kind {
+                if !*committed && prot != Prot::None {
+                    *committed = true;
+                    commits = true;
+                }
+            }
+        });
+        if commits {
+            self.tables.build(start, end);
+        }
+        let leaf = leaf_prot(prot);
+        let mut present = false;
+        self.tables.edit(start, end, |_, old| match (old, leaf) {
+            (Leaf::Mapped(m), Some(p)) if m.prot == p => None,
+            (Leaf::Mapped(m), Some(p)) => {
+                present = true;
+                Some(Leaf::Mapped(Mapping { prot: p, ..m }))
+            }
+            (Leaf::Mapped(m), None) => {
+                present = true;
+                Some(if m.owned { Leaf::Held(m.phys) } else { Leaf::Empty })
+            }
+            (Leaf::Held(phys), Some(p)) => Some(Leaf::Mapped(Mapping { phys, prot: p, owned: true, cache: CachePolicy::Normal })),
+            (Leaf::Held(_), None) | (Leaf::Empty, _) => None,
+        });
+        if present {
+            self.shoot_down(start, end, &Unlinked::none());
+        }
+        Ok(())
+    }
+
+    /// Free every frame behind `[start, start + len)` and keep its ranges as
+    /// they are: a private page reads zeros at its next touch, an object's
+    /// page is mapped again from the object.
+    pub fn discard(&mut self, start: UserAddr, len: u64) -> Result<(), SyscallError> {
+        let (start, end) = self.held(start, len)?;
+        self.clear(start, end);
+        Ok(())
+    }
+
+    /// Free every frame and the commitment of `[start, start + len)`, which
+    /// is all private memory: it is reserved again.
+    pub fn decommit(&mut self, start: UserAddr, len: u64) -> Result<(), SyscallError> {
+        let (start, end) = self.held(start, len)?;
+        self.room(start, end, 0)?;
+        if !self.inventory.meeting(start, end).all(|(_, entry)| matches!(entry.kind, Kind::Private { .. } | Kind::Copy { .. })) {
+            return Err(SyscallError::InvalidArgument);
+        }
+        self.inventory.update(start, end, |_, entry| {
+            entry.prot = Prot::None;
+            entry.kind = Kind::Private { committed: false };
+        });
+        self.clear(start, end);
+        Ok(())
+    }
+
+    /// `[start, start + len)` as pages every one of which a range holds.
+    fn held(&self, start: UserAddr, len: u64) -> Result<(u64, u64), SyscallError> {
+        let end = pages(start.raw(), len).ok_or(SyscallError::InvalidArgument)?;
+        if !self.inventory.holds(start.raw(), end) || !self.inventory.covered(start.raw(), end) {
+            return Err(SyscallError::BadAddress);
+        }
+        Ok((start.raw(), end))
+    }
+
+    /// Every CPU has dropped what it cached of `[start, end)` and of the
+    /// tables `unlinked` took out.
+    fn shoot_down(&self, start: u64, end: u64, unlinked: &Unlinked) {
+        let _reached = self.tables.shoot_down(start, end, unlinked);
+        #[cfg(feature = "test-actuators")]
+        if _reached {
+            self.usage.reached.fetch_add(1, Relaxed);
+        }
     }
 
     /// [`release`](Self::release) of every page of `[start, start + len)`
@@ -339,7 +476,7 @@ impl AddressSpace {
             Leaf::Held(_) | Leaf::Empty => None,
         });
         if present {
-            self.tables.shoot_down(start, end, &Unlinked::none());
+            self.shoot_down(start, end, &Unlinked::none());
         }
         let mut freed = 0;
         self.tables.take_owned(start, end, |frames| {
@@ -353,7 +490,7 @@ impl AddressSpace {
         let inventory = &self.inventory;
         let unlinked = self.tables.unlink(start, end, |s, e| inventory.backed(s, e));
         if !unlinked.is_empty() {
-            self.tables.shoot_down(start, end, &unlinked);
+            self.shoot_down(start, end, &unlinked);
         }
         unlinked.free();
         self.usage.freed(freed);
@@ -457,7 +594,7 @@ impl AddressSpace {
 
 /// The leaf a fault puts at `page`, inside the range `entry` starting at
 /// `start`: a fresh frame of private memory, or the object's own page.
-fn page_leaf(start: u64, entry: &Entry<Arc<SharedMemObject>>, page: u64) -> Option<Leaf> {
+fn page_leaf(start: u64, entry: &SpaceEntry, page: u64) -> Option<Leaf> {
     let prot = leaf_prot(entry.prot)?;
     Some(match &entry.kind {
         Kind::Private { committed: false } => return None,
@@ -468,10 +605,32 @@ fn page_leaf(start: u64, entry: &Entry<Arc<SharedMemObject>>, page: u64) -> Opti
             };
             Leaf::Mapped(Mapping { phys: frame.into_raw(), prot, owned: true, cache: CachePolicy::Normal })
         }
-        Kind::Object { object, offset } => {
+        Kind::Object { object, offset, .. } => {
             Leaf::Mapped(Mapping { phys: object.page(offset + (page - start)), prot, owned: false, cache: object.cache() })
         }
+        Kind::Copy { source, offset, len } => {
+            let Some(frame) = super::pmm::alloc_frame() else {
+                crate::log!("space: no frame to populate {page:#x}");
+                return None;
+            };
+            let phys = frame.into_raw();
+            copy_in(&**source, offset + (page - start), len.saturating_sub(page - start), phys);
+            Leaf::Mapped(Mapping { phys, prot, owned: true, cache: CachePolicy::Normal })
+        }
     })
+}
+
+/// Write `source`'s bytes from `offset` into the zeroed frame at `phys`, as
+/// many of the page's as `len` and the source both hold.
+fn copy_in(source: &dyn CopySource, offset: u64, len: u64, phys: u64) {
+    let n = len.min(PAGE_SIZE).min(source.size().saturating_sub(offset)) as usize;
+    if n == 0 {
+        return;
+    }
+    // SAFETY: a frame just allocated to this page, which no leaf maps yet, so
+    // nothing else reaches it; `n` bytes stay inside it.
+    let frame = unsafe { core::slice::from_raw_parts_mut(super::DirectMap::from_phys(phys).as_mut_ptr::<u8>(), n) };
+    source.read(offset, frame);
 }
 
 /// Every frame the space owns goes back; its tables go with `UserTables`.

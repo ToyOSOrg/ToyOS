@@ -6,7 +6,7 @@
 use std::sync::atomic::{AtomicU32, Ordering};
 use std::time::{Duration, Instant};
 
-use toyos_abi::syscall::{self, MmapFlags, MmapProt, SyscallError, MAX_THREADS};
+use toyos_abi::syscall::{self, VmAt, VmProt, SyscallError, MAX_THREADS};
 
 const PAGE_2M: usize = 2 * 1024 * 1024;
 
@@ -42,12 +42,7 @@ impl Stacks {
     fn next(&mut self) -> (u64, u64) {
         if self.chunk == 0 || self.used == PAGE_2M {
             let chunk = unsafe {
-                syscall::mmap(
-                    core::ptr::null_mut(),
-                    PAGE_2M,
-                    MmapProt::READ | MmapProt::WRITE,
-                    MmapFlags::ANONYMOUS | MmapFlags::PRIVATE,
-                )
+                syscall::vm_reserve(PAGE_2M, VmProt::ReadWrite, VmAt::ANYWHERE).unwrap_or(core::ptr::null_mut())
             };
             assert!(!chunk.is_null(), "no memory for thread stacks");
             self.chunk = chunk as usize;

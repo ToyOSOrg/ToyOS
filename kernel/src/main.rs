@@ -15,6 +15,7 @@ pub use mm::{UserAddr, DirectMap, PHYS_OFFSET};
 mod invalidation;
 mod seqlock;
 mod shootdown;
+mod tlb_tags;
 mod cpu_local;
 mod cpu_slice;
 mod sleeplock;

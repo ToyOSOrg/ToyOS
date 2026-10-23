@@ -306,7 +306,7 @@ fn free(slot: usize, end: End) {
     if let Some((_, base)) = end.region {
         // SAFETY: the halves that read the mapping are gone, and nothing else
         // reaches it.
-        let _ = unsafe { syscall::munmap(base as *mut u8, REGION_BYTES) };
+        let _ = unsafe { syscall::vm_release(base as *mut u8, REGION_BYTES) };
     }
     let region = end.region.map(|(region, _)| region);
     for handle in [Some(end.connection), Some(end.receive_bell), Some(end.send_bell), region].into_iter().flatten() {
@@ -973,7 +973,7 @@ fn take_up(connection: OwnedHandle, bells: [RawHandle; BELLS], region: RawHandle
         (connection, receive, send, region) => {
             // SAFETY: nothing has read the mapping through this end yet, and
             // nothing else reaches it.
-            let _ = unsafe { syscall::munmap(base, REGION_BYTES) };
+            let _ = unsafe { syscall::vm_release(base, REGION_BYTES) };
             let connection = connection.map(|(descriptor, own)| [descriptor, own]).into_iter().flatten();
             connection.chain(receive).chain(send).chain(region).for_each(syscall::close);
             Err(NetError::Io)

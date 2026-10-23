@@ -2,13 +2,11 @@
 //! and giving back part of a mapping, the allocator under many threads, and a
 //! large `realloc`.
 //!
-//! **Where the cost lands differs by design.** ToyOS commits, zeroes and maps
-//! an anonymous range whole in 2 MiB pages inside `mmap`, so a first touch
-//! takes no fault there; Linux faults each page on first touch, in 4 KiB
-//! pages where huge pages are refused and in 2 MiB pages where they are asked
-//! for and given. `map_touch_unmap` is the like-for-like total. The
-//! allocator is each system's own: ToyOS std's dlmalloc under one lock,
-//! Linux's static musl malloc.
+//! Both systems fault each anonymous page in on its first touch: ToyOS in
+//! 4 KiB pages always, Linux in 4 KiB pages where huge pages are refused and
+//! in 2 MiB pages where they are asked for and given. `map_touch_unmap` is the
+//! whole cost. The allocator is each system's own: ToyOS std's dlmalloc
+//! under one lock, Linux's static musl malloc.
 
 use std::alloc::{alloc, dealloc, realloc, Layout};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};

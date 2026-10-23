@@ -18,7 +18,7 @@
 //! (`SYS_DEBUG` actions 10 and 11): where they are, and whether they still say
 //! what it put there.
 
-use toyos_abi::syscall::{self, DlopenArgs, MmapFlags, MmapProt, SyscallError};
+use toyos_abi::syscall::{self, DlopenArgs, VmAt, VmProt, SyscallError};
 
 use toyos_abi::syscall::debug_action::{CANARY_ADDR, CANARY_CHANGED};
 
@@ -26,7 +26,7 @@ use toyos_abi::syscall::debug_action::{CANARY_ADDR, CANARY_CHANGED};
 /// an `init_array` — so a successful call has something to report.
 const LIB: &[u8] = b"/system/lib/libtls_dlopen_lib.so";
 
-const PAGE_2M: u64 = 2 * 1024 * 1024;
+const PAGE: u64 = syscall::PAGE_SIZE as u64;
 
 /// `dl_open` builds its own `init_info` on the stack, so the typed wrapper
 /// cannot express the argument under test: `SYS_DLOPEN` of [`LIB`], read once
@@ -70,21 +70,12 @@ fn main() {
     assert!(canary_intact(), "the canary changed while other kernel addresses were tried");
 
     // 3. A user address off the value's alignment is still refused.
-    let region = unsafe {
-        syscall::mmap(
-            core::ptr::null_mut(),
-            2 * PAGE_2M as usize,
-            MmapProt::READ | MmapProt::WRITE,
-            MmapFlags::ANONYMOUS | MmapFlags::PRIVATE,
-        )
-    };
-    assert!(!region.is_null(), "mmap failed");
+    // SAFETY: placed anywhere, so it replaces nothing.
+    let region = unsafe { syscall::vm_reserve(2 * PAGE as usize, VmProt::ReadWrite, VmAt::ANYWHERE) }.expect("reserve two pages");
     let base = region as u64;
-    let boundary = (base + PAGE_2M) & !(PAGE_2M - 1);
-    for &addr in &[base + 4] {
-        let ret = dlopen_raw(LIB, addr);
-        assert_eq!(err(ret), Some(SyscallError::BadAddress), "dlopen took {addr:#x}");
-    }
+    let boundary = base + PAGE;
+    let ret = dlopen_raw(LIB, base + 4);
+    assert_eq!(err(ret), Some(SyscallError::BadAddress), "dlopen took {:#x}", base + 4);
 
     // 3b. A refused dlopen must register nothing: the library loads and maps
     //     before the copy-out, so a `BadAddress` used to leave a module in the
@@ -154,7 +145,7 @@ fn main() {
     let ret = unsafe { syscall::futex_wake(word, 1) };
     assert!(err(ret).is_none(), "futex_wake refused a word of this process's own: {ret:#x}");
 
-    unsafe { syscall::munmap(region, 2 * PAGE_2M as usize) }.expect("munmap");
+    unsafe { syscall::vm_release(region, 2 * PAGE as usize) }.expect("release");
     assert!(canary_intact(), "the canary changed during the run");
     println!("dlopen and futex refuse an address they may not reach, and kernel memory is untouched");
 }

@@ -22,7 +22,7 @@ use std::os::toyos::process::ChildExt;
 use std::process::Command;
 
 use toyos_abi::clock::{ClockPage, CLOCK_MAGIC, CLOCK_PAGE};
-use toyos_abi::syscall::{self, MmapFlags, MmapProt, OpenFlags, ProcessStats, SeekFrom, SyscallError};
+use toyos_abi::syscall::{self, OpenFlags, VmAt, VmProt, ProcessStats, SeekFrom, SyscallError};
 use toyos_abi::RawHandle;
 
 const SELF_PATH: &str = "/system/bin/test_rs_abuse_readonly_copyout";
@@ -92,17 +92,10 @@ fn refused(what: &str, addr: u64, stats: RawHandle) -> Result<(), String> {
 }
 
 fn refused_mmap(stats: RawHandle) -> Result<(), String> {
-    let ro = unsafe {
-        syscall::mmap(
-            core::ptr::null_mut(),
-            PAGE_4K as usize,
-            MmapProt::READ,
-            MmapFlags::ANONYMOUS | MmapFlags::PRIVATE,
-        )
-    };
-    assert!(!ro.is_null(), "mmap a read-only page");
+    // SAFETY: placed anywhere, so it replaces nothing.
+    let ro = unsafe { syscall::vm_reserve(PAGE_4K as usize, VmProt::Read, VmAt::ANYWHERE) }.expect("reserve a read-only page");
     let verdict = refused("a read-only mmap", ro as u64, stats);
-    unsafe { syscall::munmap(ro, PAGE_4K as usize) }.expect("munmap");
+    unsafe { syscall::vm_release(ro, PAGE_4K as usize) }.expect("release");
     verdict
 }
 
@@ -111,13 +104,11 @@ fn refused_mmap(stats: RawHandle) -> Result<(), String> {
 fn refused_across_pages() -> Result<(), String> {
     let flags = OpenFlags::READ | OpenFlags::WRITE | OpenFlags::CREATE | OpenFlags::TRUNCATE;
     let probe = syscall::open(PROBE_PATH, flags).expect("create the probe file");
-    let rw = MmapProt::READ | MmapProt::WRITE;
-    let anon = MmapFlags::ANONYMOUS | MmapFlags::PRIVATE;
-    let pages = unsafe { syscall::mmap(core::ptr::null_mut(), 2 * PAGE_4K as usize, rw, anon) };
-    assert!(!pages.is_null(), "mmap two pages");
+    // SAFETY: placed anywhere, so it replaces nothing.
+    let pages = unsafe { syscall::vm_reserve(2 * PAGE_4K as usize, VmProt::ReadWrite, VmAt::ANYWHERE) }.expect("reserve two pages");
     let page = pages as u64 + PAGE_4K;
-    let ro = unsafe { syscall::mmap(page as *mut u8, PAGE_4K as usize, MmapProt::READ, anon | MmapFlags::FIXED) };
-    assert_eq!(ro as u64, page, "map the second page read-only in place");
+    // SAFETY: nothing holds a reference into the page.
+    unsafe { syscall::vm_protect(page as *mut u8, PAGE_4K as usize, VmProt::Read) }.expect("make the second page read-only");
     let at = page - (STRADDLE / 2) as u64;
     let before = snapshot(at);
     // The writable half is offered its own bytes and the read-only half their
@@ -134,7 +125,7 @@ fn refused_across_pages() -> Result<(), String> {
     } else {
         Ok(())
     };
-    unsafe { syscall::munmap(pages, 2 * PAGE_4K as usize) }.expect("munmap");
+    unsafe { syscall::vm_release(pages, 2 * PAGE_4K as usize) }.expect("release");
     syscall::close(probe);
     syscall::delete(PROBE_PATH).expect("delete the probe file");
     verdict

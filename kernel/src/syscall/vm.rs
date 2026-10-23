@@ -1,5 +1,5 @@
-//! The caller's own address space: `mmap`/`munmap` reserve, commit and take
-//! away private memory, `dlopen` maps a library image, `SYS_TLS_ALLOC_BLOCK`
+//! The caller's own address space: `vm_*` reserve, commit, protect, discard
+//! and take away private memory, `dlopen` maps a library image, `SYS_TLS_ALLOC_BLOCK`
 //! maps a thread's per-module TLS block, `SYS_QUERY_MODULES` reports what is
 //! loaded. Exhausting address space is an error return, never an `.expect`.
 //!
@@ -21,56 +21,71 @@ fn whole_pages(size: u64) -> Option<u64> {
     size.checked_next_multiple_of(crate::mm::PAGE_SIZE).filter(|&bytes| bytes != 0)
 }
 
-/// Private memory honouring `prot`, populated as it is touched: `NONE`
-/// reserves the range and nothing more. `MmapFlags::FIXED` with a non-null
-/// `req_addr` places it exactly there, in place of whatever those pages held.
-pub(super) fn sys_mmap(req_addr: u64, size: u64, prot: MmapProt, flags: MmapFlags) -> u64 {
-    // First, so the answer is the bit and not whichever other refusal came
-    // first: a bit this kernel does not define is a request it cannot serve.
-    if prot.0 & !MmapProt::KNOWN.0 != 0 || flags.0 & !MmapFlags::KNOWN.0 != 0 {
-        return SyscallError::InvalidArgument.to_u64();
-    }
-    let Some(len) = whole_pages(size) else {
-        return SyscallError::InvalidArgument.to_u64();
-    };
-    // Anonymous memory is never executable: `MmapProt` has no bit for it.
-    let prot = if prot.contains(MmapProt::WRITE) {
-        Prot::ReadWrite
-    } else if prot == MmapProt::NONE {
-        Prot::None
-    } else {
-        Prot::Read
-    };
-    let at = match (flags.contains(MmapFlags::FIXED), req_addr) {
-        (true, addr) if addr != 0 => match UserAddr::checked(addr) {
-            Some(addr) => At::Fixed(addr),
-            None => return SyscallError::InvalidArgument.to_u64(),
-        },
-        _ => At::ANYWHERE,
-    };
-    match process::current_address_space().lock().reserve(len, at, prot) {
-        Ok(at) => at.raw(),
-        Err(e) => e.to_u64(),
+/// The protection a `VmProt` word names. Executable memory is not yet one a
+/// program may ask for: `ReadExec` is `NotSupported`.
+fn vm_prot(word: u64) -> Result<Prot, SyscallError> {
+    match VmProt::from_u64(word).ok_or(SyscallError::InvalidArgument)? {
+        VmProt::None => Ok(Prot::None),
+        VmProt::Read => Ok(Prot::Read),
+        VmProt::ReadWrite => Ok(Prot::ReadWrite),
+        VmProt::ReadExec => Err(SyscallError::NotSupported),
     }
 }
 
-/// Take every page of `[addr, addr + size)` away, as POSIX `munmap` does: any
-/// run of pages, across mappings and the holes between them. `addr` is on a
-/// page and `size` is not zero, or nothing is taken.
-pub(super) fn sys_munmap(addr: u64, size: u64) -> u64 {
-    let (Some(start), Some(len)) = (UserAddr::checked(addr), whole_pages(size)) else {
-        return SyscallError::InvalidArgument.to_u64();
-    };
-    if !addr.is_multiple_of(crate::mm::PAGE_SIZE) {
-        return SyscallError::InvalidArgument.to_u64();
+/// `[addr, addr + len)` as a page-aligned start and whole pages.
+fn range(addr: u64, len: u64) -> Result<(UserAddr, u64), SyscallError> {
+    match (UserAddr::checked(addr), whole_pages(len)) {
+        (Some(start), Some(len)) if addr.is_multiple_of(crate::mm::PAGE_SIZE) => Ok((start, len)),
+        _ => Err(SyscallError::InvalidArgument),
     }
-    let space = process::current_address_space();
-    let mut space = space.lock();
-    if let Err(e) = space.room(start.raw(), start.raw() + len, 0) {
-        return e.to_u64();
-    }
-    space.release(start, len);
-    0
+}
+
+fn answer(done: Result<(), SyscallError>) -> u64 {
+    done.map_or_else(SyscallError::to_u64, |()| 0)
+}
+
+/// Private memory, committed unless `prot` is `None` and populated as it is
+/// touched, placed anywhere at a multiple of `place` or, for `VM_AT_FIXED`,
+/// exactly at `place` in place of whatever those pages held.
+pub(super) fn sys_vm_reserve(len: u64, prot: u64, place: u64, kind: u64) -> u64 {
+    let reserved = (|| {
+        let prot = vm_prot(prot)?;
+        let len = whole_pages(len).ok_or(SyscallError::InvalidArgument)?;
+        let at = match kind {
+            VM_AT_ANYWHERE => At::Anywhere(place),
+            VM_AT_FIXED => At::Fixed(range(place, len)?.0),
+            _ => return Err(SyscallError::InvalidArgument),
+        };
+        process::current_address_space().lock().reserve(len, at, prot)
+    })();
+    reserved.map_or_else(SyscallError::to_u64, UserAddr::raw)
+}
+
+/// Take every page of `[addr, addr + len)` away, as POSIX `munmap` does.
+pub(super) fn sys_vm_release(addr: u64, len: u64) -> u64 {
+    answer(range(addr, len).and_then(|(start, len)| {
+        let space = process::current_address_space();
+        let mut space = space.lock();
+        space.room(start.raw(), start.raw() + len, 0)?;
+        space.release(start, len);
+        Ok(())
+    }))
+}
+
+pub(super) fn sys_vm_protect(addr: u64, len: u64, prot: u64) -> u64 {
+    answer((|| {
+        let prot = vm_prot(prot)?;
+        let (start, len) = range(addr, len)?;
+        process::current_address_space().lock().protect(start, len, prot)
+    })())
+}
+
+pub(super) fn sys_vm_discard(addr: u64, len: u64) -> u64 {
+    answer(range(addr, len).and_then(|(start, len)| process::current_address_space().lock().discard(start, len)))
+}
+
+pub(super) fn sys_vm_decommit(addr: u64, len: u64) -> u64 {
+    answer(range(addr, len).and_then(|(start, len)| process::current_address_space().lock().decommit(start, len)))
 }
 
 /// The first `len` bytes of the shared memory object `handle` names, as a

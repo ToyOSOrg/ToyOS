@@ -55,19 +55,34 @@ fn posix_madvise_takes_its_five_and_only_them() {
 }
 
 #[test]
-fn madvise_takes_its_hints_and_refuses_its_discard() {
-    use memreq::AdviceRefusal::{Discard, Invalid};
+fn madvise_takes_its_hints_and_discards_for_dontneed() {
+    use memreq::Advice::{Discard, Hint};
     let page = 0x4000_0000;
     for (addr, advice, want) in [
-        (page, 0, None),
-        (page, 1, None),
-        (page, 2, None),
-        (page, 3, None),
+        (page, 0, Some(Hint)),
+        (page, 1, Some(Hint)),
+        (page, 2, Some(Hint)),
+        (page, 3, Some(Hint)),
         (page, 4, Some(Discard)),
-        (page, 5, Some(Invalid)),
-        (page, -1, Some(Invalid)),
-        (page + 1, 3, Some(Invalid)),
+        (page, 5, None),
+        (page, -1, None),
+        (page + 1, 3, None),
     ] {
-        assert_eq!(memreq::madvise_refusal(addr, advice), want, "madvise({addr:#x}, {advice})");
+        assert_eq!(memreq::madvise(addr, advice), want, "madvise({addr:#x}, {advice})");
+    }
+}
+
+#[test]
+fn a_protection_word_names_one_access_or_is_refused() {
+    use memreq::Access;
+    for (prot, want) in [
+        (0, Some(Access::None)),
+        (PROT_READ, Some(Access::Read)),
+        (PROT_WRITE, Some(Access::ReadWrite)),
+        (PROT_READ | PROT_WRITE, Some(Access::ReadWrite)),
+        (PROT_READ | PROT_EXEC, Some(Access::Exec)),
+        (0x8, None),
+    ] {
+        assert_eq!(memreq::access(prot), want, "prot {prot:#x}");
     }
 }
