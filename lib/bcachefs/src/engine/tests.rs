@@ -1243,4 +1243,9 @@ fn read_file_reads_a_file_whole_and_refuses_other_nodes() {
     assert_eq!(read_file(&bytes, b"d"), Err(Error::Invalid("a path naming no regular file")));
     assert_eq!(read_file(&bytes, b"d/absent"), Err(Error::NotFound));
     assert_eq!(read_file(&bytes[..bytes.len() - 512], b"d/f"), Err(Error::Corrupt("a volume of no whole blocks")));
+    // A size no volume this long can hold is refused before it is allocated.
+    let dev = small();
+    let volume = dev.get().len() as u64;
+    edit_inode(&dev, FIRST + 1, |i| i.size = volume + 1);
+    assert_eq!(read_file(&dev.into_inner(), b"d/f"), Err(Error::Corrupt("a file larger than its volume")));
 }

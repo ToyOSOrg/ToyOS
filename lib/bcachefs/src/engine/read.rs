@@ -504,7 +504,9 @@ pub fn read_file(bytes: &[u8], path: &[u8]) -> Result<Vec<u8>> {
         if inode.kind() != Some(DirentType::Regular) {
             return Err(Error::Invalid("a path naming no regular file"));
         }
-        let mut out = alloc::vec![0u8; usize::try_from(inode.size).map_err(|_| Error::Unsupported("a file past the address space"))?];
+        // No file holds more than the volume it is on; ROOT has no holes.
+        let size = usize::try_from(inode.size).ok().filter(|&n| n <= bytes.len()).ok_or(Error::Corrupt("a file larger than its volume"))?;
+        let mut out = alloc::vec![0u8; size];
         volume.read(ino, 0, &mut out).await?;
         Ok(out)
     })

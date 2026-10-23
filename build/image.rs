@@ -110,9 +110,7 @@ fn root_digest(files: &[&(String, Vec<u8>)], symlinks: &[&(String, String)]) -> 
 }
 
 /// The bytes mkfs draws for ROOT, a function of [`root_digest`] alone:
-/// SHA-256 of the digest and a block counter, in counter order. mkfs
-/// draws its UUIDs and seeds before any number that depends on the
-/// device's size, so every size it tries is given the same ones.
+/// SHA-256 of the digest and a block counter, in counter order.
 #[derive(Clone)]
 struct Drawn {
     digest: [u8; 32],
@@ -1080,7 +1078,7 @@ mod tests {
         let refusal = certify(&broken, &parts).expect_err("that volume is not FAT32");
         assert!(refusal.contains("toyos-fat32-check"), "{refusal}");
 
-        // Every superblock copy, since each is the others' backup.
+        // A ROOT of zeros: no superblock copy at all.
         let root_at = start_of(root);
         let mut broken = disk.clone();
         broken[root_at..root_at + root_image.len()].fill(0);

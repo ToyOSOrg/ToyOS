@@ -113,7 +113,10 @@ pub async fn mkfs(dev: &impl BlockDev, options: &Options<'_>, tree: &Tree<'_>, r
 /// draws. From the smallest device, each try takes the size the last
 /// refusal named, so the size only grows and the volume that fits has no
 /// free bucket, unless a try crossed to larger buckets, which can need less
-/// than the refusal at smaller ones named.
+/// than the refusal at smaller ones named. Each try draws from its own
+/// clone of `random`, and mkfs draws its UUIDs and seeds before any number
+/// that depends on the device's size, so every try lays out the volume
+/// [`mkfs`] then writes from that clone.
 pub fn fit<R: Random + Clone>(options: &Options<'_>, tree: &Tree<'_>, random: &R) -> Result<u64> {
     let mut blocks = MIN_BUCKETS * MIN_BUCKET / BLOCK_SECTORS;
     loop {
@@ -636,9 +639,12 @@ fn place(g: &Geometry, keys: &[Vec<(Bpos, Vec<u8>)>]) -> Result<(Vec<Place>, Vec
 /// pointers until one root, each level's entries spread evenly over the
 /// fewest nodes that hold them at [`capacity`].
 ///
-/// Evenly, so no node holds a remainder: upstream merges a small node into
-/// its sibling even under `fsck -n`, the merge allocates a node, and on a
-/// volume with no free bucket the merge waits for one forever.
+/// Evenly, so no node holds a remainder: each node of a level of several
+/// holds at least about half of `cap`, less one entry. Upstream merges a
+/// small node into its sibling even under `fsck -n`, and the merge
+/// allocates a node, which on a volume with no free bucket waits forever.
+/// Upstream's merge threshold is unspecified; this margin is the measured
+/// one, not a guarantee.
 fn shape(sizes: impl Iterator<Item = usize>, node_bytes: usize) -> Result<Vec<Vec<core::ops::Range<usize>>>> {
     let cap = capacity(node_bytes) - node::record_bytes(core::iter::empty());
     let sizes: Vec<usize> = sizes.collect();
@@ -653,9 +659,10 @@ fn shape(sizes: impl Iterator<Item = usize>, node_bytes: usize) -> Result<Vec<Ve
     Ok(levels)
 }
 
-/// Entries of `sizes` in consecutive nodes of at most `cap` bytes, as few
-/// nodes as hold them and as evenly filled as the entries allow; one empty
-/// node for none.
+/// Entries of `sizes`, each at most `cap` bytes, in consecutive nodes of
+/// at most `cap` bytes, as few nodes as hold them and as evenly filled as
+/// the entries allow; one empty node for none. A count of one node per
+/// entry always fits, so the count stops there and no node is empty.
 fn spread(sizes: &[usize], cap: usize) -> Vec<core::ops::Range<usize>> {
     let total: usize = sizes.iter().sum();
     let mut prefix = alloc::vec![0];
@@ -689,6 +696,7 @@ fn spread(sizes: &[usize], cap: usize) -> Vec<core::ops::Range<usize>> {
             start = end;
         }
         if ranges.iter().all(|r| prefix[r.end] - prefix[r.start] <= cap || r.len() == 1) {
+            assert!(sizes.is_empty() || ranges.iter().all(|r| !r.is_empty()), "an empty node among {} entries", sizes.len());
             return ranges;
         }
         nodes += 1;
