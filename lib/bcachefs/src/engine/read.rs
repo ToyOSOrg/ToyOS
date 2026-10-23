@@ -1,6 +1,6 @@
-//! A clean volume, read: its superblock chosen among the copies, its
-//! btrees from `clean`'s roots, and files, directories and symlinks over
-//! them.
+//! A volume, read: its superblock chosen among the copies, its btrees from
+//! `clean`'s roots or, when it was not cleanly unmounted, from its journal's
+//! replay laid over the nodes, and files, directories and symlinks over them.
 
 use alloc::collections::BTreeSet;
 use alloc::vec::Vec;
@@ -10,6 +10,7 @@ use toyos_crypto::{scrypt, siphash};
 
 use super::bkey::{Bpos, Key};
 use super::crypt::{MasterKey, Nonce};
+use super::journal::{self, Replay, Window};
 use super::node::{self, Expect, Node};
 use super::superblock::{Layout, Root, Superblock, HEADER, LAYOUT, MAX_BYTES, PRIMARY};
 use super::value::mode::{S_IFDIR, S_IFLNK, S_IFMT};
@@ -18,11 +19,19 @@ use super::value::{inode_field, inode_flag, Dirent, DirentType, Extent, InodeVal
 use super::{kind, le32, Btree, Error, Result, SECTOR};
 use crate::crc32c::{crc32c, crc32c_zero};
 
-/// A clean volume open for reading.
+/// A volume open for reading.
 pub struct Volume<D> {
     dev: D,
     sb: Superblock,
     key: Option<MasterKey>,
+    roots: Vec<Root>,
+    /// The key-version counter.
+    key_version: u64,
+    /// The newest journal sequence whose keys are visible: `clean`'s, or the
+    /// replayed window's last.
+    journal_seq: u64,
+    /// What an unclean volume's journal lays over its nodes.
+    replay: Option<(Window, Replay)>,
     /// The root subvolume's snapshot, the only one read.
     snapshot: u32,
     root: u64,
@@ -104,14 +113,20 @@ impl<D: BlockDev> Volume<D> {
         if sb.encrypted() != sb.crypt.is_some() {
             return Err(Error::Corrupt("encryption option and crypt field disagree"));
         }
-        if !sb.clean_flag() || sb.clean.is_none() {
-            return Err(Error::Unsupported("a volume not cleanly unmounted: its journal needs replay"));
-        }
         let m = &sb.member;
         if m.nbuckets * u64::from(m.bucket_sectors) > dev.blocks() * (BLOCK / SECTOR) as u64 {
             return Err(Error::Corrupt("member's buckets past the device"));
         }
-        let mut volume = Volume { dev, sb, key, snapshot: 0, root: 0 };
+        let (roots, key_version, journal_seq, replay) = if sb.clean_flag() {
+            let clean = sb.clean.as_ref().ok_or(Error::Corrupt("a volume marked clean without its clean field"))?;
+            (clean.roots.clone(), clean.key_version.unwrap_or(0), clean.journal_seq, None)
+        } else {
+            let scan = journal::scan(&dev, &sb, key.as_ref()).await?;
+            let window = scan.window(&sb)?.ok_or(Error::Corrupt("a volume not cleanly unmounted with no journal entry"))?;
+            let replay = journal::replay(&scan, &sb, &window)?;
+            (replay.roots.clone(), replay.key_version.unwrap_or(0), window.last, Some((window, replay)))
+        };
+        let mut volume = Volume { dev, sb, key, roots, key_version, journal_seq, replay, snapshot: 0, root: 0 };
         let (k, v) = volume.get(Btree::Subvolumes, Bpos::new(0, u64::from(super::mkfs::ROOT_SUBVOLUME), 0)).await?.ok_or(Error::Corrupt("no root subvolume"))?;
         if k.kind != kind::SUBVOLUME {
             return Err(Error::Corrupt("root subvolume of another type"));
@@ -135,21 +150,62 @@ impl<D: BlockDev> Volume<D> {
         &self.dev
     }
 
+    /// Every entry of the journal's ring.
+    pub(crate) async fn scan_journal(&self) -> Result<journal::Scan> {
+        journal::scan(&self.dev, &self.sb, self.key.as_ref()).await
+    }
+
     /// The root directory's inode number.
     pub fn root(&self) -> u64 {
         self.root
     }
 
     pub(crate) fn roots(&self) -> &[Root] {
-        &self.sb.clean.as_ref().expect("opened clean").roots
+        &self.roots
+    }
+
+    /// The key-version counter: every key's version but accounting's is at
+    /// most this.
+    pub(crate) fn key_version(&self) -> u64 {
+        self.key_version
+    }
+
+    /// The newest journal sequence a visible key or bset may carry.
+    pub(crate) fn journal_seq(&self) -> u64 {
+        self.journal_seq
+    }
+
+    /// The keys of `btree` when it has no root: none, or on an unclean
+    /// volume what replay lays over the empty root a btree without one
+    /// is given at mount (A2.19).
+    pub(crate) fn rootless(&self, btree: Btree) -> Result<Vec<(Key, Vec<u8>)>> {
+        match &self.replay {
+            Some((_, replay)) => replay.over(btree, 0, Bpos::MIN, Bpos::MAX, Vec::new()),
+            None => Ok(Vec::new()),
+        }
+    }
+
+    /// The replay window and what it replayed, on an unclean volume.
+    pub(crate) fn replayed(&self) -> Option<&(Window, Replay)> {
+        self.replay.as_ref()
     }
 
     fn root_of(&self, btree: Btree) -> Option<&Root> {
         self.roots().iter().find(|r| r.btree == btree)
     }
 
-    /// The node `ptr` points at, `level` of `btree`, spanning `[min, max]`.
+    /// The node `ptr` points at, `level` of `btree`, spanning `[min, max]`,
+    /// with the journal's replay laid over its keys.
     pub(crate) async fn node(&self, btree: Btree, level: u8, ptr: &NodePtr, max: Bpos) -> Result<Node> {
+        let mut node = self.stored(btree, level, ptr, max).await?;
+        if let Some((_, replay)) = &self.replay {
+            node.keys = replay.over(btree, level, ptr.min, max, node.keys)?;
+        }
+        Ok(node)
+    }
+
+    /// The node `ptr` points at as the medium holds it.
+    pub(crate) async fn stored(&self, btree: Btree, level: u8, ptr: &NodePtr, max: Bpos) -> Result<Node> {
         let sectors = u32::from(ptr.written);
         if sectors > self.sb.node_sectors() || ptr.ptr.dev != 0 {
             return Err(Error::Corrupt("btree pointer past its node, or to another device"));
@@ -174,7 +230,14 @@ impl<D: BlockDev> Volume<D> {
     /// Visits `btree`'s keys from `from` in order until `visit` answers
     /// `false`.
     pub(crate) async fn walk(&self, btree: Btree, from: Bpos, mut visit: impl FnMut(&Key, &[u8]) -> Result<bool>) -> Result<()> {
-        let Some(root) = self.root_of(btree) else { return Ok(()) };
+        let Some(root) = self.root_of(btree) else {
+            for (key, value) in self.rootless(btree)?.iter().filter(|(k, _)| k.pos >= from) {
+                if !visit(key, value)? {
+                    break;
+                }
+            }
+            return Ok(());
+        };
         let mut stack: Vec<(Node, usize)> = Vec::new();
         let node = self.node(btree, root.level, &root.ptr, root.key.pos).await?;
         let start = node.keys.partition_point(|(k, _)| k.pos < from);

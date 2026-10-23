@@ -302,11 +302,11 @@ fn a_journal_sequence_stamped_past_clean_is_found() {
 
     stamp(&dev, 1, 0);
     let v = block_on_ready(Volume::open(&dev)).unwrap();
-    assert_eq!(block_on_ready(fsck(&v)).unwrap(), [Finding::BsetAboveClean { btree: Btree::Inodes, sector, seq: 1 }]);
+    assert_eq!(block_on_ready(fsck(&v)).unwrap(), [Finding::BsetPastJournal { btree: Btree::Inodes, sector, seq: 1 }]);
 
     stamp(&dev, 0, 1);
     let v = block_on_ready(Volume::open(&dev)).unwrap();
-    assert_eq!(block_on_ready(fsck(&v)).unwrap(), [Finding::InodeAboveClean { ino: 4096, seq: 1 }]);
+    assert_eq!(block_on_ready(fsck(&v)).unwrap(), [Finding::InodePastJournal { ino: 4096, seq: 1 }]);
 }
 
 #[test]
@@ -1249,3 +1249,5 @@ fn read_file_reads_a_file_whole_and_refuses_other_nodes() {
     edit_inode(&dev, FIRST + 1, |i| i.size = volume + 1);
     assert_eq!(read_file(&dev.into_inner(), b"d/f"), Err(Error::Corrupt("a file larger than its volume")));
 }
+
+mod journal;

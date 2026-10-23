@@ -198,6 +198,22 @@ pub(crate) struct Root {
     pub ptr: NodePtr,
 }
 
+impl Root {
+    /// A btree_root record's payload: one btree_ptr_v2 key at `Bpos::MAX`,
+    /// for the root node of `btree` at `level`.
+    pub(crate) fn decode(btree: u8, level: u8, payload: &[u8]) -> Result<Root> {
+        let btree = Btree::from_id(u32::from(btree)).ok_or(Error::Unsupported("root of a btree this reader does not know"))?;
+        let (key, value) = Format::UNPACKED.key(payload)?;
+        if key.kind != kind::BTREE_PTR_V2 || key.size != 0 || usize::from(payload[0]) * 8 != payload.len() {
+            return Err(Error::Corrupt("btree root record"));
+        }
+        if key.pos != Bpos::MAX || level > 3 {
+            return Err(Error::Corrupt("btree root at a level or position no root has"));
+        }
+        Ok(Root { btree, level, key, ptr: NodePtr::decode(value)? })
+    }
+}
+
 /// `clean`.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) struct Clean {
@@ -293,6 +309,10 @@ impl Superblock {
         let clean = find(field_type::CLEAN).map(clean).transpose()?;
         let crypt = find(field_type::CRYPT).map(crypt).transpose()?;
         let blacklist = find(field_type::BLACKLIST).map(pairs).unwrap_or_default();
+        // Half-open ranges, sorted and apart (A1.38).
+        if blacklist.iter().any(|&(start, end)| start >= end) || blacklist.windows(2).any(|w| w[0].1 >= w[1].0) {
+            return Err(Error::Corrupt("journal sequence blacklist"));
+        }
         let replicas = match (find(field_type::REPLICAS_V0), find(field_type::REPLICAS)) {
             (Some(v0), _) => replicas(v0, false)?,
             (None, Some(v1)) => replicas(v1, true)?,
@@ -516,11 +536,16 @@ pub(crate) fn entries(b: &[u8]) -> Result<Vec<Entry<'_>>> {
     Ok(out)
 }
 
-/// `jset_entry` types `clean` holds.
+/// `jset_entry` record types.
 pub(crate) mod entry_type {
+    pub const BTREE_KEYS: u8 = 0;
     pub const BTREE_ROOT: u8 = 1;
+    pub const BLACKLIST: u8 = 3;
+    pub const BLACKLIST_V2: u8 = 4;
     pub const USAGE: u8 = 5;
     pub const CLOCK: u8 = 7;
+    pub const WRITE_BUFFER_KEYS: u8 = 11;
+    pub const DATETIME: u8 = 12;
 }
 /// The usage record's counter id for the key version.
 pub(crate) const KEY_VERSION: u8 = 2;
@@ -533,16 +558,9 @@ fn clean(body: &[u8]) -> Result<Clean> {
     for Entry { btree, level, kind: kind_, payload } in entries(&body[16..])? {
         match kind_ {
             entry_type::BTREE_ROOT => {
-                let btree = Btree::from_id(u32::from(btree)).ok_or(Error::Unsupported("root of a btree this reader does not know"))?;
-                let (key, value) = Format::UNPACKED.key(payload)?;
-                if key.kind != kind::BTREE_PTR_V2 || key.size != 0 || usize::from(payload[0]) * 8 != payload.len() {
-                    return Err(Error::Corrupt("btree root record"));
-                }
-                if key.pos != Bpos::MAX || level > 3 {
-                    return Err(Error::Corrupt("btree root at a level or position no root has"));
-                }
-                clean.roots.retain(|r: &Root| r.btree != btree);
-                clean.roots.push(Root { btree, level, key, ptr: NodePtr::decode(value)? });
+                let root = Root::decode(btree, level, payload)?;
+                clean.roots.retain(|r: &Root| r.btree != root.btree);
+                clean.roots.push(root);
             }
             entry_type::USAGE if btree == KEY_VERSION && payload.len() >= 8 => clean.key_version = Some(le64(payload, 0)),
             _ => {}

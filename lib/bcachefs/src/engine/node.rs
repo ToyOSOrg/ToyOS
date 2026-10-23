@@ -198,7 +198,7 @@ fn parse_keys(format: &Format, mut b: &[u8], expect: &Expect) -> Result<Vec<(Key
 /// A key's type against its node: in an interior node only pointers, of
 /// size 0; in a leaf a type its btree holds, which a read checks only for
 /// the strict types.
-fn check_kind(btree: Btree, level: u8, key: &Key) -> Result<()> {
+pub(crate) fn check_kind(btree: Btree, level: u8, key: &Key) -> Result<()> {
     if key.kind >= kind::UNKNOWN {
         return Err(Error::Unsupported("key type v1.39.4 does not define"));
     }

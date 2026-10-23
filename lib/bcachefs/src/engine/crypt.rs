@@ -22,6 +22,7 @@ pub const MIN_KDF: Kdf = Kdf { log_n: 1, log_r: 0, log_p: 0 };
 pub(crate) enum Domain {
     Extent = 0x1000_0000,
     Node = 0x2000_0000,
+    Journal = 0x3000_0000,
 }
 /// Selects the MAC key's nonce.
 const MAC: u32 = 0x8000_0000;
@@ -35,6 +36,11 @@ impl Nonce {
     /// stamped `journal_seq`.
     pub(crate) fn node(offset: u32, seq: u64, journal_seq: u64) -> Nonce {
         Nonce([offset, seq as u32, (seq >> 32) as u32, journal_seq as u32 ^ Domain::Node as u32])
+    }
+
+    /// The journal entry of sequence `seq`.
+    pub(crate) fn journal(seq: u64) -> Nonce {
+        Nonce([0, seq as u32, (seq >> 32) as u32, Domain::Journal as u32])
     }
 
     /// An uncompressed extent of version `(hi, lo)` whose crc
