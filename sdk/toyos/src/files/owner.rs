@@ -270,21 +270,24 @@ enum Opened {
 }
 
 /// The kernel's open of `abs`; a directory, which the kernel opens no handle
-/// on, is its path.
-fn kernel_open(abs: &str, how: Open) -> Result<Opened, SyscallError> {
+/// on, is its path. The kernel's own refusal is the outer error; the inner
+/// one is `O_DIRECTORY`'s, for a directory opened to write or anything else
+/// opened as one.
+fn kernel_open(abs: &str, how: Open) -> Result<Result<Opened, Error>, SyscallError> {
     if how.unnamed {
         return Err(SyscallError::NotSupported);
     }
     let writes = how.write || how.append || how.create || how.create_new || how.truncate;
     let is_dir = || syscall::stat(abs.as_bytes(), true).map(|st| st.file_type == FileType::Directory);
-    if !writes && is_dir().unwrap_or(false) {
-        return Ok(Opened::Held(Held::KernelDir(String::from(abs))));
-    }
     if how.directory {
-        // Anything else at the name is no directory, and nothing there is
-        // refused as the kernel refuses it.
-        is_dir()?;
-        return Err(SyscallError::InvalidArgument);
+        return Ok(match (is_dir()?, writes) {
+            (true, false) => Ok(Opened::Held(Held::KernelDir(String::from(abs)))),
+            (true, true) => Err(Error::Served(fs::Error::IsADirectory)),
+            (false, _) => Err(Error::NotADirectory),
+        });
+    }
+    if !writes && is_dir().unwrap_or(false) {
+        return Ok(Ok(Opened::Held(Held::KernelDir(String::from(abs)))));
     }
     let mut flags = OpenFlags(0);
     if how.read { flags |= OpenFlags::READ; }
@@ -293,7 +296,7 @@ fn kernel_open(abs: &str, how: Open) -> Result<Opened, SyscallError> {
     if how.create || how.create_new { flags |= OpenFlags::CREATE; }
     if how.create_new { flags |= OpenFlags::EXCLUSIVE; }
     if how.truncate { flags |= OpenFlags::TRUNCATE; }
-    syscall::open(abs.as_bytes(), flags).map(Opened::Kernel)
+    syscall::open(abs.as_bytes(), flags).map(|handle| Ok(Opened::Kernel(handle)))
 }
 
 #[no_mangle]
@@ -317,9 +320,10 @@ unsafe extern "C" fn toyos_fs_open(at: Fd, path: *const u8, len: usize, how: Ope
                 true => dir.create_unnamed(base, rel, flags)?,
                 false => dir.open(base, rel, flags)?,
             };
-            Ok(Opened::Held(Held::Served { cap: Arc::clone(cap), fid: opened.fid }))
+            Ok(Ok(Opened::Held(Held::Served { cap: Arc::clone(cap), fid: opened.fid })))
         },
-    );
+    )
+    .and_then(|opened| opened);
     // Installed once the turn is let go: on a full table what was opened is
     // closed again (`install`), and a kernel handle by the table.
     let installed = opened.and_then(|opened| {

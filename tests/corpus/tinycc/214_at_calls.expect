@@ -14,7 +14,10 @@ a path from a descriptor that is no directory is ENOTDIR: yes
 fstatat of a bad descriptor is EBADF: yes
 an absolute path ignores the descriptor: yes
 a `..` from the directory climbs to its parent: yes
-a `..` above the directory's root is refused: yes
+a `..` above the directory's root is EACCES: yes
+an empty path from a descriptor is ENOENT: yes
+the directory is still there: yes
+open of the empty path is ENOENT: yes
 symlinkat makes a link from the descriptor: yes
 readlinkat reads it: yes
 fstatat follows it: yes
@@ -39,6 +42,9 @@ fstat reads that back: yes
 UTIME_NOW sets it to now: yes
 a tv_nsec past a second is EINVAL: yes
 an access time the volume keeps none of is ENOTSUP: yes
+O_DIRECTORY of a /tmp file is ENOTDIR: yes
+O_DIRECTORY of /tmp to write is EISDIR: yes
+opendir of a /tmp file is ENOTDIR: yes
 utimes of the kernel's /tmp is ENOTSUP: yes
 pread beside a read on /home: yes
 pread beside a read on /tmp: yes

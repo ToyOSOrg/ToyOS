@@ -311,8 +311,8 @@ errors! {
         /// holds.
         FileTooLarge = 17,
         /// A bound the server or its volume keeps, refused rather than answered
-        /// short: a listing larger than the window, a directory with more entries
-        /// than it reads, a file in more pieces than its entry records.
+        /// short: a listing's first entry past its span, a directory with more
+        /// entries than it reads, a file in more pieces than its entry records.
         LimitExceeded = 18,
         /// The connection holds as many files open as the server keeps for one.
         TooManyOpen = 19,
@@ -1096,10 +1096,11 @@ impl Dir {
         let room = room.min(WINDOW_BYTES);
         let reply = self.fid_call(READDIR, dir, Request { offset: cursor, ..Request::new() }, room)?;
         let n = counted(reply.value, room)?;
+        let next = next_batch(n, reply.value2)?;
         out.clear();
         out.resize(n, 0);
         window_take(self.window(), 0, out);
-        Ok((reply.value2 != READDIR_END).then_some(reply.value2))
+        Ok(next)
     }
 
     pub fn mkdir(&mut self, base: Base, path: &str) -> Result<(), Refused> {
@@ -1171,6 +1172,17 @@ fn answer(msg_type: u32, reply: Reply) -> Result<Reply, Error> {
     match msg_type {
         REPLY => reply.result(),
         _ => Err(Error::Malformed),
+    }
+}
+
+/// Where a listing goes on after a batch of `bytes` that names `next`: `None`
+/// at its end. An empty batch that is not the end is [`Error::Malformed`],
+/// since asking from its cursor again would answer it again.
+fn next_batch(bytes: usize, next: u64) -> Result<Option<u64>, Error> {
+    match (bytes, next) {
+        (_, READDIR_END) => Ok(None),
+        (0, _) => Err(Error::Malformed),
+        (_, next) => Ok(Some(next)),
     }
 }
 
@@ -1495,6 +1507,10 @@ mod tests {
         assert_eq!(path_answer(FOLLOW, follow(MAX_PATH as u64 + 1), 2 * MAX_PATH).err(), Some(Refused::Error(Error::Malformed)));
         assert_eq!(path_answer(FOLLOW, follow(9), 8).err(), Some(Refused::Error(Error::Malformed)), "a link past the span");
         assert_eq!(path_answer(REPLY, Reply::refused(Error::Loop), MAX_PATH).err(), Some(Refused::Error(Error::Loop)));
+        assert_eq!(next_batch(0, READDIR_END), Ok(None));
+        assert_eq!(next_batch(19, READDIR_END), Ok(None));
+        assert_eq!(next_batch(19, 5), Ok(Some(5)));
+        assert_eq!(next_batch(0, 5), Err(Error::Malformed), "an empty batch that is not the end");
         assert_eq!(counted(7, 7), Ok(7));
         assert_eq!(counted(8, 7), Err(Error::Malformed), "more bytes than were asked for");
     }

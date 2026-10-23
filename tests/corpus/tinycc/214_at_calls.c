@@ -201,7 +201,12 @@ int main(void) {
     n = fd < 0 ? -1 : read(fd, buf, sizeof buf);
     judge("a `..` from the directory climbs to its parent", n == 2 && memcmp(buf, "at", 2) == 0);
     close(fd);
-    judge("a `..` above the directory's root is refused", fstatat(dir, "../../..", &st2, 0) == -1);
+    judge("a `..` above the directory's root is EACCES", fstatat(dir, "../../..", &st2, 0) == -1 && errno == EACCES);
+    judge("an empty path from a descriptor is ENOENT",
+          openat(dir, "", O_RDONLY) == -1 && errno == ENOENT && unlinkat(sub, "", AT_REMOVEDIR) == -1 && errno == ENOENT &&
+              mkdirat(dir, "", 0755) == -1 && errno == ENOENT);
+    judge("the directory is still there", fstatat(sub, "", &st2, AT_EMPTY_PATH) == 0 && S_ISDIR(st2.st_mode));
+    judge("open of the empty path is ENOENT", open("", O_RDONLY) == -1 && errno == ENOENT);
 
     judge("symlinkat makes a link from the descriptor", symlinkat("f", sub, "l") == 0);
     n = readlinkat(sub, "l", buf, sizeof buf);
@@ -251,6 +256,13 @@ int main(void) {
               utimensat(dir, "g", bad, 0) == -1 && errno == EINVAL;
           }));
     judge("an access time the volume keeps none of is ENOTSUP", utimensat(dir, "g", NULL, 0) == -1 && errno == ENOTSUP);
+    judge("O_DIRECTORY of a /tmp file is ENOTDIR", ({
+              int t = open(TMP_FILE, O_RDWR | O_CREAT, 0644);
+              close(t);
+              open(TMP_FILE, O_RDONLY | O_DIRECTORY) == -1 && errno == ENOTDIR;
+          }));
+    judge("O_DIRECTORY of /tmp to write is EISDIR", open("/tmp", O_RDWR | O_DIRECTORY) == -1 && errno == EISDIR);
+    judge("opendir of a /tmp file is ENOTDIR", opendir(TMP_FILE) == NULL && errno == ENOTDIR);
     judge("utimes of the kernel's /tmp is ENOTSUP", ({
               int t = open(TMP_FILE, O_RDWR | O_CREAT, 0644);
               close(t);

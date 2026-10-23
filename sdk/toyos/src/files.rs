@@ -56,7 +56,7 @@ pub struct Open {
     /// Refused unless the path names a directory.
     pub directory: bool,
     /// A file with no name in the directory the path names, which only
-    /// [`link`] ever names: POSIX's `O_TMPFILE`.
+    /// [`link`] ever names: Linux's `O_TMPFILE`.
     pub unnamed: bool,
     /// The descriptor is not inherited (`toyos::fd`'s flag).
     pub cloexec: bool,
@@ -443,7 +443,8 @@ pub fn is_served_at(at: At, path: &[u8]) -> Result<bool, Error> {
     decode(unsafe { toyos_fs_is_served(at.word(), path.as_ptr(), path.len()) }).map(|n| n == 1)
 }
 
-/// `path`, absolute against `cwd` and without `.` or `..`.
+/// `path`, absolute against `cwd` and without `.` or `..`, which are read off
+/// the text (`issues/a-working-directory-path-reads-its-dot-dot-off-the-text.md`).
 pub fn absolute(cwd: &str, path: &str) -> String {
     let joined = match path.starts_with('/') {
         true => String::from(path),
