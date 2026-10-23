@@ -5,7 +5,7 @@ use toyos_blockdev::model::Model;
 use toyos_blockdev::{block_on_ready, BlockDev, BLOCK};
 
 use super::super::journal::{self, Jset};
-use super::super::superblock::{entry_type, field_type, Field, Root, KEY_VERSION};
+use super::super::superblock::{field_type, Field, Root};
 use super::super::value::{self, data_type};
 use super::*;
 
@@ -52,16 +52,8 @@ fn unclean(dev: &Image) {
 /// The records every entry carries after its keys: `roots`, a datetime, the
 /// key version 0 and both clocks.
 fn tail(area: &mut Vec<u8>, roots: &[Root]) {
-    for r in roots {
-        journal::record(area, entry_type::BTREE_ROOT, r.btree as u8, r.level, &r.key.encode(&r.ptr.encode()));
-    }
-    journal::record(area, entry_type::DATETIME, 0, 0, &1_761_177_600u64.to_le_bytes());
-    journal::record(area, entry_type::USAGE, KEY_VERSION, 0, &0u64.to_le_bytes());
-    for rw in 0..2u8 {
-        let mut clock = [0u8; 16];
-        clock[0] = rw;
-        journal::record(area, entry_type::CLOCK, 0, 0, &clock);
-    }
+    let keys: Vec<(Btree, u8, Vec<u8>)> = roots.iter().map(|r| (r.btree, r.level, r.key.encode(&r.ptr.encode()))).collect();
+    journal::tail(area, keys.iter().map(|(b, l, k)| (*b, *l, &k[..])), Some(1_761_177_600), 0, [0; 2]);
 }
 
 /// A flush entry's records: one inode key, numbered `n` past the first
@@ -70,7 +62,7 @@ fn area_with_inode(roots: &[Root], n: u64) -> Vec<u8> {
     let inode = InodeValue { flags: 0o100644 << 36, ..Default::default() };
     let key = Key::new(kind::INODE_V3, Bpos::new(0, mkfs::FIRST_INODE + n, mkfs::ROOT_SNAPSHOT));
     let mut area = Vec::new();
-    journal::record(&mut area, entry_type::BTREE_KEYS, Btree::Inodes as u8, 0, &key.encode(&inode.encode()));
+    journal::record(&mut area, journal::Rec::Keys { btree: Btree::Inodes, level: 0, keys: &key.encode(&inode.encode()) });
     tail(&mut area, roots);
     area
 }
@@ -201,7 +193,7 @@ fn a_clean_volumes_newest_entry_is_clean_s_or_found() {
     let inode = |area: &mut Vec<u8>, _: &mut u64| {
         let key = Key::new(kind::INODE_V3, Bpos::new(0, mkfs::FIRST_INODE, mkfs::ROOT_SNAPSHOT));
         let mut keys = Vec::new();
-        journal::record(&mut keys, entry_type::BTREE_KEYS, Btree::Inodes as u8, 0, &key.encode(&InodeValue::default().encode()));
+        journal::record(&mut keys, journal::Rec::Keys { btree: Btree::Inodes, level: 0, keys: &key.encode(&InodeValue::default().encode()) });
         keys.append(area);
         *area = keys;
     };
@@ -302,8 +294,8 @@ fn a_window_with_an_entry_missing_or_failing_its_checksum_is_refused() {
         flip(dev, block * BLOCK as u64 + 100);
     });
     assert_eq!(window_of(&damaged), Err(Error::Checksum("journal entry")));
-    // With nothing laid in, the ring holds mkfs's own clean entry.
-    assert_eq!(window_of(&unclean_with(&[], |_, _| {})).unwrap().map(|w| (w.first, w.last, w.next)), Some((1, 1, 2)));
+    // With nothing laid in, mkfs's ring is empty: there is no window.
+    assert_eq!(window_of(&unclean_with(&[], |_, _| {})).unwrap().map(|w| (w.first, w.last, w.next)), None);
 }
 
 /// What the ring holds past a bucket's newest entry is left over from an
@@ -338,10 +330,10 @@ fn orphan_findings(mode: u16, listed: bool) -> Vec<Finding> {
     let inode = InodeValue { flags: u64::from(mode) << 36 | value::inode_flag::UNLINKED, ..Default::default() };
     let mut area = Vec::new();
     let key = Key::new(kind::INODE_V3, Bpos::new(0, ino, mkfs::ROOT_SNAPSHOT));
-    journal::record(&mut area, entry_type::BTREE_KEYS, Btree::Inodes as u8, 0, &key.encode(&inode.encode()));
+    journal::record(&mut area, journal::Rec::Keys { btree: Btree::Inodes, level: 0, keys: &key.encode(&inode.encode()) });
     if listed {
         let key = Key::new(kind::SET, Bpos::new(0, ino, mkfs::ROOT_SNAPSHOT));
-        journal::record(&mut area, entry_type::BTREE_KEYS, Btree::DeletedInodes as u8, 0, &key.encode(&[]));
+        journal::record(&mut area, journal::Rec::Keys { btree: Btree::DeletedInodes, level: 0, keys: &key.encode(&[]) });
     }
     tail(&mut area, &roots);
     let dev = unclean_with(&[(1, 1, area, 0)], |_, _| {});
@@ -379,4 +371,39 @@ fn a_clean_volume_holding_an_orphan_key_or_a_logged_op_is_found() {
             Finding::Key { btree: Btree::LoggedOps, pos: op, rule: rules[1] },
         ]
     );
+}
+
+/// A stored accounting total of zero is valid on any volume: upstream
+/// keeps it (A7.23, A7.26) and compares it as absent (A7.28).
+#[test]
+fn a_stored_zero_accounting_total_is_no_finding_clean_or_unclean() {
+    let mut record = vec![value::class::SNAPSHOT];
+    record.extend_from_slice(&mkfs::ROOT_SNAPSHOT.to_le_bytes());
+    record.extend_from_slice(&(Btree::Xattrs as u32).to_le_bytes());
+    let pos = value::accounting_pos(&record);
+    let zero = |dev: &Image| rewrite_leaf(dev, Btree::Accounting, pos, 0, |keys| keys.push((Key::new(kind::ACCOUNTING, pos), vec![0; 24])));
+
+    let clean = formatted(8 << 20, None);
+    zero(&clean);
+    assert_eq!(findings_of(&clean), []);
+
+    let roots = Ring::of(&formatted(8 << 20, None), None).roots;
+    let mut area = Vec::new();
+    tail(&mut area, &roots);
+    let unclean = unclean_with(&[(1, 1, area, 0)], |dev, _| zero(dev));
+    assert_eq!(findings_of(&unclean), []);
+}
+
+/// A window spanning 2^62 sequences, all but its two entries blacklisted, as
+/// a crafted volume can make it: its check walks the entries, not the span.
+#[test]
+fn a_window_spanning_2_62_sequences_is_checked_entry_by_entry() {
+    let roots = Ring::of(&formatted(8 << 20, None), None).roots;
+    let mut area = Vec::new();
+    tail(&mut area, &roots);
+    let far = 1u64 << 62;
+    let dev = unclean_with(&[(1, 1, area.clone(), 0), (far, 1, area.clone(), 0)], |dev, _| blacklist(dev, 2, far));
+    assert_eq!(window_of(&dev).unwrap().map(|w| (w.first, w.last, w.next)), Some((1, far, far + 1)));
+    let gap = unclean_with(&[(1, 1, area.clone(), 0), (far, 1, area, 0)], |dev, _| blacklist(dev, 3, far));
+    assert_eq!(window_of(&gap), Err(Error::Corrupt("a journal entry missing from the replay window")));
 }

@@ -95,7 +95,7 @@ fn writers(dev: &Image, cache_nodes: usize, dirs: &[u64], writers: usize, per: u
 /// The least cache a mount takes: room for one transaction's footprint
 /// beside reclaim's, so each writer waits for reclaim to clean what the
 /// last one dirtied.
-const SMALL_CACHE: usize = 36;
+const SMALL_CACHE: usize = 51;
 
 /// Creates past what the journal holds, with no commit: entries fill and are
 /// written, the ring fills with entries the dirty nodes pin, and a writer
@@ -104,7 +104,7 @@ const SMALL_CACHE: usize = 36;
 /// draws on ordinary admission: either is a stall.
 #[test]
 fn a_writer_waiting_on_a_full_journal_completes_while_reclaim_runs() {
-    let dev = formatted(32 << 20, None);
+    let dev = formatted(64 << 20, None);
     let p = writers(&dev, 256, &[mkfs::ROOT_INODE], 1, 600);
     assert!(p.waits[0] > 0, "no writer waited for the journal: {:?}", p.waits);
 }
@@ -119,32 +119,33 @@ fn a_writer_filling_the_cache_with_dirty_nodes_completes_while_reclaim_runs() {
     assert!(p.waits[1] > 0, "no writer waited for cache room: {:?}", p.waits);
 }
 
-/// Sixteen writers at once, each in a directory whose inode and names live in
-/// leaves of their own: admission counts what it has granted and not yet
-/// applied against the limit, so their dirty nodes and reclaim's together
-/// stay within the limit and reclaim's room, which the mount asserts at every
-/// apply. Red when admission ignores outstanding grants: sixteen footprints
-/// at once pass it.
+/// Thirty-two writers at once, each in a directory whose names live in a
+/// leaf of their own: admission counts what it has granted and not
+/// yet applied against the limit, so their dirty nodes and reclaim's
+/// together stay within the limit and reclaim's room, which the mount
+/// asserts at every apply. Red when admission ignores outstanding grants:
+/// thirty-two footprints at once pass it.
 #[test]
 fn concurrent_writers_keep_the_dirty_node_limit() {
     let mut tree = Tree::new();
     let meta = Meta { perm: 0o755, uid: 0, gid: 0 };
     let mut dirs = Vec::new();
-    for d in 0..64 {
+    for d in 0..128 {
         let dir = tree.dir(Tree::ROOT, format!("d{d}").as_bytes(), meta).unwrap();
         for f in 0..100 {
             tree.file(dir, format!("f{f}").as_bytes(), b"", meta).unwrap();
         }
         dirs.push(d);
     }
-    // 16 KiB nodes: every fourth directory's names and inode in leaves of
-    // their own.
-    let dev = populated(32 << 20, &tree, 7);
+    // 32 KiB nodes: every fourth directory's names in a leaf of their own.
+    let dev = populated(64 << 20, &tree, 7);
     let v = block_on_ready(Volume::open(&dev)).unwrap();
     let inos: Vec<u64> = dirs.iter().map(|d| path(&v, &format!("d{d}"))).collect();
+    let spread: Vec<u64> = (0..32).map(|w| inos[w * 4]).collect();
+    let names: std::collections::BTreeSet<u64> = spread.iter().map(|&d| leaf_of(&v, Btree::Dirents, Bpos::new(d, 0, u32::MAX)).0.ptr.sector).collect();
+    assert_eq!(names.len(), 32, "each writer's names in a leaf of their own");
     drop(v);
-    let spread: Vec<u64> = (0..16).map(|w| inos[w * 4]).collect();
-    let p = writers(&dev, SMALL_CACHE, &spread, 16, 2);
+    let p = writers(&dev, SMALL_CACHE, &spread, 32, 2);
     assert!(p.peak <= p.limit + p.room, "{} dirty and unpointed nodes past the limit of {} and reclaim's {}", p.peak, p.limit, p.room);
     assert!(p.waits[1] > 0, "no writer waited for cache room: {:?}", p.waits);
 }

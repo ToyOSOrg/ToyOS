@@ -21,7 +21,7 @@ use alloc::rc::Rc;
 use alloc::vec::Vec;
 use core::cell::{Cell, RefCell};
 
-use toyos_blockdev::BlockDev;
+use toyos_blockdev::{BlockDev, BLOCK};
 use toyos_crypto::{scrypt, Random};
 
 use super::bkey::{Bpos, Key, Version, KEY_U64S};
@@ -32,7 +32,7 @@ use super::journal::{self, Class, Closed, Jset, Replayed, Writer, SKIP};
 use super::mkfs::{self, COMPAT_CLEAN, ROOT_SNAPSHOT};
 use super::node::{self, Build, FIRST_KEYS};
 use super::read::{self, Inode, Parts, Source, Volume};
-use super::superblock::{entry_type, field_type, Field, Header, Member, Root, Superblock, KEY_VERSION};
+use super::superblock::{field_type, Field, Header, Member, Root, Superblock};
 use super::sync::{Broadcast, Queue};
 use super::value::{self, accounting_pos, class, data_type, inode_field, inode_flag, mode, AllocV4, DirentType, InodeValue, NodePtr, Ptr, MAX_NAME};
 use super::{kind, Btree, Error, Result, SECTOR};
@@ -44,7 +44,7 @@ pub use ops::{Link, Removed, Rename};
 pub(crate) use reclaim::Order;
 #[cfg(test)]
 pub(crate) use reclaim::Plan;
-use reclaim::{fresh_cost, node_ptr};
+use reclaim::{fresh_cost, node_ptr, MAX_REWRITE, RECLAIM_ROOM};
 
 /// How much a mount may hold in memory.
 #[derive(Clone, Copy, Debug)]
@@ -57,17 +57,20 @@ pub struct MountOptions {
 /// u64s one ordinary transaction journals at most: a namespace operation's
 /// inode, dirent and accounting keys, names of 512 bytes included.
 pub(crate) const K_TX: u64 = 512;
-/// Nodes one ordinary transaction dirties at most: a leaf in each btree it
-/// changes.
-pub(crate) const FOOTPRINT: usize = 8;
+/// Nodes any ordinary transaction dirties at most: the largest grant of
+/// the operations' (`mount/ops.rs`).
+pub(crate) const FOOTPRINT: usize = 10;
 /// Nodes one reclaim batch writes.
 const BATCH: usize = 2;
-/// u64s a reclaim share holds for each node that can pin the journal: the
-/// most one node's pointer update journals, a rewrite to one fresh node.
+/// u64s a reclaim share holds for each node that can pin the journal:
+/// sized for a rewrite to one node, the common case. A share too short for
+/// the splits a batch needs stops the mount by name ([`Mount::admit`]).
 const PER_NODE: u64 = fresh_cost(1);
-/// Nodes one reclaim transaction dirties beyond the parents of its batch:
-/// a leaf of each allocator and accounting btree.
-const RECLAIM_LEAVES: usize = 8;
+/// Cache room past the limit that only reclaim takes: what its transaction
+/// dirties, and the nodes a batch's rewrites replace its nodes with.
+const RECLAIM: usize = RECLAIM_ROOM + BATCH * (MAX_REWRITE - 1);
+/// The smallest btree node this writer writes ([`MAX_REWRITE`]).
+const MIN_NODE: usize = 16 << 10;
 /// Retries of a failed node or journal write, each of the same bytes.
 const RETRIES: usize = 2;
 /// Feature bits a volume carries once written read-write (A1.41).
@@ -116,9 +119,10 @@ struct State {
     limit: usize,
     /// Cache room only reclaim takes.
     reclaim_room: usize,
-    /// Nodes on the medium are from before a crash, and each one's next
-    /// write goes to a fresh node (§3.5).
-    unclean: bool,
+    /// After a crash, the first sequence this mount writes: a node read
+    /// whose newest bset is older is from before the crash, and its next
+    /// write goes to a fresh node (§3.5). 0 after a clean mount.
+    fresh_below: u64,
     alloc: Allocator,
     /// Why the mount stopped writing, once it has.
     read_only: Option<&'static str>,
@@ -164,6 +168,11 @@ pub struct Mount<D> {
 }
 
 const _: () = assert!(PER_NODE <= K_TX, "a reclaim batch of one node fits one reservation");
+/// The largest key ToyOS writes: a dirent of a 512-byte name.
+const MAX_KEY: usize = 8 * (KEY_U64S + (16 + MAX_NAME).div_ceil(8));
+// A node's keys at most, and two transactions' more, spread evenly over two
+// nodes: each takes half and at most a key past it ([`MAX_REWRITE`]).
+const _: () = assert!(usize::midpoint(MIN_NODE - FIRST_KEYS, 2 * K_TX as usize * 8) + MAX_KEY <= MIN_NODE - FIRST_KEYS, "two nodes hold a full node and two transactions");
 
 /// The writer slot, held until dropped.
 struct Slot<'a, D>(&'a Mount<D>);
@@ -194,6 +203,8 @@ struct Txn {
     installs: Vec<Install>,
     /// Nodes held from prepare to apply.
     held: Vec<NodeId>,
+    /// The nodes it changes at apply: those its positions were held in.
+    dirtied: BTreeSet<NodeId>,
 }
 
 /// A written node, made reachable by the transaction that holds it.
@@ -225,6 +236,11 @@ impl Planned {
     }
 }
 
+/// Each root's btree, level and pointer key, encoded, as records carry them.
+fn encoded_roots(roots: &BTreeMap<Btree, Root>) -> Vec<(Btree, u8, Vec<u8>)> {
+    roots.values().map(|r| (r.btree, r.level, r.key.encode(&r.ptr.encode()))).collect()
+}
+
 /// Refuses a volume this writer does not handle in full, by name (§3.1).
 fn writable(sb: &Superblock) -> Result<()> {
     // Compression, erasure coding, reflink, reflinked inline data,
@@ -245,6 +261,15 @@ fn writable(sb: &Superblock) -> Result<()> {
     }
     if sb.journal.is_empty() {
         return Err(Error::Unsupported("writing a volume without journal buckets"));
+    }
+    if (sb.node_sectors() as usize) * SECTOR < MIN_NODE {
+        return Err(Error::Unsupported("writing a volume of btree nodes under 16 KiB"));
+    }
+    // Every write is of whole device blocks, so entries, bsets and nodes
+    // must fall on them.
+    let (block, node, bucket) = (u64::from(sb.header.block_sectors), u64::from(sb.node_sectors()), u64::from(sb.member.bucket_sectors));
+    if !(block * SECTOR as u64).is_multiple_of(BLOCK as u64) || !node.is_multiple_of(block) || !bucket.is_multiple_of(node) {
+        return Err(Error::Unsupported("writing a volume whose blocks, nodes or buckets are not whole 4 KiB blocks of each other"));
     }
     // Fields of other shapes than those this writer keeps: the legacy
     // journal, members, quota, disk groups and errors, and replicas with a
@@ -269,6 +294,7 @@ impl<D: BlockDev> Mount<D> {
     /// One not cleanly unmounted is replayed first, and its journal resumes
     /// past the post-crash skip.
     pub async fn open(dev: D, options: MountOptions, random: Box<dyn Random>) -> Result<Self> {
+        writable(&read::read_superblock(&dev).await?)?;
         let volume = Volume::open(dev).await?;
         no_logged_ops(&volume).await?;
         Self::from(volume.into_parts(), options, random).await
@@ -277,6 +303,7 @@ impl<D: BlockDev> Mount<D> {
     /// An encrypted volume, unlocked as [`Volume::unlock`] does, mounted
     /// read-write.
     pub async fn unlock(dev: D, passphrase: &[u8], limits: scrypt::Limits, options: MountOptions, random: Box<dyn Random>) -> Result<Self> {
+        writable(&read::read_superblock(&dev).await?)?;
         let volume = Volume::unlock(dev, passphrase, limits).await?;
         no_logged_ops(&volume).await?;
         Self::from(volume.into_parts(), options, random).await
@@ -284,27 +311,36 @@ impl<D: BlockDev> Mount<D> {
 
     async fn from(parts: Parts<D>, options: MountOptions, random: Box<dyn Random>) -> Result<Self> {
         let Parts { dev, mut sb, key, roots, key_version, replay, root } = parts;
-        writable(&sb)?;
         let ring: Vec<u64> = sb.journal.iter().flat_map(|&(first, count)| first..first + count).collect();
         let bucket_sectors = u64::from(sb.member.bucket_sectors);
         let mut journal = Writer::new(ring, bucket_sectors, sb.block_bytes(), K_TX);
         let mut blacklist = sb.blacklist.clone();
-        let clocks = match &replay {
+        let (clocks, restate) = match &replay {
             None => {
                 let clean = sb.clean.as_ref().expect("a volume opens clean only with its clean field");
                 let m = &sb.member;
                 let (head, used) = (m.journal_bucket as usize, u64::from(m.journal_offset));
-                if head >= journal.ring.len() || used > bucket_sectors {
-                    return Err(Error::Corrupt("member's journal position past its ring"));
+                if head >= journal.ring.len() || used > bucket_sectors || !used.is_multiple_of(u64::from(sb.header.block_sectors)) {
+                    return Err(Error::Corrupt("member's journal position past its ring or off a block"));
                 }
                 journal.head = head;
                 journal.head_sectors = used;
-                if used > 0 {
-                    journal.newest[head] = Some(clean.journal_seq);
+                // The entry `clean` names ends where writing resumes: in
+                // the head bucket, or at the end of the one before it. A
+                // journal may also hold none (A1.43).
+                let holding = if used > 0 {
+                    Some(head)
+                } else {
+                    let before = (head + journal.ring.len() - 1) % journal.ring.len();
+                    let found = journal::scan_bucket(&dev, &sb, key.as_ref(), before).await?;
+                    found.iter().any(|e| e.good && e.flush && e.seq == clean.journal_seq).then_some(before)
+                };
+                if let Some(bucket) = holding.filter(|_| clean.journal_seq > 0) {
+                    journal.newest[bucket] = Some(clean.journal_seq);
                 }
                 journal.durable_last = clean.journal_seq;
                 journal.next_seq = clean.journal_seq + 1;
-                clean.clocks
+                (clean.clocks, holding.is_none() || clean.journal_seq == 0)
             }
             Some((window, replayed)) => {
                 let scan = journal::scan(&dev, &sb, key.as_ref()).await?;
@@ -319,15 +355,15 @@ impl<D: BlockDev> Mount<D> {
                 journal.head_sectors = newest.offset + newest.sectors;
                 // Past every sequence the medium may hold, which the
                 // blacklist covers from the window's end (A2.15).
-                let next = (window.next + SKIP).max(blacklist.last().map_or(0, |b| b.1));
+                let next = window.next.checked_add(SKIP).ok_or(Error::Corrupt("a journal sequence too near its last value to skip past"))?.max(blacklist.last().map_or(0, |b| b.1));
                 blacklist_add(&mut blacklist, window.last + 1, next);
                 journal.next_seq = next;
-                replayed.clocks
+                (replayed.clocks, false)
             }
         };
         sb.blacklist = blacklist.clone();
 
-        let reclaim_room = 2 * BATCH + RECLAIM_LEAVES;
+        let reclaim_room = RECLAIM;
         // Reclaim's two shares of the ring each hold the pointer updates of
         // every node that can pin it, and leave transactions a quarter.
         let per_entry = journal.body() - journal.max_tx;
@@ -339,6 +375,7 @@ impl<D: BlockDev> Mount<D> {
         }
         journal.reclaim_entries = ((limit + reclaim_room) as u64 * PER_NODE).div_ceil(per_entry) + 1;
 
+        let journal_next = journal.next_seq;
         let state = State {
             header: sb.header.clone(),
             fields: sb.fields.clone(),
@@ -355,7 +392,7 @@ impl<D: BlockDev> Mount<D> {
             reclaim_granted: 0,
             limit,
             reclaim_room,
-            unclean: replay.is_some(),
+            fresh_below: if replay.is_some() { journal_next } else { 0 },
             alloc: Allocator::default(),
             read_only: None,
             #[cfg(test)]
@@ -379,7 +416,7 @@ impl<D: BlockDev> Mount<D> {
             written: Broadcast::default(),
             root,
         };
-        mount.go_read_write().await?;
+        mount.go_read_write(restate).await?;
         if let Some((_, replayed)) = replay {
             mount.install_replay(replayed).await?;
         }
@@ -389,7 +426,30 @@ impl<D: BlockDev> Mount<D> {
     /// Writes the superblock as a volume being written carries it: not
     /// clean, the read-write features set, the journal's replicas entry
     /// beside the btree's (A1.41, A2.23), and the blacklist.
-    async fn go_read_write(&self) -> Result<()> {
+    ///
+    /// With `restate`, a clean volume's journal holds no entry `clean`
+    /// names, so a crash once it is marked unclean would leave nothing to
+    /// replay (A9.11). First `clean` is moved on to the next sequence, which
+    /// an empty journal accepts (A1.43), and then that entry is written as a
+    /// clean shutdown writes its last (A1.42): the volume is valid at every
+    /// step.
+    async fn go_read_write(&self, restate: bool) -> Result<()> {
+        if restate {
+            let clean = {
+                let st = self.st.borrow();
+                let roots = encoded_roots(&st.roots);
+                journal::clean_body(st.journal.next_seq, roots.iter().map(|(b, l, k)| (*b, *l, &k[..])), st.key_version, st.clocks)
+            };
+            self.write_superblock(Some(clean)).await?;
+            let seq = {
+                let mut st = self.st.borrow_mut();
+                let st = &mut *st;
+                st.journal.open_new();
+                self.close(st);
+                st.journal.closed.back().expect("just closed").seq
+            };
+            self.write_entries(seq).await?;
+        }
         {
             let mut st = self.st.borrow_mut();
             st.header.flags[0] &= !(1 << 1);
@@ -412,15 +472,8 @@ impl<D: BlockDev> Mount<D> {
             st.header.seq += 1;
             st.member.seq = st.header.seq;
             st.header.write_time = st.now;
-            // The stored entry with what a mount changes in it: the rest,
-            // such as upstream's error counts, stays as it was.
             let mut members = st.fields.iter().find(|f| f.kind == field_type::MEMBERS_V2).expect("a superblock opens only with its members").body.clone();
-            let m = &st.member;
-            members[8 + 28] = m.bitmap_shift;
-            members[8 + 120..8 + 128].copy_from_slice(&m.seq.to_le_bytes());
-            members[8 + 128..8 + 136].copy_from_slice(&m.bitmap.to_le_bytes());
-            members[8 + 136..8 + 140].copy_from_slice(&m.journal_bucket.to_le_bytes());
-            members[8 + 140..8 + 144].copy_from_slice(&m.journal_offset.to_le_bytes());
+            st.member.patch(&mut members[8..]);
             let blacklist: Vec<u8> = st.blacklist.iter().flat_map(|&(a, b)| [a.to_le_bytes(), b.to_le_bytes()]).flatten().collect();
             let mut replicas = Vec::new();
             if clean.is_none() {
@@ -453,6 +506,7 @@ impl<D: BlockDev> Mount<D> {
         drop(st);
         self.admit.wake();
         self.admit_reclaim.wake();
+        self.written.wake();
     }
 
     fn check_writable(&self) -> Result<()> {
@@ -515,8 +569,20 @@ impl<D: BlockDev> Mount<D> {
     /// The cached node `ptr` points at, read from the medium when it is
     /// not cached.
     async fn load(&self, btree: Btree, level: u8, ptr: &NodePtr, max: Bpos) -> Result<NodeId> {
-        if let Some(id) = self.st.borrow_mut().cache.at_sector(ptr.ptr.sector) {
-            return Ok(id);
+        // The sector finds a cached node; the pointer must still be to it,
+        // as two pointers to one sector on a hostile volume are not.
+        let cached = |st: &mut State| {
+            st.cache.at_sector(ptr.ptr.sector).map(|id| {
+                let n = st.cache.node(id);
+                if (n.btree, n.level, n.seq, n.min, n.max) == (btree, level, ptr.seq, ptr.min, max) {
+                    Ok(id)
+                } else {
+                    Err(Error::Corrupt("two btree pointers to one node"))
+                }
+            })
+        };
+        if let Some(found) = cached(&mut self.st.borrow_mut()) {
+            return found;
         }
         let node = read::read_node(&self.dev, &self.sb, self.key.as_ref(), btree, level, ptr, max).await.inspect_err(|e| {
             // Writing on would rewrite a node holding what this cannot read
@@ -526,10 +592,10 @@ impl<D: BlockDev> Mount<D> {
             }
         })?;
         let mut st = self.st.borrow_mut();
-        if let Some(id) = st.cache.at_sector(ptr.ptr.sector) {
-            return Ok(id);
+        if let Some(found) = cached(&mut st) {
+            return found;
         }
-        let fresh = st.unclean;
+        let fresh = node.bset_seqs.iter().max().is_none_or(|&s| s < st.fresh_below);
         Ok(st.cache.insert(Cached {
             btree,
             level,
@@ -650,7 +716,10 @@ impl<D: BlockDev> Mount<D> {
                 None => break,
             }
         }
-        self.written.until(|| !self.st.borrow().cache.node(id).writing).await;
+        // A write that failed stopped the mount: the node stays writing.
+        self.written.until(|| self.st.borrow().read_only.is_some() || !self.st.borrow().cache.node(id).writing).await;
+        self.check_writable()?;
+        txn.dirtied.insert(id);
         Ok(id)
     }
 
@@ -905,14 +974,26 @@ impl<D: BlockDev> Mount<D> {
     }
 
     /// One ordinary transaction: admitted at `bound` journal u64s and
-    /// [`FOOTPRINT`] nodes, then `prepare` under the slot, then applied.
-    async fn transact<T>(&self, bound: u64, prepare: impl AsyncFnOnce(&mut Txn) -> Result<T>) -> Result<T> {
+    /// `nodes` of cache room, then `prepare` under the slot, then applied.
+    /// It enters the slot only while no node is oversized, so no node it
+    /// changes starts past what a node holds ([`MAX_REWRITE`]); an oversized
+    /// node, which a transaction before it may leave, sends it back to wait
+    /// for reclaim to split that node.
+    async fn transact<T>(&self, bound: u64, nodes: usize, prepare: impl AsyncFnOnce(&mut Txn) -> Result<T>) -> Result<T> {
+        assert!(nodes <= FOOTPRINT, "a grant of {nodes} nodes, past the largest any operation takes");
         self.check_writable()?;
-        self.admit(Class::Ordinary, bound, FOOTPRINT).await?;
-        let _slot = self.slot(Class::Ordinary).await;
+        let _slot = loop {
+            self.admit(Class::Ordinary, bound, nodes).await?;
+            let slot = self.slot(Class::Ordinary).await;
+            let mut st = self.st.borrow_mut();
+            if st.cache.oversized == 0 {
+                break slot;
+            }
+            self.ungrant(&mut st, Class::Ordinary, bound, nodes);
+        };
         let mut txn = Txn::default();
         let out = prepare(&mut txn).await;
-        self.finish(txn, out.is_ok(), Class::Ordinary, bound, FOOTPRINT)?;
+        self.finish(txn, out.is_ok(), Class::Ordinary, bound, nodes)?;
         out
     }
 
@@ -922,6 +1003,13 @@ impl<D: BlockDev> Mount<D> {
     fn finish(&self, txn: Txn, apply: bool, class: Class, bound: u64, nodes: usize) -> Result<()> {
         let mut st = self.st.borrow_mut();
         let st = &mut *st;
+        // An ordinary grant is each operation's bound; reclaim's is capped
+        // by its room, and a batch past it stops the mount.
+        let over = txn.dirtied.len() > nodes;
+        assert!(!over || class == Class::Reclaim, "a transaction changing {} nodes past its grant of {nodes}", txn.dirtied.len());
+        if over {
+            st.read_only.get_or_insert("reclaim dirtying more nodes than its cache room");
+        }
         let stopped = st.read_only;
         if apply && stopped.is_none() {
             self.apply(st, txn, bound);
@@ -982,7 +1070,7 @@ impl<D: BlockDev> Mount<D> {
                 }
                 let key = Key { version, ..Key::new(kind::ACCOUNTING, pos) };
                 // A total of zero stays, its version with it, so a replay
-                // never adds the delta that made it zero again.
+                // never adds the delta that made it zero again (A7.23, A7.24).
                 n.put(pos, Some((key, value::counters(&sums))), seq);
             });
         }
@@ -1004,8 +1092,8 @@ impl<D: BlockDev> Mount<D> {
         let mut open = st.journal.open.take().expect("an entry open");
         let last_seq = st.cache.oldest_pin().map_or(open.seq, |p| p.min(open.seq));
         assert!(last_seq >= st.journal.durable_last, "a journal entry's last sequence moved back");
-        let roots: Vec<(u8, u8, Vec<u8>)> = st.roots.values().map(|r| (r.btree as u8, r.level, r.key.encode(&r.ptr.encode()))).collect();
-        journal::tail(&mut open.area, roots.iter().map(|(b, l, k)| (*b, *l, &k[..])), st.now, st.key_version, st.clocks);
+        let roots = encoded_roots(&st.roots);
+        journal::tail(&mut open.area, roots.iter().map(|(b, l, k)| (*b, *l, &k[..])), Some(st.now), st.key_version, st.clocks);
         let entry = Jset { seq: open.seq, last_seq, area: &open.area };
         let bytes = journal::encode(&st.header.internal_uuid, self.sb.block_bytes(), self.key.as_ref(), &entry).expect("a journal entry encrypts");
         st.journal.closed.push_back(Closed { seq: open.seq, last_seq, bytes });
@@ -1157,14 +1245,14 @@ fn records(txn: &Txn, seq: u64, base: u64) -> (Vec<u8>, BTreeMap<Bpos, Version>)
             Some((at, keys)) if *at == (*btree, *level) => keys.extend_from_slice(&bytes),
             _ => {
                 if let Some(((b, l), keys)) = group.take() {
-                    journal::record(&mut area, entry_type::BTREE_KEYS, b as u8, l, &keys);
+                    journal::record(&mut area, journal::Rec::Keys { btree: b, level: l, keys: &keys });
                 }
                 group = Some(((*btree, *level), bytes));
             }
         }
     }
     if let Some(((b, l), keys)) = group {
-        journal::record(&mut area, entry_type::BTREE_KEYS, b as u8, l, &keys);
+        journal::record(&mut area, journal::Rec::Keys { btree: b, level: l, keys: &keys });
     }
     let mut versions = BTreeMap::new();
     if !txn.accounting.is_empty() {
@@ -1177,7 +1265,7 @@ fn records(txn: &Txn, seq: u64, base: u64) -> (Vec<u8>, BTreeMap<Bpos, Version>)
             versions.insert(*pos, version);
             keys.extend_from_slice(&Key { version, ..Key::new(kind::ACCOUNTING, *pos) }.encode(&value::counters(delta)));
         }
-        journal::record(&mut area, entry_type::BTREE_KEYS, Btree::Accounting as u8, 0, &keys);
+        journal::record(&mut area, journal::Rec::Keys { btree: Btree::Accounting, level: 0, keys: &keys });
     }
     (area, versions)
 }
@@ -1187,22 +1275,18 @@ impl<D: BlockDev> Mount<D> {
     /// Writes everything out and marks the volume clean (A1.42): every
     /// orphan released; every dirty node written, leaves first, each
     /// level's pointer updates journaled before the level above is written;
-    /// the accounting keys that came to zero deleted; a final empty entry
-    /// `S` whose last sequence is its own; then the superblock, clean, with
-    /// `clean` naming `S`.
+    /// a final empty entry `S` whose last sequence is its own; then the
+    /// superblock, clean, with `clean` naming `S`. Accounting totals that
+    /// came to zero stay, as upstream keeps them (A7.23).
     pub async fn unmount(self) -> Result<()> {
         // A clean volume holds no orphan (A8.14), and nothing holds one now.
         self.release_orphans().await?;
-        loop {
-            self.check_writable()?;
-            while self.busy() {
-                self.reclaim_round(Order::LeavesFirst).await?;
-            }
-            self.flush_open().await?;
-            if !self.drop_zero_accounting().await? {
-                break;
-            }
+        self.check_writable()?;
+        while self.busy() {
+            // Nothing else runs now, so every dirty node is ready to write.
+            assert!(self.reclaim_round(Order::LeavesFirst).await?, "dirty nodes no reclaim round writes");
         }
+        self.flush_open().await?;
         let upto = {
             let mut st = self.st.borrow_mut();
             let st = &mut *st;
@@ -1213,18 +1297,8 @@ impl<D: BlockDev> Mount<D> {
         self.write_entries(upto).await?;
         let clean = {
             let mut st = self.st.borrow_mut();
-            let mut body = alloc::vec![0u8; 16];
-            body[8..].copy_from_slice(&upto.to_le_bytes());
-            mkfs::record(&mut body, KEY_VERSION, 0, entry_type::USAGE, &st.key_version.to_le_bytes());
-            for (rw, time) in st.clocks.iter().enumerate() {
-                let mut clock = [0u8; 16];
-                clock[0] = rw as u8;
-                clock[8..].copy_from_slice(&time.to_le_bytes());
-                mkfs::record(&mut body, 0, 0, entry_type::CLOCK, &clock);
-            }
-            for r in st.roots.values() {
-                mkfs::record(&mut body, r.btree as u8, r.level, entry_type::BTREE_ROOT, &r.key.encode(&r.ptr.encode()));
-            }
+            let roots = encoded_roots(&st.roots);
+            let body = journal::clean_body(upto, roots.iter().map(|(b, l, k)| (*b, *l, &k[..])), st.key_version, st.clocks);
             st.header.flags[0] |= 1 << 1;
             st.header.compat[0] |= COMPAT_CLEAN;
             st.member.journal_bucket = st.journal.head as u32;
@@ -1238,29 +1312,6 @@ impl<D: BlockDev> Mount<D> {
     fn busy(&self) -> bool {
         let st = self.st.borrow();
         st.cache.dirty > 0 || st.cache.unpointed > 0
-    }
-
-    /// Deletes the accounting keys whose totals came to zero, once nothing
-    /// pins the journal: no window can then hold the delta that zeroed one
-    /// (A7.4, A7.8). They are no change replay needs, so the deletions are
-    /// journaled nowhere. Whether there were any.
-    async fn drop_zero_accounting(&self) -> Result<bool> {
-        let _slot = self.slot(Class::Reclaim).await;
-        let mut zero = Vec::new();
-        Source::walk(self, Btree::Accounting, Bpos::MIN, |k, v| {
-            if journal::counters(v)?.iter().all(|&c| c == 0) {
-                zero.push(k.pos);
-            }
-            Ok(true)
-        })
-        .await?;
-        for &pos in &zero {
-            let id = self.find(Btree::Accounting, 0, pos).await?;
-            let mut st = self.st.borrow_mut();
-            let seq = st.journal.next_seq;
-            st.cache.change(id, |n| n.put(pos, None, seq));
-        }
-        Ok(!zero.is_empty())
     }
 }
 

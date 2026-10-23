@@ -6,6 +6,7 @@
 
 use super::bkey::Bpos;
 use super::value::{class, data_type, AllocV4};
+use super::{Error, Result};
 
 /// The fragmentation LRU of device 0.
 pub(crate) const FRAGMENTATION_LRU: u64 = 8192;
@@ -89,27 +90,33 @@ impl Bucket {
         })
     }
 
-    /// `node` sectors of btree node added (A6.17).
-    pub(crate) fn fill(&mut self, node: u32, io_time: u64) {
-        if data_type::empty(self.data_type) {
-            assert_eq!(self.data_type, data_type::FREE, "a node allocated in a bucket awaiting discard");
+    /// `node` sectors of btree node added (A6.17). `Corrupt` when the
+    /// alloc key holds the bucket for anything else.
+    pub(crate) fn fill(&mut self, node: u32, io_time: u64, bucket_sectors: u32) -> Result<()> {
+        if self.data_type == data_type::FREE {
             self.data_type = data_type::BTREE;
             self.needs_gen_increment = true;
             self.need_discard = true;
             self.io_time = io_time.max(1);
         }
-        assert_eq!(self.data_type, data_type::BTREE, "a node in a bucket of other data");
+        if self.data_type != data_type::BTREE || self.dirty + node > bucket_sectors {
+            return Err(Error::Corrupt("a btree node placed in a bucket its alloc key holds otherwise"));
+        }
         self.dirty += node;
+        Ok(())
     }
 
     /// `node` sectors of btree node released. A bucket left empty waits in
     /// need_discard, its generation raised (A6.18); the caller stamps its
-    /// empty sequence. Whether it was emptied.
-    pub(crate) fn drain(&mut self, node: u32) -> bool {
-        assert!(self.data_type == data_type::BTREE && self.dirty >= node, "a node released from a bucket that does not hold it");
+    /// empty sequence. Whether it was emptied; `Corrupt` when the alloc key
+    /// does not hold the node.
+    pub(crate) fn drain(&mut self, node: u32) -> Result<bool> {
+        if self.data_type != data_type::BTREE || self.dirty < node {
+            return Err(Error::Corrupt("a btree node released from a bucket its alloc key does not hold it in"));
+        }
         self.dirty -= node;
         if self.dirty > 0 {
-            return false;
+            return Ok(false);
         }
         self.data_type = data_type::NEED_DISCARD;
         if self.needs_gen_increment {
@@ -119,7 +126,7 @@ impl Bucket {
             self.gen = self.gen.wrapping_add(1);
             self.needs_gen_increment = false;
         }
-        true
+        Ok(true)
     }
 
     /// The device accounting record of its state, and its counters (A7.12).

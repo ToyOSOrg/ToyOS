@@ -9,7 +9,32 @@ use super::*;
 /// Hash type 3, siphash, in an inode's flags.
 const SIPHASH: u64 = 3 << 20;
 /// Hash whiteouts of a removed directory each transaction deletes.
-const WHITEOUTS: usize = 32;
+const WHITEOUTS: usize = 8;
+
+// Each operation's grant: a leaf for each position it changes, as its
+// transaction lists them. The accounting positions are a snapshot class
+// for each of inodes and dirents (A7.14) and the inode count (A7.10).
+/// The new inode and its directory's, its dirent, the inode cursor, and
+/// three accounting keys.
+const CREATE: usize = 2 + 1 + 1 + 3;
+/// The new inode, its `deleted_inodes` key, the cursor and two accounting
+/// keys.
+const CREATE_UNNAMED: usize = 1 + 1 + 1 + 2;
+/// The node, the directory and a replaced node's inodes, the dirent, the
+/// node's and the replaced node's `deleted_inodes` keys, and two accounting
+/// keys.
+const LINK: usize = 3 + 1 + 2 + 2;
+/// The directory's inode and the removed one's, the dirent or its whiteout,
+/// a `deleted_inodes` key and three accounting keys.
+const UNLINK: usize = 2 + 1 + 1 + 3;
+/// Both nodes' inodes and both directories', both dirents, the replaced
+/// node's `deleted_inodes` key and three accounting keys.
+const RENAME: usize = 4 + 2 + 1 + 3;
+/// The inode, its `deleted_inodes` key and two accounting keys.
+const RELEASE: usize = 1 + 1 + 2;
+/// The whiteouts and one accounting key.
+const DROP_WHITEOUTS: usize = WHITEOUTS + 1;
+const _: () = assert!(RENAME == FOOTPRINT && CREATE <= FOOTPRINT && LINK <= FOOTPRINT && UNLINK <= FOOTPRINT && DROP_WHITEOUTS <= FOOTPRINT);
 
 /// What a new name links.
 pub enum Link {
@@ -50,6 +75,29 @@ fn valid_name(name: &[u8]) -> Result<()> {
 
 fn is_dir(v: &InodeValue) -> bool {
     v.mode() & mode::S_IFMT == mode::S_IFDIR
+}
+
+/// A link count one more: a file's new name, or a directory's new
+/// subdirectory. Refused where the count read back, one more than stored
+/// for a file and two for a directory, would pass 32 bits.
+fn one_link_more(inode: &mut InodeValue) -> Result<()> {
+    let bias = if is_dir(inode) { 2 } else { 1 };
+    let nlink = inode.field(inode_field::NLINK) + 1;
+    if nlink + bias > u64::from(u32::MAX) {
+        return Err(Error::NoSpace("a link count at its largest"));
+    }
+    inode.set(inode_field::NLINK, nlink);
+    Ok(())
+}
+
+/// The depth of a directory made in `parent` (A5.17), refused past the
+/// field's 32 bits.
+fn deeper(parent: &InodeValue) -> Result<u64> {
+    let depth = parent.field(inode_field::DEPTH) + 1;
+    if depth > u64::from(u32::MAX) {
+        return Err(Error::NoSpace("a directory depth at its largest"));
+    }
+    Ok(depth)
 }
 
 /// A directory's link count less the subdirectory it loses.
@@ -103,7 +151,7 @@ impl<D: BlockDev> Mount<D> {
         let seed = self.nonzero()?;
         self.observe(now);
         let ino = self
-            .transact(K_TX / 2, async |txn: &mut Txn| {
+            .transact(K_TX / 2, CREATE, async |txn: &mut Txn| {
                 let mut parent = self.directory(txn, dir).await?;
                 let slot = self.free_slot(txn, dir, &parent, name).await?;
                 let ino = self.next_inode(txn).await?;
@@ -111,8 +159,8 @@ impl<D: BlockDev> Mount<D> {
                 inode.set(inode_field::DIR, dir);
                 inode.set(inode_field::DIR_OFFSET, slot);
                 if type_bits == mode::S_IFDIR {
-                    inode.set(inode_field::DEPTH, parent.field(inode_field::DEPTH) + 1);
-                    parent.set(inode_field::NLINK, parent.field(inode_field::NLINK) + 1);
+                    inode.set(inode_field::DEPTH, deeper(&parent)?);
+                    one_link_more(&mut parent)?;
                 }
                 self.set_inode(txn, ino, &inode).await?;
                 self.set_dirent(txn, dir, slot, Some((ino, dirent_type, name))).await?;
@@ -131,7 +179,7 @@ impl<D: BlockDev> Mount<D> {
         let seed = self.nonzero()?;
         self.observe(now);
         let ino = self
-            .transact(K_TX / 2, async |txn: &mut Txn| {
+            .transact(K_TX / 2, CREATE_UNNAMED, async |txn: &mut Txn| {
                 self.directory(txn, near).await?;
                 let ino = self.next_inode(txn).await?;
                 let mut inode = self.new_inode(mode::S_IFREG, owner, seed, now)?;
@@ -150,7 +198,7 @@ impl<D: BlockDev> Mount<D> {
     pub async fn link(&self, node: u64, dir: u64, name: &[u8], how: Link, now: i64) -> Result<Option<Removed>> {
         valid_name(name)?;
         self.observe(now);
-        self.transact(K_TX / 2, async |txn: &mut Txn| {
+        self.transact(K_TX / 2, LINK, async |txn: &mut Txn| {
             let mut parent = self.directory(txn, dir).await?;
             let mut inode = self.inode_in(txn, node).await?;
             if is_dir(&inode) {
@@ -189,7 +237,7 @@ impl<D: BlockDev> Mount<D> {
         valid_name(name)?;
         self.observe(now);
         let removed = self
-            .transact(K_TX / 2, async |txn: &mut Txn| {
+            .transact(K_TX / 2, UNLINK, async |txn: &mut Txn| {
                 let mut parent = self.directory(txn, dir).await?;
                 let named = self.named(txn, dir, &parent, name).await?.ok_or(Error::NotFound)?;
                 let removed = match (named.kind == DirentType::Directory, dir_too) {
@@ -221,7 +269,7 @@ impl<D: BlockDev> Mount<D> {
         valid_name(to.1)?;
         self.observe(now);
         let removed = self
-            .transact(K_TX, async |txn: &mut Txn| {
+            .transact(K_TX, RENAME, async |txn: &mut Txn| {
                 let mut src_parent = self.directory(txn, from.0).await?;
                 let src = self.named(txn, from.0, &src_parent, from.1).await?.ok_or(Error::NotFound)?;
                 let mut dst_parent = if to.0 == from.0 { src_parent.clone() } else { self.directory(txn, to.0).await? };
@@ -248,7 +296,7 @@ impl<D: BlockDev> Mount<D> {
                         self.set_dirent(txn, to.0, d.slot, Some((src.ino, src.kind, to.1))).await?;
                         if src_dir != dst_dir && to.0 != from.0 {
                             let (gains, loses) = if src_dir { (&mut dst_parent, &mut src_parent) } else { (&mut src_parent, &mut dst_parent) };
-                            gains.set(inode_field::NLINK, gains.field(inode_field::NLINK) + 1);
+                            one_link_more(gains)?;
                             one_link_less(loses)?;
                         }
                     }
@@ -276,7 +324,7 @@ impl<D: BlockDev> Mount<D> {
                         self.remove_dirent(txn, from.0, &src_parent, src.slot).await?;
                         if src_dir && to.0 != from.0 {
                             one_link_less(&mut src_parent)?;
-                            dst_parent.set(inode_field::NLINK, dst_parent.field(inode_field::NLINK) + 1);
+                            one_link_more(&mut dst_parent)?;
                         }
                     }
                 }
@@ -304,7 +352,7 @@ impl<D: BlockDev> Mount<D> {
     /// `deleted_inodes` key go (A8.13). A node with a name is left as it is;
     /// a key that names no orphan goes alone.
     pub async fn release(&self, node: u64) -> Result<()> {
-        self.transact(K_TX / 2, async |txn: &mut Txn| {
+        self.transact(K_TX / 2, RELEASE, async |txn: &mut Txn| {
             let orphan = self.inode_opt(txn, node).await?.filter(|v| v.flags & inode_flag::UNLINKED != 0 && !is_dir(v));
             if orphan.is_some() {
                 self.set(txn, Btree::Inodes, inode_pos(node), None).await?;
@@ -387,7 +435,7 @@ impl<D: BlockDev> Mount<D> {
             inode.flags &= !inode_flag::UNLINKED;
             self.set_orphan(txn, node, false).await?;
         } else {
-            inode.set(inode_field::NLINK, inode.field(inode_field::NLINK) + 1);
+            one_link_more(inode)?;
         }
         inode.set(inode_field::DIR, dir);
         inode.set(inode_field::DIR_OFFSET, slot);
@@ -423,7 +471,7 @@ impl<D: BlockDev> Mount<D> {
         inode.set(inode_field::DIR, dir);
         inode.set(inode_field::DIR_OFFSET, slot);
         if is_dir(&inode) {
-            inode.set(inode_field::DEPTH, parent.field(inode_field::DEPTH) + 1);
+            inode.set(inode_field::DEPTH, deeper(parent)?);
         }
         self.set_inode(txn, node, &inode).await
     }
@@ -463,7 +511,7 @@ impl<D: BlockDev> Mount<D> {
             if left.is_empty() {
                 return Ok(());
             }
-            self.transact(K_TX / 2, async |txn: &mut Txn| {
+            self.transact(K_TX / 2, DROP_WHITEOUTS, async |txn: &mut Txn| {
                 for &pos in &left {
                     self.set(txn, Btree::Dirents, pos, None).await?;
                 }
@@ -477,9 +525,13 @@ impl<D: BlockDev> Mount<D> {
     /// ancestors: a directory never moves beneath itself.
     async fn not_beneath(&self, txn: &Txn, node: u64, dir: u64) -> Result<()> {
         let mut at = dir;
+        let mut seen = BTreeSet::new();
         while at != self.root {
             if at == node {
                 return Err(Error::Invalid("a directory moved beneath itself"));
+            }
+            if !seen.insert(at) {
+                return Err(Error::Corrupt("directory back-references that loop"));
             }
             at = self.inode_in(txn, at).await?.field(inode_field::DIR);
             if at == 0 {

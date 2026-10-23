@@ -43,8 +43,40 @@ pub(crate) struct Jset<'a> {
     pub area: &'a [u8],
 }
 
-/// Appends a record to an entry area.
-pub(crate) fn record(area: &mut Vec<u8>, kind_: u8, btree: u8, level: u8, payload: &[u8]) {
+/// A record as ToyOS writes it into an entry or the `clean` field (A2.4, A2.5).
+pub(crate) enum Rec<'a> {
+    /// Keys of `btree` at `level`, each encoded unpacked.
+    Keys { btree: Btree, level: u8, keys: &'a [u8] },
+    /// `btree`'s root at `level`: its pointer key, encoded.
+    Root { btree: Btree, level: u8, key: &'a [u8] },
+    /// Seconds since the epoch.
+    Datetime(u64),
+    /// The key-version counter.
+    KeyVersion(u64),
+    /// The read (`write` false) or write IO clock.
+    Clock { write: bool, time: u64 },
+}
+
+/// Appends `rec` to an entry area.
+pub(crate) fn record(area: &mut Vec<u8>, rec: Rec) {
+    let mut word = [0u8; 16];
+    let (kind_, btree, level, payload): (u8, u8, u8, &[u8]) = match rec {
+        Rec::Keys { btree, level, keys } => (entry_type::BTREE_KEYS, btree as u8, level, keys),
+        Rec::Root { btree, level, key } => (entry_type::BTREE_ROOT, btree as u8, level, key),
+        Rec::Datetime(secs) => {
+            word[..8].copy_from_slice(&secs.to_le_bytes());
+            (entry_type::DATETIME, 0, 0, &word[..8])
+        }
+        Rec::KeyVersion(v) => {
+            word[..8].copy_from_slice(&v.to_le_bytes());
+            (entry_type::USAGE, KEY_VERSION, 0, &word[..8])
+        }
+        Rec::Clock { write, time } => {
+            word[0] = u8::from(write);
+            word[8..].copy_from_slice(&time.to_le_bytes());
+            (entry_type::CLOCK, 0, 0, &word)
+        }
+    };
     assert!(payload.len().is_multiple_of(8) && u16::try_from(payload.len() / 8).is_ok(), "a record of {} bytes", payload.len());
     let mut header = [0u8; 8];
     header[..2].copy_from_slice(&((payload.len() / 8) as u16).to_le_bytes());
@@ -55,21 +87,29 @@ pub(crate) fn record(area: &mut Vec<u8>, kind_: u8, btree: u8, level: u8, payloa
     area.extend_from_slice(payload);
 }
 
-/// Appends what every entry carries after its keys (A2.18): a root record
-/// for each btree with a root, each its btree id, level and pointer key;
-/// the datetime, in seconds; the key version; and the read and write clocks.
-pub(crate) fn tail<'a>(area: &mut Vec<u8>, roots: impl Iterator<Item = (u8, u8, &'a [u8])>, datetime: u64, key_version: u64, clocks: [u64; 2]) {
+/// Appends the volume's state as every entry carries it after its keys
+/// (A2.18), and as `clean` repeats it for its entry (A1.42): a root record
+/// for each btree with a root; the datetime, which `clean` has none of; the
+/// key version; and the read and write clocks.
+pub(crate) fn tail<'a>(area: &mut Vec<u8>, roots: impl IntoIterator<Item = (Btree, u8, &'a [u8])>, datetime: Option<u64>, key_version: u64, clocks: [u64; 2]) {
     for (btree, level, key) in roots {
-        record(area, entry_type::BTREE_ROOT, btree, level, key);
+        record(area, Rec::Root { btree, level, key });
     }
-    record(area, entry_type::DATETIME, 0, 0, &datetime.to_le_bytes());
-    record(area, entry_type::USAGE, KEY_VERSION, 0, &key_version.to_le_bytes());
-    for (rw, time) in clocks.iter().enumerate() {
-        let mut clock = [0u8; 16];
-        clock[0] = rw as u8;
-        clock[8..].copy_from_slice(&time.to_le_bytes());
-        record(area, entry_type::CLOCK, 0, 0, &clock);
+    if let Some(secs) = datetime {
+        record(area, Rec::Datetime(secs));
     }
+    record(area, Rec::KeyVersion(key_version));
+    record(area, Rec::Clock { write: false, time: clocks[0] });
+    record(area, Rec::Clock { write: true, time: clocks[1] });
+}
+
+/// The `clean` field's body for a clean shutdown at entry `seq`: its state
+/// records, as that entry's tail has them (A1.42).
+pub(crate) fn clean_body<'a>(seq: u64, roots: impl IntoIterator<Item = (Btree, u8, &'a [u8])>, key_version: u64, clocks: [u64; 2]) -> Vec<u8> {
+    let mut body = alloc::vec![0u8; 16];
+    body[8..].copy_from_slice(&seq.to_le_bytes());
+    tail(&mut body, roots, None, key_version, clocks);
+    body
 }
 
 /// The bytes of `entry`, padded to whole blocks, checksummed for an
@@ -126,39 +166,12 @@ pub(crate) struct Scan {
     pub entries: BTreeMap<u64, Found>,
 }
 
-/// Reads every journal bucket in ring order (A2.9). In each bucket entries
-/// are read from its start, one after the other, until a position holds no
-/// entry or an entry older than the one before it: what follows is left over
-/// from an earlier pass of the ring. Past an entry whose checksum fails, a
-/// position without one is passed a block at a time, since a torn entry's
-/// length may not be its own.
+/// Reads every journal bucket in ring order (A2.9), each as
+/// [`scan_bucket`] does.
 pub(crate) async fn scan(dev: &impl BlockDev, sb: &Superblock, key: Option<&MasterKey>) -> Result<Scan> {
-    let bucket_sectors = u64::from(sb.member.bucket_sectors);
-    let bucket_bytes = bucket_sectors as usize * SECTOR;
-    let block = sb.block_bytes();
-    let want = magic(&sb.header.internal_uuid);
     let mut entries: BTreeMap<u64, Found> = BTreeMap::new();
-    let ring = sb.journal.iter().flat_map(|&(first, count)| first..first + count);
-    for (index, bucket) in ring.enumerate() {
-        let bytes = read_bytes(dev, bucket * bucket_sectors * SECTOR as u64, bucket_bytes).await?;
-        let mut at = 0;
-        let mut previous = None;
-        let mut torn = false;
-        while at + HEADER <= bytes.len() {
-            if le64(&bytes, at + 16) != want {
-                if !torn {
-                    break;
-                }
-                at += block;
-                continue;
-            }
-            let found = entry(sb, key, &bytes[at..], index, at)?;
-            if previous.is_some_and(|p| found.seq < p) {
-                break;
-            }
-            previous = Some(found.seq);
-            torn |= !found.good;
-            at += found.sectors as usize * SECTOR;
+    for index in 0..sb.journal.iter().map(|&(_, count)| count as usize).sum() {
+        for found in scan_bucket(dev, sb, key, index).await? {
             match entries.get(&found.seq) {
                 Some(had) if had.good && found.good && had.area != found.area => {
                     return Err(Error::Corrupt("two journal entries of one sequence"));
@@ -171,6 +184,39 @@ pub(crate) async fn scan(dev: &impl BlockDev, sb: &Superblock, key: Option<&Mast
         }
     }
     Ok(Scan { entries })
+}
+
+/// The entries of ring bucket `index`, read from its start one after the
+/// other until a position holds no entry or an entry older than the one
+/// before it: what follows is left over from an earlier pass of the ring.
+/// Past an entry whose checksum fails, a position without one is passed a
+/// block at a time, since a torn entry's length may not be its own.
+pub(crate) async fn scan_bucket(dev: &impl BlockDev, sb: &Superblock, key: Option<&MasterKey>, index: usize) -> Result<Vec<Found>> {
+    let bucket_sectors = u64::from(sb.member.bucket_sectors);
+    let bucket = sb.journal.iter().flat_map(|&(first, count)| first..first + count).nth(index).expect("a bucket of the ring");
+    let block = sb.block_bytes();
+    let want = magic(&sb.header.internal_uuid);
+    let bytes = read_bytes(dev, bucket * bucket_sectors * SECTOR as u64, bucket_sectors as usize * SECTOR).await?;
+    let mut out: Vec<Found> = Vec::new();
+    let mut at = 0;
+    let mut torn = false;
+    while at + HEADER <= bytes.len() {
+        if le64(&bytes, at + 16) != want {
+            if !torn {
+                break;
+            }
+            at += block;
+            continue;
+        }
+        let found = entry(sb, key, &bytes[at..], index, at)?;
+        if out.last().is_some_and(|p| found.seq < p.seq) {
+            break;
+        }
+        torn |= !found.good;
+        at += found.sectors as usize * SECTOR;
+        out.push(found);
+    }
+    Ok(out)
 }
 
 /// The entry at the start of `b`, whose magic is the volume's, found at byte
@@ -242,15 +288,21 @@ impl Scan {
         if f.last_seq > f.seq {
             return Err(Error::Corrupt("journal entry whose last sequence is past its own"));
         }
-        for seq in f.last_seq..=f.seq {
-            match self.entries.get(&seq) {
-                _ if sb.blacklisted(seq) => {}
-                Some(e) if e.good => {}
-                Some(_) => return Err(Error::Checksum("journal entry")),
-                None => return Err(Error::Corrupt("a journal entry missing from the replay window")),
+        // Each entry of the window, and each gap before one, which only the
+        // blacklist may explain: a walk of the entries, not of a span a
+        // crafted entry can make 2^64 long.
+        let mut next = f.last_seq;
+        for e in self.entries.range(f.last_seq..=f.seq).map(|(_, e)| e) {
+            if !sb.blacklisted_span(next, e.seq) {
+                return Err(Error::Corrupt("a journal entry missing from the replay window"));
             }
+            if !e.good && !sb.blacklisted(e.seq) {
+                return Err(Error::Checksum("journal entry"));
+            }
+            next = e.seq.saturating_add(1);
         }
-        Ok(Some(Window { first: f.last_seq, last: f.seq, next: newest + 1 }))
+        let next = newest.checked_add(1).ok_or(Error::Corrupt("a journal sequence at its last value"))?;
+        Ok(Some(Window { first: f.last_seq, last: f.seq, next }))
     }
 
     /// The window's entries in sequence order, blacklisted ones left out.

@@ -150,6 +150,16 @@ impl Member {
         }
     }
 
+    /// Writes what a mount changes into a stored entry `e`, of at least
+    /// [`Member::BYTES`]: the rest, such as upstream's error counts, stays.
+    pub(crate) fn patch(&self, e: &mut [u8]) {
+        e[28] = self.bitmap_shift;
+        put64(e, 120, self.seq);
+        put64(e, 128, self.bitmap);
+        put32(e, 136, self.journal_bucket);
+        put32(e, 140, self.journal_offset);
+    }
+
     pub(crate) fn encode(&self) -> [u8; Self::BYTES] {
         let mut b = [0u8; Self::BYTES];
         b[..16].copy_from_slice(&self.uuid);
@@ -393,6 +403,12 @@ impl Superblock {
 
     pub(crate) fn blacklisted(&self, seq: u64) -> bool {
         self.blacklist.iter().any(|&(start, end)| (start..end).contains(&seq))
+    }
+
+    /// Whether every sequence of `[start, end)` is blacklisted. Ranges are
+    /// disjoint and never adjacent, so one must hold it all.
+    pub(crate) fn blacklisted_span(&self, start: u64, end: u64) -> bool {
+        start >= end || self.blacklist.iter().any(|&(s, e)| s <= start && end <= e)
     }
 
     /// The internal UUID, which seeds the node magic and the key wrap.

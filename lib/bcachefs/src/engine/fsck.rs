@@ -415,7 +415,12 @@ impl<'a> Walk<'a> {
                 self.backpointers.insert(pos, value.to_vec());
             }
             (Btree::Accounting, kind::ACCOUNTING) => {
-                self.accounting.insert(pos, value.as_chunks::<8>().0.iter().map(|c| u64::from_le_bytes(*c)).collect());
+                // A stored total of zero is valid and compared as absent, as
+                // upstream compares it (A7.26-A7.28).
+                let counters: Vec<u64> = value.as_chunks::<8>().0.iter().map(|c| u64::from_le_bytes(*c)).collect();
+                if counters.iter().any(|&c| c != 0) {
+                    self.accounting.insert(pos, counters);
+                }
             }
             (Btree::Inodes, kind::INODE | kind::INODE_V2) => return Err(super::Error::Unsupported("inode in a format before inode_v3")),
             (Btree::Inodes, kind::INODE_V3) if root_snapshot => {

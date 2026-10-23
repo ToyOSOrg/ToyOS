@@ -253,7 +253,7 @@ impl<'a> Tally<'a> {
         for (state, counts) in states {
             self.count(&[class::DEV_DATA_TYPE, 0, state], &counts);
         }
-        // A key whose counters are all zero is not kept.
+        // A total of zero is compared as absent (A7.27, A7.28).
         self.accounting.retain(|_, c| c.iter().any(|&c| c != 0));
         Derived { buckets: self.buckets, freespace, need_discard, bucket_gens, lru, backpointers: self.backpointers, accounting: self.accounting }
     }

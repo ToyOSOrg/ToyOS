@@ -46,9 +46,12 @@ what upstream stored in its own volumes, a replayed journal's included; it
 checks the journal against the superblock. It mounts a volume read-write
 (`Mount`): namespace operations as journaled transactions, nodes appended to or
 split by reclaim, a crash replayed and a clean unmount, which upstream's fsck
-also passes. Btree buckets are not yet reused (B6), file data is not yet
-written (B7), so symlinks are not yet created online. It replaced a read side written from
-upstream's headers. Its tests read volumes upstream's tools wrote
+also passes. It refuses to write a volume of blocks under 4 KiB or nodes under
+16 KiB. Btree buckets are not yet reused (B6), file data is not yet written
+(B7), so symlinks are not yet created online, and its reclaim reserves are
+sized for common rewrites
+(`issues/bcachefs-reclaim-reserves-are-sized-for-common-rewrites.md`). It
+replaced a read side written from upstream's headers. Its tests read volumes upstream's tools wrote
 (`lib/bcachefs/tests/fixtures/`). The build writes ROOT with it, at the
 smallest size that leaves no bucket free, and the loader, `imgstat` and the
 SYSTEM file server read ROOT through its reader. The rest of the crate is

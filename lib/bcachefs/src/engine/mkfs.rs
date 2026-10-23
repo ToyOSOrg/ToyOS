@@ -1,11 +1,8 @@
-//! A complete clean volume: superblock copies, a journal holding the one
-//! empty entry `clean` names, the root subvolume, snapshot and snapshot
-//! tree, a [`Tree`]'s inodes, dirents and data under the root directory, the
-//! inode cursor, and the allocator and accounting state all of that derives.
-//! No key it writes names a journal sequence.
-//!
-//! The entry is sequence 1, as a clean unmount leaves its last: a volume
-//! going read-write is then never unclean with nothing to replay (A2.13).
+//! A complete clean volume: superblock copies, an empty journal and
+//! `clean`, the root subvolume, snapshot and snapshot tree, a [`Tree`]'s
+//! inodes, dirents and data under the root directory, the inode cursor, and
+//! the allocator and accounting state all of that derives. Nothing it
+//! writes names a journal sequence, so `clean`'s is 0.
 
 use alloc::collections::BTreeMap;
 use alloc::vec::Vec;
@@ -16,7 +13,7 @@ use toyos_crypto::Random;
 use super::bkey::{Bpos, Key};
 use super::crypt::MasterKey;
 use super::node::{self, Build};
-use super::superblock::{entry_type, field_type, member_flag, Crypt, Field, Header, Kdf, Layout, Member, Superblock, KEY_VERSION, LAYOUT, MAX_NODE_SECTORS, PRIMARY};
+use super::superblock::{field_type, member_flag, Crypt, Field, Header, Kdf, Layout, Member, Superblock, LAYOUT, MAX_NODE_SECTORS, PRIMARY};
 use super::derive::{Space, Tally};
 use super::tree::{Populated, Tree};
 use super::value::{self, data_type, Alloc, NodePtr, Ptr};
@@ -100,7 +97,6 @@ pub async fn mkfs(dev: &impl BlockDev, options: &Options<'_>, tree: &Tree<'_>, r
     for (sector, bytes) in &volume.nodes {
         write(dev, *sector, bytes).await?;
     }
-    write(dev, volume.journal.0, &volume.journal.1).await?;
     for &offset in &volume.header.layout.offsets {
         write(dev, offset, &Superblock::encode(&volume.header, &volume.fields, offset)).await?;
     }
@@ -139,8 +135,6 @@ pub fn fit<R: Random + Clone>(options: &Options<'_>, tree: &Tree<'_>, random: &R
 struct Encoded<'t, 'a> {
     population: Populated<'t, 'a>,
     nodes: Vec<(u64, Vec<u8>)>,
-    /// The journal's one entry, by its first sector.
-    journal: (u64, Vec<u8>),
     header: Header,
     fields: Vec<Field>,
 }
@@ -191,12 +185,6 @@ impl<'t, 'a> Encoded<'t, 'a> {
             nodes.push((n.sector, node::encode(magic, BLOCK, key.as_ref(), &build)?));
         }
 
-        let mut area = Vec::new();
-        let roots = laid.roots.iter().map(|(b, l, k)| (*b as u8, *l, &k[..]));
-        journal::tail(&mut area, roots, options.time / 1_000_000_000, 0, [0; 2]);
-        let entry = journal::encode(&internal_uuid, BLOCK, key.as_ref(), &journal::Jset { seq: CLEAN_SEQ, last_seq: CLEAN_SEQ, area: &area })?;
-        let journal = (geometry.journal.0 * geometry.bucket, entry);
-
         let member = Member {
             uuid: member_uuid,
             nbuckets: geometry.nbuckets,
@@ -208,7 +196,7 @@ impl<'t, 'a> Encoded<'t, 'a> {
             seq: 1,
             bitmap: laid.bitmap,
             journal_bucket: 0,
-            journal_offset: (journal.1.len() / SECTOR) as u32,
+            journal_offset: 0,
             identity_zero: true,
         };
         let crypt = match (&options.encryption, &key) {
@@ -237,12 +225,9 @@ impl<'t, 'a> Encoded<'t, 'a> {
             layout: geometry.layout.clone(),
         };
         let fields = fields(&geometry, &member, crypt.as_ref(), &laid.roots);
-        Ok(Encoded { population, nodes, journal, header, fields })
+        Ok(Encoded { population, nodes, header, fields })
     }
 }
-
-/// The sequence of the entry mkfs writes, which `clean` names.
-const CLEAN_SEQ: u64 = 1;
 
 /// The feature bits `format` sets, all of a clean volume's.
 pub(crate) const FEATURES: u64 = 0x000f_ba80;
@@ -300,19 +285,7 @@ fn fields(geometry: &Geometry, member: &Member, crypt: Option<&Crypt>, roots: &[
     put64(&mut journal, 0, geometry.journal.0);
     put64(&mut journal, 8, geometry.journal.1);
 
-    // `clean`: the journal's entry, the key version, both clocks at 0, every
-    // root.
-    let mut clean = alloc::vec![0u8; 16];
-    put64(&mut clean, 8, CLEAN_SEQ);
-    record(&mut clean, KEY_VERSION, 0, entry_type::USAGE, &0u64.to_le_bytes());
-    for rw in 0..2u8 {
-        let mut clock = [0u8; 16];
-        clock[0] = rw;
-        record(&mut clean, 0, 0, entry_type::CLOCK, &clock);
-    }
-    for (btree, level, key) in roots {
-        record(&mut clean, *btree as u8, *level, entry_type::BTREE_ROOT, key);
-    }
+    let clean = journal::clean_body(0, roots.iter().map(|(b, l, k)| (*b, *l, &k[..])), 0, [0; 2]);
 
     let mut out = alloc::vec![
         Field { kind: field_type::EXT, body: ext },
@@ -330,17 +303,6 @@ fn fields(geometry: &Geometry, member: &Member, crypt: Option<&Crypt>, roots: &[
         Field { kind: field_type::REPLICAS_V0, body: alloc::vec![data_type::BTREE, 1, 0] },
     ]);
     out
-}
-
-/// Appends a `jset_entry` record.
-pub(crate) fn record(out: &mut Vec<u8>, btree: u8, level: u8, kind_: u8, payload: &[u8]) {
-    let mut header = [0u8; 8];
-    put16(&mut header, 0, (payload.len() / 8) as u16);
-    header[2] = btree;
-    header[3] = level;
-    header[4] = kind_;
-    out.extend_from_slice(&header);
-    out.extend_from_slice(payload);
 }
 
 pub(crate) async fn write(dev: &impl BlockDev, sector: u64, bytes: &[u8]) -> Result<()> {
@@ -466,7 +428,7 @@ impl Geometry {
 }
 
 /// A first bset fills at most two thirds of its node, as upstream splits.
-pub(crate) fn capacity(node_bytes: usize) -> usize {
+pub(crate) const fn capacity(node_bytes: usize) -> usize {
     node_bytes * 2 / 3
 }
 

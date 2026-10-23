@@ -40,32 +40,102 @@ enum Write {
 }
 
 impl Plan {
-    /// u64s its pointer update journals at most: a parent key for an
-    /// append; for new nodes their parent keys, and for each node allocated
-    /// or released its alloc, freespace, LRU, need_discard, bucket_gens and
-    /// backpointer keys, beside the accounting keys they share.
-    fn cost(&self) -> u64 {
+    /// New nodes it writes: those holding the keys, and a root above them.
+    fn written(&self) -> usize {
         match &self.write {
-            Write::Append { .. } => APPEND_COST,
-            Write::Fresh { nodes, root } => fresh_cost(nodes.len() + usize::from(root.is_some())),
+            Write::Append { .. } => 0,
+            Write::Fresh { nodes, root } => nodes.len() + usize::from(root.is_some()),
+        }
+    }
+
+    /// u64s its pointer update journals at most.
+    fn cost(&self) -> u64 {
+        match self.written() {
+            0 => APPEND_COST,
+            k => fresh_cost(k),
+        }
+    }
+
+    /// Nodes its pointer update dirties at most.
+    fn nodes(&self) -> usize {
+        match self.written() {
+            0 => 1,
+            k => fresh_nodes(k),
         }
     }
 }
 
-const APPEND_COST: u64 = 16;
-
-/// u64s the pointer update of a node rewritten to `nodes` new ones
-/// journals at most. A measured two-way split journals 176.
-pub(super) const fn fresh_cost(nodes: usize) -> u64 {
-    112 + 64 * nodes as u64
+/// u64s of a key in a btree_keys record whose value is `bytes` long.
+const fn key_u64s(bytes: usize) -> u64 {
+    (KEY_U64S + bytes.div_ceil(8)) as u64
 }
 
+/// A pointer to a node.
+const POINTER: u64 = key_u64s(NodePtr::BYTES);
+/// A key of no value: freespace, LRU and need_discard entries, and a
+/// deletion.
+const SET: u64 = key_u64s(0);
+const ALLOC: u64 = key_u64s(64);
+const BUCKET_GENS: u64 = key_u64s(256);
+const BACKPOINTER: u64 = key_u64s(32);
+const COUNTERS: u64 = key_u64s(24);
+/// Accounting a rewrite changes: its btree's class, the btree replicas
+/// entry, and the device's free, btree and need_discard states (A7.12).
+const ACCOUNTED: u64 = 5;
+/// Record headers, one for each btree and level a rewrite changes: the
+/// parent's, and alloc, freespace, LRU, need_discard, bucket_gens,
+/// backpointers and accounting.
+const HEADERS: u64 = 8;
+
+/// An append's update: the pointer's written sectors, in its record.
+const APPEND_COST: u64 = 1 + POINTER;
+
+/// u64s the pointer update of a node rewritten to `nodes` new ones
+/// journals at most. Each new node: its pointer, its bucket's change and its
+/// backpointer. A bucket that takes a node changes most when taken from
+/// free: its alloc key, the freespace range split about it and an LRU entry
+/// set; one that already holds nodes changes its alloc key and LRU entry.
+/// The old node: its bucket's change, most when it empties (alloc key, its
+/// LRU entry cleared, need_discard and its bucket_gens group), and its
+/// backpointer deleted. And the accounting keys.
+pub(super) const fn fresh_cost(nodes: usize) -> u64 {
+    let taken = ALLOC + 2 * SET + SET;
+    let emptied = ALLOC + SET + SET + BUCKET_GENS;
+    HEADERS + nodes as u64 * (POINTER + taken + BACKPOINTER) + emptied + SET + ACCOUNTED * COUNTERS
+}
+
+/// Nodes the pointer update of a node rewritten to `nodes` new ones
+/// dirties at most: a leaf for each position [`fresh_cost`] changes. The
+/// parent; each new node's bucket's alloc, two freespace and one LRU
+/// position, and its backpointer; the old node's bucket's alloc, LRU, two
+/// need_discard (its sequence is not yet known) and bucket_gens positions,
+/// and its backpointer; and the accounting.
+pub(super) const fn fresh_nodes(nodes: usize) -> usize {
+    1 + 5 * nodes + 5 + 1 + ACCOUNTED as usize
+}
+
+/// New nodes one rewrite writes at most: a node is split in two at most,
+/// and a root above them. A node enters the slot no fuller than a node holds
+/// ([`Mount::transact`]); the transaction holding the slot and the pointer
+/// update of the one reclaim round in flight add at most `K_TX` u64s of
+/// keys each before reclaim, which takes an oversized node first, plans it.
+/// Two nodes of at least [`MIN_NODE`] hold that.
+pub(super) const MAX_REWRITE: usize = 3;
+
+/// Cache room reclaim's transaction takes past the limit, for the leaves
+/// it dirties: every position of a rewrite to one node in a leaf of its
+/// own. A batch whose positions could need more is granted this, as they
+/// share leaves; one that dirties more is refused and stops the mount, never
+/// overfilling the cache.
+pub(super) const RECLAIM_ROOM: usize = fresh_nodes(1);
+
+const _: () = assert!(fresh_cost(MAX_REWRITE) <= K_TX, "the largest rewrite fits one reclaim transaction");
+
 impl<D: BlockDev> Mount<D> {
-    /// One batch of dirty nodes chosen by `order`, planned
-    /// under the slot and written outside it; then their pointer updates
-    /// journaled. The journal is written once that frees a bucket of its
-    /// ring, so a sweep's updates share entries. Whether there was any node
-    /// to write.
+    /// One batch of dirty nodes chosen by `order`, planned under the slot
+    /// and written outside it; then their pointer updates journaled. The
+    /// journal is written once that frees a bucket of its ring, so a sweep's
+    /// updates share entries. Whether there was any node to write.
     pub(super) async fn reclaim_round(&self, order: Order) -> Result<bool> {
         let plans = self.write_batch(order).await?;
         if plans.is_empty() {
@@ -82,6 +152,11 @@ impl<D: BlockDev> Mount<D> {
     /// Its nodes take changes again once written; their pins hold until
     /// [`Mount::point_batch`].
     pub(crate) async fn write_batch(&self, order: Order) -> Result<Vec<Plan>> {
+        let out = self.write_batch_once(order).await;
+        self.stopped_by(out)
+    }
+
+    async fn write_batch_once(&self, order: Order) -> Result<Vec<Plan>> {
         let plans = {
             let _slot = self.slot(Class::Reclaim).await;
             self.plan(order).await?
@@ -103,8 +178,26 @@ impl<D: BlockDev> Mount<D> {
     /// Reclaim's second half: the written batch's pointer updates
     /// journaled, on reclaim's reserves and ahead in the slot.
     pub(crate) async fn point_batch(&self, plans: Vec<Plan>) -> Result<()> {
+        let out = self.point_batch_once(plans).await;
+        self.stopped_by(out)
+    }
+
+    /// `out`, which a reclaim half returned; a failure stops the mount,
+    /// read-only by the failure's name: what the half captured or wrote can
+    /// no longer be made durable.
+    fn stopped_by<T>(&self, out: Result<T>) -> Result<T> {
+        if let Err(e) = &out {
+            self.stop(match *e {
+                Error::NoSpace(why) | Error::Corrupt(why) | Error::Unsupported(why) | Error::ReadOnly(why) | Error::Checksum(why) | Error::Invalid(why) => why,
+                _ => "a reclaim write failed",
+            });
+        }
+        out
+    }
+
+    async fn point_batch_once(&self, plans: Vec<Plan>) -> Result<()> {
         let bound = plans.iter().map(Plan::cost).sum();
-        let nodes = plans.len() + RECLAIM_LEAVES;
+        let nodes = plans.iter().map(Plan::nodes).sum::<usize>().min(RECLAIM_ROOM);
         // Closed entries hold pipeline depth that only writing them returns:
         // reclaim never waits on what it would itself have to do.
         self.flush_closed().await?;
@@ -153,14 +246,24 @@ impl<D: BlockDev> Mount<D> {
                 let n = st.cache.node(id);
                 let root = st.new_roots.get(&n.btree) == Some(&id) || st.roots.get(&n.btree).is_some_and(|r| r.ptr.ptr.sector == n.sector);
                 let later = node::later_record_bytes(n.unwritten.keys().map(|pos| changed(n, *pos).len())).next_multiple_of(block);
-                let append = !n.fresh && n.written > 0 && usize::from(n.on_disk) * SECTOR + later <= node_bytes;
+                // An oversized node is split: an append would leave it so.
+                let append = !n.fresh && n.written > 0 && !st.cache.oversized(n) && usize::from(n.on_disk) * SECTOR + later <= node_bytes;
                 let sizes: Vec<usize> = n.keys.iter().map(|(_, v)| 8 * (KEY_U64S + v.len().div_ceil(8))).collect();
-                let groups = mkfs::spread(&sizes, mkfs::capacity(node_bytes) - FIRST_KEYS);
+                // At two thirds, as upstream splits; an oversized node, too
+                // full for two at that, in two halves a node each holds.
+                let mut groups = mkfs::spread(&sizes, mkfs::capacity(node_bytes) - FIRST_KEYS);
+                if groups.len() > 2 {
+                    groups = mkfs::spread(&sizes, node_bytes - FIRST_KEYS);
+                }
                 (n.btree, n.level, root, append, groups)
             };
+            if groups.len() > 2 {
+                // Past what a node holds by more than the keys this writer
+                // adds ([`MAX_REWRITE`]).
+                return Err(Error::Unsupported("a btree node too full to split in two"));
+            }
             let cost = if append { APPEND_COST } else { fresh_cost(groups.len() + usize::from(groups.len() > 1 && root)) };
             if spent + cost > K_TX {
-                assert!(!plans.is_empty(), "a node too large for one reclaim transaction to split");
                 break;
             }
             spent += cost;
@@ -198,12 +301,17 @@ impl<D: BlockDev> Mount<D> {
                 });
                 Write::Fresh { nodes, root: above.transpose()? }
             };
-            self.st.borrow_mut().cache.change(id, |n| {
+            plans.push(Plan { id, btree, level, root, write });
+        }
+        // Captured only once the whole batch is planned: a plan that fails
+        // leaves every node as it was.
+        let mut st = self.st.borrow_mut();
+        for p in &plans {
+            st.cache.change(p.id, |n| {
                 n.captured = n.unwritten.values().copied().min();
                 n.unwritten.clear();
                 n.writing = true;
             });
-            plans.push(Plan { id, btree, level, root, write });
         }
         Ok(plans)
     }
@@ -243,11 +351,23 @@ impl<D: BlockDev> Mount<D> {
             })
             .await?;
             let b = free.ok_or(Error::NoSpace("no free bucket for a btree node"))?;
+            // Freespace is derived; the bucket's alloc key, and the nodes
+            // the mount holds, must agree it is free.
             let gen = match Source::get(self, Btree::Alloc, Bpos::new(0, b, 0)).await? {
-                Some((k, v)) if k.kind == kind::ALLOC_V4 => AllocV4::decode(&v)?.gen,
-                _ => 0,
+                Some((k, v)) if k.kind == kind::ALLOC_V4 => {
+                    let a = AllocV4::decode(&v)?;
+                    if a.data_type != data_type::FREE || a.dirty != 0 {
+                        return Err(Error::Corrupt("a bucket freespace lists whose alloc key holds data"));
+                    }
+                    a.gen
+                }
+                Some(_) => return Err(Error::Unsupported("alloc key before alloc_v4")),
+                None => 0,
             };
             let mut st = self.st.borrow_mut();
+            if st.cache.any_between(b * bucket, (b + 1) * bucket) {
+                return Err(Error::Corrupt("a bucket freespace lists holding a cached btree node"));
+            }
             st.alloc.taken.insert(b);
             st.alloc.open = Some((b, 0, gen));
         }
@@ -351,9 +471,9 @@ impl<D: BlockDev> Mount<D> {
         let after = &mut buckets.get_mut(&b).expect("just inserted").1;
         if added {
             let clock = self.st.borrow().clocks[1];
-            after.fill(node, clock);
+            after.fill(node, clock, bucket_sectors as u32)?;
         } else {
-            after.drain(node);
+            after.drain(node)?;
         }
         let shift = match self.sb.flag(6, 40, 8) {
             0 => 10,

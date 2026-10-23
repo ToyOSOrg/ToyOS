@@ -64,7 +64,7 @@ fn secret() -> Vec<u8> {
 /// appended bsets no durable pointer reaches.
 #[test]
 fn a_commit_between_a_node_write_and_its_pointer_update_keeps_every_acknowledged_key() {
-    let model = Model::new(formatted(32 << 20, None).into_inner(), 512);
+    let model = Model::new(formatted(64 << 20, None).into_inner(), 512);
     let m = open_rw(&model, None);
     create(&m, b"a");
     block_on_ready(m.commit()).unwrap();
@@ -100,7 +100,7 @@ fn the_first_write_to_a_node_after_a_crash_goes_to_a_fresh_node_and_repeats_no_n
     oracle::reset();
     let secret = secret();
     let p = Some(&secret[..]);
-    let dev = Bytes::new(formatted(32 << 20, Some(Encryption { passphrase: &secret, kdf: MIN_KDF })).into_inner());
+    let dev = Bytes::new(formatted(64 << 20, Some(Encryption { passphrase: &secret, kdf: MIN_KDF })).into_inner());
     let m = open_rw(&dev, p);
     create(&m, b"t1");
     let plans = write_all(&m);
@@ -148,7 +148,7 @@ fn bsets(image: &[u8], sector: u64, node_bytes: usize) -> Vec<u64> {
 /// crashed mount had open would be named again.
 #[test]
 fn a_bset_naming_an_unflushed_sequence_never_reappears_unblacklisted() {
-    let dev = formatted(32 << 20, None);
+    let dev = formatted(64 << 20, None);
     let m = open_rw(&dev, None);
     let durable = 1; // mkfs's entry
     create(&m, b"lost");
@@ -177,7 +177,7 @@ fn a_bset_naming_an_unflushed_sequence_never_reappears_unblacklisted() {
 fn a_torn_bset_is_refused(encryption: Option<Encryption>) {
     let secret = encryption.as_ref().map(|e| e.passphrase.to_vec());
     let p = secret.as_deref();
-    let dev = formatted(32 << 20, encryption);
+    let dev = formatted(64 << 20, encryption);
     let before = dev.get().clone();
     let m = open_rw(&dev, p);
     for i in 0..20 {
@@ -270,7 +270,7 @@ fn a_failed_write_is_reissued_byte_for_byte(journal: bool) {
     oracle::reset();
     let secret = secret();
     let p = Some(&secret[..]);
-    let dev = formatted(32 << 20, Some(Encryption { passphrase: &secret, kdf: MIN_KDF }));
+    let dev = formatted(64 << 20, Some(Encryption { passphrase: &secret, kdf: MIN_KDF }));
     // The journal's blocks, and the nodes' beyond them short of the end
     // superblock copy.
     let (ring, nodes) = {
@@ -287,6 +287,7 @@ fn a_failed_write_is_reissued_byte_for_byte(journal: bool) {
         writes: std::cell::RefCell::default(),
     };
     let m = open_rw(&failing, p);
+    let armed_at = failing.writes.borrow().len();
     failing.armed.set(true);
     for i in 0..30 {
         create(&m, format!("f{i}").as_bytes());
@@ -298,7 +299,7 @@ fn a_failed_write_is_reissued_byte_for_byte(journal: bool) {
     assert!(failing.failed.get(), "no write failed");
     assert_eq!(oracle::reused(), Vec::<[u32; 4]>::new(), "nonces used over two plaintexts");
     let writes = failing.writes.borrow();
-    let first = writes.iter().position(|(lba, _)| (failing.fail)(*lba)).unwrap();
+    let first = armed_at + writes[armed_at..].iter().position(|(lba, _)| (failing.fail)(*lba)).unwrap();
     let again = writes[first + 1..].iter().find(|(lba, _)| *lba == writes[first].0).expect("the failed write reissued");
     assert_eq!(again.1, writes[first].1, "the reissue carried other bytes");
     let v = open_ro(&dev, p).unwrap();
@@ -314,4 +315,118 @@ fn a_failed_journal_write_is_reissued_byte_for_byte() {
 #[test]
 fn a_failed_node_write_is_reissued_byte_for_byte() {
     a_failed_write_is_reissued_byte_for_byte(false);
+}
+
+/// A device whose writes each yield once, as a real one's do, and fail past
+/// every retry once `broken` is set: a node write in flight while another
+/// transaction reaches the node.
+struct Broken<'a> {
+    dev: &'a Image,
+    broken: Cell<bool>,
+}
+
+impl BlockDev for Broken<'_> {
+    fn blocks(&self) -> u64 {
+        self.dev.blocks()
+    }
+
+    async fn read(&self, lba: u64, out: &mut [Block]) -> core::result::Result<(), toyos_blockdev::Error> {
+        self.dev.read(lba, out).await
+    }
+
+    async fn write(&self, lba: u64, data: &[Block]) -> core::result::Result<(), toyos_blockdev::Error> {
+        let mut yielded = false;
+        core::future::poll_fn(|cx| {
+            if yielded {
+                return core::task::Poll::Ready(());
+            }
+            yielded = true;
+            cx.waker().wake_by_ref();
+            core::task::Poll::Pending
+        })
+        .await;
+        if self.broken.get() {
+            return Err(toyos_blockdev::Error::Device);
+        }
+        self.dev.write(lba, data).await
+    }
+
+    async fn flush(&self) -> core::result::Result<(), toyos_blockdev::Error> {
+        self.dev.flush().await
+    }
+}
+
+/// A node write that fails past its retries while a transaction waits on
+/// that node: the mount stops read-only, and both the reclaim and the
+/// waiting transaction answer `ReadOnly` or the write's error, never a
+/// stall; unmount refuses rather than spin.
+#[test]
+fn a_node_write_failing_past_its_retries_stops_the_mount_and_its_waiters() {
+    use core::future::Future;
+    use core::pin::Pin;
+    use toyos_blockdev::executor::Executor;
+    let dev = formatted(64 << 20, None);
+    let broken = Broken { dev: &dev, broken: Cell::new(false) };
+    let m = Executor::new().block_on(Mount::open(&broken, MEMORY, random()), || panic!("mount stalled")).unwrap();
+    Executor::new().block_on(async { m.create(m.root(), b"a", New::File, OWNER, NOW).await.unwrap() }, || panic!("create stalled"));
+    broken.broken.set(true);
+    let reclaim = core::cell::RefCell::new(None);
+    let late = core::cell::RefCell::new(None);
+    let mut work: Vec<Pin<Box<dyn Future<Output = ()> + '_>>> = vec![
+        Box::pin(async { *reclaim.borrow_mut() = Some(m.write_batch(Order::OldestPin).await.map(|p| p.len())) }),
+        Box::pin(async { *late.borrow_mut() = Some(m.create(m.root(), b"b", New::File, OWNER, NOW).await.map(|i| i.ino)) }),
+    ];
+    Executor::new().block_on(
+        core::future::poll_fn(|cx| {
+            work.retain_mut(|f| f.as_mut().poll(cx).is_pending());
+            if work.is_empty() { core::task::Poll::Ready(()) } else { core::task::Poll::Pending }
+        }),
+        || panic!("a writer stalled behind the failed write; {}", m.dump()),
+    );
+    drop(work);
+    assert_eq!(reclaim.into_inner(), Some(Err(Error::Device(toyos_blockdev::Error::Device))));
+    assert_eq!(late.into_inner(), Some(Err(Error::ReadOnly("btree node write failed"))));
+    let unmounted = Executor::new().block_on(m.unmount(), || panic!("unmount stalled"));
+    assert_eq!(unmounted, Err(Error::ReadOnly("btree node write failed")));
+}
+
+/// A plan that fails on the second node of its batch: after a crash every
+/// node's first write is fresh, and on this volume each node takes a bucket
+/// of its own, the second of which freespace lists but whose alloc key holds
+/// data. The mount stops read-only by the failure's name, and the next
+/// transaction and the unmount answer that rather than wait.
+#[test]
+fn a_reclaim_plan_failing_midway_stops_the_mount() {
+    use super::super::bucket::Bucket;
+    use toyos_blockdev::executor::Executor;
+    let dev = formatted(64 << 20, None);
+    let second_free = {
+        let v = block_on_ready(Volume::open(&dev)).unwrap();
+        assert_eq!(v.superblock().node_sectors(), u32::from(v.superblock().member.bucket_sectors), "a node to a bucket");
+        let mut b = None;
+        block_on_ready(super::super::read::Source::walk(&v, Btree::Freespace, Bpos::MIN, |k, _| {
+            assert!(k.size >= 2);
+            b = Some((k.pos.offset & ((1 << 56) - 1)) - u64::from(k.size) + 1);
+            Ok(false)
+        }))
+        .unwrap();
+        b.unwrap()
+    };
+    let at = Bpos::new(0, second_free, 0);
+    let held = Bucket { data_type: super::super::value::data_type::USER, dirty: 8, ..Bucket::HOLE }.encode().to_vec();
+    rewrite_leaf(&dev, Btree::Alloc, at, 0, |keys| keys.push((Key::new(kind::ALLOC_V4, at), held)));
+    {
+        let m = open_rw(&dev, None);
+        create(&m, b"a");
+        block_on_ready(m.commit()).unwrap();
+        // A crash: the mount dropped, never unmounted.
+    }
+    let m = open_rw(&dev, None);
+    let stalled = || panic!("stalled; {}", m.dump());
+    create(&m, b"b");
+    let first = Executor::new().block_on(m.write_batch(Order::OldestPin), stalled);
+    assert_eq!(first.err(), Some(Error::Corrupt("a bucket freespace lists whose alloc key holds data")));
+    let late = Executor::new().block_on(async { m.create(m.root(), b"late", New::File, OWNER, NOW).await.map(|i| i.ino) }, stalled);
+    assert_eq!(late, Err(Error::ReadOnly("a bucket freespace lists whose alloc key holds data")));
+    assert_eq!(Executor::new().block_on(m.unmount(), || panic!("unmount stalled")), Err(Error::ReadOnly("a bucket freespace lists whose alloc key holds data")));
 }

@@ -148,6 +148,11 @@ impl Cache {
         Some(id)
     }
 
+    /// Whether any node lies at a sector of `[start, end)`.
+    pub(crate) fn any_between(&self, start: u64, end: u64) -> bool {
+        self.by_sector.range(start..end).next().is_some()
+    }
+
     /// The node at `sector`, without counting a use.
     pub(crate) fn id_at(&self, sector: u64) -> Option<NodeId> {
         self.by_sector.get(&sector).copied()
