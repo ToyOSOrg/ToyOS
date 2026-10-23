@@ -42,7 +42,10 @@ jobs:
           key: host-sealed-${{ runner.os }}-${{ runner.arch }}-${{ github.run_id }}
           restore-keys: host-sealed-${{ runner.os }}-${{ runner.arch }}-
 
-      - run: cargo run -- --ci host
+      # `--locked`: this cargo resolves before the driver runs, so it alone sees
+      # the committed `Cargo.lock`. A merge that is clean as text can leave one
+      # cargo would rewrite.
+      - run: cargo run --locked -- --ci host
 
   scope:
     if: github.event_name != 'pull_request'
