@@ -6,8 +6,15 @@ edition = "2021"
 license = "MIT OR Apache-2.0"
 
 [dependencies]
-# The work group's compression, pure Rust and the same code on both systems.
+# The work and crunch groups' compression, pure Rust and the same code on both systems.
 miniz_oxide = "0.9"
+# The crunch group's hashing: ToyOS's own SHA-256, which its ssh server runs.
+toyos-crypto = { path = "../../../lib/crypto" }
+# The crunch group's compile-like task: parsing Rust, with no compiler to load.
+syn = { version = "2", default-features = false, features = ["full", "parsing"] }
+# The LAN group's two ends, and the rules readings are judged by.
+osbench-lan = { path = "lan" }
+osbench-rules = { path = "rules" }
 
 [target.'cfg(target_os = "toyos")'.dependencies]
 toyos-abi = { path = "../../../sdk/abi" }

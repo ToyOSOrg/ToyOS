@@ -192,9 +192,9 @@ pub fn map_unmap_small() {
 
 /// One thread's bandwidth over two 64 MiB buffers, far past either bench's
 /// last-level cache, in MB/s of buffer covered: `read` sums it, `write`
-/// stores a pattern, `copy` stores the source xor a constant — a loop the
+/// stores a pattern, and `copy` stores the source xor a constant — a loop the
 /// compiler cannot turn into a `memcpy` call, so both systems run the same
-/// instructions — and `memcpy` is `copy_from_slice`, each system's own.
+/// instructions. Each system's own `memcpy` is `mem.memcpy.*`'s.
 /// Both are asked for huge pages; the line says how much each gave, and
 /// ToyOS gives none yet. One unread round, then seven, per kind.
 pub fn bandwidth() {
@@ -235,10 +235,6 @@ pub fn bandwidth() {
         for (d, s) in d.iter_mut().zip(s.iter()) {
             *d = *s ^ 0x9e37_79b9_7f4a_7c15;
         }
-        std::hint::black_box(dst.ptr());
-    });
-    kind("memcpy", &mut || {
-        dst.words().copy_from_slice(src.words());
         std::hint::black_box(dst.ptr());
     });
 }

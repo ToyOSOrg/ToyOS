@@ -1,5 +1,5 @@
 //! Time: what reading the clock costs, how close a sleep lands to what was
-//! asked, and what yielding costs.
+//! asked, how late a 1 ms timer fires, and what yielding costs.
 
 use std::thread;
 use std::time::{Duration, Instant};
@@ -15,6 +15,8 @@ const YIELD: &str = if cfg!(target_os = "toyos") { "spin_hint_no_syscall" } else
 pub fn suite() {
     clock_read();
     sleeps("");
+    // A timer at 1 kHz: the periodic wake at a 1 ms period.
+    crate::wake::periodic("time.timer_1ms.late", Duration::from_millis(1));
     #[cfg(target_os = "linux")]
     {
         // As the periodic wake does: an ordinary Linux sleep is padded by up
@@ -22,6 +24,7 @@ pub fn suite() {
         let slack = crate::sys::timer_slack_ns();
         crate::sys::set_timer_slack_ns(1);
         sleeps(".slack1ns");
+        crate::wake::periodic("time.timer_1ms.late.slack1ns", Duration::from_millis(1));
         crate::sys::set_timer_slack_ns(slack);
     }
     yields();

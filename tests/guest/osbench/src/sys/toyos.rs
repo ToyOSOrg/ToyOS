@@ -362,3 +362,14 @@ pub fn map_anon_4k(len: usize) -> *mut u8 {
 pub fn persistent_dir() -> Option<(String, String)> {
     Some(("/log".into(), "boot USB stick TOYOS-LOG partition, FAT32, LOG file server over usbd mass storage".into()))
 }
+
+/// What carries a connection on ToyOS: netstack drives one card, Ethernet.
+pub fn link_of(_local: std::net::IpAddr) -> Result<(crate::lan::Link, String), String> {
+    Ok((crate::lan::Link::Wired, "netstack's one Ethernet card".into()))
+}
+
+/// ToyOS reads no temperature: the kernel counts none
+/// (`toyos_abi::counters::Counter`) and no driver serves one.
+pub fn package_sensor() -> Result<super::Sensor, String> {
+    Err("no counter or service carries the package's temperature".into())
+}

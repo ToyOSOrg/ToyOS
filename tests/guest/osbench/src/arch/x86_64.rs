@@ -1,8 +1,9 @@
 //! What osbench needs written for x86-64 in particular: CPU identity and
-//! topology as CPUID reads them (ToyOS has no call that says), a chain of
-//! dependent adds to time the clock with, and the bytes of a program that
-//! exits.
+//! topology as CPUID reads them (on ToyOS, which has no call that says, and
+//! on both for the munmap pair's APIC IDs), a chain of dependent adds to time
+//! the clock with, and the bytes of a program that exits.
 
+pub use cpuid::{cpu_id, cpu_id_is};
 #[cfg(target_os = "toyos")]
 pub use cpuid::{core_of, cpu_model, current_cpu, threads_per_core};
 
@@ -63,7 +64,6 @@ pub const EXIT_CODE: [u8; 11] = [
 #[cfg(target_os = "toyos")]
 const _: () = assert!(toyos_abi::syscall::SYS_EXIT == 0x48);
 
-#[cfg(target_os = "toyos")]
 mod cpuid {
     use core::arch::x86_64::__cpuid_count;
     use std::sync::OnceLock;
@@ -73,6 +73,7 @@ mod cpuid {
         /// EBX[15:0] is 0 enumerates nothing).
         x2apic: bool,
         /// Right shift from an APIC ID to its core's ID.
+        #[cfg_attr(target_os = "linux", allow(dead_code))]
         smt_shift: u32,
     }
 
@@ -106,16 +107,29 @@ mod cpuid {
         }
     }
 
+    /// [`current_cpu`], as the munmap pair reads it on either system.
+    pub fn cpu_id() -> Result<u32, &'static str> {
+        Ok(current_cpu())
+    }
+
+    /// Which register [`cpu_id`] reads on this CPU.
+    pub fn cpu_id_is() -> &'static str {
+        if topology().x2apic { "cpuid.0bh.edx" } else { "cpuid.01h.ebx" }
+    }
+
     /// The core an APIC ID belongs to: two CPUs of one core are SMT siblings.
+    #[cfg(target_os = "toyos")]
     pub fn core_of(apic: u32) -> u32 {
         apic >> topology().smt_shift
     }
 
+    #[cfg(target_os = "toyos")]
     pub fn threads_per_core() -> u32 {
         1 << topology().smt_shift
     }
 
     /// The processor brand string, CPUID 8000_0002H to 8000_0004H.
+    #[cfg(target_os = "toyos")]
     pub fn cpu_model() -> String {
         let mut bytes = Vec::with_capacity(48);
         for leaf in 0x8000_0002u32..=0x8000_0004 {

@@ -1,0 +1,104 @@
+//! The machine's link to a peer on its network, through std's `net` on both
+//! systems (`osbench-lan`): this machine broadcasts for an `osbench-peer`,
+//! then times TCP to it. Every connection is this machine's own, so a system
+//! that accepts none from its network is measured all the same.
+//!
+//! Each result is named for the link that carried it, `lan.wired.*` or
+//! `lan.wifi.*`, and the link not measured says why: a Linux run measures
+//! whichever link reaches the peer, and ToyOS drives Ethernet alone
+//! (`issues/there-is-no-wifi.md`). No address is printed.
+
+use std::net::{Ipv4Addr, SocketAddr};
+use std::time::{Duration, Instant};
+
+use osbench_lan::Peer;
+
+use crate::report::{condition, refuse, result, unmeasured, unsupported};
+
+/// How long a peer is asked for, which a boot's lease lands inside too.
+const DISCOVERY: Duration = Duration::from_secs(60);
+/// Each transfer's span.
+const SPAN: Duration = Duration::from_secs(5);
+
+/// The links a result can be named for.
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub enum Link {
+    Wired,
+    Wifi,
+}
+
+impl Link {
+    fn name(self) -> &'static str {
+        match self {
+            Link::Wired => "wired",
+            Link::Wifi => "wifi",
+        }
+    }
+}
+
+fn benches(link: Link) -> [String; 4] {
+    ["tcp.connect", "tcp.rtt.64", "tcp.upload", "tcp.download"].map(|b| format!("lan.{}.{b}", link.name()))
+}
+
+pub fn suite() {
+    if cfg!(target_os = "toyos") {
+        for bench in benches(Link::Wifi) {
+            unsupported(&bench, "ToyOS has no Wi-Fi driver: issues/there-is-no-wifi.md");
+        }
+    }
+    let broadcast = SocketAddr::from((Ipv4Addr::BROADCAST, osbench_lan::PORT));
+    let started = Instant::now();
+    let ip = match osbench_lan::discover(broadcast, DISCOVERY) {
+        Ok(Some(ip)) => ip,
+        Ok(None) => return refuse("lan", format!("no osbench-peer answered on the link within {DISCOVERY:?}")),
+        Err(e) if cfg!(target_os = "toyos") && e.kind() == std::io::ErrorKind::NotConnected => {
+            return benches(Link::Wired).iter().for_each(|b| unsupported(b, format!("no network stack answers: {e}")));
+        }
+        Err(e) => return refuse("lan", format!("no socket to look for a peer with: {e}")),
+    };
+    condition("lan.peer_found_after_ms", started.elapsed().as_millis());
+    let peer = Peer(SocketAddr::new(ip, osbench_lan::PORT));
+    let link = match peer.local() {
+        Ok(local) => crate::sys::link_of(local.ip()),
+        Err(e) => return refuse("lan", format!("the peer answered and took no connection: {e}")),
+    };
+    let (measured, said) = match link {
+        Ok((link, said)) => (link, said),
+        Err(why) => return refuse("lan", why),
+    };
+    condition("lan.link", said);
+    let other = if measured == Link::Wired { Link::Wifi } else { Link::Wired };
+    if cfg!(target_os = "linux") {
+        for bench in benches(other) {
+            unmeasured(&bench, &format!("this run reached its peer over its {} link", measured.name()), &[]);
+        }
+    }
+    measure(&peer, &benches(measured));
+}
+
+fn measure(peer: &Peer, [connect, rtt, upload, download]: &[String; 4]) {
+    crate::measure::each(connect, 5, 50, &[], |_| peer.connect().map_err(|e| format!("connect: {e}")));
+    match peer.echo(64) {
+        Ok(mut echo) => crate::measure::each(rtt, 100, 2000, &[("nodelay", "1".into())], |_| {
+            echo.round_trip().map_err(|e| format!("echo: {e}"))
+        }),
+        Err(e) => refuse(rtt, format!("the echo would not open: {e}")),
+    }
+    type Transfer = fn(&Peer, Duration) -> std::io::Result<osbench_lan::Transfer>;
+    for (bench, run) in [(upload, Peer::upload as Transfer), (download, Peer::download)] {
+        let rounds = || -> Result<Vec<u64>, String> {
+            run(peer, SPAN).map_err(|e| e.to_string())?;
+            crate::clock::settle();
+            (0..3)
+                .map(|_| {
+                    let moved = run(peer, SPAN).map_err(|e| e.to_string())?;
+                    Ok(moved.bytes * 1000 / moved.ns)
+                })
+                .collect()
+        };
+        match rounds() {
+            Ok(mut mbps) => result(bench, "MB/s", &mut mbps, &[("span_ms", SPAN.as_millis().to_string())]),
+            Err(why) => refuse(bench, why),
+        }
+    }
+}

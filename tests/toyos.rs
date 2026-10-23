@@ -1577,8 +1577,10 @@ const TESTCASES: &[metal::Arm] = &[metal::once(
 /// `osbench`'s groups, each a job named by its symlink, in `osbench all`'s
 /// order: `boot` first, which reads how long the boot took to reach it, and
 /// `persist` last, which writes the log volume.
-const OSBENCH_GROUPS: [&str; 13] = [
+const OSBENCH_GROUPS: [&str; 18] = [
     "osbench_boot",
+    "osbench_identity",
+    "osbench_energy",
     "osbench_system",
     "osbench_sched",
     "osbench_fair",
@@ -1590,16 +1592,22 @@ const OSBENCH_GROUPS: [&str; 13] = [
     "osbench_time",
     "osbench_work",
     "osbench_tail",
+    "osbench_nvme",
+    "osbench_lan",
+    "osbench_crunch",
     "osbench_persist",
 ];
 
 /// The suite runs past every boot's bound on purpose: `tail` alone waits out
 /// 100 s of wakes and spinners. Six boots of `e5573b7fe` ended their last job
 /// at 175 to 191 s on five, and at 244 s on the T14's first, where one
-/// served 64 MiB write stalled and `files` took 80 s against 13; so a list
-/// bound of 300 s leaves that stall 56 s.
+/// served 64 MiB write stalled and `files` took 80 s against 13. The groups
+/// since add at most 230 s by their own spans: `lan`'s 60 s looking for its
+/// peer and 50 s measuring, `crunch`'s two 16 s phases and two 30 s
+/// cool-downs, and under 30 s of memcpy sizes, pipe sizes and 1 ms timers.
+/// So a list bound of 540 s leaves that stall 66 s.
 const BENCHCASE: &[metal::Arm] = &[metal::Arm {
-    adds_ms: 240_000,
+    adds_ms: 480_000,
     ..metal::once("benchcase", "tests/images/benchcase.toml", &[], &OSBENCH_GROUPS)
 }];
 

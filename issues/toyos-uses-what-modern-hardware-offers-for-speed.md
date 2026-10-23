@@ -17,7 +17,7 @@ model 60h) and AMD EPYC KVM guests, and a stage's correctness test runs on
 each that has its feature. A figure is the T14's, and the AMD bench's too
 where the stage's path differs there, since the EPYC guests are shared CI
 runners: the median of 11 runs with its spread, taken by the program of
-`issues/no-program-measures-toyos-against-linux-on-one-machine.md`.
+`issues/no-published-run-compares-toyos-with-linux-on-one-machine.md`.
 A stage that its hardware's manufacturers or the published state of the art
 back follows and cites them, and its figure is reported and never blocks it: a
 slowdown is filed as a defect carrying both figures and investigated. A stage nothing published covers is
@@ -82,7 +82,7 @@ taken: the instruments, then what is measured, then the design rounds not
 yet measured.
 
 - `issues/no-test-can-hold-a-thread-on-a-named-cpu.md`
-- `issues/no-program-measures-toyos-against-linux-on-one-machine.md`
+- `issues/no-published-run-compares-toyos-with-linux-on-one-machine.md`
 - `issues/no-row-holds-a-wake-beside-seven-spinners-to-100-us.md`
 - `issues/per-cpu-scheduler-and-pmm-state-shares-lines-every-cpu-writes.md`
 - `issues/a-wake-storm-costs-the-t14-twice-the-amd-benchs-time-per-waiter-and-nothing-says-why.md`

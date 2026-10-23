@@ -61,7 +61,7 @@ and once to stop; on the AMD bench both sit at its TSC's floor.
 **Next: a TSC-deadline twin on the T14**, `main` plus the scout with the
 one-shot armed and stopped through `IA32_TSC_DEADLINE`, beside `main` plus
 the scout in the same session. Each arm reads the 1 ms timer lateness of
-`issues/no-program-measures-toyos-against-linux-on-one-machine.md` and the
+`issues/no-published-run-compares-toyos-with-linux-on-one-machine.md` and the
 split above, its re-arm segment opening at `set_timer` (`kernel/src/hw.rs:49`)
 in both. Each arm runs 11 times; a run's figure is the median lateness of
 its 1 ms timers, and an arm's is the median of its 11 with their spread,

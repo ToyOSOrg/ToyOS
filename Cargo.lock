@@ -2267,10 +2267,22 @@ version = "0.1.0"
 dependencies = [
  "libc",
  "miniz_oxide",
+ "osbench-lan",
+ "osbench-rules",
+ "syn 2.0.117",
  "toyos",
  "toyos-abi",
+ "toyos-crypto",
  "toyos-trace",
 ]
+
+[[package]]
+name = "osbench-lan"
+version = "0.1.0"
+
+[[package]]
+name = "osbench-rules"
+version = "0.1.0"
 
 [[package]]
 name = "p256"

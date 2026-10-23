@@ -41,3 +41,12 @@ pub const EXIT_CODE: [u8; 16] = [
 ];
 
 const _: () = assert!(libc::SYS_exit_group == 94);
+
+/// AArch64 names a CPU to EL0 by no register: `MPIDR_EL1` is EL1's.
+pub fn cpu_id() -> Result<u32, &'static str> {
+    Err("AArch64 has no register naming the CPU that EL0 can read")
+}
+
+pub fn cpu_id_is() -> &'static str {
+    "none"
+}
