@@ -9,8 +9,8 @@ opened: 2026-10-23
 A stream shared between processes copies under a per-direction gate, one
 holder's at a time, and a holder whose call waits for another's gate warns
 every `GATE_STALL_NANOS` it lasts (`sdk/toyos/src/net/stream.rs`,
-`gate_wait`): a holder stopped inside its gate section, by a debugger or a
-fault in its own buffer, leaves the others waiting, and the wait says so.
+`gate_wait`): a holder stopped inside its gate section by a debugger leaves
+the others waiting, and the wait says so.
 That covers a blocking read or write and libc's interruptible ones
 (`stream::wait_ready`). Two waits on the same doorbell do not report it:
 

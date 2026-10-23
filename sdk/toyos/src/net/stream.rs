@@ -722,10 +722,9 @@ pub fn watch(handle: RawHandle, way: Way) -> Result<Poll, Refused> {
     }
 }
 
-/// A wait until `way` of the stream `handle` reaches may be ready, or `wake`
-/// is readable, on `poller`, of two handles, which the caller keeps across its
-/// waits: nothing is copied, and the caller asks again. A wait for another
-/// holder's gate is reported as a blocking call's is.
+/// Waits on `poller` (capacity 2, kept by the caller across waits) until
+/// `way` of the stream `handle` reaches may be ready or `wake` is readable;
+/// copies nothing. A wait under another holder's gate reports its stall.
 pub fn wait_ready(handle: RawHandle, way: Way, wake: RawHandle, poller: &crate::poller::Poller) -> Result<(), Refused> {
     let Poll::Watching(watching) = watch(handle, way)? else { return Ok(()) };
     let bell = Call { slot: watching.slot, end: watching.end, base: watching.base }.bells().handle(session::doorbell(way));
