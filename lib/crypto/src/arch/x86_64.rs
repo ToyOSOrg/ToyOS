@@ -205,7 +205,7 @@ pub(super) fn p256_square(a: &[u64; 4]) -> Option<[u64; 4]> {
 }
 
 /// 2^255 - 19 multiplication by `f25519::mul` where BMI2 and ADX are
-/// admitted. The kernels use general registers alone, so UEFI takes them too.
+/// admitted.
 #[inline]
 pub(super) fn f25519_mul(a: &[u64; 4], b: &[u64; 4]) -> Option<[u64; 4]> {
     if !features().bmi2_adx() {
