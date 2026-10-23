@@ -62,7 +62,7 @@ review has been done, and passing vectors does not show it is safer than ring.
 | `toyos-ssh`'s SSH protocol (`lib/ssh`: `kex`, the server, the client). In the image through `system/sshserver` since `issues/the-ssh-server-is-toyos-own-and-russh-is-gone.md` stage 2 | the crate, since stage 1 | X25519, ML-KEM-768 and its hybrid, Ed25519 sign/verify, `chacha20-poly1305@openssh.com`, SHA-256/512, and a caller-supplied `Random` for replays |
 | `toyos-ssh`'s `hostkey` on the signing path. `build/signing.rs` reads the owner's image-signing key through `openssh_seed` and writes a minted one through `openssh_private`; both derive the public key from the seed | `toyos_update::sig::public_of`, the crate's since #1019 | nothing |
 | `system/sshserver` | `toyos-ssh`, since the SSH track's stage 2 | none directly; it reaches the crate through `toyos-ssh` |
-| Image and package signing: `lib/update` (the loader, `/system/bin/update`, `build/signing.rs`, `build/root`, #892's repository keys) | the crate's strict Ed25519 and SHA-2, since #1019; signing and a seed's public key behind `sign`, on the host | stage 6's bench readings |
+| Image and package signing: `lib/update` (the loader, `/system/bin/update`, `build/signing.rs`, `build/root`, #892's repository keys) | the crate's Ed25519 and SHA-2, since #1019; signing and a seed's public key behind `sign`, on the host | stage 6's bench readings |
 | Every SHA-256: the build, `pkg`, `lib/swap`, `system/update`, `lib/update` and the loader | the crate, since #1016: SHA-NI on x86-64, the UEFI loader's in a block that saves the XMM registers it uses; the Armv8 SHA instructions where the target promises them. No slower than `toyos-sha2-hw`, which it replaces, on either bench: on the T14 4.6 times as fast at 64 B and 9 and 6 percent faster at 16 KiB and 1 MiB, on the AMD bench 2.8 times at 64 B, 2 percent at 16 KiB and equal at 1 MiB (#1016's evidence) | nothing |
 | ToyOS's own HTTPS clients. On the host: the build's `ureq` (`build/release.rs`) and doom's build script (`apps/doom/build.rs`). In a guest, none today: `https_tls13` and `pkg install <url>` are stages 3 and 5 of `issues/the-internet-clients-work-unchanged.md` | the host's two: the crate's rustls provider through ureq's `rustls-no-provider`, since #1020, its key exchange on X25519 and X25519MLKEM768 alone while the T14 finding stands. In a guest, none | the NIST groups back once the T14 finding is resolved |
 | Wi-Fi's `wlan` (`issues/there-is-no-wifi.md` P6, W2) | nothing yet | PBKDF2-HMAC-SHA1, the 802.11i PRF and RFC 3394 unwrap, which the crate has. AES-CMAC-128, SAE over P-256 by hash-to-element, a public constant-time comparison and a public wiping secret, which it lacks |
@@ -522,41 +522,47 @@ Not consumers:
        decode canonically. Section 6's reference `verify` reduces k, as
        ring and `verify_strict` do; section 5.1.7's literal equation does
        not, and the two differ only for a mixed-order A (speccheck case 3
-       fails the unreduced one). An R of order dividing 8 is refused.
-     - Two refusals go beyond RFC 8032. Anyone can sign for a small-order
-       key: R = [S]B verifies under it whenever 8 divides k. A small-order
-       R is one RFC 8032 signing makes with probability about 2^-252, and
-       with a prime-order key only its holder can make one; no security
-       requirement forces its refusal. **Awaiting the owner:** whether it
-       stays. It is kept meanwhile.
+       fails the unreduced one).
+     - One refusal goes beyond RFC 8032. Anyone can sign for a small-order
+       key: R = [S]B verifies under it whenever 8 divides k.
+     - An R of order dividing 8 is taken where the equation holds, as RFC
+       8032 takes it. The owner accepted removing #1044's extra refusal on
+       the condition, argued in #1047, that it adds no security property
+       the contract requires. Under a prime-order key such an R is the
+       identity with S = k a, which only the key's holder can make, and
+       RFC 8032 signing makes it whenever r is a multiple of L.
      - Times 8, the reduced-k equation is the cofactored one, which accepts
-       more where R or A has a torsion component (cases 4 and 5); RFC
-       8032's key generation and signing make neither.
+       more where R or A has a nonzero torsion component (cases 4 and 5);
+       RFC 8032's key generation and signing make neither.
    - The edge corpus is Wycheproof's `ed25519` and the twelve cases of
      Chalkias et al., "Taming the many EdDSAs" (2020). Every Wycheproof
      verdict is the file's. `lib/crypto/tests/ed25519_verdicts.rs` gives
      each speccheck case and each known disagreement an expected verdict
      and the rule deciding it, with both cross-checks' verdicts pinned.
-     Done (#1044):
-     - **`verify_strict` differs on one class of key.** Of the 38
+     Done (#1044, #1047):
+     - **`verify_strict` differs on a small-order R and one class of
+       key.** It refuses every R of order dividing 8: R = O with S = k a
+       under an RFC 8032 key, and speccheck case 2 (a mixed-order key and
+       a small-order R), both of which satisfy the equation. Of the 38
        encodings with y of p or more, it decodes the 20 whose y - p is on
        the curve and not small-order (y - p in 3-6, 9, 10, 14-16 and 18,
        either sign), which section 5.1.3 refuses. Signing for one takes
        the discrete log of a point chosen by its y, so no signature verdict
-       is known to differ. Every speccheck verdict is `verify_strict`'s.
-     - **ring differs on small-order keys, non-canonical small-order keys
-       and a small-order R.** It accepts a signature satisfying the
-       cofactorless equation under each of the 14 encodings of a
-       small-order point, including the 6 non-canonical ones (y of p or
-       p + 1, and x = 0 signed). Whether it decodes the 20 mixed-order keys
-       with y of p or more is not known: no signature can show it. It accepts R = O with S = k a under an RFC 8032 key. In the
-       speccheck cases that is 0 and 1 (small-order key), 2 (small-order R)
-       and 11 (the key (0, -1) with x = 0 signed).
+       is known to differ there.
+     - **ring differs on small-order keys and non-canonical small-order
+       keys.** It accepts a signature satisfying the cofactorless equation
+       under each of the 14 encodings of a small-order point, including the
+       6 non-canonical ones (y of p or p + 1, and x = 0 signed). Whether it
+       decodes the 20 mixed-order keys with y of p or more is not known: no
+       signature can show it. In the speccheck cases that is 0 and 1
+       (small-order key) and 11 (the key (0, -1) with x = 0 signed).
      - All three refuse cases 4 and 5 (only the cofactored equation
        holds), 6 and 7 (S of L or more), 8 and 9 (a non-canonical R) and
        10 (a non-canonical key under which ring's equation fails too), and
        accept case 3, a mixed-order key and R satisfying the reduced-k and
-       cofactored equations.
+       cofactored equations. ToyOS and ring accept case 2 and R = O under
+       an RFC 8032 key; all three refuse the seven other small-order R under
+       one, which no S can make satisfy the equation.
    - The loader verifies a signed image on the T14 and the AMD bench, with
      its verification time measured on each. Done (#1019's probe image,
      #1016's evidence): 253,975 counter ticks on the T14 at its stated

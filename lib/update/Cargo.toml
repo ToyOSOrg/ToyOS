@@ -20,7 +20,7 @@ publish = false
 sign = ["toyos-crypto/sign"]
 
 [dependencies]
-# Strict Ed25519 verification (RFC 8032, small-order and non-canonical
+# Ed25519 verification (RFC 8032, small-order keys and non-canonical
 # encodings refused), SHA-512 over the signed header as SSHSIG names it, and
 # SHA-256 over the sections and a package archive. `no_std`.
 toyos-crypto = { path = "../crypto" }

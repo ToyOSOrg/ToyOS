@@ -2,8 +2,8 @@
 //! RustCrypto's `ed25519-dalek` 2.2 `verify_strict` and ring 0.17 as
 //! cross-checks. Each expected verdict comes from the rule, and each
 //! oracle's verdict is pinned beside it, so a red names who moved. ring
-//! departs from the rules on small-order and non-canonical keys and on a
-//! small-order R; `verify_strict` on a key whose y is p or more.
+//! departs from the rules on small-order and non-canonical keys;
+//! `verify_strict` on a small-order R and on a key whose y is p or more.
 
 mod support;
 
@@ -88,7 +88,7 @@ fn speccheck_cases() {
     let expected: [(Result<(), Error>, bool, bool, &str); 12] = [
         (SMALL_KEY, false, true, "small-order A and R, S = 0: a small-order key is refused; ring takes it"),
         (SMALL_KEY, false, true, "small-order A, mixed-order R: a small-order key is refused; ring takes it"),
-        (BAD_SIGNATURE, false, true, "mixed-order A, small-order R: a small-order R is refused; ring takes it"),
+        (ACCEPTED, false, true, "mixed-order A, small-order R satisfying the equation: R is taken, as RFC 8032 takes it; verify_strict refuses it"),
         (ACCEPTED, true, true, "mixed-order A and R satisfying [S]B = R + [k mod L]A, as section 6 reduces k; section 5.1.7's unreduced k fails, as it may only for a mixed-order A"),
         (BAD_SIGNATURE, false, false, "mixed-order A and R satisfying only the cofactored equation: cofactorless"),
         (BAD_SIGNATURE, false, false, "mixed-order A, prime-order R, only the cofactored equation: cofactorless"),
@@ -149,11 +149,11 @@ fn a_small_order_key_is_refused_though_anyone_can_sign_for_it() {
 
 /// RFC 8032 section 5.1.3 step 1 refuses y of p or more, every one of the
 /// 38 encodings y = p + j, j < 19. `verify_strict` decodes the twenty whose
-/// y - p is on the curve and not small-order, and its verdict there is
-/// ToyOS's only difference from it. No signature for such a key is known to
-/// anyone: it would take the discrete log of a point named by its
-/// y-coordinate, so no signature verdict can show the difference. ring
-/// decodes y = p and p + 1 (the small-order test) and is not consulted here.
+/// y - p is on the curve and not small-order: the only keys on which the
+/// two differ. No signature for such a key is known to anyone: it would
+/// take the discrete log of a point named by its y-coordinate, so no
+/// signature verdict can show the difference. ring decodes y = p and
+/// p + 1 (the small-order test) and is not consulted here.
 #[test]
 #[cfg_attr(not(feature = "portable"), ignore = "the same code in every form: run in the portable one")]
 fn a_key_with_y_of_p_or_more_is_refused_where_verify_strict_decodes_it() {
@@ -171,30 +171,44 @@ fn a_key_with_y_of_p_or_more_is_refused_where_verify_strict_decodes_it() {
     }
 }
 
-/// With a key the RFC 8032 key generation makes, R = O and S = k a satisfy
-/// the equation: a small-order R that only the key's holder can make, and
-/// which RFC 8032 signing makes with probability about 2^-252. It is refused
-/// as R; ring takes it. The three non-canonical encodings of O as R are
-/// refused by everyone, because R must decode (RFC 8032 section 5.1.3)
-/// though [S]B - [k]A is O, and so is S + L (section 5.1.7).
+/// Each canonical small-order R under a key the RFC 8032 key generation
+/// makes, with S = k a, the S that makes [S]B - [k]A the identity O. R = O
+/// is accepted: RFC 8032 signing emits exactly this signature when r is a
+/// multiple of L, improbable but possible, and only the key's holder can
+/// make it. ring takes it; `verify_strict` refuses every small-order R. The
+/// other seven fail the equation for any S, because [S]B - [k]A is then a
+/// multiple of B, never a point of order 2, 4 or 8.
 #[test]
 #[cfg_attr(not(feature = "portable"), ignore = "the same code in every form: run in the portable one")]
-fn small_order_and_non_canonical_r_and_s_past_l_are_refused() {
+fn r_of_order_dividing_8_is_taken_where_the_equation_holds() {
+    let (a, public) = scalar_and_point([9; 32]);
+    let message = b"r = 0";
+    for (encoding, _) in &SMALL_ORDER[..8] {
+        let r: [u8; 32] = support::hex(encoding).try_into().unwrap();
+        let signature = signature(&r, &le(&(challenge(&r, &public, message) * &a % order())));
+        let identity = r == le(&BigUint::from(1u32));
+        assert_eq!(equation_holds(&public, message, &signature), identity, "R {encoding}: the constructed signature");
+        let ours = if identity { ACCEPTED } else { BAD_SIGNATURE };
+        assert_eq!(verdicts(&public, message, &signature), Verdicts { ours, strict: false, ring: identity }, "R {encoding}");
+    }
+}
+
+/// R must decode (RFC 8032 section 5.1.3): the three non-canonical
+/// encodings of O as R are refused by everyone though [S]B - [k]A is O. So
+/// is an honest signature's S + L (section 5.1.7).
+#[test]
+#[cfg_attr(not(feature = "portable"), ignore = "the same code in every form: run in the portable one")]
+fn non_canonical_r_and_s_past_l_are_refused() {
     let (a, public) = scalar_and_point([9; 32]);
     let message = b"no nonce";
-    let forged = |r: &str| {
-        let r: [u8; 32] = support::hex(r).try_into().unwrap();
-        signature(&r, &le(&(challenge(&r, &public, message) * &a % order())))
-    };
-    let identity = forged("0100000000000000000000000000000000000000000000000000000000000000");
-    assert!(equation_holds(&public, message, &identity));
-    assert_eq!(verdicts(&public, message, &identity), Verdicts { ours: BAD_SIGNATURE, strict: false, ring: true });
     for alias in [
         "0100000000000000000000000000000000000000000000000000000000000080",
         "eeffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff7f",
         "eeffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff",
     ] {
-        assert_eq!(verdicts(&public, message, &forged(alias)), Verdicts { ours: BAD_SIGNATURE, strict: false, ring: false }, "R {alias}");
+        let r: [u8; 32] = support::hex(alias).try_into().unwrap();
+        let forged = signature(&r, &le(&(challenge(&r, &public, message) * &a % order())));
+        assert_eq!(verdicts(&public, message, &forged), Verdicts { ours: BAD_SIGNATURE, strict: false, ring: false }, "R {alias}");
     }
 
     let pair = ring::signature::Ed25519KeyPair::from_seed_unchecked(&[9; 32]).unwrap();

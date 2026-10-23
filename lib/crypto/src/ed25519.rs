@@ -46,7 +46,7 @@ const B_T: Tight = Tight::from_bytes(&[
 ]);
 
 /// The canonical encodings of the eight points of order dividing 8, which
-/// verification refuses as R or as a public key.
+/// [`PublicKey::from_bytes`] refuses.
 const SMALL_ORDER: [[u8; 32]; 8] = [
     hex("0000000000000000000000000000000000000000000000000000000000000000"),
     hex("0000000000000000000000000000000000000000000000000000000000000080"),
@@ -562,20 +562,17 @@ impl PublicKey {
     /// an encoding, so R decodes as section 5.1.3 requires. Section 5.1.7's
     /// literal equation takes k unreduced, which differs only for a
     /// mixed-order A. Times 8 this equation is the cofactored one, which
-    /// accepts more where R or A has a torsion component; RFC 8032's key
-    /// generation and signing make neither. Beyond RFC 8032, R of order
-    /// dividing 8 is refused; RFC 8032 signing makes one with probability
-    /// about 2^-252, and with a prime-order key only the key's holder can
-    /// make one.
+    /// accepts more where R or A has a nonzero torsion component; RFC 8032's
+    /// key generation and signing make neither. An R of order dividing 8 is
+    /// taken, as RFC 8032 takes it: under a prime-order A it is the identity
+    /// with S = k a mod L, which only the key's holder can compute, and RFC
+    /// 8032 signing makes it whenever r is a multiple of L.
     pub fn verify(&self, message: &[u8], signature: &[u8]) -> Result<(), Error> {
         if signature.len() != 64 {
             return Err(Error::Length);
         }
         let r_bytes: &[u8; 32] = signature[..32].try_into().unwrap();
         let s_bytes: &[u8; 32] = signature[32..].try_into().unwrap();
-        if SMALL_ORDER.contains(r_bytes) {
-            return Err(Error::InvalidSignature);
-        }
         let s = PublicScalar::canonical(s_bytes).ok_or(Error::InvalidSignature)?;
         let mut h = Sha512::new();
         h.update(r_bytes)?;
