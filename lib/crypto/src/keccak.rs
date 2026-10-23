@@ -1,6 +1,6 @@
-//! FIPS 202 sponge used only by ML-KEM. Absorption and permutation have fixed
-//! schedules for public lengths. Rate/domain separation are internal constants.
-//! State and explicit permutation workspaces are erased, including on failure.
+//! FIPS 202 sponge used only by ML-KEM. Its schedule depends only on the rate
+//! and the input and output lengths, which are public; the domain and rate are
+//! internal constants. The state is erased when the sponge drops.
 use crate::secret::wipe64;
 const RC: [u64; 24] = [
     1,
@@ -28,7 +28,8 @@ const RC: [u64; 24] = [
     0x80000001,
     0x8000000080008008,
 ];
-const ROT: [u32; 25] = [
+/// ρ's rotation of lane x + 5y (FIPS 202 §3.2.2).
+const RHO: [u32; 25] = [
     0, 1, 62, 28, 27, 36, 44, 6, 55, 20, 3, 10, 43, 25, 39, 41, 45, 15, 21, 8, 18, 2, 61, 56, 14,
 ];
 pub(crate) struct Sponge {
@@ -49,61 +50,80 @@ impl Sponge {
             rate,
             position: 0,
         };
-        for p in parts {
-            for &b in *p {
-                s.state[s.position / 8] ^= u64::from(b) << (8 * (s.position % 8));
-                s.position += 1;
-                if s.position == rate {
-                    s.permute();
-                    s.position = 0
-                }
-            }
+        for part in parts {
+            s.absorb(part)
         }
-        s.state[s.position / 8] ^= u64::from(domain) << (8 * (s.position % 8));
-        let last = rate - 1;
-        s.state[last / 8] ^= 0x80u64 << (8 * (last % 8));
-        s.permute();
+        s.xor_byte(s.position, domain);
+        s.xor_byte(rate - 1, 0x80);
+        permute(&mut s.state);
         s.position = 0;
         s
     }
-    fn permute(&mut self) {
-        let mut c = [0; 5];
-        let mut d = [0; 5];
-        let mut b = [0; 25];
-        for rc in RC {
-            for x in 0..5 {
-                c[x] = (0..5).fold(0, |c, y| c ^ self.state[x + 5 * y])
-            }
-            for x in 0..5 {
-                d[x] = c[(x + 4) % 5] ^ c[(x + 1) % 5].rotate_left(1)
-            }
-            for y in 0..5 {
-                for x in 0..5 {
-                    let i = x + 5 * y;
-                    b[y + 5 * ((2 * x + 3 * y) % 5)] = (self.state[i] ^ d[x]).rotate_left(ROT[i]);
-                }
-            }
-            for y in 0..5 {
-                for x in 0..5 {
-                    self.state[x + 5 * y] =
-                        b[x + 5 * y] ^ (!b[(x + 1) % 5 + 5 * y] & b[(x + 2) % 5 + 5 * y]);
-                }
-            }
-            self.state[0] ^= rc;
-        }
-        wipe64(&mut c);
-        wipe64(&mut d);
-        wipe64(&mut b)
+    fn xor_byte(&mut self, at: usize, byte: u8) {
+        self.state[at / 8] ^= u64::from(byte) << (8 * (at % 8))
     }
-    pub(crate) fn read(&mut self, output: &mut [u8]) {
-        for byte in output {
+    /// A whole lane at a time where the position is on one; every rate is.
+    fn absorb(&mut self, mut data: &[u8]) {
+        while !data.is_empty() {
+            let at = self.position;
+            let step = match data.first_chunk::<8>() {
+                Some(word) if at.is_multiple_of(8) => {
+                    self.state[at / 8] ^= u64::from_le_bytes(*word);
+                    8
+                }
+                _ => {
+                    self.xor_byte(at, data[0]);
+                    1
+                }
+            };
+            data = &data[step..];
+            self.position += step;
             if self.position == self.rate {
-                self.permute();
+                permute(&mut self.state);
                 self.position = 0
             }
-            *byte = (self.state[self.position / 8] >> (8 * (self.position % 8))) as u8;
-            self.position += 1
         }
+    }
+    pub(crate) fn read(&mut self, mut output: &mut [u8]) {
+        while !output.is_empty() {
+            if self.position == self.rate {
+                permute(&mut self.state);
+                self.position = 0
+            }
+            let at = self.position;
+            let step = if at.is_multiple_of(8) && output.len() >= 8 { 8 } else { 1 };
+            let lane = self.state[at / 8].to_le_bytes();
+            let (head, rest) = core::mem::take(&mut output).split_at_mut(step);
+            head.copy_from_slice(&lane[at % 8..at % 8 + step]);
+            output = rest;
+            self.position += step
+        }
+    }
+}
+/// Keccak-f[1600] (FIPS 202 §3.3), lane x + 5y at index x + 5y. Each loop but
+/// the rounds' has constant bounds, for the compiler to unroll.
+fn permute(a: &mut [u64; 25]) {
+    for &rc in &RC {
+        let c: [u64; 5] = core::array::from_fn(|x| a[x] ^ a[x + 5] ^ a[x + 10] ^ a[x + 15] ^ a[x + 20]);
+        for x in 0..5 {
+            let d = c[(x + 4) % 5] ^ c[(x + 1) % 5].rotate_left(1);
+            for y in 0..5 {
+                a[x + 5 * y] ^= d
+            }
+        }
+        // ρ and π: lane (x, y), rotated, moves to (y, 2x + 3y).
+        let mut b = [0; 25];
+        for y in 0..5 {
+            for x in 0..5 {
+                b[y + 5 * ((2 * x + 3 * y) % 5)] = a[x + 5 * y].rotate_left(RHO[x + 5 * y])
+            }
+        }
+        for y in 0..5 {
+            for x in 0..5 {
+                a[x + 5 * y] = b[x + 5 * y] ^ (!b[(x + 1) % 5 + 5 * y] & b[(x + 2) % 5 + 5 * y])
+            }
+        }
+        a[0] ^= rc
     }
 }
 pub(crate) fn h(parts: &[&[u8]]) -> [u8; 32] {
@@ -134,5 +154,27 @@ mod tests {
                 0x80, 0xf8, 0x43, 0x4a
             ]
         );
+    }
+
+    /// The lane-wise and byte-wise paths agree: any split of the input into
+    /// parts, and of the output into reads, gives the one-piece answer.
+    #[test]
+    fn splits_do_not_change_the_output() {
+        let data: [u8; 400] = core::array::from_fn(|i| (i * 7 + 3) as u8);
+        for rate in [72, 136, 168] {
+            let mut want = [0; 400];
+            Sponge::new(rate, 31, &[&data]).read(&mut want);
+            for cut in [1, 3, 8, 9, 15, 64, 71, 135, 167, 169, 399] {
+                let (a, b) = data.split_at(cut);
+                let mut got = [0; 400];
+                let mut sponge = Sponge::new(rate, 31, &[a, b]);
+                let (head, tail) = got.split_at_mut(cut);
+                for piece in head.chunks_mut(5) {
+                    sponge.read(piece)
+                }
+                sponge.read(tail);
+                assert_eq!(got, want, "rate {rate}, cut {cut}");
+            }
+        }
     }
 }

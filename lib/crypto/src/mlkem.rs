@@ -176,16 +176,18 @@ fn sample(rho: &[u8; 32], row: usize, col: usize) -> Poly {
     let mut xof = Sponge::new(168, 31, &[rho, &[col as u8, row as u8]]);
     let mut out = Poly::zero();
     let mut pos = 0;
+    let mut block = [0; 168];
     while pos < 256 {
-        let mut b = [0; 3];
-        xof.read(&mut b);
-        for v in [
-            u16::from(b[0]) | ((u16::from(b[1]) & 15) << 8),
-            (u16::from(b[1]) >> 4) | (u16::from(b[2]) << 4),
-        ] {
-            if u32::from(v) < Q && pos < 256 {
-                out.0[pos] = v;
-                pos += 1
+        xof.read(&mut block);
+        for b in block.as_chunks::<3>().0 {
+            for v in [
+                u16::from(b[0]) | ((u16::from(b[1]) & 15) << 8),
+                (u16::from(b[1]) >> 4) | (u16::from(b[2]) << 4),
+            ] {
+                if u32::from(v) < Q && pos < 256 {
+                    out.0[pos] = v;
+                    pos += 1
+                }
             }
         }
     }
