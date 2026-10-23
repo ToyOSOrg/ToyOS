@@ -15,7 +15,9 @@
 //! that booted us from a removable-media fallback path has no entry of ours at
 //! all and must be told so rather than have one guessed at.
 
-use crate::efi::{cstr16, CStr16, DevicePath, Handle, HardDrive, LoadedImage, SystemTable, VariableAttributes, GLOBAL_VARIABLE};
+use toyos_devicepath::HardDrive;
+
+use crate::efi::{cstr16, CStr16, DevicePath, Handle, LoadedImage, SystemTable, VariableAttributes, GLOBAL_VARIABLE};
 
 /// The head of every line this module writes.
 const HEAD: &str = "Boot chain:";

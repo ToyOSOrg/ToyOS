@@ -359,6 +359,16 @@ pub(super) fn sys_counters(syscap: RawHandle, out: &mut UserBytesMut) -> u64 {
     }
 }
 
+/// The sources the loader handed, into `out`: requires a `SysCap` carrying
+/// `Rights::INVENTORY`.
+pub(super) fn sys_boot_sources(syscap: RawHandle, out: &mut UserBytesMut) -> u64 {
+    if let Err(e) = demand_syscap(syscap, Rights::INVENTORY) {
+        return e.refuse();
+    }
+    out.write_at(0, toyos_abi::usersafe::bytes(&crate::loaded::sources()));
+    0
+}
+
 /// The most records one `SYS_DEVICE_INVENTORY` buffer may be declared to hold,
 /// 64 KiB of them: a declared length past it is refused before it becomes a
 /// window, and a machine with more records than this is refused by name rather

@@ -252,6 +252,7 @@ dependencies = [
  "toyos-acpi",
  "toyos-blackbox",
  "toyos-bootmap",
+ "toyos-devicepath",
  "toyos-elf",
  "toyos-gpt",
  "toyos-microcode",
@@ -1515,6 +1516,7 @@ dependencies = [
  "toyos-amdvi",
  "toyos-blackbox",
  "toyos-bootmap",
+ "toyos-devicepath",
  "toyos-dma",
  "toyos-elf",
  "toyos-gicv3",
@@ -3600,6 +3602,13 @@ name = "toyos-device-memory"
 version = "0.1.0"
 
 [[package]]
+name = "toyos-devicepath"
+version = "0.1.0"
+dependencies = [
+ "toyos-gpt",
+]
+
+[[package]]
 name = "toyos-dhcp"
 version = "0.1.0"
 dependencies = [
@@ -3945,6 +3954,7 @@ dependencies = [
  "toyos",
  "toyos-abi",
  "toyos-blockring",
+ "toyos-devicepath",
  "toyos-gpt",
  "toyos-manifest",
 ]

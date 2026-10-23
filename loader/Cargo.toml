@@ -37,3 +37,5 @@ toyos-tsc = { path = "../lib/tsc" }
 toyos-update = { path = "../lib/update" }
 # Where on ROOT the patch for this CPU is, as the build names it.
 toyos-microcode = { path = "../lib/microcode" }
+# Every device path this loader reads or hands the kernel, held to one check.
+toyos-devicepath = { path = "../lib/devicepath" }

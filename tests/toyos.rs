@@ -4594,15 +4594,12 @@ fn job_window(qemu: &mut QemuInstance, command: &str) -> Result<String, String> 
 }
 
 /// The xHCI controller a job's claim took on a metal boot, by address and
-/// card: handed over, and not the one firmware booted through, which the
-/// image's usbd row drives — so whichever port holds the stick, the spare is
-/// the other controller.
-fn spare_xhci(kernel: &serial::Serial) -> Result<(String, String), String> {
+/// card: handed over, and not the one the supervisor says `@boot` is, which
+/// the image's usbd row drives — so whichever port holds the stick, the spare
+/// is the other controller.
+fn spare_xhci(kernel: &serial::Serial, log: &serial::Serial) -> Result<(String, String), String> {
     let text = kernel.text();
-    let boot = text
-        .lines()
-        .find_map(|l| l.split_once(toyos_abi::boot::BOOT_FUNCTION_LINE)?.1.split_whitespace().next())
-        .ok_or_else(|| format!("the kernel never named the function firmware booted through:\n{text}"))?;
+    let boot = boot_xhci(log)?;
     let mut spares: Vec<(String, String)> = Vec::new();
     for line in text.lines() {
         let Some((at, rest)) = line.split_once("pcidev: PCI ").and_then(|(_, l)| l.split_once(" [")) else { continue };
@@ -4616,6 +4613,14 @@ fn spare_xhci(kernel: &serial::Serial) -> Result<(String, String), String> {
         Ok([spare]) => Ok(spare),
         Err(spares) => Err(format!("not one xHCI controller beside the boot one at {boot} was handed over: {spares:?}")),
     }
+}
+
+/// The controller the supervisor says `@boot` is, as `bb:dd.f`.
+fn boot_xhci(log: &serial::Serial) -> Result<&str, String> {
+    log.text()
+        .lines()
+        .find_map(|l| l.split_once(toyos_manifest::device::BOOT_SAID)?.1.split_whitespace().next())
+        .ok_or_else(|| format!("the supervisor never said which controller `@boot` is:\n{}", log.text()))
 }
 
 /// The job that kills a holder of the spare and claims it again at once, in
@@ -4762,7 +4767,7 @@ fn a_drives_row_holds_one_process_per_function() -> Result<(), String> {
 /// refused and recorded against the claim, which usbd ends on, never told of
 /// its No-Op.
 fn amdvi_usbd(kernel: &serial::Serial, log: &serial::Serial, after: &serial::Serial) -> Result<(), String> {
-    let (at, id) = spare_xhci(kernel)?;
+    let (at, id) = spare_xhci(kernel, log)?;
     let at = at.as_str();
     let handed = format!("pcidev: PCI {at} [{id}] handed over, vector ");
     let vector = kernel
@@ -4888,9 +4893,9 @@ fn usb_controllers(kernel: &serial::Serial) -> Vec<String> {
 /// also carries `amdvi_usbd_drives_its_own_entry`, whose jobs aim the spare
 /// ([`spare_xhci`]) past its grant and at a vector not its own, and which
 /// judges those records itself.
-fn no_fault_but_the_spares(kernel: &serial::Serial) -> Result<(), String> {
+fn no_fault_but_the_spares(kernel: &serial::Serial, log: &serial::Serial) -> Result<(), String> {
     kernel.alive()?;
-    let spares = spare_xhci(kernel).map(|(at, _)| format!(" stream={at} ")).ok();
+    let spares = spare_xhci(kernel, log).map(|(at, _)| format!(" stream={at} ")).ok();
     let theirs = |l: &str| spares.as_deref().is_some_and(|spares| l.contains(spares));
     match kernel.text().lines().find(|l| l.contains("iommu: DMA FAULT") && !theirs(l)) {
         Some(line) => Err(format!("a DMA refusal no job asked for: {line:?}")),
@@ -4911,7 +4916,7 @@ fn amdvi_translates(kernel: &serial::Serial, log: &serial::Serial) -> Result<(),
         return Err(format!("no AMD-Vi unit is translating:\n{text}"));
     }
     kernel.must_not_say("isolates no device")?;
-    no_fault_but_the_spares(kernel)?;
+    no_fault_but_the_spares(kernel, log)?;
     let controllers = usb_controllers(kernel);
     if controllers.is_empty() {
         return Err(format!("no xHCI controller was handed over:\n{text}"));
@@ -4964,7 +4969,7 @@ fn amdvi_remaps(kernel: &serial::Serial, log: &serial::Serial) -> Result<(), Str
     if !remaps.contains(&format!(" {apics} I/O APIC(s) named")) {
         return Err(format!("{remaps:?} does not name the {apics} I/O APIC(s) the MADT has"));
     }
-    no_fault_but_the_spares(kernel)?;
+    no_fault_but_the_spares(kernel, log)?;
     let controllers = usb_controllers(kernel);
     for at in &controllers {
         let data = text
@@ -4986,10 +4991,11 @@ fn amdvi_remaps(kernel: &serial::Serial, log: &serial::Serial) -> Result<(), Str
     Ok(())
 }
 
-/// The controller the boot stick is on, handed over once to the image's
-/// usbd, its message armed in remappable format through an entry of its own
-/// (VT-d's Interrupt Format, bit 4 of an MSI address; AMD-Vi's entry for its
-/// source), its No-Op answered, and the stick served by it.
+/// The controller the boot stick is on, the one the supervisor says `@boot`
+/// is, handed over once to the image's usbd, its message armed in remappable
+/// format through an entry of its own (VT-d's Interrupt Format, bit 4 of an MSI
+/// address; AMD-Vi's entry for its source), its No-Op answered, and the stick
+/// served by it. The supervisor's lines for the boot sources are printed.
 fn usbd_serves_the_boot_stick(kernel: &serial::Serial, log: &serial::Serial) -> Result<(), String> {
     let served: Vec<String> = usb_controllers(kernel)
         .into_iter()
@@ -4998,6 +5004,10 @@ fn usbd_serves_the_boot_stick(kernel: &serial::Serial, log: &serial::Serial) -> 
     let [at] = &served[..] else {
         return Err(format!("not one controller served the stick: {served:?}\n{}", log.text()));
     };
+    let boot = boot_xhci(log)?;
+    if at != boot {
+        return Err(format!("the stick was served on {at}, and the supervisor says `@boot` is {boot}"));
+    }
     let handed = format!("pcidev: PCI {at} [");
     let handovers: Vec<&str> =
         kernel.text().lines().filter(|l| l.contains(&handed) && l.contains("] handed over")).collect();
@@ -5014,6 +5024,9 @@ fn usbd_serves_the_boot_stick(kernel: &serial::Serial, log: &serial::Serial) -> 
     }
     log.must_say(&usbd_noop(at))?;
     eprintln!("  [usbd] {}", line.trim());
+    for source in log.text().lines().filter(|l| l.contains("supervisor: the loader came off") || l.contains("supervisor: the slot volume came off")) {
+        eprintln!("  [usbd] {}", source.trim());
+    }
     for complete in kernel.text().lines().filter(|l| l.contains("Boot: complete")) {
         eprintln!("  [usbd] {}", complete.trim());
     }
@@ -5030,7 +5043,7 @@ fn usbd_serves_the_boot_stick(kernel: &serial::Serial, log: &serial::Serial) -> 
 /// reset the function advertises is read off the release and printed, not
 /// judged.
 fn usbd_on_metal(kernel: &serial::Serial, log: &serial::Serial) -> Result<(), String> {
-    let (at, id) = spare_xhci(kernel)?;
+    let (at, id) = spare_xhci(kernel, log)?;
     let message = kernel
         .text()
         .lines()

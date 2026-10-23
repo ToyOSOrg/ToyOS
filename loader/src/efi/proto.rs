@@ -103,6 +103,30 @@ const NODE_HEADER: usize = 4;
 const END_ENTIRE: (u8, u8) = (0x7f, 0xff);
 
 impl DevicePath {
+    /// The path's bytes through its End of Entire node, where that is within
+    /// `bound` bytes and no node before it is shorter than its header.
+    pub fn bytes(&self, bound: usize) -> Option<&[u8]> {
+        let start = ptr::from_ref(self).cast::<u8>();
+        let mut len = 0;
+        loop {
+            if bound - len < NODE_HEADER {
+                return None;
+            }
+            // SAFETY: firmware's path is a run of nodes ending in End of
+            // Entire, and `len` is where one of them starts.
+            let header = unsafe { core::slice::from_raw_parts(start.add(len), NODE_HEADER) };
+            let node = usize::from(u16::from_le_bytes([header[2], header[3]]));
+            if node < NODE_HEADER || bound - len < node {
+                return None;
+            }
+            len += node;
+            if (header[0], header[1]) == END_ENTIRE {
+                // SAFETY: the nodes walked above.
+                return Some(unsafe { core::slice::from_raw_parts(start, len) });
+            }
+        }
+    }
+
     /// Each node, whole, up to the End of Entire node.
     ///
     /// # Panics
@@ -124,43 +148,6 @@ impl DevicePath {
             // SAFETY: the next node follows this one.
             at = unsafe { at.add(len) };
             Some(node)
-        })
-    }
-}
-
-/// The MEDIA/HARDDRIVE node (§10.3.5.1).
-pub struct HardDrive {
-    pub start: u64,
-    pub size: u64,
-    pub signature: [u8; 16],
-    /// `MBRType`: 2 for a GPT partition.
-    pub format: u8,
-    /// `SignatureType`: 2 for a GUID signature.
-    pub signature_type: u8,
-}
-
-impl HardDrive {
-    pub const TYPE: (u8, u8) = (4, 1);
-    /// `MBRType` of a GPT partition.
-    pub const GPT: u8 = 2;
-    /// `SignatureType` of a GUID signature.
-    pub const GUID_SIGNATURE: u8 = 2;
-    const LEN: usize = 42;
-
-    /// `node`, where it is a HARDDRIVE node of the length §10.3.5.1 gives it:
-    /// a node of a device path firmware built. A load option's path is any
-    /// writer's bytes, and `bootnext` walks it by its own rule.
-    pub fn parse(node: &[u8]) -> Option<HardDrive> {
-        if node.len() != Self::LEN || (node[0], node[1]) != Self::TYPE {
-            return None;
-        }
-        let u64_at = |at: usize| u64::from_le_bytes(node[at..at + 8].try_into().expect("eight bytes"));
-        Some(HardDrive {
-            start: u64_at(8),
-            size: u64_at(16),
-            signature: node[24..40].try_into().expect("sixteen bytes"),
-            format: node[40],
-            signature_type: node[41],
         })
     }
 }

@@ -297,6 +297,11 @@ pub const SYS_PROCESS_QUIT: u64 = 135;
 /// Whether [`SYS_SHUTDOWN`] or [`SYS_REBOOT`] would stop this machine, asked
 /// on the same right and stopping nothing. See [`machine_stops`].
 pub const SYS_MACHINE_STOPS: u64 = 136;
+/// Where firmware loaded this boot from, as the loader handed it. Gated by
+/// [`Rights::INVENTORY`] on a `SysCap`. See [`boot_sources`].
+///
+/// [`Rights::INVENTORY`]: crate::handle::Rights::INVENTORY
+pub const SYS_BOOT_SOURCES: u64 = 137;
 
 /// Bins in the per-process syscall profile — one for every number this ABI
 /// issues, and one at the end for every number it does not.
@@ -304,13 +309,13 @@ pub const SYS_MACHINE_STOPS: u64 = 136;
 /// **The profile's parts sum to its total, and that is the whole requirement.**
 /// A bin array narrower than the ABI reaches drops calls out of the line while
 /// the total goes on counting them.
-pub const SYSCALL_PROFILE_BINS: usize = 138;
+pub const SYSCALL_PROFILE_BINS: usize = 139;
 
 /// Where a number this ABI does not issue is counted. Merging is a degradation
 /// a reader can see in the line; dropping is one nobody can.
 pub const SYSCALL_PROFILE_OTHER: usize = SYSCALL_PROFILE_BINS - 1;
 
-const _: () = assert!(SYS_MACHINE_STOPS < SYSCALL_PROFILE_OTHER as u64);
+const _: () = assert!(SYS_BOOT_SOURCES < SYSCALL_PROFILE_OTHER as u64);
 
 pub const WNOHANG: u64 = 1;
 /// Every bit `SYS_PROCESS_WAIT`'s flag word defines; a wait carrying another
@@ -2057,6 +2062,17 @@ pub fn device_inventory(
         0,
     ))
     .map(|n| n as usize)
+}
+
+/// The [`crate::boot::BootSources`] the loader handed the kernel, unchanged.
+///
+/// `syscap` must carry [`crate::handle::Rights::INVENTORY`]: a capability
+/// without it is refused with a word, and a handle the caller does not hold
+/// ends it.
+pub fn boot_sources(syscap: RawHandle) -> Result<crate::boot::BootSources, SyscallError> {
+    let mut sources = crate::boot::BootSources::NONE;
+    check_unit(syscall(SYS_BOOT_SOURCES, syscap.0 as u64, core::ptr::from_mut(&mut sources) as u64, 0, 0))
+        .map(|()| sources)
 }
 
 /// One [`crate::counters`] record per online CPU, into `buf`; answers how many

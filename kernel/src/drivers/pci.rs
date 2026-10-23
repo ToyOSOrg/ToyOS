@@ -403,7 +403,6 @@ impl PciDevice {
             subclass: self.read_config_u8(SUBCLASS),
             prog_if: self.read_config_u8(PROG_IF),
             driven: toyos_abi::inventory::Driven::Free,
-            boot_path: false,
         }
     }
 

@@ -1,6 +1,6 @@
 [package]
 name = "toyos-supervisor"
-description = "The supervisor's lifecycle decisions, pure: which PCI functions a drives row has a process on, the function a devices entry names, when an ended process is started again, and which partitions a file server's role reaches."
+description = "The supervisor's lifecycle decisions, pure: which PCI functions a drives row has a process on, the function a devices entry names, when an ended process is started again, which partitions a file server's role reaches, and which controller the boot came through."
 version = "0.1.0"
 edition = "2021"
 license = "MIT OR Apache-2.0"
@@ -16,6 +16,8 @@ toyos = { path = "../../../sdk/toyos" }
 # The grant a role's block connector is minted with, and the type that names DATA.
 toyos-blockring = { path = "../../../lib/blockring" }
 toyos-gpt = { path = "../../../lib/gpt" }
+# The boot sources' paths, refused when malformed and said in their text form.
+toyos-devicepath = { path = "../../../lib/devicepath" }
 
 [lints.rust]
 warnings = "deny"

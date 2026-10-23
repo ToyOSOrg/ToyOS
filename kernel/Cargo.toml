@@ -519,5 +519,7 @@ toyos-random = { path = "../lib/random" }
 toyos-symbols = { path = "../lib/symbols" }
 toyos-userbound = { path = "../lib/userbound" }
 toyos-wallclock = { path = "../lib/wallclock" }
+# The structural check of the paths the loader hands over (`loaded`).
+toyos-devicepath = { path = "../lib/devicepath" }
 hashbrown = { version = "0.16", default-features = false }
 dlmalloc = { version = "0.2", default-features = false }

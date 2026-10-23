@@ -40,8 +40,8 @@ use super::ipc::{
     sys_port_badge, sys_port_create, sys_port_mint, sys_shm_create, sys_shm_map,
 };
 use super::machine::{
-    sys_counters, sys_device_inventory, sys_log_read, sys_machine_stops, sys_reboot, sys_shutdown, sys_sysinfo,
-    sys_trace_read,
+    sys_boot_sources, sys_counters, sys_device_inventory, sys_log_read, sys_machine_stops, sys_reboot, sys_shutdown,
+    sys_sysinfo, sys_trace_read,
     MAX_INVENTORY_RECORDS,
 };
 #[cfg(feature = "test-actuators")]
@@ -261,6 +261,13 @@ pub(crate) fn syscall_dispatch(num: u64, a1: u64, a2: u64, a3: u64, a4: u64) -> 
             let len = count * toyos_abi::inventory::RECORD_BYTES as u64;
             let Some(mut buf) = ctx.user_bytes_mut(UserAddr::new(a2), len) else { return bad_addr };
             sys_device_inventory(RawHandle(a1 as u32), &mut buf)
+        }
+        // Where the machine booted from, part of its census like the
+        // inventory's partitions, so it costs Rights::INVENTORY too.
+        SYS_BOOT_SOURCES => {
+            let len = core::mem::size_of::<toyos_abi::boot::BootSources>() as u64;
+            let Some(mut buf) = ctx.user_bytes_mut(UserAddr::new(a2), len) else { return bad_addr };
+            sys_boot_sources(RawHandle(a1 as u32), &mut buf)
         }
         // What every CPU counts, so it costs Rights::COUNTERS; a CPU per record,
         // so the count is bounded by the most CPUs there can be.

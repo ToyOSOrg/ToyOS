@@ -7,10 +7,11 @@ use core::mem;
 
 use alloc::vec;
 use alloc::alloc::Layout;
+use toyos_devicepath::HardDrive;
 use toyos_elf::section::SectionTable;
 use toyos_elf::{rela, ImageOffset, Op, RelaTable, SymTab};
 use efi::{
-    cstr16, CStr16, DevicePath, EdidActive, Gop, Handle, HardDrive, LoadedImage, MemoryDescriptor, Mode, PixelFormat, ResetType,
+    cstr16, CStr16, DevicePath, EdidActive, Gop, Handle, LoadedImage, MemoryDescriptor, Mode, PixelFormat, ResetType,
     SimpleFileSystem, Status, SystemTable, ACPI2_GUID, PAGE_SIZE,
 };
 use toyos_abi::boot::{KernelArgs, MemoryMapEntry, RootBridgeWindow, EDID_BLOCK, MAX_ROOT_BRIDGE_WINDOWS};
@@ -30,7 +31,7 @@ macro_rules! println {
 mod arch;
 mod attempt;
 mod blackbox;
-mod bootfunction;
+mod bootsource;
 mod bootnext;
 mod efi;
 mod floor;
@@ -553,7 +554,7 @@ fn start_kernel(kernel: LoadedKernel, kernel_elf_bytes: vec::Vec<u8>, cmdline: v
         }
     }
 
-    let boot_function = bootfunction::of(&system_table);
+    let boot_sources = bootsource::sources(&system_table, &slot_volume_guid);
     // The last of the firmware questions, and asked here for the same reason
     // the GOP's was asked before this: the protocol dies with boot services.
     //
@@ -697,7 +698,7 @@ fn start_kernel(kernel: LoadedKernel, kernel_elf_bytes: vec::Vec<u8>, cmdline: v
         slot_volume_guid,
         supervisor_image,
         fileserver_image,
-        boot_function,
+        boot_sources,
     };
     if let Some(edid) = gop.as_ref().and_then(|g| g.edid) {
         kernel_args.gop_edid = edid;

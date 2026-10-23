@@ -23,7 +23,8 @@ use crate::payload::Payload;
 use toyos_gpt::{Guid, Located, Sectors};
 use toyos_rootimage::chunk;
 use toyos_update::slots::{self, Table};
-use crate::efi::{BlockIo, BootServices, DevicePath, Handle, HardDrive, LoadedImage, Scoped, Status};
+use toyos_devicepath::HardDrive;
+use crate::efi::{BlockIo, BootServices, DevicePath, Handle, LoadedImage, Scoped, Status};
 
 /// The unit ROOT's filesystem is written in, and the alignment every buffer
 /// here is allocated at.
