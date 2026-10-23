@@ -2051,11 +2051,11 @@ impl Supervisor<'_> {
         }
 
         // **A launch names its parent**: the place it carries, spawned under, or
-        // the supervisor. One that names neither is refused rather than given to the supervisor,
-        // which would let it outlive a caller that never asked it to.
+        // detached, under the supervisor. One that names neither is refused rather than
+        // detached, which would let it outlive a caller that never asked it to.
         let under = match request.parent() {
             Some(Parent::Place(())) => Some(place.0[0]),
-            Some(Parent::Supervisor) => None,
+            Some(Parent::Detached) => None,
             None => {
                 say!("supervisor: launcher: refused a launch that names no parent");
                 let _ = conn.try_signal(launch::MSG_REFUSED);
@@ -2129,28 +2129,25 @@ impl Supervisor<'_> {
         let (program, verdict) = match resolved {
             Resolved::Row(row, verdict) => (row.clone(), verdict),
             Resolved::Package(row, verdict) => (row, verdict),
+            // **`try_signal` and not `signal`.** A blocking write is the other
+            // half of the rule that made the read side an event loop: a client
+            // that never drains its end decides when the supervisor runs again.
             Resolved::NotDeclared => {
-                // **`try_send_bytes` and not `send`.** A blocking write is the
-                // other half of the rule that made the read side an event loop: a
-                // client that never drains its end decides when the supervisor runs again.
-                // The `HOME` is the session's: a program no row names is no service.
-                let home = toyos_manifest::session_home();
-                let _ = conn.try_send_bytes(launch::MSG_NOT_DECLARED, home.as_bytes());
+                say!("supervisor: launcher: no row declares {}", request.program);
+                let _ = conn.try_signal(launch::MSG_NOT_PERMITTED);
                 return;
             }
             Resolved::Refused(why) => {
                 say!("supervisor: launcher: {why}");
-                let _ = conn.try_signal(launch::MSG_REFUSED);
+                let _ = conn.try_signal(launch::MSG_NOT_PERMITTED);
                 return;
             }
         };
-        // **`MSG_REFUSED`, never `MSG_NOT_DECLARED`**: the latter is std's cue to
-        // spawn the program itself.
         let (starts, binary, prepared) = match verdict {
             Ok(judged) => judged,
             Err(why) => {
                 say!("supervisor: launcher: {} in {} may not start {}: {why}", caller.row.name, caller.session, program.name);
-                let _ = conn.try_signal(launch::MSG_REFUSED);
+                let _ = conn.try_signal(launch::MSG_NOT_PERMITTED);
                 return;
             }
         };
@@ -2475,7 +2472,7 @@ enum Resolved<'a, V> {
     Row(&'a Program, V),
     /// An installed package, whose row is the image's `[apps]` list.
     Package(Program, V),
-    /// Nothing in the image declares it, and the caller spawns it itself.
+    /// Nothing in the image declares it.
     NotDeclared,
     /// A path under `/apps` whose package does not answer for it.
     Refused(String),
@@ -2491,11 +2488,8 @@ enum Resolved<'a, V> {
 /// classifies as one thing and opens as another, and `start` spawns the string
 /// the client sent, so the two need not even name one file.
 ///
-/// A path under `/apps` that no manifest answers for is refused rather than
-/// answered undeclared, because the caller's fallback for undeclared is a
-/// direct spawn carrying the caller's own namespace.
 fn resolve<'a, V>(system: &'a Manifest, path: &str, judge: impl FnOnce(Target<'_>) -> V) -> Resolved<'a, V> {
-    if !package::is_canonical(path) {
+    if !toyos::launch::is_canonical(path) {
         return Resolved::Refused(format!("{path:?} is not a canonical path"));
     }
     let Some(name) = package::package_of(path) else {

@@ -49,7 +49,7 @@ struct Held {
 /// The partition endowed under `label`: a session through the connector of
 /// that name, which reaches one partition and lists it.
 fn held(label: &str) -> Result<Held, String> {
-    let none = || format!("this process holds no `{label}`: the supervisor grants the idle slot to one update at a time, and says why where it grants none");
+    let none = || format!("this process holds no `{label}`: the supervisor grants the idle slot to one update at a time, and says why where it grants none; run it with `launch update`");
     let names = endow::namespace().ok_or_else(none)?;
     let own = toyos::namespace::build().keep(names, &[label]).finish().map_err(|_| none())?;
     let listed = diskserver::list(&own, label).map_err(|why| format!("`{label}` would not list its partition: {why:?}"))?;

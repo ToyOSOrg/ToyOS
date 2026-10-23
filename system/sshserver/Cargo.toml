@@ -15,3 +15,6 @@ getrandom = "0.3"
 [dev-dependencies]
 # Test scratch that is gone on every way out; `--ci host` reds on any left behind.
 toyos-tmpdir = { path = "../../lib/tmpdir" }
+
+[lints.rust]
+unexpected_cfgs = { level = "warn", check-cfg = ['cfg(target_os, values("toyos"))'] }

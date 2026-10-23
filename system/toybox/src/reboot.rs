@@ -8,6 +8,9 @@ use toyos::power::{self, Stop};
 pub fn main(_args: Vec<String>) {
     // Comes back only refused: on the other path the machine is already at its firmware.
     let refused = power::stop(Stop::Reboot);
-    eprintln!("reboot: refused ({refused:?})");
+    match refused {
+        power::Refused::NotEndowed => eprintln!("reboot: this process holds no `power` connector; run it with `launch reboot`"),
+        refused => eprintln!("reboot: refused ({refused:?})"),
+    }
     std::process::exit(1);
 }

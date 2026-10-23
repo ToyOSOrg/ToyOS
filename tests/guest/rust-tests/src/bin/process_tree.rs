@@ -44,6 +44,11 @@ use std::os::toyos::process::ExitStatusExt;
 use toyos_abi::end::{End, Fault};
 
 const SELF_PATH: &str = "/system/bin/test_rs_process_tree";
+/// This program copied to `/tmp`, which the kernel opens itself, under the
+/// same name: a chain's links spawn it with no file server's connection
+/// each, so a file server's bound on one share's clients is not what stops
+/// the chain before its depth does.
+const LINK_PATH: &str = "/tmp/test_rs_process_tree";
 /// `/system/bin/toybox` under the name of an applet that reads its input until
 /// it ends: a declared program, so a launch, and one that runs until killed
 /// while A holds its input open.
@@ -201,8 +206,7 @@ fn under_b_is_gone(grown: &Grown) {
         parent: Parent::Place(place),
         job: toyos::job::own().expect("a handle to this process's job").into_raw(),
     };
-    let mut home = [0u8; 256];
-    match launch::launch(&conn, &request, &mut home) {
+    match launch::launch(&conn, &request) {
         Ok(Outcome::Gone) => {}
         Ok(Outcome::Started(child)) => panic!("a launch under B {when} started {child:?}"),
         Ok(_) => panic!("a launch under B {when} was answered as something other than gone"),
@@ -286,8 +290,7 @@ fn a_pipe_is_no_place() {
         parent: Parent::Place(place),
         job: toyos::job::own().expect("a handle to this process's job").into_raw(),
     };
-    let mut home = [0u8; 256];
-    match launch::launch(&conn, &request, &mut home) {
+    match launch::launch(&conn, &request) {
         Ok(Outcome::Refused) => {}
         Ok(Outcome::Started(child)) => panic!("a launch whose place is a pipe started {child:?}"),
         Ok(_) => panic!("a launch whose place is a pipe was answered as something other than refused"),
@@ -300,7 +303,8 @@ fn a_pipe_is_no_place() {
 /// the link says on the chain's one output. Killing the first link then ends
 /// every one.
 fn a_chain_stops_at_max_depth_and_dies_whole() {
-    let mut first = Command::new(SELF_PATH)
+    std::fs::copy(SELF_PATH, LINK_PATH).expect("copy this program to /tmp for the chain");
+    let mut first = Command::new(LINK_PATH)
         .args(["link", "1"])
         .stdout(Stdio::piped())
         .spawn()
@@ -337,7 +341,7 @@ fn link(k: u32) -> ! {
         println!("unbounded at link {k}");
         park();
     }
-    let next = Command::new(SELF_PATH).args(["link", &(k + 1).to_string()]).spawn();
+    let next = Command::new(LINK_PATH).args(["link", &(k + 1).to_string()]).spawn();
     if let Err(e) = next {
         println!("link {k}: its next link was refused: {e}");
     }
@@ -348,6 +352,7 @@ fn link(k: u32) -> ! {
 /// end is published: it reads the input this process holds open.
 fn a_detached_program_outlives_its_shell() {
     let mut shell = Command::new(SHELL)
+        .independent()
         .args(["-c", &format!("detach {HELD}")])
         .stdin(Stdio::piped())
         .spawn()
@@ -391,11 +396,12 @@ fn park() -> ! {
 
 fn b() -> ! {
     let conn = endow::service(BACK).expect("A endowed a port back");
-    // Admitted under B, then refused by the loader: its hold on B goes.
-    assert!(Command::new("/system/bin/no_such_program").spawn().is_err(), "a program that is not there started");
+    // Admitted under B, then refused by the loader: its hold on B goes. On
+    // `/tmp`, which the kernel opens itself, so its loader is what refuses it.
+    assert!(Command::new("/tmp/no_such_program").spawn().is_err(), "a program that is not there started");
     let c = Command::new(SELF_PATH).arg("c").stdin(Stdio::null()).spawn().expect("B spawns C");
-    let d = Command::new(HELD).spawn().expect("B launches D");
-    let e = Command::new(HELD).under_supervisor().spawn().expect("B asks the supervisor for E");
+    let d = Command::new(HELD).independent().spawn().expect("B launches D");
+    let e = Command::new(HELD).independent().detached().spawn().expect("B launches E detached");
     let own = endow::this_process();
     let handles = [
         syscall::dup(RawHandle(c.as_raw_handle())).expect("a copy of C"),

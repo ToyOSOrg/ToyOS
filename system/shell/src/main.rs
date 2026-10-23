@@ -642,8 +642,7 @@ fn execute_pipeline(pipeline: &[SimpleCommand]) -> bool {
     for (i, cmd) in pipeline.iter().enumerate() {
         let is_first = i == 0;
         let is_last = i == pipeline.len() - 1;
-        let Some(mut command) = build_command(cmd) else {
-            println!("{}: not found", cmd.args[0]);
+        let Ok(mut command) = build_command(cmd) else {
             return false;
         };
 
@@ -681,8 +680,8 @@ fn execute_pipeline(pipeline: &[SimpleCommand]) -> bool {
                 }
                 children.push(child);
             }
-            Err(_) => {
-                println!("{}: not found", cmd.args[0]);
+            Err(e) => {
+                unstarted(cmd, &e);
                 return false;
             }
         }
@@ -733,10 +732,12 @@ fn execute_simple(cmd: &SimpleCommand, piped_stdin: Option<std::process::ChildSt
         _ => {}
     }
 
-    let Some(mut command) = build_command(cmd) else {
-        println!("{}: not found", cmd.args[0]);
-        set_status_code(127);
-        return false;
+    let mut command = match build_command(cmd) {
+        Ok(command) => command,
+        Err(code) => {
+            set_status_code(code);
+            return false;
+        }
     };
 
     if let Some(stdin) = piped_stdin {
@@ -771,8 +772,8 @@ fn execute_simple(cmd: &SimpleCommand, piped_stdin: Option<std::process::ChildSt
                 waited(unsafe { LAST_STATUS });
                 return ok;
             }
-            Err(_) => {
-                println!("{}: not found", cmd.args[0]);
+            Err(e) => {
+                unstarted(cmd, &e);
                 set_status_code(127);
                 return false;
             }
@@ -781,8 +782,8 @@ fn execute_simple(cmd: &SimpleCommand, piped_stdin: Option<std::process::ChildSt
 
     let mut child = match command.spawn() {
         Ok(child) => child,
-        Err(_) => {
-            println!("{}: not found", cmd.args[0]);
+        Err(e) => {
+            unstarted(cmd, &e);
             set_status_code(127);
             return false;
         }
@@ -820,19 +821,22 @@ fn provided() -> &'static [(&'static str, Connector)] {
     })
 }
 
-/// `detach <program> [args...]`: start it with the supervisor as its parent — the one way
-/// for a program to outlive this shell — and do not wait for it. Nothing this
-/// shell was provided goes with it: that belongs to the session it outlives.
+/// `detach <program> [args...]`: launch it under the launcher's owner, so it
+/// outlives this shell, and do not wait for it. Nothing this shell was
+/// provided goes with it: that belongs to the session it outlives.
 fn detach(cmd: &SimpleCommand) -> bool {
     let Some(program) = cmd.args.get(1) else {
         println!("detach: which program?");
         set_status_code(2);
         return false;
     };
-    let cwd =
-        env::current_dir().map(|p| p.display().to_string()).unwrap_or_else(|_| String::from("/"));
-    let mut command = Command::new(toyos_manifest::package::launch_path(program, &cwd));
-    command.args(&cmd.args[2..]).under_supervisor();
+    if toyos::endow::launcher().is_none() {
+        println!("detach: this shell holds no launcher");
+        set_status_code(126);
+        return false;
+    }
+    let mut command = Command::new(program);
+    command.args(&cmd.args[2..]).independent().detached();
     apply_redirect(&mut command, cmd);
     match command.spawn() {
         Ok(_) => {
@@ -847,22 +851,47 @@ fn detach(cmd: &SimpleCommand) -> bool {
     }
 }
 
-fn build_command(cmd: &SimpleCommand) -> Option<Command> {
-    if cmd.args.is_empty() { return None; }
-    // The launcher refuses a path it would have to normalize, and the shell is
-    // the half that knows the cwd.
+/// The program a simple command starts: a helper, which inherits this shell's
+/// namespace and so the surface it was provided; or after `launch`, an
+/// independent launch of the program's own row, provided what this shell was.
+/// The status, said, for a `launch` this shell cannot make, as `detach`'s.
+fn build_command(cmd: &SimpleCommand) -> Result<Command, i32> {
+    let launched = cmd.args.first().is_some_and(|word| word == LAUNCH);
+    let args = &cmd.args[usize::from(launched)..];
+    let Some(program) = args.first() else {
+        println!("launch: which program?");
+        return Err(2);
+    };
+    if launched && toyos::endow::launcher().is_none() {
+        println!("launch: this shell holds no launcher");
+        return Err(126);
+    }
     let cwd =
         env::current_dir().map(|p| p.display().to_string()).unwrap_or_else(|_| String::from("/"));
-    let mut command =
-        Command::new(toyos_manifest::package::launch_path(&cmd.args[0], &cwd));
-    command.args(&cmd.args[1..]);
-    for (name, connector) in provided() {
-        // A duplicate per child: this shell keeps its own for the next one.
-        if let Ok(handed) = connector.duplicate() {
-            command.provide(name, handed.into_raw().0);
+    let mut command = Command::new(toyos::launch::program_path(program, &cwd));
+    command.args(&args[1..]);
+    if launched {
+        command.independent();
+        for (name, connector) in provided() {
+            // A duplicate per child: this shell keeps its own for the next one.
+            if let Ok(handed) = connector.duplicate() {
+                command.provide(name, handed.into_raw().0);
+            }
         }
     }
-    Some(command)
+    Ok(command)
+}
+
+/// The word that makes a simple command an independent launch.
+const LAUNCH: &str = "launch";
+
+/// Say why `cmd` did not start: a helper's program is not found, and a
+/// launch's refusal is the launcher's to explain.
+fn unstarted(cmd: &SimpleCommand, e: &std::io::Error) {
+    match cmd.args.first().is_some_and(|word| word == LAUNCH) {
+        true => println!("launch: {}: {e}", cmd.args.get(1).map_or("", String::as_str)),
+        false => println!("{}: not found", cmd.args[0]),
+    }
 }
 
 fn apply_redirect(command: &mut Command, cmd: &SimpleCommand) {
@@ -929,8 +958,9 @@ fn set_status_code(code: i32) {
 }
 
 fn print_help() {
-    println!("Builtins: cd, clear, detach, exit, export, help");
-    println!("detach <program>: start it under the supervisor, so it outlives this shell");
+    println!("Builtins: cd, clear, detach, exit, export, help, launch");
+    println!("launch <program>: start it as itself, with its own row's authority");
+    println!("detach <program>: launch it so it outlives this shell");
     println!("Operators: | (pipe), && (and), || (or), ; (sequence)");
     println!("Redirects: > (truncate), >> (append)");
     println!("Variables: $VAR, ${{VAR}}, $? (exit status)");
@@ -1156,7 +1186,7 @@ fn replace_line(line: &mut String, cursor: &mut usize, new_content: &str) {
     *cursor = new_chars;
 }
 
-const BUILTINS: &[&str] = &["cd", "clear", "exit", "export", "help", "true", "false"];
+const BUILTINS: &[&str] = &["cd", "clear", "detach", "exit", "export", "help", "launch", "true", "false"];
 
 fn handle_tab(line: &mut String, cursor: &mut usize) {
     // Find the word being completed

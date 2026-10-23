@@ -25,7 +25,7 @@ const _: () = assert!(
 pub fn ask(owner: Owner) -> Result<BTreeMap<String, Value>, String> {
     let conn = endow::service(owner.port).map_err(|e| match e {
         EndowError::NotEndowed => format!(
-            "this program holds no `{}` connector, so {} is not its to read",
+            "this program holds no `{}` connector, so {} is not its to read; run it with `launch inspect`",
             owner.port, owner.root
         ),
         EndowError::ServerGone => format!("`{}` is not running: its port is closed", owner.port),

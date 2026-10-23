@@ -5,8 +5,7 @@
 //! **A child is the `Process` handle its spawn answered**, which this library
 //! keeps under its pid until it is waited for; a pid names nothing else here,
 //! and `kill` and `waitpid` reach only this process's own children. A child
-//! starts by `toyos::spawn`'s rule, as std's do: launched where the
-//! supervisor declares it, spawned here otherwise. It starts with descriptors
+//! is a helper (`toyos::spawn`), as a plain std spawn is. It starts with descriptors
 //! 0–2 and exactly what its file actions name (`spawnreq`). A child's group is
 //! a number this library keeps, which `kill(-pgid, …)` and `waitpid(-pgid,
 //! …)` read; the kernel has none.
@@ -25,7 +24,7 @@ use core::sync::atomic::{AtomicUsize, Ordering};
 
 use toyos::fd::Kind;
 use toyos::process::{End, Process};
-use toyos::spawn::{self, Launched, Parent, Refused, Spawn};
+use toyos::spawn::{Parent, Refused, Spawn, Start};
 use toyos_abi::syscall;
 use toyos_abi::RawHandle;
 
@@ -322,9 +321,8 @@ fn spawn_counted(path: &str, argv: &[u8], env: &[u8], actions: &[Action<Box<[u8]
     Ok(pid)
 }
 
-/// The launch-or-spawn of `toyos::spawn`, from this process's own working
-/// directory, the child's `HOME` the one `env` names if it differs from this
-/// process's start-up one.
+/// A helper, from this process's own working directory: C's children are
+/// never launches.
 fn start(path: &str, argv: &[u8], env: &[u8], fds: &[(u32, RawHandle, Kind)]) -> Result<Process, i32> {
     let mut cwd = alloc::vec![0u8; syscall::MAX_PATH];
     let n = syscall::getcwd(&mut cwd);
@@ -332,6 +330,7 @@ fn start(path: &str, argv: &[u8], env: &[u8], fds: &[(u32, RawHandle, Kind)]) ->
     let request = Spawn {
         program: path,
         image: None,
+        image_held: false,
         argv,
         env,
         cwd,
@@ -339,21 +338,18 @@ fn start(path: &str, argv: &[u8], env: &[u8], fds: &[(u32, RawHandle, Kind)]) ->
         endow: &[],
         provided: &[],
         parent: Parent::Caller,
+        independent: false,
     };
-    let mut answer = alloc::vec![0u8; toyos::ipc::MAX_FRAME_LEN as usize];
-    let home = match request.launch(&mut answer).map_err(errno_of)? {
-        Launched::Started(process) => return Ok(process),
-        Launched::Direct { home } => home,
+    let Start::Helper(helper) = request.start().map_err(errno_of)? else {
+        unreachable!("a spawn that is not independent is a helper or refused")
     };
-    let mut direct = Vec::new();
-    spawn::direct_env(env, crate::env::names_home(env), home, &mut direct);
     // A program on a file server is read here into an image the kernel pages
     // the child from: the kernel opens only what it serves itself.
     let image = match toyos::files::is_served(path.as_bytes()) {
         true => Some(toyos::files::read_image(path.as_bytes()).map_err(crate::errcode::of_image)?),
         false => None,
     };
-    request.direct(&direct, image.as_ref()).map_err(errno_of)
+    helper.spawn(image.as_ref()).map_err(errno_of)
 }
 
 fn errno_of(refused: Refused) -> i32 {

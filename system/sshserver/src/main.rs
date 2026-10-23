@@ -1,15 +1,15 @@
 //! The machine's SSH server: a shell, a command, and files both ways. A
-//! program run over `exec` is an ordinary one — `update` and `swap` are two —
-//! and holds its own manifest row, not this daemon's.
+//! command run over `exec` is a line for `shell -c`, which the shell, launched
+//! in its own manifest row and not this daemon's, runs.
 //!
 //! The protocol is `toyos-ssh`'s. This daemon drives it: a thread for each
 //! connection ([`connection`]), the host key, who may log in, and the bounds
 //! on clients that have not logged in.
 
-mod command;
 mod connection;
 mod program;
 mod sftp;
+mod spawn;
 
 use std::fs;
 use std::net::TcpListener;

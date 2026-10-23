@@ -27,6 +27,8 @@ pub struct Command {
     endowments: Vec<(String, u32)>,
     provided: Vec<(String, u32)>,
     parent: toyos::spawn::Parent,
+    /// An independent launch, where a plain spawn is a helper.
+    independent: bool,
     /// The program the child runs, when it is not the one `argv[0]` names.
     image_path: Option<OsString>,
     prepared: Option<Prepared>,
@@ -83,6 +85,7 @@ impl Command {
             endowments: Vec::new(),
             provided: Vec::new(),
             parent: toyos::spawn::Parent::Caller,
+            independent: false,
             image_path: None,
             prepared: None,
             image: None,
@@ -214,10 +217,8 @@ impl Command {
         self.endowments.push((label.to_owned(), handle));
     }
 
-    /// Give the child `connector` under `name`, on top of its manifest row.
-    ///
-    /// Routes the spawn through the launcher, which is the only thing that can
-    /// build a child's authority out of the child's own declaration.
+    /// Give the child `connector` under `name`, on top of its manifest row:
+    /// an independent launch's alone.
     pub fn provide(&mut self, name: &str, connector: u32) {
         self.provided.push((name.to_owned(), connector));
     }
@@ -228,9 +229,14 @@ impl Command {
         self.parent = toyos::spawn::Parent::Place(toyos_abi::RawHandle(place));
     }
 
-    /// Ask the supervisor to be the child's parent, through the launcher or not at all.
-    pub fn under_supervisor(&mut self) {
-        self.parent = toyos::spawn::Parent::Supervisor;
+    /// Start the child as an independent launch, through the launcher.
+    pub fn independent(&mut self) {
+        self.independent = true;
+    }
+
+    /// Place a launched child under the launcher's owner, so it outlives this process.
+    pub fn detached(&mut self) {
+        self.parent = toyos::spawn::Parent::Detached;
     }
 
     fn resolve_program(&self) -> io::Result<OsString> {
@@ -331,9 +337,12 @@ impl Command {
             self.endowments.iter().map(|(label, h)| (label.as_str(), toyos_abi::RawHandle(*h))).collect();
         let provided: Vec<(&str, toyos_abi::RawHandle)> =
             self.provided.iter().map(|(name, h)| (name.as_str(), toyos_abi::RawHandle(*h))).collect();
+        // A launch names its program absolute, as the launcher resolves it.
+        let launched = self.independent.then(|| toyos::launch::program_path(program, &cwd));
         let request = toyos::spawn::Spawn {
-            program,
+            program: launched.as_deref().unwrap_or(program),
             image: image_path,
+            image_held: prepared_image.is_some() || self.boot_image.is_some(),
             argv: &argv_buf,
             env: &env_buf,
             cwd: &cwd,
@@ -341,19 +350,16 @@ impl Command {
             endow: &endow,
             provided: &provided,
             parent: self.parent,
+            independent: self.independent,
         };
         let pipes = |stdin, stdout, stderr| StdioPipes { stdin, stdout, stderr };
-        let mut answer = crate::vec![0u8; toyos::ipc::MAX_FRAME_LEN as usize];
-        let home = match request.launch(&mut answer).map_err(refused)? {
-            toyos::spawn::Launched::Started(handle) => {
+        let helper = match request.start().map_err(refused)? {
+            toyos::spawn::Start::Launch(launch) => {
+                let handle = launch.launch().map_err(refused)?;
                 return Ok((Process { handle }, pipes(stdin_pipe, stdout_pipe, stderr_pipe)));
             }
-            toyos::spawn::Launched::Direct { home } => home,
+            toyos::spawn::Start::Helper(helper) => helper,
         };
-        // A caller that named `HOME`, or removed it, decided it.
-        let named = self.env.iter().any(|(key, _)| key == OsStr::new("HOME"));
-        let mut direct_env = Vec::new();
-        toyos::spawn::direct_env(&env_buf, named, home, &mut direct_env);
         // A program on a file server is read here, into a memory object of
         // this process's own that the kernel pages the child from: the kernel
         // opens only what it serves itself.
@@ -372,7 +378,7 @@ impl Command {
             (None, None) if crate::sys::fs::is_served(source) => Some(crate::sys::fs::read_image(source)?),
             (None, None) => None,
         };
-        let spawned = request.direct(&direct_env, image.as_ref());
+        let spawned = helper.spawn(image.as_ref());
         // The child keeps the object alive; this process's handle, and with it
         // its own mapping, goes.
         drop(image);

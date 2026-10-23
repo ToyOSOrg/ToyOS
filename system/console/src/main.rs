@@ -497,6 +497,7 @@ impl Shell {
             .duplicate()
             .expect("console: the kernel refused a duplicate of its own surface connector");
         let mut child = Command::new("/system/bin/shell")
+            .independent()
             .provide(surface::SERVICE, surface_copy.into_raw().0)
             .stdin(process::tty_piped())
             .stdout(process::tty_piped())

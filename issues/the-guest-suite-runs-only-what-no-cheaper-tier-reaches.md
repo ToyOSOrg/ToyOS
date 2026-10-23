@@ -199,10 +199,8 @@ Host: `toyos-net-tcp`, `toyos-dns`, `toyos-mdns`, `toyos-swap`, `toyos-inspect`,
 - metal `sshd_exec`, the arms `lan_talk`'s one command did not reach, each a step of that row's
   exchange red when its arm in `userland/sshd/src/main.rs` is reverted; the row and its exchange
   are deleted, and this waits on `issues/the-host-cannot-reach-the-t14-while-it-runs-toyos.md`:
-  - a program that is not there ends 127, `cannot run /system/bin/<name>` on stderr and nothing
-    on stdout;
-  - an unquotable line ends 127 before anything runs; `command::split`'s own tests already hold
-    the refusal it names;
+  - a program that is not there ends 127, the shell saying `<name>: not found`;
+  - an unquotable line is the shell's to refuse, its `-c` line read as the shell reads any;
   - stdout and stderr stay apart: `cat` of a file and of a missing path;
   - the channel's input is the program's stdin;
   - an `env` request is answered with a failure, never left unanswered;

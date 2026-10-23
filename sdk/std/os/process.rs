@@ -35,18 +35,16 @@ pub trait CommandExt {
     #[stable(feature = "toyos_ext", since = "1.0.0")]
     fn endow(&mut self, label: &str, handle: u32) -> &mut Self;
 
-    /// Put `connector` in the child's namespace under `name`, on top of what
-    /// the manifest says the child holds.
+    /// Put `connector` in an [`independent`](CommandExt::independent)
+    /// child's namespace under `name`, on top of what its manifest row holds.
     ///
-    /// **This is a launch, not a spawn.** A terminal's `surface` port exists
-    /// once per terminal, so the supervisor cannot know it and the manifest cannot
-    /// name it — but the shell's own `[programs]` row is what should decide the
-    /// rest of what a shell holds. So the caller supplies this one connector,
-    /// the supervisor supplies the row, and the child's namespace is the union.
+    /// A terminal's `surface` port exists once per terminal, so no manifest
+    /// can name it, but the shell's own row is what should decide the rest of
+    /// what a shell holds. So the caller supplies this one connector, the
+    /// launcher supplies the row, and the child's namespace is the union.
     ///
-    /// The connector is **moved**, like [`endow`](CommandExt::endow), and the
-    /// spawn fails if this process holds no `launcher` connector: there is
-    /// nowhere else the manifest row can come from.
+    /// The connector is **moved**, like [`endow`](CommandExt::endow). A
+    /// command that is not independent is refused `InvalidInput`.
     #[stable(feature = "toyos_ext", since = "1.0.0")]
     fn provide(&mut self, name: &str, connector: u32) -> &mut Self;
 
@@ -72,9 +70,9 @@ pub trait CommandExt {
     /// stays the child's `argv[0]`: the kernel opens `path`, or the spawn reads
     /// it when a file server serves it, and nothing opens `argv[0]`.
     ///
-    /// **A spawn, never a launch.** The launcher runs the program its manifest
-    /// row names, so with [`under_supervisor`](CommandExt::under_supervisor) or
-    /// [`provide`](CommandExt::provide) the spawn answers `PermissionDenied`.
+    /// **A helper's alone.** The launcher runs the program its manifest row
+    /// names, so an [`independent`](CommandExt::independent) command that
+    /// names an image is refused `InvalidInput`.
     #[stable(feature = "toyos_ext", since = "1.0.0")]
     fn image_from(&mut self, path: &crate::path::Path) -> &mut Self;
 
@@ -90,22 +88,34 @@ pub trait CommandExt {
     ///
     /// `place` is a handle carrying `WRITE` to that process: a copy of the
     /// handle it holds to itself, which it handed on. The spawn is refused
-    /// `PermissionDenied` for a handle without `WRITE`, or without `DUP` for a
-    /// program the supervisor launches, which carries a copy, and `BrokenPipe` for a
+    /// `PermissionDenied` for a handle without `WRITE`, or without `DUP` for an
+    /// independent launch, which carries a copy, and `BrokenPipe` for a
     /// process whose end has begun.
     #[stable(feature = "toyos_ext", since = "1.0.0")]
     fn under(&mut self, place: u32) -> &mut Self;
 
-    /// Ask the supervisor to be the child's parent: the one way for a child to outlive
-    /// this process.
+    /// Start the child as an **independent launch** through the session
+    /// launcher this process holds: the program its manifest row declares,
+    /// holding that row's authority, its own identity and the connectors
+    /// [`provide`](CommandExt::provide)d. Without it a spawn is a helper,
+    /// which inherits this process's namespace, environment and the
+    /// descriptors its spawn names.
     ///
-    /// **A launch or nothing.** The supervisor starts a program its manifest declares,
-    /// holding what its row says, so with no `launcher` connector, for a
-    /// program no row declares, or for a command that endows a handle or names
-    /// a descriptor beyond stdio, the spawn answers `PermissionDenied` and starts
-    /// nothing.
+    /// **A launch or nothing.** It is refused `PermissionDenied`, with the
+    /// reason, where this process holds no launcher, the launcher will not
+    /// open, or no row declares the program or this one may not start it; and
+    /// `InvalidInput` for an endowment other than a job, a descriptor past
+    /// stdio or an [`image_from`](CommandExt::image_from). It is never
+    /// started as a helper instead. A relative program is made absolute
+    /// against the child's working directory.
     #[stable(feature = "toyos_ext", since = "1.0.0")]
-    fn under_supervisor(&mut self) -> &mut Self;
+    fn independent(&mut self) -> &mut Self;
+
+    /// Place an [`independent`](CommandExt::independent) child under the
+    /// launcher's owner, so that it outlives this process. A command that is
+    /// not independent is refused `InvalidInput`.
+    #[stable(feature = "toyos_ext", since = "1.0.0")]
+    fn detached(&mut self) -> &mut Self;
 }
 
 #[stable(feature = "toyos_ext", since = "1.0.0")]
@@ -154,8 +164,13 @@ impl CommandExt for crate::process::Command {
         self
     }
 
-    fn under_supervisor(&mut self) -> &mut Self {
-        self.as_inner_mut().under_supervisor();
+    fn independent(&mut self) -> &mut Self {
+        self.as_inner_mut().independent();
+        self
+    }
+
+    fn detached(&mut self) -> &mut Self {
+        self.as_inner_mut().detached();
         self
     }
 }
@@ -192,7 +207,7 @@ pub trait ChildExt {
     /// Give up this process's handle, for one about to be sent or endowed.
     ///
     /// After this the parent no longer holds the child: it cannot wait for it,
-    /// kill it or read its accounting. The supervisor's launcher is the caller —
+    /// kill it or read its accounting. The launcher is the caller —
     /// it answers with the handle and keeps none, because a process that could
     /// ask it to start `/bin/true` in a loop would otherwise exhaust the one
     /// handle table the whole machine depends on.

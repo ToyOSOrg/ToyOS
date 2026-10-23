@@ -42,7 +42,7 @@ Compromises recorded on their own:
    `Server` or the connection layer until stage 2.
 2. **The switch and the deletion.** `system/sshserver` is rewritten on
    `toyos-ssh` with `std` threads: a shell over pipes, `subsystem sftp` over
-   `sftp.rs`, `exec` through `command.rs`, an `authorized_keys` reader in
+   `sftp.rs`, `exec` as `shell -c` (#1024), an `authorized_keys` reader in
    `toyos-ssh`, several channels on one connection, a login deadline and a cap
    on unauthenticated connections. The recorded shell, sftp and two-channel
    sessions replay against `toyos-ssh`'s scripted driver, whose SFTP server is

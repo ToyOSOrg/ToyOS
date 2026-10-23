@@ -2163,7 +2163,7 @@ fn launcher() -> mpsc::Sender<String> {
                         continue;
                     }
                 };
-                if let Err(e) = Command::new(&program).endow(JOB_LABEL, job.into_raw().0).spawn() {
+                if let Err(e) = Command::new(&program).independent().detached().endow(JOB_LABEL, job.into_raw().0).spawn() {
                     eprintln!("compositor: {program} did not start: {e}");
                 }
             }

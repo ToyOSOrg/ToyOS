@@ -101,7 +101,7 @@ fn take(args: &[String]) -> Result<Asked, Refusal> {
 fn ask(asked: &Asked) -> (Answer, Option<toyos::ipc::Connection>) {
     let unasked = |why: String| (Answer::Unasked(why), None);
     let Some(held) = Endowments::get().take::<Namespace>(toyos_swap::LABEL) else {
-        return unasked(Refusal::NoAuthority.to_string());
+        return unasked(format!("{}; run it with `launch swap`", Refusal::NoAuthority));
     };
     let supervisor = match held.open(toyos_swap::PORT) {
         Ok(conn) => conn,

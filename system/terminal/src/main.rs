@@ -284,6 +284,7 @@ fn shell(surface: &toyos::port::Connector) -> std::process::Child {
         .duplicate()
         .expect("terminal: the kernel refused a duplicate of its own surface connector");
     Command::new("/system/bin/shell")
+        .independent()
         .provide(surface::SERVICE, handed.into_raw().0)
         .stdin(process::tty_piped())
         .stdout(process::tty_piped())
