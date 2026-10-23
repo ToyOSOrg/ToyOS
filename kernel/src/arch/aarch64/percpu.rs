@@ -54,6 +54,8 @@ pub struct PerCpu {
     syscall_sp: AtomicU64,
     /// The task whose syscall this CPU is inside: packed pid:tid, or [`NO_SYSCALL`].
     syscall_task: AtomicU64,
+    /// That syscall's `trap::Frame`, which its return to EL0 loads.
+    syscall_frame: AtomicU64,
     /// This CPU's [`log::Shard`]: the boot shard on CPU 0.
     log_shard: &'static log::Shard,
     /// One counter per `irq_census::Source`.
@@ -93,6 +95,7 @@ pub fn alloc(cpu_id: u32) -> &'static PerCpu {
         syscall_fp: AtomicU64::new(0),
         syscall_sp: AtomicU64::new(0),
         syscall_task: AtomicU64::new(NO_SYSCALL),
+        syscall_frame: AtomicU64::new(0),
         log_shard: log::shard_for(cpu_id),
         irq_counts: [const { AtomicU64::new(0) }; crate::irq_census::Source::COUNT],
     }));
@@ -188,8 +191,9 @@ fn pack_task(pid: u32, tid: u32) -> u64 {
 }
 
 /// Enter this CPU's syscall bracket, with what the entry saw. `super::trap` is the only caller.
-pub(super) fn enter_syscall(pc: u64, num: u64, fp: u64, sp: u64) {
+pub(super) fn enter_syscall(pc: u64, num: u64, fp: u64, sp: u64, frame: *mut super::trap::Frame) {
     let block = this();
+    block.syscall_frame.store(frame as u64, Relaxed);
     block.syscall_pc.store(pc, Relaxed);
     block.syscall_num.store(num, Relaxed);
     block.syscall_fp.store(fp, Relaxed);
@@ -200,6 +204,12 @@ pub(super) fn enter_syscall(pc: u64, num: u64, fp: u64, sp: u64) {
 /// …and leave it.
 pub(super) fn leave_syscall() {
     this().syscall_task.store(NO_SYSCALL, Relaxed);
+}
+
+/// The frame of the syscall this CPU is inside: the caller's, for as long as
+/// it has not blocked, since a syscall that blocks can resume on another CPU.
+pub(super) fn syscall_frame() -> *mut super::trap::Frame {
+    this().syscall_frame.load(Relaxed) as *mut super::trap::Frame
 }
 
 /// Whether the task this CPU runs is inside a syscall now.

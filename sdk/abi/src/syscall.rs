@@ -317,6 +317,9 @@ pub const SYS_PWRITE: u64 = 139;
 pub const SYS_VM_PROTECT: u64 = 140;
 pub const SYS_VM_DISCARD: u64 = 141;
 pub const SYS_VM_DECOMMIT: u64 = 142;
+/// The calling thread's timing protection, asked or set. See
+/// [`timing_protection`].
+pub const SYS_TIMING_PROTECTION: u64 = 143;
 
 /// Bins in the per-process syscall profile — one for every number this ABI
 /// issues, and one at the end for every number it does not.
@@ -324,13 +327,13 @@ pub const SYS_VM_DECOMMIT: u64 = 142;
 /// **The profile's parts sum to its total, and that is the whole requirement.**
 /// A bin array narrower than the ABI reaches drops calls out of the line while
 /// the total goes on counting them.
-pub const SYSCALL_PROFILE_BINS: usize = 144;
+pub const SYSCALL_PROFILE_BINS: usize = 145;
 
 /// Where a number this ABI does not issue is counted. Merging is a degradation
 /// a reader can see in the line; dropping is one nobody can.
 pub const SYSCALL_PROFILE_OTHER: usize = SYSCALL_PROFILE_BINS - 1;
 
-const _: () = assert!(SYS_VM_DECOMMIT < SYSCALL_PROFILE_OTHER as u64);
+const _: () = assert!(SYS_TIMING_PROTECTION < SYSCALL_PROFILE_OTHER as u64);
 
 pub const WNOHANG: u64 = 1;
 /// Every bit `SYS_PROCESS_WAIT`'s flag word defines; a wait carrying another
@@ -2417,6 +2420,53 @@ pub unsafe fn vm_discard(addr: *mut u8, len: usize) -> Result<(), SyscallError> 
 /// Nothing reaches those pages meanwhile.
 pub unsafe fn vm_decommit(addr: *mut u8, len: usize) -> Result<(), SyscallError> {
     check_unit(syscall(SYS_VM_DECOMMIT, addr as u64, len as u64, 0, 0))
+}
+
+/// The calling thread's timing protection, asked or set: Intel's DOITM,
+/// `IA32_UARCH_MISC_CTL[0]`, or Arm's `PSTATE.DIT`, which make the
+/// instructions each vendor lists take time independent of their data
+/// operands. Neither makes code constant-time.
+///
+/// Answers whether it was on before the call, read from the CPU the thread
+/// runs on. The state is the thread's own: it starts off, holds across every
+/// switch and migration, and no other thread sees it. No right is needed.
+/// `NotSupported` on a machine with no such control, which is never reported
+/// as protected.
+///
+/// `toyos::timing` is the scoped interface. An AArch64 thread may also set
+/// `PSTATE.DIT` itself, which is the same state.
+pub fn timing_protection(request: TimingRequest) -> Result<bool, SyscallError> {
+    check(syscall(SYS_TIMING_PROTECTION, request as u64, 0, 0, 0)).map(|on| on != 0)
+}
+
+/// What a [`timing_protection`] call asks.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[repr(u64)]
+pub enum TimingRequest {
+    Query = 0,
+    Off = 1,
+    On = 2,
+}
+
+impl TimingRequest {
+    /// The request a syscall argument names, `None` for a word that names none.
+    pub const fn from_u64(word: u64) -> Option<Self> {
+        Some(match word {
+            0 => Self::Query,
+            1 => Self::Off,
+            2 => Self::On,
+            _ => return None,
+        })
+    }
+
+    /// The state it sets, `None` for a query.
+    pub const fn set(self) -> Option<bool> {
+        match self {
+            Self::Query => None,
+            Self::Off => Some(false),
+            Self::On => Some(true),
+        }
+    }
 }
 
 /// Non-blocking read. Returns bytes read, or `Err(WouldBlock)` if no data available.

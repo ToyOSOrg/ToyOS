@@ -279,7 +279,7 @@ fn el0_sync(frame: &mut Frame) {
 /// `SVC #0`: the number in `x0`, four arguments in `x1`–`x4`, the answer
 /// back in `x0`, and every other register the thread's as it left it.
 fn syscall(frame: &mut Frame) {
-    percpu::enter_syscall(frame.elr, frame.x[0], frame.x[29], frame.sp);
+    percpu::enter_syscall(frame.elr, frame.x[0], frame.x[29], frame.sp, &raw mut *frame);
     percpu::preempt_count_up();
     cpu::enable_interrupts();
     let answer = crate::syscall::dispatch::syscall_dispatch(frame.x[0], frame.x[1], frame.x[2], frame.x[3], frame.x[4]);

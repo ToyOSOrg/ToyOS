@@ -108,6 +108,10 @@ pub mod tcb {
     /// psABI's self-pointer and `TP + 8` the DTV pointer, inside the
     /// [`X86_64_BYTES`] the kernel reserves; TLS data is below TP.
     pub const X86_64_TID: usize = 16;
+    /// x86-64's word in which `toyos::timing` keeps whether it has this
+    /// thread's timing protection on: zero at the thread's start, and the
+    /// thread's own to write. The kernel never reads it.
+    pub const X86_64_TIMING: usize = 20;
     pub const X86_64_BYTES: usize = 64;
     /// AArch64, TLS variant I: the TCB is the [`AARCH64_BYTES`] at TP, `TP + 0`
     /// the DTV pointer and `TP + 8` the word the psABI leaves to the
@@ -121,6 +125,7 @@ pub mod tcb {
     /// AArch64's DTV pointer and wholly below its first TLS block.
     const TID: usize = core::mem::size_of::<u32>();
     const _: () = assert!(X86_64_TID >= 16 && X86_64_TID + TID <= X86_64_BYTES);
+    const _: () = assert!(X86_64_TIMING >= X86_64_TID + TID && X86_64_TIMING + 4 <= X86_64_BYTES);
     const _: () = assert!(AARCH64_TID >= 8 && AARCH64_TID + TID <= AARCH64_BYTES);
     const _: () = assert!(AARCH64_BYTES == 16, "AArch64's psABI TCB is two words");
 }

@@ -34,6 +34,7 @@ pub mod rtc;
 pub mod smmu;
 pub mod smp;
 pub mod switch;
+pub mod timing;
 pub mod tlb;
 pub mod trap;
 pub mod watchdog;

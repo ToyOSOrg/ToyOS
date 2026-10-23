@@ -40,6 +40,7 @@ pub mod smi_cmd;
 pub mod smp;
 pub mod switch;
 pub mod syscall;
+pub mod timing;
 pub mod tlb;
 pub mod vtd;
 pub mod watchdog;
@@ -122,6 +123,7 @@ pub unsafe fn percpu_fetch_add(
 /// This architecture's part of a CPU's `cpu_local` record.
 pub struct CpuLocal {
     pub counters: counters::Local,
+    pub timing: timing::Local,
     #[cfg(feature = "switch-witness")]
     pub hw: hw::Local,
 }
@@ -130,6 +132,7 @@ impl CpuLocal {
     pub fn new() -> Self {
         Self {
             counters: counters::Local::new(),
+            timing: timing::Local::new(),
             #[cfg(feature = "switch-witness")]
             hw: hw::Local::new(),
         }

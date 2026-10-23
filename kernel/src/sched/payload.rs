@@ -49,6 +49,9 @@ pub struct KernelCtx {
     pub runs: Runs,
     /// Swapped with the per-CPU word at every switch; contexts don't all owe the same `enable` count.
     pub preempt: u32,
+    /// A user thread's timing protection where the architecture's switch
+    /// carries it (`arch::timing`).
+    pub timing: crate::arch::timing::Thread,
 }
 
 /// What a context runs.

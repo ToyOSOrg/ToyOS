@@ -1,13 +1,16 @@
 //! What `CR0`, `CR4`, `IA32_EFER`, `XCR0`, `IA32_XSS`, the save form,
-//! `IA32_APIC_BASE` and the performance request hold on every CPU in this
-//! machine. One declaration, applied by the BSP and every AP and checked on
-//! each; nothing else may write any of them but [`flush_global`], which puts
-//! back the `CR4` it read, and an AP's trampoline, which enters long mode
-//! under [`EFER_BEFORE_LONG_MODE`]. Each register is written whole: `CR0` and
+//! `IA32_UARCH_MISC_CTL`, `IA32_APIC_BASE` and the performance request hold
+//! on every CPU in this machine. One declaration, applied by the BSP and every
+//! AP and checked on each; nothing else may write any of them but
+//! [`flush_global`], which puts back the `CR4` it read, an AP's trampoline,
+//! which enters long mode under [`EFER_BEFORE_LONG_MODE`], and
+//! `super::timing`, which owns `IA32_UARCH_MISC_CTL`'s DOITM bit from here on
+//! as the running thread's. Each register is written whole: `CR0` and
 //! `EFER` are constants, `CR4` is required bits plus whatever optional bits this CPU
 //! offers, `XCR0` and the save form are what `kernel::xsave` makes of this
 //! CPU's CPUID, `IA32_XSS` is zero wherever it exists (no supervisor component
-//! is enabled), and `IA32_APIC_BASE` is the local APIC at its architectural address in the one
+//! is enabled), `IA32_UARCH_MISC_CTL` is DOITM off wherever it exists, and
+//! `IA32_APIC_BASE` is the local APIC at its architectural address in the one
 //! mode CPUID offers — x2APIC where it exists, xAPIC where it does not.
 //! `EFER.NXE` lets bit 63 of a paging entry mean *not executable*
 //! ([`Prot`](crate::mm::policy::Prot)), and `CR0.WP` makes a read-only one
@@ -48,6 +51,58 @@ mod xss {
 
 /// `IA32_XSS` on every CPU that has it: no supervisor component.
 const XSS: u64 = 0;
+
+/// Data operand independent timing: Intel, "Data Operand Independent Timing
+/// Instruction Set Architecture (ISA) Guidance" (768873), Tables 1 and 2.
+/// `IA32_ARCH_CAPABILITIES` exists where `CPUID.(EAX=07H,ECX=0):EDX[29]` is
+/// set, and its bit 12 enumerates `IA32_UARCH_MISC_CTL`, a logical-processor
+/// register that resets to 0, whose bit 0 (DOITM) makes the guidance's listed
+/// instructions take time independent of their data operands, and whose bits
+/// 63:1 are reserved. The guidance says a CPU that does not enumerate it
+/// under its latest microcode has that timing without it; `super::timing`
+/// still answers such a CPU unprotected, since it controls nothing there.
+pub(super) mod doit {
+    pub const CPUID_7_EDX_ARCH_CAPABILITIES: u32 = 1 << 29;
+    pub const ARCH_CAPABILITIES: u32 = 0x10A;
+    pub const ARCH_CAPABILITIES_DOITM: u64 = 1 << 12;
+    pub const UARCH_MISC_CTL: u32 = 0x1B01;
+    pub const DOITM: u64 = 1 << 0;
+}
+
+/// `IA32_UARCH_MISC_CTL` on every CPU that has it: DOITM off, as no thread has
+/// asked for it yet.
+const UARCH_MISC_CTL: u64 = 0;
+
+/// Whether the machine's CPUs have `IA32_UARCH_MISC_CTL`: the BSP's answer,
+/// which every AP must reach too. Zero until the BSP's [`has_doitm`].
+static DOITM: AtomicU8 = AtomicU8::new(0);
+const DOITM_ABSENT: u8 = 1;
+const DOITM_PRESENT: u8 = 2;
+
+/// Whether this machine's CPUs have DOITM, once the BSP's [`init`] has asked.
+pub fn doitm() -> bool {
+    DOITM.load(Ordering::Acquire) == DOITM_PRESENT
+}
+
+/// Whether this CPU has `IA32_UARCH_MISC_CTL`, by the guidance's enumeration:
+/// CPUID first, since reading `IA32_ARCH_CAPABILITIES` where it does not
+/// exist is `#GP`. A CPU that disagrees with the BSP is named.
+fn has_doitm(cpu_id: u32) -> bool {
+    let mine = cpu::leaf_7().3 & doit::CPUID_7_EDX_ARCH_CAPABILITIES != 0
+        && cpu::rdmsr(doit::ARCH_CAPABILITIES) & doit::ARCH_CAPABILITIES_DOITM != 0;
+    let code = if mine { DOITM_PRESENT } else { DOITM_ABSENT };
+    match DOITM.compare_exchange(0, code, Ordering::Release, Ordering::Acquire) {
+        Ok(_) if !mine => log!("control_regs: no CPU enumerates DOITM (IA32_ARCH_CAPABILITIES[12])"),
+        Ok(_) => {}
+        Err(machine) => assert!(
+            machine == code,
+            "control_regs: cpu{cpu_id} {} DOITM and the BSP {} it",
+            if mine { "enumerates" } else { "does not enumerate" },
+            if machine == DOITM_PRESENT { "does" } else { "does not" },
+        ),
+    }
+    mine
+}
 
 /// `CR0`, SDM Vol. 3A §2.5.
 mod cr0 {
@@ -257,15 +312,16 @@ fn hwp_declared(cpu_id: u32) -> Option<kernel::cpu::Hwp> {
     verdict.ok()
 }
 
-/// Puts this CPU's `CR4`, `XCR0` and `IA32_XSS` into the declaration, checks
-/// them, `CR0` and `EFER` against it, and declares the save form and the area
-/// they imply. Must run after [`init_paging`], before `arch::syscall::init`,
+/// Puts this CPU's `CR4`, `XCR0`, `IA32_XSS` and `IA32_UARCH_MISC_CTL` into the
+/// declaration, checks them, `CR0` and `EFER` against it, and declares the
+/// save form and the area they imply. Must run after [`init_paging`], before `arch::syscall::init`,
 /// which needs `SCE` set, and before the first task starts, which loads and
 /// saves by `XCR0`.
 pub fn init(cpu_id: u32) {
     let declared = declaration(cpu_id);
     let (xcr0, form) = xsave_declaration(cpu_id);
     let has_xss = has_xss();
+    let has_doitm = has_doitm(cpu_id);
     if !skipped(cpu_id) {
         // SAFETY: `write_cr4` faults only on an undefined bit, on clearing `PAE`
         // in long mode, or on `PCIDE` with a nonzero PCID — `declaration` checked
@@ -284,6 +340,11 @@ pub fn init(cpu_id: u32) {
             if has_xss {
                 cpu::wrmsr(xss::MSR, XSS);
             }
+            // SAFETY: the MSR exists where `has_doitm` says, and the value sets
+            // no reserved bit.
+            if has_doitm {
+                cpu::wrmsr(doit::UARCH_MISC_CTL, UARCH_MISC_CTL);
+            }
         }
         if declared & cr4::SMAP != 0 {
             // Nothing in this kernel sets `RFLAGS.AC`, so this is the only
@@ -291,7 +352,7 @@ pub fn init(cpu_id: u32) {
             cpu::clac();
         }
     }
-    self_check(cpu_id, declared, xcr0, form, has_xss);
+    self_check(cpu_id, declared, xcr0, form, has_xss, has_doitm);
     super::fpu::declare_area(cpu_id, xcr0, form);
 }
 
@@ -564,7 +625,14 @@ fn supported(cpu_id: u32) -> u64 {
 
 /// Logs what this CPU holds, then asserts it against the declaration —
 /// logged first so a failing CPU still leaves its value in the log.
-fn self_check(cpu_id: u32, declared_cr4: u64, declared_xcr0: u64, form: kernel::xsave::Form, has_xss: bool) {
+fn self_check(
+    cpu_id: u32,
+    declared_cr4: u64,
+    declared_xcr0: u64,
+    form: kernel::xsave::Form,
+    has_xss: bool,
+    has_doitm: bool,
+) {
     let live_cr0 = cpu::read_cr0();
     let live_cr4 = cpu::read_cr4();
     let live_efer = cpu::rdmsr(efer::MSR);
@@ -572,8 +640,9 @@ fn self_check(cpu_id: u32, declared_cr4: u64, declared_xcr0: u64, form: kernel::
     // missing it reads as holding no `XCR0`, which no declaration is.
     let live_xcr0 = if live_cr4 & cr4::OSXSAVE != 0 { unsafe { cpu::xgetbv0() } } else { 0 };
     let live_xss = has_xss.then(|| cpu::rdmsr(xss::MSR));
+    let live_uarch_misc_ctl = has_doitm.then(|| cpu::rdmsr(doit::UARCH_MISC_CTL));
     log!(
-        "control_regs: cpu{} cr0={:#010x} cr4={:#010x} efer={:#06x} xcr0={:#x} save={}{}{}{}{}{}",
+        "control_regs: cpu{} cr0={:#010x} cr4={:#010x} efer={:#06x} xcr0={:#x} save={}{}{}{}{}{}{}",
         cpu_id,
         live_cr0,
         live_cr4,
@@ -585,6 +654,7 @@ fn self_check(cpu_id: u32, declared_cr4: u64, declared_xcr0: u64, form: kernel::
         opt(live_cr4, cr4::PCIDE, " pcid"),
         opt(live_cr4, cr4::UMIP, " umip"),
         opt(live_efer, efer::NXE, " nx"),
+        if has_doitm { " doitm" } else { "" },
     );
     // Order matches the declaration: `CR0`, `CR4`, `EFER` — a diverging CPU
     // usually diverges in all three, and the first assert is what a reader sees.
@@ -607,6 +677,12 @@ fn self_check(cpu_id: u32, declared_cr4: u64, declared_xcr0: u64, form: kernel::
     );
     if let Some(live_xss) = live_xss {
         assert!(live_xss == XSS, "control_regs: cpu{cpu_id} holds ia32_xss={live_xss:#x}, the declaration is {XSS:#x}");
+    }
+    if let Some(live) = live_uarch_misc_ctl {
+        assert!(
+            live == UARCH_MISC_CTL,
+            "control_regs: cpu{cpu_id} holds uarch_misc_ctl={live:#x}, the declaration is {UARCH_MISC_CTL:#x}",
+        );
     }
     CHECKED.fetch_add(1, Ordering::Relaxed);
 }
@@ -656,7 +732,7 @@ fn hwp_check(cpu_id: u32, request: u64, notify: bool) {
 /// the CPUs it got rather than to crash on that one.
 pub fn report(cpus: u32) {
     log!(
-        "control_regs: {} of {cpus} cpus hold cr0={:#010x} cr4={:#010x} efer={:#06x} xcr0={:#x} save={} apic={:?}",
+        "control_regs: {} of {cpus} cpus hold cr0={:#010x} cr4={:#010x} efer={:#06x} xcr0={:#x} save={} apic={:?}{}",
         CHECKED.load(Ordering::Relaxed),
         CR0,
         DECLARED_CR4.load(Ordering::Acquire),
@@ -664,6 +740,7 @@ pub fn report(cpus: u32) {
         DECLARED_XCR0.load(Ordering::Acquire),
         super::fpu::form().name(),
         apic_mode(),
+        if doitm() { " doitm" } else { "" },
     );
 }
 

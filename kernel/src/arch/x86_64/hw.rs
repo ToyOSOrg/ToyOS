@@ -302,6 +302,9 @@ impl Hw for KernelHw {
                 Runs::User(_) => Some((*save).kernel_stack_top),
                 Runs::Kernel(_) | Runs::Idle => None,
             };
+            if let Runs::User(_) = (*save).runs {
+                super::timing::save(&mut (*save).timing);
+            }
             (*save).thread_pointer = cpu::read_fs_base();
             (*save).preempt = crate::preempt::count();
             let incoming: &KernelCtx = &*restore;
@@ -317,6 +320,9 @@ impl Hw for KernelHw {
             percpu::set_current_tid(incoming_id.map(|id| id.1));
             percpu::set_current_pid(incoming_id.map(|id| id.0));
             super::pio::switch_to(incoming_id.map(|id| id.0));
+            if let Runs::User(_) = incoming.runs {
+                super::timing::restore(&incoming.timing);
+            }
             match incoming_id {
                 Some(_) => {
                     percpu::set_kernel_stack(incoming.kernel_stack_top);

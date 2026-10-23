@@ -9,7 +9,7 @@
 //! and the GIC architecture specification (IHI 0069H), chapter 12, for the
 //! `ICC_` registers.
 
-use core::sync::atomic::AtomicU64;
+use core::sync::atomic::{AtomicU64, AtomicU8, Ordering};
 
 use crate::log;
 
@@ -94,6 +94,31 @@ macro_rules! read {
     }};
 }
 
+/// Whether the machine's CPUs implement FEAT_DIT, `ID_AA64PFR0_EL1.DIT`
+/// (bits 51:48) nonzero: the boot CPU's answer, which every other CPU must
+/// give too, since a thread that sets `PSTATE.DIT` on one CPU runs on any.
+/// Zero until the boot CPU's [`check`].
+static DIT: AtomicU8 = AtomicU8::new(0);
+const DIT_ABSENT: u8 = 1;
+const DIT_PRESENT: u8 = 2;
+
+/// Whether this machine's CPUs implement FEAT_DIT.
+pub fn dit() -> bool {
+    DIT.load(Ordering::Acquire) == DIT_PRESENT
+}
+
+/// This CPU's FEAT_DIT, held to the boot CPU's, which says the machine's.
+fn hold_dit() {
+    let mine = read!("id_aa64pfr0_el1") >> 48 & 0xF != 0;
+    let code = if mine { DIT_PRESENT } else { DIT_ABSENT };
+    match DIT.compare_exchange(0, code, Ordering::Release, Ordering::Acquire) {
+        Ok(_) => log!("control registers: the boot CPU {} FEAT_DIT, as every other must", if mine { "has" } else { "has no" }),
+        Err(machine) => {
+            assert!(machine == code, "control registers: this CPU's FEAT_DIT is {mine} and the boot CPU's is {}", !mine)
+        }
+    }
+}
+
 /// `TCR_EL1` whole, as this CPU's physical address range makes it.
 pub fn tcr() -> u64 {
     TCR | (read!("id_aa64mmfr0_el1") & 0xF) << TCR_IPS_SHIFT
@@ -116,6 +141,7 @@ pub fn check(el: u64) {
     for (name, live, value) in declared {
         assert_eq!(live, value, "control registers: {name} holds {live:#x}, and the declaration says {value:#x}");
     }
+    hold_dit();
     // What the drop from EL2 left, or the EL1 entry kept: EL1, on `SP_EL1`.
     let (now, spsel) = (read!("CurrentEL") >> 2 & 3, read!("SPSel") & 1);
     assert_eq!((now, spsel), (1, 1), "control registers: running at EL{now} on SP_EL{spsel}, not EL1 on SP_EL1");

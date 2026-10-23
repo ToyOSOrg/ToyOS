@@ -357,6 +357,13 @@ pub(crate) fn syscall_dispatch(num: u64, a1: u64, a2: u64, a3: u64, a4: u64) -> 
         SYS_VM_PROTECT => sys_vm_protect(a1, a2, a3),
         SYS_VM_DISCARD => sys_vm_discard(a1, a2),
         SYS_VM_DECOMMIT => sys_vm_decommit(a1, a2),
+        SYS_TIMING_PROTECTION => {
+            let Some(request) = TimingRequest::from_u64(a1) else { return SyscallError::InvalidArgument.to_u64() };
+            match crate::arch::timing::request(request.set()) {
+                Some(was) => u64::from(was),
+                None => SyscallError::NotSupported.to_u64(),
+            }
+        }
         SYS_PREAD => {
             let Some(mut buf) = ctx.user_bytes_mut(UserAddr::new(a2), a3) else { return bad_addr };
             with_object(RawHandle(a1 as u32), Rights::READ, |o| ops::pread(o, a4, &mut buf))
