@@ -268,8 +268,11 @@ fn writable(sb: &Superblock) -> Result<()> {
     // Every write is of whole device blocks, so entries, bsets and nodes
     // must fall on them.
     let (block, node, bucket) = (u64::from(sb.header.block_sectors), u64::from(sb.node_sectors()), u64::from(sb.member.bucket_sectors));
-    if !(block * SECTOR as u64).is_multiple_of(BLOCK as u64) || !node.is_multiple_of(block) || !bucket.is_multiple_of(node) {
-        return Err(Error::Unsupported("writing a volume whose blocks, nodes or buckets are not whole 4 KiB blocks of each other"));
+    if !(block * SECTOR as u64).is_multiple_of(BLOCK as u64) {
+        return Err(Error::Unsupported("writing a volume of blocks under 4 KiB"));
+    }
+    if !node.is_multiple_of(block) || !bucket.is_multiple_of(node) {
+        return Err(Error::Unsupported("writing a volume whose nodes are not whole blocks or buckets not whole nodes"));
     }
     // Fields of other shapes than those this writer keeps: the legacy
     // journal, members, quota, disk groups and errors, and replicas with a

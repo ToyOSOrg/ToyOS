@@ -179,15 +179,22 @@ fn a_clean_volume_with_an_empty_journal_survives_a_crash_going_read_write() {
 }
 
 /// A volume of 512-byte blocks, which upstream formats below 1 GiB (A1.46),
-/// is refused by name: every write is of whole 4 KiB device blocks. A clean
-/// volume whose member resumes its journal off a block is corrupt.
+/// or of nodes under 16 KiB, is refused by name: every write is of whole
+/// 4 KiB device blocks, and a smaller node cannot take a split's keys
+/// (`MAX_REWRITE`). A clean volume whose member resumes its journal off a
+/// block is corrupt.
 #[test]
 fn small_blocks_and_a_journal_position_off_a_block_are_refused() {
     use super::super::superblock::field_type;
     let dev = formatted(64 << 20, None);
     rewrite_superblock(&dev, |h, _| h.block_sectors = 1);
     let err = block_on_ready(Mount::open(&dev, MEMORY, random())).err();
-    assert_eq!(err, Some(Error::Unsupported("writing a volume whose blocks, nodes or buckets are not whole 4 KiB blocks of each other")));
+    assert_eq!(err, Some(Error::Unsupported("writing a volume of blocks under 4 KiB")));
+
+    let dev = formatted(64 << 20, None);
+    rewrite_superblock(&dev, |h, _| h.flags[0] = h.flags[0] & !(0xffff << 12) | 8 << 12);
+    let err = block_on_ready(Mount::open(&dev, MEMORY, random())).err();
+    assert_eq!(err, Some(Error::Unsupported("writing a volume of btree nodes under 16 KiB")));
 
     let dev = formatted(64 << 20, None);
     rewrite_superblock(&dev, |_, fields| {
