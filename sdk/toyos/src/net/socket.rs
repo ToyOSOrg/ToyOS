@@ -22,8 +22,9 @@
 //! finds it empty waits, or answers [`NetError::WouldBlock`], with no request; one that finds it
 //! rung makes what its request needs and reads the bell empty just before the request goes,
 //! and what another holder took first is answered `WouldBlock` too. A call that fails before
-//! its request leaves the ring in the bell, where a poller still sees it, so none is lost.
-//! Nothing else reads the bell.
+//! its request goes leaves the ring in the bell, where a poller still sees it. Nothing else
+//! reads the bell. The look is made with a poller of the end's own, made with the end, so a
+//! call that does not wait asks the kernel for nothing it can refuse.
 //!
 //! **A handle with no end here is refused** [`NetError::NotASocket`]. A descriptor's handle is
 //! a copy of its end's bell, so a poller watches it for reading; the end keeps its own
@@ -37,6 +38,7 @@ use toyos_abi::syscall;
 use toyos_abi::RawHandle;
 
 use crate::ipc::{self, Connection};
+use crate::poller::Poller;
 use crate::sync::Lock;
 use crate::OwnedHandle;
 
@@ -164,8 +166,9 @@ struct End {
 
 static TABLE: Lock<Ends<End, MAX_SOCKETS>> = Lock::new(Ends::new());
 
-/// Each end's turn on its connection: one request and its answer at a time.
-static TURNS: [Lock<()>; MAX_SOCKETS] = [const { Lock::new(()) }; MAX_SOCKETS];
+/// Each end's turn on its connection, one request and its answer at a time, and the poller its
+/// look at its bell is made with: `Some` from the end's making until [`free`].
+static TURNS: [Lock<Option<Poller>>; MAX_SOCKETS] = [const { Lock::new(None) }; MAX_SOCKETS];
 
 
 /// Lets go of an end no handle or call reaches: its connection, which is its holder's leaving,
@@ -173,7 +176,14 @@ static TURNS: [Lock<()>; MAX_SOCKETS] = [const { Lock::new(()) }; MAX_SOCKETS];
 fn free(slot: usize, end: End) {
     syscall::close(end.connection);
     syscall::close(end.bell);
+    *TURNS[slot].lock() = None;
     TABLE.lock().unreserve(slot);
+}
+
+/// The poller a reserved slot's end looks at its bell with. Refused, nothing is made.
+fn make_poller(slot: usize) -> Result<(), NetError> {
+    *TURNS[slot].lock() = Some(Poller::try_new(1).map_err(|_| NetError::ResourceExhausted)?);
+    Ok(())
 }
 
 /// Runs `f` as a call through `handle`, its end kept until it returns.
@@ -197,10 +207,9 @@ fn drain(bell: RawHandle) {
     while let Ok(1..) = syscall::read_nonblock(bell, &mut bytes) {}
 }
 
-/// Whether `bell` is readable, waiting for it at most `nanos`: rung, or hung up with netstack.
-/// Nothing is read.
-fn rung(bell: RawHandle, nanos: u64) -> bool {
-    let poller = crate::poller::Poller::new(1);
+/// Whether `bell` is readable, waiting for it at most `nanos` on `poller`: rung, or hung up
+/// with netstack. Nothing is read.
+fn rung(poller: &Poller, bell: RawHandle, nanos: u64) -> bool {
     poller.watch_raw(bell, crate::poller::READABLE, 0);
     let mut answered = false;
     poller.wait(1, nanos, |_| answered = true);
@@ -214,8 +223,9 @@ fn look<T>(slot: usize, end: End, wait: Wait, mut ask: impl FnMut(&dyn Fn()) -> 
     let drained = || drain(end.bell);
     loop {
         {
-            let _turn = TURNS[slot].lock();
-            if rung(end.bell, 0) {
+            let turn = TURNS[slot].lock();
+            let Some(poller) = turn.as_ref() else { unreachable!("a live end has its poller") };
+            if rung(poller, end.bell, 0) {
                 match ask(&drained) {
                     Err(NetError::WouldBlock) => {}
                     answer => return answer,
@@ -230,8 +240,11 @@ fn look<T>(slot: usize, end: End, wait: Wait, mut ask: impl FnMut(&dyn Fn()) -> 
         if left == 0 {
             return Err(NetError::TimedOut);
         }
-        // Netstack gone hangs the bell up, which is readable, and the next look says so.
-        rung(end.bell, left);
+        // Out of the turn, which the end's other calls take meanwhile, so on a poller of the
+        // wait's own. Netstack gone hangs the bell up, which is readable, and the next look says
+        // so.
+        let poller = Poller::try_new(1).map_err(|_| NetError::ResourceExhausted)?;
+        rung(&poller, end.bell, left);
     }
 }
 
@@ -265,7 +278,7 @@ pub fn bind(addr: [u8; 4], port: u16) -> Result<Bound, NetError> {
 /// [`MAX_SOCKETS`].
 fn open(kind: Kind, addr: [u8; 4], ask: impl FnOnce(NetstackConn) -> Result<(BoundResponse, [RawHandle; 1], Connection), NetError>) -> Result<Bound, NetError> {
     let slot = TABLE.lock().reserve().ok_or(NetError::ResourceExhausted)?;
-    let made = NetstackConn::connect().and_then(ask).and_then(|(bound, [bell], connection)| {
+    let made = make_poller(slot).and_then(|()| NetstackConn::connect()).and_then(ask).and_then(|(bound, [bell], connection)| {
         let (descriptor, connection, bell) = take_up(kind, connection.into_owned(), bell)?;
         Ok((descriptor, End { kind, connection, bell, addr, port: bound.port }))
     });
@@ -276,6 +289,7 @@ fn open(kind: Kind, addr: [u8; 4], ask: impl FnOnce(NetstackConn) -> Result<(Bou
             Ok(Bound { handle, port: end.port })
         }
         Err(refused) => {
+            *TURNS[slot].lock() = None;
             table.unreserve(slot);
             Err(refused)
         }
@@ -480,7 +494,8 @@ pub fn export(handle: RawHandle) -> Result<OwnedHandle, NetError> {
 /// An exported end taken up as this process's holder of its socket, `payload` and `handles` the
 /// [`ADOPT`] netstack queued on it (`super::adopt_exported`): the end and its bell narrowed to
 /// keep no `TRANSFER`. The descriptor's handle; `None`, with everything closed, where the frame
-/// is malformed, the process holds [`MAX_SOCKETS`] or the kernel will not narrow them.
+/// is malformed, the process holds [`MAX_SOCKETS`] or the kernel makes no poller for the end or
+/// will not narrow them.
 pub(super) fn adopted(connection: Connection, payload: &[u8], handles: ipc::Batch) -> Option<RawHandle> {
     let adopt: Adopt = ipc::decode_payload(payload).ok()?;
     let [bell] = handles.exact::<1>()?;
@@ -493,7 +508,13 @@ pub(super) fn adopted(connection: Connection, payload: &[u8], handles: ipc::Batc
         syscall::close(bell);
         return None;
     };
-    let made = take_up(kind, connection.into_owned(), bell);
+    let made = match make_poller(slot) {
+        Ok(()) => take_up(kind, connection.into_owned(), bell),
+        Err(refused) => {
+            syscall::close(bell);
+            Err(refused)
+        }
+    };
     let mut table = TABLE.lock();
     match made {
         Ok((descriptor, connection, bell)) => {
@@ -501,6 +522,7 @@ pub(super) fn adopted(connection: Connection, payload: &[u8], handles: ipc::Batc
             Some(descriptor)
         }
         Err(_) => {
+            *TURNS[slot].lock() = None;
             table.unreserve(slot);
             None
         }

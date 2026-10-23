@@ -35,6 +35,17 @@ fa7a35ac0091a05b — the holder left no readable note`, 930 s by 14:48:17, with
 `lsof` showing the key's lock file open twice in the harness and nowhere else.
 `--ci host` again ran beside it and had finished at 14:45:47.
 
+It recurred on #1052's round 2, with nothing beside it: right after a `cargo
+clean`, `cargo test --test toyos-build -- netstack_holders_exported_to_children
+stream_holders libc_children iommu_virtio_platform` (harness pid 73228) took
+the build lock exclusive to build `3c919ba2399d86e1` at 20:29:49 and finished
+it at 20:31:15. Three of its tests ran and passed; `stream_holders`'s worker,
+whose `stream_handles` build had begun at 20:29:45, waited on `using sysroot
+3c919ba2399d86e1` from 20:29:49, first "held by pid 73228 (building sysroot
+3c919ba2399d86e1)" and after the build "the holder left no readable note", for
+1,290 s by 20:51:19, when the run was stopped. Alone, the same row passed in 8 s
+(PR #1052's round 2 evidence, `guest-r2.log` and `guest-r2b.log`).
+
 **Exit condition**: no path holds the worktree build lock while it waits on a
 key's lock, and a suite started on a head whose sysroot is not yet made
 finishes.

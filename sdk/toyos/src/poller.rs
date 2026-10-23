@@ -218,6 +218,12 @@ impl Poller {
     /// caller a ring smaller than the set it just declared, which makes the
     /// loss reachable while looking like a success.
     pub fn new(capacity: u32) -> Self {
+        Self::try_new(capacity).expect("Poller::new: inbox_setup failed")
+    }
+
+    /// [`new`](Self::new), answering the kernel's refusal of the inbox, as a
+    /// memory-exhausted one, instead of panicking.
+    pub fn try_new(capacity: u32) -> Result<Self, SyscallError> {
         assert!(
             (1..=Self::MAX_HANDLES).contains(&capacity),
             "Poller::new: {capacity} handles is outside 1..={}; \
@@ -227,8 +233,7 @@ impl Poller {
         let entries = capacity.next_power_of_two();
         // The inbox owns its page and the kernel maps it: one call, and no
         // second lifetime for a mapping that is only ever this inbox's.
-        let (inbox, base) = unsafe { syscall::inbox_setup(entries) }
-            .expect("Poller::new: inbox_setup failed");
+        let (inbox, base) = unsafe { syscall::inbox_setup(entries) }?;
         // SAFETY: `base` is what `inbox_setup` just answered with — the
         // address of this process's own inbox page, laid out by the kernel
         // before it was mapped and unmapped only when the handle closes, which
@@ -243,7 +248,7 @@ impl Poller {
             rings.submission_ring_size,
             rings.completion_ring_size,
         );
-        Self { inbox, rings, capacity }
+        Ok(Self { inbox, rings, capacity })
     }
 
     /// Watch the given handle for readiness.
