@@ -44,10 +44,48 @@ pub fn sign_out_rect(desk: &Desk) -> Rect {
     Rect::corners(x0, y1 - h, x0 + w, y1)
 }
 
+/// Whether the compositor has asked for a desktop session and had no answer
+/// yet: while it has, a launch asks for no second one. **Every answer ends
+/// the wait**, a refusal as much as a session, so a later launch asks again.
+#[derive(Debug, Default)]
+pub struct Opening {
+    asked: bool,
+}
+
+impl Opening {
+    /// Whether to ask for a session now, `open` saying whether one is: asked
+    /// once, until it is answered.
+    pub fn ask(&mut self, open: bool) -> bool {
+        if open || self.asked {
+            return false;
+        }
+        self.asked = true;
+        true
+    }
+
+    /// The open was answered, with a session or a refusal.
+    pub fn answered(&mut self) {
+        self.asked = false;
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use alloc::vec::Vec;
+
+    /// One open is asked at a time, and a refused one is asked again by the
+    /// next launch, as a granted one ends the asking.
+    #[test]
+    fn a_refused_open_is_asked_again() {
+        let mut opening = Opening::default();
+        assert!(opening.ask(false));
+        assert!(!opening.ask(false), "a second open was asked before the first was answered");
+        opening.answered();
+        assert!(opening.ask(false), "a refused open was never asked again");
+        opening.answered();
+        assert!(!opening.ask(true), "an open was asked with a session open");
+    }
 
     #[test]
     fn the_view_names_what_waits_and_the_keys() {

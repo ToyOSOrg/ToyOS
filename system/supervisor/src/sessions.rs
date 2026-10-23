@@ -281,6 +281,17 @@ impl Supervisor<'_> {
         Ok(self.logins.open.len() - 1)
     }
 
+    /// `opener`'s desktop session whose owner still runs, by its index.
+    fn desktop_session(&self, opener: &Program) -> Option<usize> {
+        let open: Vec<decide::Open<'_>> = self
+            .logins
+            .open
+            .iter()
+            .map(|l| decide::Open { desktop: l.desktop, opener: &l.opener.name, running: exit_of(&l.owner).is_none() })
+            .collect();
+        decide::desktop_session(&open, &opener.name)
+    }
+
     /// The desktop session the screen's row at `index` starts holding,
     /// minted for that start: the screen row's open session, or one opened
     /// for it now. A start with none holds no launcher, and the compositor
@@ -291,7 +302,7 @@ impl Supervisor<'_> {
             return;
         }
         let program = self.system.program(&program.name).expect("a `login` row is the manifest's");
-        let open = self.logins.open.iter().position(|l| l.desktop && l.opener.name == program.name);
+        let open = self.desktop_session(program);
         let at = match open.map_or_else(|| self.open_session(program), Ok) {
             Ok(at) => at,
             Err(why) => return say!("supervisor: {} starts with no desktop session: {why}", program.name),
@@ -314,7 +325,7 @@ impl Supervisor<'_> {
         // The screen's row is answered its open desktop session, as
         // `desktop_for` is: there is one desktop session at a time.
         let open = (Screen::of(opener) == Screen::Held)
-            .then(|| self.logins.open.iter().position(|l| l.desktop && l.opener.name == opener.name))
+            .then(|| self.desktop_session(opener))
             .flatten();
         let answered = open
             .map_or_else(|| self.open_session(opener), Ok)

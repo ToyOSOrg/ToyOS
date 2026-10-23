@@ -52,7 +52,7 @@ pub use mode::Mode;
 pub use plan::{compose, content_blit, Blit, Layer};
 pub use rect::{Point, Rect};
 pub use scale::Scale;
-pub use signout::{sign_out_rect, sign_out_text, SIGN_OUT_CHARS};
+pub use signout::{sign_out_rect, sign_out_text, Opening, SIGN_OUT_CHARS};
 pub use stack::Stack;
 pub use taskbar::{Taskbar, MAX_STATUS_CHARS};
 pub use window::{Buffers, Level, Presented, Window, WindowId, WindowMode};

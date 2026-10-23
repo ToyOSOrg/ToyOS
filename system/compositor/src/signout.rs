@@ -23,6 +23,7 @@ use toyos::namespace::Namespace;
 use toyos::syscap::SysCap;
 use toyos::{AsHandle, Pipe};
 use toyos_abi::syscall::SYSCAP_LABEL;
+use toyos_desktop::Opening;
 use toyos_session::{self as wire, Names, SignOut};
 
 /// What the launcher thread is asked.
@@ -38,12 +39,11 @@ pub struct Desktop {
     /// What a sign-out waits for, while one does.
     pub waiting: Option<Names>,
     asks: mpsc::Sender<Ask>,
-    /// The control connections the thread's opens made.
-    opened: mpsc::Receiver<Connection>,
-    /// Readable once per control connection in `opened`.
+    /// The answers to the thread's opens: a control connection, or why none.
+    opened: mpsc::Receiver<Result<Connection, String>>,
+    /// Readable once per answer in `opened`.
     wake: Pipe,
-    /// An open is asked and not yet answered: a launch meanwhile asks none.
-    opening: bool,
+    opening: Opening,
 }
 
 impl Desktop {
@@ -65,11 +65,11 @@ impl Desktop {
             asks,
             opened,
             wake,
-            opening: false,
+            opening: Opening::default(),
         };
         if desktop.control.is_none() {
             eprintln!("compositor: started with no desktop session");
-            desktop.open();
+            desktop.ask();
         }
         desktop
     }
@@ -86,15 +86,15 @@ impl Desktop {
     /// Start `program` in the desktop session, off the loop, asking for a
     /// session first where none is open.
     pub fn launch(&mut self, program: &str) {
-        if self.control.is_none() && !self.opening {
-            self.open();
-        }
+        self.ask();
         self.asks.send(Ask::Launch(program.to_string())).expect("compositor: its launcher thread has ended");
     }
 
-    fn open(&mut self) {
-        self.opening = true;
-        self.asks.send(Ask::Open).expect("compositor: its launcher thread has ended");
+    /// Ask the thread for a session, where none is open and none is asked.
+    fn ask(&mut self) {
+        if self.opening.ask(self.control.is_some()) {
+            self.asks.send(Ask::Open).expect("compositor: its launcher thread has ended");
+        }
     }
 
     /// A session the thread opened, now the one this compositor signs out:
@@ -103,12 +103,17 @@ impl Desktop {
         let mut drained = [0u8; 16];
         while self.wake.read_nonblock(&mut drained).is_ok_and(|n| n > 0) {}
         let mut took = false;
-        while let Ok(control) = self.opened.try_recv() {
-            println!("compositor: a desktop session is open again");
-            self.control = Some(control);
-            self.rx = ipc::FrameRx::new();
-            self.opening = false;
-            took = true;
+        while let Ok(answer) = self.opened.try_recv() {
+            self.opening.answered();
+            match answer {
+                Ok(control) => {
+                    println!("compositor: a desktop session is open again");
+                    self.control = Some(control);
+                    self.rx = ipc::FrameRx::new();
+                    took = true;
+                }
+                Err(why) => eprintln!("compositor: no desktop session: {why}; the next launch asks again"),
+            }
         }
         took
     }
@@ -156,7 +161,7 @@ impl Desktop {
                     println!("compositor: the desktop session ended");
                     self.control = None;
                     self.waiting = None;
-                    self.open();
+                    self.ask();
                     return true;
                 }
             }
@@ -171,25 +176,23 @@ impl Desktop {
 /// **Everything the desktop starts is a job of its own**, made with the
 /// `jobs` right this row's system capability carries: a program started from
 /// the taskbar is no helper of the compositor's, and must not share its CPU.
-fn launcher(queue: mpsc::Receiver<Ask>, login: Option<Namespace>, opened: mpsc::Sender<Connection>, wake: Pipe) {
+fn launcher(queue: mpsc::Receiver<Ask>, login: Option<Namespace>, opened: mpsc::Sender<Result<Connection, String>>, wake: Pipe) {
     let jobs = endow::Endowments::get().take::<SysCap>(SYSCAP_LABEL);
     // A session this thread opened, whose launcher replaces the endowed one.
     let mut session: Option<Namespace> = None;
     for ask in queue {
         let program = match ask {
+            // Answered either way, so the loop asks again after a refusal.
             Ask::Open => {
-                let Some(login) = &login else {
-                    eprintln!("compositor: no `login` connector to open a desktop session with");
-                    continue;
-                };
-                match wire::open(login) {
-                    Ok((launcher, control)) => {
+                let answer = match &login {
+                    Some(login) => wire::open(login).map(|(launcher, control)| {
                         session = Some(launcher);
-                        if opened.send(control).is_ok() {
-                            let _ = wake.write_nonblock(&[1]);
-                        }
-                    }
-                    Err(why) => eprintln!("compositor: no desktop session: {why}"),
+                        control
+                    }),
+                    None => Err("this row holds no `login` connector".to_string()),
+                };
+                if opened.send(answer).is_ok() {
+                    let _ = wake.write_nonblock(&[1]);
                 }
                 continue;
             }
