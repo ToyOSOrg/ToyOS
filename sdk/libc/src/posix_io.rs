@@ -570,10 +570,9 @@ pub struct DIR {
 }
 
 /// A listing as its server answered it: the kernel's, or a file server's
-/// entries, `d_type` and name.
+/// entries, each its node, `d_type` and name.
 enum Listing {
     Kernel(Vec<u8>),
-    /// Each entry's node, `d_type` and name.
     Served(Vec<(u64, u8, Box<[u8]>)>),
 }
 

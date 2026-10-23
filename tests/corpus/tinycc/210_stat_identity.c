@@ -2,8 +2,8 @@
    through every path, a link and its open descriptor, and across a rename;
    two files are two; and the two kernel mounts are two volumes. A kernel
    directory and symlink are each one as well, and `d_ino` is its entry's
-   `st_ino` within one volume; a mount point's entry, as on Linux, is not
-   promised the mounted root's. */
+   `st_ino` within one volume; a mount point's entry is not promised the
+   mounted root's. */
 #include <dirent.h>
 #include <fcntl.h>
 #include <stdio.h>
