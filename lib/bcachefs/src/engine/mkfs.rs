@@ -114,9 +114,8 @@ pub async fn mkfs(dev: &impl BlockDev, options: &Options<'_>, tree: &Tree<'_>, r
 /// refusal named, so the size only grows and the volume that fits has no
 /// free bucket, unless a try crossed to larger buckets, which can need less
 /// than the refusal at smaller ones named. Each try draws from its own
-/// clone of `random`, and mkfs draws its UUIDs and seeds before any number
-/// that depends on the device's size, so every try lays out the volume
-/// [`mkfs`] then writes from that clone.
+/// clone of `random`, so the size that fits lays out exactly what [`mkfs`]
+/// writes from another clone.
 pub fn fit<R: Random + Clone>(options: &Options<'_>, tree: &Tree<'_>, random: &R) -> Result<u64> {
     let mut blocks = MIN_BUCKETS * MIN_BUCKET / BLOCK_SECTORS;
     loop {
@@ -660,9 +659,11 @@ fn shape(sizes: impl Iterator<Item = usize>, node_bytes: usize) -> Result<Vec<Ve
 }
 
 /// Entries of `sizes`, each at most `cap` bytes, in consecutive nodes of
-/// at most `cap` bytes, as few nodes as hold them and as evenly filled as
-/// the entries allow; one empty node for none. A count of one node per
-/// entry always fits, so the count stops there and no node is empty.
+/// at most `cap` bytes, as evenly filled as the entries allow; one empty
+/// node for none. The count starts at the fewest that could hold them and
+/// grows until the even split fits. Each boundary leaves every later node
+/// at least one entry, so no node is empty, and one node per entry always
+/// fits, so the count stops there at the latest.
 fn spread(sizes: &[usize], cap: usize) -> Vec<core::ops::Range<usize>> {
     let total: usize = sizes.iter().sum();
     let mut prefix = alloc::vec![0];
@@ -690,7 +691,7 @@ fn spread(sizes: &[usize], cap: usize) -> Vec<core::ops::Range<usize>> {
                     (_, Some((a, _))) | (Some((a, _)), None) => a,
                     (None, None) => 0,
                 };
-                nearest.max(start + 1).min(sizes.len())
+                nearest.max(start + 1).min(sizes.len() - (nodes - k))
             };
             ranges.push(start..end);
             start = end;
@@ -759,6 +760,14 @@ mod tests {
         assert_eq!(levels[1], vec![0..3]);
         let empty = shape(core::iter::empty(), 16384).unwrap();
         assert_eq!(empty, vec![vec![0..0]], "an empty btree still has its root");
+    }
+
+    /// Three nodes hold these; without leaving each later node an entry,
+    /// the nearest boundary put both 100s in one node and four nodes left
+    /// one empty.
+    #[test]
+    fn every_later_node_keeps_an_entry() {
+        assert_eq!(spread(&[1, 1, 100, 100], 100), vec![0..2, 2..3, 3..4]);
     }
 
     /// A remainder is spread over its level rather than left in a last
