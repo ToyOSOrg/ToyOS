@@ -64,8 +64,9 @@ pub const MSG_WAITING: u32 = 12;
 /// The owner's word that a sign-out was cancelled.
 pub const MSG_CANCELLED: u32 = 13;
 /// Supervisor to owner: the machine stops, so sign out with a terminate. Owner
-/// to controls: the sign-out under way is the machine's stop, which `power`'s
-/// cancel and terminate decide.
+/// to controls, a byte: `1`, the sign-out under way is the machine's stop,
+/// which `power`'s cancel and terminate decide; `0`, that stop was cancelled
+/// and the control's own sign-out goes on.
 pub const MSG_STOPPING: u32 = 14;
 
 /// Owner to supervisor: a connection accepted on the session's launcher, its

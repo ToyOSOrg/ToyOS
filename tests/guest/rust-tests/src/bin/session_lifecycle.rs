@@ -97,6 +97,7 @@ fn main() {
     let (launcher, _control) = wire::open(&login).expect("a session for the stop");
     let holder = detach(&launcher);
     let pending = power::stop(Stop::Reboot, Mode::Wait).expect("a waiting reboot is taken");
+    let cancelled = pending.ticket;
     let pending = waits_for_the_holder(pending);
     power::cancel().expect("the waiting reboot cancels");
     match pending.outcome() {
@@ -106,8 +107,9 @@ fn main() {
     assert!(live(HOLDER).contains(&holder), "the holder ended with a cancelled reboot");
     println!("session_lifecycle: a cancelled reboot keeps the machine and the holder");
     let pending = waits_for_the_holder(power::stop(Stop::Reboot, Mode::Wait).expect("a second waiting reboot is taken"));
+    assert_ne!(pending.ticket, cancelled, "a second reboot was given the cancelled one's ticket");
     println!("session_lifecycle: ok, and the reboot is forced");
-    power::terminate().expect("the waiting reboot is forced");
+    pending.terminate().expect("the waiting reboot is forced");
     panic!("session_lifecycle: the forced reboot ended {:?}", pending.outcome());
 }
 

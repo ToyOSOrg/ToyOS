@@ -177,10 +177,14 @@ impl Desktop {
                             println!("compositor: signing out, waiting for: {}", names.names.join(", "));
                             self.waiting = Some(names);
                         }
-                        (wire::MSG_STOPPING, _) => {
+                        (wire::MSG_STOPPING, _) if payload == [1] => {
                             println!("compositor: the machine stops; Esc cancels the stop, Enter forces it");
                             self.stopping = true;
                             self.waiting.get_or_insert_with(Names::default);
+                        }
+                        (wire::MSG_STOPPING, _) if payload == [0] => {
+                            println!("compositor: the machine's stop is cancelled; the sign-out goes on");
+                            self.stopping = false;
                         }
                         (wire::MSG_CANCELLED, _) => {
                             println!("compositor: the sign-out is cancelled; the session goes on");

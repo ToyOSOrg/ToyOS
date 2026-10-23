@@ -145,7 +145,7 @@ fn probe() {
     // No server ran on this boot, and nothing has held the claim.
     assert_eq!(
         power_off().err(),
-        Some(toyos::power::Refused::Kernel(SyscallError::NotSupported)),
+        Some(toyos::power::Refused::Unsupported),
         "acpi: a power-off with no sleep type supplied"
     );
 

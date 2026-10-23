@@ -24,6 +24,10 @@ pub fn main(name: &str, how: Stop, args: &[String]) {
         Err(why) => refused(&format!("{name}: refused ({why:?})")),
     };
     waiting(name, &pending.waiting.names);
+    if !pending.watched {
+        println!("{name}: the stop is under way; the supervisor tells this no more");
+        return;
+    }
     // A stop that happens ends this process with the machine.
     loop {
         match pending.read() {

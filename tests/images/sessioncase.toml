@@ -10,7 +10,8 @@
 # connector, and lists what a session's launcher starts: a shell, which
 # detaches `hangupholder`, the app that ignores a hang-up; and `logout`, the
 # one row receiving `session-admin`. `session` owns each session opened.
-# `power`, last, for the reboot that waits for the sessions until forced.
+# test-runner receives `power` for `session_lifecycle`'s closing reboot, which
+# waits for the sessions until the job forces it.
 
 assets = ["assets"]
 

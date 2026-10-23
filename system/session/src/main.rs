@@ -166,7 +166,7 @@ fn from_supervisor(
             owner.sign_out(asked.force)
         }
         wire::MSG_STOPPING => owner.stopping(),
-        wire::MSG_CANCEL => owner.cancel(),
+        wire::MSG_CANCEL => owner.stop_cancelled(),
         other => panic!("session: the supervisor sent {other}, which the link has no word for"),
     }
 }
@@ -189,10 +189,13 @@ fn act_on(act: Act, apps: &mut [(u64, Process)], controls: &[Control], link: &Co
             }
         }
         Act::Report(names) => report(&names, controls, link),
-        Act::Stopping => {
-            say!("session: the machine stops; every app is asked to quit");
+        Act::Stopping(stopping) => {
+            match stopping {
+                true => say!("session: the machine stops; every app is asked to quit"),
+                false => say!("session: the machine's stop is cancelled; the sign-out asked before it goes on"),
+            }
             for control in controls {
-                let _ = control.conn.try_signal(wire::MSG_STOPPING);
+                let _ = control.conn.try_send_bytes(wire::MSG_STOPPING, &[u8::from(stopping)]);
             }
         }
         Act::Cancelled => {
@@ -200,6 +203,7 @@ fn act_on(act: Act, apps: &mut [(u64, Process)], controls: &[Control], link: &Co
             for control in controls {
                 let _ = control.conn.try_signal(wire::MSG_CANCELLED);
             }
+            let _ = link.try_signal(wire::MSG_CANCELLED);
         }
         Act::Exit => {
             say!("session: every app has ended; the session ends");

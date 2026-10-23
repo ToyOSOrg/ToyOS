@@ -6,6 +6,12 @@
 //! and reports the rest until the last has ended, when the owner exits and
 //! the session ends. Nothing here reads a clock. A cancel stops the waiting;
 //! a hang-up already delivered stays delivered.
+//!
+//! **The machine's stop is a sign-out of its own**, asked by the supervisor
+//! with a terminate, and only the supervisor's cancel ends it: a control's
+//! cancel withdraws the control's own sign-out and leaves the stop's. A stop
+//! cancelled while a control's sign-out is under way leaves that sign-out
+//! waiting.
 
 use std::collections::BTreeMap;
 
@@ -21,32 +27,42 @@ pub enum Act {
     /// Tell the session's controls and the supervisor what the sign-out waits for.
     Report(Names),
     Cancelled,
-    /// Tell the session's controls the machine is stopping, which a cancel
-    /// of the machine's stop ends.
-    Stopping,
+    /// Tell the session's controls whether the sign-out is the machine's
+    /// stop, which only the stop's own cancel ends.
+    Stopping(bool),
     /// Every app has ended: the session ends with the owner.
     Exit,
 }
 
-/// The session's apps, by instance, and whether it is signing out.
+/// The session's apps, by instance, and who is signing it out.
 #[derive(Debug, Default)]
 pub struct Owner {
     apps: BTreeMap<u64, String>,
-    /// The reason the sign-out asks with, while one is under way: a hang-up,
-    /// or a terminate where the machine stops.
-    signing_out: Option<Reason>,
+    /// A control asked for a sign-out, with a hang-up.
+    asked: bool,
+    /// The machine's stop asked for one, with a terminate.
+    stopping: bool,
 }
 
 impl Owner {
     pub fn signing_out(&self) -> bool {
-        self.signing_out.is_some()
+        self.asked || self.stopping
+    }
+
+    /// What an app started now is asked to quit with, while the session signs out.
+    fn reason(&self) -> Option<Reason> {
+        match (self.stopping, self.asked) {
+            (true, _) => Some(Reason::Terminate),
+            (false, true) => Some(Reason::HangUp),
+            (false, false) => None,
+        }
     }
 
     /// An app the supervisor started in the session. One started while the
     /// session signs out is asked to quit as the rest were.
     pub fn started(&mut self, instance: u64, name: String) -> Vec<Act> {
         self.apps.insert(instance, name);
-        match self.signing_out {
+        match self.reason() {
             Some(reason) => vec![Act::Quit(instance, reason), self.report()],
             None => Vec::new(),
         }
@@ -54,45 +70,64 @@ impl Owner {
 
     pub fn ended(&mut self, instance: u64) -> Vec<Act> {
         self.apps.remove(&instance);
-        match self.signing_out {
-            Some(_) => self.waited(),
-            None => Vec::new(),
+        match self.signing_out() {
+            true => self.waited(),
+            false => Vec::new(),
         }
     }
 
-    /// A sign-out, its apps asked to quit with a hang-up, or ended by `force`.
+    /// A control's sign-out: its apps asked to quit with a hang-up, or ended
+    /// by `force`.
     pub fn sign_out(&mut self, force: bool) -> Vec<Act> {
         if force {
             let mut acts: Vec<Act> = self.apps.keys().map(|&i| Act::Kill(i)).collect();
             acts.push(Act::Exit);
             return acts;
         }
-        self.ask(Reason::HangUp)
-    }
-
-    /// The machine stops: every app asked to quit with a terminate, and the
-    /// session's controls told, until a cancel of the stop.
-    pub fn stopping(&mut self) -> Vec<Act> {
-        let mut acts = vec![Act::Stopping];
-        acts.extend(self.ask(Reason::Terminate));
-        acts
-    }
-
-    fn ask(&mut self, reason: Reason) -> Vec<Act> {
-        let mut acts = match self.signing_out {
-            Some(_) => Vec::new(),
-            None => self.apps.keys().map(|&i| Act::Quit(i, reason)).collect(),
+        let mut acts = match self.signing_out() {
+            true => Vec::new(),
+            false => self.quits(Reason::HangUp),
         };
-        self.signing_out.get_or_insert(reason);
+        self.asked = true;
         acts.extend(self.waited());
         acts
     }
 
-    pub fn cancel(&mut self) -> Vec<Act> {
-        match self.signing_out.take() {
-            Some(_) => vec![Act::Cancelled],
-            None => Vec::new(),
+    /// The machine stops: every app asked to quit with a terminate, a
+    /// control's hang-up before it notwithstanding, and the controls told.
+    pub fn stopping(&mut self) -> Vec<Act> {
+        if std::mem::replace(&mut self.stopping, true) {
+            return self.waited();
         }
+        let mut acts = vec![Act::Stopping(true)];
+        acts.extend(self.quits(Reason::Terminate));
+        acts.extend(self.waited());
+        acts
+    }
+
+    /// A control's cancel: its own sign-out withdrawn. The machine's stop's
+    /// is not a control's to cancel, and goes on.
+    pub fn cancel(&mut self) -> Vec<Act> {
+        match (std::mem::take(&mut self.asked), self.stopping) {
+            (true, false) => vec![Act::Cancelled],
+            _ => Vec::new(),
+        }
+    }
+
+    /// The machine's stop was cancelled: the session goes on, or, where a
+    /// control's sign-out was under way, that sign-out waits on.
+    pub fn stop_cancelled(&mut self) -> Vec<Act> {
+        if !std::mem::take(&mut self.stopping) {
+            return Vec::new();
+        }
+        match self.asked {
+            true => vec![Act::Stopping(false), self.report()],
+            false => vec![Act::Cancelled],
+        }
+    }
+
+    fn quits(&self, reason: Reason) -> Vec<Act> {
+        self.apps.keys().map(|&i| Act::Quit(i, reason)).collect()
     }
 
     fn waited(&self) -> Vec<Act> {
@@ -164,14 +199,46 @@ mod tests {
     }
 
     /// The machine's stop asks with a terminate and tells the controls; its
-    /// cancel keeps the session as a sign-out's does.
+    /// own cancel keeps the session as a sign-out's does.
     #[test]
     fn a_stop_asks_with_a_terminate() {
         let mut owner = owner(&[(1, "holder")]);
-        assert_eq!(owner.stopping(), vec![Act::Stopping, Act::Quit(1, Reason::Terminate), waiting(&["holder"])]);
+        assert_eq!(owner.stopping(), vec![Act::Stopping(true), Act::Quit(1, Reason::Terminate), waiting(&["holder"])]);
+        assert_eq!(owner.stopping(), vec![waiting(&["holder"])], "a second stop asked again");
         assert_eq!(owner.started(2, "late".into()), vec![Act::Quit(2, Reason::Terminate), waiting(&["holder", "late"])]);
+        assert_eq!(owner.stop_cancelled(), vec![Act::Cancelled]);
+        assert!(!owner.signing_out());
+        assert_eq!(owner.stop_cancelled(), Vec::new(), "nothing to cancel");
+        assert_eq!(Owner::default().stopping(), vec![Act::Stopping(true), Act::Exit]);
+    }
+
+    /// A control's cancel never ends the machine's stop's sign-out, before
+    /// or after a control's own; the stop's cancel leaves a control's
+    /// sign-out waiting, and ends none it did not begin.
+    #[test]
+    fn only_the_stops_own_cancel_ends_its_sign_out() {
+        let mut owner = owner(&[(1, "holder")]);
+        owner.stopping();
+        assert_eq!(owner.cancel(), Vec::new(), "a control cancelled the machine's stop");
+        assert!(owner.signing_out());
+        assert_eq!(owner.started(2, "late".into()), vec![Act::Quit(2, Reason::Terminate), waiting(&["holder", "late"])]);
+
+        let mut owner = owner_signing_out();
+        assert_eq!(owner.stopping(), vec![Act::Stopping(true), Act::Quit(1, Reason::Terminate), waiting(&["holder"])], "the stop did not ask with its terminate");
+        assert_eq!(owner.cancel(), Vec::new(), "a control's cancel ended the machine's stop");
+        assert_eq!(owner.stop_cancelled(), vec![Act::Cancelled], "the withdrawn sign-out was kept");
+
+        let mut owner = owner_signing_out();
+        owner.stopping();
+        assert_eq!(owner.stop_cancelled(), vec![Act::Stopping(false), waiting(&["holder"])], "the stop's cancel cancelled a control's sign-out");
+        assert_eq!(owner.started(2, "late".into()), vec![Act::Quit(2, Reason::HangUp), waiting(&["holder", "late"])]);
         assert_eq!(owner.cancel(), vec![Act::Cancelled]);
-        assert_eq!(Owner::default().stopping(), vec![Act::Stopping, Act::Exit]);
+    }
+
+    fn owner_signing_out() -> Owner {
+        let mut owner = owner(&[(1, "holder")]);
+        assert_eq!(owner.sign_out(false), vec![Act::Quit(1, Reason::HangUp), waiting(&["holder"])]);
+        owner
     }
 
     #[test]

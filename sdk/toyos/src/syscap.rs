@@ -100,7 +100,7 @@ impl SysCap {
 
     /// Whether [`Self::shutdown`] or [`Self::reboot`] would stop this machine:
     /// the refusal it would answer before stopping anything, where not.
-    pub fn stops(&self, stop: syscall::MachineStop) -> Result<(), SyscallError> {
+    pub fn can_stop(&self, stop: syscall::MachineStop) -> Result<(), SyscallError> {
         syscall::machine_stops(self.0.raw(), stop)
     }
 

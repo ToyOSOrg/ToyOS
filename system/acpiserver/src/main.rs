@@ -80,7 +80,7 @@ mod osc;
 mod sci;
 mod tables;
 
-use std::cell::Cell;
+use std::cell::{Cell, RefCell};
 use std::collections::{BTreeMap, VecDeque};
 use std::time::{Duration, Instant};
 
@@ -151,7 +151,7 @@ fn main() {
         return;
     };
     let info = dev.describe().expect("acpiserver: the claim's first read is its description");
-    let claim = Claim { dev: &dev, info, poller: Poller::new(1), watching: Cell::new(false) };
+    let claim = Claim { dev: &dev, info, poller: Poller::new(1), watching: Cell::new(false), stop: RefCell::new(None) };
     let mut server = Server::new(&claim, Machine, info);
     server.arm(&dev);
     let (loaded, kept) = aml::load(&claim, server.info.rsdp);
@@ -208,6 +208,8 @@ struct Claim<'a> {
     /// A watch answers once: one still registered from a wait that timed out
     /// is not registered again.
     watching: Cell<bool>,
+    /// The stop the last press asked, which a terminate forces and no other.
+    stop: RefCell<Option<power::Pending>>,
 }
 
 impl Claim<'_> {
@@ -277,12 +279,13 @@ impl Kernel for Claim<'_> {
     }
 
     fn power_off(&self) -> Result<(), power::Refused> {
-        // The pending stop's later word is not read: a press asks again.
-        power::stop(Stop::Shutdown, Mode::Wait).map(drop)
+        let pending = power::stop(Stop::Shutdown, Mode::Wait)?;
+        *self.stop.borrow_mut() = Some(pending);
+        Ok(())
     }
 
     fn terminate(&self) -> Result<(), power::Refused> {
-        power::terminate()
+        self.stop.borrow().as_ref().map_or(Err(Refused::NoStopPending), power::Pending::terminate)
     }
 }
 
@@ -720,8 +723,9 @@ impl<'a, K: Kernel, P: Ports> Server<'a, K, P> {
 
     /// A press: the supervisor asked to power off once the sessions have
     /// ended, which is answered at once so the next press is served; a press
-    /// while that stop is pending forces it. A stop that ended without one,
-    /// cancelled or refused, leaves the next press asking again.
+    /// while that stop is pending forces it, and no other. A stop that ended
+    /// without the machine, cancelled or refused, leaves the next press
+    /// asking again.
     fn press(&mut self) {
         if self.stop_asked {
             println!("acpiserver: the power button was pressed again, on SCI {}; forcing the stop", self.scis);
@@ -1312,7 +1316,8 @@ mod tests {
 
     /// A press asks a stop that waits for the sessions and is answered at
     /// once, so the next press is served: it forces that stop. A stop that
-    /// ended without stopping the machine leaves the press after asking again.
+    /// ended without stopping the machine leaves the press after asking
+    /// again, and a stop of another kind pending since is not forced.
     #[test]
     fn a_press_while_the_stop_waits_forces_it() {
         use crate::host::tests::Stop::{PowerOff, Terminate};
@@ -1325,6 +1330,17 @@ mod tests {
         assert_eq!(*kernel.stopped.borrow(), [PowerOff, Terminate], "a second press did not force the stop");
         server.press();
         assert_eq!(*kernel.stopped.borrow(), [PowerOff, Terminate, Terminate, PowerOff], "a press after the stop ended did not ask again");
+
+        // Cancelled, then a reboot asked by someone else: the press after is
+        // refused its terminate, asks its own stop, is refused that, and
+        // forces nothing at any press.
+        let reboot = Err(Refused::AnotherStopPending(power::Stop::Reboot));
+        let kernel = Scripted { stops: RefCell::new([Ok(()), Err(Refused::NoStopPending), reboot, reboot].into()), ..crafted(&[], &[]) };
+        let mut server = Server::new(&kernel, Bytes::default(), info);
+        for _ in 0..3 {
+            server.press();
+        }
+        assert_eq!(*kernel.stopped.borrow(), [PowerOff, Terminate, PowerOff, PowerOff], "a press forced a stop it never asked");
     }
 
     /// §6.2.11.1.3: a commit sends what the query offered of the claim, and a

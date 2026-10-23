@@ -1,16 +1,20 @@
 //! The machine's stop, from a request on `power` to the kernel's call
 //! ([`toyos_supervisor::stop`] decides; this does).
 //!
-//! A stop signs every login session out with a terminate and is answered at
-//! once with what it waits for. Each requester that was answered is a
-//! watcher, told every list after and the outcome, never blocking the loop:
-//! a watcher that does not read is owed only the latest list and the outcome
-//! ([`Owed`]). A requester that hangs up cancels nothing.
+//! A stop is answered at once with its ticket and what it waits for. Each
+//! requester that was answered is a watcher of that stop, told every list
+//! after and the outcome, never blocking the loop: a watcher that does not
+//! read is owed only the latest list and the outcome ([`Owed`]), and is let
+//! go once the outcome is sent. A requester that hangs up cancels nothing.
+//!
+//! **The kernel's refusals are said in the protocol's words**: a machine
+//! without the stop is [`Refused::Unsupported`], and any other refusal
+//! [`Refused::Failed`], its kernel error in the log.
 
 use toyos::ipc::{Connection, FrameRx, RxStep};
-use toyos::power::{self, Refused, Request, Stop, Waiting};
+use toyos::power::{self, Answer, Refused, Request, Stop, Waiting};
 use toyos::{say, AsHandle};
-use toyos_abi::syscall::MachineStop;
+use toyos_abi::syscall::{MachineStop, SyscallError};
 use toyos_session as wire;
 use toyos_supervisor::stop::{Act, Owed};
 
@@ -38,6 +42,11 @@ impl Watcher {
         self.owed.owes()
     }
 
+    /// Kept while its stop is pending and its outcome unsent, or one is owed.
+    fn kept(&self, pending: bool) -> bool {
+        self.owed.owes() || (pending && !self.owed.done())
+    }
+
     fn post(&mut self, msg: u32, payload: Vec<u8>, outcome: bool) {
         let conn = &self.conn;
         self.owed.post(msg, payload, outcome, |msg, payload| conn.try_send_bytes(msg, payload).is_ok());
@@ -59,19 +68,34 @@ impl Supervisor<'_> {
                 }
                 None => return say!("supervisor: power: dropping a stop no requester writes"),
             },
-            power::MSG_TERMINATE => self.stops.terminate(),
-            power::MSG_CANCEL => self.stops.cancel(),
+            power::MSG_TERMINATE => {
+                let of = match payload {
+                    [] => None,
+                    ticket => match <[u8; 8]>::try_from(ticket) {
+                        Ok(ticket) => Some(u64::from_le_bytes(ticket)),
+                        Err(_) => return say!("supervisor: power: dropping a terminate no requester writes"),
+                    },
+                };
+                let (done, acts) = self.stops.terminate(of);
+                (done.map(|()| 0), acts)
+            }
+            power::MSG_CANCEL => {
+                let (done, acts) = self.stops.cancel();
+                (done.map(|()| 0), acts)
+            }
             other => return say!("supervisor: power: dropping client {} — frame {other} is no request", conn.as_handle().0),
         };
         match answer {
-            Ok(()) if msg_type == power::MSG_STOP => {
-                let _ = conn.try_send_bytes(power::MSG_PENDING, &self.waiting().encode());
-                match self.watchers.len() < MAX_WATCHERS {
+            Ok(ticket) if msg_type == power::MSG_STOP => {
+                let watched = self.watchers.len() < MAX_WATCHERS;
+                let answer = Answer { ticket, watched, waiting: self.waiting() };
+                let _ = conn.try_send_bytes(power::MSG_PENDING, &answer.encode());
+                match watched {
                     true => self.watchers.push(Watcher { conn, rx: FrameRx::new(), owed: Owed::default() }),
                     false => say!("supervisor: power: {MAX_WATCHERS} watch the stop already; this requester is told no more"),
                 }
             }
-            Ok(()) => {
+            Ok(_) => {
                 let _ = conn.try_signal(power::MSG_DONE);
             }
             Err(why) => {
@@ -88,7 +112,7 @@ impl Supervisor<'_> {
         let pending = self.stops.pending().is_some();
         self.watchers.retain_mut(|w| {
             w.flush();
-            matches!(w.rx.pump(&w.conn), RxStep::Idle) && (pending || w.owes())
+            matches!(w.rx.pump(&w.conn), RxStep::Idle) && w.kept(pending)
         });
     }
 
@@ -102,7 +126,7 @@ impl Supervisor<'_> {
             Stop::Reboot => MachineStop::Reboot,
             Stop::Shutdown => MachineStop::Shutdown,
         };
-        self.syscap.stops(stop).map_err(Refused::Kernel)
+        self.syscap.can_stop(stop).map_err(|e| refused(how, e))
     }
 
     /// What the stop waits for: every session's report.
@@ -137,7 +161,7 @@ impl Supervisor<'_> {
             }
         }
         let pending = self.stops.pending().is_some();
-        self.watchers.retain(|w| pending || w.owes());
+        self.watchers.retain(|w| w.kept(pending));
     }
 
     /// `logkeeper` flushed, then the kernel asked with the machine's
@@ -148,18 +172,27 @@ impl Supervisor<'_> {
         self.log.flush();
         self.sync_files();
         let stopped = self.stop_drivers();
-        let refused = match how {
+        let kernel = match how {
             Stop::Reboot => self.syscap.reboot(),
             Stop::Shutdown => self.syscap.shutdown(),
         };
         self.log.resume();
-        toyos::error!("supervisor: power: the kernel refused {how:?}: {refused:?}");
+        let word = refused(how, kernel);
         // Their functions are owed another driver, as after any end.
         if stopped {
             self.drive();
         }
         self.stops.refused();
-        let word = Refused::Kernel(refused).encode().expect("the kernel's refusal is said");
+        let word = word.encode().expect("the kernel's refusal is said");
         self.watchers.iter_mut().for_each(|w| w.post(power::MSG_REFUSED, word.clone(), true));
+    }
+}
+
+/// The kernel's refusal of `how`, said in the log and in the protocol's words.
+fn refused(how: Stop, kernel: SyscallError) -> Refused {
+    toyos::error!("supervisor: power: the kernel refused {how:?}: {kernel:?}");
+    match kernel {
+        SyscallError::NotSupported => Refused::Unsupported,
+        _ => Refused::Failed,
     }
 }

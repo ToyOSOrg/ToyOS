@@ -161,7 +161,9 @@ pub trait Kernel {
     /// ended (`toyos::power::stop`, waiting): answered at once, the stop
     /// pending or refused.
     fn power_off(&self) -> Result<(), toyos::power::Refused>;
-    /// Force the pending stop (`toyos::power::terminate`).
+    /// Force the stop the last [`Self::power_off`] asked, and no other
+    /// (`toyos::power::Pending::terminate`): refused `NoStopPending` once it
+    /// has ended, whatever stop is pending since.
     fn terminate(&self) -> Result<(), toyos::power::Refused>;
 }
 
