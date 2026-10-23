@@ -19,3 +19,5 @@ toyos-tco = { path = "../../lib/tco" }
 
 [dev-dependencies]
 toyos-tmpdir = { path = "../../lib/tmpdir" }
+# The slot table written into the test images `internal::admit` reads.
+toyos-update = { path = "../../lib/update" }
