@@ -8,6 +8,7 @@
 use alloc::sync::Arc;
 use alloc::vec::Vec;
 
+use crate::mm::charge::{self, Charge};
 use crate::object::job::JobObject;
 use crate::object::notice::NoticeObject;
 use crate::object::process::ProcessObject;
@@ -40,9 +41,29 @@ pub(crate) enum Start {
 pub(crate) struct KernelStack {
     alloc: OwnedAlloc,
     user: bool,
+    /// The stack, and the records its task keeps for as long as it does.
+    _charge: Charge,
 }
 
 impl KernelStack {
+    /// The heap a thread takes: its stack, its scheduler records, its place
+    /// on the one watch it may wait on, whose list doubles, and, for a thread
+    /// of a process, its place in the process's thread table, its own data,
+    /// and what one of its calls copies in and may hold while it is preempted
+    /// — two strings at their bound, as a rename's paths, and a page besides,
+    /// as a namespace's names. A spawn charges what it copies past that.
+    fn heap(user: bool) -> usize {
+        let waiter = 2 * core::mem::size_of::<(usize, u64)>();
+        let call = 2 * crate::user_ptr::MAX_USER_STR as usize + crate::mm::PAGE_BYTES;
+        let records = kernel::sched::task::TaskBuilder::<crate::sched::payload::KernelPayload>::allocations().into_iter().map(charge::heap).sum::<usize>()
+            + charge::arc::<crate::sched::payload::TaskHandle>()
+            + waiter;
+        let process = charge::map_entry::<toyos_abi::Tid, crate::process::ThreadEntry>()
+            + charge::arc::<crate::sync::Lock<crate::process::ThreadData>>()
+            + call;
+        charge::heap(Self::layout_for(user)) + records + if user { process } else { 0 }
+    }
+
     /// What one is allocated as, with the area or without it.
     fn layout_for(user: bool) -> core::alloc::Layout {
         let area = if user { crate::arch::fpu::area_bytes() } else { 0 };
@@ -80,10 +101,11 @@ pub(crate) fn alloc_kernel_stack(start: Start) -> Option<(KernelStack, u64)> {
         Start::Thread { entry, sp, arg } => (thread_start, entry.addr(), sp, arg, true),
         Start::Kernel { body, arg } => (kernel_start, body as usize as u64, 0, arg, false),
     };
+    let charge = Charge::new(KernelStack::heap(user)).ok()?;
     let layout = KernelStack::layout_for(user);
     let alloc = OwnedAlloc::new(layout.size(), layout.align())?;
     scheduler::write_stack_canary(&alloc);
-    let stack = KernelStack { alloc, user };
+    let stack = KernelStack { alloc, user, _charge: charge };
     // SAFETY: `stack` is fresh and exclusively owned, and its `top` ends the stack.
     let frame = unsafe { crate::arch::entry::initial_frame(stack.top(), trampoline, user_entry, user_sp, arg) };
     Some((stack, frame))
@@ -153,13 +175,27 @@ impl PendingHandles {
             moving.push((EndowEntry { label_off, label_len, handle, _pad: 0 }, handle));
         }
         // Checked before any removal, so a failed install can't strand a handle out of a table that never spawned.
-        if !table.has_room(moving.len() + Own::LABELS.len()) || !data.handles.has_room(1) {
+        if !table.make_room(moving.len() + Own::LABELS.len()) || !data.handles.make_room(1) {
             return Err(SyscallError::ResourceExhausted.into());
+        }
+        // The consoles this spawn endowed, by the parent's object, each with
+        // the child's own: minted before any removal too, since one can be
+        // refused. A console is minted, not moved: it is its own line buffer,
+        // and one shared would splice two processes' half-lines. Two
+        // endowments of one parent console are one child console, or aliased
+        // stdout and stderr would split in two.
+        let mut minted: Vec<(usize, KObjectRef)> = Vec::new();
+        for (_, handle) in &moving {
+            if let KObjectRef::Console(parent_console) = data.handles.get_ref(*handle, Rights::NONE)? {
+                let key = Arc::as_ptr(parent_console) as usize;
+                if !minted.iter().any(|(seen, _)| *seen == key) {
+                    let console = crate::object::device::ConsoleObject::new().map_err(SyscallError::from)?;
+                    minted.push((key, KObjectRef::Console(console)));
+                }
+            }
         }
 
         let mut entries = Vec::with_capacity(moving.len());
-        // The consoles this spawn endowed, by the parent's object, each with the child's own.
-        let mut minted: Vec<(usize, KObjectRef)> = Vec::new();
         // Moved-out console handles, dropped once the parent's lock is let go.
         let mut displaced = Vec::new();
         for (mut entry, parent_handle) in moving {
@@ -167,20 +203,11 @@ impl PendingHandles {
                 .handles
                 .remove(parent_handle)
                 .expect("an endowed handle verified under this lock stopped resolving");
-            // A console is minted, not moved: it is its own line buffer, and one shared
-            // would splice two processes' half-lines. Two endowments of one parent console
-            // are one child console, or aliased stdout and stderr would split in two.
             let moved = match moved.object() {
                 KObjectRef::Console(parent_console) => {
                     let key = Arc::as_ptr(parent_console) as usize;
-                    let object = match minted.iter().find(|(seen, _)| *seen == key) {
-                        Some((_, object)) => object.clone(),
-                        None => {
-                            let object = KObjectRef::Console(crate::object::device::ConsoleObject::new());
-                            minted.push((key, object.clone()));
-                            object
-                        }
-                    };
+                    let (_, object) = minted.iter().find(|(seen, _)| *seen == key).expect("each endowed console was minted");
+                    let object = object.clone();
                     let rights = moved.rights();
                     displaced.push(moved);
                     HandleEntry::new(object, rights)

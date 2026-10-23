@@ -12,6 +12,7 @@ use alloc::collections::VecDeque;
 use alloc::sync::Arc;
 use core::sync::atomic::{AtomicU64, Ordering};
 
+use crate::mm::charge::{self, Exhausted};
 use crate::pipe::{PipeReader, PipeWriter};
 use crate::sync::Lock;
 use crate::watch::Watch;
@@ -38,6 +39,15 @@ pub struct Stamp {
     /// The port's never-repeating id, which the acceptor asking for the badge must match.
     pub port: u64,
     pub badge: Option<Arc<[u8]>>,
+}
+
+/// The heap a badge takes, which each holder of a stamp of it is charged
+/// besides the connector it was minted on: the badge goes only with the last.
+fn badge_heap(badge: &Arc<[u8]>) -> usize {
+    let (inner, _) = core::alloc::Layout::new::<[usize; 2]>()
+        .extend(core::alloc::Layout::for_value::<[u8]>(badge))
+        .expect("port: a badge's layout");
+    charge::heap(inner.pad_to_align())
 }
 
 /// Never repeats, so a stamp outlives its port without ever naming another one.
@@ -79,16 +89,23 @@ pub enum PushError {
     QueueFull,
 }
 
-pub fn create() -> (Arc<Acceptor>, Arc<Connector>) {
+/// A port's two ends. The acceptor is charged what they share, its queue at
+/// its bound included, and each connector itself.
+pub fn create() -> Result<(Arc<Acceptor>, Arc<Connector>), Exhausted> {
+    let shared = charge::arc::<PortShared>()
+        + charge::arc::<Watch>()
+        + charge::array::<PendingConnection>(MAX_PENDING_CONNECTIONS.next_power_of_two());
+    let acceptor = Acceptor::new_core(shared)?;
+    let connector = Connector::new_core(0)?;
     let shared = Arc::new(PortShared {
         id: NEXT_PORT.fetch_add(1, Ordering::Relaxed),
         queue: Lock::new(PortQueue { closed: false, pending: VecDeque::new() }),
         watch: Arc::new(Watch::new()),
     });
-    (
-        Arc::new(Acceptor { core: Acceptor::new_core(), shared: shared.clone() }),
-        Arc::new(Connector { core: Connector::new_core(), shared, badge: None }),
-    )
+    Ok((
+        Arc::new(Acceptor { core: acceptor, shared: shared.clone() }),
+        Arc::new(Connector { core: connector, shared, badge: None }),
+    ))
 }
 
 impl PortShared {
@@ -127,9 +144,11 @@ impl Acceptor {
         self.shared.id
     }
 
-    /// A connector to this port whose every connection is stamped with `badge`.
-    pub fn mint(&self, badge: Arc<[u8]>) -> Arc<Connector> {
-        Arc::new(Connector { core: Connector::new_core(), shared: self.shared.clone(), badge: Some(badge) })
+    /// A connector to this port whose every connection is stamped with
+    /// `badge`, charged for it.
+    pub fn mint(&self, badge: Arc<[u8]>) -> Result<Arc<Connector>, Exhausted> {
+        let core = Connector::new_core(badge_heap(&badge))?;
+        Ok(Arc::new(Connector { core, shared: self.shared.clone(), badge: Some(badge) }))
     }
 }
 

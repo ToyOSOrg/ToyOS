@@ -92,14 +92,14 @@ pub fn spawn(name: &str, body: extern "C" fn(u64) -> !, arg: u64) -> ThreadSched
     let mut guard = PROCESS_TABLE.lock();
     let table = guard.as_mut().expect("kthread: spawned before process::init");
     table.insert(ProcessEntry::new(
-        crate::object::process::ProcessObject::new(pid),
+        crate::object::process::ProcessObject::new(pid).expect("kthread: no heap for its process object"),
         short,
         Arc::new(Lock::new(kernel_process_data(name, job.clone()))),
         // No user image: its frames resolve through `symbols::resolve_kernel`.
         None,
         ThreadEntry::new(Arc::new(Lock::new(kernel_thread_data()))),
         kernel::proclife::Node::root(),
-        crate::object::notice::NoticeObject::new(),
+        crate::object::notice::NoticeObject::new().expect("kthread: no heap for its notice"),
     ));
     let tid = table.get(pid).expect("kthread: the entry just inserted is gone").main_tid();
     claim.publish(TaskId(pid, tid));
@@ -137,6 +137,7 @@ fn kernel_process_data(name: &str, job: Arc<kernel::sched::job::Job>) -> Process
         accounting: ProcessAccounting::default(),
         endowments: Endowments::empty(),
         job,
+        charge: crate::mm::charge::Charge::NONE,
     }
 }
 

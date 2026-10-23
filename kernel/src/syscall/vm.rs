@@ -9,6 +9,7 @@
 
 use kernel::vm::Prot;
 
+use crate::mm::charge::{self, Charge};
 use crate::mm::space::At;
 use crate::user_ptr::UserBytesMut;
 use crate::UserAddr;
@@ -212,9 +213,10 @@ pub(super) fn sys_dlopen(
         }
         return idx as u64;
     }
-    // Asked here for the same reason, so a load past the bound is refused
-    // having registered nothing; its mapping goes down with the guard.
-    if data.elf.loaded_libs.len() >= MAX_LIBRARIES {
+    // Asked here for the same reason, so a load past the bound, or one whose
+    // records the process cannot be charged, is refused having registered
+    // nothing; its mapping goes down with the guard.
+    if data.elf.loaded_libs.len() >= MAX_LIBRARIES || data.charge.grow(library_heap(&resolved)).is_err() {
         drop(data);
         return SyscallError::ResourceExhausted.to_u64();
     }
@@ -244,6 +246,15 @@ pub(super) fn sys_dlopen(
     data.elf.lib_paths.push(resolved);
     data.elf.loaded_libs.push(lib);
     idx as u64
+}
+
+/// The heap a module's records take in its process, which keeps them for its
+/// life: its place in the lists of libraries, paths and TLS modules, each of
+/// which doubles, and its path.
+fn library_heap(path: &str) -> usize {
+    use core::mem::size_of;
+    2 * (size_of::<crate::elf::LoadedLib>() + size_of::<alloc::string::String>() + size_of::<crate::elf::TlsModule>())
+        + charge::array::<u8>(path.len())
 }
 
 /// Allocates a TLS block for the current thread's DTV entry for `module_id`,
@@ -280,12 +291,13 @@ fn tls_alloc_block(module_id: u64) -> Result<u64, SyscallError> {
     // USER and writable, over whatever the PMM hands out next.
     let tid = process::current_tid();
     let existing = process::with_process_data(|data| {
-        data.elf.dynamic_tls_blocks.get(&(tid, module_id)).map(|b| b.at)
+        data.elf.dynamic_tls_blocks.get(&(tid, module_id)).map(|(b, _)| b.at)
     });
 
     let tls_vaddr = match existing {
         Some(vaddr) => vaddr,
         None => {
+            let place = Charge::new(charge::map_entry::<(process::Tid, u64), (process::KernelMapping, Charge)>())?;
             let block = crate::object::shm::SharedMemObject::create(tls_memsz.max(1) as u64)?;
             if let Some(template) = &tls_template {
                 // SAFETY: the template is a bounds-checked view of the module's
@@ -297,7 +309,7 @@ fn tls_alloc_block(module_id: u64) -> Result<u64, SyscallError> {
             let vaddr = pt.lock().map(block.clone(), 0, len, kernel::vm::Prot::ReadWrite, crate::mm::space::At::ANYWHERE)?;
             // A thread asks for its own blocks alone, so none raced this one in.
             process::with_process_data(|data| {
-                data.elf.dynamic_tls_blocks.insert((tid, module_id), process::KernelMapping { object: block, at: vaddr })
+                data.elf.dynamic_tls_blocks.insert((tid, module_id), (process::KernelMapping { object: block, at: vaddr }, place))
             });
             vaddr
         }

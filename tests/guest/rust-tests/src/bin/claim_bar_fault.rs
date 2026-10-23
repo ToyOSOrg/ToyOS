@@ -113,7 +113,18 @@ fn holder() {
         );
         syscall::close(pipe.read);
         syscall::close(pipe.write);
-        println!("claim_bar_fault: a read into the BAR and a write from it were refused BadAddress, the registers untouched");
+        // A futex word the kernel would read through the direct map, which
+        // reaches no BAR. The expected value is the marker's low word, so a
+        // wait that read the register would park for ever.
+        let word = at as *const u32;
+        // SAFETY: an aligned word inside the live mapping; the kernel is what
+        // refuses it.
+        let waited = unsafe { syscall::futex_wait(word, MARK_SOURCE as u32, Some(0)) };
+        assert_eq!(SyscallError::from_u64(waited), Some(SyscallError::BadAddress), "claim_bar_fault: a futex wait on the BAR answered {waited:#x}");
+        // SAFETY: as above.
+        let woken = unsafe { syscall::futex_wake(word, 1) };
+        assert_eq!(SyscallError::from_u64(woken), Some(SyscallError::BadAddress), "claim_bar_fault: a futex wake on the BAR answered {woken:#x}");
+        println!("claim_bar_fault: a read into the BAR, a write from it and a futex on it were refused BadAddress, the registers untouched");
     }
 
     // `frame` runs an undefined instruction with its stack in the BAR; `jump`

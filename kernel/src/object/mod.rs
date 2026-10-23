@@ -14,6 +14,7 @@ use alloc::vec::Vec;
 use core::num::NonZeroU64;
 use core::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
 
+use crate::mm::charge::{self, Charge, Exhausted};
 use crate::sync::Lock;
 
 pub mod device;
@@ -85,6 +86,8 @@ impl Koid {
 /// What every object embeds; built only by the macro-generated `core()`, so
 /// nothing is constructed outside the census.
 pub struct ObjectCore {
+    /// The object's own allocation and what its constructor said it keeps besides.
+    _charge: Charge,
     koid: Koid,
     /// Table slots, in-flight transfers and spawn endowments — never the `Arc` strong count.
     handle_count: AtomicU32,
@@ -103,9 +106,10 @@ impl ObjectCore {
         self.retired.load(Ordering::Acquire)
     }
 
-    fn enrol(live: &'static AtomicU64) -> Self {
+    fn enrol(live: &'static AtomicU64, charge: Charge) -> Self {
         live.fetch_add(1, Ordering::Relaxed);
         Self {
+            _charge: charge,
             koid: Koid::mint(),
             handle_count: AtomicU32::new(0),
             retired: AtomicBool::new(false),
@@ -134,8 +138,10 @@ pub trait KObjectVariant: ZeroHandles + Send + Sync + Sized + 'static {
     const NAME: &'static str;
     fn from_ref(r: &KObjectRef) -> Option<&Arc<Self>>;
     fn core(&self) -> &ObjectCore;
-    /// A fresh core, enrolled in this type's census — the only way to build one.
-    fn new_core() -> ObjectCore;
+    /// A fresh core, enrolled in this type's census — the only way to build
+    /// one — charged the object's own `Arc` and the `extra` heap bytes its
+    /// constructor keeps besides; refused before anything is allocated.
+    fn new_core(extra: usize) -> Result<ObjectCore, Exhausted>;
 }
 
 /// Declares the closed set of object types; each row says whether its last
@@ -196,8 +202,9 @@ macro_rules! kobject {
                     &self.core
                 }
 
-                fn new_core() -> ObjectCore {
-                    ObjectCore::enrol(&census::$variant)
+                fn new_core(extra: usize) -> Result<ObjectCore, Exhausted> {
+                    let charge = Charge::new(charge::arc::<$ty>().saturating_add(extra))?;
+                    Ok(ObjectCore::enrol(&census::$variant, charge))
                 }
             }
         )+

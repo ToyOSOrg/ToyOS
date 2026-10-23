@@ -239,7 +239,10 @@ pub(super) fn sys_null(want: u64) -> u64 {
         Some(rights) if NullObject::RIGHTS.contains(rights) => rights,
         _ => return SyscallError::InvalidArgument.to_u64(),
     };
-    let object = KObjectRef::Null(NullObject::new());
+    let object = match NullObject::new() {
+        Ok(object) => KObjectRef::Null(object),
+        Err(e) => return SyscallError::from(e).to_u64(),
+    };
     let entry = crate::object::HandleEntry::new(object, rights);
     match process::with_process_data(|data| data.handles.install(entry)) {
         Ok(h) => h.0 as u64,

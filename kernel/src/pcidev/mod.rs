@@ -1359,7 +1359,7 @@ pub fn bar_object(binding: &Binding, index: u64) -> Result<Arc<SharedMemObject>,
             bound.bar_at[index],
             bound.bar_bytes[index].next_multiple_of(pages::PAGE),
             CachePolicy::Uncacheable,
-        ))
+        )?)
     })
 }
 

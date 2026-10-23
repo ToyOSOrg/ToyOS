@@ -34,10 +34,10 @@ pub struct Arm {
     /// config and parameters, and [`batches`] refuses a pair that does not.
     ///
     /// Named rather than derived from (config, parameters), because sharing is
-    /// not always safe and only the author knows: `mkdir_cap` fills the
-    /// machine-wide directory cap and leaves it there, so `readdir_bound`'s own
-    /// `create_dir` on that boot is refused with `OutOfMemory` and it panics. A
-    /// test that must not share names its own; it costs a minute and it says so.
+    /// not always safe and only the author knows: `readdir_bound` fills `/tmp`
+    /// to the VFS listing limit, so every later listing of `/tmp` on its boot
+    /// is refused. A test that must not share names its own; it costs a minute
+    /// and it says so.
     pub boot: &'static str,
     /// The image config, relative to the repository root.
     pub config: &'static str,

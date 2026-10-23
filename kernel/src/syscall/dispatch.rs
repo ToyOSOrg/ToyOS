@@ -185,6 +185,19 @@ pub(crate) fn syscall_dispatch(num: u64, a1: u64, a2: u64, a3: u64, a4: u64) -> 
                 Ok(parent) => parent,
                 Err(refused) => return refused,
             };
+            // What is copied below past what a thread is charged for one
+            // call's copies, and the list of argv's strings, a pointer pair
+            // for every two bytes at most, held until the call returns; each
+            // length is refused past its bound below, so this charges no more
+            // than that.
+            let copies = [args.path_len, args.argv_len, args.cwd_len, args.labels_len, args.env_len]
+                .map(|len| len.min(crate::user_ptr::MAX_USER_STR) as usize);
+            let argv = crate::mm::charge::array::<&str>(copies[1] / 2 + 1);
+            let past = (copies.iter().sum::<usize>() + argv).saturating_sub(2 * crate::user_ptr::MAX_USER_STR as usize);
+            let _copies = match crate::mm::charge::Charge::new(past) {
+                Ok(charge) => charge,
+                Err(e) => return SyscallError::from(e).to_u64(),
+            };
             let path = match ctx.user_str(UserAddr::new(args.path_ptr), args.path_len) { Ok(s) => s, Err(e) => return e.to_u64() };
             let text = match ctx.user_str(UserAddr::new(args.argv_ptr), args.argv_len) { Ok(s) => s, Err(e) => return e.to_u64() };
             let cwd = match ctx.user_str(UserAddr::new(args.cwd_ptr), args.cwd_len).and_then(|p| spawn_cwd(&p)) {

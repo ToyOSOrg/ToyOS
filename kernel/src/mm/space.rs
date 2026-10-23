@@ -9,6 +9,10 @@
 //! kernel makes for it ([`AddressSpace::reach`]) — and tables are built when a
 //! range is backed, so populating one takes a frame and nothing else.
 //!
+//! **A space is charged its ranges** (`mm::charge`) before a change that
+//! adds any, so a change the heap cannot cover is refused,
+//! `ResourceExhausted`, before it is made.
+//!
 //! **Taking a range away is one hold of the lock**: its leaves stop mapping,
 //! every CPU drops what it cached of them, and only then do its frames and the
 //! tables nothing else needs go back. A thread faulting on the range meanwhile
@@ -20,6 +24,7 @@ use core::sync::atomic::{AtomicU64, Ordering::Relaxed};
 use kernel::vm::{self, Access, Entry, Kind, Prot};
 use toyos_abi::syscall::SyscallError;
 
+use super::charge::{self, Charge};
 use super::paging::{Leaf, Mapping, Root, Unlinked, UserTables};
 use super::policy::{self, CachePolicy};
 use super::{pmm, PAGE_2M, PAGE_SIZE};
@@ -157,6 +162,7 @@ impl Space {
             tables: UserTables::new()?,
             usage: Arc::clone(&usage),
             kernel: false,
+            ranges: Charge::NONE,
         };
         Some(Arc::new(Self { inner: Lock::new(space), usage }))
     }
@@ -188,7 +194,13 @@ static KERNEL: core::sync::atomic::AtomicPtr<PageTables> = core::sync::atomic::A
 /// Make the kernel's space; `mm::init` calls it once its tables are built.
 pub(super) fn init_kernel() {
     let usage = Arc::new(Usage::default());
-    let space = AddressSpace { inventory: Inventory::new(FLOOR, TOP), tables: UserTables::kernel(), usage: Arc::clone(&usage), kernel: true };
+    let space = AddressSpace {
+        inventory: Inventory::new(FLOOR, TOP),
+        tables: UserTables::kernel(),
+        usage: Arc::clone(&usage),
+        kernel: true,
+        ranges: Charge::NONE,
+    };
     // Leaked: it outlives every task, and its tables are the kernel's.
     let space: &'static PageTables = alloc::boxed::Box::leak(alloc::boxed::Box::new(Arc::new(Space { inner: Lock::new(space), usage })));
     KERNEL.store(core::ptr::from_ref(space).cast_mut(), core::sync::atomic::Ordering::Release);
@@ -207,6 +219,21 @@ pub struct AddressSpace {
     tables: UserTables,
     usage: Arc<Usage>,
     kernel: bool,
+    /// What its ranges take of the heap, in grains of [`RANGE_GRAIN`].
+    ranges: Charge,
+}
+
+/// Ranges a space is charged for at a time, so that a change adding one
+/// rarely charges anything.
+const RANGE_GRAIN: usize = 32;
+
+/// The heap one range takes, at most: its entry, the free range beside it and
+/// that one's place by length, and its place in the lists a removal gathers.
+fn range_heap() -> usize {
+    charge::map_entry::<u64, SpaceEntry>()
+        + charge::map_entry::<u64, u64>()
+        + charge::map_entry::<(u64, u64), ()>()
+        + 2 * core::mem::size_of::<(u64, u64, SpaceEntry)>()
 }
 
 /// What a leaf of a range with protection `prot` says, `None` for one that
@@ -277,23 +304,38 @@ impl AddressSpace {
             drop(removed);
         }
         self.usage.made.fetch_add(1, Relaxed);
+        self.settle();
     }
 
     /// `ResourceExhausted` unless the space may still hold `added` ranges
     /// more and those a change over `[start, end)` adds by cutting a range at
-    /// either end. The bound keeps what a space's ranges take of the kernel
-    /// heap finite.
-    pub fn room(&self, start: u64, end: u64, added: usize) -> Result<(), SyscallError> {
+    /// either end, and is charged for them. The bound keeps the list a
+    /// removal gathers inside one heap allocation.
+    pub fn room(&mut self, start: u64, end: u64, added: usize) -> Result<(), SyscallError> {
         let cut = |at: u64| self.inventory.find(at).is_some_and(|(s, _)| s != at);
         let cuts = usize::from(cut(start)) + usize::from(cut(end));
-        if self.inventory.len() + added + cuts > toyos_abi::syscall::MAX_RANGES {
+        let ranges = self.inventory.len() + added + cuts;
+        if ranges > toyos_abi::syscall::MAX_RANGES {
             return Err(SyscallError::ResourceExhausted);
+        }
+        let charged = ranges.next_multiple_of(RANGE_GRAIN) * range_heap();
+        if charged > self.ranges.bytes() {
+            self.ranges.resize(charged)?;
         }
         Ok(())
     }
 
+    /// Give back the charge of ranges the space no longer holds, past a
+    /// grain of slack.
+    fn settle(&mut self) {
+        let charged = (self.inventory.len() + RANGE_GRAIN).next_multiple_of(RANGE_GRAIN) * range_heap();
+        if let Some(less) = self.ranges.bytes().checked_sub(charged) {
+            self.ranges.shrink(less);
+        }
+    }
+
     /// [`room`](Self::room) for one range more placed `at`.
-    fn room_at(&self, len: u64, at: At) -> Result<(), SyscallError> {
+    fn room_at(&mut self, len: u64, at: At) -> Result<(), SyscallError> {
         match at {
             At::Fixed(start) => self.room(start.raw(), start.raw().saturating_add(len), 1),
             At::Anywhere(_) => self.room(0, 0, 1),
@@ -410,6 +452,7 @@ impl AddressSpace {
         self.usage.taken.fetch_add(1, Relaxed);
         // The objects go here, after every CPU has stopped reaching them.
         drop(removed);
+        self.settle();
     }
 
     /// Give every page of `[start, start + len)` protection `prot`: a reserved
@@ -464,6 +507,7 @@ impl AddressSpace {
         if present {
             self.shoot_down(start, end, &Unlinked::none());
         }
+        self.settle();
         Ok(())
     }
 
@@ -542,6 +586,7 @@ impl AddressSpace {
         });
         let freed = self.clear(start, end);
         pmm::unpromise(committed - freed);
+        self.settle();
         Ok(())
     }
 
@@ -634,13 +679,21 @@ impl AddressSpace {
     /// Serve a fault at `va` for `access`: populate its page if its range
     /// allows the access and the page is empty. `false` ends the thread.
     pub fn fault(&mut self, va: u64, access: Access) -> bool {
-        self.reach(va, access).is_some()
+        self.populate(va, access).is_some()
     }
 
-    /// Where the byte at `va` is, populating its page where its range allows
-    /// `access`: what a copy the kernel makes for a thread of this space
-    /// reaches, which is what a store or load of the thread's own would.
+    /// Where the byte at `va` is, for the kernel to reach through the direct
+    /// map, populating its page where its range allows `access`; `None` for
+    /// an aperture's page, which the direct map does not reach.
     pub fn reach(&mut self, va: u64, access: Access) -> Option<u64> {
+        if !copyable(self.inventory.find(va)?.1) {
+            return None;
+        }
+        self.populate(va, access)
+    }
+
+    /// The frame behind `va`, populated where its range allows `access`.
+    fn populate(&mut self, va: u64, access: Access) -> Option<u64> {
         let (start, entry) = self.inventory.find(va)?;
         if !entry.prot.allows(access) {
             return None;
@@ -669,10 +722,12 @@ impl AddressSpace {
     }
 
     /// Whether every page of `[start, end)` is in a range that allows
-    /// `access`: what a copy the kernel makes for a thread asks first.
+    /// `access` and is memory the kernel can copy through the direct map:
+    /// what a copy the kernel makes for a thread asks first. A device's
+    /// registers or firmware's framebuffer, an aperture, are no buffer.
     pub fn allows(&self, start: u64, end: u64, access: Access) -> bool {
         self.inventory.covered(start & !(PAGE_SIZE - 1), end)
-            && self.inventory.meeting(start, end).all(|(_, entry)| entry.prot.allows(access) && entry.backed())
+            && self.inventory.meeting(start, end).all(|(_, entry)| entry.prot.allows(access) && entry.backed() && copyable(entry))
     }
 
     /// The frame and protection a present leaf maps `va` with, populating
@@ -728,6 +783,14 @@ impl AddressSpace {
             }
         };
         Some(phys + va % PAGE_SIZE)
+    }
+}
+
+/// Whether a range's pages are memory the direct map reaches.
+fn copyable(entry: &SpaceEntry) -> bool {
+    match &entry.kind {
+        Kind::Object { object, .. } => object.is_ordinary(),
+        Kind::Private { .. } | Kind::Copy { .. } => true,
     }
 }
 

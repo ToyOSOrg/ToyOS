@@ -792,7 +792,7 @@ mod tests {
     /// The truncation, which is what a whole-name predicate would miss.
     #[test]
     fn a_long_binarys_record_is_the_prefix_the_kernel_keeps() {
-        assert_eq!(recorded_name("test_rs_mkdir_cap"), "test_rs_mkdir_cap");
+        assert_eq!(recorded_name("test_rs_readdir_bound"), "test_rs_readdir_bound");
         assert_eq!(recorded_name("test_rs_lent_device_memory_refused"), "test_rs_lent_device_memory_");
         assert_eq!(recorded_name("/system/bin/echo"), "echo");
         assert_eq!(recorded_name("").len(), 0);

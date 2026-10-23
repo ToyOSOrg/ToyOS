@@ -8,6 +8,8 @@
 
 use alloc::sync::Arc;
 
+use crate::mm::charge::Exhausted;
+
 use super::{KObjectVariant, ObjectCore};
 
 pub struct SysCap {
@@ -16,7 +18,7 @@ pub struct SysCap {
 }
 
 impl SysCap {
-    pub fn new() -> Arc<Self> {
-        Arc::new(Self { core: Self::new_core() })
+    pub fn new() -> Result<Arc<Self>, Exhausted> {
+        Ok(Arc::new(Self { core: Self::new_core(0)? }))
     }
 }

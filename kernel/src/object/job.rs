@@ -11,6 +11,8 @@ use core::sync::atomic::{AtomicU64, Ordering};
 use kernel::sched::job::{Job, JobKey};
 use toyos_abi::handle::Rights;
 
+use crate::mm::charge::Exhausted;
+
 use super::{KObjectVariant, ObjectCore};
 
 pub struct JobObject {
@@ -24,8 +26,9 @@ impl JobObject {
     /// child in it, `DUP` and `TRANSFER` to hand that on.
     pub const RIGHTS: Rights = Rights::WRITE.union(Rights::DUP).union(Rights::TRANSFER);
 
-    pub fn new(job: Arc<Job>) -> Arc<Self> {
-        Arc::new(Self { core: Self::new_core(), job })
+    /// Charged the job besides, which a job a thread runs in can outlive.
+    pub fn new(job: Arc<Job>) -> Result<Arc<Self>, Exhausted> {
+        Ok(Arc::new(Self { core: Self::new_core(crate::mm::charge::arc::<Job>())?, job }))
     }
 
     pub fn job(&self) -> &Arc<Job> {

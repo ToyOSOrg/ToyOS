@@ -193,6 +193,7 @@ pub fn spawn<H>(
     };
     // Before anything is built; dropped on every way out below but the insert.
     let admission = Admission::ask(parent)?;
+    let mut charge = ProcessData::charge(path, &env).map_err(SyscallError::from)?;
     let t0 = crate::clock::nanos_since_boot();
 
     let backing: Arc<dyn crate::file_backing::FileBacking> = match image {
@@ -229,9 +230,12 @@ pub fn spawn<H>(
 
     // Taken before the child's space is locked: a file's snapshot takes the
     // file cache's lock, which a user copy may hold while it takes a space's.
-    let Some(source) = backing.source() else {
-        log!("spawn: {}: the file is gone", path);
-        return Err(SyscallError::NotFound.into());
+    let source = match backing.source() {
+        Ok(source) => source,
+        Err(e) => {
+            log!("spawn: {}: {e}", path);
+            return Err(e.into());
+        }
     };
 
     let t1 = crate::clock::nanos_since_boot();
@@ -284,6 +288,8 @@ pub fn spawn<H>(
             // Read directly into the `memsz`-sized buffer: `OwnedAlloc` zeroes
             // (no second pass for `.tbss`) and refuses a size past one heap
             // allocation itself.
+            let template = core::alloc::Layout::from_size_align(tls.memsz() as usize, 16).map_err(|_| SyscallError::InvalidArgument)?;
+            charge.grow(crate::mm::charge::heap(template)).map_err(SyscallError::from)?;
             let Some(tls_buf) = OwnedAlloc::new(tls.memsz() as usize, 16) else {
                 log!("spawn: {}: cannot allocate a {}-byte TLS template", path, tls.memsz());
                 return Err(SyscallError::ResourceExhausted.into());
@@ -346,8 +352,8 @@ pub fn spawn<H>(
     };
 
     let pid = admission.pid();
-    let object = crate::object::process::ProcessObject::new(pid);
-    let notice = crate::object::notice::NoticeObject::new();
+    let object = crate::object::process::ProcessObject::new(pid).map_err(SyscallError::from)?;
+    let notice = crate::object::notice::NoticeObject::new().map_err(SyscallError::from)?;
     // The point of no return: every failure above answers the caller with its
     // table untouched.
     let (handles, endowments, job, held) = commit(start::Own::new(&object, &notice))?;
@@ -376,6 +382,7 @@ pub fn spawn<H>(
         accounting: ProcessAccounting::default(),
         endowments,
         job: job.clone(),
+        charge,
     }));
 
     let thread_data = Arc::new(Lock::new(ThreadData {
@@ -448,7 +455,7 @@ pub fn spawn_supervisor(images: crate::bootimage::Objects) -> Pid {
     let mut entries = Vec::new();
     let mut labels = Vec::new();
     // One console, the supervisor's descriptors 0 to 2.
-    let console = KObjectRef::Console(crate::object::device::ConsoleObject::new());
+    let console = KObjectRef::Console(crate::object::device::ConsoleObject::new().expect("spawn_supervisor: no heap for its console"));
     for fd in ["0", "1", "2"] {
         let entry = crate::object::HandleEntry::new(console.clone(), ops::initial_rights(&console));
         let handle = handles.install(entry).expect("spawn_supervisor: three handles cannot exhaust an empty table");
@@ -458,7 +465,7 @@ pub fn spawn_supervisor(images: crate::bootimage::Objects) -> Pid {
         let label_len = labels.len() as u32 - label_off;
         entries.push(toyos_abi::syscall::EndowEntry { label_off, label_len, handle, _pad: 0 });
     }
-    let cap = KObjectRef::SysCap(crate::object::syscap::SysCap::new());
+    let cap = KObjectRef::SysCap(crate::object::syscap::SysCap::new().expect("spawn_supervisor: no heap for the system capability"));
     // Every machine-wide authority the system has: rights only shrink from
     // here, so a bit absent here is a bit no manifest can ever name. LOG and
     // WAIT arrive together since SYS_LOG_READ never blocks on its own; ROSTER

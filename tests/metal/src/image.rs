@@ -159,12 +159,12 @@ mod tests {
     #[test]
     fn every_derived_config_ends_its_own_boot() {
         for config in CONFIGS {
-            let out = derived(config, &["test_rs_mkdir_cap"]);
+            let out = derived(config, &["test_rs_readdir_bound"]);
             let parsed: Value = toml::from_str(&out).expect("the derived config parses");
             let runner = &parsed["programs"][RUNNER];
             let args: Vec<&str> =
                 runner["args"].as_array().unwrap().iter().map(|v| v.as_str().unwrap()).collect();
-            assert_eq!(args, ["--bound-ms=133100", "test_rs_mkdir_cap", REBOOT], "{config}");
+            assert_eq!(args, ["--bound-ms=133100", "test_rs_readdir_bound", REBOOT], "{config}");
             let receives: Vec<&str> = runner["receives"]
                 .as_array()
                 .unwrap()

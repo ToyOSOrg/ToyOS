@@ -80,7 +80,7 @@ pub struct Objects {
 /// One object over each image, once `mm::init` has run, for the supervisor's
 /// spawn.
 pub fn objects(handed: Handed) -> Objects {
-    let object = |image: BootImage| SharedMemObject::boot(image.addr, image.len);
+    let object = |image: BootImage| SharedMemObject::boot(image.addr, image.len).expect("boot: no heap for a boot image's object");
     for (what, image) in named(&handed) {
         log!("boot: {what} image {:#x}+{:#x}, kept read-only for the machine's life", image.addr, image.len);
     }

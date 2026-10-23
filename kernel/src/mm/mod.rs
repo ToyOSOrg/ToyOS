@@ -6,6 +6,7 @@ pub mod pmm;
 /// every caller asks it as memory management.
 pub use crate::arch::paging;
 mod alloc;
+pub mod charge;
 mod dma;
 mod image;
 mod mmio;
