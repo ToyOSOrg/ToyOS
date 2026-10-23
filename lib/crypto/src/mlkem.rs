@@ -43,20 +43,27 @@ fn sub(a: u16, b: u16) -> u16 {
 fn mul(a: u16, b: u16) -> u16 {
     reduce(u32::from(a) * u32::from(b))
 }
-fn power(mut base: u16, mut exponent: u32) -> u16 {
-    let mut result = 1;
-    while exponent != 0 {
-        if exponent & 1 == 1 {
-            result = mul(result, base)
+/// ζ^BitRev7(i) and, for `odd`, γ_i = ζ^(2·BitRev7(i)+1), with ζ = 17: FIPS 203
+/// Appendix A's two tables.
+const fn powers(odd: bool) -> [u16; 128] {
+    let mut out = [0; 128];
+    let mut i = 0;
+    while i < 128 {
+        let reversed = ((i as u8).reverse_bits() >> 1) as u32;
+        let exponent = if odd { 2 * reversed + 1 } else { reversed };
+        let mut power = 1;
+        let mut k = 0;
+        while k < exponent {
+            power = power * 17 % Q;
+            k += 1
         }
-        base = mul(base, base);
-        exponent >>= 1
+        out[i] = power as u16;
+        i += 1
     }
-    result
+    out
 }
-fn zeta(i: usize) -> u16 {
-    power(17, (i as u8).reverse_bits() as u32 >> 1)
-}
+const ZETAS: [u16; 128] = powers(false);
+const GAMMAS: [u16; 128] = powers(true);
 impl Poly {
     fn zero() -> Self {
         Self([0; 256])
@@ -66,7 +73,7 @@ impl Poly {
         let mut len = 128;
         while len >= 2 {
             for start in (0..256).step_by(2 * len) {
-                let z = zeta(k);
+                let z = ZETAS[k];
                 k += 1;
                 for i in start..start + len {
                     let t = mul(z, self.0[i + len]);
@@ -83,7 +90,7 @@ impl Poly {
         let mut len = 2;
         while len <= 128 {
             for start in (0..256).step_by(2 * len) {
-                let z = zeta(k);
+                let z = ZETAS[k];
                 k -= 1;
                 for i in start..start + len {
                     let t = self.0[i];
@@ -101,7 +108,7 @@ impl Poly {
     fn product(&self, q: &Self) -> Self {
         let mut out = Self::zero();
         for i in 0..128 {
-            let gamma = power(17, 2 * ((i as u8).reverse_bits() as u32 >> 1) + 1);
+            let gamma = GAMMAS[i];
             out.0[2 * i] = add(
                 mul(self.0[2 * i], q.0[2 * i]),
                 mul(gamma, mul(self.0[2 * i + 1], q.0[2 * i + 1])),
