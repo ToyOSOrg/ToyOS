@@ -437,7 +437,8 @@ fn write_by<W: Write>(sink: &mut W, set_timeout: impl Fn(&W, Option<Duration>) -
     true
 }
 
-/// End what runs on a channel: its program, whose pipes then end its readers.
+/// Let go of what runs on a channel: its program is asked to quit
+/// ([`Program::end`]), and its pipes then end its readers once it does.
 fn end(running: Running) {
     if let Some((program, _)) = running.program {
         program.end();

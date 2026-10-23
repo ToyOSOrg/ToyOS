@@ -1,10 +1,12 @@
 //! A program this daemon started, which one thread waits for while another
 //! may end it.
 //!
-//! std's `Child` is waited on and ended through one `&mut`. The connection
-//! starts the wait once both output streams reach end of file, and until then
-//! `end` kills the program. A program that closed both and runs on is waited
-//! for and cannot be ended:
+//! std's `Child` is waited on through one `&mut`. The connection starts the
+//! wait once both output streams reach end of file. `end` lets the program go
+//! through its [`Ender`]: on ToyOS it asks it to quit with a hang-up through
+//! a handle of its own, whether or not a thread waits; on a host it kills it
+//! unless a thread already waits, so there a program that closed both outputs
+//! and runs on cannot be ended:
 //! `issues/sshserver-cannot-end-a-program-that-closed-its-output.md`.
 
 use std::process::Child;

@@ -311,7 +311,14 @@ impl Supervisor<'_> {
             say!("supervisor: login: {} asked {msg_type}, which is no request", opener.name);
             return;
         }
-        let answered = self.open_session(opener).and_then(|at| self.logins.open[at].handed_to(opener));
+        // The screen's row is answered its open desktop session, as
+        // `desktop_for` is: there is one desktop session at a time.
+        let open = (Screen::of(opener) == Screen::Held)
+            .then(|| self.logins.open.iter().position(|l| l.desktop && l.opener.name == opener.name))
+            .flatten();
+        let answered = open
+            .map_or_else(|| self.open_session(opener), Ok)
+            .and_then(|at| self.logins.open[at].handed_to(opener));
         match answered {
             Ok((ns, control)) => {
                 // SAFETY: the namespace's own handle, given up here and to nothing else.

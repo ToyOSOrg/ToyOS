@@ -9,22 +9,15 @@
 //!
 //! **No clipboard byte is ever logged**: a refusal names a length and a client.
 
-use std::os::toyos::process::CommandExt;
-use std::process::Command;
-use std::sync::mpsc;
 use std::time::{Duration, Instant};
 
 use toyos::endow;
-use toyos::job::JOB_LABEL;
-use toyos::syscap::SysCap;
 use toyos::ipc::{Connection, FrameRx, RxStep};
 use toyos::poller::{Poller, READABLE};
 use toyos::port::Acceptor;
 use toyos::shm::SharedMemory;
-use toyos::namespace::Namespace;
 use toyos::{ipc, system, AsHandle};
 use toyos_abi::input::RawKeyEvent;
-use toyos_abi::syscall::SYSCAP_LABEL;
 use toyos_abi::RawHandle;
 use toyos_input::wire::{self, Record, CONNECTIONS, MAX_PAYLOAD};
 use toyos_input::wire::DEVICES;
@@ -247,10 +240,6 @@ pub struct Session {
     /// What the watcher has asked and is sent, for the compositor's whole life:
     /// a copy made while no watcher is there is the next one's.
     watch: Watch<CopyRegion>,
-    /// Where a launch is made: off the loop, since the supervisor answers one
-    /// whose package asks a question only once the question is answered,
-    /// through this loop.
-    launcher: mpsc::Sender<String>,
     /// The `input` port, and the sources on it, by their slot.
     inputs: Acceptor,
     sources: [Option<Source>; CONNECTIONS],
@@ -332,7 +321,7 @@ impl Session {
         let inputs = endow::acceptor(wire::PORT)
             .expect("the manifest declares this program serves `input`");
         let (mut display, panel) = Display::claim();
-        let desktop = crate::signout::Desktop::take();
+        let desktop = crate::signout::Desktop::start();
         let mode = display.mode();
         let (image, kept) = (image_scale(), kept_scale());
         let scale = scale_for(kept, image.unwrap_or(panel), mode);
@@ -395,6 +384,7 @@ impl Session {
         if let Some(control) = desktop.conn() {
             poller.watch(control, READABLE, control.as_handle().0 as u64);
         }
+        poller.watch(desktop.wake(), READABLE, desktop.wake().as_handle().0 as u64);
 
         let cursor = Point { x: desk.screen.w() / 2, y: desk.screen.h() / 2 };
         if display.hw_cursor() && cursor::in_hardware(scale) {
@@ -405,7 +395,6 @@ impl Session {
         let mut damage = Damage::default();
         damage.add(desk.screen);
 
-        let launcher = launcher(std::sync::Arc::clone(&desktop.launcher));
         println!("compositor: ready");
 
         let now = Instant::now();
@@ -418,7 +407,6 @@ impl Session {
             settings,
             watcher: None,
             watch: Watch::default(),
-            launcher,
             inputs,
             sources: Default::default(),
             merge: Merge::default(),
@@ -513,6 +501,7 @@ impl Session {
         let volume_ready = self.volume.as_ref().is_some_and(|(conn, _)| self.is_ready(conn.as_handle()));
         let display_ready = self.display.handle().is_some_and(|handle| self.is_ready(handle));
         let session_ready = self.desktop.conn().is_some_and(|c| self.is_ready(c.as_handle()));
+        let opened_ready = self.is_ready(self.desktop.wake().as_handle());
         let client_ready = self.stack.iter().any(|w| self.is_ready(w.client.conn.as_handle()))
             || self.pending.iter().any(|p| self.is_ready(p.conn.as_handle()))
             || self.watcher.as_ref().is_some_and(|w| self.is_ready(w.conn.as_handle()));
@@ -541,6 +530,7 @@ impl Session {
             && !volume_ready
             && !display_ready
             && !session_ready
+            && !opened_ready
         {
             return false;
         }
@@ -572,6 +562,14 @@ impl Session {
         }
         if session_ready {
             self.session_said();
+        }
+        if opened_ready {
+            if self.desktop.opened() {
+                if let Some(control) = self.desktop.conn() {
+                    self.poller.watch(control, READABLE, control.as_handle().0 as u64);
+                }
+            }
+            self.poller.watch(self.desktop.wake(), READABLE, self.desktop.wake().as_handle().0 as u64);
         }
         let frames = self.take_frames();
         self.dispatch(frames);
@@ -2103,19 +2101,9 @@ impl Session {
     }
 
     /// Start `program` through the launcher, off the loop.
-    /// Start `program` through the desktop session's launcher, off the
-    /// loop; with no session open and none to be opened, nothing starts.
+    /// Start `program` through the desktop session's launcher, off the loop.
     fn launch(&mut self, program: &str) {
-        let had = self.desktop.conn().is_some();
-        if !self.desktop.ensure() {
-            eprintln!("compositor: {program} did not start: no desktop session is open");
-            return;
-        }
-        // A session opened just now: its control is watched from here.
-        if let Some(control) = self.desktop.conn().filter(|_| !had) {
-            self.poller.watch(control, READABLE, control.as_handle().0 as u64);
-        }
-        self.launcher.send(program.to_string()).expect("compositor: its launcher thread has ended");
+        self.desktop.launch(program);
     }
 
     fn retarget(&mut self, idx: usize, mode: WindowMode) {
@@ -2189,54 +2177,6 @@ fn text(from: RawHandle, bytes: Vec<u8>) -> Option<String> {
             )
         })
         .ok()
-}
-
-/// The thread every launch is made on, and the channel to it: one at a time,
-/// in order, since a launch waits as long as its question does.
-///
-/// **Everything the desktop starts is a job of its own**, made with the
-/// `jobs` right this row's system capability carries: a program started from
-/// the taskbar is no helper of the compositor's, and must not share its CPU.
-fn launcher(session: crate::signout::Launcher) -> mpsc::Sender<String> {
-    let (launches, queue) = mpsc::channel::<String>();
-    std::thread::Builder::new()
-        .name("launcher".into())
-        .spawn(move || {
-            let jobs = endow::Endowments::get().take::<SysCap>(SYSCAP_LABEL);
-            for program in queue {
-                let Some(jobs) = &jobs else {
-                    eprintln!("compositor: {program} did not start: this row holds no `jobs` right to start it as its own job");
-                    continue;
-                };
-                let job = match jobs.new_job() {
-                    Ok(job) => job,
-                    Err(e) => {
-                        eprintln!("compositor: {program} did not start: no job for it: {e:?}");
-                        continue;
-                    }
-                };
-                let mut command = Command::new(&program);
-                command.independent().detached().endow(JOB_LABEL, job.into_raw().0);
-                // A session this compositor opened again, in place of the
-                // endowed one: a copy, so no lock is held across the launch.
-                let opened = session.lock().expect("compositor: its launcher lock is whole").as_ref().map(Namespace::duplicate);
-                let opened = match opened.transpose() {
-                    Ok(opened) => opened,
-                    Err(e) => {
-                        eprintln!("compositor: {program} did not start: its launcher would not duplicate ({e:?})");
-                        continue;
-                    }
-                };
-                if let Some(launcher) = &opened {
-                    command.launcher(launcher.as_handle().0);
-                }
-                if let Err(e) = command.spawn() {
-                    eprintln!("compositor: {program} did not start: {e}");
-                }
-            }
-        })
-        .expect("compositor: no thread to launch on");
-    launches
 }
 
 fn mode_rect(mode: Mode) -> Rect {

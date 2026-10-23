@@ -1,63 +1,116 @@
 //! The desktop session this compositor is the login authority of: its control
-//! connection, which signs the session out, and the launcher its launches go
-//! through.
+//! connection, which signs the session out, and the thread its launches and
+//! its opens of a session are made on.
 //!
 //! The supervisor starts this row holding the desktop session's launcher and
 //! its control connection, and no other launcher: its launches are that
 //! session's alone. **A session that ends is opened again** on the `login`
 //! port, which the supervisor refuses only past a budget of failures: a
 //! session signed out comes back empty, there being no greeter yet. While none
-//! is open, each launch asked for opens one first and, refused, says why and
-//! starts nothing.
+//! is open, each launch asked for asks for one first, and a refused open says
+//! why and its launch starts nothing. **Every open is the launcher thread's**,
+//! a supervisor round trip the loop never waits on: the control connection
+//! it opens comes back to the loop through [`Desktop::opened`].
 
-use std::sync::{Arc, Mutex};
+use std::os::toyos::process::CommandExt;
+use std::process::Command;
+use std::sync::mpsc;
 
-use toyos::endow::Endowments;
+use toyos::endow::{self, Endowments};
 use toyos::ipc::{self, Connection, RxStep};
+use toyos::job::JOB_LABEL;
 use toyos::namespace::Namespace;
+use toyos::syscap::SysCap;
+use toyos::{AsHandle, Pipe};
+use toyos_abi::syscall::SYSCAP_LABEL;
 use toyos_session::{self as wire, Names, SignOut};
 
-/// The launcher a launch goes through: the endowed one while `None`, and
-/// one this compositor opened a session for once that one ended.
-pub type Launcher = Arc<Mutex<Option<Namespace>>>;
+/// What the launcher thread is asked.
+enum Ask {
+    /// Open a desktop session on the `login` port.
+    Open,
+    Launch(String),
+}
 
 pub struct Desktop {
     control: Option<Connection>,
     rx: ipc::FrameRx<{ ipc::MAX_FRAME_LEN as usize }>,
     /// What a sign-out waits for, while one does.
     pub waiting: Option<Names>,
-    login: Option<Namespace>,
-    pub launcher: Launcher,
+    asks: mpsc::Sender<Ask>,
+    /// The control connections the thread's opens made.
+    opened: mpsc::Receiver<Connection>,
+    /// Readable once per control connection in `opened`.
+    wake: Pipe,
+    /// An open is asked and not yet answered: a launch meanwhile asks none.
+    opening: bool,
 }
 
 impl Desktop {
-    pub fn take() -> Self {
+    /// The endowed session, and the thread launches and opens are made on.
+    pub fn start() -> Self {
         let endowed = Endowments::get();
+        let (asks, queue) = mpsc::channel();
+        let (sent, opened) = mpsc::channel();
+        let (wake, woken) = toyos::pipe_pair().expect("compositor: no pipe for its session's opens");
+        let login = endowed.take::<Namespace>(wire::LOGIN_PORT);
+        std::thread::Builder::new()
+            .name("launcher".into())
+            .spawn(move || launcher(queue, login, sent, woken))
+            .expect("compositor: no thread to launch on");
         let mut desktop = Self {
             control: endowed.take::<Connection>(wire::CONTROL_LABEL),
             rx: ipc::FrameRx::new(),
             waiting: None,
-            login: endowed.take(wire::LOGIN_PORT),
-            launcher: Arc::new(Mutex::new(None)),
+            asks,
+            opened,
+            wake,
+            opening: false,
         };
         if desktop.control.is_none() {
             eprintln!("compositor: started with no desktop session");
-            desktop.reopen();
+            desktop.open();
         }
         desktop
     }
 
-    /// Whether a session is open, opening one where none is: the event a
-    /// retry waits on is a launch asked for.
-    pub fn ensure(&mut self) -> bool {
-        if self.control.is_none() {
-            self.reopen();
-        }
-        self.control.is_some()
-    }
-
     pub fn conn(&self) -> Option<&Connection> {
         self.control.as_ref()
+    }
+
+    /// What the loop watches for an open made.
+    pub fn wake(&self) -> &Pipe {
+        &self.wake
+    }
+
+    /// Start `program` in the desktop session, off the loop, asking for a
+    /// session first where none is open.
+    pub fn launch(&mut self, program: &str) {
+        if self.control.is_none() && !self.opening {
+            self.open();
+        }
+        self.asks.send(Ask::Launch(program.to_string())).expect("compositor: its launcher thread has ended");
+    }
+
+    fn open(&mut self) {
+        self.opening = true;
+        self.asks.send(Ask::Open).expect("compositor: its launcher thread has ended");
+    }
+
+    /// A session the thread opened, now the one this compositor signs out:
+    /// `true` where there is one.
+    pub fn opened(&mut self) -> bool {
+        let mut drained = [0u8; 16];
+        while self.wake.read_nonblock(&mut drained).is_ok_and(|n| n > 0) {}
+        let mut took = false;
+        while let Ok(control) = self.opened.try_recv() {
+            println!("compositor: a desktop session is open again");
+            self.control = Some(control);
+            self.rx = ipc::FrameRx::new();
+            self.opening = false;
+            took = true;
+        }
+        took
     }
 
     /// Sign the session out: ask what runs in it to quit, or end it by `force`.
@@ -103,26 +156,63 @@ impl Desktop {
                     println!("compositor: the desktop session ended");
                     self.control = None;
                     self.waiting = None;
-                    self.reopen();
+                    self.open();
                     return true;
                 }
             }
         }
     }
+}
 
-    /// A session of this compositor's own, opened on the `login` port.
-    fn reopen(&mut self) {
-        let Some(login) = &self.login else {
-            return eprintln!("compositor: no `login` connector to open a desktop session with");
-        };
-        match wire::open(login) {
-            Ok((launcher, control)) => {
-                println!("compositor: a desktop session is open again");
-                *self.launcher.lock().expect("compositor: its launcher lock is whole") = Some(launcher);
-                self.control = Some(control);
-                self.rx = ipc::FrameRx::new();
+/// The thread every launch and every open of a session is made on, in the
+/// order asked: a launch waits as long as its question does, and an open is a
+/// round trip to the supervisor.
+///
+/// **Everything the desktop starts is a job of its own**, made with the
+/// `jobs` right this row's system capability carries: a program started from
+/// the taskbar is no helper of the compositor's, and must not share its CPU.
+fn launcher(queue: mpsc::Receiver<Ask>, login: Option<Namespace>, opened: mpsc::Sender<Connection>, wake: Pipe) {
+    let jobs = endow::Endowments::get().take::<SysCap>(SYSCAP_LABEL);
+    // A session this thread opened, whose launcher replaces the endowed one.
+    let mut session: Option<Namespace> = None;
+    for ask in queue {
+        let program = match ask {
+            Ask::Open => {
+                let Some(login) = &login else {
+                    eprintln!("compositor: no `login` connector to open a desktop session with");
+                    continue;
+                };
+                match wire::open(login) {
+                    Ok((launcher, control)) => {
+                        session = Some(launcher);
+                        if opened.send(control).is_ok() {
+                            let _ = wake.write_nonblock(&[1]);
+                        }
+                    }
+                    Err(why) => eprintln!("compositor: no desktop session: {why}"),
+                }
+                continue;
             }
-            Err(why) => eprintln!("compositor: no desktop session: {why}"),
+            Ask::Launch(program) => program,
+        };
+        let Some(jobs) = &jobs else {
+            eprintln!("compositor: {program} did not start: this row holds no `jobs` right to start it as its own job");
+            continue;
+        };
+        let job = match jobs.new_job() {
+            Ok(job) => job,
+            Err(e) => {
+                eprintln!("compositor: {program} did not start: no job for it: {e:?}");
+                continue;
+            }
+        };
+        let mut command = Command::new(&program);
+        command.independent().detached().endow(JOB_LABEL, job.into_raw().0);
+        if let Some(launcher) = &session {
+            command.launcher(launcher.as_handle().0);
+        }
+        if let Err(e) = command.spawn() {
+            eprintln!("compositor: {program} did not start: {e}");
         }
     }
 }

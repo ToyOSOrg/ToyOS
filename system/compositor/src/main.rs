@@ -41,9 +41,9 @@ pub const FRAME_INTERVAL: Duration = Duration::from_nanos(16_666_667); // ~60fps
 pub const DRAIN_BUDGET: Duration = FRAME_INTERVAL;
 
 /// Handles the compositor watches that are not windows: keyboard, mouse, the
-/// two listeners, `compositor` and `prompt`, the display's claim, and the
-/// desktop session's control connection.
-pub const FIXED_POLL_HANDLES: u32 = 6;
+/// two listeners, `compositor` and `prompt`, the display's claim, the desktop
+/// session's control connection, and the pipe its opens come back on.
+pub const FIXED_POLL_HANDLES: u32 = 7;
 
 /// The `input` port's listener and each of its sources.
 pub const INPUT_POLL_HANDLES: u32 = 1 + toyos_input::wire::CONNECTIONS as u32;
