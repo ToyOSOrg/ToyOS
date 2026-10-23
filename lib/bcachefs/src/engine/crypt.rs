@@ -101,10 +101,11 @@ impl MasterKey {
         Ok(tag)
     }
 
-    /// `Ok` when `tag`, 10 or 16 bytes, is `data`'s MAC under `nonce`.
-    pub(crate) fn verify(&self, nonce: Nonce, data: &[u8], tag: &[u8], what: &'static str) -> Result<()> {
+    /// `Ok` when `tag` is the first `N` bytes of `data`'s MAC under `nonce`:
+    /// 10 or 16, as the checksum type fixes.
+    pub(crate) fn verify<const N: usize>(&self, nonce: Nonce, data: &[u8], tag: &[u8; N], what: &'static str) -> Result<()> {
         let mut key = self.mac_key(nonce)?;
-        let verdict = poly1305::verify(&key, data, tag).map_err(|_| Error::Checksum(what));
+        let verdict = poly1305::verify_truncated(&key, data, tag).map_err(|_| Error::Checksum(what));
         erase(&mut key);
         verdict
     }

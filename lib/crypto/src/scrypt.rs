@@ -76,10 +76,10 @@ impl Params {
 /// (2^32 - 1) * 32 bytes. `workspace` is exactly
 /// [`Params::workspace_len`] words.
 pub fn derive(passphrase: &[u8], salt: &[u8], params: Params, workspace: &mut [u32], output: &mut [u8]) -> Result<(), Error> {
-    if workspace.len() != params.workspace_len() || output.is_empty() || output.len().div_ceil(32) > u32::MAX as usize {
+    let workspace = Erased(workspace);
+    if workspace.0.len() != params.workspace_len() || output.is_empty() || output.len().div_ceil(32) > u32::MAX as usize {
         return Err(Error::Length);
     }
-    let workspace = Erased(workspace);
     let words = params.entry();
     let (table, rest) = workspace.0.split_at_mut(words << params.log_n);
     let (x, y) = rest.split_at_mut(words);
@@ -304,6 +304,14 @@ mod tests {
             assert_eq!(derive(b"", b"", params, &mut std::vec![0; len], &mut out), Err(Error::Length));
         }
         assert_eq!(derive(b"", b"", params, &mut [0; 4 * 32], &mut []), Err(Error::Length));
+    }
+
+    #[test]
+    fn a_refused_derivation_erases_the_workspace() {
+        let params = Params::new(1, 1, 1, ANY).unwrap();
+        let mut workspace = [0xdead_beef; 4 * 32];
+        assert_eq!(derive(b"", b"", params, &mut workspace, &mut []), Err(Error::Length));
+        assert!(workspace.iter().all(|&w| w == 0));
     }
 
     #[test]

@@ -481,7 +481,11 @@ impl<D: BlockDev> Volume<D> {
             csum::CHACHA_POLY_80 | csum::CHACHA_POLY_128 if crc.csum_len == csum::bytes(crc.csum_type) => {
                 let master = self.key.as_ref().ok_or(Error::Locked)?;
                 let nonce = Nonce::extent(key.version.hi, key.version.lo, crc.nonce);
-                master.verify(nonce, &data, &crc.csum[..crc.csum_len], "extent")?;
+                if crc.csum_type == csum::CHACHA_POLY_80 {
+                    master.verify::<10>(nonce, &data, crc.csum.first_chunk().unwrap(), "extent")?;
+                } else {
+                    master.verify(nonce, &data, &crc.csum, "extent")?;
+                }
                 master.xor(nonce, &mut data)?;
             }
             _ => return Err(Error::Unsupported("data checksum type")),

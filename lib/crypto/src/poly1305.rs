@@ -17,14 +17,18 @@ pub fn tag(key: &[u8; 32], message: &[u8]) -> [u8; 16] {
     mac.finish()
 }
 
-/// `Ok` when `expected`, 1 to 16 bytes, is that many leading bytes of
-/// [`tag`], compared in constant time.
-pub fn verify(key: &[u8; 32], message: &[u8], expected: &[u8]) -> Result<(), Error> {
+/// `Ok` when `expected` is [`tag`], compared in constant time.
+pub fn verify(key: &[u8; 32], message: &[u8], expected: &[u8; 16]) -> Result<(), Error> {
+    verify_truncated(key, message, expected)
+}
+
+/// `Ok` when `expected` is the first `N` bytes of [`tag`], compared in
+/// constant time: for a format that fixes a truncated tag's length. `N` is 1
+/// to 16.
+pub fn verify_truncated<const N: usize>(key: &[u8; 32], message: &[u8], expected: &[u8; N]) -> Result<(), Error> {
+    const { assert!(N >= 1 && N <= 16) };
     let tag = Secret(tag(key, message));
-    match tag.0.get(..expected.len()) {
-        Some(prefix) if !expected.is_empty() && crate::ct::equal(prefix, expected) => Ok(()),
-        _ => Err(Error::Authentication),
-    }
+    if crate::ct::equal(&tag.0[..N], expected) { Ok(()) } else { Err(Error::Authentication) }
 }
 
 pub(crate) struct Poly1305 {
@@ -247,11 +251,12 @@ mod tests {
         let expected = [0xa8, 0x06, 0x1d, 0xc1, 0x30, 0x51, 0x36, 0xc6, 0xc2, 0x2b, 0x8b, 0xaf, 0x0c, 0x01, 0x27, 0xa9];
         assert_eq!(tag(&key, message), expected);
         assert_eq!(verify(&key, message, &expected), Ok(()));
-        assert_eq!(verify(&key, message, &expected[..10]), Ok(()), "a truncated tag is its prefix");
+        assert_eq!(verify_truncated::<10>(&key, message, expected.first_chunk().unwrap()), Ok(()), "a truncated tag is its prefix");
         let mut forged = expected;
         forged[9] ^= 1;
-        assert_eq!(verify(&key, message, &forged[..10]), Err(Error::Authentication));
-        assert_eq!(verify(&key, message, &[]), Err(Error::Authentication), "no tag authenticates nothing");
-        assert_eq!(verify(&key, message, &[0; 17]), Err(Error::Authentication));
+        assert_eq!(verify_truncated::<10>(&key, message, forged.first_chunk().unwrap()), Err(Error::Authentication));
+        forged = expected;
+        forged[15] ^= 1;
+        assert_eq!(verify(&key, message, &forged), Err(Error::Authentication), "the full tag's last byte");
     }
 }
