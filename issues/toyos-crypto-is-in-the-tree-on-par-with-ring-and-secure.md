@@ -508,7 +508,7 @@ Not consumers:
      `ed25519-dalek` 2.2's `verify_strict` are host cross-checks, not the
      definition of correctness; the owner ruled that canonical-encoding
      rejection stays and verification is not weakened to match a library
-     (PR_NUMBER). Done:
+     (#1044). Done:
      - A key decodes under section 5.1.3 (y below p, an x for it, x = 0
        only with the sign bit clear) and is not one of the eight points of
        order dividing 8. Mixed-order keys are taken.
@@ -529,7 +529,7 @@ Not consumers:
      verdict is the file's. `lib/crypto/tests/ed25519_verdicts.rs` gives
      each speccheck case and each known disagreement an expected verdict
      and the rule deciding it, with both cross-checks' verdicts pinned.
-     Done (PR_NUMBER):
+     Done (#1044):
      - **`verify_strict` differs on one class of key.** Of the 38
        encodings with y of p or more, it decodes the 20 whose y - p is on
        the curve and not small-order (y - p in 3-6, 9, 10, 14-16 and 18,
