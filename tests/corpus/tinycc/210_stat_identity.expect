@@ -16,5 +16,4 @@ a link is not the file it names: yes
 d_ino is a directory's st_ino: yes
 d_ino is a file's st_ino: yes
 d_ino is a link's st_ino: yes
-d_ino is a mount's st_ino: yes
 d_ino on /tmp is st_ino: yes

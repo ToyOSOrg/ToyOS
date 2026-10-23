@@ -162,6 +162,8 @@ pub struct DirEntry {
     pub len: u64,
     pub is_dir: bool,
     pub modified_unix: u64,
+    /// What [`Fat32::entry_offset`] answers for its path.
+    pub entry_offset: u64,
 }
 
 /// A contiguous run of a file's data, as a byte range on the device.
@@ -415,6 +417,7 @@ impl<D: BlockDev> Fat32<D> {
                 len: if loc.raw.is_dir() { 0 } else { loc.raw.size() as u64 },
                 is_dir: loc.raw.is_dir(),
                 modified_unix: loc.raw.write_time().to_unix_secs(),
+                entry_offset: loc.offset,
             });
         }
         Ok(out)

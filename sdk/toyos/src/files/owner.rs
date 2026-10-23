@@ -434,12 +434,12 @@ unsafe extern "C" fn toyos_fs_readdir(path: *const u8, len: usize, out: *mut u8,
                 let n = syscall::readdir(abs.as_bytes(), &mut buf)?;
                 if n <= buf.len() {
                     // The kernel's listing, in the served one's encoding.
-                    let (mut out, mut at, mut entry) = (Vec::new(), 0, alloc::vec![0u8; 11 + fs::MAX_PATH]);
+                    let (mut out, mut at) = (Vec::new(), 0);
                     while let Some(d) = syscall::dirent(&buf[..n], &mut at) {
                         let kind = if d.is_dir { fs::KIND_DIR } else { fs::KIND_FILE };
                         let name = core::str::from_utf8(d.name).unwrap_or("");
-                        let n = fs::encode_entry(&mut entry, kind, 0, name).ok_or(SyscallError::InvalidArgument)?;
-                        out.extend_from_slice(&entry[..n]);
+                        let entry = fs::Entry { kind, size: 0, node: d.node, name };
+                        fs::encode_entry(&mut out, &entry).ok_or(SyscallError::InvalidArgument)?;
                     }
                     return Ok(out);
                 }

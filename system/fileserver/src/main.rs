@@ -822,11 +822,10 @@ impl Server {
                 };
                 let entries = self.volume.list(&dir)?;
                 let mut out = Vec::new();
-                let mut entry = vec![0u8; 11 + MAX_PATH];
-                for (name, meta) in &entries {
-                    let n =
-                        encode_entry(&mut entry, meta.kind.wire(), meta.size, name).ok_or(Error::NameTooLong)?;
-                    out.extend_from_slice(&entry[..n]);
+                for listed in &entries {
+                    let (meta, name) = (&listed.meta, &listed.name);
+                    let entry = Entry { kind: meta.kind.wire(), size: meta.size, node: listed.identity, name };
+                    encode_entry(&mut out, &entry).ok_or(Error::NameTooLong)?;
                 }
                 // Refused rather than cut short: a listing that stops early is a
                 // confidently wrong answer to a caller deleting a tree.

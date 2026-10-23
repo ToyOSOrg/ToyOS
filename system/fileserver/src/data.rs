@@ -40,7 +40,7 @@ use toyos::fs::Error;
 use toyos_blockdev::{Block, BlockDev, BLOCK};
 
 use crate::cache::{Cache, Disk, Shared};
-use crate::volume::{join, parent, Identities, Kind, Meta, Node, OpenHow, Out, Volume};
+use crate::volume::{join, parent, Identities, Kind, Listed, Meta, Node, OpenHow, Out, Volume};
 
 /// The longest symlink target read back: the wire's path bound.
 const MAX_LINK: u64 = toyos::fs::MAX_PATH as u64;
@@ -387,7 +387,7 @@ impl<D: Disk> Volume for DataVolume<D> {
         mapped("readlink", path, self.fs.read_link(path, MAX_LINK))?.ok_or(Error::Io)
     }
 
-    fn list(&mut self, dir: &str) -> Result<Vec<(String, Meta)>, Error> {
+    fn list(&mut self, dir: &str) -> Result<Vec<Listed>, Error> {
         if !self.is_dir(dir) {
             return Err(if self.names.contains_key(dir) { Error::NotADirectory } else { Error::NotFound });
         }
@@ -406,11 +406,12 @@ impl<D: Disk> Volume for DataVolume<D> {
         }
         let mut out = Vec::with_capacity(children.len());
         for (name, kind) in children {
+            let path = join(dir, &name);
             let meta = match kind {
                 Kind::Dir => Meta { kind, size: 0, mtime: 0 },
-                _ => self.lstat(&join(dir, &name))?,
+                _ => self.lstat(&path)?,
             };
-            out.push((name, meta));
+            out.push(Listed { name, meta, identity: self.ids.of(path) });
         }
         Ok(out)
     }
@@ -843,7 +844,7 @@ mod tests {
         assert_eq!(v.open("home/toy/Games/kept", PLAIN).map(drop), Err(Error::NotFound));
         assert_eq!(v.open("home/toy/Games/made", CREATE).map(drop), Err(Error::NotADirectory));
         assert_eq!(v.mkdir("home/toy/Games/sub"), Err(Error::NotADirectory));
-        let listed: Vec<String> = v.list("home/toy/Apps/other").unwrap().into_iter().map(|(name, _)| name).collect();
+        let listed: Vec<String> = v.list("home/toy/Apps/other").unwrap().into_iter().map(|e| e.name).collect();
         assert_eq!(listed, ["kept"]);
     }
 
@@ -914,7 +915,7 @@ mod tests {
         let n = v.open("home/d/f", CREATE).unwrap();
         v.close(n).unwrap();
         assert_eq!(v.rmdir("home/d"), Err(Error::NotEmpty));
-        let names: Vec<String> = v.list("home").unwrap().into_iter().map(|(n, _)| n).collect();
+        let names: Vec<String> = v.list("home").unwrap().into_iter().map(|e| e.name).collect();
         assert_eq!(names, ["d", "nodir"]);
         v.unlink("home/d/f").unwrap();
         v.rmdir("home/d").unwrap();
@@ -1097,7 +1098,7 @@ mod tests {
             v.close(n).unwrap();
         }
         let mut v = remount(v);
-        let listed: Vec<String> = v.list("home").unwrap().into_iter().map(|(n, _)| format!("home/{n}")).collect();
+        let listed: Vec<String> = v.list("home").unwrap().into_iter().map(|e| format!("home/{}", e.name)).collect();
         assert_eq!(listed, paths);
         for path in paths {
             let held = &model[path];
@@ -1271,7 +1272,7 @@ mod tests {
         if listed.is_empty() {
             out.insert("/".to_string(), Vec::new());
         }
-        for (name, meta) in listed {
+        for Listed { name, meta, .. } in listed {
             let path = join(dir, &name);
             match meta.kind {
                 Kind::Dir => {
@@ -1423,7 +1424,7 @@ mod tests {
         assert_eq!(v.rename("home/staged", &to), Err(Error::LimitExceeded));
 
         let names = |v: &mut DataVolume<Ram>, dir: &str| -> Vec<String> {
-            v.list(dir).map(|l| l.into_iter().map(|(n, _)| n).collect()).unwrap_or_default()
+            v.list(dir).map(|l| l.into_iter().map(|e| e.name).collect()).unwrap_or_default()
         };
         assert_eq!(names(&mut v, "home/staged"), ["a", "z"]);
         assert_eq!(v.lstat(&to), Err(Error::NotFound));
