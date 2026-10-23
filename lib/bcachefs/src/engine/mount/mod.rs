@@ -44,7 +44,7 @@ pub use ops::{Link, Removed, Rename};
 pub(crate) use reclaim::Order;
 #[cfg(test)]
 pub(crate) use reclaim::Plan;
-use reclaim::{fresh_cost, node_ptr, MAX_REWRITE, RECLAIM_ROOM};
+use reclaim::{fresh_cost, node_ptr, MAX_GROUPS, RECLAIM_ROOM, REWRITTEN};
 
 /// How much a mount may hold in memory.
 #[derive(Clone, Copy, Debug)]
@@ -68,8 +68,8 @@ const BATCH: usize = 2;
 const PER_NODE: u64 = fresh_cost(1);
 /// Cache room past the limit that only reclaim takes: what its transaction
 /// dirties, and the nodes a batch's rewrites replace its nodes with.
-const RECLAIM: usize = RECLAIM_ROOM + BATCH * (MAX_REWRITE - 1);
-/// The smallest btree node this writer writes ([`MAX_REWRITE`]).
+const RECLAIM: usize = RECLAIM_ROOM + REWRITTEN;
+/// The smallest btree node this writer writes ([`MAX_GROUPS`]).
 const MIN_NODE: usize = 16 << 10;
 /// Retries of a failed node or journal write, each of the same bytes.
 const RETRIES: usize = 2;
@@ -123,6 +123,9 @@ struct State {
     /// whose newest bset is older is from before the crash, and its next
     /// write goes to a fresh node (§3.5). 0 after a clean mount.
     fresh_below: u64,
+    /// Superblock copies a crash left unreadable, rewritten first so that
+    /// a crash in the next rewrite still leaves two whole (§3.4).
+    torn_copies: Vec<u64>,
     alloc: Allocator,
     /// Why the mount stopped writing, once it has.
     read_only: Option<&'static str>,
@@ -168,11 +171,12 @@ pub struct Mount<D> {
 }
 
 const _: () = assert!(PER_NODE <= K_TX, "a reclaim batch of one node fits one reservation");
-/// The largest key ToyOS writes: a dirent of a 512-byte name.
-const MAX_KEY: usize = 8 * (KEY_U64S + (16 + MAX_NAME).div_ceil(8));
-// A node's keys at most, and two transactions' more, spread evenly over two
-// nodes: each takes half and at most a key past it ([`MAX_REWRITE`]).
-const _: () = assert!(usize::midpoint(MIN_NODE - FIRST_KEYS, 2 * K_TX as usize * 8) + MAX_KEY <= MIN_NODE - FIRST_KEYS, "two nodes hold a full node and two transactions");
+/// The largest key a node holds: a size byte of 255 u64s (A3.16).
+const MAX_KEY: usize = 8 * 255;
+// A node read at five times its bytes unpacked, and two transactions more,
+// spread evenly over [`MAX_GROUPS`] nodes: each takes its share and at most
+// a key past it.
+const _: () = assert!((5 * (MIN_NODE - FIRST_KEYS) + 2 * K_TX as usize * 8).div_ceil(MAX_GROUPS) + MAX_KEY <= MIN_NODE - FIRST_KEYS, "seven nodes hold a node read unpacked and two transactions");
 
 /// The writer slot, held until dropped.
 struct Slot<'a, D>(&'a Mount<D>);
@@ -328,15 +332,16 @@ impl<D: BlockDev> Mount<D> {
                 }
                 journal.head = head;
                 journal.head_sectors = used;
-                // The entry `clean` names ends where writing resumes: in
-                // the head bucket, or at the end of the one before it. A
-                // journal may also hold none (A1.43).
+                // The entry `clean` names ends where writing resumes (A1.42):
+                // in the head bucket, or, at a bucket's start, in the one
+                // before it. A journal may also hold none (A1.43). The
+                // position alone is not trusted to say which.
+                let ends = |found: &[journal::Found], at: Option<u64>| found.iter().any(|e| e.good && e.flush && e.seq == clean.journal_seq && at.is_none_or(|at| e.offset + e.sectors == at));
                 let holding = if used > 0 {
-                    Some(head)
+                    ends(&journal::scan_bucket(&dev, &sb, key.as_ref(), head).await?, Some(used)).then_some(head)
                 } else {
                     let before = (head + journal.ring.len() - 1) % journal.ring.len();
-                    let found = journal::scan_bucket(&dev, &sb, key.as_ref(), before).await?;
-                    found.iter().any(|e| e.good && e.flush && e.seq == clean.journal_seq).then_some(before)
+                    ends(&journal::scan_bucket(&dev, &sb, key.as_ref(), before).await?, None).then_some(before)
                 };
                 if let Some(bucket) = holding.filter(|_| clean.journal_seq > 0) {
                     journal.newest[bucket] = Some(clean.journal_seq);
@@ -379,6 +384,12 @@ impl<D: BlockDev> Mount<D> {
         journal.reclaim_entries = ((limit + reclaim_room) as u64 * PER_NODE).div_ceil(per_entry) + 1;
 
         let journal_next = journal.next_seq;
+        let mut torn_copies = Vec::new();
+        for &offset in &sb.header.layout.offsets {
+            if read::read_copy(&dev, offset).await.is_err() {
+                torn_copies.push(offset);
+            }
+        }
         let state = State {
             header: sb.header.clone(),
             fields: sb.fields.clone(),
@@ -396,6 +407,7 @@ impl<D: BlockDev> Mount<D> {
             limit,
             reclaim_room,
             fresh_below: if replay.is_some() { journal_next } else { 0 },
+            torn_copies,
             alloc: Allocator::default(),
             read_only: None,
             #[cfg(test)]
@@ -432,25 +444,31 @@ impl<D: BlockDev> Mount<D> {
     ///
     /// With `restate`, a clean volume's journal holds no entry `clean`
     /// names, so a crash once it is marked unclean would leave nothing to
-    /// replay (A9.11). First `clean` is moved on to the next sequence, which
-    /// an empty journal accepts (A1.43), and then that entry is written as a
-    /// clean shutdown writes its last (A1.42): the volume is valid at every
-    /// step.
+    /// replay (A9.11). The next entry `S` is closed, so its place, the head
+    /// bucket's start, and its size are known; the superblock, still clean,
+    /// names `S` with the member's position after it, which an empty journal accepts (A1.43); then `S` is
+    /// written, as a clean shutdown writes its last (A1.42). Each step leaves
+    /// a valid clean volume, and a mount after a crash between them restates
+    /// again.
     async fn go_read_write(&self, restate: bool) -> Result<()> {
         if restate {
-            let clean = {
-                let st = self.st.borrow();
-                let roots = encoded_roots(&st.roots);
-                journal::clean_body(st.journal.next_seq, roots.iter().map(|(b, l, k)| (*b, *l, &k[..])), st.key_version, st.clocks)
-            };
-            self.write_superblock(Some(clean)).await?;
-            let seq = {
+            let (seq, clean) = {
                 let mut st = self.st.borrow_mut();
                 let st = &mut *st;
                 st.journal.open_new();
                 self.close(st);
-                st.journal.closed.back().expect("just closed").seq
+                let (seq, sectors) = st.journal.closed.back().map(|e| (e.seq, (e.bytes.len() / SECTOR) as u64)).expect("just closed");
+                // `S` goes at the head bucket's start: a scan reads a bucket
+                // from its start, and what the position follows is not
+                // there (a restate after a crash left it unwritten).
+                st.journal.head_sectors = 0;
+                st.journal.place(sectors);
+                st.member.journal_bucket = st.journal.head as u32;
+                st.member.journal_offset = (st.journal.head_sectors + sectors) as u32;
+                let roots = encoded_roots(&st.roots);
+                (seq, journal::clean_body(seq, roots.iter().map(|(b, l, k)| (*b, *l, &k[..])), st.key_version, st.clocks))
             };
+            self.write_superblock(Some(clean)).await?;
             self.write_entries(seq).await?;
         }
         {
@@ -465,8 +483,9 @@ impl<D: BlockDev> Mount<D> {
     }
 
     /// Every superblock copy rewritten from the state, one sequence on, each
-    /// flushed before the next is written: a crash tears at most one, and
-    /// the reader takes the newest whole copy. `clean` is the clean field a
+    /// flushed before the next is written, a copy a crash tore first: a
+    /// crash tears at most the one being written, and the reader takes the
+    /// newest whole copy. `clean` is the clean field a
     /// clean unmount writes; without it the journal's replicas entry is
     /// listed.
     async fn write_superblock(&self, clean: Option<Vec<u8>>) -> Result<()> {
@@ -490,13 +509,16 @@ impl<D: BlockDev> Mount<D> {
             if let Some(clean) = clean {
                 set_field(&mut fields, field_type::CLEAN, Some(clean));
             }
-            let copies = st.header.layout.offsets.iter().map(|&o| (o, Superblock::encode(&st.header, &fields, o))).collect();
+            let mut offsets = st.header.layout.offsets.clone();
+            offsets.sort_by_key(|o| !st.torn_copies.contains(o));
+            let copies = offsets.into_iter().map(|o| (o, Superblock::encode(&st.header, &fields, o))).collect();
             st.fields = fields;
             copies
         };
         for (offset, bytes) in copies {
             mkfs::write(&self.dev, offset, &bytes).await.inspect_err(|_| self.stop("superblock write failed"))?;
             self.dev.flush().await.inspect_err(|_| self.stop("superblock flush failed"))?;
+            self.st.borrow_mut().torn_copies.retain(|&o| o != offset);
         }
         Ok(())
     }
@@ -978,10 +1000,9 @@ impl<D: BlockDev> Mount<D> {
 
     /// One ordinary transaction: admitted at `bound` journal u64s and
     /// `nodes` of cache room, then `prepare` under the slot, then applied.
-    /// It enters the slot only while no node is oversized, so no node it
-    /// changes starts past what a node holds ([`MAX_REWRITE`]); an oversized
-    /// node, which a transaction before it may leave, sends it back to wait
-    /// for reclaim to split that node.
+    /// It enters the slot only while no changed node is oversized: one that
+    /// a transaction before it left so sends it back to wait for reclaim to
+    /// split that node ([`MAX_GROUPS`]).
     async fn transact<T>(&self, bound: u64, nodes: usize, prepare: impl AsyncFnOnce(&mut Txn) -> Result<T>) -> Result<T> {
         assert!(nodes <= FOOTPRINT, "a grant of {nodes} nodes, past the largest any operation takes");
         self.check_writable()?;
@@ -1054,12 +1075,15 @@ impl<D: BlockDev> Mount<D> {
         assert_eq!(area.len() / 8, size as usize, "a transaction's records changed size with its sequence");
         open.area.extend_from_slice(&area);
 
-        for ((btree, level, pos), kv) in core::mem::take(&mut txn.updates) {
-            let id = held(st, btree, level, pos);
+        // Every change's node is found before any changes: a pointer update
+        // this transaction makes would lead the descent to a node not yet
+        // installed.
+        let updates: Vec<_> = core::mem::take(&mut txn.updates).into_iter().map(|((btree, level, pos), kv)| (held(st, btree, level, pos), pos, kv)).collect();
+        let accounting: Vec<_> = core::mem::take(&mut txn.accounting).into_iter().map(|(pos, delta)| (held(st, Btree::Accounting, 0, pos), pos, delta)).collect();
+        for (id, pos, kv) in updates {
             st.cache.change(id, |n| n.put(pos, kv, seq));
         }
-        for (pos, delta) in core::mem::take(&mut txn.accounting) {
-            let id = held(st, Btree::Accounting, 0, pos);
+        for (id, pos, delta) in accounting {
             let version = versions[&pos];
             st.cache.change(id, |n| {
                 let i = n.at(pos);

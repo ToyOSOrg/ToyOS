@@ -137,15 +137,38 @@ fn a_key_of_an_unknown_type_met_while_mounted_stops_writing() {
     assert_eq!(block_on_ready(m.create(m.root(), b"f", New::File, OWNER, NOW)).err(), Some(Error::ReadOnly("key type v1.39.4 does not define")));
 }
 
+/// One crash state of going read-write: it opens, never as a volume marked
+/// unclean with nothing to replay (A9.11); as it lies, ToyOS's check finds
+/// nothing but at most one superblock copy torn (§3.4); and a mount and
+/// clean unmount leave it checking clean.
+fn judge_state(image: &[u8]) -> core::result::Result<(), String> {
+    use toyos_blockdev::Bytes;
+    let dev = Bytes::new(image.to_vec());
+    let v = block_on_ready(Volume::open(&dev)).map_err(|e| format!("open: {e:?}"))?;
+    let raw: Vec<Finding> = block_on_ready(fsck(&v)).map_err(|e| format!("fsck: {e:?}"))?.into_iter().filter(|f| !matches!(f, Finding::Copy(_))).collect();
+    if !raw.is_empty() {
+        return Err(format!("fsck as the crash left it: {raw:?}"));
+    }
+    let torn: Vec<u64> = v.superblock().header.layout.offsets.iter().copied().filter(|&o| block_on_ready(super::super::read::read_copy(&dev, o)).is_err()).collect();
+    if torn.len() > 1 {
+        return Err(format!("superblock copies torn at {torn:?}"));
+    }
+    let m = block_on_ready(Mount::open(&dev, MEMORY, random())).map_err(|e| format!("mount: {e:?}"))?;
+    block_on_ready(m.unmount()).map_err(|e| format!("unmount: {e:?}"))?;
+    let v = block_on_ready(Volume::open(&dev)).map_err(|e| format!("reopen: {e:?}"))?;
+    let found = block_on_ready(fsck(&v)).map_err(|e| format!("fsck: {e:?}"))?;
+    found.is_empty().then_some(()).ok_or(format!("fsck: {found:?}"))
+}
+
 /// A clean volume whose journal holds no entry, as A1.43 allows, its
-/// `clean` naming sequence 7 or mkfs's 0: mounted read-write, a crash at
-/// any request leaves a volume that opens, never one marked unclean with
-/// nothing to replay (A9.11), and that a mount and clean unmount leave
-/// checking clean.
+/// `clean` naming sequence 7 or mkfs's 0, mounted read-write: every crash
+/// state of going read-write and the first commit passes [`judge_state`],
+/// and so does every state of a second crash while the next mount goes
+/// read-write from it, as it restates again.
 #[test]
 fn a_clean_volume_with_an_empty_journal_survives_a_crash_going_read_write() {
     use toyos_blockdev::model::Model;
-    use toyos_blockdev::Bytes;
+    let judged = core::cell::Cell::new(0u64);
     for seq in [0u64, 7] {
         let dev = formatted(64 << 20, None);
         rewrite_superblock(&dev, |_, fields| {
@@ -153,19 +176,29 @@ fn a_clean_volume_with_an_empty_journal_survives_a_crash_going_read_write() {
             clean.body[8..16].copy_from_slice(&seq.to_le_bytes());
         });
         let model = Model::new(dev.into_inner(), 512);
-        let judged = core::cell::Cell::new(0u64);
         let watched = super::crash::Watched {
             model: &model,
             after: Box::new(|m: &Model| {
-                m.check(64, judged.get(), |image| {
+                m.check(4, judged.get(), |first| {
                     judged.set(judged.get() + 1);
-                    let dev = Bytes::new(image.to_vec());
-                    block_on_ready(Volume::open(&dev)).map_err(|e| format!("open: {e:?}"))?;
-                    let m = block_on_ready(Mount::open(&dev, MEMORY, random())).map_err(|e| format!("mount: {e:?}"))?;
-                    block_on_ready(m.unmount()).map_err(|e| format!("unmount: {e:?}"))?;
-                    let v = block_on_ready(Volume::open(&dev)).map_err(|e| format!("reopen: {e:?}"))?;
-                    let found = block_on_ready(fsck(&v)).map_err(|e| format!("fsck: {e:?}"))?;
-                    found.is_empty().then_some(()).ok_or(format!("fsck: {found:?}"))
+                    judge_state(first).map_err(|e| format!("first crash: {e}"))?;
+                    // A second crash, as the next mount goes read-write.
+                    let again = Model::new(first.to_vec(), 512);
+                    let second = core::cell::RefCell::new(Ok(()));
+                    let watched = super::crash::Watched {
+                        model: &again,
+                        after: Box::new(|m: &Model| {
+                            if second.borrow().is_ok() {
+                                *second.borrow_mut() = m.check(2, judged.get(), |image| {
+                                    judged.set(judged.get() + 1);
+                                    judge_state(image).map_err(|e| format!("second crash: {e}"))
+                                }).map(|_| ()).map_err(|v| v.to_string());
+                            }
+                        }),
+                    };
+                    block_on_ready(Mount::open(&watched, MEMORY, random())).map_err(|e| format!("second mount: {e:?}"))?;
+                    drop(watched);
+                    second.into_inner()
                 })
                 .unwrap_or_else(|v| panic!("clean at sequence {seq}: {v}"));
             }),
@@ -174,8 +207,8 @@ fn a_clean_volume_with_an_empty_journal_survives_a_crash_going_read_write() {
         block_on_ready(mount.create(mount.root(), b"f", New::File, OWNER, NOW)).unwrap();
         block_on_ready(mount.commit()).unwrap();
         drop(mount);
-        assert!(judged.get() > 10, "{} crash states judged", judged.get());
     }
+    assert!(judged.get() > 500, "{} crash states judged", judged.get());
 }
 
 /// A volume of 512-byte blocks, which upstream formats below 1 GiB (A1.46),
@@ -233,4 +266,91 @@ fn a_pointer_to_a_cached_node_of_another_btree_is_refused() {
     let m = block_on_ready(Mount::open(&dev, MEMORY, random())).unwrap();
     let made = Executor::new().block_on(async { m.create_unnamed(m.root(), OWNER, NOW).await.map(|i| i.ino) }, || panic!("stalled"));
     assert_eq!(made, Err(Error::Corrupt("two btree pointers to one node")));
+}
+
+/// Rewrites the accounting root leaf, on an unencrypted volume, as upstream
+/// writes leaves: its keys, and after them `extra` keys packed one u64 each
+/// in a format the node declares (A3.15-A3.17), at inode `u64::MAX`. The
+/// clean field's root names the node's new written sectors. Unpacked, the
+/// node's keys fill more than the node.
+fn pack_accounting_leaf(dev: &Image) -> u64 {
+    use super::super::journal;
+    use super::super::superblock::field_type;
+    let sb = block_on_ready(super::super::read::read_superblock(dev)).unwrap();
+    let clean = sb.clean.clone().unwrap();
+    let mut roots = clean.roots.clone();
+    let root = roots.iter_mut().find(|r| r.btree == Btree::Accounting).unwrap();
+    assert_eq!(root.level, 0, "the accounting root a leaf");
+    let v = block_on_ready(Volume::open(dev)).unwrap();
+    let keys = block_on_ready(v.node(Btree::Accounting, 0, &root.ptr, Bpos::MAX)).unwrap().keys;
+    drop(v);
+    let encoded: Vec<Vec<u8>> = keys.iter().map(|(k, val)| k.encode(val)).collect();
+    let build = Build { btree: Btree::Accounting, level: 0, seq: root.ptr.seq, min: root.ptr.min, max: Bpos::MAX, journal_seq: 0, keys: &encoded };
+    let mut bytes = node::encode(node::magic(&sb.header.internal_uuid), BLOCK, None, &build).unwrap();
+    let node_bytes = sb.node_sectors() as usize * 512;
+    let mut end = node::FIRST_KEYS + 8 * usize::from(u16::from_le_bytes([bytes[158], bytes[159]]));
+    // The format: one key u64, 16 bits of offset from `BASE`, inode and
+    // snapshot fixed at their maximum.
+    const BASE: u64 = 1 << 40;
+    let mut format = [0u8; 56];
+    format[0] = 1;
+    format[1] = 6;
+    format[3] = 16;
+    format[8..16].copy_from_slice(&u64::MAX.to_le_bytes());
+    format[16..24].copy_from_slice(&BASE.to_le_bytes());
+    format[24..32].copy_from_slice(&u64::from(u32::MAX).to_le_bytes());
+    bytes.resize(node_bytes, 0);
+    bytes[80..136].copy_from_slice(&format);
+    let mut extra = 0u64;
+    while end + 16 <= node_bytes {
+        let word = 2u64 | (u64::from(kind::ACCOUNTING) << 16) | (extra << 48);
+        bytes[end..end + 8].copy_from_slice(&word.to_le_bytes());
+        bytes[end + 8..end + 16].copy_from_slice(&1u64.to_le_bytes());
+        end += 16;
+        extra += 1;
+    }
+    bytes[158..160].copy_from_slice(&(((end - node::FIRST_KEYS) / 8) as u16).to_le_bytes());
+    let crc = crate::crc32c::crc32c(&bytes[16..end]);
+    bytes[..4].copy_from_slice(&crc.to_le_bytes());
+    let mut blocks = vec![[0u8; BLOCK]; node_bytes / BLOCK];
+    blocks.as_flattened_mut().copy_from_slice(&bytes);
+    block_on_ready(dev.write(root.ptr.ptr.sector / 8, &blocks)).unwrap();
+    root.ptr.written = (node_bytes / 512) as u16;
+    let encoded_roots: Vec<(Btree, u8, Vec<u8>)> = roots.iter().map(|r| (r.btree, r.level, r.key.encode(&r.ptr.encode()))).collect();
+    let body = journal::clean_body(clean.journal_seq, encoded_roots.iter().map(|(b, l, k)| (*b, *l, &k[..])), clean.key_version.unwrap_or(0), clean.clocks);
+    rewrite_superblock(dev, |_, fields| fields.iter_mut().find(|f| f.kind == field_type::CLEAN).unwrap().body = body);
+    extra
+}
+
+/// A packed upstream leaf whose keys, unpacked, fill more than a node: read
+/// clean, it holds no writer back; changed, reclaim splits it as far as its
+/// keys need, and every key reads back.
+#[test]
+fn a_packed_leaf_past_a_node_once_unpacked_is_read_then_split() {
+    let dev = formatted(32 << 20, None);
+    let extra = pack_accounting_leaf(&dev);
+    let m = block_on_ready(Mount::open(&dev, MEMORY, random())).unwrap();
+    let run = |what: &str| panic!("{what} stalled; {}", m.dump());
+    // A read loads the leaf, clean.
+    block_on_ready(super::super::read::Source::walk(&m, Btree::Accounting, Bpos::MIN, |_, _| Ok(true))).unwrap();
+    Executor::new().block_on(
+        async {
+            for i in 0..4 {
+                m.create(m.root(), format!("f{i}").as_bytes(), New::File, OWNER, NOW).await.unwrap();
+            }
+        },
+        || run("a create"),
+    );
+    Executor::new().block_on(m.unmount(), || panic!("unmount stalled")).unwrap();
+    let v = block_on_ready(Volume::open(&dev)).unwrap();
+    let root = *v.roots().iter().find(|r| r.btree == Btree::Accounting).unwrap();
+    assert!(root.level > 0, "the leaf split under a new root");
+    let mut packed = 0;
+    block_on_ready(super::super::read::Source::walk(&v, Btree::Accounting, Bpos::MIN, |k, _| {
+        packed += u64::from(k.pos.inode == u64::MAX);
+        Ok(true)
+    }))
+    .unwrap();
+    assert_eq!(packed, extra);
+    assert_eq!(names(&v, v.root()).len(), 4);
 }

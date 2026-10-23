@@ -95,7 +95,7 @@ fn writers(dev: &Image, cache_nodes: usize, dirs: &[u64], writers: usize, per: u
 /// The least cache a mount takes: room for one transaction's footprint
 /// beside reclaim's, so each writer waits for reclaim to clean what the
 /// last one dirtied.
-const SMALL_CACHE: usize = 51;
+const SMALL_CACHE: usize = 54;
 
 /// Creates past what the journal holds, with no commit: entries fill and are
 /// written, the ring fills with entries the dirty nodes pin, and a writer

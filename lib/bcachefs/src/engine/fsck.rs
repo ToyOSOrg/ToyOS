@@ -753,7 +753,7 @@ impl<'a> Walk<'a> {
             }
         }
         for (pos, v) in &self.bucket_gens {
-            let want = d.bucket_gens.get(&pos.offset).copied().unwrap_or([0; 256]);
+            let want = d.bucket_gens.get(&pos.offset).copied().unwrap_or([0; value::BUCKET_GENS_BYTES]);
             if pos.inode != 0 || pos.offset >= s.nbuckets.div_ceil(256) || v[..] != want[..] {
                 put(Btree::BucketGens, *pos, "differs");
             }

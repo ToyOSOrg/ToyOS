@@ -150,7 +150,8 @@ fn bsets(image: &[u8], sector: u64, node_bytes: usize) -> Vec<u64> {
 fn a_bset_naming_an_unflushed_sequence_never_reappears_unblacklisted() {
     let dev = formatted(64 << 20, None);
     let m = open_rw(&dev, None);
-    let durable = 1; // mkfs's entry
+    // The entry going read-write restates mkfs's empty journal with.
+    let durable = 1;
     create(&m, b"lost");
     let plans = write_all(&m);
     let sectors: Vec<u64> = plans.iter().flat_map(|p| p.sectors(&m)).collect();

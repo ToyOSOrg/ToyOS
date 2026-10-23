@@ -9,7 +9,7 @@ use alloc::vec::Vec;
 use super::bkey::{Bpos, Key, KEY_U64S};
 use super::fsck::Finding;
 use super::superblock::Superblock;
-use super::value::{self, accounting_pos, class, data_type, AllocV4, Extent, Ptr};
+use super::value::{self, accounting_pos, class, data_type, AllocV4, Extent, Ptr, BUCKET_GENS_BYTES};
 use super::{kind, Btree, Error, Result};
 
 /// The device as the derivation sees it, sizes in sectors.
@@ -203,7 +203,7 @@ impl<'a> Tally<'a> {
         let mut states: BTreeMap<u8, [u64; 3]> = BTreeMap::new();
         let mut freespace: Vec<(Bpos, u32)> = Vec::new();
         let mut need_discard = Vec::new();
-        let mut bucket_gens: BTreeMap<u64, [u8; 256]> = BTreeMap::new();
+        let mut bucket_gens: BTreeMap<u64, [u8; BUCKET_GENS_BYTES]> = BTreeMap::new();
         let mut lru = Vec::new();
         let mut run: Option<(u64, u64, u64)> = None; // first, end, generation bits
         let flush = |run: Option<(u64, u64, u64)>, freespace: &mut Vec<(Bpos, u32)>| {
@@ -221,7 +221,7 @@ impl<'a> Tally<'a> {
             };
             let gen = usage.and_then(|u| u.gen).unwrap_or(alloc.gen);
             if gen != 0 {
-                bucket_gens.entry(b >> 8).or_insert([0; 256])[(b & 255) as usize] = gen;
+                bucket_gens.entry(b >> 8).or_insert([0; BUCKET_GENS_BYTES])[(b & 255) as usize] = gen;
             }
             let dirty = usage.map_or(0, |u| u.dirty);
             let fragmented = match state {
@@ -268,7 +268,7 @@ pub(crate) struct Derived {
     pub freespace: Vec<(Bpos, u32)>,
     pub need_discard: Vec<Bpos>,
     /// Each group of 256 buckets with a nonzero generation.
-    pub bucket_gens: BTreeMap<u64, [u8; 256]>,
+    pub bucket_gens: BTreeMap<u64, [u8; BUCKET_GENS_BYTES]>,
     pub lru: Vec<Bpos>,
     pub backpointers: BTreeMap<Bpos, [u8; 32]>,
     pub accounting: BTreeMap<Bpos, Vec<u64>>,

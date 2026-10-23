@@ -123,8 +123,9 @@ pub(crate) struct Cache {
     capacity: usize,
     pub dirty: usize,
     pub unpointed: usize,
-    /// Nodes whose keys are past `full` bytes, which reclaim splits before
-    /// any more is admitted.
+    /// Changed nodes whose keys are past `full` bytes, which reclaim splits
+    /// before any more is admitted. A clean node read past it, as a packed
+    /// upstream leaf unpacks (A3.17), is not counted: no write is owed it.
     pub oversized: usize,
     full: usize,
     clock: u64,
@@ -167,10 +168,11 @@ impl Cache {
     pub(crate) fn change<T>(&mut self, id: NodeId, f: impl FnOnce(&mut Cached) -> T) -> T {
         let node = self.nodes[id.0].as_mut().expect("a node of the cache");
         let full = self.full;
-        let (pin, dirty, unpointed, sector, over) = (node.pin(), node.dirty(), node.captured.is_some(), node.sector, node.bytes > full);
+        let over = |n: &Cached| n.pin().is_some() && n.bytes > full;
+        let (pin, dirty, unpointed, sector, over1) = (node.pin(), node.dirty(), node.captured.is_some(), node.sector, over(node));
         let out = f(node);
-        let (pin2, dirty2, unpointed2, sector2, over2) = (node.pin(), node.dirty(), node.captured.is_some(), node.sector, node.bytes > full);
-        self.oversized = self.oversized + usize::from(over2) - usize::from(over);
+        let (pin2, dirty2, unpointed2, sector2, over2) = (node.pin(), node.dirty(), node.captured.is_some(), node.sector, over(node));
+        self.oversized = self.oversized + usize::from(over2) - usize::from(over1);
         if pin != pin2 {
             if let Some(p) = pin {
                 unpin(&mut self.pins, p);
@@ -198,7 +200,6 @@ impl Cache {
     pub(crate) fn insert(&mut self, mut node: Cached) -> NodeId {
         assert!(node.pin().is_none(), "a node enters the cache with nothing pinned");
         self.evict();
-        self.oversized += usize::from(node.bytes > self.full);
         self.clock += 1;
         node.used = self.clock;
         let sector = node.sector;
@@ -220,7 +221,6 @@ impl Cache {
     pub(crate) fn remove(&mut self, id: NodeId) -> Cached {
         let node = self.nodes[id.0].take().expect("a node of the cache");
         assert!(node.pin().is_none(), "a replaced node still pins the journal");
-        self.oversized -= usize::from(node.bytes > self.full);
         self.by_sector.remove(&node.sector);
         self.free.push(id.0);
         node

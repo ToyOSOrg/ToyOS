@@ -437,7 +437,7 @@ pub(crate) fn replay(scan: &Scan, sb: &Superblock, w: &Window) -> Result<Replay>
 
 /// An accounting value's counters: one to three.
 pub(crate) fn counters(v: &[u8]) -> Result<Vec<u64>> {
-    if !(8..=24).contains(&v.len()) || !v.len().is_multiple_of(8) {
+    if !(8..=8 * super::value::MAX_COUNTERS).contains(&v.len()) || !v.len().is_multiple_of(8) {
         return Err(Error::Corrupt("accounting value of other than one to three counters"));
     }
     Ok(v.as_chunks::<8>().0.iter().map(|c| u64::from_le_bytes(*c)).collect())

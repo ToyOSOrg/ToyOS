@@ -75,10 +75,10 @@ const POINTER: u64 = key_u64s(NodePtr::BYTES);
 /// A key of no value: freespace, LRU and need_discard entries, and a
 /// deletion.
 const SET: u64 = key_u64s(0);
-const ALLOC: u64 = key_u64s(64);
-const BUCKET_GENS: u64 = key_u64s(256);
-const BACKPOINTER: u64 = key_u64s(32);
-const COUNTERS: u64 = key_u64s(24);
+const ALLOC: u64 = key_u64s(Bucket::BYTES);
+const BUCKET_GENS: u64 = key_u64s(value::BUCKET_GENS_BYTES);
+const BACKPOINTER: u64 = key_u64s(value::BACKPOINTER_BYTES);
+const COUNTERS: u64 = key_u64s(8 * value::MAX_COUNTERS);
 /// Accounting a rewrite changes: its btree's class, the btree replicas
 /// entry, and the device's free, btree and need_discard states (A7.12).
 const ACCOUNTED: u64 = 5;
@@ -114,13 +114,22 @@ pub(super) const fn fresh_nodes(nodes: usize) -> usize {
     1 + 5 * nodes + 5 + 1 + ACCOUNTED as usize
 }
 
-/// New nodes one rewrite writes at most: a node is split in two at most,
-/// and a root above them. A node enters the slot no fuller than a node holds
-/// ([`Mount::transact`]); the transaction holding the slot and the pointer
-/// update of the one reclaim round in flight add at most `K_TX` u64s of
-/// keys each before reclaim, which takes an oversized node first, plans it.
-/// Two nodes of at least [`MIN_NODE`] hold that.
-pub(super) const MAX_REWRITE: usize = 3;
+/// Nodes a split takes at most. A node this writer changes enters the slot
+/// no fuller than a node holds ([`Mount::transact`]), and the transaction
+/// holding the slot and the pointer update of the one reclaim round in
+/// flight add at most `K_TX` u64s of keys each before reclaim, which takes
+/// an oversized node first, plans it. A node read from the medium may hold
+/// five times its bytes once unpacked: a packed key part is one u64 or more,
+/// an unpacked one five (A3.15-A3.17). Spread evenly, all that fills this
+/// many nodes of at least [`MIN_NODE`], each a key short of full.
+pub(super) const MAX_GROUPS: usize = 7;
+
+/// New nodes one rewrite writes at most: a split's, and a root above them.
+pub(super) const MAX_REWRITE: usize = MAX_GROUPS + 1;
+
+/// New nodes a rewrite that is not of an oversized node writes at most: a
+/// node no fuller than it holds spreads at two thirds into two, and a root.
+const COMMON_REWRITE: usize = 3;
 
 /// Cache room reclaim's transaction takes past the limit, for the leaves
 /// it dirties: every position of a rewrite to one node in a leaf of its
@@ -128,6 +137,14 @@ pub(super) const MAX_REWRITE: usize = 3;
 /// share leaves; one that dirties more is refused and stops the mount, never
 /// overfilling the cache.
 pub(super) const RECLAIM_ROOM: usize = fresh_nodes(1);
+
+/// Nodes past the limit a batch's rewrites can leave dirty: their new
+/// nodes, each taking the changes since its node was captured, beside the
+/// node each replaces. A batch of common rewrites, or one alone.
+pub(super) const REWRITTEN: usize = {
+    let common = BATCH * (COMMON_REWRITE - 1);
+    if common > MAX_REWRITE - 1 { common } else { MAX_REWRITE - 1 }
+};
 
 const _: () = assert!(fresh_cost(MAX_REWRITE) <= K_TX, "the largest rewrite fits one reclaim transaction");
 
@@ -250,20 +267,24 @@ impl<D: BlockDev> Mount<D> {
                 let append = !n.fresh && n.written > 0 && !st.cache.oversized(n) && usize::from(n.on_disk) * SECTOR + later <= node_bytes;
                 let sizes: Vec<usize> = n.keys.iter().map(|(_, v)| 8 * (KEY_U64S + v.len().div_ceil(8))).collect();
                 // At two thirds, as upstream splits; an oversized node, too
-                // full for two at that, in two halves a node each holds.
+                // full for two at that, in as few as each a node holds.
                 let mut groups = mkfs::spread(&sizes, mkfs::capacity(node_bytes) - FIRST_KEYS);
                 if groups.len() > 2 {
                     groups = mkfs::spread(&sizes, node_bytes - FIRST_KEYS);
                 }
                 (n.btree, n.level, root, append, groups)
             };
-            if groups.len() > 2 {
-                // Past what a node holds by more than the keys this writer
-                // adds ([`MAX_REWRITE`]).
-                return Err(Error::Unsupported("a btree node too full to split in two"));
+            if groups.len() > MAX_GROUPS {
+                // More than a node read or replayed into holds once
+                // unpacked, and two transactions ([`MAX_GROUPS`]).
+                return Err(Error::Unsupported("a btree node whose keys fill more than seven nodes"));
             }
-            let cost = if append { APPEND_COST } else { fresh_cost(groups.len() + usize::from(groups.len() > 1 && root)) };
-            if spent + cost > K_TX {
+            let written = groups.len() + usize::from(groups.len() > 1 && root);
+            let cost = if append { APPEND_COST } else { fresh_cost(written) };
+            // A rewrite past the common one is a batch of its own, so the
+            // nodes a batch's rewrites leave stay within reclaim's room.
+            let alone = !append && written > COMMON_REWRITE;
+            if spent + cost > K_TX || (alone && !plans.is_empty()) {
                 break;
             }
             spent += cost;
@@ -302,6 +323,9 @@ impl<D: BlockDev> Mount<D> {
                 Write::Fresh { nodes, root: above.transpose()? }
             };
             plans.push(Plan { id, btree, level, root, write });
+            if alone {
+                break;
+            }
         }
         // Captured only once the whole batch is planned: a plan that fails
         // leaves every node as it was.
@@ -540,8 +564,8 @@ impl<D: BlockDev> Mount<D> {
         if before.gen != after.gen {
             let pos = Bpos::new(0, b >> 8, 0);
             let mut gens = match self.get_in(txn, Btree::BucketGens, pos).await? {
-                Some((_, v)) if v.len() == 256 => v,
-                _ => alloc::vec![0u8; 256],
+                Some((_, v)) if v.len() == value::BUCKET_GENS_BYTES => v,
+                _ => alloc::vec![0u8; value::BUCKET_GENS_BYTES],
             };
             gens[(b & 255) as usize] = after.gen;
             self.put(txn, Btree::BucketGens, 0, pos, Some((Key::new(kind::BUCKET_GENS, pos), gens))).await?;

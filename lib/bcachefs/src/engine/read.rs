@@ -753,7 +753,7 @@ pub(crate) async fn read_superblock(dev: &impl BlockDev) -> Result<Superblock> {
     best.ok_or(failure.unwrap_or(Error::Corrupt("no superblock copy")))
 }
 
-async fn read_copy(dev: &impl BlockDev, sector: u64) -> Result<Superblock> {
+pub(crate) async fn read_copy(dev: &impl BlockDev, sector: u64) -> Result<Superblock> {
     let device = dev.blocks() * BLOCK as u64;
     let fits = |len: usize| sector.checked_mul(SECTOR as u64).and_then(|at| at.checked_add(len as u64)).is_some_and(|end| end <= device);
     if !fits(BLOCK) {

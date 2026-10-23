@@ -55,8 +55,11 @@ impl Bucket {
     }
 
     /// The alloc_v4 value: 8 u64s, trailing records at 8, none present.
-    pub(crate) fn encode(&self) -> [u8; 64] {
-        let mut v = [0u8; 64];
+    /// Bytes of the alloc_v4 value it encodes.
+    pub(crate) const BYTES: usize = 64;
+
+    pub(crate) fn encode(&self) -> [u8; Self::BYTES] {
+        let mut v = [0u8; Self::BYTES];
         v[..8].copy_from_slice(&self.journal_seq_nonempty.to_le_bytes());
         let flags = u32::from(self.need_discard) | u32::from(self.needs_gen_increment) << 1 | 8 << 2;
         v[8..12].copy_from_slice(&flags.to_le_bytes());
