@@ -522,41 +522,47 @@ Not consumers:
        decode canonically. Section 6's reference `verify` reduces k, as
        ring and `verify_strict` do; section 5.1.7's literal equation does
        not, and the two differ only for a mixed-order A (speccheck case 3
-       fails the unreduced one). An R of order dividing 8 is refused.
-     - Two refusals go beyond RFC 8032. Anyone can sign for a small-order
-       key: R = [S]B verifies under it whenever 8 divides k. A small-order
-       R is one RFC 8032 signing makes with probability about 2^-252, and
-       with a prime-order key only its holder can make one; no security
-       requirement forces its refusal. **Awaiting the owner:** whether it
-       stays. It is kept meanwhile.
+       fails the unreduced one).
+     - One refusal goes beyond RFC 8032. Anyone can sign for a small-order
+       key: R = [S]B verifies under it whenever 8 divides k.
+     - An R of order dividing 8 is taken where the equation holds, as RFC
+       8032 takes it. The owner accepted removing #1044's extra refusal on
+       the condition, argued in #PRNUM, that it adds no security property
+       the contract requires. Under a prime-order key such an R is the
+       identity with S = k a, which only the key's holder can make, and
+       RFC 8032 signing makes it whenever r is a multiple of L.
      - Times 8, the reduced-k equation is the cofactored one, which accepts
-       more where R or A has a torsion component (cases 4 and 5); RFC
-       8032's key generation and signing make neither.
+       more where R or A has a nonzero torsion component (cases 4 and 5);
+       RFC 8032's key generation and signing make neither.
    - The edge corpus is Wycheproof's `ed25519` and the twelve cases of
      Chalkias et al., "Taming the many EdDSAs" (2020). Every Wycheproof
      verdict is the file's. `lib/crypto/tests/ed25519_verdicts.rs` gives
      each speccheck case and each known disagreement an expected verdict
      and the rule deciding it, with both cross-checks' verdicts pinned.
      Done (#1044):
-     - **`verify_strict` differs on one class of key.** Of the 38
+     - **`verify_strict` differs on a small-order R and one class of
+       key.** It refuses every R of order dividing 8: R = O with S = k a
+       under an RFC 8032 key, and speccheck case 2 (a mixed-order key and
+       a small-order R), both of which satisfy the equation. Of the 38
        encodings with y of p or more, it decodes the 20 whose y - p is on
        the curve and not small-order (y - p in 3-6, 9, 10, 14-16 and 18,
        either sign), which section 5.1.3 refuses. Signing for one takes
        the discrete log of a point chosen by its y, so no signature verdict
-       is known to differ. Every speccheck verdict is `verify_strict`'s.
-     - **ring differs on small-order keys, non-canonical small-order keys
-       and a small-order R.** It accepts a signature satisfying the
-       cofactorless equation under each of the 14 encodings of a
-       small-order point, including the 6 non-canonical ones (y of p or
-       p + 1, and x = 0 signed). Whether it decodes the 20 mixed-order keys
-       with y of p or more is not known: no signature can show it. It accepts R = O with S = k a under an RFC 8032 key. In the
-       speccheck cases that is 0 and 1 (small-order key), 2 (small-order R)
-       and 11 (the key (0, -1) with x = 0 signed).
+       is known to differ there.
+     - **ring differs on small-order keys and non-canonical small-order
+       keys.** It accepts a signature satisfying the cofactorless equation
+       under each of the 14 encodings of a small-order point, including the
+       6 non-canonical ones (y of p or p + 1, and x = 0 signed). Whether it
+       decodes the 20 mixed-order keys with y of p or more is not known: no
+       signature can show it. In the speccheck cases that is 0 and 1
+       (small-order key) and 11 (the key (0, -1) with x = 0 signed).
      - All three refuse cases 4 and 5 (only the cofactored equation
        holds), 6 and 7 (S of L or more), 8 and 9 (a non-canonical R) and
        10 (a non-canonical key under which ring's equation fails too), and
        accept case 3, a mixed-order key and R satisfying the reduced-k and
-       cofactored equations.
+       cofactored equations. ToyOS and ring accept case 2 and R = O under
+       an RFC 8032 key; all three refuse the seven other small-order R under
+       one, which no S can make satisfy the equation.
    - The loader verifies a signed image on the T14 and the AMD bench, with
      its verification time measured on each. Done (#1019's probe image,
      #1016's evidence): 253,975 counter ticks on the T14 at its stated
