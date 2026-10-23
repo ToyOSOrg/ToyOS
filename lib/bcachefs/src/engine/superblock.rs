@@ -219,8 +219,8 @@ impl Kdf {
     /// N, r and p, when r and p fit scrypt's `u32`s.
     pub(crate) fn values(self) -> Result<(u64, u32, u32)> {
         let pow = |log: u16| if log < 32 { Ok(1u32 << log) } else { Err(Error::Unsupported("scrypt r or p past 2^31")) };
-        if self.log_n >= 64 {
-            return Err(Error::Unsupported("scrypt N past 2^63"));
+        if self.log_n == 0 || self.log_n >= 64 {
+            return Err(Error::Corrupt("scrypt N not a power of two from 2 to 2^63"));
         }
         Ok((1 << self.log_n, pow(self.log_r)?, pow(self.log_p)?))
     }
@@ -456,6 +456,9 @@ fn decode_header(b: &[u8]) -> Result<Header> {
 }
 
 fn members(body: &[u8], header: &Header) -> Result<Member> {
+    if body.len() < 8 {
+        return Err(Error::Corrupt("members_v2 without its header"));
+    }
     let size = usize::from(le16(body, 0));
     let entry = body.get(8..8 + size).filter(|_| size >= 32).ok_or(Error::Corrupt("members_v2 without the device's entry"))?;
     let member = Member::decode(entry);
@@ -475,11 +478,11 @@ fn members(body: &[u8], header: &Header) -> Result<Member> {
 /// The journal's bucket ranges lie on the device.
 fn journal(body: &[u8], member: &Member) -> Result<()> {
     let ranges = pairs(body);
-    let total: u64 = ranges.iter().map(|r| r.1).sum();
     let valid = ranges.iter().all(|&(start, count)| {
         count > 0 && start > 0 && start >= u64::from(member.first_bucket) && start.checked_add(count).is_some_and(|end| end <= member.nbuckets)
     });
-    if !valid || total > u64::from(u32::MAX) {
+    // Each count is at most the bucket count, so the sum fits.
+    if !valid || ranges.iter().map(|r| r.1).sum::<u64>() > u64::from(u32::MAX) {
         return Err(Error::Corrupt("journal buckets"));
     }
     Ok(())
@@ -529,7 +532,7 @@ fn clean(body: &[u8]) -> Result<Clean> {
             entry_type::BTREE_ROOT => {
                 let btree = Btree::from_id(u32::from(btree)).ok_or(Error::Unsupported("root of a btree this reader does not know"))?;
                 let (key, value) = Format::UNPACKED.key(payload)?;
-                if key.kind != kind::BTREE_PTR_V2 || usize::from(payload[0]) * 8 != payload.len() {
+                if key.kind != kind::BTREE_PTR_V2 || key.size != 0 || usize::from(payload[0]) * 8 != payload.len() {
                     return Err(Error::Corrupt("btree root record"));
                 }
                 if key.pos != Bpos::MAX || level > 3 {

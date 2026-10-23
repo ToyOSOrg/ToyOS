@@ -26,12 +26,21 @@ const CRC32C_TABLE: [u32; 256] = {
 
 /// Compute CRC-32c over a byte slice.
 pub fn crc32c(data: &[u8]) -> u32 {
-    let mut crc = 0xFFFF_FFFFu32;
+    update(0xFFFF_FFFF, data) ^ 0xFFFF_FFFF
+}
+
+/// The same register with no initial or final inversion: bcachefs's data
+/// checksum type 5, whose value over zeros is 0.
+pub fn crc32c_zero(data: &[u8]) -> u32 {
+    update(0, data)
+}
+
+fn update(mut crc: u32, data: &[u8]) -> u32 {
     for &byte in data {
         let idx = ((crc ^ byte as u32) & 0xFF) as usize;
         crc = (crc >> 8) ^ CRC32C_TABLE[idx];
     }
-    crc ^ 0xFFFF_FFFF
+    crc
 }
 
 #[cfg(test)]
@@ -44,6 +53,12 @@ mod tests {
         assert_eq!(crc32c(b""), 0x00000000);
         // CRC-32c of "123456789"
         assert_eq!(crc32c(b"123456789"), 0xE3069283);
+    }
+
+    #[test]
+    fn the_uninverted_register_has_its_own_check_value() {
+        assert_eq!(crc32c_zero(b"123456789"), 0x58E3_FA20);
+        assert_eq!(crc32c_zero(&[0; 4096]), 0);
     }
 
     #[test]

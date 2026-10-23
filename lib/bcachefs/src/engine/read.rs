@@ -13,7 +13,7 @@ use super::node::{self, Expect, Node};
 use super::superblock::{Layout, Root, Superblock, HEADER, LAYOUT, MAX_BYTES, PRIMARY};
 use super::value::{inode_field, inode_flag, Dirent, DirentType, Extent, InodeValue, NodePtr, Subvolume};
 use super::{kind, le32, Btree, Error, Result, SECTOR};
-use crate::crc32c::crc32c;
+use crate::crc32c::{crc32c, crc32c_zero};
 
 /// A clean volume open for reading.
 pub struct Volume<D> {
@@ -56,6 +56,10 @@ pub struct DirEntry {
     /// Where a listing resumes after this entry.
     pub next: u64,
 }
+
+/// The longest symlink this reader reads, its NUL included: a path's
+/// length on the systems that make them.
+const MAX_SYMLINK: u64 = 4096;
 
 const S_IFMT: u16 = 0o170000;
 const S_IFDIR: u16 = 0o040000;
@@ -100,6 +104,11 @@ impl<D: BlockDev> Volume<D> {
             return Err(Error::Corrupt("root subvolume of another type"));
         }
         let subvolume = Subvolume::decode(&v)?;
+        // A snapshotted subvolume's keys live in its ancestors' snapshots,
+        // which this reader does not walk.
+        if subvolume.snapshot != super::mkfs::ROOT_SNAPSHOT {
+            return Err(Error::Unsupported("a root subvolume that has been snapshotted"));
+        }
         volume.snapshot = subvolume.snapshot;
         volume.root = subvolume.inode;
         Ok(volume)
@@ -207,7 +216,7 @@ impl<D: BlockDev> Volume<D> {
         let nlink = if v.flags & inode_flag::UNLINKED != 0 {
             0
         } else {
-            stored + if mode & S_IFMT == S_IFDIR { 2 } else { 1 }
+            stored.checked_add(if mode & S_IFMT == S_IFDIR { 2 } else { 1 }).ok_or(Error::Corrupt("inode link count past 2^32"))?
         };
         let time = |f| self.time(v.field(f));
         Ok(Inode {
@@ -313,7 +322,10 @@ impl<D: BlockDev> Volume<D> {
         if inode.mode & S_IFMT != 0o120000 || inode.size == 0 {
             return Err(Error::Invalid("readlink of a node that is no symlink"));
         }
-        let mut target = alloc::vec![0u8; usize::try_from(inode.size).map_err(|_| Error::Corrupt("symlink size"))?];
+        if inode.size > MAX_SYMLINK {
+            return Err(Error::Unsupported("symlink target past 4 KiB"));
+        }
+        let mut target = alloc::vec![0u8; inode.size as usize];
         self.read(ino, 0, &mut target).await?;
         // The target is stored with one NUL after it.
         if target.pop() != Some(0) {
@@ -400,8 +412,16 @@ impl<D: BlockDev> Volume<D> {
         let mut data = read_bytes(&self.dev, extent.ptr.sector * SECTOR as u64, crc.compressed as usize * SECTOR).await?;
         match crc.csum_type {
             0 => {}
-            1 if crc32c(&data).to_le_bytes() == crc.csum[..4] => {}
-            1 => return Err(Error::Checksum("extent")),
+            // Over the whole encoded extent, the value zero-extended to the
+            // entry's checksum bytes.
+            1 | 5 => {
+                let value = if crc.csum_type == 1 { crc32c(&data) } else { crc32c_zero(&data) };
+                let mut want = [0u8; 16];
+                want[..4].copy_from_slice(&value.to_le_bytes());
+                if want != crc.csum {
+                    return Err(Error::Checksum("extent"));
+                }
+            }
             // An 80-bit MAC in a crc64 entry, a 128-bit one in a
             // crc128.
             3 | 4 if crc.csum_len == if crc.csum_type == 3 { 10 } else { 16 } => {
@@ -410,8 +430,6 @@ impl<D: BlockDev> Volume<D> {
                 master.verify(nonce, &data, &crc.csum[..crc.csum_len], "extent")?;
                 master.xor(nonce, &mut data)?;
             }
-            // Type 5, upstream's data crc32c, among them: its seed and final
-            // XOR are not established (issues/the-bcachefs-reader-refuses-crc32c-data-extents.md).
             _ => return Err(Error::Unsupported("data checksum type")),
         }
         let at = crc.offset as usize * SECTOR + skip as usize;
@@ -433,7 +451,8 @@ fn entry(k: &Key, v: &[u8]) -> Result<DirEntry> {
     if dirent.kind == DirentType::Subvolume {
         return Err(Error::Unsupported("subvolume dirent"));
     }
-    Ok(DirEntry { name: dirent.name.to_vec(), ino: dirent.target, kind: dirent.kind, next: k.pos.offset + 1 })
+    let next = k.pos.offset.checked_add(1).ok_or(Error::Corrupt("dirent at the last offset"))?;
+    Ok(DirEntry { name: dirent.name.to_vec(), ino: dirent.target, kind: dirent.kind, next })
 }
 
 /// The hash slot of `name` under directory `dir`'s seed: SipHash-2-4 keyed

@@ -83,8 +83,10 @@ pub async fn mkfs(dev: &impl BlockDev, options: &Options<'_>, random: &mut impl 
     if options.label.len() > 31 {
         return Err(Error::Invalid("label longer than 31 bytes"));
     }
-    if options.encryption.as_ref().is_some_and(|e| e.passphrase.contains(&0)) {
-        return Err(Error::Invalid("passphrase holding NUL"));
+    // Upstream's tools cut a passphrase at NUL and strip one trailing
+    // newline, so neither could unlock what such bytes wrapped.
+    if options.encryption.as_ref().is_some_and(|e| e.passphrase.contains(&0) || e.passphrase.ends_with(b"\n")) {
+        return Err(Error::Invalid("passphrase holding NUL or ending in a newline"));
     }
     let geometry = Geometry::new(dev.blocks() * BLOCK_SECTORS)?;
     let mut draw = Draw(random);

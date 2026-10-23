@@ -115,10 +115,18 @@ pub enum Btree {
     ReconcileWork = 18,
     SubvolumeChildren = 19,
     Accounting = 20,
+    ReconcileHipri = 21,
+    ReconcilePending = 22,
+    ReconcileScan = 23,
+    ReconcileWorkPhys = 24,
+    ReconcileHipriPhys = 25,
+    BucketToStripe = 26,
+    StripeBackpointers = 27,
+    Damage = 28,
 }
 
 impl Btree {
-    pub(crate) const ALL: [Btree; 21] = [
+    pub(crate) const ALL: [Btree; 29] = [
         Btree::Extents,
         Btree::Inodes,
         Btree::Dirents,
@@ -140,6 +148,14 @@ impl Btree {
         Btree::ReconcileWork,
         Btree::SubvolumeChildren,
         Btree::Accounting,
+        Btree::ReconcileHipri,
+        Btree::ReconcilePending,
+        Btree::ReconcileScan,
+        Btree::ReconcileWorkPhys,
+        Btree::ReconcileHipriPhys,
+        Btree::BucketToStripe,
+        Btree::StripeBackpointers,
+        Btree::Damage,
     ];
 
     pub(crate) fn from_id(id: u32) -> Option<Btree> {
@@ -150,15 +166,69 @@ impl Btree {
     pub(crate) fn extents(self) -> bool {
         matches!(self, Btree::Extents | Btree::Reflink | Btree::Freespace)
     }
+
+    /// The key types a leaf of this btree may hold besides `deleted`.
+    fn leaf_types(self) -> &'static [u8] {
+        match self {
+            Btree::Extents => &[1, 2, 3, 6, 7, 15, 17, 36],
+            Btree::Inodes => &[1, 8, 9, 23, 29],
+            Btree::Dirents => &[1, 4, 10],
+            Btree::Xattrs => &[1, 3, 4, 11],
+            Btree::Alloc => &[12, 20, 24, 27],
+            Btree::Quotas => &[13],
+            Btree::Stripes => &[14],
+            Btree::Reflink => &[2, 16, 19],
+            Btree::Subvolumes => &[21],
+            Btree::Snapshots => &[22],
+            Btree::Backpointers | Btree::StripeBackpointers => &[28],
+            Btree::BucketGens => &[30],
+            Btree::SnapshotTrees => &[31],
+            Btree::LoggedOps => &[32, 33, 35, 37],
+            Btree::ReconcileWork => &[3, 25],
+            Btree::Accounting => &[34],
+            Btree::ReconcileScan => &[3, 28],
+            Btree::Damage => &[1, 38],
+            Btree::Lru
+            | Btree::Freespace
+            | Btree::NeedDiscard
+            | Btree::DeletedInodes
+            | Btree::SubvolumeChildren
+            | Btree::ReconcileHipri
+            | Btree::ReconcilePending
+            | Btree::ReconcileWorkPhys
+            | Btree::ReconcileHipriPhys
+            | Btree::BucketToStripe => &[25],
+        }
+    }
+
+    /// Whether a key of `kind` belongs in a node of this btree at `level`:
+    /// an interior node holds only `deleted` and btree pointers.
+    pub(crate) fn allows(self, level: u8, kind: u8) -> bool {
+        match level {
+            0 => kind == kind::DELETED || self.leaf_types().contains(&kind),
+            _ => matches!(kind, kind::DELETED | kind::BTREE_PTR | kind::BTREE_PTR_V2),
+        }
+    }
 }
 
 /// Key types, numbered as the format numbers them: the order of
 /// *bcachefs: Principles of Operation* §11.5's list.
 pub(crate) mod kind {
+    /// The first key type v1.39.4 does not define.
+    pub const UNKNOWN: u8 = 39;
+
+    /// Types whose btree a read of a leaf does not check: upstream refuses
+    /// them in the wrong btree only when it commits them.
+    pub fn strict(kind: u8) -> bool {
+        !matches!(kind, DELETED | WHITEOUT | ERROR | COOKIE | SET)
+    }
+
     pub const DELETED: u8 = 0;
     pub const WHITEOUT: u8 = 1;
     pub const ERROR: u8 = 2;
+    pub const COOKIE: u8 = 3;
     pub const HASH_WHITEOUT: u8 = 4;
+    pub const BTREE_PTR: u8 = 5;
     pub const EXTENT: u8 = 6;
     pub const RESERVATION: u8 = 7;
     pub const INODE: u8 = 8;

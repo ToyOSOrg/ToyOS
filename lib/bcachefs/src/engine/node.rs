@@ -143,7 +143,7 @@ fn open(key: Option<&MasterKey>, seq: u64, journal_seq: u64, csum_type: u8, r: &
         csum::CRC32C if crc32c(&bytes[r.at + 16..r.end]) == le32(bytes, r.at) => Ok(()),
         csum::CRC32C => Err(Error::Checksum("btree node")),
         csum::CHACHA_POLY_128 => {
-            let key = key.ok_or(Error::Locked)?;
+            let key = key.ok_or(Error::Corrupt("MACed btree node on an unencrypted volume"))?;
             let nonce = Nonce::node(r.at as u32, seq, journal_seq);
             let tag: [u8; 16] = bytes[r.at..r.at + 16].try_into().unwrap();
             key.verify(nonce, &bytes[r.at + 16..r.end], &tag, "btree node")?;
@@ -188,6 +188,7 @@ fn parse_keys(format: &Format, mut b: &[u8], expect: &Expect) -> Result<Vec<(Key
         if key.pos < expect.min || key.pos > expect.max {
             return Err(Error::Corrupt("key outside its node's range"));
         }
+        check_kind(expect.btree, expect.level, &key)?;
         if let Some((last, _)) = keys.last() {
             let ordered = last.pos < key.pos || (last.pos == key.pos && last.kind == kind::DELETED && key.kind != kind::DELETED);
             if !ordered {
@@ -198,6 +199,22 @@ fn parse_keys(format: &Format, mut b: &[u8], expect: &Expect) -> Result<Vec<(Key
         b = &b[len..];
     }
     Ok(keys)
+}
+
+/// A key's type against its node: in an interior node only pointers, of
+/// size 0; in a leaf a type its btree holds, which a read checks only for
+/// the strict types.
+fn check_kind(btree: Btree, level: u8, key: &Key) -> Result<()> {
+    if key.kind >= kind::UNKNOWN {
+        return Err(Error::Unsupported("key type v1.39.4 does not define"));
+    }
+    if level > 0 && (!btree.allows(level, key.kind) || key.size != 0) {
+        return Err(Error::Corrupt("interior key that is no size-0 pointer"));
+    }
+    if level == 0 && kind::strict(key.kind) && !btree.allows(0, key.kind) {
+        return Err(Error::Corrupt("key of a type its btree does not hold"));
+    }
+    Ok(())
 }
 
 /// Bsets merged by position, a later one winning, deleted keys dropped.
@@ -248,6 +265,8 @@ pub(crate) fn encode(sb_magic: u64, block: usize, key: Option<&MasterKey>, build
     put16(&mut b, 158, ((end - FIRST_KEYS) / 8) as u16);
     let mut at = FIRST_KEYS;
     for k in build.keys {
+        assert!(build.btree.allows(build.level, k[2]), "a key of type {} in a {:?} node at level {}", k[2], build.btree, build.level);
+        assert!(build.level == 0 || le32(k, 16) == 0, "an interior key with a size");
         b[at..at + k.len()].copy_from_slice(k);
         at += k.len();
     }

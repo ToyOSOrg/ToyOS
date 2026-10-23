@@ -154,8 +154,8 @@ fn limits(kdf: Kdf) -> Result<scrypt::Limits> {
 /// the master key.
 fn passphrase_key(passphrase: &[u8], kdf: Kdf, limits: scrypt::Limits) -> Result<[u8; 32]> {
     let (_, r, p) = kdf.values()?;
-    let log_n = u8::try_from(kdf.log_n).map_err(|_| Error::Unsupported("scrypt N past 2^31"))?;
-    let params = scrypt::Params::new(log_n, r, p, limits).map_err(|_| Error::Unsupported("scrypt parameters past the caller's limits"))?;
+    let log_n = u8::try_from(kdf.log_n).ok().filter(|&n| n < 32).ok_or(Error::Unsupported("scrypt N past 2^31"))?;
+    let params = scrypt::Params::new(log_n, r, p, limits).map_err(|_| Error::Unsupported("scrypt parameters past RFC 7914's or the caller's limits"))?;
     let mut workspace = vec![0u32; params.workspace_len()];
     let mut key = [0u8; 32];
     scrypt::derive(passphrase, SALT, params, &mut workspace, &mut key).map_err(|_| Error::Unsupported("scrypt parameters"))?;

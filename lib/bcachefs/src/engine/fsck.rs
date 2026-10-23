@@ -5,7 +5,7 @@
 
 use alloc::vec::Vec;
 
-use toyos_blockdev::BlockDev;
+use toyos_blockdev::{BlockDev, BLOCK};
 
 use super::bkey::Bpos;
 use super::mkfs::{self, COMPAT_CLEAN, COMPAT_INITIALIZED, DOWNGRADE, EXTENT_TYPE_U64S, FEATURES};
@@ -31,6 +31,9 @@ pub enum Finding {
     BsetAboveClean { btree: Btree, sector: u64, seq: u64 },
     /// An inode stamped with a journal sequence past `clean`'s.
     InodeAboveClean { ino: u64, seq: u64 },
+    /// A key of a type its btree, at that level, does not hold. The reader
+    /// passes the non-strict types; ToyOS writes none out of place.
+    KeyType { btree: Btree, level: u8, kind: u8, pos: Bpos },
 }
 
 /// Everything wrong with `volume`; empty when nothing is.
@@ -92,7 +95,13 @@ async fn copies(dev: &impl BlockDev, sb: &Superblock) -> Result<Vec<Finding>> {
     let len = HEADER + 8 * sb.fields.iter().map(|f| 1 + f.body.len().div_ceil(8)).sum::<usize>();
     let reference = Superblock::encode(&sb.header, &sb.fields, 0);
     let mut found = Vec::new();
+    let device = dev.blocks() * BLOCK as u64;
     for &offset in &sb.header.layout.offsets {
+        let fits = offset.checked_mul(SECTOR as u64).and_then(|at| at.checked_add(len as u64)).is_some_and(|end| end <= device);
+        if !fits {
+            found.push(Finding::Copy(offset));
+            continue;
+        }
         let mut copy = read_bytes(dev, offset * SECTOR as u64, len).await?;
         copy[..16].fill(0);
         copy[104..112].fill(0);
@@ -148,7 +157,8 @@ async fn root_world<D: BlockDev>(v: &Volume<D>) -> Result<Vec<Finding>> {
     Ok(found)
 }
 
-/// Every node: inside the bitmap, and no bset or inode stamped past
+/// Every node: inside the bitmap, every key of a type its btree holds, and
+/// no bset or inode stamped past
 /// `clean`'s journal sequence: upstream's fsck reports an inode above it,
 /// and upstream's read-write mount of such a volume loses it.
 async fn nodes<D: BlockDev>(v: &Volume<D>) -> Result<Vec<Finding>> {
@@ -168,6 +178,10 @@ async fn nodes<D: BlockDev>(v: &Volume<D>) -> Result<Vec<Finding>> {
                 found.push(Finding::BsetAboveClean { btree: root.btree, sector, seq });
             }
             for (key, value) in &node.keys {
+                if !root.btree.allows(level, key.kind) {
+                    found.push(Finding::KeyType { btree: root.btree, level, kind: key.kind, pos: key.pos });
+                    continue;
+                }
                 if level > 0 {
                     pending.push((level - 1, NodePtr::decode(value)?, key.pos));
                 } else if root.btree == Btree::Inodes && key.kind == kind::INODE_V3 {
