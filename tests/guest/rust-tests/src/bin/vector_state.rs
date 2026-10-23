@@ -14,6 +14,10 @@
 #[path = "../arch/vector.rs"]
 mod vector;
 
+/// What each burst `stat`s: a file of the kernel's `/tmp`, so the kernel walks
+/// its path, which it does for no path a file server holds.
+const STAT_PATH: &str = "/tmp/vector_state";
+
 /// Rounds per thread, each with a pattern of its own, so a value left from
 /// the thread's own previous round is caught as surely as another thread's.
 const ROUNDS: u64 = 3;
@@ -38,8 +42,8 @@ fn pattern(thread: u64, round: u64, len: usize) -> Vec<u8> {
 
 fn main() {
     let width = vector::width();
-    let exe = std::env::current_exe().expect("this program's own path");
-    let path: &'static [u8] = exe.into_os_string().into_encoded_bytes().leak();
+    std::fs::write(STAT_PATH, b"x").expect("a file for the kernel to walk to");
+    let path = STAT_PATH.as_bytes();
     let threads = 2 * toyos_abi::syscall::cpu_count() as u64 + 1;
     let workers: Vec<_> = (0..threads)
         .map(|thread| {
@@ -61,5 +65,6 @@ fn main() {
     for (thread, worker) in workers.into_iter().enumerate() {
         assert!(worker.join().is_ok(), "thread {thread} found a vector register not its own");
     }
+    std::fs::remove_file(STAT_PATH).expect("the walked file removed");
     println!("vector_state: {threads} threads each held {width:?} through {ROUNDS} rounds");
 }
