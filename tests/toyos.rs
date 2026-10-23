@@ -208,8 +208,8 @@ const RUST_SKIP: &[&str] = &[
     // It claims the virtio NIC and asks how its BAR is lent, and the T14 has
     // no virtio NIC: `lent_device_memory_refused` runs it.
     "lent_device_memory_refused",
-    // It claims the radios and the disk no program holds, which a shared boot
-    // must not take from its members: `bar_map_again` and the
+    // It claims the radios no program holds, which a shared boot must not
+    // take from its members: `bar_map_again` and the
     // `msix_table_read_in_place` metal row run it.
     "msix_in_place",
     // It needs ToyOS's own clang and LLD packaged on ROOT, which only its boot
@@ -1309,11 +1309,11 @@ const METAL: &[(&str, metal::Metal)] = &[
         },
     ),
     (
-        // Each radio and disk P1 names (`issues/there-is-no-wifi.md`) that the
-        // machine has, claimed with its BARs where firmware put them, and the
-        // MSI-X entry the kernel armed read back through its holder's mapping
-        // of the table's page: the T14's AX210 and NVMe, the AMD bench's
-        // AX200 behind its bridge. It rides the `testcases` boot.
+        // Each radio P1 names (`issues/there-is-no-wifi.md`) that the machine
+        // has, claimed with its BARs where firmware put them, and the MSI-X
+        // entry the kernel armed read back through its holder's mapping of
+        // the table's page: the T14's AX210, the AMD bench's AX200 behind its
+        // bridge. It rides the `testcases` boot.
         "msix_table_read_in_place",
         metal::Metal {
             arms: &[metal::once("testcases", "tests/images/testcases.toml", &[], &["test_rs_msix_in_place"])],

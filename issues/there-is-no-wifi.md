@@ -141,12 +141,17 @@ function decodes in (`toyos_pci::pages`); nothing moves a BAR, and
 `msix-exclusive-bar=on` is gone, so the NVMe guests drive QEMU's default
 controller through its table in BAR 0.
 - **Exit, owed on the benches:**
-  - on the T14, `msix_table_read_in_place` reading the AX210's and the
-    NVMe's armed MSI-X entries back through their holders' mappings at
-    BAR 0 + 0x2000, and `claim_reuses_its_remapping_entry` unchanged;
+  - on the T14, `msix_table_read_in_place` reading the AX210's armed MSI-X
+    entry back through its holder's mapping at BAR 0 + 0x2000, and
+    `claim_reuses_its_remapping_entry` unchanged; the NVMe's table, also at
+    BAR 0 + 0x2000, is the nvme driver's in every image (#1031), so no test
+    claims it;
   - the T14's NVMe driven through that table: an Identify Controller admin
     command whose completion arrives through the in-place MSI-X entry, which
-    touches none of the other system's data; no row does it yet;
+    touches none of the other system's data. Every image's nvme driver now
+    brings it up, but no row judges that a completion arrived by interrupt:
+    `admin_command` reaps again after each bounded wait, so a lost interrupt
+    only slows it;
   - on the AMD bench, `amdvi_usbd_drives_its_own_entry`: `03:00.4`
     (which no test image's usbd row names, its MSI-X table in BAR 0, its only BAR, behind
     `00:08.1`, whose `0xd0000000..0xd0500000` bus 3 fills) claimed in place
