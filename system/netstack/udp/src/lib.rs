@@ -433,9 +433,10 @@ impl Udp {
         self.socket(id).map(|s| s.broadcast)
     }
 
-    /// The datagrams waiting for a [`Self::recv`].
-    pub fn waiting(&mut self, id: SocketId) -> Result<usize, Error> {
-        self.socket(id).map(|s| s.rx.len())
+    /// Whether a [`Self::recv`] has something to answer: a datagram, or the socket's pending
+    /// error.
+    pub fn readable(&mut self, id: SocketId) -> Result<bool, Error> {
+        self.socket(id).map(|s| !s.rx.is_empty() || s.pending.is_some())
     }
 
     pub fn set_ttl(&mut self, id: SocketId, unicast: Ttl, multicast: Ttl) -> Result<(), Error> {

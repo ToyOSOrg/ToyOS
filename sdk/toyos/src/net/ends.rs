@@ -77,14 +77,6 @@ impl<E: Copy, const N: usize> Ends<E, N> {
         }
     }
 
-    /// The end `handle` reaches, changed by `f`.
-    pub(super) fn update(&mut self, handle: RawHandle, f: impl FnOnce(&mut E)) -> Option<()> {
-        let slot = self.find(handle)?;
-        let Slot::Live { end, .. } = &mut self.slots[slot] else { return None };
-        f(end);
-        Some(())
-    }
-
     /// A call through `handle` begins: its end, counted.
     pub(super) fn call(&mut self, handle: RawHandle) -> Option<(usize, E)> {
         let slot = self.find(handle)?;
@@ -156,9 +148,8 @@ mod tests {
         let mut ends: Ends<u8, 4> = Ends::new();
         let slot = ends.reserve().unwrap();
         ends.enter(slot, 7, h(10));
-        assert_eq!((ends.find(h(12)), ends.call(h(12)), ends.forget(h(12)), ends.update(h(12), |_| {})), (None, None, None, None));
-        assert_eq!(ends.update(h(10), |end| *end = 8), Some(()));
-        assert_eq!(ends.get(h(10)), Some(8));
+        assert_eq!((ends.find(h(12)), ends.call(h(12)), ends.forget(h(12))), (None, None, None));
+        assert_eq!(ends.get(h(10)), Some(7));
     }
 
     /// Past the table's bound no slot is reserved, and a reservation given back is a slot again.

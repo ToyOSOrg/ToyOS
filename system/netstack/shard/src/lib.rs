@@ -623,9 +623,24 @@ impl Shard {
         self.udp.recv(id, out)
     }
 
-    /// [`Udp::waiting`](toyos_net_udp::Udp::waiting).
-    pub fn udp_waiting(&mut self, id: SocketId) -> Result<usize, toyos_net_udp::Error> {
-        self.udp.waiting(id)
+    /// [`Udp::readable`](toyos_net_udp::Udp::readable).
+    pub fn udp_readable(&mut self, id: SocketId) -> Result<bool, toyos_net_udp::Error> {
+        self.udp.readable(id)
+    }
+
+    /// The peer a connected socket's datagrams go to and come from.
+    pub fn udp_peer(&mut self, id: SocketId) -> Result<Option<(Ipv4Addr, Port)>, toyos_net_udp::Error> {
+        self.udp.binding(id).map(|(binding, _)| match binding {
+            toyos_net_udp::Binding::Connected { peer, peer_port, .. } => Some((peer, peer_port)),
+            toyos_net_udp::Binding::Any | toyos_net_udp::Binding::Specific(_) => None,
+        })
+    }
+
+    /// Queues a datagram for a connected socket's peer; accepted means queued, not sent.
+    pub fn udp_send(&mut self, now: Instant, id: SocketId, payload: &[u8]) -> Result<(), toyos_net_udp::Error> {
+        let queued = self.udp.send(&mut self.ip, id, payload);
+        self.settle(now);
+        queued
     }
 
     /// [`Udp::broadcast`](toyos_net_udp::Udp::broadcast).

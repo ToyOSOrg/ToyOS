@@ -5166,7 +5166,8 @@ fn netstack_holders_exported_to_children() -> Result<(), String> {
     let bins: Vec<(String, Vec<u8>)> =
         ["stream_export", "socket_export"].iter().map(|job| (job.to_string(), qemu::build_toyos_bin(qemu::SUITE_ARCH, &tests, job))).collect();
     // The host's end of the forward: a port found free and given up, which
-    // QEMU binds as it starts and refuses to start without.
+    // QEMU binds as it starts and refuses to start without. Another process
+    // can take it between the two, which fails the boot by name.
     let forwarded = std::net::TcpListener::bind("127.0.0.1:0")
         .and_then(|probe| probe.local_addr())
         .map_err(|e| format!("no loopback port to forward: {e}"))?
@@ -5213,7 +5214,9 @@ fn stream_exported_to_a_child(qemu: &mut QemuInstance) -> Result<(), String> {
 
 /// `test_rs_socket_export`: for the child and then the parent, a datagram
 /// saying it is ready, answered by one saying go, and a connection through the
-/// forwarded port that it accepts and writes its line on.
+/// forwarded port that it accepts and writes its line on; then, once the parent
+/// and a second child both say they are about to block, two connections and
+/// two datagrams, each taken once.
 fn sockets_exported_to_a_child(qemu: &mut QemuInstance, forwarded: u16) -> Result<(), String> {
     use std::io::Read;
     /// A liveness ceiling on each of the peer's waits, never a timing.
@@ -5238,6 +5241,39 @@ fn sockets_exported_to_a_child(qemu: &mut QemuInstance, forwarded: u16) -> Resul
                 return Err(format!("the peer heard {:?}, not {owed:?}", String::from_utf8_lossy(&line)));
             }
         }
+        // The race: both processes say they are about to block, then two
+        // connections and two datagrams, each taken once.
+        let both = |what: &str| -> Result<std::net::SocketAddr, String> {
+            let mut said = Vec::new();
+            let mut from = None;
+            for _ in 0..2 {
+                let mut line = [0u8; 64];
+                let (n, at) = datagrams.recv_from(&mut line).map_err(|e| format!("a racer's {what}: {e}"))?;
+                said.push(String::from_utf8_lossy(&line[..n]).into_owned());
+                from = Some(at);
+            }
+            said.sort();
+            if said != [format!("parent {what}"), format!("racer {what}")] {
+                return Err(format!("the racers said {said:?}"));
+            }
+            from.ok_or_else(|| "no racer spoke".to_string())
+        };
+        both("racing")?;
+        let conns: Vec<std::net::TcpStream> = (0..2)
+            .map(|_| std::net::TcpStream::connect(("127.0.0.1", forwarded)).map_err(|e| format!("a racer's connect: {e}")))
+            .collect::<Result<_, _>>()?;
+        for mut conn in conns {
+            conn.set_read_timeout(Some(CEILING)).map_err(|e| e.to_string())?;
+            let mut line = Vec::new();
+            conn.read_to_end(&mut line).map_err(|e| format!("a racer's line: {e} after {line:?}"))?;
+            if line != b"accepted by a racer\n" {
+                return Err(format!("a racer wrote {:?}", String::from_utf8_lossy(&line)));
+            }
+        }
+        let socket = both("receiving")?;
+        for datagram in [&b"one"[..], b"two"] {
+            datagrams.send_to(datagram, socket).map_err(|e| format!("a racer's datagram: {e}"))?;
+        }
         Ok(())
     });
     let result = qemu.run_test(&format!("test_rs_socket_export {port}"), Duration::from_secs(300));
@@ -5246,6 +5282,14 @@ fn sockets_exported_to_a_child(qemu: &mut QemuInstance, forwarded: u16) -> Resul
     }
     if result.exit_code != Some(0) {
         return Err(format!("the job ended {:?}:\n{}", result.exit_code, result.stdout));
+    }
+    for claim in [
+        "a listener and a datagram socket exported to a child: it accepted and spoke on them, and so did the parent after it",
+        "two holders blocked on one queue: each took one connection and one datagram",
+    ] {
+        if !result.stdout.contains(claim) {
+            return Err(format!("the job never said {claim:?}:\n{}", result.stdout));
+        }
     }
     heard.join().map_err(|_| "the peer's thread panicked".to_string())?
 }

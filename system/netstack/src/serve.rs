@@ -48,7 +48,7 @@ use std::time::Duration;
 use std::rc::{Rc, Weak};
 
 use toyos::net::*;
-use toyos::net::socket::{self, Kind, ACCEPT, OPTION, RECEIVE, SEND, SET_OPTION};
+use toyos::net::socket::{self, Kind, ACCEPT, CONNECT, OPTION, PEER, RECEIVE, SEND, SEND_PEER, SET_OPTION};
 use toyos::net::stream::{self, Adopt, ADOPT, BELLS, EXPORT, EXPORTED, REFUSED, RING};
 use toyos::transport::session::Holder;
 use toyos::poller::READABLE;
@@ -229,6 +229,9 @@ fn refused(refusal: Refused) -> u32 {
         Refused::InvalidInput => ERR_INVALID_INPUT,
         Refused::PermissionDenied => ERR_PERMISSION_DENIED,
         Refused::ResourceExhausted => ERR_RESOURCE_EXHAUSTED,
+        Refused::ConnectionRefused => ERR_CONNECTION_REFUSED,
+        // The pipe ABI's word for an ICMP error a connect ends in, as `connect_failed`'s.
+        Refused::Unreachable => ERR_OTHER,
     }
 }
 
@@ -577,14 +580,14 @@ impl Sockets {
     /// for a token that is none of them. An answer about a socket or a stream
     /// that is gone since says nothing.
     pub fn answered(&mut self, node: &mut Node, now: Instant, token: u64, answer: Result<u32, SyscallError>) -> bool {
-        let socket_id = token as u32;
+        let key = token as u32;
         match token & TOKEN_KIND {
-            TOKEN_STREAM => self.holder_answered(node, now, socket_id, answer),
-            TOKEN_SOCKET => self.socket_answered(node, now, socket_id, answer),
+            TOKEN_STREAM => self.holder_answered(node, now, key, answer),
+            TOKEN_SOCKET => self.socket_answered(node, now, key, answer),
             TOKEN_LOOKUP => {
                 // A lookup whose client has left ends now: its sockets and
                 // its place are another client's.
-                let spoke = |client: &Client| u64::from(client.conn.as_handle().0) == u64::from(socket_id);
+                let spoke = |client: &Client| u64::from(client.conn.as_handle().0) == u64::from(key);
                 self.lookups.retain(|(id, client)| {
                     let left = spoke(client) && client.gone();
                     if left {
@@ -735,6 +738,7 @@ impl Sockets {
                     let sent = match reply {
                         Ok(Reply::Bare) => holder.connection.try_signal(RespType::Result as u32),
                         Ok(Reply::Word(word)) => holder.connection.try_send(RespType::Result as u32, &word),
+                        Ok(Reply::Peer(peer)) => holder.connection.try_send(RespType::Result as u32, &peer),
                         Ok(Reply::Bytes(bytes)) => holder.connection.try_send_bytes(RespType::Result as u32, &bytes),
                         Err(code) => holder.connection.try_send(RespType::Error as u32, &ErrorResponse { code }),
                     };
@@ -937,6 +941,9 @@ enum Asked {
     Option(u32),
     Send { to: [u8; 4], port: u16, data: Vec<u8> },
     Receive,
+    Connect { to: [u8; 4], port: u16 },
+    Peer,
+    SendPeer(Vec<u8>),
 }
 
 /// The request a holder of a `kind` socket sent, or `None` for a frame no
@@ -955,6 +962,12 @@ fn asked(kind: Kind, msg_type: u32, payload: &[u8], handles: usize) -> Option<As
             Some(Asked::Send { to: to.addr, port: to.port, data: data.to_vec() })
         }
         (Kind::Datagram, RECEIVE, 0) if payload.is_empty() => Some(Asked::Receive),
+        (Kind::Datagram, CONNECT, 0) => {
+            let peer: socket::Datagram = ipc::decode_payload(payload).ok()?;
+            Some(Asked::Connect { to: peer.addr, port: peer.port })
+        }
+        (Kind::Datagram, PEER, 0) if payload.is_empty() => Some(Asked::Peer),
+        (Kind::Datagram, SEND_PEER, 0) if payload.len() <= socket::MAX_DATAGRAM => Some(Asked::SendPeer(payload.to_vec())),
         _ => None,
     }
 }
@@ -963,6 +976,7 @@ fn asked(kind: Kind, msg_type: u32, payload: &[u8], handles: usize) -> Option<As
 enum Reply {
     Bare,
     Word(u32),
+    Peer(socket::Datagram),
     Bytes(Vec<u8>),
 }
 
@@ -981,6 +995,14 @@ fn answer_socket(node: &mut Node, now: Instant, socket: Held, holder: HolderId, 
         (Held::Datagram(id), Asked::Send { to, port, data }) => {
             node.udp_send_to(now, id, Ipv4Addr::from(to), port, &data).map(|()| Reply::Bare).map_err(refused)
         }
+        (Held::Datagram(id), Asked::Connect { to, port }) => {
+            node.udp_connect(now, id, Ipv4Addr::from(to), port).map(|()| Reply::Bare).map_err(refused)
+        }
+        (Held::Datagram(id), Asked::Peer) => match node.udp_peer(id).map_err(refused)? {
+            Some((addr, port)) => Ok(Reply::Peer(socket::Datagram { addr: addr.octets(), port: port.get(), _pad: 0 })),
+            None => Err(ERR_NOT_CONNECTED),
+        },
+        (Held::Datagram(id), Asked::SendPeer(data)) => node.udp_send(now, id, &data).map(|()| Reply::Bare).map_err(refused),
         (Held::Datagram(id), Asked::Receive) => {
             let mut payload = [0u8; toyos_net_udp::limits::MAX_PAYLOAD];
             match node.udp_recv_from(id, holder, &mut payload) {
@@ -996,7 +1018,16 @@ fn answer_socket(node: &mut Node, now: Instant, socket: Held, holder: HolderId, 
                 Err(refusal) => Err(refused(refusal)),
             }
         }
-        (_, asked @ (Asked::Accept | Asked::Export | Asked::Send { .. } | Asked::Receive)) => {
+        (
+            _,
+            asked @ (Asked::Accept
+            | Asked::Export
+            | Asked::Send { .. }
+            | Asked::Receive
+            | Asked::Connect { .. }
+            | Asked::Peer
+            | Asked::SendPeer(_)),
+        ) => {
             unreachable!("{asked:?} is answered by its own call, or was refused as no holder's of its kind")
         }
     }
@@ -1022,7 +1053,7 @@ mod tests {
     /// there, so a connection that holds nothing reaches nothing.
     #[test]
     fn a_new_connection_names_no_socket() {
-        for holders in [ACCEPT, OPTION, SET_OPTION, SEND, RECEIVE, EXPORT, EXPORTED, REFUSED, RING, ADOPT, socket::ADOPT] {
+        for holders in [ACCEPT, OPTION, SET_OPTION, SEND, RECEIVE, CONNECT, PEER, SEND_PEER, EXPORT, EXPORTED, REFUSED, RING, ADOPT, socket::ADOPT] {
             assert_eq!(MsgType::from_u32(holders), None, "{holders}");
         }
     }
@@ -1042,6 +1073,9 @@ mod tests {
         }
         assert_eq!(asked(Kind::Datagram, SEND, &datagram, 0), Some(Asked::Send { to: [192, 0, 2, 7], port: 53, data: b"hi".to_vec() }));
         assert_eq!(asked(Kind::Datagram, RECEIVE, &[], 0), Some(Asked::Receive));
+        assert_eq!(asked(Kind::Datagram, CONNECT, &datagram[..8], 0), Some(Asked::Connect { to: [192, 0, 2, 7], port: 53 }));
+        assert_eq!(asked(Kind::Datagram, PEER, &[], 0), Some(Asked::Peer));
+        assert_eq!(asked(Kind::Datagram, SEND_PEER, b"hi", 0), Some(Asked::SendPeer(b"hi".to_vec())));
 
         for (kind, msg_type, payload, handles) in [
             (Kind::Datagram, ACCEPT, &[][..], 1),
@@ -1059,6 +1093,13 @@ mod tests {
             (Kind::Datagram, SET_OPTION, &option[..7], 0),
             (Kind::Datagram, OPTION, &option[..], 0),
             (Kind::Listener, RING, &[], 0),
+            (Kind::Listener, CONNECT, &datagram[..8], 0),
+            (Kind::Listener, PEER, &[], 0),
+            (Kind::Listener, SEND_PEER, b"hi", 0),
+            (Kind::Datagram, CONNECT, &datagram[..], 0),
+            (Kind::Datagram, PEER, &[0], 0),
+            (Kind::Datagram, SEND_PEER, &[0; socket::MAX_DATAGRAM + 1], 0),
+            (Kind::Datagram, SEND_PEER, b"hi", 1),
             (Kind::Datagram, socket::ADOPT, &[0; 8], 1),
             (Kind::Listener, u32::MAX, &[], 0),
         ] {

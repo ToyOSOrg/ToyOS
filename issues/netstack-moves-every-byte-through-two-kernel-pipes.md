@@ -77,7 +77,7 @@ The design and its roast are PR #863's body.
   `len`, `port` and `addr` out of the region once and judges the copy: a
   `len` past the bytes the record holds ends that socket alone. `toyos::net`'s `send_to` refuses
   what a sender can judge and writes no record: a payload past
-  `toyos_abi::net::UDP_MAX_PAYLOAD`, as POSIX's `sendto` fails
+  `toyos::net::socket::MAX_DATAGRAM`, as POSIX's `sendto` fails
   `[EMSGSIZE]`; port 0; an unspecified address. That bound is the one
   declaration: [udp]'s `limits::MAX_PAYLOAD` goes, and [udp], the node's
   `name.rs` and `resolve.rs`, netstack's `serve.rs` and [udp]'s

@@ -404,13 +404,12 @@ impl fmt::Debug for TcpListener {
 
 // --- UdpSocket ---
 
-/// A datagram socket's handle, as [`TcpListener`]'s is a listener's. Where a
-/// send that names no address goes is this process's (`socket::set_peer`),
-/// shared by every descriptor of the socket here.
+/// A datagram socket's handle, as [`TcpListener`]'s is a listener's. Its peer,
+/// once connected, is netstack's, shared by every holder.
 pub struct UdpSocket {
     fd: OwnedFd,
     read_timeout_ms: AtomicU32,
-    /// Kept for its getter: a send never waits, since netstack answers it at once.
+    /// Kept for its getter: a send is not bounded by it (`SO_SNDTIMEO`).
     write_timeout_ms: AtomicU32,
     nonblocking: AtomicBool,
 }
@@ -574,8 +573,7 @@ impl UdpSocket {
     }
 
     pub fn send(&self, buf: &[u8]) -> io::Result<usize> {
-        let peer = self.peer_addr()?;
-        self.send_to(buf, &peer)
+        socket::send(self.handle(), buf).map_err(net_err_to_io)
     }
 
     pub fn connect<A: ToSocketAddrs>(&self, addr: A) -> io::Result<()> {
@@ -583,8 +581,8 @@ impl UdpSocket {
             .to_socket_addrs()?
             .next()
             .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidInput, "no addresses found"))?;
-        let peer = addr_to_v4(&addr)?;
-        socket::set_peer(self.handle(), Some(peer)).map_err(net_err_to_io)
+        let (ip, port) = addr_to_v4(&addr)?;
+        socket::connect(self.handle(), ip, port).map_err(net_err_to_io)
     }
 
     pub fn as_raw_fd(&self) -> i32 {

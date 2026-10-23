@@ -264,6 +264,45 @@ fn a_refusal_is_logged_by_the_call_that_met_it() {
     assert_eq!(logged, [line(Counter::BroadcastNotPermitted, (Ipv4Addr::BROADCAST, 9), 1)]);
 }
 
+// RFC 768 has no connection; POSIX's `connect` on a datagram socket names the one peer it sends
+// to and receives from. The peer is the socket's, so every holder's: a holder that did not
+// connect sends there and reads it back, and a datagram from anyone else is no holder's.
+#[test]
+fn a_connected_sockets_peer_is_every_holders() {
+    let mut lan = Lan::new();
+    lan.lease(3_600);
+    let (id, _) = lan.node.udp_bind(ANY, port(4_000), common::unread(), undrawn).unwrap();
+    let (second, _) = lan.node.export_datagram(id, common::unread()).unwrap();
+    assert_eq!((lan.node.udp_peer(id), lan.node.udp_send(lan.now, id, b"x")), (Ok(None), Err(Refused::NotConnected)));
+    assert_eq!(lan.node.udp_connect(lan.now, id, B, 0), Err(Refused::InvalidInput), "port 0");
+    lan.node.udp_connect(lan.now, id, B, 7).expect("one host of the link");
+    assert_eq!(lan.node.udp_peer(id), Ok(Some((B, Port::new(7).unwrap()))));
+    lan.node.udp_send(lan.now, id, b"to the peer").expect("a connected socket's send");
+    lan.pump();
+    let last = lan.datagrams().last().map(|(_, udp)| (udp.destination, udp.port, udp.payload.clone()));
+    assert_eq!(last, Some((B, 7, b"to the peer".to_vec())));
+
+    lan.deliver(&udp(MAC, MAC_R, (OFF_LINK, 7), (A, 4_000), b"a stranger"));
+    lan.deliver(&udp(MAC, MAC_B, (B, 7), (A, 4_000), b"the peer"));
+    let mut out = [0u8; 64];
+    let got = lan.node.udp_recv_from(id, second, &mut out).unwrap().unwrap();
+    assert_eq!((&out[..got.len], got.source), (&b"the peer"[..], B), "the holder that did not connect reads the peer");
+    assert_eq!(lan.node.udp_recv_from(id, HolderId::FIRST, &mut out), Ok(None), "the stranger's is nobody's");
+}
+
+// A holder made while a datagram waits is rung at once: nothing promises a pass before its
+// first look.
+#[test]
+fn a_holder_made_while_a_datagram_waits_is_rung_at_once() {
+    let mut lan = Lan::new();
+    lan.lease(3_600);
+    let (id, _) = lan.node.udp_bind(ANY, port(4_000), common::unread(), undrawn).unwrap();
+    lan.deliver(&udp(MAC, MAC_B, (B, 9_999), (A, 4_000), b"waiting"));
+    let (bell, rings) = common::bell();
+    lan.node.export_datagram(id, bell).unwrap();
+    assert_eq!(rings.get(), 1);
+}
+
 // A socket's holders take from one queue: each datagram is handed whole to the one holder whose
 // receive takes it, each holder is rung once a look while one waits, and a holder that left
 // receives nothing. The socket and its port stand until the last holder leaves.

@@ -14,11 +14,12 @@ descriptor of it, which exports a holder (`fd:<n>:exported`,
 working when another exits or is killed. A stream's own handle stays in its
 process: `endow` and `provide` of one are refused with `Misuse::Moved`.
 
+`netstack_holders_exported_to_children` (`tests/toyos.rs`) reads a listener's
+and a datagram socket's holders in a parent and its child, one after the other
+and both blocked at once; no guest test reads a survivor after the other holder
+is killed.
+
 What is not shared:
-- A listener's and a datagram socket's holders are read one after the other by
-  `netstack_holders_exported_to_children` (`tests/toyos.rs`): the child
-  accepts and exchanges datagrams, and the parent after it. No test reads
-  both at once, nor a survivor after the other holder is killed.
 - A C socket that has neither bound nor connected is libc's entry alone, an
   object of libc's own, which a spawn refuses (`NotSupported`).
 - A socket2 socket's descriptor is an object of socket2's own, so a spawn

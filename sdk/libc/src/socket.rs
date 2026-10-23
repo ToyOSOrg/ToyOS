@@ -56,15 +56,13 @@ enum SocketKind {
 
 /// A socket netstack does not hold yet: what its bind or connect makes it
 /// with. A listener's `nodelay` goes in its bind's request, a datagram
-/// socket's `broadcast` and peer are handed over after its bind, and a
-/// stream's `nodelay` into its region before its connect.
+/// socket's `broadcast` is handed over after its bind, and a stream's
+/// `nodelay` into its region before its connect.
 #[derive(Clone, Copy)]
 struct SocketEntry {
     kind: SocketKind,
     nodelay: bool,
     broadcast: bool,
-    /// Where a datagram socket's `send` goes.
-    peer: Option<([u8; 4], u16)>,
 }
 
 const MAX_SOCKETS: usize = 128;
@@ -203,15 +201,19 @@ unsafe fn fill_sockaddr(addr: *mut Sockaddr, addrlen: *mut SocklenT, ip: [u8; 4]
 }
 
 /// Binds the datagram socket descriptor `fd` names, whose entry is `entry`,
-/// handing over what was set before netstack held it: from here `fd` names
-/// netstack's socket, and the entry goes once the caller's hold does.
-fn bind_datagram(fd: i32, entry: &SocketEntry, ip: [u8; 4], port: u16) -> Result<RawHandle, i32> {
+/// handing over what was set before netstack held it and connecting it to
+/// `peer`: from here `fd` names netstack's socket, and the entry goes once the
+/// caller's hold does.
+fn bind_datagram(fd: i32, entry: &SocketEntry, ip: [u8; 4], port: u16, peer: Option<([u8; 4], u16)>) -> Result<RawHandle, i32> {
     let bound = socket::bind(ip, port).map_err(net_err_to_errno)?;
     let handed = (|| {
         if entry.broadcast {
             socket::set_option(bound.handle, OPT_BROADCAST, 1)?;
         }
-        socket::set_peer(bound.handle, entry.peer)
+        match peer {
+            Some((addr, port)) => socket::connect(bound.handle, addr, port),
+            None => Ok(()),
+        }
     })();
     if let Err(e) = handed {
         socket::let_go(bound.handle);
@@ -236,7 +238,7 @@ impl dgramreq::Datagrams for Sending<'_> {
     }
     fn bind(&mut self, ip: [u8; 4], port: u16) -> Result<(), i32> {
         let entry = self.entry.ok_or(EBADF)?;
-        self.bound = Some(bind_datagram(self.fd, entry, ip, port)?);
+        self.bound = Some(bind_datagram(self.fd, entry, ip, port, None)?);
         Ok(())
     }
     fn send(&mut self, data: &[u8], ip: [u8; 4], port: u16) -> Result<usize, i32> {
@@ -269,7 +271,7 @@ pub unsafe extern "C" fn socket(domain: i32, sock_type: i32, _protocol: i32) -> 
             return -1;
         }
     };
-    alloc_socket(SocketEntry { kind, nodelay: false, broadcast: false, peer: None })
+    alloc_socket(SocketEntry { kind, nodelay: false, broadcast: false })
 }
 
 #[no_mangle]
@@ -281,7 +283,7 @@ pub unsafe extern "C" fn connect(fd: i32, addr: *const Sockaddr, addrlen: Sockle
     let mut socket = match sock_from_fd(fd) {
         Some(Sock::Entry(socket)) => socket,
         Some(Sock::Datagram(held)) => {
-            return match socket::set_peer(held.handle, Some((ip, port))) {
+            return match socket::connect(held.handle, ip, port) {
                 Ok(()) => 0,
                 Err(e) => { set_errno(net_err_to_errno(e)); -1 }
             };
@@ -309,10 +311,12 @@ pub unsafe extern "C" fn connect(fd: i32, addr: *const Sockaddr, addrlen: Sockle
                 Err(_) => { set_errno(EBADF); -1 }
             }
         }
-        SocketKind::Udp => {
-            entry.peer = Some((ip, port));
-            0
-        }
+        // A connect binds a socket not yet bound, at any address to a port the
+        // stack chooses, as a first send does.
+        SocketKind::Udp => match bind_datagram(fd, entry, [0; 4], 0, Some((ip, port))) {
+            Ok(_) => 0,
+            Err(errno) => { set_errno(errno); -1 }
+        },
     }
 }
 
@@ -334,7 +338,7 @@ pub unsafe extern "C" fn bind(fd: i32, addr: *const Sockaddr, addrlen: SocklenT)
         SocketKind::Tcp => socket::listen(ip, port, TcpOptions::new(entry.nodelay))
             .map_err(net_err_to_errno)
             .and_then(|bound| toyos::fd::replace(fd, socket::descriptor(bound.handle)).map_err(|_| EBADF)),
-        SocketKind::Udp => bind_datagram(fd, &entry, ip, port).map(drop),
+        SocketKind::Udp => bind_datagram(fd, &entry, ip, port, None).map(drop),
     };
     match bound {
         Ok(()) => 0,
@@ -402,18 +406,12 @@ pub unsafe extern "C" fn send(fd: i32, buf: *const u8, len: usize, _flags: i32) 
     let data = core::slice::from_raw_parts(buf, len);
     match sock_from_fd(fd) {
         Some(Sock::Stream(held)) => write_stream(held.handle, data),
-        Some(Sock::Datagram(held)) => match socket::peer(held.handle) {
-            Ok(Some((ip, port))) => send_datagram(Sending { fd, entry: None, bound: Some(held.handle) }, data, ip, port),
-            Ok(None) => { set_errno(ENOTCONN); -1 }
+        Some(Sock::Datagram(held)) => match socket::send(held.handle, data) {
+            Ok(sent) => sent as isize,
             Err(e) => { set_errno(net_err_to_errno(e)); -1 }
         },
-        Some(Sock::Entry(mut socket)) => match *socket.slot() {
-            Some(entry @ SocketEntry { kind: SocketKind::Udp, peer: Some((ip, port)), .. }) => {
-                send_datagram(Sending { fd, entry: Some(&entry), bound: None }, data, ip, port)
-            }
-            Some(_) => { set_errno(ENOTCONN); -1 }
-            None => { set_errno(EBADF); -1 }
-        },
+        // A socket netstack does not hold was never connected.
+        Some(Sock::Entry(_)) => { set_errno(ENOTCONN); -1 }
         Some(Sock::Listener(_)) => { set_errno(ENOTCONN); -1 }
         None => { set_errno(EBADF); -1 }
     }
@@ -799,11 +797,7 @@ pub unsafe extern "C" fn getpeername(
             Ok(peer) => peer,
             Err(e) => { set_errno(net_err_to_errno(e)); return -1; }
         },
-        Some(Sock::Listener(_)) => None,
-        Some(Sock::Entry(mut socket)) => match *socket.slot() {
-            Some(entry) => entry.peer,
-            None => { set_errno(EBADF); return -1; }
-        },
+        Some(Sock::Listener(_) | Sock::Entry(_)) => None,
         None => { set_errno(EBADF); return -1; }
     };
     let Some((ip, port)) = peer else { set_errno(ENOTCONN); return -1; };

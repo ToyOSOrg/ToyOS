@@ -11,15 +11,18 @@
 //! end's turn: [`ACCEPT`], with a stream's region, answered with the stream's connection and
 //! bells ([`super::TcpAcceptResponse`]); [`SEND`], one datagram; [`RECEIVE`], answered with one
 //! datagram; [`SET_OPTION`] and [`OPTION`]; and [`EXPORT`], answered [`EXPORTED`] or
-//! [`REFUSED`]. An exported end's first frame is [`ADOPT`], carrying [`Adopt`] and the new
-//! holder's bell. **A datagram is one frame** each way, [`Datagram`] then its bytes, so two
-//! holders' datagrams never interleave.
+//! [`REFUSED`]; a datagram socket's [`CONNECT`], [`PEER`] and [`SEND_PEER`], whose peer is the
+//! socket's and so every holder's. An exported end's first frame is [`ADOPT`], carrying
+//! [`Adopt`] and the new holder's bell. **A datagram is one frame** each way, [`Datagram`] then
+//! its bytes, so two holders' datagrams never interleave.
 //!
-//! **The bell says "look"**: netstack rings a holder while a connection or a datagram waits and
-//! the holder has not asked since it was last rung. So an accept and a receive read the bell
-//! empty just before they ask, and one that finds nothing waits for the bell: what another
-//! holder took first is answered [`NetError::WouldBlock`], and no ring is lost, since a ring is
-//! read only by a call whose request netstack then answers. Nothing else reads the bell.
+//! **The bell says "look"**: netstack rings a holder while a connection, a datagram or a
+//! datagram socket's pending error waits and the holder has not asked since it was last rung,
+//! a new holder at once. So an accept and a receive ask only once the bell rang: one that finds
+//! it empty waits, or answers [`NetError::WouldBlock`], with no request; one that read a ring
+//! asks, and what another holder took first is answered `WouldBlock` too. A ring read by a call
+//! that failed before its request went is kept for the next, so none is lost. Nothing else
+//! reads the bell.
 //!
 //! **A handle with no end here is refused** [`NetError::NotASocket`]. A descriptor's handle is
 //! a copy of its end's bell, so a poller watches it for reading; the end keeps its own
@@ -27,6 +30,8 @@
 //! end stays in its process: its bell carries no `TRANSFER`, nor a datagram socket's
 //! connection. A listener's connection keeps it, since the kernel carries an accept's region
 //! only on a connection that has it; no descriptor names that handle, so nothing hands it on.
+
+use core::sync::atomic::{AtomicBool, Ordering};
 
 use toyos_abi::handle::Rights;
 use toyos_abi::syscall;
@@ -59,6 +64,14 @@ pub const SEND: u32 = 6;
 /// A datagram holder's receive, bare: answered [`Datagram`], its source, then its bytes, or
 /// [`super::ERR_WOULD_BLOCK`].
 pub const RECEIVE: u32 = 7;
+/// A datagram holder's connect: [`Datagram`], the peer, its `_pad` and nothing more. Answered
+/// bare.
+pub const CONNECT: u32 = 13;
+/// A datagram holder's ask for its socket's peer, bare: answered [`Datagram`], or
+/// [`super::ERR_NOT_CONNECTED`].
+pub const PEER: u32 = 14;
+/// A datagram holder's send to its socket's peer: the datagram's bytes alone. Answered bare.
+pub const SEND_PEER: u32 = 15;
 
 /// The most bytes one datagram carries: an Ethernet frame's 1500, past the IPv4 header and the
 /// UDP header (RFC 894, RFC 791, RFC 768).
@@ -148,15 +161,16 @@ struct End {
     /// The address its listen or bind named, and the port it holds.
     addr: [u8; 4],
     port: u16,
-    /// Where a datagram socket's send goes when it names nowhere: this process's word, which
-    /// netstack does not hold.
-    peer: Option<([u8; 4], u16)>,
 }
 
 static TABLE: Lock<Ends<End, MAX_SOCKETS>> = Lock::new(Ends::new());
 
 /// Each end's turn on its connection: one request and its answer at a time.
 static TURNS: [Lock<()>; MAX_SOCKETS] = [const { Lock::new(()) }; MAX_SOCKETS];
+
+/// Each end read a ring and has not yet sent the request it owes: kept by a look that failed
+/// before its request went, so the next look asks. Read and written under the end's turn.
+static RUNG: [AtomicBool; MAX_SOCKETS] = [const { AtomicBool::new(false) }; MAX_SOCKETS];
 
 /// Lets go of an end no handle or call reaches: its connection, which is its holder's leaving,
 /// and its bell.
@@ -181,18 +195,35 @@ fn call_on<R>(handle: RawHandle, kind: Kind, f: impl FnOnce(usize, End) -> Resul
     call(handle, |slot, end| if end.kind == kind { f(slot, end) } else { Err(NetError::InvalidInput) })
 }
 
-/// The rings `bell` holds, read: a look follows.
-pub(super) fn drain(bell: RawHandle) {
+/// The rings `bell` holds, read: whether it rang, or hung up with netstack.
+fn drain(bell: RawHandle) -> bool {
     let mut bytes = [0u8; 64];
-    while let Ok(1..) = syscall::read_nonblock(bell, &mut bytes) {}
+    let mut rang = false;
+    loop {
+        match syscall::read_nonblock(bell, &mut bytes) {
+            Ok(0) => return true,
+            Ok(_) => rang = true,
+            Err(_) => return rang,
+        }
+    }
 }
 
-/// `attempt` until it takes something, waiting for `bell` between as `wait` says.
-fn waited<T>(bell: RawHandle, wait: Wait, mut attempt: impl FnMut() -> Result<T, NetError>) -> Result<T, NetError> {
+/// `ask` once the end's bell rang, until it takes something, waiting for the bell between as
+/// `wait` says. `ask` is handed what it calls once its request went.
+fn look<T>(slot: usize, end: End, wait: Wait, mut ask: impl FnMut(&dyn Fn()) -> Result<T, NetError>) -> Result<T, NetError> {
+    let rung = &RUNG[slot];
     loop {
-        match attempt() {
-            Err(NetError::WouldBlock) => {}
-            answer => return answer,
+        {
+            let _turn = TURNS[slot].lock();
+            if drain(end.bell) {
+                rung.store(true, Ordering::Relaxed);
+            }
+            if rung.load(Ordering::Relaxed) {
+                match ask(&|| rung.store(false, Ordering::Relaxed)) {
+                    Err(NetError::WouldBlock) => {}
+                    answer => return answer,
+                }
+            }
         }
         let until = match wait {
             Wait::Nonblocking => return Err(NetError::WouldBlock),
@@ -202,9 +233,9 @@ fn waited<T>(bell: RawHandle, wait: Wait, mut attempt: impl FnMut() -> Result<T,
         if left == 0 {
             return Err(NetError::TimedOut);
         }
-        // Netstack gone hangs the bell up, which is readable, and the next attempt says so.
+        // Netstack gone hangs the bell up, which is readable, and the next look says so.
         let poller = crate::poller::Poller::new(1);
-        poller.watch_raw(bell, crate::poller::READABLE, 0);
+        poller.watch_raw(end.bell, crate::poller::READABLE, 0);
         poller.wait(1, left, |_| {});
     }
 }
@@ -241,11 +272,12 @@ fn open(kind: Kind, addr: [u8; 4], ask: impl FnOnce(NetstackConn) -> Result<(Bou
     let slot = TABLE.lock().reserve().ok_or(NetError::ResourceExhausted)?;
     let made = NetstackConn::connect().and_then(ask).and_then(|(bound, [bell], connection)| {
         let (descriptor, connection, bell) = take_up(kind, connection.into_owned(), bell)?;
-        Ok((descriptor, End { kind, connection, bell, addr, port: bound.port, peer: None }))
+        Ok((descriptor, End { kind, connection, bell, addr, port: bound.port }))
     });
     let mut table = TABLE.lock();
     match made {
         Ok((handle, end)) => {
+            RUNG[slot].store(false, Ordering::Relaxed);
             table.enter(slot, end, handle);
             Ok(Bound { handle, port: end.port })
         }
@@ -325,12 +357,7 @@ pub fn let_go(handle: RawHandle) {
 /// The oldest connection waiting at the listener `handle` reaches, as a stream: waiting for one
 /// as `wait` says, [`NetError::WouldBlock`] or [`NetError::TimedOut`] where none came.
 pub fn accept(handle: RawHandle, wait: Wait) -> Result<stream::Accepted, NetError> {
-    call_on(handle, Kind::Listener, |slot, end| {
-        waited(end.bell, wait, || {
-            let _turn = TURNS[slot].lock();
-            stream::accept(end.connection, end.bell)
-        })
-    })
+    call_on(handle, Kind::Listener, |slot, end| look(slot, end, wait, |asked| stream::accept(end.connection, asked)))
 }
 
 // ---- a datagram socket's ----
@@ -360,10 +387,9 @@ pub fn send_to(handle: RawHandle, addr: [u8; 4], port: u16, data: &[u8]) -> Resu
 /// `wait` says, [`NetError::WouldBlock`] or [`NetError::TimedOut`] where none came.
 pub fn recv_from(handle: RawHandle, buf: &mut [u8], wait: Wait) -> Result<Received, NetError> {
     call_on(handle, Kind::Datagram, |slot, end| {
-        waited(end.bell, wait, || {
-            let _turn = TURNS[slot].lock();
-            drain(end.bell);
+        look(slot, end, wait, |asked| {
             ipc::signal(end.connection, RECEIVE).map_err(hangup)?;
+            asked();
             let header = answer(end.connection)?;
             let mut frame = [0u8; MAX_FRAME];
             let n = ipc::recv_bytes(end.connection, &header, &mut frame).map_err(hangup)?;
@@ -375,13 +401,44 @@ pub fn recv_from(handle: RawHandle, buf: &mut [u8], wait: Wait) -> Result<Receiv
     })
 }
 
-/// Where a send that names nowhere goes, from here on: this process's word for the socket.
-pub fn set_peer(handle: RawHandle, peer: Option<([u8; 4], u16)>) -> Result<(), NetError> {
-    TABLE.lock().update(handle, |end| end.peer = peer).ok_or(NetError::NotASocket)
+/// The socket `handle` reaches connected to `addr`:`port` (POSIX's `connect`), for every holder:
+/// from here it receives only the peer's datagrams, and [`send`] goes there.
+pub fn connect(handle: RawHandle, addr: [u8; 4], port: u16) -> Result<(), NetError> {
+    call_on(handle, Kind::Datagram, |slot, end| {
+        let _turn = TURNS[slot].lock();
+        ipc::send(end.connection, CONNECT, &Datagram { addr, port, _pad: 0 }).map_err(hangup)?;
+        bare(end.connection)
+    })
 }
 
+/// The peer the socket `handle` reaches is connected to, by any of its holders.
 pub fn peer(handle: RawHandle) -> Result<Option<([u8; 4], u16)>, NetError> {
-    TABLE.lock().get(handle).map(|end| end.peer).ok_or(NetError::NotASocket)
+    call_on(handle, Kind::Datagram, |slot, end| {
+        let _turn = TURNS[slot].lock();
+        ipc::signal(end.connection, PEER).map_err(hangup)?;
+        match answer(end.connection) {
+            Ok(header) => {
+                let peer: Datagram = ipc::recv_payload(end.connection, &header).map_err(|_| NetError::Protocol(PEER))?;
+                Ok(Some((peer.addr, peer.port)))
+            }
+            Err(NetError::NotConnected) => Ok(None),
+            Err(e) => Err(e),
+        }
+    })
+}
+
+/// `data` as one datagram to the connected socket's peer: the bytes it took, all of them.
+/// [`NetError::NotConnected`] for a socket no holder connected.
+pub fn send(handle: RawHandle, data: &[u8]) -> Result<usize, NetError> {
+    if data.len() > MAX_DATAGRAM {
+        return Err(NetError::InvalidInput);
+    }
+    call_on(handle, Kind::Datagram, |slot, end| {
+        let _turn = TURNS[slot].lock();
+        ipc::send_bytes(end.connection, SEND_PEER, data).map_err(hangup)?;
+        bare(end.connection)?;
+        Ok(data.len())
+    })
 }
 
 // ---- either's ----
@@ -446,7 +503,8 @@ pub(super) fn adopted(connection: Connection, payload: &[u8], handles: ipc::Batc
     let mut table = TABLE.lock();
     match made {
         Ok((descriptor, connection, bell)) => {
-            table.enter(slot, End { kind, connection, bell, addr: adopt.addr, port: adopt.port, peer: None }, descriptor);
+            RUNG[slot].store(false, Ordering::Relaxed);
+            table.enter(slot, End { kind, connection, bell, addr: adopt.addr, port: adopt.port }, descriptor);
             Some(descriptor)
         }
         Err(_) => {

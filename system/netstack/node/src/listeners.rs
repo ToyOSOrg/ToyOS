@@ -136,13 +136,17 @@ impl Node {
         Ok((id, port))
     }
 
-    /// A holder more of listener `id`, told on `bell`, which takes a place: the listener's port.
+    /// A holder more of listener `id`, told on `bell` at once of a connection that waits, which
+    /// takes a place: the listener's port.
     pub fn export_listener(&mut self, id: ListenerId, bell: Box<dyn Bell>) -> Result<(HolderId, Port), ExportRefused> {
         if self.room() == 0 {
             return Err(ExportRefused::Full);
         }
         let listener = self.listeners.live.get_mut(&id).ok_or(ExportRefused::Gone)?;
-        Ok((listener.holders.add(bell), listener.port))
+        let made = (listener.holders.add(bell), listener.port);
+        // Told now of what waits: no pass need come before its first look.
+        self.tell_holders();
+        Ok(made)
     }
 
     /// `holder` of listener `id` left; the last holder's leaving closes it. Either gives a place

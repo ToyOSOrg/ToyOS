@@ -597,6 +597,18 @@ fn a_listener_ends_with_its_last_holder() {
     net.listen(SSH);
 }
 
+// A holder made while a connection waits is rung at once: nothing promises a pass before its
+// first look.
+#[test]
+fn a_holder_made_while_a_connection_waits_is_rung_at_once() {
+    let mut net = Net::new();
+    let (id, _first) = net.listen(SSH);
+    net.handshake(P1);
+    let (second, owner) = net.export(id);
+    assert_eq!(wakes(&owner), 1);
+    net.accepts_as(id, second, P1);
+}
+
 #[test]
 fn an_export_past_the_places_makes_no_holder() {
     let mut net = with_places(1);

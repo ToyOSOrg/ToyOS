@@ -26,8 +26,9 @@
 //! has accepted: while [ip] asks for a link address the socket's datagrams to other next hops
 //! leave, and a send past the queue is answered [`Refused::ResourceExhausted`] whatever its
 //! destination. One whose next hop [ip] gives up, or that has no way out when its turn comes, is
-//! dropped and counted `udp.tx-unreachable`, and the client is told nothing: its socket is not
-//! connected.
+//! dropped and counted `udp.tx-unreachable`. An unconnected socket's client is told nothing; a
+//! connected one's next call answers [`Refused::Unreachable`] once, as it answers an ICMP error
+//! from its peer ([`Node::udp_connect`]).
 //!
 //! A refusal [udp] logs is in [`Node::drain_events`] when the send that met it returns, and one
 //! [ip] logs as a datagram leaves when that [`Node::transmit`] returns; no other call of a
@@ -37,7 +38,7 @@ use core::net::Ipv4Addr;
 
 use alloc::boxed::Box;
 
-use toyos_net_udp::{Counter, Error, SocketId};
+use toyos_net_udp::{Counter, Error, SocketError, SocketId};
 use toyos_net_wire::{Instant, Port};
 
 use crate::holders::{Bell, HolderId, Holders};
@@ -66,6 +67,12 @@ pub enum Refused {
     /// The socket holds all it may until some of it has left, or the node holds all it has
     /// places for: the same call succeeds later.
     ResourceExhausted,
+    /// An ICMP error said a connected socket's peer refuses the port: the socket's pending
+    /// error, answered once.
+    ConnectionRefused,
+    /// A connected socket's datagram found no way to its peer: an ICMP error said the way is
+    /// prohibited, or [ip] gave the next hop up. The socket's pending error, answered once.
+    Unreachable,
 }
 
 /// A datagram [`Node::udp_recv_from`] handed over.
@@ -78,33 +85,32 @@ pub struct Datagram {
     pub source_port: Option<Port>,
 }
 
-/// [udp]'s refusal as the client hears it. A client's socket is bound and never connected, and
-/// never names its source, so the rules of those calls, and the counters that are no refusal,
-/// are not its to meet.
+/// [udp]'s refusal as the client hears it. A client's socket never names its source, so that
+/// call's rule, and the counters that are no refusal, are not its to meet.
 fn refused(error: Error) -> Refused {
     let rule = match error {
         Error::NoSuchSocket => return Refused::NotConnected,
         Error::Refused(rule) => rule,
-        Error::Failed(_) => unreachable!("[udp] reported a network error against a socket that is not connected"),
+        Error::Failed(SocketError::Refused) => return Refused::ConnectionRefused,
+        Error::Failed(SocketError::Prohibited | SocketError::NextHopFailed) => return Refused::Unreachable,
     };
     match rule {
         Counter::PortInUse | Counter::NoEphemeralPort => Refused::AddrInUse,
-        Counter::NoSourceAddress | Counter::NoRoute | Counter::SourceAddressNotAssigned => Refused::NotConnected,
+        Counter::NoSourceAddress | Counter::NoRoute | Counter::SourceAddressNotAssigned | Counter::NotConnected => Refused::NotConnected,
         Counter::BindAddressNotLocal
         | Counter::SendLoopback
         | Counter::SendToSelf
         | Counter::SendInvalidDestination
         | Counter::SendPortZero
         | Counter::SendUnspecifiedDestination
-        | Counter::ExceedsMtu => Refused::InvalidInput,
-        Counter::BroadcastNotPermitted => Refused::PermissionDenied,
-        Counter::TxQueueFull => Refused::ResourceExhausted,
-        Counter::ConnectUnspecified
+        | Counter::ExceedsMtu
+        | Counter::ConnectUnspecified
         | Counter::ConnectGroup
         | Counter::ConnectPortZero
-        | Counter::ConnectedDestinationMismatch
-        | Counter::NotConnected
-        | Counter::SourceNotPermitted
+        | Counter::ConnectedDestinationMismatch => Refused::InvalidInput,
+        Counter::BroadcastNotPermitted => Refused::PermissionDenied,
+        Counter::TxQueueFull => Refused::ResourceExhausted,
+        Counter::SourceNotPermitted
         | Counter::Rx
         | Counter::RxDelivered
         | Counter::RxNoSocket
@@ -139,14 +145,18 @@ impl Node {
         Ok((DatagramId(id), port))
     }
 
-    /// A holder more of socket `id`, told on `bell`, which takes a place: the socket's port.
+    /// A holder more of socket `id`, told on `bell` at once of a datagram that waits, which takes
+    /// a place: the socket's port.
     pub fn export_datagram(&mut self, id: DatagramId, bell: Box<dyn Bell>) -> Result<(HolderId, Port), ExportRefused> {
         if self.room() == 0 {
             return Err(ExportRefused::Full);
         }
         let holders = self.datagrams.get_mut(&id).ok_or(ExportRefused::Gone)?;
+        let holder = holders.add(bell);
         let Ok(port) = self.stack.port(id.0) else { unreachable!("[udp] lost a socket the node holds") };
-        Ok((holders.add(bell), port))
+        // Told now of what waits: no pass need come before its first look.
+        self.tell_holders();
+        Ok((holder, port))
     }
 
     /// Whether the socket's datagrams may go to a broadcast address, the limited one or the
@@ -158,6 +168,28 @@ impl Node {
     /// Whether [`Self::udp_set_broadcast`] last permitted it.
     pub fn udp_broadcast(&mut self, id: DatagramId) -> Result<bool, Refused> {
         self.stack.broadcast(id.0).map_err(refused)
+    }
+
+    /// Connects the socket to `peer:port` (POSIX's `connect`): from here its datagrams come only
+    /// from there, and [`Self::udp_send`] goes there, for every holder alike. Datagrams already
+    /// received from anyone else are dropped.
+    pub fn udp_connect(&mut self, now: Instant, id: DatagramId, peer: Ipv4Addr, port: u16) -> Result<(), Refused> {
+        let connected = self.stack.connect(now, id.0, peer, port).map_err(refused);
+        self.log(now);
+        connected
+    }
+
+    /// The peer [`Self::udp_connect`] named, if any.
+    pub fn udp_peer(&mut self, id: DatagramId) -> Result<Option<(Ipv4Addr, Port)>, Refused> {
+        self.stack.peer(id.0).map_err(refused)
+    }
+
+    /// Queues `payload` for the connected socket's peer; one not connected is refused
+    /// [`Refused::NotConnected`].
+    pub fn udp_send(&mut self, now: Instant, id: DatagramId, payload: &[u8]) -> Result<(), Refused> {
+        let sent = self.stack.send_connected(now, id.0, payload).map_err(refused);
+        self.log(now);
+        sent
     }
 
     /// Queues `payload` for `destination:port`; it leaves in a later [`Node::transmit`].
@@ -205,11 +237,11 @@ impl Node {
         self.datagrams.values().map(Holders::more).fold(self.datagrams.len(), usize::saturating_add)
     }
 
-    /// Tells each holder of a socket a datagram waits for.
+    /// Tells each holder of a socket a datagram, or its pending error, waits for.
     pub(crate) fn tell_datagram_holders(&mut self) {
         for (id, holders) in &mut self.datagrams {
-            let Ok(waiting) = self.stack.waiting(id.0) else { unreachable!("[udp] lost a socket the node holds") };
-            holders.tell(waiting > 0);
+            let Ok(readable) = self.stack.readable(id.0) else { unreachable!("[udp] lost a socket the node holds") };
+            holders.tell(readable);
         }
     }
 }
