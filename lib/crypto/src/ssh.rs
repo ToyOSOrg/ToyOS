@@ -29,12 +29,8 @@ impl Keys {
             return false;
         }
         let nonce = u64::from(seq).to_be_bytes();
-        let mut states = Secret([[0u32; 16]; 4]);
-        for (i, state) in states.0.iter_mut().enumerate() {
-            let (key, counter) = if i == 0 { (self.header(), 0) } else { (self.payload(), i as u64 - 1) };
-            chacha::fill_legacy_state(state, key, &nonce, counter);
-        }
-        chacha::blocks(&states.0, 2 + length.div_ceil(64), stream);
+        let payload = self.payload();
+        chacha::blocks([self.header(), payload, payload, payload], [0, 0, 1, 2], &nonce, 2 + length.div_ceil(64), stream);
         true
     }
     fn crypt(&self, seq: u32, header: &mut [u8; 4], payload: &mut [u8]) -> Result<(), Error> {

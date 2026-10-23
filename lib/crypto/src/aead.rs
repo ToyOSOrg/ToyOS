@@ -183,11 +183,7 @@ fn short(length: usize) -> bool {
     (1..=192).contains(&length)
 }
 fn chacha_short(key: &[u8; 32], nonce: &[u8; 12], length: usize, stream: &mut [u8; 256]) {
-    let mut states = Secret([[0u32; 16]; 4]);
-    for (counter, state) in states.0.iter_mut().enumerate() {
-        chacha::fill_state(state, key, nonce, counter as u32);
-    }
-    chacha::blocks(&states.0, 1 + length.div_ceil(64), stream);
+    chacha::ietf_blocks(key, nonce, 0, 1 + length.div_ceil(64), stream);
 }
 fn chacha_seal(
     key: &[u8; 32],

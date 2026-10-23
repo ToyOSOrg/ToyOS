@@ -221,7 +221,8 @@ Not consumers:
            rows pass. Until then the rows stay recorded here, as ruled.
        - **ChaCha20-Poly1305 per-message cost.**
          - Rows:
-           - 0 B and 64 B: the AMD bench 1.14–1.34, the T14 1.10–1.18;
+           - 0 B and 64 B: the AMD bench 1.06–1.24 (seal, open and reject),
+             the T14 1.10–1.18;
            - the T14's 1 KiB rows, 1.057–1.059.
          - A seal sweep over 1–192 B put ours above ring by a constant per
            message, with a per-block cost that matches ring's.
@@ -229,8 +230,17 @@ Not consumers:
            ns on the T14. At 1 KiB on the T14 it is about 37 ns, with
            Poly1305 alone (the reject row) at 377 ns.
          - The candidates are Poly1305's key setup, its powers up to r^8 and
-           its finish, erasing the keystream and state buffers, and the
-           scalar block 0. Their shares are not measured.
+           its finish, erasing the keystream buffer, and the scalar block 0.
+           Their shares are not measured. The short path no longer fills or
+           erases state buffers; removing them left the T14's 1 B seal at
+           1.10 (1.107 to 1.097).
+         - The short path's step at 80 B is gone on the T14: with three or
+           four blocks in one AVX-512 register set, seal at 80 B fell from
+           1.27 to 1.12 against ring. On the AMD bench, AVX2 only, building
+           the rows from the key moved the 64 B rows against a same-day
+           boot of main: seal 1.34 to 1.24, open 1.26 to 1.17; 0 B and the
+           bulk rows are unchanged within noise. Its step at 80 B is
+           unmeasured: the sweep has not run there since.
          - Exit: the rows pass on both benches.
        - **One ChaCha20 block on the AMD bench (`chacha20-poly1305-openssh/length`),
          1.087.**
