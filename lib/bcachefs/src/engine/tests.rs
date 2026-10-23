@@ -163,6 +163,7 @@ fn a_flipped_byte_in_an_encrypted_extent_or_node_fails_its_mac() {
 }
 
 /// xorshift64*, for the tests' identifiers and keys.
+#[derive(Clone)]
 struct Seeded(u64);
 
 impl Random for Seeded {
@@ -330,7 +331,7 @@ fn a_node_without_a_mac_on_an_encrypted_volume_is_refused() {
 fn a_device_under_512_buckets_is_refused() {
     let dev = Bytes::new(vec![0u8; 4 << 20]);
     let options = Options { label: b"", time: 0, encryption: None };
-    assert_eq!(block_on_ready(mkfs(&dev, &options, &Tree::new(), &mut Seeded(1))), Err(Error::Invalid("device smaller than 512 buckets")));
+    assert_eq!(block_on_ready(mkfs(&dev, &options, &Tree::new(), &mut Seeded(1))), Err(Error::Small { blocks: 2048 }));
 }
 
 #[test]
@@ -831,15 +832,16 @@ fn a_populated_volume_is_a_function_of_its_tree_random_source_and_time() {
 
 #[test]
 fn a_tree_past_the_device_is_refused() {
-    // 8 MiB: data from bucket 137, the end copy from bucket 448, so 310
-    // buckets of data leave one bucket for 15 roots.
-    for (bytes, refusal) in [(8 << 20, "device too small for its files"), (310 << 14, "device too small for its metadata")] {
+    // 8 MiB: data from bucket 137, the end copy from bucket 448, one node
+    // per bucket. 512 buckets of data put the first node at 649; 310 put
+    // the 15 roots at 447–461. Each needs those and the end copy's 64.
+    for (bytes, blocks) in [(8 << 20, (649 + 1 + 64) * 4), (310 << 14, (461 + 1 + 64) * 4)] {
         let data = vec![1u8; bytes];
         let mut tree = Tree::new();
         tree.file(Tree::ROOT, b"big", &data, Meta { perm: 0o644, uid: 0, gid: 0 }).unwrap();
         let dev = Bytes::new(vec![0u8; 8 << 20]);
         let options = Options { label: b"", time: 0, encryption: None };
-        assert_eq!(block_on_ready(mkfs(&dev, &options, &tree, &mut Seeded(1))), Err(Error::Invalid(refusal)));
+        assert_eq!(block_on_ready(mkfs(&dev, &options, &tree, &mut Seeded(1))), Err(Error::Small { blocks }));
     }
 }
 
@@ -1158,4 +1160,87 @@ fn journal_buckets_keep_their_listed_order() {
         fields.iter_mut().find(|f| f.kind == 9).unwrap().body = body;
     });
     assert_eq!(block_on_ready(Volume::open(&dev)).unwrap().superblock().journal, [(30, 4), (20, 8)]);
+}
+
+fn keys_of<D: BlockDev>(v: &Volume<D>, btree: Btree) -> usize {
+    let mut n = 0;
+    block_on_ready(v.walk(btree, Bpos::MIN, |_, _| {
+        n += 1;
+        Ok(true)
+    }))
+    .unwrap();
+    n
+}
+
+/// `fit`'s size is one mkfs fills: no free bucket, so no freespace key,
+/// and a device one bucket smaller is refused. A tree the smallest device
+/// holds gets that device.
+#[test]
+fn a_fitted_volume_has_no_free_bucket_and_a_bucket_less_is_refused() {
+    let data = contents(7);
+    let options = Options { label: b"toyos", time: 0, encryption: None };
+    assert_eq!(fit(&options, &Tree::new(), &Seeded(20)), Ok(2048), "the smallest device, 512 buckets");
+    // Past the smallest device, in 16 KiB buckets, then in 64 KiB ones.
+    let big: Vec<Vec<u8>> = [9usize << 20, 30 << 20, 150 << 20].iter().map(|&n| (0..n).map(|i| (i / 4096) as u8).collect()).collect();
+    for (wide, big, seed) in [(40, &big[0], 21), (3000, &big[1], 22), (700, &big[2], 23)] {
+        let mut g = generate(&data, seed, wide);
+        g.tree.file(Tree::ROOT, b"big", big, Meta { perm: 0o644, uid: 0, gid: 0 }).unwrap();
+        g.paths.push(("big".into(), Want::File(big, usize::MAX), Meta { perm: 0o644, uid: 0, gid: 0 }));
+        let tree = &g.tree;
+        let blocks = fit(&options, tree, &Seeded(seed)).unwrap();
+        let dev = Bytes::new(vec![0u8; blocks as usize * BLOCK]);
+        block_on_ready(mkfs(&dev, &options, tree, &mut Seeded(seed))).unwrap();
+        let v = block_on_ready(Volume::open(&dev)).unwrap();
+        holds(&v, &g);
+        assert_eq!(block_on_ready(fsck(&v)).unwrap(), [], "{wide}");
+        assert_eq!(keys_of(&v, Btree::Freespace), 0, "{wide}: a free bucket at {blocks} blocks");
+        let bucket = u64::from(v.superblock().member.bucket_sectors) / 8;
+        let smaller = Bytes::new(vec![0u8; (blocks - bucket) as usize * BLOCK]);
+        assert!(matches!(block_on_ready(mkfs(&smaller, &options, tree, &mut Seeded(seed))), Err(Error::Small { .. })), "{wide}");
+    }
+}
+
+#[test]
+fn every_name_is_listed_once_under_its_path_and_resolves_to_its_node() {
+    let data = contents(7);
+    let g = generate(&data, 25, 300);
+    let dev = populated(32 << 20, &g.tree, 25);
+    let v = block_on_ready(Volume::open(&dev)).unwrap();
+    let names = block_on_ready(v.names()).unwrap();
+    let mut listed: Vec<String> = names.iter().map(|(p, _)| String::from_utf8(p.clone()).unwrap()).collect();
+    listed.sort();
+    let mut want: Vec<String> = g.paths.iter().map(|(p, _, _)| p.clone()).collect();
+    want.sort();
+    assert_eq!(listed, want);
+    for (p, e) in &names {
+        assert_eq!(block_on_ready(v.resolve(p)), Ok(e.ino));
+        let parent = p.rsplitn(2, |&b| b == b'/').nth(1).unwrap_or(b"");
+        assert!(block_on_ready(v.inode(block_on_ready(v.resolve(parent)).unwrap())).unwrap().is_dir());
+    }
+    assert_eq!(block_on_ready(v.resolve(b"")), Ok(v.root()));
+    assert_eq!(block_on_ready(v.resolve(b"wide/absent")), Err(Error::NotFound));
+    assert_eq!(block_on_ready(v.resolve(b"wide/f00000/under-a-file")), Err(Error::NotDirectory));
+    let link = block_on_ready(v.resolve(b"to-deep")).unwrap();
+    assert_eq!(block_on_ready(v.inode(link)).unwrap().kind(), Some(DirentType::Symlink), "a symlink is not followed");
+}
+
+/// A dirent naming an ancestor as a directory would make the listing a
+/// cycle; it is refused.
+#[test]
+fn a_directory_named_twice_is_refused_by_the_listing() {
+    let dev = formatted(8 << 20, None);
+    rewrite_leaf(&dev, Btree::Dirents, Bpos::MIN, 0, |keys| keys.push((Key::new(kind::DIRENT, Bpos::new(4096, 77, u32::MAX)), dirent(4096, 4, b"loop"))));
+    let v = block_on_ready(Volume::open(&dev)).unwrap();
+    assert_eq!(block_on_ready(v.names()), Err(Error::Corrupt("a directory with a second name")));
+}
+
+#[test]
+fn read_file_reads_a_file_whole_and_refuses_other_nodes() {
+    let dev = small();
+    let bytes = dev.into_inner();
+    assert_eq!(read_file(&bytes, b"d/f"), Ok(b"hello-toyos".to_vec()));
+    assert_eq!(read_file(&bytes, b"big"), Ok(vec![7u8; 100_000]));
+    assert_eq!(read_file(&bytes, b"d"), Err(Error::Invalid("a path naming no regular file")));
+    assert_eq!(read_file(&bytes, b"d/absent"), Err(Error::NotFound));
+    assert_eq!(read_file(&bytes[..bytes.len() - 512], b"d/f"), Err(Error::Corrupt("a volume of no whole blocks")));
 }

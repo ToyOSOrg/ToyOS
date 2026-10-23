@@ -15,7 +15,7 @@ use super::crypt::MasterKey;
 use super::node::{self, Build};
 use super::superblock::{entry_type, field_type, member_flag, Crypt, Field, Header, Kdf, Layout, Member, Superblock, KEY_VERSION, LAYOUT, MAX_NODE_SECTORS, PRIMARY};
 use super::derive::{Space, Tally};
-use super::tree::Tree;
+use super::tree::{Populated, Tree};
 use super::value::{self, data_type, Alloc, NodePtr, Ptr};
 use super::{kind, put16, put64, Btree, Error, Result, SECTOR, VERSION};
 
@@ -87,105 +87,144 @@ const BTREES: [Btree; 15] = [
 ];
 
 /// Writes the volume holding `tree` to `dev`, every identifier and key
-/// drawn from `random`, then flushes.
+/// drawn from `random`, then flushes. A device too small for it is refused
+/// [`Error::Small`].
 pub async fn mkfs(dev: &impl BlockDev, options: &Options<'_>, tree: &Tree<'_>, random: &mut impl Random) -> Result<()> {
-    if options.label.len() > 31 {
-        return Err(Error::Invalid("label longer than 31 bytes"));
-    }
-    // Upstream's tools cut a passphrase at NUL and strip one trailing
-    // newline, so neither could unlock what such bytes wrapped.
-    if options.encryption.as_ref().is_some_and(|e| e.passphrase.contains(&0) || e.passphrase.ends_with(b"\n")) {
-        return Err(Error::Invalid("passphrase holding NUL or ending in a newline"));
-    }
-    // An encrypted extent needs a version never used before, and mkfs
-    // allocates no extent versions.
-    if options.encryption.is_some() && tree.has_data() {
-        return Err(Error::Unsupported("file data or a symlink on an encrypted volume"));
-    }
-    let mut geometry = Geometry::new(dev.blocks() * BLOCK_SECTORS)?;
-    let mut draw = Draw(random);
-    let internal_uuid = draw.uuid()?;
-    let user_uuid = draw.uuid()?;
-    let member_uuid = draw.uuid()?;
-    let hash_seed = draw.u64()?;
-    let key = match &options.encryption {
-        Some(_) => Some(MasterKey::new(draw.bytes()?)),
-        None => None,
-    };
-    let seeds = (0..tree.len()).map(|_| draw.u64()).collect::<Result<Vec<u64>>>()?;
-
-    let first = geometry.data_start() * geometry.bucket;
-    let mut population = tree.populate(first, geometry.bucket, MAX_EXTENT, hash_seed, &seeds);
-    geometry.data_buckets = (population.data_end - first).div_ceil(geometry.bucket);
-    if geometry.btree_start() >= geometry.end_copy() {
-        return Err(Error::Invalid("device too small for its files"));
-    }
-    let mut primary = root_world();
-    primary.append(&mut population.keys);
-    let plan = Plan::new(&geometry, &primary)?;
-    let seqs = (0..plan.places.len()).map(|_| draw.nonzero()).collect::<Result<Vec<u64>>>()?;
-    let laid = plan.nodes(&geometry, &seqs);
-
-    for (sector, bytes) in population.extents() {
+    let volume = Encoded::lay_out(dev.blocks() * BLOCK_SECTORS, options, tree, random)?;
+    for (sector, bytes) in volume.population.extents() {
         write(dev, sector, bytes).await?;
     }
-    let magic = node::magic(&internal_uuid);
-    for n in &laid.nodes {
-        let build = Build { btree: n.btree, level: n.level, seq: n.seq, min: n.min, max: n.max, journal_seq: 0, keys: &n.keys };
-        let bytes = node::encode(magic, BLOCK, key.as_ref(), &build)?;
-        write(dev, n.sector, &bytes).await?;
+    for (sector, bytes) in &volume.nodes {
+        write(dev, *sector, bytes).await?;
     }
-
-    let member = Member {
-        uuid: member_uuid,
-        nbuckets: geometry.nbuckets,
-        first_bucket: 0,
-        bucket_sectors: geometry.bucket as u16,
-        bitmap_shift: laid.bitmap_shift,
-        last_mount: options.time / 1_000_000_000,
-        flags: member_flag::DATA_ALLOWED | member_flag::DURABILITY_1 | member_flag::FREESPACE_INITIALIZED | member_flag::ROTATIONAL_KNOWN,
-        seq: 1,
-        bitmap: laid.bitmap,
-        journal_bucket: 0,
-        journal_offset: 0,
-        identity_zero: true,
-    };
-    let crypt = match (&options.encryption, &key) {
-        (Some(e), Some(key)) => Some(Crypt { kdf: e.kdf, wrapped: key.wrapped(&internal_uuid, e.passphrase, e.kdf)? }),
-        _ => None,
-    };
-    let mut label = [0u8; 32];
-    label[..options.label.len()].copy_from_slice(options.label);
-    let header = Header {
-        version: VERSION,
-        version_min: VERSION,
-        internal_uuid,
-        user_uuid,
-        label,
-        offset: 0,
-        seq: 1,
-        block_sectors: BLOCK_SECTORS as u16,
-        dev_idx: 0,
-        nr_devices: 1,
-        time_base: options.time,
-        time_precision: 1,
-        flags: flags(geometry.node, crypt.is_some()),
-        write_time: options.time / 1_000_000_000,
-        features: [FEATURES, 0],
-        compat: [COMPAT_INITIALIZED | COMPAT_CLEAN, 0],
-        layout: geometry.layout.clone(),
-    };
-    let fields = fields(&geometry, &member, crypt.as_ref(), &laid.roots);
-    for &offset in &geometry.layout.offsets {
-        write(dev, offset, &Superblock::encode(&header, &fields, offset)).await?;
+    for &offset in &volume.header.layout.offsets {
+        write(dev, offset, &Superblock::encode(&volume.header, &volume.fields, offset)).await?;
     }
     // Sectors 0–6 are zeros here; the layout copy is sector 7.
     let mut first = alloc::vec![0u8; BLOCK];
     let at = LAYOUT as usize * SECTOR;
-    first[at..at + Layout::BYTES].copy_from_slice(&geometry.layout.encode());
+    first[at..at + Layout::BYTES].copy_from_slice(&volume.header.layout.encode());
     write(dev, 0, &first).await?;
     dev.flush().await?;
     Ok(())
+}
+
+/// A device size, in blocks, that [`mkfs`] of `tree` fits with `random`'s
+/// draws. From the smallest device, each try takes the size the last
+/// refusal named, so the size only grows and the volume that fits has no
+/// free bucket, unless a try crossed to larger buckets, which can need less
+/// than the refusal at smaller ones named.
+pub fn fit<R: Random + Clone>(options: &Options<'_>, tree: &Tree<'_>, random: &R) -> Result<u64> {
+    let mut blocks = MIN_BUCKETS * MIN_BUCKET / BLOCK_SECTORS;
+    loop {
+        match Encoded::lay_out(blocks * BLOCK_SECTORS, options, tree, &mut random.clone()) {
+            Ok(_) => return Ok(blocks),
+            Err(Error::Small { blocks: needs }) => {
+                assert!(needs > blocks, "a refusal at {blocks} blocks that asks for {needs}");
+                blocks = needs;
+            }
+            Err(e) => return Err(e),
+        }
+    }
+}
+
+/// A volume laid out and encoded: its extents, its nodes by first sector,
+/// and the superblock every copy writes.
+struct Encoded<'t, 'a> {
+    population: Populated<'t, 'a>,
+    nodes: Vec<(u64, Vec<u8>)>,
+    header: Header,
+    fields: Vec<Field>,
+}
+
+impl<'t, 'a> Encoded<'t, 'a> {
+    fn lay_out(sectors: u64, options: &Options<'_>, tree: &'t Tree<'a>, random: &mut impl Random) -> Result<Self> {
+        if options.label.len() > 31 {
+            return Err(Error::Invalid("label longer than 31 bytes"));
+        }
+        // Upstream's tools cut a passphrase at NUL and strip one trailing
+        // newline, so neither could unlock what such bytes wrapped.
+        if options.encryption.as_ref().is_some_and(|e| e.passphrase.contains(&0) || e.passphrase.ends_with(b"\n")) {
+            return Err(Error::Invalid("passphrase holding NUL or ending in a newline"));
+        }
+        // An encrypted extent needs a version never used before, and mkfs
+        // allocates no extent versions.
+        if options.encryption.is_some() && tree.has_data() {
+            return Err(Error::Unsupported("file data or a symlink on an encrypted volume"));
+        }
+        let mut geometry = Geometry::new(sectors)?;
+        let mut draw = Draw(random);
+        let internal_uuid = draw.uuid()?;
+        let user_uuid = draw.uuid()?;
+        let member_uuid = draw.uuid()?;
+        let hash_seed = draw.u64()?;
+        let key = match &options.encryption {
+            Some(_) => Some(MasterKey::new(draw.bytes()?)),
+            None => None,
+        };
+        let seeds = (0..tree.len()).map(|_| draw.u64()).collect::<Result<Vec<u64>>>()?;
+
+        let first = geometry.data_start() * geometry.bucket;
+        let mut population = tree.populate(first, geometry.bucket, MAX_EXTENT, hash_seed, &seeds);
+        geometry.data_buckets = (population.data_end - first).div_ceil(geometry.bucket);
+        if geometry.btree_start() >= geometry.end_copy() {
+            return Err(geometry.small(geometry.btree_start()));
+        }
+        let mut primary = root_world();
+        primary.append(&mut population.keys);
+        let plan = Plan::new(&geometry, &primary)?;
+        let seqs = (0..plan.places.len()).map(|_| draw.nonzero()).collect::<Result<Vec<u64>>>()?;
+        let laid = plan.nodes(&geometry, &seqs);
+
+        let magic = node::magic(&internal_uuid);
+        let mut nodes = Vec::new();
+        for n in &laid.nodes {
+            let build = Build { btree: n.btree, level: n.level, seq: n.seq, min: n.min, max: n.max, journal_seq: 0, keys: &n.keys };
+            nodes.push((n.sector, node::encode(magic, BLOCK, key.as_ref(), &build)?));
+        }
+
+        let member = Member {
+            uuid: member_uuid,
+            nbuckets: geometry.nbuckets,
+            first_bucket: 0,
+            bucket_sectors: geometry.bucket as u16,
+            bitmap_shift: laid.bitmap_shift,
+            last_mount: options.time / 1_000_000_000,
+            flags: member_flag::DATA_ALLOWED | member_flag::DURABILITY_1 | member_flag::FREESPACE_INITIALIZED | member_flag::ROTATIONAL_KNOWN,
+            seq: 1,
+            bitmap: laid.bitmap,
+            journal_bucket: 0,
+            journal_offset: 0,
+            identity_zero: true,
+        };
+        let crypt = match (&options.encryption, &key) {
+            (Some(e), Some(key)) => Some(Crypt { kdf: e.kdf, wrapped: key.wrapped(&internal_uuid, e.passphrase, e.kdf)? }),
+            _ => None,
+        };
+        let mut label = [0u8; 32];
+        label[..options.label.len()].copy_from_slice(options.label);
+        let header = Header {
+            version: VERSION,
+            version_min: VERSION,
+            internal_uuid,
+            user_uuid,
+            label,
+            offset: 0,
+            seq: 1,
+            block_sectors: BLOCK_SECTORS as u16,
+            dev_idx: 0,
+            nr_devices: 1,
+            time_base: options.time,
+            time_precision: 1,
+            flags: flags(geometry.node, crypt.is_some()),
+            write_time: options.time / 1_000_000_000,
+            features: [FEATURES, 0],
+            compat: [COMPAT_INITIALIZED | COMPAT_CLEAN, 0],
+            layout: geometry.layout.clone(),
+        };
+        let fields = fields(&geometry, &member, crypt.as_ref(), &laid.roots);
+        Ok(Encoded { population, nodes, header, fields })
+    }
 }
 
 /// The feature bits `format` sets, all of a clean volume's.
@@ -345,8 +384,8 @@ impl Geometry {
         let wanted = (sectors / WANT_BUCKETS).max(1);
         let bucket = (1u64 << wanted.ilog2()).clamp(MIN_BUCKET, MAX_BUCKET);
         let nbuckets = sectors / bucket;
-        if nbuckets < MIN_BUCKETS || sectors < 4 * SB_SECTORS {
-            return Err(Error::Invalid("device smaller than 512 buckets"));
+        if nbuckets < MIN_BUCKETS {
+            return Err(Error::Small { blocks: MIN_BUCKETS * MIN_BUCKET / BLOCK_SECTORS });
         }
         let second = (PRIMARY + SB_SECTORS).next_multiple_of(BLOCK_SECTORS);
         let end = (sectors - SB_SECTORS) / bucket * bucket;
@@ -383,6 +422,13 @@ impl Geometry {
     fn slot(&self, i: u64) -> u64 {
         let bucket = self.btree_start() + i / self.nodes_per_bucket();
         bucket * self.bucket + i % self.nodes_per_bucket() * self.node
+    }
+
+    /// The refusal of this device when the buckets before `bucket` are
+    /// full: what it needs is those, `bucket`, and the end copy's buckets.
+    fn small(&self, bucket: u64) -> Error {
+        let sectors = (bucket + 1 + SB_SECTORS.div_ceil(self.bucket)) * self.bucket;
+        Error::Small { blocks: sectors / BLOCK_SECTORS }
     }
 
     /// The device as [`derive`] sees it.
@@ -461,8 +507,9 @@ impl Plan {
         let mut places: Vec<Place> =
             (0..BTREES.len()).map(|t| Place { btree: t, level: 0, range: 0..0, slot: t as u64, min: Bpos::MIN, max: Bpos::MAX }).collect();
         loop {
-            if g.slot(places.len() as u64 - 1) / g.bucket >= g.end_copy() {
-                return Err(Error::Invalid("device too small for its metadata"));
+            let last = g.slot(places.len() as u64 - 1) / g.bucket;
+            if last >= g.end_copy() {
+                return Err(g.small(last));
             }
             let all = derived(g, &base, &places, &keys);
             let (next, first_of) = place(g, &all)?;
@@ -585,32 +632,67 @@ fn place(g: &Geometry, keys: &[Vec<(Bpos, Vec<u8>)>]) -> Result<(Vec<Place>, Vec
     Ok((places, first_of))
 }
 
-/// A btree's nodes for keys of `sizes`: leaves filled in order to
-/// [`capacity`], then interior levels of pointers until one root.
+/// A btree's nodes for keys of `sizes`: leaves, then interior levels of
+/// pointers until one root, each level's entries spread evenly over the
+/// fewest nodes that hold them at [`capacity`].
+///
+/// Evenly, so no node holds a remainder: upstream merges a small node into
+/// its sibling even under `fsck -n`, the merge allocates a node, and on a
+/// volume with no free bucket the merge waits for one forever.
 fn shape(sizes: impl Iterator<Item = usize>, node_bytes: usize) -> Result<Vec<Vec<core::ops::Range<usize>>>> {
     let cap = capacity(node_bytes) - node::record_bytes(core::iter::empty());
-    let mut leaves = alloc::vec![0..0];
-    let mut fill = 0;
-    for (i, size) in sizes.enumerate() {
-        let last = leaves.last_mut().unwrap();
-        if fill + size > cap && last.start != last.end {
-            leaves.push(i..i + 1);
-            fill = size;
-        } else {
-            last.end = i + 1;
-            fill += size;
-        }
-    }
-    let fanout = cap / POINTER_KEY;
-    let mut levels = alloc::vec![leaves];
+    let sizes: Vec<usize> = sizes.collect();
+    let mut levels = alloc::vec![spread(&sizes, cap)];
     while levels.last().unwrap().len() > 1 {
         let below = levels.last().unwrap().len();
-        levels.push((0..below).step_by(fanout).map(|i| i..(i + fanout).min(below)).collect());
+        levels.push(spread(&alloc::vec![POINTER_KEY; below], cap));
         if levels.len() > 4 {
             return Err(Error::Invalid("a btree deeper than four levels"));
         }
     }
     Ok(levels)
+}
+
+/// Entries of `sizes` in consecutive nodes of at most `cap` bytes, as few
+/// nodes as hold them and as evenly filled as the entries allow; one empty
+/// node for none.
+fn spread(sizes: &[usize], cap: usize) -> Vec<core::ops::Range<usize>> {
+    let total: usize = sizes.iter().sum();
+    let mut prefix = alloc::vec![0];
+    prefix.extend(sizes.iter().scan(0, |sum, &size| {
+        *sum += size;
+        Some(*sum)
+    }));
+    let mut nodes = total.div_ceil(cap).max(1);
+    loop {
+        // Node k ends at the entry boundary nearest k / nodes of the total.
+        let mut ranges = Vec::with_capacity(nodes);
+        let mut start = 0;
+        for k in 1..=nodes {
+            let end = if k == nodes {
+                sizes.len()
+            } else {
+                // In units of 1 / nodes: the boundaries either side of the
+                // share, and the nearer.
+                let want = total * k;
+                let after = prefix.partition_point(|&p| p * nodes < want);
+                let short = after.checked_sub(1).map(|b| (b, want - prefix[b] * nodes));
+                let long = prefix.get(after).map(|&p| (after, p * nodes - want));
+                let nearest = match (short, long) {
+                    (Some((b, below)), Some((_, above))) if below < above => b,
+                    (_, Some((a, _))) | (Some((a, _)), None) => a,
+                    (None, None) => 0,
+                };
+                nearest.max(start + 1).min(sizes.len())
+            };
+            ranges.push(start..end);
+            start = end;
+        }
+        if ranges.iter().all(|r| prefix[r.end] - prefix[r.start] <= cap || r.len() == 1) {
+            return ranges;
+        }
+        nodes += 1;
+    }
 }
 
 /// One node as written.
@@ -665,9 +747,26 @@ mod tests {
     fn leaves_fill_to_two_thirds_and_one_root_spans_them() {
         let levels = shape(core::iter::repeat_n(104, 300), 16384).unwrap();
         assert_eq!(levels.len(), 2);
-        assert_eq!(levels[0].len(), 3);
+        assert_eq!(levels[0], vec![0..100, 100..200, 200..300]);
         assert_eq!(levels[1], vec![0..3]);
         let empty = shape(core::iter::empty(), 16384).unwrap();
         assert_eq!(empty, vec![vec![0..0]], "an empty btree still has its root");
+    }
+
+    /// A remainder is spread over its level rather than left in a last
+    /// node: the fills of a level's nodes differ by at most one entry, and
+    /// the level takes no more nodes than its entries need.
+    #[test]
+    fn no_node_is_left_with_a_remainder() {
+        let cap = capacity(16384) - node::record_bytes(core::iter::empty());
+        for n in [105, 106, 150, 201, 299, 301, 1000, 4321] {
+            let sizes: Vec<usize> = (0..n).map(|i| 40 + i % 97).collect();
+            let largest = *sizes.iter().max().unwrap();
+            let leaves = &shape(sizes.iter().copied(), 16384).unwrap()[0];
+            let fill: Vec<usize> = leaves.iter().map(|r| sizes[r.clone()].iter().sum()).collect();
+            assert!(fill.iter().all(|&f| f <= cap), "{n}: a leaf past capacity");
+            assert!(fill.iter().max().unwrap() - fill.iter().min().unwrap() <= largest, "{n}: leaves of {fill:?}");
+            assert_eq!(leaves.len(), sizes.iter().sum::<usize>().div_ceil(cap), "{n}: more leaves than needed");
+        }
     }
 }

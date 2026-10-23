@@ -88,3 +88,23 @@ fn two_cpus_under_one_name_are_refused() {
         Err(Refused::Collision { name: "intel/06-8c-01/80".into() }),
     );
 }
+
+/// The loader's lookup over a ROOT the build writes: each bench's CPU gets
+/// its own patch byte for byte, and a CPU the image carries none for is told
+/// so by name rather than handed another's.
+#[test]
+fn the_loader_reads_each_benchs_patch_off_a_built_root() {
+    let root = Path::new(env!("CARGO_MANIFEST_DIR"));
+    let mut files = root_files(root, Machines::Benches);
+    files.push(("etc/os-release".to_string(), b"release".to_vec()));
+    let image = crate::image::create_root_image(&files, &[("bin/ls".to_string(), "/system/bin/toybox".to_string())], true);
+    let patches = split_ok();
+    let t14 = Cpu::Intel { signature: 0x0008_06c1, platform: toyos_microcode::PlatformId::from_msr(0x001c_0000_0000_0000) };
+    let amd_bench = Cpu::Amd { signature: 0x0086_0f01 };
+    // The loader's own composition: the CPU's path, read off ROOT's bytes.
+    let lookup = |cpu: Cpu| bcachefs::engine::read_file(&image, cpu.path().to_string().as_bytes());
+    for (cpu, name) in [(t14, "intel/06-8c-01/80"), (amd_bench, "amd/17-60-01")] {
+        assert!(lookup(cpu).expect(name) == patches[name].bytes, "{name}");
+    }
+    assert_eq!(lookup(Cpu::Amd { signature: 0x00a0_0f11 }), Err(bcachefs::engine::Error::NotFound));
+}

@@ -2,9 +2,10 @@
 //! btrees from `clean`'s roots, and files, directories and symlinks over
 //! them.
 
+use alloc::collections::BTreeSet;
 use alloc::vec::Vec;
 
-use toyos_blockdev::{BlockDev, BLOCK};
+use toyos_blockdev::{block_on_ready, BlockDev, ReadOnlyBytes, BLOCK};
 use toyos_crypto::{scrypt, siphash};
 
 use super::bkey::{Bpos, Key};
@@ -59,6 +60,9 @@ pub struct DirEntry {
     pub next: u64,
 }
 
+/// Entries [`Volume::names`] asks of one directory at a time.
+const LISTING: usize = 256;
+
 /// The longest symlink this reader reads, its NUL included: a path's
 /// length on the systems that make them.
 pub(crate) const MAX_SYMLINK: u64 = 4096;
@@ -67,6 +71,11 @@ pub(crate) const MAX_SYMLINK: u64 = 4096;
 impl Inode {
     pub fn is_dir(&self) -> bool {
         self.mode & S_IFMT == S_IFDIR
+    }
+
+    /// What kind of node this is, or `None` for a mode of no file type.
+    pub fn kind(&self) -> Option<DirentType> {
+        DirentType::of_mode(self.mode)
     }
 }
 
@@ -295,6 +304,47 @@ impl<D: BlockDev> Volume<D> {
         failed.map_or(Ok(found), Err)
     }
 
+    /// The node at `path`, names separated by `/`, from the root directory
+    /// and following no symlink; the empty path is the root.
+    pub async fn resolve(&self, path: &[u8]) -> Result<u64> {
+        let mut ino = self.root;
+        for name in path.split(|&b| b == b'/').filter(|name| !name.is_empty()) {
+            ino = self.lookup(ino, name).await?.ok_or(Error::NotFound)?.ino;
+        }
+        Ok(ino)
+    }
+
+    /// Every name under the root directory, each with its path from the
+    /// root, `/`-separated, a directory's before its own names.
+    pub async fn names(&self) -> Result<Vec<(Vec<u8>, DirEntry)>> {
+        let mut out = Vec::new();
+        let mut seen = BTreeSet::from([self.root]);
+        let mut dirs = alloc::vec![(self.root, Vec::new())];
+        while let Some((dir, prefix)) = dirs.pop() {
+            let mut cursor = 0;
+            loop {
+                let (entries, more) = self.readdir(dir, cursor, LISTING).await?;
+                for e in entries {
+                    cursor = e.next;
+                    let path = if prefix.is_empty() { e.name.clone() } else { [&prefix[..], b"/", &e.name].concat() };
+                    if e.kind == DirentType::Directory {
+                        // A tree names each directory once; a second name
+                        // would make this walk a cycle.
+                        if !seen.insert(e.ino) {
+                            return Err(Error::Corrupt("a directory with a second name"));
+                        }
+                        dirs.push((e.ino, path.clone()));
+                    }
+                    out.push((path, e));
+                }
+                if !more {
+                    break;
+                }
+            }
+        }
+        Ok(out)
+    }
+
     /// Up to `max` entries of `dir` from `cursor` on, in hash order, and
     /// whether more follow. Cursor 0 starts the listing; an entry's `next`
     /// resumes after it.
@@ -440,6 +490,24 @@ impl<D: BlockDev> Volume<D> {
         dst.copy_from_slice(&data[at..at + dst.len()]);
         Ok(())
     }
+}
+
+/// The regular file at `path` on the volume `bytes` hold, read whole: a
+/// volume in memory, such as ROOT. Needs an allocator and nothing else of
+/// its environment, so the loader reads with it before ExitBootServices.
+pub fn read_file(bytes: &[u8], path: &[u8]) -> Result<Vec<u8>> {
+    let device = ReadOnlyBytes::new(bytes).ok_or(Error::Corrupt("a volume of no whole blocks"))?;
+    block_on_ready(async {
+        let volume = Volume::open(device).await?;
+        let ino = volume.resolve(path).await?;
+        let inode = volume.inode(ino).await?;
+        if inode.kind() != Some(DirentType::Regular) {
+            return Err(Error::Invalid("a path naming no regular file"));
+        }
+        let mut out = alloc::vec![0u8; usize::try_from(inode.size).map_err(|_| Error::Unsupported("a file past the address space"))?];
+        volume.read(ino, 0, &mut out).await?;
+        Ok(out)
+    })
 }
 
 /// The byte an extent key's range starts at: its position is its end.

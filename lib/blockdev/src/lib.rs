@@ -1,7 +1,7 @@
 //! A block device as a filesystem awaits it ([`BlockDev`]), the executor that
-//! drives those awaits ([`executor`]), a device over memory ([`Bytes`]) and,
-//! behind the `model` feature, the crash model a filesystem's ordering is
-//! checked against ([`model`]).
+//! drives those awaits ([`executor`]), devices over memory ([`Bytes`],
+//! [`ReadOnlyBytes`]) and, behind the `model` feature, the crash model a
+//! filesystem's ordering is checked against ([`model`]).
 //!
 //! **A block is [`BLOCK`] bytes on every device**: the block service refuses
 //! a partition that is not whole 4 KiB blocks before it serves it, so nothing
@@ -22,7 +22,7 @@ pub mod executor;
 #[cfg(any(test, feature = "model"))]
 pub mod model;
 
-pub use bytes::Bytes;
+pub use bytes::{Bytes, ReadOnlyBytes};
 pub use executor::{block_on, block_on_ready, Executor};
 
 use alloc::rc::Rc;

@@ -19,12 +19,12 @@ toyos-bootmap = { path = "../lib/bootmap" }
 toyos-blackbox = { path = "../lib/blackbox" }
 toyos-wallclock = { path = "../lib/wallclock" }
 toyos-elf = { path = "../lib/elf" }
-# ROOT is picked off the boot disk with the kernel's own readers: the GPT, and
-# the superblock `Superblock::read` decides, which is the kernel's mount too.
+# ROOT is picked off the boot disk by the GPT.
 toyos-gpt = { path = "../lib/gpt" }
 # Which ROOT, how it is read in bounded chunks, and the handoff the kernel
 # checks: host-tested there.
 toyos-rootimage = { path = "../lib/rootimage" }
+# The microcode patch is read off ROOT with its reader.
 bcachefs = { path = "../lib/bcachefs", default-features = false }
 toyos-tco = { path = "../lib/tco" }
 # What bytes are a seed: the judgment the kernel makes of what this hands it.

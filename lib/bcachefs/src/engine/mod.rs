@@ -22,8 +22,8 @@ mod value;
 pub use bkey::{Bpos, Key, Version};
 pub use crypt::MIN_KDF;
 pub use fsck::{fsck, Finding};
-pub use mkfs::{mkfs, Encryption, Options};
-pub use read::{DirEntry, Inode, Volume};
+pub use mkfs::{fit, mkfs, Encryption, Options};
+pub use read::{read_file, DirEntry, Inode, Volume};
 pub use superblock::{Kdf, Superblock};
 pub use tree::{Meta, NodeRef, Tree};
 pub use value::DirentType;
@@ -46,6 +46,9 @@ pub enum Error {
     NotDirectory,
     /// An argument the caller should not have made, by name.
     Invalid(&'static str),
+    /// A device too small for the volume asked of it: one of this geometry
+    /// needs at least `blocks`.
+    Small { blocks: u64 },
     /// The random source failed.
     Entropy,
 }

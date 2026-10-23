@@ -14,7 +14,8 @@ cannot reproduce the host's bytes. Two sites in `build/image.rs` read the clock:
 - `build_time()`, which dates every file and directory `populate` writes onto
   the ESP and LOG volumes.
 
-ROOT is a function of its files (`root_uuid` hashes them), and
+ROOT is a function of its files (`create_root_image` draws everything from
+their digest and dates nothing), and
 `/system/etc/os-release` records only source facts, its time being the
 commit's (`build/build.rs`'s `release`).
 

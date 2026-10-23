@@ -43,8 +43,10 @@ encrypted), with all its allocator and accounting state, that upstream's
 that state from a volume's keys and compares, and the derivation agrees with
 what upstream stored in its own volumes. It replaced a read side written from
 upstream's headers. Its tests read volumes upstream's tools wrote
-(`lib/bcachefs/tests/fixtures/`). The rest of the crate is still the interim
-format, which ROOT, the loader and DATA use until the engine replaces it.
+(`lib/bcachefs/tests/fixtures/`). The build writes ROOT with it, at the
+smallest size that leaves no bucket free, and the loader, `imgstat` and the
+SYSTEM file server read ROOT through its reader. The rest of the crate is
+still the interim format, which DATA uses until the engine replaces it.
 
 The track itself is not planned here.
 

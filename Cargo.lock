@@ -999,6 +999,7 @@ dependencies = [
  "toyos-abi",
  "toyos-blockdev",
  "toyos-blockring",
+ "toyos-crypto",
  "toyos-fat32",
  "toyos-fat32-check",
  "toyos-gpt",
