@@ -114,14 +114,17 @@ pub(super) const fn fresh_nodes(nodes: usize) -> usize {
     1 + 5 * nodes + 5 + 1 + ACCOUNTED as usize
 }
 
-/// Nodes a split takes at most. A node this writer changes enters the slot
-/// no fuller than a node holds ([`Mount::transact`]), and the transaction
-/// holding the slot and the pointer update of the one reclaim round in
-/// flight add at most `K_TX` u64s of keys each before reclaim, which takes
-/// an oversized node first, plans it. A node read from the medium may hold
-/// five times its bytes once unpacked: a packed key part is one u64 or more,
-/// an unpacked one five (A3.15-A3.17). Spread evenly, all that fills this
-/// many nodes of at least [`MIN_NODE`], each a key short of full.
+/// Nodes a split takes at most. A node this writer wrote holds at most a
+/// node's keys; one read from the medium may hold five times that once
+/// unpacked, a packed key part being one u64 or more and an unpacked one
+/// five (A3.15-A3.17). Either takes at most two transactions more before
+/// reclaim, which takes an oversized node first, plans it: the one holding
+/// the slot, as no transaction enters it while a changed node is oversized
+/// ([`Mount::transact`]), and the pointer update of the one reclaim round in
+/// flight, each at most `K_TX` u64s of keys. Spread evenly, all that fills
+/// this many nodes of at least [`MIN_NODE`], each a key short of full. A
+/// replay installs its window's keys with no such bound
+/// (`issues/a-replayed-bcachefs-node-past-seven-nodes-is-refused.md`).
 pub(super) const MAX_GROUPS: usize = 7;
 
 /// New nodes one rewrite writes at most: a split's, and a root above them.
@@ -275,8 +278,8 @@ impl<D: BlockDev> Mount<D> {
                 (n.btree, n.level, root, append, groups)
             };
             if groups.len() > MAX_GROUPS {
-                // More than a node read or replayed into holds once
-                // unpacked, and two transactions ([`MAX_GROUPS`]).
+                // More than a node read holds once unpacked, and two
+                // transactions ([`MAX_GROUPS`]): a replay's leaf.
                 return Err(Error::Unsupported("a btree node whose keys fill more than seven nodes"));
             }
             let written = groups.len() + usize::from(groups.len() > 1 && root);

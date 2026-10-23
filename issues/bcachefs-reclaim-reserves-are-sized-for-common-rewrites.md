@@ -15,7 +15,8 @@ panics. The volume on the medium stays consistent, so the next mount replays it.
 **The journal share** (`PER_NODE` in `mount/mod.rs`) is sized as `fresh_cost(1)`
 per node that can pin the journal: every such node is assumed to rewrite to a
 single fresh node. A node that splits in two, with a new root above it, journals
-`fresh_cost(3)`. Those bounds are derived from key sizes in `mount/reclaim.rs`.
+`fresh_cost(3)`, and an oversized node's split, alone in its batch, up to
+`fresh_cost(8)`. Those bounds are derived from key sizes in `mount/reclaim.rs`.
 When a share runs short of what a batch's splits need, `Mount::admit` stops the
 mount with "journal reclaim's share exhausted".
 

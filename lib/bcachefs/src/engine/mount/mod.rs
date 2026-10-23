@@ -171,8 +171,9 @@ pub struct Mount<D> {
 }
 
 const _: () = assert!(PER_NODE <= K_TX, "a reclaim batch of one node fits one reservation");
-/// The largest key a node holds: a size byte of 255 u64s (A3.16).
-const MAX_KEY: usize = 8 * 255;
+/// The largest key a node holds, as its reader refuses a larger value
+/// (A3.16).
+const MAX_KEY: usize = 8 * (KEY_U64S + super::bkey::MAX_VALUE_U64S);
 // A node read at five times its bytes unpacked, and two transactions more,
 // spread evenly over [`MAX_GROUPS`] nodes: each takes its share and at most
 // a key past it.
@@ -446,10 +447,10 @@ impl<D: BlockDev> Mount<D> {
     /// names, so a crash once it is marked unclean would leave nothing to
     /// replay (A9.11). The next entry `S` is closed, so its place, the head
     /// bucket's start, and its size are known; the superblock, still clean,
-    /// names `S` with the member's position after it, which an empty journal accepts (A1.43); then `S` is
-    /// written, as a clean shutdown writes its last (A1.42). Each step leaves
-    /// a valid clean volume, and a mount after a crash between them restates
-    /// again.
+    /// names `S` with the member's position after it, which an empty
+    /// journal accepts (A1.43); then `S` is written, as a clean shutdown
+    /// writes its last (A1.42). Each step leaves a valid clean volume, and a
+    /// mount after a crash between them restates again.
     async fn go_read_write(&self, restate: bool) -> Result<()> {
         if restate {
             let (seq, clean) = {
@@ -458,9 +459,9 @@ impl<D: BlockDev> Mount<D> {
                 st.journal.open_new();
                 self.close(st);
                 let (seq, sectors) = st.journal.closed.back().map(|e| (e.seq, (e.bytes.len() / SECTOR) as u64)).expect("just closed");
-                // `S` goes at the head bucket's start: a scan reads a bucket
-                // from its start, and what the position follows is not
-                // there (a restate after a crash left it unwritten).
+                // `S` goes at the head bucket's start: an earlier restate's
+                // `S` may never have been written, and a scan stops at an
+                // empty bucket start.
                 st.journal.head_sectors = 0;
                 st.journal.place(sectors);
                 st.member.journal_bucket = st.journal.head as u32;
@@ -485,9 +486,8 @@ impl<D: BlockDev> Mount<D> {
     /// Every superblock copy rewritten from the state, one sequence on, each
     /// flushed before the next is written, a copy a crash tore first: a
     /// crash tears at most the one being written, and the reader takes the
-    /// newest whole copy. `clean` is the clean field a
-    /// clean unmount writes; without it the journal's replicas entry is
-    /// listed.
+    /// newest whole copy. `clean` is the clean field a clean unmount writes;
+    /// without it the journal's replicas entry is listed.
     async fn write_superblock(&self, clean: Option<Vec<u8>>) -> Result<()> {
         let copies: Vec<(u64, Vec<u8>)> = {
             let mut st = self.st.borrow_mut();

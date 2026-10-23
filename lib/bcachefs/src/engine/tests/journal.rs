@@ -407,3 +407,38 @@ fn a_window_spanning_2_62_sequences_is_checked_entry_by_entry() {
     let gap = unclean_with(&[(1, 1, area.clone(), 0), (far, 1, area, 0)], |dev, _| blacklist(dev, 3, far));
     assert_eq!(window_of(&gap), Err(Error::Corrupt("a journal entry missing from the replay window")));
 }
+
+/// A window whose keys a replay installs into one leaf past seven nodes'
+/// worth: 1 430 inodes journaled across 13 entries, none yet in a node, as
+/// an upstream volume a crash left can hold them. The reader replays it;
+/// the read-write mount stops by name at its first write, since reclaim
+/// cannot split the leaf in one transaction
+/// (`issues/a-replayed-bcachefs-node-past-seven-nodes-is-refused.md`).
+#[test]
+fn a_replayed_leaf_past_seven_nodes_is_read_but_not_mounted_read_write() {
+    let dev = formatted(32 << 20, None);
+    unclean(&dev);
+    let ring = Ring::of(&dev, None);
+    let bucket_blocks = 16 * 1024 / BLOCK as u64;
+    let mut ino = mkfs::FIRST_INODE + 1;
+    for seq in 1..=13u64 {
+        let mut keys = Vec::new();
+        for _ in 0..110 {
+            keys.extend(Key::new(kind::INODE_V3, Bpos::new(0, ino, mkfs::ROOT_SNAPSHOT)).encode(&InodeValue::default().encode()));
+            ino += 1;
+        }
+        let mut area = Vec::new();
+        journal::record(&mut area, journal::Rec::Keys { btree: Btree::Inodes, level: 0, keys: &keys });
+        tail(&mut area, &ring.roots);
+        let blocks = ring.entry(seq, 1, &area);
+        assert!(blocks.len() as u64 <= bucket_blocks);
+        block_on_ready(dev.write(ring.first + (seq - 1) * bucket_blocks, &blocks)).unwrap();
+    }
+    let v = block_on_ready(Volume::open(&dev)).unwrap();
+    assert!(block_on_ready(v.inode(ino - 1)).is_ok(), "the reader replays the window");
+    drop(v);
+    let m = block_on_ready(Mount::open(&dev, MountOptions { cache_nodes: 256 }, super::mount::random())).unwrap();
+    let why = "a btree node whose keys fill more than seven nodes";
+    assert_eq!(block_on_ready(m.create(m.root(), b"f", New::File, super::mount::OWNER, super::mount::NOW)).err(), Some(Error::Unsupported(why)));
+    assert_eq!(block_on_ready(m.unmount()).err(), Some(Error::ReadOnly(why)));
+}
