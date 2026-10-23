@@ -1,0 +1,9 @@
+[package]
+name = "hangupholder"
+description = "Test-only: an app that reads every reason it is asked to quit and stays, as one a session's sign-out waits for."
+version = "0.1.0"
+edition = "2021"
+license = "MIT OR Apache-2.0"
+
+[dependencies]
+toyos = { path = "../../../sdk/toyos" }

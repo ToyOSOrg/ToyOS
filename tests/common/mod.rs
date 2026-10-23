@@ -12,6 +12,7 @@ pub mod hostedclang;
 pub mod iommu;
 pub mod launchstdio;
 pub mod libcchildren;
+pub mod sessionlifecycle;
 pub mod irqcensus;
 /// The `isa` claim's rows on the T14.
 pub mod isa;

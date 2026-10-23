@@ -205,6 +205,11 @@ impl Connection {
         self.0
     }
 
+    /// Give up ownership, for an end about to be endowed.
+    pub fn into_raw(self) -> RawHandle {
+        self.0.into_raw()
+    }
+
     pub fn send<T: IpcPayload>(&self, msg_type: u32, payload: &T) -> Result<(), IpcError> {
         send(self.0.raw(), msg_type, payload)
     }

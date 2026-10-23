@@ -32,7 +32,8 @@ use toyos_desktop::clipboard::{Landing, Watch};
 use toyos_desktop::volume::{overlay_rect, Overlay, Request, Requests, Shown};
 use toyos::audio::{Volume, VolumeStep, MSG_VOLUME, MSG_VOLUME_MUTE, MSG_VOLUME_STEP, MSG_VOLUME_UNAVAILABLE};
 use toyos_desktop::{
-    cursor, cursor_from_abs, cursor_style, fold_mouse, hit_test, key_action, relayout, set_mode, tab_action,
+    cursor, cursor_from_abs, cursor_style, fold_mouse, hit_test, key_action, relayout, set_mode, sign_out_key,
+    sign_out_rect, sign_out_text, tab_action, SignOutKey,
     Buffers, CursorStyle, Presented, Requested, Damage, Desk, Scale, Grab, Held, Hit, KeyAction, Level, Mode, Point, Port, PromptGate,
     Rect, Released, Stack, TabAction, Verdict, Window, WindowId, WindowMode,
 };
@@ -308,6 +309,8 @@ pub struct Session {
     prev_busy_ticks: u64,
     prev_total_ticks: u64,
     last_taskbar_update: Instant,
+    /// The desktop session this compositor signs out and launches in.
+    desktop: crate::signout::Desktop,
 }
 
 impl Session {
@@ -328,6 +331,7 @@ impl Session {
         let inputs = endow::acceptor(wire::PORT)
             .expect("the manifest declares this program serves `input`");
         let (mut display, panel) = Display::claim();
+        let desktop = crate::signout::Desktop::take();
         let mode = display.mode();
         let (image, kept) = (image_scale(), kept_scale());
         let scale = scale_for(kept, image.unwrap_or(panel), mode);
@@ -387,6 +391,9 @@ impl Session {
         if let Some(handle) = display.handle() {
             poller.watch_raw(handle, READABLE, handle.0 as u64);
         }
+        if let Some(control) = desktop.conn() {
+            poller.watch(control, READABLE, control.as_handle().0 as u64);
+        }
 
         let cursor = Point { x: desk.screen.w() / 2, y: desk.screen.h() / 2 };
         if display.hw_cursor() && cursor::in_hardware(scale) {
@@ -397,7 +404,7 @@ impl Session {
         let mut damage = Damage::default();
         damage.add(desk.screen);
 
-        let launcher = launcher();
+        let launcher = launcher(std::sync::Arc::clone(&desktop.launcher));
         println!("compositor: ready");
 
         let now = Instant::now();
@@ -452,6 +459,7 @@ impl Session {
             volume_requests: Requests::default(),
             overlay: Overlay::default(),
             epoch: now,
+            desktop,
         }
     }
 
@@ -503,6 +511,7 @@ impl Session {
         let settings_ready = self.is_ready(self.settings.as_handle());
         let volume_ready = self.volume.as_ref().is_some_and(|(conn, _)| self.is_ready(conn.as_handle()));
         let display_ready = self.display.handle().is_some_and(|handle| self.is_ready(handle));
+        let session_ready = self.desktop.conn().is_some_and(|c| self.is_ready(c.as_handle()));
         let client_ready = self.stack.iter().any(|w| self.is_ready(w.client.conn.as_handle()))
             || self.pending.iter().any(|p| self.is_ready(p.conn.as_handle()))
             || self.watcher.as_ref().is_some_and(|w| self.is_ready(w.conn.as_handle()));
@@ -530,6 +539,7 @@ impl Session {
             && !client_ready
             && !volume_ready
             && !display_ready
+            && !session_ready
         {
             return false;
         }
@@ -558,6 +568,9 @@ impl Session {
         }
         if volume_ready {
             self.volume_answers();
+        }
+        if session_ready {
+            self.session_said();
         }
         let frames = self.take_frames();
         self.dispatch(frames);
@@ -670,6 +683,15 @@ impl Session {
 
     /// One transition of the merged keyboard.
     fn key(&mut self, raw: RawKeyEvent) {
+        if let Some(asked) = sign_out_key(raw, self.desktop.waiting.is_some(), self.prompt.is_some()) {
+            match asked {
+                SignOutKey::Ask => self.desktop.sign_out(false),
+                SignOutKey::Force => self.desktop.sign_out(true),
+                SignOutKey::Cancel => self.desktop.cancel(),
+            }
+            self.damage.add(sign_out_rect(&self.desk));
+            return;
+        }
         let event = window::KeyEvent::from(raw);
         let focused = self.stack.focused();
         let action = key_action(
@@ -1848,6 +1870,17 @@ impl Session {
         }
     }
 
+    /// What the desktop session's owner said, and its control connection
+    /// watched again, which a session opened again replaces.
+    fn session_said(&mut self) {
+        if self.desktop.said() {
+            self.damage.add(sign_out_rect(&self.desk));
+        }
+        if let Some(control) = self.desktop.conn() {
+            self.poller.watch(control, READABLE, control.as_handle().0 as u64);
+        }
+    }
+
     /// Re-arm the one-shot poll registrations for every handle that fired.
     fn rearm(
         &mut self,
@@ -1978,6 +2011,13 @@ impl Session {
             let rect = overlay_rect(&self.desk);
             if regions.iter().any(|r| r.overlaps(rect)) {
                 render::draw_overlay(&self.back.surface, &self.font, rect, &shown.text());
+            }
+        }
+        if let Some(waiting) = &self.desktop.waiting {
+            let rect = sign_out_rect(&self.desk);
+            if regions.iter().any(|r| r.overlaps(rect)) {
+                let text = sign_out_text(waiting.names.iter().map(String::as_str), waiting.more);
+                render::draw_overlay(&self.back.surface, &self.font, rect, &text);
             }
         }
 
@@ -2145,7 +2185,7 @@ fn text(from: RawHandle, bytes: Vec<u8>) -> Option<String> {
 /// **Everything the desktop starts is a job of its own**, made with the
 /// `jobs` right this row's system capability carries: a program started from
 /// the taskbar is no helper of the compositor's, and must not share its CPU.
-fn launcher() -> mpsc::Sender<String> {
+fn launcher(session: crate::signout::Launcher) -> mpsc::Sender<String> {
     let (launches, queue) = mpsc::channel::<String>();
     std::thread::Builder::new()
         .name("launcher".into())
@@ -2163,7 +2203,14 @@ fn launcher() -> mpsc::Sender<String> {
                         continue;
                     }
                 };
-                if let Err(e) = Command::new(&program).independent().detached().endow(JOB_LABEL, job.into_raw().0).spawn() {
+                let mut command = Command::new(&program);
+                command.independent().detached().endow(JOB_LABEL, job.into_raw().0);
+                // A session this compositor opened again, in place of the endowed one.
+                let opened = session.lock().expect("compositor: its launcher lock is whole");
+                if let Some(launcher) = &*opened {
+                    command.launcher(launcher.as_handle().0);
+                }
+                if let Err(e) = command.spawn() {
                     eprintln!("compositor: {program} did not start: {e}");
                 }
             }

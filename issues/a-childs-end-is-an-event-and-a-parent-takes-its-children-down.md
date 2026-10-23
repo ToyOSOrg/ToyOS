@@ -37,6 +37,11 @@ kill reads it. What names a child's image and working directory is
   cleanup without cooperation, run on the causing path in bounded steps. init
   never dies and stays tiny.
 
+  Since stage 5, init is the supervisor and, for each login session, its
+  owner: "keep running after I close this" in a login session places the app
+  under that session's owner, and only in the machine's session under the
+  supervisor.
+
 **Ruled** (owner, 2026-10-21): libc's signals are the focused set this track
 plans, over native process events: a child's end (stage 4) and an interrupt,
 hang-up or terminate request (stage 6), and no POSIX signal subsystem up
@@ -172,23 +177,51 @@ an explicit force issues it, and never a timer's.
    control pipe, so it watches at most 254 children: the 255th is refused
    `EAGAIN`, a `poll` takes 255 descriptors beside its wake pipe, and `SIG_IGN`
    is shown over 255 children.
-5. **A login is a session under its owner**. Per login the supervisor starts
-   one session owner, which provides the session's launcher and parents what
-   its user starts: the desktop's at boot, one per authenticated SSH
-   connection. `launch <app>` asks it for an independent app, which outlives
-   the shell that asked; a bare command is the shell's helper, and the shell's
-   `detach`, which starts a program under the supervisor today, goes. Sign-out
-   asks the session's tree to quit, shows what stays with cancel and force, and
-   ends the subtree only on force. Its namespace is
+5. **A login is a session under its owner**. **In review** (the P1b pull
+   request). Per login the supervisor starts one session owner,
+   `/system/bin/session`, which accepts on the session's launcher and hands each
+   connection to the supervisor with its badge; the supervisor serves the
+   launch in the session of the owner's link, never the request's. It parents
+   the session's detached apps, which the supervisor spawns under the place
+   the owner gives it, and the supervisor tells it of each app's start and
+   end. The desktop's session opens with the screen's row, endowed to it, and
+   again when it ends; any other `login` row opens one on the supervisor's
+   `login` port, sshserver one per connection. `launch <app>` asks the shell's
+   session for an independent app; a bare command is the shell's helper.
+   Sign-out asks every app to quit with a hang-up, reports what stays to the
+   session's controls, keeps the session on a cancel and ends what stays only
+   on a force; `logout`, the one row holding `session-admin`, lists its user's
+   sessions and signs one out. An owner's end other than its sign-out's is a
+   failure, and only the next open after one is budgeted. Its namespace is
    `issues/a-user-is-a-home-tree-and-a-login-row.md`'s login row; the SSH
-   session's shell holds no host key and no SSH service authority. *Exit*:
-   ending the desktop's session owner ends every program of that session and
-   leaves the compositor and every other session running; closing a shell
-   leaves an app it launched running under the session owner; a dropped SSH
-   connection hangs up its session's tree, says what stays and ends it only on
-   a force; the SSH session's shell can name no host key. Negative control: the
-   stage reverted whole, where a launched app dies with its shell. Oracle:
+   session's shell holds no host key and no SSH service authority.
+   *Exit*: ending the desktop's session owner ends every program of that
+   session and leaves the compositor and every other session running; closing
+   a shell leaves an app it launched running under the session owner; a
+   dropped SSH connection hangs up its session's tree, says what stays and ends
+   it only on a force; the SSH session's shell can name no host key. Oracle:
    systemd-logind, whose session scope ends every process of a login.
+   - Met in `session_lifecycle`'s QEMU x86-64 boot (`tests/images/sessioncase.toml`):
+     a detached app outlives its shell; the desktop's sign-out, by its keys,
+     waits for an app that ignores a hang-up, Escape keeps it and Enter kills
+     it, and the compositor opens the desktop again; a job's session, opened
+     on `login`, signs out the same way, `logout` lists it active and ending,
+     and ten sessions open and sign out in a row.
+   - The owner's unasked end ending its apps has no guest arm, since nothing
+     may kill a process by its number: the kernel's parent rule is
+     `process_tree`'s, and the supervisor's half, placing detached apps under
+     the owner and reading its unasked end as the session's failure, is
+     host-tested (`a_detached_app_is_placed_under_its_sessions_owner`,
+     `an_owner_that_ends_unasked_ends_its_session_as_a_failure`).
+   - The SSH arms wait for a T14 row of sshserver, which this stage owes:
+     until then a connection's session and its sign-out are only built.
+   - Negative control: the stage reverted builds neither the job nor its
+     image, so the controls are mutations, each red by name: a graceful
+     sign-out that kills (`session_lifecycle` stalls at Escape's cancel, and
+     the owner's host laws red); a handed-over launch in its badge's session;
+     ordinary opens spending the budget; `session-admin` ignoring whose
+     session it is; a detached app placed under the supervisor; any row
+     receiving `session-admin`.
 6. **A program is asked to quit**.
    - 6.1 **Done** (#995, the kernel's half): `SYS_PROCESS_QUIT` (135: the 124 this
      stage named went to `SYS_COUNTERS`), `(process, reason)`, needs `MANAGE`

@@ -32,7 +32,7 @@
 //! app-receive <name>        a connector every program launched from /apps holds
 //! app-folder <access>       the most of a folder of the home a package may be granted
 //! starts <key>              a row this program may start through the launcher, or `/apps`
-//! login                     a launch it makes from the machine's session opens a login session
+//! login                     a login authority: the supervisor opens login sessions for it
 //! ```
 //!
 //! [`device`] is what a `devices` or `drives` entry names. [`package`] is the
@@ -333,7 +333,8 @@ pub struct Program {
     /// and [`launch::APPS`] for any installed package. Non-empty is what
     /// endows it a launcher at all.
     pub starts: Vec<String>,
-    /// A launch it makes from the machine's session opens a login session
+    /// A login authority: the supervisor opens login sessions for it, the
+    /// screen's row's at its start and any on `toyos_session::LOGIN_PORT`.
     /// ([`launch`]).
     pub login: bool,
 }

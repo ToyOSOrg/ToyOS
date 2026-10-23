@@ -16,6 +16,8 @@ toyos-osrelease = { path = "../../sdk/osrelease" }
 toyos-wallclock = { path = "../../lib/wallclock" }
 toyos-logstream = { path = "../../lib/logstream" }
 toyos-swap = { path = "../../lib/swap" }
+# The login session protocols: opening one, its owner's link and `logout`'s.
+toyos-session = { path = "../../lib/session" }
 # The slot table and which slot is idle, for the one row that asks for it.
 toyos-update = { path = "../../lib/update" }
 # The partition types that name the running ROOT and the slot table.

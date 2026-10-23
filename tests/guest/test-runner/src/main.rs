@@ -9,6 +9,7 @@ use toyos::endow::{Endowments, SYSCAP_LABEL};
 use toyos::power::Stop;
 use toyos::process::Process;
 use toyos::syscap::SysCap;
+use toyos_session::LOGIN_PORT;
 
 /// The job the runner is inside, and whether the list got through: written by
 /// the loop, read by the deadline watching it.
@@ -24,6 +25,10 @@ static FINISHED: AtomicBool = AtomicBool::new(false);
 /// the `Child`'s own handle, because a `Child` has one owner and the loop is
 /// blocked inside its `wait`.
 static JOB: AtomicU32 = AtomicU32::new(0);
+
+/// The `login` connector this row is endowed as a login authority, which each
+/// job is handed a copy of.
+static LOGIN: std::sync::OnceLock<Option<toyos::namespace::Namespace>> = std::sync::OnceLock::new();
 
 /// Set by the deadline before it kills the job it was watching, so the loop
 /// that kill releases does not start another one.
@@ -256,15 +261,18 @@ fn run_one(name: &str, args: &[&str], cap: Option<&SysCap>) -> Ran {
             return Ran::No;
         }
     }
-    // Its launcher too, where its row starts anything: a job is a direct spawn,
-    // and a direct spawn inherits none.
-    if let Some(launcher) = toyos::endow::launcher() {
-        match toyos_abi::syscall::dup(toyos::AsHandle::as_handle(launcher)) {
+    // Its launcher too, where its row starts anything, and its `login`
+    // connector where its row is a login authority: a job is a helper, and a
+    // helper inherits neither.
+    let login = LOGIN.get_or_init(|| toyos::endow::Endowments::get().take::<toyos::namespace::Namespace>(LOGIN_PORT));
+    for (label, held) in [(toyos::launch::LAUNCHER, toyos::endow::launcher()), (LOGIN_PORT, login.as_ref())] {
+        let Some(held) = held else { continue };
+        match toyos_abi::syscall::dup(toyos::AsHandle::as_handle(held)) {
             Ok(dup) => {
-                command.endow(toyos::launch::LAUNCHER, dup.0);
+                command.endow(label, dup.0);
             }
             Err(e) => {
-                println!("===TEST_END {name} error=the launcher would not duplicate: {e:?}===");
+                println!("===TEST_END {name} error=its {label} would not duplicate: {e:?}===");
                 let _ = io::stdout().flush();
                 return Ran::No;
             }

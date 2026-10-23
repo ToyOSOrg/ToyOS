@@ -23,8 +23,8 @@
 //!
 //! Then it grants the package a folder of the home, `/home/toy/Games` holding
 //! a ROM, through `/system/bin/grants`: refused in this job's own session,
-//! which is the machine's, and refused `Apps/appview` by name, from the login
-//! session a shell opens. Granted it there, the package run as `game` browses
+//! which is the machine's, and refused `Apps/appview` by name, from a login
+//! session this job opens with the `login` connector test-runner hands it. Granted it there, the package run as `game` browses
 //! its working directory with gbae's own `list_directory` and saves beside
 //! the ROM as gbae does: it starts in the folder, lists the ROM and writes
 //! `test.sav`. The same package with one byte more is another binary and
@@ -251,10 +251,23 @@ fn app() {
     println!("  every arm held");
 }
 
-/// `line` run by a shell this job launches, whose `login` row opens a login
-/// session for what it launches: the session `grants` is answered in.
+/// `line` run by a shell this job launches in the login session it opened,
+/// the session `grants` is answered in.
 fn in_login(line: &str) -> std::process::Output {
-    Command::new("/system/bin/shell").independent().args(["-c", line]).current_dir("/").output().expect("launch a shell")
+    static SESSION: std::sync::OnceLock<(toyos::namespace::Namespace, toyos::ipc::Connection)> = std::sync::OnceLock::new();
+    let (launcher, _) = SESSION.get_or_init(|| {
+        let login = toyos::endow::Endowments::get()
+            .take::<toyos::namespace::Namespace>(toyos_session::LOGIN_PORT)
+            .expect("test-runner hands this job its `login` connector");
+        toyos_session::open(&login).expect("a login session for this job")
+    });
+    Command::new("/system/bin/shell")
+        .independent()
+        .launcher(toyos::AsHandle::as_handle(launcher).0)
+        .args(["-c", line])
+        .current_dir("/")
+        .output()
+        .expect("launch a shell")
 }
 
 /// What the package saw as `game`: its working directory, the ROMs gbae's

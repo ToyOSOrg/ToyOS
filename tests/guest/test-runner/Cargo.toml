@@ -8,4 +8,6 @@ license = "MIT OR Apache-2.0"
 [dependencies]
 toyos = { path = "../../../sdk/toyos" }
 toyos-abi = { path = "../../../sdk/abi" }
+# The `login` label a login authority row is endowed, which each job gets a copy of.
+toyos-session = { path = "../../../lib/session" }
 toyos-tco = { path = "../../../lib/tco" }

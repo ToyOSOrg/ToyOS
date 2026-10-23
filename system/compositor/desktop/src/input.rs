@@ -17,6 +17,7 @@ mod usage {
     pub const N: u8 = 0x11;
     pub const Q: u8 = 0x14;
     pub const V: u8 = 0x19;
+    pub const ENTER: u8 = 0x28;
     pub const ESCAPE: u8 = 0x29;
     pub const TAB: u8 = 0x2B;
     pub const RIGHT: u8 = 0x4F;
@@ -120,6 +121,32 @@ pub fn key_action(ev: RawKeyEvent, focused: Option<WindowMode>, launcher_open: b
         return KeyAction::SpawnTerminal;
     }
     KeyAction::Forward
+}
+
+/// What a key does to the desktop session's sign-out.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum SignOutKey {
+    /// Ctrl+Alt+Q: sign the session out.
+    Ask,
+    /// Escape, while a sign-out waits: it does not go on.
+    Cancel,
+    /// Enter, while a sign-out waits: end what it waits for.
+    Force,
+}
+
+/// The sign-out a key press asks for, ahead of [`key_action`]; `None` for
+/// every other transition, and for every key while a prompt is up, whose keys
+/// are the prompt's.
+pub fn sign_out_key(ev: RawKeyEvent, signing_out: bool, prompt: bool) -> Option<SignOutKey> {
+    if prompt || !ev.pressed() {
+        return None;
+    }
+    match ev.keycode {
+        usage::Q if ev.ctrl() && ev.alt() => Some(SignOutKey::Ask),
+        usage::ESCAPE if signing_out => Some(SignOutKey::Cancel),
+        usage::ENTER if signing_out => Some(SignOutKey::Force),
+        _ => None,
+    }
 }
 
 /// What the one pointer did over a batch of its states, folded into the one
@@ -567,6 +594,23 @@ mod tests {
             KeyAction::Forward
         );
         assert_eq!(key_action(key(usage::N, 0), Some(WindowMode::Normal), false, false), KeyAction::Forward);
+    }
+
+    /// Ctrl+Alt+Q asks; Escape and Enter cancel and force only while a
+    /// sign-out waits, and are the window's otherwise; a prompt takes them all.
+    #[test]
+    fn a_sign_out_is_asked_cancelled_and_forced_by_its_keys() {
+        let chord = key(usage::Q, MOD_CTRL | MOD_ALT);
+        assert_eq!(sign_out_key(chord, false, false), Some(SignOutKey::Ask));
+        assert_eq!(sign_out_key(key(usage::Q, MOD_CTRL), false, false), None);
+        assert_eq!(sign_out_key(key(usage::ESCAPE, 0), true, false), Some(SignOutKey::Cancel));
+        assert_eq!(sign_out_key(key(usage::ENTER, 0), true, false), Some(SignOutKey::Force));
+        for code in [usage::ESCAPE, usage::ENTER] {
+            assert_eq!(sign_out_key(key(code, 0), false, false), None);
+            assert_eq!(sign_out_key(key(code, MOD_RELEASED), true, false), None);
+            assert_eq!(sign_out_key(key(code, 0), true, true), None);
+        }
+        assert_eq!(sign_out_key(chord, false, true), None);
     }
 
     /// **While a prompt is up no chord is the desktop's**: closing, cycling,

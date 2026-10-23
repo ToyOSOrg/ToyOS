@@ -74,6 +74,7 @@ from_handle! {
     Device => Device,
     crate::Console => crate::Console,
     crate::Pipe => crate::Pipe,
+    crate::ipc::Connection => crate::ipc::Connection,
     crate::FramebufferDev => |h| crate::FramebufferDev(Device(h)),
     crate::PciDev => |h| crate::PciDev(Device(h)),
     crate::AcpiDev => |h| crate::AcpiDev(Device(h)),

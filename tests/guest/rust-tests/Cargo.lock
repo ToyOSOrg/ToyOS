@@ -983,9 +983,17 @@ dependencies = [
  "toyos-parity",
  "toyos-pci",
  "toyos-pci-claim",
+ "toyos-session",
  "toyos-tco",
  "toyos-trace",
  "toyos-window",
+]
+
+[[package]]
+name = "toyos-session"
+version = "0.1.0"
+dependencies = [
+ "toyos",
 ]
 
 [[package]]

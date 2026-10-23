@@ -116,6 +116,14 @@ pub trait CommandExt {
     /// not independent is refused `InvalidInput`.
     #[stable(feature = "toyos_ext", since = "1.0.0")]
     fn detached(&mut self) -> &mut Self;
+
+    /// Make an [`independent`](CommandExt::independent) launch through the
+    /// launcher `namespace` names, a namespace holding `launcher` that this
+    /// process holds and keeps, in place of the one it was endowed: a login
+    /// authority's for a session it opened. It reaches only what that launcher
+    /// does. A command that is not independent is refused `InvalidInput`.
+    #[stable(feature = "toyos_ext", since = "1.0.0")]
+    fn launcher(&mut self, namespace: u32) -> &mut Self;
 }
 
 #[stable(feature = "toyos_ext", since = "1.0.0")]
@@ -171,6 +179,11 @@ impl CommandExt for crate::process::Command {
 
     fn detached(&mut self) -> &mut Self {
         self.as_inner_mut().detached();
+        self
+    }
+
+    fn launcher(&mut self, namespace: u32) -> &mut Self {
+        self.as_inner_mut().launcher(namespace);
         self
     }
 }

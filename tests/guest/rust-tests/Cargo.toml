@@ -11,6 +11,8 @@ toyos = { path = "../../../sdk/toyos" }
 toyos-window = { path = "../../../sdk/window" }
 toyos-tco = { path = "../../../lib/tco" }
 toyos-inspect = { path = "../../../lib/inspect" }
+# A login session opened by a job, for `app_view`'s grants.
+toyos-session = { path = "../../../lib/session" }
 # The log as logkeeper serves it, and the asking for it, for `counters_metal`'s
 # wait on the log being quiet.
 toyos-logstream = { path = "../../../lib/logstream" }

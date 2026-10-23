@@ -71,10 +71,11 @@ devices = ["acpi"]
 receives = ["power"]
 
 # `starts` is what the desktop's taskbar and launcher start. `login = true`
-# makes the local desktop a login session, so `swap` and `update` run from its
-# shell. `prompt` is the layer above every window, which `filepicker` alone
-# reaches: serving it makes the sessions its launches open the screen's, whose
-# packages may ask the person at it for a folder. `clipboard` is sent every copy
+# makes it the desktop's login authority: the supervisor opens the desktop
+# session as it starts it, and its launches are that session's, so `swap` and
+# `update` run from its shell. `prompt` is the layer above every window, which
+# `filepicker` alone reaches: serving it makes the session opened for it the
+# screen's, whose packages may ask the person at it for a folder. `clipboard` is sent every copy
 # made in the session, and `vdagent` alone receives it. `input` is where a source
 # of keys and pointer reports reaches the owner of input, which it is.
 # `display` sets the mode and the scale, and `toybox` alone receives it, for
@@ -135,14 +136,23 @@ devices = ["pci:02:00:00/1af4:1041"]
 drives = ["pci:07:80:00/1af4:1043"]
 receives = ["clipboard"]
 
-# Every launch it makes is in a login session, the one `update` and `swap`
-# below start in: one it opens when it runs in the machine's session, and the
-# one it was launched in otherwise, as when a desktop shell starts it.
+# A login authority: each authenticated connection opens a login session, and
+# its shell, and a command as `shell -c`, is launched in it, the one `update`
+# and `swap` below start in.
 [programs.sshserver]
 service = true
 receives = ["netstack"]
-starts = ["toybox", "shell", "terminal", "doom", "snake", "calc", "editor", "paint", "files", "host", "inspect", "pkg", "sshserver", "swap", "toyfetch", "update", "grants", "/apps"]
+starts = ["shell"]
 login = true
+
+# A login session's owner: the supervisor starts one for each session it
+# opens, and it parents that session's detached apps and signs it out.
+[programs.session]
+
+# Its user's login sessions, listed or signed out: the one row the build lets
+# receive `session-admin`. `launch logout 3 --force` ends session 3.
+[programs.logout]
+receives = ["session-admin"]
 
 # `swap` is the authority to replace a running service's binary; the build
 # refuses it to any other program (`build/build.rs`). `ssh <machine> swap netstack
@@ -201,7 +211,7 @@ starts = ["shell"]
 
 [programs.shell]
 receives = ["surface"]
-starts = ["toybox", "shell", "terminal", "doom", "snake", "calc", "editor", "paint", "files", "host", "inspect", "pkg", "sshserver", "swap", "toyfetch", "update", "grants", "/apps"]
+starts = ["toybox", "shell", "terminal", "doom", "snake", "calc", "editor", "paint", "files", "host", "inspect", "pkg", "sshserver", "swap", "toyfetch", "update", "grants", "logout", "/apps"]
 
 [programs.doom]
 receives = ["compositor", "soundserver"]

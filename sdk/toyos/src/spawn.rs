@@ -75,6 +75,10 @@ pub struct Spawn<'a> {
     /// An independent launch through this process's launcher, where a helper
     /// is not.
     pub independent: bool,
+    /// A launcher this process holds, a namespace holding [`launch::LAUNCHER`],
+    /// which a launch goes through in place of the one it was endowed:
+    /// borrowed, and refused a helper.
+    pub launcher: Option<RawHandle>,
 }
 
 /// Why nothing was started.
@@ -117,6 +121,7 @@ struct Shape {
     extra_fds: bool,
     image_named: bool,
     provided: bool,
+    launcher_named: bool,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -129,9 +134,10 @@ enum Kind {
 /// of a helper, or what a helper alone carries asked of a launch.
 fn kind(shape: Shape) -> Result<Kind, &'static str> {
     if !shape.independent {
-        return match (shape.detached, shape.provided) {
-            (true, _) => Err("only an independent launch is detached"),
-            (_, true) => Err("only an independent launch carries a provided connector"),
+        return match (shape.detached, shape.provided, shape.launcher_named) {
+            (true, _, _) => Err("only an independent launch is detached"),
+            (_, true, _) => Err("only an independent launch carries a provided connector"),
+            (_, _, true) => Err("only an independent launch goes through a launcher"),
             _ => Ok(Kind::Helper),
         };
     }
@@ -155,6 +161,7 @@ impl<'a> Spawn<'a> {
             extra_fds: self.fds.iter().any(|&(fd, _, _)| fd > 2),
             image_named: self.image.is_some() || self.image_held,
             provided: !self.provided.is_empty(),
+            launcher_named: self.launcher.is_some(),
         };
         match kind(shape).map_err(Refused::Invalid)? {
             Kind::Helper => Ok(Start::Helper(Helper(self))),
@@ -279,8 +286,13 @@ impl Independent<'_, '_> {
     /// carries. A job the spawn endowed goes itself, moved as an endowment is.
     pub fn launch(self) -> Result<Process, Refused> {
         let s = self.0;
-        let held = crate::endow::launcher().ok_or(Refused::Permission("this process holds no launcher"))?;
-        let conn = held.open(launch::LAUNCHER).map_err(|_| Refused::Permission("the launcher this process holds will not open"))?;
+        let held = match s.launcher {
+            Some(named) => named,
+            None => crate::endow::launcher().ok_or(Refused::Permission("this process holds no launcher"))?.as_handle(),
+        };
+        let conn = syscall::namespace_open(held, launch::LAUNCHER)
+            .map(|h| crate::ipc::Connection(crate::OwnedHandle(h)))
+            .map_err(|_| Refused::Permission("the launcher this process holds will not open"))?;
         let place = match s.parent {
             Parent::Detached => None,
             Parent::Place(place) => Some(place),
@@ -396,10 +408,15 @@ mod tests {
     /// carries is refused a launch: neither becomes the other.
     #[test]
     fn each_kind_refuses_what_the_other_alone_takes() {
-        const LAUNCH: Shape = Shape { independent: true, detached: false, endowed: false, extra_fds: false, image_named: false, provided: false };
+        const LAUNCH: Shape =
+            Shape { independent: true, detached: false, endowed: false, extra_fds: false, image_named: false, provided: false, launcher_named: false };
         assert_eq!(kind(LAUNCH), Ok(Kind::Launch));
-        assert_eq!(kind(Shape { detached: true, provided: true, ..LAUNCH }), Ok(Kind::Launch));
-        for shape in [Shape { detached: true, ..Shape::default() }, Shape { provided: true, ..Shape::default() }] {
+        assert_eq!(kind(Shape { detached: true, provided: true, launcher_named: true, ..LAUNCH }), Ok(Kind::Launch));
+        for shape in [
+            Shape { detached: true, ..Shape::default() },
+            Shape { provided: true, ..Shape::default() },
+            Shape { launcher_named: true, ..Shape::default() },
+        ] {
             assert!(kind(shape).is_err(), "{shape:?}");
         }
         for shape in [

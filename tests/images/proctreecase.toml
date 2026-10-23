@@ -11,8 +11,9 @@
 # package it installed under the image's `[apps]` row and the view an
 # installed package is minted, and is refused one named after the `shell` row.
 # It grants that package a folder through `grants`, which test-runner's row
-# lists, so it is refused in the machine's session, and the shell's, so the
-# login session the shell opens is answered.
+# lists, so it is refused in the machine's session, and the shell's, so it is
+# answered from the login session the job opens: test-runner is a login
+# authority, and hands each job its `login` connector.
 
 [boot]
 start = ["logkeeper", "diskserver", "fileserver", "test-runner"]
@@ -32,6 +33,7 @@ syscap = ["logread"]
 [programs.test-runner]
 syscap = ["dup", "roster"]
 starts = ["toybox", "shell", "grants", "/apps"]
+login = true
 
 # `roster`, which a child the job spawns itself never holds: a child holding
 # it ran under this row, and `launch_toctou` asks which bytes that child was.
@@ -40,7 +42,9 @@ syscap = ["roster"]
 
 [programs.shell]
 starts = ["toybox", "shell", "grants"]
-login = true
+
+# The owner of each login session a job opens.
+[programs.session]
 
 [programs.grants]
 receives = ["grants"]

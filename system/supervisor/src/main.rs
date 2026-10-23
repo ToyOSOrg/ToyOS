@@ -87,6 +87,8 @@
 //! that asks for the supervisor is the one way to outlive the caller, and one naming
 //! neither is refused.
 
+mod sessions;
+
 use std::cell::{Cell, RefCell};
 use std::collections::BTreeMap;
 use std::os::toyos::process::{ChildExt, CommandExt};
@@ -188,6 +190,10 @@ enum Port {
     Launcher(Caller),
     /// Who asks to read or change the grants, off the connection's badge.
     Grants(Caller),
+    /// The login authority asking for a session, off its badge.
+    Login(&'static Program),
+    /// The `logout` asking about its user's sessions, off its badge.
+    Admin(Caller),
     Swap,
     Power,
 }
@@ -198,6 +204,26 @@ enum Port {
 struct Minted {
     launcher: Acceptor,
     grants: Acceptor,
+    /// [`toyos_session::LOGIN_PORT`], minted with a `login` row's key.
+    login: Acceptor,
+    /// [`toyos_session::ADMIN_PORT`], minted with its holder's row and session.
+    admin: Acceptor,
+}
+
+/// What one start is minted: the session its files and grants are in, and
+/// the launcher port its launches are minted on with their session.
+#[derive(Clone, Copy)]
+struct Minting<'m> {
+    minted: &'m Minted,
+    session: Session,
+    launches: (&'m Acceptor, Session),
+}
+
+impl<'m> Minting<'m> {
+    /// A start whose launches are in its own session, on the machine's launcher.
+    fn own(minted: &'m Minted, session: Session) -> Self {
+        Self { minted, session, launches: (&minted.launcher, session) }
+    }
 }
 
 /// The poll tokens for the `launcher`, `swap`, `power` and `grants` acceptors, for the
@@ -215,12 +241,20 @@ const TOKEN_GRANTS_ACCEPTOR: u64 = 5;
 /// The parked launch's caller, and its question's connection ([`Parked`]).
 const TOKEN_PARKED_CALLER: u64 = 6;
 const TOKEN_CONSENT: u64 = 7;
-const TOKEN_PENDING_BASE: u64 = 8;
+const TOKEN_LOGIN_ACCEPTOR: u64 = 8;
+const TOKEN_ADMIN_ACCEPTOR: u64 = 9;
+/// Every session owner's link, and the ends of every session's apps.
+const TOKEN_LINKS: u64 = 10;
+const TOKEN_APPS: u64 = 11;
+const TOKEN_PENDING_BASE: u64 = 12;
 
 /// The processes whose end the supervisor watches at once: its services and
 /// its `drives` processes, in what a poller holds beside the loop's own
 /// watches. A `drives` process past it is not started, and says so.
-const MAX_CHILDREN: usize = Poller::MAX_HANDLES as usize - TOKEN_PENDING_BASE as usize - MAX_PENDING_LAUNCHES;
+const MAX_CHILDREN: usize = Poller::MAX_HANDLES as usize
+    - TOKEN_PENDING_BASE as usize
+    - MAX_PENDING_LAUNCHES
+    - 2 * sessions::MAX_SESSIONS;
 
 /// How long a stop waits for `logkeeper` to say the log is whole.
 ///
@@ -451,7 +485,9 @@ fn main() {
     // with that program's row.
     let (launcher, _) = port::create().expect("supervisor: no port for `launcher`");
     let (grants_port, grants_connector) = port::create().expect("supervisor: no port for `grants`");
-    let minted = Minted { launcher, grants: grants_port };
+    let (login, _) = port::create().expect("supervisor: no port for `login`");
+    let (admin, _) = port::create().expect("supervisor: no port for `session-admin`");
+    let minted = Minted { launcher, grants: grants_port, login, admin };
     let mut sessions = Sessions::default();
 
     // SYSTEM, from the file server's boot image: what serves `/system`. No
@@ -507,7 +543,7 @@ fn main() {
         .served_names()
         .into_iter()
         .chain(system.supervisor_serves.iter().map(String::as_str))
-        .filter(|name| *name != grants::PORT);
+        .filter(|name| ![grants::PORT, toyos_session::ADMIN_PORT].contains(name));
     for name in names {
         let (acceptor, connector) =
             port::create().unwrap_or_else(|e| panic!("supervisor: no port for `{name}`: {e:?}"));
@@ -548,6 +584,8 @@ fn main() {
         log,
         worker: Worker::start(),
         restarting: false,
+        logins: sessions::Logins::default(),
+        watch: sessions::Watch::new(),
     };
     supervisor.boot(&mut role_acceptors);
 
@@ -612,7 +650,7 @@ impl Worker {
                 }
             })
             .expect("supervisor: its file worker could not be started");
-        Self { jobs, done, owed: 0, owed_what: String::new(), poller: Poller::new(1 + MAX_CHILDREN as u32) }
+        Self { jobs, done, owed: 0, owed_what: String::new(), poller: Poller::new((1 + MAX_CHILDREN + sessions::MAX_SESSIONS) as u32) }
     }
 
     /// Count the jobs that have finished since last asked.
@@ -687,6 +725,10 @@ struct Supervisor<'a> {
     /// Inside [`Supervisor::ended`]: a file call made there leaves an end for
     /// the loop, which is the one caller that acts on it.
     restarting: bool,
+    /// The login sessions open, each with its owner.
+    logins: sessions::Logins,
+    /// The ends of every app started in a login session.
+    watch: sessions::Watch,
 }
 
 /// One `drives` process, and the function it holds.
@@ -725,6 +767,8 @@ struct Service<'a> {
     session: Session,
     /// The starts after an end it has spent.
     budget: Budget,
+    /// The screen's row's desktop session, which each start of it holds.
+    desktop: Option<sessions::Desktop>,
 }
 
 impl<'a> Service<'a> {
@@ -739,6 +783,7 @@ impl<'a> Service<'a> {
             swapping: false,
             session,
             budget: Budget::default(),
+            desktop: None,
         }
     }
 
@@ -774,6 +819,14 @@ impl<'a> Service<'a> {
         if is_block(self.program) {
             storage.args.extend(block);
         }
+        let launches = match &self.desktop {
+            Some(desktop) => {
+                let control = desktop.control().map_err(std::io::Error::other)?;
+                storage.endow.push((toyos_session::CONTROL_LABEL, control.into_raw()));
+                (&*desktop.launcher, desktop.session)
+            }
+            None => (&minted.launcher, self.session),
+        };
         let ports = self.ports.borrow();
         let served = Served::Keep { acceptors: &ports, owed };
         let command = match source {
@@ -794,7 +847,7 @@ impl<'a> Service<'a> {
             grants,
             &[],
             storage,
-            (minted, self.session),
+            Minting { minted, session: self.session, launches },
             Output::Boot(log),
         )?;
         drop(ports);
@@ -947,6 +1000,7 @@ impl<'a> Supervisor<'a> {
                 homes_made = true;
             }
             self.make_state_dir(program);
+            self.desktop_for(at);
             let block = self.block_args();
             let service = &mut self.services[at];
             // SYSTEM was started before the manifest was read.
@@ -1056,7 +1110,7 @@ impl<'a> Supervisor<'a> {
             extra.stop = Some(read);
             stop = Some(write);
         }
-        let launcher = (&self.minted, self.sessions.machine());
+        let launcher = Minting::own(&self.minted, self.sessions.machine());
         let served = Served::Keep { acceptors: &[], owed: &[] };
         let output = Output::Boot(&mut self.log);
         let path = row.source.path().ok_or_else(|| format!("{} runs {}, and a `drives` row runs a file", row.name, row.source))?;
@@ -1317,6 +1371,12 @@ impl<'a> Supervisor<'a> {
         loop {
             poller.watch(&self.minted.launcher, READABLE, TOKEN_ACCEPTOR);
             poller.watch(&self.minted.grants, READABLE, TOKEN_GRANTS_ACCEPTOR);
+            poller.watch(&self.minted.login, READABLE, TOKEN_LOGIN_ACCEPTOR);
+            poller.watch(&self.minted.admin, READABLE, TOKEN_ADMIN_ACCEPTOR);
+            poller.watch(&self.watch.ended, READABLE, TOKEN_APPS);
+            for login in &self.logins.open {
+                poller.watch(&login.link, READABLE, TOKEN_LINKS);
+            }
             poller.watch(swap, READABLE, TOKEN_SWAP_ACCEPTOR);
             poller.watch(power, READABLE, TOKEN_POWER_ACCEPTOR);
             self.watch_children(&poller);
@@ -1360,6 +1420,8 @@ impl<'a> Supervisor<'a> {
                     (|s, c| s.caller(&s.minted.launcher, c).map(Port::Launcher)) as fn(&Self, &Connection) -> _,
                 ),
                 (TOKEN_GRANTS_ACCEPTOR, &self.minted.grants, |s, c| s.caller(&s.minted.grants, c).map(Port::Grants)),
+                (TOKEN_LOGIN_ACCEPTOR, &self.minted.login, |s, c| s.opener(c).map(Port::Login)),
+                (TOKEN_ADMIN_ACCEPTOR, &self.minted.admin, |s, c| s.caller(&s.minted.admin, c).map(Port::Admin)),
                 (TOKEN_SWAP_ACCEPTOR, swap, |_, _| Ok(Port::Swap)),
                 (TOKEN_POWER_ACCEPTOR, power, |_, _| Ok(Port::Power)),
             ] {
@@ -1426,6 +1488,8 @@ impl<'a> Supervisor<'a> {
                                 self.serve_launch(p.conn, &caller, msg_type, &payload, carried, &mut parked)
                             }
                             Port::Grants(caller) => self.serve_grants(&p.conn, &caller, msg_type, p.rx.payload(payload_len)),
+                            Port::Login(opener) => self.serve_login(&p.conn, opener, msg_type),
+                            Port::Admin(caller) => self.serve_admin(&p.conn, &caller, msg_type, p.rx.payload(payload_len)),
                             Port::Power => self.stop(&p.conn, msg_type),
                             Port::Swap => {
                                 let payload = p.rx.payload(payload_len).to_vec();
@@ -1456,10 +1520,24 @@ impl<'a> Supervisor<'a> {
             let (caller_ready, consent_ready) = (ready.contains(&TOKEN_PARKED_CALLER), ready.contains(&TOKEN_CONSENT));
             parked = parked.and_then(|asked| self.advance_parked(asked, caller_ready, consent_ready));
 
+            if ready.contains(&TOKEN_LINKS) {
+                self.pump_links(&mut pending);
+            }
+            if ready.contains(&TOKEN_APPS) {
+                self.apps_ended();
+            }
             if ready.contains(&TOKEN_ENDED) {
                 self.ended();
             }
         }
+    }
+
+    /// The `login` row the badge of a connection on [`Minted::login`] names.
+    fn opener(&self, conn: &Connection) -> Result<&'static Program, String> {
+        let mut badge = [0u8; MAX_BADGE];
+        let badge = self.minted.login.badge(conn, &mut badge).map_err(|e| format!("its connection has no badge ({e:?})"))?;
+        let row = std::str::from_utf8(badge).map_err(|_| format!("its badge is not one this supervisor writes: {badge:?}"))?;
+        self.system.program(row).filter(|p| p.login).ok_or_else(|| format!("its badge names `{row}`, which is no `login` row"))
     }
 
     /// The row and session the badge of a connection on `acceptor`, one of
@@ -1590,6 +1668,7 @@ impl<'a> Supervisor<'a> {
         let owed = self.services[index].devices.clone();
         let program = self.services[index].program;
         self.make_state_dir(program);
+        self.desktop_for(index);
         let block = self.block_args();
         let service = &mut self.services[index];
         swapped(
@@ -1802,7 +1881,7 @@ impl<'a> Supervisor<'a> {
     /// end, but a swapping service's: its swap watches that.
     fn watch_children(&self, poller: &Poller) {
         let services = self.services.iter().filter(|service| !service.swapping).filter_map(|service| service.child.as_ref());
-        for child in services.chain(self.instances.iter().map(|instance| &instance.child)) {
+        for child in services.chain(self.instances.iter().map(|instance| &instance.child)).chain(self.owners()) {
             poller.watch_raw(toyos::RawHandle(child.as_raw_handle()), READABLE, TOKEN_ENDED);
         }
     }
@@ -1834,6 +1913,7 @@ impl<'a> Supervisor<'a> {
                 AfterEnd::Restart => {
                     let (source, owed, program) = (service.source.clone(), service.devices.clone(), service.program);
                     self.make_state_dir(program);
+                    self.desktop_for(index);
                     let block = self.block_args();
                     let service = &mut self.services[index];
                     let (system, syscap, connectors, grants) = (self.system, self.syscap, &self.connectors, &self.grants);
@@ -1861,6 +1941,7 @@ impl<'a> Supervisor<'a> {
         if any {
             self.drive();
         }
+        self.sessions_ended();
         self.restarting = false;
     }
 
@@ -1869,6 +1950,7 @@ impl<'a> Supervisor<'a> {
     fn restore(&mut self, index: usize, previous: &Source, owed: &[String]) {
         let program = self.services[index].program;
         self.make_state_dir(program);
+        self.desktop_for(index);
         let block = self.block_args();
         let service = &mut self.services[index];
         let name = service.program.name.clone();
@@ -2055,7 +2137,15 @@ impl Supervisor<'_> {
         // detached, which would let it outlive a caller that never asked it to.
         let under = match request.parent() {
             Some(Parent::Place(())) => Some(place.0[0]),
-            Some(Parent::Detached) => None,
+            // Under the session's owner, or in the machine's session the supervisor.
+            Some(Parent::Detached) => match self.logins.detached_place(caller.session) {
+                Ok(place) => place,
+                Err(why) => {
+                    say!("supervisor: launcher: refused a detached launch: {why}");
+                    let _ = conn.try_signal(launch::MSG_REFUSED);
+                    return;
+                }
+            },
             None => {
                 say!("supervisor: launcher: refused a launch that names no parent");
                 let _ = conn.try_signal(launch::MSG_REFUSED);
@@ -2103,7 +2193,7 @@ impl Supervisor<'_> {
         let (row, session) = (caller.row, caller.session);
         let found = self.files("a launch's files", move || {
             resolve(system, &path, |target| -> Result<_, authority::Refusal> {
-                let starts = authority::may_start(row, session, target)?;
+                authority::may_start(row, session, target)?;
                 let (Target::Row(program) | Target::Package(program)) = target;
                 let prepared = match program.source.path() {
                     Some(path) => command.image_from(Path::new(path)).prepare().map(drop),
@@ -2115,7 +2205,7 @@ impl Supervisor<'_> {
                         .map(|bytes| toyos_swap::hex(&toyos_swap::digest(bytes)))
                         .ok_or_else(|| format!("{} was not read before its start, so no grant can name it", program.source))
                 });
-                Ok((starts, binary, prepared.map(|()| command)))
+                Ok((binary, prepared.map(|()| command)))
             })
         });
         let resolved = match found {
@@ -2143,7 +2233,7 @@ impl Supervisor<'_> {
                 return;
             }
         };
-        let (starts, binary, prepared) = match verdict {
+        let (binary, prepared) = match verdict {
             Ok(judged) => judged,
             Err(why) => {
                 say!("supervisor: launcher: {} in {} may not start {}: {why}", caller.row.name, caller.session, program.name);
@@ -2167,7 +2257,7 @@ impl Supervisor<'_> {
                 return;
             }
         };
-        let session = starts.session(&mut self.sessions);
+        let session = caller.session;
         let caller_fds: Option<Vec<(u32, toyos::RawHandle, toyos::fd::Kind)>> = request
             .fds()
             .zip(fds.0.iter().copied())
@@ -2324,6 +2414,8 @@ impl Supervisor<'_> {
             }
         }
         let storage = self.slot_storage(program);
+        let in_login = self.logins.launcher_of(session);
+        let launches = (in_login.as_deref().unwrap_or(&self.minted.launcher), session);
         let started = start(
             command,
             program,
@@ -2334,12 +2426,13 @@ impl Supervisor<'_> {
             &self.grants,
             &extras,
             storage,
-            (&self.minted, session),
+            Minting { minted: &self.minted, session, launches },
             Output::Launch { log: &mut self.log, fds: &caller_fds, job: job.take()[0] },
         );
         drop(fds);
         match started {
             Ok((child, _)) => {
+                self.started_in(session, &program.name, toyos::RawHandle(child.as_raw_handle()));
                 // SAFETY: `into_raw_handle` gave up the child's one handle in this table.
                 let handle = unsafe { toyos::OwnedHandle::from_raw(toyos::RawHandle(child.into_raw_handle())) };
                 // Consumed either way, so the supervisor keeps no `Process` handle from a
@@ -2672,10 +2765,10 @@ fn start<'a>(
     grants: &Grants<'_>,
     extras: &[(String, Connector)],
     extra: Extra,
-    launcher: (&Minted, Session),
+    minting: Minting<'_>,
     output: Output<'_>,
 ) -> Result<(Child, Vec<String>), StartError> {
-    let Extra { args, claims, root, ports, stop } = extra;
+    let Extra { args, claims, root, ports, stop, endow } = extra;
     // A storage row's own arguments first: a file server's role leads its argv.
     command.args(&args);
     command.args(&program.args);
@@ -2722,9 +2815,13 @@ fn start<'a>(
         command.endow(ROOT_IMAGE_LABEL, root.0);
         held.0.push(root);
     }
-    let mut view = grants.view(program, launcher.1);
+    for (label, handle) in endow {
+        command.endow(label, handle.0);
+        held.0.push(handle);
+    }
+    let mut view = grants.view(program, minting.session);
     view.extend(ports);
-    view.extend(grants.netstack(program, launcher.1));
+    view.extend(grants.netstack(program, minting.session));
     if let Some(ns) = build_namespace(program, system, connectors, view, extras)? {
         let raw = ns.into_raw();
         command.endow(SVC_LABEL, raw.0);
@@ -2735,14 +2832,24 @@ fn start<'a>(
         command.endow(toyos_swap::LABEL, raw.0);
         held.0.push(raw);
     }
-    if let Some(ns) = launcher_namespace(program, launcher) {
+    if let Some(ns) = launcher_namespace(program, minting.launches) {
         let raw = ns.into_raw();
         command.endow(LAUNCHER, raw.0);
         held.0.push(raw);
     }
-    if let Some(ns) = grants_namespace(program, launcher) {
-        let raw = ns.into_raw();
-        command.endow(grants::PORT, raw.0);
+    let minted = minting.minted;
+    let badged = [
+        (grants::PORT, program.receives.iter().any(|name| name == grants::PORT), &minted.grants),
+        (toyos_session::ADMIN_PORT, program.receives.iter().any(|name| name == toyos_session::ADMIN_PORT), &minted.admin),
+    ];
+    for (name, _, acceptor) in badged.into_iter().filter(|(_, receives, _)| *receives) {
+        let raw = badged_namespace(program, name, acceptor, minting.session).into_raw();
+        command.endow(name, raw.0);
+        held.0.push(raw);
+    }
+    if program.login {
+        let raw = login_namespace(program, &minted.login).into_raw();
+        command.endow(toyos_session::LOGIN_PORT, raw.0);
         held.0.push(raw);
     }
 
@@ -2994,7 +3101,7 @@ fn build_namespace(
     extras: &[(String, Connector)],
 ) -> std::io::Result<Option<Namespace>> {
     // Never the swap port nor the grants port: [`swap_namespace`] and
-    // [`grants_namespace`] say why. Never the block port's own connector,
+    // [`badged_namespace`] say why. Never the block port's own connector,
     // which reaches nothing: a holder of `block` holds one minted for what it
     // reaches, in `view`, and a disk driver one of `disk` minted for who it
     // is; nor netstack's, which nothing holds: a holder of `netstack` holds
@@ -3003,7 +3110,8 @@ fn build_namespace(
         .receives
         .iter()
         .filter(|name| {
-            ![toyos_swap::PORT, grants::PORT, toyos_blockring::PORT, toyos_blockring::disk::PORT, NETSTACK].contains(&name.as_str())
+            ![toyos_swap::PORT, grants::PORT, toyos_session::ADMIN_PORT, toyos_blockring::PORT, toyos_blockring::disk::PORT, NETSTACK]
+                .contains(&name.as_str())
         })
         .collect();
     if receives.is_empty() && extras.is_empty() && view.is_empty() {
@@ -3181,43 +3289,43 @@ fn swap_namespace(program: &Program, connectors: &BTreeMap<&str, Connector>) -> 
     Some(ns)
 }
 
-/// A `launcher` minted with `program`'s row and the session it runs in, in a
-/// namespace of its own, for a row whose `starts` lists anything; endowed under
-/// [`LAUNCHER`] and never an entry of `svc`, for [`swap_namespace`]'s reason.
-fn launcher_namespace(program: &Program, (minted, session): (&Minted, Session)) -> Option<Namespace> {
+/// A `launcher` minted with `program`'s row and the session its launches run
+/// in, on that session's launcher port, in a namespace of its own, for a row
+/// whose `starts` lists anything; endowed under [`LAUNCHER`] and never an
+/// entry of `svc`, for [`swap_namespace`]'s reason.
+fn launcher_namespace(program: &Program, (launcher, session): (&Acceptor, Session)) -> Option<Namespace> {
     if program.starts.is_empty() {
         return None;
     }
-    let badge = Authority { row: program.name.clone(), session }.encode();
-    let connector = minted
-        .launcher
-        .mint(&badge)
-        .unwrap_or_else(|e| panic!("supervisor: no launcher for {}: {e:?}", program.name));
-    let ns = namespace::build()
-        .add(LAUNCHER, &connector)
-        .finish()
-        .unwrap_or_else(|e| panic!("supervisor: no launcher namespace for {}: {e:?}", program.name));
-    Some(ns)
+    Some(badged_namespace(program, LAUNCHER, launcher, session))
 }
 
-/// [`grants::PORT`] minted with `program`'s row and the session it runs in, in
-/// a namespace of its own, for the row whose `receives` names it; endowed under
-/// that name and never an entry of `svc`, for [`swap_namespace`]'s reason.
-/// The badge is who asks: the supervisor honours a login session's alone.
-fn grants_namespace(program: &Program, (minted, session): (&Minted, Session)) -> Option<Namespace> {
-    if !program.receives.iter().any(|name| name == grants::PORT) {
-        return None;
-    }
+/// `name`, minted on `acceptor` with `program`'s row and `session`, in a
+/// namespace of its own: endowed under that name and never an entry of `svc`,
+/// for [`swap_namespace`]'s reason. The badge is who asks: the supervisor
+/// honours a login session's alone on [`grants::PORT`] and
+/// [`toyos_session::ADMIN_PORT`].
+fn badged_namespace(program: &Program, name: &str, acceptor: &Acceptor, session: Session) -> Namespace {
     let badge = Authority { row: program.name.clone(), session }.encode();
-    let connector = minted
-        .grants
+    let connector = acceptor
         .mint(&badge)
-        .unwrap_or_else(|e| panic!("supervisor: no grants connector for {}: {e:?}", program.name));
-    let ns = namespace::build()
-        .add(grants::PORT, &connector)
+        .unwrap_or_else(|e| panic!("supervisor: no `{name}` connector for {}: {e:?}", program.name));
+    namespace::build()
+        .add(name, &connector)
         .finish()
-        .unwrap_or_else(|e| panic!("supervisor: no grants namespace for {}: {e:?}", program.name));
-    Some(ns)
+        .unwrap_or_else(|e| panic!("supervisor: no `{name}` namespace for {}: {e:?}", program.name))
+}
+
+/// [`toyos_session::LOGIN_PORT`] minted with a `login` row's key, the login
+/// authority whose sessions it opens.
+fn login_namespace(program: &Program, login: &Acceptor) -> Namespace {
+    let connector = login
+        .mint(program.name.as_bytes())
+        .unwrap_or_else(|e| panic!("supervisor: no `login` connector for {}: {e:?}", program.name));
+    namespace::build()
+        .add(toyos_session::LOGIN_PORT, &connector)
+        .finish()
+        .unwrap_or_else(|e| panic!("supervisor: no `login` namespace for {}: {e:?}", program.name))
 }
 
 /// One of the supervisor's words on a swap: its line in the log.
@@ -3238,6 +3346,8 @@ struct Extra {
     ports: Vec<(String, Connector)>,
     /// A disk driver's end of its [`toyos_quiesce::DRIVER_STOP`] pipe.
     stop: Option<Pipe>,
+    /// Handles endowed by label, owned by the start until the spawn moves them.
+    endow: Vec<(&'static str, toyos::RawHandle)>,
 }
 
 /// Every record the kernel's inventory answers.

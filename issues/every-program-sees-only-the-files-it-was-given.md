@@ -129,11 +129,11 @@ nameable by every program and make confused-deputy bugs structural.
 
 ## Known weaknesses
 
-- **A login session never ends.** A program launched in one keeps the session
-  in its launcher's badge after the login that opened it is gone, so a
-  detached program can start `swap` after logout. The exit is a session's end
-  ending its launches, which the per-session `/tmp`'s wait on the session's
-  first process provides.
+- **A login session's `/tmp` is the machine's.** A session ends with its
+  owner once every app in it has ended (stage 5 of
+  `issues/a-childs-end-is-an-event-and-a-parent-takes-its-children-down.md`),
+  and its launcher's port with it, but what it wrote under `/tmp` stays for
+  every other session to read. The exit is the per-session `/tmp`.
 
 ## Ordering
 
