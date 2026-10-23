@@ -1053,7 +1053,7 @@ fn second() -> Holder {
 #[test]
 fn a_holder_past_the_first_takes_a_place_and_none_is_made_past_the_places() {
     let (mut net, id, _client) = established();
-    net.node.set_places(net.now, 2);
+    net.node.set_places(2);
     assert_eq!(net.node.held(), 1);
     let (remote, _) = net.node.export(id).expect("a place for the second holder");
     assert_eq!(remote, peer(), "the holder is told the stream's peer");

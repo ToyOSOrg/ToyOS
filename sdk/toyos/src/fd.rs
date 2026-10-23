@@ -22,9 +22,9 @@
 //!
 //! **A process's descriptors arrive as endowments**, `fd:<n>` (`FD_PREFIX`)
 //! or `fd:<n>:<kind>` ([`Kind`]), each installed at its number at the table's
-//! first use; its stdio is descriptors 0 to 2 among them. A stream's arrives
-//! as an exported end, which the table takes up as this process's holder
-//! (`net::stream::adopt_exported`).
+//! first use; its stdio is descriptors 0 to 2 among them. A stream's, a
+//! listener's and a datagram socket's arrive as an exported end, which the
+//! table takes up as this process's holder (`net::adopt_exported`).
 
 use toyos_abi::RawHandle;
 
@@ -58,6 +58,11 @@ pub const STREAM: u32 = 2;
 /// The tag of a directory the kernel serves, which has no handle
 /// (`crate::files`).
 pub const KERNEL_DIR: u32 = 3;
+/// The tag of a listener's or a datagram socket's descriptor
+/// (`crate::net::socket`): a copy of its bell, which a poller watches and no
+/// file call reaches, let go by the copy of this crate that holds the
+/// socket's end.
+pub const SOCKET: u32 = 4;
 
 /// What a descriptor names.
 #[repr(C)]
@@ -85,6 +90,12 @@ impl Object {
     /// the stream's end, lets go of once no descriptor and no call names it.
     pub const fn stream(handle: RawHandle, release: extern "C" fn(u64)) -> Self {
         Self { handle, tag: STREAM, word: handle.0 as u64, release: Some(release) }
+    }
+
+    /// A listener's or a datagram socket's bell, which `release`, of the copy
+    /// of this crate holding the socket's end, lets go of as [`Self::stream`].
+    pub const fn socket(handle: RawHandle, release: extern "C" fn(u64)) -> Self {
+        Self { handle, tag: SOCKET, word: handle.0 as u64, release: Some(release) }
     }
 
     /// The kernel handle a kernel call on the descriptor is made on: `None`
@@ -212,21 +223,24 @@ pub fn replace(fd: Fd, object: Object) -> Result<(), Error> {
 }
 
 /// What a child is given for `fd`, and its kind: a copy of the kernel handle
-/// it names, or for a stream an end of a new holder of it
-/// (`net::stream::export`). `None` for a descriptor that is not open, as a
-/// child of POSIX's holds no closed one. Refused for an object that is no
-/// kernel handle, for one the kernel will not duplicate, and for a stream
-/// netstack makes no holder of.
+/// it names, or for a stream, a listener or a datagram socket an end of a new
+/// holder of it (`net::stream::export`, `net::socket::export`). `None` for a
+/// descriptor that is not open, as a child of POSIX's holds no closed one.
+/// Refused for an object that is no kernel handle, for one the kernel will
+/// not duplicate, and for a socket netstack makes no holder of.
 pub fn copy(fd: Fd) -> Result<Option<(crate::OwnedHandle, Kind)>, crate::spawn::Refused> {
     use crate::spawn::Refused;
     let copied = with(fd, |o| match o.kernel_handle() {
+        _ if o.tag == SOCKET && crate::net::socket::is_socket(o.handle) => {
+            crate::net::socket::export(o.handle).map(|end| (end, Kind::Exported)).map_err(Refused::Export)
+        }
         Some(handle) if crate::net::stream::is_stream(handle) => {
-            crate::net::stream::export(handle).map(|end| (end, Kind::Stream)).map_err(Refused::Export)
+            crate::net::stream::export(handle).map(|end| (end, Kind::Exported)).map_err(Refused::Export)
         }
         Some(handle) if o.tag != STREAM => {
             toyos_abi::syscall::dup(handle).map(|copy| (crate::OwnedHandle(copy), Kind::Handle)).map_err(Refused::Syscall)
         }
-        // A stream another copy of this crate holds the end of, or no handle.
+        // A socket another copy of this crate holds the end of, or no handle.
         _ => Err(Refused::Syscall(toyos_abi::syscall::SyscallError::NotSupported)),
     });
     copied.map_or(Ok(None), |copied| copied.map(Some))
@@ -237,9 +251,9 @@ pub fn copy(fd: Fd) -> Result<Option<(crate::OwnedHandle, Kind)>, crate::spawn::
 pub enum Kind {
     /// The kernel handle the descriptor names: `fd:<n>`.
     Handle,
-    /// A stream's exported end, which the child takes up as its holder:
-    /// `fd:<n>:stream`.
-    Stream,
+    /// A stream's, a listener's or a datagram socket's exported end, which
+    /// the child takes up as its holder: `fd:<n>:exported`.
+    Exported,
 }
 
 impl Kind {
@@ -247,7 +261,7 @@ impl Kind {
     pub const fn suffix(self) -> &'static str {
         match self {
             Self::Handle => "",
-            Self::Stream => ":stream",
+            Self::Exported => ":exported",
         }
     }
 }
@@ -269,7 +283,7 @@ pub fn endowed_fd(label: &str) -> Option<(Fd, Kind)> {
     let rest = label.strip_prefix(toyos_abi::syscall::FD_PREFIX)?;
     let (digits, kind) = match rest.split_once(':') {
         None => (rest, Kind::Handle),
-        Some((digits, "stream")) => (digits, Kind::Stream),
+        Some((digits, "exported")) => (digits, Kind::Exported),
         Some(_) => return None,
     };
     let canonical = digits.bytes().all(|b| b.is_ascii_digit()) && (digits == "0" || !digits.starts_with('0'));
@@ -317,9 +331,9 @@ mod owner {
         })
     }
 
-    /// Install each `fd:` endowment at its number, a stream's taken up as
+    /// Install each `fd:` endowment at its number, a socket's taken up as
     /// this process's holder first. One whose number another already took,
-    /// or whose stream this process holds no room for, is refused, its handle
+    /// or whose socket this process holds no room for, is refused, its handle
     /// closed: how many were.
     fn endow(table: &mut Table<MAX_FDS>, endowed: &Endowments) -> Result<usize, Fault> {
         let mut refused = 0;
@@ -328,8 +342,8 @@ mod owner {
             let Some(handle) = endowed.take::<OwnedHandle>(label) else { continue };
             let object = match kind {
                 Kind::Handle => Object::handle(handle.into_raw()),
-                Kind::Stream => match crate::net::stream::adopt_exported(handle) {
-                    Some(descriptor) => crate::net::stream::descriptor(descriptor),
+                Kind::Exported => match crate::net::adopt_exported(handle) {
+                    Some(object) => object,
                     None => {
                         refused += 1;
                         continue;
@@ -441,13 +455,13 @@ mod tests {
     fn an_fd_label_names_its_number_and_kind_and_no_other_label_names_one() {
         assert_eq!(endowed_fd("fd:0"), Some((0, Kind::Handle)));
         assert_eq!(endowed_fd("fd:4095"), Some((4095, Kind::Handle)));
-        assert_eq!(endowed_fd("fd:3:stream"), Some((3, Kind::Stream)));
-        for kind in [Kind::Handle, Kind::Stream] {
+        assert_eq!(endowed_fd("fd:3:exported"), Some((3, Kind::Exported)));
+        for kind in [Kind::Handle, Kind::Exported] {
             assert_eq!(endowed_fd(&format!("fd:7{}", kind.suffix())), Some((7, kind)), "a label of its own");
         }
         for other in [
             "fd:4096", "fd:-1", "fd:", "fd:1x", "svc", "fd1", "dev:fd:1", "fd:+3", "fd:03", "fd:00", "fd: 3",
-            "fd:3:", "fd:3:file", "fd:3:stream:", "fd::stream", "fd:4096:stream",
+            "fd:3:", "fd:3:file", "fd:3:stream", "fd:3:exported:", "fd::exported", "fd:4096:exported",
         ] {
             assert_eq!(endowed_fd(other), None, "{other}");
         }

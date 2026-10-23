@@ -623,6 +623,16 @@ impl Shard {
         self.udp.recv(id, out)
     }
 
+    /// [`Udp::waiting`](toyos_net_udp::Udp::waiting).
+    pub fn udp_waiting(&mut self, id: SocketId) -> Result<usize, toyos_net_udp::Error> {
+        self.udp.waiting(id)
+    }
+
+    /// [`Udp::broadcast`](toyos_net_udp::Udp::broadcast).
+    pub fn udp_broadcast(&mut self, id: SocketId) -> Result<bool, toyos_net_udp::Error> {
+        self.udp.broadcast(id)
+    }
+
     /// The port a socket holds.
     pub fn udp_port(&mut self, id: SocketId) -> Result<Port, toyos_net_udp::Error> {
         self.udp.binding(id).map(|(_, port)| port)

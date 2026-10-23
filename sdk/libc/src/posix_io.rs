@@ -1015,8 +1015,8 @@ const MAX_POLLED: usize = toyos::poller::Poller::MAX_HANDLES as usize - 1;
 /// one that is ready answers at once; a direction that is not is counted in,
 /// drained, armed and looked at again (`toyos::net::stream::watch`), and its
 /// doorbell watched for reading: the connection for `POLLIN`, the bell for
-/// `POLLOUT`. Every other descriptor, a listener's wake pipe and a datagram
-/// socket's receive pipe for a socket's, is watched as it is.
+/// `POLLOUT`. Every other descriptor is watched as it is, a listener's and a
+/// datagram socket's by its holder's bell.
 ///
 /// # Safety
 /// `fds` points at `n` entries.

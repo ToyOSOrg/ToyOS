@@ -196,16 +196,16 @@ impl Command {
 
     /// Give the child descriptor `child_fd`, naming this process's
     /// `parent_handle`, which this process keeps: the spawn duplicates it, or,
-    /// for a stream's, gives the child a holder of the stream of its own.
+    /// for a stream's or a socket's, gives the child a holder of its own.
     pub fn inherit_handle(&mut self, child_fd: u32, parent_handle: u32) {
         self.inherit(child_fd, parent_handle, toyos::fd::Kind::Handle);
     }
 
-    /// Give the child descriptor `child_fd` as the stream end `end`, which
-    /// `toyos::net::stream::export` made: the spawn duplicates it, and the
-    /// child takes it up as a holder of the stream.
+    /// Give the child descriptor `child_fd` as the exported end `end`, which
+    /// `toyos::net`'s `export` made: the spawn duplicates it, and the child
+    /// takes it up as a holder of the stream or the socket.
     pub fn inherit_exported(&mut self, child_fd: u32, end: u32) {
-        self.inherit(child_fd, end, toyos::fd::Kind::Stream);
+        self.inherit(child_fd, end, toyos::fd::Kind::Exported);
     }
 
     fn inherit(&mut self, child_fd: u32, handle: u32, kind: toyos::fd::Kind) {
@@ -331,11 +331,16 @@ impl Command {
         let mut fds: Vec<(u32, toyos_abi::RawHandle, toyos::fd::Kind)> = Vec::new();
         for &(fd, handle, kind) in &self.extra_fds {
             let handle = toyos_abi::RawHandle(handle);
-            if toyos::net::stream::is_stream(handle) {
-                let end = toyos::net::stream::export(handle).map_err(|e| refused(toyos::spawn::Refused::Export(e)))?;
-                held.push((fd, end, toyos::fd::Kind::Stream));
+            let exported = if toyos::net::stream::is_stream(handle) {
+                Some(toyos::net::stream::export(handle))
+            } else if toyos::net::socket::is_socket(handle) {
+                Some(toyos::net::socket::export(handle))
             } else {
-                fds.push((fd, handle, kind));
+                None
+            };
+            match exported {
+                Some(end) => held.push((fd, end.map_err(|e| refused(toyos::spawn::Refused::Export(e)))?, toyos::fd::Kind::Exported)),
+                None => fds.push((fd, handle, kind)),
             }
         }
         fds.extend(held.iter().map(|(fd, h, kind)| (*fd, toyos::AsHandle::as_handle(h), *kind)));

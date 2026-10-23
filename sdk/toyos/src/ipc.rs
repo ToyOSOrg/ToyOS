@@ -363,6 +363,11 @@ pub fn send_bytes(handle: RawHandle, msg_type: u32, data: &[u8]) -> Result<(), I
     message(handle, msg_type, data, none(), false).map_err(blocking)
 }
 
+/// [`Connection::signal_with`] on a raw handle.
+pub(crate) fn signal_with(handle: RawHandle, msg_type: u32, handles: impl IntoIterator<Item = OwnedHandle>) -> Result<(), IpcError> {
+    message(handle, msg_type, &[], handles, false).map_err(blocking)
+}
+
 /// Send a framed payload without ever blocking, or refuse the whole frame.
 ///
 /// A server writing to a client it does not trust to read cannot use [`send`]:
@@ -764,7 +769,8 @@ fn fill(conn: &Connection, buf: &mut [u8], len: &mut usize) -> Fill {
     Fill::Filled
 }
 
-fn as_bytes<T: IpcPayload>(val: &T) -> &[u8] {
+/// A payload's bytes, as a frame carries them.
+pub(crate) fn as_bytes<T: IpcPayload>(val: &T) -> &[u8] {
     unsafe { core::slice::from_raw_parts(val as *const T as *const u8, core::mem::size_of::<T>()) }
 }
 

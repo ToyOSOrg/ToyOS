@@ -7,9 +7,14 @@
 //! nothing. A destination, a port or a length is the client's number and is refused, never
 //! trusted; a datagram off the wire reaches a socket only through [udp]'s demultiplexer.
 //!
-//! **A socket holds a place** (`places`) from its bind to its close: what it makes the node hold
-//! is its two queues, `limits::RX_DATAGRAMS` received and `limits::TX_DATAGRAMS` accepted. A bind
-//! with no place left is answered [`Refused::ResourceExhausted`] with nothing made.
+//! **A socket has holders** (`holders`), each told on its own bell that a datagram waits, all
+//! receiving from the one queue: a datagram goes to the one holder whose receive takes it. The
+//! socket lives until its last holder leaves ([`Node::datagram_departed`]).
+//!
+//! **A socket holds a place** (`places`) from its bind until then, and each holder past its
+//! first one more: what it makes the node hold is its two queues, `limits::RX_DATAGRAMS`
+//! received and `limits::TX_DATAGRAMS` accepted. A bind with no place left is answered
+//! [`Refused::ResourceExhausted`] with nothing made.
 //!
 //! **A send to a broadcast address needs the socket's permission** ([`Node::udp_set_broadcast`],
 //! POSIX's `SO_BROADCAST`), which a socket is bound without: one sent without it is answered
@@ -30,9 +35,13 @@
 
 use core::net::Ipv4Addr;
 
+use alloc::boxed::Box;
+
 use toyos_net_udp::{Counter, Error, SocketId};
 use toyos_net_wire::{Instant, Port};
 
+use crate::holders::{Bell, HolderId, Holders};
+use crate::streams::ExportRefused;
 use crate::Node;
 
 /// One client socket. An id outlives its socket only as a refusal: [udp] never hands a closed
@@ -45,7 +54,8 @@ pub struct DatagramId(SocketId);
 pub enum Refused {
     /// The port is another socket's, or no ephemeral port is free.
     AddrInUse,
-    /// The id names no socket, or the machine has no address or route to send from.
+    /// The id names no socket, or the holder none of its, or the machine has no address or route
+    /// to send from.
     NotConnected,
     /// The call names what no datagram of this socket may carry: an address that is not this
     /// machine's to bind, a destination nothing is sent to, port 0, more than one frame holds.
@@ -119,20 +129,35 @@ fn refused(error: Error) -> Refused {
 impl Node {
     /// Binds a socket to `addr`, 0.0.0.0 meaning every address the machine holds, and to `port`
     /// or, with none named, an ephemeral one, which spends the one draw. Returns the socket and
-    /// the port it holds.
-    pub fn udp_bind(&mut self, addr: Ipv4Addr, port: Option<Port>, draw: impl FnOnce() -> u32) -> Result<(DatagramId, Port), Refused> {
+    /// the port it holds; `bell` is its first holder's, [`HolderId::FIRST`].
+    pub fn udp_bind(&mut self, addr: Ipv4Addr, port: Option<Port>, bell: Box<dyn Bell>, draw: impl FnOnce() -> u32) -> Result<(DatagramId, Port), Refused> {
         if self.room() == 0 {
             return Err(Refused::ResourceExhausted);
         }
         let (id, port) = self.stack.bind(addr, port, draw).map_err(refused)?;
-        self.sockets = self.sockets.saturating_add(1);
+        self.datagrams.insert(DatagramId(id), Holders::new(bell));
         Ok((DatagramId(id), port))
+    }
+
+    /// A holder more of socket `id`, told on `bell`, which takes a place: the socket's port.
+    pub fn export_datagram(&mut self, id: DatagramId, bell: Box<dyn Bell>) -> Result<(HolderId, Port), ExportRefused> {
+        if self.room() == 0 {
+            return Err(ExportRefused::Full);
+        }
+        let holders = self.datagrams.get_mut(&id).ok_or(ExportRefused::Gone)?;
+        let Ok(port) = self.stack.port(id.0) else { unreachable!("[udp] lost a socket the node holds") };
+        Ok((holders.add(bell), port))
     }
 
     /// Whether the socket's datagrams may go to a broadcast address, the limited one or the
     /// directed one of a prefix the machine holds, from here on.
     pub fn udp_set_broadcast(&mut self, id: DatagramId, permitted: bool) -> Result<(), Refused> {
         self.stack.set_broadcast(id.0, permitted).map_err(refused)
+    }
+
+    /// Whether [`Self::udp_set_broadcast`] last permitted it.
+    pub fn udp_broadcast(&mut self, id: DatagramId) -> Result<bool, Refused> {
+        self.stack.broadcast(id.0).map_err(refused)
     }
 
     /// Queues `payload` for `destination:port`; it leaves in a later [`Node::transmit`].
@@ -142,19 +167,49 @@ impl Node {
         sent
     }
 
-    /// The oldest datagram that reached the socket, in `out`, or `None` when none waits. One
-    /// longer than `out` is cut to it and the rest is gone, as [udp] counts.
-    pub fn udp_recv_from(&mut self, id: DatagramId, out: &mut [u8]) -> Result<Option<Datagram>, Refused> {
+    /// `holder`'s receive: the oldest datagram that reached the socket, in `out`, or `None` when
+    /// none waits. One longer than `out` is cut to it and the rest is gone, as [udp] counts.
+    pub fn udp_recv_from(&mut self, id: DatagramId, holder: HolderId, out: &mut [u8]) -> Result<Option<Datagram>, Refused> {
+        if !self.datagrams.get_mut(&id).is_some_and(|holders| holders.asked(holder)) {
+            return Err(Refused::NotConnected);
+        }
         let received = self.stack.recv_from(id.0, out).map_err(refused)?;
+        self.tell_datagram_holders();
         Ok(received.map(|received| Datagram { len: received.len, source: received.source, source_port: received.source_port }))
     }
 
-    /// Closes the socket: its port is free at once, what it received is gone, and what it had
-    /// accepted still leaves, to [udp]'s bound. Its place is back.
-    pub fn udp_close(&mut self, now: Instant, id: DatagramId) -> Result<(), Refused> {
-        self.stack.close(now, id.0).map_err(refused)?;
-        self.sockets = self.sockets.saturating_sub(1);
-        self.wake_owners(now);
-        Ok(())
+    /// `holder` of socket `id` left. The last holder's leaving closes the socket: its port is
+    /// free at once, what it received is gone, and what it had accepted still leaves, to [udp]'s
+    /// bound. Either gives a place back.
+    pub fn datagram_departed(&mut self, now: Instant, id: DatagramId, holder: HolderId) {
+        let Some(holders) = self.datagrams.get_mut(&id) else { return };
+        if !holders.remove(holder) {
+            return;
+        }
+        if holders.is_empty() {
+            self.datagrams.remove(&id);
+            if let Err(error) = self.stack.close(now, id.0) {
+                unreachable!("[udp] refused the close of a socket the node holds: {error:?}");
+            }
+        }
+        self.tell_holders();
+    }
+
+    /// The clients' datagram sockets the node holds.
+    pub fn datagrams(&self) -> usize {
+        self.datagrams.len()
+    }
+
+    /// The clients' datagram sockets the node holds, and their holders past each first.
+    pub(crate) fn datagram_places(&self) -> usize {
+        self.datagrams.values().map(Holders::more).fold(self.datagrams.len(), usize::saturating_add)
+    }
+
+    /// Tells each holder of a socket a datagram waits for.
+    pub(crate) fn tell_datagram_holders(&mut self) {
+        for (id, holders) in &mut self.datagrams {
+            let Ok(waiting) = self.stack.waiting(id.0) else { unreachable!("[udp] lost a socket the node holds") };
+            holders.tell(waiting > 0);
+        }
     }
 }

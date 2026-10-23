@@ -428,6 +428,16 @@ impl Udp {
         self.socket(id).map(|s| s.broadcast = permitted)
     }
 
+    /// Whether [`Self::set_broadcast`] last permitted it.
+    pub fn broadcast(&mut self, id: SocketId) -> Result<bool, Error> {
+        self.socket(id).map(|s| s.broadcast)
+    }
+
+    /// The datagrams waiting for a [`Self::recv`].
+    pub fn waiting(&mut self, id: SocketId) -> Result<usize, Error> {
+        self.socket(id).map(|s| s.rx.len())
+    }
+
     pub fn set_ttl(&mut self, id: SocketId, unicast: Ttl, multicast: Ttl) -> Result<(), Error> {
         self.socket(id).map(|s| {
             s.ttl = unicast;

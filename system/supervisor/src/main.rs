@@ -3035,7 +3035,7 @@ fn start<'a>(
                     toyos::fd::Kind::Handle => {
                         command.inherit_handle(fd, handle.0);
                     }
-                    toyos::fd::Kind::Stream => {
+                    toyos::fd::Kind::Exported => {
                         command.inherit_exported(fd, handle.0);
                     }
                 }

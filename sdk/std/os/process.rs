@@ -14,15 +14,16 @@ pub fn tty_piped() -> crate::process::Stdio {
 pub trait CommandExt {
     /// Give the child descriptor `child_fd`, naming the kernel handle
     /// `parent_handle`, which this process keeps: the spawn duplicates it, or,
-    /// for a stream's, gives the child a holder of the stream of its own. One
-    /// of 0 to 2 replaces what the command's stdio would have given.
+    /// for a stream's, a listener's or a datagram socket's, gives the child a
+    /// holder of its own. One of 0 to 2 replaces what the command's stdio
+    /// would have given.
     #[stable(feature = "toyos_ext", since = "1.0.0")]
     fn inherit_handle(&mut self, child_fd: u32, parent_handle: u32) -> &mut Self;
 
-    /// Give the child descriptor `child_fd` as the stream end `end`, which
-    /// `toyos::net::stream::export` made and which this process keeps: the
-    /// spawn duplicates it, and the child takes it up as a holder of the
-    /// stream.
+    /// Give the child descriptor `child_fd` as the exported end `end`, which
+    /// `toyos::net`'s `export` made and which this process keeps: the spawn
+    /// duplicates it, and the child takes it up as a holder of the stream or
+    /// the socket.
     #[stable(feature = "toyos_ext", since = "1.0.0")]
     fn inherit_exported(&mut self, child_fd: u32, end: u32) -> &mut Self;
 

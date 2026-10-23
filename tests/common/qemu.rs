@@ -1205,6 +1205,10 @@ pub struct BootOptions {
     /// A slot file (`toyos_update::slots::*_FILE`) bent in the marked slot,
     /// with the other slot carrying the image whole ([`super::slots`]).
     pub bent: Option<&'static str>,
+    /// A TCP port of the host's loopback, `.0`, that QEMU's user network
+    /// forwards to the guest's port `.1`: what a peer on the host connects to a
+    /// guest's listener through. Only a profile with a NIC may set it.
+    pub forward: Option<(u16, u16)>,
 }
 
 impl BootOptions {
@@ -1246,6 +1250,7 @@ impl Default for BootOptions {
             psci_trace: None,
             rtc_base: None,
             bent: None,
+            forward: None,
         }
     }
 }
@@ -2482,19 +2487,24 @@ fn qemu_command(
     // The NIC before the virtio block, so a profile that has one and not the
     // other still creates it after the unit and before everything else.
     // `iommu_platform` is virtio's own way of asking to be decoded.
+    assert!(options.forward.is_none() || shape.nic != Nic::Absent, "a forwarded port needs a profile with a NIC");
+    let netdev = match options.forward {
+        Some((host, guest)) => format!("user,id=net0,hostfwd=tcp:127.0.0.1:{host}-:{guest}"),
+        None => "user,id=net0".to_string(),
+    };
     match shape.nic {
         Nic::Absent => {}
         Nic::Virtio => {
-            qemu.arg("-netdev").arg("user,id=net0").arg("-device").arg(format!(
+            qemu.arg("-netdev").arg(&netdev).arg("-device").arg(format!(
                 "virtio-net-pci-non-transitional,netdev=net0{platform}"
             ));
         }
         Nic::Untranslated => {
-            qemu.arg("-netdev").arg("user,id=net0").arg("-device").arg("virtio-net-pci-non-transitional,netdev=net0");
+            qemu.arg("-netdev").arg(&netdev).arg("-device").arg("virtio-net-pci-non-transitional,netdev=net0");
         }
         Nic::BehindPort => {
             qemu.arg("-device").arg("pcie-root-port,id=nicport,chassis=9");
-            qemu.arg("-netdev").arg("user,id=net0").arg("-device").arg(format!(
+            qemu.arg("-netdev").arg(&netdev).arg("-device").arg(format!(
                 "virtio-net-pci-non-transitional,netdev=net0,bus=nicport{platform}"
             ));
         }

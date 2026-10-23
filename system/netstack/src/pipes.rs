@@ -1,57 +1,23 @@
-//! The kernel's pipe end a listener's owner reads its wakes from, as the
-//! node's [`Wake`]: one non-blocking write, and the kernel's refusal in the
-//! node's word for it.
+//! A holder's bell of a listener or a datagram socket, as the node's [`Bell`]: netstack's write
+//! end of a pipe it made, whose read end only that holder is handed.
 //!
-//! **The node owns the end and netstack only watches it.** [`hold`] splits a
-//! pipe end into the [`Held`] the node is handed and the [`Watched`] netstack
-//! keeps: the handle closes when the node drops its half, which is how an
-//! owner reads the end of its listener, and from then the watched half names
-//! nothing.
-//!
-//! **Untrusted input.** The end is whatever handle its owner moved, and
-//! nothing checks its kind at intake: one that is no pipe end, or the wrong
-//! end, answers a refusal here that is neither a full pipe nor a vanished
-//! reader, and the node ends that listener for it.
-
-use std::rc::{Rc, Weak};
+//! **A ring is one non-blocking write that is never retried.** A full pipe is rung already, and
+//! one whose reader is gone has a holder whose connection's hang-up reports its leaving.
 
 use toyos::Pipe;
 use toyos_abi::syscall::SyscallError;
-use toyos_net_node::{Wake, WriteRefusal};
+use toyos_net_node::Bell;
 
-/// The half the node holds: the handle lives as long as this does.
-pub struct Held(Rc<Pipe>);
+pub struct Rung(Pipe);
 
-/// The half netstack watches by.
-pub struct Watched(Weak<Pipe>);
-
-pub fn hold(pipe: Pipe) -> (Held, Watched) {
-    let pipe = Rc::new(pipe);
-    let watched = Watched(Rc::downgrade(&pipe));
-    (Held(pipe), watched)
-}
-
-impl Watched {
-    /// The end, while the node holds it.
-    pub fn held(&self) -> Option<Rc<Pipe>> {
-        self.0.upgrade()
+impl Bell for Rung {
+    fn ring(&mut self) {
+        let _ = self.0.write_nonblock(&[1]);
     }
 }
 
-fn write_refused(why: SyscallError) -> WriteRefusal {
-    match why {
-        SyscallError::WouldBlock => WriteRefusal::Full,
-        SyscallError::Gone => WriteRefusal::Gone,
-        _ => WriteRefusal::Broken,
-    }
-}
-
-impl Wake for Held {
-    fn wake(&mut self) -> Result<(), WriteRefusal> {
-        match self.0.write_nonblock(&[1]) {
-            Ok(1) => Ok(()),
-            Ok(_) => Err(WriteRefusal::Full),
-            Err(why) => Err(write_refused(why)),
-        }
-    }
+/// A new bell: the read end to hand its holder, and the end the node rings.
+pub fn bell() -> Result<(Pipe, Rung), SyscallError> {
+    let (read, write) = toyos::pipe_pair()?;
+    Ok((read, Rung(write)))
 }

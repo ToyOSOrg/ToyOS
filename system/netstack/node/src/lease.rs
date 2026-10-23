@@ -209,6 +209,19 @@ impl Stack {
         self.shard.recv_from(id, out)
     }
 
+    /// The port a socket holds.
+    pub(crate) fn port(&mut self, id: SocketId) -> Result<Port, toyos_net_udp::Error> {
+        self.shard.udp_port(id)
+    }
+
+    pub(crate) fn waiting(&mut self, id: SocketId) -> Result<usize, toyos_net_udp::Error> {
+        self.shard.udp_waiting(id)
+    }
+
+    pub(crate) fn broadcast(&mut self, id: SocketId) -> Result<bool, toyos_net_udp::Error> {
+        self.shard.udp_broadcast(id)
+    }
+
     pub(crate) fn close(&mut self, now: Instant, id: SocketId) -> Result<(), toyos_net_udp::Error> {
         self.shard.udp_close(now, id)
     }

@@ -68,6 +68,7 @@ as_raw_fd! {
     crate::process::ChildStderr => |p| p.as_inner().raw_fd(), borrowed;
     crate::net::TcpStream => |s| s.as_inner().as_raw_fd();
     crate::net::TcpListener => |l| l.as_inner().as_raw_fd();
+    crate::net::UdpSocket => |u| u.as_inner().as_raw_fd(), borrowed;
 }
 
 /// A stream's descriptor is read and written through its region, never as a
@@ -152,6 +153,56 @@ impl From<crate::net::TcpStream> for fd::OwnedFd {
     fn from(stream: crate::net::TcpStream) -> Self {
         stream.into_inner().into_fd()
     }
+}
+
+/// A listener's and a datagram socket's descriptor, given out and taken back
+/// as a stream's is: taken back, one whose socket this process holds an end of
+/// of that kind shares it, and any other panics. A process holds an end by its
+/// listen or bind, or a spawn that gave it a holder.
+macro_rules! socket_fd {
+    ($($ty:ident, $kind:ident, $what:literal);+ $(;)?) => {$(
+        #[stable(feature = "toyos_ext", since = "1.0.0")]
+        impl FromRawFd for crate::net::$ty {
+            #[inline]
+            unsafe fn from_raw_fd(fd: RawFd) -> crate::net::$ty {
+                // SAFETY: the caller's, as `FromRawFd` states it.
+                crate::net::$ty::from(unsafe { fd::OwnedFd::from_raw_fd(fd) })
+            }
+        }
+
+        #[stable(feature = "toyos_ext", since = "1.0.0")]
+        impl IntoRawFd for crate::net::$ty {
+            #[inline]
+            fn into_raw_fd(self) -> RawFd {
+                self.into_inner().into_fd().into_raw_fd()
+            }
+        }
+
+        #[stable(feature = "toyos_ext", since = "1.0.0")]
+        impl From<fd::OwnedFd> for crate::net::$ty {
+            #[inline]
+            fn from(owned: fd::OwnedFd) -> Self {
+                let handle = owned.as_raw_handle();
+                if toyos::net::socket::kind(toyos_abi::RawHandle(handle)) != Some(toyos::net::socket::Kind::$kind) {
+                    panic!(concat!("toyos::net: handle {} is no ", $what, " of this process's: one reaches a process by its own bind or a spawn that gave it a holder of one"), handle);
+                }
+                crate::net::$ty::from_inner(crate::sys::net::$ty::from_fd(owned))
+            }
+        }
+
+        #[stable(feature = "toyos_ext", since = "1.0.0")]
+        impl From<crate::net::$ty> for fd::OwnedFd {
+            #[inline]
+            fn from(socket: crate::net::$ty) -> Self {
+                socket.into_inner().into_fd()
+            }
+        }
+    )+};
+}
+
+socket_fd! {
+    TcpListener, Listener, "listener";
+    UdpSocket, Datagram, "datagram socket";
 }
 
 /// Switch stdin between canonical and raw mode.

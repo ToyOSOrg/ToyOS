@@ -9,8 +9,10 @@ opened: 2026-09-08
 `sdk/libc/src/socket.rs`'s `getsockname()` fills the caller's `sockaddr`
 with `[10, 0, 2, 15]` and the socket's local port. The address is a literal in
 that function; netd is not asked, and the SDK has nothing to ask it with —
-`toyos::net` carries `tcp_connect`, `tcp_bind`, `tcp_accept`, the UDP calls and
-`dns_lookup`, and no call that answers "what is this machine's address".
+`toyos::net` carries a stream's connect, a listen, an accept, the datagram
+calls and `dns_lookup`, and no call that answers "what is this machine's
+address": a socket's `toyos::net::socket::local` is the address its bind
+named.
 
 It was true by coincidence until now: netd carried the same literal, so the
 shim and the stack agreed. netd takes its address from DHCP as of the change
