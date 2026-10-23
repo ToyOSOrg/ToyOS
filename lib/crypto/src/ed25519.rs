@@ -277,7 +277,8 @@ impl Projective {
     fn double(&self) -> Completed {
         let a = self.x.square();
         let b = self.y.square();
-        let c = self.z.square().mul_small(2);
+        let zz = self.z.square();
+        let c = zz.add(&zz).carry();
         let h = a.add(&b).carry();
         let g = a.sub(&b).carry();
         Completed {
@@ -338,7 +339,7 @@ const fn normalize<const N: usize>(points: &[[Tight; 4]; N]) -> [Niels; N] {
         prefix[i] = prefix[i - 1].times(&points[i][2]);
         i += 1;
     }
-    let mut inverse = prefix[N - 1].invert();
+    let mut inverse = prefix[N - 1].inverted();
     let mut table = [Niels::IDENTITY; N];
     let mut i = N;
     while i > 0 {

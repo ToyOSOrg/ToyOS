@@ -87,6 +87,22 @@ pub(crate) fn p256_square(a: &[u64; 4]) -> Option<[u64; 4]> {
     })
 }
 
+/// a b mod 2^255 - 19 in `field25519`'s four-word form, by an instruction
+/// path; `None` where the CPU has no such path. The time does not depend on
+/// a or b.
+#[cfg(target_arch = "x86_64")]
+#[inline]
+pub(crate) fn f25519_mul(a: &[u64; 4], b: &[u64; 4]) -> Option<[u64; 4]> {
+    x86_64::f25519_mul(a, b)
+}
+
+/// a^2 mod 2^255 - 19, as [`f25519_mul`].
+#[cfg(target_arch = "x86_64")]
+#[inline]
+pub(crate) fn f25519_square(a: &[u64; 4]) -> Option<[u64; 4]> {
+    x86_64::f25519_square(a)
+}
+
 /// GHASH key powers, (H^(i+1))' at index i in the instruction paths' form.
 pub(crate) type Powers = [u128; 16];
 

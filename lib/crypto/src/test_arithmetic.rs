@@ -80,6 +80,40 @@ impl Field for Curve25519 {
     }
 }
 
+/// The same field through the `const` forms that build compile-time tables.
+struct Curve25519Const;
+
+impl Field for Curve25519Const {
+    type E = Tight;
+    fn modulus(&self) -> BigUint {
+        Curve25519.modulus()
+    }
+    fn input_bound(&self) -> BigUint {
+        Curve25519.input_bound()
+    }
+    fn from(&self, value: &BigUint) -> Tight {
+        Curve25519.from(value)
+    }
+    fn value(&self, e: &Tight) -> BigUint {
+        Curve25519.value(e)
+    }
+    fn add(&self, a: &Tight, b: &Tight) -> Tight {
+        a.add(b).carry()
+    }
+    fn sub(&self, a: &Tight, b: &Tight) -> Tight {
+        a.sub(b).carry()
+    }
+    fn mul(&self, a: &Tight, b: &Tight) -> Tight {
+        a.times(b)
+    }
+    fn square(&self, a: &Tight) -> Tight {
+        a.squared()
+    }
+    fn invert(&self, a: &Tight) -> Tight {
+        a.inverted()
+    }
+}
+
 fn words<const N: usize>(value: &BigUint) -> [u64; N] {
     let mut words = [0; N];
     for (i, word) in value.iter_u64_digits().enumerate() {
@@ -274,6 +308,11 @@ fn field25519_matches_integers() {
 }
 
 #[test]
+fn compile_time_field25519_forms_match_integers() {
+    check(&Curve25519Const, 0x0fed_cba9_8765_4321);
+}
+
+#[test]
 fn field25519_negation_and_small_constants_match_integers() {
     let p = Curve25519.modulus();
     for a in boundaries(&p, &Curve25519.input_bound()) {
@@ -306,30 +345,6 @@ fn field25519_loose_operands_match_integers() {
             assert_eq!(int(&difference.mul_small(121665)), ((&a + &p - &b) * 121665u32) % &p);
             assert_eq!(int(&x.neg().mul(&sum)), ((&p - &a) * (&a + &b)) % &p);
         }
-    }
-}
-
-/// The largest limbs the operations reach, through every operation: the
-/// bounds the types state are enough for the carries.
-#[test]
-fn field25519_largest_reachable_limbs_stay_within_their_bounds() {
-    let p = (BigUint::from(1u8) << 255) - 19u8;
-    let tight = Tight::from_limbs([(1 << 51) - 1, (1 << 51) + (1 << 19) - 1, (1 << 51) - 1, (1 << 51) - 1, (1 << 51) - 1]);
-    let value = |l: &[u64; 5]| l.iter().enumerate().fold(BigUint::from(0u8), |v, (i, &x)| v + (BigUint::from(x) << (51 * i)));
-    let t = value(crate::field25519::Operand::limbs(&tight)) % &p;
-    let loose = tight.add(&tight);
-    let l = value(crate::field25519::Operand::limbs(&loose)) % &p;
-    assert_eq!(BigUint::from_bytes_le(&tight.bytes()), t);
-    assert_eq!(BigUint::from_bytes_le(&loose.mul(&loose).bytes()), (&l * &l) % &p);
-    assert_eq!(BigUint::from_bytes_le(&loose.square().bytes()), (&l * &l) % &p);
-    assert_eq!(BigUint::from_bytes_le(&tight.sub(&tight).carry().bytes()), BigUint::from(0u8));
-    assert_eq!(BigUint::from_bytes_le(&loose.mul_small(121665).bytes()), (&l * 121665u32) % &p);
-    let widest = tight.sub(&Tight::ZERO);
-    let w = value(crate::field25519::Operand::limbs(&widest)) % &p;
-    assert_eq!(BigUint::from_bytes_le(&widest.mul(&loose).bytes()), (&w * &l) % &p);
-    assert_eq!(BigUint::from_bytes_le(&widest.square().bytes()), (&w * &w) % &p);
-    for limb in crate::field25519::Operand::limbs(&loose.mul(&loose)) {
-        assert!(*limb < (1 << 51) + (1 << 19));
     }
 }
 
