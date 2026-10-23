@@ -1,7 +1,6 @@
 //! FIPS 203 ML-KEM-768, for TLS and SSH hybrid exchange. Secret polynomial
-//! operations, CBD sampling, hashes and re-encryption have fixed schedules.
-//! Division is by compile-time constants; deployed code must be checked to
-//! ensure fixed-latency lowering. Matrix rejection sampling depends only on the
+//! operations, CBD sampling, hashes and re-encryption have fixed schedules,
+//! and no secret value is divided. Matrix rejection sampling depends only on the
 //! public seed. Public-key decoding rejects coefficients >=3329. Decapsulation
 //! implements masked implicit rejection, with no validity bit or error oracle.
 //! Secret keys can only originate from the caller's entropy source, so external
@@ -23,14 +22,26 @@ impl Drop for Poly {
         core::sync::atomic::compiler_fence(core::sync::atomic::Ordering::SeqCst)
     }
 }
+/// ⌊n / q⌋ for n < 2^33 / 623, which holds every value reduced or compressed
+/// here, by a multiply and shift: a divide's latency can depend on its
+/// operands (KyberSlash, Bernstein et al., IACR ePrint 2024/1049). With
+/// M = ⌈2^33 / q⌉, n·M / 2^33 = n / q + 623·n / (q·2^33), and the excess is
+/// below 1/q, too small to carry the quotient past the next integer.
+fn divide(n: u32) -> u32 {
+    const M: u64 = (1u64 << 33).div_ceil(Q as u64);
+    ((u64::from(n) * M) >> 33) as u32
+}
+fn reduce(n: u32) -> u16 {
+    (n - divide(n) * Q) as u16
+}
 fn add(a: u16, b: u16) -> u16 {
-    ((u32::from(a) + u32::from(b)) % Q) as u16
+    reduce(u32::from(a) + u32::from(b))
 }
 fn sub(a: u16, b: u16) -> u16 {
-    ((u32::from(a) + Q - u32::from(b)) % Q) as u16
+    reduce(u32::from(a) + Q - u32::from(b))
 }
 fn mul(a: u16, b: u16) -> u16 {
-    ((u32::from(a) * u32::from(b)) % Q) as u16
+    reduce(u32::from(a) * u32::from(b))
 }
 fn power(mut base: u16, mut exponent: u32) -> u16 {
     let mut result = 1;
@@ -131,7 +142,7 @@ impl Poly {
     }
     fn compress(mut self, d: usize) -> Self {
         for word in &mut self.0 {
-            *word = ((((u32::from(*word) << d) + Q / 2) / Q) & ((1 << d) - 1)) as u16
+            *word = (divide((u32::from(*word) << d) + Q / 2) & ((1 << d) - 1)) as u16
         }
         self
     }
@@ -150,7 +161,7 @@ fn noise(seed: &[u8; 32], nonce: u8) -> Poly {
         let bits = (bytes.0[i / 2] >> (4 * (i % 2))) & 15;
         let a = u32::from(bits & 1) + u32::from((bits >> 1) & 1);
         let b = u32::from((bits >> 2) & 1) + u32::from((bits >> 3) & 1);
-        out.0[i] = ((Q + a - b) % Q) as u16
+        out.0[i] = reduce(Q + a - b)
     }
     out
 }
@@ -333,6 +344,16 @@ mod tests {
             .map(|i| u8::from_str_radix(&s[2 * i..2 * i + 2], 16).unwrap())
             .collect()
     }
+    #[test]
+    #[cfg_attr(miri, ignore = "13.8 M quotients")]
+    fn division_by_q_is_exact_over_its_whole_input_range() {
+        let end = ((1u64 << 33) / 623) as u32;
+        assert!(u64::from(end) > u64::from(Q) * u64::from(Q));
+        for n in 0..end {
+            assert_eq!(divide(n), n / Q, "{n}");
+        }
+    }
+
     /// Every pair of reduced coefficients, against 64-bit integers.
     #[test]
     #[cfg_attr(miri, ignore = "3329^2 pairs")]
