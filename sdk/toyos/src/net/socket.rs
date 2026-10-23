@@ -18,11 +18,12 @@
 //!
 //! **The bell says "look"**: netstack rings a holder while a connection, a datagram or a
 //! datagram socket's pending error waits and the holder has not asked since it was last rung,
-//! a new holder at once. So an accept and a receive ask only once the bell rang: one that finds
-//! it empty waits, or answers [`NetError::WouldBlock`], with no request; one that read a ring
-//! asks, and what another holder took first is answered `WouldBlock` too. A ring read by a call
-//! that failed before its request went is kept for the next, so none is lost. Nothing else
-//! reads the bell.
+//! a new holder at once. So an accept and a receive ask only while the bell is readable: one that
+//! finds it empty waits, or answers [`NetError::WouldBlock`], with no request; one that finds it
+//! rung makes what its request needs and reads the bell empty just before the request goes,
+//! and what another holder took first is answered `WouldBlock` too. A call that fails before
+//! its request leaves the ring in the bell, where a poller still sees it, so none is lost.
+//! Nothing else reads the bell.
 //!
 //! **A handle with no end here is refused** [`NetError::NotASocket`]. A descriptor's handle is
 //! a copy of its end's bell, so a poller watches it for reading; the end keeps its own
@@ -30,8 +31,6 @@
 //! end stays in its process: its bell carries no `TRANSFER`, nor a datagram socket's
 //! connection. A listener's connection keeps it, since the kernel carries an accept's region
 //! only on a connection that has it; no descriptor names that handle, so nothing hands it on.
-
-use core::sync::atomic::{AtomicBool, Ordering};
 
 use toyos_abi::handle::Rights;
 use toyos_abi::syscall;
@@ -168,9 +167,6 @@ static TABLE: Lock<Ends<End, MAX_SOCKETS>> = Lock::new(Ends::new());
 /// Each end's turn on its connection: one request and its answer at a time.
 static TURNS: [Lock<()>; MAX_SOCKETS] = [const { Lock::new(()) }; MAX_SOCKETS];
 
-/// Each end read a ring and has not yet sent the request it owes: kept by a look that failed
-/// before its request went, so the next look asks. Read and written under the end's turn.
-static RUNG: [AtomicBool; MAX_SOCKETS] = [const { AtomicBool::new(false) }; MAX_SOCKETS];
 
 /// Lets go of an end no handle or call reaches: its connection, which is its holder's leaving,
 /// and its bell.
@@ -195,31 +191,32 @@ fn call_on<R>(handle: RawHandle, kind: Kind, f: impl FnOnce(usize, End) -> Resul
     call(handle, |slot, end| if end.kind == kind { f(slot, end) } else { Err(NetError::InvalidInput) })
 }
 
-/// The rings `bell` holds, read: whether it rang, or hung up with netstack.
-fn drain(bell: RawHandle) -> bool {
+/// The rings `bell` holds, read: a request follows at once.
+fn drain(bell: RawHandle) {
     let mut bytes = [0u8; 64];
-    let mut rang = false;
-    loop {
-        match syscall::read_nonblock(bell, &mut bytes) {
-            Ok(0) => return true,
-            Ok(_) => rang = true,
-            Err(_) => return rang,
-        }
-    }
+    while let Ok(1..) = syscall::read_nonblock(bell, &mut bytes) {}
 }
 
-/// `ask` once the end's bell rang, until it takes something, waiting for the bell between as
-/// `wait` says. `ask` is handed what it calls once its request went.
+/// Whether `bell` is readable, waiting for it at most `nanos`: rung, or hung up with netstack.
+/// Nothing is read.
+fn rung(bell: RawHandle, nanos: u64) -> bool {
+    let poller = crate::poller::Poller::new(1);
+    poller.watch_raw(bell, crate::poller::READABLE, 0);
+    let mut answered = false;
+    poller.wait(1, nanos, |_| answered = true);
+    answered
+}
+
+/// `ask` while the end's bell is rung, until it takes something, waiting for the bell between
+/// as `wait` says. `ask` is handed [`drain`] for the bell, which it calls just before its
+/// request goes.
 fn look<T>(slot: usize, end: End, wait: Wait, mut ask: impl FnMut(&dyn Fn()) -> Result<T, NetError>) -> Result<T, NetError> {
-    let rung = &RUNG[slot];
+    let drained = || drain(end.bell);
     loop {
         {
             let _turn = TURNS[slot].lock();
-            if drain(end.bell) {
-                rung.store(true, Ordering::Relaxed);
-            }
-            if rung.load(Ordering::Relaxed) {
-                match ask(&|| rung.store(false, Ordering::Relaxed)) {
+            if rung(end.bell, 0) {
+                match ask(&drained) {
                     Err(NetError::WouldBlock) => {}
                     answer => return answer,
                 }
@@ -234,9 +231,7 @@ fn look<T>(slot: usize, end: End, wait: Wait, mut ask: impl FnMut(&dyn Fn()) -> 
             return Err(NetError::TimedOut);
         }
         // Netstack gone hangs the bell up, which is readable, and the next look says so.
-        let poller = crate::poller::Poller::new(1);
-        poller.watch_raw(end.bell, crate::poller::READABLE, 0);
-        poller.wait(1, left, |_| {});
+        rung(end.bell, left);
     }
 }
 
@@ -277,7 +272,6 @@ fn open(kind: Kind, addr: [u8; 4], ask: impl FnOnce(NetstackConn) -> Result<(Bou
     let mut table = TABLE.lock();
     match made {
         Ok((handle, end)) => {
-            RUNG[slot].store(false, Ordering::Relaxed);
             table.enter(slot, end, handle);
             Ok(Bound { handle, port: end.port })
         }
@@ -357,7 +351,7 @@ pub fn let_go(handle: RawHandle) {
 /// The oldest connection waiting at the listener `handle` reaches, as a stream: waiting for one
 /// as `wait` says, [`NetError::WouldBlock`] or [`NetError::TimedOut`] where none came.
 pub fn accept(handle: RawHandle, wait: Wait) -> Result<stream::Accepted, NetError> {
-    call_on(handle, Kind::Listener, |slot, end| look(slot, end, wait, |asked| stream::accept(end.connection, asked)))
+    call_on(handle, Kind::Listener, |slot, end| look(slot, end, wait, |drain| stream::accept(end.connection, drain)))
 }
 
 // ---- a datagram socket's ----
@@ -387,9 +381,9 @@ pub fn send_to(handle: RawHandle, addr: [u8; 4], port: u16, data: &[u8]) -> Resu
 /// `wait` says, [`NetError::WouldBlock`] or [`NetError::TimedOut`] where none came.
 pub fn recv_from(handle: RawHandle, buf: &mut [u8], wait: Wait) -> Result<Received, NetError> {
     call_on(handle, Kind::Datagram, |slot, end| {
-        look(slot, end, wait, |asked| {
+        look(slot, end, wait, |drain| {
+            drain();
             ipc::signal(end.connection, RECEIVE).map_err(hangup)?;
-            asked();
             let header = answer(end.connection)?;
             let mut frame = [0u8; MAX_FRAME];
             let n = ipc::recv_bytes(end.connection, &header, &mut frame).map_err(hangup)?;
@@ -503,7 +497,6 @@ pub(super) fn adopted(connection: Connection, payload: &[u8], handles: ipc::Batc
     let mut table = TABLE.lock();
     match made {
         Ok((descriptor, connection, bell)) => {
-            RUNG[slot].store(false, Ordering::Relaxed);
             table.enter(slot, End { kind, connection, bell, addr: adopt.addr, port: adopt.port }, descriptor);
             Some(descriptor)
         }

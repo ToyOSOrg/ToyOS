@@ -230,7 +230,7 @@ fn refused(refusal: Refused) -> u32 {
         Refused::PermissionDenied => ERR_PERMISSION_DENIED,
         Refused::ResourceExhausted => ERR_RESOURCE_EXHAUSTED,
         Refused::ConnectionRefused => ERR_CONNECTION_REFUSED,
-        // The pipe ABI's word for an ICMP error a connect ends in, as `connect_failed`'s.
+        // No finer word exists yet, as for a connect's (`connect_failed`).
         Refused::Unreachable => ERR_OTHER,
     }
 }

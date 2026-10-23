@@ -12,7 +12,7 @@ use std::net::Ipv4Addr;
 use std::time::Duration;
 
 use common::{from_server, message_of, terms, xid, A, ACK, BROADCAST, DNS, MAC, MAC_B, MAC_R, R};
-use lan::{udp, Lan, Seen, Udp, B, OFF_LINK};
+use lan::{udp, unreachable, Lan, Seen, Udp, B, OFF_LINK};
 use toyos_net_node::{Datagram, Event, ExportRefused, HolderId, Refused};
 use toyos_net_shard::Refusal;
 use toyos_net_udp::Counter;
@@ -288,6 +288,32 @@ fn a_connected_sockets_peer_is_every_holders() {
     let got = lan.node.udp_recv_from(id, second, &mut out).unwrap().unwrap();
     assert_eq!((&out[..got.len], got.source), (&b"the peer"[..], B), "the holder that did not connect reads the peer");
     assert_eq!(lan.node.udp_recv_from(id, HolderId::FIRST, &mut out), Ok(None), "the stranger's is nobody's");
+}
+
+// RFC 1122 §4.1.3.3: an ICMP port unreachable about a connected socket's datagram is reported
+// to its user; POSIX's next call answers it once. A datagram from the peer that waits behind it
+// is still the socket's, and the holder that took the error is rung again for it.
+#[test]
+fn a_pending_error_is_answered_once_and_the_datagram_behind_it_rings_again() {
+    const PORT_UNREACHABLE: u8 = 3;
+    let mut lan = Lan::new();
+    lan.lease(3_600);
+    let (first, first_rings) = common::bell();
+    let (id, _) = lan.node.udp_bind(ANY, port(4_000), first, undrawn).unwrap();
+    let (second_bell, second_rings) = common::bell();
+    let (second, _) = lan.node.export_datagram(id, second_bell).unwrap();
+    lan.node.udp_connect(lan.now, id, B, 7).unwrap();
+    lan.node.udp_send(lan.now, id, b"ping").unwrap();
+    lan.pump();
+    lan.deliver(&udp(MAC, MAC_B, (B, 7), (A, 4_000), b"pong"));
+    lan.deliver(&unreachable(PORT_UNREACHABLE, (B, MAC_B), (A, 4_000), (B, 7), 4));
+    assert_eq!((first_rings.get(), second_rings.get()), (1, 1), "both told");
+
+    let mut out = [0u8; 64];
+    assert_eq!(lan.node.udp_recv_from(id, HolderId::FIRST, &mut out), Err(Refused::ConnectionRefused));
+    assert_eq!(first_rings.get(), 2, "the holder that took the error is rung for the datagram behind it");
+    let got = lan.node.udp_recv_from(id, second, &mut out).unwrap().unwrap();
+    assert_eq!(&out[..got.len], b"pong", "the error was answered once, and the datagram is still the socket's");
 }
 
 // A holder made while a datagram waits is rung at once: nothing promises a pass before its

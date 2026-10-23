@@ -205,9 +205,10 @@ impl Node {
         if !self.datagrams.get_mut(&id).is_some_and(|holders| holders.asked(holder)) {
             return Err(Refused::NotConnected);
         }
-        let received = self.stack.recv_from(id.0, out).map_err(refused)?;
+        // Told whatever it answers: a pending error answered leaves the datagrams behind it.
+        let received = self.stack.recv_from(id.0, out);
         self.tell_datagram_holders();
-        Ok(received.map(|received| Datagram { len: received.len, source: received.source, source_port: received.source_port }))
+        Ok(received.map_err(refused)?.map(|received| Datagram { len: received.len, source: received.source, source_port: received.source_port }))
     }
 
     /// `holder` of socket `id` left. The last holder's leaving closes the socket: its port is

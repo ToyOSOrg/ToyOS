@@ -744,13 +744,13 @@ pub struct Accepted {
 
 /// The oldest connection waiting at the listener whose holder's connection is
 /// `listener`, as a stream: its region lent with a `super::socket::ACCEPT` and
-/// its connection and bells in the answer, `asked` called once the request
-/// went. Refused as [`connect`] is, and [`NetError::WouldBlock`] where none
-/// waits.
-pub(super) fn accept(listener: RawHandle, asked: &dyn Fn()) -> Result<Accepted, NetError> {
+/// its connection and bells in the answer, `drain` called just before the
+/// request goes, once the slot and the region are made. Refused as [`connect`]
+/// is, and [`NetError::WouldBlock`] where none waits.
+pub(super) fn accept(listener: RawHandle, drain: &dyn Fn()) -> Result<Accepted, NetError> {
     let opened = open(false, ([0; 4], 0), |region| {
+        drain();
         ipc::signal_with(listener, super::socket::ACCEPT, [region]).map_err(hangup)?;
-        asked();
         let header = answer(listener)?;
         let accepted: TcpAcceptResponse = ipc::recv_payload(listener, &header).map_err(hangup)?;
         let mut handles = [toyos_abi::HANDLE_INVALID; syscall::MAX_TRANSFER_HANDLES];

@@ -16,7 +16,7 @@ process: `endow` and `provide` of one are refused with `Misuse::Moved`.
 
 `netstack_holders_exported_to_children` (`tests/toyos.rs`) reads a listener's
 and a datagram socket's holders in a parent and its child, one after the other
-and both blocked at once; no guest test reads a survivor after the other holder
+and both waiting on one queue; no guest test reads a survivor after the other holder
 is killed.
 
 What is not shared:
