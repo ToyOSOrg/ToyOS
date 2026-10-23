@@ -96,6 +96,10 @@ const RUST_SKIP: &[&str] = &[
     // Its product is a cycle count per syscall and the clock rate beside it,
     // which a guest's host sets: the `syscall_cost` metal row runs it.
     "syscall_cost",
+    // Its product is what timing protection costs a switch and a crypto
+    // operation, which a guest's host sets: the `timing_protection_cost` metal
+    // row runs it.
+    "timing_protection_cost",
     // Its product is how long a spawn of `toybox` takes to its exit, which a
     // guest's host sets: the `spawn_cost` metal row runs it.
     "spawn_cost",
@@ -319,6 +323,12 @@ const DRIVEN_AND_SHARED: &[&str] = &[
     // first on each bench, and `crypto_instrument_prints_its_table` before the
     // instrument under QEMU.
     "ring_kat",
+    // Its shared run is each bench's verdict;
+    // `timing_protection_follows_its_thread` holds the line it prints on each
+    // bench, `timing_protection_without_the_control` runs it under QEMU
+    // x86-64, and `virt_smp` builds it for AArch64, whose emulated CPUs have
+    // FEAT_DIT.
+    "timing_protection",
     // Its shared run asserts what holds of `SYS_CLOCK_EPOCH` on x86-64;
     // `virt_wall_clock_utc` builds it for AArch64 and judges what it read
     // against the instant the job case stages in the RTC.
@@ -626,6 +636,11 @@ const MACHINE_TESTS: &[&str] = &[
     // run is the benches'; this is TCG's, whose XSAVE is QEMU's own reading of
     // the SDM, and the KVM runner's CPU.
     "vector_state_survives_a_switch",
+    // `timing_protection` on QEMU x86-64: under TCG, whose `qemu64` has no
+    // `IA32_ARCH_CAPABILITIES`, the machine without the control is answered so
+    // and no protection reads active. The benches' runs are the shared boot's
+    // and `timing_protection_follows_its_thread`.
+    "timing_protection_without_the_control",
     // std's CPU count against the CPUs the guest booted with, and an ended
     // thread's stack and table place given back, joined or detached, on the
     // two-CPU q35 guest: std's ToyOS layer, which no host builds.
@@ -870,6 +885,26 @@ const METAL: &[(&str, metal::Metal)] = &[
                 b[0].job_passed("test_rs_syscall_cost")?;
                 b[0].log().must_say("syscall_cost: tsc ")?;
                 b[0].log().must_say(" cycles/syscall over ")?;
+                Ok(())
+            },
+        },
+    ),
+    (
+        // Each thread's own timing protection across switches and migrations,
+        // on the bench's mode: DOITM on the T14, which every CPU there
+        // enumerates, and none on the AMD bench, which has no such control.
+        "timing_protection_follows_its_thread",
+        metal::Metal { arms: TESTCASES, judge: |b| timing_protection_on_metal(b[0]) },
+    ),
+    (
+        // What timing protection costs, printed by the job and read off the
+        // stick: that it ran, and what it said, are the verdict.
+        "timing_protection_cost",
+        metal::Metal {
+            arms: TESTCASES,
+            judge: |b| {
+                b[0].job_passed("test_rs_timing_protection_cost")?;
+                b[0].log().must_say("timing_protection_cost: x25519 agree: ")?;
                 Ok(())
             },
         },
@@ -1498,6 +1533,24 @@ const CRYPTO_CT_CURVES: &[metal::Arm] = &[metal::Arm {
     ..metal::once("cryptoctcurvescase", "tests/images/testcases.toml", &[], &["test_rs_crypto_constant_time_curves"])
 }];
 
+/// `timing_protection`'s line on the bench its microcode line names: DOITM
+/// followed every thread on the T14, and the AMD bench reported none.
+fn timing_protection_on_metal(boot: &metal::Readback) -> Result<(), String> {
+    boot.job_passed("test_rs_timing_protection")?;
+    let signature = microcode_lines(boot.kernel().text())?
+        .first()
+        .ok_or("the kernel wrote no microcode line to tell the bench by")?
+        .signature;
+    let said = match signature {
+        T14_SIGNATURE => "timing_protection: DOITM followed ",
+        AMD_BENCH_SIGNATURE => "timing_protection: no timing protection on this machine",
+        other => return Err(format!("no bench of signature {other:#x} says which timing protection it has")),
+    };
+    let log = boot.log();
+    eprintln!("  [timing] {}", log.must_say(said)?.trim_end());
+    Ok(())
+}
+
 /// A constant-time job's lines, once it has passed.
 fn crypto_ct_lines(boot: &metal::Readback, job: &str) -> Result<(), String> {
     boot.job_passed(job)?;
@@ -1556,6 +1609,8 @@ const TESTCASES: &[metal::Arm] = &[metal::once(
         "test_rs_syscall_cost",
         "test_rs_spawn_cost",
         "test_rs_job_fairness",
+        "test_rs_timing_protection",
+        "test_rs_timing_protection_cost",
         claims::RECLAIM,
     ],
 )];
@@ -2293,6 +2348,10 @@ const VIRT_COUNTERS_READ: &str = "counters_read";
 /// `tests/guest/rust-tests`' binary that `tests/images/virtsmpcase.toml` runs as its job
 /// `test_rs_trace_read`.
 const VIRT_TRACE_READ: &str = "trace_read";
+
+/// `tests/guest/rust-tests`' binary that `tests/images/virtsmpcase.toml` runs as its job
+/// `test_rs_timing_protection`.
+const VIRT_TIMING: &str = "timing_protection";
 
 /// `tests/guest/rust-tests`' binary `name` built for `arch`, once a run, as a
 /// file a case's job list names on ROOT.
@@ -3336,6 +3395,7 @@ fn boot_virt_smp(options: BootOptions) -> QemuInstance {
             extra_root_files: vec![
                 suite_bin(options.profile.arch(), VIRT_COUNTERS_READ),
                 suite_bin(options.profile.arch(), VIRT_TRACE_READ),
+                suite_bin(options.profile.arch(), VIRT_TIMING),
             ],
             ..options
         },
@@ -3347,6 +3407,10 @@ const COUNTERS_READ_SAID: &str = "counters_read: every cpu answered for itself, 
 
 /// What `trace_read` says once the diary read back as the scheduler wrote it.
 const TRACE_READ_SAID: &str = "trace_read: a wake precedes its pick, a cursor is its reader's own, and the diary is TRACE's";
+
+/// What `timing_protection` says once `PSTATE.DIT`, which every emulated CPU
+/// of the case has, followed each of its threads.
+const TIMING_DIT_SAID: &str = "timing_protection: PSTATE.DIT followed ";
 
 /// Boot `tests/images/virtsmpcase.toml` on [`VIRT_CPUS`] CPUs under `profile`, whose
 /// firmware enters every CPU at EL`el` and whose FADT names PSCI's `conduit`:
@@ -3396,6 +3460,7 @@ fn virt_smp(profile: qemu::Profile, conduit: &str, el: u32) -> Result<(), String
     eprintln!("  [virt] {VIRT_CPUS} CPUs entered at EL{el}, started through {conduit}, and scheduling");
     judge_virt_job(&mut qemu, &mut serial, "test_rs_counters_read", COUNTERS_READ_SAID)?;
     judge_virt_job(&mut qemu, &mut serial, "test_rs_trace_read", TRACE_READ_SAID)?;
+    judge_virt_job(&mut qemu, &mut serial, "test_rs_timing_protection", TIMING_DIT_SAID)?;
     let (console, calls) =
         ended_through_psci(&mut qemu, &mut stop, serial, power::SHUTTING_DOWN, "guest-shutdown", &trace, |_| Vec::new())?;
     let record = console
@@ -4356,6 +4421,7 @@ fn run_machine_test(name: &str, test_config: &Path) -> Result<(), String> {
             hda_plays_to_the_controller_that_reaches_an_output(test_config)
         }
         "vector_state_survives_a_switch" => vector_state_survives_a_switch(test_config),
+        "timing_protection_without_the_control" => timing_protection_without_the_control(test_config),
         "std_threads_count_the_cpus_and_give_back_ended_threads" => std_threads_count_the_cpus_and_give_back_ended_threads(test_config),
         "the_opening_exchange_with_qemus_agent_completes" => the_opening_exchange_with_qemus_agent_completes(),
         "crypto_instrument_prints_its_table" => crypto_instrument_prints_its_table(test_config),
@@ -5084,6 +5150,31 @@ fn vector_state_survives_a_switch(test_config: &Path) -> Result<(), String> {
         return Err(format!("the job never said what it held:\n{}", result.stdout));
     };
     eprintln!("  [claims] {}", line.trim());
+    Ok(())
+}
+
+/// [`MACHINE_TESTS`]' `timing_protection_without_the_control`: the job's own
+/// verdict, and under TCG its line saying the machine has no control. Under
+/// KVM the CPU is the host's, which may have DOITM, and its line is printed.
+fn timing_protection_without_the_control(test_config: &Path) -> Result<(), String> {
+    const JOB: &str = "timing_protection";
+    let bin = qemu::build_toyos_bin(qemu::SUITE_ARCH, &compile::repo_root().join("tests/guest/rust-tests"), JOB);
+    let mut qemu = QemuInstance::boot_with_options(test_config, &[], &[(JOB.to_string(), bin)], BootOptions::default());
+    serial::Serial::boot(&qemu).must_be_clean()?;
+    let result = qemu.run_test("test_rs_timing_protection", Duration::from_secs(300));
+    if let Some(why) = &result.error {
+        return Err(format!("{why}\nthe job said:\n{}", result.stdout));
+    }
+    if result.exit_code != Some(0) {
+        return Err(format!("the job ended {:?}:\n{}", result.exit_code, result.stdout));
+    }
+    let Some(line) = result.stdout.lines().find(|l| l.contains("timing_protection: ")) else {
+        return Err(format!("the job never said what it held:\n{}", result.stdout));
+    };
+    if !qemu::SUITE_ARCH.accel().is_hardware() && !line.contains("timing_protection: no timing protection on this machine") {
+        return Err(format!("a TCG guest, whose CPU has no such control, said {line:?}"));
+    }
+    eprintln!("  [timing] {}", line.trim());
     Ok(())
 }
 
@@ -5910,8 +6001,8 @@ fn microcode_lines(log: &str) -> Result<Vec<MicrocodeLine>, String> {
     Ok(out)
 }
 
-/// Every CPU's `CR0`, `CR4` and `XCR0`, against what a CPU running this
-/// kernel must hold.
+/// Every CPU's `CR0`, `CR4`, `XCR0` and DOITM, against what a CPU running
+/// this kernel must hold.
 ///
 /// **Not the same question the kernel's own self-check asks.** That one compares
 /// each CPU against the declaration, so it catches a CPU that missed it and
@@ -5925,6 +6016,12 @@ fn microcode_lines(log: &str) -> Result<Vec<MicrocodeLine>, String> {
 /// `XCR0` holds x87, SSE and AVX, and AVX-512's three components all or none
 /// (SDM Vol. 1 §13.3), and nothing else: a component enabled and not declared
 /// is state the kernel's save area may not hold.
+///
+/// A CPU's line names DOITM where the kernel found it enumerated, which
+/// Intel's "Data Operand Independent Timing ISA Guidance" (768873, Table 1)
+/// says every Core processor from Ice Lake on is: on the T14's Tiger Lake
+/// every CPU says so, and a kernel that misread the enumeration would offer
+/// it to no thread.
 ///
 /// Both halves, because the kernel writes every register whole: every bit named
 /// below must hold its named value, **and a bit named nowhere below may not be
@@ -5971,7 +6068,7 @@ fn control_regs(log: &str, cpus: u32) -> Result<(), String> {
     /// AVX-512's components, which a CPU without AVX-512 does not have.
     const XCR0_AVX512: &[(u32, &str)] = &[(5, "opmask"), (6, "ZMM_Hi256"), (7, "Hi16_ZMM")];
 
-    let mut seen: Vec<(u32, u64, u64, u64)> = Vec::new();
+    let mut seen: Vec<(u32, u64, u64, u64, bool)> = Vec::new();
     // The save form each CPU names, which says which path this machine runs;
     // the kernel asserts they agree.
     let mut forms: BTreeSet<&str> = BTreeSet::new();
@@ -5993,13 +6090,13 @@ fn control_regs(log: &str, cpus: u32) -> Result<(), String> {
         ) else {
             return Err(format!("unreadable control-register line: {line:?}"));
         };
-        seen.push((id, cr0, cr4, xcr0));
+        seen.push((id, cr0, cr4, xcr0, rest.split_whitespace().any(|w| w == "doitm")));
         forms.insert(form);
     }
 
     // Which CPUs answered, not how many lines were printed: a boot where one AP
     // never came up at all must not pass by having the BSP print twice.
-    let ids: BTreeSet<u32> = seen.iter().map(|&(id, _, _, _)| id).collect();
+    let ids: BTreeSet<u32> = seen.iter().map(|&(id, ..)| id).collect();
     let want: BTreeSet<u32> = (0..cpus).collect();
     if ids != want {
         return Err(format!(
@@ -6020,7 +6117,7 @@ fn control_regs(log: &str, cpus: u32) -> Result<(), String> {
     // Every wrong bit on a CPU rather than the first: an AP holding INIT's CR0
     // is wrong in five at once and each is a different consequence, so a
     // message naming one sends the next reader after a fifth of it.
-    for &(id, cr0, cr4, xcr0) in &seen {
+    for &(id, cr0, cr4, xcr0, _) in &seen {
         let mut wrong = String::new();
         for (reg, value, bits, known) in [
             ("cr0", cr0, CR0_BITS, named(CR0_BITS, &[])),
@@ -6049,17 +6146,24 @@ fn control_regs(log: &str, cpus: u32) -> Result<(), String> {
     // A CPU that agrees about every bit named above can still differ in one
     // that is not, and a thread migrating onto it would execute differently
     // from one moment to the next.
-    let (_, cr0, cr4, xcr0) = seen[0];
-    if let Some(&(id, other0, other4, other_x)) =
-        seen.iter().find(|&&(_, a, b, x)| (a, b, x) != (cr0, cr4, xcr0))
+    let (_, cr0, cr4, xcr0, doitm) = seen[0];
+    if let Some(&(id, other0, other4, other_x, other_doitm)) =
+        seen.iter().find(|&&(_, a, b, x, d)| (a, b, x, d) != (cr0, cr4, xcr0, doitm))
     {
         return Err(format!(
-            "cpu0 has cr0={cr0:#010x} cr4={cr4:#010x} xcr0={xcr0:#x} and cpu{id} has \
-             cr0={other0:#010x} cr4={other4:#010x} xcr0={other_x:#x}"
+            "cpu0 has cr0={cr0:#010x} cr4={cr4:#010x} xcr0={xcr0:#x} doitm={doitm} and cpu{id} has \
+             cr0={other0:#010x} cr4={other4:#010x} xcr0={other_x:#x} doitm={other_doitm}"
         ));
     }
+    let signature =
+        microcode_lines(log)?.first().ok_or("the kernel wrote no microcode line to tell the bench by")?.signature;
+    if signature == T14_SIGNATURE && !doitm {
+        return Err("the kernel found no DOITM on the T14, whose every CPU enumerates it".to_string());
+    }
 
-    eprintln!("  [control_regs] {cpus} CPUs, cr0={cr0:#010x} cr4={cr4:#010x} xcr0={xcr0:#x} save={forms:?}");
+    eprintln!(
+        "  [control_regs] {cpus} CPUs, cr0={cr0:#010x} cr4={cr4:#010x} xcr0={xcr0:#x} doitm={doitm} save={forms:?}"
+    );
     Ok(())
 }
 

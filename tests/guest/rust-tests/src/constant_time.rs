@@ -223,6 +223,17 @@ pub fn leaky_control(rng: &mut Rng) -> bool {
     seen
 }
 
+/// The calling thread's timing protection, held for a whole run so that what
+/// is timed is each routine under the bench's mode: `toyos-crypto` takes its
+/// own inside it, which nests and switches nothing. Says whether the bench
+/// has a mode, in a line the row prints with the verdicts.
+pub fn protected() -> toyos::timing::Protection {
+    let protection = toyos::timing::protect();
+    let mode = if protection.is_active() { "on for every measurement" } else { "none on this machine" };
+    println!("ct timing protection: {mode}");
+    protection
+}
+
 /// Ends the run: nonzero where a control failed.
 pub fn finish(controls_held: bool) {
     if !controls_held {

@@ -12,7 +12,7 @@ mod constant_time;
 #[path = "../arch/counter.rs"]
 mod counter;
 
-use constant_time::{finish, leaky_control, measure, null_control, secret, Class, Rng};
+use constant_time::{finish, leaky_control, measure, null_control, protected, secret, Class, Rng};
 use toyos_crypto::ecc::{p256, p384};
 
 /// A secret scalar: 1 for the fixed class, a uniform one otherwise. Both
@@ -37,6 +37,7 @@ macro_rules! scalar {
 }
 
 fn main() {
+    let _protection = protected();
     let mut rng = Rng(0x0c0f_fee6);
     let mut held = leaky_control(&mut rng) & null_control(&mut rng);
 

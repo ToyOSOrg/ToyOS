@@ -343,23 +343,33 @@ mod checks {
         const DECLARED: (u64, u64, u64) = (0x8001_0033, 0x0034_06e8, 0x7);
         const AVX512: u64 = 0xe0;
 
+        /// A boot of the bench `signature` names, each CPU's kernel line
+        /// saying it has DOITM where `doitm` says.
+        fn machine(signature: u32, cpus: &[(u64, u64, u64)], doitm: impl Fn(usize) -> bool) -> String {
+            let microcode = format!(
+                "[ 0.050 cpu0 kernel] microcode: cpu0 Intel signature {signature:#x} platform 7 found 0xbe \
+                 current 0xbe running 0xbe\n"
+            );
+            let lines = cpus.iter().enumerate().map(|(i, (cr0, cr4, xcr0))| {
+                format!(
+                    "[ 0.100 cpu{i} kernel] control_regs: cpu{i} cr0={cr0:#010x} cr4={cr4:#010x} \
+                     efer=0xd01 xcr0={xcr0:#x} save=xsaveopt smep nx{}\n",
+                    if doitm(i) { " doitm" } else { "" },
+                )
+            });
+            core::iter::once(microcode).chain(lines).collect()
+        }
+        /// The T14, whose every CPU enumerates DOITM.
         fn log(cpus: &[(u64, u64, u64)]) -> String {
-            cpus.iter()
-                .enumerate()
-                .map(|(i, (cr0, cr4, xcr0))| {
-                    format!(
-                        "[ 0.100 cpu{i} kernel] control_regs: cpu{i} cr0={cr0:#010x} cr4={cr4:#010x} \
-                         efer=0xd01 xcr0={xcr0:#x} save=xsaveopt smep nx\n"
-                    )
-                })
-                .collect()
+            machine(T14_SIGNATURE, cpus, |_| true)
         }
 
-        let refused = |what: &str, cpus: &[(u64, u64, u64)], says: &str| match control_regs(&log(cpus), 4) {
+        let refused_log = |what: &str, log: &str, says: &str| match control_regs(log, 4) {
             Ok(()) => Err(format!("{what} was accepted")),
             Err(e) if e.contains(says) => Ok(()),
             Err(e) => Err(format!("{what} was refused for the wrong reason: {e}")),
         };
+        let refused = |what: &str, cpus: &[(u64, u64, u64)], says: &str| refused_log(what, &log(cpus), says);
 
         // Positive control first: a verdict that refuses everything refuses the
         // defect too, and would prove nothing below.
@@ -367,6 +377,8 @@ mod checks {
             .map_err(|e| format!("the declared machine was refused: {e}"))?;
         control_regs(&log(&[(DECLARED.0, DECLARED.1, DECLARED.2 | AVX512); 4]), 4)
             .map_err(|e| format!("the declared AVX-512 machine was refused: {e}"))?;
+        control_regs(&machine(AMD_BENCH_SIGNATURE, &[DECLARED; 4], |_| false), 4)
+            .map_err(|e| format!("the AMD bench without DOITM was refused: {e}"))?;
 
         refused("the machine this tree booted", &[DECLARED, AP_BEFORE, AP_BEFORE, AP_BEFORE], "CD")?;
         // The case a "do all the CPUs agree?" test passes: they agree, on INIT's
@@ -414,8 +426,12 @@ mod checks {
         // And an AP that never printed at all, which is what a machine whose AP
         // died before the check looks like.
         refused("three lines for four CPUs", &[DECLARED; 3], "{0, 1, 2, 3}")?;
+        // A kernel that misread DOITM's enumeration offers it to no thread,
+        // and nothing in its own check notices.
+        refused_log("the T14 without DOITM", &machine(T14_SIGNATURE, &[DECLARED; 4], |_| false), "DOITM")?;
+        refused_log("one T14 CPU without DOITM", &machine(T14_SIGNATURE, &[DECLARED; 4], |i| i != 2), "cpu2")?;
 
-        eprintln!("  [control_regs] the verdict refuses 15 machines and accepts the two declared ones");
+        eprintln!("  [control_regs] the verdict refuses 17 machines and accepts the three declared ones");
         Ok(())
     }
 

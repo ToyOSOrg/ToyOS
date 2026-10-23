@@ -16,7 +16,7 @@ mod constant_time;
 #[path = "../arch/counter.rs"]
 mod counter;
 
-use constant_time::{finish, leaky_control, measure, null_control, secret, Class, Rng};
+use constant_time::{finish, leaky_control, measure, null_control, protected, secret, Class, Rng};
 use toyos_crypto::aead::{OpeningKey, SealingKey};
 use toyos_crypto::hash::Sha256;
 use toyos_crypto::kdf::{pbkdf2, Hkdf, Hmac};
@@ -48,6 +48,7 @@ type Seal = fn([u8; 32]) -> SealingKey;
 type Open = fn([u8; 32]) -> OpeningKey;
 
 fn main() {
+    let _protection = protected();
     let mut rng = Rng(0x0c0f_fee5);
     let mut held = leaky_control(&mut rng) & null_control(&mut rng);
 

@@ -449,6 +449,25 @@ Not consumers:
          removed it is not measured. The AMD bench has not run the curves program on
          current code. Evidence:
          https://github.com/ToyOSOrg/evidence/tree/6993f41cdaa886860b4d40bf766ac092cbe4d14f/pr-1036/r3
+       - **Timing protection, since #1038.** Each secret operation runs
+         under the calling thread's timing protection
+         (`lib/crypto/src/timing.rs`): DOITM on the T14, `PSTATE.DIT` on an
+         AArch64 CPU with FEAT_DIT, and none on the AMD bench, which has no
+         such control. Both programs hold one protection for their whole run
+         and print whether the bench has it; the verdicts above were taken
+         without it. A probe on #1000's code at 9217793d2 had the T14 leak
+         P-256 and P-384 public key and agreement (max |t| 68.65 to 80.80)
+         with DOITM off, and with it on pass all but P-256 agreement, which
+         read 4.56 against the 4.5 bound. Evidence:
+         https://github.com/ToyOSOrg/evidence/tree/7fb806b73ce0397b9cbec9e1da1df910ba8f4785/pr-1038/r1/probe
+         Not covered: Intel's guidance says some processors also need MXCSR
+         configured for the listed instructions to keep their timing
+         ("MXCSR Configuration Dependent Timing", `MCDT_NO` is
+         CPUID.(07H,2):EDX[5]). Whether any instruction this crate uses is
+         on that list, and whether the T14 enumerates `MCDT_NO`, is not
+         established.
+         Exit: the crate's instructions checked against Intel's MCDT list,
+         and the protection configuring MXCSR where they are on it.
        - Their judge asks only that each job ran and its controls held; the
          verdicts are this record's. The first boots, of the fast program at
          ec5a0cd18, read LEAKS everywhere: that harness made each random
