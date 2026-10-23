@@ -38,8 +38,8 @@ chacha20 = "0.9.1"
 poly1305 = "0.8.0"
 scrypt = { version = "0.12.0-rc.10", default-features = false }
 serde_json = "1.0.149"
-# The integers the field, scalar, Montgomery and Poly1305 arithmetic are held
-# against (`test_arithmetic`, `poly1305`).
+# The integers the crate's arithmetic and its Ed25519 verdicts are held
+# against.
 num-bigint = "0.4"
 
 [lints.rust]

@@ -506,17 +506,57 @@ Not consumers:
    2026-10-22 that the tree uses the crate now and improves it in place
    ("use our own crypto where possible"); #1019 takes it.
    **Exit**:
-   - Ring stays a host differential oracle of the verifier.
-   - The edge corpus is Wycheproof's `ed25519` and the vectors of Chalkias
-     et al., "Taming the many EdDSAs" (2020). On both corpora the crate agrees
-     with `ed25519-dalek`'s `verify_strict` and with ring.
-     - **Awaiting the owner, as this exit cannot hold as written:** on the
-       twelve cases every verdict of the crate's is `verify_strict`'s, and
-       ring accepts four that `verify_strict` refuses: the small-order key of
-       cases 0 and 1, the small-order R of case 2 and case 11's
-       non-canonical R. No verifier agrees with both. #1019 pins ring's
-       verdicts (`lib/crypto/tests/differential.rs`,
-       `speccheck_cases_against_dalek_strict_and_ring`).
+   - The verifier's rules are RFC 8032's and ToyOS's security
+     requirements, stated at `PublicKey::from_bytes` and
+     `PublicKey::verify` (`lib/crypto/src/ed25519.rs`). ring and
+     `ed25519-dalek` 2.2's `verify_strict` are host cross-checks, not the
+     definition of correctness; the owner ruled that canonical-encoding
+     rejection stays and verification is not weakened to match a library
+     (#1044). Done:
+     - A key decodes under section 5.1.3 (y below p, an x for it, x = 0
+       only with the sign bit clear) and is not one of the eight points of
+       order dividing 8. Mixed-order keys are taken.
+     - A signature is 64 bytes, R || S, with S below L (section 5.1.7). It
+       is accepted when [S]B - [k mod L]A encodes to R's bytes, for
+       k = SHA-512(R || A || M) over the bytes received; that also makes R
+       decode canonically. Section 6's reference `verify` reduces k, as
+       ring and `verify_strict` do; section 5.1.7's literal equation does
+       not, and the two differ only for a mixed-order A (speccheck case 3
+       fails the unreduced one). An R of order dividing 8 is refused.
+     - Two refusals go beyond RFC 8032. Anyone can sign for a small-order
+       key: R = [S]B verifies under it whenever 8 divides k. A small-order
+       R is one RFC 8032 signing makes with probability about 2^-252, and
+       with a prime-order key only its holder can make one; no security
+       requirement forces its refusal. **Awaiting the owner:** whether it
+       stays. It is kept meanwhile.
+     - Times 8, the reduced-k equation is the cofactored one, which accepts
+       more where R or A has a torsion component (cases 4 and 5); RFC
+       8032's key generation and signing make neither.
+   - The edge corpus is Wycheproof's `ed25519` and the twelve cases of
+     Chalkias et al., "Taming the many EdDSAs" (2020). Every Wycheproof
+     verdict is the file's. `lib/crypto/tests/ed25519_verdicts.rs` gives
+     each speccheck case and each known disagreement an expected verdict
+     and the rule deciding it, with both cross-checks' verdicts pinned.
+     Done (#1044):
+     - **`verify_strict` differs on one class of key.** Of the 38
+       encodings with y of p or more, it decodes the 20 whose y - p is on
+       the curve and not small-order (y - p in 3-6, 9, 10, 14-16 and 18,
+       either sign), which section 5.1.3 refuses. Signing for one takes
+       the discrete log of a point chosen by its y, so no signature verdict
+       is known to differ. Every speccheck verdict is `verify_strict`'s.
+     - **ring differs on small-order keys, non-canonical small-order keys
+       and a small-order R.** It accepts a signature satisfying the
+       cofactorless equation under each of the 14 encodings of a
+       small-order point, including the 6 non-canonical ones (y of p or
+       p + 1, and x = 0 signed). Whether it decodes the 20 mixed-order keys
+       with y of p or more is not known: no signature can show it. It accepts R = O with S = k a under an RFC 8032 key. In the
+       speccheck cases that is 0 and 1 (small-order key), 2 (small-order R)
+       and 11 (the key (0, -1) with x = 0 signed).
+     - All three refuse cases 4 and 5 (only the cofactored equation
+       holds), 6 and 7 (S of L or more), 8 and 9 (a non-canonical R) and
+       10 (a non-canonical key under which ring's equation fails too), and
+       accept case 3, a mixed-order key and R satisfying the reduced-k and
+       cofactored equations.
    - The loader verifies a signed image on the T14 and the AMD bench, with
      its verification time measured on each. Done (#1019's probe image,
      #1016's evidence): 253,975 counter ticks on the T14 at its stated
@@ -527,13 +567,6 @@ Not consumers:
      AArch64 machine too.
    - `ed25519-dalek` and the loader's `sha2` leave `Cargo.lock`'s non-dev
      packages. Done (#1019).
-   - **One verdict differs from `verify_strict`, for the owner to accept or
-     refuse:** the crate refuses a public key whose y is p or more, as
-     RFC 8032 section 5.1.3 requires, where `verify_strict` accepts it when
-     the point is not small-order. Every key the tree verifies against is one
-     its build minted, which is canonical, so no verdict on a key the tree
-     holds differs (`lib/update/tests/ed25519_oracles.rs` names the
-     encodings).
 
 ## Weaknesses until the exits hold
 

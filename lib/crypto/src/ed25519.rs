@@ -1,8 +1,8 @@
-//! RFC 8032 pure Ed25519. Verification uses the cofactorless equation and
-//! rejects noncanonical encodings, negative zero, noncanonical S and small-
-//! order R or public keys. Verification's inputs are all public: it decodes,
-//! recodes and multiplies in variable time, through [`PublicScalar`] only.
-//! Signing (feature `sign`) and key generation multiply the base point by a
+//! RFC 8032 pure Ed25519, without a context or prehash. Verification's
+//! rules are [`PublicKey::from_bytes`]'s and [`PublicKey::verify`]'s.
+//! Verification's inputs are all public: it decodes, recodes and
+//! multiplies in variable time, through [`PublicScalar`] only. Signing
+//! (feature `sign`) and key generation multiply the base point by a
 //! fixed-base comb on a fixed schedule: every table entry of a row is read
 //! and the choice is masked, so neither branches nor addresses depend on
 //! the secret scalar.
@@ -46,7 +46,7 @@ const B_T: Tight = Tight::from_bytes(&[
 ]);
 
 /// The canonical encodings of the eight points of order dividing 8, which
-/// strict verification refuses as R or as a public key.
+/// verification refuses as R or as a public key.
 const SMALL_ORDER: [[u8; 32]; 8] = [
     hex("0000000000000000000000000000000000000000000000000000000000000000"),
     hex("0000000000000000000000000000000000000000000000000000000000000080"),
@@ -535,6 +535,13 @@ pub struct PublicKey {
     point: Point,
 }
 impl PublicKey {
+    /// A key that decodes under RFC 8032 section 5.1.3, which refuses y of p
+    /// or more, a y with no x and x = 0 with the sign bit set
+    /// ([`Error::InvalidPoint`]), and that is not of order dividing 8
+    /// ([`Error::InvalidKey`]). RFC 8032 does not refuse the latter, but no
+    /// one holds a secret for it: R = [S]B verifies under one whenever 8
+    /// divides k. Mixed-order keys are taken, as RFC 8032 takes them; only
+    /// the holder of their scalar can sign for them.
     pub fn from_bytes(encoded: [u8; 32]) -> Result<Self, Error> {
         let point = Point::decode(&encoded)?;
         // A decoded encoding is canonical, so a small-order point is one of
@@ -547,8 +554,19 @@ impl PublicKey {
     pub fn as_bytes(&self) -> &[u8; 32] {
         &self.encoded
     }
-    /// Accepts when [s]B - [k]A encodes to R's bytes, which a noncanonical R,
-    /// one off the curve or a negative zero can never equal.
+    /// RFC 8032 section 5.1.7 for a 64-byte R || S, with S below L, and the
+    /// equation [S]B = R + [k mod L]A for k = SHA-512(R || A || M) over the
+    /// bytes received, reduced as section 6's reference `verify` reduces it.
+    /// It accepts when [S]B - [k mod L]A encodes to R's bytes; a
+    /// non-canonical R, one off the curve or a negative zero can never equal
+    /// an encoding, so R decodes as section 5.1.3 requires. Section 5.1.7's
+    /// literal equation takes k unreduced, which differs only for a
+    /// mixed-order A. Times 8 this equation is the cofactored one, which
+    /// accepts more where R or A has a torsion component; RFC 8032's key
+    /// generation and signing make neither. Beyond RFC 8032, R of order
+    /// dividing 8 is refused; RFC 8032 signing makes one with probability
+    /// about 2^-252, and with a prime-order key only the key's holder can
+    /// make one.
     pub fn verify(&self, message: &[u8], signature: &[u8]) -> Result<(), Error> {
         if signature.len() != 64 {
             return Err(Error::Length);
@@ -687,30 +705,6 @@ mod tests {
             assert!(Point::decode(&hex(zero)).is_err(), "{zero}");
             assert!(PublicKey::from_bytes(hex(zero)).is_err(), "{zero}");
         }
-    }
-
-    /// A signature whose R is the identity, with S = k a so that it satisfies
-    /// the cofactorless equation, is refused: strict verification admits no
-    /// small-order R.
-    #[cfg(feature = "sign")]
-    #[test]
-    fn a_small_order_r_satisfying_the_equation_is_refused() {
-        let key = SigningKey::from_seed([7; 32]);
-        let r = SMALL_ORDER[2];
-        let mut h = Sha512::new();
-        h.update(&r).unwrap();
-        h.update(key.public_key().as_bytes()).unwrap();
-        h.update(b"forged").unwrap();
-        let digest = h.finalize();
-        let s = S::reduce(&digest).mul_add(&key.scalar, &S::reduce(&[0; 64]));
-        let mut signature = [0u8; 64];
-        signature[..32].copy_from_slice(&r);
-        signature[32..].copy_from_slice(&s.bytes());
-        // The equation holds: [S]B - [k]A is the identity.
-        let s = PublicScalar::canonical(&s.bytes()).unwrap();
-        let point = verification_point(&s, &PublicScalar::reduce(&digest), &key.public.point);
-        assert_eq!(point.encode(), r);
-        assert_eq!(key.public_key().verify(b"forged", &signature), Err(Error::InvalidSignature));
     }
 
     /// The comb's rows are j 16^(2i) B, against run-time additions.
