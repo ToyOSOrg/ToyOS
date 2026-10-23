@@ -683,11 +683,8 @@ impl AddressSpace {
     }
 
     /// Where the byte at `va` is, for the kernel to reach through the direct
-    /// map, populating its page where its range allows `access`: what a copy
-    /// or a futex wait the kernel makes for a thread of this space reaches,
-    /// which is what a store or load of the thread's own would. `None` for an
-    /// aperture's page, a device's registers or firmware's framebuffer, which
-    /// the direct map does not reach.
+    /// map, populating its page where its range allows `access`; `None` for
+    /// an aperture's page, which the direct map does not reach.
     pub fn reach(&mut self, va: u64, access: Access) -> Option<u64> {
         if !copyable(self.inventory.find(va)?.1) {
             return None;

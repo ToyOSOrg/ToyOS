@@ -16,6 +16,24 @@ is charged before it is allocated (`issues/nothing-charges-kernel-memory-to-a-pr
 a thread's kernel stack among them. But the refusal falls on whichever process
 asks next, its maker or any other.
 
+**System controls must stay usable under exhaustion, and today they do not**
+(owner, item 71: "Preserving usable system controls under exhaustion remains
+required; allocation errors alone do not establish that protection"). While
+`kernel_objects_refused` holds every frame a process may, every other process
+is refused too, system services included. In #1045 round 1's `dirs-uncharged`
+control, the file server's data instance died of a refused allocation, and the
+supervisor's one refused restart was final
+(`issues/a-service-refused-its-restart-for-memory-stays-down.md`).
+
+**Exit:** per-job accounting, landing after the machine-level charges (item 71),
+with a floor reserved for the control-path system jobs, the supervisor and the
+input servers (the memory design's protected capacity), which no other job's
+allocation can take. The supervisor retries a refused restart once memory
+returns. Attribution does not impose fixed per-app limits (item 71). The guest
+test: with one ordinary job holding every frame it may, the supervisor still
+answers a stop and a restart, the input path still delivers, and a starved
+service is serving again once the memory is given back.
+
 **The class statement, which is what predicts the next instance.** *A client's
 request is an allocation request, and every one of them needs an owner who can
 say no.* Three instances were filed under it — the compositor's windows, netd's
