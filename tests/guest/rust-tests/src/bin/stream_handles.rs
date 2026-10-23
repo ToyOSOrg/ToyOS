@@ -13,6 +13,14 @@
 //!   refused by name with nothing written; a stream is no file; `endow` and
 //!   `provide` of a stream's own handle are refused, where a descriptor goes
 //!   as an exported holder.
+//! - **One end, two threads**: a write on one thread completes while another
+//!   is in a read the peer has not answered, and that read then takes what
+//!   the peer publishes. `sshserver` reads each connection on one thread and
+//!   writes it on another.
+//! - **Piped children across threads**: one thread writes a child's stdin,
+//!   two read its stdout and stderr, and another waits for its exit; a child
+//!   that holds its pipes open is killed from a thread other than the one
+//!   reading them, and that read ends. `sshserver` runs every program so.
 //!
 //! **This test is netstack for its children**: a port of its own served to
 //! each as `netstack`, which answers a connect with the region judged and two
@@ -80,6 +88,9 @@ fn main() {
         Some("faulter") => faulter(),
         Some("reader") => reader(),
         Some("reader-child") => reader_child(),
+        Some("two-threads") => two_threads(),
+        Some("echo") => echo(),
+        Some("hold") => hold(),
         Some("child") => std::process::exit(0),
         Some(other) => panic!("unknown role {other:?}"),
         None => test(),
@@ -92,6 +103,8 @@ fn test() {
     shares_within_a_process_and_refuses_moves();
     refuses_a_foreign_handle_writing_nothing();
     refuses_a_stream_as_a_file();
+    reads_and_writes_on_two_threads();
+    pipes_across_threads();
     println!("a stream's holders: one dead inside the gate leaves the other working; netstack's exit ends both");
 }
 
@@ -207,6 +220,129 @@ fn refuses_a_stream_as_a_file() {
 }
 
 // ---- this test as netstack ----
+
+/// What the client writes while its other thread reads.
+const WRITTEN: &[u8] = b"written while the other thread reads";
+
+/// What the peer publishes once the write is in.
+const LATER: &[u8] = b"published after the write";
+
+/// A write on one thread completes while the other thread's read waits on
+/// the peer, and the read then takes what the peer publishes after it.
+fn reads_and_writes_on_two_threads() {
+    let (mut child, mut netstack) = run("two-threads", PEER);
+    let mut out = BufReader::new(child.stdout.take().expect("the child's stdout"));
+    assert_eq!(line(&mut out), "reading");
+    assert_eq!(line(&mut out), "written");
+    assert_eq!(netstack.sent(), WRITTEN, "the write is in the send ring before the read is answered");
+    let words = words_of(&netstack.region);
+    let released = netstack.server.release(words, WRITTEN.len() as u32).expect("the client keeps the protocol");
+    // SAFETY: the receive ring is inside the mapping, past what the client already read.
+    unsafe { std::ptr::copy_nonoverlapping(LATER.as_ptr(), netstack.region.as_ptr().add(RECEIVE_RING + PEER.len()), LATER.len()) };
+    let published = netstack.server.publish(words, LATER.len() as u32).expect("the client keeps the protocol");
+    netstack.ring(released.and(published));
+    assert_eq!(line(&mut out), "read");
+    let status = child.wait().expect("wait the client");
+    assert!(status.success(), "the client exited {status:?}");
+    println!("  one end, two threads: the write completes beside an unanswered read, which then takes the peer's next bytes");
+}
+
+/// A client that reads on one thread and writes on another.
+fn two_threads() -> ! {
+    let mut stream = connect();
+    let mut reader = stream.try_clone().expect("a second handle");
+    let (entered, entering) = std::sync::mpsc::channel();
+    let reading = std::thread::spawn(move || {
+        let mut peer = vec![0u8; PEER.len()];
+        reader.read_exact(&mut peer).expect("the peer's first bytes");
+        assert_eq!(peer, PEER);
+        say("reading");
+        entered.send(()).expect("the writer waits");
+        let mut later = vec![0u8; LATER.len()];
+        reader.read_exact(&mut later).expect("the peer's later bytes");
+        assert_eq!(later, LATER);
+    });
+    entering.recv().expect("the reader is reading");
+    stream.write_all(WRITTEN).expect("a write beside the read");
+    say("written");
+    reading.join().expect("the reader");
+    say("read");
+    std::process::exit(0)
+}
+
+/// What `echo` is fed: more than a pipe holds, so writer and readers wait on
+/// each other.
+const FED: usize = 256 * 1024;
+
+/// A child's stdin written, its stdout and stderr read and its exit waited
+/// for, each on a thread of its own; then a child holding its pipes open
+/// killed from one thread while another reads its stdout.
+fn pipes_across_threads() {
+    use std::sync::{Arc, Mutex};
+    let fed: Vec<u8> = (0..FED).map(|i| (i % 251) as u8).collect();
+    let mut child = Command::new(SELF_PATH).arg("echo").stdin(Stdio::piped()).stdout(Stdio::piped()).stderr(Stdio::piped()).spawn().expect("spawn echo");
+    let mut stdin = child.stdin.take().expect("stdin");
+    let mut stdout = child.stdout.take().expect("stdout");
+    let mut stderr = child.stderr.take().expect("stderr");
+    let writer = {
+        let fed = fed.clone();
+        std::thread::spawn(move || stdin.write_all(&fed).expect("feed echo"))
+    };
+    let out = std::thread::spawn(move || {
+        let mut all = Vec::new();
+        stdout.read_to_end(&mut all).expect("echo's stdout");
+        all
+    });
+    let err = std::thread::spawn(move || {
+        let mut all = String::new();
+        stderr.read_to_string(&mut all).expect("echo's stderr");
+        all
+    });
+    writer.join().expect("the writer");
+    let (out, err) = (out.join().expect("the stdout reader"), err.join().expect("the stderr reader"));
+    let status = std::thread::spawn(move || child.wait().expect("wait echo")).join().expect("the waiter");
+    assert!(out == fed, "echo's stdout is its stdin: {} bytes of {}", out.len(), fed.len());
+    assert_eq!((err.as_str(), status.code()), ("fed\n", Some(7)));
+
+    let mut child = Command::new(SELF_PATH).arg("hold").stdin(Stdio::piped()).stdout(Stdio::piped()).spawn().expect("spawn hold");
+    let mut stdout = child.stdout.take().expect("stdout");
+    let (greeted, greeting) = std::sync::mpsc::channel();
+    let reader = std::thread::spawn(move || {
+        let mut line = [0u8; 5];
+        stdout.read_exact(&mut line).expect("hold's greeting");
+        greeted.send(()).expect("the killer waits");
+        let mut rest = Vec::new();
+        stdout.read_to_end(&mut rest).expect("hold's stdout to its end");
+        rest
+    });
+    let child = Arc::new(Mutex::new(child));
+    let killer = child.clone();
+    greeting.recv().expect("hold is running");
+    std::thread::spawn(move || killer.lock().expect("the child").kill().expect("kill hold")).join().expect("the killer");
+    assert_eq!(reader.join().expect("the reader"), b"", "the killed child's stdout ends");
+    let status = child.lock().expect("the child").wait().expect("wait hold");
+    assert!(!status.success(), "hold was killed: {status:?}");
+    println!("  piped children across threads: fed, read and waited for apart, and one killed beside its reader");
+}
+
+/// Its stdin back on stdout, to its end, then a word on stderr and exit 7.
+fn echo() -> ! {
+    let mut all = Vec::new();
+    std::io::stdin().read_to_end(&mut all).expect("stdin");
+    std::io::stdout().write_all(&all).expect("stdout");
+    std::io::stdout().flush().expect("flush");
+    eprint!("fed\n");
+    std::process::exit(7)
+}
+
+/// A greeting, then its pipes held open until it is killed.
+fn hold() -> ! {
+    print!("held\n");
+    std::io::stdout().flush().expect("flush");
+    let mut never = String::new();
+    let _ = std::io::stdin().read_line(&mut never);
+    panic!("hold's stdin ended: nothing closes it")
+}
 
 /// One holder as this test keeps it: its connection and the write ends of
 /// its two bells.

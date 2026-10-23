@@ -5103,7 +5103,8 @@ fn stream_exported_to_a_child() -> Result<(), String> {
 
 /// `test_rs_stream_handles` on a boot of its own: a holder killed inside its
 /// gate leaves the other working, netstack's exit ends a blocked read in each,
-/// and within a process a stream's handles are one end
+/// within a process a stream's handles are one end, one end reads and writes
+/// on two threads, and piped children are served across threads
 /// (`tests/guest/rust-tests/src/bin/stream_handles.rs`).
 fn stream_holders(test_config: &Path) -> Result<(), String> {
     const JOB: &str = "stream_handles";
@@ -5122,6 +5123,8 @@ fn stream_holders(test_config: &Path) -> Result<(), String> {
         "a holder killed inside the gate: its hang-up came after it, and the parent wrote and read",
         "netstack's exit: a blocked read in each holder answered ConnectionAborted",
         "given out and taken back: one end; its own handle endowed or provided: refused",
+        "one end, two threads: the write completes beside an unanswered read, which then takes the peer's next bytes",
+        "piped children across threads: fed, read and waited for apart, and one killed beside its reader",
     ] {
         if !result.stdout.contains(claim) {
             return Err(format!("the job never said {claim:?}:\n{}", result.stdout));
