@@ -341,6 +341,19 @@ pub fn alloc_contiguous(count: usize) -> Option<alloc::vec::Vec<PhysPage>> {
         return None;
     }
     let base = FRAMES.lock().as_mut()?.alloc_run_for_process(count)?;
+    Some(run(base, count))
+}
+
+/// `count` physically contiguous zeroed 2 MiB pages for the kernel's own use,
+/// such as a kernel driver's DMA pool.
+pub fn alloc_contiguous_for_kernel(count: usize) -> Option<alloc::vec::Vec<PhysPage>> {
+    assert!(count > 0, "pmm: a kernel run of no pages");
+    let base = FRAMES.lock().as_mut()?.alloc_run(count)?;
+    Some(run(base, count))
+}
+
+/// The pages of a run just taken at `base`, zeroed.
+fn run(base: u64, count: usize) -> alloc::vec::Vec<PhysPage> {
     let mut pages = alloc::vec::Vec::with_capacity(count);
     for i in 0..count as u64 {
         let page = PhysPage { phys: base + i * PAGE_2M };
@@ -348,7 +361,7 @@ pub fn alloc_contiguous(count: usize) -> Option<alloc::vec::Vec<PhysPage>> {
         unsafe { core::ptr::write_bytes(page.direct_map().as_mut_ptr::<u8>(), 0, PAGE_2M as usize) };
         pages.push(page);
     }
-    Some(pages)
+    pages
 }
 
 /// Pin every managed frame `[phys, phys + len)` touches so none is reissued while a user-copy window covers it; `false`, and nothing pinned, on a pin-count overflow.

@@ -158,7 +158,7 @@ impl View {
                     let at = self.start + (off + done) as u64;
                     let n = ((PAGE_SIZE - at % PAGE_SIZE) as usize).min(len - done);
                     let phys = guard
-                        .reach_copyable(at, asked(self.access))
+                        .reach(at, asked(self.access))
                         .filter(|&phys| crate::mm::pmm::pin_range(phys & !(PAGE_SIZE - 1), PAGE_SIZE as usize));
                     frames[count] = phys;
                     pieces[count] = (phys.unwrap_or(0), done, n);

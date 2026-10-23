@@ -129,7 +129,7 @@ impl ReplaceRename for TmpFs {
 
 impl FileSystem for TmpFs {
     // Nothing else caps file count here.
-    fn list(&mut self, dir: &str, limit: usize) -> Result<Vec<String>, SyscallError> {
+    fn list(&mut self, dir: &str, limit: usize, charge: &mut Charge) -> Result<Vec<String>, SyscallError> {
         let mut out = Vec::new();
         for (name, (entry, _)) in &self.entries {
             if let Entry::File { .. } = entry {
@@ -139,6 +139,7 @@ impl FileSystem for TmpFs {
                 if out.len() == limit {
                     return Err(SyscallError::ResourceExhausted);
                 }
+                charge.grow(crate::vfs::listed_heap::<String>(name))?;
                 out.push(name.clone());
             }
         }

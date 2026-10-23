@@ -165,6 +165,11 @@ const RUST_SKIP: &[&str] = &[
     // Needs a launcher whose row lists `/apps`, which `tests/images/testcases.toml` does
     // not give: the `app_view` metal row runs it on tests/images/proctreecase.toml.
     "app_view",
+    // It holds every frame a process may, and every other process's
+    // allocation is refused meanwhile, so whatever shared its boot could die
+    // of it: `kernel_objects_refused_alone` runs it on QEMU and the
+    // `kernel_objects_refused` metal row on the T14.
+    "kernel_objects_refused",
     // Fills /tmp to the VFS listing limit, so it needs a boot nothing else
     // shares — every later `read_dir("/tmp")` in it would be refused.
     // `readdir_bound` gives it one.
@@ -628,6 +633,12 @@ const MACHINE_TESTS: &[&str] = &[
     // thread's stack and table place given back, joined or detached, on the
     // two-CPU q35 guest: std's ToyOS layer, which no host builds.
     "std_threads_count_the_cpus_and_give_back_ended_threads",
+    // A process holding every frame it may is refused every kernel object it
+    // asks for more, and the kernel never panics for it: on the two-CPU,
+    // 4 GiB q35 guest, in a boot of its own, since every other process is
+    // refused meanwhile. QEMU establishes the refusals and that the machine
+    // goes on; nothing in it is timing.
+    "kernel_objects_refused_alone",
     // The parity instrument's two builds in one boot, behind ring's known
     // answers: that every row runs and both builds print the same whole table.
     // Its timings decide nothing here; the `crypto_instrument` metal row takes
@@ -708,6 +719,13 @@ const METAL: &[(&str, metal::Metal)] = &[
         // report, and a held window read back.
         "mask_windows",
         metal::Metal { arms: WINDOWSCASE, judge: |b| windows_on_metal(b[0]) },
+    ),
+    (
+        "kernel_objects_refused",
+        metal::Metal {
+            arms: TESTCASES_REFUSED,
+            judge: |b| b[0].job_passed("test_rs_kernel_objects_refused"),
+        },
     ),
     (
         "readdir_bound",
@@ -1621,6 +1639,11 @@ const TESTCASES_HELD: &[metal::Arm] = &[metal::Arm {
     last: Some("test_rs_acpi_hold"),
     ..metal::once("testcases", "tests/images/testcases.toml", &[], &[])
 }];
+
+/// Its own boot: `kernel_objects_refused` holds every frame a process may, so
+/// every other process's allocation is refused while it runs.
+const TESTCASES_REFUSED: &[metal::Arm] =
+    &[metal::once("testcases-refused", "tests/images/testcases.toml", &[], &["test_rs_kernel_objects_refused"])];
 
 /// Its own boot: `readdir_bound` fills `/tmp` to the VFS listing limit, and
 /// every later `read_dir("/tmp")` in a boot it shared would be refused.
@@ -4343,6 +4366,7 @@ fn run_machine_test(name: &str, test_config: &Path) -> Result<(), String> {
         }
         "vector_state_survives_a_switch" => vector_state_survives_a_switch(test_config),
         "std_threads_count_the_cpus_and_give_back_ended_threads" => std_threads_count_the_cpus_and_give_back_ended_threads(test_config),
+        "kernel_objects_refused_alone" => kernel_objects_refused_alone(test_config),
         "the_opening_exchange_with_qemus_agent_completes" => the_opening_exchange_with_qemus_agent_completes(),
         "crypto_instrument_prints_its_table" => crypto_instrument_prints_its_table(test_config),
         "the_compositor_drives_the_virtio_gpu" => the_compositor_drives_the_virtio_gpu(),
@@ -5096,6 +5120,25 @@ fn std_threads_count_the_cpus_and_give_back_ended_threads(test_config: &Path) ->
     }
     for line in result.stdout.lines().filter(|l| l.contains("std_threads: ")) {
         eprintln!("  [std] {}", line.trim());
+    }
+    Ok(())
+}
+
+/// `kernel_objects_refused` alone in its boot, which ends clean.
+fn kernel_objects_refused_alone(test_config: &Path) -> Result<(), String> {
+    const JOB: &str = "kernel_objects_refused";
+    let bin = qemu::build_toyos_bin(qemu::SUITE_ARCH, &compile::repo_root().join("tests/guest/rust-tests"), JOB);
+    let mut qemu = QemuInstance::boot_with_options(test_config, &[], &[(JOB.to_string(), bin)], BootOptions::default());
+    serial::Serial::boot(&qemu).must_be_clean()?;
+    let result = qemu.run_test("test_rs_kernel_objects_refused", Duration::from_secs(300));
+    if let Some(why) = &result.error {
+        return Err(format!("{why}\nthe job said:\n{}", result.stdout));
+    }
+    if result.exit_code != Some(0) {
+        return Err(format!("the job ended {:?}:\n{}", result.exit_code, result.stdout));
+    }
+    for line in result.stdout.lines().filter(|l| l.contains("PASS: ")) {
+        eprintln!("  [refused] {}", line.trim());
     }
     Ok(())
 }

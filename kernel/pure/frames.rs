@@ -28,7 +28,10 @@
 //! Nothing a process causes is promised or handed one held back, and a whole
 //! superframe is split only when no split one has a frame free, so 4 KiB
 //! traffic never splits one either. A charge is refused when it is made,
-//! never when the heap grows.
+//! and the heap's growth it covers finds a superframe. Charges count bytes,
+//! not the heap's footprint: growth that fragmentation adds past them takes
+//! spare superframes, then kept ones
+//! (`issues/the-kernel-heaps-fragmentation-is-charged-to-nobody.md`).
 //!
 //! The storage is the caller's, sized by [`supers_for`] and [`pins_for`] for
 //! the span of physical memory it manages, because the kernel lays it out of

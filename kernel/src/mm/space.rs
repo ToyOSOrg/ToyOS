@@ -679,13 +679,24 @@ impl AddressSpace {
     /// Serve a fault at `va` for `access`: populate its page if its range
     /// allows the access and the page is empty. `false` ends the thread.
     pub fn fault(&mut self, va: u64, access: Access) -> bool {
-        self.reach(va, access).is_some()
+        self.populate(va, access).is_some()
     }
 
-    /// Where the byte at `va` is, populating its page where its range allows
-    /// `access`: what a copy the kernel makes for a thread of this space
-    /// reaches, which is what a store or load of the thread's own would.
+    /// Where the byte at `va` is, for the kernel to reach through the direct
+    /// map, populating its page where its range allows `access`: what a copy
+    /// or a futex wait the kernel makes for a thread of this space reaches,
+    /// which is what a store or load of the thread's own would. `None` for an
+    /// aperture's page, a device's registers or firmware's framebuffer, which
+    /// the direct map does not reach.
     pub fn reach(&mut self, va: u64, access: Access) -> Option<u64> {
+        if !copyable(self.inventory.find(va)?.1) {
+            return None;
+        }
+        self.populate(va, access)
+    }
+
+    /// The frame behind `va`, populated where its range allows `access`.
+    fn populate(&mut self, va: u64, access: Access) -> Option<u64> {
         let (start, entry) = self.inventory.find(va)?;
         if !entry.prot.allows(access) {
             return None;
@@ -720,16 +731,6 @@ impl AddressSpace {
     pub fn allows(&self, start: u64, end: u64, access: Access) -> bool {
         self.inventory.covered(start & !(PAGE_SIZE - 1), end)
             && self.inventory.meeting(start, end).all(|(_, entry)| entry.prot.allows(access) && entry.backed() && copyable(entry))
-    }
-
-    /// [`reach`](Self::reach) for a copy the kernel makes: `None` for a page
-    /// of an aperture, which a range made since the copy's window was checked
-    /// may have put there.
-    pub fn reach_copyable(&mut self, va: u64, access: Access) -> Option<u64> {
-        if !copyable(self.inventory.find(va)?.1) {
-            return None;
-        }
-        self.reach(va, access)
     }
 
     /// The frame and protection a present leaf maps `va` with, populating

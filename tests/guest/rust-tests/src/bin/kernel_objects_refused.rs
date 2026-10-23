@@ -6,8 +6,13 @@
 //! The process commits every frame it may, which costs nothing while no page
 //! is touched; makes ranges, then directories, until each is refused, which
 //! leaves less of what charges cover than either takes; is refused one of each
-//! other kind; and is served again once it gives everything back. Nothing it
-//! does in between allocates in its own heap, which could only abort it.
+//! other kind, a listing of a directory of long names it made before among
+//! them, larger than all the kernel keeps for itself; and is served again once
+//! it gives everything back. Nothing it does in between allocates in its own
+//! heap, which could only abort it.
+//!
+//! While it holds every frame, every other process's allocation is refused
+//! too, so it has a boot of its own: `kernel_objects_refused_alone`.
 
 use std::process::Command;
 
@@ -20,6 +25,13 @@ const PAGE: usize = 4096;
 const DIRS: &[u8] = b"/tmp/kernel_objects_refused";
 const MOST_DIRS: usize = 200_000;
 
+/// A directory of long names whose listing, the names held twice while it is
+/// built, is past the 16 MiB the kernel keeps on the guest's 4 GiB: 8,192
+/// names of 3,900 bytes, 64 MiB listed.
+const LONG: &[u8] = b"/tmp/kernel_objects_refused_long";
+const LONG_NAMES: usize = 8192;
+const LONG_NAME: usize = 3900;
+
 fn main() {
     // Made before anything is taken, so what follows needs no heap of its
     // own: the pipe whose ring is not yet allocated, the file not yet
@@ -28,6 +40,12 @@ fn main() {
     let file = syscall::open(b"/tmp/kernel_objects_refused.bin", OpenFlags::WRITE | OpenFlags::CREATE | OpenFlags::TRUNCATE)
         .expect("a /tmp file before anything is taken");
     syscall::mkdir(DIRS).expect("the directory the fill makes its own in");
+    syscall::mkdir(LONG).expect("the directory of long names");
+    for n in 0..LONG_NAMES {
+        let file = syscall::open(long_path(&mut [0; 4096], n), OpenFlags::WRITE | OpenFlags::CREATE).expect("a long name before anything is taken");
+        syscall::close(file);
+    }
+    let mut listing = [0u8; 64];
     let mut committed: Vec<(*mut u8, usize)> = Vec::with_capacity(128);
     let mut ranges: Vec<*mut u8> = Vec::with_capacity(MAX_RANGES);
     let mut dirs = 0usize;
@@ -45,6 +63,7 @@ fn main() {
         ("a memory object", syscall::shm_create(PAGE).map(|_| ())),
         // SAFETY: placed anywhere, so it replaces nothing.
         ("a commitment", unsafe { syscall::vm_reserve(PAGE, VmProt::ReadWrite, VmAt::ANYWHERE) }.map(|_| ())),
+        ("a listing of long names", syscall::readdir(LONG, &mut listing).map(|_| ())),
     ];
 
     give_back(&committed, &ranges, dirs);
@@ -97,12 +116,46 @@ fn fill_ranges(ranges: &mut Vec<*mut u8>) -> usize {
 fn fill_dirs(dirs: &mut usize) -> usize {
     while *dirs < MOST_DIRS {
         match syscall::mkdir(dir_path(&mut [0; 64], *dirs)) {
-            Ok(()) => *dirs += 1,
+            Ok(()) => {
+                *dirs += 1;
+                // Never silent for long: a fill that is still working says so.
+                if dirs.is_multiple_of(20_000) {
+                    println!("  kernel_objects_refused: {} directories made", *dirs);
+                }
+            }
             Err(SyscallError::ResourceExhausted) => return *dirs,
             Err(e) => panic!("directory {} answered {e:?}", *dirs),
         }
     }
     *dirs
+}
+
+/// `LONG/<n>` padded with `a` to [`LONG_NAME`] bytes, written into `buf`.
+fn long_path(buf: &mut [u8; 4096], n: usize) -> &[u8] {
+    let at = LONG.len() + 1;
+    buf[..LONG.len()].copy_from_slice(LONG);
+    buf[LONG.len()] = b'/';
+    let digits = number(n);
+    let len = digits.iter().position(|&d| d == 0).unwrap_or(digits.len());
+    buf[at..at + len].copy_from_slice(&digits[..len]);
+    buf[at + len..at + LONG_NAME].fill(b'a');
+    &buf[..at + LONG_NAME]
+}
+
+/// `n` in decimal, ended by a zero byte.
+fn number(n: usize) -> [u8; 21] {
+    let mut digits = [0u8; 21];
+    let (mut n, mut len) = (n, 0);
+    loop {
+        digits[len] = b'0' + (n % 10) as u8;
+        len += 1;
+        n /= 10;
+        if n == 0 {
+            break;
+        }
+    }
+    digits[..len].reverse();
+    digits
 }
 
 /// `DIRS/<n>`, written into `buf`.
@@ -150,6 +203,12 @@ fn served_again(unwritten: toyos_abi::handle::RawHandle, file: toyos_abi::handle
     syscall::close(file);
     syscall::delete(b"/tmp/kernel_objects_refused.bin").expect("delete the /tmp file");
     syscall::rmdir(DIRS).expect("remove the fill's directory");
+    let mut listing = [0u8; 64];
+    assert!(syscall::readdir(LONG, &mut listing).is_ok_and(|needed| needed > listing.len()), "a listing of long names once memory is given back");
+    for n in 0..LONG_NAMES {
+        syscall::delete(long_path(&mut [0; 4096], n)).expect("delete a long name");
+    }
+    syscall::rmdir(LONG).expect("remove the directory of long names");
     let echo = Command::new("/system/bin/echo").arg("still alive").output().expect("spawn echo once memory is given back");
     assert!(echo.status.success() && String::from_utf8_lossy(&echo.stdout).trim() == "still alive", "echo answered {echo:?}");
     println!("  PASS: every kind is served again once the memory is given back, and a spawn runs");

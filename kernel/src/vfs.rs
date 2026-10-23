@@ -36,8 +36,9 @@ pub fn lock() -> VfsGuard {
 /// A device that would not answer is `Io`; `NotFound` means only that the name is absent.
 pub trait FileSystem: Send {
     /// Every name [`under_directory`] puts at or under `dir` (`""` is the mount
-    /// root), or `ResourceExhausted` above `limit`, which counts only those.
-    fn list(&mut self, dir: &str, limit: usize) -> Result<Vec<String>, SyscallError>;
+    /// root), or `ResourceExhausted` above `limit`, which counts only those,
+    /// or where `charge` cannot grow by what [`listed_heap`] says each takes.
+    fn list(&mut self, dir: &str, limit: usize, charge: &mut Charge) -> Result<Vec<String>, SyscallError>;
 
     /// The number of the file or symlink `name`, not followed, as
     /// `toyos_abi::syscall::Stat::node` says: a file's is the `FileId`
@@ -165,6 +166,17 @@ pub fn under_directory(name: &str, dir: &str) -> bool {
     dir.is_empty()
         || name == dir
         || (name.starts_with(dir) && name.as_bytes().get(dir.len()) == Some(&b'/'))
+}
+
+/// The heap a listing's entry of `name` takes, held while the call that
+/// listed it runs: its bytes, and its place in a list that doubles.
+pub fn listed_heap<T>(name: &str) -> usize {
+    charge::array::<u8>(name.len()) + 2 * core::mem::size_of::<T>()
+}
+
+/// The heap a listing's set of the directories it has seen takes for one.
+fn seen_heap(name: &str) -> usize {
+    charge::array::<u8>(name.len()) + charge::map_entry::<String, ()>()
 }
 
 /// The charge of a directory a map of `V` beside its path holds.
@@ -332,7 +344,9 @@ impl Vfs {
     /// node, as [`Self::stat`] answers it.
     ///
     /// `list` refuses above [`MAX_LIST_ENTRIES`] rather than truncating because a short listing is a confidently wrong answer to a caller checking existence or deleting a tree.
-    pub fn list(&mut self, cwd: &str, path: &str) -> Result<Vec<(String, u64)>, SyscallError> {
+    /// What the listing takes of the heap grows `charge`, which the caller
+    /// holds until it has let the listing go: refused, `ResourceExhausted`.
+    pub fn list(&mut self, cwd: &str, path: &str, charge: &mut Charge) -> Result<Vec<(String, u64)>, SyscallError> {
         let (mount, subdir) = if path.is_empty() {
             self.resolve_path(cwd, "")
         } else {
@@ -360,7 +374,7 @@ impl Vfs {
             };
         };
         let fs_path = point.path(&subdir);
-        let all_files = self.mounts[point.fs].fs.list(&fs_path, MAX_LIST_ENTRIES)?;
+        let all_files = self.mounts[point.fs].fs.list(&fs_path, MAX_LIST_ENTRIES, charge)?;
         let listed = directory(&mount, &subdir);
 
         let prefix = if fs_path.is_empty() {
@@ -389,11 +403,15 @@ impl Vfs {
             }
             if let Some(slash_pos) = rest.find('/') {
                 let child = &rest[..slash_pos];
-                if seen_dirs.insert(format!("{child}/")) {
+                let dir_name = format!("{child}/");
+                if !seen_dirs.contains(&dir_name) {
+                    charge.grow(listed_heap::<(String, u64)>(&dir_name) + seen_heap(&dir_name))?;
+                    seen_dirs.insert(dir_name.clone());
                     let node = self.dir_node(&format!("{listed}/{child}"))?;
-                    result.push((format!("{child}/"), node));
+                    result.push((dir_name, node));
                 }
             } else {
+                charge.grow(listed_heap::<(String, u64)>(rest))?;
                 result.push((String::from(rest), self.mounts[point.fs].fs.node(name)?));
             }
         }
@@ -406,10 +424,12 @@ impl Vfs {
             let child = rest.split('/').next().unwrap_or(rest);
             if !child.is_empty() {
                 let dir_name = format!("{child}/");
-                if seen_dirs.insert(dir_name.clone()) {
+                if !seen_dirs.contains(&dir_name) {
                     if result.len() == MAX_LIST_ENTRIES {
                         return Err(SyscallError::ResourceExhausted);
                     }
+                    charge.grow(listed_heap::<(String, u64)>(&dir_name) + seen_heap(&dir_name))?;
+                    seen_dirs.insert(dir_name.clone());
                     result.push((dir_name, self.dirs.of(&format!("{parent}{child}"), file_cache::draw_node, dir_charge::<(u64, Charge)>)?));
                 }
             }
@@ -615,7 +635,8 @@ impl Vfs {
         }
 
         let (fs, fs_path) = self.resolve_fs(&mount, &subdir).ok_or(SyscallError::NotFound)?;
-        let names = fs.list(&fs_path, MAX_LIST_ENTRIES)?;
+        let mut listing = Charge::NONE;
+        let names = fs.list(&fs_path, MAX_LIST_ENTRIES, &mut listing)?;
         let child_prefix = format!("{fs_path}/");
         let is_file = names.contains(&fs_path);
         // A listing mount's own `name/` self-entry is not a child, or every empty directory reads non-empty.
@@ -628,7 +649,13 @@ impl Vfs {
         }
 
         let created_prefix = format!("{dir}/");
-        let has_created_child = self.created_dirs.keys().any(|d| d.starts_with(&created_prefix));
+        // The first carried directory at or after `dir/` in key order is the
+        // only one that can lie beneath it.
+        let has_created_child = self
+            .created_dirs
+            .range::<str, _>((core::ops::Bound::Included(created_prefix.as_str()), core::ops::Bound::Unbounded))
+            .next()
+            .is_some_and(|(d, _)| d.starts_with(&created_prefix));
         if !(self.created_dirs.contains_key(&dir) || has_file_child || has_created_child) {
             return Err(SyscallError::NotFound);
         }

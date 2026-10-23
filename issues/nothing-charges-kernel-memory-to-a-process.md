@@ -12,7 +12,8 @@ it.** Every persistent kernel object a process can reach holds a
 refused `ResourceExhausted` at the call where covering it would take what the
 frame allocator holds back for the kernel; the heap grows into what charges
 reserved (`kernel/pure/frames.rs`). So the terminal state below is gone for
-those objects. What is still missing is the attribution: no charge names the
+those objects, but for the heap's fragmentation past the charges' estimates
+(`issues/the-kernel-heaps-fragmentation-is-charged-to-nobody.md`). What is still missing is the attribution: no charge names the
 process or job that caused it, so there is no per-process memory in `ps`, no
 `meminfo`, no reap-time assertion that a dead process's charges went to zero,
 and no way for the suite to assert the absence of a leak. The memory design

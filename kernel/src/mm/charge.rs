@@ -6,9 +6,11 @@
 //! allocations and dropped with it. A charge is refused, `ResourceExhausted`
 //! at the call, where covering it would take what the frame allocator holds
 //! back for the kernel (`pmm::charge`); an allocation it covers then finds
-//! room, since the heap grows into what charges reserved first. What a call
-//! allocates and frees before it returns is not charged: the kernel's kept
-//! superframes cover it.
+//! room, since the heap grows into what charges reserved first, as long as
+//! the heap's fragmentation stays within what the charges' estimates
+//! overcount (`issues/the-kernel-heaps-fragmentation-is-charged-to-nobody.md`).
+//! What a call allocates and frees before it returns, past what its thread is
+//! charged for, is not charged: the kernel's kept superframes cover it.
 
 use core::alloc::Layout;
 
