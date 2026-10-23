@@ -1,6 +1,6 @@
 //! bcachefs as bcachefs-tools v1.39.4 defines metadata version 1.39 (1063),
-//! on one device: a reader of clean volumes, [`mkfs`] of a minimal complete
-//! volume, and ToyOS's check of what it writes ([`fsck`]).
+//! on one device: a reader of clean volumes, [`mkfs`] of a clean volume
+//! holding a [`Tree`], and ToyOS's check of what it writes ([`fsck`]).
 //!
 //! **Everything read came off a disk this crate does not own.** Bytes become
 //! typed values in one place each, the superblock in [`superblock`], a node
@@ -10,11 +10,13 @@
 
 mod bkey;
 mod crypt;
+mod derive;
 mod fsck;
 mod mkfs;
 mod node;
 mod read;
 mod superblock;
+mod tree;
 mod value;
 
 pub use bkey::{Bpos, Key, Version};
@@ -23,6 +25,7 @@ pub use fsck::{fsck, Finding};
 pub use mkfs::{mkfs, Encryption, Options};
 pub use read::{DirEntry, Inode, Volume};
 pub use superblock::{Kdf, Superblock};
+pub use tree::{Meta, NodeRef, Tree};
 pub use value::DirentType;
 
 /// Why an operation on a volume did not happen.
@@ -243,6 +246,7 @@ pub(crate) mod kind {
     pub const SET: u8 = 25;
     pub const ALLOC_V4: u8 = 27;
     pub const BACKPOINTER: u8 = 28;
+    pub const BUCKET_GENS: u8 = 30;
     pub const INODE_V3: u8 = 29;
     pub const SNAPSHOT_TREE: u8 = 31;
     pub const ACCOUNTING: u8 = 34;

@@ -283,6 +283,11 @@ lib/bcachefs/tests/fixtures/ — volumes upstream's tools wrote
     sha256 fd137a545190906ded0269eeec3e32835ffe3585d3e4c2cebe84d234a96b1b1f
     raw    52638d7b3c31abb202e6b12c5ccb5a58fe95bee412bada3d7fc3756705cdcace
 
+    lib/bcachefs/tests/fixtures/links.img.gz
+    358,434 bytes gzip -9n, of a 33,554,432-byte raw volume
+    sha256 e2a3ed35d27023693192c35e833e405a240aa6feccde9412e8f5a9e881a47999
+    raw    330587c6be9b8c61067e31020838b0dc0b005398200a8458a98da38602793074
+
     SPDX-License-Identifier: MIT OR Apache-2.0
 
 `lib/bcachefs/src/engine` reads upstream's on-disk format, and the only honest
@@ -366,6 +371,39 @@ inside are generated values; the member's device name is the image file's
 basename, and no model or serial is recorded. Timestamps are 2026-10-22, the
 guest's clock. The same reasoning as for `crc32c.img.gz` makes the bytes this
 project's own.
+
+`links.img.gz` is a volume upstream's tools populated with hard links and a
+multi-level tree, against which the engine's derivation of link counts,
+allocation, backpointers and accounting is compared. It was produced by the
+same tools in the same guest, on the same terms. The commands, against a raw
+image file:
+
+    truncate -s 32M links.img
+    bcachefs format --block_size=4096 --fs_label=toyoslinks links.img
+    bcachefs fusemount links.img /mnt/t
+    cd /mnt/t
+    mkdir -p a/b/c/d/e empty
+    printf hello-toyos > a/hello.txt
+    ln a/hello.txt a/b/hello-link
+    ln a/hello.txt a/b/c/d/e/hello-deep
+    seq 1 40000 > a/b/seq.txt
+    ln a/b/seq.txt seq-again
+    ln -s ../hello.txt a/b/link
+    : > a/b/c/empty-file
+    mkdir many; for i in $(seq 1 600); do echo $i > many/f$i; done
+    ln many/f1 many/f1-twin
+    sync; cd /
+    fusermount3 -u /mnt/t        # then wait until the FUSE daemon exits,
+                                 # which writes the clean superblock
+    bcachefs fsck -n -K links.img < /dev/null    # exit 0
+    gzip -9n < links.img > links.img.gz
+
+The files are an eleven-byte string, the output of `seq`, an empty file and
+directory, a symlink, the numbers 1 to 600 and an empty `lost+found`; the
+UUIDs and hash seeds inside are generated values; the member's device name is
+the image file's basename, and no model or serial is recorded. Timestamps are
+2026-10-23, the guest's clock. The same reasoning as for `crc32c.img.gz` makes
+the bytes this project's own.
 
 
 lib/fat32/tests/fixtures/ — volumes macOS's FAT tools wrote

@@ -66,13 +66,21 @@ pub(crate) mod inode_field {
     pub const DIR: usize = 20;
     pub const DIR_OFFSET: usize = 21;
     pub const SUBVOL: usize = 22;
+    pub const PARENT_SUBVOL: usize = 23;
     pub const DEPTH: usize = 25;
+    /// The per-inode options, stored biased by one: 0 is unset.
+    pub const OPTIONS: [usize; 12] = [10, 11, 12, 13, 14, 15, 16, 17, 18, 24, 26, 27];
 }
 
 /// Inode flag bits.
 pub(crate) mod inode_flag {
+    pub const I_SECTORS_DIRTY: u64 = 1 << 6;
     pub const UNLINKED: u64 = 1 << 7;
+    pub const HAS_CHILD_SNAPSHOT: u64 = 1 << 9;
     pub const DIRENT_31_BIT: u64 = 1 << 11;
+    pub const HAS_INODE_OPTS: u64 = 1 << 12;
+    /// The access and default ACL flags, each needing its xattr.
+    pub const ACLS: u64 = 3 << 13;
 }
 
 impl InodeValue {
@@ -160,6 +168,24 @@ pub enum DirentType {
 }
 
 impl DirentType {
+    /// The type of a node of `mode`; `None` for a mode of no file type.
+    pub(crate) fn of_mode(mode: u16) -> Option<DirentType> {
+        Self::from_bits((mode >> 12) as u8).filter(|&t| t != DirentType::Subvolume)
+    }
+
+    pub(crate) fn bits(self) -> u8 {
+        match self {
+            DirentType::Fifo => 1,
+            DirentType::Char => 2,
+            DirentType::Directory => 4,
+            DirentType::Block => 6,
+            DirentType::Regular => 8,
+            DirentType::Symlink => 10,
+            DirentType::Socket => 12,
+            DirentType::Subvolume => 16,
+        }
+    }
+
     fn from_bits(bits: u8) -> Option<DirentType> {
         Some(match bits {
             1 => DirentType::Fifo,
@@ -173,6 +199,19 @@ impl DirentType {
             _ => return None,
         })
     }
+}
+
+/// The longest name a dirent may be given.
+pub(crate) const MAX_NAME: usize = 512;
+
+/// A dirent value naming `target`, non-casefold: the name runs to the
+/// value's end, zero-padded to a word.
+pub(crate) fn dirent(target: u64, kind: DirentType, name: &[u8]) -> Vec<u8> {
+    let mut v = alloc::vec![0u8; (9 + name.len()).next_multiple_of(8)];
+    put64(&mut v, 0, target);
+    v[8] = kind.bits();
+    v[9..9 + name.len()].copy_from_slice(name);
+    v
 }
 
 /// A dirent value, non-casefold layout.
@@ -248,7 +287,43 @@ pub(crate) struct Extent {
     pub ptr: Ptr,
 }
 
+/// The most sectors one crc32 entry, and one crc64 entry, describes.
+const CRC32_SECTORS: u32 = 128;
+const CRC64_SECTORS: u32 = 512;
+
 impl Extent {
+    /// An unencrypted, uncompressed extent of `sectors` at `ptr`, its
+    /// checksum `csum` of `csum_type` in the smallest entry that holds it:
+    /// a crc32 entry up to 128 sectors, else a crc64 one.
+    pub(crate) fn encode(sectors: u32, csum_type: u8, csum: u32, ptr: Ptr) -> Vec<u8> {
+        assert!((1..=CRC64_SECTORS).contains(&sectors), "an extent of {sectors} sectors");
+        let n = u64::from(sectors - 1);
+        let ty = u64::from(csum_type);
+        let words: Vec<u64> = if sectors <= CRC32_SECTORS {
+            alloc::vec![0b10 | n << 2 | n << 9 | ty << 24 | u64::from(csum) << 32, ptr.encode()]
+        } else {
+            alloc::vec![0b100 | n << 3 | n << 12 | ty << 40, u64::from(csum), ptr.encode()]
+        };
+        words.iter().flat_map(|w| w.to_le_bytes()).collect()
+    }
+
+    /// Bytes of checksum the smallest entry for this extent's checksum
+    /// type and size holds (A5.34): 4 in crc32, 10 in crc64, 16 in crc128.
+    pub(crate) fn smallest_entry(crc: &Crc) -> usize {
+        let bytes = match crc.csum_type {
+            0 | 1 | 5 => 4,
+            3 => 10,
+            _ => 16,
+        };
+        if bytes <= 4 && crc.uncompressed <= CRC32_SECTORS && crc.nonce == 0 {
+            4
+        } else if bytes <= 10 && crc.uncompressed <= CRC64_SECTORS && crc.nonce <= 1023 {
+            10
+        } else {
+            16
+        }
+    }
+
     /// The entry list, as far as a one-device volume with no erasure
     /// coding can hold.
     pub(crate) fn decode(v: &[u8]) -> Result<Extent> {
@@ -402,6 +477,56 @@ pub(crate) mod data_type {
     pub const SB: u8 = 1;
     pub const JOURNAL: u8 = 2;
     pub const BTREE: u8 = 3;
+    pub const USER: u8 = 4;
+    pub const NEED_GC_GENS: u8 = 8;
+    pub const NEED_DISCARD: u8 = 9;
+
+    /// A bucket in one of these holds no sectors.
+    pub fn empty(t: u8) -> bool {
+        matches!(t, FREE | NEED_GC_GENS | NEED_DISCARD)
+    }
+}
+
+/// The fields of an alloc_v4 value a check compares.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub(crate) struct AllocV4 {
+    pub gen: u8,
+    pub oldest_gen: u8,
+    pub data_type: u8,
+    pub dirty: u32,
+    pub cached: u32,
+    pub stripe_refcount: u32,
+    pub stripe_sectors: u32,
+    pub journal_seq_empty: u64,
+}
+
+impl AllocV4 {
+    /// A value at least 48 bytes long and as long as its trailing records
+    /// say; fields past its end read as zero.
+    pub(crate) fn decode(v: &[u8]) -> Result<AllocV4> {
+        if v.len() < 48 {
+            return Err(Error::Corrupt("alloc_v4 value shorter than 48 bytes"));
+        }
+        let flags = le32(v, 8);
+        let (start, count) = (field(u64::from(flags), 2, 6) as usize, field(u64::from(flags), 8, 6) as usize);
+        if start == 0 && count != 0 {
+            return Err(Error::Corrupt("alloc_v4 trailing records at offset 0"));
+        }
+        if v.len() < (if start == 0 { 6 } else { start } + 4 * count) * 8 {
+            return Err(Error::Corrupt("alloc_v4 value shorter than its trailing records"));
+        }
+        let get32 = |at: usize| if v.len() >= at + 4 { le32(v, at) } else { 0 };
+        Ok(AllocV4 {
+            gen: v[12],
+            oldest_gen: v[13],
+            data_type: v[14],
+            dirty: le32(v, 16),
+            cached: le32(v, 20),
+            stripe_refcount: le32(v, 40),
+            stripe_sectors: if start == 8 { get32(56) } else { 0 },
+            journal_seq_empty: if v.len() >= 56 { le64(v, 48) } else { 0 },
+        })
+    }
 }
 
 impl Alloc {
@@ -418,14 +543,17 @@ impl Alloc {
     }
 }
 
-/// A backpointer value for a btree node pointer.
-pub(crate) fn backpointer(btree: u8, node_level: u8, sectors: u32, node_max: Bpos) -> [u8; 32] {
+/// A backpointer value: the key holding the pointer, in `btree` at
+/// `level` (a node's level plus one for a node pointer, 0 for an extent)
+/// and at `pos`, and the pointer's data type, generation and sectors.
+pub(crate) fn backpointer(btree: u8, level: u8, data_type: u8, gen: u8, sectors: u32, pos: Bpos) -> [u8; 32] {
     let mut v = [0u8; 32];
     v[0] = btree;
-    v[1] = node_level + 1;
-    v[2] = data_type::BTREE;
+    v[1] = level;
+    v[2] = data_type;
+    v[3] = gen;
     put32(&mut v, 8, sectors);
-    node_max.encode(&mut v[12..32]);
+    pos.encode(&mut v[12..32]);
     v
 }
 
@@ -501,6 +629,7 @@ pub(crate) mod class {
     pub const DEV_DATA_TYPE: u8 = 3;
     pub const SNAPSHOT: u8 = 5;
     pub const BTREE: u8 = 6;
+    pub const INUM: u8 = 8;
 }
 
 /// The counters of an accounting value.

@@ -59,7 +59,7 @@ pub struct DirEntry {
 
 /// The longest symlink this reader reads, its NUL included: a path's
 /// length on the systems that make them.
-const MAX_SYMLINK: u64 = 4096;
+pub(crate) const MAX_SYMLINK: u64 = 4096;
 
 const S_IFMT: u16 = 0o170000;
 const S_IFDIR: u16 = 0o040000;
@@ -97,6 +97,10 @@ impl<D: BlockDev> Volume<D> {
         }
         if !sb.clean_flag() || sb.clean.is_none() {
             return Err(Error::Unsupported("a volume not cleanly unmounted: its journal needs replay"));
+        }
+        let m = &sb.member;
+        if m.nbuckets * u64::from(m.bucket_sectors) > dev.blocks() * (BLOCK / SECTOR) as u64 {
+            return Err(Error::Corrupt("member's buckets past the device"));
         }
         let mut volume = Volume { dev, sb, key, snapshot: 0, root: 0 };
         let (k, v) = volume.get(Btree::Subvolumes, Bpos::new(0, u64::from(super::mkfs::ROOT_SUBVOLUME), 0)).await?.ok_or(Error::Corrupt("no root subvolume"))?;
