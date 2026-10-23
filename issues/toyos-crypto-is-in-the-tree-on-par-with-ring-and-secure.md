@@ -260,17 +260,23 @@ Not consumers:
          - A VEX-encoded build of AES-NI measured slower and is not to be
            retried. It kept all fifteen AES-256 round keys in registers and
            serialised the eight blocks (CTR 2.0 to 2.2 µs).
+         - Open is one pass since #1054 (the seal stitch, hashing each
+           batch's input). On the bench's Linux beside ring, open at 16 KiB
+           went from 1.08 to 1.03; reject now decrypts and wipes, 0.53 to
+           1.03.
          - Exit: a schedule with fewer instructions per block, in counter
            generation and the Karatsuba folds, and the rows pass.
        - **AES-GCM bulk on 512-bit VAES (the T14).**
-         - Rows: 1 KiB and 16 KiB, 1.02–1.06.
-         - At 16 KiB, seal (1907 ns) is about CTR (open less reject, 1046 ns)
-           plus GHASH (reject, 966 ns) less 105 ns. So the 512-bit stitch
-           hides little of GHASH behind the AES rounds.
-         - At 1 KiB the shipped profile costs about 13% (seal 1.057, its
-           unasserted column 0.932).
-         - Exit: a stitch that overlaps the two, an inlining fix for the
-           1 KiB profile cost, and the rows pass.
+         - Since #1054: 16-block steps, three to a reduction with H^48..H^1
+           held in the key, schoolbook products, counters in a register,
+           round keys loaded per step, and a one-pass open.
+         - On the bench's Linux (`aes-gcm` probe, shipped profile), 16 KiB
+           and 64 KiB went from 1.00–1.08 against ring and 1.40–1.41 against
+           AWS-LC to 0.74–0.77 and 0.96–1.02. Taking each technique back out
+           measured: scalar counters 1.10–1.65 against AWS-LC, a reduction
+           per 16 blocks 0.99–1.19, a two-pass open 1.11 on open; Karatsuba
+           in place of schoolbook made no difference.
+         - Exit: the guest rows pass.
        - **SHA-512 at 16 KiB on BMI2 (the AMD bench), 1.035.**
          - A vector message schedule without AVX-512 measured 1.385 and was
            removed.
@@ -294,10 +300,13 @@ Not consumers:
        - Each build first checks ours against ring through the public API
          at every length from 0 to 1153 B. This covers AES-GCM and
          ChaCha20-Poly1305 seal, open and rejection with AAD of 0, 5, 16, 17
-         and 33 B, the OpenSSH construction, SHA-2 and HMAC. It runs in the
-         `cryptocase` boot and the QEMU row.
+         and 33 B, the OpenSSH construction, SHA-2 and HMAC. The AEADs also
+         run at 1281, 1535, 4113 and 16401 B, past the 512-bit path's
+         reduction groups and its counter's first low-byte carry. It runs in
+         the `cryptocase` boot and the QEMU row.
        - The host tests run on the portable code and, under Rosetta, on
-         AES-NI and PCLMULQDQ.
+         AES-NI and PCLMULQDQ. No host here runs the 512-bit path: the
+         bench's own checks are its correctness evidence.
        - Vector counter carries past 2^32 blocks are out of ring's reach;
          the 64-bit `wrapping_add` settles them by inspection.
      - **Constant time, by inspection.**
