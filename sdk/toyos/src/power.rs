@@ -7,7 +7,7 @@
 //! serves [`PORT`]: a holder of its connector asks, the supervisor has `logkeeper` flush,
 //! and the supervisor makes the call with the machine's own capability.
 //!
-//! **A stop asks the login sessions first, and its mode says what then.** In
+//! **A stop's mode says what it does with the login sessions.** In
 //! [`Mode::Wait`] the supervisor signs every session out with a terminate and
 //! waits, as events, for them to end; only a later [`terminate`] from a
 //! holder of [`PORT`] forces it. In [`Mode::Terminate`] it kills the sessions
@@ -193,7 +193,8 @@ pub enum Refused {
     Unanswered,
     /// This machine has no such stop: nothing was ended for it.
     Unsupported,
-    /// The machine's stop was asked and did not happen.
+    /// The machine's stop was asked and did not happen; the sessions it
+    /// ended stay ended.
     Failed,
     /// A terminate or a cancel with no stop pending, or a terminate of a stop
     /// that is no longer the one pending.

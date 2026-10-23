@@ -7,9 +7,10 @@
 //! read is owed only the latest list and the outcome ([`Owed`]), and is let
 //! go once the outcome is sent. A requester that hangs up cancels nothing.
 //!
-//! **The kernel's refusals are said in the protocol's words**: a machine
-//! without the stop is [`Refused::Unsupported`], and any other refusal
-//! [`Refused::Failed`], its kernel error in the log.
+//! **The kernel's refusals are said in the protocol's words**: a stop the
+//! kernel says before anything ends that this machine lacks is
+//! [`Refused::Unsupported`], and a stop that was begun and refused, or any
+//! other refusal, [`Refused::Failed`], its kernel error in the log.
 
 use toyos::ipc::{Connection, FrameRx, RxStep};
 use toyos::power::{self, Answer, Refused, Request, Stop, Waiting};
@@ -126,7 +127,16 @@ impl Supervisor<'_> {
             Stop::Reboot => MachineStop::Reboot,
             Stop::Shutdown => MachineStop::Shutdown,
         };
-        self.syscap.can_stop(stop).map_err(|e| refused(how, e))
+        self.syscap.can_stop(stop).map_err(|kernel| match kernel {
+            SyscallError::NotSupported => {
+                say!("supervisor: power: this machine has no {how:?}");
+                Refused::Unsupported
+            }
+            other => {
+                toyos::error!("supervisor: power: the kernel refused to say whether it can {how:?}: {other:?}");
+                Refused::Failed
+            }
+        })
     }
 
     /// What the stop waits for: every session's report.
@@ -177,22 +187,14 @@ impl Supervisor<'_> {
             Stop::Shutdown => self.syscap.shutdown(),
         };
         self.log.resume();
-        let word = refused(how, kernel);
+        toyos::error!("supervisor: power: the kernel refused {how:?}: {kernel:?}");
         // Their functions are owed another driver, as after any end.
         if stopped {
             self.drive();
         }
         self.stops.refused();
-        let word = word.encode().expect("the kernel's refusal is said");
+        let word = Refused::Failed.encode().expect("a refusal the supervisor says");
         self.watchers.iter_mut().for_each(|w| w.post(power::MSG_REFUSED, word.clone(), true));
     }
 }
 
-/// The kernel's refusal of `how`, said in the log and in the protocol's words.
-fn refused(how: Stop, kernel: SyscallError) -> Refused {
-    toyos::error!("supervisor: power: the kernel refused {how:?}: {kernel:?}");
-    match kernel {
-        SyscallError::NotSupported => Refused::Unsupported,
-        _ => Refused::Failed,
-    }
-}
