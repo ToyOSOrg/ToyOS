@@ -422,19 +422,23 @@ Not consumers:
        - The fast program passes every routine on the T14 (Intel signature
          0x806c1) and the AMD bench (0x860f01).
        - The curves program passes every routine on the AMD bench.
-       - **Finding, the T14:** P-256 public key LEAKS (max |t| 73.1, raw
-         t 66.9) and P-256 agreement LEAKS (max |t| 83.4, raw t 76.0); the
-         fixed scalar is about 510 ticks slower of about 1.5 M. P-384
-         agreement LEAKS (max |t| 5.79, raw t 5.77). P-384 public key and
-         Ed25519 pass. Owner: this track's parity stage, the NIST
-         arithmetic (`lib/crypto/src/nist.rs`). Exit: a T14 pass of P-256
-         and P-384 agreement on the current NIST code (#1000's Booth
-         windows, at 954b4587b), which a boot of #993's head re-measures.
-         A hypothesis, not established: value-dependent instruction latency
-         with Intel's DOITM off, which
-         a T14 boot with DOITM set on every CPU tests. Its scalar 1 holds
-         the running total at the identity for 51 of 52 windows, so the two
-         classes run the same instructions on very different values.
+       - **Finding, the T14, at 7a36687d0 (resolved since):** P-256 public
+         key LEAKED (max |t| 73.1, raw t 66.9) and P-256 agreement LEAKED
+         (max |t| 83.4, raw t 76.0); the fixed scalar was about 510 ticks
+         slower of about 1.5 M. P-384 agreement LEAKED (max |t| 5.79, raw
+         t 5.77). P-384 public key and Ed25519 passed. Its fixed scalar 1
+         held the running total at the identity for 51 of 52 windows.
+       - **The T14 at #1036's 7c860ab7b** (#990's NIST arithmetic, #1000's
+         Booth windows, #1013's comb, odd representatives and field, and
+         #1036's BMI2/ADX field kernels), DOITM off, signature 0x806c1,
+         microcode 0xbe, 1,000,000 measurements a routine: every curve
+         routine passes. P-256 public key max |t| 1.72 and agreement 2.78;
+         P-384 public key 2.79 and agreement 1.49; Ed25519 1.70. The
+         controls held: null 2.57 and 1.79, leaky 455.97 and 1,005.05. The
+         finding does not reproduce on current code. Which of those changes
+         removed it is not measured. The AMD bench has not run the curves program on
+         current code. Evidence:
+         https://github.com/ToyOSOrg/evidence/tree/6993f41cdaa886860b4d40bf766ac092cbe4d14f/pr-1036/r3
        - Their judge asks only that each job ran and its controls held; the
          verdicts are this record's. The first boots, of the fast program at
          ec5a0cd18, read LEAKS everywhere: that harness made each random
@@ -542,12 +546,12 @@ Not consumers:
   reviewed contract. Compiler
   copies, registers, spills and caller-held bytes are not wiped.
 - The host's HTTPS clients exchange keys on X25519 and X25519MLKEM768
-  alone: no P-256 or P-384 secret meets a server's input while the T14
-  finding stands, and a server offering only those groups is refused. Each
-  client keeps the two groups itself (`build/release.rs`,
-  `apps/doom/build.rs`). **Owner**: this track. **Exit**: stage 4's T14
-  finding (P-256 key derivation and agreement, and P-384 agreement, leak) is
-  resolved, and the clients take the provider's groups whole.
+  alone, and a server offering only P-256 or P-384 is refused. Each client
+  keeps the two groups itself (`build/release.rs`, `apps/doom/build.rs`).
+  The reason, stage 4's T14 finding that P-256 key derivation and agreement
+  and P-384 agreement leaked, no longer holds: the T14 passes all four at
+  #1036's 7c860ab7b. **Owner**: this track. **Exit**: the clients take the
+  provider's groups whole.
 - ToyOS's AArch64 targets hash with the portable SHA-2 rounds: no target
   promises the Armv8 SHA instructions, and neither the kernel nor the crate
   detects them at run time. **Owner**: this track. **Exit**: the crate takes
