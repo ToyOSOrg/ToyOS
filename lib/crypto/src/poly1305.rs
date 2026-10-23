@@ -3,10 +3,29 @@
 //! bits of each 32-bit word (Bernstein, "The Poly1305-AES message-authentication
 //! code", FSE 2005), so r1·2^128 ≡ s1 = r1 + r1/4 (mod 2^130 - 5) exactly, and
 //! every product sum below fits in 128 bits without reduction. No key-indexed
-//! table or content-dependent branch.
+//! table or content-dependent branch. [`tag`] and [`verify`] are Poly1305
+//! alone, for formats that compose it their own way.
 
+use crate::Error;
 use crate::block::{padded, place, terminated};
 use crate::secret::{Secret, erase};
+
+/// RFC 8439 §2.5's tag of `message` under the one-time `key`.
+pub fn tag(key: &[u8; 32], message: &[u8]) -> [u8; 16] {
+    let mut mac = Poly1305::new(key);
+    mac.update(message);
+    mac.finish()
+}
+
+/// `Ok` when `expected`, 1 to 16 bytes, is that many leading bytes of
+/// [`tag`], compared in constant time.
+pub fn verify(key: &[u8; 32], message: &[u8], expected: &[u8]) -> Result<(), Error> {
+    let tag = Secret(tag(key, message));
+    match tag.0.get(..expected.len()) {
+        Some(prefix) if !expected.is_empty() && crate::ct::equal(prefix, expected) => Ok(()),
+        _ => Err(Error::Authentication),
+    }
+}
 
 pub(crate) struct Poly1305 {
     /// r0, r1 and s1, each below 2^61.
@@ -224,13 +243,15 @@ mod tests {
             0x85, 0xd6, 0xbe, 0x78, 0x57, 0x55, 0x6d, 0x33, 0x7f, 0x44, 0x52, 0xfe, 0x42, 0xd5, 0x06, 0xa8, 0x01, 0x03,
             0x80, 0x8a, 0xfb, 0x0d, 0xb2, 0xfd, 0x4a, 0xbf, 0xf6, 0xaf, 0x41, 0x49, 0xf5, 0x1b,
         ];
-        let mut mac = Poly1305::new(&key);
-        mac.update(b"Cryptographic Forum Research Group");
-        assert_eq!(
-            mac.finish(),
-            [
-                0xa8, 0x06, 0x1d, 0xc1, 0x30, 0x51, 0x36, 0xc6, 0xc2, 0x2b, 0x8b, 0xaf, 0x0c, 0x01, 0x27, 0xa9
-            ]
-        );
+        let message = b"Cryptographic Forum Research Group";
+        let expected = [0xa8, 0x06, 0x1d, 0xc1, 0x30, 0x51, 0x36, 0xc6, 0xc2, 0x2b, 0x8b, 0xaf, 0x0c, 0x01, 0x27, 0xa9];
+        assert_eq!(tag(&key, message), expected);
+        assert_eq!(verify(&key, message, &expected), Ok(()));
+        assert_eq!(verify(&key, message, &expected[..10]), Ok(()), "a truncated tag is its prefix");
+        let mut forged = expected;
+        forged[9] ^= 1;
+        assert_eq!(verify(&key, message, &forged[..10]), Err(Error::Authentication));
+        assert_eq!(verify(&key, message, &[]), Err(Error::Authentication), "no tag authenticates nothing");
+        assert_eq!(verify(&key, message, &[0; 17]), Err(Error::Authentication));
     }
 }

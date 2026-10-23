@@ -417,12 +417,24 @@ pub const COMMITTED_FILES: &[(&str, &str, &str, Terms)] = &[
         "ours: OVMF's answer on a q35 guest, read off that boot's own loader log",
         Terms::Spdx("MIT OR Apache-2.0"),
     ),
-    // A bcachefs volume upstream's own tools wrote, gzipped. The bytes inside
-    // it are this repository's test material; `NOTICE` carries the raw digest,
-    // the commands, and the fsck that called it clean.
+    // bcachefs volumes upstream's own tools wrote, gzipped. The bytes inside
+    // them are this repository's test material; `NOTICE` carries each raw
+    // digest, the commands, and the fsck that called it clean.
     (
         "lib/bcachefs/tests/fixtures/crc32c.img.gz",
         "7be2c99db0e68c784ea59ef394454a084fa57868b14027528ab6b8b21031840e",
+        "NOTICE",
+        Terms::Spdx("MIT OR Apache-2.0"),
+    ),
+    (
+        "lib/bcachefs/tests/fixtures/encrypted.img.gz",
+        "2a32529edf3e30de75d02cdc4ad0b2060552555b012e9647dc24702c0ee7f82d",
+        "NOTICE",
+        Terms::Spdx("MIT OR Apache-2.0"),
+    ),
+    (
+        "lib/bcachefs/tests/fixtures/encrypted-wide-macs.img.gz",
+        "fd137a545190906ded0269eeec3e32835ffe3585d3e4c2cebe84d234a96b1b1f",
         "NOTICE",
         Terms::Spdx("MIT OR Apache-2.0"),
     ),

@@ -25,7 +25,7 @@ pub mod aead;
 mod aes;
 mod arch;
 mod block;
-mod chacha;
+pub mod chacha;
 mod ct;
 pub mod ecc;
 pub mod ed25519;
@@ -39,13 +39,14 @@ pub mod mlkem;
 mod montgomery;
 mod naf;
 mod nist;
-mod poly1305;
+pub mod poly1305;
 pub mod rsa;
 #[cfg(feature = "rustls-provider")]
 pub mod rustls_provider;
 mod scalar25519;
 pub mod scrypt;
 mod secret;
+pub mod siphash;
 pub mod ssh;
 #[cfg(feature = "wpa2")]
 pub mod wpa2;

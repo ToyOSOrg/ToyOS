@@ -14,7 +14,7 @@ opened: 2026-10-11
 **Candidates** (scan of the restructured tree, 2026-10-11), best first:
 1. `toyos-fat32-check`: FAT32 checker written from Microsoft's fatgen103. No ToyOS dependencies, `no_std`.
 2. `toyos-fat32`: FAT32 read/write hardened against hostile volumes. It needs `toyos-wallclock` folded in, and its tests made self-contained.
-3. The bcachefs `upstream` reader, split out of `lib/bcachefs`.
+3. The bcachefs engine (`lib/bcachefs/src/engine`), split out of `lib/bcachefs` once the interim format leaves it.
 4. `toyos-microcode` and `toyos-usbhid`.
 5. Later: the TCP stack (once `wire`'s grab-bag is factored out), the SSH server (once its track and defect issues close), and the AML interpreter (once it is decoupled from `toyos-acpi`).
 

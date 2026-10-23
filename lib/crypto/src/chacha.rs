@@ -1,5 +1,7 @@
 //! RFC 8439 ChaCha20; the original 64-bit nonce construction serves SSH.
 //! Rounds and memory addresses are independent of key and message contents.
+//! [`xor`] is the keystream alone, for formats that compose ChaCha20 their
+//! own way; TLS and SSH use [`crate::aead`] and [`crate::ssh`].
 
 use crate::{Error, poly1305::Poly1305, secret::Secret};
 
@@ -116,7 +118,9 @@ fn stream(key: &[u8; 32], counter: u64, nonce: &[u8; 8], data: &mut [u8]) {
     }
 }
 
-pub(crate) fn xor(key: &[u8; 32], nonce: &[u8; 12], counter: u32, data: &mut [u8]) -> Result<(), Error> {
+/// RFC 8439 §2.4: the keystream from block `counter` of (`key`, `nonce`)
+/// XORed into `data`. `Length` when the blocks would pass 2^32 - 1.
+pub fn xor(key: &[u8; 32], nonce: &[u8; 12], counter: u32, data: &mut [u8]) -> Result<(), Error> {
     check_ietf(data.len(), counter)?;
     let (counter, nonce) = ietf(nonce, counter);
     stream(key, counter, &nonce, data);

@@ -32,10 +32,15 @@ default filesystem.** The name stops being wrong by the crate growing into it.
 
 This entry therefore stops being a question and becomes work: what is owed is the
 implementation, and the gap between the two formats recorded above is the measure
-of it. The upstream research this tree used to carry went with the documents, so
-whoever picks this up reads the format out of upstream's own source and
-specification again — that reading is part of the work now, not a head start on
-it.
+of it. The format is implemented clean-room (root `CLAUDE.md`): an analyst reads
+upstream and writes the specification, and a different agent implements from it.
+
+**Where it stands.** `lib/bcachefs/src/engine` reads clean single-device 1.39
+volumes, crc32c and ChaCha20/Poly1305, and formats a minimal complete volume that
+upstream's `bcachefs fsck -n -K` passes. It replaced a read side written from
+upstream's headers. Its tests read volumes upstream's tools wrote
+(`lib/bcachefs/tests/fixtures/`). The rest of the crate is still the interim
+format, which ROOT, the loader and DATA use until the engine replaces it.
 
 The track itself is not planned here.
 
