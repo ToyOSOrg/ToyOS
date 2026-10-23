@@ -7,6 +7,7 @@ use alloc::vec::Vec;
 use super::bkey::{Bpos, Format, Key};
 use super::crypt::{MasterKey, Nonce};
 use super::superblock::Superblock;
+use super::value::csum_type as csum;
 use super::{field, kind, le16, le32, le64, put16, put32, put64, Btree, Error, Result, SECTOR, VERSION};
 use crate::crc32c::crc32c;
 
@@ -18,13 +19,6 @@ const FIRST_KEYS: usize = 160;
 const LATER_KEYS: usize = 40;
 /// Node flags bit 8, set on every node.
 const NEW_EXTENT_OVERWRITE: u64 = 1 << 8;
-
-/// Checksum types metadata uses.
-pub(crate) mod csum {
-    pub const NONE: u8 = 0;
-    pub const CRC32C: u8 = 1;
-    pub const CHACHA_POLY_128: u8 = 4;
-}
 
 /// Every node's magic on the volume of `internal_uuid`.
 pub(crate) fn magic(internal_uuid: &[u8; 16]) -> u64 {
@@ -140,8 +134,8 @@ fn check_bset(sb: &Superblock, flags: u32, version: u16, at: usize) -> Result<()
 fn open(key: Option<&MasterKey>, seq: u64, journal_seq: u64, csum_type: u8, r: &Record, bytes: &mut [u8]) -> Result<()> {
     match csum_type {
         csum::NONE => Ok(()),
-        csum::CRC32C if crc32c(&bytes[r.at + 16..r.end]) == le32(bytes, r.at) => Ok(()),
-        csum::CRC32C => Err(Error::Checksum("btree node")),
+        csum::CRC32C_NONZERO if crc32c(&bytes[r.at + 16..r.end]) == le32(bytes, r.at) => Ok(()),
+        csum::CRC32C_NONZERO => Err(Error::Checksum("btree node")),
         csum::CHACHA_POLY_128 => {
             let key = key.ok_or(Error::Corrupt("MACed btree node on an unencrypted volume"))?;
             let nonce = Nonce::node(r.at as u32, seq, journal_seq);
@@ -259,7 +253,7 @@ pub(crate) fn encode(sb_magic: u64, block: usize, key: Option<&MasterKey>, build
     Format::UNPACKED.encode(&mut b[80..136]);
     put64(&mut b, 136, build.seq);
     put64(&mut b, 144, build.journal_seq);
-    let csum_type = if key.is_some() { csum::CHACHA_POLY_128 } else { csum::CRC32C };
+    let csum_type = if key.is_some() { csum::CHACHA_POLY_128 } else { csum::CRC32C_NONZERO };
     put32(&mut b, 152, u32::from(csum_type));
     put16(&mut b, 156, VERSION);
     put16(&mut b, 158, ((end - FIRST_KEYS) / 8) as u16);

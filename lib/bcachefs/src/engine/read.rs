@@ -11,6 +11,8 @@ use super::bkey::{Bpos, Key};
 use super::crypt::{MasterKey, Nonce};
 use super::node::{self, Expect, Node};
 use super::superblock::{Layout, Root, Superblock, HEADER, LAYOUT, MAX_BYTES, PRIMARY};
+use super::value::mode::{S_IFDIR, S_IFLNK, S_IFMT};
+use super::value::csum_type as csum;
 use super::value::{inode_field, inode_flag, Dirent, DirentType, Extent, InodeValue, NodePtr, Subvolume};
 use super::{kind, le32, Btree, Error, Result, SECTOR};
 use crate::crc32c::{crc32c, crc32c_zero};
@@ -59,10 +61,8 @@ pub struct DirEntry {
 
 /// The longest symlink this reader reads, its NUL included: a path's
 /// length on the systems that make them.
-const MAX_SYMLINK: u64 = 4096;
+pub(crate) const MAX_SYMLINK: u64 = 4096;
 
-const S_IFMT: u16 = 0o170000;
-const S_IFDIR: u16 = 0o040000;
 
 impl Inode {
     pub fn is_dir(&self) -> bool {
@@ -97,6 +97,10 @@ impl<D: BlockDev> Volume<D> {
         }
         if !sb.clean_flag() || sb.clean.is_none() {
             return Err(Error::Unsupported("a volume not cleanly unmounted: its journal needs replay"));
+        }
+        let m = &sb.member;
+        if m.nbuckets * u64::from(m.bucket_sectors) > dev.blocks() * (BLOCK / SECTOR) as u64 {
+            return Err(Error::Corrupt("member's buckets past the device"));
         }
         let mut volume = Volume { dev, sb, key, snapshot: 0, root: 0 };
         let (k, v) = volume.get(Btree::Subvolumes, Bpos::new(0, u64::from(super::mkfs::ROOT_SUBVOLUME), 0)).await?.ok_or(Error::Corrupt("no root subvolume"))?;
@@ -319,7 +323,7 @@ impl<D: BlockDev> Volume<D> {
     /// The target of the symlink `ino`.
     pub async fn readlink(&self, ino: u64) -> Result<Vec<u8>> {
         let inode = self.inode(ino).await?;
-        if inode.mode & S_IFMT != 0o120000 || inode.size == 0 {
+        if inode.mode & S_IFMT != S_IFLNK || inode.size == 0 {
             return Err(Error::Invalid("readlink of a node that is no symlink"));
         }
         if inode.size > MAX_SYMLINK {
@@ -406,16 +410,16 @@ impl<D: BlockDev> Volume<D> {
         }
         self.in_one_bucket(extent.ptr.sector, u64::from(crc.compressed))?;
         // An encrypted volume MACs all its data.
-        if self.sb.encrypted() && !matches!(crc.csum_type, 3 | 4) {
+        if self.sb.encrypted() && !matches!(crc.csum_type, csum::CHACHA_POLY_80 | csum::CHACHA_POLY_128) {
             return Err(Error::Corrupt("unauthenticated extent on an encrypted volume"));
         }
         let mut data = read_bytes(&self.dev, extent.ptr.sector * SECTOR as u64, crc.compressed as usize * SECTOR).await?;
         match crc.csum_type {
-            0 => {}
+            csum::NONE => {}
             // Over the whole encoded extent, the value zero-extended to the
             // entry's checksum bytes.
-            1 | 5 => {
-                let value = if crc.csum_type == 1 { crc32c(&data) } else { crc32c_zero(&data) };
+            csum::CRC32C_NONZERO | csum::CRC32C => {
+                let value = if crc.csum_type == csum::CRC32C_NONZERO { crc32c(&data) } else { crc32c_zero(&data) };
                 let mut want = [0u8; 16];
                 want[..4].copy_from_slice(&value.to_le_bytes());
                 if want != crc.csum {
@@ -424,7 +428,7 @@ impl<D: BlockDev> Volume<D> {
             }
             // An 80-bit MAC in a crc64 entry, a 128-bit one in a
             // crc128.
-            3 | 4 if crc.csum_len == if crc.csum_type == 3 { 10 } else { 16 } => {
+            csum::CHACHA_POLY_80 | csum::CHACHA_POLY_128 if crc.csum_len == csum::bytes(crc.csum_type) => {
                 let master = self.key.as_ref().ok_or(Error::Locked)?;
                 let nonce = Nonce::extent(key.version.hi, key.version.lo, crc.nonce);
                 master.verify(nonce, &data, &crc.csum[..crc.csum_len], "extent")?;

@@ -438,6 +438,12 @@ pub const COMMITTED_FILES: &[(&str, &str, &str, Terms)] = &[
         "NOTICE",
         Terms::Spdx("MIT OR Apache-2.0"),
     ),
+    (
+        "lib/bcachefs/tests/fixtures/links.img.gz",
+        "e2a3ed35d27023693192c35e833e405a240aa6feccde9412e8f5a9e881a47999",
+        "NOTICE",
+        Terms::Spdx("MIT OR Apache-2.0"),
+    ),
     // FAT32 volumes macOS's `newfs_msdos` formatted and its `msdosfs`
     // populated, as runs of nonzero sectors. Each boot sector carries
     // `newfs_msdos`'s boot stub; `NOTICE` carries its notice, each raw digest

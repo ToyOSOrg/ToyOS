@@ -261,6 +261,9 @@ pub struct Superblock {
     pub(crate) crypt: Option<Crypt>,
     pub(crate) blacklist: Vec<(u64, u64)>,
     pub(crate) replicas: Vec<Replicas>,
+    /// The journal's buckets: each range's first bucket and count, in the
+    /// listed order, whose concatenation is the journal's ring.
+    pub(crate) journal: Vec<(u64, u64)>,
 }
 
 /// The `[lo, lo + len)` bits of flag word `word`.
@@ -286,9 +289,7 @@ impl Superblock {
         }
         let find = |kind: u32| fields.iter().find(|f| f.kind == kind).map(|f| f.body.as_slice());
         let member = members(find(field_type::MEMBERS_V2).ok_or(Error::Unsupported("superblock without members_v2"))?, &header)?;
-        if let Some(j) = find(field_type::JOURNAL_V2) {
-            journal(j, &member)?;
-        }
+        let journal = find(field_type::JOURNAL_V2).map(|j| journal(j, &member)).transpose()?.unwrap_or_default();
         let clean = find(field_type::CLEAN).map(clean).transpose()?;
         let crypt = find(field_type::CRYPT).map(crypt).transpose()?;
         let blacklist = find(field_type::BLACKLIST).map(pairs).unwrap_or_default();
@@ -297,7 +298,7 @@ impl Superblock {
             (None, Some(v1)) => replicas(v1, true)?,
             (None, None) => Vec::new(),
         };
-        Ok(Superblock { header, fields, member, clean, crypt, blacklist, replicas })
+        Ok(Superblock { header, fields, member, clean, crypt, blacklist, replicas, journal })
     }
 
     /// This copy's bytes with `offset` as its own: the copies differ only
@@ -475,17 +476,19 @@ fn members(body: &[u8], header: &Header) -> Result<Member> {
     Ok(member)
 }
 
-/// The journal's bucket ranges lie on the device.
-fn journal(body: &[u8], member: &Member) -> Result<()> {
+/// The journal's bucket ranges, which lie on the device.
+fn journal(body: &[u8], member: &Member) -> Result<Vec<(u64, u64)>> {
     let ranges = pairs(body);
     let valid = ranges.iter().all(|&(start, count)| {
         count > 0 && start > 0 && start >= u64::from(member.first_bucket) && start.checked_add(count).is_some_and(|end| end <= member.nbuckets)
     });
-    // Each count is at most the bucket count, so the sum fits.
-    if !valid || ranges.iter().map(|r| r.1).sum::<u64>() > u64::from(u32::MAX) {
+    // Disjoint, so together they are at most the device's buckets.
+    let mut sorted = ranges.clone();
+    sorted.sort_unstable();
+    if !valid || sorted.windows(2).any(|w| w[0].0 + w[0].1 > w[1].0) {
         return Err(Error::Corrupt("journal buckets"));
     }
-    Ok(())
+    Ok(ranges)
 }
 
 fn pairs(body: &[u8]) -> Vec<(u64, u64)> {
