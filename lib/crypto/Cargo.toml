@@ -21,6 +21,10 @@ rustls-provider = ["dep:rustls"]
 [dependencies]
 rustls = { version = "0.23.45", optional = true, default-features = false, features = ["custom-provider", "tls12"] }
 
+# The thread's timing protection around secret work (`src/timing.rs`).
+[target.'cfg(target_os = "toyos")'.dependencies]
+toyos = { path = "../../sdk/toyos" }
+
 # The oracles every primitive is held against, on the host alone.
 [dev-dependencies]
 ring = "0.17.14"
@@ -44,3 +48,4 @@ num-bigint = "0.4"
 
 [lints.rust]
 unsafe_op_in_unsafe_fn = "deny"
+unexpected_cfgs = { level = "warn", check-cfg = ['cfg(target_os, values("toyos"))'] }

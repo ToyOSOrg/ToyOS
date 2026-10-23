@@ -12,6 +12,7 @@ use crate::secret::{Secret, erase};
 
 /// RFC 8439 §2.5's tag of `message` under the one-time `key`.
 pub fn tag(key: &[u8; 32], message: &[u8]) -> [u8; 16] {
+    let _protection = crate::timing::protect();
     let mut mac = Poly1305::new(key);
     mac.update(message);
     mac.finish()
@@ -20,6 +21,7 @@ pub fn tag(key: &[u8; 32], message: &[u8]) -> [u8; 16] {
 /// `Ok` when `expected`, 1 to 16 bytes, is that many leading bytes of
 /// [`tag`], compared in constant time.
 pub fn verify(key: &[u8; 32], message: &[u8], expected: &[u8]) -> Result<(), Error> {
+    let _protection = crate::timing::protect();
     let tag = Secret(tag(key, message));
     match tag.0.get(..expected.len()) {
         Some(prefix) if !expected.is_empty() && crate::ct::equal(prefix, expected) => Ok(()),

@@ -18,12 +18,14 @@ impl SshSecret {
     }
 }
 pub fn for_tls(kem: mlkem::SharedSecret, ecdh: x25519::SharedSecret) -> TlsSecret {
+    let _protection = crate::timing::protect();
     let mut out = Secret([0; 64]);
     out.0[..32].copy_from_slice(kem.as_bytes());
     out.0[32..].copy_from_slice(ecdh.as_bytes());
     TlsSecret(out)
 }
 pub fn for_ssh(kem: mlkem::SharedSecret, ecdh: x25519::SharedSecret) -> SshSecret {
+    let _protection = crate::timing::protect();
     let mut hash = Sha256::new();
     hash.update(kem.as_bytes())
         .expect("fixed-size shared secret");

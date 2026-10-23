@@ -131,6 +131,7 @@ fn stream(key: &[u8; 32], counter: u64, nonce: &[u8; 8], data: &mut [u8]) {
 /// RFC 8439 §2.4: the keystream from block `counter` of (`key`, `nonce`)
 /// XORed into `data`. `Length` when the blocks would pass 2^32 - 1.
 pub fn xor(key: &[u8; 32], nonce: &[u8; 12], counter: u32, data: &mut [u8]) -> Result<(), Error> {
+    let _protection = crate::timing::protect();
     check_ietf(data.len(), counter)?;
     let (counter, nonce) = ietf(nonce, counter);
     stream(key, counter, &nonce, data);

@@ -71,6 +71,7 @@ impl<H: TlsHash> hmac::Hmac for Algorithm<H> {
 }
 impl<H: TlsHash> hmac::Key for Mac<H> {
     fn sign_concat(&self, first: &[u8], middle: &[&[u8]], last: &[u8]) -> hmac::Tag {
+        let _protection = crate::timing::protect();
         let mut mac = self.0.fork();
         for part in core::iter::once(first)
             .chain(middle.iter().copied())

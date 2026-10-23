@@ -45,15 +45,18 @@ macro_rules! curve_api {
             }
             impl SecretKey {
                 pub fn from_bytes(bytes: [u8; $bytes]) -> Result<Self, Error> {
+                    let _protection = crate::timing::protect();
                     let bytes = Secret(bytes);
                     Ok(Self(Scalar::from_bytes(&bytes.0)?))
                 }
                 pub fn generate(random: &mut impl Random) -> Result<Self, Error> {
+                    let _protection = crate::timing::protect();
                     let mut candidates = Secret([0; 4 * $bytes]);
                     random.fill(&mut candidates.0)?;
                     Ok(Self(Scalar::first_valid(&candidates.0)?))
                 }
                 pub fn public_key(&self) -> PublicKey {
+                    let _protection = crate::timing::protect();
                     // The base point's multiple by a nonzero scalar below n
                     // is finite and on the curve.
                     let point = <$curve as Curve<$limbs>>::base_mul(&self.0);
@@ -62,6 +65,7 @@ macro_rules! curve_api {
                     PublicKey { point, encoded }
                 }
                 pub fn agree(self, peer: &PublicKey) -> Result<SharedSecret, Error> {
+                    let _protection = crate::timing::protect();
                     let mut out = Secret([0; $bytes]);
                     peer.point.agree(&self.0, &mut out.0);
                     Ok(SharedSecret(out))
