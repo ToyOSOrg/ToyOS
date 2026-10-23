@@ -1,11 +1,11 @@
 //! The image signature beside RustCrypto's `verify_strict` and ring: the same
-//! signature bytes over SSHSIG's message from every seed, the same verdict on
-//! every changed signature, message and key, and the one place the verifiers
-//! part, named.
+//! signature bytes over SSHSIG's message from every seed, and the same verdict
+//! on every changed signature and message. Where the verifiers part is
+//! `toyos-crypto`'s `tests/ed25519_verdicts.rs`.
 
 use ring::signature::{self, KeyPair};
 use toyos_update::image::{HEADER_BYTES, SIGNATURE_BYTES};
-use toyos_update::sig::{self, Refused};
+use toyos_update::sig;
 
 const CASES: usize = 2_000;
 
@@ -76,33 +76,4 @@ fn signatures_and_verdicts_match_dalek_and_ring() {
         assert_eq!(verdict, ring(&public, message.as_bytes(), &signature), "case {case}: ring");
         assert_eq!(verdict, case % 4 == 0, "case {case}");
     }
-}
-
-/// Every key encoding `verify_strict` decodes and finds not weak, this
-/// verifier decodes too, but for the ones RFC 8032 section 5.1.3 refuses: a
-/// y of p or more. (Its other refusal, x = 0 with the sign bit set, is only
-/// at y = 1 or -1, both small-order, which both refuse.) ToyOS verifies only
-/// against keys its build minted, which are canonical, so the two never part
-/// on a key the tree holds; the test names where they would.
-#[test]
-fn keys_match_dalek_but_for_the_encodings_rfc_8032_refuses() {
-    let mut rng = Rng(0xdec0_de25);
-    let mut parted = 0;
-    let header = [0u8; HEADER_BYTES];
-    for case in 0..CASES {
-        let mut encoding: [u8; 32] = rng.bytes();
-        if case % 2 == 0 {
-            // y = p + k, k < 19: the only non-canonical encodings there are.
-            encoding = [0xff; 32];
-            encoding[0] = 0xed + rng.below(19) as u8;
-            encoding[31] = 0x7f | (rng.below(2) as u8) << 7;
-        }
-        let ours = sig::verify(&encoding, &header, &[0; SIGNATURE_BYTES]) != Err(Refused::Key);
-        let dalek = ed25519_dalek::VerifyingKey::from_bytes(&encoding).is_ok_and(|key| !key.is_weak());
-        // y < p, p = 2^255 - 19: anything but ed..ff, ff.., 7f in its 255 bits.
-        let canonical = !(encoding[0] >= 0xed && encoding[1..31].iter().all(|&b| b == 0xff) && encoding[31] & 0x7f == 0x7f);
-        assert_eq!(ours, dalek && canonical, "case {case}: {encoding:02x?}");
-        parted += usize::from(dalek && !canonical);
-    }
-    assert!(parted > 0, "no encoding where verify_strict and RFC 8032 part was drawn");
 }

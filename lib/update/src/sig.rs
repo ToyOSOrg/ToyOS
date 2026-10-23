@@ -98,9 +98,9 @@ impl core::fmt::Display for Refused {
 
 /// Whether `signature` is `key`'s over `signed`, in its namespace.
 ///
-/// Strict RFC 8032: a signature with a non-canonical `S` or a small-order
-/// `R`, and a key that is small-order or not canonically encoded, are refused
-/// rather than accepted by one implementation and not another.
+/// Under `toyos_crypto::ed25519`'s rules: a key that is small-order or not
+/// canonically encoded, and a signature with a non-canonical `R` or `S` or a
+/// small-order `R`, are refused.
 pub fn verify<S: Signed + ?Sized>(key: &[u8; 32], signed: &S, signature: &[u8; SIGNATURE_BYTES]) -> Result<(), Refused> {
     let key = PublicKey::from_bytes(*key).map_err(|_| Refused::Key)?;
     key.verify(message(signed).as_bytes(), signature).map_err(|_| Refused::Signature)

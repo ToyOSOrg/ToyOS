@@ -561,7 +561,7 @@ lib/crypto/tests/data/ed25519_speccheck_cases.json — "Taming the many EdDSAs" 
 The twelve edge cases of Chalkias, Garillot, Kondi and Nikolaenko, "Taming the
 many EdDSAs" (2020): small-order and non-canonical keys and points, and S
 past the group order. `toyos-crypto`'s host tests read them
-(`lib/crypto/tests/differential.rs`); no image carries them.
+(`lib/crypto/tests/ed25519_verdicts.rs`); no image carries them.
 
 
 tests/acvp/nist-*.json — NIST ACVP HMAC and ML-KEM vectors, NIST-Software
