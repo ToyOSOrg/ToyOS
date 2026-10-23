@@ -1,18 +1,21 @@
 // BSD sockets over netstack: a TCP stream is `toyos::net::stream`'s region
 // and connection, and a listener's wakes and a datagram socket's bytes travel
-// in pipes.
+// in pipes. A socket that connects, and one an accept makes, is its stream:
+// its descriptor names the stream's handle, as std's does, so a spawn passes
+// it as a stream (`toyos::fd::copy`) and every other socket is an entry of
+// this library's.
 
 use alloc::alloc::{alloc as heap_alloc, dealloc as heap_dealloc};
 use alloc::vec::Vec;
 use core::ptr;
 use toyos_abi::RawHandle;
 use toyos_abi::syscall;
-use toyos::net::stream::{self, Refused, Wait};
+use toyos::net::stream::{self, Wait};
 use toyos::net::{NetError, TcpOptions, TcpSocketId, UdpSocketId, OPT_BROADCAST};
 
 use crate::errcode::{
-    EACCES, EADDRINUSE, EAFNOSUPPORT, EAGAIN, EBADF, ECONNABORTED, ECONNREFUSED, ECONNRESET, EFAULT, EHOSTUNREACH, EINVAL, EIO,
-    ENOMEM, ENOPROTOOPT, ENOSPC, ENOTCONN, EPIPE, ETIMEDOUT,
+    EACCES, EADDRINUSE, EAFNOSUPPORT, EBADF, ECONNREFUSED, ECONNRESET, EFAULT, EINVAL, EIO, EISCONN, ENOMEM, ENOPROTOOPT,
+    ENOSPC, ENOTCONN, ETIMEDOUT,
 };
 use crate::inaddr::{self, SockaddrIn, AF_INET};
 use crate::dgramreq;
@@ -56,14 +59,12 @@ enum SocketKind {
 struct SocketEntry {
     kind: SocketKind,
     netstack_id: u32,       // netstack socket_id (0 = not yet connected/bound)
+    /// A datagram socket's peer was named.
     connected: bool,
     bound: bool,
     local_port: u16,
     remote_addr: [u8; 4],
     remote_port: u16,
-    /// A stream's connection, which `toyos::net::stream` holds its end by
-    /// (0 = none).
-    stream: i32,
     // A datagram socket's pipe fds (0 = not set)
     rx_fd: i32,         // read end of rx pipe (netstack→client)
     tx_fd: i32,         // write end of tx pipe (client→netstack)
@@ -89,11 +90,27 @@ static mut SOCKETS: [Option<SocketEntry>; MAX_SOCKETS] = [None; MAX_SOCKETS];
 
 /// The socket descriptor `fd` names, held for the call: a `close` on another
 /// thread meanwhile lets the socket go only once this drops, so a call never
-/// meets a handle closed under it. `None` for a descriptor that is no socket
-/// of this library's.
-fn sock_from_fd(fd: i32) -> Option<Socket> {
+/// meets a handle closed under it. `None` for a descriptor that is no socket.
+fn sock_from_fd(fd: i32) -> Option<Sock> {
     let (hold, object) = toyos::fd::hold(fd).ok()?;
-    Some(Socket { _hold: hold, idx: index_of(&object)? })
+    if object.tag == toyos::fd::STREAM {
+        return Some(Sock::Stream(Stream { _hold: hold, handle: object.handle }));
+    }
+    Some(Sock::Entry(Socket { _hold: hold, idx: index_of(&object)? }))
+}
+
+/// What a socket descriptor names, held.
+enum Sock {
+    /// A socket that is no stream: this library's entry.
+    Entry(Socket),
+    /// A stream, whose descriptor names its handle.
+    Stream(Stream),
+}
+
+/// A stream's descriptor, held for the call.
+struct Stream {
+    _hold: toyos::fd::Hold,
+    handle: RawHandle,
 }
 
 /// The index of the socket `object` is, or `None` for an object that is no
@@ -155,8 +172,6 @@ extern "C" fn release_socket(word: u64) {
 }
 
 fn let_go(entry: SocketEntry) {
-    // A stream's leaving is its connection's hang-up.
-    if entry.stream != 0 { stream::let_go(RawHandle(entry.stream as u32)); }
     if entry.rx_fd != 0 { syscall::close(RawHandle(entry.rx_fd as u32)); }
     if entry.tx_fd != 0 { syscall::close(RawHandle(entry.tx_fd as u32)); }
     if entry.notify_fd != 0 { syscall::close(RawHandle(entry.notify_fd as u32)); }
@@ -261,7 +276,6 @@ pub unsafe extern "C" fn socket(domain: i32, sock_type: i32, _protocol: i32) -> 
         local_port: 0,
         remote_addr: [0; 4],
         remote_port: 0,
-        stream: 0,
         rx_fd: 0,
         tx_fd: 0,
         notify_fd: 0,
@@ -274,7 +288,8 @@ pub unsafe extern "C" fn socket(domain: i32, sock_type: i32, _protocol: i32) -> 
 #[no_mangle]
 pub unsafe extern "C" fn connect(fd: i32, addr: *const Sockaddr, addrlen: SocklenT) -> i32 {
     let mut socket = match sock_from_fd(fd) {
-        Some(s) => s,
+        Some(Sock::Entry(socket)) => socket,
+        Some(Sock::Stream(_)) => { set_errno(EISCONN); return -1; }
         None => { set_errno(EBADF); return -1; }
     };
     let slot = socket.slot();
@@ -294,12 +309,12 @@ pub unsafe extern "C" fn connect(fd: i32, addr: *const Sockaddr, addrlen: Sockle
                 Ok(c) => c,
                 Err(e) => { set_errno(net_err_to_errno(e)); return -1; }
             };
-            entry.local_port = connected.local_port;
-            entry.remote_addr = ip;
-            entry.remote_port = port;
-            entry.connected = true;
-            entry.stream = connected.handle.0 as i32;
-            0
+            // The descriptor names the stream from here on; the entry goes once
+            // this call's hold does.
+            match toyos::fd::replace(fd, stream::descriptor(connected.handle)) {
+                Ok(()) => 0,
+                Err(_) => { set_errno(EBADF); -1 }
+            }
         }
         SocketKind::Udp => {
             entry.remote_addr = ip;
@@ -313,7 +328,8 @@ pub unsafe extern "C" fn connect(fd: i32, addr: *const Sockaddr, addrlen: Sockle
 #[no_mangle]
 pub unsafe extern "C" fn bind(fd: i32, addr: *const Sockaddr, addrlen: SocklenT) -> i32 {
     let mut socket = match sock_from_fd(fd) {
-        Some(s) => s,
+        Some(Sock::Entry(socket)) => socket,
+        Some(Sock::Stream(_)) => { set_errno(EISCONN); return -1; }
         None => { set_errno(EBADF); return -1; }
     };
     let slot = socket.slot();
@@ -361,7 +377,8 @@ pub unsafe extern "C" fn accept(
     addrlen: *mut SocklenT,
 ) -> i32 {
     let mut socket = match sock_from_fd(fd) {
-        Some(s) => s,
+        Some(Sock::Entry(socket)) => socket,
+        Some(Sock::Stream(_)) => { set_errno(EINVAL); return -1; }
         None => { set_errno(EBADF); return -1; }
     };
     let slot = socket.slot();
@@ -374,16 +391,26 @@ pub unsafe extern "C" fn accept(
 
     // A connection's arrival is a byte on the notify pipe.
     let notify = RawHandle(notify_fd as u32);
-    let arrived = interruptibly(fd, |block| match block {
-        true => {
-            let _ = syscall::read(notify, &mut [0u8; 1]);
-            Some(())
-        }
-        false => match syscall::read_nonblock(notify, &mut [0u8; 1]) {
-            Err(syscall::SyscallError::WouldBlock) => None,
-            _ => Some(()),
+    let mut poller = None;
+    let arrived = interruptibly(
+        |block| match block {
+            true => {
+                let _ = syscall::read(notify, &mut [0u8; 1]);
+                Some(())
+            }
+            false => match syscall::read_nonblock(notify, &mut [0u8; 1]) {
+                Err(syscall::SyscallError::WouldBlock) => None,
+                _ => Some(()),
+            },
         },
-    });
+        |wake| {
+            let poller = poller.get_or_insert_with(|| toyos::poller::Poller::new(2));
+            poller.watch_raw(notify, toyos::poller::READABLE, 0);
+            poller.watch_raw(wake, toyos::poller::READABLE, 1);
+            poller.wait(1, u64::MAX, |_| {});
+            Ok(())
+        },
+    );
     if let Err(errno) = arrived {
         set_errno(errno);
         return -1;
@@ -398,22 +425,12 @@ pub unsafe extern "C" fn accept(
         fill_sockaddr(addr, addrlen, accepted.remote_addr, accepted.remote_port);
     }
 
-    let new_entry = SocketEntry {
-        kind: SocketKind::Tcp,
-        netstack_id: 0,
-        connected: true,
-        bound: false,
-        local_port: accepted.local_port,
-        remote_addr: accepted.remote_addr,
-        remote_port: accepted.remote_port,
-        stream: accepted.handle.0 as i32,
-        rx_fd: 0,
-        tx_fd: 0,
-        notify_fd: 0,
-        nodelay: accepted.nodelay,
-        broadcast: false,
-    };
-    alloc_socket(new_entry)
+    // A socket descriptor is inherited, as `socket`'s is; on a full table the
+    // stream goes with its handle.
+    match toyos::fd::install(stream::descriptor(accepted.handle), true, 0) {
+        Ok(fd) => fd,
+        Err(_) => { set_errno(crate::errcode::EMFILE); -1 }
+    }
 }
 
 #[no_mangle]
@@ -422,7 +439,8 @@ pub unsafe extern "C" fn send(fd: i32, buf: *const u8, len: usize, _flags: i32) 
         return 0;
     }
     let mut socket = match sock_from_fd(fd) {
-        Some(s) => s,
+        Some(Sock::Stream(stream)) => return write_stream(stream.handle, core::slice::from_raw_parts(buf, len)),
+        Some(Sock::Entry(socket)) => socket,
         None => { set_errno(EBADF); return -1; }
     };
     let slot = socket.slot();
@@ -432,13 +450,7 @@ pub unsafe extern "C" fn send(fd: i32, buf: *const u8, len: usize, _flags: i32) 
     };
 
     match entry.kind {
-        SocketKind::Tcp => {
-            let data = core::slice::from_raw_parts(buf, len);
-            match stream::write(RawHandle(entry.stream as u32), data, Wait::Blocking(None)) {
-                Ok(n) => n as isize,
-                Err(refused) => { set_errno(stream_errno(refused)); -1 }
-            }
-        }
+        SocketKind::Tcp => { set_errno(ENOTCONN); -1 }
         SocketKind::Udp => {
             if !entry.connected {
                 set_errno(ENOTCONN);
@@ -451,13 +463,47 @@ pub unsafe extern "C" fn send(fd: i32, buf: *const u8, len: usize, _flags: i32) 
     }
 }
 
+/// `send` on a stream, and `write` on a stream's descriptor.
+fn write_stream(handle: RawHandle, data: &[u8]) -> isize {
+    match stream::write(handle, data, Wait::Blocking(None)) {
+        Ok(n) => n as isize,
+        Err(refused) => { set_errno(crate::errcode::of_stream(refused)); -1 }
+    }
+}
+
+/// `recv` on a stream, and `read` of its descriptor: a handler interrupts it
+/// as [`interruptibly`] says.
+fn read_stream(handle: RawHandle, data: &mut [u8]) -> isize {
+    let mut poller = None;
+    let read = interruptibly(
+        |block| {
+            let wait = if block { Wait::Blocking(None) } else { Wait::Nonblocking };
+            match stream::read(handle, data, wait) {
+                Err(stream::Refused::WouldBlock) if !block => None,
+                answer => Some(answer),
+            }
+        },
+        |wake| {
+            let poller = poller.get_or_insert_with(|| toyos::poller::Poller::new(2));
+            stream::wait_ready(handle, stream::Way::Receive, wake, poller).map_err(crate::errcode::of_stream)
+        },
+    );
+    match read {
+        Ok(Ok(n)) => n as isize,
+        Ok(Err(refused)) => { set_errno(crate::errcode::of_stream(refused)); -1 }
+        Err(errno) => { set_errno(errno); -1 }
+    }
+}
+
+
 #[no_mangle]
 pub unsafe extern "C" fn recv(fd: i32, buf: *mut u8, len: usize, _flags: i32) -> isize {
     if buf.is_null() || len == 0 {
         return 0;
     }
     let mut socket = match sock_from_fd(fd) {
-        Some(s) => s,
+        Some(Sock::Stream(stream)) => return read_stream(stream.handle, core::slice::from_raw_parts_mut(buf, len)),
+        Some(Sock::Entry(socket)) => socket,
         None => { set_errno(EBADF); return -1; }
     };
     let slot = socket.slot();
@@ -467,19 +513,7 @@ pub unsafe extern "C" fn recv(fd: i32, buf: *mut u8, len: usize, _flags: i32) ->
     };
 
     match entry.kind {
-        SocketKind::Tcp => {
-            let data = core::slice::from_raw_parts_mut(buf, len);
-            let stream = RawHandle(entry.stream as u32);
-            let read = interruptibly(fd, |block| match stream::read(stream, data, if block { Wait::Blocking(None) } else { Wait::Nonblocking }) {
-                Err(Refused::WouldBlock) if !block => None,
-                answer => Some(answer),
-            });
-            match read {
-                Ok(Ok(n)) => n as isize,
-                Ok(Err(refused)) => { set_errno(stream_errno(refused)); -1 }
-                Err(errno) => { set_errno(errno); -1 }
-            }
-        }
+        SocketKind::Tcp => { set_errno(ENOTCONN); -1 }
         SocketKind::Udp => {
             recvfrom(fd, buf, len, _flags, ptr::null_mut(), ptr::null_mut())
         }
@@ -499,7 +533,9 @@ pub unsafe extern "C" fn sendto(
         return 0;
     }
     let mut socket = match sock_from_fd(fd) {
-        Some(s) => s,
+        // A stream's `sendto` ignores the address, as `send`.
+        Some(Sock::Stream(stream)) => return write_stream(stream.handle, core::slice::from_raw_parts(buf, len)),
+        Some(Sock::Entry(socket)) => socket,
         None => { set_errno(EBADF); return -1; }
     };
     let slot = socket.slot();
@@ -509,10 +545,7 @@ pub unsafe extern "C" fn sendto(
     };
 
     match entry.kind {
-        SocketKind::Tcp => {
-            // TCP sendto ignores address, just send
-            send(fd, buf, len, _flags)
-        }
+        SocketKind::Tcp => { set_errno(ENOTCONN); -1 }
         SocketKind::Udp => {
             let (ip, port) = match parse_sockaddr(dest_addr, addrlen) {
                 Some(v) => v,
@@ -540,7 +573,9 @@ pub unsafe extern "C" fn recvfrom(
         return 0;
     }
     let mut socket = match sock_from_fd(fd) {
-        Some(s) => s,
+        // A stream's `recvfrom` names no address, as `recv`.
+        Some(Sock::Stream(stream)) => return read_stream(stream.handle, core::slice::from_raw_parts_mut(buf, len)),
+        Some(Sock::Entry(socket)) => socket,
         None => { set_errno(EBADF); return -1; }
     };
     let slot = socket.slot();
@@ -550,10 +585,7 @@ pub unsafe extern "C" fn recvfrom(
     };
 
     match entry.kind {
-        SocketKind::Tcp => {
-            // TCP recvfrom ignores address, just recv
-            recv(fd, buf, len, _flags)
-        }
+        SocketKind::Tcp => { set_errno(ENOTCONN); -1 }
         SocketKind::Udp => {
             // Send control request and get metadata response
             let recv_resp = match toyos::net::udp_recv_from(UdpSocketId(entry.netstack_id), len as u32) {
@@ -582,32 +614,27 @@ pub unsafe extern "C" fn recvfrom(
 
 #[no_mangle]
 pub unsafe extern "C" fn shutdown(fd: i32, how: i32) -> i32 {
-    let mut socket = match sock_from_fd(fd) {
-        Some(s) => s,
+    let handle = match sock_from_fd(fd) {
+        Some(Sock::Stream(stream)) => stream.handle,
+        Some(Sock::Entry(mut socket)) => {
+            let tcp = socket.slot().as_ref().is_some_and(|entry| matches!(entry.kind, SocketKind::Tcp));
+            if tcp {
+                set_errno(ENOTCONN);
+                return -1;
+            }
+            return 0;
+        }
         None => { set_errno(EBADF); return -1; }
     };
-    let slot = socket.slot();
-    let entry = match slot.as_mut() {
-        Some(e) => e,
-        None => { set_errno(EBADF); return -1; }
-    };
-
-    if let SocketKind::Tcp = entry.kind {
-        if entry.stream == 0 {
-            set_errno(ENOTCONN);
-            return -1;
-        }
-        let handle = RawHandle(entry.stream as u32);
-        if !matches!(how, SHUT_RD | SHUT_WR | SHUT_RDWR) {
-            set_errno(EINVAL);
-            return -1;
-        }
-        if matches!(how, SHUT_RD | SHUT_RDWR) {
-            let _ = stream::shutdown_read(handle);
-        }
-        if matches!(how, SHUT_WR | SHUT_RDWR) {
-            let _ = stream::shutdown_write(handle);
-        }
+    if !matches!(how, SHUT_RD | SHUT_WR | SHUT_RDWR) {
+        set_errno(EINVAL);
+        return -1;
+    }
+    if matches!(how, SHUT_RD | SHUT_RDWR) {
+        let _ = stream::shutdown_read(handle);
+    }
+    if matches!(how, SHUT_WR | SHUT_RDWR) {
+        let _ = stream::shutdown_write(handle);
     }
     0
 }
@@ -616,12 +643,16 @@ const SHUT_RD: i32 = 0;
 const SHUT_WR: i32 = 1;
 const SHUT_RDWR: i32 = 2;
 
-/// `attempt`'s answer, asked without blocking until it has one and waiting
-/// between for `fd` to be readable: a handler that interrupts the wait
-/// restarts it if it was installed with `SA_RESTART`, and answers `EINTR` if
-/// not. With no handler kept nothing interrupts it, and `attempt(true)`
-/// blocks for the answer.
-fn interruptibly<T>(fd: i32, mut attempt: impl FnMut(bool) -> Option<T>) -> Result<T, i32> {
+/// `attempt`'s answer, asked without blocking until it has one, with `wait`
+/// between: given what a handler's signal makes readable, it waits for that
+/// or for what the call holds to be ready. A handler that interrupts the
+/// wait restarts it if it was installed with `SA_RESTART`, and answers
+/// `EINTR` if not. With no handler kept nothing interrupts it, and
+/// `attempt(true)` blocks for the answer.
+fn interruptibly<T>(
+    mut attempt: impl FnMut(bool) -> Option<T>,
+    mut wait: impl FnMut(RawHandle) -> Result<(), i32>,
+) -> Result<T, i32> {
     let Some(mut call) = crate::signal::Call::enter(None, false, false) else {
         return Ok(attempt(true).expect("a blocking attempt answers"));
     };
@@ -635,30 +666,32 @@ fn interruptibly<T>(fd: i32, mut attempt: impl FnMut(bool) -> Option<T>) -> Resu
         if let Some(answer) = attempt(false) {
             return Ok(answer);
         }
-        let mut entry = crate::posix_io::pollfd { fd, events: 1, revents: 0 };
-        // SAFETY: one entry, this one.
-        unsafe { crate::posix_io::wait_fds(&mut entry, 1, None, Some(call.wake())) }?;
+        wait(call.wake())?;
     }
 }
 
-/// A stream's refusal in POSIX's word: `send`'s and `recv`'s.
-fn stream_errno(refused: Refused) -> i32 {
-    match refused {
-        Refused::NotThisProcess(_) => EBADF,
-        Refused::WouldBlock => EAGAIN,
-        Refused::TimedOut | Refused::ConnectionTimedOut => ETIMEDOUT,
-        Refused::Reset => ECONNRESET,
-        Refused::Unreachable => EHOSTUNREACH,
-        Refused::Aborted => ECONNABORTED,
-        Refused::Shut => EPIPE,
+/// `read` of `fd` where it names a stream of this library's, as `recv`:
+/// `None` for any other descriptor. In a Rust program the descriptor table's
+/// owner is std's copy of `toyos`, which holds no end of libc's streams.
+pub(crate) fn read_if_stream(fd: i32, data: &mut [u8]) -> Option<isize> {
+    match sock_from_fd(fd)? {
+        Sock::Stream(held) if stream::is_stream(held.handle) => Some(read_stream(held.handle, data)),
+        Sock::Stream(_) | Sock::Entry(_) => None,
     }
 }
 
-/// The handle of the stream a socket is, for `poll`, given the object of a
-/// descriptor `poll` holds.
+/// `write` of `fd` where it names a stream of this library's, as `send`.
+pub(crate) fn write_if_stream(fd: i32, data: &[u8]) -> Option<isize> {
+    match sock_from_fd(fd)? {
+        Sock::Stream(held) if stream::is_stream(held.handle) => Some(write_stream(held.handle, data)),
+        Sock::Stream(_) | Sock::Entry(_) => None,
+    }
+}
+
+/// The handle of the stream a descriptor names, for `poll`, given the object
+/// of a descriptor `poll` holds.
 pub(crate) fn stream_of(object: &toyos::fd::Object) -> Option<RawHandle> {
-    let entry = entry_of(object)?;
-    (matches!(entry.kind, SocketKind::Tcp) && entry.stream != 0).then_some(RawHandle(entry.stream as u32))
+    (object.tag == toyos::fd::STREAM).then_some(object.handle)
 }
 
 /// The kernel handle a socket that is no stream is watched by, for `poll`: a
@@ -697,7 +730,8 @@ pub unsafe extern "C" fn setsockopt(
     optlen: SocklenT,
 ) -> i32 {
     let mut socket = match sock_from_fd(fd) {
-        Some(s) => s,
+        Some(Sock::Stream(stream)) => return set_stream_option(stream.handle, level, optname, optval, optlen),
+        Some(Sock::Entry(socket)) => socket,
         None => { set_errno(EBADF); return -1; }
     };
     let slot = socket.slot();
@@ -718,13 +752,9 @@ pub unsafe extern "C" fn setsockopt(
     };
     match option {
         Kept::NoDelay => {
-            // A stream's is a word of its region, a listener's a request.
-            if entry.stream != 0 {
-                if let Err(refused) = stream::set_nodelay(RawHandle(entry.stream as u32), on) {
-                    set_errno(stream_errno(refused));
-                    return -1;
-                }
-            } else if entry.bound {
+            // A listener's is a request; a socket netstack does not hold yet
+            // keeps it for its `bind` or its `connect`.
+            if entry.bound {
                 let id = TcpSocketId(entry.netstack_id);
                 if let Err(e) = toyos::net::tcp_listener_set_option(id, toyos::net::OPT_NODELAY, on as u32) {
                     set_errno(net_err_to_errno(e));
@@ -748,6 +778,27 @@ pub unsafe extern "C" fn setsockopt(
     0
 }
 
+/// `setsockopt` on a stream: its Nagle switch is a word of its region.
+unsafe fn set_stream_option(handle: RawHandle, level: i32, optname: i32, optval: *const u8, optlen: SocklenT) -> i32 {
+    let option = match sockopt::kept(level, optname, false) {
+        Ok(Some(option)) => option,
+        Ok(None) => return 0,
+        Err(refusal) => { set_errno(option_errno(refusal)); return -1; }
+    };
+    let on = match sockopt::switch(optval, optlen) {
+        Ok(on) => on,
+        Err(refusal) => { set_errno(option_errno(refusal)); return -1; }
+    };
+    match option {
+        Kept::NoDelay => match stream::set_nodelay(handle, on) {
+            Ok(()) => 0,
+            Err(refused) => { set_errno(crate::errcode::of_stream(refused)); -1 }
+        },
+        // A stream sends to no broadcast address.
+        Kept::Broadcast => 0,
+    }
+}
+
 #[no_mangle]
 pub unsafe extern "C" fn getsockopt(
     fd: i32,
@@ -756,26 +807,28 @@ pub unsafe extern "C" fn getsockopt(
     optval: *mut u8,
     optlen: *mut SocklenT,
 ) -> i32 {
-    let mut socket = match sock_from_fd(fd) {
-        Some(s) => s,
+    let (option, entry_value) = match sock_from_fd(fd) {
+        Some(Sock::Stream(stream)) => match sockopt::kept(level, optname, false) {
+            Ok(Some(Kept::NoDelay)) => match stream::nodelay(stream.handle) {
+                Ok(on) => (Some(Kept::NoDelay), on as i32),
+                Err(refused) => { set_errno(crate::errcode::of_stream(refused)); return -1; }
+            },
+            Ok(option) => (option, 0),
+            Err(refusal) => { set_errno(option_errno(refusal)); return -1; }
+        },
+        Some(Sock::Entry(mut socket)) => {
+            let Some(entry) = *socket.slot() else { set_errno(EBADF); return -1; };
+            match sockopt::kept(level, optname, matches!(entry.kind, SocketKind::Udp)) {
+                Ok(Some(Kept::NoDelay)) => (Some(Kept::NoDelay), entry.nodelay as i32),
+                Ok(Some(Kept::Broadcast)) => (Some(Kept::Broadcast), entry.broadcast as i32),
+                Ok(None) => (None, 0),
+                Err(refusal) => { set_errno(option_errno(refusal)); return -1; }
+            }
+        }
         None => { set_errno(EBADF); return -1; }
     };
-    let slot = socket.slot();
-    let entry = match slot.as_ref() {
-        Some(e) => e,
-        None => { set_errno(EBADF); return -1; }
-    };
-
-    let option = match sockopt::kept(level, optname, matches!(entry.kind, SocketKind::Udp)) {
-        Ok(option) => option,
-        Err(refusal) => { set_errno(option_errno(refusal)); return -1; }
-    };
-    let value = match option {
-        Some(Kept::NoDelay) => entry.nodelay as i32,
-        Some(Kept::Broadcast) => entry.broadcast as i32,
-        // Every other option reads 0, `SO_ERROR` among them.
-        None => 0,
-    };
+    // Every other option reads 0, `SO_ERROR` among them.
+    let value = if option.is_some() { entry_value } else { 0 };
     match sockopt::answer(value, optval, optlen) {
         Ok(()) => 0,
         Err(refusal) => { set_errno(option_errno(refusal)); -1 }
@@ -790,20 +843,19 @@ pub unsafe extern "C" fn getpeername(
     addr: *mut Sockaddr,
     addrlen: *mut SocklenT,
 ) -> i32 {
-    let mut socket = match sock_from_fd(fd) {
-        Some(s) => s,
+    let (ip, port) = match sock_from_fd(fd) {
+        Some(Sock::Stream(stream)) => match stream::endpoints(stream.handle) {
+            Ok((peer, _)) => peer,
+            Err(refused) => { set_errno(crate::errcode::of_stream(refused)); return -1; }
+        },
+        Some(Sock::Entry(mut socket)) => match *socket.slot() {
+            Some(entry) if entry.connected => (entry.remote_addr, entry.remote_port),
+            Some(_) => { set_errno(ENOTCONN); return -1; }
+            None => { set_errno(EBADF); return -1; }
+        },
         None => { set_errno(EBADF); return -1; }
     };
-    let slot = socket.slot();
-    let entry = match slot.as_ref() {
-        Some(e) => e,
-        None => { set_errno(EBADF); return -1; }
-    };
-    if !entry.connected {
-        set_errno(ENOTCONN);
-        return -1;
-    }
-    fill_sockaddr(addr, addrlen, entry.remote_addr, entry.remote_port);
+    fill_sockaddr(addr, addrlen, ip, port);
     0
 }
 
@@ -813,17 +865,19 @@ pub unsafe extern "C" fn getsockname(
     addr: *mut Sockaddr,
     addrlen: *mut SocklenT,
 ) -> i32 {
-    let mut socket = match sock_from_fd(fd) {
-        Some(s) => s,
-        None => { set_errno(EBADF); return -1; }
-    };
-    let slot = socket.slot();
-    let entry = match slot.as_ref() {
-        Some(e) => e,
+    let local_port = match sock_from_fd(fd) {
+        Some(Sock::Stream(stream)) => match stream::endpoints(stream.handle) {
+            Ok((_, local_port)) => local_port,
+            Err(refused) => { set_errno(crate::errcode::of_stream(refused)); return -1; }
+        },
+        Some(Sock::Entry(mut socket)) => match *socket.slot() {
+            Some(entry) => entry.local_port,
+            None => { set_errno(EBADF); return -1; }
+        },
         None => { set_errno(EBADF); return -1; }
     };
     // Local address: 10.0.2.15 (QEMU default)
-    fill_sockaddr(addr, addrlen, [10, 0, 2, 15], entry.local_port);
+    fill_sockaddr(addr, addrlen, [10, 0, 2, 15], local_port);
     0
 }
 

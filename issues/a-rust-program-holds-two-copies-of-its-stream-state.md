@@ -24,8 +24,25 @@ What that costs, today:
 Both records reach the one ring, so nothing is lost and no line is spliced; the
 weakness is the doubled state and the unjoined piece.
 
-**Exit condition**: one instance of the stream state per process — `std`
+The same holds of TCP streams. `sdk/toyos/src/net/stream.rs`'s table of ends
+is one per instance, and so is libc's, which links an instance of its own
+(`toyos_c`). A stream's descriptor carries its instance's release function
+(`fd::STREAM`), so each end is let go by the instance that holds it. Every call
+that asks an instance about another's stream is refused, in a Rust program
+that also uses libc's sockets:
+- libc's `recv`, `send`, `sendto`, `recvfrom`, `getsockopt` and `getpeername`
+  on a std stream's descriptor answer `EBADF`. libc's `read` and `write` of it
+  work, through the descriptor table's owner, std's instance.
+- std's `TcpStream::from_raw_fd` of a libc stream's descriptor panics
+  (`Misuse::NotThisProcess`), and `File::from_raw_fd` of it reads and writes
+  nothing (`NotAFile`).
+- std's spawn of a libc stream's descriptor is refused `NotSupported`.
+- A log line to stderr is dropped where stderr is a libc stream's descriptor.
+
+**Exit condition**: one instance of the stream state and of the table of
+stream ends per process — `std`
 re-exporting the SDK instance it links and the SDK crate taking it rather than
 building its own, or the state moving to a per-process page both instances
 find — shown by a guest test that joins `print!` and an SDK write into one
-line and counts one mapping of the ring.
+line and counts one mapping of the ring, and by one that `recv`s through libc
+on a std stream.

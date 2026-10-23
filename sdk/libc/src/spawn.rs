@@ -23,6 +23,7 @@ use alloc::vec::Vec;
 use core::ptr;
 use core::sync::atomic::{AtomicUsize, Ordering};
 
+use toyos::fd::Kind;
 use toyos::process::{End, Process};
 use toyos::spawn::{self, Launched, Parent, Refused, Spawn};
 use toyos_abi::syscall;
@@ -292,19 +293,20 @@ fn spawn_counted(path: &str, argv: &[u8], env: &[u8], actions: &[Action<Box<[u8]
     let mut held: Vec<toyos::OwnedHandle> = Vec::new();
     let plan = spawnreq::plan(
         |fd| {
-            let Some(copy) = toyos::fd::copy(fd as i32).map_err(errno_of)? else { return Ok(None) };
+            let Some((copy, kind)) = toyos::fd::copy(fd as i32).map_err(errno_of)? else { return Ok(None) };
             let Ok(inheritable) = toyos::fd::inheritable(fd as i32) else { return Ok(None) };
-            let handle = toyos::AsHandle::as_handle(&copy).0;
+            let handle = toyos::AsHandle::as_handle(&copy);
             held.push(copy);
-            Ok(Some((handle, !inheritable)))
+            Ok(Some(((handle, kind), !inheritable)))
         },
         actions,
-        |path, oflag, mode| crate::posix_io::open_handle(path, oflag, mode).map(|h| h.0),
-        |handle| syscall::close(RawHandle(handle)),
+        |path, oflag, mode| crate::posix_io::open_handle(path, oflag, mode).map(|h| (h, Kind::Handle)),
+        |(handle, _)| syscall::close(handle),
     )?;
-    let started = start(path, argv, env, &plan.fds);
-    for handle in plan.opened {
-        syscall::close(RawHandle(handle));
+    let fds: Vec<(u32, RawHandle, Kind)> = plan.fds.iter().map(|&(fd, (handle, kind))| (fd, handle, kind)).collect();
+    let started = start(path, argv, env, &fds);
+    for (handle, _) in plan.opened {
+        syscall::close(handle);
     }
     drop(held);
     let process = started?;
@@ -323,18 +325,17 @@ fn spawn_counted(path: &str, argv: &[u8], env: &[u8], actions: &[Action<Box<[u8]
 /// The launch-or-spawn of `toyos::spawn`, from this process's own working
 /// directory, the child's `HOME` the one `env` names if it differs from this
 /// process's start-up one.
-fn start(path: &str, argv: &[u8], env: &[u8], fds: &[(u32, u32)]) -> Result<Process, i32> {
+fn start(path: &str, argv: &[u8], env: &[u8], fds: &[(u32, RawHandle, Kind)]) -> Result<Process, i32> {
     let mut cwd = alloc::vec![0u8; syscall::MAX_PATH];
     let n = syscall::getcwd(&mut cwd);
     let cwd = core::str::from_utf8(&cwd[..n]).map_err(|_| EINVAL)?;
-    let fds: Vec<(u32, RawHandle)> = fds.iter().map(|&(fd, handle)| (fd, RawHandle(handle))).collect();
     let request = Spawn {
         program: path,
         image: None,
         argv,
         env,
         cwd,
-        fds: &fds,
+        fds,
         endow: &[],
         provided: &[],
         parent: Parent::Caller,
@@ -360,6 +361,9 @@ fn errno_of(refused: Refused) -> i32 {
         Refused::Permission(_) | Refused::NotStarted => EACCES,
         Refused::Invalid(_) => E2BIG,
         Refused::Stream(_) => EBADF,
+        // A holder past what netstack has places for is a descriptor too many.
+        Refused::Export(toyos::net::NetError::ResourceExhausted) => crate::errcode::EMFILE,
+        Refused::Export(_) => crate::errcode::EIO,
         Refused::Syscall(e) => crate::errcode::of(e),
     }
 }

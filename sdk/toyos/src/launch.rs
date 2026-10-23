@@ -28,6 +28,7 @@
 
 use toyos_abi::syscall::SyscallError;
 
+use crate::fd::Kind;
 use crate::ipc::{Connection, IpcError};
 use crate::{AsHandle, OwnedHandle, RawHandle};
 
@@ -71,6 +72,26 @@ pub const MAX_LAUNCH_EXTRAS: usize = 5;
 pub const MAX_LAUNCH_FDS: usize = 3;
 
 const HEADER: usize = 36;
+
+/// One descriptor on the wire: its number, then its kind's word.
+const FD_BYTES: usize = 8;
+
+/// A descriptor's kind on the wire.
+const fn kind_word(kind: Kind) -> u32 {
+    match kind {
+        Kind::Handle => 0,
+        Kind::Stream => 1,
+    }
+}
+
+/// The kind a word names, or `None`.
+const fn kind_of(word: u32) -> Option<Kind> {
+    match word {
+        0 => Some(Kind::Handle),
+        1 => Some(Kind::Stream),
+        _ => None,
+    }
+}
 
 /// The header's last word for a launch that names a place.
 const PARENT_PLACE: u32 = 1;
@@ -118,10 +139,10 @@ pub struct Launch<'a> {
     /// `surface` port it made — a name the supervisor cannot know, because there is one
     /// per terminal.
     pub extras: &'a [(&'a str, RawHandle)],
-    /// `(child descriptor, handle)`, at most [`MAX_LAUNCH_FDS`] of them, which
-    /// the launcher endows as `fd:<n>`. The handles are **moved**, so a caller
-    /// passing on its own stdout duplicates first.
-    pub fds: &'a [(u32, RawHandle)],
+    /// `(child descriptor, handle, kind)`, at most [`MAX_LAUNCH_FDS`] of them,
+    /// which the launcher endows as `fd:<n>` or `fd:<n>:<kind>`. The handles
+    /// are **moved**, so a caller passing on its own stdout duplicates first.
+    pub fds: &'a [(u32, RawHandle, Kind)],
     /// Whom the program is placed under. A place is **moved** with the batch,
     /// and counts against [`MAX_LAUNCH_EXTRAS`].
     pub parent: Parent,
@@ -158,7 +179,7 @@ impl Launch<'_> {
             Parent::Place(place) => Some(place),
             Parent::Supervisor => None,
         };
-        let fds = self.fds.iter().map(|(_, h)| h);
+        let fds = self.fds.iter().map(|(_, h, _)| h);
         let extras = self.extras.iter().map(|(_, h)| h);
         for handle in fds.chain(extras).chain(&place).chain([&self.job]) {
             if *handle == conn || out[..n].contains(handle) {
@@ -181,7 +202,7 @@ impl Launch<'_> {
             return Err(EncodeError::TooMany);
         }
         let names_len: usize = self.extras.iter().map(|(n, _)| n.len() + 1).sum();
-        let fds_len = self.fds.len() * 4;
+        let fds_len = self.fds.len() * FD_BYTES;
         let total = HEADER
             + fds_len
             + self.program.len()
@@ -211,8 +232,9 @@ impl Launch<'_> {
             buf[*at..*at + bytes.len()].copy_from_slice(bytes);
             *at += bytes.len();
         };
-        for (fd, _) in self.fds {
+        for (fd, _, kind) in self.fds {
             put(&fd.to_le_bytes(), &mut at);
+            put(&kind_word(*kind).to_le_bytes(), &mut at);
         }
         put(self.program.as_bytes(), &mut at);
         put(self.argv, &mut at);
@@ -257,7 +279,7 @@ impl<'a> Request<'a> {
         let parent = field(8) as u32;
         if extra_count + usize::from(parent == PARENT_PLACE) + 1 > MAX_LAUNCH_EXTRAS
             || fd_count > MAX_LAUNCH_FDS
-            || fds_len != fd_count * 4
+            || fds_len != fd_count * FD_BYTES
         {
             return None;
         }
@@ -305,13 +327,17 @@ impl<'a> Request<'a> {
         self.fd_count() + self.extra_count + usize::from(self.parent == PARENT_PLACE) + 1
     }
 
-    /// The child descriptors the first handles of the batch are for, in order.
-    pub fn fd_numbers(&self) -> impl Iterator<Item = u32> + '_ {
-        self.fds.as_chunks::<4>().0.iter().map(|c| u32::from_le_bytes(*c))
+    /// The child descriptors the first handles of the batch are for, in
+    /// order, each with its kind: `None` for a word that names no kind.
+    pub fn fds(&self) -> impl Iterator<Item = (u32, Option<Kind>)> + '_ {
+        self.fds.as_chunks::<FD_BYTES>().0.iter().map(|c| {
+            let [a, b, c, d, e, f, g, h] = *c;
+            (u32::from_le_bytes([a, b, c, d]), kind_of(u32::from_le_bytes([e, f, g, h])))
+        })
     }
 
     pub fn fd_count(&self) -> usize {
-        self.fds.len() / 4
+        self.fds.len() / FD_BYTES
     }
 
     /// The extra connectors' names, in the order their handles arrive.
@@ -428,6 +454,32 @@ mod tests {
         }
     }
 
+    /// Each descriptor goes on the wire with its kind, and a word that names
+    /// no kind decodes as none, which the supervisor refuses.
+    #[test]
+    fn a_descriptor_crosses_with_its_kind() {
+        let mut buf = [0u8; 256];
+        let fds = [(0, RawHandle(5), Kind::Handle), (1, RawHandle(6), Kind::Stream)];
+        let request = Launch {
+            program: "/system/bin/cat",
+            argv: b"",
+            env: b"",
+            cwd: "/",
+            extras: &[],
+            fds: &fds,
+            parent: Parent::Supervisor,
+            job: RawHandle(10),
+        };
+        let len = request.encode(&mut buf).expect("encode a launch");
+        let decoded = Request::decode(&buf[..len]).expect("decode it");
+        assert_eq!(decoded.fds().collect::<Vec<_>>(), [(0, Some(Kind::Handle)), (1, Some(Kind::Stream))]);
+        assert_eq!(decoded.handle_count(), 3, "two descriptors and the job");
+        let second_kind = HEADER + FD_BYTES + 4;
+        buf[second_kind..second_kind + 4].copy_from_slice(&7u32.to_le_bytes());
+        let decoded = Request::decode(&buf[..len]).expect("decode it");
+        assert_eq!(decoded.fds().nth(1), Some((1, None)), "a word that names no kind");
+    }
+
     /// `launch` becomes the one owner of every number in the batch, so a
     /// number named twice, or the connection's own, is a batch to close: each
     /// number once, the connection's never.
@@ -435,7 +487,7 @@ mod tests {
     fn a_batch_names_each_handle_once_and_never_its_connection() {
         const CONN: RawHandle = RawHandle(3);
         let h = RawHandle;
-        let batch = |fds: &[(u32, RawHandle)], extras: &[(&str, RawHandle)], parent| {
+        let batch = |fds: &[(u32, RawHandle, Kind)], extras: &[(&str, RawHandle)], parent| {
             let request = Launch {
                 program: "/system/bin/cat",
                 argv: b"",
@@ -450,23 +502,23 @@ mod tests {
             request.batch(CONN).map(named).map_err(named)
         };
         assert_eq!(
-            batch(&[(0, h(5)), (1, h(6))], &[("a", h(7)), ("b", h(8))], Parent::Place(h(9))),
+            batch(&[(0, h(5), Kind::Handle), (1, h(6), Kind::Handle)], &[("a", h(7)), ("b", h(8))], Parent::Place(h(9))),
             Ok(vec![h(5), h(6), h(7), h(8), h(9), h(10)]),
         );
         assert_eq!(batch(&[], &[("a", h(7)), ("b", h(7))], Parent::Supervisor), Err(vec![h(7), h(10)]), "two extras");
-        assert_eq!(batch(&[(0, h(5)), (1, h(5))], &[], Parent::Supervisor), Err(vec![h(5), h(10)]), "two descriptors");
+        assert_eq!(batch(&[(0, h(5), Kind::Handle), (1, h(5), Kind::Handle)], &[], Parent::Supervisor), Err(vec![h(5), h(10)]), "two descriptors");
         assert_eq!(
-            batch(&[(0, h(7)), (1, h(6))], &[("a", h(7))], Parent::Supervisor),
+            batch(&[(0, h(7), Kind::Handle), (1, h(6), Kind::Handle)], &[("a", h(7))], Parent::Supervisor),
             Err(vec![h(7), h(6), h(10)]),
             "a descriptor and an extra",
         );
         assert_eq!(
-            batch(&[(0, h(5))], &[("a", h(9))], Parent::Place(h(9))),
+            batch(&[(0, h(5), Kind::Handle)], &[("a", h(9))], Parent::Place(h(9))),
             Err(vec![h(5), h(9), h(10)]),
             "an extra and the place",
         );
         assert_eq!(
-            batch(&[(0, h(5))], &[("a", CONN), ("b", h(7))], Parent::Supervisor),
+            batch(&[(0, h(5), Kind::Handle)], &[("a", CONN), ("b", h(7))], Parent::Supervisor),
             Err(vec![h(5), h(7), h(10)]),
             "the connection as an extra",
         );
@@ -475,6 +527,6 @@ mod tests {
             Err(vec![h(7), h(10)]),
             "the connection as the place",
         );
-        assert_eq!(batch(&[(0, h(10))], &[], Parent::Supervisor), Err(vec![h(10)]), "a descriptor and the job");
+        assert_eq!(batch(&[(0, h(10), Kind::Handle)], &[], Parent::Supervisor), Err(vec![h(10)]), "a descriptor and the job");
     }
 }

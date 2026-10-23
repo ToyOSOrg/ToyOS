@@ -230,7 +230,7 @@ mod target {
         use why::Why;
         // A descriptor that is not open, or names a file a server holds, is
         // written as a descriptor.
-        let asked = crate::fd::with(stream as i32, |o| o.release.is_none().then(|| syscall::fstat(o.handle)));
+        let asked = crate::fd::with(stream as i32, |o| o.kernel_handle().map(syscall::fstat));
         let Ok(Some(stat)) = asked else { return Ok(DESCRIPTOR) };
         let stat = stat.map_err(Why::Fstat)?;
         if stat.file_type != FileType::SharedMemory {
@@ -372,16 +372,29 @@ mod target {
         })
     }
 
+    /// Some of `bytes` written to the descriptor's `object`: a stream's as
+    /// its bytes, without waiting, since a line may be said from inside a call
+    /// waiting on that very stream; a handle's by a plain write. `None` for
+    /// nothing, and for a stream another copy of this crate holds.
+    fn write_line(object: crate::fd::Object, bytes: &[u8]) -> Option<usize> {
+        let wait = crate::net::stream::Wait::Nonblocking;
+        match object.kernel_handle() {
+            Some(handle) if object.tag == crate::fd::STREAM => crate::net::stream::write(handle, bytes, wait).ok(),
+            Some(handle) => syscall::write(handle, bytes).ok(),
+            None => None,
+        }
+    }
+
     /// One line of this program's own, at `severity`, onto its stderr.
     pub fn say(severity: Severity, args: core::fmt::Arguments<'_>) {
         match sink(Stream::Err) {
             Sink::Ring(ring) => compose(severity, args, &mut push(&ring)),
             Sink::Descriptor(fd) => compose(severity, args, &mut |body: &mut Body| {
-                let write = |bytes: &[u8]| crate::fd::with(fd, |o| syscall::write(o.handle, bytes));
+                let write = |bytes: &[u8]| crate::fd::with(fd, |o| write_line(o, bytes));
                 let mut rest = body.text();
                 while !rest.is_empty() {
                     match write(rest) {
-                        Ok(Ok(n @ 1..)) => rest = &rest[n..],
+                        Ok(Some(n @ 1..)) => rest = &rest[n..],
                         _ => return,
                     }
                 }

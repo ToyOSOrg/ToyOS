@@ -33,6 +33,12 @@
 //! call is [`Bells::wait_gate`], whose adapter reports it as stalled while it
 //! lasts.
 //!
+//! **A thread inside a gate section runs to its release.** Nothing may suspend
+//! it, leave the section by a non-local exit, or re-enter the stream from it:
+//! a signal handler, a debugger's stop or a `longjmp` there would stall that
+//! direction in every holder of the stream, in every process. A panic that
+//! unwinds out of one is the exception the release guard handles.
+//!
 //! **The client waits on one doorbell a direction** ([`doorbell`]), the one the
 //! server rings for that direction's want, so a reader and a writer never take
 //! each other's wake. The server waits on one, which every client ring writes.
@@ -81,7 +87,7 @@ const SHUT: u32 = 1 << 30;
 const DEPART: Ordering = if cfg!(feature = "transport-departure-relaxed") { Ordering::Relaxed } else { Ordering::AcqRel };
 
 /// One holder of the client's end, by the number its server gave it.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct Holder(NonZeroU16);
 
 impl Holder {
@@ -112,21 +118,21 @@ pub enum Way {
     Send,
 }
 
-/// A pipe the server writes and the client waits on.
+/// A pipe of a holder's that the server writes and the holder waits on.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Doorbell {
-    /// The connection the session was opened on.
-    Connection,
-    /// A pipe of the session's own.
-    Bell,
+    /// Rung for a reader.
+    Receive,
+    /// Rung for a writer.
+    Send,
 }
 
-/// The doorbell the server rings for a client waiting on `way`.
+/// The doorbell the server rings for a holder waiting on `way`.
 pub const fn doorbell(way: Way) -> Doorbell {
     match way {
-        Way::Receive => Doorbell::Connection,
-        Way::Send if cfg!(feature = "transport-one-doorbell") => Doorbell::Connection,
-        Way::Send => Doorbell::Bell,
+        Way::Receive => Doorbell::Receive,
+        Way::Send if cfg!(feature = "transport-one-doorbell") => Doorbell::Receive,
+        Way::Send => Doorbell::Send,
     }
 }
 
@@ -134,21 +140,21 @@ pub const fn doorbell(way: Way) -> Doorbell {
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 #[must_use]
 pub struct Rings {
-    pub connection: bool,
-    pub bell: bool,
+    pub receive: bool,
+    pub send: bool,
 }
 
 impl Rings {
     fn of(way: Way, rung: bool) -> Self {
         match doorbell(way) {
-            Doorbell::Connection => Self { connection: rung, bell: false },
-            Doorbell::Bell => Self { connection: false, bell: rung },
+            Doorbell::Receive => Self { receive: rung, send: false },
+            Doorbell::Send => Self { receive: false, send: rung },
         }
     }
 
     /// Both sets of rings.
     pub fn and(self, other: Self) -> Self {
-        Self { connection: self.connection || other.connection, bell: self.bell || other.bell }
+        Self { receive: self.receive || other.receive, send: self.send || other.send }
     }
 }
 
@@ -880,6 +886,15 @@ where
 #[must_use]
 pub struct Watching {
     took: bool,
+    gate: Option<u16>,
+}
+
+impl Watching {
+    /// The holder whose gate the direction is ready under, where the watch
+    /// waits on its call rather than on the server.
+    pub fn gate(&self) -> Option<u16> {
+        self.gate
+    }
 }
 
 /// What a poll's look found.
@@ -904,7 +919,7 @@ where
 {
     let (polled, ring_server, gone_at) = lock.with(|half| {
         let common = half.common();
-        let (mut counted, mut took) = (false, false);
+        let (mut counted, mut took, mut gate) = (false, false, None);
         let ready = loop {
             match look_counted(half, page, bells, &mut counted, &mut took) {
                 Ok(None) => break gone(page, common.gone),
@@ -918,11 +933,14 @@ where
             match contend(half, page, bells, &mut counted, &mut took, WANT, owner) {
                 Contended::Free => continue,
                 Contended::Gone => break true,
-                Contended::Wanted(_) => break false,
+                Contended::Wanted(owner) => {
+                    gate = Some(owner);
+                    break false;
+                }
             }
         };
         if !ready {
-            return (Polled::Watching(Watching { took }), false, common.gone);
+            return (Polled::Watching(Watching { took, gate }), false, common.gone);
         }
         (Polled::Ready, leave(half, page, counted, took), common.gone)
     });
@@ -1355,7 +1373,7 @@ mod tests {
         assert!(!server.shut(&page));
         page[TX_GATE].store(2 | WANT | SHUT, Ordering::Relaxed);
         page[TX_ROOM].store(1, Ordering::Relaxed);
-        assert_eq!(server.departed(&page, second()), Ok(Rings { connection: false, bell: true }), "the shutdown's waiter");
+        assert_eq!(server.departed(&page, second()), Ok(Rings { receive: false, send: true }), "the shutdown's waiter");
         assert_eq!(page[TX_GATE].load(Ordering::Relaxed), 0);
         assert!(server.shut(&page), "the shutdown asked of the departed owner");
     }
@@ -1407,7 +1425,7 @@ mod tests {
         assert_eq!(*bells.gates.borrow(), [Some(2)], "the shutdown's wait is for the second holder's gate");
         assert_eq!(page[TX_END].load(Ordering::Relaxed), ORDERLY);
         assert_eq!(page[TX_GATE].load(Ordering::Relaxed), 0);
-        assert_eq!(server.rung(&page), Ok(Rings { connection: false, bell: true }), "the shut rings the holder asleep over a full ring");
+        assert_eq!(server.rung(&page), Ok(Rings { receive: false, send: true }), "the shut rings the holder asleep over a full ring");
     }
 
     /// A nonblocking write that finds room under another holder's gate arms
@@ -1456,6 +1474,26 @@ mod tests {
         };
         assert_eq!(write_one(&page, &tx, &full, Mode::Blocking(None)), (Ok(1), 1));
         assert_eq!(*full.gates.borrow(), [None], "a wait for room");
+    }
+
+    /// A poll of a direction ready under another holder's gate watches for
+    /// that holder's gate, which its waiter reports where it lasts; one that
+    /// is not ready watches for no gate.
+    #[test]
+    fn a_watch_under_another_holders_gate_names_that_holder() {
+        let page = page();
+        let ((_, tx), _) = two(&page);
+        let bells = quiet();
+        let owner = Common { gate: TX_GATE, shut: Some(TX_END), gone: 13, holder: second() };
+        assert_eq!(acquire(&page, owner), Ok(()));
+        let Polled::Watching(gated) = watch(&page, &tx, &bells) else { panic!("ready under another's gate") };
+        assert_eq!(gated.gate(), Some(2));
+        let _ = unwatch(&page, &tx, &bells, gated);
+        let _ = release(&page, owner);
+        assert_eq!(write(&page, &tx, &bells, Mode::Nonblocking, C, |_, _| {}), Ok(C), "the ring filled");
+        let Polled::Watching(full) = watch(&page, &tx, &bells) else { panic!("room in a full ring") };
+        assert_eq!(full.gate(), None, "a watch for room");
+        let _ = unwatch(&page, &tx, &bells, full);
     }
 
     /// Once one holder saw the server hang up, a write with room in another
@@ -1516,7 +1554,7 @@ mod tests {
         assert_eq!(read(&page, &other_rx, &bells, Mode::Nonblocking, 1, |_, _| {}), Err(Refused::WouldBlock), "armed");
         shutdown_read(&page, &rx, &bells);
         assert_eq!(bells.rang.get(), 1);
-        assert_eq!(server.rung(&page), Ok(Rings { connection: true, bell: false }), "the reader that armed");
+        assert_eq!(server.rung(&page), Ok(Rings { receive: true, send: false }), "the reader that armed");
         let _ = server.publish(&page, 2);
         assert_eq!(read(&page, &other_rx, &bells, Mode::Nonblocking, 1, |_, _| {}), Ok(0));
         assert_eq!(server.held(&page), Ok(2), "a byte was read after the shutdown");

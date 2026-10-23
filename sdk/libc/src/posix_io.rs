@@ -182,6 +182,9 @@ pub unsafe extern "C" fn close(raw_fd: i32) -> i32 {
 pub unsafe extern "C" fn read(raw_fd: i32, buf: *mut u8, count: usize) -> isize {
     if buf.is_null() || count == 0 { return 0; }
     let slice = core::slice::from_raw_parts_mut(buf, count);
+    if let Some(n) = crate::socket::read_if_stream(raw_fd, slice) {
+        return n;
+    }
     let blocking = |slice: &mut [u8]| match files::read(raw_fd, slice) {
         Ok(n) => n as isize,
         Err(e) => refuse_files(e) as isize,
@@ -223,6 +226,9 @@ pub unsafe extern "C" fn read(raw_fd: i32, buf: *mut u8, count: usize) -> isize 
 pub unsafe extern "C" fn write(raw_fd: i32, buf: *const u8, count: usize) -> isize {
     if buf.is_null() || count == 0 { return 0; }
     let slice = core::slice::from_raw_parts(buf, count);
+    if let Some(n) = crate::socket::write_if_stream(raw_fd, slice) {
+        return n;
+    }
     match write_fd(raw_fd, slice) {
         Ok(n) => n as isize,
         Err(e) => refuse(e) as isize,
@@ -771,11 +777,11 @@ pub struct pollfd {
 }
 
 /// What [`wait_fds`] came to.
-pub(crate) struct Waited {
+struct Waited {
     /// Entries ready, their `revents` written.
-    pub(crate) ready: i32,
+    ready: i32,
     /// Whether the wake pipe beside them was readable.
-    pub(crate) woken: bool,
+    woken: bool,
 }
 
 /// The most entries and doorbells one poll watches: a poller's handles, one of
@@ -795,7 +801,7 @@ const MAX_POLLED: usize = toyos::poller::Poller::MAX_HANDLES as usize - 1;
 ///
 /// # Safety
 /// `fds` points at `n` entries.
-pub(crate) unsafe fn wait_fds(fds: *mut pollfd, n: usize, deadline: Option<u64>, wake: Option<RawHandle>) -> Result<Waited, i32> {
+unsafe fn wait_fds(fds: *mut pollfd, n: usize, deadline: Option<u64>, wake: Option<RawHandle>) -> Result<Waited, i32> {
     use toyos::net::stream::{self, Poll, Way};
 
     const POLLIN: i16 = 1;
@@ -833,7 +839,7 @@ pub(crate) unsafe fn wait_fds(fds: *mut pollfd, n: usize, deadline: Option<u64>,
             Some(_) => (-1, 0),
             None => {
                 let handle = object.and_then(|object| {
-                    crate::socket::watched_of(object).or_else(|| object.release.is_none().then_some(object.handle))
+                    crate::socket::watched_of(object).or_else(|| object.kernel_handle())
                 });
                 (handle.map_or(-1, |handle| handle.0 as i32), events)
             }

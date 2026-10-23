@@ -21,6 +21,7 @@ use toyos_abi::syscall::{
     SVC_LABEL,
 };
 
+use crate::fd::Kind;
 use crate::launch::{self, Launch, LaunchError, Outcome, MAX_LAUNCH_EXTRAS, MAX_LAUNCH_FDS};
 use crate::process::{Image, Process};
 use crate::{AsHandle, RawHandle};
@@ -52,11 +53,12 @@ pub struct Spawn<'a> {
     pub env: &'a [u8],
     /// Absolute: the kernel starts a child only where its spawn says.
     pub cwd: &'a str,
-    /// `(child descriptor, caller's handle)`, each a number once: the child
-    /// starts with these and no other descriptors. The caller keeps its
-    /// handles, which a spawn duplicates. A launch carries 0 to 2; a
+    /// `(child descriptor, caller's handle, its kind)`, each a number once:
+    /// the child starts with these and no other descriptors. The caller keeps
+    /// its handles, which a spawn duplicates; a stream's is an end
+    /// `net::stream::export` made for the child. A launch carries 0 to 2; a
     /// descriptor past them only a direct spawn gives.
-    pub fds: &'a [(u32, RawHandle)],
+    pub fds: &'a [(u32, RawHandle, Kind)],
     /// `(label, handle)` the child is endowed, each moved. One under
     /// [`JOB_LABEL`] is the job the child joins, which a launch carries too.
     pub endow: &'a [(&'a str, RawHandle)],
@@ -73,9 +75,11 @@ pub enum Refused {
     Permission(&'static str),
     /// The spawn names more than it can carry, for this reason.
     Invalid(&'static str),
-    /// It would put a stream's handle in another process, which
-    /// `crate::net::stream` answers for.
+    /// It would put a stream's own handle in another process, where only an
+    /// exported end of it goes (`crate::net::stream::export`).
     Stream(RawHandle),
+    /// netstack made no holder of a stream the child was to be given.
+    Export(crate::net::NetError),
     /// The supervisor did not start a program it declares, or its answer was lost.
     NotStarted,
     /// The kernel refused.
@@ -100,7 +104,7 @@ impl Spawn<'_> {
         let asked = Asked {
             supervisor: self.parent == Parent::Supervisor,
             endowed: self.endow.iter().any(|(label, _)| *label != JOB_LABEL),
-            extra_fds: self.fds.iter().any(|&(fd, _)| fd > 2),
+            extra_fds: self.fds.iter().any(|&(fd, _, _)| fd > 2),
             image_named: self.image.is_some(),
             provided: !self.provided.is_empty(),
         };
@@ -159,7 +163,7 @@ impl Spawn<'_> {
         if let Some(svc) = svc {
             put(&[SVC_LABEL.as_bytes()], svc, &mut count, &mut used).map_err(|e| release(&copies[..copied], e))?;
         }
-        for &(fd, handle) in self.fds {
+        for &(fd, handle, kind) in self.fds {
             let copy = match syscall::dup(handle) {
                 Ok(copy) => copy,
                 Err(e) => return Err(release(&copies[..copied], Refused::Syscall(e))),
@@ -167,7 +171,8 @@ impl Spawn<'_> {
             copies[copied] = copy;
             copied += 1;
             let digits = decimal(fd, &mut number);
-            put(&[FD_PREFIX.as_bytes(), digits], copy, &mut count, &mut used).map_err(|e| release(&copies[..copied], e))?;
+            let label = [FD_PREFIX.as_bytes(), digits, kind.suffix().as_bytes()];
+            put(&label, copy, &mut count, &mut used).map_err(|e| release(&copies[..copied], e))?;
         }
         let (image, image_len) = image.map_or((0, 0), Image::spawn_words);
         let args = SpawnArgs {
@@ -201,11 +206,11 @@ impl Spawn<'_> {
         }
     }
 
-    /// Refuses, before anything moves, a spawn that would put a stream's
-    /// handle in another process: a stream belongs to the process that
-    /// connected or accepted it.
+    /// Refuses, before anything moves, a spawn that would put a stream's own
+    /// handle in another process: a holder stays in its process, and what
+    /// goes is an end of a new one, which the caller exports.
     fn refuse_streams(&self) -> Result<(), Refused> {
-        let fds = self.fds.iter().map(|&(_, handle)| handle);
+        let fds = self.fds.iter().map(|&(_, handle, _)| handle);
         let given = self.endow.iter().chain(self.provided).map(|&(_, handle)| handle);
         match fds.chain(given).find(|h| crate::net::stream::is_stream(*h)) {
             Some(stream) => Err(Refused::Stream(stream)),
@@ -238,7 +243,7 @@ impl Spawn<'_> {
             return Err(Refused::Invalid("more connectors provided than a launch carries beside its place and job"));
         }
         let stdio = self.fds;
-        if stdio.len() > MAX_LAUNCH_FDS || stdio.iter().any(|&(fd, _)| fd > 2) {
+        if stdio.len() > MAX_LAUNCH_FDS || stdio.iter().any(|&(fd, _, _)| fd > 2) {
             return Err(Refused::Invalid("a launch carries descriptors 0 to 2 alone"));
         }
         let place = match self.parent {
@@ -264,17 +269,17 @@ impl Spawn<'_> {
                 }
             },
         };
-        let mut fds = [(0u32, RawHandle(0)); MAX_LAUNCH_FDS];
-        let release = |fds: &[(u32, RawHandle)]| {
-            fds.iter().for_each(|(_, h)| syscall::close(*h));
+        let mut fds = [(0u32, RawHandle(0), Kind::Handle); MAX_LAUNCH_FDS];
+        let release = |fds: &[(u32, RawHandle, Kind)]| {
+            fds.iter().for_each(|(_, h, _)| syscall::close(*h));
             if let launch::Parent::Place(copy) = parent {
                 syscall::close(copy);
             }
             job_copy.into_iter().for_each(syscall::close);
         };
-        for (i, &(child, handle)) in stdio.iter().enumerate() {
+        for (i, &(child, handle, kind)) in stdio.iter().enumerate() {
             match syscall::dup(handle) {
-                Ok(copy) => fds[i] = (child, copy),
+                Ok(copy) => fds[i] = (child, copy, kind),
                 Err(e) => {
                     release(&fds[..i]);
                     return Err(Refused::Syscall(e));

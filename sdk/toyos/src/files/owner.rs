@@ -136,12 +136,12 @@ fn on_fd<T>(
 ) -> Result<T, Error> {
     // A kernel call is made while the descriptor's object is held; an open
     // file is taken out of it, counted, and asked after.
-    let named = fd::with(fd, |o| match (o.release, o.tag) {
-        (None, _) => Ok(Err(kernel(o.handle).map_err(Error::Kernel))),
-        (Some(_), SERVED_FILE) => {
+    let named = fd::with(fd, |o| match (o.kernel_handle(), o.tag) {
+        (Some(handle), _) => Ok(Err(kernel(handle).map_err(Error::Kernel))),
+        (None, SERVED_FILE) => {
             Ok(Ok(open_file(o.word).expect("toyos::files: a held descriptor names an open file")))
         }
-        (Some(_), _) => Err(Error::NotAFile),
+        (None, _) => Err(Error::NotAFile),
     });
     match named.map_err(Error::Fd)?? {
         Err(answer) => answer,
@@ -265,11 +265,25 @@ unsafe extern "C" fn toyos_fs_fstat(fd: Fd, out: *mut Stat) -> i64 {
     }))
 }
 
+/// `f` on the stream `fd` names, held for the call, as a read or a write of
+/// its descriptor does it: through its region, since its connection carries
+/// frames. `None` for a descriptor that names no stream.
+fn on_stream<T>(fd: Fd, f: impl FnOnce(RawHandle) -> Result<T, crate::net::stream::Refused>) -> Option<Result<T, Error>> {
+    let streamed = fd::with(fd, |o| {
+        (o.tag == fd::STREAM).then(|| f(o.handle).map_err(Error::Stream))
+    });
+    streamed.ok().flatten()
+}
+
 #[no_mangle]
 unsafe extern "C" fn toyos_fs_read(fd: Fd, buf: *mut u8, len: usize) -> i64 {
     // SAFETY: the caller lends `len` writable bytes for the call, and only
-    // one of the two closures runs.
+    // one of the closures runs.
     let out = || unsafe { core::slice::from_raw_parts_mut(buf, len) };
+    let blocking = crate::net::stream::Wait::Blocking(None);
+    if let Some(n) = on_stream(fd, |h| crate::net::stream::read(h, out(), blocking)) {
+        return answer(n.map(|n| n as u64));
+    }
     let n = on_fd(fd, |h| syscall::read(h, out()), |dir, fid, generation| dir.read(fid, generation, out()));
     answer(n.map(|n| n as u64))
 }
@@ -278,6 +292,10 @@ unsafe extern "C" fn toyos_fs_read(fd: Fd, buf: *mut u8, len: usize) -> i64 {
 unsafe extern "C" fn toyos_fs_write(fd: Fd, buf: *const u8, len: usize) -> i64 {
     // SAFETY: the caller's.
     let buf = unsafe { bytes(buf, len) };
+    let blocking = crate::net::stream::Wait::Blocking(None);
+    if let Some(n) = on_stream(fd, |h| crate::net::stream::write(h, buf, blocking)) {
+        return answer(n.map(|n| n as u64));
+    }
     let n = on_fd(fd, |h| syscall::write(h, buf), |dir, fid, generation| dir.write(fid, generation, buf).map(|w| w.len));
     answer(n.map(|n| n as u64))
 }

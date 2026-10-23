@@ -47,6 +47,7 @@ pub(crate) const EADDRINUSE: i32 = 98;
 pub(crate) const EPROTO: i32 = 71;
 pub(crate) const ECONNABORTED: i32 = 103;
 pub(crate) const ECONNRESET: i32 = 104;
+pub(crate) const EISCONN: i32 = 106;
 pub(crate) const ENOTCONN: i32 = 107;
 pub(crate) const ETIMEDOUT: i32 = 110;
 pub(crate) const ECONNREFUSED: i32 = 111;
@@ -95,6 +96,22 @@ pub(crate) fn of_files(e: toyos::files::Error) -> i32 {
         Error::NotUtf8 => EILSEQ,
         Error::Loop => ELOOP,
         Error::CrossesServers => EXDEV,
+        Error::Stream(refused) => of_stream(refused),
+    }
+}
+
+/// A stream's refusal in POSIX's word: `send`'s, `recv`'s, and `read`'s and
+/// `write`'s of a stream's descriptor.
+pub(crate) fn of_stream(refused: toyos::net::stream::Refused) -> i32 {
+    use toyos::net::stream::Refused;
+    match refused {
+        Refused::NotThisProcess(_) => EBADF,
+        Refused::WouldBlock => EAGAIN,
+        Refused::TimedOut | Refused::ConnectionTimedOut => ETIMEDOUT,
+        Refused::Reset => ECONNRESET,
+        Refused::Unreachable => EHOSTUNREACH,
+        Refused::Aborted => ECONNABORTED,
+        Refused::Shut => EPIPE,
     }
 }
 

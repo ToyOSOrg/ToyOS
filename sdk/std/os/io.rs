@@ -112,8 +112,9 @@ impl From<OwnedFd> for crate::fs::File {
 }
 
 /// A stream's descriptor taken back: one whose stream this process holds an
-/// end of shares it, and any other panics with `toyos::net`'s refusal, a
-/// stream belonging to the process that connected or accepted it.
+/// end of shares it, and any other panics with `toyos::net`'s refusal. A
+/// process holds an end by its connect, its accept, or a spawn that gave it a
+/// holder.
 #[stable(feature = "toyos_ext", since = "1.0.0")]
 impl FromRawFd for crate::net::TcpStream {
     #[inline]

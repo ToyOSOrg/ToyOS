@@ -58,8 +58,8 @@ The design and its roast are PR #863's body.
   region whose two rings are [tcp]'s buffers and the connection it was opened
   on, which then carries only doorbells and the hang-up; std, libc, mio and
   socket2 reach it through `toyos::net::stream`, and `SYS_CONNECTION_JOIN` is
-  gone. A stream's handle cannot move to another process
-  (`issues/a-stream-cannot-move-between-processes.md`). A sent byte is copied
+  gone. A stream is shared with a child as a holder of its own; other
+  sockets are not yet (`issues/only-a-connected-stream-is-shared-with-a-child.md`). A sent byte is copied
   twice by netstack, out of the lent send ring into a scratch buffer and from
   it into the frame, since the frame builder takes one slice; a builder that
   copies each span of the ring into the frame itself would remove the first.

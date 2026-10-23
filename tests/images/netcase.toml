@@ -33,7 +33,10 @@ serves = ["soundserver", "volume", "sound-output"]
 devices = ["pci:04:01:00/1af4:1059"]
 syscap = ["rt"]
 
+# A job reaches netstack through test-runner's namespace: `stream_exported_to_a_child`
+# connects out through it.
 [programs.test-runner]
+receives = ["netstack"]
 
 # The block service: every disk a driver offers on `disk`, listed and opened
 # for the clients `block` grants, each session handed to its disk's driver.
