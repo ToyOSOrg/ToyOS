@@ -110,15 +110,11 @@ impl WatchFlags {
     pub const READABLE: Self = Self(toyos_abi::inbox::READABLE);
     pub const WRITABLE: Self = Self(toyos_abi::inbox::WRITABLE);
     pub const OTHER_END_GONE: Self = Self(toyos_abi::inbox::OTHER_END_GONE);
-    /// Every bit `toyos_abi::inbox` defines for `Submission::op_flags`;
-    /// hand-copied and unchecked, for the reason `syscall/vm.rs`'s
-    /// `MMAP_PROT_KNOWN` gives for all four of these masks.
-    const KNOWN: u32 = Self::READABLE.0 | Self::WRITABLE.0 | Self::OTHER_END_GONE.0;
-
-    /// A bit outside [`Self::KNOWN`] is an interest this kernel would register
-    /// for neither direction, so the whole watch is refused rather than served.
+    /// A bit outside `WATCH_FLAGS_KNOWN` is an interest this kernel would
+    /// register for neither direction, so the whole watch is refused rather
+    /// than served.
     fn from_raw(raw: u32) -> Result<Self, SyscallError> {
-        if raw & !Self::KNOWN != 0 {
+        if raw & !toyos_abi::inbox::WATCH_FLAGS_KNOWN != 0 {
             return Err(SyscallError::InvalidArgument);
         }
         Ok(Self(raw))

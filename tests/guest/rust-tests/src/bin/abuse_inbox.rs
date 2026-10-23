@@ -12,7 +12,7 @@ use core::sync::atomic::Ordering;
 use toyos::AsHandle;
 use toyos_abi::inbox::{
     Completion, RingHeader, Submission, COMPLETION_RING_OFF, OP_NOP, OP_WATCH, READABLE,
-    SUBMISSIONS_OFF, SUBMISSION_RING_OFF, WRITABLE,
+    SUBMISSIONS_OFF, SUBMISSION_RING_OFF, WATCH_FLAGS_KNOWN, WRITABLE,
 };
 use toyos_abi::syscall::{self, SyscallError};
 
@@ -102,12 +102,12 @@ fn one_submission(op: u8, flags: u8, op_flags: u32, handle: toyos_abi::RawHandle
 }
 
 /// Two words of a submission the kernel used to keep whole and answer in part:
-/// an `op_flags` interest outside `READABLE|WRITABLE` was registered for neither
+/// an `op_flags` interest outside `WATCH_FLAGS_KNOWN` was registered for neither
 /// direction, and `Submission::flags` is read by nothing at all. Each is paired
 /// with the same submission without the bit, so the refusal is the bit.
 fn a_submission_word_outside_what_the_abi_defines_is_refused() {
-    const UNDEFINED_INTEREST: u32 = 2;
-    const _: () = assert!(UNDEFINED_INTEREST & (READABLE | WRITABLE) == 0);
+    // The lowest bit the ABI does not define.
+    const UNDEFINED_INTEREST: u32 = 1 << WATCH_FLAGS_KNOWN.trailing_ones();
     let invalid = -(SyscallError::InvalidArgument as i32);
 
     let (read, write) = toyos::pipe_pair().expect("a pipe of our own");

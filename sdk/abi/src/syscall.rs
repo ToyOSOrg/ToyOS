@@ -310,6 +310,9 @@ pub const SYSCALL_PROFILE_OTHER: usize = SYSCALL_PROFILE_BINS - 1;
 const _: () = assert!(SYS_PROCESS_QUIT < SYSCALL_PROFILE_OTHER as u64);
 
 pub const WNOHANG: u64 = 1;
+/// Every bit `SYS_PROCESS_WAIT`'s flag word defines; a wait carrying another
+/// is refused `InvalidArgument`.
+pub const PROCESS_WAIT_FLAGS_KNOWN: u64 = WNOHANG;
 
 crate::user_safe! {
     /// Arguments for the `SYS_SPAWN` syscall, passed as a single pointer.
@@ -657,6 +660,10 @@ impl OpenFlags {
     /// there, a link or a directory included, decided in the one call that
     /// creates it.
     pub const EXCLUSIVE: Self = Self(32);
+    /// Every bit defined above. An open carrying another is refused
+    /// `InvalidArgument` before its path is resolved.
+    pub const KNOWN: Self =
+        Self(Self::READ.0 | Self::WRITE.0 | Self::CREATE.0 | Self::TRUNCATE.0 | Self::APPEND.0 | Self::EXCLUSIVE.0);
 
     pub const fn contains(self, flag: Self) -> bool { self.0 & flag.0 != 0 }
 }
@@ -684,6 +691,8 @@ impl MmapProt {
     pub const NONE: Self = Self(0);
     pub const READ: Self = Self(1);
     pub const WRITE: Self = Self(2);
+    /// Every bit defined above; [`mmap`] refuses another `InvalidArgument`.
+    pub const KNOWN: Self = Self(Self::READ.0 | Self::WRITE.0);
 
     pub const fn contains(self, flag: Self) -> bool { self.0 & flag.0 != 0 }
 }
@@ -701,6 +710,8 @@ impl MmapFlags {
     pub const ANONYMOUS: Self = Self(1);
     pub const PRIVATE: Self = Self(2);
     pub const FIXED: Self = Self(4);
+    /// Every bit defined above; [`mmap`] refuses another `InvalidArgument`.
+    pub const KNOWN: Self = Self(Self::ANONYMOUS.0 | Self::PRIVATE.0 | Self::FIXED.0);
 
     pub const fn contains(self, flag: Self) -> bool { self.0 & flag.0 != 0 }
 }

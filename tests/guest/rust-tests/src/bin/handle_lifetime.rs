@@ -78,13 +78,8 @@ fn test() {
 /// kernel has no name for, so the open is refused before the path is resolved.
 /// The differential is the bit: the same open without it is the handle below.
 fn an_undefined_open_flag_bit_is_refused() {
-    const UNDEFINED: u64 = 32;
-    const KNOWN: u64 = OpenFlags::READ.0
-        | OpenFlags::WRITE.0
-        | OpenFlags::CREATE.0
-        | OpenFlags::TRUNCATE.0
-        | OpenFlags::APPEND.0;
-    const _: () = assert!(UNDEFINED & KNOWN == 0);
+    // The lowest bit the ABI does not define.
+    const UNDEFINED: u64 = 1 << OpenFlags::KNOWN.0.trailing_ones();
 
     let asked = OpenFlags(OpenFlags::WRITE.0 | OpenFlags::CREATE.0 | OpenFlags::TRUNCATE.0);
     assert_eq!(
