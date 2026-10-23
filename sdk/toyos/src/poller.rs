@@ -47,7 +47,7 @@ impl Rings {
     ///
     /// One `read_volatile` of the whole struct rather than a `&RingLayout`.
     /// The kernel writes this before the page is mapped and never again
-    /// (`SharedMemObject::phys_before_mapping` is what enforces the order), so
+    /// (`kernel::inbox::create` writes it before it maps the rings), so
     /// there is no race to lose here — but a rule with an exception "for the
     /// field nobody rewrites" is a rule that has to be re-derived every time
     /// somebody adds a field.

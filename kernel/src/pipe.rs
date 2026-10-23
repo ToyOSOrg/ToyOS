@@ -12,7 +12,6 @@ use crate::watch::Watch;
 use crate::id_map::{IdKey, IdMap};
 use crate::sync::Lock;
 use crate::user_ptr::{UserBytes, UserBytesMut};
-use crate::DirectMap;
 
 /// Raw pipe identifier; carries no refcount, not exposed outside the kernel.
 
@@ -106,10 +105,10 @@ const _: () = assert!(
     "a whole pipe write must fit the ring",
 );
 
-/// A pipe's ring page and the cursors over it — cursors stay in kernel memory
-/// because `SYS_PIPE_MAP` maps `page` writable, so anything read back from the page is user-chosen.
+/// A pipe's ring page and the cursors over it, in kernel memory.
 struct Backing {
-    page: pmm::PhysPage,
+    /// Owns the page `ring` addresses.
+    _page: pmm::PhysPage,
     ring: Ring,
 }
 
@@ -159,7 +158,7 @@ impl Pipe {
             let page = pmm::alloc_page()?;
             // SAFETY: a fresh 2 MiB page this `Pipe` owns for as long as the `Ring` addresses it.
             let ring = unsafe { Ring::new(page.direct_map().as_mut_ptr(), PIPE_SIZE) };
-            self.backing = Some(Backing { page, ring });
+            self.backing = Some(Backing { _page: page, ring });
             self.publish_ends();
         }
         self.backing.as_mut()
@@ -214,13 +213,6 @@ pub fn create() -> (PipeReader, PipeWriter) {
         let writer = PipeWriter::acquire(pipe);
         (reader, writer)
     })
-}
-
-/// The pipe's ring page, allocating it if this is its first use.
-///
-/// `None` when the id names no pipe or its page cannot be allocated — the caller holds a descriptor, so this is physical memory exhaustion.
-pub fn map_page(pipe_id: PipeId) -> Option<DirectMap> {
-    with_pipes_mut(|pipes| Some(pipes.get_mut(pipe_id)?.back()?.page.direct_map()))
 }
 
 pub fn try_read(pipe_id: PipeId, buf: &mut UserBytesMut) -> Option<usize> {

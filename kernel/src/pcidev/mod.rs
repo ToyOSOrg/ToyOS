@@ -131,8 +131,8 @@ use crate::device::{Claim, ClaimError};
 use crate::drivers::pci::{arm_claimed_msi, arm_claimed_msix, mask_claimed_msix, NoCapability, NoEntry, PciDevice};
 use crate::iommu::{IommuError, Limit, OwnSpace, Refused, Remapped};
 use crate::mm::policy::CachePolicy;
-use crate::mm::{align_2m, DirectMap, PAGE_2M};
-use crate::object::shm::{Region, SharedMemObject};
+use crate::mm::{align_2m, PAGE_2M};
+use crate::object::shm::SharedMemObject;
 use crate::sync::Lock;
 use crate::inbox::PollEntry;
 use crate::watch::IrqWatch;
@@ -1354,14 +1354,12 @@ pub fn bar_object(binding: &Binding, index: u64) -> Result<Arc<SharedMemObject>,
         if index >= BARS || bound.bar_bytes[index] == 0 {
             return Err(SyscallError::InvalidArgument);
         }
-        Ok(SharedMemObject::over(Region {
-            phys: DirectMap::from_phys(bound.bar_at[index]),
-            size: bound.bar_bytes[index].next_multiple_of(pages::PAGE),
-            // Registers, and the memory type is not firmware's to decide.
-            cache: CachePolicy::Uncacheable,
-            // The kernel owns no pages here: this is a device's aperture.
-            memory: crate::object::shm::Memory::Foreign,
-        }))
+        // Registers, and the memory type is not firmware's to decide.
+        Ok(SharedMemObject::aperture(
+            bound.bar_at[index],
+            bound.bar_bytes[index].next_multiple_of(pages::PAGE),
+            CachePolicy::Uncacheable,
+        ))
     })
 }
 
@@ -1386,8 +1384,8 @@ pub fn dma_alloc(
         if held + span > MAX_GRANT_TOTAL {
             return Err(SyscallError::ResourceExhausted);
         }
-        let memory = SharedMemObject::create(span)?;
-        let phys = memory.phys().phys();
+        let memory = SharedMemObject::create_run(span)?;
+        let (phys, _) = memory.run().expect("pcidev: a grant is one run");
         // The pages are the allocator's own and 2 MiB, so a domain that cannot
         // take them is a kernel bug rather than the device's answer.
         let refused = |why| -> ! { panic!("pcidev: {function} could not map a grant: {why}") };
@@ -1475,7 +1473,7 @@ pub fn dma_undo(binding: &Binding, memory: &Arc<SharedMemObject>) {
 /// region's pages, in [`Space::lend`] where no grant and no residue is, so the
 /// function reaches this memory, the claim's own grants and what this holder
 /// lent it before, and nothing else. Only ordinary memory this kernel
-/// allocated qualifies ([`SharedMemObject::ram`]): a BAR window mapped here
+/// allocated in one run qualifies ([`SharedMemObject::run`]): a BAR window mapped here
 /// would be one device aimed at another's registers, and firmware's
 /// framebuffer is not the kernel's to lend.
 ///
@@ -1485,7 +1483,7 @@ pub fn dma_map(binding: &Binding, region: &Arc<SharedMemObject>) -> Result<(u64,
     let function = binding.function();
     with_bound(binding, |bound| {
         bound.limit.ok_or(SyscallError::InvalidArgument)?;
-        let (phys, span) = region.ram().ok_or(SyscallError::InvalidArgument)?;
+        let (phys, span) = region.run().ok_or(SyscallError::InvalidArgument)?;
         // One region, one address: a second mapping of it would be two grants
         // naming one set of pages, and taking either back would leave the
         // function aimed at what the other still says is lent.

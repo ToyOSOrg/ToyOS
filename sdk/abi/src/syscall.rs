@@ -101,7 +101,6 @@ pub const SYS_WRITE_NONBLOCK: u64 = 67;
 pub const SYS_EXIT: u64 = 72;
 pub const SYS_GET_ENV: u64 = 73;
 pub const SYS_CLOCK_EPOCH: u64 = 75;
-pub const SYS_PIPE_MAP: u64 = 77;
 pub const SYS_SYMLINK: u64 = 81;
 pub const SYS_READLINK: u64 = 82;
 /// Accept a queued connection from an [`Acceptor`] handle.
@@ -166,15 +165,22 @@ pub const SYS_NAMESPACE_OPEN: u64 = 102;
 /// Take the batch of handles at the reader's place in the connection's bytes.
 /// See [`handle_recv`].
 pub const SYS_HANDLE_RECV: u64 = 104;
-/// Make a shared-memory region, sized up to whole [`SHM_PAGE`]s.
+/// Make a shared-memory region, sized up to whole [`PAGE_SIZE`]s.
 /// See [`shm_create`].
 pub const SYS_SHM_CREATE: u64 = 105;
-/// Map a region into the caller. Idempotent: a second call answers the first
-/// call's address. See [`shm_map`].
+/// Map a region into the caller. See [`shm_map`].
 pub const SYS_SHM_MAP: u64 = 106;
 
-/// What [`SYS_SHM_CREATE`] rounds a length up to a whole number of.
-pub const SHM_PAGE: usize = 2 << 20;
+/// The page every mapping is made of, and what [`SYS_SHM_CREATE`] rounds a
+/// length up to a whole number of.
+pub const PAGE_SIZE: usize = 4096;
+
+/// [`shm_create_flags`]: memory a device can be lent, in whole
+/// [`SHM_DEVICE_PAGE`]s of one physical run, as a device's domain maps it.
+pub const SHM_DEVICE: u64 = 1;
+
+/// What a [`SHM_DEVICE`] region is a whole number of.
+pub const SHM_DEVICE_PAGE: u64 = 2 * 1024 * 1024;
 
 /// Wait for the process a handle names and take how it ended, an [`End`]'s
 /// word, gated by [`Rights::WAIT`]. See [`process_wait`].
@@ -693,11 +699,10 @@ impl core::ops::BitOrAssign for OpenFlags {
 
 /// Memory protection flags for [`mmap`].
 ///
-/// The kernel maps 2 MiB pages and has no `mprotect`, so what a mapping is
-/// created with is what it stays. `NONE` reserves the address range and maps
-/// nothing at all: any access to it faults, which is the guard page a libc
-/// asks for. Anything without `WRITE` is mapped read-only, and a store to it
-/// is a protection violation that kills the process.
+/// What a mapping is created with is what it stays. `NONE` reserves the
+/// address range and commits nothing: any access to it faults, which is the
+/// guard page a libc asks for. Anything without `WRITE` is mapped read-only,
+/// and a store to it is a protection violation that kills the process.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct MmapProt(pub u64);
 
@@ -2009,20 +2014,29 @@ pub fn handle_recv(conn: RawHandle, out: &mut [RawHandle]) -> Result<usize, Sysc
     .map(|n| n as usize)
 }
 
-/// Make a shared-memory region and answer a handle to it.
+/// Make a shared-memory region of zeroed memory and answer a handle to it.
 ///
-/// Fallible: a size the kernel cannot express in whole 2 MiB pages is
+/// Fallible: a size the kernel cannot express in whole pages is
 /// `InvalidArgument` and memory it does not have is `ResourceExhausted`. A
 /// daemon reaches both through a client's request, so neither may be an
 /// assertion here.
 pub fn shm_create(size: usize) -> Result<RawHandle, SyscallError> {
-    check(syscall(SYS_SHM_CREATE, size as u64, 0, 0, 0)).map(|v| RawHandle(v as u32))
+    shm_create_flags(size, 0)
 }
 
-/// Map the region `shm` names into this process. Needs [`Rights::MAP`].
+/// [`shm_create`], with [`SHM_DEVICE`] for memory a device is lent.
+pub fn shm_create_flags(size: usize, flags: u64) -> Result<RawHandle, SyscallError> {
+    check(syscall(SYS_SHM_CREATE, size as u64, flags, 0, 0)).map(|v| RawHandle(v as u32))
+}
+
+/// Map the region `shm` names into this process, readable and writable, and
+/// answer where. Needs [`Rights::MAP`].
 ///
-/// Idempotent: a second call answers the first call's address. [`SyscallError::Gone`]
-/// when the region's last handle was closed under the call: nothing is mapped.
+/// Each call is a mapping of its own, which holds the region until it is taken
+/// away ([`munmap`]) or the process ends: closing a handle takes no mapping
+/// away, but for a device's window, which goes from every process with its
+/// last handle. [`SyscallError::Gone`] for such a window whose last handle was
+/// closed under the call: nothing is mapped.
 ///
 /// [`Rights::MAP`]: crate::handle::Rights::MAP
 ///
@@ -2332,39 +2346,18 @@ pub fn cpu_count() -> u32 {
     syscall(SYS_CPU_COUNT, 0, 0, 0, 0) as u32
 }
 
-/// Regions one address space holds — every mapping, ELF segment, stack, TLS
-/// block and library image; a placement past it is `ResourceExhausted`.
-pub const MAX_REGIONS: usize = 32_768;
-
-/// Map anonymous memory. Returns pointer on success, null on failure.
+/// Map private memory, zeroed and populated a page at a time as it is
+/// touched. Returns its address, or null on failure.
 ///
-/// If `addr` is null, the kernel chooses the address — and so it does for
-/// `MmapFlags::FIXED` with a null `addr`, which asks for a placement and names
-/// none. With `FIXED` and a non-null `addr` the mapping is placed at exactly
-/// that address, which must be 2 MiB-aligned and must name a range lying whole
-/// inside the region the kernel's own placement search allocates from.
-///
-/// **A placed mapping answers for the range it names**, because it takes the
-/// question `find_gap` answers by construction for every other mapping:
-///
-/// - Over free space it maps, and the call answers `addr`.
-/// - Over exactly one whole mapping this process's own `mmap` made — the same
-///   address and the same `size`, to the byte — it replaces it, and the address
-///   keeps its meaning while changing what it names. The old range leaves the
-///   address space and the process's mapping list before the new one enters
-///   either, its pages go back to the allocator, and the shootdown a sibling
-///   thread's stale translation owes is done before the call returns.
-/// - Anything else is refused with `InvalidArgument` having created, replaced
-///   or unmapped nothing: part of a region, several regions, a region that
-///   merely starts at `addr`, and any whole range this process's `mmap` did
-///   not make — an ELF segment, a library image, a stack, a shared window.
-///
-/// POSIX unmaps whatever is in the way and says nothing. This address crossed
-/// the trust boundary like any other syscall argument, and a kernel that
-/// silently took a range it was not offered would be taking it from the loader.
+/// `size` is rounded up to whole [`PAGE_SIZE`]s. If `addr` is null, or
+/// `MmapFlags::FIXED` is not given, the kernel chooses the address. With
+/// `FIXED` and a non-null `addr` on a page, the mapping is placed at exactly
+/// that address and replaces whatever those pages held, as POSIX's
+/// `MAP_FIXED` does.
 ///
 /// # Safety
-/// Caller is responsible for managing the returned memory region.
+/// Caller is responsible for managing the returned memory region, and for
+/// anything a `FIXED` mapping replaces.
 pub unsafe fn mmap(addr: *mut u8, size: usize, prot: MmapProt, flags: MmapFlags) -> *mut u8 {
     let result = syscall(SYS_MMAP, addr as u64, size as u64, prot.0, flags.0);
     if SyscallError::from_u64(result).is_some() { core::ptr::null_mut() } else {
@@ -2372,15 +2365,18 @@ pub unsafe fn mmap(addr: *mut u8, size: usize, prot: MmapProt, flags: MmapFlags)
     }
 }
 
-/// Unmap the whole mapping `mmap` returned at `addr`.
-///
-/// `size` is the `size` that `mmap` was passed, to the byte. No mapping
-/// starting at `addr` is `NotFound`; any other `size` — a prefix, more than
-/// the mapping, zero, a length that only rounds to the same pages — is
-/// `InvalidArgument` and unmaps nothing. A mapping has no part to give back.
+/// Ranges one address space holds, each a run of pages with one kind and
+/// protection: a call that could pass it is `ResourceExhausted`.
+pub const MAX_RANGES: usize = 32_768;
+
+/// Take away every page of `[addr, addr + size)`, as POSIX's `munmap` does:
+/// any run of whole pages, across mappings and the holes between them. `addr`
+/// off a page, or a `size` of zero, is `InvalidArgument` and takes nothing;
+/// so does a space holding nearly [`MAX_RANGES`], `ResourceExhausted`, since
+/// cutting a range in two adds one.
 ///
 /// # Safety
-/// Nothing reaches the mapping at `addr` after this answers `Ok`.
+/// Nothing reaches those pages after this answers `Ok`.
 pub unsafe fn munmap(addr: *mut u8, size: usize) -> Result<(), SyscallError> {
     check_unit(syscall(SYS_MUNMAP, addr as u64, size as u64, 0, 0))
 }
@@ -2398,14 +2394,6 @@ pub fn write_nonblock(handle: RawHandle, buf: &[u8]) -> Result<usize, SyscallErr
     check(syscall(SYS_WRITE_NONBLOCK, handle.0 as u64, buf.as_ptr() as u64, buf.len() as u64, 0)).map(|n| n as usize)
 }
 
-/// Map a pipe's shared-memory ring buffer into this process's address space.
-/// Returns a pointer to the `RingHeader` at the start of the mapped region.
-///
-/// The mapping is writable, and the header is a publication: writing it tells
-/// the kernel nothing. Reads and writes still go through `SYS_READ`/`SYS_WRITE`.
-pub fn pipe_map(handle: RawHandle) -> Result<*mut u8, SyscallError> {
-    check(syscall(SYS_PIPE_MAP, handle.0 as u64, 0, 0, 0)).map(|v| v as *mut u8)
-}
 
 /// Map one memory BAR of a claimed PCI function, as an object `SYS_SHM_MAP`
 /// maps read/write and uncacheable.
@@ -2633,21 +2621,22 @@ crate::user_safe! {
         pub cpu_ns: u64,
         pub syscall_total: u64,
         pub syscall_total_ns: u64,
-        pub fault_demand_count: u32,
-        pub fault_zero_count: u32,
+        /// Pages a fault populated, and the time faults took.
+        pub faults: u64,
         pub fault_ns: u64,
-        pub io_read_ops: u32,
         /// The process's own pid. Not authority — no syscall takes a pid — but it
         /// is the name a diagnostic prints, and this is where a holder of a handle
         /// reads it.
         pub pid: u32,
-        pub io_read_bytes: u64,
+        pub _pad: u32,
         pub blocked_io_ns: u64,
         pub blocked_futex_ns: u64,
         pub blocked_pipe_ns: u64,
         pub blocked_ipc_ns: u64,
         pub blocked_other_ns: u64,
         pub runqueue_wait_ns: u64,
+        /// The most private memory it held at once, in bytes, and the ranges
+        /// it has made.
         pub peak_memory: u64,
         pub alloc_count: u64,
     }

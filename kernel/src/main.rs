@@ -81,7 +81,6 @@ mod device;
 mod pcidev;
 mod isa;
 mod user_ptr;
-mod vma;
 mod syscall;
 
 /// Nested generic forces a demangled symbol wider than the console grid.

@@ -3,9 +3,8 @@
 
 use crate::device::Screen;
 use crate::mm::policy::{CachePolicy, MmioPolicy};
-use crate::mm::{align_2m_checked, DirectMap};
+use crate::mm::align_2m_checked;
 use crate::log;
-use crate::object::shm::Region;
 
 /// `addr` is the physical address of the framebuffer supplied by firmware.
 /// `None` is a scanout no process can be given: one is handed over in 2 MiB
@@ -38,21 +37,13 @@ pub fn init(
     // must match the cache policy used for the client mapping below.
     crate::mm::paging::map_mmio(addr, aligned_size, MmioPolicy::WriteCombining);
 
-    let scanout = Region {
-        phys: DirectMap::from_phys(addr),
-        size: aligned_size,
-        cache: CachePolicy::WriteCombining,
-        memory: crate::object::shm::Memory::Foreign,
-    };
+    let scanout = crate::device::Scanout { phys: addr, size: aligned_size };
     log!("GOP: {}x{} stride={} format={} at {:#x}",
         width, height, stride, pixel_format, addr);
 
     // Reads the cache policy actually installed, not the one requested.
     let memory_type = crate::mm::paging::scanout_memory_type(addr, aligned_size);
-    let installed = crate::mm::paging::kernel()
-        .lock()
-        .direct_map_policy(addr)
-        .expect("GOP: the scanout is mapped");
+    let installed = crate::mm::paging::direct_map_policy(addr).expect("GOP: the scanout is mapped");
     assert!(
         installed == CachePolicy::WriteCombining,
         "GOP: the scanout is mapped {installed:?}"

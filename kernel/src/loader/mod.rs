@@ -1,7 +1,8 @@
 //! Building a process out of an ELF file.
 //!
 //! The kernel reads an executable's program headers, its `PT_TLS` template
-//! and its build-id note, demand-pages its `PT_LOAD`s and jumps to its entry;
+//! and its build-id note, copies its `PT_LOAD`s into memory of the new
+//! process's own and jumps to its entry;
 //! it reads no dynamic section, applies no relocation and loads no library at
 //! spawn. The program relocates itself (`toyos::relocate`).
 //!
@@ -29,12 +30,10 @@ use alloc::vec::Vec;
 
 use crate::elf;
 use crate::object::{ops, HandleTable, KObjectRef};
-use crate::mm::policy::{CachePolicy, Prot};
 use crate::mm::{PAGE_2M, PAGE_BYTES};
 use crate::process::{
-    Admission, ElfInfo, Endowments, OwnedAlloc, PageAlloc, PageFaultTrace, PageTables, Parent,
-    Pid, ProcessAccounting, ProcessData, ProcessEntry, ThreadData, ThreadEntry, UserImage,
-    UserStack, PROCESS_TABLE,
+    Admission, ElfInfo, Endowments, OwnedAlloc, Parent, Pid, ProcessAccounting, ProcessData,
+    ProcessEntry, ThreadData, ThreadEntry, UserImage, PROCESS_TABLE,
 };
 use crate::sync::Lock;
 use crate::{scheduler, vfs, UserAddr};
@@ -43,10 +42,11 @@ use toyos_abi::syscall::SyscallError;
 use toyos_elf::{Layout, TlsSegment};
 use toyos_symbols::frame::BuildId;
 
-const USER_STACK_SIZE: usize = 4 * PAGE_2M as usize; // 8 MB
+/// The main thread's stack: committed whole, populated as it is touched.
+const USER_STACK_SIZE: usize = 8 * 1024 * 1024;
 
-/// User virtual address space starts at 1 TB, above any direct-mapped physical RAM.
-const USER_VM_BASE: u64 = 0x100_0000_0000;
+/// The reserved range below the main stack.
+const STACK_GUARD: u64 = 1024 * 1024;
 
 /// Read a byte range from a file through the page cache.
 ///
@@ -84,72 +84,82 @@ pub(crate) fn read_file_range(
 }
 
 
-/// Insert one demand-paged region per `PT_LOAD` segment.
+/// Commit one range of private memory per `PT_LOAD` segment at `image_start`
+/// plus its offset, its file bytes copied in and the rest of it zero.
 ///
-/// `Err` when two segments would share a page: page-rounded regions at one
-/// address would trip `insert_region`'s assert. Checked before the first
-/// insert, so a refusal leaves the address space untouched.
-fn insert_elf_regions(
-    addr_space: &mut crate::mm::paging::AddressSpace,
+/// `Err` when two segments would share a page, which their ranges cannot, or
+/// when the file's bytes cannot be read: checked before the first range, and
+/// a refusal after it leaves ranges in a space nothing runs in yet.
+fn load_segments(
+    space: &mut crate::mm::space::AddressSpace,
     layout: &Layout,
     image_start: UserAddr,
-    backing: &Arc<dyn crate::file_backing::FileBacking>,
+    backing: &dyn crate::file_backing::FileBacking,
 ) -> Result<(), SyscallError> {
-    use crate::vma::{Region, RegionKind};
+    use crate::mm::space::At;
 
     if let Some((a, b)) = layout.overlapping_load_pages(4096) {
         log!("spawn: PT_LOAD segments {} and {} contend for a page", a, b);
         return Err(SyscallError::InvalidArgument);
     }
-
+    let mut page = [0u8; PAGE_BYTES];
     for seg in layout.segments() {
         let (lo, hi) = seg.page_range(4096);
         let (seg_start, seg_end) = ((image_start + lo).raw(), (image_start + hi).raw());
-        // A zero-size region would sit in the map where `find_region` can't see past it.
         if seg_end == seg_start {
             continue;
         }
-        let prot = segment_prot(seg);
-
-        let file_block_start = seg.file_offset() / 4096;
-        let file_blocks_needed = (seg.filesz() + (seg.file_offset() % 4096)).div_ceil(4096);
-        let file_backed_end = seg_start + file_blocks_needed * 4096;
-
-        if file_blocks_needed > 0 {
-            addr_space.insert_region(
-                UserAddr::new(seg_start),
-                Region {
-                    size: file_backed_end.min(seg_end) - seg_start,
-                    kind: RegionKind::FileBacked {
-                        backing: Arc::clone(backing),
-                        file_offset: file_block_start * 4096,
-                        file_size: seg.filesz() + (seg.file_offset() % 4096),
-                        prot,
-                    },
-                },
-            );
-        }
-
-        if file_backed_end < seg_end {
-            let anon_start = file_backed_end.max(seg_start);
-            addr_space.insert_region(
-                UserAddr::new(anon_start),
-                Region {
-                    size: seg_end - anon_start,
-                    kind: RegionKind::Anonymous { prot },
-                },
-            );
+        space.reserve(seg_end - seg_start, At::Fixed(UserAddr::new(seg_start)), segment_prot(seg))?;
+        // The file's bytes from the segment's first page: the bytes of that
+        // page before the segment are the file's too, as a linker lays them.
+        let file_start = seg.file_offset() & !4095;
+        let file_bytes = seg.filesz() + seg.file_offset() % 4096;
+        let mut done = 0;
+        while done < file_bytes {
+            if backing.read_page(file_start + done, &mut page).is_err() {
+                log!("spawn: the file's byte {} would not read", file_start + done);
+                return Err(SyscallError::NotFound);
+            }
+            let valid = (file_bytes - done).min(4096) as usize;
+            space.fill(seg_start + done, &page[..valid]);
+            done += 4096;
         }
     }
     Ok(())
+}
+
+/// The bytes a program's stack starts with below `top`, and where its stack
+/// pointer starts: argc, the argv pointers and a null, 16-aligned, then the
+/// strings they point at.
+fn argv_block(top: u64, args: &[&str]) -> (u64, Vec<u8>) {
+    let strings: usize = args.iter().map(|a| a.len() + 1).sum();
+    let words = args.len() + 2;
+    let sp = (top - strings as u64 - words as u64 * 8) & !15;
+    let mut block = alloc::vec![0u8; (top - sp) as usize];
+    let mut word = |i: usize, value: u64| block[i * 8..i * 8 + 8].copy_from_slice(&value.to_ne_bytes());
+    word(0, args.len() as u64);
+    let mut at = top - strings as u64;
+    let mut pointers = Vec::with_capacity(args.len());
+    for arg in args {
+        pointers.push(at);
+        at += arg.len() as u64 + 1;
+    }
+    for (i, pointer) in pointers.iter().enumerate() {
+        word(1 + i, *pointer);
+    }
+    for (arg, pointer) in args.iter().zip(&pointers) {
+        let off = (pointer - sp) as usize;
+        block[off..off + arg.len()].copy_from_slice(arg.as_bytes());
+    }
+    (sp, block)
 }
 
 /// What one `PT_LOAD` segment's pages may be used for.
 ///
 /// `PF_W | PF_X` refuses the write, not the execution: taking `X` away would
 /// let a hostile ELF run as data instead.
-fn segment_prot(seg: &toyos_elf::Segment) -> crate::mm::policy::Prot {
-    use crate::mm::policy::Prot;
+fn segment_prot(seg: &toyos_elf::Segment) -> kernel::vm::Prot {
+    use kernel::vm::Prot;
     if seg.flags().executable() {
         Prot::ReadExec
     } else if seg.flags().writable() {
@@ -215,18 +225,6 @@ pub fn spawn<H>(
         }
     };
 
-    // The rebase base is the file's numbers, so `rebase_base` refuses a vaddr_min
-    // that underflows the subtraction or a span that leaves the user half.
-    let extent = layout.extent();
-    let Some(base) = toyos_userbound::rebase_base(USER_VM_BASE, extent.min(), layout.span())
-    else {
-        log!("spawn: {}: image at vaddr_min {:#x} spanning {:#x} cannot rebase to {:#x}",
-            path, extent.min(), layout.span(), USER_VM_BASE);
-        return Err(SyscallError::InvalidArgument.into());
-    };
-    // Where the image's first byte lands: every `ImageOffset` the file's
-    // numbers were parsed into is added to it, and its span fits above it.
-    let image_start = UserAddr::new(USER_VM_BASE);
     // The program reads the mapped table to relocate itself, and
     // `SYS_QUERY_MODULES` answers with it: an image without one has neither.
     let Some(phdrs) = layout.program_headers() else {
@@ -236,37 +234,44 @@ pub fn spawn<H>(
 
     let t1 = crate::clock::nanos_since_boot();
 
-    // ELF segments are demand-faulted; the address space starts with the clock page alone.
-    let Some(mut space) = crate::mm::paging::AddressSpace::new_user() else {
+    let Some(child_pt) = crate::mm::space::Space::new_user() else {
         log!("spawn: {}: no user PCID free — too many live address spaces", path);
         return Err(SyscallError::ResourceExhausted.into());
     };
-    crate::clock::map_page(&mut space);
-    let child_pt: PageTables = Arc::new(Lock::new(space));
-    insert_elf_regions(&mut child_pt.lock(), &layout, image_start, &backing)?;
-
-    // Mapped eagerly, not demand-paged: every process touches the stack immediately.
-    let stack_pages = match PageAlloc::new(USER_STACK_SIZE) {
-        Some(a) => a,
-        None => {
-            log!("spawn: {}: failed to allocate user stack ({} bytes)", path, USER_STACK_SIZE);
-            return Err(SyscallError::ResourceExhausted.into());
+    let (image_start, base, stack_base, sp) = {
+        use crate::mm::space::At;
+        use kernel::vm::Prot;
+        let mut space = child_pt.lock();
+        crate::clock::map_page(&mut space);
+        // The image's span is placed whole, so its segments keep the distances
+        // the file gave them; the holes between them stay reserved.
+        let extent = layout.extent();
+        let Some(span) = layout.span().checked_next_multiple_of(crate::mm::PAGE_SIZE).filter(|&s| s != 0) else {
+            log!("spawn: {}: an image spanning {:#x}", path, layout.span());
+            return Err(SyscallError::InvalidArgument.into());
+        };
+        let image_start = space.reserve(span, At::Anywhere(PAGE_2M), Prot::None)?;
+        // The rebase base is the file's numbers, so `rebase_base` refuses a
+        // vaddr_min that underflows the subtraction or a span that leaves the
+        // user half.
+        let Some(base) = toyos_userbound::rebase_base(image_start.raw(), extent.min(), layout.span()) else {
+            log!("spawn: {}: image at vaddr_min {:#x} spanning {:#x} cannot rebase to {image_start:#x}",
+                path, extent.min(), layout.span());
+            return Err(SyscallError::InvalidArgument.into());
+        };
+        load_segments(&mut space, &layout, image_start, backing.as_ref())?;
+        // Never executable, and a reserved guard below it, so running off the
+        // stack's bottom faults instead of writing what lies there.
+        let stack = space.reserve(STACK_GUARD + USER_STACK_SIZE as u64, At::ANYWHERE, Prot::None)?;
+        let stack_base = stack + STACK_GUARD;
+        space.reserve(USER_STACK_SIZE as u64, At::Fixed(stack_base), Prot::ReadWrite)?;
+        let (sp, block) = argv_block(stack_base.raw() + USER_STACK_SIZE as u64, argv);
+        if block.len() > USER_STACK_SIZE {
+            return Err(SyscallError::InvalidArgument.into());
         }
+        space.fill(sp, &block);
+        (image_start, base, stack_base, sp)
     };
-    let stack_vaddr = UserAddr::new(crate::vma::STACK_BASE);
-    // `USER_STACK_SIZE` is named once, at the `PageAlloc::new` above; argv writes bound against the actual allocation.
-    let user_stack = UserStack::new(stack_vaddr, stack_pages.window());
-    {
-        let mut pt = child_pt.lock();
-        // `Prot::ReadWrite`, never executable: a fixed-address W+X stack is the
-        // shape stack-smashing payloads target.
-        pt.map_range(stack_vaddr, stack_pages.phys(), USER_STACK_SIZE as u64,
-            Prot::ReadWrite, CachePolicy::Normal);
-        pt.insert_region(stack_vaddr, crate::vma::Region {
-            size: USER_STACK_SIZE as u64,
-            kind: crate::vma::RegionKind::Anonymous { prot: Prot::ReadWrite },
-        });
-    }
 
     let exe_tls_template = match layout.tls().and_then(TlsSegment::occupied) {
         Some(tls) => {
@@ -316,7 +321,6 @@ pub fn spawn<H>(
         return Err(SyscallError::InvalidArgument.into());
     };
     let image_end = (image_start + layout.span()).raw();
-    let sp = user_stack.write_argv(argv);
     let t_tls = crate::clock::nanos_since_boot();
 
     // What a crash record names a frame by. The build-id is read at each
@@ -364,13 +368,7 @@ pub fn spawn<H>(
             exe_phdrs: ((image_start + phdrs.image().start().get()).raw(), phdrs.count()),
             lib_paths: Vec::new(),
         },
-        mmap_regions: Vec::new(),
-        pipe_maps: Vec::new(),
-        demand_pages: Vec::new(),
-        fault_trace: PageFaultTrace::new(),
-        peak_memory: 0,
-        alloc_count: 0,
-        free_count: 0,
+        space: Arc::clone(&child_pt),
         exe_path: String::from(path),
         spawn_ns: crate::clock::nanos_since_boot(),
         accounting: ProcessAccounting::default(),
@@ -379,10 +377,9 @@ pub fn spawn<H>(
     }));
 
     let thread_data = Arc::new(Lock::new(ThreadData {
-        tls_pages: Some(tls_pages),
-        stack_pages: Some(stack_pages),
-        user_stack_base: user_stack.base(),
-        user_stack_size: user_stack.size(),
+        tls: Some(tls_pages),
+        user_stack_base: stack_base,
+        user_stack_size: USER_STACK_SIZE as u64,
         syscall_counts: [0; toyos_abi::syscall::SYSCALL_PROFILE_BINS],
         syscall_total: 0,
         syscall_total_ns: 0,

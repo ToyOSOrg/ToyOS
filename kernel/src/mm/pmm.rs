@@ -76,6 +76,36 @@ impl Drop for Frame {
 
 static FRAMES: Lock<Option<Frames<'static>>> = Lock::new(None);
 
+/// Give back `frames`, which leaves the space owned, under one hold of the
+/// allocator's lock.
+///
+/// # Safety
+/// Each is a frame [`Frame::into_raw`] gave up, that no leaf on any CPU maps
+/// any more and nothing else frees.
+pub unsafe fn free_raw(frames: &[u64]) {
+    let pins = pins();
+    let mut guard = FRAMES.lock();
+    let allocator = guard.as_mut().expect("pmm: a frame outlived no allocator");
+    for &phys in frames {
+        allocator.free_frame(phys, &pins);
+    }
+}
+
+/// Give back every frame of `frames` under one hold of the allocator's lock.
+pub fn free_all(frames: alloc::boxed::Box<[Frame]>) {
+    let mut frames = frames.into_vec();
+    {
+        let pins = pins();
+        let mut guard = FRAMES.lock();
+        let allocator = guard.as_mut().expect("pmm: a frame outlived no allocator");
+        for frame in frames.drain(..) {
+            allocator.free_frame(frame.into_raw(), &pins);
+        }
+    }
+    // The list goes back to the heap only once the allocator's lock is let
+    // go, since the heap may give a page back through it.
+    drop(frames);
+}
 /// The pin counters, published once by [`init`]: where they are, how many,
 /// and the physical address the first one counts for.
 static PINS: (AtomicPtr<AtomicU32>, AtomicUsize, AtomicU64) =
@@ -252,6 +282,11 @@ fn frame_span(phys: u64, len: usize) -> impl Iterator<Item = u64> + Clone {
 /// Taken from the allocator, not the firmware memory map, whose backing buffer is ordinary free RAM by the time anything asks.
 pub fn top() -> u64 {
     FRAMES.lock().as_ref().map_or(0, Frames::top)
+}
+
+/// Frames free now: an answer that may be stale by the time it is read.
+pub fn free_frames() -> u64 {
+    FRAMES.lock().as_ref().map_or(0, Frames::free_frames)
 }
 
 /// Return (total_bytes, used_bytes).

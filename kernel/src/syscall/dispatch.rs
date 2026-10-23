@@ -36,7 +36,7 @@ use super::io::{
 };
 use super::ipc::{
     sys_accept, sys_handle_recv, sys_inbox_setup, sys_message_send,
-    sys_inbox_submit, sys_namespace_build, sys_namespace_open, sys_pipe, sys_pipe_map,
+    sys_inbox_submit, sys_namespace_build, sys_namespace_open, sys_pipe,
     sys_port_badge, sys_port_create, sys_port_mint, sys_shm_create, sys_shm_map,
 };
 use super::machine::{
@@ -379,7 +379,6 @@ pub(crate) fn syscall_dispatch(num: u64, a1: u64, a2: u64, a3: u64, a4: u64) -> 
                 copy_len as u64
             }
         }
-        SYS_PIPE_MAP => sys_pipe_map(RawHandle(a1 as u32)),
         // What a claimed PCI function's driver is built out of. Each is
         // gated by the claim handle alone: nothing here takes a bus/device/
         // function, so a process cannot name a device it was not given.
@@ -472,7 +471,7 @@ pub(crate) fn syscall_dispatch(num: u64, a1: u64, a2: u64, a3: u64, a4: u64) -> 
             };
             sys_handle_recv(RawHandle(a1 as u32), &mut out, a3 as usize)
         }
-        SYS_SHM_CREATE => sys_shm_create(a1),
+        SYS_SHM_CREATE => sys_shm_create(a1, a2),
         SYS_SHM_MAP => sys_shm_map(RawHandle(a1 as u32)),
         SYS_PORT_CREATE => sys_port_create(),
         SYS_PORT_MINT => {

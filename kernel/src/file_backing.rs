@@ -62,18 +62,8 @@ impl FileBacking for SharedImage {
             return Ok(());
         }
         let valid = BLOCK_SIZE.min((self.size - file_offset) as usize);
-        // SAFETY: `over` held `size` inside the object, which is one physically
-        // contiguous run of ordinary memory (`is_ordinary`: pages the kernel
-        // allocated, or a boot image it keeps for the machine's life) alive
-        // while `object` lives, so `file_offset + valid <= size` bytes from its
-        // direct-map address are mapped; `buf` is the reader's own and never
-        // the object.
-        // No reference is formed over the object's bytes, which its holders
-        // may be writing: this is the one fetch of each.
-        unsafe {
-            let from = self.object.phys().as_ptr::<u8>().add(file_offset as usize);
-            core::ptr::copy_nonoverlapping(from, buf.as_mut_ptr(), valid);
-        }
+        // The one fetch of each byte: its holders may be writing it.
+        self.object.read(file_offset, &mut buf[..valid]);
         Ok(())
     }
 

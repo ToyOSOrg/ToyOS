@@ -2,12 +2,10 @@
 //!
 //! Layout: a `RingHeader` followed by `capacity` bytes of data.
 //!
-//! The region is one page the kernel allocates and `SYS_PIPE_MAP` maps into a
-//! process **writable**, so the split here is a trust boundary, not a
-//! convenience: `Ring` is the kernel-side owner and holds every value the
-//! copies are bounded by, in kernel memory; `RingHeader` holds only what
-//! userland reads. Nothing in the header is read back by the kernel — same
-//! rule `kernel/src/inbox.rs` states for its own tail.
+//! The region is memory the kernel allocates, which no process maps. `Ring` is
+//! the kernel-side owner and holds every value the copies are bounded by;
+//! `RingHeader` holds only flags nothing reads back, left from when a process
+//! could map the ring (`issues/a-pipe-is-a-two-mebibyte-page-for-a-mapping-nothing-makes.md`).
 //!
 //! **The data region is never a `&[u8]` or `&mut [u8]`** — plain bytes in that
 //! mapping — so [`Src`] and [`Dst`] describe the copies instead. A reference
@@ -454,9 +452,8 @@ mod tests {
         assert_eq!(read, target);
     }
 
-    /// The header is in the page `SYS_PIPE_MAP` maps writable. Whatever a
-    /// process puts there, the stream must be unaffected — nothing the copies
-    /// are bounded by is in that page.
+    /// Whatever the header holds, the stream must be unaffected — nothing the
+    /// copies are bounded by is in it.
     #[test]
     fn a_scribbled_header_leaves_the_stream_exact() {
         const TOTAL: usize = 64 * 1024;

@@ -1,15 +1,10 @@
-//! The arithmetic every user-memory access rests on: the user/kernel bound, the
-//! alignment a type needs, and whether a value the kernel is about to
-//! dereference lies inside one mapping.
+//! The arithmetic every user-memory access rests on: the user/kernel bound and
+//! the alignment a type needs.
 //!
-//! **Three refusals, and each has a way of being wrong the others do not
-//! catch.** An address in the kernel half is refused outright. An object whose
-//! address is userland's but whose alignment is wrong is refused, because a
-//! misaligned read of a wider type reads bytes the caller never proved were
-//! mapped. An object that starts inside one 2 MiB page and ends in the next is
-//! refused, because only the first page was established — a straddling read
-//! takes its tail out of whatever the neighbouring frame happens to hold, and a
-//! futex word is dereferenced on every wake check.
+//! **Two refusals.** An address in the kernel half is refused outright. An
+//! object whose address is userland's but whose alignment is wrong is refused:
+//! the ABI's typed values are aligned, and a futex word, which the kernel
+//! dereferences on every wake check, then lies inside one page.
 //!
 //! The bound is also the one [`crate::fault`] classifies a trap against — one
 //! constant, read by the check before an access and by the verdict after it.
@@ -22,8 +17,7 @@
 /// something a process may hand the kernel to dereference on its behalf.
 pub const USER_TOP: u64 = 0x0000_8000_0000_0000;
 
-/// The kernel's only user page size, which is also the granularity a
-/// translation answers at.
+/// A superframe, the leaf device memory and grants are handed out in.
 pub const PAGE_2M: u64 = 2 * 1024 * 1024;
 
 /// Rounds `size` up to the next 2 MiB page, or `None` when the sum wraps
@@ -92,21 +86,10 @@ pub fn rebase_base(vm_base: u64, vaddr_min: u64, span: u64) -> Option<u64> {
 }
 
 /// Whether the kernel may read or write a `size`-byte value of alignment
-/// `align` at `ptr` through one translation.
-///
-/// A translation answers for the 2 MiB page holding its first byte; the
-/// physical page after that one belongs to whoever the PMM last gave it to. So
-/// an object crossing the boundary is refused rather than served out of the
-/// page it started in — every `UserSafe` type is small enough for userland to
-/// move, and the alternative is a write into another process's memory.
+/// `align` at `ptr`: aligned, and wholly in the user half. A value across a
+/// page boundary is copied in pieces, one per page.
 pub fn is_user_object(ptr: u64, size: u64, align: u64) -> bool {
-    if size == 0 || !align.is_power_of_two() {
-        return false;
-    }
-    if !ptr.is_multiple_of(align) || !in_user_half(ptr, size) {
-        return false;
-    }
-    ptr & !(PAGE_2M - 1) == (ptr + size - 1) & !(PAGE_2M - 1)
+    size != 0 && align.is_power_of_two() && ptr.is_multiple_of(align) && in_user_half(ptr, size)
 }
 
 /// What the kernel does through a user address, asked as the MMU asks the same
@@ -118,7 +101,7 @@ pub enum Access {
     Write,
 }
 
-/// The grain a split window grants rights at.
+/// The page every user mapping is made of.
 pub const PAGE_4K: u64 = 4096;
 
 #[cfg(test)]
@@ -163,22 +146,14 @@ mod tests {
         assert!(!in_user_half(1 << 63, 1 << 63));
     }
 
-    /// The straddle, for every type, at every offset that can produce one.
+    /// A straddle, for every type, at every aligned offset that makes one.
     #[test]
-    fn no_type_may_cross_a_2_mib_boundary() {
+    fn an_aligned_object_may_cross_a_page_boundary() {
         for (size, align) in shapes() {
-            for last in 1..size {
-                let ptr = 4 * PAGE_2M - last;
-                if !ptr.is_multiple_of(align) {
-                    continue;
-                }
-                assert!(
-                    !is_user_object(ptr, size, align),
-                    "{size}/{align} at {ptr:#x} has {last} bytes below the boundary"
-                );
+            for last in (1..size).filter(|last| last % align == 0) {
+                let ptr = 4 * PAGE_4K - last;
+                assert!(is_user_object(ptr, size, align), "{size}/{align} at {ptr:#x} has {last} bytes below the boundary");
             }
-            assert!(is_user_object(4 * PAGE_2M - size, size, align), "{size}/{align} ending at a boundary");
-            assert!(is_user_object(4 * PAGE_2M, size, align), "{size}/{align} starting at a boundary");
         }
     }
 

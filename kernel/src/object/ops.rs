@@ -5,7 +5,6 @@
 //! caller has already resolved the handle with the rights the call needs.
 
 use alloc::sync::Arc;
-use alloc::vec::Vec;
 
 use toyos_abi::handle::{RawHandle, Rights};
 use toyos_abi::syscall::{FileType, OpenFlags, SeekFrom, SyscallError, MAX_WHOLE_PIPE_WRITE};
@@ -15,7 +14,6 @@ use crate::drivers::serial;
 use crate::file_cache;
 use crate::pipe::{self, PipeId};
 use kernel::pipe::{End, Landing};
-use crate::process::PipeMap;
 use crate::user_ptr::{UserBytes, UserBytesMut};
 use crate::inbox::PollEntry;
 use crate::watch::Watch;
@@ -30,9 +28,8 @@ use super::KObjectRef;
 pub fn initial_rights(object: &KObjectRef) -> Rights {
     const BASE: Rights = Rights::DUP.union(Rights::TRANSFER).union(Rights::WAIT);
     match object {
-        // `MAP` is `SYS_PIPE_MAP`: either end may window the pipe's ring page.
-        KObjectRef::PipeRead(_) => BASE.union(Rights::READ).union(Rights::MAP),
-        KObjectRef::PipeWrite(_) => BASE.union(Rights::WRITE).union(Rights::MAP),
+        KObjectRef::PipeRead(_) => BASE.union(Rights::READ),
+        KObjectRef::PipeWrite(_) => BASE.union(Rights::WRITE),
         KObjectRef::Connection(_) => {
             BASE.union(Rights::READ).union(Rights::WRITE).union(Rights::MAP)
         }
@@ -176,27 +173,12 @@ pub fn open(table: &mut HandleTable, path: &str, flags: OpenFlags) -> u64 {
 
 /// Release one handle.
 ///
-/// What the object holds is released by its own zero-handle hook; `close` releases only the two things that are the process's, not the object's (pipe-map windows, polls on a watch it ends).
-pub fn close(
-    table: &mut HandleTable,
-    h: RawHandle,
-    pipe_maps: &mut Vec<PipeMap>,
-) -> Result<(), super::HandleError> {
+/// What the object holds is released by its own zero-handle hook; `close` releases only what is the process's, not the object's: polls on a watch it ends.
+pub fn close(table: &mut HandleTable, h: RawHandle) -> Result<(), super::HandleError> {
     let entry = table.remove(h)?;
     let object = entry.object().clone();
     // The decrement, and any deferred hook it enqueues, run with the table's borrow already released.
     drop(entry);
-    // A map's warrant is the handle: past the last one naming this pipe, revoke its windows.
-    for id in [pipe_id_read(&object), pipe_id_write(&object)].into_iter().flatten() {
-        let still_held = table.iter().any(|(_, e)| {
-            pipe_id_read(e.object()) == Some(id) || pipe_id_write(e.object()) == Some(id)
-        });
-        if !still_held {
-            if let Some(pt) = crate::scheduler::current_address_space() {
-                crate::process::revoke_pipe_maps(pipe_maps, &pt, id);
-            }
-        }
-    }
     // Only a watch this handle's object ends is answered: one it shares cannot cancel another's poll.
     if close_ends_polls(&object) {
         for watch in [read_watch(&object), write_watch(&object), pipe_end_watch(&object)].into_iter().flatten() {
@@ -209,7 +191,6 @@ pub fn close(
 
 /// Release every handle a process holds; runs on the kill path too, which does not unwind.
 ///
-/// `close_all` takes no `pipe_maps` argument: its only caller is process teardown, which destroys the whole address space the windows are in.
 pub fn close_all(table: &mut HandleTable) {
     for entry in table.drain() {
         drop(entry);
@@ -676,10 +657,12 @@ pub fn fstat(object: &KObjectRef) -> Stat {
         KObjectRef::Acceptor(_) => plain(FileType::Pipe),
         KObjectRef::SharedMem(m) => Stat {
             // The verdict `pcidev::dma_map` lends a device by: a receiver judges a peer's region on it before mapping.
-            file_type: match (m.ram(), m.immutable()) {
-                (Some(_), _) => FileType::SharedMemory,
-                (None, Some(_)) => FileType::ImmutableMemory,
-                (None, None) => FileType::DeviceMemory,
+            file_type: if m.is_ram() {
+                FileType::SharedMemory
+            } else if m.immutable().is_some() {
+                FileType::ImmutableMemory
+            } else {
+                FileType::DeviceMemory
             } as u64,
             size: m.immutable().unwrap_or(m.size()),
             mtime: 0,

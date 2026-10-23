@@ -59,48 +59,36 @@ pub fn stamp() -> Option<LogStamp> {
     (stated != 0).then(|| LogStamp::since_zero(ticks_to_nanos(cpu::counter(), stated)))
 }
 
-/// The clock page's frame, or 0 before [`set_counter`]: the one every address space
-/// maps read-only at [`toyos_abi::clock::CLOCK_PAGE`].
-static PAGE_PHYS: AtomicU64 = AtomicU64::new(0);
+/// The clock page, published once by [`set_counter`]: the object every address
+/// space maps read-only at [`toyos_abi::clock::CLOCK_PAGE`].
+static PAGE: core::sync::atomic::AtomicPtr<alloc::sync::Arc<crate::object::shm::SharedMemObject>> =
+    core::sync::atomic::AtomicPtr::new(core::ptr::null_mut());
 
-/// Lay the calibration out on a frame of its own, for every process to read
+/// Lay the calibration out on a page of its own, for every process to read
 /// the clock this module reads without asking it. Laid out before any address
 /// space can map it, and never written again.
 fn publish_page(counter_at_boot: u64, period_fs: u64, stamp_at_boot: u64) {
     use toyos_abi::clock::{ClockPage, CLOCK_MAGIC};
-    let bytes = crate::mm::PAGE_2M as usize;
+    let page = crate::object::shm::SharedMemObject::create(crate::mm::PAGE_SIZE).expect("clock: no frame for the clock page");
+    let value = ClockPage { magic: CLOCK_MAGIC, counter_at_boot, period_fs, stamp_at_boot };
+    // SAFETY: `ClockPage` is four `u64`s, `repr(C)`: every byte is a field's.
+    let bytes = unsafe { core::slice::from_raw_parts((&value as *const ClockPage).cast::<u8>(), core::mem::size_of::<ClockPage>()) };
+    page.write(0, bytes);
     // Held for the machine's life: every process maps it.
-    let frame = crate::process::PageAlloc::new(bytes)
-        .expect("clock: no 2 MiB frame for the clock page");
-    // SAFETY: a fresh allocation this function owns, `bytes` long, that no
-    // address space maps yet; zeroed whole because all of it is mapped, and
-    // the page is written through raw pointers because it becomes a user
-    // mapping.
-    unsafe {
-        core::ptr::write_bytes(frame.ptr(), 0, bytes);
-        core::ptr::write_volatile(
-            frame.ptr() as *mut ClockPage,
-            ClockPage { magic: CLOCK_MAGIC, counter_at_boot, period_fs, stamp_at_boot },
-        );
-    }
-    PAGE_PHYS.store(frame.phys(), Release);
-    #[expect(clippy::disallowed_methods, reason = "every address space maps the clock page for the machine's life")]
-    core::mem::forget(frame);
+    PAGE.store(alloc::boxed::Box::into_raw(alloc::boxed::Box::new(page)), Release);
 }
 
 /// Map the clock page into a fresh address space, read-only, at the address
-/// the ABI names. A region of its own, so no `mmap` can land on it and a
-/// fault in it is refused rather than filled.
-pub fn map_page(space: &mut crate::mm::paging::AddressSpace) {
-    use crate::mm::policy::{CachePolicy, Prot};
-    let phys = PAGE_PHYS.load(Acquire);
-    assert!(phys != 0, "clock: an address space was built before the clock page");
-    let at = crate::UserAddr::new(toyos_abi::clock::CLOCK_PAGE);
-    space.map_range(at, phys, crate::mm::PAGE_2M, Prot::Read, CachePolicy::Normal);
-    space.insert_region(
-        at,
-        crate::vma::Region { size: crate::mm::PAGE_2M, kind: crate::vma::RegionKind::Mapped },
-    );
+/// the ABI names.
+pub fn map_page(space: &mut crate::mm::space::AddressSpace) {
+    let page = PAGE.load(Acquire);
+    assert!(!page.is_null(), "clock: an address space was built before the clock page");
+    // SAFETY: `publish_page` stored a box it never frees, and the pointer is
+    // never cleared.
+    let page = alloc::sync::Arc::clone(unsafe { &*page });
+    let at = crate::mm::space::At::Fixed(crate::UserAddr::new(toyos_abi::clock::CLOCK_PAGE));
+    let len = page.size();
+    space.map(page, 0, len, kernel::vm::Prot::Read, at).expect("clock: the clock page's address is a fresh space's");
 }
 
 /// Whether [`nanos_since_boot`] measures anything yet; false before [`init`].

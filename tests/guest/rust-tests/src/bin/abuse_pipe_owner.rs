@@ -54,7 +54,6 @@ const UNPUBLISHED_SLOT: u32 = 902;
 const REACHES: &[(&str, &str)] = &[
     ("read", "read as if it named something"),
     ("write", "took a write"),
-    ("map", "handed over a ring page"),
     ("control", "a slot nobody ever published answered"),
 ];
 
@@ -141,7 +140,6 @@ fn attacker(role: &str) -> ! {
     let answered = match role {
         "read" => format!("{:?}", syscall::read_nonblock(read, &mut buf)),
         "write" => format!("{:?}", syscall::write_nonblock(write, b"injected")),
-        "map" => format!("{:?}", syscall::pipe_map(read).map(|_| ())),
         "control" => {
             format!("{:?}", syscall::read_nonblock(RawHandle(UNPUBLISHED_SLOT), &mut buf))
         }

@@ -44,7 +44,7 @@ pub(super) fn handle_result(r: Result<RawHandle, SyscallError>) -> u64 {
 /// Wakes nobody: `pipe::close_write`'s own zero-refcount path does that.
 pub(super) fn sys_close(h: RawHandle) -> u64 {
     let result = process::with_process_data(|data| {
-        ops::close(&mut data.handles, h, &mut data.pipe_maps)
+        ops::close(&mut data.handles, h)
     });
     match result {
         Ok(()) => 0,

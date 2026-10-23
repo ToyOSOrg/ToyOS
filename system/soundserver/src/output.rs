@@ -177,7 +177,7 @@ impl Outputs {
                 return;
             }
         };
-        let lent = SharedMemory::create(offer.ring_bytes()).and_then(|ring| Ok((ring.share()?, ring)));
+        let lent = SharedMemory::create_for_device(offer.ring_bytes()).and_then(|ring| Ok((ring.share()?, ring)));
         let (handle, ring) = match lent {
             Ok(lent) => lent,
             Err(why) => {

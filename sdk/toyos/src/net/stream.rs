@@ -299,10 +299,15 @@ impl Table {
 }
 
 /// Lets go of an end no handle or call reaches: its halves, its connection,
-/// its bells and its region, whose mapping goes with its handle.
+/// its bells, and its region's mapping and handle.
 fn free(slot: usize, end: End) {
     *HALVES[slot].rx.lock() = Kept::Empty;
     *HALVES[slot].tx.lock() = Kept::Empty;
+    if let Some((_, base)) = end.region {
+        // SAFETY: the halves that read the mapping are gone, and nothing else
+        // reaches it.
+        let _ = unsafe { syscall::munmap(base as *mut u8, REGION_BYTES) };
+    }
     let region = end.region.map(|(region, _)| region);
     for handle in [Some(end.connection), Some(end.receive_bell), Some(end.send_bell), region].into_iter().flatten() {
         if handle != toyos_abi::HANDLE_INVALID {
@@ -908,7 +913,7 @@ fn open<A: Answered>(
         let lent = region.share().map_err(|_| NetError::Io)?;
         let (answer, bells, connection) = ask(NetstackConn::connect()?, lent)?;
         let (region, base) = region.into_raw();
-        let held = take_up(connection.into_owned(), bells, region)?;
+        let held = take_up(connection.into_owned(), bells, region, base)?;
         *HALVES[slot].rx.lock() = Kept::Held(rx);
         *HALVES[slot].tx.lock() = Kept::Held(tx);
         let peer = answer.peer().unwrap_or(peer);
@@ -955,9 +960,9 @@ fn hold_connection(connection: OwnedHandle) -> Result<(RawHandle, RawHandle), Ne
     })
 }
 
-/// A holder's connection, its bells and its region, taken up as [`Held`].
-/// Refused, every one is closed, and the region's mapping goes with it.
-fn take_up(connection: OwnedHandle, bells: [RawHandle; BELLS], region: RawHandle) -> Result<Held, NetError> {
+/// A holder's connection, its bells and its region mapped at `base`, taken up
+/// as [`Held`]. Refused, the region is unmapped and every handle closed.
+fn take_up(connection: OwnedHandle, bells: [RawHandle; BELLS], region: RawHandle, base: *mut u8) -> Result<Held, NetError> {
     let connection = hold_connection(connection);
     let [receive, send] = bells.map(|bell| narrowed(bell, HELD_BELL));
     let region = narrowed(region, HELD_REGION);
@@ -966,6 +971,9 @@ fn take_up(connection: OwnedHandle, bells: [RawHandle; BELLS], region: RawHandle
             Ok(Held { descriptor, connection, receive_bell, send_bell, region })
         }
         (connection, receive, send, region) => {
+            // SAFETY: nothing has read the mapping through this end yet, and
+            // nothing else reaches it.
+            let _ = unsafe { syscall::munmap(base, REGION_BYTES) };
             let connection = connection.map(|(descriptor, own)| [descriptor, own]).into_iter().flatten();
             connection.chain(receive).chain(send).chain(region).for_each(syscall::close);
             Err(NetError::Io)
@@ -1035,7 +1043,7 @@ pub fn adopt_exported(end: OwnedHandle) -> Option<RawHandle> {
         Some((holder, adopt, base, [receive, send], region))
     });
     let made = match taken {
-        Some((holder, adopt, base, bells, region)) => take_up(connection.into_owned(), bells, region).map(|held| {
+        Some((holder, adopt, base, bells, region)) => take_up(connection.into_owned(), bells, region, base).map(|held| {
             let (rx, tx) = session::holder(LAYOUT, holder);
             *HALVES[slot].rx.lock() = Kept::Held(rx);
             *HALVES[slot].tx.lock() = Kept::Held(tx);

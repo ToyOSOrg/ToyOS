@@ -15,26 +15,22 @@ reuse instead.
 **Three things already exist, and this track is the difference between them and
 a plateau.**
 
-`SYS_SYSINFO` carries a live per-process byte total: `demand_pages + mmap_regions
-+ dynamic_tls_blocks + loaded_libs`, summed at `kernel/src/syscall/machine.rs:146-156`
-into the entry's `memory` word. A userland `mmap` becomes an `mmap_regions`
-entry, so a leaked thread stack is inside that number. **But the sum is taken
-under `try_lock`, and the failure arm writes `0`** (`machine.rs:155-157`). A
-plateau reads a sequence; a spurious zero in that sequence is indistinguishable
-from a release, and it appears exactly when the process is busy — which is when
-a spawn/join loop is running.
+`SYS_SYSINFO` carries a live per-process byte total: the private memory its
+space has populated (`Usage::resident_bytes`, `kernel/src/mm/space.rs`), read
+in `kernel/src/syscall/machine.rs`'s roster. The usage is atomics, but it is
+reached through the process's data **under `try_lock`, and the failure arm
+writes `0`**. A plateau reads a sequence; a spurious zero in that sequence is
+indistinguishable from a release, and it appears exactly when the process is
+busy — which is when a spawn/join loop is running. Objects the process made,
+its TLS blocks and regions among them, are in no part of it.
 
-`ProcessStats` (`SYS_PROCESS_STATS`) carries `alloc_count`, `peak_memory` and
-the two fault counts. Subtracting frees from allocations would not give a live
-count even if `free_count` were exported, and it is not (`kernel/src/process.rs:502`,
-absent from the ABI struct) — **the two counters count different populations.**
-`alloc_count` is bumped at four sites including the demand-page fill
-(`kernel/src/syscall/vm.rs:117`, `:142`, `:374`, `kernel/src/process.rs:1432`);
-`free_count` at two, `munmap` and TLS teardown (`vm.rs:161`, `process.rs:189`).
-Demand-page release is never counted at all — `demand_pages` is cleared wholesale
-at teardown (`process.rs:965`) — so the difference folds in every demand fill ever
-taken and climbs forever. Exporting one field is the cheap fix that yields a
-number which never returns. `peak_memory` is a high-water mark, which means a
+`ProcessStats` (`SYS_PROCESS_STATS`) carries `peak_memory` and
+`alloc_count`, which is the ranges the space has made (`Usage::ranges_made`,
+`kernel/src/mm/space.rs`); the ranges taken away are counted beside it
+(`Usage::ranges_taken`) and logged at exit, but not exported. Neither is a
+live count of memory: a range is any run of pages, so one `munmap` can take
+part of one and another can take several, so exporting the other count
+yields no number that returns to where it was. `peak_memory` is a high-water mark, which means a
 *fix* is invisible in it: a leak that stops leaking leaves the peak where it was.
 
 `tests/guest/rust-tests/src/bin/abuse_tls_alloc.rs` has the harness shape. It

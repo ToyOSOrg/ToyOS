@@ -484,7 +484,14 @@ pub(super) fn page_fault_handler(frame: &TrapFrame) {
         let is_user = Ring::of_cs(frame.cs).is_user();
         // Ring 3 only: a Ring 0 fault is a kernel bug, and it halts below
         // before anything is mapped into whichever process is current.
-        if is_user && process::handle_page_fault(fault_addr, frame.error_code) {
+        let access = if frame.error_code & PF_INSTRUCTION_FETCH != 0 {
+            kernel::vm::Access::Exec
+        } else if frame.error_code & PF_WRITE != 0 {
+            kernel::vm::Access::Write
+        } else {
+            kernel::vm::Access::Read
+        };
+        if is_user && process::handle_page_fault(fault_addr, access) {
             percpu::set_fault_state(percpu::CpuFaultState::Normal);
             return;
         }
