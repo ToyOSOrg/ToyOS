@@ -19,6 +19,7 @@ use alloc::vec::Vec;
 
 use toyos_abi::syscall::SyscallError;
 
+use crate::mm::charge::{self, Charge, Exhausted};
 use crate::mm::policy::CachePolicy;
 use crate::mm::pmm::{self, Frame, PhysPage};
 use crate::mm::space::Space;
@@ -46,9 +47,13 @@ enum Backing {
     /// of the object's pages: kept for the machine's life and written by
     /// nobody, so every mapping of it is read-only (`crate::bootimage`).
     Boot { phys: u64, len: u64 },
-    /// Memory the kernel does not own, at `phys`, with where it is mapped.
-    Aperture { phys: u64, mapped: Held<Vec<(Weak<Space>, UserAddr, u64)>> },
+    /// Memory the kernel does not own, at `phys`, with where it is mapped
+    /// and that list's charge.
+    Aperture { phys: u64, mapped: Held<(Vec<Mapped>, Charge)> },
 }
+
+/// A space an aperture is mapped in, and where.
+type Mapped = (Weak<Space>, UserAddr, u64);
 
 pub struct SharedMemObject {
     pub(super) core: ObjectCore,
@@ -58,8 +63,9 @@ pub struct SharedMemObject {
 }
 
 impl SharedMemObject {
-    fn new(backing: Backing, size: u64, cache: CachePolicy) -> Arc<Self> {
-        Arc::new(Self { core: Self::new_core(), backing, size, cache })
+    /// Over `core`, charged with what `backing` keeps on the heap.
+    fn new(core: ObjectCore, backing: Backing, size: u64, cache: CachePolicy) -> Arc<Self> {
+        Arc::new(Self { core, backing, size, cache })
     }
 
     /// `size` bytes of zeroed memory in whole pages, frame by frame;
@@ -67,12 +73,15 @@ impl SharedMemObject {
     /// `ResourceExhausted` where frames run out.
     pub fn create(size: u64) -> Result<Arc<Self>, SyscallError> {
         let pages = pages(size)?;
+        let (count, full, rest) = (pages.div_ceil(CHUNK as u64), pages / CHUNK as u64, (pages % CHUNK as u64) as usize);
+        let lists = charge::array::<Frame>(CHUNK).saturating_mul(full as usize).saturating_add(charge::array::<Frame>(rest));
+        let core = Self::new_core(charge::array::<Box<[Frame]>>(count as usize).saturating_add(lists))?;
         // Promised whole before any is taken: frames one at a time until none
         // is left would starve every other allocation meanwhile.
         if !pmm::promise(pages) {
             return Err(SyscallError::ResourceExhausted);
         }
-        let mut pieces = Vec::new();
+        let mut pieces = Vec::with_capacity(count as usize);
         let mut left = pages as usize;
         while left > 0 {
             let n = left.min(CHUNK);
@@ -83,7 +92,7 @@ impl SharedMemObject {
             pieces.push(piece.into_boxed_slice());
             left -= n;
         }
-        Ok(Self::new(Backing::Frames(pieces), pages * PAGE_SIZE, CachePolicy::Normal))
+        Ok(Self::new(core, Backing::Frames(pieces), pages * PAGE_SIZE, CachePolicy::Normal))
     }
 
     /// `size` bytes of zeroed memory in whole pages, over one run of whole
@@ -92,26 +101,29 @@ impl SharedMemObject {
     pub fn create_run(size: u64) -> Result<Arc<Self>, SyscallError> {
         let bytes = pages(size)? * PAGE_SIZE;
         let run = crate::mm::align_2m_checked(bytes).ok_or(SyscallError::InvalidArgument)?;
-        let pages = pmm::alloc_contiguous((run / PAGE_2M) as usize).ok_or(SyscallError::ResourceExhausted)?;
-        Ok(Self::new(Backing::Run(pages), bytes, CachePolicy::Normal))
+        let count = (run / PAGE_2M) as usize;
+        let core = Self::new_core(charge::array::<PhysPage>(count))?;
+        let pages = pmm::alloc_contiguous(count).ok_or(SyscallError::ResourceExhausted)?;
+        Ok(Self::new(core, Backing::Run(pages), bytes, CachePolicy::Normal))
     }
 
     /// An aperture over `size` bytes of memory somebody else owns at `phys`,
     /// whole 4 KiB pages, mapped as `cache` says: never freed here, and taken
     /// out of every space that mapped it when its last handle goes.
-    pub fn aperture(phys: u64, size: u64, cache: CachePolicy) -> Arc<Self> {
+    pub fn aperture(phys: u64, size: u64, cache: CachePolicy) -> Result<Arc<Self>, Exhausted> {
         assert!(
             (phys | size) & (PAGE_SIZE - 1) == 0 && size != 0,
             "shm: an aperture of {size:#x} bytes at {phys:#x} is not whole 4 KiB pages"
         );
-        Self::new(Backing::Aperture { phys, mapped: Held::new(Vec::new()) }, size, cache)
+        let mapped = Held::new((Vec::new(), Charge::NONE));
+        Ok(Self::new(Self::new_core(0)?, Backing::Aperture { phys, mapped }, size, cache))
     }
 
     /// A boot image of `len` bytes at `phys`, in whole 4 KiB pages: never
     /// freed and never written.
-    pub fn boot(phys: u64, len: u64) -> Arc<Self> {
+    pub fn boot(phys: u64, len: u64) -> Result<Arc<Self>, Exhausted> {
         assert!(phys.is_multiple_of(PAGE_SIZE) && len != 0, "shm: a boot image of {len:#x} bytes at {phys:#x}");
-        Self::new(Backing::Boot { phys, len }, len.next_multiple_of(PAGE_SIZE), CachePolicy::Normal)
+        Ok(Self::new(Self::new_core(0)?, Backing::Boot { phys, len }, len.next_multiple_of(PAGE_SIZE), CachePolicy::Normal))
     }
 
     pub fn size(&self) -> u64 {
@@ -219,15 +231,22 @@ impl SharedMemObject {
     }
 
     /// Record that `space` maps this object at `[at, at + len)`, if it is an
-    /// aperture: what its last handle takes back. `Gone` once that has.
+    /// aperture: what its last handle takes back. `Gone` once that has, and
+    /// `ResourceExhausted` where the list cannot grow.
     pub fn mapped_at(&self, space: &Arc<Space>, at: UserAddr, len: u64) -> Result<(), SyscallError> {
         let Backing::Aperture { mapped, .. } = &self.backing else { return Ok(()) };
         mapped
-            .with_mut(|mapped| {
+            .with_mut(|(mapped, charge)| {
                 mapped.retain(|(space, _, _)| space.strong_count() > 0);
+                if mapped.len() == mapped.capacity() {
+                    let capacity = (mapped.capacity() * 2).max(4);
+                    charge.resize(charge::array::<Mapped>(capacity))?;
+                    mapped.reserve_exact(capacity - mapped.len());
+                }
                 mapped.push((Arc::downgrade(space), at, len));
+                Ok(())
             })
-            .ok_or(SyscallError::Gone)
+            .ok_or(SyscallError::Gone)?
     }
 }
 
@@ -266,7 +285,7 @@ impl Drop for SharedMemObject {
 impl ZeroHandles for SharedMemObject {
     fn on_zero_handles(&self) {
         let Backing::Aperture { mapped, .. } = &self.backing else { return };
-        let Some(mapped) = mapped.take() else { return };
+        let Some((mapped, _charge)) = mapped.take() else { return };
         for (space, at, len) in mapped {
             if let Some(space) = space.upgrade() {
                 space.release_object(at, len, self);

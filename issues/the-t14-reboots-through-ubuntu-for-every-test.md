@@ -55,7 +55,7 @@ A session's bound owes, beside its members, a lease as late as 19.1 s
 (`issues/most-t14-leases-land-one-dhcp-retry-late.md`) and one per-job
 bound. Every judge reads the stick as today but `syscall_cost`, which
 reads the window. `loader_watchdog_arms`' control arm rides a session,
-`mkdir_cap` and `readdir_bound` remove what they made, and `audio_idle_suspend`
+`readdir_bound` removes what it made, and `audio_idle_suspend`
 waits for soundd's `inspect` to read `suspended`
 (`userland/soundd/src/inspect.rs:21-33`), not for a boot no client has reached.
 

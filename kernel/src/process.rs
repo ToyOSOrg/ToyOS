@@ -30,6 +30,7 @@ use alloc::sync::Arc;
 use alloc::vec::Vec;
 use core::ptr::NonNull;
 use crate::arch::percpu;
+use crate::mm::charge::{self, Charge, Exhausted};
 use crate::object::{ops, HandleTable};
 use crate::sync::Lock;
 use crate::sched::payload::ThreadSched;
@@ -271,8 +272,9 @@ pub struct ElfInfo {
     pub tls: toyos_elf::tls::Static,
     /// Next module ID to assign on dlopen (1-based, exe=1).
     pub next_tls_module_id: u64,
-    /// Dynamically allocated TLS blocks for dlopen'd modules, keyed by (Tid, module_id).
-    pub dynamic_tls_blocks: alloc::collections::BTreeMap<(Tid, u64), KernelMapping>,
+    /// Dynamically allocated TLS blocks for dlopen'd modules, keyed by
+    /// (Tid, module_id), each with the charge of its place here.
+    pub dynamic_tls_blocks: alloc::collections::BTreeMap<(Tid, u64), (KernelMapping, Charge)>,
     /// Dynamically loaded shared libraries (indexed by dlopen handle).
     pub loaded_libs: Vec<elf::LoadedLib>,
     pub elf_base: UserAddr,
@@ -330,6 +332,34 @@ pub struct ProcessData {
     /// The job its threads, and its children unless a spawn names another,
     /// run in.
     pub job: Arc<kernel::sched::job::Job>,
+    /// What [`ProcessData::charge`] charged, and its executable's TLS beside.
+    pub charge: Charge,
+}
+
+impl ProcessData {
+    /// The heap a process of the program at `path` takes beside what is
+    /// charged on its own — its handles, threads, ranges and objects: its
+    /// records, its place in the process table and among its parent's
+    /// children, its strings at their bound, and its endowments at theirs.
+    pub fn charge(path: &str, env: &[u8]) -> Result<Charge, Exhausted> {
+        // The process table doubles, and its control byte beside each.
+        let entry = 2 * (core::mem::size_of::<(Pid, ProcessEntry)>() + 1);
+        // A thread table of one thread is a whole leaf.
+        let threads = charge::heap(Layout::array::<(Tid, ThreadEntry)>(11).expect("process: a leaf's layout"));
+        let records = charge::arc::<Lock<ProcessData>>()
+            + charge::arc::<UserImage>()
+            + charge::arc::<crate::mm::space::Space>()
+            + charge::arc::<crate::mm::space::Usage>()
+            + entry
+            + threads
+            + 2 * core::mem::size_of::<Pid>();
+        let strings = 2 * charge::array::<u8>(path.len())
+            + charge::array::<u8>(toyos_abi::syscall::MAX_PATH)
+            + charge::array::<u8>(env.len());
+        let endowments = charge::array::<EndowEntry>(toyos_abi::syscall::MAX_ENDOWMENTS)
+            + charge::array::<u8>(toyos_abi::syscall::MAX_LABELS_LEN);
+        Charge::new(records + strings + endowments)
+    }
 }
 
 /// The labels a parent put on the handles it endowed — names, not authority: the handle is in the table whether or not the child ever asks.
@@ -967,7 +997,7 @@ fn release_thread(tid: Tid) {
         let owner_arc = process_data();
         let mut owner = owner_arc.lock();
         let keys: Vec<(Tid, u64)> = owner.elf.dynamic_tls_blocks.keys().filter(|&&(t, _)| t == tid).copied().collect();
-        keys.iter().filter_map(|key| owner.elf.dynamic_tls_blocks.remove(key)).collect()
+        keys.iter().filter_map(|key| owner.elf.dynamic_tls_blocks.remove(key)).map(|(block, _charge)| block).collect()
     };
     // With no process lock held: a release takes the space's.
     for block in tls.iter().chain(&blocks) {

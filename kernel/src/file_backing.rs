@@ -12,6 +12,8 @@ const BLOCK_SIZE: usize = crate::mm::PAGE_SIZE as usize;
 pub enum BlockError {
     /// The backing itself failed the read.
     Device,
+    /// No memory to keep the page in: the kernel holds back what is left.
+    Exhausted,
 }
 
 pub type BlockResult = Result<(), BlockError>;
@@ -27,8 +29,9 @@ pub trait FileBacking: Send + Sync {
     fn file_size(&self) -> u64;
 
     /// The file's bytes as a spawn's segments copy them, each page at its
-    /// first touch: `None` once the file is gone.
-    fn source(&self) -> Option<Arc<dyn CopySource>>;
+    /// first touch: `NotFound` once the file is gone, `ResourceExhausted`
+    /// where what keeps them cannot be charged.
+    fn source(&self) -> Result<Arc<dyn CopySource>, SyscallError>;
 }
 
 /// An executable in a shared memory object handed over by handle: one a
@@ -76,7 +79,7 @@ impl FileBacking for SharedImage {
         self.size
     }
 
-    fn source(&self) -> Option<Arc<dyn CopySource>> {
-        Some(self.object.clone())
+    fn source(&self) -> Result<Arc<dyn CopySource>, SyscallError> {
+        Ok(self.object.clone())
     }
 }

@@ -10,6 +10,7 @@
 use alloc::sync::Arc;
 use core::sync::atomic::{AtomicBool, Ordering};
 
+use crate::mm::charge::Exhausted;
 use crate::pipe::{PipeId, PipeReader, PipeWriter};
 
 use super::{Held, KObjectVariant, ObjectCore, ZeroHandles};
@@ -31,13 +32,13 @@ pub struct PipeWriteEnd {
 }
 
 impl PipeReadEnd {
-    pub fn new(reader: PipeReader) -> Arc<Self> {
-        Arc::new(Self {
-            core: Self::new_core(),
+    pub fn new(reader: PipeReader) -> Result<Arc<Self>, Exhausted> {
+        Ok(Arc::new(Self {
+            core: Self::new_core(0)?,
             id: reader.id(),
             tty: AtomicBool::new(false),
             reference: Held::new(reader),
-        })
+        }))
     }
 
     pub fn id(&self) -> PipeId {
@@ -56,13 +57,13 @@ impl PipeReadEnd {
 }
 
 impl PipeWriteEnd {
-    pub fn new(writer: PipeWriter) -> Arc<Self> {
-        Arc::new(Self {
-            core: Self::new_core(),
+    pub fn new(writer: PipeWriter) -> Result<Arc<Self>, Exhausted> {
+        Ok(Arc::new(Self {
+            core: Self::new_core(0)?,
             id: writer.id(),
             tty: AtomicBool::new(false),
             reference: Held::new(writer),
-        })
+        }))
     }
 
     pub fn id(&self) -> PipeId {

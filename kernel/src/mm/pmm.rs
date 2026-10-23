@@ -4,6 +4,11 @@
 //! [`Frame`] owns one 4 KiB frame and [`PhysPage`] one 2 MiB superframe; each
 //! returns its memory when it drops. Pins ([`pin_range`]) are taken without
 //! the allocator's lock.
+//!
+//! What a process causes — a commitment, a page table, a pipe's ring, a run a
+//! device is lent, a [`charge`] of the kernel heap — is refused rather than
+//! take what the allocator holds back for the kernel; only the kernel's own
+//! allocations may take it.
 
 use core::sync::atomic::{AtomicPtr, AtomicU32, AtomicU64, AtomicUsize, Ordering};
 
@@ -27,11 +32,6 @@ pub struct PhysPage {
 }
 
 impl PhysPage {
-    /// Caller must ensure `phys` is a previously allocated, 2MB-aligned page.
-    pub(super) fn from_raw(phys: u64) -> Self {
-        Self { phys }
-    }
-
     /// Access this page through the kernel direct map.
     pub fn direct_map(&self) -> DirectMap {
         DirectMap::from_phys(self.phys)
@@ -166,6 +166,7 @@ pub(super) fn init(entries: &[MemoryMapEntry], reserved: &[Region]) {
         frames.withhold(region.start, region.end);
     }
     frames.seal();
+    frames.keep(kept_supers(&frames));
     let managed = frames.usable_frames() * FRAME;
     let withheld = (described - frames.usable_frames()) * FRAME;
 
@@ -206,21 +207,32 @@ fn place(entries: &[MemoryMapEntry], reserved: &[Region], bytes: u64) -> Option<
     entries.iter().filter(|e| is_usable(e)).filter_map(lowest_in).min()
 }
 
-/// The free frames no commitment may promise, so that the kernel's own
-/// allocations meet room when commitments have taken the rest: 1/256 of
-/// managed memory, and 16 MiB at least.
-fn kept(frames: &Frames) -> u64 {
-    (frames.usable_frames() / 256).max((16 << 20) / FRAME)
+/// The whole superframes nothing a process causes may take, so that the
+/// kernel's own allocations, its heap's growth past its charges among them,
+/// meet room when processes have taken the rest: 1/256 of managed memory,
+/// and 16 MiB at least.
+fn kept_supers(frames: &Frames) -> u64 {
+    (frames.usable_frames() / 256).max((16 << 20) / FRAME).div_ceil(SUPER / FRAME)
 }
 
 /// Promise `frames` to a commitment, which draws each with
 /// [`alloc_promised`] when it is first touched; `false`, and nothing
-/// promised, where that would leave less than the kernel keeps.
+/// promised, where that would take what the kernel holds back.
 pub fn promise(frames: u64) -> bool {
-    FRAMES.lock().as_mut().is_some_and(|f| {
-        let keep = kept(f);
-        f.promise(frames, keep)
-    })
+    FRAMES.lock().as_mut().is_some_and(|f| f.promise(frames))
+}
+
+/// Charge `bytes` of the kernel heap to what a process caused, before it is
+/// allocated; `false`, and nothing charged, where covering them would take
+/// what the kernel holds back. The heap grows into what charges reserve
+/// first, so an allocation a charge covers finds its room.
+pub fn charge(bytes: u64) -> bool {
+    FRAMES.lock().as_mut().is_some_and(|f| f.charge(bytes))
+}
+
+/// Give back a [`charge`].
+pub fn uncharge(bytes: u64) {
+    FRAMES.lock().as_mut().expect("pmm: a charge outlived no allocator").uncharge(bytes);
 }
 
 /// Take back promises no commitment holds any more.
@@ -249,34 +261,66 @@ pub fn alloc_promised() -> Frame {
     frame
 }
 
-/// A zeroed frame for a page table a process causes, refused unless it
-/// leaves the frames the kernel keeps: a process's tables are not promised,
-/// so this is what keeps them out of the kernel's room.
+/// A zeroed frame for a page table a process causes, refused rather than
+/// take what the kernel holds back: a process's tables are not promised.
 pub fn alloc_table_frame() -> Option<Frame> {
-    let phys = FRAMES.lock().as_mut().and_then(|f| {
-        let keep = kept(f);
-        f.alloc_frame_keeping(keep)
-    })?;
+    let phys = FRAMES.lock().as_mut()?.alloc_frame_for_process()?;
     let frame = Frame { phys };
     // SAFETY: just taken off the allocator, so unaliased, and inside the direct map.
     unsafe { core::ptr::write_bytes(frame.direct_map().as_mut_ptr::<u8>(), 0, FRAME as usize) };
     Some(frame)
 }
 
-/// Allocate one 2MB physical page.
+/// One zeroed 2 MiB page for the kernel's own use.
 pub fn alloc_page() -> Option<PhysPage> {
-    let page = claim()?;
-    // SAFETY: `claim` just took the frame off the allocator, so it is unaliased, and the direct map covers every address it can name.
-    unsafe {
-        core::ptr::write_bytes(page.direct_map().as_mut_ptr::<u8>(), 0, PAGE_2M as usize);
-    }
-    Some(page)
+    let phys = FRAMES.lock().as_mut()?.alloc_super()?;
+    Some(zeroed(PhysPage { phys }))
 }
 
-/// One 2MB physical page holding what its last owner left in it. Only the kernel heap takes one as it is: the heap answers uninitialized memory, and `alloc_zeroed` writes its own zeros. Does not heap-allocate: the heap calls it when it is full.
-pub(super) fn claim() -> Option<PhysPage> {
-    let phys = FRAMES.lock().as_mut()?.alloc_super()?;
-    Some(PhysPage { phys })
+/// One zeroed 2 MiB page a process causes, such as a pipe's ring: refused
+/// rather than take what the kernel holds back.
+pub fn alloc_page_for_process() -> Option<PhysPage> {
+    let phys = FRAMES.lock().as_mut()?.alloc_run_for_process(1)?;
+    Some(zeroed(PhysPage { phys }))
+}
+
+fn zeroed(page: PhysPage) -> PhysPage {
+    // SAFETY: just taken off the allocator, so unaliased, and the direct map covers every address it can name.
+    unsafe { core::ptr::write_bytes(page.direct_map().as_mut_ptr::<u8>(), 0, PAGE_2M as usize) };
+    page
+}
+
+/// A 2 MiB superframe the kernel heap holds, holding what its last owner left
+/// in it: the heap answers uninitialized memory, and `alloc_zeroed` writes its
+/// own zeros. It goes back when it drops.
+pub(super) struct HeapPage {
+    phys: u64,
+}
+
+impl HeapPage {
+    /// Grow the heap by one superframe: one its charges reserved, or one for
+    /// the kernel's own use. Does not heap-allocate: the heap calls it when
+    /// it is full.
+    pub(super) fn grow() -> Option<Self> {
+        let phys = FRAMES.lock().as_mut()?.alloc_heap()?;
+        Some(Self { phys })
+    }
+
+    pub(super) fn direct_map(&self) -> DirectMap {
+        DirectMap::from_phys(self.phys)
+    }
+
+    /// The page the heap gave up with [`core::mem::forget`] at `phys`, taken
+    /// back once.
+    pub(super) fn from_raw(phys: u64) -> Self {
+        Self { phys }
+    }
+}
+
+impl Drop for HeapPage {
+    fn drop(&mut self) {
+        FRAMES.lock().as_mut().expect("pmm: a heap page outlived no allocator").free_heap(self.phys, &pins());
+    }
 }
 
 /// One zeroed 4 KiB frame.
@@ -288,13 +332,15 @@ pub fn alloc_frame() -> Option<Frame> {
     Some(frame)
 }
 
-/// Allocate `count` physically contiguous 2MB pages.
+/// `count` physically contiguous zeroed 2 MiB pages a process causes, such as
+/// memory a device is lent: refused rather than take what the kernel holds
+/// back.
 pub fn alloc_contiguous(count: usize) -> Option<alloc::vec::Vec<PhysPage>> {
     // `count` comes from userland, so a bogus 0 and a legitimate `mmap(0)` can't be told apart here — refuse, don't assert.
     if count == 0 {
         return None;
     }
-    let base = FRAMES.lock().as_mut()?.alloc_run(count)?;
+    let base = FRAMES.lock().as_mut()?.alloc_run_for_process(count)?;
     let mut pages = alloc::vec::Vec::with_capacity(count);
     for i in 0..count as u64 {
         let page = PhysPage { phys: base + i * PAGE_2M };

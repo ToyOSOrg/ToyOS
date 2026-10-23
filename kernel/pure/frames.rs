@@ -20,6 +20,16 @@
 //! other allocation is refused rather than take a frame promised. So a
 //! commitment is refused when it is made, never at its first touch.
 //!
+//! **The kernel heap grows by whole superframes, so what it is owed is held
+//! back whole.** Kernel memory a process causes is
+//! [`charge`](Frames::charge)d in bytes before it is allocated, and the heap
+//! grows into a superframe reserved for the charges before any other; a few
+//! more are kept for the kernel's own allocations ([`keep`](Frames::keep)).
+//! Nothing a process causes is promised or handed one held back, and a whole
+//! superframe is split only when no split one has a frame free, so 4 KiB
+//! traffic never splits one either. A charge is refused when it is made,
+//! never when the heap grows.
+//!
 //! The storage is the caller's, sized by [`supers_for`] and [`pins_for`] for
 //! the span of physical memory it manages, because the kernel lays it out of
 //! that memory before it has a heap.
@@ -104,6 +114,10 @@ pub enum Discarded {
 }
 
 /// The allocator. Every method but the constructors takes the caller's lock.
+///
+/// Invariants: `whole ≥ reserved + kept`, and `promised + PER_SUPER ×
+/// (reserved + kept) ≤ free`, so what is promised fits outside the
+/// superframes held back and a draw never has to split one of them.
 pub struct Frames<'m> {
     base: u64,
     supers: &'m mut [Super],
@@ -111,8 +125,21 @@ pub struct Frames<'m> {
     partial: List,
     free: u64,
     usable: u64,
-    /// Frames promised and not yet drawn: never more than `free`.
+    /// Frames promised and not yet drawn.
     promised: u64,
+    /// Whole superframes reserved for the heap to grow into: what charges
+    /// cover beyond what it grew into for them, `entitled - drawn`.
+    reserved: u64,
+    /// Whole superframes kept for the kernel's own allocations, and how many
+    /// it is to keep.
+    kept: u64,
+    keep_target: u64,
+    /// Bytes charged, the superframes covering them, those the heap holds,
+    /// and how many of these it grew into from what charges reserved.
+    charged: u64,
+    entitled: u64,
+    heap: u64,
+    drawn: u64,
 }
 
 impl<'m> Frames<'m> {
@@ -123,7 +150,22 @@ impl<'m> Frames<'m> {
         assert!(base.is_multiple_of(SUPER), "frames: base {base:#x} is not on a superframe");
         assert!(supers.len() < NIL as usize, "frames: {} superframes do not fit the list links", supers.len());
         supers.fill(Super::ABSENT);
-        Self { base, supers, whole: List::EMPTY, partial: List::EMPTY, free: 0, usable: 0, promised: 0 }
+        Self {
+            base,
+            supers,
+            whole: List::EMPTY,
+            partial: List::EMPTY,
+            free: 0,
+            usable: 0,
+            promised: 0,
+            reserved: 0,
+            kept: 0,
+            keep_target: 0,
+            charged: 0,
+            entitled: 0,
+            heap: 0,
+            drawn: 0,
+        }
     }
 
     /// One past the last byte the records cover.
@@ -214,10 +256,54 @@ impl<'m> Frames<'m> {
         self.promised
     }
 
-    /// Promise `frames` if that leaves `keep` free frames unpromised.
-    pub fn promise(&mut self, frames: u64, keep: u64) -> bool {
-        let room = self.free.saturating_sub(self.promised).saturating_sub(keep);
-        if frames > room {
+    /// Whole superframes held back for the heap: those charges cover and the
+    /// heap does not hold, and those kept for the kernel's own allocations.
+    pub fn held_back(&self) -> (u64, u64) {
+        (self.reserved, self.kept)
+    }
+
+    /// Bytes charged, and the superframes the heap holds.
+    pub fn charges(&self) -> (u64, u64) {
+        (self.charged, self.heap)
+    }
+
+    /// Free frames nothing holds back: neither promised nor in a superframe
+    /// reserved or kept.
+    fn room(&self) -> u64 {
+        let held = self.promised + PER_SUPER as u64 * (self.reserved + self.kept);
+        self.free.checked_sub(held).unwrap_or_else(|| panic!("frames: {held} held back of {} free", self.free))
+    }
+
+    /// Whole superframes nothing holds back.
+    fn spare_supers(&self) -> u64 {
+        let held = self.reserved + self.kept;
+        u64::from(self.whole.len).checked_sub(held).unwrap_or_else(|| panic!("frames: {held} superframes held back of {} whole", self.whole.len))
+    }
+
+    /// Superframes `count` new ones can be taken as without holding back
+    /// fewer than it does.
+    fn spare(&self, count: u64) -> bool {
+        self.spare_supers() >= count && self.room() >= count * PER_SUPER as u64
+    }
+
+    /// Keep up to `supers` whole superframes for the kernel's own
+    /// allocations, which nothing a process causes takes: as many as are
+    /// spare now, and the rest as they come back.
+    pub fn keep(&mut self, supers: u64) {
+        self.keep_target = supers;
+        self.refill();
+    }
+
+    /// Keep superframes towards the target while some are spare.
+    fn refill(&mut self) {
+        while self.kept < self.keep_target && self.spare(1) {
+            self.kept += 1;
+        }
+    }
+
+    /// Promise `frames` if nothing held back is needed for them.
+    pub fn promise(&mut self, frames: u64) -> bool {
+        if frames > self.room() {
             return false;
         }
         self.promised += frames;
@@ -246,13 +332,14 @@ impl<'m> Frames<'m> {
     /// frames just came back free.
     fn repromise(&mut self, frames: u64) {
         self.promised += frames;
-        assert!(self.promised <= self.free, "frames: {} promised of {} free", self.promised, self.free);
+        let _ = self.room();
     }
 
     /// Take back promises of `frames` no commitment holds any more.
     pub fn unpromise(&mut self, frames: u64) {
         assert!(frames <= self.promised, "frames: {frames} unpromised of {} promised", self.promised);
         self.promised -= frames;
+        self.refill();
     }
 
     /// One frame a promise held, which a promise guarantees is free.
@@ -263,22 +350,27 @@ impl<'m> Frames<'m> {
         phys
     }
 
-    /// One frame no promise holds, from a split superframe if one has a frame
-    /// free and from a whole one otherwise.
+    /// One frame for the kernel's own use: one nothing holds back, or else
+    /// one of a kept superframe, which is kept no longer.
     pub fn alloc_frame(&mut self) -> Option<u64> {
-        self.alloc_frame_keeping(0)
+        if self.room() == 0 {
+            self.kept = self.kept.checked_sub(1)?;
+        }
+        self.take_frame()
     }
 
-    /// [`alloc_frame`](Self::alloc_frame), refused unless it leaves `keep`
-    /// frames neither promised nor taken: what a frame a process causes
-    /// without a promise, such as its page tables, may not take.
-    pub fn alloc_frame_keeping(&mut self, keep: u64) -> Option<u64> {
-        if self.free <= self.promised + keep {
+    /// One frame a process causes without a promise, such as a page table:
+    /// refused rather than take one held back.
+    pub fn alloc_frame_for_process(&mut self) -> Option<u64> {
+        if self.room() == 0 {
             return None;
         }
         self.take_frame()
     }
 
+    // A whole superframe is split only when no split one has a frame free, so
+    // a draw that `room` allows never splits one held back: then every free
+    // frame is in a whole superframe, and the frames held back are fewer.
     fn take_frame(&mut self) -> Option<u64> {
         let s = match self.partial.head {
             NIL => {
@@ -306,10 +398,15 @@ impl<'m> Frames<'m> {
     /// Give back the frame at `phys`, which [`alloc_frame`](Self::alloc_frame)
     /// handed out; a pinned one is taken back by its last unpin instead.
     pub fn free_frame(&mut self, phys: u64, pins: &Pins) {
+        self.give_back(phys, pins);
+        self.refill();
+    }
+
+    fn give_back(&mut self, phys: u64, pins: &Pins) {
         let (s, _) = self.index(phys);
         assert!(self.supers[s].state == State::Split, "frames: {phys:#x} is freed as a frame and was not one");
         if pins.defer(phys) {
-            self.release(phys);
+            self.put_back(phys);
         }
     }
 
@@ -317,6 +414,11 @@ impl<'m> Frames<'m> {
     /// answered [`Unpinned::Release`]), or one [`free_frame`](Self::free_frame)
     /// found unpinned.
     pub fn release(&mut self, phys: u64) {
+        self.put_back(phys);
+        self.refill();
+    }
+
+    fn put_back(&mut self, phys: u64) {
         let (s, i) = self.index(phys);
         let record = &mut self.supers[s];
         assert!(
@@ -337,38 +439,45 @@ impl<'m> Frames<'m> {
         }
     }
 
-    /// One whole superframe.
+    /// One whole superframe for the kernel's own use.
     pub fn alloc_super(&mut self) -> Option<u64> {
-        if self.free < self.promised + PER_SUPER as u64 {
-            return None;
-        }
-        let s = self.pop(Which::Whole)?;
-        self.supers[s].state = State::Taken;
-        self.free -= PER_SUPER as u64;
-        Some(self.phys(s, 0))
+        self.alloc_run(1)
     }
 
-    /// Give back the superframe at `phys` that [`alloc_super`](Self::alloc_super)
-    /// or [`alloc_run`](Self::alloc_run) handed out; any of its frames still
-    /// pinned is taken back by its last unpin.
-    pub fn free_super(&mut self, phys: u64, pins: &Pins) {
-        let (s, i) = self.index(phys);
-        assert!(i == 0 && self.supers[s].state == State::Taken, "frames: {phys:#x} is freed as a superframe and was not one");
-        let record = &mut self.supers[s];
-        // As a split superframe with nothing free, each frame then freed alone:
-        // a superframe a copy still reads is whole again only once it is done.
-        record.state = State::Split;
-        record.free_map = [0; WORDS];
-        record.free = 0;
-        for frame in 0..PER_SUPER {
-            self.free_frame(self.phys(s, frame), pins);
-        }
-    }
-
-    /// `count` superframes in a row, lowest address first; `None` for none.
+    /// `count` superframes in a row for the kernel's own use, lowest address
+    /// first; `None` for none. Kept superframes go to it where no spare ones
+    /// are enough.
     pub fn alloc_run(&mut self, count: usize) -> Option<u64> {
-        if count == 0 || count as u64 > u64::from(self.whole.len) || self.free < self.promised + (count * PER_SUPER) as u64 {
+        let count64 = count as u64;
+        let spare = self.spare_supers().min(self.room() / PER_SUPER as u64);
+        let from_kept = count64.saturating_sub(spare);
+        if from_kept > self.kept {
             return None;
+        }
+        let run = self.take_run(count)?;
+        self.kept -= from_kept;
+        Some(run)
+    }
+
+    /// [`alloc_run`](Self::alloc_run) of a run a process causes, such as a
+    /// pipe's ring or memory a device is lent: refused rather than take a
+    /// superframe held back.
+    pub fn alloc_run_for_process(&mut self, count: usize) -> Option<u64> {
+        if !self.spare(count as u64) {
+            return None;
+        }
+        self.take_run(count)
+    }
+
+    fn take_run(&mut self, count: usize) -> Option<u64> {
+        if count == 0 || count as u64 > u64::from(self.whole.len) {
+            return None;
+        }
+        if count == 1 {
+            let s = self.pop(Which::Whole)?;
+            self.supers[s].state = State::Taken;
+            self.free -= PER_SUPER as u64;
+            return Some(self.phys(s, 0));
         }
         let mut run = 0;
         for s in 0..self.supers.len() {
@@ -386,11 +495,99 @@ impl<'m> Frames<'m> {
         None
     }
 
+    /// Give back the superframe at `phys` that [`alloc_super`](Self::alloc_super)
+    /// or [`alloc_run`](Self::alloc_run) handed out; any of its frames still
+    /// pinned is taken back by its last unpin.
+    pub fn free_super(&mut self, phys: u64, pins: &Pins) {
+        self.give_back_super(phys, pins);
+        self.refill();
+    }
+
+    fn give_back_super(&mut self, phys: u64, pins: &Pins) {
+        let (s, i) = self.index(phys);
+        assert!(i == 0 && self.supers[s].state == State::Taken, "frames: {phys:#x} is freed as a superframe and was not one");
+        let record = &mut self.supers[s];
+        // As a split superframe with nothing free, each frame then freed alone:
+        // a superframe a copy still reads is whole again only once it is done.
+        record.state = State::Split;
+        record.free_map = [0; WORDS];
+        record.free = 0;
+        for frame in 0..PER_SUPER {
+            self.give_back(self.phys(s, frame), pins);
+        }
+    }
+
     /// Give back a run [`alloc_run`](Self::alloc_run) handed out.
     pub fn free_run(&mut self, phys: u64, count: usize, pins: &Pins) {
         for s in 0..count as u64 {
-            self.free_super(phys + s * SUPER, pins);
+            self.give_back_super(phys + s * SUPER, pins);
         }
+        self.refill();
+    }
+
+    /// Charge `bytes` of the kernel heap to a process's cause, refused where
+    /// covering them would take a superframe held back. What charges cover is
+    /// whole superframes: those the heap grew into from what charges
+    /// reserved, and reserved ones it grows into first. None the heap took
+    /// otherwise covers a charge, since what it holds there is not charged.
+    pub fn charge(&mut self, bytes: u64) -> bool {
+        let Some(charged) = self.charged.checked_add(bytes) else { return false };
+        let need = charged.div_ceil(SUPER);
+        if need > self.entitled {
+            let more = need - self.entitled;
+            if !self.spare(more) {
+                return false;
+            }
+            self.entitled = need;
+            self.reserved += more;
+        }
+        self.charged = charged;
+        true
+    }
+
+    /// Give back a charge of `bytes`. Superframes stay reserved for one more
+    /// than the charges need, so a charge and its uncharge at a boundary do
+    /// not take and give back one each time.
+    pub fn uncharge(&mut self, bytes: u64) {
+        self.charged = self.charged.checked_sub(bytes).unwrap_or_else(|| panic!("frames: {bytes} uncharged of {}", self.charged));
+        let need = self.charged.div_ceil(SUPER) + 1;
+        if self.entitled > need {
+            self.entitled = need;
+            self.drawn = self.drawn.min(need);
+            self.reserved = need - self.drawn;
+            self.refill();
+        }
+    }
+
+    /// A superframe for the kernel heap to grow by: a reserved one, or else
+    /// one for the kernel's own use.
+    pub fn alloc_heap(&mut self) -> Option<u64> {
+        let phys = match self.reserved {
+            0 => self.alloc_super()?,
+            _ => {
+                let phys = self.take_run(1).expect("frames: a reserved superframe is whole");
+                self.reserved -= 1;
+                self.drawn += 1;
+                phys
+            }
+        };
+        self.heap += 1;
+        Some(phys)
+    }
+
+    /// Give back a superframe [`alloc_heap`](Self::alloc_heap) handed out,
+    /// which no copy pins: one the heap took otherwise goes first, and one it
+    /// grew into for charges is reserved for them again.
+    pub fn free_heap(&mut self, phys: u64, pins: &Pins) {
+        self.give_back_super(phys, pins);
+        let (s, _) = self.index(phys);
+        assert!(self.supers[s].state == State::Whole, "frames: the heap's superframe {phys:#x} is pinned");
+        self.heap -= 1;
+        if self.heap < self.drawn {
+            self.drawn -= 1;
+            self.reserved += 1;
+        }
+        self.refill();
     }
 
     fn index(&self, phys: u64) -> (usize, usize) {
@@ -586,46 +783,124 @@ mod tests {
     }
 
     /// What is promised is refused to every other allocation and drawn by
-    /// its holder alone; a promise past what is free, less what must be kept,
-    /// is refused whole.
+    /// its holder alone; a promise past what is free, less the superframes
+    /// kept, is refused whole.
     #[test]
     fn a_promise_holds_its_frames_against_every_other_allocation() {
-        let mut m = whole(2);
+        let mut m = whole(3);
+        m.frames.keep(1);
         let all = 2 * PER_SUPER as u64;
-        assert!(!m.frames.promise(all - 9, 10), "a promise into the kept frames");
-        assert!(m.frames.promise(all - 10, 10));
+        assert!(!m.frames.promise(all + 1), "a promise into the kept superframe");
+        assert!(m.frames.promise(all - 10));
         assert_eq!(m.frames.promised(), all - 10);
-        assert_eq!(m.frames.alloc_super(), None, "a superframe out of promised frames");
-        assert_eq!(m.frames.alloc_run(1), None, "a run out of promised frames");
-        let free: Vec<u64> = core::iter::from_fn(|| m.frames.alloc_frame()).collect();
+        assert_eq!(m.frames.alloc_run_for_process(1), None, "a superframe out of promised frames");
+        let free: Vec<u64> = core::iter::from_fn(|| m.frames.alloc_frame_for_process()).collect();
         assert_eq!(free.len(), 10, "only the unpromised frames go to anyone else");
-        assert!(!m.frames.promise(1, 0), "nothing is left to promise");
+        assert!(!m.frames.promise(1), "nothing is left to promise");
 
         let drawn: Vec<u64> = (0..all - 10).map(|_| m.frames.alloc_promised()).collect();
-        assert_eq!((m.frames.promised(), m.frames.free_frames()), (0, 0));
+        assert_eq!((m.frames.promised(), m.frames.free_frames()), (0, PER_SUPER as u64));
 
         // A frame a commitment still holds, given back, is promised to it
         // again; one given back by none is anyone's.
         assert_eq!(m.frames.discard(drawn[0], &m.pins), Discarded::Freed);
-        assert_eq!((m.frames.promised(), m.frames.free_frames()), (1, 1));
-        assert_eq!(m.frames.alloc_frame(), None, "a frame promised again went to another");
+        assert_eq!(m.frames.promised(), 1);
+        assert_eq!(m.frames.alloc_frame_for_process(), None, "a frame promised again went to another");
         m.frames.free_frame(drawn[1], &m.pins);
-        assert!(m.frames.alloc_frame().is_some(), "a frame no promise holds was refused");
-        assert_eq!(m.frames.alloc_frame(), None, "the promised one went too");
+        assert!(m.frames.alloc_frame_for_process().is_some(), "a frame no promise holds was refused");
+        assert_eq!(m.frames.alloc_frame_for_process(), None, "the promised one went too");
         m.frames.unpromise(1);
-        assert!(m.frames.alloc_frame().is_some(), "an unpromised frame stayed held");
+        assert!(m.frames.alloc_frame_for_process().is_some(), "an unpromised frame stayed held");
     }
 
-    /// What a process's page tables may take leaves the kept frames to the
-    /// kernel, as a promise does.
+    /// A kept superframe is the kernel's alone: refused to whatever a process
+    /// causes, a frame or a run, and taken by the kernel only once nothing
+    /// spare is left. It is kept again when one comes back whole.
     #[test]
-    fn a_frame_kept_for_the_kernel_goes_to_the_kernel_alone() {
-        let mut m = whole(1);
+    fn a_kept_superframe_goes_to_the_kernel_alone() {
+        let mut m = whole(2);
+        m.frames.keep(1);
         let all = PER_SUPER as u64;
-        let keep = 10;
-        let taken: Vec<u64> = core::iter::from_fn(|| m.frames.alloc_frame_keeping(keep)).collect();
-        assert_eq!(taken.len() as u64, all - keep, "a table took a kept frame");
-        assert!(m.frames.alloc_frame().is_some(), "the kernel was refused a kept frame");
+        let tables: Vec<u64> = core::iter::from_fn(|| m.frames.alloc_frame_for_process()).collect();
+        assert_eq!(tables.len() as u64, all, "a table took a frame of the kept superframe");
+        assert_eq!(m.frames.alloc_run_for_process(1), None, "a process's run took the kept superframe");
+        assert_eq!(m.frames.held_back(), (0, 1));
+        let kernel = m.frames.alloc_frame().expect("the kernel was refused a kept frame");
+        assert_eq!(m.frames.held_back(), (0, 0), "a kept superframe split for the kernel stayed kept");
+        for &f in &tables {
+            m.frames.free_frame(f, &m.pins);
+        }
+        assert_eq!(m.frames.held_back(), (0, 1), "a superframe back whole was not kept again");
+        m.frames.free_frame(kernel, &m.pins);
+        assert!(m.frames.alloc_super().is_some());
+        assert_eq!(m.frames.held_back(), (0, 1), "the kernel's own superframe came from the kept one while one was spare");
+    }
+
+    /// Charges reserve whole superframes before the heap grows, and the heap
+    /// grows into them first; a charge they cannot cover is refused whole,
+    /// and an uncharge gives back all but one superframe of slack.
+    #[test]
+    fn a_charge_reserves_what_the_heap_grows_into() {
+        let mut m = whole(4);
+        m.frames.keep(1);
+        assert!(m.frames.charge(SUPER + 1));
+        assert_eq!(m.frames.held_back(), (2, 1));
+        assert!(!m.frames.charge(2 * SUPER), "a charge into the kept superframe");
+        assert_eq!((m.frames.charges(), m.frames.held_back()), ((SUPER + 1, 0), (2, 1)), "a refused charge left something behind");
+        assert!(!m.frames.promise(PER_SUPER as u64 + 1), "a promise into the reserved superframes");
+        assert!(m.frames.promise(PER_SUPER as u64));
+
+        let first = m.frames.alloc_heap().unwrap();
+        let second = m.frames.alloc_heap().unwrap();
+        assert_eq!(m.frames.held_back(), (0, 1));
+        assert!(m.frames.alloc_heap().is_some());
+        assert_eq!(m.frames.held_back(), (0, 0), "the heap past its charges took no kept superframe");
+        assert_eq!(m.frames.alloc_heap(), None);
+        assert_eq!((0..PER_SUPER).map(|_| m.frames.alloc_promised()).count(), PER_SUPER, "the heap took a promised frame");
+
+        m.frames.free_heap(first, &m.pins);
+        assert_eq!(m.frames.held_back(), (0, 1), "the superframe past the charges was not kept again");
+        m.frames.free_heap(second, &m.pins);
+        assert_eq!(m.frames.held_back(), (1, 1), "a superframe the charges cover was not reserved again");
+        m.frames.uncharge(SUPER + 1);
+        assert_eq!(m.frames.held_back(), (0, 1), "a superframe past one of slack stayed reserved");
+    }
+
+    /// What the heap took for the kernel's own use, its boot-time structures
+    /// say, covers no charge: a charge reserves its superframes beside them.
+    #[test]
+    fn the_heaps_own_superframes_cover_no_charge() {
+        let mut m = whole(4);
+        let own = [m.frames.alloc_heap().unwrap(), m.frames.alloc_heap().unwrap()];
+        assert!(m.frames.charge(1));
+        assert_eq!(m.frames.held_back(), (1, 0), "a charge leaned on the heap's own superframes");
+        m.frames.free_heap(own[0], &m.pins);
+        assert_eq!(m.frames.held_back(), (1, 0));
+        let drawn = m.frames.alloc_heap().unwrap();
+        assert_eq!(m.frames.held_back(), (0, 0));
+        m.frames.free_heap(own[1], &m.pins);
+        assert_eq!(m.frames.held_back(), (0, 0), "the heap's own superframe went back as the charge's");
+        m.frames.free_heap(drawn, &m.pins);
+        assert_eq!(m.frames.held_back(), (1, 0), "the charge's superframe was not reserved again");
+    }
+
+    /// One superframe of slack stays reserved past what the charges need, so
+    /// charges that rise and fall across a boundary do not take and give one
+    /// back each time.
+    #[test]
+    fn an_uncharge_keeps_one_superframe_of_slack() {
+        let mut m = whole(4);
+        assert!(m.frames.charge(1));
+        m.frames.uncharge(1);
+        assert_eq!(m.frames.held_back(), (1, 0));
+        assert!(m.frames.charge(SUPER));
+        assert_eq!(m.frames.held_back(), (1, 0));
+        assert!(m.frames.charge(1));
+        assert_eq!(m.frames.held_back(), (2, 0));
+        m.frames.uncharge(SUPER);
+        assert_eq!(m.frames.held_back(), (2, 0));
+        m.frames.uncharge(1);
+        assert_eq!((m.frames.charges(), m.frames.held_back()), ((0, 0), (1, 0)));
     }
 
     /// A frame a copy pins is kept by a discard rather than freed: freed, it
@@ -636,7 +911,7 @@ mod tests {
     fn a_discard_keeps_a_pinned_frame_and_promises_only_what_came_back() {
         let mut m = whole(1);
         let all = PER_SUPER as u64;
-        assert!(m.frames.promise(all, 0));
+        assert!(m.frames.promise(all));
         let drawn: Vec<u64> = (0..all).map(|_| m.frames.alloc_promised()).collect();
         assert!(m.pins.pin(drawn[0]));
         assert_eq!(m.frames.discard(drawn[0], &m.pins), Discarded::Kept, "a pinned frame was freed");
@@ -791,6 +1066,86 @@ mod tests {
     fn an_unpin_with_no_pin_is_a_kernel_bug() {
         let m = whole(1);
         let _ = m.pins.unpin(BASE);
+    }
+
+    /// However a process's 4 KiB traffic fragments memory, the heap always
+    /// finds a whole superframe for what its charges cover, and a promised
+    /// frame is always there to draw: a deterministic mix of promises,
+    /// draws, discards, a process's tables and runs, the kernel's own frames
+    /// and charges, with the heap grown whenever its charges outrun it.
+    #[test]
+    fn fragmentation_never_takes_what_charges_or_promises_hold() {
+        let supers = 16;
+        let mut m = whole(supers);
+        m.frames.keep(2);
+        let mut seed = 0x9e37_79b9_7f4a_7c15u64;
+        let mut next = move || {
+            seed ^= seed << 13;
+            seed ^= seed >> 7;
+            seed ^= seed << 17;
+            seed
+        };
+        let (mut drawn, mut tables, mut runs, mut kernel, mut heap, mut charges) =
+            (Vec::new(), Vec::new(), Vec::new(), Vec::new(), Vec::new(), Vec::new());
+        let mut promised = 0u64;
+        for _ in 0..40_000 {
+            match next() % 12 {
+                0 => {
+                    let n = next() % 300;
+                    if m.frames.promise(n) {
+                        promised += n;
+                    }
+                }
+                1 | 2 if promised > 0 => {
+                    drawn.push(m.frames.alloc_promised());
+                    promised -= 1;
+                }
+                3 if !drawn.is_empty() => {
+                    // A discard keeps the page committed: its frame is promised again.
+                    let f = drawn.swap_remove(next() as usize % drawn.len());
+                    assert_eq!(m.frames.discard(f, &m.pins), Discarded::Freed);
+                    promised += 1;
+                }
+                4 if !drawn.is_empty() => {
+                    // Every 7th drawn frame goes back unpromised, scattering holes.
+                    let i = next() as usize % drawn.len();
+                    if i.is_multiple_of(7) {
+                        m.frames.free_frame(drawn.swap_remove(i), &m.pins);
+                    }
+                }
+                5 => tables.extend(m.frames.alloc_frame_for_process()),
+                6 if !tables.is_empty() => m.frames.free_frame(tables.swap_remove(next() as usize % tables.len()), &m.pins),
+                7 => runs.extend(m.frames.alloc_run_for_process(1)),
+                8 if !runs.is_empty() => m.frames.free_super(runs.swap_remove(next() as usize % runs.len()), &m.pins),
+                9 => {
+                    let bytes = next() % (SUPER / 2);
+                    if m.frames.charge(bytes) {
+                        charges.push(bytes);
+                    }
+                }
+                10 if !charges.is_empty() => m.frames.uncharge(charges.swap_remove(next() as usize % charges.len())),
+                11 => match next() % 2 {
+                    0 => kernel.extend(m.frames.alloc_frame()),
+                    _ if !kernel.is_empty() => m.frames.free_frame(kernel.swap_remove(next() as usize % kernel.len()), &m.pins),
+                    _ => {}
+                },
+                _ => {}
+            }
+            // The heap holds exactly what its charges need, as one that grows
+            // only for them would.
+            let need = m.frames.charges().0.div_ceil(SUPER) as usize;
+            while heap.len() < need {
+                heap.push(m.frames.alloc_heap().expect("the heap found no superframe its charges reserved"));
+            }
+            while heap.len() > need {
+                m.frames.free_heap(heap.pop().unwrap(), &m.pins);
+            }
+            assert_eq!(m.frames.promised(), promised);
+        }
+        while promised > 0 {
+            drawn.push(m.frames.alloc_promised());
+            promised -= 1;
+        }
     }
 
     /// Every frame handed out is distinct, inside usable memory, and the counts

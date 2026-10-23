@@ -37,6 +37,7 @@ use core::sync::atomic::Ordering;
 use kernel::sched::task::WaitClass;
 use kernel::sched::watch::{Fire, Ring};
 
+use crate::mm::charge::{self, Charge};
 use crate::object::shm::SharedMemObject;
 use crate::object::{ops, HandleError, KObjectRef};
 use crate::process;
@@ -190,6 +191,19 @@ pub struct Inbox {
     completions: Lock<Option<Completions>>,
     /// Threads parked in `submit`; never a poll — see the module header.
     watch: IrqWatch,
+    /// Itself and its polls at their cap: a poll is made at a submission,
+    /// which has no call of its own to refuse.
+    _charge: Charge,
+}
+
+/// The heap an inbox and [`MAX_PENDING_WATCHES`] polls take: each poll's
+/// place in the list, the poll, and its entries on up to three watches, which
+/// double their lists as they grow.
+fn heap() -> usize {
+    let places = core::alloc::Layout::from_size_align(Polls::<Arc<Inbox>>::place_bytes() * MAX_PENDING_WATCHES, 8)
+        .expect("inbox: the poll list's layout");
+    let per_poll = charge::arc::<Poll>() + 3 * 2 * core::mem::size_of::<PollEntry>();
+    charge::arc::<Inbox>() + charge::heap(places) + MAX_PENDING_WATCHES * per_poll
 }
 
 struct RingState {
@@ -344,6 +358,7 @@ pub fn create(depth: u32) -> Result<(InboxRef, u64), SyscallError> {
     let submission_size = depth;
     let completion_size = depth * 2;
 
+    let charge = Charge::new(heap())?;
     let space = process::current_address_space();
     let bytes = SUBMISSIONS_OFF + u64::from(MAX_SUBMISSION_DEPTH) * core::mem::size_of::<Submission>() as u64;
     let ring = SharedMemObject::create(bytes)?;
@@ -368,6 +383,7 @@ pub fn create(depth: u32) -> Result<(InboxRef, u64), SyscallError> {
             completion_tail: 0,
         })),
         watch: IrqWatch::new(),
+        _charge: charge,
     });
     Ok((InboxRef(inbox), at.raw()))
 }
@@ -661,13 +677,18 @@ fn process_accept(inbox: &Arc<Inbox>, submission: &Submission) {
         }
     };
 
+    // Charged before a connection is taken, so a refusal leaves it queued.
+    let core = match crate::object::service::ConnectionEnd::accept_core() {
+        Ok(core) => core,
+        Err(e) => {
+            polls::complete(inbox, user_data, -(SyscallError::from(e) as i32));
+            return;
+        }
+    };
     match acceptor.pop() {
         Some(conn) => {
             let installed = process::with_process_data(|data| {
-                ops::install(
-                    &mut data.handles,
-                    KObjectRef::Connection(crate::object::service::ConnectionEnd::accepted(conn)),
-                )
+                ops::install(&mut data.handles, KObjectRef::Connection(crate::object::service::ConnectionEnd::accepted(core, conn)))
             });
             match installed {
                 Ok(h) => polls::complete(inbox, user_data, h.0 as i32),

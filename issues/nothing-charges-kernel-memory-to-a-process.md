@@ -6,10 +6,21 @@ opened: 2026-08-04
 
 # Nothing charges a kernel allocation to the process that caused it
 
-No allocation the kernel makes on a process's behalf is attributed to it, so
-there is no per-process memory in `ps`, no `meminfo`, no reap-time assertion
-that a dead process's charges went to zero, and no way for the suite to assert
-the absence of a leak.
+**Kernel memory a process causes is charged, but to the machine, not to
+it.** Every persistent kernel object a process can reach holds a
+`mm::charge::Charge` for the heap it keeps, taken before the allocation and
+refused `ResourceExhausted` at the call where covering it would take what the
+frame allocator holds back for the kernel; the heap grows into what charges
+reserved (`kernel/pure/frames.rs`). So the terminal state below is gone for
+those objects. What is still missing is the attribution: no charge names the
+process or job that caused it, so there is no per-process memory in `ps`, no
+`meminfo`, no reap-time assertion that a dead process's charges went to zero,
+and no way for the suite to assert the absence of a leak. The memory design
+puts this on the scheduler's job as its `Account`, with `account_info`.
+
+**Exit:** each charge held against its job's account, released with the
+object, and `account_info` reporting it, with a reap-time check that an ended
+job's charges are what its retained objects hold.
 
 **The security case that once justified this is mostly gone, and that is the
 news.** It was staged as an ownership discipline — a purpose-carrying allocator
@@ -36,16 +47,8 @@ both cost a day to discover:
   =`, `drop()` and burial in a collection all pass silently. A drop bomb is the
   state of the art, and `Unmapped<T>` is already exactly such an obligation.
 
-**The terminal state of every unbounded grower is a halted machine.** A failed
+**The terminal state of an uncharged grower is a halted machine.** A failed
 kernel allocation panics with the size, the layer and the call site named, and
-every kernel panic halts, so a grower userland can drive is refused at its bound
-or it ends the machine.
-
-**A port badge is kernel memory nobody is charged for.** Any process can make
-a port and mint on it (`SYS_PORT_MINT`), at most `MAX_BADGE` = 64 bytes per
-connector. Derived from the bounds, not measured: a namespace holds 64
-connectors and a table 4,096 handles, so one process pins 16 MiB of badge
-bytes in its table, and up to 2 GiB more in the handle queues of the 2,048
-connections it can hold both ends of (2 directions × 16 batches × 8 handles ×
-64 connectors × 64 bytes each), the same queues that already hold its
-unbadged connectors uncharged.
+every kernel panic halts. What a call allocates and frees before it returns is
+not charged: it draws on the superframes the kernel keeps, 1/256 of memory and
+16 MiB at least, which nothing a process causes takes.

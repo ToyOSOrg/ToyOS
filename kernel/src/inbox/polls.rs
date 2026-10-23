@@ -124,6 +124,11 @@ impl<W: Wake> Polls<W> {
         Self { polls: Vec::new(), kept: 0 }
     }
 
+    /// The bytes one kept poll's place in the list takes.
+    pub const fn place_bytes() -> usize {
+        core::mem::size_of::<Kept<W>>()
+    }
+
     fn keep(&mut self, poll: Arc<Poll<W>>) -> Kept<W> {
         self.kept += 1;
         Kept { poll, looking: false, order: self.kept - 1 }

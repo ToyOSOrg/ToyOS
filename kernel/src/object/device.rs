@@ -10,6 +10,7 @@ use toyos_abi::usersafe::bytes;
 use toyos_abi::FramebufferInfo;
 
 use crate::device::{Claim, DeviceType};
+use crate::mm::charge::Exhausted;
 
 use super::handle::{HandleEntry, HandleTable};
 use super::shm::SharedMemObject;
@@ -74,14 +75,15 @@ struct Described {
 }
 
 impl DeviceClaim {
-    pub fn new(class: DeviceType, info: DeviceInfo, claim: Claim) -> Arc<Self> {
-        Arc::new(Self {
-            core: Self::new_core(),
+    /// Refused, `claim` drops and the device is let go.
+    pub fn new(class: DeviceType, info: DeviceInfo, claim: Claim) -> Result<Arc<Self>, Exhausted> {
+        Ok(Arc::new(Self {
+            core: Self::new_core(0)?,
             class,
             info_read: AtomicBool::new(false),
             described: crate::sync::Lock::new(Described { info, bytes: None }),
             reference: Held::new(claim),
-        })
+        }))
     }
 
     pub fn class(&self) -> DeviceType {
@@ -158,11 +160,11 @@ pub struct ConsoleObject {
 }
 
 impl ConsoleObject {
-    pub fn new() -> Arc<Self> {
-        Arc::new(Self {
-            core: Self::new_core(),
+    pub fn new() -> Result<Arc<Self>, Exhausted> {
+        Ok(Arc::new(Self {
+            core: Self::new_core(0)?,
             line: crate::sync::Lock::new(crate::drivers::serial::ConsoleLine::new()),
-        })
+        }))
     }
 
     /// Take a userland write, queueing every whole line it completes that the

@@ -1,3 +1,4 @@
+use crate::mm::charge::{self, Charge, Exhausted};
 use crate::mm::pmm;
 
 use kernel::message::Window;
@@ -132,13 +133,20 @@ struct Pipe {
     /// batches are pinned at (`kernel::message`), which never wrap.
     written: u64,
     read: u64,
+    /// Its place in `PIPES` and its watches.
+    _charge: Charge,
 }
 
 // SAFETY: `Backing::ring`'s raw pointer and its owning `PhysPage` move together in the same struct, and the `PIPES` lock is the only way to reach a `Pipe`, serializing all access to it.
 unsafe impl Send for Pipe {}
 
 impl Pipe {
-    fn new(id: PipeId) -> Self {
+    /// The heap one takes: its place in `PIPES` and its four watches.
+    fn heap() -> usize {
+        charge::map_entry::<PipeId, Pipe>() + 4 * charge::arc::<Watch>()
+    }
+
+    fn new(id: PipeId, charge: Charge) -> Self {
         Self {
             id,
             backing: None,
@@ -149,13 +157,15 @@ impl Pipe {
             rt_boost_pending: false,
             written: 0,
             read: 0,
+            _charge: charge,
         }
     }
 
-    /// Allocate the ring page if this is the first use; `None` on exhaustion, an error return rather than a panic since userland drives it.
+    /// Allocate the ring page if this is the first use; `None` where the
+    /// kernel holds back what is left, which userland's write is refused.
     fn back(&mut self) -> Option<&mut Backing> {
         if self.backing.is_none() {
-            let page = pmm::alloc_page()?;
+            let page = pmm::alloc_page_for_process()?;
             // SAFETY: a fresh 2 MiB page this `Pipe` owns for as long as the `Ring` addresses it.
             let ring = unsafe { Ring::new(page.direct_map().as_mut_ptr(), PIPE_SIZE) };
             self.backing = Some(Backing { _page: page, ring });
@@ -204,15 +214,17 @@ pub fn init() {
 
 /// Create a new pipe. Returns owned reader + writer references.
 ///
-/// Infallible: a pipe with no traffic owns no physical memory, so nothing here can be exhausted; the ring page is allocated on first `write` or `map_page`.
-pub fn create() -> (PipeReader, PipeWriter) {
-    with_pipes_mut(|pipes| {
-        let id = pipes.insert_with(Pipe::new);
+/// A pipe with no traffic owns no physical memory: its ring page is
+/// allocated at its first `write`, which is refused if none is left.
+pub fn create() -> Result<(PipeReader, PipeWriter), Exhausted> {
+    let charge = Charge::new(Pipe::heap())?;
+    Ok(with_pipes_mut(|pipes| {
+        let id = pipes.insert_with(|id| Pipe::new(id, charge));
         let pipe = pipes.get_mut(id).expect("the pipe just inserted");
         let reader = PipeReader::acquire(pipe);
         let writer = PipeWriter::acquire(pipe);
         (reader, writer)
-    })
+    }))
 }
 
 pub fn try_read(pipe_id: PipeId, buf: &mut UserBytesMut) -> Option<usize> {

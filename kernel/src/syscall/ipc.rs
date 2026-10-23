@@ -25,17 +25,21 @@ use super::{cancelled, HANDLE_LEN};
 use super::handles::handle_result;
 
 pub(super) fn sys_pipe() -> u64 {
-    let (reader, writer) = pipe::create();
-    let read_end = KObjectRef::PipeRead(crate::object::pipe::PipeReadEnd::new(reader));
-    let write_end = KObjectRef::PipeWrite(crate::object::pipe::PipeWriteEnd::new(writer));
-    install_pair(read_end, write_end)
+    let ends = pipe::create().and_then(|(reader, writer)| {
+        let read_end = KObjectRef::PipeRead(crate::object::pipe::PipeReadEnd::new(reader)?);
+        Ok((read_end, KObjectRef::PipeWrite(crate::object::pipe::PipeWriteEnd::new(writer)?)))
+    });
+    match ends {
+        Ok((read_end, write_end)) => install_pair(read_end, write_end),
+        Err(e) => SyscallError::from(e).to_u64(),
+    }
 }
 
 /// Install two objects or neither; the two handles come back packed into one word, which cannot be read as an error.
 fn install_pair(first: KObjectRef, second: KObjectRef) -> u64 {
     let installed = process::with_process_data(|data| {
         // Room for both before either: a refused pair installs nothing, so nothing is taken back.
-        if !data.handles.has_room(2) {
+        if !data.handles.make_room(2) {
             return Err((first, second));
         }
         let mut install =
@@ -53,8 +57,10 @@ fn install_pair(first: KObjectRef, second: KObjectRef) -> u64 {
 
 /// Make a port and install both ends; needs no right and grants none, since a port with no clients is not authority.
 pub(super) fn sys_port_create() -> u64 {
-    let (acceptor, connector) = port::create();
-    install_pair(KObjectRef::Acceptor(acceptor), KObjectRef::Connector(connector))
+    match port::create() {
+        Ok((acceptor, connector)) => install_pair(KObjectRef::Acceptor(acceptor), KObjectRef::Connector(connector)),
+        Err(e) => SyscallError::from(e).to_u64(),
+    }
 }
 
 /// Build a namespace from a base's kept names plus new bindings; a refusal leaves the caller's table unchanged (every name resolved and connector checked first).
@@ -161,6 +167,9 @@ pub(super) fn sys_namespace_build(ctx: &SyscallContext, args: &NamespaceBuild) -
         Err(crate::object::namespace::BuildError::Duplicate) => {
             return SyscallError::AlreadyExists.to_u64()
         }
+        Err(crate::object::namespace::BuildError::Exhausted) => {
+            return SyscallError::ResourceExhausted.to_u64()
+        }
     };
     process::with_process_data(|data| {
         handle_result(ops::install(&mut data.handles, KObjectRef::Namespace(namespace)))
@@ -187,27 +196,34 @@ fn connect_through(connector: &port::Connector) -> u64 {
     if connector.closed() {
         return SyscallError::Gone.to_u64();
     }
-    let (cs_reader, cs_writer) = pipe::create(); // client → server
-    let (sc_reader, sc_writer) = pipe::create(); // server → client
-    // Cross-wired here only: the server's end is built from the same two queues when it accepts.
-    let (to_server, to_client) = crate::object::service::ConnectionEnd::pair_queues();
+    let made = (|| {
+        let (cs_reader, cs_writer) = pipe::create()?; // client → server
+        let (sc_reader, sc_writer) = pipe::create()?; // server → client
+        // Cross-wired here only: the server's end is built from the same two queues when it accepts.
+        let (to_server, to_client) = crate::object::service::ConnectionEnd::pair_queues()?;
 
-    let object = KObjectRef::Connection(crate::object::service::ConnectionEnd::new(
-        sc_reader,          // client reads from server→client
-        cs_writer,          // client writes to client→server
-        to_client.clone(),  // and receives what the server sent
-        to_server.clone(),
-    ));
-    let pending = port::PendingConnection {
-        rx: cs_reader, // server reads from client→server
-        tx: sc_writer, // server writes to server→client
-        inbox: to_server,
-        outbox: to_client,
-        stamp: connector.stamp(),
+        let object = KObjectRef::Connection(crate::object::service::ConnectionEnd::new(
+            sc_reader,          // client reads from server→client
+            cs_writer,          // client writes to client→server
+            to_client.clone(),  // and receives what the server sent
+            to_server.clone(),
+        )?);
+        let pending = port::PendingConnection {
+            rx: cs_reader, // server reads from client→server
+            tx: sc_writer, // server writes to server→client
+            inbox: to_server,
+            outbox: to_client,
+            stamp: connector.stamp(),
+        };
+        Ok::<_, crate::mm::charge::Exhausted>((object, pending))
+    })();
+    let (object, pending) = match made {
+        Ok(made) => made,
+        Err(e) => return SyscallError::from(e).to_u64(),
     };
     // One hold from the room to the install: the port can still refuse, and the client's end is in the table only once it has not.
     let installed = process::with_process_data(|data| {
-        if !data.handles.has_room(1) {
+        if !data.handles.make_room(1) {
             return Err((SyscallError::ResourceExhausted, object, pending));
         }
         match connector.push(pending) {
@@ -237,9 +253,14 @@ pub(super) fn sys_accept(h: RawHandle) -> u64 {
     };
 
     loop {
+        // Charged before a connection is taken, so a refusal leaves it queued.
+        let core = match crate::object::service::ConnectionEnd::accept_core() {
+            Ok(core) => core,
+            Err(e) => return SyscallError::from(e).to_u64(),
+        };
         if let Some(conn) = acceptor.pop() {
             // PipeReader/PipeWriter move from queue into connection: ownership transfers, no refcount change.
-            let object = KObjectRef::Connection(crate::object::service::ConnectionEnd::accepted(conn));
+            let object = KObjectRef::Connection(crate::object::service::ConnectionEnd::accepted(core, conn));
             let installed = process::with_process_data(|data| {
                 ops::install(&mut data.handles, object)
             });
@@ -273,7 +294,10 @@ pub(super) fn sys_port_mint(h: RawHandle, badge: &[u8]) -> u64 {
         Ok(a) => a,
         Err(e) => return e.refuse(),
     };
-    let connector = KObjectRef::Connector(acceptor.mint(alloc::sync::Arc::from(badge)));
+    let connector = match acceptor.mint(alloc::sync::Arc::from(badge)) {
+        Ok(connector) => KObjectRef::Connector(connector),
+        Err(e) => return SyscallError::from(e).to_u64(),
+    };
     process::with_process_data(|data| handle_result(ops::install(&mut data.handles, connector)))
 }
 
@@ -417,7 +441,7 @@ pub(super) fn sys_handle_recv(
             .handles
             .get::<crate::object::service::ConnectionEnd>(conn_h, Rights::READ)?;
         // Width and room are measured before the batch is taken: refusing after taking would drop handles nobody could ask for again.
-        let Some(batch) = conn.recv(cap, |width| data.handles.has_room(width))? else { return Ok(0) };
+        let Some(batch) = conn.recv(cap, |width| data.handles.make_room(width))? else { return Ok(0) };
         let count = batch.len();
         for (i, entry) in batch.into_iter().enumerate() {
             let h = data.handles.install(entry).expect("room was asked for first");
@@ -439,7 +463,10 @@ pub(super) fn sys_inbox_setup(depth: u32, out: &mut crate::user_ptr::UserBytesMu
         Err(e) => return e.to_u64(),
     };
     // A refused install drops the reference, which tears the inbox down again.
-    let object = KObjectRef::Inbox(crate::object::inbox::InboxObject::new(inbox));
+    let object = match crate::object::inbox::InboxObject::new(inbox) {
+        Ok(object) => KObjectRef::Inbox(object),
+        Err(e) => return SyscallError::from(e).to_u64(),
+    };
     let installed = process::with_process_data(|data| ops::install(&mut data.handles, object));
     let handle = match installed {
         Ok(h) => h,

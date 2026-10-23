@@ -130,7 +130,10 @@ pub(super) fn sys_job_create(syscap: RawHandle) -> u64 {
     if let Err(e) = demand_syscap(syscap, Rights::JOBS) {
         return e.refuse();
     }
-    let object = crate::object::KObjectRef::Job(crate::object::job::JobObject::new(crate::object::job::new_job()));
+    let object = match crate::object::job::JobObject::new(crate::object::job::new_job()) {
+        Ok(object) => crate::object::KObjectRef::Job(object),
+        Err(e) => return SyscallError::from(e).to_u64(),
+    };
     match process::with_process_data(|data| crate::object::ops::install(&mut data.handles, object)) {
         Ok(h) => u64::from(h.0),
         Err(e) => e.to_u64(),
@@ -140,7 +143,7 @@ pub(super) fn sys_job_create(syscap: RawHandle) -> u64 {
 /// Install a handle to the job the caller runs in.
 pub(super) fn sys_job_own() -> u64 {
     let installed = process::with_process_data(|data| {
-        let object = crate::object::KObjectRef::Job(crate::object::job::JobObject::new(data.job.clone()));
+        let object = crate::object::KObjectRef::Job(crate::object::job::JobObject::new(data.job.clone())?);
         crate::object::ops::install(&mut data.handles, object)
     });
     match installed {

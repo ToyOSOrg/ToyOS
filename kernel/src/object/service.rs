@@ -5,8 +5,9 @@ use alloc::vec::Vec;
 
 use kernel::message::{Batches, Refused, Window};
 use kernel::pipe::Landing;
-use toyos_abi::syscall::{SyscallError, MAX_QUEUED_BATCHES};
+use toyos_abi::syscall::{SyscallError, MAX_QUEUED_BATCHES, MAX_TRANSFER_HANDLES};
 
+use crate::mm::charge::{self, Charge, Exhausted};
 use crate::pipe::{self, AtBatch, PipeId, PipeReader, PipeWrite, PipeWriter};
 use crate::user_ptr::{UserBytes, UserBytesMut};
 use crate::sync::Lock;
@@ -22,7 +23,13 @@ use super::{Held, KObjectVariant, ObjectCore, ZeroHandles};
 /// **Its lock is taken before the pipe's**, by the sender for the whole of a
 /// message and by the reader for a read or a receive, so a reader that has
 /// read a message's bytes finds its batch pinned.
-pub struct HandleQueue(Lock<Option<Batches<Vec<HandleEntry>>>>);
+///
+/// Charged at its bound when it is made, so that no send has a heap
+/// allocation of its own to be refused.
+pub struct HandleQueue {
+    batches: Lock<Option<Batches<Vec<HandleEntry>>>>,
+    _charge: Charge,
+}
 
 /// Why a message was not sent; nothing of it was.
 pub enum SendRefused {
@@ -32,15 +39,20 @@ pub enum SendRefused {
 }
 
 impl HandleQueue {
-    fn open() -> Arc<Self> {
-        Arc::new(Self(Lock::new(Some(Batches::new()))))
+    fn open() -> Result<Arc<Self>, Exhausted> {
+        // `VecDeque` doubles its storage, so the bound's next power of two.
+        let bound = charge::arc::<Self>()
+            + charge::array::<(u64, Vec<HandleEntry>)>(MAX_QUEUED_BATCHES.next_power_of_two())
+            + MAX_QUEUED_BATCHES * charge::array::<HandleEntry>(MAX_TRANSFER_HANDLES);
+        let charge = Charge::new(bound)?;
+        Ok(Arc::new(Self { batches: Lock::new(Some(Batches::new())), _charge: charge }))
     }
 
     /// Write `bytes` to `tx` and pin `batch` just past them, whole or not at
     /// all. A refusal hands the batch back: dropped here, it would be
     /// capabilities destroyed silently.
     fn send(&self, tx: PipeId, bytes: &UserBytes, batch: Vec<HandleEntry>) -> Result<(), (Vec<HandleEntry>, SendRefused)> {
-        let mut guard = self.0.lock();
+        let mut guard = self.batches.lock();
         let Some(batches) = guard.as_mut() else { return Err((batch, SendRefused::Error(SyscallError::Gone))) };
         let carries = !batch.is_empty();
         match batches.admit(bytes.len(), carries, MAX_QUEUED_BATCHES) {
@@ -63,7 +75,7 @@ impl HandleQueue {
 
     /// A read of `rx`, stopping at the next pinned batch.
     fn read(&self, rx: PipeId, buf: &mut UserBytesMut) -> Option<Result<usize, AtBatch>> {
-        let guard = self.0.lock();
+        let guard = self.batches.lock();
         pipe::try_read_within(rx, buf, |read, available| match guard.as_ref() {
             Some(batches) => batches.window(read, available),
             None => Window::Bytes(available),
@@ -73,7 +85,7 @@ impl HandleQueue {
     /// Take the batch pinned at `rx`'s read position, refusing without taking
     /// when it is wider than `cap`, and leaving it pinned when `room` refuses.
     fn take(&self, rx: PipeId, cap: usize, room: impl FnOnce(usize) -> bool) -> Result<Option<Vec<HandleEntry>>, SyscallError> {
-        let mut guard = self.0.lock();
+        let mut guard = self.batches.lock();
         let Some(batches) = guard.as_mut() else { return Ok(None) };
         let Some(read) = pipe::read_position(rx) else { return Ok(None) };
         let Some(width) = batches.at(read).map(Vec::len) else { return Ok(None) };
@@ -88,14 +100,14 @@ impl HandleQueue {
 
     /// Whether a batch is pinned where the reader is, which is something to receive.
     fn pinned_here(&self, rx: PipeId) -> bool {
-        let guard = self.0.lock();
+        let guard = self.batches.lock();
         let Some(batches) = guard.as_ref() else { return false };
         pipe::read_position(rx).is_some_and(|read| batches.at(read).is_some())
     }
 
     /// Drops the batches outside the lock: releasing a handle can run another object's hook.
     pub(super) fn close_now(&self) {
-        let batches = self.0.lock().take();
+        let batches = self.batches.lock().take();
         drop(batches);
     }
 }
@@ -114,8 +126,8 @@ pub struct ConnectionEnd {
 
 impl ConnectionEnd {
     /// One call for both ends, so the cross-wiring can't be gotten wrong from two constructors.
-    pub fn pair_queues() -> (Arc<HandleQueue>, Arc<HandleQueue>) {
-        (HandleQueue::open(), HandleQueue::open())
+    pub fn pair_queues() -> Result<(Arc<HandleQueue>, Arc<HandleQueue>), Exhausted> {
+        Ok((HandleQueue::open()?, HandleQueue::open()?))
     }
 
     pub fn new(
@@ -123,16 +135,29 @@ impl ConnectionEnd {
         tx: PipeWriter,
         inbox: Arc<HandleQueue>,
         outbox: Arc<HandleQueue>,
-    ) -> Arc<Self> {
-        Self::build(rx, tx, inbox, outbox, None)
+    ) -> Result<Arc<Self>, Exhausted> {
+        Ok(Self::build(Self::new_core(0)?, rx, tx, inbox, outbox, None))
     }
 
-    /// The server's end of a queued connection, keeping its stamp.
-    pub fn accepted(conn: PendingConnection) -> Arc<Self> {
-        Self::build(conn.rx, conn.tx, conn.inbox, conn.outbox, Some(conn.stamp))
+    /// What a server's end is charged, a stamp's badge at its bound
+    /// included: taken before a connection leaves its port's queue, so a
+    /// refused accept leaves it there.
+    pub fn accept_core() -> Result<ObjectCore, Exhausted> {
+        let badge = core::alloc::Layout::new::<[usize; 2]>()
+            .extend(core::alloc::Layout::array::<u8>(toyos_abi::syscall::MAX_BADGE).expect("service: a badge's layout"))
+            .expect("service: a badge's layout")
+            .0;
+        Self::new_core(charge::heap(badge.pad_to_align()))
+    }
+
+    /// The server's end of a queued connection, over what
+    /// [`accept_core`](Self::accept_core) charged, keeping its stamp.
+    pub fn accepted(core: ObjectCore, conn: PendingConnection) -> Arc<Self> {
+        Self::build(core, conn.rx, conn.tx, conn.inbox, conn.outbox, Some(conn.stamp))
     }
 
     fn build(
+        core: ObjectCore,
         rx: PipeReader,
         tx: PipeWriter,
         inbox: Arc<HandleQueue>,
@@ -140,7 +165,7 @@ impl ConnectionEnd {
         stamp: Option<Stamp>,
     ) -> Arc<Self> {
         Arc::new(Self {
-            core: Self::new_core(),
+            core,
             rx: rx.id(),
             tx: tx.id(),
             inbox,

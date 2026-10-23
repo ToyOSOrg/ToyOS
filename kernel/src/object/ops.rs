@@ -22,7 +22,7 @@ use crate::device as device_registry;
 use super::device::DeviceClaim;
 use super::file::{FileObject, OpenFileState};
 use super::handle::{HandleEntry, HandleTable};
-use super::KObjectRef;
+use super::{KObjectRef, KObjectVariant};
 
 /// What a freshly created object's one handle carries.
 pub fn initial_rights(object: &KObjectRef) -> Rights {
@@ -84,6 +84,11 @@ pub fn open(table: &mut HandleTable, path: &str, flags: OpenFlags) -> u64 {
         return SyscallError::InvalidArgument.to_u64();
     }
     let modifies = writable || create || truncate || append;
+    // Charged before the file is opened or made, so a refusal makes nothing.
+    let core = match FileObject::new_core(0) {
+        Ok(core) => core,
+        Err(e) => return SyscallError::from(e).to_u64(),
+    };
 
     let opened = {
         let mut vfs = crate::vfs::lock();
@@ -154,12 +159,7 @@ pub fn open(table: &mut HandleTable, path: &str, flags: OpenFlags) -> u64 {
         Ok(v) => v,
         Err(e) => return e.to_u64(),
     };
-    let object = KObjectRef::File(FileObject::new(OpenFileState {
-        file_id,
-        volume,
-        position,
-        mtime,
-    }));
+    let object = KObjectRef::File(FileObject::new(core, OpenFileState { file_id, volume, position, mtime }));
     // `writable` is a right, not a field: a read-only write fails for lacking `WRITE`.
     let mut rights = initial_rights(&object);
     if !writable {
@@ -189,12 +189,10 @@ pub fn close(table: &mut HandleTable, h: RawHandle) -> Result<(), super::HandleE
 }
 
 
-/// Release every handle a process holds; runs on the kill path too, which does not unwind.
-///
+/// Release every handle a process holds; runs on the kill path too, which
+/// does not unwind, and allocates nothing.
 pub fn close_all(table: &mut HandleTable) {
-    for entry in table.drain() {
-        drop(entry);
-    }
+    drop(core::mem::replace(table, HandleTable::new()));
 }
 
 pub fn pipe_id_read(object: &KObjectRef) -> Option<PipeId> {
@@ -370,6 +368,14 @@ fn close_ends_polls(object: &KObjectRef) -> bool {
     }
 }
 
+/// What a file's page that could not be read or kept answers its call.
+fn block_refusal(e: crate::file_backing::BlockError) -> SyscallError {
+    match e {
+        crate::file_backing::BlockError::Device => SyscallError::Io,
+        crate::file_backing::BlockError::Exhausted => SyscallError::ResourceExhausted,
+    }
+}
+
 fn read_file(file: &FileObject, buf: &mut UserBytesMut) -> Option<u64> {
     file.with(|state| {
         let (answer, read) = read_file_at(state.file_id, state.position, buf);
@@ -384,21 +390,21 @@ fn read_file_at(file_id: file_cache::FileId, position: usize, buf: &mut UserByte
     let size = file_cache::size(file_id) as usize;
     let count = buf.len().min(size.saturating_sub(position));
     let mut read = 0;
-    let mut refused = false;
+    let mut refused = None;
     while read < count {
         let abs_pos = position + read;
         let page_idx = (abs_pos / 4096) as u32;
         let offset_in_page = abs_pos % 4096;
         let to_read = (4096 - offset_in_page).min(count - read);
         // A refused page is not a page of zeros: stop short rather than fake a hole under a success.
-        if file_cache::read_page(file_id, page_idx, offset_in_page, &mut buf.sub(read, to_read)).is_err() {
-            refused = true;
+        if let Err(e) = file_cache::read_page(file_id, page_idx, offset_in_page, &mut buf.sub(read, to_read)) {
+            refused = Some(e);
             break;
         }
         read += to_read;
     }
-    if read == 0 && refused {
-        return (SyscallError::Io.to_u64(), 0);
+    if let (0, Some(e)) = (read, refused) {
+        return (block_refusal(e).to_u64(), 0);
     }
     (read as u64, read)
 }
@@ -411,21 +417,21 @@ fn write_file_at(state: &mut OpenFileState, position: usize, buf: &UserBytes) ->
         return (SyscallError::InvalidArgument.to_u64(), 0);
     }
     let mut written = 0;
-    let mut refused = false;
+    let mut refused = None;
     while written < buf.len() {
         let abs_pos = position + written;
         let page_idx = (abs_pos / 4096) as u32;
         let offset_in_page = abs_pos % 4096;
         let to_write = (4096 - offset_in_page).min(buf.len() - written);
         // A page that cannot be re-read off the device is refused, not merged into zeros.
-        if file_cache::write_page(state.file_id, page_idx, offset_in_page, &buf.sub(written, to_write)).is_err() {
-            refused = true;
+        if let Err(e) = file_cache::write_page(state.file_id, page_idx, offset_in_page, &buf.sub(written, to_write)) {
+            refused = Some(e);
             break;
         }
         written += to_write;
     }
-    if written == 0 && refused {
-        return (SyscallError::Io.to_u64(), 0);
+    if let (0, Some(e)) = (written, refused) {
+        return (block_refusal(e).to_u64(), 0);
     }
     state.mtime = crate::clock::mtime_now();
     file_cache::touch(state.file_id, state.mtime);
@@ -699,7 +705,9 @@ pub fn ftruncate(object: &KObjectRef, size: u64) -> u64 {
     }
     // The seek pointer is not touched (POSIX ftruncate): a shrink leaves it past EOF.
     file.with(|state| {
-        file_cache::set_size(state.file_id, size);
+        if let Err(e) = file_cache::set_size(state.file_id, size) {
+            return SyscallError::from(e).to_u64();
+        }
         state.mtime = crate::clock::mtime_now();
         file_cache::touch(state.file_id, state.mtime);
         0

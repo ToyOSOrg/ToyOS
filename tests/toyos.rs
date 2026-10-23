@@ -169,8 +169,6 @@ const RUST_SKIP: &[&str] = &[
     // shares — every later `read_dir("/tmp")` in it would be refused.
     // `readdir_bound` gives it one.
     "readdir_bound",
-    // Fills the VFS `created_dirs` cap and leaves it there. `mkdir_cap` runs it.
-    "mkdir_cap",
     // They need an HDA controller, which the shared boot's machine has not:
     // the `hda_tone`, `hda_tone_resampled` and `hda_volume_step` metal rows
     // run them on the T14 and the AMD bench, and
@@ -710,13 +708,6 @@ const METAL: &[(&str, metal::Metal)] = &[
         // report, and a held window read back.
         "mask_windows",
         metal::Metal { arms: WINDOWSCASE, judge: |b| windows_on_metal(b[0]) },
-    ),
-    (
-        "mkdir_cap",
-        metal::Metal {
-            arms: TESTCASES_MKDIR,
-            judge: |b| b[0].job_passed("test_rs_mkdir_cap"),
-        },
     ),
     (
         "readdir_bound",
@@ -1631,13 +1622,8 @@ const TESTCASES_HELD: &[metal::Arm] = &[metal::Arm {
     ..metal::once("testcases", "tests/images/testcases.toml", &[], &[])
 }];
 
-/// **Two boots of one config, because these two cannot share one.** Each fills
-/// a machine-wide cap and leaves it filled: `mkdir_cap` fills the directory cap,
-/// and `readdir_bound`'s own `create_dir("/tmp/empty")` is then refused with
-/// `OutOfMemory` and it panics — measured on the first staged image.
-const TESTCASES_MKDIR: &[metal::Arm] =
-    &[metal::once("testcases-mkdir", "tests/images/testcases.toml", &[], &["test_rs_mkdir_cap"])];
-
+/// Its own boot: `readdir_bound` fills `/tmp` to the VFS listing limit, and
+/// every later `read_dir("/tmp")` in a boot it shared would be refused.
 const TESTCASES_READDIR: &[metal::Arm] =
     &[metal::once("testcases-readdir", "tests/images/testcases.toml", &[], &["test_rs_readdir_bound"])];
 

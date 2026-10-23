@@ -128,12 +128,20 @@ pub enum ClaimError {
     /// device is not something a claim may create.
     KernelDriven,
     /// This machine has no interrupt left to give the function: every vector,
-    /// remapping entry or LPI a claim spends is held.
+    /// remapping entry or LPI a claim spends is held; or no memory is left for
+    /// the claim.
     Exhausted,
     /// The function is there and could not be handed over — no MSI-X, no
     /// window to move a BAR into, an address it did not take. The kernel names
     /// which at the site.
     Unusable,
+}
+
+/// No memory for the claim's object: the device stays unclaimed.
+impl From<crate::mm::charge::Exhausted> for ClaimError {
+    fn from(crate::mm::charge::Exhausted: crate::mm::charge::Exhausted) -> Self {
+        Self::Exhausted
+    }
 }
 
 /// Try to claim exclusive access to a device.
@@ -151,7 +159,7 @@ pub fn try_claim(class: DeviceType, selector: [u64; 2]) -> Result<Arc<DeviceClai
             let screen = (*FB_INFO.lock()).clone().ok_or(ClaimError::Absent)?;
             let claim = Claim::acquire(class)?;
             crate::drivers::panic_console::screen_claimed_by_userland();
-            Ok(DeviceClaim::new(class, framebuffer_info(screen), claim))
+            Ok(DeviceClaim::new(class, framebuffer_info(screen)?, claim)?)
         }
         DeviceType::PciFunction => {
             // A number past a `u32` is an arrival no function had.
@@ -160,20 +168,20 @@ pub fn try_claim(class: DeviceType, selector: [u64; 2]) -> Result<Arc<DeviceClai
             // per function rather than per class, so there is no flag here to
             // acquire first.
             let (info, claim) = crate::pcidev::claim(toyos_abi::inventory::Arrival(arrival))?;
-            Ok(DeviceClaim::new(class, DeviceInfo::PciFunction(info), claim))
+            Ok(DeviceClaim::new(class, DeviceInfo::PciFunction(info), claim)?)
         }
         DeviceType::Isa => {
             let set = toyos_abi::syscall::IsaId::from_wire(selector).ok_or(ClaimError::Absent)?;
             // The row's own guard, taken inside as a PCI function's is.
             let row = crate::isa::claim(set)?;
             let claim = Claim { what: Claimed::Isa(row) };
-            Ok(DeviceClaim::new(class, DeviceInfo::Isa(set), claim))
+            Ok(DeviceClaim::new(class, DeviceInfo::Isa(set), claim)?)
         }
         DeviceType::Acpi => {
             // The row's own guard, taken inside, and the switch to ACPI mode.
             let (row, info) = crate::arch::acpi_mode::claim()?;
             let claim = Claim { what: Claimed::Acpi(row) };
-            Ok(DeviceClaim::new(class, DeviceInfo::Acpi(info), claim))
+            Ok(DeviceClaim::new(class, DeviceInfo::Acpi(info), claim)?)
         }
     }
 }
@@ -185,12 +193,12 @@ pub struct Scanout {
     pub size: u64,
 }
 
-fn shm(scanout: Scanout) -> Arc<crate::object::shm::SharedMemObject> {
+fn shm(scanout: Scanout) -> Result<Arc<crate::object::shm::SharedMemObject>, crate::mm::charge::Exhausted> {
     crate::object::shm::SharedMemObject::aperture(scanout.phys, scanout.size, crate::mm::policy::CachePolicy::WriteCombining)
 }
 
 /// The description a framebuffer claim answers with, over a freshly minted
 /// scanout object.
-fn framebuffer_info(screen: Screen) -> DeviceInfo {
-    DeviceInfo::Framebuffer(screen.info, shm(screen.scanout))
+fn framebuffer_info(screen: Screen) -> Result<DeviceInfo, crate::mm::charge::Exhausted> {
+    Ok(DeviceInfo::Framebuffer(screen.info, shm(screen.scanout)?))
 }

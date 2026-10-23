@@ -5,7 +5,7 @@ use alloc::sync::Arc;
 use crate::file_cache::{self, FileId};
 use crate::sync::Lock;
 
-use super::{KObjectVariant, ObjectCore};
+use super::ObjectCore;
 
 pub struct OpenFileState {
     pub file_id: FileId,
@@ -28,8 +28,9 @@ pub struct FileObject {
 }
 
 impl FileObject {
-    pub fn new(state: OpenFileState) -> Arc<Self> {
-        Arc::new(Self { core: Self::new_core(), state: Lock::new(state) })
+    /// Over `core`, which the open charged before it opened the file.
+    pub fn new(core: ObjectCore, state: OpenFileState) -> Arc<Self> {
+        Arc::new(Self { core, state: Lock::new(state) })
     }
 
     pub fn with<R>(&self, f: impl FnOnce(&mut OpenFileState) -> R) -> R {
