@@ -13,9 +13,10 @@ mod lan;
 use std::net::Ipv4Addr;
 use std::time::Duration;
 
-use common::{arp, from_server, message, message_of, option, sum, terms, xid, A, ACK, BROADCAST, DISCOVER, DNS, MAC, MAC_B, MAC_R, NAK, OFFER, R, REQUEST};
-use lan::{udp, Lan, Seen, Udp, B};
+use common::{arp, from_server, message, message_of, option, terms, xid, A, ACK, BROADCAST, DISCOVER, DNS, MAC, MAC_B, MAC_R, NAK, OFFER, R, REQUEST};
+use lan::{udp, unreachable, Lan, Seen, Udp, B};
 use toyos_dns::{Failure, Name, MAX_LOOKUPS, ROUNDS, WAIT_MS};
+use toyos_net_node::HolderId;
 use toyos_net_node::{Counter, Ended, LookupId, NotStarted, Refused, Resolved, Resolving};
 use toyos_net_udp::limits::{EPHEMERAL_COUNT, EPHEMERAL_FIRST, TX_DATAGRAMS};
 use toyos_net_udp::Counter as Rule;
@@ -165,32 +166,6 @@ fn gives(query: &[u8], address: [u8; 4]) -> Vec<u8> {
     reply(query, RESPONSE, &[(TYPE_A, address.to_vec())])
 }
 
-/// RFC 792's destination unreachable from `reporter` at `mac`: type 3 and `code`, the checksum,
-/// four unused octets, then the internet header and the first 64 bits of the datagram it is
-/// about. That datagram is spelled here as RFC 791 and RFC 768 lay out one from `source` to
-/// `destination` carrying `length` octets: no options, DF, TTL 64, protocol 17.
-fn unreachable(code: u8, (reporter, mac): (Ipv4Addr, [u8; 6]), source: (Ipv4Addr, u16), destination: (Ipv4Addr, u16), length: usize) -> Vec<u8> {
-    let datagram = u16::try_from(8 + length).unwrap().to_be_bytes();
-    let total = u16::try_from(20 + 8 + length).unwrap().to_be_bytes();
-    let mut quoted = vec![0x45, 0, total[0], total[1], 0, 0, 0x40, 0, 64, 17, 0, 0];
-    quoted.extend_from_slice(&source.0.octets());
-    quoted.extend_from_slice(&destination.0.octets());
-    let check = sum(&quoted);
-    quoted[10..12].copy_from_slice(&check.to_be_bytes());
-    quoted.extend_from_slice(&[&source.1.to_be_bytes()[..], &destination.1.to_be_bytes(), &datagram, &[0, 0]].concat());
-    let mut icmp = vec![3, code, 0, 0, 0, 0, 0, 0];
-    icmp.extend_from_slice(&quoted);
-    let check = sum(&icmp);
-    icmp[2..4].copy_from_slice(&check.to_be_bytes());
-    let total = u16::try_from(20 + icmp.len()).unwrap().to_be_bytes();
-    let mut ip = vec![0x45, 0, total[0], total[1], 0, 0, 0x40, 0, 64, 1, 0, 0];
-    ip.extend_from_slice(&reporter.octets());
-    ip.extend_from_slice(&source.0.octets());
-    let check = sum(&ip);
-    ip[10..12].copy_from_slice(&check.to_be_bytes());
-    [&MAC[..], &mac, &[0x08, 0x00], &ip, &icmp].concat()
-}
-
 /// `code` from `reporter` about `query`, as the node sent it.
 fn reports(code: u8, reporter: (Ipv4Addr, [u8; 6]), query: &Udp) -> Vec<u8> {
     unreachable(code, reporter, (query.source, query.source_port), (query.destination, query.port), query.payload.len())
@@ -298,9 +273,9 @@ impl Net {
 
     /// Whether a socket holds `port`, by binding it: a port is one socket's.
     fn port_held(&mut self, port: u16) -> bool {
-        match self.lan.node.udp_bind(ANY, Port::new(port), undrawn) {
+        match self.lan.node.udp_bind(ANY, Port::new(port), common::unread(), undrawn) {
             Ok((id, _)) => {
-                self.lan.node.udp_close(self.lan.now, id).unwrap();
+                self.lan.node.datagram_departed(self.lan.now, id, HolderId::FIRST);
                 false
             }
             Err(Refused::AddrInUse) => true,
@@ -839,11 +814,11 @@ fn a_query_with_no_port_to_leave_from_ends_its_lookup_by_name() {
     let mut net = Net::leased(&[ANSWERS], Some(R));
     let last = u32::from(EPHEMERAL_COUNT) - 1;
     // A client's socket holds a place; a query's holds none.
-    net.lan.node.set_places(net.lan.now, usize::from(EPHEMERAL_COUNT) - 1);
+    net.lan.node.set_places(usize::from(EPHEMERAL_COUNT) - 1);
     for offset in 0..last {
-        net.lan.node.udp_bind(ANY, None, || offset).unwrap();
+        net.lan.node.udp_bind(ANY, None, common::unread(), || offset).unwrap();
     }
-    assert_eq!(net.lan.node.udp_bind(ANY, None, || last), Err(toyos_net_node::Refused::ResourceExhausted), "every place is a client's socket");
+    assert_eq!(net.lan.node.udp_bind(ANY, None, common::unread(), || last), Err(toyos_net_node::Refused::ResourceExhausted), "every place is a client's socket");
     let id = asking(net.lan.node.resolve(net.lan.now, ONE, name("www.example"), sequence([0x8001, last])).expect("the one port left, and a query needs no place"));
     assert_eq!(net.lan.node.resolve(net.lan.now, ONE, name("other.example"), sequence([0x8002, 0])), Err(NotStarted::ResourceExhausted));
     assert_eq!(net.run(id, 10 * WAIT_MS), Some(Err(Ended::NoPort)));
@@ -892,7 +867,7 @@ fn a_clients_datagrams_behind_the_burst_wait_in_their_own_socket_and_take_no_que
     for asked in &names {
         net.resolve(asked).unwrap();
     }
-    let (client, _) = net.lan.node.udp_bind(ANY, None, || 0x3000).unwrap();
+    let (client, _) = net.lan.node.udp_bind(ANY, None, common::unread(), || 0x3000).unwrap();
     let behind: Vec<Vec<u8>> = (0..TX_DATAGRAMS).map(|n| format!("behind the burst {n}").into_bytes()).collect();
     for datagram in &behind {
         net.lan.node.udp_send_to(net.lan.now, client, ANSWERS, 9, datagram).unwrap();

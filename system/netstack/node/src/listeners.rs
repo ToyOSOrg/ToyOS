@@ -1,28 +1,26 @@
-//! Listeners: a passive open of [tcp]'s and the pipe its owner reads its wakes from. The queues
-//! are [tcp]'s: handshakes in progress, and connections that finished theirs and wait, oldest
-//! first. A connection that waits is nobody's stream yet, its text held in [tcp]'s own storage;
-//! an accept makes the oldest one a stream on the region the accept lends, and what it held moves
-//! there at its offsets, text past a hole included, the FIN staying [tcp]'s state.
+//! Listeners: a passive open of [tcp]'s and its holders (`holders`), each told on its own bell
+//! that a connection waits. The queues are [tcp]'s: handshakes in progress, and connections that
+//! finished theirs and wait, oldest first. A connection that waits is nobody's stream yet, its
+//! text held in [tcp]'s own storage; an accept makes the oldest one a stream on the region the
+//! accept lends, and what it held moves there at its offsets, text past a hole included, the FIN
+//! staying [tcp]'s state.
 //!
-//! **The owner holds one unspent wake for each connection that waits and that there is a place
-//! for, and an accept spends one whatever it answers.** The owner reads a wake and then accepts,
-//! once; the node writes what is missing whenever a pass ends ([`Node::bridge`]), from what
-//! [tcp] holds and what `places` has left at that moment, so no wake depends on the pass that
-//! saw a connection arrive. A wake left over by a connection its peer reset before the accept
-//! stands for the next one, and until then its accept is answered [`AcceptRefused::Nothing`].
-//! The node cannot tell an accept that is on its way from one that will never be sent: an owner
-//! that reads a wake and sends no accept is owed one wake fewer from then on.
+//! **Every holder takes from the one queue.** A holder is told while a connection waits that
+//! there is a place for, once until it asks again ([`Node::accept`]); the node tells whenever a
+//! pass ends ([`Node::bridge`]), from what [tcp] holds and what `places` has left at that moment,
+//! so no ring depends on the pass that saw a connection arrive. Two holders told of one
+//! connection both ask; one takes it and the other is answered [`AcceptRefused::Nothing`].
 //!
 //! **A port is one listener's**, whatever address either listen named: [tcp] hands a SYN to
 //! the listener that named its address before one at every address, so a second listen on a
 //! held port would take the first's connections, and a listen carries no word for its program
-//! by which the node could allow that to the first's owner alone.
+//! by which the node could allow that to the first's holders alone.
 //!
-//! **A listener lives until its owner lets go**: [`Node::close_listener`], or a wake its pipe
-//! refuses, for whatever reason. [tcp] then resets every connection that still waits, so each
-//! peer learns at once, and the port is free. Nothing the wire does ends one: a listener
-//! whose address the machine loses stands, with its port and its place, and is handed the
-//! next SYN once the address is the machine's again.
+//! **A listener lives until its last holder leaves** ([`Node::listener_departed`]); each holder
+//! past the first takes a place ([`Node::export_listener`]). [tcp] then resets every connection
+//! that still waits, so each peer learns at once, and the port is free. Nothing the wire does
+//! ends one: a listener whose address the machine loses stands, with its port and its place, and
+//! is handed the next SYN once the address is the machine's again.
 //!
 //! **A stream starts with the options its connection has**, and those are its listener's as
 //! they were when its SYN arrived: [tcp] hands them over then (LS-10), the node reads them
@@ -33,32 +31,16 @@
 //! (`tests/host.rs` asks the host the tests run on).
 
 use alloc::boxed::Box;
-use alloc::collections::{BTreeMap, VecDeque};
+use alloc::collections::BTreeMap;
 use core::net::Ipv4Addr;
 
 use toyos_net_shard::ListenError;
 use toyos_net_tcp::{Endpoint, Error, Options};
 use toyos_net_wire::{Instant, Port};
 
-use crate::streams::{Session, StreamId};
+use crate::holders::{Bell, HolderId, Holders};
+use crate::streams::{ExportRefused, Session, StreamId};
 use crate::Node;
-
-/// Why the write end of a listener's wake pipe took nothing.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum WriteRefusal {
-    Full,
-    /// Nobody holds the read end.
-    Gone,
-    /// Anything else: the handle is not the pipe end its owner said it was.
-    Broken,
-}
-
-/// The write end of the pipe a listener's owner reads its wakes from. Dropped, the owner reads
-/// the end.
-pub trait Wake {
-    /// Writes one wake.
-    fn wake(&mut self) -> Result<(), WriteRefusal>;
-}
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct ListenerId(u64);
@@ -87,12 +69,12 @@ pub struct Accepted {
     pub nodelay: bool,
 }
 
-/// Why an accept took no connection. Whatever waits still waits, and the session is dropped.
+/// Why an accept took no connection. Whatever waits still waits, and no session was made.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum AcceptRefused {
-    /// The id names no listener.
+    /// The id names no listener, or the holder none of its.
     NoListener,
-    /// The request carried no region.
+    /// The connection that waits found no region to become a stream on.
     NoRegion,
     /// The node holds all it has places for (`places`), whatever waits.
     Full,
@@ -103,9 +85,7 @@ pub enum AcceptRefused {
 struct Listener {
     bound: toyos_net_tcp::ListenerId,
     port: Port,
-    owner: Box<dyn Wake>,
-    /// Wakes written that no accept has spent.
-    unspent: usize,
+    holders: Holders,
     /// The options last written to [tcp].
     options: Options,
 }
@@ -115,16 +95,22 @@ pub(crate) struct Listeners {
     live: BTreeMap<ListenerId, Listener>,
     /// The next listener's id: none is used twice.
     next: u64,
-    ended: VecDeque<(ListenerId, WriteRefusal)>,
+}
+
+impl Listeners {
+    /// The holders past each listener's first, which take places of their own.
+    pub(crate) fn more_holders(&self) -> usize {
+        self.live.values().map(|listener| listener.holders.more()).fold(0, usize::saturating_add)
+    }
 }
 
 impl Node {
     /// A passive open at `addr`, 0.0.0.0 meaning every address the interface holds or comes to
     /// hold, on `port` or on a port chosen from `draw`'s candidates, with `nodelay` as
     /// [`Node::set_listener_nodelay`] would set it, for every connection of the listener's
-    /// from its first. Answers the listener and its port. Refused, nothing was made and
-    /// `owner` is dropped.
-    pub fn listen(&mut self, addr: Ipv4Addr, port: Option<Port>, nodelay: bool, owner: Box<dyn Wake>, mut draw: impl FnMut() -> u32) -> Result<(ListenerId, Port), ListenRefused> {
+    /// from its first. Answers the listener and its port; `bell` is its first holder's,
+    /// [`HolderId::FIRST`]. Refused, nothing was made and `bell` is dropped.
+    pub fn listen(&mut self, addr: Ipv4Addr, port: Option<Port>, nodelay: bool, bell: Box<dyn Bell>, mut draw: impl FnMut() -> u32) -> Result<(ListenerId, Port), ListenRefused> {
         if self.room() == 0 {
             return Err(ListenRefused::Full);
         }
@@ -146,8 +132,34 @@ impl Node {
         self.listeners.next = self.listeners.next.saturating_add(1);
         let options = Options { nodelay, ..Options::default() };
         self.stack.tcp_set_listener_options(bound, options);
-        self.listeners.live.insert(id, Listener { bound, port, owner, unspent: 0, options });
+        self.listeners.live.insert(id, Listener { bound, port, holders: Holders::new(bell), options });
         Ok((id, port))
+    }
+
+    /// A holder more of listener `id`, told on `bell` at once of a connection that waits, which
+    /// takes a place: the listener's port.
+    pub fn export_listener(&mut self, id: ListenerId, bell: Box<dyn Bell>) -> Result<(HolderId, Port), ExportRefused> {
+        if self.room() == 0 {
+            return Err(ExportRefused::Full);
+        }
+        let listener = self.listeners.live.get_mut(&id).ok_or(ExportRefused::Gone)?;
+        let made = (listener.holders.add(bell), listener.port);
+        // Told now of what waits: no pass need come before its first look.
+        self.tell_holders();
+        Ok(made)
+    }
+
+    /// `holder` of listener `id` left; the last holder's leaving closes it. Either gives a place
+    /// back.
+    pub fn listener_departed(&mut self, now: Instant, id: ListenerId, holder: HolderId) {
+        let Some(listener) = self.listeners.live.get_mut(&id) else { return };
+        if !listener.holders.remove(holder) {
+            return;
+        }
+        if listener.holders.is_empty() {
+            self.end_listener(now, id);
+        }
+        self.tell_holders();
     }
 
     /// Nagle's algorithm off or on (RFC 9293 §3.7.4) for every connection whose SYN arrives at
@@ -160,79 +172,58 @@ impl Node {
         true
     }
 
-    /// The owner's accept: the oldest connection waiting at `id` becomes a stream on `session`'s
-    /// region, and what it already received moves there at once.
-    pub fn accept(&mut self, now: Instant, id: ListenerId, session: Option<Box<dyn Session>>) -> Result<Accepted, AcceptRefused> {
-        let Some(listener) = self.listeners.live.get_mut(&id) else { return Err(AcceptRefused::NoListener) };
-        listener.unspent = listener.unspent.saturating_sub(1);
+    /// Whether Nagle's algorithm is off for the connections that begin at `id` from here on:
+    /// `None` is an id that names no listener.
+    pub fn listener_nodelay(&self, id: ListenerId) -> Option<bool> {
+        self.listeners.live.get(&id).map(|listener| listener.options.nodelay)
+    }
+
+    /// `holder`'s accept: the oldest connection waiting at `id` becomes a stream on the region of
+    /// the session `session` makes, which is asked for only once there is a connection and a
+    /// place for it, and what the connection already received moves there at once.
+    pub fn accept(&mut self, now: Instant, id: ListenerId, holder: HolderId, session: impl FnOnce() -> Option<Box<dyn Session>>) -> Result<Accepted, AcceptRefused> {
+        let Some(listener) = self.listeners.live.get_mut(&id).filter(|listener| listener.holders.holds(holder)) else {
+            return Err(AcceptRefused::NoListener);
+        };
+        listener.holders.asked(holder);
         let bound = listener.bound;
         let answer = self.take(bound, session);
         self.pass(now, false);
         answer
     }
 
-    fn take(&mut self, bound: toyos_net_tcp::ListenerId, session: Option<Box<dyn Session>>) -> Result<Accepted, AcceptRefused> {
-        let Some(session) = session else { return Err(AcceptRefused::NoRegion) };
+    fn take(&mut self, bound: toyos_net_tcp::ListenerId, session: impl FnOnce() -> Option<Box<dyn Session>>) -> Result<Accepted, AcceptRefused> {
         if self.room() == 0 {
             return Err(AcceptRefused::Full);
         }
-        let Some((conn, tuple, options)) = self.stack.tcp_accept(bound) else { return Err(AcceptRefused::Nothing) };
+        if self.stack.tcp_ready(bound) == 0 {
+            return Err(AcceptRefused::Nothing);
+        }
+        let session = session().ok_or(AcceptRefused::NoRegion)?;
+        let Some((conn, tuple, options)) = self.stack.tcp_accept(bound) else { unreachable!("[tcp] counted a connection it would not hand over") };
         let id = self.streams.accepted(&mut self.stack, conn, options, session);
         Ok(Accepted { id, remote: tuple.remote, local: tuple.local.port, nodelay: options.nodelay })
     }
 
-    /// The owner lets go of the listener: netstack calls it for a close, and when the kernel
-    /// says nobody holds the other end of the wake pipe. `false` is an id that names no listener.
-    pub fn close_listener(&mut self, now: Instant, id: ListenerId) -> bool {
-        let closed = self.end_listener(now, id);
-        if closed {
-            self.wake_owners(now);
+    fn end_listener(&mut self, now: Instant, id: ListenerId) {
+        if let Some(listener) = self.listeners.live.remove(&id) {
+            self.stack.tcp_close_listener(now, listener.bound);
         }
-        closed
     }
 
-    fn end_listener(&mut self, now: Instant, id: ListenerId) -> bool {
-        let Some(listener) = self.listeners.live.remove(&id) else { return false };
-        self.stack.tcp_close_listener(now, listener.bound);
-        true
-    }
-
-    /// Writes every owner the wakes it is owed, and ends a listener whose pipe refuses one. One
-    /// lookup in [tcp] a listener: nothing of [tcp]'s is moved or offered for sending.
-    pub(crate) fn wake_owners(&mut self, now: Instant) {
-        // A listener ended here gives its place back, which another's owner may be owed a wake
-        // for.
-        while self.wake_each(now) {}
-    }
-
-    /// One round over the listeners, up to the first whose pipe refuses a wake; `true` ended it.
-    fn wake_each(&mut self, now: Instant) -> bool {
+    /// Tells every holder of a listener or a datagram socket what it is owed: a listener's, while
+    /// a connection waits that there is a place for; a datagram socket's, while a datagram
+    /// waits. One lookup in [tcp] or [udp] a socket: nothing is moved or offered for sending.
+    pub(crate) fn tell_holders(&mut self) {
         let room = self.room();
-        let stack = &mut self.stack;
-        let ended = self.listeners.live.iter_mut().find_map(|(id, listener)| {
-            let owed = stack.tcp_ready(listener.bound).min(room);
-            while listener.unspent < owed {
-                if let Err(refusal) = listener.owner.wake() {
-                    return Some((*id, refusal));
-                }
-                listener.unspent = listener.unspent.saturating_add(1);
-            }
-            None
-        });
-        let Some((id, refusal)) = ended else { return false };
-        self.end_listener(now, id);
-        self.listeners.ended.push_back((id, refusal));
-        true
+        for listener in self.listeners.live.values_mut() {
+            listener.holders.tell(room > 0 && self.stack.tcp_ready(listener.bound) > 0);
+        }
+        self.tell_datagram_holders();
     }
 
     /// The listeners the node holds.
     pub fn listeners(&self) -> usize {
         self.listeners.live.len()
-    }
-
-    /// The listeners ended since the last call because their owner's pipe refused a wake, and
-    /// what it answered.
-    pub fn drain_ended_listeners(&mut self) -> impl Iterator<Item = (ListenerId, WriteRefusal)> + '_ {
-        self.listeners.ended.drain(..)
     }
 }

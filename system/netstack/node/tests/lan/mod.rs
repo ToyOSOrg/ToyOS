@@ -250,3 +250,29 @@ impl Lan {
         self.node.shard().udp_counters().get(counter)
     }
 }
+
+/// RFC 792's destination unreachable from `reporter` at `mac`: type 3 and `code`, the checksum,
+/// four unused octets, then the internet header and the first 64 bits of the datagram it is
+/// about. That datagram is spelled here as RFC 791 and RFC 768 lay out one from `source` to
+/// `destination` carrying `length` octets: no options, DF, TTL 64, protocol 17.
+pub fn unreachable(code: u8, (reporter, mac): (Ipv4Addr, [u8; 6]), source: (Ipv4Addr, u16), destination: (Ipv4Addr, u16), length: usize) -> Vec<u8> {
+    let datagram = u16::try_from(8 + length).unwrap().to_be_bytes();
+    let total = u16::try_from(20 + 8 + length).unwrap().to_be_bytes();
+    let mut quoted = vec![0x45, 0, total[0], total[1], 0, 0, 0x40, 0, 64, 17, 0, 0];
+    quoted.extend_from_slice(&source.0.octets());
+    quoted.extend_from_slice(&destination.0.octets());
+    let check = sum(&quoted);
+    quoted[10..12].copy_from_slice(&check.to_be_bytes());
+    quoted.extend_from_slice(&[&source.1.to_be_bytes()[..], &destination.1.to_be_bytes(), &datagram, &[0, 0]].concat());
+    let mut icmp = vec![3, code, 0, 0, 0, 0, 0, 0];
+    icmp.extend_from_slice(&quoted);
+    let check = sum(&icmp);
+    icmp[2..4].copy_from_slice(&check.to_be_bytes());
+    let total = u16::try_from(20 + icmp.len()).unwrap().to_be_bytes();
+    let mut ip = vec![0x45, 0, total[0], total[1], 0, 0, 0x40, 0, 64, 1, 0, 0];
+    ip.extend_from_slice(&reporter.octets());
+    ip.extend_from_slice(&source.0.octets());
+    let check = sum(&ip);
+    ip[10..12].copy_from_slice(&check.to_be_bytes());
+    [&MAC[..], &mac, &[0x08, 0x00], &ip, &icmp].concat()
+}

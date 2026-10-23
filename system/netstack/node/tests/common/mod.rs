@@ -11,12 +11,14 @@
 
 pub mod client;
 
+use std::cell::Cell;
 use std::net::Ipv4Addr;
+use std::rc::Rc;
 use std::time::Duration;
 
 use etherparse::{ArpOperation, Icmpv4Type, LinkSlice, NetSlice, SlicedPacket, TransportSlice};
 use toyos_dhcp::HostName;
-use toyos_net_node::Node;
+use toyos_net_node::{Bell, Node};
 use toyos_net_shard::{Config, Secrets};
 use toyos_net_wire::ethernet::{IndividualMac, MacAddr};
 use toyos_net_wire::Instant;
@@ -30,6 +32,26 @@ pub const ELSEWHERE: Ipv4Addr = Ipv4Addr::new(192, 0, 2, 7);
 pub const R: Ipv4Addr = Ipv4Addr::new(192, 0, 2, 254);
 pub const DNS: Ipv4Addr = Ipv4Addr::new(192, 0, 2, 53);
 pub const MASK: Ipv4Addr = Ipv4Addr::new(255, 255, 255, 0);
+
+/// A holder's bell: the rings it took, which the test reads by the count it holds.
+pub struct Rings(pub Rc<Cell<usize>>);
+
+impl Bell for Rings {
+    fn ring(&mut self) {
+        self.0.set(self.0.get() + 1);
+    }
+}
+
+/// A bell, and its count of rings.
+pub fn bell() -> (Box<dyn Bell>, Rc<Cell<usize>>) {
+    let rings = Rc::new(Cell::new(0));
+    (Box::new(Rings(rings.clone())), rings)
+}
+
+/// A bell whose rings nobody reads.
+pub fn unread() -> Box<dyn Bell> {
+    bell().0
+}
 
 /// The places `Wire`'s node has for streams and listeners.
 pub const PLACES: usize = 32;
@@ -339,7 +361,7 @@ impl Wire {
         let config = Config { mac: IndividualMac::new(MacAddr(mac)).unwrap(), receive_buffer: 65_535, send_buffer: 65_535, secrets };
         let mut draws = 0x5a00_0000;
         let mut node = Node::new(now, config, HostName::new("toyos"), draw(&mut draws)).unwrap();
-        node.set_places(now, PLACES);
+        node.set_places(PLACES);
         Self { node, mac, now, sent: Vec::new(), draws }
     }
 

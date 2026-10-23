@@ -671,12 +671,12 @@ fn no_cut_of_a_query_is_answered() {
 fn the_names_port_is_held_by_one_socket() {
     let mdns = Port::new(MDNS);
     let mut lan = named();
-    assert_eq!(lan.node.udp_bind(Ipv4Addr::UNSPECIFIED, mdns, || 0).map(|(_, port)| port), Err(Refused::AddrInUse));
+    assert_eq!(lan.node.udp_bind(Ipv4Addr::UNSPECIFIED, mdns, common::unread(), || 0).map(|(_, port)| port), Err(Refused::AddrInUse));
     let again = lan.node.answer_as(lan.now, Host::new("toyos").unwrap(), undrawn);
     assert_eq!(again, Err(toyos_net_udp::Error::Refused(toyos_net_udp::Counter::PortInUse)));
 
     let mut taken = Lan::new();
-    taken.node.udp_bind(Ipv4Addr::UNSPECIFIED, mdns, || 0).unwrap();
+    taken.node.udp_bind(Ipv4Addr::UNSPECIFIED, mdns, common::unread(), || 0).unwrap();
     let refused = taken.node.answer_as(taken.now, Host::new("toyos").unwrap(), undrawn);
     assert_eq!(refused, Err(toyos_net_udp::Error::Refused(toyos_net_udp::Counter::PortInUse)));
     taken.lease(3_600);

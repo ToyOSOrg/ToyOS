@@ -209,6 +209,28 @@ impl Stack {
         self.shard.recv_from(id, out)
     }
 
+    /// The port a socket holds.
+    pub(crate) fn port(&mut self, id: SocketId) -> Result<Port, toyos_net_udp::Error> {
+        self.shard.udp_port(id)
+    }
+
+    pub(crate) fn readable(&mut self, id: SocketId) -> Result<bool, toyos_net_udp::Error> {
+        self.shard.udp_readable(id)
+    }
+
+    pub(crate) fn peer(&mut self, id: SocketId) -> Result<Option<(Ipv4Addr, Port)>, toyos_net_udp::Error> {
+        self.shard.udp_peer(id)
+    }
+
+    /// Queues a datagram for a connected socket's peer.
+    pub(crate) fn send_connected(&mut self, now: Instant, id: SocketId, payload: &[u8]) -> Result<(), toyos_net_udp::Error> {
+        self.shard.udp_send(now, id, payload)
+    }
+
+    pub(crate) fn broadcast(&mut self, id: SocketId) -> Result<bool, toyos_net_udp::Error> {
+        self.shard.udp_broadcast(id)
+    }
+
     pub(crate) fn close(&mut self, now: Instant, id: SocketId) -> Result<(), toyos_net_udp::Error> {
         self.shard.udp_close(now, id)
     }

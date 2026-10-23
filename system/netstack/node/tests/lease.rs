@@ -14,7 +14,7 @@ use std::time::Duration;
 use common::*;
 use etherparse::{PacketBuilder, TcpOptionElement};
 use toyos_net_ip::AddrState;
-use toyos_net_node::{Counter, Event, ListenRefused, Wake, WriteRefusal};
+use toyos_net_node::{Bell, Counter, Event, ListenRefused};
 use toyos_net_shard::Refusal;
 use toyos_net_wire::{Instant, Port};
 
@@ -218,8 +218,8 @@ fn a_second_conflict_takes_a_held_lease_and_declines_it() {
     assert!(!wire.answers_arp_for(A));
 }
 
-/// What a listener's owner saw of its wake pipe: the wakes written, and whether the node dropped
-/// its end, at which the owner reads the end.
+/// What a listener's holder saw of its bell: the rings, and whether the node dropped it, which
+/// is the listener's end.
 #[derive(Default)]
 struct Told {
     wakes: Cell<usize>,
@@ -228,10 +228,9 @@ struct Told {
 
 struct Owner(Rc<Told>);
 
-impl Wake for Owner {
-    fn wake(&mut self) -> Result<(), WriteRefusal> {
+impl Bell for Owner {
+    fn ring(&mut self) {
         self.0.wakes.set(self.0.wakes.get() + 1);
-        Ok(())
     }
 }
 
@@ -310,7 +309,7 @@ fn a_listener_stands_while_its_address_is_lost_and_answers_when_it_is_back() {
         let named = listen(&mut wire, A, 22).expect("the held address");
         let any = listen(&mut wire, Ipv4Addr::UNSPECIFIED, 23).expect("every address");
         let stand = |wire: &mut Wire, when: &str| {
-            assert_eq!((wire.node.listeners(), wire.node.held(), wire.node.drain_ended_listeners().count()), (2, 2, 0), "{how}, {when}");
+            assert_eq!((wire.node.listeners(), wire.node.held()), (2, 2), "{how}, {when}");
             assert_eq!((named.dropped.get(), any.dropped.get(), named.wakes.get(), any.wakes.get()), (false, false, 0, 0), "{how}, {when}");
         };
 

@@ -63,10 +63,10 @@ pub enum ConnectRefused {
 /// Why an export made no holder.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum ExportRefused {
-    /// The node holds all it has places for, and a holder past a stream's first takes one.
+    /// The node holds all it has places for, and a holder past a socket's first takes one.
     Full,
-    /// The id names no stream the node holds established.
-    NoStream,
+    /// The id names no established stream, listener or datagram socket the node holds.
+    Gone,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
@@ -320,7 +320,7 @@ impl Node {
         let Streams { live, events, .. } = &mut self.streams;
         let stack = &mut self.stack;
         live.retain(|id, stream| (connects && stream.server.is_some()) || stream.pass(*id, now, stack, events));
-        self.wake_owners(now);
+        self.tell_holders();
     }
 
     /// A holder more for established stream `id`, which takes a place: the stream's peer and
@@ -329,7 +329,7 @@ impl Node {
         if self.room() == 0 {
             return Err(ExportRefused::Full);
         }
-        let stream = self.streams.live.get_mut(&id).filter(|stream| stream.server.is_some()).ok_or(ExportRefused::NoStream)?;
+        let stream = self.streams.live.get_mut(&id).filter(|stream| stream.server.is_some()).ok_or(ExportRefused::Gone)?;
         stream.more_holders = stream.more_holders.saturating_add(1);
         Ok(self.stack.tcp_endpoints(stream.conn))
     }

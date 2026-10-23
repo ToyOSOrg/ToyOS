@@ -39,6 +39,7 @@
 extern crate alloc;
 
 mod datagram;
+mod holders;
 mod lease;
 mod listeners;
 mod name;
@@ -46,7 +47,8 @@ mod places;
 mod resolve;
 mod streams;
 
-pub use listeners::{AcceptRefused, Accepted, ListenRefused, ListenerId, Wake, WriteRefusal};
+pub use holders::{Bell, HolderId};
+pub use listeners::{AcceptRefused, Accepted, ListenRefused, ListenerId};
 pub use streams::{ConnectRefused, ExportRefused, Session, StreamEvent, StreamId};
 
 use alloc::vec;
@@ -97,8 +99,8 @@ pub struct Node {
     datagram: Vec<u8>,
     streams: streams::Streams,
     listeners: listeners::Listeners,
-    /// The clients' datagram sockets bound and not closed.
-    sockets: usize,
+    /// The clients' datagram sockets bound and not closed, and their holders.
+    datagrams: alloc::collections::BTreeMap<DatagramId, holders::Holders>,
     /// How many streams, listeners, datagram sockets and connections [tcp] finishes alone the
     /// node holds at most.
     places: usize,
@@ -124,7 +126,7 @@ impl Node {
             datagram: vec![0; usize::from(toyos_dhcp::limits::MAX_MESSAGE)],
             streams: streams::Streams::default(),
             listeners: listeners::Listeners::default(),
-            sockets: 0,
+            datagrams: alloc::collections::BTreeMap::new(),
             places: 0,
         })
     }

@@ -428,6 +428,17 @@ impl Udp {
         self.socket(id).map(|s| s.broadcast = permitted)
     }
 
+    /// Whether [`Self::set_broadcast`] last permitted it.
+    pub fn broadcast(&mut self, id: SocketId) -> Result<bool, Error> {
+        self.socket(id).map(|s| s.broadcast)
+    }
+
+    /// Whether a [`Self::recv`] has something to answer: a datagram, or the socket's pending
+    /// error.
+    pub fn readable(&mut self, id: SocketId) -> Result<bool, Error> {
+        self.socket(id).map(|s| !s.rx.is_empty() || s.pending.is_some())
+    }
+
     pub fn set_ttl(&mut self, id: SocketId, unicast: Ttl, multicast: Ttl) -> Result<(), Error> {
         self.socket(id).map(|s| {
             s.ttl = unicast;

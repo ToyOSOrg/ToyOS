@@ -233,9 +233,11 @@ const RUST_SKIP: &[&str] = &[
     // A shell's Ctrl+C, the probe being its surface: `libc_children` runs it
     // on tests/images/libccase.toml, whose shell and `cat` it drives.
     "tty_interrupt",
-    // A stream exported to a child through real netstack: it connects out to
-    // the harness, which only `stream_exported_to_a_child`'s boot sets up.
+    // A stream, a listener and a datagram socket exported to a child through
+    // real netstack: they reach the harness, which only
+    // `netstack_holders_exported_to_children`'s boot sets up.
     "stream_export",
+    "socket_export",
     // A stream's holders across processes, as their own netstack: it spawns a
     // child that faults, which a shared boot's other members must not watch,
     // and `stream_holders` runs it.
@@ -590,13 +592,16 @@ const MACHINE_TESTS: &[&str] = &[
     // build has; no hardware is in it. x86-64 alone, the architecture the
     // suite builds guest binaries for (`qemu::SUITE_ARCH`).
     "stream_holders",
-    // One stream exported through std's `Command` and adopted in the child,
-    // through the real netstack of `tests/images/netcase.toml`: the export,
-    // the endowment and the adoption cross real processes and the real
-    // netstack, which no host test and `stream_holders`' stand-in show. The
-    // harness is the peer, on the host's loopback that QEMU's user network
-    // reaches, so no public network. x86-64 alone (`qemu::SUITE_ARCH`).
-    "stream_exported_to_a_child",
+    // A stream, a listener and a datagram socket exported through std's
+    // `Command` and adopted in a child, through the real netstack of
+    // `tests/images/netcase.toml`: the export, the endowment, the adoption and
+    // a second process's accept and datagrams on one queue cross real
+    // processes and the real netstack, which no host test and
+    // `stream_holders`' stand-in show. The harness is the peer, on the host's
+    // loopback that QEMU's user network reaches and forwards one port of, so
+    // no public network. Both jobs in one boot. x86-64 alone
+    // (`qemu::SUITE_ARCH`).
+    "netstack_holders_exported_to_children",
     // Login sessions: their owner parents, signs out and ends with each, and
     // the machine's reboot waits for them until forced, which only processes
     // in one boot show, as order, completion and counts. The reboot ends the
@@ -4343,7 +4348,7 @@ fn run_machine_test(name: &str, test_config: &Path) -> Result<(), String> {
         "hosted_clang_hello" => common::hostedclang::hosted_clang_hello(),
         "libc_children" => common::libcchildren::libc_children(),
         "stream_holders" => stream_holders(test_config),
-        "stream_exported_to_a_child" => stream_exported_to_a_child(),
+        "netstack_holders_exported_to_children" => netstack_holders_exported_to_children(),
         "session_lifecycle" => common::sessionlifecycle::session_lifecycle(),
         "a_launch_gives_each_unsent_stdio_slot_a_null" => common::launchstdio::a_launch_gives_each_unsent_stdio_slot_a_null(),
         "a_row_reaches_its_own_state_and_no_other" => common::stateview::a_row_reaches_its_own_state_and_no_other(),
@@ -5174,24 +5179,45 @@ fn crypto_instrument_prints_its_table(test_config: &Path) -> Result<(), String> 
 /// else.
 const CRYPTO_JOB_CEILING_SECS: u64 = 300;
 
-/// `test_rs_stream_export` on `tests/images/netcase.toml`'s boot, the
-/// harness its stream's peer: the child's line, then the parent's, then the
-/// FIN once both holders are gone.
-fn stream_exported_to_a_child() -> Result<(), String> {
-    use std::io::Read;
-    const JOB: &str = "stream_export";
+/// The guest port `test_rs_socket_export` listens on, which the boot forwards
+/// a port of the host's loopback to.
+const SOCKET_EXPORT_PORT: u16 = 7070;
+
+/// `test_rs_stream_export` and `test_rs_socket_export` on one boot of
+/// `tests/images/netcase.toml`, the harness every socket's peer: a stream's
+/// child's line, then its parent's, then the FIN once both holders are gone;
+/// then a listener's and a datagram socket's child's datagram, its accept and
+/// its line, and the parent's after it.
+fn netstack_holders_exported_to_children() -> Result<(), String> {
     /// netstack's line once its lease landed: before it, a connect is refused.
     const LEASED: &str = "netstack: ready, at most";
-    let peer = std::net::TcpListener::bind("127.0.0.1:0").map_err(|e| format!("no loopback listener: {e}"))?;
-    let port = peer.local_addr().map_err(|e| format!("the listener's port: {e}"))?.port();
     let tests = compile::repo_root().join("tests/guest/rust-tests");
-    let bin = qemu::build_toyos_bin(qemu::SUITE_ARCH, &tests, JOB);
+    let bins: Vec<(String, Vec<u8>)> =
+        ["stream_export", "socket_export"].iter().map(|job| (job.to_string(), qemu::build_toyos_bin(qemu::SUITE_ARCH, &tests, job))).collect();
+    // The host's end of the forward: a port found free and given up, which
+    // QEMU binds as it starts and refuses to start without. Another process
+    // can take it between the two, which fails the boot by name.
+    let forwarded = std::net::TcpListener::bind("127.0.0.1:0")
+        .and_then(|probe| probe.local_addr())
+        .map_err(|e| format!("no loopback port to forward: {e}"))?
+        .port();
     let config = compile::repo_root().join("tests/images/netcase.toml");
-    let mut qemu = QemuInstance::boot_with_options(&config, &[], &[(JOB.to_string(), bin)], BootOptions::default());
+    let options = BootOptions { forward: Some((forwarded, SOCKET_EXPORT_PORT)), ..BootOptions::default() };
+    let mut qemu = QemuInstance::boot_with_options(&config, &[], &bins, options);
     serial::Serial::boot(&qemu).must_be_clean()?;
     if !qemu.boot_log().contains(LEASED) && !qemu.drain_until(Duration::from_secs(60), |l| l.contains(LEASED)).contains(LEASED) {
         return Err("netstack never said its lease landed".into());
     }
+    stream_exported_to_a_child(&mut qemu)?;
+    sockets_exported_to_a_child(&mut qemu, forwarded)
+}
+
+/// `test_rs_stream_export`: the child's line, then the parent's, then the FIN
+/// once both holders are gone.
+fn stream_exported_to_a_child(qemu: &mut QemuInstance) -> Result<(), String> {
+    use std::io::Read;
+    let peer = std::net::TcpListener::bind("127.0.0.1:0").map_err(|e| format!("no loopback listener: {e}"))?;
+    let port = peer.local_addr().map_err(|e| format!("the listener's port: {e}"))?.port();
     // The peer's side on a thread of its own: the job's lines arrive while it runs.
     let heard = std::thread::spawn(move || -> Result<Vec<u8>, String> {
         let (mut conn, _) = peer.accept().map_err(|e| format!("the guest's connect: {e}"))?;
@@ -5213,6 +5239,88 @@ fn stream_exported_to_a_child() -> Result<(), String> {
         return Err(format!("the peer heard {:?}, not {:?}", String::from_utf8_lossy(&heard), String::from_utf8_lossy(owed)));
     }
     Ok(())
+}
+
+/// `test_rs_socket_export`: for the child and then the parent, a datagram
+/// saying it is ready, answered by one saying go, and a connection through the
+/// forwarded port that it accepts and writes its line on; then, once the parent
+/// and a second child both say they are about to block, two connections and
+/// two datagrams, each taken once.
+fn sockets_exported_to_a_child(qemu: &mut QemuInstance, forwarded: u16) -> Result<(), String> {
+    use std::io::Read;
+    /// A liveness ceiling on each of the peer's waits, never a timing.
+    const CEILING: Duration = Duration::from_secs(120);
+    let datagrams = std::net::UdpSocket::bind("127.0.0.1:0").map_err(|e| format!("no loopback datagram socket: {e}"))?;
+    datagrams.set_read_timeout(Some(CEILING)).map_err(|e| e.to_string())?;
+    let port = datagrams.local_addr().map_err(|e| format!("the datagram socket's port: {e}"))?.port();
+    let heard = std::thread::spawn(move || -> Result<(), String> {
+        for who in ["child", "parent"] {
+            let mut ready = [0u8; 64];
+            let (n, from) = datagrams.recv_from(&mut ready).map_err(|e| format!("the {who}'s datagram: {e}"))?;
+            if &ready[..n] != format!("{who} ready").as_bytes() {
+                return Err(format!("the peer heard {:?} for the {who}'s datagram", String::from_utf8_lossy(&ready[..n])));
+            }
+            datagrams.send_to(b"go", from).map_err(|e| format!("go to the {who}: {e}"))?;
+            let mut conn = std::net::TcpStream::connect(("127.0.0.1", forwarded)).map_err(|e| format!("the connect for the {who}: {e}"))?;
+            conn.set_read_timeout(Some(CEILING)).map_err(|e| e.to_string())?;
+            let mut line = Vec::new();
+            conn.read_to_end(&mut line).map_err(|e| format!("the {who}'s line, until its FIN: {e} after {line:?}"))?;
+            let owed = format!("accepted by the {who}\n");
+            if line != owed.as_bytes() {
+                return Err(format!("the peer heard {:?}, not {owed:?}", String::from_utf8_lossy(&line)));
+            }
+        }
+        // The race: both processes say they are about to block, then two
+        // connections and two datagrams, each taken once.
+        let both = |what: &str| -> Result<std::net::SocketAddr, String> {
+            let mut said = Vec::new();
+            let mut from = None;
+            for _ in 0..2 {
+                let mut line = [0u8; 64];
+                let (n, at) = datagrams.recv_from(&mut line).map_err(|e| format!("a racer's {what}: {e}"))?;
+                said.push(String::from_utf8_lossy(&line[..n]).into_owned());
+                from = Some(at);
+            }
+            said.sort();
+            if said != [format!("parent {what}"), format!("racer {what}")] {
+                return Err(format!("the racers said {said:?}"));
+            }
+            from.ok_or_else(|| "no racer spoke".to_string())
+        };
+        both("racing")?;
+        let conns: Vec<std::net::TcpStream> = (0..2)
+            .map(|_| std::net::TcpStream::connect(("127.0.0.1", forwarded)).map_err(|e| format!("a racer's connect: {e}")))
+            .collect::<Result<_, _>>()?;
+        for mut conn in conns {
+            conn.set_read_timeout(Some(CEILING)).map_err(|e| e.to_string())?;
+            let mut line = Vec::new();
+            conn.read_to_end(&mut line).map_err(|e| format!("a racer's line: {e} after {line:?}"))?;
+            if line != b"accepted by a racer\n" {
+                return Err(format!("a racer wrote {:?}", String::from_utf8_lossy(&line)));
+            }
+        }
+        let socket = both("receiving")?;
+        for datagram in [&b"one"[..], b"two"] {
+            datagrams.send_to(datagram, socket).map_err(|e| format!("a racer's datagram: {e}"))?;
+        }
+        Ok(())
+    });
+    let result = qemu.run_test(&format!("test_rs_socket_export {port}"), Duration::from_secs(300));
+    if let Some(why) = &result.error {
+        return Err(format!("{why}\nthe job said:\n{}", result.stdout));
+    }
+    if result.exit_code != Some(0) {
+        return Err(format!("the job ended {:?}:\n{}", result.exit_code, result.stdout));
+    }
+    for claim in [
+        "a listener and a datagram socket exported to a child: it accepted and spoke on them, and so did the parent after it",
+        "two holders blocked on one queue: each took one connection and one datagram",
+    ] {
+        if !result.stdout.contains(claim) {
+            return Err(format!("the job never said {claim:?}:\n{}", result.stdout));
+        }
+    }
+    heard.join().map_err(|_| "the peer's thread panicked".to_string())?
 }
 
 /// `test_rs_stream_handles` on a boot of its own: a holder killed inside its

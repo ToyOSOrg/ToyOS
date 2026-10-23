@@ -1,7 +1,7 @@
 use std::time::{Duration, Instant};
 
 use toyos::AsHandle;
-use toyos::ipc::{self, Connection, IpcPayload};
+use toyos::ipc::{self, Connection};
 use toyos::net::{ErrorResponse, MAX_REQUEST, RespType};
 use toyos::say;
 
@@ -21,16 +21,8 @@ pub struct Client {
 }
 
 impl Client {
-    pub fn result<T: IpcPayload>(&self, payload: &T) {
-        self.answered(self.conn.try_send(RESP_RESULT, payload));
-    }
-
     pub fn result_bytes(&self, data: &[u8]) {
         self.answered(self.conn.try_send_bytes(RESP_RESULT, data));
-    }
-
-    pub fn done(&self) {
-        self.answered(self.conn.try_signal(RESP_RESULT));
     }
 
     pub fn error(&self, code: u32) {

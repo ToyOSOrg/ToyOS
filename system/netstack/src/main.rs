@@ -6,9 +6,9 @@
 //! wire goes to the node as the card handed it over, and every decision about
 //! an address, a socket or a segment is the node's. What is here is what the
 //! node cannot do and stay pure: the card (`card`), the clock, the kernel's
-//! random source, the regions clients lend (`lent`), the kernel's pipes
-//! (`pipes`), the clients' connections (`client`) and their requests
-//! (`serve`).
+//! random source, the regions clients lend (`lent`), the bells a socket's
+//! holders are rung on (`pipes`), the clients' connections (`client`) and
+//! their requests (`serve`).
 //!
 //! **One pass**: the card's link and its received frames, as one batch, go to the node, then
 //! every deadline that is due, then the node is offered the card's transmit
@@ -22,7 +22,7 @@
 //! the node builds none without it, and a card with none wakes the pass that
 //! has (`Card::wake_on_room`).
 //!
-//! **Every draw is the kernel's**, the stack's secrets and each id, port and
+//! **Every draw is the kernel's**, the stack's secrets and each port and
 //! transaction id after them, and a kernel that refuses one ends netstack by
 //! name: a value anyone can predict is a forged answer's way in.
 
@@ -104,17 +104,22 @@ const PIPE_BYTES: u64 = 2 * 1024 * 1024;
 /// (`issues/a-pipe-is-a-two-mebibyte-page-for-a-mapping-nothing-makes.md`).
 const HOLDER_BYTES: u64 = 4 * PIPE_BYTES;
 
-/// What one place can make this machine hold, at the largest of the four
-/// things a place is (`toyos-net-node`'s `places`): a stream, its region and
-/// its first holder; a holder past a stream's first; a listener, whose peers
-/// fill its queue of `LISTEN_READY` finished connections with an initial
-/// receive buffer of text each, nobody reading them to grow one, and its wake
-/// pipe; a datagram socket, its two pipes and two queues.
+/// What one holder of a listener or a datagram socket holds: the two pipes of
+/// its connection and its bell.
+const SOCKET_HOLDER_BYTES: u64 = 3 * PIPE_BYTES;
+
+/// What one place can make this machine hold, at the largest of the things a
+/// place is (`toyos-net-node`'s `places`): a stream, its region and its first
+/// holder; a holder past a stream's first; a listener, whose peers fill its
+/// queue of `LISTEN_READY` finished connections with an initial receive buffer
+/// of text each, nobody reading them to grow one, and its first holder; a
+/// datagram socket, its two queues and its first holder; a holder past a
+/// socket's first.
 const PLACE_BYTES: u64 = {
     let stream = toyos::net::stream::REGION_BYTES as u64 + HOLDER_BYTES;
-    let listener = toyos_net_tcp::limits::LISTEN_READY as u64 * toyos_net_tcp::limits::RECEIVE_BUFFER_INITIAL as u64 + PIPE_BYTES;
-    let datagram = 2 * PIPE_BYTES + (toyos_net_udp::limits::RX_BYTES + toyos_net_udp::limits::TX_BYTES) as u64;
-    assert!(stream >= listener && stream >= datagram && stream >= HOLDER_BYTES);
+    let listener = toyos_net_tcp::limits::LISTEN_READY as u64 * toyos_net_tcp::limits::RECEIVE_BUFFER_INITIAL as u64 + SOCKET_HOLDER_BYTES;
+    let datagram = SOCKET_HOLDER_BYTES + (toyos_net_udp::limits::RX_BYTES + toyos_net_udp::limits::TX_BYTES) as u64;
+    assert!(stream >= listener && stream >= datagram && stream >= HOLDER_BYTES && stream >= SOCKET_HOLDER_BYTES);
     stream
 };
 
@@ -131,9 +136,9 @@ const PLACE_BUDGET_SHARE: u64 = 8;
 const FIXED_WATCHES: u32 = 2;
 
 /// The most places one poller can watch: each place is one watched handle, a
-/// stream holder's connection, a listener's wake pipe or a datagram socket's
-/// receive pipe, asked about in the same batch as the fixed watches, the connections
-/// that have not said what they want and the lookups' clients.
+/// holder's connection of a stream, a listener or a datagram socket, asked
+/// about in the same batch as the fixed watches, the connections that have not
+/// said what they want and the lookups' clients.
 const MAX_PLACES: u32 = Poller::MAX_HANDLES - FIXED_WATCHES - MAX_PENDING_CONNS - serve::LOOKUP_WATCHES;
 
 /// How many places the node is given, of `total_mem` bytes of physical
@@ -355,8 +360,8 @@ fn main() {
 
     let total_mem = total_memory();
     let places = places_for(total_mem);
-    node.set_places(clock(), places);
-    let mut sockets = serve::Sockets::new(draw(), places);
+    node.set_places(places);
+    let mut sockets = serve::Sockets::new(places);
     let mut leases = Leases { began, said: None, settled: false };
 
     // The link as the card came up with it, which the first change a pass
@@ -411,7 +416,7 @@ fn main() {
         }
         card.report();
 
-        sockets.settle(&mut node, now);
+        sockets.settle(&mut node);
         // Before anything is served: the lease is what gives this machine an
         // address, a route and its resolvers.
         if leases.pass(node.lease()) {
