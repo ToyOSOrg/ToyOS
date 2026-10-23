@@ -1,6 +1,6 @@
 [package]
 name = "logout"
-description = "logout [<session> [--force]]: its user's login sessions, listed, or one of them signed out, asked of the supervisor."
+description = "logout [<session> [--force]]: the login sessions open, listed, or one of them signed out, asked of the supervisor."
 version = "0.1.0"
 edition = "2021"
 license = "MIT OR Apache-2.0"

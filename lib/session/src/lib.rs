@@ -21,8 +21,8 @@
 /// `login` row receives.
 pub const LOGIN_PORT: &str = "login";
 
-/// The supervisor's port `logout` acts on its user's sessions through, which
-/// only [`ADMIN_HOLDER`] receives, minted with its user.
+/// The supervisor's port `logout` acts on the sessions open through, which
+/// only [`ADMIN_HOLDER`] receives, minted with its row and session.
 pub const ADMIN_PORT: &str = "session-admin";
 
 /// The one row a build may let receive [`ADMIN_PORT`]: its own binary, so no
@@ -77,7 +77,7 @@ pub const MSG_ENDED: u32 = 22;
 /// child under it, which the session's detached apps are spawned under.
 pub const MSG_PLACE: u32 = 23;
 
-/// On [`ADMIN_PORT`]: the sessions of the badge's user. No payload.
+/// On [`ADMIN_PORT`]: the sessions open. No payload.
 pub const MSG_LIST: u32 = 30;
 /// The answer to [`MSG_LIST`]: [`Listed`] lines.
 pub const MSG_SESSIONS: u32 = 31;
@@ -196,7 +196,7 @@ pub fn decode_instance(bytes: &[u8]) -> Option<u64> {
     Some(u64::from_le_bytes(bytes.try_into().ok()?))
 }
 
-/// `logout`'s sign-out of one of its user's sessions, by its share.
+/// `logout`'s sign-out of one session, by its share.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct SignOutSession {
     pub share: u64,

@@ -192,7 +192,7 @@ enum Port {
     Grants(Caller),
     /// The login authority asking for a session, off its badge.
     Login(&'static Program),
-    /// The `logout` asking about its user's sessions, off its badge.
+    /// The `logout` asking about the sessions open, off its badge.
     Admin(Caller),
     Swap,
     Power,
@@ -216,13 +216,17 @@ struct Minted {
 struct Minting<'m> {
     minted: &'m Minted,
     session: Session,
-    launches: (&'m Acceptor, Session),
+    /// `None` for a start that holds no launcher minted here: a `login` row
+    /// outside a login session, whose launches are a session's alone.
+    launches: Option<(&'m Acceptor, Session)>,
 }
 
 impl<'m> Minting<'m> {
-    /// A start whose launches are in its own session, on the machine's launcher.
-    fn own(minted: &'m Minted, session: Session) -> Self {
-        Self { minted, session, launches: (&minted.launcher, session) }
+    /// A start in the machine's session, its launches on the machine's
+    /// launcher, but for a `login` row's, which hold none of it.
+    fn machine(minted: &'m Minted, program: &Program, session: Session) -> Self {
+        let launches = toyos_supervisor::sessions::holds_machine_launcher(program).then_some((&minted.launcher, session));
+        Self { minted, session, launches }
     }
 }
 
@@ -767,7 +771,8 @@ struct Service<'a> {
     session: Session,
     /// The starts after an end it has spent.
     budget: Budget,
-    /// The screen's row's desktop session, which each start of it holds.
+    /// The screen's row's desktop session's launcher and control, minted for
+    /// its next start, which takes them.
     desktop: Option<sessions::Desktop>,
 }
 
@@ -819,14 +824,11 @@ impl<'a> Service<'a> {
         if is_block(self.program) {
             storage.args.extend(block);
         }
-        let launches = match &self.desktop {
-            Some(desktop) => {
-                let control = desktop.control().map_err(std::io::Error::other)?;
-                storage.endow.push((toyos_session::CONTROL_LABEL, control.into_raw()));
-                (&*desktop.launcher, desktop.session)
-            }
-            None => (&minted.launcher, self.session),
-        };
+        // The screen's row's desktop session, minted for this start alone.
+        if let Some(desktop) = self.desktop.take() {
+            storage.endow.push((LAUNCHER, desktop.launcher.into_raw()));
+            storage.endow.push((toyos_session::CONTROL_LABEL, desktop.control.into_raw()));
+        }
         let ports = self.ports.borrow();
         let served = Served::Keep { acceptors: &ports, owed };
         let command = match source {
@@ -847,7 +849,7 @@ impl<'a> Service<'a> {
             grants,
             &[],
             storage,
-            Minting { minted, session: self.session, launches },
+            Minting::machine(minted, self.program, self.session),
             Output::Boot(log),
         )?;
         drop(ports);
@@ -1110,7 +1112,7 @@ impl<'a> Supervisor<'a> {
             extra.stop = Some(read);
             stop = Some(write);
         }
-        let launcher = Minting::own(&self.minted, self.sessions.machine());
+        let launcher = Minting::machine(&self.minted, row, self.sessions.machine());
         let served = Served::Keep { acceptors: &[], owed: &[] };
         let output = Output::Boot(&mut self.log);
         let path = row.source.path().ok_or_else(|| format!("{} runs {}, and a `drives` row runs a file", row.name, row.source))?;
@@ -2414,8 +2416,17 @@ impl Supervisor<'_> {
             }
         }
         let storage = self.slot_storage(program);
-        let in_login = self.logins.launcher_of(session);
-        let launches = (in_login.as_deref().unwrap_or(&self.minted.launcher), session);
+        let launches = match session {
+            Session::Login(..) => match self.logins.launcher_of(session) {
+                Some(launcher) => Some((launcher, session)),
+                None => {
+                    say!("supervisor: launcher: {} was not started: its session has ended", program.name);
+                    let _ = conn.try_signal(launch::MSG_REFUSED);
+                    return;
+                }
+            },
+            Session::Machine(_) => Minting::machine(&self.minted, program, session).launches,
+        };
         let started = start(
             command,
             program,
@@ -2832,7 +2843,7 @@ fn start<'a>(
         command.endow(toyos_swap::LABEL, raw.0);
         held.0.push(raw);
     }
-    if let Some(ns) = launcher_namespace(program, minting.launches) {
+    if let Some(ns) = minting.launches.and_then(|launches| launcher_namespace(program, launches)) {
         let raw = ns.into_raw();
         command.endow(LAUNCHER, raw.0);
         held.0.push(raw);

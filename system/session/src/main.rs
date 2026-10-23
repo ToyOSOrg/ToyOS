@@ -23,8 +23,9 @@ const TOKEN_LAUNCHER: u64 = 1;
 const TOKEN_CONTROLS: u64 = 2;
 const TOKEN_CONTROL_BASE: u64 = 3;
 
-/// The control connections one session keeps: its login authority's, and
-/// one per restart of a compositor that held it.
+/// The live control connections one session keeps: its login authority's,
+/// and a restarted compositor's while its last one's hang-up is unread. One
+/// past it is closed unread, which its holder reads as the session's end.
 const MAX_CONTROLS: usize = 8;
 
 type Rx = ipc::FrameRx<{ ipc::MAX_FRAME_LEN as usize }>;

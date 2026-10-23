@@ -1,13 +1,15 @@
-//! How this daemon starts what a client asks for.
+//! How this daemon starts what a client asks for, and lets it go.
 //!
 //! On ToyOS each connection's programs run in a login session the supervisor
 //! opens for it ([`Login`]): launched in their own rows, detached under that
 //! session's owner, so they hold no host key and no network right of this
-//! daemon's. A connection that goes signs its session out, which asks its
-//! programs to quit and ends none by force. Elsewhere a program has no row
-//! and runs as this daemon's child, killed when its connection goes.
+//! daemon's. A channel's end asks its program to quit with a hang-up
+//! ([`Ender`]), and the connection's end signs its session out, which asks
+//! every program in it and ends none by force. Elsewhere a program has no row
+//! and runs as this daemon's child, killed when its channel or connection goes.
 
 use std::process::{Child, Command};
+use std::sync::Mutex;
 
 /// The login session one connection's programs run in.
 #[cfg(target_os = "toyos")]
@@ -41,12 +43,6 @@ impl Login {
         command.independent().detached().launcher(toyos::AsHandle::as_handle(&self.launcher).0);
         command
     }
-
-    /// A program whose connection is gone: its session's sign-out asks it to
-    /// quit, so this daemon lets it go.
-    pub fn abandon(_child: &mut Child, name: &str, peer: &str) {
-        println!("sshserver: {peer}: the connection is gone; {name} is asked to quit with its session");
-    }
 }
 
 /// The connection is gone: its session signs out, asking what runs in it to
@@ -58,6 +54,28 @@ impl Drop for Login {
         if let Err(e) = self.control.try_send_bytes(toyos_session::MSG_SIGN_OUT, &asked) {
             println!("sshserver: a session was not signed out with its connection: {e:?}");
         }
+    }
+}
+
+/// How a channel's end lets its program go: a hang-up, asked through a handle
+/// that may quit it, which a thread waiting for the program does not hold.
+#[cfg(target_os = "toyos")]
+pub struct Ender(toyos::process::Process);
+
+#[cfg(target_os = "toyos")]
+impl Ender {
+    pub fn of(child: &Child) -> Result<Self, String> {
+        use std::os::toyos::process::ChildExt;
+        let handle = toyos::RawHandle(child.as_raw_handle());
+        let quit = toyos_abi::syscall::dup_narrowed(handle, toyos_abi::Rights::MANAGE)
+            .map_err(|e| format!("no handle to end it was had ({e:?})"))?;
+        // SAFETY: a duplicate made here, which nothing else answers for.
+        Ok(Self(unsafe { toyos::process::Process::from_raw(quit) }))
+    }
+
+    /// Ask it to quit with a hang-up, whether or not a thread waits for it.
+    pub fn end(&self, _child: &Mutex<Child>) {
+        let _ = self.0.quit(toyos::quit::Reason::HangUp);
     }
 }
 
@@ -74,12 +92,23 @@ impl Login {
     pub fn command(&self, program: &str) -> Command {
         Command::new(program)
     }
+}
 
-    /// A program whose connection is gone is killed: nobody is left to read it.
-    pub fn abandon(child: &mut Child, name: &str, peer: &str) {
-        match child.kill().and_then(|()| child.wait()) {
-            Ok(_) => println!("sshserver: {peer}: the connection is gone; ended {name}"),
-            Err(e) => println!("sshserver: {peer}: the connection is gone and {name} would not end: {e}"),
+/// Elsewhere a channel's end kills its program, nobody being left to read it.
+#[cfg(not(target_os = "toyos"))]
+pub struct Ender;
+
+#[cfg(not(target_os = "toyos"))]
+impl Ender {
+    pub fn of(_child: &Child) -> Result<Self, String> {
+        Ok(Self)
+    }
+
+    /// Kill it and reap it, unless a thread is already waiting for its end.
+    pub fn end(&self, child: &Mutex<Child>) {
+        if let Ok(mut child) = child.try_lock() {
+            let _ = child.kill();
+            let _ = child.wait();
         }
     }
 }

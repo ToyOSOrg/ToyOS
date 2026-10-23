@@ -11,13 +11,18 @@ use std::process::Child;
 use std::sync::Mutex;
 
 use crate::connection::EXIT_LOST;
+use crate::spawn::Ender;
 
-pub struct Program(Mutex<Child>);
+pub struct Program(Mutex<Child>, Ender);
 
 impl Program {
-    /// `child`, whose pipes are taken.
-    pub fn new(child: Child) -> Self {
-        Self(Mutex::new(child))
+    /// `child`, whose pipes are taken; or the child back, with why it could
+    /// not be ended.
+    pub fn new(child: Child) -> Result<Self, (Child, String)> {
+        match Ender::of(&child) {
+            Ok(ender) => Ok(Self(Mutex::new(child), ender)),
+            Err(why) => Err((child, why)),
+        }
     }
 
     /// Its exit status once it ends, or [`EXIT_LOST`] for an end the protocol's
@@ -37,12 +42,9 @@ impl Program {
         }
     }
 
-    /// Kill it and reap it, unless a thread is already waiting for its end.
+    /// Let it go as its channel or connection ends ([`Ender`]).
     pub fn end(&self) {
-        if let Ok(mut child) = self.0.try_lock() {
-            let _ = child.kill();
-            let _ = child.wait();
-        }
+        self.1.end(&self.0);
     }
 }
 
@@ -55,7 +57,7 @@ mod tests {
     #[test]
     fn a_program_ended_is_reaped() {
         let child = Command::new("sleep").arg("1000").stdin(Stdio::null()).spawn().expect("spawn sleep");
-        let program = Program::new(child);
+        let program = Program::new(child).map_err(|(_, why)| why).expect("a host's child is ended through itself");
         program.end();
         let status = program.0.lock().unwrap().try_wait().expect("try_wait");
         assert!(status.is_some_and(|s| !s.success()), "the killed program was reaped: {status:?}");

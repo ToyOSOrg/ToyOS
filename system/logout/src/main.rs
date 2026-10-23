@@ -1,4 +1,4 @@
-//! `/system/bin/logout`: its user's login sessions, asked of the supervisor.
+//! `/system/bin/logout`: the login sessions open, asked of the supervisor.
 //!
 //! - `logout`: every session, one line each: its number, `desktop` or
 //!   `remote`, `active` or `ending`, and what an ending one waits for.
@@ -7,7 +7,8 @@
 //!
 //! It holds the one `session-admin` connector the build lets a program hold,
 //! minted with its row and session, so it is reached with `launch logout`;
-//! the supervisor answers a login session's alone, for that session's user.
+//! the supervisor answers a login session's alone. The machine has one user,
+//! so that is every session's.
 //! The answer is the supervisor's text on standard output, with exit status 0
 //! where it was done and 1 where it was refused.
 

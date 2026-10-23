@@ -26,9 +26,28 @@ static FINISHED: AtomicBool = AtomicBool::new(false);
 /// blocked inside its `wait`.
 static JOB: AtomicU32 = AtomicU32::new(0);
 
-/// The `login` connector this row is endowed as a login authority, which each
-/// job is handed a copy of.
-static LOGIN: std::sync::OnceLock<Option<toyos::namespace::Namespace>> = std::sync::OnceLock::new();
+/// What this row is endowed as a login authority, where it is one: its `login`
+/// connector, which each job is handed a copy of, and the launcher of the
+/// session it opens for its jobs, which a login authority's launches are in.
+struct Login {
+    connector: toyos::namespace::Namespace,
+    session: toyos::namespace::Namespace,
+    _control: toyos::ipc::Connection,
+}
+
+static LOGIN: std::sync::OnceLock<Option<Login>> = std::sync::OnceLock::new();
+
+fn login() -> Option<&'static Login> {
+    LOGIN
+        .get_or_init(|| {
+            let connector = Endowments::get().take::<toyos::namespace::Namespace>(LOGIN_PORT)?;
+            match toyos_session::open(&connector) {
+                Ok((session, control)) => Some(Login { connector, session, _control: control }),
+                Err(why) => panic!("test-runner: a login authority with no session for its jobs: {why}"),
+            }
+        })
+        .as_ref()
+}
 
 /// Set by the deadline before it kills the job it was watching, so the loop
 /// that kill releases does not start another one.
@@ -262,10 +281,12 @@ fn run_one(name: &str, args: &[&str], cap: Option<&SysCap>) -> Ran {
         }
     }
     // Its launcher too, where its row starts anything, and its `login`
-    // connector where its row is a login authority: a job is a helper, and a
-    // helper inherits neither.
-    let login = LOGIN.get_or_init(|| toyos::endow::Endowments::get().take::<toyos::namespace::Namespace>(LOGIN_PORT));
-    for (label, held) in [(toyos::launch::LAUNCHER, toyos::endow::launcher()), (LOGIN_PORT, login.as_ref())] {
+    // connector where its row is a login authority, whose launcher is the
+    // session it opened for its jobs: a job is a helper, and a helper
+    // inherits neither.
+    let login = login();
+    let launcher = login.map(|l| &l.session).or(toyos::endow::launcher());
+    for (label, held) in [(toyos::launch::LAUNCHER, launcher), (LOGIN_PORT, login.map(|l| &l.connector))] {
         let Some(held) = held else { continue };
         match toyos_abi::syscall::dup(toyos::AsHandle::as_handle(held)) {
             Ok(dup) => {

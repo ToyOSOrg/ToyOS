@@ -186,13 +186,18 @@ an explicit force issues it, and never a timer's.
    the owner gives it, and the supervisor tells it of each app's start and
    end. The desktop's session opens with the screen's row, endowed to it, and
    again when it ends; any other `login` row opens one on the supervisor's
-   `login` port, sshserver one per connection. `launch <app>` asks the shell's
+   `login` port, sshserver one per connection. A `login` row holds no
+   launcher of the machine's session: its launches are its sessions' alone,
+   and with none open it launches nothing and says so. `launch <app>` asks the shell's
    session for an independent app; a bare command is the shell's helper.
    Sign-out asks every app to quit with a hang-up, reports what stays to the
    session's controls, keeps the session on a cancel and ends what stays only
-   on a force; `logout`, the one row holding `session-admin`, lists its user's
-   sessions and signs one out. An owner's end other than its sign-out's is a
-   failure, and only the next open after one is budgeted. Its namespace is
+   on a force; `logout`, the one row holding `session-admin`, lists the
+   sessions open and signs one out. The machine has one user, so a login
+   session's `logout` acts on every session. An owner's end other than its
+   sign-out's is a failure, and a login authority whose sessions failed more
+   than the restart budget's three times in ten seconds is refused its next
+   open; no other open is counted. Its namespace is
    `issues/a-user-is-a-home-tree-and-a-login-row.md`'s login row; the SSH
    session's shell holds no host key and no SSH service authority.
    *Exit*: ending the desktop's session owner ends every program of that
@@ -206,7 +211,8 @@ an explicit force issues it, and never a timer's.
      waits for an app that ignores a hang-up, Escape keeps it and Enter kills
      it, and the compositor opens the desktop again; a job's session, opened
      on `login`, signs out the same way, `logout` lists it active and ending,
-     and ten sessions open and sign out in a row.
+     and ten sessions open and sign out in a row. Jobs of a `login`
+     test-runner run in a session it opens for them.
    - The owner's unasked end ending its apps has no guest arm, since nothing
      may kill a process by its number: the kernel's parent rule is
      `process_tree`'s, and the supervisor's half, placing detached apps under
@@ -219,9 +225,9 @@ an explicit force issues it, and never a timer's.
      image, so the controls are mutations, each red by name: a graceful
      sign-out that kills (`session_lifecycle` stalls at Escape's cancel, and
      the owner's host laws red); a handed-over launch in its badge's session;
-     ordinary opens spending the budget; `session-admin` ignoring whose
-     session it is; a detached app placed under the supervisor; any row
-     receiving `session-admin`.
+     a sibling's sign-out forgetting a failure; one failure refusing a login;
+     a detached app placed under the supervisor; a `login` row holding the
+     machine's launcher; any row receiving `session-admin`.
 6. **A program is asked to quit**.
    - 6.1 **Done** (#995, the kernel's half): `SYS_PROCESS_QUIT` (135: the 124 this
      stage named went to `SYS_COUNTERS`), `(process, reason)`, needs `MANAGE`

@@ -56,24 +56,24 @@ fn main() {
     let holder = live(HOLDER).into_iter().next().expect("the detached holder runs once its shell has ended");
     println!("session_lifecycle: a detached app (pid {holder}) outlives its shell");
 
-    // Shares only grow, so the first session opened has the smaller.
-    let said = logout();
-    let share: u64 = said
+    // What `logout` lists active now, among which this job's session is.
+    let active: Vec<u64> = logout()
         .lines()
         .filter(|l| l.contains(" remote active"))
         .filter_map(|l| l.split(' ').next()?.parse().ok())
-        .min()
-        .unwrap_or_else(|| panic!("logout listed no active remote session: {said:?}"));
-    println!("session_lifecycle: logout lists session {share} active");
+        .collect();
 
     // A graceful sign-out asks, and the holder, which stays, is what it waits for.
     control.send(wire::MSG_SIGN_OUT, &SignOut { force: false }.encode());
     let waiting = control.waiting();
     assert!(waiting.names.iter().any(|n| n == HOLDER), "the sign-out waits for {waiting:?}");
     let said = logout();
-    let line = said.lines().find(|l| l.starts_with(&format!("{share} "))).unwrap_or("");
-    assert!(line.contains(" remote ending ") && line.contains(HOLDER), "logout listed {said:?}");
-    println!("session_lifecycle: the sign-out waits for the holder, and logout lists it ending");
+    let ending = said.lines().find(|l| l.contains(" remote ending ") && l.contains(HOLDER));
+    let share: Option<u64> = ending.and_then(|l| l.split(' ').next()?.parse().ok());
+    let share = share.unwrap_or_else(|| panic!("logout listed no session ending for the holder: {said:?}"));
+    assert!(active.contains(&share), "session {share}, ending, was not listed active before: {active:?}");
+    println!("session_lifecycle: logout lists session {share} active, then ending");
+    println!("session_lifecycle: the sign-out waits for the holder");
 
     // A cancel keeps the session, and the holder in it.
     control.send(wire::MSG_CANCEL, &[]);

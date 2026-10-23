@@ -5523,7 +5523,6 @@ fn app_view(back: &metal::Readback) -> Result<(), String> {
         &named,
         "supervisor: launcher: appview was not started: /home/toy/Apps/appview could not be made: \
          /home/toy/Apps/appview is no directory",
-        "supervisor: grants: refused grants in the machine's session: only a login session may ask for grants",
         "supervisor: grants: appview is granted /home/toy/Games read-write",
         "  granted: cwd=/home/toy/Games roms=[\"test.gba\"] saved=Ok",
         "supervisor: grants: appview's grant is revoked; its next launch holds no folder",

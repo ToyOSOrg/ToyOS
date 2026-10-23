@@ -1,20 +1,61 @@
 //! Login sessions, as far as the supervisor decides about them: whether a
-//! login authority may open one, and which of them a user's `logout` may sign
-//! out. Pure.
+//! login authority may open one, where a detached app in one goes, and what
+//! an owner's end means. Pure.
 //!
-//! **Only a reopen after a failure is budgeted.** A session owner's failure is
-//! an end the supervisor did not ask for and no sign-out preceded; an open by
-//! the same login authority after one spends [`Reopens`]'s budget, which is
-//! [`crate::restart::Budget`]. An open with no failure before it is never
-//! counted.
+//! **Only failures are budgeted.** A session owner's failure is an end the
+//! supervisor did not ask for and no sign-out preceded. A login authority
+//! whose sessions failed more than [`RESTARTS`] times inside [`WINDOW`] is
+//! refused its next open until the oldest failure leaves the window; every
+//! other open, any number of logins and `ssh host cmd` sessions included,
+//! spends nothing, and an open refused for another reason spends nothing
+//! either.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, VecDeque};
 use std::time::Instant;
 
 use toyos_abi::end::End;
 use toyos_manifest::launch::Session;
+use toyos_manifest::Program;
 
-use crate::restart::Budget;
+use crate::restart::{RESTARTS, WINDOW};
+
+/// The failures of each login authority's sessions, inside the window.
+#[derive(Default, Debug)]
+pub struct Reopens {
+    failures: BTreeMap<String, VecDeque<Instant>>,
+}
+
+/// An open refused because its authority's sessions failed past the budget.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Exhausted;
+
+impl Reopens {
+    /// One of `opener`'s sessions ended at `now`: by a sign-out, or a failure.
+    pub fn ended(&mut self, opener: &str, signed_out: bool, now: Instant) {
+        if !signed_out {
+            self.failures.entry(opener.to_string()).or_default().push_back(now);
+        }
+    }
+
+    /// Whether `opener` may open a session at `now`.
+    pub fn may_open(&mut self, opener: &str, now: Instant) -> Result<(), Exhausted> {
+        let Some(failures) = self.failures.get_mut(opener) else { return Ok(()) };
+        while failures.front().is_some_and(|at| now.duration_since(*at) > WINDOW) {
+            failures.pop_front();
+        }
+        match failures.len() > RESTARTS {
+            true => Err(Exhausted),
+            false => Ok(()),
+        }
+    }
+}
+
+/// Whether a start of `program` in the machine's session holds the machine's
+/// launcher. **Never a `login` row's**: its launches are a session's alone, so
+/// one that opened none launches nothing, rather than in the machine's.
+pub fn holds_machine_launcher(program: &Program) -> bool {
+    !program.login
+}
 
 /// The session a launch an owner handed over runs in: its link's, never what
 /// the connection's badge names, which must be the same one.
@@ -54,81 +95,45 @@ pub fn signed_out(end: End) -> bool {
     end == End::Exited(0)
 }
 
-/// The budget each login authority's opens after a failure spend.
-#[derive(Default, Debug)]
-pub struct Reopens {
-    owed: BTreeMap<String, (bool, Budget)>,
-}
-
-/// An open refused because its authority's budget is spent.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub struct Exhausted;
-
-impl Reopens {
-    /// `opener`'s session ended: by a sign-out, or a failure.
-    pub fn ended(&mut self, opener: &str, signed_out: bool) {
-        self.owed.entry(opener.to_string()).or_default().0 = !signed_out;
-    }
-
-    /// Whether `opener` may open a session at `now`, spending its budget where
-    /// its last session failed.
-    pub fn open(&mut self, opener: &str, now: Instant) -> Result<(), Exhausted> {
-        let Some((failed, budget)) = self.owed.get_mut(opener) else { return Ok(()) };
-        if !*failed {
-            return Ok(());
-        }
-        match budget.spend(now) {
-            true => {
-                *failed = false;
-                Ok(())
-            }
-            false => Err(Exhausted),
-        }
-    }
-}
-
-/// Why `logout` may not sign a session out.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum Refused {
-    NoSuchSession,
-    NotYours,
-}
-
-/// Whether `user` may sign out the session `share` names, among `sessions`,
-/// each a share and the user it is of. A session is its own user's alone.
-pub fn sign_out_target(sessions: &[(u64, &str)], user: &str, share: u64) -> Result<(), Refused> {
-    match sessions.iter().find(|(s, _)| *s == share) {
-        None => Err(Refused::NoSuchSession),
-        Some((_, of)) if *of != user => Err(Refused::NotYours),
-        Some(_) => Ok(()),
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::restart::{RESTARTS, WINDOW};
     use std::time::Duration;
 
-    /// Opens with no failure before them are never counted; reopens after a
-    /// failure spend the budget, which refuses the fourth inside its window
-    /// and is whole again after it, and a sign-out spends nothing.
+    /// Opens with no failure before them are never counted, however many.
     #[test]
-    fn only_a_reopen_after_a_failure_spends() {
-        let mut reopens = Reopens::default();
-        let now = Instant::now();
+    fn ordinary_opens_spend_nothing() {
+        let (mut reopens, now) = (Reopens::default(), Instant::now());
         for _ in 0..10 * RESTARTS {
-            assert_eq!(reopens.open("sshserver", now), Ok(()));
-            reopens.ended("sshserver", true);
+            assert_eq!(reopens.may_open("sshserver", now), Ok(()));
+            reopens.ended("sshserver", true, now);
         }
-        reopens.ended("compositor", false);
+    }
+
+    /// Several sessions of one authority at once: one failing spends no other
+    /// login's open, a sibling's sign-out forgets no failure, and only more
+    /// than the budget's failures inside the window refuse, until the oldest
+    /// leaves it.
+    #[test]
+    fn failures_are_budgeted_across_an_authoritys_sessions() {
+        let (mut reopens, now) = (Reopens::default(), Instant::now());
+        reopens.ended("sshserver", false, now);
+        assert_eq!(reopens.may_open("sshserver", now), Ok(()), "one failure refused an ordinary login");
         for _ in 0..RESTARTS {
-            assert_eq!(reopens.open("compositor", now), Ok(()));
-            reopens.ended("compositor", false);
+            reopens.ended("sshserver", true, now);
+            reopens.ended("sshserver", false, now);
         }
-        assert_eq!(reopens.open("compositor", now), Err(Exhausted));
+        assert_eq!(reopens.may_open("sshserver", now), Err(Exhausted), "a sibling's sign-out forgot a failure");
+        assert_eq!(reopens.may_open("compositor", now), Ok(()));
         let later = now + WINDOW + Duration::from_millis(1);
-        assert_eq!(reopens.open("compositor", later), Ok(()));
+        assert_eq!(reopens.may_open("sshserver", later), Ok(()));
+    }
+
+    #[test]
+    fn a_login_row_holds_no_machine_launcher() {
+        assert!(!holds_machine_launcher(&Program { login: true, starts: vec!["shell".into()], ..Program::default() }));
+        assert!(holds_machine_launcher(&Program { starts: vec!["toybox".into()], ..Program::default() }));
     }
 
     /// An owner hands over only its own session's launches: a badge naming
@@ -161,22 +166,11 @@ mod tests {
         assert!(signed_out(End::Exited(0)));
         let mut reopens = Reopens::default();
         let now = Instant::now();
-        for end in [End::Exited(1), End::Killed, End::Fault(Fault::Memory)] {
+        for end in [End::Exited(1), End::Killed, End::Fault(Fault::Memory), End::Killed] {
             assert!(!signed_out(end), "{end:?}");
-            reopens.ended("compositor", signed_out(end));
+            reopens.ended("compositor", signed_out(end), now);
         }
-        for _ in 0..RESTARTS {
-            assert_eq!(reopens.open("compositor", now), Ok(()));
-            reopens.ended("compositor", signed_out(End::Killed));
-        }
-        assert_eq!(reopens.open("compositor", now), Err(Exhausted));
+        assert_eq!(reopens.may_open("compositor", now), Err(Exhausted));
     }
 
-    #[test]
-    fn a_user_signs_out_their_own_sessions_alone() {
-        let sessions = [(3, "toy"), (4, "guest")];
-        assert_eq!(sign_out_target(&sessions, "toy", 3), Ok(()));
-        assert_eq!(sign_out_target(&sessions, "toy", 4), Err(Refused::NotYours));
-        assert_eq!(sign_out_target(&sessions, "toy", 5), Err(Refused::NoSuchSession));
-    }
 }

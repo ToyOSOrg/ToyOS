@@ -19,7 +19,6 @@
 //! spends a budget ([`Reopens`]).
 
 use std::process::{Child, Command};
-use std::rc::Rc;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{mpsc, Arc};
 use std::time::Instant;
@@ -44,7 +43,8 @@ const CONTROL: &str = "control";
 
 /// The login sessions the supervisor watches the owners of at once. Each
 /// owner is a process its loop watches, beside its services and `drives`
-/// processes.
+/// processes. The last is the desktop's alone, so sessions left ending by an
+/// app that ignores its hang-up never keep the desktop from opening again.
 pub(crate) const MAX_SESSIONS: usize = 16;
 
 /// One open login session.
@@ -59,23 +59,33 @@ pub(crate) struct Login {
     /// The owner's handle to itself, which places a detached app under it.
     place: Option<OwnedHandle>,
     /// The session's launcher port, which every launcher in it is minted on.
-    pub launcher: Rc<Acceptor>,
+    /// Held here alone, so the session's end closes it and a launch connected
+    /// to it reads its end.
+    pub launcher: Acceptor,
+    /// A connector to the session's control port, for each control connection
+    /// a login authority is handed.
+    controls: Namespace,
+    /// Whether the screen's row opened it: the desktop's.
+    desktop: bool,
     state: State,
     waiting: Names,
 }
 
-/// The desktop session, as the screen's row is started holding it.
-#[derive(Clone)]
+/// The desktop session's launcher and a control connection to it, minted for
+/// one start of the screen's row.
 pub(crate) struct Desktop {
-    pub launcher: Rc<Acceptor>,
-    pub session: Session,
-    pub controls: Rc<Namespace>,
+    pub launcher: Namespace,
+    pub control: Connection,
 }
 
-impl Desktop {
-    /// A control connection to the session, for one start of the screen's row.
-    pub fn control(&self) -> Result<Connection, String> {
-        self.controls.open(CONTROL).map_err(|e| format!("the desktop session's control port refused ({e:?})"))
+impl Login {
+    /// `opener`'s launcher in this session, and a control connection to it.
+    fn handed_to(&self, opener: &Program) -> Result<(Namespace, Connection), String> {
+        let badge = Authority { row: opener.name.clone(), session: self.session }.encode();
+        let connector = self.launcher.mint(&badge).map_err(|e| format!("no launcher was minted ({e:?})"))?;
+        let launcher = namespace::build().add(LAUNCHER, &connector).finish().map_err(|e| format!("{e:?}"))?;
+        let control = self.controls.open(CONTROL).map_err(|e| format!("no control connection ({e:?})"))?;
+        Ok((launcher, control))
     }
 }
 
@@ -104,9 +114,9 @@ impl Logins {
         }
     }
 
-    /// The launcher port `session`'s launches are minted on, for a login one.
-    pub fn launcher_of(&self, session: Session) -> Option<Rc<Acceptor>> {
-        self.of(session).map(|login| Rc::clone(&login.launcher))
+    /// The launcher port `session`'s launches are minted on, while it is open.
+    pub fn launcher_of(&self, session: Session) -> Option<&Acceptor> {
+        self.of(session).map(|login| &login.launcher)
     }
 }
 
@@ -199,18 +209,21 @@ impl Watch {
 }
 
 impl Supervisor<'_> {
-    /// Open a login session for `opener`, start its owner, and answer the
-    /// opener's launcher in it and the session's controls.
-    fn open_session(&mut self, opener: &'static Program) -> Result<(Session, Rc<Acceptor>, Rc<Namespace>), String> {
-        self.logins.reopens.open(&opener.name, Instant::now()).map_err(|_| {
+    /// Open a login session for `opener` and start its owner: the index of
+    /// the session, or why none was opened.
+    fn open_session(&mut self, opener: &'static Program) -> Result<usize, String> {
+        let now = Instant::now();
+        self.logins.reopens.may_open(&opener.name, now).map_err(|_| {
             format!(
-                "its sessions failed {} times in {} s",
-                toyos_supervisor::restart::RESTARTS + 1,
+                "more than {} of its sessions failed in {} s",
+                toyos_supervisor::restart::RESTARTS,
                 toyos_supervisor::restart::WINDOW.as_secs()
             )
         })?;
-        if self.logins.open.len() >= MAX_SESSIONS {
-            return Err(format!("{MAX_SESSIONS} sessions are open"));
+        let desktop = Screen::of(opener) == Screen::Held;
+        let room = if desktop { MAX_SESSIONS } else { MAX_SESSIONS - 1 };
+        if self.logins.open.len() >= room {
+            return Err(format!("{} sessions are open", self.logins.open.len()));
         }
         let owner_row = self
             .system
@@ -235,7 +248,7 @@ impl Supervisor<'_> {
             ..Extra::default()
         };
         self.make_state_dir(owner_row);
-        let minting = Minting { minted: &self.minted, session, launches: (&launcher, session) };
+        let minting = Minting { minted: &self.minted, session, launches: None };
         let served = Served::Keep { acceptors: &[], owed: &[] };
         let (owner, _) = start(
             Command::new(path),
@@ -252,7 +265,6 @@ impl Supervisor<'_> {
         )
         .map_err(|e| format!("its owner did not start: {e}"))?;
         say!("supervisor: session {} opened for {}, owned by pid {}", session.share(), opener.name, owner.id());
-        let (launcher, controls) = (Rc::new(launcher), Rc::new(controls));
         self.logins.open.push(Login {
             session,
             opener,
@@ -260,30 +272,32 @@ impl Supervisor<'_> {
             link,
             rx: LaunchRx::new(),
             place: None,
-            launcher: Rc::clone(&launcher),
+            launcher,
+            controls,
+            desktop,
             state: State::Active,
             waiting: Names::default(),
         });
-        Ok((session, launcher, controls))
+        Ok(self.logins.open.len() - 1)
     }
 
-    /// The desktop session the screen's row at `index` starts holding: the one
-    /// it held, while that session lives, or one opened for it now.
+    /// The desktop session the screen's row at `index` starts holding,
+    /// minted for that start: the screen row's open session, or one opened
+    /// for it now. A start with none holds no launcher, and the compositor
+    /// says so at each launch it is asked for.
     pub(crate) fn desktop_for(&mut self, index: usize) {
         let program = self.services[index].program;
         if !(program.login && Screen::of(program) == Screen::Held) {
             return;
         }
         let program = self.system.program(&program.name).expect("a `login` row is the manifest's");
-        let alive = self.services[index]
-            .desktop
-            .as_ref()
-            .is_some_and(|desktop| self.logins.of(desktop.session).is_some());
-        if alive {
-            return;
-        }
-        self.services[index].desktop = match self.open_session(program) {
-            Ok((session, launcher, controls)) => Some(Desktop { launcher, session, controls }),
+        let open = self.logins.open.iter().position(|l| l.desktop && l.opener.name == program.name);
+        let at = match open.map_or_else(|| self.open_session(program), Ok) {
+            Ok(at) => at,
+            Err(why) => return say!("supervisor: {} starts with no desktop session: {why}", program.name),
+        };
+        self.services[index].desktop = match self.logins.open[at].handed_to(program) {
+            Ok((launcher, control)) => Some(Desktop { launcher, control }),
             Err(why) => {
                 say!("supervisor: {} starts with no desktop session: {why}", program.name);
                 None
@@ -297,20 +311,7 @@ impl Supervisor<'_> {
             say!("supervisor: login: {} asked {msg_type}, which is no request", opener.name);
             return;
         }
-        let answered = self.open_session(opener).and_then(|(session, launcher, controls)| {
-            // The screen's row opening its desktop again: a start of it after
-            // this one is endowed this session.
-            if Screen::of(opener) == Screen::Held {
-                for service in self.services.iter_mut().filter(|s| s.program.name == opener.name) {
-                    service.desktop = Some(Desktop { launcher: Rc::clone(&launcher), session, controls: Rc::clone(&controls) });
-                }
-            }
-            let badge = Authority { row: opener.name.clone(), session }.encode();
-            let connector = launcher.mint(&badge).map_err(|e| format!("no launcher was minted ({e:?})"))?;
-            let ns = namespace::build().add(LAUNCHER, &connector).finish().map_err(|e| format!("{e:?}"))?;
-            let control = controls.open(CONTROL).map_err(|e| format!("no control connection ({e:?})"))?;
-            Ok((ns, control))
-        });
+        let answered = self.open_session(opener).and_then(|at| self.logins.open[at].handed_to(opener));
         match answered {
             Ok((ns, control)) => {
                 // SAFETY: the namespace's own handle, given up here and to nothing else.
@@ -334,8 +335,11 @@ impl Supervisor<'_> {
                 let login = &mut self.logins.open[at];
                 let (msg_type, payload, batch) = match login.rx.pump(&login.link) {
                     RxStep::Idle | RxStep::Eof => break,
+                    // The supervisor's own child broke its protocol: the session
+                    // ends with it, as a failure.
                     RxStep::Malformed => {
-                        say!("supervisor: session {}'s owner sent a frame its link cannot describe", login.session.share());
+                        say!("supervisor: session {}'s owner sent a frame its link cannot describe; it is ended", login.session.share());
+                        let _ = login.owner.kill();
                         break;
                     }
                     RxStep::Frame { msg_type, payload_len, .. } => {
@@ -433,7 +437,7 @@ impl Supervisor<'_> {
             };
             let login = self.logins.open.swap_remove(at);
             let signed_out = decide::signed_out(end);
-            self.logins.reopens.ended(&login.opener.name, signed_out);
+            self.logins.reopens.ended(&login.opener.name, signed_out, Instant::now());
             match signed_out {
                 true => say!("supervisor: session {} is signed out", login.session.share()),
                 false => say!("supervisor: session {} ended with its owner, {end}", login.session.share()),
@@ -457,10 +461,9 @@ impl Supervisor<'_> {
         let _ = conn.try_send_bytes(msg, text.as_bytes());
     }
 
+    /// **The machine has one user**, so a login session's `logout` acts on
+    /// every session open, its own and any other.
     fn admin(&mut self, msg_type: u32, payload: &[u8]) -> Result<String, String> {
-        // One user signs in: every session is `toyos_manifest::USER`'s.
-        let user = toyos_manifest::USER;
-        let sessions: Vec<(u64, &str)> = self.logins.open.iter().map(|l| (l.session.share(), user)).collect();
         match msg_type {
             wire::MSG_LIST => {
                 let lines: Vec<String> = self
@@ -479,11 +482,12 @@ impl Supervisor<'_> {
             }
             wire::MSG_SIGN_OUT_SESSION => {
                 let asked = SignOutSession::decode(payload).ok_or("its request is not one `logout` writes")?;
-                decide::sign_out_target(&sessions, user, asked.share).map_err(|why| match why {
-                    decide::Refused::NoSuchSession => format!("no session {} is open", asked.share),
-                    decide::Refused::NotYours => format!("session {} is another user's", asked.share),
-                })?;
-                let login = self.logins.open.iter().find(|l| l.session.share() == asked.share).expect("found above");
+                let login = self
+                    .logins
+                    .open
+                    .iter()
+                    .find(|l| l.session.share() == asked.share)
+                    .ok_or_else(|| format!("no session {} is open", asked.share))?;
                 let SignOut { force } = asked.sign_out;
                 login
                     .link

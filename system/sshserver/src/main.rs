@@ -1,6 +1,7 @@
 //! The machine's SSH server: a shell, a command, and files both ways. A
 //! command run over `exec` is a line for `shell -c`, which the shell, launched
-//! in its own manifest row and not this daemon's, runs.
+//! in its own manifest row and not this daemon's, runs. On ToyOS each
+//! connection's programs run in a login session of its own ([`spawn::Login`]).
 //!
 //! The protocol is `toyos-ssh`'s. This daemon drives it: a thread for each
 //! connection ([`connection`]), the host key, who may log in, and the bounds

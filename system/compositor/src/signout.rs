@@ -3,11 +3,12 @@
 //! through.
 //!
 //! The supervisor starts this row holding the desktop session's launcher and
-//! its control connection. **A session that ends is opened again** on the
-//! `login` port, which the supervisor budgets only after a failure: a
-//! session signed out comes back empty, there being no greeter yet, and one
-//! whose owner failed comes back unless its failures are past the budget.
-//! Until then a launch goes nowhere, and says so.
+//! its control connection, and no other launcher: its launches are that
+//! session's alone. **A session that ends is opened again** on the `login`
+//! port, which the supervisor refuses only past a budget of failures: a
+//! session signed out comes back empty, there being no greeter yet. While none
+//! is open, each launch asked for opens one first and, refused, says why and
+//! starts nothing.
 
 use std::sync::{Arc, Mutex};
 
@@ -32,17 +33,27 @@ pub struct Desktop {
 impl Desktop {
     pub fn take() -> Self {
         let endowed = Endowments::get();
-        let control = endowed.take::<Connection>(wire::CONTROL_LABEL);
-        if control.is_none() {
-            eprintln!("compositor: started with no desktop session; its launches go nowhere");
-        }
-        Self {
-            control,
+        let mut desktop = Self {
+            control: endowed.take::<Connection>(wire::CONTROL_LABEL),
             rx: ipc::FrameRx::new(),
             waiting: None,
             login: endowed.take(wire::LOGIN_PORT),
             launcher: Arc::new(Mutex::new(None)),
+        };
+        if desktop.control.is_none() {
+            eprintln!("compositor: started with no desktop session");
+            desktop.reopen();
         }
+        desktop
+    }
+
+    /// Whether a session is open, opening one where none is: the event a
+    /// retry waits on is a launch asked for.
+    pub fn ensure(&mut self) -> bool {
+        if self.control.is_none() {
+            self.reopen();
+        }
+        self.control.is_some()
     }
 
     pub fn conn(&self) -> Option<&Connection> {

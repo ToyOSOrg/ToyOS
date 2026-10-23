@@ -21,6 +21,7 @@ use toyos::ipc::{Connection, FrameRx, RxStep};
 use toyos::poller::{Poller, READABLE};
 use toyos::port::Acceptor;
 use toyos::shm::SharedMemory;
+use toyos::namespace::Namespace;
 use toyos::{ipc, system, AsHandle};
 use toyos_abi::input::RawKeyEvent;
 use toyos_abi::syscall::SYSCAP_LABEL;
@@ -2102,7 +2103,18 @@ impl Session {
     }
 
     /// Start `program` through the launcher, off the loop.
-    fn launch(&self, program: &str) {
+    /// Start `program` through the desktop session's launcher, off the
+    /// loop; with no session open and none to be opened, nothing starts.
+    fn launch(&mut self, program: &str) {
+        let had = self.desktop.conn().is_some();
+        if !self.desktop.ensure() {
+            eprintln!("compositor: {program} did not start: no desktop session is open");
+            return;
+        }
+        // A session opened just now: its control is watched from here.
+        if let Some(control) = self.desktop.conn().filter(|_| !had) {
+            self.poller.watch(control, READABLE, control.as_handle().0 as u64);
+        }
         self.launcher.send(program.to_string()).expect("compositor: its launcher thread has ended");
     }
 
@@ -2205,9 +2217,17 @@ fn launcher(session: crate::signout::Launcher) -> mpsc::Sender<String> {
                 };
                 let mut command = Command::new(&program);
                 command.independent().detached().endow(JOB_LABEL, job.into_raw().0);
-                // A session this compositor opened again, in place of the endowed one.
-                let opened = session.lock().expect("compositor: its launcher lock is whole");
-                if let Some(launcher) = &*opened {
+                // A session this compositor opened again, in place of the
+                // endowed one: a copy, so no lock is held across the launch.
+                let opened = session.lock().expect("compositor: its launcher lock is whole").as_ref().map(Namespace::duplicate);
+                let opened = match opened.transpose() {
+                    Ok(opened) => opened,
+                    Err(e) => {
+                        eprintln!("compositor: {program} did not start: its launcher would not duplicate ({e:?})");
+                        continue;
+                    }
+                };
+                if let Some(launcher) = &opened {
                     command.launcher(launcher.as_handle().0);
                 }
                 if let Err(e) = command.spawn() {
