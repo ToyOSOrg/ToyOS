@@ -86,10 +86,16 @@ impl<M: Modulus<N>, const N: usize> Residue<M, N> {
         let one = Self(one(), PhantomData);
         self.mul(&one).0
     }
+    /// P-256's field operations inline into the point formulas, with only the
+    /// portable multiplication out of line; every other modulus's are calls.
+    #[inline(always)]
     pub(crate) fn add(&self, b: &Self) -> Self {
         if let Form::P256 = M::FORM {
             return Self(p256::add(&self.0, &b.0), PhantomData);
         }
+        self.add_generic(b)
+    }
+    fn add_generic(&self, b: &Self) -> Self {
         let mut v = [0; N];
         let mut carry = false;
         for i in 0..N {
@@ -97,13 +103,18 @@ impl<M: Modulus<N>, const N: usize> Residue<M, N> {
         }
         Self(reduce(&v, u64::from(carry), &M::P), PhantomData)
     }
+    #[inline(always)]
     pub(crate) fn double(&self) -> Self {
         self.add(self)
     }
+    #[inline(always)]
     pub(crate) fn sub(&self, b: &Self) -> Self {
         if let Form::P256 = M::FORM {
             return Self(p256::sub(&self.0, &b.0), PhantomData);
         }
+        self.sub_generic(b)
+    }
+    fn sub_generic(&self, b: &Self) -> Self {
         let mut v = [0; N];
         let mut borrow = false;
         for i in 0..N {
@@ -119,19 +130,27 @@ impl<M: Modulus<N>, const N: usize> Residue<M, N> {
     /// self * b / R mod p, word by word with each product row followed by its
     /// reduction step (CIOS; Koc, Acar and Kaliski, "Analyzing and comparing
     /// Montgomery multiplication algorithms", IEEE Micro 1996).
+    #[inline(always)]
     pub(crate) fn mul(&self, b: &Self) -> Self {
         if let Form::P256 = M::FORM {
             return Self(p256::mul(&self.0, &b.0), PhantomData);
         }
+        self.mul_generic(b)
+    }
+    fn mul_generic(&self, b: &Self) -> Self {
         let (t, high) = product::<M, N>(&self.0, &b.0);
         Self(reduce(&t, high, &M::P), PhantomData)
     }
     /// self^2 / R mod p: the N(N - 1)/2 cross products once, doubled, the N
     /// squares added, then N reduction steps over the 2N-word square.
+    #[inline(always)]
     pub(crate) fn square(&self) -> Self {
         if let Form::P256 = M::FORM {
             return Self(p256::square(&self.0), PhantomData);
         }
+        self.square_generic()
+    }
+    fn square_generic(&self) -> Self {
         let (t, high) = redc::<M, N>(&mut square_wide(&self.0));
         Self(reduce(&t, high, &M::P), PhantomData)
     }
@@ -378,12 +397,17 @@ mod p256 {
         words([r0, r1, r2, r3])
     }
 
-    /// CIOS with P-256's reduction step, as `product`.
     #[inline(always)]
     pub(super) fn mul<const N: usize>(a: &[u64; N], b: &[u64; N]) -> [u64; N] {
-        if let Some(v) = crate::arch::p256_mul(four(a), four(b)) {
-            return words(v);
+        match crate::arch::p256_mul(four(a), four(b)) {
+            Some(v) => words(v),
+            None => mul_portable(a, b),
         }
+    }
+
+    /// CIOS with P-256's reduction step, as `product`.
+    #[inline(never)]
+    fn mul_portable<const N: usize>(a: &[u64; N], b: &[u64; N]) -> [u64; N] {
         let (mut t0, mut t1, mut t2, mut t3, mut high) = (0u64, 0u64, 0u64, 0u64, 0u64);
         macro_rules! row {
             ($ai:expr) => {{
@@ -409,13 +433,18 @@ mod p256 {
         reduce([t0, t1, t2, t3], high)
     }
 
-    /// The cross products once, doubled, the squares added, then four
-    /// reduction steps, as `square_wide` and `redc`.
     #[inline(always)]
     pub(super) fn square<const N: usize>(a: &[u64; N]) -> [u64; N] {
-        if let Some(v) = crate::arch::p256_square(four(a)) {
-            return words(v);
+        match crate::arch::p256_square(four(a)) {
+            Some(v) => words(v),
+            None => square_portable(a),
         }
+    }
+
+    /// The cross products once, doubled, the squares added, then four
+    /// reduction steps, as `square_wide` and `redc`.
+    #[inline(never)]
+    fn square_portable<const N: usize>(a: &[u64; N]) -> [u64; N] {
         let (t1, c) = mac(0, a[0], a[1], 0);
         let (t2, c) = mac(0, a[0], a[2], c);
         let (t3, t4) = mac(0, a[0], a[3], c);
