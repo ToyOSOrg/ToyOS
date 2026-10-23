@@ -331,6 +331,7 @@ fn start(path: &str, argv: &[u8], env: &[u8], fds: &[(u32, RawHandle, Kind)]) ->
         program: path,
         image: None,
         image_held: false,
+        launcher: None,
         argv,
         env,
         cwd,

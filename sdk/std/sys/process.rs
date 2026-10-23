@@ -29,6 +29,9 @@ pub struct Command {
     parent: toyos::spawn::Parent,
     /// An independent launch, where a plain spawn is a helper.
     independent: bool,
+    /// The launcher an independent launch goes through, where it is not the
+    /// endowed one: a namespace handle the caller keeps.
+    launcher: Option<toyos_abi::RawHandle>,
     /// The program the child runs, when it is not the one `argv[0]` names.
     image_path: Option<OsString>,
     prepared: Option<Prepared>,
@@ -86,6 +89,7 @@ impl Command {
             provided: Vec::new(),
             parent: toyos::spawn::Parent::Caller,
             independent: false,
+            launcher: None,
             image_path: None,
             prepared: None,
             image: None,
@@ -234,6 +238,11 @@ impl Command {
         self.independent = true;
     }
 
+    /// Launch through the launcher `namespace` holds, which this process keeps.
+    pub fn launcher(&mut self, namespace: u32) {
+        self.launcher = Some(toyos_abi::RawHandle(namespace));
+    }
+
     /// Place a launched child under the launcher's owner, so it outlives this process.
     pub fn detached(&mut self) {
         self.parent = toyos::spawn::Parent::Detached;
@@ -351,6 +360,7 @@ impl Command {
             provided: &provided,
             parent: self.parent,
             independent: self.independent,
+            launcher: self.launcher,
         };
         let pipes = |stdin, stdout, stderr| StdioPipes { stdin, stdout, stderr };
         let helper = match request.start().map_err(refused)? {

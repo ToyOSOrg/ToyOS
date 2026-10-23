@@ -33,6 +33,7 @@ fn launched(program: &str, argv: &[u8], fds: &[(u32, RawHandle, Kind)]) {
         provided: &[],
         parent: Parent::Caller,
         independent: true,
+        launcher: None,
     };
     let child = match request.start().map(|start| match start {
         Start::Launch(launch) => launch.launch(),

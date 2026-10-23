@@ -63,6 +63,7 @@ members = [
     "lib/random",
     "lib/rootimage",
     "lib/scsi",
+    "lib/session",
     "lib/ssh",
     "lib/swap",
     "lib/symbols",
@@ -99,6 +100,7 @@ members = [
     "system/host",
     "system/inspect",
     "system/logkeeper",
+    "system/logout",
     "system/netstack",
     "system/netstack/dhcp",
     "system/netstack/dns",
@@ -117,6 +119,7 @@ members = [
     "system/ps2server/ps2",
     "system/hda",
     "system/hda/driver",
+    "system/session",
     "system/shell",
     "system/soundserver",
     "system/soundserver/mixer",
@@ -138,6 +141,7 @@ members = [
     "system/usbd/xhci",
     "system/vdagent",
     "system/vdagent/bridge",
+    "tests/guest/hangupholder",
     "tests/guest/kernelprobe",
     "tests/guest/metalprobe",
     "tests/guest/osbench",
@@ -243,6 +247,7 @@ toyos-osrelease = { path = "sdk/osrelease" }
 # The swap port's name and the one program the image may give it to, so the
 # gate on every manifest reads what the supervisor reads.
 toyos-swap = { path = "lib/swap" }
+toyos-session = { path = "lib/session" }
 # QEMU's clipboard channel's port name, id and port count, so the launch reads
 # the declaration the guest's agent drives.
 toyos-vdagent = { path = "lib/vdagent" }

@@ -240,6 +240,9 @@ const RUST_SKIP: &[&str] = &[
     // It needs a launcher: `a_launch_gives_each_unsent_stdio_slot_a_null`
     // runs it on tests/images/launchcase.toml.
     "launch_unsent_stdio",
+    // It needs a `login` connector and the session rows: `session_lifecycle`
+    // runs it on tests/images/sessioncase.toml.
+    "session_lifecycle",
     // It claims the xHCI controller no image's usbd row names, which only a
     // machine with a spare has: `usbd_drives_the_spare` and the
     // `usbd_drives_the_type_c_controller` metal row run it.
@@ -591,6 +594,9 @@ const MACHINE_TESTS: &[&str] = &[
     // harness is the peer, on the host's loopback that QEMU's user network
     // reaches, so no public network. x86-64 alone (`qemu::SUITE_ARCH`).
     "stream_exported_to_a_child",
+    // Login sessions: their owner parents, signs out and ends with each, which
+    // only processes in one boot show, as order, completion and counts.
+    "session_lifecycle",
     // A launch's unsent stdio slots: its own boot, because the launcher it
     // needs makes every spawn of a declared program a launch.
     "a_launch_gives_each_unsent_stdio_slot_a_null",
@@ -4327,6 +4333,7 @@ fn run_machine_test(name: &str, test_config: &Path) -> Result<(), String> {
         "libc_children" => common::libcchildren::libc_children(),
         "stream_holders" => stream_holders(test_config),
         "stream_exported_to_a_child" => stream_exported_to_a_child(),
+        "session_lifecycle" => common::sessionlifecycle::session_lifecycle(),
         "a_launch_gives_each_unsent_stdio_slot_a_null" => common::launchstdio::a_launch_gives_each_unsent_stdio_slot_a_null(),
         "a_row_reaches_its_own_state_and_no_other" => common::stateview::a_row_reaches_its_own_state_and_no_other(),
         "usbd_drives_the_spare" => usbd_drives_the_spare(test_config),
@@ -5516,7 +5523,6 @@ fn app_view(back: &metal::Readback) -> Result<(), String> {
         &named,
         "supervisor: launcher: appview was not started: /home/toy/Apps/appview could not be made: \
          /home/toy/Apps/appview is no directory",
-        "supervisor: grants: refused grants in the machine's session: only a login session may ask for grants",
         "supervisor: grants: appview is granted /home/toy/Games read-write",
         "  granted: cwd=/home/toy/Games roms=[\"test.gba\"] saved=Ok",
         "supervisor: grants: appview's grant is revoked; its next launch holds no folder",

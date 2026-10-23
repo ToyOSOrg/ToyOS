@@ -30,6 +30,19 @@ impl Namespace {
         self.0.into_raw()
     }
 
+    /// A second handle to the same namespace, for a holder handing one on or
+    /// using one while another thread may replace its own.
+    pub fn duplicate(&self) -> Result<Self, SyscallError> {
+        syscall::dup(self.0.raw()).map(|h| Self(OwnedHandle(h)))
+    }
+
+    /// A namespace a peer sent, consumed. Its type is the sender's word: the
+    /// kernel refuses each namespace call on a handle of another type, as it
+    /// does a connection's ([`Connection::received`]).
+    pub fn received(raw: RawHandle) -> Self {
+        Self(OwnedHandle(raw))
+    }
+
     /// # Safety
     /// `raw` must be a live namespace handle this process owns and nothing else
     /// answers for.

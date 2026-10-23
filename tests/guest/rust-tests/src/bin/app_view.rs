@@ -22,9 +22,8 @@
 //! the package to what it installed.
 //!
 //! Then it grants the package a folder of the home, `/home/toy/Games` holding
-//! a ROM, through `/system/bin/grants`: refused in this job's own session,
-//! which is the machine's, and refused `Apps/appview` by name, from the login
-//! session a shell opens. Granted it there, the package run as `game` browses
+//! a ROM, through `/system/bin/grants`: refused `Apps/appview` by name, from
+//! the login session test-runner, its login authority, opened for its jobs. Granted it there, the package run as `game` browses
 //! its working directory with gbae's own `list_directory` and saves beside
 //! the ROM as gbae does: it starts in the folder, lists the ROM and writes
 //! `test.sav`. The same package with one byte more is another binary and
@@ -251,8 +250,8 @@ fn app() {
     println!("  every arm held");
 }
 
-/// `line` run by a shell this job launches, whose `login` row opens a login
-/// session for what it launches: the session `grants` is answered in.
+/// `line` run by a shell this job launches in test-runner's login session,
+/// the session `grants` is answered in.
 fn in_login(line: &str) -> std::process::Output {
     Command::new("/system/bin/shell").independent().args(["-c", line]).current_dir("/").output().expect("launch a shell")
 }
@@ -278,14 +277,6 @@ fn granted(red: &mut Vec<String>) {
     fs::create_dir_all(GAMES).expect("make the folder the package is granted");
     fs::write(ROM, b"a ROM's bytes").expect("put a ROM in it");
 
-    match Command::new("/system/bin/grants").independent().args(["add", "appview", GAMES]).output() {
-        Ok(out) if out.status.code() == Some(1)
-            && String::from_utf8_lossy(&out.stdout).contains("only a login session may ask for grants") =>
-        {
-            println!("  grants in the machine's session: refused")
-        }
-        other => red.push(format!("grants in the machine's session was answered {other:?}")),
-    }
     let apps = in_login(&format!("launch /system/bin/grants add appview {HOME}"));
     match String::from_utf8_lossy(&apps.stdout) {
         said if said.contains("where every app keeps its own folder") => println!("  {HOME} as a grant: refused"),

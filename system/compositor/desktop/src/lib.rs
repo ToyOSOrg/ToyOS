@@ -33,6 +33,7 @@ pub mod mode;
 pub mod plan;
 pub mod rect;
 pub mod scale;
+pub mod signout;
 pub mod stack;
 pub mod taskbar;
 pub mod volume;
@@ -43,13 +44,15 @@ pub use damage::{Damage, MAX_DAMAGE_RECTS};
 pub use hit::{hit_test, Hit};
 pub use input::{
     cursor_from_abs, cursor_style, edge_snap, fold_mouse, key_action, tab_action, CursorStyle, Grab,
-    Held, KeyAction, MouseSample, PromptGate, Released, TabAction, DRAG_THRESHOLD,
+    Held, KeyAction, MouseSample, PromptGate, Released, SignOutKey, TabAction, DRAG_THRESHOLD,
+    sign_out_key,
 };
 pub use layout::{relayout, set_mode, Chrome, Desk, TEXT_CELL};
 pub use mode::Mode;
 pub use plan::{compose, content_blit, Blit, Layer};
 pub use rect::{Point, Rect};
 pub use scale::Scale;
+pub use signout::{sign_out_rect, sign_out_text, Opening, SIGN_OUT_CHARS};
 pub use stack::Stack;
 pub use taskbar::{Taskbar, MAX_STATUS_CHARS};
 pub use window::{Buffers, Level, Presented, Window, WindowId, WindowMode};

@@ -21,11 +21,12 @@ the child runs on.
 Before #1026 the daemon polled `try_wait` with a backoff to keep the kill,
 which is a fixed delay where an event exists.
 
-A `cfg` reaching ToyOS's process handle, whose `wait` and `kill` take `&self`,
-closes the hole on ToyOS. The host gate refuses that `cfg` in a program crate
-that holds tests (`build/userlandhost.rs`) until #1024, after which a `cfg`
-counts only in a file that holds a test or declares a module: the fix is a
-ToyOS-only leaf file, as #1024's `system/sshserver/src/spawn.rs` is.
+On ToyOS a channel's end no longer goes through the `Child`: it asks the
+program to quit with a hang-up through a handle of its own
+(`system/sshserver/src/spawn.rs`, `Ender`), and the connection's end signs the
+session out, so a program that closed its output is asked all the same. One
+that ignores the hang-up is the session's to end, by a force. The hole stays
+on a host build, where the kill still goes through the `Child`.
 
 **Owner**: `sshserver`.
 

@@ -32,6 +32,7 @@ use std::time::{Duration, Instant};
 use toyos_ssh::{Authorizer, ChannelId, Event, HostKey, Server};
 
 use crate::program::Program;
+use crate::spawn::Login;
 use crate::{sftp, OsRandom};
 
 /// This daemon would not run what was asked: the shell's own convention for
@@ -128,6 +129,7 @@ pub fn serve<A: Authorizer>(stream: TcpStream, host: Arc<HostKey>, authorizer: A
         tx,
         channels: BTreeMap::new(),
         peer,
+        login: None,
     };
     connection.run(&rx, unauthenticated, deadline);
     connection.end();
@@ -155,6 +157,9 @@ struct Connection<A> {
     tx: Sender<Input>,
     channels: BTreeMap<ChannelId, Running>,
     peer: String,
+    /// The login session this connection's programs run in, opened with the
+    /// first of them and signed out when the connection ends.
+    login: Option<Login>,
 }
 
 impl<A: Authorizer> Connection<A> {
@@ -307,7 +312,12 @@ impl<A: Authorizer> Connection<A> {
     }
 
     fn start(&mut self, channel: ChannelId, argv: Vec<String>, crlf: bool) {
-        let spawned = crate::spawn::own_row(&argv[0])
+        let login = match self.login.take().map_or_else(Login::open, Ok) {
+            Ok(login) => self.login.insert(login),
+            Err(why) => return self.refuse(channel, &format!("no session to run {} in: {why}", argv[0])),
+        };
+        let spawned = login
+            .command(&argv[0])
             .args(&argv[1..])
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
@@ -320,7 +330,14 @@ impl<A: Authorizer> Connection<A> {
         let stdin = child.stdin.take().expect("stdin was piped");
         let stdout = child.stdout.take().expect("stdout was piped");
         let stderr = child.stderr.take().expect("stderr was piped");
-        let program = Arc::new(Program::new(child));
+        let program = match Program::new(child) {
+            Ok(program) => Arc::new(program),
+            Err((mut child, why)) => {
+                let _ = child.kill();
+                let _ = child.wait();
+                return self.refuse(channel, &format!("{} started and {why}", argv[0]));
+            }
+        };
         let (input, queue) = mpsc::channel();
         let tx = self.tx.clone();
         std::thread::spawn(move || write_stdin(stdin, queue, channel, tx));
@@ -420,7 +437,8 @@ fn write_by<W: Write>(sink: &mut W, set_timeout: impl Fn(&W, Option<Duration>) -
     true
 }
 
-/// End what runs on a channel: its program, whose pipes then end its readers.
+/// Let go of what runs on a channel: its program is asked to quit
+/// ([`Program::end`]), and its pipes then end its readers once it does.
 fn end(running: Running) {
     if let Some((program, _)) = running.program {
         program.end();

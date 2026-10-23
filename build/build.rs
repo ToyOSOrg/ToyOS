@@ -196,7 +196,7 @@ struct ProgramConfig {
     restart: bool,
     /// The rows it may start through the launcher (`toyos_manifest::Program::starts`).
     starts: Vec<String>,
-    /// A launch it makes from the machine's session opens a login session
+    /// A login authority, for which the supervisor opens login sessions
     /// (`toyos_manifest::Program::login`).
     login: bool,
 }
@@ -642,17 +642,18 @@ impl Userland {
 /// rather than a constant here and a string in the supervisor.
 ///
 /// Not `launcher`: a row holds it by its `starts`, badged with its row, and no
-/// row receives it.
-const SUPERVISOR_SERVED: &[&str] = &[toyos_swap::PORT, "power", toyos_manifest::grants::PORT];
+/// row receives it. Nor `login`: a `login` row holds it, badged with its key.
+const SUPERVISOR_SERVED: &[&str] = &[toyos_swap::PORT, "power", toyos_manifest::grants::PORT, toyos_session::ADMIN_PORT];
 
 /// The ports that named rows alone may receive, each with those rows: the
 /// swap port, whose holder replaces any service's binary, the grants port,
 /// whose holder writes which folder of the home a package sees, the prompt
 /// port, whose holder draws above every window and has every key while it
 /// does, the input port, whose holders type into the focused window, the
-/// clipboard port, whose holder is sent every copy made in the session, and
-/// the display port, whose holder sets the mode and the scale every window is
-/// drawn at.
+/// clipboard port, whose holder is sent every copy made in the session, the
+/// display port, whose holder sets the mode and the scale every window is
+/// drawn at, and the session-admin port, whose holder signs its user's
+/// sessions out.
 const HELD_ALONE: &[(&str, &[&str])] = &[
     (toyos_swap::PORT, &[toyos_swap::HOLDER]),
     (toyos_manifest::grants::PORT, &[toyos_manifest::grants::HOLDER]),
@@ -660,6 +661,7 @@ const HELD_ALONE: &[(&str, &[&str])] = &[
     (toyos_input::wire::PORT, toyos_input::wire::HOLDERS),
     (toyos_manifest::clipboard::PORT, &[toyos_manifest::clipboard::HOLDER]),
     (toyos_manifest::display::PORT, &[toyos_manifest::display::HOLDER]),
+    (toyos_session::ADMIN_PORT, &[toyos_session::ADMIN_HOLDER]),
 ];
 
 /// Rows, as a refusal names them.
@@ -771,13 +773,37 @@ fn receives_reach_a_running_server(config: &SystemConfig) -> Result<(), String> 
     }
 }
 
+/// An image with a `login` row declares the session owner's row, which the
+/// supervisor starts for each session it opens, and starts it nowhere else:
+/// not at boot, and not through a launch.
+fn logins_have_their_owner(config: &SystemConfig) -> Result<(), String> {
+    let owner = toyos_session::OWNER;
+    if let Some((name, _)) = config.programs.iter().find(|(_, row)| row.login) {
+        if !config.programs.contains_key(owner) {
+            return Err(format!("`{name}` is a `login` row, and no `{owner}` row owns its sessions"));
+        }
+    }
+    if config.boot.start.iter().any(|key| key == owner) {
+        return Err(format!("`{owner}` is in `[boot] start`, and the supervisor starts it for a session alone"));
+    }
+    match config.programs.iter().find(|(_, row)| row.starts.iter().any(|key| key == owner)) {
+        Some((name, _)) => Err(format!("`{name}` starts `{owner}`, which the supervisor starts for a session alone")),
+        None => Ok(()),
+    }
+}
+
 /// The resolved config as the records the supervisor reads.
 ///
 /// The format, the renderer and the parser are `lib/manifest/`, whose
 /// round-trip test is what makes "what the build writes is what the supervisor reads" a
 /// fact rather than two hand-matched implementations.
 fn render_manifest(config: &SystemConfig) -> Vec<u8> {
-    for gate in [held_by_their_holders_alone, starts_name_what_a_launch_can_start, receives_reach_a_running_server] {
+    for gate in [
+        held_by_their_holders_alone,
+        starts_name_what_a_launch_can_start,
+        receives_reach_a_running_server,
+        logins_have_their_owner,
+    ] {
         if let Err(why) = gate(config) {
             panic!("the image config cannot be rendered as a manifest: {why}");
         }
@@ -3158,6 +3184,7 @@ mod tests {
         "tests/images/latencycase.toml",
         "tests/images/launchcase.toml",
         "tests/images/libccase.toml",
+        "tests/images/sessioncase.toml",
         "tests/images/metalcase.toml",
         "tests/images/metaldevicecase.toml",
         "tests/images/netcase.toml",
@@ -3211,6 +3238,22 @@ mod tests {
                 other => panic!("{text:?}: {other:?}, not {said:?}"),
             }
         }
+    }
+
+    /// Every committed config with a `login` row declares the session owner,
+    /// and none starts it but the supervisor, for a session.
+    #[test]
+    fn a_login_row_has_a_session_owner_only_the_supervisor_starts() {
+        for cfg in ALL_CONFIGS {
+            logins_have_their_owner(&load(cfg)).unwrap_or_else(|e| panic!("{cfg}: {e}"));
+        }
+        let gate = |text: &str| logins_have_their_owner(&toml::from_str(text).unwrap());
+        assert!(gate("[programs.compositor]\nlogin = true\n[programs.session]\n").is_ok());
+        assert!(gate("[programs.compositor]\nlogin = true\n").unwrap_err().contains("no `session` row"));
+        assert!(gate("[boot]\nstart = [\"session\"]\n[programs.session]\n").is_err());
+        assert!(gate("[programs.shell]\nstarts = [\"session\"]\n[programs.session]\n").is_err());
+        let admin: SystemConfig = toml::from_str("[programs.toybox]\nreceives = [\"session-admin\"]\n").unwrap();
+        assert!(held_by_their_holders_alone(&admin).unwrap_err().contains("only `logout`"));
     }
 
     /// The swap port reaches `swap` and nothing else, and the idle slot

@@ -451,6 +451,7 @@ dependencies = [
  "toyos-inspect",
  "toyos-manifest",
  "toyos-pci-claim",
+ "toyos-session",
  "toyos-virtio",
  "toyos-virtio-gpu",
  "toyos-wallclock",
@@ -1203,6 +1204,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "hangupholder"
+version = "0.1.0"
+dependencies = [
+ "toyos",
+]
+
+[[package]]
 name = "hashbrown"
 version = "0.15.5"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1629,6 +1637,14 @@ version = "0.1.0"
 dependencies = [
  "toyos",
  "toyos-logstream",
+]
+
+[[package]]
+name = "logout"
+version = "0.1.0"
+dependencies = [
+ "toyos",
+ "toyos-session",
 ]
 
 [[package]]
@@ -2897,6 +2913,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "session"
+version = "0.1.0"
+dependencies = [
+ "toyos",
+ "toyos-abi",
+ "toyos-session",
+]
+
+[[package]]
 name = "sha2"
 version = "0.10.9"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -3110,7 +3135,10 @@ name = "sshserver"
 version = "0.0.0"
 dependencies = [
  "getrandom 0.3.4",
+ "toyos",
+ "toyos-abi",
  "toyos-crypto",
+ "toyos-session",
  "toyos-ssh",
  "toyos-tmpdir",
 ]
@@ -3136,6 +3164,7 @@ dependencies = [
  "toyos-osrelease",
  "toyos-pci-claim",
  "toyos-quiesce",
+ "toyos-session",
  "toyos-supervisor",
  "toyos-swap",
  "toyos-update",
@@ -3233,6 +3262,7 @@ version = "0.1.0"
 dependencies = [
  "toyos",
  "toyos-abi",
+ "toyos-session",
  "toyos-tco",
 ]
 
@@ -3518,6 +3548,7 @@ dependencies = [
  "toyos-osrelease",
  "toyos-parity",
  "toyos-quiesce",
+ "toyos-session",
  "toyos-ssh",
  "toyos-swap",
  "toyos-symbols",
@@ -3875,6 +3906,13 @@ version = "0.1.0"
 [[package]]
 name = "toyos-scsi"
 version = "0.1.0"
+
+[[package]]
+name = "toyos-session"
+version = "0.1.0"
+dependencies = [
+ "toyos",
+]
 
 [[package]]
 name = "toyos-smmu"

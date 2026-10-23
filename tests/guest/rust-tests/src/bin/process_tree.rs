@@ -6,7 +6,7 @@
 //! arm — and the arm asserts, once A's wait on B answers:
 //!
 //! - C and D have ended, as killed;
-//! - E, which the supervisor started, runs on: the supervisor is the one way to outlive a starter;
+//! - E, which the supervisor started under its session's owner, runs on: detached is the one way to outlive a starter;
 //! - after the kill, a spawn and a launch under B's `self` answer `Gone`.
 //!
 //! B's first act is a spawn the loader refuses once it is admitted under B: its
@@ -178,12 +178,12 @@ fn an_end_takes_its_subtree(end: Ending) {
     assert_eq!(End::from_word(status.into_raw()), Some(b_code), "B ended {end:?} and read {status}");
     assert_eq!(grown.c.try_wait(), Ok(KILLED), "C was not ended, as killed, once B's end was published ({end:?})");
     assert_eq!(grown.d.try_wait(), Ok(KILLED), "D, which the supervisor launched under B, was not ended with B ({end:?})");
-    assert_eq!(grown.e.try_wait(), Err(SyscallError::WouldBlock), "E, started under the supervisor, ended with B ({end:?})");
+    assert_eq!(grown.e.try_wait(), Err(SyscallError::WouldBlock), "E, started under its session's owner, ended with B ({end:?})");
 
     grown.e.kill().expect("kill E");
     assert_eq!(grown.e.wait(), Ok(KILLED));
     syscall::close(grown.b_self);
-    println!("  B {end:?}: C and D ended, as killed; E, under the supervisor, ran on");
+    println!("  B {end:?}: C and D ended, as killed; E, under its session's owner, ran on");
 }
 
 /// A spawn and a launch placed under B's `self` both answer `Gone`.
@@ -348,7 +348,7 @@ fn link(k: u32) -> ! {
     park();
 }
 
-/// A `cat` a shell `detach`es is the supervisor's child, so it runs on once the shell's
+/// A `cat` a shell `detach`es is its session owner's child, so it runs on once the shell's
 /// end is published: it reads the input this process holds open.
 fn a_detached_program_outlives_its_shell() {
     let mut shell = Command::new(SHELL)

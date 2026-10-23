@@ -18,3 +18,10 @@ toyos-tmpdir = { path = "../../lib/tmpdir" }
 
 [lints.rust]
 unexpected_cfgs = { level = "warn", check-cfg = ['cfg(target_os, values("toyos"))'] }
+
+[target.'cfg(target_os = "toyos")'.dependencies]
+toyos = { path = "../../sdk/toyos" }
+# The handle a channel's end asks its program to quit through.
+toyos-abi = { path = "../../sdk/abi" }
+# Opening a login session per connection, and signing it out.
+toyos-session = { path = "../../lib/session" }
