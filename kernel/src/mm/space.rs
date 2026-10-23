@@ -6,8 +6,9 @@
 //! range is backed by private memory, committed or only reserved, or by a
 //! memory object. Every page of either is populated when it is first touched —
 //! by the thread that touches it ([`AddressSpace::fault`]) or by a copy the
-//! kernel makes for it ([`AddressSpace::reach`]) — and tables are built when a
-//! range is backed, so populating one takes a frame and nothing else.
+//! kernel makes for it ([`AddressSpace::reach`]), a private one together with
+//! its run when it is touched beside a populated page — and tables are built
+//! when a range is backed, so populating one takes a frame and nothing else.
 //!
 //! **A space is charged its ranges** (`mm::charge`) before a change that
 //! adds any, so a change the heap cannot cover is refused,
@@ -709,13 +710,27 @@ impl AddressSpace {
                 phys
             }
             Leaf::Empty => {
-                let leaf = page_leaf(start, entry, page)?;
-                let Leaf::Mapped(m) = leaf else { return None };
-                self.tables.set(page, leaf);
-                if m.owned {
-                    self.usage.populated(1);
+                let prot = leaf_prot(entry.prot)?;
+                match &entry.kind {
+                    Kind::Private { committed: false } => return None,
+                    Kind::Object { object, offset, .. } => {
+                        let phys = object.page(offset + (page - start));
+                        self.tables.set(page, Leaf::Mapped(Mapping { phys, prot, owned: false, cache: object.cache() }));
+                        phys
+                    }
+                    Kind::Private { committed: true } | Kind::Copy { .. } => {
+                        let tables = &self.tables;
+                        let (lo, hi) = vm::around(start, entry.end, page, |at| tables.get(at) != Leaf::Empty);
+                        let mut filled = 0;
+                        self.tables.fill(lo, hi, |at| {
+                            filled += 1;
+                            Leaf::Mapped(Mapping { phys: owned_frame(start, entry, at), prot, owned: true, cache: CachePolicy::Normal })
+                        });
+                        self.usage.populated(filled);
+                        let Leaf::Mapped(m) = self.tables.get(page) else { unreachable!("space: {page:#x} filled and empty") };
+                        m.phys
+                    }
                 }
-                m.phys
             }
         };
         Some(phys + va % PAGE_SIZE)
@@ -794,24 +809,14 @@ fn copyable(entry: &SpaceEntry) -> bool {
     }
 }
 
-/// The leaf a fault puts at `page`, inside the range `entry` starting at
-/// `start`: a fresh frame of private memory, or the object's own page.
-fn page_leaf(start: u64, entry: &SpaceEntry, page: u64) -> Option<Leaf> {
-    let prot = leaf_prot(entry.prot)?;
-    Some(match &entry.kind {
-        Kind::Private { committed: false } => return None,
-        Kind::Private { committed: true } => {
-            Leaf::Mapped(Mapping { phys: pmm::alloc_promised().into_raw(), prot, owned: true, cache: CachePolicy::Normal })
-        }
-        Kind::Object { object, offset, .. } => {
-            Leaf::Mapped(Mapping { phys: object.page(offset + (page - start)), prot, owned: false, cache: object.cache() })
-        }
-        Kind::Copy { source, offset, len } => {
-            let phys = pmm::alloc_promised().into_raw();
-            copy_in(&**source, offset + (page - start), len.saturating_sub(page - start), phys);
-            Leaf::Mapped(Mapping { phys, prot, owned: true, cache: CachePolicy::Normal })
-        }
-    })
+/// The frame `page` of a committed range that owns its frames starts with,
+/// `entry` from `start`: zeros, or its source's bytes for a copied range.
+fn owned_frame(start: u64, entry: &SpaceEntry, page: u64) -> u64 {
+    let phys = pmm::alloc_promised().into_raw();
+    if let Kind::Copy { source, offset, len } = &entry.kind {
+        copy_in(&**source, offset + (page - start), len.saturating_sub(page - start), phys);
+    }
+    phys
 }
 
 /// Write `source`'s bytes from `offset` into the zeroed frame at `phys`, as

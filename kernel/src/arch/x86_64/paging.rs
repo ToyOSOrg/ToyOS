@@ -858,6 +858,21 @@ impl UserTables {
         table.store(((va >> 12) & 0x1FF) as usize, leaf.encode());
     }
 
+    /// Write `fill`'s leaf into each empty leaf of `[start, end)`, which one
+    /// table [`build`](Self::build) made holds.
+    pub fn fill(&mut self, start: u64, end: u64, mut fill: impl FnMut(u64) -> Leaf) {
+        assert!(toyos_userbound::is_user_addr(start) && start < end && (end - 1) & !(PAGE_2M - 1) == start & !(PAGE_2M - 1), "paging: a fill of {start:#x}..{end:#x}");
+        let table = self.leaves(start).map(PageTablePage::phys).unwrap_or_else(|| panic!("paging: no table over {start:#x}"));
+        // SAFETY: a table of leaves this space linked; `&mut self`.
+        let table = unsafe { PageTablePage::from_phys_mut(table) };
+        let base = start & !(PAGE_2M - 1);
+        for i in slots(start, end, base, 12) {
+            if Leaf::decode(table.0[i]) == Leaf::Empty {
+                table.store(i, fill(base + ((i as u64) << 12)).encode());
+            }
+        }
+    }
+
     /// Call `f` on every leaf in `[start, end)` that is not empty, with its
     /// address; a `Some` it answers is written in its place.
     pub fn edit(&mut self, start: u64, end: u64, mut f: impl FnMut(u64, Leaf) -> Option<Leaf>) {

@@ -17,6 +17,24 @@ use alloc::vec::Vec;
 /// The page every range is made of.
 pub const PAGE: u64 = 4096;
 
+/// The pages a touch beside a populated page populates at once: an aligned
+/// run of 64 KiB.
+pub const AROUND: u64 = 16 * PAGE;
+
+/// The pages `[from, to)` a touch of the empty `page` of the range `[start,
+/// end)` populates: its own, and where a page beside it in the range is
+/// `populated`, every page of its aligned run of [`AROUND`] in the range. So a
+/// range touched in order, upward or downward, takes a fault per run and a
+/// lone touch takes one page.
+pub fn around(start: u64, end: u64, page: u64, populated: impl Fn(u64) -> bool) -> (u64, u64) {
+    let beside = |at: u64| (start..end).contains(&at) && populated(at);
+    if !beside(page.wrapping_sub(PAGE)) && !beside(page + PAGE) {
+        return (page, page + PAGE);
+    }
+    let run = page & !(AROUND - 1);
+    (run.max(start), (run + AROUND).min(end))
+}
+
 /// What a page may be used for. No variant is both writable and executable.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum Prot {
@@ -566,5 +584,35 @@ mod tests {
             assert!(longest_gap == 0 || v.place(longest_gap * PAGE, PAGE).is_some(), "round {round}");
             assert_eq!(v.place((longest_gap + 1) * PAGE, PAGE), None, "round {round}");
         }
+    }
+
+    #[test]
+    fn a_lone_touch_populates_its_own_page() {
+        let (start, end) = (FLOOR, FLOOR + 64 * AROUND);
+        let page = start + 5 * AROUND + 3 * PAGE;
+        assert_eq!(around(start, end, page, |_| false), (page, page + PAGE));
+        // A page two away is not beside it.
+        assert_eq!(around(start, end, page, |at| at == page + 2 * PAGE), (page, page + PAGE));
+    }
+
+    #[test]
+    fn a_touch_beside_a_populated_page_populates_its_run_upward_or_downward() {
+        let (start, end) = (FLOOR, FLOOR + 64 * AROUND);
+        let run = start + 5 * AROUND;
+        let after_a_run = |at| at < run;
+        assert_eq!(around(start, end, run, after_a_run), (run, run + AROUND), "the next run, touched in order");
+        let below_a_run = |at| at >= run + AROUND;
+        let last = run + AROUND - PAGE;
+        assert_eq!(around(start, end, last, below_a_run), (run, run + AROUND), "a stack's next run down");
+    }
+
+    #[test]
+    fn a_run_stops_at_the_ranges_ends_and_a_neighbour_outside_it_counts_for_nothing() {
+        let (start, end) = (FLOOR + 3 * PAGE, FLOOR + AROUND + 2 * PAGE);
+        assert_eq!(around(start, end, start + PAGE, |at| at == start), (start, FLOOR + AROUND));
+        assert_eq!(around(start, end, end - PAGE, |at| at == end - 2 * PAGE), (FLOOR + AROUND, end));
+        // Populated memory just past either end is another range's.
+        assert_eq!(around(start, end, start, |at| at < start), (start, start + PAGE));
+        assert_eq!(around(start, end, end - PAGE, |at| at >= end), (end - PAGE, end));
     }
 }

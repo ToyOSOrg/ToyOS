@@ -3,12 +3,14 @@
 //! range, across two, or a hole — and a fixed reserve replaces whatever the
 //! pages it names held; `vm_protect` commits a reservation and changes
 //! protection in place, contents kept; `vm_discard` keeps the pages and reads
-//! back zeros; `vm_decommit` makes them a reservation again. The ranges one
-//! space holds are bounded, and a commitment past what memory holds is
-//! refused when it is asked for.
+//! back zeros; `vm_decommit` makes them a reservation again. A page
+//! populated with its neighbours is populated as its own range says. The
+//! ranges one space holds are bounded, and a commitment past what memory
+//! holds is refused when it is asked for.
 //!
-//! A page left unreachable must fault, which ends the process, so each such
-//! case runs in a child that makes the page itself and then loads from it.
+//! A page left unreachable, or read-only and written, must fault, which ends
+//! the process, so each such case runs in a child that makes the page itself
+//! and then touches it.
 
 use std::collections::HashSet;
 use std::process::Command;
@@ -36,18 +38,18 @@ fn set(p: *mut u8, page: usize, value: u8) {
     unsafe { p.add(page * PAGE).write_volatile(value) }
 }
 
-/// The unreachable pages a child makes and loads from.
-const UNREACHABLE: [&str; 3] = ["reserved", "protected-none", "decommitted"];
+/// The pages a child makes and touches, none of which allows the touch.
+const FAULTING: [&str; 4] = ["reserved", "protected-none", "decommitted", "read-only-beside-a-run"];
 
 fn main() {
     if let Some(case) = std::env::args().nth(1) {
-        return load_from(&case);
+        return touch(&case);
     }
     placement_and_release();
     protection();
     discard_and_decommit();
     ranges_are_bounded();
-    for case in UNREACHABLE {
+    for case in FAULTING {
         faults(case);
     }
     println!("vm_reserve, vm_protect, vm_discard, vm_decommit and vm_release do what each says");
@@ -206,24 +208,39 @@ fn ranges_are_bounded() {
     println!("  PASS: a space holds at most {MAX_RANGES} ranges, and gives each back at the bound");
 }
 
-/// A child that makes the page `case` names and loads from it must die of it.
+/// A child that makes the page `case` names and touches it must die of it.
 fn faults(case: &str) {
     let out = Command::new("/system/bin/test_rs_mmap_stress")
         .arg(case)
         .output()
         .unwrap_or_else(|e| panic!("spawn the {case} child: {e}"));
     let said = String::from_utf8_lossy(&out.stdout);
-    assert!(said.contains("armed"), "the {case} child never reached the load:\n{said}");
-    assert!(!said.contains("SURVIVED"), "a {case} page was readable:\n{said}");
-    assert!(!out.status.success(), "a load from a {case} page did not end the child");
-    println!("  PASS: a load from a {case} page ends the process");
+    assert!(said.contains("armed"), "the {case} child never reached the touch:\n{said}");
+    assert!(!said.contains("SURVIVED"), "a {case} page allowed the touch:\n{said}");
+    assert!(!out.status.success(), "a touch of a {case} page did not end the child");
+    println!("  PASS: a touch of a {case} page ends the process");
 }
 
-/// Make a page, written once where the case has one, unreachable as `case`
-/// says, then load from it.
-fn load_from(case: &str) {
+/// Make the page `case` names, then touch it as its range does not allow: a
+/// load from an unreachable page, written once where the case has one, or a
+/// write to a read-only one.
+fn touch(case: &str) {
     let page = match case {
         "reserved" => reserve(PAGE, VmProt::None),
+        "read-only-beside-a-run" => {
+            // A run of 16 pages whose last half is read-only, its first half
+            // written in order: populating the run populates no page of the
+            // read-only range as writable.
+            // SAFETY: placed anywhere, so it replaces nothing.
+            let run = unsafe { syscall::vm_reserve(16 * PAGE, VmProt::ReadWrite, VmAt::Anywhere { align: 16 * PAGE }) }.expect("reserve");
+            unsafe { syscall::vm_protect(run.add(8 * PAGE), 8 * PAGE, VmProt::Read) }.expect("protect the last half");
+            (0..8).for_each(|page| set(run, page, 1));
+            assert_eq!(byte(run, 8), 0, "a read-only page read other than zero");
+            println!("armed at {run:p}");
+            set(run, 8, 1);
+            println!("SURVIVED, wrote a read-only page");
+            return;
+        }
         "protected-none" | "decommitted" => {
             let page = reserve(PAGE, VmProt::ReadWrite);
             set(page, 0, 0x77);
