@@ -40,7 +40,7 @@ use super::ipc::{
     sys_port_badge, sys_port_create, sys_port_mint, sys_shm_create, sys_shm_map,
 };
 use super::machine::{
-    sys_counters, sys_device_inventory, sys_log_read, sys_reboot, sys_shutdown, sys_sysinfo,
+    sys_counters, sys_device_inventory, sys_log_read, sys_machine_stops, sys_reboot, sys_shutdown, sys_sysinfo,
     sys_trace_read,
     MAX_INVENTORY_RECORDS,
 };
@@ -156,6 +156,7 @@ pub(crate) fn syscall_dispatch(num: u64, a1: u64, a2: u64, a3: u64, a4: u64) -> 
         }
         SYS_SHUTDOWN => sys_shutdown(RawHandle(a1 as u32)),
         SYS_REBOOT => sys_reboot(RawHandle(a1 as u32)),
+        SYS_MACHINE_STOPS => sys_machine_stops(RawHandle(a1 as u32), a2),
         SYS_CHDIR => {
             let path = match ctx.user_str(UserAddr::new(a1), a2) { Ok(s) => s, Err(e) => return e.to_u64() };
             sys_chdir(&path)

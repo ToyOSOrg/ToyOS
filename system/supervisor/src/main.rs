@@ -19,8 +19,9 @@
 //! anything else the caller passed — a terminal's pipes stay the terminal's.
 //!
 //! **The supervisor sequences the machine's stop** ([`toyos::power`]): a holder of the
-//! `power` connector asks, the supervisor has `logkeeper` flush and answer, and only then
-//! asks the kernel, which stops every process at once and waits for none.
+//! `power` connector asks, the supervisor signs every login session out and,
+//! once they have ended, has `logkeeper` flush and answer, and only then asks
+//! the kernel, which stops every process at once and waits for none.
 //!
 //! **A service the supervisor starts at boot outlives any one process serving it.** The supervisor
 //! keeps each of its acceptors and endows a duplicate, so a restart or a swap
@@ -88,6 +89,7 @@
 //! neither is refused.
 
 mod sessions;
+mod stopping;
 
 use std::cell::{Cell, RefCell};
 use std::collections::BTreeMap;
@@ -113,10 +115,10 @@ use toyos::fs::{Access, Grant, CAPABILITY_PREFIX};
 use toyos::ipc::{self, Connection, RxStep};
 use toyos::launch::{self, Parent, Request, LAUNCHER};
 use toyos::namespace::{self, Namespace};
-use toyos::poller::{Poller, READABLE};
+use toyos::poller::{Poller, READABLE, WRITABLE};
 use toyos::port::{self, Acceptor, Connector};
 use toyos::log::region::{Ring, RING_BYTES};
-use toyos::power::{self, Stop};
+use toyos::power;
 use toyos::say;
 use toyos::shm::SharedMemory;
 use toyos::syscap::SysCap;
@@ -251,6 +253,8 @@ const TOKEN_ADMIN_ACCEPTOR: u64 = 9;
 const TOKEN_LINKS: u64 = 10;
 const TOKEN_APPS: u64 = 11;
 const TOKEN_PENDING_BASE: u64 = 12;
+/// Above every pending connection's token, which is a handle's past the base.
+const TOKEN_POWER_WATCHERS: u64 = u64::MAX;
 
 /// The processes whose end the supervisor watches at once: its services and
 /// its `drives` processes, in what a poller holds beside the loop's own
@@ -589,6 +593,8 @@ fn main() {
         worker: Worker::start(),
         restarting: false,
         logins: sessions::Logins::default(),
+        stops: Default::default(),
+        watchers: Vec::new(),
         watch: sessions::Watch::new(),
     };
     supervisor.boot(&mut role_acceptors);
@@ -733,6 +739,10 @@ struct Supervisor<'a> {
     logins: sessions::Logins,
     /// The ends of every app started in a login session.
     watch: sessions::Watch,
+    /// The machine's stop, if one is pending.
+    stops: toyos_supervisor::stop::Stops,
+    /// The requesters told what the stop waits for, as it changes.
+    watchers: Vec<stopping::Watcher>,
 }
 
 /// One `drives` process, and the function it holds.
@@ -1381,6 +1391,10 @@ impl<'a> Supervisor<'a> {
             }
             poller.watch(swap, READABLE, TOKEN_SWAP_ACCEPTOR);
             poller.watch(power, READABLE, TOKEN_POWER_ACCEPTOR);
+            for watcher in &self.watchers {
+                let writable = if watcher.owes() { WRITABLE } else { 0 };
+                poller.watch(&watcher.conn, READABLE | writable, TOKEN_POWER_WATCHERS);
+            }
             self.watch_children(&poller);
             if let Some(Flight { phase: Phase::Answered { conn, .. }, .. }) = &flight {
                 poller.watch(conn, READABLE, TOKEN_HANGUP);
@@ -1413,6 +1427,7 @@ impl<'a> Supervisor<'a> {
                 .map_or(u64::MAX, |left| left.as_nanos() as u64);
             ready.clear();
             poller.wait(1, timeout, |token| ready.push(token));
+            let open = self.logins.open.len();
 
             // Accept and the request are two events. Nothing is read here.
             for (token, acceptor, port) in [
@@ -1492,7 +1507,10 @@ impl<'a> Supervisor<'a> {
                             Port::Grants(caller) => self.serve_grants(&p.conn, &caller, msg_type, p.rx.payload(payload_len)),
                             Port::Login(opener) => self.serve_login(&p.conn, opener, msg_type),
                             Port::Admin(caller) => self.serve_admin(&p.conn, &caller, msg_type, p.rx.payload(payload_len)),
-                            Port::Power => self.stop(&p.conn, msg_type),
+                            Port::Power => {
+                                let payload = p.rx.payload(payload_len).to_vec();
+                                self.serve_power(p.conn, msg_type, &payload)
+                            }
                             Port::Swap => {
                                 let payload = p.rx.payload(payload_len).to_vec();
                                 if let Some(accepted) =
@@ -1530,6 +1548,12 @@ impl<'a> Supervisor<'a> {
             }
             if ready.contains(&TOKEN_ENDED) {
                 self.ended();
+            }
+            if ready.contains(&TOKEN_POWER_WATCHERS) {
+                self.pump_watchers();
+            }
+            if ready.contains(&TOKEN_LINKS) || self.logins.open.len() != open {
+                self.sessions_changed();
             }
         }
     }
@@ -1759,31 +1783,6 @@ impl<'a> Supervisor<'a> {
                 self.restore(index, previous, owed);
             }
         }
-    }
-
-    /// A request on `power`: `logkeeper` flushed, then the kernel asked with the
-    /// machine's capability. Answers only a refusal: a stop that happens takes
-    /// the supervisor, and the requester, with it.
-    fn stop(&mut self, conn: &Connection, msg_type: u32) {
-        let Some(how) = Stop::from_message(msg_type) else {
-            say!("supervisor: power: dropping client {} — frame {msg_type} is no stop", conn.as_handle().0);
-            return;
-        };
-        say!("{STOPPING} ({how:?})");
-        self.log.flush();
-        self.sync_files();
-        let stopped = self.stop_drivers();
-        let refused = match how {
-            Stop::Reboot => self.syscap.reboot(),
-            Stop::Shutdown => self.syscap.shutdown(),
-        };
-        self.log.resume();
-        toyos::error!("supervisor: power: the kernel refused {how:?}: {refused:?}");
-        // Their functions are owed another driver, as after any end.
-        if stopped {
-            self.drive();
-        }
-        let _ = conn.try_send_bytes(power::MSG_REFUSED, &refused.to_u64().to_le_bytes());
     }
 
     /// Tell every disk driver the machine stops, after the sync that wrote

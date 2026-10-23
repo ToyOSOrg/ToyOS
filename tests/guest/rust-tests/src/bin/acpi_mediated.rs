@@ -144,8 +144,8 @@ fn probe() {
 
     // No server ran on this boot, and nothing has held the claim.
     assert_eq!(
-        toyos::power::stop(toyos::power::Stop::Shutdown),
-        toyos::power::Refused::Kernel(SyscallError::NotSupported),
+        power_off().err(),
+        Some(toyos::power::Refused::Unsupported),
         "acpi: a power-off with no sleep type supplied"
     );
 
@@ -195,8 +195,15 @@ fn probe() {
 
     assert_eq!(syscall::acpi_lock_take(holder.handle()), Ok(true), "acpi: the lock, for the power-off to find");
     println!("{HELD_INTO_THE_STOP}");
-    let refused = toyos::power::stop(toyos::power::Stop::Shutdown);
+    let refused = power_off();
     panic!("acpi: the power-off was refused: {refused:?}");
+}
+
+/// The power-off, as test-runner's jobs ask it: waiting for no session.
+/// Comes back only where the machine did not stop.
+fn power_off() -> Result<toyos::power::Update, toyos::power::Refused> {
+    use toyos::power::{stop, Mode, Pending, Stop};
+    stop(Stop::Shutdown, Mode::Terminate).map(Pending::outcome)
 }
 
 /// What [`memory`] says of the addresses firmware's map does not list.
@@ -660,7 +667,7 @@ fn outlived() {
     // returned before the power-off is asked for.
     drop(claim(&cap));
     println!("{ASKED_WITH_NO_HOLDER}");
-    let refused = toyos::power::stop(toyos::power::Stop::Shutdown);
+    let refused = power_off();
     panic!("acpi: the power-off was refused: {refused:?}");
 }
 

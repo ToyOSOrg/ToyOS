@@ -98,6 +98,12 @@ impl SysCap {
         syscall::reboot(self.0.raw())
     }
 
+    /// Whether [`Self::shutdown`] or [`Self::reboot`] would stop this machine:
+    /// the refusal it would answer before stopping anything, where not.
+    pub fn can_stop(&self, stop: syscall::MachineStop) -> Result<(), SyscallError> {
+        syscall::machine_stops(self.0.raw(), stop)
+    }
+
     /// The machine's header, then one entry per live thread for as much of
     /// `buf` as is left. Answers the bytes written, and `0` if it was refused.
     ///

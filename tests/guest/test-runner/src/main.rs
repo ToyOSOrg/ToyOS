@@ -6,7 +6,7 @@ use std::sync::Mutex;
 use std::time::Duration;
 
 use toyos::endow::{Endowments, SYSCAP_LABEL};
-use toyos::power::Stop;
+use toyos::power::{Mode, Pending, Refused, Stop, Update};
 use toyos::process::Process;
 use toyos::syscap::SysCap;
 use toyos_session::LOGIN_PORT;
@@ -180,7 +180,7 @@ fn deadline(bound_ms: u64) {
             let _ = job.kill();
             let _ = job.wait();
         }
-        fatal(&format!("the reboot was refused: {:?}", toyos::power::stop(Stop::Reboot)));
+        fatal(&format!("the reboot was refused: {:?}", reboot()));
     });
 }
 
@@ -201,10 +201,17 @@ fn deadline(bound_ms: u64) {
 fn give_the_machine_back(why: &str) -> ! {
     println!("test-runner: {why}");
     let _ = io::stdout().flush();
-    let refused = toyos::power::stop(Stop::Reboot);
+    let refused = reboot();
     println!("test-runner: the reboot was refused: {refused:?}");
     let _ = io::stdout().flush();
     std::process::exit(1);
+}
+
+/// The machine back to firmware, at once: the harness owns it, so its stop
+/// is the explicit decision and waits for no session. Comes back only where
+/// the machine did not stop.
+fn reboot() -> Result<Update, Refused> {
+    toyos::power::stop(Stop::Reboot, Mode::Terminate).map(Pending::outcome)
 }
 
 /// Say why, on a console that may have nobody on it, and end this process —

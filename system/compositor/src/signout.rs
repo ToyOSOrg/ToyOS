@@ -11,6 +11,10 @@
 //! why and its launch starts nothing. **Every open is the launcher thread's**,
 //! a supervisor round trip the loop never waits on: the control connection
 //! it opens comes back to the loop through [`Desktop::opened`].
+//!
+//! **A sign-out the session's owner says is the machine's stop**
+//! ([`wire::MSG_STOPPING`]) is decided on `power`: its cancel and force are
+//! the stop's, sent on the launcher thread too.
 
 use std::os::toyos::process::CommandExt;
 use std::process::Command;
@@ -31,6 +35,14 @@ enum Ask {
     /// Open a desktop session on the `login` port.
     Open,
     Launch(String),
+    /// Cancel or force the machine's stop.
+    Stop(Decide),
+}
+
+#[derive(Clone, Copy, Debug)]
+enum Decide {
+    Cancel,
+    Terminate,
 }
 
 pub struct Desktop {
@@ -38,6 +50,8 @@ pub struct Desktop {
     rx: ipc::FrameRx<{ ipc::MAX_FRAME_LEN as usize }>,
     /// What a sign-out waits for, while one does.
     pub waiting: Option<Names>,
+    /// The sign-out is the machine's stop.
+    pub stopping: bool,
     asks: mpsc::Sender<Ask>,
     /// The answers to the thread's opens: a control connection, or why none.
     opened: mpsc::Receiver<Result<Connection, String>>,
@@ -62,6 +76,7 @@ impl Desktop {
             control: endowed.take::<Connection>(wire::CONTROL_LABEL),
             rx: ipc::FrameRx::new(),
             waiting: None,
+            stopping: false,
             asks,
             opened,
             wake,
@@ -120,6 +135,12 @@ impl Desktop {
 
     /// Sign the session out: ask what runs in it to quit, or end it by `force`.
     pub fn sign_out(&mut self, force: bool) {
+        if self.stopping {
+            if force {
+                self.decide(Decide::Terminate);
+            }
+            return;
+        }
         let Some(control) = &self.control else { return };
         if let Err(e) = control.try_send_bytes(wire::MSG_SIGN_OUT, &SignOut { force }.encode()) {
             return eprintln!("compositor: the sign-out was not asked: {e:?}");
@@ -129,10 +150,17 @@ impl Desktop {
     }
 
     pub fn cancel(&mut self) {
+        if self.stopping {
+            return self.decide(Decide::Cancel);
+        }
         let Some(control) = &self.control else { return };
         if let Err(e) = control.try_signal(wire::MSG_CANCEL) {
             eprintln!("compositor: the cancel was not sent: {e:?}");
         }
+    }
+
+    fn decide(&mut self, decide: Decide) {
+        self.asks.send(Ask::Stop(decide)).expect("compositor: its launcher thread has ended");
     }
 
     /// Everything the session's owner said; `true` where the view changed.
@@ -149,9 +177,19 @@ impl Desktop {
                             println!("compositor: signing out, waiting for: {}", names.names.join(", "));
                             self.waiting = Some(names);
                         }
+                        (wire::MSG_STOPPING, _) if payload == [1] => {
+                            println!("compositor: the machine stops; Esc cancels the stop, Enter forces it");
+                            self.stopping = true;
+                            self.waiting.get_or_insert_with(Names::default);
+                        }
+                        (wire::MSG_STOPPING, _) if payload == [0] => {
+                            println!("compositor: the machine's stop is cancelled; the sign-out goes on");
+                            self.stopping = false;
+                        }
                         (wire::MSG_CANCELLED, _) => {
                             println!("compositor: the sign-out is cancelled; the session goes on");
                             self.waiting = None;
+                            self.stopping = false;
                         }
                         _ => eprintln!("compositor: the session's owner said {msg_type}, which is no report"),
                     }
@@ -161,6 +199,7 @@ impl Desktop {
                     println!("compositor: the desktop session ended");
                     self.control = None;
                     self.waiting = None;
+                    self.stopping = false;
                     self.ask();
                     return true;
                 }
@@ -193,6 +232,16 @@ fn launcher(queue: mpsc::Receiver<Ask>, login: Option<Namespace>, opened: mpsc::
                 };
                 if opened.send(answer).is_ok() {
                     let _ = wake.write_nonblock(&[1]);
+                }
+                continue;
+            }
+            Ask::Stop(decide) => {
+                let decided = match decide {
+                    Decide::Cancel => toyos::power::cancel(),
+                    Decide::Terminate => toyos::power::terminate(),
+                };
+                if let Err(why) = decided {
+                    eprintln!("compositor: the stop's {decide:?} was refused: {why:?}");
                 }
                 continue;
             }

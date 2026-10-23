@@ -118,6 +118,30 @@ impl Logins {
     pub fn launcher_of(&self, session: Session) -> Option<&Acceptor> {
         self.of(session).map(|login| &login.launcher)
     }
+
+    /// What every session's last report named.
+    pub fn waiting_names(&self) -> impl Iterator<Item = &str> {
+        self.open.iter().flat_map(|login| login.waiting.names.iter().map(String::as_str))
+    }
+
+    /// `msg_type` to every owner, never blocking: one whose link is full
+    /// is said.
+    pub fn tell_all(&self, msg_type: u32) {
+        for login in &self.open {
+            if let Err(e) = login.link.try_signal(msg_type) {
+                say!("supervisor: session {}'s owner was not told {msg_type} ({e:?})", login.session.share());
+            }
+        }
+    }
+
+    /// Every owner killed, and with it everything under it.
+    pub fn kill_all(&mut self) {
+        for login in &mut self.open {
+            if let Err(e) = login.owner.kill() {
+                say!("supervisor: session {}'s owner was not killed ({e})", login.session.share());
+            }
+        }
+    }
 }
 
 /// The ends of every app started in a login session, watched off the loop.
@@ -212,6 +236,9 @@ impl Supervisor<'_> {
     /// Open a login session for `opener` and start its owner: the index of
     /// the session, or why none was opened.
     fn open_session(&mut self, opener: &'static Program) -> Result<usize, String> {
+        if let Some(stop) = self.stops.pending() {
+            return Err(format!("the machine's {stop:?} is pending"));
+        }
         let now = Instant::now();
         self.logins.reopens.may_open(&opener.name, now).map_err(|_| {
             format!(
@@ -455,7 +482,10 @@ impl Supervisor<'_> {
             };
             let login = self.logins.open.swap_remove(at);
             let signed_out = decide::signed_out(end);
-            self.logins.reopens.ended(&login.opener.name, signed_out, Instant::now());
+            // The stop's own kills are no failure of the login authority's.
+            if self.stops.pending().is_none() {
+                self.logins.reopens.ended(&login.opener.name, signed_out, Instant::now());
+            }
             match signed_out {
                 true => say!("supervisor: session {} is signed out", login.session.share()),
                 false => say!("supervisor: session {} ended with its owner, {end}", login.session.share()),

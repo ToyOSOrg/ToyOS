@@ -334,11 +334,14 @@ an explicit force issues it, and never a timer's.
      11.1.9).
    - 7.2 The rest, with stage 5: sshd hangs up a dropped connection's session,
      says what stays and keeps waiting. A stop of the machine is a request
-     carrying its mode, wait or terminate, and only a terminate request, itself
-     the explicit force, asks with terminate; test-runner's stops are terminate
-     requests. No product timeout makes one; a test's hang ceiling may still
-     end its test with one, the test reporting its own stall. `&` is a line the shell watches. sshd
-     awaits exits through a ToyOS `tokio/src/process` arm in the tokio fork,
+     carrying its mode, wait or terminate. A wait stop asks every session to
+     quit with terminate and waits for them until a later terminate request,
+     itself the explicit force, ends what stays, or a cancel keeps the machine
+     running; test-runner's stops are terminate requests. This much is done
+     (`toyos::power`, and `session_lifecycle`'s reboot arm). No product
+     timeout makes one; a test's hang ceiling may still end its test with
+     one, the test reporting its own stall. `&` is a line the shell watches.
+     sshd awaits exits through a ToyOS `tokio/src/process` arm in the tokio fork,
      shaped as its Linux pidfd arm (`process/unix/pidfd_reaper.rs`). *Exit*: a
      dropped SSH connection whose session runs a watching child sees it write
      its file before it ends; tokio's `Child::wait` returns with no loop

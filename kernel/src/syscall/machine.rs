@@ -166,14 +166,42 @@ pub(super) fn sys_shutdown(syscap: RawHandle) -> u64 {
     if let Err(e) = demand_syscap(syscap, Rights::POWER) {
         return e.refuse();
     }
-    if let Some(why) = power::shutdown_refused() {
-        log!("shutdown: {why} — refused");
-        return SyscallError::NotSupported.to_u64();
+    if let Some(refused) = shutdown_refused() {
+        return refused.to_u64();
     }
     match quiesce("Shutting down.") {
         Ok((stopping, wire)) => power::shutdown(stopping, wire),
         Err(e) => e.to_u64(),
     }
+}
+
+/// Whether `sys_shutdown` or `sys_reboot` would stop the machine, on their right: their refusal before anything is torn down, or `0`.
+pub(super) fn sys_machine_stops(syscap: RawHandle, stop: u64) -> u64 {
+    if let Err(e) = demand_syscap(syscap, Rights::POWER) {
+        return e.refuse();
+    }
+    let refused = match MachineStop::from_u64(stop) {
+        Some(MachineStop::Shutdown) => shutdown_refused(),
+        Some(MachineStop::Reboot) => reboot_refused(),
+        None => return SyscallError::InvalidArgument.to_u64(),
+    };
+    refused.map_or(0, SyscallError::to_u64)
+}
+
+/// The power-off's refusal before anything is torn down, said, where this machine has none.
+fn shutdown_refused() -> Option<SyscallError> {
+    let why = power::shutdown_refused()?;
+    log!("shutdown: {why} — refused");
+    Some(SyscallError::NotSupported)
+}
+
+/// The reset's refusal before anything is torn down, said, where this machine has none.
+fn reboot_refused() -> Option<SyscallError> {
+    if power::can_reboot() {
+        return None;
+    }
+    log!("reboot: this machine has no reset this kernel performs — refused");
+    Some(SyscallError::NotSupported)
 }
 
 /// Returns the machine to firmware; requires a `SysCap` carrying [`Rights::POWER`]. Returns only when refused.
@@ -182,9 +210,8 @@ pub(super) fn sys_reboot(syscap: RawHandle) -> u64 {
     if let Err(e) = demand_syscap(syscap, Rights::POWER) {
         return e.refuse();
     }
-    if !power::can_reboot() {
-        log!("reboot: this machine has no reset this kernel performs — refused");
-        return SyscallError::NotSupported.to_u64();
+    if let Some(refused) = reboot_refused() {
+        return refused.to_u64();
     }
     match quiesce("Rebooting.") {
         Ok((_, wire)) => power::reboot(wire),

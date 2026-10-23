@@ -11,6 +11,8 @@ doctest = false
 [dependencies]
 toyos-abi = { path = "../../../sdk/abi" }
 toyos-manifest = { path = "../../../lib/manifest" }
+# The stop's request and refusals.
+toyos = { path = "../../../sdk/toyos" }
 # The grant a role's block connector is minted with, and the type that names DATA.
 toyos-blockring = { path = "../../../lib/blockring" }
 toyos-gpt = { path = "../../../lib/gpt" }

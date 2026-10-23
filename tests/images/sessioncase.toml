@@ -10,6 +10,8 @@
 # connector, and lists what a session's launcher starts: a shell, which
 # detaches `hangupholder`, the app that ignores a hang-up; and `logout`, the
 # one row receiving `session-admin`. `session` owns each session opened.
+# test-runner receives `power` for `session_lifecycle`'s closing reboot, which
+# waits for the sessions until the job forces it.
 
 assets = ["assets"]
 
@@ -24,6 +26,7 @@ syscap = ["logread"]
 # when forced; `dup`, because test-runner hands each job its capability.
 [programs.test-runner]
 syscap = ["dup", "roster"]
+receives = ["power"]
 starts = ["shell", "logout"]
 login = true
 

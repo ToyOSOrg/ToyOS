@@ -294,6 +294,9 @@ pub const SYS_JOB_OWN: u64 = 134;
 ///
 /// [`Rights::MANAGE`]: crate::handle::Rights::MANAGE
 pub const SYS_PROCESS_QUIT: u64 = 135;
+/// Whether [`SYS_SHUTDOWN`] or [`SYS_REBOOT`] would stop this machine, asked
+/// on the same right and stopping nothing. See [`machine_stops`].
+pub const SYS_MACHINE_STOPS: u64 = 136;
 
 /// Bins in the per-process syscall profile — one for every number this ABI
 /// issues, and one at the end for every number it does not.
@@ -301,13 +304,13 @@ pub const SYS_PROCESS_QUIT: u64 = 135;
 /// **The profile's parts sum to its total, and that is the whole requirement.**
 /// A bin array narrower than the ABI reaches drops calls out of the line while
 /// the total goes on counting them.
-pub const SYSCALL_PROFILE_BINS: usize = 137;
+pub const SYSCALL_PROFILE_BINS: usize = 138;
 
 /// Where a number this ABI does not issue is counted. Merging is a degradation
 /// a reader can see in the line; dropping is one nobody can.
 pub const SYSCALL_PROFILE_OTHER: usize = SYSCALL_PROFILE_BINS - 1;
 
-const _: () = assert!(SYS_PROCESS_QUIT < SYSCALL_PROFILE_OTHER as u64);
+const _: () = assert!(SYS_MACHINE_STOPS < SYSCALL_PROFILE_OTHER as u64);
 
 pub const WNOHANG: u64 = 1;
 /// Every bit `SYS_PROCESS_WAIT`'s flag word defines; a wait carrying another
@@ -1293,6 +1296,32 @@ pub fn reboot(syscap: RawHandle) -> SyscallError {
             return e;
         }
     }
+}
+
+/// Which stop [`machine_stops`] asks about.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[repr(u64)]
+pub enum MachineStop {
+    Shutdown = 0,
+    Reboot = 1,
+}
+
+impl MachineStop {
+    pub fn from_u64(word: u64) -> Option<Self> {
+        match word {
+            0 => Some(Self::Shutdown),
+            1 => Some(Self::Reboot),
+            _ => None,
+        }
+    }
+}
+
+/// `Ok` where [`shutdown`] or [`reboot`], as `stop` names, would stop this
+/// machine; the refusal it would answer before stopping anything where not,
+/// [`SyscallError::NotSupported`] for a machine without it. Lets a caller
+/// refuse a stop before it ends what the stop would have ended.
+pub fn machine_stops(syscap: RawHandle, stop: MachineStop) -> Result<(), SyscallError> {
+    check_unit(syscall(SYS_MACHINE_STOPS, syscap.0 as u64, stop as u64, 0, 0))
 }
 
 /// The device classes, their wire numbers, and the name a `system.toml`

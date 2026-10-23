@@ -80,14 +80,14 @@ mod osc;
 mod sci;
 mod tables;
 
-use std::cell::Cell;
+use std::cell::{Cell, RefCell};
 use std::collections::{BTreeMap, VecDeque};
 use std::time::{Duration, Instant};
 
 use toyos::endow;
 use toyos::ioport::{in16, in8, out16, out8};
 use toyos::poller::{Poller, READABLE};
-use toyos::power::{self, Stop};
+use toyos::power::{self, Mode, Refused, Stop};
 use toyos::AcpiDev;
 use toyos_abi::acpi::{Access, AcpiInfo, Block, FIXED_POWER_BUTTON};
 use toyos_abi::syscall::{DeviceType, SyscallError};
@@ -127,6 +127,8 @@ struct Server<'a, K, P> {
     empty: u32,
     /// The kernel was handed `\_S5`'s sleep type: a press powers the machine off.
     power_off: bool,
+    /// A press asked a stop, which another press forces.
+    stop_asked: bool,
     /// What the namespace's initialisation ran.
     census: Census,
     /// What `_OSC` answered.
@@ -149,7 +151,7 @@ fn main() {
         return;
     };
     let info = dev.describe().expect("acpiserver: the claim's first read is its description");
-    let claim = Claim { dev: &dev, info, poller: Poller::new(1), watching: Cell::new(false) };
+    let claim = Claim { dev: &dev, info, poller: Poller::new(1), watching: Cell::new(false), stop: RefCell::new(None) };
     let mut server = Server::new(&claim, Machine, info);
     server.arm(&dev);
     let (loaded, kept) = aml::load(&claim, server.info.rsdp);
@@ -206,6 +208,8 @@ struct Claim<'a> {
     /// A watch answers once: one still registered from a wait that timed out
     /// is not registered again.
     watching: Cell<bool>,
+    /// The stop the last press asked, which a terminate forces and no other.
+    stop: RefCell<Option<power::Pending>>,
 }
 
 impl Claim<'_> {
@@ -274,8 +278,14 @@ impl Kernel for Claim<'_> {
         self.dev.ack().expect("acpiserver: the claim's acknowledgement");
     }
 
-    fn power_off(&self) -> power::Refused {
-        power::stop(Stop::Shutdown)
+    fn power_off(&self) -> Result<(), power::Refused> {
+        let pending = power::stop(Stop::Shutdown, Mode::Wait)?;
+        *self.stop.borrow_mut() = Some(pending);
+        Ok(())
+    }
+
+    fn terminate(&self) -> Result<(), power::Refused> {
+        self.stop.borrow().as_ref().map_or(Err(Refused::NoStopPending), power::Pending::terminate)
     }
 }
 
@@ -345,6 +355,7 @@ impl<'a, K: Kernel, P: Ports> Server<'a, K, P> {
             scis: 0,
             empty: 0,
             power_off: false,
+            stop_asked: false,
             census: Census::default(),
             negotiated: osc::Negotiated::default(),
             intel: toyos_abi::processor_is_intel(),
@@ -710,13 +721,28 @@ impl<'a, K: Kernel, P: Ports> Server<'a, K, P> {
         }
     }
 
-    /// A press: the machine stops, and this comes back only where it has no
-    /// power-off, which the load said and this says again.
+    /// A press: the supervisor asked to power off once the sessions have
+    /// ended, which is answered at once so the next press is served; a press
+    /// while that stop is pending forces it, and no other. A stop that ended
+    /// without the machine, cancelled or refused, leaves the next press
+    /// asking again.
     fn press(&mut self) {
+        if self.stop_asked {
+            println!("acpiserver: the power button was pressed again, on SCI {}; forcing the stop", self.scis);
+            match self.kernel.terminate() {
+                Ok(()) => return,
+                Err(Refused::NoStopPending) => self.stop_asked = false,
+                Err(refused) => panic!("acpiserver: the stop's terminate was refused: {refused:?}"),
+            }
+        }
         println!("acpiserver: the power button was pressed, on SCI {} of this boot; asking the supervisor to power off", self.scis);
-        let refused = self.kernel.power_off();
+        let Err(refused) = self.kernel.power_off() else {
+            self.stop_asked = true;
+            return;
+        };
         match sci::unstopped(refused, self.power_off) {
             Unstopped::Dropped => toyos::error!("acpiserver: the press is dropped: {}", aml::NO_S5_HANDED.trim_start_matches("acpiserver: ")),
+            Unstopped::Another(stop) => toyos::error!("acpiserver: the press is dropped: a {stop:?} is pending"),
             Unstopped::Defect => panic!("acpiserver: the power-off was refused: {refused:?}"),
         }
     }
@@ -1286,6 +1312,35 @@ mod tests {
         let why = stopped.err().map(|payload| payload.downcast_ref::<String>().cloned().unwrap_or_default());
         assert_eq!(why.as_deref(), Some(POWERED_OFF), "the press did not power the machine off first");
         assert_eq!(*kernel.takes.borrow(), [Take::Pending], "the _INI took the Global Lock before the press was served");
+    }
+
+    /// A press asks a stop that waits for the sessions and is answered at
+    /// once, so the next press is served: it forces that stop. A stop that
+    /// ended without stopping the machine leaves the press after asking
+    /// again, and a stop of another kind pending since is not forced.
+    #[test]
+    fn a_press_while_the_stop_waits_forces_it() {
+        use crate::host::tests::Stop::{PowerOff, Terminate};
+        let kernel = Scripted { stops: RefCell::new([Ok(()), Ok(()), Err(Refused::NoStopPending), Ok(())].into()), ..crafted(&[], &[]) };
+        let info = AcpiInfo { rsdp: CRAFTED_RSDP, pm1_event: Block::NONE, gpe0: GPE0, flags: FIXED_POWER_BUTTON, reserved: [0; 3] };
+        let mut server = Server::new(&kernel, Bytes::default(), info);
+        server.press();
+        assert_eq!(*kernel.stopped.borrow(), [PowerOff]);
+        server.press();
+        assert_eq!(*kernel.stopped.borrow(), [PowerOff, Terminate], "a second press did not force the stop");
+        server.press();
+        assert_eq!(*kernel.stopped.borrow(), [PowerOff, Terminate, Terminate, PowerOff], "a press after the stop ended did not ask again");
+
+        // Cancelled, then a reboot asked by someone else: the press after is
+        // refused its terminate, asks its own stop, is refused that, and
+        // forces nothing at any press.
+        let reboot = Err(Refused::AnotherStopPending(power::Stop::Reboot));
+        let kernel = Scripted { stops: RefCell::new([Ok(()), Err(Refused::NoStopPending), reboot, reboot].into()), ..crafted(&[], &[]) };
+        let mut server = Server::new(&kernel, Bytes::default(), info);
+        for _ in 0..3 {
+            server.press();
+        }
+        assert_eq!(*kernel.stopped.borrow(), [PowerOff, Terminate, PowerOff, PowerOff], "a press forced a stop it never asked");
     }
 
     /// §6.2.11.1.3: a commit sends what the query offered of the claim, and a

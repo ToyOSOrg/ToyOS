@@ -8,8 +8,7 @@
 
 use std::time::Instant;
 
-use toyos::power::Refused;
-use toyos_abi::syscall::SyscallError;
+use toyos::power::{Refused, Stop};
 
 /// PM1 status and enable (ACPI 6.5 Tables 4.13, 4.14): the power button.
 pub const PWRBTN: u16 = 1 << 8;
@@ -203,19 +202,23 @@ pub const EMPTY_SCIS: u32 = 64;
 pub enum Unstopped {
     /// The machine has no power-off: the press is said and dropped.
     Dropped,
+    /// Another stop is pending, which this press does not replace: said and
+    /// dropped.
+    Another(Stop),
     /// This server's defect, or the supervisor's.
     Defect,
 }
 
 /// A press whose power-off was `refused`, on a machine the kernel was handed
-/// `\_S5`'s sleep type on (`power_off`) or was not. Only the kernel's own
-/// word for a machine without one drops the press, and only where this server
-/// handed it none: every other refusal is of a stop that should have
-/// happened.
+/// `\_S5`'s sleep type on (`power_off`) or was not. Only the supervisor's word
+/// for a machine without one drops the press, and only where this server
+/// handed it none; another stop pending drops it too, unreplaced. Every other
+/// refusal is of a stop that should have happened.
 pub fn unstopped(refused: Refused, power_off: bool) -> Unstopped {
     match refused {
-        Refused::Kernel(SyscallError::NotSupported) if !power_off => Unstopped::Dropped,
-        Refused::Kernel(_) | Refused::NotEndowed | Refused::Unanswered => Unstopped::Defect,
+        Refused::Unsupported if !power_off => Unstopped::Dropped,
+        Refused::AnotherStopPending(stop) => Unstopped::Another(stop),
+        Refused::Unsupported | Refused::Failed | Refused::NotEndowed | Refused::Unanswered | Refused::NoStopPending | Refused::TooLate => Unstopped::Defect,
     }
 }
 
@@ -394,16 +397,10 @@ mod tests {
 
     #[test]
     fn only_a_press_on_a_machine_handed_no_sleep_type_is_dropped() {
-        let no_sleep_type = Refused::Kernel(SyscallError::NotSupported);
-        assert_eq!(unstopped(no_sleep_type, false), Unstopped::Dropped);
-        assert_eq!(unstopped(no_sleep_type, true), Unstopped::Defect, "the kernel lost the sleep type this server handed it");
-        for refused in [
-            Refused::Kernel(SyscallError::PermissionDenied),
-            Refused::Kernel(SyscallError::Gone),
-            Refused::Kernel(SyscallError::InvalidArgument),
-            Refused::NotEndowed,
-            Refused::Unanswered,
-        ] {
+        assert_eq!(unstopped(Refused::Unsupported, false), Unstopped::Dropped);
+        assert_eq!(unstopped(Refused::Unsupported, true), Unstopped::Defect, "the kernel lost the sleep type this server handed it");
+        assert_eq!(unstopped(Refused::AnotherStopPending(Stop::Reboot), true), Unstopped::Another(Stop::Reboot));
+        for refused in [Refused::Failed, Refused::NotEndowed, Refused::Unanswered, Refused::NoStopPending, Refused::TooLate] {
             for power_off in [false, true] {
                 assert_eq!(unstopped(refused, power_off), Unstopped::Defect, "{refused:?} with power_off {power_off}");
             }

@@ -157,9 +157,14 @@ pub trait Kernel {
     fn latched(&self) -> Option<u32>;
     /// Acknowledge the SCI, whose status this server has cleared.
     fn ack(&self);
-    /// Ask the supervisor to power the machine off
-    /// (`toyos::power::stop`), which answers only where it did not.
-    fn power_off(&self) -> toyos::power::Refused;
+    /// Ask the supervisor to power the machine off once its sessions have
+    /// ended (`toyos::power::stop`, waiting): answered at once, the stop
+    /// pending or refused.
+    fn power_off(&self) -> Result<(), toyos::power::Refused>;
+    /// Force the stop the last [`Self::power_off`] asked, and no other
+    /// (`toyos::power::Pending::terminate`): refused `NoStopPending` once it
+    /// has ended, whatever stop is pending since.
+    fn terminate(&self) -> Result<(), toyos::power::Refused>;
 }
 
 /// Why an access to one of the controller's ports was not made.
@@ -762,13 +767,28 @@ pub mod tests {
         /// Each served set a Sleep was asked to serve.
         pub sleeps: RefCell<VecDeque<Latched>>,
         pub slept: RefCell<Vec<Option<u16>>>,
+        /// What each power-off and terminate answers, in turn; each asked.
+        pub stops: RefCell<VecDeque<Result<(), toyos::power::Refused>>>,
+        pub stopped: RefCell<Vec<Stop>>,
     }
 
-    /// What [`Scripted`] panics with where it is asked to power off: the
-    /// machine stops there, and nothing after the ask runs.
+    /// What the server asked the supervisor.
+    #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+    pub enum Stop {
+        PowerOff,
+        Terminate,
+    }
+
+    /// What [`Scripted`] panics with where it is asked to power off with no
+    /// answer scripted: the machine stops there, and nothing after the ask runs.
     pub const POWERED_OFF: &str = "the scripted machine powered off";
 
     impl Scripted {
+        fn stop(&self, asked: Stop) -> Result<(), toyos::power::Refused> {
+            self.stopped.borrow_mut().push(asked);
+            self.stops.borrow_mut().pop_front().unwrap_or_else(|| panic!("{POWERED_OFF}"))
+        }
+
         fn stopping(&self) -> Result<(), Stopping> {
             match self.stops_after.get() {
                 Some(0) => Err(Stopping),
@@ -892,8 +912,12 @@ pub mod tests {
             panic!("an SCI acknowledged where none latched");
         }
 
-        fn power_off(&self) -> toyos::power::Refused {
-            panic!("{POWERED_OFF}");
+        fn power_off(&self) -> Result<(), toyos::power::Refused> {
+            self.stop(Stop::PowerOff)
+        }
+
+        fn terminate(&self) -> Result<(), toyos::power::Refused> {
+            self.stop(Stop::Terminate)
         }
     }
 
