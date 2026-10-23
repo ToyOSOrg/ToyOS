@@ -229,7 +229,7 @@ fn check<A: Field>(field: &A, seed: u64) {
         assert_eq!(field.value(&field.square(&x)), (&a * &a) % &p, "{a}^2");
     }
 
-    // Inversion is a^(p-2), the inverse and zero for zero, for every value.
+    // Inversion gives the inverse, and zero for zero, for every value.
     for a in values.iter().take(if cfg!(miri) { 3 } else { values.len() }) {
         let x = field.from(a);
         let inverse = field.invert(&x);

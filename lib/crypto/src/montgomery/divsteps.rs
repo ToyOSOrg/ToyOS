@@ -41,9 +41,9 @@ pub(super) fn invert<M: Modulus<N>, const N: usize>(x: &[u64; N], scale: &[u64; 
     // with d p's width in bits.
     let batches = const {
         assert!(limbs(N) <= LIMBS && M::P[0] & 1 == 1);
-        let d = 64 * N as u64 - M::P[N - 1].leading_zeros() as u64;
-        assert!(d >= 46);
-        ((49 * d + 57) / 17).div_ceil(62) as usize
+        let bits = 64 * N as u64 - M::P[N - 1].leading_zeros() as u64;
+        assert!(bits >= 46);
+        ((49 * bits + 57) / 17).div_ceil(62) as usize
     };
     let mut f = p;
     let mut g = split::<N>(x);
@@ -199,7 +199,8 @@ const fn split<const N: usize>(x: &[u64; N]) -> Limbs {
     out
 }
 
-/// Nonnegative limbs below 2^(64N) as N words.
+/// Nonnegative limbs below 2^(64N) as N words: word i starts 2i bits into
+/// limb 64i / 62, so two limbs fill it.
 fn join<const N: usize>(a: &Limbs) -> [u64; N] {
     let mut out = [0; N];
     for (i, word) in out.iter_mut().enumerate() {
@@ -207,9 +208,6 @@ fn join<const N: usize>(a: &Limbs) -> [u64; N] {
         *word = (a[limb] as u64) >> shift;
         if limb + 1 < LIMBS {
             *word |= (a[limb + 1] as u64) << (62 - shift);
-        }
-        if shift > 60 && limb + 2 < LIMBS {
-            *word |= (a[limb + 2] as u64) << (124 - shift);
         }
     }
     out
