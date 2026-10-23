@@ -59,7 +59,7 @@ fn main() {
         [(toyos_inspect::dev::ROOT, inventory), (toyos_inspect::kernel::ROOT, cpu_counters)];
     for (root, ask) in kernel_roots.into_iter().filter(|(root, _)| run.selector.reaches(root)) {
         let answer = cap.as_ref().ok_or_else(|| {
-            "this program holds no system capability, so the kernel's answer is not its to read"
+            "this program holds no system capability, so the kernel's answer is not its to read; run it with `launch inspect`"
                 .to_string()
         });
         match answer.and_then(ask) {

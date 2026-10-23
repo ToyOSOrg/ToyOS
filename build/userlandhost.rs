@@ -42,9 +42,10 @@
 //! host build most userland crates cannot make. So the reading is made to fail
 //! loudly: a test is gated only in the one shape a default `cargo test` in a
 //! crate is known to run. That is an attribute naming `test` or `test_case`, in
-//! a file under the `src/` or `tests/` of the crate nearest it, in a crate whose
-//! only `cfg` is `cfg(test)`, which ignores no test, and whose manifest switches
-//! off no target's tests.
+//! a file under the `src/` or `tests/` of the crate nearest it, in a crate that
+//! ignores no test, whose manifest switches off no target's tests, and whose
+//! only `cfg` in a file holding a test or declaring a module is `cfg(test)`. A
+//! `cfg` in any other file has no test to compile out.
 //!
 //! Doc-tests are not read: a library crate that leaves `doctest` on is refused,
 //! because the `toyos` toolchain builds no rustdoc.
@@ -106,8 +107,10 @@ pub fn survey(userland: &Path) -> Result<Survey, String> {
         }
         let crate_name = rel(userland, owner);
         crates.insert(crate_name.clone());
-        for why in &scan.conditions {
-            conditional.push((crate_name.clone(), file.clone(), *why));
+        if scan.test || scan.module {
+            for why in &scan.conditions {
+                conditional.push((crate_name.clone(), file.clone(), *why));
+            }
         }
         if !scan.test {
             continue;
@@ -366,8 +369,10 @@ fn switched_off(doc: &toml::Value) -> Vec<String> {
 struct Scan {
     /// An attribute names `test` or `test_case` as a word.
     test: bool,
+    /// A line declares a module, whose tests a condition on it could hide.
+    module: bool,
     /// Why a default `cargo test` might skip this crate's tests; binding only
-    /// if the crate is gated.
+    /// if the crate is gated and this file holds a test or declares a module.
     conditions: Vec<&'static str>,
 }
 
@@ -426,11 +431,27 @@ fn scan(text: &str) -> Result<Scan, &'static str> {
             judge_attribute(&body, &mut out);
             rest = rest[end..].trim_start();
         }
+        if attribute.is_none() && declares_module(rest) {
+            out.module = true;
+        }
     }
     match attribute {
         Some(_) => Err("an attribute that never closes, which hides the rest of the file"),
         None => Ok(out),
     }
+}
+
+/// Whether `code`, a line past its attributes, starts a module item:
+/// `mod m;`, `pub(crate) mod m {`.
+fn declares_module(code: &str) -> bool {
+    let mut code = code;
+    if let Some(after) = code.strip_prefix("pub") {
+        code = match after.trim_start().strip_prefix('(') {
+            Some(scoped) => scoped.split_once(')').map_or("", |(_, rest)| rest),
+            None => after,
+        };
+    }
+    code.trim_start().strip_prefix("mod").is_some_and(|rest| rest.starts_with(char::is_whitespace))
 }
 
 /// One attribute, whitespace and string contents removed: `#[cfg(test)]`,
@@ -503,6 +524,8 @@ mod tests {
         put("gated/Cargo.toml", manifest);
         put("gated/src/lib.rs", test);
         put("gated/src/slow.rs", "#[test]\n#[ignore]\nfn slow() {}\n");
+        put("gated/src/leaf.rs", "pub fn f() {\n    #[cfg(target_os = \"toyos\")]\n    g();\n}\n");
+        put("gated/src/hides.rs", "#[cfg(target_os = \"toyos\")]\npub(crate) mod hidden;\n");
         put("gated/build.rs", &format!("fn main() {{}}\n{escape}"));
         put("gated/examples/x.rs", &format!("fn main() {{}}\n{escape}"));
         put("gated/sub/Cargo.toml", manifest);
@@ -533,6 +556,9 @@ mod tests {
                         .into(),
                     "gated/examples/x.rs: a test outside gated's src/ and tests/, which cargo \
                      test does not run"
+                        .into(),
+                    "gated/src/hides.rs: a cfg other than cfg(test) can compile a test out of \
+                     the host run"
                         .into(),
                     "gated/src/slow.rs: an ignored test runs nowhere".into(),
                     "loose.rs: a test in no crate".into(),
@@ -654,6 +680,17 @@ mod tests {
         assert!(!conditions("#[cfg(test)] #[cfg(feature = \"slow\")] mod tests {").is_empty());
         assert!(conditions("#![feature(test)]").is_empty());
         assert!(scan("#[cfg(test)\nmod tests {}\n#[test]\nfn f() {}").is_err());
+    }
+
+    #[test]
+    fn a_module_item_is_a_module_and_a_word_like_it_is_not() {
+        let module = |text| scan(text).expect("closes").module;
+        for item in ["mod m;", "pub mod m;", "pub(crate) mod m {", "pub(in crate::a) mod m;", "#[cfg(x)] mod m;"] {
+            assert!(module(item), "{item}");
+        }
+        for not in ["let model = 1;", "// mod m;", "fn modulo() {}", "pub fn f() {}", "#[cfg(x)]\nfn f() {}"] {
+            assert!(!module(not), "{not}");
+        }
     }
 
     #[test]

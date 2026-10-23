@@ -10,3 +10,5 @@ license = "MIT OR Apache-2.0"
 # would be a config the build system accepts and the supervisor cannot act on.
 [dependencies]
 toyos-abi = { path = "../../sdk/abi" }
+# `toyos::launch::is_canonical`, the one rule a launch path is held to.
+toyos = { path = "../../sdk/toyos" }

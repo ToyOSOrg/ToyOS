@@ -103,8 +103,7 @@ an explicit force issues it, and never a timer's.
    Oracle: POSIX `<signal.h>`'s classes.
 3. **Done**: **libc starts and waits for children**. `posix_spawn` and
    `posix_spawnp` with file actions and attributes start a child by
-   `toyos::spawn`, std's launch-or-spawn rule, which std's `Command` now uses
-   too. A C child starts with descriptors 0–2 and exactly what its file
+   `toyos::spawn`, as a helper, as std's `Command` does by default. A C child starts with descriptors 0–2 and exactly what its file
    actions name, a stated departure from POSIX, each endowed as
    `fd:<n>`, which the child's descriptor table installs at its number
    (`toyos::fd`). A descriptor a process was started without is no

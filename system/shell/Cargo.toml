@@ -9,8 +9,6 @@ license = "MIT OR Apache-2.0"
 toyos = { path = "../../sdk/toyos" }
 # The quit a `-c` shell asks of a child spawned past its own interrupt.
 toyos-abi = { path = "../../sdk/abi" }
-# `launch_path`, which is the other half of the gate the supervisor refuses a launch on.
-toyos-manifest = { path = "../../lib/manifest" }
 
 [package.metadata.toyos.host]
 fails = ["linux", "macos", "windows"]

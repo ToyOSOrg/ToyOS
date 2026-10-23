@@ -12,6 +12,9 @@ use toyos::power::{self, Stop};
 pub fn main(_args: Vec<String>) {
     // Comes back only refused: on the other path the power is already off.
     let refused = power::stop(Stop::Shutdown);
-    eprintln!("shutdown: refused ({refused:?})");
+    match refused {
+        power::Refused::NotEndowed => eprintln!("shutdown: this process holds no `power` connector; run it with `launch shutdown`"),
+        refused => eprintln!("shutdown: refused ({refused:?})"),
+    }
     std::process::exit(1);
 }

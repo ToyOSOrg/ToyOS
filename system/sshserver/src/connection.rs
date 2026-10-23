@@ -24,7 +24,7 @@
 use std::collections::{BTreeMap, VecDeque};
 use std::io::{Read, Write};
 use std::net::{Shutdown, TcpStream};
-use std::process::{Command, Stdio};
+use std::process::Stdio;
 use std::sync::mpsc::{self, Receiver, Sender, SyncSender};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
@@ -32,7 +32,7 @@ use std::time::{Duration, Instant};
 use toyos_ssh::{Authorizer, ChannelId, Event, HostKey, Server};
 
 use crate::program::Program;
-use crate::{command, sftp, OsRandom};
+use crate::{sftp, OsRandom};
 
 /// This daemon would not run what was asked: the shell's own convention for
 /// a command that could not be executed, and the reason is on stderr.
@@ -289,17 +289,13 @@ impl<A: Authorizer> Connection<A> {
 const SHELL: &str = "/system/bin/shell";
 
 impl<A: Authorizer> Connection<A> {
-    /// Run the named program. **Not through a shell**: `command::split` is the
-    /// whole grammar the line is read with, and a client that wants a pipe asks
-    /// for `shell -c` by name.
+    /// Run the request line as `shell -c` does, as OpenSSH runs it under the
+    /// user's `$SHELL -c`: SSH has no argument vector, and every client pastes
+    /// its words into one line for a shell to read. Its quoting is the shell's.
     fn exec(&mut self, channel: ChannelId, line: &[u8]) {
-        let argv = std::str::from_utf8(line)
-            .map_err(|_| "the command is not UTF-8".to_string())
-            .and_then(command::split)
-            .and_then(|argv| Ok(std::iter::once(command::resolve(&argv[0])?).chain(argv.into_iter().skip(1)).collect()));
-        match argv {
-            Ok(argv) => self.start(channel, argv, false),
-            Err(why) => self.refuse(channel, &why),
+        match std::str::from_utf8(line) {
+            Ok(line) => self.start(channel, vec![SHELL.to_string(), "-c".to_string(), line.to_string()], false),
+            Err(_) => self.refuse(channel, "the command is not UTF-8"),
         }
     }
 
@@ -311,7 +307,12 @@ impl<A: Authorizer> Connection<A> {
     }
 
     fn start(&mut self, channel: ChannelId, argv: Vec<String>, crlf: bool) {
-        let spawned = Command::new(&argv[0]).args(&argv[1..]).stdin(Stdio::piped()).stdout(Stdio::piped()).stderr(Stdio::piped()).spawn();
+        let spawned = crate::spawn::own_row(&argv[0])
+            .args(&argv[1..])
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn();
         let mut child = match spawned {
             Ok(child) => child,
             Err(e) => return self.refuse(channel, &format!("cannot run {}: {e}", argv[0])),

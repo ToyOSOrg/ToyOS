@@ -2751,7 +2751,8 @@ fn a_usb_key_reaches_the_console() -> Result<(), String> {
         }
     }
     await_guest(&mut qemu, &mut console, "the shell to run what was typed", |c| {
-        c.lines().any(|l| l.contains("spawn: ") && l.contains("toybox"))
+        // A bare `ls` is the shell's helper, spawned by the name it was typed as.
+        c.lines().any(|l| l.contains("spawn: /system/bin/ls "))
     })?;
     serial::Serial::named("the typed-on console boot", console).must_be_clean()
 }
@@ -5487,10 +5488,10 @@ fn process_tree(back: &metal::Readback) -> Result<(), String> {
     back.job_passed("test_rs_process_tree")?;
     let kernel = back.kernel();
     let log = kernel.text();
-    let unloaded = log.lines().filter(|l| l.contains("spawn: /system/bin/no_such_program: ")).count();
+    let unloaded = log.lines().filter(|l| l.contains("spawn: /tmp/no_such_program: ")).count();
     if unloaded != 2 {
         return Err(format!(
-            "the loader refused /system/bin/no_such_program {unloaded} times, not once per B"
+            "the loader refused /tmp/no_such_program {unloaded} times, not once per B"
         ));
     }
     let refused: Vec<&str> = log.lines().filter(|l| l.contains("spawn: refused under pid ")).collect();

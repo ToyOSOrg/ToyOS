@@ -2943,7 +2943,6 @@ version = "0.1.0"
 dependencies = [
  "toyos",
  "toyos-abi",
- "toyos-manifest",
 ]
 
 [[package]]
@@ -3708,6 +3707,7 @@ dependencies = [
 name = "toyos-manifest"
 version = "0.1.0"
 dependencies = [
+ "toyos",
  "toyos-abi",
 ]
 

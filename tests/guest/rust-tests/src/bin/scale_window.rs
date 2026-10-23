@@ -10,6 +10,7 @@
 //! window, its new fill on the panel, then Enter again. The harness presses
 //! Enter only once it has read the panel, so neither step outruns it.
 
+use std::os::toyos::process::CommandExt;
 use std::process::Command;
 
 use window::{Color, Event, Size, Window};
@@ -37,6 +38,7 @@ fn main() {
     }
     enter(&mut window);
     let status = Command::new("/system/bin/toybox")
+        .independent()
         .args(["screen", "scale", "1"])
         .status()
         .unwrap_or_else(|e| panic!("scale_window: `screen scale 1` was not launched: {e}"));

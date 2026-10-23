@@ -1,4 +1,5 @@
-//! Asking the supervisor to start a declared program.
+//! Asking the session launcher to start a declared program: an independent
+//! launch.
 //!
 //! **`SYS_SPAWN` can only give a child what the caller holds, and that is not
 //! enough.** doom is started from a shell and doom is to hold sound; the shell
@@ -20,11 +21,14 @@
 //!
 //! **A launch names its parent**, by one of two words: a place, which is a
 //! handle to a process carrying `WRITE` — the caller's own `self`, duplicated —
-//! that the supervisor spawns the program under, so the caller's end takes it down; or
-//! the supervisor, the one way for a program to outlive whoever started it.
+//! that the program is spawned under, so the caller's end takes it down; or
+//! detached, under the launcher's owner, the one way for a program to outlive
+//! whoever started it.
 //!
 //! The wire is a single frame plus one handle batch, and this module is both
 //! halves of it — std's `Command` encodes and the supervisor decodes.
+
+use alloc::string::String;
 
 use toyos_abi::syscall::SyscallError;
 
@@ -43,12 +47,10 @@ pub const LAUNCHER: &str = "launcher";
 pub const MSG_LAUNCH: u32 = 1;
 /// It started. One `Process` handle travels with this.
 pub const MSG_LAUNCHED: u32 = 2;
-/// No `[programs]` row names that program, so the supervisor has nothing to build its
-/// authority from. The caller spawns it directly instead, which gets
-/// inheritance — the right answer for a binary the image did not declare.
-/// The payload is the `HOME` the supervisor decides for it, which that spawn carries in
-/// place of the caller's own: a location is the supervisor's to hand out, not a parent's.
-pub const MSG_NOT_DECLARED: u32 = 3;
+/// Not permitted: no row declares the program, its package does not answer
+/// for it, or the caller's row may not start it. The reason is in the
+/// launcher's log.
+pub const MSG_NOT_PERMITTED: u32 = 3;
 /// It is declared and did not start: no such file, a full table, a refused
 /// endowment. The reason is in the supervisor's log, not in this frame — a caller can do
 /// nothing differently about any of them.
@@ -95,8 +97,8 @@ const fn kind_of(word: u32) -> Option<Kind> {
 
 /// The header's last word for a launch that names a place.
 const PARENT_PLACE: u32 = 1;
-/// The header's last word for a launch that asks the supervisor to be the parent.
-const PARENT_SUPERVISOR: u32 = 2;
+/// The header's last word for a detached launch.
+const PARENT_DETACHED: u32 = 2;
 
 /// Whom a launch asks the supervisor to place the program under.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -104,8 +106,8 @@ pub enum Parent<H = RawHandle> {
     /// The process a handle carrying `WRITE` names, moved as the batch's last
     /// handle.
     Place(H),
-    /// The supervisor itself.
-    Supervisor,
+    /// The launcher's owner.
+    Detached,
 }
 
 /// What a caller asks the supervisor to start.
@@ -177,7 +179,7 @@ impl Launch<'_> {
         let mut sendable = true;
         let place = match self.parent {
             Parent::Place(place) => Some(place),
-            Parent::Supervisor => None,
+            Parent::Detached => None,
         };
         let fds = self.fds.iter().map(|(_, h, _)| h);
         let extras = self.extras.iter().map(|(_, h)| h);
@@ -196,7 +198,7 @@ impl Launch<'_> {
     pub fn encode(&self, buf: &mut [u8]) -> Result<usize, EncodeError> {
         let (place, word) = match self.parent {
             Parent::Place(_) => (1, PARENT_PLACE),
-            Parent::Supervisor => (0, PARENT_SUPERVISOR),
+            Parent::Detached => (0, PARENT_DETACHED),
         };
         if self.extras.len() + place + 1 > MAX_LAUNCH_EXTRAS || self.fds.len() > MAX_LAUNCH_FDS {
             return Err(EncodeError::TooMany);
@@ -316,7 +318,7 @@ impl<'a> Request<'a> {
     pub fn parent(&self) -> Option<Parent<()>> {
         match self.parent {
             PARENT_PLACE => Some(Parent::Place(())),
-            PARENT_SUPERVISOR => Some(Parent::Supervisor),
+            PARENT_DETACHED => Some(Parent::Detached),
             _ => None,
         }
     }
@@ -348,6 +350,30 @@ impl<'a> Request<'a> {
     }
 }
 
+/// Whether `path` is already the string every path syscall will act on.
+///
+/// The kernel normalizes before it opens anything (`kernel/src/vfs.rs`'s
+/// `normalize` drops an empty component and `.`, and pops on `..`), so a path
+/// meaning something else after that is one nothing can both classify and
+/// spawn: `/apps/./x` is outside `/apps` to the supervisor's package
+/// classification and inside it to every syscall.
+pub fn is_canonical(path: &str) -> bool {
+    path.starts_with('/')
+        && !path.split('/').skip(1).any(|part| part.is_empty() || part == "." || part == "..")
+}
+
+/// What a launch names for a program its caller typed: a bare name left
+/// alone for `PATH`, anything with a `/` made absolute against `cwd` and
+/// normalized the way the kernel does. It lives beside [`is_canonical`]
+/// because a resolver that drifted from the gate would refuse every relative
+/// command.
+pub fn program_path(program: &str, cwd: &str) -> String {
+    match program.contains('/') {
+        true => crate::files::absolute(cwd, program),
+        false => String::from(program),
+    }
+}
+
 /// Why a launch did not answer, and — the part that matters — whether the
 /// handles it was going to carry are still the caller's.
 ///
@@ -366,28 +392,22 @@ pub enum LaunchError {
 }
 
 /// What a launch answered.
-pub enum Outcome<'a> {
+pub enum Outcome {
     /// The handle the caller now holds for the child.
     Started(RawHandle),
-    /// Not a `[programs]` key. The caller spawns it directly, with `home` as
-    /// its `HOME`.
-    NotDeclared { home: &'a str },
+    /// Not permitted ([`MSG_NOT_PERMITTED`]).
+    NotPermitted,
     /// Declared, and it did not start.
     Refused,
     /// The place it named has begun to end.
     Gone,
 }
 
-/// Send one launch and read its answer, a `HOME` in `answer`.
+/// Send one launch and read its answer.
 ///
 /// The handles travel in the launch frame itself, and the `Process` handle
-/// comes back in the answer's. A `HOME` longer than `answer` or not UTF-8 is a
-/// malformed answer, never a shortened one.
-pub fn launch<'a>(
-    conn: &Connection,
-    request: &Launch<'_>,
-    answer: &'a mut [u8],
-) -> Result<Outcome<'a>, LaunchError> {
+/// comes back in the answer's.
+pub fn launch(conn: &Connection, request: &Launch<'_>) -> Result<Outcome, LaunchError> {
     let mut buf = [0u8; crate::ipc::MAX_FRAME_LEN as usize];
     let len = request
         .encode(&mut buf)
@@ -409,15 +429,7 @@ pub fn launch<'a>(
             Some([process]) => Ok(Outcome::Started(process)),
             None => Err(LaunchError::Sent(IpcError::Malformed)),
         },
-        MSG_NOT_DECLARED => {
-            if header.len() as usize > answer.len() {
-                return Err(LaunchError::Sent(IpcError::Malformed));
-            }
-            let len = conn.recv_bytes(&header, answer).map_err(LaunchError::Sent)?;
-            let home = core::str::from_utf8(&answer[..len])
-                .map_err(|_| LaunchError::Sent(IpcError::Malformed))?;
-            Ok(Outcome::NotDeclared { home })
-        }
+        MSG_NOT_PERMITTED => Ok(Outcome::NotPermitted),
         MSG_REFUSED => Ok(Outcome::Refused),
         MSG_GONE => Ok(Outcome::Gone),
         _ => Err(LaunchError::Sent(IpcError::Malformed)),
@@ -428,7 +440,39 @@ pub fn launch<'a>(
 mod tests {
     use super::*;
 
-    /// The header's last word names the parent: a place, the supervisor, or — any other
+    /// Checked against the gate itself, not a shape written down twice.
+    #[test]
+    fn what_a_shell_resolves_is_what_the_launcher_accepts() {
+        let cwd = "/home/toy/reltest";
+        for (typed, want) in [
+            ("./foo", "/home/toy/reltest/foo"),
+            ("../bin/foo", "/home/toy/bin/foo"),
+            ("./a/./b/../c", "/home/toy/reltest/a/c"),
+            ("sub/foo", "/home/toy/reltest/sub/foo"),
+            ("/system/bin/toybox", "/system/bin/toybox"),
+            ("/system//bin/./toybox", "/system/bin/toybox"),
+            ("/../system/bin/toybox", "/system/bin/toybox"),
+        ] {
+            let got = program_path(typed, cwd);
+            assert_eq!(got, want, "{typed:?} from {cwd:?}");
+            assert!(is_canonical(&got), "{typed:?} resolved to {got:?}, which the supervisor refuses");
+        }
+        // A bare name is `PATH`'s, and that rule is left where it was.
+        for bare in ["foo", "echo", "toybox"] {
+            assert_eq!(program_path(bare, cwd), bare);
+        }
+    }
+
+    #[test]
+    fn a_path_the_normalizer_would_change_is_not_canonical() {
+        assert!(is_canonical("/apps/toy/echo"));
+        assert!(is_canonical("/system/bin/toybox"));
+        for bad in ["/apps/./toy/echo", "/apps//toy/echo", "apps/toy/echo", "/tmp/../apps/toy/echo", "/apps/toy/echo/", "./echo", "", "/"] {
+            assert!(!is_canonical(bad), "{bad:?} passed as canonical");
+        }
+    }
+
+    /// The header's last word names the parent: a place, detached, or — any other
     /// word — neither, which the supervisor refuses.
     #[test]
     fn a_request_names_its_parent_by_one_word() {
@@ -443,11 +487,11 @@ mod tests {
             parent,
             job: RawHandle(10),
         };
-        for (parent, named) in [(Parent::Place(RawHandle(9)), Parent::Place(())), (Parent::Supervisor, Parent::Supervisor)] {
+        for (parent, named) in [(Parent::Place(RawHandle(9)), Parent::Place(())), (Parent::Detached, Parent::Detached)] {
             let len = request(parent).encode(&mut buf).expect("encode a launch");
             assert_eq!(Request::decode(&buf[..len]).expect("decode it").parent(), Some(named));
         }
-        let len = request(Parent::Supervisor).encode(&mut buf).expect("encode a launch");
+        let len = request(Parent::Detached).encode(&mut buf).expect("encode a launch");
         for word in [0, 3, u32::MAX] {
             buf[HEADER - 4..HEADER].copy_from_slice(&word.to_le_bytes());
             assert_eq!(Request::decode(&buf[..len]).expect("decode it").parent(), None, "word {word}");
@@ -467,7 +511,7 @@ mod tests {
             cwd: "/",
             extras: &[],
             fds: &fds,
-            parent: Parent::Supervisor,
+            parent: Parent::Detached,
             job: RawHandle(10),
         };
         let len = request.encode(&mut buf).expect("encode a launch");
@@ -505,10 +549,10 @@ mod tests {
             batch(&[(0, h(5), Kind::Handle), (1, h(6), Kind::Handle)], &[("a", h(7)), ("b", h(8))], Parent::Place(h(9))),
             Ok(vec![h(5), h(6), h(7), h(8), h(9), h(10)]),
         );
-        assert_eq!(batch(&[], &[("a", h(7)), ("b", h(7))], Parent::Supervisor), Err(vec![h(7), h(10)]), "two extras");
-        assert_eq!(batch(&[(0, h(5), Kind::Handle), (1, h(5), Kind::Handle)], &[], Parent::Supervisor), Err(vec![h(5), h(10)]), "two descriptors");
+        assert_eq!(batch(&[], &[("a", h(7)), ("b", h(7))], Parent::Detached), Err(vec![h(7), h(10)]), "two extras");
+        assert_eq!(batch(&[(0, h(5), Kind::Handle), (1, h(5), Kind::Handle)], &[], Parent::Detached), Err(vec![h(5), h(10)]), "two descriptors");
         assert_eq!(
-            batch(&[(0, h(7), Kind::Handle), (1, h(6), Kind::Handle)], &[("a", h(7))], Parent::Supervisor),
+            batch(&[(0, h(7), Kind::Handle), (1, h(6), Kind::Handle)], &[("a", h(7))], Parent::Detached),
             Err(vec![h(7), h(6), h(10)]),
             "a descriptor and an extra",
         );
@@ -518,7 +562,7 @@ mod tests {
             "an extra and the place",
         );
         assert_eq!(
-            batch(&[(0, h(5), Kind::Handle)], &[("a", CONN), ("b", h(7))], Parent::Supervisor),
+            batch(&[(0, h(5), Kind::Handle)], &[("a", CONN), ("b", h(7))], Parent::Detached),
             Err(vec![h(5), h(7), h(10)]),
             "the connection as an extra",
         );
@@ -527,6 +571,6 @@ mod tests {
             Err(vec![h(7), h(10)]),
             "the connection as the place",
         );
-        assert_eq!(batch(&[(0, h(10), Kind::Handle)], &[], Parent::Supervisor), Err(vec![h(10)]), "a descriptor and the job");
+        assert_eq!(batch(&[(0, h(10), Kind::Handle)], &[], Parent::Detached), Err(vec![h(10)]), "a descriptor and the job");
     }
 }
