@@ -6,15 +6,15 @@
 //! no End of Entire node or bytes after it, and a multi-instance path are each
 //! refused by name ([`Malformed`]). A [`Path`] is only made by that check.
 //!
-//! A node decodes ([`Node::decode`]) only at the exact length its definition
-//! gives; any other is [`Known::Other`], kept and rendered whole.
+//! A node is decoded only at the exact length its definition gives; any other
+//! is rendered whole, as is every kind no boot source has needed.
 
 #![no_std]
 
 use core::fmt;
 
 /// A node's header: type, subtype and a little-endian length counting it.
-pub const HEADER: usize = 4;
+const HEADER: usize = 4;
 
 /// End of Entire Device Path.
 const END_ENTIRE: (u8, u8) = (0x7f, 0xff);
@@ -104,15 +104,13 @@ impl<'a> Node<'a> {
         self.0
     }
 
-    pub fn decode(&self) -> Known {
+    fn decode(&self) -> Known {
         let n = self.0;
-        let u16_at = |at: usize| u16::from_le_bytes([n[at], n[at + 1]]);
         let u32_at = |at: usize| u32::from_le_bytes(n[at..at + 4].try_into().expect("four bytes"));
         match (self.kind(), n.len()) {
             ((2, 1), 12) => Known::Acpi { hid: u32_at(4), uid: u32_at(8) },
             ((1, 1), 6) => Known::Pci { function: n[4], device: n[5] },
             ((3, 5), 6) => Known::Usb { port: n[4], interface: n[5] },
-            ((3, 0x12), 10) => Known::Sata { hba_port: u16_at(4), multiplier_port: u16_at(6), lun: u16_at(8) },
             ((3, 0x17), 16) => Known::Nvme { namespace: u32_at(4), eui64: n[8..16].try_into().expect("eight bytes") },
             (HardDrive::TYPE, _) => HardDrive::parse(n).map_or(Known::Other, Known::HardDrive),
             _ => Known::Other,
@@ -122,7 +120,7 @@ impl<'a> Node<'a> {
 
 /// What a node is, of the kinds a boot source's path is made of.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum Known {
+enum Known {
     /// An ACPI device by its `_HID` and `_UID`: a root bridge, at the head of
     /// a PCI device's path.
     Acpi { hid: u32, uid: u32 },
@@ -132,7 +130,6 @@ pub enum Known {
     Pci { device: u8, function: u8 },
     /// A USB device on its parent hub's or root's port.
     Usb { port: u8, interface: u8 },
-    Sata { hba_port: u16, multiplier_port: u16, lun: u16 },
     Nvme { namespace: u32, eui64: [u8; 8] },
     HardDrive(HardDrive),
     Other,
@@ -188,7 +185,7 @@ impl HardDrive {
     }
 }
 
-/// The text form (§10.6) for the nodes [`Known`] decodes, and
+/// The text form (§10.6) for the nodes decoded, and
 /// `Path(type,subtype,hex)` for every other.
 impl fmt::Display for Path<'_> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
@@ -210,7 +207,6 @@ impl fmt::Display for Node<'_> {
             Known::Acpi { hid, uid } => write!(f, "Acpi({hid:#x},{uid:#x})"),
             Known::Pci { device, function } => write!(f, "Pci({device:#x},{function:#x})"),
             Known::Usb { port, interface } => write!(f, "USB({port:#x},{interface:#x})"),
-            Known::Sata { hba_port, multiplier_port, lun } => write!(f, "Sata({hba_port:#x},{multiplier_port:#x},{lun:#x})"),
             Known::Nvme { namespace, eui64: e } => write!(
                 f,
                 "NVMe({namespace:#x},{:02X}-{:02X}-{:02X}-{:02X}-{:02X}-{:02X}-{:02X}-{:02X})",
@@ -260,11 +256,12 @@ mod tests {
         node(HardDrive::TYPE, &data)
     }
 
-    /// A stick on a T14's 00:14.0 as its firmware names the ESP.
+    /// The T14's ESP on a stick on 00:14.0, its nodes as that firmware named
+    /// them on a bench run; the partition's GUID, start and size are made up.
     fn stick() -> Vec<u8> {
         let mut acpi = Vec::from(PNP0A03.to_le_bytes());
         acpi.extend_from_slice(&0u32.to_le_bytes());
-        [node((2, 1), &acpi), node((1, 1), &[0, 0x14]), node((3, 5), &[2, 0]), hard_drive(), end()].concat()
+        [node((2, 1), &acpi), node((1, 1), &[0, 0x14]), node((3, 5), &[0, 0]), hard_drive(), end()].concat()
     }
 
     #[test]
@@ -272,13 +269,13 @@ mod tests {
         let bytes = stick();
         let path = Path::parse(&bytes).unwrap();
         let known: Vec<Known> = path.nodes().map(|n| n.decode()).collect();
-        assert_eq!(known[..3], [Known::Acpi { hid: PNP0A03, uid: 0 }, Known::Pci { device: 0x14, function: 0 }, Known::Usb { port: 2, interface: 0 }]);
+        assert_eq!(known[..3], [Known::Acpi { hid: PNP0A03, uid: 0 }, Known::Pci { device: 0x14, function: 0 }, Known::Usb { port: 0, interface: 0 }]);
         let Known::HardDrive(hd) = known[3] else { panic!("{:?}", known[3]) };
         assert_eq!((hd.number, hd.start, hd.size), (1, 0x800, 0x10_0000));
         assert_eq!(hd.guid(), Some([0x11, 0x22, 0x33, 0x44, 0x55, 0x66, 0x77, 0x88, 9, 10, 11, 12, 13, 14, 15, 16]));
         assert_eq!(
             path.to_string(),
-            "PciRoot(0x0)/Pci(0x14,0x0)/USB(0x2,0x0)/HD(1,GPT,44332211-6655-8877-090A-0B0C0D0E0F10,0x800,0x100000)"
+            "PciRoot(0x0)/Pci(0x14,0x0)/USB(0x0,0x0)/HD(1,GPT,44332211-6655-8877-090A-0B0C0D0E0F10,0x800,0x100000)"
         );
         assert_eq!(path.bytes(), &bytes[..]);
     }

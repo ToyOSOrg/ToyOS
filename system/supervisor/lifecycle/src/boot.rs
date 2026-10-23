@@ -57,20 +57,26 @@ mod tests {
     use super::*;
     use toyos_abi::boot::Controller;
 
-    /// A stick on the AMD bench's USB-C controller, 03:00.4, as its ESP's path.
-    const STICK: [u8; 32] = [
+    /// The AMD bench's ESP on a stick in its USB-C port, 03:00.4: the nodes as
+    /// that firmware named them on a bench run, then a HARDDRIVE node whose
+    /// GUID, start and size are made up.
+    const STICK: [u8; 76] = [
         2, 1, 12, 0, 0xd0, 0x41, 0x03, 0x0a, 0, 0, 0, 0, // PciRoot(0x0)
         1, 1, 6, 0, 1, 8, // Pci(0x8,0x1)
         1, 1, 6, 0, 4, 0, // Pci(0x0,0x4)
-        3, 5, 6, 0, 1, 0, // USB(0x1,0x0)
-        0x7f, 0xff, // End, its length below
+        3, 5, 6, 0, 4, 0, // USB(0x4,0x0)
+        4, 1, 42, 0, 1, 0, 0, 0, // HD(1,
+        0, 8, 0, 0, 0, 0, 0, 0, // 0x800,
+        0, 0x10, 0, 0, 0, 0, 0, 0, // 0x1000)
+        1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 2, 2, // GPT, its GUID
+        0x7f, 0xff, 4, 0, // End
     ];
+    const SAID: &str = "PciRoot(0x0)/Pci(0x8,0x1)/Pci(0x0,0x4)/USB(0x4,0x0)/HD(1,GPT,04030201-0605-0807-090A-0B0C0D0E0F10,0x800,0x1000)";
     const AT: PciAddr = PciAddr { segment: 0, bus: 3, dev: 0, func: 4 };
 
     fn on_stick(controller: Controller) -> BootSource {
-        let mut source = BootSource { path_len: 34, controller, ..BootSource::NONE };
-        source.path[..32].copy_from_slice(&STICK);
-        source.path[32..34].copy_from_slice(&[4, 0]);
+        let mut source = BootSource { path_len: STICK.len() as u16, controller, ..BootSource::NONE };
+        source.path[..STICK.len()].copy_from_slice(&STICK);
         source
     }
 
@@ -83,9 +89,9 @@ mod tests {
         let read = read(&BootSources { loader: on_stick(placed()), slot: on_stick(placed()) });
         assert_eq!(read.controller, Some(AT));
         assert_eq!(read.lines, [
-            "supervisor: the loader came off PciRoot(0x0)/Pci(0x8,0x1)/Pci(0x0,0x4)/USB(0x1,0x0), on PCI 03:00.4",
-            "supervisor: the slot volume came off PciRoot(0x0)/Pci(0x8,0x1)/Pci(0x0,0x4)/USB(0x1,0x0), on PCI 03:00.4",
-            "supervisor: `@boot` is PCI 03:00.4 (segment 0)",
+            format!("supervisor: the loader came off {SAID}, on PCI 03:00.4"),
+            format!("supervisor: the slot volume came off {SAID}, on PCI 03:00.4"),
+            "supervisor: `@boot` is PCI 03:00.4 (segment 0)".to_string(),
         ]);
     }
 
@@ -105,12 +111,13 @@ mod tests {
     #[test]
     fn a_hostile_source_is_refused_and_names_no_controller() {
         let mut unterminated = on_stick(placed());
-        unterminated.path_len = 32;
+        unterminated.path[STICK.len() - 4..STICK.len()].fill(0);
+        unterminated.path_len = STICK.len() as u16 - 2;
         let mut zero_node = on_stick(placed());
         zero_node.path[2] = 0;
         let cases: [(BootSource, &str); 5] = [
             (BootSource { path_len: 513, ..on_stick(placed()) }, "supervisor: the loader's source is refused: its path is 513 bytes, past 512"),
-            (unterminated, "supervisor: the loader's source is refused: the path ends at byte 30 with no End node"),
+            (unterminated, "supervisor: the loader's source is refused: the path ends at byte 72 with no End node"),
             (zero_node, "supervisor: the loader's source is refused: the node at byte 0 claims 0 bytes, short of its header"),
             (on_stick(Controller { present: 2, ..placed() }), "supervisor: the loader's source is refused: its controller's present is 2"),
             (BootSource { controller: placed(), ..BootSource::NONE }, "supervisor: the loader's source names no device path"),

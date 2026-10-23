@@ -170,19 +170,26 @@ fn boot_partition(handle: Handle, system_table: &SystemTable) -> Option<BootPart
     let bs = system_table.boot_services();
     let image = bs.exclusive::<LoadedImage>(handle).ok()?;
     let device = image.device()?;
-    let path = bs.exclusive::<DevicePath>(device).ok()?;
+    let firmware = bs.exclusive::<DevicePath>(device).ok()?;
+    let path = match firmware.path() {
+        Ok(path) => path,
+        Err(why) => {
+            println!("Boot partition: the boot device's path is not read ({why}), so it is ignored");
+            return None;
+        }
+    };
 
     // Exactly one, not the last one. A path with two HARDDRIVE nodes describes
     // a partition inside a partition, and picking either is guessing which of
     // the two the kernel's block device will be looking at.
-    let mut nodes = path.nodes().filter(|node| (node[0], node[1]) == HardDrive::TYPE);
+    let mut nodes = path.nodes().filter(|node| node.kind() == HardDrive::TYPE);
     let node = nodes.next()?;
     if nodes.next().is_some() {
         println!("Boot partition: the device path has more than one HARDDRIVE node, so it is ignored");
         return None;
     }
 
-    let hd = HardDrive::parse(node)?;
+    let hd = HardDrive::parse(node.bytes())?;
     if hd.format != HardDrive::GPT {
         println!("Boot partition: firmware says this is not a GPT partition, so it is ignored");
         return None;

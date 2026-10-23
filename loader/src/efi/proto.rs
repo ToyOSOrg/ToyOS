@@ -7,6 +7,9 @@ use core::ptr::{self, NonNull};
 
 use alloc::vec;
 
+use toyos_abi::boot::DEVICE_PATH_BYTES;
+use toyos_devicepath::{Malformed, Path};
+
 use super::boot::{Exclusive, Protocol};
 use super::{CStr16, Guid, Handle, Status};
 
@@ -103,52 +106,49 @@ const NODE_HEADER: usize = 4;
 const END_ENTIRE: (u8, u8) = (0x7f, 0xff);
 
 impl DevicePath {
-    /// The path's bytes through its End of Entire node, where that is within
-    /// `bound` bytes and no node before it is shorter than its header.
-    pub fn bytes(&self, bound: usize) -> Option<&[u8]> {
+    /// The path, walked no further than [`DEVICE_PATH_BYTES`] and held to
+    /// [`Path::parse`].
+    pub fn path(&self) -> Result<Path<'_>, Unread> {
         let start = ptr::from_ref(self).cast::<u8>();
         let mut len = 0;
         loop {
-            if bound - len < NODE_HEADER {
-                return None;
+            if DEVICE_PATH_BYTES - len < NODE_HEADER {
+                return Err(Unread::Past);
             }
             // SAFETY: firmware's path is a run of nodes ending in End of
             // Entire, and `len` is where one of them starts.
             let header = unsafe { core::slice::from_raw_parts(start.add(len), NODE_HEADER) };
             let node = usize::from(u16::from_le_bytes([header[2], header[3]]));
-            if node < NODE_HEADER || bound - len < node {
-                return None;
+            if node < NODE_HEADER {
+                return Err(Unread::Malformed(Malformed::Short { at: len, len: node }));
+            }
+            if DEVICE_PATH_BYTES - len < node {
+                return Err(Unread::Past);
             }
             len += node;
             if (header[0], header[1]) == END_ENTIRE {
                 // SAFETY: the nodes walked above.
-                return Some(unsafe { core::slice::from_raw_parts(start, len) });
+                let bytes = unsafe { core::slice::from_raw_parts(start, len) };
+                return Path::parse(bytes).map_err(Unread::Malformed);
             }
         }
     }
+}
 
-    /// Each node, whole, up to the End of Entire node.
-    ///
-    /// # Panics
-    /// Where a node's length does not cover its own header: the walk could
-    /// not step past it.
-    pub fn nodes(&self) -> impl Iterator<Item = &[u8]> {
-        let mut at = ptr::from_ref(self).cast::<u8>();
-        core::iter::from_fn(move || {
-            // SAFETY: firmware's path is a run of nodes ending in End of
-            // Entire, and `at` is the start of one of them.
-            let header = unsafe { core::slice::from_raw_parts(at, NODE_HEADER) };
-            if (header[0], header[1]) == END_ENTIRE {
-                return None;
-            }
-            let len = usize::from(u16::from_le_bytes([header[2], header[3]]));
-            assert!(len >= NODE_HEADER, "firmware's device path has a {len}-byte node");
-            // SAFETY: the node's own length, which counts its header.
-            let node = unsafe { core::slice::from_raw_parts(at, len) };
-            // SAFETY: the next node follows this one.
-            at = unsafe { at.add(len) };
-            Some(node)
-        })
+/// Why a handle's device path was not read.
+#[derive(Clone, Copy, Debug)]
+pub enum Unread {
+    /// It runs past [`DEVICE_PATH_BYTES`].
+    Past,
+    Malformed(Malformed),
+}
+
+impl core::fmt::Display for Unread {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        match self {
+            Self::Past => write!(f, "it runs past {DEVICE_PATH_BYTES} bytes"),
+            Self::Malformed(why) => why.fmt(f),
+        }
     }
 }
 

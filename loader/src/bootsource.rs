@@ -12,7 +12,7 @@
 
 use alloc::vec::Vec;
 
-use toyos_abi::boot::{BootSource, BootSources, Controller, DEVICE_PATH_BYTES};
+use toyos_abi::boot::{BootSource, BootSources, Controller};
 use toyos_devicepath::Path;
 
 use crate::efi::{BootServices, DevicePath, Handle, LoadedImage, PciIo, SystemTable};
@@ -56,17 +56,14 @@ fn of(bs: &BootServices, name: &str, device: Handle) -> BootSource {
             return source;
         }
     };
-    let Some(bytes) = firmware.bytes(DEVICE_PATH_BYTES) else {
-        println!("{HEAD} the {name}'s device path runs past {DEVICE_PATH_BYTES} bytes or has a node shorter than its header");
-        return source;
-    };
-    let path = match Path::parse(bytes) {
+    let path = match firmware.path() {
         Ok(path) => path,
         Err(why) => {
             println!("{HEAD} the {name}'s device path is refused: {why}");
             return source;
         }
     };
+    let bytes = path.bytes();
     source.path[..bytes.len()].copy_from_slice(bytes);
     source.path_len = u16::try_from(bytes.len()).expect("a path within DEVICE_PATH_BYTES");
     source.controller = controller(bs, name, device, path);
@@ -90,7 +87,7 @@ fn controller(bs: &BootServices, name: &str, device: Handle, path: Path<'_>) -> 
     let mut best: Option<(usize, Handle)> = None;
     for &candidate in handles.iter().filter(|&&h| h != device) {
         let Ok(firmware) = bs.get::<DevicePath>(candidate) else { continue };
-        let Some(Ok(theirs)) = firmware.bytes(DEVICE_PATH_BYTES).map(Path::parse) else { continue };
+        let Ok(theirs) = firmware.path() else { continue };
         let theirs: Vec<&[u8]> = theirs.nodes().map(|n| n.bytes()).collect();
         if theirs.len() < nodes.len() && nodes.starts_with(&theirs) && best.is_none_or(|(len, _)| theirs.len() > len) {
             best = Some((theirs.len(), candidate));
