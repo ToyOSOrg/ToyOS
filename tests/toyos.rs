@@ -594,8 +594,10 @@ const MACHINE_TESTS: &[&str] = &[
     // harness is the peer, on the host's loopback that QEMU's user network
     // reaches, so no public network. x86-64 alone (`qemu::SUITE_ARCH`).
     "stream_exported_to_a_child",
-    // Login sessions: their owner parents, signs out and ends with each, which
-    // only processes in one boot show, as order, completion and counts.
+    // Login sessions: their owner parents, signs out and ends with each, and
+    // the machine's reboot waits for them until forced, which only processes
+    // in one boot show, as order, completion and counts. The reboot ends the
+    // boot, so it is last and the boot is the test's own.
     "session_lifecycle",
     // A launch's unsent stdio slots: its own boot, because the launcher it
     // needs makes every spawn of a declared program a launch.

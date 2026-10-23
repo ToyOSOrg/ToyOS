@@ -11,7 +11,6 @@ use toyos::ipc::{self, Connection, RxStep};
 use toyos::poller::{Poller, READABLE};
 use toyos::port::Acceptor;
 use toyos::process::Process;
-use toyos::quit::Reason;
 use toyos::{say, AsHandle};
 use toyos_abi::syscall::MAX_BADGE;
 use toyos_session::{self as wire, Names, SignOut, Started};
@@ -166,6 +165,8 @@ fn from_supervisor(
             let asked = SignOut::decode(payload).expect("session: the supervisor's sign-out is one it writes");
             owner.sign_out(asked.force)
         }
+        wire::MSG_STOPPING => owner.stopping(),
+        wire::MSG_CANCEL => owner.cancel(),
         other => panic!("session: the supervisor sent {other}, which the link has no word for"),
     }
 }
@@ -173,9 +174,9 @@ fn from_supervisor(
 fn act_on(act: Act, apps: &mut [(u64, Process)], controls: &[Control], link: &Connection) {
     let app = |instance| apps.iter().find(|(i, _)| *i == instance).map(|(_, p)| p);
     match act {
-        Act::Quit(instance) => {
+        Act::Quit(instance, reason) => {
             if let Some(process) = app(instance) {
-                if let Err(e) = process.quit(Reason::HangUp) {
+                if let Err(e) = process.quit(reason) {
                     say!("session: app {instance} was not asked to quit: {e:?}");
                 }
             }
@@ -188,6 +189,12 @@ fn act_on(act: Act, apps: &mut [(u64, Process)], controls: &[Control], link: &Co
             }
         }
         Act::Report(names) => report(&names, controls, link),
+        Act::Stopping => {
+            say!("session: the machine stops; every app is asked to quit");
+            for control in controls {
+                let _ = control.conn.try_signal(wire::MSG_STOPPING);
+            }
+        }
         Act::Cancelled => {
             say!("session: the sign-out is cancelled");
             for control in controls {

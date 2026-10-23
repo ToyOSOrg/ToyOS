@@ -1,5 +1,6 @@
 //! The desktop session's sign-out view: one line above the taskbar while a
-//! sign-out waits, naming what it waits for and the two keys that decide.
+//! sign-out waits, naming what it waits for and the two keys that decide. A
+//! sign-out that is the machine's stop says so: its keys decide the stop.
 
 use alloc::format;
 use alloc::string::String;
@@ -10,27 +11,29 @@ use crate::rect::Rect;
 /// The widest line the view shows: its words, then as many names as fit.
 pub const SIGN_OUT_CHARS: usize = 72;
 
-/// What the view says for a sign-out waiting on `waiting`, and `more` it was
-/// not told the names of, each clipped to [`SIGN_OUT_CHARS`].
-pub fn sign_out_text<'a>(waiting: impl IntoIterator<Item = &'a str>, more: u32) -> String {
+/// What the view says for a sign-out, the machine's stop where `stopping`,
+/// waiting on `waiting`, and `more` it was not told the names of, clipped to
+/// [`SIGN_OUT_CHARS`].
+pub fn sign_out_text<'a>(stopping: bool, waiting: impl IntoIterator<Item = &'a str>, more: u32) -> String {
     const KEYS: &str = " - Esc cancels, Enter ends them";
+    let lead = if stopping { "Stopping, waiting for: " } else { "Waiting for: " };
     let mut names = String::new();
     let mut left = more as usize;
     let mut waiting = waiting.into_iter().peekable();
     if waiting.peek().is_none() && more == 0 {
-        return String::from("Signing out");
+        return String::from(if stopping { "The machine stops" } else { "Signing out" });
     }
     for name in waiting.by_ref() {
         let next = if names.is_empty() { String::from(name) } else { format!(", {name}") };
         // Room kept for the count of names left out, ` +` and five digits.
-        if "Waiting for: ".len() + names.len() + next.len() + " +99999".len() + KEYS.len() > SIGN_OUT_CHARS {
+        if lead.len() + names.len() + next.len() + " +99999".len() + KEYS.len() > SIGN_OUT_CHARS {
             left += 1;
             continue;
         }
         names.push_str(&next);
     }
     let rest = if left > 0 { format!(" +{left}") } else { String::new() };
-    let text = format!("Waiting for: {names}{rest}{KEYS}");
+    let text = format!("{lead}{names}{rest}{KEYS}");
     text.chars().take(SIGN_OUT_CHARS).collect()
 }
 
@@ -89,21 +92,25 @@ mod tests {
 
     #[test]
     fn the_view_names_what_waits_and_the_keys() {
-        assert_eq!(sign_out_text([], 0), "Signing out");
-        assert_eq!(sign_out_text(["holder"], 0), "Waiting for: holder - Esc cancels, Enter ends them");
-        assert_eq!(sign_out_text(["a", "b"], 2), "Waiting for: a, b +2 - Esc cancels, Enter ends them");
+        assert_eq!(sign_out_text(false, [], 0), "Signing out");
+        assert_eq!(sign_out_text(false, ["holder"], 0), "Waiting for: holder - Esc cancels, Enter ends them");
+        assert_eq!(sign_out_text(false, ["a", "b"], 2), "Waiting for: a, b +2 - Esc cancels, Enter ends them");
+        assert_eq!(sign_out_text(true, [], 0), "The machine stops");
+        assert_eq!(sign_out_text(true, ["holder"], 0), "Stopping, waiting for: holder - Esc cancels, Enter ends them");
     }
 
     /// However many names, the line fits its box and still says the keys.
     #[test]
     fn a_long_list_is_cut_to_the_box_and_keeps_its_keys() {
         let names: Vec<String> = (0..40).map(|i| format!("application{i}")).collect();
-        let text = sign_out_text(names.iter().map(String::as_str), 0);
-        assert!(text.chars().count() <= SIGN_OUT_CHARS, "{text}");
-        assert!(text.ends_with("Enter ends them"), "{text}");
-        assert!(text.contains('+'), "{text}");
-        let long = "x".repeat(200);
-        assert!(sign_out_text([long.as_str()], 0).chars().count() <= SIGN_OUT_CHARS);
+        for stopping in [false, true] {
+            let text = sign_out_text(stopping, names.iter().map(String::as_str), 0);
+            assert!(text.chars().count() <= SIGN_OUT_CHARS, "{text}");
+            assert!(text.ends_with("Enter ends them"), "{text}");
+            assert!(text.contains('+'), "{text}");
+            let long = "x".repeat(200);
+            assert!(sign_out_text(stopping, [long.as_str()], 0).chars().count() <= SIGN_OUT_CHARS);
+        }
     }
 
     #[test]

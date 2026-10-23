@@ -9,17 +9,21 @@
 
 use std::collections::BTreeMap;
 
+use toyos_abi::quit::Reason;
 use toyos_session::Names;
 
 /// What the owner does next.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Act {
-    /// Ask this app, and everything below it, to quit with a hang-up.
-    Quit(u64),
+    /// Ask this app, and everything below it, to quit for this reason.
+    Quit(u64, Reason),
     Kill(u64),
     /// Tell the session's controls and the supervisor what the sign-out waits for.
     Report(Names),
     Cancelled,
+    /// Tell the session's controls the machine is stopping, which a cancel
+    /// of the machine's stop ends.
+    Stopping,
     /// Every app has ended: the session ends with the owner.
     Exit,
 }
@@ -28,12 +32,14 @@ pub enum Act {
 #[derive(Debug, Default)]
 pub struct Owner {
     apps: BTreeMap<u64, String>,
-    signing_out: bool,
+    /// The reason the sign-out asks with, while one is under way: a hang-up,
+    /// or a terminate where the machine stops.
+    signing_out: Option<Reason>,
 }
 
 impl Owner {
     pub fn signing_out(&self) -> bool {
-        self.signing_out
+        self.signing_out.is_some()
     }
 
     /// An app the supervisor started in the session. One started while the
@@ -41,38 +47,51 @@ impl Owner {
     pub fn started(&mut self, instance: u64, name: String) -> Vec<Act> {
         self.apps.insert(instance, name);
         match self.signing_out {
-            true => vec![Act::Quit(instance), self.report()],
-            false => Vec::new(),
+            Some(reason) => vec![Act::Quit(instance, reason), self.report()],
+            None => Vec::new(),
         }
     }
 
     pub fn ended(&mut self, instance: u64) -> Vec<Act> {
         self.apps.remove(&instance);
         match self.signing_out {
-            true => self.waited(),
-            false => Vec::new(),
+            Some(_) => self.waited(),
+            None => Vec::new(),
         }
     }
 
+    /// A sign-out, its apps asked to quit with a hang-up, or ended by `force`.
     pub fn sign_out(&mut self, force: bool) -> Vec<Act> {
         if force {
             let mut acts: Vec<Act> = self.apps.keys().map(|&i| Act::Kill(i)).collect();
             acts.push(Act::Exit);
             return acts;
         }
+        self.ask(Reason::HangUp)
+    }
+
+    /// The machine stops: every app asked to quit with a terminate, and the
+    /// session's controls told, until a cancel of the stop.
+    pub fn stopping(&mut self) -> Vec<Act> {
+        let mut acts = vec![Act::Stopping];
+        acts.extend(self.ask(Reason::Terminate));
+        acts
+    }
+
+    fn ask(&mut self, reason: Reason) -> Vec<Act> {
         let mut acts = match self.signing_out {
-            true => Vec::new(),
-            false => self.apps.keys().map(|&i| Act::Quit(i)).collect(),
+            Some(_) => Vec::new(),
+            None => self.apps.keys().map(|&i| Act::Quit(i, reason)).collect(),
         };
-        self.signing_out = true;
+        self.signing_out.get_or_insert(reason);
         acts.extend(self.waited());
         acts
     }
 
     pub fn cancel(&mut self) -> Vec<Act> {
-        match std::mem::replace(&mut self.signing_out, false) {
-            true => vec![Act::Cancelled],
-            false => Vec::new(),
+        match self.signing_out.take() {
+            Some(_) => vec![Act::Cancelled],
+            None => Vec::new(),
         }
     }
 
@@ -109,10 +128,10 @@ mod tests {
     #[test]
     fn a_graceful_sign_out_asks_waits_and_never_kills() {
         let mut owner = owner(&[(1, "terminal"), (2, "holder")]);
-        assert_eq!(owner.sign_out(false), vec![Act::Quit(1), Act::Quit(2), waiting(&["terminal", "holder"])]);
+        assert_eq!(owner.sign_out(false), vec![Act::Quit(1, Reason::HangUp), Act::Quit(2, Reason::HangUp), waiting(&["terminal", "holder"])]);
         assert_eq!(owner.sign_out(false), vec![waiting(&["terminal", "holder"])], "a second ask asks nobody again");
         assert_eq!(owner.ended(1), vec![waiting(&["holder"])]);
-        assert_eq!(owner.started(3, "late".into()), vec![Act::Quit(3), waiting(&["holder", "late"])]);
+        assert_eq!(owner.started(3, "late".into()), vec![Act::Quit(3, Reason::HangUp), waiting(&["holder", "late"])]);
         assert_eq!(owner.ended(3), vec![waiting(&["holder"])]);
         assert_eq!(owner.ended(2), vec![Act::Exit]);
     }
@@ -141,7 +160,18 @@ mod tests {
         assert!(!owner.signing_out());
         assert_eq!(owner.ended(2), Vec::new());
         assert_eq!(owner.cancel(), Vec::new(), "nothing to cancel");
-        assert_eq!(owner.sign_out(false), vec![Act::Quit(1), waiting(&["holder"])]);
+        assert_eq!(owner.sign_out(false), vec![Act::Quit(1, Reason::HangUp), waiting(&["holder"])]);
+    }
+
+    /// The machine's stop asks with a terminate and tells the controls; its
+    /// cancel keeps the session as a sign-out's does.
+    #[test]
+    fn a_stop_asks_with_a_terminate() {
+        let mut owner = owner(&[(1, "holder")]);
+        assert_eq!(owner.stopping(), vec![Act::Stopping, Act::Quit(1, Reason::Terminate), waiting(&["holder"])]);
+        assert_eq!(owner.started(2, "late".into()), vec![Act::Quit(2, Reason::Terminate), waiting(&["holder", "late"])]);
+        assert_eq!(owner.cancel(), vec![Act::Cancelled]);
+        assert_eq!(Owner::default().stopping(), vec![Act::Stopping, Act::Exit]);
     }
 
     #[test]

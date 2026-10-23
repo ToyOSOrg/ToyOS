@@ -2,7 +2,9 @@
 //! connector, as a login authority: the session's owner parents what is
 //! detached in it, signs it out by asking and waiting, and ends what stays
 //! only when forced; `logout` lists it; and opens are never budgeted.
-//! `hangupholder` is the app that ignores a hang-up.
+//! Last, the machine's reboot waits for what a session runs until it is
+//! forced, a cancel keeping both, and a terminate reboots the machine, which
+//! ends the job. `hangupholder` is the app that ignores every quit.
 
 use std::os::toyos::process::CommandExt;
 use std::process::{Command, Stdio};
@@ -12,6 +14,7 @@ use toyos::endow::{Endowments, SYSCAP_LABEL};
 use toyos::ipc::{self, Connection, RxStep};
 use toyos::namespace::Namespace;
 use toyos::poller::{Poller, READABLE};
+use toyos::power::{self, Mode, Pending, Stop, Update};
 use toyos::syscap::SysCap;
 use toyos::AsHandle;
 use toyos_session::{self as wire, Names, SignOut};
@@ -42,18 +45,7 @@ fn main() {
 
     // A detached app outlives the shell that started it. The shell's output
     // is nobody's, since the holder it detaches keeps what it inherits open.
-    let shell = Command::new("/system/bin/shell")
-        .independent()
-        .launcher(launcher.as_handle().0)
-        .args(["-c", &format!("detach /system/bin/{HOLDER}")])
-        .stdin(Stdio::null())
-        .stdout(Stdio::null())
-        .stderr(Stdio::null())
-        .current_dir("/")
-        .status()
-        .expect("launch a shell in the session");
-    assert!(shell.success(), "the shell's detach ended {shell:?}");
-    let holder = live(HOLDER).into_iter().next().expect("the detached holder runs once its shell has ended");
+    let holder = detach(&launcher);
     println!("session_lifecycle: a detached app (pid {holder}) outlives its shell");
 
     // What `logout` lists active now, among which this job's session is.
@@ -99,7 +91,56 @@ fn main() {
         control.ended();
     }
     println!("session_lifecycle: {OPENS} sessions opened and signed out in a row");
-    println!("session_lifecycle: ok");
+
+    // The machine's stop asks every session with a terminate, which the
+    // holder ignores, and waits for it until a terminate forces the stop.
+    let (launcher, _control) = wire::open(&login).expect("a session for the stop");
+    let holder = detach(&launcher);
+    let pending = power::stop(Stop::Reboot, Mode::Wait).expect("a waiting reboot is taken");
+    let pending = waits_for_the_holder(pending);
+    power::cancel().expect("the waiting reboot cancels");
+    match pending.outcome() {
+        Update::Cancelled => {}
+        other => panic!("a cancelled reboot ended {other:?}"),
+    }
+    assert!(live(HOLDER).contains(&holder), "the holder ended with a cancelled reboot");
+    println!("session_lifecycle: a cancelled reboot keeps the machine and the holder");
+    let pending = waits_for_the_holder(power::stop(Stop::Reboot, Mode::Wait).expect("a second waiting reboot is taken"));
+    println!("session_lifecycle: ok, and the reboot is forced");
+    power::terminate().expect("the waiting reboot is forced");
+    panic!("session_lifecycle: the forced reboot ended {:?}", pending.outcome());
+}
+
+/// `hangupholder` detached in `launcher`'s session by a shell that has ended:
+/// its pid.
+fn detach(launcher: &Namespace) -> u32 {
+    let before = live(HOLDER);
+    let shell = Command::new("/system/bin/shell")
+        .independent()
+        .launcher(launcher.as_handle().0)
+        .args(["-c", &format!("detach /system/bin/{HOLDER}")])
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .current_dir("/")
+        .status()
+        .expect("launch a shell in the session");
+    assert!(shell.success(), "the shell's detach ended {shell:?}");
+    live(HOLDER).into_iter().find(|pid| !before.contains(pid)).expect("the detached holder runs once its shell has ended")
+}
+
+/// The stop's lists until one names the holder: the first may be read before
+/// its session has reported.
+fn waits_for_the_holder(mut pending: Pending) -> Pending {
+    let mut waiting = pending.waiting.clone();
+    while !waiting.names.iter().any(|n| n == HOLDER) {
+        waiting = match pending.read() {
+            Update::Waiting(now) => now,
+            other => panic!("a waiting reboot ended {other:?} before it named the holder"),
+        };
+    }
+    println!("session_lifecycle: the reboot waits for the holder");
+    pending
 }
 
 struct Control {

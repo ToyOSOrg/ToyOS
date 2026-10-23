@@ -2015,7 +2015,7 @@ impl Session {
         if let Some(waiting) = &self.desktop.waiting {
             let rect = sign_out_rect(&self.desk);
             if regions.iter().any(|r| r.overlaps(rect)) {
-                let text = sign_out_text(waiting.names.iter().map(String::as_str), waiting.more);
+                let text = sign_out_text(self.desktop.stopping, waiting.names.iter().map(String::as_str), waiting.more);
                 render::draw_overlay(&self.back.surface, &self.font, rect, &text);
             }
         }

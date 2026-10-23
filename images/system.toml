@@ -83,11 +83,12 @@ receives = ["power"]
 # keys set and no other row receives. The display is a virtio-gpu function the
 # compositor drives, where the machine has one, and the firmware's framebuffer
 # otherwise. `jobs` makes each program it starts a job of its own, with its own
-# share of the CPU.
+# share of the CPU. `power` is its stop view's: Esc cancels the machine's stop,
+# Enter forces it.
 [programs.compositor]
 service = true
 serves = ["compositor", "prompt", "clipboard", "input", "display"]
-receives = ["soundserver", "filepicker", "volume"]
+receives = ["soundserver", "filepicker", "volume", "power"]
 devices = ["pci:03:80:00/1af4:1050", "framebuffer"]
 starts = ["terminal", "files", "/apps"]
 syscap = ["jobs"]

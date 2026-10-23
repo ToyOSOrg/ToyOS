@@ -3941,6 +3941,7 @@ dependencies = [
 name = "toyos-supervisor"
 version = "0.1.0"
 dependencies = [
+ "toyos",
  "toyos-abi",
  "toyos-blockring",
  "toyos-gpt",

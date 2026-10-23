@@ -8,14 +8,19 @@
 //!   it, and Enter ends it, the compositor opening another;
 //! - **a job's**, opened with test-runner's `login` connector:
 //!   `session_lifecycle` holds the owner to the same rules from inside, with
-//!   `logout` listing it, and opens ten in a row unbudgeted.
+//!   `logout` listing it, and opens ten in a row unbudgeted; last, it asks
+//!   the machine's reboot, which waits for the holder until a cancel keeps
+//!   both and a terminate forces it, and the boot ends in the reset.
 //!
 //! What it claims is order, completion and counts, which QEMU establishes.
 
+use std::io::Write;
 use std::time::Duration;
 
+use toyos_build::bootlog::REBOOTING;
+
 use super::qemu::{self, await_marker, await_marker_new, BootOptions, QemuInstance, QmpInput};
-use super::{compile, ps2server};
+use super::{compile, power, ps2server};
 
 const JOB: &str = "session_lifecycle";
 
@@ -34,20 +39,25 @@ pub fn session_lifecycle() -> Result<(), String> {
         format!("{e}\n--- what the desktop said ---\n{}", said.join("\n"))
     })?;
 
-    let result = qemu.run_test(&format!("test_rs_{JOB}"), BOUND);
-    if let Some(why) = &result.error {
-        return Err(format!("{why}\nthe job said:\n{}", result.stdout));
+    // The job ends in the reboot it forces, so its end is the machine's.
+    let mut reset = qemu::QmpShutdown::open(qemu.qmp_socket(), qemu.budget(BOUND));
+    let from = console.len();
+    writeln!(qemu.stdin_mut(), "run test_rs_{JOB}").map_err(|e| e.to_string())?;
+    qemu.flush_stdin();
+    let whole = format!("{JOB}: ok, and the reboot is forced");
+    await_marker_new(&mut qemu, &mut console, &whole, from, "the job to reach the forced reboot")?;
+    power::ended(&mut qemu, &mut reset, &mut console, REBOOTING, "guest-reset")?;
+    let said = &console[from..];
+    for line in said.lines().filter(|l| l.contains(&format!("{JOB}: "))) {
+        eprintln!("  [{JOB}] {}", line.trim());
     }
-    if result.exit_code != Some(0) {
-        return Err(format!("the job ended {:?}:\n{}", result.exit_code, result.stdout));
+    // The kill is the terminate's and no clock's: after the job forced it.
+    let forced = said.find(&whole).expect("awaited above");
+    let killed = said.find("power: the stop ends what stays").ok_or("the supervisor never said what the forced reboot ended")?;
+    if killed < forced {
+        return Err(format!("the reboot ended what stays before the job forced it:\n{said}"));
     }
-    for said in result.stdout.lines().filter(|l| l.contains(&format!("{JOB}: "))) {
-        eprintln!("  [{JOB}] {}", said.trim());
-    }
-    match result.stdout.lines().any(|l| l.trim_end().ends_with(&format!("{JOB}: ok"))) {
-        true => Ok(()),
-        false => Err(format!("the job never said it was whole:\n{}", result.stdout)),
-    }
+    Ok(())
 }
 
 /// The desktop session, driven through its keys.
