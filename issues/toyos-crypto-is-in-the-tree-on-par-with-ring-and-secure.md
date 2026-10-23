@@ -527,7 +527,7 @@ Not consumers:
        key: R = [S]B verifies under it whenever 8 divides k.
      - An R of order dividing 8 is taken where the equation holds, as RFC
        8032 takes it. The owner accepted removing #1044's extra refusal on
-       the condition, argued in #PRNUM, that it adds no security property
+       the condition, argued in #1047, that it adds no security property
        the contract requires. Under a prime-order key such an R is the
        identity with S = k a, which only the key's holder can make, and
        RFC 8032 signing makes it whenever r is a multiple of L.
@@ -539,7 +539,7 @@ Not consumers:
      verdict is the file's. `lib/crypto/tests/ed25519_verdicts.rs` gives
      each speccheck case and each known disagreement an expected verdict
      and the rule deciding it, with both cross-checks' verdicts pinned.
-     Done (#1044):
+     Done (#1044, #1047):
      - **`verify_strict` differs on a small-order R and one class of
        key.** It refuses every R of order dividing 8: R = O with S = k a
        under an RFC 8032 key, and speccheck case 2 (a mixed-order key and
