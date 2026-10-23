@@ -177,7 +177,7 @@ an explicit force issues it, and never a timer's.
    control pipe, so it watches at most 254 children: the 255th is refused
    `EAGAIN`, a `poll` takes 255 descriptors beside its wake pipe, and `SIG_IGN`
    is shown over 255 children.
-5. **A login is a session under its owner**. **In review** (the P1b pull
+5. **A login is a session under its owner**. **In review** (#1035, the P1b pull
    request). Per login the supervisor starts one session owner,
    `/system/bin/session`, which accepts on the session's launcher and hands each
    connection to the supervisor with its badge; the supervisor serves the
