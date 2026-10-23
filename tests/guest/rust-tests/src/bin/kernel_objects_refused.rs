@@ -20,6 +20,9 @@ use toyos_abi::syscall::{self, OpenFlags, SyscallError, VmAt, VmProt, MAX_RANGES
 
 const PAGE: usize = 4096;
 
+/// An offset of the /tmp file no write reached.
+const HOLE: u64 = 16 * PAGE as u64;
+
 /// The directories made under, and the most the fill makes before it is
 /// owed a refusal: what a few superframes of charges hold, many times over.
 const DIRS: &[u8] = b"/tmp/kernel_objects_refused";
@@ -37,8 +40,10 @@ fn main() {
     // own: the pipe whose ring is not yet allocated, the file not yet
     // written, every list at its bound, and stdout's buffer.
     let unwritten = syscall::pipe().expect("a pipe before anything is taken");
-    let file = syscall::open(b"/tmp/kernel_objects_refused.bin", OpenFlags::WRITE | OpenFlags::CREATE | OpenFlags::TRUNCATE)
+    let file = syscall::open(b"/tmp/kernel_objects_refused.bin", OpenFlags::READ | OpenFlags::WRITE | OpenFlags::CREATE | OpenFlags::TRUNCATE)
         .expect("a /tmp file before anything is taken");
+    // Its last byte written, so every page below is a hole.
+    syscall::pwrite(file, b"x", 64 * PAGE as u64).expect("a /tmp pwrite before anything is taken");
     syscall::mkdir(DIRS).expect("the directory the fill makes its own in");
     syscall::mkdir(LONG).expect("the directory of long names");
     for n in 0..LONG_NAMES {
@@ -60,13 +65,20 @@ fn main() {
         ("a directory", syscall::mkdir(b"/tmp/kernel_objects_refused_more")),
         ("a pipe's first write, its ring", syscall::write(unwritten.write, b"x").map(|_| ())),
         ("a /tmp file's page", syscall::write(file, &[0x5a; PAGE]).map(|_| ())),
+        ("a /tmp file's page at an offset", syscall::pwrite(file, &[0x5a; PAGE], HOLE).map(|_| ())),
         ("a memory object", syscall::shm_create(PAGE).map(|_| ())),
         // SAFETY: placed anywhere, so it replaces nothing.
         ("a commitment", unsafe { syscall::vm_reserve(PAGE, VmProt::ReadWrite, VmAt::ANYWHERE) }.map(|_| ())),
         ("a listing of long names", syscall::readdir(LONG, &mut listing).map(|_| ())),
     ];
 
+    // A hole needs no page kept for it: a pread of one answers its zeros.
+    let mut hole = [0xffu8; 64];
+    let read_hole = syscall::pread(file, &mut hole, HOLE);
+
     give_back(&committed, &ranges, dirs);
+    assert_eq!(read_hole, Ok(64), "a pread of a /tmp file's hole with every frame taken");
+    assert!(hole.iter().all(|&b| b == 0), "a pread of a hole with every frame taken read other than zeros");
     assert!(range_refused < MAX_RANGES - 64, "ranges were refused at {range_refused}, the per-space bound, not for memory");
     assert!(dir_refused < MOST_DIRS, "{MOST_DIRS} directories were made and none refused: directories are not charged");
     println!("  PASS: {range_refused} ranges, then {dir_refused} directories, and the next of each was refused");
@@ -200,6 +212,7 @@ fn served_again(unwritten: toyos_abi::handle::RawHandle, file: toyos_abi::handle
     syscall::close(pipe.write);
     assert_eq!(syscall::write(unwritten, b"x"), Ok(1), "a pipe's first write once memory is given back");
     assert_eq!(syscall::write(file, &[0x5a; PAGE]), Ok(PAGE), "a /tmp write once memory is given back");
+    assert_eq!(syscall::pwrite(file, &[0x5a; PAGE], HOLE), Ok(PAGE), "a /tmp pwrite once memory is given back");
     syscall::close(file);
     syscall::delete(b"/tmp/kernel_objects_refused.bin").expect("delete the /tmp file");
     syscall::rmdir(DIRS).expect("remove the fill's directory");
