@@ -32,6 +32,18 @@ measuring CPU until three probes of a dependent `add` chain agree within 1%,
 and every result line prints that clock as `mhz_settled` and the clock just
 after as `mhz`; each group also prints `cpu.clock`, 200 probes from idle.
 
+The network runs show it again. On the T14 at `d99ef5a35`, each group's
+`cpu.clock` p50 in MHz was:
+
+| | ToyOS (3 runs) | Linux (4 runs) |
+|---|---|---|
+| before `lan` | 2791, 2791, 1495 | 4186, 4184, 4185, 4186 |
+| before `internet` | 3189, 1595, 2990 | 3790, 4186, 3788, 4186 |
+
+Both groups wait mostly on the network. In those runs ToyOS's settled clock
+also ranged from 1.6 to 3.8 GHz across rows
+(`ToyOSOrg/evidence` branch `pr-1065`, `r3/`).
+
 **Exit**: a T14 run on each system shows `mhz_settled` near the all-CPU rate
 per CPU within the run-to-run spread, or names the benchmark whose CPU did
 not settle.

@@ -1648,12 +1648,12 @@ const OSBENCH_LAN: &[metal::Arm] = &[metal::Arm {
     ..metal::once("netbenchcase", "tests/images/benchcase.toml", &[], &["osbench_lan"])
 }];
 /// `internet` waits up to 60 s for the lease when it runs first, then
-/// measures six 25 MB downloads, six 10 MB uploads and 77 short exchanges:
-/// under 95 s at 3 MB/s down and 1.5 MB/s up. Those rates are an
-/// assumption, not a reading: no ToyOS TLS transfer has been timed on metal
-/// by this group, and a slower one ends the list at the bound.
+/// measures four 10 MB downloads, four 10 MB uploads and 77 short exchanges:
+/// under 45 s at 3 MB/s down and 1.5 MB/s up. Those rates are an assumed
+/// floor, far under the T14's first ToyOS readings, and a slower link ends
+/// the list at the bound.
 const OSBENCH_INTERNET: &[metal::Arm] = &[metal::Arm {
-    adds_ms: 155_000,
+    adds_ms: 105_000,
     named_only: true,
     ..metal::once("netbenchcase", "tests/images/benchcase.toml", &[], &["osbench_internet"])
 }];

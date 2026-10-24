@@ -24,9 +24,12 @@ const HOST: &str = "speed.cloudflare.com";
 const USER_AGENT: &str = "toyos-build (https://github.com/ToyOSOrg/ToyOS)";
 /// One download's bytes and one upload's, each timed whole: a slow uplink's
 /// rate needs more resolution than whole MB/s.
-const DOWN: u64 = 25_000_000;
+const DOWN: u64 = 10_000_000;
 const UP: usize = 10_000_000;
-const ROUNDS: usize = 5;
+/// Timed transfers each way after one unread. The endpoint answers 429 past
+/// a download volume it does not publish, so a session of runs stays well
+/// under the volume that first drew one.
+const ROUNDS: usize = 3;
 /// The most a short answer is read to.
 const ANSWER_MAX: u64 = 64 * 1024;
 /// How long one connection or request may take before it is given up.

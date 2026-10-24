@@ -38,6 +38,10 @@ its groups:
 path neither system owns, run only when a pass names its row: no automated
 test depends on the public internet.
 
+The first paired session (`ToyOSOrg/evidence` branch `pr-1065`, `r3/`) put
+ToyOS's T14 LAN download and 64 B round trip at Linux's and its upload at
+a third of it (`issues/netstack-sends-tcp-at-a-third-of-what-the-t14s-wired-link-carries.md`).
+
 The cryptographic rows are not osbench's. AES-GCM, ChaCha20-Poly1305,
 SHA-256 and the rest were measured under Linux on both benches against ring,
 OpenSSL and AWS-LC by the crypto oracle probe, and that table is the

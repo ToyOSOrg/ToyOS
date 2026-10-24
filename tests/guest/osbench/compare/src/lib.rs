@@ -134,17 +134,20 @@ pub fn range(values: &[u64]) -> Option<f64> {
     (median > 0.0).then(|| (max - min) as f64 / median)
 }
 
-/// The least two-sided p `n` runs against `m` can reach: complete
-/// separation, two of the C(n + m, n) splits.
-pub fn least_p(n: usize, m: usize) -> f64 {
-    let splits = (1..=n).fold(1.0, |c, k| c * (m + k) as f64 / k as f64);
-    (2.0 / splits).min(1.0)
+/// The exact two-sided Mann-Whitney test of `a` against `b`: `p`, and
+/// `least`, the smallest p these pooled values could give whichever runs
+/// were whose. Ties count half a win, and the distribution is every split of
+/// the pooled values into sets of the two sizes, so it holds the observed
+/// ties: with none, `least` is 2/C(n + m, n); runs tied apart from the other
+/// system's can lower it.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct Exact {
+    pub p: f64,
+    pub least: f64,
 }
 
-/// The exact two-sided Mann-Whitney p of `a` against `b`, ties counted half,
-/// by every split of the pooled values into sets of their sizes; `None` past
-/// [`MAX_RUNS`] values or with an empty side.
-pub fn mann_whitney(a: &[u64], b: &[u64]) -> Option<f64> {
+/// `None` past [`MAX_RUNS`] values or with an empty side.
+pub fn mann_whitney(a: &[u64], b: &[u64]) -> Option<Exact> {
     let pooled: Vec<u64> = a.iter().chain(b).copied().collect();
     let total = pooled.len();
     if a.is_empty() || b.is_empty() || total > MAX_RUNS {
@@ -166,7 +169,7 @@ pub fn mann_whitney(a: &[u64], b: &[u64]) -> Option<f64> {
     };
     let centre = (a.len() * b.len()) as i64;
     let seen = (doubled_u(a, b) - centre).abs();
-    let (mut splits, mut extreme) = (0u64, 0u64);
+    let mut distances = Vec::new();
     let (mut first, mut second) = (Vec::with_capacity(total), Vec::with_capacity(total));
     for mask in 0u32..(1 << total) {
         if mask.count_ones() as usize != a.len() {
@@ -177,12 +180,11 @@ pub fn mann_whitney(a: &[u64], b: &[u64]) -> Option<f64> {
         for (i, v) in pooled.iter().enumerate() {
             if mask & (1 << i) != 0 { first.push(*v) } else { second.push(*v) }
         }
-        splits += 1;
-        if (doubled_u(&first, &second) - centre).abs() >= seen {
-            extreme += 1;
-        }
+        distances.push((doubled_u(&first, &second) - centre).abs());
     }
-    Some(extreme as f64 / splits as f64)
+    let share = |at_least: i64| distances.iter().filter(|&&d| d >= at_least).count() as f64 / distances.len() as f64;
+    let farthest = *distances.iter().max().expect("a split");
+    Some(Exact { p: share(seen), least: share(farthest) })
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -285,20 +287,20 @@ fn compare_one(runs: &[&Run], name: &str) -> String {
     let (ratio, p, verdict) = match (values.get(&Os::Linux), values.get(&Os::Toyos)) {
         (Some(l), Some(t)) => {
             let ratio = median(t) / median(l);
-            let p = mann_whitney(t, l);
-            let least = least_p(t.len(), l.len());
-            let verdict = match p {
+            let exact = mann_whitney(t, l);
+            let verdict = match exact {
                 None => "too many runs for the exact test".to_string(),
-                Some(_) if least > RESOLVED => format!("too few runs to resolve (least p {least:.3})"),
-                Some(p) if p <= RESOLVED => {
+                Some(Exact { p, .. }) if p <= RESOLVED => {
                     let higher = median(t) > median(l);
                     match better(unit.unwrap_or_default()) {
                         Some(way) => format!("ToyOS {}", if higher == (way == Better::Higher) { "better" } else { "worse" }),
                         None => format!("ToyOS {}", if higher { "higher" } else { "lower" }),
                     }
                 }
+                Some(Exact { least, .. }) if least > RESOLVED => format!("too few runs to resolve (least p {least:.3})"),
                 Some(_) => "not resolved".to_string(),
             };
+            let p = exact.map(|e| e.p);
             (format!("{ratio:.2}"), p.map_or_else(|| "-".into(), |p| format!("{p:.3}")), verdict)
         }
         _ => ("-".into(), "-".into(), String::new()),
@@ -365,7 +367,7 @@ mod tests {
     #[test]
     fn the_exact_test_matches_its_tables() {
         // Complete separation has two splits as extreme as itself, of C(n+m, n).
-        let p = |a: &[u64], b: &[u64]| mann_whitney(a, b).unwrap();
+        let p = |a: &[u64], b: &[u64]| mann_whitney(a, b).unwrap().p;
         assert!((p(&[1, 2, 3, 4], &[5, 6, 7, 8]) - 2.0 / 70.0).abs() < 1e-12);
         assert!((p(&[8, 7, 6, 5], &[1, 2, 3, 4]) - 2.0 / 70.0).abs() < 1e-12);
         assert!((p(&[1, 2, 3], &[4, 5, 6]) - 0.1).abs() < 1e-12);
@@ -395,14 +397,18 @@ mod tests {
     }
 
     #[test]
-    fn the_least_p_is_complete_separations() {
-        assert!((least_p(4, 4) - 2.0 / 70.0).abs() < 1e-12);
-        assert!((least_p(4, 3) - 2.0 / 35.0).abs() < 1e-12);
-        assert!((least_p(3, 4) - least_p(4, 3)).abs() < 1e-12);
-        assert_eq!(least_p(1, 1), 1.0);
-        assert_eq!(least_p(1, 3), 0.5);
-        let p = mann_whitney(&[1, 2, 3, 4], &[5, 6, 7]).unwrap();
-        assert!((p - least_p(4, 3)).abs() < 1e-12);
+    fn the_least_p_is_the_farthest_splits_share() {
+        let least = |a: &[u64], b: &[u64]| mann_whitney(a, b).unwrap().least;
+        // Distinct values: complete separation either way, 2 of C(n + m, n).
+        assert!((least(&[1, 2, 3, 4], &[5, 6, 7, 8]) - 2.0 / 70.0).abs() < 1e-12);
+        assert!((least(&[9, 1, 5, 3], &[2, 8, 4, 6]) - 2.0 / 70.0).abs() < 1e-12);
+        assert!((least(&[1, 2, 3, 4], &[5, 6, 7]) - 2.0 / 35.0).abs() < 1e-12);
+        assert_eq!(least(&[1], &[2]), 1.0);
+        assert_eq!(least(&[1], &[2, 3, 4]), 0.5);
+        // Three tied runs of four: only the three lowest values set apart are
+        // that far out, so one split of 35, the session's T14 upload.
+        let upload = mann_whitney(&[41, 48, 31], &[113, 113, 114, 113]).unwrap();
+        assert!((upload.p - 1.0 / 35.0).abs() < 1e-12 && (upload.least - 1.0 / 35.0).abs() < 1e-12, "{upload:?}");
     }
 
     fn rtt(os: &str, p50: u64) -> Run {
@@ -430,6 +436,11 @@ mod tests {
         runs.extend([150, 149, 155].iter().map(|v| rtt("toyos", *v)));
         let table = compare(&runs).unwrap();
         assert!(table.contains("| 0.057 | too few runs to resolve (least p 0.057) |"), "{table}");
+        // Ties can let the same counts resolve: the test decides, not the count.
+        let mbps = |os: &str, v: u64| run(os, &[&format!("bench=lan.wired.tcp.upload unit=MB/s n=5 min=1 p50={v} max=9 mean=5")]);
+        let mut runs: Vec<Run> = [113, 113, 114, 113].iter().map(|v| mbps("linux", *v)).collect();
+        runs.extend([41, 48, 31].iter().map(|v| mbps("toyos", *v)));
+        assert!(compare(&runs).unwrap().contains("| 0.029 | ToyOS worse |"));
     }
 
     #[test]
