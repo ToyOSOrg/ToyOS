@@ -10,11 +10,36 @@ User memory moved from 2 MiB pages filled when mapped to 4 KiB pages filled
 at first touch (`kernel/src/mm/space.rs`). Each of these costs more than it
 did; the T14's numbers are below:
 
-- **Faults.** About 512 times as many per byte touched. Each takes the
-  space's lock, an inventory lookup, two table walks (`reach` reads the leaf
-  with `get` and writes it with `set`), and the frame allocator's one lock
+- **Faults.** A touch beside a populated page of a private range fills its
+  aligned 64 KiB run (`kernel::vm::around`), so memory touched in order takes
+  a fault per 16 pages; a lone touch is still one fault per page. Each fault
+  takes the space's lock, an inventory lookup, one table walk and, per frame,
+  the frame allocator's one lock
   (`issues/per-cpu-scheduler-and-pmm-state-shares-lines-every-cpu-writes.md`)
-  and a 4 KiB zeroing.
+  and a 4 KiB zeroing. Probed on the T14 at `b48c7dd9d` (scratch probe, one
+  frame per fault): about 345 ns from the trap handler's entry to its return —
+  47 to take the lock, 203 under it (36 the allocator, 145 the zeroing of a
+  cold frame, the rest the lookup and walks), 52 after — and, by difference
+  from the bench's own 1,003 ns under the probe, some 650 ns outside it: the
+  exception's delivery and return and the touch that follows. With runs, per
+  page that leaves the frame (about 36 + 145 ns) and the memory traffic of
+  writing zeroed pages back, which the probe cannot attribute; 2 MiB pages
+  or less traffic are what is left to win.
+
+  Runs cost, each owed a fix or the owner's acceptance:
+  - **Untouched pages resident.** A run draws up to 15 committed pages
+    nothing has touched, zeroing each; resident and peak count them, and a
+    thread's stack is resident in 64 KiB once its second page is touched.
+  - **`mem.anon.unmap`**, +9% p50 at `a75abd3f6` in two pairs; not
+    reproduced at `6d826e313` (4,421 to 4,303 ns/MiB).
+  - **A lone fault** costs about 19 ns more: `mem.first_touch.2m`, one page
+    per 2 MiB, is 684 to 703 ns/page at `6d826e313` (681 to 706 at
+    `a75abd3f6`), though it now takes one walk of the tables
+    (`UserTables::leaf_table`); cause not found. Accepted as a measured
+    tradeoff by the coordinator on PR #1055, under the owner's delegation
+    of implementation tradeoffs (2026-10-23), against about 380 ns saved per page touched in order.
+  - **Spawn.** `proc.spawn_wait_loop.100` rose 2.3% at `a75abd3f6` and is
+    within 1.5% at `6d826e313`.
 - **Frees.** A clear walks the 64 futex buckets once per table of leaves that
   held an owned frame (at most 512 frames each), whether or not anything waits.
 - **Commits.** A committed range's tables are built when it is made, under the
@@ -42,10 +67,10 @@ each), what is still slower than the base:
 
 | row | head | base |
 |---|---|---|
-| `mem.first_touch.4k` ns/page | 887 | 11 (2 MiB pages; Linux 927) |
-| `mem.map_touch_unmap.4k` ns/page | 909 | 207 |
-| `mem.anon.total` ns/MiB | 228,677 | 51,612 (Linux 258,177) |
-| `mem.realloc_grow.1m_256m` ms | 116 | 30 (Linux 131 ns, by `mremap`) |
+| `mem.first_touch.4k` ns/page | 887; 508 with runs | 11 (2 MiB pages; Linux 927) |
+| `mem.map_touch_unmap.4k` ns/page | 909; 532 with runs | 207 |
+| `mem.anon.total` ns/MiB | 228,677; 132,877 with runs | 51,612 (Linux 258,177) |
+| `mem.realloc_grow.1m_256m` ms | 116; 67 with runs | 30 (Linux 131 ns, by `mremap`) |
 | `fs.tmp.seq_read.1048576` MB/s | 6,060 | 9,425 |
 | `fs.tmp.seq_write.1048576` MB/s | 4,297 | 5,889 |
 | `fs.tmp.readdir.1000` ms | 1.20 | 0.74 |
@@ -53,9 +78,16 @@ each), what is still slower than the base:
 | `pipe.throughput.65536` MB/s | 7,021 | 10,902 |
 
 The copies (`fs.tmp`, `ipc`, `pipe`) point at the user-copy path above.
+"With runs" is `a75abd3f6` against `b48c7dd9d` on the T14, one run each;
+`6d826e313` gave 500, 521, 132,434 and 67 ms for the first four rows.
+
+`mem.realloc_grow` still copies: std's dlmalloc 0.2.14 never maps a block on
+its own, so its `remap` hook is never called, and moving pages instead needs
+large blocks mapped alone, which `mem.malloc_churn.1048576` would pay for.
 
 Owner: the memory track. Exit: each path above measured on the T14 at a
 change and at its base, and against Linux; a regression is fixed or its cost
-accepted by the owner. Cheap remedies when measurement asks: a per-CPU frame
-cache, one walk per fault, a count of armed futex waiters that lets a clear
+accepted by the owner, or by the coordinator for an implementation tradeoff,
+which the owner delegated on 2026-10-23. Cheap remedies when measurement asks: a
+per-CPU frame cache, a count of armed futex waiters that lets a clear
 with none skip the buckets, and tables built at the first touch of their span.
