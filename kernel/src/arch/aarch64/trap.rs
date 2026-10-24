@@ -137,6 +137,7 @@ extern "C" fn dispatch(frame: &mut Frame, entry: u64) {
 /// EL1, or an FIQ or SError from anywhere. The panic handler's branch puts it
 /// on the console and the panel.
 fn exception(frame: &Frame, entry: u64) -> ! {
+    crate::log::console::on_the_uart_for_good();
     let entry = Entry(entry);
     log!("KERNEL PANIC: {entry}: {} (ESR={:#010x})", class_name(frame.esr), frame.esr);
     log!("  elr={:#018x}  far={:#018x}  spsr={:#010x}", frame.elr, frame.far, frame.spsr);

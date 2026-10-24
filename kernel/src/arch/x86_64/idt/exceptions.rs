@@ -470,6 +470,10 @@ pub(super) fn page_fault_handler(frame: &TrapFrame) {
     }
 
     let fault_addr = cpu::read_cr2();
+    // A Ring 0 fault halts below: before its first record.
+    if !Ring::of_cs(frame.cs).is_user() {
+        crate::log::console::on_the_uart_for_good();
+    }
 
     if frame.error_code & PF_PRESENT != 0 && !Ring::of_cs(frame.cs).is_user()
         && mm::is_kernel_addr(fault_addr)

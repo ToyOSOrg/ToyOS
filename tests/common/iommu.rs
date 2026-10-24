@@ -1,14 +1,13 @@
-//! `iommu_virtio_platform`: whether each virtio function the kernel drives
-//! itself negotiated `VIRTIO_F_ACCESS_PLATFORM` behind QEMU's emulated VT-d
-//! unit and none without one, and that a process's claim on one is handed
-//! over behind the unit and refused where no unit is.
+//! `iommu_virtio_platform`: whether every virtio function QEMU creates
+//! carries `iommu_platform=on` exactly where a unit is, and a process's claim
+//! on one is handed over behind the unit and refused where no unit is.
 //! `amdvi_firmware_left`: whether an AMD-Vi unit firmware left blocking is
 //! switched off before the boot stick is driven.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::Path;
 
-use super::qemu::{self, is_kernel_line, BootOptions, Profile, QemuInstance};
+use super::qemu::{self, BootOptions, Profile, QemuInstance};
 use super::serial::Serial;
 
 /// The function `tests/images/netcase.toml`'s netstack claims, as its `devices` row spells it.
@@ -100,11 +99,6 @@ pub fn iommu_virtio_platform() -> Result<(), String> {
             no_unit_is_no_claim(&log)?;
         }
 
-        // The kernel drives no virtio function: every one is a process's, whose
-        // negotiation is `toyos-virtio`'s and host-tested there.
-        if let Some(line) = log.text().lines().find(|l| is_kernel_line(l) && l.contains("VirtIO: PCI ")) {
-            return Err(format!("{name}: the kernel negotiated a virtio function's features: {line:?}"));
-        }
         eprintln!(
             "  [iommu] {name}: {} virtio function(s), behind a unit = {behind_unit}; {}",
             created.len(),

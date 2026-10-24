@@ -177,7 +177,16 @@ impl ConsoleObject {
     /// not (`log::console::carried_by`); its last handle lets go of it.
     pub fn carry(&self, elsewhere: bool) -> Result<(), kernel::carrier::Refused> {
         match elsewhere {
-            true => crate::log::console::carried_by(self.holder()),
+            true => {
+                crate::log::console::carried_by(self.holder())?;
+                // A last handle closed beside this call ran its release
+                // before the carry landed: the carry is given back here.
+                core::sync::atomic::fence(Ordering::SeqCst);
+                if self.core.retired() {
+                    crate::log::console::released_by(self.holder());
+                }
+                Ok(())
+            }
             false => {
                 crate::log::console::released_by(self.holder());
                 Ok(())

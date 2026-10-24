@@ -943,8 +943,8 @@ struct Shape {
     /// *size* is a shape dimension exactly as a disk's is, and the tests that
     /// read pixels were all blind to the remainder until one profile had one.
     panel: Option<(u32, u32)>,
-    /// virtio-sound, the console on virtio-serial, and the clipboard's
-    /// channel on a virtio-serial function of its own.
+    /// virtio-sound, and the clipboard's channel on a virtio-serial function
+    /// of its own.
     virtio: Virtio,
     /// The console's port, on its own virtio-serial function, which
     /// `/system/bin/virtio-console` carries the log on. A machine whose every
