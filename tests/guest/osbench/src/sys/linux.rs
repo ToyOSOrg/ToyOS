@@ -583,49 +583,7 @@ fn backing_disk(mut device: std::path::PathBuf) -> (std::path::PathBuf, bool) {
     (device, mapped)
 }
 
-/// The interface holding `local`, off `getifaddrs`, and whether it is a
-/// wireless one, as sysfs says: its kind, and its driver and speed. The
-/// interface's name and addresses are never printed.
-pub fn link_of(local: std::net::IpAddr) -> Result<(crate::lan::Link, String), String> {
-    let name = interface_holding(local)?;
-    let at = std::path::Path::new("/sys/class/net").join(&name);
-    let wireless = at.join("wireless").exists() || at.join("phy80211").exists();
-    let driver = fs::read_link(at.join("device/driver"))
-        .ok()
-        .and_then(|p| p.file_name().map(|n| n.to_string_lossy().into_owned()))
-        .unwrap_or_else(|| "none".into());
-    let speed = read(&at.join("speed").to_string_lossy()).unwrap_or_else(|| "unknown".into());
-    let link = if wireless { crate::lan::Link::Wifi } else { crate::lan::Link::Wired };
-    let kind = if wireless { "wireless" } else { "wired" };
-    Ok((link, format!("{kind} driver={driver} speed_mbps={speed}")))
-}
-
-fn interface_holding(local: std::net::IpAddr) -> Result<String, String> {
-    let std::net::IpAddr::V4(local) = local else { return Err("the connection left from an IPv6 address".into()) };
-    let mut list: *mut libc::ifaddrs = std::ptr::null_mut();
-    // SAFETY: `list` is a valid out-pointer; the list is freed below.
-    if unsafe { libc::getifaddrs(&mut list) } != 0 {
-        return Err(format!("getifaddrs: {}", std::io::Error::last_os_error()));
-    }
-    let mut found = None;
-    let mut at = list;
-    while !at.is_null() {
-        // SAFETY: a node of the list getifaddrs made, alive until it is freed.
-        let ifa = unsafe { &*at };
-        // SAFETY: a non-null `ifa_addr` of family AF_INET is a sockaddr_in.
-        let v4 = (!ifa.ifa_addr.is_null() && unsafe { (*ifa.ifa_addr).sa_family } == libc::AF_INET as libc::sa_family_t)
-            .then(|| unsafe { (*ifa.ifa_addr.cast::<libc::sockaddr_in>()).sin_addr.s_addr });
-        if v4 == Some(u32::from(local).to_be()) {
-            // SAFETY: an interface's name is a NUL-terminated string.
-            found = Some(unsafe { std::ffi::CStr::from_ptr(ifa.ifa_name) }.to_string_lossy().into_owned());
-            break;
-        }
-        at = ifa.ifa_next;
-    }
-    // SAFETY: the list getifaddrs made, read no more.
-    unsafe { libc::freeifaddrs(list) };
-    found.ok_or_else(|| "no interface holds the address the connection left from".into())
-}
+pub use osbench_lan::link::of as link_of;
 
 /// The package's temperature off hwmon: `coretemp`'s `Package id 0`, or
 /// `k10temp`'s `Tdie` where it has one and its `Tctl` otherwise.

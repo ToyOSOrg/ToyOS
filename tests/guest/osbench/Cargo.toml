@@ -8,8 +8,13 @@ license = "MIT OR Apache-2.0"
 [dependencies]
 # The work and crunch groups' compression, pure Rust and the same code on both systems.
 miniz_oxide = "0.9"
-# The crunch group's hashing: ToyOS's own SHA-256, which its ssh server runs.
-toyos-crypto = { path = "../../../lib/crypto" }
+# The crunch group's hashing: ToyOS's own SHA-256, which its ssh server runs;
+# and the internet group's TLS provider, with its types and its entropy.
+toyos-crypto = { path = "../../../lib/crypto", features = ["std", "rustls-provider"] }
+rustls = { version = "0.23.45", default-features = false }
+getrandom = "0.3"
+# The internet group's HTTPS, with webpki's roots, on toyos-crypto's provider.
+ureq = { version = "3", default-features = false, features = ["rustls-no-provider", "rustls-webpki-roots"] }
 # The crunch group's compile-like task: parsing Rust, with no compiler to load.
 syn = { version = "2", default-features = false, features = ["full", "parsing"] }
 # The LAN group's two ends, and the rules readings are judged by.

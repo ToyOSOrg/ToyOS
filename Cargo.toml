@@ -146,6 +146,7 @@ members = [
     "tests/guest/kernelprobe",
     "tests/guest/metalprobe",
     "tests/guest/osbench",
+    "tests/guest/osbench/compare",
     "tests/guest/osbench/lan",
     "tests/guest/osbench/rules",
     "tests/guest/pciholder",

@@ -70,6 +70,14 @@ is nothing to enable.
   `issues/idle-cpus-enter-the-c-states-cst-names.md`'s to answer; that the
   idle state reaches HWP's clock choice is inference. Next: a T14 scout whose
   idle CPUs wait in a deep C-state, read over the same windows.
+  #1065's network session on the T14 (`ToyOSOrg/evidence` branch
+  `pr-1065`, `r3/`) shows the same ceiling in `cpu.clock`, whose 200 probes
+  ramp from idle. Its maximum was 3789 MHz under ToyOS in every group that
+  reached its top, against 4188 to 4190 MHz in every Linux group. That
+  covers three ToyOS and four Linux runs of `osbench lan` and
+  `osbench internet`. The probes' p50, which reads idle and ramp policy
+  (`issues/osbench-times-cpus-leaving-idle-and-not-their-settled-clock.md`),
+  is no reading of this ceiling.
 - **Global-line contention** is bounded at 2 to 3 % of C0 on the T14 and not
   attributed; next, the HITM count attributed to its lines on both benches
   (`issues/per-cpu-scheduler-and-pmm-state-shares-lines-every-cpu-writes.md`).

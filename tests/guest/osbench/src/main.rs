@@ -1,9 +1,10 @@
 //! `osbench`: the same system workloads, built from one source for ToyOS
 //! and for Linux, so one machine's two systems can be compared.
 //!
-//! `osbench <group>` runs a group, or `all` of them in [`GROUPS`]' order. A
-//! ToyOS job list passes no arguments, so there the group is the name the
-//! program was started under, `osbench_<group>`. Every other command is one
+//! `osbench <group>` runs a group, or `all` of them in [`GROUPS`]' order; the
+//! groups in [`BY_NAME`] need another party and run only by name. A ToyOS job
+//! list passes no arguments, so there the group is the name the program was
+//! started under, `osbench_<group>`. Every other command is one
 //! this program gives its own children.
 //!
 //! Every result is one line of `key=value` words (`report`): a distribution
@@ -30,8 +31,7 @@
 //! That nightly is the build's stage-0 compiler (`build/sysroot.rs`'s
 //! `STAGE0_CARGO`, which this follows), the upstream one nearest ToyOS's own.
 //! On Linux `nvme` and `energy` read what only root may (the raw namespace,
-//! the package's energy counter) and say so unprivileged; `lan` needs an
-//! `osbench-peer` (`lan/`) running on another machine on the link.
+//! the package's energy counter) and say so unprivileged.
 //! With the `toyos` profile every guest binary is built with, osbench's own
 //! code is generated alike for both; std's platform layer and the C library
 //! beneath it (musl's on Linux) are each system's own.
@@ -44,6 +44,7 @@ mod energy;
 mod fair;
 mod files;
 mod identity;
+mod internet;
 mod ipc;
 mod lan;
 mod measure;
@@ -141,12 +142,12 @@ fn files() {
     }
 }
 
-/// Every group, in the order `all` and the ToyOS job list run them: `boot`
-/// first, since it reads how long the boot took to reach it; `energy` while
-/// the machine is still quiet; `crunch`, which heats it, after every other
-/// measurement; and `persist` last, since it writes the volume a ToyOS
-/// boot's log is on.
-const GROUPS: [(&str, fn()); 18] = [
+/// Every group the machine alone runs, in the order `all` and the ToyOS job
+/// list run them: `boot` first, since it reads how long the boot took to
+/// reach it; `energy` while the machine is still quiet; `crunch`, which heats
+/// it, after every other measurement; and `persist` last, since it writes the
+/// volume a ToyOS boot's log is on.
+const GROUPS: [(&str, fn()); 17] = [
     ("boot", boot::suite),
     ("identity", identity::suite),
     ("energy", energy::suite),
@@ -162,10 +163,13 @@ const GROUPS: [(&str, fn()); 18] = [
     ("work", work::suite),
     ("tail", tail::suite),
     ("nvme", nvme::suite),
-    ("lan", lan::suite),
     ("crunch", crunch::suite),
     ("persist", storage::suite),
 ];
+
+/// The groups that need another party: `lan` the `osbench-peer` on the other
+/// bench, `internet` the public internet.
+const BY_NAME: [(&str, fn()); 2] = [("lan", lan::suite), ("internet", internet::suite)];
 
 /// A group between its first and last lines, after the machine's conditions
 /// and the clock its CPU starts at.
@@ -194,10 +198,10 @@ fn main() {
         "fair-helper" => return fair::helper(rest),
         "ipc-serve" => return ipc::serve(),
         "cc" => return work::cc(rest),
-        named => match GROUPS.iter().find(|(name, _)| *name == named) {
+        named => match GROUPS.iter().chain(&BY_NAME).find(|(name, _)| *name == named) {
             Some((name, run)) => group(name, *run),
             None => {
-                let names: Vec<&str> = GROUPS.iter().map(|(name, _)| *name).collect();
+                let names: Vec<&str> = GROUPS.iter().chain(&BY_NAME).map(|(name, _)| *name).collect();
                 eprintln!("osbench: no command {named:?}; the groups are {} and all", names.join(", "));
                 std::process::exit(2);
             }

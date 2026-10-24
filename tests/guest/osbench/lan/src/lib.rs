@@ -1,9 +1,10 @@
 //! A bench's link to a peer, timed from the bench.
 //!
 //! **The bench finds the peer and opens every connection**: it broadcasts
-//! [`HELLO`] to [`PORT`] and takes the source of the first [`ANSWER`] as its
+//! [`HELLO`] to [`PORT`] and takes the source of the first answer as its
 //! peer, so neither side is configured with an address and the bench accepts
-//! nothing. The peer only answers; every figure is the bench's clock.
+//! nothing. The answer says which of its links the peer answered over
+//! ([`link`]). The peer only answers; every figure is the bench's clock.
 //!
 //! Each TCP connection to the peer's [`PORT`] opens with one [`Request`]:
 //! echo fixed-size messages, sink everything to end-of-file and answer the
@@ -15,12 +16,16 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
+pub mod link;
+
 /// The peer's UDP port for discovery and its TCP port for requests.
 pub const PORT: u16 = 47_321;
 
-/// What a bench broadcasts, and what the peer answers it with.
-pub const HELLO: &[u8] = b"osbench-lan/1 hello";
-pub const ANSWER: &[u8] = b"osbench-lan/1 peer";
+/// What a bench broadcasts, and what the peer's answer starts with: the rest
+/// is its link's description, at most [`MAX_SAID`] bytes of printable ASCII.
+pub const HELLO: &[u8] = b"osbench-lan/2 hello";
+pub const ANSWER: &[u8] = b"osbench-lan/2 peer ";
+pub const MAX_SAID: usize = 160;
 
 /// How long either end waits on one read or write before it gives the
 /// connection up.
@@ -94,16 +99,31 @@ impl Request {
     }
 }
 
-/// The bench's end: broadcast [`HELLO`] to `to` once a second until an
-/// [`ANSWER`] comes or `patience` has passed, and answer where it came from.
-/// `Ok(None)` is no answer; an error is a socket the system would not give.
-/// Sends refused while the link has no address yet are tried again.
-pub fn discover(to: SocketAddr, patience: Duration) -> io::Result<Option<IpAddr>> {
+/// A peer that answered: where from, and what it said of its link.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Found {
+    pub ip: IpAddr,
+    pub link: String,
+}
+
+/// The description an answer carries, or `None` for a datagram that is no
+/// answer.
+pub fn answered(datagram: &[u8]) -> Option<&str> {
+    let said = datagram.strip_prefix(ANSWER)?;
+    let printable = said.iter().all(|b| b.is_ascii_graphic() || *b == b' ');
+    (said.len() <= MAX_SAID && printable).then(|| std::str::from_utf8(said).expect("ASCII"))
+}
+
+/// The bench's end: broadcast [`HELLO`] to `to` once a second until an answer
+/// comes or `patience` has passed. `Ok(None)` is no answer; an error is a
+/// socket the system would not give. Sends refused while the link has no
+/// address yet are tried again.
+pub fn discover(to: SocketAddr, patience: Duration) -> io::Result<Option<Found>> {
     let socket = UdpSocket::bind((Ipv4Addr::UNSPECIFIED, 0))?;
     socket.set_broadcast(true)?;
     socket.set_read_timeout(Some(Duration::from_secs(1)))?;
     let start = Instant::now();
-    let mut buf = [0u8; 64];
+    let mut buf = [0u8; ANSWER.len() + MAX_SAID + 1];
     while start.elapsed() < patience {
         if socket.send_to(HELLO, to).is_err() {
             std::thread::sleep(Duration::from_secs(1));
@@ -112,8 +132,11 @@ pub fn discover(to: SocketAddr, patience: Duration) -> io::Result<Option<IpAddr>
         let asked = Instant::now();
         while asked.elapsed() < Duration::from_secs(1) {
             match socket.recv_from(&mut buf) {
-                Ok((n, from)) if &buf[..n] == ANSWER => return Ok(Some(from.ip())),
-                Ok(_) => {}
+                Ok((n, from)) => {
+                    if let Some(said) = answered(&buf[..n]) {
+                        return Ok(Some(Found { ip: from.ip(), link: said.to_string() }));
+                    }
+                }
                 Err(e) if matches!(e.kind(), ErrorKind::WouldBlock | ErrorKind::TimedOut) => break,
                 Err(e) => return Err(e),
             }
@@ -225,13 +248,17 @@ impl Echo {
 /// The most connections a peer serves at once.
 pub const MAX_SESSIONS: usize = 8;
 
-/// The peer's end of discovery: answer every [`HELLO`] on `socket`, for good.
+/// The peer's end of discovery: answer every [`HELLO`] on `socket` with the
+/// link it answers over, for good.
 pub fn answer(socket: &UdpSocket) -> io::Result<()> {
     let mut buf = [0u8; 64];
     loop {
         let (n, from) = socket.recv_from(&mut buf)?;
         if &buf[..n] == HELLO {
-            socket.send_to(ANSWER, from)?;
+            let said = link::toward(from.ip()).map_or_else(|why| format!("unread: {why}"), |(_, said)| said);
+            let mut reply = ANSWER.to_vec();
+            reply.extend(said.bytes().filter(|b| b.is_ascii_graphic() || *b == b' ').take(MAX_SAID));
+            socket.send_to(&reply, from)?;
         }
     }
 }
@@ -346,8 +373,9 @@ mod tests {
     #[test]
     fn a_bench_finds_its_peer_and_measures_each_request() {
         let (discovery, requests) = peer();
-        let found = discover(discovery, Duration::from_secs(5)).unwrap();
-        assert_eq!(found, Some(IpAddr::V4(Ipv4Addr::LOCALHOST)));
+        let found = discover(discovery, Duration::from_secs(5)).unwrap().expect("the peer answers");
+        assert_eq!(found.ip, IpAddr::V4(Ipv4Addr::LOCALHOST));
+        assert!(!found.link.is_empty(), "the answer says something of the peer's link");
 
         let peer = Peer(requests);
         peer.connect().unwrap();
@@ -359,6 +387,21 @@ mod tests {
         assert!(up.bytes >= CHUNK as u64, "{up:?}");
         let down = peer.download(Duration::from_millis(50)).unwrap();
         assert!(down.bytes >= CHUNK as u64, "{down:?}");
+    }
+
+    #[test]
+    fn an_answer_carries_the_peers_link_and_nothing_else_is_one() {
+        assert_eq!(answered(b"osbench-lan/2 peer wired driver=e1000e speed_mbps=1000"), Some("wired driver=e1000e speed_mbps=1000"));
+        assert_eq!(answered(b"osbench-lan/2 peer "), Some(""));
+        assert_eq!(answered(b"osbench-lan/1 peer"), None);
+        assert_eq!(answered(b"osbench-lan/2 hello"), None);
+        assert_eq!(answered(b"osbench-lan/2 peer wired\n"), None);
+        assert_eq!(answered("osbench-lan/2 peer ä".as_bytes()), None);
+        let mut long = ANSWER.to_vec();
+        long.extend([b'x'; MAX_SAID]);
+        assert!(answered(&long).is_some());
+        long.push(b'x');
+        assert_eq!(answered(&long), None);
     }
 
     #[test]
