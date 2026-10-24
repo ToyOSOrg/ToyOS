@@ -149,9 +149,9 @@ pub enum Refusal {
     Table(String),
     /// The table does not hold exactly one partition of a type the loop needs.
     Partitions { what: &'static str, matched: u32 },
-    /// The table holds neither one nor two ROOTs, which are the slots the
-    /// loader boots.
-    Roots { matched: u32 },
+    /// The table holds neither one nor two of a slot's partitions, BOOT or
+    /// ROOT: the slots the loader boots.
+    Slots { what: &'static str, matched: u32 },
     /// The image is armed with a parameter [`FLASHABLE`] does not clear.
     Armed { name: String },
     /// **The image carries no bound on its own boot.** Every metal image is
@@ -203,7 +203,7 @@ pub enum Refusal {
     /// The machine did not name itself: its SMBIOS answer is not
     /// [`Machine::QUERY`]'s three lines.
     Machine(String),
-    /// The account's home on the machine is no absolute path a rule can name.
+    /// The account's home on the machine is no normal absolute path.
     Home(String),
     /// The machine has no record, so no stick this loop may write.
     Unrecorded { path: String },
@@ -266,8 +266,8 @@ impl fmt::Display for Refusal {
             Self::Partitions { what, matched } => {
                 write!(f, "the image carries {matched} {what} partitions and this loop needs one")
             }
-            Self::Roots { matched } => {
-                write!(f, "the image carries {matched} TOYOS-ROOT partitions and this loop needs one or two")
+            Self::Slots { what, matched } => {
+                write!(f, "the image carries {matched} {what} partitions and this loop needs one or two")
             }
             Self::NoBound { staged_a_wedge } => write!(
                 f,
@@ -1026,17 +1026,20 @@ pub fn judge_arms(armed: &[String]) -> Result<u64, Refusal> {
 }
 
 /// [`whole_disk`]: exactly one ESP, one TOYOS-LOG and one slot table, and one
-/// or two ROOTs, the slots the loader boots.
+/// or two BOOTs and ROOTs, the slots the loader boots — [`Carrying::Layout`],
+/// so a stick this flashes is found again.
 fn admit(path: &Path) -> Result<Flashable, Refusal> {
     let (mut file, bytes) = whole_disk(path).map_err(Refusal::Disk)?;
     let esp = one_partition(&mut file, toyos_gpt::Guid::EFI_SYSTEM, "ESP")?;
     let log = one_partition(&mut file, toyos_gpt::Guid::MICROSOFT_BASIC, "TOYOS-LOG")?;
     one_partition(&mut file, toyos_gpt::Guid::TOYOS_SLOTS, "TOYOS-SLOTS")?;
-    let roots = toyos_gpt::locate_type(&mut toyos_build::image::FileSectors(&mut file), toyos_gpt::Guid::TOYOS_ROOT, &mut [])
-        .map_err(|e| Refusal::Table(format!("{e:?}")))?
-        .matched;
-    if !(1..=2).contains(&roots) {
-        return Err(Refusal::Roots { matched: roots });
+    for (what, kind) in [("TOYOS-BOOT", toyos_gpt::Guid::TOYOS_BOOT), ("TOYOS-ROOT", toyos_gpt::Guid::TOYOS_ROOT)] {
+        let matched = toyos_gpt::locate_type(&mut toyos_build::image::FileSectors(&mut file), kind, &mut [])
+            .map_err(|e| Refusal::Table(format!("{e:?}")))?
+            .matched;
+        if !(1..=2).contains(&matched) {
+            return Err(Refusal::Slots { what, matched });
+        }
     }
     let mut listed = [None; 16];
     toyos_gpt::list(&mut toyos_build::image::FileSectors(&mut file), &mut listed)
@@ -3526,8 +3529,13 @@ mod tests {
             std::fs::write(&at, bytes).expect("write");
             at
         };
-        let (esp, basic, slots, root) =
-            (toyos_gpt::Guid::EFI_SYSTEM, toyos_gpt::Guid::MICROSOFT_BASIC, toyos_gpt::Guid::TOYOS_SLOTS, toyos_gpt::Guid::TOYOS_ROOT);
+        let (esp, basic, slots, boot, root) = (
+            toyos_gpt::Guid::EFI_SYSTEM,
+            toyos_gpt::Guid::MICROSOFT_BASIC,
+            toyos_gpt::Guid::TOYOS_SLOTS,
+            toyos_gpt::Guid::TOYOS_BOOT,
+            toyos_gpt::Guid::TOYOS_ROOT,
+        );
 
         assert_eq!(
             admit(&write("ragged.img", &vec![0u8; 1000])),
@@ -3557,10 +3565,21 @@ mod tests {
             admit(&write("no-log.img", &no_log)),
             Err(Refusal::Partitions { what: "TOYOS-LOG", matched: 0 })
         );
-        let rootless = disk(&[("esp", esp), ("slots", slots), ("log", basic)]);
-        assert_eq!(admit(&write("rootless.img", &rootless)), Err(Refusal::Roots { matched: 0 }));
-        let three = disk(&[("esp", esp), ("slots", slots), ("log", basic), ("a", root), ("b", root), ("c", root)]);
-        assert_eq!(admit(&write("three-roots.img", &three)), Err(Refusal::Roots { matched: 3 }));
+        let bootless = disk(&[("esp", esp), ("slots", slots), ("log", basic), ("root", root)]);
+        assert_eq!(
+            admit(&write("bootless.img", &bootless)),
+            Err(Refusal::Slots { what: "TOYOS-BOOT", matched: 0 })
+        );
+        let rootless = disk(&[("esp", esp), ("slots", slots), ("log", basic), ("boot", boot)]);
+        assert_eq!(
+            admit(&write("rootless.img", &rootless)),
+            Err(Refusal::Slots { what: "TOYOS-ROOT", matched: 0 })
+        );
+        let three = disk(&[("esp", esp), ("slots", slots), ("log", basic), ("boot", boot), ("a", root), ("b", root), ("c", root)]);
+        assert_eq!(
+            admit(&write("three-roots.img", &three)),
+            Err(Refusal::Slots { what: "TOYOS-ROOT", matched: 3 })
+        );
         let no_table = disk(&[("esp", esp), ("root", root), ("log", basic)]);
         assert_eq!(
             admit(&write("no-table.img", &no_table)),
@@ -3568,9 +3587,10 @@ mod tests {
         );
         // And the shapes `build/image.rs` writes, one slot or two, which are
         // the ones admitted.
-        let two_slots = disk(&[("esp", esp), ("slots", slots), ("log", basic), ("a", root), ("b", root)]);
+        let two_slots =
+            disk(&[("esp", esp), ("slots", slots), ("log", basic), ("a", boot), ("a", root), ("b", boot), ("b", root)]);
         assert!(admit(&write("two-slots.img", &two_slots)).is_ok(), "a two-slot image is refused");
-        let built = disk(&[("esp", esp), ("slots", slots), ("log", basic), ("root", root)]);
+        let built = disk(&[("esp", esp), ("slots", slots), ("log", basic), ("boot", boot), ("root", root)]);
         let ok = admit(&write("built.img", &built)).expect("the built shape is admitted");
         assert_eq!((ok.esp.index, ok.log.index), (1, 3));
         assert_eq!(ok.bytes % u64::from(LBA), 0);
