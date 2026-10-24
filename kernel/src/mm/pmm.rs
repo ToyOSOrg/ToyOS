@@ -344,14 +344,6 @@ pub fn alloc_contiguous(count: usize) -> Option<alloc::vec::Vec<PhysPage>> {
     Some(run(base, count))
 }
 
-/// `count` physically contiguous zeroed 2 MiB pages for the kernel's own use,
-/// such as a kernel driver's DMA pool.
-pub fn alloc_contiguous_for_kernel(count: usize) -> Option<alloc::vec::Vec<PhysPage>> {
-    assert!(count > 0, "pmm: a kernel run of no pages");
-    let base = FRAMES.lock().as_mut()?.alloc_run(count)?;
-    Some(run(base, count))
-}
-
 /// The pages of a run just taken at `base`, zeroed.
 fn run(base: u64, count: usize) -> alloc::vec::Vec<PhysPage> {
     let mut pages = alloc::vec::Vec::with_capacity(count);

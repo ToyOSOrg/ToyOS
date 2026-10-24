@@ -1,13 +1,10 @@
-//! The console UART and the virtio-console, and the two locks that serialise
-//! them. Where the UART is and what it is are the architecture's
-//! (`arch::console_uart`).
+//! The console UART and the two locks that serialise it. Where the UART is
+//! and what it is are the architecture's (`arch::console_uart`).
 //!
 //! [`BackendGuard`] is the registers' lock, held with interrupts off for one
-//! burst: what the UART's transmitter takes at once; the publish of a
-//! transmit buffer to virtio-console, and each look for its completion, which
-//! the host takes at its own pace; a byte read. The panic path takes the
-//! registers alone, as a [`PanicUart`], and bypasses them once they stay held.
-//! Nothing that holds a kernel lock formats here.
+//! burst: what the UART's transmitter takes at once, or a byte read. The
+//! panic path takes the registers alone, as a [`PanicUart`], and bypasses them
+//! once they stay held. Nothing that holds a kernel lock formats here.
 
 use core::cell::Cell;
 use core::sync::atomic::{AtomicBool, Ordering};
@@ -25,49 +22,19 @@ use crate::arch::console_uart as uart;
 static UART_PRESENT: AtomicBool = AtomicBool::new(false);
 
 /// Find and program the console UART, off the firmware tables at `rsdp_addr`
-/// where the architecture places it by them.
+/// where the architecture places it by them, and put the boot so far on it.
 pub fn init(rsdp_addr: u64) {
     // What the architecture logs under the lock is not drained under it:
     // `has_console` is false until the store below.
     let present = uart::init(&mut BackendGuard::lock().registers, rsdp_addr);
     UART_PRESENT.store(present, Ordering::Relaxed);
-    console_changed();
-}
-
-/// A backend arrived or improved. Forwards to `log::console`, which owns the replay argument.
-pub fn console_changed() {
-    crate::log::console::backend_changed();
-}
-
-pub fn uart_present() -> bool {
-    UART_PRESENT.load(Ordering::Relaxed)
+    crate::log::console::drain_inline();
 }
 
 /// Whether anything can carry a byte off this machine; the same check `panic_flush` refuses on.
 pub fn has_console() -> bool {
-    !matches!(backend(), Backend::None)
+    UART_PRESENT.load(Ordering::Relaxed)
 }
-
-/// Which channel a write goes to right now; virtio-console is preferred over the UART.
-#[derive(Clone, Copy, PartialEq, Eq)]
-#[repr(u8)]
-pub enum Backend {
-    /// Nothing can carry a byte off this machine.
-    None = 0,
-    Uart = 1,
-    Virtio = 2,
-}
-
-pub fn backend() -> Backend {
-    if super::virtio_console::is_ready() {
-        Backend::Virtio
-    } else if uart_present() {
-        Backend::Uart
-    } else {
-        Backend::None
-    }
-}
-
 
 static BACKEND: BackendLock = BackendLock::new();
 
@@ -93,29 +60,15 @@ impl BackendGuard {
 
     /// Writes raw bytes with no escape stripping.
     pub fn write_raw(&mut self, bytes: &[u8]) {
-        match backend() {
-            Backend::Virtio => super::virtio_console::write_bytes_locked(self, bytes),
-            Backend::Uart => uart_write_bytes(&mut self.registers, bytes),
-            Backend::None => {}
-        }
+        uart_write_bytes(&mut self.registers, bytes);
     }
 
     pub fn has_data(&mut self) -> bool {
-        if super::virtio_console::is_ready() {
-            super::virtio_console::has_data_locked(self)
-        } else {
-            uart_present() && uart::rx_ready(&mut self.registers)
-        }
+        has_console() && uart::rx_ready(&mut self.registers)
     }
 
     pub fn try_read_byte(&mut self) -> Option<u8> {
-        if super::virtio_console::is_ready() {
-            super::virtio_console::try_read_byte_locked(self)
-        } else if uart_present() && uart::rx_ready(&mut self.registers) {
-            Some(uart::read_byte(&mut self.registers))
-        } else {
-            None
-        }
+        self.has_data().then(|| uart::read_byte(&mut self.registers))
     }
 }
 
@@ -169,6 +122,7 @@ const DRAINED_RAW: &[u8] =
 /// The registers for a fatal path: waited for while another holder may still
 /// let them go, and had at once where this CPU's fatal path holds them.
 pub fn panic_registers() -> PanicUart {
+    crate::log::console::on_the_uart_for_good();
     let irq = IrqGuard::close();
     let seized = Cell::new(None);
     // Uncalibrated, this asks once: only the boot CPU runs, so a holder is beneath this frame and never lets go.
@@ -197,7 +151,7 @@ impl PanicUart {
         }
     }
 
-    /// Straight to the UART, never virtio-console: no allocation, bounded per byte.
+    /// Straight to the UART: no allocation, bounded per byte.
     pub fn write(&mut self, bytes: &[u8]) {
         uart_write_bytes(self.registers(), bytes);
     }
@@ -235,10 +189,8 @@ impl PanicUart {
 
 /// Flushes pending logs on the panic path.
 ///
-/// Waits for a live guard holder to release before bypassing it — bypassing
-/// immediately would race its live ring/virtqueue mutation — and only
-/// bypasses a holder that never releases, or its own CPU's fatal path, which
-/// may have stopped inside a virtqueue publish.
+/// Waits for a live guard holder to release before bypassing it, and only
+/// bypasses a holder that never releases, or its own CPU's fatal path.
 ///
 /// # Safety
 /// Panic context only: the bypass reads the drain position with no lock held.
@@ -256,12 +208,6 @@ pub unsafe fn panic_flush() {
     if matches!(uart.0, Hold::Reentered(_)) {
         uart.write(DRAINED_RAW);
     }
-    // Disables virtio-console first: a half-submitted TX queue would panic
-    // recursively if a bypassing write reached it.
-    if !uart_present() {
-        return;
-    }
-    super::virtio_console::disable();
     // SAFETY: the registers are a wedged holder's or a fatal path's beneath
     // this one, neither of which runs again to publish, so reading the
     // position unlocked is safe.
@@ -320,24 +266,13 @@ pub fn wire_is_mine() -> bool {
 /// Whether the UART has refused a write, which is said once.
 static UART_REFUSED: AtomicBool = AtomicBool::new(false);
 
-/// `bytes` onto the wire the caller holds, in bursts: what the UART's
-/// transmitter takes at once, one transmit buffer's to virtio-console, with interrupts on
-/// between every two looks at the device.
+/// `bytes` onto the wire the caller holds, in bursts of what the UART's
+/// transmitter takes at once: each burst waits for the transmitter with
+/// interrupts on, and takes the register lock only to ask it and fill it.
 pub fn write_wire(_wire: &SleepGuard<'_, ()>, bytes: &[u8]) {
-    match backend() {
-        Backend::Virtio => {
-            for chunk in bytes.chunks(super::virtio_console::TX_BUF_SIZE) {
-                super::virtio_console::write_burst(chunk);
-            }
-        }
-        Backend::Uart => uart_write_fifo(bytes),
-        Backend::None => {}
+    if !has_console() {
+        return;
     }
-}
-
-/// The burst writer: each burst waits for the transmitter with interrupts on,
-/// and takes the register lock only to ask it and fill it.
-fn uart_write_fifo(bytes: &[u8]) {
     for chunk in bytes.chunks(uart::TX_BURST) {
         let mut asked = 0;
         loop {
@@ -476,7 +411,7 @@ pub const MAX_CONSOLE_LINE: usize = 1024;
 const THRE_SPIN_LIMIT: u32 = 100_000;
 
 fn uart_write_bytes(registers: &mut Registers, bytes: &[u8]) {
-    if !uart_present() {
+    if !has_console() {
         return;
     }
     for &b in bytes {

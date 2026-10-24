@@ -477,7 +477,9 @@ pub enum RenderError {
     /// no PCI matcher.
     NoSuchDevice { program: String, entry: String },
     /// Two entries one device can answer, by row and entry: the second claim
-    /// would be refused at boot, or two rows would race for one function.
+    /// would be refused at boot. Two rows' `drives` entries may: the function
+    /// goes to the first row's process, and to the next row's once one ends
+    /// with exit 0, which says the function is not its own.
     Overlap { first: (String, String), second: (String, String) },
     /// A `drives` row that also has what one process per function cannot
     /// carry: `serves`, `roles` or `devices`, or a place in `[boot] start` or
@@ -574,9 +576,10 @@ pub fn render(manifest: &Manifest) -> Result<Vec<u8>, RenderError> {
 }
 
 /// Every entry names a device, a `drives` row is one process per function and
-/// nothing else, and no device can answer two entries — but two different
-/// `drives` entries of one row, which start one process on a function either
-/// way, under the first that matches it.
+/// nothing else, and no device can answer two entries — but two `drives`
+/// entries other than one written twice: one row's start one process on a
+/// function under the first that matches it, and two rows' take turns at it,
+/// in their order, until one's process keeps it.
 fn claims_apart(manifest: &Manifest) -> Result<(), RenderError> {
     let mut seen: Vec<(&str, &str, device::Entry, bool)> = Vec::new();
     for program in &manifest.programs {
@@ -602,7 +605,7 @@ fn claims_apart(manifest: &Manifest) -> Result<(), RenderError> {
         for entry in devices.chain(drives) {
             let (text, parsed, driven) = entry?;
             let apart = |row: &str, other: &str, earlier_driven: bool| {
-                driven && earlier_driven && row == program.name && other != text.as_str()
+                driven && earlier_driven && (row != program.name || other != text.as_str())
             };
             if let Some((row, other, ..)) =
                 seen.iter().find(|(row, other, earlier, was)| earlier.overlaps(&parsed) && !apart(row, other, *was))
@@ -1077,16 +1080,16 @@ mod tests {
 
     /// **Two entries one device can answer are refused where the image is
     /// built, naming both**: across rows, within one row's `devices`, and an
-    /// entry written twice. Two different `drives` entries of one row are not:
-    /// the row starts one process on the function under the first.
+    /// entry written twice. Two different `drives` entries are not: one row
+    /// starts one process on the function under the first, and two rows take
+    /// turns at it.
     #[test]
     fn two_entries_one_device_can_answer_are_refused_by_name() {
-        let cases: [(&[Row<'_>], _, _); 6] = [
+        let cases: [(&[Row<'_>], _, _); 5] = [
             (&[("a", &[], &["pci:ff:00:00", "pci:ff:00:00"])], ("a", "pci:ff:00:00"), ("a", "pci:ff:00:00")),
             (&[("a", &["framebuffer"], &[]), ("b", &["framebuffer"], &[])], ("a", "framebuffer"), ("b", "framebuffer")),
             (&[("a", &["isa:0060,0064:1,12"], &[]), ("b", &["isa:0060,0064:1,12"], &[])], ("a", "isa:0060,0064:1,12"), ("b", "isa:0060,0064:1,12")),
             (&[("a", &["pci:01:08:02/1b36:0010"], &[]), ("b", &[], &["pci:01:08:02"])], ("a", "pci:01:08:02/1b36:0010"), ("b", "pci:01:08:02")),
-            (&[("a", &[], &["pci:0c:03:30"]), ("b", &[], &["pci:0c:03:30/1b36:000d"])], ("a", "pci:0c:03:30"), ("b", "pci:0c:03:30/1b36:000d")),
             (&[("a", &["pci:02:00:00", "pci:02:00:00/1af4:1041"], &[])], ("a", "pci:02:00:00"), ("a", "pci:02:00:00/1af4:1041")),
         ];
         for (rows, first, second) in cases {
@@ -1100,6 +1103,8 @@ mod tests {
         assert!(render(&apart).is_ok());
         let one_row = with_rows(&[("usbd", &[], &["pci:0c:03:30/1033:0194", "pci:0c:03:30@boot"])]);
         assert!(render(&one_row).is_ok());
+        let two_rows = with_rows(&[("vdagent", &[], &["pci:07:80:00/1af4:1043"]), ("console", &[], &["pci:07:80:00/1af4:1043"])]);
+        assert!(render(&two_rows).is_ok());
     }
 
     #[test]

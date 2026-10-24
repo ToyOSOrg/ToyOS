@@ -35,7 +35,9 @@
 //!
 //! **A `drives` row has one process per PCI function it names**, each holding
 //! that function's claim and started when the inventory shows the function
-//! free ([`toyos_supervisor::drives`]). **Every end is readiness on the
+//! free ([`toyos_supervisor::drives`]); rows that name one function take
+//! turns at it, the next started once one's process ends with exit 0.
+//! **Every end is readiness on the
 //! process's handle**, watched on the loop's own poller: the supervisor reads
 //! the inventory again after each, and what an end owes is
 //! [`toyos_supervisor`]'s to decide.
@@ -1943,7 +1945,11 @@ impl<'a> Supervisor<'a> {
             any = true;
             let Instance { row, function, .. } = self.instances.swap_remove(at);
             say!("supervisor: {} on PCI {} ended, {exit}", row.name, pci_at(function.at));
-            self.drives.ended(function.arrival, restart::owed(row, exit));
+            if exit.success() {
+                self.drives.declined(function.arrival, &row.name);
+            } else {
+                self.drives.ended(function.arrival, restart::owed(row, exit));
+            }
         }
         if any {
             self.drive();

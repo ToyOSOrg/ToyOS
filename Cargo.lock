@@ -1517,7 +1517,6 @@ dependencies = [
  "toyos-blackbox",
  "toyos-bootmap",
  "toyos-devicepath",
- "toyos-dma",
  "toyos-elf",
  "toyos-gicv3",
  "toyos-its",
@@ -1526,6 +1525,7 @@ dependencies = [
  "toyos-phys",
  "toyos-quiesce",
  "toyos-random",
+ "toyos-register",
  "toyos-rootimage",
  "toyos-smmu",
  "toyos-symbols",
@@ -3572,6 +3572,7 @@ dependencies = [
  "toyos-update",
  "toyos-userbound",
  "toyos-vdagent",
+ "toyos-virtio-serial",
  "toyos-wallclock",
  "ureq",
  "webpki-root-certs",
@@ -3628,10 +3629,6 @@ dependencies = [
  "toyos-net-udp",
  "toyos-net-wire",
 ]
-
-[[package]]
-name = "toyos-dma"
-version = "0.1.0"
 
 [[package]]
 name = "toyos-dns"
@@ -3905,6 +3902,10 @@ name = "toyos-random"
 version = "0.1.0"
 
 [[package]]
+name = "toyos-register"
+version = "0.1.0"
+
+[[package]]
 name = "toyos-resample"
 version = "0.1.0"
 dependencies = [
@@ -4061,6 +4062,22 @@ version = "0.1.0"
 dependencies = [
  "toyos-device-memory",
  "toyos-virtio",
+]
+
+[[package]]
+name = "toyos-virtio-serial"
+version = "0.1.0"
+
+[[package]]
+name = "toyos-virtio-serial-claim"
+version = "0.1.0"
+dependencies = [
+ "toyos",
+ "toyos-abi",
+ "toyos-device-memory",
+ "toyos-pci-claim",
+ "toyos-virtio",
+ "toyos-virtio-serial",
 ]
 
 [[package]]
@@ -4298,12 +4315,11 @@ version = "0.0.0"
 dependencies = [
  "toyos",
  "toyos-abi",
- "toyos-device-memory",
  "toyos-manifest",
- "toyos-pci-claim",
  "toyos-vdagent",
  "toyos-vdagent-bridge",
- "toyos-virtio",
+ "toyos-virtio-serial",
+ "toyos-virtio-serial-claim",
  "toyos-window",
 ]
 
@@ -4312,6 +4328,18 @@ name = "version_check"
 version = "0.9.5"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "0b928f33d975fc6ad9f86c8f283853ad26bdd5b10b7f1542aa2fa15e2289105a"
+
+[[package]]
+name = "virtio-console"
+version = "0.0.0"
+dependencies = [
+ "logkeeper-api",
+ "toyos",
+ "toyos-abi",
+ "toyos-manifest",
+ "toyos-virtio-serial",
+ "toyos-virtio-serial-claim",
+]
 
 [[package]]
 name = "walkdir"

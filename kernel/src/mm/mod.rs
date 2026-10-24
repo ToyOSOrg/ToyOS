@@ -7,7 +7,6 @@ pub mod pmm;
 pub use crate::arch::paging;
 mod alloc;
 pub mod charge;
-mod dma;
 mod image;
 mod mmio;
 pub mod policy;
@@ -23,7 +22,6 @@ pub use alloc::sweep as sweep_heap_bands;
 /// Isolates the sweep's lock hold from the sweep itself, to attribute contention correctly.
 #[cfg(feature = "heap-lockspin")]
 pub use alloc::hold_lock as hold_heap_lock;
-pub use dma::{Dma, DmaPool, Unaligned};
 pub use image::Image;
 pub use mmio::Mmio;
 pub use region::{Allocation, KernelSlice};

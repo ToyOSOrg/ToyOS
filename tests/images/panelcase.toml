@@ -13,8 +13,14 @@ start = ["logkeeper", "compositor"]
 [programs.logkeeper]
 service = true
 syscap = ["logread"]
+serves = ["log-carrier"]
 
 [programs.compositor]
 service = true
 serves = ["compositor", "prompt", "clipboard", "input", "display"]
 devices = ["framebuffer"]
+
+# The VM's console, on whichever virtio-serial function names its port.
+[programs.virtio-console]
+drives = ["pci:07:80:00/1af4:1043"]
+receives = ["log-carrier"]

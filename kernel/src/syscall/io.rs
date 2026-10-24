@@ -235,3 +235,24 @@ pub(super) fn sys_random(out: &mut UserBytesMut) -> u64 {
     crate::random::fill_user(out);
     0
 }
+
+/// `SYS_CONSOLE_CARRIED`: whether the holder of the console `h` carries the
+/// log off the machine ([`crate::object::device::ConsoleObject::carry`]).
+pub(super) fn sys_console_carried(h: RawHandle, elsewhere: u64) -> u64 {
+    let elsewhere = match elsewhere {
+        0 => false,
+        1 => true,
+        _ => return SyscallError::InvalidArgument.to_u64(),
+    };
+    let console = match process::with_process_data(|data| {
+        data.handles.get::<crate::object::device::ConsoleObject>(h, Rights::WRITE)
+    }) {
+        Ok(console) => console,
+        Err(e) => return e.refuse(),
+    };
+    match console.carry(elsewhere) {
+        Ok(()) => 0,
+        Err(kernel::carrier::Refused::Another) => SyscallError::AlreadyExists.to_u64(),
+        Err(kernel::carrier::Refused::ForGood) => SyscallError::NotSupported.to_u64(),
+    }
+}

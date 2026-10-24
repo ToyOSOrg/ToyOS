@@ -1,69 +1,40 @@
-//! The kernel's console as the host reads it off the virtio port: every byte
-//! from the kernel's first record on, and none before it.
+//! The VM's console: at the launch, a virtio-serial function of its own whose
+//! one port is named [`CONSOLE_PORT`] and carries what a chardev is given
+//! ([`args`]); and on the host's terminal, every line in colour ([`relay`]).
+//! The bytes the host reads are never coloured.
 //!
-//! A firmware whose UEFI console drives that port writes its own lines and the
-//! loader's there first, the last of them cut off where boot services end and
-//! the kernel's first record written onto its tail. Every one of them is on the
-//! 16550 as well, and a loader line is read there. Where the kernel begins is
-//! the whole rule (`toyos_logstream::kernel_opening`), so a firmware that
-//! writes nothing on the port reads the same. A terminal is shown that whole,
-//! and what is the kernel's in colour ([`Painter`], [`relay`]); the bytes the
-//! host reads are never coloured.
+//! **A `virtserialport`, never a `virtconsole`**: QEMU 11.1.1 holds a
+//! `virtserialport`'s transmit until its chardev takes it, and drops what a
+//! `virtconsole`'s chardev refuses (`hw/char/virtio-console.c`, `flush_buf`).
+//! Port 0 is a `virtconsole`'s alone, so the port is [`PORT_ID`] of a
+//! multiport function. Firmware writes nothing on it, so its first byte is
+//! the boot log's.
 
-use std::borrow::Cow;
 use std::io::{self, Read, Write};
 use std::os::fd::{AsFd, AsRawFd, BorrowedFd};
 
-use toyos_logstream::{kernel_opening, Opening, Showing};
+use toyos_logstream::Showing;
+use toyos_virtio_serial::{CONSOLE_PORT, MAX_PORTS, PORT_ID};
 
-/// A console's bytes as they arrive, withheld until the kernel's first record.
-///
-/// Of a QEMU process's first boot only: a guest reset does not re-arm it
-/// (`issues/the-kernel-console-split-does-not-re-arm-across-a-guest-reset.md`).
-pub struct KernelConsole {
-    /// The withheld tail that could still open the kernel's first record;
-    /// `None` once the kernel has begun.
-    held: Option<Vec<u8>>,
+/// The port's QEMU device id, which a test unplugs it by.
+pub const PORT_DEVICE: &str = "console-port";
+
+/// The arguments that put the console's port on `chardev`. `platform` is the
+/// virtio function's `iommu_platform` property, as every other virtio function
+/// on the machine is given it.
+pub fn args(chardev: &str, platform: &str) -> [String; 4] {
+    [
+        "-device".into(),
+        format!("virtio-serial-pci-non-transitional,id=console-serial,max_ports={MAX_PORTS}{platform}"),
+        "-device".into(),
+        format!("virtserialport,bus=console-serial.0,nr={PORT_ID},chardev={chardev},name={CONSOLE_PORT},id={PORT_DEVICE}"),
+    ]
 }
 
-impl Default for KernelConsole {
-    fn default() -> Self {
-        Self { held: Some(Vec::new()) }
-    }
-}
-
-impl KernelConsole {
-    /// What of the next `chunk` is the kernel's.
-    pub fn pass<'a>(&mut self, chunk: &'a [u8]) -> Cow<'a, [u8]> {
-        let Some(held) = &mut self.held else { return Cow::Borrowed(chunk) };
-        held.extend_from_slice(chunk);
-        match kernel_opening(held) {
-            Opening::At(at) => {
-                let from = held.split_off(at);
-                self.held = None;
-                Cow::Owned(from)
-            }
-            Opening::From(at) => {
-                held.drain(..at);
-                Cow::Borrowed(&[])
-            }
-            Opening::Nowhere => {
-                held.clear();
-                Cow::Borrowed(&[])
-            }
-        }
-    }
-}
-
-/// The console as a terminal shows it: what comes before the kernel's first
-/// record as it came, and every line from it on as [`Showing`] shows it.
-///
-/// From the kernel's first record on the console carries whole lines only, so
-/// a line is held until it ends; before it, only what could still open that
-/// record is.
+/// The console as a terminal shows it: every line as [`Showing`] shows it,
+/// each held until it ends.
 #[derive(Default)]
 pub struct Painter {
-    begun: bool,
     held: Vec<u8>,
     showing: Showing,
 }
@@ -73,22 +44,6 @@ impl Painter {
     pub fn pass(&mut self, chunk: &[u8]) -> Vec<u8> {
         let mut out = Vec::new();
         self.held.extend_from_slice(chunk);
-        if !self.begun {
-            match kernel_opening(&self.held) {
-                Opening::At(at) => {
-                    out.extend(self.held.drain(..at));
-                    self.begun = true;
-                }
-                Opening::From(at) => {
-                    out.extend(self.held.drain(..at));
-                    return out;
-                }
-                Opening::Nowhere => {
-                    out.append(&mut self.held);
-                    return out;
-                }
-            }
-        }
         while let Some(end) = self.held.iter().position(|&b| b == b'\n') {
             let line: Vec<u8> = self.held.drain(..=end).collect();
             self.show(&line[..end], &mut out);
@@ -97,16 +52,14 @@ impl Painter {
         out
     }
 
-    /// What the terminal is shown of what is still held once the console has
-    /// ended: a line a machine that stopped mid-line never finished, or the
-    /// bytes that could have opened the kernel's first record.
+    /// What the terminal is shown of a line a machine that stopped mid-line
+    /// never finished, once the console has ended.
     pub fn finish(mut self) -> Vec<u8> {
         let held = std::mem::take(&mut self.held);
-        if !self.begun || held.is_empty() {
-            return held;
-        }
         let mut out = Vec::new();
-        self.show(&held, &mut out);
+        if !held.is_empty() {
+            self.show(&held, &mut out);
+        }
         out
     }
 
@@ -176,52 +129,9 @@ mod tests {
     use super::*;
     use std::os::fd::FromRawFd;
 
-    /// QEMU 11.1.1's own edk2 on the virtio port, as a boot put it there: the
-    /// screen clears, `BdsDxe` and the loader, and the loader's last line cut
-    /// off by the handoff.
-    const FIRMWARE: &str = "\x1b[2J\x1b[01;01H\x1b[=3h\x1b[2J\x1b[01;01HBdsDxe: loading Boot0001 \
-         \"UEFI QEMU QEMU USB HARDDRIVE TOYOS0BOOTSTICK1\" from PciRoot(0x0)/Pci(0x1,0x0)/USB(0x0,0x0)\n\
-         [--.--- cpu0 loader] ToyOS Bootloader 1.0\n\
-         [--.--- cpu0 loader] ROOT: read into memory at 0x7c894000+0x800000 from LBA 212992+16384, 1048576 bytes a request \
-         (optimal granularity: not reported), in 22519000 counter ticks\n\
-         [--.--- cpu0 loader] Loader log: the kernel handoff begins, so ";
-
     const KERNEL: &str = "[--.--- cpu0 kernel] black box: 0x8000000 is this boot's, 16344 bytes \
          for the next boot's loader\n\
          [--.--- cpu0 kernel] pmm: the firmware map calls 4288393216 bytes usable\n";
-
-    /// Everything `stream` passes, fed in pieces cut at each of `cuts`.
-    fn passed(stream: &str, cuts: &[usize]) -> String {
-        let mut console = KernelConsole::default();
-        let mut out = Vec::new();
-        let mut from = 0;
-        for &to in cuts.iter().chain([stream.len()].iter()) {
-            out.extend_from_slice(&console.pass(&stream.as_bytes()[from..to]));
-            from = to;
-        }
-        String::from_utf8(out).expect("the kernel's bytes are UTF-8")
-    }
-
-    #[test]
-    fn the_fused_line_is_the_kernels_first_record_wherever_the_chunks_fall() {
-        let stream = format!("{FIRMWARE}{KERNEL}");
-        for cut in 0..=stream.len() {
-            assert_eq!(passed(&stream, &[cut]), KERNEL, "cut at byte {cut}");
-        }
-        let every_byte: Vec<usize> = (1..stream.len()).collect();
-        let kernel = passed(&stream, &every_byte);
-        let first = kernel.lines().next().expect("a first line");
-        assert_eq!(
-            crate::bootlog::message(first),
-            Some("black box: 0x8000000 is this boot's, 16344 bytes for the next boot's loader")
-        );
-    }
-
-    #[test]
-    fn a_port_the_firmware_left_alone_passes_whole() {
-        let later = format!("{KERNEL}[ 1.002 supervisor] supervisor: a program's line\n");
-        assert_eq!(passed(&later, &[3, 40]), later);
-    }
 
     /// What the terminal is shown of `stream` fed in pieces cut at each of `cuts`.
     fn painted(stream: &str, cuts: &[usize]) -> String {
@@ -235,31 +145,26 @@ mod tests {
         String::from_utf8(out).expect("the painter writes UTF-8")
     }
 
-    /// The firmware's bytes reach the terminal as they came, the kernel's
-    /// lines as a screen shows them, a continuation in its record's severity —
-    /// and the same however the chunks fall.
+    /// Every line as a screen shows it, a continuation in its record's
+    /// severity, and the same however the chunks fall.
     #[test]
-    fn a_terminal_is_shown_the_firmware_as_it_came_and_the_kernel_in_colour() {
+    fn a_terminal_is_shown_each_line_in_colour() {
         let alert = "[ 0.002 cpu1 kernel alert tid=4] PANIC: panicked at kernel/src/main.rs:1:\n  oops\n";
         let program = "[ 0.003 supervisor warn] supervisor: a program's line\n";
-        let stream = format!("{FIRMWARE}{KERNEL}{alert}{program}");
-        let mut want = String::from(FIRMWARE);
+        let stream = format!("{KERNEL}{alert}{program}");
+        let mut want = String::new();
         let mut showing = Showing::default();
-        for line in format!("{KERNEL}{alert}{program}").lines() {
+        for line in stream.lines() {
             want.push_str(&format!("{}\n", showing.line(line)));
         }
         assert!(want.contains("\x1b[91m  oops\x1b[0m\n"), "{want:?}");
         assert_eq!(painted(&stream, &[]), want);
         let every_byte: Vec<usize> = (1..stream.len()).collect();
         assert_eq!(painted(&stream, &every_byte), want);
-        // What is held before the kernel is only what could still open its first record.
-        assert_eq!(painted(&FIRMWARE[..FIRMWARE.len() - 3], &[]), FIRMWARE[..FIRMWARE.len() - 3]);
-        assert_eq!(painted("so [--.--- cpu0 ker", &[]), "so ");
     }
 
     /// A console that ends mid-line — a machine that stopped while it spoke —
-    /// still shows its last line, and one that ends on what could have begun
-    /// the kernel's head still shows those bytes.
+    /// still shows its last line.
     #[test]
     fn a_console_that_ends_mid_line_shows_its_last_line() {
         let cut = "[ 0.004 cpu0 kernel alert tid=1] PANIC: triple fa";
@@ -271,13 +176,6 @@ mod tests {
         let want = format!("{want}{}", showing.line(cut));
         assert!(want.ends_with("\x1b[91mPANIC: triple fa\x1b[0m"), "{want:?}");
         assert_eq!(String::from_utf8(out).expect("UTF-8"), want);
-
-        for early in ["so [--.--- cpu0 ker", "loading\r"] {
-            let mut painter = Painter::default();
-            let mut out = painter.pass(early.as_bytes());
-            out.extend(painter.finish());
-            assert_eq!(out, early.as_bytes());
-        }
     }
 
     /// A descriptor that refuses a write as `WouldBlock` once it is full, and says so
@@ -310,7 +208,7 @@ mod tests {
     /// A burst of kernel lines far past a terminal's capacity, and what a
     /// [`Painter`] shows of it.
     fn burst() -> (Vec<u8>, Vec<u8>) {
-        let mut stream = String::from(FIRMWARE);
+        let mut stream = String::new();
         for n in 0..20_000 {
             stream.push_str(&format!("[ 1.{:03} cpu{} kernel alert tid=3] frame {n}: kernel::panic\n", n % 1000, n % 8));
             stream.push_str("  continued\n");
@@ -380,14 +278,5 @@ mod tests {
             .unwrap_or_else(|e| panic!("the terminal was not shown the {length} bytes painted: {e}"))
             .expect("the relay's output");
         assert!(shown == want, "the terminal was shown other bytes than the {length} painted");
-    }
-
-    #[test]
-    fn nothing_before_the_kernel_passes() {
-        assert_eq!(passed(FIRMWARE, &[5, 200]), "");
-        let mut console = KernelConsole::default();
-        assert!(console.pass(FIRMWARE.as_bytes()).is_empty());
-        let held = console.held.as_ref().expect("the kernel has not begun").len();
-        assert!(held < toyos_logstream::MAX_HEAD, "{held} bytes withheld, more than could open a record");
     }
 }

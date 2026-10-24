@@ -153,15 +153,6 @@ impl Published {
         self.lost.store(other.lost(), Ordering::Relaxed);
     }
 
-    /// Resets the position to the oldest record every shard still holds.
-    pub fn rewind(&self) {
-        for ring in 0..self.count() {
-            self.word(ring).store(FIRST_SEQ, Ordering::Relaxed);
-        }
-        // Also zeroes `lost`: after a rewind it counts only future drops, not what a prior consumer missed.
-        self.lost.store(0, Ordering::Relaxed);
-    }
-
     /// Is there a committed record this position has not taken? Lock-free.
     pub fn any_pending(&self) -> bool {
         any_committed(self)

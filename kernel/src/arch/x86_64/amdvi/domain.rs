@@ -97,7 +97,7 @@ pub(super) fn claimed(id: u16) {
 /// own, if it does: no programmed unit serves it, so nothing would translate
 /// one; or an IVMD names it, so firmware reserves memory it must keep
 /// reaching, which the identity domain maps and a domain of its own would not.
-pub fn untranslated(stream: StreamId) -> Option<&'static str> {
+fn untranslated(stream: StreamId) -> Option<&'static str> {
     let held = DOMAINS.lock();
     let amd = held.as_ref()?;
     let id = stream.requester();

@@ -13,7 +13,7 @@ start = ["logkeeper", "diskserver", "fileserver", "soundserver", "acpiserver", "
 [programs.logkeeper]
 service = true
 syscap = ["logread"]
-serves = ["log"]
+serves = ["log", "log-carrier"]
 
 # The machine's ACPI fixed hardware, as `images/system.toml` serves it: on the T14
 # every row of this image runs in ACPI mode, and on q35 the stop tests power off
@@ -123,3 +123,8 @@ receives = ["disk"]
 restart = true
 roles = ["data", "log", "boot"]
 receives = ["block"]
+
+# The VM's console, on whichever virtio-serial function names its port.
+[programs.virtio-console]
+drives = ["pci:07:80:00/1af4:1043"]
+receives = ["log-carrier"]

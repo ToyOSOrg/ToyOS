@@ -653,7 +653,8 @@ const SUPERVISOR_SERVED: &[&str] = &[toyos_swap::PORT, "power", toyos_manifest::
 /// clipboard port, whose holder is sent every copy made in the session, the
 /// display port, whose holder sets the mode and the scale every window is
 /// drawn at, and the session-admin port, whose holder signs its user's
-/// sessions out.
+/// sessions out, and the log's carrier port, for whose holder the console
+/// UART goes quiet.
 const HELD_ALONE: &[(&str, &[&str])] = &[
     (toyos_swap::PORT, &[toyos_swap::HOLDER]),
     (toyos_manifest::grants::PORT, &[toyos_manifest::grants::HOLDER]),
@@ -662,6 +663,7 @@ const HELD_ALONE: &[(&str, &[&str])] = &[
     (toyos_manifest::clipboard::PORT, &[toyos_manifest::clipboard::HOLDER]),
     (toyos_manifest::display::PORT, &[toyos_manifest::display::HOLDER]),
     (toyos_session::ADMIN_PORT, &[toyos_session::ADMIN_HOLDER]),
+    (toyos_logstream::CARRIER, &[toyos_logstream::CARRIER_HOLDER]),
 ];
 
 /// Rows, as a refusal names them.
@@ -3290,6 +3292,10 @@ mod tests {
         assert!(held_by_their_holders_alone(&vdagent).is_ok());
         let editor: SystemConfig = toml::from_str("[programs.editor]\nreceives = [\"clipboard\"]\n").unwrap();
         assert!(held_by_their_holders_alone(&editor).is_err());
+        let console: SystemConfig = toml::from_str("[programs.virtio-console]\nreceives = [\"log-carrier\"]\n").unwrap();
+        assert!(held_by_their_holders_alone(&console).is_ok());
+        let agent: SystemConfig = toml::from_str("[programs.vdagent]\nreceives = [\"clipboard\", \"log-carrier\"]\n").unwrap();
+        assert!(held_by_their_holders_alone(&agent).unwrap_err().contains("only `virtio-console`"));
     }
 
     /// The prompt port reaches its server alone, and the consent port no row,

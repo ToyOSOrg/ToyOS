@@ -1,11 +1,7 @@
 //! QEMU's clipboard channel at the launch: its `qemu-vdagent` chardev, the
 //! virtio-serial function of its own it is on, and the agent's port, from the
-//! one declaration the guest's agent reads (`toyos-vdagent`).
-//!
-//! **A function of its own**, created just before the console's: the console's
-//! function is the kernel's log channel from early boot, and the agent's
-//! enumerates first, so every virtio boot runs the kernel's choice of console
-//! (`toyos_pci::console`).
+//! declarations the guest's agent reads (`toyos-vdagent`,
+//! `toyos-virtio-serial`).
 //!
 //! **The chardev exists only in a QEMU built with spice-protocol** (QEMU's
 //! `qapi/char.json`, `'if': 'CONFIG_SPICE_PROTOCOL'`), so a launch asks QEMU
@@ -14,7 +10,8 @@
 use std::process::Command;
 use std::sync::OnceLock;
 
-use toyos_vdagent::{MAX_PORTS, PORT_ID, PORT_NAME};
+use toyos_vdagent::PORT_NAME;
+use toyos_virtio_serial::{MAX_PORTS, PORT_ID};
 
 use crate::arch::Arch;
 

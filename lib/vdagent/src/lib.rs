@@ -1,15 +1,13 @@
-//! QEMU's clipboard channel, as a guest agent speaks it: the channel's
-//! declaration, virtio-serial's control messages ([`control`]) and the spice
-//! vdagent stream ([`stream`] decodes it, [`encode`] writes it).
+//! QEMU's clipboard channel, as a guest agent speaks it: the agent's port's
+//! name and the spice vdagent stream ([`stream`] decodes it, [`encode`] writes
+//! it). The virtio-serial function it is on is `toyos-virtio-serial`'s.
 //!
 //! **Every word decoded here is the host's**, written by QEMU's `qemu-vdagent`
 //! chardev through its virtio-serial device. Each is bounded before it sizes a
 //! buffer, and one that fails its bound is a refusal by name: a decode never
 //! panics and never buffers more than arrived.
 //!
-//! What it cites: *Virtual I/O Device (VIRTIO) Version 1.2*, OASIS Committee
-//! Specification 01, §5.3 for the console device and its control messages, and
-//! spice-protocol's `spice/vd_agent.h` at `499cc832` for the stream, its
+//! What it cites: spice-protocol's `spice/vd_agent.h` at `499cc832` for the stream, its
 //! packed layouts and its numbers. The header leaves a `GRAB`'s serial without
 //! a meaning; what QEMU 11.1.1 does with it is the agent's to state, measured.
 
@@ -20,25 +18,12 @@ extern crate alloc;
 #[cfg(test)]
 extern crate std;
 
-pub mod control;
 pub mod encode;
 pub mod stream;
 
 /// The agent's port, as `vd_agent.h:63-68` names it: what the launch names the
-/// `virtserialport` it creates.
+/// `virtserialport` it creates, and how the agent knows its function.
 pub const PORT_NAME: &str = "com.redhat.spice.0";
-
-/// The virtio-serial function's `max_ports`: port 0, which nothing uses, and
-/// the agent's.
-pub const MAX_PORTS: u32 = 2;
-
-/// The agent's port id, `nr=` at the launch: the one id the launch and the
-/// agent both read, so a `PORT_NAME`'s bytes are never decoded.
-pub const PORT_ID: u32 = 1;
-
-/// How many control receive buffers the agent keeps posted: virtio-serial drops
-/// a control event that finds none.
-pub const CONTROL_BUFFERS: usize = 8;
 
 /// The longest clipboard text that crosses, in bytes: the compositor's
 /// `window::MAX_CLIPBOARD_BYTES`, which the agent asserts this equals.

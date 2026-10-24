@@ -147,20 +147,10 @@ pub mod domain {
         }
     }
 
-    /// Why `stream` keeps the machine's own addresses rather than a domain of
-    /// its own, if it does: AMD-Vi's reasons. VT-d answers `None` for every
-    /// function, an RMRR's included, which it moves off the identity domain
-    /// like any other.
-    pub fn untranslated(stream: StreamId) -> Option<&'static str> {
-        match backend() {
-            Backend::AmdVi => amdvi::domain::untranslated(stream),
-            Backend::Vtd | Backend::None => None,
-        }
-    }
-
-    /// Why no claim may have `stream`, if none may: [`untranslated`]'s
-    /// reasons and the requester ids AMD-Vi's platform speaks as. VT-d
-    /// answers `None`.
+    /// Why no claim may have `stream`, if none may: AMD-Vi's reasons for a
+    /// function that keeps the machine's own addresses, and the requester ids
+    /// its platform speaks as. VT-d answers `None` for every function, an
+    /// RMRR's included, which it moves off the identity domain like any other.
     pub fn unclaimable(stream: StreamId) -> Option<&'static str> {
         match backend() {
             Backend::AmdVi => amdvi::domain::unclaimable(stream),

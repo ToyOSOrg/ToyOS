@@ -13,7 +13,8 @@ sdk/abi/src/syscall.rs` is the check, and it finds none: the three `SYS_NIC_*`
 names went with the virtio NIC driver, which is `system/netstack/src/virtio_net.rs`
 now, the four `SYS_GPU_*` names with virtio-gpu's, which is the
 compositor's (`system/compositor/virtio-gpu`), and `SYS_HDA_BIND` with the
-kernel's HDA stub. The kernel's virtio code left is its console's, and it
+kernel's HDA stub. No virtio code is left in the kernel: its console's is
+`system/virtio-console`'s, a `drives` row beside vdagent's, and the kernel
 drives no audio hardware.
 
 **Ordering ruling, and it is not negotiable: the IOMMU lands first and

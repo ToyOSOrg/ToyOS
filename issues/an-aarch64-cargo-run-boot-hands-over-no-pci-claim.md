@@ -25,10 +25,11 @@ in this kernel is given no LPI`) and initialises no controller, so no USB
 keyboard reaches the compositor, which panics on "the manifest gives this
 program the keyboard".
 
-So on aarch64 the clipboard agent's claim and its handshake are unbooted:
-its function is declined by the console driver and the console comes up
-on the next one, and the agent itself exits on "no virtio-serial function
-was handed to this program". Its handshake on aarch64 rests on the code
+So on aarch64 the virtio-serial drivers' claims and handshakes are unbooted:
+neither the clipboard agent nor the console's driver is handed its
+function, so the console port `cargo run`'s terminal shows carries nothing,
+and the boot's whole log is on the UART's file
+(`/tmp/toyos-uart-early.log`). Their handshakes on aarch64 rest on the code
 that passes on q35.
 
 The windows a claim's BAR is checked against come from the loader's list, which takes every

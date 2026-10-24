@@ -337,6 +337,10 @@ fn user_abort(frame: &mut Frame) {
 fn user_fatal(frame: &Frame) -> ! {
     let prev = percpu::swap_fault_state(CpuFaultState::Fatal);
     let recursive = matches!(prev, CpuFaultState::Fatal | CpuFaultState::Panic);
+    // Before the first record of a report that halts the machine.
+    if recursive {
+        crate::log::console::on_the_uart_for_good();
+    }
     // First: a panic anywhere below reaches the panic handler as DOUBLE
     // PANIC, which can only report what was captured here.
     crate::panic::record_fault(class_name(frame.esr), frame.elr, frame.far, frame.esr);
