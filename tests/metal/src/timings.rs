@@ -5,7 +5,7 @@
 //! One file per machine under [`dir`], named for its SMBIOS vendor and product:
 //! `metal/` in the host's store, outside every checkout, so every worktree on
 //! the host reads one record and none commits it.
-//! `toyos-metal --install-sudoers` writes it once, with the stick and no
+//! `toyos-metal --record` writes it once, with the stick and no
 //! number, and the loop refuses a machine that has none. A name the record
 //! lacks is added by a run and not judged, and only where its owner passed, the
 //! boot or the row that measured it; a recorded value is never moved by a run,
