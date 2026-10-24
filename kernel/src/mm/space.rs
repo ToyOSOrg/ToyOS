@@ -713,7 +713,7 @@ impl AddressSpace {
                 phys
             }
             Leaf::Empty => match &entry.kind {
-                Kind::Private { committed: false } => return None,
+                Kind::Private { committed: false } => unreachable!("space: a reservation at {page:#x} allows an access"),
                 Kind::Object { object, offset, .. } => {
                     let phys = object.page(offset + (page - start));
                     leaves.set(page, Leaf::Mapped(Mapping { phys, prot, owned: false, cache: object.cache() }));
