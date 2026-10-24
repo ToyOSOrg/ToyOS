@@ -287,10 +287,12 @@ Not consumers:
          - The 0 B reject rows failed there (1.12). The refusal's wipe was a
            `memset`, which costs a `rep stosb` start-up on ToyOS
            (`issues/a-short-memset-on-x86-64-costs-a-rep-stosb-start-up.md`).
-           #1054 now wipes 16 bytes per store; that build's boot is pending.
-         - Exit: the 0 B reject rows pass again.
+           With #1054's 16-byte wipe they read 56.7 and 61.2 ns (0.59,
+           0.63), main's 57–61, and pass.
+         - Exit: the guest rows pass.
          - Evidence:
-           https://github.com/ToyOSOrg/evidence/tree/1f9192b8c6f601c9e748cb87a78ba33d4a95fba7/r3
+           https://github.com/ToyOSOrg/evidence/tree/db8683ad53396c00cef576007349d3662d4c7d78/r3
+           and `r4` beside it.
        - **SHA-512 at 16 KiB on BMI2 (the AMD bench), 1.035.**
          - A vector message schedule without AVX-512 measured 1.385 and was
            removed.
@@ -499,8 +501,12 @@ Not consumers:
        - The controls held: null 1.68–1.69 and 0.83–1.17, leaky 1,119.7 and 1,122.5
          and 109–190.
        - The job took about 465 s and 434 s.
+       - With #1054's 16-byte refusal wipe in place of the `memset`, every
+         routine passes again: max |t| 1.10–2.60 on the T14 and 1.00–2.49 on
+         the AMD bench.
        - Evidence:
-         https://github.com/ToyOSOrg/evidence/tree/1f9192b8c6f601c9e748cb87a78ba33d4a95fba7/r3
+         https://github.com/ToyOSOrg/evidence/tree/db8683ad53396c00cef576007349d3662d4c7d78/r3
+         and `r4`.
      - **Not timed:** ML-KEM key generation. Its matrix expansion rejects
        samples by rho, a public output of the secret seed, so no two classes
        can share it. Exit: a measurement with rho held fixed, which needs an

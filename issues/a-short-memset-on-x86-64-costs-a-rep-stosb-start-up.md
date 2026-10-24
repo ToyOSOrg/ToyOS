@@ -16,7 +16,9 @@ any program makes pays the instruction's start-up.
 - AES-GCM's refusal zeroed the record with `fill(0)`. reject/0 read 107.6–108.7 ns, against 56.7–58.8 ns on main in every recent readback.
 - At 0 B that refusal does a zero-length `memset` and little else.
 - The Linux probe, on musl's `memset`, read 51 ns at both revisions.
-- #1054 now wipes 16 bytes per store instead. That build's boot decides whether the `memset` was the whole difference.
+- With #1054's 16-byte volatile stores in its place, reject/0 read 56.7 and 61.2 ns, main's level. The `memset` was the whole difference: about 50 ns for a zero-length call.
+- The ToyOS-target disassembly of that build's open calls no `memset`.
+- Evidence: https://github.com/ToyOSOrg/evidence/tree/db8683ad53396c00cef576007349d3662d4c7d78/r4
 
 **Owner:** `sdk/libc`. `toyos-crypto` works around the cost: `block.rs`'s header, and `secret::wipe` at the refusal.
 
