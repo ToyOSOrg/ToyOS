@@ -21,7 +21,7 @@ fn create_single_small_file() {
     let files = mounted.list(usize::MAX, &|_| true).expect("list failed");
     assert_eq!(files.len(), 1);
     assert_eq!(files[0].0, "hello.txt");
-    assert_eq!(files[0].1, 13);
+    assert_eq!(files[0].1, bcachefs::Recorded { symlink: false, size: 13, mtime: 42 });
 
     let data = mounted.read_file("hello.txt").expect("read failed");
     assert_eq!(data, b"Hello, world!");
@@ -134,7 +134,7 @@ fn empty_file() {
     let files = mounted.list(usize::MAX, &|_| true).expect("list");
     assert_eq!(files.len(), 1);
     assert_eq!(files[0].0, "empty");
-    assert_eq!(files[0].1, 0);
+    assert_eq!(files[0].1.size, 0);
 
     let data = mounted.read_file("empty").expect("read empty");
     assert!(data.is_empty());
