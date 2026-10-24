@@ -389,9 +389,6 @@ pub fn spawn<H>(
         tls: Some(tls_pages),
         user_stack_base: stack_base,
         user_stack_size: USER_STACK_SIZE as u64,
-        syscall_counts: [0; toyos_abi::syscall::SYSCALL_PROFILE_BINS],
-        syscall_total: 0,
-        syscall_total_ns: 0,
     }));
 
     #[cfg(feature = "test-actuators")]

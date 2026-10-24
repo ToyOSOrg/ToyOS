@@ -716,6 +716,32 @@ pub fn current_image() -> Option<Option<Arc<crate::process::UserImage>>> {
     try_with_cpu(|cpu| cpu.running().map(|t| t.ext().image.clone())).flatten()
 }
 
+/// Whether this CPU's doorbell was rung since its last pass began: what a
+/// kick's handler asks before it owes a pass. A kick that landed after the pass
+/// it was sent for began, or that only asks this CPU to serve a counters round,
+/// owes none.
+pub fn pass_owed() -> bool {
+    cpus().get(current_cpu()).doorbell().kick_pending()
+}
+
+/// Ring every other CPU's doorbell with nothing behind it and kick each whose
+/// edge this raised, so each runs a pass: what a machine-wide stop needs of a
+/// CPU halted with its timer stopped, or running a thread that never enters
+/// the kernel.
+pub fn ring_all_but_self() {
+    let me = current_cpu();
+    for cpu in (0..cpus().len() as u32).map(CpuId).filter(|&cpu| cpu != me) {
+        if cpus().get(cpu).poke() == Kick::Send {
+            HW.kick(cpu);
+        }
+    }
+}
+
+/// Count the running thread's syscall `num`, which took `ticks` of the counter.
+pub fn note_syscall(num: u64, ticks: u64) {
+    try_with_cpu(|cpu| cpu.running().map(|t| t.ext().handle.syscalls().note(num, ticks)));
+}
+
 /// What the running task's marks say it does instead of returning to Ring 3 — one load, no clone, since an `Arc` refcount here is too costly on this path.
 pub fn current_safe_point(stopping: bool) -> Option<kernel::sched::task::SafePoint> {
     try_with_cpu(|cpu| cpu.running().and_then(|t| t.shared().at_safe_point(stopping))).flatten()

@@ -446,7 +446,6 @@ pub(crate) unsafe extern "C" fn kernel_main(loader_args: &mut KernelArgs) -> ! {
     vfs::init();
     process::init();
     scheduler::init();
-    pipe::init();
 
     vfs::lock().mount(&["tmp"], Box::new(crate::tmpfs::TmpFs::new()));
 

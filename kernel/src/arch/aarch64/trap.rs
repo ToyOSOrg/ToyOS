@@ -215,7 +215,7 @@ fn irq(frame: &Frame, from_el0: bool) -> bool {
         irqchip::SGI_KICK => {
             percpu::irq_took(Source::Kick);
             crate::counters::serve_here();
-            true
+            crate::sched::driver::pass_owed()
         }
         #[cfg(feature = "boot-actuators")]
         irqchip::SGI_STORM => {

@@ -48,8 +48,20 @@ impl ClockPage {
 /// Saturating below boot: a counter read on a CPU that trails reads as the
 /// oldest instant, never as a wrap 584 years ahead.
 pub const fn nanos_between(counter_at_boot: u64, period_fs: u64, now: u64) -> u64 {
-    let delta = now.saturating_sub(counter_at_boot);
-    ((delta as u128 * period_fs as u128) / 1_000_000) as u64
+    ticks_to_nanos(now.saturating_sub(counter_at_boot), period_fs)
+}
+
+/// `ticks` of a counter whose tick is `period_fs` femtoseconds, in nanoseconds:
+/// `⌊ticks · period_fs / 10⁶⌋` in its low 64 bits, the one formula the kernel
+/// and every clock-page reader share.
+///
+/// Split at 10⁶ ticks, `⌊(q·10⁶ + r)·p / 10⁶⌋ = q·p + ⌊r·p / 10⁶⌋`, so it
+/// takes two 64-bit divisions by a constant, which compile to multiplications,
+/// in place of a 128-bit division, which is a library call. Exact for any tick
+/// under 18 ms (`10⁶ · period_fs < 2⁶⁴`).
+pub const fn ticks_to_nanos(ticks: u64, period_fs: u64) -> u64 {
+    const FS_PER_NS: u64 = 1_000_000;
+    (ticks / FS_PER_NS).wrapping_mul(period_fs).wrapping_add(ticks % FS_PER_NS * period_fs / FS_PER_NS)
 }
 
 /// Nanoseconds since boot, off this process's clock page.
@@ -101,6 +113,28 @@ mod tests {
         assert_eq!(nanos_between(0, 400_000, 2_500_000_000), 1_000_000_000);
         // No overflow at a counter the machine will not reach in a century.
         assert_eq!(nanos_between(0, 1_000_000, u64::MAX), u64::MAX);
+    }
+
+    /// The split formula is the 128-bit product's quotient for every period a
+    /// counter has, at every count: the ends, the split's own boundary, and a
+    /// spread between.
+    #[test]
+    fn the_split_is_the_wide_quotient() {
+        let wide = |ticks: u64, fs: u64| ((ticks as u128 * fs as u128) / 1_000_000) as u64;
+        let mut x = 0x2545_f491_4f6c_dd1du64;
+        let mut next = || {
+            x = x.wrapping_mul(6_364_136_223_846_793_005).wrapping_add(1_442_695_040_888_963_407);
+            x
+        };
+        let mut periods = std::vec![1, 999_999, 1_000_000, 1_000_001, 41_666_666, 413_393, 18_000_000_000_000];
+        periods.extend((0..64).map(|_| 1 + next() % 100_000_000));
+        let mut ticks = std::vec![0, 1, 999_999, 1_000_000, 1_000_001, u64::MAX - 1, u64::MAX];
+        ticks.extend((0..256).map(|_| next()));
+        for &fs in &periods {
+            for &t in &ticks {
+                assert_eq!(ticks_to_nanos(t, fs), wide(t, fs), "{t} ticks of {fs} fs");
+            }
+        }
     }
 
     #[test]

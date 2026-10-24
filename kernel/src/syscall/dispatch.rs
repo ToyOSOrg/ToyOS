@@ -70,13 +70,7 @@ fn task_probes() {
 pub(crate) fn syscall_dispatch(num: u64, a1: u64, a2: u64, a3: u64, a4: u64) -> u64 {
     #[cfg(feature = "boot-actuators")]
     task_probes();
-    let t0 = crate::clock::nanos_since_boot();
-
-    process::with_current_data(|data| {
-        data.syscall_total += 1;
-        // Clamped, not guarded: an unissued number still lands in the last bin, not nowhere.
-        data.syscall_counts[(num as usize).min(toyos_abi::syscall::SYSCALL_PROFILE_OTHER)] += 1;
-    });
+    let entered = crate::arch::cpu::counter();
 
     // SAFETY: current process's page tables remain active for the duration of this call.
     let ctx = unsafe { SyscallContext::new() };
@@ -662,10 +656,8 @@ pub(crate) fn syscall_dispatch(num: u64, a1: u64, a2: u64, a3: u64, a4: u64) -> 
     crate::object::drain_zero_handles();
 
     // Wall-clock, not CPU time: elapsed includes any preemption.
-    let elapsed = crate::clock::nanos_since_boot() - t0;
-    process::with_current_data(|data| {
-        data.syscall_total_ns += elapsed;
-    });
+    let elapsed = crate::arch::cpu::counter().saturating_sub(entered);
+    crate::sched::driver::note_syscall(num, elapsed);
 
     result
 }

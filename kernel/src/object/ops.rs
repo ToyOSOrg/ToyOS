@@ -12,7 +12,7 @@ use kernel::sched::task::WaitClass;
 
 use crate::drivers::serial;
 use crate::file_cache;
-use crate::pipe::{self, PipeId};
+use crate::pipe::{self, PipeRef};
 use kernel::pipe::{End, Landing};
 use crate::user_ptr::{UserBytes, UserBytesMut};
 use crate::inbox::PollEntry;
@@ -195,19 +195,22 @@ pub fn close_all(table: &mut HandleTable) {
     drop(core::mem::replace(table, HandleTable::new()));
 }
 
-pub fn pipe_id_read(object: &KObjectRef) -> Option<PipeId> {
-    pipe_read(object).map(|(id, _)| id)
+/// The pipe a read of `object` took from, held past the handle table's lock
+/// to wake its writers.
+pub fn read_pipe(object: &KObjectRef) -> Option<PipeRef> {
+    pipe_read(object).map(|(pipe, _)| pipe.clone())
 }
 
-pub fn pipe_id_write(object: &KObjectRef) -> Option<PipeId> {
-    pipe_write(object).map(|(id, _, _)| id)
+/// The pipe a write to `object` filled, held the same way to wake its readers.
+pub fn written_pipe(object: &KObjectRef) -> Option<PipeRef> {
+    pipe_write(object).map(|(pipe, _, _)| pipe.clone())
 }
 
 /// The pipe a blocking read of `object` parks on, and the class its wait is
 /// charged to: a connection's is its peer's answer, which is IPC.
-pub fn pipe_read(object: &KObjectRef) -> Option<(PipeId, WaitClass)> {
+pub fn pipe_read(object: &KObjectRef) -> Option<(&PipeRef, WaitClass)> {
     match object {
-        KObjectRef::PipeRead(r) => Some((r.id(), WaitClass::Pipe)),
+        KObjectRef::PipeRead(r) => Some((r.pipe(), WaitClass::Pipe)),
         KObjectRef::Connection(c) => Some((c.rx(), WaitClass::Ipc)),
         KObjectRef::PipeWrite(_) | KObjectRef::File(_) | KObjectRef::Device(_)
         | KObjectRef::Console(_) | KObjectRef::Acceptor(_) | KObjectRef::Inbox(_)
@@ -220,9 +223,9 @@ pub fn pipe_read(object: &KObjectRef) -> Option<(PipeId, WaitClass)> {
 
 /// [`pipe_read`]'s answer for a blocking write, and how a write lands in
 /// that pipe.
-pub fn pipe_write(object: &KObjectRef) -> Option<(PipeId, WaitClass, Landing)> {
+pub fn pipe_write(object: &KObjectRef) -> Option<(&PipeRef, WaitClass, Landing)> {
     match object {
-        KObjectRef::PipeWrite(w) => Some((w.id(), WaitClass::Pipe, Landing::Pipe)),
+        KObjectRef::PipeWrite(w) => Some((w.pipe(), WaitClass::Pipe, Landing::Pipe)),
         KObjectRef::Connection(c) => Some((c.tx(), WaitClass::Ipc, Landing::Partial)),
         KObjectRef::PipeRead(_) | KObjectRef::File(_) | KObjectRef::Device(_)
         | KObjectRef::Console(_) | KObjectRef::Acceptor(_) | KObjectRef::Inbox(_)
@@ -266,8 +269,8 @@ impl WatchRef {
 /// readiness of that direction exists.
 pub fn read_watch(object: &KObjectRef) -> Option<WatchRef> {
     match object {
-        KObjectRef::PipeRead(r) => pipe::read_watch(r.id()).map(WatchRef::Shared),
-        KObjectRef::Connection(c) => pipe::read_watch(c.rx()).map(WatchRef::Shared),
+        KObjectRef::PipeRead(r) => Some(WatchRef::Shared(r.pipe().read_watch().clone())),
+        KObjectRef::Connection(c) => Some(WatchRef::Shared(c.rx().read_watch().clone())),
         KObjectRef::Acceptor(a) => Some(WatchRef::Shared(a.watch().clone())),
         KObjectRef::Process(p) => Some(WatchRef::Shared(p.watch().clone())),
         KObjectRef::Notice(n) => Some(WatchRef::Shared(n.watch().clone())),
@@ -303,8 +306,8 @@ pub fn watched_readable(object: &KObjectRef) {
 /// The watch a writable poll on this object registers on.
 pub fn write_watch(object: &KObjectRef) -> Option<WatchRef> {
     match object {
-        KObjectRef::PipeWrite(w) => pipe::write_watch(w.id()).map(WatchRef::Shared),
-        KObjectRef::Connection(c) => pipe::write_watch(c.tx()).map(WatchRef::Shared),
+        KObjectRef::PipeWrite(w) => Some(WatchRef::Shared(w.pipe().write_watch().clone())),
+        KObjectRef::Connection(c) => Some(WatchRef::Shared(c.tx().write_watch().clone())),
         KObjectRef::Console(_) => Some(WatchRef::Static(&crate::log::console::SPACE)),
         KObjectRef::PipeRead(_) | KObjectRef::File(_) | KObjectRef::Device(_)
         | KObjectRef::Acceptor(_) | KObjectRef::Inbox(_)
@@ -319,8 +322,8 @@ pub fn write_watch(object: &KObjectRef) -> Option<WatchRef> {
 /// it lets go; `None` for an object that is no pipe end.
 pub fn pipe_end_watch(object: &KObjectRef) -> Option<WatchRef> {
     match object {
-        KObjectRef::PipeRead(r) => pipe::left_watch(r.id(), End::Read).map(WatchRef::Shared),
-        KObjectRef::PipeWrite(w) => pipe::left_watch(w.id(), End::Write).map(WatchRef::Shared),
+        KObjectRef::PipeRead(r) => Some(WatchRef::Shared(r.pipe().left_watch(End::Read).clone())),
+        KObjectRef::PipeWrite(w) => Some(WatchRef::Shared(w.pipe().left_watch(End::Write).clone())),
         KObjectRef::Connection(_) | KObjectRef::Acceptor(_) | KObjectRef::Process(_) | KObjectRef::Job(_)
         | KObjectRef::Notice(_)
         | KObjectRef::Console(_) | KObjectRef::Device(_) | KObjectRef::SysCap(_)
@@ -333,8 +336,8 @@ pub fn pipe_end_watch(object: &KObjectRef) -> Option<WatchRef> {
 /// object that is no pipe end.
 pub fn other_end_gone(object: &KObjectRef) -> bool {
     match object {
-        KObjectRef::PipeRead(r) => pipe::other_end_gone(r.id(), End::Read),
-        KObjectRef::PipeWrite(w) => pipe::other_end_gone(w.id(), End::Write),
+        KObjectRef::PipeRead(r) => r.pipe().other_end_gone(End::Read),
+        KObjectRef::PipeWrite(w) => w.pipe().other_end_gone(End::Write),
         KObjectRef::Connection(_) | KObjectRef::Acceptor(_) | KObjectRef::Process(_) | KObjectRef::Job(_)
         | KObjectRef::Notice(_)
         | KObjectRef::Console(_) | KObjectRef::Device(_) | KObjectRef::SysCap(_)
@@ -533,7 +536,7 @@ fn record_bytes(record: &toyos_abi::pci::DeviceIrqRecord) -> &[u8] {
 pub fn try_read(object: &KObjectRef, buf: &mut UserBytesMut) -> Option<u64> {
     match object {
         KObjectRef::File(f) => read_file(f, buf),
-        KObjectRef::PipeRead(r) => pipe::try_read(r.id(), buf).map(|n| n as u64),
+        KObjectRef::PipeRead(r) => r.pipe().try_read(buf).map(|n| n as u64),
         // A batch pinned where the reader is answers the read, so no byte
         // after it is read until the batch is taken.
         KObjectRef::Connection(c) => c.read(buf).map(|read| match read {
@@ -576,8 +579,8 @@ pub fn try_read(object: &KObjectRef, buf: &mut UserBytesMut) -> Option<u64> {
 }
 
 fn write_pipe(object: &KObjectRef, buf: &UserBytes) -> Option<u64> {
-    let (id, _, landing) = pipe_write(object).expect("a pipe's write end writes its pipe");
-    match pipe::write(id, buf, landing) {
+    let (pipe, _, landing) = pipe_write(object).expect("a pipe's write end writes its pipe");
+    match pipe.write(buf, landing) {
         // The reader is gone, not absent: `NotFound` means the name is not there and nothing else may say so.
         pipe::PipeWrite::BrokenPipe => Some(SyscallError::Gone.to_u64()),
         pipe::PipeWrite::NoMemory => Some(SyscallError::ResourceExhausted.to_u64()),
@@ -716,7 +719,7 @@ pub fn ftruncate(object: &KObjectRef, size: u64) -> u64 {
 
 pub fn has_data(object: &KObjectRef) -> bool {
     match object {
-        KObjectRef::PipeRead(r) => pipe::has_data(r.id()),
+        KObjectRef::PipeRead(r) => r.pipe().has_data(),
         KObjectRef::Connection(c) => c.has_data(),
         KObjectRef::Console(_) => serial::has_data(),
         KObjectRef::Acceptor(a) => a.has_pending(),
@@ -759,8 +762,8 @@ pub fn has_space(object: &KObjectRef) -> bool {
     match object {
         // Writable is room for any write that lands whole, so a non-blocking
         // one refused, retried on readiness, lands.
-        KObjectRef::PipeWrite(w) => pipe::has_space(w.id(), MAX_WHOLE_PIPE_WRITE),
-        KObjectRef::Connection(c) => pipe::has_space(c.tx(), 1),
+        KObjectRef::PipeWrite(w) => w.pipe().has_space(MAX_WHOLE_PIPE_WRITE),
+        KObjectRef::Connection(c) => c.tx().has_space(1),
         KObjectRef::File(_) | KObjectRef::Null(_) => true,
         KObjectRef::Console(_) => crate::log::console::has_room(),
         KObjectRef::PipeRead(_) | KObjectRef::Device(_) | KObjectRef::Acceptor(_)

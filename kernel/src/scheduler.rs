@@ -12,7 +12,7 @@ use kernel::sched::task::{Refused, SafePoint, WaitClass, QUANTUM_NS};
 use crate::arch::percpu;
 use crate::watch::{self, Cancel};
 use crate::hw::HW;
-use crate::pipe::PipeId;
+use crate::pipe::PipeRef;
 use crate::process::{self, Pid, Tid};
 use crate::sched::driver::{self, cpus, preempt_off, Dispose, NewTask};
 use crate::sched::payload::ThreadSched;
@@ -255,12 +255,10 @@ pub fn exit_current() -> ! {
 
 /// Wake pipe readers, lending each an RT window if the writer holds one; the
 /// pipe is also marked, so a runnable reader takes the window too.
-pub fn wake_pipe_readers(pipe_id: PipeId) {
-    let Some(watch) = crate::pipe::read_watch(pipe_id) else {
-        return;
-    };
+pub fn wake_pipe_readers(pipe: &PipeRef) {
+    let watch = pipe.read_watch();
     if driver::current_is_rt() {
-        crate::pipe::set_rt_boost_pending(pipe_id);
+        pipe.set_rt_boost_pending();
         watch.post_boosted(boost_window());
     } else {
         watch.post();
@@ -268,10 +266,8 @@ pub fn wake_pipe_readers(pipe_id: PipeId) {
 }
 
 /// Wake pipe writers, and complete every poll on the write end.
-pub fn wake_pipe_writers(pipe_id: PipeId) {
-    if let Some(watch) = crate::pipe::write_watch(pipe_id) {
-        watch.post();
-    }
+pub fn wake_pipe_writers(pipe: &PipeRef) {
+    pipe.write_watch().post();
 }
 
 /// How long a lent RT priority lasts: one quantum, a wall-clock bound on time held.
@@ -326,8 +322,10 @@ pub fn futex_wait(
         read,
     );
     // `wait_until` answers `Ok(())` for a satisfied predicate and an expired
-    // deadline alike, so the word itself is what tells them apart.
-    if read() {
+    // deadline alike, so the word itself is what tells them apart. With no
+    // deadline the word or its frame changed, or a kill ended it, whose answer
+    // never reaches Ring 3.
+    if deadline.is_never() || read() {
         FutexEnd::Changed
     } else {
         FutexEnd::Timeout

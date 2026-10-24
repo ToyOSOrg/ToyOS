@@ -145,7 +145,6 @@ impl ThreadEntry {
         let len = name.len().min(THREAD_NAME_LEN);
         self.name[..len].copy_from_slice(&name[..len]);
     }
-    pub fn thread_data(&self) -> &Arc<Lock<ThreadData>> { &self.thread_data }
 }
 
 /// A process and all its threads. Removing a ProcessEntry removes all threads.
@@ -413,11 +412,6 @@ pub struct ThreadData {
     pub tls: Option<KernelMapping>,
     pub user_stack_base: UserAddr,
     pub user_stack_size: u64,
-    /// Syscall counts per syscall number (for profiling)
-    pub syscall_counts: [u32; toyos_abi::syscall::SYSCALL_PROFILE_BINS],
-    pub syscall_total: u64,
-    /// Wall-clock nanoseconds spent in syscall dispatch (includes preemption time)
-    pub syscall_total_ns: u64,
 }
 
 /// Zero-sized proof of running on the per-CPU idle stack; required by `collect_orphan_zombies` so it never drops the thread entry it runs on.
@@ -480,23 +474,17 @@ pub fn stats_of(
     }
     let pid = object.pid();
     // The other two locks are taken after this one is dropped, so no ordering edge.
-    let (data_arc, cpu_ns, threads) = {
+    let (data_arc, cpu_ns, syscall_total, syscall_total_ns) = {
         let guard = PROCESS_TABLE.lock();
         let proc = guard.as_ref()?.get(pid)?;
-        let mut cpu_ns = 0;
-        let mut threads = Vec::new();
-        for (_, thread) in proc.threads().iter() {
-            cpu_ns += thread.sched().map_or(0, scheduler::task_cpu_ns);
-            threads.push(Arc::clone(thread.thread_data()));
+        let (mut cpu_ns, mut syscall_total, mut syscall_total_ns) = (0, 0, 0);
+        for sched in proc.threads().iter().filter_map(|(_, thread)| thread.sched()) {
+            cpu_ns += scheduler::task_cpu_ns(sched);
+            syscall_total += sched.handle.syscalls().calls();
+            syscall_total_ns += sched.handle.syscalls().ns();
         }
-        (Arc::clone(proc.process_data()), cpu_ns, threads)
+        (Arc::clone(proc.process_data()), cpu_ns, syscall_total, syscall_total_ns)
     };
-    let (mut syscall_total, mut syscall_total_ns) = (0, 0);
-    for tdata in threads {
-        let tdata = tdata.lock();
-        syscall_total += tdata.syscall_total;
-        syscall_total_ns += tdata.syscall_total_ns;
-    }
     let data = data_arc.lock();
     Some(stats_from(&data, pid, cpu_ns, syscall_total, syscall_total_ns))
 }
@@ -702,9 +690,6 @@ pub fn spawn_thread(
         tls: Some(tls_alloc),
         user_stack_base: UserAddr::new(stack_base),
         user_stack_size: if stack_base > 0 { stack_ptr - stack_base } else { 0 },
-        syscall_counts: [0; toyos_abi::syscall::SYSCALL_PROFILE_BINS],
-        syscall_total: 0,
-        syscall_total_ns: 0,
     }));
     let proc = table.get_mut(parent_process)
         .expect("spawn_thread: the entry the insert admission just answered for");
@@ -765,16 +750,16 @@ impl core::fmt::Display for Consumed {
 /// Says nothing of the machine: a reading of every CPU is `crate::census`'s, never one process's end.
 fn teardown_resources(
     process_data_arc: &Arc<Lock<ProcessData>>,
-    thread_data_arc: &Arc<Lock<ThreadData>>,
+    main_thread: &(Arc<Lock<ThreadData>>, Option<ThreadSched>),
     pid: Pid,
 ) -> Consumed {
+    let (thread_data_arc, sched) = main_thread;
+    let syscalls = sched.as_ref().map(|sched| sched.handle.syscalls());
+    let syscall_total = syscalls.map_or(0, |s| s.calls());
+    let syscall_total_ns = syscalls.map_or(0, |s| s.ns());
+    let syscall_counts = syscalls.map_or([0; toyos_abi::syscall::SYSCALL_PROFILE_BINS], |s| s.by_number());
     // Never hold ThreadData + ProcessData at once.
-    let (syscall_total, syscall_total_ns, syscall_counts) = {
-        let mut tdata = thread_data_arc.lock();
-        let stats = (tdata.syscall_total, tdata.syscall_total_ns, tdata.syscall_counts);
-        tdata.tls.take();
-        stats
-    };
+    thread_data_arc.lock().tls.take();
 
     // Before the teardown below: a report spans its process up to here, and the next one this teardown.
     #[cfg(feature = "mask-windows")]
@@ -867,13 +852,14 @@ pub fn stats_from(
 /// Waits on nothing: it runs on a killed thread whose one cancel may be spent, and at the exit boundary's preempt depth, where a park asserts.
 /// The section that marks it also lets the teardown's own hold on the publication go: the exit is published here when nothing below it is left, and otherwise by the last end below it.
 fn teardown(pid: Pid, tid: Tid, end: End, mark: i32, process_data: &Arc<Lock<ProcessData>>) {
-    let main_thread_data = {
+    let main_thread = {
         let guard = PROCESS_TABLE.lock();
         let proc = guard.as_ref().unwrap().get(pid).expect("teardown: the process its last thread is in");
-        Arc::clone(&proc.threads.get(proc.main_tid).expect("teardown: a claimed process gives up no thread").thread_data)
+        let main = proc.threads.get(proc.main_tid).expect("teardown: a claimed process gives up no thread");
+        (Arc::clone(&main.thread_data), main.sched().cloned())
     };
     let releases = crate::object::Releases::open();
-    let consumed = teardown_resources(process_data, &main_thread_data, pid);
+    let consumed = teardown_resources(process_data, &main_thread, pid);
     let released = releases.run();
     let cpu_ns = {
         let mut guard = PROCESS_TABLE.lock();
@@ -1052,13 +1038,13 @@ pub fn futex_wake(addr: UserAddr, count: u64) -> u64 {
 }
 
 /// Wake processes blocked on reading from a pipe that now has data.
-pub fn wake_pipe_readers(pipe_id: pipe::PipeId) {
-    scheduler::wake_pipe_readers(pipe_id);
+pub fn wake_pipe_readers(pipe: &pipe::PipeRef) {
+    scheduler::wake_pipe_readers(pipe);
 }
 
 /// Wake processes blocked on writing to a pipe that now has space.
-pub fn wake_pipe_writers(pipe_id: pipe::PipeId) {
-    scheduler::wake_pipe_writers(pipe_id);
+pub fn wake_pipe_writers(pipe: &pipe::PipeRef) {
+    scheduler::wake_pipe_writers(pipe);
 }
 
 /// Ask `join` once more; an unsettled one collects under the table lock, which is what makes validating the parent-thread relationship and collecting the zombie one act.

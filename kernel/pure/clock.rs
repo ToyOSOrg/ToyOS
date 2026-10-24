@@ -6,10 +6,7 @@
 
 const NANOS_PER_SEC: u64 = 1_000_000_000;
 
-/// `ticks` of a counter whose tick is `period_fs` femtoseconds, in nanoseconds.
-pub const fn ticks_to_nanos(ticks: u64, period_fs: u64) -> u64 {
-    ((ticks as u128 * period_fs as u128) / 1_000_000) as u64
-}
+pub use toyos_abi::clock::ticks_to_nanos;
 
 /// Unix seconds at the counter's `boot`, from a reading of `secs` true when the
 /// counter read `at`, which is after boot where the kernel read the clock and
