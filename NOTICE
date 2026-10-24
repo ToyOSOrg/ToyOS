@@ -293,6 +293,11 @@ lib/bcachefs/tests/fixtures/ — volumes upstream's tools wrote
     sha256 2393f9e1aafcbecdbea55d851acc88e711033df7cf9a1814e49cda0f31274adb
     raw    26fa074b6d7e0b24607c5445f5d6bb71b0a2170fa8fb31459dc5b60464bded19
 
+    lib/bcachefs/tests/fixtures/unclean-32k-nodes.img.gz
+    139,436 bytes gzip -9n, of a 67,108,864-byte raw volume
+    sha256 d4bd7ecb9dae1d0d8d3ffbdab2b3d4c4d4a79688e9c0cd545c4a98c5dd0e4e2d
+    raw    5b468241fb8b316b7a5862234bdb6eb3232666458d6732a771daa23af3bd7a5e
+
     SPDX-License-Identifier: MIT OR Apache-2.0
 
 `lib/bcachefs/src/engine` reads upstream's on-disk format, and the only honest
@@ -430,6 +435,12 @@ hash seeds inside are generated values; the member's device name is the image
 file's basename, and no model or serial is recorded. Timestamps are
 2026-10-22, the guest's clock. The same reasoning as for `crc32c.img.gz` makes
 the bytes this project's own.
+
+`unclean-32k-nodes.img.gz` is the same, made by the same commands but on a
+64 MiB image, so its btree nodes are 32 KiB: the engine writes no volume of
+smaller nodes. It was made by the same tools in the judge's Ubuntu guest, on
+the same terms; its `fsck -n -K` exits 0, replaying 18-18 past unflushed
+entries 19-22. Timestamps are 2026-10-24, the guest's clock.
 
 
 lib/fat32/tests/fixtures/ — volumes macOS's FAT tools wrote

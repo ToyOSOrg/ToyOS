@@ -409,21 +409,23 @@ fn a_window_spanning_2_62_sequences_is_checked_entry_by_entry() {
 }
 
 /// A window whose keys a replay installs into one leaf past seven nodes'
-/// worth: 1 430 inodes journaled across 13 entries, none yet in a node, as
+/// worth: 110 inodes per 16 KiB of node, journaled across 13 entries, none
+/// yet in a node, as
 /// an upstream volume a crash left can hold them. The reader replays it;
 /// the read-write mount stops by name at its first write, since reclaim
 /// cannot split the leaf in one transaction
 /// (`issues/a-replayed-bcachefs-node-past-seven-nodes-is-refused.md`).
 #[test]
 fn a_replayed_leaf_past_seven_nodes_is_read_but_not_mounted_read_write() {
-    let dev = formatted(32 << 20, None);
+    let dev = formatted(64 << 20, None);
+    let bucket_bytes = u64::from(block_on_ready(Volume::open(&dev)).unwrap().superblock().member.bucket_sectors) * SECTOR as u64;
     unclean(&dev);
     let ring = Ring::of(&dev, None);
-    let bucket_blocks = 16 * 1024 / BLOCK as u64;
+    let bucket_blocks = bucket_bytes / BLOCK as u64;
     let mut ino = mkfs::FIRST_INODE + 1;
     for seq in 1..=13u64 {
         let mut keys = Vec::new();
-        for _ in 0..110 {
+        for _ in 0..110 * bucket_bytes / (16 << 10) {
             keys.extend(Key::new(kind::INODE_V3, Bpos::new(0, ino, mkfs::ROOT_SNAPSHOT)).encode(&InodeValue::default().encode()));
             ino += 1;
         }

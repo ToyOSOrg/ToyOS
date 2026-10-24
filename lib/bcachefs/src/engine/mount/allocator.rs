@@ -54,31 +54,23 @@ pub(super) struct Allocator {
     free: u64,
     /// Buckets each sequence emptied, until it is durable.
     returning: BTreeMap<u64, u64>,
-    /// The newest journal sequence on the medium.
-    durable: u64,
     /// Buckets taken that a previous life emptied, for the tests.
     #[cfg(test)]
     pub reused: usize,
 }
 
 impl Allocator {
-    /// `free` empty buckets of `per_bucket` node slots each, the journal
-    /// durable through `durable`.
-    pub(super) fn new(per_bucket: u64, free: u64, durable: u64) -> Self {
+    /// `free` empty buckets of `per_bucket` node slots each.
+    pub(super) fn new(per_bucket: u64, free: u64) -> Self {
         Allocator {
             per_bucket,
             open: None,
             taken: BTreeSet::new(),
             free,
             returning: BTreeMap::new(),
-            durable,
             #[cfg(test)]
             reused: 0,
         }
-    }
-
-    pub(super) fn durable(&self) -> u64 {
-        self.durable
     }
 
     fn open_slots(&self) -> u64 {
@@ -127,16 +119,10 @@ impl Allocator {
     }
 
     /// `b`, empty at generation `gen`, opened for nodes.
-    pub(super) fn take(&mut self, b: u64, gen: u8, reused: bool) {
+    pub(super) fn take(&mut self, b: u64, gen: u8) {
         self.taken.insert(b);
         self.free = self.free.saturating_sub(1);
         self.open = Some((b, 0, gen));
-        #[cfg(test)]
-        {
-            self.reused += usize::from(reused);
-        }
-        #[cfg(not(test))]
-        let _ = reused;
     }
 
     /// `b`'s filling applied: the indexes no longer list it.
@@ -154,7 +140,6 @@ impl Allocator {
 
     /// The journal written through `seq`: what it emptied is free.
     pub(super) fn durable_through(&mut self, seq: u64) {
-        self.durable = self.durable.max(seq);
         let later = self.returning.split_off(&(seq + 1));
         self.free += self.returning.values().sum::<u64>();
         self.returning = later;
@@ -240,8 +225,8 @@ mod tests {
 
     #[test]
     fn an_emptied_bucket_counts_as_room_but_is_free_only_once_durable() {
-        let mut a = Allocator::new(2, 1, 5);
-        a.take(9, 0, false);
+        let mut a = Allocator::new(2, 1);
+        a.take(9, 0);
         assert_eq!(a.next_slot(64, 32), Some((9 * 64, 0)));
         assert_eq!((a.ready(0), a.slots()), (1, 1));
         a.emptied(3, 7);

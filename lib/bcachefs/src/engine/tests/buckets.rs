@@ -95,14 +95,15 @@ fn churn<D: BlockDev>(dev: &D, options: MountOptions, files: usize, reuses: usiz
 }
 
 /// Renames rewrite the same leaves, each rewrite emptying the bucket of the
-/// node it replaces: on a volume of 2 048 buckets, more buckets are taken
-/// than it has, and none ever runs out. Red when an emptied bucket is never
+/// node it replaces: on a volume of 2 048 buckets, with reclaim writing
+/// before every rename, more buckets are taken than it has, and none ever
+/// runs out. Red when an emptied bucket is never
 /// taken again: the volume answers `NoSpace`.
 #[test]
 fn renames_past_the_volumes_buckets_reuse_them_and_never_run_out() {
-    let dev = formatted(32 << 20, None);
+    let dev = formatted(64 << 20, None);
     let nbuckets = block_on_ready(Volume::open(&dev)).unwrap().superblock().member.nbuckets as usize;
-    churn(&dev, MEMORY, 40, 2 * nbuckets, 25);
+    churn(&dev, super::crash::PRESSED, 40, nbuckets, 25);
     let v = block_on_ready(Volume::open(&dev)).unwrap();
     assert_eq!(names(&v, v.root()).len(), 40);
     assert_eq!(block_on_ready(fsck(&v)).unwrap(), []);
@@ -232,6 +233,53 @@ pub(super) fn reclaim_all<D: BlockDev>(m: &Mount<D>) -> Vec<u64> {
     }
 }
 
+/// A crash on a full volume, then a read-write mount: its window replays,
+/// every node it writes goes to a fresh one (§3.5), and the room left still
+/// takes those rewrites. Names are removed, an orphan released, and the
+/// volume unmounts clean and checks clean.
+#[test]
+fn a_full_volume_crashed_mounts_read_write_and_still_removes_names() {
+    let mut data = Vec::new();
+    let dev = nearly_full(&mut data, 400);
+    let made = {
+        let m = block_on_ready(Mount::open(&dev, MEMORY, random())).unwrap();
+        let made = Executor::new().block_on(
+            async {
+                let mut n = 0;
+                while m.create(m.root(), format!("f{n}").as_bytes(), New::File, OWNER, NOW).await.is_ok() {
+                    n += 1;
+                }
+                m.commit().await.unwrap();
+                n
+            },
+            || panic!("stalled"),
+        );
+        // A crash: the mount dropped, never unmounted.
+        made
+    };
+    let m = block_on_ready(Mount::open(&dev, MEMORY, random())).unwrap();
+    let stalled = || panic!("stalled; {}", m.dump());
+    Executor::new().block_on(
+        async {
+            let r = m.root();
+            assert_eq!(m.create(r, b"again", New::File, OWNER, NOW).await.err(), Some(Error::NoSpace("no room left for the btree nodes a change may write")));
+            for i in 0..20 {
+                m.unlink(r, format!("f{i}").as_bytes(), false, NOW).await.unwrap();
+            }
+            let orphan = m.lookup(r, b"f20").await.unwrap().unwrap().ino;
+            m.unlink(r, b"f20", false, NOW).await.unwrap();
+            m.release(orphan).await.unwrap();
+            m.commit().await.unwrap();
+        },
+        stalled,
+    );
+    block_on_ready(m.unmount()).unwrap();
+    let v = block_on_ready(Volume::open(&dev)).unwrap();
+    let (entries, more) = block_on_ready(v.readdir(v.root(), 0, usize::MAX)).unwrap();
+    assert_eq!((entries.len(), more), (made + 1 - 21, false));
+    assert_eq!(block_on_ready(fsck(&v)).unwrap(), []);
+}
+
 /// A bucket emptied by an entry not yet durable is not written again: a
 /// crash before that entry is on the medium brings back the pointers into
 /// it (A6.19). After an unclean mount the first write to each node goes to
@@ -321,9 +369,11 @@ impl BlockDev for Gated<'_> {
 /// durable, and more nodes written, which would take that bucket first. No
 /// bucket the listing may still lead into is written while it reads, so
 /// the leaf it reads is still the one its pointer names, and the listing
-/// completes. Red when a bucket is taken while a traversal begun before it
-/// emptied still reads: the listing reads another node where its pointer
-/// leads, and fails.
+/// completes. Its stale cached leaf goes when the bucket is taken after it
+/// ends. Red when a bucket is taken while a traversal begun before it
+/// emptied still reads: a node is written into the bucket the listing
+/// leads into. Red when the stale node is kept: two nodes cached at one
+/// sector.
 #[test]
 fn a_bucket_a_traversal_may_still_lead_into_is_not_written_while_it_reads() {
     let dev = formatted(64 << 20, None);

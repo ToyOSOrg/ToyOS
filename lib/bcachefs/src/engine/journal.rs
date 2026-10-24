@@ -539,6 +539,8 @@ pub(crate) struct Writer {
     pub newest: Vec<Option<u64>>,
     /// The last sequence of the newest durable flush entry.
     pub durable_last: u64,
+    /// The sequence of the newest flush entry on the medium.
+    pub durable: u64,
     pub open: Option<Open>,
     pub closed: VecDeque<Closed>,
     pub next_seq: u64,
@@ -573,6 +575,7 @@ impl Writer {
             head_sectors: 0,
             newest,
             durable_last: 0,
+            durable: 0,
             open: None,
             closed: VecDeque::new(),
             next_seq: 1,
@@ -682,6 +685,7 @@ impl Writer {
         self.newest[self.head] = Some(seq);
         self.head_sectors += sectors;
         self.durable_last = last_seq;
+        self.durable = seq;
         let head = self.head;
         for (i, newest) in self.newest.iter_mut().enumerate() {
             if i != head && newest.is_some_and(|n| n < last_seq) {

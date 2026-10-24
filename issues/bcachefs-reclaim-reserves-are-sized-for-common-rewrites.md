@@ -27,12 +27,12 @@ refused at apply, and the mount stops with "reclaim dirtying more nodes than its
 cache room".
 
 **Why not the worst case.** The worst-case bounds hold for every volume, and they
-are derived, not measured. Sized for them, a 32 MiB volume's ring (16 entries of
-16 KiB) leaves no dirty-node limit at all, and a 64 MiB volume's leaves 4, under
-a transaction's grant of 10. Every volume under 128 MiB laid out as upstream's
-`format` does would then be refused, and so would the committed upstream fixture
-`unclean.img.gz` that B5 mounts read-write. The limits for each geometry are in
-the evidence of the pull request that sized the reserves.
+are derived, not measured. Sized for them, a 64 MiB volume's ring leaves a
+dirty-node limit of 4, under a transaction's grant of 10. Every volume under
+128 MiB laid out as upstream's `format` does would then be refused, and so would
+the committed upstream fixture `unclean-32k-nodes.img.gz` that the read-write
+mount is tested on. The limits for each geometry are in the evidence of the pull
+request that sized the reserves (storage B5).
 
 **Exit.** Reserves that hold for the worst case at a usable limit. One way is
 a write buffer for derived-btree updates (backpointers, LRU, need_discard,
@@ -40,5 +40,5 @@ bucket_gens), flushed in batches, so a rewrite journals and dirties a bounded
 handful of leaves. Another is a reservation of
 exact leaves before the slot. Bucket reuse (B6) leaves both reserves as they
 were: a rewrite into a reused bucket changes no more positions than one into a
-free bucket. It does spread a rewrite's alloc and backpointer keys over more
-leaves (`issues/a-bcachefs-mount-of-16-kib-nodes-can-stop-under-churn.md`).
+free bucket. The room for new nodes has its own gap
+(`issues/the-bcachefs-btree-room-bound-counts-no-reclaim-cascade.md`).

@@ -134,8 +134,8 @@ pub(super) const MAX_REWRITE: usize = MAX_GROUPS + 1;
 
 /// New nodes a rewrite that is not of an oversized node writes at most: a
 /// node no fuller than it holds spreads at two thirds into two, and a root.
-/// One this writer filled past full holds at most two transactions more
-/// than a node, which two nodes hold.
+/// So does one this writer filled past full: it holds at most a node's keys
+/// and two transactions', which fit in two nodes.
 pub(super) const COMMON_REWRITE: usize = 3;
 
 /// Node slots one batch can take: its common rewrites, or one alone.
@@ -406,7 +406,7 @@ impl<D: BlockDev> Mount<D> {
     /// free one. Its alloc key must agree it is empty, and no backpointer
     /// lead into it; the nodes cached there are unreachable, and go.
     async fn take_bucket(&self) -> Result<()> {
-        let durable = self.st.borrow().alloc.durable();
+        let durable = self.st.borrow().journal.durable;
         let mut emptied = None;
         Source::walk(self, Btree::NeedDiscard, Bpos::MIN, |k, _| {
             if k.pos.inode > durable {
@@ -469,7 +469,11 @@ impl<D: BlockDev> Mount<D> {
         if !st.cache.drop_unreachable(b * sectors, (b + 1) * sectors) {
             return Err(Error::Corrupt("a bucket an index lists as empty holding a changed btree node"));
         }
-        st.alloc.take(b, bucket.reused_gen(), emptied.is_some());
+        st.alloc.take(b, bucket.reused_gen());
+        #[cfg(test)]
+        {
+            st.alloc.reused += usize::from(emptied.is_some());
+        }
         Ok(())
     }
 

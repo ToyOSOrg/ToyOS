@@ -71,8 +71,11 @@ const PER_NODE: u64 = fresh_cost(1);
 /// Cache room past the limit that only reclaim takes: what its transaction
 /// dirties, and the nodes a batch's rewrites replace its nodes with.
 const RECLAIM: usize = RECLAIM_ROOM + REWRITTEN;
-/// The smallest btree node this writer writes ([`MAX_GROUPS`]).
-const MIN_NODE: usize = 16 << 10;
+/// The smallest btree node this writer writes. Past its first bset a
+/// smaller one has room for about two whole-block appends, and reclaim's own
+/// changes to the allocator's leaves then rewrite more nodes than they
+/// settle ([`MAX_GROUPS`] needs less).
+const MIN_NODE: usize = 32 << 10;
 /// Retries of a failed node or journal write, each of the same bytes.
 const RETRIES: usize = 2;
 /// Feature bits a volume carries once written read-write (A1.41).
@@ -264,7 +267,7 @@ fn writable(sb: &Superblock) -> Result<()> {
         return Err(Error::Unsupported("writing a volume without journal buckets"));
     }
     if (sb.node_sectors() as usize) * SECTOR < MIN_NODE {
-        return Err(Error::Unsupported("writing a volume of btree nodes under 16 KiB"));
+        return Err(Error::Unsupported("writing a volume of btree nodes under 32 KiB"));
     }
     // Every write is of whole device blocks, so entries, bsets and nodes
     // must fall on them.
@@ -322,7 +325,7 @@ impl<D: BlockDev> Mount<D> {
         let bucket_sectors = u64::from(sb.member.bucket_sectors);
         let mut journal = Writer::new(ring, bucket_sectors, sb.block_bytes(), K_TX);
         let mut blacklist = sb.blacklist.clone();
-        let (clocks, restate, durable) = match &replay {
+        let (clocks, restate) = match &replay {
             None => {
                 let clean = sb.clean.as_ref().expect("a volume opens clean only with its clean field");
                 let m = &sb.member;
@@ -348,7 +351,8 @@ impl<D: BlockDev> Mount<D> {
                 }
                 journal.durable_last = clean.journal_seq;
                 journal.next_seq = clean.journal_seq + 1;
-                (clean.clocks, holding.is_none() || clean.journal_seq == 0, clean.journal_seq)
+                journal.durable = clean.journal_seq;
+                (clean.clocks, holding.is_none() || clean.journal_seq == 0)
             }
             Some((window, replayed)) => {
                 let scan = journal::scan(&dev, &sb, key.as_ref()).await?;
@@ -366,7 +370,8 @@ impl<D: BlockDev> Mount<D> {
                 let next = window.next.checked_add(SKIP).ok_or(Error::Corrupt("a journal sequence too near its last value to skip past"))?.max(blacklist.last().map_or(0, |b| b.1));
                 blacklist_add(&mut blacklist, window.last + 1, next);
                 journal.next_seq = next;
-                (replayed.clocks, false, window.last)
+                journal.durable = window.last;
+                (replayed.clocks, false)
             }
         };
         sb.blacklist = blacklist.clone();
@@ -408,7 +413,7 @@ impl<D: BlockDev> Mount<D> {
             reclaim_room,
             fresh_below: if replay.is_some() { journal_next } else { 0 },
             torn_copies,
-            alloc: Allocator::new(u64::from(sb.member.bucket_sectors) / u64::from(sb.node_sectors()), empty, durable),
+            alloc: Allocator::new(u64::from(sb.member.bucket_sectors) / u64::from(sb.node_sectors()), empty),
             read_only: None,
             #[cfg(test)]
             peak: 0,
@@ -457,7 +462,7 @@ impl<D: BlockDev> Mount<D> {
                 let mut st = self.st.borrow_mut();
                 let st = &mut *st;
                 st.journal.open_new();
-                self.close(st);
+                self.close(st, true);
                 let (seq, sectors) = st.journal.closed.back().map(|e| (e.seq, (e.bytes.len() / SECTOR) as u64)).expect("just closed");
                 // `S` goes at the head bucket's start: an earlier restate's
                 // `S` may never have been written, and a scan stops at an
@@ -1091,7 +1096,7 @@ impl<D: BlockDev> Mount<D> {
         assert!(size <= bound, "a transaction of {size} u64s past its bound of {bound}");
         if !st.journal.fits(size) {
             if st.journal.open.is_some() {
-                self.close(st);
+                self.close(st, false);
             }
             st.journal.open_new();
         }
@@ -1149,9 +1154,18 @@ impl<D: BlockDev> Mount<D> {
     /// its tail the roots, datetime, key version and clocks as they stand
     /// now. A pin released by an update a later entry carries cannot move
     /// this entry's window past the keys it held (A2.21).
-    fn close(&self, st: &mut State) {
+    ///
+    /// **Nor past the newest entry already durable** (A2.24): upstream drops
+    /// every entry below a flush entry's last sequence as it reads, torn or
+    /// not, so a torn entry naming itself would leave it nothing to replay
+    /// (`issues/upstream-bcachefs-recovery-loops-on-a-torn-newest-journal-entry.md`).
+    /// Only an entry that must name itself does: `own` is the first after a
+    /// clean state, written before the superblock goes unclean (A2.25), and
+    /// a clean unmount's last (A1.42).
+    fn close(&self, st: &mut State, own: bool) {
         let mut open = st.journal.open.take().expect("an entry open");
-        let last_seq = st.cache.oldest_pin().map_or(open.seq, |p| p.min(open.seq));
+        let pinned = st.cache.oldest_pin().map_or(open.seq, |p| p.min(open.seq));
+        let last_seq = if own { pinned } else { pinned.min(st.journal.durable) };
         assert!(last_seq >= st.journal.durable_last, "a journal entry's last sequence moved back");
         let roots = encoded_roots(&st.roots);
         journal::tail(&mut open.area, roots.iter().map(|(b, l, k)| (*b, *l, &k[..])), Some(st.now), st.key_version, st.clocks);
@@ -1162,8 +1176,9 @@ impl<D: BlockDev> Mount<D> {
 
     /// Writes every closed entry through `upto`, in order, each after a
     /// flush and followed by one (A2.12), so each is durable once written and
-    /// so is every node write that completed before it. A failed write is
-    /// reissued with the same bytes, or the mount stops writing.
+    /// so is every node write that completed before it. An entry naming
+    /// itself has its header sector written last, after a flush. A failed
+    /// write is reissued with the same bytes, or the mount stops writing.
     async fn write_entries(&self, upto: u64) -> Result<()> {
         self.journal_queue.wait(|| (!self.journal_held.get()).then(|| self.journal_held.set(true))).await;
         let out = async {
@@ -1178,9 +1193,21 @@ impl<D: BlockDev> Mount<D> {
                     let (sector, _) = st.journal.place((bytes.len() / SECTOR) as u64);
                     (seq, last_seq, bytes, sector)
                 };
+                // An entry naming itself (A2.25, A1.42) would, torn, drop
+                // every entry below it as upstream reads (A2.T1): its header
+                // goes last, so a crash leaves it whole or not there at all.
+                let header_last = last_seq == seq;
                 self.reissue("journal write failed", async || {
                     self.dev.flush().await?;
-                    mkfs::write(&self.dev, sector, &bytes).await?;
+                    if header_last {
+                        let mut headless = bytes.clone();
+                        headless[..SECTOR].fill(0);
+                        mkfs::write(&self.dev, sector, &headless).await?;
+                        self.dev.flush().await?;
+                        mkfs::write(&self.dev, sector, &bytes[..BLOCK]).await?;
+                    } else {
+                        mkfs::write(&self.dev, sector, &bytes).await?;
+                    }
                     self.dev.flush().await?;
                     Ok(())
                 })
@@ -1232,7 +1259,7 @@ impl<D: BlockDev> Mount<D> {
                 }
                 if st.journal.may_close() {
                     st.journal.closing = false;
-                    self.close(st);
+                    self.close(st, false);
                     break st.journal.closed.back().expect("just closed").seq;
                 }
                 // Reservations counted the open entry's room: they apply
@@ -1253,7 +1280,7 @@ impl<D: BlockDev> Mount<D> {
             let mut st = self.st.borrow_mut();
             let st = &mut *st;
             if st.journal.open.is_some() && st.journal.may_close() {
-                self.close(st);
+                self.close(st, false);
             }
             st.journal.closed.back().map(|e| e.seq)
         };
@@ -1353,7 +1380,7 @@ impl<D: BlockDev> Mount<D> {
             let mut st = self.st.borrow_mut();
             let st = &mut *st;
             st.journal.open_new();
-            self.close(st);
+            self.close(st, true);
             st.journal.closed.back().expect("just closed").seq
         };
         self.write_entries(upto).await?;
