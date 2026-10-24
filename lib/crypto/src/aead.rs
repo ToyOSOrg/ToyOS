@@ -257,9 +257,9 @@ mod tests {
     use super::*;
 
     /// A forged record's open returns zeros in place of its plaintext, at
-    /// every length the paths divide at: an AVX2 host decrypts as it
-    /// authenticates, so the zeros are all that stands between the caller and
-    /// the keystream.
+    /// every length the paths divide at: past 192 bytes an AVX2 host decrypts
+    /// as it authenticates, so the zeros are all that stands between the
+    /// caller and the keystream.
     #[test]
     fn a_forged_chacha_record_opens_to_zeros() {
         let key = [0x17; 32];

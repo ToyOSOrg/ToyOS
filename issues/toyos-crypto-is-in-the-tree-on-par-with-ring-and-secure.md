@@ -209,9 +209,9 @@ Not consumers:
          Poly1305 on AVX2; SHA-512 on BMI2; SHA-256 on SHA-NI.
      - **Rows that fail, by measured cause.**
        - **ChaCha20 on AVX2 (the AMD bench): a recorded exception.**
-         - Since #1056, seal and open on AVX2 without AVX-512VL are one
-           stitched pass of eight-block batches, the Poly1305 key in the
-           first. A refusal zeroes the record, as AES-GCM's does since #1054.
+         - Since #1056, seal and open of records past 192 B on AVX2 without
+           AVX-512VL are one stitched pass of eight-block batches, the
+           Poly1305 key in the first; shorter records take the short path. A refusal zeroes the record, as AES-GCM's does since #1054.
            The one-pass open is an owner decision of 2026-10-23.
          - Rows, from the guest table at 035c36d30: ChaCha20-Poly1305 at
            1 KiB and 16 KiB, seal 1.25 and 1.11, open 1.19 and 1.09, reject
@@ -224,13 +224,9 @@ Not consumers:
            rows pass. Until then the rows stay recorded here, as ruled.
        - **ChaCha20-Poly1305 per-message cost.**
          - Rows:
-           - 0 B and 64 B: the AMD bench 1.06–1.24 (seal, open and reject),
-             the T14 1.10–1.18. In the guest table at 035c36d30, where #1056's
-             one pass took 1–192 B on the AMD bench, the AMD bench read
-             1.10–1.35. The short path runs first again since #1056's review;
-             a Linux probe then read 64 B at 1.04–1.23 on the AMD bench. The
-             T14 read 1.12–1.25 for 0 B and seal at 64 B;
-           - the T14's 1 KiB rows, 1.057–1.059 (1.04–1.05 at 035c36d30).
+           - 0 B and 64 B (seal, open and reject): the AMD bench 1.04–1.38
+             (Linux probe), the T14 0.83–1.25 (guest table);
+           - the T14's 1 KiB rows, 1.04–1.05 (guest table).
          - A seal sweep over 1–192 B put ours above ring by a constant per
            message, with a per-block cost that matches ring's.
          - At 540c55e35 the constant is 23–51 ns on the AMD bench and 17–25

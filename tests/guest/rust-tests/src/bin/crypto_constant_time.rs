@@ -1,6 +1,6 @@
 //! `toyos-crypto`'s secret routines but the NIST curves' and Ed25519's,
 //! timed fixed against random (`../constant_time.rs`): the AEADs' and
-//! OpenSSH's sealing and refusal (AES-GCM's at 1 KiB too), HMAC, HKDF,
+//! OpenSSH's sealing and refusal at 64 B and 1 KiB, HMAC, HKDF,
 //! PBKDF2, scrypt's Salsa20/8, X25519 and ML-KEM-768's encapsulation and
 //! decapsulation. scrypt's ROMix
 //! is not timed: the entry it reads is a function of the secret by design
@@ -26,9 +26,8 @@ use toyos_crypto::x25519;
 
 /// A TLS record's worth: one 64-byte payload and its 5-byte header.
 const PAYLOAD: [u8; 64] = [0x70; 64];
-/// A record long enough for the stitched paths, AES-GCM's and
-/// ChaCha20-Poly1305's and OpenSSH's on AVX2, whose refusal zeroes what it
-/// decrypted.
+/// A record long enough for every AEAD's stitched path, whose refusal zeroes
+/// what it decrypted.
 const RECORD: [u8; 1024] = [0x70; 1024];
 const AAD: [u8; 5] = [0x17, 0x03, 0x03, 0x00, 0x50];
 const IV: [u8; 12] = [0x24; 12];
