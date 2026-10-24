@@ -216,9 +216,14 @@ Not consumers:
          - The AVX2 rounds come to about 3.4 instructions per byte in both
            the eight-block and the three-pair layout, against about 2.8 for
            an ideal schedule.
-         - Opening authenticates before it decrypts, and that stays.
+         - #1056 (owner-approved): on AVX2 without AVX-512VL, seal and open
+           are one stitched pass of eight-block batches, the key block in the
+           first, and a refusal zeroes the record, as AES-GCM's does since
+           #1054. Its Linux probe on the AMD bench put seal and open 64 KiB at
+           1.04 and 1.05 of ring (from 1.14 and 1.35).
          - Exit: an AVX2 ChaCha20 schedule within ring's time, and then the
-           rows pass. Until then the rows stay recorded here, as ruled.
+           rows pass. Until #1056's `cryptocase` boot judges them, the rows
+           stay recorded here, as ruled.
        - **ChaCha20-Poly1305 per-message cost.**
          - Rows:
            - 0 B and 64 B: the AMD bench 1.06–1.24 (seal, open and reject),

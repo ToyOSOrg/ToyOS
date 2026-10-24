@@ -343,6 +343,7 @@ pub(super) use hosted::*;
 mod hosted {
     //! Each function checks its own admission and reports whether it ran.
     use super::{Powers, aesni, chacha, features, poly1305, sha, vaes512};
+    use crate::poly1305::Poly1305;
 
     pub(in crate::arch) fn aes_expand(key: &[u8], keys: &mut [u8; 240]) -> bool {
         if !features().aes() {
@@ -448,24 +449,24 @@ mod hosted {
         Some(unsafe { aesni::short(keys, rounds, powers, nonce, aad, data, stream) })
     }
 
-    pub(in crate::arch) fn chacha_seal(
+    pub(in crate::arch) fn chacha20_poly1305(
         key: &[u8; 32],
         counter: u64,
         nonce: &[u8; 8],
+        prefix: &[u8],
         data: &mut [u8],
-        r: &[u64; 3],
-        h: &mut [u64; 3],
-    ) -> usize {
-        if !features().avx2() {
-            return 0;
+        seal: bool,
+        pad: bool,
+    ) -> Option<Poly1305> {
+        // Block 0 alone is quicker in scalar code. With AVX-512VL's rounds the
+        // vector Poly1305 after them is faster than the stitch, as the T14
+        // measures it.
+        if data.is_empty() || !features().avx2() || !features().bmi2() || features().avx512vl() {
+            return None;
         }
-        // With AVX-512VL's rounds the caller's vector Poly1305 after them is
-        // faster than the stitch, as the T14 measures it.
-        if features().avx512vl() {
-            return 0;
-        }
-        // AVX2 under YMM state is admitted; the caller bounded the counter.
-        unsafe { chacha::seal(key, counter, nonce, data, r, h) }
+        // AVX2 and BMI2 under YMM state are admitted; the caller bounded the
+        // counter.
+        Some(unsafe { chacha::avx2::chacha20_poly1305(key, counter, nonce, prefix, data, seal, pad) })
     }
 
     pub(in crate::arch) fn chacha_blocks(

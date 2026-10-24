@@ -84,7 +84,8 @@ fn rfc8439_aead_and_authenticated_refusal() {
         opener.open(&nonce, &aad, &mut encrypted, &bad),
         Err(Error::Authentication)
     );
-    assert_eq!(encrypted, original);
+    assert_eq!(encrypted, [0; 114], "a refusal zeroes the record");
+    encrypted = original;
     assert_eq!(
         opener.open(&nonce, &aad, &mut encrypted, &tag[..15]),
         Err(Error::Length)

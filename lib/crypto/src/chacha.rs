@@ -137,21 +137,21 @@ pub fn xor(key: &[u8; 32], nonce: &[u8; 12], counter: u32, data: &mut [u8]) -> R
     Ok(())
 }
 
-/// [`xor`], with `mac` absorbing the ciphertext zero-padded to a block.
-pub(crate) fn seal(key: &[u8; 32], nonce: &[u8; 12], counter: u32, data: &mut [u8], mac: &mut Poly1305) -> Result<(), Error> {
-    check_ietf(data.len(), counter)?;
-    if data.is_empty() {
-        return Ok(());
-    }
-    let (counter, nonce) = ietf(nonce, counter);
-    let done = match mac.parts() {
-        Some((r, h)) => crate::arch::chacha_seal(key, counter, &nonce, data, r, h),
-        None => 0,
-    };
-    let rest = &mut data[done..];
-    stream(key, counter.wrapping_add((done / 64) as u64), &nonce, rest);
-    mac.update_padded(rest);
-    Ok(())
+/// RFC 8439 §2.8's ChaCha20 and Poly1305 in one pass from block 0 of (`key`,
+/// `nonce`), where an instruction path runs: the MAC over the zero-padded
+/// `aad` and ciphertext, ready for the length block. `data`'s length is
+/// bounded as `crate::aead` bounds it.
+pub(crate) fn aead(key: &[u8; 32], nonce: &[u8; 12], aad: &[u8], data: &mut [u8], seal: bool) -> Option<Poly1305> {
+    let (counter, nonce) = ietf(nonce, 0);
+    crate::arch::chacha20_poly1305(key, counter, &nonce, aad, data, seal, true)
+}
+
+/// OpenSSH's payload pass in one, where an instruction path runs: block 0 of
+/// (`key`, `nonce`) keys the MAC over `header` and the payload's ciphertext,
+/// and the payload is XORed with the blocks after it. A payload of at most
+/// 2^32 - 1 bytes cannot carry the 64-bit counter.
+pub(crate) fn openssh(key: &[u8; 32], nonce: &[u8; 8], header: &[u8; 4], payload: &mut [u8], seal: bool) -> Option<Poly1305> {
+    crate::arch::chacha20_poly1305(key, 0, nonce, header, payload, seal, false)
 }
 
 pub(crate) fn legacy_xor(key: &[u8; 32], nonce: &[u8; 8], counter: u64, data: &mut [u8]) -> Result<(), Error> {

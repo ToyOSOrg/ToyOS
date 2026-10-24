@@ -86,10 +86,8 @@ struct Record<'a> {
     msg: &'a [u8],
 }
 
-/// Opens `ct` under `tag`, checking that a refusal leaves no plaintext (AES-GCM
-/// zeroes the buffer; ChaCha20-Poly1305 authenticates first and leaves it as
-/// it was) and that an open recovers `msg`; seals `msg` too where the file
-/// says valid.
+/// Opens `ct` under `tag`, checking that a refusal zeroes the buffer and that
+/// an open recovers `msg`; seals `msg` too where the file says valid.
 fn aead_case(tally: &mut Tally, file: &str, t: &Value, alg: Aead, r: Record) {
     let Record { key, nonce, aad, ct, tag, msg } = r;
     let id = case(file, t);
@@ -104,8 +102,7 @@ fn aead_case(tally: &mut Tally, file: &str, t: &Value, alg: Aead, r: Record) {
     if refusal.is_ok() {
         assert_eq!(opened, msg, "{id}");
     } else {
-        let left = if matches!(alg, Aead::ChaCha) { ct.to_vec() } else { vec![0; ct.len()] };
-        assert_eq!(opened, left, "{id}: what a refusal left");
+        assert!(opened.iter().all(|&b| b == 0), "{id}: a refusal left more than zeros");
     }
     tally.judged(result(t), refusal.is_ok(), &id);
     if result(t) == "valid" {

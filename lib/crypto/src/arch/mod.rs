@@ -260,18 +260,24 @@ pub(crate) fn chacha_blocks(
     })
 }
 
-/// [`chacha_xor`] over a prefix of whole batches, absorbing the ciphertext
-/// into the Poly1305 accumulator `h` under `r` as it goes; returns its length.
-pub(crate) fn chacha_seal(
+/// ChaCha20 and its Poly1305 MAC in one pass over `data`, sealing or opening
+/// it: block `counter` is the Poly1305 key, and `data` is XORed with the
+/// blocks after it. The MAC runs over `prefix` and the ciphertext, each
+/// zero-padded to a block where `pad` asks it (RFC 8439 §2.8), or run
+/// together (OpenSSH). Returns the MAC, ready for anything after the
+/// ciphertext, where an instruction path runs. The caller has checked counter
+/// bounds, as for [`chacha_xor`].
+pub(crate) fn chacha20_poly1305(
     key: &[u8; 32],
     counter: u64,
     nonce: &[u8; 8],
+    prefix: &[u8],
     data: &mut [u8],
-    r: &[u64; 3],
-    h: &mut [u64; 3],
-) -> usize {
-    hosted!(x86_64::chacha_seal(key, counter, nonce, data, r, h), {
-        let _ = (key, counter, nonce, data, r, h);
-        0
+    seal: bool,
+    pad: bool,
+) -> Option<crate::poly1305::Poly1305> {
+    hosted!(x86_64::chacha20_poly1305(key, counter, nonce, prefix, data, seal, pad), {
+        let _ = (key, counter, nonce, prefix, data, seal, pad);
+        None
     })
 }

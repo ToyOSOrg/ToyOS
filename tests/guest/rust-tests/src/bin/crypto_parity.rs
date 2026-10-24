@@ -649,10 +649,7 @@ fn agrees_with_ring_at_every_length() {
                 forged[len % 16] ^= 1;
                 let mut refused = theirs.clone();
                 assert!(opener.open(&IV, aad, &mut refused, &forged).is_err(), "{} refuses a forged tag at {len} B", alg.name());
-                // AES-GCM zeroes a refused record; ChaCha20-Poly1305
-                // authenticates first and leaves it as it was.
-                let left = if matches!(alg, Tls::ChaCha) { theirs.clone() } else { vec![0; len] };
-                assert_eq!(refused, left, "{} leaves no plaintext of a refused record", alg.name());
+                assert_eq!(refused, vec![0; len], "{} leaves no plaintext of a refused record", alg.name());
             }
         }
     }
@@ -670,6 +667,11 @@ fn agrees_with_ring_at_every_length() {
         let mut header: [u8; 4] = packet[..4].try_into().unwrap();
         let mut opened = packet[4..].to_vec();
         assert_eq!(opener.packet_length(sequence, header), len as u32);
+        let mut forged = ring_tag;
+        forged[len % 16] ^= 1;
+        let (mut refused_header, mut refused) = (header, opened.clone());
+        assert!(opener.open(sequence, &mut refused_header, &mut refused, &forged).is_err(), "OpenSSH refuses a forged tag at {len} B");
+        assert_eq!((refused_header, refused), (header, vec![0; len]), "OpenSSH leaves no plaintext of a refused packet");
         opener.open(sequence, &mut header, &mut opened, &ring_tag).expect("ours opens ring's packet");
         assert_eq!(opened, plain, "OpenSSH opens {len} B");
     }

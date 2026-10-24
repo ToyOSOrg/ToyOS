@@ -1,10 +1,12 @@
-//! RFC 8439 ChaCha20 on AVX2. With AVX-512VL's 32 registers and VPROLD,
-//! eight blocks run with each register holding one state word of all eight
-//! (Goll and Gueron, "Vectorization on ChaCha Stream Cipher", ITNG 2014). On
-//! AVX2 alone, and for shorter runs, blocks run in pairs with each 128-bit
-//! lane holding one block's row; with AVX-512F, four blocks run in one
-//! register set with a block per lane. Rows are built from the key bytes in
-//! registers, never from a state in memory. Rounds, shuffles and addresses
+//! RFC 8439 ChaCha20 on AVX2. Eight blocks run with each register holding
+//! one state word of all eight (Goll and Gueron, "Vectorization on ChaCha
+//! Stream Cipher", ITNG 2014): with AVX-512VL's 32 registers and VPROLD, and
+//! on AVX2 alone, where sixteen registers spill a few words a round but need
+//! none of the row layout's diagonal shuffles, which share Zen 2's two
+//! shuffle pipes with its one shift pipe. Shorter runs go in pairs with each
+//! 128-bit lane holding one block's row; with AVX-512F, four blocks run in
+//! one register set with a block per lane. Rows are built from the key bytes
+//! in registers, never from a state in memory. Rounds, shuffles and addresses
 //! depend only on public lengths and counters. Only hosted targets with
 //! OS-enabled YMM state enter here. Hot loops index fixed-size arrays, as
 //! `aesni`'s header explains.
@@ -14,7 +16,6 @@
 use core::arch::x86_64::*;
 
 use super::load;
-use crate::poly1305::absorb;
 
 const SIGMA: [u32; 4] = [0x61707865, 0x3320646e, 0x79622d32, 0x6b206574];
 
@@ -31,15 +32,24 @@ fn key_row(key: &[u8; 32], row: usize) -> __m128i {
     load(&halves[row - 1])
 }
 
+/// `mask` through an assembly block LLVM cannot see into, which emits
+/// nothing. A shuffle by a known 16-bit rotation mask is otherwise lowered
+/// as VPSHUFLW and VPSHUFHW, two shuffle uops for VPSHUFB's one.
+#[inline]
+#[target_feature(enable = "avx2")]
+fn opaque(mut mask: __m256i) -> __m256i {
+    // SAFETY: the template reads and writes only the operand's register.
+    unsafe { core::arch::asm!("/* {0} */", inout(ymm_reg) mask, options(pure, nomem, nostack, preserves_flags)) };
+    mask
+}
+
 #[inline]
 #[target_feature(enable = "avx2")]
 fn rotate16(x: __m256i) -> __m256i {
-    _mm256_shuffle_epi8(
-        x,
-        _mm256_setr_epi8(
-            2, 3, 0, 1, 6, 7, 4, 5, 10, 11, 8, 9, 14, 15, 12, 13, 2, 3, 0, 1, 6, 7, 4, 5, 10, 11, 8, 9, 14, 15, 12, 13,
-        ),
-    )
+    let mask = _mm256_setr_epi8(
+        2, 3, 0, 1, 6, 7, 4, 5, 10, 11, 8, 9, 14, 15, 12, 13, 2, 3, 0, 1, 6, 7, 4, 5, 10, 11, 8, 9, 14, 15, 12, 13,
+    );
+    _mm256_shuffle_epi8(x, opaque(mask))
 }
 
 #[inline]
@@ -98,7 +108,7 @@ fn rotate7(x: __m256i) -> __m256i {
 /// The vector rounds and their callers, every function compiled for
 /// `$features` with the rotations given.
 macro_rules! chacha256 {
-    ($features:literal, $six:literal, $r16:ident, $r12:ident, $r8:ident, $r7:ident) => {
+    ($features:literal, $r16:ident, $r12:ident, $r8:ident, $r7:ident) => {
         use core::arch::x86_64::*;
 
         use super::super::{load_data, store_data};
@@ -123,10 +133,12 @@ macro_rules! chacha256 {
             store_data(bytes, _mm256_xor_si256(stream, load_data(bytes)));
         }
 
-        /// Eight blocks from `counter` on, XORed into `out`.
+        /// Eight blocks from `counter` on, a register per state word of all
+        /// eight, with `beside` run once in each double round. Returns the
+        /// words after the rounds and the feed-forward.
         #[inline]
         #[target_feature(enable = $features)]
-        fn eight(key: &[u8; 32], nonce: u64, counter: u64, out: &mut [u8; 512]) {
+        fn eight(key: &[u8; 32], nonce: u64, counter: u64, mut beside: impl FnMut(usize)) -> [__m256i; 16] {
             let mut lanes = [[0u32; 8]; 2];
             for j in 0..8 {
                 let c = counter.wrapping_add(j as u64);
@@ -152,7 +164,8 @@ macro_rules! chacha256 {
                     (v[$a], v[$b], v[$c], v[$d]) = (a, b, c, d);
                 }};
             }
-            for _ in 0..10 {
+            for round in 0..10 {
+                beside(round);
                 q!(0, 4, 8, 12);
                 q!(1, 5, 9, 13);
                 q!(2, 6, 10, 14);
@@ -165,6 +178,14 @@ macro_rules! chacha256 {
             for i in 0..16 {
                 v[i] = _mm256_add_epi32(v[i], start[i]);
             }
+            v
+        }
+
+        /// [`eight`]'s words as eight blocks of keystream XORed into `out` or
+        /// written over it.
+        #[inline]
+        #[target_feature(enable = $features)]
+        fn emit_eight(v: [__m256i; 16], out: &mut [u8; 512], xor: bool) {
             // Transpose each group of four words: lane 0 of `t[g][q]` is words
             // 4g..4g+4 of block q, lane 1 of block q + 4.
             let mut t = [[_mm256_setzero_si256(); 4]; 4];
@@ -185,25 +206,33 @@ macro_rules! chacha256 {
             let (halves, _) = out.as_chunks_mut::<32>();
             for q in 0..4 {
                 let [w0, w1, w2, w3] = [t[0][q], t[1][q], t[2][q], t[3][q]];
-                xor_into(&mut halves[2 * q], _mm256_permute2x128_si256::<0x20>(w0, w1));
-                xor_into(&mut halves[2 * q + 1], _mm256_permute2x128_si256::<0x20>(w2, w3));
-                xor_into(&mut halves[2 * q + 8], _mm256_permute2x128_si256::<0x31>(w0, w1));
-                xor_into(&mut halves[2 * q + 9], _mm256_permute2x128_si256::<0x31>(w2, w3));
+                let blocks = [
+                    _mm256_permute2x128_si256::<0x20>(w0, w1),
+                    _mm256_permute2x128_si256::<0x20>(w2, w3),
+                    _mm256_permute2x128_si256::<0x31>(w0, w1),
+                    _mm256_permute2x128_si256::<0x31>(w2, w3),
+                ];
+                let at = [2 * q, 2 * q + 1, 2 * q + 8, 2 * q + 9];
+                for i in 0..4 {
+                    if xor {
+                        xor_into(&mut halves[at[i]], blocks[i]);
+                    } else {
+                        store_data(&mut halves[at[i]], blocks[i]);
+                    }
+                }
             }
         }
 
         /// `2P` blocks, two per register: pair p holds blocks 2p and 2p + 1, each
-        /// register one row of both, with `beside` run once in each of the first
-        /// eight double rounds. Returns each pair's rows after the rounds and the
+        /// register one row of both, with `beside` run once in each double
+        /// round. Returns each pair's rows after the rounds and the
         /// feed-forward.
         #[inline]
         #[target_feature(enable = $features)]
         fn pairs<const P: usize>(start: [[__m256i; 4]; P], mut beside: impl FnMut(usize)) -> [[__m256i; 4]; P] {
             let mut v = start;
             for round in 0..10 {
-                if round < 8 {
-                    beside(round);
-                }
+                beside(round);
                 for p in 0..P {
                     let [mut a, mut b, mut c, mut d] = v[p];
                     quarter(&mut a, &mut b, &mut c, &mut d);
@@ -268,15 +297,6 @@ macro_rules! chacha256 {
             rows
         }
 
-        /// `2P` blocks of one key from `counter` on, XORed into `out`'s first
-        /// `128P` bytes, with `beside` as [`pairs`] runs it.
-        #[inline]
-        #[target_feature(enable = $features)]
-        pub(super) fn pairs_of<const P: usize>(key: &[u8; 32], nonce: u64, counter: u64, out: &mut [u8], beside: impl FnMut(usize)) {
-            let (halves, _) = out.as_chunks_mut::<32>();
-            emit(pairs::<P>(counter_rows::<P>(key, nonce, counter), beside), 2 * P, halves, true);
-        }
-
         /// The rows of the pair of lanes `2p` and `2p + 1`, one per register.
         #[inline]
         #[target_feature(enable = $features)]
@@ -304,21 +324,12 @@ macro_rules! chacha256 {
         pub(in crate::arch) unsafe fn xor(key: &[u8; 32], counter: u64, nonce: &[u8; 8], data: &mut [u8]) -> usize {
             let nonce = u64::from_le_bytes(*nonce);
             let mut counter = counter;
-            let done = if $six {
-                let (sixes, _) = data.as_chunks_mut::<384>();
-                for i in 0..sixes.len() {
-                    pairs_of::<3>(key, nonce, counter, &mut sixes[i], |_| {});
-                    counter = counter.wrapping_add(6);
-                }
-                384 * sixes.len()
-            } else {
-                let (eights, _) = data.as_chunks_mut::<512>();
-                for i in 0..eights.len() {
-                    eight(key, nonce, counter, &mut eights[i]);
-                    counter = counter.wrapping_add(8);
-                }
-                512 * eights.len()
-            };
+            let (eights, _) = data.as_chunks_mut::<512>();
+            for i in 0..eights.len() {
+                emit_eight(eight(key, nonce, counter, |_| {}), &mut eights[i], true);
+                counter = counter.wrapping_add(8);
+            }
+            let done = 512 * eights.len();
             let (fours, rest) = data[done..].as_chunks_mut::<256>();
             for i in 0..fours.len() {
                 four(key, nonce, counter, &mut fours[i], true);
@@ -341,9 +352,13 @@ macro_rules! chacha256 {
 }
 
 pub(super) mod avx2 {
-    // Sixteen YMM registers hold three pairs' rows and the rotation masks;
-    // the word-per-register layout's eight blocks spill.
-    chacha256!("avx2", true, rotate16, rotate12, rotate8, rotate7);
+    chacha256!("avx2", rotate16, rotate12, rotate8, rotate7);
+
+    use core::ops::Range;
+
+    use crate::block::{padded, terminated, xor as xor_bytes};
+    use crate::poly1305::{Poly1305, absorb};
+    use crate::secret::Secret;
 
     /// Four blocks of one key from `counter` on, XORed into `out` or written
     /// over it.
@@ -370,10 +385,177 @@ pub(super) mod avx2 {
             emit(pairs::<2>(lane_rows::<2>(keys, counters, nonce), |_| {}), n, halves, false);
         }
     }
+
+    /// Absorbs `blocks[3 round..3 round + 3]`, those there are, into `acc`.
+    #[inline(always)]
+    fn absorb_round(acc: &mut [u64; 3], blocks: &[[u8; 16]], r: [u64; 3], round: usize) {
+        for j in 3 * round..(3 * round + 3).min(blocks.len()) {
+            *acc = absorb(*acc, &blocks[j], r, true);
+        }
+    }
+
+    /// Absorbs `blocks[30..]`, the blocks past three in each double round.
+    #[inline(always)]
+    fn absorb_after(acc: &mut [u64; 3], blocks: &[[u8; 16]], r: [u64; 3]) {
+        for j in 30..blocks.len() {
+            *acc = absorb(*acc, &blocks[j], r, true);
+        }
+    }
+
+    /// Eight blocks from `counter` XORed into `data[at..at + 512]`, while the
+    /// blocks of `data[hashed]` are absorbed into `acc` under `r`: scalar
+    /// multiplication on the integer units beside the vector rounds (Gopal et
+    /// al., "Fast Cryptographic Computation on Intel Architecture Processors
+    /// Via Function Stitching", Intel, 2010), three in each double round and
+    /// any past thirty after them, then `data[partial]` as the MAC's [`last`]
+    /// block, all before the keystream lands.
+    #[inline]
+    #[target_feature(enable = "avx2,bmi2")]
+    fn batch(
+        key: &[u8; 32],
+        nonce: u64,
+        counter: u64,
+        data: &mut [u8],
+        at: usize,
+        (hashed, partial): (Range<usize>, Range<usize>),
+        (acc, r, pad): (&mut [u64; 3], [u64; 3], bool),
+    ) {
+        let v = {
+            let (blocks, _) = data[hashed].as_chunks::<16>();
+            let v = eight(key, nonce, counter, |round| absorb_round(acc, blocks, r, round));
+            absorb_after(acc, blocks, r);
+            if !partial.is_empty() {
+                *acc = last(*acc, &data[partial], r, pad);
+            }
+            v
+        };
+        emit_eight(v, (&mut data[at..at + 512]).try_into().unwrap(), true);
+    }
+
+    /// Keystream from block `counter` over `stream`, enough for `n` bytes, at
+    /// most 512, in the fewest pairs or eight blocks, absorbing `blocks` as
+    /// [`batch`] does.
+    #[inline]
+    #[target_feature(enable = "avx2,bmi2")]
+    fn keystream(
+        key: &[u8; 32],
+        nonce: u64,
+        counter: u64,
+        n: usize,
+        blocks: &[[u8; 16]],
+        (acc, r): (&mut [u64; 3], [u64; 3]),
+        stream: &mut [u8; 512],
+    ) {
+        if n > 256 {
+            let v = eight(key, nonce, counter, |round| absorb_round(acc, blocks, r, round));
+            emit_eight(v, stream, false);
+        } else {
+            let (halves, _) = stream.as_chunks_mut::<32>();
+            if n <= 128 {
+                let rows = pairs::<1>(counter_rows::<1>(key, nonce, counter), |round| absorb_round(acc, blocks, r, round));
+                emit(rows, 2, halves, false);
+            } else {
+                let rows = pairs::<2>(counter_rows::<2>(key, nonce, counter), |round| absorb_round(acc, blocks, r, round));
+                emit(rows, 4, halves, false);
+            }
+        }
+        absorb_after(acc, blocks, r);
+    }
+
+    /// The MAC's last block, partial: RFC 8439 pads it with zeros; OpenSSH's
+    /// ends in a one byte, as Poly1305's own message end does.
+    #[inline(always)]
+    fn last(acc: [u64; 3], bytes: &[u8], r: [u64; 3], pad: bool) -> [u64; 3] {
+        if pad {
+            absorb(acc, &padded(bytes), r, true)
+        } else {
+            absorb(acc, &terminated(&padded(bytes), bytes.len(), 1), r, false)
+        }
+    }
+
+    /// ChaCha20 and its Poly1305 MAC in one pass over `data`: block `counter`
+    /// is the Poly1305 key and `data` is XORed with the blocks after it. The
+    /// MAC runs over `prefix` and the ciphertext, each zero-padded to a block
+    /// where `pad` asks it, as RFC 8439 §2.8 does, or run together, as
+    /// OpenSSH's does. Returns the MAC ready for anything after the
+    /// ciphertext.
+    ///
+    /// The key comes from the first batch, which carries the first seven
+    /// blocks of keystream; an open that runs on past it carries one, since
+    /// its MAC waits for the key. Sealing absorbs each 512-byte batch's
+    /// ciphertext beside the next batch's rounds; opening absorbs a batch, to
+    /// the end of the MAC block it ends in, beside its own rounds before
+    /// they overwrite it.
+    ///
+    /// # Safety
+    /// AVX2 and BMI2 under YMM state are admitted, and the caller bounded
+    /// `counter` plus the block count.
+    #[target_feature(enable = "avx2,bmi2")]
+    pub(in crate::arch) unsafe fn chacha20_poly1305(
+        key: &[u8; 32],
+        counter: u64,
+        nonce: &[u8; 8],
+        prefix: &[u8],
+        data: &mut [u8],
+        seal: bool,
+        pad: bool,
+    ) -> Poly1305 {
+        let nonce = u64::from_le_bytes(*nonce);
+        let len = data.len();
+        // The MAC's blocks over `data` begin `skew` bytes in, after the bytes
+        // that complete an unpadded prefix's last block.
+        let skew = if pad { 0 } else { prefix.len().wrapping_neg() % 16 };
+        // The end of the MAC block holding byte `end - 1`, or of `data`.
+        let reach = |end: usize| (skew + end.saturating_sub(skew).next_multiple_of(16)).min(len);
+        let rest = |mac: &mut Poly1305, bytes: &[u8]| if pad { mac.update_padded(bytes) } else { mac.update(bytes) };
+        let mut stream = Secret([0u8; 512]);
+        let first = if seal || len <= 448 { len.min(448) } else { 64 };
+        keystream(key, nonce, counter, 64 + first, &[], (&mut [0; 3], [0; 3]), &mut stream.0);
+        let mut mac = Poly1305::new(stream.0[..32].try_into().unwrap());
+        rest(&mut mac, prefix);
+        // The bytes of `data` absorbed.
+        let mut hashed = if seal { 0 } else { reach(first) };
+        rest(&mut mac, &data[..hashed]);
+        xor_bytes(&mut data[..first], &stream.0[64..]);
+        if seal {
+            hashed = skew.min(len);
+            rest(&mut mac, &data[..hashed]);
+        }
+        let mut done = first;
+        if done < len {
+            let Some((r, h)) = mac.parts() else { unreachable!("the MAC is at a block boundary") };
+            let (r, mut acc) = (*r, *h);
+            let mut counter = counter.wrapping_add(1 + first as u64 / 64);
+            while done < len {
+                let end = len.min(done + 512);
+                let upto = if seal { done } else { reach(end) };
+                let whole = hashed + (upto - hashed) / 16 * 16;
+                // An open's final partial block, where this batch reaches it.
+                let partial = if seal { whole..whole } else { whole..upto };
+                if end - done == 512 {
+                    batch(key, nonce, counter, data, done, (hashed..whole, partial), (&mut acc, r, pad));
+                } else {
+                    let blocks = data[hashed..whole].as_chunks::<16>().0;
+                    keystream(key, nonce, counter, end - done, blocks, (&mut acc, r), &mut stream.0);
+                    if !partial.is_empty() {
+                        acc = last(acc, &data[partial], r, pad);
+                    }
+                    xor_bytes(&mut data[done..end], &stream.0);
+                }
+                hashed = if seal { whole } else { upto };
+                done = end;
+                counter = counter.wrapping_add(8);
+            }
+            let Some((_, h)) = mac.parts() else { unreachable!("the MAC is at a block boundary") };
+            *h = acc;
+        }
+        rest(&mut mac, &data[hashed..]);
+        mac
+    }
 }
 
 pub(super) mod avx512 {
-    chacha256!("avx2,avx512f,avx512vl", false, rol16, rol12, rol8, rol7);
+    chacha256!("avx2,avx512f,avx512vl", rol16, rol12, rol8, rol7);
 
     use super::super::{load, store};
 
@@ -515,49 +697,106 @@ pub(super) mod avx512 {
     }
 }
 
-/// The AVX2 `xor` over whole 384-byte batches, absorbing each batch's
-/// ciphertext into the Poly1305 accumulator `h` under `r` in the next
-/// batch's double rounds: scalar multiplication on the integer units beside
-/// the vector rounds (Gopal et al., "Fast Cryptographic Computation on Intel
-/// Architecture Processors Via Function Stitching", Intel, 2010). Returns the
-/// bytes done.
-///
-/// Where AVX-512VL admits its own rounds, the vector Poly1305 after them
-/// is faster than this.
-///
-/// # Safety
-/// AVX2 under YMM state is admitted, and the caller bounded `counter` plus
-/// the block count.
-#[target_feature(enable = "avx2")]
-pub(super) unsafe fn seal(
-    key: &[u8; 32],
-    counter: u64,
-    nonce: &[u8; 8],
-    data: &mut [u8],
-    r: &[u64; 3],
-    h: &mut [u64; 3],
-) -> usize {
-    let nonce = u64::from_le_bytes(*nonce);
-    let (batches, _) = data.as_chunks_mut::<384>();
-    let n = batches.len();
-    if n == 0 {
-        return 0;
+#[cfg(test)]
+mod tests {
+    use std::{format, vec::Vec};
+
+    use crate::chacha::legacy_block;
+
+    /// Whether this host can test the AVX2 paths; a host without AVX2 says so
+    /// rather than passing.
+    fn avx2() -> bool {
+        assert!(
+            super::super::features().avx2() || cfg!(feature = "portable"),
+            "this host's CPU has no AVX2, so nothing here can test the AVX2 ChaCha20 paths"
+        );
+        !cfg!(feature = "portable")
     }
-    let mut acc = *h;
-    avx2::pairs_of::<3>(key, nonce, counter, &mut batches[0], |_| {});
-    for i in 1..n {
-        let (done, next) = batches.split_at_mut(i);
-        let (blocks, _) = done[i - 1].as_chunks::<16>();
-        avx2::pairs_of::<3>(key, nonce, counter.wrapping_add(6 * i as u64), &mut next[0], |round| {
-            for j in 3 * round..3 * round + 3 {
-                acc = absorb(acc, &blocks[j], *r, true);
+
+    /// `data` XORed with blocks `counter` on, one portable block at a time.
+    fn portable_stream(key: &[u8; 32], nonce: &[u8; 8], counter: u64, data: &[u8]) -> Vec<u8> {
+        let mut out = data.to_vec();
+        for (i, chunk) in out.chunks_mut(64).enumerate() {
+            let block = legacy_block(key, nonce, counter.wrapping_add(i as u64));
+            for (byte, mask) in chunk.iter_mut().zip(block.0) {
+                *byte ^= mask;
             }
-        });
+        }
+        out
     }
-    let (blocks, _) = batches[n - 1].as_chunks::<16>();
-    for j in 0..24 {
-        acc = absorb(acc, &blocks[j], *r, true);
+
+    fn message(len: usize, seed: usize) -> Vec<u8> {
+        (0..len).map(|i| (i * 167 + seed * 31 + 13) as u8).collect()
     }
-    *h = acc;
-    384 * n
+
+    /// The eight-block stream from every counter carry a batch can straddle,
+    /// through every batch tail, against one portable block at a time. The
+    /// dispatched stream takes AVX-512 where the host has it, so this drives
+    /// the AVX2 kernel itself.
+    #[test]
+    fn the_avx2_stream_matches_one_block_at_a_time() {
+        if !avx2() {
+            return;
+        }
+        let key: [u8; 32] = core::array::from_fn(|i| (i * 7 + 3) as u8);
+        let nonce = [0x10, 0x32, 0x54, 0x76, 0x98, 0xba, 0xdc, 0xfe];
+        for len in (0..=1600).chain([2047, 2048, 2049, 4095, 4096, 4097]) {
+            let data = message(len, len);
+            for counter in [0, u64::from(u32::MAX) - 3, u64::MAX - len.div_ceil(64) as u64] {
+                let mut ours = data.clone();
+                // CPUID and XCR0 admitted AVX2 above; no counter passes 2^64.
+                let done = unsafe { super::avx2::xor(&key, counter, &nonce, &mut ours) };
+                assert_eq!(done, len);
+                assert_eq!(ours, portable_stream(&key, &nonce, counter, &data), "{len} bytes from counter {counter}");
+            }
+        }
+    }
+
+    /// The one-pass kernel against both MACs composed from portable blocks
+    /// and `poly1305::tag`: RFC 8439 §2.8's, with AAD that fills no block,
+    /// one and a part, and OpenSSH's over a four-byte header and the payload
+    /// run together. Every length through the first batch, two whole batches
+    /// and each tail, then longer runs; sealing and opening.
+    #[test]
+    fn the_avx2_one_pass_matches_both_macs_composed() {
+        if !avx2() {
+            return;
+        }
+        let key: [u8; 32] = core::array::from_fn(|i| (i * 89 + 1) as u8);
+        let nonce = [0xa5, 0x5a, 0x01, 0x02, 0x03, 0x04, 0x05, 0x06];
+        // An RFC 8439 nonce's first word above the 32-bit block counter.
+        let counter = 0x0807_0605_0000_0000;
+        for len in (1..=1600).chain([1983, 1984, 1985, 2047, 2048, 2049, 4096, 16383, 16384, 16385]) {
+            for pad in [true, false] {
+                let prefix = if pad { message([0, 5, 17][len % 3], len) } else { message(4, len) };
+                let plain = message(len, len + 1);
+                let sealed = portable_stream(&key, &nonce, counter + 1, &plain);
+                let mut input = Vec::new();
+                for part in [&prefix, &sealed] {
+                    input.extend_from_slice(part);
+                    if pad {
+                        input.resize(input.len().next_multiple_of(16), 0);
+                    }
+                }
+                let lengths = [(prefix.len() as u64).to_le_bytes(), (len as u64).to_le_bytes()].concat();
+                if pad {
+                    input.extend_from_slice(&lengths);
+                }
+                let tag = crate::poly1305::tag(legacy_block(&key, &nonce, counter).0[..32].try_into().unwrap(), &input);
+                for seal in [true, false] {
+                    let mut data = if seal { plain.clone() } else { sealed.clone() };
+                    // CPUID and XCR0 admitted AVX2 above, and every AVX2 CPU has
+                    // BMI2; the counter stays below 2^32 blocks.
+                    let mut mac =
+                        unsafe { super::avx2::chacha20_poly1305(&key, counter, &nonce, &prefix, &mut data, seal, pad) };
+                    if pad {
+                        mac.update_padded(&lengths);
+                    }
+                    let case = format!("{len} bytes, seal {seal}, pad {pad}");
+                    assert_eq!(&data, if seal { &sealed } else { &plain }, "{case}");
+                    assert_eq!(mac.finish(), tag, "{case}");
+                }
+            }
+        }
+    }
 }
