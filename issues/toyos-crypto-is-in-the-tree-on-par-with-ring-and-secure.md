@@ -219,11 +219,17 @@ Not consumers:
          - #1056 (owner-approved): on AVX2 without AVX-512VL, seal and open
            are one stitched pass of eight-block batches, the key block in the
            first, and a refusal zeroes the record, as AES-GCM's does since
-           #1054. Its Linux probe on the AMD bench put seal and open 64 KiB at
-           1.04 and 1.05 of ring (from 1.14 and 1.35).
+           #1054. Its Linux probes on the AMD bench put seal and open 64 KiB
+           at 1.04 to 1.10 of ring (from 1.14 and 1.35), and 1 KiB at 1.24 to
+           1.26 and 1.19 to 1.21.
+         - The spread is per build. 2c00ebbdc and 035c36d30 read 1.04 and
+           1.10 with the same 4,503-byte vector loop at a different alignment
+           and ring unchanged, and two variants of short batches moved the
+           bulk rows they cannot touch by 0.03. Code placement is the
+           unverified suspect.
          - Exit: an AVX2 ChaCha20 schedule within ring's time, and then the
-           rows pass. Until #1056's `cryptocase` boot judges them, the rows
-           stay recorded here, as ruled.
+           rows pass. Until then the rows stay recorded here, as ruled; #1056's
+           `cryptocase` boot at 035c36d30 passed on both benches.
        - **ChaCha20-Poly1305 per-message cost.**
          - Rows:
            - 0 B and 64 B: the AMD bench 1.06–1.24 (seal, open and reject),
