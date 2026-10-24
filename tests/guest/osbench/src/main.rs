@@ -29,6 +29,9 @@
 //!
 //! That nightly is the build's stage-0 compiler (`build/sysroot.rs`'s
 //! `STAGE0_CARGO`, which this follows), the upstream one nearest ToyOS's own.
+//! On Linux `nvme` and `energy` read what only root may (the raw namespace,
+//! the package's energy counter) and say so unprivileged; `lan` needs an
+//! `osbench-peer` (`lan/`) running on another machine on the link.
 //! With the `toyos` profile every guest binary is built with, osbench's own
 //! code is generated alike for both; std's platform layer and the C library
 //! beneath it (musl's on Linux) are each system's own.
@@ -36,12 +39,17 @@
 mod arch;
 mod boot;
 mod clock;
+mod crunch;
+mod energy;
 mod fair;
 mod files;
+mod identity;
 mod ipc;
+mod lan;
 mod measure;
 mod mem;
 mod net;
+mod nvme;
 mod pingpong;
 mod place;
 mod procs;
@@ -90,8 +98,9 @@ fn system() {
     system::null_syscall();
     system::thread_spawn();
     system::process_spawn();
-    system::pipe_throughput(64);
-    system::pipe_throughput(64 * 1024);
+    for size in [64, 256, 1024, 4096, 16 * 1024, 64 * 1024] {
+        system::pipe_throughput(size);
+    }
     system::anon_memory();
     system::map_unmap_small();
     system::bandwidth();
@@ -99,7 +108,7 @@ fn system() {
 
 fn sched() {
     system::chunk_rate();
-    wake::periodic("wake.periodic.idle");
+    wake::periodic("wake.periodic.idle", wake::PERIOD);
     wake::periodic_loaded("wake.periodic.loaded");
     #[cfg(target_os = "linux")]
     {
@@ -107,7 +116,7 @@ fn sched() {
         // by default; these show the wake without it. ToyOS has none.
         let slack = sys::timer_slack_ns();
         sys::set_timer_slack_ns(1);
-        wake::periodic("wake.periodic.idle.slack1ns");
+        wake::periodic("wake.periodic.idle.slack1ns", wake::PERIOD);
         wake::periodic_loaded("wake.periodic.loaded.slack1ns");
         sys::set_timer_slack_ns(slack);
     }
@@ -133,10 +142,14 @@ fn files() {
 }
 
 /// Every group, in the order `all` and the ToyOS job list run them: `boot`
-/// first, since it reads how long the boot took to reach it, and `persist`
-/// last, since it writes the volume a ToyOS boot's log is on.
-const GROUPS: [(&str, fn()); 13] = [
+/// first, since it reads how long the boot took to reach it; `energy` while
+/// the machine is still quiet; `crunch`, which heats it, after every other
+/// measurement; and `persist` last, since it writes the volume a ToyOS
+/// boot's log is on.
+const GROUPS: [(&str, fn()); 18] = [
     ("boot", boot::suite),
+    ("identity", identity::suite),
+    ("energy", energy::suite),
     ("system", system),
     ("sched", sched),
     ("fair", fair),
@@ -148,6 +161,9 @@ const GROUPS: [(&str, fn()); 13] = [
     ("time", time::suite),
     ("work", work::suite),
     ("tail", tail::suite),
+    ("nvme", nvme::suite),
+    ("lan", lan::suite),
+    ("crunch", crunch::suite),
     ("persist", storage::suite),
 ];
 

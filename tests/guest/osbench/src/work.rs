@@ -18,12 +18,12 @@ use crate::report::{refuse, result};
 use crate::ns_since;
 
 const FILES: usize = 256;
-const FILE_BYTES: usize = 32 << 10;
+pub const FILE_BYTES: usize = 32 << 10;
 
 /// One deterministic file of C-like text: words from a fixed vocabulary in
 /// an order an LCG picks, so it compresses as source does rather than as
 /// noise or as zeros.
-fn source(seed: u64) -> Vec<u8> {
+pub fn source(seed: u64) -> Vec<u8> {
     const WORDS: [&str; 24] = [
         "int", "return", "if", "else", "for", "while", "struct", "static", "const", "char", "void", "size_t",
         "(", ")", "{", "}", ";", "=", "+", "*", "->", "0", "1", "\n",

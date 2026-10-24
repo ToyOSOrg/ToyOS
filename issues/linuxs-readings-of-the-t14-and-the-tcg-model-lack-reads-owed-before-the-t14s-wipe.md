@@ -10,12 +10,12 @@ The CPU readings this issue owed went with `toyos-cpuvuln` (#915); the
 track's pin is in
 `issues/the-kernel-is-at-least-as-secure-as-linux-on-every-machine-toyos-supports.md`.
 Ubuntu leaves the T14 only after this issue and
-`issues/no-program-measures-toyos-against-linux-on-one-machine.md`
+`issues/no-published-run-compares-toyos-with-linux-on-one-machine.md`
 close.
 
 **Exit**: the Linux readings on the T14 that
 `issues/toyos-explains-itself.md` (each counter ToyOS reads there) and
-`issues/no-program-measures-toyos-against-linux-on-one-machine.md` (that
+`issues/no-published-run-compares-toyos-with-linux-on-one-machine.md` (that
 program's outputs under Ubuntu) compare against are taken before the wipe and
 published in evidence.
 

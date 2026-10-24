@@ -83,6 +83,14 @@ impl Mapping {
         self.ptr
     }
 
+    /// The mapping as bytes. Anonymous memory reads as zero, so every byte is
+    /// initialised.
+    #[cfg(target_os = "linux")]
+    pub fn bytes(&mut self) -> &mut [u8] {
+        // SAFETY: `ptr` is page-aligned, `len` bytes long and owned by `self`.
+        unsafe { std::slice::from_raw_parts_mut(self.ptr, self.len) }
+    }
+
     /// The mapping as words. Anonymous memory reads as zero, so every word is
     /// initialised.
     pub fn words(&mut self) -> &mut [u64] {
@@ -96,4 +104,14 @@ impl Drop for Mapping {
         // SAFETY: nothing borrows the mapping past `self`.
         unsafe { unmap(self.ptr, self.len) }
     }
+}
+
+/// The CPU package's temperature, in millidegrees Celsius, where a program
+/// can read it.
+pub struct Sensor {
+    pub read: Box<dyn Fn() -> Option<i64> + Send + Sync>,
+    /// The temperature the sensor calls critical, where it reports one.
+    pub crit_mc: Option<i64>,
+    /// Which sensor this is, for the conditions.
+    pub what: String,
 }

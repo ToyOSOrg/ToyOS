@@ -16,7 +16,7 @@ use crate::{ns_since, sys};
 /// refused: every wait here is microseconds on a working machine.
 const STUCK: Duration = Duration::from_secs(5);
 
-fn spin_until(what: &str, done: impl Fn() -> bool) -> Result<(), String> {
+pub fn spin_until(what: &str, done: impl Fn() -> bool) -> Result<(), String> {
     let start = Instant::now();
     while !done() {
         if start.elapsed() > STUCK {
@@ -27,18 +27,20 @@ fn spin_until(what: &str, done: impl Fn() -> bool) -> Result<(), String> {
     Ok(())
 }
 
-/// A cyclictest-style periodic wake: sleep to absolute targets every 500 µs
-/// and record how late each wake ran, ns, 5,000 after 100. A late wake
-/// shortens the next sleep rather than moving every later target. Ordinary
-/// priority on both systems, as an unprivileged program gets it.
-pub fn periodic(bench: &str) {
-    const PERIOD: Duration = Duration::from_micros(500);
+/// The period the wake group's periodic wakes keep.
+pub const PERIOD: Duration = Duration::from_micros(500);
+
+/// A cyclictest-style periodic wake: sleep to absolute targets every
+/// `period` and record how late each wake ran, ns, 5,000 after 100. A late
+/// wake shortens the next sleep rather than moving every later target.
+/// Ordinary priority on both systems, as an unprivileged program gets it.
+pub fn periodic(bench: &str, period: Duration) {
     const WARMUP: u32 = 100;
     const SAMPLES: u32 = 5_000;
     let start = Instant::now();
     let mut late = Vec::with_capacity(SAMPLES as usize);
     for i in 1..=WARMUP + SAMPLES {
-        let target = start + PERIOD * i;
+        let target = start + period * i;
         if let Some(left) = target.checked_duration_since(Instant::now()) {
             thread::sleep(left);
         }
@@ -46,7 +48,7 @@ pub fn periodic(bench: &str) {
             late.push(ns_since(target));
         }
     }
-    result(bench, "ns", &mut late, &[("period_ns", PERIOD.as_nanos().to_string())]);
+    result(bench, "ns", &mut late, &[("period_ns", period.as_nanos().to_string())]);
 }
 
 /// The periodic wake with every CPU kept busy by another process's
@@ -56,7 +58,7 @@ pub fn periodic_loaded(bench: &str) {
         Ok(load) => load,
         Err(why) => return refuse(bench, why),
     };
-    periodic(bench);
+    periodic(bench, PERIOD);
     if let Err(why) = load.stop() {
         refuse(bench, why);
     }

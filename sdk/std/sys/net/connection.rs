@@ -58,10 +58,14 @@ fn addr_to_v4(addr: &SocketAddr) -> io::Result<([u8; 4], u16)> {
     }
 }
 
-fn duration_to_ms(d: Option<Duration>) -> u32 {
+/// A timeout as the protocol's milliseconds, where 0 is no bound: a zero
+/// timeout is refused, as std's contract has it, and one under a millisecond
+/// waits one, not forever.
+fn timeout_ms(d: Option<Duration>) -> io::Result<u32> {
     match d {
-        Some(d) => d.as_millis().min(u32::MAX as u128) as u32,
-        None => 0,
+        Some(Duration::ZERO) => Err(io::Error::ZERO_TIMEOUT),
+        Some(d) => Ok(d.as_millis().clamp(1, u32::MAX as u128) as u32),
+        None => Ok(0),
     }
 }
 
@@ -136,7 +140,7 @@ impl TcpStream {
 
     pub fn connect_timeout(addr: &SocketAddr, timeout: Duration) -> io::Result<TcpStream> {
         let (ip, port) = addr_to_v4(addr)?;
-        let connected = stream::connect(ip, port, duration_to_ms(Some(timeout)), false).map_err(net_err_to_io)?;
+        let connected = stream::connect(ip, port, timeout_ms(Some(timeout))?, false).map_err(net_err_to_io)?;
         Ok(TcpStream::from_fd(stream_fd(connected.handle)?))
     }
 
@@ -145,12 +149,12 @@ impl TcpStream {
     }
 
     pub fn set_read_timeout(&self, dur: Option<Duration>) -> io::Result<()> {
-        self.read_timeout_ms.store(duration_to_ms(dur), Relaxed);
+        self.read_timeout_ms.store(timeout_ms(dur)?, Relaxed);
         Ok(())
     }
 
     pub fn set_write_timeout(&self, dur: Option<Duration>) -> io::Result<()> {
-        self.write_timeout_ms.store(duration_to_ms(dur), Relaxed);
+        self.write_timeout_ms.store(timeout_ms(dur)?, Relaxed);
         Ok(())
     }
 
@@ -479,12 +483,12 @@ impl UdpSocket {
     }
 
     pub fn set_read_timeout(&self, dur: Option<Duration>) -> io::Result<()> {
-        self.read_timeout_ms.store(duration_to_ms(dur), Relaxed);
+        self.read_timeout_ms.store(timeout_ms(dur)?, Relaxed);
         Ok(())
     }
 
     pub fn set_write_timeout(&self, dur: Option<Duration>) -> io::Result<()> {
-        self.write_timeout_ms.store(duration_to_ms(dur), Relaxed);
+        self.write_timeout_ms.store(timeout_ms(dur)?, Relaxed);
         Ok(())
     }
 

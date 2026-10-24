@@ -582,3 +582,75 @@ fn backing_disk(mut device: std::path::PathBuf) -> (std::path::PathBuf, bool) {
     }
     (device, mapped)
 }
+
+/// The interface holding `local`, off `getifaddrs`, and whether it is a
+/// wireless one, as sysfs says: its kind, and its driver and speed. The
+/// interface's name and addresses are never printed.
+pub fn link_of(local: std::net::IpAddr) -> Result<(crate::lan::Link, String), String> {
+    let name = interface_holding(local)?;
+    let at = std::path::Path::new("/sys/class/net").join(&name);
+    let wireless = at.join("wireless").exists() || at.join("phy80211").exists();
+    let driver = fs::read_link(at.join("device/driver"))
+        .ok()
+        .and_then(|p| p.file_name().map(|n| n.to_string_lossy().into_owned()))
+        .unwrap_or_else(|| "none".into());
+    let speed = read(&at.join("speed").to_string_lossy()).unwrap_or_else(|| "unknown".into());
+    let link = if wireless { crate::lan::Link::Wifi } else { crate::lan::Link::Wired };
+    let kind = if wireless { "wireless" } else { "wired" };
+    Ok((link, format!("{kind} driver={driver} speed_mbps={speed}")))
+}
+
+fn interface_holding(local: std::net::IpAddr) -> Result<String, String> {
+    let std::net::IpAddr::V4(local) = local else { return Err("the connection left from an IPv6 address".into()) };
+    let mut list: *mut libc::ifaddrs = std::ptr::null_mut();
+    // SAFETY: `list` is a valid out-pointer; the list is freed below.
+    if unsafe { libc::getifaddrs(&mut list) } != 0 {
+        return Err(format!("getifaddrs: {}", std::io::Error::last_os_error()));
+    }
+    let mut found = None;
+    let mut at = list;
+    while !at.is_null() {
+        // SAFETY: a node of the list getifaddrs made, alive until it is freed.
+        let ifa = unsafe { &*at };
+        // SAFETY: a non-null `ifa_addr` of family AF_INET is a sockaddr_in.
+        let v4 = (!ifa.ifa_addr.is_null() && unsafe { (*ifa.ifa_addr).sa_family } == libc::AF_INET as libc::sa_family_t)
+            .then(|| unsafe { (*ifa.ifa_addr.cast::<libc::sockaddr_in>()).sin_addr.s_addr });
+        if v4 == Some(u32::from(local).to_be()) {
+            // SAFETY: an interface's name is a NUL-terminated string.
+            found = Some(unsafe { std::ffi::CStr::from_ptr(ifa.ifa_name) }.to_string_lossy().into_owned());
+            break;
+        }
+        at = ifa.ifa_next;
+    }
+    // SAFETY: the list getifaddrs made, read no more.
+    unsafe { libc::freeifaddrs(list) };
+    found.ok_or_else(|| "no interface holds the address the connection left from".into())
+}
+
+/// The package's temperature off hwmon: `coretemp`'s `Package id 0`, or
+/// `k10temp`'s `Tdie` where it has one and its `Tctl` otherwise.
+pub fn package_sensor() -> Result<super::Sensor, String> {
+    let mut chips: Vec<std::path::PathBuf> =
+        fs::read_dir("/sys/class/hwmon").map_err(|e| format!("/sys/class/hwmon: {e}"))?.flatten().map(|e| e.path()).collect();
+    chips.sort();
+    for chip in chips {
+        let name = read(&chip.join("name").to_string_lossy()).unwrap_or_default();
+        let wanted: &[&str] = match name.as_str() {
+            "coretemp" => &["Package id 0"],
+            "k10temp" => &["Tdie", "Tctl"],
+            _ => continue,
+        };
+        let labels: Vec<(String, String)> = (1..=64)
+            .filter_map(|i| read(&chip.join(format!("temp{i}_label")).to_string_lossy()).map(|l| (format!("temp{i}"), l)))
+            .collect();
+        for label in wanted {
+            if let Some((temp, _)) = labels.iter().find(|(_, l)| l == label) {
+                let input = chip.join(format!("{temp}_input"));
+                let crit_mc = read(&chip.join(format!("{temp}_crit")).to_string_lossy()).and_then(|v| v.parse().ok());
+                let reader = move || read(&input.to_string_lossy()).and_then(|v| v.parse().ok());
+                return Ok(super::Sensor { read: Box::new(reader), crit_mc, what: format!("{name} {label}") });
+            }
+        }
+    }
+    Err("no coretemp or k10temp package sensor in /sys/class/hwmon".into())
+}
