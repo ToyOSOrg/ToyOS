@@ -365,7 +365,7 @@ pub fn persistent_dir() -> Option<(String, String)> {
 
 /// What carries a connection on ToyOS: netstack drives one card, Ethernet.
 pub fn link_of(_local: std::net::IpAddr) -> Result<(osbench_lan::link::Link, String), String> {
-    Ok((osbench_lan::link::Link::Wired, "netstack's one Ethernet card".into()))
+    Ok((osbench_lan::link::Link::Wired, "wired netstack's one Ethernet card".into()))
 }
 
 /// ToyOS reads no temperature: the kernel counts none

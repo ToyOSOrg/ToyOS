@@ -1636,18 +1636,24 @@ const BENCHCASE: &[metal::Arm] = &[metal::Arm {
 }];
 
 /// The two groups that need another party share one boot when one pass names
-/// both. `lan` looks for its peer up to 60 s, inside which the boot's lease
+/// both. Each adds its own worst span; the 60 s every list has is the
+/// boot's margin, not either group's.
+///
+/// `lan` looks for its peer for up to 60 s, inside which the boot's lease
 /// lands, then measures for under 60 s over a Wi-Fi hop: 2,155 round trips
-/// at up to 10 ms and twelve 3 s transfers, so 150 s leaves it 30 s.
-/// `internet` measures for under 95 s down to 3 MB/s and up to 1.5 MB/s: six
-/// 25 MB downloads, six 10 MB uploads and 77 short exchanges.
+/// at up to 10 ms and twelve 3 s transfers with their warm-ups.
 const OSBENCH_LAN: &[metal::Arm] = &[metal::Arm {
-    adds_ms: 90_000,
+    adds_ms: 120_000,
     named_only: true,
     ..metal::once("netbenchcase", "tests/images/benchcase.toml", &[], &["osbench_lan"])
 }];
+/// `internet` waits up to 60 s for the lease when it runs first, then
+/// measures six 25 MB downloads, six 10 MB uploads and 77 short exchanges:
+/// under 95 s at 3 MB/s down and 1.5 MB/s up. Those rates are an
+/// assumption, not a reading: no ToyOS TLS transfer has been timed on metal
+/// by this group, and a slower one ends the list at the bound.
 const OSBENCH_INTERNET: &[metal::Arm] = &[metal::Arm {
-    adds_ms: 60_000,
+    adds_ms: 155_000,
     named_only: true,
     ..metal::once("netbenchcase", "tests/images/benchcase.toml", &[], &["osbench_internet"])
 }];

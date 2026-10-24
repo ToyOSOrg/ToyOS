@@ -7,7 +7,10 @@
 //! Linux's range on a path is that path's noise floor. ToyOS's median over
 //! Linux's is the ratio, and the exact two-sided Mann-Whitney test over the
 //! two sets of runs says whether the difference is resolved at all: with four
-//! runs each, complete separation gives p = 2/70.
+//! runs each, complete separation gives p = 2/70. Each p is one row's,
+//! uncorrected for the table's other rows. Better or worse is judged only
+//! for a unit whose better direction is known ([`better`]); for any other
+//! the verdict says which way ToyOS differs.
 
 use std::collections::BTreeMap;
 use std::fmt::Write as _;
@@ -123,10 +126,19 @@ pub fn median(values: &[u64]) -> f64 {
     }
 }
 
-/// `(max - min) / median`, the spread of a set of runs.
-pub fn range(values: &[u64]) -> f64 {
+/// `(max - min) / median`, the spread of a set of runs; `None` about a
+/// median of 0.
+pub fn range(values: &[u64]) -> Option<f64> {
     let (min, max) = (values.iter().min().expect("values"), values.iter().max().expect("values"));
-    (max - min) as f64 / median(values)
+    let median = median(values);
+    (median > 0.0).then(|| (max - min) as f64 / median)
+}
+
+/// The least two-sided p `n` runs against `m` can reach: complete
+/// separation, two of the C(n + m, n) splits.
+pub fn least_p(n: usize, m: usize) -> f64 {
+    let splits = (1..=n).fold(1.0, |c, k| c * (m + k) as f64 / k as f64);
+    (2.0 / splits).min(1.0)
 }
 
 /// The exact two-sided Mann-Whitney p of `a` against `b`, ties counted half,
@@ -173,14 +185,30 @@ pub fn mann_whitney(a: &[u64], b: &[u64]) -> Option<f64> {
     Some(extreme as f64 / splits as f64)
 }
 
-/// Whether a lower value of `unit` is the better one.
-fn lower_is_better(unit: &str) -> bool {
-    unit == "ns"
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Better {
+    Lower,
+    Higher,
 }
 
-/// A link description's kind and driver, without what varies by the run.
-fn path(said: &str) -> String {
-    said.split(['_', ' ']).take(2).collect::<Vec<_>>().join(" ")
+/// Which way `unit` is better, for the units whose direction is known: a
+/// time and a rate. A clock, a power or a share is no better higher or lower.
+pub fn better(unit: &str) -> Option<Better> {
+    match unit {
+        "ns" => Some(Better::Lower),
+        "MB/s" => Some(Better::Higher),
+        _ => None,
+    }
+}
+
+/// The condition every run of a machine must agree on for a benchmark's
+/// runs to be compared, and how many of its leading words must agree: the
+/// peer's link kind and driver, and the internet link's kind, not what
+/// varies by the run.
+const PATHS: [(&str, &str, usize); 2] = [("lan.", "lan.peer_link", 2), ("internet.", "internet.link", 1)];
+
+fn path(said: &str, words: usize) -> String {
+    said.split(['_', ' ']).take(words).collect::<Vec<_>>().join(" ")
 }
 
 /// Every machine's comparison, as Markdown: one section per machine, one row
@@ -193,28 +221,34 @@ pub fn compare(runs: &[Run]) -> Result<String, String> {
     let mut out = String::new();
     for (machine, runs) in machines {
         let count = |os| runs.iter().filter(|r| r.os == os).count();
-        let peers: std::collections::BTreeSet<String> =
-            runs.iter().filter_map(|r| r.conds.get("lan.peer_link")).map(|said| path(said)).collect();
+        let paths: Vec<(&str, &str, std::collections::BTreeSet<String>)> = PATHS
+            .iter()
+            .map(|&(prefix, cond, words)| {
+                (prefix, cond, runs.iter().filter_map(|r| r.conds.get(cond)).map(|said| path(said, words)).collect())
+            })
+            .collect();
         writeln!(out, "## {machine}\n").unwrap();
-        writeln!(out, "Runs: Linux {}, ToyOS {}. LAN peer: {}.\n", count(Os::Linux), count(Os::Toyos), {
-            if peers.is_empty() { "none".to_string() } else { peers.iter().cloned().collect::<Vec<_>>().join(", ") }
-        })
-        .unwrap();
+        write!(out, "Runs: Linux {}, ToyOS {}.", count(Os::Linux), count(Os::Toyos)).unwrap();
+        for (_, cond, seen) in &paths {
+            let seen = if seen.is_empty() { "none".to_string() } else { seen.iter().cloned().collect::<Vec<_>>().join(", ") };
+            write!(out, " {cond}: {seen}.").unwrap();
+        }
+        writeln!(out, "\n").unwrap();
         writeln!(out, "| bench | unit | Linux p50s | Linux median | Linux range | ToyOS p50s | ToyOS median | ToyOS range | ToyOS/Linux | p | verdict |").unwrap();
         writeln!(out, "|---|---|---|---|---|---|---|---|---|---|---|").unwrap();
         let names: std::collections::BTreeSet<&String> = runs.iter().flat_map(|r| r.benches.keys()).collect();
         for name in names {
-            let row = if name.starts_with("lan.") && peers.len() > 1 {
-                Err("the runs' peers were on different links".to_string())
-            } else {
-                Ok(compare_one(&runs, name))
+            let split = paths.iter().find(|(prefix, _, seen)| name.starts_with(prefix) && seen.len() > 1);
+            let row = match split {
+                Some((_, cond, _)) => Err(format!("the runs disagree on {cond}")),
+                None => Ok(compare_one(&runs, name)),
             };
             match row {
                 Ok(row) => writeln!(out, "| {name} | {row} |").unwrap(),
                 Err(why) => writeln!(out, "| {name} | | | | | | | | | | {why} |").unwrap(),
             }
         }
-        writeln!(out).unwrap();
+        writeln!(out, "\nEach p is its row's alone, uncorrected for the table's other rows.\n").unwrap();
     }
     Ok(out)
 }
@@ -241,7 +275,7 @@ fn compare_one(runs: &[&Run], name: &str) -> String {
             Some(v) => [
                 v.iter().map(u64::to_string).collect::<Vec<_>>().join(", "),
                 format!("{:.0}", median(v)),
-                format!("{:.1}%", range(v) * 100.0),
+                range(v).map_or_else(|| "-".into(), |r| format!("{:.1}%", r * 100.0)),
             ],
             None => [String::new(), "-".into(), "-".into()],
         }
@@ -252,12 +286,16 @@ fn compare_one(runs: &[&Run], name: &str) -> String {
         (Some(l), Some(t)) => {
             let ratio = median(t) / median(l);
             let p = mann_whitney(t, l);
+            let least = least_p(t.len(), l.len());
             let verdict = match p {
                 None => "too many runs for the exact test".to_string(),
-                Some(_) if l.len() < 2 || t.len() < 2 => "too few runs".to_string(),
+                Some(_) if least > RESOLVED => format!("too few runs to resolve (least p {least:.3})"),
                 Some(p) if p <= RESOLVED => {
-                    let better = (ratio < 1.0) == lower_is_better(unit.unwrap_or_default());
-                    format!("ToyOS {}", if better { "better" } else { "worse" })
+                    let higher = median(t) > median(l);
+                    match better(unit.unwrap_or_default()) {
+                        Some(way) => format!("ToyOS {}", if higher == (way == Better::Higher) { "better" } else { "worse" }),
+                        None => format!("ToyOS {}", if higher { "higher" } else { "lower" }),
+                    }
                 }
                 Some(_) => "not resolved".to_string(),
             };
@@ -351,8 +389,20 @@ mod tests {
     fn median_and_range_of_a_set_of_runs() {
         assert_eq!(median(&[3, 1, 2]), 2.0);
         assert_eq!(median(&[4, 1, 3, 2]), 2.5);
-        assert!((range(&[90, 100, 110, 100]) - 0.2).abs() < 1e-12);
-        assert_eq!(range(&[7]), 0.0);
+        assert!((range(&[90, 100, 110, 100]).unwrap() - 0.2).abs() < 1e-12);
+        assert_eq!(range(&[7]), Some(0.0));
+        assert_eq!(range(&[0, 0, 3]), None, "no spread relative to a median of 0");
+    }
+
+    #[test]
+    fn the_least_p_is_complete_separations() {
+        assert!((least_p(4, 4) - 2.0 / 70.0).abs() < 1e-12);
+        assert!((least_p(4, 3) - 2.0 / 35.0).abs() < 1e-12);
+        assert!((least_p(3, 4) - least_p(4, 3)).abs() < 1e-12);
+        assert_eq!(least_p(1, 1), 1.0);
+        assert_eq!(least_p(1, 3), 0.5);
+        let p = mann_whitney(&[1, 2, 3, 4], &[5, 6, 7]).unwrap();
+        assert!((p - least_p(4, 3)).abs() < 1e-12);
     }
 
     fn rtt(os: &str, p50: u64) -> Run {
@@ -372,6 +422,24 @@ mod tests {
         runs.extend([99, 103, 97, 102].iter().map(|v| rtt("toyos", *v)));
         let table = compare(&runs).unwrap();
         assert!(table.contains("| not resolved |"), "{table}");
+    }
+
+    #[test]
+    fn counts_that_cannot_reach_the_level_say_so_and_not_that_nothing_differs() {
+        let mut runs: Vec<Run> = [100, 104, 98, 102].iter().map(|v| rtt("linux", *v)).collect();
+        runs.extend([150, 149, 155].iter().map(|v| rtt("toyos", *v)));
+        let table = compare(&runs).unwrap();
+        assert!(table.contains("| 0.057 | too few runs to resolve (least p 0.057) |"), "{table}");
+    }
+
+    #[test]
+    fn a_unit_of_no_known_direction_is_told_only_which_way_it_differs() {
+        let power = |os: &str, v: u64| run(os, &[&format!("bench=energy.idle_60s.package unit=mW n=1 min=1 p50={v} max=9 mean=5")]);
+        let mut runs: Vec<Run> = [900, 910, 920, 930].iter().map(|v| power("linux", *v)).collect();
+        runs.extend([1500, 1510, 1520, 1530].iter().map(|v| power("toyos", *v)));
+        let table = compare(&runs).unwrap();
+        assert!(table.contains("| ToyOS higher |"), "{table}");
+        assert!(!table.contains("better") && !table.contains("worse"), "{table}");
     }
 
     #[test]
@@ -401,6 +469,17 @@ mod tests {
         ];
         assert!(!compare(&runs).unwrap().contains("different links"), "a signal is no other link");
         let runs = [peer("linux", "wireless_driver=iwlwifi_signal_dbm=-52", 10), peer("toyos", "wired_driver=e1000e_speed_mbps=1000", 12)];
-        assert!(compare(&runs).unwrap().contains("| the runs' peers were on different links |"));
+        assert!(compare(&runs).unwrap().contains("| the runs disagree on lan.peer_link |"));
+    }
+
+    #[test]
+    fn internet_runs_that_left_by_different_kinds_of_link_are_not_compared() {
+        let left = |os: &str, said: &str| {
+            run(os, &[&format!("cond internet.link={said}"), "bench=internet.https.rtt unit=ns n=1 min=1 p50=9 max=1 mean=1"])
+        };
+        let same = [left("linux", "wired_driver=e1000e_speed_mbps=1000"), left("toyos", "wired_netstack's_one_Ethernet_card")];
+        assert!(!compare(&same).unwrap().contains("disagree"), "both wired, by any driver");
+        let split = [left("linux", "wireless_driver=iwlwifi_signal_dbm=-50"), left("toyos", "wired_netstack's_one_Ethernet_card")];
+        assert!(compare(&split).unwrap().contains("| the runs disagree on internet.link |"));
     }
 }
