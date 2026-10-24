@@ -13,9 +13,9 @@
 //! (Gueron and Kounavis, "Efficient implementation of the Galois Counter Mode
 //! using a carry-less multiplier and a fast reduction algorithm", IPL 110,
 //! 2010). Eight blocks share one reduction with H^8..H^1 (aggregated
-//! reduction, ibid.), and sealing interleaves the hash of one batch with the
-//! encryption of the next (Gopal et al., "Fast Cryptographic Computation on
-//! Intel Architecture Processors Via Function Stitching", Intel, 2010).
+//! reduction, ibid.), and CTR interleaves GHASH over its ciphertext (Gopal
+//! et al., "Fast Cryptographic Computation on Intel Architecture Processors
+//! Via Function Stitching", Intel, 2010).
 //!
 //! Every branch and address depends only on lengths and round counts.
 //!
@@ -33,7 +33,7 @@ use crate::arch::Powers;
 use crate::block::padded;
 
 /// x^63 + x^62 + x^57: g* - x^128 - 1, divided by x^64.
-const REDUCE: i64 = 0xc200_0000_0000_0000_u64 as i64;
+pub(super) const REDUCE: i64 = 0xc200_0000_0000_0000_u64 as i64;
 /// x^128 mod g*.
 const X128: u128 = 0xc200_0000_0000_0000_0000_0000_0000_0001;
 
@@ -130,7 +130,7 @@ pub(super) unsafe fn encrypt(keys: &[u8; 240], rounds: usize, block: &mut [u8; 1
 /// The nonce's counter block with round key 0 folded in.
 #[inline]
 #[target_feature(enable = "sse2")]
-pub(super) fn counter_base(nonce: &[u8; 12], key0: __m128i) -> __m128i {
+fn counter_base(nonce: &[u8; 12], key0: __m128i) -> __m128i {
     let mut iv = [0u8; 16];
     iv[..12].copy_from_slice(nonce);
     _mm_xor_si128(load(&iv), key0)
@@ -240,16 +240,16 @@ pub(super) fn reverse(x: __m128i) -> __m128i {
 /// A carry-less product's three Karatsuba terms, summed over several pairs
 /// before one reduction.
 #[derive(Clone, Copy)]
-pub(super) struct Product {
-    pub(super) low: __m128i,
-    pub(super) high: __m128i,
-    pub(super) middle: __m128i,
+struct Product {
+    low: __m128i,
+    high: __m128i,
+    middle: __m128i,
 }
 
 impl Product {
     #[inline]
     #[target_feature(enable = "pclmulqdq,sse2")]
-    pub(super) fn new(x: __m128i, h: __m128i) -> Self {
+    fn new(x: __m128i, h: __m128i) -> Self {
         Self {
             low: _mm_clmulepi64_si128::<0x00>(x, h),
             high: _mm_clmulepi64_si128::<0x11>(x, h),
@@ -259,7 +259,7 @@ impl Product {
 
     #[inline]
     #[target_feature(enable = "pclmulqdq,sse2")]
-    pub(super) fn add(self, x: __m128i, h: __m128i) -> Self {
+    fn add(self, x: __m128i, h: __m128i) -> Self {
         let p = Self::new(x, h);
         Self {
             low: _mm_xor_si128(self.low, p.low),
@@ -271,7 +271,7 @@ impl Product {
     /// The sum times x^-128 mod g*.
     #[inline]
     #[target_feature(enable = "pclmulqdq,sse2")]
-    pub(super) fn reduce(self) -> __m128i {
+    fn reduce(self) -> __m128i {
         let middle = _mm_xor_si128(self.middle, _mm_xor_si128(self.low, self.high));
         let low = _mm_xor_si128(self.low, _mm_slli_si128::<8>(middle));
         let high = _mm_xor_si128(self.high, _mm_srli_si128::<8>(middle));
@@ -299,22 +299,26 @@ fn multiply(a: __m128i, h: __m128i) -> __m128i {
 /// A value's halves XORed, the Karatsuba middle operand.
 #[inline]
 #[target_feature(enable = "sse2")]
-pub(super) fn folded(h: __m128i) -> __m128i {
+fn folded(h: __m128i) -> __m128i {
     _mm_xor_si128(h, _mm_shuffle_epi32::<0x4e>(h))
 }
 
 #[inline(always)]
-pub(super) fn power(p: u128) -> __m128i {
+fn power(p: u128) -> __m128i {
     // Both are 16 plain bytes; the low half of `p` is the low lane.
     unsafe { core::mem::transmute(p) }
 }
 
-/// `powers[i]` = (H^(i+1))' for the hash key `h` in GCM's byte order.
-///
-/// # Safety
-/// CLMUL and SSSE3 are admitted.
+/// (H^n)'.
+#[inline(always)]
+fn key_power(powers: &Powers, n: usize) -> __m128i {
+    power(powers[48 - n])
+}
+
+/// `p[i]` = (H^(i+1))' for the hash key `h` in GCM's byte order.
+#[inline]
 #[target_feature(enable = "pclmulqdq,sse2,ssse3")]
-pub(super) unsafe fn powers(h: &[u8; 16], powers: &mut Powers) {
+pub(super) fn powers16(h: &[u8; 16]) -> [__m128i; 16] {
     let h = u128::from_be_bytes(*h);
     // H*·x: a shift, reduced by x^128 where the top bit carries out.
     let mut p = [_mm_setzero_si128(); 16];
@@ -324,9 +328,19 @@ pub(super) unsafe fn powers(h: &[u8; 16], powers: &mut Powers) {
         let half = i.div_ceil(2);
         p[i] = multiply(p[half - 1], p[i - half]);
     }
+    p
+}
+
+/// H^16..H^1 for the hash key `h` in GCM's byte order.
+///
+/// # Safety
+/// CLMUL and SSSE3 are admitted.
+#[target_feature(enable = "pclmulqdq,sse2,ssse3")]
+pub(super) unsafe fn powers(h: &[u8; 16], powers: &mut Powers) {
+    let p = powers16(h);
     for i in 0..16 {
         // Both are 16 plain bytes.
-        powers[i] = unsafe { core::mem::transmute::<__m128i, u128>(p[i]) };
+        powers[47 - i] = unsafe { core::mem::transmute::<__m128i, u128>(p[i]) };
     }
 }
 
@@ -339,9 +353,9 @@ fn absorb(y: __m128i, powers: &Powers, blocks: &[[u8; 16]]) -> __m128i {
     if n == 0 {
         return y;
     }
-    let mut sum = Product::new(_mm_xor_si128(reverse(load(&blocks[0])), y), power(powers[n - 1]));
+    let mut sum = Product::new(_mm_xor_si128(reverse(load(&blocks[0])), y), key_power(powers, n));
     for j in 1..n {
-        sum = sum.add(reverse(load(&blocks[j])), power(powers[n - 1 - j]));
+        sum = sum.add(reverse(load(&blocks[j])), key_power(powers, n - j));
     }
     sum.reduce()
 }
@@ -357,7 +371,7 @@ pub(super) unsafe fn hash(powers: &Powers, state: &mut [u8; 16], blocks: &[[u8; 
         let mut h = [_mm_setzero_si128(); 8];
         let mut folds = [_mm_setzero_si128(); 8];
         for j in 0..8 {
-            h[j] = power(powers[7 - j]);
+            h[j] = key_power(powers, 8 - j);
             folds[j] = folded(h[j]);
         }
         for i in 0..batches.len() {
@@ -385,8 +399,20 @@ pub(super) unsafe fn hash(powers: &Powers, state: &mut [u8; 16], blocks: &[[u8; 
     store(state, reverse(y));
 }
 
+/// Eight blocks byte-reflected for GHASH.
+#[inline]
+#[target_feature(enable = "sse2,ssse3")]
+fn reflect8(batch: &[u8; 128]) -> [__m128i; 8] {
+    let (blocks, _) = batch.as_chunks::<16>();
+    let mut x = [_mm_setzero_si128(); 8];
+    for j in 0..8 {
+        x[j] = reverse(load(&blocks[j]));
+    }
+    x
+}
+
 #[target_feature(enable = "aes,pclmulqdq,sse2,ssse3")]
-fn seal_rounds<const R: usize>(
+fn crypt_rounds<const R: usize, const OPEN: bool>(
     keys: &[u8; 240],
     powers: &Powers,
     nonce: &[u8; 12],
@@ -400,37 +426,42 @@ fn seal_rounds<const R: usize>(
     }
     let (slots, _) = keys.as_chunks::<16>();
     let k: &[[u8; 16]; 15] = slots.try_into().unwrap();
+    // H^8..H^1, block j of a batch meeting H^(8-j).
     let mut h = [_mm_setzero_si128(); 8];
     let mut folds = [_mm_setzero_si128(); 8];
     for j in 0..8 {
-        h[j] = power(powers[j]);
+        h[j] = key_power(powers, 8 - j);
         folds[j] = folded(h[j]);
     }
     let base = counter_base(nonce, load(&k[0]));
     let mut y = reverse(load(state));
-    let (blocks, _) = batches[0].as_chunks_mut::<16>();
-    let mut s = [_mm_setzero_si128(); 15];
-    encrypt_into::<R, 8>(k, base, 2, &mut s);
-    for j in 0..8 {
-        xor_into(&mut blocks[j], s[j]);
-    }
-    for i in 1..n {
-        let (done, next) = batches.split_at_mut(i);
-        let (previous, _) = done[i - 1].as_chunks::<16>();
+    // Opening hashes each batch beside its own rounds; sealing hashes each
+    // batch's ciphertext beside the next batch's.
+    let from = if OPEN {
+        0
+    } else {
+        let (blocks, _) = batches[0].as_chunks_mut::<16>();
+        let mut s = [_mm_setzero_si128(); 15];
+        encrypt_into::<R, 8>(k, base, 2, &mut s);
+        for j in 0..8 {
+            xor_into(&mut blocks[j], s[j]);
+        }
+        1
+    };
+    for i in from..n {
+        let x = reflect8(&batches[if OPEN { i } else { i - 1 }]);
         let first = (i as u32).wrapping_mul(8).wrapping_add(2);
-        let mut x = [_mm_setzero_si128(); 8];
         let mut s = [_mm_setzero_si128(); 8];
         for j in 0..8 {
-            x[j] = reverse(load(&previous[j]));
             s[j] = counter(base, first.wrapping_add(j as u32));
         }
         let x0 = _mm_xor_si128(x[0], y);
         let mut sum = Product {
-            low: _mm_clmulepi64_si128::<0x00>(x0, h[7]),
-            high: _mm_clmulepi64_si128::<0x11>(x0, h[7]),
-            middle: _mm_clmulepi64_si128::<0x00>(folded(x0), folds[7]),
+            low: _mm_clmulepi64_si128::<0x00>(x0, h[0]),
+            high: _mm_clmulepi64_si128::<0x11>(x0, h[0]),
+            middle: _mm_clmulepi64_si128::<0x00>(folded(x0), folds[0]),
         };
-        // Round r + 1 also multiplies block r of the previous batch.
+        // Round r + 1 also multiplies block r.
         for r in 0..R - 1 {
             let key = load(&k[r + 1]);
             for j in 0..8 {
@@ -438,43 +469,48 @@ fn seal_rounds<const R: usize>(
             }
             if (1..8).contains(&r) {
                 sum = Product {
-                    low: _mm_xor_si128(sum.low, _mm_clmulepi64_si128::<0x00>(x[r], h[7 - r])),
-                    high: _mm_xor_si128(sum.high, _mm_clmulepi64_si128::<0x11>(x[r], h[7 - r])),
-                    middle: _mm_xor_si128(sum.middle, _mm_clmulepi64_si128::<0x00>(folded(x[r]), folds[7 - r])),
+                    low: _mm_xor_si128(sum.low, _mm_clmulepi64_si128::<0x00>(x[r], h[r])),
+                    high: _mm_xor_si128(sum.high, _mm_clmulepi64_si128::<0x11>(x[r], h[r])),
+                    middle: _mm_xor_si128(sum.middle, _mm_clmulepi64_si128::<0x00>(folded(x[r]), folds[r])),
                 };
             }
         }
         y = sum.reduce();
-        let (blocks, _) = next[0].as_chunks_mut::<16>();
+        let (blocks, _) = batches[i].as_chunks_mut::<16>();
         let last = load(&k[R]);
         for j in 0..8 {
             xor_into(&mut blocks[j], _mm_aesenclast_si128(s[j], last));
         }
     }
-    y = absorb(y, powers, batches[n - 1].as_chunks::<16>().0);
+    if !OPEN {
+        y = absorb(y, powers, batches[n - 1].as_chunks::<16>().0);
+    }
     store(state, reverse(y));
     128 * n
 }
 
-/// Encrypts whole 128-byte batches from counter 2 on and hashes their
-/// ciphertext, returning the bytes done.
+/// CTR from counter 2 over whole 128-byte batches, each hashed in the same
+/// pass: the ciphertext it writes when sealing, the ciphertext it reads when
+/// `open`. Returns the bytes done.
 ///
 /// # Safety
 /// AES, CLMUL and SSSE3 are admitted, `rounds` is 10 or 14, `powers` came
 /// from [`powers`], and GCM bounded `data`'s length.
 #[target_feature(enable = "aes,pclmulqdq,sse2,ssse3")]
-pub(super) unsafe fn seal(
+pub(super) unsafe fn crypt(
     keys: &[u8; 240],
     rounds: usize,
     powers: &Powers,
     nonce: &[u8; 12],
     state: &mut [u8; 16],
     data: &mut [u8],
+    open: bool,
 ) -> usize {
-    if rounds == 10 {
-        seal_rounds::<10>(keys, powers, nonce, state, data)
-    } else {
-        seal_rounds::<14>(keys, powers, nonce, state, data)
+    match (rounds, open) {
+        (10, false) => crypt_rounds::<10, false>(keys, powers, nonce, state, data),
+        (10, true) => crypt_rounds::<10, true>(keys, powers, nonce, state, data),
+        (_, false) => crypt_rounds::<14, false>(keys, powers, nonce, state, data),
+        (_, true) => crypt_rounds::<14, true>(keys, powers, nonce, state, data),
     }
 }
 
@@ -550,9 +586,9 @@ fn short_rounds<const R: usize>(
     let lengths = ((aad.len() as u128 * 8) << 64) | (data.len() as u128 * 8);
     x[n] = power(lengths);
     n += 1;
-    let mut sum = Product::new(x[0], power(powers[n - 1]));
+    let mut sum = Product::new(x[0], key_power(powers, n));
     for j in 1..n {
-        sum = sum.add(x[j], power(powers[n - 1 - j]));
+        sum = sum.add(x[j], key_power(powers, n - j));
     }
     let mut tag = [0u8; 16];
     store(&mut tag, _mm_xor_si128(reverse(sum.reduce()), s[0]));

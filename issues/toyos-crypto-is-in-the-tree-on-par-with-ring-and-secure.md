@@ -252,25 +252,57 @@ Not consumers:
            inlines it, as the hot loops were, and the row passes. The T14
            passes it at 0.82.
        - **AES-GCM bulk on AES-NI (the AMD bench).**
-         - Rows: 1 KiB and 16 KiB, 1.03–1.16.
+         - Rows: 1 KiB and 16 KiB, seal, open and reject, 1.007–1.131 in
+           `cryptocase` at #1054's 43690c542. The reject rows newly fail
+           there (0.53 → 1.02–1.03): since #1054 a refusal decrypts and
+           wipes, so reject costs what open does.
+         - With #1054's 16-byte volatile wipe at the refusal, reject at
+           16 KiB reads 1.135 and 1.112 (3916 and 4213 ns), against 1.03
+           with the `memset`. The wipe's stores cost more than a long
+           `rep stosb`; they replace it because a short one costs more
+           still (`issues/a-short-memset-on-x86-64-costs-a-rep-stosb-start-up.md`).
+           A refusal is an error path, so the trade stands until that issue's
+           exit returns the refusal to a fill.
          - The stitched eight-block seal is about 277 instructions per
            128 B, so it is bound by instruction count, not spills.
-         - CTR alone (open less reject) is about 1.95 µs per 16 KiB for
-           AES-128 and 3.0 µs for AES-256. GHASH alone passes at about 0.5.
+         - Before #1054, when reject was GHASH alone: CTR (open less
+           reject) was about 1.95 µs per 16 KiB for AES-128 and 3.0 µs for
+           AES-256, and GHASH alone passed at about 0.5.
          - A VEX-encoded build of AES-NI measured slower and is not to be
            retried. It kept all fifteen AES-256 round keys in registers and
            serialised the eight blocks (CTR 2.0 to 2.2 µs).
+         - Open is one pass since #1054 (the seal stitch, hashing each
+           batch's input). In `cryptocase` at #1054's 43690c542, open at
+           16 KiB reads 1.03 for both key sizes (AES-256 was 1.26 on the
+           bench's Linux before), seal 1.13 and 1.03, and reject, which now
+           decrypts and wipes, 1.03.
          - Exit: a schedule with fewer instructions per block, in counter
            generation and the Karatsuba folds, and the rows pass.
        - **AES-GCM bulk on 512-bit VAES (the T14).**
-         - Rows: 1 KiB and 16 KiB, 1.02–1.06.
-         - At 16 KiB, seal (1907 ns) is about CTR (open less reject, 1046 ns)
-           plus GHASH (reject, 966 ns) less 105 ns. So the 512-bit stitch
-           hides little of GHASH behind the AES rounds.
-         - At 1 KiB the shipped profile costs about 13% (seal 1.057, its
-           unasserted column 0.932).
-         - Exit: a stitch that overlaps the two, an inlining fix for the
-           1 KiB profile cost, and the rows pass.
+         - Since #1054: 16-block steps, three to a reduction with H^48..H^1
+           held in the key, schoolbook products, counters in a register,
+           round keys loaded per step, and a one-pass open.
+         - On the bench's Linux (`aes-gcm` probe, shipped profile), 16 KiB
+           and 64 KiB went from 1.00–1.08 against ring and 1.40–1.41 against
+           AWS-LC to 0.74–0.77 and 0.96–1.02. Taking each technique back out
+           measured: scalar counters 1.10–1.65 against AWS-LC, a reduction
+           per 16 blocks 0.99–1.19, a two-pass open 1.11 on open; Karatsuba
+           in place of schoolbook made no difference.
+         - In `cryptocase` at 43690c542, every row at 1 KiB and 16 KiB
+           passes: seal 0.91–0.94 and 0.77–0.78, open 0.76–0.86, reject
+           0.76–0.88. Key setup reads 0.78–0.81.
+         - The 0 B reject rows failed there (1.12). The refusal's wipe was a
+           `memset`, which costs a `rep stosb` start-up on ToyOS
+           (`issues/a-short-memset-on-x86-64-costs-a-rep-stosb-start-up.md`).
+           With #1054's 16-byte wipe they read 56.7 and 61.2 ns (0.59,
+           0.63), main's 57–61, and pass.
+         - The same wipe costs at 16 KiB: reject reads 1898 and 2094 ns
+           (0.988, 0.982, still passing), against 0.76–0.77 with the
+           `memset`. The trade and its exit are the AMD entry's above.
+         - Exit: the guest rows pass.
+         - Evidence:
+           https://github.com/ToyOSOrg/evidence/tree/db8683ad53396c00cef576007349d3662d4c7d78/r3
+           and `r4` beside it.
        - **SHA-512 at 16 KiB on BMI2 (the AMD bench), 1.035.**
          - A vector message schedule without AVX-512 measured 1.385 and was
            removed.
@@ -294,10 +326,13 @@ Not consumers:
        - Each build first checks ours against ring through the public API
          at every length from 0 to 1153 B. This covers AES-GCM and
          ChaCha20-Poly1305 seal, open and rejection with AAD of 0, 5, 16, 17
-         and 33 B, the OpenSSH construction, SHA-2 and HMAC. It runs in the
-         `cryptocase` boot and the QEMU row.
+         and 33 B, the OpenSSH construction, SHA-2 and HMAC. The AEADs also
+         run at 1281, 1535, 4113 and 16401 B, past the 512-bit path's
+         reduction groups and its counter's first low-byte carry. It runs in
+         the `cryptocase` boot and the QEMU row.
        - The host tests run on the portable code and, under Rosetta, on
-         AES-NI and PCLMULQDQ.
+         AES-NI and PCLMULQDQ. No host here runs the 512-bit path: the
+         bench's own checks are its correctness evidence.
        - Vector counter carries past 2^32 blocks are out of ring's reach;
          the 64-bit `wrapping_add` settles them by inspection.
      - **Constant time, by inspection.**
@@ -466,6 +501,22 @@ Not consumers:
          ec5a0cd18, read LEAKS everywhere: that harness made each random
          input next to the clock, so those readings are no finding.
        - Evidence: https://github.com/ToyOSOrg/evidence/tree/18e8243a9e9fb4ec4edaeec68ace23abe98c16b9/pr-993/r3
+     - **AES-GCM at #1054's 43690c542**, 1,000,000 measurements a routine,
+       on the T14 (signature 0x806c1) and the AMD bench (0x860f01).
+       - Routines: AES-128 and AES-256, key setup and seal and key setup
+         and refusal, at 64 B and, new, 1 KiB, which takes the stitched
+         loops and the refusal's wipe.
+       - Every routine passes: max |t| 1.07 to 3.27 on the T14 and 0.61 to
+         1.79 on the AMD bench.
+       - The controls held: null 1.68–1.69 and 0.83–1.17, leaky 1,119.7 and 1,122.5
+         and 109–190.
+       - The job took about 465 s and 434 s.
+       - With #1054's 16-byte refusal wipe in place of the `memset`, every
+         routine passes again: max |t| 1.10–2.60 on the T14 and 1.00–2.49 on
+         the AMD bench.
+       - Evidence:
+         https://github.com/ToyOSOrg/evidence/tree/db8683ad53396c00cef576007349d3662d4c7d78/r3
+         and `r4`.
      - **Not timed:** ML-KEM key generation. Its matrix expansion rejects
        samples by rho, a public output of the secret seed, so no two classes
        can share it. Exit: a measurement with rho held fixed, which needs an

@@ -363,11 +363,16 @@ mod hosted {
     }
 
     pub(in crate::arch) fn ghash_powers(h: &[u8; 16], powers: &mut Powers) -> bool {
-        if !features().aes_clmul() {
+        let features = features();
+        if features.vaes512() {
+            // 512-bit VPCLMULQDQ under ZMM state is admitted.
+            unsafe { vaes512::powers(h, powers) }
+        } else if features.aes_clmul() {
+            // CLMUL and SSSE3 are admitted.
+            unsafe { aesni::powers(h, powers) }
+        } else {
             return false;
         }
-        // CLMUL and SSSE3 are admitted.
-        unsafe { aesni::powers(h, powers) }
         true
     }
 
@@ -395,36 +400,32 @@ mod hosted {
         counter: u32,
         data: &mut [u8],
     ) -> bool {
-        let features = features();
-        if data.len() >= 512 && features.vaes512() {
-            // 512-bit VAES under ZMM state is admitted.
-            unsafe { vaes512::ctr(keys, rounds, nonce, counter, data) }
-        } else if features.aes_clmul() {
-            // AES and SSSE3 are admitted.
-            unsafe { aesni::ctr(keys, rounds, nonce, counter, data) }
-        } else {
+        if !features().aes_clmul() {
             return false;
         }
+        // AES and SSSE3 are admitted.
+        unsafe { aesni::ctr(keys, rounds, nonce, counter, data) }
         true
     }
 
-    /// Encrypts and hashes whole 128-byte batches from counter 2 on, and
-    /// returns the bytes it did; `powers` came from [`ghash_powers`].
-    pub(in crate::arch) fn gcm_seal(
+    /// CTR and GHASH over whole batches from counter 2 on, in one pass;
+    /// returns the bytes it did. `powers` came from [`ghash_powers`].
+    pub(in crate::arch) fn gcm_crypt(
         keys: &[u8; 240],
         rounds: usize,
         powers: &Powers,
         nonce: &[u8; 12],
         state: &mut [u8; 16],
         data: &mut [u8],
+        open: bool,
     ) -> usize {
         let features = features();
-        if features.vaes512() {
+        if data.len() >= 256 && features.vaes512() {
             // 512-bit VAES and VPCLMULQDQ under ZMM state are admitted.
-            unsafe { vaes512::seal(keys, rounds, powers, nonce, state, data) }
+            unsafe { vaes512::crypt(keys, rounds, powers, nonce, state, data, open) }
         } else if features.aes_clmul() {
             // AES, CLMUL and SSSE3 are admitted.
-            unsafe { aesni::seal(keys, rounds, powers, nonce, state, data) }
+            unsafe { aesni::crypt(keys, rounds, powers, nonce, state, data, open) }
         } else {
             0
         }

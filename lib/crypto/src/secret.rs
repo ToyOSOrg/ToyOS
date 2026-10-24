@@ -36,8 +36,15 @@
 
 use core::sync::atomic::{Ordering, compiler_fence};
 
+/// Erases `bytes` with volatile stores, 16 bytes to a store: one volatile
+/// store of a large array is lowered through a stack copy, a `memcpy` call.
 pub(crate) fn wipe(bytes: &mut [u8]) {
-    for byte in bytes {
+    let (chunks, tail) = bytes.as_chunks_mut::<16>();
+    for chunk in chunks {
+        // SAFETY: the address is a live, exclusively borrowed chunk.
+        unsafe { core::ptr::write_volatile(chunk, [0; 16]) };
+    }
+    for byte in tail {
         // SAFETY: the address is a live, exclusively borrowed byte.
         unsafe { core::ptr::write_volatile(byte, 0) };
     }
@@ -64,7 +71,8 @@ pub(crate) fn wipe64(words: &mut [u64]) {
 ///
 /// # Safety
 /// The all-zero bit pattern must be a valid `Self`: no references,
-/// `NonZero` fields or enums without a zero discriminant.
+/// `NonZero` fields or enums without a zero discriminant. `Self` has no
+/// padding, so its bytes are all initialised.
 pub(crate) unsafe trait Zeroable: Copy {}
 // SAFETY: an integer is valid at zero.
 unsafe impl Zeroable for u8 {}
@@ -79,21 +87,12 @@ unsafe impl Zeroable for u128 {}
 // SAFETY: an array of elements valid at zero is valid at zero.
 unsafe impl<T: Zeroable, const N: usize> Zeroable for [T; N] {}
 
-/// Erases a whole value, 16 bytes per volatile store. A single volatile store
-/// of a large array is lowered through a stack copy, a `memcpy` call.
+/// Erases a whole value, as [`wipe`] erases its bytes.
 pub(crate) fn erase<T: Zeroable>(value: &mut T) {
-    let bytes = core::mem::size_of::<T>();
-    let base = (value as *mut T).cast::<u8>();
-    for i in 0..bytes / 16 {
-        // SAFETY: the 16 bytes lie inside the live, exclusively borrowed value,
-        // and zero bytes are a valid `T`.
-        unsafe { core::ptr::write_volatile(base.add(16 * i).cast::<[u8; 16]>(), [0; 16]) };
-    }
-    for i in bytes / 16 * 16..bytes {
-        // SAFETY: as above, one byte.
-        unsafe { core::ptr::write_volatile(base.add(i), 0) };
-    }
-    compiler_fence(Ordering::SeqCst);
+    // SAFETY: the value is live and exclusively borrowed for the slice's life,
+    // its bytes are initialised (`Zeroable` has no padding), and zero bytes
+    // are a valid `T`.
+    wipe(unsafe { core::slice::from_raw_parts_mut((value as *mut T).cast::<u8>(), core::mem::size_of::<T>()) });
 }
 
 /// An owned array of `N` words, erased on drop.
