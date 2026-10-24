@@ -23,8 +23,6 @@ rounds:
 
 - No ToyOS round reached a Linux one: ToyOS's rounds ran 31 to 59 MB/s and
   Linux's 112 to 114. The exact rank test over the runs gives p = 1/35.
-- ToyOS's rounds cluster near 31 and 58 MB/s, an observation from three
-  runs that suggests a cap rather than noise.
 - The same runs' HTTPS upload to the public internet took 1.40 times
   Linux's time.
 
@@ -39,9 +37,11 @@ not findings:
   (`issues/the-intel-driver-writes-txdctl-and-tidv-against-the-82574-datasheets-newer-revision.md`);
 - the send window and the ACK clocking.
 
-The sending CPU's clock read 1.6 to 3.8 GHz around these runs. That is
-not excluded either: it is the T14's clock ceiling in
-`issues/toyos-uses-what-modern-hardware-offers-for-speed.md`.
+The clock does not separate the two systems. Each upload row's own
+readings, `mhz` just after it and `mhz_settled` before it, were about
+1.6 GHz under ToyOS (settled 1.6, 1.8 or 3.8 GHz). Under Linux they were
+1.5 GHz (settled 1.5 or 4.2 GHz), and Linux still moved 113 MB/s. At most,
+the clock matters through what ToyOS spends per byte sent.
 
 **Exit**: `osbench_lan` on the T14 reads `lan.wired.tcp.upload` within
 Linux's run-to-run range on the same path, or the cause is named and owned

@@ -136,10 +136,13 @@ pub fn range(values: &[u64]) -> Option<f64> {
 
 /// The exact two-sided Mann-Whitney test of `a` against `b`: `p`, and
 /// `least`, the smallest p these pooled values could give whichever runs
-/// were whose. Ties count half a win, and the distribution is every split of
-/// the pooled values into sets of the two sizes, so it holds the observed
-/// ties: with none, `least` is 2/C(n + m, n); runs tied apart from the other
-/// system's can lower it.
+/// were whose. Ties count half a win. Over every split of the pooled values
+/// into sets of the two sizes, `p` is the share of splits whose |2U - nm| is
+/// at least the observed one: the distance from the centre, not twice the
+/// one-sided p. Since the splits hold the observed ties, a tie can make a
+/// split's mirror image less extreme. Then fewer splits reach the farthest
+/// distance than the 2 of C(n + m, n) that untied values give, and `least`
+/// is lower.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct Exact {
     pub p: f64,
