@@ -30,17 +30,16 @@ did; the T14's numbers are below:
   - **Untouched pages resident.** A run draws up to 15 committed pages
     nothing has touched, zeroing each; resident and peak count them, and a
     thread's stack is resident in 64 KiB once its second page is touched.
-  - **`mem.anon.unmap`**, +9% p50 at `a75abd3f6` (4,014 to 4,366 ns/MiB, and
-    3,950 to 4,171 at the minimum), reproduced in a second pair. The free
-    path is unchanged; the touch ending sooner, with its zeroed lines still
-    being written back while the unmap runs, is an inference.
-  - **A lone fault** at `a75abd3f6` walked the tables five times, and
-    `mem.first_touch.2m`, one page per 2 MiB, rose 681 to 706 ns/page. It now
-    takes one walk, through the table of leaves it reaches first
-    (`UserTables::leaf_table`); measured after that: not yet.
-  - **Spawn.** `proc.spawn_wait_loop.100` rose 2.3% (4.2% under the probe),
-    inside the base pair's own 1.6% spread: possibly the run pages a child's
-    stack and data take.
+  - **`mem.anon.unmap`**, +9% p50 at `a75abd3f6` in two pairs; not
+    reproduced at `6d826e313` (4,421 to 4,303 ns/MiB).
+  - **A lone fault** costs about 19 ns more: `mem.first_touch.2m`, one page
+    per 2 MiB, is 684 to 703 ns/page at `6d826e313` (681 to 706 at
+    `a75abd3f6`), though it now takes one walk of the tables
+    (`UserTables::leaf_table`); cause not found. Accepted as a measured
+    tradeoff by the coordinator on PR #1055, against about 380 ns saved per
+    page touched in order.
+  - **Spawn.** `proc.spawn_wait_loop.100` rose 2.3% at `a75abd3f6` and is
+    within 1.5% at `6d826e313`.
 - **Frees.** A clear walks the 64 futex buckets once per table of leaves that
   held an owned frame (at most 512 frames each), whether or not anything waits.
 - **Commits.** A committed range's tables are built when it is made, under the
@@ -79,7 +78,8 @@ each), what is still slower than the base:
 | `pipe.throughput.65536` MB/s | 7,021 | 10,902 |
 
 The copies (`fs.tmp`, `ipc`, `pipe`) point at the user-copy path above.
-"With runs" is `a75abd3f6` against `b48c7dd9d` on the T14, one run each.
+"With runs" is `a75abd3f6` against `b48c7dd9d` on the T14, one run each;
+`6d826e313` gave 500, 521, 132,434 and 67 ms for the first four rows.
 
 `mem.realloc_grow` still copies: std's dlmalloc 0.2.14 never maps a block on
 its own, so its `remap` hook is never called, and moving pages instead needs
