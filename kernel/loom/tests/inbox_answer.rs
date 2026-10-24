@@ -330,6 +330,38 @@ fn a_poll_left_standing_still_answers() {
     });
 }
 
+/// A server that watches again only what it was answered, and reads one
+/// frame an answer (`system/fileserver/src/main.rs`): a handle with a second
+/// frame queued behind the one it read is answered at once, by its watch's
+/// own look with no post behind it, and a handle it never watched again
+/// still answers the bytes that reach it later.
+#[test]
+fn a_reader_that_watches_again_only_what_was_answered_misses_nothing() {
+    loom::model(|| {
+        let kernel = Kernel::new(4);
+        kernel.watch(H, 3);
+        kernel.watch(G, 4);
+        kernel.submit();
+
+        kernel.fill(H);
+        kernel.post(H);
+        kernel.submit();
+        assert_eq!(kernel.drain(), [(3, BYTES)]);
+
+        // One frame of two read: the bytes of the second stay.
+        kernel.watch(H, 3);
+        kernel.submit();
+        assert_eq!(kernel.drain(), [(3, BYTES)], "the queued frame waited for a post that never comes");
+
+        kernel.take(H);
+        kernel.watch(H, 3);
+        kernel.fill(G);
+        kernel.post(G);
+        kernel.submit();
+        assert_eq!(kernel.drain(), [(4, BYTES)]);
+    });
+}
+
 /// A source that ended is answered as gone: there is nothing to look at.
 #[test]
 fn an_ended_source_is_answered_gone_without_a_look() {
