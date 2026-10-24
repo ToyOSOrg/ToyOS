@@ -42,8 +42,15 @@ comparison until it can:
   supervisor mints for a file server's role or the idle slot, and the bench's
   NVMe holds another system.
 - **Package energy and temperature**: no counter carries either
-  (`toyos_abi::counters::Counter`), so the ToyOS crunch runs its phases
-  without a stop and says so.
+  (`toyos_abi::counters::Counter`), so the ToyOS crunch runs its one-thread
+  phase alone and reports every all-core row `unmeasured`, with nothing to
+  stop it at. The kernel's sampler of `IA32_PACKAGE_THERM_STATUS`,
+  `MSR_TEMPERATURE_TARGET` and `MSR_PKG_ENERGY_STATUS` in
+  `issues/the-kernel-owns-cpu-performance-state.md` is what closes both. The
+  first ToyOS crunch on the T14 held 3,788 MHz all-core where Linux fell to
+  1.7-1.9 GHz, which
+  `issues/the-t14s-thermal-modes-do-not-move-its-package-power-limits.md`
+  would explain: ToyOS refuses the firmware's PL1 and PL2 writes.
 - **Wi-Fi**: `issues/there-is-no-wifi.md`.
 - **USB, NVMe and cpuidle identity**: their owners serve no program that
   reads them.

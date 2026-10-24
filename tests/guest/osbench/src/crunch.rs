@@ -10,9 +10,9 @@
 //! **A laptop is not let overheat.** Where the system reads the package's
 //! temperature, a phase stops once it reaches `osbench_rules::heat`'s limit,
 //! [`osbench_rules::heat::MARGIN_MC`] below the CPU's TjMax, and each result
-//! names the limit's source. Where it cannot (ToyOS), the result says so and
-//! the phases run their length; the CPU's own thermal control, which
-//! throttles at TjMax, is what stands then.
+//! names the limit's source. Where it cannot (ToyOS), only the one-thread
+//! phase runs and every all-core result is `unmeasured`, there being nothing
+//! to stop at.
 
 use std::sync::atomic::{AtomicBool, AtomicI64, Ordering};
 use std::sync::{Arc, Barrier};
@@ -30,9 +30,6 @@ const SLICE: Duration = Duration::from_secs(4);
 const POLL: Duration = Duration::from_millis(100);
 /// The longest cool-down waits for the package to cool.
 const COOL_BOUND: Duration = Duration::from_secs(90);
-/// The cool-down where no temperature can be read: nothing can be waited
-/// for, so the machine idles this long.
-const BLIND_COOL: Duration = Duration::from_secs(30);
 
 const MIB: usize = 1 << 20;
 const N: usize = 160;
@@ -143,38 +140,38 @@ pub fn suite() {
             Some(Heat { sensor, limit })
         }
         Err(why) => {
-            condition("crunch.temperature", format!("unread: {why}; phases run their length"));
+            condition("crunch.temperature", format!("unread: {why}"));
             None
         }
     };
-    let start_mc = heat.as_ref().and_then(Heat::read);
+    let inputs = Arc::new(Inputs::new());
+    let Some(heat) = heat else {
+        run_phase("single", 1, &inputs, None);
+        for workload in &WORKLOADS {
+            unmeasured(&format!("crunch.all.{}", workload.name), "no package temperature to stop the all-core phase at", &[]);
+        }
+        return;
+    };
+    let start_mc = heat.read();
     if let Some(t) = start_mc {
         condition("crunch.start_c", t as f64 / 1000.0);
     }
-    let inputs = Arc::new(Inputs::new());
     for (phase, threads) in [("single", 1), ("all", crate::cpus())] {
-        run_phase(phase, threads, &inputs, heat.as_ref());
-        cool(phase, start_mc, heat.as_ref());
+        run_phase(phase, threads, &inputs, Some(&heat));
+        cool(phase, start_mc, &heat);
     }
 }
 
 /// Idle until the package reads within `heat::COOLED_WITHIN_MC` of where the
-/// group started, or [`COOL_BOUND`]; [`BLIND_COOL`] where nothing reads it.
-fn cool(after: &str, start_mc: Option<i64>, heat: Option<&Heat>) {
+/// group started, or [`COOL_BOUND`].
+fn cool(after: &str, start_mc: Option<i64>, heat: &Heat) {
     let t = Instant::now();
-    match (heat, start_mc) {
-        (Some(heat), Some(start)) => {
-            while t.elapsed() < COOL_BOUND && !heat.read().is_some_and(|now| heat::cooled(start, now)) {
-                thread::sleep(Duration::from_secs(1));
-            }
-            let now = heat.read().map_or("unread".into(), |n| (n as f64 / 1000.0).to_string());
-            condition(&format!("crunch.cooled_after_{after}"), format!("{}ms to {now}C", t.elapsed().as_millis()));
-        }
-        _ => {
-            thread::sleep(BLIND_COOL);
-            condition(&format!("crunch.cooled_after_{after}"), format!("{}ms, unread", t.elapsed().as_millis()));
-        }
+    let cooled = || start_mc.zip(heat.read()).is_some_and(|(start, now)| heat::cooled(start, now));
+    while t.elapsed() < COOL_BOUND && !cooled() {
+        thread::sleep(Duration::from_secs(1));
     }
+    let now = heat.read().map_or("unread".into(), |n| (n as f64 / 1000.0).to_string());
+    condition(&format!("crunch.cooled_after_{after}"), format!("{}ms to {now}C", t.elapsed().as_millis()));
 }
 
 /// Each workload for [`SLICE`] on `threads` threads, every unit timed, with

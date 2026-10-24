@@ -606,11 +606,11 @@ const MACHINE_TESTS: &[&str] = &[
     // (`qemu::SUITE_ARCH`).
     "netstack_holders_exported_to_children",
     // A datagram receive with a read timeout ends at it, a timeout under a
-    // millisecond included, and a zero timeout is refused: std's conversion
-    // of every socket timeout and its datagram wait, through the real
-    // netstack of `tests/images/netcase.toml`, which no host build has. No
-    // peer and no public network. Order and completion: QEMU's clock bounds
-    // nothing but the hang. x86-64 alone (`qemu::SUITE_ARCH`).
+    // millisecond included: std's conversion of a socket timeout and its
+    // datagram wait, through the real netstack of `tests/images/netcase.toml`,
+    // which no host build has. No peer and no public network. Order and
+    // completion: QEMU's clock bounds nothing but the hang. x86-64 alone
+    // (`qemu::SUITE_ARCH`).
     "udp_receive_times_out",
     // Login sessions: their owner parents, signs out and ends with each, and
     // the machine's reboot waits for them until forced, which only processes
@@ -1612,10 +1612,11 @@ const OSBENCH_GROUPS: [&str; 18] = [
 /// 100 s of wakes and spinners. Six boots of `e5573b7fe` ended their last job
 /// at 175 to 191 s on five, and at 244 s on the T14's first, where one
 /// served 64 MiB write stalled and `files` took 80 s against 13. The groups
-/// since add at most 230 s by their own spans: `lan`'s 60 s looking for its
-/// peer and 50 s measuring, `crunch`'s two 16 s phases and two 30 s
-/// cool-downs, and under 30 s of memcpy sizes, pipe sizes and 1 ms timers.
-/// So a list bound of 540 s leaves that stall 66 s.
+/// since add at most 160 s by their own spans: `lan`'s 60 s looking for its
+/// peer and 50 s measuring, `crunch`'s one-thread 16 s (ToyOS reads no
+/// temperature, so its all-core phase does not run), and under 30 s of memcpy
+/// sizes, pipe sizes and 1 ms timers. So a list bound of 540 s leaves that
+/// stall 136 s.
 const BENCHCASE: &[metal::Arm] = &[metal::Arm {
     adds_ms: 480_000,
     ..metal::once("benchcase", "tests/images/benchcase.toml", &[], &OSBENCH_GROUPS)

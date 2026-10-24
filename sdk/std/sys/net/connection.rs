@@ -58,9 +58,11 @@ fn addr_to_v4(addr: &SocketAddr) -> io::Result<([u8; 4], u16)> {
     }
 }
 
+/// A timeout as the protocol's milliseconds, where 0 is no bound: a non-zero
+/// timeout under a millisecond waits one, not forever.
 fn duration_to_ms(d: Option<Duration>) -> u32 {
     match d {
-        Some(d) => d.as_millis().min(u32::MAX as u128) as u32,
+        Some(d) => d.as_millis().clamp(1, u32::MAX as u128) as u32,
         None => 0,
     }
 }

@@ -101,9 +101,18 @@ pub mod heat {
     /// never reaches the CPU's own throttling inside a measurement.
     pub const MARGIN_MC: i64 = 15_000;
 
-    /// Where the stop is when nothing says the CPU's TjMax. Policy: the
-    /// lowest TjMax in [`PUBLISHED`] less the margin.
-    pub const ASSUMED_STOP_MC: i64 = 85_000;
+    /// Where the stop is when nothing says the CPU's TjMax: the lowest TjMax
+    /// in [`PUBLISHED`] less the margin.
+    pub const ASSUMED_STOP_MC: i64 = {
+        let (mut lowest, mut i) = (i64::MAX, 0);
+        while i < PUBLISHED.len() {
+            if PUBLISHED[i].1 < lowest {
+                lowest = PUBLISHED[i].1;
+            }
+            i += 1;
+        }
+        lowest - MARGIN_MC
+    };
 
     /// A cooled CPU reads within this of where its group started.
     pub const COOLED_WITHIN_MC: i64 = 5_000;

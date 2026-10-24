@@ -187,16 +187,17 @@ impl Peer {
         Ok(Transfer { bytes: sent, ns })
     }
 
-    /// What the peer sends for `span`, timed from the first byte to
-    /// end-of-file.
+    /// What the peer sends for `span` after its first read, timed from that
+    /// read to end-of-file.
     pub fn download(&self, span: Duration) -> io::Result<Transfer> {
         let millis = u32::try_from(span.as_millis()).unwrap_or(u32::MAX);
         let mut stream = self.open(Some(Request::Source { millis }))?;
         let mut buf = vec![0u8; CHUNK];
-        let mut bytes = stream.read(&mut buf)? as u64;
-        if bytes == 0 {
+        // The clock starts at the first byte; what it carried is not counted.
+        if stream.read(&mut buf)? == 0 {
             return Err(io::Error::other("the peer sent nothing"));
         }
+        let mut bytes = 0u64;
         let t = Instant::now();
         loop {
             match stream.read(&mut buf)? {
