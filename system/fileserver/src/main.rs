@@ -464,11 +464,7 @@ impl Server {
             for &token in &ready {
                 if token == TOKEN_ACCEPTOR {
                     self.acceptor_armed = false;
-                    // Armed below the bound, which may be met since: the
-                    // connection waits in the port's queue until it is not.
-                    if self.takes_handshakes() {
-                        self.accept();
-                    }
+                    self.accept();
                 } else if token < TOKEN_STREAM {
                     let id = token - TOKEN_CLIENT;
                     if let Some(c) = self.clients.get_mut(&id) {

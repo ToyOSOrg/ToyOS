@@ -10,8 +10,7 @@
 //!
 //! **Every name is indexed in memory at mount** ([`DataVolume::names`]), with
 //! what its entry records, so a lookup, a stat, a listing and "is this a
-//! directory" are map queries and never a search of the tree. Only an open
-//! reads an entry, for its extents.
+//! directory" are map queries and never a search of the tree.
 //!
 //! **A file's data lives in the blocks its extents name, in the cache.** A
 //! write resolves (allocating where it must) the block of each page it
@@ -765,9 +764,10 @@ impl<D: Disk> Volume for DataVolume<D> {
                     .collect();
                 let pairs: Vec<(&str, &str)> = renames.iter().map(|(a, b)| (a.as_str(), b.as_str())).collect();
                 mapped("rename", from, self.fs.rename_all(&pairs))?;
-                for (name, meta) in moving {
+                for (name, _) in moving {
                     let moved = format!("{to}{}", &name[from.len()..]);
-                    self.names.remove(&name);
+                    // The record as it is now, which the persists above updated.
+                    let meta = self.names.remove(&name).expect("a name the volume holds");
                     self.names.insert(moved.clone(), meta);
                     if let Some(node) = self.by_path.remove(&name) {
                         self.open.get_mut(&node).expect("indexed").path = moved.clone();
@@ -1021,9 +1021,16 @@ mod tests {
         }
     }
 
+    /// A clock that reads a later nanosecond at every call, so a time left
+    /// stale anywhere is a time that differs.
+    fn advancing_clock() -> u64 {
+        static NOW: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1_000_000_000);
+        NOW.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+    }
+
     #[test]
     fn a_stat_from_the_index_is_what_the_entry_records() {
-        let mut v = DataVolume::format(Ram::new(4096), &["home"], nanosecond_clock).unwrap();
+        let mut v = DataVolume::format(Ram::new(4096), &["home"], advancing_clock).unwrap();
         let a = v.open("home/a", CREATE).unwrap();
         v.write(a, 0, &[1; 5000]).unwrap();
         assert_eq!(v.lstat("home/a").unwrap().size, 5000, "an open file's own length, before its entry has it");
@@ -1037,17 +1044,26 @@ mod tests {
         v.symlink("home/l", "a").unwrap();
         v.rename("home/a", "home/sub/c").unwrap();
         v.rename("home/b", "home/sub/c").unwrap();
+        // Written and still open while its directory moves.
+        let open = v.open("home/sub/open", CREATE).unwrap();
+        v.write(open, 0, &[3; 7000]).unwrap();
+        let written = v.lstat("home/sub/open").unwrap();
         v.mkdir("home/d").unwrap();
         v.rename("home/sub", "home/d/moved").unwrap();
+        v.close(open).unwrap();
         assert_index_is_the_format_s(&v);
-        assert_eq!(v.lstat("home/d/moved/c").unwrap(), Meta { kind: Kind::File, size: 100, mtime: nanosecond_clock() });
+        assert_eq!(v.lstat("home/d/moved/open").unwrap(), written, "the open file's length and time moved with it");
+        assert_eq!(v.lstat("home/d/moved/c").unwrap().size, 100);
         assert_eq!(v.lstat("home/l").unwrap(), Meta { kind: Kind::Symlink, size: 1, mtime: 0 });
         v.unlink("home/l").unwrap();
         assert_eq!(v.lstat("home/l"), Err(Error::NotFound));
 
         let before: Vec<(String, Meta)> = v.names.iter().map(|(n, m)| (n.clone(), *m)).collect();
         v.sync().unwrap();
-        let again = remount(v);
+        let DataVolume { fs, cache, .. } = v;
+        drop(fs);
+        let disk = Rc::try_unwrap(cache).ok().expect("one owner").into_disk();
+        let Probed::Mounted(again) = DataVolume::probe(disk, &["home"], advancing_clock) else { panic!("remount") };
         let after: Vec<(String, Meta)> = again.names.iter().map(|(n, m)| (n.clone(), *m)).collect();
         assert_eq!(after, before, "the index a mount reads is the one the server kept");
         assert_index_is_the_format_s(&again);

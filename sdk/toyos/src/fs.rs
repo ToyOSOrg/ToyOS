@@ -32,9 +32,10 @@
 //! the server a [`WINDOW_BYTES`] region at connect ([`HELLO`]); a request's
 //! paths, data and answer travel in the span it names, and the frames stay
 //! small and fixed. The reply carries the request's tag; a [`CLOSE`] has
-//! none, so a close costs its client a send and no wait. A client keeps at
-//! most [`MAX_OUTSTANDING`] requests unanswered on one connection and lets no
-//! two of their spans overlap; a server reads a request's input out of its
+//! none, so a close costs its client a send and no wait and is never
+//! outstanding. A client keeps at most [`MAX_OUTSTANDING`] requests
+//! unanswered on one connection and lets no two of their spans overlap; a
+//! server reads a request's input out of its
 //! span before it writes its answer there. The window is shared memory both
 //! sides write, so each side copies what it reads out of it once and acts on
 //! the copy.

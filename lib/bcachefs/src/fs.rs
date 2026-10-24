@@ -54,7 +54,7 @@ fn push_extent(extents: &mut Vec<Extent>, start: u64, count: u32) {
     extents.push(Extent { start_block: start, block_count: count, _reserved: 0 });
 }
 
-/// What one entry [`Mounted::list`] answers records besides its name.
+/// What an entry records besides its name, as [`Mounted::list`] answers it.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Recorded {
     pub symlink: bool,
