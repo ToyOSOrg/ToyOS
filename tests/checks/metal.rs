@@ -7,7 +7,7 @@ use toyos_metal::{
     verdict_file, BootFile, Phases, Refusal, READBACK_BOOT, READBACK_KERNEL, READBACK_LOADER,
     READBACK_VERDICT,
 };
-use toyos_metal::timings::{Machine, Record, Stick};
+use toyos_metal::timings::{Disk, Machine, Record};
 
 const PANEL: &str = "| panel: paints=10 px=8741248 us=21751 max_us=3851\n";
 const BOOTED: &str = "[2026-09-29 18:22:39  1.165 cpu0 kernel] Boot: complete (1165ms)\n";
@@ -20,8 +20,8 @@ fn t14() -> Machine {
     }
 }
 
-fn stick() -> Stick {
-    Stick { sectors: 60_062_500, vendor: "SanDisk".to_string(), model: "Ultra".to_string() }
+fn stick() -> Disk {
+    Disk { sectors: 60_062_500, vendor: "SanDisk".to_string(), model: "Ultra".to_string() }
 }
 
 /// A root holding the T14's record as `toyos-metal --install-sudoers` writes
@@ -370,6 +370,7 @@ fn kept(bios: &str, complete_ms: u64) -> Record {
         product: machine.product,
         bios: bios.to_string(),
         stick: stick(),
+        scratch: Vec::new(),
         measured: [
             ("boot.passing.complete_ms", complete_ms),
             ("boot.passing.panel_max_us", 3851),
