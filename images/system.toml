@@ -51,11 +51,12 @@ pkg = { state = true }
 # image does. The kernel keeps the record ring and the console and writes no
 # file at all, so a boot config without `logkeeper` is a boot whose `/log` is empty —
 # `every_boot_config_runs_logkeeper` is what refuses one. It claims no device, and
-# `log` is the port it answers `inspect` on.
+# `log` is the port it answers `inspect` on. `log-carrier` is where the VM's
+# console asks to carry the log, which quiets the UART while it does.
 [programs.logkeeper]
 service = true
 syscap = ["logread"]
-serves = ["log"]
+serves = ["log", "log-carrier"]
 
 # The machine's ACPI fixed hardware: the kernel puts the machine in ACPI mode
 # when it mints the `acpi` claim and back when the claim goes, so the SCI,
@@ -128,14 +129,23 @@ service = true
 serves = ["netstack"]
 devices = ["pci:02:00:00/1af4:1041"]
 
-# The shared clipboard with QEMU's host: one process per virtio-serial
-# function the kernel does not drive (the kernel's console is `1af4:1043` too),
-# holding the function its vdagent chardev is on, and the compositor's
-# clipboard port. A machine with no such function, the T14 among them, starts
-# none.
+# The shared clipboard with QEMU's host, and the VM's console: two drivers of
+# one device, `1af4:1043`, each started on every virtio-serial function in
+# turn and keeping the one whose port carries its name; on another, it ends
+# with exit 0 and the function goes to the next row. Each row's authority is
+# its own — vdagent the compositor's clipboard port, virtio-console the log's
+# carrier port, which no other row may receive — but while it probes a
+# function that is not its own, a process holds that function's claim beside
+# its row's port, until its verdict or its probe's bound: vdagent the
+# console's function, which comes to it first. A machine with no such
+# function, the T14 among them, starts neither.
 [programs.vdagent]
 drives = ["pci:07:80:00/1af4:1043"]
 receives = ["clipboard"]
+
+[programs.virtio-console]
+drives = ["pci:07:80:00/1af4:1043"]
+receives = ["log-carrier"]
 
 # A login authority: each authenticated connection opens a login session, and
 # its shell, and a command as `shell -c`, is launched in it, the one `update`

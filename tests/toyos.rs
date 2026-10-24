@@ -469,10 +469,11 @@ const MACHINE_TESTS: &[&str] = &[
     // its DMA bypasses the unit: the supervisor refuses it to netstack by
     // name. Only QEMU can create such a function; q35 only.
     "a_virtio_function_without_access_platform_is_refused",
-    // The kernel's own virtio console created without `iommu_platform=on`
-    // on q35 with VT-d: the kernel tells it physical addresses, and the boot
-    // runs over it. q35 only.
-    "the_kernel_tells_a_bypassing_console_physical_addresses",
+    // The VM's console port unplugged under a running guest: its driver
+    // ends, logkeeper sees its carrier gone and the UART carries the log
+    // again. Three processes, the kernel and QEMU's hot-unplug, which no host
+    // build has. q35 only: no other machine carries a console port.
+    "the_uart_carries_the_log_again_once_the_console_carrier_goes",
     // An AMD-Vi unit left blocking every device, switched off and programmed
     // before the boot stick is driven behind it: the register sequence and the
     // DMA it lets through are no host test's, and the AMD bench is staged by
@@ -4330,8 +4331,8 @@ fn run_machine_test(name: &str, test_config: &Path) -> Result<(), String> {
         "a_virtio_function_without_access_platform_is_refused" => {
             common::iommu::a_virtio_function_without_access_platform_is_refused()
         }
-        "the_kernel_tells_a_bypassing_console_physical_addresses" => {
-            common::iommu::the_kernel_tells_a_bypassing_console_physical_addresses()
+        "the_uart_carries_the_log_again_once_the_console_carrier_goes" => {
+            common::vmconsole::the_uart_carries_the_log_again_once_the_console_carrier_goes(test_config)
         }
         "amdvi_firmware_left" => common::iommu::amdvi_firmware_left(test_config),
         "amdvi_selftest" => common::iommu::amdvi_selftest(test_config),
@@ -5672,7 +5673,7 @@ fn pci_cap_selftest(log: &str) -> Result<(), String> {
             return Err(format!("the walk's self-test never ran:\n{log}"));
         };
         // The count, not the absence of a FAILED line, which zero cases satisfy too.
-        if !verdict.contains("15/15") {
+        if !verdict.contains("selftest 6/6") {
             return Err(format!("not every crafted capability layout was answered: {verdict}"));
         }
         // And how those layouts *ended*, which is the split a claimed function's

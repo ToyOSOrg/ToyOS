@@ -86,13 +86,8 @@ impl Live {
     }
 }
 
-/// Why `function` keeps the machine's own addresses rather than a domain of
-/// its own: never, since nothing this kernel reads of the IORT says so.
-pub fn untranslated(_function: StreamId) -> Option<&'static str> {
-    None
-}
-
-/// Why no claim may have `function`: never, as [`untranslated`].
+/// Why no claim may have `function`: never, since nothing this kernel reads
+/// of the IORT says it keeps the machine's own addresses.
 pub fn unclaimable(_function: StreamId) -> Option<&'static str> {
     None
 }

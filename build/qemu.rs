@@ -52,7 +52,7 @@ use std::path::PathBuf;
 use std::process::{Command, Stdio};
 
 use toyos_build::arch::{Accel, Arch};
-use toyos_build::kernelconsole;
+use toyos_build::vmconsole;
 
 /// The hardware shape QEMU presents to the guest.
 ///
@@ -61,7 +61,7 @@ use toyos_build::kernelconsole;
 /// virtio device, which changes the console, the network, and audio too.
 #[derive(Clone, Copy, PartialEq)]
 pub enum Profile {
-    /// virtio-gpu for the display, virtio-console for the console, plus
+    /// virtio-gpu for the display, a virtio-serial port for the console, plus
     /// virtio-net and virtio-sound.
     Virtio,
     /// `-vga std`, so firmware publishes a GOP and the kernel takes the
@@ -256,24 +256,17 @@ pub fn launch(opts: &Options) {
         qemu.arg("-device")
             .arg(format!("virtio-sound-pci,audiodev=audio0,streams=1{platform}"));
 
-        // The clipboard's channel, just before the console's function, so it
-        // enumerates first and the kernel's console rule runs.
         qemu.args(toyos_build::vdagent::args(platform));
 
-        // Console wiring: virtio-console on stdio is the primary I/O channel
-        // (the kernel switches to it once virtio-console init completes —
-        // see drivers/virtio_console.rs). UART stays on a file so early-boot
-        // logs (before virtio is up) and panic fallback are still captured.
+        // The console's port on stdio, where `/system/bin/virtio-console`
+        // carries the log once userland runs; the UART on a file, which keeps
+        // the loader, the early boot, the stop and a fatal path's report, and
+        // the whole log again if the console's carrier goes.
         qemu.arg("-serial")
             .arg("file:/tmp/toyos-uart-early.log")
             .arg("-chardev")
             .arg("stdio,id=cs0,signal=off")
-            .arg("-device")
-            .arg(format!(
-                "virtio-serial-pci-non-transitional,id=virtio-serial0,max_ports=1{platform}"
-            ))
-            .arg("-device")
-            .arg("virtconsole,chardev=cs0,id=console0");
+            .args(toyos_build::vmconsole::args("cs0", platform));
     } else if opts.mute {
         eprintln!("metal-sim: no 16550 — the framebuffer is the only channel out");
         qemu.arg("-serial").arg("none");
@@ -320,7 +313,7 @@ pub fn launch(opts: &Options) {
     let console = child.stdout.take().expect("QEMU's stdout is piped");
     // The console ends when QEMU does; a relay that fails first ends QEMU, which
     // would otherwise run on into a pipe nobody reads.
-    if let Err(relay) = kernelconsole::relay(console, &mut terminal) {
+    if let Err(relay) = vmconsole::relay(console, &mut terminal) {
         // SIGTERM, not `Child::kill`'s SIGKILL: QEMU gives the terminal back its
         // modes only on its own exit path.
         let pid = libc::pid_t::try_from(child.id()).expect("a pid is a pid_t");

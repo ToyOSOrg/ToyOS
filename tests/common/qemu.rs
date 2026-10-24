@@ -1,5 +1,7 @@
 use std::collections::BTreeSet;
-use std::io::{BufReader, BufWriter, Read, Write};
+use std::io::{BufWriter, Read, Write};
+use std::os::fd::AsRawFd;
+use std::os::unix::net::{UnixListener, UnixStream};
 use std::path::{Path, PathBuf};
 use std::process::{Child, ChildStdin, Command, Stdio};
 use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
@@ -698,10 +700,6 @@ pub enum Profile {
     /// `iommu_platform=on`, so behind the unit on paper and bypassing it in
     /// fact: the function a claim must never be handed.
     HeadlessNicUntranslated,
-    /// [`Profile::Headless`] with the kernel's virtio console created without
-    /// `iommu_platform=on`: a device the kernel itself must tell physical
-    /// addresses.
-    HeadlessConsoleUntranslated,
     /// [`Profile::Headless`] with two of QEMU's `edu`, which the kernel drives
     /// neither of: two identical functions, each a `drives` row's to start a
     /// process on.
@@ -805,7 +803,6 @@ impl Profile {
             | Self::HeadlessUsbSpare
             | Self::HeadlessNicBehindPort
             | Self::HeadlessNicUntranslated
-            | Self::HeadlessConsoleUntranslated
             | Self::HeadlessTwoEdu
             | Self::Metal
             | Self::MetalTwoHda
@@ -946,13 +943,16 @@ struct Shape {
     /// *size* is a shape dimension exactly as a disk's is, and the tests that
     /// read pixels were all blind to the remainder until one profile had one.
     panel: Option<(u32, u32)>,
-    /// virtio-sound, the console on virtio-serial, and the clipboard's
-    /// channel on a virtio-serial function of its own.
+    /// virtio-sound, and the clipboard's channel on a virtio-serial function
+    /// of its own.
     virtio: Virtio,
+    /// The console's port, on its own virtio-serial function, which
+    /// `/system/bin/virtio-console` carries the log on. A machine whose every
+    /// claim the kernel refuses — no unit, or one that cannot remap or filter
+    /// a claim's messages — has none: its driver could never run, so its
+    /// UART is its console.
+    console_port: bool,
     nic: Nic,
-    /// The virtio console created without `iommu_platform=on` on a machine
-    /// with a unit, so its DMA bypasses the unit.
-    console_bypasses: bool,
     /// The `-device` argument for each xHCI controller, port and slot counts
     /// included. A list because a machine can have more than one and the T14
     /// does — its keyboard is on the second.
@@ -1069,6 +1069,7 @@ impl Profile {
                 vga: "std",
                 panel: None,
                 virtio: Virtio::Absent,
+                console_port: false,
                 nic: Nic::Absent,
                 xhci: &[XHCI_DEFAULT],
                 usb: &[],
@@ -1079,12 +1080,12 @@ impl Profile {
                 rng: true,
                 virtio_gpu: false,
                 hda: false,
-                console_bypasses: false,
             },
             Self::Headless => Shape {
                 vga: "none",
                 panel: None,
                 virtio: Virtio::Present,
+                console_port: true,
                 nic: Nic::Virtio,
                 xhci: &[XHCI_DEFAULT],
                 usb: &["usb-kbd,bus=xhci.0"],
@@ -1095,7 +1096,6 @@ impl Profile {
                 rng: false,
                 virtio_gpu: false,
                 hda: false,
-                console_bypasses: false,
             },
             Self::Metal => Shape {
                 vga: "std",
@@ -1105,6 +1105,7 @@ impl Profile {
                 // expresses.
                 panel: Some((1920, 1080)),
                 virtio: Virtio::Absent,
+                console_port: false,
                 nic: Nic::Absent,
                 xhci: &[XHCI_DEFAULT],
                 usb: &[],
@@ -1115,7 +1116,6 @@ impl Profile {
                 rng: false,
                 virtio_gpu: false,
                 hda: false,
-                console_bypasses: false,
             },
             Self::MetalNoX2apic => Self::Metal.shape(),
             Self::MetalTwoHda => Shape { hda: true, ..Self::Metal.shape() },
@@ -1123,18 +1123,17 @@ impl Profile {
             Self::MetalBesideAHostDisk => Shape { storage: Storage::Stick { beside: Beside::HostDisk }, ..Self::Metal.shape() },
             Self::MetalAmdVi => Shape { iommu: Some(Unit::AmdVi { intremap: false }), ..Self::Metal.shape() },
             Self::HeadlessUsbSpareAmdVi => {
-                Shape { iommu: Some(Unit::AmdVi { intremap: true }), ..Self::HeadlessUsbSpare.shape() }
+                Shape { iommu: Some(Unit::AmdVi { intremap: true }), console_port: false, ..Self::HeadlessUsbSpare.shape() }
             }
             Self::HeadlessUsbSpareAmdViNoRemap => {
                 Shape { iommu: Some(Unit::AmdVi { intremap: false }), ..Self::HeadlessUsbSpareAmdVi.shape() }
             }
             Self::MetalAmdViTestdev => Shape { probes: Probes::Testdevs, ..Self::MetalAmdVi.shape() },
-            Self::HeadlessNoIommu => Shape { iommu: None, ..Self::Headless.shape() },
+            Self::HeadlessNoIommu => Shape { iommu: None, console_port: false, ..Self::Headless.shape() },
             Self::HeadlessNoUsb => Shape { xhci: &[], usb: &[], ..Self::Headless.shape() },
             Self::HeadlessVirtioGpu => Shape { virtio_gpu: true, ..Self::Headless.shape() },
             Self::HeadlessNicBehindPort => Shape { nic: Nic::BehindPort, ..Self::Headless.shape() },
             Self::HeadlessNicUntranslated => Shape { nic: Nic::Untranslated, ..Self::Headless.shape() },
-            Self::HeadlessConsoleUntranslated => Shape { console_bypasses: true, ..Self::Headless.shape() },
             Self::HeadlessTwoEdu => Shape { probes: Probes::Edus, ..Self::Headless.shape() },
             Self::HeadlessUsbSpare => Shape {
                 xhci: &[XHCI_DEFAULT, XHCI_SPARE],
@@ -1276,7 +1275,11 @@ pub struct QemuInstance {
     child: Child,
     /// What ends QEMU when this process dies without dropping this.
     _tether: Tether,
-    stdin: BufWriter<ChildStdin>,
+    /// The guest's commands: the UART's socket on a virtio machine, QEMU's
+    /// stdin otherwise.
+    stdin: BufWriter<Box<dyn Write + Send>>,
+    /// QEMU's stdin on a virtio machine, held open and never written.
+    _console_input: Option<ChildStdin>,
     rx: Receiver<String>,
     _reader_thread: thread::JoinHandle<String>,
     /// Held for the claim: one live guest per NVMe image.
@@ -1465,6 +1468,9 @@ impl QemuInstance {
         rust_tests: &[(String, Vec<u8>)],
         options: BootOptions,
     ) -> Self {
+        if options.profile.shape().console_port {
+            carries_its_console(config).unwrap_or_else(|why| panic!("[qemu] {}: {why}", config.display()));
+        }
         let mut features: Vec<&str> = kernel_of(&options);
         if options.debug_wait {
             features.push(toyos_build::build::DEBUG_KERNEL_BUILD);
@@ -1558,7 +1564,7 @@ impl QemuInstance {
             .and_then(|firmware| firmware.fresh_vars(&vars))
             .unwrap_or_else(|why| panic!("[qemu] {why}"));
 
-        let qemu = qemu_command(&boot_image, nvme.path(), &uart_log, &sockets.dir, &vars, &options);
+        let qemu = qemu_command(&boot_image, nvme.path(), &sockets.dir, &vars, &options);
         spawn_and_wait_ready(
             qemu,
             options,
@@ -1709,7 +1715,7 @@ impl QemuInstance {
         self.nvme.path()
     }
 
-    pub fn stdin_mut(&mut self) -> &mut BufWriter<ChildStdin> {
+    pub fn stdin_mut(&mut self) -> &mut BufWriter<Box<dyn Write + Send>> {
         &mut self.stdin
     }
 
@@ -2241,7 +2247,7 @@ impl QmpInput {
 /// unused — so this is what a profile assertion has to read.
 pub fn profile_argv(options: &BootOptions) -> Vec<String> {
     let p = Path::new("/nonexistent");
-    qemu_command(p, p, p, p, p, options)
+    qemu_command(p, p, p, p, options)
         .get_args()
         .map(|a| a.to_string_lossy().into_owned())
         .collect()
@@ -2250,7 +2256,6 @@ pub fn profile_argv(options: &BootOptions) -> Vec<String> {
 fn qemu_command(
     boot_image: &Path,
     nvme_image: &Path,
-    uart_log: &Path,
     socket_dir: &Path,
     firmware_vars: &Path,
     options: &BootOptions,
@@ -2518,32 +2523,29 @@ fn qemu_command(
                 .arg("-device")
                 .arg(format!("virtio-sound-pci,audiodev=audio0,streams=1{platform}"));
         }
-        // The clipboard's channel, just before the console's function, so it
-        // enumerates first and every virtio boot runs the kernel's console
-        // rule. Refused by name where QEMU has no `qemu-vdagent`.
+        // The clipboard's channel, refused by name where QEMU has no
+        // `qemu-vdagent`.
         toyos_build::vdagent::available(arch).unwrap_or_else(|why| panic!("[qemu] {why}"));
         qemu.args(toyos_build::vdagent::args(platform));
-        qemu
-            // virtio-console on stdio is the primary I/O channel; UART goes to
-            // a temp file so early-boot logs and panic fallback still land
-            // somewhere when the kernel switches backends.
+    }
+    if shape.console_port {
+        // The console's port on stdio, which `/system/bin/virtio-console`
+        // carries the log on; the UART on the socket this harness listens on
+        // ([`UartConsole`]), which takes the commands typed at the guest and
+        // the lines the console's port cannot carry.
+        qemu.arg("-chardev")
+            .arg(format!("socket,id=uart0,path={}", socket_dir.join(UART_SOCKET).display()))
             .arg("-serial")
-            .arg(format!("file:{}", uart_log.display()))
+            .arg("chardev:uart0")
             .arg("-chardev")
             .arg("stdio,id=cs0,signal=off")
-            .arg("-device")
-            .arg(format!(
-                "virtio-serial-pci-non-transitional,id=virtio-serial0,max_ports=1{}",
-                if shape.console_bypasses { "" } else { platform }
-            ))
-            .arg("-device")
-            .arg("virtconsole,chardev=cs0,id=console0");
+            .args(toyos_build::vmconsole::args("cs0", platform));
     } else if options.mute {
         qemu.arg("-serial").arg("none");
     } else {
-        // The 16550 *is* the console here: no virtio-serial exists, so the
+        // The 16550 *is* the console here: no console port exists, so the
         // kernel's log ring drains to it and the guest reads its commands
-        // off it. signal=off matches the virtio console above, so a ^C in
+        // off it. signal=off matches the console port above, so a ^C in
         // the stream reaches the guest rather than killing QEMU.
         qemu.arg("-chardev")
             .arg("stdio,id=uart0,signal=off")
@@ -2618,57 +2620,31 @@ fn spawn_and_wait_ready(mut qemu: Command, options: BootOptions, files: Files) -
         .stdout(Stdio::piped())
         .stderr(Stdio::inherit());
 
+    // Listening before QEMU starts, which connects as it makes the chardev.
+    let virtio = options.profile.shape().console_port;
+    let listener = virtio.then(|| {
+        UnixListener::bind(sockets.dir.join(UART_SOCKET)).unwrap_or_else(|e| panic!("[qemu] the UART's socket: {e}"))
+    });
+
     if VERBOSE.load(Ordering::Relaxed) {
         eprintln!("[qemu {seq}] Launching QEMU...");
     }
     let (mut child, tether) = toyos_build::tether::spawn(qemu).expect("Failed to launch QEMU");
 
-    let stdin = BufWriter::new(child.stdin.take().unwrap());
     let stdout = child.stdout.take().unwrap();
+    let qemu_stdin = child.stdin.take().unwrap();
+    let uart = listener.map(|listener| UartConsole::accept(&listener, &mut child, &uart_log));
+    // Commands go to the UART, which test-runner reads; on a virtio machine
+    // QEMU's stdin stays open and unwritten, since the console port's chardev
+    // reads its end as the host going.
+    let (stdin, console_input): (Box<dyn Write + Send>, _) = match &uart {
+        Some(uart) => (Box::new(uart.stream.try_clone().expect("[qemu] the UART's socket")), Some(qemu_stdin)),
+        None => (Box::new(qemu_stdin), None),
+    };
+    let stdin = BufWriter::new(stdin);
 
     let (tx, rx) = mpsc::channel::<String>();
-    // The virtio port starts at the kernel's first record; a 16550 on stdio has
-    // no other file, so it is read whole.
-    let mut kernel_console = options
-        .profile
-        .shape()
-        .virtio
-        .present()
-        .then(toyos_build::kernelconsole::KernelConsole::default);
-    let reader_thread = thread::spawn(move || {
-        let mut reader = BufReader::new(stdout);
-        let mut full_log = String::new();
-        // Read bytes and split them, rather than `BufRead::lines`: every
-        // consumer below still gets whole lines and nothing else.
-        let mut pending: Vec<u8> = Vec::new();
-        let mut chunk = [0u8; 4096];
-        loop {
-            let read = reader.read(&mut chunk).unwrap_or(0);
-            if read == 0 {
-                // EOF, and whatever has no newline behind it is the last line —
-                // which is what `lines` hands over here too.
-                if !pending.is_empty() {
-                    publish_line(pending, seq, &mut full_log, &tx);
-                }
-                return full_log;
-            }
-            let read = match &mut kernel_console {
-                Some(console) => console.pass(&chunk[..read]),
-                None => std::borrow::Cow::Borrowed(&chunk[..read]),
-            };
-            pending.extend_from_slice(&read);
-            while let Some(at) = pending.iter().position(|&b| b == b'\n') {
-                let mut line: Vec<u8> = pending.drain(..=at).collect();
-                line.pop();
-                if line.last() == Some(&b'\r') {
-                    line.pop();
-                }
-                if !publish_line(line, seq, &mut full_log, &tx) {
-                    return full_log;
-                }
-            }
-        }
-    });
+    let reader_thread = thread::spawn(move || read_consoles(stdout, uart, seq, &tx));
 
     // A muted guest has no console at all, so there is no marker to wait for:
     // the caller polls the framebuffer. Blocking here would only time out.
@@ -2709,6 +2685,7 @@ fn spawn_and_wait_ready(mut qemu: Command, options: BootOptions, files: Files) -
         child,
         _tether: tether,
         stdin,
+        _console_input: console_input,
         rx,
         _reader_thread: reader_thread,
         nvme,
@@ -2720,6 +2697,190 @@ fn spawn_and_wait_ready(mut qemu: Command, options: BootOptions, files: Files) -
         boot_log,
         smp: options.smp,
         carried,
+    }
+}
+
+/// Whether the image `config` builds carries the console on a virtio machine:
+/// its console driver's row, and `logkeeper` serving it the log. Without both
+/// the boot's whole log is on the UART, which a virtio machine's harness
+/// reads only from the carrier's word on.
+fn carries_its_console(config: &Path) -> Result<(), String> {
+    let text = fs::read_to_string(config).map_err(|e| e.to_string())?;
+    let doc: toml::Value = text.parse().map_err(|e| format!("not TOML: {e}"))?;
+    let row = |name: &str| doc.get("programs").and_then(|p| p.get(name));
+    let names = |row: Option<&toml::Value>, key: &str, port: &str| {
+        row.and_then(|r| r.get(key)).and_then(|v| v.as_array()).is_some_and(|a| a.iter().any(|v| v.as_str() == Some(port)))
+    };
+    let carrier = toyos_logstream::CARRIER;
+    if !names(row(toyos_logstream::CARRIER_HOLDER), "receives", carrier) {
+        return Err(format!("a virtio machine's image has no `{}` row receiving `{carrier}`", toyos_logstream::CARRIER_HOLDER));
+    }
+    if !names(row(toyos_logstream::LOGKEEPER), "serves", carrier) {
+        return Err(format!("a virtio machine's image has no `logkeeper` serving `{carrier}`"));
+    }
+    Ok(())
+}
+
+/// The name of the UART's socket in a boot's socket directory.
+const UART_SOCKET: &str = "uart.sock";
+
+/// What the kernel puts on the UART as the console's carrier takes the log
+/// (`kernel/src/log/console.rs`): every UART line before it the console port
+/// carries too, and the ones after it are the UART's alone.
+const CARRIED_ELSEWHERE: &str = "console: the log is carried elsewhere from here";
+
+/// How long QEMU may take to connect to the UART's socket: it does as it makes
+/// its chardevs, before the machine runs.
+const UART_CONNECT: Duration = Duration::from_secs(30);
+
+/// A virtio machine's UART, on the socket this harness listens on: the
+/// loader, the early boot, and the lines the console port cannot carry — the
+/// stop's, a fatal path's, and the whole log again once the console's carrier
+/// is gone.
+///
+/// **Its lines up to [`CARRIED_ELSEWHERE`] are the console port's too**, so
+/// they go only to the boot's UART file, but for a kernel's death, which no
+/// other channel will carry; every line after either is published.
+struct UartConsole {
+    stream: UnixStream,
+    file: fs::File,
+    pending: Vec<u8>,
+    live: bool,
+}
+
+impl UartConsole {
+    /// QEMU's connection, waited for while it runs and for [`UART_CONNECT`].
+    fn accept(listener: &UnixListener, child: &mut Child, file: &Path) -> Self {
+        listener.set_nonblocking(true).expect("[qemu] the UART's socket");
+        let deadline = Instant::now() + UART_CONNECT;
+        let stream = loop {
+            match listener.accept() {
+                Ok((stream, _)) => break stream,
+                Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => {}
+                Err(e) => panic!("[qemu] the UART's socket: {e}"),
+            }
+            if let Ok(Some(status)) = child.try_wait() {
+                panic!("[qemu] QEMU ended ({status}) before it connected to the UART's socket");
+            }
+            if Instant::now() > deadline {
+                let _ = child.kill();
+                panic!("[qemu] QEMU did not connect to the UART's socket in {} s", UART_CONNECT.as_secs());
+            }
+            readable(listener.as_raw_fd(), 100);
+        };
+        stream.set_nonblocking(false).expect("[qemu] the UART's socket");
+        let file = fs::File::create(file).unwrap_or_else(|e| panic!("[qemu] {}: {e}", file.display()));
+        Self { stream, file, pending: Vec::new(), live: false }
+    }
+
+    /// The UART's lines in `bytes`, each published that is to be. `false`
+    /// once nothing is left to read for.
+    fn pass(&mut self, bytes: &[u8], seq: u32, full_log: &mut String, tx: &mpsc::Sender<String>) -> bool {
+        self.file.write_all(bytes).expect("[qemu] the boot's UART file");
+        self.pending.extend_from_slice(bytes);
+        while let Some(line) = take_line(&mut self.pending) {
+            let text = String::from_utf8_lossy(&line);
+            if !self.live && text.contains(CARRIED_ELSEWHERE) {
+                self.live = true;
+                continue;
+            }
+            self.live |= super::serial::died(&text) == Some(super::serial::Died::Kernel);
+            if self.live && !publish_line(line, seq, full_log, tx) {
+                return false;
+            }
+        }
+        true
+    }
+}
+
+/// Whether `fd` reads within `ms`, or at its end.
+fn readable(fd: std::os::fd::RawFd, ms: i32) -> bool {
+    let mut ready = libc::pollfd { fd, events: libc::POLLIN, revents: 0 };
+    // SAFETY: one `pollfd`, which lives across the call.
+    unsafe { libc::poll(&mut ready, 1, ms) > 0 }
+}
+
+/// The first whole line in `pending`, without its line ending.
+fn take_line(pending: &mut Vec<u8>) -> Option<Vec<u8>> {
+    let at = pending.iter().position(|&b| b == b'\n')?;
+    let mut line: Vec<u8> = pending.drain(..=at).collect();
+    line.pop();
+    if line.last() == Some(&b'\r') {
+        line.pop();
+    }
+    Some(line)
+}
+
+/// Publish every whole line of QEMU's stdout and, on a virtio machine, of
+/// its UART, until QEMU's stdout ends; answers every line published.
+///
+/// **One thread reads both, and drains stdout before each read of the UART**:
+/// QEMU writes a console port's bytes to stdout before the guest is told the
+/// host took them, so what the guest said there before it said a line on the
+/// UART is in the pipe by the time that line can be read, and is published
+/// first.
+fn read_consoles(
+    mut stdout: std::process::ChildStdout,
+    mut uart: Option<UartConsole>,
+    seq: u32,
+    tx: &mpsc::Sender<String>,
+) -> String {
+    let mut full_log = String::new();
+    let mut pending: Vec<u8> = Vec::new();
+    let mut chunk = [0u8; 4096];
+    // One read of stdout: `false` at its end, or once nothing is left to read for.
+    let mut out = |stdout: &mut std::process::ChildStdout, full_log: &mut String| -> bool {
+        let read = stdout.read(&mut chunk).unwrap_or(0);
+        if read == 0 {
+            // EOF, and whatever has no newline behind it is the last line.
+            if !pending.is_empty() {
+                publish_line(std::mem::take(&mut pending), seq, full_log, tx);
+            }
+            return false;
+        }
+        pending.extend_from_slice(&chunk[..read]);
+        while let Some(line) = take_line(&mut pending) {
+            if !publish_line(line, seq, full_log, tx) {
+                return false;
+            }
+        }
+        true
+    };
+    loop {
+        let Some(console) = &mut uart else {
+            if !out(&mut stdout, &mut full_log) {
+                return full_log;
+            }
+            continue;
+        };
+        let mut fds = [
+            libc::pollfd { fd: stdout.as_raw_fd(), events: libc::POLLIN, revents: 0 },
+            libc::pollfd { fd: console.stream.as_raw_fd(), events: libc::POLLIN, revents: 0 },
+        ];
+        // SAFETY: two `pollfd`s, which live across the call.
+        if unsafe { libc::poll(fds.as_mut_ptr(), 2, -1) } < 0 {
+            continue;
+        }
+        if fds[0].revents != 0 && !out(&mut stdout, &mut full_log) {
+            return full_log;
+        }
+        if fds[1].revents == 0 {
+            continue;
+        }
+        while readable(stdout.as_raw_fd(), 0) {
+            if !out(&mut stdout, &mut full_log) {
+                return full_log;
+            }
+        }
+        let mut bytes = [0u8; 4096];
+        match console.stream.read(&mut bytes) {
+            Ok(0) | Err(_) => uart = None,
+            Ok(n) => {
+                if !console.pass(&bytes[..n], seq, &mut full_log, tx) {
+                    return full_log;
+                }
+            }
+        }
     }
 }
 
@@ -2772,8 +2933,8 @@ fn wait_for_ready(
             // one failure in this harness that arrives with no evidence at all,
             // and "the guest printed nothing" and "the guest printed sixty
             // lines and then stopped" are different machines. The 16550's
-            // too: a kernel that dies before virtio-console arrives said why
-            // only there.
+            // too: a kernel that dies before the console port carries the log
+            // said why only there.
             let uart = fs::read_to_string(uart_log).unwrap_or_default();
             panic!(
                 "[qemu] Boot timed out waiting for {ready}; the console carried:\n{}\nuart:\n{}",
@@ -2833,9 +2994,9 @@ fn wait_for_ready(
                 continue;
             }
             // The 16550's file is never read for the marker: it carries the
-            // kernel's records until virtio-console arrives and replays them
+            // log until the console port's carrier takes it and replays it
             // here, so a marker found there first ends the wait with a boot
-            // log that holds none of them.
+            // log that holds none of the boot.
             Err(RecvTimeoutError::Timeout) => continue,
             Err(RecvTimeoutError::Disconnected) => {
                 let status = child.wait();

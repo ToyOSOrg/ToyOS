@@ -19,6 +19,7 @@ start = ["logkeeper", "compositor", "test-runner"]
 [programs.logkeeper]
 service = true
 syscap = ["logread"]
+serves = ["log-carrier"]
 
 [programs.compositor]
 service = true
@@ -26,10 +27,15 @@ serves = ["compositor", "prompt", "clipboard", "input", "display"]
 devices = ["pci:03:80:00/1af4:1050"]
 args = ["scale=2"]
 
-# One process per virtio-serial function the kernel does not drive: the
-# clipboard's channel, beside the kernel's console.
+# One process per virtio-serial function: the one that names the clipboard's
+# port is its own, and the console's goes to the row below.
 [programs.vdagent]
 drives = ["pci:07:80:00/1af4:1043"]
 receives = ["clipboard"]
 
 [programs.test-runner]
+
+# The VM's console, on whichever virtio-serial function names its port.
+[programs.virtio-console]
+drives = ["pci:07:80:00/1af4:1043"]
+receives = ["log-carrier"]

@@ -20,6 +20,11 @@ change touches no socket or netstack code. Each stalled run's last guest lines
 are the racer's spawn and netstack's mDNS line. Logs: PR #1060's evidence,
 `qemu/netstack-*`.
 
+PR #1062 saw the same stall, the same last lines, at load averages of 20 to
+28: two of three runs at its branch (`ebac17a93`), whose change touches no
+socket or netstack code, and one of one at `2a5b446b0` (main). Logs: PR
+#1062's evidence, `guest/socket-export-*`.
+
 What blocks is not established: no guest line says whether either racer sent
 its `racing` datagram, which the harness waits for before it connects.
 

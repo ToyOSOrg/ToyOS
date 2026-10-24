@@ -3,20 +3,25 @@
 //! the compositor's clipboard.
 //!
 //! **What is here is the loop and the device's handshake.** The function is
-//! [`channel`]'s; the stream is `toyos-vdagent`'s; every decision about who
-//! owns the clipboard and what a transmit owes is `toyos-vdagent-bridge`'s;
-//! the compositor's side is `window::watcher`'s.
+//! `toyos-virtio-serial-claim`'s and which port is the agent's is
+//! `toyos_virtio_serial::probe`'s; the stream is `toyos-vdagent`'s; every
+//! decision about who owns the clipboard and what a transmit owes is
+//! `toyos-vdagent-bridge`'s; the compositor's side is `window::watcher`'s.
 //!
-//! **The handshake is virtio 1.2 §5.3.6.2's**: `DEVICE_READY`, the device's
-//! `DEVICE_ADD` of [`PORT_ID`] answered with `PORT_READY`, and the agent's
-//! port opened once the host's `PORT_OPEN(1)` has come. One process runs per
-//! virtio-serial function the kernel does not drive, holding its claim. The host's
-//! `PORT_OPEN(0)` is answered with the agent's `PORT_OPEN(0)`, and its
-//! `PORT_OPEN(1)` with `PORT_OPEN(1)`: QEMU 11.1.1 then starts a new session
-//! with its capabilities, measured. Any other port the device adds, a console
-//! port, the removal of the agent's port, an unframed stream and a used ring
-//! the device is not believed on end the program by name. It is not started
-//! again: one that ended says why and stays down for the boot.
+//! **The handshake is virtio 1.2 §5.3.6.2's**: `DEVICE_READY`, each port the
+//! device adds answered with `PORT_READY`, and the agent's port — the one the
+//! device names [`PORT_NAME`] — opened once the host's `PORT_OPEN(1)` has
+//! come. One process runs per virtio-serial function the kernel does not
+//! drive, holding its claim; a function none of whose ports is the agent's is
+//! another driver's, and this program ends with exit 0, which hands it to the
+//! next row that drives one, before it connects to the compositor's
+//! clipboard. The host's `PORT_OPEN(0)` is answered with the agent's
+//! `PORT_OPEN(0)`, and its `PORT_OPEN(1)` with `PORT_OPEN(1)`: QEMU 11.1.1 then
+//! starts a new session with its capabilities, measured. A console port, the
+//! removal of the agent's port, a device that misnames its ports, an
+//! unframed stream and a used ring the device is not believed on end the
+//! program by name. It is not started again: one that ended says why and stays
+//! down for the boot.
 //!
 //! **A transmit the device has not taken back within [`TRANSMIT_BOUND`] ends
 //! the program**: QEMU 11.1.1 takes the largest one at once, measured, and a
@@ -32,16 +37,15 @@ use toyos::say;
 use toyos::PciDev;
 use toyos_abi::syscall::PciId;
 use toyos_manifest::device::PciMatch;
-use toyos_vdagent::control::{Control, Event};
 use toyos_vdagent::stream::{Decoder, Message};
-use toyos_vdagent::PORT_ID;
+use toyos_vdagent::{LARGEST_TRANSMIT, PORT_NAME};
 use toyos_vdagent_bridge::sets::Sets;
 use toyos_vdagent_bridge::{Bridge, Effect};
+use toyos_virtio_serial::control::{Control, Event};
+use toyos_virtio_serial::probe::{Probe, Step};
+use toyos_virtio_serial::PORT_ID;
+use toyos_virtio_serial_claim::{Channel, Identified, Shape, PROBE_BOUND};
 use window::watcher::{Watched, Watcher};
-
-mod channel;
-
-use channel::Channel;
 
 /// One declaration of the clipboard's bound, read by the codec and the
 /// compositor alike.
@@ -55,6 +59,11 @@ const VIRTIO_SERIAL: PciMatch = PciMatch::new([0x07, 0x80, 0x00], Some(PciId { v
 /// How long a transmit may stay with the device. Policy, far past any time
 /// QEMU 11.1.1 took, measured: it took every element at once.
 const TRANSMIT_BOUND: Duration = Duration::from_secs(5);
+
+/// The agent's port: sixteen receive buffers of a page, and one transmit, of
+/// every message owed, in one element.
+const SHAPE: Shape = Shape { receive: Some((16, 4096)), transmit: (1, LARGEST_TRANSMIT) };
+
 
 const TOKEN_CLAIM: u64 = 0;
 const TOKEN_WATCHER: u64 = 1;
@@ -71,24 +80,20 @@ struct Agent {
 }
 
 impl Agent {
-    fn control(&mut self, channel: &mut Channel, control: Result<Control, toyos_vdagent::control::Refused>) {
-        let Control { id, event, value } = match control {
-            Ok(control) => control,
-            Err(why) => return say!("vdagent: {why}, ignored"),
-        };
+    /// A control message about a port the device added, the agent's to answer.
+    fn control(&mut self, channel: &mut Channel, Control { id, event, value }: Control) {
         let reply = |event, value| Control { id: PORT_ID, event, value };
         match event {
-            Event::DeviceAdd if id == PORT_ID => channel.send_control(reply(Event::PortReady, 1)),
-            Event::DeviceAdd => panic!("vdagent: the device added port {id}, and the launch declares port {PORT_ID} alone"),
             Event::ConsolePort => panic!("vdagent: the device made port {id} a console port"),
-            Event::DeviceRemove if id == PORT_ID => panic!("vdagent: the device removed port {PORT_ID}"),
-            Event::PortOpen if id == PORT_ID && value != 0 => {
+            Event::DeviceRemove => panic!("vdagent: the device removed port {PORT_ID}"),
+            _ if id != PORT_ID => {}
+            Event::PortOpen if value != 0 => {
                 if !self.open {
                     channel.send_control(reply(Event::PortOpen, 1));
                     self.open = true;
                 }
             }
-            Event::PortOpen if id == PORT_ID => {
+            Event::PortOpen => {
                 say!("vdagent: the host closed port {PORT_ID}");
                 self.bridge.closed();
                 self.decoder = Decoder::default();
@@ -97,8 +102,6 @@ impl Agent {
                     self.open = false;
                 }
             }
-            // Its name is not read: the port is the declared id.
-            Event::PortName => {}
             other => say!("vdagent: control {other:?} for port {id}, ignored"),
         }
     }
@@ -163,17 +166,28 @@ impl Agent {
 fn main() {
     let claim: PciDev = endow::claim(&VIRTIO_SERIAL.to_string())
         .expect("vdagent: its row drives a function, and it is started holding the function's claim");
+    let mut channel =
+        Channel::open(claim, SHAPE, "vdagent").unwrap_or_else(|why| panic!("vdagent: the function is not driven: {why}"));
+    let poller = Poller::new(2);
+    let mut probe = Probe::new(PORT_NAME);
+    let mut held = identify(&mut channel, &mut probe, &poller);
     let watcher = Watcher::connect(toyos_manifest::clipboard::PORT)
         .unwrap_or_else(|why| panic!("vdagent: the compositor's clipboard: {why}"));
-    let mut channel = Channel::open(claim).unwrap_or_else(|why| panic!("vdagent: the function is not driven: {why}"));
     let mut agent = Agent { bridge: Bridge::default(), decoder: Decoder::default(), watcher, sets: Sets::default(), open: false };
+    for control in held.drain(..) {
+        agent.control(&mut channel, control);
+    }
 
-    let poller = Poller::new(2);
     poller.watch(channel.claim(), READABLE, TOKEN_CLAIM);
     poller.watch(agent.watcher.conn(), READABLE, TOKEN_WATCHER);
     loop {
-        while let Some(control) = channel.control() {
-            agent.control(&mut channel, control);
+        while let Some(received) = channel.control() {
+            match probe.take(received.bytes()) {
+                Ok(Step::Reply(reply)) => channel.send_control(reply),
+                Ok(Step::Driver(control)) => agent.control(&mut channel, control),
+                Ok(Step::Nothing) => {}
+                Err(why) => panic!("vdagent: {why}"),
+            }
         }
         let Agent { decoder, .. } = &mut agent;
         let mut messages = Vec::new();
@@ -188,15 +202,16 @@ fn main() {
                 Err(refusal) => say!("vdagent: {refusal}"),
             }
         }
-        if channel.transmit_free() {
+        channel.transmitted();
+        if channel.can_transmit() {
             if agent.bridge.owes() {
                 channel.transmit(|out| agent.bridge.transmit(out));
             }
-        } else if channel.sent().is_some_and(|at| at.elapsed() > TRANSMIT_BOUND) {
+        } else if channel.oldest().is_some_and(|at| at.elapsed() > TRANSMIT_BOUND) {
             panic!("vdagent: the device has not taken a transmit back within {TRANSMIT_BOUND:?}");
         }
 
-        let timeout = channel.sent().map_or(u64::MAX, |at| {
+        let timeout = channel.oldest().map_or(u64::MAX, |at| {
             let left = (at + TRANSMIT_BOUND).saturating_duration_since(Instant::now());
             u64::try_from(left.as_nanos()).unwrap_or(u64::MAX)
         });
@@ -209,6 +224,23 @@ fn main() {
         if ready[TOKEN_WATCHER as usize] {
             agent.watched();
             poller.watch(agent.watcher.conn(), READABLE, TOKEN_WATCHER);
+        }
+    }
+}
+
+/// The agent's function's ports identified, and the messages about them that
+/// came first; or the end with exit 0 where none is the agent's: the
+/// function is another driver's.
+fn identify(channel: &mut Channel, probe: &mut Probe<'_>, poller: &Poller) -> Vec<Control> {
+    match toyos_virtio_serial_claim::identify(channel, probe, poller, "vdagent") {
+        Identified::Ours(held) => held,
+        Identified::Foreign(names) => {
+            say!("vdagent: the function's ports are {names:?}, none {PORT_NAME}; another row drives it");
+            std::process::exit(0);
+        }
+        Identified::Unnamed => {
+            say!("vdagent: the function named no port {PORT_NAME} in {PROBE_BOUND:?}; another row drives it");
+            std::process::exit(0);
         }
     }
 }

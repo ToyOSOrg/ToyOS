@@ -1,0 +1,16 @@
+[package]
+name = "virtio-console"
+description = "The VM's console: this boot's log, from its first line, written to the virtio-serial port QEMU puts on its stdio, as the console's carrier logkeeper quiets the UART for."
+edition = "2024"
+license = "MIT OR Apache-2.0"
+
+[dependencies]
+toyos = { path = "../../sdk/toyos" }
+toyos-abi = { path = "../../sdk/abi" }
+toyos-manifest = { path = "../../lib/manifest" }
+toyos-virtio-serial = { path = "../../lib/virtio-serial" }
+toyos-virtio-serial-claim = { path = "../../lib/virtio-serial/claim" }
+logkeeper-api = { path = "../../lib/logkeeper-api" }
+
+[package.metadata.toyos.host]
+exempt.owns = "the virtio-serial function QEMU's console port is on, and the log's carrier port"

@@ -7,6 +7,7 @@ start = ["logkeeper", "diskserver", "fileserver", "test-runner"]
 [programs.logkeeper]
 service = true
 syscap = ["logread"]
+serves = ["log-carrier"]
 
 [programs.test-runner]
 
@@ -28,3 +29,8 @@ receives = ["disk"]
 restart = true
 roles = ["data", "log", "boot"]
 receives = ["block"]
+
+# The VM's console, on whichever virtio-serial function names its port.
+[programs.virtio-console]
+drives = ["pci:07:80:00/1af4:1043"]
+receives = ["log-carrier"]

@@ -8,8 +8,15 @@
 //! **A reading that changed nothing starts nothing.** A start that was refused
 //! — the claim, the hand-over or the spawn — and an end owed no restart leave
 //! the function alone until its inventory record differs from the first one
-//! read after. Every start of a function after its first spends its
-//! [`Budget`], and a function whose budget is spent is given up on.
+//! read after. Every start of a row's process on a function after its first
+//! spends the function's [`Budget`], and a function whose budget is spent is
+//! given up on.
+//!
+//! **Rows whose matchers name one function take turns at it**, in their
+//! order: a process that ends with exit 0 says the function is not its own
+//! ([`Drives::declined`]), and the next row's is started on it. Once every
+//! row has declined it, it is left alone like an end owed nothing, and its
+//! record differing starts the turns again.
 
 use std::collections::BTreeMap;
 use std::time::Instant;
@@ -49,7 +56,10 @@ pub struct Drives {
 #[derive(Default)]
 struct Function {
     budget: Budget,
-    started: bool,
+    /// The row whose process was started on it last.
+    started: Option<String>,
+    /// Rows whose process ended with exit 0 on it.
+    declined: Vec<String>,
     phase: Phase,
 }
 
@@ -80,7 +90,9 @@ impl Drives {
         });
         let mut acts = Vec::new();
         for pci in records.iter().filter(|pci| pci.driven != Driven::Kernel) {
-            let Some(&(row, entry)) = rows.iter().find(|(_, matcher)| matcher.matches(pci, boot)) else { continue };
+            if !rows.iter().any(|(_, matcher)| matcher.matches(pci, boot)) {
+                continue;
+            }
             let function = self.functions.entry(pci.arrival).or_default();
             if let Phase::Held(seen) = &mut function.phase {
                 match seen {
@@ -92,12 +104,21 @@ impl Drives {
             if !matches!(function.phase, Phase::Owed) || pci.driven != Driven::Free {
                 continue;
             }
-            if function.started && !function.budget.spend(now) {
+            let turn = rows
+                .iter()
+                .find(|(row, matcher)| matcher.matches(pci, boot) && !function.declined.contains(&row.name));
+            let Some(&(row, entry)) = turn else {
+                function.declined.clear();
+                function.phase = Phase::Held(Some(*pci));
+                continue;
+            };
+            let again = function.started.as_deref() == Some(row.name.as_str());
+            if again && !function.budget.spend(now) {
                 function.phase = Phase::GivenUp;
                 acts.push(Act::GiveUp { row, function: *pci });
                 continue;
             }
-            function.started = true;
+            function.started = Some(row.name.clone());
             function.phase = Phase::Running;
             acts.push(Act::Start { row, entry, function: *pci });
         }
@@ -116,6 +137,14 @@ impl Drives {
             true => self.set(arrival, Phase::Owed),
             false => self.leave(arrival),
         }
+    }
+
+    /// The process of `row` on `arrival` ended with exit 0: the function is
+    /// not its own, and the next row that drives it is owed one.
+    pub fn declined(&mut self, arrival: Arrival, row: &str) {
+        let function = self.functions.get_mut(&arrival).expect("supervisor: an arrival it decided nothing about");
+        function.declined.push(row.to_string());
+        function.phase = Phase::Owed;
     }
 
     fn leave(&mut self, arrival: Arrival) {
@@ -241,6 +270,59 @@ mod tests {
         drives.ended(Arrival(4), false);
         assert_eq!(started(&drives.decide(&rows, &machine, None, now)), [3]);
         assert!(drives.decide(&rows, &machine, None, now).is_empty());
+    }
+
+    /// Two rows' matchers name one function: the first row's process is
+    /// started on it, the second's once the first declines it, and neither
+    /// again until its record differs.
+    #[test]
+    fn rows_that_name_one_function_take_turns_until_one_keeps_it() {
+        let now = Instant::now();
+        let (agent, console) = (row(), Program { name: "console".into(), drives: vec![EDU.to_string()], ..Program::default() });
+        let rows = [(&agent, EDU), (&console, EDU)];
+        let machine = [edu(3, Driven::Free)];
+        let mut drives = Drives::default();
+        let turn = |acts: Vec<Act<'_>>| match acts.as_slice() {
+            [Act::Start { row, .. }] => row.name.clone(),
+            other => panic!("one start, not {other:?}"),
+        };
+        assert_eq!(turn(drives.decide(&rows, &machine, None, now)), "holder");
+        drives.declined(Arrival(3), "holder");
+        assert_eq!(turn(drives.decide(&rows, &machine, None, now)), "console");
+        // The second keeps it: its process holds the function.
+        assert!(drives.decide(&rows, &[edu(3, Driven::Claimed)], None, now).is_empty());
+
+        // Both decline: the function is left alone until its record differs.
+        let mut drives = Drives::default();
+        drives.decide(&rows, &machine, None, now);
+        drives.declined(Arrival(3), "holder");
+        drives.decide(&rows, &machine, None, now);
+        drives.declined(Arrival(3), "console");
+        for round in 0..3 {
+            assert!(drives.decide(&rows, &machine, None, now).is_empty(), "round {round} started one again");
+        }
+        drives.decide(&rows, &[edu(3, Driven::Claimed)], None, now);
+        assert_eq!(turn(drives.decide(&rows, &machine, None, now)), "holder");
+    }
+
+    /// A row's first start on a function spends nothing, whichever row went
+    /// before it.
+    #[test]
+    fn a_turn_spends_no_budget() {
+        let now = Instant::now();
+        let (agent, console) = (row(), Program { name: "console".into(), drives: vec![EDU.to_string()], ..Program::default() });
+        let rows = [(&agent, EDU), (&console, EDU)];
+        let machine = [edu(3, Driven::Free)];
+        let mut drives = Drives::default();
+        drives.decide(&rows, &machine, None, now);
+        drives.declined(Arrival(3), "holder");
+        drives.decide(&rows, &machine, None, now);
+        for _ in 0..RESTARTS {
+            drives.ended(Arrival(3), true);
+            assert_eq!(started(&drives.decide(&rows, &machine, None, now)), [3]);
+        }
+        drives.ended(Arrival(3), true);
+        assert!(matches!(drives.decide(&rows, &machine, None, now).as_slice(), [Act::GiveUp { .. }]));
     }
 
     #[test]

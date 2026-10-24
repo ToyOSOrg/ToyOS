@@ -17,6 +17,7 @@ start = ["logkeeper", "diskserver", "fileserver", "netstack", "soundserver", "te
 [programs.logkeeper]
 service = true
 syscap = ["logread"]
+serves = ["log-carrier"]
 
 # netstack holds the NIC's PCI function and drives it: the virtqueues, the register
 # window and the interrupt are its own, and the kernel keeps only the claim.
@@ -67,3 +68,8 @@ receives = ["disk"]
 restart = true
 roles = ["data", "log", "boot"]
 receives = ["block"]
+
+# The VM's console, on whichever virtio-serial function names its port.
+[programs.virtio-console]
+drives = ["pci:07:80:00/1af4:1043"]
+receives = ["log-carrier"]

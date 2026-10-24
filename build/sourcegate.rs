@@ -88,10 +88,8 @@ const LOG_PRODUCERS: &[&str] = &["log!(", "alert!(", "boot_phase!(", "log::emit(
 const NMI_SILENT: &[&str] =
     &["kernel/src/arch/x86_64/idt/nmi.rs", "kernel/src/hardlockup/mod.rs"];
 
-/// Every `enable_bus_master(` site `kernel/src` holds, by file and count.
-/// No kernel site leaves a device it declined mastering the bus: virtio
-/// parses its capability chain first, and switches mastering off on a refusal
-/// that comes after arming.
+/// Every `enable_bus_master(` site `kernel/src` holds, by file and count:
+/// its definition, and the AMD-Vi unit's own function.
 ///
 /// A function handed to a *process* takes the other path: `pcidev` arms bus
 /// mastering with `start_bus_mastering`, after the address space that bounds it
@@ -99,7 +97,6 @@ const NMI_SILENT: &[&str] =
 /// count below stays the census of drivers this kernel has.
 const BUS_MASTER_SITES: &[(&str, usize)] = &[
     ("kernel/src/drivers/pci.rs", 1),
-    ("kernel/src/drivers/virtio.rs", 1),
     ("kernel/src/arch/x86_64/amdvi/mod.rs", 1),
 ];
 
@@ -137,7 +134,6 @@ const SENTINEL_ALLOWED: &[(&str, usize)] = &[
 /// reds beside a permitted one and a deleted one reds its own stale row.
 const AUTO_TRAIT_IMPLS: &[(&str, usize)] = &[
     ("kernel/src/drivers/panic_console/mod.rs", 3),
-    ("kernel/src/drivers/virtio_console.rs", 1),
     ("kernel/src/arch/x86_64/hw.rs", 1),
     ("kernel/src/mm/mmio.rs", 2),
     ("kernel/src/mm/region.rs", 2),

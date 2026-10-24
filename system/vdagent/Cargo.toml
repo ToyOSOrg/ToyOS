@@ -7,10 +7,9 @@ license = "MIT OR Apache-2.0"
 [dependencies]
 toyos-abi = { path = "../../sdk/abi" }
 toyos = { path = "../../sdk/toyos" }
-toyos-device-memory = { path = "../../lib/device-memory" }
-toyos-virtio = { path = "../../lib/virtio" }
-toyos-pci-claim = { path = "../../lib/pci-claim" }
 toyos-vdagent = { path = "../../lib/vdagent" }
+toyos-virtio-serial = { path = "../../lib/virtio-serial" }
+toyos-virtio-serial-claim = { path = "../../lib/virtio-serial/claim" }
 toyos-vdagent-bridge = { path = "bridge" }
 toyos-manifest = { path = "../../lib/manifest" }
 toyos-window = { path = "../../sdk/window" }

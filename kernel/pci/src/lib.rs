@@ -31,11 +31,9 @@ pub mod aperture;
 pub mod af;
 pub mod bar;
 pub mod caps;
-pub mod choose;
 pub mod express;
 pub mod msi;
 pub mod msix;
 pub mod pages;
 pub mod pm;
 
-pub use choose::console;

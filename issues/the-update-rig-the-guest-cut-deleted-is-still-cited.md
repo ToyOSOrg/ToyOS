@@ -9,7 +9,7 @@ opened: 2026-10-03
 #660 (`06788146b`) deleted `tests/common/update.rs` with its `Rig`,
 `tests/common/fwvars.rs` and `tests/updatecase/system.toml`. `git grep -n
 'fwvars\|updatecase\|common/update\.rs\|Rig::\|vars::plant\|vars::live'` finds
-seven lines in two files, each planning or describing a test on them:
+six lines in one file, each planning or describing a test on them:
 
 - `issues/the-loader-does-only-what-must-precede-the-handover.md`,
   six lines. Stage 3's exit takes `fwvars::live` as
@@ -17,10 +17,8 @@ seven lines in two files, each planning or describing a test on them:
   `tests/updatecase/system.toml` grants `slots` and that two tests run
   `updatecase`; one of its negative controls signs with `Rig::update` and
   reads the floor with `fwvars::live`, which its oracles name too.
-- `issues/the-kernel-console-split-does-not-re-arm-across-a-guest-reset.md`,
-  one line: the reset in place it describes is `Rig::boot`'s.
 
-What each should name is the tier its test has now, and stage A of
+What it should name is the tier its test has now, and stage A of
 `issues/the-guest-suite-runs-only-what-no-cheaper-tier-reaches.md` gives
 it: `update_floor_is_the_images_own`, `update_refusals_boot_the_other_slot`
 and `update_grant_refuses_a_stray_partition` are host tests there and guest

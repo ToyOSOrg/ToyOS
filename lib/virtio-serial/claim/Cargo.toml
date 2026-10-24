@@ -1,0 +1,18 @@
+[package]
+name = "toyos-virtio-serial-claim"
+description = "A virtio-serial function brought up and driven over its PCI claim, for this project's two drivers of it: its six queues, the control messages each way and the named port's buffers."
+version = "0.1.0"
+edition = "2021"
+license = "MIT OR Apache-2.0"
+publish = false
+
+[dependencies]
+toyos = { path = "../../../sdk/toyos" }
+toyos-abi = { path = "../../../sdk/abi" }
+toyos-device-memory = { path = "../../device-memory" }
+toyos-pci-claim = { path = "../../pci-claim" }
+toyos-virtio = { path = "../../virtio" }
+toyos-virtio-serial = { path = ".." }
+
+[lib]
+doctest = false

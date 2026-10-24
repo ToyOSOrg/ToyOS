@@ -225,10 +225,8 @@ impl Serial {
         self.text.lines().filter(|l| is_kernel_line(l)).count()
     }
 
-    /// A line carrying a kernel prefix somewhere other than its start, which
-    /// is the virtio-console's missing line atomicity showing up in the
-    /// capture: `log!` and a userspace `println!` interleave mid-word (see
-    /// `issues/`). Reported rather than repaired — a needle that went
+    /// A line carrying a kernel prefix somewhere other than its start: two
+    /// writers' lines spliced mid-word in the capture. Reported rather than repaired — a needle that went
     /// missing because it was split in half should say so instead of looking
     /// like the guest never said it.
     pub fn interleaved(&self) -> Option<&str> {
