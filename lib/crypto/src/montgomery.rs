@@ -68,6 +68,13 @@ pub(crate) trait Modulus<const N: usize>: Sized + 'static {
         let (t, high) = redc::<Self, N>(&mut square_wide(a));
         reduce(&t, high, &Self::P)
     }
+    /// The words of table[index] for a secret index, or table[0] for an
+    /// index past 15, reading every entry under masks: the table's order
+    /// and length are public.
+    #[inline(always)]
+    fn select<T, const W: usize>(table: &[T; 16], words: impl Fn(&T) -> [&[u64; N]; W], index: u64) -> [[u64; N]; W] {
+        select(table, words, index)
+    }
     /// `computation` over the fastest arithmetic modulo p that the CPU
     /// admits: this modulus's own unless it says otherwise.
     #[inline(always)]
@@ -116,9 +123,13 @@ unsafe impl<M: Modulus<N>, const N: usize> crate::secret::Zeroable for Residue<M
 
 impl<M: Modulus<N>, const N: usize> Residue<M, N> {
     /// Words already in Montgomery form and below p: a compile-time constant
-    /// from [`encode`].
+    /// from [`encode`], or a residue's own [`Self::words`].
     pub(crate) const fn from_montgomery(words: [u64; N]) -> Self {
         Self(words, PhantomData)
+    }
+    /// The Montgomery-form words, for [`Modulus::select`].
+    pub(crate) const fn words(&self) -> &[u64; N] {
+        &self.0
     }
     pub(crate) const fn zero() -> Self {
         Self([0; N], PhantomData)
@@ -423,6 +434,28 @@ pub(crate) mod p256 {
         step!(3);
         reduce([t[4], t[5], t[6], t[7]], extra)
     }
+}
+
+/// [`Modulus::select`]'s portable form, by `ct` masks.
+#[inline(always)]
+pub(crate) fn select<T, const N: usize, const W: usize>(
+    table: &[T; 16],
+    words: impl Fn(&T) -> [&[u64; N]; W],
+    index: u64,
+) -> [[u64; N]; W] {
+    let mut chosen = words(&table[0]).map(|w| *w);
+    // Indexing, not an iterator adaptor, which the shipped profile keeps out
+    // of line.
+    for j in 1..16 {
+        let m = ct::mask(1 ^ ct::nonzero(index ^ j as u64));
+        let entry = words(&table[j]);
+        for w in 0..W {
+            for i in 0..N {
+                chosen[w][i] = (chosen[w][i] & !m) | (entry[w][i] & m);
+            }
+        }
+    }
+    chosen
 }
 
 /// Whether two moduli are one p, at compile time.

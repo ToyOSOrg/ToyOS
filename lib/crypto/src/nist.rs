@@ -179,14 +179,9 @@ impl<C: Curve<N>, const N: usize, F: Modulus<N>> Affine<C, N, F> {
     /// is the identity, so no arithmetic runs on it.
     fn lookup(row: &[Affine<C, N>; 16], d: i8) -> Self {
         let (magnitude, negative) = magnitude(d);
-        let mut chosen = Self::from_table(&row[0]);
-        // Indexing, not an iterator adaptor, which the shipped profile keeps
-        // out of line.
-        for j in 1..16 {
-            let take = 1 ^ crate::ct::nonzero(magnitude ^ (j as u64 + 1));
-            chosen.x = Residue::select(&chosen.x, &row[j].x.cast(), take);
-            chosen.y = Residue::select(&chosen.y, &row[j].y.cast(), take);
-        }
+        let [x, y] = F::select(row, |e| [e.x.words(), e.y.words()], magnitude.wrapping_sub(1));
+        let entry = Affine::<C, N>::new(Residue::from_montgomery(x), Residue::from_montgomery(y));
+        let mut chosen = Self::from_table(&entry);
         chosen.y = Residue::select(&chosen.y, &Residue::zero().sub(&chosen.y), negative);
         chosen
     }
@@ -458,10 +453,8 @@ impl<C: Curve<N>, const N: usize, F: Modulus<N>> Point<C, N, F> {
     /// discards by mask.
     fn lookup(table: &[Self; 16], d: i8) -> Self {
         let (magnitude, negative) = magnitude(d);
-        let mut chosen = table[0];
-        for j in 1..16 {
-            chosen = Self::select(&chosen, &table[j], 1 ^ crate::ct::nonzero(magnitude ^ (j as u64 + 1)));
-        }
+        let [x, y, z] = F::select(table, |e| [e.x.words(), e.y.words(), e.z.words()], magnitude.wrapping_sub(1));
+        let mut chosen = Self::new(Residue::from_montgomery(x), Residue::from_montgomery(y), Residue::from_montgomery(z));
         let negated = Residue::zero().sub(&chosen.y);
         chosen.y = Residue::select(&chosen.y, &negated, negative);
         chosen

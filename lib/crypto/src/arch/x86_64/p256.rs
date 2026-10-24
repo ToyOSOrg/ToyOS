@@ -1,24 +1,27 @@
 //! P-256 field arithmetic in general registers: multiplication and squaring
 //! on BMI2 and ADX (Intel SDM Vol. 2A, ADCX, ADOX and MULX), and addition and
-//! subtraction on the base instruction set. Operands below p arrive in
-//! registers and results below p leave in them, so a point formula's values
-//! need not pass through memory between operations. No branch or address
-//! depends on the operands; every conditional subtraction is a `cmov` or a
-//! mask taken from a borrow.
+//! subtraction on the base instruction set. Results leave in registers, and
+//! every operand but multiplication's first arrives in them, so a point
+//! formula's values need not pass through memory between operations. No
+//! branch or address depends on the operands; every conditional subtraction
+//! is a `cmov` or a mask taken from a borrow.
 //!
 //! Each Montgomery reduction step adds q p for q the lowest word, which
 //! clears it as -p^-1 = 1 mod 2^64, and drops it: q 2^32 at the next word
-//! (from q (2^64 - 1) + q (2^32 - 1) 2^64), and q p3 two words above that,
-//! where q p3 = q 2^64 - q 2^32 + q is formed by shifts and subtraction
+//! (from q (2^64 - 1) + q (2^32 - 1) 2^64), and q p3 two words above that
 //! (Gueron and Krasnov, "Fast prime field elliptic-curve cryptography with
-//! 256-bit primes", J. Cryptogr. Eng. 2015). Every register a template may
-//! take is in use, so p3 has none to sit in for a `mulx`.
+//! 256-bit primes", J. Cryptogr. Eng. 2015).
 
 use core::arch::asm;
+use core::arch::x86_64::*;
+
+/// p's top word, the one a reduction step multiplies by.
+const P3: u64 = 0xffff_ffff_0000_0001;
 
 /// a b / 2^256 mod p for a, b < p, by the portable field's CIOS with P-256's
-/// reduction step (`montgomery`'s `Form::P256`): a in registers, b0 in RDX
-/// and b's other words read where they lie.
+/// reduction step (`montgomery`'s `Form::P256`): b in registers, b0 in RDX,
+/// and a's words read where they lie. A template has 13 general registers
+/// besides RDX, too few to hold both operands with the running words.
 ///
 /// Row i adds a b_i to the running words, carrying into a sixth: low halves
 /// on CF through `adcx`, high halves on OF through `adox`. Each row's
@@ -30,155 +33,142 @@ use core::arch::asm;
 /// The CPU has BMI2 and ADX.
 #[inline(always)]
 pub(super) unsafe fn mul(a: &[u64; 4], b: &[u64; 4]) -> [u64; 4] {
-    let [mut r0, mut r1, mut r2, mut r3] = *a;
-    // SAFETY: the template reads b's words 1 to 3, writes only its declared
+    let (r0, r1, r2, r3): (u64, u64, u64, u64);
+    // SAFETY: the template reads a's four words, writes only its declared
     // registers and leaves the stack alone.
     unsafe {
         asm!(
-            // Row 0 into (A B C D E), F = 0.
-            "mulx {B}, {A}, {a0}",
-            "mulx {C}, {lo}, {a1}",
+            // Row 0 (rdx = b0) into (A B C D E), F = 0.
+            "mulx {B}, {A}, [{a}]",
+            "mulx {C}, {lo}, [{a} + 8]",
             "add {B}, {lo}",
-            "mulx {D}, {lo}, {a2}",
+            "mulx {D}, {lo}, [{a} + 16]",
             "adc {C}, {lo}",
-            "mulx {E}, {lo}, {a3}",
+            "mulx {E}, {lo}, [{a} + 24]",
             "adc {D}, {lo}",
             "adc {E}, 0",
             "xor {F:e}, {F:e}",
-            // Reduction: q = A; q p3 into (A, rdx); the sum moves to (B C D E F).
-            "mov {lo}, {A}",
-            "shl {lo}, 32",
-            "mov {hi}, {A}",
-            "shr {hi}, 32",
+            // Reduction: q = A; the sum moves to (B C D E F).
             "mov rdx, {A}",
-            "sub {A}, {lo}",
-            "sbb rdx, {hi}",
-            "add {B}, {lo}",
-            "adc {C}, {hi}",
-            "adc {D}, {A}",
-            "adc {E}, rdx",
+            "mulx {hi}, {lo}, {p3}",
+            "shl rdx, 32",
+            "shr {A}, 32",
+            "add {B}, rdx",
+            "adc {C}, {A}",
+            "adc {D}, {lo}",
+            "adc {E}, {hi}",
             "adc {F}, 0",
             // Row 1 into (B C D E F), A = 0.
-            "mov rdx, [{b} + 8]",
+            "mov rdx, {b1}",
             "xor {A:e}, {A:e}",
-            "mulx {hi}, {lo}, {a0}",
+            "mulx {hi}, {lo}, [{a}]",
             "adcx {B}, {lo}",
             "adox {C}, {hi}",
-            "mulx {hi}, {lo}, {a1}",
+            "mulx {hi}, {lo}, [{a} + 8]",
             "adcx {C}, {lo}",
             "adox {D}, {hi}",
-            "mulx {hi}, {lo}, {a2}",
+            "mulx {hi}, {lo}, [{a} + 16]",
             "adcx {D}, {lo}",
             "adox {E}, {hi}",
-            "mulx {hi}, {lo}, {a3}",
+            "mulx {hi}, {lo}, [{a} + 24]",
             "adcx {E}, {lo}",
             "adox {F}, {hi}",
             "adcx {F}, {A}",
             "adox {A}, {A}",
             "adc {A}, 0",
             // Reduction: q = B; the sum moves to (C D E F A).
-            "mov {lo}, {B}",
-            "shl {lo}, 32",
-            "mov {hi}, {B}",
-            "shr {hi}, 32",
             "mov rdx, {B}",
-            "sub {B}, {lo}",
-            "sbb rdx, {hi}",
-            "add {C}, {lo}",
-            "adc {D}, {hi}",
-            "adc {E}, {B}",
-            "adc {F}, rdx",
+            "mulx {hi}, {lo}, {p3}",
+            "shl rdx, 32",
+            "shr {B}, 32",
+            "add {C}, rdx",
+            "adc {D}, {B}",
+            "adc {E}, {lo}",
+            "adc {F}, {hi}",
             "adc {A}, 0",
             // Row 2 into (C D E F A), B = 0.
-            "mov rdx, [{b} + 16]",
+            "mov rdx, {b2}",
             "xor {B:e}, {B:e}",
-            "mulx {hi}, {lo}, {a0}",
+            "mulx {hi}, {lo}, [{a}]",
             "adcx {C}, {lo}",
             "adox {D}, {hi}",
-            "mulx {hi}, {lo}, {a1}",
+            "mulx {hi}, {lo}, [{a} + 8]",
             "adcx {D}, {lo}",
             "adox {E}, {hi}",
-            "mulx {hi}, {lo}, {a2}",
+            "mulx {hi}, {lo}, [{a} + 16]",
             "adcx {E}, {lo}",
             "adox {F}, {hi}",
-            "mulx {hi}, {lo}, {a3}",
+            "mulx {hi}, {lo}, [{a} + 24]",
             "adcx {F}, {lo}",
             "adox {A}, {hi}",
             "adcx {A}, {B}",
             "adox {B}, {B}",
             "adc {B}, 0",
             // Reduction: q = C; the sum moves to (D E F A B).
-            "mov {lo}, {C}",
-            "shl {lo}, 32",
-            "mov {hi}, {C}",
-            "shr {hi}, 32",
             "mov rdx, {C}",
-            "sub {C}, {lo}",
-            "sbb rdx, {hi}",
-            "add {D}, {lo}",
-            "adc {E}, {hi}",
-            "adc {F}, {C}",
-            "adc {A}, rdx",
+            "mulx {hi}, {lo}, {p3}",
+            "shl rdx, 32",
+            "shr {C}, 32",
+            "add {D}, rdx",
+            "adc {E}, {C}",
+            "adc {F}, {lo}",
+            "adc {A}, {hi}",
             "adc {B}, 0",
             // Row 3 into (D E F A B), C = 0.
-            "mov rdx, [{b} + 24]",
+            "mov rdx, {b3}",
             "xor {C:e}, {C:e}",
-            "mulx {hi}, {lo}, {a0}",
+            "mulx {hi}, {lo}, [{a}]",
             "adcx {D}, {lo}",
             "adox {E}, {hi}",
-            "mulx {hi}, {lo}, {a1}",
+            "mulx {hi}, {lo}, [{a} + 8]",
             "adcx {E}, {lo}",
             "adox {F}, {hi}",
-            "mulx {hi}, {lo}, {a2}",
+            "mulx {hi}, {lo}, [{a} + 16]",
             "adcx {F}, {lo}",
             "adox {A}, {hi}",
-            "mulx {hi}, {lo}, {a3}",
+            "mulx {hi}, {lo}, [{a} + 24]",
             "adcx {A}, {lo}",
             "adox {B}, {hi}",
             "adcx {B}, {C}",
             "adox {C}, {C}",
             "adc {C}, 0",
             // Reduction: q = D; the sum moves to (E F A B C).
-            "mov {lo}, {D}",
-            "shl {lo}, 32",
-            "mov {hi}, {D}",
-            "shr {hi}, 32",
             "mov rdx, {D}",
-            "sub {D}, {lo}",
-            "sbb rdx, {hi}",
-            "add {E}, {lo}",
-            "adc {F}, {hi}",
-            "adc {A}, {D}",
-            "adc {B}, rdx",
+            "mulx {hi}, {lo}, {p3}",
+            "shl rdx, 32",
+            "shr {D}, 32",
+            "add {E}, rdx",
+            "adc {F}, {D}",
+            "adc {A}, {lo}",
+            "adc {B}, {hi}",
             "adc {C}, 0",
-            // (E F A B C) - p into a's registers; a borrow means the sum
-            // was below p, and it stands.
-            "mov {a0}, {E}",
-            "mov {a1}, {F}",
-            "mov {a2}, {A}",
-            "mov {a3}, {B}",
-            "mov {lo:e}, 0xffffffff",
-            "mov {hi}, 0xffffffff00000001",
-            "sub {a0}, -1",
-            "sbb {a1}, {lo}",
-            "sbb {a2}, 0",
-            "sbb {a3}, {hi}",
+            // (E F A B C) - p, p1 = 2^32 - 1 in b1's register; no borrow out
+            // means the sum was at least p.
+            "mov {D}, {E}",
+            "mov {lo}, {F}",
+            "mov {hi}, {A}",
+            "mov rdx, {B}",
+            "mov {b1:e}, 0xffffffff",
+            "sub {D}, -1",
+            "sbb {lo}, {b1}",
+            "sbb {hi}, 0",
+            "sbb rdx, {p3}",
             "sbb {C}, 0",
-            "cmovc {a0}, {E}",
-            "cmovc {a1}, {F}",
-            "cmovc {a2}, {A}",
-            "cmovc {a3}, {B}",
-            a0 = inout(reg) r0,
-            a1 = inout(reg) r1,
-            a2 = inout(reg) r2,
-            a3 = inout(reg) r3,
-            b = in(reg) b.as_ptr(),
-            A = out(reg) _,
-            B = out(reg) _,
+            "cmovnc {E}, {D}",
+            "cmovnc {F}, {lo}",
+            "cmovnc {A}, {hi}",
+            "cmovnc {B}, rdx",
+            a = in(reg) a.as_ptr(),
+            b1 = inout(reg) b[1] => _,
+            b2 = in(reg) b[2],
+            b3 = in(reg) b[3],
+            p3 = in(reg) P3,
+            A = out(reg) r2,
+            B = out(reg) r3,
             C = out(reg) _,
             D = out(reg) _,
-            E = out(reg) _,
-            F = out(reg) _,
+            E = out(reg) r0,
+            F = out(reg) r1,
             lo = out(reg) _,
             hi = out(reg) _,
             inout("rdx") b[0] => _,
@@ -188,9 +178,10 @@ pub(super) unsafe fn mul(a: &[u64; 4], b: &[u64; 4]) -> [u64; 4] {
     [r0, r1, r2, r3]
 }
 
-/// a^2 / 2^256 mod p for a < p: the cross products once, doubled, the
-/// squares added, then [`mul`]'s reduction steps in place, the word each
-/// step clears gathering the carry out of the top.
+/// a^2 / 2^256 mod p for a < p in registers: the cross products once,
+/// doubled, the squares added, then [`mul`]'s reduction steps in place, the
+/// word each step clears gathering the carry out of the top. p3 takes a1's
+/// register once a1 is squared.
 ///
 /// # Safety
 /// The CPU has BMI2 and ADX.
@@ -247,77 +238,65 @@ pub(super) unsafe fn square(a: &[u64; 4]) -> [u64; 4] {
             "mulx {hi}, {lo}, rdx",
             "adc {T6}, {lo}",
             "adc {T7}, {hi}",
+            "mov {a1}, 0xffffffff00000001",
             // Reduction steps; T0 then gathers the carry out of T7.
-            "mov {lo}, {a0}",
-            "shl {lo}, 32",
-            "mov {hi}, {a0}",
-            "shr {hi}, 32",
             "mov rdx, {a0}",
-            "sub {a0}, {lo}",
-            "sbb rdx, {hi}",
-            "add {T1}, {lo}",
-            "adc {T2}, {hi}",
-            "adc {T3}, {a0}",
-            "adc {T4}, rdx",
+            "mulx {hi}, {lo}, {a1}",
+            "shl rdx, 32",
+            "shr {a0}, 32",
+            "add {T1}, rdx",
+            "adc {T2}, {a0}",
+            "adc {T3}, {lo}",
+            "adc {T4}, {hi}",
             "adc {T5}, 0",
             "adc {T6}, 0",
             "adc {T7}, 0",
             "mov {a0:e}, 0",
             "adc {a0}, 0",
-            "mov {lo}, {T1}",
-            "shl {lo}, 32",
-            "mov {hi}, {T1}",
-            "shr {hi}, 32",
             "mov rdx, {T1}",
-            "sub {T1}, {lo}",
-            "sbb rdx, {hi}",
-            "add {T2}, {lo}",
-            "adc {T3}, {hi}",
-            "adc {T4}, {T1}",
-            "adc {T5}, rdx",
+            "mulx {hi}, {lo}, {a1}",
+            "shl rdx, 32",
+            "shr {T1}, 32",
+            "add {T2}, rdx",
+            "adc {T3}, {T1}",
+            "adc {T4}, {lo}",
+            "adc {T5}, {hi}",
             "adc {T6}, 0",
             "adc {T7}, 0",
             "adc {a0}, 0",
-            "mov {lo}, {T2}",
-            "shl {lo}, 32",
-            "mov {hi}, {T2}",
-            "shr {hi}, 32",
             "mov rdx, {T2}",
-            "sub {T2}, {lo}",
-            "sbb rdx, {hi}",
-            "add {T3}, {lo}",
-            "adc {T4}, {hi}",
-            "adc {T5}, {T2}",
-            "adc {T6}, rdx",
+            "mulx {hi}, {lo}, {a1}",
+            "shl rdx, 32",
+            "shr {T2}, 32",
+            "add {T3}, rdx",
+            "adc {T4}, {T2}",
+            "adc {T5}, {lo}",
+            "adc {T6}, {hi}",
             "adc {T7}, 0",
             "adc {a0}, 0",
-            "mov {lo}, {T3}",
-            "shl {lo}, 32",
-            "mov {hi}, {T3}",
-            "shr {hi}, 32",
             "mov rdx, {T3}",
-            "sub {T3}, {lo}",
-            "sbb rdx, {hi}",
-            "add {T4}, {lo}",
-            "adc {T5}, {hi}",
-            "adc {T6}, {T3}",
-            "adc {T7}, rdx",
+            "mulx {hi}, {lo}, {a1}",
+            "shl rdx, 32",
+            "shr {T3}, 32",
+            "add {T4}, rdx",
+            "adc {T5}, {T3}",
+            "adc {T6}, {lo}",
+            "adc {T7}, {hi}",
             "adc {a0}, 0",
-            // (T4 .. T7 a0) - p, as in `mul`, into a1, a2, a3 and rdx.
-            "mov {a1}, {T4}",
-            "mov {a2}, {T5}",
-            "mov {a3}, {T6}",
+            // (T4 .. T7 a0) - p, as in `mul`.
+            "mov {a2}, {T4}",
+            "mov {a3}, {T5}",
+            "mov {T1}, {T6}",
             "mov rdx, {T7}",
             "mov {lo:e}, 0xffffffff",
-            "mov {hi}, 0xffffffff00000001",
-            "sub {a1}, -1",
-            "sbb {a2}, {lo}",
-            "sbb {a3}, 0",
-            "sbb rdx, {hi}",
+            "sub {a2}, -1",
+            "sbb {a3}, {lo}",
+            "sbb {T1}, 0",
+            "sbb rdx, {a1}",
             "sbb {a0}, 0",
-            "cmovnc {T4}, {a1}",
-            "cmovnc {T5}, {a2}",
-            "cmovnc {T6}, {a3}",
+            "cmovnc {T4}, {a2}",
+            "cmovnc {T5}, {a3}",
+            "cmovnc {T6}, {T1}",
             "cmovnc {T7}, rdx",
             a0 = inout(reg) a0 => _,
             a1 = inout(reg) a1 => _,
@@ -470,4 +449,46 @@ pub(super) fn sub(a: &[u64; 4], b: &[u64; 4]) -> [u64; 4] {
         );
     }
     [r0, r1, r2, r3]
+}
+
+/// The words of table[index], or table[0] for an index past 15, in AVX2
+/// registers: each entry's residues are one vector each, and each is kept or
+/// replaced under the mask of a vector equality between the index and a
+/// vector count of the entries. Every entry is read.
+///
+/// # Safety
+/// The CPU has AVX2 and the OS saves its state.
+#[target_feature(enable = "avx2")]
+#[allow(clippy::needless_range_loop, reason = "iterator adaptors stay out of line in the shipped profile")]
+pub(super) unsafe fn select<T, const W: usize>(
+    table: &[T; 16],
+    words: impl Fn(&T) -> [&[u64; 4]; W],
+    index: u64,
+) -> [[u64; 4]; W] {
+    // `lddqu`, an unaligned load like `_mm256_loadu_si256`, which copies
+    // through the stack under debug assertions.
+    let load = |w: &[u64; 4]| -> __m256i {
+        // SAFETY: four words are 32 readable bytes.
+        unsafe { _mm256_lddqu_si256(w.as_ptr().cast()) }
+    };
+    let index = _mm256_set1_epi64x(index as i64);
+    let first = words(&table[0]);
+    let mut chosen: [__m256i; W] = core::array::from_fn(|w| load(first[w]));
+    let one = _mm256_set1_epi64x(1);
+    let mut count = one;
+    for j in 1..16 {
+        let mut m = _mm256_cmpeq_epi64(index, count);
+        // Opaque, so LLVM keeps the logical select below rather than forming
+        // a `vblendvpd`, which is not one of the crate's audited
+        // instructions.
+        // SAFETY: the template reads and writes only the operand's register.
+        unsafe { asm!("/* {0} */", inout(ymm_reg) m, options(pure, nomem, nostack, preserves_flags)) };
+        count = _mm256_add_epi64(count, one);
+        let entry = words(&table[j]);
+        for w in 0..W {
+            chosen[w] = _mm256_or_si256(_mm256_andnot_si256(m, chosen[w]), _mm256_and_si256(m, load(entry[w])));
+        }
+    }
+    // SAFETY: a vector and four words are the same 32 plain bytes.
+    chosen.map(|v| unsafe { core::mem::transmute::<__m256i, [u64; 4]>(v) })
 }

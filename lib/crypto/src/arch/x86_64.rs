@@ -206,12 +206,22 @@ impl crate::montgomery::Modulus<4> for P256Kernels {
     #[inline(always)]
     fn mul(a: &[u64; 4], b: &[u64; 4]) -> [u64; 4] {
         // SAFETY: the type is only named once CPUID admitted BMI2 and ADX.
-        unsafe { p256::mul(a, b) }
+        // The kernel reads its first operand from memory: a, the more recent
+        // in the point formulas, stays in registers.
+        unsafe { p256::mul(b, a) }
     }
     #[inline(always)]
     fn square(a: &[u64; 4]) -> [u64; 4] {
         // SAFETY: as `mul`.
         unsafe { p256::square(a) }
+    }
+    #[inline(always)]
+    fn select<T, const W: usize>(table: &[T; 16], words: impl Fn(&T) -> [&[u64; 4]; W], index: u64) -> [[u64; 4]; W] {
+        if features().avx2() {
+            // SAFETY: CPUID and XCR0 admitted AVX2.
+            return unsafe { p256::select(table, words, index) };
+        }
+        crate::montgomery::select(table, words, index)
     }
 }
 
@@ -614,6 +624,27 @@ mod tests {
             unsafe { sha_saving::sha256(&mut saving, blocks) };
             crate::hash::sha256_rounds(&mut portable, blocks);
             assert_eq!(saving, portable, "{n} blocks");
+        }
+    }
+
+    /// The AVX2 masked read against the portable one, for every index in
+    /// the table, either side of it and far past it.
+    #[test]
+    fn the_avx2_table_read_matches_the_portable_one() {
+        assert!(
+            features().avx2() || cfg!(feature = "portable"),
+            "this host's CPU has no AVX2, so nothing here can test the vector table read"
+        );
+        if !features().avx2() {
+            return;
+        }
+        let table: [[[u64; 4]; 3]; 16] =
+            core::array::from_fn(|j| core::array::from_fn(|w| core::array::from_fn(|i| ((j * 12 + w * 4 + i) as u64).wrapping_mul(0x9e37_79b9_7f4a_7c15))));
+        for index in (0..18).chain([u64::MAX, 1 << 63]) {
+            let portable = crate::montgomery::select(&table, |e| [&e[0], &e[1], &e[2]], index);
+            // CPUID and XCR0 admitted AVX2.
+            assert_eq!(unsafe { p256::select(&table, |e| [&e[0], &e[1], &e[2]], index) }, portable, "index {index}");
+            assert_eq!(portable, table[if index < 16 { index as usize } else { 0 }], "index {index}");
         }
     }
 
