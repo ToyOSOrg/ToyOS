@@ -19,7 +19,7 @@
 //! to let another CPU restore it ([`SchedPass::answer_steal_requests`]).
 
 use alloc::boxed::Box;
-use alloc::collections::{BTreeMap, VecDeque};
+use alloc::collections::{BTreeMap, BTreeSet, VecDeque};
 use alloc::vec::Vec;
 use core::marker::PhantomData;
 
@@ -118,14 +118,63 @@ pub enum Action<X: SchedPayload> {
 
 /// A parked task, plus the two facts that are only meaningful while parked.
 ///
-/// The deadline lives *here* and nowhere else, so a task that is not parked
-/// structurally cannot have one, and no second copy can disagree with this one
-/// about what the CPU owes. A `since` field here is omitted for the same
-/// reason: the residency stamp is in the task record.
+/// The deadline lives *here*, so a task that is not parked structurally
+/// cannot have one; [`Parked`]'s order of deadlines is written only beside it.
+/// A `since` field here is omitted for the same reason: the residency stamp is
+/// in the task record.
 pub struct ParkedEntry<X: SchedPayload> {
     task: BlockedTask<X>,
     deadline: Option<Nanos>,
     class: WaitClass,
+}
+
+/// The tasks parked on a CPU, and their deadlines in the order they fall due:
+/// what the CPU owes first is one lookup, however many tasks it holds. Only
+/// these methods write either, so the order cannot disagree with an entry.
+struct Parked<X: SchedPayload> {
+    entries: BTreeMap<TaskKey, ParkedEntry<X>>,
+    due: BTreeSet<(Nanos, TaskKey)>,
+}
+
+impl<X: SchedPayload> Parked<X> {
+    fn new() -> Self {
+        Self { entries: BTreeMap::new(), due: BTreeSet::new() }
+    }
+
+    fn insert(&mut self, key: TaskKey, entry: ParkedEntry<X>) {
+        if let Some(at) = entry.deadline {
+            self.due.insert((at, key));
+        }
+        assert!(self.entries.insert(key, entry).is_none(), "a task parked twice");
+    }
+
+    fn remove(&mut self, key: TaskKey) -> Option<ParkedEntry<X>> {
+        let entry = self.entries.remove(&key)?;
+        if let Some(at) = entry.deadline {
+            self.due.remove(&(at, key));
+        }
+        Some(entry)
+    }
+
+    fn get(&self, key: TaskKey) -> Option<&ParkedEntry<X>> {
+        self.entries.get(&key)
+    }
+
+    /// The deadline that will not be honoured stops being owed.
+    fn forget_deadline(&mut self, key: TaskKey) {
+        if let Some(at) = self.entries.get_mut(&key).and_then(|entry| entry.deadline.take()) {
+            self.due.remove(&(at, key));
+        }
+    }
+
+    fn earliest(&self) -> Option<Nanos> {
+        self.due.first().map(|&(at, _)| at)
+    }
+
+    /// The task whose deadline falls due first, if that is by `now`.
+    fn next_due(&self, now: Nanos) -> Option<TaskKey> {
+        self.due.first().filter(|&&(at, _)| at <= now).map(|&(_, key)| key)
+    }
 }
 
 /// One parked task as an outside reader sees it.
@@ -179,7 +228,7 @@ pub struct CpuSched<X: SchedPayload> {
     id: CpuId,
     running: Option<RunningTask<X>>,
     rq: RunQueue<X>,
-    parked: BTreeMap<TaskKey, ParkedEntry<X>>,
+    parked: Parked<X>,
     /// Killed tasks that still have a kernel stack to unwind, dispatched
     /// ahead of the **fair** queue, and behind the RT band only until the head
     /// of this list has aged ([`DYING_AGE_NS`]).
@@ -334,7 +383,7 @@ impl<X: SchedPayload> CpuSched<X> {
             id,
             running: None,
             rq: RunQueue::new(),
-            parked: BTreeMap::new(),
+            parked: Parked::new(),
             dying: VecDeque::new(),
             stopped: VecDeque::new(),
             zombie: None,
@@ -383,11 +432,11 @@ impl<X: SchedPayload> CpuSched<X> {
     }
 
     pub fn parked(&self) -> impl Iterator<Item = ParkedView<'_, X>> + '_ {
-        self.parked.iter().map(|(key, entry)| ParkedView { key: *key, entry })
+        self.parked.entries.iter().map(|(key, entry)| ParkedView { key: *key, entry })
     }
 
     pub fn parked_task(&self, key: TaskKey) -> Option<&BlockedTask<X>> {
-        self.parked.get(&key).map(|e| &e.task)
+        self.parked.get(key).map(|e| &e.task)
     }
 
     /// The killed tasks waiting to unwind, for the invariant walks and for a
@@ -1037,7 +1086,7 @@ impl<X: SchedPayload> CpuSched<X> {
         env: Env<'_, H, P>,
         now: Nanos,
     ) {
-        let Some(entry) = self.parked.remove(&key) else {
+        let Some(entry) = self.parked.remove(key) else {
             // Not parked here any more: a `Retire` already woke it into the
             // dying list, or its deadline fired first and this wake lost the
             // arbitration CAS. Keys are never reused, so a stale wake is
@@ -1072,18 +1121,17 @@ impl<X: SchedPayload> CpuSched<X> {
         now: Nanos,
     ) {
         let key = shared.key();
-        if self.parked.contains_key(&key) {
+        if let Some(entry) = self.parked.get(key) {
             // **Claim-arbitrated, exactly as `fire_deadlines` is**:
             // remove-then-convert loses the race. If a remote waker has
             // already claimed this task its `Msg::Wake` is in flight to this
             // same CPU, so leaving the entry alone is what keeps the task in
             // *some* container — `handle_wake` finds it and the wake places
             // it, into the dying list, because the kill bit is already set.
-            let entry = self.parked.get_mut(&key).expect("just checked");
             match entry.task.shared().claim_wake() {
                 Claim::Parked(cpu) => {
                     assert_eq!(cpu, self.id, "a task parked here claims another CPU");
-                    let entry = self.parked.remove(&key).expect("still there");
+                    let entry = self.parked.remove(key).expect("still there");
                     let task = entry.task.wake(
                         self.id,
                         WakeCause::new(WakeReason::Woken),
@@ -1177,14 +1225,7 @@ impl<X: SchedPayload> CpuSched<X> {
     /// long*: a CPU that owes a wake is the wrong one to run unbounded I/O on,
     /// and the idle loop asks before it flushes (`sched::driver::owes_deadline`).
     pub fn earliest_deadline(&self) -> Option<Nanos> {
-        self.parked.values().filter_map(|entry| entry.deadline).min()
-    }
-
-    fn next_due(&self, now: Nanos) -> Option<TaskKey> {
-        self.parked
-            .iter()
-            .find(|(_, entry)| entry.deadline.is_some_and(|at| at <= now))
-            .map(|(key, _)| *key)
+        self.parked.earliest()
     }
 
     /// Fire every deadline that is due, arbitrating with remote wakers
@@ -1194,8 +1235,8 @@ impl<X: SchedPayload> CpuSched<X> {
         env: Env<'_, H, P>,
         now: Nanos,
     ) {
-        while let Some(key) = self.next_due(now) {
-            let entry = self.parked.get_mut(&key).expect("just found");
+        while let Some(key) = self.parked.next_due(now) {
+            let entry = self.parked.get(key).expect("just found");
             match entry.task.shared().claim_wake() {
                 Claim::Parked(cpu) => {
                     assert_eq!(cpu, self.id, "a task parked here claims another CPU")
@@ -1207,11 +1248,11 @@ impl<X: SchedPayload> CpuSched<X> {
                 // also what advances the loop — the deadline that will not be
                 // honoured and the deadline that is not reported are one field.
                 Claim::Lost => {
-                    entry.deadline = None;
+                    self.parked.forget_deadline(key);
                     continue;
                 }
             }
-            let entry = self.parked.remove(&key).expect("still there");
+            let entry = self.parked.remove(key).expect("still there");
             let task = entry.task.wake(
                 self.id,
                 WakeCause::new(WakeReason::Timeout),
@@ -1695,7 +1736,7 @@ impl<H: Hw, P: PreemptGuard> SchedPass<'_, '_, H, P, Disposed> {
             let handle = self.env.cpus.get(self.cpu.id);
             let surplus = self.cpu.rq.fair_len() as u32;
             handle.publish_load((self.cpu.rq.len() + self.cpu.dying.len()) as u32);
-            handle.publish_surplus(surplus);
+            self.env.cpus.publish_surplus(self.cpu.id, surplus);
             self.cpu.rq.refresh();
             handle.publish_weight(self.cpu.rq.weight());
             // The stamp goes with them: it is what says they are about now.
@@ -1955,11 +1996,14 @@ impl<H: Hw, P: PreemptGuard> SchedPass<'_, '_, H, P, Disposed> {
         }
         self.cpu.next_balance = self.now.after(BALANCE_NS);
         let (cpus, me, now) = (self.env.cpus, self.cpu.id, self.now);
+        if !cpus.any_offers_surplus() {
+            return;
+        }
         let mine = self.cpu.rq.weight();
         let heaviest = STEAL_RINGS
             .into_iter()
             .flat_map(|(inner, outer)| cpus.topology().ring(me, inner, outer, 0))
-            .filter(|&cpu| cpus.get(cpu).answering(now) && cpus.get(cpu).surplus() >= PUSH_THRESHOLD)
+            .filter(|&cpu| cpus.offers_surplus(cpu) && cpus.get(cpu).answering(now))
             .map(|cpu| (cpus.get(cpu).weight(), cpu))
             .fold(None, |best: Option<(u64, CpuId)>, (weight, cpu)| match best {
                 Some((most, _)) if most >= weight => best,
@@ -2183,16 +2227,16 @@ impl<H: Hw, P: PreemptGuard> SchedPass<'_, '_, H, P, Disposed> {
     /// nearer victim moves the same work for less cache refill.
     fn best_victim(&self) -> Option<CpuId> {
         let cpus = self.env.cpus;
+        if !cpus.any_offers_surplus() {
+            return None;
+        }
         let me = self.cpu.id;
         STEAL_RINGS.into_iter().find_map(|(inner, outer)| {
-                let (victim, surplus) = cpus
-                    .topology()
-                    .ring(me, inner, outer, 0)
-                    .filter(|&cpu| cpus.get(cpu).answering(self.now))
-                    .map(|cpu| (cpu, cpus.get(cpu).surplus()))
-                    .max_by_key(|&(_, surplus)| surplus)?;
-                (surplus >= PUSH_THRESHOLD).then_some(victim)
-            })
+            cpus.topology()
+                .ring(me, inner, outer, 0)
+                .filter(|&cpu| cpus.offers_surplus(cpu) && cpus.get(cpu).answering(self.now))
+                .max_by_key(|&cpu| cpus.get(cpu).surplus())
+        })
     }
 
     /// [`Balance::PushOnSurplus`]: this pass has just published `surplus`, so
@@ -2242,7 +2286,7 @@ pub struct CpuHandle<M> {
     /// the fair band, so a task placed here waits for it.
     load: AtomicU32,
     /// **How many fair-band tasks this CPU could give away**, published for the
-    /// steal probe and for nothing else.
+    /// steal probe and for nothing else, through [`CpuHandles::publish_surplus`].
     ///
     /// A separate number from [`Self::load`] because the two questions have
     /// different answers, and asking one with the other's is a defect:
@@ -2314,10 +2358,6 @@ impl<M: SchedMsg> CpuHandle<M> {
 
     pub fn surplus(&self) -> u32 {
         self.surplus.load(Ordering::Relaxed)
-    }
-
-    pub fn publish_surplus(&self, fair: u32) {
-        self.surplus.store(fair, Ordering::Relaxed);
     }
 
     pub fn weight(&self) -> u64 {
@@ -2407,6 +2447,11 @@ impl<M: SchedMsg> CpuHandle<M> {
 pub struct CpuHandles<M> {
     handles: Box<[CpuHandle<M>]>,
     topology: Topology,
+    /// A bit per CPU whose published surplus reaches [`PUSH_THRESHOLD`], set
+    /// and cleared by its own [`Self::publish_surplus`]: what a choice of a
+    /// victim reads first, so a machine with nothing to steal costs an idle
+    /// pass one line instead of every CPU's handle.
+    offering: Box<[AtomicU64]>,
 }
 
 /// The CPUs an idle CPU is chosen among, nearest first: `me`'s LLC, then the
@@ -2434,10 +2479,42 @@ impl<M: SchedMsg> CpuHandles<M> {
             );
         }
         assert_eq!(topology.cpus(), handles.len(), "the topology describes every cpu and no other");
+        let offering = (0..handles.len().div_ceil(64)).map(|_| AtomicU64::new(0)).collect();
         Self {
             handles: handles.into_boxed_slice(),
             topology,
+            offering,
         }
+    }
+
+    /// Publish how many fair-band tasks `cpu` could give away; called by that
+    /// CPU's own pass. Its bit in the offering mask changes with the threshold,
+    /// before the pass's [`balance_fence`], so the mask is what the push's
+    /// sleeper half reads.
+    pub fn publish_surplus(&self, cpu: CpuId, fair: u32) {
+        let handle = self.get(cpu);
+        let was = handle.surplus() >= PUSH_THRESHOLD;
+        handle.surplus.store(fair, Ordering::Relaxed);
+        let (word, bit) = (&self.offering[cpu.0 as usize / 64], 1u64 << (cpu.0 % 64));
+        match (was, fair >= PUSH_THRESHOLD) {
+            (false, true) => {
+                word.fetch_or(bit, Ordering::Relaxed);
+            }
+            (true, false) => {
+                word.fetch_and(!bit, Ordering::Relaxed);
+            }
+            _ => {}
+        }
+    }
+
+    /// Whether `cpu` publishes a surplus a probe would be answered from.
+    pub fn offers_surplus(&self, cpu: CpuId) -> bool {
+        self.offering[cpu.0 as usize / 64].load(Ordering::Relaxed) & 1u64 << (cpu.0 % 64) != 0
+    }
+
+    /// Whether any CPU does.
+    fn any_offers_surplus(&self) -> bool {
+        self.offering.iter().any(|word| word.load(Ordering::Relaxed) != 0)
     }
 
     pub fn get(&self, cpu: CpuId) -> &CpuHandle<M> {
@@ -4258,8 +4335,8 @@ mod tests {
             for cpu in 0..8 {
                 w.handles.get(CpuId(cpu)).publish_pass(NOW);
             }
-            w.handles.get(CpuId(near)).publish_surplus(1);
-            w.handles.get(CpuId(1)).publish_surplus(5);
+            w.handles.publish_surplus(CpuId(near), 1);
+            w.handles.publish_surplus(CpuId(1), 5);
             w.run_a_pass(C0);
             let asked: Vec<u32> = (0..8u32).filter(|&cpu| !w.cpus[cpu as usize].mailbox_is_empty()).collect();
             assert_eq!(asked, [victim], "the probe's victim");
