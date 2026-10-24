@@ -17,10 +17,12 @@
 //! positive arm is what makes that non-vacuous: the same region, reached by the
 //! peer that was sent it, with the secret in it.
 //!
-//! Three roles. `invited` is spawned holding a connector and is sent the
+//! Four roles. `invited` is spawned holding a connector and is sent the
 //! region; `uninvited` is spawned holding nothing and told the owner's handle
 //! value; `dropped` is the other end of the same fact — a region whose last
-//! handle is gone leaves a number that is not a name for what lands there next.
+//! handle is gone leaves a number that is not a name for what lands there next
+//! — and `dropped_sub` names that number to `shm_sub`, which makes a region
+//! over part of another's pages.
 
 use std::io::{BufRead, BufReader, Write};
 use std::os::toyos::process::CommandExt;
@@ -46,6 +48,7 @@ fn main() {
         Some("invited") => invited(),
         Some("uninvited") => uninvited(),
         Some("dropped") => dropped(),
+        Some("dropped_sub") => dropped_sub(),
         Some(other) => panic!("unknown role {other:?}"),
         None => owner(),
     }
@@ -97,13 +100,29 @@ fn owner() {
     // next. Raised in a child on its own region, because it is the same fatal
     // fact from the owning side.
     killed("dropped", "", "a handle its owner had closed still named a region");
+    killed("dropped_sub", "", "a handle its owner had closed still named a region to part of");
+
+    // Part of the owner's own region is the same pages, and a part that is no
+    // whole page in, holds nothing or runs past the region is refused.
+    let part = syscall::shm_sub(own_handle, 0, SECRET.len() as u64).expect("part of our own region");
+    // SAFETY: the mapping is the part's, at least `SECRET.len()` bytes, and
+    // nothing here writes it meanwhile.
+    let seen = unsafe { core::slice::from_raw_parts(syscall::shm_map(part).expect("map the part"), SECRET.len()) };
+    assert_eq!(seen, SECRET, "part of a region is not its pages");
+    for (offset, len) in [(0, 0), (1, 1), (0, REGION as u64 + 1), (REGION as u64, 1)] {
+        assert_eq!(
+            syscall::shm_sub(own_handle, offset, len),
+            Err(syscall::SyscallError::InvalidArgument),
+            "{len} bytes at {offset} of a {REGION}-byte region",
+        );
+    }
 
     // And through all of it the owner's own region is still the owner's, and
     // the invited peer's mapping was its own handle's business rather than a
     // second name for this one.
     assert_eq!(&region.as_slice()[..SECRET.len()], SECRET, "the owner's own region changed");
 
-    println!("the region reached the peer it was sent to and no other, and a closed handle names nothing");
+    println!("the region reached the peer it was sent to and no other, a closed handle names nothing, and part of one is its pages");
 }
 
 /// The one line a peer reports.
@@ -162,6 +181,16 @@ fn uninvited() -> ! {
     marker("uninvited");
     let reached = unsafe { syscall::shm_map(guess) };
     panic!("the owner's handle value answered {:?} here", reached.map(|_| ()));
+}
+
+/// Asks for part of a region of its own that it has closed.
+fn dropped_sub() -> ! {
+    let region = SharedMemory::create(REGION).expect("a region to close");
+    let closed = region.as_handle();
+    drop(region);
+    marker("dropped_sub");
+    let reached = syscall::shm_sub(closed, 0, REGION as u64);
+    panic!("a closed handle answered {:?}", reached.map(|_| ()));
 }
 
 /// Names a region of its own that it has closed.

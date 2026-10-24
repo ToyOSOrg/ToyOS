@@ -70,10 +70,6 @@ impl Volume for Absent {
         Err(Error::NotFound)
     }
 
-    fn in_place(&mut self, _node: Node) -> Result<Option<(u64, u64)>, Error> {
-        Err(Error::NotFound)
-    }
-
     fn write(&mut self, _node: Node, _offset: u64, _data: &[u8]) -> Result<(), Error> {
         Err(Error::NotFound)
     }

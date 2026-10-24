@@ -283,11 +283,6 @@ impl<D: Disk> Volume for FatVolume<D> {
         Ok(self.ids.of(key))
     }
 
-    /// None: the volume is a device's, read through a cache.
-    fn in_place(&mut self, _node: Node) -> Result<Option<(u64, u64)>, fs::Error> {
-        Ok(None)
-    }
-
     fn read(&mut self, node: Node, offset: u64, out: &mut dyn Out) -> Result<usize, fs::Error> {
         let open = self.open.get_mut(&node).ok_or(fs::Error::Stale)?;
         if open.gone {

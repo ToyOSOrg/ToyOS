@@ -509,9 +509,9 @@ pub(crate) trait Source {
 
     /// Where the bytes of file `ino` lie on the device: the byte they start
     /// at, a whole block in, and the file's size, every extent's checksum
-    /// verified. `None` where they are not stored as they read, in one run
-    /// from the file's first byte to its last: inline, sparse, encrypted or
-    /// split apart.
+    /// verified. `None` where they are not stored as they read, checksummed,
+    /// in one run of whole blocks from the file's first byte to its last:
+    /// inline, sparse, encrypted, unchecksummed or split apart.
     async fn in_place(&self, ino: u64) -> Result<Option<(u64, u64)>> {
         let inode = self.inode(ino).await?;
         if self.superblock().encrypted() || inode.kind() != Some(DirentType::Regular) || inode.size == 0 {
@@ -530,7 +530,6 @@ pub(crate) trait Source {
         .await?;
         // The file's bytes covered so far, and the device byte after them.
         let (mut covered, mut start, mut next) = (0u64, None, 0u64);
-        let mut scratch = Vec::new();
         for (key, value) in &extents {
             if covered >= inode.size {
                 break;
@@ -542,15 +541,17 @@ pub(crate) trait Source {
             let Some(crc) = extent.crc else { return Ok(None) };
             let len = u64::from(key.size) * SECTOR as u64;
             let at = extent.ptr.sector.checked_mul(SECTOR as u64).ok_or(Error::Corrupt("extent past 2^64 bytes"))?;
-            if extent.ptr.unwritten || crc.offset != 0 || crc.uncompressed != key.size || start.is_some_and(|_| at != next) {
+            let unchecked = crc.csum_type == csum::NONE;
+            if unchecked || extent.ptr.unwritten || crc.offset != 0 || crc.uncompressed != key.size || start.is_some_and(|_| at != next) {
                 return Ok(None);
             }
-            scratch.resize(len as usize, 0);
-            self.extent(key, value, 0, &mut scratch).await?;
+            // Checks the whole extent and copies none of it.
+            self.extent(key, value, 0, &mut []).await?;
             start.get_or_insert(at);
             (covered, next) = (covered + len, at + len);
         }
-        Ok(start.filter(|&at| covered >= inode.size && at % BLOCK as u64 == 0).map(|at| (at, inode.size)))
+        let blocks = |byte: u64| byte.is_multiple_of(BLOCK as u64);
+        Ok(start.filter(|&at| covered >= inode.size && blocks(at) && blocks(next)).map(|at| (at, inode.size)))
     }
 
     /// `dst.len()` bytes of the extent `key` from `skip` bytes into its

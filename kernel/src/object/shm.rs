@@ -197,7 +197,8 @@ impl SharedMemObject {
 
     /// The physical run and its length in whole 2 MiB pages, for ordinary
     /// memory the kernel allocated in one run — the only kind a device may be
-    /// lent (`pcidev::dma_map`). `None` for anything else.
+    /// lent (`pcidev::dma_map`). `None` for anything else, a part of a run
+    /// included: one set of pages is never lent under two objects.
     pub fn run(&self) -> Option<(u64, u64)> {
         match &self.backing {
             Backing::Run(pages) => Some((pages[0].direct_map().phys(), pages.len() as u64 * PAGE_2M)),

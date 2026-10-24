@@ -378,15 +378,15 @@ crate::user_safe! {
         /// statement**: the kernel never substitutes the caller's own.
         pub cwd_ptr: u64,
         pub cwd_len: u64,
-        /// The program's bytes, in a shared memory object the caller made and
-        /// read the program into: `image` is a handle to it carrying `MAP`, and
-        /// `image_len` how many of its first bytes the program is — or 0, for a
-        /// program the kernel opens at `path` itself. `PermissionDenied` for a
-        /// handle without `MAP`; `InvalidArgument` for a length the object does not
-        /// hold, or an object that is no memory the kernel allocated. The object
-        /// stays the caller's: what the kernel reads of it, and when, is
-        /// `kernel/src/file_backing.rs`'s (`SharedImage`). `path` is then opened by
-        /// nobody.
+        /// The program's bytes, in a memory object the caller holds — its file
+        /// server's for the file, or one the caller read the program into:
+        /// `image` is a handle to it carrying `MAP`, and `image_len` how many of
+        /// its first bytes the program is — or 0, for a program the kernel opens
+        /// at `path` itself. `PermissionDenied` for a handle without `MAP`;
+        /// `InvalidArgument` for a length the object does not hold, or a device's
+        /// window. The object stays the caller's: what the kernel reads of it,
+        /// and when, is `kernel/src/file_backing.rs`'s (`SharedImage`). `path` is
+        /// then opened by nobody.
         pub image: u64,
         pub image_len: u64,
         /// The process the child is placed under, whose end takes it down: a
@@ -411,9 +411,9 @@ crate::user_safe! {
         /// already loaded and runs no initialiser again. Nothing opens it.
         pub name_ptr: u64,
         pub name_len: u64,
-        /// The library's bytes, in a shared memory object the caller read them
-        /// into, as [`SpawnArgs::image`] names a program's: a handle carrying
-        /// `MAP`, and how many of its first bytes the library is.
+        /// The library's bytes, in a memory object as [`SpawnArgs::image`] names a
+        /// program's: a handle carrying `MAP`, and how many of its first bytes
+        /// the library is.
         pub image: u64,
         pub image_len: u64,
         /// Where the kernel writes the module's `[.init_array address, count]`,

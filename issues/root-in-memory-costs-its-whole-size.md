@@ -34,8 +34,9 @@ at `b9e4c5862`, 384 MiB once ROOT left the kernel, one boot each, the same
 session; the 54 MiB are the running services' images, each rounded up to
 2 MiB, and the SYSTEM file server.
 
-**Per held child, the image is 2 MiB of a 16 MiB cost, and it is what puts
-255 children past a 4 GiB guest.** `libc_children`'s `spawn_children_cap`
+**Per held child, the image was 2 MiB of a 16 MiB cost, and it was what put
+255 children past a 4 GiB guest**, while each spawn read one; a `/system`
+program's spawn now holds no image object of its own. `libc_children`'s `spawn_children_cap`
 holds 255 unwaited children of one `/system` program. Measured on QEMU's x86-64
 machine, `tests/images/libccase.toml`, 4 GiB, toybox's `free` every 50 held
 children, one boot each in the same session (a scratch patch to the case, not

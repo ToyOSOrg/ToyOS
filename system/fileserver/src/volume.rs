@@ -121,8 +121,11 @@ pub trait Volume {
 
     /// Where in the volume's memory the open file `node`'s bytes lie as they
     /// read, nobody writing them: the byte they start at, a whole page in,
-    /// and their length, verified. `None` for a file it holds otherwise.
-    fn in_place(&mut self, node: Node) -> Result<Option<(u64, u64)>, Error>;
+    /// and their length, verified. `None` for a file it holds otherwise, as a
+    /// device's volume holds every file.
+    fn in_place(&mut self, _node: Node) -> Result<Option<(u64, u64)>, Error> {
+        Ok(None)
+    }
 
     fn write(&mut self, node: Node, offset: u64, data: &[u8]) -> Result<(), Error>;
 
