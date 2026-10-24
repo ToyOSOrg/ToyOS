@@ -10,11 +10,12 @@
 //! **A laptop is not let overheat.** Where the system reads the package's
 //! temperature, a phase stops once it reaches `osbench_rules::heat`'s limit,
 //! [`osbench_rules::heat::MARGIN_MC`] below the CPU's TjMax, and each result
-//! names the limit's source. Where it cannot (ToyOS), only the one-thread
-//! phase runs and every all-core result is `unmeasured`, there being nothing
-//! to stop at.
+//! names the limit's source, and a reading that fails stops it too. Where
+//! the system cannot read it (ToyOS), or its sensor never answers, only the
+//! one-thread phase runs and every all-core result is `unmeasured`, there
+//! being nothing to stop at.
 
-use std::sync::atomic::{AtomicBool, AtomicI64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicI64, AtomicU8, Ordering};
 use std::sync::{Arc, Barrier};
 use std::thread;
 use std::time::{Duration, Instant};
@@ -145,17 +146,15 @@ pub fn suite() {
         }
     };
     let inputs = Arc::new(Inputs::new());
-    let Some(heat) = heat else {
+    // The all-core phase runs only on a sensor that has answered once.
+    let Some((heat, start_mc)) = heat.and_then(|heat| heat.read().map(|start| (heat, start))) else {
         run_phase("single", 1, &inputs, None);
         for workload in &WORKLOADS {
             unmeasured(&format!("crunch.all.{}", workload.name), "no package temperature to stop the all-core phase at", &[]);
         }
         return;
     };
-    let start_mc = heat.read();
-    if let Some(t) = start_mc {
-        condition("crunch.start_c", t as f64 / 1000.0);
-    }
+    condition("crunch.start_c", start_mc as f64 / 1000.0);
     for (phase, threads) in [("single", 1), ("all", crate::cpus())] {
         run_phase(phase, threads, &inputs, Some(&heat));
         cool(phase, start_mc, &heat);
@@ -163,14 +162,10 @@ pub fn suite() {
 }
 
 /// Idle until the package reads within `heat::COOLED_WITHIN_MC` of where the
-/// group started, or [`COOL_BOUND`]. With no starting reading there is no mark
-/// to wait for, and the next phase's stop still guards it.
-fn cool(after: &str, start_mc: Option<i64>, heat: &Heat) {
-    let Some(start) = start_mc else {
-        return condition(&format!("crunch.cooled_after_{after}"), "unread: the group's start read no temperature");
-    };
+/// group started, or [`COOL_BOUND`].
+fn cool(after: &str, start_mc: i64, heat: &Heat) {
     let t = Instant::now();
-    let cooled = || heat.read().is_some_and(|now| heat::cooled(start, now));
+    let cooled = || heat.read().is_some_and(|now| heat::cooled(start_mc, now));
     while t.elapsed() < COOL_BOUND && !cooled() {
         thread::sleep(Duration::from_secs(1));
     }
@@ -178,21 +173,32 @@ fn cool(after: &str, start_mc: Option<i64>, heat: &Heat) {
     condition(&format!("crunch.cooled_after_{after}"), format!("{}ms to {now}C", t.elapsed().as_millis()));
 }
 
+/// Why a watched phase stopped early.
+const RUNNING: u8 = 0;
+const HOT: u8 = 1;
+const UNREAD: u8 = 2;
+
 /// Each workload for [`SLICE`] on `threads` threads, every unit timed, with
-/// the temperature watched throughout.
+/// the temperature watched throughout: the phase stops at the limit, and at
+/// a reading that fails, since then nothing guards it.
 fn run_phase(phase: &str, threads: usize, inputs: &Arc<Inputs>, heat: Option<&Heat>) {
-    let hot = Arc::new(AtomicBool::new(false));
+    let stopped = Arc::new(AtomicU8::new(RUNNING));
     let hottest = Arc::new(AtomicI64::new(i64::MIN));
     let done = Arc::new(AtomicBool::new(false));
     thread::scope(|scope| {
         if let Some(heat) = heat {
-            let (hot, hottest, done) = (hot.clone(), hottest.clone(), done.clone());
+            let (stopped, hottest, done) = (stopped.clone(), hottest.clone(), done.clone());
             scope.spawn(move || {
                 while !done.load(Ordering::Relaxed) {
-                    if let Some(t) = heat.read() {
-                        hottest.fetch_max(t, Ordering::Relaxed);
-                        if heat.limit.too_hot(t) {
-                            hot.store(true, Ordering::Relaxed);
+                    match heat.read() {
+                        Some(t) => {
+                            hottest.fetch_max(t, Ordering::Relaxed);
+                            if heat.limit.too_hot(t) {
+                                let _ = stopped.compare_exchange(RUNNING, HOT, Ordering::Relaxed, Ordering::Relaxed);
+                            }
+                        }
+                        None => {
+                            let _ = stopped.compare_exchange(RUNNING, UNREAD, Ordering::Relaxed, Ordering::Relaxed);
                         }
                     }
                     thread::sleep(POLL);
@@ -201,17 +207,24 @@ fn run_phase(phase: &str, threads: usize, inputs: &Arc<Inputs>, heat: Option<&He
         }
         for workload in &WORKLOADS {
             let bench = format!("crunch.{phase}.{}", workload.name);
-            if hot.load(Ordering::Relaxed) {
-                unmeasured(&bench, "the phase stopped once the package reached its limit", &stop_fields(heat, &hottest));
-                continue;
+            match stopped.load(Ordering::Relaxed) {
+                RUNNING => {}
+                HOT => {
+                    unmeasured(&bench, "the phase stopped once the package reached its limit", &stop_fields(heat, &hottest));
+                    continue;
+                }
+                _ => {
+                    unmeasured(&bench, "the phase stopped once the sensor stopped answering", &stop_fields(heat, &hottest));
+                    continue;
+                }
             }
-            let (mut ns, elapsed) = slice(workload, threads, inputs, &hot);
+            let (mut ns, elapsed) = slice(workload, threads, inputs, &stopped);
             let units = ns.len() as u64;
             let mut fields = vec![
                 ("work_unit", workload.unit.to_string()),
                 ("threads", threads.to_string()),
                 ("units_per_s", format!("{:.3}", units as f64 * 1e9 / elapsed.max(1) as f64)),
-                ("stopped_hot", u8::from(hot.load(Ordering::Relaxed)).to_string()),
+                ("stopped", ["no", "hot", "unread"][usize::from(stopped.load(Ordering::Relaxed))].to_string()),
             ];
             fields.extend(stop_fields(heat, &hottest));
             result(&bench, "ns", &mut ns, &fields);
@@ -231,8 +244,8 @@ fn stop_fields(heat: Option<&Heat>, hottest: &AtomicI64) -> Vec<(&'static str, S
 }
 
 /// `workload`'s units on `threads` threads until [`SLICE`] has passed or the
-/// package is hot: every unit's ns, and the slice's own.
-fn slice(workload: &Workload, threads: usize, inputs: &Arc<Inputs>, hot: &AtomicBool) -> (Vec<u64>, u64) {
+/// phase is stopped: every unit's ns, and the slice's own.
+fn slice(workload: &Workload, threads: usize, inputs: &Arc<Inputs>, stopped: &AtomicU8) -> (Vec<u64>, u64) {
     let go = Barrier::new(threads + 1);
     let start = std::sync::OnceLock::new();
     let samples = thread::scope(|scope| {
@@ -243,7 +256,7 @@ fn slice(workload: &Workload, threads: usize, inputs: &Arc<Inputs>, hot: &Atomic
                     go.wait();
                     let start: &Instant = start.get().expect("the slice's start is set before it goes");
                     let mut ns = Vec::new();
-                    while start.elapsed() < SLICE && !hot.load(Ordering::Relaxed) {
+                    while start.elapsed() < SLICE && stopped.load(Ordering::Relaxed) == RUNNING {
                         let t = Instant::now();
                         std::hint::black_box((workload.run)(std::hint::black_box(inputs)));
                         ns.push(ns_since(t));
