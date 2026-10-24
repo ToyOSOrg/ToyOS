@@ -225,9 +225,11 @@ Not consumers:
        - **ChaCha20-Poly1305 per-message cost.**
          - Rows:
            - 0 B and 64 B: the AMD bench 1.06–1.24 (seal, open and reject),
-             the T14 1.10–1.18; in the guest table at 035c36d30 (#1056, whose
-             one pass takes 1–192 B on the AMD bench) the AMD bench reads
-             1.10–1.35, and the T14 1.12–1.25 for 0 B and seal at 64 B;
+             the T14 1.10–1.18. In the guest table at 035c36d30, where #1056's
+             one pass took 1–192 B on the AMD bench, the AMD bench read
+             1.10–1.35. The short path runs first again since #1056's review;
+             a Linux probe then read 64 B at 1.04–1.23 on the AMD bench. The
+             T14 read 1.12–1.25 for 0 B and seal at 64 B;
            - the T14's 1 KiB rows, 1.057–1.059 (1.04–1.05 at 035c36d30).
          - A seal sweep over 1–192 B put ours above ring by a constant per
            message, with a per-block cost that matches ring's.

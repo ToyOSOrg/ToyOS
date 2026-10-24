@@ -180,8 +180,9 @@ fn chacha_finish(mut mac: Poly1305, aad: usize, ciphertext: usize) -> Secret<16>
     Secret(mac.finish())
 }
 /// Blocks 0 to 3 for 1 to 192 bytes of data, computed together: the
-/// Poly1305 key, then the data's keystream. An empty message takes block 0
-/// alone, whose latency is lower.
+/// Poly1305 key, then the data's keystream. It runs ahead of the one-pass
+/// path, which costs more for so few blocks on the AMD bench. An empty
+/// message takes block 0 alone, whose latency is lower.
 fn short(length: usize) -> bool {
     (1..=192).contains(&length)
 }
@@ -195,22 +196,20 @@ fn chacha_seal(
     data: &mut [u8],
 ) -> Result<[u8; 16], Error> {
     check_chacha_length(data.len())?;
-    let mac = match chacha::aead(key, nonce, aad, data, true) {
-        Some(mac) => mac,
-        None if short(data.len()) => {
-            let mut stream = Secret([0u8; 256]);
-            chacha_short(key, nonce, data.len(), &mut stream.0);
-            crate::block::xor(data, &stream.0[64..]);
-            let mut mac = chacha_mac(stream.0[..32].try_into().unwrap(), aad);
-            mac.update_padded(data);
-            mac
-        }
-        None => {
-            let mut mac = chacha_mac(chacha::block(key, nonce, 0).0[..32].try_into().unwrap(), aad);
-            chacha::xor(key, nonce, 1, data)?;
-            mac.update_padded(data);
-            mac
-        }
+    let mac = if short(data.len()) {
+        let mut stream = Secret([0u8; 256]);
+        chacha_short(key, nonce, data.len(), &mut stream.0);
+        crate::block::xor(data, &stream.0[64..]);
+        let mut mac = chacha_mac(stream.0[..32].try_into().unwrap(), aad);
+        mac.update_padded(data);
+        mac
+    } else if let Some(mac) = chacha::aead(key, nonce, aad, data, true) {
+        mac
+    } else {
+        let mut mac = chacha_mac(chacha::block(key, nonce, 0).0[..32].try_into().unwrap(), aad);
+        chacha::xor(key, nonce, 1, data)?;
+        mac.update_padded(data);
+        mac
     };
     Ok(chacha_finish(mac, aad.len(), data.len()).0)
 }
@@ -225,28 +224,26 @@ fn chacha_open(
     let authentic = |mac: Poly1305, length: usize| crate::ct::equal(&chacha_finish(mac, aad.len(), length).0, tag);
     // Without the one-pass path, the MAC comes first and only an authentic
     // record is decrypted.
-    let opened = match chacha::aead(key, nonce, aad, data, false) {
-        Some(mac) => authentic(mac, data.len()),
-        None if short(data.len()) => {
-            let mut stream = Secret([0u8; 256]);
-            chacha_short(key, nonce, data.len(), &mut stream.0);
-            let mut mac = chacha_mac(stream.0[..32].try_into().unwrap(), aad);
-            mac.update_padded(data);
-            let opened = authentic(mac, data.len());
-            if opened {
-                crate::block::xor(data, &stream.0[64..]);
-            }
-            opened
+    let opened = if short(data.len()) {
+        let mut stream = Secret([0u8; 256]);
+        chacha_short(key, nonce, data.len(), &mut stream.0);
+        let mut mac = chacha_mac(stream.0[..32].try_into().unwrap(), aad);
+        mac.update_padded(data);
+        let opened = authentic(mac, data.len());
+        if opened {
+            crate::block::xor(data, &stream.0[64..]);
         }
-        None => {
-            let mut mac = chacha_mac(chacha::block(key, nonce, 0).0[..32].try_into().unwrap(), aad);
-            mac.update_padded(data);
-            let opened = authentic(mac, data.len());
-            if opened {
-                chacha::xor(key, nonce, 1, data)?;
-            }
-            opened
+        opened
+    } else if let Some(mac) = chacha::aead(key, nonce, aad, data, false) {
+        authentic(mac, data.len())
+    } else {
+        let mut mac = chacha_mac(chacha::block(key, nonce, 0).0[..32].try_into().unwrap(), aad);
+        mac.update_padded(data);
+        let opened = authentic(mac, data.len());
+        if opened {
+            chacha::xor(key, nonce, 1, data)?;
         }
+        opened
     };
     if !opened {
         crate::secret::wipe(data);
