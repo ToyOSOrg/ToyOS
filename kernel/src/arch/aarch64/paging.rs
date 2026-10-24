@@ -481,6 +481,55 @@ fn slots(start: u64, end: u64, base: u64, shift: u32) -> core::ops::Range<usize>
     (((lo - base) >> shift) as usize)..(((hi - 1 - base) >> shift) as usize + 1)
 }
 
+/// The leaves of one 2 MiB of a user space, [`UserTables::leaf_table`]'s.
+/// Every write reaches the walkers before it returns.
+pub struct LeafTable<'a> {
+    base: u64,
+    table: &'a mut Table,
+}
+
+impl LeafTable<'_> {
+    /// Whether `va` is one of these leaves' pages.
+    pub fn covers(&self, va: u64) -> bool {
+        va & !(PAGE_2M - 1) == self.base
+    }
+
+    fn slot(&self, va: u64) -> usize {
+        assert!(self.covers(va), "paging: {va:#x} outside the leaves from {:#x}", self.base);
+        ((va - self.base) >> 12) as usize
+    }
+
+    pub fn get(&self, va: u64) -> Leaf {
+        Leaf::decode(self.table.0[self.slot(va)])
+    }
+
+    pub fn set(&mut self, va: u64, leaf: Leaf) {
+        let slot = self.slot(va);
+        self.write(slot, leaf);
+        published();
+    }
+
+    /// Write `fill`'s leaf into each empty leaf of `[start, end)`, all of
+    /// whose pages these leaves cover.
+    pub fn fill(&mut self, start: u64, end: u64, mut fill: impl FnMut(u64) -> Leaf) {
+        assert!(start < end && self.covers(start) && self.covers(end - 1), "paging: a fill of {start:#x}..{end:#x}");
+        for i in slots(start, end, self.base, 12) {
+            if Leaf::decode(self.table.0[i]) == Leaf::Empty {
+                let leaf = fill(self.base + ((i as u64) << 12));
+                self.write(i, leaf);
+            }
+        }
+        published();
+    }
+
+    fn write(&mut self, slot: usize, leaf: Leaf) {
+        if let Leaf::Mapped(Mapping { phys, prot: Prot::ReadExec, .. }) = leaf {
+            super::cache::make_executable(DirectMap::from_phys(phys).as_ptr::<u8>() as u64, PAGE_4K as usize);
+        }
+        self.table.set(slot, leaf.encode());
+    }
+}
+
 /// Tables [`UserTables::unlink`] took out of the tree, freed once no CPU can
 /// still walk into them. Each holds no leaf, so they are chained through
 /// their first entry, which holds the next one's frame: a value with its low
@@ -594,34 +643,16 @@ impl UserTables {
 
     /// Write the leaf over `va`, whose table [`build`](Self::build) made.
     pub fn set(&mut self, va: u64, leaf: Leaf) {
-        assert!(toyos_userbound::is_user_addr(va), "paging: a user leaf at {va:#x}");
-        if let Leaf::Mapped(Mapping { phys, prot: Prot::ReadExec, .. }) = leaf {
-            super::cache::make_executable(DirectMap::from_phys(phys).as_ptr::<u8>() as u64, PAGE_4K as usize);
-        }
-        let table = self.leaves(va).map(Table::phys).unwrap_or_else(|| panic!("paging: no table over {va:#x}"));
-        // SAFETY: a table of leaves this space linked; `&mut self`.
-        unsafe { Table::at_mut(table) }.set(index(va, 3), leaf.encode());
-        published();
+        self.leaf_table(va).unwrap_or_else(|| panic!("paging: no table over {va:#x}")).set(va, leaf);
     }
 
-    /// Write `fill`'s leaf into each empty leaf of `[start, end)`, which one
-    /// table [`build`](Self::build) made holds.
-    pub fn fill(&mut self, start: u64, end: u64, mut fill: impl FnMut(u64) -> Leaf) {
-        assert!(toyos_userbound::is_user_addr(start) && start < end && (end - 1) & !(PAGE_2M - 1) == start & !(PAGE_2M - 1), "paging: a fill of {start:#x}..{end:#x}");
-        let table = self.leaves(start).map(Table::phys).unwrap_or_else(|| panic!("paging: no table over {start:#x}"));
+    /// The table of leaves over `va`'s 2 MiB, if [`build`](Self::build) made
+    /// one: every leaf of it read and written for one walk.
+    pub fn leaf_table(&mut self, va: u64) -> Option<LeafTable<'_>> {
+        assert!(toyos_userbound::is_user_addr(va), "paging: a user leaf at {va:#x}");
+        let table = self.leaves(va).map(Table::phys)?;
         // SAFETY: a table of leaves this space linked; `&mut self`.
-        let table = unsafe { Table::at_mut(table) };
-        let base = start & !(PAGE_2M - 1);
-        for i in slots(start, end, base, 12) {
-            if Leaf::decode(table.0[i]) == Leaf::Empty {
-                let leaf = fill(base + ((i as u64) << 12));
-                if let Leaf::Mapped(Mapping { phys, prot: Prot::ReadExec, .. }) = leaf {
-                    super::cache::make_executable(DirectMap::from_phys(phys).as_ptr::<u8>() as u64, PAGE_4K as usize);
-                }
-                table.set(i, leaf.encode());
-            }
-        }
-        published();
+        Some(LeafTable { base: va & !(PAGE_2M - 1), table: unsafe { Table::at_mut(table) } })
     }
 
     /// Call `f` on every leaf in `[start, end)` that is not empty, with its

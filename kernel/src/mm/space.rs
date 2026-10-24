@@ -4,11 +4,12 @@
 //! **The inventory is the only record of a space's ranges, and a leaf the only
 //! record of a private frame**, which carries the architecture's owned bit. A
 //! range is backed by private memory, committed or only reserved, or by a
-//! memory object. Every page of either is populated when it is first touched —
-//! by the thread that touches it ([`AddressSpace::fault`]) or by a copy the
-//! kernel makes for it ([`AddressSpace::reach`]), a private one together with
-//! its run when it is touched beside a populated page — and tables are built
-//! when a range is backed, so populating one takes a frame and nothing else.
+//! memory object. Every page is populated at its first touch, or before it
+//! with the 64 KiB run of a touch beside a populated page
+//! (`kernel::vm::around`) — by the thread that touches it
+//! ([`AddressSpace::fault`]) or by a copy the kernel makes for it
+//! ([`AddressSpace::reach`]) — and tables are built when a range is backed, so
+//! populating one takes a frame and nothing else.
 //!
 //! **A space is charged its ranges** (`mm::charge`) before a change that
 //! adds any, so a change the heap cannot cover is refused,
@@ -88,7 +89,7 @@ pub struct Usage {
     /// Ranges made and taken away.
     made: AtomicU64,
     taken: AtomicU64,
-    /// Pages a fault populated, and the time faults took.
+    /// Faults served, and the time they took.
     faults: AtomicU64,
     fault_ns: AtomicU64,
     /// Changes to the space's leaves that reached another CPU by interrupt,
@@ -127,7 +128,7 @@ impl Usage {
         self.fault_ns.load(Relaxed)
     }
 
-    /// A fault populated a page, in `ns`.
+    /// A fault was served, in `ns`.
     pub fn faulted(&self, ns: u64) {
         self.faults.fetch_add(1, Relaxed);
         self.fault_ns.fetch_add(ns, Relaxed);
@@ -700,38 +701,41 @@ impl AddressSpace {
             return None;
         }
         let page = va & !(PAGE_SIZE - 1);
-        let phys = match self.tables.get(page) {
+        let prot = leaf_prot(entry.prot)?;
+        // A range that allows an access is backed, so its tables are built.
+        let mut leaves = self.tables.leaf_table(page).unwrap_or_else(|| panic!("space: no tables under {page:#x}"));
+        let phys = match leaves.get(page) {
             Leaf::Mapped(m) => m.phys,
             // A frame the page keeps while no leaf maps it: a discard that
             // zeroed a pinned frame in place.
             Leaf::Held(phys) => {
-                let prot = leaf_prot(entry.prot)?;
-                self.tables.set(page, Leaf::Mapped(Mapping { phys, prot, owned: true, cache: CachePolicy::Normal }));
+                leaves.set(page, Leaf::Mapped(Mapping { phys, prot, owned: true, cache: CachePolicy::Normal }));
                 phys
             }
-            Leaf::Empty => {
-                let prot = leaf_prot(entry.prot)?;
-                match &entry.kind {
-                    Kind::Private { committed: false } => return None,
-                    Kind::Object { object, offset, .. } => {
-                        let phys = object.page(offset + (page - start));
-                        self.tables.set(page, Leaf::Mapped(Mapping { phys, prot, owned: false, cache: object.cache() }));
-                        phys
-                    }
-                    Kind::Private { committed: true } | Kind::Copy { .. } => {
-                        let tables = &self.tables;
-                        let (lo, hi) = vm::around(start, entry.end, page, |at| tables.get(at) != Leaf::Empty);
-                        let mut filled = 0;
-                        self.tables.fill(lo, hi, |at| {
-                            filled += 1;
-                            Leaf::Mapped(Mapping { phys: owned_frame(start, entry, at), prot, owned: true, cache: CachePolicy::Normal })
-                        });
-                        self.usage.populated(filled);
-                        let Leaf::Mapped(m) = self.tables.get(page) else { unreachable!("space: {page:#x} filled and empty") };
-                        m.phys
-                    }
+            Leaf::Empty => match &entry.kind {
+                Kind::Private { committed: false } => return None,
+                Kind::Object { object, offset, .. } => {
+                    let phys = object.page(offset + (page - start));
+                    leaves.set(page, Leaf::Mapped(Mapping { phys, prot, owned: false, cache: object.cache() }));
+                    phys
                 }
-            }
+                Kind::Private { committed: true } | Kind::Copy { .. } => {
+                    // A neighbour in the next table down or up is another run's.
+                    let (lo, hi) = vm::around(start, entry.end, page, |at| leaves.covers(at) && leaves.get(at) != Leaf::Empty);
+                    let (mut filled, mut own) = (0, 0);
+                    leaves.fill(lo, hi, |at| {
+                        let phys = owned_frame(start, entry, at);
+                        filled += 1;
+                        if at == page {
+                            own = phys;
+                        }
+                        Leaf::Mapped(Mapping { phys, prot, owned: true, cache: CachePolicy::Normal })
+                    });
+                    assert_ne!(own, 0, "space: {page:#x} touched and not filled");
+                    self.usage.populated(filled);
+                    own
+                }
+            },
         };
         Some(phys + va % PAGE_SIZE)
     }
@@ -809,8 +813,8 @@ fn copyable(entry: &SpaceEntry) -> bool {
     }
 }
 
-/// The frame `page` of a committed range that owns its frames starts with,
-/// `entry` from `start`: zeros, or its source's bytes for a copied range.
+/// A fresh frame for `page` of the committed range `entry` at `start`: zeros,
+/// or its source's bytes for a copied range.
 fn owned_frame(start: u64, entry: &SpaceEntry, page: u64) -> u64 {
     let phys = pmm::alloc_promised().into_raw();
     if let Kind::Copy { source, offset, len } = &entry.kind {

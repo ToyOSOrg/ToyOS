@@ -25,6 +25,22 @@ did; the T14's numbers are below:
   page that leaves the frame (about 36 + 145 ns) and the memory traffic of
   writing zeroed pages back, which the probe cannot attribute; 2 MiB pages
   or less traffic are what is left to win.
+
+  Runs cost, each owed a fix or the owner's acceptance:
+  - **Untouched pages resident.** A run draws up to 15 committed pages
+    nothing has touched, zeroing each; resident and peak count them, and a
+    thread's stack is resident in 64 KiB once its second page is touched.
+  - **`mem.anon.unmap`**, +9% p50 at `a75abd3f6` (4,014 to 4,366 ns/MiB, and
+    3,950 to 4,171 at the minimum), reproduced in a second pair. The free
+    path is unchanged; the touch ending sooner, with its zeroed lines still
+    being written back while the unmap runs, is an inference.
+  - **A lone fault** at `a75abd3f6` walked the tables five times, and
+    `mem.first_touch.2m`, one page per 2 MiB, rose 681 to 706 ns/page. It now
+    takes one walk, through the table of leaves it reaches first
+    (`UserTables::leaf_table`); measured after that: not yet.
+  - **Spawn.** `proc.spawn_wait_loop.100` rose 2.3% (4.2% under the probe),
+    inside the base pair's own 1.6% spread: possibly the run pages a child's
+    stack and data take.
 - **Frees.** A clear walks the 64 futex buckets once per table of leaves that
   held an owned frame (at most 512 frames each), whether or not anything waits.
 - **Commits.** A committed range's tables are built when it is made, under the

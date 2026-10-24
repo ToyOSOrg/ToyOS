@@ -2661,7 +2661,7 @@ crate::user_safe! {
         pub cpu_ns: u64,
         pub syscall_total: u64,
         pub syscall_total_ns: u64,
-        /// Pages a fault populated, and the time faults took.
+        /// Faults served, and the time they took.
         pub faults: u64,
         pub fault_ns: u64,
         /// The process's own pid. Not authority — no syscall takes a pid — but it
