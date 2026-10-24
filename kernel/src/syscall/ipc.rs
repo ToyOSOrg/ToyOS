@@ -425,11 +425,11 @@ pub(super) fn sys_message_send(
             }
             // A refusal restores every handle at its own number, so it is invisible.
             let moved = data.handles.transfer(wanted, |batch| conn.send(bytes, batch));
-            Ok::<_, crate::object::Refusal>((conn.tx(), moved))
+            Ok::<_, crate::object::Refusal>((conn.tx().clone(), moved))
         });
         let tx = match sent {
             Ok((tx, Ok(()))) => {
-                process::wake_pipe_readers(tx);
+                process::wake_pipe_readers(&tx);
                 return 0;
             }
             Ok((tx, Err(SendRefused::NoRoom))) if !nonblock => tx,
@@ -438,10 +438,9 @@ pub(super) fn sys_message_send(
             Err(e) => return e.refuse(),
         };
         // Outside every lock: room appears as the reader drains, and its read posts this watch.
-        let Some(watch) = pipe::write_watch(tx) else { return SyscallError::Gone.to_u64() };
         let len = bytes.len();
-        if watch::wait_until(&crate::scheduler::Parkable::at_entry(), &watch, 0, WaitClass::Ipc, Deadline::never(), || {
-            pipe::has_space(tx, len)
+        if watch::wait_until(&crate::scheduler::Parkable::at_entry(), tx.write_watch(), 0, WaitClass::Ipc, Deadline::never(), || {
+            tx.has_space(len)
         })
         .is_err()
         {

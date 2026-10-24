@@ -681,23 +681,21 @@ impl AddressSpace {
     /// Serve a fault at `va` for `access`: populate its page if its range
     /// allows the access and the page is empty. `false` ends the thread.
     pub fn fault(&mut self, va: u64, access: Access) -> bool {
-        self.populate(va, access).is_some()
+        self.populate(va, access, |_| true).is_some()
     }
 
     /// Where the byte at `va` is, for the kernel to reach through the direct
     /// map, populating its page where its range allows `access`; `None` for
     /// an aperture's page, which the direct map does not reach.
     pub fn reach(&mut self, va: u64, access: Access) -> Option<u64> {
-        if !copyable(self.inventory.find(va)?.1) {
-            return None;
-        }
-        self.populate(va, access)
+        self.populate(va, access, copyable)
     }
 
-    /// The frame behind `va`, populated where its range allows `access`.
-    fn populate(&mut self, va: u64, access: Access) -> Option<u64> {
+    /// The frame behind `va`, populated where its range allows `access` and
+    /// is one `admits`.
+    fn populate(&mut self, va: u64, access: Access, admits: fn(&SpaceEntry) -> bool) -> Option<u64> {
         let (start, entry) = self.inventory.find(va)?;
-        if !entry.prot.allows(access) {
+        if !admits(entry) || !entry.prot.allows(access) {
             return None;
         }
         let page = va & !(PAGE_SIZE - 1);
@@ -745,8 +743,8 @@ impl AddressSpace {
     /// what a copy the kernel makes for a thread asks first. A device's
     /// registers or firmware's framebuffer, an aperture, are no buffer.
     pub fn allows(&self, start: u64, end: u64, access: Access) -> bool {
-        self.inventory.covered(start & !(PAGE_SIZE - 1), end)
-            && self.inventory.meeting(start, end).all(|(_, entry)| entry.prot.allows(access) && entry.backed() && copyable(entry))
+        self.inventory
+            .covered_where(start & !(PAGE_SIZE - 1), end, |entry| entry.prot.allows(access) && entry.backed() && copyable(entry))
     }
 
     /// The frame and protection a present leaf maps `va` with, populating

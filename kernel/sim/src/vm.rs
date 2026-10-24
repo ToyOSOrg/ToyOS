@@ -1435,7 +1435,7 @@ impl<'q> Vm<'q> {
         self.apply(action);
         self.hw.leave_pass();
         if self.scenario.surplus == SurplusShape::Withheld {
-            self.handles.get(CpuId(cpu as u32)).publish_surplus(0);
+            self.handles.publish_surplus(CpuId(cpu as u32), 0);
         }
         self.note_kicks(kicks_before);
         self.note_pass(cpu);

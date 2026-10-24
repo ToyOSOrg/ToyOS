@@ -279,7 +279,7 @@ pub fn stage_a_wedge() -> ! {
     log!("{WEDGE_STAGED}: every CPU stops taking scheduler passes from here");
     STAGED.store(true, Relaxed);
     // A core still asleep is not a core this control has wedged.
-    crate::arch::irqchip::kick_all_but_self();
+    crate::sched::driver::ring_all_but_self();
     this_cpu()
 }
 

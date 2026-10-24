@@ -110,6 +110,49 @@ pub struct TaskHandle {
     cancels: AtomicU32,
     /// The releases this thread owns while its process is torn down (`object::Releases`); kept here, as `operation` is, so they follow the thread across a migration.
     releases: Lock<Option<Vec<crate::object::KObjectRef>>>,
+    syscalls: SyscallProfile,
+}
+
+/// What a thread's syscalls cost it. Written only by the thread, at the end of
+/// each of its syscalls, so a count is a load and a store; read by anyone.
+pub struct SyscallProfile {
+    calls: AtomicU64,
+    /// Counter ticks between each syscall's entry and its end, wall-clock: a
+    /// preemption inside one is counted.
+    ticks: AtomicU64,
+    by_number: [AtomicU32; toyos_abi::syscall::SYSCALL_PROFILE_BINS],
+}
+
+impl SyscallProfile {
+    fn new() -> Self {
+        Self {
+            calls: AtomicU64::new(0),
+            ticks: AtomicU64::new(0),
+            by_number: [const { AtomicU32::new(0) }; toyos_abi::syscall::SYSCALL_PROFILE_BINS],
+        }
+    }
+
+    /// The running thread's syscall `num` took `ticks`.
+    pub fn note(&self, num: u64, ticks: u64) {
+        let bump = |count: &AtomicU64, by: u64| count.store(count.load(Ordering::Relaxed) + by, Ordering::Relaxed);
+        bump(&self.calls, 1);
+        bump(&self.ticks, ticks);
+        // Clamped, not guarded: an unissued number still lands in the last bin, not nowhere.
+        let bin = &self.by_number[(num as usize).min(toyos_abi::syscall::SYSCALL_PROFILE_OTHER)];
+        bin.store(bin.load(Ordering::Relaxed) + 1, Ordering::Relaxed);
+    }
+
+    pub fn calls(&self) -> u64 {
+        self.calls.load(Ordering::Relaxed)
+    }
+
+    pub fn ns(&self) -> u64 {
+        crate::clock::nanos_of_ticks(self.ticks.load(Ordering::Relaxed))
+    }
+
+    pub fn by_number(&self) -> [u32; toyos_abi::syscall::SYSCALL_PROFILE_BINS] {
+        core::array::from_fn(|bin| self.by_number[bin].load(Ordering::Relaxed))
+    }
 }
 
 impl TaskHandle {
@@ -120,7 +163,12 @@ impl TaskHandle {
             watch: Watch::new(),
             cancels: AtomicU32::new(0),
             releases: Lock::new(None),
+            syscalls: SyscallProfile::new(),
         }
+    }
+
+    pub fn syscalls(&self) -> &SyscallProfile {
+        &self.syscalls
     }
 
     pub(crate) fn publish(&self, acct: &TaskAccounting, running_since: Option<Nanos>) {

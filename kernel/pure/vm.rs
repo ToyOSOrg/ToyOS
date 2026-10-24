@@ -214,14 +214,23 @@ impl<O: Object, S: Object> Inventory<O, S> {
 
     /// Whether entries cover every page of `[start, end)`.
     pub fn covered(&self, start: u64, end: u64) -> bool {
-        let mut at = start;
-        for (s, entry) in self.meeting(start, end) {
-            if s > at {
+        self.covered_where(start, end, |_| true)
+    }
+
+    /// Whether entries cover every page of `[start, end)` and each that meets
+    /// it answers `ok`: one descent of the tree, walking down from `end`.
+    pub fn covered_where(&self, start: u64, end: u64, ok: impl Fn(&Entry<O, S>) -> bool) -> bool {
+        // `[low, end)` is covered by entries that answered `ok`.
+        let mut low = end;
+        let mut below = self.entries.range(..end).rev();
+        while low > start {
+            let Some((&s, entry)) = below.next() else { return false };
+            if entry.end < low || !ok(entry) {
                 return false;
             }
-            at = entry.end;
+            low = s;
         }
-        at >= end
+        true
     }
 
     /// Whether any entry meeting `[start, end)` is backed.
@@ -561,6 +570,14 @@ mod tests {
                     }
                 }
             }
+            // Coverage of the round's range, and of its writable pages, as the map says.
+            let pages = &map[page(start)..page(end)];
+            assert_eq!(v.covered(start, end), pages.iter().all(Option::is_some), "round {round}: covered");
+            assert_eq!(
+                v.covered_where(start, end, |e| e.prot == Prot::ReadWrite),
+                pages.iter().all(|p| p.is_some_and(|(prot, _)| prot == Prot::ReadWrite)),
+                "round {round}: covered by writable entries"
+            );
             // Every page as the map says, and no two neighbours that could join.
             for p in 0..PAGES {
                 let at = FLOOR + p * PAGE;

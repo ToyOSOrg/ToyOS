@@ -43,8 +43,9 @@ and contention).
 - An MWAIT doorbell: the IPI's send and delivery and the kick's handler are
   at most 14.7 to 14.9 % of an idle wake on the T14 and 22.4 to 22.6 % on the
   AMD bench (`issues/idle-is-hlt-so-every-wake-of-an-idle-cpu-is-an-ipi.md`).
-- A TSC deadline: the re-arm is at most 11.7 to 12.1 % of a pass's pick and
-  switch on the T14, and at the AMD bench's TSC floor
+- A TSC deadline: before #1061 cut the arm to one register write, the
+  re-arm was at most 11.7 to 12.1 % of a pass's pick and switch on the T14,
+  and at the AMD bench's TSC floor; it is to be read again
   (`issues/the-timer-is-a-lapic-count-re-armed-every-pass-never-a-tsc-deadline.md`).
 
 **Moot.** PCID on the AMD bench: its CPUs read `pcid=0 invpcid=0`, so there
@@ -95,5 +96,6 @@ yet measured.
 - `issues/fsgsbase-is-taken.md`
 - `issues/idle-cpus-enter-the-c-states-cst-names.md`
 - `issues/diskserver-drives-nvme-apst.md`
-- `issues/every-syscall-takes-the-process-table-lock-twice-to-count-itself.md`
+- `issues/syscall-cost-is-unread-since-a-syscall-counts-itself-on-its-thread.md`
+- `issues/malloc-churn-across-eight-threads-fell-with-the-run-queue-arenas.md`
 - `issues/a-thread-resuming-on-the-cpu-that-holds-its-state-restores-it-again.md`

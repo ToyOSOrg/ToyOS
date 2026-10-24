@@ -146,8 +146,5 @@ fn kernel_thread_data() -> ThreadData {
         tls: None,
         user_stack_base: crate::mm::UserAddr::new(0),
         user_stack_size: 0,
-        syscall_counts: [0; toyos_abi::syscall::SYSCALL_PROFILE_BINS],
-        syscall_total: 0,
-        syscall_total_ns: 0,
     }
 }

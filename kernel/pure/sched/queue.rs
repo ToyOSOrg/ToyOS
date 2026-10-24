@@ -1,8 +1,9 @@
 //! The per-CPU run queue: a real-time FIFO drained first, and the fair band.
 //!
 //! The fair band is EEVDF over the job groups this CPU holds, and EEVDF again
-//! over each group's threads ([`Eevdf`] at both levels). A group's weight is
-//! its job's weight times the group's share of the job's runnable threads
+//! over each group's threads ([`Queue`] at both levels, their entities in this
+//! queue's two arenas). A group's weight is its job's weight times the group's
+//! share of the job's runnable threads
 //! ([`Job::group_weight`]), refreshed at each decision. Lag goes with whatever
 //! leaves the queue: a thread's to the next queue it enters, and a dissolving
 //! group's with its last thread to the group that thread next enters. There
@@ -13,7 +14,7 @@
 
 use alloc::collections::{BTreeMap, VecDeque};
 
-use crate::sched::eevdf::{Eevdf, Lag};
+use crate::sched::eevdf::{Arena, Lag, Queue, Slot};
 use crate::sched::hw::Nanos;
 use crate::sched::job::{Job, JobKey};
 use crate::sched::sync::Arc;
@@ -35,20 +36,31 @@ pub const LAG_BOUND_NS: u64 = 4_000_000;
 /// Every thread weighs the same inside its group.
 const THREAD_WEIGHT: u64 = 1 << 16;
 
-struct Group<X: SchedPayload> {
+/// A group entity's payload: its job, and the queue of its threads.
+struct Group {
     job: Arc<Job>,
-    threads: Eevdf<TaskKey>,
-    /// Every queued thread's value but the running one's.
-    ready: BTreeMap<TaskKey, ReadyTask<X>>,
+    threads: Queue,
+}
+
+/// The two entities a queued fair thread holds: its group's and its own.
+#[derive(Clone, Copy)]
+struct Place {
+    group: Slot,
+    thread: Slot,
 }
 
 pub struct RunQueue<X: SchedPayload> {
     rt: VecDeque<ReadyTask<X>>,
-    groups: Eevdf<JobKey>,
-    members: BTreeMap<JobKey, Group<X>>,
+    groups: Queue,
+    /// Every queued group's entity.
+    group_slots: Arena<JobKey, Group>,
+    /// Every queued thread's entity, whichever group's queue it is in, holding
+    /// its value: `None` for the running thread's.
+    threads: Arena<TaskKey, Option<ReadyTask<X>>>,
+    members: BTreeMap<JobKey, Slot>,
     /// The running thread, where it is fair: its entity is queued and its
     /// value is not.
-    running: Option<(JobKey, TaskKey)>,
+    running: Option<Place>,
     ready_fair: usize,
     /// Negative-gate escape hatches only; see
     /// [`Self::set_lowest_key_within_group`] and [`Self::set_double_charge`].
@@ -62,7 +74,9 @@ impl<X: SchedPayload> RunQueue<X> {
     pub fn new() -> Self {
         Self {
             rt: VecDeque::new(),
-            groups: Eevdf::new(),
+            groups: Queue::new(),
+            group_slots: Arena::new(),
+            threads: Arena::new(),
             members: BTreeMap::new(),
             running: None,
             ready_fair: 0,
@@ -109,72 +123,91 @@ impl<X: SchedPayload> RunQueue<X> {
         let standing = task.standing_mut();
         let carried = core::mem::take(&mut standing.group_lag);
         let left = standing.left.take();
-        match self.members.get(&jk) {
-            Some(_) if carried != Lag::ZERO => {
-                let weight = self.groups.weight(jk);
-                let mut held = self.groups.leave(jk);
-                held.lag = held.lag.saturating_add(carried).clamp_ns(LAG_BOUND_NS);
-                self.groups.rejoin(jk, weight, SLICE_NS, held);
+        let group = match self.members.get(&jk) {
+            Some(&group) => {
+                if carried != Lag::ZERO {
+                    let weight = self.group_slots.weight(group);
+                    self.groups.readmit(&mut self.group_slots, group, weight, |mut held| {
+                        held.lag = held.lag.saturating_add(carried).clamp_ns(LAG_BOUND_NS);
+                        held
+                    });
+                }
+                group
             }
-            Some(_) => {}
             None => {
-                self.members.insert(jk, Group { job, threads: Eevdf::new(), ready: BTreeMap::new() });
-                // Weighed below, once the thread is counted here.
-                self.groups.join(jk, 1, SLICE_NS, carried);
+                // At the weight it holds once this thread is counted here.
+                let weight = job.group_weight(1);
+                let group = self.groups.join(
+                    &mut self.group_slots,
+                    jk,
+                    weight,
+                    SLICE_NS,
+                    carried,
+                    Group { job, threads: Queue::new() },
+                );
+                self.members.insert(jk, group);
+                group
             }
-        }
-        let group = self.members.get_mut(&jk).expect("just made");
-        match left {
-            Some(left) => group.threads.rejoin(key, THREAD_WEIGHT, SLICE_NS, left),
-            None => group.threads.join(key, THREAD_WEIGHT, SLICE_NS, Lag::ZERO),
         };
-        group.ready.insert(key, task);
+        let threads = &mut self.group_slots.payload_mut(group).threads;
+        match left {
+            Some(left) => threads.rejoin(&mut self.threads, key, THREAD_WEIGHT, SLICE_NS, left, Some(task)),
+            None => threads.join(&mut self.threads, key, THREAD_WEIGHT, SLICE_NS, Lag::ZERO, Some(task)),
+        };
         self.ready_fair += 1;
-        self.reweigh(jk);
+        self.reweigh(group);
     }
 
     /// Take the entity of a fair thread out, writing what it takes with it
-    /// into `standing`. The value is the caller's.
-    fn leave(&mut self, jk: JobKey, key: TaskKey, standing: &mut Standing) {
-        let group = self.members.get_mut(&jk).expect("a queued thread's group exists");
-        let mut left = group.threads.leave(key);
+    /// into `standing`. Its value is the caller's, already taken.
+    fn leave(&mut self, at: Place, standing: &mut Standing) {
+        let group = self.group_slots.payload_mut(at.group);
+        let (mut left, value) = group.threads.leave(&mut self.threads, at.thread);
+        assert!(value.is_none(), "a thread left its queue holding its value");
         left.lag = left.lag.clamp_ns(LAG_BOUND_NS);
         standing.left = Some(left);
         group.job.leave();
         if group.threads.is_empty() {
-            self.members.remove(&jk);
-            standing.group_lag = self.groups.leave(jk).lag.clamp_ns(LAG_BOUND_NS);
+            let (left, group) = self.groups.leave(&mut self.group_slots, at.group);
+            self.members.remove(&group.job.key());
+            standing.group_lag = left.lag.clamp_ns(LAG_BOUND_NS);
         } else {
-            self.reweigh(jk);
+            self.reweigh(at.group);
         }
     }
 
-    /// Hold `jk`'s group at its current weight on this CPU.
-    fn reweigh(&mut self, jk: JobKey) {
-        let group = &self.members[&jk];
-        let weight = group.job.group_weight(group.threads.len() as u32);
-        self.groups.reweight(jk, weight);
+    /// Hold a group at its current weight on this CPU.
+    fn reweigh(&mut self, group: Slot) {
+        let g = self.group_slots.payload(group);
+        let weight = g.job.group_weight(g.threads.len() as u32);
+        self.groups.reweight(&mut self.group_slots, group, weight);
     }
 
     /// Every group at the weight its job's runnable count now gives it: what
     /// the job's other CPUs changed since this one last decided.
     pub fn refresh(&mut self) {
-        for (&jk, group) in &self.members {
-            self.groups.reweight(jk, group.job.group_weight(group.threads.len() as u32));
+        for &group in self.members.values() {
+            let g = self.group_slots.payload(group);
+            let weight = g.job.group_weight(g.threads.len() as u32);
+            self.groups.reweight(&mut self.group_slots, group, weight);
         }
     }
 
     /// The fair band's pick: a group, then one of its threads.
-    fn pick_fair(&mut self) -> Option<(JobKey, TaskKey)> {
+    fn pick_fair(&mut self) -> Option<Place> {
         self.refresh();
-        let jk = self.groups.pick()?;
-        let group = &self.members[&jk];
+        let group = self.groups.pick(&self.group_slots)?;
+        let threads = &self.group_slots.payload(group).threads;
         #[cfg(feature = "protocol-port")]
         if self.lowest_key_within_group {
-            let key = group.threads.keys().min().expect("a queued group has a thread");
-            return Some((jk, key));
+            let thread = threads
+                .slots(&self.threads)
+                .min_by_key(|&t| self.threads.key(t))
+                .expect("a queued group has a thread");
+            return Some(Place { group, thread });
         }
-        Some((jk, group.threads.pick().expect("a queued group has a thread")))
+        let thread = threads.pick(&self.threads).expect("a queued group has a thread");
+        Some(Place { group, thread })
     }
 
     /// The real-time band first, then the fair band's pick, which becomes the
@@ -184,17 +217,17 @@ impl<X: SchedPayload> RunQueue<X> {
         if let Some(task) = self.rt.pop_front() {
             return Some(task);
         }
-        let (jk, key) = self.pick_fair()?;
-        let task = self.members.get_mut(&jk).and_then(|g| g.ready.remove(&key)).expect("the pick has its value");
+        let at = self.pick_fair()?;
+        let task = self.threads.payload_mut(at.thread).take().expect("the pick has its value");
         self.ready_fair -= 1;
-        self.running = Some((jk, key));
+        self.running = Some(at);
         Some(task)
     }
 
     /// Whether `key`, just queued, is what the fair band would run now in
     /// place of the running fair thread.
     pub fn would_preempt_for(&mut self, key: TaskKey) -> bool {
-        self.running.is_some() && self.pick_fair().is_some_and(|(_, picked)| picked == key)
+        self.running.is_some() && self.pick_fair().is_some_and(|at| self.threads.key(at.thread) == key)
     }
 
     /// Whether the running thread's entity is the fair band's.
@@ -204,13 +237,13 @@ impl<X: SchedPayload> RunQueue<X> {
 
     /// The running fair thread received `ns`.
     pub fn charge_running(&mut self, ns: u64) {
-        if let Some((jk, key)) = self.running {
-            self.groups.charge(jk, ns);
+        if let Some(at) = self.running {
+            self.groups.charge(&mut self.group_slots, at.group, ns);
             #[cfg(feature = "protocol-port")]
-            if self.double_charge == Some(jk) {
-                self.groups.charge(jk, ns);
+            if self.double_charge == Some(self.group_slots.key(at.group)) {
+                self.groups.charge(&mut self.group_slots, at.group, ns);
             }
-            self.members.get_mut(&jk).expect("the running thread's group").threads.charge(key, ns);
+            self.group_slots.payload_mut(at.group).threads.charge(&mut self.threads, at.thread, ns);
         }
     }
 
@@ -220,17 +253,17 @@ impl<X: SchedPayload> RunQueue<X> {
     /// after them runs first.
     pub fn put_back(&mut self, mut task: ReadyTask<X>, yielded: bool) {
         match self.running.take() {
-            Some((jk, key)) => {
-                assert_eq!(key, task.key(), "the task put back is not the running one");
+            Some(at) => {
+                assert_eq!(self.threads.key(at.thread), task.key(), "the task put back is not the running one");
                 if task.rt().is_rt() {
-                    self.leave(jk, key, task.standing_mut());
+                    self.leave(at, task.standing_mut());
                     self.rt.push_back(task);
                 } else {
                     if yielded {
-                        self.groups.end_request(jk);
-                        self.members.get_mut(&jk).expect("the running thread's group").threads.end_request(key);
+                        self.groups.end_request(&mut self.group_slots, at.group);
+                        self.group_slots.payload_mut(at.group).threads.end_request(&mut self.threads, at.thread);
                     }
-                    self.members.get_mut(&jk).expect("the running thread's group").ready.insert(key, task);
+                    *self.threads.payload_mut(at.thread) = Some(task);
                     self.ready_fair += 1;
                 }
             }
@@ -241,9 +274,9 @@ impl<X: SchedPayload> RunQueue<X> {
     /// The running task leaves the fair band without going back to it — it
     /// blocks, exits, stops or dies — taking its standing into `standing`.
     pub fn leave_running(&mut self, key: TaskKey, standing: &mut Standing) {
-        if let Some((jk, running)) = self.running.take() {
-            assert_eq!(running, key, "the task leaving is not the running one");
-            self.leave(jk, key, standing);
+        if let Some(at) = self.running.take() {
+            assert_eq!(self.threads.key(at.thread), key, "the task leaving is not the running one");
+            self.leave(at, standing);
         }
     }
 
@@ -255,14 +288,30 @@ impl<X: SchedPayload> RunQueue<X> {
     /// Within a group no such instant is needed: the group's request is as
     /// short as its threads', and deciding sooner only switches siblings.
     pub fn decision(&self, now: Nanos, since: Nanos) -> Option<Nanos> {
-        let (jk, key) = self.running?;
-        let threads = &self.members[&jk].threads;
-        let left = self.groups.request_left_ns(jk).min(threads.request_left_ns(key));
-        let mut at = now.after(left);
-        if let Some(ns) = self.groups.overtaken_in(jk) {
-            at = at.min(now.after(ns).max(since.after(MIN_SLICE_NS)));
+        let at = self.running?;
+        let left = self.group_slots.request_left_ns(at.group).min(self.threads.request_left_ns(at.thread));
+        let mut decide = now.after(left);
+        if let Some(ns) = self.groups.overtaken_in(&self.group_slots, at.group) {
+            decide = decide.min(now.after(ns).max(since.after(MIN_SLICE_NS)));
         }
-        Some(at)
+        Some(decide)
+    }
+
+    /// Every queued fair thread whose value is here, with the group it is in.
+    fn ready(&self) -> impl Iterator<Item = (Place, &ReadyTask<X>)> + '_ {
+        self.members.values().flat_map(move |&group| {
+            self.group_slots.payload(group).threads.slots(&self.threads).filter_map(move |thread| {
+                self.threads.payload(thread).as_ref().map(|task| (Place { group, thread }, task))
+            })
+        })
+    }
+
+    /// Take a ready thread's value and its entity out of the band.
+    fn take(&mut self, at: Place) -> ReadyTask<X> {
+        let mut task = self.threads.payload_mut(at.thread).take().expect("a ready task");
+        self.ready_fair -= 1;
+        self.leave(at, task.standing_mut());
+        task
     }
 
     /// The ready fair task a balance request is best answered with, out of
@@ -271,24 +320,27 @@ impl<X: SchedPayload> RunQueue<X> {
     /// this CPU still stands on (`SchedPass::answer_steal_requests`). An idle
     /// asker is answered with that task whatever the move does; a busy one only
     /// if the move narrows the difference by a quarter of the thread's weight,
-    /// so that floor rounding cannot hand an odd split back and forth.
+    /// so that floor rounding cannot hand an odd split back and forth. Each
+    /// group offers its newest ready thread.
     pub fn pop_surplus(&mut self, loaded: Option<TaskKey>, asking: u64) -> Option<ReadyTask<X>> {
         self.refresh();
         let diff = self.weight() as i128 - asking as i128;
-        let (jk, key) = self
+        let (_, _, _, at) = self
             .members
             .iter()
-            .filter_map(|(&jk, group)| {
-                let key = group.ready.keys().rev().copied().find(|&key| Some(key) != loaded)?;
-                let w = group.job.thread_weight() as i128;
-                (asking == 0 || w + w / 4 <= diff).then_some(((diff - 2 * w).abs(), jk, key))
+            .filter_map(|(&jk, &group)| {
+                let g = self.group_slots.payload(group);
+                let (key, thread) = g
+                    .threads
+                    .slots(&self.threads)
+                    .filter_map(|t| self.threads.payload(t).as_ref().map(|task| (task.key(), t)))
+                    .filter(|&(key, _)| Some(key) != loaded)
+                    .max_by_key(|&(key, _)| key)?;
+                let w = g.job.thread_weight() as i128;
+                (asking == 0 || w + w / 4 <= diff).then_some(((diff - 2 * w).abs(), jk, key, Place { group, thread }))
             })
-            .min()
-            .map(|(_, jk, key)| (jk, key))?;
-        let mut task = self.members.get_mut(&jk).and_then(|g| g.ready.remove(&key)).expect("a ready task");
-        self.ready_fair -= 1;
-        self.leave(jk, key, task.standing_mut());
-        Some(task)
+            .min_by_key(|&(score, jk, key, _)| (score, jk, key))?;
+        Some(self.take(at))
     }
 
     /// Retire found the task queued rather than parked: out of whichever band
@@ -297,11 +349,8 @@ impl<X: SchedPayload> RunQueue<X> {
         if let Some(index) = self.rt.iter().position(|t| t.key() == key) {
             return self.rt.remove(index);
         }
-        let jk = *self.members.iter().find(|(_, g)| g.ready.contains_key(&key))?.0;
-        let mut task = self.members.get_mut(&jk).and_then(|g| g.ready.remove(&key)).expect("just found");
-        self.ready_fair -= 1;
-        self.leave(jk, key, task.standing_mut());
-        Some(task)
+        let at = self.ready().find(|(_, task)| task.key() == key)?.0;
+        Some(self.take(at))
     }
 
     /// Is an RT task waiting? The preemption decision in `finish()` and
@@ -322,7 +371,7 @@ impl<X: SchedPayload> RunQueue<X> {
 
     /// Is `key` queued in the fair band?
     pub fn holds_fair(&self, key: TaskKey) -> bool {
-        self.members.values().any(|g| g.ready.contains_key(&key))
+        self.ready().any(|(_, task)| task.key() == key)
     }
 
     pub fn is_empty(&self) -> bool {
@@ -337,7 +386,9 @@ impl<X: SchedPayload> RunQueue<X> {
     /// Each job's group here: its key, its weight and how many of its threads
     /// it holds, the running one included.
     pub fn groups(&self) -> impl Iterator<Item = (JobKey, u64, usize)> + '_ {
-        self.members.iter().map(|(&jk, g)| (jk, self.groups.weight(jk), g.threads.len()))
+        self.members
+            .iter()
+            .map(|(&jk, &group)| (jk, self.group_slots.weight(group), self.group_slots.payload(group).threads.len()))
     }
 
     /// Residents, for the invariant walks: the real-time band, then each
@@ -347,7 +398,7 @@ impl<X: SchedPayload> RunQueue<X> {
     }
 
     pub fn tasks(&self) -> impl Iterator<Item = &ReadyTask<X>> + '_ {
-        self.rt.iter().chain(self.members.values().flat_map(|g| g.ready.values()))
+        self.rt.iter().chain(self.ready().map(|(_, task)| task))
     }
 }
 

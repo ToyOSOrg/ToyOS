@@ -9,8 +9,8 @@ opened: 2026-10-11
 A received byte is copied three times between the card's buffer and the
 application's: netstack writes it into its connection's heap ring
 (`system/netstack/shard/tcp/src/ring.rs`), then into the client's pipe with a
-`SYS_WRITE` whose copy runs under the one global `PIPES` lock with preemption
-off (`kernel/src/pipe.rs`, `issues/the-global-pipe-lock-spans-a-user-copy.md`),
+`SYS_WRITE` whose copy runs under that pipe's lock with preemption off
+(`kernel/src/pipe.rs`, `issues/a-pipes-lock-spans-a-user-copy-and-its-first-allocation.md`),
 and the client's `SYS_READ` copies it out under the same lock. A sent byte is
 copied into the pipe, out of it into netstack's stack chunk, into the
 connection's send ring, and into the frame. Both buffers hold the same bytes: a

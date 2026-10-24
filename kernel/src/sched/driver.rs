@@ -649,7 +649,11 @@ fn execute(action: Action<KernelPayload>) {
             let awake = cpus().get(cpu).doorbell().kick_pending()
                 || crate::preempt::need_resched()
                 // No log condition here: a log to write means a runnable process, covered above.
-                || !with_cpu(|c| c.mailbox_is_empty());
+                || !with_cpu(|c| c.mailbox_is_empty())
+                // The one-shot fires no sooner than its floor, so a deadline
+                // nearer than that is met by passing again, not by sleeping
+                // past it.
+                || token.armed().is_some_and(|at| at.0 < HW.now().0.saturating_add(crate::hw::MIN_ONE_SHOT.nanos()));
             if awake {
                 crate::arch::cpu::enable_interrupts();
                 drop(token);
@@ -714,6 +718,32 @@ pub fn current_handle() -> Option<Arc<crate::sched::payload::TaskHandle>> {
 /// No pass can start underneath the read: a fault handler runs with preemption declined.
 pub fn current_image() -> Option<Option<Arc<crate::process::UserImage>>> {
     try_with_cpu(|cpu| cpu.running().map(|t| t.ext().image.clone())).flatten()
+}
+
+/// Whether this CPU's doorbell was rung since its last pass began: what a
+/// kick's handler asks before it owes a pass. A kick that landed after the pass
+/// it was sent for began, or that only asks this CPU to serve a counters round,
+/// owes none.
+pub fn pass_owed() -> bool {
+    cpus().get(current_cpu()).doorbell().kick_pending()
+}
+
+/// Ring every other CPU's doorbell with nothing behind it and kick each whose
+/// edge this raised, so each runs a pass: what a machine-wide stop needs of a
+/// CPU halted with its timer stopped, or running a thread that never enters
+/// the kernel.
+pub fn ring_all_but_self() {
+    let me = current_cpu();
+    for cpu in (0..cpus().len() as u32).map(CpuId).filter(|&cpu| cpu != me) {
+        if cpus().get(cpu).poke() == Kick::Send {
+            HW.kick(cpu);
+        }
+    }
+}
+
+/// Count the running thread's syscall `num`, which took `ticks` of the counter.
+pub fn note_syscall(num: u64, ticks: u64) {
+    try_with_cpu(|cpu| cpu.running().map(|t| t.ext().handle.syscalls().note(num, ticks)));
 }
 
 /// What the running task's marks say it does instead of returning to Ring 3 — one load, no clone, since an `Arc` refcount here is too costly on this path.
