@@ -207,7 +207,7 @@ impl Gcm {
         };
         if !authentic {
             // The buffer may hold unauthenticated plaintext.
-            data.fill(0);
+            crate::secret::wipe(data);
             return Err(Error::Authentication);
         }
         Ok(())

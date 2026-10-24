@@ -36,8 +36,15 @@
 
 use core::sync::atomic::{Ordering, compiler_fence};
 
+/// Erases `bytes`, 16 at a time: a fill would be a library `memset`, a `rep
+/// stosb` on ToyOS whose start-up costs more than a short record.
 pub(crate) fn wipe(bytes: &mut [u8]) {
-    for byte in bytes {
+    let (chunks, tail) = bytes.as_chunks_mut::<16>();
+    for chunk in chunks {
+        // SAFETY: the address is a live, exclusively borrowed chunk.
+        unsafe { core::ptr::write_volatile(chunk, [0; 16]) };
+    }
+    for byte in tail {
         // SAFETY: the address is a live, exclusively borrowed byte.
         unsafe { core::ptr::write_volatile(byte, 0) };
     }
