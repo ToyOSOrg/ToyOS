@@ -2265,20 +2265,30 @@ dependencies = [
 name = "osbench"
 version = "0.1.0"
 dependencies = [
+ "getrandom 0.3.4",
  "libc",
  "miniz_oxide",
  "osbench-lan",
  "osbench-rules",
+ "rustls",
  "syn 2.0.117",
  "toyos",
  "toyos-abi",
  "toyos-crypto",
  "toyos-trace",
+ "ureq",
 ]
+
+[[package]]
+name = "osbench-compare"
+version = "0.1.0"
 
 [[package]]
 name = "osbench-lan"
 version = "0.1.0"
+dependencies = [
+ "libc",
+]
 
 [[package]]
 name = "osbench-rules"

@@ -1093,7 +1093,22 @@ const METAL: &[(&str, metal::Metal)] = &[
         // holds only that every group ran to its end. The T14 and the AMD bench.
         // One boot runs the whole suite, so three readbacks are three runs.
         "osbench",
-        metal::Metal { arms: BENCHCASE, judge: |b| osbench_ran(b[0]) },
+        metal::Metal { arms: BENCHCASE, judge: |b| osbench_ran(b[0], &OSBENCH_GROUPS) },
+    ),
+    (
+        // `osbench lan` against the `osbench-peer` the other bench's Linux runs,
+        // compared with the same program under this bench's Linux on the same
+        // path. A pass names it: the other bench has to be running the peer.
+        // The T14 over its I219; the AMD bench has no card ToyOS drives.
+        "osbench_lan",
+        metal::Metal { arms: OSBENCH_LAN, judge: |b| osbench_ran(b[0], &["osbench_lan"]) },
+    ),
+    (
+        // `osbench internet`: exploratory evidence over the public internet,
+        // which no automated test depends on, so only a pass that names it runs
+        // it. The T14; the AMD bench has no card ToyOS drives.
+        "osbench_internet",
+        metal::Metal { arms: OSBENCH_INTERNET, judge: |b| osbench_ran(b[0], &["osbench_internet"]) },
     ),
     // ---- tests/images/jobcase.toml, each image armed to end its boot its own way ----
     (
@@ -1587,7 +1602,7 @@ const TESTCASES: &[metal::Arm] = &[metal::once(
 /// `osbench`'s groups, each a job named by its symlink, in `osbench all`'s
 /// order: `boot` first, which reads how long the boot took to reach it, and
 /// `persist` last, which writes the log volume.
-const OSBENCH_GROUPS: [&str; 18] = [
+const OSBENCH_GROUPS: [&str; 17] = [
     "osbench_boot",
     "osbench_identity",
     "osbench_energy",
@@ -1603,7 +1618,6 @@ const OSBENCH_GROUPS: [&str; 18] = [
     "osbench_work",
     "osbench_tail",
     "osbench_nvme",
-    "osbench_lan",
     "osbench_crunch",
     "osbench_persist",
 ];
@@ -1612,21 +1626,37 @@ const OSBENCH_GROUPS: [&str; 18] = [
 /// 100 s of wakes and spinners. Six boots of `e5573b7fe` ended their last job
 /// at 175 to 191 s on five, and at 244 s on the T14's first, where one
 /// served 64 MiB write stalled and `files` took 80 s against 13. The groups
-/// since add at most 160 s by their own spans: `lan`'s 60 s looking for its
-/// peer and 50 s measuring, `crunch`'s one-thread 16 s (ToyOS reads no
-/// temperature, so its all-core phase does not run), and under 30 s of memcpy
-/// sizes, pipe sizes and 1 ms timers. So a list bound of 540 s leaves that
-/// stall 136 s.
+/// since add at most 50 s by their own spans: `crunch`'s one-thread 16 s
+/// (ToyOS reads no temperature, so its all-core phase does not run), and
+/// under 30 s of memcpy sizes, pipe sizes and 1 ms timers. So a list bound of
+/// 430 s leaves that stall 136 s.
 const BENCHCASE: &[metal::Arm] = &[metal::Arm {
-    adds_ms: 480_000,
+    adds_ms: 370_000,
     ..metal::once("benchcase", "tests/images/benchcase.toml", &[], &OSBENCH_GROUPS)
 }];
 
-/// Every group exited 0, which `osbench` does only once each of its
+/// The two groups that need another party share one boot when one pass names
+/// both. `lan` looks for its peer up to 60 s, inside which the boot's lease
+/// lands, then measures for under 60 s over a Wi-Fi hop: 2,155 round trips
+/// at up to 10 ms and twelve 3 s transfers, so 150 s leaves it 30 s.
+/// `internet` measures for under 95 s down to 3 MB/s and up to 1.5 MB/s: six
+/// 25 MB downloads, six 10 MB uploads and 77 short exchanges.
+const OSBENCH_LAN: &[metal::Arm] = &[metal::Arm {
+    adds_ms: 90_000,
+    named_only: true,
+    ..metal::once("netbenchcase", "tests/images/benchcase.toml", &[], &["osbench_lan"])
+}];
+const OSBENCH_INTERNET: &[metal::Arm] = &[metal::Arm {
+    adds_ms: 60_000,
+    named_only: true,
+    ..metal::once("netbenchcase", "tests/images/benchcase.toml", &[], &["osbench_internet"])
+}];
+
+/// Every group's job exited 0, which `osbench` does only once each of its
 /// benchmarks measured, and said it was done.
-fn osbench_ran(boot: &metal::Readback) -> Result<(), String> {
+fn osbench_ran(boot: &metal::Readback, jobs: &[&str]) -> Result<(), String> {
     in_acpi_mode_before_any_job(boot)?;
-    for job in OSBENCH_GROUPS {
+    for &job in jobs {
         boot.job_passed(job)?;
         let group = job.strip_prefix("osbench_").expect("a group's job");
         boot.log().must_say(&format!("group={group} done"))?;

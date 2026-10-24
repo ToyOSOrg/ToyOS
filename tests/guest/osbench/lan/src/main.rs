@@ -1,5 +1,5 @@
-//! `osbench-peer`: the far end of a bench's `osbench lan`, on any host on the
-//! bench's link. It answers discovery and serves requests on
+//! `osbench-peer`: the far end of a bench's `osbench lan`, the fixed reference
+//! on the other bench's Linux. It answers discovery and serves requests on
 //! [`osbench_lan::PORT`] until it is stopped, and names no address.
 
 use std::net::{Ipv4Addr, TcpListener, UdpSocket};

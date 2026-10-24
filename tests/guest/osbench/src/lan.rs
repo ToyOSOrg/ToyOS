@@ -1,40 +1,28 @@
-//! The machine's link to a peer on its network, through std's `net` on both
-//! systems (`osbench-lan`): this machine broadcasts for an `osbench-peer`,
-//! then times TCP to it. Every connection is this machine's own, so a system
-//! that accepts none from its network is measured all the same.
+//! The machine's link to the other bench, through std's `net` on both
+//! systems (`osbench-lan`): this machine broadcasts for the `osbench-peer`
+//! that bench's Linux runs as the fixed reference, then times TCP to it.
+//! Every connection is this machine's own, so a system that accepts none
+//! from its network is measured all the same.
 //!
 //! Each result is named for the link that carried it, `lan.wired.*` or
 //! `lan.wifi.*`, and the link not measured says why: a Linux run measures
 //! whichever link reaches the peer, and ToyOS drives Ethernet alone
-//! (`issues/there-is-no-wifi.md`). No address is printed.
+//! (`issues/there-is-no-wifi.md`). `lan.link` and `lan.peer_link` describe
+//! both ends' links; no address is printed.
 
 use std::net::{Ipv4Addr, SocketAddr};
 use std::time::{Duration, Instant};
 
+use osbench_lan::link::Link;
 use osbench_lan::Peer;
 
 use crate::report::{condition, refuse, result, unmeasured, unsupported};
 
 /// How long a peer is asked for, which a boot's lease lands inside too.
 const DISCOVERY: Duration = Duration::from_secs(60);
-/// Each transfer's span.
-const SPAN: Duration = Duration::from_secs(5);
-
-/// The links a result can be named for.
-#[derive(Clone, Copy, PartialEq, Eq)]
-pub enum Link {
-    Wired,
-    Wifi,
-}
-
-impl Link {
-    fn name(self) -> &'static str {
-        match self {
-            Link::Wired => "wired",
-            Link::Wifi => "wifi",
-        }
-    }
-}
+/// Each transfer's span, and the rounds timed after one unread.
+const SPAN: Duration = Duration::from_secs(3);
+const ROUNDS: usize = 5;
 
 fn benches(link: Link) -> [String; 4] {
     ["tcp.connect", "tcp.rtt.64", "tcp.upload", "tcp.download"].map(|b| format!("lan.{}.{b}", link.name()))
@@ -48,8 +36,8 @@ pub fn suite() {
     }
     let broadcast = SocketAddr::from((Ipv4Addr::BROADCAST, osbench_lan::PORT));
     let started = Instant::now();
-    let ip = match osbench_lan::discover(broadcast, DISCOVERY) {
-        Ok(Some(ip)) => ip,
+    let found = match osbench_lan::discover(broadcast, DISCOVERY) {
+        Ok(Some(found)) => found,
         Ok(None) => return refuse("lan", format!("no osbench-peer answered on the link within {DISCOVERY:?}")),
         Err(e) if cfg!(target_os = "toyos") && e.kind() == std::io::ErrorKind::NotConnected => {
             return benches(Link::Wired).iter().for_each(|b| unsupported(b, format!("no network stack answers: {e}")));
@@ -57,7 +45,8 @@ pub fn suite() {
         Err(e) => return refuse("lan", format!("no socket to look for a peer with: {e}")),
     };
     condition("lan.peer_found_after_ms", started.elapsed().as_millis());
-    let peer = Peer(SocketAddr::new(ip, osbench_lan::PORT));
+    condition("lan.peer_link", &found.link);
+    let peer = Peer(SocketAddr::new(found.ip, osbench_lan::PORT));
     let link = match peer.local() {
         Ok(local) => crate::sys::link_of(local.ip()),
         Err(e) => return refuse("lan", format!("the peer answered and took no connection: {e}")),
@@ -89,7 +78,7 @@ fn measure(peer: &Peer, [connect, rtt, upload, download]: &[String; 4]) {
         let rounds = || -> Result<Vec<u64>, String> {
             run(peer, SPAN).map_err(|e| e.to_string())?;
             crate::clock::settle();
-            (0..3)
+            (0..ROUNDS)
                 .map(|_| {
                     let moved = run(peer, SPAN).map_err(|e| e.to_string())?;
                     Ok(moved.bytes * 1000 / moved.ns)

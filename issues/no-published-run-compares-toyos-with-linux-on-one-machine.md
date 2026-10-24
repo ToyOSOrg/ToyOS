@@ -24,10 +24,19 @@ its groups:
 - an idle minute's package energy: `energy.idle_60s.package`;
 - the machine's PCI, USB, NVMe and cpuidle identity: `identity`, with no
   serial number or network identifier;
-- the wired LAN's TCP round trip and throughput, and Wi-Fi's under Linux:
-  `lan.wired.*`, `lan.wifi.*`, against `osbench-peer` on another machine;
+- TCP connect, round trip and throughput between the two benches:
+  `lan.wired.*`, `lan.wifi.*`, the bench under test against the
+  `osbench-peer` the other bench's Linux runs, each way. ToyOS and Linux on
+  one path are the comparison, and Linux's runs on it its ceiling and its
+  noise; `osbench-compare` reads the runs, interleaved, four of each at least
+  for its exact test to resolve a difference. `lan` and `internet` run only
+  by name, each its own metal row, since they need another party;
 - a short CPU crunch, one thread then all, that stops at TjMax less 15 C
   where the package's temperature can be read: `crunch.*`.
+
+`internet.*`, HTTPS to Cloudflare's speed test, is exploratory evidence of a
+path neither system owns, run only when a pass names its row: no automated
+test depends on the public internet.
 
 The cryptographic rows are not osbench's. AES-GCM, ChaCha20-Poly1305,
 SHA-256 and the rest were measured under Linux on both benches against ring,
@@ -51,7 +60,9 @@ comparison until it can:
   1.7-1.9 GHz, which
   `issues/the-t14s-thermal-modes-do-not-move-its-package-power-limits.md`
   would explain: ToyOS refuses the firmware's PL1 and PL2 writes.
-- **Wi-Fi**: `issues/there-is-no-wifi.md`.
+- **Wi-Fi**: `issues/there-is-no-wifi.md`. The T14's `lan.wifi.*` and every
+  AMD bench `lan.*` and `internet.*` row, whose one network card is its
+  AX200, are measured under Linux alone.
 - **USB, NVMe and cpuidle identity**: their owners serve no program that
   reads them.
 - **Loopback** (`net.*`): netstack refuses 127/8 as a destination.
