@@ -209,32 +209,26 @@ Not consumers:
          Poly1305 on AVX2; SHA-512 on BMI2; SHA-256 on SHA-NI.
      - **Rows that fail, by measured cause.**
        - **ChaCha20 on AVX2 (the AMD bench): a recorded exception.**
-         - Rows: ChaCha20-Poly1305 at 1 KiB and 16 KiB, seal 1.16–1.52 and
-           open 1.22–1.43.
-         - At 16 KiB, open is about 2.5 µs of Poly1305 (the reject row) plus
-           about 5.5 µs of ChaCha20, against 6.55 µs for ring's whole AEAD.
-         - The AVX2 rounds come to about 3.4 instructions per byte in both
-           the eight-block and the three-pair layout, against about 2.8 for
-           an ideal schedule.
-         - #1056 (owner-approved): on AVX2 without AVX-512VL, seal and open
-           are one stitched pass of eight-block batches, the key block in the
-           first, and a refusal zeroes the record, as AES-GCM's does since
-           #1054. Its Linux probes on the AMD bench put seal and open 64 KiB
-           at 1.04 to 1.10 of ring (from 1.14 and 1.35), and 1 KiB at 1.24 to
-           1.26 and 1.19 to 1.21.
-         - The spread is per build. 2c00ebbdc and 035c36d30 read 1.04 and
-           1.10 with the same 4,503-byte vector loop at a different alignment
-           and ring unchanged, and two variants of short batches moved the
-           bulk rows they cannot touch by 0.03. Code placement is the
-           unverified suspect.
+         - Since #1056, seal and open on AVX2 without AVX-512VL are one
+           stitched pass of eight-block batches, the Poly1305 key in the
+           first. A refusal zeroes the record, as AES-GCM's does since #1054.
+           The one-pass open is an owner decision of 2026-10-23.
+         - Rows, from the guest table at 035c36d30: ChaCha20-Poly1305 at
+           1 KiB and 16 KiB, seal 1.25 and 1.11, open 1.19 and 1.09, reject
+           1.14 and 1.17. Reject costs an open because the open is one pass.
+         - Linux probes put the 64 KiB rows at 1.04 to 1.10, and the spread is
+           per build. 2c00ebbdc and 035c36d30 read 1.04 and 1.10 with the
+           same 4,503-byte vector loop at a different alignment and ring
+           unchanged. Code placement is the unverified suspect.
          - Exit: an AVX2 ChaCha20 schedule within ring's time, and then the
-           rows pass. Until then the rows stay recorded here, as ruled; #1056's
-           `cryptocase` boot at 035c36d30 passed on both benches.
+           rows pass. Until then the rows stay recorded here, as ruled.
        - **ChaCha20-Poly1305 per-message cost.**
          - Rows:
            - 0 B and 64 B: the AMD bench 1.06–1.24 (seal, open and reject),
-             the T14 1.10–1.18;
-           - the T14's 1 KiB rows, 1.057–1.059.
+             the T14 1.10–1.18; in the guest table at 035c36d30 (#1056, whose
+             one pass takes 1–192 B on the AMD bench) the AMD bench reads
+             1.10–1.35, and the T14 1.12–1.25 for 0 B and seal at 64 B;
+           - the T14's 1 KiB rows, 1.057–1.059 (1.04–1.05 at 035c36d30).
          - A seal sweep over 1–192 B put ours above ring by a constant per
            message, with a per-block cost that matches ring's.
          - At 540c55e35 the constant is 23–51 ns on the AMD bench and 17–25

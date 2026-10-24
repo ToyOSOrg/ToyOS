@@ -1,15 +1,14 @@
 //! RFC 8439 ChaCha20 on AVX2. Eight blocks run with each register holding
 //! one state word of all eight (Goll and Gueron, "Vectorization on ChaCha
-//! Stream Cipher", ITNG 2014): with AVX-512VL's 32 registers and VPROLD, and
-//! on AVX2 alone, where sixteen registers spill a few words a round but need
-//! none of the row layout's diagonal shuffles, which share Zen 2's two
-//! shuffle pipes with its one shift pipe. Shorter runs go in pairs with each
-//! 128-bit lane holding one block's row; with AVX-512F, four blocks run in
-//! one register set with a block per lane. Rows are built from the key bytes
-//! in registers, never from a state in memory. Rounds, shuffles and addresses
-//! depend only on public lengths and counters. Only hosted targets with
-//! OS-enabled YMM state enter here. Hot loops index fixed-size arrays, as
-//! `aesni`'s header explains.
+//! Stream Cipher", ITNG 2014), with AVX-512VL's VPROLD or AVX2's shifts. On
+//! AVX2 the sixteen registers spill a few words a round, but this layout
+//! needs no diagonal shuffles, which Zen 2 runs on two pipes, one of them its
+//! only shift pipe. Shorter runs go in pairs, each 128-bit lane holding one
+//! block's row; with AVX-512F, four blocks run in one register set with a
+//! block per lane. Rows are built from the key bytes in registers, never from
+//! a state in memory. Rounds, shuffles and addresses depend only on public
+//! lengths and counters. Only hosted targets with OS-enabled YMM state enter
+//! here. Hot loops index fixed-size arrays, as `aesni`'s header explains.
 
 #![allow(clippy::needless_range_loop, reason = "see `aesni`'s header")]
 
@@ -703,12 +702,23 @@ mod tests {
 
     use crate::chacha::legacy_block;
 
-    /// Whether this host can test the AVX2 paths; a host without AVX2 says so
+    /// Whether this host can test the AVX2 stream; a host without AVX2 says so
     /// rather than passing.
     fn avx2() -> bool {
         assert!(
             super::super::features().avx2() || cfg!(feature = "portable"),
             "this host's CPU has no AVX2, so nothing here can test the AVX2 ChaCha20 paths"
+        );
+        !cfg!(feature = "portable")
+    }
+
+    /// Whether this host can test the one-pass kernel, which also takes BMI2;
+    /// a host without either says so rather than passing.
+    fn avx2_bmi2() -> bool {
+        let features = super::super::features();
+        assert!(
+            (features.avx2() && features.bmi2()) || cfg!(feature = "portable"),
+            "this host's CPU lacks AVX2 or BMI2, so nothing here can test the one-pass ChaCha20-Poly1305 kernel"
         );
         !cfg!(feature = "portable")
     }
@@ -759,7 +769,7 @@ mod tests {
     /// and each tail, then longer runs; sealing and opening.
     #[test]
     fn the_avx2_one_pass_matches_both_macs_composed() {
-        if !avx2() {
+        if !avx2_bmi2() {
             return;
         }
         let key: [u8; 32] = core::array::from_fn(|i| (i * 89 + 1) as u8);
@@ -785,8 +795,8 @@ mod tests {
                 let tag = crate::poly1305::tag(legacy_block(&key, &nonce, counter).0[..32].try_into().unwrap(), &input);
                 for seal in [true, false] {
                     let mut data = if seal { plain.clone() } else { sealed.clone() };
-                    // CPUID and XCR0 admitted AVX2 above, and every AVX2 CPU has
-                    // BMI2; the counter stays below 2^32 blocks.
+                    // CPUID and XCR0 admitted AVX2 and BMI2 above; the counter
+                    // stays below 2^32 blocks.
                     let mut mac =
                         unsafe { super::avx2::chacha20_poly1305(&key, counter, &nonce, &prefix, &mut data, seal, pad) };
                     if pad {

@@ -26,8 +26,9 @@ use toyos_crypto::x25519;
 
 /// A TLS record's worth: one 64-byte payload and its 5-byte header.
 const PAYLOAD: [u8; 64] = [0x70; 64];
-/// A record long enough for AES-GCM's stitched paths, whose refusal zeroes
-/// what it decrypted.
+/// A record long enough for the stitched paths, AES-GCM's and
+/// ChaCha20-Poly1305's and OpenSSH's on AVX2, whose refusal zeroes what it
+/// decrypted.
 const RECORD: [u8; 1024] = [0x70; 1024];
 const AAD: [u8; 5] = [0x17, 0x03, 0x03, 0x00, 0x50];
 const IV: [u8; 12] = [0x24; 12];
@@ -78,7 +79,7 @@ fn main() {
             assert!(open(k).open(&IV, &AAD, &mut data, &forged).is_err());
         });
     }
-    for (name, seal, open) in &aeads[..2] {
+    for (name, seal, open) in &aeads {
         measure(&format!("{name} key setup and seal, 1 KiB"), &mut rng, key::<32>, |k| {
             let mut data = RECORD;
             std::hint::black_box(seal(k).seal(&AAD, &mut data).unwrap());
@@ -100,6 +101,18 @@ fn main() {
     let (_, mut forged) = toyos_crypto::ssh::SealingKey::new([0; 64], 3).seal(&mut header, &mut sealed).unwrap();
     forged[15] ^= 1;
     measure("chacha20-poly1305@openssh.com refusal, 64 B", &mut rng, key::<64>, |k| {
+        let (mut h, mut data) = (header, sealed);
+        assert!(toyos_crypto::ssh::OpeningKey::new(k).open(3, &mut h, &mut data, &forged).is_err());
+    });
+
+    measure("chacha20-poly1305@openssh.com seal, 1 KiB", &mut rng, key::<64>, |k| {
+        let (mut header, mut data) = ([0, 0, 4, 0], RECORD);
+        std::hint::black_box(toyos_crypto::ssh::SealingKey::new(k, 3).seal(&mut header, &mut data).unwrap());
+    });
+    let (mut header, mut sealed) = ([0, 0, 4, 0], RECORD);
+    let (_, mut forged) = toyos_crypto::ssh::SealingKey::new([0; 64], 3).seal(&mut header, &mut sealed).unwrap();
+    forged[15] ^= 1;
+    measure("chacha20-poly1305@openssh.com refusal, 1 KiB", &mut rng, key::<64>, |k| {
         let (mut h, mut data) = (header, sealed);
         assert!(toyos_crypto::ssh::OpeningKey::new(k).open(3, &mut h, &mut data, &forged).is_err());
     });
