@@ -24,7 +24,7 @@ fn stick() -> Stick {
     Stick { sectors: 60_062_500, vendor: "SanDisk".to_string(), model: "Ultra".to_string() }
 }
 
-/// A root holding the T14's record as `toyos-metal --install-sudoers` writes
+/// A root holding the T14's record as `toyos-metal --record` writes
 /// one, its stick and no number: what every run the loop made had.
 fn recorded() -> toyos_tmpdir::TempDir {
     let root = toyos_tmpdir::TempDir::new("metal-records");

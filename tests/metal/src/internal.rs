@@ -63,7 +63,7 @@ impl Owned {
     }
 
     /// The partition's name in the table, which is what says the tool made
-    /// it. One word, so the rule names it without quoting.
+    /// it.
     pub fn label(self) -> &'static str {
         match self {
             Self::Esp => "ToyOS-internal-ESP",
