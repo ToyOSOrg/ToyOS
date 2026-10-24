@@ -37,7 +37,7 @@ did; the T14's numbers are below:
     `a75abd3f6`), though it now takes one walk of the tables
     (`UserTables::leaf_table`); cause not found. Accepted as a measured
     tradeoff by the coordinator on PR #1055, under the owner's delegation
-    below, against about 380 ns saved per page touched in order.
+    of implementation tradeoffs (2026-10-23), against about 380 ns saved per page touched in order.
   - **Spawn.** `proc.spawn_wait_loop.100` rose 2.3% at `a75abd3f6` and is
     within 1.5% at `6d826e313`.
 - **Frees.** A clear walks the 64 futex buckets once per table of leaves that
@@ -88,7 +88,6 @@ large blocks mapped alone, which `mem.malloc_churn.1048576` would pay for.
 Owner: the memory track. Exit: each path above measured on the T14 at a
 change and at its base, and against Linux; a regression is fixed or its cost
 accepted by the owner, or by the coordinator for an implementation tradeoff,
-which the owner delegated (`claude-questions.md`, after item 78, 2026-10-23:
-"those decisions you can make"). Cheap remedies when measurement asks: a
+which the owner delegated on 2026-10-23. Cheap remedies when measurement asks: a
 per-CPU frame cache, a count of armed futex waiters that lets a clear
 with none skip the buckets, and tables built at the first touch of their span.
