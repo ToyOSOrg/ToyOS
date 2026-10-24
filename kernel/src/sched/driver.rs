@@ -649,7 +649,11 @@ fn execute(action: Action<KernelPayload>) {
             let awake = cpus().get(cpu).doorbell().kick_pending()
                 || crate::preempt::need_resched()
                 // No log condition here: a log to write means a runnable process, covered above.
-                || !with_cpu(|c| c.mailbox_is_empty());
+                || !with_cpu(|c| c.mailbox_is_empty())
+                // The one-shot fires no sooner than its floor, so a deadline
+                // nearer than that is met by passing again, not by sleeping
+                // past it.
+                || token.armed().is_some_and(|at| at.0 < HW.now().0.saturating_add(crate::hw::MIN_ONE_SHOT.nanos()));
             if awake {
                 crate::arch::cpu::enable_interrupts();
                 drop(token);
