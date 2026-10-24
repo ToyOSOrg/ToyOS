@@ -129,7 +129,7 @@ struct State {
     read: u64,
 }
 
-// SAFETY: `Backing::ring`'s raw pointer and its owning `PhysPage` move together in the same struct, and the pipe's lock is the only way to reach a `State`, serializing all access to it.
+// SAFETY: `Backing::ring`'s raw pointer and its owning `pmm::Run` move together in the same struct, and the pipe's lock is the only way to reach a `State`, serializing all access to it.
 unsafe impl Send for State {}
 
 impl Pipe {

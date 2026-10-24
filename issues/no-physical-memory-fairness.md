@@ -41,7 +41,8 @@ supervisor's own memory, which closes it (below).
 - **What the supervisor holds grows with the sessions and programs it
   runs**, and on its floor. A login authority connects its own control
   connection and an owner its own link, and a launched program's image is
-  its job's, but each live program still holds a few KiB of the supervisor's
+  not the supervisor's (its server's object, or a copy its own job holds),
+  but each live program still holds a few KiB of the supervisor's
   (its handle, notice and the connectors minted for it), bounded only by the
   process table. Owner: the supervisor track. Exit: what a launch makes for
   the child counted to the child's job, or a bound on live launches the
