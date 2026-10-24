@@ -261,9 +261,10 @@ Not consumers:
            retried. It kept all fifteen AES-256 round keys in registers and
            serialised the eight blocks (CTR 2.0 to 2.2 µs).
          - Open is one pass since #1054 (the seal stitch, hashing each
-           batch's input). On the bench's Linux beside ring, open at 16 KiB
-           went from 1.08 to 1.03; reject now decrypts and wipes, 0.53 to
-           1.03.
+           batch's input). In `cryptocase` at #1054's 43690c542, open at
+           16 KiB reads 1.03 for both key sizes (AES-256 was 1.26 on the
+           bench's Linux before), seal 1.13 and 1.03, and reject, which now
+           decrypts and wipes, 1.03.
          - Exit: a schedule with fewer instructions per block, in counter
            generation and the Karatsuba folds, and the rows pass.
        - **AES-GCM bulk on 512-bit VAES (the T14).**
@@ -276,7 +277,15 @@ Not consumers:
            measured: scalar counters 1.10–1.65 against AWS-LC, a reduction
            per 16 blocks 0.99–1.19, a two-pass open 1.11 on open; Karatsuba
            in place of schoolbook made no difference.
-         - Exit: the guest rows pass.
+         - In `cryptocase` at 43690c542, every row at 1 KiB and 16 KiB
+           passes: seal 0.91–0.94 and 0.77–0.78, open 0.76–0.86, reject
+           0.76–0.88. Key setup reads 0.78–0.81.
+         - The 0 B reject rows failed there (1.12): the refusal's wipe was a
+           `memset`. 5b26ab26c wipes 16 bytes per store; its boot is
+           pending.
+         - Exit: the 0 B reject rows pass again.
+         - Evidence:
+           https://github.com/ToyOSOrg/evidence/tree/1f9192b8c6f601c9e748cb87a78ba33d4a95fba7/r3
        - **SHA-512 at 16 KiB on BMI2 (the AMD bench), 1.035.**
          - A vector message schedule without AVX-512 measured 1.385 and was
            removed.
@@ -475,6 +484,18 @@ Not consumers:
          ec5a0cd18, read LEAKS everywhere: that harness made each random
          input next to the clock, so those readings are no finding.
        - Evidence: https://github.com/ToyOSOrg/evidence/tree/18e8243a9e9fb4ec4edaeec68ace23abe98c16b9/pr-993/r3
+     - **AES-GCM at #1054's 43690c542**, 1,000,000 measurements a routine,
+       on the T14 (signature 0x806c1) and the AMD bench (0x860f01).
+       - Routines: AES-128 and AES-256, key setup and seal and key setup
+         and refusal, at 64 B and, new, 1 KiB, which takes the stitched
+         loops and the refusal's wipe.
+       - Every routine passes: max |t| 1.07 to 3.27 on the T14 and 0.61 to
+         1.79 on the AMD bench.
+       - The controls held: null 1.68–1.69 and 0.83–1.17, leaky 1,119.7 and 1,122.5
+         and 109–190.
+       - The job took about 465 s and 434 s.
+       - Evidence:
+         https://github.com/ToyOSOrg/evidence/tree/1f9192b8c6f601c9e748cb87a78ba33d4a95fba7/r3
      - **Not timed:** ML-KEM key generation. Its matrix expansion rejects
        samples by rho, a public output of the secret seed, so no two classes
        can share it. Exit: a measurement with rho held fixed, which needs an
