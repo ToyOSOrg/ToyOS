@@ -536,8 +536,6 @@ mod tests {
         }
     }
 
-    /// A bounded post spends nothing on a thread that was not parked, and
-    /// reaches the next registered thread instead.
     /// Records each kick and whether the list lock was held when it was sent.
     struct LockedKicks<'w> {
         watch: &'w TestWatch,
@@ -573,6 +571,8 @@ mod tests {
         assert_eq!(rx.pop(&NoPreempt), Some(Msg::Wake(TaskKey(2))));
     }
 
+    /// A bounded post spends nothing on a thread that was not parked, and
+    /// reaches the next registered thread instead.
     #[test]
     fn a_bounded_post_skips_a_waiter_that_was_not_parked() {
         let (handles, mut rx) = cpus();

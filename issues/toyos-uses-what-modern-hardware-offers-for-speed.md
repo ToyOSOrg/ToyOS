@@ -97,4 +97,5 @@ yet measured.
 - `issues/idle-cpus-enter-the-c-states-cst-names.md`
 - `issues/diskserver-drives-nvme-apst.md`
 - `issues/syscall-cost-is-unread-since-a-syscall-counts-itself-on-its-thread.md`
+- `issues/malloc-churn-across-eight-threads-fell-with-the-run-queue-arenas.md`
 - `issues/a-thread-resuming-on-the-cpu-that-holds-its-state-restores-it-again.md`

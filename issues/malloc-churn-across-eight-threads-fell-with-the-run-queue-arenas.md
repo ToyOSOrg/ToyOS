@@ -17,17 +17,21 @@ since #1061. The single-threaded row is flat. Measured in one session each
 | diary instrument | 4419 | 3406 | 3234 |
 | C1E auto-promotion cleared | 3677 | — | 3411 |
 
-About half of the drop goes with C1E
-(`issues/a-cpu-leaving-hlt-runs-its-first-microseconds-slow-under-c1e.md`).
-What is left, 7 % with C1E cleared, begins at the arenas commit. That commit
-changes no scheduling decision by reading; it makes a wake and a block cheaper.
-The diary shows scheduler events at well under one per hundred operations, with
-no change in kind between `main` and the branch. The cause is not named. The
-candidate is a contended mutex's handoff: a cheaper park leaves less time in which
-a waiter finds the lock free before it parks.
+Each cell is one boot, and `main` itself spans 3677–4419 across sessions. The
+branch reads the same with C1E on or cleared, 3406 and 3413 against 3411. The
+gap narrows under the control only because `main` fell, from 3875–3889 to
+3677. So C1E is not what costs the branch here. The drop begins at the
+arenas commit, which changes no scheduling decision by reading; it makes a wake
+and a block cheaper. The diary shows scheduler events at well under one per
+hundred operations, with no change in kind between `main` and the branch. The
+cause is not named. The candidate is a contended mutex's handoff: a cheaper park
+leaves less time in which a waiter finds the lock free before it parks.
 
 Against this, the same commits halve the futex, pipe and IPC round trips
 (#1061).
+
+Owner: `issues/toyos-uses-what-modern-hardware-offers-for-speed.md`, the speed
+track the change was made under.
 
 **Exit**: the cause named by a measurement, such as futex waits and wakes per
 operation on `main` and the branch in one session, and then either the
