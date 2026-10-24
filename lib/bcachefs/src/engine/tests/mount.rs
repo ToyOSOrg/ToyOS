@@ -14,8 +14,14 @@ pub(super) const OWNER: Owner = Owner { perm: 0o644, uid: 0, gid: 0 };
 /// 2025-10-23, nanoseconds: every operation's time.
 pub(super) const NOW: i64 = 1_761_177_600_000_000_000;
 
+/// A random source for one mount, its stream unlike every other mount's in
+/// this test, as the kernel's is: a mount after a crash that drew the
+/// crashed one's node sequences again could write a node over one of its
+/// own with the same sequence, which real randomness all but never does.
 pub(super) fn random() -> Box<dyn Random> {
-    Box::new(Seeded(0x0b5e_ed05))
+    std::thread_local!(static MOUNTS: core::cell::Cell<u64> = const { core::cell::Cell::new(0) });
+    let n = MOUNTS.with(|m| m.replace(m.get() + 1));
+    Box::new(Seeded(0x0b5e_ed05 ^ n.wrapping_mul(0x9e37_79b9_7f4a_7c15)))
 }
 
 /// `f` against `dev` mounted read-write; a stall, every task waiting on what

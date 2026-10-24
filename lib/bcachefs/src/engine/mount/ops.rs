@@ -151,7 +151,7 @@ impl<D: BlockDev> Mount<D> {
         let seed = self.nonzero()?;
         self.observe(now);
         let ino = self
-            .transact(K_TX / 2, CREATE, async |txn: &mut Txn| {
+            .transact(K_TX / 2, CREATE, Draw::Ordinary, async |txn: &mut Txn| {
                 let mut parent = self.directory(txn, dir).await?;
                 let slot = self.free_slot(txn, dir, &parent, name).await?;
                 let ino = self.next_inode(txn).await?;
@@ -179,7 +179,7 @@ impl<D: BlockDev> Mount<D> {
         let seed = self.nonzero()?;
         self.observe(now);
         let ino = self
-            .transact(K_TX / 2, CREATE_UNNAMED, async |txn: &mut Txn| {
+            .transact(K_TX / 2, CREATE_UNNAMED, Draw::Ordinary, async |txn: &mut Txn| {
                 self.directory(txn, near).await?;
                 let ino = self.next_inode(txn).await?;
                 let mut inode = self.new_inode(mode::S_IFREG, owner, seed, now)?;
@@ -198,7 +198,7 @@ impl<D: BlockDev> Mount<D> {
     pub async fn link(&self, node: u64, dir: u64, name: &[u8], how: Link, now: i64) -> Result<Option<Removed>> {
         valid_name(name)?;
         self.observe(now);
-        self.transact(K_TX / 2, LINK, async |txn: &mut Txn| {
+        self.transact(K_TX / 2, LINK, Draw::Ordinary, async |txn: &mut Txn| {
             let mut parent = self.directory(txn, dir).await?;
             let mut inode = self.inode_in(txn, node).await?;
             if is_dir(&inode) {
@@ -237,7 +237,7 @@ impl<D: BlockDev> Mount<D> {
         valid_name(name)?;
         self.observe(now);
         let removed = self
-            .transact(K_TX / 2, UNLINK, async |txn: &mut Txn| {
+            .transact(K_TX / 2, UNLINK, Draw::Freeing, async |txn: &mut Txn| {
                 let mut parent = self.directory(txn, dir).await?;
                 let named = self.named(txn, dir, &parent, name).await?.ok_or(Error::NotFound)?;
                 let removed = match (named.kind == DirentType::Directory, dir_too) {
@@ -269,7 +269,7 @@ impl<D: BlockDev> Mount<D> {
         valid_name(to.1)?;
         self.observe(now);
         let removed = self
-            .transact(K_TX, RENAME, async |txn: &mut Txn| {
+            .transact(K_TX, RENAME, Draw::Ordinary, async |txn: &mut Txn| {
                 let mut src_parent = self.directory(txn, from.0).await?;
                 let src = self.named(txn, from.0, &src_parent, from.1).await?.ok_or(Error::NotFound)?;
                 let mut dst_parent = if to.0 == from.0 { src_parent.clone() } else { self.directory(txn, to.0).await? };
@@ -352,7 +352,7 @@ impl<D: BlockDev> Mount<D> {
     /// `deleted_inodes` key go (A8.13). A node with a name is left as it is;
     /// a key that names no orphan goes alone.
     pub async fn release(&self, node: u64) -> Result<()> {
-        self.transact(K_TX / 2, RELEASE, async |txn: &mut Txn| {
+        self.transact(K_TX / 2, RELEASE, Draw::Freeing, async |txn: &mut Txn| {
             let orphan = self.inode_opt(txn, node).await?.filter(|v| v.flags & inode_flag::UNLINKED != 0 && !is_dir(v));
             if orphan.is_some() {
                 self.set(txn, Btree::Inodes, inode_pos(node), None).await?;
@@ -511,7 +511,7 @@ impl<D: BlockDev> Mount<D> {
             if left.is_empty() {
                 return Ok(());
             }
-            self.transact(K_TX / 2, DROP_WHITEOUTS, async |txn: &mut Txn| {
+            self.transact(K_TX / 2, DROP_WHITEOUTS, Draw::Freeing, async |txn: &mut Txn| {
                 for &pos in &left {
                     self.set(txn, Btree::Dirents, pos, None).await?;
                 }

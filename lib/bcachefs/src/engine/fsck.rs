@@ -719,6 +719,11 @@ impl<'a> Walk<'a> {
         for &b in self.alloc.keys().filter(|&&b| b < s.first_bucket || b >= s.nbuckets) {
             put(Btree::Alloc, Bpos::new(0, b, 0), "unexpected");
         }
+        // A bucket is reused once the entry that emptied it is durable, so
+        // that entry is one the volume's journal holds.
+        for (&b, _) in self.alloc.iter().filter(|(_, a)| a.data_type == data_type::NEED_DISCARD && a.journal_seq_empty > self.journal_seq) {
+            put(Btree::Alloc, Bpos::new(0, b, 0), "emptied past the journal");
+        }
 
         // Free ranges, merged where they touch at equal generation bits.
         let mut stored = self.freespace;

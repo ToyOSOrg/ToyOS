@@ -38,5 +38,7 @@ the evidence of the pull request that sized the reserves.
 a write buffer for derived-btree updates (backpointers, LRU, need_discard,
 bucket_gens), flushed in batches, so a rewrite journals and dirties a bounded
 handful of leaves. Another is a reservation of
-exact leaves before the slot. Bucket reuse (B6) reduces how often a rewrite
-empties a bucket, but it does not by itself bound a batch.
+exact leaves before the slot. Bucket reuse (B6) leaves both reserves as they
+were: a rewrite into a reused bucket changes no more positions than one into a
+free bucket. It does spread a rewrite's alloc and backpointer keys over more
+leaves (`issues/a-bcachefs-mount-of-16-kib-nodes-can-stop-under-churn.md`).

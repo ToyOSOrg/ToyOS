@@ -177,9 +177,25 @@ fn judge(image: &[u8], states: &[BTreeSet<Vec<u8>>], applied: usize, committed: 
 /// crash state sampled `samples` times after each request.
 fn ops_survive_a_crash_anywhere(encryption: Option<Encryption>, ops: &[Op], every: usize, samples: u64) {
     let passphrase = encryption.as_ref().map(|e| e.passphrase.to_vec());
-    let image = formatted(64 << 20, encryption).into_inner();
+    ops_survive_a_crash_on(formatted(64 << 20, encryption).into_inner(), passphrase.as_deref(), MEMORY, ops, every, samples);
+}
+
+/// [`ops_survive_a_crash_anywhere`] on `image`, mounted with `options`; how
+/// many buckets the mount took again after an emptying.
+fn ops_survive_a_crash_on(image: Vec<u8>, passphrase: Option<&[u8]>, options: MountOptions, ops: &[Op], every: usize, samples: u64) -> usize {
+    let passphrase = passphrase.map(<[u8]>::to_vec);
+    // The names the volume holds already stay through every state.
+    let initial: BTreeSet<Vec<u8>> = {
+        let dev = Bytes::new(image.clone());
+        let v = match &passphrase {
+            Some(p) => block_on_ready(Volume::unlock(&dev, p, MIN_LIMITS)),
+            None => block_on_ready(Volume::open(&dev)),
+        }
+        .unwrap();
+        block_on_ready(v.readdir(v.root(), 0, 10_000)).unwrap().0.into_iter().map(|e| e.name).collect()
+    };
     let model = Model::new(image, 512);
-    let states = names_after(ops);
+    let states: Vec<BTreeSet<Vec<u8>>> = names_after(ops).into_iter().map(|s| s.union(&initial).cloned().collect()).collect();
     // Operations begun, so possibly applied, and committed.
     let applied = Cell::new(0);
     let committed = Cell::new(0);
@@ -197,8 +213,8 @@ fn ops_survive_a_crash_anywhere(encryption: Option<Encryption>, ops: &[Op], ever
         }),
     };
     let mount = match &passphrase {
-        Some(p) => block_on_ready(Mount::unlock(&dev, p, MIN_LIMITS, MEMORY, random())),
-        None => block_on_ready(Mount::open(&dev, MEMORY, random())),
+        Some(p) => block_on_ready(Mount::unlock(&dev, p, MIN_LIMITS, options, random())),
+        None => block_on_ready(Mount::open(&dev, options, random())),
     }
     .unwrap();
     Executor::new().block_on(
@@ -214,8 +230,10 @@ fn ops_survive_a_crash_anywhere(encryption: Option<Encryption>, ops: &[Op], ever
         },
         || panic!("stalled"),
     );
+    let reused = mount.reused();
     block_on_ready(mount.unmount()).unwrap();
     assert!(judged.get() > 500, "{} crash states judged", judged.get());
+    reused
 }
 
 fn creates(n: usize) -> Vec<Op> {
@@ -253,3 +271,41 @@ fn encrypted_namespace_operations_survive_a_crash_at_every_request() {
     ops_survive_a_crash_anywhere(Some(Encryption { passphrase: &secret, kdf: MIN_KDF }), &mixed(70), 7, 24);
 }
 
+
+/// A cache whose dirty-node limit is one transaction's footprint: reclaim
+/// writes before every operation, so leaves fill and rewrite.
+pub(super) const PRESSED: MountOptions = MountOptions { cache_nodes: 54 };
+
+/// `files` files made, then each renamed back and forth `rounds` times:
+/// the same leaves rewritten again and again, each rewrite emptying the
+/// bucket of the node it replaces.
+fn renames(files: usize, rounds: usize) -> Vec<Op> {
+    let mut ops: Vec<Op> = (0..files).map(|i| Op::Create(format!("a{i}").into_bytes())).collect();
+    for round in 0..rounds {
+        let (from, to) = if round % 2 == 0 { ("a", "b") } else { ("b", "a") };
+        ops.extend((0..files).map(|i| Op::Rename(format!("{from}{i}").into_bytes(), format!("{to}{i}").into_bytes())));
+    }
+    ops
+}
+
+/// Allocation pressure: a volume a file has filled to a few hundred empty
+/// buckets, its leaves rewritten until emptied buckets are taken again, a
+/// crash at every request. Every crash state replays to a prefix holding
+/// every commit and checks clean: a bucket is written again only once its
+/// emptying is durable. Red when one is reused before.
+#[test]
+fn renames_reusing_buckets_on_a_nearly_full_volume_survive_a_crash_at_every_request() {
+    let mut data = Vec::new();
+    let image = super::buckets::nearly_full(&mut data, 400).into_inner();
+    let reused = ops_survive_a_crash_on(image, None, PRESSED, &renames(8, 8), 4, 8);
+    assert!(reused > 4, "{reused} buckets taken again");
+}
+
+/// The same on DATA's encrypted form, on a volume with no data.
+#[test]
+fn encrypted_renames_reusing_buckets_survive_a_crash_at_every_request() {
+    let secret = hex_secret();
+    let image = formatted(32 << 20, Some(Encryption { passphrase: &secret, kdf: MIN_KDF })).into_inner();
+    let reused = ops_survive_a_crash_on(image, Some(&secret), PRESSED, &renames(8, 6), 4, 6);
+    assert!(reused > 4, "{reused} buckets taken again");
+}

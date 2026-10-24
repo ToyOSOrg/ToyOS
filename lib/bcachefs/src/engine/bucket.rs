@@ -1,8 +1,9 @@
 //! A bucket's state as a transaction changes it, and the keys each change
-//! writes: its alloc key, its freespace and fragmentation-LRU entries, its
-//! generation and the device's per-state accounting (A6, A7.12). v1 changes
-//! buckets only by btree nodes: a free bucket takes nodes, and a btree bucket
-//! that loses its last node waits in need_discard, never reused here (B6).
+//! writes: its alloc key, its freespace, need_discard and fragmentation-LRU
+//! entries, its generation and the device's per-state accounting (A6,
+//! A7.12). v1 changes buckets only by btree nodes: an empty bucket takes
+//! nodes, and a btree bucket that loses its last node waits in need_discard
+//! until its emptying is durable, when it takes nodes again (A6.19).
 
 use super::bkey::Bpos;
 use super::value::{class, data_type, AllocV4};
@@ -93,14 +94,38 @@ impl Bucket {
         })
     }
 
-    /// `node` sectors of btree node added (A6.17). `Corrupt` when the
-    /// alloc key holds the bucket for anything else.
+    /// The generation an empty bucket's new nodes carry: a raise its
+    /// emptying owed made first.
+    pub(crate) fn reused_gen(&self) -> u8 {
+        let mut b = *self;
+        b.owed_raise();
+        b.gen
+    }
+
+    /// The raise of the generation an emptying owes (A6.18).
+    fn owed_raise(&mut self) {
+        if self.needs_gen_increment && data_type::empty(self.data_type) {
+            if self.gen == self.oldest_gen {
+                self.oldest_gen = self.oldest_gen.wrapping_add(1);
+            }
+            self.gen = self.gen.wrapping_add(1);
+            self.needs_gen_increment = false;
+        }
+    }
+
+    /// `node` sectors of btree node added (A6.17): to an empty bucket, free
+    /// or one whose emptying is durable, as need_discard then free would
+    /// leave it (A6.19). `Corrupt` when the alloc key holds the bucket for
+    /// anything else.
     pub(crate) fn fill(&mut self, node: u32, io_time: u64, bucket_sectors: u32) -> Result<()> {
-        if self.data_type == data_type::FREE {
+        if matches!(self.data_type, data_type::FREE | data_type::NEED_DISCARD) {
+            self.owed_raise();
             self.data_type = data_type::BTREE;
             self.needs_gen_increment = true;
             self.need_discard = true;
             self.io_time = io_time.max(1);
+            self.journal_seq_nonempty = 0;
+            self.journal_seq_empty = 0;
         }
         if self.data_type != data_type::BTREE || self.dirty + node > bucket_sectors {
             return Err(Error::Corrupt("a btree node placed in a bucket its alloc key holds otherwise"));
@@ -122,13 +147,7 @@ impl Bucket {
             return Ok(false);
         }
         self.data_type = data_type::NEED_DISCARD;
-        if self.needs_gen_increment {
-            if self.gen == self.oldest_gen {
-                self.oldest_gen = self.oldest_gen.wrapping_add(1);
-            }
-            self.gen = self.gen.wrapping_add(1);
-            self.needs_gen_increment = false;
-        }
+        self.owed_raise();
         Ok(true)
     }
 
