@@ -946,6 +946,12 @@ struct Shape {
     /// virtio-sound, the console on virtio-serial, and the clipboard's
     /// channel on a virtio-serial function of its own.
     virtio: Virtio,
+    /// The console's port, on its own virtio-serial function, which
+    /// `/system/bin/virtio-console` carries the log on. A machine whose every
+    /// claim the kernel refuses — no unit, or one that cannot remap or filter
+    /// a claim's messages — has none: its driver could never run, so its
+    /// UART is its console.
+    console_port: bool,
     nic: Nic,
     /// The `-device` argument for each xHCI controller, port and slot counts
     /// included. A list because a machine can have more than one and the T14
@@ -1063,6 +1069,7 @@ impl Profile {
                 vga: "std",
                 panel: None,
                 virtio: Virtio::Absent,
+                console_port: false,
                 nic: Nic::Absent,
                 xhci: &[XHCI_DEFAULT],
                 usb: &[],
@@ -1078,6 +1085,7 @@ impl Profile {
                 vga: "none",
                 panel: None,
                 virtio: Virtio::Present,
+                console_port: true,
                 nic: Nic::Virtio,
                 xhci: &[XHCI_DEFAULT],
                 usb: &["usb-kbd,bus=xhci.0"],
@@ -1097,6 +1105,7 @@ impl Profile {
                 // expresses.
                 panel: Some((1920, 1080)),
                 virtio: Virtio::Absent,
+                console_port: false,
                 nic: Nic::Absent,
                 xhci: &[XHCI_DEFAULT],
                 usb: &[],
@@ -1114,13 +1123,13 @@ impl Profile {
             Self::MetalBesideAHostDisk => Shape { storage: Storage::Stick { beside: Beside::HostDisk }, ..Self::Metal.shape() },
             Self::MetalAmdVi => Shape { iommu: Some(Unit::AmdVi { intremap: false }), ..Self::Metal.shape() },
             Self::HeadlessUsbSpareAmdVi => {
-                Shape { iommu: Some(Unit::AmdVi { intremap: true }), ..Self::HeadlessUsbSpare.shape() }
+                Shape { iommu: Some(Unit::AmdVi { intremap: true }), console_port: false, ..Self::HeadlessUsbSpare.shape() }
             }
             Self::HeadlessUsbSpareAmdViNoRemap => {
                 Shape { iommu: Some(Unit::AmdVi { intremap: false }), ..Self::HeadlessUsbSpareAmdVi.shape() }
             }
             Self::MetalAmdViTestdev => Shape { probes: Probes::Testdevs, ..Self::MetalAmdVi.shape() },
-            Self::HeadlessNoIommu => Shape { iommu: None, ..Self::Headless.shape() },
+            Self::HeadlessNoIommu => Shape { iommu: None, console_port: false, ..Self::Headless.shape() },
             Self::HeadlessNoUsb => Shape { xhci: &[], usb: &[], ..Self::Headless.shape() },
             Self::HeadlessVirtioGpu => Shape { virtio_gpu: true, ..Self::Headless.shape() },
             Self::HeadlessNicBehindPort => Shape { nic: Nic::BehindPort, ..Self::Headless.shape() },
@@ -1459,7 +1468,7 @@ impl QemuInstance {
         rust_tests: &[(String, Vec<u8>)],
         options: BootOptions,
     ) -> Self {
-        if options.profile.shape().virtio.present() {
+        if options.profile.shape().console_port {
             carries_its_console(config).unwrap_or_else(|why| panic!("[qemu] {}: {why}", config.display()));
         }
         let mut features: Vec<&str> = kernel_of(&options);
@@ -2518,6 +2527,8 @@ fn qemu_command(
         // `qemu-vdagent`.
         toyos_build::vdagent::available(arch).unwrap_or_else(|why| panic!("[qemu] {why}"));
         qemu.args(toyos_build::vdagent::args(platform));
+    }
+    if shape.console_port {
         // The console's port on stdio, which `/system/bin/virtio-console`
         // carries the log on; the UART on the socket this harness listens on
         // ([`UartConsole`]), which takes the commands typed at the guest and
@@ -2532,9 +2543,9 @@ fn qemu_command(
     } else if options.mute {
         qemu.arg("-serial").arg("none");
     } else {
-        // The 16550 *is* the console here: no virtio-serial exists, so the
+        // The 16550 *is* the console here: no console port exists, so the
         // kernel's log ring drains to it and the guest reads its commands
-        // off it. signal=off matches the virtio console above, so a ^C in
+        // off it. signal=off matches the console port above, so a ^C in
         // the stream reaches the guest rather than killing QEMU.
         qemu.arg("-chardev")
             .arg("stdio,id=uart0,signal=off")
@@ -2610,7 +2621,7 @@ fn spawn_and_wait_ready(mut qemu: Command, options: BootOptions, files: Files) -
         .stderr(Stdio::inherit());
 
     // Listening before QEMU starts, which connects as it makes the chardev.
-    let virtio = options.profile.shape().virtio.present();
+    let virtio = options.profile.shape().console_port;
     let listener = virtio.then(|| {
         UnixListener::bind(sockets.dir.join(UART_SOCKET)).unwrap_or_else(|e| panic!("[qemu] the UART's socket: {e}"))
     });
