@@ -27,6 +27,8 @@
 //! state                     it keeps machine state of its own in `/state/<name>`
 //! role <role>               a file server for `<role>`: one process of it per role
 //! restart                   the supervisor starts it again when it ends
+//! memory-floor <bytes>      memory held back for its job however short every other runs
+//! supervisor-floor <bytes>  the same for the supervisor's own job
 //! supervisor-serve <name>   a name the supervisor serves itself
 //! start <name>              the supervisor starts this program at boot
 //! app-receive <name>        a connector every program launched from /apps holds
@@ -337,6 +339,11 @@ pub struct Program {
     /// screen's row's at its start and any on `toyos_session::LOGIN_PORT`.
     /// ([`launch`]).
     pub login: bool,
+    /// Bytes held back for its job however short every other job runs: the
+    /// protected capacity of a control path the machine has to keep
+    /// answering under exhaustion, and zero for every other row. Only the
+    /// signed image declares one; an installed package's row never has one.
+    pub memory_floor: u64,
 }
 
 impl Program {
@@ -416,6 +423,8 @@ pub struct Manifest {
     /// Program names, in the order `[boot] start` gave them — which orders
     /// nothing, because every port exists before any server runs.
     pub start: Vec<String>,
+    /// [`Program::memory_floor`] for the supervisor's own job.
+    pub supervisor_floor: u64,
 }
 
 impl Manifest {
@@ -554,6 +563,12 @@ pub fn render(manifest: &Manifest) -> Result<Vec<u8>, RenderError> {
         if program.login {
             out.push_str("login\n");
         }
+        if program.memory_floor > 0 {
+            out.push_str(&format!("memory-floor {}\n", program.memory_floor));
+        }
+    }
+    if manifest.supervisor_floor > 0 {
+        out.push_str(&format!("supervisor-floor {}\n", manifest.supervisor_floor));
     }
     for name in &manifest.supervisor_serves {
         check("supervisor", "supervisor_serves", name)?;
@@ -644,6 +659,11 @@ fn reject_newline(program: &str, field: &'static str, value: &str) -> Result<(),
     Ok(())
 }
 
+/// A record's byte count, which only [`render`] writes.
+fn bytes(line: &str, rest: &str) -> u64 {
+    rest.parse().unwrap_or_else(|_| panic!("manifest: a byte count that is none: {line}"))
+}
+
 /// Read back what [`render`] wrote.
 ///
 /// Panics on a line neither half can produce. This file is the build system's
@@ -686,6 +706,7 @@ pub fn parse(text: &str) -> Manifest {
                 assert!(manifest.folder.replace(access).is_none(), "manifest: `app-folder` twice");
             }
             "start" => manifest.start.push(rest.to_string()),
+            "supervisor-floor" => manifest.supervisor_floor = bytes(line, rest),
             "" => {}
             _ => {
                 let program = manifest
@@ -707,6 +728,7 @@ pub fn parse(text: &str) -> Manifest {
                     "restart" if rest.is_empty() => program.restart = true,
                     "starts" => program.starts.push(rest.to_string()),
                     "login" if rest.is_empty() => program.login = true,
+                    "memory-floor" => program.memory_floor = bytes(line, rest),
                     other => panic!("manifest: unknown record `{other}`"),
                 }
             }
@@ -762,6 +784,7 @@ mod tests {
                     source: Source::Path("/system/bin/vdagent".into()),
                     receives: vec!["clipboard".into()],
                     drives: vec!["pci:07:80:00/1af4:1043".into()],
+                    memory_floor: 16 << 20,
                     ..Program::default()
                 },
                 Program {
@@ -777,6 +800,7 @@ mod tests {
             apps: vec!["compositor".into(), "soundserver".into()],
             folder: Some(grants::Access::ReadWrite),
             start: vec!["compositor".into(), "soundserver".into()],
+            supervisor_floor: 48 << 20,
         }
     }
 
@@ -790,6 +814,7 @@ mod tests {
         assert!(row.syscap.is_empty());
         assert!(row.serves.is_empty());
         assert!(row.provides.is_empty());
+        assert_eq!(row.memory_floor, 0, "a package's row held memory back");
         assert_eq!(row.source.path(), Some("/apps/gbae/gbae"));
     }
 

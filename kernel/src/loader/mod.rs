@@ -20,7 +20,7 @@
 mod start;
 mod tls;
 
-pub use start::{build_child_handles, PendingHandles};
+pub use start::{build_child_handles, Commit, PendingHandles};
 pub(crate) use start::{alloc_kernel_stack, KernelStack, Start};
 pub use tls::{TlsBlock, DTV_INITIAL_CAPACITY, VARIANT as TLS_VARIANT};
 
@@ -166,9 +166,10 @@ fn segment_prot(seg: &toyos_elf::Segment) -> kernel::vm::Prot {
 
 
 /// Load a program and place its main thread under `parent`, answering its pid
-/// and what `commit` left its caller holding of it. `commit` builds the
-/// child's handle table around the child's handle to itself, once nothing is
-/// left to refuse, and names the job it runs in.
+/// and what `commit` left its caller holding of it. Everything built for the
+/// child is counted to [`Commit::job`], which it runs in, and `commit` builds
+/// the child's handle table around its handle to itself once nothing is left
+/// to refuse.
 ///
 /// `path` is the program, opened here — or, with `image`, the bytes the caller
 /// read from it itself, and then nothing opens it. `argv[0]` is only the name the child goes by.
@@ -176,24 +177,23 @@ fn segment_prot(seg: &toyos_elf::Segment) -> kernel::vm::Prot {
 /// `Refusal`, not `-> !`, is the error type: every failure below owns a
 /// partly built process (address space, stack, kernel stack), and nothing
 /// unwinds, so the error must travel out as a value rather than strand it.
-pub fn spawn<H>(
+pub fn spawn<C: Commit>(
     path: &str,
     argv: &[&str],
-    commit: impl FnOnce(
-        start::Own,
-    ) -> Result<(HandleTable, Endowments, Arc<kernel::sched::job::Job>, H), crate::object::Refusal>,
+    commit: C,
     cwd: String,
     env: Vec<u8>,
     image: Option<Arc<dyn crate::file_backing::FileBacking>>,
     parent: Parent,
-) -> Result<(Pid, H), crate::object::Refusal> {
+) -> Result<(Pid, C::Held), crate::object::Refusal> {
+    let job = Arc::clone(commit.job());
     // An argv of only separators survives sys_spawn's split as an empty slice.
     let Some(&name) = argv.first() else {
         return Err(SyscallError::InvalidArgument.into());
     };
     // Before anything is built; dropped on every way out below but the insert.
     let admission = Admission::ask(parent)?;
-    let mut charge = ProcessData::charge(path, &env).map_err(SyscallError::from)?;
+    let mut charge = ProcessData::charge(&job, path, &env).map_err(SyscallError::from)?;
     let t0 = crate::clock::nanos_since_boot();
 
     let backing: Arc<dyn crate::file_backing::FileBacking> = match image {
@@ -240,8 +240,8 @@ pub fn spawn<H>(
 
     let t1 = crate::clock::nanos_since_boot();
 
-    let Some(child_pt) = crate::mm::space::Space::new_user() else {
-        log!("spawn: {}: no user PCID free — too many live address spaces", path);
+    let Some(child_pt) = crate::mm::space::Space::new_user(&job) else {
+        log!("spawn: {}: no address space: every user PCID is held, or no frame is left for its root", path);
         return Err(SyscallError::ResourceExhausted.into());
     };
     let (image_start, base, stack_base, sp) = {
@@ -343,7 +343,7 @@ pub fn spawn<H>(
         bias: base,
     });
 
-    let (ks_alloc, ks_sp) = match alloc_kernel_stack(Start::Process { entry, sp }) {
+    let (ks_alloc, ks_sp) = match alloc_kernel_stack(&job, Start::Process { entry, sp }) {
         Some(ks) => ks,
         None => {
             log!("spawn: {}: failed to allocate kernel stack", path);
@@ -356,7 +356,7 @@ pub fn spawn<H>(
     let notice = crate::object::notice::NoticeObject::new().map_err(SyscallError::from)?;
     // The point of no return: every failure above answers the caller with its
     // table untouched.
-    let (handles, endowments, job, held) = commit(start::Own::new(&object, &notice))?;
+    let (handles, endowments, held) = commit.commit(start::Own::new(&object, &notice))?;
     let proc_data = Arc::new(Lock::new(ProcessData {
         handles,
         cwd,
@@ -448,11 +448,12 @@ const SUPERVISOR: &str = "supervisor";
 /// processes that can ever claim a device, enter the RT band, or power off.
 /// Panics on failure: a boot that cannot start the supervisor has nowhere to report to.
 pub fn spawn_supervisor(images: crate::bootimage::Objects) -> Pid {
-    let mut handles = HandleTable::new();
+    let job = crate::object::job::new_job();
+    let mut handles = HandleTable::new(&job);
     let mut entries = Vec::new();
     let mut labels = Vec::new();
     // One console, the supervisor's descriptors 0 to 2.
-    let console = KObjectRef::Console(crate::object::device::ConsoleObject::new().expect("spawn_supervisor: no heap for its console"));
+    let console = KObjectRef::Console(crate::object::device::ConsoleObject::new(&job).expect("spawn_supervisor: no heap for its console"));
     for fd in ["0", "1", "2"] {
         let entry = crate::object::HandleEntry::new(console.clone(), ops::initial_rights(&console));
         let handle = handles.install(entry).expect("spawn_supervisor: three handles cannot exhaust an empty table");
@@ -471,6 +472,7 @@ pub fn spawn_supervisor(images: crate::bootimage::Objects) -> Pid {
         .union(Rights::TRANSFER)
         .union(Rights::DEVICE)
         .union(Rights::JOBS)
+        .union(Rights::FLOOR)
         .union(Rights::RT)
         .union(Rights::LOG)
         .union(Rights::WAIT)
@@ -513,13 +515,32 @@ pub fn spawn_supervisor(images: crate::bootimage::Objects) -> Pid {
             .expect("spawn_supervisor: a boot image is ordinary memory, its length inside it"),
     );
     // Built by the kernel and owing nobody anything: no table but the supervisor's own holds it.
-    let commit = |own: start::Own| {
-        own.endow(&mut handles, &mut entries, &mut labels);
-        Ok((handles, Endowments::new(entries, labels), crate::object::job::new_job(), ()))
-    };
-    match spawn(SUPERVISOR, &[SUPERVISOR], commit, String::from("/"), Vec::new(), Some(image), Parent::Root) {
+    let table = SupervisorTable { job, handles, entries, labels };
+    match spawn(SUPERVISOR, &[SUPERVISOR], table, String::from("/"), Vec::new(), Some(image), Parent::Root) {
         Ok((pid, ())) => pid,
         Err(crate::object::Refusal::Error(e)) => panic!("spawn_supervisor: failed to spawn: {e:?}"),
         Err(crate::object::Refusal::Handle(e)) => panic!("spawn_supervisor: {e}"),
+    }
+}
+
+/// The supervisor's table as the kernel lays it out, in a job of its own.
+struct SupervisorTable {
+    job: Arc<kernel::sched::job::Job>,
+    handles: HandleTable,
+    entries: Vec<toyos_abi::syscall::EndowEntry>,
+    labels: Vec<u8>,
+}
+
+impl Commit for SupervisorTable {
+    type Held = ();
+
+    fn job(&self) -> &Arc<kernel::sched::job::Job> {
+        &self.job
+    }
+
+    fn commit(self, own: start::Own) -> Result<(HandleTable, Endowments, ()), crate::object::Refusal> {
+        let Self { mut handles, mut entries, mut labels, .. } = self;
+        own.endow(&mut handles, &mut entries, &mut labels);
+        Ok((handles, Endowments::new(entries, labels), ()))
     }
 }

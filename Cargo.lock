@@ -1380,6 +1380,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "inputsink"
+version = "0.1.0"
+dependencies = [
+ "toyos",
+ "toyos-abi",
+ "toyos-input",
+]
+
+[[package]]
 name = "inspect"
 version = "0.1.0"
 dependencies = [
@@ -3156,6 +3165,14 @@ dependencies = [
  "toyos-session",
  "toyos-ssh",
  "toyos-tmpdir",
+]
+
+[[package]]
+name = "starveling"
+version = "0.1.0"
+dependencies = [
+ "toyos",
+ "toyos-abi",
 ]
 
 [[package]]

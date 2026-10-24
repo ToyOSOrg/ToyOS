@@ -358,10 +358,10 @@ pub fn create(depth: u32) -> Result<(InboxRef, u64), SyscallError> {
     let submission_size = depth;
     let completion_size = depth * 2;
 
-    let charge = Charge::new(heap())?;
+    let charge = Charge::current(heap())?;
     let space = process::current_address_space();
     let bytes = SUBMISSIONS_OFF + u64::from(MAX_SUBMISSION_DEPTH) * core::mem::size_of::<Submission>() as u64;
-    let ring = SharedMemObject::create(bytes)?;
+    let ring = SharedMemObject::create(&crate::mm::charge::current(), bytes)?;
     // Laid out before mapped: mapping first lets a sibling thread write the
     // rings while the kernel initializes them.
     ring.write(0, &ring_layout(submission_size, completion_size));

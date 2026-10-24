@@ -33,6 +33,12 @@
 //! as it is for a server nothing keeps. A program started through `launcher`
 //! still gets its acceptor by move and is started once per boot.
 //!
+//! **A service keeps one job across its starts**, its row's `system.toml`
+//! floor held on it, so a control path started again is owed what it was.
+//! **A start refused for memory waits for it to come back**: the service
+//! keeps its ports, and its job's readiness, posted when what it lacked is
+//! free, is what starts it again ([`Supervisor::memory_returned`]).
+//!
 //! **A `drives` row has one process per PCI function it names**, each holding
 //! that function's claim and started when the inventory shows the function
 //! free ([`toyos_supervisor::drives`]). **Every end is readiness on the
@@ -252,7 +258,10 @@ const TOKEN_ADMIN_ACCEPTOR: u64 = 9;
 /// Every session owner's link, and the ends of every session's apps.
 const TOKEN_LINKS: u64 = 10;
 const TOKEN_APPS: u64 = 11;
-const TOKEN_PENDING_BASE: u64 = 12;
+/// The job of every service waiting for memory to come back to start again,
+/// watched in the place of the process it has none of.
+const TOKEN_MEMORY: u64 = 12;
+const TOKEN_PENDING_BASE: u64 = 13;
 /// Above every pending connection's token, which is a handle's past the base.
 const TOKEN_POWER_WATCHERS: u64 = u64::MAX;
 
@@ -307,6 +316,24 @@ fn new_ring() -> SharedMemory {
     let region = SharedMemory::create(RING_BYTES).expect("supervisor: no memory for a log ring");
     view(&region).lay_out_with_placeholder_owner();
     region
+}
+
+/// [`new_ring`] for a program started in `job`, counted to it: a ring is the
+/// program's output, and the supervisor's own floor pays for none of it.
+/// Refused where `job` has no memory for it.
+fn ring_for(job: toyos::RawHandle) -> std::io::Result<SharedMemory> {
+    let region = SharedMemory::create_for(job, RING_BYTES).map_err(memory_refused)?;
+    view(&region).lay_out_with_placeholder_owner();
+    Ok(region)
+}
+
+/// A refusal the kernel answered as an `io::Error` of the kind std gives it,
+/// so a start refused for memory is told apart from one refused otherwise.
+fn memory_refused(e: SyscallError) -> std::io::Error {
+    match e {
+        SyscallError::ResourceExhausted => std::io::Error::new(std::io::ErrorKind::OutOfMemory, "no memory left for it"),
+        other => std::io::Error::other(format!("{other:?}")),
+    }
 }
 
 fn view(region: &SharedMemory) -> Ring {
@@ -537,6 +564,16 @@ fn main() {
     // For the machine's life, and `'static` so a launch's path can be resolved
     // against it on the supervisor's file worker.
     let system: &'static Manifest = Box::leak(Box::new(toyos_manifest::parse(&text)));
+    // Its own floor, the protected capacity of the machine's controls: held
+    // through a handle to its own job, kept for the machine's life.
+    let own = toyos::job::own().expect("supervisor: no handle to its own job");
+    if system.supervisor_floor > 0 {
+        match syscap.hold_floor(&own, system.supervisor_floor) {
+            Ok(()) => say!("supervisor: {} MiB held back for its own job", system.supervisor_floor >> 20),
+            Err(e) => toyos::error!("supervisor: its floor of {} MiB could not be held ({e:?}); the controls run unprotected", system.supervisor_floor >> 20),
+        }
+    }
+    let _own: &'static toyos::job::Job = Box::leak(Box::new(own));
     // A role no row serves: closed before anything asks it, so a connect to it
     // answers `ServerGone` rather than waiting in a queue nothing will ever
     // accept from.
@@ -756,6 +793,8 @@ struct Instance {
     row: &'static Program,
     function: Pci,
     child: Child,
+    /// The job it runs in, kept while it runs: what holds its row's floor.
+    _job: toyos::job::Job,
     /// A disk driver's [`toyos_quiesce::DRIVER_STOP`] pipe: closing it tells the
     /// driver the machine stops.
     stop: Option<Pipe>,
@@ -790,6 +829,12 @@ struct Service<'a> {
     /// The screen's row's desktop session's launcher and control, minted for
     /// its next start, which takes them.
     desktop: Option<sessions::Desktop>,
+    /// The job every process serving it runs in, made at its first start and
+    /// kept: its floor, where its row has one, outlives each process, so a
+    /// start after an end is not refused what the row was held.
+    job: Option<toyos::job::Job>,
+    /// Since when a start after its end has waited for memory to come back.
+    starved: Option<Instant>,
 }
 
 impl<'a> Service<'a> {
@@ -805,6 +850,8 @@ impl<'a> Service<'a> {
             session,
             budget: Budget::default(),
             desktop: None,
+            job: None,
+            starved: None,
         }
     }
 
@@ -845,6 +892,11 @@ impl<'a> Service<'a> {
             storage.endow.push((LAUNCHER, desktop.launcher.into_raw()));
             storage.endow.push((toyos_session::CONTROL_LABEL, desktop.control.into_raw()));
         }
+        let job = match &self.job {
+            Some(job) => job,
+            None => self.job.insert(job_for(syscap, self.program)?),
+        };
+        let endowed = job.duplicate().map_err(memory_refused)?.into_raw();
         let ports = self.ports.borrow();
         let served = Served::Keep { acceptors: &ports, owed };
         let command = match source {
@@ -866,7 +918,7 @@ impl<'a> Service<'a> {
             &[],
             storage,
             Minting::machine(minted, self.program, self.session),
-            Output::Boot(log),
+            Output::Boot { log, job: endowed },
         )?;
         drop(ports);
         let pid = child.id();
@@ -878,6 +930,22 @@ impl<'a> Service<'a> {
 
     fn pid(&self) -> Option<u32> {
         self.child.as_ref().map(Child::id)
+    }
+
+    /// How many requests its job was refused for memory: a start that raised
+    /// it waits for memory, and one refused anything else was refused that.
+    fn refusals(&self) -> u64 {
+        self.job.as_ref().and_then(|job| job.account().ok()).map_or(0, |account| account.refusals)
+    }
+
+    /// What its job's account says it would have held had its last refused
+    /// request been granted, for a line that says why it waits.
+    fn wanted(&self) -> String {
+        match self.job.as_ref().map(toyos::job::Job::account) {
+            Some(Ok(account)) => format!("{} KiB, to hold {} KiB in all", account.wanted.saturating_sub(account.committed + account.kernel) >> 10, account.wanted >> 10),
+            Some(Err(e)) => format!("what its account would not say: {e:?}"),
+            None => String::from("memory before it had a job"),
+        }
     }
 
     /// The name its lines and the supervisor's say it under: a file server's role
@@ -1041,6 +1109,7 @@ impl<'a> Supervisor<'a> {
                 Ok(_) => {}
                 Err(StartError::Refused(why)) => {
                     service.ports.borrow_mut().clear();
+                    service.job = None;
                     say!("supervisor: {} did not start ({why}); its ports are closed this boot", service.label());
                 }
                 Err(e) => panic!("supervisor: cannot start {}: {e}", program.name),
@@ -1074,7 +1143,7 @@ impl<'a> Supervisor<'a> {
         for act in self.drives.decide(&rows, &records, boot_controller(), Instant::now()) {
             match act {
                 Act::Start { row, entry, function } => match self.start_instance(row, entry, function) {
-                    Ok((child, stop)) => self.instances.push(Instance { row, function, child, stop }),
+                    Ok((child, stop, job)) => self.instances.push(Instance { row, function, child, stop, _job: job }),
                     Err(why) => {
                         say!("supervisor: {} was not started on PCI {}: {why}", row.name, pci_at(function.at));
                         refused.push(format!("{entry} at PCI {}", pci_at(function.at)));
@@ -1109,7 +1178,7 @@ impl<'a> Supervisor<'a> {
 
     /// One `drives` process of `row`, holding `function`'s claim under
     /// `entry`'s spelling.
-    fn start_instance(&mut self, row: &'static Program, entry: PciMatch, function: Pci) -> Result<(Child, Option<Pipe>), String> {
+    fn start_instance(&mut self, row: &'static Program, entry: PciMatch, function: Pci) -> Result<(Child, Option<Pipe>, toyos::job::Job), String> {
         if self.services.len() + self.instances.len() >= MAX_CHILDREN {
             return Err(format!("the supervisor watches {MAX_CHILDREN} processes already"));
         }
@@ -1130,10 +1199,12 @@ impl<'a> Supervisor<'a> {
         }
         let launcher = Minting::machine(&self.minted, row, self.sessions.machine());
         let served = Served::Keep { acceptors: &[], owed: &[] };
-        let output = Output::Boot(&mut self.log);
         let path = row.source.path().ok_or_else(|| format!("{} runs {}, and a `drives` row runs a file", row.name, row.source))?;
+        let job = job_for(self.syscap, row).map_err(|e| e.to_string())?;
+        let endowed = job.duplicate().map_err(|e| format!("its job would not duplicate: {e:?}"))?.into_raw();
+        let output = Output::Boot { log: &mut self.log, job: endowed };
         start(Command::new(path), row, self.system, self.syscap, served, &self.connectors, &self.grants, &[], extra, launcher, output)
-            .map(|(child, _)| (child, stop))
+            .map(|(child, _)| (child, stop, job))
             .map_err(|e| e.to_string())
     }
 
@@ -1329,14 +1400,17 @@ impl<'a> Supervisor<'a> {
     /// call a server's end left waiting in the port's queue goes on to the
     /// process started in its place.
     /// `Err` is the call still unanswered at [`FILES_BOUND`], which the worker
-    /// goes on waiting for alone, or the worker still waiting on an earlier
-    /// one.
+    /// goes on waiting for alone, the worker still waiting on an earlier
+    /// one, or a storage service waiting for memory to start again: no call
+    /// may be answered until it has, and the loop answers the controls
+    /// meanwhile.
     fn files<T: Send + 'static>(&mut self, what: &str, work: impl FnOnce() -> T + Send + 'static) -> Result<T, String> {
         const DONE: u64 = 0;
         self.worker.settle();
         if self.worker.owed > 0 {
             return Err(format!("the supervisor's file worker still waits on {}", self.worker.owed_what));
         }
+        self.storage_fed()?;
         let (answer, answered) = std::sync::mpsc::channel();
         let job: Job = Box::new(move || {
             // The receiver is gone once the bound has passed.
@@ -1361,6 +1435,7 @@ impl<'a> Supervisor<'a> {
             if self.worker.owed == 0 {
                 return Ok(answered.recv().expect("supervisor: a finished file job answered"));
             }
+            self.storage_fed()?;
             if Instant::now() >= deadline {
                 return Err(format!("{what} was not answered in {} s", FILES_BOUND.as_secs()));
             }
@@ -1381,6 +1456,7 @@ impl<'a> Supervisor<'a> {
     /// service it has just killed to finish ending, which is the kernel's
     /// teardown and no client's.
     fn serve_forever(&mut self, swap: &Acceptor, power: &Acceptor) -> ! {
+        self.say_floors();
         let poller = Poller::new(Poller::MAX_HANDLES);
         let mut pending: Vec<Pending> = Vec::new();
         let mut flight: Option<Flight> = None;
@@ -1393,7 +1469,7 @@ impl<'a> Supervisor<'a> {
             poller.watch(&self.minted.admin, READABLE, TOKEN_ADMIN_ACCEPTOR);
             poller.watch(&self.watch.ended, READABLE, TOKEN_APPS);
             for login in &self.logins.open {
-                poller.watch(&login.link, READABLE, TOKEN_LINKS);
+                poller.watch_raw(login.link.handle(), READABLE, TOKEN_LINKS);
             }
             poller.watch(swap, READABLE, TOKEN_SWAP_ACCEPTOR);
             poller.watch(power, READABLE, TOKEN_POWER_ACCEPTOR);
@@ -1402,6 +1478,10 @@ impl<'a> Supervisor<'a> {
                 poller.watch(&watcher.conn, READABLE | writable, TOKEN_POWER_WATCHERS);
             }
             self.watch_children(&poller);
+            for service in self.services.iter().filter(|service| service.starved.is_some()) {
+                let job = service.job.as_ref().expect("supervisor: a service waiting for memory has its job");
+                poller.watch(job, READABLE, TOKEN_MEMORY);
+            }
             if let Some(Flight { phase: Phase::Answered { conn, .. }, .. }) = &flight {
                 poller.watch(conn, READABLE, TOKEN_HANGUP);
             }
@@ -1551,6 +1631,9 @@ impl<'a> Supervisor<'a> {
             }
             if ready.contains(&TOKEN_APPS) {
                 self.apps_ended();
+            }
+            if ready.contains(&TOKEN_MEMORY) {
+                self.memory_returned();
             }
             if ready.contains(&TOKEN_ENDED) {
                 self.ended();
@@ -1908,30 +1991,34 @@ impl<'a> Supervisor<'a> {
             let (label, pid) = (service.label(), service.pid().unwrap_or(0));
             service.child = None;
             match restart::after_end(service.program, exit, &mut service.budget, Instant::now()) {
-                AfterEnd::Close => service.ports.borrow_mut().clear(),
+                AfterEnd::Close => {
+                    service.ports.borrow_mut().clear();
+                    service.job = None;
+                }
                 AfterEnd::GiveUp => {
                     service.ports.borrow_mut().clear();
+                    service.job = None;
                     say!(
                         "supervisor: {label} ended {} times in {} s; its ports are closed, its clients answered Gone, and a program started from now on is given none of its directories",
                         restart::RESTARTS + 1,
                         restart::WINDOW.as_secs()
                     );
                 }
-                AfterEnd::Restart => {
-                    let (source, owed, program) = (service.source.clone(), service.devices.clone(), service.program);
-                    self.make_state_dir(program);
-                    self.desktop_for(index);
-                    let block = self.block_args();
-                    let service = &mut self.services[index];
-                    let (system, syscap, connectors, grants) = (self.system, self.syscap, &self.connectors, &self.grants);
-                    match service.spawn(&source, &owed, block, system, syscap, connectors, grants, &self.minted, self.boot, &mut self.log) {
-                        Ok(new) => say!("supervisor: {label} (pid {pid}) ended; started again as pid {new}"),
-                        Err(e) => {
-                            service.ports.borrow_mut().clear();
-                            say!("supervisor: {label} ended and would not start again ({e}); its ports are closed");
-                        }
+                AfterEnd::Restart => match self.start_again(index) {
+                    Ok(new) => say!("supervisor: {label} (pid {pid}) ended; started again as pid {new}"),
+                    Err((e, true)) => {
+                        let wanted = self.services[index].wanted();
+                        self.services[index].starved = Some(Instant::now());
+                        say!(
+                            "supervisor: {label} (pid {pid}) ended and could not start again for want of memory ({e}; it lacked {wanted}); \
+                             it starts again once memory comes back, and its clients wait on its ports meanwhile"
+                        );
                     }
-                }
+                    Err((e, false)) => {
+                        self.close_for_good(index);
+                        say!("supervisor: {label} ended and would not start again ({e}{}); its ports are closed", unrecorded(&e));
+                    }
+                },
             }
         }
         let mut at = 0;
@@ -1952,6 +2039,80 @@ impl<'a> Supervisor<'a> {
         self.restarting = false;
     }
 
+    /// What each floor job holds of its floor once the boot is done: the margin
+    /// a floor's size is judged by.
+    fn say_floors(&self) {
+        let own = toyos::job::own().and_then(|job| job.account());
+        let services = self.services.iter().filter_map(|s| Some((s.label(), s.job.as_ref()?.account().ok()?)));
+        for (name, account) in own.ok().map(|a| ("the supervisor".to_string(), a)).into_iter().chain(services) {
+            if account.floor > 0 {
+                say!("supervisor: {name} holds {} KiB of its {} KiB floor, at most {} KiB so far", (account.committed + account.kernel) >> 10, account.floor >> 10, account.peak >> 10);
+            }
+        }
+    }
+
+    /// Service `index` serves no more: its ports close, and its job goes, and
+    /// with it any floor its row was held.
+    fn close_for_good(&mut self, index: usize) {
+        let service = &mut self.services[index];
+        service.ports.borrow_mut().clear();
+        service.starved = None;
+        service.job = None;
+    }
+
+    /// `Err` naming a storage service that waits for memory to start again.
+    fn storage_fed(&self) -> Result<(), String> {
+        match self.services.iter().find(|s| s.starved.is_some() && is_storage(s.program)) {
+            Some(starved) => Err(format!("{} waits for memory to start again", starved.label())),
+            None => Ok(()),
+        }
+    }
+
+    /// Start service `index` again on the ports and devices it kept, from
+    /// what it last ran. A refusal says whether its job was refused memory
+    /// meanwhile, which is what a wait for memory to come back can answer.
+    fn start_again(&mut self, index: usize) -> Result<u32, (StartError, bool)> {
+        let before = self.services[index].refusals();
+        let started = self.start_from(index);
+        started.map_err(|e| (e, self.services[index].refusals() > before))
+    }
+
+    fn start_from(&mut self, index: usize) -> Result<u32, StartError> {
+        let service = &self.services[index];
+        let (source, owed, program) = (service.source.clone(), service.devices.clone(), service.program);
+        self.make_state_dir(program);
+        self.desktop_for(index);
+        let block = self.block_args();
+        let service = &mut self.services[index];
+        let (system, syscap, connectors, grants) = (self.system, self.syscap, &self.connectors, &self.grants);
+        service.spawn(&source, &owed, block, system, syscap, connectors, grants, &self.minted, self.boot, &mut self.log)
+    }
+
+    /// Memory came back that a service waiting to start again lacked: each
+    /// is tried again, and one still short waits for the next time, said
+    /// with what it lacks now.
+    fn memory_returned(&mut self) {
+        for index in 0..self.services.len() {
+            let Some(since) = self.services[index].starved else { continue };
+            let label = self.services[index].label();
+            let waited = since.elapsed().as_millis();
+            match self.start_again(index) {
+                Ok(pid) => {
+                    self.services[index].starved = None;
+                    say!("supervisor: {label} started again as pid {pid} once memory came back, {waited} ms after its start was refused");
+                }
+                Err((e, true)) => {
+                    let wanted = self.services[index].wanted();
+                    say!("supervisor: {label} is still short of memory after {waited} ms ({e}; it lacks {wanted}); it waits on");
+                }
+                Err((e, false)) => {
+                    self.close_for_good(index);
+                    say!("supervisor: {label} would not start again once memory came back ({e}{}); its ports are closed", unrecorded(&e));
+                }
+            }
+        }
+    }
+
     /// Start the binary a failed swap replaced, or close the service's ports
     /// when that will not start either.
     fn restore(&mut self, index: usize, previous: &Source, owed: &[String]) {
@@ -1969,6 +2130,7 @@ impl<'a> Supervisor<'a> {
             Err(e) => {
                 service.swapping = false;
                 service.ports.borrow_mut().clear();
+                service.job = None;
                 swapped(
                     &name,
                     Word::Gone,
@@ -2188,6 +2350,10 @@ impl Supervisor<'_> {
                 command.arg(arg);
             }
         }
+
+        // Endowed before `prepare` reads the program, so its image is read for the
+        // job the child runs in, which keeps it as long as the child runs.
+        command.endow(JOB_LABEL, job.0[0].0);
 
         // On the worker, every file the launch reads: a path under `/apps` is
         // read off its package, and the program and its working directory may
@@ -2788,7 +2954,7 @@ fn start<'a>(
     // A storage row's own arguments first: a file server's role leads its argv.
     command.args(&args);
     command.args(&program.args);
-    let booting = matches!(output, Output::Boot(_));
+    let booting = matches!(output, Output::Boot { .. });
 
     // **Set here, over whatever a launching caller carried**: the row decides
     // where a program's home is, and a service's is made before this
@@ -2802,16 +2968,16 @@ fn start<'a>(
     // class nothing can mint again. A client picks whether a spawn fails — an
     // unreachable `cwd` is enough — so this is its path as much as a bug's.
     let mut held = Moved(Vec::new());
-    // **Every service the supervisor starts is a job of its own**, made with the
-    // system capability's `JOBS`; a launch's program joins the job its caller
+    // **Every service the supervisor starts is a job of its own**, which its
+    // caller made ([`job_for`]); a launch's program joins the job its caller
     // named, which is the caller's own unless it holds that right itself.
     let job = match &output {
-        Output::Boot(_) => {
-            syscap.new_job().map_err(|e| std::io::Error::other(format!("no job for it: {e:?}")))?.into_raw()
-        }
-        Output::Launch { job, .. } => *job,
+        Output::Boot { job, .. } | Output::Launch { job, .. } => *job,
     };
-    command.endow(JOB_LABEL, job.0);
+    // A launch's command was endowed its job before its image was read.
+    if matches!(output, Output::Boot { .. }) {
+        command.endow(JOB_LABEL, job.0);
+    }
     held.0.push(job);
     // Acceptors are given *back* rather than closed: a `serves` port whose
     // acceptor is gone can never be served again.
@@ -3001,8 +3167,8 @@ fn start<'a>(
     let mut ring: Option<SharedMemory> = None;
     let mut origins: Option<Acceptor> = None;
     let log: &mut Log = match output {
-        Output::Boot(log) => {
-            let own = ring.insert(new_ring()).as_handle();
+        Output::Boot { log, .. } => {
+            let own = ring.insert(ring_for(job)?).as_handle();
             command.inherit_handle(0, log.stdin.0);
             command.inherit_handle(1, own.0);
             command.inherit_handle(2, own.0);
@@ -3029,7 +3195,10 @@ fn start<'a>(
                         .is_ok_and(|stat| stat.file_type == FileType::SharedMemory);
                 match kind {
                     _ if caller_ring => {
-                        let own = ring.get_or_insert_with(new_ring).as_handle();
+                        let own = match &mut ring {
+                            Some(ring) => ring.as_handle(),
+                            None => ring.insert(ring_for(job)?).as_handle(),
+                        };
                         command.inherit_handle(fd, own.0);
                     }
                     toyos::fd::Kind::Handle => {
@@ -3095,7 +3264,7 @@ fn start<'a>(
 /// launch's caller's descriptors with any ring among them replaced — and, for
 /// a launch, the job its caller named, which `start` owns from its first line.
 enum Output<'l> {
-    Boot(&'l mut Log),
+    Boot { log: &'l mut Log, job: toyos::RawHandle },
     Launch { log: &'l mut Log, fds: &'l [(u32, toyos::RawHandle, toyos::fd::Kind)], job: toyos::RawHandle },
 }
 
@@ -3532,4 +3701,35 @@ fn system_row() -> Program {
         restart: true,
         ..Program::default()
     }
+}
+
+/// What a refusal no memory was recorded for is, beside its own words: a
+/// `ResourceExhausted` the job's account did not count is a limit, or the
+/// supervisor's own memory, and waiting for memory would not end it.
+fn unrecorded(e: &StartError) -> &'static str {
+    match e {
+        StartError::Other(e) if e.kind() == std::io::ErrorKind::OutOfMemory => {
+            "; its job was refused no memory, so it is a limit or the supervisor's own refusal"
+        }
+        _ => "",
+    }
+}
+
+/// A job of its own for a service or driver `row` starts: made with the system
+/// capability's `JOBS`, and held its row's floor, which only a signed image's
+/// `system.toml` declares. A floor refused is a start refused: a control path
+/// started without the memory it is owed would answer until memory ran out
+/// and then not.
+fn job_for(syscap: &SysCap, row: &Program) -> std::io::Result<toyos::job::Job> {
+    let job = syscap.new_job().map_err(memory_refused)?;
+    if row.memory_floor > 0 {
+        syscap.hold_floor(&job, row.memory_floor).map_err(|e| match e {
+            SyscallError::ResourceExhausted => std::io::Error::new(
+                std::io::ErrorKind::OutOfMemory,
+                format!("its floor of {} MiB cannot be held", row.memory_floor >> 20),
+            ),
+            other => std::io::Error::other(format!("its floor would not be held: {other:?}")),
+        })?;
+    }
+    Ok(job)
 }

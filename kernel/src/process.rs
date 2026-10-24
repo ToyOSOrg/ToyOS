@@ -340,7 +340,7 @@ impl ProcessData {
     /// charged on its own — its handles, threads, ranges and objects: its
     /// records, its place in the process table and among its parent's
     /// children, its strings at their bound, and its endowments at theirs.
-    pub fn charge(path: &str, env: &[u8]) -> Result<Charge, Exhausted> {
+    pub fn charge(job: &Arc<kernel::sched::job::Job>, path: &str, env: &[u8]) -> Result<Charge, Exhausted> {
         // The process table doubles, and its control byte beside each.
         let entry = 2 * (core::mem::size_of::<(Pid, ProcessEntry)>() + 1);
         // A thread table of one thread is a whole leaf.
@@ -357,7 +357,7 @@ impl ProcessData {
             + charge::array::<u8>(env.len());
         let endowments = charge::array::<EndowEntry>(toyos_abi::syscall::MAX_ENDOWMENTS)
             + charge::array::<u8>(toyos_abi::syscall::MAX_LABELS_LEN);
-        Charge::new(records + strings + endowments)
+        Charge::new(job, records + strings + endowments)
     }
 }
 
@@ -664,7 +664,7 @@ pub fn spawn_thread(
     // not a kernel bug.
     let (tls_alloc, thread_pointer, tp_offset) = block.publish(&parent_addr_space)?;
 
-    let (ks_alloc, ks_sp) = match alloc_kernel_stack(Start::Thread { entry, sp: stack_ptr, arg }) {
+    let (ks_alloc, ks_sp) = match alloc_kernel_stack(&job, Start::Thread { entry, sp: stack_ptr, arg }) {
         Some(ks) => ks,
         None => {
             tls_alloc.release(&parent_addr_space);

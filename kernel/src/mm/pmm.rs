@@ -1,22 +1,28 @@
 //! Physical memory: `kernel::frames`' allocator over every usable frame
 //! firmware's map names, its records laid out at boot in memory it manages.
 //!
-//! [`Frame`] owns one 4 KiB frame and [`PhysPage`] one 2 MiB superframe; each
-//! returns its memory when it drops. Pins ([`pin_range`]) are taken without
-//! the allocator's lock.
+//! [`Frame`] owns one 4 KiB frame, [`PhysPage`] one 2 MiB superframe of the
+//! kernel's and [`Run`] a run of an account's; each returns its memory when it
+//! drops. Pins ([`pin_range`]) are taken without the allocator's lock.
 //!
-//! What a process causes — a commitment, a page table, a pipe's ring, a run a
-//! device is lent, a [`charge`] of the kernel heap — is refused rather than
-//! take what the allocator holds back for the kernel; only the kernel's own
-//! allocations may take it.
+//! **What a process causes is counted to the job that caused it**, its
+//! account — a commitment, a page table, a pipe's ring, a run a device is
+//! lent, a [`charge`] of the kernel heap — and is refused rather than take
+//! what the allocator holds back for the kernel or for another account's
+//! floor ([`set_floor`]); only the kernel's own allocations may take what it
+//! keeps. A job refused memory can wait for it to come back: [`ready`]
+//! answers whether it has, and [`returned`] is posted once it has.
 
+use alloc::sync::Arc;
 use core::sync::atomic::{AtomicPtr, AtomicU32, AtomicU64, AtomicUsize, Ordering};
 
-use kernel::frames::{self, Frames, Pins, Super, Unpinned, FRAME, SUPER};
+use kernel::frames::{self, Frames, Pins, PoolSplit, Super, Unpinned, FRAME, SUPER};
+use kernel::sched::job::Job;
 pub use kernel::frames::Discarded;
 
 use super::{DirectMap, PAGE_2M};
 use crate::sync::Lock;
+use crate::watch::IrqWatch;
 use crate::MemoryMapEntry;
 
 /// Region of physical memory to exclude from the free list.
@@ -40,7 +46,7 @@ impl PhysPage {
 
 impl Drop for PhysPage {
     fn drop(&mut self) {
-        FRAMES.lock().as_mut().expect("pmm: a page outlived no allocator").free_super(self.phys, &pins());
+        with(|f| f.free_super(self.phys, &pins()));
     }
 }
 
@@ -56,57 +62,97 @@ impl Frame {
         DirectMap::from_phys(self.phys)
     }
 
-    /// Give the frame's ownership to whatever records `phys`, which must
-    /// return it through [`Frame::from_raw`].
+    /// Give the frame's ownership to whatever records `phys`: a page
+    /// committed to a job, which returns it through [`free_drawn`].
     pub fn into_raw(self) -> u64 {
         core::mem::ManuallyDrop::new(self).phys
-    }
-
-    /// # Safety
-    /// `phys` is a frame [`Frame::into_raw`] gave up, taken back once.
-    pub unsafe fn from_raw(phys: u64) -> Self {
-        Self { phys }
     }
 }
 
 impl Drop for Frame {
     fn drop(&mut self) {
-        FRAMES.lock().as_mut().expect("pmm: a frame outlived no allocator").free_frame(self.phys, &pins());
+        with(|f| f.free_frame(self.phys, &pins()));
     }
 }
 
 static FRAMES: Lock<Option<Frames<'static>>> = Lock::new(None);
 
-/// Give back `frames`, which leaves the space owned, under one hold of the
-/// allocator's lock.
+/// Posted once memory a refused job waits for has come back.
+static RETURNED: IrqWatch = IrqWatch::new();
+
+/// Run `f` on the allocator, and post [`RETURNED`] once its lock is let go
+/// if what `f` gave back met a waiter's want. The post frees nothing, so it
+/// may be made wherever memory is given back.
+fn with<R>(f: impl FnOnce(&mut Frames<'static>) -> R) -> R {
+    try_with(|frames| Some(f(frames))).expect("pmm: memory reached before the allocator")
+}
+
+/// [`with`], answering `None` before the allocator exists.
+fn try_with<R>(f: impl FnOnce(&mut Frames<'static>) -> Option<R>) -> Option<R> {
+    let (answer, returned) = {
+        let mut guard = FRAMES.lock();
+        let frames = guard.as_mut()?;
+        let answer = f(frames);
+        (answer, frames.take_returned())
+    };
+    if returned {
+        RETURNED.post_in_place();
+    }
+    answer
+}
+
+/// What a job waiting for memory to come back registers on.
+pub fn returned() -> &'static IrqWatch {
+    &RETURNED
+}
+
+/// Whether what `job` lacked when it was last refused is free for it now;
+/// if not, [`returned`] is posted once it is.
+pub fn ready(job: &Job) -> bool {
+    with(|f| f.ready(job.memory()))
+}
+
+/// Hold `bytes` back for `job`, which has none, however short every other
+/// job runs: `AlreadyExists` where it has one, and `ResourceExhausted`,
+/// nothing changed, where what is free now cannot hold it.
+pub fn hold_floor(job: &Job, bytes: u64) -> Result<(), toyos_abi::syscall::SyscallError> {
+    use toyos_abi::syscall::SyscallError;
+    with(|f| match job.memory().usage().floor {
+        0 if f.set_floor(job.memory(), bytes.div_ceil(FRAME)) => Ok(()),
+        0 => Err(SyscallError::ResourceExhausted),
+        _ => Err(SyscallError::AlreadyExists),
+    })
+}
+
+/// Let go of what [`hold_floor`] held back for `job`.
+pub fn release_floor(job: &Job) {
+    let set = with(|f| f.set_floor(job.memory(), 0));
+    assert!(set, "pmm: a floor let go of was refused");
+}
+
+/// Give back `frames` drawn for pages `job` committed and no longer does,
+/// under one hold of the allocator's lock.
 ///
 /// # Safety
 /// Each is a frame [`Frame::into_raw`] gave up, that no leaf on any CPU maps
 /// any more and nothing else frees.
-pub unsafe fn free_raw(frames: &[u64]) {
+pub unsafe fn free_drawn(job: &Job, frames: &[u64]) {
     let pins = pins();
-    let mut guard = FRAMES.lock();
-    let allocator = guard.as_mut().expect("pmm: a frame outlived no allocator");
-    for &phys in frames {
-        allocator.free_frame(phys, &pins);
+    with(|f| f.free_drawn(job.memory(), frames.iter().copied(), &pins));
+}
+
+/// Give back every frame of `frames`, drawn for pages `job` committed, under
+/// one hold of the allocator's lock.
+pub fn free_all(job: &Job, frames: alloc::boxed::Box<[Frame]>) {
+    let pins = pins();
+    with(|f| f.free_drawn(job.memory(), frames.iter().map(|frame| frame.phys), &pins));
+    // Given up only once the allocator's lock is let go: the list goes back
+    // to the heap, which may give a page back through it.
+    for frame in frames.into_vec() {
+        let _ = frame.into_raw();
     }
 }
 
-/// Give back every frame of `frames` under one hold of the allocator's lock.
-pub fn free_all(frames: alloc::boxed::Box<[Frame]>) {
-    let mut frames = frames.into_vec();
-    {
-        let pins = pins();
-        let mut guard = FRAMES.lock();
-        let allocator = guard.as_mut().expect("pmm: a frame outlived no allocator");
-        for frame in frames.drain(..) {
-            allocator.free_frame(frame.into_raw(), &pins);
-        }
-    }
-    // The list goes back to the heap only once the allocator's lock is let
-    // go, since the heap may give a page back through it.
-    drop(frames);
-}
 /// The pin counters, published once by [`init`]: where they are, how many,
 /// and the physical address the first one counts for.
 static PINS: (AtomicPtr<AtomicU32>, AtomicUsize, AtomicU64) =
@@ -215,30 +261,30 @@ fn kept_supers(frames: &Frames) -> u64 {
     (frames.usable_frames() / 256).max((16 << 20) / FRAME).div_ceil(SUPER / FRAME)
 }
 
-/// Promise `frames` to a commitment, which draws each with
+/// Promise `frames` to a commitment of `job`'s, which draws each with
 /// [`alloc_promised`] when it is first touched; `false`, and nothing
-/// promised, where that would take what the kernel holds back.
-pub fn promise(frames: u64) -> bool {
-    FRAMES.lock().as_mut().is_some_and(|f| f.promise(frames))
+/// promised, where that would take what is held back.
+pub fn promise(job: &Job, frames: u64) -> bool {
+    frames == 0 || with(|f| f.promise(job.memory(), frames))
 }
 
-/// Charge `bytes` of the kernel heap to what a process caused, before it is
-/// allocated; `false`, and nothing charged, where covering them would take
-/// what the kernel holds back. The heap grows into what charges reserve
-/// first, so an allocation a charge covers finds its room.
-pub fn charge(bytes: u64) -> bool {
-    FRAMES.lock().as_mut().is_some_and(|f| f.charge(bytes))
+/// Charge `bytes` more of the kernel heap to `job`, into `held`, before they
+/// are allocated; `false`, and nothing charged, where covering them would
+/// take what is held back. The heap grows into what charges reserve first, so
+/// an allocation a charge covers finds its room.
+pub fn charge(job: &Job, held: &mut PoolSplit, bytes: u64) -> bool {
+    with(|f| f.grow(job.memory(), held, bytes))
 }
 
-/// Give back a [`charge`].
-pub fn uncharge(bytes: u64) {
-    FRAMES.lock().as_mut().expect("pmm: a charge outlived no allocator").uncharge(bytes);
+/// Give back `bytes` of a [`charge`].
+pub fn uncharge(job: &Job, held: &mut PoolSplit, bytes: u64) {
+    with(|f| f.shrink(job.memory(), held, bytes));
 }
 
-/// Take back promises no commitment holds any more.
-pub fn unpromise(frames: u64) {
+/// Take back promises none of `job`'s commitments holds any more.
+pub fn unpromise(job: &Job, frames: u64) {
     if frames > 0 {
-        FRAMES.lock().as_mut().expect("pmm: a promise outlived no allocator").unpromise(frames);
+        with(|f| f.unpromise(job.memory(), frames));
     }
 }
 
@@ -249,38 +295,40 @@ pub fn unpromise(frames: u64) {
 /// `phys` is an owned leaf's frame, which no leaf on any CPU maps any more,
 /// unless this answers [`Discarded::Kept`].
 pub unsafe fn discard(phys: u64) -> Discarded {
-    FRAMES.lock().as_mut().expect("pmm: a frame outlived no allocator").discard(phys, &pins())
+    let pins = pins();
+    with(|f| f.discard(phys, &pins))
 }
 
 /// A zeroed frame a promise held, which the promise guarantees is free.
 pub fn alloc_promised() -> Frame {
-    let phys = FRAMES.lock().as_mut().expect("pmm: a promise outlived no allocator").alloc_promised();
-    let frame = Frame { phys };
+    let frame = Frame { phys: with(Frames::alloc_promised) };
     // SAFETY: just taken off the allocator, so unaliased, and inside the direct map.
     unsafe { core::ptr::write_bytes(frame.direct_map().as_mut_ptr::<u8>(), 0, FRAME as usize) };
     frame
 }
 
-/// A zeroed frame for a page table a process causes, refused rather than
-/// take what the kernel holds back: a process's tables are not promised.
-pub fn alloc_table_frame() -> Option<Frame> {
-    let phys = FRAMES.lock().as_mut()?.alloc_frame_for_process()?;
-    let frame = Frame { phys };
+/// A zeroed frame for a page table of `job`'s, refused rather than take what
+/// is held back: a process's tables are not promised. It goes back through
+/// [`free_table_frame`].
+pub fn alloc_table_frame(job: &Job) -> Option<u64> {
+    let phys = with(|f| f.alloc_table(job.memory()))?;
     // SAFETY: just taken off the allocator, so unaliased, and inside the direct map.
-    unsafe { core::ptr::write_bytes(frame.direct_map().as_mut_ptr::<u8>(), 0, FRAME as usize) };
-    Some(frame)
+    unsafe { core::ptr::write_bytes(DirectMap::from_phys(phys).as_mut_ptr::<u8>(), 0, FRAME as usize) };
+    Some(phys)
+}
+
+/// Give back a frame [`alloc_table_frame`] took for `job`.
+///
+/// # Safety
+/// No table links it any more, and no CPU can still walk into it.
+pub unsafe fn free_table_frame(job: &Job, phys: u64) {
+    let pins = pins();
+    with(|f| f.free_table(job.memory(), phys, &pins));
 }
 
 /// One zeroed 2 MiB page for the kernel's own use.
 pub fn alloc_page() -> Option<PhysPage> {
-    let phys = FRAMES.lock().as_mut()?.alloc_super()?;
-    Some(zeroed(PhysPage { phys }))
-}
-
-/// One zeroed 2 MiB page a process causes, such as a pipe's ring: refused
-/// rather than take what the kernel holds back.
-pub fn alloc_page_for_process() -> Option<PhysPage> {
-    let phys = FRAMES.lock().as_mut()?.alloc_run_for_process(1)?;
+    let phys = with(Frames::alloc_super)?;
     Some(zeroed(PhysPage { phys }))
 }
 
@@ -288,6 +336,46 @@ fn zeroed(page: PhysPage) -> PhysPage {
     // SAFETY: just taken off the allocator, so unaliased, and the direct map covers every address it can name.
     unsafe { core::ptr::write_bytes(page.direct_map().as_mut_ptr::<u8>(), 0, PAGE_2M as usize) };
     page
+}
+
+/// Physically contiguous 2 MiB pages a job holds, such as a pipe's ring or
+/// memory a device is lent; they go back, counted to it, when this drops.
+pub struct Run {
+    base: u64,
+    count: usize,
+    job: Arc<Job>,
+}
+
+impl Run {
+    /// `count` zeroed pages in a row for `job`, refused rather than take what
+    /// is held back; `None` for none, which a caller's bogus size and a
+    /// legitimate zero would both ask.
+    pub fn new(job: &Arc<Job>, count: usize) -> Option<Self> {
+        if count == 0 {
+            return None;
+        }
+        let base = with(|f| f.alloc_run_for(job.memory(), count))?;
+        // SAFETY: every superframe of the run was just taken off the allocator,
+        // so it is unaliased and within the direct map.
+        unsafe { core::ptr::write_bytes(DirectMap::from_phys(base).as_mut_ptr::<u8>(), 0, count * PAGE_2M as usize) };
+        Some(Self { base, count, job: Arc::clone(job) })
+    }
+
+    pub fn direct_map(&self) -> DirectMap {
+        DirectMap::from_phys(self.base)
+    }
+
+    /// Its pages.
+    pub fn count(&self) -> usize {
+        self.count
+    }
+}
+
+impl Drop for Run {
+    fn drop(&mut self) {
+        let pins = pins();
+        with(|f| f.free_run_for(self.job.memory(), self.base, self.count, &pins));
+    }
 }
 
 /// A 2 MiB superframe the kernel heap holds, holding what its last owner left
@@ -319,29 +407,19 @@ impl HeapPage {
 
 impl Drop for HeapPage {
     fn drop(&mut self) {
-        FRAMES.lock().as_mut().expect("pmm: a heap page outlived no allocator").free_heap(self.phys, &pins());
+        with(|f| f.free_heap(self.phys, &pins()));
     }
 }
 
 /// One zeroed 4 KiB frame.
 pub fn alloc_frame() -> Option<Frame> {
-    let phys = FRAMES.lock().as_mut()?.alloc_frame()?;
+    // Through `try_with`: a frame of a kept superframe frees the rest of it
+    // to the room, which may be what a waiter lacks.
+    let phys = try_with(Frames::alloc_frame)?;
     let frame = Frame { phys };
     // SAFETY: just taken off the allocator, so unaliased, and inside the direct map.
     unsafe { core::ptr::write_bytes(frame.direct_map().as_mut_ptr::<u8>(), 0, FRAME as usize) };
     Some(frame)
-}
-
-/// `count` physically contiguous zeroed 2 MiB pages a process causes, such as
-/// memory a device is lent: refused rather than take what the kernel holds
-/// back.
-pub fn alloc_contiguous(count: usize) -> Option<alloc::vec::Vec<PhysPage>> {
-    // `count` comes from userland, so a bogus 0 and a legitimate `mmap(0)` can't be told apart here — refuse, don't assert.
-    if count == 0 {
-        return None;
-    }
-    let base = FRAMES.lock().as_mut()?.alloc_run_for_process(count)?;
-    Some(run(base, count))
 }
 
 /// `count` physically contiguous zeroed 2 MiB pages for the kernel's own use,
@@ -349,11 +427,6 @@ pub fn alloc_contiguous(count: usize) -> Option<alloc::vec::Vec<PhysPage>> {
 pub fn alloc_contiguous_for_kernel(count: usize) -> Option<alloc::vec::Vec<PhysPage>> {
     assert!(count > 0, "pmm: a kernel run of no pages");
     let base = FRAMES.lock().as_mut()?.alloc_run(count)?;
-    Some(run(base, count))
-}
-
-/// The pages of a run just taken at `base`, zeroed.
-fn run(base: u64, count: usize) -> alloc::vec::Vec<PhysPage> {
     let mut pages = alloc::vec::Vec::with_capacity(count);
     for i in 0..count as u64 {
         let page = PhysPage { phys: base + i * PAGE_2M };
@@ -361,7 +434,7 @@ fn run(base: u64, count: usize) -> alloc::vec::Vec<PhysPage> {
         unsafe { core::ptr::write_bytes(page.direct_map().as_mut_ptr::<u8>(), 0, PAGE_2M as usize) };
         pages.push(page);
     }
-    pages
+    Some(pages)
 }
 
 /// Pin every managed frame `[phys, phys + len)` touches so none is reissued while a user-copy window covers it; `false`, and nothing pinned, on a pin-count overflow.
@@ -385,7 +458,7 @@ pub fn unpin_range(phys: u64, len: usize) {
 
 fn unpin(pins: &Pins, frame: u64) {
     if pins.unpin(frame) == Unpinned::Release {
-        FRAMES.lock().as_mut().expect("pmm: a pinned frame outlived no allocator").release(frame);
+        with(|f| f.release(frame));
     }
 }
 

@@ -181,7 +181,7 @@ fn seen_heap(name: &str) -> usize {
 
 /// The charge of a directory a map of `V` beside its path holds.
 fn dir_charge<V>(path: &str) -> Result<Charge, SyscallError> {
-    Ok(Charge::new(charge::map_entry::<String, V>() + charge::array::<u8>(path.len()))?)
+    Ok(Charge::current(charge::map_entry::<String, V>() + charge::array::<u8>(path.len()))?)
 }
 
 const _: () = assert!(core::mem::size_of::<(String, u64)>() == 32);
@@ -635,7 +635,7 @@ impl Vfs {
         }
 
         let (fs, fs_path) = self.resolve_fs(&mount, &subdir).ok_or(SyscallError::NotFound)?;
-        let mut listing = Charge::NONE;
+        let mut listing = Charge::none(&charge::current());
         let names = fs.list(&fs_path, MAX_LIST_ENTRIES, &mut listing)?;
         let child_prefix = format!("{fs_path}/");
         let is_file = names.contains(&fs_path);

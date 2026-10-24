@@ -50,11 +50,12 @@ impl TlsBlock {
         build_combined(modules, tls)
     }
 
-    /// Map the block into `space`, answering its mapping, the thread pointer,
+    /// Map the block into `space`, counted to its job, answering its mapping, the thread pointer,
     /// and where that pointer lies in the block. `None` when `space` has no
     /// room or no memory is left for it.
     pub fn publish(mut self, pt: &PageTables) -> Option<(KernelMapping, u64, usize)> {
-        let object = SharedMemObject::create(self.bytes.len() as u64).ok()?;
+        let job = alloc::sync::Arc::clone(pt.lock().job());
+        let object = SharedMemObject::create(&job, self.bytes.len() as u64).ok()?;
         let mut space = pt.lock();
         let at = space.reserve(object.size(), At::Anywhere(self.align), kernel::vm::Prot::None).ok()?;
         rebase(&mut self.bytes, self.tp_offset, at.raw());

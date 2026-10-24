@@ -244,7 +244,12 @@ fn connect_through(connector: &port::Connector) -> u64 {
     h.0 as u64
 }
 
-pub(super) fn sys_accept(h: RawHandle) -> u64 {
+pub(super) fn sys_accept(h: RawHandle, flags: u64) -> u64 {
+    let waits = match flags {
+        0 => true,
+        ACCEPT_NONBLOCK => false,
+        _ => return SyscallError::InvalidArgument.to_u64(),
+    };
     let acceptor = match process::with_process_data(|data| {
         data.handles.get::<port::Acceptor>(h, Rights::READ)
     }) {
@@ -269,6 +274,9 @@ pub(super) fn sys_accept(h: RawHandle) -> u64 {
         // A closed acceptor will never queue again, so returning here is the only alternative to parking forever.
         if acceptor.closed() {
             return SyscallError::Gone.to_u64();
+        }
+        if !waits {
+            return SyscallError::WouldBlock.to_u64();
         }
         let parkable = crate::scheduler::Parkable::at_entry();
         if watch::wait_until(
@@ -328,11 +336,20 @@ pub(super) fn sys_port_badge(
 }
 
 /// Make a shared region and hand back the one handle to it, carrying MAP, DUP and TRANSFER — naming it is what authorizes mapping it.
-/// `SHM_DEVICE` asks for memory a device can be lent; any other bit is refused.
-pub(super) fn sys_shm_create(size: u64, flags: u64) -> u64 {
-    let created = match flags {
-        0 => crate::object::shm::SharedMemObject::create(size),
-        SHM_DEVICE => crate::object::shm::SharedMemObject::create_run(size),
+/// `SHM_DEVICE` asks for memory a device can be lent, and `SHM_FOR_JOB`
+/// counts it to the job `job` names rather than the caller's; any other
+/// bit is refused.
+pub(super) fn sys_shm_create(size: u64, flags: u64, job: RawHandle) -> u64 {
+    let charged = match flags & SHM_FOR_JOB {
+        0 => crate::mm::charge::current(),
+        _ => match process::with_process_data(|data| data.handles.get::<crate::object::job::JobObject>(job, Rights::WRITE)) {
+            Ok(object) => alloc::sync::Arc::clone(object.job()),
+            Err(e) => return e.refuse(),
+        },
+    };
+    let created = match flags & !SHM_FOR_JOB {
+        0 => crate::object::shm::SharedMemObject::create(&charged, size),
+        SHM_DEVICE => crate::object::shm::SharedMemObject::create_run(&charged, size),
         _ => return SyscallError::InvalidArgument.to_u64(),
     };
     let object = match created {

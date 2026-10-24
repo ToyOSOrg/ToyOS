@@ -3,8 +3,12 @@
 //! [`JOB_LABEL`] to put its child in it; [`own`] is this process's own, and
 //! [`SysCap::new_job`](crate::syscap::SysCap::new_job) makes an independent
 //! one.
+//!
+//! **A job is also the account its memory is counted to** ([`Job::account`]),
+//! and a readable poll on its handle answers once memory it was refused is
+//! free for it again: what a launcher waits on before it tries again.
 
-use toyos_abi::syscall::{self, SyscallError};
+use toyos_abi::syscall::{self, AccountInfo, SyscallError};
 
 pub use toyos_abi::syscall::JOB_LABEL;
 
@@ -23,6 +27,13 @@ impl Job {
     pub fn duplicate(&self) -> Result<Job, SyscallError> {
         // SAFETY: the kernel installed this handle for this call and no other.
         syscall::dup(self.0.raw()).map(|raw| Job(unsafe { OwnedHandle::from_raw(raw) }))
+    }
+
+    /// What its account holds.
+    pub fn account(&self) -> Result<AccountInfo, SyscallError> {
+        let mut info = AccountInfo::default();
+        syscall::account_info(self.0.raw(), &mut info)?;
+        Ok(info)
     }
 
     /// Give up ownership, for a spawn that moves it.

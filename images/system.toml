@@ -11,6 +11,16 @@
 # day delete it.
 assets = ["assets"]
 
+# **Floors are the machine's protected capacity**: memory held back for a
+# control path's job however short every other job runs. Only a job that does
+# no ordinary client work gets one: the supervisor and ps2server. A floor
+# covers what the job holds as it runs, its 8 MiB main stack's commitment
+# among it, and the headroom it needs to keep answering. usbd has none, since
+# it drives disks too, so a USB keyboard is not protected
+# (`issues/no-physical-memory-fairness.md`).
+[supervisor]
+memory-floor-mib = 96
+
 # What the supervisor starts at boot. Program keys, not paths, and the order means
 # nothing: every port exists before any server runs.
 [boot]
@@ -103,6 +113,7 @@ login = true
 restart = true
 receives = ["input"]
 devices = ["isa:0060,0064:1,12"]
+memory-floor-mib = 24
 
 [programs.soundserver]
 service = true
