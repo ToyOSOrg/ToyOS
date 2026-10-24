@@ -94,7 +94,9 @@ const APPEND_COST: u64 = 1 + POINTER;
 /// journals at most. Each new node: its pointer, its bucket's change and its
 /// backpointer. A bucket that takes a node changes most when taken from
 /// free: its alloc key, the freespace range split about it and an LRU entry
-/// set; one that already holds nodes changes its alloc key and LRU entry.
+/// set; one taken from need_discard changes its alloc key, its need_discard
+/// entry and an LRU entry; one that already holds nodes, its alloc key and
+/// LRU entry.
 /// The old node: its bucket's change, most when it empties (alloc key, its
 /// LRU entry cleared, need_discard and its bucket_gens group), and its
 /// backpointer deleted. And the accounting keys.
@@ -106,10 +108,10 @@ pub(super) const fn fresh_cost(nodes: usize) -> u64 {
 
 /// Nodes the pointer update of a node rewritten to `nodes` new ones
 /// dirties at most: a leaf for each position [`fresh_cost`] changes. The
-/// parent; each new node's bucket's alloc, two freespace and one LRU
-/// position, and its backpointer; the old node's bucket's alloc, LRU, two
-/// need_discard (its sequence is not yet known) and bucket_gens positions,
-/// and its backpointer; and the accounting.
+/// parent; each new node's bucket's alloc, two freespace (or one
+/// need_discard) and one LRU position, and its backpointer; the old node's
+/// bucket's alloc, LRU, two need_discard (its sequence is not yet known)
+/// and bucket_gens positions, and its backpointer; and the accounting.
 pub(super) const fn fresh_nodes(nodes: usize) -> usize {
     1 + 5 * nodes + 5 + 1 + ACCOUNTED as usize
 }
@@ -132,7 +134,12 @@ pub(super) const MAX_REWRITE: usize = MAX_GROUPS + 1;
 
 /// New nodes a rewrite that is not of an oversized node writes at most: a
 /// node no fuller than it holds spreads at two thirds into two, and a root.
-const COMMON_REWRITE: usize = 3;
+/// So does one this writer filled past full: it holds at most a node's keys
+/// and two transactions', which fit in two nodes.
+pub(super) const COMMON_REWRITE: usize = 3;
+
+/// Node slots one batch can take: its common rewrites, or one alone.
+const BATCH_SLOTS: u64 = (if BATCH * COMMON_REWRITE > MAX_REWRITE { BATCH * COMMON_REWRITE } else { MAX_REWRITE }) as u64;
 
 /// Cache room reclaim's transaction takes past the limit, for the leaves
 /// it dirties: every position of a rewrite to one node in a leaf of its
@@ -177,6 +184,7 @@ impl<D: BlockDev> Mount<D> {
     }
 
     async fn write_batch_once(&self, order: Order) -> Result<Vec<Plan>> {
+        self.make_room().await?;
         let plans = {
             let _slot = self.slot(Class::Reclaim).await;
             self.plan(order).await?
@@ -221,7 +229,8 @@ impl<D: BlockDev> Mount<D> {
         // Closed entries hold pipeline depth that only writing them returns:
         // reclaim never waits on what it would itself have to do.
         self.flush_closed().await?;
-        self.admit(Class::Reclaim, bound, nodes).await?;
+        // Reclaim's room for nodes is its own share; no draw limits it.
+        self.admit(Class::Reclaim, Draw::Freeing, bound, nodes).await?;
         let _slot = self.slot(Class::Reclaim).await;
         let mut txn = Txn::default();
         let out = self.point(&mut txn, plans).await;
@@ -354,49 +363,125 @@ impl<D: BlockDev> Mount<D> {
         Ok((Planned { btree, level, min, max, seq, sector: at.0, gen: at.1, sectors, keys }, bytes))
     }
 
-    /// The next free node slot, and its bucket's generation, from the open
-    /// bucket or else the lowest free bucket the mount has not taken.
+    /// Room for a batch's new nodes now, outside the slot: buckets emptied
+    /// made durable, and traversals that may still lead into them waited
+    /// out. A volume short past that plans anyway; admission keeps room for
+    /// reclaim, so a plan that finds no slot is a bug, and stops the mount.
+    async fn make_room(&self) -> Result<()> {
+        loop {
+            let blocked = self.readers.borrow_mut().blocked();
+            let (ready, returning) = {
+                let st = self.st.borrow();
+                (st.alloc.ready(blocked), st.alloc.returning())
+            };
+            if ready >= BATCH_SLOTS {
+                return Ok(());
+            }
+            if returning {
+                self.commit().await?;
+            } else if blocked > 0 {
+                self.written.until(|| self.readers.borrow_mut().blocked() < blocked || self.st.borrow().read_only.is_some()).await;
+                self.check_writable()?;
+            } else {
+                return Ok(());
+            }
+        }
+    }
+
+    /// The next node slot, and its bucket's generation: the open bucket's,
+    /// or the first of a bucket taken.
     async fn alloc_sector(&self) -> Result<(u64, u8)> {
         let bucket = u64::from(self.sb.member.bucket_sectors);
         let node = u64::from(self.sb.node_sectors());
         loop {
-            {
-                let mut st = self.st.borrow_mut();
-                if let Some((b, slot, gen)) = st.alloc.open {
-                    if slot < bucket / node {
-                        st.alloc.open = Some((b, slot + 1, gen));
-                        return Ok((b * bucket + slot * node, gen));
-                    }
-                }
+            if let Some(slot) = self.st.borrow_mut().alloc.next_slot(bucket, node) {
+                return Ok(slot);
             }
-            let mut free = None;
-            Source::walk(self, Btree::Freespace, Bpos::MIN, |k, _| {
-                let end = k.pos.offset & ((1 << 56) - 1);
-                let st = self.st.borrow();
-                free = (end.saturating_sub(u64::from(k.size))..end).find(|b| !st.alloc.taken.contains(b));
-                Ok(free.is_none())
-            })
-            .await?;
-            let b = free.ok_or(Error::NoSpace("no free bucket for a btree node"))?;
-            // Freespace is derived; the bucket's alloc key, and the nodes
-            // the mount holds, must agree it is free.
-            let gen = match Source::get(self, Btree::Alloc, Bpos::new(0, b, 0)).await? {
-                Some((k, v)) if k.kind == kind::ALLOC_V4 => {
-                    let a = AllocV4::decode(&v)?;
-                    if a.data_type != data_type::FREE || a.dirty != 0 {
-                        return Err(Error::Corrupt("a bucket freespace lists whose alloc key holds data"));
-                    }
-                    a.gen
-                }
-                Some(_) => return Err(Error::Unsupported("alloc key before alloc_v4")),
-                None => 0,
-            };
-            let mut st = self.st.borrow_mut();
-            if st.cache.any_between(b * bucket, (b + 1) * bucket) {
-                return Err(Error::Corrupt("a bucket freespace lists holding a cached btree node"));
+            self.take_bucket().await?;
+        }
+    }
+
+    /// Opens an empty bucket for nodes: the oldest whose emptying is durable
+    /// and that no traversal may lead into (A6.14, A6.19), else the lowest
+    /// free one. Its alloc key must agree it is empty, and no backpointer
+    /// lead into it; the nodes cached there are unreachable, and go.
+    async fn take_bucket(&self) -> Result<()> {
+        let durable = self.st.borrow().journal.durable;
+        let mut emptied = None;
+        Source::walk(self, Btree::NeedDiscard, Bpos::MIN, |k, _| {
+            if k.pos.inode > durable {
+                return Ok(false);
             }
-            st.alloc.taken.insert(b);
-            st.alloc.open = Some((b, 0, gen));
+            // The offset is a device and bucket (A6.2); one device.
+            if k.pos.offset >> 48 != 0 {
+                return Err(Error::Corrupt("a need_discard key of another device"));
+            }
+            let b = k.pos.offset;
+            if k.kind == kind::SET && !self.st.borrow().alloc.is_taken(b) && !self.readers.borrow_mut().blocks(b) {
+                emptied = Some((b, k.pos.inode));
+            }
+            Ok(emptied.is_none())
+        })
+        .await?;
+        let b = match emptied {
+            Some((b, _)) => b,
+            None => {
+                let mut free = None;
+                Source::walk(self, Btree::Freespace, Bpos::MIN, |k, _| {
+                    let end = k.pos.offset & ((1 << 56) - 1);
+                    let st = self.st.borrow();
+                    free = (end.saturating_sub(u64::from(k.size))..end).find(|&b| !st.alloc.is_taken(b));
+                    Ok(free.is_none())
+                })
+                .await?;
+                free.ok_or(Error::NoSpace("no free bucket for a btree node"))?
+            }
+        };
+        // The indexes are derived; the bucket's alloc key, its backpointers
+        // and the nodes the mount holds must agree it is empty.
+        let bucket = match Source::get(self, Btree::Alloc, Bpos::new(0, b, 0)).await? {
+            Some((k, v)) if k.kind == kind::ALLOC_V4 => {
+                let a = AllocV4::decode(&v)?;
+                Bucket::of(&a, a.flags, a.io_time_write, a.journal_seq_nonempty)
+            }
+            Some(_) => return Err(Error::Unsupported("alloc key before alloc_v4")),
+            None => Bucket::HOLE,
+        };
+        let agrees = match emptied {
+            Some((_, seq)) => bucket.data_type == data_type::NEED_DISCARD && bucket.journal_seq_empty == seq,
+            None => bucket.data_type == data_type::FREE,
+        };
+        if !agrees || bucket.dirty != 0 {
+            return Err(Error::Corrupt("a bucket an index lists as empty whose alloc key holds otherwise"));
+        }
+        let sectors = u64::from(self.sb.member.bucket_sectors);
+        let (start, end) = ((b * sectors) << self.bp_shift(), ((b + 1) * sectors) << self.bp_shift());
+        let mut pointed = false;
+        Source::walk(self, Btree::Backpointers, Bpos::new(0, start, 0), |k, _| {
+            pointed = k.pos.inode == 0 && k.pos.offset < end;
+            Ok(false)
+        })
+        .await?;
+        if pointed {
+            return Err(Error::Corrupt("a bucket an index lists as empty that a backpointer leads into"));
+        }
+        let mut st = self.st.borrow_mut();
+        if !st.cache.drop_unreachable(b * sectors, (b + 1) * sectors) {
+            return Err(Error::Corrupt("a bucket an index lists as empty holding a changed btree node"));
+        }
+        st.alloc.take(b, bucket.reused_gen());
+        #[cfg(test)]
+        {
+            st.alloc.reused += usize::from(emptied.is_some());
+        }
+        Ok(())
+    }
+
+    /// Low bits of a backpointer's offset below its sector (A6.25).
+    fn bp_shift(&self) -> u32 {
+        match self.sb.flag(6, 40, 8) {
+            0 => 10,
+            s => s as u32,
         }
     }
 
@@ -499,14 +584,11 @@ impl<D: BlockDev> Mount<D> {
         if added {
             let clock = self.st.borrow().clocks[1];
             after.fill(node, clock, bucket_sectors as u32)?;
+            txn.filled.push(b);
         } else {
             after.drain(node)?;
         }
-        let shift = match self.sb.flag(6, 40, 8) {
-            0 => 10,
-            s => s as u32,
-        };
-        let pos = Bpos::new(0, sector << shift, 0);
+        let pos = Bpos::new(0, sector << self.bp_shift(), 0);
         let bp = added.then(|| (Key::new(kind::BACKPOINTER, pos), value::backpointer(btree as u8, level + 1, data_type::BTREE, gen, node, max).to_vec()));
         self.put(txn, Btree::Backpointers, 0, pos, bp).await?;
         let sign = |c: u64| if added { c } else { c.wrapping_neg() };
@@ -550,6 +632,10 @@ impl<D: BlockDev> Mount<D> {
         }
         if before.data_type == data_type::FREE && after.data_type != data_type::FREE {
             self.take_free(txn, b).await?;
+        }
+        if before.data_type == data_type::NEED_DISCARD && after.data_type != data_type::NEED_DISCARD {
+            let pos = Bpos::new(before.journal_seq_empty, b, 0);
+            self.put(txn, Btree::NeedDiscard, 0, pos, None).await?;
         }
         let (old, new) = (before.lru(b, bucket_sectors), after.lru(b, bucket_sectors));
         if old != new {

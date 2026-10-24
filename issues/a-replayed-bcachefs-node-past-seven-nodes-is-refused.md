@@ -21,7 +21,7 @@ read-write mount opens it, but its first write that needs the leaf split
 stops the mount, read-only by name: "a btree node whose keys fill more than
 seven nodes". `tests/journal.rs`,
 `a_replayed_leaf_past_seven_nodes_is_read_but_not_mounted_read_write`, builds
-the case: 1 430 inodes in 13 entries of a 32 MiB volume's window.
+the case: about 2 860 inodes in 13 entries of a 64 MiB volume's window.
 
 **Exit.** A split that spans several reclaim transactions for a node no
 single transaction can split. For instance, write the window's keys out as a

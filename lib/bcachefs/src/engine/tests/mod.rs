@@ -1257,6 +1257,7 @@ fn read_file_reads_a_file_whole_and_refuses_other_nodes() {
 }
 
 mod admission;
+mod buckets;
 mod crash;
 mod interleave;
 mod journal;

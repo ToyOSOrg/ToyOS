@@ -177,9 +177,25 @@ fn judge(image: &[u8], states: &[BTreeSet<Vec<u8>>], applied: usize, committed: 
 /// crash state sampled `samples` times after each request.
 fn ops_survive_a_crash_anywhere(encryption: Option<Encryption>, ops: &[Op], every: usize, samples: u64) {
     let passphrase = encryption.as_ref().map(|e| e.passphrase.to_vec());
-    let image = formatted(64 << 20, encryption).into_inner();
+    ops_survive_a_crash_on(formatted(64 << 20, encryption).into_inner(), passphrase.as_deref(), MEMORY, ops, every, samples);
+}
+
+/// [`ops_survive_a_crash_anywhere`] on `image`, mounted with `options`; how
+/// many buckets the mount took again after an emptying.
+fn ops_survive_a_crash_on(image: Vec<u8>, passphrase: Option<&[u8]>, options: MountOptions, ops: &[Op], every: usize, samples: u64) -> usize {
+    let passphrase = passphrase.map(<[u8]>::to_vec);
+    // The names the volume holds already stay through every state.
+    let initial: BTreeSet<Vec<u8>> = {
+        let dev = Bytes::new(image.clone());
+        let v = match &passphrase {
+            Some(p) => block_on_ready(Volume::unlock(&dev, p, MIN_LIMITS)),
+            None => block_on_ready(Volume::open(&dev)),
+        }
+        .unwrap();
+        block_on_ready(v.readdir(v.root(), 0, 10_000)).unwrap().0.into_iter().map(|e| e.name).collect()
+    };
     let model = Model::new(image, 512);
-    let states = names_after(ops);
+    let states: Vec<BTreeSet<Vec<u8>>> = names_after(ops).into_iter().map(|s| s.union(&initial).cloned().collect()).collect();
     // Operations begun, so possibly applied, and committed.
     let applied = Cell::new(0);
     let committed = Cell::new(0);
@@ -197,8 +213,8 @@ fn ops_survive_a_crash_anywhere(encryption: Option<Encryption>, ops: &[Op], ever
         }),
     };
     let mount = match &passphrase {
-        Some(p) => block_on_ready(Mount::unlock(&dev, p, MIN_LIMITS, MEMORY, random())),
-        None => block_on_ready(Mount::open(&dev, MEMORY, random())),
+        Some(p) => block_on_ready(Mount::unlock(&dev, p, MIN_LIMITS, options, random())),
+        None => block_on_ready(Mount::open(&dev, options, random())),
     }
     .unwrap();
     Executor::new().block_on(
@@ -214,8 +230,10 @@ fn ops_survive_a_crash_anywhere(encryption: Option<Encryption>, ops: &[Op], ever
         },
         || panic!("stalled"),
     );
+    let reused = mount.reused();
     block_on_ready(mount.unmount()).unwrap();
     assert!(judged.get() > 500, "{} crash states judged", judged.get());
+    reused
 }
 
 fn creates(n: usize) -> Vec<Op> {
@@ -253,3 +271,159 @@ fn encrypted_namespace_operations_survive_a_crash_at_every_request() {
     ops_survive_a_crash_anywhere(Some(Encryption { passphrase: &secret, kdf: MIN_KDF }), &mixed(70), 7, 24);
 }
 
+
+/// A cache whose dirty-node limit is one transaction's footprint: reclaim
+/// writes before every operation, so leaves fill and rewrite.
+pub(super) const PRESSED: MountOptions = MountOptions { cache_nodes: 54 };
+
+/// `files` files made, then each renamed back and forth `rounds` times:
+/// the same leaves rewritten again and again, each rewrite emptying the
+/// bucket of the node it replaces.
+fn renames(files: usize, rounds: usize) -> Vec<Op> {
+    let mut ops: Vec<Op> = (0..files).map(|i| Op::Create(format!("a{i}").into_bytes())).collect();
+    for round in 0..rounds {
+        let (from, to) = if round % 2 == 0 { ("a", "b") } else { ("b", "a") };
+        ops.extend((0..files).map(|i| Op::Rename(format!("{from}{i}").into_bytes(), format!("{to}{i}").into_bytes())));
+    }
+    ops
+}
+
+/// Allocation pressure: a volume a file has filled to a few hundred empty
+/// buckets, its leaves rewritten until emptied buckets are taken again, a
+/// crash at every request. Every crash state replays to a prefix holding
+/// every commit and checks clean: a bucket is written again only once its
+/// emptying is durable. Red when one is reused before.
+#[test]
+fn renames_reusing_buckets_on_a_nearly_full_volume_survive_a_crash_at_every_request() {
+    let mut data = Vec::new();
+    let image = super::buckets::nearly_full(&mut data, 400).into_inner();
+    let reused = ops_survive_a_crash_on(image, None, PRESSED, &renames(8, 8), 4, 8);
+    assert!(reused > 4, "{reused} buckets taken again");
+}
+
+/// The same on DATA's encrypted form, on a volume with no data.
+#[test]
+fn encrypted_renames_reusing_buckets_survive_a_crash_at_every_request() {
+    let secret = hex_secret();
+    let image = formatted(64 << 20, Some(Encryption { passphrase: &secret, kdf: MIN_KDF })).into_inner();
+    let reused = ops_survive_a_crash_on(image, Some(&secret), PRESSED, &renames(8, 6), 4, 6);
+    assert!(reused > 4, "{reused} buckets taken again");
+}
+
+/// The window upstream's reader takes (A2-torn-newest A2.T1, A2.13): every
+/// flush entry's header last sequence, its checksum good or not, drops each
+/// entry below it as the journal is read; then, from the highest down, no-flush
+/// entries are skipped, the first bad flush entry is skipped as torn, and the
+/// next flush entry is `F`. `None` when none is left, which upstream cannot
+/// recover from.
+fn upstream_f(image: &[u8], passphrase: Option<&[u8]>) -> core::result::Result<Option<u64>, String> {
+    let dev = Bytes::new(image.to_vec());
+    let sb = block_on_ready(super::super::read::read_superblock(&dev)).map_err(|e| format!("superblock: {e:?}"))?;
+    let key = match passphrase {
+        Some(p) => Some(super::super::crypt::MasterKey::unwrap(sb.crypt.as_ref().ok_or("no crypt field")?, &sb.header.internal_uuid, p, MIN_LIMITS).map_err(|e| format!("unlock: {e:?}"))?),
+        None => None,
+    };
+    let scan = block_on_ready(super::super::journal::scan(&dev, &sb, key.as_ref())).map_err(|e| format!("scan: {e:?}"))?;
+    let floor = scan.entries.values().filter(|e| e.flush).map(|e| e.last_seq).max().unwrap_or(0);
+    let mut torn = false;
+    for e in scan.entries.values().rev().filter(|e| e.seq >= floor && e.flush) {
+        if !e.good && !torn {
+            torn = true;
+            continue;
+        }
+        // A second bad flush entry ends the walk with no `F` (A2.13 step 5).
+        return Ok(e.good.then_some(e.seq));
+    }
+    Ok(None)
+}
+
+/// `run` against a model of `image`, every crash state after each request
+/// judged by upstream's window: an unclean one always leaves `F`.
+fn upstream_finds_f_at_every_request(image: Vec<u8>, passphrase: Option<&[u8]>, run: impl AsyncFnOnce(&Mount<&Watched>)) -> u64 {
+    let model = Model::new(image, 512);
+    let unclean = Cell::new(0u64);
+    let seed = Cell::new(0xa224_0000u64);
+    let dev = Watched {
+        model: &model,
+        after: Box::new(|m: &Model| {
+            seed.set(seed.get() + 1);
+            m.check(64, seed.get(), |image| {
+                let dev = Bytes::new(image.to_vec());
+                let clean = block_on_ready(super::super::read::read_superblock(&dev)).map_err(|e| format!("{e:?}"))?.clean_flag();
+                if clean {
+                    return Ok(());
+                }
+                unclean.set(unclean.get() + 1);
+                match upstream_f(image, passphrase)? {
+                    Some(_) => Ok(()),
+                    None => {
+                        let dev = Bytes::new(image.to_vec());
+                        let sb = block_on_ready(super::super::read::read_superblock(&dev)).unwrap();
+                        let scan = block_on_ready(super::super::journal::scan(&dev, &sb, None)).ok();
+                        let entries: Vec<_> = scan.iter().flat_map(|s| s.entries.values()).map(|e| (e.seq, e.last_seq, e.flush, e.good)).collect();
+                        Err(format!("unclean, and upstream's reader finds no entry to replay: {entries:?}"))
+                    }
+                }
+            })
+            .unwrap_or_else(|v| panic!("{v}"));
+        }),
+    };
+    let mount = match passphrase {
+        Some(p) => block_on_ready(Mount::unlock(&dev, p, MIN_LIMITS, PRESSED, random())),
+        None => block_on_ready(Mount::open(&dev, PRESSED, random())),
+    }
+    .unwrap();
+    Executor::new().block_on(run(&mount), || panic!("stalled"));
+    block_on_ready(mount.unmount()).unwrap();
+    unclean.get()
+}
+
+/// A2.24: no flush entry names a sequence past the newest one durable when
+/// it was written, so a torn newest entry leaves upstream the one before it.
+/// Renames whose reclaim writes before each, a commit after every two, a
+/// crash at every request: in every unclean state upstream's reader finds
+/// an entry to replay. And on the medium no entry names itself but the first
+/// after mkfs's empty journal (A2.25), so only that one and the unmount's
+/// last pay for being written header last. Red when an entry's last
+/// sequence may be its own.
+#[test]
+fn a_torn_newest_entry_leaves_upstream_an_entry_to_replay() {
+    use super::super::read::Source;
+    for passphrase in [None, Some(hex_secret())] {
+        let p = passphrase.as_deref();
+        let image = formatted(64 << 20, p.map(|passphrase| Encryption { passphrase, kdf: MIN_KDF })).into_inner();
+        let ops = renames(6, 4);
+        let unclean = upstream_finds_f_at_every_request(image, p, async |m| {
+            for (i, op) in ops.iter().enumerate() {
+                apply(m, op).await;
+                if i % 2 == 1 {
+                    m.commit().await.unwrap();
+                }
+            }
+            let scan = super::super::journal::scan(Source::dev(m), Source::superblock(m), Source::master_key(m)).await.unwrap();
+            let named: Vec<u64> = scan.entries.values().filter(|e| e.good && e.flush && e.last_seq == e.seq && e.seq != 1).map(|e| e.seq).collect();
+            assert!(scan.entries.len() > 10 && named.is_empty(), "entries naming themselves: {named:?}");
+        });
+        assert!(unclean > 200, "{unclean} unclean states judged");
+    }
+}
+
+/// A2.25: the superblock goes unclean only once a flush entry is durable,
+/// on a volume whose journal is empty (mkfs's) and on one holding the entry
+/// its `clean` names. Crashed at every request of going read-write and the
+/// first commit, every unclean state leaves upstream an entry to replay. Red
+/// when the superblock goes unclean before the entry `clean` names is
+/// written.
+#[test]
+fn the_superblock_goes_unclean_only_once_an_entry_is_durable() {
+    let fresh = formatted(64 << 20, None);
+    let reopened = formatted(64 << 20, None);
+    block_on_ready(block_on_ready(Mount::open(&reopened, MEMORY, random())).unwrap().unmount()).unwrap();
+    for image in [fresh.into_inner(), reopened.into_inner()] {
+        let unclean = upstream_finds_f_at_every_request(image, None, async |m| {
+            m.create(m.root(), b"f", New::File, OWNER, NOW).await.unwrap();
+            m.commit().await.unwrap();
+        });
+        assert!(unclean > 0, "no unclean state judged");
+    }
+}

@@ -14,8 +14,14 @@ pub(super) const OWNER: Owner = Owner { perm: 0o644, uid: 0, gid: 0 };
 /// 2025-10-23, nanoseconds: every operation's time.
 pub(super) const NOW: i64 = 1_761_177_600_000_000_000;
 
+/// A random source for one mount, its stream unlike every other mount's in
+/// this test, as the kernel's is: a mount after a crash that drew the
+/// crashed one's node sequences again could write a node over one of its
+/// own with the same sequence, which real randomness all but never does.
 pub(super) fn random() -> Box<dyn Random> {
-    Box::new(Seeded(0x0b5e_ed05))
+    std::thread_local!(static MOUNTS: core::cell::Cell<u64> = const { core::cell::Cell::new(0) });
+    let n = MOUNTS.with(|m| m.replace(m.get() + 1));
+    Box::new(Seeded(0x0b5e_ed05 ^ n.wrapping_mul(0x9e37_79b9_7f4a_7c15)))
 }
 
 /// `f` against `dev` mounted read-write; a stall, every task waiting on what
@@ -79,13 +85,14 @@ fn leaves_and_roots_split_and_their_buckets_and_accounting_derive() {
     assert_eq!(block_on_ready(fsck(&v)).unwrap(), []);
 }
 
-/// The upstream volume left mid-write (BB-A2-1), mounted read-write: its
-/// window replayed, the journal moved on by the post-crash skip with the
-/// skipped sequences blacklisted, every node it writes a fresh one, then
-/// unmounted clean.
+/// The upstream volume left mid-write (BB-A2-1) on 64 MiB, of 32 KiB nodes,
+/// mounted read-write: its window replayed past the unflushed entries after
+/// it, the journal moved on by the post-crash skip with the skipped
+/// sequences blacklisted, every node it writes a fresh one, then unmounted
+/// clean.
 #[test]
 fn the_unclean_fixture_mounts_read_write_past_the_skip_and_unmounts_clean() {
-    let dev = fixture("unclean.img.gz");
+    let dev = fixture("unclean-32k-nodes.img.gz");
     mounted(&dev, async |m: &Mount<&Image>| {
         for i in 0..20 {
             m.create(m.root(), format!("toyos{i}").as_bytes(), New::File, OWNER, NOW).await.unwrap();
@@ -95,15 +102,28 @@ fn the_unclean_fixture_mounts_read_write_past_the_skip_and_unmounts_clean() {
     let v = block_on_ready(Volume::open(&dev)).unwrap();
     let sb = v.superblock();
     assert!(sb.clean_flag());
-    assert_eq!(sb.blacklist, [(63, 63 + 4096)], "F was 62, the newest entry found 62");
-    assert!(sb.clean.as_ref().unwrap().journal_seq > 63 + 4096);
+    assert_eq!(sb.blacklist, [(19, 23 + 4096)], "F was 18, the newest entry found 22");
+    assert!(sb.clean.as_ref().unwrap().journal_seq > 23 + 4096);
+    // As upstream's own FUSE mount of the fixture reads it: f1 to f139
+    // whole, f140 made but empty; the rest were in the unflushed entries.
     let (entries, _) = block_on_ready(v.readdir(v.root(), 0, 1000)).unwrap();
-    assert_eq!(entries.len(), 200 + 20 + 1, "the fixture's 200, these 20 and lost+found");
-    for i in 1..=200 {
+    assert_eq!(entries.len(), 140 + 20 + 1, "the fixture's 140, these 20 and lost+found");
+    for i in 1..=139 {
         assert_eq!(read_all(&v, path(&v, &format!("f{i}"))).unwrap(), format!("{i}\n").into_bytes(), "f{i}");
     }
+    assert_eq!(read_all(&v, path(&v, "f140")).unwrap(), b"");
     let found = block_on_ready(fsck(&v)).unwrap();
     assert_eq!(found, UPSTREAM_ONLY, "only what upstream itself writes otherwise");
+}
+
+/// The same on 32 MiB, of 16 KiB nodes, is read, its window replayed, and
+/// refused read-write by name.
+#[test]
+fn the_unclean_fixture_of_16_kib_nodes_is_read_and_refused_read_write() {
+    let dev = fixture("unclean.img.gz");
+    assert_eq!(block_on_ready(Mount::open(&dev, MEMORY, random())).err(), Some(Error::Unsupported("writing a volume of btree nodes under 32 KiB")));
+    let v = block_on_ready(Volume::open(&dev)).unwrap();
+    assert_eq!(read_all(&v, path(&v, "f200")).unwrap(), b"200\n");
 }
 
 /// What this writer does not handle in full is refused read-write by name
@@ -212,10 +232,10 @@ fn a_clean_volume_with_an_empty_journal_survives_a_crash_going_read_write() {
 }
 
 /// A volume of 512-byte blocks, which upstream formats below 1 GiB (A1.46),
-/// or of nodes under 16 KiB, is refused by name: every write is of whole
-/// 4 KiB device blocks, and a smaller node cannot take a split's keys
-/// (`MAX_REWRITE`). A clean volume whose member resumes its journal off a
-/// block is corrupt.
+/// or of nodes under 32 KiB, is refused by name: every write is of whole
+/// 4 KiB device blocks, and a smaller node leaves too little room for the
+/// appends that let reclaim's own writes settle (`MIN_NODE`). A clean volume
+/// whose member resumes its journal off a block is corrupt.
 #[test]
 fn small_blocks_and_a_journal_position_off_a_block_are_refused() {
     use super::super::superblock::field_type;
@@ -224,10 +244,12 @@ fn small_blocks_and_a_journal_position_off_a_block_are_refused() {
     let err = block_on_ready(Mount::open(&dev, MEMORY, random())).err();
     assert_eq!(err, Some(Error::Unsupported("writing a volume of blocks under 4 KiB")));
 
-    let dev = formatted(64 << 20, None);
-    rewrite_superblock(&dev, |h, _| h.flags[0] = h.flags[0] & !(0xffff << 12) | 8 << 12);
-    let err = block_on_ready(Mount::open(&dev, MEMORY, random())).err();
-    assert_eq!(err, Some(Error::Unsupported("writing a volume of btree nodes under 16 KiB")));
+    for sectors in [8, 32] {
+        let dev = formatted(64 << 20, None);
+        rewrite_superblock(&dev, |h, _| h.flags[0] = h.flags[0] & !(0xffff << 12) | sectors << 12);
+        let err = block_on_ready(Mount::open(&dev, MEMORY, random())).err();
+        assert_eq!(err, Some(Error::Unsupported("writing a volume of btree nodes under 32 KiB")), "{sectors} sectors");
+    }
 
     let dev = formatted(64 << 20, None);
     rewrite_superblock(&dev, |_, fields| {
@@ -327,7 +349,7 @@ fn pack_accounting_leaf(dev: &Image) -> u64 {
 /// keys need, and every key reads back.
 #[test]
 fn a_packed_leaf_past_a_node_once_unpacked_is_read_then_split() {
-    let dev = formatted(32 << 20, None);
+    let dev = formatted(64 << 20, None);
     let extra = pack_accounting_leaf(&dev);
     let m = block_on_ready(Mount::open(&dev, MEMORY, random())).unwrap();
     let run = |what: &str| panic!("{what} stalled; {}", m.dump());

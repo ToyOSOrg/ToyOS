@@ -149,9 +149,20 @@ impl Cache {
         Some(id)
     }
 
-    /// Whether any node lies at a sector of `[start, end)`.
-    pub(crate) fn any_between(&self, start: u64, end: u64) -> bool {
-        self.by_sector.range(start..end).next().is_some()
+    /// Drops the nodes at sectors `[start, end)`, which no pointer reaches:
+    /// a traversal read them through a pointer since replaced. `false`,
+    /// dropping none, when one of them holds what the medium does not.
+    pub(crate) fn drop_unreachable(&mut self, start: u64, end: u64) -> bool {
+        let ids: Vec<NodeId> = self.by_sector.range(start..end).map(|(_, &id)| id).collect();
+        if !ids.iter().all(|id| self.node(*id).evictable()) {
+            return false;
+        }
+        for id in ids {
+            let node = self.nodes[id.0].take().expect("a node of the cache");
+            self.by_sector.remove(&node.sector);
+            self.free.push(id.0);
+        }
+        true
     }
 
     /// The node at `sector`, without counting a use.

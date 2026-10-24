@@ -426,8 +426,8 @@ fn a_reclaim_plan_failing_midway_stops_the_mount() {
     let stalled = || panic!("stalled; {}", m.dump());
     create(&m, b"b");
     let first = Executor::new().block_on(m.write_batch(Order::OldestPin), stalled);
-    assert_eq!(first.err(), Some(Error::Corrupt("a bucket freespace lists whose alloc key holds data")));
+    assert_eq!(first.err(), Some(Error::Corrupt("a bucket an index lists as empty whose alloc key holds otherwise")));
     let late = Executor::new().block_on(async { m.create(m.root(), b"late", New::File, OWNER, NOW).await.map(|i| i.ino) }, stalled);
-    assert_eq!(late, Err(Error::ReadOnly("a bucket freespace lists whose alloc key holds data")));
-    assert_eq!(Executor::new().block_on(m.unmount(), || panic!("unmount stalled")), Err(Error::ReadOnly("a bucket freespace lists whose alloc key holds data")));
+    assert_eq!(late, Err(Error::ReadOnly("a bucket an index lists as empty whose alloc key holds otherwise")));
+    assert_eq!(Executor::new().block_on(m.unmount(), || panic!("unmount stalled")), Err(Error::ReadOnly("a bucket an index lists as empty whose alloc key holds otherwise")));
 }

@@ -269,7 +269,7 @@ fn a_rename_across_many_leaves_dirties_no_more_nodes_than_its_grant() {
             tree.file(dir, format!("f{f}").as_bytes(), b"", meta).unwrap();
         }
     }
-    let dev = populated(32 << 20, &tree, 7);
+    let dev = populated(64 << 20, &tree, 7);
     let v = block_on_ready(Volume::open(&dev)).unwrap();
     let leaf = |p: &str| leaf_of(&v, Btree::Inodes, Bpos::new(0, path(&v, p), u32::MAX)).0.ptr.sector;
     // Two directories, a file in each, all four inodes in leaves apart.

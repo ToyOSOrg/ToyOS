@@ -213,6 +213,15 @@ impl<D: BlockDev> Volume<D> {
     }
 }
 
+/// A traversal in progress, ended when dropped.
+struct Reading<'a, S: Source + ?Sized>(&'a S, u64);
+
+impl<S: Source + ?Sized> Drop for Reading<'_, S> {
+    fn drop(&mut self) {
+        self.0.end_read(self.1);
+    }
+}
+
 /// What the namespace reads stand on: a volume's btrees, their nodes read
 /// from the medium or held in memory, under the root subvolume's snapshot.
 #[allow(async_fn_in_trait)]
@@ -231,9 +240,20 @@ pub(crate) trait Source {
     /// `[ptr.min, max]`.
     async fn keys(&self, btree: Btree, level: u8, ptr: &NodePtr, max: Bpos) -> Result<Keys>;
 
+    /// A traversal that may follow pointers it read before an await begins,
+    /// and its ticket: until [`Source::end_read`] with it, a mount writes no
+    /// bucket that a pointer read now may lead into.
+    fn begin_read(&self) -> u64 {
+        0
+    }
+
+    fn end_read(&self, _ticket: u64) {}
+
     /// Visits `btree`'s keys from `from` in order until `visit` answers
     /// `false`.
     async fn walk(&self, btree: Btree, from: Bpos, mut visit: impl FnMut(&Key, &[u8]) -> Result<bool>) -> Result<()> {
+        // Interior keys below are read once and followed after awaits.
+        let _reading = Reading(self, self.begin_read());
         let Some(root) = self.root_of(btree) else {
             for (key, value) in self.rootless(btree)?.iter().filter(|(k, _)| k.pos >= from) {
                 if !visit(key, value)? {
