@@ -7,7 +7,7 @@
 
 use crate::{
     field25519::{Multiply, Tight},
-    montgomery::{Modulus, Residue},
+    montgomery::{Computation, Modulus, Residue},
     nist::{P256Field, P256Order, P384Field, P384Order},
     scalar25519::S,
 };
@@ -350,9 +350,17 @@ fn field25519_loose_operands_match_integers() {
 
 #[test]
 fn nist_fields_and_orders_match_integers() {
+    /// The check in the arithmetic the CPU's dispatch chooses, named.
+    struct Dispatched;
+    impl Computation<4> for Dispatched {
+        type Output = &'static str;
+        fn run<F: Modulus<4>>(self) -> &'static str {
+            check(&Montgomery::<F, 4>(PhantomData), 1);
+            core::any::type_name::<F>()
+        }
+    }
     // Which P-256 field path this run checks, for a reader of `--nocapture`.
-    let kernel = crate::arch::p256_mul(&[0; 4], &[0; 4]).is_some() && crate::arch::p256_square(&[0; 4]).is_some();
-    std::println!("p-256 field path: {}", if kernel { "the BMI2/ADX kernels" } else { "portable" });
+    std::println!("p-256 field path: {}", P256Field::dispatch(Dispatched));
     check(&Montgomery::<P256Field, 4>(PhantomData), 1);
     check(&Montgomery::<P256Order, 4>(PhantomData), 2);
     check(&Montgomery::<P384Field, 6>(PhantomData), 3);
@@ -365,6 +373,26 @@ fn compile_time_montgomery_forms_match_integers() {
     check(&MontgomeryConst::<P256Order, 4>(PhantomData), 6);
     check(&MontgomeryConst::<P384Field, 6>(PhantomData), 7);
     check(&MontgomeryConst::<P384Order, 6>(PhantomData), 8);
+}
+
+/// The variable-time inverse of public integers, from 1 to p - 1: the edges
+/// and seeded values.
+#[test]
+fn public_inverses_match_integers() {
+    fn run<M: Modulus<N>, const N: usize>(seed: u64) {
+        let p = integer(&M::P);
+        let mut rng = XorShift(seed);
+        let mut values = boundaries(&p, &p);
+        values.extend((0..CASES).map(|_| rng.below(&p)));
+        for a in values.iter().filter(|a| **a != BigUint::from(0u8)) {
+            let inverse = Residue::<M, N>::inverse_of_public(&words(a));
+            assert_eq!(integer(&inverse.integer()), a.modinv(&p).unwrap(), "1 / {a}");
+        }
+    }
+    run::<P256Field, 4>(9);
+    run::<P256Order, 4>(10);
+    run::<P384Field, 6>(11);
+    run::<P384Order, 6>(12);
 }
 
 /// The compile-time Montgomery constants, and the canonical decoding that
