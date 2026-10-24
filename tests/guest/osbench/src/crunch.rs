@@ -163,10 +163,14 @@ pub fn suite() {
 }
 
 /// Idle until the package reads within `heat::COOLED_WITHIN_MC` of where the
-/// group started, or [`COOL_BOUND`].
+/// group started, or [`COOL_BOUND`]. With no starting reading there is no mark
+/// to wait for, and the next phase's stop still guards it.
 fn cool(after: &str, start_mc: Option<i64>, heat: &Heat) {
+    let Some(start) = start_mc else {
+        return condition(&format!("crunch.cooled_after_{after}"), "unread: the group's start read no temperature");
+    };
     let t = Instant::now();
-    let cooled = || start_mc.zip(heat.read()).is_some_and(|(start, now)| heat::cooled(start, now));
+    let cooled = || heat.read().is_some_and(|now| heat::cooled(start, now));
     while t.elapsed() < COOL_BOUND && !cooled() {
         thread::sleep(Duration::from_secs(1));
     }
