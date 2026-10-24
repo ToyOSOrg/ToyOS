@@ -331,7 +331,8 @@ fn upstream_f(image: &[u8], passphrase: Option<&[u8]>) -> core::result::Result<O
             torn = true;
             continue;
         }
-        return Ok(Some(e.seq));
+        // A second bad flush entry ends the walk with no `F` (A2.13 step 5).
+        return Ok(e.good.then_some(e.seq));
     }
     Ok(None)
 }

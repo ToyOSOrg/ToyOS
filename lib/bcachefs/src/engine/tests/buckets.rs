@@ -97,8 +97,8 @@ fn churn<D: BlockDev>(dev: &D, options: MountOptions, files: usize, reuses: usiz
 /// Renames rewrite the same leaves, each rewrite emptying the bucket of the
 /// node it replaces: on a volume of 2 048 buckets, with reclaim writing
 /// before every rename, more buckets are taken than it has, and none ever
-/// runs out. Red when an emptied bucket is never
-/// taken again: the volume answers `NoSpace`.
+/// runs out. Red when an emptied bucket is never taken again: the volume
+/// answers `NoSpace`.
 #[test]
 fn renames_past_the_volumes_buckets_reuse_them_and_never_run_out() {
     let dev = formatted(64 << 20, None);

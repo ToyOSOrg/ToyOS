@@ -29,6 +29,8 @@ bound.
 **Exit.**
 - B7, for volumes that hold file data: a removal frees its extents' buckets and
   refills the reserve from them, as Q3 states.
-- For a volume full of metadata alone: node merges. A leaf under a fill
-  threshold merges with a neighbour in a reclaim rewrite, releasing a node.
-  Design §3.1 lists merges as later, so adopting them is the owner's decision.
+- For removals that free no bucket: node merges. That covers a volume full of
+  metadata alone, and also unlinks of empty files or rmdirs on any full
+  volume, which free no data even after B7. A leaf under a fill threshold
+  merges with a neighbour in a reclaim rewrite, releasing a node. Design §3.1
+  lists merges as later, so adopting them is the owner's decision.

@@ -409,11 +409,11 @@ fn a_window_spanning_2_62_sequences_is_checked_entry_by_entry() {
 }
 
 /// A window whose keys a replay installs into one leaf past seven nodes'
-/// worth: 110 inodes per 16 KiB of node, journaled across 13 entries, none
-/// yet in a node, as
-/// an upstream volume a crash left can hold them. The reader replays it;
-/// the read-write mount stops by name at its first write, since reclaim
-/// cannot split the leaf in one transaction
+/// worth: 110 inodes per 16 KiB of the volume's buckets, which are its
+/// nodes, journaled across 13 entries, none yet in a node, as an upstream
+/// volume a crash left can hold them. The reader replays it; the read-write
+/// mount stops by name at its first write, since reclaim cannot split the
+/// leaf in one transaction
 /// (`issues/a-replayed-bcachefs-node-past-seven-nodes-is-refused.md`).
 #[test]
 fn a_replayed_leaf_past_seven_nodes_is_read_but_not_mounted_read_write() {

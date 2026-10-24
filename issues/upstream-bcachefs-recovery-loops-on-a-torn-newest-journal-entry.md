@@ -21,8 +21,9 @@ the judge):
    advances past it. `fsck -n -K` spun at 100 % CPU with 4 GB resident until it
    was stopped.
 
-Upstream's own writer can leave the same state: it records last sequence = seq
-whenever every older entry is reclaimed (A2.T7).
+Upstream's own writer records last sequence = seq whenever every older entry is
+reclaimed (A2.T7). So, the analyst infers with medium-high confidence, it can
+leave the same state itself; this was not reproduced.
 
 **How ToyOS avoids it** (`close` and `write_entries` in
 `lib/bcachefs/src/engine/mount/mod.rs`):
@@ -42,4 +43,6 @@ the old state to the entry before.
 **No upstream report is sent**: the owner's policy for now is to send none.
 
 **Exit:** an upstream release that recovers the state, at a re-pin of the judge.
-ToyOS's writer rules cost nothing and stay either way.
+ToyOS's writer rules stay either way. A2.24 costs no write; writing a
+self-naming entry header last costs one flush and one 4 KiB write more, each
+time going read-write from an empty journal and at each clean unmount.

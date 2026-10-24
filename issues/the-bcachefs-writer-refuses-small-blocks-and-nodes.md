@@ -14,8 +14,8 @@ read-only.
 
 ToyOS's own mkfs always formats at 4 KiB blocks. Like upstream's `format`, it
 takes nodes no larger than a bucket, so a volume under 64 MiB has 16 KiB nodes
-and is read-only to the writer. That includes ROOT, which is never written
-online. Upstream's `format` uses 512-byte blocks on volumes under 1 GiB unless
+and is read-only to the writer. ROOT is never written online, whatever its
+node size. Upstream's `format` uses 512-byte blocks on volumes under 1 GiB unless
 told otherwise (A1.46), and such a volume is read-only to ToyOS too.
 
 **Why.** Every write is a whole 4 KiB device block (`toyos-blockdev`), so a
