@@ -102,6 +102,10 @@ impl Poly1305 {
 
     /// The key and the accumulator, for absorbing whole blocks elsewhere;
     /// `None` while a partial block is buffered.
+    #[cfg_attr(
+        not(all(target_arch = "x86_64", not(target_os = "uefi"))),
+        expect(dead_code, reason = "hosted x86-64's stitched ChaCha20 alone absorbs blocks elsewhere")
+    )]
     pub(crate) fn parts(&mut self) -> Option<(&[u64; 3], &mut [u64; 3])> {
         (self.filled == 0).then_some((&self.r, &mut self.h))
     }

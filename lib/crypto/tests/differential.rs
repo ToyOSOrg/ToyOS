@@ -46,8 +46,10 @@ fn sha2_streaming_boundaries() {
 fn aead_all_algorithms_and_partial_blocks() {
     for n in [
         0, 1, 15, 16, 17, 31, 32, 33, 47, 48, 49, 63, 64, 65, 127, 128, 129, 191, 192, 193, 208,
-        223, 224, 225, 255, 256, 257, 383, 384, 385, 511, 512, 513, 767, 768, 769, 1023, 1024, 1025,
-        1151, 1152, 1153, 1279, 1280, 1281, 1535, 1536, 1537, 1792, 1793, 4096, 4111, 16384, 16400,
+        223, 224, 225, 255, 256, 257, 383, 384, 385, 447, 448, 449, 511, 512, 513, 575, 576, 577,
+        703, 704, 705, 767, 768, 769, 959, 960, 961, 1023, 1024, 1025, 1087, 1088, 1089, 1151,
+        1152, 1153, 1279, 1280, 1281, 1471, 1472, 1473, 1535, 1536, 1537, 1792, 1793, 4096, 4111,
+        16384, 16400,
     ] {
         for a in [0, 1, 15, 16, 17, 31, 32, 33] {
             let k = bytes::<32>(n + a);
@@ -87,15 +89,12 @@ fn aead_all_algorithms_and_partial_blocks() {
                 };
                 assert_eq!(ours, reference);
                 assert_eq!(tag.as_slice(), expected.as_slice());
-                // AES-GCM zeroes a refused record; ChaCha20-Poly1305
-                // authenticates first and leaves it as it was.
-                let refused = if alg == 2 { ours.clone() } else { vec![0; n] };
                 for i in 0..16 {
                     let mut bad = tag;
                     bad[i] ^= 1;
                     let mut ciphertext = ours.clone();
                     assert!(opener.open(&nonce, aad, &mut ciphertext, &bad).is_err());
-                    assert_eq!(ciphertext, refused);
+                    assert_eq!(ciphertext, vec![0; n], "a refusal zeroes the record");
                 }
                 opener.open(&nonce, aad, &mut ours, &tag).unwrap();
                 assert_eq!(ours, input);
@@ -194,8 +193,9 @@ fn openssh_construction_matches_independent_primitives() {
     use chacha20::cipher::{KeyIvInit, StreamCipher, StreamCipherSeek};
     use poly1305::universal_hash::KeyInit;
     for n in [
-        0, 1, 15, 16, 17, 63, 64, 65, 128, 129, 255, 256, 257, 383, 384, 385, 511, 512, 513, 767,
-        768, 769, 1024, 4096,
+        0, 1, 11, 12, 13, 15, 16, 17, 63, 64, 65, 128, 129, 255, 256, 257, 383, 384, 385, 447, 448,
+        449, 511, 512, 513, 575, 576, 577, 588, 589, 767, 768, 769, 1024, 1087, 1088, 1089, 1100,
+        1101, 4096,
     ] {
         let key = bytes::<64>(n);
         let mut ours = bytes::<4096>(n)[..n].to_vec();
@@ -390,8 +390,7 @@ fn seeded_aead_against_ring_and_rustcrypto() {
         }
         let changed = ct.clone();
         assert!(opener.open(&nonce, &bad_aad, &mut ct, &bad_tag).is_err(), "case {case}: a changed record opened");
-        let left = if algorithm == 2 { changed.clone() } else { vec![0; changed.len()] };
-        assert_eq!(ct, left, "case {case}: what a refusal left");
+        assert_eq!(ct, vec![0; changed.len()], "case {case}: a refusal left more than zeros");
         let mut ring_ct = [changed.as_slice(), &bad_tag].concat();
         assert!(ring_key.open_in_place(aead::Nonce::assume_unique_for_key(nonce), aead::Aad::from(&bad_aad), &mut ring_ct).is_err(), "case {case}");
         opener.open(&nonce, &aad, &mut sealed, &tag).unwrap();
@@ -428,7 +427,7 @@ fn seeded_openssh_against_rustcrypto() {
         bad[rng.below(16)] ^= 1 << rng.below(8);
         let (mut h, mut p) = (header, sealed.clone());
         assert!(opener.open(seq, &mut h, &mut p, &bad).is_err(), "case {case}");
-        assert_eq!((h, p.as_slice()), (header, sealed.as_slice()), "case {case}: a refusal changed the packet");
+        assert_eq!((h, p), (header, vec![0; n]), "case {case}: a refusal left more than the header and zeros");
         opener.open(seq, &mut header, &mut sealed, &tag).unwrap();
         assert_eq!(sealed, message, "case {case}");
     });

@@ -209,21 +209,24 @@ Not consumers:
          Poly1305 on AVX2; SHA-512 on BMI2; SHA-256 on SHA-NI.
      - **Rows that fail, by measured cause.**
        - **ChaCha20 on AVX2 (the AMD bench): a recorded exception.**
-         - Rows: ChaCha20-Poly1305 at 1 KiB and 16 KiB, seal 1.16–1.52 and
-           open 1.22–1.43.
-         - At 16 KiB, open is about 2.5 µs of Poly1305 (the reject row) plus
-           about 5.5 µs of ChaCha20, against 6.55 µs for ring's whole AEAD.
-         - The AVX2 rounds come to about 3.4 instructions per byte in both
-           the eight-block and the three-pair layout, against about 2.8 for
-           an ideal schedule.
-         - Opening authenticates before it decrypts, and that stays.
+         - Since #1056, seal and open of records past 192 B on AVX2 without
+           AVX-512VL are one stitched pass of eight-block batches, the
+           Poly1305 key in the first; shorter records take the short path. A refusal zeroes the record, as AES-GCM's does since #1054.
+           The one-pass open is an owner decision of 2026-10-23.
+         - Rows, from the guest table at 035c36d30: ChaCha20-Poly1305 at
+           1 KiB and 16 KiB, seal 1.25 and 1.11, open 1.19 and 1.09, reject
+           1.14 and 1.17. Reject costs an open because the open is one pass.
+         - Linux probes put the 64 KiB rows at 1.04 to 1.10, and the spread is
+           per build. 2c00ebbdc and 035c36d30 read 1.04 and 1.10 with the
+           same 4,503-byte vector loop at a different alignment and ring
+           unchanged. Code placement is the unverified suspect.
          - Exit: an AVX2 ChaCha20 schedule within ring's time, and then the
            rows pass. Until then the rows stay recorded here, as ruled.
        - **ChaCha20-Poly1305 per-message cost.**
          - Rows:
-           - 0 B and 64 B: the AMD bench 1.06–1.24 (seal, open and reject),
-             the T14 1.10–1.18;
-           - the T14's 1 KiB rows, 1.057–1.059.
+           - 0 B and 64 B (seal, open and reject): the AMD bench 1.04–1.38
+             (Linux probe), the T14 0.83–1.25 (guest table);
+           - the T14's 1 KiB rows, 1.04–1.05 (guest table).
          - A seal sweep over 1–192 B put ours above ring by a constant per
            message, with a per-block cost that matches ring's.
          - At 540c55e35 the constant is 23–51 ns on the AMD bench and 17–25

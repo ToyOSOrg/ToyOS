@@ -127,12 +127,9 @@ fn record_adapters_interoperate_and_refuse_reused_sequences() {
                 )
                 .is_err()
             );
-            // AES-GCM zeroes a refused record's data; ChaCha20-Poly1305
-            // authenticates first and leaves it as it was.
+            // A refusal zeroes the record's data.
             let mut left = before.clone();
-            if algorithm != &ring::aead::CHACHA20_POLY1305 {
-                left[offset..last - 15].fill(0);
-            }
+            left[offset..last - 15].fill(0);
             assert_eq!(payload, left);
             let mut payload = before;
             payload[last] ^= 1;
