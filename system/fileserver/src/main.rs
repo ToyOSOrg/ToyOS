@@ -154,6 +154,8 @@ struct Client {
     window: Option<SharedMemory>,
     fids: Ids,
     since: Instant,
+    /// A watch on its connection waits in the poller.
+    armed: bool,
 }
 
 impl Client {
@@ -181,6 +183,8 @@ struct Stream {
     file: Shared,
     /// The share of the client that asked for it, which it spends.
     share: u64,
+    /// A watch on its pipe waits in the poller.
+    armed: bool,
 }
 
 /// The private port exports are made on: its acceptor, and the namespace
@@ -248,6 +252,7 @@ fn main() {
         writeback: WriteBack::default(),
         scratch: Vec::new(),
         volume_id: u64::from(toyos_abi::syscall::getpid().0),
+        acceptor_armed: false,
     }
     .serve()
 }
@@ -369,6 +374,8 @@ struct Server {
     /// The volume every node is on: this start's pid, which the kernel never
     /// issues again, since a restart numbers its files afresh.
     volume_id: u64,
+    /// A watch on the acceptor waits in the poller.
+    acceptor_armed: bool,
 }
 
 /// What one request is answered.
@@ -378,6 +385,8 @@ enum Answer {
     Follow(usize),
     /// A reply that carries a handle.
     WithHandle(Reply, toyos::OwnedHandle),
+    /// No frame: what a `CLOSE` is answered.
+    Nothing,
     /// The client broke the protocol and is let go.
     Drop(&'static str),
     /// The client is answered this refusal and let go, for this reason.
@@ -416,18 +425,29 @@ impl Out for WindowOut {
 }
 
 impl Server {
+    /// Whether another accepted connection may wait on its hello.
+    fn takes_handshakes(&self) -> bool {
+        self.clients.values().filter(|c| c.waiting()).count() < MAX_HANDSHAKES
+    }
+
+    /// A watch stays in the poller until it fires, so only what fired since
+    /// the last wait, and what is new, is watched again: each watch costs the
+    /// kernel a pass over every poll the ring holds.
     fn serve(mut self) -> ! {
         let poller = Poller::new(Poller::MAX_HANDLES);
         let mut ready = Vec::new();
         loop {
-            if self.clients.values().filter(|c| c.waiting()).count() < MAX_HANDSHAKES {
+            if !self.acceptor_armed && self.takes_handshakes() {
                 poller.watch(&self.acceptor, READABLE, TOKEN_ACCEPTOR);
+                self.acceptor_armed = true;
             }
-            for (id, c) in &self.clients {
+            for (id, c) in self.clients.iter_mut().filter(|(_, c)| !c.armed) {
                 poller.watch(&c.conn, READABLE, TOKEN_CLIENT + id);
+                c.armed = true;
             }
-            for (id, s) in &self.streams {
+            for (id, s) in self.streams.iter_mut().filter(|(_, s)| !s.armed) {
                 poller.watch(&s.pipe, READABLE, TOKEN_STREAM + id);
+                s.armed = true;
             }
             let now = Instant::now();
             let timeout = self
@@ -443,11 +463,24 @@ impl Server {
 
             for &token in &ready {
                 if token == TOKEN_ACCEPTOR {
-                    self.accept();
+                    self.acceptor_armed = false;
+                    // Armed below the bound, which may be met since: the
+                    // connection waits in the port's queue until it is not.
+                    if self.takes_handshakes() {
+                        self.accept();
+                    }
                 } else if token < TOKEN_STREAM {
-                    self.pump(token - TOKEN_CLIENT);
+                    let id = token - TOKEN_CLIENT;
+                    if let Some(c) = self.clients.get_mut(&id) {
+                        c.armed = false;
+                    }
+                    self.pump(id);
                 } else {
-                    self.drain(token - TOKEN_STREAM);
+                    let sid = token - TOKEN_STREAM;
+                    if let Some(s) = self.streams.get_mut(&sid) {
+                        s.armed = false;
+                    }
+                    self.drain(sid);
                 }
             }
             let now = Instant::now();
@@ -502,6 +535,7 @@ impl Server {
             window: None,
             fids: Ids::default(),
             since: Instant::now(),
+            armed: false,
         };
         self.clients.insert(id, client);
     }
@@ -548,6 +582,7 @@ impl Server {
             Answer::Reply(reply) => client.conn.try_send(REPLY, &Reply { tag, ..reply }),
             Answer::Follow(len) => client.conn.try_send(FOLLOW, &Reply { tag, value: len as u64, ..Reply::ok() }),
             Answer::WithHandle(reply, handle) => client.conn.try_send_with(REPLY, &Reply { tag, ..reply }, [handle]),
+            Answer::Nothing => return,
             Answer::Drop(why) => return self.drop_client(id, why),
             Answer::Refuse(e, why) => {
                 // Let go whether or not the refusal went: either way it is said.
@@ -753,11 +788,13 @@ impl Server {
             // These volumes keep no file without a name.
             CREATE_UNNAMED => Err(Error::Unsupported),
             CLOSE => {
+                // Nobody waits on the answer: an id the client does not hold
+                // closes nothing, and a refused close is its volume's to say.
                 let client = self.clients.get_mut(&id).expect("pumped");
-                if let Some(node) = client.fids.close(r.fid)? {
-                    self.volume.close(node)?;
+                if let Ok(Some(node)) = client.fids.close(r.fid) {
+                    let _ = self.volume.close(node);
                 }
-                Ok(Answer::Reply(Reply::ok()))
+                Ok(Answer::Nothing)
             }
             DUP => {
                 let client = self.clients.get_mut(&id).expect("pumped");
@@ -844,7 +881,7 @@ impl Server {
                 let (read, write) = toyos::pipe_pair().map_err(|e| Error::kernel("a stream's pipe", e))?;
                 let sid = self.next_stream;
                 self.next_stream += 1;
-                self.streams.insert(sid, Stream { pipe: read, file, share });
+                self.streams.insert(sid, Stream { pipe: read, file, share, armed: false });
                 Ok(Answer::WithHandle(Reply::ok(), write.into()))
             }
             READDIR => {
@@ -1151,6 +1188,7 @@ impl Server {
             window: None,
             fids,
             since: Instant::now(),
+            armed: false,
         };
         let child = self.next_client;
         self.next_client += 1;

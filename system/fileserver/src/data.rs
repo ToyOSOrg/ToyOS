@@ -8,9 +8,10 @@
 //! boot — and a directory with anything under it is one whether or not that
 //! entry exists, since volumes written before these entries carry none.
 //!
-//! **Every name is indexed in memory at mount** ([`DataVolume::names`]), so a
-//! lookup, a listing and "is this a directory" are a map query and never the
-//! walk of the whole tree the format's own `is_dir` is.
+//! **Every name is indexed in memory at mount** ([`DataVolume::names`]), with
+//! what its entry records, so a lookup, a stat, a listing and "is this a
+//! directory" are map queries and never a search of the tree. Only an open
+//! reads an entry, for its extents.
 //!
 //! **A file's data lives in the blocks its extents name, in the cache.** A
 //! write resolves (allocating where it must) the block of each page it
@@ -32,6 +33,7 @@
 //! before it reaches the tree.
 
 use std::collections::BTreeMap;
+use std::ops::Bound;
 use std::rc::Rc;
 
 use bcachefs::{Extent, Formatted, FsError, Mounted, ReadWrite};
@@ -61,8 +63,10 @@ struct Open {
 pub struct DataVolume<D: Disk> {
     fs: Mounted<Shared<D>, ReadWrite>,
     cache: Rc<Cache<D>>,
-    /// Every name on the volume, a directory entry's without its `/`.
-    names: BTreeMap<String, Kind>,
+    /// Every name on the volume, a directory entry's without its `/`, and
+    /// what its entry records: for a file the length and time its last
+    /// written entry holds, which an open node's own supersede.
+    names: BTreeMap<String, Meta>,
     /// Directories that exist whatever the volume holds: each connection's root.
     roots: Vec<String>,
     open: BTreeMap<Node, Open>,
@@ -147,6 +151,9 @@ fn disk_word(e: toyos_blockdev::Error) -> Error {
         toyos_blockdev::Error::ReadOnly => Error::ReadOnly,
     }
 }
+
+/// What a directory is: the format keeps no length or time for one.
+const DIR: Meta = Meta { kind: Kind::Dir, size: 0, mtime: 0 };
 
 /// The block holding page `page`, if the extents reach it.
 fn block_for(extents: &[Extent], page: u64) -> Option<u64> {
@@ -246,16 +253,16 @@ impl<D: Disk> DataVolume<D> {
     ) -> Result<Self, String> {
         let listed = fs.list(usize::MAX, &|_| true).map_err(|e| format!("the volume would not list: {e:?}"))?;
         let mut names = BTreeMap::new();
-        for (name, _) in listed {
-            let kind = match name.strip_suffix('/') {
-                Some(dir) => {
-                    names.insert(dir.to_string(), Kind::Dir);
+        for (name, recorded) in listed {
+            let meta = match (name.strip_suffix('/'), recorded.symlink) {
+                (Some(dir), _) => {
+                    names.insert(dir.to_string(), DIR);
                     continue;
                 }
-                None if fs.is_symlink(&name).map_err(|e| format!("{e:?}"))? => Kind::Symlink,
-                None => Kind::File,
+                (None, true) => Meta { kind: Kind::Symlink, size: recorded.size, mtime: recorded.mtime },
+                (None, false) => Meta { kind: Kind::File, size: recorded.size, mtime: recorded.mtime },
             };
-            names.insert(name, kind);
+            names.insert(name, meta);
         }
         Ok(Self {
             fs,
@@ -293,11 +300,24 @@ impl<D: Disk> DataVolume<D> {
         self.names.range(prefix.clone()..).next().is_some_and(|(name, _)| name.starts_with(&prefix))
     }
 
+    fn kind(&self, path: &str) -> Option<Kind> {
+        self.names.get(path).map(|meta| meta.kind)
+    }
+
     fn is_dir(&self, path: &str) -> bool {
         path.is_empty()
             || self.roots.iter().any(|r| r == path)
-            || self.names.get(path) == Some(&Kind::Dir)
+            || self.kind(path) == Some(Kind::Dir)
             || (!self.names.contains_key(path) && self.has_children(path))
+    }
+
+    /// What `path`'s file or symlink is: its open node's length and time
+    /// where it has one, and its entry's otherwise.
+    fn current(&self, path: &str, recorded: Meta) -> Meta {
+        match self.by_path.get(path).and_then(|n| self.open.get(n)) {
+            Some(open) => Meta { kind: recorded.kind, size: open.size, mtime: open.mtime },
+            None => recorded,
+        }
     }
 
     fn entry(&mut self, node: Node) -> Result<&mut Open, Error> {
@@ -316,6 +336,9 @@ impl<D: Disk> DataVolume<D> {
         }
         mapped("the entry", &open.path, self.fs.update_metadata(&open.path, &open.extents, open.size, open.mtime))?;
         open.dirty = false;
+        if let Some(meta) = self.names.get_mut(&open.path) {
+            (meta.size, meta.mtime) = (open.size, open.mtime);
+        }
         Ok(())
     }
 
@@ -350,7 +373,7 @@ impl<D: Disk> DataVolume<D> {
     fn require_parent_dir(&self, path: &str) -> Result<(), Error> {
         let mut dir = parent(path);
         while !dir.is_empty() {
-            if matches!(self.names.get(dir), Some(Kind::File | Kind::Symlink)) {
+            if matches!(self.kind(dir), Some(Kind::File | Kind::Symlink)) {
                 return Err(Error::NotADirectory);
             }
             dir = parent(dir);
@@ -365,23 +388,15 @@ impl<D: Disk> Volume for DataVolume<D> {
     }
 
     fn lstat(&mut self, path: &str) -> Result<Meta, Error> {
-        match self.names.get(path).copied() {
-            Some(Kind::Dir) => Ok(Meta { kind: Kind::Dir, size: 0, mtime: 0 }),
-            Some(kind) => {
-                if let Some(open) = self.by_path.get(path).and_then(|n| self.open.get(n)) {
-                    return Ok(Meta { kind, size: open.size, mtime: open.mtime });
-                }
-                let (_, size) = mapped("a lookup", path, self.fs.file_extents(path))?.ok_or(Error::NotFound)?;
-                let mtime = mapped("a lookup", path, self.fs.file_mtime(path))?.ok_or(Error::NotFound)?;
-                Ok(Meta { kind, size, mtime })
-            }
-            None if self.is_dir(path) => Ok(Meta { kind: Kind::Dir, size: 0, mtime: 0 }),
+        match self.names.get(path) {
+            Some(&recorded) => Ok(self.current(path, recorded)),
+            None if self.is_dir(path) => Ok(DIR),
             None => Err(Error::NotFound),
         }
     }
 
     fn read_link(&mut self, path: &str) -> Result<String, Error> {
-        if self.names.get(path) != Some(&Kind::Symlink) {
+        if self.kind(path) != Some(Kind::Symlink) {
             return Err(if self.names.contains_key(path) || self.is_dir(path) { Error::NotALink } else { Error::NotFound });
         }
         mapped("readlink", path, self.fs.read_link(path, MAX_LINK))?.ok_or(Error::Io)
@@ -391,29 +406,35 @@ impl<D: Disk> Volume for DataVolume<D> {
         if !self.is_dir(dir) {
             return Err(if self.names.contains_key(dir) { Error::NotADirectory } else { Error::NotFound });
         }
+        // The names beneath a child directory are passed over whole: a
+        // listing costs the directory's children, not everything below it.
         let prefix = if dir.is_empty() { String::new() } else { format!("{dir}/") };
-        let mut children: BTreeMap<String, Kind> = BTreeMap::new();
-        for (name, kind) in self.names.range(prefix.clone()..) {
-            let Some(rest) = name.strip_prefix(&prefix) else { break };
-            match rest.split_once('/') {
-                Some((child, _)) => {
-                    children.insert(child.to_string(), Kind::Dir);
+        let mut children = Vec::new();
+        let mut from = prefix.clone();
+        loop {
+            let mut past = None;
+            for (name, &recorded) in self.names.range::<str, _>((Bound::Included(from.as_str()), Bound::Unbounded)) {
+                let Some(rest) = name.strip_prefix(&prefix) else { break };
+                let Some((child, _)) = rest.split_once('/') else {
+                    children.push((rest.to_string(), self.current(name, recorded)));
+                    continue;
+                };
+                // A child with an entry of its own was listed at it.
+                if !self.names.contains_key(&format!("{prefix}{child}")) {
+                    children.push((child.to_string(), DIR));
                 }
-                None => {
-                    children.entry(rest.to_string()).or_insert(*kind);
-                }
+                // Every name beneath `child/`, and nothing else, sorts before
+                // `child0`: `0` follows `/`.
+                past = Some(format!("{prefix}{child}0"));
+                break;
+            }
+            match past {
+                Some(next) => from = next,
+                None => break,
             }
         }
-        let mut out = Vec::with_capacity(children.len());
-        for (name, kind) in children {
-            let path = join(dir, &name);
-            let meta = match kind {
-                Kind::Dir => Meta { kind, size: 0, mtime: 0 },
-                _ => self.lstat(&path)?,
-            };
-            out.push(Listed { name, meta, identity: self.ids.of(path) });
-        }
-        Ok(out)
+        children.sort_unstable_by(|(a, _), (b, _)| a.cmp(b));
+        Ok(children.into_iter().map(|(name, meta)| Listed { identity: self.ids.of(join(dir, &name)), name, meta }).collect())
     }
 
     fn open(&mut self, path: &str, how: OpenHow) -> Result<Node, Error> {
@@ -425,10 +446,9 @@ impl<D: Disk> Volume for DataVolume<D> {
             Some(node) => node,
             None => match self.names.get(path).copied() {
                 Some(_) if how.create_new => return Err(Error::AlreadyExists),
-                Some(Kind::File) => {
+                Some(Meta { kind: Kind::File, mtime, .. }) => {
                     let (extents, size) =
                         mapped("open", path, self.fs.file_extents(path))?.ok_or(Error::NotFound)?;
-                    let mtime = mapped("open", path, self.fs.file_mtime(path))?.ok_or(Error::NotFound)?;
                     self.new_node(path, extents, size, mtime)
                 }
                 // A link the resolver did not follow is one with nothing behind it.
@@ -437,7 +457,7 @@ impl<D: Disk> Volume for DataVolume<D> {
                     self.require_parent_dir(path)?;
                     let now = (self.clock)();
                     mapped("create", path, self.fs.create(path, &[], now))?;
-                    self.names.insert(path.to_string(), Kind::File);
+                    self.names.insert(path.to_string(), Meta { kind: Kind::File, size: 0, mtime: now });
                     self.new_node(path, Vec::new(), 0, now)
                 }
                 None => return Err(Error::NotFound),
@@ -616,6 +636,9 @@ impl<D: Disk> Volume for DataVolume<D> {
         // Recorded first, freed second.
         mapped("a truncate", &open.path, self.fs.update_metadata(&open.path, &open.extents, size, now))?;
         open.dirty = false;
+        if let Some(meta) = self.names.get_mut(&open.path) {
+            (meta.size, meta.mtime) = (size, now);
+        }
         let path = open.path.clone();
         mapped("a truncate's free", &path, self.fs.free_extents(&dropped))
     }
@@ -634,7 +657,7 @@ impl<D: Disk> Volume for DataVolume<D> {
         self.require_parent_dir(path)?;
         let now = (self.clock)();
         mapped("mkdir", path, self.fs.create(&format!("{path}/"), &[], now))?;
-        self.names.insert(path.to_string(), Kind::Dir);
+        self.names.insert(path.to_string(), DIR);
         Ok(())
     }
 
@@ -658,7 +681,7 @@ impl<D: Disk> Volume for DataVolume<D> {
     }
 
     fn unlink(&mut self, path: &str) -> Result<(), Error> {
-        match self.names.get(path) {
+        match self.kind(path) {
             Some(Kind::File) | Some(Kind::Symlink) => {}
             Some(Kind::Dir) => return Err(Error::IsADirectory),
             None if self.is_dir(path) => return Err(Error::IsADirectory),
@@ -698,8 +721,8 @@ impl<D: Disk> Volume for DataVolume<D> {
                 // one leaves `to` naming its file, holders and unsynced length whole.
                 mapped("rename", from, self.fs.rename(from, to))?;
                 self.orphan(to);
-                self.names.remove(from);
-                self.names.insert(to.to_string(), kind);
+                let moved = self.names.remove(from).expect("a file the volume names");
+                self.names.insert(to.to_string(), moved);
                 if let Some(node) = self.by_path.remove(from) {
                     self.open.get_mut(&node).expect("indexed").path = to.to_string();
                     self.by_path.insert(to.to_string(), node);
@@ -718,7 +741,7 @@ impl<D: Disk> Volume for DataVolume<D> {
                 // Every entry beneath, and the directory's own, in one
                 // operation of the format's: the directory moves whole or not at all.
                 let prefix = format!("{from}/");
-                let moving: Vec<(String, Kind)> = self
+                let moving: Vec<(String, Meta)> = self
                     .names
                     .get_key_value(from)
                     .into_iter()
@@ -732,9 +755,9 @@ impl<D: Disk> Volume for DataVolume<D> {
                 }
                 let renames: Vec<(String, String)> = moving
                     .iter()
-                    .map(|(name, kind)| {
+                    .map(|(name, meta)| {
                         let moved = format!("{to}{}", &name[from.len()..]);
-                        match kind {
+                        match meta.kind {
                             Kind::Dir => (format!("{name}/"), format!("{moved}/")),
                             _ => (name.clone(), moved),
                         }
@@ -742,10 +765,10 @@ impl<D: Disk> Volume for DataVolume<D> {
                     .collect();
                 let pairs: Vec<(&str, &str)> = renames.iter().map(|(a, b)| (a.as_str(), b.as_str())).collect();
                 mapped("rename", from, self.fs.rename_all(&pairs))?;
-                for (name, kind) in moving {
+                for (name, meta) in moving {
                     let moved = format!("{to}{}", &name[from.len()..]);
                     self.names.remove(&name);
-                    self.names.insert(moved.clone(), kind);
+                    self.names.insert(moved.clone(), meta);
                     if let Some(node) = self.by_path.remove(&name) {
                         self.open.get_mut(&node).expect("indexed").path = moved.clone();
                         self.by_path.insert(moved, node);
@@ -764,7 +787,8 @@ impl<D: Disk> Volume for DataVolume<D> {
         }
         self.require_parent_dir(path)?;
         mapped("symlink", path, self.fs.create_symlink(path, target))?;
-        self.names.insert(path.to_string(), Kind::Symlink);
+        // What the format's symlink entry records: its target's length, undated.
+        self.names.insert(path.to_string(), Meta { kind: Kind::Symlink, size: target.len() as u64, mtime: 0 });
         Ok(())
     }
 
@@ -980,6 +1004,76 @@ mod tests {
         v.close(m).unwrap();
         v.rename("home/b/g", "home/b/f").unwrap();
         assert_eq!(v.lstat("home/b/f").unwrap().size, 0, "replaced");
+    }
+
+    /// Every name the index records is what the format's own entry holds,
+    /// for each closed file and symlink: the stat a client is answered from
+    /// memory is the one a search of the tree would answer.
+    fn assert_index_is_the_format_s(v: &DataVolume<Ram>) {
+        for (name, meta) in &v.names {
+            if meta.kind == Kind::Dir || v.by_path.contains_key(name) {
+                continue;
+            }
+            let (_, size) = v.fs.file_extents(name).unwrap().unwrap_or_else(|| panic!("{name} has no entry"));
+            let mtime = v.fs.file_mtime(name).unwrap().unwrap();
+            assert_eq!((meta.size, meta.mtime), (size, mtime), "{name}");
+            assert_eq!(meta.kind == Kind::Symlink, v.fs.is_symlink(name).unwrap(), "{name}");
+        }
+    }
+
+    #[test]
+    fn a_stat_from_the_index_is_what_the_entry_records() {
+        let mut v = DataVolume::format(Ram::new(4096), &["home"], nanosecond_clock).unwrap();
+        let a = v.open("home/a", CREATE).unwrap();
+        v.write(a, 0, &[1; 5000]).unwrap();
+        assert_eq!(v.lstat("home/a").unwrap().size, 5000, "an open file's own length, before its entry has it");
+        v.close(a).unwrap();
+        assert_index_is_the_format_s(&v);
+
+        let b = v.open("home/b", CREATE).unwrap();
+        v.write(b, 0, &[2; 9000]).unwrap();
+        v.truncate(b, 100).unwrap();
+        v.close(b).unwrap();
+        v.symlink("home/l", "a").unwrap();
+        v.rename("home/a", "home/sub/c").unwrap();
+        v.rename("home/b", "home/sub/c").unwrap();
+        v.mkdir("home/d").unwrap();
+        v.rename("home/sub", "home/d/moved").unwrap();
+        assert_index_is_the_format_s(&v);
+        assert_eq!(v.lstat("home/d/moved/c").unwrap(), Meta { kind: Kind::File, size: 100, mtime: nanosecond_clock() });
+        assert_eq!(v.lstat("home/l").unwrap(), Meta { kind: Kind::Symlink, size: 1, mtime: 0 });
+        v.unlink("home/l").unwrap();
+        assert_eq!(v.lstat("home/l"), Err(Error::NotFound));
+
+        let before: Vec<(String, Meta)> = v.names.iter().map(|(n, m)| (n.clone(), *m)).collect();
+        v.sync().unwrap();
+        let again = remount(v);
+        let after: Vec<(String, Meta)> = again.names.iter().map(|(n, m)| (n.clone(), *m)).collect();
+        assert_eq!(after, before, "the index a mount reads is the one the server kept");
+        assert_index_is_the_format_s(&again);
+    }
+
+    /// A listing passes over what is beneath a child directory and names
+    /// each child once: `x` with an entry of its own and names beneath, `y`
+    /// only the prefix of two, and the names beside `x` that sort among its
+    /// own (`-` and `.` before `/`, `0` after).
+    #[test]
+    fn a_listing_names_each_child_once_and_nothing_beneath_one() {
+        let mut v = vol();
+        v.mkdir("home/x").unwrap();
+        for path in ["home/x-a", "home/x.b", "home/x/deep/er/f", "home/x/g", "home/x0", "home/y/z", "home/y/z2"] {
+            let n = v.open(path, CREATE).unwrap();
+            v.close(n).unwrap();
+        }
+        v.mkdir("home/x/kept").unwrap();
+        v.mkdir("home/e").unwrap();
+        let listed: Vec<(String, Kind)> = v.list("home").unwrap().into_iter().map(|l| (l.name, l.meta.kind)).collect();
+        let want = [("e", Kind::Dir), ("x", Kind::Dir), ("x-a", Kind::File), ("x.b", Kind::File), ("x0", Kind::File), ("y", Kind::Dir)];
+        assert_eq!(listed, want.map(|(n, k)| (n.to_string(), k)));
+        let inner: Vec<String> = v.list("home/x").unwrap().into_iter().map(|l| l.name).collect();
+        assert_eq!(inner, ["deep", "g", "kept"]);
+        let root: Vec<String> = v.list("").unwrap().into_iter().map(|l| l.name).collect();
+        assert_eq!(root, ["home"]);
     }
 
     /// A clock that reads no whole second.

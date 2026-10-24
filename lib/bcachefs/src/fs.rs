@@ -54,6 +54,14 @@ fn push_extent(extents: &mut Vec<Extent>, start: u64, count: u32) {
     extents.push(Extent { start_block: start, block_count: count, _reserved: 0 });
 }
 
+/// What one entry [`Mounted::list`] answers records besides its name.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Recorded {
+    pub symlink: bool,
+    pub size: u64,
+    pub mtime: u64,
+}
+
 /// Filesystem error type with rich context.
 #[derive(Debug)]
 pub enum FsError {
@@ -706,11 +714,11 @@ impl<IO: BlockIO, Mode> Mounted<IO, Mode> {
         }
     }
 
-    /// Up to `limit` of the files `keep` accepts, as (name, size); more is
-    /// refused before any materialise. `limit` counts the kept names, so a
-    /// caller listing one directory pays that directory's bound and not the
-    /// volume's.
-    pub fn list(&self, limit: usize, keep: &dyn Fn(&str) -> bool) -> Result<Vec<(String, u64)>, FsError> {
+    /// Up to `limit` of the files `keep` accepts, with what each one's entry
+    /// records; more is refused before any materialise. `limit` counts the
+    /// kept names, so a caller listing one directory pays that directory's
+    /// bound and not the volume's.
+    pub fn list(&self, limit: usize, keep: &dyn Fn(&str) -> bool) -> Result<Vec<(String, Recorded)>, FsError> {
         let mut result = Vec::new();
         let ControlFlow::Continue(()) = btree::for_each_live(&self.io, self.sb.root_node, &mut |entry| {
             let Ok(leaf) = self.decode(&entry.value) else { return Ok(ControlFlow::Continue(())) };
@@ -720,7 +728,8 @@ impl<IO: BlockIO, Mode> Mounted<IO, Mode> {
             if result.len() >= limit {
                 return Err(FsError::ListTooLong { limit });
             }
-            result.push((String::from(leaf.name()), leaf.size()));
+            let symlink = matches!(leaf, LeafValue::Symlink { .. });
+            result.push((String::from(leaf.name()), Recorded { symlink, size: leaf.size(), mtime: leaf.mtime() }));
             Ok(ControlFlow::Continue(()))
         })? else {
             unreachable!("`list`'s visitor never breaks")

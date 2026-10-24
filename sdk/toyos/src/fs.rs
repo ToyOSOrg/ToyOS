@@ -31,7 +31,8 @@
 //! **A request carries a tag and its span of the window.** The client lends
 //! the server a [`WINDOW_BYTES`] region at connect ([`HELLO`]); a request's
 //! paths, data and answer travel in the span it names, and the frames stay
-//! small and fixed. The reply carries the request's tag. A client keeps at
+//! small and fixed. The reply carries the request's tag; a [`CLOSE`] has
+//! none, so a close costs its client a send and no wait. A client keeps at
 //! most [`MAX_OUTSTANDING`] requests unanswered on one connection and lets no
 //! two of their spans overlap; a server reads a request's input out of its
 //! span before it writes its answer there. The window is shared memory both
@@ -93,6 +94,8 @@ pub const OPEN: u32 = 2;
 /// A file with no name, in the directory the path names, opened by `flags` as
 /// [`OPEN`] opens: a later [`LINK`] gives it one, and nothing else ever does.
 pub const CREATE_UNNAMED: u32 = 3;
+/// Let the id `fid` go. Answered with no frame: a close the volume refuses
+/// keeps its node for the next sync, which the server says in its log.
 pub const CLOSE: u32 = 4;
 /// Read the span's length at the description's offset into the span, and move
 /// the offset past it: `value` answers how much.
@@ -927,8 +930,14 @@ impl Dir {
         Ok(Opened { fid, stat: stat_of(&reply) })
     }
 
+    /// Let `fid` go, without waiting for the server: [`CLOSE`] is answered
+    /// with nothing.
     pub fn close(&mut self, fid: Fid) {
-        let _ = self.fid_call(CLOSE, fid, Request::new(), 0);
+        let Ok(id) = self.held(fid) else { return };
+        let conn = self.conn.as_ref().expect("an id is held on a connection");
+        if conn.send(CLOSE, &Request { fid: id, ..Request::new() }).is_err() {
+            self.conn = None;
+        }
     }
 
     /// Read at most `out.len()` bytes, and at most the window, at the
