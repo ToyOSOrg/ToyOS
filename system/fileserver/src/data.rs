@@ -480,6 +480,11 @@ impl<D: Disk> Volume for DataVolume<D> {
         Ok(self.ids.of(path.to_string()))
     }
 
+    /// None: the volume is a device's, read through a cache, and written.
+    fn in_place(&mut self, _node: Node) -> Result<Option<(u64, u64)>, Error> {
+        Ok(None)
+    }
+
     fn read(&mut self, node: Node, offset: u64, out: &mut dyn Out) -> Result<usize, Error> {
         let cache = Rc::clone(&self.cache);
         let open = self.entry(node)?;

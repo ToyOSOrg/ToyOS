@@ -319,6 +319,8 @@ pub const SYS_PWRITE: u64 = 139;
 pub const SYS_VM_PROTECT: u64 = 140;
 pub const SYS_VM_DISCARD: u64 = 141;
 pub const SYS_VM_DECOMMIT: u64 = 142;
+/// A memory object over part of another's pages. See [`shm_sub`].
+pub const SYS_SHM_SUB: u64 = 143;
 
 /// Bins in the per-process syscall profile — one for every number this ABI
 /// issues, and one at the end for every number it does not.
@@ -326,13 +328,13 @@ pub const SYS_VM_DECOMMIT: u64 = 142;
 /// **The profile's parts sum to its total, and that is the whole requirement.**
 /// A bin array narrower than the ABI reaches drops calls out of the line while
 /// the total goes on counting them.
-pub const SYSCALL_PROFILE_BINS: usize = 144;
+pub const SYSCALL_PROFILE_BINS: usize = 145;
 
 /// Where a number this ABI does not issue is counted. Merging is a degradation
 /// a reader can see in the line; dropping is one nobody can.
 pub const SYSCALL_PROFILE_OTHER: usize = SYSCALL_PROFILE_BINS - 1;
 
-const _: () = assert!(SYS_VM_DECOMMIT < SYSCALL_PROFILE_OTHER as u64);
+const _: () = assert!(SYS_SHM_SUB < SYSCALL_PROFILE_OTHER as u64);
 
 pub const WNOHANG: u64 = 1;
 /// Every bit `SYS_PROCESS_WAIT`'s flag word defines; a wait carrying another
@@ -2054,6 +2056,18 @@ pub fn shm_create_flags(size: usize, flags: u64) -> Result<RawHandle, SyscallErr
 pub unsafe fn shm_map(shm: RawHandle) -> Result<*mut u8, SyscallError> {
     check(syscall(SYS_SHM_MAP, shm.0 as u64, 0, 0, 0))
         .map(|addr| core::ptr::with_exposed_provenance_mut(addr as usize))
+}
+
+/// A memory object over `len` bytes of the one `shm` names, from `offset`: the
+/// same pages, not a copy, so it is written by nobody when the original is
+/// written by nobody. The new handle carries `shm`'s rights. Needs
+/// [`Rights::MAP`]. `InvalidArgument` for an `offset` that is no whole number
+/// of [`PAGE_SIZE`]s, no bytes, a range past the object's bytes, or a device's
+/// window.
+///
+/// [`Rights::MAP`]: crate::handle::Rights::MAP
+pub fn shm_sub(shm: RawHandle, offset: u64, len: u64) -> Result<RawHandle, SyscallError> {
+    check(syscall(SYS_SHM_SUB, shm.0 as u64, offset, len, 0)).map(|v| RawHandle(v as u32))
 }
 
 /// The machine's [header](SYSINFO_HEADER_SIZE), then as much of the process

@@ -154,6 +154,11 @@ pub const READLINK: u32 = 23;
 /// name too, which must be free; with [`LINK_REPLACE`], take the name from
 /// the node the description `expected` names, and only if it still names it.
 pub const LINK: u32 = 24;
+/// The open file's bytes as a memory object nobody writes, its pages the
+/// volume's own and its length the file's: the reply carries it. Refused
+/// [`Error::Unsupported`] by a volume that holds the file in no such object,
+/// whose bytes [`READ`] gives.
+pub const IMAGE: u32 = 25;
 
 pub const SEEK_START: u64 = 0;
 pub const SEEK_CURRENT: u64 = 1;
@@ -1078,6 +1083,23 @@ impl Dir {
         let (msg_type, reply, carried) = self.call_with(STREAM, request, &mut batch)?;
         match (answer(msg_type, reply), carried) {
             (Ok(_), 1) => Ok(Pipe(crate::OwnedHandle(batch[0]))),
+            (Err(e), 0) => Err(e),
+            (_, n) => {
+                close_all(&batch[..n]);
+                self.conn = None;
+                Err(Error::Malformed)
+            }
+        }
+    }
+
+    /// The bytes of the file `fid` opened, as [`IMAGE`] answers them.
+    pub fn image(&mut self, fid: Fid) -> Result<crate::OwnedHandle, Error> {
+        let mut request = Request::new();
+        request.fid = self.held(fid)?;
+        let mut batch = [toyos_abi::HANDLE_INVALID; MAX_TRANSFER_HANDLES];
+        let (msg_type, reply, carried) = self.call_with(IMAGE, request, &mut batch)?;
+        match (answer(msg_type, reply), carried) {
+            (Ok(_), 1) => Ok(crate::OwnedHandle(batch[0])),
             (Err(e), 0) => Err(e),
             (_, n) => {
                 close_all(&batch[..n]);

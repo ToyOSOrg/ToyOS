@@ -205,6 +205,13 @@ impl Immutable {
         Ok(Self { ptr: map(&handle).map_err(NotImmutable::Kernel)?, handle, len: stat.size as usize })
     }
 
+    /// `len` of its bytes from `offset`, a whole page in, as a region of
+    /// their own over the same pages, unmapped here
+    /// (`toyos_abi::syscall::shm_sub`).
+    pub fn sub(&self, offset: u64, len: u64) -> Result<OwnedHandle, SyscallError> {
+        syscall::shm_sub(self.handle.raw(), offset, len).map(OwnedHandle)
+    }
+
     pub fn as_slice(&self) -> &[u8] {
         // SAFETY: the mapping is `len` bytes, lives as long as `self`, and is
         // written by nobody, so a shared reference over it is sound.

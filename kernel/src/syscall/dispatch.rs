@@ -37,7 +37,7 @@ use super::io::{
 use super::ipc::{
     sys_accept, sys_handle_recv, sys_inbox_setup, sys_message_send,
     sys_inbox_submit, sys_namespace_build, sys_namespace_open, sys_pipe,
-    sys_port_badge, sys_port_create, sys_port_mint, sys_shm_create, sys_shm_map,
+    sys_port_badge, sys_port_create, sys_port_mint, sys_shm_create, sys_shm_map, sys_shm_sub,
 };
 use super::machine::{
     sys_boot_sources, sys_counters, sys_device_inventory, sys_log_read, sys_machine_stops, sys_reboot, sys_shutdown,
@@ -492,6 +492,7 @@ pub(crate) fn syscall_dispatch(num: u64, a1: u64, a2: u64, a3: u64, a4: u64) -> 
         }
         SYS_SHM_CREATE => sys_shm_create(a1, a2),
         SYS_SHM_MAP => sys_shm_map(RawHandle(a1 as u32)),
+        SYS_SHM_SUB => sys_shm_sub(RawHandle(a1 as u32), a2, a3),
         SYS_PORT_CREATE => sys_port_create(),
         SYS_PORT_MINT => {
             // Copied in before any handle is looked up: the kernel holds the badge, never the caller's page.

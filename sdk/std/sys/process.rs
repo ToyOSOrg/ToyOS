@@ -388,7 +388,7 @@ impl Command {
                 let region = toyos::shm::Immutable::adopt(copy).map_err(|why| {
                     io::Error::new(io::ErrorKind::InvalidInput, format!("the boot image is no immutable region: {why}"))
                 })?;
-                Some(toyos::process::Image::boot(region))
+                Some(toyos::process::Image::immutable(region))
             }
             (None, None) if crate::sys::fs::is_served(source) => Some(crate::sys::fs::read_image(source)?),
             (None, None) => None,

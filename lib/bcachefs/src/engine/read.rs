@@ -507,6 +507,52 @@ pub(crate) trait Source {
         Ok(len)
     }
 
+    /// Where the bytes of file `ino` lie on the device: the byte they start
+    /// at, a whole block in, and the file's size, every extent's checksum
+    /// verified. `None` where they are not stored as they read, in one run
+    /// from the file's first byte to its last: inline, sparse, encrypted or
+    /// split apart.
+    async fn in_place(&self, ino: u64) -> Result<Option<(u64, u64)>> {
+        let inode = self.inode(ino).await?;
+        if self.superblock().encrypted() || inode.kind() != Some(DirentType::Regular) || inode.size == 0 {
+            return Ok(None);
+        }
+        let mut extents = Vec::new();
+        self.walk(Btree::Extents, Bpos::new(ino, 1, 0), |k, v| {
+            if k.pos.inode != ino {
+                return Ok(false);
+            }
+            if k.pos.snapshot == ROOT_SNAPSHOT {
+                extents.push((*k, v.to_vec()));
+            }
+            Ok(true)
+        })
+        .await?;
+        // The file's bytes covered so far, and the device byte after them.
+        let (mut covered, mut start, mut next) = (0u64, None, 0u64);
+        let mut scratch = Vec::new();
+        for (key, value) in &extents {
+            if covered >= inode.size {
+                break;
+            }
+            if key.kind != kind::EXTENT || extent_start(key)? != covered {
+                return Ok(None);
+            }
+            let extent = Extent::decode(value)?;
+            let Some(crc) = extent.crc else { return Ok(None) };
+            let len = u64::from(key.size) * SECTOR as u64;
+            let at = extent.ptr.sector.checked_mul(SECTOR as u64).ok_or(Error::Corrupt("extent past 2^64 bytes"))?;
+            if extent.ptr.unwritten || crc.offset != 0 || crc.uncompressed != key.size || start.is_some_and(|_| at != next) {
+                return Ok(None);
+            }
+            scratch.resize(len as usize, 0);
+            self.extent(key, value, 0, &mut scratch).await?;
+            start.get_or_insert(at);
+            (covered, next) = (covered + len, at + len);
+        }
+        Ok(start.filter(|&at| covered >= inode.size && at % BLOCK as u64 == 0).map(|at| (at, inode.size)))
+    }
+
     /// `dst.len()` bytes of the extent `key` from `skip` bytes into its
     /// range, its checksum verified or its MAC verified and decrypted.
     async fn extent(&self, key: &Key, value: &[u8], skip: u64, dst: &mut [u8]) -> Result<()> {
@@ -641,6 +687,12 @@ impl<D: BlockDev> Volume<D> {
     /// holds there. Holes read as zeros.
     pub async fn read(&self, ino: u64, offset: u64, out: &mut [u8]) -> Result<usize> {
         Source::read(self, ino, offset, out).await
+    }
+
+    /// Where the bytes of file `ino` lie on the device, verified, if they are
+    /// stored as they read in one run: the byte they start at and how many.
+    pub async fn in_place(&self, ino: u64) -> Result<Option<(u64, u64)>> {
+        Source::in_place(self, ino).await
     }
 }
 

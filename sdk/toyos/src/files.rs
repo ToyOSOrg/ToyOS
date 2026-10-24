@@ -35,6 +35,7 @@ use toyos_abi::syscall::{FileType, SeekFrom, SyscallError};
 use crate::fd::{self, Fd};
 use crate::fs;
 use crate::process::{Image, ImageRefused};
+use crate::shm::{Immutable, NotImmutable};
 use crate::OwnedHandle;
 
 /// The deepest directory a capability names, in components.
@@ -234,6 +235,7 @@ extern "C" {
     fn toyos_fs_truncate(fd: Fd, size: u64) -> i64;
     fn toyos_fs_fsync(fd: Fd) -> i64;
     fn toyos_fs_stream(fd: Fd) -> i64;
+    fn toyos_fs_image(fd: Fd) -> i64;
     fn toyos_fs_mkdir(at: Fd, path: *const u8, len: usize) -> i64;
     fn toyos_fs_unlink(at: Fd, path: *const u8, len: usize, dir: bool) -> i64;
     fn toyos_fs_rename(from_at: Fd, from: *const u8, from_len: usize, to_at: Fd, to: *const u8, to_len: usize) -> i64;
@@ -396,13 +398,24 @@ pub fn read_dir(fd: Fd, cursor: u64) -> Result<(Vec<u8>, Option<u64>), Error> {
     }
 }
 
-/// The whole of the file at `path`, read into a memory object of this
-/// process's own, wherever it is served: what a spawn names as its program
-/// (`SpawnArgs::image`) and [`dl_open`] loads, since the kernel opens neither.
+/// The whole of the file at `path`, wherever it is served: what a spawn names
+/// as its program (`SpawnArgs::image`) and [`dl_open`] loads, since the kernel
+/// opens neither. The object its server holds it in where there is one
+/// ([`crate::fs::IMAGE`]), and otherwise a copy read into memory of this
+/// process's own.
 pub fn read_image(path: &[u8]) -> Result<Image, ImageRefused<Error>> {
     let fd = open(At::Cwd, path, Open { read: true, cloexec: true, ..Open::default() }).map_err(ImageRefused::Read)?;
-    let image = match fstat(fd) {
-        Ok(stat) => Image::read(stat.size, |buf| read(fd, buf)),
+    // SAFETY: a plain value; a handle answered is this process's alone.
+    let held = decode(unsafe { toyos_fs_image(fd) }).map(|h| OwnedHandle(toyos_abi::RawHandle(h as u32)));
+    let image = match held {
+        Ok(handle) => Immutable::adopt(handle).map(Image::immutable).map_err(|why| match why {
+            NotImmutable::Kernel(e) => ImageRefused::Memory(e),
+            NotImmutable::Writable => ImageRefused::Read(Error::Served(fs::Error::Malformed)),
+        }),
+        Err(Error::Served(fs::Error::Unsupported) | Error::Kernel(SyscallError::NotSupported)) => match fstat(fd) {
+            Ok(stat) => Image::read(stat.size, |buf| read(fd, buf)),
+            Err(e) => Err(ImageRefused::Read(e)),
+        },
         Err(e) => Err(ImageRefused::Read(e)),
     };
     // A refused close leaves nothing this read depends on.
