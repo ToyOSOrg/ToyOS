@@ -130,12 +130,15 @@ serves = ["netstack"]
 devices = ["pci:02:00:00/1af4:1041"]
 
 # The shared clipboard with QEMU's host, and the VM's console: two drivers of
-# one device, `1af4:1043`, each started on every virtio-serial function and
-# keeping the one whose port carries its name; on another, it ends with exit 0
-# and the function goes to the next row. Each holds only its own authority:
-# vdagent the compositor's clipboard port, virtio-console the log's carrier
-# port, which no other row may receive. A machine with no such function, the
-# T14 among them, starts neither.
+# one device, `1af4:1043`, each started on every virtio-serial function in
+# turn and keeping the one whose port carries its name; on another, it ends
+# with exit 0 and the function goes to the next row. Each row's authority is
+# its own — vdagent the compositor's clipboard port, virtio-console the log's
+# carrier port, which no other row may receive — but while it probes a
+# function that is not its own, a process holds that function's claim beside
+# its row's port, until its verdict or its probe's bound: vdagent the
+# console's function, which comes to it first. A machine with no such
+# function, the T14 among them, starts neither.
 [programs.vdagent]
 drives = ["pci:07:80:00/1af4:1043"]
 receives = ["clipboard"]

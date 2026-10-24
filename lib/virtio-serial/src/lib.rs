@@ -28,8 +28,7 @@ pub mod probe;
 pub const CONSOLE_PORT: &str = "org.toyos.console";
 
 /// Every virtio-serial function the launch makes has `max_ports` this: port 0,
-/// which QEMU 11.1.1 reserves for a `virtconsole` (`hw/char/virtio-console.c`)
-/// and nothing here uses, and the function's one named port.
+/// which nothing here uses, and the function's one named port.
 pub const MAX_PORTS: u32 = 2;
 
 /// The id of a function's one named port, `nr=` at the launch.

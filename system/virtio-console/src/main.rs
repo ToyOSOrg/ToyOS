@@ -30,9 +30,9 @@ use toyos::{PciDev, Pipe};
 use toyos_abi::syscall::{PciId, SyscallError};
 use toyos_manifest::device::PciMatch;
 use toyos_virtio_serial::control::{Control, Event};
-use toyos_virtio_serial::probe::{Probe, Step, Verdict};
+use toyos_virtio_serial::probe::{Probe, Step};
 use toyos_virtio_serial::{CONSOLE_PORT, PORT_ID};
-use toyos_virtio_serial_claim::{Channel, Shape};
+use toyos_virtio_serial_claim::{Channel, Identified, Shape, PROBE_BOUND};
 
 /// A communication controller of class `07:80:00`, which virtio 1.2 §5.3.1
 /// numbers `0x1040 + 3`: the matcher its row drives, and the label its claim
@@ -42,10 +42,6 @@ const VIRTIO_SERIAL: PciMatch = PciMatch::new([0x07, 0x80, 0x00], Some(PciId { v
 /// Four transmits in flight, so the host is handed the next while it writes
 /// one out, of a size that makes each a few hundred lines.
 const SHAPE: Shape = Shape { receive: None, transmit: (4, 32 * 1024) };
-
-/// How long the device may take to name its ports. Policy, far past what QEMU
-/// 11.1.1 takes: it adds and names them at the driver's first messages.
-const PROBE_BOUND: Duration = Duration::from_secs(5);
 
 /// How long the host may take nothing before that is said.
 const SILENT: Duration = Duration::from_secs(10);
@@ -93,35 +89,19 @@ fn main() {
     }
 }
 
-/// Read the device's control messages until a port carries the console's
-/// name, or end with exit 0 where none does: the function is another
-/// driver's.
+/// The console's function identified; or the end with exit 0 where none of
+/// its ports is the console's: the function is another driver's.
 fn identify(channel: &mut Channel, probe: &mut Probe<'_>, poller: &Poller) {
-    let deadline = Instant::now() + PROBE_BOUND;
-    loop {
-        while let Some(received) = channel.control() {
-            match probe.take(received.bytes()) {
-                Ok(Step::Reply(reply)) => channel.send_control(reply),
-                Ok(Step::Driver(_) | Step::Nothing) => {}
-                Err(why) => panic!("virtio-console: {why}"),
-            }
+    match toyos_virtio_serial_claim::identify(channel, probe, poller, "virtio-console") {
+        Identified::Ours(_) => {}
+        Identified::Foreign(names) => {
+            say!("virtio-console: the function's ports are {names:?}, none {CONSOLE_PORT}; another row drives it");
+            std::process::exit(0);
         }
-        match probe.verdict() {
-            Verdict::Ours => return,
-            Verdict::Foreign(names) => {
-                say!("virtio-console: the function's ports are {names:?}, none {CONSOLE_PORT}; another row drives it");
-                std::process::exit(0);
-            }
-            Verdict::Probing => {}
-        }
-        let left = deadline.saturating_duration_since(Instant::now());
-        if left.is_zero() {
+        Identified::Unnamed => {
             say!("virtio-console: the function named no port {CONSOLE_PORT} in {PROBE_BOUND:?}; another row drives it");
             std::process::exit(0);
         }
-        poller.watch(channel.claim(), READABLE, TOKEN_CLAIM);
-        poller.wait(1, u64::try_from(left.as_nanos()).unwrap_or(u64::MAX), |_| {});
-        channel.take_interrupt();
     }
 }
 

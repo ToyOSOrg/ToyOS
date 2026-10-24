@@ -42,9 +42,9 @@ use toyos_vdagent::{LARGEST_TRANSMIT, PORT_NAME};
 use toyos_vdagent_bridge::sets::Sets;
 use toyos_vdagent_bridge::{Bridge, Effect};
 use toyos_virtio_serial::control::{Control, Event};
-use toyos_virtio_serial::probe::{Probe, Step, Verdict};
+use toyos_virtio_serial::probe::{Probe, Step};
 use toyos_virtio_serial::PORT_ID;
-use toyos_virtio_serial_claim::{Channel, Shape};
+use toyos_virtio_serial_claim::{Channel, Identified, Shape, PROBE_BOUND};
 use window::watcher::{Watched, Watcher};
 
 /// One declaration of the clipboard's bound, read by the codec and the
@@ -64,9 +64,6 @@ const TRANSMIT_BOUND: Duration = Duration::from_secs(5);
 /// every message owed, in one element.
 const SHAPE: Shape = Shape { receive: Some((16, 4096)), transmit: (1, LARGEST_TRANSMIT) };
 
-/// How long the device may take to name its ports. Policy, far past what QEMU
-/// 11.1.1 takes: it adds and names them at the driver's first messages.
-const PROBE_BOUND: Duration = Duration::from_secs(5);
 
 const TOKEN_CLAIM: u64 = 0;
 const TOKEN_WATCHER: u64 = 1;
@@ -231,36 +228,19 @@ fn main() {
     }
 }
 
-/// Read the device's control messages until a port carries the agent's name,
-/// and answer the messages for it that came with them; or end with exit 0
-/// where none does: the function is another driver's.
+/// The agent's function's ports identified, and the messages about them that
+/// came first; or the end with exit 0 where none is the agent's: the
+/// function is another driver's.
 fn identify(channel: &mut Channel, probe: &mut Probe<'_>, poller: &Poller) -> Vec<Control> {
-    let deadline = Instant::now() + PROBE_BOUND;
-    let mut held = Vec::new();
-    loop {
-        while let Some(received) = channel.control() {
-            match probe.take(received.bytes()) {
-                Ok(Step::Reply(reply)) => channel.send_control(reply),
-                Ok(Step::Driver(control)) => held.push(control),
-                Ok(Step::Nothing) => {}
-                Err(why) => panic!("vdagent: {why}"),
-            }
+    match toyos_virtio_serial_claim::identify(channel, probe, poller, "vdagent") {
+        Identified::Ours(held) => held,
+        Identified::Foreign(names) => {
+            say!("vdagent: the function's ports are {names:?}, none {PORT_NAME}; another row drives it");
+            std::process::exit(0);
         }
-        match probe.verdict() {
-            Verdict::Ours => return held,
-            Verdict::Foreign(names) => {
-                say!("vdagent: the function's ports are {names:?}, none {PORT_NAME}; another row drives it");
-                std::process::exit(0);
-            }
-            Verdict::Probing => {}
-        }
-        let left = deadline.saturating_duration_since(Instant::now());
-        if left.is_zero() {
+        Identified::Unnamed => {
             say!("vdagent: the function named no port {PORT_NAME} in {PROBE_BOUND:?}; another row drives it");
             std::process::exit(0);
         }
-        poller.watch(channel.claim(), READABLE, TOKEN_CLAIM);
-        poller.wait(1, u64::try_from(left.as_nanos()).unwrap_or(u64::MAX), |_| {});
-        channel.take_interrupt();
     }
 }

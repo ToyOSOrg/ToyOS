@@ -4,11 +4,11 @@
 //! The bytes the host reads are never coloured.
 //!
 //! **A `virtserialport`, never a `virtconsole`**: QEMU 11.1.1 holds a
-//! `virtserialport`'s transmit until its chardev takes it, and drops what a
-//! `virtconsole`'s chardev refuses (`hw/char/virtio-console.c`, `flush_buf`).
-//! Port 0 is a `virtconsole`'s alone, so the port is [`PORT_ID`] of a
-//! multiport function. Firmware writes nothing on it, so its first byte is
-//! the boot log's.
+//! `virtserialport`'s transmit until its chardev takes it, measured — a host
+//! reader stopped for 20 s lost no byte — where a `virtconsole` dropped what
+//! a slow reader left. The port is [`PORT_ID`] of a multiport function.
+//! Firmware writes nothing on it, measured, so its first byte is the boot
+//! log's.
 
 use std::io::{self, Read, Write};
 use std::os::fd::{AsFd, AsRawFd, BorrowedFd};

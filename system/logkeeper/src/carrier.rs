@@ -14,7 +14,7 @@
 //! back to the UART with it, so a crash here cannot leave the UART quiet.
 //!
 //! What the carrier's channel had not taken when the carrier went is on
-//! neither: `/log` has it.
+//! neither (`issues/the-console-loses-what-its-carrier-had-not-delivered.md`).
 
 use std::sync::{Arc, Condvar, Mutex, MutexGuard};
 use std::time::{Duration, Instant};
@@ -234,13 +234,13 @@ impl Carrier {
             let mut ready = [false; 2];
             poller.wait(1, u64::MAX, |token| ready[token as usize] = true);
 
-            if ready[ACCEPT as usize] {
-                if let Ok(conn) = acceptor.accept() {
-                    if admitted.is_some() || asking.is_some() {
-                        say!("logkeeper: refusing a second console carrier: one is served");
-                    } else {
-                        asking = Some((conn, FrameRx::new()));
-                    }
+            if ready[ACCEPT as usize]
+                && let Ok(conn) = acceptor.accept()
+            {
+                if admitted.is_some() || asking.is_some() {
+                    say!("logkeeper: refusing a second console carrier: one is served");
+                } else {
+                    asking = Some((conn, FrameRx::new()));
                 }
             }
             if !ready[CONNECTION as usize] {

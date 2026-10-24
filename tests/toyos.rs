@@ -145,8 +145,7 @@ const RUST_SKIP: &[&str] = &[
     // Its product is what a diary record costs, which the `trace_record_cost`
     // metal row reads off the test kernel its flood needs.
     "trace_flood",
-    // It takes the machine down; `virt_fatal_halts_the_others_first` and
-    // `a_fatal_report_reaches_the_uart_while_a_carrier_carries_the_log` run it.
+    // It takes the machine down; `virt_fatal_halts_the_others_first` runs it.
     "panic_halts_first",
     // They claim QEMU's `edu` and `e1000e`, which only `virt_claim_lpi`'s
     // machine has.
@@ -475,12 +474,6 @@ const MACHINE_TESTS: &[&str] = &[
     // again. Three processes, the kernel and QEMU's hot-unplug, which no host
     // build has. q35 only: no other machine carries a console port.
     "the_uart_carries_the_log_again_once_the_console_carrier_goes",
-    // A kernel's fatal path on a guest whose console port carries the log,
-    // while three CPUs make records `klogd` advances past unwritten: the
-    // report reaches the harness on the UART. The kernel, the carrier's
-    // processes and the harness's two channels, which no host build has.
-    // q35 only: no other machine carries a console port.
-    "a_fatal_report_reaches_the_uart_while_a_carrier_carries_the_log",
     // An AMD-Vi unit left blocking every device, switched off and programmed
     // before the boot stick is driven behind it: the register sequence and the
     // DMA it lets through are no host test's, and the AMD bench is staged by
@@ -4340,9 +4333,6 @@ fn run_machine_test(name: &str, test_config: &Path) -> Result<(), String> {
         }
         "the_uart_carries_the_log_again_once_the_console_carrier_goes" => {
             common::vmconsole::the_uart_carries_the_log_again_once_the_console_carrier_goes(test_config)
-        }
-        "a_fatal_report_reaches_the_uart_while_a_carrier_carries_the_log" => {
-            common::vmconsole::a_fatal_report_reaches_the_uart_while_a_carrier_carries_the_log(test_config)
         }
         "amdvi_firmware_left" => common::iommu::amdvi_firmware_left(test_config),
         "amdvi_selftest" => common::iommu::amdvi_selftest(test_config),

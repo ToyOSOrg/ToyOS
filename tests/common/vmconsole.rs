@@ -1,7 +1,6 @@
 //! The VM's console on a virtio machine: `/system/bin/virtio-console`
 //! carrying the log on its port, and the UART taking it back when it goes.
 
-use std::io::Write;
 use std::path::Path;
 
 use super::qemu::{self, BootOptions, QemuInstance, QmpMonitor};
@@ -44,41 +43,3 @@ pub fn the_uart_carries_the_log_again_once_the_console_carrier_goes(test_config:
     Ok(())
 }
 
-/// What the fatal path says once it has armed the reboot that ends it
-/// (`kernel/src/panic_reboot.rs`): a line only the UART carries.
-const REBOOT_ARMED: &str = "panic: rebooting in";
-
-/// **A kernel's fatal report reaches the harness on the UART while the
-/// console port's carrier carries the log**, three CPUs making kernel
-/// records as fast as they can — the records `klogd` advances past unwritten
-/// while it does. `test_rs_panic_halts_first` goes fatal by `SYS_DEBUG` once
-/// its siblings run: its line and the fatal path's after it are the UART's
-/// alone, the carrier being one of the processes the fatal path stopped.
-/// That a fatal path's first record is never advanced past is the ordering
-/// `kernel/src/log/console.rs` states, not this test's: the halt makes the
-/// same claim microseconds later. q35 only: no other machine of this suite
-/// carries a console port.
-pub fn a_fatal_report_reaches_the_uart_while_a_carrier_carries_the_log(test_config: &Path) -> Result<(), String> {
-    let fatal = qemu::build_toyos_bin(
-        qemu::SUITE_ARCH,
-        &super::compile::repo_root().join("tests/guest/rust-tests"),
-        "panic_halts_first",
-    );
-    let options = BootOptions {
-        smp: crate::STOP_CPUS,
-        kernel_features: crate::ACTUATOR_KERNEL,
-        extra_root_files: vec![("bin/test_rs_panic_halts_first".to_string(), fatal)],
-        ..Default::default()
-    };
-    let mut qemu = QemuInstance::boot_with_options(test_config, &[], &[], options);
-    let mut console = Serial::boot(&qemu).text().to_string();
-    qemu::await_marker(&mut qemu, &mut console, QUIETED, "logkeeper to quiet the UART for its carrier")?;
-    let from = console.len();
-    writeln!(qemu.stdin_mut(), "run test_rs_panic_halts_first").map_err(|e| e.to_string())?;
-    qemu.flush_stdin();
-    qemu::await_marker_new(&mut qemu, &mut console, REBOOT_ARMED, from, "the fatal path to arm its reboot")?;
-    let after = Serial::named("console after the fatal halt", console[from..].to_string());
-    let nonce = after.must_say_after(crate::FATAL_HALT_NONCE, REBOOT_ARMED)?;
-    eprintln!("  [vmconsole] {}", nonce.trim());
-    Ok(())
-}

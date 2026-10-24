@@ -19,8 +19,9 @@
 //! refusal's own name: every message after it is one that silently never
 //! arrives.
 
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
+use toyos::poller::{Poller, READABLE};
 use toyos::shm::SharedMemory;
 use toyos::{DmaRegion, PciDev};
 use toyos_abi::syscall::SyscallError;
@@ -31,6 +32,7 @@ use toyos_virtio::pci::Live;
 use toyos_virtio::queue::{Buffer, Parts, Used, Virtqueue};
 
 use toyos_virtio_serial::control::{self, Control};
+use toyos_virtio_serial::probe::{Probe, Step, Verdict};
 use toyos_virtio_serial::{CONTROL_BUFFERS, MAX_PORTS};
 
 /// §5.3.3: the device has control queues and more than one port.
@@ -370,5 +372,52 @@ impl Channel {
         self.device.notify(published);
         self.in_flight[head as usize] = Some((len as u32, Instant::now()));
         len
+    }
+}
+
+/// How long the device may take to name its ports. Policy, far past what QEMU
+/// 11.1.1 takes, measured: it adds and names them at the driver's first
+/// messages.
+pub const PROBE_BOUND: Duration = Duration::from_secs(5);
+
+/// What the device said its ports are.
+pub enum Identified {
+    /// A port carries the driver's name; the control messages about known
+    /// ports that came with the names, the driver's to answer.
+    Ours(Vec<Control>),
+    /// Every port the device added is named, by these names, and none is the
+    /// driver's.
+    Foreign(Vec<String>),
+    /// The device named no port of the driver's within [`PROBE_BOUND`].
+    Unnamed,
+}
+
+/// Read the device's control messages, answering each `DEVICE_ADD`, until
+/// `probe` has a verdict or [`PROBE_BOUND`] is spent, parking on `poller`.
+/// A device that misnames its ports ends the program, `who`'s, by name.
+pub fn identify(channel: &mut Channel, probe: &mut Probe<'_>, poller: &Poller, who: &str) -> Identified {
+    let deadline = Instant::now() + PROBE_BOUND;
+    let mut held = Vec::new();
+    loop {
+        while let Some(received) = channel.control() {
+            match probe.take(received.bytes()) {
+                Ok(Step::Reply(reply)) => channel.send_control(reply),
+                Ok(Step::Driver(control)) => held.push(control),
+                Ok(Step::Nothing) => {}
+                Err(why) => panic!("{who}: {why}"),
+            }
+        }
+        match probe.verdict() {
+            Verdict::Ours => return Identified::Ours(held),
+            Verdict::Foreign(names) => return Identified::Foreign(names),
+            Verdict::Probing => {}
+        }
+        let left = deadline.saturating_duration_since(Instant::now());
+        if left.is_zero() {
+            return Identified::Unnamed;
+        }
+        poller.watch(channel.claim(), READABLE, 0);
+        poller.wait(1, u64::try_from(left.as_nanos()).unwrap_or(u64::MAX), |_| {});
+        channel.take_interrupt();
     }
 }
