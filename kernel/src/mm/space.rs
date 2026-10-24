@@ -26,6 +26,8 @@ use core::sync::atomic::{AtomicU64, Ordering::Relaxed};
 use kernel::vm::{self, Access, Entry, Kind, Prot};
 use toyos_abi::syscall::SyscallError;
 
+use kernel::sched::job::Job;
+
 use super::charge::{self, Charge};
 use super::paging::{Leaf, Mapping, Root, Unlinked, UserTables};
 use super::policy::{self, CachePolicy};
@@ -155,16 +157,18 @@ pub struct Space {
 pub type PageTables = Arc<Space>;
 
 impl Space {
-    /// A new user space holding nothing, or `None` when every tag the
-    /// architecture has for one is held by a live space.
-    pub fn new_user() -> Option<PageTables> {
+    /// A new user space holding nothing, whose memory is counted to `job`,
+    /// or `None` when every tag the architecture has for one is held by a
+    /// live space or no frame is left for its root.
+    pub fn new_user(job: &Arc<Job>) -> Option<PageTables> {
         let usage = Arc::new(Usage::default());
         let space = AddressSpace {
             inventory: Inventory::new(FLOOR, TOP),
-            tables: UserTables::new()?,
+            tables: UserTables::new(job)?,
             usage: Arc::clone(&usage),
             kernel: false,
-            ranges: Charge::NONE,
+            ranges: Charge::none(job),
+            job: Arc::clone(job),
         };
         Some(Arc::new(Self { inner: Lock::new(space), usage }))
     }
@@ -201,7 +205,8 @@ pub(super) fn init_kernel() {
         tables: UserTables::kernel(),
         usage: Arc::clone(&usage),
         kernel: true,
-        ranges: Charge::NONE,
+        ranges: Charge::none(charge::boot()),
+        job: Arc::clone(charge::boot()),
     };
     // Leaked: it outlives every task, and its tables are the kernel's.
     let space: &'static PageTables = alloc::boxed::Box::leak(alloc::boxed::Box::new(Arc::new(Space { inner: Lock::new(space), usage })));
@@ -223,6 +228,8 @@ pub struct AddressSpace {
     kernel: bool,
     /// What its ranges take of the heap, in grains of [`RANGE_GRAIN`].
     ranges: Charge,
+    /// The job its memory is counted to: its process's.
+    job: Arc<Job>,
 }
 
 /// Ranges a space is charged for at a time, so that a change adding one
@@ -258,6 +265,11 @@ fn pages(start: u64, len: u64) -> Option<u64> {
 impl AddressSpace {
     pub fn root(&self) -> Root {
         self.tables.root()
+    }
+
+    /// The job its memory is counted to.
+    pub fn job(&self) -> &Arc<Job> {
+        &self.job
     }
 
     /// Where a range of `len` bytes goes, changing nothing: a `Fixed` one is
@@ -300,7 +312,7 @@ impl AddressSpace {
                 .sum();
             self.inventory.insert(start, entry);
             let freed = self.clear(start, end);
-            pmm::unpromise(committed - freed);
+            pmm::unpromise(&self.job, committed - freed);
             self.usage.taken.fetch_add(1, Relaxed);
             // The objects go here, after every CPU has stopped reaching them.
             drop(removed);
@@ -373,11 +385,14 @@ impl AddressSpace {
         let start = self.place(len, at)?;
         let entry = Entry { end: start + len, prot, kind };
         let promised = if entry.committed() { len / PAGE_SIZE } else { 0 };
-        if !pmm::promise(promised) {
+        if !pmm::promise(&self.job, promised) {
             return Err(SyscallError::ResourceExhausted);
         }
         if entry.backed() {
-            self.build(start, start + len).inspect_err(|_| pmm::unpromise(promised))?;
+            if let Err(e) = self.build(start, start + len) {
+                pmm::unpromise(&self.job, promised);
+                return Err(e);
+            }
         }
         self.put(start, entry);
         Ok(UserAddr::new(start))
@@ -395,7 +410,7 @@ impl AddressSpace {
         if !unlinked.is_empty() {
             self.tables.shoot_down(start, end, &unlinked);
         }
-        unlinked.free();
+        self.tables.free(unlinked);
         Err(SyscallError::ResourceExhausted)
     }
 
@@ -450,7 +465,7 @@ impl AddressSpace {
             .map(|(s, entry)| (entry.end - s) / PAGE_SIZE)
             .sum();
         let freed = self.clear(start, end);
-        pmm::unpromise(committed - freed);
+        pmm::unpromise(&self.job, committed - freed);
         self.usage.taken.fetch_add(1, Relaxed);
         // The objects go here, after every CPU has stopped reaching them.
         drop(removed);
@@ -479,11 +494,14 @@ impl AddressSpace {
             Prot::None => 0,
             _ => self.pages_where(start, end, |kind| matches!(kind, Kind::Private { committed: false })),
         };
-        if !pmm::promise(commits) {
+        if !pmm::promise(&self.job, commits) {
             return Err(SyscallError::ResourceExhausted);
         }
         if commits > 0 {
-            self.build(start, end).inspect_err(|_| pmm::unpromise(commits))?;
+            if let Err(e) = self.build(start, end) {
+                pmm::unpromise(&self.job, commits);
+                return Err(e);
+            }
         }
         self.inventory.update(start, end, |_, entry| {
             entry.prot = prot;
@@ -587,7 +605,7 @@ impl AddressSpace {
             entry.kind = Kind::Private { committed: false };
         });
         let freed = self.clear(start, end);
-        pmm::unpromise(committed - freed);
+        pmm::unpromise(&self.job, committed - freed);
         self.settle();
         Ok(())
     }
@@ -665,7 +683,7 @@ impl AddressSpace {
             crate::sched::futex::revoke_frames(frames);
             // SAFETY: frames owned leaves gave up, which no leaf maps on any
             // CPU now and no waiter is keyed on.
-            unsafe { pmm::free_raw(frames) };
+            unsafe { pmm::free_drawn(&self.job, frames) };
             freed += frames.len() as u64;
         });
         let inventory = &self.inventory;
@@ -673,7 +691,7 @@ impl AddressSpace {
         if !unlinked.is_empty() {
             self.shoot_down(start, end, &unlinked);
         }
-        unlinked.free();
+        self.tables.free(unlinked);
         self.usage.freed(freed);
         freed
     }
@@ -847,10 +865,10 @@ impl Drop for AddressSpace {
         let mut freed = 0;
         self.tables.take_owned(FLOOR, TOP, |frames| {
             // SAFETY: the space's own frames, which nothing maps once it drops.
-            unsafe { pmm::free_raw(frames) };
+            unsafe { pmm::free_drawn(&self.job, frames) };
             freed += frames.len() as u64;
         });
         self.usage.freed(freed);
-        pmm::unpromise(committed - freed);
+        pmm::unpromise(&self.job, committed - freed);
     }
 }

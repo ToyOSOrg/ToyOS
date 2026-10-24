@@ -41,6 +41,16 @@ impl Acceptor {
         syscall::accept(self.0.raw()).map(|h| Connection(OwnedHandle(h)))
     }
 
+    /// A connection already queued, or `None` where none is: for a loop that
+    /// must never wait on a client.
+    pub fn try_accept(&self) -> Result<Option<Connection>, SyscallError> {
+        match syscall::accept_nonblock(self.0.raw()) {
+            Ok(h) => Ok(Some(Connection(OwnedHandle(h)))),
+            Err(SyscallError::WouldBlock) => Ok(None),
+            Err(e) => Err(e),
+        }
+    }
+
     /// A connector to this port whose every connection carries `badge`, which
     /// [`Self::badge`] reads back: what this holder granted whoever holds the
     /// connector, never who that is.

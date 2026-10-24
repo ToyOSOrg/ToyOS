@@ -3,6 +3,7 @@ use crate::mm::pmm;
 
 use kernel::message::Window;
 use kernel::pipe::{End, Holders, Landing, Released};
+use kernel::sched::job::Job;
 use toyos_abi::ring::Ring;
 
 use alloc::sync::Arc;
@@ -93,8 +94,8 @@ const _: () = assert!(
 
 /// A pipe's ring page and the cursors over it, in kernel memory.
 struct Backing {
-    /// Owns the page `ring` addresses.
-    _page: pmm::PhysPage,
+    /// Owns the page `ring` addresses, counted to the job that made the pipe.
+    _page: pmm::Run,
     ring: Ring,
 }
 
@@ -108,8 +109,9 @@ struct Pipe {
     /// end sits on it, and only the other end's last holder posts it — a byte
     /// moved through the pipe wakes no poll that asked about a leaving.
     left: [Arc<Watch>; 2],
-    /// Its own heap and its watches.
-    _charge: Charge,
+    /// Its own heap and its watches, charged to the job that made it, which
+    /// its ring is counted to as well.
+    charge: Charge,
 }
 
 /// What a pipe's lock holds.
@@ -127,7 +129,7 @@ struct State {
     read: u64,
 }
 
-// SAFETY: `Backing::ring`'s raw pointer and its owning `PhysPage` move together in the same struct, and the pipe's lock is the only way to reach a `State`, serializing all access to it.
+// SAFETY: `Backing::ring`'s raw pointer and its owning `pmm::Run` move together in the same struct, and the pipe's lock is the only way to reach a `State`, serializing all access to it.
 unsafe impl Send for State {}
 
 impl Pipe {
@@ -138,11 +140,13 @@ impl Pipe {
 }
 
 impl State {
-    /// Allocate the ring page if this is the first use; `None` where the
-    /// kernel holds back what is left, which userland's write is refused.
-    fn back(&mut self) -> Option<&mut Backing> {
+    /// Allocate the ring page if this is the first use, counted to `job`, the
+    /// one that made the pipe, whoever writes first: a connection's are both
+    /// its connecting job's, so a server's reply spends nothing of its own.
+    /// `None` where what is left is held back, which the write is refused.
+    fn back(&mut self, job: &Arc<Job>) -> Option<&mut Backing> {
         if self.backing.is_none() {
-            let page = pmm::alloc_page_for_process()?;
+            let page = pmm::Run::new(job, 1)?;
             // SAFETY: a fresh 2 MiB page this `State` owns for as long as the `Ring` addresses it.
             let ring = unsafe { Ring::new(page.direct_map().as_mut_ptr(), PIPE_SIZE) };
             self.backing = Some(Backing { _page: page, ring });
@@ -173,13 +177,13 @@ impl State {
 /// A pipe with no traffic owns no physical memory: its ring page is
 /// allocated at its first `write`, which is refused if none is left.
 pub fn create() -> Result<(PipeReader, PipeWriter), Exhausted> {
-    let charge = Charge::new(Pipe::heap())?;
+    let charge = Charge::current(Pipe::heap())?;
     let pipe = PipeRef(Arc::new(Pipe {
         state: Lock::new(State { backing: None, holders: Holders::new(), rt_boost_pending: false, written: 0, read: 0 }),
         read_watch: Arc::new(Watch::new()),
         write_watch: Arc::new(Watch::new()),
         left: [Arc::new(Watch::new()), Arc::new(Watch::new())],
-        _charge: charge,
+        charge,
     }));
     Ok((PipeReader::acquire(&pipe), PipeWriter::acquire(&pipe)))
 }
@@ -259,7 +263,7 @@ impl PipeRef {
         if !pipe.holders.held(End::Read) {
             return PipeWrite::BrokenPipe;
         }
-        let Some(backing) = pipe.back() else { return PipeWrite::NoMemory };
+        let Some(backing) = pipe.back(self.0.charge.job()) else { return PipeWrite::NoMemory };
         let Some(n) = landing.takes(backing.ring.space(), buf.len()) else { return PipeWrite::NoRoom };
         let wrote = backing.ring.write(n, |off, mut dst| buf.read_run(off, &mut dst));
         assert_eq!(wrote, n, "pipe: a ring with room for a write took less of it");

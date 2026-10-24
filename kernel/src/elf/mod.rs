@@ -50,7 +50,7 @@ pub struct Run(alloc::sync::Arc<crate::object::shm::SharedMemObject>);
 impl Run {
     /// `size` bytes of zeroed memory in one run.
     pub fn new(size: usize) -> Option<Self> {
-        crate::object::shm::SharedMemObject::create_run(size as u64).ok().map(Self)
+        crate::object::shm::SharedMemObject::create_run(&crate::mm::charge::current(), size as u64).ok().map(Self)
     }
 
     pub fn ptr(&self) -> *mut u8 {
