@@ -381,9 +381,13 @@ fn upstream_finds_f_at_every_request(image: Vec<u8>, passphrase: Option<&[u8]>, 
 /// it was written, so a torn newest entry leaves upstream the one before it.
 /// Renames whose reclaim writes before each, a commit after every two, a
 /// crash at every request: in every unclean state upstream's reader finds
-/// an entry to replay. Red when an entry's last sequence may be its own.
+/// an entry to replay. And on the medium no entry names itself but the first
+/// after mkfs's empty journal (A2.25), so only that one and the unmount's
+/// last pay for being written header last. Red when an entry's last
+/// sequence may be its own.
 #[test]
 fn a_torn_newest_entry_leaves_upstream_an_entry_to_replay() {
+    use super::super::read::Source;
     for passphrase in [None, Some(hex_secret())] {
         let p = passphrase.as_deref();
         let image = formatted(64 << 20, p.map(|passphrase| Encryption { passphrase, kdf: MIN_KDF })).into_inner();
@@ -395,6 +399,9 @@ fn a_torn_newest_entry_leaves_upstream_an_entry_to_replay() {
                     m.commit().await.unwrap();
                 }
             }
+            let scan = super::super::journal::scan(Source::dev(m), Source::superblock(m), Source::master_key(m)).await.unwrap();
+            let named: Vec<u64> = scan.entries.values().filter(|e| e.good && e.flush && e.last_seq == e.seq && e.seq != 1).map(|e| e.seq).collect();
+            assert!(scan.entries.len() > 10 && named.is_empty(), "entries naming themselves: {named:?}");
         });
         assert!(unclean > 200, "{unclean} unclean states judged");
     }
