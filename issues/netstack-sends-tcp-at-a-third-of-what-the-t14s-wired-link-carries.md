@@ -40,7 +40,8 @@ not findings:
 - the send window and the ACK clocking.
 
 The sending CPU's clock read 1.6 to 3.8 GHz around these runs. That is
-not excluded either.
+not excluded either: it is the T14's clock ceiling in
+`issues/toyos-uses-what-modern-hardware-offers-for-speed.md`.
 
 **Exit**: `osbench_lan` on the T14 reads `lan.wired.tcp.upload` within
 Linux's run-to-run range on the same path, or the cause is named and owned

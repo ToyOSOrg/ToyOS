@@ -70,6 +70,11 @@ is nothing to enable.
   `issues/idle-cpus-enter-the-c-states-cst-names.md`'s to answer; that the
   idle state reaches HWP's clock choice is inference. Next: a T14 scout whose
   idle CPUs wait in a deep C-state, read over the same windows.
+  #1065's network session on the T14 (`ToyOSOrg/evidence` branch
+  `pr-1065`, `r3/`) read the same: each group's `cpu.clock` p50 was 1.5 to
+  3.2 GHz under ToyOS against 3.8 to 4.2 GHz under Linux. That covers three
+  ToyOS runs and four Linux runs of `osbench lan` and `osbench internet`, both
+  of which mostly wait on the network.
 - **Global-line contention** is bounded at 2 to 3 % of C0 on the T14 and not
   attributed; next, the HITM count attributed to its lines on both benches
   (`issues/per-cpu-scheduler-and-pmm-state-shares-lines-every-cpu-writes.md`).
