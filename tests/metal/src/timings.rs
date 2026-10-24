@@ -87,14 +87,11 @@ fn file(vendor: &str, product: &str) -> String {
     format!("{}.toml", slug.trim_end_matches('-'))
 }
 
-/// A disk a bench lends ToyOS, as its `/sys/class/block/<disk>` answered when
-/// it was recorded: shared by every disk of its model, so what the disk holds
-/// says which one it is (`toyos_metal::located`). A card behind an SD host
-/// controller would answer its `manfid` and `name` for vendor and model;
-/// reading one is not built.
+/// The one disk the loop may write on a machine, as its
+/// `/sys/class/block/<disk>` answered when the machine was recorded.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
-pub struct Disk {
+pub struct Stick {
     pub sectors: u64,
     pub vendor: String,
     pub model: String,
@@ -106,24 +103,18 @@ pub struct Record {
     pub vendor: String,
     pub product: String,
     pub bios: String,
-    /// The boot stick the loop flashes.
-    pub stick: Disk,
-    /// The disks a destructive test may erase, each adopted once by
-    /// `toyos-metal --adopt-scratch`.
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub scratch: Vec<Disk>,
+    pub stick: Stick,
     pub measured: BTreeMap<String, u64>,
 }
 
 impl Record {
     /// `machine` with `stick`, before any run has measured it.
-    pub fn new(machine: &Machine, stick: Disk) -> Self {
+    pub fn new(machine: &Machine, stick: Stick) -> Self {
         Self {
             vendor: machine.vendor.clone(),
             product: machine.product.clone(),
             bios: machine.bios.clone(),
             stick,
-            scratch: Vec::new(),
             measured: BTreeMap::new(),
         }
     }
@@ -291,30 +282,12 @@ mod tests {
     }
 
     fn fresh(machine: &Machine) -> Record {
-        let stick = Disk { sectors: 60_062_500, vendor: "SanDisk".to_string(), model: "Ultra".to_string() };
+        let stick = Stick { sectors: 60_062_500, vendor: "SanDisk".to_string(), model: "Ultra".to_string() };
         Record::new(machine, stick)
     }
 
     fn recorded(machine: &Machine, pairs: &[(&str, u64)]) -> Record {
         judge(machine, fresh(machine), &readings(pairs)).record
-    }
-
-    /// A record's scratch disks survive its file, and a record written before
-    /// any was adopted still reads, with none.
-    #[test]
-    fn scratch_disks_cross_in_the_record_file() {
-        let dir = toyos_tmpdir::TempDir::new("metal-record");
-        let machine = t14(BIOS);
-        let mut record = recorded(&machine, &[("boot.a.complete_ms", 1166)]);
-        std::fs::create_dir_all(&*dir).unwrap();
-        let at = dir.join(machine.file());
-        std::fs::write(&at, toml::to_string(&record).unwrap()).unwrap();
-        assert!(!std::fs::read_to_string(&at).unwrap().contains("scratch"));
-        assert_eq!(Record::load(&dir, &machine), Ok(Some(record.clone())));
-        record.scratch.push(Disk { sectors: 62_521_344, vendor: "TS-RDF5".to_string(), model: "SD Transcend".to_string() });
-        record.scratch.push(fresh(&machine).stick);
-        record.save(&dir).unwrap();
-        assert_eq!(Record::load(&dir, &machine), Ok(Some(record)));
     }
 
     #[test]

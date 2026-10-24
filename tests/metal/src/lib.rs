@@ -39,7 +39,7 @@ use toyos_build::image::LBA;
 use toyos_gpt::Guid;
 
 use crate::internal::Owned;
-use crate::timings::{Disk, Machine, Record};
+use crate::timings::{Machine, Record, Stick};
 
 pub mod image;
 pub mod internal;
@@ -146,9 +146,9 @@ pub enum Refusal {
     Identity { field: &'static str, want: String, got: String },
     /// No disk is a recorded one carrying what this step needs; each disk
     /// considered is named with why it is not.
-    NoStick { carrying: String, considered: Vec<String> },
+    Unlocated { carrying: String, considered: Vec<String> },
     /// More than one disk is a recorded one carrying it, so none is.
-    Sticks { carrying: String, nodes: Vec<String> },
+    Ambiguous { carrying: String, nodes: Vec<String> },
     /// The disk named to be adopted as scratch is not one this loop erases.
     Adopt(String),
     File { path: String, why: String },
@@ -257,7 +257,7 @@ impl fmt::Display for Refusal {
             Self::Identity { field, want, got } => {
                 write!(f, "the disk's {field} reads {got:?} where this loop was given {want:?}")
             }
-            Self::NoStick { carrying, considered } => write!(
+            Self::Unlocated { carrying, considered } => write!(
                 f,
                 "no disk is a recorded one carrying {carrying}, so nothing was written ({}). A \
                  boot stick that carries no ToyOS image yet is adopted by naming it by hand, \
@@ -268,7 +268,7 @@ impl fmt::Display for Refusal {
                 }
             ),
             Self::Adopt(why) => write!(f, "nothing was erased: {why}"),
-            Self::Sticks { carrying, nodes } => write!(
+            Self::Ambiguous { carrying, nodes } => write!(
                 f,
                 "{} are each a recorded disk carrying {carrying}, so nothing was written: unplug \
                  every one but the disk meant",
@@ -458,7 +458,7 @@ impl Identity {
         })
     }
 
-    fn check(&self, want: &Disk) -> Result<(), Refusal> {
+    fn check(&self, want: &Stick) -> Result<(), Refusal> {
         let no = |field, want: String, got: String| Refusal::Identity { field, want, got };
         if self.sectors != want.sectors {
             return Err(no("size", want.sectors.to_string(), self.sectors.to_string()));
@@ -524,6 +524,17 @@ fn sd_disks(listing: &str) -> Result<Vec<(Sd, Vec<Listed>)>, Refusal> {
     Ok(disks)
 }
 
+/// What a disk's partitions are, by type, so a refusal tells apart two disks
+/// of one identity for whoever then names one by hand.
+fn table(parts: &[Listed]) -> String {
+    let kinds: Vec<String> =
+        parts.iter().map(|p| p.kind.map_or_else(|| "no GPT type".to_string(), |k| k.to_string())).collect();
+    match kinds.len() {
+        0 => "no partitions".to_string(),
+        n => format!("{n} partitions: {}", kinds.join(", ")),
+    }
+}
+
 /// What a disk must hold to be the stick a step writes or reads: the recorded
 /// identity alone is shared by every stick of the model.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -535,6 +546,8 @@ enum Carrying {
     Log { index: u32, guid: Guid },
     /// A scratch disk's table, as [`adopt_scratch`] writes it: one partition,
     /// of [`Guid::TOYOS_SCRATCH`], so no disk holding a ToyOS image is one.
+    /// The mark is the whole of a scratch disk's identity: only adoption
+    /// writes it, and what carries it is erasable by definition.
     Scratch,
 }
 
@@ -568,21 +581,17 @@ impl fmt::Display for Carrying {
 
 /// The one disk of `listing` that carries `carrying` and answers as the
 /// recorded disk `want`, `identity` answering [`Sd::identity`] for each disk
-/// that carries it. **Refused where none is, or more than one**: a second
-/// disk of the same model is told apart by what it holds, so a blank one, one
-/// holding another system, or a boot stick and a scratch disk taken for each
-/// other, is never the target, whatever its node. The one rule for every disk
-/// a bench lends, and for every writer of one.
+/// that carries it; refused where none is, or more than one.
 fn located(
     listing: &str,
     carrying: Carrying,
-    want: &Disk,
+    want: &Stick,
     mut identity: impl FnMut(Sd) -> Result<String, Refusal>,
 ) -> Result<Sd, Refusal> {
     let (mut found, mut considered) = (Vec::new(), Vec::new());
     for (sd, parts) in sd_disks(listing)? {
         if !carrying.holds(&parts) {
-            considered.push(format!("{} does not carry {carrying}", sd.node().whole()));
+            considered.push(format!("{} does not carry {carrying} ({})", sd.node().whole(), table(&parts)));
             continue;
         }
         match Identity::parse(&identity(sd)?)?.check(want) {
@@ -592,8 +601,8 @@ fn located(
     }
     match found[..] {
         [one] => Ok(one),
-        [] => Err(Refusal::NoStick { carrying: carrying.to_string(), considered }),
-        _ => Err(Refusal::Sticks {
+        [] => Err(Refusal::Unlocated { carrying: carrying.to_string(), considered }),
+        _ => Err(Refusal::Ambiguous {
             carrying: carrying.to_string(),
             nodes: found.iter().map(|sd| sd.node().whole()).collect(),
         }),
@@ -608,7 +617,7 @@ fn recorded(dir: &Path, machine: &Machine) -> Result<Record, Refusal> {
 }
 
 /// Whether `disk` is the stick `machine`'s record in `dir` names.
-fn recorded_stick(dir: &Path, machine: &Machine, disk: &Identity) -> Result<Disk, Refusal> {
+fn recorded_stick(dir: &Path, machine: &Machine, disk: &Identity) -> Result<Stick, Refusal> {
     let stick = recorded(dir, machine)?.stick;
     disk.check(&stick)?;
     Ok(stick)
@@ -619,7 +628,7 @@ fn recorded_stick(dir: &Path, machine: &Machine, disk: &Identity) -> Result<Disk
 #[derive(Debug, PartialEq, Eq)]
 struct Captured {
     at: PathBuf,
-    stick: Disk,
+    stick: Stick,
     wrote: bool,
 }
 
@@ -627,7 +636,7 @@ impl Captured {
     /// The capture's account of itself: the record, the disk it was taken
     /// from, and the disk every later run writes.
     fn said(&self, sd: Sd) -> String {
-        let Disk { sectors, vendor, model } = &self.stick;
+        let Stick { sectors, vendor, model } = &self.stick;
         format!(
             "{} {}: the stick is {}, {sectors} sectors, {vendor} {model}, removable; every run on \
              this machine writes the one disk of that identity carrying a ToyOS image, or the one \
@@ -647,7 +656,7 @@ fn record_machine(dir: &Path, machine: &Machine, disk: &Identity) -> Result<Capt
         Some(_) => false,
         None => {
             let stick =
-                Disk { sectors: disk.sectors, vendor: disk.vendor.clone(), model: disk.model.clone() };
+                Stick { sectors: disk.sectors, vendor: disk.vendor.clone(), model: disk.model.clone() };
             // Before the write, so a fixed disk is never recorded as a stick.
             disk.check(&stick)?;
             Record::new(machine, stick).save(dir).map_err(Refusal::Record)?;
@@ -1582,7 +1591,7 @@ impl Driver {
     }
 
     /// The one disk that is `want` and carries `carrying`, by [`located`].
-    fn locate(&self, carrying: Carrying, want: &Disk) -> Result<Sd, Refusal> {
+    fn locate(&self, carrying: Carrying, want: &Stick) -> Result<Sd, Refusal> {
         let listing = self.ssh("listing the disks", DISKS)?;
         located(&listing, carrying, want, |sd| self.ssh("reading a disk", &sd.identity()))
     }
@@ -1594,13 +1603,13 @@ impl Driver {
     /// the T14 alone can say about the ruling, and before this it was only ever
     /// visible as `mount: special device /dev/sda3 does not exist` — a mount
     /// that fails for a dozen other reasons too.
-    fn wait_for_the_stick(&self, carrying: Carrying, want: &Disk) -> Result<(Sd, u64), Refusal> {
+    fn wait_for_the_stick(&self, carrying: Carrying, want: &Stick) -> Result<(Sd, u64), Refusal> {
         let began = std::time::Instant::now();
         loop {
             match self.locate(carrying, want) {
                 Ok(sd) => return Ok((sd, began.elapsed().as_secs())),
-                Err(Refusal::NoStick { .. }) if began.elapsed().as_secs() < STICK_SECS => {}
-                Err(Refusal::NoStick { .. }) => return Err(Refusal::Stick { secs: STICK_SECS }),
+                Err(Refusal::Unlocated { .. }) if began.elapsed().as_secs() < STICK_SECS => {}
+                Err(Refusal::Unlocated { .. }) => return Err(Refusal::Stick { secs: STICK_SECS }),
                 Err(refusal) => return Err(refusal),
             }
             std::thread::sleep(POLL);
@@ -2058,7 +2067,7 @@ fn install_sudoers(target: &Target, password: &Path) -> Result<(), Refusal> {
             println!("{}", record_machine(&timings::dir(), &machine, &disk)?.said(sd));
         }
         None => {
-            let Disk { sectors, vendor, model } = recorded(&timings::dir(), &machine)?.stick;
+            let Stick { sectors, vendor, model } = recorded(&timings::dir(), &machine)?.stick;
             println!("{} records this machine's stick as {sectors} sectors, {vendor} {model}", machine.file());
         }
     }
@@ -2143,61 +2152,58 @@ fn stage_and_install(driver: &Driver, password: &Path, staged: &str) -> Result<S
     Ok(String::new())
 }
 
+/// `sd`'s partitions in `listing`, refused where the machine lists no `sd`.
+fn parts_of(listing: &str, sd: Sd) -> Result<Vec<Listed>, Refusal> {
+    sd_disks(listing)?
+        .into_iter()
+        .find(|(listed, _)| *listed == sd)
+        .map(|(_, parts)| parts)
+        .ok_or_else(|| Refusal::Adopt(format!("{} is no disk the machine lists", sd.node().whole())))
+}
+
 /// Whether `sd` of `listing` may be erased to make it a scratch disk: listed,
 /// and holding no ToyOS image, which is what tells the boot stick apart.
 fn adoptable(listing: &str, sd: Sd, image: Carrying) -> Result<(), Refusal> {
-    let whole = sd.node().whole();
-    let (_, parts) = sd_disks(listing)?
-        .into_iter()
-        .find(|(listed, _)| *listed == sd)
-        .ok_or_else(|| Refusal::Adopt(format!("{whole} is no disk the machine lists")))?;
-    if image.holds(&parts) {
+    if image.holds(&parts_of(listing, sd)?) {
         return Err(Refusal::Adopt(format!(
-            "{whole} carries {image}, as the boot stick does, and a scratch disk is never one"
+            "{} carries {image}, as the boot stick does, and a scratch disk is never one",
+            sd.node().whole()
         )));
     }
     Ok(())
 }
 
-/// Make `sd`, named by hand, a scratch disk of the recorded machine: its
-/// signatures wiped, a table of one [`Carrying::Scratch`] partition written,
-/// and its identity added to the record once [`located`] finds it as the one
-/// scratch disk of that identity. The disk's contents are lost.
+/// Make `sd`, named by hand, a scratch disk of a recorded machine: its
+/// signatures wiped and a table of one [`Carrying::Scratch`] partition
+/// written, which the disk is then read back as carrying. The disk's contents
+/// are lost.
 fn adopt_scratch(target: &Target, dry_run: bool, sd: Sd) -> Result<(), Refusal> {
     let driver = Driver::reach(target.clone(), dry_run)?;
     driver.require_sudo()?;
-    let machine = driver.recorded_machine()?;
-    let dir = timings::dir();
-    let mut record = recorded(&dir, &machine)?;
+    driver.recorded_machine()?;
     let image = Carrying::Layout { esp: target.esp_part, log: target.log_part };
     adoptable(&driver.ssh("listing the disks", DISKS)?, sd, image)?;
-    let answered = Identity::parse(&driver.ssh("reading the disk", &sd.identity())?)?;
-    let disk = Disk { sectors: answered.sectors, vendor: answered.vendor.clone(), model: answered.model.clone() };
-    answered.check(&disk)?;
+    let disk = Identity::parse(&driver.ssh("reading the disk", &sd.identity())?)?;
+    if !disk.removable {
+        return Err(Refusal::Identity { field: "removable", want: "1".to_string(), got: "0".to_string() });
+    }
     let letter = sd.letter();
     driver.as_root("wiping its signatures", Job::Wipe, &[&letter], None)?;
     driver.as_root("writing the scratch table", Job::Scratch, &[&letter], None)?;
     if dry_run {
-        println!("dry run: nothing was erased and the record is unchanged");
+        println!("dry run: nothing was erased");
         return Ok(());
     }
     driver.ssh("settling the new table", "udevadm settle")?;
-    let found = driver.locate(Carrying::Scratch, &disk)?;
-    if found != sd {
-        return Err(Refusal::Adopt(format!("{} was written and {} answers as the scratch disk", sd.node().whole(), found.node().whole())));
-    }
-    if !record.scratch.contains(&disk) {
-        record.scratch.push(disk);
-        record.save(&dir).map_err(Refusal::Record)?;
+    if !Carrying::Scratch.holds(&parts_of(&driver.ssh("listing the disks", DISKS)?, sd)?) {
+        return Err(Refusal::Adopt(format!("{} was written and does not read back as a scratch disk", sd.node().whole())));
     }
     println!(
-        "{}: {} is a scratch disk, {} sectors, {} {}; every writer finds it as the one disk of that \
-         identity carrying a scratch table",
-        dir.join(machine.file()).display(),
+        "{} is a scratch disk: {} sectors, {} {}",
         sd.node().whole(),
-        answered.sectors,
-        answered.vendor,
-        answered.model
+        disk.sectors,
+        disk.vendor,
+        disk.model
     );
     Ok(())
 }
@@ -3292,7 +3298,7 @@ mod tests {
         let dir = toyos_tmpdir::TempDir::new("metal-record");
         let root: &Path = &dir;
         let t14 = t14();
-        let recorded = Disk { sectors: 60_062_500, vendor: "SanDisk".to_string(), model: "Ultra".to_string() };
+        let recorded = Stick { sectors: 60_062_500, vendor: "SanDisk".to_string(), model: "Ultra".to_string() };
         Record::new(&t14, recorded.clone()).save(root).expect("a record");
         let stick = Identity::parse("60062500\nSanDisk \nUltra           \n1\n").unwrap();
         assert_eq!(stick.sectors, 60_062_500);
@@ -3344,7 +3350,7 @@ mod tests {
         ));
         assert_eq!(Record::load(&root, &bench), Ok(None), "a refused capture wrote a record");
 
-        let want = Disk { sectors: 120_176_640, vendor: "Kingston".to_string(), model: "DataTraveler".to_string() };
+        let want = Stick { sectors: 120_176_640, vendor: "Kingston".to_string(), model: "DataTraveler".to_string() };
         assert_eq!(
             record_machine(&root, &bench, &stick),
             Ok(Captured { at: at.clone(), stick: want.clone(), wrote: true })
@@ -3396,8 +3402,8 @@ mod tests {
     /// The T14's SanDisk Ultra as `/sys/class/block` answers [`Sd::identity`].
     const ULTRA: &str = "60062500\nSanDisk \nUltra           \n1\n";
 
-    fn ultra() -> Disk {
-        Disk { sectors: 60_062_500, vendor: "SanDisk".to_string(), model: "Ultra".to_string() }
+    fn ultra() -> Stick {
+        Stick { sectors: 60_062_500, vendor: "SanDisk".to_string(), model: "Ultra".to_string() }
     }
 
     /// `node` and its partitions as [`DISKS`] lists them, each `(type, GUID)`.
@@ -3484,7 +3490,7 @@ mod tests {
         let refused = found.unwrap_err();
         assert_eq!(
             refused,
-            Refusal::Sticks {
+            Refusal::Ambiguous {
                 carrying: "a ToyOS image's partition table".to_string(),
                 nodes: vec!["/dev/sda".to_string(), "/dev/sdb".to_string()],
             }
@@ -3504,15 +3510,23 @@ mod tests {
             LAYOUT,
             &[("/dev/sda", ULTRA), ("/dev/sdb", "62521344\nGeneric \nSD Card         \n1\n")],
         );
-        let Err(Refusal::NoStick { considered, .. }) = &found else { panic!("{found:?}") };
+        let Err(Refusal::Unlocated { considered, .. }) = &found else { panic!("{found:?}") };
         assert_eq!(considered.len(), 2, "{considered:?}");
-        assert!(considered[0].starts_with("/dev/sda does not carry"), "{considered:?}");
+        assert_eq!(
+            considered[0],
+            "/dev/sda does not carry a ToyOS image's partition table (2 partitions: no GPT type, no GPT type)"
+        );
         assert!(considered[1].starts_with("/dev/sdb: the disk's size"), "{considered:?}");
         let said = found.unwrap_err().to_string();
         assert!(said.contains("--device /dev/sd<letter>"), "{said}");
 
+        let (found, _) = locate(&listed("/dev/sda", &[]), LAYOUT, &[]);
+        assert!(
+            matches!(found, Err(Refusal::Unlocated { ref considered, .. }) if considered[0].ends_with("(no partitions)")),
+            "{found:?}"
+        );
         let (found, asked) = locate("", LAYOUT, &[]);
-        assert!(matches!(found, Err(Refusal::NoStick { ref considered, .. }) if considered.is_empty()), "{found:?}");
+        assert!(matches!(found, Err(Refusal::Unlocated { ref considered, .. }) if considered.is_empty()), "{found:?}");
         assert!(asked.is_empty());
         let (found, _) = locate("NAME=\"/dev/sda\" TYPE=\"disk", LAYOUT, &[]);
         assert!(matches!(found, Err(Refusal::Remote { .. })), "{found:?}");
@@ -3530,7 +3544,7 @@ mod tests {
         let answers = [("/dev/sda", ULTRA), ("/dev/sdb", ULTRA)];
         assert_eq!(locate(&listing, carrying, &answers).0, Ok(Sd(b'b')));
         let (gone, _) = locate(&toyos("/dev/sda", earlier), carrying, &answers);
-        assert!(matches!(gone, Err(Refusal::NoStick { .. })), "{gone:?}");
+        assert!(matches!(gone, Err(Refusal::Unlocated { .. })), "{gone:?}");
     }
 
     /// A disk adopted as scratch: one partition, of the scratch type.
@@ -3546,15 +3560,15 @@ mod tests {
         for (boot, spare) in [("/dev/sda", "/dev/sdb"), ("/dev/sdb", "/dev/sda")] {
             let listing = format!("{}{}", toyos(boot, LOG), scratch(spare));
             assert_eq!(locate(&listing, LAYOUT, &answers).0, Ok(Sd::parse(boot).unwrap()));
-            assert_eq!(locate(&listing, Carrying::Scratch, &answers).0, Ok(Sd::parse(spare).unwrap()));
+            let parts = |sd: &str| parts_of(&listing, Sd::parse(sd).unwrap()).unwrap();
+            assert!(Carrying::Scratch.holds(&parts(spare)) && !LAYOUT.holds(&parts(spare)));
+            assert!(!Carrying::Scratch.holds(&parts(boot)));
         }
         // A scratch partition beside anything else is no scratch disk.
         let mut both = toyos("/dev/sda", LOG);
         both += "NAME=\"/dev/sda6\" TYPE=\"part\" PKNAME=\"/dev/sda\" PARTN=\"6\" \
                  PARTTYPE=\"51cc09f9-7442-435b-bc03-0fd8718b0fb5\" PARTUUID=\"\"\n";
-        assert!(matches!(locate(&both, Carrying::Scratch, &answers).0, Err(Refusal::NoStick { .. })));
-        let pair = format!("{}{}", scratch("/dev/sda"), scratch("/dev/sdb"));
-        assert!(matches!(locate(&pair, Carrying::Scratch, &answers).0, Err(Refusal::Sticks { .. })));
+        assert!(!Carrying::Scratch.holds(&parts_of(&both, Sd(b'a')).unwrap()));
     }
 
     /// **Adoption never erases a disk holding a ToyOS image**, which is the
