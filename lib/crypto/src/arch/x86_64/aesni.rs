@@ -130,7 +130,7 @@ pub(super) unsafe fn encrypt(keys: &[u8; 240], rounds: usize, block: &mut [u8; 1
 /// The nonce's counter block with round key 0 folded in.
 #[inline]
 #[target_feature(enable = "sse2")]
-pub(super) fn counter_base(nonce: &[u8; 12], key0: __m128i) -> __m128i {
+fn counter_base(nonce: &[u8; 12], key0: __m128i) -> __m128i {
     let mut iv = [0u8; 16];
     iv[..12].copy_from_slice(nonce);
     _mm_xor_si128(load(&iv), key0)
@@ -240,16 +240,16 @@ pub(super) fn reverse(x: __m128i) -> __m128i {
 /// A carry-less product's three Karatsuba terms, summed over several pairs
 /// before one reduction.
 #[derive(Clone, Copy)]
-pub(super) struct Product {
-    pub(super) low: __m128i,
-    pub(super) high: __m128i,
-    pub(super) middle: __m128i,
+struct Product {
+    low: __m128i,
+    high: __m128i,
+    middle: __m128i,
 }
 
 impl Product {
     #[inline]
     #[target_feature(enable = "pclmulqdq,sse2")]
-    pub(super) fn new(x: __m128i, h: __m128i) -> Self {
+    fn new(x: __m128i, h: __m128i) -> Self {
         Self {
             low: _mm_clmulepi64_si128::<0x00>(x, h),
             high: _mm_clmulepi64_si128::<0x11>(x, h),
@@ -259,7 +259,7 @@ impl Product {
 
     #[inline]
     #[target_feature(enable = "pclmulqdq,sse2")]
-    pub(super) fn add(self, x: __m128i, h: __m128i) -> Self {
+    fn add(self, x: __m128i, h: __m128i) -> Self {
         let p = Self::new(x, h);
         Self {
             low: _mm_xor_si128(self.low, p.low),
@@ -271,7 +271,7 @@ impl Product {
     /// The sum times x^-128 mod g*.
     #[inline]
     #[target_feature(enable = "pclmulqdq,sse2")]
-    pub(super) fn reduce(self) -> __m128i {
+    fn reduce(self) -> __m128i {
         let middle = _mm_xor_si128(self.middle, _mm_xor_si128(self.low, self.high));
         let low = _mm_xor_si128(self.low, _mm_slli_si128::<8>(middle));
         let high = _mm_xor_si128(self.high, _mm_srli_si128::<8>(middle));
@@ -299,19 +299,19 @@ fn multiply(a: __m128i, h: __m128i) -> __m128i {
 /// A value's halves XORed, the Karatsuba middle operand.
 #[inline]
 #[target_feature(enable = "sse2")]
-pub(super) fn folded(h: __m128i) -> __m128i {
+fn folded(h: __m128i) -> __m128i {
     _mm_xor_si128(h, _mm_shuffle_epi32::<0x4e>(h))
 }
 
 #[inline(always)]
-pub(super) fn power(p: u128) -> __m128i {
+fn power(p: u128) -> __m128i {
     // Both are 16 plain bytes; the low half of `p` is the low lane.
     unsafe { core::mem::transmute(p) }
 }
 
 /// (H^n)'.
 #[inline(always)]
-fn h(powers: &Powers, n: usize) -> __m128i {
+fn key_power(powers: &Powers, n: usize) -> __m128i {
     power(powers[48 - n])
 }
 
@@ -353,9 +353,9 @@ fn absorb(y: __m128i, powers: &Powers, blocks: &[[u8; 16]]) -> __m128i {
     if n == 0 {
         return y;
     }
-    let mut sum = Product::new(_mm_xor_si128(reverse(load(&blocks[0])), y), h(powers, n));
+    let mut sum = Product::new(_mm_xor_si128(reverse(load(&blocks[0])), y), key_power(powers, n));
     for j in 1..n {
-        sum = sum.add(reverse(load(&blocks[j])), h(powers, n - j));
+        sum = sum.add(reverse(load(&blocks[j])), key_power(powers, n - j));
     }
     sum.reduce()
 }
@@ -371,7 +371,7 @@ pub(super) unsafe fn hash(powers: &Powers, state: &mut [u8; 16], blocks: &[[u8; 
         let mut h = [_mm_setzero_si128(); 8];
         let mut folds = [_mm_setzero_si128(); 8];
         for j in 0..8 {
-            h[j] = self::h(powers, 8 - j);
+            h[j] = key_power(powers, 8 - j);
             folds[j] = folded(h[j]);
         }
         for i in 0..batches.len() {
@@ -430,7 +430,7 @@ fn crypt_rounds<const R: usize, const OPEN: bool>(
     let mut h = [_mm_setzero_si128(); 8];
     let mut folds = [_mm_setzero_si128(); 8];
     for j in 0..8 {
-        h[j] = self::h(powers, 8 - j);
+        h[j] = key_power(powers, 8 - j);
         folds[j] = folded(h[j]);
     }
     let base = counter_base(nonce, load(&k[0]));
@@ -586,9 +586,9 @@ fn short_rounds<const R: usize>(
     let lengths = ((aad.len() as u128 * 8) << 64) | (data.len() as u128 * 8);
     x[n] = power(lengths);
     n += 1;
-    let mut sum = Product::new(x[0], h(powers, n));
+    let mut sum = Product::new(x[0], key_power(powers, n));
     for j in 1..n {
-        sum = sum.add(x[j], h(powers, n - j));
+        sum = sum.add(x[j], key_power(powers, n - j));
     }
     let mut tag = [0u8; 16];
     store(&mut tag, _mm_xor_si128(reverse(sum.reduce()), s[0]));

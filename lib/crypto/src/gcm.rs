@@ -206,7 +206,8 @@ impl Gcm {
             }
         };
         if !authentic {
-            // The buffer may hold unauthenticated plaintext.
+            // The buffer may hold unauthenticated plaintext. `wipe`, not a
+            // fill: on ToyOS a fill is a `memset` call.
             crate::secret::wipe(data);
             return Err(Error::Authentication);
         }

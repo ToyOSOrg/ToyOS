@@ -252,11 +252,15 @@ Not consumers:
            inlines it, as the hot loops were, and the row passes. The T14
            passes it at 0.82.
        - **AES-GCM bulk on AES-NI (the AMD bench).**
-         - Rows: 1 KiB and 16 KiB, 1.03–1.16.
+         - Rows: 1 KiB and 16 KiB, seal, open and reject, 1.007–1.131 in
+           `cryptocase` at #1054's 43690c542. The reject rows newly fail
+           there (0.53 → 1.02–1.03): since #1054 a refusal decrypts and
+           wipes, so reject costs what open does.
          - The stitched eight-block seal is about 277 instructions per
            128 B, so it is bound by instruction count, not spills.
-         - CTR alone (open less reject) is about 1.95 µs per 16 KiB for
-           AES-128 and 3.0 µs for AES-256. GHASH alone passes at about 0.5.
+         - Before #1054, when reject was GHASH alone: CTR (open less
+           reject) was about 1.95 µs per 16 KiB for AES-128 and 3.0 µs for
+           AES-256, and GHASH alone passed at about 0.5.
          - A VEX-encoded build of AES-NI measured slower and is not to be
            retried. It kept all fifteen AES-256 round keys in registers and
            serialised the eight blocks (CTR 2.0 to 2.2 µs).
@@ -280,9 +284,10 @@ Not consumers:
          - In `cryptocase` at 43690c542, every row at 1 KiB and 16 KiB
            passes: seal 0.91–0.94 and 0.77–0.78, open 0.76–0.86, reject
            0.76–0.88. Key setup reads 0.78–0.81.
-         - The 0 B reject rows failed there (1.12): the refusal's wipe was a
-           `memset`. 5b26ab26c wipes 16 bytes per store; its boot is
-           pending.
+         - The 0 B reject rows failed there (1.12). The refusal's wipe was a
+           `memset`, which costs a `rep stosb` start-up on ToyOS
+           (`issues/a-short-memset-on-x86-64-costs-a-rep-stosb-start-up.md`).
+           #1054 now wipes 16 bytes per store; that build's boot is pending.
          - Exit: the 0 B reject rows pass again.
          - Evidence:
            https://github.com/ToyOSOrg/evidence/tree/1f9192b8c6f601c9e748cb87a78ba33d4a95fba7/r3

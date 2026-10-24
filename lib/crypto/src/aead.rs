@@ -5,7 +5,9 @@
 //! Nonces are `iv XOR (0^32 || sequence_be64)`. Public lengths select buffering;
 //! contents and keys do not select branches or addresses. A refusal releases no
 //! plaintext: AES-GCM decrypts as it authenticates and zeroes a refused buffer,
-//! and ChaCha20-Poly1305 authenticates first and leaves it unchanged.
+//! and ChaCha20-Poly1305 authenticates first and leaves it unchanged. AES-GCM's
+//! buffer holds unauthenticated plaintext during `open`, so it must be the
+//! caller's alone: not memory another process maps.
 
 use crate::{Error, chacha, poly1305::Poly1305, secret::Secret};
 

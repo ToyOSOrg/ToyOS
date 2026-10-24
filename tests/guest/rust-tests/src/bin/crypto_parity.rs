@@ -622,9 +622,9 @@ fn agrees_with_ring_at_every_length() {
     use ring::aead::chacha20_poly1305_openssh as ring_ssh;
     use toyos_crypto::ssh;
     const MAX: usize = 1153;
-    /// Five and six of the 512-bit path's 256-byte steps, which a reduction
-    /// takes three at a time, and lengths past its counter's first carry out
-    /// of the low byte, at block 254.
+    /// Five of the 512-bit path's 256-byte steps, which a reduction takes
+    /// three at a time, with a 1 B and a 255 B tail, and lengths past its
+    /// counter's first carry out of the low byte, at block 254.
     const LONG: [usize; 4] = [1281, 1535, 4113, 16401];
     let source: Vec<u8> = (0..LONG[3] + 64).map(|i| (i * 167 + 13) as u8).collect();
     let message = |len: usize| source[len % 61..][..len].to_vec();
