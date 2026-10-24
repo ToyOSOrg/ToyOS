@@ -242,6 +242,9 @@ const RUST_SKIP: &[&str] = &[
     // child that faults, which a shared boot's other members must not watch,
     // and `stream_holders` runs it.
     "stream_handles",
+    // A datagram receive bounded by its read timeout, through real netstack,
+    // which a shared boot runs none of: `udp_receive_times_out` runs it.
+    "udp_recv_timeout",
     // It needs a launcher: `a_launch_gives_each_unsent_stdio_slot_a_null`
     // runs it on tests/images/launchcase.toml.
     "launch_unsent_stdio",
@@ -602,6 +605,13 @@ const MACHINE_TESTS: &[&str] = &[
     // no public network. Both jobs in one boot. x86-64 alone
     // (`qemu::SUITE_ARCH`).
     "netstack_holders_exported_to_children",
+    // A datagram receive with a read timeout ends at it, a timeout under a
+    // millisecond included, and a zero timeout is refused: std's conversion
+    // of every socket timeout and its datagram wait, through the real
+    // netstack of `tests/images/netcase.toml`, which no host build has. No
+    // peer and no public network. Order and completion: QEMU's clock bounds
+    // nothing but the hang. x86-64 alone (`qemu::SUITE_ARCH`).
+    "udp_receive_times_out",
     // Login sessions: their owner parents, signs out and ends with each, and
     // the machine's reboot waits for them until forced, which only processes
     // in one boot show, as order, completion and counts. The reboot ends the
@@ -4357,6 +4367,7 @@ fn run_machine_test(name: &str, test_config: &Path) -> Result<(), String> {
         "libc_children" => common::libcchildren::libc_children(),
         "stream_holders" => stream_holders(test_config),
         "netstack_holders_exported_to_children" => netstack_holders_exported_to_children(),
+        "udp_receive_times_out" => udp_receive_times_out(),
         "session_lifecycle" => common::sessionlifecycle::session_lifecycle(),
         "a_launch_gives_each_unsent_stdio_slot_a_null" => common::launchstdio::a_launch_gives_each_unsent_stdio_slot_a_null(),
         "a_row_reaches_its_own_state_and_no_other" => common::stateview::a_row_reaches_its_own_state_and_no_other(),
@@ -5329,6 +5340,24 @@ fn sockets_exported_to_a_child(qemu: &mut QemuInstance, forwarded: u16) -> Resul
         }
     }
     heard.join().map_err(|_| "the peer's thread panicked".to_string())?
+}
+
+/// `test_rs_udp_recv_timeout` on `tests/images/netcase.toml`'s boot.
+fn udp_receive_times_out() -> Result<(), String> {
+    const JOB: &str = "udp_recv_timeout";
+    let tests = compile::repo_root().join("tests/guest/rust-tests");
+    let bin = qemu::build_toyos_bin(qemu::SUITE_ARCH, &tests, JOB);
+    let config = compile::repo_root().join("tests/images/netcase.toml");
+    let mut qemu = QemuInstance::boot_with_options(&config, &[], &[(JOB.to_string(), bin)], BootOptions::default());
+    serial::Serial::boot(&qemu).must_be_clean()?;
+    let result = qemu.run_test("test_rs_udp_recv_timeout", Duration::from_secs(120));
+    if let Some(why) = &result.error {
+        return Err(format!("{why}\nthe job said:\n{}", result.stdout));
+    }
+    if result.exit_code != Some(0) {
+        return Err(format!("the job ended {:?}:\n{}", result.exit_code, result.stdout));
+    }
+    Ok(())
 }
 
 /// `test_rs_stream_handles` on a boot of its own: a holder killed inside its
