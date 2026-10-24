@@ -231,7 +231,7 @@ fn main() {
         .take(&label)
         .unwrap_or_else(|| panic!("fileserver: started without its role's acceptor, `{label}`"));
     let roots: Vec<&str> = dirs.iter().map(|d| d.root).collect();
-    let volume = open_volume(role, guid, &roots);
+    let (volume, memory) = open_volume(role, guid, &roots);
     println!(
         "fileserver: {role:?} serving {} — {}",
         dirs.iter().map(|d| d.dir).collect::<Vec<_>>().join(", "),
@@ -239,6 +239,7 @@ fn main() {
     );
     Server {
         volume,
+        memory,
         acceptor,
         clients: BTreeMap::new(),
         next_client: 0,
@@ -279,9 +280,13 @@ fn data_partitions() -> Result<Vec<[u8; 16]>, String> {
     }
 }
 
-fn open_volume(role: Role, guid: Option<&str>, roots: &[&str]) -> Box<dyn Volume> {
-    match role {
-        Role::System => Box::new(root()),
+/// The role's volume, and the memory nobody writes that it is, if it is one.
+fn open_volume(role: Role, guid: Option<&str>, roots: &[&str]) -> (Box<dyn Volume>, Option<&'static toyos::shm::Immutable>) {
+    let volume = match role {
+        Role::System => {
+            let (volume, memory) = root();
+            return (Box::new(volume), Some(memory));
+        }
         Role::Data => match fileserver::data::find(data_partitions().as_deref().map_err(String::clone)) {
             Located::Nowhere => ram(roots, "this machine has no DATA partition"),
             Located::Served(guid) => match served(guid) {
@@ -306,21 +311,22 @@ fn open_volume(role: Role, guid: Option<&str>, roots: &[&str]) -> Box<dyn Volume
                 )),
             }
         }
-    }
+    };
+    (volume, None)
 }
 
-/// ROOT, out of the image the supervisor endowed: for the life of this
-/// process, which is the volume's. Without it there is no `/system`, and the
-/// supervisor that started this server is told by its end.
-fn root() -> RootVolume {
+/// ROOT, out of the image the supervisor endowed, and that image: for the
+/// life of this process, which is the volume's. Without it there is no
+/// `/system`, and the supervisor that started this server is told by its end.
+fn root() -> (RootVolume, &'static toyos::shm::Immutable) {
     let label = toyos_abi::syscall::ROOT_IMAGE_LABEL;
     let handle = Endowments::get()
         .take::<toyos::OwnedHandle>(label)
         .unwrap_or_else(|| panic!("fileserver: the system role was started without `{label}`"));
     let image = toyos::shm::Immutable::adopt(handle)
         .unwrap_or_else(|why| panic!("fileserver: `{label}` is no image nobody writes: {why}"));
-    let bytes: &'static [u8] = Box::leak(Box::new(image)).as_slice();
-    RootVolume::mount(bytes).unwrap_or_else(|why| panic!("fileserver: {why}"))
+    let image: &'static toyos::shm::Immutable = Box::leak(Box::new(image));
+    (RootVolume::mount(image.as_slice()).unwrap_or_else(|why| panic!("fileserver: {why}")), image)
 }
 
 fn absent(roots: &[&str], why: String) -> Box<dyn Volume> {
@@ -353,6 +359,9 @@ fn fat_on<D: Disk + 'static>(disk: D, writable: bool) -> Result<Box<dyn Volume>,
 
 struct Server {
     volume: Box<dyn Volume>,
+    /// The memory nobody writes that the volume is, which
+    /// [`Volume::in_place`] names bytes of: ROOT's, and no other volume's.
+    memory: Option<&'static toyos::shm::Immutable>,
     /// The role's port, which every grant is minted on.
     acceptor: Acceptor,
     clients: BTreeMap<u64, Client>,
@@ -846,6 +855,15 @@ impl Server {
                 self.next_stream += 1;
                 self.streams.insert(sid, Stream { pipe: read, file, share });
                 Ok(Answer::WithHandle(Reply::ok(), write.into()))
+            }
+            IMAGE => {
+                let file = self.fid(id, r.fid)?;
+                let node = file.borrow().node()?;
+                let (Some(memory), Some((at, len))) = (self.memory, self.volume.in_place(node)?) else {
+                    return Err(Error::Unsupported);
+                };
+                let image = memory.sub(at, len).map_err(|e| Error::kernel("a file's image", e))?;
+                Ok(Answer::WithHandle(Reply::ok(), image))
             }
             READDIR => {
                 let file = self.fid(id, r.fid)?;

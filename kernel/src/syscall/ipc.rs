@@ -342,6 +342,27 @@ pub(super) fn sys_shm_create(size: u64, flags: u64) -> u64 {
     process::with_process_data(|data| handle_result(ops::install(&mut data.handles, object)))
 }
 
+/// `toyos_abi::syscall::shm_sub`: the new object's handle carries `h`'s rights.
+pub(super) fn sys_shm_sub(h: RawHandle, offset: u64, len: u64) -> u64 {
+    // A refusal is made with nothing held: a bad handle's ends the process.
+    let held = process::with_process_data(|data| {
+        let whole = data.handles.get::<crate::object::shm::SharedMemObject>(h, Rights::MAP)?;
+        Ok::<_, crate::object::handle::HandleError>((whole, data.handles.rights_of(h)?))
+    });
+    let (whole, rights) = match held {
+        Ok(held) => held,
+        Err(e) => return e.refuse(),
+    };
+    let sub = match crate::object::shm::SharedMemObject::sub(&whole, offset, len) {
+        Ok(sub) => sub,
+        Err(e) => return e.to_u64(),
+    };
+    let entry = crate::object::handle::HandleEntry::new(KObjectRef::SharedMem(sub), rights);
+    process::with_process_data(|data| {
+        handle_result(data.handles.install(entry).map_err(|_| SyscallError::ResourceExhausted))
+    })
+}
+
 pub(super) fn sys_shm_map(h: RawHandle) -> u64 {
     let shm = match process::with_process_data(|data| {
         data.handles.get::<crate::object::shm::SharedMemObject>(h, Rights::MAP)

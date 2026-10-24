@@ -10,6 +10,10 @@
 //!
 //! Every name is indexed at mount: ROOT is written once by the build and
 //! never changes. A node's identity is its inode number.
+//!
+//! **A file whose bytes lie in ROOT as they read is handed out in place**
+//! ([`Volume::in_place`]), its extents verified at its first ask: a spawn
+//! pages a program from ROOT's own pages and copies nothing here.
 
 use std::collections::BTreeMap;
 
@@ -22,6 +26,9 @@ use crate::volume::{join, Kind, Listed, Meta, Node, OpenHow, Out, Volume};
 /// The longest read asked of the reader at once, so a large client window
 /// costs this much memory and no more.
 const READ_CHUNK: usize = 256 << 10;
+
+// A block of ROOT is a page of the memory it is in.
+const _: () = assert!(BLOCK == toyos_abi::syscall::PAGE_SIZE);
 
 /// One file open, while any client holds it.
 struct Open {
@@ -38,6 +45,8 @@ pub struct RootVolume {
     open: BTreeMap<Node, Open>,
     by_path: BTreeMap<String, Node>,
     next: Node,
+    /// What [`Volume::in_place`] verified, by inode: ROOT never changes.
+    in_place: BTreeMap<u64, Option<(u64, u64)>>,
 }
 
 impl RootVolume {
@@ -57,7 +66,7 @@ impl RootVolume {
             };
             names.insert(path, (entry.ino, kind));
         }
-        Ok(Self { fs, blocks: bytes.len() / BLOCK, names, open: BTreeMap::new(), by_path: BTreeMap::new(), next: 1 })
+        Ok(Self { fs, blocks: bytes.len() / BLOCK, names, open: BTreeMap::new(), by_path: BTreeMap::new(), next: 1, in_place: BTreeMap::new() })
     }
 
     /// The filesystem's name, which the build derives from every file ROOT carries.
@@ -189,6 +198,16 @@ impl Volume for RootVolume {
             }
         }
         Ok(done)
+    }
+
+    fn in_place(&mut self, node: Node) -> Result<Option<(u64, u64)>, Error> {
+        let ino = self.entry(node)?.ino;
+        if let Some(&run) = self.in_place.get(&ino) {
+            return Ok(run);
+        }
+        let run = mapped("a verify", "an open file", block_on_ready(self.fs.in_place(ino)))?;
+        self.in_place.insert(ino, run);
+        Ok(run)
     }
 
     fn write(&mut self, _: Node, _: u64, _: &[u8]) -> Result<(), Error> {
@@ -386,6 +405,26 @@ mod tests {
         let node = v.open("bin/toybox", READ).unwrap();
         let mut out = [0u8; 8];
         assert_eq!(v.read(node, 0, &mut Buf(&mut out)), Err(Error::Io));
+    }
+
+    /// A program is handed out where its bytes are in ROOT, and a damaged one
+    /// is `Io` there as its read is.
+    #[test]
+    fn a_file_is_in_place_where_root_holds_its_bytes_and_a_damaged_one_is_io() {
+        let bytes = root_image();
+        let mut v = mount(bytes.clone());
+        let node = v.open("bin/toybox", READ).unwrap();
+        let (at, len) = v.in_place(node).unwrap().expect("one run");
+        assert_eq!(bytes[at as usize..(at + len) as usize], big()[..]);
+        assert_eq!(v.in_place(node), Ok(Some((at, len))), "asked again");
+
+        let mut damaged = bytes;
+        damaged[at as usize] ^= 1;
+        let mut v = mount(damaged);
+        let node = v.open("bin/toybox", READ).unwrap();
+        assert_eq!(v.in_place(node), Err(Error::Io));
+        v.close(node).unwrap();
+        assert_eq!(v.in_place(node), Err(Error::Stale), "a closed node");
     }
 
     /// A node closed by its last holder is gone; a second open is a fresh one.

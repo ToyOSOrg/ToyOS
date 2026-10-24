@@ -1262,3 +1262,50 @@ mod interleave;
 mod journal;
 mod mount;
 mod ops;
+
+/// mkfs lays a file's data out in one run whatever its extent count, so a
+/// volume in memory can hand the run itself out: the bytes there are the
+/// file's, and each of its extents is verified on the way.
+#[test]
+fn a_file_mkfs_wrote_is_in_place_and_verified() {
+    let meta = Meta { perm: 0o644, uid: 0, gid: 0 };
+    // Seven 256 KiB extents and a partial block: past one extent, one bucket
+    // and the block size.
+    let big: Vec<u8> = (0..(7 << 18) + 1000).map(|i: usize| (i % 251) as u8 | 1).collect();
+    let mut tree = Tree::new();
+    tree.file(Tree::ROOT, b"big", &big, meta).unwrap();
+    tree.file(Tree::ROOT, b"small", b"one block", meta).unwrap();
+    tree.file(Tree::ROOT, b"empty", b"", meta).unwrap();
+    tree.symlink(Tree::ROOT, b"link", b"big", meta).unwrap();
+    let dev = Bytes::new(vec![0u8; 32 << 20]);
+    let options = Options { label: b"", time: 0, encryption: None };
+    block_on_ready(mkfs(&dev, &options, &tree, &mut Seeded(1))).unwrap();
+    let v = block_on_ready(Volume::open(&dev)).unwrap();
+    for (name, bytes) in [("big", &big[..]), ("small", b"one block")] {
+        let (at, len) = block_on_ready(v.in_place(path(&v, name))).unwrap().expect(name);
+        assert_eq!(at % BLOCK as u64, 0, "{name}");
+        assert_eq!(&dev.get()[at as usize..(at + len) as usize], bytes, "{name}");
+    }
+    for name in ["empty", "link"] {
+        assert_eq!(block_on_ready(v.in_place(path(&v, name))).unwrap(), None, "{name}");
+    }
+
+    // The same volume with a byte of the big file's last extent changed.
+    let (at, len) = block_on_ready(v.in_place(path(&v, "big"))).unwrap().unwrap();
+    let mut changed = dev.get().clone();
+    changed[(at + len - 1) as usize] ^= 0xff;
+    let changed = Bytes::new(changed);
+    let v = block_on_ready(Volume::open(&changed)).unwrap();
+    assert_eq!(block_on_ready(v.in_place(path(&v, "big"))), Err(Error::Checksum("extent")));
+}
+
+/// Upstream's inline data is no run of the device, and its fourteen-extent
+/// file, which its tools wrote in one run, is that run.
+#[test]
+fn an_upstream_volumes_file_in_one_run_is_in_place_and_inline_data_is_not() {
+    let dev = fixture("crc32c.img.gz");
+    let v = block_on_ready(Volume::open(&dev)).unwrap();
+    assert_eq!(block_on_ready(v.in_place(path(&v, "Documents/a.txt"))).unwrap(), None, "inline data");
+    let (at, len) = block_on_ready(v.in_place(path(&v, "Documents/deep/seq.txt"))).unwrap().expect("one run");
+    assert_eq!(dev.get()[at as usize..(at + len) as usize], seq()[..]);
+}

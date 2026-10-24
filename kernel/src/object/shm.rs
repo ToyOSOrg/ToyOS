@@ -1,8 +1,8 @@
 //! A memory object: bytes more than one address space can map — a region
 //! `SYS_SHM_CREATE` makes, a device's grant, a program's TLS block, an inbox's
-//! ring, the clock page, a boot image the loader handed over — or an aperture
-//! over memory the kernel does not own: a device's registers, firmware's
-//! framebuffer.
+//! ring, the clock page, a boot image the loader handed over, part of another
+//! object's pages — or an aperture over memory the kernel does not own: a
+//! device's registers, firmware's framebuffer.
 //!
 //! **A mapping holds the object, and a handle holds nothing of a mapping**:
 //! the object's frames go back when the last of its handles and mappings has.
@@ -50,6 +50,9 @@ enum Backing {
     /// Memory the kernel does not own, at `phys`, with where it is mapped
     /// and that list's charge.
     Aperture { phys: u64, mapped: Held<(Vec<Mapped>, Charge)> },
+    /// The pages of `whole` from `offset`, which is never itself a `Sub` or
+    /// an aperture; `len` its bytes, the payload where `whole` is immutable.
+    Sub { whole: Arc<SharedMemObject>, offset: u64, len: u64 },
 }
 
 /// A space an aperture is mapped in, and where.
@@ -126,6 +129,26 @@ impl SharedMemObject {
         Ok(Self::new(Self::new_core(0)?, Backing::Boot { phys, len }, len.next_multiple_of(PAGE_SIZE), CachePolicy::Normal))
     }
 
+    /// `len` bytes of `object`'s from `offset`, a whole page in, as an
+    /// object of their own over the same pages. Refused `InvalidArgument` for
+    /// no bytes, a range past what `object` holds — its payload, where nobody
+    /// writes it — or an aperture, whose last handle takes it back from every
+    /// mapping.
+    pub fn sub(object: &Arc<Self>, offset: u64, len: u64) -> Result<Arc<Self>, SyscallError> {
+        let (whole, base) = match &object.backing {
+            Backing::Sub { whole, offset, .. } => (whole, *offset),
+            Backing::Aperture { .. } => return Err(SyscallError::InvalidArgument),
+            Backing::Frames(_) | Backing::Run(_) | Backing::Boot { .. } => (object, 0),
+        };
+        let held = object.immutable().unwrap_or(object.size);
+        if len == 0 || !offset.is_multiple_of(PAGE_SIZE) || offset.checked_add(len).is_none_or(|end| end > held) {
+            return Err(SyscallError::InvalidArgument);
+        }
+        let size = pages(len)? * PAGE_SIZE;
+        let backing = Backing::Sub { whole: Arc::clone(whole), offset: base + offset, len };
+        Ok(Self::new(Self::new_core(0)?, backing, size, whole.cache))
+    }
+
     pub fn size(&self) -> u64 {
         self.size
     }
@@ -139,13 +162,19 @@ impl SharedMemObject {
     /// Whether its bytes are memory the kernel allocated to it, rather than a
     /// device's, firmware's or the loader's.
     pub fn is_ram(&self) -> bool {
-        matches!(self.backing, Backing::Frames(_) | Backing::Run(_))
+        match &self.backing {
+            Backing::Frames(_) | Backing::Run(_) => true,
+            Backing::Sub { whole, .. } => whole.is_ram(),
+            Backing::Boot { .. } | Backing::Aperture { .. } => false,
+        }
     }
 
-    /// The payload's length, for a boot image: memory nobody writes.
+    /// The payload's length, for memory nobody writes: a boot image or part
+    /// of one.
     pub fn immutable(&self) -> Option<u64> {
-        match self.backing {
-            Backing::Boot { len, .. } => Some(len),
+        match &self.backing {
+            Backing::Boot { len, .. } => Some(*len),
+            Backing::Sub { whole, len, .. } => whole.immutable().map(|_| *len),
             Backing::Frames(_) | Backing::Run(_) | Backing::Aperture { .. } => None,
         }
     }
@@ -156,21 +185,24 @@ impl SharedMemObject {
         !matches!(self.backing, Backing::Aperture { .. })
     }
 
-    /// The most a mapping of it may allow: a boot image is read-only.
+    /// The most a mapping of it may allow: a boot image, and any part of
+    /// one, is read-only.
     pub fn max_prot(&self) -> kernel::vm::Prot {
-        match self.backing {
+        match &self.backing {
             Backing::Boot { .. } => kernel::vm::Prot::Read,
+            Backing::Sub { whole, .. } => whole.max_prot(),
             Backing::Frames(_) | Backing::Run(_) | Backing::Aperture { .. } => kernel::vm::Prot::ReadWrite,
         }
     }
 
     /// The physical run and its length in whole 2 MiB pages, for ordinary
     /// memory the kernel allocated in one run — the only kind a device may be
-    /// lent (`pcidev::dma_map`). `None` for anything else.
+    /// lent (`pcidev::dma_map`). `None` for anything else, a part of a run
+    /// included: one set of pages is never lent under two objects.
     pub fn run(&self) -> Option<(u64, u64)> {
         match &self.backing {
             Backing::Run(pages) => Some((pages[0].direct_map().phys(), pages.len() as u64 * PAGE_2M)),
-            Backing::Frames(_) | Backing::Boot { .. } | Backing::Aperture { .. } => None,
+            Backing::Frames(_) | Backing::Boot { .. } | Backing::Aperture { .. } | Backing::Sub { .. } => None,
         }
     }
 
@@ -185,6 +217,7 @@ impl SharedMemObject {
             }
             Backing::Run(pages) => pages[0].direct_map().phys() + page,
             Backing::Boot { phys, .. } | Backing::Aperture { phys, .. } => phys + page,
+            Backing::Sub { whole, offset, .. } => whole.page(offset + page),
         }
     }
 
@@ -276,7 +309,7 @@ impl Drop for SharedMemObject {
             Backing::Run(pages) => {
                 crate::sched::futex::revoke_run(pages[0].direct_map().phys(), pages.len() as u64 * PAGE_2M);
             }
-            Backing::Boot { .. } | Backing::Aperture { .. } => {}
+            Backing::Boot { .. } | Backing::Aperture { .. } | Backing::Sub { .. } => {}
         }
     }
 }

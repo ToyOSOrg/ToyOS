@@ -89,10 +89,11 @@ live split of a user leaf.
    (`issues/nothing-charges-kernel-memory-to-a-process.md`).
 5. **Shared text.** A spawn copies each page of its program's segments into
    the process at the page's first touch, out of the image object or out of
-   a snapshot of its `/tmp` file; no fault reads a file. ROOT's read-only
-   text shared zero-copy, from
-   immutable sealed objects, is the next step. Exit: two processes of one
-   binary hold its text once.
+   a snapshot of its `/tmp` file; no fault reads a file. A ROOT program's
+   image object is SYSTEM's subrange of ROOT's own pages (`fs::IMAGE`), so
+   no spawn copies the whole binary first. Mapping ROOT's read-only text
+   into each process without the per-page copy is the next step. Exit: two
+   processes of one binary hold its text once.
 6. **`/apps` image sharing.** The design is the owner's decision, owed when
    this stage is reached.
 7. **Large user leaves where they pay.** No user leaf is 2 MiB now, so every

@@ -456,6 +456,13 @@ extern "C" fn toyos_fs_stream(fd: Fd) -> i64 {
     answer(handle.map(|h| u64::from(h.0)))
 }
 
+/// A kernel file is `NotSupported`: the kernel opens its own files for a spawn.
+#[no_mangle]
+extern "C" fn toyos_fs_image(fd: Fd) -> i64 {
+    let image = on_fd(fd, |_| Err(SyscallError::NotSupported), is_a_directory, |dir, fid| dir.image(fid).map(|h| h.into_raw()));
+    answer(image.map(|h| u64::from(h.0)))
+}
+
 #[no_mangle]
 unsafe extern "C" fn toyos_fs_mkdir(at: Fd, path: *const u8, len: usize) -> i64 {
     // SAFETY: the caller's.

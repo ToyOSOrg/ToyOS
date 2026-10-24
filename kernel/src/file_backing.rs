@@ -34,18 +34,18 @@ pub trait FileBacking: Send + Sync {
     fn source(&self) -> Result<Arc<dyn CopySource>, SyscallError>;
 }
 
-/// An executable in a shared memory object handed over by handle: one a
-/// caller read into an object of its own, which is what every program a file
-/// server holds is spawned and paged from, since no file server's volume is
-/// the kernel's; or a boot image the loader verified.
+/// An executable in a shared memory object handed over by handle, since no
+/// file server's volume is the kernel's: a file server's object for the file
+/// (for ROOT, part of the boot image), or one a caller read into an object of
+/// its own; or a boot image the loader verified.
 ///
 /// **Nothing is copied at the call, and every page is copied once when it is
-/// read.** The object is the caller's memory, charged to it and alive while
-/// any process pages from it; its bytes stay the caller's to change. So each
-/// read takes one copy of the page into the reader's own buffer and what the
-/// loader keeps is that copy: a change after the hand-off reaches only pages
-/// not yet read, which is the caller changing its own child's program, and
-/// never a value the kernel checked and then read again.
+/// read.** The object is alive while any process pages from it, and a
+/// writable one's bytes stay its holders' to change. So each read takes one
+/// copy of the page into the reader's own buffer and what the loader keeps is
+/// that copy: a change after the hand-off reaches only pages not yet read,
+/// which is the caller changing its own child's program, and never a value
+/// the kernel checked and then read again.
 pub struct SharedImage {
     object: Arc<SharedMemObject>,
     size: u64,

@@ -112,8 +112,8 @@ pub struct Image {
 enum Object {
     /// Read into memory of this process's own.
     Read(SharedMemory),
-    /// A boot image the kernel handed over.
-    Boot(Immutable),
+    /// A region nobody writes: a boot image, or a file its server holds so.
+    Immutable(Immutable),
 }
 
 /// Why [`Image::read`] made no image.
@@ -151,17 +151,17 @@ impl Image {
         Ok(Self { object: Object::Read(object), len })
     }
 
-    /// The program a boot image is, whole.
-    pub fn boot(image: Immutable) -> Self {
+    /// The program a region nobody writes is, whole.
+    pub fn immutable(image: Immutable) -> Self {
         let len = image.as_slice().len() as u64;
-        Self { object: Object::Boot(image), len }
+        Self { object: Object::Immutable(image), len }
     }
 
     /// The program's bytes, as they were read.
     pub fn bytes(&self) -> &[u8] {
         let bytes = match &self.object {
             Object::Read(object) => object.as_slice(),
-            Object::Boot(image) => image.as_slice(),
+            Object::Immutable(image) => image.as_slice(),
         };
         &bytes[..self.len as usize]
     }
@@ -171,7 +171,7 @@ impl Image {
     pub fn spawn_words(&self) -> (u64, u64) {
         let handle = match &self.object {
             Object::Read(object) => object.as_handle(),
-            Object::Boot(image) => image.as_handle(),
+            Object::Immutable(image) => image.as_handle(),
         };
         (u64::from(handle.0), self.len)
     }

@@ -375,9 +375,9 @@ impl Command {
             }
             toyos::spawn::Start::Helper(helper) => helper,
         };
-        // A program on a file server is read here, into a memory object of
-        // this process's own that the kernel pages the child from: the kernel
-        // opens only what it serves itself.
+        // A program on a file server is taken here as the memory object its
+        // server holds it in, or read into one of this process's own, which
+        // the kernel pages the child from: it opens only what it serves itself.
         let source = Path::new(image_path.unwrap_or(program));
         let image = match (prepared_image, self.boot_image) {
             (Some(image), _) => Some(image),
@@ -388,7 +388,7 @@ impl Command {
                 let region = toyos::shm::Immutable::adopt(copy).map_err(|why| {
                     io::Error::new(io::ErrorKind::InvalidInput, format!("the boot image is no immutable region: {why}"))
                 })?;
-                Some(toyos::process::Image::boot(region))
+                Some(toyos::process::Image::immutable(region))
             }
             (None, None) if crate::sys::fs::is_served(source) => Some(crate::sys::fs::read_image(source)?),
             (None, None) => None,
