@@ -206,9 +206,7 @@ impl crate::montgomery::Modulus<4> for P256Kernels {
     #[inline(always)]
     fn mul(a: &[u64; 4], b: &[u64; 4]) -> [u64; 4] {
         // SAFETY: the type is only named once CPUID admitted BMI2 and ADX.
-        // The kernel reads its first operand from memory: a, the more recent
-        // in the point formulas, stays in registers.
-        unsafe { p256::mul(b, a) }
+        unsafe { p256::mul(a, b) }
     }
     #[inline(always)]
     fn square(a: &[u64; 4]) -> [u64; 4] {
