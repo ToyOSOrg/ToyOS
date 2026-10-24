@@ -256,6 +256,13 @@ Not consumers:
            `cryptocase` at #1054's 43690c542. The reject rows newly fail
            there (0.53 → 1.02–1.03): since #1054 a refusal decrypts and
            wipes, so reject costs what open does.
+         - With #1054's 16-byte volatile wipe at the refusal, reject at
+           16 KiB reads 1.135 and 1.112 (3916 and 4213 ns), against 1.03
+           with the `memset`. The wipe's stores cost more than a long
+           `rep stosb`; they replace it because a short one costs more
+           still (`issues/a-short-memset-on-x86-64-costs-a-rep-stosb-start-up.md`).
+           A refusal is an error path, so the trade stands until that issue's
+           exit returns the refusal to a fill.
          - The stitched eight-block seal is about 277 instructions per
            128 B, so it is bound by instruction count, not spills.
          - Before #1054, when reject was GHASH alone: CTR (open less
@@ -289,6 +296,9 @@ Not consumers:
            (`issues/a-short-memset-on-x86-64-costs-a-rep-stosb-start-up.md`).
            With #1054's 16-byte wipe they read 56.7 and 61.2 ns (0.59,
            0.63), main's 57–61, and pass.
+         - The same wipe costs at 16 KiB: reject reads 1898 and 2094 ns
+           (0.988, 0.982, still passing), against 0.76–0.77 with the
+           `memset`. The trade and its exit are the AMD entry's above.
          - Exit: the guest rows pass.
          - Evidence:
            https://github.com/ToyOSOrg/evidence/tree/db8683ad53396c00cef576007349d3662d4c7d78/r3
