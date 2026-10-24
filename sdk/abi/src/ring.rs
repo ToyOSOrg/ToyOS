@@ -104,7 +104,7 @@ impl Dst<'_> {
 /// Kernel-side owner of one ring region: the cursors, the capacity, and the
 /// base of the region they address.
 ///
-/// Every access is serialized by the caller's lock (`kernel::pipe`'s `PIPES`),
+/// Every access is serialized by the caller's lock (each `kernel::pipe` pipe's own),
 /// which is why the cursors are plain integers rather than atomics — the
 /// header's were only ever atomic because they lived in shared memory.
 pub struct Ring {

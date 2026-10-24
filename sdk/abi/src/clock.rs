@@ -58,7 +58,7 @@ pub const fn nanos_between(counter_at_boot: u64, period_fs: u64, now: u64) -> u6
 /// Split at 10⁶ ticks, `⌊(q·10⁶ + r)·p / 10⁶⌋ = q·p + ⌊r·p / 10⁶⌋`, so it
 /// takes two 64-bit divisions by a constant, which compile to multiplications,
 /// in place of a 128-bit division, which is a library call. Exact for any tick
-/// under 18 ms (`10⁶ · period_fs < 2⁶⁴`).
+/// period under 18 ms (`10⁶ · period_fs < 2⁶⁴`).
 pub const fn ticks_to_nanos(ticks: u64, period_fs: u64) -> u64 {
     const FS_PER_NS: u64 = 1_000_000;
     (ticks / FS_PER_NS).wrapping_mul(period_fs).wrapping_add(ticks % FS_PER_NS * period_fs / FS_PER_NS)

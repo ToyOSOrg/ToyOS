@@ -743,9 +743,9 @@ pub enum Balance {
     /// at `threshold:` [`PUSH_THRESHOLD`].
     ///
     /// **It rests on an observation, and the observation is one half of
-    /// Dekker's pair** — see [`balance_fence`]. The pusher stores its surplus
-    /// and then loads the sleeper's SLEEPING bit; the sleeper stores SLEEPING
-    /// and then loads the surplus. Without a `SeqCst` fence between each side's
+    /// Dekker's pair** — see [`balance_fence`]. The pusher sets its bit in the
+    /// offering mask and then loads the sleeper's SLEEPING bit; the sleeper
+    /// stores SLEEPING and then loads the mask. Without a `SeqCst` fence between each side's
     /// store and its load, both may miss, and the CPU sleeps through a surplus
     /// exactly as it does under [`Balance::Pull`] — a narrower window on the
     /// same defect. `kernel/loom/tests/loom_push.rs` is the model.
@@ -804,13 +804,13 @@ impl Balance {
 /// that gained surplus does
 ///
 /// ```text
-/// surplus.store(n);  ...  doorbell.load()   // "is anybody asleep?"
+/// offering.fetch_or(bit);  ...  doorbell.load()   // "is anybody asleep?"
 /// ```
 ///
 /// and the CPU going to sleep does
 ///
 /// ```text
-/// doorbell.store(SLEEPING);  ...  surplus.load()   // "is there anything to steal?"
+/// doorbell.fetch_or(SLEEPING);  ...  offering.load()   // "is there anything to steal?"
 /// ```
 ///
 /// Each side stores to one location and loads the other. With plain accesses
@@ -2120,7 +2120,7 @@ impl<H: Hw, P: PreemptGuard> SchedPass<'_, '_, H, P, Disposed> {
         let arm: SleepArm<'_> = self.env.cpus.get(self.cpu.id).doorbell().arm_sleep();
         // [`Balance::PushOnSurplus`]'s other half, and the half that makes the
         // push an ordering rather than a hope: SLEEPING is published above, so
-        // reading the surplus *here*, behind the fence, is the load that pairs
+        // reading the offering mask *here*, behind the fence, is the load that pairs
         // with the pusher's read of that bit. `post_steal_probe`'s own read is
         // before the store and answers nothing about it.
         if self.probe_still_owed() {
@@ -2160,8 +2160,8 @@ impl<H: Hw, P: PreemptGuard> SchedPass<'_, '_, H, P, Disposed> {
     ///
     /// Only [`Balance::PushOnSurplus`] asks, and only to close its own Dekker
     /// window (see [`balance_fence`]): if the pusher missed our SLEEPING bit, we
-    /// must not also miss its surplus. Answering `true` sends the pass round
-    /// again, and the second trip's `post_steal_probe` reads the surplus behind
+    /// must not also miss its offering bit. Answering `true` sends the pass
+    /// round again, and the second trip's `post_steal_probe` reads the mask behind
     /// the same fence and posts — which is why this terminates: a probe in
     /// flight is an answer, so the question is asked at most once per halt.
     fn probe_still_owed(&self) -> bool {

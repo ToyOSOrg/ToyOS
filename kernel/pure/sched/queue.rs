@@ -1,10 +1,9 @@
 //! The per-CPU run queue: a real-time FIFO drained first, and the fair band.
 //!
 //! The fair band is EEVDF over the job groups this CPU holds, and EEVDF again
-//! over each group's threads ([`Queue`] at both levels). Every entity lives in
-//! one of this queue's two arenas, so once they have held as many a wake and a
-//! block allocate nothing. A group's weight is its job's weight times the
-//! group's share of the job's runnable threads
+//! over each group's threads ([`Queue`] at both levels, their entities in this
+//! queue's two arenas). A group's weight is its job's weight times the group's
+//! share of the job's runnable threads
 //! ([`Job::group_weight`]), refreshed at each decision. Lag goes with whatever
 //! leaves the queue: a thread's to the next queue it enters, and a dissolving
 //! group's with its last thread to the group that thread next enters. There
