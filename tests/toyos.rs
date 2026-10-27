@@ -6620,6 +6620,9 @@ struct Bench {
     /// The blocks the processors' `_OSC` load under ToyOS's claims, by
     /// signature and length.
     loaded: &'static [&'static str],
+    /// The end of the server's line for the processors' idle states: what
+    /// every declaration it handed over held, and what it withheld.
+    idle: &'static str,
     /// Each register the kernel keeps that this machine's AML writes: the
     /// server says it once, and its evaluation goes on.
     kept: &'static [At],
@@ -6660,8 +6663,9 @@ fn said_writes(lines: &[&str], head: &str) -> Result<Vec<u64>, String> {
 }
 
 /// The T14: 14 blocks; its `\_S5`'s `SLP_TYPa` read by a byte scan of its
-/// DSDT, with no interpreter; the first processor's commit loads one block,
-/// of 459 bytes. Its controller's `_INI` writes its GPIO pad
+/// DSDT, with no interpreter; the first processor's commit of ToyOS's claim
+/// (bits 4 and 9) loads three blocks, its `_CST`'s among them, and every
+/// processor's `_CST` then names `MWAIT 0x31` and `0x60` beyond C1. Its controller's `_INI` writes its GPIO pad
 /// `PAD_CFG_DW0_GPPC_A_13` at 0xFD6E0A70 (631120-002 §27.1.114), and its
 /// hotkey device's `_INI` writes MCHBAR's cTDP control and turbo activation
 /// ratio, at 5F50h and 5F54h, and PL1 at 59A0h, which the kernel keeps
@@ -6671,7 +6675,8 @@ const T14: Bench = Bench {
     blocks: 14,
     refused: &[],
     s5: "power: S5 is PM1a 0x1804 with SLP_TYPa=7,",
-    loaded: &["SSDT, 459 bytes"],
+    loaded: &["SSDT, 916 bytes", "SSDT, 459 bytes", "SSDT, 1162 bytes"],
+    idle: " with MWAIT 0x31 253 µs + MWAIT 0x60 1048 µs; withheld: none; unread: none",
     kept: &[At::Mchbar(0x59A0)],
     first_written: &[At::Address(0xFD6E_0000), At::Mchbar(0x5000)],
 };
@@ -6680,7 +6685,9 @@ const T14: Bench = Bench {
 /// table defines, refused whole as the owner ruled
 /// (`issues/the-amd-benchs-ssdt8-scopes-a-controller-no-table-defines.md`);
 /// its `\_S5`'s `SLP_TYPa` as the check outside the tree evaluated it; no
-/// processor names an `_OSC`. Its controller's `_REG(3, 1)` and its
+/// processor names an `_OSC`; each `_CST` hands over its port 0x414 and
+/// withholds its type-3 0x415
+/// (`issues/the-amd-benchs-c3-is-withheld-for-want-of-a-coherence-statement.md`). Its controller's `_REG(3, 1)` and its
 /// adapter's `_PSR` each reach `ALIB`, whose mailbox writes the root
 /// complex's 0xB8 and 0xBC through ECAM, in 00:00.0's page at 0xF8000000.
 const AMD: Bench = Bench {
@@ -6689,6 +6696,7 @@ const AMD: Bench = Bench {
     refused: &[(9, "a name that does not resolve")],
     s5: "with SLP_TYPa=5,",
     loaded: &[],
+    idle: " with port 0x414 400 µs; withheld: a type-3 SystemIO state, whose caches OSPM keeps coherent (ACPI 6.5 §8.1.4) x16; unread: none",
     kept: &[],
     first_written: &[At::Address(0xF800_0000)],
 };
@@ -6704,8 +6712,9 @@ const AMD: Bench = Bench {
 /// the bench's AML writes said once, and each page of registers it writes
 /// said with the kernel's first write into it; every battery reading names
 /// the adapter online or offline; `\_SB._OSC`
-/// negotiated, and on an Intel machine each processor's, none refused; every
-/// block they load loaded, none refused. Every other CPU of the machine said
+/// negotiated, and on an Intel machine each processor's committed, none
+/// refused; every block they load loaded, none refused; every processor's
+/// idle states the bench's, and none refused by the kernel. Every other CPU of the machine said
 /// how its range registers stand beside the boot processor's, and none holds
 /// registers that are on and not those. What it prints beside that is the
 /// first measurement of each: the load's time, the reads by address space,
@@ -6793,12 +6802,17 @@ fn acpi_tables_on_metal(back: &metal::Readback) -> Result<(), String> {
             return Err(format!("this bench's processors name no _OSC: {processors}"));
         }
     } else {
-        let processors = log.must_say("acpiserver: the processors' _OSC negotiated, Intel's: ")?;
+        let processors = log.must_say("acpiserver: the processors' _OSC committed, Intel's: ")?;
         if !processors.contains(", 0 refused;") {
             return Err(format!("a processor's _OSC was refused: {processors}"));
         }
         eprintln!("  [acpi] {}", processors.trim());
     }
+    let idle = log.must_say("acpiserver: the processors' idle states: ")?;
+    if !idle.contains(" 0 refused by the kernel;") || !idle.trim_end().ends_with(bench.idle) {
+        return Err(format!("the processors' idle states are not this bench's, or the kernel refused one: {idle}"));
+    }
+    eprintln!("  [acpi] {}", idle.trim());
     let loads: Vec<&str> = lines.iter().filter_map(|l| l.split_once("acpiserver: a table loaded at run time: ").map(|(_, said)| said.trim())).collect();
     if loads != bench.loaded {
         return Err(format!("the tables loaded at run time are {loads:?}, where this bench's claims load {:?}", bench.loaded));
