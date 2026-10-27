@@ -281,9 +281,7 @@ fn refused(name: &str, outcome: Result<RawHandle, SyscallError>) {
 /// server's volume reads a program into one.
 fn image_object(bytes: &[u8]) -> toyos::shm::SharedMemory {
     let object = toyos::shm::SharedMemory::create(bytes.len().max(1)).expect("a memory object for the image");
-    // SAFETY: the region is at least `bytes.len()` long, mapped here, and this
-    // process's alone; `bytes` is not in it.
-    unsafe { core::ptr::copy_nonoverlapping(bytes.as_ptr(), object.as_ptr(), bytes.len()) };
+    object.bytes().write(0, bytes);
     object
 }
 

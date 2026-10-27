@@ -121,7 +121,8 @@ fn killer() -> ! {
     let header = conn.recv_header().expect("the arming frame");
     assert_eq!(header.msg_type, ARM, "an unexpected frame");
     let [word_handle, victim] = conn.recv_handles_exact::<2>(&header).expect("the word and the victim");
-    let go = SharedMemory::lent(word_handle, WORD_BYTES).expect("map the word");
+    // SAFETY: received with this frame, so this process's and nobody else's.
+    let go = SharedMemory::lent(unsafe { OwnedHandle::from_raw(word_handle) }, WORD_BYTES).expect("map the word");
     // SAFETY: the parent sent one handle to the victim, which nothing else here owns.
     let victim = unsafe { Process::from_raw(victim) };
 

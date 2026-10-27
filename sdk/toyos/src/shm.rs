@@ -7,22 +7,30 @@
 //! peer that never receives it can never name it.
 //!
 //! A mapping holds its region until it is taken away, and dropping this takes
-//! it away before closing the handle: that is all the cleanup there is.
+//! it away before closing the handle: that is all the cleanup there is. Each
+//! map is a mapping of its own, so dropping one value never unmaps another's.
 //!
-//! **A region a peer lends is taken only through [`SharedMemory::lent`]**,
-//! which believes the kernel's answer about it and not the peer's: a handle
-//! the kernel's [`fstat`](syscall::fstat) says is not memory it allocated to a
-//! region — another kind of object, or a device's registers — or is not the
-//! length the protocol says, is refused before it is mapped, since mapping a
-//! handle that names no region ends this process. [`SharedMemory::adopt`] is
-//! for a region the kernel itself handed this process.
+//! **No reference is formed over a writable region's bytes.** Any other
+//! mapping of it — a peer's, a device's, this process's own through a second
+//! handle — can write them meanwhile, which no `&[u8]` or `&mut [u8]` allows.
+//! They are reached through [`Bytes`], or by `unsafe` code over
+//! [`SharedMemory::as_ptr`] keeping the same rule.
+//!
+//! **A handle is judged by the kernel's answer before it is mapped**, since
+//! mapping one that names no region ends this process. [`SharedMemory::lent`]
+//! takes a peer's region only where [`fstat`](syscall::fstat) says it is
+//! memory the kernel allocated, of exactly the length the protocol says, and
+//! not a device's registers; [`SharedMemory::adopt`] takes a region the kernel
+//! handed this process only where it is a writable region at least as long as
+//! the view asked for.
 //!
 //! **A region nobody can write is an [`Immutable`]**, taken only once the
-//! kernel answers it is one: every mapping of it is read-only, so it has no
-//! mutable view to offer.
+//! kernel answers it is one: every mapping of it is read-only, so a plain
+//! slice over it is sound.
 
+use alloc::vec::Vec;
 use core::fmt;
-use core::sync::atomic::AtomicU8;
+use core::marker::PhantomData;
 
 use toyos_abi::syscall::{self, FileType, Stat, SyscallError, PAGE_SIZE, SHM_DEVICE};
 
@@ -31,12 +39,15 @@ use crate::{AsHandle, OwnedHandle, RawHandle};
 pub struct SharedMemory {
     handle: OwnedHandle,
     ptr: *mut u8,
-    size: usize,
-    /// What the mapping covers: the whole region, whatever `size` views.
+    len: usize,
+    /// What the mapping covers: the whole region, whatever `len` views.
     mapped: usize,
 }
 
+// SAFETY: the mapping is this process's whichever thread holds it, and every
+// access to its bytes is through `Bytes`, which races nothing.
 unsafe impl Send for SharedMemory {}
+// SAFETY: as for `Send`.
 unsafe impl Sync for SharedMemory {}
 
 impl SharedMemory {
@@ -45,35 +56,40 @@ impl SharedMemory {
     /// Fallible: a size the kernel cannot express is `InvalidArgument` and
     /// memory it does not have is `ResourceExhausted`. A daemon reaches both
     /// through a client's request, so neither may be an assertion here.
-    pub fn create(size: usize) -> Result<Self, SyscallError> {
-        Self::adopt(syscall::shm_create(size)?, size)
+    pub fn create(len: usize) -> Result<Self, SyscallError> {
+        Self::adopt(OwnedHandle(syscall::shm_create(len)?), len)
     }
 
     /// [`create`](Self::create) for a region a device will be lent, by this
     /// process's driver or by a driver it sends the region to.
-    pub fn create_for_device(size: usize) -> Result<Self, SyscallError> {
-        Self::adopt(syscall::shm_create_flags(size, SHM_DEVICE)?, size)
+    pub fn create_for_device(len: usize) -> Result<Self, SyscallError> {
+        Self::adopt(OwnedHandle(syscall::shm_create_flags(len, SHM_DEVICE)?), len)
     }
 
     /// Map a region the kernel itself handed this process — a device's
-    /// window, a DMA grant — and view its first `size` bytes.
+    /// window, a DMA grant, a scanout — and view its first `len` bytes.
+    /// `InvalidArgument`, and never mapped, unless the kernel answers it is a
+    /// writable region of at least `len` bytes. The handle is consumed either
+    /// way.
     ///
-    /// Never for a region a peer sent, which is [`Self::lent`]'s.
-    pub fn adopt(handle: RawHandle, size: usize) -> Result<Self, SyscallError> {
-        let handle = OwnedHandle(handle);
-        let mapped = syscall::fstat(handle.raw())?.size as usize;
-        Ok(Self { ptr: map(&handle)?, handle, size, mapped })
+    /// A region a peer sent is [`Self::lent`]'s.
+    pub fn adopt(handle: OwnedHandle, len: usize) -> Result<Self, SyscallError> {
+        let stat = syscall::fstat(handle.raw())?;
+        if !adoptable(&stat, len) {
+            return Err(SyscallError::InvalidArgument);
+        }
+        // A region the kernel maps is within the address space, so its length is a `usize`.
+        Ok(Self { ptr: map(&handle)?, handle, len, mapped: stat.size as usize })
     }
 
     /// Map a region a peer lent, whose protocol says it is `bytes` long, and
     /// view those bytes; refused, and never mapped, unless the kernel answers
     /// it is memory it allocated, `bytes` rounded up to whole pages, as
     /// [`Self::create`] makes it. The handle is consumed either way.
-    pub fn lent(handle: RawHandle, bytes: usize) -> Result<Self, Lent> {
-        let handle = OwnedHandle(handle);
+    pub fn lent(handle: OwnedHandle, bytes: usize) -> Result<Self, Lent> {
         let stat = syscall::fstat(handle.raw()).map_err(Lent::Kernel)?;
         judge(&stat, bytes)?;
-        Ok(Self { ptr: map(&handle).map_err(Lent::Kernel)?, handle, size: bytes, mapped: stat.size as usize })
+        Ok(Self { ptr: map(&handle).map_err(Lent::Kernel)?, handle, len: bytes, mapped: stat.size as usize })
     }
 
     /// A second handle to the same region, for sending to a peer.
@@ -84,13 +100,23 @@ impl SharedMemory {
         syscall::dup(self.handle.raw()).map(OwnedHandle)
     }
 
+    /// The viewed bytes, as memory. A device's registers are reached through
+    /// a [`Window`](crate::volatile::Window) instead.
+    pub fn bytes(&self) -> Bytes<'_> {
+        Bytes { ptr: self.ptr, len: self.len, _mapping: PhantomData }
+    }
+
+    /// The first byte, for `unsafe` code that reaches the region as atomics
+    /// or through a [`Window`](crate::volatile::Window), never as a reference
+    /// to its bytes.
     pub fn as_ptr(&self) -> *mut u8 {
         self.ptr
     }
 
     /// Give up ownership: the handle and its mapping stay, the mapping for
-    /// the caller to take away with `vm_release` of [`len`](Self::len) bytes
-    /// before it closes the handle.
+    /// the caller to take away with `vm_release` before it closes the handle.
+    /// The mapping is [`len`](Self::len) in whole pages for a region this made
+    /// or was lent, and the kernel's whole region for one adopted.
     pub fn into_raw(self) -> (RawHandle, *mut u8) {
         let this = core::mem::ManuallyDrop::new(self);
         // SAFETY: `this` is never used or dropped again, so the handle moves
@@ -100,26 +126,11 @@ impl SharedMemory {
     }
 
     pub fn len(&self) -> usize {
-        self.size
+        self.len
     }
 
     pub fn is_empty(&self) -> bool {
-        self.size == 0
-    }
-
-    pub fn as_slice(&self) -> &[u8] {
-        unsafe { core::slice::from_raw_parts(self.ptr, self.size) }
-    }
-
-    pub fn as_mut_slice(&mut self) -> &mut [u8] {
-        unsafe { core::slice::from_raw_parts_mut(self.ptr, self.size) }
-    }
-
-    /// The region as the one type that may alias memory a peer writes.
-    pub fn as_atomic(&self) -> &[AtomicU8] {
-        // SAFETY: the mapping is `size` bytes and lives as long as `self`, and
-        // `AtomicU8` has `u8`'s size and alignment.
-        unsafe { core::slice::from_raw_parts(self.ptr as *const AtomicU8, self.size) }
+        self.len == 0
     }
 }
 
@@ -131,11 +142,112 @@ impl Drop for SharedMemory {
     }
 }
 
+impl AsHandle for SharedMemory {
+    fn as_handle(&self) -> RawHandle {
+        self.handle.raw()
+    }
+}
+
+/// A range of a mapping another party can write, borrowed from what keeps it
+/// mapped.
+///
+/// Each read and write is one copy the compiler sees only as an access to the
+/// range (`crate::arch::copy`), so it is never split, repeated or assumed to
+/// hold still: a writer meanwhile changes only which bytes arrive. A reader
+/// acts on its own copy and never reads the same bytes twice to check them.
+#[derive(Clone, Copy)]
+pub struct Bytes<'a> {
+    ptr: *mut u8,
+    len: usize,
+    _mapping: PhantomData<&'a SharedMemory>,
+}
+
+// SAFETY: a range of a mapping the process holds, reached only by copies that
+// race nothing.
+unsafe impl Send for Bytes<'_> {}
+// SAFETY: as for `Send`.
+unsafe impl Sync for Bytes<'_> {}
+
+impl<'a> Bytes<'a> {
+    /// # Safety
+    /// `ptr` names `len` bytes of a live mapping for `'a`, which this process
+    /// reaches only through `Bytes`, atomics or volatile accesses meanwhile.
+    pub unsafe fn from_raw(ptr: *mut u8, len: usize) -> Self {
+        Self { ptr, len, _mapping: PhantomData }
+    }
+
+    pub fn len(self) -> usize {
+        self.len
+    }
+
+    pub fn is_empty(self) -> bool {
+        self.len == 0
+    }
+
+    /// `len` of these bytes from `offset`.
+    pub fn sub(self, offset: usize, len: usize) -> Self {
+        assert!(
+            offset.checked_add(len).is_some_and(|end| end <= self.len),
+            "shm: {len} bytes at {offset:#x} run past {:#x}",
+            self.len
+        );
+        // SAFETY: the assertion kept `offset + len` inside this range.
+        Self { ptr: unsafe { self.ptr.add(offset) }, len, _mapping: PhantomData }
+    }
+
+    /// Copy `out.len()` bytes from `offset` out.
+    pub fn read(self, offset: usize, out: &mut [u8]) {
+        let from = self.sub(offset, out.len());
+        // SAFETY: `sub` bounded the source inside the range, and `out` is a
+        // reference, so it is not the mapping.
+        unsafe { crate::arch::copy(out.as_mut_ptr(), from.ptr, out.len()) }
+    }
+
+    /// Copy `data` in at `offset`.
+    pub fn write(self, offset: usize, data: &[u8]) {
+        let to = self.sub(offset, data.len());
+        // SAFETY: as in `read`, with the two sides swapped.
+        unsafe { crate::arch::copy(to.ptr, data.as_ptr(), data.len()) }
+    }
+
+    /// Write zeroes over the whole range.
+    pub fn zero(self) {
+        const ZEROES: [u8; 256] = [0; 256];
+        let mut at = 0;
+        while at < self.len {
+            let n = ZEROES.len().min(self.len - at);
+            self.write(at, &ZEROES[..n]);
+            at += n;
+        }
+    }
+
+    pub fn to_vec(self) -> Vec<u8> {
+        let mut out = alloc::vec![0; self.len];
+        self.read(0, &mut out);
+        out
+    }
+
+    /// Copy the whole range to `dst`.
+    ///
+    /// # Safety
+    /// `dst` is writable for [`len`](Self::len) bytes and none of them is in
+    /// this range.
+    pub unsafe fn read_to(self, dst: *mut u8) {
+        // SAFETY: the caller's, and the range is mapped for `'a`.
+        unsafe { crate::arch::copy(dst, self.ptr, self.len) }
+    }
+}
+
 fn map(handle: &OwnedHandle) -> Result<*mut u8, SyscallError> {
-    // SAFETY: the mapping lives as long as `SharedMemory`, which takes it away.
+    // SAFETY: the mapping lives as long as what holds it, which takes it away.
     let ptr = unsafe { syscall::shm_map(handle.raw()) }?;
     assert!(!ptr.is_null(), "shm_map answered null");
     Ok(ptr)
+}
+
+/// Whether the kernel's answer is a writable region with `len` bytes to view.
+fn adoptable(stat: &Stat, len: usize) -> bool {
+    matches!(stat.file_type, FileType::SharedMemory | FileType::DeviceMemory) && len as u64 <= stat.size
 }
 
 /// Why a lent region was refused.
@@ -171,12 +283,6 @@ fn judge(stat: &Stat, bytes: usize) -> Result<(), Lent> {
         return Err(Lent::Length { is: stat.size as usize, bytes });
     }
     Ok(())
-}
-
-impl AsHandle for SharedMemory {
-    fn as_handle(&self) -> RawHandle {
-        self.handle.raw()
-    }
 }
 
 /// A region nobody can write, mapped read-only: a payload the loader verified,
@@ -284,5 +390,88 @@ mod tests {
             judge(&answer(PAGE_SIZE, FileType::SharedMemory), usize::MAX),
             Err(Lent::Length { is: PAGE_SIZE, bytes: usize::MAX })
         );
+    }
+
+    #[test]
+    fn an_adopted_view_is_at_most_the_region() {
+        for kind in [FileType::SharedMemory, FileType::DeviceMemory] {
+            assert!(adoptable(&answer(2 * PAGE_SIZE, kind), 2 * PAGE_SIZE));
+            assert!(adoptable(&answer(2 * PAGE_SIZE, kind), PAGE_SIZE + 1));
+            assert!(!adoptable(&answer(2 * PAGE_SIZE, kind), 2 * PAGE_SIZE + 1));
+            assert!(!adoptable(&answer(PAGE_SIZE, kind), usize::MAX));
+        }
+    }
+
+    #[test]
+    fn only_a_writable_region_is_adopted() {
+        for kind in [FileType::ImmutableMemory, FileType::Pipe, FileType::Unknown] {
+            assert!(!adoptable(&answer(PAGE_SIZE, kind), 1), "{kind:?}");
+        }
+    }
+
+    /// `Bytes` over `buf`, as a mapping would be.
+    fn over(buf: &mut [u8]) -> Bytes<'_> {
+        // SAFETY: `buf` is reached only through the answer while it lives.
+        unsafe { Bytes::from_raw(buf.as_mut_ptr(), buf.len()) }
+    }
+
+    #[test]
+    fn every_length_and_alignment_is_copied_whole_and_nothing_beside_it() {
+        let source: Vec<u8> = (0..400).map(|i| (i * 7 + 3) as u8).collect();
+        for at in 0..16 {
+            for len in 0..300 {
+                let mut region = vec![0xEEu8; 400];
+                over(&mut region).write(at, &source[..len]);
+                assert_eq!(&region[at..at + len], &source[..len], "write of {len} at {at}");
+                assert!(region[..at].iter().chain(&region[at + len..]).all(|&b| b == 0xEE), "write of {len} at {at} spilled");
+
+                let mut out = vec![0xEEu8; len + 16];
+                over(&mut region).read(at, &mut out[at % 8..at % 8 + len]);
+                assert_eq!(&out[at % 8..at % 8 + len], &source[..len], "read of {len} at {at}");
+                assert!(out[..at % 8].iter().chain(&out[at % 8 + len..]).all(|&b| b == 0xEE), "read of {len} at {at} spilled");
+            }
+        }
+    }
+
+    #[test]
+    fn a_sub_range_is_its_own_bytes() {
+        let mut region: Vec<u8> = (0..64).collect();
+        let part = over(&mut region).sub(8, 16);
+        assert_eq!(part.len(), 16);
+        assert_eq!(part.to_vec(), (8..24).collect::<Vec<u8>>());
+        part.write(15, &[0xAA]);
+        assert_eq!(region[23], 0xAA);
+    }
+
+    #[test]
+    fn a_zeroed_range_is_zero_and_nothing_beside_it() {
+        for len in [0, 1, 255, 256, 257, 1000] {
+            let mut region = vec![0xEEu8; len + 2];
+            over(&mut region).sub(1, len).zero();
+            assert_eq!(region[0], 0xEE);
+            assert!(region[1..=len].iter().all(|&b| b == 0), "{len}");
+            assert_eq!(region[len + 1], 0xEE);
+        }
+    }
+
+    #[test]
+    #[should_panic(expected = "run past")]
+    fn a_read_past_the_range_panics() {
+        let mut region = [0u8; 16];
+        over(&mut region).sub(4, 8).read(4, &mut [0; 5]);
+    }
+
+    #[test]
+    #[should_panic(expected = "run past")]
+    fn a_write_past_the_range_panics() {
+        let mut region = [0u8; 16];
+        over(&mut region).write(12, &[0; 5]);
+    }
+
+    #[test]
+    #[should_panic(expected = "run past")]
+    fn an_offset_that_overflows_panics() {
+        let mut region = [0u8; 16];
+        over(&mut region).sub(usize::MAX, 2);
     }
 }

@@ -108,7 +108,7 @@ pub struct Region {
 impl Region {
     /// The region `handle` names, judged and mapped. Refused, nothing is mapped and the handle
     /// is closed.
-    pub fn judged(handle: toyos::RawHandle) -> Result<SharedMemory, shm::Lent> {
+    pub fn judged(handle: toyos::OwnedHandle) -> Result<SharedMemory, shm::Lent> {
         SharedMemory::lent(handle, REGION_BYTES)
     }
 

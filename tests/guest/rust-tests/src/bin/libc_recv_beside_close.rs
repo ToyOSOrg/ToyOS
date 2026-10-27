@@ -131,7 +131,8 @@ fn test(role: &str) {
     assert_eq!(header.msg_type, MsgType::TcpConnect as u32, "a stream's connect");
     let _: TcpConnectRequest = conn.recv_payload(&header).expect("the connect's request");
     let [region] = conn.recv_handles_exact::<1>(&header).expect("the stream's region");
-    let region = SharedMemory::lent(region, REGION_BYTES).expect("a region netstack takes");
+    // SAFETY: received with this frame, so this process's and nobody else's.
+    let region = SharedMemory::lent(unsafe { OwnedHandle::from_raw(region) }, REGION_BYTES).expect("a region netstack takes");
     // SAFETY: the mapping is `REGION_BYTES`, 2 MiB aligned, and its header is reached only as atomics.
     let words = unsafe { &*(region.as_ptr() as *const Words) };
     let mut server = Server::new(words, LAYOUT);
@@ -165,8 +166,7 @@ fn test(role: &str) {
         }
     }
 
-    // SAFETY: the receive ring is inside the mapping, and the client reads nothing past the tail.
-    unsafe { std::ptr::copy_nonoverlapping(PEER.as_ptr(), region.as_ptr().add(RECEIVE_RING), PEER.len()) };
+    region.bytes().write(RECEIVE_RING, PEER);
     let _ = server.publish(words, PEER.len() as u32).expect("the client keeps the protocol");
     syscall::write(receive.as_handle(), &[1]).expect("ring the reader");
 

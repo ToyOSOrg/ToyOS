@@ -213,15 +213,15 @@ fn draw_window(
     }
 
     if let Some(b) = content_blit(win, clip) {
-        let buffer = win.client.buffers.shown().shm.as_slice();
+        let buffer = win.client.buffers.shown().shm.bytes();
         let offset = (b.src_y as usize * win.buf_w as usize + b.src_x as usize) * 4;
-        surface.blit(
+        surface.blit_shared(
             b.dst.x0 as usize,
             b.dst.y0 as usize,
             b.dst.w() as usize,
             b.dst.h() as usize,
             win.buf_w as usize,
-            &buffer[offset..],
+            buffer.sub(offset, buffer.len().saturating_sub(offset)),
         );
     }
 }

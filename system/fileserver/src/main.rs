@@ -70,8 +70,7 @@ use toyos::ipc::{self, Connection, RxStep};
 use toyos::namespace::Namespace;
 use toyos::poller::{Poller, READABLE};
 use toyos::port::{self, Acceptor};
-use toyos::shm::SharedMemory;
-use toyos::volatile::Window;
+use toyos::shm::{Bytes, SharedMemory};
 use toyos::Pipe;
 use toyos_abi::handle::Rights;
 use toyos_abi::syscall::{self, SyscallError, MAX_BADGE, SERVE_PREFIX};
@@ -409,23 +408,26 @@ fn stat_reply(meta: Meta, identity: u64, volume: u64) -> Reply {
     Reply::stat(&stat)
 }
 
-fn window_of(w: &SharedMemory) -> Window {
-    // SAFETY: the region is `WINDOW_BYTES` long (it came through `adopt` at
-    // that size, and shared memory is never less) and lives as long as `w`.
-    unsafe { Window::new(w.as_ptr(), WINDOW_BYTES) }
+/// A client's window, unborrowed so a request can reach the volume while it
+/// holds it.
+fn window_of(w: &SharedMemory) -> Bytes<'static> {
+    // SAFETY: the region is `WINDOW_BYTES` long (it came through `lent` at that
+    // size) and lives as long as its client, which outlives every request
+    // that takes its window.
+    unsafe { Bytes::from_raw(w.as_ptr(), WINDOW_BYTES) }
 }
 
 /// A read's destination: the first bytes of a client's window, which the
 /// volume copies its cache's blocks into once and never holds a reference to.
-struct WindowOut(Window);
+struct WindowOut(Bytes<'static>);
 
 impl Out for WindowOut {
     fn len(&self) -> usize {
-        self.0.bytes()
+        self.0.len()
     }
 
     fn put(&mut self, at: usize, bytes: &[u8]) {
-        window_put(self.0, at, bytes);
+        self.0.write(at, bytes);
     }
 
     fn zero(&mut self, at: usize, len: usize) {
@@ -601,7 +603,7 @@ impl Server {
     }
 
     /// The client's window.
-    fn window(&self, id: u64) -> Window {
+    fn window(&self, id: u64) -> Bytes<'static> {
         window_of(self.clients[&id].window.as_ref().expect("a request comes after the window"))
     }
 
@@ -616,7 +618,7 @@ impl Server {
         let (at, room) = Self::span(r)?;
         let (len, len2) = bounds::paths(room, r.len, r.len2)?;
         let mut bytes = vec![0u8; len + len2];
-        window_take(self.window(id), at, &mut bytes);
+        self.window(id).read(at, &mut bytes);
         let second = bytes.split_off(len);
         Ok((bounds::path(bytes)?, bounds::path(second)?))
     }
@@ -683,7 +685,7 @@ impl Server {
         if bytes.len() > room {
             return Err(Error::NameTooLong);
         }
-        window_put(self.window(id), at, bytes);
+        self.window(id).write(at, bytes);
         Ok(())
     }
 
@@ -696,7 +698,8 @@ impl Server {
             }
             let slot = if client.exported() { Slot::Taken } else { Slot::AtHello };
             // The window travels in the HELLO frame: its reader took it with the frame.
-            let lent = || client.rx.take_handles::<1>().map(|[lent]| SharedMemory::lent(lent, WINDOW_BYTES));
+            // SAFETY: the frame moved it here, and nothing else answers for it.
+            let lent = || client.rx.take_handles::<1>().map(|[lent]| SharedMemory::lent(unsafe { toyos::OwnedHandle::from_raw(lent) }, WINDOW_BYTES));
             match bounds::hello(slot, all, mine, lent) {
                 Hello::Served(window) => client.window = Some(window),
                 Hello::Refused(why) => return Answer::Refuse(Error::TooManyConnections, why),
@@ -775,7 +778,7 @@ impl Server {
 
     /// The open file `fid` names, a directory refused `IsADirectory`, and the
     /// span its data travels in.
-    fn file_and_span(&mut self, id: u64, r: &Request) -> Result<(Shared, Node, Window), Error> {
+    fn file_and_span(&mut self, id: u64, r: &Request) -> Result<(Shared, Node, Bytes<'static>), Error> {
         let file = self.settled(id, r.fid)?;
         let node = file.borrow().node()?;
         let (at, len) = Self::span(r)?;
@@ -820,11 +823,11 @@ impl Server {
                 if !file.borrow().write {
                     return Err(Error::NotOpenForWriting);
                 }
-                let len = window.bytes();
+                let len = window.len();
                 if self.scratch.len() < len {
                     self.scratch.resize(len, 0);
                 }
-                window_take(window, 0, &mut self.scratch[..len]);
+                window.read(0, &mut self.scratch[..len]);
                 let end = match op {
                     WRITE => self.write_at(&file, len)?,
                     _ => self.write_to(&file, r.offset, len)?,
@@ -1184,7 +1187,7 @@ impl Server {
             return Err(Error::InvalidRequest);
         }
         let mut words = vec![0u8; count * 8];
-        window_take(self.window(id), at, &mut words);
+        self.window(id).read(at, &mut words);
         let fids: Vec<u64> =
             words.chunks_exact(8).map(|w| u64::from_le_bytes(w.try_into().expect("eight bytes"))).collect();
         let parent = &self.clients[&id];
