@@ -23,7 +23,7 @@
 
 use std::cell::RefCell;
 
-use toyos::shm::{Bytes, SharedMemory};
+use toyos::shm::SharedMemory;
 use toyos::{DmaRegion, PciDev};
 use toyos_abi::syscall::SyscallError;
 use toyos_device_memory::DmaBuffers;
@@ -203,11 +203,16 @@ impl VirtioNet {
         self.post_rx(index);
     }
 
-    /// A received frame, past the virtio header, copied into the start of `out`.
-    pub fn rx_frame<'o>(&self, index: usize, len: usize, out: &'o mut [u8]) -> &'o [u8] {
-        let out = &mut out[..len];
-        dma(self, self.grant.window().sub(OFF_RX_BUFS + index * RX_BUF_SIZE + NET_HDR_SIZE, len)).read(0, out);
-        out
+    /// Where a received frame's bytes are, past the virtio header.
+    pub fn rx_frame(&self, index: usize, len: usize) -> &[u8] {
+        let window = self.grant.window().sub(OFF_RX_BUFS + index * RX_BUF_SIZE + NET_HDR_SIZE, len);
+        // SAFETY: the window is inside the grant, which lives as long as
+        // `self`; the device has finished with this buffer — its used-ring
+        // element is what said so — and it is not posted again until
+        // `rx_done`, which the caller makes after this borrow ends. virtio is
+        // the hypervisor's, inside the trusted base, so its protocol is believed;
+        // an external or hot-plug device's driver must copy instead.
+        unsafe { std::slice::from_raw_parts(window.as_ptr() as *const u8, len) }
     }
 
     /// How many frames the transmit queue takes now ([`TxQueue::room`]). A
@@ -218,10 +223,10 @@ impl VirtioNet {
 
     /// Fill a transmit buffer with a `len`-byte frame and hand it to the
     /// device ([`TxQueue::send`]).
-    pub fn tx<R>(&self, len: usize, fill: impl FnOnce(&mut [u8]) -> R) -> R {
-        let (result, published) = self.tx.borrow_mut().send(len, fill);
+    /// Copy `frame` into a transmit buffer and hand it to the device.
+    pub fn tx(&self, frame: &[u8]) {
+        let ((), published) = self.tx.borrow_mut().send(frame.len(), |slot| slot.copy_from_slice(frame));
         self.device.notify(published);
-        result
     }
 
     /// The claim, for the poller: readable means an interrupt has landed.
@@ -286,9 +291,14 @@ impl TxQueue {
         let at = OFF_TX_BUFS + head as usize * TX_BUF_SIZE;
         // The header is this driver's and zeroed before the frame goes in.
         self.grant.window().sub(at, NET_HDR_SIZE).zero();
-        let mut frame = [0u8; TX_BUF_SIZE - NET_HDR_SIZE];
-        let result = fill(&mut frame[..len]);
-        dma(self, self.grant.window().sub(at + NET_HDR_SIZE, len)).write(0, &frame[..len]);
+        let window = self.grant.window().sub(at + NET_HDR_SIZE, len);
+        // SAFETY: the window is inside the grant, which lives as long as the
+        // driver that holds this queue; the device is not reading it, because
+        // this head is out of `free` and its descriptor is published only
+        // after `fill` returns. virtio is the hypervisor's, inside the trusted
+        // base, so its protocol is believed; an external or hot-plug device's
+        // driver must copy instead.
+        let result = fill(unsafe { std::slice::from_raw_parts_mut(window.as_ptr(), len) });
         let frame = Buffer::readable(self.grant.device_addr(at), (NET_HDR_SIZE + len) as u32);
         (result, self.rings.publish(head, &[frame]))
     }
@@ -428,13 +438,4 @@ mod tests {
     fn a_used_index_past_every_frame_offered_ends_the_driver() {
         after_the_device_wrote(0, 0, 3).room();
     }
-}
-
-/// `window`, of the grant, as bytes the device may write: a frame is copied out
-/// of it and into it whole, for as long as `_held`, part of the driver that
-/// holds the grant's region, is borrowed.
-fn dma<T>(_held: &T, window: toyos::volatile::Window) -> Bytes<'_> {
-    // SAFETY: `window` is inside the grant, whose region the driver holds for
-    // longer than `held` is borrowed, and nothing reaches it as a reference.
-    unsafe { Bytes::from_raw(window.as_ptr(), window.bytes()) }
 }

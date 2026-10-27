@@ -20,7 +20,7 @@
 
 use std::time::Instant;
 
-use toyos::shm::{Bytes, SharedMemory};
+use toyos::shm::SharedMemory;
 use toyos::{DmaRegion, PciDev};
 use toyos_abi::syscall::SyscallError;
 use toyos_device_memory::DmaBuffers;
@@ -272,12 +272,15 @@ impl Channel {
     /// Hand every buffer the host filled on the agent's port to `each`, and
     /// post it again.
     pub fn received(&mut self, mut each: impl FnMut(&[u8])) {
-        let mut copy = [0u8; PORT_RX_BYTES];
         while let Some(Used { head, written }) = finished(&mut self.port_rx) {
             let window = self.grant.window().sub(OFF_PORT_RX + head as usize * PORT_RX_BYTES, written as usize);
-            let out = &mut copy[..written as usize];
-            dma(self, window).read(0, out);
-            each(out);
+            // SAFETY: the window is inside the grant, which lives as long as
+            // `self`; the device has finished with this buffer — its used
+            // element said so, and `written` is at most the buffer's length —
+            // and it is not posted again until `each` has returned. virtio is
+            // the hypervisor's, inside the trusted base, so its protocol is
+            // believed; an external or hot-plug device's driver must copy instead.
+            each(unsafe { std::slice::from_raw_parts(window.as_ptr() as *const u8, written as usize) });
             self.post_port(head);
         }
     }
@@ -304,24 +307,19 @@ impl Channel {
     /// With a transmit in flight: the caller asks [`Self::transmit_free`].
     pub fn transmit(&mut self, fill: impl FnOnce(&mut [u8]) -> usize) {
         assert!(self.sent.is_none(), "vdagent: a transmit was made over the one in flight");
-        let mut frame = [0u8; LARGEST_TRANSMIT];
-        let len = fill(&mut frame);
+        let window = self.grant.window().sub(OFF_PORT_TX, LARGEST_TRANSMIT);
+        // SAFETY: the window is inside the grant, which lives as long as
+        // `self`; the device is not reading it, because no transmit is in
+        // flight and the buffer is published only after `fill` returns. virtio
+        // is the hypervisor's, inside the trusted base, so its protocol is
+        // believed; an external or hot-plug device's driver must copy instead.
+        let len = fill(unsafe { std::slice::from_raw_parts_mut(window.as_ptr(), LARGEST_TRANSMIT) });
         if len == 0 {
             return;
         }
-        dma(self, self.grant.window().sub(OFF_PORT_TX, len)).write(0, &frame[..len]);
         let frame = Buffer::readable(self.grant.device_addr(OFF_PORT_TX), len as u32);
         let published = self.port_tx.publish(0, &[frame]);
         self.device.notify(published);
         self.sent = Some(Instant::now());
     }
-}
-
-/// `window`, of the grant, as bytes the device may write: a buffer is copied
-/// out of it and into it whole, for as long as `_held`, the channel that holds
-/// the grant's region, is borrowed.
-fn dma<T>(_held: &T, window: toyos::volatile::Window) -> Bytes<'_> {
-    // SAFETY: `window` is inside the grant, whose region the channel holds for
-    // longer than `_held` is borrowed, and nothing reaches it as a reference.
-    unsafe { Bytes::from_raw(window.as_ptr(), window.bytes()) }
 }
