@@ -19,11 +19,10 @@ Two couplings every production scheduler has and ours lacks:
   wake. A latency-sensitive wake should prefer a shallow-idle core; a
   throughput task can pay to wake a deep one.
 
-Both wait for an AML interpreter
-(`issues/toyos-runs-the-machine-in-acpi-mode-and-interprets-its-aml.md`),
-because the kernel reads no C-state on metal and chooses no P-state: it
-declares HWP's bounds (`kernel/src/arch/x86_64/control_regs.rs`), and the CPU
-chooses within them.
+Idle-state awareness waits for the states
+`issues/idle-cpus-enter-the-c-states-cst-names.md` is building. The kernel
+chooses no P-state: it declares HWP's bounds
+(`kernel/src/arch/x86_64/control_regs.rs`), and the CPU chooses within them.
 Filed so the placement track (see `placement-has-no-migration-cost-or-wake-affinity.md`)
 leaves room for an idle-state input when it designs wake placement.
 

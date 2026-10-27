@@ -50,21 +50,25 @@ and contention).
 - Deep idle: on the T14 `hlt` holds a one-thread load to the turbo ratio
   for three or more active cores, 38 of `MSR_TURBO_RATIO_LIMIT`'s
   `0x2626262626262a2a` against 42 for one or two (#866's dump,
-  https://github.com/ToyOSOrg/ToyOS/pull/866#issuecomment-6119512404). HWP's
-  request (maximum 42), turbo, the power limits and C1E promotion were ruled
-  out. Under `hlt`, `cpu.clock` reads at most 3789 MHz in every osbench group.
-  PR #1066's scout, whose idle CPUs wait in MWAIT 0x31, reads 4189 MHz in
-  13 of 17 groups, `crunch` and `work` among them, and runs `crunch.single`
-  1.10 to 1.11 times faster
-  (`issues/idle-cpus-enter-the-c-states-cst-names.md`). The AMD bench has
-  no such gap: its `cpu.clock` p50 is 4289 MHz under ToyOS and at most 4033
-  under Linux.
+  https://github.com/ToyOSOrg/ToyOS/pull/866#issuecomment-6119512404), the
+  limit bit logged being multi-core turbo. HWP's request (maximum 42),
+  turbo, the power limits and C1E promotion were ruled out. Under `hlt`,
+  `cpu.clock` reads at most 3789 MHz in every osbench group. What deep idle
+  reads is `issues/idle-cpus-enter-the-c-states-cst-names.md`'s. The AMD
+  bench has no such gap: its one-thread `crunch.single` deflate, matmul and
+  sha256 run at 0.98 to 1.02 of Linux's; parse, faster under ToyOS on both
+  benches, is no clock reading.
 
 **Moot.** PCID on the AMD bench: its CPUs read `pcid=0 invpcid=0`, so there
 is nothing to enable.
 
 **Unexplained, and the measurement each needs next.**
 
+- **The T14's effective clock over the `internet_download` row's download
+  windows**: its median is 2.67 GHz under ToyOS against 3.08 under Linux
+  (`wt/toyos-scout-clock` at `fa6a2a829`), and read 2.53 GHz in round 1 of
+  PR #861. The bin of 38 bounds it at 3.8 GHz and does not explain it. Next:
+  the same windows read again once idle CPUs leave `hlt`.
 - **Global-line contention** is bounded at 2 to 3 % of C0 on the T14 and not
   attributed; next, the HITM count attributed to its lines on both benches
   (`issues/per-cpu-scheduler-and-pmm-state-shares-lines-every-cpu-writes.md`).
