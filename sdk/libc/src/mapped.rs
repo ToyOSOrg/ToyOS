@@ -1,8 +1,8 @@
 //! Blocks of [`THRESHOLD`] bytes or more, each a mapping of its own beside
 //! the heap that holds every smaller one: such a block grows by `vm_remap`,
-//! in place or by moving its pages, never by copying them, and its memory
-//! goes back at its free. One source for std's allocator
-//! (`sdk/std/sys/alloc.rs`) and libc's.
+//! in place or by moving its pages, and is copied only when it is aligned past
+//! a page and cannot grow in place; its memory goes back at its free. One
+//! source for std's allocator (`sdk/std/sys/alloc.rs`) and libc's.
 //!
 //! Which a block is follows from its layout alone, which every call about it
 //! carries, so nothing is recorded.
