@@ -19,10 +19,11 @@ permissions:
 jobs:
   # The required check: green when every part of the host checks is. The parts
   # run in parallel (build/ci.rs's `Part`); a part that failed, was cancelled or
-  # never ran reds it.
+  # never ran reds it. `always()`, so a cancelled run reaches this job too: a
+  # required job its condition skipped would read as success.
   host:
     needs: host-part
-    if: ${{ github.event_name != 'pull_request' && !cancelled() }}
+    if: ${{ always() && github.event_name != 'pull_request' }}
     runs-on: ubuntu-24.04
     timeout-minutes: 5
     steps:

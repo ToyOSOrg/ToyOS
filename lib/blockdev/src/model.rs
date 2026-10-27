@@ -405,18 +405,21 @@ mod tests {
     fn a_check_and_its_judges_writes_leave_the_durable_bytes_as_they_were() {
         let dev = Model::new(vec![3; 2 * BLOCK], 512);
         block_on_ready(dev.write(1, &[[9; BLOCK]])).unwrap();
-        let untorn = |dev: &Model| {
-            let mut durable = 0;
+        // Which of the write's sectors each state keeps: every subset once, so
+        // no state inherits a unit the one before it chose.
+        let media = |dev: &Model| {
+            let mut seen = BTreeSet::new();
             dev.check(1 << 10, SEED, |image| {
-                durable += u32::from(image[BLOCK..].iter().all(|&b| b == 3));
+                assert!(seen.insert((0..8).fold(0u8, |k, s| k | u8::from(image[BLOCK + s * 512] == 9) << s)));
                 Ok(())
             })
             .unwrap();
-            durable
+            seen
         };
-        assert_eq!(untorn(&dev), 1, "one state keeps none of the write");
+        let every: BTreeSet<u8> = (0..=255).collect();
+        assert_eq!(media(&dev), every, "each state is its own subset of the write");
         assert!(dev.check(1 << 10, SEED, |image| if image[BLOCK] == 9 { Err("kept".into()) } else { Ok(()) }).is_err());
-        assert_eq!(untorn(&dev), 1, "a refusal left a state behind");
+        assert_eq!(media(&dev), every, "a refusal left a state behind");
         block_on_ready(dev.write(0, &[[5; BLOCK]])).unwrap();
         dev.check(1, SEED, |image| {
             let overlay = Overlay::new(image);

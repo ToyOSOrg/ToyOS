@@ -10,12 +10,11 @@ toyos-abi = { path = "../../sdk/abi" }
 
 [features]
 # The lifecycle's controls, declared for this crate's own tests and never
-# enabled by a kernel build: each reverts one
-# decision to the form this kernel really had, so the host model that refuses
-# it is shown able to red at all. `build/ci.rs`'s `CONTROLS` runs each and
-# demands the named test's own FAILED line; `build/build.rs`'s
-# `every_model_control_is_run` reds on a control declared with no row behind
-# it.
+# enabled by a kernel build: each reverts one decision to the form this kernel
+# really had, so the host model that refuses it is shown able to red at all.
+# `build/ci.rs`'s `CONTROLS` runs each and demands the named test's own FAILED
+# line; `build/build.rs`'s `every_model_control_is_run` reds on a control
+# declared with no row behind it.
 #
 # `teardown::claim_teardown` stops being exclusive: every arrival wins. An exit
 # and a kill then both tear one process down, both retire its threads and both
