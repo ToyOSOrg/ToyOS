@@ -118,7 +118,7 @@ fn encode(table: &Table, generation: u64) -> [u64; WORDS] {
         };
         words[1 + 2 * i] = kind | address << 8;
         // Microseconds, as declared: each fits its half.
-        words[2 + 2 * i] = state.exit_ns / 1000 | (state.residency_ns / 1000) << 32;
+        words[2 + 2 * i] = (state.exit_ns / 1000) | ((state.residency_ns / 1000) << 32);
     }
     words
 }
