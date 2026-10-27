@@ -66,9 +66,19 @@ impl FramebufferDev {
 /// A framebuffer claim, opened. Held whole: closing the claim gives the
 /// framebuffer back, and the mapping goes first.
 pub struct Scanout {
-    pub info: toyos_abi::FramebufferInfo,
-    pub memory: crate::shm::SharedMemory,
+    info: toyos_abi::FramebufferInfo,
+    memory: crate::shm::SharedMemory,
     _claim: FramebufferDev,
+}
+
+impl Scanout {
+    pub fn info(&self) -> &toyos_abi::FramebufferInfo {
+        &self.info
+    }
+
+    pub fn memory(&self) -> &crate::shm::SharedMemory {
+        &self.memory
+    }
 }
 
 impl AsHandle for FramebufferDev {

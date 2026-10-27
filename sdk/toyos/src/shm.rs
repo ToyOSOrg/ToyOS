@@ -16,13 +16,9 @@
 //! They are reached through [`Bytes`], or by `unsafe` code over
 //! [`SharedMemory::as_ptr`] keeping the same rule.
 //!
-//! **A handle is judged by the kernel's answer before it is mapped**, since
-//! mapping one that names no region ends this process. [`SharedMemory::lent`]
-//! takes a peer's region only where [`fstat`](syscall::fstat) says it is
-//! memory the kernel allocated, of exactly the length the protocol says, and
-//! not a device's registers; [`SharedMemory::adopt`] takes a region the kernel
-//! handed this process only where it is a writable region at least as long as
-//! the view asked for.
+//! A handle is judged by the kernel's answer before it is mapped
+//! ([`SharedMemory::lent`], [`SharedMemory::adopt`]), since mapping one that
+//! names no region ends this process.
 //!
 //! **A region nobody can write is an [`Immutable`]**, taken only once the
 //! kernel answers it is one: every mapping of it is read-only, so a plain
@@ -44,8 +40,9 @@ pub struct SharedMemory {
     mapped: usize,
 }
 
-// SAFETY: the mapping is this process's whichever thread holds it, and every
-// access to its bytes is through `Bytes`, which races nothing.
+// SAFETY: the mapping is this process's whichever thread holds it, and its
+// bytes are reached only through `Bytes`, whose copies are opaque accesses
+// that form no data race in Rust's model, whoever else writes the bytes.
 unsafe impl Send for SharedMemory {}
 // SAFETY: as for `Send`.
 unsafe impl Sync for SharedMemory {}
@@ -152,9 +149,10 @@ impl AsHandle for SharedMemory {
 /// mapped.
 ///
 /// Each read and write is one copy the compiler sees only as an access to the
-/// range (`crate::arch::copy`), so it is never split, repeated or assumed to
-/// hold still: a writer meanwhile changes only which bytes arrive. A reader
-/// acts on its own copy and never reads the same bytes twice to check them.
+/// range (`crate::arch::copy`), so it is never repeated or assumed to hold
+/// still. It is no snapshot: a writer meanwhile changes which bytes arrive. A
+/// reader acts on its own copy and never reads the same bytes twice to check
+/// them.
 #[derive(Clone, Copy)]
 pub struct Bytes<'a> {
     ptr: *mut u8,
@@ -162,16 +160,17 @@ pub struct Bytes<'a> {
     _mapping: PhantomData<&'a SharedMemory>,
 }
 
-// SAFETY: a range of a mapping the process holds, reached only by copies that
-// race nothing.
+// SAFETY: a range of a mapping the process holds, reached only by opaque
+// copies that form no data race in Rust's model.
 unsafe impl Send for Bytes<'_> {}
 // SAFETY: as for `Send`.
 unsafe impl Sync for Bytes<'_> {}
 
 impl<'a> Bytes<'a> {
     /// # Safety
-    /// `ptr` names `len` bytes of a live mapping for `'a`, which this process
-    /// reaches only through `Bytes`, atomics or volatile accesses meanwhile.
+    /// `ptr` names `len` bytes that stay mapped for all of `'a`, which this
+    /// process reaches only through `Bytes`, atomics or volatile accesses
+    /// meanwhile.
     pub unsafe fn from_raw(ptr: *mut u8, len: usize) -> Self {
         Self { ptr, len, _mapping: PhantomData }
     }
@@ -212,13 +211,8 @@ impl<'a> Bytes<'a> {
 
     /// Write zeroes over the whole range.
     pub fn zero(self) {
-        const ZEROES: [u8; 256] = [0; 256];
-        let mut at = 0;
-        while at < self.len {
-            let n = ZEROES.len().min(self.len - at);
-            self.write(at, &ZEROES[..n]);
-            at += n;
-        }
+        // SAFETY: the whole range, which is mapped for `'a`.
+        unsafe { crate::arch::zero(self.ptr, self.len) }
     }
 
     pub fn to_vec(self) -> Vec<u8> {
@@ -445,7 +439,7 @@ mod tests {
 
     #[test]
     fn a_zeroed_range_is_zero_and_nothing_beside_it() {
-        for len in [0, 1, 255, 256, 257, 1000] {
+        for len in [0, 1, 15, 16, 17, 31, 32, 33, 255, 256, 257, 1000] {
             let mut region = vec![0xEEu8; len + 2];
             over(&mut region).sub(1, len).zero();
             assert_eq!(region[0], 0xEE);

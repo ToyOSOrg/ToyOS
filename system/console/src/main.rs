@@ -173,9 +173,9 @@ fn main() {
         return;
     };
     let scanout = fb_dev.open().expect("console: the framebuffer claim's description and scanout");
-    let info = &scanout.info;
+    let info = scanout.info();
     let screen = Screen::new(
-        scanout.memory.as_ptr(),
+        scanout.memory().as_ptr(),
         info.width as usize,
         info.height as usize,
         info.stride as usize,

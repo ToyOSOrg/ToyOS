@@ -19,14 +19,17 @@ the region's only writer.
 The compositor's side is sound: it reads a client's buffer only by copies
 (`Framebuffer::blit_shared`, `toyos::shm::Bytes`).
 
-The drivers that hand a received frame on as a slice (`system/netstack/src/i219.rs`,
-`virtio_net.rs`, `system/vdagent/src/channel.rs`) rest on the same kind of
-promise: the device's descriptor says it has finished with the buffer, which
-is the device's protocol and not a type.
+The same constructors are unsound over private memory too.
+`system/compositor/src/render.rs`'s `BackBuffer` draws through a
+`Framebuffer` over its own `Vec`'s pointer while `BackBuffer::region` lends
+`&self.pixels` of the same bytes. The compositor forbids `unsafe`, so the
+constructors cannot simply become `unsafe` fns: what it needs is a surface
+that owns or borrows the memory it draws into.
 
 Owner: `sdk/window`.
 
-**Exit**: `Framebuffer::new` and `Screen::new` are `unsafe` with their
-preconditions stated, or take the mapping they draw into; and a client's
-buffer has one writable mapping, the client's, so drawing into it with plain
-accesses is sound, or the client draws into memory of its own and copies.
+**Exit**: no safe `Framebuffer` or `Screen` constructor takes a raw pointer:
+one owns or borrows the memory it draws into, and a raw one is `unsafe` with
+its preconditions stated; and a client's buffer has one writable mapping, the
+client's, so drawing into it with plain accesses is sound, or the client draws
+into memory of its own and copies.

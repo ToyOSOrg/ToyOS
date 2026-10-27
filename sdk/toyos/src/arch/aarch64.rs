@@ -47,3 +47,31 @@ pub(crate) unsafe fn copy(dst: *mut u8, src: *const u8, len: usize) {
         );
     }
 }
+
+/// [`crate::shm::Bytes::zero`]'s fill: 16 bytes a step from the zero
+/// register, then 1, as opaque as [`copy`].
+///
+/// # Safety
+/// `dst` is writable for `len` bytes.
+pub(crate) unsafe fn zero(dst: *mut u8, len: usize) {
+    // SAFETY: the caller's; every store is within `len` bytes of `dst`.
+    unsafe {
+        core::arch::asm!(
+            "2:",
+            "cmp {len}, #16",
+            "b.lo 3f",
+            "stp xzr, xzr, [{dst}], #16",
+            "sub {len}, {len}, #16",
+            "b 2b",
+            "3:",
+            "cbz {len}, 4f",
+            "strb wzr, [{dst}], #1",
+            "sub {len}, {len}, #1",
+            "b 3b",
+            "4:",
+            len = inout(reg) len => _,
+            dst = inout(reg) dst => _,
+            options(nostack),
+        );
+    }
+}

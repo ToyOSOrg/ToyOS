@@ -22,9 +22,10 @@ the handles a frame moved into this process as `RawHandle`s
 in an `unsafe` block of its own.
 
 The same gap is why no SDK type can prove a region exclusive: a safe `dup` of
-`as_handle()` and a safe send of the copy give a peer a writable mapping. Only
-`toyos::process::Image` forms a slice over a writable region, under its own
-encapsulation.
+`as_handle()` and a safe send of the copy give a peer a writable mapping.
+`toyos::process::Image` forms slices over its own region under its
+encapsulation, and `Image::spawn_words` hands out the raw number that gap
+reaches.
 
 Owner: `toyos-abi` and `toyos::ipc`.
 

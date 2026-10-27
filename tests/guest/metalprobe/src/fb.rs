@@ -55,7 +55,7 @@ impl Scanout {
         let dev: FramebufferDev =
             cap.claim(DeviceType::Framebuffer).map_err(|_| Refusal::NoDevice)?;
         let opened = dev.open().map_err(|_| Refusal::NoScanout)?;
-        let info = &opened.info;
+        let info = opened.info();
         if info.width == 0 || info.height == 0 || info.stride < info.width {
             return Err(Refusal::NoScanout);
         }
@@ -71,7 +71,7 @@ impl Scanout {
     /// Copy `row` into row `y` of the scanout. A blit, not a word loop: what is
     /// measured has to be the path a compositor takes.
     fn put(&self, y: u32, row: &[u32]) {
-        let at = self.opened.memory.as_ptr() as *mut u32;
+        let at = self.opened.memory().as_ptr() as *mut u32;
         // SAFETY: `at` is the mapping the claim handed over, `stride * height * 4`
         // bytes, so the row at `y * stride` for `width` words is inside it for
         // every `y < height` and `width <= stride`.
@@ -83,7 +83,7 @@ impl Scanout {
 
     /// Row `y` of the scanout, copied out into ordinary memory.
     fn get(&self, y: u32, into: &mut [u32]) {
-        let at = self.opened.memory.as_ptr() as *const u32;
+        let at = self.opened.memory().as_ptr() as *const u32;
         // SAFETY: as `put`, and `into` is this frame's own storage of exactly
         // `width` words.
         unsafe {

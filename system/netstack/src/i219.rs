@@ -19,7 +19,7 @@ use std::cell::{Cell, RefCell};
 use std::rc::Rc;
 
 use toyos::poller::{Poller, READABLE};
-use toyos::shm::SharedMemory;
+use toyos::shm::{Bytes, SharedMemory};
 use toyos::volatile::Window;
 use toyos::{DmaRegion, PciDev};
 use toyos_abi::syscall::{RegWidth, SyscallError};
@@ -261,14 +261,11 @@ impl Nic {
         self.driver.borrow_mut().poll_rx()
     }
 
-    /// The bytes of a received frame.
-    pub fn rx_frame(&self, frame: &toyos_i219::Frame) -> &[u8] {
-        let window = self.frames.sub(frame.at, frame.len);
-        // SAFETY: the window is inside the grant, which lives as long as
-        // `self`; the device has finished with this buffer — the `DD` its
-        // descriptor carries is what said so — and it is not published again
-        // until `rx_done`, which the caller makes after this borrow ends.
-        unsafe { std::slice::from_raw_parts(window.as_ptr() as *const u8, frame.len) }
+    /// A received frame, copied into the start of `out`.
+    pub fn rx_frame<'o>(&self, frame: &toyos_i219::Frame, out: &'o mut [u8]) -> &'o [u8] {
+        let out = &mut out[..frame.len];
+        dma(self, self.frames.sub(frame.at, frame.len)).read(0, out);
+        out
     }
 
     /// Give the buffer back once its frame has been read.
@@ -302,12 +299,9 @@ impl Nic {
         let slot = self.driver.borrow_mut().tx_reserve(len).unwrap_or_else(|| {
             panic!("netstack: a {len}-byte frame was offered to a transmit ring that refuses it")
         });
-        let window = self.frames.sub(slot.at, len);
-        // SAFETY: the window is inside the grant, which lives as long as
-        // `self`; the device is not reading it, because this descriptor is out
-        // of the ring and is published only by `tx_commit` below, after `fill`
-        // has returned.
-        let result = fill(unsafe { std::slice::from_raw_parts_mut(window.as_ptr(), len) });
+        let mut frame = [0u8; toyos_i219::TX_BUF_BYTES];
+        let result = fill(&mut frame[..len]);
+        dma(self, self.frames.sub(slot.at, len)).write(0, &frame[..len]);
         self.driver.borrow_mut().tx_commit(slot);
         result
     }
@@ -379,4 +373,13 @@ impl<T: Copy + PartialEq> Latch<T> {
         let was = self.0.replace(now);
         (was != now).then_some(was)
     }
+}
+
+/// `window`, of the grant, as bytes the device may write: a frame is copied out
+/// of it and into it whole, for as long as `_held`, part of the driver that
+/// holds the grant's region, is borrowed.
+fn dma<T>(_held: &T, window: Window) -> Bytes<'_> {
+    // SAFETY: `window` is inside the grant, whose region the driver holds for
+    // longer than `held` is borrowed, and nothing reaches it as a reference.
+    unsafe { Bytes::from_raw(window.as_ptr(), window.bytes()) }
 }

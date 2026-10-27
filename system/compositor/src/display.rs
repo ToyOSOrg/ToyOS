@@ -250,9 +250,9 @@ impl Gop {
         // A handle the claim's own read installed, so a refusal is the kernel
         // contradicting itself and not a client doing anything.
         let scanout = claim.open().expect("compositor: the framebuffer claim's description and scanout");
-        let info = &scanout.info;
+        let info = scanout.info();
         let screen = Screen::new(
-            scanout.memory.as_ptr(),
+            scanout.memory().as_ptr(),
             info.width as usize,
             info.height as usize,
             info.stride as usize,
@@ -263,7 +263,7 @@ impl Gop {
     }
 
     fn edid(&self) -> &[u8] {
-        let info = &self.scanout.info;
+        let info = self.scanout.info();
         info.edid.get(..info.edid_len as usize).expect("the kernel hands over an EDID length of 0 or one block")
     }
 }

@@ -13,6 +13,9 @@ pub enum Card {
     Intel(i219::Nic),
 }
 
+// The copy a received frame is taken from holds either card's.
+const _: () = assert!(toyos_i219::RX_BUF_BYTES <= crate::virtio_net::RX_BUF_SIZE);
+
 impl Card {
     /// A device this driver cannot bring up is not a machine without a NIC: the
     /// claim was minted, so something the device said is not what this driver
@@ -148,16 +151,18 @@ impl Card {
     /// Hands the next received frame to `take` and gives its buffer back to
     /// the card once `take` returns; `false` when none waits.
     fn rx(&self, take: &mut dyn FnMut(&[u8])) -> bool {
+        // Either card's largest receive buffer: a frame is taken from a copy.
+        let mut frame = [0u8; crate::virtio_net::RX_BUF_SIZE];
         match self {
             Self::Virtio(nic) => {
                 let Some((index, len)) = nic.poll_rx() else { return false };
-                take(nic.rx_frame(index, len));
+                take(nic.rx_frame(index, len, &mut frame));
                 nic.rx_done(index);
             }
             Self::Intel(nic) => {
-                let Some(frame) = nic.poll_rx() else { return false };
-                take(nic.rx_frame(&frame));
-                nic.rx_done(frame);
+                let Some(frame_at) = nic.poll_rx() else { return false };
+                take(nic.rx_frame(&frame_at, &mut frame));
+                nic.rx_done(frame_at);
             }
         }
         true

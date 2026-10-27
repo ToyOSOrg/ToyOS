@@ -408,20 +408,17 @@ fn stat_reply(meta: Meta, identity: u64, volume: u64) -> Reply {
     Reply::stat(&stat)
 }
 
-/// A client's window, unborrowed so a request can reach the volume while it
-/// holds it.
-fn window_of(w: &SharedMemory) -> Bytes<'static> {
-    // SAFETY: the region is `WINDOW_BYTES` long (it came through `lent` at that
-    // size) and lives as long as its client, which outlives every request
-    // that takes its window.
-    unsafe { Bytes::from_raw(w.as_ptr(), WINDOW_BYTES) }
+/// Client `id`'s window, borrowed from the clients alone so a request can
+/// reach the volume while it holds it.
+fn window_of(clients: &BTreeMap<u64, Client>, id: u64) -> Bytes<'_> {
+    clients[&id].window.as_ref().expect("a request comes after the window").bytes()
 }
 
 /// A read's destination: the first bytes of a client's window, which the
 /// volume copies its cache's blocks into once and never holds a reference to.
-struct WindowOut(Bytes<'static>);
+struct WindowOut<'a>(Bytes<'a>);
 
-impl Out for WindowOut {
+impl Out for WindowOut<'_> {
     fn len(&self) -> usize {
         self.0.len()
     }
@@ -603,8 +600,8 @@ impl Server {
     }
 
     /// The client's window.
-    fn window(&self, id: u64) -> Bytes<'static> {
-        window_of(self.clients[&id].window.as_ref().expect("a request comes after the window"))
+    fn window(&self, id: u64) -> Bytes<'_> {
+        window_of(&self.clients, id)
     }
 
     /// The request's span: where it starts in the window and how long it is.
@@ -776,13 +773,12 @@ impl Server {
         Ok(Answer::Reply(stat_reply(meta, identity, self.volume_id)))
     }
 
-    /// The open file `fid` names, a directory refused `IsADirectory`, and the
-    /// span its data travels in.
-    fn file_and_span(&mut self, id: u64, r: &Request) -> Result<(Shared, Node, Bytes<'static>), Error> {
+    /// The open file `fid` names, a directory refused `IsADirectory`, and
+    /// where in the window its data travels and how much.
+    fn file_and_span(&mut self, id: u64, r: &Request) -> Result<(Shared, Node, (usize, usize)), Error> {
         let file = self.settled(id, r.fid)?;
         let node = file.borrow().node()?;
-        let (at, len) = Self::span(r)?;
-        Ok((file, node, self.window(id).sub(at, len)))
+        Ok((file, node, Self::span(r)?))
     }
 
     fn serve_one(&mut self, id: u64, op: u32, r: Request) -> Result<Answer, Error> {
@@ -810,8 +806,9 @@ impl Server {
                 Ok(Answer::Reply(Reply { value: fid, ..Reply::ok() }))
             }
             READ | PREAD => {
-                let (file, node, window) = self.file_and_span(id, &r)?;
+                let (file, node, (span_at, span)) = self.file_and_span(id, &r)?;
                 let at = if op == READ { file.borrow().offset } else { r.offset };
+                let window = window_of(&self.clients, id).sub(span_at, span);
                 let n = self.volume.read(node, at, &mut WindowOut(window))?;
                 if op == READ {
                     file.borrow_mut().offset = at + n as u64;
@@ -819,7 +816,8 @@ impl Server {
                 Ok(Answer::Reply(Reply { value: n as u64, ..Reply::ok() }))
             }
             WRITE | PWRITE => {
-                let (file, _, window) = self.file_and_span(id, &r)?;
+                let (file, _, (span_at, span)) = self.file_and_span(id, &r)?;
+                let window = window_of(&self.clients, id).sub(span_at, span);
                 if !file.borrow().write {
                     return Err(Error::NotOpenForWriting);
                 }
