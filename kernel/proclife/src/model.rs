@@ -13,11 +13,11 @@ use alloc::collections::{BTreeMap, BTreeSet};
 use alloc::string::String;
 use alloc::vec::Vec;
 
-use crate::proclife::quit::{self, Notice, Owed, Reason};
-use crate::proclife::table::{Lifecycle, Processes};
-use crate::proclife::teardown::{self, Leave};
-use crate::proclife::tree::{self, Admit, Publish};
-use crate::proclife::{End, Node, Pid, Pids, ThreadLocation, Tid, Watch};
+use crate::quit::{self, Notice, Owed, Reason};
+use crate::table::{Lifecycle, Processes};
+use crate::teardown::{self, Leave};
+use crate::tree::{self, Admit, Publish};
+use crate::{End, Node, Pid, Pids, ThreadLocation, Tid, Watch};
 
 /// One process, as its lifecycle sees it.
 #[derive(Clone, PartialEq, Eq, Hash)]

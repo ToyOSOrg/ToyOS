@@ -298,7 +298,7 @@ pub fn read_watch(object: &KObjectRef) -> Option<WatchRef> {
 }
 
 /// A readable poll is registered on this object: its process listens to a
-/// notice from now on (`kernel::proclife::quit`).
+/// notice from now on (`toyos_proclife::quit`).
 pub fn watched_readable(object: &KObjectRef) {
     match object {
         KObjectRef::Notice(n) => n.listen(),

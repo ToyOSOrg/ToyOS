@@ -14,7 +14,7 @@ use crate::process::{
 };
 use crate::scheduler::{self, TaskId};
 use crate::sync::Lock;
-use kernel::proclife::Processes;
+use toyos_proclife::Processes;
 
 use super::payload::ThreadSched;
 
@@ -97,7 +97,7 @@ pub fn spawn(name: &str, body: extern "C" fn(u64) -> !, arg: u64) -> ThreadSched
         // No user image: its frames resolve through `symbols::resolve_kernel`.
         None,
         ThreadEntry::new(Arc::new(Lock::new(kernel_thread_data()))),
-        kernel::proclife::Node::root(),
+        toyos_proclife::Node::root(),
         crate::object::notice::NoticeObject::new().expect("kthread: no heap for its notice"),
     ));
     let tid = table.get(pid).expect("kthread: the entry just inserted is gone").main_tid();

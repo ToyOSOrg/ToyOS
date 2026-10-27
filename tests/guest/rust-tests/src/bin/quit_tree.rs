@@ -2,7 +2,7 @@
 //! to its notice reads the reason and ends as it chooses, and one that never
 //! listened is killed with everything below it, listening or not.
 //!
-//! The decisions are `kernel::proclife::quit`'s and its interleavings are host
+//! The decisions are `toyos_proclife::quit`'s and its interleavings are host
 //! tests; what only a guest shows is the walk over real processes, the notice
 //! each is started holding, the read that blocks until a quit fills it and the
 //! watch that fires, and the kill a second quit makes of a reason left unread.

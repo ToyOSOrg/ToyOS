@@ -67,7 +67,7 @@ const KILLED: End = End::Killed;
 /// How a write to address 0 ends a process.
 const CPU_FAULT: End = End::Fault(Fault::Memory);
 
-/// `kernel::proclife::MAX_DEPTH`, which the kernel refuses a process past.
+/// `toyos_proclife::MAX_DEPTH`, which the kernel refuses a process past.
 const MAX_DEPTH: u32 = 64;
 
 /// The links a chain may grow before a refusal must have stopped it: each

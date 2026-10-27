@@ -10,7 +10,7 @@
 //! - **May a child be placed here?** [`admit_child`] at the top of a spawn,
 //!   before anything is built: a place being torn down takes nothing more,
 //!   and a child deeper than [`MAX_DEPTH`] below the supervisor is refused. It takes
-//!   the child's pid ([`crate::proclife::pids`]).
+//!   the child's pid ([`crate::pids`]).
 //! - **Who does an end take?** [`claim`] one process at a time: its claim is
 //!   what closes admission under it, and the same hold reads its children.
 //!   A child admitted before the claim and landed after it is claimed in the
@@ -24,8 +24,8 @@
 
 use alloc::vec::Vec;
 
-use crate::proclife::table::{Lifecycle, Processes};
-use crate::proclife::{teardown, End, Pid, Tid};
+use crate::table::{Lifecycle, Processes};
+use crate::{teardown, End, Pid, Tid};
 
 /// How far below the supervisor a process may be. Bounds the climb one teardown can
 /// owe.
@@ -231,8 +231,8 @@ fn lower<T: Processes>(table: &mut T, pid: Pid) -> Option<Publish> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::proclife::model::World;
-    use crate::proclife::Pids;
+    use crate::model::World;
+    use crate::Pids;
 
     /// A chain from the supervisor down to `MAX_DEPTH`: the last is admitted, and one
     /// more below it is refused naming the depth it would have had.

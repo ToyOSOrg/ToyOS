@@ -450,6 +450,7 @@ pub(crate) const SDK_DIR: &str = "sdk/toyos";
 const KERNEL_LOOM: &str = "kernel-loom";
 const KERNEL_SIM: &str = "kernel-sim";
 const BLOCKRING: &str = "toyos-blockring";
+const PROCLIFE: &str = "toyos-proclife";
 /// The SDK package, whose `transport` module carries its own controls.
 const SDK: &str = "toyos";
 
@@ -640,69 +641,69 @@ pub(crate) const CONTROLS: &[Control] = &[
         Fails("iova::tests::every_grant_is_the_lowest_allowed_run_below_its_limit"),
         Fails("iova::tests::the_amd_benchs_layout"),
     ]),
-    red(KERNEL, "mutate-spawn-skips-the-insert-recheck", None, &[
-        Fails("proclife::interleave::tests::a_published_exit_leaves_no_unretired_thread"),
-        Fails("proclife::interleave::tests::a_kill_racing_a_spawn_leaves_no_unretired_thread"),
+    red(PROCLIFE, "mutate-spawn-skips-the-insert-recheck", None, &[
+        Fails("interleave::tests::a_published_exit_leaves_no_unretired_thread"),
+        Fails("interleave::tests::a_kill_racing_a_spawn_leaves_no_unretired_thread"),
     ]),
-    red(KERNEL, "mutate-claim-teardown-always-wins", None, &[
-        Fails("proclife::interleave::tests::an_exit_and_a_kill_never_both_tear_a_process_down"),
+    red(PROCLIFE, "mutate-claim-teardown-always-wins", None, &[
+        Fails("interleave::tests::an_exit_and_a_kill_never_both_tear_a_process_down"),
     ]),
-    red(KERNEL, "mutate-kill-waits-for-its-victims", None, &[
-        Fails("proclife::interleave::tests::two_processes_killing_each_other_both_end"),
-        Fails("proclife::interleave::tests::a_kill_chain_of_three_ends"),
+    red(PROCLIFE, "mutate-kill-waits-for-its-victims", None, &[
+        Fails("interleave::tests::two_processes_killing_each_other_both_end"),
+        Fails("interleave::tests::a_kill_chain_of_three_ends"),
     ]),
-    red(KERNEL, "mutate-first-out-tears-down", None, &[
-        Fails("proclife::interleave::tests::an_exit_and_a_kill_never_both_tear_a_process_down"),
+    red(PROCLIFE, "mutate-first-out-tears-down", None, &[
+        Fails("interleave::tests::an_exit_and_a_kill_never_both_tear_a_process_down"),
     ]),
-    red(KERNEL, "mutate-join-collects-in-a-teardown", None, &[
-        Fails("proclife::interleave::tests::a_join_racing_the_kill_that_takes_its_target"),
+    red(PROCLIFE, "mutate-join-collects-in-a-teardown", None, &[
+        Fails("interleave::tests::a_join_racing_the_kill_that_takes_its_target"),
     ]),
-    red(KERNEL, "mutate-last-out-leaves-before-its-teardown", None, &[
-        Fails("proclife::interleave::tests::the_last_one_out_is_in_its_process_until_its_teardown_is_done"),
-        Fails("proclife::teardown::tests::only_the_thread_that_empties_a_claimed_process_tears_it_down"),
+    red(PROCLIFE, "mutate-last-out-leaves-before-its-teardown", None, &[
+        Fails("interleave::tests::the_last_one_out_is_in_its_process_until_its_teardown_is_done"),
+        Fails("teardown::tests::only_the_thread_that_empties_a_claimed_process_tears_it_down"),
     ]),
-    red(KERNEL, "mutate-place-skips-the-insert-recheck", None, &[
-        Fails("proclife::interleave::tests::a_spawn_racing_its_places_kill_leaves_nothing_under_it_and_publishes_it"),
+    red(PROCLIFE, "mutate-place-skips-the-insert-recheck", None, &[
+        Fails("interleave::tests::a_spawn_racing_its_places_kill_leaves_nothing_under_it_and_publishes_it"),
     ]),
-    red(KERNEL, "mutate-refused-spawn-keeps-the-count", None, &[
-        Fails("proclife::interleave::tests::a_spawn_racing_its_places_kill_leaves_nothing_under_it_and_publishes_it"),
+    red(PROCLIFE, "mutate-refused-spawn-keeps-the-count", None, &[
+        Fails("interleave::tests::a_spawn_racing_its_places_kill_leaves_nothing_under_it_and_publishes_it"),
     ]),
-    red(KERNEL, "mutate-landed-child-retires-nothing", None, &[
-        Fails("proclife::interleave::tests::a_spawn_racing_its_places_kill_leaves_nothing_under_it_and_publishes_it"),
-        Fails("proclife::tree::tests::a_child_landed_under_a_place_claimed_since_its_admission_is_claimed_with_it"),
+    red(PROCLIFE, "mutate-landed-child-retires-nothing", None, &[
+        Fails("interleave::tests::a_spawn_racing_its_places_kill_leaves_nothing_under_it_and_publishes_it"),
+        Fails("tree::tests::a_child_landed_under_a_place_claimed_since_its_admission_is_claimed_with_it"),
     ]),
-    red(KERNEL, "mutate-publish-before-the-children", None, &[
-        Fails("proclife::interleave::tests::an_exit_publishes_after_every_end_below_it"),
+    red(PROCLIFE, "mutate-publish-before-the-children", None, &[
+        Fails("interleave::tests::an_exit_publishes_after_every_end_below_it"),
     ]),
-    red(KERNEL, "mutate-walk-in-one-hold", None, &[
-        Fails("proclife::interleave::tests::a_spawn_under_an_unrelated_process_lands_between_two_claims_of_one_walk"),
+    red(PROCLIFE, "mutate-walk-in-one-hold", None, &[
+        Fails("interleave::tests::a_spawn_under_an_unrelated_process_lands_between_two_claims_of_one_walk"),
     ]),
-    red(KERNEL, "mutate-spawner-handle-after-the-landing", None, &[
-        Fails("proclife::interleave::tests::a_spawn_racing_its_places_kill_leaves_nothing_under_it_and_publishes_it"),
-        Fails("proclife::interleave::tests::a_spawn_racing_the_kill_of_its_own_spawner"),
+    red(PROCLIFE, "mutate-spawner-handle-after-the-landing", None, &[
+        Fails("interleave::tests::a_spawn_racing_its_places_kill_leaves_nothing_under_it_and_publishes_it"),
+        Fails("interleave::tests::a_spawn_racing_the_kill_of_its_own_spawner"),
     ]),
-    red(KERNEL, "mutate-spawner-handle-before-the-childs-own", None, &[
-        Fails("proclife::interleave::tests::a_sibling_closing_a_spawns_handle_before_the_spawn_returns"),
+    red(PROCLIFE, "mutate-spawner-handle-before-the-childs-own", None, &[
+        Fails("interleave::tests::a_sibling_closing_a_spawns_handle_before_the_spawn_returns"),
     ]),
-    red(KERNEL, "mutate-quit-checks-and-kills-in-two-acts", None, &[
-        Fails("proclife::interleave::tests::a_notices_read_racing_a_second_quit_kills_only_where_the_read_comes_second"),
+    red(PROCLIFE, "mutate-quit-checks-and-kills-in-two-acts", None, &[
+        Fails("interleave::tests::a_notices_read_racing_a_second_quit_kills_only_where_the_read_comes_second"),
     ]),
-    red(KERNEL, "mutate-quit-spawn-starts-unasked", None, &[
-        Fails("proclife::interleave::tests::a_spawn_racing_a_quit_on_its_place_asks_each_child_once"),
-        Fails("proclife::quit::tests::a_child_starts_holding_its_parents_unread_reason_and_never_listened"),
+    red(PROCLIFE, "mutate-quit-spawn-starts-unasked", None, &[
+        Fails("interleave::tests::a_spawn_racing_a_quit_on_its_place_asks_each_child_once"),
+        Fails("quit::tests::a_child_starts_holding_its_parents_unread_reason_and_never_listened"),
     ]),
-    red(KERNEL, "mutate-quit-reads-children-late", None, &[
-        Fails("proclife::interleave::tests::a_spawn_racing_a_quit_on_its_place_asks_each_child_once"),
+    red(PROCLIFE, "mutate-quit-reads-children-late", None, &[
+        Fails("interleave::tests::a_spawn_racing_a_quit_on_its_place_asks_each_child_once"),
     ]),
-    red(KERNEL, "mutate-quit-asks-below-a-kill", None, &[
-        Fails("proclife::interleave::tests::a_quit_of_a_process_that_never_listened_asks_nothing_below_it"),
+    red(PROCLIFE, "mutate-quit-asks-below-a-kill", None, &[
+        Fails("interleave::tests::a_quit_of_a_process_that_never_listened_asks_nothing_below_it"),
     ]),
-    red(KERNEL, "mutate-quit-notifies-a-deaf-process", None, &[
-        Fails("proclife::interleave::tests::a_quit_of_a_process_that_never_listened_asks_nothing_below_it"),
-        Fails("proclife::quit::tests::a_listener_is_asked_and_one_that_never_listened_is_killed"),
+    red(PROCLIFE, "mutate-quit-notifies-a-deaf-process", None, &[
+        Fails("interleave::tests::a_quit_of_a_process_that_never_listened_asks_nothing_below_it"),
+        Fails("quit::tests::a_listener_is_asked_and_one_that_never_listened_is_killed"),
     ]),
-    red(KERNEL, "mutate-quit-reaches-the-named-process-alone", None, &[
-        Fails("proclife::interleave::tests::a_quit_reaches_every_process_below_its_target"),
+    red(PROCLIFE, "mutate-quit-reaches-the-named-process-alone", None, &[
+        Fails("interleave::tests::a_quit_reaches_every_process_below_its_target"),
     ]),
     red(KERNEL_SIM, "placement-ignores-staleness", Some("policy"), &[
         Fails("a_stopped_cpu_stops_taking_work"),

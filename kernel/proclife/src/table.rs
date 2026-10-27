@@ -8,9 +8,9 @@
 //! not a simulated kernel.
 //!
 //! A caller that needs an order sorts what it collected, and the two that do
-//! ([`crate::proclife::teardown::retire_set`] and [`crate::proclife::reap::finished_pids`]) say so.
+//! ([`crate::teardown::retire_set`] and [`crate::reap::finished_pids`]) say so.
 
-use crate::proclife::{End, Node, Pid, Pids, ThreadLocation, Tid};
+use crate::{End, Node, Pid, Pids, ThreadLocation, Tid};
 
 /// One process's lifecycle state: the whole of what a spawn, an exit, a kill, a
 /// join or a reap reads or writes about it.
@@ -27,7 +27,7 @@ pub trait Lifecycle {
         self.teardown_end().is_some()
     }
 
-    /// Raise the teardown claim, with the end it publishes. [`crate::proclife::teardown::claim_teardown`] is the one
+    /// Raise the teardown claim, with the end it publishes. [`crate::teardown::claim_teardown`] is the one
     /// caller — the flag exists to be claimed exactly once, so raising it
     /// anywhere else is what that function is written to prevent.
     fn begin_teardown(&mut self, end: End);
@@ -52,7 +52,7 @@ pub trait Lifecycle {
     fn thread_count(&self) -> usize;
 
     /// Where this process stands in the tree. Read and written by
-    /// [`crate::proclife::tree`] alone.
+    /// [`crate::tree`] alone.
     fn node(&self) -> &Node;
     fn node_mut(&mut self) -> &mut Node;
 }
