@@ -57,9 +57,10 @@ is nothing to enable.
   `MSR_TURBO_RATIO_LIMIT` reads `0x2626262626262a2a`: ratio 42 with one or
   two active cores, 38 with three or more (#866's Ubuntu turbostat dump,
   https://github.com/ToyOSOrg/ToyOS/pull/866#issuecomment-6119512404).
-  `cpu.clock` peaks at 3786 to 3789 MHz under ToyOS in every osbench group
-  and 4176 to 4192 MHz under Linux, 1.105 apart as 42 and 38 are, and the
-  one-thread `crunch` rows run 1.09 to 1.10 times slower (PR #1067's
+  `cpu.clock`'s maximum is 3789 MHz under ToyOS in every osbench group and
+  4190 MHz under Linux in every group whose probes leave its idle clock,
+  1.106 apart where 42 and 38 are 1.105, and the
+  one-thread `crunch` rows run 1.09 to 1.10 times slower (PR #1066's
   evidence). Ruled out: the HWP request (maximum 42 under both systems),
   turbo (engaged, `IA32_MISC_ENABLE[38]` clear), the power limits (no power,
   thermal or current limit bit logged) and C1E promotion (the same under
@@ -67,10 +68,10 @@ is nothing to enable.
   ToyOS's idle cores wait in `hlt`, C1/C1E, and Linux's in C7. Intel's
   datasheet counts the cores "operating in the C0 state" (631121-012
   §2.4.6.3), so that a core in C1 counts as active is inference until a
-  Linux run limited to C1 and PR #1067's deep-idle scout read it. The fix
+  Linux run limited to C1 and PR #1066's deep-idle scout read it. The fix
   is `issues/idle-cpus-enter-the-c-states-cst-names.md`'s: no register ToyOS
-  declares holds the clock. The AMD bench shows no gap (`cpu.clock` 4289
-  MHz under ToyOS against 4033 under Linux).
+  declares holds the clock. The AMD bench shows no such gap: its
+  `cpu.clock` p50 is 4289 MHz under ToyOS and at most 4033 under Linux.
 - **Global-line contention** is bounded at 2 to 3 % of C0 on the T14 and not
   attributed; next, the HITM count attributed to its lines on both benches
   (`issues/per-cpu-scheduler-and-pmm-state-shares-lines-every-cpu-writes.md`).
