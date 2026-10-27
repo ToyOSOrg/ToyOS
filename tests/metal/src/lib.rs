@@ -103,9 +103,8 @@ const TRUE: &str = "/usr/bin/true";
 const UDEVADM: &str = "/usr/bin/udevadm";
 const WIPEFS: &str = "/usr/sbin/wipefs";
 
-/// How long udev's queue gets to drain: udevd's own bound on one event
-/// (systemd-udevd(8), `--event-timeout`), past which the queue holds an event
-/// udevd is killing.
+/// How long udev's queue gets to drain, a failure bound: udevd kills a stuck
+/// event at 180 s (systemd-udevd(8), `--event-timeout`).
 const SETTLE_SECS: u64 = 180;
 
 /// What the firmware loads off the stick's ESP, and off the internal one.
@@ -455,16 +454,18 @@ impl Identity {
     }
 }
 
-/// Every block device with its partitions' numbers, types and GUIDs, as udev
-/// records them, for [`located`].
-const DISKS: &str = "lsblk --noheadings --paths --pairs --output NAME,TYPE,PKNAME,PARTN,PARTTYPE,PARTUUID";
+/// Every block device with its partitions' numbers, types, GUIDs and
+/// filesystems, as udev records them, for [`located`].
+const DISKS: &str = "lsblk --noheadings --paths --pairs --output NAME,TYPE,PKNAME,PARTN,PARTTYPE,PARTUUID,FSTYPE";
 
 /// One partition [`DISKS`] listed.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 struct Listed {
     index: u32,
     kind: Option<Guid>,
     unique: Option<Guid>,
+    /// The filesystem whose signature `blkid` found in it.
+    filesystem: Option<String>,
 }
 
 /// Each `/dev/sd<letter>` disk [`DISKS`] answered, with its partitions.
@@ -498,6 +499,7 @@ fn sd_disks(listing: &str) -> Result<Vec<(Sd, Vec<Listed>)>, Refusal> {
             index,
             kind: internal::guid(&field(row, "PARTTYPE")),
             unique: internal::guid(&field(row, "PARTUUID")),
+            filesystem: Some(field(row, "FSTYPE")).filter(|fs| !fs.is_empty()),
         });
     }
     Ok(disks)
@@ -654,7 +656,6 @@ enum Job {
     /// leaves.
     WipePartition { sd: Sd, part: u32 },
     Flash(Sd),
-    /// Every event udev has queued or has yet to queue, handled.
     Settle,
     /// The kernel's table of the disk, read again off the disk.
     Reread(Sd),
@@ -1197,84 +1198,6 @@ struct Driver {
     dry_run: bool,
 }
 
-/// What the loop asks of a machine: [`Driver`]'s, and a test's model of one.
-trait Remote {
-    /// [`Driver::as_root`].
-    fn root(&self, what: &str, job: Job, feed: Option<Feed<'_>>) -> Result<Option<Output>, Refusal>;
-    /// One command as the account.
-    fn read(&self, what: &str, command: &str) -> Result<String, Refusal>;
-}
-
-impl Remote for Driver {
-    fn root(&self, what: &str, job: Job, feed: Option<Feed<'_>>) -> Result<Option<Output>, Refusal> {
-        self.as_root(what, job, feed)
-    }
-
-    fn read(&self, what: &str, command: &str) -> Result<String, Refusal> {
-        self.ssh(what, command)
-    }
-}
-
-/// `dd`'s own count of what one [`Driver::as_root`] fed it, held to the
-/// feed's length: a short local read ends `ssh` and the remote `dd` exits 0
-/// on the prefix it got.
-fn fed(what: &str, out: &Output, want: u64) -> Result<DdSaid, Refusal> {
-    let stderr = String::from_utf8_lossy(&out.stderr).to_string();
-    let dd = dd_said(&stderr).ok_or_else(|| Refusal::Remote {
-        what: what.to_string(),
-        status: "printed no byte count and seconds".to_string(),
-        stderr,
-    })?;
-    if dd.bytes != want {
-        return Err(Refusal::Landed { what: format!("the byte count dd reported {what}"), want, got: dd.bytes });
-    }
-    Ok(dd)
-}
-
-/// **The kernel reads a disk's table only when asked to, so the loop asks**
-/// once it has written one. The ask udevd makes when a writer closes the disk
-/// is best effort and skipped while anything holds the disk's lock, as udevd's
-/// own probing of it does. udev is settled first, so no ask of its own is
-/// still to come; neither job opens the disk for writing, so neither starts
-/// another.
-fn reread(remote: &impl Remote, sd: Sd) -> Result<(), Refusal> {
-    remote.root("settling udev", Job::Settle, None)?;
-    remote.root("re-reading the table", Job::Reread(sd), None)?;
-    Ok(())
-}
-
-/// **The write is verified, not assumed**: `dd`'s own byte count and then
-/// the table the kernel re-read are both compared. `wipefs`
-/// first, because the stick outlives the image and its old backup GPT would
-/// otherwise leave the firmware two tables.
-///
-/// `None` is a dry run, which wrote nothing to time.
-fn flash(remote: &impl Remote, image: &Flashable, sd: Sd) -> Result<Option<Flashed>, Refusal> {
-    let began = std::time::Instant::now();
-    remote.root("wiping the old signatures", Job::Wipe(sd), None)?;
-    let wipe = began.elapsed().as_secs_f64();
-    let began = std::time::Instant::now();
-    let feed = Feed { path: &image.path, at: 0, len: image.bytes };
-    let Some(out) = remote.root("flashing the stick", Job::Flash(sd), Some(feed))? else { return Ok(None) };
-    let dd = fed("flashing the stick", &out, image.bytes)?;
-    reread(remote, sd)?;
-    for (name, part) in [("the ESP", image.esp), ("TOYOS-LOG", image.log)] {
-        let at = sd.node().part_sysfs(part.index);
-        let read = remote.read("reading the new table back", &format!("cat {at}/start {at}/size"))?;
-        let mut numbers = read.lines().map(str::trim).map(str::parse::<u64>);
-        let start = numbers.next().and_then(Result::ok).unwrap_or_default();
-        let sectors = numbers.next().and_then(Result::ok).unwrap_or_default();
-        for (what, want, got) in
-            [("first sector", part.start, start), ("sector count", part.sectors, sectors)]
-        {
-            if want != got {
-                return Err(Refusal::Landed { what: format!("{name}'s {what}"), want, got });
-            }
-        }
-    }
-    Ok(Some(Flashed { wipe, flash: began.elapsed().as_secs_f64(), dd: dd.secs }))
-}
-
 /// One command on `target`, as its account and never as root.
 fn ssh(target: &Target, what: &str, command: &str) -> Result<String, Refusal> {
     let out = Command::new("ssh")
@@ -1336,6 +1259,87 @@ impl Driver {
             .map_err(Refusal::Machine)?;
         recorded(&timings::dir(), &machine)?;
         Ok(machine)
+    }
+
+    /// `dd`'s own count of what one [`Driver::as_root`] fed it, held to the
+    /// feed's length: a short local read ends `ssh` and the remote `dd` exits 0
+    /// on the prefix it got.
+    fn fed(&self, what: &str, out: &Output, want: u64) -> Result<DdSaid, Refusal> {
+        let stderr = String::from_utf8_lossy(&out.stderr).to_string();
+        let dd = dd_said(&stderr).ok_or_else(|| Refusal::Remote {
+            what: what.to_string(),
+            status: "printed no byte count and seconds".to_string(),
+            stderr,
+        })?;
+        if dd.bytes != want {
+            return Err(Refusal::Landed { what: format!("the byte count dd reported {what}"), want, got: dd.bytes });
+        }
+        Ok(dd)
+    }
+
+    /// **The kernel reads a disk's table only when asked to, so the loop asks**
+    /// once it has written one. The ask udevd makes when a writer closes the disk
+    /// is best effort and skipped while anything holds the disk's lock, as udevd's
+    /// own probing of it does. udev is settled first, so no ask of its own is
+    /// still to come; neither job opens the disk for writing, so neither starts
+    /// another.
+    fn reread(&self, sd: Sd) -> Result<(), Refusal> {
+        self.as_root("settling udev", Job::Settle, None)?;
+        self.as_root("re-reading the table", Job::Reread(sd), None)?;
+        Ok(())
+    }
+
+    /// **The write is verified, not assumed**: `dd`'s own byte count and then
+    /// the table the kernel re-read are both compared. `wipefs`
+    /// first, because the stick outlives the image and its old backup GPT would
+    /// otherwise leave the firmware two tables.
+    ///
+    /// `None` is a dry run, which wrote nothing to time.
+    fn flash(&self, image: &Flashable, sd: Sd) -> Result<Option<Flashed>, Refusal> {
+        let began = std::time::Instant::now();
+        self.as_root("wiping the old signatures", Job::Wipe(sd), None)?;
+        let wipe = began.elapsed().as_secs_f64();
+        let began = std::time::Instant::now();
+        let feed = Feed { path: &image.path, at: 0, len: image.bytes };
+        let out = self.as_root("flashing the stick", Job::Flash(sd), Some(feed))?;
+        let Some(out) = out else { return Ok(None) };
+        let dd = self.fed("flashing the stick", &out, image.bytes)?;
+        self.reread(sd)?;
+        for (name, part) in [("the ESP", image.esp), ("TOYOS-LOG", image.log)] {
+            let at = sd.node().part_sysfs(part.index);
+            let read = self.ssh("reading the new table back", &format!("cat {at}/start {at}/size"))?;
+            let mut numbers = read.lines().map(str::trim).map(str::parse::<u64>);
+            let start = numbers.next().and_then(Result::ok).unwrap_or_default();
+            let sectors = numbers.next().and_then(Result::ok).unwrap_or_default();
+            for (what, want, got) in
+                [("first sector", part.start, start), ("sector count", part.sectors, sectors)]
+            {
+                if want != got {
+                    return Err(Refusal::Landed { what: format!("{name}'s {what}"), want, got });
+                }
+            }
+        }
+        Ok(Some(Flashed { wipe, flash: began.elapsed().as_secs_f64(), dd: dd.secs }))
+    }
+
+    /// The writes that make `sd` a scratch disk, and its read-back; `false` is a
+    /// dry run, which wrote nothing.
+    ///
+    /// **The new partition is wiped as well as the disk**: a wipe of the whole
+    /// disk erases its tables and nothing inside a partition, and the new
+    /// partition starts where the old first one did, so the old ESP's FAT would
+    /// otherwise be read as the scratch partition's.
+    fn make_scratch(&self, sd: Sd) -> Result<bool, Refusal> {
+        self.as_root("wiping its signatures", Job::Wipe(sd), None)?;
+        if self.as_root("writing the scratch table", Job::Scratch(sd), None)?.is_none() {
+            return Ok(false);
+        }
+        self.reread(sd)?;
+        self.as_root("wiping the new partition's signatures", Job::WipePartition { sd, part: 1 }, None)?;
+        // The listing is udev's record, of the re-read and the wipe.
+        self.as_root("settling udev", Job::Settle, None)?;
+        scratch_read_back(&self.ssh("listing the disks", DISKS)?, sd)?;
+        Ok(true)
     }
 
     /// The boot entry `create` makes under `label` for the ESP whose partition
@@ -1586,7 +1590,7 @@ impl Driver {
             let what = format!("writing the image's {o:?} to {}", part.node);
             let feed = Feed { path: &image.path, at: piece.at, len: piece.len };
             if let Some(out) = self.as_root(&what, Job::Write(o), Some(feed))? {
-                fed(&what, &out, piece.len)?;
+                self.fed(&what, &out, piece.len)?;
             }
         }
         let entry = self.boot_entry(INTERNAL_LABEL, Job::CreateInternal, kept(Owned::Esp))?;
@@ -1867,6 +1871,20 @@ fn adoptable(listing: &str, sd: Sd, image: Carrying) -> Result<(), Refusal> {
     Ok(())
 }
 
+/// Whether `sd` of `listing` reads back as [`make_scratch`](Driver::make_scratch)
+/// leaves it: a scratch disk whose one partition carries no filesystem.
+fn scratch_read_back(listing: &str, sd: Sd) -> Result<(), Refusal> {
+    let parts = parts_of(listing, sd)?;
+    let disk = sd.node().whole();
+    if !Carrying::Scratch.holds(&parts) {
+        return Err(Refusal::Adopt(format!("{disk} was written and does not read back as a scratch disk")));
+    }
+    if let Some(fs) = parts.iter().find_map(|p| p.filesystem.as_deref()) {
+        return Err(Refusal::Adopt(format!("{disk}'s scratch partition still carries a {fs} signature")));
+    }
+    Ok(())
+}
+
 /// Make `sd`, named by hand, a scratch disk of a recorded machine: its
 /// signatures wiped and a table of one [`Carrying::Scratch`] partition
 /// written, which the disk is then read back as carrying. The disk's contents
@@ -1880,7 +1898,7 @@ fn adopt_scratch(target: &Target, dry_run: bool, sd: Sd) -> Result<(), Refusal> 
     if !disk.removable {
         return Err(Refusal::Identity { field: "removable", want: "1".to_string(), got: "0".to_string() });
     }
-    if !make_scratch(&driver, sd)? {
+    if !driver.make_scratch(sd)? {
         println!("dry run: nothing was erased");
         return Ok(());
     }
@@ -1892,28 +1910,6 @@ fn adopt_scratch(target: &Target, dry_run: bool, sd: Sd) -> Result<(), Refusal> 
         disk.model
     );
     Ok(())
-}
-
-/// The writes that make `sd` a scratch disk, and its read-back; `false` is a
-/// dry run, which wrote nothing.
-///
-/// **The new partition is wiped as well as the disk**: a wipe of the whole
-/// disk erases its tables and nothing inside a partition, and the new
-/// partition starts where the old first one did, so the old ESP's FAT would
-/// otherwise be read as the scratch partition's.
-fn make_scratch(remote: &impl Remote, sd: Sd) -> Result<bool, Refusal> {
-    remote.root("wiping its signatures", Job::Wipe(sd), None)?;
-    if remote.root("writing the scratch table", Job::Scratch(sd), None)?.is_none() {
-        return Ok(false);
-    }
-    reread(remote, sd)?;
-    remote.root("wiping the new partition's signatures", Job::WipePartition { sd, part: 1 }, None)?;
-    // The listing is udev's record, of the re-read and the wipe.
-    remote.root("settling udev", Job::Settle, None)?;
-    if !Carrying::Scratch.holds(&parts_of(&remote.read("listing the disks", DISKS)?, sd)?) {
-        return Err(Refusal::Adopt(format!("{} was written and does not read back as a scratch disk", sd.node().whole())));
-    }
-    Ok(true)
 }
 
 /// Bytes of a local file one root command reads on its stdin.
@@ -2049,7 +2045,7 @@ pub fn run(args: &Args) -> Result<Option<u64>, Refusal> {
     );
     let preamble = began.elapsed().as_secs_f64();
 
-    let flashed = flash(&driver, &image, sd)?;
+    let flashed = driver.flash(&image, sd)?;
     let began = std::time::Instant::now();
     let entry = driver.boot_entry(&args.target.label, Job::Create { sd, esp: image.esp.index }, image.esp.guid)?;
 
@@ -2371,7 +2367,8 @@ pub struct Phases {
     /// the machine and the disk read off the machine.
     pub preamble: f64,
     pub wipe: f64,
-    /// `dd` over `ssh`, and the table read back.
+    /// `dd` over `ssh`, settling udev, the kernel's re-read of the table, and
+    /// the table read back.
     pub flash: f64,
     /// What `dd` itself said of the write. It reads `ssh`'s stdin, so this is
     /// whichever of the wire and the stick is slower, and splits neither out.
@@ -3241,141 +3238,19 @@ mod tests {
         assert!(!Carrying::Scratch.holds(&parts_of(&both, Sd(b'a')).unwrap()));
     }
 
-    /// One partition of a [`Block`] table: number, first sector, sectors, type.
-    type Row = (u32, u64, u64, Guid);
-
-    /// A stick's block layer as the loop's steps rest on it, at its worst
-    /// where Linux allows a range:
-    ///
-    /// - the kernel's table changes only on a re-read (`BLKRRPART`), and
-    ///   udevd's own re-read on a writer's close never happens, as when its
-    ///   probing holds the disk's lock;
-    /// - a re-read while udev has a writer's close unhandled is refused, since
-    ///   udevd can still drop and re-add every partition after it;
-    /// - a wipe of the whole disk erases its tables and leaves every
-    ///   filesystem's signature inside a partition, which `blkid` reads as the
-    ///   partition's when it lies at the partition's first sector;
-    /// - `lsblk` answers udev's record, as of the last settle.
-    struct Block {
-        written: Vec<Row>,
-        kernel: Vec<Row>,
-        record: Vec<Row>,
-        unsettled: bool,
-        signatures: Vec<u64>,
-    }
-
-    /// The image [`flash`] writes in these tests, its ESP and log where the
-    /// T14's image puts them.
-    fn t14_image() -> Flashable {
-        let part = |index, start| Part { index, start, sectors: 69_632, guid: Guid::EFI_SYSTEM };
-        Flashable { path: PathBuf::from("image.img"), bytes: 140_509_184, esp: part(1, 2048), log: part(3, 73_728), guids: Vec::new() }
-    }
-
-    /// `image`'s table, and where its two FATs' signatures lie.
-    fn rows(image: &Flashable) -> (Vec<Row>, Vec<u64>) {
-        let (esp, log) = (image.esp, image.log);
-        let rows = vec![
-            (esp.index, esp.start, esp.sectors, Guid::EFI_SYSTEM),
-            (log.index, log.start, log.sectors, Guid::MICROSOFT_BASIC),
-        ];
-        (rows, vec![esp.start, log.start])
-    }
-
-    /// A stick an earlier image, its log further in, was flashed to and
-    /// settled long ago: a table the kernel kept is told apart from the new.
-    fn flashed_stick() -> std::cell::RefCell<Block> {
-        let mut earlier = t14_image();
-        earlier.log.start = 139_264;
-        let (rows, signatures) = rows(&earlier);
-        std::cell::RefCell::new(Block { written: rows.clone(), kernel: rows.clone(), record: rows, signatures, unsettled: false })
-    }
-
-    impl Remote for std::cell::RefCell<Block> {
-        fn root(&self, what: &str, job: Job, feed: Option<Feed<'_>>) -> Result<Option<Output>, Refusal> {
-            let mut b = self.borrow_mut();
-            let refused = |stderr: &str| Refusal::Remote { what: what.to_string(), status: "exit status: 1".to_string(), stderr: stderr.to_string() };
-            let mut said = String::new();
-            match job {
-                Job::Wipe(_) => {
-                    b.written.clear();
-                    b.unsettled = true;
-                }
-                Job::Flash(_) => {
-                    (b.written, b.signatures) = rows(&t14_image());
-                    b.unsettled = true;
-                    let len = feed.expect("a flash is fed the image").len;
-                    said = format!("{len} bytes (141 MB, 134 MiB) copied, 1.5 s, 94 MB/s\n");
-                }
-                Job::Scratch(_) => {
-                    b.written = vec![(1, 2048, 60_060_000, Guid::TOYOS_SCRATCH)];
-                    b.unsettled = true;
-                }
-                Job::Settle => {
-                    b.record = b.kernel.clone();
-                    b.unsettled = false;
-                }
-                Job::Reread(_) if b.unsettled => return Err(refused("BLKRRPART: Device or resource busy")),
-                Job::Reread(_) => b.kernel = b.written.clone(),
-                Job::WipePartition { part, .. } => {
-                    let Some(&(_, start, ..)) = b.kernel.iter().find(|row| row.0 == part) else {
-                        return Err(refused("wipefs: error: probing initialization failed: No such file or directory"));
-                    };
-                    b.signatures.retain(|at| *at != start);
-                    b.unsettled = true;
-                }
-                other => panic!("{other:?} is no job of a flash or an adoption"),
-            }
-            Ok(Some(Output { status: std::process::ExitStatus::default(), stdout: Vec::new(), stderr: said.into_bytes() }))
-        }
-
-        fn read(&self, _: &str, command: &str) -> Result<String, Refusal> {
-            let b = self.borrow();
-            let node = Sd(b'b').node();
-            if command == DISKS {
-                let mut listing = format!("NAME=\"{}\" TYPE=\"disk\" PKNAME=\"\" PARTN=\"\" PARTTYPE=\"\" PARTUUID=\"\"\n", node.whole());
-                for (n, _, _, kind) in &b.record {
-                    let part = node.partition(*n);
-                    let whole = node.whole();
-                    listing += &format!("NAME=\"{part}\" TYPE=\"part\" PKNAME=\"{whole}\" PARTN=\"{n}\" PARTTYPE=\"{kind}\" PARTUUID=\"\"\n");
-                }
-                return Ok(listing);
-            }
-            for (n, start, sectors, _) in &b.kernel {
-                let at = node.part_sysfs(*n);
-                if command == format!("cat {at}/start {at}/size") {
-                    return Ok(format!("{start}\n{sectors}\n"));
-                }
-            }
-            Err(Refusal::Remote {
-                what: command.to_string(),
-                status: "exit status: 1".to_string(),
-                stderr: "cat: No such file or directory".to_string(),
-            })
-        }
-    }
-
-    /// **The flash reads back the table the kernel was asked to re-read**,
-    /// whatever udevd made of the writer's close: the kernel is asked once udev
-    /// has settled, and nothing opens the disk for writing after that.
+    /// **An adoption reads back the wipe it made**: a scratch partition still
+    /// carrying the old ESP's FAT is refused, by name, as is a table that is
+    /// not a scratch disk's.
     #[test]
-    fn a_flash_reads_back_the_table_it_had_the_kernel_reread() {
-        let stick = flashed_stick();
-        let flashed = flash(&stick, &t14_image(), Sd(b'b')).expect("the flash reads its table back");
-        assert!(flashed.is_some());
-        let b = stick.borrow();
-        assert_eq!(b.kernel, rows(&t14_image()).0);
-    }
-
-    /// **An adopted scratch partition carries nothing the disk held before**:
-    /// the old image's ESP starts where the scratch partition does, and its
-    /// FAT is gone; the disk then reads back from udev's record as scratch.
-    #[test]
-    fn an_adopted_scratch_partition_carries_no_signature_the_old_image_left() {
-        let stick = flashed_stick();
-        assert_eq!(make_scratch(&stick, Sd(b'b')), Ok(true));
-        let b = stick.borrow();
-        assert_eq!(b.kernel, [(1, 2048, 60_060_000, Guid::TOYOS_SCRATCH)]);
-        assert!(!b.signatures.contains(&2048), "{:?}", b.signatures);
+    fn an_adopted_disk_reads_back_as_scratch_with_no_filesystem() {
+        let sdb = Sd(b'b');
+        assert_eq!(scratch_read_back(&scratch("/dev/sdb"), sdb), Ok(()));
+        let stale = scratch("/dev/sdb").replace("PARTUUID=\"60000000-0000-4000-8000-000000000000\"", "PARTUUID=\"60000000-0000-4000-8000-000000000000\" FSTYPE=\"vfat\"");
+        assert_ne!(stale, scratch("/dev/sdb"));
+        let refused = scratch_read_back(&stale, sdb).unwrap_err();
+        assert!(matches!(refused, Refusal::Adopt(ref why) if why.ends_with("carries a vfat signature")), "{refused:?}");
+        let refused = scratch_read_back(&toyos("/dev/sdb", LOG), sdb).unwrap_err();
+        assert!(matches!(refused, Refusal::Adopt(ref why) if why.ends_with("does not read back as a scratch disk")), "{refused:?}");
     }
 
     /// **Adoption never erases a disk holding a ToyOS image**, which is the
