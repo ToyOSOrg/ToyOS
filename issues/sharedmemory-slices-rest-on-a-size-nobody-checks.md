@@ -16,9 +16,13 @@ enforces neither premise that makes this sound:
   kernel's own regions (a device window, a DMA grant, the scanout) only by its
   doc comment, so a caller that adopts a peer's region at the peer's declared
   length reads and writes past it in safe code.
-- `shm_map` is idempotent, so `share()` followed by `adopt` gives two
-  `SharedMemory` values over one mapping in one process. `as_mut_slice` on one
-  then aliases `as_slice` or `as_atomic` on the other.
+- Every view aliases memory something else can write. Each `shm_map` is a
+  mapping of its own at a fresh address (`sys_shm_map` maps `At::ANYWHERE`),
+  and dropping one `SharedMemory` releases only its own mapping, so `share()`
+  followed by `adopt` gives two values over two mappings of the same pages.
+  `as_mut_slice` on one then aliases `as_slice` or `as_atomic` on the other at
+  another address, and every peer holding a handle maps those pages too, so a
+  slice over a region already shared is never exclusive.
 
 `#![forbid(unsafe_code)]` on the compositor (`system/compositor/src/main.rs`)
 leans on both. The compositor meets them, since it adopts only regions it
@@ -27,6 +31,5 @@ that.
 
 Owner: `toyos::shm`.
 
-**Exit**: `adopt` is an `unsafe fn` whose contract is both premises, or it
-checks `size` against the kernel's region and refuses a second mapping of one
-region.
+**Exit**: `adopt` checks `size` against the kernel's region, and no safe
+function forms a reference over bytes another mapping can write.
