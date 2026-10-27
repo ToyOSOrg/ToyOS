@@ -47,4 +47,4 @@ the clock matters through what ToyOS spends per byte sent.
 
 **Exit**: `osbench_lan` on the T14 reads `lan.wired.tcp.upload` within
 Linux's run-to-run range on the same path, or the cause is named and owned
-by its own issue. The next reading is pull request #PR's.
+by its own issue. The next reading is pull request #1069's.
