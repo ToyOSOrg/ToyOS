@@ -367,7 +367,7 @@ pub fn persistent_dir() -> Option<(String, String)> {
 /// [tcp]'s bytes, losses and the time its senders waited on each send limit, and the card's
 /// full-ring waits and missed frames. Those a card does not report are left out.
 pub fn net_counters() -> Result<Vec<(String, u64)>, String> {
-    const READ: [&str; 14] = [
+    const READ: [&str; 17] = [
         "net.tcp.sent.bytes",
         "net.tcp.retransmit.bytes",
         "net.tcp.rto",
@@ -378,6 +378,9 @@ pub fn net_counters() -> Result<Vec<(String, u64)>, String> {
         "net.tcp.send-limited.user.ns",
         "net.tcp.send-limited.window.ns",
         "net.tcp.send-limited.congestion.ns",
+        "net.tcp.congestion-stops",
+        "net.tcp.congestion-stops.cwnd.bytes",
+        "net.tcp.congestion-stops.srtt.us",
         "net.transmit.full",
         "net.transmit.wake_armed",
         "net.transmit.wake_taken",
@@ -391,6 +394,12 @@ pub fn net_counters() -> Result<Vec<(String, u64)>, String> {
             _ => None,
         })
         .collect())
+}
+
+/// What a connection says of itself: nothing on ToyOS, whose stack's counters
+/// ([`net_counters`]) say it for every connection.
+pub fn stream_info(_stream: &std::net::TcpStream) -> Result<Vec<(&'static str, u64)>, String> {
+    Ok(Vec::new())
 }
 
 /// What carries a connection on ToyOS: netstack drives one card, Ethernet.

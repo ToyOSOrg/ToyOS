@@ -1,6 +1,6 @@
-//! What held a sender back, and for how long (RFC 4898 §2's sender limitation states): the time
+//! What held a sender back, and for how long (RFC 4898 §4's `tcpEStatsPerfSndLimTime*`): the time
 //! from a transmit opportunity that left new data unsent to the next that sent some, counted by
-//! whether the user, the peer's window or congestion held it.
+//! whether the sender itself, the peer's window or congestion held it.
 
 mod common;
 
@@ -24,6 +24,8 @@ fn a_sender_at_its_congestion_window_counts_the_wait_until_the_ack_that_opens_it
     assert_eq!(held(&h), [0; 3], "nothing counts until the wait ends");
     assert!(!h.input(50, seg(5001).ack(15_601)).is_empty(), "the ACK opens the window");
     assert_eq!(held(&h), [0, 0, 50 * MS]);
+    assert_eq!(h.count(Counter::CongestionStops), 1, "the rest of the 30 000 bytes fit the grown window");
+    assert_eq!(h.count(Counter::CongestionStopsCwndBytes), 14_600);
 }
 
 #[test]
@@ -65,4 +67,30 @@ fn a_retransmission_is_not_counted_as_sent_again() {
     h.at(1000);
     assert!(h.count(Counter::RetransmitBytes) > 0, "the timeout resent");
     assert_eq!(h.count(Counter::SentBytes), 14_600);
+}
+
+#[test]
+fn a_nagle_hold_is_the_senders_own() {
+    let mut h = fixture_e();
+    assert_eq!(h.send(0, 2000).len(), 1, "Nagle holds the 540-byte tail behind the segment in flight");
+    assert!(!h.input(30, seg(5001).ack(2461)).is_empty(), "the ACK releases the tail");
+    assert_eq!(held(&h), [30 * MS, 0, 0]);
+}
+
+#[test]
+fn a_wait_that_ends_in_a_timeout_is_congestions() {
+    let mut h = fixture_e();
+    h.send(0, 1460);
+    // Nothing unsent: the sender's own wait, until the retransmission timer fires and makes the
+    // span congestion's; the wait after it is the sender's again.
+    let mut t = 0;
+    while h.count(Counter::Rto) == 0 {
+        t += 1;
+        h.at(t);
+    }
+    let fired = u64::try_from(t).unwrap();
+    assert_eq!(held(&h), [0, 0, fired * MS]);
+    h.input(t + 1, seg(5001).ack(2461));
+    assert_eq!(h.send(t + 11, 1460).len(), 1);
+    assert_eq!(held(&h), [11 * MS, 0, fired * MS]);
 }

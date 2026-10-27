@@ -83,3 +83,24 @@ fn s_cc_012_restart_after_idle() {
     assert_eq!(outs.len(), 10);
     assert_eq!(h.info().cwnd, 14_600);
 }
+
+/// RFC 5681 §3.1 grows cwnd by each ACK, and a receive pass that brings ten ACKs before the next
+/// transmit opportunity is ten ACKs: the window grows as it does when each comes alone.
+#[test]
+fn s_cc_016_acks_in_one_pass_each_grow_slow_start() {
+    let one_at_a_time = {
+        let mut h = fixture_e();
+        h.send(0, 60_000);
+        for i in 1..=10u32 {
+            h.input(10, seg(5001).ack(1001 + i * 1460));
+        }
+        h.info().cwnd
+    };
+    let mut h = fixture_e();
+    h.send(0, 60_000);
+    for i in 1..=10u32 {
+        h.arrive(seg(5001).ack(1001 + i * 1460));
+    }
+    h.transmit();
+    assert_eq!((one_at_a_time, h.info().cwnd), (29_200, 29_200));
+}

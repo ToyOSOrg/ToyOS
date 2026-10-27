@@ -371,15 +371,21 @@ pub struct Sync {
     last_unsolicited: Option<Instant>,
     urgent_logged: bool,
     pub delivery_problem: bool,
-    /// What has held new data back since when (RFC 4898's `SndLimTrans` states); `None` while
-    /// the connection sends.
+    /// What has held new data back since when; `None` while the connection sends.
     held_by: Option<(SendLimit, Instant)>,
+    /// Why [`Self::new_data`] last sent nothing.
+    declined: SendLimit,
+    /// cwnd held a retransmission back in this transmit opportunity.
+    retransmission_held: bool,
 }
 
-/// What a sender with nothing more to send now is waiting on (RFC 4898 §2, `tcpEStatsPerfSndLim`).
+/// What a sender's new data waits on: RFC 4898 §4's `tcpEStatsPerfSndLimTime{Snd,Rwin,Cwnd}`.
+/// Unlike the RFC, which divides all of a connection's time among the three, a span here runs from
+/// a transmit opportunity that left new data unsent to the next one that sends some: time spent
+/// sending, or waiting for the caller's next opportunity, is charged to none.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum SendLimit {
-    /// The user has given nothing that is unsent.
+    /// The sender itself: nothing unsent, or Nagle holding less than a segment.
     User,
     /// The peer's receive window.
     Window,
@@ -464,6 +470,8 @@ impl Sync {
             urgent_logged: false,
             delivery_problem: false,
             held_by: None,
+            declined: SendLimit::User,
+            retransmission_held: false,
         };
         sync.refresh(now);
         sync
@@ -1109,6 +1117,10 @@ impl Sync {
     fn expire(&mut self, ctx: &mut Ctx<'_>) {
         self.rtx_timer = None;
         ctx.log.count(Counter::Rto);
+        // RFC 4898 §4, `tcpEStatsPerfSndLimTimeCwnd`: a wait that ends in a timeout is congestion's.
+        if let Some((limit, _)) = self.held_by.as_mut() {
+            *limit = SendLimit::Congestion;
+        }
         if self.rto_pending {
             ctx.log.count(Counter::RtoUnsent);
         }
@@ -1145,35 +1157,38 @@ impl Sync {
     /// Hands off the next segment this opportunity owes, after SYNs and resets: `true` if one left.
     /// The time new data waits on the user, the peer's window or congestion is counted by which.
     pub fn next_segment<T>(&mut self, ctx: &mut Ctx<'_>, exit: &mut dyn Exit<T>) -> Result<bool, NotReady> {
+        let before = self.tx.nxt;
+        self.retransmission_held = false;
         let sent = self.owed_segment(ctx, exit)?;
         let now = ctx.now;
-        let held = if sent && self.last_data_sent == Some(now) {
+        let held = if sent && self.tx.nxt.after(before) {
             None
         } else if sent {
             return Ok(true);
+        } else if self.retransmission_held {
+            Some(SendLimit::Congestion)
         } else {
-            Some(self.send_limit())
+            Some(self.declined)
         };
-        if let Some((limit, since)) = self.held_by {
-            if held != Some(limit) {
-                ctx.log.add(limit.counter(), u64::try_from(now.since(since).as_nanos()).unwrap_or(u64::MAX));
-                self.held_by = held.map(|limit| (limit, now));
-            }
-        } else {
+        if let Some(limit) = held {
+            self.cc.limited = limit == SendLimit::Congestion;
+        }
+        let was = self.held_by.map(|(limit, _)| limit);
+        if let Some((limit, since)) = self.held_by.filter(|_| held != was) {
+            ctx.log.add(limit.counter(), u64::try_from(now.since(since).as_nanos()).unwrap_or(u64::MAX));
+        }
+        if held != was {
             self.held_by = held.map(|limit| (limit, now));
+            if held == Some(SendLimit::Congestion) {
+                // What the window and the round trip were as cwnd stopped the sender: their means
+                // say whether a small window or a long round trip set the rate.
+                ctx.log.count(Counter::CongestionStops);
+                ctx.log.add(Counter::CongestionStopsCwndBytes, u64::from(self.cwnd()));
+                let srtt = self.rtt.srtt().map_or(0, |d| u64::try_from(d.as_micros()).unwrap_or(u64::MAX));
+                ctx.log.add(Counter::CongestionStopsSrttMicros, srtt);
+            }
         }
         Ok(sent)
-    }
-
-    /// What holds new data back, for a sender that has sent all it may now.
-    fn send_limit(&self) -> SendLimit {
-        if self.tx.unsent() == 0 && !self.tx.fin_unsent() {
-            SendLimit::User
-        } else if self.persist.is_some() || self.tx.usable() < signed(self.smss()) {
-            SendLimit::Window
-        } else {
-            SendLimit::Congestion
-        }
     }
 
     fn owed_segment<T>(&mut self, ctx: &mut Ctx<'_>, exit: &mut dyn Exit<T>) -> Result<bool, NotReady> {
@@ -1327,7 +1342,7 @@ impl Sync {
         let len = if pos.before(stop) { stop.since(pos) } else { 0 };
         let fin = self.fin_fits(pos.add(len)) && (len > 0 || fin_resend);
         if len == 0 && !fin {
-            self.cc.limited = true;
+            self.retransmission_held = true;
             return Ok(false);
         }
         self.emit(ctx, exit, pos, len, fin, blocks)?;
@@ -1393,14 +1408,20 @@ impl Sync {
     /// New data and the FIN (RFC 9293 §3.7.4 Nagle, §3.8.6.2.1 sender silly-window avoidance),
     /// within SND.UNA + min(cwnd, SND.WND) (RFC 5681 §2).
     fn new_data<T>(&mut self, ctx: &mut Ctx<'_>, exit: &mut dyn Exit<T>) -> Result<bool, NotReady> {
-        if self.persist.is_some() || matches!(self.recovery, Recovery::Sack { .. }) || self.tx.window() == 0 {
+        let unsent = self.tx.unsent();
+        if unsent == 0 && !self.tx.fin_unsent() {
+            self.declined = SendLimit::User;
+            return Ok(false);
+        }
+        if self.persist.is_some() || self.tx.window() == 0 {
+            self.declined = SendLimit::Window;
+            return Ok(false);
+        }
+        if matches!(self.recovery, Recovery::Sack { .. }) {
+            self.declined = SendLimit::Congestion;
             return Ok(false);
         }
         let now = ctx.now;
-        let unsent = self.tx.unsent();
-        if unsent == 0 && !self.tx.fin_unsent() {
-            return Ok(false);
-        }
         if unsent > 0 && self.last_data_sent.is_some_and(|at| now.since(at) > self.rtt.rto()) && self.tx.flight() == 0 {
             self.cc.restart_after_idle();
         }
@@ -1419,6 +1440,7 @@ impl Sync {
         let start = self.tx.nxt;
         if d == 0 {
             if w_rcv < 1 {
+                self.declined = SendLimit::Window;
                 return Ok(false);
             }
             self.emit(ctx, exit, start, 0, true, blocks)?;
@@ -1431,10 +1453,17 @@ impl Sync {
             d.min(w_rcv).min(w_cc) >= mss || (nagle && d <= w_rcv.min(w_cc)) || (nagle && d.min(w_rcv) >= half && w_cc > 0)
         };
         let go = usable > 0 && (rules(w_rcv) || self.sws_fired || self.tx.fin.is_some());
-        if w_cc < d.min(w_rcv).min(mss) {
-            self.cc.limited = true;
-        }
         if !go {
+            // Congestion where cwnd leaves less than the segment the rest would send, the peer's
+            // window where only it stands in the way (sender SWS avoidance included), else the
+            // sender's own Nagle hold.
+            self.declined = if w_cc < d.min(w_rcv).min(mss) {
+                SendLimit::Congestion
+            } else if !rules(w_rcv) && rules(i64::MAX) {
+                SendLimit::Window
+            } else {
+                SendLimit::User
+            };
             if w_rcv > 0 && rules(i64::MAX) && self.sws.is_none() && !self.sws_fired {
                 self.sws = Some(now.after(limits::SWS_OVERRIDE));
             }

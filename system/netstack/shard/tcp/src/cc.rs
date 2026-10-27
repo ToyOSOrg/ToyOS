@@ -1,6 +1,6 @@
 //! The congestion window: slow start with appropriate byte counting (RFC 5681 §3.1), CUBIC in
 //! avoidance (RFC 9438), and the reductions a loss or a timeout makes. Growth happens only when
-//! the window, not the application or the peer, limited the last send (RFC 9438 §5.8), and CUBIC's
+//! the window, not the application or the peer, stopped the sender last (RFC 9438 §5.8), and CUBIC's
 //! clock skips the time that was so limited (§4.2). The cube is computed in fixed point: no float,
 //! no `libm`.
 
@@ -65,7 +65,8 @@ pub struct Cc {
     pub cwnd: u32,
     pub ssthresh: u32,
     pub smss: u32,
-    /// A send was held by cwnd, with data waiting and the peer's window open, since the last growth.
+    /// The sender's last stop was cwnd's: data waited with the peer's window open. Every ACK until
+    /// the next stop grows the window (RFC 5681 §3.1 counts each), however many one pass brings.
     pub limited: bool,
     w_max: Option<u32>,
     /// RFC 9438 §4.3's cwnd_prior: cwnd when ssthresh was last set, and before that the initial
@@ -94,7 +95,7 @@ impl Cc {
 
     /// An ACK that newly acknowledges `acked` bytes outside loss recovery.
     pub fn on_ack(&mut self, now: Instant, acked: u32, srtt: Option<Duration>) {
-        let grow = core::mem::replace(&mut self.limited, false);
+        let grow = self.limited;
         let since_last = self.last_ack.replace(now).map_or(Duration::ZERO, |last| now.since(last));
         if self.cwnd < self.ssthresh {
             if grow {

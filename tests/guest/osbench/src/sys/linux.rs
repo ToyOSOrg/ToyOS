@@ -514,8 +514,6 @@ pub fn mount_options(dir: &str) -> String {
     mount_of(dir).map_or_else(|| "unknown".into(), |(fstype, _, options)| format!("{fstype} {options}"))
 }
 
-/// The runner's home, and the filesystem and disk model holding it; the
-/// path itself names the user and is never printed.
 /// What a transfer row reports of the stack beneath it: the kernel's TCP segment counts and
 /// its loss recovery, from `/proc/net/snmp` and `/proc/net/netstat`.
 pub fn net_counters() -> Result<Vec<(String, u64)>, String> {
@@ -533,7 +531,12 @@ pub fn net_counters() -> Result<Vec<(String, u64)>, String> {
         let lines: Vec<&str> = text.lines().collect();
         // Each table is a line of names and a line of values, both led by its name.
         for [names, values] in lines.as_chunks::<2>().0 {
-            let (Some((name, keys)), Some((_, values))) = (names.split_once(':'), values.split_once(':')) else { continue };
+            let (Some((name, keys)), Some((again, values))) = (names.split_once(':'), values.split_once(':')) else {
+                return Err(format!("{file}: a table's line has no name"));
+            };
+            if name != again {
+                return Err(format!("{file}: {name}'s names are followed by {again}'s values"));
+            }
             for (key, value) in keys.split_whitespace().zip(values.split_whitespace()) {
                 if let Ok(value) = value.parse::<u64>() {
                     table.insert(format!("{name}.{key}"), value);
@@ -544,6 +547,36 @@ pub fn net_counters() -> Result<Vec<(String, u64)>, String> {
     Ok(READ.iter().filter_map(|(name, key)| table.get(&format!("{name}.{key}")).map(|v| (format!("{name}.{key}"), *v))).collect())
 }
 
+/// What a connection says of itself in `TCP_INFO`: RFC 4898's sender limits as Linux keeps them
+/// (`tcpi_busy_time`, `tcpi_rwnd_limited`, `tcpi_sndbuf_limited`, microseconds), and its
+/// congestion window in segments and smoothed round trip in microseconds as of now.
+pub fn stream_info(stream: &std::net::TcpStream) -> Result<Vec<(&'static str, u64)>, String> {
+    use std::os::fd::AsRawFd;
+    // SAFETY: plain old data, which the kernel fills.
+    let mut info: libc::tcp_info = unsafe { std::mem::zeroed() };
+    let mut len = std::mem::size_of::<libc::tcp_info>() as libc::socklen_t;
+    // SAFETY: `info` is `len` writable bytes, and the descriptor is the stream's own.
+    let rc = unsafe {
+        libc::getsockopt(stream.as_raw_fd(), libc::IPPROTO_TCP, libc::TCP_INFO, (&raw mut info).cast(), &mut len)
+    };
+    if rc != 0 {
+        return Err(format!("TCP_INFO: {}", std::io::Error::last_os_error()));
+    }
+    let full = std::mem::offset_of!(libc::tcp_info, tcpi_sndbuf_limited) + std::mem::size_of::<u64>();
+    if (len as usize) < full {
+        return Err(format!("TCP_INFO answered {len} bytes, short of the sender limits' {full}"));
+    }
+    Ok(vec![
+        ("busy_us", info.tcpi_busy_time),
+        ("rwnd_limited_us", info.tcpi_rwnd_limited),
+        ("sndbuf_limited_us", info.tcpi_sndbuf_limited),
+        ("snd_cwnd_segments", u64::from(info.tcpi_snd_cwnd)),
+        ("srtt_us", u64::from(info.tcpi_rtt)),
+    ])
+}
+
+/// The runner's home, and the filesystem and disk model holding it; the
+/// path itself names the user and is never printed.
 pub fn persistent_dir() -> Option<(String, String)> {
     let home = std::env::var("HOME").ok()?;
     let (fstype, source, _) = mount_of(&home)?;

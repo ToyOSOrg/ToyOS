@@ -73,6 +73,9 @@ toyos_net_wire::counters! {
     SendLimitedByUserNanos = "tcp.send-limited.user.ns";
     SendLimitedByWindowNanos = "tcp.send-limited.window.ns";
     SendLimitedByCongestionNanos = "tcp.send-limited.congestion.ns";
+    CongestionStops = "tcp.congestion-stops";
+    CongestionStopsCwndBytes = "tcp.congestion-stops.cwnd.bytes";
+    CongestionStopsSrttMicros = "tcp.congestion-stops.srtt.us";
     EventOverflow = "tcp.event-overflow";
 }
 

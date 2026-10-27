@@ -29,7 +29,7 @@ rounds:
 Evidence: `ToyOSOrg/evidence` branch `pr-1065`, `r3/`.
 
 The paired session at `aeba59fb0` read 62, 63, 65 and 64 MB/s against
-Linux's 113, 110, 111 and 112 (p = 0.029).
+Linux's 113, 110, 111 and 112 (p = 0.029): [evidence `aeba59fb0/`](https://github.com/ToyOSOrg/evidence/tree/37288c84c175a647145fe83fd51d945806cdb4ff/r1/aeba59fb0).
 
 **Refuted: the transmit ring's depth.** At 16 descriptors the ring holds
 15 frames, 184 µs of a gigabit wire, and 64 MB/s is exactly 15 segments
@@ -39,12 +39,29 @@ four ToyOS runs interleaved with four Linux ones: ToyOS 36, 36, 39 and
 44 MB/s, Linux 112 in all four. The rounds inside each ToyOS run ranged from
 27–35 to 46–67 MB/s, and downloads stayed at parity (110–113). The ring was
 not the limit, and a sender that moves either half or all of what it moved
-before, round by round, is not limited by any fixed depth.
+before, round by round, is not limited by any fixed depth
+([evidence `af239c8bb/`](https://github.com/ToyOSOrg/evidence/tree/37288c84c175a647145fe83fd51d945806cdb4ff/r1/af239c8bb)).
 
-Still unread, and what the next reading has to separate: retransmissions
-and recovery, the congestion window against the peer's window, the time the
-sender had nothing it was allowed to send, and the card's full-ring waits.
-None of these reaches the log or `inspect` today.
+**Ruled out: loss.** Pull request #1069's counters read on 2026-10-28, four
+runs on the 16-descriptor ring and two on 256, against Linux's 111–112: no
+retransmission timeout and no recovery in any run, one 1448-byte segment
+resent in all six, no frame missed by the card. Linux resent none. The
+256-descriptor ring's two runs read the same 36 MB/s with a ninth to a half
+of the 16-descriptor ring's 60,665–66,044 full-ring waits
+([evidence `132d5ef75/`](https://github.com/ToyOSOrg/evidence/tree/f06c0e92fa4c7172fe5c0946c540c34b434179dc/r2/132d5ef75)).
+
+**Found on the way: slow start grew once per pass.** [tcp]'s cwnd grew by
+one segment for the first ACK after a stop at cwnd, and not for the rest:
+netstack hands the stack every ACK one pass received before the pass's
+transmit opportunity, so a pass's ACKs grew the window as one. #1069 makes
+each ACK count (RFC 5681 §3.1). This matters at the start of each 3 s round;
+it cannot alone hold a round at a third of Linux's rate.
+
+Still to read, and what #1069's next reading separates: whether the sender
+waits on itself (the user's writes, Nagle's hold on a tail) or on cwnd, and
+at a stop for cwnd what the window and the round trip were. The transmit
+setup's own lead stays open in
+`issues/the-intel-driver-writes-txdctl-and-tidv-against-the-82574-datasheets-newer-revision.md`.
 
 The clock does not separate the two systems. Each upload row's own
 readings, `mhz` just after it and `mhz_settled` before it, were about
