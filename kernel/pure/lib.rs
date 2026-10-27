@@ -22,7 +22,6 @@ pub mod owners;
 pub mod pcid;
 pub mod pipe;
 pub mod pointers;
-pub mod proclife;
 pub mod sched;
 pub mod vm;
 pub mod wx;

@@ -17,8 +17,8 @@
 
 use alloc::vec::Vec;
 
-use crate::proclife::table::{Lifecycle, Processes};
-use crate::proclife::{tree, End, Pid};
+use crate::table::{Lifecycle, Processes};
+use crate::{tree, End, Pid};
 
 pub use toyos_abi::quit::Reason;
 
@@ -158,7 +158,7 @@ pub fn owed_children<T: Processes>(table: &T, pid: Pid, owed: &mut Owed) {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::proclife::model::World;
+    use crate::model::World;
 
     fn listening() -> Notice {
         let mut notice = Notice::new();

@@ -31,6 +31,7 @@ members = [
     "kernel/loom",
     "kernel/pci",
     "kernel/phys",
+    "kernel/proclife",
     "kernel/sim",
     "kernel/smmu",
     "lib/acpi",

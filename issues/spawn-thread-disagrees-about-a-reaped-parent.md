@@ -43,7 +43,7 @@ yet answers it.
 one sentence at the site saying whether the entry can be missing, and the two
 phases made to agree with it.
 
-Found while extracting the lifecycle's decisions into what is now `kernel/pure/proclife`
+Found while extracting the lifecycle's decisions into what is now `kernel/proclife`
 (2026-08-24), which is what made the two spellings of one lookup visible: they
 are now one function asked twice, and the callers still disagree about its
 `NoSuchProcess` answer.
@@ -53,5 +53,5 @@ deleted it with the reaper, and it reached it by routing rather than by
 running: the model's `retire` took a thread off every CPU, so no schedule it
 enumerated had a live thread arriving at a syscall body with its entry gone,
 the state the kernel would have to survive. Whether the model in
-`kernel/pure/proclife/interleave.rs` that replaced it reaches that state is
+`kernel/proclife/src/interleave.rs` that replaced it reaches that state is
 unread.

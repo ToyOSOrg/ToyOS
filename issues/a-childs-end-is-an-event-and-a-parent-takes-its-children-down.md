@@ -241,7 +241,7 @@ an explicit force issues it, and never a timer's.
      listened or whose notice still holds a reason, whoever asks, in one act
      no read comes between, and asks nothing below it. A child started under a
      process whose notice holds a reason starts holding it too, and the quit
-     that put it there asks that child no second time (`kernel::proclife::quit`).
+     that put it there asks that child no second time (`toyos_proclife::quit`).
      *Exit*, met: host — `proclife::interleave`'s orderings of a notice's
      read racing a second quit kill only where the read comes second, of a
      spawn racing a quit on its place ask each child once, of a quit of a

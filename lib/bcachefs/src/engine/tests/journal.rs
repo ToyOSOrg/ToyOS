@@ -2,7 +2,7 @@
 //! mkfs volume, torn by a crash or breaking a rule fsck checks.
 
 use toyos_blockdev::model::Model;
-use toyos_blockdev::{block_on_ready, BlockDev, BLOCK};
+use toyos_blockdev::{block_on_ready, BlockDev, ReadOnlyBytes, BLOCK};
 
 use super::super::journal::{self, Jset};
 use super::super::superblock::{field_type, Field, Root};
@@ -127,7 +127,7 @@ fn a_torn_entry_is_refused(encryption: Option<Encryption>) {
     let search = model
         .check(1 << 12, 0x7041_5ee7, |image| {
             let whole = image[fourth.0..fourth.0 + fourth.1.len()] == fourth.1[..];
-            let v = open(Bytes::new(image.to_vec()), passphrase.as_deref()).map_err(|e| format!("{e:?}"))?;
+            let v = open(ReadOnlyBytes::new(image).unwrap(), passphrase.as_deref()).map_err(|e| format!("{e:?}"))?;
             let (window, replay) = v.replayed().ok_or("not replayed")?;
             let last = if whole { 4 } else { 3 };
             if window.last != last {
