@@ -6,10 +6,21 @@ opened: 2026-09-29
 
 # Idle CPUs enter the C-states `_CST` names
 
-The kernel runs no `mwait` and reads no `_CST`; this track is being built on
-branch `deep-idle`. ToyOS's cores never go below C1/C1E and its package
-never leaves PC0, and its idle package draws 3.16 W against Linux's 1.18 to
-1.57 W (#866, https://github.com/ToyOSOrg/ToyOS/pull/866#issuecomment-6119513916).
+Built on branch `deep-idle`: acpiserver hands the kernel what each
+processor's `_CST` names that it may enter as it is
+(`system/acpiserver/src/cst.rs`), the kernel checks it against the CPU
+(`lib/userbound/src/idle.rs`) and chooses a state each idle period
+(`kernel/pure/sched/idle.rs`, `kernel/src/idle.rs`), and a `WakeLatency`
+hold bounds the exit (`soundserver` holds half a period while it plays).
+On the T14 that is `MWAIT 0x31` and `0x60` (253 and 1048 µs); on the AMD
+bench port 0x414 (400 µs), its type-3 0x415 withheld
+(`issues/the-amd-benchs-c3-is-withheld-for-want-of-a-coherence-statement.md`).
+AArch64 keeps `wfi` (`issues/aarch64-cpus-idle-only-in-wfi.md`). What
+remains is the exit below, read on metal.
+
+Before it, ToyOS's cores never went below C1/C1E and its package never left
+PC0, and its idle package drew 3.16 W against Linux's 1.18 to 1.57 W (#866,
+https://github.com/ToyOSOrg/ToyOS/pull/866#issuecomment-6119513916).
 What `hlt` alone costs a wake, firmware's C1E promotion included, is
 `issues/a-cpu-leaving-hlt-runs-its-first-microseconds-slow-under-c1e.md`.
 

@@ -1,7 +1,7 @@
 //! Which state an idle CPU waits in: the states the `acpi` claim's holder
 //! declared for it, checked at the boundary (`toyos_userbound::idle`), chosen
 //! among once per idle period by `kernel::sched::idle::choose`, and the
-//! machine-wide wake bound that [`WakeLatency`] holds set.
+//! machine-wide wake bound that `object::wake_latency` holds set.
 //!
 //! **A CPU with nothing declared waits in C1**, `hlt`, as it always has: that
 //! is the machine before its AML server has spoken, not a failure.
@@ -217,7 +217,7 @@ pub fn wait(armed: Option<Nanos>) {
     }
 }
 
-/// A [`WakeLatency`] object's bound, held until it goes.
+/// A `WakeLatencyObject`'s bound, held until it goes.
 pub fn hold(bound: u64) {
     let mut bounds = BOUNDS.lock();
     bounds.hold(bound);
