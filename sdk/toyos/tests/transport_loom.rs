@@ -309,9 +309,10 @@ use toyos::transport::session::{
 };
 
 /// Every session model explores its interleavings with at most this many
-/// preemptions unless `LOOM_MAX_PREEMPTIONS` names another bound, as the
-/// kernel's own models bound theirs.
-const PREEMPTIONS: usize = 5;
+/// preemptions unless `LOOM_MAX_PREEMPTIONS` names another bound: each
+/// mutation of `build/ci.rs`'s controls is red at two, and a holder's death
+/// is a stop of its own that takes no preemption.
+const PREEMPTIONS: usize = 3;
 
 fn bounded(model: impl Fn() + Sync + Send + 'static) {
     bounded_by(PREEMPTIONS, model);
@@ -971,13 +972,6 @@ fn a_source_registered_over_a_full_ring_as_a_reset_arrives_gets_its_first_event(
 // model below meets it dead at every point of its call, with a gate held or
 // not, and its departure is answered whenever the server's loop reads it.
 
-/// The two-holder models explore interleavings with at most this many
-/// preemptions. Each of their mutations is red at two already
-/// (`build/ci.rs`'s controls), and a death is a stop of its own that takes no
-/// preemption. At five the death sweeps alone ran past the host CI job's 45
-/// minutes; at three each model takes seconds.
-const TWO_HOLDERS: usize = 3;
-
 thread_local! {
     /// Whether a holder died in any execution of the model since the last
     /// [`whenever_it_dies`] count: loom runs every execution of a model, its
@@ -1007,7 +1001,7 @@ fn whenever_it_dies(model: impl Fn(Option<u32>)) {
 /// `transport-gate-no-want`, `transport-contended-no-arm` and
 /// `transport-want-before-arm` leave it asleep after the owner let go.
 fn two_writers(dies: Option<u32>) {
-    bounded_by(TWO_HOLDERS, move || {
+    bounded(move || {
         let (s, mut server) = Session::new(2);
         let net = {
             let s = Rc::clone(&s);
@@ -1061,7 +1055,7 @@ fn a_holder_waiting_for_the_gate_is_woken_by_its_owners_departure() {
 /// asleep for a gate the dead holder held; `transport-no-resume` has a holder
 /// read again what the other released.
 fn two_readers(dies: Option<u32>) {
-    bounded_by(TWO_HOLDERS, move || {
+    bounded(move || {
         let (s, mut server) = Session::new(2);
         s.publish_at(&mut server, 0, &[0xA, 0xB]);
         s.rings(server.finish(&s.page));
@@ -1108,7 +1102,7 @@ fn two_holders_read_each_byte_once() {
 /// shutdown.
 #[test]
 fn a_write_after_another_holders_shutdown_answers_shut() {
-    bounded_by(TWO_HOLDERS, || {
+    bounded(|| {
         let (s, mut server) = Session::new(2);
         let net = {
             let s = Rc::clone(&s);
@@ -1142,7 +1136,7 @@ fn a_write_after_another_holders_shutdown_answers_shut() {
 /// byte is published after the `end` the server saw. A shutdown under the
 /// writer's gate is the writer's to store, or its departure's.
 fn shutdown_racing_a_write(dies: Option<u32>) {
-    bounded_by(TWO_HOLDERS, move || {
+    bounded(move || {
         let (s, mut server) = Session::new(2);
         let net = {
             let s = Rc::clone(&s);
@@ -1205,11 +1199,10 @@ fn a_shutdown_racing_a_write_is_never_written_past_whenever_the_writer_dies() {
 /// before the room was released, which overstates and loses no wake, and
 /// every byte is read once. `transport-ungated-violation` ends a read over
 /// such a look. The stale head is a load loom answers with an older store,
-/// which takes no preemption, so its bound is two: at three it explores for
-/// over ten minutes, and its control is red at two.
+/// which takes no preemption: its control is red at none, so its bound is one.
 #[test]
 fn looks_without_the_gate_lose_no_wake() {
-    bounded_by(2, || {
+    bounded_by(1, || {
         let (s, mut server) = Session::new(2);
         s.publish_at(&mut server, 0, &[0xA, 0xB]);
         let net = {
