@@ -102,14 +102,9 @@ pub unsafe fn dealloc(ptr: *mut u8, layout: Layout) {
 
 #[inline]
 pub unsafe fn realloc(ptr: *mut u8, layout: Layout, new_size: usize) -> *mut u8 {
-    if mapped::resizes(layout, new_size) {
-        return unsafe { mapped::resize(ptr, layout, new_size) };
-    }
-    // SAFETY: `GlobalAlloc::realloc` requires `new_size` at this alignment to be a layout.
-    let new = unsafe { Layout::from_size_align_unchecked(new_size, layout.align()) };
-    if mapped::holds(layout) || mapped::holds(new) {
-        return unsafe { super::realloc_fallback(ptr, layout, new_size) };
-    }
-    let _lock = lock();
-    unsafe { (*DLMALLOC.get()).0.realloc(ptr, layout.size(), layout.align(), new_size) }
+    let small = || {
+        let _lock = lock();
+        unsafe { (*DLMALLOC.get()).0.realloc(ptr, layout.size(), layout.align(), new_size) }
+    };
+    unsafe { mapped::realloc(&crate::alloc::System, ptr, layout, new_size, small) }
 }

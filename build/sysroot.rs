@@ -25,11 +25,11 @@
 //! the primary's fork repository at the commit this tree pins and never moved ([`fork_checkout`]).
 //! `library/std` names `toyos-abi` and `toyos` by version, and every bootstrap
 //! run is handed this worktree's by one `[patch]` ([`std_patch`]); each file of
-//! its ToyOS backend, `sdk/std` and the C allocator `sdk/libc/src/malloc.rs`
-//! it includes, it names by a `#[path]` up out of the fork. So
-//! each checkout's std compiles against its own worktree's ABI and backend with
-//! nothing rewritten, and the fork names no path to either crate, so moving one
-//! breaks no fork commit pinned before the move. The build is bootstrap's
+//! its ToyOS backend, `sdk/std` and the allocator files of `sdk/libc/src` it
+//! includes (`malloc.rs`, `mapped.rs`), it names by a `#[path]` up out of the
+//! fork. So each checkout's std compiles against its own worktree's ABI and
+//! backend with nothing rewritten, and the fork names no path to either crate,
+//! so moving one breaks no fork commit pinned before the move. The build is bootstrap's
 //! stage-0 local rebuild: the compiler the checkout names (`build/compiler.rs`)
 //! compiles the checkout's `library/` for the guest targets into
 //! `<checkout>/build/toyos-std/`.

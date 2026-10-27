@@ -218,23 +218,8 @@ mod runtime {
             unsafe { DLMALLOC.lock().free(ptr, layout.size(), layout.align()) }
         }
         unsafe fn realloc(&self, ptr: *mut u8, layout: core::alloc::Layout, new_size: usize) -> *mut u8 {
-            if mapped::resizes(layout, new_size) {
-                return unsafe { mapped::resize(ptr, layout, new_size) };
-            }
-            // SAFETY: `GlobalAlloc::realloc` requires `new_size` at this alignment to be a layout.
-            let new = unsafe { core::alloc::Layout::from_size_align_unchecked(new_size, layout.align()) };
-            if !mapped::holds(layout) && !mapped::holds(new) {
-                return unsafe { DLMALLOC.lock().realloc(ptr, layout.size(), layout.align(), new_size) };
-            }
-            // Between the heap and a mapping of its own: moved, as the default does.
-            let moved = unsafe { self.alloc(new) };
-            if !moved.is_null() {
-                unsafe {
-                    core::ptr::copy_nonoverlapping(ptr, moved, layout.size().min(new_size));
-                    self.dealloc(ptr, layout);
-                }
-            }
-            moved
+            let small = || unsafe { DLMALLOC.lock().realloc(ptr, layout.size(), layout.align(), new_size) };
+            unsafe { mapped::realloc(self, ptr, layout, new_size, small) }
         }
     }
 }

@@ -2439,10 +2439,10 @@ pub unsafe fn vm_decommit(addr: *mut u8, len: usize) -> Result<(), SyscallError>
 
 /// Resize `[addr, addr + old_len)`, committed private memory of one
 /// protection that is not executable, to `new_len` bytes, both rounded up to
-/// whole pages, as Linux's `mremap` does: its pages keep their contents and a
-/// grown tail reads as zeros. It grows in place where the pages after it are
-/// free; otherwise, if `may_move`, its pages move to a new place, unmapped at
-/// the old, with nothing copied. A shrink gives back the tail in place.
+/// whole pages: its pages keep their contents and a grown tail reads as
+/// zeros. It grows in place where the pages after it are free; otherwise, if
+/// `may_move`, its pages move to a new place, unmapped at the old, with
+/// nothing copied. A shrink gives back the tail in place.
 /// Answers where the range is now. Refused, it is left as it was:
 /// `BadAddress` for a page no range holds, `InvalidArgument` for any other
 /// memory or a zero length, and `ResourceExhausted` where it has no room.
