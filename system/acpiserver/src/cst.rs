@@ -119,6 +119,7 @@ pub fn declare<K: Kernel>(aml: &mut Aml<'_, K>, kernel: &K, processor: &Processo
     let read = |aml: &mut Aml<'_, K>, method: &str| aml.interpreter.evaluate(&mut aml.host, &format!("{}.{method}", processor.path), &[]);
     let states = match read(aml, "_CST").map_err(|why| kind(&why)).and_then(|v| cst(&v)) {
         Ok(states) => states,
+        Err(_) if aml.host.stopping => return Err(Stopping),
         Err(why) => {
             census.unread.see(&format!("_CST: {why}"));
             println!("{OWN}{}._CST unread: {why}", processor.path);
@@ -128,6 +129,7 @@ pub fn declare<K: Kernel>(aml: &mut Aml<'_, K>, kernel: &K, processor: &Processo
     let software = if processor.csd {
         match read(aml, "_CSD").map_err(|why| kind(&why)).and_then(|v| csd(&v)) {
             Ok(software) => software,
+            Err(_) if aml.host.stopping => return Err(Stopping),
             Err(why) => {
                 census.unread.see(&format!("_CSD: {why}"));
                 println!("{OWN}{}._CSD unread, so none of its states is handed over: {why}", processor.path);

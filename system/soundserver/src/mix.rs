@@ -621,7 +621,7 @@ pub(crate) fn mix_thread(
                 // started: the marker has to precede whatever the backend logs
                 // about starting.
                 say!("soundserver: resumed");
-                wake_hold = Some(cap.hold_wake_latency(wake_bound).expect("the manifest declares this program `wake-latency`"));
+                wake_hold.replace(cap.hold_wake_latency(wake_bound).expect("the manifest declares this program `wake-latency`"));
             }
             backend.submit(idx, device_period_bytes);
             unplayed += 1;
@@ -672,7 +672,7 @@ pub(crate) fn mix_thread(
             dll.reset();
             backend.stop();
             started = false;
-            wake_hold = None;
+            drop(wake_hold.take());
             say!("soundserver: suspended");
         }
 
