@@ -304,6 +304,7 @@ pub fn init(cpu_id: u32) {
 /// "Additional MSRs associated with HWP may only be accessed after HWP is
 /// enabled, with the exception of IA32_HWP_INTERRUPT and MSR_PPERF".
 pub fn init_performance(cpu_id: u32) {
+    super::hw::scout_deep_idle(cpu_id);
     let Some(hwp) = hwp_declared(cpu_id) else { return };
     // SAFETY: `hwp_declared` admitted this CPU only where CPUID enumerates HWP,
     // and `IA32_HWP_INTERRUPT` where it enumerates that too; both values hold

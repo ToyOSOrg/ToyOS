@@ -11,11 +11,57 @@ use crate::hw::{report_contexts, KernelHw};
 use super::switch::context_switch;
 use crate::sched::payload::{KernelCtx, KernelPayload, Runs};
 
+/// SCOUT, measurement only, never lands: the MWAIT hint an idle CPU waits
+/// in, or `NO_DEEP_IDLE` for `sti; hlt`.
+static DEEP_IDLE_HINT: core::sync::atomic::AtomicU32 = core::sync::atomic::AtomicU32::new(NO_DEEP_IDLE);
+const NO_DEEP_IDLE: u32 = u32::MAX;
+
+/// The T14's `_CST` C2 entry, FFH MWAIT 0x31 (#870's comment of 2026-10-12).
+const SCOUT_HINT: u32 = 0x31;
+
+#[repr(align(64))]
+struct Line([u8; 64]);
+/// Armed by MONITOR and written by nothing: interrupts alone end the wait.
+static IDLE_LINE: Line = Line([0; 64]);
+
+/// SCOUT: the BSP takes `SCOUT_HINT` where this CPU's CPUID enumerates it
+/// and the break-on-masked-interrupt extension, and an always-running APIC
+/// timer; every CPU logs what it read.
+pub fn scout_deep_idle(cpu_id: u32) {
+    let monitor = cpu::cpuid(1, 0).2 & (1 << 3) != 0;
+    let (l5, arat) = if cpu::cpuid(0, 0).0 >= 5 { (cpu::cpuid(5, 0), cpu::leaf_6().0 & (1 << 2) != 0) } else { ((0, 0, 0, 0), false) };
+    let (_, _, ecx5, edx5) = l5;
+    let substates = (edx5 >> (4 * ((SCOUT_HINT >> 4) + 1))) & 0xf;
+    let ok = cpu::vendor() == kernel::cpu::Vendor::Intel
+        && monitor
+        && ecx5 & 0b11 == 0b11
+        && substates > (SCOUT_HINT & 0xf)
+        && arat;
+    crate::log!(
+        "scout_idle: cpu{cpu_id} monitor={monitor} leaf5={l5:x?} arat={arat} hint={SCOUT_HINT:#x} substates={substates} taken={ok}"
+    );
+    if cpu_id == 0 && ok {
+        DEEP_IDLE_HINT.store(SCOUT_HINT, core::sync::atomic::Ordering::Relaxed);
+    }
+}
+
 /// `sti; hlt`, the atomic enable-and-wait pair: a wake landing between the two is not lost.
 pub fn halt() {
     #[cfg(feature = "mask-windows")]
     if !cpu::interrupts_enabled() {
         crate::windows::irqs_unmasking();
+    }
+    let hint = DEEP_IDLE_HINT.load(core::sync::atomic::Ordering::Relaxed);
+    if hint != NO_DEEP_IDLE {
+        // SAFETY: CPUID enumerated MONITOR/MWAIT, the hint and ECX[0]
+        // (SDM Vol. 2B MWAIT, Table 1-2); MWAIT runs with interrupts masked
+        // and ECX[0] set, so an interrupt pending before it still ends it,
+        // and `sti; nop` delivers it before this returns.
+        unsafe {
+            asm!("monitor", in("rax") IDLE_LINE.0.as_ptr(), in("ecx") 0, in("edx") 0, options(nostack, readonly));
+            asm!("mwait", "sti", "nop", in("eax") hint, in("ecx") 1, options(nomem, nostack));
+        }
+        return;
     }
     // SAFETY: enables interrupts and waits for one; touches no memory.
     unsafe { asm!("sti; hlt", options(nomem, nostack)); }
