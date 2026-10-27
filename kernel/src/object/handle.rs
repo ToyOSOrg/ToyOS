@@ -181,8 +181,14 @@ pub struct HandleTable {
 }
 
 impl HandleTable {
-    pub const fn new() -> Self {
-        Self { slots: Vec::new(), free: Vec::new(), charge: Charge::NONE }
+    /// An empty table, its storage charged to `job` as it grows.
+    pub fn new(job: &Arc<kernel::sched::job::Job>) -> Self {
+        Self { slots: Vec::new(), free: Vec::new(), charge: Charge::none(job) }
+    }
+
+    /// The job its storage is charged to.
+    pub fn job(&self) -> &Arc<kernel::sched::job::Job> {
+        self.charge.job()
     }
 
     /// Make sure `n` more `install`s all succeed: `false`, with nothing

@@ -45,7 +45,7 @@ impl Page {
     /// A page of zeros, or `Exhausted`, charged before it is allocated with
     /// its place in its file.
     fn blank() -> Result<Self, Exhausted> {
-        let charge = Charge::new(charge::heap(core::alloc::Layout::new::<[u8; PAGE_SIZE]>()) + charge::arc::<Page>() + charge::map_entry::<u32, CachedPage>())?;
+        let charge = Charge::current(charge::heap(core::alloc::Layout::new::<[u8; PAGE_SIZE]>()) + charge::arc::<Page>() + charge::map_entry::<u32, CachedPage>())?;
         Ok(Self { bytes: blank_page(), _charge: charge })
     }
 
@@ -119,7 +119,7 @@ pub fn init() {
 
 /// Allocate a new FileId. The file cache is the sole allocator.
 pub fn create_file(evictable: bool, mtime: u64) -> Result<FileId, Exhausted> {
-    let charge = Charge::new(charge::map_entry::<FileId, CachedFile>())?;
+    let charge = Charge::current(charge::map_entry::<FileId, CachedFile>())?;
     let mut cache = FILE_CACHE.lock();
     let id = cache.next_id;
     cache.next_id += 1;
@@ -384,7 +384,7 @@ pub fn snapshot(file_id: FileId) -> Result<Snapshot, SyscallError> {
     if file.pages.len() > crate::mm::MAX_HEAP_ALLOC / core::mem::size_of::<(u32, PageData)>() {
         return Err(SyscallError::ResourceExhausted);
     }
-    let charge = Charge::new(charge::arc::<Snapshot>() + charge::array::<(u32, PageData)>(file.pages.len()))?;
+    let charge = Charge::current(charge::arc::<Snapshot>() + charge::array::<(u32, PageData)>(file.pages.len()))?;
     let pages = file.pages.iter().map(|(&idx, page)| (idx, Arc::clone(&page.data))).collect();
     Ok(Snapshot { size: file.size, pages, _charge: charge })
 }

@@ -82,7 +82,7 @@ An owner is an issue under `issues/`, or this track.
 
 | # | Item | Status | Owner | Blocked on |
 |---|---|---|---|---|
-| 13 | Process memory: 4 KiB pages, a ledger, demand paging, one mapping inventory, then private file mappings and coherent shared ones (owner direction, 2026-10-21; the design is out of the tree, under review) | direction set | `process-memory-in-4-kib-pages-still-copies-each-programs-text`, `nothing-charges-kernel-memory-to-a-process` | engineering: the design, with a wait and progress design for mapped pages without an automatic hang restart (owner, 2026-10-21) |
+| 13 | Process memory: 4 KiB pages, a ledger, demand paging, one mapping inventory, then private file mappings and coherent shared ones (owner direction, 2026-10-21; the design is out of the tree, under review) | direction set | `process-memory-in-4-kib-pages-still-copies-each-programs-text`, `no-physical-memory-fairness` | engineering: the design, with a wait and progress design for mapped pages without an automatic hang restart (owner, 2026-10-21) |
 | 14 | Record locks the file server serves, and std's and cargo's locks on them | direction set | `std-file-lock-answers-ok-and-locks-nothing`, `libc-refuses-what-toyos-cannot-yet-answer` | engineering: the lock design, part of 13's |
 | 15 | An unlinked open file lives until its last close or unmap | direction set | `an-unlinked-open-file-answers-stale` | 13 for the mapping |
 | 16 | An exclusive create on `/tmp` (`O_CREAT\|O_EXCL`, `create_new`): the kernel's `OpenFlags::EXCLUSIVE` | done | this track | — |

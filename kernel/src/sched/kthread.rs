@@ -74,7 +74,9 @@ pub fn is_kernel_task(id: TaskId) -> bool {
 
 /// Start a kernel thread running `body(arg)` on its own kernel stack and return its scheduler faces.
 pub fn spawn(name: &str, body: extern "C" fn(u64) -> !, arg: u64) -> ThreadSched {
-    let (stack, entry_sp) = crate::loader::alloc_kernel_stack(crate::loader::Start::Kernel { body, arg })
+    // A job of its own: a kernel thread is nobody's helper.
+    let job = crate::object::job::new_job();
+    let (stack, entry_sp) = crate::loader::alloc_kernel_stack(&job, crate::loader::Start::Kernel { body, arg })
         .unwrap_or_else(|| panic!("kthread: no kernel stack for {name}"));
 
     // Before the table lock: a panic holding the process table hangs the machine.
@@ -85,9 +87,6 @@ pub fn spawn(name: &str, body: extern "C" fn(u64) -> !, arg: u64) -> ThreadSched
     let mut short = [0u8; THREAD_NAME_LEN];
     let len = name.len().min(THREAD_NAME_LEN - 1);
     short[..len].copy_from_slice(&name.as_bytes()[..len]);
-    // A job of its own: a kernel thread is nobody's helper.
-    let job = crate::object::job::new_job();
-
     // One hold across insert and place: a visible pid already has its thread scheduled.
     let mut guard = PROCESS_TABLE.lock();
     let table = guard.as_mut().expect("kthread: spawned before process::init");
@@ -127,7 +126,7 @@ pub fn spawn(name: &str, body: extern "C" fn(u64) -> !, arg: u64) -> ThreadSched
 /// Every field is the empty value but its job: a kernel thread has no user half.
 fn kernel_process_data(name: &str, job: Arc<kernel::sched::job::Job>) -> ProcessData {
     ProcessData {
-        handles: crate::object::HandleTable::new(),
+        handles: crate::object::HandleTable::new(&job),
         cwd: String::from("/"),
         env: Vec::new(),
         elf: ElfInfo::none(),
@@ -136,8 +135,8 @@ fn kernel_process_data(name: &str, job: Arc<kernel::sched::job::Job>) -> Process
         spawn_ns: crate::clock::nanos_since_boot(),
         accounting: ProcessAccounting::default(),
         endowments: Endowments::empty(),
+        charge: crate::mm::charge::Charge::none(&job),
         job,
-        charge: crate::mm::charge::Charge::NONE,
     }
 }
 

@@ -10,7 +10,9 @@
 // executable (`mm::audit_wx`).
 
 use crate::log;
+use alloc::sync::Arc;
 use alloc::vec::Vec;
+use kernel::sched::job::Job;
 
 use kernel::pcid::{Alloc, Pcid, PcidPool};
 
@@ -139,8 +141,8 @@ const _: () = assert!(
 struct PageTablePage([u64; 512]);
 
 impl PageTablePage {
-    /// An empty table in a frame of its own, owned from here by the entry
-    /// that links it: [`free_table`] gives it back.
+    /// An empty table of the kernel's in a frame of its own, owned from here
+    /// by the entry that links it.
     fn new() -> &'static mut PageTablePage {
         let frame = crate::mm::pmm::alloc_frame().expect("paging: no frame for a page table");
         // SAFETY: a zeroed frame just allocated, so a table of empty entries
@@ -148,13 +150,13 @@ impl PageTablePage {
         unsafe { Self::from_phys_mut(frame.into_raw()) }
     }
 
-    /// A table of a user space, or `None` where taking a frame would cut into
-    /// what the kernel keeps (`pmm::alloc_table_frame`).
-    fn try_new() -> Option<&'static mut PageTablePage> {
-        let frame = crate::mm::pmm::alloc_table_frame()?;
+    /// A table of a user space, counted to `job`, or `None` where taking a
+    /// frame would cut into what is held back (`pmm::alloc_table_frame`).
+    fn try_new(job: &Job) -> Option<&'static mut PageTablePage> {
+        let phys = crate::mm::pmm::alloc_table_frame(job)?;
         // SAFETY: a zeroed frame just allocated, so a table of empty entries
         // nothing else names.
-        Some(unsafe { Self::from_phys_mut(frame.into_raw()) })
+        Some(unsafe { Self::from_phys_mut(phys) })
     }
 
     fn phys(&self) -> u64 {
@@ -457,11 +459,12 @@ fn alloc_pcid() -> Option<PcidGuard> {
     }
 }
 
-/// Give back a table [`PageTablePage::new`] made, which nothing links any more.
-fn free_table(phys: u64) {
-    // SAFETY: the caller unlinked the table, and every table is a frame
-    // `PageTablePage::new` gave up.
-    drop(unsafe { crate::mm::pmm::Frame::from_raw(phys) });
+/// Give back a table of `job`'s user space [`PageTablePage::try_new`] made,
+/// which nothing links any more.
+fn free_table(job: &Job, phys: u64) {
+    // SAFETY: the caller unlinked the table, after the shootdown that let
+    // every CPU stop walking it.
+    unsafe { crate::mm::pmm::free_table_frame(job, phys) };
 }
 
 /// The kernel half every space shares: PML4[256..511] and what they name.
@@ -783,13 +786,14 @@ impl Unlinked {
         self.head = phys;
     }
 
-    /// Free the tables, only after the shootdown that followed the unlink.
-    pub fn free(self) {
+    /// Free the tables of `job`'s space, only after the shootdown that
+    /// followed the unlink.
+    fn free(self, job: &Job) {
         let mut at = self.head;
         while at != 0 {
             // SAFETY: a table of the chain, which only this frees.
             let next = unsafe { PageTablePage::from_phys_mut(at) }.0[0];
-            free_table(at);
+            free_table(job, at);
             at = next;
         }
     }
@@ -805,15 +809,18 @@ pub struct UserTables {
     /// Owned for this space's life: dropping it returns a user tag, so two live
     /// spaces can never share one.
     pcid: PcidHandle,
+    /// The job its tables are counted to.
+    job: Arc<Job>,
 }
 
 impl UserTables {
     /// A new space with the kernel half copied in, or `None` when every user
-    /// PCID is held by a live space or no frame is free for its root.
-    pub fn new() -> Option<Self> {
-        let pml4 = PageTablePage::try_new()?;
+    /// PCID is held by a live space or no frame is free for its root. Its
+    /// tables are counted to `job`.
+    pub fn new(job: &Arc<Job>) -> Option<Self> {
+        let pml4 = PageTablePage::try_new(job)?;
         let Some(pcid) = alloc_pcid() else {
-            free_table(pml4.phys());
+            free_table(job, pml4.phys());
             return None;
         };
         let kernel = KERNEL.lock();
@@ -826,7 +833,7 @@ impl UserTables {
             );
             pml4.init_entry(slot, entry);
         }
-        Some(Self { root: pml4.phys(), pcid: PcidHandle::User(pcid) })
+        Some(Self { root: pml4.phys(), pcid: PcidHandle::User(pcid), job: Arc::clone(job) })
     }
 
     /// The kernel's own space, whose user half is empty: what a kernel thread
@@ -834,7 +841,7 @@ impl UserTables {
     pub fn kernel() -> Self {
         let root = KERNEL.lock().root;
         assert!(root != 0, "paging: the kernel's space before `init`");
-        Self { root, pcid: PcidHandle::Kernel }
+        Self { root, pcid: PcidHandle::Kernel, job: Arc::clone(crate::mm::charge::boot()) }
     }
 
     pub fn root(&self) -> Cr3 {
@@ -863,6 +870,7 @@ impl UserTables {
     /// built linked for an [`unlink`](Self::unlink). Only an empty entry is
     /// written, which owes nothing.
     pub fn build(&mut self, start: u64, end: u64) -> Option<u64> {
+        let job = Arc::clone(&self.job);
         let mut built = 0;
         let mut va = start & !(PAGE_2M - 1);
         while va < end {
@@ -870,7 +878,7 @@ impl UserTables {
             let mut level = self.root_table_mut();
             for index in [a, b, c] {
                 if level[index] & PAGE_PRESENT == 0 {
-                    let child = PageTablePage::try_new()?;
+                    let child = PageTablePage::try_new(&job)?;
                     level.write(index, va, child.phys() | TABLE_FLAGS).expect_install("build");
                     built += 1;
                 }
@@ -991,8 +999,14 @@ impl UserTables {
     /// Unlink every table over `[start, end)` whose span `needed` answers
     /// `false` for, and every table above one that is then empty; a table
     /// that still links anything stays. A table unlinked holds no leaf: a span
-    /// no range needs maps nothing. They are freed by [`Unlinked::free`],
+    /// no range needs maps nothing. They are freed by [`free`](Self::free),
     /// after the caller's shootdown.
+    /// Free tables [`unlink`](Self::unlink) took out, only after the
+    /// shootdown that followed it.
+    pub fn free(&self, unlinked: Unlinked) {
+        unlinked.free(&self.job);
+    }
+
     pub fn unlink(&mut self, start: u64, end: u64, needed: impl Fn(u64, u64) -> bool) -> Unlinked {
         let mut unlinked = Unlinked::none();
         let root = self.root_table_mut();
@@ -1046,8 +1060,8 @@ impl Drop for UserTables {
     fn drop(&mut self) {
         assert!(matches!(self.pcid, PcidHandle::User(_)), "paging: the kernel's address space dropped");
         let all = self.unlink(0, (ROOT_HIGH_HALF as u64) << 39, |_, _| false);
-        all.free();
-        free_table(self.root);
+        all.free(&self.job);
+        free_table(&self.job, self.root);
     }
 }
 

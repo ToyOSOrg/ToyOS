@@ -131,7 +131,15 @@ pub enum ImageRefused<E> {
 
 impl Image {
     /// `len` bytes, from `read` asked until it has given them all.
-    pub fn read<E>(
+    pub fn read<E>(len: u64, read: impl FnMut(&mut [u8]) -> Result<usize, E>) -> Result<Self, ImageRefused<E>> {
+        Self::read_for(None, len, read)
+    }
+
+    /// [`read`](Self::read), counted to the job `job` is a handle to, rather
+    /// than this process's: the program of a child started in it, which
+    /// keeps the image for as long as it runs.
+    pub fn read_for<E>(
+        job: Option<RawHandle>,
         len: u64,
         mut read: impl FnMut(&mut [u8]) -> Result<usize, E>,
     ) -> Result<Self, ImageRefused<E>> {
@@ -139,7 +147,11 @@ impl Image {
         if size == 0 {
             return Err(ImageRefused::Empty);
         }
-        let mut object = SharedMemory::create(size).map_err(ImageRefused::Memory)?;
+        let created = match job {
+            Some(job) => SharedMemory::create_for(job, size),
+            None => SharedMemory::create(size),
+        };
+        let mut object = created.map_err(ImageRefused::Memory)?;
         let bytes = object.as_mut_slice();
         let mut done = 0;
         while done < size {

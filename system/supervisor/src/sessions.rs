@@ -27,7 +27,7 @@ use toyos::ipc::{self, Connection, RxStep};
 use toyos::launch::LAUNCHER;
 use toyos::namespace::{self, Namespace};
 use toyos::poller::{Poller, READABLE};
-use toyos::port::{self, Acceptor};
+use toyos::port::{self, Acceptor, Connector};
 use toyos::{say, AsHandle, OwnedHandle, Pipe, RawHandle};
 use toyos_abi::syscall;
 use toyos_abi::Rights;
@@ -37,9 +37,6 @@ use toyos_session::{self as wire, Listed, Names, SignOut, SignOutSession, Starte
 use toyos_supervisor::sessions::{self as decide, Reopens};
 
 use crate::{exit_of, start, Caller, Extra, LaunchRx, Minting, Output, Pending, Port, Served, Supervisor};
-
-/// The name a session's controls namespace holds its control port under.
-const CONTROL: &str = "control";
 
 /// The login sessions the supervisor watches the owners of at once. Each
 /// owner is a process its loop watches, beside its services and `drives`
@@ -53,8 +50,8 @@ pub(crate) struct Login {
     /// The login authority's row that opened it.
     opener: &'static Program,
     pub owner: Child,
-    /// The supervisor's end of the owner's link.
-    pub link: Connection,
+    /// The supervisor's end of the owner's link, which the owner connects.
+    pub link: Link,
     rx: LaunchRx,
     /// The owner's handle to itself, which places a detached app under it.
     place: Option<OwnedHandle>,
@@ -62,30 +59,71 @@ pub(crate) struct Login {
     /// Held here alone, so the session's end closes it and a launch connected
     /// to it reads its end.
     pub launcher: Acceptor,
-    /// A connector to the session's control port, for each control connection
-    /// a login authority is handed.
-    controls: Namespace,
+    /// The session's control port, a namespace of which each login
+    /// authority is handed to connect its own control connection through.
+    controls: Connector,
     /// Whether the screen's row opened it: the desktop's.
     desktop: bool,
     state: State,
     waiting: Names,
 }
 
-/// The desktop session's launcher and a control connection to it, minted for
-/// one start of the screen's row.
+/// The desktop session's launcher and its controls, minted for one start of
+/// the screen's row.
 pub(crate) struct Desktop {
     pub launcher: Namespace,
-    pub control: Connection,
+    pub control: Namespace,
+}
+
+/// A session owner's link: the port the owner connects, until it has, and
+/// then the connection. The owner connects, so the link is counted to its
+/// job.
+pub(crate) enum Link {
+    Waiting(Acceptor),
+    Open(Connection),
+}
+
+impl Link {
+    /// What the loop watches for the owner's word, or its connect.
+    pub fn handle(&self) -> RawHandle {
+        match self {
+            Self::Waiting(acceptor) => acceptor.as_handle(),
+            Self::Open(conn) => conn.as_handle(),
+        }
+    }
+
+    /// The connection, taken off the port first if the owner has connected.
+    fn open(&mut self) -> Option<&Connection> {
+        if let Self::Waiting(acceptor) = self {
+            match acceptor.try_accept() {
+                Ok(Some(conn)) => *self = Self::Open(conn),
+                Ok(None) => return None,
+                Err(e) => {
+                    say!("supervisor: a session owner's link was not accepted ({e:?})");
+                    return None;
+                }
+            }
+        }
+        self.conn()
+    }
+
+    /// The connection, once the owner has connected.
+    fn conn(&self) -> Option<&Connection> {
+        match self {
+            Self::Open(conn) => Some(conn),
+            Self::Waiting(_) => None,
+        }
+    }
 }
 
 impl Login {
-    /// `opener`'s launcher in this session, and a control connection to it.
-    fn handed_to(&self, opener: &Program) -> Result<(Namespace, Connection), String> {
+    /// `opener`'s launcher in this session, and its controls to connect to.
+    fn handed_to(&self, opener: &Program) -> Result<(Namespace, Namespace), String> {
         let badge = Authority { row: opener.name.clone(), session: self.session }.encode();
         let connector = self.launcher.mint(&badge).map_err(|e| format!("no launcher was minted ({e:?})"))?;
         let launcher = namespace::build().add(LAUNCHER, &connector).finish().map_err(|e| format!("{e:?}"))?;
-        let control = self.controls.open(CONTROL).map_err(|e| format!("no control connection ({e:?})"))?;
-        Ok((launcher, control))
+        let controls = namespace::build().add(wire::CONTROL, &self.controls).finish().map_err(|e| format!("{e:?}"))?;
+        Ok((launcher, controls))
     }
 }
 
@@ -128,7 +166,11 @@ impl Logins {
     /// is said.
     pub fn tell_all(&self, msg_type: u32) {
         for login in &self.open {
-            if let Err(e) = login.link.try_signal(msg_type) {
+            let Some(link) = login.link.conn() else {
+                say!("supervisor: session {}'s owner has not connected its link, and is not told {msg_type}", login.session.share());
+                continue;
+            };
+            if let Err(e) = link.try_signal(msg_type) {
                 say!("supervisor: session {}'s owner was not told {msg_type} ({e:?})", login.session.share());
             }
         }
@@ -261,14 +303,11 @@ impl Supervisor<'_> {
         let (launcher, _) = port::create().map_err(|e| format!("no launcher port ({e:?})"))?;
         let (controls_acceptor, controls_connector) = port::create().map_err(|e| format!("no control port ({e:?})"))?;
         let (link_acceptor, link_connector) = port::create().map_err(|e| format!("no link ({e:?})"))?;
-        let links = namespace::build().add(CONTROL, &link_connector).finish().map_err(|e| format!("{e:?}"))?;
-        let link = links.open(CONTROL).map_err(|e| format!("the link would not open ({e:?})"))?;
-        let owner_end = link_acceptor.accept().map_err(|e| format!("the link was not accepted ({e:?})"))?;
-        let controls = namespace::build().add(CONTROL, &controls_connector).finish().map_err(|e| format!("{e:?}"))?;
+        let link = namespace::build().add(wire::LINK, &link_connector).finish().map_err(|e| format!("{e:?}"))?;
         let accepting = syscall::dup(launcher.as_handle()).map_err(|e| format!("no copy of its launcher ({e:?})"))?;
         let extra = Extra {
             endow: vec![
-                (wire::LINK_LABEL, owner_end.into_raw()),
+                (wire::LINK_LABEL, link.into_raw()),
                 (wire::LAUNCHER_ACCEPTOR_LABEL, accepting),
                 (wire::CONTROL_ACCEPTOR_LABEL, controls_acceptor.into_raw()),
             ],
@@ -277,6 +316,7 @@ impl Supervisor<'_> {
         self.make_state_dir(owner_row);
         let minting = Minting { minted: &self.minted, session, launches: None };
         let served = Served::Keep { acceptors: &[], owed: &[] };
+        let job = crate::job_for(self.syscap, owner_row).map_err(|e| format!("no job for its owner: {e}"))?.into_raw();
         let (owner, _) = start(
             Command::new(path),
             owner_row,
@@ -288,7 +328,7 @@ impl Supervisor<'_> {
             &[],
             extra,
             minting,
-            Output::Boot(&mut self.log),
+            Output::Boot { log: &mut self.log, job },
         )
         .map_err(|e| format!("its owner did not start: {e}"))?;
         say!("supervisor: session {} opened for {}, owned by pid {}", session.share(), opener.name, owner.id());
@@ -296,11 +336,11 @@ impl Supervisor<'_> {
             session,
             opener,
             owner,
-            link,
+            link: Link::Waiting(link_acceptor),
             rx: LaunchRx::new(),
             place: None,
             launcher,
-            controls,
+            controls: controls_connector,
             desktop,
             state: State::Active,
             waiting: Names::default(),
@@ -358,9 +398,9 @@ impl Supervisor<'_> {
             .map_or_else(|| self.open_session(opener), Ok)
             .and_then(|at| self.logins.open[at].handed_to(opener));
         match answered {
-            Ok((ns, control)) => {
-                // SAFETY: the namespace's own handle, given up here and to nothing else.
-                let handles = [unsafe { OwnedHandle::from_raw(ns.into_raw()) }, control.into_owned()];
+            Ok((ns, controls)) => {
+                // SAFETY: the two namespaces' own handles, given up here and to nothing else.
+                let handles = unsafe { [OwnedHandle::from_raw(ns.into_raw()), OwnedHandle::from_raw(controls.into_raw())] };
                 if let Err(e) = conn.try_signal_with(wire::MSG_OPENED, handles) {
                     say!("supervisor: login: {}'s session was opened and not answered ({e:?})", opener.name);
                 }
@@ -378,7 +418,8 @@ impl Supervisor<'_> {
         for at in 0..self.logins.open.len() {
             loop {
                 let login = &mut self.logins.open[at];
-                let (msg_type, payload, batch) = match login.rx.pump(&login.link) {
+                let Some(link) = login.link.open() else { break };
+                let (msg_type, payload, batch) = match login.rx.pump(link) {
                     RxStep::Idle | RxStep::Eof => break,
                     // The supervisor's own child broke its protocol: the session
                     // ends with it, as a failure.
@@ -448,7 +489,11 @@ impl Supervisor<'_> {
         let started = Started { instance, name: name.to_string() };
         // SAFETY: a duplicate made above, which nothing else answers for.
         let managed = unsafe { OwnedHandle::from_raw(managed) };
-        if let Err(e) = login.link.try_send_bytes_with(wire::MSG_STARTED, &started.encode(), [managed]) {
+        let sent = match login.link.conn() {
+            Some(link) => link.try_send_bytes_with(wire::MSG_STARTED, &started.encode(), [managed]).map_err(|e| format!("{e:?}")),
+            None => Err("its link is not connected".to_string()),
+        };
+        if let Err(e) = sent {
             say!("supervisor: session {}'s owner was not told of {name} ({e:?})", session.share());
         }
         // SAFETY: as above.
@@ -461,7 +506,9 @@ impl Supervisor<'_> {
         while self.watch.ended.read_nonblock(&mut drained).is_ok_and(|n| n > 0) {}
         while let Ok((instance, session)) = self.watch.ends.try_recv() {
             if let Some(login) = self.logins.of(session) {
-                let _ = login.link.try_send_bytes(wire::MSG_ENDED, &instance.to_le_bytes());
+                if let Some(link) = login.link.conn() {
+                    let _ = link.try_send_bytes(wire::MSG_ENDED, &instance.to_le_bytes());
+                }
             }
         }
     }
@@ -539,6 +586,8 @@ impl Supervisor<'_> {
                 let SignOut { force } = asked.sign_out;
                 login
                     .link
+                    .conn()
+                    .ok_or_else(|| format!("session {}'s owner has not connected its link", asked.share))?
                     .try_send_bytes(wire::MSG_SIGN_OUT, &asked.sign_out.encode())
                     .map_err(|e| format!("session {}'s owner was not asked ({e:?})", asked.share))?;
                 Ok(format!("session {} is asked to sign out{}", asked.share, if force { ", by force" } else { "" }))

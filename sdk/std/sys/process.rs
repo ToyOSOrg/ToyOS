@@ -140,7 +140,7 @@ impl Command {
         if !kept {
             self.image = None;
             if self.boot_image.is_none() && crate::sys::fs::is_served(Path::new(&source)) {
-                let image = crate::sys::fs::read_image(Path::new(&source))?;
+                let image = crate::sys::fs::read_image(Path::new(&source), self.endowed_job())?;
                 self.image = Some((source, image));
             }
         }
@@ -211,6 +211,12 @@ impl Command {
     fn inherit(&mut self, child_fd: u32, handle: u32, kind: toyos::fd::Kind) {
         self.extra_fds.retain(|&(fd, _, _)| fd != child_fd);
         self.extra_fds.push((child_fd, handle, kind));
+    }
+
+    /// The job the child is endowed to run in, which its program image is
+    /// read for: the child keeps the image as long as it runs.
+    fn endowed_job(&self) -> Option<toyos::RawHandle> {
+        self.endowments.iter().find(|(label, _)| label == toyos::job::JOB_LABEL).map(|(_, handle)| toyos::RawHandle(*handle))
     }
 
     /// Give the child `handle` under the name `label`.
@@ -376,8 +382,9 @@ impl Command {
             toyos::spawn::Start::Helper(helper) => helper,
         };
         // A program on a file server is taken here as the memory object its
-        // server holds it in, or read into one of this process's own, which
-        // the kernel pages the child from: it opens only what it serves itself.
+        // server holds it in, or read into one counted to the job the child is
+        // endowed to run in or else to this process's, which the kernel pages
+        // the child from: it opens only what it serves itself.
         let source = Path::new(image_path.unwrap_or(program));
         let image = match (prepared_image, self.boot_image) {
             (Some(image), _) => Some(image),
@@ -385,12 +392,15 @@ impl Command {
                 let copy = toyos_abi::syscall::dup(toyos_abi::RawHandle(handle)).map_err(crate::sys::to_io_error)?;
                 // SAFETY: `dup` answered a fresh handle nothing else answers for.
                 let copy = unsafe { toyos::OwnedHandle::from_raw(copy) };
-                let region = toyos::shm::Immutable::adopt(copy).map_err(|why| {
-                    io::Error::new(io::ErrorKind::InvalidInput, format!("the boot image is no immutable region: {why}"))
+                let region = toyos::shm::Immutable::adopt(copy).map_err(|why| match why {
+                    toyos::shm::NotImmutable::Kernel(e) => crate::sys::to_io_error(e),
+                    toyos::shm::NotImmutable::Writable => {
+                        io::const_error!(io::ErrorKind::InvalidInput, "the boot image is no immutable region")
+                    }
                 })?;
                 Some(toyos::process::Image::immutable(region))
             }
-            (None, None) if crate::sys::fs::is_served(source) => Some(crate::sys::fs::read_image(source)?),
+            (None, None) if crate::sys::fs::is_served(source) => Some(crate::sys::fs::read_image(source, self.endowed_job())?),
             (None, None) => None,
         };
         let spawned = helper.spawn(image.as_ref());

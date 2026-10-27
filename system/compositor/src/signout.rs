@@ -72,8 +72,12 @@ impl Desktop {
             .name("launcher".into())
             .spawn(move || launcher(queue, login, sent, woken))
             .expect("compositor: no thread to launch on");
+        // Connected here, so the control connection is the compositor's own.
+        let control = endowed.take::<Namespace>(wire::CONTROL_LABEL).and_then(|controls| {
+            controls.open(wire::CONTROL).inspect_err(|why| eprintln!("compositor: its session's controls refused it: {why}")).ok()
+        });
         let mut desktop = Self {
-            control: endowed.take::<Connection>(wire::CONTROL_LABEL),
+            control,
             rx: ipc::FrameRx::new(),
             waiting: None,
             stopping: false,

@@ -182,6 +182,7 @@ pub fn init(memory_map: &'static [MemoryMapEntry], reserved: &[Region], image: &
     pmm::init(memory_map, reserved);
     DIRECT_MAP_END.set(paging::init(memory_map, crate::drivers::panic_console::scanout(), image));
     alloc::init();
+    charge::init();
     paging::seal_kernel_half();
     space::init_kernel();
 }

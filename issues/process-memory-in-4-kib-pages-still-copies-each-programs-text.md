@@ -84,9 +84,8 @@ live split of a user leaf.
    frames when it is made, and every other allocation is refused rather than
    take a promised frame (`kernel::frames`), so a commitment past what memory
    holds is refused at the call, not at a fault; its page tables are taken
-   then too. Kernel objects a process makes are still drawn from the frames
-   no commitment may promise, uncharged
-   (`issues/nothing-charges-kernel-memory-to-a-process.md`).
+   then too. Kernel objects a process makes are charged to its job
+   (`kernel/src/mm/charge.rs`).
 5. **Shared text.** A spawn copies each page of its program's segments into
    the process at the page's first touch, out of the image object or out of
    a snapshot of its `/tmp` file; no fault reads a file. A ROOT program's

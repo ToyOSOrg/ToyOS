@@ -74,7 +74,7 @@ pub struct TmpFs {
 
 /// The charge of `name` holding an entry that keeps `kept` heap bytes besides.
 fn name_charge(name: &str, kept: usize) -> Result<Charge, SyscallError> {
-    Ok(Charge::new(charge::map_entry::<String, (Entry, Charge)>() + charge::array::<u8>(name.len()) + kept)?)
+    Ok(Charge::current(charge::map_entry::<String, (Entry, Charge)>() + charge::array::<u8>(name.len()) + kept)?)
 }
 
 /// The heap a file's entry keeps besides its name.

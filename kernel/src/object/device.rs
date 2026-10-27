@@ -160,9 +160,10 @@ pub struct ConsoleObject {
 }
 
 impl ConsoleObject {
-    pub fn new() -> Result<Arc<Self>, Exhausted> {
+    /// A console of its own for a holder in `job`, charged to it.
+    pub fn new(job: &Arc<kernel::sched::job::Job>) -> Result<Arc<Self>, Exhausted> {
         Ok(Arc::new(Self {
-            core: Self::new_core(0)?,
+            core: Self::new_core_for(job, 0)?,
             line: crate::sync::Lock::new(crate::drivers::serial::ConsoleLine::new()),
         }))
     }
