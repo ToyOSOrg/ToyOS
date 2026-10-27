@@ -8,10 +8,8 @@
 //!
 //! **Everything here on the idle path is the CPU's own and lock-free**: the
 //! declaration is a seqlock its CPU reads, the bound one atomic word, and what
-//! the CPU learned of its wakes ([`Own`]) touched by that CPU alone, between
-//! the pass's final interrupts-off check and its next pass.
+//! the CPU learned of its wakes two words that CPU alone writes.
 
-use core::cell::UnsafeCell;
 use core::sync::atomic::{AtomicU64, Ordering};
 
 use kernel::sched::hw::Nanos;
@@ -36,7 +34,10 @@ pub struct Local {
     table: Published<WORDS>,
     /// What the CPU can enter, read by it at its first idle; `None` before.
     facts: Lock<Option<toyos_userbound::idle::CpuIdle>>,
-    own: OwnCell,
+    /// What the CPU learned of its wakes (`History::bits`), and the
+    /// declaration it learned it under.
+    history: AtomicU64,
+    learned_under: AtomicU64,
     /// Idle periods spent in a declared state, and their nanoseconds.
     deep: AtomicU64,
     deep_nanos: AtomicU64,
@@ -47,7 +48,8 @@ impl Local {
         Self {
             table: Published::new(),
             facts: Lock::new(None),
-            own: OwnCell(UnsafeCell::new(Own { history: History::default(), generation: 0 })),
+            history: AtomicU64::new(0),
+            learned_under: AtomicU64::new(0),
             deep: AtomicU64::new(0),
             deep_nanos: AtomicU64::new(0),
         }
@@ -57,28 +59,6 @@ impl Local {
     pub fn deep(&self) -> (u64, u64) {
         (self.deep.load(Ordering::Relaxed), self.deep_nanos.load(Ordering::Relaxed))
     }
-}
-
-struct Own {
-    history: History,
-    /// The declaration [`Self::history`] learned under.
-    generation: u64,
-}
-
-struct OwnCell(UnsafeCell<Own>);
-
-// SAFETY: reached only through `own`, by the CPU whose record holds it, from its idle path.
-unsafe impl Sync for OwnCell {}
-
-/// This CPU's [`Own`].
-///
-/// # Safety
-/// The caller is this CPU's idle path, which nothing re-enters: an interrupt
-/// taken on an idle CPU runs no pass (`scheduler::do_preempt`) and no idle
-/// code.
-unsafe fn own() -> &'static mut Own {
-    // SAFETY: as the function's contract.
-    unsafe { &mut *crate::cpu_local::here().idle.own.0.get() }
 }
 
 /// Read what this CPU can enter: called by each CPU as it first enters its
@@ -175,20 +155,19 @@ static BOUNDS: Lock<Bounds> = Lock::new(Bounds::new());
 /// in the state this idle period chooses; returns once an interrupt has been
 /// taken. The kernel's `Machine::idle_wait`.
 pub fn wait(armed: Option<Nanos>) {
-    // SAFETY: this is the CPU's idle path (`Machine::idle_wait`).
-    let own = unsafe { own() };
     let local = &crate::cpu_local::here().idle;
+    let mut history = History::from_bits(local.history.load(Ordering::Relaxed));
     let now = crate::clock::nanos_since_boot();
     // A declaration mid-publication is this period in C1, and the next reads it.
     let declared = local.table.snapshot().map(|words| decode(&words));
     let (len, costs) = declared.as_ref().map_or((0, &[][..]), |d| (d.len, &d.costs[..d.len]));
-    if let Some(d) = declared.as_ref().filter(|d| d.generation != own.generation) {
-        own.history.forget();
-        own.generation = d.generation;
+    if let Some(d) = declared.as_ref().filter(|d| d.generation != local.learned_under.load(Ordering::Relaxed)) {
+        history.forget();
+        local.learned_under.store(d.generation, Ordering::Relaxed);
     }
     let horizon = armed.map(|at| at.0.saturating_sub(now));
     let limit = Some(LIMIT.load(Ordering::Relaxed)).filter(|&l| l != u64::MAX);
-    let choice = idle::choose(costs, &own.history, horizon, limit);
+    let choice = idle::choose(costs, &history, horizon, limit);
     crate::sched::driver::publish_idle_exit(choice.state.map_or(0, |state| costs[state].exit));
     // The deadline met rather than made late by the state's exit: the timer
     // fires that much early, and the pass it brings finds nothing due and
@@ -213,8 +192,9 @@ pub fn wait(armed: Option<Nanos>) {
     // the instant it was armed for; a revisit is a period the history learns.
     let foreseen = fires.is_some_and(|fires| now + slept >= fires);
     if !foreseen && len > 0 {
-        own.history.unforeseen(costs, slept);
+        history.unforeseen(costs, slept);
     }
+    local.history.store(history.bits(), Ordering::Relaxed);
 }
 
 /// A `WakeLatencyObject`'s bound, held until it goes.

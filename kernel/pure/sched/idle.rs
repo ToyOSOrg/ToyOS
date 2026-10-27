@@ -65,6 +65,15 @@ impl History {
         *self = Self::default();
     }
 
+    /// The whole history as one word, for a CPU to keep in an atomic of its own.
+    pub const fn bits(&self) -> u64 {
+        u64::from_le_bytes(self.early)
+    }
+
+    pub const fn from_bits(bits: u64) -> Self {
+        Self { early: bits.to_le_bytes() }
+    }
+
     fn admits(&self, state: usize) -> bool {
         self.early[state].count_ones() <= EARLY_ALLOWED
     }
