@@ -2569,7 +2569,8 @@ impl<M: SchedMsg> CpuHandles<M> {
     pub fn idle_near(&self, me: CpuId, from: usize, usable: impl Fn(&CpuHandle<M>) -> bool) -> Option<CpuId> {
         for (inner, outer) in IDLE_GROUPS {
             // The best of each tier, as (exit, cpu): strictly less replaces, so the first of equals stays.
-            let (mut free_core, mut shared_core): (Option<(u64, CpuId)>, Option<(u64, CpuId)>) = (None, None);
+            let mut free_core: Option<(u64, CpuId)> = None;
+            let mut shared_core: Option<(u64, CpuId)> = None;
             for cpu in self.topology.ring(me, inner, outer, from) {
                 let handle = self.get(cpu);
                 if !usable(handle) {

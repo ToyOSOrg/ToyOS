@@ -204,8 +204,8 @@ mod tests {
     #[test]
     fn every_shape_of_record_reads_back_as_written() {
         for r in [
-            record(false, [Some(1), Some(u64::from(u32::MAX)), Some(3), Some(u64::MAX), Some(0), Some(0x8000_2a04), Some(6), Some(0), Some(2), Some(31_936)]),
-            record(true, [Some(9), None, None, None, Some(4), None, Some(0x8000_ff01), None, Some(0), None]),
+            record(false, [Some(1), Some(u64::from(u32::MAX)), Some(3), Some(u64::MAX), Some(0), Some(0x8000_2a04), Some(6), Some(0), Some(2), Some(31_936), Some(0), Some(7_000_000)]),
+            record(true, [Some(9), None, None, None, Some(4), None, Some(0x8000_ff01), None, Some(0), None, Some(12), None]),
             record(true, [None; Counter::COUNT]),
         ] {
             assert_eq!(Record::decode(&r.encode()), Ok(r));
@@ -215,7 +215,7 @@ mod tests {
     /// Absent is not zero: a zero that is there reads back there.
     #[test]
     fn a_present_zero_is_not_an_absent_counter() {
-        let r = record(false, [Some(5), Some(0), None, None, None, None, None, None, None, None]);
+        let r = record(false, [Some(5), Some(0), None, None, None, None, None, None, None, None, None, None]);
         assert_eq!(Record::decode(&r.encode()).unwrap().get(Counter::Smi), Some(0));
         assert_eq!(Record::decode(&r.encode()).unwrap().get(Counter::Aperf), None);
     }
@@ -232,7 +232,7 @@ mod tests {
 
     #[test]
     fn a_word_under_an_absent_counter_is_refused() {
-        let mut raw = record(false, [Some(1), None, None, None, None, None, None, None, None, None]).encode();
+        let mut raw = record(false, [Some(1), None, None, None, None, None, None, None, None, None, None, None]).encode();
         raw.0[16 + 8 * Counter::Mperf as usize] = 1;
         assert_eq!(Record::decode(&raw), Err(Undecodable::Absent(Counter::Mperf)));
     }
