@@ -3,12 +3,12 @@
 //!
 //! **A growing write is two writes: the chain, then the directory entry.**
 //! Between them the volume holds clusters its entry does not reach, which
-//! fatgen103 refuses, so every open file is brought level — its entry written,
-//! its chain reconciled — at its last close, at an fsync and at a sync, as
-//! the kernel's adapter did. **The two are a cache flush apart**: the cache
-//! writes lowest block first and the disk keeps no order until a flush, so an
-//! entry put into the cache beside its chain and data would reach the disk
-//! before the clusters it names.
+//! fatgen103 refuses, so an open file changed since it was last level is
+//! brought level — its entry written and stamped, its chain reconciled — at
+//! its last close, at an fsync and at a sync. **The two are a cache flush
+//! apart**: the cache writes lowest block first and the disk keeps no order
+//! until a flush, so an entry put into the cache beside its chain and data
+//! would reach the disk before the clusters it names.
 //!
 //! **A create makes the directories on its way**, as the kernel's did: a log
 //! file's path is its own, and FAT has the directories to carry it. A
@@ -38,7 +38,8 @@ struct Open {
     file: toyos_fat32::File,
     holders: u32,
     gone: bool,
-    /// Written or resized since its entry was last brought level.
+    /// Written, resized or opened truncating since its entry was last
+    /// brought level.
     dirty: bool,
 }
 
@@ -132,11 +133,12 @@ impl<D: Disk> FatVolume<D> {
     /// Bring one open file's entry level with its chain, stamped now, when
     /// it changed since the entry was last written.
     fn level(&mut self, node: Node) -> Result<(), fs::Error> {
-        let time = self.time();
-        let Some(open) = self.open.get_mut(&node) else { return Ok(()) };
-        if open.gone || !open.dirty {
-            return Ok(());
+        match self.open.get(&node) {
+            Some(open) if !open.gone && (open.dirty || open.file.needs_reconcile()) => {}
+            _ => return Ok(()),
         }
+        let time = self.time();
+        let open = self.open.get_mut(&node).expect("just found");
         // The chain and the data on the disk before the entry that reaches
         // them is in the cache.
         if open.file.needs_reconcile() {
@@ -250,6 +252,8 @@ impl<D: Disk> Volume for FatVolume<D> {
         };
         self.open.get_mut(&node).expect("just found or made").holders += 1;
         if how.truncate {
+            // POSIX's `open` stamps a truncated file even when it was empty.
+            self.open.get_mut(&node).expect("just found or made").dirty = true;
             if let Err(e) = self.truncate(node, 0) {
                 // A refused close is said, and its node kept for the next sync.
                 let _ = self.close(node);
