@@ -471,7 +471,9 @@ after the initialisation has run, before the press.
 deep idle states take the interpreter's missing `Load` and `_OSC`/`_PDC`
 first or wait for this track: "finish aml then continue working on deep idle
 states". What finished is, and the slices below and their order, are #875's
-design, not his.
+design, not his. **Superseded** (owner, 2026-10-27): deep idle is built now,
+not after this track, on branch `deep-idle`
+(`issues/idle-cpus-enter-the-c-states-cst-names.md`).
 
 **Finished** is held to ACPI 6.5, and to Intel's Processor Vendor-Specific
 ACPI Interface Specification (302223-007) for a processor's `_OSC` on Intel:
