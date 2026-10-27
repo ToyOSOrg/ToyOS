@@ -38,6 +38,8 @@ struct Open {
     file: toyos_fat32::File,
     holders: u32,
     gone: bool,
+    /// Written or resized since its entry was last brought level.
+    dirty: bool,
 }
 
 /// The disk's `ReadOnly` reaches `toyos-fat32` as a refused write, which it
@@ -127,11 +129,12 @@ impl<D: Disk> FatVolume<D> {
         Ok(open)
     }
 
-    /// Bring one open file's entry level with its chain.
+    /// Bring one open file's entry level with its chain, stamped now, when
+    /// it changed since the entry was last written.
     fn level(&mut self, node: Node) -> Result<(), fs::Error> {
         let time = self.time();
         let Some(open) = self.open.get_mut(&node) else { return Ok(()) };
-        if open.gone {
+        if open.gone || !open.dirty {
             return Ok(());
         }
         // The chain and the data on the disk before the entry that reaches
@@ -143,6 +146,7 @@ impl<D: Disk> FatVolume<D> {
         if open.file.needs_reconcile() {
             self.cache.block_on(self.fs.reconcile(&mut open.file, time)).map_err(|e| logged("a reconcile", &open.path, e))?;
         }
+        open.dirty = false;
         Ok(())
     }
 
@@ -239,7 +243,7 @@ impl<D: Disk> Volume for FatVolume<D> {
                 };
                 let node = self.next;
                 self.next += 1;
-                self.open.insert(node, Open { path: path.to_string(), file, holders: 0, gone: false });
+                self.open.insert(node, Open { path: path.to_string(), file, holders: 0, gone: false, dirty: false });
                 self.by_path.insert(path.to_string(), node);
                 node
             }
@@ -302,6 +306,7 @@ impl<D: Disk> Volume for FatVolume<D> {
         if open.gone {
             return Err(fs::Error::Stale);
         }
+        open.dirty = true;
         self.cache.block_on(self.fs.write(&mut open.file, offset, data)).map_err(|e| logged("write", &open.path, e))
     }
 
@@ -313,6 +318,7 @@ impl<D: Disk> Volume for FatVolume<D> {
         if open.file.len() == size {
             return Ok(());
         }
+        open.dirty = true;
         self.cache.block_on(self.fs.set_len(&mut open.file, size)).map_err(|e| logged("set_len", &open.path, e))
     }
 
@@ -522,6 +528,51 @@ mod tests {
         v.close(a).unwrap();
         evict(&v);
         assert_eq!(v.lstat("a.txt").unwrap().mtime, 1_717_245_300 * NANOS_PER_SEC);
+    }
+
+    /// What [`a_sync_of_files_nothing_changed_asks_the_disk_nothing`]'s volume
+    /// reads as the time, which only that test sets.
+    static LATER: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
+    /// Once a sync has made a file durable, a sync, an fsync or a close that
+    /// finds it and every other file unchanged asks the disk for nothing and
+    /// restamps no entry; the next write is stamped and written at its sync.
+    #[test]
+    fn a_sync_of_files_nothing_changed_asks_the_disk_nothing() {
+        use std::sync::atomic::Ordering::Relaxed;
+        const CREATE: OpenHow = OpenHow { create: true, create_new: false, truncate: false };
+        const OPEN: OpenHow = OpenHow { create: false, create_new: false, truncate: false };
+        let spec = spec_volume::fixture();
+        let mut image = spec.bytes.clone();
+        image.resize(spec.bytes.len().div_ceil(BLOCK) * BLOCK, 0);
+        let epochs: Epochs = Rc::new(std::cell::RefCell::new(vec![Vec::new()]));
+        let disk = Traced { image: Bytes::new(image), epochs: Rc::clone(&epochs) };
+        LATER.store(1_717_245_296 * NANOS_PER_SEC, Relaxed);
+        let mut v = FatVolume::mount(disk, true, || LATER.load(Relaxed)).unwrap();
+        let a = v.open("a.txt", CREATE).unwrap();
+        v.write(a, 0, &[1; 3000]).unwrap();
+        assert_eq!(v.sync(), Ok(Vec::new()));
+        let durable = epochs.borrow().clone();
+        assert!(durable.last().is_some_and(Vec::is_empty), "the sync ended with a flush");
+
+        LATER.store(1_717_245_310 * NANOS_PER_SEC, Relaxed);
+        let stamped = v.lstat("short.txt").unwrap().mtime;
+        let short = v.open("short.txt", OPEN).unwrap();
+        let mut out = vec![0u8; 100];
+        assert_eq!(v.read(short, 0, &mut crate::volume::Buf(&mut out)), Ok(100));
+        v.close(short).unwrap();
+        assert_eq!(v.sync(), Ok(Vec::new()));
+        assert_eq!(v.sync(), Ok(Vec::new()));
+        assert!(*epochs.borrow() == durable, "a sync with nothing changed wrote or flushed the disk");
+        assert_eq!(v.lstat("a.txt").unwrap().mtime, 1_717_245_296 * NANOS_PER_SEC);
+        assert_eq!(v.lstat("short.txt").unwrap().mtime, stamped, "a file only read is not restamped");
+
+        v.write(a, 0, &[2; 10]).unwrap();
+        assert_eq!(v.sync(), Ok(Vec::new()));
+        assert_eq!(epochs.borrow().len(), durable.len() + 1, "the write's sync is one flush");
+        v.close(a).unwrap();
+        assert_eq!(epochs.borrow().len(), durable.len() + 1, "a close after the sync writes nothing");
+        assert_eq!(v.lstat("a.txt").unwrap().mtime, 1_717_245_310 * NANOS_PER_SEC);
     }
 
     /// Every clean block out of the cache, so the next read of one asks the disk.
