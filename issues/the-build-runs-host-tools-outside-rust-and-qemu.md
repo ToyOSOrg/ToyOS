@@ -38,4 +38,3 @@ arrives and is not one. M4 and M5 are stages of `issues/toyos-builds-itself.md`.
 | `guest.yml`, step `deps` | the snapshot archive read out of `debian.sources` with `sed`, checked with `test` and written back with `echo` and `rm`, a three-attempt `apt-get` loop with `sleep` and `cat`, `git config`, and rustup through `curl`, `sh` and `echo` | refused: shell of our own | each step is one command |
 | `nightly.yml`, job `portability-linux`, step "deps" | the same loop, `git config`, and rustup the same way | refused: shell of our own | each step is one command |
 | `nightly.yml`, job `portability-macos`, the rustup step | `curl`, `sh rustup-init.sh`, and `echo` into `$GITHUB_PATH` | refused: shell of our own | each step is one command |
-| `umask 077 && cat > <staged>` | `tests/metal/src/lib.rs` stages the sudoers rule on the T14 with it | refused: shell of our own | Ubuntu leaves the metal loop |

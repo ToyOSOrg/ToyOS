@@ -63,7 +63,7 @@ impl Owned {
     }
 
     /// The partition's name in the table, which is what says the tool made
-    /// it. One word, so the rule names it without quoting.
+    /// it.
     pub fn label(self) -> &'static str {
         match self {
             Self::Esp => "ToyOS-internal-ESP",
@@ -123,7 +123,7 @@ pub const HOLDERS: &str = "lsblk --noheadings --paths --pairs --output NAME,PART
 
 /// One line of `lsblk --pairs`: `KEY="value"` separated by spaces, each value
 /// with `"`, `\`, `` ` ``, `$` and every unprintable byte written `\xHH`.
-fn pairs(line: &str) -> Result<BTreeMap<String, String>, String> {
+pub(crate) fn pairs(line: &str) -> Result<BTreeMap<String, String>, String> {
     let mut out = BTreeMap::new();
     let mut rest = line.trim();
     while !rest.is_empty() {
@@ -152,7 +152,7 @@ fn unescape(value: &str) -> Option<String> {
 }
 
 /// A GUID as `lsblk` writes one, lower-case, in [`Guid::parse`]'s spelling.
-fn guid(text: &str) -> Option<Guid> {
+pub(crate) fn guid(text: &str) -> Option<Guid> {
     Guid::parse(&text.to_ascii_uppercase())
 }
 
