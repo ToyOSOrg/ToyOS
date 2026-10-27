@@ -28,14 +28,16 @@ rounds:
 
 Evidence: `ToyOSOrg/evidence` branch `pr-1065`, `r3/`.
 
-Where the time goes is not measured. These are candidates to measure first,
-not findings:
+The paired session at `aeba59fb0` read 62, 63, 65 and 64 MB/s against
+Linux's 113, 110, 111 and 112 (p = 0.029).
 
-- every sent byte's copies through a kernel pipe
-  (`issues/netstack-moves-every-byte-through-two-kernel-pipes.md`);
-- the I219 transmit path's `TXDCTL` and `TIDV` setup
-  (`issues/the-intel-driver-writes-txdctl-and-tidv-against-the-82574-datasheets-newer-revision.md`);
-- the send window and the ACK clocking.
+**Cause, derived and not yet read on the T14**: the I219's transmit ring held
+16 descriptors, so at most 15 frames were the part's at once: 184 µs of a
+gigabit wire. A pass that finds the ring full sleeps until the part writes a
+descriptor back, and its interrupt is held back by the 131 µs throttle
+(`THROTTLE`, `system/netstack/i219/src/lib.rs`) before netstack is even woken.
+64 MB/s is 15 full-sized segments every 339 µs. The ring is now 256
+descriptors, 3.1 ms of the wire.
 
 The clock does not separate the two systems. Each upload row's own
 readings, `mhz` just after it and `mhz_settled` before it, were about
@@ -45,4 +47,4 @@ the clock matters through what ToyOS spends per byte sent.
 
 **Exit**: `osbench_lan` on the T14 reads `lan.wired.tcp.upload` within
 Linux's run-to-run range on the same path, or the cause is named and owned
-by its own issue.
+by its own issue. The next reading is pull request #PR's.

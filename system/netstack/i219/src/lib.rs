@@ -165,12 +165,18 @@ pub const GRANT_BYTES: u64 = 2 << 20;
 /// How many receive descriptors the ring holds: the most whose descriptors
 /// and buffers fit the grant beside the transmit ring's. §7.1.8: `RDLEN`
 /// "must be a multiple of 128", so the count is a multiple of eight.
-pub const RX_RING: usize = 1000;
+pub const RX_RING: usize = 760;
 /// How many transmit descriptors the ring holds. A frame is handed to the
 /// device the moment it is filled and reclaimed when room is next asked for,
 /// so what this bounds is how many may be in flight at once: one fewer than
 /// this, [`I219::tx_room`]'s most.
-pub const TX_RING: usize = 16;
+///
+/// **The ring is what keeps the wire busy while netstack is away.** At
+/// 1000 Mb/s a full-sized frame leaves every 12.3 µs, so 255 frames are 3.1 ms
+/// of the wire. A full ring is refilled only by a pass its wake begins, which
+/// [`THROTTLE`] alone can hold back 131 µs; a ring that drains sooner than
+/// that pass comes leaves the wire idle.
+pub const TX_RING: usize = 256;
 /// Free receive descriptors at which the part reports itself short:
 /// `RCTL.RDMTS = 00b`, "1/2" of `RDLEN` (§10.2.5.1), raising `RXDMT0`.
 const RX_SHORT: usize = RX_RING / 2;
