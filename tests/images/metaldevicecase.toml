@@ -21,7 +21,7 @@ syscap = ["logread"]
 [programs.soundserver]
 service = true
 serves = ["soundserver", "volume", "sound-output"]
-syscap = ["rt"]
+syscap = ["rt", "wake-latency"]
 
 # The Intel HD Audio driver: one process per HDA function the kernel does not
 # drive, each walking its own controller's codecs and offering soundserver the

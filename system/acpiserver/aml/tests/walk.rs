@@ -168,7 +168,7 @@ fn every_object_is_walked_as_what_it_is() {
     assert_eq!(at("\\_SB_"), (1, Kind::Scope));
     assert_eq!(at("\\_SB_.PCI0"), (2, Kind::Device));
     assert_eq!(at("\\_SB_.PCI0._INI"), (3, Kind::Method));
-    assert_eq!(at("\\_PR_.CPU0"), (2, Kind::Processor));
+    assert_eq!(at("\\_PR_.CPU0"), (2, Kind::Processor { id: 1 }));
     assert_eq!(at("\\_TZ_.TZ00"), (2, Kind::ThermalZone));
     assert_eq!(at("\\PWR0"), (1, Kind::PowerResource));
     assert_eq!(at("\\STR0"), (1, Kind::String));

@@ -2304,6 +2304,12 @@ pub struct CpuHandle<M> {
     /// can tell a claim about the present from one a stopped CPU left behind.
     /// See [`CpuHandle::answering`].
     last_pass: AtomicU64,
+    /// **How long this CPU takes to wake from the state it last chose to wait
+    /// in**, in nanoseconds, 0 for C1: what a wake forward weighs between
+    /// sleeping CPUs ([`CpuHandles::idle_near`]). Written before the CPU
+    /// waits, after it published SLEEPING, so a reader may see the previous
+    /// idle period's: a tiebreak, never a correctness input.
+    idle_exit: AtomicU64,
     /// The on-target counterpart to the simulator's invariants: the sim asserts
     /// what a pass *does*, this measures what a pass *costs*.
     ///
@@ -2330,6 +2336,7 @@ impl<M: SchedMsg> CpuHandle<M> {
             surplus: AtomicU32::new(0),
             weight: AtomicU64::new(0),
             last_pass: AtomicU64::new(0),
+            idle_exit: AtomicU64::new(0),
             #[cfg(feature = "sched-check")]
             pass_costs: PassCosts::new(),
         }
@@ -2366,6 +2373,14 @@ impl<M: SchedMsg> CpuHandle<M> {
 
     pub fn publish_weight(&self, weight: u64) {
         self.weight.store(weight, Ordering::Relaxed);
+    }
+
+    pub fn idle_exit(&self) -> u64 {
+        self.idle_exit.load(Ordering::Relaxed)
+    }
+
+    pub fn publish_idle_exit(&self, nanos: u64) {
+        self.idle_exit.store(nanos, Ordering::Relaxed);
     }
 
     /// Stamp the numbers above with the pass that published them.
@@ -2546,23 +2561,31 @@ impl<M: SchedMsg> CpuHandles<M> {
 
     /// The CPU nearest `me` that `usable` accepts, preferring within each
     /// group of [`IDLE_GROUPS`] one whose SMT siblings all sleep too, so work
-    /// goes to a free physical core before it shares one with running work.
-    /// Ties go to the first at or after topology position `from`, which is how
+    /// goes to a free physical core before it shares one with running work,
+    /// and then the one quickest to wake ([`CpuHandle::idle_exit`]), so a wake
+    /// goes to a CPU waiting shallow and the deep sleepers stay asleep. Ties
+    /// go to the first at or after topology position `from`, which is how
     /// consecutive choices rotate.
     pub fn idle_near(&self, me: CpuId, from: usize, usable: impl Fn(&CpuHandle<M>) -> bool) -> Option<CpuId> {
         for (inner, outer) in IDLE_GROUPS {
-            let mut shared_core = None;
+            // The best of each tier, as (exit, cpu): strictly less replaces, so the first of equals stays.
+            let (mut free_core, mut shared_core): (Option<(u64, CpuId)>, Option<(u64, CpuId)>) = (None, None);
             for cpu in self.topology.ring(me, inner, outer, from) {
-                if !usable(self.get(cpu)) {
+                let handle = self.get(cpu);
+                if !usable(handle) {
                     continue;
                 }
-                if self.busy_siblings(cpu) == 0 {
-                    return Some(cpu);
+                let exit = handle.idle_exit();
+                let tier = if self.busy_siblings(cpu) == 0 { &mut free_core } else { &mut shared_core };
+                if tier.is_none_or(|(best, _)| exit < best) {
+                    *tier = Some((exit, cpu));
                 }
-                shared_core.get_or_insert(cpu);
+                if free_core.is_some_and(|(best, _)| best == 0) {
+                    break;
+                }
             }
-            if shared_core.is_some() {
-                return shared_core;
+            if let Some((_, cpu)) = free_core.or(shared_core) {
+                return Some(cpu);
             }
         }
         None
@@ -4306,6 +4329,26 @@ mod tests {
         assert!(handles.topology().core(other).iter().all(|&c| handles.get(c).doorbell().sleeping()));
         assert_eq!(handles.topology().level(me, other), Some(Level::Package));
         assert_eq!(handles.idle_near(me, 0, |h| asleep(h) && h.id() == CpuId(9)), None);
+    }
+
+    /// **Among free cores of the nearest group, the one quickest to wake**:
+    /// rotation decides only between equals, and locality and a free core
+    /// still come before the wake cost.
+    #[test]
+    fn among_equally_near_free_cores_the_shallowest_sleeper_is_woken() {
+        let (handles, _consumers) = bare_handles(two_llcs());
+        let me = CpuId(0);
+        let asleep = |h: &CpuHandle<_>| h.doorbell().sleeping();
+        sleep(&handles, &[1, 2, 3, 4, 5, 6, 7]);
+        handles.get(CpuId(2)).publish_idle_exit(1_048_000);
+        handles.get(CpuId(6)).publish_idle_exit(253_000);
+        assert_eq!(handles.idle_near(me, 0, asleep), Some(CpuId(6)), "of free core {{2, 6}}, cpu6 wakes in 253 µs and cpu2 in 1048");
+        handles.get(CpuId(6)).publish_idle_exit(1_048_000);
+        assert_eq!(handles.idle_near(me, 0, asleep), Some(CpuId(2)), "equals go to the rotation's first");
+        let after_two = handles.topology().position(CpuId(2)) + 1;
+        assert_eq!(handles.idle_near(me, after_two, asleep), Some(CpuId(6)), "and rotate");
+        wake_up(&handles, &[2, 6]);
+        assert_eq!(handles.idle_near(me, 0, asleep), Some(CpuId(4)), "cpu4 shares a busy core, but is in this LLC: locality before wake cost");
     }
 
     /// **A spawn takes the least queue, then a sleeping CPU, then the CPU

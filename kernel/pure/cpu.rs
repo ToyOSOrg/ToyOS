@@ -226,6 +226,16 @@ fn counts_smis(id: &Ident) -> bool {
     id.vendor == Vendor::Intel && id.family == 6 && SMI_COUNT_MODELS.contains(&id.model)
 }
 
+/// Whether the CPU `id` names has `CStateBaseAddr` (MSRC001_0073), the
+/// eight ports its core traps as C-state requests: the family the PPRs that
+/// define it are for (55922, 55901, 55772: family 17h), on the CPU itself
+/// and not under a hypervisor, whose emulation of the register nothing
+/// documents. A CPU wrongly admitted is a `#GP` at its first idle, so a
+/// family no document in hand defines it for is left out and keeps C1.
+pub fn traps_cstate_ports(id: &Ident, cpuid_1_ecx: u32) -> bool {
+    id.vendor == Vendor::Amd && id.family == 0x17 && cpuid_1_ecx & CPUID_1_ECX_HYPERVISOR == 0
+}
+
 /// Why a CPU's topology leaves describe no place in a tree.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum TopologyRefusal {
@@ -279,6 +289,17 @@ pub fn topology_keys(levels: &[[u32; 4]], caches: &[[u32; 4]]) -> Result<CpuKeys
 
 #[cfg(test)]
 mod tests {
+
+    #[test]
+    fn only_a_family_17h_amd_outside_a_hypervisor_reads_cstate_base_addr() {
+        // A Zen 2's signature (family 17h, model 60h) and a Tiger Lake's.
+        let zen2 = Ident::new(Vendor::Amd, 0x0086_0F01);
+        assert_eq!(zen2.family, 0x17);
+        assert!(traps_cstate_ports(&zen2, 0));
+        assert!(!traps_cstate_ports(&zen2, CPUID_1_ECX_HYPERVISOR));
+        assert!(!traps_cstate_ports(&Ident::new(Vendor::Amd, 0x00A2_0F10), 0), "family 19h: no document in hand");
+        assert!(!traps_cstate_ports(&Ident::new(Vendor::Intel, 0x0008_06C1), 0));
+    }
     use super::*;
 
     /// The T14's `control_regs:` line at its own boot: `hwp_capabilities=0x0104182a`,

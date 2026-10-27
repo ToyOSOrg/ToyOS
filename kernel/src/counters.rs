@@ -140,6 +140,8 @@ fn sample(me: usize) -> [u64; WORDS] {
             Counter::EnergyPerfBias => hardware.envelope.as_ref().map(|e| e.energy_perf_bias),
             Counter::FirmwareCalls => hardware.firmware.as_ref().map(|f| f.calls),
             Counter::FirmwareNanos => hardware.firmware.as_ref().map(|f| f.nanos),
+            Counter::DeepIdles => Some(crate::cpu_local::of(me as u32).idle.deep().0),
+            Counter::DeepIdleNanos => Some(crate::cpu_local::of(me as u32).idle.deep().1),
         };
         if let Some(value) = value {
             words[1] |= 1 << counter as usize;

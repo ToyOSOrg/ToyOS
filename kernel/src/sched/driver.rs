@@ -679,6 +679,7 @@ pub fn enter_idle_loop() -> ! {
 }
 
 extern "C" fn idle_loop() -> ! {
+    crate::idle::init_here();
     loop {
         // The first NMI; its handler stages the nested one.
         #[cfg(feature = "boot-actuators")]
@@ -759,6 +760,12 @@ pub fn current_safe_point(stopping: bool) -> Option<kernel::sched::task::SafePoi
 /// Whether the running task has been killed — one relaxed load, no clone, since an `Arc` refcount here is too costly on this path.
 pub fn current_kill_pending() -> bool {
     try_with_cpu(|cpu| cpu.running().is_some_and(|t| t.shared().kill_pending())).unwrap_or(false)
+}
+
+/// How long this CPU takes to wake from the state it is about to wait in, for
+/// a wake forward choosing between sleepers (`CpuHandles::idle_near`).
+pub fn publish_idle_exit(nanos: u64) {
+    cpus().get(current_cpu()).publish_idle_exit(nanos);
 }
 
 pub fn current_cpu() -> CpuId {

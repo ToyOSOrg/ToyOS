@@ -33,6 +33,7 @@ mod releases;
 pub mod service;
 pub mod shm;
 pub mod syscap;
+pub mod wake_latency;
 
 pub use handle::{HandleEntry, HandleError, HandleTable, Refusal};
 pub(crate) use releases::{Released, Releases};
@@ -279,6 +280,8 @@ kobject! {
     immediate Job => job::JobObject,
     // Its one handle is its process's, and goes with it.
     immediate Notice => notice::NoticeObject,
+    // What it holds is released by its last reference: nothing waits on it.
+    immediate WakeLatency => wake_latency::WakeLatencyObject,
 }
 
 /// Objects whose last handle has gone, waiting for release with nothing held;

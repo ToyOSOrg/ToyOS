@@ -62,6 +62,7 @@ mod loader;
 mod scheduler;
 mod sched;
 mod hw;
+mod idle;
 mod iommu;
 mod preempt;
 mod counters;

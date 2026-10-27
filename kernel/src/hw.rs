@@ -75,16 +75,17 @@ impl Machine for KernelHw {
         crate::trace::record(ev);
     }
 
-    /// Diagnostic builds arm a periodic wake before halting so a quiescent CPU still reports.
+    /// Waits in the state `crate::idle` chooses. Diagnostic builds arm a
+    /// periodic wake first, so a quiescent CPU still reports.
     fn idle_wait(&self, token: SleepToken) {
-        let _consumed = token;
+        let armed = token.armed();
         #[cfg(feature = "boot-actuators")]
         if crate::actuator::diag_tick() {
             irqchip::arm_within(DIAG_TICK_NS);
         }
         #[cfg(feature = "mask-windows")]
         crate::windows::halting();
-        self.halt();
+        crate::idle::wait(armed);
         #[cfg(feature = "mask-windows")]
         crate::windows::woken();
         // **A CPU that is executing has a one-shot armed, and this is where

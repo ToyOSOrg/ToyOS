@@ -14,7 +14,7 @@ pub fn release() {
     unreachable!("AArch64 has no ACPI row")
 }
 
-/// Never called, as [`release`]: the four are reached only with a claim.
+/// Never called, as [`release`]: the five are reached only with a claim.
 pub fn access(_row: &crate::isa::Row, _request: &mut toyos_abi::acpi::Access) -> Result<(), toyos_abi::syscall::SyscallError> {
     unreachable!("AArch64 has no ACPI row")
 }
@@ -28,6 +28,10 @@ pub fn lock_release(_row: &crate::isa::Row) -> Result<(), toyos_abi::syscall::Sy
 }
 
 pub fn s5(_row: &crate::isa::Row, _word: u64) -> Result<(), toyos_abi::syscall::SyscallError> {
+    unreachable!("AArch64 has no ACPI row")
+}
+
+pub fn idle(_row: &crate::isa::Row, _declaration: &toyos_abi::acpi::IdleDeclaration) -> Result<(), toyos_abi::syscall::SyscallError> {
     unreachable!("AArch64 has no ACPI row")
 }
 

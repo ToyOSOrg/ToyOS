@@ -25,6 +25,7 @@
 #![forbid(unsafe_code)]
 
 pub mod fault;
+pub mod idle;
 pub mod firmware;
 pub mod port;
 pub mod span;

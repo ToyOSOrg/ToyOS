@@ -231,6 +231,10 @@ const SYSCAP_RIGHTS: &[(&str, Rights)] = &[
     // a launcher's. Every other child joins its parent's job, so this is what
     // lets a program gain aggregate CPU by starting many.
     ("jobs", Rights::JOBS),
+    // Hold every idle CPU to waking within a bound: what an audio or other
+    // deadline-bound service holds while it has a deadline, paid for in the
+    // whole machine's power.
+    ("wake-latency", Rights::WAKE_LATENCY),
 ];
 
 /// The whole right set a program's `syscap` list asks for.

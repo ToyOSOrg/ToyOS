@@ -84,7 +84,7 @@ impl Names {
 }
 
 fn is_device(kind: Kind) -> bool {
-    matches!(kind, Kind::Device | Kind::Processor)
+    matches!(kind, Kind::Device | Kind::Processor { .. })
 }
 
 /// The scope an object's path is in.

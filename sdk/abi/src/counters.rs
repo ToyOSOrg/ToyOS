@@ -50,10 +50,15 @@ pub enum Counter {
     /// its return: the firmware's handler, where a write raises an interrupt
     /// to it.
     FirmwareNanos,
+    /// Idle periods the CPU waited in a state deeper than C1 its firmware
+    /// declared.
+    DeepIdles,
+    /// Nanoseconds those periods lasted, each from the choice to the wake.
+    DeepIdleNanos,
 }
 
 impl Counter {
-    pub const COUNT: usize = 10;
+    pub const COUNT: usize = 12;
     pub const ALL: [Counter; Self::COUNT] = [
         Self::Stamp,
         Self::Smi,
@@ -65,6 +70,8 @@ impl Counter {
         Self::EnergyPerfBias,
         Self::FirmwareCalls,
         Self::FirmwareNanos,
+        Self::DeepIdles,
+        Self::DeepIdleNanos,
     ];
 
     pub const fn name(self) -> &'static str {
@@ -79,6 +86,8 @@ impl Counter {
             Self::EnergyPerfBias => "energy_perf_bias",
             Self::FirmwareCalls => "firmware_calls",
             Self::FirmwareNanos => "firmware_nanos",
+            Self::DeepIdles => "deep_idles",
+            Self::DeepIdleNanos => "deep_idle_nanos",
         }
     }
 
@@ -91,7 +100,9 @@ impl Counter {
             | Self::Kicks
             | Self::HwpRequest
             | Self::HwpRequestPkg
-            | Self::EnergyPerfBias => Rights::COUNTERS.union(Rights::TRACE),
+            | Self::EnergyPerfBias
+            | Self::DeepIdles
+            | Self::DeepIdleNanos => Rights::COUNTERS.union(Rights::TRACE),
         }
     }
 }

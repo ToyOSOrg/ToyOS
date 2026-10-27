@@ -548,6 +548,14 @@ pub fn s5(row: &isa::Row, word: u64) -> Result<(), SyscallError> {
     Ok(())
 }
 
+/// Take one processor's idle states from the claim's holder
+/// (`crate::idle::declare`), under the claim's lock and [`HOLDER`], so one
+/// declaration is published at a time.
+pub fn idle(row: &isa::Row, declaration: &toyos_abi::acpi::IdleDeclaration) -> Result<(), SyscallError> {
+    let _holder = acting(row)?;
+    crate::idle::declare(declaration)
+}
+
 /// Clear the lock word's owner where the claim's holder holds it, and tell
 /// the firmware where it asked meanwhile. `orphaned` says why the holder did
 /// not give it back itself, for the log; empty where it did.

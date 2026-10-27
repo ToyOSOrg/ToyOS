@@ -48,7 +48,7 @@ use super::machine::{
 use super::machine::lower_sysinfo_bound;
 use super::proc::{
     spawn_place, sys_endowments, sys_exit, sys_nanosleep, sys_process_stats,
-    sys_account_info, sys_job_create, sys_job_floor, sys_job_own, sys_process_quit, sys_process_wait, sys_rt_enter, sys_spawn, sys_thread_exit, sys_thread_join, sys_thread_spawn,
+    sys_account_info, sys_job_create, sys_job_floor, sys_job_own, sys_process_quit, sys_process_wait, sys_rt_enter, sys_spawn, sys_thread_exit, sys_thread_join, sys_thread_spawn, sys_wake_latency_hold,
 };
 use super::vm::{
     shared_image, sys_dlopen, sys_dlsym, sys_query_modules, sys_tls_alloc_block, sys_vm_decommit, sys_vm_discard,
@@ -623,6 +623,7 @@ pub(crate) fn syscall_dispatch(num: u64, a1: u64, a2: u64, a3: u64, a4: u64) -> 
             _ => SyscallError::InvalidArgument.to_u64(),
         },
         SYS_JOB_FLOOR => sys_job_floor(RawHandle(a1 as u32), RawHandle(a2 as u32), a3),
+        SYS_WAKE_LATENCY_HOLD => sys_wake_latency_hold(RawHandle(a1 as u32), a2),
         SYS_ACCOUNT_INFO => {
             if a3 < core::mem::size_of::<toyos_abi::syscall::AccountInfo>() as u64 { return SyscallError::InvalidArgument.to_u64(); }
             let Some(addr) = UserAddr::checked(a2) else { return bad_addr };
