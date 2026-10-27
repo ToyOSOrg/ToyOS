@@ -6,6 +6,9 @@ use crate::alloc::Layout;
 use crate::ptr;
 use crate::sys::sync::Mutex;
 
+#[path = "../../libc/src/mapped.rs"]
+mod mapped;
+
 /// dlmalloc's memory: the process's own private pages, committed whole and
 /// populated as they are touched, and given back in part when it trims.
 struct ToyOsAllocator;
@@ -72,24 +75,41 @@ impl Drop for DropLock {
 
 #[inline]
 pub unsafe fn alloc(layout: Layout) -> *mut u8 {
+    if mapped::holds(layout) {
+        return mapped::alloc(layout);
+    }
     let _lock = lock();
     unsafe { (*DLMALLOC.get()).0.malloc(layout.size(), layout.align()) }
 }
 
 #[inline]
 pub unsafe fn alloc_zeroed(layout: Layout) -> *mut u8 {
+    if mapped::holds(layout) {
+        return mapped::alloc(layout);
+    }
     let _lock = lock();
     unsafe { (*DLMALLOC.get()).0.calloc(layout.size(), layout.align()) }
 }
 
 #[inline]
 pub unsafe fn dealloc(ptr: *mut u8, layout: Layout) {
+    if mapped::holds(layout) {
+        return unsafe { mapped::dealloc(ptr, layout) };
+    }
     let _lock = lock();
     unsafe { (*DLMALLOC.get()).0.free(ptr, layout.size(), layout.align()) }
 }
 
 #[inline]
 pub unsafe fn realloc(ptr: *mut u8, layout: Layout, new_size: usize) -> *mut u8 {
+    if mapped::resizes(layout, new_size) {
+        return unsafe { mapped::resize(ptr, layout, new_size) };
+    }
+    // SAFETY: `GlobalAlloc::realloc` requires `new_size` at this alignment to be a layout.
+    let new = unsafe { Layout::from_size_align_unchecked(new_size, layout.align()) };
+    if mapped::holds(layout) || mapped::holds(new) {
+        return unsafe { super::realloc_fallback(ptr, layout, new_size) };
+    }
     let _lock = lock();
     unsafe { (*DLMALLOC.get()).0.realloc(ptr, layout.size(), layout.align(), new_size) }
 }

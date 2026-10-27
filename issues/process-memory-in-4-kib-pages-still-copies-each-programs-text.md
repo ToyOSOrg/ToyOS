@@ -77,9 +77,10 @@ live split of a user leaf.
 4. **Demand-zero anonymous `mmap`.** Built, over 4 KiB pages only: a fault
    populates one page, unmapping a range no thread touched sends no IPI, and
    `munmap` and a `FIXED` `mmap` take any run of pages, as POSIX does.
-   `vm_reserve`, `vm_protect`, `vm_discard`, `vm_decommit` and `vm_release`
-   are the calls, behind libc's `mmap`, `mprotect`, `madvise` and `munmap`
-   and std's allocator, which trims, and its thread stacks, each reserved
+   `vm_reserve`, `vm_protect`, `vm_discard`, `vm_decommit`, `vm_remap` and
+   `vm_release` are the calls, behind libc's `mmap`, `mprotect`, `madvise` and
+   `munmap`, std's and libc's allocators, which trim and grow a large block
+   by `vm_remap` in place or by moving its pages, and std's thread stacks, each reserved
    at the size asked with a guard page below. A commitment is promised its
    frames when it is made, and every other allocation is refused rather than
    take a promised frame (`kernel::frames`), so a commitment past what memory

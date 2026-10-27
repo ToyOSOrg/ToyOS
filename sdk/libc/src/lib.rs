@@ -48,6 +48,9 @@ mod uname;
 mod utf8;
 mod wchar;
 
+#[cfg(not(feature = "std-runtime"))]
+mod mapped;
+
 // C runtime: the entry `arch::_start` calls, panic handler, and global allocator.
 // Only for pure C programs (no Rust std). When linked into a Rust program
 // with std, std provides these.
@@ -193,15 +196,45 @@ mod runtime {
     #[global_allocator]
     pub(crate) static ALLOCATOR: LibcAllocator = LibcAllocator;
 
+    use super::mapped;
+
     unsafe impl core::alloc::GlobalAlloc for LibcAllocator {
         unsafe fn alloc(&self, layout: core::alloc::Layout) -> *mut u8 {
+            if mapped::holds(layout) {
+                return mapped::alloc(layout);
+            }
             unsafe { DLMALLOC.lock().malloc(layout.size(), layout.align()) }
         }
+        unsafe fn alloc_zeroed(&self, layout: core::alloc::Layout) -> *mut u8 {
+            if mapped::holds(layout) {
+                return mapped::alloc(layout);
+            }
+            unsafe { DLMALLOC.lock().calloc(layout.size(), layout.align()) }
+        }
         unsafe fn dealloc(&self, ptr: *mut u8, layout: core::alloc::Layout) {
+            if mapped::holds(layout) {
+                return unsafe { mapped::dealloc(ptr, layout) };
+            }
             unsafe { DLMALLOC.lock().free(ptr, layout.size(), layout.align()) }
         }
         unsafe fn realloc(&self, ptr: *mut u8, layout: core::alloc::Layout, new_size: usize) -> *mut u8 {
-            unsafe { DLMALLOC.lock().realloc(ptr, layout.size(), layout.align(), new_size) }
+            if mapped::resizes(layout, new_size) {
+                return unsafe { mapped::resize(ptr, layout, new_size) };
+            }
+            // SAFETY: `GlobalAlloc::realloc` requires `new_size` at this alignment to be a layout.
+            let new = unsafe { core::alloc::Layout::from_size_align_unchecked(new_size, layout.align()) };
+            if !mapped::holds(layout) && !mapped::holds(new) {
+                return unsafe { DLMALLOC.lock().realloc(ptr, layout.size(), layout.align(), new_size) };
+            }
+            // Between the heap and a mapping of its own: moved, as the default does.
+            let moved = unsafe { self.alloc(new) };
+            if !moved.is_null() {
+                unsafe {
+                    core::ptr::copy_nonoverlapping(ptr, moved, layout.size().min(new_size));
+                    self.dealloc(ptr, layout);
+                }
+            }
+            moved
         }
     }
 }

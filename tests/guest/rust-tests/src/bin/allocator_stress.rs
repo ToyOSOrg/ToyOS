@@ -13,6 +13,7 @@ fn main() {
     test_fragmentation_resistance();
     test_memory_stats();
     test_oom_graceful();
+    test_large_blocks();
     println!("all allocator stress tests passed");
 }
 
@@ -223,6 +224,45 @@ fn test_grow_and_shrink() {
 
     drop(map);
     println!("  grow and shrink: ok");
+}
+
+/// Blocks past the allocator's mapping threshold, a mapping each: a vector
+/// grown by doubling from the heap into one and on, and shrunk back into the
+/// heap, keeps every byte; a zeroed one reads zeros where a freed one of its
+/// size was written; and one aligned past a page keeps its alignment when it
+/// grows.
+fn test_large_blocks() {
+    let byte = |i: usize| (i % 251) as u8;
+    let mut v: Vec<u8> = Vec::new();
+    for len in (10..=26).map(|shift| 1usize << shift) {
+        v.reserve_exact(len - v.len());
+        v.extend((v.len()..len).map(byte));
+        assert!(v.iter().enumerate().all(|(i, &b)| b == byte(i)), "grown to {len} bytes, a byte changed");
+    }
+    v.truncate(100 * 1024);
+    v.shrink_to_fit();
+    assert!(v.iter().enumerate().all(|(i, &b)| b == byte(i)), "shrunk into the heap, a byte changed");
+    drop(v);
+
+    let written = vec![0x5Au8; 8 << 20];
+    drop(written);
+    let zeroed = vec![0u8; 8 << 20];
+    assert!(zeroed.iter().all(|&b| b == 0), "a zeroed large block held a byte");
+    drop(zeroed);
+
+    let layout = std::alloc::Layout::from_size_align(4 << 20, 2 << 20).unwrap();
+    // SAFETY: a non-zero layout; the block is written inside it, grown with
+    // it and freed with the grown layout.
+    unsafe {
+        let p = std::alloc::alloc(layout);
+        assert!(!p.is_null() && p as usize % (2 << 20) == 0, "{p:p} is not 2 MiB aligned");
+        p.write_bytes(0x3C, 4 << 20);
+        let q = std::alloc::realloc(p, layout, 8 << 20);
+        assert!(!q.is_null() && q as usize % (2 << 20) == 0, "grown, {q:p} is not 2 MiB aligned");
+        assert!((0..4 << 20).step_by(4096).all(|i| *q.add(i) == 0x3C), "grown, an aligned block lost a byte");
+        std::alloc::dealloc(q, std::alloc::Layout::from_size_align(8 << 20, 2 << 20).unwrap());
+    }
+    println!("  large blocks: ok");
 }
 
 /// Test that the allocator handles fragmentation gracefully.
