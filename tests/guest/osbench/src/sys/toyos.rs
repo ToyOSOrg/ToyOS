@@ -363,6 +363,36 @@ pub fn persistent_dir() -> Option<(String, String)> {
     Some(("/log".into(), "boot USB stick TOYOS-LOG partition, FAT32, LOG file server over usbd mass storage".into()))
 }
 
+/// What a transfer row reports of the stack beneath it, as netstack's `inspect` answers it:
+/// [tcp]'s bytes, losses and the time its senders waited on each send limit, and the card's
+/// full-ring waits and missed frames. Those a card does not report are left out.
+pub fn net_counters() -> Result<Vec<(String, u64)>, String> {
+    const READ: [&str; 14] = [
+        "net.tcp.sent.bytes",
+        "net.tcp.retransmit.bytes",
+        "net.tcp.rto",
+        "net.tcp.fast-recovery",
+        "net.tcp.sack-recovery",
+        "net.tcp.loss-probe",
+        "net.tcp.dsack-rcvd",
+        "net.tcp.send-limited.user.ns",
+        "net.tcp.send-limited.window.ns",
+        "net.tcp.send-limited.congestion.ns",
+        "net.transmit.full",
+        "net.transmit.wake_armed",
+        "net.transmit.wake_taken",
+        "net.errors.missed",
+    ];
+    let snap = inspect::ask(toyos_inspect::NET)?;
+    Ok(READ
+        .iter()
+        .filter_map(|key| match snap.get(*key) {
+            Some(toyos_inspect::Value::U64(v)) => Some((key.to_string(), *v)),
+            _ => None,
+        })
+        .collect())
+}
+
 /// What carries a connection on ToyOS: netstack drives one card, Ethernet.
 pub fn link_of(_local: std::net::IpAddr) -> Result<(osbench_lan::link::Link, String), String> {
     Ok((osbench_lan::link::Link::Wired, "wired netstack's one Ethernet card".into()))

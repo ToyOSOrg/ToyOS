@@ -75,19 +75,44 @@ fn measure(peer: &Peer, [connect, rtt, upload, download]: &[String; 4]) {
     }
     type Transfer = fn(&Peer, Duration) -> std::io::Result<osbench_lan::Transfer>;
     for (bench, run) in [(upload, Peer::upload as Transfer), (download, Peer::download)] {
-        let rounds = || -> Result<Vec<u64>, String> {
+        let mut stack = Vec::new();
+        let mut rounds = || -> Result<Vec<u64>, String> {
             run(peer, SPAN).map_err(|e| e.to_string())?;
             crate::clock::settle();
-            (0..ROUNDS)
+            let before = crate::sys::net_counters();
+            let mbps = (0..ROUNDS)
                 .map(|_| {
                     let moved = run(peer, SPAN).map_err(|e| e.to_string())?;
                     Ok(moved.bytes * 1000 / moved.ns)
                 })
-                .collect()
+                .collect::<Result<Vec<u64>, String>>()?;
+            stack = stack_moved(before, crate::sys::net_counters());
+            Ok(mbps)
         };
         match rounds() {
-            Ok(mut mbps) => result(bench, "MB/s", &mut mbps, &[("span_ms", SPAN.as_millis().to_string())]),
+            Ok(mut mbps) => {
+                let mut extra = vec![("span_ms".to_string(), SPAN.as_millis().to_string())];
+                extra.extend(stack);
+                let extra: Vec<(&str, String)> = extra.iter().map(|(k, v)| (k.as_str(), v.clone())).collect();
+                result(bench, "MB/s", &mut mbps, &extra)
+            }
             Err(why) => refuse(bench, why),
         }
+    }
+}
+
+/// What the stack's counters moved by over a row's timed rounds, each as a field named
+/// `stack_<counter>`; a reading that failed is one field saying why.
+fn stack_moved(before: Result<Vec<(String, u64)>, String>, after: Result<Vec<(String, u64)>, String>) -> Vec<(String, String)> {
+    match (before, after) {
+        (Ok(before), Ok(after)) => after
+            .iter()
+            .filter_map(|(key, now)| {
+                let was = before.iter().find(|(k, _)| k == key)?.1;
+                let field = format!("stack_{}", key.replace(['.', '-'], "_"));
+                Some((field, now.saturating_sub(was).to_string()))
+            })
+            .collect(),
+        (Err(why), _) | (_, Err(why)) => vec![("stack_unread".to_string(), why)],
     }
 }

@@ -371,6 +371,30 @@ pub struct Sync {
     last_unsolicited: Option<Instant>,
     urgent_logged: bool,
     pub delivery_problem: bool,
+    /// What has held new data back since when (RFC 4898's `SndLimTrans` states); `None` while
+    /// the connection sends.
+    held_by: Option<(SendLimit, Instant)>,
+}
+
+/// What a sender with nothing more to send now is waiting on (RFC 4898 §2, `tcpEStatsPerfSndLim`).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum SendLimit {
+    /// The user has given nothing that is unsent.
+    User,
+    /// The peer's receive window.
+    Window,
+    /// The congestion window, or loss recovery's pipe.
+    Congestion,
+}
+
+impl SendLimit {
+    fn counter(self) -> Counter {
+        match self {
+            Self::User => Counter::SendLimitedByUserNanos,
+            Self::Window => Counter::SendLimitedByWindowNanos,
+            Self::Congestion => Counter::SendLimitedByCongestionNanos,
+        }
+    }
 }
 
 fn us32(n: usize) -> u32 {
@@ -439,6 +463,7 @@ impl Sync {
             last_unsolicited: None,
             urgent_logged: false,
             delivery_problem: false,
+            held_by: None,
         };
         sync.refresh(now);
         sync
@@ -1118,7 +1143,40 @@ impl Sync {
     // ---- transmit ----
 
     /// Hands off the next segment this opportunity owes, after SYNs and resets: `true` if one left.
+    /// The time new data waits on the user, the peer's window or congestion is counted by which.
     pub fn next_segment<T>(&mut self, ctx: &mut Ctx<'_>, exit: &mut dyn Exit<T>) -> Result<bool, NotReady> {
+        let sent = self.owed_segment(ctx, exit)?;
+        let now = ctx.now;
+        let held = if sent && self.last_data_sent == Some(now) {
+            None
+        } else if sent {
+            return Ok(true);
+        } else {
+            Some(self.send_limit())
+        };
+        if let Some((limit, since)) = self.held_by {
+            if held != Some(limit) {
+                ctx.log.add(limit.counter(), u64::try_from(now.since(since).as_nanos()).unwrap_or(u64::MAX));
+                self.held_by = held.map(|limit| (limit, now));
+            }
+        } else {
+            self.held_by = held.map(|limit| (limit, now));
+        }
+        Ok(sent)
+    }
+
+    /// What holds new data back, for a sender that has sent all it may now.
+    fn send_limit(&self) -> SendLimit {
+        if self.tx.unsent() == 0 && !self.tx.fin_unsent() {
+            SendLimit::User
+        } else if self.persist.is_some() || self.tx.usable() < signed(self.smss()) {
+            SendLimit::Window
+        } else {
+            SendLimit::Congestion
+        }
+    }
+
+    fn owed_segment<T>(&mut self, ctx: &mut Ctx<'_>, exit: &mut dyn Exit<T>) -> Result<bool, NotReady> {
         if self.rx.dup_owed > 0 {
             self.emit_ack(ctx, exit, self.tx.nxt)?;
             self.rx.dup_owed = self.rx.dup_owed.saturating_sub(1);
@@ -1198,6 +1256,10 @@ impl Sync {
             self.last_data_sent = Some(now);
             self.sws = None;
             self.sws_fired = false;
+        }
+        let data_end = start.add(len);
+        if data_end.after(old) {
+            ctx.log.add(Counter::SentBytes, u64::from(data_end.since(old.later(start))));
         }
         if resent {
             ctx.log.add(Counter::RetransmitBytes, u64::from(old.earlier(end).since(start)));

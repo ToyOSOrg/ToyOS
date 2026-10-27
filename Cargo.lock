@@ -2266,6 +2266,7 @@ name = "osbench"
 version = "0.1.0"
 dependencies = [
  "getrandom 0.3.4",
+ "inspect",
  "libc",
  "miniz_oxide",
  "osbench-lan",
@@ -2275,6 +2276,7 @@ dependencies = [
  "toyos",
  "toyos-abi",
  "toyos-crypto",
+ "toyos-inspect",
  "toyos-trace",
  "ureq",
 ]

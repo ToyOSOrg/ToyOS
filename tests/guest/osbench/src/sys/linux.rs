@@ -516,6 +516,34 @@ pub fn mount_options(dir: &str) -> String {
 
 /// The runner's home, and the filesystem and disk model holding it; the
 /// path itself names the user and is never printed.
+/// What a transfer row reports of the stack beneath it: the kernel's TCP segment counts and
+/// its loss recovery, from `/proc/net/snmp` and `/proc/net/netstat`.
+pub fn net_counters() -> Result<Vec<(String, u64)>, String> {
+    const READ: [(&str, &str); 6] = [
+        ("Tcp", "OutSegs"),
+        ("Tcp", "RetransSegs"),
+        ("TcpExt", "TCPTimeouts"),
+        ("TcpExt", "TCPSackRecovery"),
+        ("TcpExt", "TCPRenoRecovery"),
+        ("TcpExt", "TCPLossProbes"),
+    ];
+    let mut table = std::collections::BTreeMap::new();
+    for file in ["/proc/net/snmp", "/proc/net/netstat"] {
+        let text = fs::read_to_string(file).map_err(|e| format!("{file}: {e}"))?;
+        let lines: Vec<&str> = text.lines().collect();
+        // Each table is a line of names and a line of values, both led by its name.
+        for [names, values] in lines.as_chunks::<2>().0 {
+            let (Some((name, keys)), Some((_, values))) = (names.split_once(':'), values.split_once(':')) else { continue };
+            for (key, value) in keys.split_whitespace().zip(values.split_whitespace()) {
+                if let Ok(value) = value.parse::<u64>() {
+                    table.insert(format!("{name}.{key}"), value);
+                }
+            }
+        }
+    }
+    Ok(READ.iter().filter_map(|(name, key)| table.get(&format!("{name}.{key}")).map(|v| (format!("{name}.{key}"), *v))).collect())
+}
+
 pub fn persistent_dir() -> Option<(String, String)> {
     let home = std::env::var("HOME").ok()?;
     let (fstype, source, _) = mount_of(&home)?;
