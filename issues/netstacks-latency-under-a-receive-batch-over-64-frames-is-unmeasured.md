@@ -7,7 +7,7 @@ opened: 2026-10-12
 # netstack's latency under a receive batch of more than 64 frames is unmeasured
 
 `Node::receive` takes at most the card's ring in one batch (`Card::receive`,
-`system/netstack/src/card.rs`): `toyos_i219::RX_RING - 1`, 759 frames, on the
+`system/netstack/src/card.rs`): `toyos_i219::RX_RING - 1`, 999 frames, on the
 I219, and the queue's 256 on virtio. Before pull request #861 it took 64. Every
 frame of a batch reaches the stack under one `now`, read before the batch
 (`system/netstack/src/main.rs`'s loop), and the deadlines that are due, the

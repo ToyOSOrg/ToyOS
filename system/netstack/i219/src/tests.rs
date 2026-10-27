@@ -752,7 +752,7 @@ fn held_with_a_link(seed: u64, part: Part, permits: Permits) -> (Nic, Driver) {
 fn fill(nic: &Nic, driver: &mut Driver, first: u8) -> Vec<Vec<u8>> {
     let mut out = Vec::new();
     while let Some(slot) = driver.tx_reserve(64) {
-        let payload = frame(first.wrapping_add(out.len() as u8), 64);
+        let payload = frame(first + out.len() as u8, 64);
         nic.put_bytes(slot.at, &payload);
         driver.tx_commit(slot);
         out.push(payload);
@@ -913,7 +913,7 @@ fn a_burst_past_the_ring_leaves_whole_on_the_room_it_is_told() {
         let mut out: Vec<Vec<u8>> = Vec::new();
         let mut on_the_wire: Vec<Vec<u8>> = Vec::new();
         let mut sleeps = 0;
-        for i in 0..TX_RING * 4 {
+        for i in 0..(TX_RING as u8 * 4) {
             while driver.tx_room() == 0 && driver.wake_on_room() == 0 {
                 // Asleep on the claim: the device works, and nothing but a
                 // message begins the next pass.
@@ -927,7 +927,7 @@ fn a_burst_past_the_ring_leaves_whole_on_the_room_it_is_told() {
                 one_pass(&mut driver);
                 sleeps += 1;
             }
-            let payload = frame((i + 1) as u8, 100 + i);
+            let payload = frame(i + 1, 100 + i as usize);
             let slot = driver.tx_reserve(payload.len()).expect("the room the driver just counted");
             nic.put_bytes(slot.at, &payload);
             driver.tx_commit(slot);
@@ -1056,8 +1056,8 @@ fn transmit_descriptors_are_reclaimed_under_batched_write_back() {
         one_pass(&mut driver);
         let mut out: Vec<Vec<u8>> = Vec::new();
         let mut on_the_wire: Vec<Vec<u8>> = Vec::new();
-        for i in 0..TX_RING * 4 {
-            let payload = frame((i + 1) as u8, 100 + i);
+        for i in 0..(TX_RING as u8 * 4) {
+            let payload = frame(i + 1, 100 + i as usize);
             // Reclaim happens inside `tx_reserve`, so a ring that is never
             // given back would refuse here rather than send.
             for _ in 0..8 {
@@ -1565,10 +1565,10 @@ fn a_worked_trace(seed: u64, part: Part) -> (Vec<Access>, usize, usize) {
     let mut driver = open(&nic);
     link_up(&nic, &mut driver);
     let (mut sent, mut received) = (0, 0);
-    for round in 0..TX_RING * 3 {
-        nic.deliver(&frame((round + 1) as u8, 64 + round));
+    for round in 0..(TX_RING as u8 * 3) {
+        nic.deliver(&frame(round + 1, 64 + round as usize));
         if let Some(slot) = driver.tx_reserve(64) {
-            nic.put_bytes(slot.at, &frame(0x80 | round as u8, 64));
+            nic.put_bytes(slot.at, &frame(0x80 | round, 64));
             driver.tx_commit(slot);
             sent += 1;
         }
