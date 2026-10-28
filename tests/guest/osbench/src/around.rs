@@ -10,8 +10,6 @@
 //! around `cpu.clock`'s few milliseconds, which [`ran_during`] names from the
 //! roster instead.
 
-use std::time::Instant;
-
 use crate::report::note;
 
 /// The counters as a row began.
@@ -49,13 +47,13 @@ impl Around {
 #[cfg(target_os = "toyos")]
 pub struct Reading {
     pub cpus: Vec<crate::sys::diag::CpuCounts>,
-    called: Instant,
+    called: std::time::Instant,
     cost_ns: u64,
 }
 
 #[cfg(target_os = "toyos")]
 pub fn read(d: &crate::sys::diag::Diag) -> Result<Reading, String> {
-    let called = Instant::now();
+    let called = std::time::Instant::now();
     let cpus = d.counters()?;
     Ok(Reading { cpus, called, cost_ns: crate::ns_since(called) })
 }
