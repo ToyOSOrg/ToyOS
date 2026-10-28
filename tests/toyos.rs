@@ -482,8 +482,8 @@ const MACHINE_TESTS: &[&str] = &[
     // DMA it lets through are no host test's, and the AMD bench is staged by
     // hand rather than by CI.
     "amdvi_firmware_left",
-    // A VT-d unit left translating where the DMAR declares nothing in flight:
-    // the T14's declares it, so only QEMU's unit takes this hand-over.
+    // A VT-d unit left translating, with no protected memory regions to guard
+    // its hand-over: the T14's units have them, so only QEMU's takes this one.
     "vtd_firmware_left",
     // A translating AMD-Vi unit's refusal, recorded and read: a kernel-owned
     // record halts the machine, so no metal row reaches it, and only QEMU's
@@ -5982,14 +5982,13 @@ fn sysret_ss(log: &str) -> Result<(), String> {
 
 /// Every unit this kernel went on to program, and every AMD-Vi unit it
 /// switched off, said it was handed over with what the actuator left on; and
-/// where firmware declares its DMA confined to reserved regions this kernel's
-/// root translates alike, as the T14's does, every VT-d unit kept translating.
+/// where every VT-d unit has protected memory regions, as the T14's do, they
+/// went on before the hand-over and off after it.
 ///
 /// An AMD-Vi unit's lines are on the boot stick only because the switch-off
 /// let the stick's DMA through the unit the actuator left blocking it.
 fn iommu_firmware_left(log: &str) -> Result<(), String> {
-        let declared = log.contains(" dma_ctrl_opt_in=y")
-            && !log.lines().any(|l| l.contains("iommu: rmrr") && (l.contains(" OUTSIDE the identity domain") || l.contains("bridge walk")));
+        let guarded = log.lines().filter(|l| l.contains(" cap=") && l.contains("iommu: unit")).all(|l| l.contains(" pmr=y"));
         let mut units = 0;
         for line in log.lines().filter(|l| l.contains(" translating gsts=")) {
             let unit = line
@@ -6013,12 +6012,6 @@ fn iommu_firmware_left(log: &str) -> Result<(), String> {
                          the state the actuator left was never switched off by the hand-over:\n{log}"
                     ));
                 }
-            }
-            if declared && !log.contains(&format!("iommu: {unit} was handed over with translation on; it stays on")) {
-                return Err(format!(
-                    "firmware declares its DMA confined to reserved regions this kernel's root \
-                     translates alike, and {unit} still took translation off:\n{log}"
-                ));
             }
             units += 1;
         }
@@ -6044,11 +6037,20 @@ fn iommu_firmware_left(log: &str) -> Result<(), String> {
         if units == 0 {
             return Err(format!("no unit was programmed or switched off, so nothing was handed over:\n{log}"));
         }
+        let armed = log.lines().position(|l| l.contains("iommu: protected memory for the hand-over on"));
+        let released = log.lines().position(|l| l.contains("iommu: protected memory released on"));
+        let first_off = log.lines().position(|l| l.contains("was handed over with translation on; it goes off first"));
+        if guarded && !matches!((armed, first_off, released), (Some(a), Some(o), Some(r)) if a < o && o < r) {
+            return Err(format!(
+                "every unit has protected memory regions, and the hand-over did not take translation \
+                 off between their going on and their release:\n{log}"
+            ));
+        }
         let passed = log.matches("handed over with compatibility-format pass-through on").count();
-        let kept = log.matches("handed over with translation on; it stays on").count();
         eprintln!(
             "  [iommu-firmware-left] {units} unit(s) switched off what they were handed over with, \
-             {kept} of them keeping translation on; {passed} of them reported compatibility format passed"
+             {} protected memory; {passed} of them reported compatibility format passed",
+            if guarded { "inside" } else { "without" }
         );
         Ok(())
 }

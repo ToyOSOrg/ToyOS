@@ -52,8 +52,9 @@ a unit firmware left translating:
   scalable or abort-DMA mode, with `CAP.ESRTPS` clear, may not have its root
   table switched under translation (VT-d Rev. 4.1 §6.6), so translation goes
   off for that one switch. The older protection registers are `PMEN`'s
-  protected memory regions (§11.4.8.1). The weakness is
-  `issues/a-unit-in-scalable-or-abort-mode-loses-translation-for-its-root-table-switch.md`.
+  protected memory regions (§11.4.8.1). Every hand-over now takes
+  translation off inside them where every unit has them; what remains is
+  `issues/a-unit-without-protected-memory-regions-passes-dma-untranslated-while-it-is-handed-over.md`.
 - **"Apply it at hand-over"**, on reserved memory: "From the hand-over on,
   only display and USB controllers keep access to their reserved region; any
   other device's access is refused. A device that firmware was still using

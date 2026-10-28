@@ -1,9 +1,9 @@
 //! Queued invalidation: submits a descriptor and an Invalidation Wait
 //! descriptor, then polls the wait's status write to completion.
 //! Acknowledgement timeout is a panic — the kernel cannot say what a device
-//! can reach past it. Only the queued-invalidation path is implemented: every
-//! unit reachable here has it, so a `CCMD_REG`/`IOTLB_REG` fallback would be
-//! dead code; a unit without `ECAP.QI` is left unprogrammed.
+//! can reach past it. Every invalidation after the hand-over goes through
+//! here; the hand-over's own goes through the unit's registers, before the
+//! queue exists. A unit without `ECAP.QI` is left unprogrammed.
 
 use crate::mm::Mmio;
 use crate::time::{Duration, Tripwire};
@@ -20,9 +20,7 @@ const IOTLB: u64 = 0x2;
 const INTERRUPT_ENTRY_CACHE: u64 = 0x4;
 const WAIT: u64 = 0x5;
 
-/// Granularity field, bits 5:4: `01` is global — every domain, every entry.
-const GLOBAL: u64 = 1 << 4;
-/// `10`: everything cached for one domain id, whatever address or requester it came from.
+/// Granularity field, bits 5:4, `10`: everything cached for one domain id, whatever address or requester it came from.
 const DOMAIN: u64 = 2 << 4;
 /// `11`, context cache only: one requester id, Section 6.5.2.1.
 const DEVICE: u64 = 3 << 4;
@@ -62,18 +60,6 @@ impl Queue {
         regs.write_u64(IQA_REG, queue.descriptors.phys());
         regs.write_u64(IQT_REG, 0);
         queue
-    }
-
-    /// Every cached translation and context entry, gone, acknowledged by the
-    /// unit before this returns.
-    pub fn invalidate_all(&mut self, regs: Mmio) {
-        self.submit(
-            regs,
-            &[
-                (CONTEXT_CACHE | GLOBAL, 0),
-                (IOTLB | GLOBAL | DRAIN_WRITES | DRAIN_READS, 0),
-            ],
-        );
     }
 
     /// Every translation cached for one domain, gone. Owed after any change to

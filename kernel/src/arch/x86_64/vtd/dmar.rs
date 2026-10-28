@@ -186,12 +186,6 @@ impl Rmrr {
         Scopes { table: self.table, offset: self.at + RMRR_SCOPES, end: self.at + self.len }
     }
 
-    /// Whether the declared length covers every fixed field, so none of them
-    /// read as the zero `bounded` gives a field past it.
-    pub fn whole(&self) -> bool {
-        self.len >= RMRR_SCOPES
-    }
-
     fn field<T: Copy + Default>(&self, offset: usize) -> T {
         bounded(self.table, self.at, self.len, offset)
     }
