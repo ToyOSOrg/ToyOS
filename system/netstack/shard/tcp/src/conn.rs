@@ -1068,7 +1068,7 @@ impl Sync {
         if !(self.rx.lendable(rx.len()) && self.tx.buf.lendable(tx.len())) {
             return false;
         }
-        let ring = tx.len();
+        let ring = tx.most();
         self.rx.lend(rx);
         self.tx.buf.lend(tx);
         self.tx.buf.grow(ring);

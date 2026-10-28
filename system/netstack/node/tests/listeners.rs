@@ -373,10 +373,11 @@ impl Net {
         self.pump();
     }
 
-    /// The stream's client writes 100,000 bytes and leaves: [tcp] queues them all, its send
+    /// The stream's client fills its send ring and leaves: [tcp] queues it all, its send
     /// buffer being the client's ring, and finishes the connection alone.
     fn departs(&mut self, id: StreamId, client: &Client) {
-        assert_eq!(client.write(&[7u8; 100_000]), Ok(100_000));
+        let ring = toyos::net::stream::SEND_INITIAL as usize;
+        assert_eq!(client.write(&vec![7u8; ring]), Ok(ring));
         self.node.left(self.now, id);
         self.pump();
         assert!(client.dropped());

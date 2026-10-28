@@ -488,7 +488,7 @@ impl Vfs {
     pub fn stat(&mut self, path: &str, follow: bool) -> Result<Stat, SyscallError> {
         let (mount, file) = if follow { self.followed(path)? } else { self.resolve_path("/", path) };
         let named = |file_type: FileType, size, mtime, volume, node| {
-            Stat { file_type: file_type as u64, size, mtime, volume, node }
+            Stat { file_type: file_type as u64, size, mtime, volume, node, committed: 0 }
         };
         if mount.is_empty() {
             return Ok(named(FileType::Directory, 0, 0, NAMESPACE_VOLUME, ROOT_NODE));

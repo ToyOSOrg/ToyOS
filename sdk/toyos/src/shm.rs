@@ -62,6 +62,18 @@ impl SharedMemory {
         Self::adopt(OwnedHandle(syscall::shm_create(len)?), len)
     }
 
+    /// [`create`](Self::create), only the pages of its first `committed`
+    /// bytes memory until [`Self::commit`] makes more of it.
+    pub fn reserve(size: usize, committed: usize) -> Result<Self, SyscallError> {
+        Self::adopt(syscall::shm_reserve(size, committed)?, size)
+    }
+
+    /// Make every page `[offset, offset + len)` of the region touches memory
+    /// that is not yet ([`syscall::shm_commit`]).
+    pub fn commit(&self, offset: usize, len: usize) -> Result<(), SyscallError> {
+        syscall::shm_commit(self.handle.raw(), offset, len)
+    }
+
     /// [`create`](Self::create), counted to the job `job` is a handle to,
     /// carrying `WRITE`, rather than this process's own: memory laid out
     /// for a child started in it.

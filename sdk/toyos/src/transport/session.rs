@@ -61,7 +61,7 @@
 use core::num::NonZeroU16;
 use core::sync::atomic::Ordering;
 
-use super::stream::{Consumer, Place, Producer, WAKE};
+use super::stream::{Consumer, Place, Producer, Size, WAKE};
 use super::{word, Span, Violation, Word};
 
 /// An `end` while its ring runs.
@@ -174,7 +174,7 @@ pub struct Layout<const RX: u32, const TX: u32, const N: usize> {
 impl<const RX: u32, const TX: u32, const N: usize> Layout<RX, TX, N> {
     /// The receive ring at `rx`, the send ring at `tx`, their `end`s and
     /// gates, [`shutdown_read`]'s word and the word that says the server hung
-    /// up. A layout whose words are not fourteen distinct ones below `N` does
+    /// up. A layout whose words are not sixteen distinct ones below `N` does
     /// not compile where it is a constant.
     pub const fn new<
         const RX_END: usize,
@@ -187,12 +187,22 @@ impl<const RX: u32, const TX: u32, const N: usize> Layout<RX, TX, N> {
         rx: Place<RX, N>,
         tx: Place<TX, N>,
     ) -> Self {
-        let [a, b, c, d] = rx.words();
-        let [e, f, g, h] = tx.words();
+        let [a, b, c, d, e] = rx.words();
+        let [f, g, h, i, j] = tx.words();
         let own = [RX_END, TX_END, RX_GATE, TX_GATE, READ_SHUT, GONE];
         assert!(below(&own, N), "a word past the words");
-        assert!(distinct(&[a, b, c, d, e, f, g, h, RX_END, TX_END, RX_GATE, TX_GATE, READ_SHUT, GONE]), "a session's fourteen words are fourteen");
+        assert!(distinct(&[a, b, c, d, e, f, g, h, i, j, RX_END, TX_END, RX_GATE, TX_GATE, READ_SHUT, GONE]), "a session's sixteen words are sixteen");
         Self { rx, tx, rx_end: RX_END, tx_end: TX_END, rx_gate: RX_GATE, tx_gate: TX_GATE, read_shut: READ_SHUT, gone: GONE }
+    }
+
+    /// Where the receive ring is.
+    pub const fn receive_place(&self) -> Place<RX, N> {
+        self.rx
+    }
+
+    /// Where the send ring is.
+    pub const fn send_place(&self) -> Place<TX, N> {
+        self.tx
     }
 
     /// The receive ring's `end` as the server last stored it.
@@ -352,6 +362,8 @@ pub trait Half<const N: usize>: sealed::Sealed {
 #[derive(Debug)]
 pub struct Receiving<const C: u32, const N: usize> {
     ring: Consumer<C, N>,
+    /// The ring's capacity this process made sure is memory.
+    reached: u32,
     end: usize,
     read_shut: usize,
     common: Common,
@@ -362,6 +374,8 @@ pub struct Receiving<const C: u32, const N: usize> {
 #[derive(Debug)]
 pub struct Sending<const C: u32, const N: usize> {
     ring: Producer<C, N>,
+    /// The ring's capacity this process made sure is memory.
+    reached: u32,
     /// The server's `end`, which a failure makes ready.
     received: usize,
     end: usize,
@@ -515,14 +529,17 @@ impl<const C: u32, const N: usize> Half<N> for Sending<C, N> {
     }
 }
 
-/// The first holder's two halves, the end's cursors stored 0.
+/// The first holder's two halves, the end's cursors stored 0 and its send
+/// ring `send` bytes, which the region holds as memory.
 pub fn client<W: Word, const RX: u32, const TX: u32, const N: usize>(
     page: &[W; N],
     layout: Layout<RX, TX, N>,
+    send: u32,
 ) -> (Receiving<RX, N>, Sending<TX, N>) {
     let (mut receiving, mut sending) = holder(layout, Holder::FIRST);
     receiving.ring = Consumer::new(page, layout.rx);
-    sending.ring = Producer::new(page, layout.tx);
+    sending.ring = Producer::new(page, layout.tx, send);
+    sending.reached = send;
     (receiving, sending)
 }
 
@@ -535,6 +552,7 @@ pub fn holder<const RX: u32, const TX: u32, const N: usize>(
     let common = |gate, shut| Common { gate, shut, gone: layout.gone, holder };
     let receiving = Receiving {
         ring: Consumer::joining(layout.rx),
+        reached: 0,
         end: layout.rx_end,
         read_shut: layout.read_shut,
         common: common(layout.rx_gate, None),
@@ -542,6 +560,7 @@ pub fn holder<const RX: u32, const TX: u32, const N: usize>(
     };
     let sending = Sending {
         ring: Producer::joining(layout.tx),
+        reached: 0,
         received: layout.rx_end,
         end: layout.tx_end,
         common: common(layout.tx_gate, Some(layout.tx_end)),
@@ -807,13 +826,17 @@ where
 /// Reads at most `max` bytes, each span copied out by `copy` at its offset
 /// into the caller's buffer: the count, at least one, or 0 for an orderly end
 /// with every byte read, or once a holder shut the receiving half down. A read
-/// of no bytes answers 0 at once.
+/// of no bytes answers 0 at once. Before it copies past a capacity this
+/// process has not reached, `reach` makes the ring's first that many bytes
+/// memory; one it cannot is a size the server never made,
+/// [`Violation::Size`].
 pub fn read<W, L, B, const C: u32, const N: usize>(
     page: &[W; N],
     lock: &L,
     bells: &B,
     mode: Mode<B::Until>,
     max: u32,
+    mut reach: impl FnMut(u32) -> bool,
     mut copy: impl FnMut(Span, usize),
 ) -> Result<u32, Refused>
 where
@@ -829,8 +852,18 @@ where
             return (if seen.end == ORDERLY { Ok(0) } else { Err(Refused::Failed(seen.end)) }, false);
         }
         let n = seen.ready.min(max);
+        let cap = half.ring.capacity();
+        if cap > half.reached {
+            if !reach(cap) {
+                return (Err(Refused::Violation(Violation::Size)), false);
+            }
+            half.reached = cap;
+        }
+        let Some(spans) = half.ring.span(0, n) else {
+            return (Err(Refused::Violation(Violation::TailPastDepth)), false);
+        };
         let mut at = 0usize;
-        for span in half.ring.span(0, n).into_iter().flatten() {
+        for span in spans {
             copy(span, at);
             at = at.saturating_add(span.len);
         }
@@ -844,13 +877,17 @@ where
 /// Writes at most `len` bytes, each span copied in by `copy` from its offset
 /// into the caller's buffer: the count, at least one. A shutdown, the server's
 /// hang-up or a failure it stored is answered, and nothing copied, whatever
-/// room there is. A write of no bytes answers 0 at once.
+/// room there is. A write of no bytes answers 0 at once. A write the room
+/// cannot take whole doubles the ring, up to its place, where `reach` makes
+/// the ring's first twice its capacity memory; where it cannot, the ring
+/// stays as it is.
 pub fn write<W, L, B, const C: u32, const N: usize>(
     page: &[W; N],
     lock: &L,
     bells: &B,
     mode: Mode<B::Until>,
     len: u32,
+    mut reach: impl FnMut(u32) -> bool,
     mut copy: impl FnMut(Span, usize),
 ) -> Result<u32, Refused>
 where
@@ -867,13 +904,23 @@ where
         Writable::Failed(end) => (Err(Refused::Failed(end)), false),
         Writable::Room(room) => {
             let n = room.min(len);
+            let Some(spans) = half.ring.span(0, n) else {
+                return (Err(Refused::Violation(Violation::HeadPastTail)), false);
+            };
             let mut at = 0usize;
-            for span in half.ring.span(0, n).into_iter().flatten() {
+            for span in spans {
                 copy(span, at);
                 at = at.saturating_add(span.len);
             }
             if !half.ring.advance(n) {
                 return (Err(Refused::Violation(Violation::HeadPastTail)), false);
+            }
+            if n < len && half.ring.can_grow() {
+                let cap = half.ring.capacity().saturating_mul(2);
+                if half.reached >= cap || reach(cap) {
+                    half.reached = half.reached.max(cap);
+                    half.ring.grow(page);
+                }
             }
             (Ok(n), half.ring.publish(page))
         }
@@ -1107,14 +1154,55 @@ pub struct Server<const RX: u32, const TX: u32, const N: usize> {
 }
 
 impl<const RX: u32, const TX: u32, const N: usize> Server<RX, TX, N> {
-    /// The server's end, its cursors stored 0.
-    pub fn new<W: Word>(page: &[W; N], layout: Layout<RX, TX, N>) -> Self {
-        Self { layout, rx: Producer::new(page, layout.rx), tx: Consumer::new(page, layout.tx), ended: OPEN }
+    /// The server's end, its cursors stored 0 and its receive ring `receive`
+    /// bytes, which the region holds as memory.
+    pub fn new<W: Word>(page: &[W; N], layout: Layout<RX, TX, N>, receive: u32) -> Self {
+        Self { layout, rx: Producer::new(page, layout.rx, receive), tx: Consumer::new(page, layout.tx), ended: OPEN }
     }
 
     /// Bytes published that the client has not released.
     pub fn held<W: Word>(&mut self, page: &[W; N]) -> Result<u32, Violation> {
-        Ok(RX.saturating_sub(self.rx.room(page)?))
+        self.rx.room(page)?;
+        self.rx.held(page)
+    }
+
+    /// The most the receive ring holds from the client's head [`Self::held`]
+    /// last read: what netstack may place in it.
+    pub fn receive_holds(&self) -> u32 {
+        self.rx.holds()
+    }
+
+    /// The receive ring's size, which every byte netstack puts in it is laid
+    /// out by.
+    pub fn receive_size(&self) -> Size {
+        self.rx.size()
+    }
+
+    /// The send ring's size as [`Self::sent`] last judged it, which the
+    /// caller makes sure is memory before it copies a byte by it.
+    pub fn send_size(&self) -> Size {
+        self.tx.size()
+    }
+
+    /// The receive ring's capacity.
+    pub fn receive_size_cap(&self) -> u32 {
+        self.rx.capacity()
+    }
+
+    /// The send ring's capacity as [`Self::sent`] last judged it.
+    pub fn send_size_cap(&self) -> u32 {
+        self.tx.capacity()
+    }
+
+    /// Whether [`Self::grow_receive`] may double the receive ring now.
+    pub fn can_grow_receive(&self) -> bool {
+        self.rx.can_grow()
+    }
+
+    /// Double the receive ring, the region below twice its capacity made
+    /// memory first.
+    pub fn grow_receive<W: Word>(&mut self, page: &[W; N]) {
+        self.rx.grow(page);
     }
 
     /// Publishes `n` more bytes, already in the ring behind the tail.
@@ -1168,7 +1256,7 @@ impl<const RX: u32, const TX: u32, const N: usize> Server<RX, TX, N> {
         }
         self.ended = ORDERLY;
         word(page, self.layout.rx_end).store(ORDERLY, Ordering::Release);
-        let [_, _, data, _] = self.layout.rx.words();
+        let [_, _, data, _, _] = self.layout.rx.words();
         Rings::of(Way::Receive, word(page, data).swap(0, WAKE) != 0)
     }
 
@@ -1178,8 +1266,8 @@ impl<const RX: u32, const TX: u32, const N: usize> Server<RX, TX, N> {
     pub fn fail<W: Word>(&mut self, page: &[W; N], code: u32) -> Rings {
         self.ended = code;
         word(page, self.layout.rx_end).store(code, Ordering::Release);
-        let [_, _, data, _] = self.layout.rx.words();
-        let [_, _, _, room] = self.layout.tx.words();
+        let [_, _, data, _, _] = self.layout.rx.words();
+        let [_, _, _, room, _] = self.layout.tx.words();
         let receive = Rings::of(Way::Receive, word(page, data).swap(0, WAKE) != 0);
         receive.and(Rings::of(Way::Send, word(page, room).swap(0, WAKE) != 0))
     }
@@ -1227,14 +1315,14 @@ mod tests {
     use core::cell::{Cell, RefCell};
     use core::sync::atomic::AtomicU32;
 
-    const N: usize = 14;
+    const N: usize = 16;
     const C: u32 = 4;
     const RX_GATE: usize = 10;
     const TX_GATE: usize = 11;
     const TX_END: usize = 9;
     const LAYOUT: Layout<C, C, N> = Layout::new::<8, TX_END, RX_GATE, TX_GATE, 12, 13>(
-        Place::new::<0, 1, 2, 3, 0>(),
-        Place::new::<4, 5, 6, 7, { C as usize }>(),
+        Place::new::<0, 1, 2, 3, 14, 0>(),
+        Place::new::<4, 5, 6, 7, 15, { C as usize }>(),
     );
     /// The send ring's two wants: the server's and the client's.
     const TX_DATA: usize = 6;
@@ -1298,14 +1386,14 @@ mod tests {
 
     /// The first holder's halves and another's, over one page.
     fn two(page: &[AtomicU32; N]) -> (Halves, Halves) {
-        let (rx, tx) = client(page, LAYOUT);
+        let (rx, tx) = client(page, LAYOUT, C);
         let (other_rx, other_tx) = holder(LAYOUT, second());
         ((Held(RefCell::new(rx)), Held(RefCell::new(tx))), (Held(RefCell::new(other_rx)), Held(RefCell::new(other_tx))))
     }
 
     fn write_one<B: Bells>(page: &[AtomicU32; N], tx: &Held<Sending<C, N>>, bells: &B, mode: Mode<B::Until>) -> (Result<u32, Refused>, u32) {
         let mut copied = 0;
-        let wrote = write(page, tx, bells, mode, 1, |span, _| copied += span.len as u32);
+        let wrote = write(page, tx, bells, mode, 1, |_| true, |span, _| copied += span.len as u32);
         (wrote, copied)
     }
 
@@ -1316,8 +1404,8 @@ mod tests {
     fn a_write_with_room_after_a_reset_answers_it_and_copies_nothing() {
         const RESET: u32 = 2;
         let page = page();
-        let (_, sending) = client(&page, LAYOUT);
-        let mut server = Server::new(&page, LAYOUT);
+        let (_, sending) = client(&page, LAYOUT, C);
+        let mut server = Server::new(&page, LAYOUT, C);
         let _ = server.fail(&page, RESET);
         let (sending, bells) = (Held(RefCell::new(sending)), quiet());
         assert_eq!(write_one(&page, &sending, &bells, Mode::Nonblocking), (Err(Refused::Failed(RESET)), 0));
@@ -1328,12 +1416,12 @@ mod tests {
     #[test]
     fn a_read_takes_every_byte_before_the_end() {
         let page = page();
-        let (receiving, _) = client(&page, LAYOUT);
-        let mut server = Server::new(&page, LAYOUT);
+        let (receiving, _) = client(&page, LAYOUT, C);
+        let mut server = Server::new(&page, LAYOUT, C);
         let _ = server.publish(&page, 3);
         let _ = server.finish(&page);
         let (receiving, bells) = (Held(RefCell::new(receiving)), quiet());
-        let read = |max| read(&page, &receiving, &bells, Mode::Nonblocking, max, |_, _| {});
+        let read = |max| read(&page, &receiving, &bells, Mode::Nonblocking, max, |_| true, |_, _| {});
         assert_eq!((read(2), read(2), read(2)), (Ok(2), Ok(1), Ok(0)));
     }
 
@@ -1363,8 +1451,8 @@ mod tests {
     #[test]
     fn a_departure_frees_only_the_departed_holders_gates() {
         let page = page();
-        let mut server = Server::new(&page, LAYOUT);
-        let _ = client(&page, LAYOUT);
+        let mut server = Server::new(&page, LAYOUT, C);
+        let _ = client(&page, LAYOUT, C);
         page[RX_GATE].store(2 | WANT, Ordering::Relaxed);
         page[TX_GATE].store(1, Ordering::Relaxed);
         assert_eq!(server.departed(&page, second()), Ok(Rings::default()), "nobody armed a want");
@@ -1383,7 +1471,7 @@ mod tests {
     #[test]
     fn a_write_after_another_holders_shutdown_answers_shut_and_publishes_nothing() {
         let page = page();
-        let mut server = Server::new(&page, LAYOUT);
+        let mut server = Server::new(&page, LAYOUT, C);
         let ((_, tx), (_, other_tx)) = two(&page);
         let bells = quiet();
         shutdown(&page, &tx, &bells);
@@ -1402,9 +1490,9 @@ mod tests {
     fn a_shutdown_under_another_holders_gate_is_stored_by_its_release() {
         let page = page();
         let ((_, tx), _) = two(&page);
-        let mut server = Server::new(&page, LAYOUT);
+        let mut server = Server::new(&page, LAYOUT, C);
         // A full send ring: no room rings the shutting holder, only the shut.
-        let filled = write(&page, &tx, &quiet(), Mode::Nonblocking, C, |_, _| {});
+        let filled = write(&page, &tx, &quiet(), Mode::Nonblocking, C, |_| true, |_, _| {});
         assert_eq!(filled, Ok(C));
         let owner = Common { gate: TX_GATE, shut: Some(TX_END), gone: 13, holder: second() };
         assert_eq!(acquire(&page, owner), Ok(()));
@@ -1450,7 +1538,7 @@ mod tests {
     fn a_blocking_write_under_another_holders_gate_waits_for_that_holders_gate() {
         let page = page();
         let ((_, tx), _) = two(&page);
-        let server = RefCell::new(Server::new(&page, LAYOUT));
+        let server = RefCell::new(Server::new(&page, LAYOUT, C));
         let owner = Common { gate: TX_GATE, shut: Some(TX_END), gone: 13, holder: second() };
         assert_eq!(acquire(&page, owner), Ok(()));
         let gated = Quiet {
@@ -1463,7 +1551,7 @@ mod tests {
         };
         assert_eq!(write_one(&page, &tx, &gated, Mode::Blocking(None)), (Ok(1), 1));
         assert_eq!(*gated.gates.borrow(), [Some(2)]);
-        assert_eq!(write(&page, &tx, &quiet(), Mode::Nonblocking, C, |_, _| {}), Ok(C - 1), "the ring filled");
+        assert_eq!(write(&page, &tx, &quiet(), Mode::Nonblocking, C, |_| true, |_, _| {}), Ok(C - 1), "the ring filled");
         let full = Quiet {
             rang: Cell::new(0),
             gone: false,
@@ -1490,7 +1578,7 @@ mod tests {
         assert_eq!(gated.gate(), Some(2));
         let _ = unwatch(&page, &tx, &bells, gated);
         let _ = release(&page, owner);
-        assert_eq!(write(&page, &tx, &bells, Mode::Nonblocking, C, |_, _| {}), Ok(C), "the ring filled");
+        assert_eq!(write(&page, &tx, &bells, Mode::Nonblocking, C, |_| true, |_, _| {}), Ok(C), "the ring filled");
         let Polled::Watching(full) = watch(&page, &tx, &bells) else { panic!("room in a full ring") };
         assert_eq!(full.gate(), None, "a watch for room");
         let _ = unwatch(&page, &tx, &bells, full);
@@ -1501,15 +1589,15 @@ mod tests {
     #[test]
     fn a_hang_up_one_holder_saw_is_every_holders() {
         let page = page();
-        let mut server = Server::new(&page, LAYOUT);
+        let mut server = Server::new(&page, LAYOUT, C);
         let ((rx, _), (other_rx, other_tx)) = two(&page);
         let _ = server.publish(&page, 1);
         let hung = Quiet::<fn()> { rang: Cell::new(0), gone: true, waited: None, gates: RefCell::new(Vec::new()) };
-        assert_eq!(read(&page, &rx, &hung, Mode::Nonblocking, 1, |_, _| {}), Ok(1), "the byte before the hang-up");
-        assert_eq!(read(&page, &rx, &hung, Mode::Nonblocking, 1, |_, _| {}), Err(Refused::Gone));
+        assert_eq!(read(&page, &rx, &hung, Mode::Nonblocking, 1, |_| true, |_, _| {}), Ok(1), "the byte before the hang-up");
+        assert_eq!(read(&page, &rx, &hung, Mode::Nonblocking, 1, |_| true, |_, _| {}), Err(Refused::Gone));
         let quiet = quiet();
         assert_eq!(write_one(&page, &other_tx, &quiet, Mode::Nonblocking), (Err(Refused::Gone), 0));
-        assert_eq!(read(&page, &other_rx, &quiet, Mode::Nonblocking, 1, |_, _| {}), Err(Refused::Gone));
+        assert_eq!(read(&page, &other_rx, &quiet, Mode::Nonblocking, 1, |_| true, |_, _| {}), Err(Refused::Gone));
         assert_eq!(quiet.rang.get(), 0, "nothing was rung");
     }
 
@@ -1548,15 +1636,15 @@ mod tests {
     #[test]
     fn a_read_shutdown_is_every_holders() {
         let page = page();
-        let mut server = Server::new(&page, LAYOUT);
+        let mut server = Server::new(&page, LAYOUT, C);
         let ((rx, _), (other_rx, _)) = two(&page);
         let bells = quiet();
-        assert_eq!(read(&page, &other_rx, &bells, Mode::Nonblocking, 1, |_, _| {}), Err(Refused::WouldBlock), "armed");
+        assert_eq!(read(&page, &other_rx, &bells, Mode::Nonblocking, 1, |_| true, |_, _| {}), Err(Refused::WouldBlock), "armed");
         shutdown_read(&page, &rx, &bells);
         assert_eq!(bells.rang.get(), 1);
         assert_eq!(server.rung(&page), Ok(Rings { receive: true, send: false }), "the reader that armed");
         let _ = server.publish(&page, 2);
-        assert_eq!(read(&page, &other_rx, &bells, Mode::Nonblocking, 1, |_, _| {}), Ok(0));
+        assert_eq!(read(&page, &other_rx, &bells, Mode::Nonblocking, 1, |_| true, |_, _| {}), Ok(0));
         assert_eq!(server.held(&page), Ok(2), "a byte was read after the shutdown");
     }
 
@@ -1565,10 +1653,10 @@ mod tests {
     #[test]
     fn a_copy_that_unwinds_lets_the_gate_go_and_rings() {
         let page = page();
-        let (_, tx) = client(&page, LAYOUT);
+        let (_, tx) = client(&page, LAYOUT, C);
         let (tx, bells) = (Held(RefCell::new(tx)), quiet());
         let unwound = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-            write(&page, &tx, &bells, Mode::Nonblocking, 1, |_, _| panic!("the copy faulted"))
+            write(&page, &tx, &bells, Mode::Nonblocking, 1, |_| true, |_, _| panic!("the copy faulted"))
         }));
         assert!(unwound.is_err());
         assert_eq!(page[TX_GATE].load(Ordering::Relaxed), 0, "the gate is still held");
