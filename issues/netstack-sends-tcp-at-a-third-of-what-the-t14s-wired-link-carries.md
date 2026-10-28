@@ -54,13 +54,23 @@ of the 16-descriptor ring's 60,665–66,044 full-ring waits
 one segment for the first ACK after a stop at cwnd, and not for the rest:
 netstack hands the stack every ACK one pass received before the pass's
 transmit opportunity, so a pass's ACKs grew the window as one. #1069 makes
-each ACK count (RFC 5681 §3.1). This matters at the start of each 3 s round;
-it cannot alone hold a round at a third of Linux's rate.
+each ACK count (RFC 5681 §3.1).
 
-Still to read, and what #1069's next reading separates: whether the sender
-waits on itself (the user's writes, Nagle's hold on a tail) or on cwnd, and
-at a stop for cwnd what the window and the round trip were. The transmit
-setup's own lead stays open in
+**Read with it, 2026-10-28**: upload 58, 59, 58 and 59 MB/s against
+Linux's 110–112 ([evidence `afe0c7dac/`](https://github.com/ToyOSOrg/evidence/tree/695218c8513e785bf0465e2f13e0575f5723a2e3/r3/afe0c7dac)). Each ToyOS row's 15 s was
+held by cwnd for 1.5–2.1 s, at stops whose mean cwnd was 192–228 KB and
+mean smoothed round trip 4.5–5.9 ms; by the peer's window for 87–189 ms;
+by the sender itself for about 1 ms. Every resent segment was a loss
+probe, and nearly every one came back D-SACKed. Linux ended its rounds at a
+mean cwnd of 1,706–2,208 segments and a round trip of 9.7–11.7 ms: its
+window is never the limit, and its own queue fills the path.
+
+So neither loss, the peer, the sender nor cwnd holds most of a ToyOS row.
+What is left is the card: 100,053–106,424 full-ring waits a row, about
+6,700 a second. The 256-descriptor ring read no better on 2026-10-27 and
+-28 because slow start then held every row at cwnd; with that fixed, the
+ring's depth is again the candidate, and the next reading compares the
+two rings at this revision. The transmit setup's own lead stays open in
 `issues/the-intel-driver-writes-txdctl-and-tidv-against-the-82574-datasheets-newer-revision.md`.
 
 The clock does not separate the two systems. Each upload row's own
