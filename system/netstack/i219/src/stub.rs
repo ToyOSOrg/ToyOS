@@ -108,9 +108,10 @@ pub struct Permits {
     /// hardware's.
     pub batched_writeback: bool,
     /// What a reset leaves in `TCTL`. Off: §10.2.6.1's initial values, as §4.2
-    /// has a software reset re-read the NVM and reset the rest. On: whatever the
-    /// last holder wrote, which is what the T14's part does: its `TCTL` reads
-    /// the same before the bring-up's reset as after it.
+    /// has a software reset re-read the NVM and reset the rest. On: the value
+    /// before the reset, which is what the T14 reads after it; whether its reset
+    /// keeps `TCTL` or this MAC's own reset value is that one, no reading says,
+    /// and the 82574's table does not describe the PCH's MAC.
     pub reset_leaves_tctl: bool,
     /// §7.1.8: the head register "includes those descriptors completed but not
     /// yet stored in memory", so `RDH` may be ahead of what a driver can read.
@@ -788,12 +789,12 @@ impl Model {
             *word = 0;
         }
         self.set(regs::CTRL, CTRL_RESERVED_SET);
-        // §10.2.6.1's initial values: `PSP`, `MULR` and `RRTHRESH` set, every
-        // other field it gives a value 0; `UNORTX` and `TXDSCMT` it gives none,
-        // and they are 0 here.
         let tctl = if self.permits.reset_leaves_tctl {
             last_holders_tctl
         } else {
+            // §10.2.6.1's initial values: `PSP`, `MULR` and `RRTHRESH` set,
+            // every other field it gives a value 0; `UNORTX` and `TXDSCMT` it
+            // gives none, and they are 0 here.
             tctl::PSP | tctl::MULR | tctl::RRTHRESH_INITIAL
         };
         self.set(regs::TCTL, tctl);

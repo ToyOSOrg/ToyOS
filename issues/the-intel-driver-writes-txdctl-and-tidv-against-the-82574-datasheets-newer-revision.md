@@ -28,7 +28,7 @@ publishes neither). The transmit wake rests on a write-back per descriptor
 with bit 22 clear, and on the I219 the reading of that is the T14 boot
 `issues/the-intel-nics-room-and-wake-are-unread-on-hardware.md` exits on.
 
-**Now the T14's upload lead.** With #1075 keeping `TCTL`'s loaded fields,
+**Now the T14's upload lead.** With #1075 setting every `TCTL` field,
 the upload reads 82–87 MB/s against Linux's 110–111, and the transmit ring
 still sits full 8.3–8.7 s of each 15 s row with no completion unreported
 (`issues/netstack-sends-tcp-at-a-third-of-what-the-t14s-wired-link-carries.md`).

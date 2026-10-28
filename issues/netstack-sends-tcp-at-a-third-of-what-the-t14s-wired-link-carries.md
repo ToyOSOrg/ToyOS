@@ -156,21 +156,21 @@ one request at a time, When set to 1b, the 82574 might submit up to four
 concurrent requests". It gives `MULR` an initial value of `1b` and
 `RRTHRESH` `01b`.
 
-**Refuted for the T14's reset: that the part reloads these from its NVM.**
-§10.2.6.1 says `MULR` "is loaded from the NVM word 0x24/0x14", and §4.2 that
-a software reset "re-reads the per-function NVM fields". On the T14,
+**The T14's reset does not give §10.2.6.1's initial values.** §10.2.6.1
+says `MULR` "is loaded from the NVM word 0x24/0x14", and §4.2 that a
+software reset "re-reads the per-function NVM fields" and resets the bits
+normally read from the NVM to "their default hardware values". On the T14,
 `TCTL` read `0x3003f0f8` both before and after the bring-up's reset
-([evidence `19fbf239c/`](https://github.com/ToyOSOrg/evidence/tree/53b5659297ad1617d886a0ccfbcfcb9f99556851/r4/19fbf239c)): the previous holder's value, `CT`
-and `COLD` included. So the two fields were whatever ran before ToyOS. The
-bring-up now writes every `TCTL` field itself, `MULR` and `RRTHRESH` at
-§10.2.6.1's initial values.
+([evidence `19fbf239c/`](https://github.com/ToyOSOrg/evidence/tree/53b5659297ad1617d886a0ccfbcfcb9f99556851/r4/19fbf239c)), `CT` and `COLD` included, where those
+values would read about `0x30000008`. Either the reset kept the register or
+this MAC's own reset value is that one: no reading separates the two, and
+the 82574's table does not describe the PCH's MAC. Either way the value the
+bring-up met was not one the driver can count on, so it now writes every
+`TCTL` field itself, `MULR` and `RRTHRESH` at §10.2.6.1's initial values.
 
 What is left, about 1.3 times short of Linux with the ring still full most
 of a row, is the next lead: the transmit descriptor control
 (`issues/the-intel-driver-writes-txdctl-and-tidv-against-the-82574-datasheets-newer-revision.md`).
-
-The transmit setup's own lead stays open in
-`issues/the-intel-driver-writes-txdctl-and-tidv-against-the-82574-datasheets-newer-revision.md`.
 
 The clock does not separate the two systems. Each upload row's own
 readings, `mhz` just after it and `mhz_settled` before it, were about

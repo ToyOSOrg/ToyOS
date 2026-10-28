@@ -599,12 +599,10 @@ const STRANDED_DEADLINE_NANOS: u64 =
 /// delivery of it and still a bound on a vector that never fires.
 pub const DELIVERY_DEADLINE_NANOS: u64 = 100_000_000;
 
-/// The transmit control [`I219::open`] writes: §4.6.6's suggested values with
-/// the transmitter enabled.
 /// Every `TCTL` field, so what the bring-up leaves owes nothing to a previous
 /// holder: §4.6.6's `EN`, `PSP`, `CT` and `COLD`, and `MULR` and `RRTHRESH` at
 /// §10.2.6.1's initial values, which §4.6.6's "all other fields 0b" would clear.
-/// The T14's reset leaves `TCTL` as the last holder wrote it.
+/// The T14's reset does not give §10.2.6.1's initial values.
 const TX_CONTROL: u32 =
     tctl::EN | tctl::PSP | tctl::CT | tctl::COLD_FULL_DUPLEX | tctl::MULR | tctl::RRTHRESH_INITIAL;
 
