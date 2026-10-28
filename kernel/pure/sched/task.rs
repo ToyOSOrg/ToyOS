@@ -58,6 +58,9 @@ pub struct Standing {
 pub struct WakeCause {
     pub reason: WakeReason,
     pub boost: Option<BoostWindow>,
+    /// The CPU whose running task posted this wake and parks next, inside the
+    /// same call: the CPU it frees is where the woken task runs.
+    pub parker: Option<CpuId>,
 }
 
 impl WakeCause {
@@ -65,6 +68,7 @@ impl WakeCause {
         Self {
             reason,
             boost: None,
+            parker: None,
         }
     }
 
@@ -72,7 +76,13 @@ impl WakeCause {
         Self {
             reason,
             boost: Some(BoostWindow { until }),
+            parker: None,
         }
+    }
+
+    /// This wake, posted by the task running on `cpu`, which parks next.
+    pub fn parks_next(self, cpu: CpuId) -> Self {
+        Self { parker: Some(cpu), ..self }
     }
 
     /// RT and boost wakes must preempt the target promptly; ordinary wakes
