@@ -221,9 +221,8 @@ impl VirtioNet {
         self.tx.borrow_mut().room()
     }
 
-    /// Fill a transmit buffer with a `len`-byte frame and hand it to the
-    /// device ([`TxQueue::send`]).
-    /// Copy `frame` into a transmit buffer and hand it to the device.
+    /// Copy `frame` into a transmit buffer and hand it to the device
+    /// ([`TxQueue::send`]).
     pub fn tx(&self, frame: &[u8]) {
         let ((), published) = self.tx.borrow_mut().send(frame.len(), |slot| slot.copy_from_slice(frame));
         self.device.notify(published);
