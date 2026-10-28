@@ -774,7 +774,7 @@ impl AddressSpace {
             crate::sched::futex::revoke_frames(frames);
             // SAFETY: frames owned leaves gave up, which no leaf maps on any
             // CPU now and no waiter is keyed on.
-            unsafe { pmm::free_drawn(&self.job, frames) };
+            unsafe { pmm::free_drawn(&self.job, frames.iter().copied()) };
             freed += frames.len() as u64;
         });
         let inventory = &self.inventory;
@@ -822,7 +822,7 @@ impl AddressSpace {
             Leaf::Empty => match &entry.kind {
                 Kind::Private { committed: false } => unreachable!("space: a reservation at {page:#x} allows an access"),
                 Kind::Object { object, offset, .. } => {
-                    let phys = object.page(offset + (page - start));
+                    let phys = object.page(offset + (page - start))?;
                     leaves.set(page, Leaf::Mapped(Mapping { phys, prot, owned: false, cache: object.cache() }));
                     phys
                 }
@@ -956,7 +956,7 @@ impl Drop for AddressSpace {
         let mut freed = 0;
         self.tables.take_owned(FLOOR, TOP, |frames| {
             // SAFETY: the space's own frames, which nothing maps once it drops.
-            unsafe { pmm::free_drawn(&self.job, frames) };
+            unsafe { pmm::free_drawn(&self.job, frames.iter().copied()) };
             freed += frames.len() as u64;
         });
         self.usage.freed(freed);

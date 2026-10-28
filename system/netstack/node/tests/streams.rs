@@ -596,7 +596,7 @@ fn a_deadline_moves_an_established_stream_with_no_opportunity_after_it() {
 #[test]
 fn a_write_larger_than_the_window_is_queued_whole_and_arrives_whole() {
     let (mut net, id, client) = established();
-    let sent = text(100_000);
+    let sent = text(toyos::net::stream::SEND_INITIAL as usize);
     assert_eq!(client.write(&sent), Ok(sent.len()), "the send ring holds all of it");
     net.node.bridge(net.now, [id]);
     net.pump();
@@ -729,7 +729,8 @@ fn room_released_rings_a_writer_over_a_full_send_ring_on_its_bell() {
         }
         net.bridge();
     }
-    assert_eq!(written, toyos::net::stream::SEND_BYTES as usize, "the ring is full");
+    // A deaf peer acknowledges nothing, so no byte is released and the ring stays as made.
+    assert_eq!(written, toyos::net::stream::SEND_INITIAL as usize, "the ring is full");
     let bell = client.bell();
     // The peer acknowledges every byte it heard of the node's.
     let heard = u32::try_from(net.far.segments.iter().map(|segment| segment.text.len()).sum::<usize>()).unwrap();
