@@ -45,9 +45,9 @@ first boots):
 | row | T14 C1 | T14 deep | T14 delta | T14 Linux | AMD C1 | AMD deep | AMD delta | AMD Linux |
 |---|---|---|---|---|---|---|---|---|
 | `time.sleep_late.1ms` | 17.7, 17.8 | 22.1, 14.6 (B7 17.2) | −3 to +4 | 71.5-71.8 | 32.2, 32.5 | 5.6, 5.6 (B7 5.4) | −27 | 69.7-70.8 |
-| `time.sleep_late.10ms` | 17.8, 17.8 | 28.3, 28.3 (B7 27.4) | +10 | 213 | 32.3, 32.6 | 32.6, 33.3 (B7 32.8) | +0.3 to +1 | 342-344 |
+| `time.sleep_late.10ms` | 17.8, 17.8 | 28.3, 28.3 (B7 27.4) | +10.5 to +10.6 | 213 | 32.3, 32.6 | 32.6, 33.3 (B7 32.8) | 0 to +1 | 342-344 |
 | `wake.storm.drain.w4` | 38.5, 37.6 | 126.1, 128.6 (B7 127.9) | +88 to +91 | 121-123 | 306, 107 | 112, 306 (B7 107) | none: 107 or 306 either way | 77-78 |
-| `wake.storm.drain.w16` | 74.1, 77.6 | 161.1, 145.5 (B7 130.1) | +52 to +87 | 370-1041 | 304, 328 | 321, 331 (B7 350) | within the spread | 113-200 |
+| `wake.storm.drain.w16` | 74.1, 77.6 | 161.1, 145.5 (B7 130.1) | +68 to +87 (B7 +52) | 370-1041 | 304, 328 | 321, 331 (B7 350) | within the spread | 113-200 |
 
 A sleep long enough for a deep state is woken early by its exit and still
 lands later the deeper the state was (none at 100 µs, C2 at 1 ms, C10 at
@@ -61,14 +61,14 @@ What it costs, as inference, not measured per workload:
 
 - **Interactive**: an input event that wakes an idle CPU on the T14 lands up
   to about 10 µs later, and one that fans out to 4 to 16 sleeping threads
-  about 50 to 90 µs later, against a 60 Hz frame's 16.7 ms.
+  about 70 to 90 µs later, against a 60 Hz frame's 16.7 ms.
 - **Audio**: while a stream plays, soundserver holds the exit to half its
   2.9 ms period, about 1.45 ms, which both T14 states (253 and 1048 µs) and
   the AMD's (400 µs) are inside: so a period's wake may still pay up to
   1048 µs of exit on the T14, a third of the period. Measured, its worst IRQ
   lateness is not moved and no window underran (below).
 - **Normal workloads**: a server or build that wakes many sleeping threads
-  in bursts pays the storm's 50 to 90 µs per burst on the T14, latency
+  in bursts pays the storm's 70 to 90 µs per burst on the T14, latency
   rather than CPU time; throughput rows did not lose (below).
 
 **Where the exit stands** (#1073's second boots at `f8749dc69`, two boots
@@ -121,9 +121,8 @@ evidence):
   inside the spread: the history does not hold the count down, and no
   idle-policy change is earned.
 - D1's counters showed nothing. In 13 of 17 windows the two reads, 5 ms
-  apart, shared one round (since fixed: every reading is taken after its
-  read was called), and the windows that did differ were read before
-  osbench took a window from the readings' own stamps.
+  apart, were served one round, and the windows that did differ were read
+  before osbench took a window from the readings' own stamps.
 - The scheduler's diary across each window (D3), a boot in which boot,
   identity, energy, system and mem were at 3789: in the first four
   acpiserver ran beside osbench, 5.5 ms of the window by the roster. In mem
@@ -141,8 +140,7 @@ idle predictor is tuned before it has been read.
 
 **Exit**: on the T14, since a KVM guest's idle is its host's: the idle
 minute's package energy, timer lateness no worse than `hlt`'s by more than
-the chosen state's exit latency, the exit costs above decided by the
-architect, and single-thread rows (`crunch.single`) at Linux's on the same
-T14. `cpu.clock` at each group start is read beside them to explain a
-shortfall, not held to ratio 42 for its own sake.
+the chosen state's exit latency, and the exit costs above decided by the
+architect. `cpu.clock` at each group start is read beside them as a
+diagnostic, not held to ratio 42 for its own sake.
 **Mutation**: always the deepest state. **Oracle**: Linux's figures.

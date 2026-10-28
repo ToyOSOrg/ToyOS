@@ -10,9 +10,9 @@
 //! waited for without end.
 //!
 //! **Every reading is taken after its read was called.** A read joins a round
-//! issued after its call began, or issues its own; a round is issued at most
-//! once per [`JOIN`], so a read inside one waits until it has passed, and no
-//! reader makes a CPU take more than one kick per [`JOIN`].
+//! issued after its call began, or issues its own; rounds are at least
+//! [`INTERVAL`] apart, so a read inside one waits until it has passed, and no
+//! reader makes a CPU take more than one kick per [`INTERVAL`].
 //!
 //! A model-specific counter is read only where the CPU's own verdict at
 //! [`bring_up`] admitted it, and the power envelope only where the CPU-state
@@ -40,9 +40,9 @@ const ANSWER: Budget = Budget::of(
     "every CPU that has not answered is read stale, with the block it last published",
 );
 
-/// The most often a round is issued.
-const JOIN: Cadence = Cadence::every(
-    Duration::from_millis(10),
+/// The least time between two rounds.
+const INTERVAL: Cadence = Cadence::every(
+    Duration::from_nanos(toyos_abi::counters::INTERVAL_NS),
     "a reader within it of the last round's issue waits until it has passed, so a kick per CPU per 10 ms at most",
 );
 
@@ -206,7 +206,7 @@ pub fn read(rights: Rights, out: &mut UserBytesMut) -> Result<usize, SyscallErro
             match *last {
                 // Strictly after: every answer to it is taken after its issue, and so after this call.
                 Some((generation, issued)) if issued > called => break (generation, issued, false),
-                Some((_, issued)) if now < issued + JOIN.duration() => issued + JOIN.duration(),
+                Some((_, issued)) if now < issued + INTERVAL.duration() => issued + INTERVAL.duration(),
                 _ => {
                     let generation = ROUNDS.issue(Reach::Narrow);
                     *last = Some((generation, now));

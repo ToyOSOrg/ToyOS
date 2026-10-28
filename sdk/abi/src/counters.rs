@@ -4,8 +4,8 @@
 //! **A CPU's hardware counters are readable only on that CPU**, so a read asks
 //! every CPU to copy its counters out and waits for the answers under a bound.
 //! Every answer is taken after the read was called. Reads close together
-//! share one round of asking, and a round is asked at most every 10 ms, so a
-//! read may wait up to 10 ms before its round begins.
+//! share one round of asking, and rounds are at least [`INTERVAL_NS`] apart,
+//! so a read may wait up to 10 ms before its round begins.
 //! A CPU that has not answered by then is [`Record::stale`]: its values are the
 //! last it gave, and its [`Counter::Stamp`] says when it gave them. A counter
 //! the CPU does not have, or that the caller's capability may not read, is
@@ -20,6 +20,9 @@
 //! [`SYS_COUNTERS`]: crate::syscall::SYS_COUNTERS
 
 use crate::handle::Rights;
+
+/// The least time between two rounds of asking every CPU, in nanoseconds.
+pub const INTERVAL_NS: u64 = 10_000_000;
 
 /// One counter a CPU keeps, by its index in [`Record::values`].
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
