@@ -9,12 +9,20 @@
 //!
 //! - an `MWAIT` hint names a sub-state CPUID leaf 5 enumerates, on a CPU with
 //!   MONITOR/MWAIT and its extensions (Intel SDM Vol. 2B, MWAIT, Table 1-3);
-//! - a port is one the core itself traps as a C-state request and no device
-//!   sees: `CStateBaseAddr`'s eight (AMD PPR 55922, MSRC001_0073);
+//! - a port is one the holder could read itself through its claim: no port
+//!   the kernel keeps, protects or lent to another claim
+//!   (`crate::firmware::port`, asked by the caller), since a read the kernel
+//!   makes for the holder is one the holder's AML could make;
 //! - the CPU keeps time in any state: its APIC timer always runs (CPUID.06H:
 //!   EAX[2]) and its TSC is invariant (CPUID.80000007H:EDX[8]). Without either a
 //!   deep state stops the clock or the one-shot, so a CPU lacking one keeps
-//!   only C1, whatever is declared.
+//!   only C1, whatever is declared;
+//! - a state's residency is no shorter than its exit: the CPU wakes `exit`
+//!   early before a deadline (`kernel::sched::idle`), which is a wait only
+//!   where the state fits a residency longer than that.
+//!
+//! The kernel keeps a CPU's table as words it publishes and its CPU reads
+//! ([`words`], [`read`]).
 
 use toyos_abi::acpi::{IdleDeclaration, IdleEntry, IDLE_STATES};
 
@@ -31,9 +39,6 @@ pub struct CpuIdle {
     pub always_running_timer: bool,
     /// CPUID.80000007H:EDX[8].
     pub invariant_tsc: bool,
-    /// The first of the eight ports the core traps for C-state entry, where it
-    /// traps any: `CStateBaseAddr` on AMD, nonzero.
-    pub trapped_ports: Option<u16>,
 }
 
 /// How a checked state is entered.
@@ -93,14 +98,17 @@ pub enum Refused {
     NoMwait { state: usize },
     /// A hint with reserved bits, or a sub-state leaf 5 does not enumerate.
     Hint { state: usize, hint: u64 },
-    /// A port the core does not trap for C-state entry.
+    /// A port past 0xFFFF, or one the holder could not read itself.
     Port { state: usize, port: u64 },
     /// A state that claims to wake in no time.
     NoLatency { state: usize },
+    /// A residency shorter than the state's exit, zero among them.
+    Residency { state: usize },
 }
 
-/// `declaration` checked for the CPU `cpu` describes.
-pub fn table(declaration: &IdleDeclaration, cpu: &CpuIdle) -> Result<Table, Refused> {
+/// `declaration` checked for the CPU `cpu` describes; `readable` says whether
+/// the holder could read a port itself.
+pub fn table(declaration: &IdleDeclaration, cpu: &CpuIdle, readable: impl Fn(u16) -> bool) -> Result<Table, Refused> {
     let count = declaration.count as usize;
     if count > IDLE_STATES {
         return Err(Refused::Count(declaration.count));
@@ -126,16 +134,16 @@ pub fn table(declaration: &IdleDeclaration, cpu: &CpuIdle) -> Result<Table, Refu
                 }
                 Entry::Mwait { hint: mwait_hint(declared.address, cpu.mwait_substates).ok_or(Refused::Hint { state, hint: declared.address })? }
             }
-            IdleEntry::Port => {
-                let trapped = cpu.trapped_ports.is_some_and(|base| (u64::from(base)..u64::from(base) + 8).contains(&declared.address));
-                if !trapped {
-                    return Err(Refused::Port { state, port: declared.address });
-                }
-                Entry::Port { port: declared.address as u16 }
-            }
+            IdleEntry::Port => match u16::try_from(declared.address) {
+                Ok(port) if readable(port) => Entry::Port { port },
+                _ => return Err(Refused::Port { state, port: declared.address }),
+            },
         };
         if declared.latency_us == 0 {
             return Err(Refused::NoLatency { state });
+        }
+        if declared.residency_us < declared.latency_us {
+            return Err(Refused::Residency { state });
         }
         table.states[state] = Some(State {
             entry,
@@ -144,6 +152,54 @@ pub fn table(declaration: &IdleDeclaration, cpu: &CpuIdle) -> Result<Table, Refu
         });
     }
     Ok(table)
+}
+
+/// A table's words: a generation and the count, then two per state.
+pub const WORDS: usize = 1 + 2 * IDLE_STATES;
+
+const MWAIT: u64 = 1;
+const PORT: u64 = 2;
+
+/// `table` as words, for one publisher to store and its CPU to [`read`]: the
+/// generation tells this table from the one it replaces.
+pub fn words(table: &Table, generation: u64) -> [u64; WORDS] {
+    let mut words = [0; WORDS];
+    words[0] = (generation << 8) | table.len() as u64;
+    for (i, state) in table.states().enumerate() {
+        let (kind, address) = match state.entry {
+            Entry::Mwait { hint } => (MWAIT, u64::from(hint)),
+            Entry::Port { port } => (PORT, u64::from(port)),
+        };
+        words[1 + 2 * i] = kind | (address << 8);
+        // Microseconds, as declared: each fits its half.
+        words[2 + 2 * i] = (state.exit_ns / 1000) | ((state.residency_ns / 1000) << 32);
+    }
+    words
+}
+
+/// What [`words`] wrote: the generation, and the states in order.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub struct Published {
+    pub generation: u64,
+    pub states: [Option<State>; IDLE_STATES],
+}
+
+/// The words [`words`] wrote, read back. Words it did not write are a
+/// kernel bug: the one publisher writes nothing else.
+pub fn read(words: &[u64; WORDS]) -> Published {
+    let len = (words[0] & 0xFF) as usize;
+    assert!(len <= IDLE_STATES, "idle: a published table of {len} states, which no table holds");
+    let mut states = [None; IDLE_STATES];
+    for (i, slot) in states.iter_mut().enumerate().take(len) {
+        let (head, cost) = (words[1 + 2 * i], words[2 + 2 * i]);
+        let entry = match head & 0xFF {
+            MWAIT => Entry::Mwait { hint: (head >> 8) as u32 },
+            PORT => Entry::Port { port: (head >> 8) as u16 },
+            kind => panic!("idle: a published state of kind {kind}, which words writes none of"),
+        };
+        *slot = Some(State { entry, exit_ns: (cost & 0xFFFF_FFFF) * 1000, residency_ns: (cost >> 32) * 1000 });
+    }
+    Published { generation: words[0] >> 8, states }
 }
 
 /// `hint` where leaf 5 enumerates its sub-state: bits 7:4 the target C-state
@@ -175,19 +231,23 @@ mod tests {
         mwait_substates: 0x1002_2120,
         always_running_timer: true,
         invariant_tsc: true,
-        trapped_ports: None,
     };
 
     /// A Zen 2's: MWAIT reaches C1 alone (PPR 55922, CPUID_Fn00000005_EDX
-    /// 0000_0011h), and the core traps 0x413 to 0x41A.
+    /// 0000_0011h).
     const ZEN_2: CpuIdle = CpuIdle {
         monitor: true,
         mwait_extensions: true,
         mwait_substates: 0x11,
         always_running_timer: true,
         invariant_tsc: true,
-        trapped_ports: Some(0x413),
     };
+
+    /// The holder's port policy as a test asks it: every port but the ones
+    /// the kernel keeps, here the 8259 pair's.
+    fn readable(port: u16) -> bool {
+        !matches!(port, 0x20 | 0x21 | 0xA0 | 0xA1)
+    }
 
     fn state(entry: IdleEntry, address: u64, latency_us: u32) -> IdleState {
         IdleState { address, latency_us, residency_us: 2 * latency_us, entry: entry as u8, reserved: [0; 7] }
@@ -201,7 +261,7 @@ mod tests {
 
     #[test]
     fn the_t14s_two_states_are_kept_as_declared() {
-        let t = table(&declaring(&[state(IdleEntry::Mwait, 0x31, 253), state(IdleEntry::Mwait, 0x60, 1048)]), &INTEL).unwrap();
+        let t = table(&declaring(&[state(IdleEntry::Mwait, 0x31, 253), state(IdleEntry::Mwait, 0x60, 1048)]), &INTEL, readable).unwrap();
         let mut states = [None; 2];
         for (slot, kept) in states.iter_mut().zip(t.states()) {
             *slot = Some(*kept);
@@ -221,41 +281,65 @@ mod tests {
         // C3 has two sub-states, so 0x22 names a third; C6 has none; a target
         // of 7 would be C8, past leaf 5; 0xF0 is C0; 0x100 sets a reserved bit.
         for hint in [0x22, 0x50, 0x70, 0xF0, 0x100] {
-            assert_eq!(table(&declaring(&[state(IdleEntry::Mwait, hint, 10)]), &INTEL), Err(Refused::Hint { state: 0, hint }), "{hint:#x}");
+            assert_eq!(table(&declaring(&[state(IdleEntry::Mwait, hint, 10)]), &INTEL, readable), Err(Refused::Hint { state: 0, hint }), "{hint:#x}");
         }
-        assert_eq!(table(&declaring(&[state(IdleEntry::Mwait, 0x31, 10)]), &ZEN_2), Err(Refused::Hint { state: 0, hint: 0x31 }));
+        assert_eq!(table(&declaring(&[state(IdleEntry::Mwait, 0x31, 10)]), &ZEN_2, readable), Err(Refused::Hint { state: 0, hint: 0x31 }));
     }
 
     #[test]
-    fn the_amds_trapped_port_is_kept_and_any_other_refused() {
-        let kept = table(&declaring(&[state(IdleEntry::Port, 0x414, 400)]), &ZEN_2).unwrap();
+    fn a_port_the_holder_may_read_is_kept_and_any_other_refused() {
+        let kept = table(&declaring(&[state(IdleEntry::Port, 0x414, 400)]), &ZEN_2, readable).unwrap();
         assert_eq!(kept.states().next().unwrap().entry, Entry::Port { port: 0x414 });
-        for port in [0x412, 0x41B, 0x1816, 0x1_0414] {
-            assert_eq!(table(&declaring(&[state(IdleEntry::Port, port, 400)]), &ZEN_2), Err(Refused::Port { state: 0, port }), "{port:#x}");
+        for port in [0x20, 0xA1, 0x1_0414] {
+            assert_eq!(table(&declaring(&[state(IdleEntry::Port, port, 400)]), &ZEN_2, readable), Err(Refused::Port { state: 0, port }), "{port:#x}");
         }
-        assert_eq!(table(&declaring(&[state(IdleEntry::Port, 0x414, 400)]), &INTEL), Err(Refused::Port { state: 0, port: 0x414 }));
+    }
+
+    /// The early wake before a deadline is the exit; a state whose residency
+    /// is shorter would be woken from before it was worth entering.
+    #[test]
+    fn a_residency_shorter_than_the_exit_is_refused() {
+        let with = |latency_us, residency_us| IdleState { residency_us, ..state(IdleEntry::Mwait, 0x31, latency_us) };
+        assert_eq!(table(&declaring(&[with(253, 252)]), &INTEL, readable), Err(Refused::Residency { state: 0 }));
+        assert_eq!(table(&declaring(&[with(253, 0)]), &INTEL, readable), Err(Refused::Residency { state: 0 }));
+        assert!(table(&declaring(&[with(253, 253)]), &INTEL, readable).is_ok());
+    }
+
+    #[test]
+    fn a_table_reads_back_from_its_words_whole() {
+        let t = table(&declaring(&[state(IdleEntry::Mwait, 0x31, 253), state(IdleEntry::Port, 0x414, 400)]), &INTEL, readable);
+        // Ports are no Intel state, but the boundary checks only what the CPU can do: a port is read on any.
+        let t = t.unwrap();
+        let back = read(&words(&t, 7));
+        assert_eq!(back.generation, 7);
+        let mut expected = [None; IDLE_STATES];
+        for (slot, kept) in expected.iter_mut().zip(t.states()) {
+            *slot = Some(*kept);
+        }
+        assert_eq!(back.states, expected);
+        assert_eq!(read(&words(&Table::EMPTY, 9)), Published { generation: 9, states: [None; IDLE_STATES] });
     }
 
     #[test]
     fn a_cpu_whose_timer_or_clock_stops_keeps_c1_alone() {
         let d = declaring(&[state(IdleEntry::Mwait, 0x31, 253)]);
-        assert_eq!(table(&d, &CpuIdle { always_running_timer: false, ..INTEL }), Err(Refused::TimerStops));
-        assert_eq!(table(&d, &CpuIdle { invariant_tsc: false, ..INTEL }), Err(Refused::TscVaries));
-        assert_eq!(table(&declaring(&[]), &CpuIdle::default()), Ok(Table::EMPTY), "nothing declared needs nothing of the CPU");
+        assert_eq!(table(&d, &CpuIdle { always_running_timer: false, ..INTEL }, readable), Err(Refused::TimerStops));
+        assert_eq!(table(&d, &CpuIdle { invariant_tsc: false, ..INTEL }, readable), Err(Refused::TscVaries));
+        assert_eq!(table(&declaring(&[]), &CpuIdle::default(), readable), Ok(Table::EMPTY), "nothing declared needs nothing of the CPU");
     }
 
     #[test]
     fn a_malformed_declaration_is_refused_whole() {
         let mut d = declaring(&[state(IdleEntry::Mwait, 0x31, 253)]);
         d.count = 9;
-        assert_eq!(table(&d, &INTEL), Err(Refused::Count(9)));
+        assert_eq!(table(&d, &INTEL, readable), Err(Refused::Count(9)));
         let mut bad = state(IdleEntry::Mwait, 0x31, 253);
         bad.entry = 3;
-        assert_eq!(table(&declaring(&[bad]), &INTEL), Err(Refused::Malformed { state: 0 }));
+        assert_eq!(table(&declaring(&[bad]), &INTEL, readable), Err(Refused::Malformed { state: 0 }));
         let mut bad = state(IdleEntry::Mwait, 0x31, 253);
         bad.reserved[6] = 1;
-        assert_eq!(table(&declaring(&[bad]), &INTEL), Err(Refused::Malformed { state: 0 }));
-        assert_eq!(table(&declaring(&[state(IdleEntry::Mwait, 0x31, 0)]), &INTEL), Err(Refused::NoLatency { state: 0 }));
-        assert_eq!(table(&declaring(&[state(IdleEntry::Mwait, 0x31, 1)]), &CpuIdle { mwait_extensions: false, ..INTEL }), Err(Refused::NoMwait { state: 0 }));
+        assert_eq!(table(&declaring(&[bad]), &INTEL, readable), Err(Refused::Malformed { state: 0 }));
+        assert_eq!(table(&declaring(&[state(IdleEntry::Mwait, 0x31, 0)]), &INTEL, readable), Err(Refused::NoLatency { state: 0 }));
+        assert_eq!(table(&declaring(&[state(IdleEntry::Mwait, 0x31, 1)]), &CpuIdle { mwait_extensions: false, ..INTEL }, readable), Err(Refused::NoMwait { state: 0 }));
     }
 }

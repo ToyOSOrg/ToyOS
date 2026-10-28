@@ -763,9 +763,22 @@ pub fn current_kill_pending() -> bool {
 }
 
 /// How long this CPU takes to wake from the state it is about to wait in, for
-/// a wake forward choosing between sleepers (`CpuHandles::idle_near`).
+/// a wake forward choosing between sleepers (`CpuHandles::idle_near`) and for
+/// a new wake bound ([`wake_slower_than`]); 0 once it is awake.
 pub fn publish_idle_exit(nanos: u64) {
     cpus().get(current_cpu()).publish_idle_exit(nanos);
+}
+
+/// Ring and kick every other CPU whose published exit exceeds `bound`, so it
+/// leaves its state and chooses again under the bound.
+pub fn wake_slower_than(bound: u64) {
+    let me = current_cpu();
+    for cpu in (0..cpus().len() as u32).map(CpuId).filter(|&cpu| cpu != me) {
+        let handle = cpus().get(cpu);
+        if handle.idle_exit() > bound && handle.poke() == Kick::Send {
+            HW.kick(cpu);
+        }
+    }
 }
 
 pub fn current_cpu() -> CpuId {

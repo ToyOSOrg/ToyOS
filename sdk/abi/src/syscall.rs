@@ -1762,9 +1762,11 @@ pub fn job_floor(syscap: RawHandle, job: RawHandle, bytes: u64) -> Result<(), Sy
 }
 
 /// Hold every idle CPU to waking within `bound_ns` for as long as the
-/// returned handle lives: no CPU waits in a state slower to leave than the
-/// least bound held. Needs [`Rights::WAKE_LATENCY`]; a bound of 0 is
-/// refused [`SyscallError::InvalidArgument`].
+/// returned handle lives: from when this returns no CPU enters a state slower
+/// to leave than the least bound held, and each CPU waiting in one has been
+/// sent a wake, which pays that state's exit once. Needs
+/// [`Rights::WAKE_LATENCY`]; a bound of 0 is refused
+/// [`SyscallError::InvalidArgument`].
 ///
 /// [`Rights::WAKE_LATENCY`]: crate::handle::Rights::WAKE_LATENCY
 pub fn wake_latency_hold(syscap: RawHandle, bound_ns: u64) -> Result<RawHandle, SyscallError> {

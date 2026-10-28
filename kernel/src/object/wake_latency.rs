@@ -1,5 +1,6 @@
-//! A hold on how long any idle CPU takes to wake: while one lives, no CPU waits
-//! in a state slower to leave than the least bound held (`crate::idle`). It is
+//! A hold on how long any idle CPU takes to wake: from its making until it
+//! goes, no CPU enters a state slower to leave than the least bound held, and
+//! its making wakes each CPU waiting in one (`crate::idle::hold`). It is
 //! made through a `SysCap` carrying `WAKE_LATENCY` and lasts as long as the
 //! object, so its last handle's going, the holder's death among them, ends it.
 

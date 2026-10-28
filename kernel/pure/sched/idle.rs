@@ -18,7 +18,11 @@
 //! **A CPU the history alone holds shallow comes back to look** ([`Choice::revisit_after`]):
 //! the history moves only on wakes, and a CPU that stopped being woken would
 //! otherwise wait shallow for as long as nothing comes, which on a part whose
-//! turbo counts a core in C1 as active costs every other core its clock.
+//! turbo counts a core in C1 as active costs every other core its clock. It
+//! looks again after the residency of the next deeper state it was kept from,
+//! and a look that nothing interrupted is an idle period that long, after
+//! which the short wakes that held the CPU no longer describe it
+//! ([`History::quiet`]): a CPU left idle climbs one state per residency.
 
 use alloc::collections::BTreeMap;
 
@@ -59,6 +63,18 @@ impl History {
         }
     }
 
+    /// An idle period of `slept` that nothing but the CPU's own revisit
+    /// ended: whatever pattern of short wakes held the CPU shallow has stopped
+    /// for at least that long, so each state whose residency it covers starts
+    /// again with nothing early.
+    pub fn quiet(&mut self, costs: &[Cost], slept: u64) {
+        for (bits, cost) in self.early.iter_mut().zip(costs) {
+            if cost.residency <= slept {
+                *bits = 0;
+            }
+        }
+    }
+
     /// The states a new declaration replaced are not its states: what was
     /// learned of them says nothing about these.
     pub fn forget(&mut self) {
@@ -88,9 +104,8 @@ pub struct Choice {
     /// deadline to be met.
     pub wake_early_by: u64,
     /// Where a deeper state fit the horizon and the bound and the history
-    /// alone kept the CPU from it: how soon to wake and choose again, that
-    /// state's residency. A wake then is a period that long, which the history
-    /// learns as one.
+    /// alone kept the CPU from it: how soon to wake and choose again, the
+    /// residency of the shallowest such state ([`History::quiet`]).
     pub revisit_after: Option<u64>,
 }
 
@@ -103,15 +118,68 @@ pub fn choose(costs: &[Cost], history: &History, horizon: Option<u64>, limit: Op
         let cost = costs[state];
         limit.is_none_or(|limit| cost.exit <= limit) && horizon.is_none_or(|horizon| cost.residency <= horizon)
     };
-    let deepest_permitted = states.clone().rev().find(|&s| permitted(s));
-    let state = states.rev().find(|&s| permitted(s) && history.admits(s));
+    let state = states.clone().rev().find(|&s| permitted(s) && history.admits(s));
+    let next_deeper = states.filter(|&s| state.is_none_or(|chosen| s > chosen)).find(|&s| permitted(s));
     Choice {
         state,
         wake_early_by: match (state, horizon) {
             (Some(state), Some(_)) => costs[state].exit,
             _ => 0,
         },
-        revisit_after: deepest_permitted.filter(|&deepest| Some(deepest) != state).map(|deepest| costs[deepest].residency),
+        revisit_after: next_deeper.map(|deeper| costs[deeper].residency),
+    }
+}
+
+/// How early the scheduler's own timer may fire and still be the wake it was
+/// armed for: a one-shot counts its span in whole ticks of its timer, rounding
+/// down, so it fires up to a tick early. A policy far above one tick of either
+/// architecture's timer, and far below any state's residency.
+pub const FORESEEN_SLACK: u64 = 1_000;
+
+/// When the scheduler's own timer fires after this choice, where one is armed
+/// for `armed`: its deadline, pulled in by the chosen state's exit.
+pub fn deadline_fires(choice: &Choice, armed: Option<u64>) -> Option<u64> {
+    armed.map(|at| at.saturating_sub(choice.wake_early_by))
+}
+
+/// The instant to fire this CPU's timer at, sooner than the scheduler armed
+/// it, for `choice` made at `now`: the deadline pulled in by the exit, or the
+/// revisit, whichever is sooner. Never at or after `armed`, so writing it can
+/// only move the timer earlier; `None` leaves it as the scheduler armed it.
+pub fn wake_at(choice: &Choice, armed: Option<u64>, now: u64) -> Option<u64> {
+    let early = deadline_fires(choice, armed).filter(|_| choice.wake_early_by > 0);
+    let revisit = choice.revisit_after.map(|after| now.saturating_add(after));
+    early.into_iter().chain(revisit).min().filter(|&at| armed.is_none_or(|armed| at < armed))
+}
+
+/// Whether a period that ended at `woke` was ended by the scheduler's own
+/// timer, firing for `fires`: what the history must not learn from, since the
+/// horizon already said it.
+pub fn foreseen(fires: Option<u64>, woke: u64) -> bool {
+    fires.is_some_and(|fires| woke.saturating_add(FORESEEN_SLACK) >= fires)
+}
+
+/// What ended an idle period.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum Ended {
+    /// The scheduler's own timer, which the horizon already said.
+    Deadline,
+    /// The CPU's revisit, nothing else having come first.
+    Revisit,
+    /// A kick, an IPI or a device: what the history learns from.
+    Unforeseen,
+}
+
+/// What ended an idle period chosen as `choice` at `now`, with the
+/// scheduler's timer armed for `armed`, that ended at `woke`.
+pub fn ended(choice: &Choice, armed: Option<u64>, now: u64, woke: u64) -> Ended {
+    let revisit = choice.revisit_after.map(|after| now.saturating_add(after));
+    if foreseen(deadline_fires(choice, armed), woke) {
+        Ended::Deadline
+    } else if foreseen(revisit, woke) {
+        Ended::Revisit
+    } else {
+        Ended::Unforeseen
     }
 }
 
@@ -256,7 +324,7 @@ mod tests {
         for _ in 0..WINDOW {
             short.unforeseen(&T14, 10 * US);
         }
-        assert_eq!(choose(&T14, &short, None, None).revisit_after, Some(2096 * US));
+        assert_eq!(choose(&T14, &short, None, None).revisit_after, Some(506 * US), "the next deeper state is C2");
         assert_eq!(choose(&T14, &short, Some(1000 * US), None).revisit_after, Some(506 * US), "C2 alone fits the horizon");
         assert_eq!(choose(&T14, &short, None, Some(300 * US)).revisit_after, Some(506 * US), "C2 alone fits the bound");
         assert_eq!(choose(&T14, &History::default(), Some(1000 * US), None).revisit_after, None, "the horizon kept it from C3, not the history");
@@ -264,24 +332,47 @@ mod tests {
     }
 
     /// A CPU that was busy and then got nothing more to do is woken only by
-    /// its revisits, each a period of the residency it was asked to look
-    /// after: it reaches the deepest state within the window less the
-    /// allowance, and then stays.
+    /// its revisits: it climbs a state per revisit, C2 after C2's residency
+    /// and C3 after C3's, and then stays.
     #[test]
-    fn a_cpu_left_idle_after_short_idles_reaches_the_deepest_state_on_its_revisits_alone() {
+    fn a_cpu_left_idle_after_short_idles_climbs_a_state_per_revisit() {
         let mut h = History::default();
         for _ in 0..WINDOW {
             h.unforeseen(&T14, 10 * US);
         }
-        let mut revisits = 0;
+        let mut path = std::vec::Vec::new();
         loop {
             let choice = choose(&T14, &h, None, None);
+            path.push(choice.state);
             let Some(after) = choice.revisit_after else { break };
-            h.unforeseen(&T14, after);
-            revisits += 1;
+            h.quiet(&T14, after);
         }
-        assert_eq!(choose(&T14, &h, None, None).state, Some(1));
-        assert_eq!(revisits, WINDOW - EARLY_ALLOWED);
+        assert_eq!(path, [None, Some(0), Some(1)]);
+    }
+
+    /// A revisit clears only what it covered: a period of C2's residency says
+    /// nothing of an idle as long as C3's.
+    #[test]
+    fn a_quiet_period_clears_the_states_it_covers_and_no_deeper() {
+        let mut h = History::default();
+        for _ in 0..WINDOW {
+            h.unforeseen(&T14, 10 * US);
+        }
+        h.quiet(&T14, 506 * US);
+        assert_eq!(choose(&T14, &h, None, None).state, Some(0));
+        assert_eq!(choose(&T14, &h, None, None).revisit_after, Some(2096 * US));
+    }
+
+    #[test]
+    fn a_period_is_ended_by_the_deadline_the_revisit_or_neither() {
+        let held = Choice { state: None, wake_early_by: 0, revisit_after: Some(506 * US) };
+        assert_eq!(ended(&held, Some(10_000 * US), 0, 10_000 * US), Ended::Deadline);
+        assert_eq!(ended(&held, Some(10_000 * US), 0, 506 * US), Ended::Revisit);
+        assert_eq!(ended(&held, None, 0, 506 * US - FORESEEN_SLACK), Ended::Revisit, "a tick short");
+        assert_eq!(ended(&held, None, 0, 300 * US), Ended::Unforeseen);
+        let deep = Choice { state: Some(1), wake_early_by: 1048 * US, revisit_after: None };
+        assert_eq!(ended(&deep, Some(10_000 * US), 0, 8952 * US), Ended::Deadline, "the early wake is the deadline's");
+        assert_eq!(ended(&deep, None, 0, 9_000 * US), Ended::Unforeseen);
     }
 
     #[test]
@@ -298,6 +389,33 @@ mod tests {
         assert_eq!(b.least(), Some(1_450 * US));
         b.release(1_450 * US);
         assert_eq!(b.least(), None);
+    }
+
+    #[test]
+    fn the_timer_fires_at_the_deadline_less_the_exit_or_the_revisit_whichever_is_sooner() {
+        let deep = Choice { state: Some(1), wake_early_by: 1048 * US, revisit_after: None };
+        assert_eq!(deadline_fires(&deep, Some(10_000 * US)), Some(8952 * US));
+        assert_eq!(wake_at(&deep, Some(10_000 * US), 0), Some(8952 * US));
+        let held = Choice { state: Some(0), wake_early_by: 253 * US, revisit_after: Some(2096 * US) };
+        assert_eq!(wake_at(&held, Some(10_000 * US), 1000 * US), Some(3096 * US), "the revisit is sooner");
+        assert_eq!(wake_at(&held, Some(2_000 * US), 1000 * US), Some(1747 * US), "the deadline is sooner");
+        let c1 = Choice { state: None, wake_early_by: 0, revisit_after: Some(506 * US) };
+        assert_eq!(wake_at(&c1, None, 0), Some(506 * US), "a CPU with no timer still comes back to look");
+        assert_eq!(deadline_fires(&c1, Some(10_000 * US)), Some(10_000 * US));
+        assert_eq!(wake_at(&c1, Some(300 * US), 0), None, "a revisit after the deadline would move the timer later");
+        let plain = Choice { state: None, wake_early_by: 0, revisit_after: None };
+        assert_eq!(wake_at(&plain, Some(10_000 * US), 0), None, "nothing sooner than the scheduler armed");
+    }
+
+    #[test]
+    fn a_wake_is_the_schedulers_timer_from_a_tick_before_it_on_and_unforeseen_before_that() {
+        let fires = Some(5_000 * US);
+        assert!(foreseen(fires, 5_000 * US));
+        assert!(foreseen(fires, 6_000 * US));
+        assert!(foreseen(fires, 5_000 * US - FORESEEN_SLACK), "a one-shot that counted down a tick short");
+        assert!(!foreseen(fires, 5_000 * US - FORESEEN_SLACK - 1));
+        assert!(!foreseen(fires, 100 * US), "a kick long before the deadline");
+        assert!(!foreseen(None, 5_000 * US), "with no timer armed, every wake is unforeseen");
     }
 
     #[test]

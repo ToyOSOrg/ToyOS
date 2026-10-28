@@ -6,7 +6,7 @@ opened: 2026-09-29
 
 # Idle CPUs enter the C-states `_CST` names
 
-Built on branch `deep-idle`: acpiserver hands the kernel what each
+Built (#1073): acpiserver hands the kernel what each
 processor's `_CST` names that it may enter as it is
 (`system/acpiserver/src/cst.rs`), the kernel checks it against the CPU
 (`lib/userbound/src/idle.rs`) and chooses a state each idle period

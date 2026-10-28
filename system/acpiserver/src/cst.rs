@@ -15,13 +15,19 @@
 //!   avoidance, which ToyOS does not track; any other FFH encoding has no
 //!   document in hand;
 //! - a SystemIO state is a byte read of its register, handed over off Intel,
-//!   where the core traps it (the kernel checks which ports); on Intel it is a
-//!   chipset's P_LVLx read (§8.1.3) no machine ToyOS runs needs;
+//!   where the core traps it as a C-state request (AMD PPR 55922,
+//!   MSRC001_0073); on Intel it is a chipset's P_LVLx read (§8.1.3) no machine
+//!   ToyOS runs needs;
 //! - a type-3 SystemIO state is withheld: for one OSPM keeps the caches
 //!   coherent, on a multiprocessor by flushing them before entry (§8.1.4),
 //!   which ToyOS does not, and no document in hand says the processor's own
 //!   hardware makes that unnecessary for it
-//!   (`issues/the-amd-benchs-c3-is-withheld-for-want-of-a-coherence-statement.md`);
+//!   (`issues/the-amd-benchs-c3-is-withheld-for-want-of-a-coherence-statement.md`).
+//!   An Intel FFH state of any type is not: its entry is the vendor's native
+//!   instruction, whose only OSPM duty Intel encodes is bus-master avoidance
+//!   (302223-007 Table 4, withheld above), and the processor flushes what a
+//!   C-state powers off as it enters it (SDM Vol. 3B §20.19.6.4: data "may have
+//!   been flushed to memory during the process of entering the idle state");
 //! - a state `_CSD` names for software coordination (Table 8.1, SW_ALL or
 //!   SW_ANY) is withheld: ToyOS coordinates no CPU's state with another's.
 //!   HW_ALL asks nothing of OSPM.
@@ -229,7 +235,9 @@ fn register_of(bytes: &[u8]) -> Option<Register> {
 }
 
 /// The `_CST` indices `_CSD` names for software coordination (Table 8.3:
-/// NumEntries 6, Revision 0, Domain, CoordType, NumProcessors, Index).
+/// NumEntries 6, Revision 0, Domain, CoordType, NumProcessors, Index). Index
+/// counts the states after `_CST`'s count from 0: §8.4.1.2's example names
+/// its C2-type state, the second, Index 1.
 pub fn csd(value: &Value) -> Result<Vec<u64>, String> {
     const SW_ALL: u64 = 0xFC;
     const SW_ANY: u64 = 0xFD;

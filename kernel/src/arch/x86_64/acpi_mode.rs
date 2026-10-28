@@ -553,7 +553,9 @@ pub fn s5(row: &isa::Row, word: u64) -> Result<(), SyscallError> {
 /// declaration is published at a time.
 pub fn idle(row: &isa::Row, declaration: &toyos_abi::acpi::IdleDeclaration) -> Result<(), SyscallError> {
     let _holder = acting(row)?;
-    crate::idle::declare(declaration)
+    // A port is one the holder's own AML could read through this claim.
+    let readable = |port| matches!(firmware::port(|port| pio::standing(port, ROW), port, Width::Byte, None), PortVerdict::Through(_));
+    crate::idle::declare(declaration, readable)
 }
 
 /// Clear the lock word's owner where the claim's holder holds it, and tell

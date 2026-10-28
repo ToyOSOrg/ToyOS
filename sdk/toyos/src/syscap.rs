@@ -96,8 +96,9 @@ impl SysCap {
     }
 
     /// Hold every idle CPU to waking within `bound` until the returned hold
-    /// is dropped. Needs [`Rights::WAKE_LATENCY`]; a bound under a
-    /// nanosecond is refused `InvalidArgument`.
+    /// is dropped ([`syscall::wake_latency_hold`]: it holds from when this
+    /// returns). Needs [`Rights::WAKE_LATENCY`]; a bound under a nanosecond
+    /// is refused `InvalidArgument`.
     pub fn hold_wake_latency(&self, bound: core::time::Duration) -> Result<WakeLatencyHold, SyscallError> {
         let nanos = u64::try_from(bound.as_nanos()).unwrap_or(u64::MAX);
         let raw = syscall::wake_latency_hold(self.0.raw(), nanos)?;
