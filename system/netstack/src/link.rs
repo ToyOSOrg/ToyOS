@@ -17,6 +17,7 @@ use toyos_link::region::Region;
 use toyos_link::state::{Counters, Group, Link};
 use toyos_link::wire::{self, Hello, Refusal};
 use toyos_net_node::Node;
+use toyos_net_wire::ethernet::{IndividualMac, MacAddr};
 use toyos_net_wire::Instant;
 
 use crate::watches::Watches;
@@ -35,8 +36,9 @@ pub enum Heard {
     Nothing,
     /// The driver went, or said what no driver says: it was refused, or let go.
     Gone,
-    /// The driver said who it is: its connection is [`Pending::into_conn`].
-    Hello(Hello, Region),
+    /// The driver said who it is, its address as the node takes one: its
+    /// connection is [`Pending::into_conn`].
+    Hello(Hello, IndividualMac, Region),
 }
 
 impl Pending {
@@ -58,9 +60,10 @@ impl Pending {
             RxStep::Eof => Heard::Gone,
             RxStep::Frame { msg_type: wire::MSG_HELLO, payload_len, handles: 1 } => {
                 let hello = Hello::decode(self.rx.payload(payload_len));
+                let mac = hello.as_ref().and_then(|hello| IndividualMac::new(MacAddr(hello.mac.bytes())));
                 let region = self.rx.take_handles::<1>().and_then(|[region]| Region::lent(region).ok());
-                match (hello, region) {
-                    (Some(hello), Some(region)) => Heard::Hello(hello, region),
+                match (hello, mac, region) {
+                    (Some(hello), Some(mac), Some(region)) => Heard::Hello(hello, mac, region),
                     _ => {
                         say!("netstack: a NIC driver's hello is not one this protocol makes, or its region is none");
                         refuse(&self.conn, Refusal::Malformed);
@@ -93,6 +96,7 @@ pub struct Session {
     region: Region,
     end: Stack,
     hello: Hello,
+    mac: IndividualMac,
     /// The link as the node was last told it.
     said: Link,
     frame: Box<[u8; SLOT_BYTES]>,
@@ -104,17 +108,22 @@ pub struct Session {
 impl Session {
     /// Open the link `hello` asked for over `region`, and say so to the
     /// driver; `None` for a driver gone before it heard.
-    pub fn open(hello: Hello, conn: Connection, region: Region, groups: &[Group]) -> Option<Self> {
+    pub fn open(hello: Hello, mac: IndividualMac, conn: Connection, region: Region, groups: &[Group]) -> Option<Self> {
         let mut end = Stack::new(region.words());
         for group in groups {
             assert!(end.join(region.words(), *group), "netstack: more groups than a link holds");
         }
         conn.try_send_bytes(wire::MSG_OPENED, &[]).ok()?;
-        Some(Self { conn, region, end, hello, said: Link::Down, frame: Box::new([0; SLOT_BYTES]), asked: false, ring: true })
+        Some(Self { conn, region, end, hello, mac, said: Link::Down, frame: Box::new([0; SLOT_BYTES]), asked: false, ring: true })
     }
 
     pub fn hello(&self) -> &Hello {
         &self.hello
+    }
+
+    /// The driver's address, as the node takes one.
+    pub fn mac(&self) -> IndividualMac {
+        self.mac
     }
 
     /// The link's end if its driver has hung up, read now.
@@ -253,7 +262,7 @@ impl Session {
     /// stack nothing about one, and the stack serving as though it were up is
     /// its assumption rather than something it measured.
     pub fn inspect(&self, counters: Option<&Counters>, snap: &mut Snapshot) {
-        let m = self.hello.mac.get().0;
+        let m = self.hello.mac.bytes();
         snap.put("mac", format!("{:02x}:{:02x}:{:02x}:{:02x}:{:02x}:{:02x}", m[0], m[1], m[2], m[3], m[4], m[5]));
         snap.put("driver", self.hello.label.as_str());
         match self.said {

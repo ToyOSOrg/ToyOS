@@ -9,7 +9,21 @@
 use alloc::string::String;
 use alloc::vec::Vec;
 
-use toyos_net_wire::ethernet::{IndividualMac, MacAddr};
+/// A device's own address: an individual one, its first byte's low bit,
+/// IEEE 802's individual/group bit, clear.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Address([u8; 6]);
+
+impl Address {
+    /// `None` for a group's address, the broadcast one among them.
+    pub fn new(bytes: [u8; 6]) -> Option<Self> {
+        (bytes[0] & 1 == 0).then_some(Self(bytes))
+    }
+
+    pub fn bytes(self) -> [u8; 6] {
+        self.0
+    }
+}
 
 /// Driver to stack: a [`Hello`]. Handles: the region.
 pub const MSG_HELLO: u32 = 1;
@@ -25,7 +39,7 @@ pub const MAX_LABEL: usize = 32;
 /// name for the stack's lines: ASCII letters, digits and `-`.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Hello {
-    pub mac: IndividualMac,
+    pub mac: Address,
     pub label: String,
 }
 
@@ -34,7 +48,7 @@ impl Hello {
 
     pub fn encode(&self) -> Vec<u8> {
         let mut out = Vec::with_capacity(6 + self.label.len());
-        out.extend_from_slice(&self.mac.get().0);
+        out.extend_from_slice(&self.mac.bytes());
         out.extend_from_slice(self.label.as_bytes());
         out
     }
@@ -43,7 +57,7 @@ impl Hello {
     /// address, or a name that is empty, too long or not one.
     pub fn decode(bytes: &[u8]) -> Option<Self> {
         let (mac, label) = bytes.split_first_chunk::<6>()?;
-        let mac = IndividualMac::new(MacAddr(*mac))?;
+        let mac = Address::new(*mac)?;
         let named = |b: &u8| b.is_ascii_alphanumeric() || *b == b'-';
         if label.is_empty() || label.len() > MAX_LABEL || !label.iter().all(named) {
             return None;
@@ -90,8 +104,8 @@ impl Refusal {
 mod tests {
     use super::*;
 
-    fn mac(bytes: [u8; 6]) -> IndividualMac {
-        IndividualMac::new(MacAddr(bytes)).unwrap()
+    fn mac(bytes: [u8; 6]) -> Address {
+        Address::new(bytes).unwrap()
     }
 
     #[test]

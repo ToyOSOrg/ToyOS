@@ -48,6 +48,7 @@ use toyos_link::wire::{Hello, Refusal};
 use toyos_net_ip::Nud;
 use toyos_net_node::Node;
 use toyos_net_shard::{Config, Secrets};
+use toyos_net_wire::ethernet::IndividualMac;
 use toyos_net_wire::Instant;
 
 mod client;
@@ -310,7 +311,7 @@ fn answer_inspect(request: &Request, link: Option<(&Session, Option<&Counters>)>
 /// Open the link `asked` asks for, and say so.
 fn open(asked: Asked, groups: &[Group]) -> Option<Session> {
     let label = asked.hello.label.clone();
-    let opened = Session::open(asked.hello, asked.conn, asked.region, groups);
+    let opened = Session::open(asked.hello, asked.mac, asked.conn, asked.region, groups);
     match &opened {
         Some(_) => say!("netstack: {label}'s link is open"),
         None => say!("netstack: {label} went before its link was opened"),
@@ -337,9 +338,9 @@ fn hear_links(pending: &mut Vec<Pending>) -> Vec<Asked> {
             Heard::Gone => {
                 pending.remove(i);
             }
-            Heard::Hello(hello, region) => {
+            Heard::Hello(hello, mac, region) => {
                 let conn = pending.remove(i).into_conn();
-                asked.push(Asked { hello, conn, region });
+                asked.push(Asked { hello, mac, conn, region });
             }
         }
     }
@@ -386,7 +387,7 @@ fn first_link(links: &Acceptor, groups: &[Group]) -> Option<Session> {
         if opened.is_some() {
             return opened;
         }
-        let Some(left) = LINK_BOUND.checked_sub(began.elapsed()) else { return None };
+        let left = LINK_BOUND.checked_sub(began.elapsed())?;
         poller.watch(links, READABLE, TOKEN_LINKS);
         for (i, p) in pending.iter().enumerate() {
             p.watch(&mut poller, TOKEN_LINK_PENDING_BASE + i as u64);
@@ -412,6 +413,7 @@ const _: () = assert!(
 /// A driver's hello, with what it came with.
 struct Asked {
     hello: Hello,
+    mac: IndividualMac,
     conn: toyos::Connection,
     region: toyos_link::region::Region,
 }
@@ -436,7 +438,7 @@ fn main() {
         say!("netstack: no NIC driver brought a link in {} s; this machine has no network, exiting", LINK_BOUND.as_secs());
         return;
     };
-    let mac = first.hello().mac;
+    let mac = first.mac();
     let mut link = Some(first);
 
     let began = Wall::now();
@@ -584,7 +586,7 @@ fn main() {
             accept_link(&links, &mut pending_links);
         }
         for asked in hear_links(&mut pending_links) {
-            if asked.hello.mac != mac {
+            if asked.mac != mac {
                 refuse(&asked, Refusal::OneLink, "its address is not the one netstack drives (issues/netstack-drives-one-card.md)");
                 continue;
             }

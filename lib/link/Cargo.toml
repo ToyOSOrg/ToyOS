@@ -21,8 +21,6 @@ mutate-want-relaxed = []
 toyos-abi = { path = "../../sdk/abi" }
 # The rings on the region's header page: `toyos::transport`.
 toyos = { path = "../../sdk/toyos" }
-# The hello's address, an individual one, as the stack makes its node with.
-toyos-net-wire = { path = "../../system/netstack/wire" }
 
 [lints.rust]
 warnings = "deny"

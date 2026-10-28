@@ -3807,7 +3807,6 @@ dependencies = [
  "loom",
  "toyos",
  "toyos-abi",
- "toyos-net-wire",
 ]
 
 [[package]]

@@ -22,13 +22,12 @@ use toyos::poller::{Poller, READABLE};
 use toyos::shm::ReadBytes;
 use toyos::{say, PciDev};
 use toyos_abi::syscall::SyscallError;
-use toyos_net_wire::ethernet::{IndividualMac, MacAddr};
 
 use crate::ends::{Driver, Fault};
 use crate::layout::{RX_DEPTH, SLOT_BYTES, TX_DEPTH};
 use crate::region::Region;
 use crate::state::{Counters, Group, Link};
-use crate::wire::{self, Hello, Refusal};
+use crate::wire::{self, Address, Hello, Refusal};
 use crate::PORT;
 
 /// The device under a link, as its driver drives it.
@@ -135,7 +134,7 @@ impl<'a> Session<'a> {
     fn open(label: &'a str, nic: &impl Nic, conn: Connection) -> Self {
         let region = Region::create().unwrap_or_else(|why| panic!("{label}: no region for a link: {why:?}"));
         let end = Driver::new(region.words());
-        let mac = IndividualMac::new(MacAddr(nic.mac()))
+        let mac = Address::new(nic.mac())
             .unwrap_or_else(|| panic!("{label}: the device's address is a group's, which no link carries"));
         let hello = Hello { mac, label: label.into() };
         let shared = region.share().unwrap_or_else(|why| panic!("{label}: the link's region would not share: {why:?}"));
