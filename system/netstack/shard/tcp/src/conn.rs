@@ -3,6 +3,7 @@
 //! each transmit opportunity builds.
 
 use alloc::boxed::Box;
+use alloc::collections::VecDeque;
 use core::num::NonZeroU16;
 use core::time::Duration;
 
@@ -348,7 +349,10 @@ pub struct Sync {
     pub rtx_timer: Option<Instant>,
     rto_pending: bool,
     timeout_rtx: bool,
-    timing: Option<(Seq, Instant)>,
+    /// When each segment of new data in flight left, by its end, while none has been resent since
+    /// it did (RFC 6298 §3, Karn): the samples an ACK gives at the clock's own resolution (RFC 8985
+    /// §6.1). At most [`TIMED`]; a segment sent while it is full is not timed.
+    departures: VecDeque<(Seq, Instant)>,
     /// RFC 8985 §7: when the loss probe is due, whether it is, the probe in flight (SND.NXT once
     /// it left and whether it was a retransmission), and whether an RTT sample came since the last.
     probe_at: Option<Instant>,
@@ -403,6 +407,10 @@ impl SendLimit {
     }
 }
 
+/// The departures a connection times at once: one stretch ACK's worth after another for a window
+/// of hundreds of segments, at a fixed cost per connection.
+const TIMED: usize = 64;
+
 fn us32(n: usize) -> u32 {
     u32::try_from(n).unwrap_or(u32::MAX)
 }
@@ -449,7 +457,7 @@ impl Sync {
             rtx_timer: None,
             rto_pending: false,
             timeout_rtx: false,
-            timing: None,
+            departures: VecDeque::new(),
             probe_at: None,
             probe_due: false,
             probe: None,
@@ -831,24 +839,25 @@ impl Sync {
         }
     }
 
+    /// The ACK's RTT sample: from the departure of the newest segment it newly acknowledges, else
+    /// from the timestamp it echoes, which also times a retransmission (RFC 7323 §4.1). Either is
+    /// weighted by RFC 7323 Appendix G's ExpectedSamples.
     fn sample(&mut self, seg: &In<'_>, ack: Seq, flight: u32, ctx: &mut Ctx<'_>) -> Option<Duration> {
         let now = ctx.now;
-        let (rtt, weight) = match self.ts {
-            Some(ts) => {
-                let t = seg.options.timestamps()?;
-                let Some(rtt) = ts.echo_rtt(t.echo, now) else {
-                    ctx.log.count(Counter::TsEcrInvalid);
-                    return None;
-                };
-                (rtt, flight.div_ceil(self.smss().saturating_mul(2).max(1)).max(1))
+        let echoed = self.ts.zip(seg.options.timestamps()).and_then(|(ts, t)| {
+            let rtt = ts.echo_rtt(t.echo, now);
+            if rtt.is_none() {
+                ctx.log.count(Counter::TsEcrInvalid);
             }
-            None => {
-                let (_, at) = self.timing.filter(|&(end, _)| ack.at_or_after(end))?;
-                self.timing = None;
-                (now.since(at), 1)
-            }
-        };
-        self.rtt.sample(rtt, weight);
+            rtt
+        });
+        let mut departed = None;
+        while let Some(&(_, at)) = self.departures.front().filter(|&&(end, _)| ack.at_or_after(end)) {
+            self.departures.pop_front();
+            departed = Some(at);
+        }
+        let rtt = departed.map(|at| now.since(at)).or(echoed)?;
+        self.rtt.sample(rtt, flight.div_ceil(self.smss().saturating_mul(2).max(1)).max(1));
         self.sampled = true;
         Some(rtt)
     }
@@ -1148,7 +1157,8 @@ impl Sync {
         }
         self.rto_pending = true;
         self.rtt.back_off();
-        self.timing = None;
+        // An expiry puts every departure in doubt, whether or not its retransmission has left.
+        self.departures.clear();
         (self.probe_at, self.probe_due, self.probe) = (None, false, None);
         let repeat = core::mem::replace(&mut self.timeout_rtx, true);
         self.cc.on_timeout(self.tx.flight(), repeat);
@@ -1306,12 +1316,13 @@ impl Sync {
         }
         if resent {
             ctx.log.add(Counter::RetransmitBytes, u64::from(old.earlier(end).since(start)));
-            self.timing = None;
+            // The ACK that repairs a hole also covers what was sent before it, held behind the hole.
+            self.departures.clear();
             if start == self.tx.una {
                 self.rto_pending = false;
             }
-        } else if end.after(old) && self.timing.is_none() && self.ts.is_none() {
-            self.timing = Some((end, now));
+        } else if end.after(old) && self.departures.len() < TIMED {
+            self.departures.push_back((end, now));
         }
         self.arm(now);
         if len > 0 && !resent {
