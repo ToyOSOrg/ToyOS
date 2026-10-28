@@ -82,7 +82,8 @@ comparison until it can:
   AX200, are measured under Linux alone.
 - **USB, NVMe and cpuidle identity**: their owners serve no program that
   reads them.
-- **Loopback** (`net.*`): netstack refuses 127/8 as a destination.
+- **Loopback** (`net.*`): netstack refuses 127/8 as a destination
+  (`issues/toyos-has-no-loopback-so-osbench-net-measures-nothing.md`).
 
 **Exit**: both systems' outputs on the T14 and the AMD bench published in
 evidence, Linux's run before the T14's wipe. Linux's outputs are a goal

@@ -31,5 +31,10 @@ another space runs there, and faults touching the page again after the
 initiator unmapped it meanwhile. The TCG model has no PCID
 (`build/arch.rs`), so only metal can show a switched-out CPU's entries.
 
+In the 2026-10-28 scoreboard (evidence branch `scoreboard-2026-10-28`) the
+T14 lost `mem.munmap_part.4k` at 1.22x Linux's (1,558 against 1,280 ns) and
+`mem.munmap_touched_remote.4k` at 1.32x (3,028 against 2,290 ns), each
+resolved; the AMD won both.
+
 **Exit**: that case, on each proving machine with PCID, red with the flush on
 entry removed; and the T14's munmap and `vm_protect` figures against Linux.
