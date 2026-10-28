@@ -3,10 +3,10 @@
 //!
 //! The part is the T14's onboard `8086:15fc` at `00:1f.6`, or the `8086:10d3`
 //! that QEMU's `e1000e` models. Every `§` in this file and in [`regs`] is a
-//! section of the *Intel 82574 GbE Controller Family Datasheet*, document
-//! 317694, revision 3.4 (June 2014). The citations were first written against
-//! revision 2.7 (317694-018); those compared sit at the same numbers in 3.4,
-//! where `TXDCTL` is §10.2.6.11.
+//! section of the *Intel 82574 GbE Controller Family Datasheet*: those of
+//! `TCTL`, `TXDCTL`, `TIDV`, `TADV`, `TARC`, `RXCSUM`, `RFCTL`, `MRQC`, the
+//! receive addresses, §4.2, §4.6.6 and §7.2 were last read in document 317694,
+//! revision 3.4 (June 2014); the rest in revision 2.7 (317694-018).
 //!
 //! **Below the register file the two parts are not one.** §3.2.1 puts the
 //! 82574's PHY on the controller's own die; the T14's is a MAC in the PCH whose
@@ -928,9 +928,12 @@ pub struct OutOfReset {
     pub mrqc: u32,
     pub rfctl: u32,
     /// Bit `n` set where receive address entry `n`, 1 and up, is valid
-    /// (`RAH.AV`). The addresses themselves are not read: entries past the
-    /// first are manageability's (82574 §8's RAL15/RAH15; the I219's shared
-    /// receive addresses, 612523 §7.4.2.3.1), and this driver leaves them.
+    /// (`RAH.AV`), read at the 82574's offsets, which no PCH document
+    /// confirms for the I219's MAC. The addresses themselves are not read.
+    /// The driver programs entry 0 alone and leaves the rest: on the 82574 a
+    /// master reset clears `AV` in entries 0-14 and "Entry 15 is reserved for
+    /// manageability firmware usage" (§10.2.5.23); on the I219 "up to eleven"
+    /// shared addresses "can be allocated to manageability" (612523 §7.4.2.3.1).
     pub receive_addresses_valid: u16,
 }
 
@@ -1175,11 +1178,10 @@ impl<R: Registers, C: Clock, D: DmaBuffers, I: Interrupts> I219<R, C, D, I> {
         nic.accepted(regs::TCTL, TX_CONTROL)?;
         nic.brought_up.transmit_control = nic.regs.read32(regs::TCTL);
 
-        // No receive offload, no second queue and no header filtering: the
-        // three registers' documented fields, all 0 but `RXCSUM`'s two
-        // checksum offloads, which §10.2.5.15 sets at reset and this driver
-        // reads nothing of. `MRQC` "can be modified only when receive to host
-        // is not enabled".
+        // Their reset values but `RXCSUM`'s two offloads (§10.2.5.15): legacy
+        // write-back, no second receive queue, and no IP or TCP/UDP checksum
+        // result, which this driver reads nothing of. `RXCSUM` and `MRQC` are
+        // written only while `RCTL.EN` is 0b, as §10.2.5.15 and §10.2.5.25 say.
         nic.regs.write32(regs::RXCSUM, 0);
         nic.regs.write32(regs::MRQC, 0);
         nic.regs.write32(regs::RFCTL, 0);

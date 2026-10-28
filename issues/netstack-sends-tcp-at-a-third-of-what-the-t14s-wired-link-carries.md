@@ -168,12 +168,25 @@ the 82574's table does not describe the PCH's MAC. Either way the value the
 bring-up met was not one the driver can count on, so it now writes every
 `TCTL` field itself, `MULR` and `RRTHRESH` at §10.2.6.1's initial values.
 
-What is left, about 1.3 times short of Linux with the ring still full most
-of a row, is the next lead: the transmit descriptor control. Its bit 22,
-which 82574 §10.2.6.11 says "Must be set to 1b for proper operation", is
-set with the rest of what the datasheet requires, and its prefetch
-thresholds (§7.2.4.1) are tuned apart, each read against main's driver in
-one interleaved session.
+**The rest of the transmit setup the datasheet requires, read 2026-10-28**
+([evidence `800e35c69/`](https://github.com/ToyOSOrg/evidence/tree/a911b388eac3990bde439b95091b41a00335748c/r1/800e35c69)): no measured rate effect. Pull request #1078 sets
+`TXDCTL` bit 22, which 82574 §10.2.6.11 says "Must be set to 1b for proper
+operation", leaves `TIDV` alone, sets `TARC0`'s `ENABLE` and writes the
+receive filter registers. One session alternated main's driver (A), that
+change (B) and that change with transmit prefetch (C, `PTHRESH` 16,
+`HTHRESH` 1), three of each, with Linux at both ends (110 and 111 MB/s):
+
+- Upload p50 A 86, 86 and 85 MB/s, B 85, 86 and 86, C 88, 87 and 87. B reads
+  no different from A, and lands as the datasheet's requirement, not a gain.
+- C read higher than B in all three rounds, by about 1.5 %, which three runs
+  a side cannot resolve: the exact rank test's least p is 1/20 one-sided and
+  1/10 two-sided. The prefetch tuning did not land.
+- The ring sat full 7.8–8.1 s of each 15 s row in all three arms, and no
+  completion was unreported at a full answer.
+
+What is left, about 1.3 times short of Linux with the ring full about half
+of each row whatever the descriptor fetch does, is the next lead: what the
+part waits on for each frame once it holds it.
 
 The clock does not separate the two systems. Each upload row's own
 readings, `mhz` just after it and `mhz_settled` before it, were about

@@ -53,12 +53,8 @@ use std::{format, vec};
 use crate::phy::{advertise, control, control_1000t, custom_mode, oem_bits, reg};
 use crate::regs::{
     self, cause, ctrl, ctrl_ext, extcnf, fwsm, lanphypc_timing, mdic, pbeccsts, phy_ctrl, rah, rctl,
-    rx_desc, status, tarc, tctl, tx_desc, txdctl,
+    rx_desc, rxcsum, status, tarc, tctl, tx_desc, txdctl,
 };
-
-/// §10.2.5.15: `RXCSUM`'s `IPOFLD` (bit 8) and `TUOFLD` (bit 9), 1b out of
-/// reset.
-const RXCSUM_OFFLOADS: u32 = 0b11 << 8;
 use crate::{phy, wake, Clock, Delivery, DmaBuffers, Interrupts, Part, Registers};
 
 /// Where the device reaches the grant. Not zero and not a small number: a
@@ -117,8 +113,9 @@ pub struct Permits {
     /// has a software reset re-read the NVM and reset the rest. On: the values
     /// before the reset, which is what the T14 reads after it for `TCTL`;
     /// whether its reset keeps `TCTL` or this MAC's own reset value is that
-    /// one, no reading says, the 82574's table does not describe the PCH's
-    /// MAC, and the others are unread.
+    /// one, no reading says, and the 82574's table does not describe the PCH's
+    /// MAC. The others read documented values on the T14, which cannot tell a
+    /// reset from a last holder that left the same values.
     pub reset_leaves_last_holders: bool,
     /// §7.1.8: the head register "includes those descriptors completed but not
     /// yet stored in memory", so `RDH` may be ahead of what a driver can read.
@@ -700,6 +697,9 @@ struct Model {
     lcd_reset_at: Option<u64>,
     power_cycles: u32,
     phy_resets: u32,
+    /// Whether the part has powered on once: a reset after that is the one the
+    /// last holder's values may survive.
+    powered: bool,
 }
 
 /// Where one PHY register address lands in [`PhyModel`].
@@ -783,6 +783,7 @@ impl Model {
             lcd_reset_at: None,
             power_cycles: 0,
             phy_resets: 0,
+            powered: false,
         };
         model.power_on();
         model
@@ -799,7 +800,10 @@ impl Model {
             *word = 0;
         }
         self.set(regs::CTRL, CTRL_RESERVED_SET);
-        let tctl = if self.permits.reset_leaves_last_holders {
+        // Power-on gives the documented values; only a later reset may leave a
+        // last holder's.
+        let keep = self.permits.reset_leaves_last_holders && core::mem::replace(&mut self.powered, true);
+        let tctl = if keep {
             last_holders[0]
         } else {
             // §10.2.6.1's initial values: `PSP`, `MULR` and `RRTHRESH` set,
@@ -812,8 +816,8 @@ impl Model {
         // `RXCSUM`: `IPOFLD` and `TUOFLD` 1b. `TXDCTL`, `MRQC` and `RFCTL` are
         // all 0 out of reset (§10.2.6.11, §10.2.5.25, §10.2.5.16).
         self.set(regs::TARC0, 0x3 | tarc::ENABLE);
-        self.set(regs::RXCSUM, RXCSUM_OFFLOADS);
-        if self.permits.reset_leaves_last_holders {
+        self.set(regs::RXCSUM, rxcsum::IPOFLD | rxcsum::TUOFLD);
+        if keep {
             for (reg, value) in kept.into_iter().zip(last_holders).skip(1) {
                 self.set(reg, value);
             }
@@ -2595,12 +2599,6 @@ impl Nic {
     /// [`Self::run`] says so.
     pub fn hold(&self) {
         self.0.borrow_mut().held = true;
-    }
-
-    /// One register written as a driver writes it, for a test of what the part
-    /// does with a value no change of this driver's should write.
-    pub fn write_register(&self, reg: usize, value: u32) {
-        self.0.borrow_mut().write(reg, value);
     }
 
     /// One register written as a previous holder left it, before this driver

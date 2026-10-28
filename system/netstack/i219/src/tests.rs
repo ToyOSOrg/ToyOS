@@ -3423,13 +3423,13 @@ fn bring_up_owns_tarc0_enable_and_the_receive_filters() {
     for reset_leaves_last_holders in [true, false] {
         let nic = Nic::with(7, Part::I219, Permits { reset_leaves_last_holders, ..Permits::default() });
         nic.inherit(regs::TARC0, 0x5);
-        nic.inherit(regs::RXCSUM, 0x0000_0300);
+        nic.inherit(regs::RXCSUM, 0x0000_0100);
         nic.inherit(regs::MRQC, 0x0001_0001);
         nic.inherit(regs::RFCTL, 0x0000_8000);
         let driver = open(&nic);
         let reset = driver.brought_up().out_of_reset;
         let (tarc0, rxcsum, mrqc, rfctl) = if reset_leaves_last_holders {
-            (0x5, 0x300, 0x0001_0001, 0x8000)
+            (0x5, 0x100, 0x0001_0001, 0x8000)
         } else {
             (0x3 | tarc::ENABLE, 0x300, 0, 0)
         };
@@ -3442,8 +3442,8 @@ fn bring_up_owns_tarc0_enable_and_the_receive_filters() {
 }
 
 /// `TIDV` is never written: §10.2.6.10 allows no 0, and this driver sets `IDE`
-/// on no descriptor. Nor is any receive address past the first, which are
-/// manageability's; the reset's valid ones are reported.
+/// on no descriptor. Nor is any receive address past the first: the driver
+/// programs entry 0 alone. The reset's valid ones are reported.
 #[test]
 fn bring_up_leaves_tidv_and_the_receive_addresses_past_the_first() {
     let nic = Nic::with(7, Part::I219, Permits::default());
@@ -3456,15 +3456,4 @@ fn bring_up_leaves_tidv_and_the_receive_addresses_past_the_first() {
         assert!(!written(regs::ral(n)) && !written(regs::rah(n)), "receive address {n} was written");
     }
     assert_eq!(driver.brought_up().out_of_reset.receive_addresses_valid, 1 << 3 | 1 << 15);
-}
-
-/// §10.2.6.11: bit 22 "Must be set to 1b for proper operation", and the model
-/// refuses a `TXDCTL` write that clears it, so no driver change can.
-#[test]
-#[should_panic(expected = "Must be set to 1b")]
-fn the_model_refuses_txdctl_without_bit_22() {
-    let nic = Nic::with(7, Part::I219, Permits::default());
-    let mut driver = open(&nic);
-    let _ = driver.tx_room();
-    nic.write_register(regs::TXDCTL, txdctl::SUGGESTED & !txdctl::MUST_BE_SET);
 }

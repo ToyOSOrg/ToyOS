@@ -120,7 +120,8 @@ pub const TARC0: usize = 0x03840;
 pub const RXCSUM: usize = 0x05000;
 pub const RFCTL: usize = 0x05008;
 pub const MRQC: usize = 0x05818;
-/// Receive Address entries past the first, Low and High, eight bytes apart.
+/// Receive Address entries 0 to 15, Low and High, eight bytes apart
+/// (§10.2.5.22, §10.2.5.23: "n [...] equals to 0,1,…15").
 pub const RECEIVE_ADDRESSES: usize = 16;
 pub const fn ral(n: usize) -> usize {
     RAL0 + 8 * n
@@ -507,6 +508,14 @@ pub mod txdctl {
     /// descriptors, and bit 22. A larger `WTHRESH` holds a completion back
     /// until the ring fills.
     pub const SUGGESTED: u32 = GRAN | (1 << WTHRESH_SHIFT) | MUST_BE_SET;
+}
+
+/// Receive Checksum Control bits (§10.2.5.15).
+pub mod rxcsum {
+    /// IP and TCP/UDP Checksum Offload Enable (bits 8 and 9), each 1b out of
+    /// reset.
+    pub const IPOFLD: u32 = 1 << 8;
+    pub const TUOFLD: u32 = 1 << 9;
 }
 
 /// Transmit Arbitration Count bits (§10.2.6.9).
