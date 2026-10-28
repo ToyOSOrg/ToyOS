@@ -14,10 +14,15 @@ use toyos_abi::RawHandle;
 
 use crate::{pipe_pair, AsHandle, Pipe};
 
-/// A fresh bell and the waker that rings it.
+/// A fresh bell and the waker that rings it. One wake is written and taken
+/// here, so the pipe has held a byte and no later wake into an empty bell is
+/// refused for memory (`toyos_abi::syscall::PIPE_CAPACITY`).
 pub fn pair() -> Result<(Waker, Bell), SyscallError> {
     let (read, write) = pipe_pair()?;
-    Ok((Waker(write), Bell(read)))
+    write.write_nonblock(&[1])?;
+    let bell = Bell(read);
+    bell.take();
+    Ok((Waker(write), bell))
 }
 
 /// Rings a [`Bell`] from any thread, and never waits.
@@ -26,9 +31,10 @@ pub struct Waker(Pipe);
 impl Waker {
     pub fn wake(&self) {
         match self.0.write_nonblock(&[1]) {
-            // A full pipe is a wake already pending, and a bell nobody holds
-            // any more has nobody left to wake.
-            Ok(_) | Err(SyscallError::WouldBlock) | Err(SyscallError::Gone) => {}
+            // A full pipe is a wake already pending, and so is one refused
+            // memory, since a bell `pair` primed takes none while it is empty;
+            // a bell nobody holds any more has nobody left to wake.
+            Ok(_) | Err(SyscallError::WouldBlock) | Err(SyscallError::ResourceExhausted) | Err(SyscallError::Gone) => {}
             Err(e) => panic!("Waker::wake: the wake pipe refused a write: {e:?}"),
         }
     }

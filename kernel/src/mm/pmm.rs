@@ -330,12 +330,16 @@ pub fn alloc_held(job: &Job, count: usize, each: impl FnMut(u64)) -> bool {
 }
 
 /// Give back `frames` [`alloc_table_frame`] or [`alloc_held`] took for
-/// `job`, under one hold of the allocator's lock.
+/// `job`, under one hold of the allocator's lock, which none takes.
 ///
 /// # Safety
 /// Nothing reaches any of them any more: no table links it, no CPU can still
 /// walk into it, and nothing else frees it.
-pub unsafe fn free_held(job: &Job, frames: impl IntoIterator<Item = u64>) {
+pub unsafe fn free_held<I: ExactSizeIterator<Item = u64>>(job: &Job, frames: impl IntoIterator<IntoIter = I>) {
+    let frames = frames.into_iter();
+    if frames.len() == 0 {
+        return;
+    }
     let pins = pins();
     with(|f| f.free_held(job.memory(), frames, &pins));
 }

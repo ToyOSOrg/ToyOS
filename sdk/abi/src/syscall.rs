@@ -1027,9 +1027,9 @@ pub mod debug_action {
 
 /// Create a pipe. Returns the read and write ends.
 ///
-/// **Fallible, because `sys_pipe` is.** It answers `ResourceExhausted` on three
-/// paths — no pipe pages, and either handle install hitting the table cap — and
-/// a wrapper that cannot say so hands the caller a pair of handles that are an
+/// **Fallible, because `sys_pipe` is.** It answers `ResourceExhausted` where
+/// the pipe's heap cannot be charged or either handle install hits the table
+/// cap, and a wrapper that cannot say so hands the caller a pair of handles that are an
 /// error word cut in half.
 ///
 /// A packed pair can never be mistaken for an error word: no handle is ever
@@ -1190,7 +1190,10 @@ pub const MAX_WHOLE_PIPE_WRITE: usize = 4096;
 
 /// The most a pipe holds unread: a write past it waits for its reader. The
 /// kernel takes memory for what a pipe holds as it fills and gives it back as
-/// it drains, so this is a bound, not what a pipe costs.
+/// it drains, so this is a bound, not what a pipe costs. A pipe that has held
+/// a byte keeps what an empty one needs: a write of at most
+/// [`MAX_WHOLE_PIPE_WRITE`] bytes into it while it is empty is never refused
+/// for memory.
 pub const PIPE_CAPACITY: usize = 2 << 20;
 
 /// Open a file.
@@ -2755,7 +2758,7 @@ crate::user_safe! {
         /// Private and object memory its processes committed.
         pub committed: u64,
         /// Kernel memory it caused: heap its objects keep, its page tables,
-        /// and runs such as pipe rings and memory a device is lent.
+        /// pipes' bytes, and runs such as memory a device is lent.
         pub kernel: u64,
         /// The most of the two it held at once.
         pub peak: u64,

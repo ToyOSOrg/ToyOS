@@ -917,8 +917,8 @@ impl<'m> Frames<'m> {
         Some(run)
     }
 
-    /// `count` superframes in a row for `l`, such as a pipe's ring or memory
-    /// a device is lent: refused rather than take a superframe held back.
+    /// `count` superframes in a row for `l`, such as memory a device is lent:
+    /// refused rather than take a superframe held back.
     pub fn alloc_run_for(&mut self, l: &Ledger, count: usize) -> Option<u64> {
         let supers = count as u64;
         let frames = supers * PER_SUPER as u64;
