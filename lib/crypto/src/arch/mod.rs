@@ -68,23 +68,12 @@ pub(crate) fn rsa_mul(a: &[u64], b: &[u64], m: &[u64], n0: u64, n: usize, out: &
     })
 }
 
-/// a b / 2^256 mod P-256's p, for a, b < p, by an instruction path; `None`
-/// where the CPU has no such path. The time does not depend on a or b.
-#[inline]
-pub(crate) fn p256_mul(a: &[u64; 4], b: &[u64; 4]) -> Option<[u64; 4]> {
-    hosted!(x86_64::p256_mul(a, b), {
-        let _ = (a, b);
-        None
-    })
-}
-
-/// a^2 / 2^256 mod P-256's p, for a < p, as [`p256_mul`].
-#[inline]
-pub(crate) fn p256_square(a: &[u64; 4]) -> Option<[u64; 4]> {
-    hosted!(x86_64::p256_square(a), {
-        let _ = a;
-        None
-    })
+/// `computation` over P-256's field arithmetic on the CPU's kernels where it
+/// has them, otherwise `P256Field`'s own. The dispatch is per computation:
+/// no field operation inside it checks the CPU.
+#[inline(always)]
+pub(crate) fn p256<C: crate::montgomery::Computation<4>>(computation: C) -> C::Output {
+    hosted!(x86_64::p256(computation), computation.run::<crate::nist::P256Field>())
 }
 
 /// a b mod 2^255 - 19 in `field25519`'s four-word form, by an instruction

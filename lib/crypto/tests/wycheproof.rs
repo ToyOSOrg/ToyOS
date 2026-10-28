@@ -193,7 +193,6 @@ fn ed25519() {
 }
 
 #[test]
-#[cfg_attr(not(feature = "portable"), ignore = "the same code in every form: run in the portable one")]
 fn ecdsa_der() {
     for file in [
         "ecdsa_secp256r1_sha256_test.json",
@@ -223,7 +222,6 @@ fn ecdsa_der() {
 }
 
 #[test]
-#[cfg_attr(not(feature = "portable"), ignore = "the same code in every form: run in the portable one")]
 fn ecdh_sec1() {
     use toyos_crypto::ecc::{p256, p384};
     for (file, width) in [("ecdh_secp256r1_ecpoint_test.json", 32), ("ecdh_secp384r1_ecpoint_test.json", 48)] {

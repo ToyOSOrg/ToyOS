@@ -1,8 +1,11 @@
 //! Montgomery arithmetic modulo the NIST curves' primes and orders, N = 4 or 6
 //! words. Each modulus is a type, so a residue modulo one cannot meet a residue
-//! modulo another. Every operation on a residue has a fixed schedule: masked
-//! final subtractions, and inversion by a fixed count of divsteps. Residues
-//! are `Copy` intermediates, not erased (`secret`'s contract).
+//! modulo another, and a computation names a second type of the same p only
+//! to run on its arithmetic (`Modulus::dispatch`). Every operation on a
+//! residue has a fixed schedule: masked final subtractions, and inversion by
+//! a fixed count of divsteps; only `Residue::inverse_of_public`, for public
+//! integers, does not. Residues are `Copy` intermediates, not erased
+//! (`secret`'s contract).
 #![allow(
     clippy::needless_range_loop,
     reason = "carry chains index parallel fixed-size arrays; iterator adaptors stay out of line in the shipped profile"
@@ -12,9 +15,11 @@ use core::marker::PhantomData;
 
 mod divsteps;
 
-/// An odd modulus p with 2^(64N-1) < p < 2^(64N), and its Montgomery
-/// constants for R = 2^(64N), evaluated at compile time.
-pub(crate) trait Modulus<const N: usize>: 'static {
+/// An odd modulus p with 2^(64N-1) < p < 2^(64N), its Montgomery constants
+/// for R = 2^(64N), evaluated at compile time, and the arithmetic on its
+/// residues. Each operation takes and returns words below p, on a fixed
+/// schedule; a modulus with a faster form of one overrides it.
+pub(crate) trait Modulus<const N: usize>: Sized + 'static {
     const P: [u64; N];
     /// How a reduction step forms q p.
     const FORM: Form = Form::Generic;
@@ -24,6 +29,66 @@ pub(crate) trait Modulus<const N: usize>: 'static {
     const ONE: [u64; N] = shift_mod(&one(), &Self::P, 64 * N);
     /// R^2 mod p.
     const R2: [u64; N] = shift_mod(&one(), &Self::P, 128 * N);
+
+    fn add(a: &[u64; N], b: &[u64; N]) -> [u64; N] {
+        let mut v = [0; N];
+        let mut carry = false;
+        for i in 0..N {
+            (v[i], carry) = carrying_add(a[i], b[i], carry);
+        }
+        reduce(&v, u64::from(carry), &Self::P)
+    }
+    #[inline(always)]
+    fn double(a: &[u64; N]) -> [u64; N] {
+        Self::add(a, a)
+    }
+    fn sub(a: &[u64; N], b: &[u64; N]) -> [u64; N] {
+        let mut v = [0; N];
+        let mut borrow = false;
+        for i in 0..N {
+            (v[i], borrow) = borrowing_sub(a[i], b[i], borrow);
+        }
+        let mask = ct::mask(u64::from(borrow));
+        let mut carry = false;
+        for i in 0..N {
+            (v[i], carry) = carrying_add(v[i], Self::P[i] & mask, carry);
+        }
+        v
+    }
+    /// a b / R mod p, word by word with each product row followed by its
+    /// reduction step (CIOS; Koc, Acar and Kaliski, "Analyzing and comparing
+    /// Montgomery multiplication algorithms", IEEE Micro 1996).
+    fn mul(a: &[u64; N], b: &[u64; N]) -> [u64; N] {
+        let (t, high) = product::<Self, N>(a, b);
+        reduce(&t, high, &Self::P)
+    }
+    /// a^2 / R mod p: the N(N - 1)/2 cross products once, doubled, the N
+    /// squares added, then N reduction steps over the 2N-word square.
+    fn square(a: &[u64; N]) -> [u64; N] {
+        let (t, high) = redc::<Self, N>(&mut square_wide(a));
+        reduce(&t, high, &Self::P)
+    }
+    /// The words of table[index] for a secret index, or table[0] for an
+    /// index past 15, reading every entry under masks: the table's order
+    /// and length are public.
+    #[inline(always)]
+    fn select<T, const W: usize>(table: &[T; 16], words: impl Fn(&T) -> [&[u64; N]; W], index: u64) -> [[u64; N]; W] {
+        select(table, words, index)
+    }
+    /// `computation` over the fastest arithmetic modulo p that the CPU
+    /// admits: this modulus's own unless it says otherwise.
+    #[inline(always)]
+    fn dispatch<C: Computation<N>>(computation: C) -> C::Output {
+        computation.run::<Self>()
+    }
+}
+
+/// A computation over residues modulo one p, generic over the modulus type
+/// whose arithmetic computes them; [`Modulus::dispatch`] chooses it, and
+/// every type it passes has the same p.
+pub(crate) trait Computation<const N: usize> {
+    type Output;
+    fn run<F: Modulus<N>>(self) -> Self::Output;
 }
 
 /// The shape of a modulus that its reduction step exploits.
@@ -58,9 +123,13 @@ unsafe impl<M: Modulus<N>, const N: usize> crate::secret::Zeroable for Residue<M
 
 impl<M: Modulus<N>, const N: usize> Residue<M, N> {
     /// Words already in Montgomery form and below p: a compile-time constant
-    /// from [`encode`].
+    /// from [`encode`], or a residue's own [`Self::words`].
     pub(crate) const fn from_montgomery(words: [u64; N]) -> Self {
         Self(words, PhantomData)
+    }
+    /// The Montgomery-form words, for [`Modulus::select`].
+    pub(crate) const fn words(&self) -> &[u64; N] {
+        &self.0
     }
     pub(crate) const fn zero() -> Self {
         Self([0; N], PhantomData)
@@ -88,73 +157,32 @@ impl<M: Modulus<N>, const N: usize> Residue<M, N> {
         let one = Self(one(), PhantomData);
         self.mul(&one).0
     }
-    /// P-256's operations inline into the point formulas; its portable
-    /// multiplication and squaring stay out of line.
     #[inline(always)]
     pub(crate) fn add(&self, b: &Self) -> Self {
-        if let Form::P256 = M::FORM {
-            return Self(p256::add(&self.0, &b.0), PhantomData);
-        }
-        self.add_generic(b)
-    }
-    fn add_generic(&self, b: &Self) -> Self {
-        let mut v = [0; N];
-        let mut carry = false;
-        for i in 0..N {
-            (v[i], carry) = carrying_add(self.0[i], b.0[i], carry);
-        }
-        Self(reduce(&v, u64::from(carry), &M::P), PhantomData)
+        Self(M::add(&self.0, &b.0), PhantomData)
     }
     #[inline(always)]
     pub(crate) fn double(&self) -> Self {
-        self.add(self)
+        Self(M::double(&self.0), PhantomData)
     }
     #[inline(always)]
     pub(crate) fn sub(&self, b: &Self) -> Self {
-        if let Form::P256 = M::FORM {
-            return Self(p256::sub(&self.0, &b.0), PhantomData);
-        }
-        self.sub_generic(b)
+        Self(M::sub(&self.0, &b.0), PhantomData)
     }
-    fn sub_generic(&self, b: &Self) -> Self {
-        let mut v = [0; N];
-        let mut borrow = false;
-        for i in 0..N {
-            (v[i], borrow) = borrowing_sub(self.0[i], b.0[i], borrow);
-        }
-        let mask = ct::mask(u64::from(borrow));
-        let mut carry = false;
-        for i in 0..N {
-            (v[i], carry) = carrying_add(v[i], M::P[i] & mask, carry);
-        }
-        Self(v, PhantomData)
-    }
-    /// self * b / R mod p, word by word with each product row followed by its
-    /// reduction step (CIOS; Koc, Acar and Kaliski, "Analyzing and comparing
-    /// Montgomery multiplication algorithms", IEEE Micro 1996).
     #[inline(always)]
     pub(crate) fn mul(&self, b: &Self) -> Self {
-        if let Form::P256 = M::FORM {
-            return Self(p256::mul(&self.0, &b.0), PhantomData);
-        }
-        self.mul_generic(b)
+        Self(M::mul(&self.0, &b.0), PhantomData)
     }
-    fn mul_generic(&self, b: &Self) -> Self {
-        let (t, high) = product::<M, N>(&self.0, &b.0);
-        Self(reduce(&t, high, &M::P), PhantomData)
-    }
-    /// self^2 / R mod p: the N(N - 1)/2 cross products once, doubled, the N
-    /// squares added, then N reduction steps over the 2N-word square.
     #[inline(always)]
     pub(crate) fn square(&self) -> Self {
-        if let Form::P256 = M::FORM {
-            return Self(p256::square(&self.0), PhantomData);
-        }
-        self.square_generic()
+        Self(M::square(&self.0), PhantomData)
     }
-    fn square_generic(&self) -> Self {
-        let (t, high) = redc::<M, N>(&mut square_wide(&self.0));
-        Self(reduce(&t, high, &M::P), PhantomData)
+    /// The same residue under another modulus type with the same p: the
+    /// type whose arithmetic [`Modulus::dispatch`] chose.
+    #[inline(always)]
+    pub(crate) fn cast<F: Modulus<N>>(&self) -> Residue<F, N> {
+        const { assert!(same(&M::P, &F::P)) };
+        Residue(self.0, PhantomData)
     }
     /// The `const` forms of [`Self::mul`], [`Self::add`] and [`Self::sub`],
     /// for tables built at compile time and for tests: not for secrets. They
@@ -247,6 +275,11 @@ impl<M: Modulus<N>, const N: usize> Residue<M, N> {
         // (x R)^-1 R^2 = x^-1 R.
         Self(divsteps::invert::<M, N>(&self.0, &M::R2), PhantomData)
     }
+    /// The residue x^-1 for a public integer 0 < x < p, in variable time.
+    pub(crate) fn inverse_of_public(x: &[u64; N]) -> Self {
+        // x^-1 R is x^-1's Montgomery form.
+        Self(divsteps::invert_public::<M, N>(x, &M::ONE), PhantomData)
+    }
 }
 
 /// p - 2 for M's p.
@@ -262,12 +295,10 @@ const fn exponent<M: Modulus<N>, const N: usize>() -> [u64; N] {
     e
 }
 
-/// P-256's field arithmetic written out word by word: the shipped profile
-/// does not unroll the generic loops, and P-256 is the hot curve. Every step
-/// is the generic one's (`product`, `square_wide`, `redc`, `reduce`).
-/// Multiplication and squaring take the instruction paths where the CPU has
-/// them (`arch::p256_mul`, `arch::p256_square`).
-mod p256 {
+/// P-256's field arithmetic written out word by word, `P256Field`'s: the
+/// shipped profile does not unroll the generic loops. Every step is the
+/// generic one's (`product`, `square_wide`, `redc`, `reduce`).
+pub(crate) mod p256 {
     use super::{Form, Modulus, ct, mac};
     use crate::nist::P256Field;
 
@@ -288,37 +319,19 @@ mod p256 {
         (d, (b1 | b2) as u64)
     }
 
-    /// The four words as a residue's array, whose N is four here; indexing
-    /// rather than a slice copy keeps the words in registers.
-    #[inline(always)]
-    fn words<const N: usize>(w: [u64; 4]) -> [u64; N] {
-        let mut out = [0; N];
-        out[0] = w[0];
-        out[1] = w[1];
-        out[2] = w[2];
-        out[3] = w[3];
-        out
-    }
-
-    /// A residue's array as four words, which N is here.
-    #[inline(always)]
-    fn four<const N: usize>(a: &[u64; N]) -> &[u64; 4] {
-        a.as_slice().try_into().expect("P-256 residues are four words")
-    }
-
     /// v mod p for v + high 2^256 < 2p, p subtracted under a mask.
     #[inline(always)]
-    fn reduce<const N: usize>(v: [u64; 4], high: u64) -> [u64; N] {
+    fn reduce(v: [u64; 4], high: u64) -> [u64; 4] {
         let (d0, b) = sbb(v[0], P[0], 0);
         let (d1, b) = sbb(v[1], P[1], b);
         let (d2, b) = sbb(v[2], P[2], b);
         let (d3, b) = sbb(v[3], P[3], b);
         let m = ct::mask(ct::nonzero(high) | (1 ^ b));
-        words([(v[0] & !m) | (d0 & m), (v[1] & !m) | (d1 & m), (v[2] & !m) | (d2 & m), (v[3] & !m) | (d3 & m)])
+        [(v[0] & !m) | (d0 & m), (v[1] & !m) | (d1 & m), (v[2] & !m) | (d2 & m), (v[3] & !m) | (d3 & m)]
     }
 
     #[inline(always)]
-    pub(super) fn add<const N: usize>(a: &[u64; N], b: &[u64; N]) -> [u64; N] {
+    pub(crate) fn add(a: &[u64; 4], b: &[u64; 4]) -> [u64; 4] {
         let (v0, c) = adc(a[0], b[0], 0);
         let (v1, c) = adc(a[1], b[1], c);
         let (v2, c) = adc(a[2], b[2], c);
@@ -327,7 +340,7 @@ mod p256 {
     }
 
     #[inline(always)]
-    pub(super) fn sub<const N: usize>(a: &[u64; N], b: &[u64; N]) -> [u64; N] {
+    pub(crate) fn sub(a: &[u64; 4], b: &[u64; 4]) -> [u64; 4] {
         let (v0, w) = sbb(a[0], b[0], 0);
         let (v1, w) = sbb(a[1], b[1], w);
         let (v2, w) = sbb(a[2], b[2], w);
@@ -337,20 +350,13 @@ mod p256 {
         let (r1, c) = adc(v1, P[1] & m, c);
         let (r2, c) = adc(v2, P[2] & m, c);
         let (r3, _) = adc(v3, P[3] & m, c);
-        words([r0, r1, r2, r3])
+        [r0, r1, r2, r3]
     }
 
-    #[inline(always)]
-    pub(super) fn mul<const N: usize>(a: &[u64; N], b: &[u64; N]) -> [u64; N] {
-        match crate::arch::p256_mul(four(a), four(b)) {
-            Some(v) => words(v),
-            None => mul_portable(a, b),
-        }
-    }
-
-    /// CIOS with P-256's reduction step, as `product`.
+    /// CIOS with P-256's reduction step, as `product`; out of line in the
+    /// point formulas.
     #[inline(never)]
-    fn mul_portable<const N: usize>(a: &[u64; N], b: &[u64; N]) -> [u64; N] {
+    pub(crate) fn mul(a: &[u64; 4], b: &[u64; 4]) -> [u64; 4] {
         let (mut t0, mut t1, mut t2, mut t3, mut high) = (0u64, 0u64, 0u64, 0u64, 0u64);
         macro_rules! row {
             ($ai:expr) => {{
@@ -376,18 +382,10 @@ mod p256 {
         reduce([t0, t1, t2, t3], high)
     }
 
-    #[inline(always)]
-    pub(super) fn square<const N: usize>(a: &[u64; N]) -> [u64; N] {
-        match crate::arch::p256_square(four(a)) {
-            Some(v) => words(v),
-            None => square_portable(a),
-        }
-    }
-
     /// The cross products once, doubled, the squares added, then four
-    /// reduction steps, as `square_wide` and `redc`.
+    /// reduction steps, as `square_wide` and `redc`; out of line.
     #[inline(never)]
-    fn square_portable<const N: usize>(a: &[u64; N]) -> [u64; N] {
+    pub(crate) fn square(a: &[u64; 4]) -> [u64; 4] {
         let (t1, c) = mac(0, a[0], a[1], 0);
         let (t2, c) = mac(0, a[0], a[2], c);
         let (t3, t4) = mac(0, a[0], a[3], c);
@@ -436,6 +434,40 @@ mod p256 {
         step!(3);
         reduce([t[4], t[5], t[6], t[7]], extra)
     }
+}
+
+/// [`Modulus::select`]'s portable form, by `ct` masks.
+#[inline(always)]
+pub(crate) fn select<T, const N: usize, const W: usize>(
+    table: &[T; 16],
+    words: impl Fn(&T) -> [&[u64; N]; W],
+    index: u64,
+) -> [[u64; N]; W] {
+    let mut chosen = words(&table[0]).map(|w| *w);
+    // Indexing, not an iterator adaptor, which the shipped profile keeps out
+    // of line.
+    for j in 1..16 {
+        let m = ct::mask(1 ^ ct::nonzero(index ^ j as u64));
+        let entry = words(&table[j]);
+        for w in 0..W {
+            for i in 0..N {
+                chosen[w][i] = (chosen[w][i] & !m) | (entry[w][i] & m);
+            }
+        }
+    }
+    chosen
+}
+
+/// Whether two moduli are one p, at compile time.
+const fn same<const N: usize>(a: &[u64; N], b: &[u64; N]) -> bool {
+    let mut i = 0;
+    while i < N {
+        if a[i] != b[i] {
+            return false;
+        }
+        i += 1;
+    }
+    true
 }
 
 /// One when x < p, otherwise zero; the time does not depend on x.
