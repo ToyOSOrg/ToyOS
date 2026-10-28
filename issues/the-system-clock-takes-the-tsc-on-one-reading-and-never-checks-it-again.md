@@ -17,9 +17,9 @@ then relies on go unchecked:
   states (`kernel/src/arch/x86_64/idle.rs::facts`). The clock starts on a
   TSC without it the same way.
 - **That every CPU's TSC agrees.** Each AP's reading at start is checked to
-  fall inside a bracket of the BSP's, and that bracket is about 19.8 M cycles
-  wide on the AMD bench, 11 ms (the `SMP:` lines). An offset under that
-  passes unseen, and nothing compares the CPUs again.
+  fall inside a bracket of the BSP's, about 19.8 M cycles wide on the AMD
+  bench, 11 ms (the `SMP:` lines), and nothing compares the CPUs again
+  (`issues/ap-tsc-trail-is-assumed-and-never-checked.md`).
 - **That the rate stays the one measured.** No later reading is set against
   the HPET or another reference, so a step or a change of rate after boot
   goes into every timestamp, timeout and deadline unannounced.

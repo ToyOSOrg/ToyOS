@@ -63,3 +63,15 @@ QEMU synthesises every guest TSC from one host clock and cannot answer, so this
 belongs on the metal session's table beside the control-register delta
 (`issues/a-metal-session-runs-a-pre-flash-gate-first.md`). Owed by
 whoever prepares that session: build the log line first, then read it.
+
+**2026-10-28, part measured.** `smp` now logs each AP's `rdtsc` inside a
+bracket of the BSP's, about 19.8 M cycles (11 ms) wide on the AMD bench, so
+it answers "trails by more than the boot took" and no smaller offset. Under
+the AMD bench's Linux, CPU 0 and each of the other 15 took turns reading
+their TSCs through idle gaps up to 1 s (`tsc-probe warp`, PR #1079's
+evidence). No CPU ever read behind the other's last reading, and the
+smallest step was 54 cycles, so that CPU's TSCs agree to within one turn,
+some 200 ns. That is that firmware's synchronisation under Linux, not a
+ToyOS measurement: the log line this file owes is still a bracket, not an
+offset. `issues/the-system-clock-takes-the-tsc-on-one-reading-and-never-checks-it-again.md`
+holds the clock's other unchecked assumptions.
