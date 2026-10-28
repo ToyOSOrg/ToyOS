@@ -8,6 +8,7 @@
 #![cfg(feature = "loom")]
 
 use loom::sync::Arc;
+use kernel_loom::sched::affinity::CpuMask;
 use kernel_loom::sched::cpu::{CpuHandle, CpuHandles};
 use kernel_loom::sched::topology::Topology;
 use kernel_loom::sched::mailbox::{mailbox, MailboxConsumer};
@@ -41,7 +42,7 @@ fn world() -> (Arc<World>, MailboxConsumer<Msg>) {
 }
 
 fn task(key: u64) -> Arc<TaskShared<Msg>> {
-    Arc::new(TaskShared::new(TaskKey(key), TaskState::Running(CPU0)))
+    Arc::new(TaskShared::new(TaskKey(key), TaskState::Running(CPU0), CpuMask::ANY))
 }
 
 fn drain(rx: &mut MailboxConsumer<Msg>, preempt: &PreemptModel) -> Vec<Msg> {

@@ -14,7 +14,8 @@ use crate::sched::hw::{CpuId, Nanos};
 use crate::sched::job::Job;
 use crate::sched::mailbox::MailboxNode;
 use crate::sched::msg::Msg;
-use crate::sched::sync::{Arc, AtomicBool, AtomicU64, Ordering};
+use crate::sched::affinity::{CpuMask, SharedMask};
+use crate::sched::sync::{fence, Arc, AtomicBool, AtomicU64, Ordering};
 use crate::sched::park::CommittedTicket;
 
 /// Monotonic, never reused. Stale messages keyed by `TaskKey` are provably
@@ -378,17 +379,24 @@ pub struct TaskShared<M> {
     /// watch holds the `Arc`; this flag is the fail-fast check that a task
     /// never registers on two.
     waiting: AtomicBool,
+    /// The CPUs the task may run on, as its setters publish them.
+    mask: SharedMask,
 }
 
 impl<M> TaskShared<M> {
-    pub fn new(key: TaskKey, state: TaskState) -> Self {
+    pub fn new(key: TaskKey, state: TaskState, mask: CpuMask) -> Self {
         Self {
             key,
             state: AtomicU64::new(pack(state)),
             wake_node: MailboxNode::new(),
             retire_node: MailboxNode::new(),
             waiting: AtomicBool::new(false),
+            mask: SharedMask::new(mask),
         }
+    }
+
+    pub fn mask(&self) -> &SharedMask {
+        &self.mask
     }
 
     pub fn key(&self) -> TaskKey {
@@ -795,6 +803,10 @@ struct TaskInner<X: SchedPayload> {
     ctx: X::Ctx,
     rt: RtState,
     acct: TaskAccounting,
+    /// The owner CPU's copy of [`TaskShared::mask`] and the version it was
+    /// loaded at. Changed only by [`Task::refresh_affinity`].
+    affinity: CpuMask,
+    affinity_version: u64,
     /// When the current residency began: enqueue time while ready, dispatch
     /// time while running, park time while blocked. One field, because a task
     /// is in exactly one state.
@@ -842,6 +854,20 @@ impl<X: SchedPayload> Task<X> {
 
     pub fn acct(&self) -> &TaskAccounting {
         &self.0.acct
+    }
+
+    pub fn affinity(&self) -> CpuMask {
+        self.0.affinity
+    }
+
+    /// Take the published mask if a setter has moved it since the last
+    /// refresh, and answer whether it did.
+    pub(crate) fn refresh_affinity(&mut self) -> bool {
+        if self.0.shared.mask().version() == self.0.affinity_version {
+            return false;
+        }
+        (self.0.affinity, self.0.affinity_version) = self.0.shared.mask().load();
+        true
     }
 
     /// The stable address of the saved context, for [`crate::sched::cpu::RunToken`]:
@@ -936,6 +962,11 @@ macro_rules! linear_state {
             pub fn acct(&self) -> &TaskAccounting {
                 self.0.acct()
             }
+
+            /// The CPUs this task may run on, as its owner last loaded them.
+            pub fn affinity(&self) -> CpuMask {
+                self.0.affinity()
+            }
         }
     };
 }
@@ -971,6 +1002,8 @@ pub struct TaskBuilder<X: SchedPayload> {
     pub ctx: X::Ctx,
     pub ext: X,
     pub rt: RtState,
+    /// Where it may run: its spawning thread's.
+    pub mask: CpuMask,
 }
 
 impl<X: SchedPayload> TaskBuilder<X> {
@@ -981,7 +1014,7 @@ impl<X: SchedPayload> TaskBuilder<X> {
     }
 
     pub fn build(self, dst: CpuId, now: Nanos) -> TransitTask<X> {
-        let shared = Arc::new(TaskShared::new(self.key, TaskState::InTransit(dst)));
+        let shared = Arc::new(TaskShared::new(self.key, TaskState::InTransit(dst), self.mask));
         TransitTask(Task(Box::new(TaskInner {
             key: self.key,
             shared,
@@ -990,6 +1023,8 @@ impl<X: SchedPayload> TaskBuilder<X> {
             ctx: self.ctx,
             rt: self.rt,
             acct: TaskAccounting::default(),
+            affinity: self.mask,
+            affinity_version: 0,
             since: now,
             adopt_node: MailboxNode::new(),
             ext: Some(self.ext),
@@ -1013,6 +1048,10 @@ impl<X: SchedPayload> TransitTask<X> {
             "adopt of a task that is not in transit to this CPU: {:?}",
             task.0.shared.state(),
         );
+        // Paired with the fence that ends `SharedMask::store`: either the
+        // setter's next read of the state word finds this CPU and kicks it, or
+        // the refresh that places the task here reads the setter's version.
+        fence(Ordering::SeqCst);
         ReadyTask(task)
     }
 
@@ -1022,6 +1061,10 @@ impl<X: SchedPayload> TransitTask<X> {
 }
 
 impl<X: SchedPayload> ReadyTask<X> {
+    pub(crate) fn refresh_affinity(&mut self) -> bool {
+        self.0.refresh_affinity()
+    }
+
     pub(crate) fn standing_mut(&mut self) -> &mut Standing {
         &mut self.0 .0.standing
     }
@@ -1085,6 +1128,10 @@ impl<X: SchedPayload> ReadyTask<X> {
 }
 
 impl<X: SchedPayload> RunningTask<X> {
+    pub(crate) fn refresh_affinity(&mut self) -> bool {
+        self.0.refresh_affinity()
+    }
+
     pub(crate) fn standing_mut(&mut self) -> &mut Standing {
         &mut self.0 .0.standing
     }
@@ -1244,7 +1291,7 @@ mod tests {
     const C1: CpuId = CpuId(1);
 
     fn running(cpu: CpuId) -> Shared {
-        Shared::new(TaskKey(1), TaskState::Running(cpu))
+        Shared::new(TaskKey(1), TaskState::Running(cpu), CpuMask::ANY)
     }
 
     #[test]

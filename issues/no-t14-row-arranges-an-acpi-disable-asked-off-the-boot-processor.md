@@ -18,8 +18,8 @@ leaves to the scheduler or does not read:
   killed `/system/bin/acpiserver`'s last thread, in its teardown and under
   its process's lock (`process::teardown_resources`), on the CPU the kill
   found it on: a killed task is never migrated. The job places no thread of
-  another process, and the tree has no affinity, so where the server dies is
-  the scheduler's. The judge prints the disable's asker and requires nothing
+  another process, and nothing pins the server, so where it dies is the
+  scheduler's. The judge prints the disable's asker and requires nothing
   of it: a judge that required a crossing no job arranges would be a flake.
 - **The boot processor's answer from a lock's spin.** `tlb::poll` answers a
   round for a boot processor that spins with interrupts closed on a lock the
@@ -32,8 +32,9 @@ leaves to the scheduler or does not read:
   `claim_off_the_boot_processor`). The kernel moves no running thread, so the
   asker is the CPU the thread read, unless a preemption between that read and
   the kernel's lock in `smi_cmd::write` queues the thread behind another and
-  an idle boot processor takes it. With no affinity in the tree the window
-  cannot be closed.
+  an idle boot processor takes it. Pinning the claiming thread off the boot
+  processor (`toyos_abi::syscall::thread_set_affinity`) closes the window,
+  and the job does not pin it yet.
 
 The disable, on the recorded `acpicase` boots. Ten before `289906d5b`: the
 `legacy mode again` line was logged on cpu0 in nine and on cpu1 in one, an

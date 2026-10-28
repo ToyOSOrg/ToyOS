@@ -396,6 +396,7 @@ impl<M, R: Ring, L: CellLock<Waiters<M, R>>> Drop for Watch<M, R, L> {
 
 #[cfg(test)]
 mod tests {
+    use crate::sched::affinity::CpuMask;
     extern crate std;
 
     use super::*;
@@ -477,7 +478,7 @@ mod tests {
     }
 
     fn task(key: u64) -> Arc<TaskShared<Msg>> {
-        Arc::new(TaskShared::new(TaskKey(key), TaskState::Running(C0)))
+        Arc::new(TaskShared::new(TaskKey(key), TaskState::Running(C0), CpuMask::ANY))
     }
 
     fn cpus() -> (CpuHandles<Msg>, MailboxConsumer<Msg>) {
