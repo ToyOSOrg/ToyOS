@@ -335,6 +335,11 @@ pub const SYS_JOB_FLOOR: u64 = 144;
 pub const SYS_ACCOUNT_INFO: u64 = 145;
 /// Resize a run of committed private memory, in place or moved. See [`vm_remap`].
 pub const SYS_VM_REMAP: u64 = 146;
+/// Hold every idle CPU to waking within a bound, gated by
+/// [`Rights::WAKE_LATENCY`] on a `SysCap`. See [`wake_latency_hold`].
+///
+/// [`Rights::WAKE_LATENCY`]: crate::handle::Rights::WAKE_LATENCY
+pub const SYS_WAKE_LATENCY_HOLD: u64 = 147;
 
 /// Bins in the per-process syscall profile — one for every number this ABI
 /// issues, and one at the end for every number it does not.
@@ -342,13 +347,13 @@ pub const SYS_VM_REMAP: u64 = 146;
 /// **The profile's parts sum to its total, and that is the whole requirement.**
 /// A bin array narrower than the ABI reaches drops calls out of the line while
 /// the total goes on counting them.
-pub const SYSCALL_PROFILE_BINS: usize = 148;
+pub const SYSCALL_PROFILE_BINS: usize = 149;
 
 /// Where a number this ABI does not issue is counted. Merging is a degradation
 /// a reader can see in the line; dropping is one nobody can.
 pub const SYSCALL_PROFILE_OTHER: usize = SYSCALL_PROFILE_BINS - 1;
 
-const _: () = assert!(SYS_VM_REMAP < SYSCALL_PROFILE_OTHER as u64);
+const _: () = assert!(SYS_WAKE_LATENCY_HOLD < SYSCALL_PROFILE_OTHER as u64);
 
 pub const WNOHANG: u64 = 1;
 /// Every bit `SYS_PROCESS_WAIT`'s flag word defines; a wait carrying another
@@ -1758,6 +1763,18 @@ pub fn job_floor(syscap: RawHandle, job: RawHandle, bytes: u64) -> Result<(), Sy
     check_unit(syscall(SYS_JOB_FLOOR, syscap.0 as u64, job.0 as u64, bytes, 0))
 }
 
+/// Hold every idle CPU to waking within `bound_ns` for as long as the
+/// returned handle lives: from when this returns no CPU enters a state slower
+/// to leave than the least bound held, and each CPU waiting in one has been
+/// sent a wake, which pays that state's exit once. Needs
+/// [`Rights::WAKE_LATENCY`]; a bound of 0 is refused
+/// [`SyscallError::InvalidArgument`].
+///
+/// [`Rights::WAKE_LATENCY`]: crate::handle::Rights::WAKE_LATENCY
+pub fn wake_latency_hold(syscap: RawHandle, bound_ns: u64) -> Result<RawHandle, SyscallError> {
+    check(syscall(SYS_WAKE_LATENCY_HOLD, syscap.0 as u64, bound_ns, 0, 0)).map(|raw| RawHandle(raw as u32))
+}
+
 /// What the account of the job `job` names holds, its handle carrying
 /// `READ`.
 pub fn account_info(job: RawHandle, info: &mut AccountInfo) -> Result<(), SyscallError> {
@@ -2262,6 +2279,14 @@ pub fn acpi_lock_release(claim: RawHandle) -> Result<(), SyscallError> {
 /// [`SyscallError::AlreadyExists`], and nothing is kept of either.
 pub fn acpi_s5(claim: RawHandle, slp_typ_a: u64) -> Result<(), SyscallError> {
     check_unit(syscall(SYS_ACPI, claim.0 as u64, crate::acpi::op::S5, slp_typ_a, 0))
+}
+
+/// Declare one processor's idle states ([`crate::acpi::op::IDLE`]).
+/// `InvalidArgument` is a declaration the kernel will not enter on that
+/// processor, `NotFound` a UID that names no CPU it runs, and its log line
+/// says which; nothing of a refused one is kept.
+pub fn acpi_idle(claim: RawHandle, declaration: &crate::acpi::IdleDeclaration) -> Result<(), SyscallError> {
+    check_unit(syscall(SYS_ACPI, claim.0 as u64, crate::acpi::op::IDLE, declaration as *const crate::acpi::IdleDeclaration as u64, 0))
 }
 
 /// Sleep for the given number of nanoseconds.

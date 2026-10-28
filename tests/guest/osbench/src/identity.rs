@@ -109,8 +109,6 @@ mod imp {
 
 #[cfg(target_os = "toyos")]
 mod imp {
-    use toyos::endow::{Endowments, SYSCAP_LABEL};
-    use toyos::syscap::SysCap;
     use toyos_abi::inventory::{Driven, RawRecord, Record};
 
     use crate::report::{note, refuse, unsupported};
@@ -125,7 +123,7 @@ mod imp {
     /// Every PCI function off the kernel's inventory, which the runner's
     /// capability carries `inventory` for.
     fn pci() {
-        let Some(cap) = Endowments::get().take::<SysCap>(SYSCAP_LABEL) else {
+        let Some(cap) = crate::sys::syscap() else {
             return refuse("identity.pci", "this program was endowed no SysCap");
         };
         let records: Vec<Record> = match cap.records(|n| vec![RawRecord::EMPTY; n]) {

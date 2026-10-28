@@ -43,7 +43,7 @@ fn the_madt_names_the_two_cpus_that_boot_and_the_chip_that_interrupts_them() {
     let mut overrides = Vec::new();
     for item in madt_entries(&madt) {
         match item.expect("a table QEMU published walks to its end") {
-            MadtEntry::LocalApic { apic_id, enabled } => {
+            MadtEntry::LocalApic { apic_id, enabled, .. } => {
                 if enabled {
                     cpus.push(apic_id);
                 }

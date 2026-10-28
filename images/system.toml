@@ -115,11 +115,13 @@ receives = ["input"]
 devices = ["isa:0060,0064:1,12"]
 memory-floor-mib = 24
 
+# `wake-latency` holds every idle CPU to waking within half a period while a
+# stream plays, so a CPU in a deep state does not make the mix late.
 [programs.soundserver]
 service = true
 serves = ["soundserver", "volume", "sound-output"]
 devices = ["pci:04:01:00/1af4:1059"]
-syscap = ["rt"]
+syscap = ["rt", "wake-latency"]
 
 # The Intel HD Audio driver: one process per HDA function the kernel does not
 # drive, each walking its own controller's codecs and offering soundserver the

@@ -11,9 +11,11 @@
 //! **What a period *is* was decided in `toyos-mixer`** before either loop ran:
 //! this file spends the answers and owns the effects around them.
 
+use std::time::Duration;
+
 use toyos::endow::Endowments;
 use toyos::poller::{Poller, READABLE};
-use toyos::syscap::SysCap;
+use toyos::syscap::{SysCap, WakeLatencyHold};
 use toyos_abi::syscall;
 use toyos_abi::RawHandle;
 use toyos_sound_output::{run, Run};
@@ -303,17 +305,27 @@ pub(crate) fn mix_thread(
     // Until this branch it was gated on the audio claim, which the dispatch's
     // own comment called out as not a privilege at all: whoever won the
     // first-come race for the sound card got the RT band with it. This is the
-    // `RT`-only capability the manifest's `syscap = ["rt"]` row asks the supervisor for,
-    // and soundserver is the only program in the tree that has one. Mixing on
-    // without the band would show up only as glitches, so a refusal is loud.
-    // Once: the band is the thread's, and the loop runs again on each output.
-    static RT: std::sync::Once = std::sync::Once::new();
-    RT.call_once(|| {
-        let rt: SysCap = Endowments::get()
+    // capability the manifest's `syscap = ["rt", "wake-latency"]` row asks the
+    // supervisor for, and soundserver is the only program in the tree that has
+    // one. Mixing on without the band would show up only as glitches, so a
+    // refusal is loud. Once: the band is the thread's, and the loop runs
+    // again on each output.
+    static CAP: std::sync::OnceLock<SysCap> = std::sync::OnceLock::new();
+    let cap = CAP.get_or_init(|| {
+        let cap: SysCap = Endowments::get()
             .take(toyos_abi::syscall::SYSCAP_LABEL)
-            .expect("the manifest declares this program `syscap = [\"rt\"]`");
-        rt.enter_rt().expect("an RT capability refused the band it names");
+            .expect("the manifest declares this program `syscap = [\"rt\", \"wake-latency\"]`");
+        cap.enter_rt().expect("an RT capability refused the band it names");
+        cap
     });
+    // While a stream plays, every idle CPU wakes within half a period, which
+    // leaves the other half for the render and the rest of the wake chain:
+    // the period interrupt may land on one CPU and wake this thread on
+    // another. A policy until the realtime stage's audio workers carry their
+    // own deadline arithmetic; none is held while suspended, so the machine
+    // sleeps deep when nothing plays.
+    let wake_bound = Duration::from_nanos(period_nanos / 2);
+    let mut wake_hold: Option<WakeLatencyHold> = None;
 
     let poller = Poller::new(64);
     let mut mix_f32 = vec![0.0f32; device_period_samples];
@@ -613,6 +625,7 @@ pub(crate) fn mix_thread(
                 // started: the marker has to precede whatever the backend logs
                 // about starting.
                 say!("soundserver: resumed");
+                wake_hold.replace(cap.hold_wake_latency(wake_bound).expect("the manifest declares this program `wake-latency`"));
             }
             backend.submit(idx, device_period_bytes);
             unplayed += 1;
@@ -663,6 +676,7 @@ pub(crate) fn mix_thread(
             dll.reset();
             backend.stop();
             started = false;
+            drop(wake_hold.take());
             say!("soundserver: suspended");
         }
 

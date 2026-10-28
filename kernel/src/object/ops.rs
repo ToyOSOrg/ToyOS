@@ -60,6 +60,7 @@ pub fn initial_rights(object: &KObjectRef) -> Rights {
         KObjectRef::Null(_) => super::null::NullObject::RIGHTS,
         KObjectRef::Job(_) => super::job::JobObject::RIGHTS,
         KObjectRef::Notice(_) => super::notice::NoticeObject::RIGHTS,
+        KObjectRef::WakeLatency(_) => super::wake_latency::WakeLatencyObject::RIGHTS,
     }
 }
 
@@ -218,7 +219,7 @@ pub fn pipe_read(object: &KObjectRef) -> Option<(&PipeRef, WaitClass)> {
         KObjectRef::PipeWrite(_) | KObjectRef::File(_) | KObjectRef::Device(_)
         | KObjectRef::Console(_) | KObjectRef::Acceptor(_) | KObjectRef::Inbox(_)
         | KObjectRef::SysCap(_)
-        | KObjectRef::Connector(_) | KObjectRef::Namespace(_)
+        | KObjectRef::Connector(_) | KObjectRef::WakeLatency(_) | KObjectRef::Namespace(_)
         | KObjectRef::SharedMem(_) | KObjectRef::Process(_) | KObjectRef::Job(_) | KObjectRef::Null(_)
         | KObjectRef::Notice(_) => None,
     }
@@ -233,7 +234,7 @@ pub fn pipe_write(object: &KObjectRef) -> Option<(&PipeRef, WaitClass, Landing)>
         KObjectRef::PipeRead(_) | KObjectRef::File(_) | KObjectRef::Device(_)
         | KObjectRef::Console(_) | KObjectRef::Acceptor(_) | KObjectRef::Inbox(_)
         | KObjectRef::SysCap(_)
-        | KObjectRef::Connector(_) | KObjectRef::Namespace(_)
+        | KObjectRef::Connector(_) | KObjectRef::WakeLatency(_) | KObjectRef::Namespace(_)
         | KObjectRef::SharedMem(_) | KObjectRef::Process(_) | KObjectRef::Job(_) | KObjectRef::Null(_)
         | KObjectRef::Notice(_) => None,
     }
@@ -294,7 +295,7 @@ pub fn read_watch(object: &KObjectRef) -> Option<WatchRef> {
         // Named unconditionally: the watch alone cannot enforce rights.
         KObjectRef::SysCap(_) => Some(WatchRef::Static(&crate::log::user::WATCH)),
         KObjectRef::PipeWrite(_) | KObjectRef::File(_) | KObjectRef::Inbox(_)
-        | KObjectRef::Connector(_) | KObjectRef::Namespace(_)
+        | KObjectRef::Connector(_) | KObjectRef::WakeLatency(_) | KObjectRef::Namespace(_)
         | KObjectRef::SharedMem(_) | KObjectRef::Null(_) => None,
     }
 }
@@ -305,7 +306,7 @@ pub fn watched_readable(object: &KObjectRef) {
     match object {
         KObjectRef::Notice(n) => n.listen(),
         KObjectRef::PipeRead(_) | KObjectRef::PipeWrite(_) | KObjectRef::Connection(_) | KObjectRef::Device(_)
-        | KObjectRef::Acceptor(_) | KObjectRef::Inbox(_) | KObjectRef::SharedMem(_) | KObjectRef::Connector(_)
+        | KObjectRef::Acceptor(_) | KObjectRef::Inbox(_) | KObjectRef::SharedMem(_) | KObjectRef::Connector(_) | KObjectRef::WakeLatency(_)
         | KObjectRef::Namespace(_) | KObjectRef::File(_) | KObjectRef::Console(_) | KObjectRef::SysCap(_)
         | KObjectRef::Process(_) | KObjectRef::Null(_) | KObjectRef::Job(_) => {}
     }
@@ -320,7 +321,7 @@ pub fn write_watch(object: &KObjectRef) -> Option<WatchRef> {
         KObjectRef::PipeRead(_) | KObjectRef::File(_) | KObjectRef::Device(_)
         | KObjectRef::Acceptor(_) | KObjectRef::Inbox(_)
         | KObjectRef::SysCap(_)
-        | KObjectRef::Connector(_) | KObjectRef::Namespace(_)
+        | KObjectRef::Connector(_) | KObjectRef::WakeLatency(_) | KObjectRef::Namespace(_)
         | KObjectRef::SharedMem(_) | KObjectRef::Process(_) | KObjectRef::Job(_) | KObjectRef::Null(_)
         | KObjectRef::Notice(_) => None,
     }
@@ -335,7 +336,7 @@ pub fn pipe_end_watch(object: &KObjectRef) -> Option<WatchRef> {
         KObjectRef::Connection(_) | KObjectRef::Acceptor(_) | KObjectRef::Process(_) | KObjectRef::Job(_)
         | KObjectRef::Notice(_)
         | KObjectRef::Console(_) | KObjectRef::Device(_) | KObjectRef::SysCap(_)
-        | KObjectRef::File(_) | KObjectRef::Inbox(_) | KObjectRef::Connector(_)
+        | KObjectRef::File(_) | KObjectRef::Inbox(_) | KObjectRef::Connector(_) | KObjectRef::WakeLatency(_)
         | KObjectRef::Namespace(_) | KObjectRef::SharedMem(_) | KObjectRef::Null(_) => None,
     }
 }
@@ -349,7 +350,7 @@ pub fn other_end_gone(object: &KObjectRef) -> bool {
         KObjectRef::Connection(_) | KObjectRef::Acceptor(_) | KObjectRef::Process(_) | KObjectRef::Job(_)
         | KObjectRef::Notice(_)
         | KObjectRef::Console(_) | KObjectRef::Device(_) | KObjectRef::SysCap(_)
-        | KObjectRef::File(_) | KObjectRef::Inbox(_) | KObjectRef::Connector(_)
+        | KObjectRef::File(_) | KObjectRef::Inbox(_) | KObjectRef::Connector(_) | KObjectRef::WakeLatency(_)
         | KObjectRef::Namespace(_) | KObjectRef::SharedMem(_) | KObjectRef::Null(_) => false,
     }
 }
@@ -374,7 +375,7 @@ fn close_ends_polls(object: &KObjectRef) -> bool {
         },
         KObjectRef::PipeRead(_) | KObjectRef::PipeWrite(_) | KObjectRef::Connection(_)
         | KObjectRef::Acceptor(_) | KObjectRef::File(_) | KObjectRef::Inbox(_)
-        | KObjectRef::Connector(_) | KObjectRef::Namespace(_)
+        | KObjectRef::Connector(_) | KObjectRef::WakeLatency(_) | KObjectRef::Namespace(_)
         | KObjectRef::SharedMem(_) | KObjectRef::Null(_) | KObjectRef::Notice(_) => true,
     }
 }
@@ -581,7 +582,7 @@ pub fn try_read(object: &KObjectRef, buf: &mut UserBytesMut) -> Option<u64> {
         }),
         KObjectRef::PipeWrite(_) | KObjectRef::Acceptor(_) | KObjectRef::Inbox(_)
         | KObjectRef::SysCap(_)
-        | KObjectRef::Connector(_) | KObjectRef::Namespace(_)
+        | KObjectRef::Connector(_) | KObjectRef::WakeLatency(_) | KObjectRef::Namespace(_)
         | KObjectRef::SharedMem(_) | KObjectRef::Process(_) | KObjectRef::Job(_) => Some(SyscallError::PermissionDenied.to_u64()),
     }
 }
@@ -612,7 +613,7 @@ pub fn try_write(object: &KObjectRef, buf: &UserBytes) -> Option<u64> {
         KObjectRef::Null(_) => Some(buf.len() as u64),
         KObjectRef::PipeRead(_) | KObjectRef::Acceptor(_)
         | KObjectRef::Inbox(_) | KObjectRef::SharedMem(_) | KObjectRef::SysCap(_)
-        | KObjectRef::Connector(_) | KObjectRef::Namespace(_)
+        | KObjectRef::Connector(_) | KObjectRef::WakeLatency(_) | KObjectRef::Namespace(_)
         | KObjectRef::Process(_) | KObjectRef::Job(_) | KObjectRef::Notice(_) => {
             Some(SyscallError::PermissionDenied.to_u64())
         }
@@ -687,7 +688,7 @@ pub fn fstat(object: &KObjectRef) -> Stat {
             node: 0,
         },
         KObjectRef::Inbox(_) | KObjectRef::SysCap(_)
-        | KObjectRef::Connector(_) | KObjectRef::Namespace(_)
+        | KObjectRef::Connector(_) | KObjectRef::WakeLatency(_) | KObjectRef::Namespace(_)
         | KObjectRef::Process(_) | KObjectRef::Job(_) | KObjectRef::Notice(_) => plain(FileType::Unknown),
         KObjectRef::Device(d) => plain(match d.class() {
             device_registry::DeviceType::Framebuffer => FileType::Framebuffer,
@@ -747,7 +748,7 @@ pub fn has_data(object: &KObjectRef) -> bool {
             device_registry::DeviceType::Framebuffer => true,
         },
         KObjectRef::PipeWrite(_) | KObjectRef::Inbox(_) | KObjectRef::SysCap(_)
-        | KObjectRef::Connector(_) | KObjectRef::Namespace(_)
+        | KObjectRef::Connector(_) | KObjectRef::WakeLatency(_) | KObjectRef::Namespace(_)
         | KObjectRef::SharedMem(_) => false,
     }
 }
@@ -760,7 +761,7 @@ pub fn read_posts_are_readiness(object: &KObjectRef) -> bool {
         KObjectRef::SysCap(_) => true,
         KObjectRef::Console(_) | KObjectRef::PipeRead(_) | KObjectRef::PipeWrite(_) | KObjectRef::Connection(_)
         | KObjectRef::Acceptor(_) | KObjectRef::File(_) | KObjectRef::Device(_)
-        | KObjectRef::Inbox(_) | KObjectRef::Connector(_) | KObjectRef::Namespace(_)
+        | KObjectRef::Inbox(_) | KObjectRef::Connector(_) | KObjectRef::WakeLatency(_) | KObjectRef::Namespace(_)
         | KObjectRef::SharedMem(_) | KObjectRef::Process(_) | KObjectRef::Job(_) | KObjectRef::Null(_)
         | KObjectRef::Notice(_) => false,
     }
@@ -776,7 +777,7 @@ pub fn has_space(object: &KObjectRef) -> bool {
         KObjectRef::Console(_) => crate::log::console::has_room(),
         KObjectRef::PipeRead(_) | KObjectRef::Device(_) | KObjectRef::Acceptor(_)
         | KObjectRef::Inbox(_) | KObjectRef::SysCap(_)
-        | KObjectRef::Connector(_) | KObjectRef::Namespace(_)
+        | KObjectRef::Connector(_) | KObjectRef::WakeLatency(_) | KObjectRef::Namespace(_)
         | KObjectRef::SharedMem(_) | KObjectRef::Process(_) | KObjectRef::Job(_) | KObjectRef::Notice(_) => false,
     }
 }
@@ -795,7 +796,7 @@ pub fn mark_tty(object: &KObjectRef) -> u64 {
         KObjectRef::Connection(_) | KObjectRef::File(_) | KObjectRef::Device(_)
         | KObjectRef::Console(_) | KObjectRef::Acceptor(_) | KObjectRef::Inbox(_)
         | KObjectRef::SysCap(_) | KObjectRef::SharedMem(_)
-        | KObjectRef::Connector(_) | KObjectRef::Namespace(_)
+        | KObjectRef::Connector(_) | KObjectRef::WakeLatency(_) | KObjectRef::Namespace(_)
         | KObjectRef::Process(_) | KObjectRef::Job(_) | KObjectRef::Null(_) | KObjectRef::Notice(_) => {
             SyscallError::InvalidArgument.to_u64()
         }

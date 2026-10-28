@@ -35,7 +35,9 @@ pub struct SourceOverride {
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum MadtEntry {
     /// Type 0 (Table 5.21) or type 9 (Table 5.27); `enabled` is flags bit 0.
-    LocalApic { apic_id: u32, enabled: bool },
+    /// `uid` is its ACPI Processor UID, which a processor object's `_UID` or
+    /// ProcID names it by (ACPI 6.5 §5.2.12.2).
+    LocalApic { apic_id: u32, uid: u32, enabled: bool },
     IoApic(IoApicEntry),
     SourceOverride(SourceOverride),
     /// Type 0xB (Table 5.37): one CPU's GIC CPU interface; `enabled` is flags bit 0.
@@ -115,6 +117,7 @@ impl<P: Phys> Iterator for MadtEntries<P> {
             // Table 5.21: ACPI Processor UID (2), APIC ID (3), Flags (4..8).
             (0, 8..) => MadtEntry::LocalApic {
                 apic_id: u32::from(phys.byte(base + 3)),
+                uid: u32::from(phys.byte(base + 2)),
                 enabled: u32le(phys, base + 4) & 1 != 0,
             },
             // Table 5.22: I/O APIC ID (2), Address (4..8), GSI Base (8..12).
@@ -130,9 +133,10 @@ impl<P: Phys> Iterator for MadtEntries<P> {
                 gsi: u32le(phys, base + 4),
                 flags: u16le(phys, base + 8),
             }),
-            // Table 5.27: X2APIC ID (4..8), Flags (8..12).
+            // Table 5.27: X2APIC ID (4..8), Flags (8..12), ACPI Processor UID (12..16).
             (9, 16..) => MadtEntry::LocalApic {
                 apic_id: u32le(phys, base + 4),
+                uid: u32le(phys, base + 12),
                 enabled: u32le(phys, base + 8) & 1 != 0,
             },
             // Table 5.37: ACPI Processor UID (8..12), Flags (12..16), GICR Base

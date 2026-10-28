@@ -31,7 +31,7 @@ devices = ["pci:02:00:00/1af4:1041"]
 service = true
 serves = ["soundserver", "volume", "sound-output"]
 devices = ["pci:04:01:00/1af4:1059"]
-syscap = ["rt"]
+syscap = ["rt", "wake-latency"]
 
 # A job reaches netstack through test-runner's namespace:
 # `netstack_holders_exported_to_children`'s jobs reach the harness through it.

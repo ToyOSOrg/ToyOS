@@ -474,6 +474,7 @@ pub fn spawn_supervisor(images: crate::bootimage::Objects) -> Pid {
         .union(Rights::JOBS)
         .union(Rights::FLOOR)
         .union(Rights::RT)
+        .union(Rights::WAKE_LATENCY)
         .union(Rights::LOG)
         .union(Rights::WAIT)
         .union(Rights::POWER)

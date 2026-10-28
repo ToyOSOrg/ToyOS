@@ -78,10 +78,11 @@ pub enum ObjectKind {
     Null = 13,
     Job = 14,
     Notice = 15,
+    WakeLatency = 16,
 }
 
 impl ObjectKind {
-    pub const ALL: [ObjectKind; 16] = [
+    pub const ALL: [ObjectKind; 17] = [
         Self::PipeRead,
         Self::PipeWrite,
         Self::Connection,
@@ -98,6 +99,7 @@ impl ObjectKind {
         Self::Null,
         Self::Job,
         Self::Notice,
+        Self::WakeLatency,
     ];
 
     pub const fn from_word(word: u32) -> Option<Self> {
@@ -240,10 +242,18 @@ impl Rights {
     ///
     /// [`SYS_JOB_FLOOR`]: crate::syscall::SYS_JOB_FLOOR
     pub const FLOOR: Rights = Rights(1 << 16);
+    /// On a `SysCap`: hold every idle CPU to waking within a bound
+    /// ([`SYS_WAKE_LATENCY_HOLD`]). What it costs is the whole machine's
+    /// power, every CPU kept out of its deeper states while the hold lives,
+    /// which is why it rides a bit of its own and not [`RT`](Self::RT)'s:
+    /// one takes CPU from other programs, this takes power from the machine.
+    ///
+    /// [`SYS_WAKE_LATENCY_HOLD`]: crate::syscall::SYS_WAKE_LATENCY_HOLD
+    pub const WAKE_LATENCY: Rights = Rights(1 << 17);
 
     /// Every bit that has a caller. A wider set than this is a bug in whoever
     /// composed it, not a right nobody uses.
-    pub const ALL: Rights = Rights(0x1_ffff);
+    pub const ALL: Rights = Rights(0x3_ffff);
 
     pub const fn from_bits(bits: u32) -> Option<Self> {
         if bits & !Self::ALL.0 == 0 { Some(Rights(bits)) } else { None }
@@ -274,7 +284,7 @@ impl Rights {
 /// refusal saying which right was missing.
 impl core::fmt::Debug for Rights {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
-        const NAMES: [(Rights, &str); 17] = [
+        const NAMES: [(Rights, &str); 18] = [
             (Rights::DUP, "DUP"),
             (Rights::TRANSFER, "TRANSFER"),
             (Rights::READ, "READ"),
@@ -292,6 +302,7 @@ impl core::fmt::Debug for Rights {
             (Rights::TRACE, "TRACE"),
             (Rights::JOBS, "JOBS"),
             (Rights::FLOOR, "FLOOR"),
+            (Rights::WAKE_LATENCY, "WAKE_LATENCY"),
         ];
         if self.0 == 0 {
             return f.write_str("NONE");

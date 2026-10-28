@@ -44,9 +44,10 @@
 //! is run as its method ([`run_query`]): a Notify of a press is a press.
 //! Elsewhere no query's method runs.
 //!
-//! **Then `_OSC` is negotiated** ([`osc`]): `\_SB._OSC`, and each
-//! processor's on an Intel processor, query then commit, claiming what ToyOS
-//! honours; whatever a table they loaded added is initialised in turn.
+//! **Then `_OSC` is negotiated** ([`osc`]): `\_SB._OSC` query then commit,
+//! and each processor's on an Intel processor committed, claiming what ToyOS
+//! honours; whatever a table they loaded added is initialised in turn. Then
+//! each processor's idle states are handed to the kernel ([`cst`]).
 //!
 //! **Each SCI** is read off both blocks ([`sci::events`]): a press stops the
 //! machine through the supervisor, or is said and dropped on a machine with
@@ -70,6 +71,7 @@
 
 mod aml;
 mod battery;
+mod cst;
 mod devices;
 mod ec;
 mod gpe;
@@ -89,7 +91,7 @@ use toyos::ioport::{in16, in8, out16, out8};
 use toyos::poller::{Poller, READABLE};
 use toyos::power::{self, Mode, Refused, Stop};
 use toyos::AcpiDev;
-use toyos_abi::acpi::{Access, AcpiInfo, Block, FIXED_POWER_BUTTON};
+use toyos_abi::acpi::{Access, AcpiInfo, Block, IdleDeclaration, FIXED_POWER_BUTTON};
 use toyos_abi::syscall::{DeviceType, SyscallError};
 
 use acpiserver_api::{CONTROLLER_NONE, CONTROLLER_SERVED};
@@ -97,7 +99,7 @@ use aml::Aml;
 use battery::Power;
 use devices::{Ec, Queried};
 use ec::Transaction;
-use host::{port_in, Answer, Kernel, Stopping, Take, Unmade, OWN};
+use host::{port_in, Answer, Declared, Kernel, Stopping, Take, Unmade, OWN};
 use init::{Census, Names};
 use sci::{Bits, Event, Fixed, Served, Unserved, Unstopped, PM1_STATUS, PWRBTN};
 
@@ -143,6 +145,8 @@ struct Server<'a, K, P> {
     gpe_runs: BTreeMap<u16, u64>,
     /// Each Notify delivered, by object and value.
     delivered: ledger::Ledger,
+    /// The processors whose `_CST` is read, which their Notify 0x81 reads again.
+    idle: Vec<cst::Processor>,
 }
 
 fn main() {
@@ -159,6 +163,7 @@ fn main() {
     let (batteries, adapters) = server.arm_controller(names.as_ref());
     if let Some(names) = server.negotiate(names) {
         println!("{}", server.census.line());
+        server.declare_idle(&names);
         server.arm_gpes(&names);
     }
     server.sources = (batteries.clone(), adapters.clone());
@@ -266,6 +271,14 @@ impl Kernel for Claim<'_> {
         }
     }
 
+    fn idle(&self, declaration: &IdleDeclaration) -> Result<Declared, Stopping> {
+        match self.dev.idle(declaration) {
+            Err(SyscallError::NotFound) => Ok(Declared::NoCpu),
+            Err(SyscallError::InvalidArgument) => Ok(Declared::Refused),
+            answer => Self::answered("a processor's idle states", answer).map(|()| Declared::Kept),
+        }
+    }
+
     fn latched(&self) -> Option<u32> {
         match self.dev.irq() {
             Ok(record) => Some(record.count),
@@ -358,6 +371,7 @@ impl<'a, K: Kernel, P: Ports> Server<'a, K, P> {
             stop_asked: false,
             census: Census::default(),
             negotiated: osc::Negotiated::default(),
+            idle: Vec::new(),
             intel: toyos_abi::processor_is_intel(),
             sources: (Vec::new(), Vec::new()),
             gpe_runs: BTreeMap::new(),
@@ -460,6 +474,29 @@ impl<'a, K: Kernel, P: Ports> Server<'a, K, P> {
             toyos_aml::MAX_RUNNING
         );
         Some(names)
+    }
+
+    /// Hand the kernel each processor's idle states ([`cst`]), once `_OSC`
+    /// has said what ToyOS does and the blocks it loaded stand.
+    fn declare_idle(&mut self, names: &Names) {
+        let Some(aml) = &mut self.aml else { return };
+        self.idle = cst::processors(aml, names);
+        let mut census = cst::Census::default();
+        for processor in &self.idle {
+            if cst::declare(aml, self.kernel, processor, self.intel, &mut census).is_err() {
+                return;
+            }
+        }
+        println!("{}", census.line());
+    }
+
+    /// `object`'s idle states read again and handed over, on its Notify 0x81.
+    fn redeclare_idle(&mut self, object: &str) {
+        let (Some(aml), Some(processor)) = (&mut self.aml, self.idle.iter().find(|p| p.path == object)) else { return };
+        let mut census = cst::Census::default();
+        if cst::declare(aml, self.kernel, processor, self.intel, &mut census).is_ok() {
+            println!("{OWN}{object}'s idle states read again: {}", census.line());
+        }
     }
 
     /// Find the controller, and the buttons where they are control method
@@ -671,14 +708,16 @@ impl<'a, K: Kernel, P: Ports> Server<'a, K, P> {
     /// status change (0x80) reads the power sources again, and a battery's
     /// information change (0x81) finds them again; `\_SB`'s or a negotiated
     /// processor's 0x08 negotiates its `_OSC` again with the same claim
-    /// (§6.2.11); a processor's performance, idle or throttling change
-    /// (0x80, 0x81, 0x82, §8.4) is counted, since nothing reads those states
-    /// yet; anything else is served by nothing and counted.
+    /// (§6.2.11); a processor's idle change (0x81, §8.4.1.1) reads its
+    /// `_CST` again; its performance or throttling change (0x80, 0x82) is
+    /// counted, since nothing reads those states; anything else is served by
+    /// nothing and counted.
     fn deliver(&mut self, notified: std::collections::BTreeSet<(String, u64)>) {
         let (mut status, mut info) = (false, false);
         for (object, value) in notified {
             let source = self.sources.0.contains(&object) || self.sources.1.contains(&object);
             let processor = self.negotiated.processors.iter().any(|(path, _)| *path == object);
+            let idles = self.idle.iter().any(|p| p.path == object);
             let served = match value {
                 0x80 if source => {
                     status = true;
@@ -692,7 +731,11 @@ impl<'a, K: Kernel, P: Ports> Server<'a, K, P> {
                     self.renegotiate(&object);
                     "its _OSC negotiated again"
                 }
-                0x80..=0x82 if processor => "counted: nothing reads the processors' performance, idle or throttling states",
+                0x81 if idles => {
+                    self.redeclare_idle(&object);
+                    "its idle states read again"
+                }
+                0x80 | 0x82 if processor || idles => "counted: nothing reads the processors' performance or throttling states",
                 _ => "served by nothing",
             };
             if self.delivered.see(&format!("{object} {value:#x}")) {
@@ -710,11 +753,16 @@ impl<'a, K: Kernel, P: Ports> Server<'a, K, P> {
     /// `object`'s `_OSC` negotiated again with its claim.
     fn renegotiate(&mut self, object: &str) {
         let Some(aml) = &mut self.aml else { return };
-        let claim = if object == "\\_SB_" { &osc::PLATFORM } else { &osc::PROCESSOR };
         let before = aml.interpreter.defined();
-        match osc::negotiate(aml, &format!("{object}._OSC"), claim) {
-            Ok(answered) => println!("{OWN}{object}._OSC negotiated again: {answered:x?}"),
-            Err(why) => println!("{OWN}{object}._OSC was refused again: {why}"),
+        let path = format!("{object}._OSC");
+        let answered = if object == "\\_SB_" {
+            osc::negotiate(aml, &path, &osc::PLATFORM).map(|answered| format!("{answered:x?}"))
+        } else {
+            osc::commit(aml, &path, &osc::PROCESSOR).map(|committed| format!("{committed:x?}"))
+        };
+        match answered {
+            Ok(answered) => println!("{OWN}{path} negotiated again: {answered}"),
+            Err(why) => println!("{OWN}{path} was refused again: {why}"),
         }
         if let Ok(names) = Names::read(&aml.interpreter) {
             self.settle(before, names);
@@ -1111,11 +1159,12 @@ mod tests {
         kernel
     }
 
-    /// §6.2.11: `\_SB._OSC` and, on an Intel processor, each processor's are
-    /// queried with what ToyOS claims, nothing, and committed with what the
-    /// query granted of it, nothing, though the firmware offered a bit;
-    /// the block the processor's commit loads from reserved memory loads, and
-    /// its device's `_INI` runs. On another vendor's processor its `_OSC` is
+    /// §6.2.11: `\_SB._OSC` is queried with what ToyOS claims, nothing, and
+    /// committed with what the query granted of it, nothing, though the
+    /// firmware offered a bit; on an Intel processor, each processor's is
+    /// committed with ToyOS's claim and never queried (302223-007 §2.1). The
+    /// block the processor's commit loads from reserved memory loads, and its
+    /// device's `_INI` runs. On another vendor's processor its `_OSC` is
     /// not evaluated, and a block in ACPI reclaim memory, which Table 15.6
     /// calls neither reserved nor NVS, is refused and keeps nothing.
     #[test]
@@ -1137,13 +1186,46 @@ mod tests {
             let platform: Vec<u64> = ["\\PUU", "\\PQ1", "\\PQ2", "\\PC1", "\\PC2"].map(&mut read).to_vec();
             assert_eq!(platform, [1, 1, 0, 0, 0], "the platform's UUID, the query flag and nothing claimed, then the commit of nothing");
             let processor: Vec<u64> = ["\\CUU", "\\CQ1", "\\CQ2", "\\CC1", "\\CC2"].map(&mut read).to_vec();
-            assert_eq!(processor, if intel { [1, 1, 0, 0, 0] } else { [0; 5] }, "intel {intel}");
+            let claimed = u64::from(osc::PROCESSOR.capabilities);
+            assert_eq!(processor, if intel { [1, 0, 0, 0, claimed] } else { [0; 5] }, "intel {intel}");
             assert_eq!(read("\\NEWI"), if loaded { 0x77 } else { 0 }, "intel {intel}, block in type {block_type}");
             assert_eq!((aml.host.loaded, aml.host.loads_refused), (u64::from(loaded), u64::from(intel && !loaded)));
             let answered = osc::Answered { query: 0x10, offered: 0, commit: Some((0, 0)) };
             assert_eq!(server.negotiated.platform, Some(Ok(answered)));
             assert_eq!(server.negotiated.processors.len(), usize::from(intel));
             assert_eq!(server.census.ini, u64::from(loaded), "the loaded device's _INI");
+        }
+    }
+
+    /// Each processor's `_CST` reaches the kernel by the UID the MADT names
+    /// it by, a `Processor` object's ProcID, holding the states deeper than
+    /// C1 as `_CST` names them: the T14's, as its firmware answers ToyOS's
+    /// processor `_OSC`.
+    #[test]
+    fn each_processors_cst_is_handed_to_the_kernel_by_its_uid() {
+        use crate::common::{buffer, cat, def_name, int, name, package, pkg};
+        use toyos_abi::acpi::IdleEntry;
+        let register = |hint: u64| {
+            let mut descriptor = vec![0x82, 12, 0, 0x7F, 1, 2, 1];
+            descriptor.extend(hint.to_le_bytes());
+            descriptor.extend([0x79, 0x00]);
+            buffer(&int(descriptor.len() as u64), &descriptor)
+        };
+        let state = |hint, kind, latency| package(&[register(hint), int(kind), int(latency), int(0)]);
+        let cst = def_name("_CST", &package(&[int(3), state(0x00, 1, 1), state(0x31, 2, 253), state(0x60, 3, 1048)]));
+        let processor = |path: &str, id: u8| cat(&[&[0x5B, 0x83], &pkg(&cat(&[&name(path), &[id], &0u32.to_le_bytes(), &[0x00], &cst]))]);
+        let kernel = crafted(&sealed(b"DSDT", &cat(&[&processor("\\_PR.CPU0", 2), &processor("\\_PR.CPU1", 5)])), &[]);
+        let info = AcpiInfo { rsdp: CRAFTED_RSDP, pm1_event: Block::NONE, gpe0: GPE0, flags: FIXED_POWER_BUTTON, reserved: [0; 3] };
+        let mut server = Server::new(&kernel, Bytes::default(), info);
+        server.intel = true;
+        server.aml = load(&kernel, CRAFTED_RSDP).1;
+        let names = server.initialise().expect("the namespace stands");
+        server.declare_idle(&names);
+        let declared = kernel.declared.borrow();
+        assert_eq!(declared.iter().map(|d| d.processor_uid).collect::<Vec<_>>(), [2, 5]);
+        for d in declared.iter() {
+            let states: Vec<(u8, u64, u32)> = d.states[..d.count as usize].iter().map(|s| (s.entry, s.address, s.latency_us)).collect();
+            assert_eq!(states, [(IdleEntry::Mwait as u8, 0x31, 253), (IdleEntry::Mwait as u8, 0x60, 1048)]);
         }
     }
 

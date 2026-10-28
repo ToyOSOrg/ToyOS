@@ -23,6 +23,7 @@ pub mod entropy;
 pub mod entry;
 pub mod fpu;
 pub mod hw;
+pub mod idle;
 pub mod irqchip;
 pub mod paging;
 pub mod percpu;

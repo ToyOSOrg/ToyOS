@@ -15,6 +15,7 @@
 pub mod cpu;
 pub mod eevdf;
 pub mod hw;
+pub mod idle;
 pub mod invariants;
 pub mod job;
 pub mod job_sched;
