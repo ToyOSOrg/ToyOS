@@ -8,7 +8,7 @@ opened: 2026-10-12
 
 Two builds of one plan write different images, so ToyOS rebuilding itself
 cannot reproduce the host's bytes. Every GUID an image carries comes from
-`gptwrite::random_guid`, the operating system's random source, drawn again on
+`image::random_guid`, the operating system's random source, drawn again on
 every `create_boot_image` call: it draws the log partition's, the ESP's, the
 slot table's and each slot's boot and ROOT GUIDs, and writes the log's again
 into the ESP's `/toyos/log.guid` and each slot's into the slot table; `lay`
