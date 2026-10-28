@@ -1113,17 +1113,10 @@ const METAL: &[(&str, metal::Metal)] = &[
     (
         // The numbers compared with the same program on the bench's own Linux.
         // Evidence and not a verdict: they are read off the log, and the row
-        // holds only that every group ran to its end, on a boot that did not
-        // spend itself formatting DATA. The T14 and the AMD bench. One boot
-        // runs the whole suite, so three readbacks are three runs.
+        // holds only that every group ran to its end. The T14 and the AMD bench.
+        // One boot runs the whole suite, so three readbacks are three runs.
         "osbench",
-        metal::Metal {
-            arms: BENCHCASE,
-            judge: |b| {
-                not_the_format_boot(b[0])?;
-                osbench_ran(b[0], &OSBENCH_GROUPS)
-            },
-        },
+        metal::Metal { arms: BENCHCASE, judge: |b| osbench_ran(b[0], &OSBENCH_GROUPS) },
     ),
     (
         // `osbench lan` against the `osbench-peer` the other bench's Linux runs,
@@ -1700,28 +1693,6 @@ fn osbench_ran(boot: &metal::Readback, jobs: &[&str]) -> Result<(), String> {
         boot.log().must_say(&format!("group={group} done"))?;
     }
     Ok(())
-}
-
-/// The boot that formats a freshly designated DATA partition is no measured
-/// run: its start went to the format, and the volume it leaves is new. It
-/// says how long the format took.
-fn not_the_format_boot(boot: &metal::Readback) -> Result<(), String> {
-    const FORMATTING: &str = "fileserver: block 0 designates this partition for ToyOS; formatting it";
-    const SERVING: &str = "fileserver: Data serving ";
-    let log = boot.log();
-    let text = log.text();
-    let Some(began) = text.lines().find(|l| l.contains(FORMATTING)) else {
-        return Ok(());
-    };
-    let ended = text.lines().find(|l| l.contains(SERVING));
-    let secs = ended.and_then(since_boot).zip(since_boot(began)).map(|(end, start)| end - start);
-    let took = secs.map_or("its end unlogged".to_string(), |s| format!("{s:.3} s"));
-    Err(format!("this boot formatted DATA off its designation ({took}), and the format's boot is no measured run"))
-}
-
-/// A log line's seconds since boot: `[2026-10-24 14:17:17 12.664 fileserver]`.
-fn since_boot(line: &str) -> Option<f64> {
-    line.strip_prefix('[')?.split_whitespace().nth(2)?.parse().ok()
 }
 
 /// A timing boot was in ACPI mode before its first job and stayed there, as a

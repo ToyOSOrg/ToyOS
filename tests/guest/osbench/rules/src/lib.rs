@@ -398,9 +398,12 @@ pub mod window {
 
 pub mod settle {
     //! A clock has settled once every reading over [`STEADY_NS`] agrees
-    //! within 1%. A frequency governor can hold a CPU that just turned busy
+    //! within 5%. A frequency governor can hold a CPU that just turned busy
     //! at a lower clock for tens of milliseconds before it steps up, so a
-    //! span much shorter than that takes the step for the settled clock.
+    //! span much shorter than that takes the step for the settled clock. The
+    //! steps are a quarter of the clock and more (the AMD bench's 1.36, 1.8
+    //! and 4 GHz), while a boosting CPU's clock dithers by some 2% from one
+    //! reading to the next, so 5% tells the two apart.
 
     /// How long the readings must agree.
     pub const STEADY_NS: u64 = 50_000_000;
@@ -419,11 +422,11 @@ pub mod settle {
         }
 
         /// The reading `mhz` taken at `at_ns`: whether every reading for
-        /// [`STEADY_NS`] up to it agrees within 1%. A reading that does not
+        /// [`STEADY_NS`] up to it agrees within 5%. A reading that does not
         /// agree with those before it starts the span again from itself.
         pub fn settled_with(&mut self, at_ns: u64, mhz: u64) -> bool {
             let (lo, hi) = (self.lo.min(mhz), self.hi.max(mhz));
-            if (hi - lo) * 100 > hi {
+            if (hi - lo) * 20 > hi {
                 *self = Plateau::new(at_ns, mhz);
             } else {
                 (self.lo, self.hi) = (lo, hi);
@@ -451,8 +454,9 @@ pub mod settle {
         }
 
         #[test]
-        fn readings_within_one_percent_hold_the_span() {
-            let wobble = |at: u64| if (at / MS).is_multiple_of(2) { 4000 } else { 3970 };
+        fn a_boosting_clocks_dither_holds_the_span() {
+            // The AMD bench's Linux readings on 2026-10-28: 4022 to 4126 MHz.
+            let wobble = |at: u64| if (at / MS).is_multiple_of(2) { 4126 } else { 4022 };
             assert_eq!(settles(wobble), Some((50 * MS, wobble(50 * MS))));
         }
 
@@ -460,9 +464,9 @@ pub mod settle {
         fn a_reading_that_disagrees_starts_the_span_again() {
             let mut plateau = Plateau::new(0, 4000);
             assert!(!plateau.settled_with(40 * MS, 4000));
-            assert!(!plateau.settled_with(41 * MS, 3900), "2.5% below");
-            assert!(!plateau.settled_with(90 * MS, 3900), "49 ms since the disagreement");
-            assert!(plateau.settled_with(91 * MS, 3900));
+            assert!(!plateau.settled_with(41 * MS, 3700), "7.5% below");
+            assert!(!plateau.settled_with(90 * MS, 3700), "49 ms since the disagreement");
+            assert!(plateau.settled_with(91 * MS, 3700));
         }
 
         #[test]

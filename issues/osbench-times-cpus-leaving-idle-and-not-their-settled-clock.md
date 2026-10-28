@@ -29,11 +29,14 @@ counter reading.
 Since round 2 every benchmark but the wake and fairness groups' (whose CPUs
 idle or are all busy by design) runs after `clock::settle`, which spins the
 measuring CPU until every reading of a dependent `add` chain for 50 ms
-agrees within 1% (`osbench_rules::settle`), or for 0.5 s, and every result
-line prints that clock as `mhz_settled` and the clock just after as `mhz`;
-each group also prints `cpu.clock`, 200 probes from idle. Three probes in a
-row, the rule until 2026-10-27, took the AMD bench's `schedutil` step for
-the settled clock: its Linux runs of 2026-10-24 settled at 1,357 MHz.
+agrees within 5% (`osbench_rules::settle`), or for 0.5 s, and every result
+line prints that clock as `mhz_settled`, the clock a second settle reaches
+after the row as `mhz_after`, and the clock just after as `mhz`; each group
+also prints `cpu.clock`, 200 probes from idle. Three probes in a row, the
+rule until 2026-10-27, took the AMD bench's `schedutil` step for the
+settled clock: its Linux runs of 2026-10-24 settled at 1,357 MHz. A 1%
+span never formed there on 2026-10-28, where Linux's boosting clock
+dithered between 4,022 and 4,126 MHz, so 84 of its rows read `unsettled`.
 
 **Exit**: a T14 run on each system shows `mhz_settled` near the all-CPU rate
 per CPU within the run-to-run spread, or names the benchmark whose CPU did

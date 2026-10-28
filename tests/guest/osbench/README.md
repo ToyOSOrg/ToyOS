@@ -114,14 +114,25 @@ user's manager delegates the `cpu` controller. Check
 thread-fair, and the pair compares nothing.
 
 **The clock.** Every timestamp is read from the TSC on ToyOS. The AMD
-bench's Linux keeps time on the HPET, having found its TSC unstable at boot
-(`issues/the-amd-benchs-linux-reads-its-clock-through-a-syscall.md`), so
-each of its `Instant::now` is a syscall: 1.21 µs on 2026-10-24 against the
-T14's 14 ns, carried by every per-operation timing there. That is its
-baseline, stated by the `clocksource` setup line. A Linux forced onto the
-TSC (`tsc=reliable`) has its stability checks switched off, so it is no
-baseline. It is an experiment, and only once the instability's cause is
-known.
+bench's Linux keeps time on the HPET in most boots: its clocksource watchdog
+distrusts the TSC early in boot. Each `Instant::now` there is then a
+syscall's cost, 1.21 µs against the T14's 14 ns, carried by every
+per-operation timing. That is its baseline, stated by the `clocksource`
+setup line. In 30 boots' kernel logs (2026-10-28) the watchdog fired in 18:
+- in 13, Linux's refined calibration read 1799.54 to 1799.61 MHz, some
+  1,630 ppm above the TSC's 1796.62 MHz;
+- in 5, with a right calibration, the TSC ran some 1.7 ms ahead of the HPET
+  over half a second, a step whose cause is unknown.
+
+At runtime neither shows: across 16 CPUs and idle gaps up to 1 s, no CPU's
+TSC read behind another's and no step exceeded the 1.2 µs of a read. A
+Linux forced onto the TSC (`tsc=reliable`) has those checks switched off,
+so it is no baseline.
+
+**On the T14 the baseline already makes ToyOS's request but for its
+floor.** Its Linux's `IA32_HWP_REQUEST` read `0x80002a04` on every CPU
+(2026-10-28): EPP 0x80 and highest 0x2a as ToyOS asks, and lowest 4 where
+ToyOS asks 1.
 
 ## The disk is not yet one disk
 
@@ -130,9 +141,7 @@ runner's home, ext4 on the bench's NVMe. On ToyOS it is still the boot
 stick's LOG volume, FAT32 over USB 2.0, because ToyOS's DATA is the bench's
 partition only once ToyOS has designated it, and ToyOS cannot yet do that
 itself. So `persist` compares two media. Its lines name theirs, and
-`osbench-compare` refuses a verdict on any row whose media differ. The
-`osbench` row refuses the boot that formats a newly designated DATA as a
-run, and says how long the format took.
+`osbench-compare` refuses a verdict on any row whose media differ.
 
 ## What is not a comparison
 
