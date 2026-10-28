@@ -1319,17 +1319,18 @@ mod tests {
         /// Shared, so a test reads what the disk holds while the server runs.
         image: Rc<std::cell::RefCell<Image>>,
         writes: std::cell::Cell<usize>,
+        flushes: std::cell::Cell<usize>,
         keep: usize,
         refuse: Option<usize>,
     }
 
     impl Stops {
         fn new(blocks: u64) -> Self {
-            Self { blocks, image: Rc::default(), writes: Default::default(), keep: usize::MAX, refuse: None }
+            Self { blocks, image: Rc::default(), writes: Default::default(), flushes: Default::default(), keep: usize::MAX, refuse: None }
         }
 
         fn from(image: &Image, blocks: u64, keep: usize, refuse: Option<usize>) -> Self {
-            Self { blocks, image: Rc::new(image.clone().into()), writes: Default::default(), keep, refuse }
+            Self { blocks, image: Rc::new(image.clone().into()), writes: Default::default(), flushes: Default::default(), keep, refuse }
         }
     }
 
@@ -1364,11 +1365,36 @@ mod tests {
         }
 
         async fn flush(&self) -> Result<(), toyos_blockdev::Error> {
+            self.flushes.set(self.flushes.get() + 1);
             Ok(())
         }
     }
 
     impl Disk for Stops {}
+
+    /// A sync with nothing written since the last asks the disk for nothing,
+    /// and one after a write over a page the file holds writes the page and
+    /// makes it durable. The sync after a commit still writes the blocks that
+    /// commit freed, which are marked free only once it has landed.
+    #[test]
+    fn a_sync_with_nothing_new_asks_the_disk_for_nothing() {
+        let mut v = DataVolume::format(Stops::new(1024), &["home", "apps"], clock).unwrap();
+        let n = v.open("home/f", CREATE).unwrap();
+        v.write(n, 0, &[1; BLOCK]).unwrap();
+        assert_eq!(v.sync(), Ok(Vec::new()));
+        assert_eq!(v.sync(), Ok(Vec::new()));
+        let asked = |v: &DataVolume<Stops>| (v.cache.disk().writes.get(), v.cache.disk().flushes.get());
+        let synced = asked(&v);
+        assert_eq!(v.sync(), Ok(Vec::new()));
+        assert_eq!(asked(&v), synced);
+
+        v.write(n, 0, &[2; BLOCK]).unwrap();
+        assert_eq!(v.sync(), Ok(Vec::new()));
+        let (writes, flushes) = asked(&v);
+        assert!(writes > synced.0 && flushes > synced.1, "the write over the page asked {:?} after {synced:?}", (writes, flushes));
+        let block = block_for(&v.open[&n].extents, 0).unwrap();
+        assert_eq!(v.cache.disk().image.borrow()[&block][..], [2; BLOCK][..]);
+    }
 
     fn take(v: DataVolume<Stops>) -> Stops {
         let DataVolume { fs, cache, .. } = v;
