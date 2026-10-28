@@ -918,6 +918,27 @@ pub fn export(handle: BorrowedHandle<'_>) -> Result<OwnedHandle, NetError> {
     }
 }
 
+/// A call through `handle` begun and left open, so its end stays until
+/// [`release`]: the slot. `None` for a handle that reaches no stream end.
+pub(super) fn hold(handle: BorrowedHandle<'_>) -> Option<usize> {
+    TABLE.lock().call(handle.raw()).map(|(slot, _)| slot)
+}
+
+/// [`export`] of the end a [`hold`] keeps at `slot`.
+pub(super) fn export_held(slot: usize) -> Result<OwnedHandle, NetError> {
+    let end = TABLE.lock().at(slot).expect("a held end is live");
+    if end.region.is_none() {
+        return Err(NetError::NetstackNotFound);
+    }
+    let _turn = HALVES[slot].control.lock();
+    ask_export(end.connection)
+}
+
+/// The call a [`hold`] began, ended.
+pub(super) fn release(slot: usize) {
+    ended(slot);
+}
+
 /// [`EXPORT`] on a holder's connection, a stream's or a socket's, and
 /// netstack's answer to it.
 pub(super) fn ask_export(connection: BorrowedHandle<'_>) -> Result<OwnedHandle, NetError> {

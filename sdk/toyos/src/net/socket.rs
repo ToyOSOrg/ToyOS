@@ -545,6 +545,26 @@ pub fn export(handle: BorrowedHandle<'_>) -> Result<OwnedHandle, NetError> {
     })
 }
 
+/// A call through `handle` begun and left open, so its end stays until [`release`]: the slot.
+/// `None` for a handle that reaches no socket.
+pub(super) fn hold(handle: BorrowedHandle<'_>) -> Option<usize> {
+    TABLE.lock().call(handle.raw()).map(|(slot, _)| slot)
+}
+
+/// [`export`] of the end a [`hold`] keeps at `slot`.
+pub(super) fn export_held(slot: usize) -> Result<OwnedHandle, NetError> {
+    let end = TABLE.lock().at(slot).expect("a held end is live");
+    let _turn = TURNS[slot].lock();
+    stream::ask_export(end.connection)
+}
+
+/// The call a [`hold`] began, ended.
+pub(super) fn release(slot: usize) {
+    if let Some(end) = TABLE.lock().returned(slot) {
+        free(slot, end);
+    }
+}
+
 /// An exported end taken up as this process's holder of its socket, `payload` and `handles` the
 /// [`ADOPT`] netstack queued on it (`super::adopt_exported`): the end and its bell narrowed to
 /// keep no `TRANSFER`. The descriptor's handle; `None`, with everything closed, where the frame

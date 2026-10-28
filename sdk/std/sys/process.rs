@@ -23,11 +23,8 @@ pub struct Command {
     stdin: Option<Stdio>,
     stdout: Option<Stdio>,
     stderr: Option<Stdio>,
-    /// The child's descriptors past its stdio, each a handle of the command's
-    /// own, which every spawn duplicates: a copy of the caller's, or an
-    /// exported holder of its stream or socket. A copy refused is each
-    /// spawn's refusal.
-    extra_fds: Vec<(u32, io::Result<(toyos::OwnedHandle, toyos::fd::Kind)>)>,
+    /// The child's descriptors past its stdio, each lent to every spawn.
+    extra_fds: Vec<(u32, Given)>,
     /// Taken by the next spawn: moved to its child, or closed if it is refused.
     endowments: Vec<(String, toyos::OwnedHandle)>,
     provided: Vec<(String, toyos::OwnedHandle)>,
@@ -48,6 +45,16 @@ pub struct Command {
     /// instead of any file ([`Command::boot_image`]): each spawn adopts a
     /// copy of its own.
     boot_image: Option<io::Result<toyos::OwnedHandle>>,
+}
+
+/// What the command gives a child for one of its descriptors.
+enum Given {
+    /// A copy of the caller's handle, which each spawn duplicates; one
+    /// refused is each spawn's refusal.
+    Copy(io::Result<(toyos::OwnedHandle, toyos::fd::Kind)>),
+    /// The caller's stream or socket, kept, of which each spawn exports a
+    /// holder for its child alone.
+    Holder(toyos::net::Exporter),
 }
 
 /// Whom a child is placed under: [`toyos::spawn::Parent`], with a place the
@@ -220,28 +227,24 @@ impl Command {
     }
 
     /// Give the child descriptor `child_fd`, naming a copy of
-    /// `parent_handle`, or, for a stream's or a socket's, an exported holder
-    /// of its own.
+    /// `parent_handle`, or, for a stream's or a socket's, a holder each spawn
+    /// exports for its child alone.
     pub fn inherit_handle(&mut self, child_fd: u32, parent_handle: crate::os::toyos::io::BorrowedHandle<'_>) {
-        let handle = parent_handle.inner();
-        let given = if toyos::net::stream::is_stream(handle) {
-            toyos::net::stream::export(handle).map(|end| (end, toyos::fd::Kind::Exported))
-        } else if toyos::net::socket::is_socket(handle) {
-            toyos::net::socket::export(handle).map(|end| (end, toyos::fd::Kind::Exported))
-        } else {
-            return self.inherit(child_fd, copy(parent_handle).map(|h| (h, toyos::fd::Kind::Handle)));
+        let given = match toyos::net::Exporter::of(parent_handle.inner()) {
+            Some(kept) => Given::Holder(kept),
+            None => Given::Copy(copy(parent_handle).map(|h| (h, toyos::fd::Kind::Handle))),
         };
-        self.inherit(child_fd, given.map_err(|e| refused(toyos::spawn::Refused::Export(e))));
+        self.inherit(child_fd, given);
     }
 
     /// Give the child descriptor `child_fd` as a copy of the exported end
     /// `end`, which `toyos::net`'s `export` made: the child takes it up as a
     /// holder of the stream or the socket.
     pub fn inherit_exported(&mut self, child_fd: u32, end: crate::os::toyos::io::BorrowedHandle<'_>) {
-        self.inherit(child_fd, copy(end).map(|h| (h, toyos::fd::Kind::Exported)));
+        self.inherit(child_fd, Given::Copy(copy(end).map(|h| (h, toyos::fd::Kind::Exported))));
     }
 
-    fn inherit(&mut self, child_fd: u32, given: io::Result<(toyos::OwnedHandle, toyos::fd::Kind)>) {
+    fn inherit(&mut self, child_fd: u32, given: Given) {
         self.extra_fds.retain(|(fd, _)| *fd != child_fd);
         self.extra_fds.push((child_fd, given));
     }
@@ -368,12 +371,23 @@ impl Command {
                 held.push((fd, handle, kind));
             }
         }
+        // A stream's or a socket's holder is this spawn's alone: exported
+        // now, and gone with the spawn.
+        for (fd, given) in &self.extra_fds {
+            match given {
+                Given::Holder(kept) => {
+                    let end = kept.export().map_err(|e| refused(toyos::spawn::Refused::Export(e)))?;
+                    held.push((*fd, end, toyos::fd::Kind::Exported));
+                }
+                Given::Copy(Err(e)) => return Err(io::Error::new(e.kind(), e.to_string())),
+                Given::Copy(Ok(_)) => {}
+            }
+        }
         let mut fds: Vec<(u32, toyos::BorrowedHandle<'_>, toyos::fd::Kind)> =
             held.iter().map(|(fd, h, kind)| (*fd, toyos::AsHandle::as_handle(h), *kind)).collect();
         for (fd, given) in &self.extra_fds {
-            match given {
-                Ok((handle, kind)) => fds.push((*fd, toyos::AsHandle::as_handle(handle), *kind)),
-                Err(e) => return Err(io::Error::new(e.kind(), e.to_string())),
+            if let Given::Copy(Ok((handle, kind))) = given {
+                fds.push((*fd, toyos::AsHandle::as_handle(handle), *kind));
             }
         }
 

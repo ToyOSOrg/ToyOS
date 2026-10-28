@@ -63,9 +63,9 @@ pub struct Spawn<'a> {
     pub cwd: &'a str,
     /// `(child descriptor, caller's handle, its kind)`, each a number once:
     /// the child starts with these and no other descriptors. The caller keeps
-    /// its handles, which a spawn duplicates; a stream's is an end
-    /// `net::stream::export` made for the child. A launch carries 0 to 2
-    /// alone.
+    /// its handles, which a spawn duplicates; a stream's or a socket's is an
+    /// end the caller exported for this child (`net::Exporter`), which no
+    /// other child is given. A launch carries 0 to 2 alone.
     pub fds: &'a [(u32, BorrowedHandle<'a>, FdKind)],
     /// `(label, handle)` the child is endowed, each moved: by a spawn that
     /// happens to the child, and closed by one refused. One under

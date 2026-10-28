@@ -10,6 +10,44 @@ mod ends;
 pub mod socket;
 pub mod stream;
 
+/// A stream or a socket this process holds an end of, kept for as long as
+/// this lives, which makes a new holder for each other process that is to
+/// share it: what a spawn command keeps between spawns, where each child gets
+/// a holder of its own.
+pub struct Exporter {
+    slot: usize,
+    stream: bool,
+}
+
+impl Exporter {
+    /// The stream or socket `handle` reaches; `None` for a handle that
+    /// reaches neither.
+    pub fn of(handle: crate::BorrowedHandle<'_>) -> Option<Self> {
+        match stream::hold(handle) {
+            Some(slot) => Some(Self { slot, stream: true }),
+            None => socket::hold(handle).map(|slot| Self { slot, stream: false }),
+        }
+    }
+
+    /// A new holder, its end of the connection to give another process
+    /// ([`stream::export`], [`socket::export`]).
+    pub fn export(&self) -> Result<OwnedHandle, NetError> {
+        match self.stream {
+            true => stream::export_held(self.slot),
+            false => socket::export_held(self.slot),
+        }
+    }
+}
+
+impl Drop for Exporter {
+    fn drop(&mut self) {
+        match self.stream {
+            true => stream::release(self.slot),
+            false => socket::release(self.slot),
+        }
+    }
+}
+
 use crate::ipc::{IpcError, IpcHeader, IpcPayload};
 use crate::ipc_payload;
 use crate::{Connection, OwnedHandle};

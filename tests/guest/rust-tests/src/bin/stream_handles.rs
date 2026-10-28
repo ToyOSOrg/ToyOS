@@ -8,6 +8,8 @@
 //!   meanwhile finds the gate held and answers `WouldBlock`, its wants armed;
 //!   the departure frees the gate and rings it, and its write and read work.
 //! - **netstack's exit ends a blocked read in every holder** with `Aborted`.
+//! - **One `Command` spawned twice gives each child a holder of its own**:
+//!   each spawn asks netstack for one, and both children write through it.
 //! - **Within a process, every handle of a stream is one end**: handles given
 //!   out and taken back read on where the last read stopped; a bare `dup` is
 //!   refused by name with nothing written; a stream is no file; a duplicate of
@@ -87,6 +89,8 @@ fn main() {
         Some("faulter") => faulter(),
         Some("reader") => reader(),
         Some("reader-child") => reader_child(),
+        Some("respawner") => respawner(),
+        Some("writer-child") => writer_child(),
         Some("two-threads") => two_threads(),
         Some("echo") => echo(),
         Some("hold") => hold(),
@@ -99,6 +103,7 @@ fn main() {
 fn test() {
     a_holder_killed_inside_the_gate_leaves_the_parent_working();
     netstacks_exit_ends_a_blocked_read_in_every_holder();
+    one_command_gives_each_spawn_a_holder_of_its_own();
     shares_within_a_process_and_refuses_moves();
     refuses_a_foreign_handle_writing_nothing();
     refuses_a_stream_as_a_file();
@@ -142,6 +147,26 @@ fn a_holder_killed_inside_the_gate_leaves_the_parent_working() {
     let status = parent.wait().expect("wait the parent");
     assert!(status.success(), "the parent ended {status:?}");
     println!("  a holder killed inside the gate: its hang-up came after it, and the parent wrote and read");
+}
+
+/// One `Command` bound to the stream and spawned twice: each spawn asks for a
+/// holder of its own, and each child writes through it.
+fn one_command_gives_each_spawn_a_holder_of_its_own() {
+    let (mut parent, mut netstack) = run("respawner", &[]);
+    let mut out = BufReader::new(parent.stdout.take().expect("the parent's stdout"));
+    for n in 0..2 {
+        let holder = netstack.serve_export(Holder::FIRST);
+        let said = line(&mut out);
+        if said != format!("child {n} wrote") {
+            parent_failed(&mut parent, "a child of the one command", &said);
+        }
+        netstack.hung_up(holder);
+        netstack.depart(holder);
+    }
+    assert_eq!(netstack.sent(), b"cc", "what the two children published");
+    let status = parent.wait().expect("wait the parent");
+    assert!(status.success(), "the parent ended {status:?}");
+    println!("  one command spawned twice: each child had a holder of its own, and both wrote");
 }
 
 /// Two holders blocked in a read, and netstack gone.
@@ -410,8 +435,8 @@ impl Netstack {
     }
 
     /// `asker`'s export, answered with a holder of the stream made on the
-    /// private port, its `ADOPT` queued first.
-    fn serve_export(&mut self, asker: Holder) {
+    /// private port, its `ADOPT` queued first: the holder's number.
+    fn serve_export(&mut self, asker: Holder) -> Holder {
         assert_eq!(self.next_frame(asker), Some(EXPORT), "the spawn asks for a holder");
         let number = Holder::new(self.holders.len() as u16 + 1).expect("a holder's number");
         let theirs = self.exports.1.open("export").expect("a connection of the private port");
@@ -424,6 +449,7 @@ impl Netstack {
         ours.send_with(ADOPT, &adopt, handles).expect("queue the holder's adoption");
         self.holders.push(Holding { number, connection: ours, frames: FrameRx::new(), receive, send });
         self.holder(asker).connection.signal_with(EXPORTED, [theirs.into_owned()]).expect("answer the export");
+        number
     }
 
     /// Waits for `number`'s hang-up.
@@ -573,6 +599,28 @@ fn reader() -> ! {
     say(&format!("parent: {ended}"));
     let status = child.wait().expect("wait the reader's child");
     std::process::exit(if status.success() { 0 } else { 1 })
+}
+
+/// Spawns one command, bound to the stream, twice.
+fn respawner() -> ! {
+    let stream = connect();
+    let mut command = Command::new(SELF_PATH);
+    command.arg("writer-child").inherit_handle(HELD_FD, std::os::toyos::io::AsHandle::as_handle(&stream)).stdout(Stdio::null());
+    for n in 0..2 {
+        let status = command.spawn().expect("spawn a child of the one command").wait().expect("wait it");
+        say(&match status.success() {
+            true => format!("child {n} wrote"),
+            false => format!("child {n} ended {status:?}"),
+        });
+    }
+    std::process::exit(0)
+}
+
+/// Adopts its holder and writes one byte through it.
+fn writer_child() -> ! {
+    // SAFETY: the descriptor its parent gave it, a holder of the stream.
+    let mut stream = unsafe { TcpStream::from_raw_fd(HELD_FD as i32) };
+    std::process::exit(if stream.write_all(b"c").is_ok() { 0 } else { 1 })
 }
 
 fn reader_child() -> ! {

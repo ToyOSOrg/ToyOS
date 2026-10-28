@@ -104,6 +104,14 @@ impl<E: Copy, const N: usize> Ends<E, N> {
         Some((slot, *end))
     }
 
+    /// The live end at `slot`, which a counted call keeps.
+    pub(super) fn at(&self, slot: usize) -> Option<E> {
+        match self.slots[slot] {
+            Slot::Live { end, .. } => Some(end),
+            Slot::Free | Slot::Making => None,
+        }
+    }
+
     /// A call ends: the end, where it was its last use.
     pub(super) fn returned(&mut self, slot: usize) -> Option<E> {
         let Slot::Live { calls, .. } = &mut self.slots[slot] else { unreachable!("a call counted in an end that is not live") };

@@ -14,9 +14,11 @@ pub fn tty_piped() -> crate::process::Stdio {
 pub trait CommandExt {
     /// Give the child descriptor `child_fd`, naming the kernel handle
     /// `parent_handle`, which this process keeps: the command takes a
-    /// duplicate of it now, or, for a stream's, a listener's or a datagram
-    /// socket's, a holder of its own for the child. One of 0 to 2 replaces
-    /// what the command's stdio would have given; a refusal is the spawn's.
+    /// duplicate of it now. For a stream's, a listener's or a datagram
+    /// socket's, the command keeps the stream or socket instead, and each
+    /// spawn exports a holder of it for its child alone. One of 0 to 2
+    /// replaces what the command's stdio would have given; a refusal is the
+    /// spawn's.
     #[stable(feature = "toyos_ext", since = "1.0.0")]
     fn inherit_handle(&mut self, child_fd: u32, parent_handle: crate::os::toyos::io::BorrowedHandle<'_>) -> &mut Self;
 
