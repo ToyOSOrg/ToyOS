@@ -31,15 +31,16 @@ Evidence: `ToyOSOrg/evidence` branch `pr-1065`, `r3/`.
 The paired session at `aeba59fb0` read 62, 63, 65 and 64 MB/s against
 Linux's 113, 110, 111 and 112 (p = 0.029): [evidence `aeba59fb0/`](https://github.com/ToyOSOrg/evidence/tree/37288c84c175a647145fe83fd51d945806cdb4ff/r1/aeba59fb0).
 
-**Refuted: the transmit ring's depth.** At 16 descriptors the ring holds
+**Not the limit on the 2026-10-27 and -28 heads: the transmit ring's
+depth.** At 16 descriptors the ring holds
 15 frames, 184 µs of a gigabit wire, and 64 MB/s is exactly 15 segments
 every 339 µs, so a ring drained before the pass that refills it was the
 candidate. Pull request #1069 read it at 256 descriptors on 2026-10-27,
 four ToyOS runs interleaved with four Linux ones: ToyOS 36, 36, 39 and
 44 MB/s, Linux 112 in all four. The rounds inside each ToyOS run ranged from
-27–35 to 46–67 MB/s, and downloads stayed at parity (110–113). The ring was
-not the limit, and a sender that moves either half or all of what it moved
-before, round by round, is not limited by any fixed depth
+27–35 to 46–67 MB/s, and downloads stayed at parity (110–113). On that
+head the deeper ring moved nothing; whether depth limits a sender whose
+window grows as it should is not read by it
 ([evidence `af239c8bb/`](https://github.com/ToyOSOrg/evidence/tree/37288c84c175a647145fe83fd51d945806cdb4ff/r1/af239c8bb)).
 
 **Ruled out: loss.** Pull request #1069's counters read on 2026-10-28, four
@@ -68,12 +69,39 @@ probe, and nearly every one came back D-SACKed. Linux ended its rounds at a
 mean cwnd of 1,706–2,208 segments and a round trip of 9.7–11.7 ms: its
 window is never the limit, and its own queue fills the path.
 
-So at that head neither loss, the peer, the sender nor cwnd held most of a
-ToyOS row. What is left is the card: 100,053–106,424 full-ring waits a row, about
-6,700 a second. The 256-descriptor ring read no better on 2026-10-27 and
--28 because slow start then held every row at cwnd; with that fixed, the
-ring's depth is again the candidate, which a reading of both rings at the
-corrected head settles. The transmit setup's own lead stays open in
+**Two hypotheses, which the `d184223b0` session tested**:
+
+- The card's refill limits a sender whose window no longer does: at
+  `afe0c7dac` the card was full 100,053–106,424 times a row, though that
+  head's cwnd times are not creditable. If so, the 256-descriptor ring
+  reads faster than 16 at `d184223b0` and its full-ring waits fall.
+- The deeper ring read no better on 2026-10-27 and -28 because slow start,
+  growing once per pass, held those rows at cwnd. Nothing measured that:
+  `af239c8bb` had no counters, and `132d5ef75` charged Nagle holds to
+  congestion.
+
+**Read at `d184223b0`, 2026-10-29**
+([evidence `d184223b0/`](https://github.com/ToyOSOrg/evidence/tree/bc4188c1070d283e38f7a96019437b99697fe4c5/r4/d184223b0)), four runs on 16 descriptors and two on 256,
+against Linux's 112–113:
+
+- The per-ACK fix's gain is measured. At the head that also cures cwnd
+  growing while the card held the sender, ToyOS read 58, 61, 59 and
+  57 MB/s on 16 descriptors, where `132d5ef75` read 31–36.
+- The ring's depth is not the limit. 256 descriptors read 60 and 57 MB/s.
+  The card was still full 77,036–79,567 times a row (100,246–106,959 on 16).
+  cwnd held the sender 4.6–4.9 s of a row (2.1–2.4 s on 16), at a mean of
+  488–506 KB and 8.0 ms (310–354 KB and 4.1–5.6 ms on 16). The deeper ring
+  added its queue to the round trip, and the window reached no further.
+- No loss: one segment resent, D-SACKed, across the six runs, and no
+  probe that ended a slow start.
+
+So neither held as stated: the per-ACK fix is the gain, and with it the
+deeper ring still reads no better. What remains open
+is how fast the card drains what it is given: even at 256 descriptors it
+is full about 5,000 times a second. That lead is the I219's transmit
+configuration (interrupt moderation, descriptor write-back, how often
+netstack learns of completions) and is taken up apart from this record's
+pull request. The transmit setup's own lead stays open in
 `issues/the-intel-driver-writes-txdctl-and-tidv-against-the-82574-datasheets-newer-revision.md`.
 
 The clock does not separate the two systems. Each upload row's own

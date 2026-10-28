@@ -501,6 +501,12 @@ impl Sync {
     }
 
     /// RFC 6675's SetPipe, HighRxt at SND.UNA outside SACK recovery.
+    /// What cwnd is measured against: RFC 6675's pipe while SACK reports duplicates, the flight
+    /// otherwise.
+    fn in_flight(&self) -> u32 {
+        if self.sack_ok && self.dupacks > 0 { self.pipe() } else { self.tx.flight() }
+    }
+
     pub fn pipe(&self) -> u32 {
         self.tx.pipe(self.sack_marks().map_or(self.tx.una, |(high_rxt, _)| high_rxt), self.smss())
     }
@@ -1273,7 +1279,7 @@ impl Sync {
             self.sws_fired = false;
             // Until the next stop says otherwise: an opportunity that ends on the caller's credit
             // ends here, and cwnd limited it only if this left it full.
-            let in_flight = if self.sack_ok && self.dupacks > 0 { self.pipe() } else { self.tx.flight() };
+            let in_flight = self.in_flight();
             self.cc.limited = self.cwnd().saturating_sub(in_flight) < self.smss();
         }
         let data_end = start.add(len);
@@ -1434,7 +1440,7 @@ impl Sync {
         let blocks = self.blocks();
         let mss = signed(self.room(&blocks));
         let w_rcv = self.tx.usable();
-        let in_flight = if self.sack_ok && self.dupacks > 0 { self.pipe() } else { self.tx.flight() };
+        let in_flight = self.in_flight();
         let cwnd = signed(self.cwnd());
         let mut w_cc = cwnd.saturating_sub(signed(in_flight));
         let limited_transmit = self.recovery == Recovery::None && if self.sack_ok { self.dupacks > 0 } else { self.lt_budget > 0 };
