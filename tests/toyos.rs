@@ -2714,7 +2714,7 @@ fn osbench_capability_groups_exit_0() -> Result<(), String> {
     let mut console = format!("{}\n", qemu.boot_log());
     let last = format!("===TEST_END {} ", JOBS[JOBS.len() - 1]);
     await_guest(&mut qemu, &mut console, "osbench's two groups to end", |said| said.contains(&last))?;
-    let said = serial::Serial::named("the osbench boot", console);
+    let said = serial::Serial::named("osbench boot", console);
     for job in JOBS {
         said.must_say(&format!("===TEST_END {job} exit=0==="))?;
     }
