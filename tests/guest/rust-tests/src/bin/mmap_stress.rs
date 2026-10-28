@@ -3,7 +3,9 @@
 //! range, across two, or a hole — and a fixed reserve replaces whatever the
 //! pages it names held; `vm_protect` commits a reservation and changes
 //! protection in place, contents kept; `vm_discard` keeps the pages and reads
-//! back zeros; `vm_decommit` makes them a reservation again. A page
+//! back zeros; `vm_decommit` makes them a reservation again; `vm_remap`
+//! grows, moves and shrinks committed memory, contents kept, and loses no
+//! frame or promise when it moves. A page
 //! populated with its neighbours is populated as its own range says. The
 //! ranges one space holds are bounded, and a commitment past what memory
 //! holds is refused when it is asked for.
@@ -39,7 +41,7 @@ fn set(p: *mut u8, page: usize, value: u8) {
 }
 
 /// The pages a child makes and touches, none of which allows the touch.
-const FAULTING: [&str; 4] = ["reserved", "protected-none", "decommitted", "read-only-beside-a-run"];
+const FAULTING: [&str; 5] = ["reserved", "protected-none", "decommitted", "read-only-beside-a-run", "moved-from"];
 
 fn main() {
     if let Some(case) = std::env::args().nth(1) {
@@ -49,10 +51,12 @@ fn main() {
     protection();
     discard_and_decommit();
     ranges_are_bounded();
+    resize();
+    remap_keeps_memory();
     for case in FAULTING {
         faults(case);
     }
-    println!("vm_reserve, vm_protect, vm_discard, vm_decommit and vm_release do what each says");
+    println!("vm_reserve, vm_protect, vm_discard, vm_decommit, vm_remap and vm_release do what each says");
 }
 
 fn placement_and_release() {
@@ -208,6 +212,107 @@ fn ranges_are_bounded() {
     println!("  PASS: a space holds at most {MAX_RANGES} ranges, and gives each back at the bound");
 }
 
+fn remap(p: *mut u8, old: usize, new: usize, may_move: bool) -> Result<*mut u8, SyscallError> {
+    // SAFETY: every range remapped here is this test's own, reached through
+    // raw pointers only, and through the answer alone once it moves.
+    unsafe { syscall::vm_remap(p, old * PAGE, new * PAGE, may_move) }
+}
+
+/// `pages` committed pages followed by a read-only one of the same
+/// reservation, its own range, so the first `pages` cannot grow in place.
+fn blocked(pages: usize) -> *mut u8 {
+    let p = reserve((pages + 1) * PAGE, VmProt::ReadWrite);
+    unsafe { syscall::vm_protect(p.add(pages * PAGE), PAGE, VmProt::Read) }.expect("protect the blocking page");
+    p
+}
+
+fn resize() {
+    // Grown into the free pages after it: the same address, the bytes kept,
+    // and a tail of zeros that takes writes.
+    let p = reserve(8 * PAGE, VmProt::ReadWrite);
+    unsafe { syscall::vm_release(p.add(4 * PAGE), 4 * PAGE) }.expect("free the last four pages");
+    (0..4).for_each(|page| set(p, page, 0x50 + page as u8));
+    assert_eq!(remap(p, 4, 8, false), Ok(p), "growth into free pages");
+    assert_eq!((0..8).map(|page| byte(p, page)).collect::<Vec<_>>(), [0x50, 0x51, 0x52, 0x53, 0, 0, 0, 0], "grown in place");
+    set(p, 7, 0x57);
+    assert_eq!(byte(p, 7), 0x57, "the grown tail is not writable");
+
+    // Shrunk: the tail goes and the rest stays.
+    assert_eq!(remap(p, 8, 2, false), Ok(p), "a shrink");
+    assert_eq!((byte(p, 0), byte(p, 1)), (0x50, 0x51), "a shrink took a kept page's byte");
+    assert_eq!(unsafe { syscall::vm_protect(p, 3 * PAGE, VmProt::ReadWrite) }, Err(SyscallError::BadAddress), "a shrink kept its tail");
+    unsafe { syscall::vm_release(p, 2 * PAGE) }.expect("release");
+
+    // A neighbour in the way refuses a growth that may not move, and moves
+    // one that may: every page's byte at the new place, nothing at the old,
+    // the neighbour untouched. 768 pages cross tables of leaves and batches.
+    const PAGES: usize = 768;
+    let p = blocked(PAGES);
+    (0..PAGES).step_by(3).for_each(|page| set(p, page, page as u8 | 1));
+    assert_eq!(remap(p, PAGES, 2 * PAGES, false), Err(SyscallError::ResourceExhausted), "growth into a held page");
+    assert_eq!(byte(p, 3), 3 | 1, "a refused growth touched the range");
+    let q = remap(p, PAGES, 2 * PAGES, true).expect("a growth that may move");
+    assert_ne!(q, p, "growth past a held page stayed in place");
+    for page in 0..2 * PAGES {
+        let want = if page < PAGES && page % 3 == 0 { page as u8 | 1 } else { 0 };
+        assert_eq!(byte(q, page), want, "page {page} of the moved range");
+    }
+    set(q, 1, 0x61);
+    assert_eq!(byte(q, 1), 0x61, "a moved page is not writable");
+    assert_eq!(unsafe { syscall::vm_protect(p, PAGE, VmProt::ReadWrite) }, Err(SyscallError::BadAddress), "the old place is still held");
+    assert_eq!(unsafe { syscall::vm_protect(p.add(PAGES * PAGE), PAGE, VmProt::Read) }, Ok(()), "the neighbour went");
+    unsafe { syscall::vm_release(p.add(PAGES * PAGE), PAGE) }.expect("release the neighbour");
+    unsafe { syscall::vm_release(q, 2 * PAGES * PAGE) }.expect("release the moved range");
+
+    // What remap refuses: any memory but committed private pages of one
+    // protection, a page no range holds, and a length of nothing.
+    let none = reserve(2 * PAGE, VmProt::None);
+    assert_eq!(remap(none, 2, 4, true), Err(SyscallError::InvalidArgument), "a reservation");
+    unsafe { syscall::vm_release(none, 2 * PAGE) }.expect("release");
+    let mixed = blocked(1);
+    assert_eq!(remap(mixed, 2, 4, true), Err(SyscallError::InvalidArgument), "two protections");
+    assert_eq!(remap(mixed, 1, 0, true), Err(SyscallError::InvalidArgument), "no bytes");
+    assert_eq!(remap(unsafe { mixed.add(1) }, 1, 2, true), Err(SyscallError::InvalidArgument), "off a page");
+    unsafe { syscall::vm_release(mixed, 2 * PAGE) }.expect("release");
+    assert_eq!(remap(mixed, 1, 2, true), Err(SyscallError::BadAddress), "a page no range holds");
+    let clock = toyos_abi::clock::CLOCK_PAGE as *mut u8;
+    assert_eq!(remap(clock, 1, 2, true), Err(SyscallError::InvalidArgument), "a shared object's page");
+    // `page` asserts the clock page's magic.
+    let _ = toyos_abi::clock::page();
+    println!("  PASS: remap grows in place or moves the pages, shrinks in place, and refuses all but committed private memory");
+}
+
+/// Bytes the machine has in use or promised.
+fn used() -> u64 {
+    let mut header = [0u8; syscall::SYSINFO_HEADER_SIZE];
+    assert_eq!(toyos::system::sysinfo(&mut header), header.len(), "the sysinfo header");
+    syscall::SysinfoHeader::decode(&header).memory_used
+}
+
+/// A written 16 MiB moved 32 times, each time grown by the page that becomes
+/// the next move's neighbour, gives every frame and promise back: the
+/// machine's memory in use after is what it was before, give or take what the
+/// rest of it did meanwhile, where one move that kept its range's promise
+/// would cost 16 MiB.
+fn remap_keeps_memory() {
+    const PAGES: usize = 4096;
+    let before = used();
+    let mut p = blocked(PAGES);
+    (0..PAGES).for_each(|page| set(p, page, page as u8));
+    for round in 0..32 {
+        let q = remap(p, PAGES, PAGES + 1, true).unwrap_or_else(|e| panic!("move {round}: {e:?}"));
+        assert_ne!(q, p, "move {round} stayed in place");
+        unsafe { syscall::vm_release(p.add(PAGES * PAGE), PAGE) }.expect("release the old neighbour");
+        unsafe { syscall::vm_protect(q.add(PAGES * PAGE), PAGE, VmProt::Read) }.expect("make the grown page the neighbour");
+        p = q;
+    }
+    assert!((0..PAGES).all(|page| byte(p, page) == page as u8), "a page lost its byte over the moves");
+    unsafe { syscall::vm_release(p, (PAGES + 1) * PAGE) }.expect("release the moved range");
+    let after = used();
+    assert!(after < before + 8 * (1 << 20), "moves kept memory: {before} bytes in use before, {after} after");
+    println!("  PASS: a range moved 32 times gives back every frame and promise");
+}
+
 /// A child that makes the page `case` names and touches it must die of it.
 fn faults(case: &str) {
     let out = Command::new("/system/bin/test_rs_mmap_stress")
@@ -240,6 +345,13 @@ fn touch(case: &str) {
             set(run, 8, 1);
             println!("SURVIVED, wrote a read-only page");
             return;
+        }
+        "moved-from" => {
+            // Written, then moved past its neighbour: the old place is gone.
+            let page = blocked(1);
+            set(page, 0, 0x77);
+            assert_ne!(remap(page, 1, 2, true).expect("move"), page, "a growth past a held page stayed");
+            page
         }
         "protected-none" | "decommitted" => {
             let page = reserve(PAGE, VmProt::ReadWrite);

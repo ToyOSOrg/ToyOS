@@ -51,7 +51,7 @@ use super::proc::{
     sys_account_info, sys_job_create, sys_job_floor, sys_job_own, sys_process_quit, sys_process_wait, sys_rt_enter, sys_spawn, sys_thread_exit, sys_thread_join, sys_thread_spawn,
 };
 use super::vm::{
-    shared_image, sys_dlopen, sys_dlsym, sys_query_modules, sys_tls_alloc_block, sys_vm_decommit, sys_vm_discard,
+    shared_image, sys_dlopen, sys_dlsym, sys_query_modules, sys_tls_alloc_block, sys_vm_decommit, sys_vm_discard, sys_vm_remap,
     sys_vm_protect, sys_vm_release, sys_vm_reserve,
 };
 
@@ -364,6 +364,7 @@ pub(crate) fn syscall_dispatch(num: u64, a1: u64, a2: u64, a3: u64, a4: u64) -> 
         SYS_VM_PROTECT => sys_vm_protect(a1, a2, a3),
         SYS_VM_DISCARD => sys_vm_discard(a1, a2),
         SYS_VM_DECOMMIT => sys_vm_decommit(a1, a2),
+        SYS_VM_REMAP => sys_vm_remap(a1, a2, a3, a4),
         SYS_PREAD => {
             let Some(mut buf) = ctx.user_bytes_mut(UserAddr::new(a2), a3) else { return bad_addr };
             with_object(RawHandle(a1 as u32), Rights::READ, |o| ops::pread(o, a4, &mut buf))

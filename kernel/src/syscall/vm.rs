@@ -1,5 +1,5 @@
-//! The caller's own address space: `vm_*` reserve, commit, protect, discard
-//! and take away private memory, `dlopen` maps a library image, `SYS_TLS_ALLOC_BLOCK`
+//! The caller's own address space: `vm_*` reserve, commit, protect, discard,
+//! resize and take away private memory, `dlopen` maps a library image, `SYS_TLS_ALLOC_BLOCK`
 //! maps a thread's per-module TLS block, `SYS_QUERY_MODULES` reports what is
 //! loaded. Exhausting address space is an error return, never an `.expect`.
 //!
@@ -87,6 +87,21 @@ pub(super) fn sys_vm_discard(addr: u64, len: u64) -> u64 {
 
 pub(super) fn sys_vm_decommit(addr: u64, len: u64) -> u64 {
     answer(range(addr, len).and_then(|(start, len)| process::current_address_space().lock().decommit(start, len)))
+}
+
+/// Resize committed private memory in place, or move it when `may_move` is 1.
+pub(super) fn sys_vm_remap(addr: u64, old: u64, new: u64, may_move: u64) -> u64 {
+    let remapped = (|| {
+        let may_move = match may_move {
+            0 => false,
+            1 => true,
+            _ => return Err(SyscallError::InvalidArgument),
+        };
+        let (start, old) = range(addr, old)?;
+        let new = whole_pages(new).ok_or(SyscallError::InvalidArgument)?;
+        process::current_address_space().lock().remap(start, old, new, may_move)
+    })();
+    remapped.map_or_else(SyscallError::to_u64, UserAddr::raw)
 }
 
 /// The first `len` bytes of the shared memory object `handle` names, as a
