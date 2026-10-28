@@ -214,6 +214,7 @@ impl<F> Bytes<F> {
     /// handed each run of them as its frame, where they go in it, and where
     /// they start among the `len`. They are held once [`Self::commit`] counts
     /// them.
+    #[inline(always)]
     pub fn place(&mut self, at: usize, len: usize, mut copy: impl FnMut(&mut F, Range<usize>, usize)) {
         let end = self.head + self.len + at + len;
         assert!(end <= self.frames.len() * FRAME, "pipe: bytes placed past the frames it was given");
@@ -235,6 +236,7 @@ impl<F> Bytes<F> {
 
     /// The `len` held bytes `at` past the oldest, handed to `copy` as
     /// [`Self::place`] hands them out; [`Self::consume`] lets them go.
+    #[inline(always)]
     pub fn peek(&self, at: usize, len: usize, mut copy: impl FnMut(&F, Range<usize>, usize)) {
         assert!(at + len <= self.len, "pipe: {len} bytes at {at} of {} held", self.len);
         let (mut done, mut pos) = (0, self.head + at);

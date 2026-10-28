@@ -145,6 +145,7 @@ impl Gather {
     /// # Safety
     /// `from` is readable and `to` writable for `len` bytes, and stay so
     /// until the next [`Self::flush`]; the two never overlap.
+    #[inline(always)]
     unsafe fn add(&mut self, from: *const u8, to: *mut u8, len: usize) {
         if self.len > 0 && self.from.wrapping_add(self.len) == from && self.to.wrapping_add(self.len) == to {
             self.len += len;
@@ -159,6 +160,7 @@ impl Gather {
     ///
     /// # Safety
     /// As [`Self::add`] for every run gathered.
+    #[inline(always)]
     unsafe fn flush(&mut self) {
         if self.len > 0 {
             // SAFETY: the runs gathered are contiguous on both sides and
@@ -171,10 +173,19 @@ impl Gather {
 
 /// `within` of a frame a pipe holds, which no process maps and only that
 /// pipe's lock reaches.
+#[inline(always)]
 fn frame_bytes(frame: &u64, within: Range<usize>) -> *mut u8 {
-    assert!(within.end <= kernel::pipe::FRAME, "pipe: bytes {within:?} past a frame");
+    if within.end > kernel::pipe::FRAME {
+        past_a_frame(within);
+    }
     // SAFETY: inside the frame, which the direct map covers.
     unsafe { DirectMap::from_phys(*frame).as_mut_ptr::<u8>().add(within.start) }
+}
+
+#[cold]
+#[inline(never)]
+fn past_a_frame(within: Range<usize>) -> ! {
+    panic!("pipe: bytes {within:?} past a frame")
 }
 
 struct Pipe {
