@@ -376,7 +376,7 @@ fn whole_blocks(len: usize) -> u32 {
     blocks
 }
 
-fn connect(names: &Namespace, service: &str) -> Result<Connection, Error> {
+pub(crate) fn connect(names: &Namespace, service: &str) -> Result<Connection, Error> {
     names.open(service).map_err(|e| match e {
         SyscallError::NotFound => Error::NotHeld,
         e => Error::Kernel(e),
@@ -385,7 +385,7 @@ fn connect(names: &Namespace, service: &str) -> Result<Connection, Error> {
 
 /// The header of the service's answer on `conn`, once it is there, within
 /// [`wire::ANSWER_BOUND_NS`].
-fn answer(conn: &Connection) -> Result<toyos::ipc::IpcHeader, Error> {
+pub(crate) fn answer(conn: &Connection) -> Result<toyos::ipc::IpcHeader, Error> {
     let poller = Poller::new(1);
     poller.watch(conn, READABLE, 0);
     let mut ready = false;

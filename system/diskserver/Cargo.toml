@@ -23,6 +23,8 @@ toyos-blockring = { path = "../../lib/blockring" }
 toyos-blockserve = { path = "../../lib/blockserve" }
 # The device a served partition is.
 toyos-blockdev = { path = "../../lib/blockdev" }
+# The `--active` partitions, named as GUID text.
+toyos-gpt = { path = "../../lib/gpt" }
 
 [package.metadata.toyos.host]
 exempt.owns = "the block service between ToyOS disk drivers and their clients"

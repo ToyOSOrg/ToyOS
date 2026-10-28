@@ -771,6 +771,7 @@ dependencies = [
  "toyos-blockdev",
  "toyos-blockring",
  "toyos-blockserve",
+ "toyos-gpt",
 ]
 
 [[package]]
