@@ -27,7 +27,7 @@ The slow row happens on `544f9cc3c`, so the behaviour predates #1074. Whether
 #1074 raises the refusal rate is not established: 0 of 8 against 3 of 10,
 one-sided Fisher exact p = 0.15. The readbacks are PR #1074's sessions 1–5.
 
-**What could cause it.** `place`'s rule (`kernel/src/sched/driver.rs`) takes
+**What could cause it.** `placement`'s rule (`kernel/src/sched/driver.rs`) takes
 the CPUs that are answering, then the least `load`, then a CPU that is not
 sleeping, then busy siblings, from a global rotating start. So:
 
