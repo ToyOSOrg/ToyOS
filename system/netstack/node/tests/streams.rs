@@ -1131,3 +1131,33 @@ fn the_last_holder_leaving_is_the_streams_close() {
     assert!(net.far.fin, "the last holder left");
     assert_eq!((first.dropped(), net.node.streams()), (true, 0));
 }
+
+// ---- the rings grow under load ----
+
+// A client that writes more than its send ring holds doubles the ring at each write the room
+// cannot take whole, to its place, and netstack reads the grown ring by the size the client
+// stored: the peer's stream is the client's, byte for byte.
+#[test]
+fn an_upload_larger_than_its_send_ring_grows_it_to_its_place() {
+    use toyos::net::stream::{SEND_BYTES, SEND_RING};
+    const PERIOD: usize = 251;
+    let byte = |i: usize| (i % PERIOD) as u8;
+    const WRITE: usize = 2 * SEND_BYTES as usize;
+    let pattern: Vec<u8> = (0..WRITE + PERIOD).map(byte).collect();
+    let (mut net, _, client) = established();
+    let mut offset = 0;
+    for _ in 0..1_000 {
+        if client.region.committed(SEND_RING) == SEND_BYTES as usize {
+            break;
+        }
+        match client.write(&pattern[offset % PERIOD..][..WRITE]) {
+            Ok(n) => offset += n,
+            Err(Refused::WouldBlock) => {}
+            Err(other) => panic!("{other:?}"),
+        }
+        net.bridge();
+    }
+    assert_eq!(client.region.committed(SEND_RING), SEND_BYTES as usize, "the send ring after {offset} bytes");
+    let heard = &net.far.received;
+    assert!(!heard.is_empty() && heard.iter().enumerate().all(|(i, &b)| b == byte(i)), "the peer's stream is the client's");
+}
