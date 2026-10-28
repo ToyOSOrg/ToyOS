@@ -514,6 +514,11 @@ const MACHINE_TESTS: &[&str] = &[
     // carries the panic; the order of the step and the panic, and the size
     // the check read, are what it holds.
     "a_stepped_tsc_panics",
+    // Its counterpart: the HPET an actuator stalled while the TSC and the PM
+    // timer count on is left out, and the boot goes on. q35 on
+    // `Profile::Metal`, whose PM timer is at 0x608; no bench's HPET stalls on
+    // demand.
+    "a_stalled_hpet_is_left_out",
     // A press of the fixed power button reaches the `acpi` claim's holder as
     // one SCI, its line masked until the holder serves it: the kernel's SCI
     // and its mask have no host build, QEMU raises the event on demand, and
@@ -4604,6 +4609,7 @@ fn run_machine_test(name: &str, test_config: &Path) -> Result<(), String> {
         "nested_nmi_is_loud" => faults::nested_nmi_is_loud(test_config),
         "kernel_wx_leaf_is_refused" => faults::kernel_wx_leaf_is_refused(test_config, qemu::Profile::Metal),
         "a_stepped_tsc_panics" => faults::a_stepped_tsc_panics(test_config),
+        "a_stalled_hpet_is_left_out" => faults::a_stalled_hpet_is_left_out(test_config),
         "acpi_press_is_one_sci" => acpi_press_is_one_sci(),
         "osbench_capability_groups_exit_0" => osbench_capability_groups_exit_0(),
         "acpi_mediated_access" => acpi_mediated_access(2),

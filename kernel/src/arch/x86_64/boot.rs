@@ -110,7 +110,7 @@ pub fn interrupts(rsdp_addr: u64) -> Platform {
 /// The clock: the TSC, held to the HPET, and the CMOS wall clock.
 pub fn clock(args: &KernelArgs) {
     let hpet_base = acpi::find_hpet_base(args.rsdp_addr).expect("ACPI: HPET not found");
-    super::clocksource::start(hpet_base);
+    super::clocksource::start(hpet_base, acpi::pm_timer(args.rsdp_addr));
     let century_reg = match acpi::rtc_century_register(args.rsdp_addr) {
         Ok(reg) => reg,
         Err(e) => {
