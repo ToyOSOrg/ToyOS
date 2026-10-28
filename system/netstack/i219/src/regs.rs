@@ -109,10 +109,26 @@ pub const TDLEN: usize = 0x03808;
 pub const TDH: usize = 0x03810;
 pub const TDT: usize = 0x03818;
 /// Transmit Interrupt Delay Value (`0x03820`), Transmit Descriptor Control
-/// (§10.2.6.10, `0x03828`) and the absolute delay (`0x0382C`).
+/// (§10.2.6.11, `0x03828`) and the absolute delay (`0x0382C`).
 pub const TIDV: usize = 0x03820;
 pub const TXDCTL: usize = 0x03828;
 pub const TADV: usize = 0x0382C;
+/// Transmit Arbitration Count, queue 0 (§10.2.6.9).
+pub const TARC0: usize = 0x03840;
+/// Receive Checksum Control (§10.2.5.15), Receive Filter Control (§10.2.5.16)
+/// and Multiple Receive Queues Command (§10.2.5.25).
+pub const RXCSUM: usize = 0x05000;
+pub const RFCTL: usize = 0x05008;
+pub const MRQC: usize = 0x05818;
+/// Receive Address entries 0 to 15, Low and High, eight bytes apart
+/// (§10.2.5.22, §10.2.5.23: "n [...] equals to 0,1,…15").
+pub const RECEIVE_ADDRESSES: usize = 16;
+pub const fn ral(n: usize) -> usize {
+    RAL0 + 8 * n
+}
+pub const fn rah(n: usize) -> usize {
+    RAH0 + 8 * n
+}
 /// Extended Configuration Control (§10.2.2.15, `0x00F00`), which carries
 /// §4.5.2's arbitration for the MDIO interface — and which §8.2.4 gives one
 /// writable bit and no more.
@@ -168,6 +184,8 @@ const _: () = {
     assert!(MTA + MTA_DWORDS * 4 <= REGISTER_BYTES);
     assert!(RAH0 < REGISTER_BYTES);
     assert!(TADV < REGISTER_BYTES);
+    assert!(TARC0 < REGISTER_BYTES && MRQC < REGISTER_BYTES);
+    assert!(rah(RECEIVE_ADDRESSES - 1) < REGISTER_BYTES);
     assert!(EXTCNF_CTRL < REGISTER_BYTES);
     assert!(CTRL_EXT < REGISTER_BYTES);
     assert!(PHY_CTRL < REGISTER_BYTES);
@@ -465,20 +483,47 @@ pub mod tctl {
     /// Collision Distance (bits 21:12). §4.6.6: full duplex is `63`.
     pub const COLD_SHIFT: u32 = 12;
     pub const COLD_FULL_DUPLEX: u32 = 0x3F << COLD_SHIFT;
+    /// Multiple Request Support (bit 28), initially `1b`: "When set to 0b, the
+    /// 82574 submits only one request at a time, When set to 1b, the 82574
+    /// might submit up to four concurrent requests" for transmit data (§7.2.7).
+    pub const MULR: u32 = 1 << 28;
+    /// Read Request Threshold (bits 30:29), initially `01b`: when the
+    /// intermediate buffer sends its read command to the packet buffer.
+    pub const RRTHRESH: u32 = 0b11 << 29;
+    pub const RRTHRESH_INITIAL: u32 = 0b01 << 29;
 }
 
 /// The inter-packet gap §4.6.6 names: `IPGT = 8`, `IPGR1 = 2`, `IPGR2 = 10`,
 /// "the minimum legal IPG".
 pub const TIPG_DEFAULT: u32 = 8 | (2 << 10) | (10 << 20);
 
-/// Transmit Descriptor Control bits (§10.2.6.10).
+/// Transmit Descriptor Control bits (§10.2.6.11).
 pub mod txdctl {
     pub const WTHRESH_SHIFT: u32 = 16;
     pub const GRAN: u32 = 1 << 24;
-    /// §4.6.6's suggested write-back policy: one descriptor's worth, counted in
-    /// descriptors. Anything larger holds a completion back until the ring
-    /// fills.
-    pub const SUGGESTED: u32 = GRAN | (1 << WTHRESH_SHIFT);
+    /// Bit 22 (§10.2.6.11): "Reserved. Must be set to 1b for proper
+    /// operation", though its initial value is 0x0.
+    pub const MUST_BE_SET: u32 = 1 << 22;
+    /// §4.6.6's suggested write-back policy, one descriptor's worth counted in
+    /// descriptors, and bit 22. A larger `WTHRESH` holds a completion back
+    /// until the ring fills.
+    pub const SUGGESTED: u32 = GRAN | (1 << WTHRESH_SHIFT) | MUST_BE_SET;
+}
+
+/// Receive Checksum Control bits (§10.2.5.15).
+pub mod rxcsum {
+    /// IP and TCP/UDP Checksum Offload Enable (bits 8 and 9), each 1b out of
+    /// reset.
+    pub const IPOFLD: u32 = 1 << 8;
+    pub const TUOFLD: u32 = 1 << 9;
+}
+
+/// Transmit Arbitration Count bits (§10.2.6.9).
+pub mod tarc {
+    /// Descriptor Enable (bit 10), initially 1b: "The Enable bit of transmit
+    /// queue 0 should always be set." The register's other fields on the PCH's
+    /// MAC are unpublished, so this bit is set alone.
+    pub const ENABLE: u32 = 1 << 10;
 }
 
 /// [`super::LANPHYPC_TIMING`]'s one field this driver sets.
@@ -532,8 +577,9 @@ pub mod rx_desc {
         pub const RXE: u8 = 1 << 7;
         /// The ones that say the frame's own bytes are wrong. The two checksum
         /// bits are left out: §7.1.3.4 says "if receive checksum offloading is
-        /// disabled [...] the IPE and TCPE bits are 0b", and this driver asks
-        /// for none.
+        /// disabled [...] the IPE and TCPE bits are 0b", and the bring-up
+        /// writes `RXCSUM` 0, where §10.2.5.15 has both offloads set out of
+        /// reset.
         pub const FRAME_IS_BAD: u8 = CE | SE | SEQ | CXE | RXE;
     }
 }

@@ -4,11 +4,11 @@
 //! else holds it. A read takes the reason asked, one byte
 //! (`toyos_abi::quit::Reason::to_byte`), and blocks while none is; a read or
 //! an armed readable watch makes the process a listener, which a quit asks
-//! rather than kills (`kernel::proclife::quit`).
+//! rather than kills (`toyos_proclife::quit`).
 
 use alloc::sync::Arc;
 
-use kernel::proclife::quit::{Notice, Reason};
+use toyos_proclife::quit::{Notice, Reason};
 use toyos_abi::handle::Rights;
 
 use crate::mm::charge::{self, Exhausted};

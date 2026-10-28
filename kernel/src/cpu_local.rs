@@ -17,6 +17,7 @@ pub struct CpuLocal {
     pub hw: crate::hw::Local,
     pub irq_census: crate::irq_census::Local,
     pub counters: crate::counters::Local,
+    pub idle: crate::idle::Local,
     #[cfg(feature = "mask-windows")]
     pub windows: crate::windows::Local,
 }
@@ -32,6 +33,7 @@ pub fn size(capacity: usize) {
         hw: crate::hw::Local::new(),
         irq_census: crate::irq_census::Local::new(),
         counters: crate::counters::Local::new(),
+        idle: crate::idle::Local::new(),
         #[cfg(feature = "mask-windows")]
         windows: crate::windows::Local::new(),
     })));

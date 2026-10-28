@@ -123,6 +123,9 @@ impl Card {
         snap.put("transmit.full", counters.tx_full);
         snap.put("transmit.wake_armed", counters.tx_wake_armed);
         snap.put("transmit.wake_taken", counters.tx_wake_taken);
+        snap.put("transmit.full.ns", counters.tx_full_nanos);
+        snap.put("transmit.unreported", counters.tx_unreported);
+        snap.put("transmit.unreported.max", counters.tx_unreported_max);
         snap.put("wire.sent", wire.sent);
         snap.put("wire.received", wire.received);
         snap.put("wire.seen", wire.seen);
@@ -185,10 +188,10 @@ impl Card {
         }
     }
 
-    pub fn tx<R>(&self, len: usize, fill: impl FnOnce(&mut [u8]) -> R) -> R {
+    pub fn tx(&self, frame: &[u8]) {
         match self {
-            Self::Virtio(nic) => nic.tx(len, fill),
-            Self::Intel(nic) => nic.tx(len, fill),
+            Self::Virtio(nic) => nic.tx(frame),
+            Self::Intel(nic) => nic.tx(frame),
         }
     }
 

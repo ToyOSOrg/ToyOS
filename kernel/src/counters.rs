@@ -51,6 +51,9 @@ pub struct Hardware {
     pub mperf: Option<u64>,
     pub envelope: Option<Envelope>,
     pub firmware: Option<Firmware>,
+    /// `MSR_CORE_C6_RESIDENCY` and `MSR_CORE_C7_RESIDENCY`, where admitted.
+    pub core_c6: Option<u64>,
+    pub core_c7: Option<u64>,
 }
 
 /// The commands this CPU wrote to the firmware, where it is the one that
@@ -103,18 +106,20 @@ pub fn bring_up() {
     let me = percpu::cpu_id() as usize;
     let words = sample(me);
     block(me).publish(words);
-    let [smi, aperf, mperf, request, pkg, epb] = [
+    let [smi, aperf, mperf, request, pkg, epb, c6, c7] = [
         Counter::Smi,
         Counter::Aperf,
         Counter::Mperf,
         Counter::HwpRequest,
         Counter::HwpRequestPkg,
         Counter::EnergyPerfBias,
+        Counter::CoreC6,
+        Counter::CoreC7,
     ]
     .map(|c| held(&words, c));
     log!(
         "counters: cpu{me} reads smi={smi} aperf={aperf} mperf={mperf} hwp_request={request} \
-         hwp_request_pkg={pkg} energy_perf_bias={epb}"
+         hwp_request_pkg={pkg} energy_perf_bias={epb} core_c6={c6} core_c7={c7}"
     );
 }
 
@@ -140,6 +145,10 @@ fn sample(me: usize) -> [u64; WORDS] {
             Counter::EnergyPerfBias => hardware.envelope.as_ref().map(|e| e.energy_perf_bias),
             Counter::FirmwareCalls => hardware.firmware.as_ref().map(|f| f.calls),
             Counter::FirmwareNanos => hardware.firmware.as_ref().map(|f| f.nanos),
+            Counter::DeepIdles => Some(crate::cpu_local::of(me as u32).idle.deep().0),
+            Counter::DeepIdleNanos => Some(crate::cpu_local::of(me as u32).idle.deep().1),
+            Counter::CoreC6 => hardware.core_c6,
+            Counter::CoreC7 => hardware.core_c7,
         };
         if let Some(value) = value {
             words[1] |= 1 << counter as usize;

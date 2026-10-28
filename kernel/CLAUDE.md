@@ -10,7 +10,7 @@ The module header at the site owns its subsystem — read it before changing a m
 - **Every x86 Ring 0 entry clears the direction flag** — no hardware gate does it, and `memmove` sets it across `rep` operations with interrupts on; `arch::entry::ring3_naked_asm` is where it lives.
 - **`BackendGuard` masks interrupts for its whole life**, so anything written under it is an interrupt latency; a new holder bounds itself as the console drain and the userland `write` flush do.
 - **A syscall that can block resolves its handle and clones the object out before it blocks** — a `with_object`/`with_process_data` guard held across a park is a runtime panic no compile check catches; the `SYS_FSYNC` arm in `syscall/dispatch.rs` is the pattern.
-- **A decision the process table makes lives in `kernel/pure/proclife/`, never in `process.rs`** — its defects are interleavings and its host tests are the only machine that can enumerate one.
+- **A decision the process table makes lives in `kernel/proclife/`, never in `process.rs`** — its defects are interleavings and its host tests are the only machine that can enumerate one.
 - **A task holds at most one watch registration** — a standing registration across a loop must not call anything that registers again. A double registration panics only at attempt ≥ 2, so the contention depth is the coverage.
 - **A console is per holder, minted at spawn** — the object *is* the line buffer.
 - **`ops::close` cancels a poll only for a source its object really ends** — `Watch::cancel_polls` answers every ring's poll on that watch; `ops::close_ends_polls` is where a new object kind answers.

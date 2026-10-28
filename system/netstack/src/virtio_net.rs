@@ -209,7 +209,9 @@ impl VirtioNet {
         // SAFETY: the window is inside the grant, which lives as long as
         // `self`; the device has finished with this buffer — its used-ring
         // element is what said so — and it is not posted again until
-        // `rx_done`, which the caller makes after this borrow ends.
+        // `rx_done`, which the caller makes after this borrow ends. virtio is
+        // the hypervisor's, inside the trusted base, so its protocol is believed;
+        // an external or hot-plug device's driver must copy instead.
         unsafe { std::slice::from_raw_parts(window.as_ptr() as *const u8, len) }
     }
 
@@ -219,12 +221,11 @@ impl VirtioNet {
         self.tx.borrow_mut().room()
     }
 
-    /// Fill a transmit buffer with a `len`-byte frame and hand it to the
-    /// device ([`TxQueue::send`]).
-    pub fn tx<R>(&self, len: usize, fill: impl FnOnce(&mut [u8]) -> R) -> R {
-        let (result, published) = self.tx.borrow_mut().send(len, fill);
+    /// Copy `frame` into a transmit buffer and hand it to the device
+    /// ([`TxQueue::send`]).
+    pub fn tx(&self, frame: &[u8]) {
+        let ((), published) = self.tx.borrow_mut().send(frame.len(), |slot| slot.copy_from_slice(frame));
         self.device.notify(published);
-        result
     }
 
     /// The claim, for the poller: readable means an interrupt has landed.
@@ -293,7 +294,9 @@ impl TxQueue {
         // SAFETY: the window is inside the grant, which lives as long as the
         // driver that holds this queue; the device is not reading it, because
         // this head is out of `free` and its descriptor is published only
-        // after `fill` returns.
+        // after `fill` returns. virtio is the hypervisor's, inside the trusted
+        // base, so its protocol is believed; an external or hot-plug device's
+        // driver must copy instead.
         let result = fill(unsafe { std::slice::from_raw_parts_mut(window.as_ptr(), len) });
         let frame = Buffer::readable(self.grant.device_addr(at), (NET_HDR_SIZE + len) as u32);
         (result, self.rings.publish(head, &[frame]))

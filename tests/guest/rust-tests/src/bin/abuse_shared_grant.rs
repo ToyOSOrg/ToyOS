@@ -55,8 +55,8 @@ fn main() {
 }
 
 fn owner() {
-    let mut region = SharedMemory::create(REGION).expect("a region of our own");
-    region.as_mut_slice()[..SECRET.len()].copy_from_slice(SECRET);
+    let region = SharedMemory::create(REGION).expect("a region of our own");
+    region.bytes().write(0, SECRET);
     let own_handle = region.as_handle();
 
     let (acceptor, connector) = port::create().expect("the kernel refused a port");
@@ -107,7 +107,7 @@ fn owner() {
     let part = syscall::shm_sub(own_handle, 0, SECRET.len() as u64).expect("part of our own region");
     // SAFETY: the mapping is the part's, at least `SECRET.len()` bytes, and
     // nothing here writes it meanwhile.
-    let seen = unsafe { core::slice::from_raw_parts(syscall::shm_map(part).expect("map the part"), SECRET.len()) };
+    let seen = unsafe { core::slice::from_raw_parts(syscall::shm_map(part, syscall::VmProt::Read).expect("map the part"), SECRET.len()) };
     assert_eq!(seen, SECRET, "part of a region is not its pages");
     for (offset, len) in [(0, 0), (1, 1), (0, REGION as u64 + 1), (REGION as u64, 1)] {
         assert_eq!(
@@ -120,7 +120,7 @@ fn owner() {
     // And through all of it the owner's own region is still the owner's, and
     // the invited peer's mapping was its own handle's business rather than a
     // second name for this one.
-    assert_eq!(&region.as_slice()[..SECRET.len()], SECRET, "the owner's own region changed");
+    assert_eq!(region.bytes().sub(0, SECRET.len()).to_vec(), SECRET, "the owner's own region changed");
 
     println!("the region reached the peer it was sent to and no other, a closed handle names nothing, and part of one is its pages");
 }
@@ -167,8 +167,9 @@ fn invited() {
     let conn = toyos::endow::service(SERVICE).expect("the invited peer holds a connector");
     let header = conn.recv_header().expect("the owner's announcement");
     let [handle] = conn.recv_handles_exact::<1>(&header).expect("the region the owner sent");
-    let region = SharedMemory::lent(handle, REGION).expect("take the region");
-    println!("read {}", String::from_utf8_lossy(&region.as_slice()[..SECRET.len()]));
+    // SAFETY: received with this frame, so this process's and nobody else's.
+    let region = SharedMemory::lent(unsafe { toyos::OwnedHandle::from_raw(handle) }, REGION).expect("take the region");
+    println!("read {}", String::from_utf8_lossy(&region.bytes().sub(0, SECRET.len()).to_vec()));
     std::io::stdout().flush().expect("invited: flush the report");
 }
 
@@ -179,7 +180,7 @@ fn uninvited() -> ! {
         std::env::args().nth(2).expect("uninvited needs the owner's handle value").parse().unwrap(),
     );
     marker("uninvited");
-    let reached = unsafe { syscall::shm_map(guess) };
+    let reached = unsafe { syscall::shm_map(guess, syscall::VmProt::Read) };
     panic!("the owner's handle value answered {:?} here", reached.map(|_| ()));
 }
 
@@ -199,6 +200,6 @@ fn dropped() -> ! {
     let closed = region.as_handle();
     drop(region);
     marker("dropped");
-    let reached = unsafe { syscall::shm_map(closed) };
+    let reached = unsafe { syscall::shm_map(closed, syscall::VmProt::Read) };
     panic!("a closed handle answered {:?}", reached.map(|_| ()));
 }

@@ -22,11 +22,11 @@ use alloc::vec;
 use alloc::vec::Vec;
 use std::collections::HashSet;
 
-use crate::proclife::model::{Climb, World};
-use crate::proclife::quit::{self, Owed, Reason};
-use crate::proclife::table::{Lifecycle, Processes};
-use crate::proclife::tree::{self, Admit, Admitted};
-use crate::proclife::{join, reap, spawn, teardown, End, Pid, Tid, Watch};
+use crate::model::{Climb, World};
+use crate::quit::{self, Owed, Reason};
+use crate::table::{Lifecycle, Processes};
+use crate::tree::{self, Admit, Admitted};
+use crate::{join, reap, spawn, teardown, End, Pid, Tid, Watch};
 
 /// The end a walk claims every process below an end with.
 const KILLED: End = End::Killed;

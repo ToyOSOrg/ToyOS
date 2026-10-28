@@ -13,8 +13,9 @@
 //! out of the allocator and charged to no process, for the machine's life.
 //!
 //! [`objects`] makes each one a [`SharedMemObject`] over its pages
-//! ([`SharedMemObject::boot`]), which every mapping maps read-only, so no
-//! holder writes it whatever rights its handle carries.
+//! ([`SharedMemObject::boot`]), whose handles never carry `WRITE`
+//! (`ops::initial_rights`, and every part of one inherits its source's
+//! rights), so every mapping of it is read-only; `sys_shm_map` asserts it.
 
 use alloc::sync::Arc;
 

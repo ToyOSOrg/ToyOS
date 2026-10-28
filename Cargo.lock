@@ -1533,6 +1533,7 @@ dependencies = [
  "toyos-microcode",
  "toyos-pci",
  "toyos-phys",
+ "toyos-proclife",
  "toyos-quiesce",
  "toyos-random",
  "toyos-rootimage",
@@ -2275,6 +2276,7 @@ name = "osbench"
 version = "0.1.0"
 dependencies = [
  "getrandom 0.3.4",
+ "inspect",
  "libc",
  "miniz_oxide",
  "osbench-lan",
@@ -2284,6 +2286,7 @@ dependencies = [
  "toyos",
  "toyos-abi",
  "toyos-crypto",
+ "toyos-inspect",
  "toyos-trace",
  "ureq",
 ]
@@ -3918,6 +3921,13 @@ dependencies = [
 [[package]]
 name = "toyos-phys"
 version = "0.1.0"
+
+[[package]]
+name = "toyos-proclife"
+version = "0.1.0"
+dependencies = [
+ "toyos-abi",
+]
 
 [[package]]
 name = "toyos-ps2"

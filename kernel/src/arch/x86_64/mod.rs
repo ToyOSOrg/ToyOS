@@ -24,6 +24,7 @@ pub mod entry;
 pub mod fpu;
 pub mod hpet;
 pub mod hw;
+pub mod idle;
 pub mod idt;
 pub mod iommu_unit;
 pub mod ioapic;
@@ -122,6 +123,7 @@ pub unsafe fn percpu_fetch_add(
 /// This architecture's part of a CPU's `cpu_local` record.
 pub struct CpuLocal {
     pub counters: counters::Local,
+    pub idle_line: idle::Line,
     #[cfg(feature = "switch-witness")]
     pub hw: hw::Local,
 }
@@ -130,6 +132,7 @@ impl CpuLocal {
     pub fn new() -> Self {
         Self {
             counters: counters::Local::new(),
+            idle_line: idle::Line::new(),
             #[cfg(feature = "switch-witness")]
             hw: hw::Local::new(),
         }

@@ -110,7 +110,9 @@ pub struct Image {
 }
 
 enum Object {
-    /// Read into memory of this process's own.
+    /// Read into a region of this process's own, which this mapping alone
+    /// writes: its handle leaves only for a spawn, whose kernel copies each
+    /// page and writes none.
     Read(SharedMemory),
     /// A region nobody writes: a boot image, or a file its server holds so.
     Immutable(Immutable),
@@ -151,8 +153,10 @@ impl Image {
             Some(job) => SharedMemory::create_for(job, size),
             None => SharedMemory::create(size),
         };
-        let mut object = created.map_err(ImageRefused::Memory)?;
-        let bytes = object.as_mut_slice();
+        let object = created.map_err(ImageRefused::Memory)?;
+        // SAFETY: `size` bytes of a fresh mapping no handle has left this
+        // process for, borrowed while `object` lives here.
+        let bytes = unsafe { core::slice::from_raw_parts_mut(object.as_ptr(), size) };
         let mut done = 0;
         while done < size {
             match read(&mut bytes[done..]).map_err(ImageRefused::Read)? {
@@ -172,7 +176,9 @@ impl Image {
     /// The program's bytes, as they were read.
     pub fn bytes(&self) -> &[u8] {
         let bytes = match &self.object {
-            Object::Read(object) => object.as_slice(),
+            // SAFETY: the mapping is `object.len()` bytes and lives as long as
+            // `self`, and nothing writes them once read (`Object::Read`).
+            Object::Read(object) => unsafe { core::slice::from_raw_parts(object.as_ptr(), object.len()) },
             Object::Immutable(image) => image.as_slice(),
         };
         &bytes[..self.len as usize]

@@ -238,12 +238,7 @@ impl Grouping {
             #[cfg(target_os = "toyos")]
             Grouping::Apart => {
                 use std::os::toyos::process::CommandExt;
-                use toyos::syscap::SysCap;
-                static CAP: std::sync::OnceLock<Option<SysCap>> = std::sync::OnceLock::new();
-                let cap = CAP
-                    .get_or_init(|| toyos::endow::Endowments::get().take(toyos::endow::SYSCAP_LABEL))
-                    .as_ref()
-                    .ok_or("no capability was endowed, so no job can be made")?;
+                let cap = crate::sys::syscap().ok_or("no capability was endowed, so no job can be made")?;
                 let job = cap.new_job().map_err(|e| format!("a new job was refused: {e:?}"))?;
                 let mut command = Command::new(exe);
                 command.endow(toyos::job::JOB_LABEL, job.into_raw().0);

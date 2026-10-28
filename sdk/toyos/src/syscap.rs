@@ -16,6 +16,10 @@ use crate::{AsHandle, OwnedHandle, RawHandle};
 
 pub struct SysCap(pub(crate) OwnedHandle);
 
+/// A bound on how long any idle CPU takes to wake, held until dropped
+/// ([`SysCap::hold_wake_latency`]).
+pub struct WakeLatencyHold(#[allow(dead_code, reason = "held for its drop, which closes the handle")] OwnedHandle);
+
 impl SysCap {
     /// Mint the claim for a device class, as whichever typed wrapper the caller
     /// drives it through.
@@ -89,6 +93,17 @@ impl SysCap {
     /// this; a right is.
     pub fn enter_rt(&self) -> Result<(), SyscallError> {
         syscall::rt_enter(self.0.raw())
+    }
+
+    /// Hold every idle CPU to waking within `bound` until the returned hold
+    /// is dropped ([`syscall::wake_latency_hold`]: it holds from when this
+    /// returns). Needs [`Rights::WAKE_LATENCY`]; a bound under a nanosecond
+    /// is refused `InvalidArgument`.
+    pub fn hold_wake_latency(&self, bound: core::time::Duration) -> Result<WakeLatencyHold, SyscallError> {
+        let nanos = u64::try_from(bound.as_nanos()).unwrap_or(u64::MAX);
+        let raw = syscall::wake_latency_hold(self.0.raw(), nanos)?;
+        // SAFETY: the kernel installed this handle for this call and no other.
+        Ok(WakeLatencyHold(unsafe { OwnedHandle::from_raw(raw) }))
     }
 
     /// Power the machine off.

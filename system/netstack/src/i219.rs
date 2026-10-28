@@ -98,7 +98,7 @@ pub struct Nic {
     /// Held for their mappings' lives: the register window points into the
     /// first and the grant's into the second.
     _mapped: SharedMemory,
-    _region: DmaRegion,
+    region: DmaRegion,
     claim: Rc<PciDev>,
     /// netstack's view of the same grant: the frame payloads, and nothing else.
     frames: Window,
@@ -156,7 +156,22 @@ fn granted(dev: &PciDev) -> Result<(Bar, Grant, SharedMemory, DmaRegion), Openin
 /// What a bring-up says about itself: a sentence each for what it asked the
 /// I219's PHY before its reset and what that reset did, and one for the rest.
 fn brought_up_words(brought_up: toyos_i219::BringUp) -> Vec<String> {
-    let mut words = vec![brought_up.delivered.to_string()];
+    let mut words = vec![
+        brought_up.delivered.to_string(),
+        format!(
+            "out of the reset: TCTL {:#010x} TXDCTL {:#010x} TARC0 {:#010x} RXCSUM {:#010x} MRQC \
+             {:#010x} RFCTL {:#010x}, receive addresses past the first valid {:#06x} (left to \
+             firmware); TCTL {:#010x} after the bring-up",
+            brought_up.out_of_reset.tctl,
+            brought_up.out_of_reset.txdctl,
+            brought_up.out_of_reset.tarc0,
+            brought_up.out_of_reset.rxcsum,
+            brought_up.out_of_reset.mrqc,
+            brought_up.out_of_reset.rfctl,
+            brought_up.out_of_reset.receive_addresses_valid,
+            brought_up.transmit_control
+        ),
+    ];
     match brought_up.woke {
         Some(Ok(woke)) => words.push(format!("before the reset the PHY was asked: {woke}")),
         Some(Err(why)) => words.push(format!("the PHY was not asked before the reset: {why}")),
@@ -204,7 +219,7 @@ impl Nic {
         Ok(Self {
             driver: RefCell::new(driver),
             _mapped: mapped,
-            _region: region,
+            region,
             claim: dev,
             frames,
             mac,
@@ -267,7 +282,10 @@ impl Nic {
         // SAFETY: the window is inside the grant, which lives as long as
         // `self`; the device has finished with this buffer — the `DD` its
         // descriptor carries is what said so — and it is not published again
-        // until `rx_done`, which the caller makes after this borrow ends.
+        // until `rx_done`, which the caller makes after this borrow ends. The
+        // I219 is the chipset vendor's integrated MAC, inside the trusted base,
+        // so its descriptor protocol is believed; an external or hot-plug
+        // device's driver must copy instead.
         unsafe { std::slice::from_raw_parts(window.as_ptr() as *const u8, frame.len) }
     }
 
@@ -292,24 +310,19 @@ impl Nic {
         self.driver.borrow_mut().wake_on_room()
     }
 
-    /// Fill a transmit buffer with a `len`-byte frame and hand it to the
-    /// device.
+    /// Copy `frame` into a transmit buffer and hand it to the device.
     ///
     /// Non-blocking, and for a caller [`Self::tx_room`] answered in this
     /// pass: a frame the driver has no slot for is a caller that did not ask,
     /// or one that offered more than a buffer holds.
-    pub fn tx<R>(&self, len: usize, fill: impl FnOnce(&mut [u8]) -> R) -> R {
+    pub fn tx(&self, frame: &[u8]) {
+        let len = frame.len();
         let slot = self.driver.borrow_mut().tx_reserve(len).unwrap_or_else(|| {
             panic!("netstack: a {len}-byte frame was offered to a transmit ring that refuses it")
         });
-        let window = self.frames.sub(slot.at, len);
-        // SAFETY: the window is inside the grant, which lives as long as
-        // `self`; the device is not reading it, because this descriptor is out
-        // of the ring and is published only by `tx_commit` below, after `fill`
-        // has returned.
-        let result = fill(unsafe { std::slice::from_raw_parts_mut(window.as_ptr(), len) });
+        // `frames` is the grant's window, which starts at the region's first byte.
+        self.region.memory.bytes().write(slot.at, frame);
         self.driver.borrow_mut().tx_commit(slot);
-        result
     }
 
     /// Say what this driver has refused or been told about, and what the link

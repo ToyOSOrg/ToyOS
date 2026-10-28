@@ -125,6 +125,25 @@ pub(super) fn sys_rt_enter(syscap: RawHandle) -> u64 {
     0
 }
 
+/// Hold every idle CPU to waking within `bound_ns`, gated on a `SysCap`
+/// carrying [`Rights::WAKE_LATENCY`], and install the hold's handle.
+pub(super) fn sys_wake_latency_hold(syscap: RawHandle, bound_ns: u64) -> u64 {
+    if let Err(e) = demand_syscap(syscap, Rights::WAKE_LATENCY) {
+        return e.refuse();
+    }
+    if bound_ns == 0 {
+        return SyscallError::InvalidArgument.to_u64();
+    }
+    let object = match crate::object::wake_latency::WakeLatencyObject::new(bound_ns) {
+        Ok(object) => crate::object::KObjectRef::WakeLatency(object),
+        Err(e) => return SyscallError::from(e).to_u64(),
+    };
+    match process::with_process_data(|data| crate::object::ops::install(&mut data.handles, object)) {
+        Ok(h) => u64::from(h.0),
+        Err(e) => e.to_u64(),
+    }
+}
+
 /// Make a new job, gated on a `SysCap` carrying [`Rights::JOBS`], and install a handle to it.
 pub(super) fn sys_job_create(syscap: RawHandle) -> u64 {
     if let Err(e) = demand_syscap(syscap, Rights::JOBS) {
@@ -193,7 +212,7 @@ pub(super) fn sys_thread_join(tid: u64) -> u64 {
     // None means never existed or already collected; the predicate below answers both.
     let target = process::thread_sched(caller, tid);
     let parkable = crate::scheduler::Parkable::at_entry();
-    let join = kernel::proclife::join::Join::default();
+    let join = toyos_proclife::join::Join::default();
     let ask = || process::ask_join(&join, tid, caller);
     loop {
         // Both refusals are one answer here; `JoinRefused` keeps them apart because they aren't the same fact.

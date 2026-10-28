@@ -1,5 +1,6 @@
 //! Every refusal, every drop that is not a plain duplicate, and every recovery event has a counter
-//! named `tcp.<name>`. A refusal of legacy or insecure input is also an event naming the rule and
+//! named `tcp.<name>`, as do the bytes sent and the time senders waited on the user, the peer's
+//! window or congestion. A refusal of legacy or insecure input is also an event naming the rule and
 //! both endpoints; [`RefusalLog`] decides which of those become a log line.
 
 use alloc::vec::Vec;
@@ -60,6 +61,7 @@ toyos_net_wire::counters! {
     NextHopFailed = "tcp.next-hop-failed";
     Rto = "tcp.rto";
     RtoUnsent = "tcp.rto-unsent";
+    SentBytes = "tcp.sent.bytes";
     RetransmitBytes = "tcp.retransmit.bytes";
     FastRecovery = "tcp.fast-recovery";
     SackRecovery = "tcp.sack-recovery";
@@ -68,6 +70,12 @@ toyos_net_wire::counters! {
     LossProbe = "tcp.loss-probe";
     LossProbeRecovery = "tcp.loss-probe-recovery";
     KeepaliveProbe = "tcp.keepalive-probe";
+    SendLimitedByUserNanos = "tcp.send-limited.user.ns";
+    SendLimitedByWindowNanos = "tcp.send-limited.window.ns";
+    SendLimitedByCongestionNanos = "tcp.send-limited.congestion.ns";
+    CongestionStops = "tcp.congestion-stops";
+    CongestionStopsCwndBytes = "tcp.congestion-stops.cwnd.bytes";
+    CongestionStopsSrttMicros = "tcp.congestion-stops.srtt.us";
     EventOverflow = "tcp.event-overflow";
 }
 

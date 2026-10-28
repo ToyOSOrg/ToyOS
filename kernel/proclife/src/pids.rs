@@ -12,7 +12,7 @@
 
 use alloc::vec::Vec;
 
-use crate::proclife::Pid;
+use crate::Pid;
 
 #[derive(Clone, PartialEq, Eq, Hash, Debug)]
 pub struct Pids {

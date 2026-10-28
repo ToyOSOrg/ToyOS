@@ -196,6 +196,8 @@ type Lent = (Region, [Pipe; BELLS], Rc<Holders>);
 /// ends the answer hands over, and the holders. Refused by name, nothing is
 /// mapped, and the connection is handed back with the refusal's word.
 fn lend(connection: Connection, region: toyos::RawHandle) -> Result<Lent, (Connection, u32)> {
+    // SAFETY: the holder's frame moved it here, and nothing else answers for it.
+    let region = unsafe { toyos::OwnedHandle::from_raw(region) };
     let mapping = match Region::judged(region) {
         Ok(mapping) => mapping,
         Err(why) => {
@@ -890,6 +892,14 @@ impl Sockets {
         snap.put("streams.live", node.streams());
         snap.put("places.held", node.held());
         snap.put("places.max", self.places);
+        tcp_counters(node.shard().tcp_counters(), snap);
+    }
+}
+
+/// Every [tcp] counter, at `net.<its name>`.
+fn tcp_counters(counters: &toyos_net_tcp::Counters, snap: &mut Snapshot) {
+    for (name, value) in counters.iter() {
+        snap.put(name, value);
     }
 }
 
@@ -1047,6 +1057,17 @@ fn answer_refused(holders: &Holders, code: u32) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Every [tcp] counter fits the snapshot with half of a frame to spare, which is more than
+    /// the card's, the lease's and the sockets' few dozen entries take. A counter is eight bytes
+    /// whatever its value.
+    #[test]
+    fn the_tcp_counters_leave_the_snapshot_half_its_frame() {
+        let mut snap = Snapshot::new(toyos_inspect::NET);
+        tcp_counters(&toyos_net_tcp::Counters::default(), &mut snap);
+        let bytes = snap.encode().expect("the counters encode").len();
+        assert!(bytes <= toyos_inspect::MAX_SNAPSHOT_BYTES / 2, "{bytes} bytes");
+    }
 
     /// A new connection's requests make a socket or ask a name and act on
     /// none: every request a holder makes of its own socket is no request

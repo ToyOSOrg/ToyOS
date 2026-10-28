@@ -197,6 +197,14 @@ pub mod ipc {
     }
 }
 
+/// The capability the runner endowed this process, `None` where the boot
+/// endows none. The endowment is taken once per process, so every row that
+/// uses the capability borrows it here.
+pub fn syscap() -> Option<&'static toyos::syscap::SysCap> {
+    static CAP: std::sync::OnceLock<Option<toyos::syscap::SysCap>> = std::sync::OnceLock::new();
+    CAP.get_or_init(|| toyos::endow::Endowments::get().take(toyos::endow::SYSCAP_LABEL)).as_ref()
+}
+
 /// What the tail group reads to say where a late wake's time went, through
 /// the runner's capability: each CPU's firmware interrupts and clock, the
 /// scheduler's diary and the roster's names. Read-only observation rights;
@@ -204,7 +212,6 @@ pub mod ipc {
 pub mod diag {
     use std::collections::BTreeMap;
 
-    use toyos::endow::{Endowments, SYSCAP_LABEL};
     use toyos::syscap::{SysCap, TraceCursor};
     use toyos_abi::counters::{Counter, RawRecord, Record};
     use toyos_abi::syscall::{SYSINFO_ENTRY_SIZE, SYSINFO_HEADER_SIZE};
@@ -212,7 +219,7 @@ pub mod diag {
     use toyos_trace::{Entry, Event};
 
     pub struct Diag {
-        cap: SysCap,
+        cap: &'static SysCap,
         cursor: Option<TraceCursor<Vec<u64>>>,
     }
 
@@ -221,16 +228,35 @@ pub mod diag {
     /// names it by.
     #[derive(Clone)]
     pub struct CpuCounts {
+        /// The CPU did not answer within the read's bound: its values are the
+        /// last it published.
+        pub stale: bool,
         pub cpu: u32,
         pub apic: u32,
+        /// The CPU's own counter when it read the rest (the TSC).
+        pub stamp: Option<u64>,
         pub smi: Option<u64>,
         pub aperf: Option<u64>,
         pub mperf: Option<u64>,
         pub kicks: Option<u64>,
+        /// Core C6 and C7 residency in TSC ticks, where the CPU counts it.
+        pub core_c6: Option<u64>,
+        pub core_c7: Option<u64>,
+        /// Idle periods the kernel chose a declared deep state for, counted
+        /// as each ends.
+        pub deep_idles: Option<u64>,
+    }
+
+    /// The capability's diagnostics for the rows that read the counters
+    /// around them ([`crate::around`]): opened once a process, and `None`
+    /// where the boot endows no capability.
+    pub fn shared() -> Option<&'static Diag> {
+        static SHARED: std::sync::OnceLock<Option<Diag>> = std::sync::OnceLock::new();
+        SHARED.get_or_init(open).as_ref()
     }
 
     pub fn open() -> Option<Diag> {
-        let cap: SysCap = Endowments::get().take(SYSCAP_LABEL)?;
+        let cap = super::syscap()?;
         let cursor = cap.trace_cursor_words().ok().map(|n| TraceCursor::new(vec![0u64; n]));
         Some(Diag { cap, cursor })
     }
@@ -245,12 +271,17 @@ pub mod diag {
                 .map(|r| {
                     let r = Record::decode(r).map_err(|e| format!("a counters record did not decode: {e:?}"))?;
                     Ok(CpuCounts {
+                        stale: r.stale,
                         cpu: r.cpu,
                         apic: r.hardware_id,
+                        stamp: r.get(Counter::Stamp),
                         smi: r.get(Counter::Smi),
                         aperf: r.get(Counter::Aperf),
                         mperf: r.get(Counter::Mperf),
                         kicks: r.get(Counter::Kicks),
+                        core_c6: r.get(Counter::CoreC6),
+                        core_c7: r.get(Counter::CoreC7),
+                        deep_idles: r.get(Counter::DeepIdles),
                     })
                 })
                 .collect()
@@ -363,6 +394,59 @@ pub fn map_anon_4k(len: usize) -> *mut u8 {
 pub fn persistent_dir() -> Option<(String, String, String)> {
     let served_by = "boot USB stick TOYOS-LOG partition, FAT32, LOG file server over usbd mass storage";
     Some(("/log".into(), served_by.into(), "usb".into()))
+}
+
+/// What a transfer row reports of the stack beneath it, as netstack's `inspect` answers it:
+/// [tcp]'s bytes, losses and the time its senders waited on each send limit, and the card's
+/// full-ring waits and missed frames. Those a card does not report are left out.
+pub fn net_counters() -> Result<Vec<(String, u64)>, String> {
+    const READ: [&str; 21] = [
+        "net.tcp.sent.bytes",
+        "net.tcp.retransmit.bytes",
+        "net.tcp.rto",
+        "net.tcp.fast-recovery",
+        "net.tcp.sack-recovery",
+        "net.tcp.loss-probe",
+        "net.tcp.loss-probe-recovery",
+        "net.tcp.dsack-rcvd",
+        "net.tcp.send-limited.user.ns",
+        "net.tcp.send-limited.window.ns",
+        "net.tcp.send-limited.congestion.ns",
+        "net.tcp.congestion-stops",
+        "net.tcp.congestion-stops.cwnd.bytes",
+        "net.tcp.congestion-stops.srtt.us",
+        "net.transmit.full",
+        "net.transmit.wake_armed",
+        "net.transmit.wake_taken",
+        "net.transmit.full.ns",
+        "net.transmit.unreported",
+        "net.errors.missed",
+        "net.wire.sent",
+    ];
+    let snap = inspect::ask(toyos_inspect::NET)?;
+    Ok(READ
+        .iter()
+        .filter_map(|key| match snap.get(*key) {
+            Some(toyos_inspect::Value::U64(v)) => Some((key.to_string(), *v)),
+            _ => None,
+        })
+        .collect())
+}
+
+/// What a row's own connections say of themselves: nothing on ToyOS, whose
+/// stack's counters ([`net_counters`]) say it for every connection.
+pub struct StreamLog;
+
+impl StreamLog {
+    pub fn new() -> Self {
+        Self
+    }
+
+    pub fn look(&mut self, _stream: &std::net::TcpStream) {}
+
+    pub fn fields(&self) -> Vec<(String, String)> {
+        Vec::new()
+    }
 }
 
 /// What carries a connection on ToyOS: netstack drives one card, Ethernet.

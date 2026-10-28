@@ -9,8 +9,8 @@ use std::string::String;
 use std::vec::Vec;
 
 use toyos_blockdev::executor::Executor;
-use toyos_blockdev::model::Model;
-use toyos_blockdev::{block_on_ready, Block, BlockDev, Bytes};
+use toyos_blockdev::model::{Model, Overlay};
+use toyos_blockdev::{block_on_ready, Block, BlockDev, Bytes, ReadOnlyBytes};
 
 use super::mount::{random, MEMORY, NOW, OWNER};
 use super::*;
@@ -148,7 +148,7 @@ pub(super) async fn apply<D: BlockDev>(m: &Mount<D>, op: &Op) {
 /// committed one; and unmounted clean, its orphans released, it checks
 /// clean.
 fn judge(image: &[u8], states: &[BTreeSet<Vec<u8>>], applied: usize, committed: usize, passphrase: Option<&[u8]>) -> core::result::Result<(), String> {
-    let dev = Bytes::new(image.to_vec());
+    let dev = Overlay::new(image);
     let mount = match passphrase {
         Some(p) => block_on_ready(Mount::unlock(&dev, p, MIN_LIMITS, MEMORY, random())),
         None => block_on_ready(Mount::open(&dev, MEMORY, random())),
@@ -317,7 +317,7 @@ fn encrypted_renames_reusing_buckets_survive_a_crash_at_every_request() {
 /// next flush entry is `F`. `None` when none is left, which upstream cannot
 /// recover from.
 fn upstream_f(image: &[u8], passphrase: Option<&[u8]>) -> core::result::Result<Option<u64>, String> {
-    let dev = Bytes::new(image.to_vec());
+    let dev = ReadOnlyBytes::new(image).unwrap();
     let sb = block_on_ready(super::super::read::read_superblock(&dev)).map_err(|e| format!("superblock: {e:?}"))?;
     let key = match passphrase {
         Some(p) => Some(super::super::crypt::MasterKey::unwrap(sb.crypt.as_ref().ok_or("no crypt field")?, &sb.header.internal_uuid, p, MIN_LIMITS).map_err(|e| format!("unlock: {e:?}"))?),
@@ -348,7 +348,7 @@ fn upstream_finds_f_at_every_request(image: Vec<u8>, passphrase: Option<&[u8]>, 
         after: Box::new(|m: &Model| {
             seed.set(seed.get() + 1);
             m.check(64, seed.get(), |image| {
-                let dev = Bytes::new(image.to_vec());
+                let dev = ReadOnlyBytes::new(image).unwrap();
                 let clean = block_on_ready(super::super::read::read_superblock(&dev)).map_err(|e| format!("{e:?}"))?.clean_flag();
                 if clean {
                     return Ok(());
@@ -357,7 +357,7 @@ fn upstream_finds_f_at_every_request(image: Vec<u8>, passphrase: Option<&[u8]>, 
                 match upstream_f(image, passphrase)? {
                     Some(_) => Ok(()),
                     None => {
-                        let dev = Bytes::new(image.to_vec());
+                        let dev = ReadOnlyBytes::new(image).unwrap();
                         let sb = block_on_ready(super::super::read::read_superblock(&dev)).unwrap();
                         let scan = block_on_ready(super::super::journal::scan(&dev, &sb, None)).ok();
                         let entries: Vec<_> = scan.iter().flat_map(|s| s.entries.values()).map(|e| (e.seq, e.last_seq, e.flush, e.good)).collect();

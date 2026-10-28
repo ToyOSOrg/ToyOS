@@ -92,7 +92,7 @@ use std::collections::BTreeMap;
 use std::fmt;
 use std::time::{Duration, Instant};
 
-use toyos_abi::acpi::{pci_address, Access, Refused, Space, Width, UNLISTED};
+use toyos_abi::acpi::{pci_address, Access, IdleDeclaration, Refused, Space, Width, UNLISTED};
 use toyos_aml::{Address, Denied, Host, RuntimeLoad, Transfer};
 
 use crate::devices::Ec;
@@ -134,6 +134,16 @@ pub enum Take {
     Unusable,
 }
 
+/// What the kernel did with a processor's idle states.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum Declared {
+    Kept,
+    /// The processor's UID names no CPU the kernel runs.
+    NoCpu,
+    /// The CPU cannot enter them as declared; the kernel's log says why.
+    Refused,
+}
+
 /// The `acpi` claim as this server asks it, its mediated access and its SCI,
 /// and the power-off it asks of the supervisor.
 pub trait Kernel {
@@ -148,6 +158,8 @@ pub trait Kernel {
     /// once under a claim: `false` where it is wider than the register's
     /// field, and the kernel kept nothing.
     fn s5(&self, slp_typ_a: u64) -> Result<bool, Stopping>;
+    /// Hand the kernel one processor's idle states (`crate::cst`).
+    fn idle(&self, declaration: &IdleDeclaration) -> Result<Declared, Stopping>;
     /// Waits until `until`, serving the SCI as `sci::await_sleep` does for
     /// the fixed power button where the claim serves it and the controller's
     /// GPE `ec_gpe`: what latched and was taken.
@@ -763,6 +775,8 @@ pub mod tests {
         pub stops_after: Cell<Option<usize>>,
         /// The `SLP_TYPa` it was handed and kept.
         pub handed: Cell<Option<u64>>,
+        /// Each processor's idle states it was handed, all kept.
+        pub declared: RefCell<Vec<IdleDeclaration>>,
         /// What each Sleep's wait takes, in turn; nothing once it runs out.
         /// Each served set a Sleep was asked to serve.
         pub sleeps: RefCell<VecDeque<Latched>>,
@@ -902,6 +916,12 @@ pub mod tests {
             }
             assert_eq!(self.handed.replace(Some(slp_typ_a)), None, "a second sleep type under one claim, which the kernel refuses");
             Ok(true)
+        }
+
+        fn idle(&self, declaration: &IdleDeclaration) -> Result<Declared, Stopping> {
+            self.stopping()?;
+            self.declared.borrow_mut().push(*declaration);
+            Ok(Declared::Kept)
         }
 
         fn latched(&self) -> Option<u32> {

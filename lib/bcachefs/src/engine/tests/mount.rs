@@ -162,8 +162,7 @@ fn a_key_of_an_unknown_type_met_while_mounted_stops_writing() {
 /// nothing but at most one superblock copy torn (§3.4); and a mount and
 /// clean unmount leave it checking clean.
 fn judge_state(image: &[u8]) -> core::result::Result<(), String> {
-    use toyos_blockdev::Bytes;
-    let dev = Bytes::new(image.to_vec());
+    let dev = toyos_blockdev::model::Overlay::new(image);
     let v = block_on_ready(Volume::open(&dev)).map_err(|e| format!("open: {e:?}"))?;
     let raw: Vec<Finding> = block_on_ready(fsck(&v)).map_err(|e| format!("fsck: {e:?}"))?.into_iter().filter(|f| !matches!(f, Finding::Copy(_))).collect();
     if !raw.is_empty() {

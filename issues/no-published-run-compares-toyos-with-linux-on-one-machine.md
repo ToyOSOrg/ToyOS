@@ -55,6 +55,12 @@ OpenSSL and AWS-LC by the crypto oracle probe, and that table is the
 evidence: `ToyOSOrg/evidence` at `bed0b00efac82546b995f0841da54aea11c45694`,
 `r2/table.md`.
 
+The AMD bench's `crunch.single.deflate` read 4 to 6 % slower in four boots
+of twelve, at the same clock, with and without the deep idle states
+(`issues/the-amd-benchs-deflate-runs-6-percent-slow-in-some-boots-at-the-same-clock.md`).
+An AMD single-thread row compared across boots needs repeats enough to
+see which mode each boot read.
+
 What ToyOS cannot measure is reported `unsupported` by name, and is not a
 comparison until it can:
 

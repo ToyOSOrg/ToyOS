@@ -23,9 +23,7 @@ const CWD: &str = "/";
 fn object_of(path: &str) -> (SharedMemory, u64) {
     let bytes = std::fs::read(path).unwrap_or_else(|e| panic!("read {path}: {e}"));
     let object = SharedMemory::create(bytes.len()).expect("a memory object");
-    // SAFETY: the region is at least `bytes.len()` long, mapped here, and not
-    // yet handed to anyone; `bytes` is not in it.
-    unsafe { core::ptr::copy_nonoverlapping(bytes.as_ptr(), object.as_ptr(), bytes.len()) };
+    object.bytes().write(0, &bytes);
     (object, bytes.len() as u64)
 }
 
@@ -80,9 +78,8 @@ fn main() {
     println!("spawn_image_object: an object without MAP and a length past one are refused");
 
     let child = spawn(object.as_handle(), len).expect("spawn from the object that is then overwritten");
-    // SAFETY: the region is `object.len()` long and mapped here; the kernel
-    // reads it only by copying, which is what this races.
-    unsafe { core::ptr::write_bytes(object.as_ptr(), 0xF4, object.len()) };
+    // The kernel reads the object only by copying, which is what this races.
+    object.bytes().write(0, &vec![0xF4; object.len()]);
     let end = syscall::process_wait(child).expect("the overwritten child is waited for");
     println!("spawn_image_object: a child whose object was overwritten after the spawn ended ({end})");
     drop(object);

@@ -1,0 +1,113 @@
+[package]
+name = "toyos-proclife"
+description = "Every decision a process or thread lifecycle makes, as pure functions the kernel performs and the host model-checks."
+version = "0.1.0"
+edition = "2021"
+license = "MIT OR Apache-2.0"
+
+[dependencies]
+toyos-abi = { path = "../../sdk/abi" }
+
+[features]
+# The lifecycle's controls, declared for this crate's own tests and never
+# enabled by a kernel build: each reverts one decision to the form this kernel
+# really had, so the host model that refuses it is shown able to red at all.
+# `build/ci.rs`'s `CONTROLS` runs each and demands the named test's own FAILED
+# line; `build/build.rs`'s `every_model_control_is_run` reds on a control
+# declared with no row behind it.
+#
+# `teardown::claim_teardown` stops being exclusive: every arrival wins. An exit
+# and a kill then both tear one process down, both retire its threads and both
+# publish an exit — which `ProcessObject::publish_exit` asserts against at run
+# time, in a guest, on whichever boot the two happen to meet.
+# `interleave::tests::an_exit_and_a_kill_never_both_tear_a_process_down` must
+# red under this, and it does so in every ordering rather than in one.
+mutate-claim-teardown-always-wins = []
+# `spawn::admit_thread_insert` stops re-reading the teardown claim, so the
+# question is asked once — at the top of `process::spawn_thread`, before the
+# TLS block, the kernel stack and the scheduler record are built. Everything
+# that makes a thread happens in that window, and teardown claims the process
+# under the very lock the insert takes. `interleave::tests::a_published_exit_
+# leaves_no_unretired_thread` must red under this.
+mutate-spawn-skips-the-insert-recheck = []
+# The model's kill waits for its victim's exit before it returns.
+# `interleave::tests::two_processes_killing_each_other_both_end` must red under
+# this: each killer waits on a process whose thread is inside the other's kill.
+mutate-kill-waits-for-its-victims = []
+# `teardown::leave` answers `Last` to every thread that leaves a claimed
+# process, so the first one out tears it down under its siblings.
+# `interleave::tests::an_exit_and_a_kill_never_both_tear_a_process_down` must
+# red under this.
+mutate-first-out-tears-down = []
+# `teardown::leave` marks the last one out dead before its teardown runs, so
+# the machine's stop finds nothing running while that teardown frees and logs.
+# `interleave::tests::the_last_one_out_is_in_its_process_until_its_teardown_is_done`
+# must red under this.
+mutate-last-out-leaves-before-its-teardown = []
+# `join::collect_zombie` gives up a thread of a process being torn down, whose
+# mappings its siblings may still run in.
+# `interleave::tests::a_join_racing_the_kill_that_takes_its_target` must red
+# under this.
+mutate-join-collects-in-a-teardown = []
+# `tree::land_child` stops re-reading its place's claim, so a spawn admitted
+# before a kill lands unclaimed under the place after the walk read its children.
+# `interleave::tests::a_spawn_racing_its_places_kill_leaves_nothing_under_it_and_publishes_it`
+# must red under this.
+mutate-place-skips-the-insert-recheck = []
+# `tree::refuse_child` keeps a failed spawn's hold on its place, which then
+# waits for a child that will never be and is never published. The same test
+# must red under this.
+mutate-refused-spawn-keeps-the-count = []
+# `tree::land_child` claims a child landed under a place claimed since its
+# admission and answers no thread to retire, so the child runs on claimed, is
+# never torn down, and holds its place unpublished.
+# `interleave::tests::a_spawn_racing_its_places_kill_leaves_nothing_under_it_and_publishes_it`
+# must red under this.
+mutate-landed-child-retires-nothing = []
+# `tree::teardown_done` publishes an end with its own teardown, whatever is
+# still unpublished below it. `interleave::tests::an_exit_publishes_after_every_end_below_it`
+# must red under this.
+mutate-publish-before-the-children = []
+# The model's walk claims everything it owes in one lock section, as a kernel
+# that held `PROCESS_TABLE` across its walk would.
+# `interleave::tests::a_spawn_under_an_unrelated_process_lands_between_two_claims_of_one_walk`
+# must red under this.
+mutate-walk-in-one-hold = []
+# The model's spawn mints its caller's handle to the child once the spawn has
+# landed and its retires are posted, as a kernel that installed it after
+# `loader::spawn` returned would: a child claimed as it lands closes its table,
+# its own `self` with it, before that.
+# `interleave::tests::a_spawn_racing_its_places_kill_leaves_nothing_under_it_and_publishes_it`
+# must red under this.
+mutate-spawner-handle-after-the-landing = []
+# The model's spawn mints its caller's handle to the child under the caller's
+# lock and the child's own once that lock is given up, as a kernel whose commit
+# installed the one before it minted the other would: another thread of the
+# caller closes the only handle the object has.
+# `interleave::tests::a_sibling_closing_a_spawns_handle_before_the_spawn_returns`
+# must red under this.
+mutate-spawner-handle-before-the-childs-own = []
+# The model's quit claims a process it decided to kill a lock section after
+# the decision, as a kernel that gave the notice's lock up between them would:
+# a read comes between. `interleave::tests::a_notices_read_racing_a_second_quit_kills_only_where_the_read_comes_second`
+# must red under this.
+mutate-quit-checks-and-kills-in-two-acts = []
+# `quit::Notice::under` starts a child unasked under a parent whose notice holds
+# a reason unread. `interleave::tests::a_spawn_racing_a_quit_on_its_place_asks_each_child_once`
+# must red under this.
+mutate-quit-spawn-starts-unasked = []
+# `quit::ask` reads a notified process's children a lock section after it put
+# the reason in its notice, so a child landed between them, holding the
+# reason, is asked again and killed. The same test must red under this.
+mutate-quit-reads-children-late = []
+# `quit::ask` asks the children of a process it kills, whose end is about to
+# take them. `interleave::tests::a_quit_of_a_process_that_never_listened_asks_nothing_below_it`
+# must red under this.
+mutate-quit-asks-below-a-kill = []
+# `quit::decide` notifies a process that never listened like one that did. The
+# same test must red under this.
+mutate-quit-notifies-a-deaf-process = []
+# `quit::ask` reads no children, so a quit reaches the process it names alone.
+# `interleave::tests::a_quit_reaches_every_process_below_its_target` must red
+# under this.
+mutate-quit-reaches-the-named-process-alone = []

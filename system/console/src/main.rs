@@ -32,7 +32,6 @@ use std::process::{Child, ChildStderr, ChildStdin, ChildStdout, Command};
 use terminal::Console;
 use toyos::ipc::{Connection, FrameRx, RxStep};
 use toyos::poller::{Poller, READABLE};
-use toyos::shm::SharedMemory;
 use toyos::endow;
 use toyos::port::{self, Connector};
 use toyos::surface::{self, Delivery, Host, Notice};
@@ -173,11 +172,10 @@ fn main() {
         eprintln!("console: no framebuffer, exiting");
         return;
     };
-    let info = fb_dev.info().expect("console: framebuffer info");
-    let shm = SharedMemory::adopt(info.scanout, info.stride as usize * info.height as usize * 4)
-        .expect("console: the scanout buffer the framebuffer claim just handed over");
+    let scanout = fb_dev.open().expect("console: the framebuffer claim's description and scanout");
+    let info = *scanout.info();
     let screen = Screen::new(
-        shm.as_ptr(),
+        scanout,
         info.width as usize,
         info.height as usize,
         info.stride as usize,

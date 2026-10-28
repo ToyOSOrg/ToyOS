@@ -83,3 +83,39 @@ fn s_cc_012_restart_after_idle() {
     assert_eq!(outs.len(), 10);
     assert_eq!(h.info().cwnd, 14_600);
 }
+
+/// RFC 5681 §3.1 grows cwnd by each ACK, and a receive pass that brings ten ACKs before the next
+/// transmit opportunity is ten ACKs: the window grows as it does when each comes alone.
+#[test]
+fn s_cc_016_acks_in_one_pass_each_grow_slow_start() {
+    let one_at_a_time = {
+        let mut h = fixture_e();
+        h.send(0, 60_000);
+        for i in 1..=10u32 {
+            h.input(10, seg(5001).ack(1001 + i * 1460));
+        }
+        h.info().cwnd
+    };
+    let mut h = fixture_e();
+    h.send(0, 60_000);
+    for i in 1..=10u32 {
+        h.arrive(seg(5001).ack(1001 + i * 1460));
+    }
+    h.transmit();
+    assert_eq!((one_at_a_time, h.info().cwnd), (29_200, 29_200));
+}
+
+/// RFC 9438 §5.8, RFC 7661: a transmit opportunity that ends on the caller's credit with cwnd room
+/// left is not cwnd's stop, and the ACKs after it grow nothing.
+#[test]
+fn s_cc_017_a_sender_the_card_holds_grows_no_window() {
+    let mut h = fixture_e();
+    assert_eq!(h.send(0, 60_000).len(), 10, "a stop at the initial window");
+    h.credit = Some(1);
+    h.input(10, seg(5001).ack(3921));
+    assert_eq!(h.info().cwnd, 16_060, "the ACK after cwnd's stop grows it");
+    // Three segments' room, one segment's credit: the opportunity ended on the card.
+    h.credit = Some(1);
+    assert_eq!(h.input(11, seg(5001).ack(5381)).len(), 1);
+    assert_eq!(h.info().cwnd, 16_060, "a sender the card held grew its window");
+}

@@ -221,7 +221,9 @@ fn run_phase(phase: &str, threads: usize, inputs: &Arc<Inputs>, heat: Option<&He
             // The clock before the slice, beside the one after it: a slice
             // long enough to meet the package's power limit says so.
             crate::clock::settle();
-            let (mut ns, elapsed) = slice(workload, threads, inputs, &stopped);
+            let around = crate::around::begin();
+            let (mut ns, elapsed, placed) = slice(workload, threads, inputs, &stopped);
+            around.end(&bench, &placed);
             let units = ns.len() as u64;
             let mut fields = vec![
                 ("work_unit", workload.unit.to_string()),
@@ -247,8 +249,9 @@ fn stop_fields(heat: Option<&Heat>, hottest: &AtomicI64) -> Vec<(&'static str, S
 }
 
 /// `workload`'s units on `threads` threads until [`SLICE`] has passed or the
-/// phase is stopped: every unit's ns, and the slice's own.
-fn slice(workload: &Workload, threads: usize, inputs: &Arc<Inputs>, stopped: &AtomicU8) -> (Vec<u64>, u64) {
+/// phase is stopped: every unit's ns, the slice's own, and each thread's CPU
+/// as it began and as it ended.
+fn slice(workload: &Workload, threads: usize, inputs: &Arc<Inputs>, stopped: &AtomicU8) -> (Vec<u64>, u64, Vec<(u32, u32)>) {
     let go = Barrier::new(threads + 1);
     let start = std::sync::OnceLock::new();
     let samples = thread::scope(|scope| {
@@ -258,20 +261,22 @@ fn slice(workload: &Workload, threads: usize, inputs: &Arc<Inputs>, stopped: &At
                 scope.spawn(move || {
                     go.wait();
                     let start: &Instant = start.get().expect("the slice's start is set before it goes");
+                    let began_on = crate::sys::current_cpu();
                     let mut ns = Vec::new();
                     while start.elapsed() < SLICE && stopped.load(Ordering::Relaxed) == RUNNING {
                         let t = Instant::now();
                         std::hint::black_box((workload.run)(std::hint::black_box(inputs)));
                         ns.push(ns_since(t));
                     }
-                    ns
+                    (ns, (began_on, crate::sys::current_cpu()))
                 })
             })
             .collect();
         start.set(Instant::now()).expect("one start");
         go.wait();
-        workers.into_iter().flat_map(|w| w.join().expect("a crunch worker panicked")).collect::<Vec<u64>>()
+        workers.into_iter().map(|w| w.join().expect("a crunch worker panicked")).collect::<Vec<_>>()
     });
     let elapsed = ns_since(*start.get().expect("set"));
-    (samples, elapsed)
+    let placed = samples.iter().map(|(_, placed)| *placed).collect();
+    (samples.into_iter().flat_map(|(ns, _)| ns).collect(), elapsed, placed)
 }

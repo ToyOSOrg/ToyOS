@@ -410,7 +410,7 @@ fn main() {
                 0 => card.wake_on_room(),
                 room => room,
             };
-            if room == 0 || node.transmit(now, room, |frame| card.tx(frame.len(), |slot| slot.copy_from_slice(frame)), draw) < room {
+            if room == 0 || node.transmit(now, room, |frame| card.tx(frame), draw) < room {
                 break;
             }
         }

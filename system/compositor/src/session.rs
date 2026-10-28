@@ -15,7 +15,7 @@ use toyos::endow;
 use toyos::ipc::{Connection, FrameRx, RxStep};
 use toyos::poller::{Poller, READABLE};
 use toyos::port::Acceptor;
-use toyos::shm::SharedMemory;
+use toyos::shm::{ReadOnly, SharedMemory};
 use toyos::{ipc, system, AsHandle};
 use toyos_abi::input::RawKeyEvent;
 use toyos_abi::RawHandle;
@@ -33,7 +33,7 @@ use toyos_desktop::{
 };
 use toyos_icon::{Icon, Mask};
 use window::display::{self, Refused, Setting};
-use window::Screen;
+use window::{Framebuffer, Screen};
 
 use crate::client::{
     announce, deliver, deliver_signal, deliver_with_handle, mark_dead, note_closed, note_opened,
@@ -41,7 +41,7 @@ use crate::client::{
     HANDSHAKE_TIMEOUT, MAX_PENDING_CONNS,
 };
 use crate::display::Display;
-use crate::render::{self, Assets, BackBuffer, SystemStats, TitleBarIcons};
+use crate::render::{self, Assets, SystemStats, TitleBarIcons};
 use crate::stats::FrameTotals;
 use crate::{
     launcher_apps, CLIPBOARD_POLL_HANDLES, DISPLAY_PORT_POLL_HANDLES, DOUBLE_CLICK_TIME, DRAIN_BUDGET,
@@ -256,7 +256,7 @@ pub struct Session {
     /// The person's own scale, kept across boots; drawn at as far as the
     /// mode holds it ([`Scale::shown`]).
     kept: Option<Scale>,
-    back: BackBuffer,
+    back: Framebuffer<'static>,
     cursors: Cursors,
     current_cursor: CursorStyle,
 
@@ -331,7 +331,7 @@ impl Session {
             (None, None) => println!("compositor: drawing at scale {scale}"),
         }
         let screen = display.screen();
-        let back = BackBuffer::new(screen.width(), screen.height(), screen.pixel_format_raw());
+        let back = Framebuffer::new(screen.width(), screen.height(), screen.pixel_format_raw());
 
         let shapes = Shapes::read();
         let cursors = shapes.cursors(scale);
@@ -1350,34 +1350,18 @@ impl Session {
             self.stack.len(),
             self.desk.screen,
         );
-        let shm = match SharedMemory::create((content.area() * 4) as usize) {
-            Ok(shm) => shm,
+        // The client gets the one writable handle and draws into the buffer
+        // with plain stores; the compositor reads it through a read-only
+        // mapping. Each holds the region apart, so a client that exits leaves
+        // the compositor's buffer intact until the window goes.
+        let (shm, client_shm) = match ReadOnly::create((content.area() * 4) as usize) {
+            Ok(made) => made,
             Err(e) => {
                 eprintln!(
                     "compositor: refusing {}x{} window from client {} — there is no memory \
                      for it ({e:?})",
                     content.w(),
                     content.h(),
-                    handle.0
-                );
-                let _ = ipc::try_send(
-                    handle,
-                    window::MSG_WINDOW_REFUSED,
-                    &window::WindowRefused { reason: window::REFUSED_NO_MEMORY },
-                );
-                return;
-            }
-        };
-        // A second handle to the same region, for the client. The compositor
-        // keeps the first and draws chrome through it, so the two lifetimes are
-        // genuinely separate: a client that exits takes its own handle and
-        // leaves the compositor's buffer intact until the window goes.
-        let client_shm = match shm.share() {
-            Ok(h) => h,
-            Err(e) => {
-                eprintln!(
-                    "compositor: refusing a window to client {} — its buffer cannot be shared \
-                     ({e:?})",
                     handle.0
                 );
                 let _ = ipc::try_send(
@@ -1451,21 +1435,11 @@ impl Session {
             );
             return;
         }
-        let region = match SharedMemory::create(len) {
-            Ok(region) => region,
+        let (region, theirs) = match ReadOnly::create(len) {
+            Ok(made) => made,
             Err(e) => {
                 eprintln!(
-                    "compositor: client {} gets no copy — no memory for {len} bytes ({e:?})",
-                    handle.0
-                );
-                return;
-            }
-        };
-        let theirs = match region.share() {
-            Ok(theirs) => theirs,
-            Err(e) => {
-                eprintln!(
-                    "compositor: client {} gets no copy — its region cannot be shared ({e:?})",
+                    "compositor: client {} gets no copy — no region of {len} bytes for it ({e:?})",
                     handle.0
                 );
                 return;
@@ -1582,7 +1556,7 @@ impl Session {
         if !window::copy_fits(len) {
             return mark_dead(&mut self.dead, from, DropReason::OutOfProtocol);
         }
-        let (region, theirs) = match SharedMemory::create(len).and_then(|r| r.share().map(|h| (r, h))) {
+        let (region, theirs) = match ReadOnly::create(len) {
             Ok(made) => made,
             Err(e) => {
                 eprintln!("compositor: the watcher gets no region — no memory for {len} bytes ({e:?})");
@@ -1607,9 +1581,9 @@ impl Session {
         let sent = if len <= window::MAX_INLINE_PAYLOAD {
             w.conn.try_send_bytes(window::MSG_CLIPBOARD_PASTE, self.clipboard.as_bytes()).map_err(DropReason::from)
         } else {
-            match SharedMemory::create(len).and_then(|mut r| {
-                r.as_mut_slice()[..len].copy_from_slice(self.clipboard.as_bytes());
-                r.share()
+            match SharedMemory::create(len).and_then(|r| {
+                r.bytes().write(0, self.clipboard.as_bytes());
+                r.share_read_only()
             }) {
                 Ok(theirs) => w
                     .conn
@@ -1737,7 +1711,7 @@ impl Session {
         let old = self.desk;
         let rescaled = scale != old.scale;
         if mode_rect(mode) != old.screen {
-            self.back = BackBuffer::new(mode.width as usize, mode.height as usize, self.pixel_format());
+            self.back = Framebuffer::new(mode.width as usize, mode.height as usize, self.pixel_format());
             self.pointers.screen(mode.width, mode.height);
             self.wallpaper.rescale(mode, self.pixel_format());
         }
@@ -1995,7 +1969,7 @@ impl Session {
         };
         for region in &regions {
             render::paint(
-                &self.back.surface,
+                &self.back,
                 &self.desk,
                 &self.stack,
                 &assets,
@@ -2009,14 +1983,14 @@ impl Session {
         if let Some(shown) = self.overlay.visible(self.overlay_now()) {
             let rect = overlay_rect(&self.desk);
             if regions.iter().any(|r| r.overlaps(rect)) {
-                render::draw_overlay(&self.back.surface, &self.font, rect, &shown.text());
+                render::draw_overlay(&self.back, &self.font, rect, &shown.text());
             }
         }
         if let Some(waiting) = &self.desktop.waiting {
             let rect = sign_out_rect(&self.desk);
             if regions.iter().any(|r| r.overlaps(rect)) {
                 let text = sign_out_text(self.desktop.stopping, waiting.names.iter().map(String::as_str), waiting.more);
-                render::draw_overlay(&self.back.surface, &self.font, rect, &text);
+                render::draw_overlay(&self.back, &self.font, rect, &text);
             }
         }
 
@@ -2026,7 +2000,7 @@ impl Session {
             let (mask, color) = self.cursors.get(self.current_cursor);
             let rect = cursor::drawn(self.current_cursor, self.cursor, self.desk.scale);
             if regions.iter().any(|r| r.overlaps(rect)) {
-                render::draw_software_cursor(&self.back.surface, mask, color, rect.origin());
+                render::draw_software_cursor(&self.back, mask, color, rect.origin());
             }
         }
         regions
@@ -2136,7 +2110,7 @@ impl Session {
         // the send has moved it, so the compositor's own mapping goes at the end
         // of this function — where the old code kept the last paste mapped until
         // the next one replaced it.
-        let mut shm = match SharedMemory::create(self.clipboard.len()) {
+        let shm = match SharedMemory::create(self.clipboard.len()) {
             Ok(shm) => shm,
             Err(e) => {
                 eprintln!(
@@ -2147,14 +2121,14 @@ impl Session {
                 return;
             }
         };
-        let Ok(handle) = shm.share() else {
+        let Ok(handle) = shm.share_read_only() else {
             eprintln!(
                 "compositor: client {} gets no paste — its region cannot be shared",
                 win.client.conn.as_handle().0
             );
             return;
         };
-        shm.as_mut_slice()[..self.clipboard.len()].copy_from_slice(self.clipboard.as_bytes());
+        shm.bytes().write(0, self.clipboard.as_bytes());
         deliver_with_handle(
             &mut self.dead,
             win,
@@ -2184,17 +2158,11 @@ fn mode_rect(mode: Mode) -> Rect {
 }
 
 /// Carry `regions` of the back buffer to `screen`, and answer the pixels.
-fn blit(screen: &Screen, back: &BackBuffer, regions: &[Rect]) -> u64 {
+fn blit(screen: &Screen, back: &Framebuffer, regions: &[Rect]) -> u64 {
     let mut pixels = 0;
     for region in regions {
-        screen.blit(
-            region.x0 as usize,
-            region.y0 as usize,
-            region.w() as usize,
-            region.h() as usize,
-            back.surface.width(),
-            back.region(*region),
-        );
+        let (x, y) = (region.x0 as usize, region.y0 as usize);
+        screen.blit(x, y, region.w() as usize, region.h() as usize, back, x, y);
         pixels += region.area();
     }
     pixels
@@ -2265,26 +2233,17 @@ fn rebuffer(win: &mut Win, pixel_format: u32, scale: window::Scale, dead: &mut V
         return true;
     }
     let (w, h) = (win.content.w(), win.content.h());
-    let new_shm = match SharedMemory::create(w as usize * h as usize * 4) {
-        Ok(shm) => shm,
+    let (new_shm, client_shm) = match ReadOnly::create(w as usize * h as usize * 4) {
+        Ok(made) => made,
         Err(e) => {
             eprintln!(
-                "compositor: client {} keeps its {}x{} buffer — no memory for {w}x{h} ({e:?})",
+                "compositor: client {} keeps its {}x{} buffer — no region for {w}x{h} ({e:?})",
                 win.client.conn.as_handle().0,
                 win.buf_w,
                 win.buf_h
             );
             return false;
         }
-    };
-    let Ok(client_shm) = new_shm.share() else {
-        eprintln!(
-            "compositor: client {} keeps its {}x{} buffer — the new one cannot be shared",
-            win.client.conn.as_handle().0,
-            win.buf_w,
-            win.buf_h
-        );
-        return false;
     };
     let generation = win.client.buffers.give(Buffer { shm: new_shm, width: w, height: h, scale });
     // The one message a window cannot afford to miss — its next present is

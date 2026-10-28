@@ -15,8 +15,8 @@
 
 use core::cell::Cell;
 
-use crate::proclife::table::{Lifecycle, Processes};
-use crate::proclife::{Pid, Tid};
+use crate::table::{Lifecycle, Processes};
+use crate::{Pid, Tid};
 
 /// Why a join may never be answered.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -87,8 +87,8 @@ mod tests {
     use super::*;
     use core::cell::RefCell;
 
-    use crate::proclife::model::World;
-    use crate::proclife::ThreadLocation;
+    use crate::model::World;
+    use crate::ThreadLocation;
 
     #[test]
     fn a_live_thread_answers_wait_and_stays_in_the_table() {
@@ -115,8 +115,8 @@ mod tests {
         let mut world = World::new();
         let pid = world.spawn_process();
         let t1 = world.spawn_thread(pid);
-        assert!(crate::proclife::teardown::claim_teardown(&mut world, pid, crate::proclife::End::Killed));
-        let _ = crate::proclife::teardown::leave(&mut world, pid, t1, None);
+        assert!(crate::teardown::claim_teardown(&mut world, pid, crate::End::Killed));
+        let _ = crate::teardown::leave(&mut world, pid, t1, None);
         assert_eq!(collect_zombie(&mut world, pid, t1), Ok(None));
         assert!(world.get(pid).unwrap().location(t1).is_some(), "the entry keeps the thread");
     }

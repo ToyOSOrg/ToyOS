@@ -14,10 +14,9 @@
 //! handle a client sends stays queued until its connection closes.
 
 use std::fmt;
-use std::sync::atomic::Ordering;
 use std::time::{Duration, Instant};
 
-use toyos::shm::SharedMemory;
+use toyos::shm::ReadOnly;
 use toyos::{ipc, AsHandle, Connection, OwnedHandle};
 use toyos_abi::syscall::SyscallError;
 use toyos_abi::RawHandle;
@@ -57,10 +56,10 @@ pub struct Client {
     pub frames: u64,
 }
 
-/// A window's buffer, the compositor's own handle to it, its size in pixels
-/// and the scale its client draws into it at.
+/// A window's buffer, the compositor's own read-only mapping of it, its size
+/// in pixels and the scale its client draws into it at.
 pub struct Buffer {
-    pub shm: SharedMemory,
+    pub shm: ReadOnly,
     pub width: i32,
     pub height: i32,
     pub scale: window::Scale,
@@ -134,16 +133,16 @@ pub struct PendingConn {
 ///
 /// **Read once, and only by being taken.** Its one method consumes it, so
 /// nothing here can read the region twice or validate it in place.
-pub struct CopyRegion(SharedMemory);
+pub struct CopyRegion(ReadOnly);
 
 impl CopyRegion {
-    pub fn new(region: SharedMemory) -> Self {
+    pub fn new(region: ReadOnly) -> Self {
         Self(region)
     }
 
     /// Every byte, each read once, into memory no client can write.
     pub fn take(self) -> Vec<u8> {
-        self.0.as_atomic().iter().map(|b| b.load(Ordering::Relaxed)).collect()
+        self.0.bytes().to_vec()
     }
 }
 

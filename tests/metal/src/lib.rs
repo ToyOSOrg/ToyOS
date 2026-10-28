@@ -91,6 +91,7 @@ pub const STICK_SECS: u64 = 30;
 
 /// Each tool at the path the bench's Ubuntu installs it, so `sudo` runs that
 /// one whatever the account's `PATH`.
+const BLOCKDEV: &str = "/usr/sbin/blockdev";
 const DD: &str = "/usr/bin/dd";
 const EFIBOOTMGR: &str = "/usr/bin/efibootmgr";
 const MOUNT: &str = "/usr/bin/mount";
@@ -99,7 +100,12 @@ const SGDISK: &str = "/usr/sbin/sgdisk";
 const UMOUNT: &str = "/usr/bin/umount";
 const REBOOT: &str = "/usr/sbin/reboot";
 const TRUE: &str = "/usr/bin/true";
+const UDEVADM: &str = "/usr/bin/udevadm";
 const WIPEFS: &str = "/usr/sbin/wipefs";
+
+/// How long udev's queue gets to drain, a failure bound: udevd kills a stuck
+/// event at 180 s (systemd-udevd(8), `--event-timeout`).
+const SETTLE_SECS: u64 = 180;
 
 /// What the firmware loads off the stick's ESP, and off the internal one.
 const LOADER: &str = r"\EFI\BOOT\BOOTX64.EFI";
@@ -448,16 +454,18 @@ impl Identity {
     }
 }
 
-/// Every block device with its partitions' numbers, types and GUIDs, as udev
-/// records them, for [`located`].
-const DISKS: &str = "lsblk --noheadings --paths --pairs --output NAME,TYPE,PKNAME,PARTN,PARTTYPE,PARTUUID";
+/// Every block device with its partitions' numbers, types, GUIDs and
+/// filesystems, as udev records them, for [`located`].
+const DISKS: &str = "lsblk --noheadings --paths --pairs --output NAME,TYPE,PKNAME,PARTN,PARTTYPE,PARTUUID,FSTYPE";
 
 /// One partition [`DISKS`] listed.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 struct Listed {
     index: u32,
     kind: Option<Guid>,
     unique: Option<Guid>,
+    /// The filesystem whose signature `blkid` found in it.
+    filesystem: Option<String>,
 }
 
 /// Each `/dev/sd<letter>` disk [`DISKS`] answered, with its partitions.
@@ -491,6 +499,7 @@ fn sd_disks(listing: &str) -> Result<Vec<(Sd, Vec<Listed>)>, Refusal> {
             index,
             kind: internal::guid(&field(row, "PARTTYPE")),
             unique: internal::guid(&field(row, "PARTUUID")),
+            filesystem: Some(field(row, "FSTYPE")).filter(|fs| !fs.is_empty()),
         });
     }
     Ok(disks)
@@ -643,7 +652,13 @@ fn record_machine(dir: &Path, machine: &Machine, disk: &Identity) -> Result<Capt
 #[derive(Debug, Clone, PartialEq, Eq)]
 enum Job {
     Wipe(Sd),
+    /// The signatures inside one partition, which a wipe of the whole disk
+    /// leaves.
+    WipePartition { sd: Sd, part: u32 },
     Flash(Sd),
+    Settle,
+    /// The kernel's table of the disk, read again off the disk.
+    Reread(Sd),
     /// One partition read whole, as bytes rather than as files: what
     /// `toyos-fat32-check` judges is the volume `logkeeper` wrote, and a
     /// `mount` has already had a driver's opinion about it.
@@ -742,9 +757,15 @@ impl Target {
         };
         match job {
             Job::Wipe(sd) => words(&[WIPEFS, "--all", &sd.node().whole()]),
+            Job::WipePartition { sd, part } => words(&[WIPEFS, "--all", &sd.node().partition(*part)]),
             // `nocreat`: a node that is not there is refused, rather than
             // created as a file in `/dev` that every later write lands in.
             Job::Flash(sd) => words(&[DD, &format!("of={}", sd.node().whole()), "bs=4M", "conv=fsync,nocreat"]),
+            // Root's, because only root's settle first waits for udevd to
+            // have handled what is already pending, such as a writer's close
+            // it has yet to turn into an event.
+            Job::Settle => words(&[UDEVADM, "settle", &format!("--timeout={SETTLE_SECS}")]),
+            Job::Reread(sd) => words(&[BLOCKDEV, "--rereadpt", &sd.node().whole()]),
             Job::ReadLog { sd, part } => words(&[DD, &format!("if={}", sd.node().partition(*part)), "bs=4M"]),
             Job::Create { sd, esp } => create(&sd.node().whole(), *esp, &self.label),
             Job::Delete(id) => words(&[EFIBOOTMGR, "--delete-bootnum", "--bootnum", id]),
@@ -1256,6 +1277,18 @@ impl Driver {
         Ok(dd)
     }
 
+    /// **The kernel reads a disk's table only when asked to, so the loop asks**
+    /// once it has written one. The ask udevd makes when a writer closes the disk
+    /// is best effort and skipped while anything holds the disk's lock, as udevd's
+    /// own probing of it does. udev is settled first, so no ask of its own is
+    /// still to come; neither job opens the disk for writing, so neither starts
+    /// another.
+    fn reread(&self, sd: Sd) -> Result<(), Refusal> {
+        self.as_root("settling udev", Job::Settle, None)?;
+        self.as_root("re-reading the table", Job::Reread(sd), None)?;
+        Ok(())
+    }
+
     /// **The write is verified, not assumed**: `dd`'s own byte count and then
     /// the table the kernel re-read are both compared. `wipefs`
     /// first, because the stick outlives the image and its old backup GPT would
@@ -1271,7 +1304,7 @@ impl Driver {
         let out = self.as_root("flashing the stick", Job::Flash(sd), Some(feed))?;
         let Some(out) = out else { return Ok(None) };
         let dd = self.fed("flashing the stick", &out, image.bytes)?;
-        self.ssh("settling the new table", "udevadm settle")?;
+        self.reread(sd)?;
         for (name, part) in [("the ESP", image.esp), ("TOYOS-LOG", image.log)] {
             let at = sd.node().part_sysfs(part.index);
             let read = self.ssh("reading the new table back", &format!("cat {at}/start {at}/size"))?;
@@ -1287,6 +1320,26 @@ impl Driver {
             }
         }
         Ok(Some(Flashed { wipe, flash: began.elapsed().as_secs_f64(), dd: dd.secs }))
+    }
+
+    /// The writes that make `sd` a scratch disk, and its read-back; `false` is a
+    /// dry run, which wrote nothing.
+    ///
+    /// **The new partition is wiped as well as the disk**: a wipe of the whole
+    /// disk erases its tables and nothing inside a partition, and the new
+    /// partition starts where the old first one did, so the old ESP's FAT would
+    /// otherwise be read as the scratch partition's.
+    fn make_scratch(&self, sd: Sd) -> Result<bool, Refusal> {
+        self.as_root("wiping its signatures", Job::Wipe(sd), None)?;
+        if self.as_root("writing the scratch table", Job::Scratch(sd), None)?.is_none() {
+            return Ok(false);
+        }
+        self.reread(sd)?;
+        self.as_root("wiping the new partition's signatures", Job::WipePartition { sd, part: 1 }, None)?;
+        // The listing is udev's record, of the re-read and the wipe.
+        self.as_root("settling udev", Job::Settle, None)?;
+        scratch_read_back(&self.ssh("listing the disks", DISKS)?, sd)?;
+        Ok(true)
     }
 
     /// The boot entry `create` makes under `label` for the ESP whose partition
@@ -1516,7 +1569,7 @@ impl Driver {
 
         self.as_root("giving the partitions the image's GUIDs", Job::Retag(named.clone()), None)?;
         if !self.dry_run {
-            self.ssh("settling the table", "udevadm settle")?;
+            self.as_root("settling udev", Job::Settle, None)?;
             let back = self.install_area()?;
             for (o, guid) in &named {
                 let got = &back[Owned::ALL.iter().position(|x| x == o).expect("listed")];
@@ -1556,7 +1609,7 @@ impl Driver {
     fn make_area(&self) -> Result<(), Refusal> {
         let node = self.target.internal;
         if !self.dry_run && self.as_root("adding an area the table may already hold", Job::AddPartitions, None).is_ok() {
-            self.ssh("settling the table", "udevadm settle")?;
+            self.as_root("settling udev", Job::Settle, None)?;
             if internal::recognise(&self.internal_disk()?).map_err(Refusal::Layout)? != internal::Area::Absent {
                 println!("{}: the table already held the install area, and the kernel now does too", node.whole());
                 return Ok(());
@@ -1566,7 +1619,7 @@ impl Driver {
         self.as_root("making the install partitions", Job::Partition, None)?;
         self.as_root("adding them to the kernel's view", Job::AddPartitions, None)?;
         if !self.dry_run {
-            self.ssh("settling the new table", "udevadm settle")?;
+            self.as_root("settling udev", Job::Settle, None)?;
         }
         Ok(())
     }
@@ -1818,6 +1871,20 @@ fn adoptable(listing: &str, sd: Sd, image: Carrying) -> Result<(), Refusal> {
     Ok(())
 }
 
+/// Whether `sd` of `listing` reads back as [`make_scratch`](Driver::make_scratch)
+/// leaves it: a scratch disk whose one partition carries no filesystem.
+fn scratch_read_back(listing: &str, sd: Sd) -> Result<(), Refusal> {
+    let parts = parts_of(listing, sd)?;
+    let disk = sd.node().whole();
+    if !Carrying::Scratch.holds(&parts) {
+        return Err(Refusal::Adopt(format!("{disk} was written and does not read back as a scratch disk")));
+    }
+    if let Some(fs) = parts.iter().find_map(|p| p.filesystem.as_deref()) {
+        return Err(Refusal::Adopt(format!("{disk}'s scratch partition still carries a {fs} signature")));
+    }
+    Ok(())
+}
+
 /// Make `sd`, named by hand, a scratch disk of a recorded machine: its
 /// signatures wiped and a table of one [`Carrying::Scratch`] partition
 /// written, which the disk is then read back as carrying. The disk's contents
@@ -1831,15 +1898,9 @@ fn adopt_scratch(target: &Target, dry_run: bool, sd: Sd) -> Result<(), Refusal> 
     if !disk.removable {
         return Err(Refusal::Identity { field: "removable", want: "1".to_string(), got: "0".to_string() });
     }
-    driver.as_root("wiping its signatures", Job::Wipe(sd), None)?;
-    driver.as_root("writing the scratch table", Job::Scratch(sd), None)?;
-    if dry_run {
+    if !driver.make_scratch(sd)? {
         println!("dry run: nothing was erased");
         return Ok(());
-    }
-    driver.ssh("settling the new table", "udevadm settle")?;
-    if !Carrying::Scratch.holds(&parts_of(&driver.ssh("listing the disks", DISKS)?, sd)?) {
-        return Err(Refusal::Adopt(format!("{} was written and does not read back as a scratch disk", sd.node().whole())));
     }
     println!(
         "{} is a scratch disk: {} sectors, {} {}",
@@ -2306,7 +2367,8 @@ pub struct Phases {
     /// the machine and the disk read off the machine.
     pub preamble: f64,
     pub wipe: f64,
-    /// `dd` over `ssh`, and the table read back.
+    /// `dd` over `ssh`, settling udev, the kernel's re-read of the table, and
+    /// the table read back.
     pub flash: f64,
     /// What `dd` itself said of the write. It reads `ssh`'s stdin, so this is
     /// whichever of the wire and the stick is slower, and splits neither out.
@@ -3176,6 +3238,21 @@ mod tests {
         assert!(!Carrying::Scratch.holds(&parts_of(&both, Sd(b'a')).unwrap()));
     }
 
+    /// **An adoption reads back the wipe it made**: a scratch partition still
+    /// carrying the old ESP's FAT is refused, by name, as is a table that is
+    /// not a scratch disk's.
+    #[test]
+    fn an_adopted_disk_reads_back_as_scratch_with_no_filesystem() {
+        let sdb = Sd(b'b');
+        assert_eq!(scratch_read_back(&scratch("/dev/sdb"), sdb), Ok(()));
+        let stale = scratch("/dev/sdb").replace("PARTUUID=\"60000000-0000-4000-8000-000000000000\"", "PARTUUID=\"60000000-0000-4000-8000-000000000000\" FSTYPE=\"vfat\"");
+        assert_ne!(stale, scratch("/dev/sdb"));
+        let refused = scratch_read_back(&stale, sdb).unwrap_err();
+        assert!(matches!(refused, Refusal::Adopt(ref why) if why.ends_with("carries a vfat signature")), "{refused:?}");
+        let refused = scratch_read_back(&toyos("/dev/sdb", LOG), sdb).unwrap_err();
+        assert!(matches!(refused, Refusal::Adopt(ref why) if why.ends_with("does not read back as a scratch disk")), "{refused:?}");
+    }
+
     /// **Adoption never erases a disk holding a ToyOS image**, which is the
     /// one thing the boot stick is known by, nor a node the machine lacks.
     #[test]
@@ -3316,6 +3393,12 @@ mod tests {
         assert_eq!(
             t.remote(&Job::Flash(Sd(b'a')), &home()),
             "sudo -n '/usr/bin/dd' 'of=/dev/sda' 'bs=4M' 'conv=fsync,nocreat'"
+        );
+        assert_eq!(t.remote(&Job::Settle, &home()), "sudo -n '/usr/bin/udevadm' 'settle' '--timeout=180'");
+        assert_eq!(t.remote(&Job::Reread(Sd(b'a')), &home()), "sudo -n '/usr/sbin/blockdev' '--rereadpt' '/dev/sda'");
+        assert_eq!(
+            t.remote(&Job::WipePartition { sd: Sd(b'a'), part: 1 }, &home()),
+            "sudo -n '/usr/sbin/wipefs' '--all' '/dev/sda1'"
         );
         assert_eq!(
             t.remote(&Job::Create { sd: Sd(b'a'), esp: 1 }, &home()),

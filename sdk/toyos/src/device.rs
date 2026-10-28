@@ -53,8 +53,37 @@ pub(crate) fn read_info<T: IpcPayload>(dev: &Device) -> Result<T, SyscallError> 
 pub struct FramebufferDev(pub(crate) Device);
 
 impl FramebufferDev {
-    pub fn info(&self) -> Result<toyos_abi::FramebufferInfo, SyscallError> {
-        read_info(&self.0)
+    /// Read the claim's description, which this consumes the claim to do only
+    /// once, and map the scanout it hands over: `stride * height * 4` bytes.
+    pub fn open(self) -> Result<Scanout, SyscallError> {
+        let info: toyos_abi::FramebufferInfo = read_info(&self.0)?;
+        let bytes = info.stride as usize * info.height as usize * 4;
+        let memory = crate::shm::SharedMemory::adopt(crate::OwnedHandle(info.scanout), bytes)?;
+        Ok(Scanout { info, memory, _claim: self })
+    }
+}
+
+/// A framebuffer claim, opened. Held whole: closing the claim gives the
+/// framebuffer back, and the mapping goes first.
+pub struct Scanout {
+    info: toyos_abi::FramebufferInfo,
+    memory: crate::shm::SharedMemory,
+    _claim: FramebufferDev,
+}
+
+impl Scanout {
+    pub fn info(&self) -> &toyos_abi::FramebufferInfo {
+        &self.info
+    }
+
+    pub fn memory(&self) -> &crate::shm::SharedMemory {
+        &self.memory
+    }
+}
+
+impl AsRef<crate::shm::SharedMemory> for Scanout {
+    fn as_ref(&self) -> &crate::shm::SharedMemory {
+        &self.memory
     }
 }
 
@@ -106,7 +135,7 @@ impl PciDev {
     /// mapped with the rest of its page; the length here is the BAR's.
     pub fn map_bar(&self, bar: u32, bytes: u64) -> Result<crate::shm::SharedMemory, SyscallError> {
         let handle = syscall::device_bar_map(self.0.as_handle(), bar)?;
-        crate::shm::SharedMemory::adopt(handle, bytes as usize)
+        crate::shm::SharedMemory::adopt(crate::OwnedHandle(handle), bytes as usize)
     }
 
     /// Give up ownership, for a claim about to be endowed.
@@ -131,7 +160,7 @@ impl PciDev {
     /// the width [`Self::dma_limit`] stated.
     pub fn dma_alloc(&self, bytes: u64) -> Result<DmaRegion, SyscallError> {
         let grant = syscall::device_dma_alloc(self.0.as_handle(), bytes)?;
-        let memory = crate::shm::SharedMemory::adopt(grant.shm, grant.bytes as usize)?;
+        let memory = crate::shm::SharedMemory::adopt(crate::OwnedHandle(grant.shm), grant.bytes as usize)?;
         Ok(DmaRegion { memory, device_addr: grant.device_addr })
     }
 
@@ -213,6 +242,12 @@ impl AcpiDev {
     /// ([`syscall::acpi_s5`]).
     pub fn s5(&self, slp_typ_a: u64) -> Result<(), SyscallError> {
         syscall::acpi_s5(self.as_handle(), slp_typ_a)
+    }
+
+    /// Declare one processor's idle states deeper than C1
+    /// ([`syscall::acpi_idle`]).
+    pub fn idle(&self, declaration: &toyos_abi::acpi::IdleDeclaration) -> Result<(), SyscallError> {
+        syscall::acpi_idle(self.as_handle(), declaration)
     }
 }
 

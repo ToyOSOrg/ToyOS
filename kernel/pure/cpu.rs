@@ -190,6 +190,8 @@ pub struct Counters {
     pub aperf_mperf: bool,
     /// `MSR_SMI_COUNT` (34H).
     pub smi: bool,
+    /// `MSR_CORE_C6_RESIDENCY` and `MSR_CORE_C7_RESIDENCY` (3FDH, 3FEH).
+    pub core_residency: bool,
 }
 
 pub fn counters(facts: &CounterFacts) -> Counters {
@@ -201,7 +203,30 @@ pub fn counters(facts: &CounterFacts) -> Counters {
         // firmware's count it is read for.
         smi: counts_smis(&Ident::new(facts.vendor, facts.signature))
             && facts.cpuid_1_ecx & CPUID_1_ECX_HYPERVISOR == 0,
+        // The same rule: a hypervisor's emulation is not the core's count.
+        core_residency: counts_core_residency(&Ident::new(facts.vendor, facts.signature))
+            && facts.cpuid_1_ecx & CPUID_1_ECX_HYPERVISOR == 0,
     }
+}
+
+/// The family 6 DisplayModels SDM Vol. 4 (325462-093) names as supporting
+/// Table 2-20, each in its section's opening (§2.11-§2.16 and §2.17), which
+/// defines `MSR_CORE_C6_RESIDENCY` (3FDH) and `MSR_CORE_C7_RESIDENCY` (3FEH)
+/// as counting at the TSC's rate, the unit [`Counter::CoreC6`] promises.
+/// Of the tables that supersede it for these models, only Table 2-57 names
+/// either address, for 06_AFH, and counts both in units of the P1 clock,
+/// so 06_AFH is left out. AMD documents no core residency counter in the
+/// PPRs in hand.
+///
+/// [`Counter::CoreC6`]: toyos_abi::counters::Counter::CoreC6
+const CORE_RESIDENCY_MODELS: [u32; 36] = [
+    0x2a, 0x2d, 0x3a, 0x3e, 0x3c, 0x45, 0x46, 0x3f, 0x3d, 0x47, 0x4f, 0x56,
+    0x4e, 0x5e, 0x55, 0x8e, 0x9e, 0x66, 0xa5, 0xa6, 0x7e, 0x8c, 0x8d, 0x6a,
+    0x6c, 0x97, 0x9a, 0xba, 0xb7, 0xbf, 0x8f, 0xcf, 0xaa, 0xad, 0xae, 0xbd,
+];
+
+fn counts_core_residency(id: &Ident) -> bool {
+    id.vendor == Vendor::Intel && id.family == 6 && CORE_RESIDENCY_MODELS.contains(&id.model)
 }
 
 /// The Intel family 6 DisplayModels a section of SDM Vol. 4 names as
@@ -347,7 +372,14 @@ mod tests {
     /// 06_8CH, which §2.17 names as supporting Table 2-20.
     #[test]
     fn the_t14_counts_smis_and_has_aperf_and_mperf() {
-        assert_eq!(counters(&intel(T14_SIGNATURE)), Counters { aperf_mperf: true, smi: true });
+        assert_eq!(counters(&intel(T14_SIGNATURE)), Counters { aperf_mperf: true, smi: true, core_residency: true });
+    }
+
+    /// 06_AFH: Table 2-57 counts its core residency at P1, not the TSC.
+    #[test]
+    fn sierra_forest_counts_no_core_residency_in_tsc_ticks() {
+        assert!(!counters(&intel(0x000a_06f0)).core_residency);
+        assert!(counters(&intel(0x000a_06f0)).smi, "its 34H stands");
     }
 
     /// The AMD bench, Family 17h Model 60h: PPR 55922 gives it `EffFreq` and
@@ -355,19 +387,19 @@ mod tests {
     #[test]
     fn the_amd_bench_has_aperf_and_mperf_and_no_smi_count() {
         let renoir = CounterFacts { vendor: Vendor::Amd, signature: 0x0086_0f01, cpuid_1_ecx: 0, cpuid_6_ecx: 1 };
-        assert_eq!(counters(&renoir), Counters { aperf_mperf: true, smi: false });
+        assert_eq!(counters(&renoir), Counters { aperf_mperf: true, smi: false, core_residency: false });
     }
 
     #[test]
     fn a_vendor_neither_intel_nor_amd_has_neither() {
         let other = CounterFacts { vendor: Vendor::Other(*b"CentaurHauls"), ..intel(T14_SIGNATURE) };
-        assert_eq!(counters(&other), Counters { aperf_mperf: false, smi: false });
+        assert_eq!(counters(&other), Counters { aperf_mperf: false, smi: false, core_residency: false });
     }
 
     #[test]
     fn a_guest_counts_no_smis() {
         let guest = CounterFacts { cpuid_1_ecx: CPUID_1_ECX_HYPERVISOR, ..intel(T14_SIGNATURE) };
-        assert_eq!(counters(&guest), Counters { aperf_mperf: true, smi: false });
+        assert_eq!(counters(&guest), Counters { aperf_mperf: true, smi: false, core_residency: false });
     }
 
     /// Family 6 signatures with the given DisplayModel, stepping 1.

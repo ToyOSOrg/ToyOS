@@ -6,7 +6,7 @@ use std::cell::Cell;
 use std::vec::Vec;
 
 use toyos_blockdev::model::{Model, Search};
-use toyos_blockdev::{block_on_ready, Block, BlockDev, Bytes, BLOCK};
+use toyos_blockdev::{block_on_ready, Block, BlockDev, Bytes, ReadOnlyBytes, BLOCK};
 
 use super::super::crypt::oracle;
 use super::super::mount::{Order, Plan};
@@ -74,7 +74,7 @@ fn a_commit_between_a_node_write_and_its_pointer_update_keeps_every_acknowledged
     block_on_ready(m.commit()).unwrap();
     let search = model
         .check(1 << 10, 0xea51, |image| {
-            let v = open_ro(Bytes::new(image.to_vec()), None).map_err(|e| format!("{e:?}"))?;
+            let v = open_ro(ReadOnlyBytes::new(image).unwrap(), None).map_err(|e| format!("{e:?}"))?;
             let mut seen = names(&v);
             seen.sort();
             if seen != [b"a".to_vec(), b"b".to_vec()] {

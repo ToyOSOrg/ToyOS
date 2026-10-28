@@ -27,7 +27,7 @@ impl Region {
 
     /// A region a client sent, refused unless it is memory the kernel
     /// allocated and exactly a session long.
-    pub fn lent(handle: toyos::RawHandle) -> Result<Self, Lent> {
+    pub fn lent(handle: toyos::OwnedHandle) -> Result<Self, Lent> {
         Ok(Self { memory: SharedMemory::lent(handle, SESSION_BYTES)? })
     }
 
