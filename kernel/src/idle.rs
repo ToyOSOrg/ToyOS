@@ -41,9 +41,8 @@ pub struct Local {
     /// declaration it learned it under.
     history: AtomicU64,
     learned_under: AtomicU64,
-    /// Idle periods spent in a declared state, and their nanoseconds.
+    /// Idle periods spent in a declared state.
     deep: AtomicU64,
-    deep_nanos: AtomicU64,
 }
 
 impl Local {
@@ -54,13 +53,12 @@ impl Local {
             history: AtomicU64::new(0),
             learned_under: AtomicU64::new(0),
             deep: AtomicU64::new(0),
-            deep_nanos: AtomicU64::new(0),
         }
     }
 
-    /// Idle periods this CPU spent in a declared state, and their nanoseconds.
-    pub fn deep(&self) -> (u64, u64) {
-        (self.deep.load(Ordering::Relaxed), self.deep_nanos.load(Ordering::Relaxed))
+    /// Idle periods this CPU spent in a declared state.
+    pub fn deep(&self) -> u64 {
+        self.deep.load(Ordering::Relaxed)
     }
 }
 
@@ -176,7 +174,6 @@ pub fn wait(plan: &idle::Plan) {
         // Falling back to C1: what this CPU publishes is what it waits in.
         crate::sched::driver::publish_idle_exit(0);
     }
-    let entered = crate::clock::nanos_since_boot();
     match (state, &d) {
         (Some(state), Some(d)) => crate::arch::idle::enter(d.entries[state]),
         _ => crate::arch::hw::halt(),
@@ -184,10 +181,8 @@ pub fn wait(plan: &idle::Plan) {
     // Awake: no hold has a reason to wake this CPU until it waits again.
     crate::sched::driver::publish_idle_exit(0);
     let woke = crate::clock::nanos_since_boot();
-    let slept = woke.saturating_sub(entered);
     if state.is_some() {
         local.deep.fetch_add(1, Ordering::Relaxed);
-        local.deep_nanos.fetch_add(slept, Ordering::Relaxed);
     }
     let Some(d) = d else { return };
     let costs = &d.costs[..d.len];

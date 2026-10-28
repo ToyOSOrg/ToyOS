@@ -79,11 +79,7 @@ each against its control with the deep states off, all else equal):
   `r4/` in the evidence), and acpiserver ran for the whole of each of those
   clock windows: a measured busy core beside the clock's thread. At the
   starts of net, procs, mem, tail and nvme still at 3789, the roster names
-  nothing beside osbench for more than 0.9 ms of the 5.5 ms window. Mem
-  stays unexplained. Net, procs, tail and nvme reached 4189 under the
-  always-deepest control, so the history holding idle CPUs shallow after
-  the group before is the open hypothesis there; a per-CPU state read
-  inside the window would test it.
+  nothing beside osbench for more than 0.9 ms of the 5.5 ms window.
 - Group starts at 4189 across the eight T14 boots with the deep states:
   8 and 8 (r2), 8 and 10 (r3), 10 (B4), 5 (B5), 10 (B6) and 10 (B7), counted
   as a maximum above 4100 MHz. Only sched, files, ipc and work reached it
@@ -96,15 +92,31 @@ each against its control with the deep states off, all else equal):
   underran.
 
 **#1066's exit is unmet** where this track stands: the T14's `cpu.clock` reaches
-ratio 42 at 5 to 10 of 17 group starts against Linux's 13. Of the groups
-below it, boot, identity, energy and system are held by acpiserver's
-measured start-up work; the rest are the open question above. Three
-diagnostic boots (#1073's `r6/`) read the counters around each group's
-clock, the same with the history switched off, and the scheduler's diary
-across it. The counters read came back as one reading twice in 13 of 17
-windows (`issues/a-counters-read-within-10-ms-of-another-returns-the-older-reading-as-new.md`),
-and switching the history off left the count inside the spread. The
-finding goes into this record with the track's next change.
+ratio 42 at 5 to 10 of 17 group starts against Linux's 13. Three diagnostic
+T14 boots at #1073's head read each group's clock window (`r6/` in the
+evidence):
+
+- With the counters read around each window (D1), 8 group starts reached
+  4189; with the history also admitting every state (D2), 10. Both are
+  inside the spread: the history does not hold the count down, and no
+  idle-policy change is earned.
+- D1's counters showed nothing. In 13 of 17 windows the two reads, 5 ms
+  apart, shared one round (since fixed: every reading is taken after its
+  read was called), and the windows that did differ were read before
+  osbench took a window from the readings' own stamps.
+- The scheduler's diary across each window (D3), a boot in which boot,
+  identity, energy, system and mem were at 3789: in the first four
+  acpiserver ran beside osbench, 5.5 ms of the window by the roster. In mem
+  the diary and the roster agree that no thread but osbench's ran on any
+  CPU, and mem stays at 3789 under always-deepest too, so neither thread
+  work nor the idle choice holds it. The diary counts a thread running from
+  before the window only from its first event inside it. Net, procs, tail
+  and nvme reached 4189 in this boot.
+
+So boot, identity, energy and system are held by acpiserver's measured
+start-up work. Mem's 3789 is open: interrupts, which no thread view sees,
+or the package's power or thermal state after procs. The counters read
+around mem's clock window is the instrument to read it with next.
 
 **Exit**: on the T14, since a KVM guest's idle is its host's: the idle
 minute's package energy, timer lateness no worse than `hlt`'s by more than
