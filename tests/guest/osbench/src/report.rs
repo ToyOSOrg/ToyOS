@@ -64,6 +64,8 @@ pub fn any_refused() -> bool {
 /// `mhz_settled` is the clock it reached, and `mhz_after` the clock a settle
 /// just after the measurement reaches: a CPU that only idled meanwhile is
 /// back at its clock, and one a power or heat limit holds is not.
+/// `unsettled` names a settle that ran out its limit and took the clock it
+/// had.
 pub fn result(bench: &str, unit: &str, samples: &mut [u64], extra: &[(&str, String)]) {
     if samples.is_empty() {
         refuse(bench, "no samples");
@@ -87,11 +89,14 @@ pub fn result(bench: &str, unit: &str, samples: &mut [u64], extra: &[(&str, Stri
         line.push_str(&format!(" {key}={}", word(value)));
     }
     let after = crate::clock::mhz();
-    match crate::clock::take_settled() {
-        0 => {}
-        settled => {
-            crate::clock::settle();
-            line.push_str(&format!(" mhz_settled={settled} mhz_after={}", crate::clock::take_settled()));
+    if let Some(before) = crate::clock::take_settled() {
+        crate::clock::settle();
+        let settled_after = crate::clock::take_settled().expect("the settle just run");
+        line.push_str(&format!(" mhz_settled={} mhz_after={}", before.mhz, settled_after.mhz));
+        let unsettled: Vec<&str> =
+            [("before", before.capped), ("after", settled_after.capped)].iter().filter(|(_, c)| *c).map(|(w, _)| *w).collect();
+        if !unsettled.is_empty() {
+            line.push_str(&format!(" unsettled={}", unsettled.join("+")));
         }
     }
     line.push_str(&format!(" mhz={after}"));

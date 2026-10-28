@@ -1,12 +1,12 @@
 //! Files, through std's `fs` on both systems: the same operations under a
-//! filesystem each keeps in memory (`mem`) and under the one on the bench's
-//! disk (`disk`, which `storage` runs beside its durable writes). Nothing here
-//! asks for durability, so on the disk these are the cached path.
+//! filesystem each keeps in memory (`mem`), and on ToyOS under `/home`
+//! (`served`). Persistent storage is `storage`'s.
 //!
 //! `mem` is Linux's `/dev/shm` through the VFS, and ToyOS's `/tmp`, which the
-//! kernel serves through syscalls. `disk` is each system's
-//! [`crate::sys::persistent_dir`]: Linux's VFS and page cache over the
-//! runner's home, and ToyOS's DATA file server, through IPC per request.
+//! kernel serves through syscalls. `served` is ToyOS's DATA file server,
+//! through IPC per request: on the volume the bench's DATA partition holds
+//! where it holds one of ours, and in memory where it does not (the file
+//! server says which in the log).
 
 use std::fs::{self, File, OpenOptions};
 use std::io::{Read, Seek, SeekFrom, Write};
@@ -17,11 +17,22 @@ use crate::report::{condition, refuse};
 
 const MIB: usize = 1 << 20;
 
-/// A directory to measure under, and what serves it.
+/// A directory to measure under, what serves it, and the medium beneath,
+/// where the program can tell: `memory`, or the disk's kind.
 pub struct Target {
     pub name: &'static str,
     pub dir: String,
     pub served_by: String,
+    pub medium: Option<String>,
+}
+
+impl Target {
+    /// What every line measured under the target carries.
+    pub fn fields(&self) -> Vec<(&'static str, String)> {
+        let mut fields = vec![("served_by", self.served_by.clone())];
+        fields.extend(self.medium.clone().map(|m| ("medium", m)));
+        fields
+    }
 }
 
 pub fn memory() -> Target {
@@ -30,12 +41,23 @@ pub fn memory() -> Target {
     } else {
         ("/dev/shm", "tmpfs, through the VFS")
     };
-    Target { name: "mem", dir: dir.into(), served_by: served_by.into() }
+    Target { name: "mem", dir: dir.into(), served_by: served_by.into(), medium: Some("memory".into()) }
+}
+
+/// Every directory `files` measures under.
+pub fn targets() -> Vec<Target> {
+    let mut targets = vec![memory()];
+    if cfg!(target_os = "toyos") {
+        // Memory or the DATA partition's volume: the program cannot tell which.
+        let served_by = "the DATA file server, through IPC".into();
+        targets.push(Target { name: "served", dir: "/home".into(), served_by, medium: None });
+    }
+    targets
 }
 
 /// The persistent filesystem's directory, or `None` where the system has none.
 pub fn disk() -> Option<Target> {
-    crate::sys::persistent_dir().map(|(dir, served_by)| Target { name: "disk", dir, served_by })
+    crate::sys::persistent_dir().map(|(dir, served_by, medium)| Target { name: "disk", dir, served_by, medium: Some(medium) })
 }
 
 /// A scratch directory of this process's under `dir`, removed whole on drop.
@@ -80,7 +102,8 @@ fn page_at(i: usize, pages: usize) -> u64 {
     (x % pages as u64) * 4096
 }
 
-/// Every benchmark under `target`, each line naming what served it. Each
+/// Every benchmark under `target`, each line naming what served it and its
+/// medium. Each
 /// one's comment is its warm-up and repetitions.
 pub fn suite(target: &Target) {
     condition(&format!("fs.{}.served_by", target.name), &target.served_by);
@@ -92,7 +115,7 @@ pub fn suite(target: &Target) {
     };
     let name = |op: &str| format!("fs.{}.{op}", target.name);
     let with = |fields: &[(&'static str, String)]| -> Vec<(&'static str, String)> {
-        fields.iter().cloned().chain([("served_by", target.served_by.clone())]).collect()
+        fields.iter().cloned().chain(target.fields()).collect()
     };
 
     // Opening an existing 4 KiB file for reading and closing it: 2,000 after 100.

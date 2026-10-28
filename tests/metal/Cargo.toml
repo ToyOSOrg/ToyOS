@@ -14,13 +14,10 @@ toyos-build = { path = "../.." }
 # The outside judge of the log partition the boot left on the stick.
 toyos-fat32-check = { path = "../../lib/fat32/check" }
 toyos-gpt = { path = "../../lib/gpt" }
-# A ToyOS volume's magic, which the DATA designation never writes over.
-bcachefs = { path = "../../lib/bcachefs" }
-# Where the designation's one block waits for the root command that writes it.
-toyos-tmpdir = { path = "../../lib/tmpdir" }
 toyos-quiesce = { path = "../../lib/quiesce" }
 toyos-tco = { path = "../../lib/tco" }
 
 [dev-dependencies]
+toyos-tmpdir = { path = "../../lib/tmpdir" }
 # The slot table written into the test images `internal::admit` reads.
 toyos-update = { path = "../../lib/update" }

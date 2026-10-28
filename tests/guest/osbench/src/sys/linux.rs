@@ -521,10 +521,11 @@ pub fn mount_options(dir: &str) -> String {
     mount_of(dir).map_or_else(|| "unknown".into(), |(fstype, _, options)| format!("{fstype} {options}"))
 }
 
-/// The runner's home, and the filesystem and disk model holding it, as
-/// `ext4, NVMe disk, model <model>`; the path itself names the user and is
-/// never printed.
-pub fn persistent_dir() -> Option<(String, String)> {
+/// The runner's home, the filesystem and disk model holding it, as `ext4,
+/// NVMe disk, model <model>`, and the disk's kind as a medium: `nvme`, `usb`,
+/// `sata`, `mmc`, `virtio`, `other`, or `none` for no block device. The path
+/// itself names the user and is never printed.
+pub fn persistent_dir() -> Option<(String, String, String)> {
     let home = std::env::var("HOME").ok()?;
     let (fstype, source, _) = mount_of(&home)?;
     // btrfs reports an anonymous `0:NN` that names no block device; its
@@ -537,19 +538,22 @@ pub fn persistent_dir() -> Option<(String, String)> {
         sysfs(format!("{}:{}", libc::major(rdev), libc::minor(rdev)))
     });
     let Some(device) = device else {
-        return Some((home, format!("{fstype}, on no block device")));
+        return Some((home, format!("{fstype}, on no block device"), "none".into()));
     };
     let (disk, mapped) = backing_disk(device);
     let model = read(&disk.join("device/model").to_string_lossy()).unwrap_or_else(|| "unknown".into());
     let name = disk.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
-    let kind = [("nvme", "NVMe"), ("sd", "SCSI, SATA or USB"), ("mmcblk", "MMC"), ("vd", "virtio")]
-        .iter()
+    // A SCSI disk is a USB one where sysfs puts it under a USB device.
+    let usb = disk.to_string_lossy().contains("/usb");
+    let sd = if usb { ("USB", "usb") } else { ("SCSI or SATA", "sata") };
+    let (kind, medium) = [("nvme", ("NVMe", "nvme")), ("sd", sd), ("mmcblk", ("MMC", "mmc")), ("vd", ("virtio", "virtio"))]
+        .into_iter()
         .find(|(prefix, _)| name.starts_with(prefix))
-        .map_or("other", |(_, kind)| kind);
+        .map_or(("other", "other"), |(_, kind)| kind);
     let through = if mapped { " through device-mapper" } else { "" };
     // The device's own name is never printed: an installer or a user chose
     // a mapper's (`luks-<UUID>`, a volume group named for the host).
-    Some((home, format!("{fstype}{through}, {kind} disk, model {model}")))
+    Some((home, format!("{fstype}{through}, {kind} disk, model {model}"), medium.into()))
 }
 
 /// The `major:minor` of the filesystem holding `path`, off mountinfo's third

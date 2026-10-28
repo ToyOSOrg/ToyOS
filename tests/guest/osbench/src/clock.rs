@@ -2,7 +2,7 @@
 //! `arch::add_chain`'s adds wait a cycle each, so cycles are the number of
 //! adds.
 
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::Mutex;
 use std::time::{Duration, Instant};
 
 use osbench_rules::settle::Plateau;
@@ -10,8 +10,16 @@ use osbench_rules::settle::Plateau;
 use crate::report::result;
 use crate::ns_since;
 
-/// What the last [`settle`] settled at, for the next result line to print.
-static SETTLED: AtomicU64 = AtomicU64::new(0);
+/// What the last [`settle`] reached, for the next result line to print.
+static SETTLED: Mutex<Option<Settled>> = Mutex::new(None);
+
+/// The clock a settle reached, and whether it held: `capped` is a settle
+/// that ran out its [`SETTLE_LIMIT`] and took the reading it had.
+#[derive(Clone, Copy)]
+pub struct Settled {
+    pub mhz: u64,
+    pub capped: bool,
+}
 
 /// Turns per probe: 100,000 cycles, 25 to 50 µs on either bench.
 const TURNS: u64 = 1_000;
@@ -44,16 +52,18 @@ pub fn settle() {
     let mut plateau = Plateau::new(at(), mhz());
     loop {
         let reading = mhz();
-        if plateau.settled_with(at(), reading) || start.elapsed() >= SETTLE_LIMIT {
-            SETTLED.store(reading, Ordering::Relaxed);
+        let held = plateau.settled_with(at(), reading);
+        if held || start.elapsed() >= SETTLE_LIMIT {
+            *SETTLED.lock().expect("no settle panics holding it") = Some(Settled { mhz: reading, capped: !held });
             return;
         }
     }
 }
 
-/// The clock the last [`settle`] reached, once: zero when none has run since.
-pub fn take_settled() -> u64 {
-    SETTLED.swap(0, Ordering::Relaxed)
+/// The clock the last [`settle`] reached, once: `None` when none has run
+/// since.
+pub fn take_settled() -> Option<Settled> {
+    SETTLED.lock().expect("no settle panics holding it").take()
 }
 
 /// `cpu.clock`: 200 probes back to back after one, MHz. The first probes of a

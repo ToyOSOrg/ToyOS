@@ -125,14 +125,16 @@ fn fair() {
 }
 
 fn files() {
-    files::suite(&files::memory());
+    for target in files::targets() {
+        files::suite(&target);
+    }
 }
 
 /// Every group the machine alone runs, in the order `all` and the ToyOS job
 /// list run them: `boot` first, since it reads how long the boot took to
-/// reach it; `energy` while the machine is still quiet; `crunch`, which heats
-/// it, after every other measurement; and `persist` last, so what the disk
-/// writes back after it disturbs no other measurement.
+/// reach it; `energy` while the machine is still quiet; and `crunch`, which
+/// heats it, last: ToyOS reads no temperature to cool down by, so a group
+/// after it would start at a clock its Linux run does not.
 const GROUPS: [(&str, fn()); 17] = [
     ("boot", boot::suite),
     ("identity", identity::suite),
@@ -149,8 +151,8 @@ const GROUPS: [(&str, fn()); 17] = [
     ("work", work::suite),
     ("tail", tail::suite),
     ("nvme", nvme::suite),
-    ("crunch", crunch::suite),
     ("persist", storage::suite),
+    ("crunch", crunch::suite),
 ];
 
 /// The groups that need another party: `lan` the `osbench-peer` on the other

@@ -733,9 +733,8 @@ fn name_of(part: &toyos_gpt::Partition) -> String {
     String::from_utf16(part.name()).unwrap_or_else(|e| panic!("partition {}'s name is no UTF-16: {e}", part.unique_guid()))
 }
 
-/// Block 0 of a volume of `blocks` 4 KiB blocks, designated for ToyOS: the
-/// magic and its block count.
-pub fn designation(blocks: u64) -> [u8; SECTOR] {
+/// Block 0 of a volume: the magic and its block count.
+fn designation(blocks: u64) -> [u8; SECTOR] {
     let mut block = [0u8; SECTOR];
     block[..bcachefs::DESIGNATION_MAGIC.len()].copy_from_slice(&bcachefs::DESIGNATION_MAGIC);
     let at = bcachefs::DESIGNATION_BLOCKS_OFFSET;

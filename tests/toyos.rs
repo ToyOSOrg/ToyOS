@@ -1108,14 +1108,14 @@ const METAL: &[(&str, metal::Metal)] = &[
     (
         // The numbers compared with the same program on the bench's own Linux.
         // Evidence and not a verdict: they are read off the log, and the row
-        // holds only that every group ran to its end on the bench's NVMe.
-        // The T14 and the AMD bench. One boot runs the whole suite, so three
-        // readbacks are three runs.
+        // holds only that every group ran to its end, on a boot that did not
+        // spend itself formatting DATA. The T14 and the AMD bench. One boot
+        // runs the whole suite, so three readbacks are three runs.
         "osbench",
         metal::Metal {
             arms: BENCHCASE,
             judge: |b| {
-                data_on_the_nvme(b[0])?;
+                not_the_format_boot(b[0])?;
                 osbench_ran(b[0], &OSBENCH_GROUPS)
             },
         },
@@ -1408,16 +1408,12 @@ const METAL: &[(&str, metal::Metal)] = &[
         metal::Metal { arms: TESTCASES, judge: |b| usbd_serves_the_boot_stick(&b[0].kernel(), &b[0].log()) },
     ),
     (
-        // The bench's own NVMe disk, driven beside the stick by the row's
-        // class: its host's partitions left alone, and the owner's ToyOS DATA,
-        // designated (`toyos-metal --designate-data`), the one partition a
-        // session opened (`hostdisk::left_alone`). The T14 and the AMD bench;
+        // The bench's own NVMe disk, its host's partitions and the owner's
+        // unformatted ToyOS DATA, driven beside the stick by the row's class
+        // and left alone (`hostdisk::left_alone`). The T14 and the AMD bench;
         // the metal loop's next boot of the host off that disk is the other half.
         "nvme_leaves_the_benchs_disk_alone",
-        metal::Metal {
-            arms: TESTCASES,
-            judge: |b| common::hostdisk::left_alone(&b[0].log(), common::hostdisk::Data::Designated).map(|_| ()),
-        },
+        metal::Metal { arms: TESTCASES, judge: |b| common::hostdisk::left_alone(&b[0].log()).map(|_| ()) },
     ),
     (
         // The stick written through usbd while the boot deadline resets the
@@ -1630,7 +1626,7 @@ const TESTCASES: &[metal::Arm] = &[metal::once(
 
 /// `osbench`'s groups, each a job named by its symlink, in `osbench all`'s
 /// order: `boot` first, which reads how long the boot took to reach it, and
-/// `persist` last, which writes the disk.
+/// `crunch` last, which heats the machine.
 const OSBENCH_GROUPS: [&str; 17] = [
     "osbench_boot",
     "osbench_identity",
@@ -1647,8 +1643,8 @@ const OSBENCH_GROUPS: [&str; 17] = [
     "osbench_work",
     "osbench_tail",
     "osbench_nvme",
-    "osbench_crunch",
     "osbench_persist",
+    "osbench_crunch",
 ];
 
 /// The suite runs past every boot's bound on purpose: `tail` alone waits out
@@ -1701,32 +1697,21 @@ fn osbench_ran(boot: &metal::Readback, jobs: &[&str]) -> Result<(), String> {
     Ok(())
 }
 
-/// DATA, which `osbench persist` writes, was a volume on a TOYOS-DATA
-/// partition the NVMe driver serves, mounted, and not memory standing in for
-/// a partition that is not ours. The block service refuses DATA where two
-/// disks carry one, so a mount alongside the NVMe's partition is that
-/// partition's. The boot that formats a freshly designated partition is no
-/// measured run, and says how long the format took.
-fn data_on_the_nvme(boot: &metal::Readback) -> Result<(), String> {
+/// The boot that formats a freshly designated DATA partition is no measured
+/// run: its start went to the format, and the volume it leaves is new. It
+/// says how long the format took.
+fn not_the_format_boot(boot: &metal::Readback) -> Result<(), String> {
     const FORMATTING: &str = "fileserver: block 0 designates this partition for ToyOS; formatting it";
     const SERVING: &str = "fileserver: Data serving ";
     let log = boot.log();
     let text = log.text();
-    let served = format!(" of type {} at block ", toyos_gpt::Guid::TOYOS_DATA);
-    if !text.lines().any(|l| l.contains("nvme] nvme ") && l.contains(&served)) {
-        return Err("the NVMe driver served no TOYOS-DATA partition, so persist measured no disk of the bench's".into());
-    }
-    if let Some(began) = text.lines().find(|l| l.contains(FORMATTING)) {
-        let ended = text.lines().find(|l| l.contains(SERVING));
-        let secs = ended.and_then(since_boot).zip(since_boot(began)).map(|(end, start)| end - start);
-        let took = secs.map_or("its end unlogged".to_string(), |s| format!("{s:.3} s"));
-        return Err(format!("this boot formatted DATA off its designation ({took}), and the format's boot is no measured run"));
-    }
-    if !text.contains("fileserver: mounted the DATA volume") {
-        let why = text.lines().find(|l| l.contains("fileserver: the DATA")).unwrap_or("the file server said nothing of DATA");
-        return Err(format!("DATA was not the NVMe's partition, so persist measured no disk: {why}"));
-    }
-    Ok(())
+    let Some(began) = text.lines().find(|l| l.contains(FORMATTING)) else {
+        return Ok(());
+    };
+    let ended = text.lines().find(|l| l.contains(SERVING));
+    let secs = ended.and_then(since_boot).zip(since_boot(began)).map(|(end, start)| end - start);
+    let took = secs.map_or("its end unlogged".to_string(), |s| format!("{s:.3} s"));
+    Err(format!("this boot formatted DATA off its designation ({took}), and the format's boot is no measured run"))
 }
 
 /// A log line's seconds since boot: `[2026-10-24 14:17:17 12.664 fileserver]`.
@@ -4703,7 +4688,7 @@ fn a_host_disk_beside_the_stick_is_left_alone(test_config: &Path) -> Result<(), 
     console.push_str(&qemu.await_exit(by)?);
     let log = serial::Serial::named("the boot", console);
     log.must_say("vendor=8086 device=5845 prog_if=02")?;
-    match common::hostdisk::left_alone(&log, common::hostdisk::Data::Foreign)? {
+    match common::hostdisk::left_alone(&log)? {
         4 => {}
         named => return Err(format!("the driver named {named} partitions of a disk that has 4")),
     }

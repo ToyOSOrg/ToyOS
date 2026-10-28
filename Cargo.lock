@@ -3802,7 +3802,6 @@ dependencies = [
 name = "toyos-metal"
 version = "0.1.0"
 dependencies = [
- "bcachefs",
  "serde",
  "toml",
  "toyos-build",

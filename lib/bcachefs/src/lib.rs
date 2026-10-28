@@ -27,7 +27,7 @@ pub use block_io::{BlockIO, BlockBuf, BlockNum, DeviceError, TransferError};
 #[cfg(feature = "std")]
 pub use block_io::VecBlockIO;
 pub use fs::{file_entry_fits, Formatted, Mounted, ReadOnly, ReadWrite, Recorded, FsError, Extent};
-pub use superblock::{DESIGNATION_BLOCKS_OFFSET, DESIGNATION_MAGIC, FsUuid, MAGIC, Superblock};
+pub use superblock::{DESIGNATION_BLOCKS_OFFSET, DESIGNATION_MAGIC, FsUuid, Superblock};
 
 /// Records the largest single allocation each test thread makes, so a test can
 /// assert what parsing a crafted block asks the allocator for.

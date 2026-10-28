@@ -5,8 +5,8 @@
 # ACPI server, and netstack for `osbench lan` and `osbench internet`, each its
 # own metal row (`tests/toyos.rs`): no compositor or sound, so little but the
 # measurement asks for a CPU. The stick has no DATA partition, so DATA is the
-# bench's: the TOYOS-DATA partition on its NVMe, which `osbench persist`
-# writes, and which the `osbench` row refuses a boot to be without.
+# bench's TOYOS-DATA partition where ToyOS has designated it, and memory where
+# it has not; the log volume is what `osbench persist` writes.
 #
 # The runner's capability carries `jobs`, for the fairness run that starts each
 # workload as a job of its own; `counters`, `trace` and `roster`, so `osbench
@@ -62,8 +62,8 @@ args = [
     "osbench_work",
     "osbench_tail",
     "osbench_nvme",
-    "osbench_crunch",
     "osbench_persist",
+    "osbench_crunch",
     "reboot",
 ]
 
