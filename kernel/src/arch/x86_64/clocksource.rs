@@ -26,16 +26,21 @@ const HPET_CAP: u64 = 0x000;
 const HPET_CFG: u64 = 0x010;
 const HPET_COUNTER: u64 = 0x0F0;
 /// `GCAP_ID` bit 13, `COUNT_SIZE_CAP`: the main counter is 64 bits wide
-/// (IA-PC HPET Specification 1.0a, the General Capabilities and ID Register).
+/// (IA-PC HPET Specification 1.0a, §2.3.4).
 const COUNT_SIZE_CAP: u64 = 1 << 13;
-/// The main counter's tick is accurate to 0.05% over any interval of 1 ms or
-/// more (IA-PC HPET Specification 1.0a): the most the TSC may seem to
-/// drift against it without having moved.
-const HPET_TOLERANCE_PPB: u64 = 500_000;
+/// The HPET as a reference: its tick, and the main counter's clock frequency
+/// drift the specification's minimum implementation allows, ±0.05% over any
+/// interval of 1 ms or more and ±0.2% over any of 100 µs or less (IA-PC HPET
+/// Specification 1.0a, §2.2), which is what the TSC may seem to drift against
+/// it without having moved. The 0.2% is taken for every span under 1 ms, which
+/// the table leaves unstated between 100 µs and 1 ms.
+const fn hpet_reference(period_fs: u64) -> Reference {
+    Reference { period_fs, tolerance_ppb: 500_000, settled_ns: 1_000_000, short_tolerance_ppb: 2_000_000 }
+}
 
-/// Reads of the HPET per sample, of which the narrowest bracket is kept: an
+/// Reads of the HPET per boot sample, of which the narrowest bracket is kept: an
 /// SMI or a host's preemption inside one read widens that read alone.
-const READS: usize = 3;
+const BOOT_READS: usize = 3;
 
 const CALIBRATION: Delay = Delay::to_measure(
     Duration::from_millis(50),
@@ -48,8 +53,11 @@ const CALIBRATION_TRIES: u32 = 3;
 
 /// What each CPU waits between its samples: about the half millisecond the
 /// HPET's tolerance allows a second, so a step of the 1.7 ms seen on the AMD
-/// bench fails the sample after it. Three reads of the HPET, some 4 µs, once
-/// a second on each CPU.
+/// bench fails the sample after it. One read of the HPET, once a second on
+/// each CPU, inside its scheduler pass: 14.8 µs on the T14, whose HPET read
+/// brackets 35,690 TSC cycles. One and not the boot's narrowest of three:
+/// every bound here allows the read's own bracket, so a read an SMI widened
+/// costs that sample precision and never a false failure.
 const CHECK_EVERY_NS: u64 = 1_000_000_000;
 
 /// Round trips of a cache line between the BSP and each AP as it starts.
@@ -77,10 +85,10 @@ impl Hpet {
         if self.wide { self.mmio.read_u64(HPET_COUNTER) } else { u64::from(self.mmio.read_u32(HPET_COUNTER)) }
     }
 
-    /// The narrowest bracket of [`READS`] readings near `near`.
-    fn sample(&self, near: u64) -> Sample {
+    /// The narrowest bracket of `reads` readings near `near`.
+    fn sample(&self, near: u64, reads: usize) -> Sample {
         let mut best: Option<Sample> = None;
-        for _ in 0..READS {
+        for _ in 0..reads {
             let before = cpu::rdtsc_ordered();
             let reference = self.read(near);
             let after = cpu::rdtsc_ordered();
@@ -89,7 +97,7 @@ impl Hpet {
                 best = Some(sample);
             }
         }
-        best.expect("READS is not zero")
+        best.expect("a sample takes a read")
     }
 
     /// Where the counter should read now, from `last` and the rate the clock
@@ -145,7 +153,7 @@ pub fn start(hpet_base: u64) {
     assert!(period_fs > 0, "HPET: invalid counter period");
     let cfg = mmio.read_u64(HPET_CFG);
     mmio.write_u64(HPET_CFG, cfg | 1);
-    let hpet = Hpet { mmio, wide: cap & COUNT_SIZE_CAP != 0, reference: Reference { period_fs, tolerance_ppb: HPET_TOLERANCE_PPB } };
+    let hpet = Hpet { mmio, wide: cap & COUNT_SIZE_CAP != 0, reference: hpet_reference(period_fs) };
     log!(
         "clock: HPET at {hpet_base:#x} enabled, period={period_fs}fs, {} bits, counter reads {}",
         if hpet.wide { 64 } else { 32 },
@@ -154,7 +162,7 @@ pub fn start(hpet_base: u64) {
 
     let (anchor, kept) = match cpu::stated_counter_hz() {
         Some(hz) => {
-            let anchor = hpet.sample(hpet.raw());
+            let anchor = hpet.sample(hpet.raw(), BOOT_READS);
             log!(
                 "clock: the TSC counts at {hz} Hz, as CPUID 15H states, held to the HPET from a reading {} cycles wide",
                 anchor.width()
@@ -174,12 +182,12 @@ fn calibrate(hpet: &Hpet) -> (Sample, Kept) {
     for attempt in 1..=CALIBRATION_TRIES {
         // Every sample is within the window of the first, far under the 2^31
         // ticks a 32-bit counter's reading is taken near.
-        let first = hpet.sample(hpet.raw());
+        let first = hpet.sample(hpet.raw(), BOOT_READS);
         let mut samples = [first; CALIBRATION_SAMPLES as usize];
         for (i, slot) in samples.iter_mut().enumerate().skip(1) {
             let target = first.reference + span_ticks * i as u64 / (CALIBRATION_SAMPLES - 1);
             wait_for(hpet, target, first);
-            *slot = hpet.sample(first.reference);
+            *slot = hpet.sample(first.reference, BOOT_READS);
         }
         match reference::calibrate(hpet.reference, &samples) {
             Ok(rate) => {
@@ -347,7 +355,7 @@ pub fn check(now_ns: u64) {
             started as i64,
         );
     }
-    let sample = held.hpet.sample(held.hpet.near(held.watch.last(), held.watch.kept().mult));
+    let sample = held.hpet.sample(held.hpet.near(held.watch.last(), held.watch.kept().mult), 1);
     #[cfg(feature = "boot-actuators")]
     let sample = staged(local, sample, false);
     match held.watch.take(sample) {
