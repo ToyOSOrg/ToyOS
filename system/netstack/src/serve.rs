@@ -22,7 +22,9 @@
 //! netstack judges the region before it maps it (`lent`), makes the first
 //! holder's bells and answers once with them, and from then watches each
 //! holder's rung bell for its rings and exports, and its wakers' end, which is
-//! that holder's leaving and, for the last, the stream's close. A
+//! that holder's leaving and, for the last, the stream's close. Until a
+//! connect is answered netstack itself holds the rung's waker, so it watches
+//! the first holder's connection instead, whose hang-up is that leaving. A
 //! holder netstack makes is a connection of its private port's, its `ADOPT`
 //! queued on it before the asker is answered. A client names no stream by a
 //! number, and a frame no holder of the protocol sends drops that holder.
@@ -574,15 +576,20 @@ impl Sockets {
     }
 
     /// Asks the kernel about everything a pass could be owed for: each
-    /// stream holder's bell, for its rings and its leaving, each socket
+    /// stream holder's bell, for its rings and its leaving, or for a connect
+    /// not yet answered its connection, for its hang-up; each socket
     /// holder's connection, for its requests and its hang-up, and the
     /// connection of each client that waits for a lookup, which hangs up by
     /// closing it.
     pub fn watch(&self, poller: &mut Watches) {
         for (key, (stream, number)) in &self.holders {
-            let Some(holders) = self.streams.get(stream).and_then(|stream| stream.holders.upgrade()) else { continue };
-            if let Some(holding) = holders.by_number.borrow().get(number) {
-                poller.watch(&holding.rung, READABLE, TOKEN_STREAM | u64::from(*key));
+            let Some(stream) = self.streams.get(stream) else { continue };
+            let Some(holders) = stream.holders.upgrade() else { continue };
+            let token = TOKEN_STREAM | u64::from(*key);
+            match holders.by_number.borrow().get(number) {
+                Some(holding) if stream.answer.is_some() => poller.watch(&holding.connection, READABLE, token),
+                Some(holding) => poller.watch(&holding.rung, READABLE, token),
+                None => {}
             }
         }
         for (key, holder) in &self.sockets {
@@ -618,9 +625,10 @@ impl Sockets {
         true
     }
 
-    /// What a holder's bell said: a ring for the pass and its exports
-    /// answered, read frame by frame off its connection, or its leaving, which
-    /// a frame no holder sends is too.
+    /// What a holder's bell, or its connection while its connect is
+    /// unanswered, said: a ring for the pass and its exports answered, read
+    /// frame by frame off its connection, or its leaving, which a hang-up and
+    /// a frame no holder sends are too.
     fn holder_answered(&mut self, node: &mut Node, now: Instant, key: u32, answer: Result<u32, SyscallError>) {
         let Some(&(stream_key, number)) = self.holders.get(&key) else { return };
         let Some(stream) = self.streams.get(&stream_key) else { return };
@@ -628,7 +636,7 @@ impl Sockets {
         let Some(holders) = stream.holders.upgrade() else { return };
         let (mut rang, mut exports, mut left) = (false, 0usize, answer.is_err());
         if let Err(why) = answer {
-            say!("netstack: dropping a stream's holder — the kernel refused the watch of its bell: {why:?}");
+            say!("netstack: dropping a stream's holder — the kernel refused the watch of its bell or connection: {why:?}");
         }
         if let Some(holding) = holders.by_number.borrow_mut().get_mut(&number).filter(|_| !left) {
             match holding.rung.try_take() {

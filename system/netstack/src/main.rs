@@ -44,11 +44,11 @@ use toyos_net_shard::{Config, Secrets};
 use toyos_net_wire::ethernet::{IndividualMac, MacAddr};
 use toyos_net_wire::Instant;
 
+mod bells;
 mod card;
 mod client;
 mod i219;
 mod lent;
-mod bells;
 mod serve;
 mod virtio_net;
 mod watches;
