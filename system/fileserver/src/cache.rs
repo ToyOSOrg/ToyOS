@@ -8,8 +8,8 @@
 //! blocks flushes first, and is refused whole when that flush is, so memory
 //! bounds the write-back and not the other way round.
 //!
-//! **Clean blocks are kept up to [`CLEAN_LIMIT`]** and the oldest-read goes
-//! first; a dirty block is never dropped.
+//! **Clean blocks are kept up to the limit the cache is made with** and the
+//! oldest-read goes first; a dirty block is never dropped.
 //!
 //! **Several tasks may use it at once**, and the disk never has two requests
 //! for one block in flight when either is a write, which the block service's
@@ -44,9 +44,6 @@ impl Disk for diskserver::disk::Served {
     }
 }
 
-/// Clean blocks kept: 64 MiB.
-pub const CLEAN_LIMIT: usize = 16 * 1024;
-
 /// Dirty blocks held before the cache flushes by itself: 32 MiB.
 pub const DIRTY_LIMIT: usize = 8 * 1024;
 
@@ -69,6 +66,8 @@ struct Fetch {
 
 #[derive(Default)]
 struct Inner {
+    /// The most clean blocks kept.
+    clean_limit: usize,
     slots: BTreeMap<u64, Slot>,
     /// Clean blocks in the order they were read or cleaned; stale entries are
     /// skipped when popped.
@@ -104,8 +103,9 @@ pub struct Counts {
 }
 
 impl<D: Disk> Cache<D> {
-    pub fn new(disk: D) -> Self {
-        Self { disk, inner: RefCell::new(Inner { unflushed: true, ..Inner::default() }) }
+    /// A cache over `disk` keeping at most `clean_limit` clean blocks.
+    pub fn new(disk: D, clean_limit: usize) -> Self {
+        Self { disk, inner: RefCell::new(Inner { clean_limit, unflushed: true, ..Inner::default() }) }
     }
 
     /// The disk, once nothing else holds the cache: what it holds is what the
@@ -313,9 +313,9 @@ impl<D: Disk> BlockDev for Cache<D> {
 }
 
 impl Inner {
-    /// Drop the oldest clean blocks past [`CLEAN_LIMIT`].
+    /// Drop the oldest clean blocks past the limit.
     fn evict(&mut self) {
-        while self.slots.len() - self.dirty > CLEAN_LIMIT {
+        while self.slots.len() - self.dirty > self.clean_limit {
             let Some(block) = self.order.pop_front() else { break };
             if self.slots.get(&block).is_some_and(|s| !s.dirty) {
                 self.slots.remove(&block);
@@ -323,7 +323,7 @@ impl Inner {
         }
         // A queue of mostly stale entries is compacted, so it stays the size
         // of what it orders.
-        if self.order.len() > 4 * (CLEAN_LIMIT + DIRTY_LIMIT) {
+        if self.order.len() > 4 * (self.clean_limit + DIRTY_LIMIT) {
             let slots = &self.slots;
             self.order.retain(|b| slots.get(b).is_some_and(|s| !s.dirty));
         }
@@ -381,6 +381,9 @@ mod tests {
     use crate::ram::Ram;
     use toyos_blockdev::{block_on_ready, Executor};
 
+    /// The clean blocks every cache here keeps.
+    const CLEAN_LIMIT: usize = 4096;
+
     /// A disk that counts what reaches it, and refuses its flushes while
     /// `refusing_flush` is set.
     struct Counting {
@@ -427,7 +430,7 @@ mod tests {
     impl Disk for Counting {}
 
     fn cache() -> Cache<Counting> {
-        Cache::new(Counting::new(1024))
+        Cache::new(Counting::new(1024), CLEAN_LIMIT)
     }
 
     fn read_one<D: Disk>(c: &Cache<D>, block: u64) -> Result<Block, Error> {
@@ -505,7 +508,7 @@ mod tests {
 
     #[test]
     fn clean_blocks_are_bounded_and_dirty_ones_are_kept() {
-        let c = Cache::new(Counting::new((CLEAN_LIMIT + 64) as u64));
+        let c = Cache::new(Counting::new((CLEAN_LIMIT + 64) as u64), CLEAN_LIMIT);
         block_on_ready(c.write(0, &[[1; BLOCK]])).unwrap();
         for b in 1..(CLEAN_LIMIT as u64 + 32) {
             read_one(&c, b).unwrap();
@@ -530,7 +533,7 @@ mod tests {
     #[test]
     fn every_evicted_clean_block_reads_back_off_the_disk_byte_for_byte() {
         let blocks = (CLEAN_LIMIT + 2048) as u64;
-        let c = Cache::new(Counting::new(blocks));
+        let c = Cache::new(Counting::new(blocks), CLEAN_LIMIT);
         for b in 0..blocks {
             block_on_ready(c.write(b, &[pattern(b)])).unwrap();
         }
@@ -574,7 +577,7 @@ mod tests {
     #[test]
     fn at_the_dirty_limit_a_refused_flush_refuses_the_write_and_the_cache_grows_no_larger() {
         let limit = DIRTY_LIMIT as u64;
-        let c = Cache::new(Refusing { ram: Ram::new(limit + 16), refusing: Cell::new(false) });
+        let c = Cache::new(Refusing { ram: Ram::new(limit + 16), refusing: Cell::new(false) }, CLEAN_LIMIT);
         for b in 0..limit {
             block_on_ready(c.write(b, &[[1; BLOCK]])).unwrap();
         }
@@ -686,7 +689,7 @@ mod tests {
 
     #[test]
     fn a_block_written_while_a_flush_carries_its_older_copy_stays_dirty() {
-        let c = Cache::new(Held::new(16));
+        let c = Cache::new(Held::new(16), CLEAN_LIMIT);
         block_on_ready(c.write(3, &[[1; BLOCK]])).unwrap();
         c.disk.open.set(false);
         let exec = Executor::new();
@@ -705,7 +708,7 @@ mod tests {
     /// whose landing order nothing fixes.
     #[test]
     fn a_flush_asked_during_another_waits_and_then_writes_the_newer_copy() {
-        let c = Cache::new(Held::new(16));
+        let c = Cache::new(Held::new(16), CLEAN_LIMIT);
         block_on_ready(c.write(3, &[[1; BLOCK]])).unwrap();
         c.disk.open.set(false);
         let exec = Executor::new();
@@ -727,7 +730,7 @@ mod tests {
     /// block, and the cache keeps the write's copy, not the fetch's.
     #[test]
     fn a_flush_waits_for_a_fetch_of_its_block_and_the_write_is_kept() {
-        let c = Cache::new(Held::new(16));
+        let c = Cache::new(Held::new(16), CLEAN_LIMIT);
         block_on_ready(c.disk.ram.write(5, &[[1; BLOCK]])).unwrap();
         c.disk.open.set(false);
         let exec = Executor::new();

@@ -211,8 +211,8 @@ fn designated<D: Disk>(cache: &Cache<D>) -> bool {
 impl<D: Disk> DataVolume<D> {
     /// Mount the volume on `disk`, format it if it is designated, and refuse
     /// it otherwise — the kernel's DATA mount's decisions, unchanged.
-    pub fn probe(disk: D, roots: &[&str], clock: fn() -> u64) -> Probed<D> {
-        let cache = Rc::new(Cache::new(disk));
+    pub fn probe(disk: D, clean_limit: usize, roots: &[&str], clock: fn() -> u64) -> Probed<D> {
+        let cache = Rc::new(Cache::new(disk, clean_limit));
         match Mounted::<Shared<D>, ReadWrite>::open(Shared(Rc::clone(&cache))) {
             Ok(fs) => {
                 println!("fileserver: mounted the DATA volume");
@@ -233,8 +233,8 @@ impl<D: Disk> DataVolume<D> {
     }
 
     /// A fresh volume on `disk`, which holds nothing of anyone's: memory.
-    pub fn format(disk: D, roots: &[&str], clock: fn() -> u64) -> Result<Self, String> {
-        let cache = Rc::new(Cache::new(disk));
+    pub fn format(disk: D, clean_limit: usize, roots: &[&str], clock: fn() -> u64) -> Result<Self, String> {
+        let cache = Rc::new(Cache::new(disk, clean_limit));
         let fs = Formatted::format(Shared(Rc::clone(&cache))).map_err(|e| format!("{e:?}"))?;
         Self::over(fs.mount(), cache, roots, clock)
     }
@@ -831,8 +831,11 @@ mod tests {
         1_000_000_000
     }
 
+    /// The clean blocks every volume's cache here keeps: 64 MiB.
+    const CLEAN_LIMIT: usize = 16 * 1024;
+
     fn vol() -> DataVolume<Ram> {
-        DataVolume::format(Ram::new(4096), &["home", "apps"], clock).unwrap()
+        DataVolume::format(Ram::new(4096), CLEAN_LIMIT, &["home", "apps"], clock).unwrap()
     }
 
     const CREATE: OpenHow = OpenHow { create: true, create_new: false, truncate: false };
@@ -1025,7 +1028,7 @@ mod tests {
 
     #[test]
     fn a_stat_from_the_index_is_what_the_entry_records() {
-        let mut v = DataVolume::format(Ram::new(4096), &["home"], advancing_clock).unwrap();
+        let mut v = DataVolume::format(Ram::new(4096), CLEAN_LIMIT, &["home"], advancing_clock).unwrap();
         let a = v.open("home/a", CREATE).unwrap();
         v.write(a, 0, &[1; 5000]).unwrap();
         assert_eq!(v.lstat("home/a").unwrap().size, 5000, "an open file's own length, before its entry has it");
@@ -1058,7 +1061,7 @@ mod tests {
         let DataVolume { fs, cache, .. } = v;
         drop(fs);
         let disk = Rc::try_unwrap(cache).ok().expect("one owner").into_disk();
-        let Probed::Mounted(again) = DataVolume::probe(disk, &["home"], advancing_clock) else { panic!("remount") };
+        let Probed::Mounted(again) = DataVolume::probe(disk, CLEAN_LIMIT, &["home"], advancing_clock) else { panic!("remount") };
         let after: Vec<(String, Meta)> = again.names.iter().map(|(n, m)| (n.clone(), *m)).collect();
         assert_eq!(after, before, "the index a mount reads is the one the server kept");
         assert_index_is_the_format_s(&again);
@@ -1097,7 +1100,7 @@ mod tests {
     /// it away.
     #[test]
     fn a_write_s_stamp_keeps_its_nanosecond_across_a_remount() {
-        let mut v = DataVolume::format(Ram::new(4096), &["home"], nanosecond_clock).unwrap();
+        let mut v = DataVolume::format(Ram::new(4096), CLEAN_LIMIT, &["home"], nanosecond_clock).unwrap();
         let n = v.open("home/stamped", CREATE).unwrap();
         v.write(n, 0, b"stamped").unwrap();
         v.close(n).unwrap();
@@ -1105,7 +1108,7 @@ mod tests {
         let DataVolume { fs, cache, .. } = v;
         drop(fs);
         let disk = Rc::try_unwrap(cache).ok().expect("one owner").into_disk();
-        let Probed::Mounted(mut again) = DataVolume::probe(disk, &["home"], nanosecond_clock) else { panic!("remount") };
+        let Probed::Mounted(mut again) = DataVolume::probe(disk, CLEAN_LIMIT, &["home"], nanosecond_clock) else { panic!("remount") };
         assert_eq!(again.lstat("home/stamped").unwrap().mtime, nanosecond_clock());
     }
 
@@ -1113,7 +1116,7 @@ mod tests {
         let DataVolume { fs, cache, .. } = v;
         drop(fs);
         let disk = Rc::try_unwrap(cache).ok().expect("one owner").into_disk();
-        let Probed::Mounted(again) = DataVolume::probe(disk, &["home"], clock) else { panic!("remount") };
+        let Probed::Mounted(again) = DataVolume::probe(disk, CLEAN_LIMIT, &["home"], clock) else { panic!("remount") };
         again
     }
 
@@ -1122,7 +1125,7 @@ mod tests {
     /// every other one given back, and the run the reserve kept
     /// (`bcachefs`'s `NODE_RESERVE`, 16) taken after.
     fn fragmented() -> DataVolume<Ram> {
-        let mut v = DataVolume::format(Ram::new(1024), &["home"], clock).unwrap();
+        let mut v = DataVolume::format(Ram::new(1024), CLEAN_LIMIT, &["home"], clock).unwrap();
         let mut run = Vec::new();
         let mut page = 0;
         while v.fs.resolve_or_alloc_block(&mut run, page).is_ok() {
@@ -1318,6 +1321,7 @@ mod tests {
         blocks: u64,
         /// Shared, so a test reads what the disk holds while the server runs.
         image: Rc<std::cell::RefCell<Image>>,
+        reads: std::cell::Cell<usize>,
         writes: std::cell::Cell<usize>,
         keep: usize,
         refuse: Option<usize>,
@@ -1325,11 +1329,11 @@ mod tests {
 
     impl Stops {
         fn new(blocks: u64) -> Self {
-            Self { blocks, image: Rc::default(), writes: Default::default(), keep: usize::MAX, refuse: None }
+            Self { blocks, image: Rc::default(), reads: Default::default(), writes: Default::default(), keep: usize::MAX, refuse: None }
         }
 
         fn from(image: &Image, blocks: u64, keep: usize, refuse: Option<usize>) -> Self {
-            Self { blocks, image: Rc::new(image.clone().into()), writes: Default::default(), keep, refuse }
+            Self { blocks, image: Rc::new(image.clone().into()), reads: Default::default(), writes: Default::default(), keep, refuse }
         }
     }
 
@@ -1339,6 +1343,7 @@ mod tests {
         }
 
         async fn read(&self, lba: u64, out: &mut [Block]) -> Result<(), toyos_blockdev::Error> {
+            self.reads.set(self.reads.get() + out.len());
             let image = self.image.borrow();
             for (block, out) in (lba..).zip(out) {
                 match image.get(&block) {
@@ -1369,6 +1374,37 @@ mod tests {
     }
 
     impl Disk for Stops {}
+
+    /// `osbench`'s `fs.disk.seq_read.4096`: a 64 MiB file written in 4 KiB
+    /// calls and synced, then opened, read whole in 4 KiB calls and closed,
+    /// in rounds, on a volume whose cache holds twice the file. A round after
+    /// the first is answered from the cache, without one disk read: what an
+    /// open reads of the tree evicts none of the file.
+    #[test]
+    fn a_file_the_cache_holds_is_read_again_from_the_cache() {
+        const MIB: usize = 1 << 20;
+        let mut v = DataVolume::format(Stops::new(20_000), 2 * 64 * MIB / BLOCK, &["home", "apps"], clock).unwrap();
+        let n = v.open("home/seq", CREATE).unwrap();
+        let page: Vec<u8> = (0..BLOCK).map(|i| (i % 253) as u8).collect();
+        for k in 0..64 * MIB / BLOCK {
+            v.write(n, (k * BLOCK) as u64, &page).unwrap();
+        }
+        v.close(n).unwrap();
+        assert_eq!(v.sync(), Ok(Vec::new()));
+        let mut out = vec![0u8; BLOCK];
+        let mut round = |v: &mut DataVolume<Stops>| {
+            let before = v.cache.disk().reads.get();
+            let n = v.open("home/seq", PLAIN).unwrap();
+            for k in 0..64 * MIB / BLOCK {
+                assert_eq!(v.read(n, (k * BLOCK) as u64, &mut Buf(&mut out)).unwrap(), BLOCK);
+            }
+            v.close(n).unwrap();
+            v.cache.disk().reads.get() - before
+        };
+        round(&mut v);
+        let again: Vec<usize> = (0..3).map(|_| round(&mut v)).collect();
+        assert_eq!(again, [0; 3], "blocks each round after the first read from the disk");
+    }
 
     fn take(v: DataVolume<Stops>) -> Stops {
         let DataVolume { fs, cache, .. } = v;
@@ -1427,7 +1463,7 @@ mod tests {
     /// A staged package: files enough to fill several leaves, a subdirectory,
     /// an empty one, and names beside it the rename must not move; synced.
     fn staged() -> (Image, BTreeMap<String, Vec<u8>>) {
-        let mut v = DataVolume::format(Stops::new(1024), &["home", "apps"], clock).unwrap();
+        let mut v = DataVolume::format(Stops::new(1024), CLEAN_LIMIT, &["home", "apps"], clock).unwrap();
         for i in 0..80 {
             let n = v.open(&format!("home/beside{i}"), CREATE).unwrap();
             v.write(n, 0, format!("beside {i}").as_bytes()).unwrap();
@@ -1447,7 +1483,7 @@ mod tests {
     }
 
     fn mounted(disk: Stops) -> Result<DataVolume<Stops>, String> {
-        match DataVolume::probe(disk, &["home", "apps"], clock) {
+        match DataVolume::probe(disk, CLEAN_LIMIT, &["home", "apps"], clock) {
             Probed::Mounted(v) => Ok(v),
             Probed::Unmountable(why) => Err(format!("unmountable: {why}")),
             Probed::Foreign => Err("foreign".into()),
