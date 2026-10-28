@@ -229,7 +229,7 @@ mod tests {
         let mut disk = Disk::new(1000, |b| (b % 251) as u8 | 1);
         let mut job = Designation::new(1000, true);
         assert_eq!(disk.run(&mut job, &mut memory()), Ok(Designated::Written));
-        assert_eq!(disk.blocks[0], bcachefs::designation(1000), "the stamp is on the medium, not in the cache");
+        assert!(disk.blocks[0] == bcachefs::designation(1000), "the stamp is on the medium, not in the cache");
         assert!(disk.blocks[1..].iter().enumerate().all(|(i, b)| b[0] == ((i + 1) % 251) as u8 | 1));
         let reads: u64 = disk
             .commands
@@ -310,6 +310,6 @@ mod tests {
         assert_eq!(job.next(&mut mem, false), Ask::Wait);
         let mut disk = Disk { cache: false, ..Disk::new(10, |_| 9) };
         assert_eq!(disk.run(&mut job, &mut mem), Ok(Designated::Written));
-        assert_eq!(disk.blocks[0], bcachefs::designation(10));
+        assert!(disk.blocks[0] == bcachefs::designation(10), "the stamp is on the medium");
     }
 }
