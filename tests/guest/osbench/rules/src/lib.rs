@@ -248,19 +248,13 @@ pub mod energy {
 pub mod window {
     //! Whether one CPU's two counters readings describe the row they were
     //! read around. Each reading carries the CPU's own counter as it
-    //! answered, so the readings' window is the difference of the two,
-    //! whatever the kernel served.
+    //! answered, so the readings' window is the difference of the two.
     //!
     //! The row is the span from the first read's call to the second read's
-    //! return. A CPU answers each read inside its call, so its window lies
-    //! within the row and is shorter by at most the two calls' cost, except
-    //! that a read issued within [`JOIN_NS`] of another round is served that
-    //! round, issued up to [`JOIN_NS`] before the call. A window outside
-    //! those bounds is not the row's.
-
-    /// The kernel's counters join interval (`kernel/src/counters.rs`'s
-    /// `JOIN`): how long before its call a read may be served a round.
-    pub const JOIN_NS: u64 = 10_000_000;
+    //! return. A CPU answers each read inside its call
+    //! (`toyos_abi::counters`), so its window lies within the row and is
+    //! shorter by at most the two calls' cost. A window outside those bounds
+    //! is not the row's.
 
     /// The row's span and what its two reads cost, in nanoseconds.
     #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -319,8 +313,7 @@ pub mod window {
         }
         let window_ns = to_ns(ticks);
         let shortest = span.row_ns.saturating_sub(span.reads_ns);
-        let longest = span.row_ns.saturating_add(JOIN_NS);
-        if !(shortest..=longest).contains(&window_ns) {
+        if !(shortest..=span.row_ns).contains(&window_ns) {
             return Err(Refusal::NotTheRow { window_ns, row_ns: span.row_ns, reads_ns: span.reads_ns });
         }
         Ok((ticks, window_ns))
@@ -357,17 +350,18 @@ pub mod window {
         }
 
         #[test]
-        fn a_before_served_from_a_joined_round_stands_within_the_join() {
-            assert_eq!(of(false, Some(0), Some(2_020_000_000), ROW, ns), Ok((2_020_000_000, 1_010_000_000)));
+        fn a_window_longer_than_the_row_is_refused() {
+            assert_eq!(of(false, Some(0), Some(2_000_000_000), ROW, ns), Ok((2_000_000_000, 1_000_000_000)), "the row exactly");
+            // A `before` taken before the row's first read was called.
             assert_eq!(
-                of(false, Some(0), Some(2_020_000_002), ROW, ns),
-                Err(Refusal::NotTheRow { window_ns: 1_010_000_001, row_ns: 1_000_000_000, reads_ns: 200_000 })
+                of(false, Some(0), Some(2_000_000_002), ROW, ns),
+                Err(Refusal::NotTheRow { window_ns: 1_000_000_001, row_ns: 1_000_000_000, reads_ns: 200_000 })
             );
         }
 
         #[test]
         fn a_window_shorter_than_the_row_less_its_reads_is_refused() {
-            // An `after` served a round issued inside the row.
+            // An `after` taken before the row's second read was called.
             assert_eq!(
                 of(false, Some(0), Some(1_900_000_000), ROW, ns),
                 Err(Refusal::NotTheRow { window_ns: 950_000_000, row_ns: 1_000_000_000, reads_ns: 200_000 })

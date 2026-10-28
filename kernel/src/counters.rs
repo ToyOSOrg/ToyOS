@@ -7,9 +7,12 @@
 //! the round's [`ANSWER`] bound has passed. A CPU answers from its kick
 //! handler ([`serve_here`]) wherever it was; one whose interrupts stay closed
 //! past the bound is reported stale with the last block it published, never
-//! waited for without end. A read within [`JOIN`] of the last round's issue
-//! waits on that round, so no reader makes a CPU take more than one kick per
-//! [`JOIN`].
+//! waited for without end.
+//!
+//! **Every reading is taken after its read was called.** A read joins a round
+//! issued after its call began, or issues its own; rounds are at least
+//! [`INTERVAL`] apart, so a read inside one waits until it has passed, and no
+//! reader makes a CPU take more than one kick per [`INTERVAL`].
 //!
 //! A model-specific counter is read only where the CPU's own verdict at
 //! [`bring_up`] admitted it, and the power envelope only where the CPU-state
@@ -37,10 +40,10 @@ const ANSWER: Budget = Budget::of(
     "every CPU that has not answered is read stale, with the block it last published",
 );
 
-/// The most often a round is issued.
-const JOIN: Cadence = Cadence::every(
-    Duration::from_millis(10),
-    "a reader within it of the last round's issue waits on that round, so a kick per CPU per 10 ms at most",
+/// The least time between two rounds.
+const INTERVAL: Cadence = Cadence::every(
+    Duration::from_nanos(toyos_abi::counters::INTERVAL_NS),
+    "a reader within it of the last round's issue waits until it has passed, so a kick per CPU per 10 ms at most",
 );
 
 /// The counters a CPU's model-specific registers hold, where its bring-up
@@ -145,8 +148,7 @@ fn sample(me: usize) -> [u64; WORDS] {
             Counter::EnergyPerfBias => hardware.envelope.as_ref().map(|e| e.energy_perf_bias),
             Counter::FirmwareCalls => hardware.firmware.as_ref().map(|f| f.calls),
             Counter::FirmwareNanos => hardware.firmware.as_ref().map(|f| f.nanos),
-            Counter::DeepIdles => Some(crate::cpu_local::of(me as u32).idle.deep().0),
-            Counter::DeepIdleNanos => Some(crate::cpu_local::of(me as u32).idle.deep().1),
+            Counter::DeepIdles => Some(crate::cpu_local::of(me as u32).idle.deep()),
             Counter::CoreC6 => hardware.core_c6,
             Counter::CoreC7 => hardware.core_c7,
         };
@@ -195,23 +197,36 @@ pub fn read(rights: Rights, out: &mut UserBytesMut) -> Result<usize, SyscallErro
     if out.len() < cpus * RECORD_BYTES {
         return Err(SyscallError::ResourceExhausted);
     }
-    let now = crate::clock::now();
-    let (generation, issued, fresh) = {
-        let mut last = LAST.lock();
-        match *last {
-            Some((generation, issued)) if now < issued + JOIN.duration() => (generation, issued, false),
-            _ => {
-                let generation = ROUNDS.issue(Reach::Narrow);
-                *last = Some((generation, now));
-                (generation, now, true)
+    let parkable = Parkable::at_entry();
+    let called = crate::clock::now();
+    let (generation, issued, fresh) = loop {
+        let due = {
+            let mut last = LAST.lock();
+            let now = crate::clock::now();
+            match *last {
+                // Strictly after: every answer to it is taken after its issue, and so after this call.
+                Some((generation, issued)) if issued > called => break (generation, issued, false),
+                Some((_, issued)) if now < issued + INTERVAL.duration() => issued + INTERVAL.duration(),
+                _ => {
+                    let generation = ROUNDS.issue(Reach::Narrow);
+                    *last = Some((generation, now));
+                    break (generation, now, true);
+                }
             }
+        };
+        // A rate limit with a known end, not a delay standing in for an event: the next
+        // round may be issued at `due` and no sooner. Readers resting here wake together;
+        // the first issues it, and the rest join.
+        let handle = crate::sched::driver::current_handle().expect("a syscall runs on a thread");
+        if watch::wait_until(&parkable, handle.watch(), 0, WaitClass::Other, Deadline::at(due), || false).is_err() {
+            return Err(SyscallError::Gone);
         }
     };
     // This CPU's kick, if it has one, waits behind this syscall.
     answer(fresh);
     let answered = || (0..cpus).all(|cpu| ROUNDS.served(cpu, generation));
     let deadline = Deadline::at(issued + ANSWER.duration());
-    if watch::wait_until(&Parkable::at_entry(), &ANSWERED, 0, WaitClass::Other, deadline, answered).is_err() {
+    if watch::wait_until(&parkable, &ANSWERED, 0, WaitClass::Other, deadline, answered).is_err() {
         return Err(SyscallError::Gone);
     }
     for cpu in 0..cpus {
