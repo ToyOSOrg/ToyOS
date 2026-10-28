@@ -3345,3 +3345,48 @@ fn quiesce_stops_what_a_previous_holder_left_running() {
     assert_eq!(read(crate::regs::TCTL), crate::regs::tctl::PSP);
     assert_eq!(read(crate::regs::IMC), u32::MAX);
 }
+
+/// Frames on the wire whose write-back the driver has not read yet, at each
+/// full answer: §7.2.4.2 lets the part hold a batch of write-backs, and the
+/// count is what the wire carried past what the driver reclaimed. A part that
+/// writes each back as it sends leaves none.
+#[test]
+fn a_full_ring_counts_the_frames_it_was_full_of_without_knowing() {
+    for (batched, seed) in [(true, 3u64), (true, 4), (false, 3)] {
+        let permits = Permits { batched_writeback: batched, ..Permits::default() };
+        let (nic, mut driver) = held_with_a_link(seed, Part::I219, permits);
+        let first = fill(&nic, &mut driver, 1);
+        nic.run();
+        let on_the_wire = nic.sent().len();
+        assert_eq!(on_the_wire, first.len(), "{}", nic.because("the held ring did not all leave"));
+        // Room for what was written back, refilled, so the ring is full again.
+        fill(&nic, &mut driver, 100);
+        assert_eq!(driver.wake_on_room(), 0);
+        let counters = driver.counters();
+        let unreported = (on_the_wire as u64).saturating_sub(u64::from(counters.sent));
+        assert_eq!(counters.tx_unreported, unreported, "{}", nic.because("the unreported frames were miscounted"));
+        assert_eq!(u64::from(counters.tx_unreported_max), unreported);
+        if batched {
+            assert!(unreported > 0, "{}", nic.because("seed {seed} held back no write-back, so this case reads nothing"));
+        } else {
+            assert_eq!(unreported, 0, "{}", nic.because("a part that writes each back left some unreported"));
+        }
+    }
+}
+
+/// The time a full ring waits is counted from the first full answer to the
+/// next room, whatever passes between.
+#[test]
+fn a_full_ring_counts_how_long_it_waited_for_room() {
+    let (nic, mut driver) = held_with_a_link(5, Part::I219, Permits::default());
+    fill(&nic, &mut driver, 1);
+    assert_eq!(driver.wake_on_room(), 0);
+    assert_eq!(driver.wake_on_room(), 0, "a second full answer starts no second wait");
+    nic.time_passes(5_000_000);
+    nic.run();
+    assert!(driver.tx_room() > 0, "{}", nic.because("the sent frames gave no room back"));
+    let waited = driver.counters().tx_full_nanos;
+    assert!((5_000_000..5_100_000).contains(&waited), "waited {waited} ns");
+    assert!(driver.tx_room() > 0);
+    assert_eq!(driver.counters().tx_full_nanos, waited, "room with no wait added time");
+}

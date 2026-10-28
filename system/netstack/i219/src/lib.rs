@@ -488,6 +488,16 @@ pub struct Counters {
     pub spurious: u32,
     /// Frames the part took off the transmit ring and wrote `DD` back for.
     pub sent: u32,
+    /// Nanoseconds the transmit ring spent full: from a caller's first full
+    /// answer to the next room counted.
+    pub tx_full_nanos: u64,
+    /// At each full answer, frames `GPTC` counts on the wire whose `DD` this
+    /// driver had not yet read, summed: completions the ring was full of
+    /// without knowing it. 0 says the part sends what it holds no faster than
+    /// it writes it back.
+    pub tx_unreported: u64,
+    /// The most of those at any one full answer.
+    pub tx_unreported_max: u32,
     /// Frames the part filled a receive descriptor with and this driver handed
     /// up.
     pub received: u32,
@@ -495,11 +505,22 @@ pub struct Counters {
 
 impl Counters {
     /// The counts that are worth a line: every one but [`Self::spurious`],
-    /// [`Self::sent`], [`Self::received`] and the three of a full transmit
+    /// [`Self::sent`], [`Self::received`] and the six of a full transmit
     /// ring, which move on their own on a working card, so a diagnostic keyed
     /// on them would print on nothing having gone wrong.
     pub fn anomalies(&self) -> Self {
-        Self { spurious: 0, sent: 0, received: 0, tx_full: 0, tx_wake_armed: 0, tx_wake_taken: 0, ..*self }
+        Self {
+            spurious: 0,
+            sent: 0,
+            received: 0,
+            tx_full: 0,
+            tx_wake_armed: 0,
+            tx_wake_taken: 0,
+            tx_full_nanos: 0,
+            tx_unreported: 0,
+            tx_unreported_max: 0,
+            ..*self
+        }
     }
 }
 
@@ -920,6 +941,8 @@ pub struct I219<R: Registers, C, D, I> {
     /// Whether the transmit write-back is unmasked: a caller found the ring
     /// full and no pass has begun since.
     tx_wake: bool,
+    /// When the transmit ring was first answered full, while it still is.
+    tx_full_since: Option<u64>,
     /// The descriptors a link change left in the transmit ring that the part
     /// has not yet written back.
     stranded: Option<Stranded>,
@@ -1094,6 +1117,7 @@ impl<R: Registers, C: Clock, D: DmaBuffers, I: Interrupts> I219<R, C, D, I> {
             tx_next: 0,
             tx_clean: 0,
             tx_wake: false,
+            tx_full_since: None,
             stranded: None,
             counters: Counters::default(),
             wire: Wire::default(),
@@ -1504,7 +1528,14 @@ impl<R: Registers, C: Clock, D: DmaBuffers, I: Interrupts> I219<R, C, D, I> {
         if !self.link.is_up() {
             return 0;
         }
-        TX_RING - 1 - self.unsent()
+        let room = TX_RING - 1 - self.unsent();
+        if room > 0 {
+            if let Some(since) = self.tx_full_since.take() {
+                let waited = self.clock.nanos().saturating_sub(since);
+                self.counters.tx_full_nanos = self.counters.tx_full_nanos.saturating_add(waited);
+            }
+        }
+        room
     }
 
     /// Ask for a message when the part next writes a transmit descriptor
@@ -1533,6 +1564,13 @@ impl<R: Registers, C: Clock, D: DmaBuffers, I: Interrupts> I219<R, C, D, I> {
             return room;
         }
         self.counters.tx_full = self.counters.tx_full.saturating_add(1);
+        self.tx_full_since.get_or_insert(self.clock.nanos());
+        // §10.2.7.28's GPTC counts good frames transmitted; the driver's `sent`, those
+        // whose write-back it has read. One register read per full answer.
+        let on_the_wire = self.wire().sent;
+        let unreported = on_the_wire.saturating_sub(u64::from(self.counters.sent));
+        self.counters.tx_unreported = self.counters.tx_unreported.saturating_add(unreported);
+        self.counters.tx_unreported_max = self.counters.tx_unreported_max.max(u32::try_from(unreported).unwrap_or(u32::MAX));
         if !self.tx_wake {
             self.regs.write32(regs::IMS, self.causes.tx_done);
             self.tx_wake = true;
