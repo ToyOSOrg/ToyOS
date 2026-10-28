@@ -1,16 +1,16 @@
-# A member of the host workspace (root `Cargo.toml`): the
-# kernel depends on it by path and its tests run on the host, with no
+# A member of the host workspace (root `Cargo.toml`): the loader and the
+# disk drivers depend on it by path and its tests run on the host, with no
 # target-triple juggling. A GPT is bytes somebody else wrote, so the
 # parser has to be exercised against hostile bytes far more often than a QEMU
 # boot allows.
 
 [package]
 name = "toyos-gpt"
-description = "GPT parser that finds the partition firmware booted from (no_std, no alloc, forbid(unsafe_code))."
+description = "GPT: the parser that finds the partition firmware booted from, and the one writer of a whole table (no_std, no alloc, forbid(unsafe_code))."
 version = "0.1.0"
 edition = "2021"
 license = "MIT OR Apache-2.0"
 
 [dev-dependencies]
-# The differential oracle of `tests/oracle.rs`.
+# The differential oracle of `tests/oracle.rs` and `tests/edit.rs`.
 gpt = "3.1.0"

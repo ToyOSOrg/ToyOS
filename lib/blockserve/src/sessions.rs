@@ -30,7 +30,7 @@ use toyos_blockring::entry::{Completion, Op};
 use toyos_blockring::layout::{ServerRings, DEPTH};
 use toyos_blockring::server::{ServerSession, Taken};
 use toyos_blockring::disk::Designation;
-use toyos_blockring::wire::{self, Designated, DiskHead, Lba0, Opened, Refusal, SlotLine};
+use toyos_blockring::wire::{self, Designated, DiskHead, Opened, Refusal, SlotLine};
 use toyos_blockring::Status;
 
 use crate::designate::{self, Ask};
@@ -409,12 +409,6 @@ impl Sessions {
         let head = DiskHead {
             lba_bytes: self.read.lba_bytes,
             sectors: self.read.sectors,
-            lba0: match copies.map(|c| c.mbr) {
-                None => Lba0::Unread,
-                Some(toyos_gpt::edit::Mbr::Protective) => Lba0::Protective,
-                Some(toyos_gpt::edit::Mbr::Other) => Lba0::Mbr,
-                Some(toyos_gpt::edit::Mbr::Blank) => Lba0::Blank,
-            },
             agree: copies.is_some_and(|c| c.agree()),
             primary: copies.map_or_else(|| "unread".into(), |c| table::state(&c.primary)),
             backup: copies.map_or_else(|| "unread".into(), |c| table::state(&c.backup)),

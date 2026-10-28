@@ -289,10 +289,12 @@ impl Encoded {
     /// when `mbr` asks for it and the primary copy, and a flush.
     ///
     /// The backup goes first because §5.3.2 requires it. The flush between is
-    /// what keeps a crash from tearing both copies at once: the primary is
-    /// not touched until the backup is whole on the medium, so at every
-    /// instant one copy is whole — the old primary while the backup is
-    /// written, the new backup while the primary is.
+    /// what keeps a crash from tearing both copies at once — on a device that
+    /// persists each sector whole or not at all and has every write before a
+    /// completed flush on the medium: then the primary is not touched until
+    /// the backup is whole, and one copy is whole at every instant, the old
+    /// primary while the backup is written and the new backup while the
+    /// primary is. A device that breaks either can leave neither copy valid.
     pub fn steps<'a>(&'a self, mbr: bool) -> impl Iterator<Item = Step<'a>> {
         let len = self.geometry.lba.bytes_usize();
         let block = |b: &'a Block| -> &'a [u8] { b.get(..len).unwrap_or_default() };

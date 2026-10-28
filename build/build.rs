@@ -719,9 +719,10 @@ fn held_by_their_holders_alone(config: &SystemConfig) -> Result<(), String> {
         if program.slots && config.boot.start.contains(name) {
             return Err(format!("`{name}` asks for `slots` and is in `[boot] start`, and the slots are granted to a launch alone"));
         }
-        // A row any login could start would hand every login what it holds:
-        // an authorization that changes a disk is the image's to grant, to a
-        // row only the boot starts.
+        // A row any login could start would hand every login what it holds,
+        // and so would a login authority, whose namespace reaches every
+        // program a login runs directly: an authorization that changes a
+        // disk is the image's to grant, to a row that is neither.
         for word in &program.authorize {
             let Some(authorization) = toyos_manifest::authorize::Authorization::parse(word) else {
                 return Err(format!("`{name}` asks to be authorized for `{word}`, which is no disk authorization"));
@@ -729,6 +730,9 @@ fn held_by_their_holders_alone(config: &SystemConfig) -> Result<(), String> {
             let starters: Vec<&String> = config.programs.iter().filter(|(_, p)| p.starts.contains(name)).map(|(n, _)| n).collect();
             if authorization.changes() && !starters.is_empty() {
                 return Err(format!("`{name}` is authorized for `{word}`, which changes a disk, and {starters:?} may start it"));
+            }
+            if authorization.changes() && program.login {
+                return Err(format!("`{name}` is authorized for `{word}`, which changes a disk, and is a login authority"));
             }
         }
     }
@@ -3006,6 +3010,9 @@ mod tests {
         assert!(gate("[programs.disks]\nauthorize = [\"tables\"]\n[programs.shell]\nstarts = [\"disks\"]\n").is_ok());
         let launched = gate("[programs.disks]\nauthorize = [\"designate:data\"]\n[programs.shell]\nstarts = [\"disks\"]\n");
         assert!(launched.unwrap_err().contains("may start it"));
+        let login = gate("[boot]\nstart = [\"sshserver\"]\n[programs.sshserver]\nlogin = true\nauthorize = [\"designate:data\"]\n");
+        assert!(login.unwrap_err().contains("is a login authority"));
+        assert!(gate("[programs.sshserver]\nlogin = true\nauthorize = [\"tables\"]\n").is_ok(), "reading the tables is no change");
         assert!(gate("[programs.disks]\nauthorize = [\"format:everything\"]\n").unwrap_err().contains("no disk authorization"));
     }
 
@@ -3243,7 +3250,7 @@ mod tests {
         "tests/images/benchcase.toml",
         "tests/images/clipboardcase.toml",
         "tests/images/designatecase.toml",
-    "tests/images/drivescase.toml",
+        "tests/images/drivescase.toml",
         "tests/images/hostedclangcase.toml",
         "tests/images/jobcase.toml",
         "tests/images/latencycase.toml",

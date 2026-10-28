@@ -51,8 +51,8 @@ pub const MSG_SLOT: u32 = 8;
 /// The description is whole. No payload.
 pub const MSG_DESCRIBED: u32 = 9;
 /// Designate the machine's DATA partition, for a [`Badge::DesignateData`]
-/// connection: payload one byte, 1 to write the stamp and 0 to judge only. Answered [`MSG_DESIGNATED`] or
-/// [`MSG_REFUSED`].
+/// connection: payload one byte, 1 to write the stamp and 0 to judge only.
+/// Answered [`MSG_DESIGNATED`] or [`MSG_REFUSED`].
 pub const MSG_DESIGNATE: u32 = 10;
 /// A [`Designated`].
 pub const MSG_DESIGNATED: u32 = 11;
@@ -346,18 +346,6 @@ impl Badge {
     }
 }
 
-/// What LBA 0 of a disk holds, as [`DiskHead`] says it.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum Lba0 {
-    Protective,
-    /// An MBR that is not a GPT's protective one.
-    Mbr,
-    /// No boot signature.
-    Blank,
-    /// It would not read.
-    Unread,
-}
-
 /// The longest copy state a [`DiskHead`] carries.
 pub const MAX_STATE: usize = 200;
 
@@ -367,7 +355,6 @@ pub const MAX_STATE: usize = 200;
 pub struct DiskHead {
     pub lba_bytes: u32,
     pub sectors: u64,
-    pub lba0: Lba0,
     /// Both copies valid and the same table.
     pub agree: bool,
     pub primary: String,
@@ -379,12 +366,6 @@ impl DiskHead {
         let mut out = Vec::with_capacity(18 + self.primary.len() + self.backup.len() + 4);
         out.extend_from_slice(&self.lba_bytes.to_le_bytes());
         out.extend_from_slice(&self.sectors.to_le_bytes());
-        out.push(match self.lba0 {
-            Lba0::Protective => 0,
-            Lba0::Mbr => 1,
-            Lba0::Blank => 2,
-            Lba0::Unread => 3,
-        });
         out.push(u8::from(self.agree));
         for state in [&self.primary, &self.backup] {
             let state = &state.as_bytes()[..floor_char(state, MAX_STATE)];
@@ -397,14 +378,7 @@ impl DiskHead {
     pub fn decode(bytes: &[u8]) -> Option<Self> {
         let (lba_bytes, rest) = bytes.split_first_chunk::<4>()?;
         let (sectors, rest) = rest.split_first_chunk::<8>()?;
-        let (&[lba0, agree], rest) = rest.split_first_chunk::<2>()?;
-        let lba0 = match lba0 {
-            0 => Lba0::Protective,
-            1 => Lba0::Mbr,
-            2 => Lba0::Blank,
-            3 => Lba0::Unread,
-            _ => return None,
-        };
+        let (&[agree], rest) = rest.split_first_chunk::<1>()?;
         let agree = match agree {
             0 => false,
             1 => true,
@@ -415,7 +389,6 @@ impl DiskHead {
         rest.is_empty().then(|| Self {
             lba_bytes: u32::from_le_bytes(*lba_bytes),
             sectors: u64::from_le_bytes(*sectors),
-            lba0,
             agree,
             primary,
             backup,

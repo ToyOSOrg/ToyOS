@@ -1427,8 +1427,9 @@ const METAL: &[(&str, metal::Metal)] = &[
         // driver of the NVMe disk judges the partition, writes the stamp,
         // flushes and reads it back, under the one authorization the
         // designation image grants its runner. Destructive and once per
-        // bench, so named only; the T14, whose p4 is the owner's empty
-        // ToyOS DATA.
+        // bench, so named only: the T14 and the AMD bench, whose p4s are the
+        // owner's empty ToyOS DATA. On the T14 the same boot reads its stick's
+        // last sector, past its last whole block.
         "bench_data_designated",
         metal::Metal { arms: DESIGNATE, judge: |b| bench_data_designated(&b[0].log(), &b[1].log()) },
     ),
@@ -4724,6 +4725,14 @@ fn bench_data_designated(first: &serial::Serial, second: &serial::Serial) -> Res
     first.must_say("supervisor: test-runner is authorized for `designate:data`")?;
     nvme_wrote_the_designation(first.text())?;
     first.must_say("the DATA partition is designated: the stamp is on the disk and read back")?;
+    // The T14's stick carries 7507812 sectors, four past its last whole 4 KiB
+    // block, and a smaller image than it, so its last sector holds no backup:
+    // usbd reads it with a short READ(10) and says the copies disagree. A
+    // read that failed would name the sector.
+    let usbd = |l: &&str| l.contains("usbd ") && l.contains("two copies do not agree");
+    if let Some(failed) = first.text().lines().filter(usbd).find(|l| l.contains("ReadFailed(")) {
+        return Err(format!("a stick's last sector would not read: {failed:?}"));
+    }
     first.must_not_say("are in memory and will not survive a reboot")?;
     second.must_say("fileserver: block 0 designates this partition for ToyOS; formatting it")?;
     let serving = second.must_say("fileserver: Data serving ")?;

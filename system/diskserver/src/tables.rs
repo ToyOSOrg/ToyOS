@@ -1,6 +1,6 @@
-//! A client's side of a disk's description and of a designation: what
-//! `disks` and the supervisor ask the block service through a tables or a
-//! designation badge (`toyos_blockring::wire::Badge`).
+//! A client's side of a disk's description and of a designation, asked of
+//! the block service through a tables or a designation badge
+//! (`toyos_blockring::wire::Badge`).
 
 use toyos::namespace::Namespace;
 use toyos_blockring::wire::{self, Designated, DiskHead, Refusal, SlotLine};

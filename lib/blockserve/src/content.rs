@@ -4,8 +4,8 @@
 //! **A bug fence, not a licence**: a partition is designated because its
 //! authorization says so, and a signature recognised here refuses it, since
 //! a volume somebody can name is the likeliest mistake. Finding none proves
-//! nothing about what the partition holds. Each offset is the format's own,
-//! from the document named beside it.
+//! nothing about what the partition holds. Each offset is the format's own;
+//! where a published document defines it, it is named beside it.
 
 /// How much of a partition [`judge`] reads: every signature below lies in it.
 pub const READ_BYTES: usize = 1 << 20;

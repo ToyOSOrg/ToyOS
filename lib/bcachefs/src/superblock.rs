@@ -7,8 +7,8 @@ use crate::fs::FsError;
 pub const MAGIC: [u8; 4] = *b"BCFS";
 pub const VERSION: u32 = 2;
 
-/// The designation stamp: the *only* thing that authorises ToyOS to destroy
-/// what is on a partition.
+/// The designation stamp: the only thing that authorises a file server to
+/// format a partition that holds no volume of this format.
 ///
 /// Not a bcachefs concept, and it lives here anyway, because it occupies the
 /// same block as the superblock and the one invariant that matters is that

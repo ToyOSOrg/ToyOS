@@ -669,7 +669,6 @@ fn data_row(guid: Guid, len: u64) -> Row {
     Row { what: "DATA partition".into(), name: "ToyOS data".into(), kind: Guid::TOYOS_DATA, guid, len }
 }
 
-/// Write `bytes` at byte `at` of `disk`; `what` they are is what a refusal names.
 /// A version 4 GUID from the host's random source.
 pub fn random_guid() -> Guid {
     let mut bytes = [0u8; 16];
@@ -692,6 +691,7 @@ pub fn write_gpt(disk: &mut (impl Write + Seek), total: u64, disk_guid: Guid, sl
     }
 }
 
+/// Write `bytes` at byte `at` of `disk`; `what` they are is what a refusal names.
 fn write_at(disk: &mut (impl Write + Seek), at: u64, bytes: &[u8], what: &str) {
     disk.seek(SeekFrom::Start(at))
         .and_then(|_| disk.write_all(bytes))
@@ -766,7 +766,6 @@ impl toyos_gpt::Sectors for FileSectors<'_> {
     fn lba_count(&self) -> u64 {
         self.0.metadata().map(|m| m.len()).unwrap_or(0) / u64::from(LBA)
     }
-
 
     fn read_lba(&mut self, lba: u64, buf: &mut [u8]) -> bool {
         self.0.seek(SeekFrom::Start(lba * u64::from(LBA))).is_ok() && self.0.read_exact(buf).is_ok()
@@ -876,7 +875,6 @@ impl toyos_gpt::Sectors for ImageSectors<'_> {
     fn lba_count(&self) -> u64 {
         self.0.len() as u64 / u64::from(LBA)
     }
-
 
     fn read_lba(&mut self, lba: u64, buf: &mut [u8]) -> bool {
         let at = lba as usize * LBA as usize;

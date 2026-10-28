@@ -235,7 +235,6 @@ impl Sectors for Disk<'_> {
         self.lba_count
     }
 
-
     fn read_lba(&mut self, lba: u64, buf: &mut [u8]) -> bool {
         let n = self.lba_bytes as usize;
         if self.io.read_blocks(self.media_id, lba, &mut self.scratch[..n]).is_err() {

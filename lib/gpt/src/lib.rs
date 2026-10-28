@@ -17,6 +17,9 @@
 //! `no_std`, no allocation, no `unsafe`: the entry array is streamed a block
 //! at a time through [`Sectors`], so nothing here is sized by a number the
 //! disk chose.
+//!
+//! [`edit`] is the other half: a whole table read from either copy, checked
+//! and written, for the one writer of a table ToyOS has.
 
 #![no_std]
 #![forbid(unsafe_code)]

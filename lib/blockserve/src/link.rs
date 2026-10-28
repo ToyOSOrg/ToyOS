@@ -27,6 +27,13 @@ pub enum Handed {
     Designate { order: disk::Designation, conn: Connection },
 }
 
+/// The longest frame the service sends: a session, a designation, or a disk's number.
+const FRAME: usize = max(max(disk::Session::BYTES, disk::Designation::BYTES), 4);
+
+const fn max(a: usize, b: usize) -> usize {
+    if a > b { a } else { b }
+}
+
 /// Fresh connections in a row that may refuse what the driver says before it
 /// gives up: a frame refused on an empty connection is not backpressure.
 const CONNECTS: u32 = 3;
@@ -35,7 +42,7 @@ pub struct Link {
     label: String,
     /// `None` once the service's port has closed for good.
     conn: Option<Connection>,
-    rx: FrameRx<{ disk::Designation::BYTES }>,
+    rx: FrameRx<{ FRAME }>,
     offers: BTreeMap<u32, Vec<Part>>,
     settled: Option<Settled>,
 }

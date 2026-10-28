@@ -13,7 +13,7 @@
 //! a login grants none. Exit status 0 where it was done, 1 where it was
 //! refused or failed, 2 for a command line it does not take.
 
-use toyos_blockring::wire::{Designated, DiskHead, Lba0, SlotLine};
+use toyos_blockring::wire::{Designated, DiskHead, SlotLine};
 use toyos_gpt::Guid;
 use toyos_manifest::authorize::Authorization;
 
@@ -111,7 +111,7 @@ fn kind(guid: [u8; 16]) -> String {
     named.iter().find(|(g, _)| g.0 == guid).map_or_else(|| Guid(guid).to_string(), |(_, name)| (*name).to_string())
 }
 
-/// `bytes` in the largest binary unit that leaves a whole number above one.
+/// `bytes` in the largest binary unit that leaves at least 10 of it.
 fn size(bytes: u64) -> String {
     let units = ["B", "KiB", "MiB", "GiB", "TiB"];
     let mut at = 0;
@@ -126,19 +126,13 @@ fn size(bytes: u64) -> String {
 /// One disk as `disks list` prints it.
 fn describe(disk: u32, head: &DiskHead, slots: &[SlotLine]) -> String {
     let bytes = head.sectors * u64::from(head.lba_bytes);
-    let lba0 = match head.lba0 {
-        Lba0::Protective => "a GPT",
-        Lba0::Mbr => "an MBR that is not a GPT's",
-        Lba0::Blank => "no partition table",
-        Lba0::Unread => "a first sector that would not read",
-    };
     let copies = if head.agree {
         "both copies agree".to_string()
     } else {
         format!("primary {}, backup {}", head.primary, head.backup)
     };
     let mut out = format!(
-        "disk {disk}: {} ({} sectors of {} bytes), {lba0}, {copies}\n",
+        "disk {disk}: {} ({} sectors of {} bytes), a GPT, {copies}\n",
         size(bytes),
         head.sectors,
         head.lba_bytes
@@ -179,7 +173,6 @@ mod tests {
         let head = DiskHead {
             lba_bytes: 512,
             sectors: 500_118_192,
-            lba0: Lba0::Protective,
             agree: true,
             primary: "valid".into(),
             backup: "valid".into(),
@@ -210,7 +203,7 @@ mod tests {
     }
 
     #[test]
-    fn only_a_done_or_judged_designation_succeeds() {
+    fn a_designation_is_said_as_what_it_came_to() {
         assert!(designated(&Designated::Written).contains("read back"));
         assert!(designated(&Designated::Foreign("an NTFS file system".into())).contains("carries an NTFS file system"));
     }

@@ -346,8 +346,8 @@ fn data_on<D: Disk + 'static>(disk: D, roots: &[&str]) -> Box<dyn Volume> {
             Box::new(Absent::new(roots, why))
         }
         // A disk that is there and holds somebody's bytes is no machine without
-        // one: nothing stands in for it, and `disks designate data` is how it
-        // becomes ToyOS's.
+        // one: nothing stands in for it, and a designation is how it becomes
+        // ToyOS's.
         Probed::Foreign => absent(roots, "the DATA partition holds no volume of ours and no designation stamp".into()),
     }
 }
