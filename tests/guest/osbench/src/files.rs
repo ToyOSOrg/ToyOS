@@ -92,6 +92,29 @@ fn page_at(i: usize, pages: usize) -> u64 {
     (x % pages as u64) * 4096
 }
 
+/// `read_4k_at`'s parts, on `f` and the 16 MiB file it holds open.
+fn parts(
+    name: &dyn Fn(&str) -> String,
+    fields: &[(&'static str, String)],
+    f: &mut File,
+    buf: &mut [u8],
+    pages: usize,
+) {
+    #[cfg(target_os = "linux")]
+    use std::os::unix::fs::FileExt;
+    #[cfg(target_os = "toyos")]
+    use std::os::toyos::fs::FileExt;
+
+    each(&name("seek"), 100, 2000, fields, |i| io("seek", f.seek(SeekFrom::Start(page_at(i, pages)))).map(drop));
+    // 2,100 reads from the start fit the file's 4,096 pages.
+    if let Err(e) = f.seek(SeekFrom::Start(0)) {
+        return refuse(&name("read_4k"), e);
+    }
+    each(&name("read_4k"), 100, 2000, fields, |_| io("read", f.read_exact(buf)));
+    each(&name("pread_4k"), 100, 2000, fields, |i| io("pread", f.read_at(buf, page_at(i, pages))).map(drop));
+    each(&name("pread_8"), 100, 2000, fields, |i| io("pread", f.read_at(&mut buf[..8], page_at(i, pages))).map(drop));
+}
+
 /// Every benchmark under `target`, each line naming what served it and its
 /// medium. Each one's comment is its warm-up and repetitions.
 pub fn suite(target: &Target) {
@@ -114,8 +137,13 @@ pub fn suite(target: &Target) {
     }
     each(&name("open_close"), 100, 2000, &with(&[]), |_| io("open", File::open(&small)).map(drop));
 
-    // `metadata` of the same file: 2,000 after 100.
+    // `metadata` of the same file, by its path and through a descriptor
+    // held open: 2,000 after 100 each.
     each(&name("stat"), 100, 2000, &with(&[]), |_| io("stat", fs::metadata(&small)).map(drop));
+    match File::open(&small) {
+        Ok(f) => each(&name("fstat"), 100, 2000, &with(&[]), |_| io("fstat", f.metadata()).map(drop)),
+        Err(e) => refuse(&name("fstat"), e),
+    }
 
     // A new file, 100 bytes written to it, closed and removed: 1,000 after 50.
     let fresh = scratch.at("fresh");
@@ -127,8 +155,10 @@ pub fn suite(target: &Target) {
     });
 
     // A 4 KiB read and a 4 KiB write at a page-aligned offset of a 16 MiB
-    // file held open, each a seek and the transfer (std on ToyOS has no
-    // positioned read): 2,000 after 100.
+    // file held open, each a seek and the transfer; then the read's parts
+    // alone: the seek, a 4 KiB read where the last left off, and a
+    // positioned read of 4 KiB and of 8 bytes, which no seek precedes:
+    // 2,000 after 100 each.
     let big = scratch.at("big");
     if let Err(e) = fill(&big, 16 * MIB) {
         return refuse(&name("setup"), e);
@@ -145,6 +175,22 @@ pub fn suite(target: &Target) {
                 io("seek", f.seek(SeekFrom::Start(page_at(i, pages))))?;
                 io("write", f.write_all(&buf))
             });
+            let fields = with(&[("file_bytes", (16 * MIB).to_string())]);
+            parts(&name, &fields, &mut f, &mut buf, pages);
+            #[cfg(target_os = "toyos")]
+            match crate::sys::direct::connect(&target.dir) {
+                Ok(Some(mut dir)) => {
+                    let under = |p: &Path| p.strip_prefix(&target.dir).ok().and_then(Path::to_str).map(str::to_string);
+                    match (under(&small), under(&big)) {
+                        (Some(s), Some(b)) => {
+                            crate::sys::direct::rows(&mut dir, &name, &with(&[]), &fields, &s, &b, |i| page_at(i, pages));
+                        }
+                        _ => refuse(&name("direct"), "the scratch files are not under the served directory"),
+                    }
+                }
+                Ok(None) => {}
+                Err(why) => refuse(&name("direct"), why),
+            }
         }
         Err(e) => refuse(&name("read_4k_at"), e),
     }
