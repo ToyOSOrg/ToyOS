@@ -26,6 +26,7 @@ use super::device::{
     sys_device_dma_limit, sys_device_dma_start, sys_device_dma_unmap,
     sys_device_reg_read,
 };
+use super::event::{sys_event_create, sys_event_signal, sys_event_take, sys_handle_wait};
 use super::fs::{
     spawn_cwd, sys_chdir, sys_delete, sys_getcwd, sys_mkdir, sys_open, sys_readdir, sys_readlink,
     sys_rename, sys_rmdir, sys_stat, sys_symlink,
@@ -625,6 +626,10 @@ pub(crate) fn syscall_dispatch(num: u64, a1: u64, a2: u64, a3: u64, a4: u64) -> 
         },
         SYS_JOB_FLOOR => sys_job_floor(RawHandle(a1 as u32), RawHandle(a2 as u32), a3),
         SYS_WAKE_LATENCY_HOLD => sys_wake_latency_hold(RawHandle(a1 as u32), a2),
+        SYS_EVENT_CREATE => sys_event_create(),
+        SYS_EVENT_SIGNAL => sys_event_signal(RawHandle(a1 as u32)),
+        SYS_EVENT_TAKE => sys_event_take(RawHandle(a1 as u32)),
+        SYS_HANDLE_WAIT => sys_handle_wait(RawHandle(a1 as u32), a2, a3),
         SYS_ACCOUNT_INFO => {
             if a3 < core::mem::size_of::<toyos_abi::syscall::AccountInfo>() as u64 { return SyscallError::InvalidArgument.to_u64(); }
             let Some(addr) = UserAddr::checked(a2) else { return bad_addr };
