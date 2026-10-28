@@ -107,6 +107,9 @@ pub struct Permits {
     /// moment the frame arrived, and the order inside a chunk is the
     /// hardware's.
     pub batched_writeback: bool,
+    /// §10.2.6.1: `TCTL.MULR` "is loaded from the NVM word 0x24/0x14", so a
+    /// part's NVM may set it or clear it. On: set, as the T14's is.
+    pub nvm_sets_mulr: bool,
     /// §7.1.8: the head register "includes those descriptors completed but not
     /// yet stored in memory", so `RDH` may be ahead of what a driver can read.
     pub shadow_head: bool,
@@ -238,6 +241,7 @@ impl Default for Permits {
     fn default() -> Self {
         Self {
             batched_writeback: true,
+            nvm_sets_mulr: true,
             shadow_head: true,
             null_padding: true,
             spurious_interrupts: true,
@@ -781,6 +785,10 @@ impl Model {
             *word = 0;
         }
         self.set(regs::CTRL, CTRL_RESERVED_SET);
+        // §10.2.6.1's initial values: `PSP` and `RRTHRESH`, and `MULR` as the
+        // NVM loads it.
+        let mulr = if self.permits.nvm_sets_mulr { tctl::MULR } else { 0 };
+        self.set(regs::TCTL, tctl::PSP | tctl::RRTHRESH_RESET | mulr);
         if self.permits.extcnf_carries_firmware_fields {
             self.set(regs::EXTCNF_CTRL, EXTCNF_FIRMWARE_FIELDS);
         }

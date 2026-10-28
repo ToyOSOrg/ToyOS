@@ -905,6 +905,8 @@ pub struct BringUp {
     pub phy: Result<phy::Phy, phy::PhyRefusal>,
     /// The message the claim was proven to deliver.
     pub delivered: Delivered,
+    /// `TCTL` as the bring-up left it, the part's loaded fields among it.
+    pub transmit_control: u32,
 }
 
 /// The function, brought up and driving.
@@ -1107,7 +1109,7 @@ impl<R: Registers, C: Clock, D: DmaBuffers, I: Interrupts> I219<R, C, D, I> {
             dma,
             irq,
             mac,
-            brought_up: BringUp { master_quiet, woke, reset: full, phy, delivered },
+            brought_up: BringUp { master_quiet, woke, reset: full, phy, delivered, transmit_control: 0 },
             link: Link::default(),
             opened_at: 0,
             link_up_at: None,
@@ -1139,8 +1141,14 @@ impl<R: Registers, C: Clock, D: DmaBuffers, I: Interrupts> I219<R, C, D, I> {
         // transmitter.
         nic.regs.write32(regs::TXDCTL, txdctl::SUGGESTED);
         nic.regs.write32(regs::TIPG, regs::TIPG_DEFAULT);
-        nic.regs.write32(regs::TCTL, TX_CONTROL);
-        nic.accepted(regs::TCTL, TX_CONTROL)?;
+        // §4.6.6's fields, over what the part loaded for itself: written whole,
+        // `TCTL` would clear the NVM's `MULR` and the reset's `RRTHRESH`, and
+        // the part would fetch each frame's data one request at a time. §10.2.6.1
+        // allows the write: the head is the tail, nothing being published yet.
+        let tx = (nic.regs.read32(regs::TCTL) & tctl::LOADED) | TX_CONTROL;
+        nic.regs.write32(regs::TCTL, tx);
+        nic.accepted(regs::TCTL, tx)?;
+        nic.brought_up.transmit_control = nic.regs.read32(regs::TCTL);
 
         // §4.6.5.1: the receiver last, "only after all other setup is
         // accomplished".

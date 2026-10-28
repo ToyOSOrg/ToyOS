@@ -465,6 +465,22 @@ pub mod tctl {
     /// Collision Distance (bits 21:12). §4.6.6: full duplex is `63`.
     pub const COLD_SHIFT: u32 = 12;
     pub const COLD_FULL_DUPLEX: u32 = 0x3F << COLD_SHIFT;
+    /// Under-run No Re-Transmit (bit 25) and the Tx Descriptor Minimum
+    /// Threshold (bits 27:26): §10.2.6.1 gives neither a value of its own.
+    pub const UNORTX: u32 = 1 << 25;
+    pub const TXDSCMT: u32 = 0b11 << 26;
+    /// Multiple Request Support (bit 28): "When set to 0b, the 82574 submits
+    /// only one request at a time, When set to 1b, the 82574 might submit up
+    /// to four concurrent requests" for transmit data (§7.2.7). "This bit is
+    /// loaded from the NVM word 0x24/0x14."
+    pub const MULR: u32 = 1 << 28;
+    /// Read Request Threshold (bits 30:29), initially `01b`: when the
+    /// intermediate buffer sends its read command to the packet buffer.
+    pub const RRTHRESH: u32 = 0b11 << 29;
+    pub const RRTHRESH_RESET: u32 = 0b01 << 29;
+    /// What the part loads for itself and no driver decides: kept as reset and
+    /// the NVM left it.
+    pub const LOADED: u32 = UNORTX | TXDSCMT | MULR | RRTHRESH;
 }
 
 /// The inter-packet gap §4.6.6 names: `IPGT = 8`, `IPGR1 = 2`, `IPGR2 = 10`,

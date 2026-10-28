@@ -127,6 +127,19 @@ earlier sessions while Linux held 110–114. The fix is consistent with most
 of that, but not with `aeba59fb0`'s 62–65, above B's reading here. That
 part of the spread across sessions stays unexplained.
 
+**The card sends slowly, read 2026-10-28** ([evidence `c54355277/`](https://github.com/ToyOSOrg/evidence/tree/5db2f7f5ed4e54c12fd74c8aa2368de4b4a6590a/r1/c54355277)).
+Pull request #1075 counted, at each full ring, the frames `GPTC` had on the
+wire that netstack had not seen written back: none, in either of two runs,
+while the ring sat full 10.2–10.4 s of each 15 s row. The part sent what it
+held at about 42,000 frames a second, 23.8 µs a frame against 12.3 µs of
+wire.
+
+**The cause, derived, which #1075's interleaved reading tests**: the
+bring-up wrote `TCTL` whole, clearing `MULR`, which the T14's NVM sets
+(`TCTL` read `0x3003f0f8` before the reset). With it clear "the 82574
+submits only one request at a time" for transmit data (82574 §10.2.6.1,
+§7.2.7). #1075 keeps the fields the part loads.
+
 The transmit setup's own lead stays open in
 `issues/the-intel-driver-writes-txdctl-and-tidv-against-the-82574-datasheets-newer-revision.md`.
 

@@ -102,9 +102,9 @@ fn bring_up_programs_what_the_initialization_sections_name() {
     );
     assert_eq!(
         nic.peek(regs::TCTL),
-        tctl::EN | tctl::PSP | tctl::CT | tctl::COLD_FULL_DUPLEX,
+        tctl::EN | tctl::PSP | tctl::CT | tctl::COLD_FULL_DUPLEX | tctl::MULR | tctl::RRTHRESH_RESET,
         "{}",
-        nic.because("TCTL is not §4.6.6's suggested configuration")
+        nic.because("TCTL is not §4.6.6's fields over what the part loaded for itself")
     );
     assert_eq!(nic.peek(regs::TIPG), regs::TIPG_DEFAULT);
     assert_eq!(nic.peek(regs::TXDCTL), regs::txdctl::SUGGESTED);
@@ -3389,4 +3389,25 @@ fn a_full_ring_counts_how_long_it_waited_for_room() {
     assert!((5_000_000..5_100_000).contains(&waited), "waited {waited} ns");
     assert!(driver.tx_room() > 0);
     assert_eq!(driver.counters().tx_full_nanos, waited, "room with no wait added time");
+}
+
+/// §10.2.6.1: `MULR` "is loaded from the NVM word 0x24/0x14" and `RRTHRESH`
+/// comes out of reset at `01b`; the bring-up sets §4.6.6's fields and leaves
+/// those as the part loaded them, whichever way its NVM has `MULR`.
+#[test]
+fn bring_up_keeps_what_the_part_loaded_into_tctl() {
+    for nvm_sets_mulr in [true, false] {
+        let nic = Nic::with(7, Part::I219, Permits { nvm_sets_mulr, ..Permits::default() });
+        let driver = open(&nic);
+        let tctl = nic.peek(regs::TCTL);
+        assert_eq!(driver.brought_up().transmit_control, tctl, "the bring-up reported another TCTL");
+        assert_eq!(tctl & tctl::MULR != 0, nvm_sets_mulr, "{}", nic.because("MULR is not the NVM's"));
+        assert_eq!(tctl & tctl::RRTHRESH, tctl::RRTHRESH_RESET, "{}", nic.because("RRTHRESH is not its reset value"));
+        assert_eq!(
+            tctl & !tctl::LOADED,
+            tctl::EN | tctl::PSP | tctl::CT | tctl::COLD_FULL_DUPLEX,
+            "{}",
+            nic.because("the fields the driver decides are not §4.6.6's")
+        );
+    }
 }
