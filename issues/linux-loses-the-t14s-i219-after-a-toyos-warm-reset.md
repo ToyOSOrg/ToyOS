@@ -78,8 +78,11 @@ each of:
   `regs::status::PHY_CONFIGURED`).
 
 One power-control read after the K1 write and one after `START`, in the next
-instrumented boot, separate them. Until then the host model is contradicted
-by real hardware: `stub.rs` carries `power_control` across the reset (it is
+instrumented boot, tell an ignored write and the `START` commit apart from
+each other and from the reset. Both reads precede `RST|PHY_RST`, so they
+leave the reset's two causes, `PHY_RST` and the MAC's post-reset
+configuration, undetermined. Until the cause is known the host model is
+contradicted by real hardware: `stub.rs` carries `power_control` across the reset (it is
 set only at construction and by the driver's write), and
 `ulp_left_armed_is_disarmed_and_a_lost_link_leaves_the_phy_in_reach` in
 `tests.rs` asserts K1 on after the bring-up. Both are unconfirmed pending the
@@ -87,7 +90,7 @@ cause. Whether this PCH needs K1 off at gigabit is outside what the
 clean-room facts cover, and it is open only once the write is shown to take.
 The disarm's ULP result does not depend on K1.
 
-**One cut-off trial.** That same boot, an `i219_leaves_ulp_unarmed` image with
+**One cut-off trial.** The 13:22 UTC boot, an `i219_leaves_ulp_unarmed` image with
 no job of its own at `a6ae98b35`, rebooted 3 ms after netstack started, so the
 driver was cut off part way through its wake.
 
