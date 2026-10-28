@@ -439,10 +439,8 @@ const OFFER_ANSWER: Duration = Duration::from_secs(30);
 fn offered(control: &Connection, offer: &Offer) -> Result<OwnedHandle, Refusal> {
     let refused = |why: String| Refusal::Soundserver(why);
     control.send_bytes(MSG_OFFER, &offer.encode()).map_err(|why| refused(format!("the offer was refused ({why:?})")))?;
-    let poller = Poller::new(1);
-    poller.watch(control, READABLE, TOKEN_CONTROL);
-    let mut answered = false;
-    poller.wait(1, OFFER_ANSWER.as_nanos() as u64, |_| answered = true);
+    let answered = toyos::poller::wait_one(control, READABLE, OFFER_ANSWER.as_nanos() as u64)
+        .map_err(|why| refused(format!("its answer could not be waited for ({why:?})")))?;
     if !answered {
         return Err(refused(format!("it did not answer the offer within {OFFER_ANSWER:?}")));
     }
