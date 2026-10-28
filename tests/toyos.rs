@@ -138,6 +138,9 @@ const RUST_SKIP: &[&str] = &[
     // It measures the T14's I219, which no guest has: the
     // `i219_messages_on_its_msi_vector` metal row runs it.
     "i219_msi",
+    // It waits for netstack to answer, which follows the I219's bring-up: the
+    // `i219_leaves_ulp_unarmed` metal row runs it on tests/images/benchcase.toml.
+    "netstack_answers",
     // Its product is the T14's counters across an idle span and a spin on
     // every CPU, which the `counters` metal row judges; on a guest it would be
     // seconds of four CPUs spinning, read by nothing.
@@ -1137,7 +1140,8 @@ const METAL: &[(&str, metal::Metal)] = &[
         // What the PHY's ULP registers hold after the I219's disarm and the
         // full reset, which the stub only assumes. The T14 only: the AMD bench
         // has no card ToyOS drives. It rides `osbench`'s boot, whose netstack
-        // drives the card, and reads two of netstack's lines.
+        // drives the card, and reads two of netstack's lines once its job has
+        // had netstack answer, which it does only after the bring-up.
         "i219_leaves_ulp_unarmed",
         metal::Metal { arms: BENCHCASE_ALONE, judge: |b| i219_leaves_ulp_unarmed(b[0]) },
     ),
@@ -1689,14 +1693,18 @@ const OSBENCH_INTERNET: &[metal::Arm] = &[metal::Arm {
     ..metal::once("netbenchcase", "tests/images/benchcase.toml", &[], &["osbench_internet"])
 }];
 
-/// [`BENCHCASE`]'s boot, with no job of its own.
-const BENCHCASE_ALONE: &[metal::Arm] = &[metal::once("benchcase", "tests/images/benchcase.toml", &[], &[])];
+/// [`BENCHCASE`]'s boot, with one job: netstack answering, which it does only
+/// once the card's bring-up has logged. Without it the list's `reboot` lands
+/// while the driver is still reaching the PHY.
+const BENCHCASE_ALONE: &[metal::Arm] =
+    &[metal::once("benchcase", "tests/images/benchcase.toml", &[], &["test_rs_netstack_answers"])];
 
 /// netstack's account of the I219's start: what its wake found of Ultra Low
 /// Power and disarmed, and the configuration its bring-up read back unarmed.
 /// Both lines are printed, because what was found is what the next boot's
 /// diagnosis reads.
 fn i219_leaves_ulp_unarmed(boot: &metal::Readback) -> Result<(), String> {
+    boot.job_passed("test_rs_netstack_answers")?;
     let log = boot.log();
     let woke = log.must_say("netstack: I219: before the reset the PHY was asked:")?;
     let left = log.must_say("it is left with ULP configuration")?;

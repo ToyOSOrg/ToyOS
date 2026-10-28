@@ -28,6 +28,19 @@ silent after its power cycle, answering once the MAC was forced onto SMBus.
   transactions follow forcing SMBus.
 - (c) A PHY that failed on its own.
 
+**For (a): the bench's Linux has magic-packet wake on.** Before the T14 boot
+of 2026-10-28 13:22 UTC its e1000e reported "Supports Wake-on: pumbg" and
+"Wake-on: g". A Linux driver arms ULP at its own shutdown, reboot and kexec when
+a wake is wanted and none of the filters ULP cannot serve (unicast, multicast,
+broadcast) is among them, and magic packet is not one of those. So every
+Linux reboot into ToyOS on this bench leaves ULP armed, which fits ToyOS's start
+finding the PHY silent over PCIe and answering only on SMBus on every logged
+boot. Before #1091 nothing in ToyOS cleared it.
+
+**One cut-off trial.** That same boot, an `i219_leaves_ulp_unarmed` image with no
+job of its own at `a6ae98b35`, rebooted 3 ms after netstack started, so the
+driver was cut off part way through its wake. Linux found the NIC afterwards.
+
 **Instrument.** Since #1091 the wake's line says what ULP held when the PHY
 first answered, and the bring-up's what it holds after the reset. Every T14
 metal boot ends with `0xCF9` ← `06h` into the loader's chain pass and the
