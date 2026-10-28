@@ -437,6 +437,18 @@ dependencies = [
 ]
 
 [[package]]
+name = "mio"
+version = "1.2.0"
+source = "git+https://github.com/ToyOSOrg/mio?branch=toyos#fe42def7bec9a1f01bfff764256fcdce77e7f7e1"
+dependencies = [
+ "libc",
+ "log",
+ "toyos-abi",
+ "wasi",
+ "windows-sys 0.61.2",
+]
+
+[[package]]
 name = "ml-kem"
 version = "0.3.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -971,6 +983,7 @@ dependencies = [
  "libloading",
  "logkeeper-api",
  "memmap2",
+ "mio",
  "ml-kem",
  "ring",
  "toyos",

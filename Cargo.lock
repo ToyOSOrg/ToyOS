@@ -1749,7 +1749,7 @@ dependencies = [
 [[package]]
 name = "mio"
 version = "1.2.0"
-source = "git+https://github.com/ToyOSOrg/mio?branch=toyos#f76209283c8133df0e56be2cd402e05ebdec41c8"
+source = "git+https://github.com/ToyOSOrg/mio?branch=toyos#fe42def7bec9a1f01bfff764256fcdce77e7f7e1"
 dependencies = [
  "libc",
  "toyos-abi",
