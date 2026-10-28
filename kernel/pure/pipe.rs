@@ -145,19 +145,22 @@ impl Landing {
 /// What a pipe holds, in frames taken as it fills and given back as it
 /// drains. Its first unread byte is `head` bytes into the first frame, and
 /// the frames past its last byte are spare: kept for the next write while
-/// there are no more of them than frames holding bytes, and one besides. So a
-/// pipe holds at most twice the frames its bytes need and one more, never more
-/// than [`MOST_FRAMES`], and a stream that keeps a backlog in it takes no
-/// frame from the allocator.
+/// there are no more of them than frames holding bytes, or than its last
+/// write spanned, or one. So a pipe holds at most the frames its bytes need
+/// and as many again or its last write's, never more than [`MOST_FRAMES`],
+/// and a stream of writes of one size takes no frame from the allocator
+/// whether its reader keeps up or lags.
 pub struct Bytes<F> {
     frames: VecDeque<F>,
     head: usize,
     len: usize,
+    /// The frames the last write spanned: the working set its next one wants.
+    last: usize,
 }
 
 impl<F> Bytes<F> {
     pub const fn new() -> Self {
-        Self { frames: VecDeque::new(), head: 0, len: 0 }
+        Self { frames: VecDeque::new(), head: 0, len: 0, last: 0 }
     }
 
     pub fn len(&self) -> usize {
@@ -226,6 +229,7 @@ impl<F> Bytes<F> {
     /// Count `n` more bytes held: what [`Self::place`] put at the end.
     pub fn commit(&mut self, n: usize) {
         assert_eq!(self.wants(n), 0, "pipe: bytes held past the frames it was given");
+        self.last = (self.head + self.len + n).div_ceil(FRAME) - (self.head + self.len) / FRAME;
         self.len += n;
     }
 
@@ -234,7 +238,7 @@ impl<F> Bytes<F> {
     pub fn write(&mut self, n: usize, copy: impl FnMut(&mut F, Range<usize>, usize)) {
         assert_eq!(self.wants(n), 0, "pipe: a write past the frames it was given");
         self.place(0, n, copy);
-        self.len += n;
+        self.commit(n);
     }
 
     /// The `len` held bytes `at` past the oldest, handed to `copy` as
@@ -273,13 +277,13 @@ impl<F> Bytes<F> {
     /// The spares past those it keeps, for the caller to give back.
     pub fn surplus(&mut self) -> Drain<'_, F> {
         let used = self.used();
-        let keep = used + (self.frames.len() - used).min(used.max(1));
+        let keep = used + (self.frames.len() - used).min(used.max(self.last).max(1));
         self.frames.drain(keep..)
     }
 
     /// Every frame, for the caller to give back, and with them every byte.
     pub fn clear(&mut self) -> Drain<'_, F> {
-        (self.head, self.len) = (0, 0);
+        (self.head, self.len, self.last) = (0, 0, 0);
         self.frames.drain(..)
     }
 }
@@ -699,7 +703,7 @@ mod tests {
             assert_eq!(got, pattern(read, got.len()), "turn {turn}: bytes {read}.. came back wrong");
             read += got.len();
             assert!(
-                pipe.bytes.frames() <= 2 * pipe.bytes.used() + 1,
+                pipe.bytes.frames() <= pipe.bytes.used() + pipe.bytes.used().max(pipe.bytes.last).max(1),
                 "turn {turn}: {} frames kept for {} bytes",
                 pipe.bytes.frames(),
                 pipe.bytes.len()
@@ -708,7 +712,7 @@ mod tests {
         }
         let rest = pipe.read(PIPE_CAPACITY);
         assert_eq!(rest, pattern(read, written - read));
-        assert_eq!(pipe.bytes.frames(), 1, "a drained pipe keeps one frame");
+        assert_eq!(pipe.bytes.frames(), pipe.bytes.last.max(1), "a drained pipe keeps its last write's frames");
     }
 
     /// A write placed in pieces, in any order and cut anywhere, as a user
@@ -774,13 +778,13 @@ mod tests {
         assert_eq!(pipe.read(PIPE_CAPACITY), [pattern(5, 5), pattern(10, rest)].concat());
     }
 
-    /// A stream that keeps a backlog in the pipe, a little or nearly all of
-    /// it, takes no frame after its first round: the frames a read empties
-    /// carry the next write.
+    /// A stream of one write size takes no frame after its first round,
+    /// whether its reader drains the pipe each time, keeps a little backlog
+    /// or nearly all of it: the frames a read empties carry the next write.
     #[test]
     fn a_steady_stream_takes_no_frames() {
         const CHUNK: usize = 64 << 10;
-        for backlog in [CHUNK, PIPE_CAPACITY - CHUNK] {
+        for backlog in [0, CHUNK, PIPE_CAPACITY - CHUNK] {
             let mut pipe = Held::new();
             pipe.write(&vec![1; backlog]);
             pipe.write(&vec![1; CHUNK]);
@@ -794,12 +798,15 @@ mod tests {
         }
     }
 
-    /// A pipe that held much and is drained gives back all but one frame,
-    /// which carries the next whole write, and `clear` gives back every one.
+    /// A pipe that held much and is drained keeps what its last write
+    /// spanned and gives back the rest, so after a small write and its read
+    /// it keeps one frame, which carries the next whole write; `clear` gives
+    /// back every one.
     #[test]
     fn a_drained_pipe_gives_its_frames_back() {
         let mut pipe = Held::new();
-        pipe.write(&vec![1; PIPE_CAPACITY]);
+        pipe.write(&vec![1; PIPE_CAPACITY - 1]);
+        pipe.write(&[1]);
         assert_eq!(pipe.bytes.frames(), PIPE_CAPACITY / FRAME);
         pipe.read(PIPE_CAPACITY);
         assert_eq!((pipe.bytes.frames(), pipe.returned.len()), (1, PIPE_CAPACITY / FRAME - 1));
