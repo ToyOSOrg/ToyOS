@@ -57,7 +57,7 @@ each against its control with the deep states off, all else equal):
 
 - T14 `crunch.single` 1.10 to 1.11 times faster (deflate 60.3 to 54.5 ms,
   Linux's 54.6 to 54.7). The clock beside both deflate and
-  `malloc_churn.1048576.t1` read 4187 to 4189 MHz in all seven boots with
+  `malloc_churn.1048576.t1` read 4187 to 4189 MHz in all eight boots with
   the deep states, against 3788 to 3789 in the four A\* boots (each row's
   `mhz`, `cpu.clock`'s reading beside it). Across deflate, every core but
   the thread's was 99.5 to 99.9 % of the row in core C7, which counts at the
@@ -84,10 +84,10 @@ each against its control with the deep states off, all else equal):
   always-deepest control, so the history holding idle CPUs shallow after
   the group before is the open hypothesis there; a per-CPU state read
   inside the window would test it.
-- Group starts at 4189 across the six T14 boots with the deep states:
-  8 and 8 (r2), 8 and 10 (r3), 10 (B4) and 5 (B5 at `d60d727aa`), counted
+- Group starts at 4189 across the eight T14 boots with the deep states:
+  8 and 8 (r2), 8 and 10 (r3), 10 (B4), 5 (B5), 10 (B6) and 10 (B7), counted
   as a maximum above 4100 MHz. Only sched, files, ipc and work reached it
-  in all six; B5 lost time, which every earlier boot had. It is a spread
+  in all eight; B5 and B6 lost time, which the others had. It is a spread
   from boot to boot, not a fixed set of groups.
 - Soundserver's worst IRQ lateness, over every window line of the
   testcases boots: with every idle CPU in C1 (one boot a bench), T14 181 to
