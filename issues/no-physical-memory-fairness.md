@@ -94,7 +94,8 @@ netstack's piped connections, and `SYS_CONNECT` pinning 4 MiB into an
 unbounded pending queue — and all three have a bound *and* a caller that hears
 the refusal: `toyos_desktop::max_windows` and netstack's `places_for` each
 divide an eighth of physical memory by what one unit costs and refuse past it,
-and a pipe allocates its ring page on first use rather than at `create`. Their
+and a pipe takes memory for its bytes as it holds them rather than at
+`create`. Their
 memory is counted to whichever job made it: a client's own connection is
 its job's, but a pipe a server makes and hands out (fileserver's stream
 pipes, netstack's bells) is the server's, which the server bounds. With no

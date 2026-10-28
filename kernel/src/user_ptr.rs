@@ -219,16 +219,15 @@ impl UserBytes<'_> {
         self.0.read_into(off, dst);
     }
 
-    /// Copy the window at `off` into one ring run; panics if out of bounds, as
+    /// Hand `copy` each piece of the window's `[off, off + len)`, as
+    /// [`read_at`](Self::read_at) reaches them, one chunk of pages pinned at
+    /// a time: a pointer to its bytes, its offset in that range and its
+    /// length. The pointer is valid for that length until `copy` returns,
+    /// with preemption off, and is never made a reference; a page the
+    /// process took away reads as zeros. Panics if out of bounds, as
     /// [`read_at`](Self::read_at) does.
-    pub fn read_run(&self, off: usize, dst: &mut toyos_abi::ring::Dst<'_>) {
-        let into = dst.as_mut_ptr();
-        self.0.pieces("UserBytes::read_run", off, dst.len(), |run, at, n| {
-            // SAFETY: `pieces` bounds `[at, at + n)` inside the ring run, which
-            // `Ring::write` proved is inside its own data region, and `run..+n`
-            // inside one pinned page; the ring is kernel memory no window names.
-            unsafe { core::ptr::copy_nonoverlapping(run, into.add(at), n) }
-        });
+    pub fn read_pieces(&self, off: usize, len: usize, mut copy: impl FnMut(*const u8, usize, usize)) {
+        self.0.pieces("UserBytes::read_pieces", off, len, |run, at, n| copy(run.cast_const(), at, n));
     }
 
     /// The `len`-byte window at `off` inside this one.
@@ -254,17 +253,11 @@ impl UserBytesMut<'_> {
         self.0.write_from(off, src);
     }
 
-    /// Copy one ring run into the window at `off`; panics if out of bounds, as
-    /// [`write_at`](Self::write_at) does.
-    pub fn write_run(&mut self, off: usize, src: &toyos_abi::ring::Src<'_>) {
-        let from = src.as_ptr();
-        self.0.pieces("UserBytesMut::write_run", off, src.len(), |run, at, n| {
-            // SAFETY: `pieces` bounds `[at, at + n)` inside the ring run, which
-            // `Ring::read` proved is inside its own data region, and `run..+n`
-            // inside one pinned page its range let the process write; the ring
-            // is kernel memory no window names.
-            unsafe { core::ptr::copy_nonoverlapping(from.add(at), run, n) }
-        });
+    /// [`UserBytes::read_pieces`] for a copy into the window: each pointer
+    /// may be written for its length until `copy` returns, and a page the
+    /// process took away drops what is written to it.
+    pub fn write_pieces(&mut self, off: usize, len: usize, copy: impl FnMut(*mut u8, usize, usize)) {
+        self.0.pieces("UserBytesMut::write_pieces", off, len, copy);
     }
 
     /// Zero `len` bytes of the window at `off`.

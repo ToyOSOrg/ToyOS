@@ -197,7 +197,7 @@ fn published() {
 fn free_table(job: &Job, phys: u64) {
     // SAFETY: the caller unlinked the table, after the shootdown that let
     // every CPU stop walking it.
-    unsafe { crate::mm::pmm::free_table_frame(job, phys) };
+    unsafe { crate::mm::pmm::free_held(job, [phys]) };
 }
 
 /// A root and every table under it, each a frame the descriptor linking it

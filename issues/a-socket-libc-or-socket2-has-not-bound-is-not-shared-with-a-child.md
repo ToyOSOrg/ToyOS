@@ -30,8 +30,7 @@ What is not shared:
 
 Each child descriptor naming a stream is a holder of its own: inetd's
 `dup2(s, 0); dup2(s, 1); dup2(s, 2)` makes three holders for one child, each
-a place, a watch and four pipe pages
-(`issues/a-pipe-is-a-two-mebibyte-page-for-a-mapping-nothing-makes.md`). One
+a place, a watch and four pipes. One
 holder shared by a child's duplicates would need the child to alias an
 adoption, since a second copy of one exported end carries no `ADOPT`.
 

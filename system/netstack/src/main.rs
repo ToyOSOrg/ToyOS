@@ -33,7 +33,7 @@ use toyos::ipc::{self, RxStep};
 use toyos::poller::{Poller, READABLE};
 use toyos::say;
 use toyos::AsHandle;
-use toyos_abi::syscall::PciId;
+use toyos_abi::syscall::{PciId, PIPE_CAPACITY};
 use toyos_manifest::device::PciMatch;
 use toyos_dhcp::{HostName, Lease};
 use toyos_i219::Part;
@@ -95,17 +95,18 @@ const LEASE_BOUND: Duration = Duration::from_millis(toyos_tco::LEASE_BOUND_MS);
 /// keeps up (`toyos-net-tcp`'s `rx`); a send buffer is the region's send ring.
 const TCP_BUFFER: u32 = toyos::net::stream::RECEIVE_BYTES;
 
-/// A kernel pipe is one 2 MiB page (`kernel/src/pipe.rs`). The client
-/// allocates it, and netstack holding its far end is what keeps it alive.
-const PIPE_BYTES: u64 = 2 * 1024 * 1024;
+/// The most a kernel pipe holds unread; the frames it takes for that add a
+/// frame and their list's few KiB (`kernel::pipe::MOST_FRAMES`). A client's
+/// pipes are counted to it, and netstack holding their far ends keeps what is
+/// in them alive.
+const PIPE_BYTES: u64 = PIPE_CAPACITY as u64;
 
-/// What one holder of a stream holds of this machine: the two pipes of its
-/// connection and its two bells, each a page once written
-/// (`issues/a-pipe-is-a-two-mebibyte-page-for-a-mapping-nothing-makes.md`).
+/// What one holder of a stream can make this machine hold: the two pipes of
+/// its connection and its two bells, each full.
 const HOLDER_BYTES: u64 = 4 * PIPE_BYTES;
 
-/// What one holder of a listener or a datagram socket holds: the two pipes of
-/// its connection and its bell.
+/// What one holder of a listener or a datagram socket can make it hold: the
+/// two pipes of its connection and its bell.
 const SOCKET_HOLDER_BYTES: u64 = 3 * PIPE_BYTES;
 
 /// What one place can make this machine hold, at the largest of the things a

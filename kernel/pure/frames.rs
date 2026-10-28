@@ -36,8 +36,8 @@
 //! **Everything a process causes is counted to its account's [`Ledger`],
 //! and an account's floor is held back against every other account.** What
 //! a floor account does not use of its floor is held as frames, and as the
-//! whole superframes it makes, so that it can still be promised, tabled,
-//! lent a run and grow its own heap pool however short every other account
+//! whole superframes it makes, so that it can still be promised, given
+//! frames, lent a run and grow its own heap pool however short every other account
 //! runs. What it gives back is held for its floor again as it comes back:
 //! a frame a copy still pins comes back with its last unpin, and a whole
 //! superframe only once one is whole. An ordinary account has no floor and
@@ -136,10 +136,11 @@ pub struct Ledger {
     /// Frames held back for it, however short every other account runs:
     /// zero for an ordinary account.
     floor: AtomicU64,
-    /// Pages committed to it, promised or drawn; frames of its page tables;
-    /// superframes of its runs.
+    /// Pages committed to it, promised or drawn; frames the kernel holds for
+    /// it one by one, its page tables' and its pipes' bytes; superframes of
+    /// its runs.
     committed: AtomicU64,
-    tables: AtomicU64,
+    held: AtomicU64,
     runs: AtomicU64,
     /// Heap bytes charged to it, those of them charged to its own pool, and
     /// the superframes that pool is entitled to.
@@ -165,7 +166,7 @@ pub struct Ledger {
 pub struct Usage {
     pub floor: u64,
     pub committed: u64,
-    pub tables: u64,
+    pub held: u64,
     pub runs: u64,
     pub heap: u64,
     pub entitled: u64,
@@ -206,7 +207,7 @@ impl Ledger {
         Self {
             floor: AtomicU64::new(0),
             committed: AtomicU64::new(0),
-            tables: AtomicU64::new(0),
+            held: AtomicU64::new(0),
             runs: AtomicU64::new(0),
             heap: AtomicU64::new(0),
             own: AtomicU64::new(0),
@@ -226,7 +227,7 @@ impl Ledger {
         Usage {
             floor: read(&self.floor),
             committed: read(&self.committed),
-            tables: read(&self.tables),
+            held: read(&self.held),
             runs: read(&self.runs),
             heap: read(&self.heap),
             entitled: read(&self.entitled),
@@ -239,7 +240,7 @@ impl Ledger {
     /// Whether it holds nothing at all.
     pub fn is_empty(&self) -> bool {
         let u = self.usage();
-        (u.committed, u.tables, u.runs, u.heap) == (0, 0, 0, 0)
+        (u.committed, u.held, u.runs, u.heap) == (0, 0, 0, 0)
     }
 
     /// The heap pool a charge it takes now is taken from: its own once it
@@ -256,7 +257,7 @@ impl Ledger {
     /// since that is what is held for its heap.
     fn floor_used(&self) -> u64 {
         let u = self.usage();
-        u.committed + u.tables + PER_SUPER as u64 * (u.runs + u.entitled)
+        u.committed + u.held + PER_SUPER as u64 * (u.runs + u.entitled)
     }
 
     /// Frames of its floor it does not use.
@@ -267,7 +268,7 @@ impl Ledger {
     /// The frames it holds, its heap rounded up.
     fn footprint(&self) -> u64 {
         let u = self.usage();
-        u.committed + u.tables + PER_SUPER as u64 * u.runs + u.heap.div_ceil(FRAME)
+        u.committed + u.held + PER_SUPER as u64 * u.runs + u.heap.div_ceil(FRAME)
     }
 
     fn add(word: &AtomicU64, n: u64) {
@@ -797,25 +798,32 @@ impl<'m> Frames<'m> {
         self.take_frame()
     }
 
-    /// One frame for a page table of `l`'s, which is not promised: refused
+    /// `count` frames the kernel holds for `l`, such as page tables, which
+    /// are not promised, each handed to `each`: refused whole, nothing taken,
     /// rather than take one held back.
-    pub fn alloc_table(&mut self, l: &Ledger) -> Option<u64> {
-        let Some(floors) = self.admit(l, 1, 1, 0) else {
-            self.refused(l, 1, 0, 0);
-            return None;
+    pub fn alloc_held(&mut self, l: &Ledger, count: u64, mut each: impl FnMut(u64)) -> bool {
+        let Some(floors) = self.admit(l, count, count, 0) else {
+            self.refused(l, count, 0, 0);
+            return false;
         };
         self.floors = floors;
-        let phys = self.take_frame().expect("frames: an admitted frame is free");
-        Ledger::add(&l.tables, 1);
+        for _ in 0..count {
+            each(self.take_frame().expect("frames: an admitted frame is free"));
+        }
+        Ledger::add(&l.held, count);
         l.grew();
-        Some(phys)
+        true
     }
 
-    /// Give back a table frame [`alloc_table`](Self::alloc_table) took for
-    /// `l`.
-    pub fn free_table(&mut self, l: &Ledger, phys: u64, pins: &Pins) {
-        self.give_back(phys, pins);
-        self.give_back_for(l, |l| Ledger::sub(&l.tables, 1, "table frames"));
+    /// Give back `frames`, which [`alloc_held`](Self::alloc_held) took for
+    /// `l`; a pinned one is taken back by its last unpin instead.
+    pub fn free_held(&mut self, l: &Ledger, frames: impl IntoIterator<Item = u64>, pins: &Pins) {
+        let mut count = 0;
+        for phys in frames {
+            self.give_back(phys, pins);
+            count += 1;
+        }
+        self.give_back_for(l, |l| Ledger::sub(&l.held, count, "held frames"));
     }
 
     // A whole superframe is split only when no split one has a frame free, so
@@ -909,8 +917,8 @@ impl<'m> Frames<'m> {
         Some(run)
     }
 
-    /// `count` superframes in a row for `l`, such as a pipe's ring or memory
-    /// a device is lent: refused rather than take a superframe held back.
+    /// `count` superframes in a row for `l`, such as memory a device is lent:
+    /// refused rather than take a superframe held back.
     pub fn alloc_run_for(&mut self, l: &Ledger, count: usize) -> Option<u64> {
         let supers = count as u64;
         let frames = supers * PER_SUPER as u64;
@@ -1300,6 +1308,30 @@ mod tests {
         machine(supers, &[(BASE, BASE + supers as u64 * SUPER)], &[])
     }
 
+    /// One held frame for `l`, as a page table takes it.
+    fn held(frames: &mut Frames, l: &Ledger) -> Option<u64> {
+        let mut got = None;
+        frames.alloc_held(l, 1, |phys| got = Some(phys)).then(|| got.expect("an admitted frame was handed over"))
+    }
+
+    /// A batch is admitted whole or not at all: past what is free it takes
+    /// nothing and records what it asked for, and what it took comes back.
+    #[test]
+    fn held_frames_are_taken_whole_or_not_at_all() {
+        let mut m = whole(2);
+        m.frames.keep(1);
+        let all = PER_SUPER as u64;
+        let mut taken = Vec::new();
+        assert!(!m.frames.alloc_held(&m.l, all + 1, |phys| taken.push(phys)), "a batch into the kept superframe");
+        assert!(taken.is_empty(), "a refused batch handed frames over");
+        assert_eq!((m.frames.free_frames(), m.l.usage().held, m.l.usage().refusals), (2 * all, 0, 1));
+        assert!(m.frames.alloc_held(&m.l, all, |phys| taken.push(phys)));
+        assert_eq!((taken.iter().collect::<BTreeSet<_>>().len() as u64, m.l.usage().held), (all, all));
+        m.frames.free_held(&m.l, taken, &m.pins);
+        assert_eq!((m.frames.free_frames(), m.l.usage().held), (2 * all, 0));
+        assert!(m.l.is_empty());
+    }
+
     #[test]
     fn a_frame_carves_one_superframe_and_its_return_makes_it_whole() {
         let mut m = whole(2);
@@ -1337,7 +1369,7 @@ mod tests {
         assert!(m.frames.promise(&m.l, all - 10));
         assert_eq!(m.frames.promised(), all - 10);
         assert_eq!(m.frames.alloc_run_for(&m.l, 1), None, "a superframe out of promised frames");
-        let free: Vec<u64> = core::iter::from_fn(|| m.frames.alloc_table(&m.l)).collect();
+        let free: Vec<u64> = core::iter::from_fn(|| held(&mut m.frames, &m.l)).collect();
         assert_eq!(free.len(), 10, "only the unpromised frames go to anyone else");
         assert!(!m.frames.promise(&m.l, 1), "nothing is left to promise");
 
@@ -1348,12 +1380,12 @@ mod tests {
         // again; one given back by none is anyone's.
         assert_eq!(m.frames.discard(drawn[0], &m.pins), Discarded::Freed);
         assert_eq!(m.frames.promised(), 1);
-        assert_eq!(m.frames.alloc_table(&m.l), None, "a frame promised again went to another");
+        assert_eq!(held(&mut m.frames, &m.l), None, "a frame promised again went to another");
         m.frames.free_drawn(&m.l, [drawn[1]], &m.pins);
-        assert!(m.frames.alloc_table(&m.l).is_some(), "a frame no promise holds was refused");
-        assert_eq!(m.frames.alloc_table(&m.l), None, "the promised one went too");
+        assert!(held(&mut m.frames, &m.l).is_some(), "a frame no promise holds was refused");
+        assert_eq!(held(&mut m.frames, &m.l), None, "the promised one went too");
         m.frames.unpromise(&m.l, 1);
-        assert!(m.frames.alloc_table(&m.l).is_some(), "an unpromised frame stayed held");
+        assert!(held(&mut m.frames, &m.l).is_some(), "an unpromised frame stayed held");
     }
 
     /// A kept superframe is the kernel's alone: refused to whatever a process
@@ -1364,14 +1396,14 @@ mod tests {
         let mut m = whole(2);
         m.frames.keep(1);
         let all = PER_SUPER as u64;
-        let tables: Vec<u64> = core::iter::from_fn(|| m.frames.alloc_table(&m.l)).collect();
+        let tables: Vec<u64> = core::iter::from_fn(|| held(&mut m.frames, &m.l)).collect();
         assert_eq!(tables.len() as u64, all, "a table took a frame of the kept superframe");
         assert_eq!(m.frames.alloc_run_for(&m.l, 1), None, "a process's run took the kept superframe");
         assert_eq!(m.frames.held_back(), (0, 1));
         let kernel = m.frames.alloc_frame().expect("the kernel was refused a kept frame");
         assert_eq!(m.frames.held_back(), (0, 0), "a kept superframe split for the kernel stayed kept");
         for &f in &tables {
-            m.frames.free_table(&m.l, f, &m.pins);
+            m.frames.free_held(&m.l, [f], &m.pins);
         }
         assert_eq!(m.frames.held_back(), (0, 1), "a superframe back whole was not kept again");
         m.frames.free_frame(kernel, &m.pins);
@@ -1638,12 +1670,12 @@ mod tests {
         let floor = 2 * PER + 100;
         let f = floored(&mut m, floor);
         exhaust(&mut m.frames, &m.l);
-        assert_eq!(m.frames.alloc_table(&m.l), None, "an ordinary table took a floor's frame");
+        assert_eq!(held(&mut m.frames, &m.l), None, "an ordinary table took a floor's frame");
         assert_eq!(m.frames.alloc_run_for(&m.l, 1), None, "an ordinary run took a floor's superframe");
         assert!(!m.frames.charge(&m.l, Pool::Shared, SUPER), "an ordinary charge took a floor's superframe");
 
         let run = m.frames.alloc_run_for(&f, 1).expect("the floor account was refused a run inside its floor");
-        assert!(m.frames.alloc_table(&f).is_some(), "the floor account was refused a table inside its floor");
+        assert!(held(&mut m.frames, &f).is_some(), "the floor account was refused a table inside its floor");
         assert!(m.frames.promise(&f, floor - PER - 1), "the floor account was refused the rest of its floor");
         assert!(!m.frames.promise(&f, 1), "the floor account took a frame past its floor");
         assert_eq!(m.frames.floors_held(), (0, 0));
@@ -1660,9 +1692,9 @@ mod tests {
         let mut m = whole(4);
         let f = floored(&mut m, PER);
         // One split superframe: half its frames taken, half free and scattered.
-        let tables: Vec<u64> = (0..2 * PER).map(|_| m.frames.alloc_table(&m.l).unwrap()).collect();
+        let tables: Vec<u64> = (0..2 * PER).map(|_| held(&mut m.frames, &m.l).unwrap()).collect();
         for &t in tables.iter().step_by(2) {
-            m.frames.free_table(&m.l, t, &m.pins);
+            m.frames.free_held(&m.l, [t], &m.pins);
         }
         assert!(m.frames.room() >= PER, "the scattered frames cover a run");
         assert_eq!(m.frames.alloc_run_for(&m.l, 1), Some(BASE + 2 * SUPER), "the one spare whole superframe");
@@ -1812,10 +1844,10 @@ mod tests {
     #[test]
     fn a_wait_for_a_superframe_is_answered_by_one_and_not_by_frames() {
         let mut m = whole(4);
-        let tables: Vec<u64> = core::iter::from_fn(|| m.frames.alloc_table(&m.l)).collect();
+        let tables: Vec<u64> = core::iter::from_fn(|| held(&mut m.frames, &m.l)).collect();
         assert_eq!(tables.len(), 4 * PER_SUPER);
         for &t in tables.iter().step_by(2) {
-            m.frames.free_table(&m.l, t, &m.pins);
+            m.frames.free_held(&m.l, [t], &m.pins);
         }
         assert!(m.frames.room() >= PER && m.frames.spare_supers() == 0, "the frames free are scattered");
         let starved = Ledger::new();
@@ -1824,11 +1856,11 @@ mod tests {
         // All of the first superframe's frames but one come back: still no whole one.
         let first: Vec<u64> = tables.iter().copied().skip(1).step_by(2).filter(|&t| t < BASE + SUPER).collect();
         for &t in &first[1..] {
-            m.frames.free_table(&m.l, t, &m.pins);
+            m.frames.free_held(&m.l, [t], &m.pins);
         }
         assert!(!m.frames.take_returned(), "answered with frames back and no whole superframe");
         assert!(!m.frames.ready(&starved));
-        m.frames.free_table(&m.l, first[0], &m.pins);
+        m.frames.free_held(&m.l, [first[0]], &m.pins);
         assert!(m.frames.take_returned(), "a whole superframe back went unanswered");
         assert!(!m.frames.take_returned(), "answered twice");
         assert!(m.frames.ready(&starved));
@@ -1842,11 +1874,11 @@ mod tests {
     fn a_floor_accounts_wait_is_answered_by_its_own_floor() {
         let mut m = whole(4);
         let f = floored(&mut m, PER);
-        let table = m.frames.alloc_table(&m.l).unwrap();
+        let table = held(&mut m.frames, &m.l).unwrap();
         assert!(m.pins.pin(table));
         // Every other superframe and frame is taken, not promised: none is spare.
         while m.frames.alloc_run_for(&m.l, 1).is_some() {}
-        while m.frames.alloc_table(&m.l).is_some() {}
+        while held(&mut m.frames, &m.l).is_some() {}
         let run = m.frames.alloc_run_for(&f, 1).expect("a run inside its floor");
         let pinned = run + 9 * FRAME;
         assert!(m.pins.pin(pinned));
@@ -1855,7 +1887,7 @@ mod tests {
         assert!(!m.frames.ready(&f));
         // Something else is given back, and comes back pinned too: the floor
         // is still short of the frame its superframe needs.
-        m.frames.free_table(&m.l, table, &m.pins);
+        m.frames.free_held(&m.l, [table], &m.pins);
         assert!(!m.frames.take_returned(), "answered while its floor is short");
         assert_eq!(m.pins.unpin(pinned), Unpinned::Release);
         m.frames.release(pinned);
@@ -1955,7 +1987,7 @@ mod tests {
                     m.frames.free_run_for(l, run, count, &m.pins);
                     false
                 }
-                5 if a < 3 => match m.frames.alloc_table(l) {
+                5 if a < 3 => match held(&mut m.frames, l) {
                     Some(t) => {
                         tables[a].push(t);
                         false
@@ -1964,7 +1996,7 @@ mod tests {
                 },
                 6 if !tables[a].is_empty() => {
                     let t = tables[a].swap_remove(next() as usize % tables[a].len());
-                    m.frames.free_table(l, t, &m.pins);
+                    m.frames.free_held(l, [t], &m.pins);
                     false
                 }
                 7 if a == 3 => !m.frames.promise(l, PER + next() % (4 * PER)) || {
@@ -2025,8 +2057,8 @@ mod tests {
                     let i = next() as usize % drawn.len();
                     m.frames.free_drawn(&m.l, [drawn.swap_remove(i)], &m.pins);
                 }
-                3 => tables.extend(m.frames.alloc_table(&m.l)),
-                4 if !tables.is_empty() => m.frames.free_table(&m.l, tables.swap_remove(next() as usize % tables.len()), &m.pins),
+                3 => tables.extend(held(&mut m.frames, &m.l)),
+                4 if !tables.is_empty() => m.frames.free_held(&m.l, [tables.swap_remove(next() as usize % tables.len())], &m.pins),
                 5 => runs.extend(m.frames.alloc_run_for(&m.l, 1)),
                 6 if !runs.is_empty() => m.frames.free_run_for(&m.l, runs.swap_remove(next() as usize % runs.len()), 1, &m.pins),
                 7 => {
@@ -2109,8 +2141,8 @@ mod tests {
                         m.frames.free_drawn(&m.l, [drawn.swap_remove(i)], &m.pins);
                     }
                 }
-                5 => tables.extend(m.frames.alloc_table(&m.l)),
-                6 if !tables.is_empty() => m.frames.free_table(&m.l, tables.swap_remove(next() as usize % tables.len()), &m.pins),
+                5 => tables.extend(held(&mut m.frames, &m.l)),
+                6 if !tables.is_empty() => m.frames.free_held(&m.l, [tables.swap_remove(next() as usize % tables.len())], &m.pins),
                 7 => runs.extend(m.frames.alloc_run_for(&m.l, 1)),
                 8 if !runs.is_empty() => m.frames.free_run_for(&m.l, runs.swap_remove(next() as usize % runs.len()), 1, &m.pins),
                 9 => {

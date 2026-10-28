@@ -464,7 +464,7 @@ fn alloc_pcid() -> Option<PcidGuard> {
 fn free_table(job: &Job, phys: u64) {
     // SAFETY: the caller unlinked the table, after the shootdown that let
     // every CPU stop walking it.
-    unsafe { crate::mm::pmm::free_table_frame(job, phys) };
+    unsafe { crate::mm::pmm::free_held(job, [phys]) };
 }
 
 /// The kernel half every space shares: PML4[256..511] and what they name.
