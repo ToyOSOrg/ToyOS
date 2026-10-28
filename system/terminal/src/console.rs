@@ -258,13 +258,7 @@ impl Console {
         for row in 0..self.rows {
             let Some((first, last)) = self.damage(row) else { continue };
             let span = last + 1 - first;
-            let surface = Framebuffer::new(
-                strip.as_mut_ptr(),
-                span * fw,
-                fh,
-                span * fw,
-                self.screen.pixel_format_raw(),
-            );
+            let surface = Framebuffer::over(&mut strip, span * fw, fh, span * fw, self.screen.pixel_format_raw());
             let x = first * fw;
             let w = (span * fw).min(paint_width.saturating_sub(x));
             let delivered = first + w / fw;
@@ -278,25 +272,19 @@ impl Console {
                 }
             }
             if w > 0 {
-                self.screen.blit(x, row * fh, w, fh, span * fw, &strip);
+                self.screen.blit(x, row * fh, w, fh, &surface, 0, 0);
             }
         }
 
         if bar != self.painted_scrollbar {
             if let Some((thumb_top, thumb_height)) = bar {
                 let height = self.rows * fh;
-                let surface = Framebuffer::new(
-                    strip.as_mut_ptr(),
-                    self.bar_w,
-                    height,
-                    self.bar_w,
-                    self.screen.pixel_format_raw(),
-                );
+                let surface =
+                    Framebuffer::over(&mut strip, self.bar_w, height, self.bar_w, self.screen.pixel_format_raw());
                 surface.fill_rect(0, 0, self.bar_w, height, SCROLLBAR_TRACK);
                 surface.fill_rect(0, thumb_top, self.bar_w, thumb_height, SCROLLBAR_THUMB);
                 let x = self.screen.width() - self.bar_w;
-                self.screen
-                    .blit(x, 0, self.bar_w, height, self.bar_w, &strip);
+                self.screen.blit(x, 0, self.bar_w, height, &surface, 0, 0);
             }
             self.painted_scrollbar = bar;
         }
@@ -306,15 +294,9 @@ impl Console {
             let margin = self.screen.height() - covered;
             if margin > 0 {
                 let width = self.screen.width();
-                let surface = Framebuffer::new(
-                    strip.as_mut_ptr(),
-                    width,
-                    margin,
-                    width,
-                    self.screen.pixel_format_raw(),
-                );
+                let surface = Framebuffer::over(&mut strip, width, margin, width, self.screen.pixel_format_raw());
                 surface.fill_rect(0, 0, width, margin, DEFAULT_BG);
-                self.screen.blit(0, covered, width, margin, width, &strip);
+                self.screen.blit(0, covered, width, margin, &surface, 0, 0);
             }
             self.margin_painted = true;
         }

@@ -250,9 +250,9 @@ pub(super) fn sys_device_dma_alloc(
 
 /// A region the caller holds, put into the claimed function's domain.
 ///
-/// The caller must hold the region with [`Rights::MAP`]: a device writing into
-/// it is the same authority as a store through the caller's own mapping, and
-/// no more. The output window is taken before the mapping, as
+/// The caller must hold the region with [`Rights::MAP`] and [`Rights::WRITE`]:
+/// a device writing into it is the same authority as a store through the
+/// caller's own writable mapping, and no more. The output window is taken before the mapping, as
 /// [`sys_device_dma_alloc`] takes its own: a bad address must not leave the
 /// function reaching memory the caller was never told the address of.
 pub(super) fn sys_device_dma_map(
@@ -266,7 +266,7 @@ pub(super) fn sys_device_dma_map(
         Err(e) => return e.refuse(),
     };
     let memory = match process::with_process_data(|data| {
-        data.handles.get::<crate::object::shm::SharedMemObject>(region, Rights::MAP)
+        data.handles.get::<crate::object::shm::SharedMemObject>(region, Rights::MAP.union(Rights::WRITE))
     }) {
         Ok(memory) => memory,
         Err(e) => {

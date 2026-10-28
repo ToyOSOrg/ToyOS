@@ -29,8 +29,8 @@ pub enum DeviceInfo {
     Acpi(toyos_abi::acpi::AcpiInfo),
 }
 
-// MAP is required; DUP and TRANSFER let a daemon hand the buffer to another process.
-const BUFFER_RIGHTS: Rights = Rights::MAP.union(Rights::DUP).union(Rights::TRANSFER);
+// MAP and WRITE draw into it; DUP and TRANSFER let a daemon hand the buffer to another process.
+const BUFFER_RIGHTS: Rights = Rights::MAP.union(Rights::WRITE).union(Rights::DUP).union(Rights::TRANSFER);
 
 fn install_buffer(table: &mut HandleTable, buffer: &Arc<SharedMemObject>) -> Result<RawHandle, SyscallError> {
     table

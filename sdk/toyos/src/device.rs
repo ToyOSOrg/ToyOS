@@ -81,6 +81,12 @@ impl Scanout {
     }
 }
 
+impl AsRef<crate::shm::SharedMemory> for Scanout {
+    fn as_ref(&self) -> &crate::shm::SharedMemory {
+        &self.memory
+    }
+}
+
 impl AsHandle for FramebufferDev {
     fn as_handle(&self) -> RawHandle { self.0.as_handle() }
 }

@@ -15,7 +15,6 @@ use std::time::Duration;
 
 use toyos::poller::{Poller, READABLE};
 use toyos::shm::SharedMemory;
-use toyos::device::Scanout;
 use toyos::{endow, AsHandle, DmaRegion, FramebufferDev, PciDev};
 use toyos_abi::syscall::{DeviceType, PciId, SyscallError};
 use toyos_abi::RawHandle;
@@ -239,10 +238,9 @@ fn panel_scale(mode: Mode, edid: &[u8]) -> Scale {
 
 /// The firmware's framebuffer.
 pub struct Gop {
-    /// Held because `screen` points into it.
-    scanout: Scanout,
     screen: Screen,
     mode: Mode,
+    edid: Vec<u8>,
 }
 
 impl Gop {
@@ -250,21 +248,15 @@ impl Gop {
         // A handle the claim's own read installed, so a refusal is the kernel
         // contradicting itself and not a client doing anything.
         let scanout = claim.open().expect("compositor: the framebuffer claim's description and scanout");
-        let info = scanout.info();
-        let screen = Screen::new(
-            scanout.memory().as_ptr(),
-            info.width as usize,
-            info.height as usize,
-            info.stride as usize,
-            info.pixel_format,
-        );
+        let info = *scanout.info();
+        let edid = info.edid.get(..info.edid_len as usize).expect("the kernel hands over an EDID length of 0 or one block").to_vec();
         let mode = Mode::new(info.width, info.height);
-        Self { scanout, screen, mode }
+        let screen = Screen::new(scanout, info.width as usize, info.height as usize, info.stride as usize, info.pixel_format);
+        Self { screen, mode, edid }
     }
 
     fn edid(&self) -> &[u8] {
-        let info = self.scanout.info();
-        info.edid.get(..info.edid_len as usize).expect("the kernel hands over an EDID length of 0 or one block")
+        &self.edid
     }
 }
 
@@ -340,12 +332,13 @@ impl Virtio {
 
 fn scanout_screen(lent: &Lent, mode: Mode) -> Screen {
     let width = mode.width as usize;
-    Screen::new(lent.memory.as_ptr(), width, mode.height as usize, width, BGRX)
+    Screen::new(Rc::clone(&lent.memory), width, mode.height as usize, width, BGRX)
 }
 
-/// A region lent to the function as a scanout's backing.
+/// A region lent to the function as a scanout's backing; a [`Screen`] over it
+/// keeps its mapping after the function is done with it.
 pub struct Lent {
-    memory: SharedMemory,
+    memory: Rc<SharedMemory>,
     device_addr: u64,
 }
 
@@ -387,7 +380,7 @@ impl Claim for VirtioClaim {
     fn lend(&mut self, bytes: u64) -> Result<(Lent, u64), SyscallError> {
         let memory = SharedMemory::create_for_device(bytes as usize)?;
         let device_addr = self.dev.dma_map(memory.as_handle())?.device_addr;
-        Ok((Lent { memory, device_addr }, device_addr))
+        Ok((Lent { memory: Rc::new(memory), device_addr }, device_addr))
     }
 
     fn unlend(&mut self, lent: Lent) {

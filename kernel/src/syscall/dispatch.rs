@@ -486,7 +486,7 @@ pub(crate) fn syscall_dispatch(num: u64, a1: u64, a2: u64, a3: u64, a4: u64) -> 
             sys_handle_recv(RawHandle(a1 as u32), &mut out, a3 as usize)
         }
         SYS_SHM_CREATE => sys_shm_create(a1, a2, RawHandle(a3 as u32)),
-        SYS_SHM_MAP => sys_shm_map(RawHandle(a1 as u32)),
+        SYS_SHM_MAP => sys_shm_map(RawHandle(a1 as u32), a2),
         SYS_SHM_SUB => sys_shm_sub(RawHandle(a1 as u32), a2, a3),
         SYS_PORT_CREATE => sys_port_create(),
         SYS_PORT_MINT => {

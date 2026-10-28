@@ -2111,8 +2111,10 @@ pub fn shm_create_for(job: RawHandle, size: usize) -> Result<RawHandle, SyscallE
     check(syscall(SYS_SHM_CREATE, size as u64, SHM_FOR_JOB, job.0 as u64, 0)).map(|v| RawHandle(v as u32))
 }
 
-/// Map the region `shm` names into this process, readable and writable, and
-/// answer where. Needs [`Rights::MAP`].
+/// Map the region `shm` names into this process as `prot` says, and answer
+/// where: [`VmProt::Read`] needs [`Rights::MAP`], [`VmProt::ReadWrite`] needs
+/// [`Rights::WRITE`] beside it, and any other protection is `InvalidArgument`.
+/// A read-only mapping never becomes writable ([`vm_protect`]).
 ///
 /// Each call is a mapping of its own, which holds the region until it is taken
 /// away ([`munmap`]) or the process ends: closing a handle takes no mapping
@@ -2121,11 +2123,12 @@ pub fn shm_create_for(job: RawHandle, size: usize) -> Result<RawHandle, SyscallE
 /// closed under the call: nothing is mapped.
 ///
 /// [`Rights::MAP`]: crate::handle::Rights::MAP
+/// [`Rights::WRITE`]: crate::handle::Rights::WRITE
 ///
 /// # Safety
 /// Caller must manage the returned pointer.
-pub unsafe fn shm_map(shm: RawHandle) -> Result<*mut u8, SyscallError> {
-    check(syscall(SYS_SHM_MAP, shm.0 as u64, 0, 0, 0))
+pub unsafe fn shm_map(shm: RawHandle, prot: VmProt) -> Result<*mut u8, SyscallError> {
+    check(syscall(SYS_SHM_MAP, shm.0 as u64, prot as u64, 0, 0))
         .map(|addr| core::ptr::with_exposed_provenance_mut(addr as usize))
 }
 
@@ -2608,7 +2611,8 @@ pub fn device_dma_start(claim: RawHandle) -> Result<(), SyscallError> {
 
 /// Put the region `shm` names into the address space of the function `claim`
 /// holds, and answer where the function reaches it: the region's whole length,
-/// read and write, and nothing on either side of it.
+/// read and write, and nothing on either side of it. `shm` must carry
+/// [`Rights::WRITE`](crate::handle::Rights::WRITE), as a writable mapping does.
 ///
 /// For a driver serving a client out of the client's own memory — the client
 /// sends the region, and the device moves data straight into it. The region
