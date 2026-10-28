@@ -1,6 +1,5 @@
 use core::arch::global_asm;
 use core::mem::size_of;
-use core::sync::atomic::{AtomicU64, Ordering};
 
 use crate::arch::cpu;
 use crate::arch::{apic, percpu, syscall};
@@ -18,18 +17,8 @@ const TRAMPOLINE_PAGE: u64 = 0x8000;
 const TRAMPOLINE_VECTOR: u8 = 0x08;
 const DATA_OFFSET: usize = 0xF00;
 
-/// The `rdtsc` the AP being started read on its first instruction in Rust.
-///
-/// **The whole of the TSC-trail measurement.** `clock::nanos_since_boot`
-/// subtracts one BSP-sampled `COUNTER_AT_BOOT` whatever CPU asks, so a CPU whose TSC
-/// reads below the BSP's has no honest answer to give; the reading is bracketed
-/// by two BSP samples taken either side of this AP's whole bring-up, which is
-/// serialised, so a synchronised TSC lands inside the bracket by construction
-/// and a skewed one is outside it by at least the skew.
-static AP_TSC: AtomicU64 = AtomicU64::new(0);
-
 /// The started AP's [`cpu::topology_keys`], written before its echo and taken
-/// after it, like [`AP_TSC`]: bring-up is serialised, so one slot serves.
+/// after it: bring-up is serialised, so one slot serves.
 static AP_TOPOLOGY: Lock<Option<Result<CpuKeys, TopologyRefusal>>> = Lock::new(None);
 
 // Field offsets are hardcoded in the global_asm! trampoline below; the static assertion at the bottom checks the match.
@@ -194,7 +183,6 @@ pub fn boot_aps(madt: &MadtInfo, boot_cr3: u64) {
     data.cr3 = boot_cr3;
     let target = crate::DirectMap::from_phys(TRAMPOLINE_PAGE + DATA_OFFSET as u64).as_mut_ptr::<TrampolineData>();
 
-    let mut bracketed = 0u32;
     for &ap_id in &madt.apic_ids {
         if ap_id == bsp_id { continue; }
 
@@ -207,11 +195,6 @@ pub fn boot_aps(madt: &MadtInfo, boot_cr3: u64) {
         data.percpu_ptr = ap_percpu as u64;
         // SAFETY: `target` is reserved physical memory written only here; unaligned because `TrampolineData` is `repr(C, packed)`; this AP has not been sent its SIPI yet, and the loop reaches a second write only after the previous AP committed — which happens in `ap_entry` past every trampoline read — so no CPU is reading it; a failed AP breaks the loop below instead of reaching another write.
         unsafe { core::ptr::write_unaligned(target, data); }
-
-        AP_TSC.store(0, Ordering::Release);
-        // The bracket's lower edge: taken after the previous AP committed and
-        // before this one is sent anything, so nothing this AP does precedes it.
-        let bracket_lo = cpu::rdtsc();
 
         // Both delays are spent, not waited on: nothing is polled across either.
         const AFTER_INIT: Delay =
@@ -234,10 +217,7 @@ pub fn boot_aps(madt: &MadtInfo, boot_cr3: u64) {
         let deadline = clock::nanos_since_boot() + AP_START.nanos();
         // Commit only on this attempt's own token, so `0..cpu_count()` stays dense.
         if ROSTER.await_echo(attempt, || clock::nanos_since_boot() >= deadline) {
-            let bracket_hi = cpu::rdtsc();
-            if tsc_inside(attempt.id(), bracket_lo, bracket_hi) {
-                bracketed += 1;
-            }
+            super::clocksource::measure_offset(attempt.id());
             ROSTER.commit(attempt, ap_id);
             topology.push(AP_TOPOLOGY.lock().take().expect("an AP reads its topology before it echoes"));
             log!("SMP: AP cpu{} lapic={} online", attempt.id(), ap_id);
@@ -249,9 +229,8 @@ pub fn boot_aps(madt: &MadtInfo, boot_cr3: u64) {
     }
     let online = smp::cpu_count();
     log!(
-        "SMP: {online} of {} MADT cpus online, {bracketed} of {} APs inside the BSP's TSC bracket",
+        "SMP: {online} of {} MADT cpus online",
         madt.apic_ids.len(),
-        online.saturating_sub(1),
     );
     crate::arch::control_regs::report(online);
     smp::set_topology(
@@ -263,41 +242,7 @@ pub fn boot_aps(madt: &MadtInfo, boot_cr3: u64) {
     );
 }
 
-/// Whether the AP just started read a TSC between the two the BSP took either
-/// side of its bring-up, and the record of where it read.
-///
-/// Cycles, not nanoseconds: the AP's own conversion is what is under test, and
-/// the reading is a raw `rdtsc` taken before this CPU has run `clock`'s
-/// arithmetic at all.
-fn tsc_inside(cpu_id: u32, lo: u64, hi: u64) -> bool {
-    let sample = AP_TSC.load(Ordering::Acquire);
-    let span = hi.wrapping_sub(lo);
-    if sample >= lo && sample <= hi {
-        log!("SMP: cpu{cpu_id} tsc={sample} inside the BSP's {lo}..{hi} ({span} cycles wide)");
-        return true;
-    }
-    // Spelled whole in each arm rather than with the verb as a field: the host
-    // profile holds these two words against this file's source, and a literal
-    // assembled at run time is one no reader of the source can find.
-    if sample < lo {
-        log!(
-            "SMP: cpu{cpu_id} tsc={sample} trails the BSP's {lo}..{hi} by {} cycles",
-            lo - sample
-        );
-    } else {
-        log!(
-            "SMP: cpu{cpu_id} tsc={sample} leads the BSP's {lo}..{hi} by {} cycles",
-            sample - hi
-        );
-    }
-    false
-}
-
 extern "C" fn ap_entry() -> ! {
-    // First, so the reading is this CPU's TSC and not a measure of what runs
-    // after it; `rdtsc` needs nothing this AP has not got out of the trampoline.
-    AP_TSC.store(cpu::rdtsc(), Ordering::Release);
-
     // Must run before `pat::init`, which restores the CR0 this call sets.
     crate::arch::control_regs::init_paging(percpu::cpu_id());
     // Before `control_regs::init` reads what an update changes.
@@ -314,12 +259,15 @@ extern "C" fn ap_entry() -> ! {
     syscall::init();
     // Calibration is a one-time BSP measurement; nothing left for an AP to do here.
     apic::init_ap();
+    super::clocksource::start_ap(percpu::cpu_id());
     // Before the echo, so every CPU the roster counts has said its line.
     crate::arch::mtrr::compare(percpu::cpu_id());
 
     *AP_TOPOLOGY.lock() = Some(cpu::topology_keys());
     // Echo this attempt's token, so the BSP counts this AP for its own attempt.
     ROSTER.echo(percpu::ap_token());
+    // The BSP's next step once it sees the echo.
+    super::clocksource::answer_offset();
 
     process::ap_idle();
 }

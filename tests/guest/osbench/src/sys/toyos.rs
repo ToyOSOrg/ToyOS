@@ -311,7 +311,7 @@ pub mod diag {
                 };
                 for raw in &buf[..n] {
                     if let Ok(entry) = Entry::decode(raw) {
-                        let since_boot = page.stamp_of(entry.stamp).saturating_sub(page.stamp_at_boot);
+                        let since_boot = page.nanos_since_boot(entry.stamp);
                         out.push((since_boot, entry));
                     }
                 }

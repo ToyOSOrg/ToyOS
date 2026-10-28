@@ -508,6 +508,12 @@ const MACHINE_TESTS: &[&str] = &[
     // the same audit passing. q35 on `Profile::Metal`, whose 16550 carries
     // the panic.
     "kernel_wx_leaf_is_refused",
+    // The clock's runtime check failing loud on a TSC an actuator stepped
+    // where `IA32_TSC_ADJUST` would not show it: the panic ends the boot, and
+    // no bench's TSC steps on demand. q35 on `Profile::Metal`, whose 16550
+    // carries the panic; the order of the step and the panic, and the size
+    // the check read, are what it holds.
+    "a_stepped_tsc_panics",
     // A press of the fixed power button reaches the `acpi` claim's holder as
     // one SCI, its line masked until the holder serves it: the kernel's SCI
     // and its mask have no host build, QEMU raises the event on demand, and
@@ -1081,7 +1087,7 @@ const METAL: &[(&str, metal::Metal)] = &[
             arms: TESTCASES,
             judge: |b| {
                 timer_calibration(b[0].kernel().text())?;
-                tsc_agrees_with_cpuid(b[0].kernel().text())
+                tsc_rate_at_boot(b[0].kernel().text())
             },
         },
     ),
@@ -1157,6 +1163,13 @@ const METAL: &[(&str, metal::Metal)] = &[
                 osbench_ran(b[0], &OSBENCH_GROUPS)
             },
         },
+    ),
+    (
+        // The clock's boot rate against the HPET's over the minutes the suite
+        // runs, through its idle, busy and hot phases: the T14 and the AMD
+        // bench, riding the `osbench` boot.
+        "clock_holds_over_minutes",
+        metal::Metal { arms: BENCHCASE, judge: |b| clock_holds_over_minutes(b[0]) },
     ),
     (
         // `osbench lan` against the `osbench-peer` the other bench's Linux runs,
@@ -4590,6 +4603,7 @@ fn run_machine_test(name: &str, test_config: &Path) -> Result<(), String> {
         "amdvi_selftest" => common::iommu::amdvi_selftest(test_config),
         "nested_nmi_is_loud" => faults::nested_nmi_is_loud(test_config),
         "kernel_wx_leaf_is_refused" => faults::kernel_wx_leaf_is_refused(test_config, qemu::Profile::Metal),
+        "a_stepped_tsc_panics" => faults::a_stepped_tsc_panics(test_config),
         "acpi_press_is_one_sci" => acpi_press_is_one_sci(),
         "osbench_capability_groups_exit_0" => osbench_capability_groups_exit_0(),
         "acpi_mediated_access" => acpi_mediated_access(2),
@@ -7239,19 +7253,13 @@ fn number_between(log: &str, head: &str, tail: &str) -> Result<u64, String> {
 }
 
 /// Every CPU the firmware named is scheduling, every one of them holds the
-/// control-register declaration, and none of their timestamp counters trails
-/// the BSP's.
+/// control-register declaration, and every AP's timestamp counter is bounded
+/// against the BSP's.
 ///
-/// **The third is the one nothing in this tree ever asked.**
-/// `clock::nanos_since_boot` subtracts a single BSP-sampled origin whatever CPU
-/// reads it, so a CPU whose TSC starts behind that origin saturates to zero and
-/// stamps every record it writes as the oldest thing the machine has
-///. The kernel
-/// brackets each AP's first `rdtsc` between two of the BSP's, taken either side
-/// of a bring-up that is serialised — so "inside" is what a synchronised
-/// counter gives and nothing else does. **QEMU cannot refute it**: every guest
-/// TSC is synthesised from one host clock, which is exactly why the assertion
-/// is here to be run on metal.
+/// The kernel bounds each AP's offset with round trips of a cache line as it
+/// starts and panics on one they prove, so the row reads each AP's bound and
+/// prints the widest. **QEMU cannot refute it**: every guest TSC is
+/// synthesised from one host clock, which is why it runs on metal.
 fn smp_roster_and_tsc_trail(log: &str, cpus: u32) -> Result<(), String> {
     let online = number_between(log, "SMP: ", " of ")?;
     let named = number_between(log, " of ", " MADT cpus online")?;
@@ -7260,31 +7268,26 @@ fn smp_roster_and_tsc_trail(log: &str, cpus: u32) -> Result<(), String> {
             "the machine was given {cpus} CPUs, its MADT named {named} and {online} came up"
         ));
     }
-    let bracketed = number_between(log, "MADT cpus online, ", " of ")?;
+    let bounds: Vec<(i64, i64)> = log.lines().filter_map(tsc_offset_bound).collect();
     let aps = u64::from(cpus) - 1;
-    if bracketed != aps {
-        let outside: Vec<&str> = log
-            .lines()
-            .filter(|l| l.contains(" the BSP's ") && !l.contains("inside"))
-            .collect();
-        return Err(format!(
-            "{bracketed} of {aps} APs read a TSC inside the BSP's bracket; the rest: {outside:#?}"
-        ));
+    if bounds.len() as u64 != aps {
+        return Err(format!("{} of {aps} APs' TSCs were bounded against the BSP's", bounds.len()));
     }
     let checked = number_between(log, "control_regs: ", " of ")?;
     if checked != u64::from(cpus) {
         return Err(format!("{checked} of {cpus} CPUs were checked against the declaration"));
     }
-    let widest = log
-        .lines()
-        .filter_map(|l| l.split(" (").nth(1)?.split(" cycles wide)").next()?.parse::<u64>().ok())
-        .max()
-        .unwrap_or_default();
-    eprintln!(
-        "  [smp] {online} CPUs online, {bracketed} AP TSCs inside a BSP bracket at most \
-         {widest} cycles wide"
-    );
+    let widest = bounds.iter().map(|&(lo, hi)| lo.unsigned_abs().max(hi.unsigned_abs())).max().unwrap_or_default();
+    eprintln!("  [smp] {online} CPUs online, every AP's TSC within {widest} cycles of the BSP's");
     Ok(())
+}
+
+/// `lo..=hi` off `clock: cpuN's TSC is within lo..=hi cycles of cpu0's`.
+fn tsc_offset_bound(line: &str) -> Option<(i64, i64)> {
+    let (_, rest) = line.split_once("'s TSC is within ")?;
+    let (bound, _) = rest.split_once(" cycles of cpu0's")?;
+    let (lo, hi) = bound.split_once("..=")?;
+    Some((lo.parse().ok()?, hi.parse().ok()?))
 }
 
 /// The local APIC mode a bench's CPUs offer, by `CPUID.01H:ECX[21]` as each
@@ -7421,55 +7424,106 @@ fn acpi_table_inventory(log: &str) -> Result<(), String> {
     Ok(())
 }
 
-/// The LAPIC timer and the TSC each calibrated to a frequency.
+/// The LAPIC timer calibrated to a frequency.
 fn timer_calibration(log: &str) -> Result<(), String> {
     let lapic_hz = number_between(log, "ticks/10ms, so ", "Hz")?;
     if lapic_hz == 0 {
         return Err("the LAPIC timer calibrated to no frequency at all".to_string());
     }
-    let measured = number_between(log, "clock: TSC measured ", "Hz against the HPET")?;
-    if measured == 0 {
-        return Err("the TSC calibrated to no frequency at all".to_string());
-    }
-    eprintln!("  [timer] TSC {measured}Hz measured; LAPIC {lapic_hz}Hz");
+    eprintln!("  [timer] LAPIC {lapic_hz}Hz");
     Ok(())
 }
 
-/// The TSC the whole machine is timed by, against the frequency the part itself
-/// states.
-///
-/// **The one cross-source check a boot has.** Everything else the kernel times
-/// is derived from the HPET calibration, so it can only agree with itself;
-/// CPUID leaf 15H's crystal ratio and leaf 16H's base frequency are the CPU's
-/// own statement, arrived at by neither the HPET nor the counting loop. A part
-/// that states neither is a fact about the part, not a failure, so the ppm
-/// bound is asserted only where a statement exists. Judged on metal only: the
-/// calibration is a span of a clock, and a guest's clock runs while its host
-/// has the vCPU.
-fn tsc_agrees_with_cpuid(log: &str) -> Result<(), String> {
-    /// One percent, which is the widest two timebases can differ and still be
-    /// counting the same second. A refusal and not a measurement: it catches a
-    /// machine whose HPET and CPUID have stopped agreeing at all, and nothing
-    /// narrower is true of every part this kernel may boot on.
-    const CEILING_PPM: u64 = 10_000;
+/// The rate the boot started the clock at: CPUID 15H's, or one the HPET
+/// measured with its bound, which on the bench is a rate the clock can keep at
+/// all. Its bound is held against minutes by [`clock_holds_over_minutes`].
+fn tsc_rate_at_boot(log: &str) -> Result<(), String> {
+    let boot = boot_rate(log)?;
+    if boot.millihertz == 0 {
+        return Err("the TSC was started at no rate at all".to_string());
+    }
+    eprintln!("  [timer] TSC {boot:?}");
+    Ok(())
+}
 
-    let measured = number_between(log, "clock: TSC measured ", "Hz against the HPET")?;
-    let Ok(stated) = number_between(log, "CPUID states ", "Hz,") else {
-        let why = log
-            .lines()
-            .find(|l| l.contains("CPUID leaves 15H and 16H"))
-            .ok_or("neither a stated frequency nor the record saying there is none")?;
-        eprintln!("  [timer] TSC {measured}Hz — {}", why.trim());
-        return Ok(());
-    };
-    let ppm = number_between(log, "Hz, ", "ppm apart")?;
-    if ppm > CEILING_PPM {
+/// The rate the clock started at, in millihertz, and its bound in ppb: zero
+/// for CPUID 15H's, which is not measured.
+#[derive(Debug)]
+struct BootRate {
+    millihertz: u64,
+    bound_ppb: u64,
+    stated: bool,
+}
+
+fn boot_rate(log: &str) -> Result<BootRate, String> {
+    if let Ok(hz) = number_between(log, "clock: the TSC counts at ", " Hz, as CPUID 15H states") {
+        return Ok(BootRate { millihertz: hz * 1_000, bound_ppb: 0, stated: true });
+    }
+    let millihertz = number_between(log, "clock: the TSC counts at ", " mHz against the HPET over ")?;
+    let bound_ppb = number_between(log, " ms, within ", " ppb; CPUID 15H states no rate")?;
+    Ok(BootRate { millihertz, bound_ppb, stated: false })
+}
+
+/// One of the clock's reports: the TSC's rate against the HPET over a span
+/// since boot and its bound, and the rate the clock keeps after it.
+#[derive(Debug)]
+struct ClockReport {
+    span_s: u64,
+    measured_millihertz: u64,
+    measured_ppb: u64,
+    kept_millihertz: u64,
+}
+
+fn clock_report(line: &str) -> Option<ClockReport> {
+    let (_, rest) = line.split_once("clock: over ")?;
+    let (span, rest) = rest.split_once(" s the TSC counted ")?;
+    let (measured, rest) = rest.split_once(" mHz against the HPET, within ")?;
+    let (measured_ppb, rest) = rest.split_once(" ppb; the clock ")?;
+    let kept = rest.split(' ').find_map(|word| word.parse().ok())?;
+    Some(ClockReport {
+        span_s: span.parse().ok()?,
+        measured_millihertz: measured.parse().ok()?,
+        measured_ppb: measured_ppb.parse().ok()?,
+        kept_millihertz: kept,
+    })
+}
+
+/// Parts per billion `a` is from `b`.
+fn ppb_apart(a: u64, b: u64) -> u64 {
+    (u128::from(a.abs_diff(b)) * 1_000_000_000 / u128::from(b)) as u64
+}
+
+/// **The clock over minutes.** The kernel holds every CPU's TSC to the HPET
+/// once a second and panics on a step or a drift, so a boot that ran its list
+/// to the end held; what this row reads is whether the rate the boot started at
+/// was within the bound it derived, against the rate the HPET measured over
+/// the longest span the boot reached, which must be two minutes or more. A
+/// stated rate is CPUID 15H's, and against it the HPET's own 0.05% is all a
+/// document allows (IA-PC HPET Specification 1.0a), so its distance is printed.
+fn clock_holds_over_minutes(boot: &metal::Readback) -> Result<(), String> {
+    let kernel = boot.kernel();
+    let text = kernel.text();
+    let started = boot_rate(text)?;
+    let longest = text
+        .lines()
+        .filter_map(clock_report)
+        .max_by_key(|report| report.span_s)
+        .ok_or("the clock never reported its rate against the HPET")?;
+    if longest.span_s < 120 {
+        return Err(format!("the clock's longest report spans {} s, under two minutes: {longest:?}", longest.span_s));
+    }
+    let apart = ppb_apart(started.millihertz, longest.measured_millihertz);
+    eprintln!(
+        "  [clock] started at {started:?}; over {} s the HPET measured {} mHz within {} ppb, {apart} ppb from the start; keeps {} mHz",
+        longest.span_s, longest.measured_millihertz, longest.measured_ppb, longest.kept_millihertz,
+    );
+    let allowed = if started.stated { 500_000 } else { started.bound_ppb } + longest.measured_ppb;
+    if apart > allowed {
         return Err(format!(
-            "the TSC measures {measured}Hz against the HPET and CPUID states {stated}Hz — \
-             {ppm}ppm apart, over the {CEILING_PPM}ppm this bound allows"
+            "the clock started {apart} ppb from the rate the HPET measured over {} s, past the {allowed} ppb its bounds allow",
+            longest.span_s
         ));
     }
-    eprintln!("  [timer] TSC {measured}Hz measured, {stated}Hz stated, {ppm}ppm apart");
     Ok(())
 }
 

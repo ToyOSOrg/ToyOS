@@ -7,11 +7,11 @@ opened: 2026-10-12
 # The x86 clock calibrates against an HPET, or the boot panics
 
 `arch::boot::clock` (`kernel/src/arch/x86_64/boot.rs`) takes the HPET's base
-from its ACPI table with `.expect("ACPI: HPET not found")`, and every rate the
-kernel keeps descends from that one measurement: the TSC's
-(`kernel/src/arch/x86_64/hpet.rs`) and the local APIC timer's, calibrated
-against the TSC (`apic::init_timer`). CPUID 15H/16H is read after it, as a
-cross-check only. A machine whose firmware publishes no `HPET` table stops
+from its ACPI table with `.expect("ACPI: HPET not found")`, and the clock
+needs it whatever the CPU states: it measures the TSC's rate against the HPET
+where CPUID 15H states none, and holds the TSC to it while it runs, a stated
+rate too (`kernel/src/arch/x86_64/clocksource.rs`); the local APIC timer is
+calibrated against the TSC (`apic::init_timer`). A machine whose firmware publishes no `HPET` table stops
 there, before a timer ticks, and before PCI is enumerated, so a console that
 is a virtio function never carries the panic.
 
@@ -44,5 +44,6 @@ a third-party copy of ACPI 6.6 numbers them; 6.5 itself is unread.
 **Owner**: whoever holds `issues/toyos-runs-in-any-open-source-hypervisor.md`.
 
 **Exit**: a q35 boot with `-machine hpet=off` reaches `Boot: complete`, its
-`TSC:` line naming the source its rate came from; and a machine that states no
-source is refused by a line that names each one it looked for.
+`clock:` line naming the source its rate came from and the reference that
+holds it; and a machine that states no source is refused by a line that names
+each one it looked for.
