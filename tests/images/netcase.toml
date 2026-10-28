@@ -2,10 +2,9 @@
 # NVMe controller and soundserver's virtio-sound beside it: `iommu_virtio_platform`'s
 # machine, where every virtio function is a process's claim or a kernel driver's.
 #
-# The supervisor starts the NIC drivers before netstack and says how many, and
-# netstack with none leaves, so a machine with no NIC never reaches a line of
-# the daemon proper. Every NIC driver is here, so whichever NIC the machine has
-# comes up with no row naming it.
+# netstack serves once a NIC driver says hello, and leaves a machine none says
+# hello on within 30 s. Every NIC driver is here, so whichever NIC the machine
+# has comes up with no row naming it.
 #
 # test-runner is here for the same reason it is in metalcase: it makes the boot
 # announce itself.
@@ -26,7 +25,8 @@ service = true
 serves = ["netstack", "link"]
 
 # The NIC drivers: one process per function a row's parts match, holding that
-# function alone, and started again when one ends other than by exit 0.
+# function alone; virtio's is started again when it ends other than by exit 0,
+# the Intel parts' is not (`images/system.toml`).
 [programs.virtio-net]
 drives = ["pci:02:00:00/1af4:1041"]
 receives = ["link"]
@@ -35,7 +35,6 @@ restart = true
 [programs.i219]
 drives = ["pci:02:00:00/8086:15fc", "pci:02:00:00/8086:10d3"]
 receives = ["link"]
-restart = true
 
 [programs.soundserver]
 service = true

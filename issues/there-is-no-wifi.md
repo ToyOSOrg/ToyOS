@@ -195,8 +195,16 @@ stage 3 of `issues/the-lan-is-not-yet-production-grade.md`, whole.
 - **Built:** `toyos-link` (`lib/link`), and the I219 and virtio drivers as
   `drives` rows of their own (`system/i219`, `system/virtio-net`), which the
   supervisor's match table already binds; netstack claims no device and
-  refuses a second link by name. In a guest:
-  `a_link_ends_under_a_held_stream_and_comes_back`, and
+  refuses a link of another address by name. A link whose driver wrote what
+  no driver writes ends, and that address's next hello is refused
+  `Faulted`, on which the driver ends: the supervisor's restart budget (3 in
+  10 s) bounds a driver that keeps doing it. virtio's row restarts; the I219's
+  does not, until
+  `issues/no-machine-has-read-an-intel-nic-across-a-link-change.md` reads its
+  reset over a live ring. In a guest:
+  `a_link_ends_under_a_held_stream_and_comes_back` (a driver killed and
+  started again by its job, the stream intact; the supervisor's restart of a
+  `drives` row is the lifecycle crate's host tests'), and
   `netstack_holders_exported_to_children` on virtio and on QEMU's `e1000e`.
 - **Read on the T14:** `i219_carries_netstacks_link` and
   `i219_leaves_ulp_unarmed` passed on one boot at 8bdf49156

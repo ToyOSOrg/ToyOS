@@ -8,10 +8,13 @@
 //! most a ring of frames each way, so a peer that keeps one full cannot keep
 //! the other waiting.
 //!
-//! **A stack that hangs up is connected to again at once**: the port queues
-//! the connection for the stack started in its place, and a fresh region
-//! begins the new link. The device stays up meanwhile. A refusal, or a port
-//! closed for good, ends [`drive`]: nothing this driver does changes either.
+//! **A stack that hangs up is connected to again at once**, with a fresh
+//! region, and the device stays up meanwhile. The stack hangs up on a link
+//! whose driver wrote what no driver writes, and refuses that address's next
+//! hello [`Refusal::Faulted`], on which this driver ends: its supervisor's
+//! restart budget is what bounds a driver that keeps doing it. Any other
+//! refusal, or a port closed for good, ends [`drive`]: nothing this driver
+//! does changes either.
 
 use toyos::endow::{self, EndowError};
 use toyos::ipc::{Connection, FrameRx, RxStep};
@@ -19,6 +22,7 @@ use toyos::poller::{Poller, READABLE};
 use toyos::shm::ReadBytes;
 use toyos::{say, PciDev};
 use toyos_abi::syscall::SyscallError;
+use toyos_net_wire::ethernet::{IndividualMac, MacAddr};
 
 use crate::ends::{Driver, Fault};
 use crate::layout::{RX_DEPTH, SLOT_BYTES, TX_DEPTH};
@@ -82,8 +86,10 @@ const TOKEN_LINK: u64 = 1;
 /// stack refuses it or its port closes for good.
 ///
 /// # Panics
-/// On anything the stack writes that no stack of the protocol writes, and on
-/// a manifest that gives this driver no link: nothing drives on from either.
+/// On anything the stack writes that no stack of the protocol writes, on the
+/// stack's refusal for what this driver wrote, on a device whose address is a
+/// group's, and on a manifest that gives this driver no link: nothing drives
+/// on from any of them.
 pub fn drive(label: &str, nic: &mut impl Nic) {
     loop {
         let conn = match endow::service(PORT) {
@@ -96,6 +102,7 @@ pub fn drive(label: &str, nic: &mut impl Nic) {
         };
         let mut session = Session::open(label, nic, conn);
         match session.serve(nic) {
+            Ended::Refused(Refusal::Faulted) => panic!("{label}: the stack ended this driver's link for what it wrote"),
             Ended::Refused(why) => {
                 say!("{label}: the stack refused this link: {why:?}");
                 return;
@@ -128,7 +135,9 @@ impl<'a> Session<'a> {
     fn open(label: &'a str, nic: &impl Nic, conn: Connection) -> Self {
         let region = Region::create().unwrap_or_else(|why| panic!("{label}: no region for a link: {why:?}"));
         let end = Driver::new(region.words());
-        let hello = Hello { mac: nic.mac(), label: label.into() };
+        let mac = IndividualMac::new(MacAddr(nic.mac()))
+            .unwrap_or_else(|| panic!("{label}: the device's address is a group's, which no link carries"));
+        let hello = Hello { mac, label: label.into() };
         let shared = region.share().unwrap_or_else(|why| panic!("{label}: the link's region would not share: {why:?}"));
         // A connection that will not take the hello is one whose stack has
         // gone: its hang-up is read in the first pass.
