@@ -109,8 +109,8 @@ and the ACPI read-out in `s1-r2/`
   without `ECAP.EIM`: `kernel/src/arch/x86_64/vtd/mod.rs`) rests on `CFIS=0`
   alone.
 
-**S2, the link hop's cost on the T14.** A scout, never landing: two
-processes over `toyos::transport`, one entry per 1,514-byte frame, batches of
+**S2, the link hop's cost on the T14: done, reported under P4.** A scout,
+never landing: two processes over `toyos::transport`, one entry per 1,514-byte frame, batches of
 1, 8 and 32, both directions, each side copying each frame once. Owner: the
 orchestrator. Depends on: nothing. Exit: cycles per frame and frames a
 second on one CPU, reported in P4's design round. Beside them stands the
@@ -192,6 +192,29 @@ stage 3 of `issues/the-lan-is-not-yet-production-grade.md`, whole.
   - the network suite unchanged under QEMU;
   - a T14 row reading the I219 working, with nothing regressed;
   - S2 rerun and reported.
+- **Built:** `toyos-link` (`lib/link`), and the I219 and virtio drivers as
+  `drives` rows of their own (`system/i219`, `system/virtio-net`), which the
+  supervisor's match table already binds; netstack claims no device and
+  refuses a link of another address by name. A link whose driver wrote what
+  no driver writes ends, and that address's next hello is refused
+  `Faulted`, on which the driver ends: the supervisor's restart budget (3 in
+  10 s) bounds a driver that keeps doing it. virtio's row restarts; the I219's
+  does not, until
+  `issues/no-machine-has-read-an-intel-nic-across-a-link-change.md` reads its
+  reset over a live ring. In a guest:
+  `a_link_ends_under_a_held_stream_and_comes_back` (a driver killed and
+  started again by its job, the stream intact; the supervisor's restart of a
+  `drives` row is the lifecycle crate's host tests'), and
+  `netstack_holders_exported_to_children` on virtio and on QEMU's `e1000e`.
+- **Read on the T14:** `i219_carries_netstacks_link` and
+  `i219_leaves_ulp_unarmed` passed on one boot at 8bdf49156
+  (https://github.com/ToyOSOrg/evidence/blob/4d818727fb372e181c402149aeb2779808fa2ef2/p4-r1/metal-t14-judge.log).
+- **S2, reported:** on the T14, the hop costs one CPU about 3,300 TSC
+  cycles a frame with a doorbell per frame, 920 per batch of 8 and 620 per
+  batch of 32, both directions alike: about 740,000, 2.6 million and 3.9
+  million frames a second of one CPU at 2.42 GHz, against the 200,163 a
+  second each way full rate needs
+  (https://github.com/ToyOSOrg/evidence/blob/4a8d02243d626df929fe05365e991873574e0dc2/s2/README.md).
 
 **P5, netstack over several links.** Owner: the orchestrator; its defect is
 `issues/netstack-drives-one-card.md`. Depends on: P4.

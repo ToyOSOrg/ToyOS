@@ -1,7 +1,7 @@
-//! One request netstack answers: a UDP bind on any address. netstack opens its
-//! card before it accepts a connection, so the answer follows the card's
-//! bring-up and every line that bring-up logged. Exits 0 on the bind, and 1
-//! naming the refusal.
+//! One request netstack answers: a UDP bind on any address. netstack serves
+//! once a NIC driver's link is open, which the driver opens after its card's
+//! bring-up, so the answer follows every line that bring-up logged. Exits 0
+//! on the bind, and 1 naming the refusal.
 
 use std::net::{Ipv4Addr, UdpSocket};
 use std::process::ExitCode;

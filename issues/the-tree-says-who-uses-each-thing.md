@@ -165,9 +165,9 @@ Where this differs from the tree the owner adopted:
 - `sdk/std/` is std's ToyOS backend, which left the `rust` fork after the
   design (the owner: "MOVE IT"); the fork's `library/std`, outside this
   repository, compiles it by `#[path]` (rule step 3).
-- `toyos-i219` is `system/netstack/i219`: the harness stopped using it in
-  93719bc03, after the design, which leaves netstack its one user (rule
-  step 4).
+- `toyos-i219` is `system/i219/driver`: the harness stopped using it in
+  93719bc03, after the design, which leaves the `i219` driver program its
+  one user (rule step 4).
 - `toyos-pci-claim`, `acpiserver-api` and `logkeeper-api` are in `lib/`:
   each has two users (rule step 5).
 - `toyos-ssh` is `lib/ssh`: `build/signing.rs` and `system/sshserver` use it

@@ -10,7 +10,7 @@ The owner's target is that `virtio` does not appear anywhere in the kernel. The
 strongest check on it is not the driver files but the ABI: no syscall name may
 carry a NIC, GPU or audio device operation. `rg '^pub const SYS_(NIC|GPU|AUDIO|HDA)_'
 sdk/abi/src/syscall.rs` is the check, and it finds none: the three `SYS_NIC_*`
-names went with the virtio NIC driver, which is `system/netstack/src/virtio_net.rs`
+names went with the virtio NIC driver, which is `system/virtio-net/src/nic.rs`
 now, the four `SYS_GPU_*` names with virtio-gpu's, which is the
 compositor's (`system/compositor/virtio-gpu`), and `SYS_HDA_BIND` with the
 kernel's HDA stub. The kernel's virtio code left is its console's, and it
