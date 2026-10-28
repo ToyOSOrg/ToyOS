@@ -47,7 +47,7 @@ use std::sync::atomic::Ordering;
 
 use toyos::ipc::{FrameRx, RxStep};
 use toyos::net::stream::{
-    Adopt, Misuse, Server, Words, ADOPT, EXPORT, EXPORTED, LAYOUT, RECEIVE_RING, REGION_BYTES, RING, SEND_RING,
+    Adopt, Misuse, Server, Words, ADOPT, EXPORT, EXPORTED, LAYOUT, RECEIVE_INITIAL, RECEIVE_RING, REGION_BYTES, RING, SEND_RING,
     SERVER_WATCH,
 };
 use toyos::net::{MsgType, RespType, TcpConnectRequest, TcpConnectResponse};
@@ -479,7 +479,7 @@ fn run(role: &str, peer: &[u8]) -> (Child, Netstack) {
     let _: TcpConnectRequest = conn.recv_payload(&header).expect("the connect's request");
     let [region] = conn.recv_handles_exact::<1>(&header).expect("the stream's region");
     let region = SharedMemory::lent(region, REGION_BYTES).expect("a region netstack takes");
-    let mut server = Server::new(words_of(&region), LAYOUT);
+    let mut server = Server::new(words_of(&region), LAYOUT, RECEIVE_INITIAL);
     // SAFETY: the receive ring is inside the mapping, and the client reads nothing yet.
     unsafe { std::ptr::copy_nonoverlapping(peer.as_ptr(), region.as_ptr().add(RECEIVE_RING), peer.len()) };
     let _ = server.publish(words_of(&region), peer.len() as u32).expect("the client keeps the protocol");
