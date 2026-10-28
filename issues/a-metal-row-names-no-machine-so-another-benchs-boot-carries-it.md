@@ -38,7 +38,7 @@ AMD-bench rows judged against a T14 readback:
 - `amdvi_translates_the_boot_controller` and
   `amdvi_remaps_the_boot_controller`: no AMD-Vi unit is translating.
 
-The boot's two other reds have causes of their own:
+The boot's two other reds have records of their own:
 `i219_messages_on_its_msi_vector` (`issues/i219-msi-passes-only-when-the-network-sends-it-a-frame.md`)
 and `hda_tone` (`issues/the-t14-tone-underran-one-period-once-in-nine-boots.md`).
 

@@ -32,7 +32,7 @@ the signal bell, and after delivery `signal_clients` (`system/soundserver/src/mi
 rings it once per mix wake. It drops every error but `Gone`, and a bell
 refused for memory would be dropped too. But neither tree can refuse that
 write for memory in a stream this short:
-- on main, a pipe holds its page from its first write;
+- on main 370d7d9f6, a pipe holds its page from its first write;
 - with #1074, a pipe that has held a byte needs another frame only when its
   held bytes cross a frame's 4096 bytes (`kernel/pure/pipe.rs`'s `wants`, and
   `consume` restarts a drained pipe at its frame's start). That takes about
