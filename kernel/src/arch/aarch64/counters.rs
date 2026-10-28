@@ -18,5 +18,6 @@ pub fn read() -> Hardware {
         package: None,
         package_residency: None,
         core_energy: None,
+        planes: None,
     }
 }

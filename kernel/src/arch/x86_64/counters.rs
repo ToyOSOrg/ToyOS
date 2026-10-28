@@ -23,6 +23,8 @@ const MSR_PKG_C2_RESIDENCY: u32 = 0x60D;
 const MSR_PKG_C3_RESIDENCY: u32 = 0x3F8;
 const MSR_PKG_C6_RESIDENCY: u32 = 0x3F9;
 const MSR_PKG_C7_RESIDENCY: u32 = 0x3FA;
+const MSR_PP0_ENERGY_STATUS: u32 = 0x639;
+const MSR_PP1_ENERGY_STATUS: u32 = 0x641;
 // PPR 55922 `RAPL_PWR_UNIT`, `CORE_ENERGY_STAT` and `PKG_ENERGY_STAT`.
 const AMD_RAPL_PWR_UNIT: u32 = 0xC001_0299;
 const AMD_CORE_ENERGY_STAT: u32 = 0xC001_029A;
@@ -35,6 +37,7 @@ const INTEL_RAPL: u8 = 1 << 3;
 const AMD_RAPL: u8 = 1 << 4;
 const PACKAGE_RESIDENCY: u8 = 1 << 5;
 const CORE_ENERGY: u8 = 1 << 6;
+const PLANES: u8 = 1 << 7;
 /// Bits 31:0 of every energy register: bits 63:32 are reserved (SDM Vol. 3B
 /// Figure 17-37; PPR 55922).
 const ENERGY: u64 = 0xFFFF_FFFF;
@@ -76,7 +79,8 @@ pub fn bring_up() {
             None => 0,
         }
         | if verdict.package_residency { PACKAGE_RESIDENCY } else { 0 }
-        | if verdict.core_energy { CORE_ENERGY } else { 0 };
+        | if verdict.core_energy { CORE_ENERGY } else { 0 }
+        | if verdict.planes { PLANES } else { 0 };
     admitted().store(bits, Relaxed);
 }
 
@@ -103,5 +107,7 @@ pub fn read() -> Hardware {
             [MSR_PKG_C2_RESIDENCY, MSR_PKG_C3_RESIDENCY, MSR_PKG_C6_RESIDENCY, MSR_PKG_C7_RESIDENCY].map(cpu::rdmsr)
         }),
         core_energy: msr(CORE_ENERGY, AMD_CORE_ENERGY_STAT).map(|energy| energy & ENERGY),
+        planes: (admitted & PLANES != 0)
+            .then(|| [MSR_PP0_ENERGY_STATUS, MSR_PP1_ENERGY_STATUS].map(|at| cpu::rdmsr(at) & ENERGY)),
     }
 }

@@ -44,7 +44,7 @@ devices = ["pci:02:00:00/8086:15fc"]
 # this config built without the row; a derived metal config states its own.
 [programs.test-runner]
 receives = ["power", "netstack"]
-syscap = ["jobs", "counters", "trace", "roster", "inventory", "dup"]
+syscap = ["jobs", "counters", "trace", "roster", "inventory", "dup", "wake-latency"]
 args = [
     "--bound-ms=525000",
     "osbench_boot",
