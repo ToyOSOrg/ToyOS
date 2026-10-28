@@ -836,6 +836,7 @@ impl Server {
                 Ok(Answer::Reply(Reply { value: n as u64, ..Reply::ok() }))
             }
             WRITE | PWRITE => {
+                let probe_t = Instant::now();
                 let (file, _, (span_at, span)) = self.file_and_span(id, &r)?;
                 let window = window_of(&self.clients, id).sub(span_at, span);
                 if !file.borrow().write {
@@ -850,6 +851,8 @@ impl Server {
                     WRITE => self.write_at(&file, len)?,
                     _ => self.write_to(&file, r.offset, len)?,
                 };
+                diskserver::disk::probe::add(diskserver::disk::probe::SERVER_WRITES, 1);
+                diskserver::disk::probe::add(diskserver::disk::probe::SERVER_WRITE_NS, probe_t.elapsed().as_nanos() as u64);
                 Ok(Answer::Reply(Reply { value: len as u64, value2: end, ..Reply::ok() }))
             }
             SEEK => {
@@ -888,7 +891,21 @@ impl Server {
                     // A directory's names are made durable with the volume.
                     Held::Dir { .. } => None,
                 };
-                self.sync(node)
+                let t = Instant::now();
+                let answer = self.sync(node);
+                let fsync_ns = t.elapsed().as_nanos() as u64;
+                use diskserver::disk::probe as p;
+                if p::C[p::VOL_WRITE_BYTES].load(std::sync::atomic::Ordering::Relaxed) >= 1 << 20 {
+                    let c = p::take();
+                    println!(
+                        "disk-path-probe: fsync_us={} written={} server_write_us={} server_writes={} vol_write_us={} vol_alloc_us={} vol_copy_us={} persist_us={} commit_us={} cache_flush_us={} cache_flush_blocks={} dev_writes={} dev_write_us={} dev_flushes={} dev_flush_us={} forced_flushes={}",
+                        fsync_ns / 1000, c[p::VOL_WRITE_BYTES], c[p::SERVER_WRITE_NS] / 1000, c[p::SERVER_WRITES], c[p::VOL_WRITE_NS] / 1000,
+                        c[p::VOL_ALLOC_NS] / 1000, c[p::VOL_COPY_NS] / 1000, c[p::PERSIST_NS] / 1000, c[p::COMMIT_NS] / 1000,
+                        c[p::CACHE_FLUSH_NS] / 1000, c[p::CACHE_FLUSH_BLOCKS], c[p::DEV_WRITES], c[p::DEV_WRITE_NS] / 1000,
+                        c[p::DEV_FLUSHES], c[p::DEV_FLUSH_NS] / 1000, c[p::FORCED]
+                    );
+                }
+                answer
             }
             SYNC => self.sync(None),
             ROOM => {

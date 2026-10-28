@@ -262,10 +262,20 @@ impl<D: Disk> BlockDev for Cache<D> {
     /// nothing since the last flush it answered is asked nothing: every write
     /// it took is already durable.
     async fn flush(&self) -> Result<(), Error> {
+        let t = std::time::Instant::now();
+        let r = self.flush_probed().await;
+        diskserver::disk::probe::add(diskserver::disk::probe::CACHE_FLUSH_NS, diskserver::disk::probe::since(t));
+        r
+    }
+}
+
+impl<D: Disk> Cache<D> {
+    async fn flush_probed(&self) -> Result<(), Error> {
         self.until(|inner| !inner.flushing).await;
         self.inner.borrow_mut().flushing = true;
         let _flushing = Flushing(self);
         let dirty: Vec<u64> = self.inner.borrow().slots.iter().filter(|(_, s)| s.dirty).map(|(b, _)| *b).collect();
+        diskserver::disk::probe::add(diskserver::disk::probe::CACHE_FLUSH_BLOCKS, dirty.len() as u64);
         let mut buf: Vec<Block> = vec![[0; BLOCK]; RUN];
         let mut i = 0;
         while i < dirty.len() {

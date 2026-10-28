@@ -59,6 +59,36 @@ impl Link for Session {
     }
 }
 
+/// MEASUREMENT ONLY: phase timings for the disk-path profile; never landed.
+pub mod probe {
+    use std::sync::atomic::{AtomicU64, Ordering::Relaxed};
+    pub static C: [AtomicU64; 16] = [const { AtomicU64::new(0) }; 16];
+    pub const DEV_WRITES: usize = 0;
+    pub const DEV_WRITE_NS: usize = 1;
+    pub const DEV_FLUSHES: usize = 2;
+    pub const DEV_FLUSH_NS: usize = 3;
+    pub const FORCED: usize = 4;
+    pub const VOL_WRITE_BYTES: usize = 5;
+    pub const VOL_ALLOC_NS: usize = 6;
+    pub const VOL_COPY_NS: usize = 7;
+    pub const VOL_WRITE_NS: usize = 8;
+    pub const PERSIST_NS: usize = 9;
+    pub const COMMIT_NS: usize = 10;
+    pub const CACHE_FLUSH_NS: usize = 11;
+    pub const CACHE_FLUSH_BLOCKS: usize = 12;
+    pub const SERVER_WRITE_NS: usize = 13;
+    pub const SERVER_WRITES: usize = 14;
+    pub fn add(i: usize, v: u64) {
+        C[i].fetch_add(v, Relaxed);
+    }
+    pub fn since(t: std::time::Instant) -> u64 {
+        t.elapsed().as_nanos() as u64
+    }
+    pub fn take() -> [u64; 16] {
+        core::array::from_fn(|i| C[i].swap(0, Relaxed))
+    }
+}
+
 /// How many times one request is asked again across block service restarts
 /// before the disk is called gone: the supervisor gives up on a service that
 /// ends faster than this.
@@ -182,7 +212,10 @@ impl<L: Link> Served<L> {
         loop {
             match self.ask(&mut submit).await {
                 Ok(answer) => return Ok(answer),
-                Err(NotAnswered::Full) => self.flush().await?,
+                Err(NotAnswered::Full) => {
+                    probe::add(probe::FORCED, 1);
+                    self.flush().await?
+                }
                 Err(NotAnswered::Gone) => return Err(Error::Gone),
             }
         }
@@ -214,7 +247,11 @@ impl<L: Link> BlockDev for Served<L> {
         let per = MAX_REQUEST_BLOCKS as usize;
         for (i, chunk) in data.chunks(per).enumerate() {
             let at = lba + (i * per) as u64;
-            match self.ask_room(|link| link.submit_write(at, chunk.as_flattened())).await?.outcome {
+            let t = std::time::Instant::now();
+            let asked = self.ask_room(|link| link.submit_write(at, chunk.as_flattened())).await;
+            probe::add(probe::DEV_WRITES, 1);
+            probe::add(probe::DEV_WRITE_NS, probe::since(t));
+            match asked?.outcome {
                 Outcome::Done => {}
                 Outcome::ReadOnly => return Err(Error::ReadOnly),
                 _ => return Err(Error::Device),
@@ -224,7 +261,11 @@ impl<L: Link> BlockDev for Served<L> {
     }
 
     async fn flush(&self) -> Result<(), Error> {
-        match self.ask(Link::submit_flush).await {
+        let t = std::time::Instant::now();
+        let asked = self.ask(Link::submit_flush).await;
+        probe::add(probe::DEV_FLUSHES, 1);
+        probe::add(probe::DEV_FLUSH_NS, probe::since(t));
+        match asked {
             Ok(Answer { outcome: Outcome::Durable, .. }) => Ok(()),
             Ok(_) => Err(Error::Device),
             Err(NotAnswered::Gone) => Err(Error::Gone),

@@ -540,6 +540,8 @@ impl<D: Disk> Volume for DataVolume<D> {
 
     fn write(&mut self, node: Node, offset: u64, data: &[u8]) -> Result<(), Error> {
         let end = offset.checked_add(data.len() as u64).ok_or(Error::FileTooLarge)?;
+        let probe_t = std::time::Instant::now();
+        diskserver::disk::probe::add(diskserver::disk::probe::VOL_WRITE_BYTES, data.len() as u64);
         let cache = Rc::clone(&self.cache);
         let now = (self.clock)();
         let open = self.open.get_mut(&node).ok_or(Error::Stale)?;
@@ -570,6 +572,8 @@ impl<D: Disk> Volume for DataVolume<D> {
                 return Err(e);
             }
         }
+        diskserver::disk::probe::add(diskserver::disk::probe::VOL_ALLOC_NS, diskserver::disk::probe::since(probe_t));
+        let copy_t = std::time::Instant::now();
         let mut done = 0;
         let mut page_buf: [Block; 1] = [[0; BLOCK]];
         while done < data.len() {
@@ -597,6 +601,8 @@ impl<D: Disk> Volume for DataVolume<D> {
         open.size = open.size.max(end);
         open.mtime = now;
         open.dirty = true;
+        diskserver::disk::probe::add(diskserver::disk::probe::VOL_COPY_NS, diskserver::disk::probe::since(copy_t));
+        diskserver::disk::probe::add(diskserver::disk::probe::VOL_WRITE_NS, diskserver::disk::probe::since(probe_t));
         Ok(())
     }
 
@@ -788,6 +794,7 @@ impl<D: Disk> Volume for DataVolume<D> {
     }
 
     fn sync(&mut self) -> Result<Vec<(Node, Error)>, Error> {
+        let probe_t = std::time::Instant::now();
         let mut unwritten = Vec::new();
         let nodes: Vec<Node> = self.open.keys().copied().collect();
         for node in nodes {
@@ -797,7 +804,10 @@ impl<D: Disk> Volume for DataVolume<D> {
                 Ok(()) => {}
             }
         }
+        diskserver::disk::probe::add(diskserver::disk::probe::PERSIST_NS, diskserver::disk::probe::since(probe_t));
+        let commit_t = std::time::Instant::now();
         mapped("sync", "", self.fs.sync())?;
+        diskserver::disk::probe::add(diskserver::disk::probe::COMMIT_NS, diskserver::disk::probe::since(commit_t));
         Ok(unwritten)
     }
 
