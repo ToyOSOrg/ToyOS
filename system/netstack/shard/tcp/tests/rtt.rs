@@ -42,15 +42,17 @@ fn s_rt_007_karn() {
     assert_eq!((info.srtt, info.rttvar, info.rto), (Some(ms(10)), Some(std::time::Duration::from_micros(3_750)), ms(200)));
 }
 
+/// RFC 8985 §6.1: an ACK is timed from the newest segment it newly acknowledges, which the
+/// receiver did not hold waiting for a second.
 #[test]
-fn s_rt_008_one_segment_timed() {
+fn s_rt_008_the_newest_segment_acknowledged_is_timed() {
     let mut h = fixture_e();
     let (_, outs) = h.call(0, |tcp, now, id| tcp.set_options(now, id, toyos_net_tcp::Options { nodelay: true, ..Default::default() }));
     nothing(&outs);
     h.send(0, 1460);
     h.send(5, 1460);
     h.input(20, seg(5001).ack(3921));
-    assert_eq!(h.info().srtt, Some(std::time::Duration::from_micros(11_250)), "one 20 ms sample");
+    assert_eq!(h.info().srtt, Some(std::time::Duration::from_micros(10_625)), "one 15 ms sample");
 }
 
 #[test]
@@ -72,13 +74,14 @@ fn s_rt_010_a_retransmission_echoed() {
     assert_eq!(h.info().srtt, Some(std::time::Duration::from_micros(12_500)), "a 30 ms sample");
 }
 
+/// An echo of a TSval never sent is counted; the ACK is still timed by its segment's departure.
 #[test]
 fn s_rt_011_an_echo_from_the_future() {
     let mut h = fixture_ef();
     h.send(0, 100);
     h.input(30, seg(5001).ack(1101).wnd(512).ts(50_030, 5000));
     let info = h.info();
-    assert_eq!(info.srtt, Some(ms(10)));
+    assert_eq!(info.srtt, Some(std::time::Duration::from_micros(12_500)));
     assert_eq!(info.snd_una.get(), 1101);
     assert_eq!(h.count(Counter::TsEcrInvalid), 1);
 }
@@ -120,4 +123,42 @@ fn s_rt_016_no_timer_when_all_is_acknowledged() {
     h.send(0, 100);
     h.input(10, seg(5001).ack(1101));
     assert_eq!(h.info().rtx_timer, None);
+}
+
+/// A sample is the departure's own time, finer than the timestamp clock's millisecond: 1.5 ms
+/// reads as 1.5 ms where an echoed TSval would say 1 or 2.
+#[test]
+fn s_rt_018_a_sample_below_the_timestamp_tick() {
+    let mut h = fixture_ef();
+    h.send(0, 100);
+    h.input_past(1, 500, seg(5001).ack(1101).wnd(512).ts(50_001, 1000));
+    assert_eq!(h.info().srtt, Some(std::time::Duration::from_micros(8_937)));
+}
+
+/// Karn (RFC 6298 §3): after a fast retransmission, the departures before it time nothing: the
+/// ACK that repairs the hole covers segments held behind it.
+#[test]
+fn s_rt_017_a_retransmission_forgets_the_departures_before_it() {
+    let mut h = fixture_e();
+    assert_eq!(h.send(0, 5840).len(), 4);
+    for t in 11..=13 {
+        h.input(t, seg(5001).ack(1001));
+    }
+    assert_eq!(h.count(Counter::FastRecovery), 1);
+    h.input(20, seg(5001).ack(6841));
+    assert_eq!(h.info().srtt, Some(ms(10)), "a segment held behind the hole times nothing");
+}
+
+/// Without timestamps too, every ACK that newly acknowledges a timed segment is a sample, not one
+/// a round trip: HyStart++ can collect its N_RTT_SAMPLE in a round.
+#[test]
+fn s_rt_019_each_ack_is_a_sample_without_timestamps() {
+    let mut h = fixture_e();
+    let (_, _) = h.call(0, |tcp, now, id| tcp.set_options(now, id, toyos_net_tcp::Options { nodelay: true, ..Default::default() }));
+    h.send(0, 1460);
+    h.send(0, 1460);
+    h.input(20, seg(5001).ack(2461));
+    assert_eq!(h.info().srtt, Some(std::time::Duration::from_micros(11_250)), "a 20 ms sample");
+    h.input(28, seg(5001).ack(3921));
+    assert_eq!(h.info().srtt, Some(std::time::Duration::from_micros(13_343)), "and a 28 ms one");
 }
