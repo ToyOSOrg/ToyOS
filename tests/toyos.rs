@@ -1133,6 +1133,14 @@ const METAL: &[(&str, metal::Metal)] = &[
         "osbench_internet",
         metal::Metal { arms: OSBENCH_INTERNET, judge: |b| osbench_ran(b[0], &["osbench_internet"]) },
     ),
+    (
+        // The I219's start disarms the Ultra Low Power configuration it finds,
+        // on the silicon whose PHY the model's disarm is written for: the
+        // registers the PHY holds are no model's. The T14, the one bench whose
+        // card ToyOS drives; the boot netstack drives it in, with no job.
+        "i219_leaves_ulp_unarmed",
+        metal::Metal { arms: NETBENCHCASE, judge: |b| i219_leaves_ulp_unarmed(b[0]) },
+    ),
     // ---- tests/images/jobcase.toml, each image armed to end its boot its own way ----
     (
         // Its own boot, and it must not share one: it is the only arm in this
@@ -1680,6 +1688,28 @@ const OSBENCH_INTERNET: &[metal::Arm] = &[metal::Arm {
     named_only: true,
     ..metal::once("netbenchcase", "tests/images/benchcase.toml", &[], &["osbench_internet"])
 }];
+
+/// The boot netstack drives the T14's I219 in, with nothing else asked of it.
+const NETBENCHCASE: &[metal::Arm] = &[metal::once("netbenchcase", "tests/images/benchcase.toml", &[], &[])];
+
+/// netstack's account of the I219's start: what its wake found of Ultra Low
+/// Power and disarmed, and the configuration its bring-up read back unarmed.
+/// Both lines are printed, because what was found is what the next boot's
+/// diagnosis reads.
+fn i219_leaves_ulp_unarmed(boot: &metal::Readback) -> Result<(), String> {
+    let log = boot.log();
+    let woke = log.must_say("netstack: I219: before the reset the PHY was asked:")?;
+    let left = log.must_say("it is left with ULP configuration")?;
+    eprintln!("  [i219] {woke}");
+    eprintln!("  [i219] {left}");
+    if !woke.contains(", and disarmed") {
+        return Err(format!("the I219's wake did not disarm ULP: {woke}"));
+    }
+    if !left.trim_end().ends_with(": unarmed") {
+        return Err(format!("the I219's bring-up left ULP armed: {left}"));
+    }
+    Ok(())
+}
 
 /// Every group's job exited 0, which `osbench` does only once each of its
 /// benchmarks measured, and said it was done.
