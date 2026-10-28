@@ -18,9 +18,10 @@ than one value across twelve boots (`ToyOSOrg/evidence` branch `pr-1073`,
 The thread's APERF/MPERF ratio, the one figure of the pair AMD defines
 (APM Vol. 2 §17.3), differed by under 1 % across the boots. The slow boots
 include one with every idle CPU in C1 and the rest with the deep states.
-In the slow A\* boot and the slow B4 boot, no other CPU's MPERF advanced by
-a thousandth of its TSC's count across the row, and MPERF counts only in
-C0 (§17.3).
+In the slow A\* boot and the slow B4 boot, every other CPU's MPERF advanced
+under a thousandth of the deflate thread's own across the row (0 against
+999, each in thousandths of the same window), and MPERF counts only in C0
+(§17.3).
 So it is not the idle states, the clock, the placement, or a running
 neighbour.
 

@@ -3,6 +3,9 @@
 //!
 //! **A CPU's hardware counters are readable only on that CPU**, so a read asks
 //! every CPU to copy its counters out and waits for the answers under a bound.
+//! Every answer is taken after the read was called. Reads close together
+//! share one round of asking, and rounds are at least [`INTERVAL_NS`] apart,
+//! so a read may wait up to 10 ms before its round begins.
 //! A CPU that has not answered by then is [`Record::stale`]: its values are the
 //! last it gave, and its [`Counter::Stamp`] says when it gave them. A counter
 //! the CPU does not have, or that the caller's capability may not read, is
@@ -17,6 +20,9 @@
 //! [`SYS_COUNTERS`]: crate::syscall::SYS_COUNTERS
 
 use crate::handle::Rights;
+
+/// The least time between two rounds of asking every CPU, in nanoseconds.
+pub const INTERVAL_NS: u64 = 10_000_000;
 
 /// One counter a CPU keeps, by its index in [`Record::values`].
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -53,8 +59,6 @@ pub enum Counter {
     /// Idle periods the CPU waited in a state deeper than C1 its firmware
     /// declared.
     DeepIdles,
-    /// Nanoseconds those periods lasted, each from the choice to the wake.
-    DeepIdleNanos,
     /// Time the CPU's core was in its processor-specific C6 states, in TSC
     /// ticks (`MSR_CORE_C6_RESIDENCY`): the hardware's own count, beside the
     /// kernel's choices.
@@ -64,7 +68,7 @@ pub enum Counter {
 }
 
 impl Counter {
-    pub const COUNT: usize = 14;
+    pub const COUNT: usize = 13;
     pub const ALL: [Counter; Self::COUNT] = [
         Self::Stamp,
         Self::Smi,
@@ -77,7 +81,6 @@ impl Counter {
         Self::FirmwareCalls,
         Self::FirmwareNanos,
         Self::DeepIdles,
-        Self::DeepIdleNanos,
         Self::CoreC6,
         Self::CoreC7,
     ];
@@ -95,7 +98,6 @@ impl Counter {
             Self::FirmwareCalls => "firmware_calls",
             Self::FirmwareNanos => "firmware_nanos",
             Self::DeepIdles => "deep_idles",
-            Self::DeepIdleNanos => "deep_idle_nanos",
             Self::CoreC6 => "core_c6",
             Self::CoreC7 => "core_c7",
         }
@@ -112,7 +114,6 @@ impl Counter {
             | Self::HwpRequestPkg
             | Self::EnergyPerfBias
             | Self::DeepIdles
-            | Self::DeepIdleNanos
             | Self::CoreC6
             | Self::CoreC7 => Rights::COUNTERS.union(Rights::TRACE),
         }
@@ -216,8 +217,8 @@ mod tests {
     #[test]
     fn every_shape_of_record_reads_back_as_written() {
         for r in [
-            record(false, [Some(1), Some(u64::from(u32::MAX)), Some(3), Some(u64::MAX), Some(0), Some(0x8000_2a04), Some(6), Some(0), Some(2), Some(31_936), Some(0), Some(7_000_000), Some(5), None]),
-            record(true, [Some(9), None, None, None, Some(4), None, Some(0x8000_ff01), None, Some(0), None, Some(12), None, None, Some(9)]),
+            record(false, [Some(1), Some(u64::from(u32::MAX)), Some(3), Some(u64::MAX), Some(0), Some(0x8000_2a04), Some(6), Some(0), Some(2), Some(31_936), Some(7_000_000), Some(5), None]),
+            record(true, [Some(9), None, None, None, Some(4), None, Some(0x8000_ff01), None, Some(0), None, Some(12), None, Some(9)]),
             record(true, [None; Counter::COUNT]),
         ] {
             assert_eq!(Record::decode(&r.encode()), Ok(r));
@@ -227,7 +228,7 @@ mod tests {
     /// Absent is not zero: a zero that is there reads back there.
     #[test]
     fn a_present_zero_is_not_an_absent_counter() {
-        let r = record(false, [Some(5), Some(0), None, None, None, None, None, None, None, None, None, None, None, None]);
+        let r = record(false, [Some(5), Some(0), None, None, None, None, None, None, None, None, None, None, None]);
         assert_eq!(Record::decode(&r.encode()).unwrap().get(Counter::Smi), Some(0));
         assert_eq!(Record::decode(&r.encode()).unwrap().get(Counter::Aperf), None);
     }
@@ -244,7 +245,7 @@ mod tests {
 
     #[test]
     fn a_word_under_an_absent_counter_is_refused() {
-        let mut raw = record(false, [Some(1), None, None, None, None, None, None, None, None, None, None, None, None, None]).encode();
+        let mut raw = record(false, [Some(1), None, None, None, None, None, None, None, None, None, None, None, None]).encode();
         raw.0[16 + 8 * Counter::Mperf as usize] = 1;
         assert_eq!(Record::decode(&raw), Err(Undecodable::Absent(Counter::Mperf)));
     }

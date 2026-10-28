@@ -34,23 +34,42 @@ faster than a `hlt` control. Its `work.build_shaped.j1` p50 read 1176 ms
 against the control's 967, with its own 5 runs spread from 817 to 1594 ms,
 the control on a different `main`: unresolved.
 
-**The exit cost of deep states, accepted** (orchestrator, 2026-10-28, under
-the owner's direction of 2026-10-27), as #1073's first boots read it at
-`59dcd1f03`, p50 against main's `ea6414e53` and against Linux 6.8 on the same
-bench (Linux's 50 µs timer slack included):
+**The exit cost of deep states is a tradeoff to bring to the architect, not
+accepted.** It was recorded as accepted on ratios alone (1.5 to 3.4 times),
+which accepts no material compromise. In absolute terms, p50 in µs with every
+idle CPU in C1 (two A\* boots) against the deep states (two B3 boots), one
+build (`f6510defd`) and one session a bench, B7 at `18fe4e150` beside them,
+and Linux 6.8 on the same bench (its 50 µs timer slack included; #1073's
+first boots):
 
-| row | T14 main | T14 deep idle | T14 Linux | AMD main | AMD deep idle | AMD Linux |
-|---|---|---|---|---|---|---|
-| `time.sleep_late.1ms` | 17.7 µs | 22.9 µs | 71.5-71.8 µs | 32.5 µs | 5.4 µs | 69.7-70.8 µs |
-| `time.sleep_late.10ms` | 17.8 µs | 29.5 µs | 213 µs | 32.6 µs | 32.3 µs | 342-344 µs |
-| `wake.storm.drain.w4` | 37 µs | 127 µs | 121-123 µs | 105 µs | 307 µs | 77-78 µs |
-| `wake.storm.drain.w16` | 77 µs | 144 µs | 370-1041 µs | 333 µs | 329 µs | 113-200 µs |
+| row | T14 C1 | T14 deep | T14 delta | T14 Linux | AMD C1 | AMD deep | AMD delta | AMD Linux |
+|---|---|---|---|---|---|---|---|---|
+| `time.sleep_late.1ms` | 17.7, 17.8 | 22.1, 14.6 (B7 17.2) | −3 to +4 | 71.5-71.8 | 32.2, 32.5 | 5.6, 5.6 (B7 5.4) | −27 | 69.7-70.8 |
+| `time.sleep_late.10ms` | 17.8, 17.8 | 28.3, 28.3 (B7 27.4) | +10.5 to +10.6 | 213 | 32.3, 32.6 | 32.6, 33.3 (B7 32.8) | 0 to +1 | 342-344 |
+| `wake.storm.drain.w4` | 38.5, 37.6 | 126.1, 128.6 (B7 127.9) | +88 to +91 | 121-123 | 306, 107 | 112, 306 (B7 107) | none: 107 or 306 either way | 77-78 |
+| `wake.storm.drain.w16` | 74.1, 77.6 | 161.1, 145.5 (B7 130.1) | +68 to +87 (B7 +52) | 370-1041 | 304, 328 | 321, 331 (B7 350) | within the spread | 113-200 |
 
 A sleep long enough for a deep state is woken early by its exit and still
 lands later the deeper the state was (none at 100 µs, C2 at 1 ms, C10 at
 10 ms), which an early wake that fell short would make hundreds of µs:
 consistent with the cost of the caches a deep state powers off, not measured
-as that. A burst of wakes to CPUs in deep states pays their exits.
+as that. A burst of wakes to CPUs in deep states pays their exits. The cost
+is the T14's; on the AMD the deep state lands a 1 ms sleep 27 µs sooner and
+moves nothing else.
+
+What it costs, as inference, not measured per workload:
+
+- **Interactive**: an input event that wakes an idle CPU on the T14 lands up
+  to about 10 µs later, and one that fans out to 4 to 16 sleeping threads
+  about 70 to 90 µs later, against a 60 Hz frame's 16.7 ms.
+- **Audio**: while a stream plays, soundserver holds the exit to half its
+  2.9 ms period, about 1.45 ms, which both T14 states (253 and 1048 µs) and
+  the AMD's (400 µs) are inside: so a period's wake may still pay up to
+  1048 µs of exit on the T14, a third of the period. Measured, its worst IRQ
+  lateness is not moved and no window underran (below).
+- **Normal workloads**: a server or build that wakes many sleeping threads
+  in bursts pays the storm's 70 to 90 µs per burst on the T14, latency
+  rather than CPU time; throughput rows did not lose (below).
 
 **Where the exit stands** (#1073's second boots at `f8749dc69`, two boots
 each against its control with the deep states off, all else equal):
@@ -79,11 +98,7 @@ each against its control with the deep states off, all else equal):
   `r4/` in the evidence), and acpiserver ran for the whole of each of those
   clock windows: a measured busy core beside the clock's thread. At the
   starts of net, procs, mem, tail and nvme still at 3789, the roster names
-  nothing beside osbench for more than 0.9 ms of the 5.5 ms window. Mem
-  stays unexplained. Net, procs, tail and nvme reached 4189 under the
-  always-deepest control, so the history holding idle CPUs shallow after
-  the group before is the open hypothesis there; a per-CPU state read
-  inside the window would test it.
+  nothing beside osbench for more than 0.9 ms of the 5.5 ms window.
 - Group starts at 4189 across the eight T14 boots with the deep states:
   8 and 8 (r2), 8 and 10 (r3), 10 (B4), 5 (B5), 10 (B6) and 10 (B7), counted
   as a maximum above 4100 MHz. Only sched, files, ipc and work reached it
@@ -95,20 +110,37 @@ each against its control with the deep states off, all else equal):
   to 564 µs and AMD 0 to 2661. The deep states move neither, and no window
   underran.
 
-**#1066's exit is unmet** where this track stands: the T14's `cpu.clock` reaches
-ratio 42 at 5 to 10 of 17 group starts against Linux's 13. Of the groups
-below it, boot, identity, energy and system are held by acpiserver's
-measured start-up work; the rest are the open question above. Three
-diagnostic boots (#1073's `r6/`) read the counters around each group's
-clock, the same with the history switched off, and the scheduler's diary
-across it. The counters read came back as one reading twice in 13 of 17
-windows (`issues/a-counters-read-within-10-ms-of-another-returns-the-older-reading-as-new.md`),
-and switching the history off left the count inside the spread. The
-finding goes into this record with the track's next change.
+**`cpu.clock` at group starts** is a diagnostic of the turbo grant, not a
+product target: the T14's reaches ratio 42 at 5 to 10 of 17 group starts
+against Linux's 13, and #1066 set Linux's count as its exit. Three diagnostic
+T14 boots at #1073's head read each group's clock window (`r6/` in the
+evidence):
+
+- With the counters read around each window (D1), 8 group starts reached
+  4189; with the history also admitting every state (D2), 10. Both are
+  inside the spread: the history does not hold the count down, and no
+  idle-policy change is earned.
+- D1's counters showed nothing. In 13 of 17 windows the two reads, 5 ms
+  apart, were served one round, and the windows that did differ were read
+  before osbench took a window from the readings' own stamps.
+- The scheduler's diary across each window (D3), a boot in which boot,
+  identity, energy, system and mem were at 3789: in the first four
+  acpiserver ran beside osbench, 5.5 ms of the window by the roster. In mem
+  the diary and the roster agree that no thread but osbench's ran on any
+  CPU, and mem stays at 3789 under always-deepest too, so neither thread
+  work nor the idle choice holds it. The diary counts a thread running from
+  before the window only from its first event inside it. Net, procs, tail
+  and nvme reached 4189 in this boot.
+
+So boot, identity, energy and system are held by acpiserver's measured
+start-up work. Mem's 3789 is open: interrupts, which no thread view sees,
+or the package's power or thermal state after procs. The counters read
+around mem's clock window is the instrument to read it with next, and no
+idle predictor is tuned before it has been read.
 
 **Exit**: on the T14, since a KVM guest's idle is its host's: the idle
 minute's package energy, timer lateness no worse than `hlt`'s by more than
-the chosen state's exit latency, and osbench's `cpu.clock` maximum at ratio
-42 (4185 to 4190 MHz, as Linux's reads it on the same T14) in every group
-where Linux's reaches 42.
+the chosen state's exit latency, and the exit costs above decided by the
+architect. `cpu.clock` at each group start is read beside them as a
+diagnostic, not held to ratio 42 for its own sake.
 **Mutation**: always the deepest state. **Oracle**: Linux's figures.

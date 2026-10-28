@@ -45,17 +45,31 @@ impl Around {
 
 /// One counters read, with when its call began and what it cost.
 #[cfg(target_os = "toyos")]
+#[derive(Clone)]
 pub struct Reading {
     pub cpus: Vec<crate::sys::diag::CpuCounts>,
     called: std::time::Instant,
     cost_ns: u64,
 }
 
+/// The counters now, or this process's last reading where a read now would
+/// fall within the kernel's interval between rounds
+/// (`toyos_abi::counters::INTERVAL_NS`) of it: that read would sleep out the
+/// interval, and osbench would then be the one system that sleeps right
+/// before a measured row. One reading then bounds both rows beside it.
 #[cfg(target_os = "toyos")]
 pub fn read(d: &crate::sys::diag::Diag) -> Result<Reading, String> {
+    static LAST: std::sync::Mutex<Option<Reading>> = std::sync::Mutex::new(None);
+    let mut last = LAST.lock().expect("no reader panics holding the last reading");
+    let recent = |r: &&Reading| crate::ns_since(r.called) < r.cost_ns + toyos_abi::counters::INTERVAL_NS;
+    if let Some(reading) = last.as_ref().filter(recent) {
+        return Ok(reading.clone());
+    }
     let called = std::time::Instant::now();
     let cpus = d.counters()?;
-    Ok(Reading { cpus, called, cost_ns: crate::ns_since(called) })
+    let reading = Reading { cpus, called, cost_ns: crate::ns_since(called) };
+    *last = Some(reading.clone());
+    Ok(reading)
 }
 
 /// One line a CPU: what it did between `before` and `after`. Every figure
@@ -64,8 +78,7 @@ pub fn read(d: &crate::sys::diag::Diag) -> Result<Reading, String> {
 /// ([`osbench_rules::window`]). Core residency counts at the TSC's rate (SDM
 /// Vol. 4 Table 2-20), the window's own counter; APERF/MPERF is printed as
 /// the ratio, the one figure of the pair either vendor defines. Deep idle is
-/// counted as the periods that ended in the window: the kernel credits a
-/// period's time when it ends, so its time is no fraction of the window.
+/// counted as the periods that ended in the window.
 #[cfg(target_os = "toyos")]
 pub fn cpus(bench: &str, before: &Reading, after: &Reading) {
     use osbench_rules::window;

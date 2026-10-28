@@ -359,35 +359,21 @@ const STORM: usize = 10_000;
 /// processor, as `acpi_release`'s.
 const STARTS: usize = 64;
 
-/// What the boot processor counts of the kernel's writes to `SMI_CMD`, read
-/// in a round of the counters issued after the last one read here returned: a
-/// read within the kernel's joining window of a round answers with that
-/// round, which may be older than what the caller just did, so this reads
-/// until the boot processor's stamp is one it has not seen. Nothing else on
-/// this boot reads the counters, so a round not seen is one this asked for.
-struct Counted<'a> {
-    cap: &'a SysCap,
-    seen: Option<u64>,
-}
-
-impl Counted<'_> {
-    fn firmware_calls(&mut self) -> u64 {
-        loop {
-            let mut raw = vec![RawRecord::EMPTY; syscall::cpu_count() as usize];
-            let n = self.cap.counters(&mut raw).expect("acpi: the estate's capability reads the counters");
-            let records: Vec<Record> = raw[..n].iter().map(|r| Record::decode(r).expect("acpi: a record that decodes")).collect();
-            let stamp = records[0].get(Counter::Stamp);
-            if records.iter().any(|r| r.stale) || stamp == self.seen {
-                std::thread::yield_now();
-                continue;
-            }
-            self.seen = stamp;
-            // No other CPU holds the counter: none writes the port.
-            for r in &records[1..] {
-                assert_eq!(r.get(Counter::FirmwareCalls), None, "acpi: cpu{} counts firmware calls, and makes none", r.cpu);
-            }
-            return records[0].get(Counter::FirmwareCalls).expect("acpi: the boot processor counts its writes to SMI_CMD");
+/// What the boot processor counts of the kernel's writes to `SMI_CMD`, in a
+/// round every CPU answered: every answer is taken after its read was called.
+fn firmware_calls(cap: &SysCap) -> u64 {
+    loop {
+        let mut raw = vec![RawRecord::EMPTY; syscall::cpu_count() as usize];
+        let n = cap.counters(&mut raw).expect("acpi: the estate's capability reads the counters");
+        let records: Vec<Record> = raw[..n].iter().map(|r| Record::decode(r).expect("acpi: a record that decodes")).collect();
+        if records.iter().any(|r| r.stale) {
+            continue;
         }
+        // No other CPU holds the counter: none writes the port.
+        for r in &records[1..] {
+            assert_eq!(r.get(Counter::FirmwareCalls), None, "acpi: cpu{} counts firmware calls, and makes none", r.cpu);
+        }
+        return records[0].get(Counter::FirmwareCalls).expect("acpi: the boot processor counts its writes to SMI_CMD");
     }
 }
 
@@ -441,7 +427,6 @@ fn firmware(holder: &Holder, info: &AcpiInfo, cap: &SysCap) {
     let sci_en = || holder.read(Space::SystemIo, control, Width::Word).expect("acpi: PM1a_CNT reads") & 1;
     let last_written = || holder.read(Space::SystemIo, smi_cmd, Width::Byte).expect("acpi: SMI_CMD reads");
     let write = |at: u64, width: Width, value: u64| holder.write(Space::SystemIo, at, width, value);
-    let mut counted = Counted { cap, seen: None };
     let hex = |bytes: &[u64]| bytes.iter().map(|byte| format!("{byte:#04x}")).collect::<Vec<_>>().join(", ");
     // Whether this chipset interrupts its firmware on a write to the port:
     // the ICH9's `SMI_EN` at PMBASE + 30h, `APMC_EN` its bit 5, PMBASE being
@@ -450,7 +435,7 @@ fn firmware(holder: &Holder, info: &AcpiInfo, cap: &SysCap) {
 
     // The kernel's own commands: refused, and the chipset saw neither, which
     // leaves ACPI mode on the second.
-    let before = (counted.firmware_calls(), last_written());
+    let before = (firmware_calls(cap), last_written());
     assert!(named.iter().all(|&byte| byte != 0 && !CROSSED.contains(&byte) && !STORMED.contains(&byte)), "acpi: this FADT names {}", hex(&named));
     for kept in named {
         assert_eq!(write(smi_cmd, Width::Byte, kept), Err(Refused::KernelCommand), "acpi: {kept:#04x}, which the FADT names, was written to SMI_CMD");
@@ -460,12 +445,12 @@ fn firmware(holder: &Holder, info: &AcpiInfo, cap: &SysCap) {
     for (at, width) in [(smi_cmd, Width::Word), (smi_cmd, Width::DWord), (smi_cmd - 1, Width::Word), (smi_cmd - 3, Width::DWord)] {
         assert_eq!(write(at, width, CROSSED[0]), Err(Refused::CommandSpan), "acpi: a {width:?} at {at:#x}");
     }
-    assert_eq!((counted.firmware_calls(), last_written()), before, "acpi: a refused command was written or counted");
+    assert_eq!((firmware_calls(cap), last_written()), before, "acpi: a refused command was written or counted");
 
     // A call: the chipset has the byte, and the boot processor counted one write.
     let mut asked_from = vec![call_off_the_boot_processor(holder, smi_cmd, CROSSED[0])];
     assert_eq!(last_written(), CROSSED[0], "acpi: SMI_CMD does not hold the byte the kernel was asked to write");
-    assert_eq!(counted.firmware_calls(), before.0 + 1, "acpi: one firmware call");
+    assert_eq!(firmware_calls(cap), before.0 + 1, "acpi: one firmware call");
     for value in &CROSSED[1..] {
         asked_from.push(call_off_the_boot_processor(holder, smi_cmd, *value));
         assert_eq!(last_written(), *value);
@@ -489,7 +474,7 @@ fn firmware(holder: &Holder, info: &AcpiInfo, cap: &SysCap) {
     });
     let refused_at = stormed.unwrap_or_else(|| panic!("acpi: {STORM} firmware calls in a row were made, and none refused"));
     assert_ne!(last_written(), STORMED[refused_at % 2], "acpi: a call refused CommandRate reached SMI_CMD");
-    assert_eq!(counted.firmware_calls(), before.0 + made as u64, "acpi: the boot processor counted another number of writes than were made");
+    assert_eq!(firmware_calls(cap), before.0 + made as u64, "acpi: the boot processor counted another number of writes than were made");
     println!(
         "acpi: firmware calls of {} were asked from the CPUs of x2APIC id {asked_from:?}; this chipset's SMI_EN reads {smi_en:#010x}, APMC_EN {}",
         hex(&CROSSED),
