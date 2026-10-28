@@ -15,8 +15,9 @@
 //! commits them: `SYS_SHM_CREATE`, all or a first part of them, then
 //! `SYS_SHM_COMMIT`, which any holder that may map it calls. A committed
 //! page is the object's to its end. A fault on a page not committed is
-//! refused as an access outside every range is, and a copy reads it as
-//! zeros.
+//! refused as an access outside every range is, a syscall's window over one
+//! is `BadAddress`, and the kernel's own read of one ([`SharedMemObject::read`],
+//! a program image's loader among its callers) answers zeros.
 
 use alloc::boxed::Box;
 use alloc::sync::{Arc, Weak};
@@ -151,20 +152,6 @@ impl SharedMemObject {
         Ok(())
     }
 
-    /// The bytes of it that are committed.
-    pub fn committed(&self) -> u64 {
-        match &self.backing {
-            Backing::Frames(pieces) => {
-                let pages = pieces.iter().flat_map(|piece| piece.iter()).filter(|word| word.load(Ordering::Relaxed) != 0).count();
-                pages as u64 * PAGE_SIZE
-            }
-            Backing::Sub { whole, offset, len } => {
-                (0..len.div_ceil(PAGE_SIZE)).filter(|page| whole.page(offset + page * PAGE_SIZE).is_some()).count() as u64 * PAGE_SIZE
-            }
-            Backing::Run(_) | Backing::Boot { .. } | Backing::Aperture { .. } => self.size,
-        }
-    }
-
     /// `size` bytes of zeroed memory in whole pages, over one run of whole
     /// 2 MiB pages: what a device can be lent, since a domain maps 2 MiB at a
     /// time and a device with no domain reaches memory by its physical address.
@@ -287,6 +274,7 @@ impl SharedMemObject {
     pub fn write(&self, offset: u64, bytes: &[u8]) {
         assert!(self.is_ram(), "shm koid {}: the kernel writes no aperture", self.core.koid().raw());
         self.each_piece(offset, bytes.len(), |phys, at, n| {
+            let phys = phys.unwrap_or_else(|| panic!("shm koid {}: the kernel wrote {:#x}, not committed", self.core.koid().raw(), offset + at as u64));
             // SAFETY: `each_piece` bounds `[at, at + n)` inside `bytes` and
             // `phys..+n` inside one of this object's own pages, which the
             // direct map covers; no reference forms over a page a process may
@@ -295,19 +283,23 @@ impl SharedMemObject {
         });
     }
 
-    /// Copy out `out.len()` bytes at `offset`, each read once.
+    /// Copy out `out.len()` bytes at `offset`, each read once: a page not
+    /// committed reads as zeros.
     pub fn read(&self, offset: u64, out: &mut [u8]) {
         assert!(self.is_ordinary(), "shm koid {}: the kernel reads no aperture", self.core.koid().raw());
         let into = out.as_mut_ptr();
-        self.each_piece(offset, out.len(), |phys, at, n| {
+        self.each_piece(offset, out.len(), |phys, at, n| match phys {
             // SAFETY: as `write`, mirrored; `out` is the caller's own.
-            unsafe { core::ptr::copy_nonoverlapping(DirectMap::from_phys(phys).as_ptr(), into.add(at), n) }
+            Some(phys) => unsafe { core::ptr::copy_nonoverlapping(DirectMap::from_phys(phys).as_ptr(), into.add(at), n) },
+            // SAFETY: `each_piece` bounds `[at, at + n)` inside `out`.
+            None => unsafe { core::ptr::write_bytes(into.add(at), 0, n) },
         });
     }
 
     /// `f(phys, at, n)` for each piece of `[offset, offset + len)` inside one
-    /// page, `at` its offset from `offset`.
-    fn each_piece(&self, offset: u64, len: usize, mut f: impl FnMut(u64, usize, usize)) {
+    /// page, `at` its offset from `offset`; `phys` is `None` for a page not
+    /// committed.
+    fn each_piece(&self, offset: u64, len: usize, mut f: impl FnMut(Option<u64>, usize, usize)) {
         assert!(
             offset.checked_add(len as u64).is_some_and(|end| end <= self.size),
             "shm koid {}: {len} bytes at {offset:#x} of {:#x}",
@@ -318,8 +310,7 @@ impl SharedMemObject {
         while done < len {
             let at = offset + done as u64;
             let n = ((PAGE_SIZE - at % PAGE_SIZE) as usize).min(len - done);
-            let page = self.page(at).unwrap_or_else(|| panic!("shm koid {}: the kernel reached {at:#x}, not committed", self.core.koid().raw()));
-            f(page + at % PAGE_SIZE, done, n);
+            f(self.page(at).map(|page| page + at % PAGE_SIZE), done, n);
             done += n;
         }
     }
