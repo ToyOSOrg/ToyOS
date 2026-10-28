@@ -12,8 +12,8 @@
 //! Then each load runs for its span, and the package is read once a second:
 //! each row is that second's power, its residency and, under a spin, its
 //! energy per [`crate::chunk`]. Each CPU's counters are read at the load's
-//! two ends, so Linux sends no IPI inside a second; ToyOS's every read kicks
-//! every CPU. No figure is better higher or lower by itself: a load that ran
+//! two ends, so Linux reads the package on the reader's own CPU inside a
+//! second; ToyOS's every read kicks every CPU. No figure is better higher or lower by itself: a load that ran
 //! more work may draw more.
 
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering::Relaxed};
@@ -22,8 +22,6 @@ use std::time::{Duration, Instant};
 use osbench_rules::energy::{self, RANGE};
 
 use crate::report::{note, result};
-#[cfg(target_os = "linux")]
-use crate::sys;
 use crate::sys::{power, CpuPower, Package, Refused};
 
 /// The longest the group waits for the machine to go quiet.
@@ -43,11 +41,7 @@ enum Load {
 
 pub fn suite() {
     #[cfg(target_os = "linux")]
-    {
-        power::conditions();
-        // Its own CPU is the one whose registers the package is read from.
-        sys::pin_self(0);
-    }
+    power::conditions();
     let loads = [
         ("energy.idle", 60, Load::Idle),
         ("energy.wake_10ms", 30, Load::Wake(Duration::from_millis(10))),
@@ -123,8 +117,6 @@ fn row(bench: &str, seconds: u64, load: Load) -> Result<(), Refused> {
         for slot in &counts {
             let stop = &stop;
             s.spawn(move || {
-                #[cfg(target_os = "linux")]
-                sys::unpin(sys::tid());
                 while !stop.load(Relaxed) {
                     match load {
                         Load::Wake(period) => std::thread::sleep(period),
@@ -156,6 +148,8 @@ fn row(bench: &str, seconds: u64, load: Load) -> Result<(), Refused> {
     if let Some(mw) = unit.and_then(|unit| cores_mw(&first, &last, unit, samples.span_ns)) {
         fields.push(("cores_mw", mw.to_string()));
     }
+    let series: Vec<String> = samples.mw.iter().map(u64::to_string).collect();
+    note(&format!("{bench}.series"), &[("mw", series.join(","))]);
     result(&format!("{bench}.package"), "mW", &mut samples.mw, &fields);
     for (state, permille) in STATES.iter().zip(&mut samples.residency) {
         if !permille.is_empty() {

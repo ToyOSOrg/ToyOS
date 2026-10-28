@@ -240,7 +240,7 @@ pub mod energy {
     }
 
     /// The most CPU time the machine may spend in a second for that second to
-    /// be quiet: a hundredth of one CPU.
+    /// be quiet: a hundredth of one CPU, one tick of Linux's `/proc/stat`.
     pub const QUIET_NS: u64 = 10_000_000;
     /// The quiet seconds in a row an idle reading waits for.
     pub const QUIET_SECONDS: usize = 3;
@@ -248,7 +248,7 @@ pub mod energy {
     /// Whether the last [`QUIET_SECONDS`] of `busy_ns`, each a second's CPU
     /// time, were each quiet.
     pub fn quiet(busy_ns: &[u64]) -> bool {
-        busy_ns.len() >= QUIET_SECONDS && busy_ns[busy_ns.len() - QUIET_SECONDS..].iter().all(|&ns| ns < QUIET_NS)
+        busy_ns.len() >= QUIET_SECONDS && busy_ns[busy_ns.len() - QUIET_SECONDS..].iter().all(|&ns| ns <= QUIET_NS)
     }
 
     #[cfg(test)]
@@ -295,9 +295,9 @@ pub mod energy {
         #[test]
         fn quiet_is_every_one_of_the_last_seconds_under_the_bar() {
             assert!(!quiet(&[0, 0]), "too few seconds");
-            assert!(quiet(&[50_000_000, 0, 9_999_999, 0]));
-            assert!(!quiet(&[0, 0, QUIET_NS, 0, 0]));
-            assert!(quiet(&[0, 0, QUIET_NS, 0, 0, 0]));
+            assert!(quiet(&[50_000_000, 0, QUIET_NS, 0]), "one tick of /proc/stat is quiet");
+            assert!(!quiet(&[0, 0, QUIET_NS + 1, 0, 0]));
+            assert!(quiet(&[0, 0, QUIET_NS + 1, 0, 0, 0]));
         }
     }
 }
