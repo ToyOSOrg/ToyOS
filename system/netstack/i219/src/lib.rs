@@ -16,7 +16,8 @@
 //! [`phy`] is everything that follows from it. [`wake`] is what brings that PHY
 //! within `MDIC`'s reach before the reset and what shape the reset then takes —
 //! the MAC and the PHY together — on properties of the part no Intel document
-//! publishes, and `pch` is what the PCH's MAC is given before its rings.
+//! publishes, [`ulp`] is the Ultra Low Power arming the wake clears, and `pch`
+//! is what the PCH's MAC is given before its rings.
 //!
 //! # The boundary
 //!
@@ -115,6 +116,7 @@ mod pch;
 pub mod phy;
 pub mod power;
 pub mod regs;
+pub mod ulp;
 pub mod wake;
 
 #[cfg(test)]

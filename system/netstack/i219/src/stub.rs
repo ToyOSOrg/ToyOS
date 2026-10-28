@@ -55,7 +55,7 @@ use crate::regs::{
     self, cause, ctrl, ctrl_ext, extcnf, fwsm, lanphypc_timing, mdic, pbeccsts, phy_ctrl, rah, rctl,
     rx_desc, rxcsum, status, tarc, tctl, tx_desc, txdctl,
 };
-use crate::{phy, wake, Clock, Delivery, DmaBuffers, Interrupts, Part, Registers};
+use crate::{phy, ulp, wake, Clock, Delivery, DmaBuffers, Interrupts, Part, Registers};
 
 /// Where the device reaches the grant. Not zero and not a small number: a
 /// driver that wrote a grant *offset* into a descriptor instead of a device
@@ -242,6 +242,11 @@ pub struct Permits {
     /// PHY is found with both in effect, and each reset that reaches it has the
     /// MAC load them again from `PHY_CTRL`'s outside-D0a bits.
     pub phy_left_in_low_power_link_up: bool,
+    /// I219 §6.4 leaves ULP's configuration to "the host driver (on non ME
+    /// systems) or the ME FW", so the agent before this driver may have armed
+    /// it: §9.5.7.1's sticky ULP and reset to SMBus committed, with the rest of
+    /// an arming ([`crate::ulp`]'s header) beside them.
+    pub ulp_left_armed: bool,
 }
 
 impl Default for Permits {
@@ -276,6 +281,7 @@ impl Default for Permits {
             firmware_allows_a_phy_reset: true,
             phy_wake_left_armed: true,
             phy_left_in_low_power_link_up: true,
+            ulp_left_armed: true,
         }
     }
 }
@@ -509,6 +515,15 @@ struct PhyModel {
     /// A fault injector: it is how a test reaches a ladder that stops on a
     /// refusal with the MAC on SMBus.
     transition_sticks_on_smbus: bool,
+    /// §9.5.7.1's ULP Configuration 1, page 779 register 16, as it holds it,
+    /// and as the last write with `START` committed it. **The always-powered
+    /// block keeps both across a power cycle and every reset**: what survives
+    /// is unpublished, and a model that cleared them would hide a driver that
+    /// left them.
+    ulp_configuration: u16,
+    ulp_in_effect: u16,
+    /// Page 770 register 17, which holds K1's enable.
+    power_control: u16,
 }
 
 impl PhyModel {
@@ -574,9 +589,23 @@ impl PhyModel {
             extcnf_ones_after_request: None,
             extcnf_writes: 0,
             transition_sticks_on_smbus: false,
+            ulp_configuration: if permits.ulp_left_armed { ULP_ARMED } else { 0 },
+            ulp_in_effect: if permits.ulp_left_armed { ULP_ARMED } else { 0 },
+            power_control: if permits.ulp_left_armed { 0 } else { ulp::K1_ENABLE },
         }
     }
 }
+
+/// The worst case: every arming bit, and the part's power-up indication.
+const ULP_ARMED: u16 = ulp::CLEARED | ULP_UNMODELLED;
+/// A bit of each register that the model gives no meaning, set so a driver that
+/// composed the register instead of carrying it is caught clearing it.
+pub(crate) const ULP_UNMODELLED: u16 = 1 << 9;
+const SMBUS_HOLD_UNMODELLED: u32 = 1 << 1;
+
+/// The longest this driver means to hold `LANPHYPC` low: its own target, a
+/// release as soon as the floor has passed, and no property of the part.
+pub(crate) const LANPHYPC_HOLD_TARGET_NANOS: u64 = 20_000;
 
 /// The register file plus everything behind it.
 struct Model {
@@ -686,6 +715,9 @@ struct Model {
     cycle_done_reads: u32,
     /// When the MAC was last forced onto SMBus.
     smbus_forced_at: Option<u64>,
+    /// `regs::ULP_SMBUS_HOLD`, which a MAC reset leaves as it was: unpublished,
+    /// and kept for the same reason as the PHY's ULP configuration.
+    smbus_hold: u32,
     /// No access is taken before this: the 20 ms after a full reset.
     quiet_until: Option<u64>,
     /// Readings of `STATUS` left before its bit 9 shows, and `None` where
@@ -716,6 +748,10 @@ enum PhyPlace {
     PortGeneral,
     /// §9.5.8.2's OEM Bits, page 0's register 25.
     OemBits,
+    /// §9.5.7.1's ULP Configuration 1, page 779's register 16.
+    UlpConfiguration,
+    /// Page 770's register 17, K1's.
+    PowerControl,
     /// One of the thirty PHY addresses §9.3 places nothing at. §10.2.2.7's
     /// `PHYADD` field is five bits and this part answers two of them, so a
     /// transaction to any other ends with nothing driving the bus.
@@ -778,6 +814,7 @@ impl Model {
             lanphypc_low_at: None,
             cycle_done_reads: 0,
             smbus_forced_at: None,
+            smbus_hold: SMBUS_HOLD_UNMODELLED | if permits.ulp_left_armed { ulp::SMBUS_HOLD } else { 0 },
             quiet_until: None,
             phy_configured_reads: None,
             lcd_reset_at: None,
@@ -1156,6 +1193,7 @@ impl Model {
             }
             // §10.2.4.6: write-only, and a read answers nothing.
             regs::IMC => 0,
+            regs::ULP_SMBUS_HOLD if self.part == Part::I219 => self.smbus_hold,
             // The statistics the driver reads: each read takes the count and
             // clears it.
             regs::GPTC | regs::GPRC | regs::TPR | regs::MPC | regs::CRCERRS => {
@@ -1281,16 +1319,19 @@ impl Model {
             // §10.2.4.4: "Any bit written with a 1b sets the corresponding
             // interrupt", and a message follows where it is unmasked.
             regs::ICS => self.raise(value),
-            regs::IVAR => {
-                assert!(
-                    self.part != Part::I219,
+            regs::ULP_SMBUS_HOLD if self.part == Part::I219 => {
+                assert_eq!(
+                    value & !ulp::SMBUS_HOLD,
+                    self.smbus_hold & !ulp::SMBUS_HOLD,
                     "seed {}: the driver wrote {value:#010x} to {:#x}, which on the PCH's MAC is \
-                     not IVAR but a power and clock control it has just overwritten",
+                     not IVAR but a power and clock control, and moved more of it than ULP's \
+                     SMBus hold",
                     self.seed,
                     regs::IVAR
                 );
-                self.set(regs::IVAR, value);
+                self.smbus_hold = value;
             }
+            regs::IVAR => self.set(regs::IVAR, value),
             // §10.2.4.6: clear.
             regs::IMC => {
                 let held = self.get(regs::IMS);
@@ -1405,9 +1446,9 @@ impl Model {
         if now & ctrl::LANPHYPC_HOST_DRIVEN == 0 {
             if let Some(at) = self.lanphypc_low_at.take() {
                 assert!(
-                    self.nanos - at >= wake::LANPHYPC_HOLD_NANOS,
-                    "seed {}: the driver held LANPHYPC low {} ns, under the 10 us a power cycle \
-                     takes",
+                    (wake::LANPHYPC_HOLD_NANOS..=LANPHYPC_HOLD_TARGET_NANOS).contains(&(self.nanos - at)),
+                    "seed {}: the driver held LANPHYPC low {} ns: under the 10 us a power cycle \
+                     takes, or past the prompt release it means to make",
                     self.seed,
                     self.nanos - at
                 );
@@ -1675,6 +1716,12 @@ impl Model {
                 );
                 PhyPlace::SmbusControl
             }
+            (phy::GENERAL, ulp::POWER_CONTROL) if self.phy.page == Some(ulp::PAGE_POWER) => {
+                PhyPlace::PowerControl
+            }
+            (phy::GENERAL, ulp::CONFIGURATION) if self.phy.page == Some(ulp::PAGE_ULP) => {
+                PhyPlace::UlpConfiguration
+            }
             (phy::GENERAL, reg::PORT_GENERAL) => {
                 assert_eq!(
                     self.phy.page,
@@ -1725,6 +1772,8 @@ impl Model {
             PhyPlace::CustomMode => self.phy.custom_mode,
             PhyPlace::PortGeneral => self.phy.port_general,
             PhyPlace::OemBits => self.phy.oem_bits,
+            PhyPlace::UlpConfiguration => self.phy.ulp_configuration,
+            PhyPlace::PowerControl => self.phy.power_control,
             PhyPlace::SmbusControl => {
                 if self.lcd == Lcd::Smbus {
                     wake::SMBUS_CONTROL_FORCE
@@ -1818,6 +1867,34 @@ impl Model {
                     self.phy.negotiating = true;
                 }
                 self.refresh_phy_link();
+            }
+            PhyPlace::UlpConfiguration => {
+                let moved = ulp::CLEARED | ulp::config::START;
+                assert_eq!(
+                    data & !moved,
+                    self.phy.ulp_configuration & !moved,
+                    "seed {}: the driver wrote {data:#06x} to §9.5.7.1's ULP Configuration 1, \
+                     which held {:#06x}: §9.1 has every field it does not mean to move loaded \
+                     with what is there",
+                    self.seed,
+                    self.phy.ulp_configuration
+                );
+                // `START` "starts the auto ULP configuration" and clears itself.
+                self.phy.ulp_configuration = data & !ulp::config::START;
+                if data & ulp::config::START != 0 {
+                    self.phy.ulp_in_effect = self.phy.ulp_configuration;
+                }
+            }
+            PhyPlace::PowerControl => {
+                assert_eq!(
+                    data & !ulp::K1_ENABLE,
+                    self.phy.power_control & !ulp::K1_ENABLE,
+                    "seed {}: the driver wrote {data:#06x} to page 770 register 17, which held \
+                     {:#06x}",
+                    self.seed,
+                    self.phy.power_control
+                );
+                self.phy.power_control = data;
             }
             PhyPlace::CustomMode => {
                 self.carried("§9.5.3.1's Custom Mode Control", data, &carried::CUSTOM_MODE);
@@ -2410,6 +2487,17 @@ impl Nic {
         self.0.borrow().power_cycles
     }
 
+    /// What ULP's configuration holds now: §9.5.7.1's register as last
+    /// committed with `START`, K1's register, and the MAC's SMBus hold.
+    pub fn ulp(&self) -> ulp::State {
+        let model = self.0.borrow();
+        ulp::State {
+            configuration: model.phy.ulp_in_effect,
+            power_control: model.phy.power_control,
+            smbus_hold: model.smbus_hold,
+        }
+    }
+
     /// §9.5.3.2's Port General Configuration as the PHY holds it now.
     pub fn phy_port_general(&self) -> u16 {
         self.0.borrow().phy.port_general
@@ -2552,7 +2640,13 @@ impl Nic {
         }
         model.link_up = up;
         match model.part {
-            Part::I219 => model.refresh_phy_link(),
+            Part::I219 => {
+                // §9.5.7.1's sticky ULP: "enter ULP on link disconnect".
+                if !up && model.phy.ulp_in_effect & ulp::config::STICKY != 0 {
+                    model.lcd = Lcd::Off;
+                }
+                model.refresh_phy_link()
+            }
             Part::E82574 => {
                 model.refresh_status();
                 model.strand_if_the_link_is_gone();

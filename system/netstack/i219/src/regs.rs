@@ -147,6 +147,11 @@ pub const FWSM: usize = 0x05B54;
 /// set how long the PHY's configuration is given after a `LANPHYPC` power
 /// cycle, so it is named for the cycle it times.
 pub const LANPHYPC_TIMING: usize = 0x0003C;
+/// The PCH's MAC's register at the 82574's `IVAR` offset, which neither PCH
+/// document publishes: its bit 5 keeps the MAC's SMBus from being released on
+/// `PERST#`, the MAC's half of an armed Ultra Low Power configuration
+/// ([`crate::ulp`]).
+pub const ULP_SMBUS_HOLD: usize = IVAR;
 
 /// §8.2.8's `GBECSR_5800` at `5800h`, whose one writable field is the APM
 /// wake-up enable.

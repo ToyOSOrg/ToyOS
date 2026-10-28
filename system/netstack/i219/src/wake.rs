@@ -47,15 +47,18 @@
 //! **The pace these accesses are made at is
 //! [`crate::phy::ARBITRATION_PACE_NANOS`]**, because every one of them is under
 //! §8.2.4's flag and the T14 is the one machine whose answer to a faster pace
-//! was a power-off. The pace is wider than every floor above, and the
-//! constants below assert it.
+//! was a power-off. Two accesses are not paced, as `MDIC`'s own poll is not:
+//! the `STATUS` read that flushes `LANPHYPC`'s low write and the write that
+//! releases it, which bound the pin's hold and are timed by it.
 
 use crate::phy::PhyRefusal;
 use crate::power::Settled;
 use crate::regs::{ctrl, ctrl_ext, fwsm, lanphypc_timing};
+use crate::ulp::Disarm;
 
-/// How long `LANPHYPC` is held low before it is given back: the floor a power
-/// cycle takes.
+/// How long `LANPHYPC` is held low at least, from the low write's flush. The
+/// release follows as soon as this has passed: the driver's choice, since no
+/// document gives a longest hold.
 pub const LANPHYPC_HOLD_NANOS: u64 = 10_000;
 
 /// How long `CTRL_EXT`'s cycle-done bit is waited on, a driver-chosen bound.
@@ -81,13 +84,6 @@ pub const PHY_CONFIGURED_DEADLINE_NANOS: u64 = 500_000_000;
 
 /// How long passes between two readings of `STATUS` inside that wait.
 pub const PHY_CONFIGURED_PACE_NANOS: u64 = 100_000;
-
-const _: () = {
-    // Every access of the power cycle is paced from the last, so the hold is
-    // at least one pace long; a pace under the hold would let the override go
-    // before the PHY lost power.
-    assert!(crate::phy::ARBITRATION_PACE_NANOS >= LANPHYPC_HOLD_NANOS);
-};
 
 /// I219 §9.5.3.4's SMBus Control register, PHY address 01, page 769, register
 /// 23, and its bit 0: "Force SMBus, reset on PCI reset de-assertion".
@@ -192,6 +188,9 @@ pub struct Woke {
     /// §8.2's power step as the wake took it, before any ask.
     pub power: Settled,
     asked: [Option<(Moment, Answer)>; ASKS],
+    /// The longest `LANPHYPC` was held low, and `None` where it was not cycled.
+    pub held_low_nanos: Option<u64>,
+    pub ulp: Disarm,
 }
 
 /// The first ask, one after each rung of [`LADDER`], and one after taking a PHY
@@ -201,7 +200,11 @@ pub const ASKS: usize = 1 + LADDER.len() + 1;
 impl Woke {
     /// A wake that has taken its power step and asked nothing yet.
     pub(crate) fn found(power: Settled) -> Self {
-        Self { power, asked: [None; ASKS] }
+        Self { power, asked: [None; ASKS], held_low_nanos: None, ulp: Disarm::Unreached }
+    }
+
+    pub(crate) fn held_low(&mut self, nanos: u64) {
+        self.held_low_nanos = Some(self.held_low_nanos.map_or(nanos, |held| held.max(nanos)));
     }
 
     pub(crate) fn push(&mut self, moment: Moment, answer: Answer) {
@@ -226,7 +229,10 @@ impl core::fmt::Display for Woke {
         for (moment, answer) in self.asked() {
             write!(f, "; {moment}: {answer}")?;
         }
-        Ok(())
+        if let Some(nanos) = self.held_low_nanos {
+            write!(f, "; LANPHYPC was held low for {nanos} ns at the longest")?;
+        }
+        write!(f, "; {}", self.ulp)
     }
 }
 

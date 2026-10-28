@@ -2853,6 +2853,81 @@ fn a_phy_in_reach_is_asked_once_and_left_powered() {
     assert!(driver.brought_up().phy.is_ok());
 }
 
+/// The T14's firmware: `FWSM` reports it not valid, so ULP is the host's.
+fn host_owns_ulp(permits: Permits) -> Permits {
+    Permits { firmware_reports_itself_ready: false, ..permits }
+}
+
+/// ULP another agent armed is disarmed by the start, whether the PHY answered
+/// as found or only up the ladder: committed with `START`, K1 on and the MAC's
+/// SMBus hold let go, every other field carried. A link lost afterwards then
+/// leaves the PHY in reach, where an armed one would have entered ULP.
+#[test]
+fn ulp_left_armed_is_disarmed_and_a_lost_link_leaves_the_phy_in_reach() {
+    for (seed, out_of_reach) in [(140, true), (141, false)] {
+        let nic = Nic::with(
+            seed,
+            Part::I219,
+            host_owns_ulp(Permits { phy_starts_out_of_reach: out_of_reach, ..Permits::default() }),
+        );
+        assert!(nic.ulp().armed());
+        let driver = open(&nic);
+        let woke = woke_of(&driver, &nic);
+        let ulp::Disarm::Disarmed { found } = woke.ulp else {
+            panic!("{}", nic.because(&format!("ULP was not disarmed: {woke}")));
+        };
+        assert!(found.armed(), "{}", nic.because(&format!("found {found}")));
+        let left = nic.ulp();
+        assert_eq!(
+            left.configuration,
+            crate::stub::ULP_UNMODELLED,
+            "{}",
+            nic.because(&format!("ULP left with more or less than the field it does not own: {left}"))
+        );
+        assert!(!left.armed() && left.power_control & ulp::K1_ENABLE != 0, "{}", nic.because(&format!("{left}")));
+        let phy = driver.brought_up().phy.expect("the PHY in reach");
+        assert_eq!(phy.ulp, Ok(left), "{}", nic.because("the bring-up read ULP as it is not"));
+        assert!(woke.to_string().contains("and disarmed"), "{woke}");
+
+        nic.set_link(true);
+        nic.negotiation_settles();
+        nic.set_link(false);
+        assert_ne!(nic.lcd(), Lcd::Off, "{}", nic.because("the PHY entered ULP on a lost link"));
+    }
+}
+
+/// Where the firmware is valid the ME owns ULP and none of it is written; where
+/// the PHY never answers over PCIe there is nothing to write it through.
+#[test]
+fn ulp_is_left_alone_where_the_firmware_owns_it_or_the_phy_never_answers() {
+    let nic = Nic::i219(142);
+    let driver = open(&nic);
+    assert_eq!(woke_of(&driver, &nic).ulp, ulp::Disarm::FirmwareOwns);
+    assert!(nic.ulp().armed());
+    assert!(!nic.written().contains(&regs::ULP_SMBUS_HOLD));
+
+    let nic = Nic::with(143, Part::I219, host_owns_ulp(Permits::default()));
+    nic.mdi_never_ready();
+    let driver = open(&nic);
+    assert_eq!(woke_of(&driver, &nic).ulp, ulp::Disarm::Unreached);
+    assert!(!nic.written().contains(&regs::ULP_SMBUS_HOLD));
+}
+
+/// `LANPHYPC` is held low for the cycle's 10 µs and let go as soon as that has
+/// passed, not at the arbitration's pace.
+#[test]
+fn lanphypc_is_held_low_for_the_cycle_and_no_longer() {
+    let nic = Nic::i219(144);
+    let driver = open(&nic);
+    assert_eq!(nic.power_cycles(), 1);
+    let held = woke_of(&driver, &nic).held_low_nanos.expect("the ladder cycled the pin");
+    assert!(
+        (wake::LANPHYPC_HOLD_NANOS..=crate::stub::LANPHYPC_HOLD_TARGET_NANOS).contains(&held),
+        "{}",
+        nic.because(&format!("held {held} ns"))
+    );
+}
+
 /// Where `FWSM` says the firmware blocks a PHY reset, neither `PHY_RST` nor a
 /// `LANPHYPC` cycle goes out — the cycle is a reset of the PHY by its power
 /// pin — and a MAC reset alone then leaves a PHY that answered before it out

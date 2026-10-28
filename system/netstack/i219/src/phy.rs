@@ -19,7 +19,8 @@
 use core::cell::Cell;
 
 use crate::power::{Reading, Settled};
-use crate::regs::{self, extcnf, mdic};
+use crate::regs::{self, extcnf, fwsm, mdic};
+use crate::ulp::{self, Disarm};
 use crate::wake::{self, Action, Answer, Moment, Woke};
 use crate::{Clock, Registers};
 
@@ -376,6 +377,9 @@ pub struct Phy {
     pub port_general: u16,
     /// §9.5.8.2's OEM Bits: as found, as written, and as read back after.
     pub oem: Oem,
+    /// ULP's configuration as the bring-up leaves it, which nothing in this
+    /// driver writes again.
+    pub ulp: Result<ulp::State, PhyRefusal>,
 }
 
 /// One bring-up's account of §9.5.8.2's OEM Bits.
@@ -421,7 +425,7 @@ impl core::fmt::Display for Phy {
         write!(
             f,
             "answers at PHY address {:02} as {:#010x}, its Port General Configuration read \
-             {:#06x}{}; {}",
+             {:#06x}{}; {}; it is left with ",
             self.addr,
             self.id,
             self.port_general,
@@ -431,7 +435,11 @@ impl core::fmt::Display for Phy {
                 ""
             },
             self.oem
-        )
+        )?;
+        match self.ulp {
+            Ok(state) => write!(f, "{state}"),
+            Err(why) => write!(f, "a ULP state that could not be read: {why}"),
+        }
     }
 }
 
@@ -478,8 +486,10 @@ impl<'a, R: Registers, C: Clock> Arbitration<'a, R, C> {
     /// **The pace is over the agents and not over one register.** §8.2.4 calls
     /// what the flag arbitrates "shared CSR registers with the firmware and
     /// hardware" — a set and not a word — so every access this driver makes
-    /// under the flag is paced from the same clock reading, and `MDIC`'s own
-    /// poll is the one exception (it is the transaction, not the arbitration).
+    /// under the flag is paced from the same clock reading. The exceptions are
+    /// `MDIC`'s own poll (it is the transaction, not the arbitration) and the
+    /// `LANPHYPC` hold's flushing read and release write ([`Self::flush`],
+    /// [`Self::write_after`]), which the hold times.
     fn read_at(&self, reg: usize) -> u32 {
         self.pace();
         let reading = self.regs.read32(reg);
@@ -490,6 +500,25 @@ impl<'a, R: Registers, C: Clock> Arbitration<'a, R, C> {
     fn write_at(&self, reg: usize, value: u32) {
         self.pace();
         self.regs.write32(reg, value);
+        self.last.set(Some(self.clock.nanos()));
+    }
+
+    /// Write `value` as soon as `nanos` has passed since this driver's last
+    /// access, outside the pace: a spin, because a pause may return long after.
+    /// Answers the time from that access to this write.
+    fn write_after(&self, reg: usize, value: u32, nanos: u64) -> u64 {
+        let since = self.last.get().unwrap_or_else(|| self.clock.nanos());
+        while self.clock.nanos().saturating_sub(since) < nanos {}
+        self.regs.write32(reg, value);
+        let now = self.clock.nanos();
+        self.last.set(Some(now));
+        now.saturating_sub(since)
+    }
+
+    /// Read `STATUS` outside the pace, so the write before it has reached the
+    /// part before a hold is counted from it.
+    fn flush(&self) {
+        let _ = self.regs.read32(regs::STATUS);
         self.last.set(Some(self.clock.nanos()));
     }
 
@@ -808,17 +837,19 @@ impl<'a, R: Registers, C: Clock> Owned<'a, R, C> {
     }
 
     /// Cycle `LANPHYPC` the way [`crate::wake`]'s header sets out: the PHY's
-    /// configuration time first, the pin held low for one pace, the cycle-done
-    /// bit waited on, and [`wake::POWER_CYCLE_SETTLE_NANOS`] after.
-    fn power_cycle(&self) {
+    /// configuration time first, the pin held low for
+    /// [`wake::LANPHYPC_HOLD_NANOS`], the cycle-done bit waited on, and
+    /// [`wake::POWER_CYCLE_SETTLE_NANOS`] after. Answers how long the pin was
+    /// held low.
+    fn power_cycle(&self) -> u64 {
         let timing = self.mdio.read_at(regs::LANPHYPC_TIMING);
         self.mdio.write_at(regs::LANPHYPC_TIMING, wake::configuration_50ms(timing));
         let held = self.mdio.read_at(regs::CTRL);
         let low = wake::lanphypc_low(held);
         self.mdio.write_at(regs::CTRL, low);
-        // The pace between these two writes is the hold, and it is wider than
-        // the cycle's floor by a compile-time assertion.
-        self.mdio.write_at(regs::CTRL, wake::lanphypc_released(low));
+        self.mdio.flush();
+        let held_low =
+            self.mdio.write_after(regs::CTRL, wake::lanphypc_released(low), wake::LANPHYPC_HOLD_NANOS);
         let released_at = self.mdio.clock.nanos();
         loop {
             let ext = self.mdio.read_at(regs::CTRL_EXT);
@@ -828,6 +859,35 @@ impl<'a, R: Registers, C: Clock> Owned<'a, R, C> {
             }
         }
         self.mdio.settle(wake::POWER_CYCLE_SETTLE_NANOS);
+        held_low
+    }
+
+    /// The three words of [`ulp::State`], read and nothing written but the
+    /// page register.
+    fn ulp_state(&self) -> Result<ulp::State, PhyRefusal> {
+        self.select(ulp::PAGE_ULP)?;
+        let configuration = self.read(GENERAL, ulp::CONFIGURATION)?;
+        self.select(ulp::PAGE_POWER)?;
+        let power_control = self.read(GENERAL, ulp::POWER_CONTROL)?;
+        let smbus_hold = self.mdio.read_at(regs::ULP_SMBUS_HOLD);
+        if smbus_hold == u32::MAX {
+            return Err(PhyRefusal::Unrouted { reg: regs::ULP_SMBUS_HOLD });
+        }
+        Ok(ulp::State { configuration, power_control, smbus_hold })
+    }
+
+    /// [`crate::ulp`]'s disarm, over a PHY that answers on PCIe: K1 enabled,
+    /// the configuration cleared and committed, then the MAC's SMBus hold let
+    /// go. Answers what it found.
+    fn disarm_ulp(&self) -> Result<ulp::State, PhyRefusal> {
+        let found = self.ulp_state()?;
+        self.write(GENERAL, ulp::POWER_CONTROL, ulp::k1_enabled(found.power_control))?;
+        self.select(ulp::PAGE_ULP)?;
+        let disarmed = ulp::disarmed(found.configuration);
+        self.write(GENERAL, ulp::CONFIGURATION, disarmed)?;
+        self.write(GENERAL, ulp::CONFIGURATION, disarmed | ulp::config::START)?;
+        self.mdio.write_at(regs::ULP_SMBUS_HOLD, ulp::smbus_released(found.smbus_hold));
+        Ok(found)
     }
 
     fn force_smbus(&self) {
@@ -950,12 +1010,14 @@ pub(crate) fn bring_up<R: Registers, C: Clock>(
     mdi.write(GENERAL, reg::OEM_BITS, wrote)?;
     let after = mdi.read(GENERAL, reg::OEM_BITS)?;
 
-    Ok(Phy { addr, id, port_general: port, oem: Oem { found, wrote, after } })
+    let ulp = mdi.ulp_state();
+    Ok(Phy { addr, id, port_general: port, oem: Oem { found, wrote, after }, ulp })
 }
 
 /// Bring the PHY within reach of `MDIC` before [`crate::I219::open`] resets
 /// the part: ask it as found, and where it does not answer, climb
-/// [`wake::LADDER`] one rung at a time with an ask after each.
+/// [`wake::LADDER`] one rung at a time with an ask after each. A PHY that
+/// answers is then disarmed of ULP ([`crate::ulp`]).
 ///
 /// **Every ask is recorded with the `MDIC` word it ended on**, so the account
 /// says in the part's own words at which rung the PHY first answered — or that
@@ -982,17 +1044,31 @@ pub(crate) fn wake<R: Registers, C: Clock>(
     let mut woke = Woke::found(mdi.settle_power()?);
     let first = mdi.ask();
     woke.push(Moment::AsFound, first);
-    if !matches!(first, Answer::Silent { .. } | Answer::Failed { .. }) {
-        return Ok(woke);
+    if matches!(first, Answer::Silent { .. } | Answer::Failed { .. }) {
+        climb(&mdi, &mut woke);
     }
-    let firmware = mdi.mdio.read_at(regs::FWSM);
+    let firmware = woke.power.after.fwsm;
+    woke.ulp = match woke.answered() {
+        None => Disarm::Unreached,
+        Some(_) if firmware & fwsm::FIRMWARE_VALID != 0 => Disarm::FirmwareOwns,
+        Some(_) => match mdi.disarm_ulp() {
+            Ok(found) => Disarm::Disarmed { found },
+            Err(why) => Disarm::Refused(why),
+        },
+    };
+    Ok(woke)
+}
+
+/// [`wake::LADDER`], from a PHY that did not answer as found.
+fn climb<R: Registers, C: Clock>(mdi: &Owned<'_, R, C>, woke: &mut Woke) {
+    let firmware = woke.power.after.fwsm;
     let mut on_smbus = false;
     for (action, moment) in wake::LADDER {
         if !wake::rung_allowed(action, firmware) {
             continue;
         }
         match action {
-            Action::PowerCycle => mdi.power_cycle(),
+            Action::PowerCycle => woke.held_low(mdi.power_cycle()),
             Action::ForceSmbus => {
                 mdi.force_smbus();
                 on_smbus = true;
@@ -1018,5 +1094,4 @@ pub(crate) fn wake<R: Registers, C: Clock>(
     if on_smbus {
         mdi.release_smbus();
     }
-    Ok(woke)
 }
