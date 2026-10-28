@@ -211,7 +211,12 @@ fn arm_fch(revision: u8) {
         u8::from(control.powers_off()),
         u8::from(misc & fch::USE_CPU_RST != 0),
         u8::from(reset_ctl1 & fch::RST_TO_CPU_PWR_GD_EN != 0),
-        u8::from(gating & fch::WDT_BLK_CLK_GATING_DIS != 0),
+        // All ones is also what an undecoded register reads.
+        match gating {
+            u32::MAX => "unread",
+            gating if gating & fch::WDT_BLK_CLK_GATING_DIS != 0 => "1",
+            _ => "0",
+        },
         u8::from(control.0 & fch::Control::ACTION_EN != 0),
         if resets { "can" } else { "cannot" },
     );
