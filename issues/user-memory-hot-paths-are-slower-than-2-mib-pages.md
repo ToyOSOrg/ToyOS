@@ -82,6 +82,12 @@ The copies (`fs.tmp`, `ipc`, `pipe`) point at the user-copy path above.
 "With runs" is `a75abd3f6` against `b48c7dd9d` on the T14, one run each;
 `6d826e313` gave 500, 521 and 132,434 for the first three rows.
 
+`mem.bw.copy` streams two 64 MiB buffers it asks to be huge. In the
+2026-10-28 scoreboard (evidence branch `scoreboard-2026-10-28`) Linux gave
+131,072 KiB of huge pages and ToyOS none; ToyOS read 0.95 of Linux's on the
+T14 (6,651 against 6,992 MB/s) and 0.98 on the AMD (8,352 against 8,550),
+each resolved worse.
+
 `mem.realloc_grow` no longer copies. std and libc map a block of 256 KiB or
 more on its own (`sdk/libc/src/mapped.rs`) and grow it by `vm_remap`, which
 moves pages. On the T14 at 204243e7f, `1m_256m` took 45.9 us, its last
