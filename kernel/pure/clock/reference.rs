@@ -379,13 +379,44 @@ impl Offset {
     }
 }
 
-/// The 64-bit reading of a reference whose counter is 32 bits wide: the value
-/// with `low` as its low half nearest `predicted`, the earlier 64-bit reading
+/// The 64-bit reading of a reference whose counter is `bits` wide: the value
+/// with `low` as its low bits nearest `predicted`, the earlier 64-bit reading
 /// plus the ticks the counter says have passed since. Right while that
-/// prediction is within 2^31 ticks.
-pub const fn extend(predicted: u64, low: u32) -> u64 {
-    let off = (low as u64).wrapping_sub(predicted) as u32 as i32;
-    predicted.wrapping_add_signed(off as i64)
+/// prediction is within half the counter's range.
+pub const fn extend(predicted: u64, low: u64, bits: u32) -> u64 {
+    let range = 1u64 << bits;
+    let off = low.wrapping_sub(predicted) & (range - 1);
+    if off >= range / 2 {
+        predicted.wrapping_add(off).wrapping_sub(range)
+    } else {
+        predicted.wrapping_add(off)
+    }
+}
+
+/// What a second reference says of a step the counter and the first
+/// reference disagree on, over the same span.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Arbitration {
+    /// The second reference agrees with the counter: the first moved.
+    FirstMoved,
+    /// The second reference disagrees with the counter by what the first
+    /// does, within both agreements' allowances: the counter moved, or both
+    /// references did together.
+    CounterMoved,
+    /// The two references disagree with the counter and with each other.
+    AllDisagree,
+}
+
+/// `first` and `second`: the counter against each reference over one span,
+/// the first's an agreement that failed.
+pub const fn arbitrate(first: Agreement, second: Agreement) -> Arbitration {
+    if second.holds() {
+        Arbitration::FirstMoved
+    } else if first.apart_ns.abs_diff(second.apart_ns) <= first.allowed_ns + second.allowed_ns {
+        Arbitration::CounterMoved
+    } else {
+        Arbitration::AllDisagree
+    }
 }
 
 #[cfg(test)]
@@ -616,10 +647,57 @@ mod tests {
         assert_eq!(Offset { least_out: 200, least_back: -45 }.bound(), Err(45));
     }
 
+    /// The PM timer, at 3.579545 MHz, across the same spans as the HPET.
+    const PM: Reference =
+        Reference { period_fs: 279_365_114, tolerance_ppb: 500_000, settled_ns: 1_000_000, short_tolerance_ppb: 2_000_000 };
+
+    /// The PM timer's sample a perfect counter takes at `ns`, its step `step`.
+    fn pm_at(ns: u64, step: i64) -> Sample {
+        let n = (ns as u128 * 1_000_000 / PM.period_fs as u128) as u64;
+        let counter = (n as u128 * PM.period_fs as u128 * HZ / 1_000_000_000_000_000) as u64;
+        let latch = counter.wrapping_add_signed(step);
+        Sample { before: latch - READ / 2, after: latch - READ / 2 + READ, reference: n }
+    }
+
+    fn ns_of(n: u64) -> u64 {
+        (n as u128 * HPET.period_fs as u128 / 1_000_000) as u64
+    }
+
+    /// The AMD's 1.7 ms over 680 ms: as the TSC's own step, both references
+    /// read it alike; as the HPET's stall, the PM timer reads the TSC right;
+    /// as a step of each by a different size, nothing agrees.
+    #[test]
+    fn a_second_reference_tells_which_moved() {
+        let mult = ((1_000_000_000u128 << 32) / HZ) as u64;
+        let tolerance = 500_000;
+        let (n0, n1) = (100 * SECOND, 100 * SECOND + 9_739_369);
+        let step = 3_096_525i64;
+        let hpet = |n, step| sample_at(HZ, n, READ / 2, step);
+        let tsc_moved = arbitrate(
+            agree(HPET, hpet(n0, 0), hpet(n1, step), mult, tolerance),
+            agree(PM, pm_at(ns_of(n0), 0), pm_at(ns_of(n1), step), mult, tolerance),
+        );
+        assert_eq!(tsc_moved, Arbitration::CounterMoved);
+        let stalled = n1 - 24_675;
+        let hpet_moved = arbitrate(
+            agree(HPET, hpet(n0, 0), Sample { reference: stalled, ..hpet(n1, 0) }, mult, tolerance),
+            agree(PM, pm_at(ns_of(n0), 0), pm_at(ns_of(n1), 0), mult, tolerance),
+        );
+        assert_eq!(hpet_moved, Arbitration::FirstMoved);
+        let neither = arbitrate(
+            agree(HPET, hpet(n0, 0), hpet(n1, step), mult, tolerance),
+            agree(PM, pm_at(ns_of(n0), 0), pm_at(ns_of(n1), step / 3), mult, tolerance),
+        );
+        assert_eq!(neither, Arbitration::AllDisagree);
+    }
+
     #[test]
     fn a_32_bit_reference_is_extended_across_its_wrap() {
-        assert_eq!(extend(0x1_ffff_fff0, 0x0000_0010), 0x2_0000_0010);
-        assert_eq!(extend(0x2_0000_0010, 0xffff_fff0), 0x1_ffff_fff0);
-        assert_eq!(extend(0x5_1234_5678, 0x1234_5679), 0x5_1234_5679);
+        assert_eq!(extend(0x1_ffff_fff0, 0x0000_0010, 32), 0x2_0000_0010);
+        assert_eq!(extend(0x2_0000_0010, 0xffff_fff0, 32), 0x1_ffff_fff0);
+        assert_eq!(extend(0x5_1234_5678, 0x1234_5679, 32), 0x5_1234_5679);
+        // The ACPI PM timer's 24 bits, across their wrap and back.
+        assert_eq!(extend(0x3_ff_fff0, 0x00_0010, 24), 0x4_00_0010);
+        assert_eq!(extend(0x4_00_0010, 0xff_fff0, 24), 0x3_ff_fff0);
     }
 }

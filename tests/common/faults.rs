@@ -165,3 +165,36 @@ pub fn a_stepped_tsc_panics(test_config: &Path) -> Result<(), String> {
     eprintln!("  [tsc_step] {}", lines[panicked].trim());
     Ok(())
 }
+
+/// What `hpet-stall` says of the stall it stages, the sampler's record of
+/// leaving the span out, and a report after it.
+const HPET_STALL_STAGED: &str = "hpet-stall: the HPET reads ";
+const HPET_MOVED: &str = "clock: the HPET moved and the TSC did not, so this span is left out: ";
+const CLOCK_REPORT: &str = "clock: over ";
+
+/// An HPET `hpet-stall` reads 10 ms behind while the TSC and the ACPI PM timer
+/// count on: the sampler says the HPET moved, leaves the span out, and the
+/// clock goes on reporting rather than panicking.
+pub fn a_stalled_hpet_is_left_out(test_config: &Path) -> Result<(), String> {
+    let mut qemu = QemuInstance::boot_with_options(
+        test_config,
+        &[],
+        &[],
+        BootOptions { profile: qemu::Profile::Metal, kernel_params: &["hpet-stall"], ready_marker: HPET_MOVED, ..Default::default() },
+    );
+    let staged_then_moved = {
+        let serial = qemu.boot_log();
+        let staged = serial.find(HPET_STALL_STAGED);
+        let moved = serial.find(HPET_MOVED);
+        match (staged, moved) {
+            (Some(staged), Some(moved)) if staged < moved => Ok(serial[moved..].lines().next().unwrap_or_default().to_string()),
+            _ => Err(format!("no {HPET_STALL_STAGED:?} before {HPET_MOVED:?}\n{serial}")),
+        }
+    }?;
+    let after = qemu.drain_until(std::time::Duration::from_secs(60), |l| l.contains(CLOCK_REPORT) || l.contains("PANIC"));
+    if after.contains("PANIC") || !after.contains(CLOCK_REPORT) {
+        return Err(format!("the clock did not report again after it left the span out\n{after}"));
+    }
+    eprintln!("  [hpet_stall] {}", staged_then_moved.trim());
+    Ok(())
+}
