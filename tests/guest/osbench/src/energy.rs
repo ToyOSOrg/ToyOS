@@ -148,6 +148,11 @@ fn row(bench: &str, seconds: u64, load: Load) -> Result<(), Refused> {
     if let Some(mw) = unit.and_then(|unit| cores_mw(&first, &last, unit, samples.span_ns)) {
         fields.push(("cores_mw", mw.to_string()));
     }
+    for (name, steps) in [("pp0_mw", samples.plane_steps[0]), ("pp1_mw", samples.plane_steps[1])] {
+        if let (Some(steps), Some(unit)) = (steps, unit) {
+            fields.push((name, energy::milliwatts(energy::microjoules(steps, unit), samples.span_ns).to_string()));
+        }
+    }
     let series: Vec<String> = samples.mw.iter().map(u64::to_string).collect();
     note(&format!("{bench}.series"), &[("mw", series.join(","))]);
     result(&format!("{bench}.package"), "mW", &mut samples.mw, &fields);
@@ -170,6 +175,8 @@ struct Samples {
     nj_per_chunk: Vec<u64>,
     power_unit: Option<u64>,
     span_ns: u64,
+    /// Each plane's steps over the row, where both ends read it.
+    plane_steps: [Option<u64>; 2],
 }
 
 /// A reading of the package each second for `seconds`, into `out`, with the
@@ -198,6 +205,11 @@ fn sample(seconds: u64, counts: &[Slot], per_chunk: bool, out: &mut Samples) -> 
         for (i, rows) in out.residency.iter_mut().enumerate() {
             if let (Some(r0), Some(r1)) = (before.residency[i], after.residency[i]) {
                 rows.push(osbench_rules::window::permille(r1.wrapping_sub(r0), ticks));
+            }
+        }
+        for (i, steps) in out.plane_steps.iter_mut().enumerate() {
+            if let (Some(p0), Some(p1)) = (before.planes[i], after.planes[i]) {
+                *steps = Some(steps.unwrap_or(0) + energy::span(p0, p1, RANGE).unwrap_or(0));
             }
         }
         (before, at, done) = (after, now, done_now);
@@ -276,6 +288,13 @@ pub fn park() {
         }
     };
     step("energy.park.0_base".into());
+    // Under the T14's MWAIT 0x60 exit (1048 us) and over its 0x31's (253 us):
+    // every idle CPU waits in 0x31 or C1 while it is held.
+    let held = crate::sys::syscap().map(|cap| cap.hold_wake_latency(Duration::from_micros(800)));
+    note("energy.park", &[("hold_800us", format!("{:?}", held.as_ref().map(|h| h.as_ref().map(|_| ()))))]);
+    step("energy.park.0_hold_800us".into());
+    drop(held);
+    step("energy.park.0_released".into());
     for (i, (name, who)) in LADDER.iter().enumerate() {
         let was = toyos_abi::syscall::debug_with(toyos_abi::syscall::debug_action::PCI_PARK_D3HOT, u64::from(*who));
         note("energy.park", &[("function", name.to_string()), ("answered", was.to_string())]);

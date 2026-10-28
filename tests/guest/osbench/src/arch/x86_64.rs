@@ -85,6 +85,7 @@ mod cpuid {
                 package_residency: [Some(0x60d), Some(0x3f8), Some(0x3f9), Some(0x3fa)],
                 core_residency: [Some(0x3fd), Some(0x3fe)],
                 core_energy: None,
+                planes: [Some(0x639), Some(0x641)],
             }),
             b"AuthenticAMD" => Some(crate::sys::PowerRegisters {
                 energy: 0xc001_029b,
@@ -92,6 +93,7 @@ mod cpuid {
                 package_residency: [None; 4],
                 core_residency: [None; 2],
                 core_energy: Some(0xc001_029a),
+                planes: [None; 2],
             }),
             _ => None,
         }

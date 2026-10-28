@@ -85,10 +85,16 @@ pub enum Counter {
     /// The energy the CPU's core consumed, 32 bits wide, in the package's
     /// unit (AMD's `CORE_ENERGY_STAT`): SMT siblings read their one core's.
     CoreEnergy,
+    /// Intel's PP0 plane, the cores (`MSR_PP0_ENERGY_STATUS`), 32 bits wide in
+    /// the package's unit. Held by the boot processor.
+    Plane0Energy,
+    /// Intel's PP1 plane, a client uncore device (`MSR_PP1_ENERGY_STATUS`),
+    /// beside it.
+    Plane1Energy,
 }
 
 impl Counter {
-    pub const COUNT: usize = 20;
+    pub const COUNT: usize = 22;
     pub const ALL: [Counter; Self::COUNT] = [
         Self::Stamp,
         Self::Smi,
@@ -110,6 +116,8 @@ impl Counter {
         Self::PackageC6,
         Self::PackageC7,
         Self::CoreEnergy,
+        Self::Plane0Energy,
+        Self::Plane1Energy,
     ];
 
     pub const fn name(self) -> &'static str {
@@ -134,6 +142,8 @@ impl Counter {
             Self::PackageC6 => "package_c6",
             Self::PackageC7 => "package_c7",
             Self::CoreEnergy => "core_energy",
+            Self::Plane0Energy => "plane0_energy",
+            Self::Plane1Energy => "plane1_energy",
         }
     }
 
@@ -157,7 +167,9 @@ impl Counter {
             | Self::PackageC3
             | Self::PackageC6
             | Self::PackageC7
-            | Self::CoreEnergy => Rights::COUNTERS.union(Rights::TRACE),
+            | Self::CoreEnergy
+            | Self::Plane0Energy
+            | Self::Plane1Energy => Rights::COUNTERS.union(Rights::TRACE),
         }
     }
 }
@@ -259,8 +271,8 @@ mod tests {
     #[test]
     fn every_shape_of_record_reads_back_as_written() {
         for r in [
-            record(false, [Some(1), Some(u64::from(u32::MAX)), Some(3), Some(u64::MAX), Some(0), Some(0x8000_2a04), Some(6), Some(0), Some(2), Some(31_936), Some(7_000_000), Some(5), None, Some(u64::from(u32::MAX)), Some(0xa_0e03), Some(8), None, Some(0), Some(u64::MAX), None]),
-            record(true, [Some(9), None, None, None, Some(4), None, Some(0x8000_ff01), None, Some(0), None, Some(12), None, Some(9), None, None, None, Some(3), None, None, Some(77)]),
+            record(false, [Some(1), Some(u64::from(u32::MAX)), Some(3), Some(u64::MAX), Some(0), Some(0x8000_2a04), Some(6), Some(0), Some(2), Some(31_936), Some(7_000_000), Some(5), None, Some(u64::from(u32::MAX)), Some(0xa_0e03), Some(8), None, Some(0), Some(u64::MAX), None, Some(11), Some(12)]),
+            record(true, [Some(9), None, None, None, Some(4), None, Some(0x8000_ff01), None, Some(0), None, Some(12), None, Some(9), None, None, None, Some(3), None, None, Some(77), None, Some(5)]),
             record(true, [None; Counter::COUNT]),
         ] {
             assert_eq!(Record::decode(&r.encode()), Ok(r));

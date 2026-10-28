@@ -61,6 +61,8 @@ pub struct Hardware {
     /// The package's C2, C3, C6 and C7 residency, where admitted.
     pub package_residency: Option<[u64; 4]>,
     pub core_energy: Option<u64>,
+    /// Intel's PP0 and PP1 energy, where admitted.
+    pub planes: Option<[u64; 2]>,
 }
 
 /// The package's energy counter and its unit register, where this CPU reads
@@ -120,7 +122,7 @@ pub fn bring_up() {
     let me = percpu::cpu_id() as usize;
     let words = sample(me);
     block(me).publish(words);
-    let [smi, aperf, mperf, request, pkg, epb, c6, c7, energy, pc, core_energy] = [
+    let [smi, aperf, mperf, request, pkg, epb, c6, c7, energy, pc, core_energy, planes] = [
         Counter::Smi,
         Counter::Aperf,
         Counter::Mperf,
@@ -132,12 +134,13 @@ pub fn bring_up() {
         Counter::PackageEnergy,
         Counter::PackageC2,
         Counter::CoreEnergy,
+        Counter::Plane0Energy,
     ]
     .map(|c| held(&words, c));
     log!(
         "counters: cpu{me} reads smi={smi} aperf={aperf} mperf={mperf} hwp_request={request} \
          hwp_request_pkg={pkg} energy_perf_bias={epb} core_c6={c6} core_c7={c7} \
-         package_energy={energy} package_residency={pc} core_energy={core_energy}"
+         package_energy={energy} package_residency={pc} core_energy={core_energy} planes={planes}"
     );
 }
 
@@ -173,6 +176,8 @@ fn sample(me: usize) -> [u64; WORDS] {
             Counter::PackageC6 => hardware.package_residency.map(|r| r[2]),
             Counter::PackageC7 => hardware.package_residency.map(|r| r[3]),
             Counter::CoreEnergy => hardware.core_energy,
+            Counter::Plane0Energy => hardware.planes.map(|p| p[0]),
+            Counter::Plane1Energy => hardware.planes.map(|p| p[1]),
         };
         if let Some(value) = value {
             words[1] |= 1 << counter as usize;

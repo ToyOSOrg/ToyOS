@@ -204,6 +204,9 @@ pub struct Counters {
     pub package_residency: bool,
     /// AMD's `CORE_ENERGY_STAT` (C001_029AH).
     pub core_energy: bool,
+    /// Intel's PP0 and PP1 planes (639H, 641H). Scout: 06_8CH alone, whose
+    /// §2.17 names Tables 2-20 and 2-21 that define them.
+    pub planes: bool,
 }
 
 /// Whose registers carry a package's energy and its units, each counting
@@ -246,6 +249,7 @@ pub fn counters(facts: &CounterFacts) -> Counters {
         // Table 2-42 restates 3F8H for 06_66H without a rate.
         package_residency: table_2_20 && id.model != 0x66 && facts.reads_package,
         core_energy: amd_rapl,
+        planes: table_2_20 && id.model == 0x8c && facts.reads_package,
     }
 }
 
@@ -439,6 +443,7 @@ mod tests {
         package_energy: None,
         package_residency: false,
         core_energy: false,
+        planes: false,
     };
 
     /// 06_8CH, which §2.17 names as supporting Table 2-20.
@@ -451,10 +456,11 @@ mod tests {
             package_energy: Some(Rapl::Intel),
             package_residency: true,
             core_energy: false,
+            planes: true,
         };
         assert_eq!(counters(&intel(T14_SIGNATURE)), all);
         let ap = CounterFacts { reads_package: false, ..intel(T14_SIGNATURE) };
-        assert_eq!(counters(&ap), Counters { package_energy: None, package_residency: false, ..all });
+        assert_eq!(counters(&ap), Counters { package_energy: None, package_residency: false, planes: false, ..all });
     }
 
     /// 06_AFH: Table 2-57 counts its core residency at P1, not the TSC.

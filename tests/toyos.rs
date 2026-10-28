@@ -1747,9 +1747,9 @@ const OSBENCH_ENERGY: &[metal::Arm] = &[metal::Arm {
     ..metal::once("energybenchcase", "tests/images/benchcase.toml", &[], &["osbench_energy"])
 }];
 
-/// The park scout: up to 120 s for quiet, then ten 30 s idle rows.
+/// The park scout: up to 120 s for quiet, then twelve 30 s idle rows.
 const POWER_PARK: &[metal::Arm] = &[metal::Arm {
-    adds_ms: 480_000,
+    adds_ms: 540_000,
     features: &["test-actuators"],
     named_only: true,
     ..metal::once("parkbenchcase", "tests/images/benchcase.toml", &[], &["osbench_park"])

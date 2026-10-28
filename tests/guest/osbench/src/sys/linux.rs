@@ -286,6 +286,7 @@ pub struct PowerRegisters {
     pub package_residency: [Option<u32>; 4],
     pub core_residency: [Option<u32>; 2],
     pub core_energy: Option<u32>,
+    pub planes: [Option<u32>; 2],
 }
 
 /// The power counters through the `msr` driver's `/dev/cpu/<n>/msr`, which
@@ -343,7 +344,11 @@ pub mod power {
         for (slot, at) in residency.iter_mut().zip(r.package_residency) {
             *slot = each(&dev, cpu, at)?;
         }
-        Ok(Package { tsc, energy: msr(&dev, cpu, r.energy)?, power_unit: msr(&dev, cpu, r.power_unit)?, residency })
+        let mut planes = [None; 2];
+        for (slot, at) in planes.iter_mut().zip(r.planes) {
+            *slot = each(&dev, cpu, at)?;
+        }
+        Ok(Package { tsc, energy: msr(&dev, cpu, r.energy)?, power_unit: msr(&dev, cpu, r.power_unit)?, residency, planes })
     }
 
     pub fn cpus() -> Result<Vec<CpuPower>, Refused> {

@@ -79,6 +79,8 @@ pub struct Package {
     pub energy: Option<u64>,
     pub power_unit: Option<u64>,
     pub residency: [Option<u64>; 4],
+    /// Intel's PP0 and PP1 energy counters, in the package's unit.
+    pub planes: [Option<u64>; 2],
 }
 
 /// One CPU's power counters as its registers hold them: its TSC beside them,

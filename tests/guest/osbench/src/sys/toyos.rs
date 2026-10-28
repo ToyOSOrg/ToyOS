@@ -249,6 +249,7 @@ pub mod diag {
         pub rapl_power_unit: Option<u64>,
         pub package_residency: [Option<u64>; 4],
         pub core_energy: Option<u64>,
+        pub planes: [Option<u64>; 2],
     }
 
     /// The capability's diagnostics for the rows that read the counters
@@ -291,6 +292,7 @@ pub mod diag {
                         package_residency: [Counter::PackageC2, Counter::PackageC3, Counter::PackageC6, Counter::PackageC7]
                             .map(|c| r.get(c)),
                         core_energy: r.get(Counter::CoreEnergy),
+                        planes: [r.get(Counter::Plane0Energy), r.get(Counter::Plane1Energy)],
                     })
                 })
                 .collect()
@@ -409,6 +411,7 @@ pub mod power {
             energy: c.package_energy,
             power_unit: c.rapl_power_unit,
             residency: c.package_residency,
+            planes: c.planes,
         })
     }
 

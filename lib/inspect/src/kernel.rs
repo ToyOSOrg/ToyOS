@@ -73,7 +73,7 @@ mod tests {
             [
                 Some(10), Some(4817), Some(100), Some(200), Some(3), Some(0x8000_2a04), Some(0x8000_ff01), Some(6), calls,
                 nanos, Some(40), Some(1_000), Some(3_000), Some(77_000), Some(0xa_0e03), Some(5), Some(6), Some(7), Some(8),
-                Some(900),
+                Some(900), Some(901), Some(902),
             ],
         )
     }
