@@ -1127,6 +1127,32 @@ fn reset(pci: &PciDevice) -> (How, Option<Resetting>) {
     (How::Nothing { express, af, pm }, None)
 }
 
+/// `SYS_DEBUG`'s park: the unclaimed, undriven function `who` names put in
+/// D3hot, answering the state it was in.
+#[cfg(feature = "test-actuators")]
+pub fn park_d3hot(who: u64) -> u64 {
+    let Ok(who) = u16::try_from(who) else { return SyscallError::InvalidArgument.to_u64() };
+    let pci = {
+        let machine = MACHINE.lock();
+        if machine.kernel_driven.contains(&who) {
+            return SyscallError::PermissionDenied.to_u64();
+        }
+        match machine.functions.iter().find(|pci| requester(pci) == who) {
+            Some(pci) => *pci,
+            None => return SyscallError::NotFound.to_u64(),
+        }
+    };
+    if functions().iter().any(|f| f.who == who && f.held.load(Ordering::Acquire)) {
+        return SyscallError::PermissionDenied.to_u64();
+    }
+    let Ok(cap) = pci.capability(pm::CAP_ID) else { return SyscallError::NotSupported.to_u64() };
+    let pmcsr = cap.read_u16(pm::PMCSR);
+    cap.write_u16(pm::PMCSR, pm::to(pmcsr, pm::D3HOT));
+    wait_until(crate::clock::nanos_since_boot() + pm::TRANSITION_NANOS);
+    log!("pcidev: PCI {:02x}:{:02x}.{} parked in D3hot from D{} for a measurement", pci.bus, pci.dev, pci.func, pm::state(pmcsr));
+    u64::from(pm::state(pmcsr))
+}
+
 /// Finish whatever is left of a reset this kernel started on this function,
 /// and put back what it cleared, before a register of it is read.
 ///

@@ -245,3 +245,40 @@ fn cpus(bench: &str, first: &[CpuPower], last: &[CpuPower]) {
         );
     }
 }
+
+/// A measurement scout, ToyOS-only and not for landing: the T14's driverless
+/// functions parked in D3hot one more at a time (`SYS_DEBUG`'s
+/// `PCI_PARK_D3HOT`, a test-actuators kernel), 30 s of idle read after each.
+/// Each function is named by its requester id, bus << 8 | device << 3 |
+/// function; the iGPU last, since it takes the panel's scan-out with it.
+#[cfg(target_os = "toyos")]
+pub fn park() {
+    const LADDER: [(&str, u16); 9] = [
+        ("sdreader_0a.00.0", 0x0a00),
+        ("wifi_09.00.0", 0x0900),
+        ("audio_00.1f.3", 0x00fb),
+        ("usb4dma_00.0d.2", 0x006a),
+        ("usb4dma_00.0d.3", 0x006b),
+        ("tcss_xhci_00.0d.0", 0x0068),
+        ("heci_00.16.0", 0x00b0),
+        ("pch_xhci_00.14.0", 0x00a0),
+        ("igpu_00.02.0", 0x0010),
+    ];
+    if let Err(why) = power::package() {
+        return why.report("energy.park.0_base.package");
+    }
+    wait_quiet();
+    let step = |bench: String| {
+        let mut measured = Ok(());
+        crate::around::ran_during(&bench, || measured = row(&bench, 30, Load::Idle));
+        if let Err(why) = measured {
+            why.report(&format!("{bench}.package"));
+        }
+    };
+    step("energy.park.0_base".into());
+    for (i, (name, who)) in LADDER.iter().enumerate() {
+        let was = toyos_abi::syscall::debug_with(toyos_abi::syscall::debug_action::PCI_PARK_D3HOT, u64::from(*who));
+        note("energy.park", &[("function", name.to_string()), ("answered", was.to_string())]);
+        step(format!("energy.park.{}_{name}", i + 1));
+    }
+}

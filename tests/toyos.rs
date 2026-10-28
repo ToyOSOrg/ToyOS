@@ -1161,6 +1161,12 @@ const METAL: &[(&str, metal::Metal)] = &[
         metal::Metal { arms: OSBENCH_ENERGY, judge: |b| osbench_energy_measured(b[0]) },
     ),
     (
+        // Scout, not for landing: the T14's driverless functions parked in
+        // D3hot one more at a time, the package's idle read after each.
+        "power_park",
+        metal::Metal { arms: POWER_PARK, judge: |b| osbench_ran(b[0], &["osbench_park"]) },
+    ),
+    (
         // `osbench lan` against the `osbench-peer` the other bench's Linux runs,
         // compared with the same program under this bench's Linux on the same
         // path. A pass names it: the other bench has to be running the peer.
@@ -1739,6 +1745,14 @@ const BENCHCASE: &[metal::Arm] = &[metal::Arm {
 const OSBENCH_ENERGY: &[metal::Arm] = &[metal::Arm {
     adds_ms: 300_000,
     ..metal::once("energybenchcase", "tests/images/benchcase.toml", &[], &["osbench_energy"])
+}];
+
+/// The park scout: up to 120 s for quiet, then ten 30 s idle rows.
+const POWER_PARK: &[metal::Arm] = &[metal::Arm {
+    adds_ms: 480_000,
+    features: &["test-actuators"],
+    named_only: true,
+    ..metal::once("parkbenchcase", "tests/images/benchcase.toml", &[], &["osbench_park"])
 }];
 
 /// The two groups that need another party share one boot when one pass names
