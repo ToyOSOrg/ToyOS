@@ -54,7 +54,7 @@ a unit firmware left translating:
   off for that one switch. The older protection registers are `PMEN`'s
   protected memory regions (§11.4.8.1). Every hand-over now takes
   translation off inside them where every unit has them; what remains is
-  `issues/a-unit-without-protected-memory-regions-passes-dma-untranslated-while-it-is-handed-over.md`.
+  `issues/a-unit-passes-dma-untranslated-outside-its-protected-memory-regions-while-it-is-handed-over.md`.
 - **"Apply it at hand-over"**, on reserved memory: "From the hand-over on,
   only display and USB controllers keep access to their reserved region; any
   other device's access is refused. A device that firmware was still using

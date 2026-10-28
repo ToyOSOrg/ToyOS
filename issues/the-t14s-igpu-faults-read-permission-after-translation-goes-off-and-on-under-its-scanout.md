@@ -78,9 +78,13 @@ Neither the tables nor any cached state VT-d Rev. 4.1 lets the unit keep is
 what refuses. Intel's 11th Generation Core specification update (631123-034,
 errata TGL001 to TGL075) documents no erratum for VT-d or the iGPU's DMA.
 
-Every hand-over still takes translation off. Under `iommu-firmware-left` the
-T14 therefore still reaches this, in about one boot in 27. Real T14 firmware
-leaves translation off, so no other boot does.
+Every hand-over still takes translation off, now inside protected memory
+regions, so `iommu-firmware-left` still reaches this on the T14. Real T14
+firmware leaves translation off, so no other boot does. How often a boot of
+today's sequence halts is not measured. The estimate is between the cycles'
+one in 27, a different sequence with no regions, and the pre-#1086 boots' 1
+in 46. The row that arms the actuator rides a boot of its own, so a halt costs
+only that boot.
 
 **Exit**: this kernel's hand-over sequence is fixed so that the measurement's
 off-on cycles fault no more than its switch cycles, or a documented erratum

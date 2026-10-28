@@ -353,17 +353,16 @@ pub(crate) fn amdvi_left_on(unit: &str) -> [String; 3] {
 /// the T14 takes (`iommu_firmware_left`'s row), logged as such. Under
 /// `iommu-firmware-left` the unit is left queueing, translating and remapping;
 /// each goes off by its own write, the root is set and invalidated through
-/// the unit's registers, and the unit ends translating with the boot stick's
-/// DMA behind it.
+/// the queue, and the unit ends translating with the boot stick's DMA behind it.
 pub fn vtd_firmware_left(test_config: &Path) -> Result<(), String> {
     let options = BootOptions { profile: Profile::Metal, kernel_params: &["iommu-firmware-left"], ..Default::default() };
     let qemu = QemuInstance::boot_with_options(test_config, &[], &[], options);
     let log = Serial::boot(&qemu);
     log.must_be_clean()?;
-    let unguarded = log.must_say("iommu: unit0 has no protected memory regions")?;
+    let unguarded = log.must_say("iommu: the hand-over is unguarded: unit0 has no protected memory regions")?;
     let off = log.must_say("iommu: unit0 was handed over with translation on; it goes off first")?;
     log.must_say("iommu: unit0 was handed over with queued invalidation on; it goes off first")?;
-    log.must_not_say("iommu: protected memory for the hand-over")?;
+    log.must_not_say("iommu: protected memory on for")?;
     let translating = log.must_say(" translating gsts=")?;
     if !translating.contains(" tes=y ") {
         return Err(format!("unit0 was programmed and is not translating: {translating:?}"));

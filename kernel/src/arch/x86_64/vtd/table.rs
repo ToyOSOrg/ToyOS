@@ -46,6 +46,14 @@ impl Tables {
         Self { pages: Vec::new(), used: PAGE_2M as usize }
     }
 
+    /// Every 2 MiB page tables have been carved from, `[start, end)` physical.
+    pub fn pages(&self) -> impl Iterator<Item = (u64, u64)> + '_ {
+        self.pages.iter().map(|page| {
+            let start = page.direct_map().phys();
+            (start, start + PAGE_2M)
+        })
+    }
+
     /// Returns one zeroed 4 KiB table, usable as a root, context, second-level, or invalidation-queue table.
     pub fn alloc(&mut self) -> Table {
         if self.used + TABLE_BYTES > PAGE_2M as usize {

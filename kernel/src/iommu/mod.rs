@@ -278,12 +278,15 @@ impl core::fmt::Display for StreamId {
 ///
 /// No domain's addresses reach into one of `windows`, the root bridges'
 /// declared memory, or `None` where no declaration is held ([`window`]).
+/// `kernel` is this kernel's image, `[start, end)` physical: what a unit's
+/// hand-over keeps out of every device's reach where it can.
 pub fn init(
     rsdp_addr: u64,
     devices: &[crate::drivers::pci::PciDevice],
     windows: Option<&toyos_pci::aperture::Declaration<alloc::vec::Vec<toyos_abi::boot::RootBridgeWindow>>>,
+    kernel: (u64, u64),
 ) {
-    unit::init(rsdp_addr, devices, windows.map(|declared| declared.windows()));
+    unit::init(rsdp_addr, devices, windows.map(|declared| declared.windows()), kernel);
 }
 
 /// Once, after every kernel driver has taken its functions from firmware and

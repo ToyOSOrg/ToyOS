@@ -31,7 +31,6 @@ use crate::sync::Lock;
 use crate::time::{Duration, Tripwire};
 
 use super::iommu_unit::{yn, MAX_UNITS};
-use kernel::dmaguard::Step;
 use dmar::{Dmar, Malformed, Scope, Scopes, Structure};
 use queue::Queue;
 use table::{Table, Tables};
@@ -94,8 +93,8 @@ static TABLES: Lock<Tables> = Lock::new(Tables::new());
 /// queue: a queue has one tail, so a second holder would submit behind its back.
 static UNITS: Lock<Vec<Live>> = Lock::new(Vec::new());
 
-/// A unit past `enable`: its window, its queue, and the root table its context
-/// entries live in.
+/// A unit past its hand-over: its window, its queue, and the root table its
+/// context entries live in.
 pub(super) struct Live {
     regs: Mmio,
     queue: Queue,
@@ -127,7 +126,7 @@ pub(super) fn invalidate_interrupt_entries() {
 
 /// `windows` and every region firmware reserved are what no domain's addresses
 /// reach. `false` where firmware published no DMAR.
-pub fn init(rsdp_addr: u64, devices: &[PciDevice], windows: Option<&[RootBridgeWindow]>) -> bool {
+pub fn init(rsdp_addr: u64, devices: &[PciDevice], windows: Option<&[RootBridgeWindow]>, kernel: (u64, u64)) -> bool {
     let dmar = match Dmar::open(rsdp_addr) {
         Ok(dmar) => dmar,
         Err(TableError::Absent) => return false,
@@ -248,53 +247,88 @@ pub fn init(rsdp_addr: u64, devices: &[PciDevice], windows: Option<&[RootBridgeW
     // One identity-domain table set per address width: units may disagree on
     // `CAP.SAGAW`, and a shared set would be programmed at the wrong depth for one.
     let mut domains: [Option<Table>; 2] = [None, None];
-    let mut steps: Vec<Option<(Unit, Plan)>> = ready.into_iter().map(Some).collect();
     // Before any table is built: what a domain of a driver's own can be is the
     // narrowest thing every translating unit on this machine agrees to.
-    for (unit, plan) in steps.iter().flatten() {
+    for (unit, plan) in &ready {
         domain::unit_agrees(plan.width, unit.caps.domains(), unit.caps.mgaw());
     }
     #[cfg(feature = "boot-actuators")]
     if crate::actuator::iommu_firmware_left() {
-        for (unit, plan) in steps.iter().flatten() {
-            unit.leave_on(devices, identity_domain(&mut domains, plan.width), plan.width);
+        for (unit, plan) in &ready {
+            let domain = identity_domain(&mut TABLES.lock(), &mut domains, plan.width);
+            unit.leave_on(devices, domain, plan.width);
         }
     }
-    // A unit whose translation goes off passes DMA untranslated until it is
-    // back on, so the protected regions cover every unit's window at once.
-    let mut guard = {
-        let units: Vec<(usize, Mmio, bool)> = steps
+    for (unit, _) in &ready {
+        pmr::hand_over(unit.index, unit.regs);
+    }
+    // Built before the regions are chosen, so they can be chosen to hold them.
+    let ready: Vec<(Unit, Plan, Table)> = ready
+        .into_iter()
+        .map(|(unit, plan)| {
+            let mut tables = TABLES.lock();
+            let domain = identity_domain(&mut tables, &mut domains, plan.width);
+            let root = identity_root(&mut tables, devices, domain, plan.width);
+            (unit, plan, root)
+        })
+        .collect();
+    let guard = {
+        let candidates: Vec<pmr::Candidate> = ready
             .iter()
-            .flatten()
-            .map(|(unit, _)| (unit.index, unit.regs, unit.caps.protected_memory()))
+            .map(|(unit, _, _)| pmr::Candidate {
+                index: unit.index,
+                regs: unit.regs,
+                regions: unit.caps.protected_memory(),
+                registers: unit.invalidates_through_registers(),
+            })
             .collect();
+        // What the OS owns once firmware is done with it: the pmm's memory and
+        // ACPI's reclaimable tables, never firmware's NVS.
         let ram: Vec<(u64, u64)> = crate::mm::firmware_map()
             .iter()
-            .filter(|e| toyos_bootmap::is_read_as_memory(e.uefi_type))
+            .filter(|e| toyos_bootmap::is_usable_type(e.uefi_type) || e.uefi_type == toyos_bootmap::EFI_ACPI_RECLAIM_MEMORY)
             .map(|e| (e.start, e.end))
             .collect();
-        if units.is_empty() { None } else { pmr::program(&units, &ram, &rmrrs, crate::mm::pmm::top()) }
-    };
-    let mut translating: Vec<Option<Translating>> = Vec::new();
-    for step in kernel::dmaguard::order(steps.len(), guard.is_some()) {
-        match step {
-            Step::Arm => guard.as_ref().expect("an armed step without a guard").arm(),
-            Step::Translate(at) => {
-                let (unit, plan) = steps[at].take().expect("a unit translated twice");
-                translating.push(Some(translate(unit, plan, devices, &mut domains)));
-            }
-            Step::Release => guard.take().expect("a release without a guard").release(),
-            Step::Finish(at) => finish(translating[at].take().expect("a unit finished twice"), devices, remap),
+        let cover: Vec<(u64, u64)> = TABLES.lock().pages().chain([kernel]).collect();
+        if candidates.is_empty() {
+            None
+        } else {
+            pmr::program(&candidates, units, &ram, &rmrrs, &cover, crate::mm::pmm::top())
         }
+    };
+    if let Some(guard) = &guard {
+        log_bus_masters(devices);
+        guard.arm();
+    }
+    let via = if guard.is_some() { Invalidation::Registers } else { Invalidation::Queue };
+    let translating: Vec<Translating> =
+        ready.into_iter().map(|(unit, plan, root)| translate(unit, plan, root, via)).collect();
+    if let Some(guard) = guard {
+        guard.release();
+    }
+    for translating in translating {
+        finish(translating, devices, remap);
     }
     true
 }
 
+/// Every function mastering the bus as the regions go on: what they block,
+/// they block without a record (§11.4.8.1).
+fn log_bus_masters(devices: &[PciDevice]) {
+    const BUS_MASTER: u16 = 1 << 2;
+    let masters: Vec<alloc::string::String> = devices
+        .iter()
+        .filter(|d| d.read_config_u16(0x04) & BUS_MASTER != 0)
+        .map(|d| alloc::format!("{}", StreamId::pci(d.bus, d.dev, d.func)))
+        .collect();
+    log!("iommu: functions mastering the bus as protected memory goes on: [{}]", masters.join(" "));
+}
+
 /// The identity domain at `width`, built the first time it is asked for.
-fn identity_domain(domains: &mut [Option<Table>; 2], width: AddressWidth) -> Table {
+fn identity_domain(tables: &mut Tables, domains: &mut [Option<Table>; 2], width: AddressWidth) -> Table {
     *domains[domain_slot(width)].get_or_insert_with(|| {
         let top = crate::mm::pmm::top();
-        let (domain, frames) = table::identity_domain(&mut TABLES.lock(), width, top);
+        let (domain, frames) = table::identity_domain(tables, width, top);
         log!("iommu: identity domain aw={} covers 0x0..{top:#x} in {frames} 2 MiB leaves", width.bits());
         domain
     })
@@ -401,11 +435,11 @@ impl Unit {
             let root = identity_root(&mut tables, devices, domain, width);
             (queue, root, tables.alloc())
         };
+        self.command(QUEUED_INVALIDATION_ENABLE, true, "queued invalidation");
         self.regs.write_u64(RTADDR_REG, root.phys());
         self.command(SET_ROOT_TABLE_POINTER, true, "the root table pointer");
-        self.invalidate_through_registers();
+        queue.invalidate_all(self.regs);
         self.command(TRANSLATION_ENABLE, true, "translation");
-        self.command(QUEUED_INVALIDATION_ENABLE, true, "queued invalidation");
         if self.caps.interrupt_remapping() {
             self.regs.write_u64(interrupt::IRTA_REG, remap.phys());
             self.command(interrupt::SET_TABLE_POINTER, true, "the interrupt remap table pointer");
@@ -416,10 +450,17 @@ impl Unit {
         }
     }
 
+    /// Whether this unit takes register-based invalidation: a unit of major
+    /// version 6 or later refuses every request (§11.4.6.1), and the IOTLB
+    /// registers must lie inside the window this kernel maps.
+    fn invalidates_through_registers(&self) -> bool {
+        self.major < 6 && self.caps.iotlb_registers() + 16 <= REGISTER_WINDOW
+    }
+
     /// A global context-cache invalidation, then a global IOTLB one draining
     /// reads and writes, through the unit's registers (§6.5.1); valid only with
     /// queued invalidation off, whatever `TES` says. A unit that reports either
-    /// done at no granularity refused it, as every unit from version 6 does.
+    /// done at no granularity refused it.
     fn invalidate_through_registers(&self) {
         const START: u64 = 1 << 63;
         const GLOBAL_CONTEXT: u64 = 0b01 << 61;
@@ -568,66 +609,69 @@ fn plan(unit: &Unit) -> Option<Plan> {
         );
         return None;
     }
-    // The hand-over invalidates through these registers (`Unit::invalidate_through_registers`).
-    if unit.major >= 6 {
-        log!(
-            "iommu: unit{index} is version {}, which refuses register-based invalidation (§11.4.6.1) \
-             and so the hand-over's — not programmed",
-            unit.major
-        );
-        return None;
-    }
-    if unit.caps.iotlb_registers() + 16 > REGISTER_WINDOW {
-        log!(
-            "iommu: unit{index} puts its IOTLB registers at {:#x}, past its own {REGISTER_WINDOW}-byte \
-             window (ECAP={:#018x}) — not programmed",
-            unit.caps.iotlb_registers(),
-            unit.caps.ecap
-        );
-        return None;
-    }
     Some(Plan { width, records })
 }
 
-/// A unit translating through this kernel's root, its queue and interrupt
-/// remapping not yet programmed.
+/// How a hand-over invalidates after pointing the unit at this kernel's root.
+#[derive(Clone, Copy)]
+enum Invalidation {
+    /// Through the unit's registers, inside protected memory: the queue's
+    /// memory is no remapping structure (Appendix A, `ECAP.C`), so the regions
+    /// may cover it.
+    Registers,
+    /// Through the queue, enabled first.
+    Queue,
+}
+
+/// A unit translating through this kernel's root, its interrupt remapping not
+/// yet programmed.
 struct Translating {
     unit: Unit,
     width: AddressWidth,
     root: Table,
+    /// Enabled already where the hand-over invalidated through it.
+    queue: Option<Queue>,
 }
 
-/// Whatever firmware left on, off; then this kernel's root pointed, the global
-/// invalidation §6.6 owes it, and translation on. The invalidation goes through
-/// the unit's registers, since the queue's memory is no remapping structure
-/// (Appendix A) and may lie under a protected region.
-fn translate(unit: Unit, plan: Plan, devices: &[PciDevice], domains: &mut [Option<Table>; 2]) -> Translating {
+/// Whatever firmware left on, off; then `root` pointed, the global
+/// invalidation §6.6 owes it, and translation on.
+fn translate(unit: Unit, plan: Plan, root: Table, via: Invalidation) -> Translating {
     let Plan { width, records } = plan;
-    // Built before `TABLES` is held here: building it takes that lock too.
-    let domain = identity_domain(domains, width);
-    let root = identity_root(&mut TABLES.lock(), devices, domain, width);
     // After the tables are built, so a unit firmware left translating passes
-    // DMA untranslated only while it is programmed.
+    // DMA untranslated only while it is programmed, and before the queue is
+    // pointed, which §6.5.2 does only with it off.
     unit.hand_over();
     // Before `TE`: the first blocked transaction must be reportable, not merely counted.
     fault::arm(unit.index, unit.regs, records, crate::arch::idt::DMA_FAULT_VECTOR);
+    let mut queue = match via {
+        Invalidation::Registers => None,
+        Invalidation::Queue => Some(enable_queue(&unit)),
+    };
     unit.regs.write_u64(RTADDR_REG, root.phys());
     unit.command(SET_ROOT_TABLE_POINTER, true, "the root table pointer");
-    unit.invalidate_through_registers();
+    match queue.as_mut() {
+        Some(queue) => queue.invalidate_all(unit.regs),
+        None => unit.invalidate_through_registers(),
+    }
     unit.command(TRANSLATION_ENABLE, true, "translation");
-    Translating { unit, width, root }
+    Translating { unit, width, root, queue }
 }
 
-/// The invalidation queue and interrupt remapping, each confirmed in `GSTS`
-/// before the next.
+fn enable_queue(unit: &Unit) -> Queue {
+    let queue = Queue::new(&mut TABLES.lock(), unit.regs);
+    unit.command(QUEUED_INVALIDATION_ENABLE, true, "queued invalidation");
+    queue
+}
+
+/// The queue where it is not on yet, then interrupt remapping, each confirmed
+/// in `GSTS` before the next.
 fn finish(translating: Translating, devices: &[PciDevice], remap: Option<bool>) {
-    let Translating { unit, width, root } = translating;
+    let Translating { unit, width, root, queue } = translating;
     let index = unit.index;
-    let mut queue = Queue::new(&mut TABLES.lock(), unit.regs);
+    let mut queue = queue.unwrap_or_else(|| enable_queue(&unit));
     // Outside the `TABLES` lock: `interrupt::arm` takes its own lock and
     // then that one, and the order this subsystem holds is the reverse.
     let irta = remap.map(interrupt::arm);
-    unit.command(QUEUED_INVALIDATION_ENABLE, true, "queued invalidation");
     if let Some(irta) = irta {
         unit.regs.write_u64(interrupt::IRTA_REG, irta);
         unit.command(interrupt::SET_TABLE_POINTER, true, "the interrupt remap table pointer");
@@ -795,7 +839,7 @@ impl Capabilities {
         self.ecap & (1 << 0) != 0
     }
 
-    /// `ECAP.QI`; absent falls back to `CCMD_REG`/`IOTLB_REG`, correct but slower.
+    /// `ECAP.QI`; a unit without it is left unprogrammed (`plan`).
     fn queued_invalidation(&self) -> bool {
         self.ecap & (1 << 1) != 0
     }

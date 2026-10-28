@@ -210,7 +210,13 @@ pub fn drivers_settled() {}
 
 /// The SMMUv3, armed; a refusal leaves every unit the IORT names aborting
 /// what it is given, or says why one could not be told to.
-pub fn init(rsdp_addr: u64, devices: &[PciDevice], windows: Option<&[toyos_abi::boot::RootBridgeWindow]>) {
+/// `_kernel` is the VT-d hand-over's to guard; this backend has no use for it.
+pub fn init(
+    rsdp_addr: u64,
+    devices: &[PciDevice],
+    windows: Option<&[toyos_abi::boot::RootBridgeWindow]>,
+    _kernel: (u64, u64),
+) {
     let iort = match toyos_acpi::iort(direct_phys(), rsdp_addr) {
         Ok(iort) => iort,
         Err(IortRefused::Table(TableError::Absent)) => {
