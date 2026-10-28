@@ -500,13 +500,13 @@ impl Sync {
         }
     }
 
-    /// RFC 6675's SetPipe, HighRxt at SND.UNA outside SACK recovery.
     /// What cwnd is measured against: RFC 6675's pipe while SACK reports duplicates, the flight
     /// otherwise.
     fn in_flight(&self) -> u32 {
         if self.sack_ok && self.dupacks > 0 { self.pipe() } else { self.tx.flight() }
     }
 
+    /// RFC 6675's SetPipe, HighRxt at SND.UNA outside SACK recovery.
     pub fn pipe(&self) -> u32 {
         self.tx.pipe(self.sack_marks().map_or(self.tx.una, |(high_rxt, _)| high_rxt), self.smss())
     }

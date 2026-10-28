@@ -57,10 +57,14 @@ netstack hands the stack every ACK one pass received before the pass's
 transmit opportunity, so a pass's ACKs grew the window as one. #1069 makes
 each ACK count (RFC 5681 §3.1), and the window grow only after an
 opportunity cwnd ended, not one the card's room ended (RFC 9438 §5.8).
+That is a correction the RFCs require, held by [tcp]'s host tests
+`s_cc_016` and `s_cc_017`. What it does to the T14's upload rate is not yet
+measured: the readings below come from different sessions, and on this
+path that credits nothing (the finding after them).
 
 **Read at `afe0c7dac`, 2026-10-28**, a head that also grew the window while
 the card held the sender, so neither its rate nor its stop samples are the
-per-ACK fix's alone; the corrected head's reading is pending. Upload 58, 59, 58 and 59 MB/s against
+per-ACK fix's alone; the corrected head, `d184223b0`, is read below. Upload 58, 59, 58 and 59 MB/s against
 Linux's 110–112 ([evidence `afe0c7dac/`](https://github.com/ToyOSOrg/evidence/tree/695218c8513e785bf0465e2f13e0575f5723a2e3/r3/afe0c7dac)). Each ToyOS row's 15 s was
 held by cwnd for 1.5–2.1 s, at stops whose mean cwnd was 192–228 KB and
 mean smoothed round trip 4.5–5.9 ms; by the peer's window for 87–189 ms;
@@ -84,24 +88,35 @@ window is never the limit, and its own queue fills the path.
 ([evidence `d184223b0/`](https://github.com/ToyOSOrg/evidence/tree/bc4188c1070d283e38f7a96019437b99697fe4c5/r4/d184223b0)), four runs on 16 descriptors and two on 256,
 against Linux's 112–113:
 
-- The per-ACK fix's gain is measured. At the head that also cures cwnd
-  growing while the card held the sender, ToyOS read 58, 61, 59 and
-  57 MB/s on 16 descriptors, where `132d5ef75` read 31–36.
+- On 16 descriptors ToyOS read 58, 61, 59 and 57 MB/s.
 - The ring's depth is not the limit. 256 descriptors read 60 and 57 MB/s.
   The card was still full 77,036–79,567 times a row (100,246–106,959 on 16).
   cwnd held the sender 4.6–4.9 s of a row (2.1–2.4 s on 16), at a mean of
-  488–506 KB and 8.0 ms (310–354 KB and 4.1–5.6 ms on 16). The deeper ring
-  added its queue to the round trip, and the window reached no further.
+  488–506 KB and 8.0 ms (310–354 KB and 4.1–5.6 ms on 16): on the deeper
+  ring cwnd was larger and the round trip longer, and the rate was the
+  same. That the deeper ring's own queue lengthened the round trip is an
+  inference from those three readings, not a measurement.
 - No loss: one segment resent, D-SACKed, across the six runs, and no
   probe that ended a slow start.
 
-So neither held as stated: the per-ACK fix is the gain, and with it the
-deeper ring still reads no better. What remains open
+So the first hypothesis did not hold: with the corrected slow start the
+deeper ring still reads no better. The second is not settled by this
+session either, which has no unfixed control. What remains open
 is how fast the card drains what it is given: even at 256 descriptors it
 is full about 5,000 times a second. That lead is the I219's transmit
 configuration (interrupt moderation, descriptor write-back, how often
 netstack learns of completions) and is taken up apart from this record's
-pull request. The transmit setup's own lead stays open in
+pull request.
+
+**Unexplained: ToyOS's rate moves between sessions on the same code.** Heads
+without the per-ACK fix read 41, 48 and 31 MB/s (`d99ef5a35`, 2026-10-24),
+62–65 (`aeba59fb0`, 2026-10-24), 36–44 (`af239c8bb`, 2026-10-27, 256
+descriptors) and 31–36 (`132d5ef75`, 2026-10-28), while Linux read 110–114
+in every session. So a ToyOS reading is compared only with one interleaved
+in its own session: the per-ACK fix's effect is the reading of a session
+that alternates it with a control.
+
+The transmit setup's own lead stays open in
 `issues/the-intel-driver-writes-txdctl-and-tidv-against-the-82574-datasheets-newer-revision.md`.
 
 The clock does not separate the two systems. Each upload row's own
