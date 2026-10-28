@@ -995,6 +995,11 @@ mod checks {
     }
 
     #[test]
+    fn metal_bench_disk_judge_admits_data_and_the_loaders_volumes_alone() {
+        metal_checks::the_bench_disk_judge_admits_data_and_the_loaders_volumes_alone();
+    }
+
+    #[test]
     fn metal_bench_reaches_the_loop_as_its_host() {
         metal_checks::the_bench_reaches_the_loop_as_its_host();
     }
@@ -1155,10 +1160,10 @@ mod checks {
         let unnamed = format!("{staged}{}{}|   cpu0 pc=0xffff80006051b0b2  {spin}\n", awake(1), awake(0));
         assert!(judge(&[&readback("deadlinewedge", &wedged(&unnamed), kernel)]).is_err());
 
-        // The stick load's boot: its deadline ended it while the job's lines
+        // The disk load's boot: its deadline ended it while the job's lines
         // were reaching /log; one whose job never wrote, or that handed the
         // machine back, is no reset under load.
-        let judge = metal_judge("stick_survives_a_reset_under_load");
+        let judge = metal_judge("the_disk_survives_a_reset_under_load");
         let line = |n: u32| format!("[2026-09-29 10:33:40 20.100 test-runner pid=12] stick_load: line {n} {}\n", "x".repeat(840));
         let wrote = format!("{kernel}{}", (0..1200).map(line).collect::<String>());
         let short = format!("{kernel}{}", (0..10).map(line).collect::<String>());

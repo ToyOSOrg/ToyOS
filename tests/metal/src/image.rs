@@ -119,7 +119,7 @@ pub fn derive(
     symlinks.insert(REBOOT_LINK.to_string(), Value::String(TOYBOX_PATH.to_string()));
     // A boot whose jobs are reached through names of their own — the C corpus's
     // one comparator, staged once and symlinked once per case, so the kernel
-    // records each run under the case's name and a stick says which one failed.
+    // records each run under the case's name and the log says which one failed.
     for (from, to) in extra_links {
         symlinks.insert(from.clone(), Value::String(to.clone()));
     }

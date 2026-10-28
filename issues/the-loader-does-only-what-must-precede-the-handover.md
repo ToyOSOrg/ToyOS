@@ -335,7 +335,7 @@ Each stage lands on its own, in this order.
    - The tested pass's `loader.log` is kept as `loader-previous.log` by a
      rename (`SetInfo`), not by #539's copy.
    - It runs over the cable that
-     `issues/the-t14-answers-only-through-a-usb-stick.md` owns, and
+     `issues/the-t14-answers-only-through-what-ubuntu-reads-off-its-disk.md` owns, and
      waits on
      `issues/the-t14-hung-after-rebooting-with-its-i219-faulted.md`,
      `issues/a-fatal-event-stands-down-both-bounds-and-may-leave-nothing-to-end-the-machine.md`,

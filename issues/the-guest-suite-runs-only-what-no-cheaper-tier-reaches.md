@@ -135,10 +135,12 @@ The kernel drives no USB; usbd does (the small-kernel track's step 10). Host:
 and `toyos-usbhid`'s and `toyos-scsi`'s decoders. Metal: the usbd rows.
 Exit: as stage A, with what is still owed:
 
-- metal: the rewritten `usbload` row, a stick written continuously through
-  usbd and the machine reset under it by the boot deadline, judged on
-  `boot.usbload.stick_secs` (#901 section 9).
-- metal: `tone_beside_a_stick_write`
+- metal: a stick written continuously through usbd and the machine reset
+  under it by the boot deadline (#901 section 9), which no bench row writes
+  since the benches boot off their NVMe
+  (`issues/no-bench-row-drives-usb-storage-since-the-benches-boot-off-nvme.md`).
+- metal: a tone beside a stick write, which no bench row makes since the
+  benches boot off their NVMe (`tone_beside_a_log_write` writes the NVMe)
   (`issues/a-megabyte-written-to-the-stick-starves-a-tone-beside-it.md`).
 - metal `late_storage_connect`: a disk that connects after bring-up is
   served, and `/boot` and `/log` mount off it — on the stub, a device plugged

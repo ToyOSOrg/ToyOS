@@ -54,7 +54,7 @@ fn spelled(id: PciId) -> String {
 /// The spare this machine has, as `usbd_spare` chooses it, named by its
 /// arrival, so every round claims that function and no other of its card.
 fn spare(cap: &SysCap) -> (PciId, Arrival) {
-    let pci = spare::of(cap, &SPARES).expect("end_returns_claims: no one spare controller on this machine");
+    let pci = spare::of(cap, &SPARES).expect("end_returns_claims: no spare controller on this machine");
     (PciId { vendor: pci.vendor, device: pci.device }, pci.arrival)
 }
 

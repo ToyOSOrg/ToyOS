@@ -1,13 +1,11 @@
-//! Lines written to `/log`, which a metal boot's logkeeper keeps on the boot
-//! stick and makes durable every round: the one volume on that stick a job
-//! reaches. (`/home` is DATA's, and a metal test image carries no DATA
-//! partition, so DATA lives in memory there.)
+//! Lines written to `/log`, which a boot's logkeeper keeps on its log volume
+//! and makes durable every round.
 //!
 //! Each line is one record of [`LINE_BYTES`], paced at the caller's rate,
 //! under logkeeper's allowance for a program's children (4096 records a
 //! second), so none is suppressed and every one reaches the file. What
 //! reached the medium is counted by the judge in the file read back off the
-//! stick, never here.
+//! log volume, never here.
 
 use std::time::{Duration, Instant};
 

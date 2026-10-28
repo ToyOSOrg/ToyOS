@@ -43,5 +43,8 @@ a signed test image's job holds it.
    `Guid::TOYOS_SCRATCH` replaces `toyos-metal --adopt-scratch`
    (`issues/the-scratch-disk-adopt-scratch-makes-is-not-served.md`).
 4. **The installer** (`issues/storage-is-layers-and-a-role-is-a-filesystem.md`,
-   stage 3) lays its layout through stage 2's library and authorization, and
-   `toyos-metal --install-internal`'s `sgdisk` and `partx` go with it.
+   stage 3) lays its layout through stage 2's library and authorization.
+   `toyos-metal`'s `sgdisk` and `partx` are not this track's to replace: they
+   run under a bench's Ubuntu before ToyOS boots, making the install area once
+   and giving partitions 7–11 the image's GUIDs on every flash, and they leave
+   with Ubuntu (`issues/the-build-runs-host-tools-outside-rust-and-qemu.md`).

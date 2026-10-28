@@ -4,10 +4,10 @@ kind: track
 opened: 2026-09-07
 ---
 
-# The T14 answers only through a USB stick
+# The T14 answers only through what Ubuntu reads off its disk
 
-Every boot of the bench is flashed to a stick under Ubuntu and judged by what
-is read off it after a reboot into Ubuntu. The laptop is on a cable on the same
+Every boot of the bench is flashed to its internal NVMe under Ubuntu and
+judged by what is read off it after a reboot into Ubuntu. The laptop is on a cable on the same
 LAN as the development Mac and its NIC is the onboard Intel I219 at `00:1f.6`,
 `8086:15fc`. The track is to make that cable the answer path. The boot on
 which the Mac read the log, ran a command and handed the machine back over it
@@ -16,8 +16,8 @@ is deleted: the host reaches no T14 that runs ToyOS
 
 What is left is the harness running userland tests over ssh through a russh
 client, which `issues/the-t14-reboots-through-ubuntu-for-every-test.md`
-stages, and a netboot spike in which the firmware fetches the loader over HTTP
-so the stick leaves the boot path.
+stages, and a netboot spike in which the firmware fetches the loader over
+HTTP.
 
 Constraints a reader would otherwise pay to re-derive:
 
@@ -50,6 +50,6 @@ Constraints a reader would otherwise pay to re-derive:
   the image named the Mac and nothing on the Mac listened. The serving half and
   the Mac's reader are deleted
   (`issues/the-host-cannot-reach-the-t14-while-it-runs-toyos.md`); a boot
-  that dies before netd leases needed the stick either way.
+  that dies before netd leases needed the disk Ubuntu reads either way.
 - The metal loop is `toyos-metal` (`tests/metal/src/lib.rs`), and the T14 is run by the
   orchestrator alone.

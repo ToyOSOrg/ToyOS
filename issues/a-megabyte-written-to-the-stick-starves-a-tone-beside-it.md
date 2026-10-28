@@ -25,10 +25,13 @@ much to the stick while a tone plays is the same stimulus.
 
 Since the small-kernel track's step 10 the stick is usbd's: the interrupts are
 its claim's and the waits its thread's, and the kernel's two-second transport
-break is gone. Whether the starvation remains is unmeasured.
+break is gone. Whether the starvation remains is unmeasured. A bench's `/log`
+is on its NVMe now, so `tone_beside_a_log_write` writes no stick and is no
+evidence for this issue
+(`issues/no-bench-row-drives-usb-storage-since-the-benches-boot-off-nvme.md`).
 
 ## Exit condition
 
 On the T14, a `METAL` row plays `hda_tone`'s tone while a program writes a
-mebibyte to `/log`, and soundserver reports `underruns=0` over the tone's window
-across repeated boots. Owner: the metal suite (`tests/toyos.rs`'s `METAL`).
+mebibyte to a USB stick through usbd, and soundserver reports `underruns=0`
+over the tone's window across repeated boots. Owner: the metal suite (`tests/toyos.rs`'s `METAL`).

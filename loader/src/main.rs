@@ -808,6 +808,15 @@ fn main(handle: Handle, system_table: SystemTable) -> Status {
     // so the answer is on the stick and not only on the screen.
     let firmware_watchdog =
         system_table.boot_services().set_watchdog_timer(FIRMWARE_WATCHDOG_SECS, WATCHDOG_CODE);
+    // Before anything that can panic: a panic resets the machine where the
+    // reset boots its default entry and not this loader, so a bench whose
+    // `BootNext` bought this boot falls back to its own system with no hand,
+    // and powers it off where this loader is the default, which a reset would
+    // only start again.
+    let panic_resets = bootnext::default_is_another(&system_table);
+    if panic_resets {
+        efi::reset_on_panic();
+    }
     // Before the first line, so the screen holds this loader's lines and none
     // of the firmware's: its logo and its boot manager's text. ClearScreen
     // (UEFI 2.11 §12.4.8) is the console's own clear, which also homes the
@@ -875,6 +884,13 @@ fn main(handle: Handle, system_table: SystemTable) -> Status {
     if let Err(e) = cleared {
         println!("Screen: firmware's console would not clear ({e}), so its own lines stay above these");
     }
+    println!(
+        "Panic: a panic in this loader {}",
+        match panic_resets {
+            true => "resets the machine, whose default boot is another entry than this one",
+            false => "powers the machine off, since its default boot is this loader or the firmware does not say",
+        }
+    );
     if let Some(line) = claim_refused {
         println!("{line}");
     }

@@ -68,12 +68,12 @@ const ACTUATOR_KERNEL: &[&str] = toyos_build::build::TEST_KERNEL;
 
 // Rust helper binaries that are spawned by tests, not tests themselves.
 const RUST_SKIP: &[&str] = &[
-    // It writes the stick for ever, so that its boot's deadline resets the
-    // machine under it: `stick_survives_a_reset_under_load` runs it alone.
+    // It writes the log disk for ever, so that its boot's deadline resets the
+    // machine under it: `the_disk_survives_a_reset_under_load` runs it alone.
     "stick_load",
-    // The stick-write load `mask_windows` reads windows under, on the boot
+    // The log-write load `mask_windows` reads windows under, on the boot
     // whose kernel reports them.
-    "stick_write",
+    "log_write",
     // It opens a window, which needs a compositor the shared boot does not
     // run: `a_window_is_drawn_at_the_scale_and_relaid_at_the_next` runs it on
     // tests/images/scalecase.toml, and the `gop_edid_scale` metal row on
@@ -193,7 +193,7 @@ const RUST_SKIP: &[&str] = &[
     // on QEMU's.
     "audio_tone",
     "audio_tone_resampled",
-    "tone_beside_stick_write",
+    "tone_beside_log_write",
     "volume_step",
     // It hands the ACPI claim to a server of its own and kills it, which needs
     // a boot that starts none: the `acpi_server_death` metal row runs it on
@@ -489,7 +489,7 @@ const MACHINE_TESTS: &[&str] = &[
     // runs over it. q35 only.
     "the_kernel_tells_a_bypassing_console_physical_addresses",
     // An AMD-Vi unit left blocking every device, switched off and programmed
-    // before the boot stick is driven behind it: the register sequence and the
+    // before the boot disk is driven behind it: the register sequence and the
     // DMA it lets through are no host test's, and the AMD bench is staged by
     // hand rather than by CI.
     "amdvi_firmware_left",
@@ -594,8 +594,8 @@ const MACHINE_TESTS: &[&str] = &[
     // A machine whose one NVMe disk is all it has boots the image off it and
     // serves every role off it: the firmware that reads it, the loader and
     // kernel it hands the image to, and the claim the nvme driver serves the
-    // block service's sessions through have no host build, and the T14 boots
-    // from a stick beside an NVMe disk that is another system's.
+    // block service's sessions through have no host build. A bench boots the
+    // same way from its own disk, beside another system's partitions.
     "nvme_disk_boots",
     // A stick boot beside an NVMe disk that is another system's, on a
     // controller under Intel's id: the row drives it by its class through the
@@ -668,8 +668,8 @@ const MACHINE_TESTS: &[&str] = &[
     // filter.
     "usbd_refused_without_smi_filter",
     // The same machine with its AMD unit remapping nothing: the claim is
-    // refused by that reason. No metal row asks it: a bench without remapping
-    // drives no USB, so no `/log` reaches its stick to judge.
+    // refused by that reason. No metal row asks it: no bench is without
+    // remapping.
     "usbd_refused_without_amdvi_remapping",
     // Every vector register a thread holds, across switches to threads holding
     // others, against a scheduler, which no host build has. The shared boot's
@@ -726,9 +726,9 @@ const MACHINE_TESTS: &[&str] = &[
     "a_window_is_drawn_at_the_scale_and_relaid_at_the_next",
 ];
 
-/// **The metal profile**: which registrations run on the ThinkPad T14, what
-/// boots each one needs, and how each is judged off the log the stick came back
-/// with.
+/// **The metal profile**: which registrations run on a bench, what boots each
+/// one needs, and how each is judged off the log the boot left on the bench's
+/// disk.
 ///
 /// Two rows naming the same boot share one image and one boot, and their job
 /// lists are unioned. A boot is about a minute of the machine's time, so that
@@ -817,18 +817,16 @@ const METAL: &[(&str, metal::Metal)] = &[
         },
     ),
     (
-        // `hda_tone`'s tone while a thread of its process writes the stick
-        // through usbd: no period soundserver had to fill
-        // (`issues/a-megabyte-written-to-the-stick-starves-a-tone-beside-it.md`'s
-        // exit). It is the kernel's: one claim's interrupts and its holder's
-        // threads never starve another holder's deadline. The T14 and the AMD
-        // bench.
-        "tone_beside_a_stick_write",
+        // `hda_tone`'s tone while a thread of its process writes the log
+        // disk, the bench's NVMe: no period soundserver had to fill. It is the
+        // kernel's: one claim's interrupts and its holder's threads never
+        // starve another holder's deadline. The T14 and the AMD bench.
+        "tone_beside_a_log_write",
         metal::Metal {
             arms: TESTCASES,
             judge: |b| {
-                b[0].job_passed(audio::TONE_BESIDE_STICK_WRITE)?;
-                audio::tone_beside_a_stick_write(&b[0].log())
+                b[0].job_passed(audio::TONE_BESIDE_LOG_WRITE)?;
+                audio::tone_beside_a_log_write(&b[0].log())
             },
         },
     ),
@@ -943,7 +941,7 @@ const METAL: &[(&str, metal::Metal)] = &[
     ),
     (
         // The two numbers `syscall_cost` measures, printed by the job and read
-        // off the stick: that it ran, and what it said, are the verdict.
+        // off the log: that it ran, and what it said, are the verdict.
         "syscall_cost",
         metal::Metal {
             arms: TESTCASES,
@@ -957,7 +955,7 @@ const METAL: &[(&str, metal::Metal)] = &[
     ),
     (
         // How long a spawn of `toybox` takes to its exit, printed by the job and
-        // read off the stick for an A/B against another build: that it ran, and
+        // read off the log for an A/B against another build: that it ran, and
         // what it said, are the verdict.
         "spawn_cost",
         metal::Metal {
@@ -1039,14 +1037,14 @@ const METAL: &[(&str, metal::Metal)] = &[
         "watchdog_fed",
         metal::Metal {
             arms: &[metal::once("testcases-watchdog", "tests/images/testcases.toml", &["watchdog"], &[])],
-            judge: |b| b[0].log_reached_the_stick(),
+            judge: |b| b[0].log_is_whole_to_its_stop(),
         },
     ),
     // ---- the boot facts, riding the same tests/images/testcases.toml image ----
     //
     // **Seven names and no extra minute of the machine.** Every needle below is a
     // record the *shipping* kernel writes on any boot it takes, so each rides
-    // whatever image is already going on the stick; the two rows after them are
+    // whatever image is already going on the bench; the two rows after them are
     // the two things this suite measures rather than reads, and those cost a
     // boot.
     (
@@ -1202,7 +1200,7 @@ const METAL: &[(&str, metal::Metal)] = &[
     ),
     (
         // Its own boot, and it must not share one: it deliberately leaves the
-        // page holding a record no stick owns, and a boot that then read it as
+        // page holding a record no image owns, and a boot that then read it as
         // a predecessor's is exactly what the arm above judges.
         "blackbox_foreign_record",
         metal::Metal {
@@ -1332,7 +1330,7 @@ const METAL: &[(&str, metal::Metal)] = &[
         metal::Metal { arms: SELFTESTS, judge: |b| lapic_vectors(b[0].kernel().text()) },
     ),
     (
-        // No drain on this side: the whole boot's records are on the stick, so
+        // No drain on this side: the whole boot's records are on the log, so
         // the probe's line is either in them or it never ran.
         "sysret_ss_reload",
         metal::Metal { arms: SELFTESTS, judge: |b| sysret_ss(b[0].kernel().text()) },
@@ -1381,22 +1379,22 @@ const METAL: &[(&str, metal::Metal)] = &[
         metal::Metal { arms: TESTCASES, judge: |b| claims::clear_of_host_bridges(&b[0].kernel()) },
     ),
     (
-        // An AMD-Vi unit programmed, and the boot stick's controller read
+        // An AMD-Vi unit programmed, and the boot disk's controller read
         // through a domain of its own: the register sequence, the device
         // table and the host tables on real silicon. The AMD bench's row.
-        "amdvi_translates_the_stick_controller",
+        "amdvi_translates_the_boot_controller",
         metal::Metal { arms: TESTCASES, judge: |b| amdvi_translates(&b[0].kernel(), &b[0].log()) },
     ),
     (
-        // An AMD-Vi unit remapping every message: the boot stick's
+        // An AMD-Vi unit remapping every message: the boot disk's
         // controller's interrupt delivered through an entry of its own
         // table, on real silicon, and every I/O APIC named.
-        "amdvi_remaps_the_stick_controller",
+        "amdvi_remaps_the_boot_controller",
         metal::Metal { arms: TESTCASES, judge: |b| amdvi_remaps(&b[0].kernel(), &b[0].log()) },
     ),
     (
-        // The AMD bench's xHCI that does not hold the stick, which the
-        // image's usbd row leaves, claimed and driven by usbd through an entry of its own table, its
+        // The AMD bench's first xHCI, which the image's usbd row leaves,
+        // claimed and driven by usbd through an entry of its own table, its
         // MSI-X table in the register BAR it hands over; then aimed past its
         // grant, recorded against the claim; then its holder rewriting its
         // own table entry to a vector not its own, refused and recorded.
@@ -1440,23 +1438,18 @@ const METAL: &[(&str, metal::Metal)] = &[
         },
     ),
     (
-        // The boot controller handed over to the image's usbd row (the one
-        // holding the stick), its message through its remapping
-        // entry, its No-Op answered by that interrupt, and the boot stick
-        // served through it: what every metal boot's `/log` now rides.
-        // `Boot: complete` and the log volume's mount are printed, not judged.
-        "usbd_serves_the_boot_stick",
-        metal::Metal { arms: TESTCASES, judge: |b| usbd_serves_the_boot_stick(&b[0].kernel(), &b[0].log()) },
-    ),
-    (
-        // The bench's own NVMe disk, driven beside the stick by the row's
-        // class: nothing on it is touched but its ToyOS DATA partition, which
-        // is left alone while it is foreign and formatted or mounted once it
-        // is designated (`hostdisk::left_alone`), and never stood in for by
-        // memory. The T14 and the AMD bench; the metal loop's next boot of the
-        // host off that disk is the other half.
+        // The bench's own NVMe disk, which the boot came off, driven by the
+        // row's class: nothing on it is touched but the log and boot volumes
+        // the loader named and its ToyOS DATA partition, which is left alone
+        // while it is foreign and formatted or mounted once it is designated
+        // (`hostdisk::left_alone`), and never stood in for by memory. The T14
+        // and the AMD bench; the metal loop's next boot of the host off that
+        // disk is the other half.
         "nvme_leaves_the_benchs_disk_alone",
-        metal::Metal { arms: TESTCASES, judge: |b| common::hostdisk::left_alone(&b[0].log()).map(drop) },
+        metal::Metal {
+            arms: TESTCASES,
+            judge: |b| common::hostdisk::left_alone(&b[0].log(), &common::hostdisk::loader_named(&b[0].loader())?).map(drop),
+        },
     ),
     (
         // The bench's DATA partition designated from inside ToyOS, and the
@@ -1465,25 +1458,24 @@ const METAL: &[(&str, metal::Metal)] = &[
         // flushes and reads it back, under the one authorization the
         // designation image grants its runner. Destructive and once per
         // bench, so named only: the T14 and the AMD bench, whose p4s are the
-        // owner's empty ToyOS DATA. On the T14 the same boot reads its stick's
-        // last sector, past its last whole block.
+        // owner's empty ToyOS DATA.
         "bench_data_designated",
         metal::Metal { arms: DESIGNATE, judge: |b| bench_data_designated(&b[0].log(), &b[1].log()) },
     ),
     (
-        // The stick written through usbd while the boot deadline resets the
-        // machine, which touches no USB register (#901 §6): the stick must
-        // enumerate on the next host within the bench's record. It is the
-        // kernel's reset path that is judged; usbd and the job are the load.
-        "stick_survives_a_reset_under_load",
+        // The log disk written while the boot deadline resets the machine: the
+        // pass after the reset reads the deadline's record and the host boots
+        // again off the disk the write was in flight on. It is the kernel's
+        // reset path that is judged; the job is the load.
+        "the_disk_survives_a_reset_under_load",
         metal::Metal {
             arms: &[metal::once("usbload", "tests/images/testcases.toml", &[], &[metal::STICK_LOAD_JOB])],
-            judge: |b| power::stick_survives_a_reset_under_load(b[0]),
+            judge: |b| power::the_disk_survives_a_reset_under_load(b[0]),
         },
     ),
     (
-        // The T14's xHCI that does not hold the stick, which the image's
-        // usbd row leaves, claimed, and usbd driving it: handed
+        // The T14's first xHCI, the Type-C one, which the image's usbd row
+        // leaves, claimed, and usbd driving it: handed
         // over, MSI armed through remapping, and the No-Op answered by an
         // interrupt; usbd is killed, so the release says which reset the
         // function advertises. Then a holder of it is killed and the claim
@@ -1670,7 +1662,7 @@ const TESTCASES: &[metal::Arm] = &[metal::once(
         "test_rs_wake_onto_busy",
         "test_rs_audio_tone",
         "test_rs_audio_tone_resampled",
-        audio::TONE_BESIDE_STICK_WRITE,
+        audio::TONE_BESIDE_LOG_WRITE,
         "test_rs_volume_step",
         "test_rs_syscall_cost",
         "test_rs_spawn_cost",
@@ -1845,16 +1837,17 @@ const WINDOWSCASE: &[metal::Arm] = &[metal::Arm {
         "windowscase",
         "tests/images/testcases.toml",
         &[],
-        &["test_rs_idle_span", "pwd", WINDOWS_LOAD, STICK_WRITE],
+        &["test_rs_idle_span", "pwd", WINDOWS_LOAD, LOG_WRITE],
     )
 }];
 
 /// The load `mask_windows` reads the windows under.
 const WINDOWS_LOAD: &str = "test_rs_ring_park_herd";
 
-/// The stick-write load it reads them under too (#901 §9): 32 MiB through
-/// usbd, whose interrupts and threads are a claim's and a process's.
-const STICK_WRITE: &str = "test_rs_stick_write";
+/// The log-write load it reads them under too (#901 §9): 8 MiB through the
+/// log disk's driver, whose interrupts and threads are a claim's and a
+/// process's.
+const LOG_WRITE: &str = "test_rs_log_write";
 
 /// The head of the kernel's record of `job`'s exit.
 fn exited(job: &str) -> String {
@@ -4802,14 +4795,6 @@ fn bench_data_designated(first: &serial::Serial, second: &serial::Serial) -> Res
     first.must_say("supervisor: test-runner is authorized for `designate:data`")?;
     nvme_wrote_the_designation(first.text())?;
     first.must_say("the DATA partition is designated: the stamp is on the disk and read back")?;
-    // The T14's stick carries 7507812 sectors, four past its last whole 4 KiB
-    // block, and a smaller image than it, so its last sector holds no backup:
-    // usbd reads it with a short READ(10) and says the copies disagree. A
-    // read that failed would name the sector.
-    let usbd = |l: &&str| l.contains("usbd ") && l.contains("two copies do not agree");
-    if let Some(failed) = first.text().lines().filter(usbd).find(|l| l.contains("ReadFailed(")) {
-        return Err(format!("a stick's last sector would not read: {failed:?}"));
-    }
     first.must_not_say("are in memory and will not survive a reboot")?;
     second.must_say("fileserver: block 0 designates this partition for ToyOS; formatting it")?;
     let serving = second.must_say("fileserver: Data serving ")?;
@@ -4876,7 +4861,7 @@ fn a_host_disk_beside_the_stick_is_left_alone(test_config: &Path) -> Result<(), 
     log.must_say("vendor=8086 device=5845 prog_if=02")?;
     // This disk's DATA is never designated: what it is judged on is that
     // nothing writes to a disk that is not ours.
-    match common::hostdisk::left_alone(&log)? {
+    match common::hostdisk::left_alone(&log, &[])? {
         (4, common::hostdisk::Data::Foreign) => {}
         (named, data) => return Err(format!("the driver named {named} partitions of a disk that has 4, and DATA was {data:?}")),
     }
@@ -4908,13 +4893,12 @@ fn job_window(qemu: &mut QemuInstance, command: &str) -> Result<String, String> 
     Ok(result.serial)
 }
 
-/// The xHCI controller a job's claim took on a metal boot, by address and
-/// card: handed over, and not the one the supervisor says `@boot` is, which
-/// the image's usbd row drives — so whichever port holds the stick, the spare
-/// is the other controller.
+/// The xHCI controller a job's claim took, by address and card: handed over,
+/// and not the one the supervisor says `@boot` is, which the image's usbd row
+/// drives where it is an xHCI.
 fn spare_xhci(kernel: &serial::Serial, log: &serial::Serial) -> Result<(String, String), String> {
     let text = kernel.text();
-    let boot = boot_xhci(log)?;
+    let boot = boot_controller(log)?;
     let mut spares: Vec<(String, String)> = Vec::new();
     for line in text.lines() {
         let Some((at, rest)) = line.split_once("pcidev: PCI ").and_then(|(_, l)| l.split_once(" [")) else { continue };
@@ -4931,7 +4915,7 @@ fn spare_xhci(kernel: &serial::Serial, log: &serial::Serial) -> Result<(String, 
 }
 
 /// The controller the supervisor says `@boot` is, as `bb:dd.f`.
-fn boot_xhci(log: &serial::Serial) -> Result<&str, String> {
+fn boot_controller(log: &serial::Serial) -> Result<&str, String> {
     log.text()
         .lines()
         .find_map(|l| l.split_once(toyos_manifest::device::BOOT_SAID)?.1.split_whitespace().next())
@@ -5218,11 +5202,15 @@ fn no_fault_but_the_spares(kernel: &serial::Serial, log: &serial::Serial) -> Res
     }
 }
 
-/// usbd's word that it serves the boot stick: its first disk offered.
-const STICK_SERVED: &str = ": serving it as disk 0";
+/// The nvme driver's word that a session opened on the disk it drives at
+/// `at`: block I/O through that controller.
+fn nvme_session(at: &str) -> String {
+    format!("nvme {at}: session ")
+}
 
-/// Every AMD-Vi unit translating, every xHCI controller usbd drives on a
-/// domain of its own, the boot stick served through one, and no DMA refused.
+/// Every AMD-Vi unit translating, the boot disk's controller and every xHCI
+/// controller usbd drives on a domain of its own, the boot disk read and
+/// written through its one, and no DMA refused.
 fn amdvi_translates(kernel: &serial::Serial, log: &serial::Serial) -> Result<(), String> {
     let text = kernel.text();
     let units: Vec<&str> =
@@ -5232,27 +5220,26 @@ fn amdvi_translates(kernel: &serial::Serial, log: &serial::Serial) -> Result<(),
     }
     kernel.must_not_say("isolates no device")?;
     no_fault_but_the_spares(kernel, log)?;
-    let controllers = usb_controllers(kernel);
-    if controllers.is_empty() {
-        return Err(format!("no xHCI controller was handed over:\n{text}"));
-    }
+    let boot = boot_controller(log)?;
+    let mut controllers = usb_controllers(kernel);
+    controllers.push(boot.to_string());
     for at in &controllers {
         kernel.must_say(&format!("iommu: {at} moves to domain"))?;
     }
-    log.must_say(STICK_SERVED)?;
+    log.must_say(&nvme_session(boot))?;
     for unit in units {
         eprintln!("  [amdvi] {}", unit.trim());
     }
-    eprintln!("  [amdvi] {} controller(s) on domains of their own, the stick served", controllers.len());
+    eprintln!("  [amdvi] {} controller(s) on domains of their own, the boot disk served", controllers.len());
     Ok(())
 }
 
 /// Every AMD-Vi unit remapping (`GAEn`, MMIO 0018h bit 17) and, once the
 /// kernel's drivers are settled, filtering SMIs and logging each it refuses
 /// (`SmiFEn` bit 22, `SmiFLogEn` bit 24); every I/O APIC the MADT has named
-/// by the IVRS; and each xHCI controller usbd drives armed through a present
-/// entry of its own table at the vector its message carries, the stick served
-/// by those interrupts.
+/// by the IVRS; and the boot disk's controller and each xHCI controller usbd
+/// drives armed through a present entry of its own table at the vector its
+/// message carries, the boot disk served by those interrupts.
 fn amdvi_remaps(kernel: &serial::Serial, log: &serial::Serial) -> Result<(), String> {
     let text = kernel.text();
     let remaps = kernel.must_say("iommu: amdvi remaps every message through its requester's table")?;
@@ -5285,7 +5272,9 @@ fn amdvi_remaps(kernel: &serial::Serial, log: &serial::Serial) -> Result<(), Str
         return Err(format!("{remaps:?} does not name the {apics} I/O APIC(s) the MADT has"));
     }
     no_fault_but_the_spares(kernel, log)?;
-    let controllers = usb_controllers(kernel);
+    let boot = boot_controller(log)?;
+    let mut controllers = usb_controllers(kernel);
+    controllers.push(boot.to_string());
     for at in &controllers {
         let data = text
             .lines()
@@ -5294,7 +5283,7 @@ fn amdvi_remaps(kernel: &serial::Serial, log: &serial::Serial) -> Result<(), Str
         let vector = u32::from_str_radix(data.trim_start_matches("0x"), 16).map_err(|e| format!("{data}: {e}"))? & 0xFF;
         kernel.must_say(&format!("iommu: amdvi irte source={at} vector={vector:#04x} p=1 "))?;
     }
-    log.must_say(STICK_SERVED)?;
+    log.must_say(&nvme_session(boot))?;
     eprintln!("  [amdvi] {}", remaps.trim());
     for filter in filters {
         eprintln!("  [amdvi] {}", filter.trim());
@@ -5302,57 +5291,12 @@ fn amdvi_remaps(kernel: &serial::Serial, log: &serial::Serial) -> Result<(), Str
     for refused in text.lines().filter(|l| l.contains("iommu: amdvi unit") && l.contains(" said so far")) {
         eprintln!("  [amdvi] {}", refused.trim());
     }
-    eprintln!("  [amdvi] {} controller(s) armed through their own entries, the stick served", controllers.len());
+    eprintln!("  [amdvi] {} controller(s) armed through their own entries, the boot disk served", controllers.len());
     Ok(())
 }
 
-/// The controller the boot stick is on, the one the supervisor says `@boot`
-/// is, handed over once to the image's usbd, its message armed in remappable
-/// format through an entry of its own (VT-d's Interrupt Format, bit 4 of an MSI
-/// address; AMD-Vi's entry for its source), its No-Op answered, and the stick
-/// served by it. The supervisor's lines for the boot sources are printed.
-fn usbd_serves_the_boot_stick(kernel: &serial::Serial, log: &serial::Serial) -> Result<(), String> {
-    let served: Vec<String> = usb_controllers(kernel)
-        .into_iter()
-        .filter(|at| log.text().lines().any(|l| l.contains(&format!("usbd {at}: ")) && l.ends_with(STICK_SERVED)))
-        .collect();
-    let [at] = &served[..] else {
-        return Err(format!("not one controller served the stick: {served:?}\n{}", log.text()));
-    };
-    let boot = boot_xhci(log)?;
-    if at != boot {
-        return Err(format!("the stick was served on {at}, and the supervisor says `@boot` is {boot}"));
-    }
-    let handed = format!("pcidev: PCI {at} [");
-    let handovers: Vec<&str> =
-        kernel.text().lines().filter(|l| l.contains(&handed) && l.contains("] handed over")).collect();
-    let [line] = handovers[..] else {
-        return Err(format!("{at} was not handed over once: {handovers:?}"));
-    };
-    let remapped = kernel.text().lines().any(|l| {
-        l.split_once(&format!("PCI {at}: msi address="))
-            .and_then(|(_, a)| u32::from_str_radix(a.split_whitespace().next()?.trim_start_matches("0x"), 16).ok())
-            .is_some_and(|address| address & (1 << 4) != 0)
-    }) || kernel.text().contains(&format!("iommu: amdvi irte source={at} "));
-    if !remapped {
-        return Err(format!("{at}'s message names no remapping entry of its own:\n{}", kernel.text()));
-    }
-    log.must_say(&usbd_noop(at))?;
-    eprintln!("  [usbd] {}", line.trim());
-    for source in log.text().lines().filter(|l| l.contains("supervisor: the loader came off") || l.contains("supervisor: the slot volume came off")) {
-        eprintln!("  [usbd] {}", source.trim());
-    }
-    for complete in kernel.text().lines().filter(|l| l.contains("Boot: complete")) {
-        eprintln!("  [usbd] {}", complete.trim());
-    }
-    if let Some(mounted) = log.text().lines().find(|l| l.contains("fileserver: Log serving /log")) {
-        eprintln!("  [usbd] {}", mounted.trim());
-    }
-    Ok(())
-}
-
-/// The T14's spare controller — the Type-C one, or 00:14.0 where the stick is
-/// in a Type-C port — left to a claim and driven by usbd: the claim was
+/// The T14's spare controller, the first free one, left to a claim and driven
+/// by usbd: the claim was
 /// handed over with its MSI in remappable format and its remapping entry
 /// written, the message reached its claim, and the No-Op completed. What
 /// reset the function advertises is read off the release and printed, not
@@ -5999,17 +5943,17 @@ fn windows_on_metal(boot: &metal::Readback) -> Result<(), String> {
         "  [windows] held irqs_off_ns={} preempt_off_ns={}; herd irqs_off_ns={} preempt_off_ns={}",
         read.held.0, read.held.1, read.load.0, read.load.1
     );
-    // Under the stick write, each CPU's longest windows are judged against
+    // Under the log write, each CPU's longest windows are judged against
     // the bench's record (`timings::ceiling`), the base they were first read at.
-    boot.job_passed(STICK_WRITE)?;
-    let reached = metal::bytes_of_lines(boot.log().text(), "stick_write: line ");
+    boot.job_passed(LOG_WRITE)?;
+    let reached = metal::bytes_of_lines(boot.log().text(), "log_write: line ");
     if reached < 1 << 20 {
-        return Err(format!("{reached} bytes of the stick write's lines reached the stick, under a mebibyte"));
+        return Err(format!("{reached} bytes of the log write's lines reached the disk, under a mebibyte"));
     }
-    let under = common::irqcensus::windows_under(kernel.text(), cpus, &exited(STICK_WRITE))?;
-    eprintln!("  [windows] stick write irqs_off_ns={} preempt_off_ns={}", under.load.0, under.load.1);
-    boot.measured("boot.windowscase.stick_write.irqs_off_ns", under.load.0)?;
-    boot.measured("boot.windowscase.stick_write.preempt_off_ns", under.load.1)
+    let under = common::irqcensus::windows_under(kernel.text(), cpus, &exited(LOG_WRITE))?;
+    eprintln!("  [windows] log write irqs_off_ns={} preempt_off_ns={}", under.load.0, under.load.1);
+    boot.measured("boot.windowscase.log_write.irqs_off_ns", under.load.0)?;
+    boot.measured("boot.windowscase.log_write.preempt_off_ns", under.load.1)
 }
 
 fn pci_cap_selftest(log: &str) -> Result<(), String> {
@@ -6169,8 +6113,8 @@ fn sysret_ss(log: &str) -> Result<(), String> {
 /// where every VT-d unit has protected memory regions, as the T14's do, they
 /// went on before the hand-over and off after it.
 ///
-/// An AMD-Vi unit's lines are on the boot stick only because the switch-off
-/// let the stick's DMA through the unit the actuator left blocking it.
+/// An AMD-Vi unit's lines are on the log disk only because the switch-off
+/// let that disk's DMA through the unit the actuator left blocking it.
 fn iommu_firmware_left(log: &str) -> Result<(), String> {
         // VT-d unit lines alone: an AMD-Vi unit's read `iommu: amdvi unit`.
         let vtd: Vec<&str> = log.lines().filter(|l| l.contains("iommu: unit") && l.contains(" cap=")).collect();
