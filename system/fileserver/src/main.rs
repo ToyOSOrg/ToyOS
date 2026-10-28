@@ -379,7 +379,9 @@ fn clean_limit() -> usize {
     let n = toyos::system::sysinfo(&mut buf);
     assert!(n >= toyos::system::SYSINFO_HEADER_SIZE, "fileserver: sysinfo returned {n} bytes");
     let total = toyos_abi::syscall::SysinfoHeader::decode(&buf).memory_total;
-    usize::try_from(total / CLEAN_SHARE / toyos_blockdev::BLOCK as u64).expect("a block count fits a usize")
+    // MEASUREMENT ONLY: the old fixed limit, to see which rows follow it.
+    let _ = usize::try_from(total / CLEAN_SHARE / toyos_blockdev::BLOCK as u64).expect("a block count fits a usize");
+    16 * 1024
 }
 
 struct Server {
