@@ -188,6 +188,33 @@ What is left, about 1.3 times short of Linux with the ring full about half
 of each row whatever the descriptor fetch does, is the next lead: what the
 part waits on for each frame once it holds it.
 
+**The part keeps line rate while it holds frames; the gap is each
+connection's first second, read 2026-10-28** ([evidence `d1ea41856/`](https://github.com/ToyOSOrg/evidence/tree/9f309c28654d89c37e8fb0defc9fd2b1c61cc91b/r1/d1ea41856)).
+On the full ring the I219 sent 83,600 frames a second, line rate. One session
+read what the peer had received after its first byte, a mean over each row's
+five connections, at `d1ea41856` (A) and A with a card-held stop counted as
+cwnd's (B), two of each, with Linux at both ends:
+
+| received by | 100 ms | 300 ms | 1 s | 2 s | upload p50 |
+|---|---|---|---|---|---|
+| Linux (2 runs) | 5.9–6.4 MB | 27.9–29.0 MB | 109–110 MB | 224–225 MB | 113, 113 |
+| A (2 runs) | 0.32 MB | 2.0–2.1 MB | 38–41 MB | 149–153 MB | 88, 89 |
+| B (2 runs) | 0.32–0.35 MB | 2.1–2.3 MB | 46–47 MB | 162–163 MB | 93, 92 |
+
+- From 1 s to 2 s ToyOS carried 112–117 MB, Linux 115. Nothing was lost.
+- The peer acknowledged about 50 KB, 34 segments, an ACK. Each ACK that grew
+  cwnd grew it by one SMSS (RFC 5681 §3.1's min(N, SMSS)), so slow start grew
+  a few percent a round trip instead of doubling.
+- Under A, 75–76 % of ACKs grew nothing: the card's room had ended the
+  opportunity before them with more than a segment of cwnd left.
+
+Pull request #1102 replaces the initial slow start with HyStart++
+(RFC 9406, which RFC 9438 §4.10 recommends for CUBIC), whose L = 8 for a
+sender that does not pace caps the growth an ACK gives at eight segments, and
+counts a card-held window as in use when at least half of it is in flight
+(RFC 7661 §4.3). Its effect on this row is read by the A/B in that pull
+request.
+
 The clock does not separate the two systems. Each upload row's own
 readings, `mhz` just after it and `mhz_settled` before it, were about
 1.6 GHz under ToyOS (settled 1.6, 1.8 or 3.8 GHz). Under Linux they were

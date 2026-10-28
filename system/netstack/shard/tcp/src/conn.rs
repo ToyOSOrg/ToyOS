@@ -8,7 +8,7 @@ use core::time::Duration;
 
 use toyos_net_wire::tcp::{SackBlock, SynOptions, TcpFlags, TcpOptions, TcpSegment, Timestamps};
 
-use crate::cc::Cc;
+use crate::cc::{self, Cc, SlowStart};
 use crate::counters::{Counter, Log};
 use crate::ring::{Lent, Ring};
 use crate::rtt::{Rtt, RTO_AFTER_HANDSHAKE_LOSS, RTO_MAX};
@@ -744,7 +744,7 @@ impl Sync {
         self.tx.trim_scoreboard();
         self.rtx_next = self.rtx_next.map(|p| p.later(ack)).filter(|p| p.before(self.tx.nxt));
         self.urgent = self.urgent.filter(|u| u.at_or_after(ack));
-        self.sample(seg, ack, flight, ctx);
+        let rtt = self.sample(seg, ack, flight, ctx);
         self.progress_since = Some(now);
         self.acked_since = Some(now);
         self.stalled = 0;
@@ -774,7 +774,15 @@ impl Sync {
                 ctx.log.count(if self.cc.limited { Counter::AcksCwndLimited } else { Counter::AcksNotLimited });
                 ctx.log.add(Counter::AcksBytes, u64::from(bytes));
                 let before = self.cc.cwnd;
-                self.cc.on_ack(now, bytes, self.rtt.srtt());
+                match self.cc.on_ack(&cc::Ack { now, bytes, una: ack, nxt: self.tx.nxt, rtt, srtt: self.rtt.srtt() }) {
+                    Some(SlowStart::Conservative) => ctx.log.count(Counter::HyStartCss),
+                    Some(SlowStart::Ended) => {
+                        ctx.log.count(Counter::HyStartExits);
+                        ctx.log.add(Counter::HyStartExitCwndBytes, u64::from(self.cc.cwnd));
+                    }
+                    Some(SlowStart::Resumed) => ctx.log.count(Counter::HyStartResumed),
+                    None => {}
+                }
                 ctx.log.add(Counter::CwndGrownBytes, u64::from(self.cc.cwnd.saturating_sub(before)));
             }
         }
@@ -819,28 +827,26 @@ impl Sync {
         }
     }
 
-    fn sample(&mut self, seg: &In<'_>, ack: Seq, flight: u32, ctx: &mut Ctx<'_>) {
+    fn sample(&mut self, seg: &In<'_>, ack: Seq, flight: u32, ctx: &mut Ctx<'_>) -> Option<Duration> {
         let now = ctx.now;
-        match self.ts {
+        let (rtt, weight) = match self.ts {
             Some(ts) => {
-                let Some(t) = seg.options.timestamps() else { return };
-                match ts.echo_rtt(t.echo, now) {
-                    Some(rtt) => {
-                        let expected = flight.div_ceil(self.smss().saturating_mul(2).max(1)).max(1);
-                        self.rtt.sample(rtt, expected);
-                        self.sampled = true;
-                    }
-                    None => ctx.log.count(Counter::TsEcrInvalid),
-                }
+                let t = seg.options.timestamps()?;
+                let Some(rtt) = ts.echo_rtt(t.echo, now) else {
+                    ctx.log.count(Counter::TsEcrInvalid);
+                    return None;
+                };
+                (rtt, flight.div_ceil(self.smss().saturating_mul(2).max(1)).max(1))
             }
             None => {
-                if let Some((_, at)) = self.timing.filter(|&(end, _)| ack.at_or_after(end)) {
-                    self.timing = None;
-                    self.rtt.sample(now.since(at), 1);
-                    self.sampled = true;
-                }
+                let (_, at) = self.timing.filter(|&(end, _)| ack.at_or_after(end))?;
+                self.timing = None;
+                (now.since(at), 1)
             }
-        }
+        };
+        self.rtt.sample(rtt, weight);
+        self.sampled = true;
+        Some(rtt)
     }
 
     /// A duplicate acknowledgment: RFC 5681 §2's without SACK, RFC 6675 §2's with it.
@@ -1284,9 +1290,9 @@ impl Sync {
             self.sws = None;
             self.sws_fired = false;
             // Until the next stop says otherwise: an opportunity that ends on the caller's credit
-            // ends here, and cwnd limited it only if this left it full.
-            let in_flight = self.in_flight();
-            self.cc.limited = self.cwnd().saturating_sub(in_flight) < self.smss();
+            // ends here. The caller is neither the application nor the peer (RFC 9438 §5.8), and
+            // a window at least half in flight is in use (RFC 7661 §4.3).
+            self.cc.limited = self.in_flight() >= self.cwnd() / 2;
         }
         let data_end = start.add(len);
         if data_end.after(old) {

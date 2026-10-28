@@ -106,5 +106,5 @@ fn each_ack_is_counted_with_what_it_acknowledged_and_grew() {
     assert_eq!(h.count(Counter::AcksCwndLimited), 1);
     assert_eq!(h.count(Counter::AcksNotLimited), 1);
     assert_eq!(h.count(Counter::AcksBytes), 4380);
-    assert_eq!(h.count(Counter::CwndGrownBytes), 1460);
+    assert_eq!(h.count(Counter::CwndGrownBytes), 2920);
 }

@@ -42,13 +42,14 @@ fn s_cc_004_one_segment_after_two_syn_retransmissions() {
     expect(&h.send(3010, 30_000), &["LEN=1460"]);
 }
 
+/// RFC 9406 §4.2: an ACK of two segments grows the initial slow start by both.
 #[test]
 fn s_cc_005_slow_start() {
     let mut h = fixture_e();
     h.send(0, 30_000);
     let outs = h.input(10, seg(5001).ack(3921));
-    assert_eq!(h.info().cwnd, 16_060);
-    expect(&outs, &["SEQ=15601", "SEQ=17061", "SEQ=18521"]);
+    assert_eq!(h.info().cwnd, 17_520);
+    expect(&outs, &["SEQ=15601", "SEQ=17061", "SEQ=18521", "SEQ=19981"]);
 }
 
 #[test]
@@ -105,17 +106,37 @@ fn s_cc_016_acks_in_one_pass_each_grow_slow_start() {
     assert_eq!((one_at_a_time, h.info().cwnd), (29_200, 29_200));
 }
 
-/// RFC 9438 §5.8, RFC 7661: a transmit opportunity that ends on the caller's credit with cwnd room
-/// left is not cwnd's stop, and the ACKs after it grow nothing.
+/// RFC 9438 §5.8, RFC 7661 §4.3: the caller's credit is neither the application's limit nor the
+/// peer's. An opportunity it ends with at least half of cwnd in flight leaves the window in use;
+/// with less, the ACKs after it grow nothing.
 #[test]
-fn s_cc_017_a_sender_the_card_holds_grows_no_window() {
+fn s_cc_017_a_sender_the_card_holds_grows_a_window_half_in_flight() {
     let mut h = fixture_e();
     assert_eq!(h.send(0, 60_000).len(), 10, "a stop at the initial window");
     h.credit = Some(1);
-    h.input(10, seg(5001).ack(3921));
-    assert_eq!(h.info().cwnd, 16_060, "the ACK after cwnd's stop grows it");
-    // Three segments' room, one segment's credit: the opportunity ended on the card.
+    assert_eq!(h.deliver(seg(5001).ack(3921)).len(), 1);
+    assert_eq!(h.info().cwnd, 17_520, "the ACK after cwnd's stop grows it");
+    // 13,140 of 17,520 in flight as the card's credit ended the opportunity.
     h.credit = Some(1);
-    assert_eq!(h.input(11, seg(5001).ack(5381)).len(), 1);
-    assert_eq!(h.info().cwnd, 16_060, "a sender the card held grew its window");
+    assert_eq!(h.deliver(seg(5001).ack(5381)).len(), 1);
+    assert_eq!(h.info().cwnd, 18_980, "a window the card held over half in flight grew nothing");
+    // 4,380 of 29,200 in flight.
+    h.credit = Some(1);
+    assert_eq!(h.deliver(seg(5001).ack(15_601)).len(), 1);
+    assert_eq!(h.info().cwnd, 29_200);
+    h.credit = Some(0);
+    h.deliver(seg(5001).ack(17_061));
+    assert_eq!(h.info().cwnd, 29_200, "a window the card held under half in flight grew");
+}
+
+/// RFC 9406 §4.2 with §4.3's L = 8 for a sender that does not pace: an ACK of the whole flight
+/// grows the initial slow start by eight segments, where RFC 5681 §3.1 grows it by one.
+#[test]
+fn s_cc_018_a_stretch_ack_grows_the_initial_slow_start_by_eight_segments() {
+    let mut h = fixture_e();
+    assert_eq!(h.send(0, 60_000).len(), 10);
+    assert_eq!(h.input(10, seg(5001).ack(15_601)).len(), 18);
+    assert_eq!(h.info().cwnd, 26_280);
+    h.input(20, seg(5001).ack(41_881));
+    assert_eq!(h.info().cwnd, 37_960);
 }

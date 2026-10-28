@@ -80,6 +80,10 @@ toyos_net_wire::counters! {
     AcksNotLimited = "tcp.acks.not-limited";
     AcksBytes = "tcp.acks.bytes";
     CwndGrownBytes = "tcp.cwnd.grown.bytes";
+    HyStartCss = "tcp.hystart.css";
+    HyStartResumed = "tcp.hystart.resumed";
+    HyStartExits = "tcp.hystart.exits";
+    HyStartExitCwndBytes = "tcp.hystart.exit.cwnd.bytes";
     EventOverflow = "tcp.event-overflow";
 }
 
