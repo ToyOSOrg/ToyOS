@@ -10,7 +10,7 @@ use kernel::sched::hw::{CpuId, Machine, Nanos};
 use kernel::sched::task::{Refused, SafePoint, WaitClass, QUANTUM_NS};
 
 use crate::arch::percpu;
-use crate::watch::{self, Cancel};
+use crate::watch::{self, Cancel, Watch};
 use crate::hw::HW;
 use crate::pipe::PipeRef;
 use crate::process::{self, Pid, Tid};
@@ -253,12 +253,17 @@ pub fn exit_current() -> ! {
     unreachable!("exit_current: returned from the exit pass");
 }
 
-/// Wake pipe readers, lending each an RT window if the writer holds one; the
-/// pipe is also marked, so a runnable reader takes the window too.
+/// Wake pipe readers, lending each an RT window if the writer holds one.
 pub fn wake_pipe_readers(pipe: &PipeRef) {
-    let watch = pipe.read_watch();
+    post_lending(pipe.read_watch(), || pipe.set_rt_boost_pending());
+}
+
+/// Post `watch`, lending whoever it wakes one [`boost_window`] if the poster
+/// is real-time; `mark` records the loan for a consumer already runnable,
+/// which takes it with [`boost_current_rt_inherited`].
+pub fn post_lending(watch: &Watch, mark: impl FnOnce()) {
     if driver::current_is_rt() {
-        pipe.set_rt_boost_pending();
+        mark();
         watch.post_boosted(boost_window());
     } else {
         watch.post();

@@ -377,6 +377,8 @@ mod std_io {
 
     std_owned_from!(
         super::Pipe,
+        super::wake::Waker,
+        super::wake::Bell,
         super::Device,
         super::Console,
         super::ipc::Connection,

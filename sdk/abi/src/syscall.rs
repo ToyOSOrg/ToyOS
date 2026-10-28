@@ -340,6 +340,14 @@ pub const SYS_VM_REMAP: u64 = 146;
 ///
 /// [`Rights::WAKE_LATENCY`]: crate::handle::Rights::WAKE_LATENCY
 pub const SYS_WAKE_LATENCY_HOLD: u64 = 147;
+/// A fresh event's two sides. See [`event_create`].
+pub const SYS_EVENT_CREATE: u64 = 148;
+/// Raise an event, on its signal side's `WRITE`. See [`event_signal`].
+pub const SYS_EVENT_SIGNAL: u64 = 149;
+/// Take an event's pending signal, on its wait side's `READ`. See [`event_take`].
+pub const SYS_EVENT_TAKE: u64 = 150;
+/// Park on one handle's one condition, with a timeout. See [`handle_wait`].
+pub const SYS_HANDLE_WAIT: u64 = 151;
 
 /// Bins in the per-process syscall profile — one for every number this ABI
 /// issues, and one at the end for every number it does not.
@@ -347,13 +355,13 @@ pub const SYS_WAKE_LATENCY_HOLD: u64 = 147;
 /// **The profile's parts sum to its total, and that is the whole requirement.**
 /// A bin array narrower than the ABI reaches drops calls out of the line while
 /// the total goes on counting them.
-pub const SYSCALL_PROFILE_BINS: usize = 149;
+pub const SYSCALL_PROFILE_BINS: usize = 153;
 
 /// Where a number this ABI does not issue is counted. Merging is a degradation
 /// a reader can see in the line; dropping is one nobody can.
 pub const SYSCALL_PROFILE_OTHER: usize = SYSCALL_PROFILE_BINS - 1;
 
-const _: () = assert!(SYS_WAKE_LATENCY_HOLD < SYSCALL_PROFILE_OTHER as u64);
+const _: () = assert!(SYS_HANDLE_WAIT < SYSCALL_PROFILE_OTHER as u64);
 
 pub const WNOHANG: u64 = 1;
 /// Every bit `SYS_PROCESS_WAIT`'s flag word defines; a wait carrying another
@@ -1047,6 +1055,44 @@ pub fn pipe() -> Result<PipeEnds, SyscallError> {
         read: RawHandle((raw >> 32) as u32),
         write: RawHandle((raw & 0xFFFF_FFFF) as u32),
     })
+}
+
+/// An event's two sides: [`signal`](Self::signal) carries `WRITE|DUP|TRANSFER`,
+/// [`wait`](Self::wait) `READ|WAIT|DUP|TRANSFER`.
+pub struct EventEnds {
+    pub signal: RawHandle,
+    pub wait: RawHandle,
+}
+
+/// A fresh event: one coalescing pending signal, raised by its signal side
+/// and taken by its wait side. Packed as [`pipe`] is.
+pub fn event_create() -> Result<EventEnds, SyscallError> {
+    let raw = check(syscall(SYS_EVENT_CREATE, 0, 0, 0, 0))?;
+    Ok(EventEnds { signal: RawHandle((raw >> 32) as u32), wait: RawHandle((raw & 0xFFFF_FFFF) as u32) })
+}
+
+/// Raise the event; signals before a take are one. Never blocks and
+/// allocates nothing. `Gone` once the wait side's last handle has gone.
+pub fn event_signal(signal: RawHandle) -> Result<(), SyscallError> {
+    check(syscall(SYS_EVENT_SIGNAL, signal.0 as u64, 0, 0, 0)).map(drop)
+}
+
+/// Take the pending signal. `WouldBlock` with none pending; `Gone` with none
+/// pending and the signal side's last handle gone, which is never a signal.
+/// A wait side is readable while either holds, and a readable watch takes
+/// nothing.
+pub fn event_take(wait: RawHandle) -> Result<(), SyscallError> {
+    check(syscall(SYS_EVENT_TAKE, wait.0 as u64, 0, 0, 0)).map(drop)
+}
+
+/// Park until `handle` answers the one condition `interest` names
+/// ([`READABLE`](crate::inbox::READABLE), [`WRITABLE`](crate::inbox::WRITABLE)
+/// or [`OTHER_END_GONE`](crate::inbox::OTHER_END_GONE)), as an inbox watch
+/// would, or `timeout_nanos` passes; `u64::MAX` waits for good. Answers the
+/// condition's bit, or `0` at the timeout. Needs `WAIT`; an object with no
+/// such condition, or a device claim, is `NotSupported`.
+pub fn handle_wait(handle: RawHandle, interest: u32, timeout_nanos: u64) -> Result<u32, SyscallError> {
+    check(syscall(SYS_HANDLE_WAIT, handle.0 as u64, interest as u64, timeout_nanos, 0)).map(|bit| bit as u32)
 }
 
 /// Read the inherited environment variables into `buf`.
