@@ -218,6 +218,9 @@ fn run_phase(phase: &str, threads: usize, inputs: &Arc<Inputs>, heat: Option<&He
                     continue;
                 }
             }
+            // The clock before the slice, beside the one after it: a slice
+            // long enough to meet the package's power limit says so.
+            crate::clock::settle();
             let around = crate::around::begin();
             let (mut ns, elapsed, placed) = slice(workload, threads, inputs, &stopped);
             around.end(&bench, &placed);

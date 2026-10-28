@@ -225,7 +225,8 @@ fn busy_permille(span: Duration) -> Option<u64> {
     (total > 0).then(|| (total - (idle1 - idle0)) * 1000 / total)
 }
 
-/// What a Linux number depends on, read and never changed.
+/// What a Linux number depends on, read and never changed. `README.md` says
+/// which of them a comparison sets.
 pub fn conditions() {
     condition("kernel", read("/proc/sys/kernel/osrelease").unwrap_or_default());
     let distro = fs::read_to_string("/etc/os-release").ok().and_then(|text| {
@@ -238,6 +239,7 @@ pub fn conditions() {
     condition("cpufreq_driver", per_cpu("cpufreq/scaling_driver"));
     condition("governor", per_cpu("cpufreq/scaling_governor"));
     condition("epp", per_cpu("cpufreq/energy_performance_preference"));
+    condition("min_khz", per_cpu("cpufreq/scaling_min_freq"));
     condition("max_khz", per_cpu("cpufreq/scaling_max_freq"));
     condition(
         "intel_no_turbo",
@@ -245,6 +247,11 @@ pub fn conditions() {
     );
     condition("boost", read("/sys/devices/system/cpu/cpufreq/boost").unwrap_or_else(|| "absent".into()));
     condition("amd_pstate", read("/sys/devices/system/cpu/amd_pstate/status").unwrap_or_else(|| "absent".into()));
+    condition("platform_profile", read("/sys/firmware/acpi/platform_profile").unwrap_or_else(|| "absent".into()));
+    // What every timestamp here is read from: one the vDSO cannot read costs
+    // each `Instant::now` a syscall.
+    let clocksource = read("/sys/devices/system/clocksource/clocksource0/current_clocksource");
+    condition("clocksource", clocksource.unwrap_or_else(|| "absent".into()));
     for supply in fs::read_dir("/sys/class/power_supply").into_iter().flatten().flatten() {
         let at = supply.path();
         let get = |f: &str| read(&at.join(f).to_string_lossy());
@@ -624,9 +631,11 @@ fn tcp_info(stream: &std::net::TcpStream) -> Result<Reading, String> {
     ])
 }
 
-/// The runner's home, and the filesystem and disk model holding it; the
-/// path itself names the user and is never printed.
-pub fn persistent_dir() -> Option<(String, String)> {
+/// The runner's home, the filesystem and disk model holding it, as `ext4,
+/// NVMe disk, model <model>`, and the disk's kind as a medium: `nvme`, `usb`,
+/// `sata`, `mmc`, `virtio`, `other`, or `none` for no block device. The path
+/// itself names the user and is never printed.
+pub fn persistent_dir() -> Option<(String, String, String)> {
     let home = std::env::var("HOME").ok()?;
     let (fstype, source, _) = mount_of(&home)?;
     // btrfs reports an anonymous `0:NN` that names no block device; its
@@ -639,19 +648,22 @@ pub fn persistent_dir() -> Option<(String, String)> {
         sysfs(format!("{}:{}", libc::major(rdev), libc::minor(rdev)))
     });
     let Some(device) = device else {
-        return Some((home, format!("{fstype}, on no block device")));
+        return Some((home, format!("{fstype}, on no block device"), "none".into()));
     };
     let (disk, mapped) = backing_disk(device);
     let model = read(&disk.join("device/model").to_string_lossy()).unwrap_or_else(|| "unknown".into());
     let name = disk.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
-    let kind = [("nvme", "NVMe"), ("sd", "SCSI, SATA or USB"), ("mmcblk", "MMC"), ("vd", "virtio")]
-        .iter()
+    // A SCSI disk is a USB one where sysfs puts it under a USB device.
+    let usb = disk.to_string_lossy().contains("/usb");
+    let sd = if usb { ("USB", "usb") } else { ("SCSI or SATA", "sata") };
+    let (kind, medium) = [("nvme", ("NVMe", "nvme")), ("sd", sd), ("mmcblk", ("MMC", "mmc")), ("vd", ("virtio", "virtio"))]
+        .into_iter()
         .find(|(prefix, _)| name.starts_with(prefix))
-        .map_or("other", |(_, kind)| kind);
+        .map_or(("other", "other"), |(_, kind)| kind);
     let through = if mapped { " through device-mapper" } else { "" };
     // The device's own name is never printed: an installer or a user chose
     // a mapper's (`luks-<UUID>`, a volume group named for the host).
-    Some((home, format!("{fstype}{through}, {kind} disk, model {model}")))
+    Some((home, format!("{fstype}{through}, {kind} disk, model {model}"), medium.into()))
 }
 
 /// The `major:minor` of the filesystem holding `path`, off mountinfo's third

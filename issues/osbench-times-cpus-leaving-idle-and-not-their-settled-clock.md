@@ -28,9 +28,19 @@ counter reading.
 
 Since round 2 every benchmark but the wake and fairness groups' (whose CPUs
 idle or are all busy by design) runs after `clock::settle`, which spins the
-measuring CPU until three probes of a dependent `add` chain agree within 1%,
-and every result line prints that clock as `mhz_settled` and the clock just
-after as `mhz`; each group also prints `cpu.clock`, 200 probes from idle.
+measuring CPU until every reading of a dependent `add` chain for 50 ms
+agrees within 3% (`osbench_rules::settle`), or for 0.5 s, and every result
+line prints that clock as `mhz_settled`, the clock a second settle reaches
+after the row as `mhz_after`, and the clock just after as `mhz`; each group
+also prints `cpu.clock`, 200 probes from idle. A reading is the difference
+of a short add chain's time and a long one's, so the cost of reading the
+time is no part of it. Three probes in a row, the rule until 2026-10-27,
+took the AMD bench's `schedutil` step for the settled clock: its Linux runs
+of 2026-10-24 settled at 1,357 MHz. On 2026-10-28 every settle of the AMD's
+Linux ran out its time under a 1% rule (84 of 84) where ToyOS's on the same
+CPU never did (0 of 92). That Linux timed through the HPET, whose 1.2 µs a
+read sat inside a 25 µs probe, reading the clock some 5% low and moving it
+by the read's jitter.
 
 **Exit**: a T14 run on each system shows `mhz_settled` near the all-CPU rate
 per CPU within the run-to-run spread, or names the benchmark whose CPU did

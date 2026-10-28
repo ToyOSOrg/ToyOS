@@ -11,6 +11,29 @@
 //! uncorrected for the table's other rows. Better or worse is judged only
 //! for a unit whose better direction is known ([`better`]); for any other
 //! the verdict says which way ToyOS differs.
+//!
+//! Each row's clocks are told beside its verdict, since no program reads a
+//! power or heat limit on both systems:
+//!
+//! - in how many runs the clock settled after the row was under nine tenths
+//!   of the one settled before it ([`clock_fell`]), which a limit reached
+//!   inside the row most likely explains;
+//! - where the two systems' median clocks settled before the row lie more
+//!   than a tenth apart ([`clocks_apart`]), which also catches a row that
+//!   started already limited, as a fall cannot;
+//! - in how many runs a settle ran out its time (`unsettled`), whose clocks
+//!   say nothing either way.
+//!
+//! A row whose lines name their medium (`medium=`, the memory or the kind of
+//! disk under a filesystem) is compared only where every run's medium is one:
+//! a row written to an NVMe disk under one system and a USB stick under the
+//! other has a verdict of what the two media are, not of the systems.
+//!
+//! A system's runs on one machine are one configuration ([`SETUP`]): runs that
+//! disagree on it are refused, since their median would mix two, and each
+//! machine's table states what each system's runs were taken under. What a
+//! system chooses afresh at each boot ([`PER_RUN`]) is part of that system as
+//! booted: it is stated run by run and never refused.
 
 use std::collections::BTreeMap;
 use std::fmt::Write as _;
@@ -26,9 +49,28 @@ pub enum Os {
     Toyos,
 }
 
+impl Os {
+    pub fn name(self) -> &'static str {
+        match self {
+            Os::Linux => "Linux",
+            Os::Toyos => "ToyOS",
+        }
+    }
+}
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Outcome {
-    Measured { unit: String, p50: u64 },
+    /// `clock_fell` as [`clock_fell`] judges the line's two clocks, unless
+    /// either is `unsettled`; `settled` the clock settled before it; `medium`
+    /// as the line names it.
+    Measured {
+        unit: String,
+        p50: u64,
+        clock_fell: bool,
+        settled: Option<u64>,
+        unsettled: bool,
+        medium: Option<String>,
+    },
     /// Unmeasured, unsupported or refused, with the run's reason.
     Not { kind: String, why: String },
 }
@@ -49,7 +91,7 @@ impl Run {
 
 /// One run's lines. A benchmark a run reports in more than one group, as
 /// every group's `cpu.clock`, is named `<bench>@<group>`, and the `k`th of
-/// one name in a group, as `fair.flat`'s jobs, `<name>#k`. A run with no
+/// one name in a group `<name>#k`. A run with no
 /// osbench line, two systems' lines or one group started twice is refused.
 pub fn parse(text: &str) -> Result<Run, String> {
     let mut os = None;
@@ -89,7 +131,16 @@ pub fn parse(text: &str) -> Result<Run, String> {
         let fields: BTreeMap<&str, &str> = words.filter_map(|w| w.split_once('=')).collect();
         let outcome = if let Some(unit) = fields.get("unit") {
             let p50 = fields.get("p50").and_then(|v| v.parse().ok()).ok_or_else(|| format!("{bench}: no p50"))?;
-            Outcome::Measured { unit: unit.to_string(), p50 }
+            let mhz = |key: &str| fields.get(key).and_then(|v| v.parse().ok());
+            let unsettled = fields.contains_key("unsettled");
+            Outcome::Measured {
+                unit: unit.to_string(),
+                p50,
+                clock_fell: !unsettled && clock_fell(mhz("mhz_settled"), mhz("mhz_after")),
+                settled: mhz("mhz_settled"),
+                unsettled,
+                medium: fields.get("medium").map(|m| m.to_string()),
+            }
         } else if let Some((kind, why)) =
             ["unmeasured", "unsupported", "refused"].iter().find_map(|k| fields.get(k).map(|why| (*k, *why)))
         {
@@ -112,6 +163,19 @@ pub fn parse(text: &str) -> Result<Run, String> {
         benches.insert(name, outcome.clone());
     }
     Ok(Run { os: os.ok_or("no osbench line")?, conds, benches })
+}
+
+/// Whether the clock fell across a measurement: the clock settled after it
+/// under nine tenths of the clock settled before it. A line that settled no
+/// clock says nothing either way.
+pub fn clock_fell(settled: Option<u64>, after: Option<u64>) -> bool {
+    matches!((settled, after), (Some(settled), Some(after)) if after * 10 < settled * 9)
+}
+
+/// Whether two systems' median settled clocks lie more than a tenth of the
+/// higher apart.
+pub fn clocks_apart(a: f64, b: f64) -> bool {
+    (a - b).abs() * 10.0 > a.max(b)
 }
 
 pub fn median(values: &[u64]) -> f64 {
@@ -212,6 +276,63 @@ pub fn better(unit: &str) -> Option<Better> {
 /// varies by the run.
 const PATHS: [(&str, &str, usize); 2] = [("lan.", "lan.peer_link", 2), ("internet.", "internet.link", 1)];
 
+/// The conditions every run of one system on one machine must share: the
+/// kernel, the CPU's frequency request, and what serves each filesystem the
+/// `fs` and `persist` rows use.
+pub const SETUP: [&str; 13] = [
+    "kernel",
+    "cpufreq_driver",
+    "governor",
+    "epp",
+    "min_khz",
+    "max_khz",
+    "boost",
+    "intel_no_turbo",
+    "platform_profile",
+    "smt_active",
+    "fs.mem.served_by",
+    "fs.served.served_by",
+    "persist.served_by",
+];
+
+/// The conditions a system chooses at each boot, stated per run: the clock
+/// every timestamp is read from, which Linux's watchdog can move off the TSC
+/// in one boot and not the next.
+pub const PER_RUN: [&str; 1] = ["clocksource"];
+
+/// `os`'s [`PER_RUN`] conditions, each as `key=<run 1's>,<run 2's>...` in the
+/// runs' order, `absent` for a run that names none.
+fn per_run(runs: &[&Run], os: Os) -> Vec<String> {
+    let runs: Vec<&&Run> = runs.iter().filter(|r| r.os == os).collect();
+    PER_RUN
+        .iter()
+        .filter(|key| runs.iter().any(|r| r.conds.contains_key(**key)))
+        .map(|key| {
+            let said: Vec<&str> = runs.iter().map(|r| r.conds.get(*key).map_or("absent", String::as_str)).collect();
+            format!("{key}={}", said.join(","))
+        })
+        .collect()
+}
+
+/// `os`'s setup on these runs, as `key=value` in [`SETUP`]'s order, or the
+/// first key its runs disagree on.
+fn setup(runs: &[&Run], os: Os) -> Result<Vec<String>, String> {
+    let runs: Vec<&&Run> = runs.iter().filter(|r| r.os == os).collect();
+    let mut said = Vec::new();
+    for key in SETUP {
+        let values: std::collections::BTreeSet<Option<&String>> = runs.iter().map(|r| r.conds.get(key)).collect();
+        match values.iter().collect::<Vec<_>>()[..] {
+            [] | [None] => {}
+            [Some(value)] => said.push(format!("{key}={value}")),
+            _ => {
+                let seen: Vec<&str> = values.iter().map(|v| v.map_or("absent", String::as_str)).collect();
+                return Err(format!("the {} runs disagree on {key}: {}", os.name(), seen.join(" / ")));
+            }
+        }
+    }
+    Ok(said)
+}
+
 fn path(said: &str, words: usize) -> String {
     said.split(['_', ' ']).take(words).collect::<Vec<_>>().join(" ")
 }
@@ -239,6 +360,16 @@ pub fn compare(runs: &[Run]) -> Result<String, String> {
             write!(out, " {cond}: {seen}.").unwrap();
         }
         writeln!(out, "\n").unwrap();
+        for os in [Os::Linux, Os::Toyos] {
+            let said = setup(&runs, os).map_err(|why| format!("{machine}: {why}"))?;
+            if !said.is_empty() {
+                writeln!(out, "{} setup: {}.\n", os.name(), said.join(", ")).unwrap();
+            }
+            let each = per_run(&runs, os);
+            if !each.is_empty() {
+                writeln!(out, "{} per run: {}.\n", os.name(), each.join(", ")).unwrap();
+            }
+        }
         writeln!(out, "| bench | unit | Linux p50s | Linux median | Linux range | ToyOS p50s | ToyOS median | ToyOS range | ToyOS/Linux | p | verdict |").unwrap();
         writeln!(out, "|---|---|---|---|---|---|---|---|---|---|---|").unwrap();
         let names: std::collections::BTreeSet<&String> = runs.iter().flat_map(|r| r.benches.keys()).collect();
@@ -262,14 +393,22 @@ pub fn compare(runs: &[Run]) -> Result<String, String> {
 fn compare_one(runs: &[&Run], name: &str) -> String {
     let mut unit = None;
     let mut values: BTreeMap<Os, Vec<u64>> = BTreeMap::new();
+    let mut fell: BTreeMap<Os, usize> = BTreeMap::new();
+    let mut unsettled_runs: BTreeMap<Os, usize> = BTreeMap::new();
+    let mut settled: BTreeMap<Os, Vec<u64>> = BTreeMap::new();
+    let mut media: BTreeMap<Os, std::collections::BTreeSet<Option<String>>> = BTreeMap::new();
     let mut not: BTreeMap<Os, Vec<String>> = BTreeMap::new();
     for run in runs {
         match run.benches.get(name) {
-            Some(Outcome::Measured { unit: u, p50 }) => {
+            Some(Outcome::Measured { unit: u, p50, clock_fell, settled: mhz, unsettled, medium }) => {
                 if unit.get_or_insert(u.as_str()) != u {
                     return "| | | | | | | | | units differ between runs".into();
                 }
                 values.entry(run.os).or_default().push(*p50);
+                *fell.entry(run.os).or_default() += usize::from(*clock_fell);
+                *unsettled_runs.entry(run.os).or_default() += usize::from(*unsettled);
+                settled.entry(run.os).or_default().extend(mhz.filter(|_| !*unsettled));
+                media.entry(run.os).or_default().insert(medium.clone());
             }
             Some(Outcome::Not { kind, why }) => not.entry(run.os).or_default().push(format!("{kind}: {why}")),
             None => not.entry(run.os).or_default().push("absent".into()),
@@ -287,7 +426,17 @@ fn compare_one(runs: &[&Run], name: &str) -> String {
     };
     let [lp, lm, lr] = side(Os::Linux);
     let [tp, tm, tr] = side(Os::Toyos);
+    // A side that names no medium is a medium of its own beside one that does.
+    let all_media: std::collections::BTreeSet<&Option<String>> = media.values().flatten().collect();
+    let differ = all_media.len() > 1 && all_media.iter().any(|m| m.is_some());
     let (ratio, p, verdict) = match (values.get(&Os::Linux), values.get(&Os::Toyos)) {
+        (Some(_), Some(_)) if differ => {
+            let named = |os: Os| {
+                let said = media.get(&os).into_iter().flatten().map(|m| m.as_deref().unwrap_or("unnamed"));
+                said.collect::<Vec<_>>().join("+")
+            };
+            ("-".into(), "-".into(), format!("the media differ: Linux {}, ToyOS {}", named(Os::Linux), named(Os::Toyos)))
+        }
         (Some(l), Some(t)) => {
             let ratio = median(t) / median(l);
             let exact = mann_whitney(t, l);
@@ -309,13 +458,28 @@ fn compare_one(runs: &[&Run], name: &str) -> String {
         _ => ("-".into(), "-".into(), String::new()),
     };
     let mut verdict = verdict;
+    let mut note = |said: String| {
+        let sep = if verdict.is_empty() { "" } else { "; " };
+        verdict = format!("{verdict}{sep}{said}");
+    };
+    if let (Some(l), Some(t)) = (settled.get(&Os::Linux).filter(|v| !v.is_empty()), settled.get(&Os::Toyos).filter(|v| !v.is_empty())) {
+        let (l, t) = (median(l), median(t));
+        if clocks_apart(l, t) {
+            note(format!("settled clocks apart: Linux {l:.0} MHz, ToyOS {t:.0} MHz"));
+        }
+    }
+    for (counts, said) in [(&fell, "the clock fell"), (&unsettled_runs, "the clock did not settle")] {
+        for (os, n) in counts.iter().filter(|(_, n)| **n > 0) {
+            let of = values.get(os).map_or(0, Vec::len);
+            note(format!("{said} in {n} of {of} {} run(s)", os.name()));
+        }
+    }
     for (os, reasons) in &not {
         let mut distinct = reasons.clone();
         distinct.sort();
         distinct.dedup();
-        let who = if *os == Os::Linux { "Linux" } else { "ToyOS" };
         let sep = if verdict.is_empty() { "" } else { "; " };
-        verdict = format!("{verdict}{sep}{who} {} run(s) {}", reasons.len(), distinct.join(" / "));
+        verdict = format!("{verdict}{sep}{} {} run(s) {}", os.name(), reasons.len(), distinct.join(" / "));
     }
     format!("{} | {lp} | {lm} | {lr} | {tp} | {tm} | {tr} | {ratio} | {p} | {verdict}", unit.unwrap_or_default())
 }
@@ -345,7 +509,10 @@ mod tests {
         );
         assert_eq!(r.os, Os::Toyos);
         assert_eq!(r.machine(), Some("Bench_CPU"));
-        assert_eq!(r.benches["lan.wired.tcp.rtt.64"], Outcome::Measured { unit: "ns".into(), p50: 812 });
+        assert_eq!(
+            r.benches["lan.wired.tcp.rtt.64"],
+            Outcome::Measured { unit: "ns".into(), p50: 812, clock_fell: false, settled: None, unsettled: false, medium: None }
+        );
         assert_eq!(
             r.benches["lan.wifi.tcp.upload"],
             Outcome::Not { kind: "unsupported".into(), why: "ToyOS_has_no_Wi-Fi_driver".into() }
@@ -360,8 +527,8 @@ mod tests {
         let groups = ["sched", "fair"].map(|g| format!("osbench v=2 os=linux group={g} start\nosbench v=2 os=linux bench=cpu.clock unit=MHz n=1 min=1 p50=4000 max=1 mean=1\n")).concat();
         let run = parse(&groups).unwrap();
         assert_eq!(run.benches.keys().collect::<Vec<_>>(), ["cpu.clock@fair", "cpu.clock@sched"]);
-        let jobs = "osbench v=2 os=linux bench=fair.flat unit=permille n=5 min=1 p50=63 max=1 mean=1 job=build\n".repeat(2);
-        assert_eq!(parse(&jobs).unwrap().benches.keys().collect::<Vec<_>>(), ["fair.flat#1", "fair.flat#2"]);
+        let jobs = "osbench v=2 os=linux bench=wake.storm unit=ns n=5 min=1 p50=63 max=1 mean=1\n".repeat(2);
+        assert_eq!(parse(&jobs).unwrap().benches.keys().collect::<Vec<_>>(), ["wake.storm#1", "wake.storm#2"]);
         let mixed = "osbench v=2 os=linux cond cpus=8\nosbench v=2 os=toyos cond cpus=8\n";
         assert!(parse(mixed).unwrap_err().contains("two systems"));
         assert!(parse("nothing here\n").is_err());
@@ -484,6 +651,86 @@ mod tests {
         assert!(!compare(&runs).unwrap().contains("different links"), "a signal is no other link");
         let runs = [peer("linux", "wireless_driver=iwlwifi_signal_dbm=-52", 10), peer("toyos", "wired_driver=e1000e_speed_mbps=1000", 12)];
         assert!(compare(&runs).unwrap().contains("| the runs disagree on lan.peer_link |"));
+    }
+
+    #[test]
+    fn a_row_whose_clock_fell_in_a_run_says_so_per_system() {
+        assert!(clock_fell(Some(4289), Some(1884)));
+        assert!(!clock_fell(Some(4289), Some(3861)), "a tenth down is not a fall");
+        assert!(clock_fell(Some(4289), Some(3860)));
+        assert!(!clock_fell(None, Some(1396)), "no settled clock, no judgement");
+        let deflate = |os: &str, p50: u64, after: u64| {
+            run(os, &[&format!("bench=crunch.single.deflate unit=ns n=63 min=1 p50={p50} max=1 mean=1 mhz_settled=4289 mhz_after={after} mhz=1300")])
+        };
+        let mut runs: Vec<Run> = [(65, 4200), (66, 4210), (64, 4190), (65, 4200)].iter().map(|&(p, m)| deflate("linux", p, m)).collect();
+        runs.extend([(63, 1884), (66, 1396), (63, 4200), (64, 4280)].iter().map(|&(p, m)| deflate("toyos", p, m)));
+        let table = compare(&runs).unwrap();
+        let row = table.lines().find(|l| l.starts_with("| crunch.single.deflate")).unwrap();
+        assert!(row.ends_with("not resolved; the clock fell in 2 of 4 ToyOS run(s) |"), "{row}");
+    }
+
+    #[test]
+    fn clocks_settled_apart_and_settles_cut_short_are_told() {
+        assert!(clocks_apart(4289.0, 1884.0));
+        assert!(!clocks_apart(4186.0, 3788.0), "9.5% apart is within a tenth");
+        assert!(clocks_apart(4186.0, 3767.0));
+        let at = |os: &str, v: u64, settled: u64, unsettled: &str| {
+            run(os, &[&format!("bench=fs.mem.stat unit=ns n=2000 min=1 p50={v} max=1 mean=1 mhz_settled={settled} mhz_after=1000{unsettled} mhz=1")])
+        };
+        let mut runs: Vec<Run> = [10, 11, 12, 13].iter().map(|v| at("linux", *v, 4200, "")).collect();
+        runs.extend([20, 21, 22].iter().map(|v| at("toyos", *v, 1884, "")));
+        runs.push(at("toyos", 23, 4200, " unsettled=after"));
+        let row = compare(&runs).unwrap().lines().find(|l| l.starts_with("| fs.mem.stat")).unwrap().to_string();
+        assert!(row.contains("settled clocks apart: Linux 4200 MHz, ToyOS 1884 MHz"), "{row}");
+        assert!(row.contains("the clock fell in 4 of 4 Linux run(s)"), "{row}");
+        assert!(row.contains("the clock fell in 3 of 4 ToyOS run(s); the clock did not settle in 1 of 4 ToyOS run(s) |"), "{row}");
+    }
+
+    #[test]
+    fn a_row_on_two_media_is_no_comparison_of_the_systems() {
+        let fsync = |os: &str, v: u64, medium: &str| {
+            run(os, &[&format!("bench=persist.fsync_clean unit=ns n=200 min=1 p50={v} max=1 mean=1 medium={medium}")])
+        };
+        let mut runs: Vec<Run> = [67, 68, 66, 67].iter().map(|v| fsync("linux", *v, "nvme")).collect();
+        runs.extend([1687, 1690, 1700, 1695].iter().map(|v| fsync("toyos", *v, "usb")));
+        let row = compare(&runs).unwrap().lines().find(|l| l.starts_with("| persist.fsync_clean")).unwrap().to_string();
+        assert!(row.ends_with("| - | - | the media differ: Linux nvme, ToyOS usb |"), "{row}");
+        let mut runs: Vec<Run> = [67, 68, 66, 67].iter().map(|v| fsync("linux", *v, "nvme")).collect();
+        runs.extend([70, 71, 72, 73].iter().map(|v| fsync("toyos", *v, "nvme")));
+        assert!(compare(&runs).unwrap().contains("| ToyOS worse |"), "one medium is a comparison");
+        let mut runs: Vec<Run> = [67, 68, 66].iter().map(|v| fsync("linux", *v, "nvme")).collect();
+        runs.push(fsync("linux", 69, "sata"));
+        runs.extend([70, 71, 72, 73].iter().map(|v| fsync("toyos", *v, "nvme")));
+        assert!(compare(&runs).unwrap().contains("the media differ: Linux nvme+sata, ToyOS nvme"), "nor one system's runs on two");
+        let mut runs: Vec<Run> = [67, 68, 66, 67].iter().map(|v| fsync("linux", *v, "nvme")).collect();
+        runs.extend([70, 71, 72, 73].iter().map(|v| run("toyos", &[&format!("bench=persist.fsync_clean unit=ns n=200 min=1 p50={v} max=1 mean=1")])));
+        assert!(compare(&runs).unwrap().contains("the media differ: Linux nvme, ToyOS unnamed"), "nor a named medium and none");
+    }
+
+    #[test]
+    fn a_systems_runs_on_two_setups_are_refused_and_one_setup_is_stated() {
+        let under = |os: &str, governor: &str| {
+            run(os, &[&format!("cond governor={governor}"), "cond clocksource=tsc", "bench=time.now unit=ps n=15 min=1 p50=14 max=1 mean=1"])
+        };
+        let mixed = [under("linux", "performance*16"), under("linux", "schedutil*16"), under("toyos", "absent")];
+        let why = compare(&mixed).unwrap_err();
+        assert!(why.contains("the Linux runs disagree on governor: performance*16 / schedutil*16"), "{why}");
+        let one = [under("linux", "performance*16"), under("linux", "performance*16")];
+        let table = compare(&one).unwrap();
+        assert!(table.contains("Linux setup: governor=performance*16."), "{table}");
+        let absent = [under("linux", "performance*16"), run("linux", &["bench=time.now unit=ps n=15 min=1 p50=14 max=1 mean=1"])];
+        assert!(compare(&absent).unwrap_err().contains("disagree on governor: absent / performance*16"));
+    }
+
+    #[test]
+    fn a_clocksource_each_boot_chose_is_stated_per_run_and_never_refused() {
+        let booted = |clocksource: &str| {
+            run("linux", &[&format!("cond clocksource={clocksource}"), "bench=time.now unit=ps n=15 min=1 p50=14 max=1 mean=1"])
+        };
+        let runs = [booted("hpet"), booted("tsc"), booted("hpet"), run("toyos", &["bench=time.now unit=ps n=15 min=1 p50=9 max=1 mean=1"])];
+        let table = compare(&runs).unwrap();
+        assert!(table.contains("Linux per run: clocksource=hpet,tsc,hpet."), "{table}");
+        assert!(!table.contains("ToyOS per run"), "{table}");
     }
 
     #[test]

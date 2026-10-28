@@ -1624,7 +1624,7 @@ const TESTCASES: &[metal::Arm] = &[metal::once(
 
 /// `osbench`'s groups, each a job named by its symlink, in `osbench all`'s
 /// order: `boot` first, which reads how long the boot took to reach it, and
-/// `persist` last, which writes the log volume.
+/// `crunch` last, which heats the machine.
 const OSBENCH_GROUPS: [&str; 17] = [
     "osbench_boot",
     "osbench_identity",
@@ -1641,8 +1641,8 @@ const OSBENCH_GROUPS: [&str; 17] = [
     "osbench_work",
     "osbench_tail",
     "osbench_nvme",
-    "osbench_crunch",
     "osbench_persist",
+    "osbench_crunch",
 ];
 
 /// The suite runs past every boot's bound on purpose: `tail` alone waits out
@@ -1651,10 +1651,12 @@ const OSBENCH_GROUPS: [&str; 17] = [
 /// served 64 MiB write stalled and `files` took 80 s against 13. The groups
 /// since add at most 50 s by their own spans: `crunch`'s one-thread 16 s
 /// (ToyOS reads no temperature, so its all-core phase does not run), and
-/// under 30 s of memcpy sizes, pipe sizes and 1 ms timers. So a list bound of
-/// 430 s leaves that stall 136 s.
+/// under 30 s of memcpy sizes, pipe sizes and 1 ms timers. Each of the some
+/// ninety benchmarks that settle the clock settles it before and after
+/// itself, 50 ms where the clock holds and 0.5 s at most (`clock::settle`):
+/// under 95 s. So a list bound of 525 s leaves that stall 136 s.
 const BENCHCASE: &[metal::Arm] = &[metal::Arm {
-    adds_ms: 370_000,
+    adds_ms: 465_000,
     ..metal::once("benchcase", "tests/images/benchcase.toml", &[], &OSBENCH_GROUPS)
 }];
 

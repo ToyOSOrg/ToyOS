@@ -60,9 +60,12 @@ pub fn any_refused() -> bool {
 /// One measured distribution, by nearest rank. A percentile the sample count
 /// cannot resolve prints `-`: p99 needs 100 samples and p99.9 a thousand.
 /// `mhz` is the reporting CPU's clock read just after the measurement
-/// (`clock::mhz`), and `mhz_settled` the clock the benchmark's warm-up
-/// reached before it (`clock::settle`), so every number says the clock it
-/// was taken at.
+/// (`clock::mhz`). Where the benchmark's warm-up settled the clock first,
+/// `mhz_settled` is the clock it reached, and `mhz_after` the clock a settle
+/// just after the measurement reaches: a CPU that only idled meanwhile is
+/// back at its clock, and one a power or heat limit holds is not.
+/// `unsettled` names a settle that ran out its limit and took the clock it
+/// had.
 pub fn result(bench: &str, unit: &str, samples: &mut [u64], extra: &[(&str, String)]) {
     if samples.is_empty() {
         refuse(bench, "no samples");
@@ -85,11 +88,18 @@ pub fn result(bench: &str, unit: &str, samples: &mut [u64], extra: &[(&str, Stri
     for (key, value) in extra {
         line.push_str(&format!(" {key}={}", word(value)));
     }
-    match crate::clock::take_settled() {
-        0 => {}
-        settled => line.push_str(&format!(" mhz_settled={settled}")),
+    let after = crate::clock::mhz();
+    if let Some(before) = crate::clock::take_settled() {
+        crate::clock::settle();
+        let settled_after = crate::clock::take_settled().expect("the settle just run");
+        line.push_str(&format!(" mhz_settled={} mhz_after={}", before.mhz, settled_after.mhz));
+        let unsettled: Vec<&str> =
+            [("before", before.capped), ("after", settled_after.capped)].iter().filter(|(_, c)| *c).map(|(w, _)| *w).collect();
+        if !unsettled.is_empty() {
+            line.push_str(&format!(" unsettled={}", unsettled.join("+")));
+        }
     }
-    line.push_str(&format!(" mhz={}", crate::clock::mhz()));
+    line.push_str(&format!(" mhz={after}"));
     emit(&line);
 }
 

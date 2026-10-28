@@ -389,9 +389,11 @@ pub fn map_anon_4k(len: usize) -> *mut u8 {
     map_anon(len)
 }
 
-/// The one writable persistent volume a benchcase boot has, and what it is.
-pub fn persistent_dir() -> Option<(String, String)> {
-    Some(("/log".into(), "boot USB stick TOYOS-LOG partition, FAT32, LOG file server over usbd mass storage".into()))
+/// The one writable volume a benchcase boot certainly has on a disk, what
+/// serves it, and its medium.
+pub fn persistent_dir() -> Option<(String, String, String)> {
+    let served_by = "boot USB stick TOYOS-LOG partition, FAT32, LOG file server over usbd mass storage";
+    Some(("/log".into(), served_by.into(), "usb".into()))
 }
 
 /// What a transfer row reports of the stack beneath it, as netstack's `inspect` answers it:
