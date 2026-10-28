@@ -4706,16 +4706,23 @@ fn nvme_disk_boots(test_config: &Path) -> Result<(), String> {
     Ok(())
 }
 
+/// The NVMe driver's own account of the designation, which must be that it
+/// wrote it: the line, or why there is none.
+fn nvme_wrote_the_designation(text: &str) -> Result<&str, String> {
+    let said: Vec<&str> = text.lines().filter(|l| l.contains("nvme ") && l.contains(": designation of ")).collect();
+    match said[..] {
+        [one] if one.ends_with(": Written") => Ok(one),
+        _ => Err(format!("the NVMe driver did not say it wrote one designation: {said:?}")),
+    }
+}
+
 /// The first boot designated the machine's DATA partition, judged and
 /// written by the NVMe driver and read back, through the runner's
 /// authorization; the second formatted it and serves it, and neither served
 /// DATA from memory.
 fn bench_data_designated(first: &serial::Serial, second: &serial::Serial) -> Result<(), String> {
     first.must_say("supervisor: test-runner is authorized for `designate:data`")?;
-    let done = first.must_say(": designation of ")?;
-    if !done.contains("nvme ") || !done.ends_with(": Written") {
-        return Err(format!("the designation was not written by an NVMe driver: {done:?}"));
-    }
+    nvme_wrote_the_designation(first.text())?;
     first.must_say("the DATA partition is designated: the stamp is on the disk and read back")?;
     first.must_not_say("are in memory and will not survive a reboot")?;
     second.must_say("fileserver: block 0 designates this partition for ToyOS; formatting it")?;
@@ -4747,11 +4754,7 @@ fn the_data_partition_beside_the_stick_is_designated() -> Result<(), String> {
     if done.exit_code != Some(0) || !done.stdout.contains("the stamp is on the disk and read back") {
         return Err(format!("the designation: {:?}\n{}", done.exit_code, done.serial));
     }
-    let written = serial::Serial::named("the designation", done.serial.clone());
-    let line = written.must_say(": designation of ")?;
-    if !line.contains("nvme ") || !line.ends_with(": Written") {
-        return Err(format!("the designation was not written by the NVMe driver: {line:?}"));
-    }
+    eprintln!("  [designate] {}", nvme_wrote_the_designation(&done.serial)?);
     qemu::QmpShutdown::open(qemu.qmp_socket(), qemu.budget(qemu::GUEST_QUIET)).power_button();
     let by = qemu.budget(Duration::from_secs(60));
     console.push_str(&qemu.await_exit(by)?);
