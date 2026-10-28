@@ -645,7 +645,6 @@ toyos_abi::user_safe! {
         pub mtime: u64,
         pub volume: u64,
         pub node: u64,
-        pub committed: u64,
     }
 }
 
@@ -654,7 +653,7 @@ const _: () = assert!(core::mem::size_of::<Stat>() == core::mem::size_of::<toyos
 /// What kind of thing this is, how big, and which file: a file's node is its
 /// `FileId`, one per file for as long as it exists (`vfs::FileSystem::open_file`).
 pub fn fstat(object: &KObjectRef) -> Stat {
-    let plain = |t: FileType| Stat { file_type: t as u64, size: 0, mtime: 0, volume: 0, node: 0, committed: 0 };
+    let plain = |t: FileType| Stat { file_type: t as u64, size: 0, mtime: 0, volume: 0, node: 0 };
     match object {
         KObjectRef::File(f) => f.with(|state| Stat {
             file_type: FileType::File as u64,
@@ -662,7 +661,6 @@ pub fn fstat(object: &KObjectRef) -> Stat {
             mtime: state.mtime,
             volume: state.volume,
             node: state.file_id,
-            committed: 0,
         }),
         KObjectRef::PipeRead(r) => {
             plain(if r.is_tty() { FileType::Tty } else { FileType::Pipe })
@@ -687,7 +685,6 @@ pub fn fstat(object: &KObjectRef) -> Stat {
             mtime: 0,
             volume: 0,
             node: 0,
-            committed: m.committed(),
         },
         KObjectRef::Inbox(_) | KObjectRef::SysCap(_)
         | KObjectRef::Connector(_) | KObjectRef::WakeLatency(_) | KObjectRef::EventSignal(_) | KObjectRef::EventWait(_) | KObjectRef::Pager(_) | KObjectRef::Paged(_) | KObjectRef::Namespace(_)

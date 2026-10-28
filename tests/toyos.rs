@@ -254,6 +254,12 @@ const RUST_SKIP: &[&str] = &[
     // `netstack_holders_exported_to_children`'s boot sets up.
     "stream_export",
     "socket_export",
+    // A memory object's commit and its faults: `shm_commit_alone` runs it on
+    // QEMU, which establishes them; nothing in it is hardware.
+    "shm_commit",
+    // A connect whose region nothing committed, to real netstack, which goes
+    // on serving: `netstack_holders_exported_to_children`'s boot runs it.
+    "stream_region_refused",
     // A stream's holders across processes, as their own netstack: it spawns a
     // child that faults, which a shared boot's other members must not watch,
     // and `stream_holders` runs it.
@@ -753,6 +759,13 @@ const MACHINE_TESTS: &[&str] = &[
     // refused meanwhile. QEMU establishes the refusals and that the machine
     // goes on; nothing in it is timing.
     "kernel_objects_refused_alone",
+    // A region committed in parts: a touch past the commit ends the process, a
+    // syscall's output into it is `BadAddress`, a spawn from nothing committed
+    // is refused, a commit is zeroed memory an earlier mapping sees, counted
+    // to the job once and given back with the region. These are the kernel's
+    // page tables, frames and accounts, which no host model has; order and
+    // contents only, on the shared boot's q35 guest in a boot of its own.
+    "shm_commit_alone",
     // With one ordinary job holding every frame it may, the supervisor answers
     // a stop's request, a key reaches the owner of input through ps2server, a
     // system holder kills the greedy job, and a service the exhaustion ended is
@@ -4831,6 +4844,7 @@ fn run_machine_test(name: &str, test_config: &Path) -> Result<(), String> {
         "std_threads_count_the_cpus_and_give_back_ended_threads" => std_threads_count_the_cpus_and_give_back_ended_threads(test_config),
         "affinity_pins_hold_on_every_cpu" => affinity_pins_hold_on_every_cpu(test_config),
         "kernel_objects_refused_alone" => kernel_objects_refused_alone(test_config),
+        "shm_commit_alone" => shm_commit_alone(test_config),
         "memory_floor_holds_the_controls" => memory_floor_holds_the_controls(),
         "the_opening_exchange_with_qemus_agent_completes" => the_opening_exchange_with_qemus_agent_completes(),
         "crypto_instrument_prints_its_table" => crypto_instrument_prints_its_table(test_config),
@@ -5663,6 +5677,24 @@ fn kernel_objects_refused_alone(test_config: &Path) -> Result<(), String> {
     Ok(())
 }
 
+fn shm_commit_alone(test_config: &Path) -> Result<(), String> {
+    const JOB: &str = "shm_commit";
+    let bin = qemu::build_toyos_bin(qemu::SUITE_ARCH, &compile::repo_root().join("tests/guest/rust-tests"), JOB);
+    let mut qemu = QemuInstance::boot_with_options(test_config, &[], &[(JOB.to_string(), bin)], BootOptions::default());
+    serial::Serial::boot(&qemu).must_be_clean()?;
+    let result = qemu.run_test("test_rs_shm_commit", Duration::from_secs(120));
+    if let Some(why) = &result.error {
+        return Err(format!("{why}\nthe job said:\n{}", result.stdout));
+    }
+    if result.exit_code != Some(0) {
+        return Err(format!("the job ended {:?}:\n{}", result.exit_code, result.stdout));
+    }
+    for line in result.stdout.lines().filter(|l| l.contains("PASS: ")) {
+        eprintln!("  [commit] {}", line.trim());
+    }
+    Ok(())
+}
+
 /// `memory_floor --input` alone in `tests/images/floorcase.toml`'s boot, a key
 /// typed once every frame is held: the job holds what the controls did, and the
 /// supervisor said it was refused the starved service's restart, then started
@@ -5775,7 +5807,7 @@ fn holders_exported_over(profile: qemu::Profile, driver: &str) -> Result<(), Str
     const LEASED: &str = "netstack: ready, at most";
     let tests = compile::repo_root().join("tests/guest/rust-tests");
     let bins: Vec<(String, Vec<u8>)> =
-        ["stream_export", "socket_export"].iter().map(|job| (job.to_string(), qemu::build_toyos_bin(qemu::SUITE_ARCH, &tests, job))).collect();
+        ["stream_export", "socket_export", "stream_region_refused"].iter().map(|job| (job.to_string(), qemu::build_toyos_bin(qemu::SUITE_ARCH, &tests, job))).collect();
     // The host's end of the forward: a port found free and given up, which
     // QEMU binds as it starts and refuses to start without. Another process
     // can take it between the two, which fails the boot by name.
@@ -5799,7 +5831,12 @@ fn holders_exported_over(profile: qemu::Profile, driver: &str) -> Result<(), Str
         return Err(format!("{driver}: netstack leased without saying {opened:?}\n{said}"));
     }
     stream_exported_to_a_child(&mut qemu)?;
-    sockets_exported_to_a_child(&mut qemu, forwarded)
+    sockets_exported_to_a_child(&mut qemu, forwarded)?;
+    let result = qemu.run_test("test_rs_stream_region_refused", Duration::from_secs(60));
+    match (&result.error, result.exit_code) {
+        (None, Some(0)) => Ok(()),
+        _ => Err(format!("{:?}, ended {:?}; the job said:\n{}", result.error, result.exit_code, result.stdout)),
+    }
 }
 
 /// `test_rs_stream_export`: the child's line, then the parent's, then the FIN

@@ -54,7 +54,8 @@ use crate::Node;
 pub trait Session {
     /// The region's header.
     fn words(&self) -> &Words;
-    /// The region's bytes, which the node lays its two rings out in.
+    /// The region's bytes, which the node lays its two rings out in: its header and each
+    /// ring's first size are memory already (`RECEIVE_INITIAL`, `SEND_INITIAL`).
     fn memory(&self) -> Rc<dyn Memory>;
     /// Rings the doorbells `rings` names, of every holder, never waiting.
     fn ring(&self, rings: Rings);
@@ -96,8 +97,12 @@ impl<const C: u32> LentRing<C> {
     fn spans(&self, at: usize, len: usize) -> [(Span, usize); 4] {
         let none = (Span { offset: 0, len: 0 }, 0);
         let mut out = [none; 4];
-        let (Ok(at), Ok(len)) = (u32::try_from(at & 0xFFFF_FFFF), u32::try_from(len)) else { return out };
-        let Some(spans) = self.place.spans(self.shape.get().size, at, len) else { return out };
+        let (Ok(at), Ok(len)) = (u32::try_from(at & 0xFFFF_FFFF), u32::try_from(len)) else {
+            unreachable!("[tcp] hands a ring at most its capacity, {len} bytes at {at}")
+        };
+        let Some(spans) = self.place.spans(self.shape.get().size, at, len) else {
+            unreachable!("{len} bytes at {at} lie in at most four spans of a size the pass judged")
+        };
         let mut from = 0usize;
         for (slot, span) in out.iter_mut().zip(spans) {
             *slot = (span, from);
@@ -200,8 +205,6 @@ struct Stream {
     session: Box<dyn Session>,
     /// The receive ring's and the send ring's shapes, as [tcp]'s storage reads them.
     shapes: Option<(Shared, Shared)>,
-    /// What the next pass ends the stream with.
-    broken: Option<Violation>,
     /// The session's server end, once the connection is established and its buffers are the
     /// region's; `None` while a connect is not answered.
     server: Option<Server>,
@@ -222,19 +225,13 @@ struct Stream {
 }
 
 impl Stream {
-    /// A connection whose buffers are the region's from here on, and its server end. A region
-    /// whose first rings cannot be made memory holds nothing, and the next pass ends the stream
-    /// with [`Violation::Size`].
+    /// A connection whose buffers are the region's from here on, and its server end.
     fn lent(&mut self, stack: &mut Stack) {
         let session = &self.session;
         let memory = session.memory();
-        let first = |ring, cap: u32| memory.commit(ring, usize::try_from(cap).unwrap_or(usize::MAX));
-        let made = first(RECEIVE_RING, RECEIVE_INITIAL) && first(SEND_RING, SEND_INITIAL);
-        self.broken = (!made).then_some(Violation::Size);
         let server = Server::new(session.words(), LAYOUT, RECEIVE_INITIAL);
-        let (receive, send) = if made { (RECEIVE_INITIAL, SEND_INITIAL) } else { (0, 0) };
-        let rx = Rc::new(Cell::new(Shape { size: server.receive_size(), holds: receive, wanted: 0 }));
-        let tx = Rc::new(Cell::new(Shape { size: server.send_size(), holds: send, wanted: 0 }));
+        let rx = Rc::new(Cell::new(Shape { size: server.receive_size(), holds: RECEIVE_INITIAL, wanted: 0 }));
+        let tx = Rc::new(Cell::new(Shape { size: server.send_size(), holds: SEND_INITIAL, wanted: 0 }));
         let receive = LentRing { memory: memory.clone(), place: LAYOUT.receive_place(), shape: rx.clone() };
         let send = LentRing { memory, place: LAYOUT.send_place(), shape: tx.clone() };
         if stack.tcp_lend(self.conn, Box::new(receive), Box::new(send)).is_err() {
@@ -284,9 +281,6 @@ impl Stream {
     /// more, and rings the client once: `false` once the connection ended.
     fn moved(&mut self, now: Instant, stack: &mut Stack) -> Result<bool, Violation> {
         let conn = self.conn;
-        if let Some(violation) = self.broken.take() {
-            return Err(violation);
-        }
         let Some(server) = self.server.as_mut() else { unreachable!("a stream moves only once established") };
         let Some((rx_shape, tx_shape)) = self.shapes.as_ref() else { unreachable!("a lent stream has its shapes") };
         let words = self.session.words();
@@ -397,7 +391,7 @@ impl Streams {
     /// has, `nodelay` among them written into the region's header.
     pub(crate) fn accepted(&mut self, stack: &mut Stack, conn: ConnId, options: Options, session: Box<dyn Session>) -> StreamId {
         session.words()[NODELAY].store(u32::from(options.nodelay), Ordering::Relaxed);
-        let mut stream = Stream { conn, session, shapes: None, broken: None, server: None, deadline: None, held: 0, queued: 0, fin_queued: false, options, rung: false, more_holders: 0 };
+        let mut stream = Stream { conn, session, shapes: None, server: None, deadline: None, held: 0, queued: 0, fin_queued: false, options, rung: false, more_holders: 0 };
         stream.lent(stack);
         self.hold(stream)
     }
@@ -424,7 +418,7 @@ impl Node {
         let options = Options { nodelay: session.words()[NODELAY].load(Ordering::Relaxed) != 0, ..Options::default() };
         self.stack.tcp_set_options(now, conn, options);
         let deadline = timeout.map(|within| now.after(within));
-        Ok(self.streams.hold(Stream { conn, session, shapes: None, broken: None, server: None, deadline, held: 0, queued: 0, fin_queued: false, options, rung: false, more_holders: 0 }))
+        Ok(self.streams.hold(Stream { conn, session, shapes: None, server: None, deadline, held: 0, queued: 0, fin_queued: false, options, rung: false, more_holders: 0 }))
     }
 
     /// One pass over every stream: netstack calls it once the kernel answered the connections it

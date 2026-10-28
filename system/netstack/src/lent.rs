@@ -19,7 +19,7 @@ use std::collections::BTreeMap;
 use std::rc::Rc;
 
 use toyos::ipc::FrameRx;
-use toyos::net::stream::{Words, REGION_BYTES};
+use toyos::net::stream::{Words, RECEIVE_INITIAL, RECEIVE_RING, REGION_BYTES, SEND_INITIAL, SEND_RING};
 use toyos::shm::{self, SharedMemory};
 use toyos::transport::session::{Holder, Rings};
 use toyos::wake::{Bell, Waker};
@@ -98,10 +98,14 @@ pub struct Region {
 }
 
 impl Region {
-    /// The region `handle` names, judged and mapped. Refused, nothing is mapped and the handle
-    /// is closed.
+    /// The region `handle` names, judged and mapped, and its header and both rings' first
+    /// sizes made memory, charged to the client as each commit is. Refused, nothing is mapped
+    /// and the handle is closed.
     pub fn judged(handle: toyos::OwnedHandle) -> Result<SharedMemory, shm::Lent> {
-        SharedMemory::lent(handle, REGION_BYTES)
+        let mapping = SharedMemory::lent(handle, REGION_BYTES)?;
+        mapping.commit(0, RECEIVE_RING + RECEIVE_INITIAL as usize).map_err(shm::Lent::Kernel)?;
+        mapping.commit(SEND_RING, SEND_INITIAL as usize).map_err(shm::Lent::Kernel)?;
+        Ok(mapping)
     }
 
     /// The session over `mapping`, `first` its first holder, and its holders, which `serve`

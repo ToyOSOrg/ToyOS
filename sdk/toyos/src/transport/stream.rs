@@ -665,6 +665,59 @@ mod tests {
         }
     }
 
+    /// Both ends resumed from a position just short of 2^32, so every
+    /// growth's switch and its 24-bit reconstruction cross the wrap.
+    fn agrees_across_the_wrap<const C: u32>(start: u32, seed: u64) {
+        let page = page();
+        let from = u32::MAX - 3 * C;
+        let (mut tx, mut rx) = (Producer::new(&page, place::<C>(), start), Consumer::new(&page, place::<C>()));
+        page[0].store(from, Ordering::Release);
+        page[1].store(from, Ordering::Release);
+        assert_eq!((tx.resume(&page), rx.resume(&page)), (Ok(()), Ok(())));
+        let mut region = region::<C>();
+        let (mut written, mut published, mut read, mut released) = (0u64, 0u64, 0u64, 0u64);
+        let mut model = Model { cap: start, switch: None };
+        let mut rng = Rng(seed);
+        for _ in 0..200 * C {
+            match rng.below(4) {
+                0 => {
+                    let room = tx.room(&page).unwrap();
+                    assert_eq!(u64::from(room), model.room(written, released), "the room");
+                    if tx.can_grow() && rng.below(4) == 0 {
+                        tx.grow(&page);
+                        model = Model { cap: model.cap * 2, switch: Some(released + u64::from(model.cap)) };
+                    }
+                    let n = rng.below(room + 1);
+                    put(&mut region, tx.span(0, n).unwrap(), written);
+                    assert!(tx.advance(n));
+                    written += u64::from(n);
+                    let _ = tx.publish(&page);
+                    published = written;
+                }
+                1 | 2 => {
+                    let ready = rx.ready(&page).unwrap();
+                    assert_eq!(u64::from(ready), published - read, "the bytes ready");
+                    let n = rng.below(ready + 1);
+                    assert_eq!(get(&region, rx.span(0, n).unwrap()), expected(read, n), "bytes {read}.. past the wrap");
+                    assert!(rx.advance(n));
+                    read += u64::from(n);
+                }
+                _ => {
+                    let _ = rx.release(&page);
+                    released = read;
+                }
+            }
+        }
+        assert!(u64::from(from) + read > 1 << 32, "the stream did not cross 2^32");
+    }
+
+    #[test]
+    fn a_ring_that_grows_across_the_wrap_agrees_with_the_stream() {
+        for seed in 1..=64 {
+            agrees_across_the_wrap::<64>(1, seed);
+        }
+    }
+
     #[test]
     fn a_ring_that_grows_agrees_with_the_stream_too() {
         for seed in 1..=64 {

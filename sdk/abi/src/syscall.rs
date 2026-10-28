@@ -831,9 +831,6 @@ pub struct Stat {
     /// reaches it, for as long as it exists and its volume stays mounted, and
     /// no other file's while both exist. 0 exactly when `volume` is.
     pub node: u64,
-    /// A memory object's bytes that are committed ([`shm_commit`]): its
-    /// `size` but for a region made with fewer; 0 for anything else.
-    pub committed: u64,
 }
 
 #[cfg(target_arch = "x86_64")]
@@ -2323,8 +2320,10 @@ pub fn shm_reserve(size: usize, committed: usize) -> Result<RawHandle, SyscallEr
 /// touches that is not yet: zeroed, counted to the job the region is
 /// counted to, and refused whole, `ResourceExhausted`, where they cannot all
 /// be. A page committed already is left as it is, so any holder may commit
-/// what it is about to touch. Needs [`Rights::MAP`]. `InvalidArgument` for
-/// no bytes, a range past the region, or a device's window.
+/// what it is about to touch. Needs [`Rights::MAP`] alone: a holder that may
+/// only map a region read-only may still spend its owner's memory on it, up
+/// to the size the owner made it. `InvalidArgument` for no bytes, a range
+/// past the region, or a device's window.
 ///
 /// [`Rights::MAP`]: crate::handle::Rights::MAP
 pub fn shm_commit(shm: RawHandle, offset: usize, len: usize) -> Result<(), SyscallError> {

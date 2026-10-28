@@ -6,10 +6,6 @@ opened: 2026-10-14
 
 # A process holds at most 128 streams
 
-A stream's region now commits its header and 64 KiB of each ring at the
-connect, and each ring's producer doubles it as it needs more
-(`toyos::transport::stream`), so a stream commits what it holds.
-
 The process's ends are a fixed table, `MAX_STREAMS` = 128 streams and 256
 handles of their connections (`sdk/toyos/src/net/stream.rs`), since `toyos`
 allocates nothing: past it a connect or an accept is refused
