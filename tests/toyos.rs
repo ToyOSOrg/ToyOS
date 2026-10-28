@@ -5347,9 +5347,10 @@ fn crypto_instrument_prints_its_table(test_config: &Path) -> Result<(), String> 
 const CRYPTO_JOB_CEILING_SECS: u64 = 300;
 
 /// The guest port `test_rs_socket_export` listens on, which the boot forwards
-/// a port of the host's loopback to. QEMU's user network listens there with a
-/// queue of one, and a macOS host resets a connect that finds it full, so the
-/// peer connects only once the guest has answered its last connection.
+/// a port of the host's loopback to. QEMU's user network listens on that host
+/// port with a queue of one, and a macOS host resets a connect that finds it
+/// full, so the peer connects only once the guest has answered its last
+/// connection.
 const SOCKET_EXPORT_PORT: u16 = 7070;
 
 /// `test_rs_stream_export` and `test_rs_socket_export` on one boot of
@@ -5440,9 +5441,6 @@ fn sockets_exported_to_a_child(qemu: &mut QemuInstance, forwarded: u16) -> Resul
                 return Err(format!("the peer heard {:?}, not {owed:?}", String::from_utf8_lossy(&line)));
             }
         }
-        // The race: both processes say they are about to block, then two
-        // connections, one at a time, and two datagrams at once, each taken
-        // once.
         let both = |what: &str| -> Result<std::net::SocketAddr, String> {
             let mut said = Vec::new();
             let mut from = None;
