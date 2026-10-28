@@ -19,25 +19,28 @@ Evidence (T14 readbacks):
 - The last pass on record is 1595bbbcd (2026-10-23). There the same wait
   returned within a millisecond of the kill.
 
-What differs between them is the machine: every failing boot's log has
-acpiserver taking embedded-controller query `0x4f` on an SCI about once a
-second (`acpiserver: 31 SCIs; embedded controller queries taken: 0x4f x14`).
-The passing boot has no such line. Nothing in acpiserver's SCI path keeps an
-object per event.
+A T14 boot of 1090's first commit (abded5216) names the kind. One
+`SharedMem` stays live for the whole minute, and the count does not move:
+`census_wait: after 100 paces, still grown since the first reading: SharedMem 88 -> 89`.
+Between the first reading and the wait, the only thing that happens is the
+parent spawning the ring holder (pid 24) from `/system/bin` and killing it.
+The earlier spawns (pids 22 and 23) fall before the first reading, which is
+why this arm, the first to compare across a spawn, is the one that waits.
 
-The likely cause is the oracle, and that is an inference. The census is
-machine-wide, as `kill_releases_ring`'s own doc says. A daemon holding one
-transient object while it waits between events reads as a leak whenever the
-first reading caught it holding none. `released_to` then returns only if a
-later reading also falls in that gap.
+The leading hypothesis is that a spawn of a program from the file server
+leaves one memory object alive after its child has ended. It is unconfirmed
+which side keeps it: the parent's spawn, the file server's image answer, or
+the kernel's teardown. Candidates in the window between 1595bbbcd and
+576bebf3a are `53f73a63c` (a ROOT program spawned from SYSTEM's object for
+it) and the memory stage's spawn changes. The acpiserver EC traffic that
+only the failing boots show moves no count: the census stays at 89 across
+its SCIs.
 
-`census_wait::released_to` now names the kinds still grown, once a second,
-so the next T14 shared-debug boot shows which kind and how many.
+Owner: the spawn and memory-object path (`sdk/std/sys/process.rs`'s image
+read, the file server's image answer, `kernel/src/loader`), until the holder
+of the object is named.
 
-Owner: the tests that read the census (`tests/guest/rust-tests/src/census_wait.rs`,
-`handle_lifetime`, `shm_release_reclaims`).
-
-**Exit**: the grown kind is named from a T14 boot. The reclaim check then
-judges what the killed holder made, and nothing a daemon makes beside it
-reaches the verdict. Five consecutive T14 shared-debug boots run all five
-members.
+**Exit**: whoever keeps the `SharedMem` past its child is named and fixed.
+A spawn and the end of its child then leave the census where it was, shown
+on QEMU and the T14. Five consecutive T14 shared-debug boots then run all
+five members.
