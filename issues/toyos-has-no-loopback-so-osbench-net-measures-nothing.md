@@ -19,8 +19,9 @@ netstack treats 127/8 as a destination that never exists (`is_martian`,
 - **UDP.** `unusable` refuses a loopback destination and a send to the
   host's own address by name (`system/netstack/udp/src/lib.rs`,
   `Counter::SendLoopback`, `SendToSelf`).
-- **Tests.** The unit tests hold these refusals: TCP's
-  `s_hs_035_connect_needs_a_unicast_remote` (LOCALHOST among them) and UDP's
+- **Tests.** The unit tests hold these refusals: the route's
+  `s_ip_rte_006_invalid_and_local_destinations` (127.0.0.1 is
+  `RouteInvalidDestination`, `system/netstack/ip/tests/addr.rs`) and UDP's
   `s_udp_us_003_only_an_assigned_address_binds`.
 
 **The connect's refusal is misreported.** `serve.rs`'s `connect_refused`

@@ -31,7 +31,10 @@ and a `rep movsb` start-up is the cost
 `issues/a-short-memset-on-x86-64-costs-a-rep-stosb-start-up.md` records for
 `memset`. This row is that record's `memcpy` measurement. On the T14
 (i5-1135G7) ToyOS wins 64 bytes threefold. It loses 16 KiB (1.09x) and
-64 MiB (1.05x), both resolved, and matches at 256 KiB. The 256 KiB row's 45%
+64 MiB (1.05x), both resolved, and matches at 256 KiB. The sweep asks for
+huge pages, which Linux gives and ToyOS does not; the 64 MiB row's 0.95 of
+Linux's equals `mem.bw.copy`'s under the same difference
+(`issues/user-memory-hot-paths-are-slower-than-2-mib-pages.md`). The 256 KiB row's 45%
 ToyOS range on the AMD is unexplained.
 
 **Exit**: `mem.memcpy.*` within Linux's on both benches in a labelled

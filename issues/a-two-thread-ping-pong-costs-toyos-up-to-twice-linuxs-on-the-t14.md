@@ -27,8 +27,8 @@ and 5 through the HPET, at 1.2 µs a timestamp.
 On the T14 ToyOS loses all four, 1.37x to 2.01x, each resolved. On the AMD
 ToyOS is faster in all four, and against Linux's TSC runs alone too: the
 futex rows read 6,141 to 6,248 ns (`same_cpu`) and 9,648 to 9,864 ns
-(`cross_core`) there, both above ToyOS's medians. So the T14's gap is no
-clocksource's. Where its round trip's time goes, the wait, the wake or the
+(`cross_core`) there, both above ToyOS's medians. The T14's Linux timed every
+run through the TSC. Where its round trip's time goes, the wait, the wake or the
 switch, is unmeasured.
 
 #1074 has since changed the pipe on main and reads `pingpong.pipe.*` lower

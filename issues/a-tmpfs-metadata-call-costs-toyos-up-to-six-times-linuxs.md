@@ -27,13 +27,11 @@ and 5 through the HPET, at 1.2 µs a timestamp.
 | `fs.mem.write_4k_at` | 1,237 ns (4.0%) | 625 ns (5.0%) | 1,563 ns (7.7%) | 1,823 ns (61.0%) |
 | `fs.mem.read_4k_at` | 1,222 ns (2.3%) | 710 ns (4.5%) | 1,422 ns (3.5%) | 1,403 ns (70.8%) |
 
-
 On the T14 ToyOS loses all eight, 1.7x to 6.5x, each resolved. On the AMD it
 loses `open_close` (2.1x) and `rename` (1.4x), both resolved, wins
 `tree.100`, `create_write_unlink` and `write_4k_at`, and is unresolved on the
-other three. There the
-HPET does fit: Linux's TSC runs read `open_close` at 2.9 µs and its HPET runs
-at 4.3 µs, so its spread is the clocksource's. The listing
+other three. There the HPET explains Linux's spread: its TSC runs read
+`open_close` at 2.9 µs and its HPET runs at 4.3 µs. The listing
 (`fs.mem.readdir.1000`) is `issues/a-listing-still-scans-the-whole-mount.md`'s,
 and the sequential copies are
 `issues/user-memory-hot-paths-are-slower-than-2-mib-pages.md`'s.

@@ -37,9 +37,9 @@ and 5 through the HPET, at 1.2 µs a timestamp.
 
 **On the T14** ToyOS loses every spawn and thread row but one. The
 like-for-like pair is std's `Command` with the two programs: `tiny` reads
-1.01x, unresolved, and `large` 3.68x, resolved. So what costs ToyOS on that
-bench is what `large` adds, its 32 MiB in `/tmp` (8,192 pages), not the
-spawn itself. `posix_spawn` of the osbench binary reads 2.66x and
+1.01x, unresolved, and `large` 3.68x, resolved. Under `Command`, then, what
+costs ToyOS on that bench is what `large` adds, its 32 MiB in `/tmp`
+(8,192 pages). `posix_spawn` of the osbench binary reads 2.66x and
 `process.spawn_wait` 2.53x.
 
 **On the AMD** ToyOS resolves better on `spawn_wait.large`,
