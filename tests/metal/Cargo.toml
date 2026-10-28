@@ -1,6 +1,6 @@
 [package]
 name = "toyos-metal"
-description = "The metal loop that flashes an image to a bench's stick, boots it once and reads back what the boot left; the suite's command line, and what the metal profile derives, times and reads off a boot."
+description = "The metal loop that writes an image to a bench's internal disk, boots it once and reads back what the boot left; the suite's command line, and what the metal profile derives, times and reads off a boot."
 version = "0.1.0"
 edition = "2021"
 license = "MIT OR Apache-2.0"

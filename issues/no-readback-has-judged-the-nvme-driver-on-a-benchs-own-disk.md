@@ -16,7 +16,9 @@ no volume of ours and no designation stamp is never written
 (`a_host_disk_beside_the_stick_is_left_alone`, on QEMU's controller under
 Intel's id).
 
-No bench has run it. The controller's bring-up, its geometry (`MDTS` of at
+Every bench boot now runs on it: the benches boot their images off their
+internal NVMe, so the log and boot volumes are served through it. No
+readback has judged it yet. The controller's bring-up, its geometry (`MDTS` of at
 least 32 blocks, 512- or 4096-byte sectors), its shutdown at the stop, and
 the host booting again off a controller ToyOS drove are each unmeasured on
 both benches.

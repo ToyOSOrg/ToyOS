@@ -54,8 +54,8 @@ drives = ["pci:01:08:02"]
 receives = ["disk"]
 
 # The USB driver: QEMU's `nec-usb-xhci`, and the controller firmware booted
-# through, which on a bench is the one holding the stick. Every other xHCI
-# controller stays free for the tests that claim one.
+# through where that is an xHCI, which on a bench booted off its NVMe is none.
+# Every other xHCI controller stays free for the tests that claim one.
 [programs.usbd]
 drives = ["pci:0c:03:30/1033:0194", "pci:0c:03:30@boot"]
 receives = ["disk"]

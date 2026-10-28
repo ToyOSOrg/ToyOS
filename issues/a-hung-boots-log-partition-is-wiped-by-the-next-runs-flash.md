@@ -19,15 +19,11 @@ before `:1489`. The next invocation opens with `flash` again. The previous
 boot's partition therefore survives to be read exactly when something outside
 the loop reads it between the two invocations — and nothing in the loop does.
 
-**And the loop cannot read a wedged stick at all.** `read_log` `?`s on the
-`mkdir` and the mount (`:1131-1132`) and `read_mounted` on the listing and
-every `cat` (`:1152-1162`); `raw_log` (`:1173`) refuses a short read by name
-(`Refusal::Landed`, `:1184-1190`). Both are reached only after
-`wait_for_the_stick` has seen the block node for up to `STICK_SECS` (`:68`,
-30 s) — which is not tolerance of an unreachable stick but the reason neither
-is asked to tolerate one. A pre-flash call to either, as written, would refuse
-every run whose predecessor left the stick unenumerable (run 49's mode, below)
-instead of recording that it did.
+**Since the benches boot off their NVMe nothing stops the loop reading it
+first.** The log volume is the install area's partition 7
+(`ToyOS-internal-log`), on the disk Ubuntu boots from, so it is there whenever
+the loop is: the stick that could come back unenumerable (run 49's mode,
+below) is in no boot's path. The line numbers above are of the stick loop.
 
 ## What was and was not lost
 

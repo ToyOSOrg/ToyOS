@@ -38,7 +38,11 @@ a signed test image's job holds it.
    (`--active`), writes sector-granular at the disk's true last LBA, flushes
    between the two copies, and reads both back. Unrelated partitions are
    untouched by construction; another system's are reclaimed only when the
-   plan names them.
+   plan names them. Until then a bench's table is edited under its Ubuntu:
+   `toyos-metal` makes the install area (partitions 5–11 after the bench's
+   four) once with `sgdisk` and `partx`, and every flash gives partitions 7–11
+   the GUIDs the image names with `sgdisk --partition-guid`. A bench's area
+   is this stage's first plan.
 3. **Scratch disks.** `Init` with one aligned partition of
    `Guid::TOYOS_SCRATCH` replaces `toyos-metal --adopt-scratch`
    (`issues/the-scratch-disk-adopt-scratch-makes-is-not-served.md`).

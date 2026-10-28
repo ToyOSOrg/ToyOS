@@ -1,5 +1,6 @@
 //! Another system's disk, as a bench's internal disk is before ToyOS is
-//! installed on it, and the judge of what ToyOS did to it.
+//! installed on it, and the judge of what ToyOS did to it, there or on a bench
+//! that boots ToyOS off the same disk.
 //!
 //! The layout is the benches': the host's ESP, its `/boot` and its root, and
 //! the owner's ToyOS DATA, unformatted. Every block of every partition carries
@@ -77,14 +78,15 @@ pub enum Data {
     Mounted,
 }
 
-/// A boot off a stick drove an NVMe disk that is another system's and
-/// touched nothing on it but its ToyOS DATA partition: a driver brought a
-/// controller up and offered its partitions, it opened at least one session
-/// and each on a ToyOS DATA partition, and the file server either left that
-/// DATA alone, finding it neither ours nor designated, or — once it is
-/// designated — formatted or mounted it; never DATA from memory. Answers how
-/// many partitions the disks' tables named, and which of those DATA was.
-pub fn left_alone(log: &Serial) -> Result<(usize, Data), String> {
+/// A boot drove an NVMe disk that holds another system's partitions and
+/// touched nothing on it but its ToyOS DATA partition and `ours`, the volumes
+/// the loader named for this boot: a driver brought a controller up and
+/// offered its partitions, it opened at least one session and each on DATA
+/// or one of `ours`, and the file server either left that DATA alone, finding
+/// it neither ours nor designated, or — once it is designated — formatted or
+/// mounted it; never DATA from memory. Answers how many partitions the disks'
+/// tables named, and which of those DATA was.
+pub fn left_alone(log: &Serial, ours: &[Guid]) -> Result<(usize, Data), String> {
     log.must_say("diskserver: every disk driver has settled")?;
     let said: Vec<&str> = log.text().lines().filter_map(said_by_nvme).collect();
     if !said.iter().any(|s| s.starts_with("up: ")) {
@@ -109,10 +111,17 @@ pub fn left_alone(log: &Serial) -> Result<(usize, Data), String> {
     if opened.is_empty() {
         return Err(format!("no nvme driver opened a session, so none was seen on DATA\n{}", log.text()));
     }
+    let ours: Vec<String> = ours.iter().map(Guid::to_string).collect();
     for guid in opened {
         match kinds.iter().find(|(g, _)| *g == guid) {
             Some((_, kind)) if *kind == data => {}
-            other => return Err(format!("an nvme driver opened a session on {guid}, of type {other:?}, which is no ToyOS DATA")),
+            Some(_) if ours.iter().any(|o| o == guid) => {}
+            other => {
+                return Err(format!(
+                    "an nvme driver opened a session on {guid}, of type {other:?}, which is no ToyOS DATA \
+                     and none of the volumes the loader named ({ours:?})"
+                ))
+            }
         }
     }
     log.must_not_say("are in memory and will not survive a reboot")?;
@@ -135,4 +144,27 @@ pub fn left_alone(log: &Serial) -> Result<(usize, Data), String> {
         }
     }
     Ok((kinds.len(), fate))
+}
+
+/// The boot and log volumes the loader named for its boot, out of its own
+/// `Boot partition:` and `Log partition:` lines; a boot whose loader named no
+/// boot partition has only its log.
+pub fn loader_named(loader: &Serial) -> Result<Vec<Guid>, String> {
+    let signature = |head: &str| -> Result<Option<Guid>, String> {
+        let Some(line) = loader.text().lines().find(|l| l.contains(head)) else { return Ok(None) };
+        let list = line
+            .split_once("signature [")
+            .and_then(|(_, rest)| rest.split_once(']'))
+            .map(|(list, _)| list)
+            .ok_or_else(|| format!("{line:?} names no signature"))?;
+        let bytes: Vec<u8> = list
+            .split(", ")
+            .map(|b| u8::from_str_radix(b, 16))
+            .collect::<Result<_, _>>()
+            .map_err(|e| format!("{line:?}: {e}"))?;
+        let bytes: [u8; 16] = bytes.try_into().map_err(|_| format!("{line:?} names no sixteen bytes"))?;
+        Ok(Some(Guid(bytes)))
+    };
+    let log = signature("Log partition: signature [")?.ok_or_else(|| format!("the loader named no log partition:\n{}", loader.text()))?;
+    Ok(signature("Boot partition: LBA ")?.into_iter().chain([log]).collect())
 }

@@ -203,8 +203,7 @@ Beside that order, each waiting on something outside it:
        port and its controller (`Hc::stop`) before the kernel's, as the
        kernel's xHCI stop did. **The exit's evidence**: the kernel's
        part by `usbd_drives_the_spare` on the default `qemu-xhci` and
-       `usbd_drives_the_type_c_controller`, and `usbd_serves_the_boot_stick`
-       for the boot controller; the kernel's input streams gone, with no
+       `usbd_drives_the_type_c_controller`; the kernel's input streams gone, with no
        `Keyboard` or `Mouse` in `sdk/abi`'s `DeviceType` or `FileType`; the
        owner of input's by `toyos-input`'s
        `a_connections_end_releases_every_device_it_carried_and_a_gone_only_its_own_source`;
@@ -223,9 +222,9 @@ Beside that order, each waiting on something outside it:
        metal rows that asked for that machine (`iommu-no-remap`) are deleted,
        and the refusal is QEMU's to hold, by
        `usbd_refused_without_amdvi_remapping` and `amdvi_firmware_left`.
-       **Left**: the metal rows, which have not run: `usbd_serves_the_boot_stick`
-       and #901 section 9's three that judge with a userland load,
-       `stick_survives_a_reset_under_load` (a deadline reset under
+       **Left**: the metal rows, which have not run: #901 section 9's three
+       that judge with a userland load,
+       `the_disk_survives_a_reset_under_load` (a deadline reset under
        `stick_load`), `tone_beside_a_stick_write`
        (`issues/a-megabyte-written-to-the-stick-starves-a-tone-beside-it.md`'s
        exit) and `mask_windows` under `stick_write`. #971's first metal boots

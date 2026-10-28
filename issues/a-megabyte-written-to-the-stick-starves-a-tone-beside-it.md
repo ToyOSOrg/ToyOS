@@ -25,7 +25,10 @@ much to the stick while a tone plays is the same stimulus.
 
 Since the small-kernel track's step 10 the stick is usbd's: the interrupts are
 its claim's and the waits its thread's, and the kernel's two-second transport
-break is gone. Whether the starvation remains is unmeasured.
+break is gone. Whether the starvation remains is unmeasured, and on a bench
+`tone_beside_a_stick_write` now writes the NVMe the bench boots off, so no
+bench row writes a stick beside the tone
+(`issues/no-bench-row-drives-usb-storage-since-the-benches-boot-off-nvme.md`).
 
 ## Exit condition
 

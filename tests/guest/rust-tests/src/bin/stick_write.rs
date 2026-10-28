@@ -1,6 +1,6 @@
-//! Eight mebibytes of lines to `/log` on the boot stick through usbd
-//! ([`stick_lines`]), then an end: the stick-write load `mask_windows` reads
-//! the windows under.
+//! Eight mebibytes of lines to `/log` on the boot's log disk
+//! ([`stick_lines`]), then an end: the log-write load `mask_windows` reads the
+//! windows under.
 
 #[path = "../stick_lines.rs"]
 mod stick_lines;

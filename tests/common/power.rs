@@ -302,7 +302,7 @@ pub fn watchdog_quiet(
 ) -> Result<(), String> {
     // The loader's channel said *something*, which is what makes the absence
     // below mean anything. Asked of the loader's own first line rather than
-    // through `must_not_say`: on the stick `loader.log` is a file of its own and
+    // through `must_not_say`: on the log volume `loader.log` is a file of its own and
     // carries no kernel record for `Serial::alive` to find.
     loader.must_say(bootlog::LOADER_FIRST_LINE)?;
     says_nothing_of(loader, &loader_armed())?;
@@ -313,7 +313,7 @@ pub fn watchdog_quiet(
 
 /// `must_not_say` on a channel whose liveness the caller has already
 /// established, because `Serial::alive` asks for a kernel record and the
-/// loader's own file on the stick has none.
+/// loader's own file on the log volume has none.
 pub fn says_nothing_of(channel: &serial::Serial, needle: &str) -> Result<(), String> {
     match channel.text().lines().find(|l| l.contains(needle)) {
         Some(line) => Err(format!(
@@ -415,7 +415,7 @@ fn record_cpu<'a>(line: &'a str, needle: &str) -> Option<&'a str> {
 /// purpose ended itself, and the pass after the reset read why off the page.
 ///
 /// **The only evidence a wedge can leave on this machine.** `logkeeper` writes the
-/// kernel log to the stick, and a wedged boot's `logkeeper` never runs again — so
+/// kernel log to the log volume, and a wedged boot's `logkeeper` never runs again — so
 /// everything after the wedge exists only in the record ring, and the black box
 /// is the one channel that carries a copy of it across the reset.
 pub fn deadline_wedge_chain(after: &serial::Serial) -> Result<(), String> {
@@ -462,14 +462,14 @@ pub fn deadline_wedge_chain(after: &serial::Serial) -> Result<(), String> {
 ///
 /// The state under it is the one measured on this machine and on no other: run
 /// 22's boot hung after its job list with a 120 s deadline armed, sat past
-/// 420 s, and left the stick with no kernel log at all — the deadline never
+/// 420 s, and left the log volume with no kernel log at all — the deadline never
 /// fired, because nothing was taking the interrupt that polls it.
 pub fn hard_lockup_chain(
     kernel: &serial::Serial,
     after: &serial::Serial,
 ) -> Result<(), String> {
     // **Nothing this judge reads was written after the wedge.** `logkeeper` stops
-    // where the scheduler does, so the stick's kernel log ends at the last
+    // where the scheduler does, so the log volume's kernel log ends at the last
     // spawn, and the sealed page can fill with a boot's *older* records before
     // it reaches the lines the control writes about itself. What crosses is the
     // arm line and the record itself.
@@ -566,21 +566,20 @@ pub fn blackbox_unclaimed(
 const ACPI_ARMED: &str = "acpiserver: armed: power button served";
 
 /// [`STICK_LOAD_JOB`](super::metal::STICK_LOAD_JOB)'s boot: the job wrote the
-/// stick through usbd, the boot deadline ended the machine while it did, and
-/// the stick came back on the next host. How long it took to enumerate is
-/// judged against the bench's record (`boot.usbload.stick_secs`), and a stick
-/// that never came back is a readback that failed before this was asked.
-pub fn stick_survives_a_reset_under_load(back: &super::metal::Readback) -> Result<(), String> {
+/// log disk, the boot deadline ended the machine while it did, and the pass
+/// after the reset read the deadline's record. The host booting again off that
+/// disk is the loop's own half, and a readback is only there once it did.
+pub fn the_disk_survives_a_reset_under_load(back: &super::metal::Readback) -> Result<(), String> {
     let after = back.after_the_reset()?;
     after.must_say(bootlog::PREVIOUS_PANIC)?;
     after.must_say_after(bootlog::PREVIOUS_PANIC, bootlog::DEADLINE_EXPIRED)?;
     says_nothing_of(&after, REBOOTING)?;
     // What reached the medium: the load's lines in the file read back off the
-    // stick, which logkeeper wrote through usbd.
+    // log volume.
     let reached = super::metal::bytes_of_lines(back.log().text(), "stick_load: line ");
     if reached < 1 << 20 {
-        return Err(format!("{reached} bytes of the load's lines reached the stick, under a mebibyte"));
+        return Err(format!("{reached} bytes of the load's lines reached the disk, under a mebibyte"));
     }
-    eprintln!("  [power] {} KiB of the load's lines reached the stick before the reset", reached >> 10);
-    back.measured("boot.usbload.stick_secs", back.stick_secs)
+    eprintln!("  [power] {} KiB of the load's lines reached the disk before the reset", reached >> 10);
+    Ok(())
 }

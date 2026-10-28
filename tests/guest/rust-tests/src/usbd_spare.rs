@@ -48,8 +48,8 @@ pub fn cap() -> SysCap {
 
 /// The controllers a boot of this job can leave to a claim: QEMU's
 /// `qemu-xhci` on the guest profiles, either of the T14's two and the AMD
-/// bench's, whose two controllers share an id. The image's usbd row drives the
-/// one holding the stick, so `claim` takes the one of them nobody holds.
+/// bench's, whose two controllers share an id. `claim` takes the first of them
+/// nobody holds.
 const SPARES: [PciId; 4] = [
     PciId { vendor: 0x8086, device: 0xa0ed },
     PciId { vendor: 0x1b36, device: 0x000d },
@@ -73,7 +73,7 @@ const PAST_THE_GRANT: u64 = 1 << 30;
 /// card the kernel does not drive, or, on a kernel that drives every one,
 /// the only one there is.
 fn claim(cap: &SysCap) -> (PciId, Result<PciDev, SyscallError>) {
-    let pci = spare::of(cap, &SPARES).expect("usbd_spare: no one spare controller on this machine");
+    let pci = spare::of(cap, &SPARES).expect("usbd_spare: no spare controller on this machine");
     (PciId { vendor: pci.vendor, device: pci.device }, cap.claim_function(pci.arrival))
 }
 
@@ -240,8 +240,8 @@ pub fn fault(cap: &SysCap) {
 const BOOT: [PciId; 1] = [PciId { vendor: 0x1033, device: 0x0194 }];
 
 pub fn refused(cap: &SysCap) {
-    let boot = spare::one(cap, &BOOT, toyos_abi::inventory::Driven::Claimed)
-        .expect("usbd_spare: no boot controller a process holds");
+    let held: Vec<_> = spare::all(cap, &BOOT).into_iter().filter(|pci| pci.driven == toyos_abi::inventory::Driven::Claimed).collect();
+    let [boot] = held[..] else { panic!("usbd_spare: not one boot controller a process holds: {} are", held.len()) };
     let id = PciId { vendor: boot.vendor, device: boot.device };
     match cap.claim_function::<PciDev>(boot.arrival) {
         Err(SyscallError::AlreadyExists) => println!("usbd_spare: the claim on {} was refused: AlreadyExists", spelled(id)),

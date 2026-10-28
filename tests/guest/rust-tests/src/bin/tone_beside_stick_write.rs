@@ -1,7 +1,7 @@
 //! `hda_tone`'s tone, played while a thread writes lines to `/log` on the
-//! boot stick through usbd ([`stick_lines`]): `tone_beside_a_stick_write`'s
-//! stimulus (`issues/a-megabyte-written-to-the-stick-starves-a-tone-beside-it.md`).
-//! The judge counts the lines read back off the stick, which have to be the
+//! boot's log disk ([`stick_lines`]): `tone_beside_a_stick_write`'s stimulus
+//! (`issues/a-megabyte-written-to-the-stick-starves-a-tone-beside-it.md`).
+//! The judge counts the lines read back off the log, which have to be the
 //! mebibyte the issue names; soundserver's counters over the job's window are
 //! the verdict.
 

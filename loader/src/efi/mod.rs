@@ -539,20 +539,32 @@ unsafe impl core::alloc::GlobalAlloc for Pool {
 }
 
 /// Set by the first panic, so a panic while saying one goes straight to the
-/// power-off.
+/// reset.
 static PANICKED: AtomicBool = AtomicBool::new(false);
 
-/// Say the panic on firmware's console and power the machine off; from the
-/// first `ExitBootServices` call the console is not written, and once boot
-/// services are gone neither is there, and the CPU spins.
+/// Whether a panic resets the machine rather than powering it off
+/// ([`reset_on_panic`]).
+static PANIC_RESETS: AtomicBool = AtomicBool::new(false);
+
+/// Have a panic from here on reset the machine instead of powering it off:
+/// for a machine whose next boot after a reset is not this loader's.
+pub fn reset_on_panic() {
+    PANIC_RESETS.store(true, Ordering::Relaxed);
+}
+
+/// Say the panic on firmware's console, then reset the machine or power it
+/// off as [`reset_on_panic`] chose; from the first `ExitBootServices` call the
+/// console is not written, and once boot services are gone neither is there,
+/// and the CPU spins.
 #[panic_handler]
 fn panic(info: &core::panic::PanicInfo) -> ! {
     if let Some(raw) = live() {
         if console().is_some() && !PANICKED.swap(true, Ordering::Relaxed) {
             print(format_args!("[PANIC]: {info}\n"));
         }
+        let kind = if PANIC_RESETS.load(Ordering::Relaxed) { ResetType::WARM } else { ResetType::SHUTDOWN };
         // SAFETY: runtime services live as long as the table.
-        unsafe { &*raw.runtime_services }.reset(ResetType::SHUTDOWN, Status::ABORTED)
+        unsafe { &*raw.runtime_services }.reset(kind, Status::ABORTED)
     }
     loop {
         core::hint::spin_loop();
