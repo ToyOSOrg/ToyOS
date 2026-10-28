@@ -3037,6 +3037,29 @@ fn no_arbitration_nearer_than_the_pace(nic: &Nic) -> bool {
     nic.arbitration_at().windows(2).all(|pair| pair[1] - pair[0] >= toyos_phy::ARBITRATION_PACE_NANOS)
 }
 
+/// I219 §9.5.6 and §9.5.12.1: EEE is read at page 772 and through MI16 and
+/// MI17, under the flag, paced from the bring-up's last hold of it, and the
+/// flag given back. The 82574's PHY is not this register map.
+#[test]
+fn eee_is_read_under_the_flag_paced_from_the_last_hold() {
+    let (nic, mut driver) = held_with_a_link(120, Part::I219, Permits::default());
+    let eee = driver.eee().unwrap_or_else(|why| panic!("{}", nic.because(&format!("EEE not read: {why}"))));
+    let abilities = (1 << 1) | toyos_phy::emi::GIGABIT;
+    let expected = toyos_phy::Eee {
+        lpi_gpio_control: 0x00C9,
+        lpi_control: 0x0220,
+        capability: abilities,
+        advertised: abilities,
+        partner: 0,
+        pcs_status: 0,
+    };
+    assert_eq!(eee, expected, "{}", nic.because("EEE read other than the PHY holds"));
+    assert!(no_arbitration_nearer_than_the_pace(&nic), "{}", nic.because("the EEE hold broke the pace"));
+    assert_eq!(nic.peek(regs::EXTCNF_CTRL) & extcnf::MDIO_SW_OWNERSHIP, 0, "{}", nic.because("the flag was kept"));
+    let (_, mut other) = held_with_a_link(120, Part::E82574, Permits::default());
+    assert!(matches!(other.eee(), Err(PhyRefusal::NotThisRegisterMap)));
+}
+
 /// Every ask the wake made carries the part's own word for how it ended — the
 /// identifier where the PHY answered, `MDIC` as the transaction left it where
 /// it did not — and the wake keeps the arbitration's pace throughout.
@@ -3391,6 +3414,40 @@ fn a_full_ring_counts_how_long_it_waited_for_room() {
     assert!((6_000_000..6_100_000).contains(&waited), "waited {waited} ns: a second full answer restarted the wait");
     assert!(driver.tx_room() > 0);
     assert_eq!(driver.counters().tx_full_nanos, waited, "room with no wait added time");
+}
+
+/// The frames a full ring's span counts are the ones `GPTC` counted inside it,
+/// and none the wire carried before the first full answer; a span whose room
+/// came back with nothing left in the ring is counted drained, and one the part
+/// still held frames at is not.
+#[test]
+fn a_full_ring_counts_the_frames_sent_while_it_was_full() {
+    for (batched, seed) in [(false, 3u64), (true, 3)] {
+        let permits = Permits { batched_writeback: batched, ..Permits::default() };
+        let (nic, mut driver) = held_with_a_link(seed, Part::I219, permits);
+        fill(&nic, &mut driver, 1);
+        nic.run();
+        settle(&nic, &mut driver);
+        let before = nic.sent().len();
+        let full = fill(&nic, &mut driver, 100);
+        assert_eq!(driver.wake_on_room(), 0);
+        nic.run();
+        let room = driver.tx_room();
+        assert!(room > 0, "{}", nic.because("the sent frames gave no room back"));
+        let counters = driver.counters();
+        assert_eq!(nic.sent().len(), full.len(), "{}", nic.because("the full ring did not all leave"));
+        assert_eq!(
+            counters.tx_full_frames,
+            full.len() as u64,
+            "{}",
+            nic.because(&std::format!("the span counted frames other than its own {} ({before} before it)", full.len()))
+        );
+        let drained = room == TX_RING - 1;
+        assert_eq!(drained, !batched, "{}", nic.because("seed {seed}'s write-back did not give the case it is for"));
+        assert_eq!(counters.tx_full_drained, u32::from(drained), "{}", nic.because("the span's end was miscounted"));
+        assert!(driver.tx_room() > 0);
+        assert_eq!(driver.counters().tx_full_frames, full.len() as u64, "room with no wait counted frames");
+    }
 }
 
 /// The bring-up leaves one `TCTL` whatever the last holder wrote: a reset that

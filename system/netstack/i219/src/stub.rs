@@ -509,6 +509,13 @@ struct PhyModel {
     /// A fault injector: it is how a test reaches a ladder that stops on a
     /// refusal with the MAC on SMBus.
     transition_sticks_on_smbus: bool,
+    /// §9.5.6.1's and §9.5.6.2's LPI registers, page 772's 18 and 20.
+    lpi_gpio_control: u16,
+    lpi_control: u16,
+    /// §9.5.12.1's MI16, the EMI address MI17 reaches, and what the EMI
+    /// addresses this model has hold.
+    emi_address: u16,
+    emi: [(u16, u16); 4],
 }
 
 impl PhyModel {
@@ -574,9 +581,23 @@ impl PhyModel {
             extcnf_ones_after_request: None,
             extcnf_writes: 0,
             transition_sticks_on_smbus: false,
+            // §9.5.6.1's bits 9:0 and §9.5.6.2's PllLockCnt and PostLPICount
+            // as their tables print them; neither enable set.
+            lpi_gpio_control: 0x00C9,
+            lpi_control: (0x2 << 4) | (0x1 << 9),
+            emi_address: 0,
+            emi: [
+                (phy::emi::CAPABILITY, EEE_ABILITIES),
+                (phy::emi::ADVERTISEMENT, EEE_ABILITIES),
+                (phy::emi::PARTNER, 0),
+                (phy::emi::PCS_STATUS, 0),
+            ],
         }
     }
 }
+
+/// 100BASE-TX and 1000BASE-T EEE, bits 1 and 2 of MMD 3.20 and 7.60.
+const EEE_ABILITIES: u16 = (1 << 1) | phy::emi::GIGABIT;
 
 /// The register file plus everything behind it.
 struct Model {
@@ -716,6 +737,13 @@ enum PhyPlace {
     PortGeneral,
     /// §9.5.8.2's OEM Bits, page 0's register 25.
     OemBits,
+    /// §9.5.6.1's LPI GPIO Control and §9.5.6.2's LPI Control, page 772's
+    /// registers 18 and 20.
+    LpiGpioControl,
+    LpiControl,
+    /// §9.5.12.1's MI16 and MI17, PHY address 02, page 0.
+    EmiAddress,
+    EmiData,
     /// One of the thirty PHY addresses §9.3 places nothing at. §10.2.2.7's
     /// `PHYADD` field is five bits and this part answers two of them, so a
     /// transaction to any other ends with nothing driving the bus.
@@ -1709,6 +1737,28 @@ impl Model {
                 );
                 PhyPlace::CustomMode
             }
+            (phy::GENERAL, reg::LPI_GPIO_CONTROL | reg::LPI_CONTROL) => {
+                assert_eq!(
+                    self.phy.page,
+                    Some(phy::PAGE_LPI),
+                    "seed {}: the driver reached §9.5.6's register {reg} with page {:?} selected, \
+                     and §9.5.6 places it at page 772",
+                    self.seed,
+                    self.phy.page
+                );
+                if reg == reg::LPI_CONTROL { PhyPlace::LpiControl } else { PhyPlace::LpiGpioControl }
+            }
+            (phy::SPECIFIC, reg::EMI_ADDRESS | reg::EMI_DATA) => {
+                assert_eq!(
+                    self.phy.page,
+                    Some(phy::PAGE_GENERAL),
+                    "seed {}: the driver reached §9.5.12.1's MI{reg} with page {:?} selected, \
+                     and §9.5.12.1 places it at page 0",
+                    self.seed,
+                    self.phy.page
+                );
+                if reg == reg::EMI_ADDRESS { PhyPlace::EmiAddress } else { PhyPlace::EmiData }
+            }
             (a, _) if a != phy::GENERAL && a != phy::SPECIFIC => PhyPlace::Undriven,
             _ => panic!(
                 "seed {}: the driver reached PHY address {addr:02} register {reg}, which \
@@ -1725,6 +1775,20 @@ impl Model {
             PhyPlace::CustomMode => self.phy.custom_mode,
             PhyPlace::PortGeneral => self.phy.port_general,
             PhyPlace::OemBits => self.phy.oem_bits,
+            PhyPlace::LpiGpioControl => self.phy.lpi_gpio_control,
+            PhyPlace::LpiControl => self.phy.lpi_control,
+            PhyPlace::EmiAddress => self.phy.emi_address,
+            PhyPlace::EmiData => {
+                let at = self.phy.emi_address;
+                match self.phy.emi.iter().find(|(address, _)| *address == at) {
+                    Some(&(_, value)) => value,
+                    None => panic!(
+                        "seed {}: the driver read EMI address {at:#06x}, which this model does \
+                         not have",
+                        self.seed
+                    ),
+                }
+            }
             PhyPlace::SmbusControl => {
                 if self.lcd == Lcd::Smbus {
                     wake::SMBUS_CONTROL_FORCE
@@ -1760,6 +1824,12 @@ impl Model {
             // page. During write to the page register, the five LSBs are
             // ignored."
             PhyPlace::Page => self.phy.page = Some(data >> phy::PAGE_SHIFT),
+            PhyPlace::EmiAddress => self.phy.emi_address = data,
+            PhyPlace::LpiGpioControl | PhyPlace::LpiControl | PhyPlace::EmiData => panic!(
+                "seed {}: the driver wrote {data:#06x} to PHY address {addr:02} register {reg}, \
+                 which it only reads",
+                self.seed
+            ),
             PhyPlace::SmbusControl => {
                 // §9.5.3.4's other fields come up 0b, and this model leaves them
                 // there.

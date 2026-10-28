@@ -159,9 +159,11 @@ fn brought_up_words(brought_up: toyos_i219::BringUp) -> Vec<String> {
     let mut words = vec![
         brought_up.delivered.to_string(),
         format!(
-            "out of the reset: TCTL {:#010x} TXDCTL {:#010x} TARC0 {:#010x} RXCSUM {:#010x} MRQC \
+            "out of the reset: PBA {:#010x} PBS {:#010x} TCTL {:#010x} TXDCTL {:#010x} TARC0 {:#010x} RXCSUM {:#010x} MRQC \
              {:#010x} RFCTL {:#010x}, receive addresses past the first valid {:#06x} (left to \
              firmware); TCTL {:#010x} after the bring-up",
+            brought_up.out_of_reset.pba,
+            brought_up.out_of_reset.pbs,
             brought_up.out_of_reset.tctl,
             brought_up.out_of_reset.txdctl,
             brought_up.out_of_reset.tarc0,
@@ -354,6 +356,7 @@ impl Nic {
                 toyos_i219::Link::Down => crate::say!("netstack: I219: link down"),
             }
         }
+        let came_up = link != was_link && link.is_up();
         if counters.anomalies() != was_counters {
             crate::say!(
                 "netstack: I219: refused {} over-length, {} errored, {} split and {} empty \
@@ -368,6 +371,14 @@ impl Nic {
                 counters.stranded,
                 counters.spurious,
             );
+        }
+        drop(driver);
+        // Once a link comes up, when both ends' advertisements are settled.
+        if came_up && self.part == toyos_i219::Part::I219 {
+            match self.driver.borrow_mut().eee() {
+                Ok(eee) => crate::say!("netstack: I219: {eee}"),
+                Err(why) => crate::say!("netstack: I219: EEE not read: {why}"),
+            }
         }
     }
 }

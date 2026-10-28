@@ -98,6 +98,11 @@ pub fn mta_bit_pch(group: [u8; 6]) -> (usize, u32) {
 /// address, and the one exact-match filter this driver uses.
 pub const RAL0: usize = 0x05400;
 pub const RAH0: usize = 0x05404;
+/// Packet Buffer Allocation (§10.2.2.17) and Packet Buffer Size
+/// (§10.2.12.13): the on-chip buffer's size and its receive and transmit
+/// split, in KB. Neither is reset by `CTRL.RST`.
+pub const PBA: usize = 0x01000;
+pub const PBS: usize = 0x01008;
 /// Transmit Control (§10.2.6.1, `0x00400`) and the inter-packet gap
 /// (§10.2.6.2, `0x00410`).
 pub const TCTL: usize = 0x00400;

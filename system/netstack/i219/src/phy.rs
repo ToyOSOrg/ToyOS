@@ -95,7 +95,40 @@ pub(crate) mod reg {
     pub const OEM_BITS: u8 = 25;
     /// §9.3: "Register 31 is the page register in all pages of PHY address 01."
     pub const PAGE_SELECT: u8 = 31;
+    /// Low Power Idle GPIO Control and Low Power Idle Control (§9.5.6.1,
+    /// §9.5.6.2), PHY address 01, page 772.
+    pub const LPI_GPIO_CONTROL: u8 = 18;
+    pub const LPI_CONTROL: u8 = 20;
+    /// §9.5.12.1: the EMI registers are reached "by programing the EMI address
+    /// to register MI16 and reading/writing the data from/to register MI17",
+    /// PHY address 02, page 0.
+    pub const EMI_ADDRESS: u8 = 16;
+    pub const EMI_DATA: u8 = 17;
 }
+
+/// The page §9.5.6's LPI registers live in.
+pub(crate) const PAGE_LPI: u16 = 772;
+
+/// §9.5.12.1's EMI addresses, each the IEEE MMD register it carries.
+pub mod emi {
+    /// MMD 3.1, the PCS status: bits 11 and 10 Tx and Rx LP idle received, 9
+    /// and 8 Tx and Rx LP idle indication.
+    pub const PCS_STATUS: u16 = 0x9401;
+    /// MMD 3.20, the EEE capability.
+    pub const CAPABILITY: u16 = 0x8000;
+    /// MMD 7.60 and 7.61, the EEE advertisement and the link partner's.
+    pub const ADVERTISEMENT: u16 = 0x8001;
+    pub const PARTNER: u16 = 0x8002;
+    /// IEEE 802.3 §45.2.7.13: bit 2 of 7.60 and 7.61 is 1000BASE-T EEE.
+    pub const GIGABIT: u16 = 1 << 2;
+}
+
+/// LPI Control's 1000Enable (§9.5.6.2, bit 14): "Enable EEE on 1 Gb/s link
+/// speed. This bit auto clears on link down."
+pub const LPI_CONTROL_GIGABIT: u16 = 1 << 14;
+/// LPI GPIO Control's Auto EN LPI (§9.5.6.1, bit 11): "When set to 0x1
+/// 772.20[14:13] will be automatically set by HW after link up."
+pub const LPI_GPIO_AUTO_ENABLE: u16 = 1 << 11;
 
 /// Port General Configuration bits (§9.5.3.2).
 pub mod port_general {
@@ -951,6 +984,68 @@ pub(crate) fn bring_up<R: Registers, C: Clock>(
     let after = mdi.read(GENERAL, reg::OEM_BITS)?;
 
     Ok(Phy { addr, id, port_general: port, oem: Oem { found, wrote, after } })
+}
+
+/// What the PHY says of Energy Efficient Ethernet: whether its transmit path
+/// may enter Low Power Idle at 1000 Mb/s, what both ends advertise, and whether
+/// either has.
+///
+/// I219 §6.3.1.4: the decision to enter LPI "is done on the integrated LAN
+/// controller level", and the PHY is enabled for it by 772.20's 1000Enable,
+/// which 772.18's Auto EN LPI sets "after link up".
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub struct Eee {
+    pub lpi_gpio_control: u16,
+    pub lpi_control: u16,
+    pub capability: u16,
+    pub advertised: u16,
+    pub partner: u16,
+    pub pcs_status: u16,
+}
+
+impl core::fmt::Display for Eee {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        let yes = |set: bool| if set { "yes" } else { "no" };
+        write!(
+            f,
+            "EEE: LPI GPIO Control {:#06x} (auto-enable {}), LPI Control {:#06x} (1000 Mb/s              enabled {}), capability {:#06x}, advertised {:#06x} (1000BASE-T {}), partner              {:#06x} (1000BASE-T {}), PCS status {:#06x}",
+            self.lpi_gpio_control,
+            yes(self.lpi_gpio_control & LPI_GPIO_AUTO_ENABLE != 0),
+            self.lpi_control,
+            yes(self.lpi_control & LPI_CONTROL_GIGABIT != 0),
+            self.capability,
+            self.advertised,
+            yes(self.advertised & emi::GIGABIT != 0),
+            self.partner,
+            yes(self.partner & emi::GIGABIT != 0),
+            self.pcs_status,
+        )
+    }
+}
+
+/// Take the MDIO interface, read [`Eee`], and give the interface back.
+pub(crate) fn eee<R: Registers, C: Clock>(
+    regs: &R,
+    clock: &C,
+    after: Option<u64>,
+) -> Result<Eee, PhyRefusal> {
+    let mdi = Owned::claim(regs, clock, after)?;
+    mdi.select(PAGE_LPI)?;
+    let lpi_gpio_control = mdi.read(GENERAL, reg::LPI_GPIO_CONTROL)?;
+    let lpi_control = mdi.read(GENERAL, reg::LPI_CONTROL)?;
+    mdi.select(PAGE_GENERAL)?;
+    let emi = |at| {
+        mdi.write(SPECIFIC, reg::EMI_ADDRESS, at)?;
+        mdi.read(SPECIFIC, reg::EMI_DATA)
+    };
+    Ok(Eee {
+        lpi_gpio_control,
+        lpi_control,
+        capability: emi(emi::CAPABILITY)?,
+        advertised: emi(emi::ADVERTISEMENT)?,
+        partner: emi(emi::PARTNER)?,
+        pcs_status: emi(emi::PCS_STATUS)?,
+    })
 }
 
 /// Bring the PHY within reach of `MDIC` before [`crate::I219::open`] resets

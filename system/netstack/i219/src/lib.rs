@@ -493,6 +493,14 @@ pub struct Counters {
     /// Nanoseconds the transmit ring spent full: from a caller's first full
     /// answer to the next room counted.
     pub tx_full_nanos: u64,
+    /// Frames `GPTC` counted over the same spans: with [`Self::tx_full_nanos`],
+    /// the pace the part sent at with frames in hand.
+    pub tx_full_frames: u64,
+    /// Those spans that ended with every descriptor written back. §7.2.2 has a
+    /// frame "fetched by the hardware" before it is sent and its descriptor
+    /// written back after that fetch, so the part had taken every frame and
+    /// its end of such a span may be the wake's and not the part's pace.
+    pub tx_full_drained: u32,
     /// At each full answer, frames `GPTC` counts on the wire whose `DD` this
     /// driver had not yet read, summed: completions the ring was full of
     /// without knowing it. 0 says the part sends what it holds no faster than
@@ -507,7 +515,7 @@ pub struct Counters {
 
 impl Counters {
     /// The counts that are worth a line: every one but [`Self::spurious`],
-    /// [`Self::sent`], [`Self::received`] and the six of a full transmit
+    /// [`Self::sent`], [`Self::received`] and the eight of a full transmit
     /// ring, which move on their own on a working card, so a diagnostic keyed
     /// on them would print on nothing having gone wrong.
     pub fn anomalies(&self) -> Self {
@@ -519,6 +527,8 @@ impl Counters {
             tx_wake_armed: 0,
             tx_wake_taken: 0,
             tx_full_nanos: 0,
+            tx_full_frames: 0,
+            tx_full_drained: 0,
             tx_unreported: 0,
             tx_unreported_max: 0,
             ..*self
@@ -921,6 +931,9 @@ pub struct BringUp {
 /// gives, which the bring-up does not rely on.
 #[derive(Clone, Copy, PartialEq, Eq, Debug, Default)]
 pub struct OutOfReset {
+    /// The packet buffer's split and size, which the bring-up leaves.
+    pub pba: u32,
+    pub pbs: u32,
     pub tctl: u32,
     pub txdctl: u32,
     pub tarc0: u32,
@@ -951,6 +964,9 @@ pub struct I219<R: Registers, C, D, I> {
     irq: I,
     mac: [u8; 6],
     brought_up: BringUp,
+    /// When this driver last gave §4.5.2's flag back, which the next hold's
+    /// pace runs from; `None` on the 82574.
+    phy_released: Option<u64>,
     link: Link,
     /// When [`Self::open`] returned, and when the link first came up — the two
     /// the caller subtracts to get a link-up time.
@@ -971,8 +987,9 @@ pub struct I219<R: Registers, C, D, I> {
     /// Whether the transmit write-back is unmasked: a caller found the ring
     /// full and no pass has begun since.
     tx_wake: bool,
-    /// When the transmit ring was first answered full, while it still is.
-    tx_full_since: Option<u64>,
+    /// When the transmit ring was first answered full, and `GPTC`'s count
+    /// then, while it still is.
+    tx_full_since: Option<FullSince>,
     /// The descriptors a link change left in the transmit ring that the part
     /// has not yet written back.
     stranded: Option<Stranded>,
@@ -987,6 +1004,13 @@ impl<R: Registers, C, D, I> Drop for I219<R, C, D, I> {
             pch::release(&self.regs);
         }
     }
+}
+
+/// Where a full transmit ring's span began.
+#[derive(Clone, Copy)]
+struct FullSince {
+    at: u64,
+    wire_sent: u64,
 }
 
 /// The oldest descriptors of the transmit ring, published before a link change
@@ -1107,6 +1131,7 @@ impl<R: Registers, C: Clock, D: DmaBuffers, I: Interrupts> I219<R, C, D, I> {
             Part::I219 => phy::bring_up(&regs, &clock, reset_at, released),
             Part::E82574 => Err(phy::PhyRefusal::NotThisRegisterMap),
         };
+        let phy_released = (part == Part::I219).then(|| clock.nanos());
 
         // §10.2.2.1: `SLU` is what lets the MAC see the PHY's link at all;
         // `ASDE` must be zero on this family; forcing speed or duplex would
@@ -1138,6 +1163,7 @@ impl<R: Registers, C: Clock, D: DmaBuffers, I: Interrupts> I219<R, C, D, I> {
             irq,
             mac,
             brought_up: BringUp { master_quiet, woke, reset: full, phy, delivered, out_of_reset: OutOfReset::default(), transmit_control: 0 },
+            phy_released,
             link: Link::default(),
             opened_at: 0,
             link_up_at: None,
@@ -1225,14 +1251,16 @@ impl<R: Registers, C: Clock, D: DmaBuffers, I: Interrupts> I219<R, C, D, I> {
         }
     }
 
-    /// The registers the bring-up writes, as the reset left them, and which
-    /// receive addresses past the first are valid.
+    /// The registers the bring-up writes, as the reset left them, the packet
+    /// buffer's split, and which receive addresses past the first are valid.
     fn out_of_reset(&self) -> OutOfReset {
         let read = |reg| self.regs.read32(reg);
         let receive_addresses_valid = (1..regs::RECEIVE_ADDRESSES)
             .filter(|&n| read(regs::rah(n)) & rah::AV != 0)
             .fold(0u16, |valid, n| valid | 1 << n);
         OutOfReset {
+            pba: read(regs::PBA),
+            pbs: read(regs::PBS),
             tctl: read(regs::TCTL),
             txdctl: read(regs::TXDCTL),
             tarc0: read(regs::TARC0),
@@ -1302,6 +1330,20 @@ impl<R: Registers, C: Clock, D: DmaBuffers, I: Interrupts> I219<R, C, D, I> {
     /// no link has to say about why.
     pub fn brought_up(&self) -> BringUp {
         self.brought_up
+    }
+
+    /// What the PHY says of Energy Efficient Ethernet ([`phy::Eee`]).
+    ///
+    /// **It holds the MDIO interface under §4.5.2's arbitration**, paced at
+    /// [`phy::ARBITRATION_PACE_NANOS`]: hundreds of milliseconds in which
+    /// nothing else this driver does moves. For a link change, not a pass.
+    pub fn eee(&mut self) -> Result<phy::Eee, phy::PhyRefusal> {
+        if self.part != Part::I219 {
+            return Err(phy::PhyRefusal::NotThisRegisterMap);
+        }
+        let read = phy::eee(&self.regs, &self.clock, self.phy_released);
+        self.phy_released = Some(self.clock.nanos());
+        read
     }
 
     pub fn counters(&self) -> Counters {
@@ -1593,8 +1635,13 @@ impl<R: Registers, C: Clock, D: DmaBuffers, I: Interrupts> I219<R, C, D, I> {
         let room = TX_RING - 1 - self.unsent();
         if room > 0 {
             if let Some(since) = self.tx_full_since.take() {
-                let waited = self.clock.nanos().saturating_sub(since);
+                let waited = self.clock.nanos().saturating_sub(since.at);
                 self.counters.tx_full_nanos = self.counters.tx_full_nanos.saturating_add(waited);
+                let sent = self.wire_sent().saturating_sub(since.wire_sent);
+                self.counters.tx_full_frames = self.counters.tx_full_frames.saturating_add(sent);
+                if room == TX_RING - 1 {
+                    self.counters.tx_full_drained = self.counters.tx_full_drained.saturating_add(1);
+                }
             }
         }
         room
@@ -1626,14 +1673,12 @@ impl<R: Registers, C: Clock, D: DmaBuffers, I: Interrupts> I219<R, C, D, I> {
             return room;
         }
         self.counters.tx_full = self.counters.tx_full.saturating_add(1);
+        // The driver's `sent` is the frames whose write-back it has read.
+        let wire_sent = self.wire_sent();
         if self.tx_full_since.is_none() {
-            self.tx_full_since = Some(self.clock.nanos());
+            self.tx_full_since = Some(FullSince { at: self.clock.nanos(), wire_sent });
         }
-        // §10.2.7.28's GPTC counts good frames transmitted; the driver's `sent`,
-        // those whose write-back it has read. One register read per full answer,
-        // GPTC alone, added up as `wire` adds it.
-        self.wire.sent = self.wire.sent.saturating_add(u64::from(self.regs.read32(regs::GPTC)));
-        let unreported = self.wire.sent.saturating_sub(u64::from(self.counters.sent));
+        let unreported = wire_sent.saturating_sub(u64::from(self.counters.sent));
         self.counters.tx_unreported = self.counters.tx_unreported.saturating_add(unreported);
         let most = u32::try_from(unreported).unwrap_or(u32::MAX);
         self.counters.tx_unreported_max = self.counters.tx_unreported_max.max(most);
@@ -1643,6 +1688,13 @@ impl<R: Registers, C: Clock, D: DmaBuffers, I: Interrupts> I219<R, C, D, I> {
             self.counters.tx_wake_armed = self.counters.tx_wake_armed.saturating_add(1);
         }
         self.tx_room()
+    }
+
+    /// §10.2.7.28's `GPTC`, good frames transmitted, read alone and added up as
+    /// [`Self::wire`] adds it.
+    fn wire_sent(&mut self) -> u64 {
+        self.wire.sent = self.wire.sent.saturating_add(u64::from(self.regs.read32(regs::GPTC)));
+        self.wire.sent
     }
 
     /// Take a transmit descriptor and its buffer, or `None` where the ring has

@@ -124,6 +124,8 @@ impl Card {
         snap.put("transmit.wake_armed", counters.tx_wake_armed);
         snap.put("transmit.wake_taken", counters.tx_wake_taken);
         snap.put("transmit.full.ns", counters.tx_full_nanos);
+        snap.put("transmit.full.frames", counters.tx_full_frames);
+        snap.put("transmit.full.drained", counters.tx_full_drained);
         snap.put("transmit.unreported", counters.tx_unreported);
         snap.put("transmit.unreported.max", counters.tx_unreported_max);
         snap.put("wire.sent", wire.sent);
