@@ -13,17 +13,24 @@ back on through this kernel's root table only after the queue, fault
 reporting, both table pointers and a global invalidation are programmed. In
 between, every function behind that unit reaches all of memory.
 
-Keeping `TE` on is what VT-d Rev. 4.1 §6.6 allows only onto tables that remap
-in-flight requests exactly as the ones being walked. Where firmware sets
-`DMA_CTRL_PLATFORM_OPT_IN` (§8.1), its DMA reaches only its RMRRs, which
-§3.16 has mapped identity and read-write. If the identity domain holds every
-RMRR and every device they name is enumerated, this kernel's root translates
-them alike, and the hand-over keeps `TE` on. The T14 is such a machine.
-Elsewhere, firmware's tables have to be read and copied first, as Linux's
-kdump path does (`copy_translation_tables`, `drivers/iommu/intel/iommu.c`);
-Linux outside kdump switches `TE` off as this kernel does. Any copy has to
-read them before the pmm hands their memory out: it takes
-`EfiBootServicesData` as free (`lib/bootmap/src/lib.rs`, `is_usable_type`).
+Keeping `TE` on is what VT-d Rev. 4.1 §6.6 allows only onto structures that
+give identical remapping results. Where firmware reports
+`DMA_CTRL_PLATFORM_OPT_IN` (§8.1), the DMA it leaves running reaches only its
+RMRRs. This kernel infers that firmware's tables map those identity and
+read-write, the mapping §3.16 expects of system software's tables but does
+not guarantee of firmware's. On that inference, where the identity domain
+holds every RMRR and every device they name is enumerated, the hand-over
+keeps `TE` on. The T14 reports the flag, but its firmware leaves translation
+off, so only `iommu-firmware-left` takes that path there. Elsewhere,
+firmware's tables have to be read and copied before the switch.
+
+Both routes share one exposure. `mm::init` runs before `iommu::init` and
+treats `EfiBootServicesData` as free (`lib/bootmap/src/lib.rs`,
+`is_usable_type`). From then until the switch, or until translation goes off,
+a unit left translating walks firmware's tables in memory the pmm may already
+have handed out. The same exposure weakens the inference above and any copy
+of firmware's tables, which would have to be read before the pmm hands that
+memory out.
 
 Evidence: no machine here is handed a unit translating; the T14's four units
 read `gsts=0x40000000` (pull request #700's selftests boot). QEMU's DMAR leaves

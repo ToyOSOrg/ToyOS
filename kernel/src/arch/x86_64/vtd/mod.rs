@@ -8,8 +8,6 @@
 //! cannot use leaves the unit switched off rather than halting, logged by
 //! register value rather than a bare "unsupported".
 
-#[cfg(feature = "boot-actuators")]
-mod cycles;
 pub mod dmar;
 pub mod domain;
 pub mod fault;
@@ -51,7 +49,11 @@ const IQH_REG: u64 = 0x80;
 const IQT_REG: u64 = 0x88;
 const IQA_REG: u64 = 0x90;
 
-/// `RTADDR_REG.TTM`, bits 11:10: `00` is legacy mode, the only one this kernel writes.
+/// `RTADDR_REG.TTM`, bits 11:10, `00` for legacy mode: this kernel's root is
+/// legacy, and with `CAP.ESRTPS` clear `TTM` may not change while `TES` is set
+/// (§6.6, §11.4.5).
+// No machine here reports `ESRTPS`, so a unit in another mode goes off
+// whatever it reports (`issues/a-unit-in-scalable-or-abort-mode-loses-translation-for-its-root-table-switch.md`).
 const TRANSLATION_TABLE_MODE: u64 = 0b11 << 10;
 
 /// `GCMD` bits; `GSTS` confirms each at the same bit position.
@@ -160,9 +162,9 @@ pub fn init(rsdp_addr: u64, devices: &[PciDevice], windows: Option<&[RootBridgeW
     // meets them; nothing where no declaration is held.
     let mut reserved: Option<Vec<(u64, u64)>> = windows
         .map(|w| w.iter().map(|w| (w.base, w.end())).chain([super::iommu_unit::INTERRUPT_RANGE]).collect());
-    // Cleared by the first region this kernel's root does not translate as
-    // firmware must have: one outside the identity domain, or one naming a
-    // device no context entry is written for.
+    // Whether every region was read whole and is one this kernel's root maps
+    // for every device it names; cleared too by a walk that stops before the
+    // table's end, since the regions past it are unread.
     let mut regions_identity = true;
     for structure in dmar.structures() {
         match structure {
@@ -172,6 +174,7 @@ pub fn init(rsdp_addr: u64, devices: &[PciDevice], windows: Option<&[RootBridgeW
                 units += 1;
                 if units > MAX_UNITS {
                     log!("iommu: more than {MAX_UNITS} units described; the rest are not inventoried");
+                    regions_identity = false;
                     break;
                 }
                 if let Some(unit) = describe_unit(units - 1, &drhd) {
@@ -214,7 +217,7 @@ pub fn init(rsdp_addr: u64, devices: &[PciDevice], windows: Option<&[RootBridgeW
                     reserved.push((base, limit.saturating_add(1)));
                 }
                 describe_scopes("rmrr", regions, rmrr.scopes());
-                regions_identity &= held && rmrr.scopes().all(|scope| enumerated(devices, scope));
+                regions_identity &= held && identity_mapped(devices, &rmrr);
                 regions += 1;
                 held_regions += usize::from(held);
             }
@@ -230,6 +233,7 @@ pub fn init(rsdp_addr: u64, devices: &[PciDevice], windows: Option<&[RootBridgeW
                     "iommu: DMAR structure at +{at} declares {declared} bytes the table cannot \
                      hold — stopping"
                 );
+                regions_identity = false;
             }
         }
     }
@@ -251,28 +255,34 @@ pub fn init(rsdp_addr: u64, devices: &[PciDevice], windows: Option<&[RootBridgeW
     for (unit, plan) in ready {
         enable(unit, plan, devices, &mut domains, remap, in_flight);
     }
-    #[cfg(feature = "boot-actuators")]
-    if crate::actuator::iommu_handover_cycles() {
-        cycles::run(devices);
-    }
     true
 }
 
-/// Whether an RMRR scope names a function this kernel writes a context entry for.
-fn enumerated(devices: &[PciDevice], scope: Result<Scope, Malformed>) -> bool {
-    let Ok(Some(stream)) = scope.map(|s| s.stream_id()) else { return false };
-    devices.iter().any(|d| StreamId::pci(d.bus, d.dev, d.func) == stream)
+/// Whether `rmrr` is whole, `base <= limit`, on the one segment this kernel
+/// enumerates, and names only endpoints it writes a context entry for. A
+/// bridge scope's requesters are the devices below it, which it does not name.
+fn identity_mapped(devices: &[PciDevice], rmrr: &dmar::Rmrr) -> bool {
+    rmrr.whole()
+        && rmrr.base() <= rmrr.limit()
+        && rmrr.segment() == toyos_acpi::SEGMENT_GROUP
+        && rmrr.scopes().all(|scope| {
+            let Ok(scope) = scope else { return false };
+            let Some(stream) = scope.stream_id().filter(|_| scope.kind() == SCOPE_ENDPOINT) else { return false };
+            devices.iter().any(|d| StreamId::pci(d.bus, d.dev, d.func) == stream)
+        })
 }
 
 /// What a unit firmware left translating may have in flight when this kernel's
 /// root replaces firmware's.
 #[derive(Clone, Copy)]
 enum InFlight {
-    /// Only what this kernel's root translates as firmware's must: firmware
-    /// declares `DMA_CTRL_PLATFORM_OPT_IN` (§8.1), so the DMA it leaves running
-    /// reaches only its RMRRs, which §3.16 has it map identity and read-write,
-    /// and the identity domain does too for every device they name. §6.6 then
-    /// allows the switch with translation on.
+    /// Only what this kernel's root is taken to translate as firmware's does:
+    /// firmware reports `DMA_CTRL_PLATFORM_OPT_IN` (§8.1), so the DMA it leaves
+    /// running reaches only its RMRRs, and the identity domain maps each of
+    /// them, identity and read-write, for every device it names. That
+    /// firmware's own tables map them the same way is an inference, not a
+    /// guarantee: §3.16 sets that expectation for system software's tables.
+    /// §6.6 allows the switch under translation only onto identical results.
     Identical,
     /// Anything, for the reason given.
     Unknown(&'static str),
@@ -348,30 +358,27 @@ struct Unit {
     caps: Capabilities,
 }
 
-/// Turn one `GCMD` field on or off by §11.4.4.1's recipe — every other field
-/// as `GSTS` reports it — and wait for `GSTS` to agree.
-fn command(index: usize, regs: Mmio, bit: u32, on: bool, what: &str) {
-    let status = regs.read_u32(GSTS_REG) & PERSISTENT;
-    regs.write_u32(GCMD_REG, if on { status | bit } else { status & !bit });
-    let state = if on { "" } else { " off" };
-    wait(index, regs, what, state, || (regs.read_u32(GSTS_REG) & bit != 0) == on);
-}
-
-fn wait(index: usize, regs: Mmio, what: &str, state: &str, done: impl Fn() -> bool) {
-    let deadline = crate::clock::nanos_since_boot() + COMMAND_TIMEOUT.nanos();
-    while !done() {
-        assert!(
-            crate::clock::nanos_since_boot() < deadline,
-            "iommu: unit{index} never reported {what}{state}, GSTS={:#010x}",
-            regs.read_u32(GSTS_REG)
-        );
-        core::hint::spin_loop();
-    }
-}
-
 impl Unit {
+    /// Turn one `GCMD` field on or off by §11.4.4.1's recipe — every other
+    /// field as `GSTS` reports it — and wait for `GSTS` to agree.
     fn command(&self, bit: u32, on: bool, what: &str) {
-        command(self.index, self.regs, bit, on, what);
+        let status = self.regs.read_u32(GSTS_REG) & PERSISTENT;
+        self.regs.write_u32(GCMD_REG, if on { status | bit } else { status & !bit });
+        let state = if on { "" } else { " off" };
+        self.wait(what, state, || (self.regs.read_u32(GSTS_REG) & bit != 0) == on);
+    }
+
+    fn wait(&self, what: &str, state: &str, done: impl Fn() -> bool) {
+        let deadline = crate::clock::nanos_since_boot() + COMMAND_TIMEOUT.nanos();
+        while !done() {
+            assert!(
+                crate::clock::nanos_since_boot() < deadline,
+                "iommu: unit{} never reported {what}{state}, GSTS={:#010x}",
+                self.index,
+                self.regs.read_u32(GSTS_REG)
+            );
+            core::hint::spin_loop();
+        }
     }
 
     /// [`crate::actuator::iommu_firmware_left`]: the state [`Self::hand_over`]
@@ -407,8 +414,8 @@ impl Unit {
 
     /// Every field of [`FIRMWARE_LEFT`] that is on, off, except translation
     /// through a legacy-mode root while `in_flight` is [`InFlight::Identical`]:
-    /// [`enable`] then moves the unit onto this kernel's root under translation,
-    /// as §6.6 allows (`RTADDR_REG.RTA` may change while `TES` is set, §11.4.5).
+    /// [`enable`] then sets this kernel's root pointer with translation on, as
+    /// §6.6 allows onto structures with identical remapping results.
     fn hand_over(&self, in_flight: InFlight) {
         for (bit, what) in FIRMWARE_LEFT {
             if self.regs.read_u32(GSTS_REG) & bit == 0 {
@@ -442,7 +449,7 @@ impl Unit {
             if bit == QUEUED_INVALIDATION_ENABLE {
                 // §6.5.2: a queue is switched off only once it is empty and its
                 // last descriptor was a wait, which only firmware could have sent.
-                wait(self.index, self.regs, "its invalidation queue", " empty", || {
+                self.wait("its invalidation queue", " empty", || {
                     self.regs.read_u64(IQH_REG) == self.regs.read_u64(IQT_REG)
                 });
             }
@@ -674,6 +681,9 @@ fn describe_scopes(owner: &str, index: usize, scopes: Scopes) {
         }
     }
 }
+
+/// Device scope type 1, a PCI endpoint: the requester is the function named.
+const SCOPE_ENDPOINT: u8 = 1;
 
 /// Device scope type 3, whose enumeration id is an I/O APIC's MADT id.
 const SCOPE_IOAPIC: u8 = 3;
