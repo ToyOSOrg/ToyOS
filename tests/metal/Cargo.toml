@@ -11,7 +11,7 @@ serde = { version = "1", features = ["derive"] }
 toml = "0.8"
 # The build system's reading of an image, a boot log and a command line.
 toyos-build = { path = "../.." }
-# The outside judge of the log partition the boot left on the stick.
+# The outside judge of the log volume the boot left on the bench's disk.
 toyos-fat32-check = { path = "../../lib/fat32/check" }
 toyos-gpt = { path = "../../lib/gpt" }
 toyos-quiesce = { path = "../../lib/quiesce" }

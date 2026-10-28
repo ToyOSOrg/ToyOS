@@ -84,15 +84,15 @@ pub fn tone_on_metal(log: &Serial) -> Result<(), String> {
 }
 
 /// The job that plays `hda_tone`'s tone while it writes the log disk.
-pub const TONE_BESIDE_STICK_WRITE: &str = "test_rs_tone_beside_stick_write";
+pub const TONE_BESIDE_LOG_WRITE: &str = "test_rs_tone_beside_log_write";
 
 /// That job's tone played to its end through the HDA controller with no
 /// period left to soundserver, while at least a mebibyte of its lines reached
 /// the log disk: counted in the file read back off it, not in what the job says.
-pub fn tone_beside_a_stick_write(log: &Serial) -> Result<(), String> {
-    on_an_output(log.text(), TONE_BESIDE_STICK_WRITE)?;
-    let window = job_window(log.text(), TONE_BESIDE_STICK_WRITE)?;
-    let reached = super::metal::bytes_of_lines(window, "tone_beside_stick_write: line ");
+pub fn tone_beside_a_log_write(log: &Serial) -> Result<(), String> {
+    on_an_output(log.text(), TONE_BESIDE_LOG_WRITE)?;
+    let window = job_window(log.text(), TONE_BESIDE_LOG_WRITE)?;
+    let reached = super::metal::bytes_of_lines(window, "tone_beside_log_write: line ");
     if reached < 1 << 20 {
         return Err(format!("{reached} bytes of the job's lines reached the disk beside the tone, under a mebibyte"));
     }

@@ -38,14 +38,13 @@ a signed test image's job holds it.
    (`--active`), writes sector-granular at the disk's true last LBA, flushes
    between the two copies, and reads both back. Unrelated partitions are
    untouched by construction; another system's are reclaimed only when the
-   plan names them. Until then a bench's table is edited under its Ubuntu:
-   `toyos-metal` makes the install area (partitions 5–11 after the bench's
-   four) once with `sgdisk` and `partx`, and every flash gives partitions 7–11
-   the GUIDs the image names with `sgdisk --partition-guid`. A bench's area
-   is this stage's first plan.
+   plan names them.
 3. **Scratch disks.** `Init` with one aligned partition of
    `Guid::TOYOS_SCRATCH` replaces `toyos-metal --adopt-scratch`
    (`issues/the-scratch-disk-adopt-scratch-makes-is-not-served.md`).
 4. **The installer** (`issues/storage-is-layers-and-a-role-is-a-filesystem.md`,
-   stage 3) lays its layout through stage 2's library and authorization, and
-   `toyos-metal --install-internal`'s `sgdisk` and `partx` go with it.
+   stage 3) lays its layout through stage 2's library and authorization.
+   `toyos-metal`'s `sgdisk` and `partx` are not this track's to replace: they
+   run under a bench's Ubuntu before ToyOS boots, making the install area once
+   and giving partitions 7–11 the image's GUIDs on every flash, and they leave
+   with Ubuntu (`issues/the-build-runs-host-tools-outside-rust-and-qemu.md`).

@@ -20,21 +20,18 @@ the boot stick lost it:
   leaves a USB stick its next host can enumerate, `boot.usbload.stick_secs`
   and the guard `a-cut-bulk-only-command-does-not-brick-the-benchs-stick.md`
   names, is judged by no row.
-- `tone_beside_a_stick_write` and `mask_windows` under `stick_write` write
-  `/log`, which is the NVMe now: the USB load
+- `tone_beside_a_stick_write` and `mask_windows` under `stick_write` are
+  `tone_beside_a_log_write` and `mask_windows` under `log_write`: they write
+  `/log`, the NVMe now, so the USB load
   `a-megabyte-written-to-the-stick-starves-a-tone-beside-it.md` asks about is
-  not reproduced on a bench. Their jobs and the records'
-  `boot.windowscase.stick_write.*` still say "stick"; those two rows of each
-  bench's record were taken under the USB load and are re-recorded once
-  deleted.
+  not reproduced on a bench. The windows' records are
+  `boot.windowscase.log_write.*`, recorded afresh under the NVMe load; the
+  `stick_write` rows of each bench's record were taken under the USB load.
 - `bench_data_designated` no longer reads the T14 stick's short last sector.
 - `amdvi_translates_the_boot_controller` and `amdvi_remaps_the_boot_controller`
   judge the NVMe controller where they judged the stick's xHCI.
 
 QEMU's machines still boot off a stick (`the_log_lands_on_the_boot_stick`).
-The test images' `pci:0c:03:30@boot` entry names QEMU's NEC controller, which
-the entry before it already names, and nothing on a bench: whether `@boot`
-keeps a user is the owner's to say.
 
 **Exit**: a metal row drives a USB stick that is not the boot disk — the
 scratch disk (`issues/the-scratch-disk-adopt-scratch-makes-is-not-served.md`)

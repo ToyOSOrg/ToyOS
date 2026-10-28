@@ -25,9 +25,10 @@ kernel's part of a restart, and named module tests hold each program's
    where firmware put it, handed over in 4 KiB pages with its MSI-X table's
    page, under the owner's Q2 ruling. The orchestrator ruled on #900 that
    this route serves usbd's claim (step 10).
-4. **Step 10's metal rows still owed** (step 10, below): the rewritten
-   `usbload` row, `tone_beside_a_stick_write` and `mask_windows` under a stick
-   write.
+4. **Step 10's metal rows still owed** (step 10, below): a reset, a tone and
+   `mask_windows` under a write to a stick through usbd, which no bench row
+   makes since the benches boot off their NVMe
+   (`issues/no-bench-row-drives-usb-storage-since-the-benches-boot-off-nvme.md`).
 5. **Stage 6 step 5, then stage 5's windows.**
 
 Beside that order, each waiting on something outside it:
@@ -222,12 +223,13 @@ Beside that order, each waiting on something outside it:
        metal rows that asked for that machine (`iommu-no-remap`) are deleted,
        and the refusal is QEMU's to hold, by
        `usbd_refused_without_amdvi_remapping` and `amdvi_firmware_left`.
-       **Left**: the metal rows, which have not run: #901 section 9's three
-       that judge with a userland load,
-       `the_disk_survives_a_reset_under_load` (a deadline reset under
-       `stick_load`), `tone_beside_a_stick_write`
+       **Left**: #901 section 9's three metal judgements under a userland
+       load on a stick — a deadline reset, a tone
        (`issues/a-megabyte-written-to-the-stick-starves-a-tone-beside-it.md`'s
-       exit) and `mask_windows` under `stick_write`. #971's first metal boots
+       exit) and `mask_windows` — which no bench row makes since the benches
+       boot off their NVMe; `the_disk_survives_a_reset_under_load`,
+       `tone_beside_a_log_write` and `mask_windows` under `log_write` judge the
+       same under a write to the NVMe. #971's first metal boots
        came back with no `logkeeper` file on the stick, which every metal
        row reads; QEMU's stick boot (`the_log_lands_on_the_boot_stick`) has
        it. And the client test

@@ -91,13 +91,9 @@ impl Node {
         format!("/dev/{}", self.part_name(index))
     }
 
-    /// Where `/sys` answers for the disk, and for one of its partitions.
+    /// Where `/sys` answers for the disk.
     pub fn sysfs(&self) -> String {
         format!("/sys/class/block/{}", self.name())
-    }
-
-    pub fn part_sysfs(&self, index: u32) -> String {
-        format!("{}/{}", self.sysfs(), self.part_name(index))
     }
 }
 
@@ -143,10 +139,34 @@ mod tests {
         }
         assert_eq!(Node::parse("/dev/sda").unwrap().whole(), "/dev/sda");
         assert_eq!(Node::parse("/dev/sdb").unwrap().partition(3), "/dev/sdb3");
-        assert_eq!(Node::parse("/dev/sda").unwrap().part_sysfs(1), "/sys/class/block/sda/sda1");
         let nvme = Node::parse("/dev/nvme0n1").unwrap();
         assert_eq!(nvme.whole(), "/dev/nvme0n1");
         assert_eq!(nvme.partition(3), "/dev/nvme0n1p3");
-        assert_eq!(nvme.part_sysfs(1), "/sys/class/block/nvme0n1/nvme0n1p1");
+    }
+
+    /// **A whole disk's image is whole sectors with `EFI PART` in its final
+    /// one**: a ragged or empty file, and one whose signature is only in the
+    /// primary header, the false pass a healthy front hides, are refused.
+    #[test]
+    fn a_whole_disk_is_whole_sectors_ending_in_the_backup_header() {
+        let dir = toyos_tmpdir::TempDir::new("whole-disk");
+        let write = |name: &str, bytes: &[u8]| {
+            let at = dir.join(name);
+            std::fs::write(&at, bytes).expect("write");
+            at
+        };
+        let refused = |name: &str, bytes: &[u8]| whole_disk(&write(name, bytes)).map(|(_, n)| n).unwrap_err();
+        assert_eq!(refused("ragged.img", &[0u8; 1000]), Unfit::Sectors { bytes: 1000 });
+        assert_eq!(refused("empty.img", &[]), Unfit::Sectors { bytes: 0 });
+        assert_eq!(
+            refused("headless.img", &[0u8; 1024]),
+            Unfit::BackupHeader { at: 512, saw: "\0\0\0\0\0\0\0\0".to_string() }
+        );
+        let mut front = vec![0u8; 1536];
+        front[512..520].copy_from_slice(b"EFI PART");
+        assert!(matches!(refused("front-only.img", &front), Unfit::BackupHeader { at: 1024, .. }));
+        let mut whole = front.clone();
+        whole[1024..1032].copy_from_slice(b"EFI PART");
+        assert_eq!(whole_disk(&write("whole.img", &whole)).map(|(_, n)| n), Ok(1536));
     }
 }

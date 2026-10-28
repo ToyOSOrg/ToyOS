@@ -11,9 +11,11 @@
 //! **The bench's own partitions are never written.** The machine must answer
 //! as a recorded bench by its SMBIOS, the disk must be one
 //! [`internal::recognise`] knows, and every write names one of the partitions
-//! after the bench's four. The firmware's order keeps Ubuntu first: ToyOS's
-//! entry is never in it, so a ToyOS boot that fails or is reset hands the next
-//! boot to Ubuntu.
+//! after the bench's four, but for the partition table itself, which `sgdisk`
+//! rewrites whole on every flash with entries 1–4 as they were. The
+//! firmware's order keeps Ubuntu first: ToyOS's entry is never in it, which
+//! every boot checks before and after, so a ToyOS boot that fails or is reset
+//! hands the next boot to Ubuntu.
 //!
 //! Beside the loop: [`testargs`], the suite's command line, which carries the
 //! metal profile's flags; [`image`], the config a metal boot derives; and
@@ -150,8 +152,11 @@ pub enum Refusal {
     Landed { what: String, want: u64, got: u64 },
     /// `efibootmgr` named no four-hex-digit boot entry.
     BootEntry(String),
-    /// Creating the entry moved the firmware's boot order.
-    BootOrder { before: String, now: String },
+    /// The firmware's boot order moved `during` something this loop did.
+    BootOrder { during: &'static str, before: String, now: String },
+    /// The entry about to be booted once is in the firmware's boot order, so
+    /// a failed ToyOS boot would come back to ToyOS rather than Ubuntu.
+    Ordered { entry: String, order: String },
     Sudo(String),
     /// A lid key that no longer reads `ignore`, which is what keeps the machine up.
     Lid { key: &'static str, got: String },
@@ -258,10 +263,15 @@ impl fmt::Display for Refusal {
             Self::BootEntry(saw) => {
                 write!(f, "efibootmgr named no four-hex-digit boot entry: {saw:?}")
             }
-            Self::BootOrder { before, now } => write!(
+            Self::BootOrder { during, before, now } => write!(
                 f,
-                "creating the boot entry moved BootOrder from {before:?} to {now:?}: this loop \
-                 buys one boot with --bootnext and leaves the order alone"
+                "{during} moved BootOrder from {before:?} to {now:?}: this loop buys one boot with \
+                 --bootnext and leaves the order alone"
+            ),
+            Self::Ordered { entry, order } => write!(
+                f,
+                "Boot{entry} is in BootOrder {order:?}, so a ToyOS boot that fails would come back to \
+                 ToyOS: the firmware put it there, and it is taken out by hand"
             ),
             Self::Sudo(saw) => {
                 write!(f, "`sudo -n` on the machine did not answer: {saw}. The bench account needs passwordless sudo")
@@ -929,7 +939,7 @@ fn entry_after_create(
 ) -> Result<String, Refusal> {
     let (was, now) = (boot_order(before), boot_order(after));
     if was != now {
-        return Err(Refusal::BootOrder { before: was, now });
+        return Err(Refusal::BootOrder { during: "creating the boot entry", before: was, now });
     }
     entries_labelled(after, label)
         .into_iter()
@@ -948,6 +958,15 @@ fn boot_order(listing: &str) -> String {
         .unwrap_or_default()
         .trim()
         .to_string()
+}
+
+/// Refused where `entry` is one of `order`'s, out of a listing's `BootOrder:`.
+fn unordered(listing: &str, entry: &str) -> Result<(), Refusal> {
+    let order = boot_order(listing);
+    match order.split(',').any(|id| id.trim().eq_ignore_ascii_case(entry)) {
+        true => Err(Refusal::Ordered { entry: entry.to_string(), order }),
+        false => Ok(()),
+    }
 }
 
 /// systemd's *effective* logind policy, out of `systemd-analyze cat-config`:
@@ -1258,10 +1277,11 @@ impl Driver {
     /// first where it is absent, and answer the boot entry for it — `None` on
     /// a dry run that stopped at the area it did not create.
     ///
-    /// **Every write names an [`Owned`] partition**, and runs only once
-    /// [`internal::recognise`] has said what the disk holds: the area's
-    /// partitions are given the GUIDs the image's contents name before their
-    /// bytes are written, and the boot entry is made or refreshed last.
+    /// **Every write names an [`Owned`] partition or is the partition table**,
+    /// and runs only once [`internal::recognise`] has said what the disk holds:
+    /// the table is rewritten whole to give the area's partitions the GUIDs the
+    /// image's contents name before their bytes are written, and the boot entry
+    /// is made or refreshed last.
     fn install_internal(&self, image: &internal::Install) -> Result<Option<Installed>, Refusal> {
         let node = self.target.internal;
         if internal::recognise(&self.internal_disk()?).map_err(Refusal::Layout)? == internal::Area::Absent {
@@ -1751,6 +1771,8 @@ pub fn run(args: &Args) -> Result<Option<u64>, Refusal> {
     let Some(installed) = driver.install_internal(&image)? else { return Ok(None) };
     let flash = began.elapsed().as_secs_f64();
     let began = std::time::Instant::now();
+    let before = driver.ssh("listing boot entries", EFIBOOTMGR)?;
+    unordered(&before, &installed.entry)?;
     driver.as_root("setting bootnext", Job::BootNext(installed.entry), None)?;
     driver.as_root("rebooting", Job::Reboot, None)?;
     let entry = began.elapsed().as_secs_f64();
@@ -1789,7 +1811,20 @@ pub fn run(args: &Args) -> Result<Option<u64>, Refusal> {
     let phases = Phases { preamble, flash, dd_secs: installed.dd, entry, down, read_log, raw_log };
     println!("phases: {phases}");
     let boot = BootFile { back, machine, phases }.text();
-    judge_and_write_readback(&armed, &loader, &log_text, args.readback.as_deref(), &boot).map(Some)
+    let verdict = judge_and_write_readback(&armed, &loader, &log_text, args.readback.as_deref(), &boot);
+    // After the readback, so a boot that moved the order is still judged; the
+    // order's refusal is the louder answer, since the next failure loops.
+    order_kept(&before, &driver.ssh("listing boot entries", EFIBOOTMGR)?)?;
+    verdict.map(Some)
+}
+
+/// Refused where the boot between `before` and `after` moved `BootOrder`.
+fn order_kept(before: &str, after: &str) -> Result<(), Refusal> {
+    let (was, now) = (boot_order(before), boot_order(after));
+    match was == now {
+        true => Ok(()),
+        false => Err(Refusal::BootOrder { during: "the boot", before: was, now }),
+    }
 }
 
 /// An entry on the internal ESP that no firmware can boot, as
@@ -1860,6 +1895,8 @@ fn fall_through(target: &Target, dry_run: bool, how: Unbootable) -> Result<(), R
     }
     let create = Job::Create { label: UNBOOTABLE_LABEL, loader: how.loader() };
     let entry = driver.boot_entry(UNBOOTABLE_LABEL, create, esp)?;
+    let before = driver.ssh("listing boot entries", EFIBOOTMGR)?;
+    unordered(&before, &entry)?;
     driver.as_root("setting bootnext", Job::BootNext(entry.clone()), None)?;
     driver.as_root("rebooting", Job::Reboot, None)?;
     if dry_run {
@@ -1876,6 +1913,11 @@ fn fall_through(target: &Target, dry_run: bool, how: Unbootable) -> Result<(), R
     if let Some(next) = listing.lines().find_map(|l| l.strip_prefix("BootNext:")) {
         return Err(Refusal::FellThrough(format!("BootNext still reads {}", next.trim())));
     }
+    let first = boot_order(&listing).split(',').next().unwrap_or_default().trim().to_string();
+    if current != Some(first.as_str()) {
+        return Err(Refusal::FellThrough(format!("BootCurrent is {current:?} and BootOrder's first entry {first:?}")));
+    }
+    order_kept(&before, &listing)?;
     deleted?;
     println!(
         "the firmware fell through past Boot{entry} ({}) to Boot{} and answered ssh after {back} s",
@@ -3006,6 +3048,7 @@ mod tests {
         assert_eq!(
             entry_after_create(before, &ordered, "ToyOS", guid),
             Err(Refusal::BootOrder {
+                during: "creating the boot entry",
                 before: "0001,001D".to_string(),
                 now: "0002,0001,001D".to_string(),
             })
@@ -3023,8 +3066,49 @@ mod tests {
 
         assert_eq!(boot_order("BootCurrent: 0001\n"), "");
         assert_eq!(boot_order(""), "");
-        assert!(!Refusal::BootOrder { before: String::new(), now: "0002".to_string() }
+        assert!(!Refusal::BootOrder { during: "the boot", before: String::new(), now: "0002".to_string() }
             .about_the_boot());
+    }
+
+    /// **An entry in the boot order is never bought with `BootNext`, and a
+    /// boot that moved the order is refused**: either is a bench whose next
+    /// failed ToyOS boot comes back to ToyOS and not to Ubuntu.
+    #[test]
+    fn the_boot_order_holds_no_toyos_entry_and_no_boot_moves_it() {
+        let listing = "BootCurrent: 0003\nBootOrder: 0003,2001,2002\n";
+        assert_eq!(unordered(listing, "0004"), Ok(()));
+        assert_eq!(
+            unordered(listing, "2001"),
+            Err(Refusal::Ordered { entry: "2001".to_string(), order: "0003,2001,2002".to_string() })
+        );
+        assert!(unordered("BootOrder: 0003,000a\n", "000A").is_err(), "the case efibootmgr prints is not the guard's");
+        assert_eq!(unordered("BootCurrent: 0003\n", "0003"), Ok(()));
+        assert_eq!(order_kept(listing, listing), Ok(()));
+        let moved = listing.replace("BootOrder: 0003,", "BootOrder: 0004,0003,");
+        assert_eq!(
+            order_kept(listing, &moved),
+            Err(Refusal::BootOrder {
+                during: "the boot",
+                before: "0003,2001,2002".to_string(),
+                now: "0004,0003,2001,2002".to_string(),
+            })
+        );
+    }
+
+    /// **A disk's identity is the four `sysfs` lines [`Sd::identity`] asks
+    /// for**, read as they come, and refused otherwise: adoption's refusal to
+    /// erase a fixed disk rests on `removable`.
+    #[test]
+    fn a_disks_identity_reads_four_lines_or_is_refused() {
+        let stick = Identity::parse("60062500\nSanDisk \nUltra           \n1\n").unwrap();
+        assert_eq!(
+            stick,
+            Identity { sectors: 60_062_500, vendor: "SanDisk".to_string(), model: "Ultra".to_string(), removable: true }
+        );
+        assert!(!Identity::parse("500118192\nATA     \nSSD             \n0\n").unwrap().removable);
+        for (answer, field) in [("60062500\nSanDisk \n", "the whole query"), ("many\nSanDisk \nUltra\n1\n", "size")] {
+            assert!(matches!(Identity::parse(answer), Err(Refusal::Identity { field: f, .. }) if f == field), "{answer:?}");
+        }
     }
 
     #[test]

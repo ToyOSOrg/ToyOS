@@ -538,8 +538,8 @@ unsafe impl core::alloc::GlobalAlloc for Pool {
     }
 }
 
-/// Set by the first panic, so a panic while saying one goes straight to the
-/// reset.
+/// Set by the first panic, so a panic while saying one goes straight to
+/// `ResetSystem`.
 static PANICKED: AtomicBool = AtomicBool::new(false);
 
 /// Whether a panic resets the machine rather than powering it off

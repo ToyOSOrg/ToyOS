@@ -72,7 +72,7 @@ const RUST_SKIP: &[&str] = &[
     "stick_load",
     // The log-write load `mask_windows` reads windows under, on the boot
     // whose kernel reports them.
-    "stick_write",
+    "log_write",
     // It opens a window, which needs a compositor the shared boot does not
     // run: `a_window_is_drawn_at_the_scale_and_relaid_at_the_next` runs it on
     // tests/images/scalecase.toml, and the `gop_edid_scale` metal row on
@@ -185,7 +185,7 @@ const RUST_SKIP: &[&str] = &[
     // on QEMU's.
     "audio_tone",
     "audio_tone_resampled",
-    "tone_beside_stick_write",
+    "tone_beside_log_write",
     "volume_step",
     // It hands the ACPI claim to a server of its own and kills it, which needs
     // a boot that starts none: the `acpi_server_death` metal row runs it on
@@ -803,17 +803,15 @@ const METAL: &[(&str, metal::Metal)] = &[
     ),
     (
         // `hda_tone`'s tone while a thread of its process writes the log
-        // disk: no period soundserver had to fill
-        // (`issues/a-megabyte-written-to-the-stick-starves-a-tone-beside-it.md`'s
-        // exit). It is the kernel's: one claim's interrupts and its holder's
-        // threads never starve another holder's deadline. The T14 and the AMD
-        // bench.
-        "tone_beside_a_stick_write",
+        // disk, the bench's NVMe: no period soundserver had to fill. It is the
+        // kernel's: one claim's interrupts and its holder's threads never
+        // starve another holder's deadline. The T14 and the AMD bench.
+        "tone_beside_a_log_write",
         metal::Metal {
             arms: TESTCASES,
             judge: |b| {
-                b[0].job_passed(audio::TONE_BESIDE_STICK_WRITE)?;
-                audio::tone_beside_a_stick_write(&b[0].log())
+                b[0].job_passed(audio::TONE_BESIDE_LOG_WRITE)?;
+                audio::tone_beside_a_log_write(&b[0].log())
             },
         },
     ),
@@ -1629,7 +1627,7 @@ const TESTCASES: &[metal::Arm] = &[metal::once(
         "test_rs_wake_onto_busy",
         "test_rs_audio_tone",
         "test_rs_audio_tone_resampled",
-        audio::TONE_BESIDE_STICK_WRITE,
+        audio::TONE_BESIDE_LOG_WRITE,
         "test_rs_volume_step",
         "test_rs_syscall_cost",
         "test_rs_spawn_cost",
@@ -1778,7 +1776,7 @@ const WINDOWSCASE: &[metal::Arm] = &[metal::Arm {
         "windowscase",
         "tests/images/testcases.toml",
         &[],
-        &["test_rs_idle_span", "pwd", WINDOWS_LOAD, STICK_WRITE],
+        &["test_rs_idle_span", "pwd", WINDOWS_LOAD, LOG_WRITE],
     )
 }];
 
@@ -1788,7 +1786,7 @@ const WINDOWS_LOAD: &str = "test_rs_ring_park_herd";
 /// The log-write load it reads them under too (#901 §9): 8 MiB through the
 /// log disk's driver, whose interrupts and threads are a claim's and a
 /// process's.
-const STICK_WRITE: &str = "test_rs_stick_write";
+const LOG_WRITE: &str = "test_rs_log_write";
 
 /// The head of the kernel's record of `job`'s exit.
 fn exited(job: &str) -> String {
@@ -5873,15 +5871,15 @@ fn windows_on_metal(boot: &metal::Readback) -> Result<(), String> {
     );
     // Under the log write, each CPU's longest windows are judged against
     // the bench's record (`timings::ceiling`), the base they were first read at.
-    boot.job_passed(STICK_WRITE)?;
-    let reached = metal::bytes_of_lines(boot.log().text(), "stick_write: line ");
+    boot.job_passed(LOG_WRITE)?;
+    let reached = metal::bytes_of_lines(boot.log().text(), "log_write: line ");
     if reached < 1 << 20 {
         return Err(format!("{reached} bytes of the log write's lines reached the disk, under a mebibyte"));
     }
-    let under = common::irqcensus::windows_under(kernel.text(), cpus, &exited(STICK_WRITE))?;
+    let under = common::irqcensus::windows_under(kernel.text(), cpus, &exited(LOG_WRITE))?;
     eprintln!("  [windows] log write irqs_off_ns={} preempt_off_ns={}", under.load.0, under.load.1);
-    boot.measured("boot.windowscase.stick_write.irqs_off_ns", under.load.0)?;
-    boot.measured("boot.windowscase.stick_write.preempt_off_ns", under.load.1)
+    boot.measured("boot.windowscase.log_write.irqs_off_ns", under.load.0)?;
+    boot.measured("boot.windowscase.log_write.preempt_off_ns", under.load.1)
 }
 
 fn pci_cap_selftest(log: &str) -> Result<(), String> {
