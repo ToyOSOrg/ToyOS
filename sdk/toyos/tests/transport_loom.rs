@@ -301,55 +301,55 @@ fn a_ring_grown_while_it_holds_bytes_reads_each_as_written() {
     bounded(|| {
         let page: Rc<[Shared; 5]> = Rc::new(core::array::from_fn(|_| Shared(AtomicU32::new(0))));
         let bytes: Rc<[Cell<u32>; MOST as usize]> = Rc::new(core::array::from_fn(|_| Cell::new(0)));
-        let (mut tx, mut rx) = (stream::Producer::new(&*page, GROWN, 2), stream::Consumer::new(&*page, GROWN));
+        let (mut tx, mut rx) = (stream::Producer::new(&page, GROWN, 2), stream::Consumer::new(&page, GROWN));
         let put = |tx: &mut stream::Producer<MOST, 5>, bytes: &[Cell<u32>], at: u32| {
             for span in tx.span(0, 1).expect("a byte of room") {
                 (span.offset..span.offset + span.len).for_each(|i| bytes[i].set(at));
             }
             assert!(tx.advance(1));
-            let _ = tx.publish(&*page);
+            let _ = tx.publish(&page);
         };
         // Positions 0 and 1 go round once and are read, then 2 and 3 are
         // written and left unread.
         for at in 0..2 {
-            assert_eq!(tx.room(&*page), Ok(2 - at));
+            assert_eq!(tx.room(&page), Ok(2 - at));
             put(&mut tx, &bytes[..], at);
         }
-        assert_eq!(rx.ready(&*page), Ok(2));
+        assert_eq!(rx.ready(&page), Ok(2));
         assert!(rx.advance(2));
-        let _ = rx.release(&*page);
+        let _ = rx.release(&page);
         for at in 2..4 {
-            assert!(tx.room(&*page).expect("the consumer keeps the protocol") > 0);
+            assert!(tx.room(&page).expect("the consumer keeps the protocol") > 0);
             put(&mut tx, &bytes[..], at);
         }
         let (producer_page, producer_bytes) = (Rc::clone(&page), Rc::clone(&bytes));
         let producer = loom::thread::spawn(move || {
             // The consumer may already be reading: the switch is the old
             // ring past whatever head this look finds.
-            tx.room(&*producer_page).expect("the consumer keeps the protocol");
-            tx.grow(&*producer_page);
+            tx.room(&producer_page).expect("the consumer keeps the protocol");
+            tx.grow(&producer_page);
             for at in 4..7 {
-                while tx.room(&*producer_page).expect("the consumer keeps the protocol") == 0 {
+                while tx.room(&producer_page).expect("the consumer keeps the protocol") == 0 {
                     loom::thread::yield_now();
                 }
                 for span in tx.span(0, 1).expect("a byte of room") {
                     (span.offset..span.offset + span.len).for_each(|i| producer_bytes[i].set(at));
                 }
                 assert!(tx.advance(1));
-                let _ = tx.publish(&*producer_page);
+                let _ = tx.publish(&producer_page);
             }
             tx.capacity()
         });
         let mut read = Vec::new();
         while read.len() < 5 {
-            match rx.ready(&*page).expect("the producer keeps the protocol") {
+            match rx.ready(&page).expect("the producer keeps the protocol") {
                 0 => loom::thread::yield_now(),
                 _ => {
                     for span in rx.span(0, 1).expect("a byte ready") {
                         read.extend((span.offset..span.offset + span.len).map(|i| bytes[i].get()));
                     }
                     assert!(rx.advance(1));
-                    let _ = rx.release(&*page);
+                    let _ = rx.release(&page);
                 }
             }
         }
