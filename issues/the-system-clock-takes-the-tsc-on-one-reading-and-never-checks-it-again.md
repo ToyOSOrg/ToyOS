@@ -30,12 +30,12 @@ That CPU states the invariant bit. Under its Linux, it counts one rate in
 every phase over 10 minutes, and over 15 minutes across 16 CPUs and idle
 gaps up to 1 s no CPU's TSC read behind another's and no step exceeded a
 read's 1.2 µs. But in 5 of 30 boots' kernel logs that Linux's watchdog saw
-the TSC some 1.7 ms ahead of the HPET over half a second, 2.6 s into boot
-in the one boot whose dmesg was kept. Every time it was the same size, and it came with a calibration that
-was right. The cause is unknown (`tsc-probe` and the boots' figures, PR
-#1079's evidence). ToyOS's one calibration also runs early in boot. A step
-inside its 50 ms would be a 3% error in every timestamp after it, and a
-clock that never checks would not see it.
+the TSC some 1.7 ms ahead of the HPET over half a second, 2.6 s into boot in
+the one boot whose dmesg was kept. Every time it was the same size, and it
+came with a calibration that was right. The cause is unknown (`tsc-probe`
+and the boots' figures, PR #1079's evidence). ToyOS's one calibration also
+runs early in boot. A step inside its 50 ms would be a 3% error in every
+timestamp after it, and a clock that never checks would not see it.
 
 **Exit**: the kernel keeps time on the TSC only where every CPU states it
 invariant. It bounds the CPUs' offsets at start to a figure it logs and
