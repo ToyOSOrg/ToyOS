@@ -826,12 +826,14 @@ pub fn ended_by_its_deadline(armed: &[impl AsRef<str>]) -> bool {
 }
 
 /// The `boot-deadline=` bound an image armed with `armed` carries, whose
-/// runner bounds its list at `list_ms`.
+/// runner bounds its list at `list_ms`. A wedge staged under the chipset
+/// watchdog is the watchdog's to end, so its deadline stands behind it.
 pub fn bound_for(armed: &[impl AsRef<str>], list_ms: u64) -> u64 {
-    if stages_a_wedge(armed) {
-        toyos_tco::STAGED_BOUND_MS
-    } else {
-        toyos_tco::wedge_bound_ms(list_ms)
+    let watched = armed.iter().any(|name| name.as_ref() == toyos_tco::PARAM);
+    match (stages_a_wedge(armed), watched) {
+        (true, true) => toyos_tco::WATCHED_WEDGE_BOUND_MS,
+        (true, false) => toyos_tco::STAGED_BOUND_MS,
+        (false, _) => toyos_tco::wedge_bound_ms(list_ms),
     }
 }
 
@@ -2596,6 +2598,15 @@ mod tests {
         assert!(!stages_a_wedge(&["watchdog".to_string(), bound]));
         assert_eq!(bound_for(&["watchdog"], 60_000), 120_000);
         assert_eq!(bound_for(&["watchdog"], 135_680), 271_360);
+    }
+
+    /// Under the chipset watchdog a staged wedge's deadline is past the
+    /// watchdog's reset, which lands within one bound of the last feed.
+    #[test]
+    fn a_wedge_under_the_watchdog_is_the_watchdogs_to_end() {
+        assert_eq!(bound_for(&[WEDGE_ARM, toyos_tco::PARAM], 60_000), 29_200);
+        const { assert!(toyos_tco::WATCHED_WEDGE_BOUND_MS > toyos_tco::STAGED_BOUND_MS + toyos_tco::BOUND_MS) };
+        assert_eq!(bound_for(&[WEDGE_ARM], 60_000), toyos_tco::STAGED_BOUND_MS);
     }
 
     /// A row for a name the kernel no longer declares is a ruling about

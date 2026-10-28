@@ -1186,6 +1186,21 @@ const METAL: &[(&str, metal::Metal)] = &[
         },
     ),
     (
+        // The same wedge under the chipset watchdog, with the deadline past
+        // its bound: the watchdog's reset and not the kernel's ends the boot.
+        // The AMD bench, whose FCH says which reset it was. Named only: no
+        // TCO has reset the T14 (`issues/an-armed-tco-has-never-reset-the-t14.md`),
+        // where this boot would wait out its deadline instead.
+        "watchdog_resets",
+        metal::Metal {
+            arms: &[metal::Arm {
+                named_only: true,
+                ..metal::once("watchdogwedge", "tests/images/jobcase.toml", &["watchdog", "wedge-before-reset"], &[])
+            }],
+            judge: |b| power::watchdog_reset_chain(&b[0].kernel(), &b[0].log(), &b[0].after_the_reset()?),
+        },
+    ),
+    (
         // Its own boot, and the one arm in this profile the machine itself is
         // the instrument for: QEMU's TCG guest has no performance counter, so
         // only here is the NMI that samples a deaf CPU the counter's own. It

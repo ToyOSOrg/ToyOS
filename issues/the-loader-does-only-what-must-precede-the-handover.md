@@ -391,6 +391,10 @@ Each stage lands on its own, in this order.
      `TCO_RLD` at the arm and at the first feed (the counting read, with no
      stall), `TCO1_STS`, and `no_reboot`, `tco_lock` and `timeout`. That issue's
      exit reads the kernel's log in place of `loader.log`.
+   - On an FCH the kernel selects the tick in `PMx000` and stops a count
+     the last boot left, which `loader/src/watchdog.rs`'s `survey` does
+     today. That PM block shares its page with registers AML uses, and a
+     window `map_mmio` maps is refused the `acpi` claim's holder.
    - Deleted: `loader/src/watchdog.rs`, `arch::pio`, the kernel's
      on-arrival read with `ARMED_ON_ARRIVAL` and `UNARMED_ON_ARRIVAL`, and
      `tests/common/power.rs`' `loader_armed`, `armed_on_arrival` and

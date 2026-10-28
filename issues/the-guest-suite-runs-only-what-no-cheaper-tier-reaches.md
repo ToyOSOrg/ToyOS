@@ -68,7 +68,8 @@ console's renderer. Exit: as stage A.
   `nested_fault_is_recursive`: a fault inside the report names the first.
 - metal `pre_idle_wedge_speaks`: a boot stopped in phase 3 says where.
 - metal `panic_halts_the_others_first`: no other CPU's record follows the fatal line.
-- metal `watchdog_resets`: the TCO ends the machine.
+- metal `watchdog_resets`: the chipset's watchdog ends the machine. Judged on the AMD bench's FCH;
+  the T14's TCO has never reset it (`issues/an-armed-tco-has-never-reset-the-t14.md`).
 - metal `quiesce_refuses_a_second_shutdown`: the machine has one shutdown, and a second caller is
   refused while the first holds it.
 - host `screen_early_panel`: the panel repaints after each committed record.
