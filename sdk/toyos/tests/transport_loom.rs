@@ -3,6 +3,8 @@
 //!
 //! - **Publication**: a consumer that sees a tail sees every word of the
 //!   entries below it. `transport-publish-relaxed` takes the edge away.
+//! - **Growth**: a ring doubled while it holds unread bytes reads each byte as
+//!   written. `transport-grow-room-now` and `transport-size-before-tail` red it.
 //! - **A hostile peer** leaves the honest end with entries, nothing, or a
 //!   named violation, and never more entries than the ring holds.
 //!   `transport-no-clamp` believes the peer.
@@ -162,15 +164,15 @@ fn a_hostile_consumer_yields_room_or_a_violation() {
 /// failure unwinds the model, which aborts the run before it says which test
 /// failed (`issues/loom-arc-panics-in-its-drop-while-a-failed-model-unwinds.md`).
 struct Stream {
-    page: [Shared; 4],
+    page: [Shared; 5],
     bytes: [Cell<u32>; RING as usize],
     to_consumer: Notify,
     to_producer: Notify,
 }
 
 const RING: u32 = 1;
-const STREAM: stream::Place<RING, 4> = stream::Place::new::<0, 1, 2, 3, 0>();
-type StreamEnds = (stream::Producer<RING, 4>, stream::Consumer<RING, 4>);
+const STREAM: stream::Place<RING, 5> = stream::Place::new::<0, 1, 2, 3, 4, 0>();
+type StreamEnds = (stream::Producer<RING, 5>, stream::Consumer<RING, 5>);
 
 fn stream() -> (Rc<Stream>, StreamEnds) {
     let s = Rc::new(Stream {
@@ -179,13 +181,13 @@ fn stream() -> (Rc<Stream>, StreamEnds) {
         to_consumer: Notify::new(),
         to_producer: Notify::new(),
     });
-    let ends = (stream::Producer::new(&s.page, STREAM), stream::Consumer::new(&s.page, STREAM));
+    let ends = (stream::Producer::new(&s.page, STREAM, RING), stream::Consumer::new(&s.page, STREAM));
     (s, ends)
 }
 
 /// Writes `byte` into the room the producer was last shown and publishes it,
 /// ringing a consumer that armed.
-fn send(s: &Stream, tx: &mut stream::Producer<RING, 4>, byte: u32) {
+fn send(s: &Stream, tx: &mut stream::Producer<RING, 5>, byte: u32) {
     for span in tx.span(0, 1).expect("a byte of room") {
         for at in span.offset..span.offset + span.len {
             s.bytes[at].set(byte);
@@ -199,7 +201,7 @@ fn send(s: &Stream, tx: &mut stream::Producer<RING, 4>, byte: u32) {
 
 /// Reads the byte the consumer was last shown and releases it, ringing a
 /// producer that armed.
-fn receive(s: &Stream, rx: &mut stream::Consumer<RING, 4>) -> u32 {
+fn receive(s: &Stream, rx: &mut stream::Consumer<RING, 5>) -> u32 {
     let mut read = Vec::new();
     for span in rx.span(0, 1).expect("a byte ready") {
         read.extend((span.offset..span.offset + span.len).map(|at| s.bytes[at].get()));
@@ -284,6 +286,78 @@ fn a_producer_that_looked_again_is_rung_for_room_it_missed() {
     });
 }
 
+/// A ring of at most four bytes, grown from two while the producer keeps
+/// writing: no byte waits for it to empty, and every byte is read as written.
+/// The consumer may hold two unread bytes at offsets 0 and 1 when the producer
+/// grows, so the first byte past the switch, at offset 0 again, lands on an
+/// unread one, a write beside the consumer's read, where the room is counted
+/// in the new capacity at once (`transport-grow-room-now`); and a consumer
+/// that loads the size before the tail meets a tail past what that size holds
+/// (`transport-size-before-tail`).
+#[test]
+fn a_ring_grown_while_it_holds_bytes_reads_each_as_written() {
+    const MOST: u32 = 4;
+    const GROWN: stream::Place<MOST, 5> = stream::Place::new::<0, 1, 2, 3, 4, 0>();
+    bounded(|| {
+        let page: Rc<[Shared; 5]> = Rc::new(core::array::from_fn(|_| Shared(AtomicU32::new(0))));
+        let bytes: Rc<[Cell<u32>; MOST as usize]> = Rc::new(core::array::from_fn(|_| Cell::new(0)));
+        let (mut tx, mut rx) = (stream::Producer::new(&*page, GROWN, 2), stream::Consumer::new(&*page, GROWN));
+        let put = |tx: &mut stream::Producer<MOST, 5>, bytes: &[Cell<u32>], at: u32| {
+            for span in tx.span(0, 1).expect("a byte of room") {
+                (span.offset..span.offset + span.len).for_each(|i| bytes[i].set(at));
+            }
+            assert!(tx.advance(1));
+            let _ = tx.publish(&*page);
+        };
+        // Positions 0 and 1 go round once and are read, then 2 and 3 are
+        // written and left unread.
+        for at in 0..2 {
+            assert_eq!(tx.room(&*page), Ok(2 - at));
+            put(&mut tx, &bytes[..], at);
+        }
+        assert_eq!(rx.ready(&*page), Ok(2));
+        assert!(rx.advance(2));
+        let _ = rx.release(&*page);
+        for at in 2..4 {
+            assert!(tx.room(&*page).expect("the consumer keeps the protocol") > 0);
+            put(&mut tx, &bytes[..], at);
+        }
+        let (producer_page, producer_bytes) = (Rc::clone(&page), Rc::clone(&bytes));
+        let producer = loom::thread::spawn(move || {
+            // The consumer may already be reading: the switch is the old
+            // ring past whatever head this look finds.
+            tx.room(&*producer_page).expect("the consumer keeps the protocol");
+            tx.grow(&*producer_page);
+            for at in 4..7 {
+                while tx.room(&*producer_page).expect("the consumer keeps the protocol") == 0 {
+                    loom::thread::yield_now();
+                }
+                for span in tx.span(0, 1).expect("a byte of room") {
+                    (span.offset..span.offset + span.len).for_each(|i| producer_bytes[i].set(at));
+                }
+                assert!(tx.advance(1));
+                let _ = tx.publish(&*producer_page);
+            }
+            tx.capacity()
+        });
+        let mut read = Vec::new();
+        while read.len() < 5 {
+            match rx.ready(&*page).expect("the producer keeps the protocol") {
+                0 => loom::thread::yield_now(),
+                _ => {
+                    for span in rx.span(0, 1).expect("a byte ready") {
+                        read.extend((span.offset..span.offset + span.len).map(|i| bytes[i].get()));
+                    }
+                    assert!(rx.advance(1));
+                    let _ = rx.release(&*page);
+                }
+            }
+        }
+        assert_eq!(producer.join().expect("the producer thread"), MOST);
+        assert_eq!(read, [2, 3, 4, 5, 6], "a byte was read other than as written");
+    });
+}
+
 // ---- a session: the client's sequences and the server's rings ----
 //
 // The models below drive `session`'s own code: a holder's `read`, `write`,
@@ -328,10 +402,10 @@ fn bounded_by(preemptions: usize, model: impl Fn() + Sync + Send + 'static) {
 }
 
 const BYTES: u32 = 2;
-const SESSION_WORDS: usize = 14;
+const SESSION_WORDS: usize = 16;
 const SESSION: Layout<BYTES, BYTES, SESSION_WORDS> = Layout::new::<8, 9, 10, 11, 12, 13>(
-    stream::Place::new::<0, 1, 2, 3, 0>(),
-    stream::Place::new::<4, 5, 6, 7, { BYTES as usize }>(),
+    stream::Place::new::<0, 1, 2, 3, 14, 0>(),
+    stream::Place::new::<4, 5, 6, 7, 15, { BYTES as usize }>(),
 );
 /// A failure the server stores in the receive ring's `end`.
 const RESET: u32 = 2;
@@ -563,9 +637,9 @@ impl Session {
     /// A session whose end has `holders` holders, and its server end.
     fn new(holders: u16) -> (Rc<Self>, End) {
         let page: [Shared; SESSION_WORDS] = core::array::from_fn(|_| Shared(AtomicU32::new(0)));
-        let mut all = vec![Holding::new(session::client(&page, SESSION))];
+        let mut all = vec![Holding::new(session::client(&page, SESSION, BYTES))];
         all.extend((2..=holders).map(|n| Holding::new(session::holder(SESSION, Holder::new(n).unwrap()))));
-        let server = Server::new(&page, SESSION);
+        let server = Server::new(&page, SESSION, BYTES);
         let s = Session {
             page,
             bytes: core::array::from_fn(|_| Cell::new(0)),
@@ -602,7 +676,7 @@ impl Session {
     /// A holder reads at most `max` bytes over `page`: the bytes it read.
     fn read_by<W: Word>(&self, page: &[W; SESSION_WORDS], by: &By, mode: Mode<()>, max: u32) -> Result<Vec<u32>, Refused> {
         let mut read = Vec::new();
-        session::read(page, &self.holders[by.at].rx, by, mode, max, |span, _| {
+        session::read(page, &self.holders[by.at].rx, by, mode, max, |_| true, |span, _| {
             read.extend((span.offset..span.offset + span.len).map(|at| self.bytes[at].get()));
         })?;
         Ok(read)
@@ -610,7 +684,7 @@ impl Session {
 
     /// A holder writes `byte` over `page`, once at most.
     fn write_by<W: Word>(&self, page: &[W; SESSION_WORDS], by: &By, mode: Mode<()>, byte: u32) -> Result<u32, Refused> {
-        session::write(page, &self.holders[by.at].tx, by, mode, 1, |span, _| {
+        session::write(page, &self.holders[by.at].tx, by, mode, 1, |_| true, |span, _| {
             for at in span.offset..span.offset + span.len {
                 if lives(by.fate) {
                     self.bytes[at].set(byte);
