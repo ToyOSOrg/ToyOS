@@ -239,10 +239,9 @@ pub mod diag {
         /// Core C6 and C7 residency in TSC ticks, where the CPU counts it.
         pub core_c6: Option<u64>,
         pub core_c7: Option<u64>,
-        /// Idle periods the kernel chose a declared deep state for, and
-        /// their nanoseconds.
+        /// Idle periods the kernel chose a declared deep state for, counted
+        /// as each ends.
         pub deep_idles: Option<u64>,
-        pub deep_idle_nanos: Option<u64>,
     }
 
     /// The capability's diagnostics for the rows that read the counters
@@ -279,7 +278,6 @@ pub mod diag {
                         core_c6: r.get(Counter::CoreC6),
                         core_c7: r.get(Counter::CoreC7),
                         deep_idles: r.get(Counter::DeepIdles),
-                        deep_idle_nanos: r.get(Counter::DeepIdleNanos),
                     })
                 })
                 .collect()

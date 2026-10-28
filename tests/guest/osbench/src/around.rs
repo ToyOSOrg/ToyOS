@@ -52,9 +52,9 @@ impl Around {
 /// One line a CPU: what it did between `before` and `after`, read around a
 /// row of `row_ns`. Every figure is of the readings' own window, off the
 /// CPU's counter in each; a CPU whose readings are not the row's is refused
-/// by name ([`osbench_rules::window`]). Deep idle is counted as periods that
-/// ended in the window and their microseconds, as the kernel credits a
-/// period when it ends.
+/// by name ([`osbench_rules::window`]). Deep idle is counted as the periods
+/// that ended in the window: the kernel credits a period's time when it
+/// ends, so its time is no fraction of the window.
 #[cfg(target_os = "toyos")]
 pub fn cpus(bench: &str, before: &[crate::sys::diag::CpuCounts], after: &[crate::sys::diag::CpuCounts], row_ns: u64) {
     use osbench_rules::window;
@@ -89,7 +89,6 @@ pub fn cpus(bench: &str, before: &[crate::sys::diag::CpuCounts], after: &[crate:
                 ("core_c6_permille", permille(delta(a.core_c6, b.core_c6))),
                 ("core_c7_permille", permille(delta(a.core_c7, b.core_c7))),
                 ("deep_ended", shown(delta(a.deep_idles, b.deep_idles))),
-                ("deep_ended_us", shown(delta(a.deep_idle_nanos, b.deep_idle_nanos).map(|ns| ns / 1000))),
                 ("kicks", shown(delta(a.kicks, b.kicks))),
                 ("smi", shown(delta(a.smi, b.smi))),
             ],
