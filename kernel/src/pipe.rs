@@ -129,7 +129,7 @@ impl Drop for Held {
 
 /// `within` of a frame a pipe holds, which no process maps and only that
 /// pipe's lock reaches.
-fn frame(frame: &u64, within: Range<usize>) -> *mut u8 {
+fn frame_bytes(frame: &u64, within: Range<usize>) -> *mut u8 {
     assert!(within.end <= kernel::pipe::FRAME, "pipe: bytes {within:?} past a frame");
     // SAFETY: inside the frame, which the direct map covers.
     unsafe { DirectMap::from_phys(*frame).as_mut_ptr::<u8>().add(within.start) }
@@ -229,11 +229,11 @@ impl PipeRef {
             };
             if available > 0 && limit > 0 {
                 let len = buf.len().min(limit);
-                let n = pipe.held.bytes.read(len, |held, within, at| {
+                let n = pipe.held.bytes.read(len, |frame, within, at| {
                     let n = within.len();
                     // SAFETY: bytes of a frame this pipe holds, which only its
                     // lock reaches and nothing writes while it is held.
-                    buf.write_at(at, unsafe { core::slice::from_raw_parts(frame(held, within), n) });
+                    buf.write_at(at, unsafe { core::slice::from_raw_parts(frame_bytes(frame, within), n) });
                 });
                 pipe.held.give_back_surplus();
                 pipe.read += n as u64;
@@ -267,11 +267,11 @@ impl PipeRef {
         if pipe.held.take_frames(n).is_err() {
             return PipeWrite::NoMemory;
         }
-        pipe.held.bytes.write(n, |held, within, at| {
+        pipe.held.bytes.write(n, |frame, within, at| {
             let n = within.len();
             // SAFETY: bytes of a frame this pipe holds, which only its lock
             // reaches and nothing reads while it is held.
-            buf.read_at(at, unsafe { core::slice::from_raw_parts_mut(frame(held, within), n) });
+            buf.read_at(at, unsafe { core::slice::from_raw_parts_mut(frame_bytes(frame, within), n) });
         });
         pipe.written += n as u64;
         PipeWrite::Wrote { n, end: pipe.written }
