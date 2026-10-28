@@ -231,6 +231,19 @@ impl UserBytes<'_> {
         });
     }
 
+    /// Copy `len` bytes out of the window at `off` to `dst`, never through a
+    /// reference: for memory another CPU may copy into or out of meanwhile.
+    ///
+    /// # Safety
+    /// `dst` is writable for `len` bytes, kernel memory no window names.
+    pub unsafe fn read_raw(&self, off: usize, dst: *mut u8, len: usize) {
+        self.0.pieces("UserBytes::read_raw", off, len, |run, at, n| {
+            // SAFETY: `pieces` bounds `[at, at + n)` inside `len` and `run..+n`
+            // inside one pinned page or the zero page; `dst` is the caller's.
+            unsafe { core::ptr::copy_nonoverlapping(run, dst.add(at), n) }
+        });
+    }
+
     /// The `len`-byte window at `off` inside this one.
     pub fn sub(&self, off: usize, len: usize) -> UserBytes<'_> {
         UserBytes(self.0.sub("UserBytes::sub", off, len), PhantomData)
@@ -264,6 +277,19 @@ impl UserBytesMut<'_> {
             // inside one pinned page its range let the process write; the ring
             // is kernel memory no window names.
             unsafe { core::ptr::copy_nonoverlapping(from.add(at), run, n) }
+        });
+    }
+
+    /// Copy `len` bytes from `src` into the window at `off`, never through a
+    /// reference: for memory another CPU may write meanwhile.
+    ///
+    /// # Safety
+    /// `src` is readable for `len` bytes, kernel memory no window names.
+    pub unsafe fn write_raw(&mut self, off: usize, src: *const u8, len: usize) {
+        self.0.pieces("UserBytesMut::write_raw", off, len, |run, at, n| {
+            // SAFETY: `pieces` bounds `[at, at + n)` inside `len` and `run..+n`
+            // inside one pinned page the process may write; `src` is the caller's.
+            unsafe { core::ptr::copy_nonoverlapping(src.add(at), run, n) }
         });
     }
 

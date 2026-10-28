@@ -126,6 +126,13 @@ pub trait CommandExt {
     /// does. A command that is not independent is refused `InvalidInput`.
     #[stable(feature = "toyos_ext", since = "1.0.0")]
     fn launcher(&mut self, namespace: crate::os::toyos::io::BorrowedHandle<'_>) -> &mut Self;
+
+    /// Start the child as a pager, by `syscap`, a `SysCap` carrying
+    /// `Rights::PAGER`, which this process keeps: it may then make the pager
+    /// object its file server's pages come from. An independent launch is
+    /// refused `InvalidInput`.
+    #[stable(feature = "toyos_ext", since = "1.0.0")]
+    fn pager(&mut self, syscap: crate::os::toyos::io::BorrowedHandle<'_>) -> &mut Self;
 }
 
 #[stable(feature = "toyos_ext", since = "1.0.0")]
@@ -186,6 +193,11 @@ impl CommandExt for crate::process::Command {
 
     fn launcher(&mut self, namespace: crate::os::toyos::io::BorrowedHandle<'_>) -> &mut Self {
         self.as_inner_mut().launcher(namespace);
+        self
+    }
+
+    fn pager(&mut self, syscap: crate::os::toyos::io::BorrowedHandle<'_>) -> &mut Self {
+        self.as_inner_mut().pager(syscap);
         self
     }
 }

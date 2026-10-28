@@ -45,6 +45,7 @@ pub(super) fn spawn_place(place: u64) -> Result<process::Parent, u64> {
 }
 
 /// Start a program in `cwd` under `parent` and return the handle to it the spawn's commit put in the caller's table.
+#[allow(clippy::too_many_arguments)]
 pub(super) fn sys_spawn(
     path: &str,
     args: &[&str],
@@ -53,12 +54,22 @@ pub(super) fn sys_spawn(
     env: Vec<u8>,
     image: Option<alloc::sync::Arc<dyn crate::file_backing::FileBacking>>,
     parent: process::Parent,
+    pager: bool,
 ) -> u64 {
     // Nothing to clean up: spawn's frame owns the child's resources on error.
-    match process::spawn(path, args, pending, cwd, env, image, parent) {
+    match process::spawn(path, args, pending, cwd, env, image, parent, pager) {
         Ok((_, handle)) => u64::from(handle.0),
         Err(e) => e.refuse(),
     }
+}
+
+/// `SpawnArgs::pager`: none, or a `SysCap` carrying [`Rights::PAGER`].
+pub(super) fn spawn_pager(pager: u64) -> Result<bool, u64> {
+    if pager == u64::from(toyos_abi::HANDLE_INVALID.0) {
+        return Ok(false);
+    }
+    let raw = u32::try_from(pager).map_err(|_| SyscallError::InvalidArgument.to_u64())?;
+    demand_syscap(RawHandle(raw), Rights::PAGER).map(|_| true).map_err(|refused| refused.refuse())
 }
 
 /// Take how a process ended, blocking until it has; repeatable across waiters, and `WNOHANG` skips the block.

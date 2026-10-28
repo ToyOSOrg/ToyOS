@@ -177,6 +177,7 @@ fn segment_prot(seg: &toyos_elf::Segment) -> kernel::vm::Prot {
 /// `Refusal`, not `-> !`, is the error type: every failure below owns a
 /// partly built process (address space, stack, kernel stack), and nothing
 /// unwinds, so the error must travel out as a value rather than strand it.
+#[allow(clippy::too_many_arguments)]
 pub fn spawn<C: Commit>(
     path: &str,
     argv: &[&str],
@@ -185,6 +186,7 @@ pub fn spawn<C: Commit>(
     env: Vec<u8>,
     image: Option<Arc<dyn crate::file_backing::FileBacking>>,
     parent: Parent,
+    pager: bool,
 ) -> Result<(Pid, C::Held), crate::object::Refusal> {
     let job = Arc::clone(commit.job());
     // An argv of only separators survives sys_spawn's split as an empty slice.
@@ -383,6 +385,7 @@ pub fn spawn<C: Commit>(
         endowments,
         job: job.clone(),
         charge,
+        pager: if pager { crate::process::PagerRole::May } else { crate::process::PagerRole::None },
     }));
 
     let thread_data = Arc::new(Lock::new(ThreadData {
@@ -481,7 +484,8 @@ pub fn spawn_supervisor(images: crate::bootimage::Objects) -> Pid {
         .union(Rights::ROSTER)
         .union(Rights::INVENTORY)
         .union(Rights::COUNTERS)
-        .union(Rights::TRACE);
+        .union(Rights::TRACE)
+        .union(Rights::PAGER);
     let cap_handle = handles
         .install(crate::object::HandleEntry::new(cap, rights))
         .expect("spawn_supervisor: an empty table refused the system capability");
@@ -517,7 +521,7 @@ pub fn spawn_supervisor(images: crate::bootimage::Objects) -> Pid {
     );
     // Built by the kernel and owing nobody anything: no table but the supervisor's own holds it.
     let table = SupervisorTable { job, handles, entries, labels };
-    match spawn(SUPERVISOR, &[SUPERVISOR], table, String::from("/"), Vec::new(), Some(image), Parent::Root) {
+    match spawn(SUPERVISOR, &[SUPERVISOR], table, String::from("/"), Vec::new(), Some(image), Parent::Root, false) {
         Ok((pid, ())) => pid,
         Err(crate::object::Refusal::Error(e)) => panic!("spawn_supervisor: failed to spawn: {e:?}"),
         Err(crate::object::Refusal::Handle(e)) => panic!("spawn_supervisor: {e}"),

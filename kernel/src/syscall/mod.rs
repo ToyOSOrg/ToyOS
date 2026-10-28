@@ -11,6 +11,7 @@ mod handles;
 mod io;
 mod ipc;
 mod machine;
+mod paged;
 mod proc;
 mod vm;
 

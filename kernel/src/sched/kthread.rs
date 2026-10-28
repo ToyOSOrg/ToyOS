@@ -136,6 +136,7 @@ fn kernel_process_data(name: &str, job: Arc<kernel::sched::job::Job>) -> Process
         accounting: ProcessAccounting::default(),
         endowments: Endowments::empty(),
         charge: crate::mm::charge::Charge::none(&job),
+        pager: crate::process::PagerRole::None,
         job,
     }
 }

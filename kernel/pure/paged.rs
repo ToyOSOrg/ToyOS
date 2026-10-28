@@ -152,6 +152,12 @@ impl<F: Copy> Pages<F> {
         }
     }
 
+    /// The heap a table of `capacity` pages takes, all of it made by [`new`](Self::new).
+    pub fn heap_bytes(capacity: usize) -> usize {
+        capacity * (core::mem::size_of::<Option<Slot<F>>>() + core::mem::size_of::<u32>())
+            + (capacity * 2).next_power_of_two() * core::mem::size_of::<u32>()
+    }
+
     pub fn capacity(&self) -> usize {
         self.slots.len()
     }
@@ -281,8 +287,9 @@ impl<F: Copy> Pages<F> {
         }
     }
 
-    /// Install `frame` at `page`, clean, or dirty with a slot, extending the
-    /// size to `end` where it ends past it. A failed page is replaced.
+    /// Install `frame` at `page`, clean, or dirty with a slot. A dirty page
+    /// extends the size to `end`, where its bytes end past it; a clean one is
+    /// what the file holds and moves nothing. A failed page is replaced.
     pub fn supply(&mut self, o: &mut Object, page: u64, frame: F, dirty: bool, end: u64) -> Result<Supplied, Refused> {
         if o.gone {
             return Err(Refused::Gone);
@@ -306,20 +313,20 @@ impl<F: Copy> Pages<F> {
         }
         let state = State { dirty, ..State::CLEAN };
         self.insert(o, page, Some(frame), state)?;
-        o.size = o.size.max(end);
+        if dirty {
+            o.size = o.size.max(end);
+        }
         Ok(Supplied::Installed)
     }
 
     /// A write pin on present `page`, for a copy into it that runs outside the
     /// object's lock: the page is dirty from here, and a write-back that
     /// begins or ends before [`write_unpin`](Self::write_unpin) keeps it so.
-    /// The size grows to `end` now, with the bytes the pin lets in.
-    pub fn write_pin(&mut self, o: &mut Object, page: u64, end: u64) -> Result<F, Refused> {
+    /// The size is not moved until the unpin, so no reader sees bytes past it
+    /// that the copy has not written yet.
+    pub fn write_pin(&mut self, o: &mut Object, page: u64) -> Result<F, Refused> {
         if o.gone {
             return Err(Refused::Gone);
-        }
-        if end > (page + 1) * PAGE || page * PAGE >= end.max(o.size) {
-            return Err(Refused::PastEnd);
         }
         let i = self.find(o.id, page).ok_or(Refused::InvalidArgument)?;
         let s = self.slot(i);
@@ -337,17 +344,27 @@ impl<F: Copy> Pages<F> {
         if needs_slot {
             self.slots_held += 1;
         }
-        o.size = o.size.max(end);
         Ok(frame)
     }
 
-    /// The end of a [`write_pin`](Self::write_pin). A page a shrink or a
-    /// failure removed meanwhile has nothing left to unpin.
-    pub fn write_unpin(&mut self, o: &Object, page: u64) {
-        if let Some(i) = self.find(o.id, page) {
-            let s = self.slot_mut(i);
-            s.state.write_pins = s.state.write_pins.checked_sub(1).expect("a write pin released twice");
+    /// The end of a [`write_pin`](Self::write_pin) of `frame`, once its
+    /// bytes are in: the size grows to `end`. A page a shrink or a failure
+    /// removed meanwhile, even one supplied again since, holds another frame
+    /// or none; there is nothing left to unpin, and the bytes are not the
+    /// file's. The caller keeps `frame` pinned until this, so it is not
+    /// another page's meanwhile.
+    pub fn write_unpin(&mut self, o: &mut Object, page: u64, frame: F, end: u64)
+    where
+        F: PartialEq,
+    {
+        assert!(end <= (page + 1) * PAGE && end > page * PAGE, "a write pin's end {end} outside page {page}");
+        let Some(i) = self.find(o.id, page) else { return };
+        let s = self.slot_mut(i);
+        if s.frame != Some(frame) {
+            return;
         }
+        s.state.write_pins = s.state.write_pins.checked_sub(1).expect("a write pin released twice");
+        o.size = o.size.max(end);
     }
 
     fn range_ok(o: &Object, first: u64, count: u64) -> bool {
@@ -459,7 +476,7 @@ impl<F: Copy> Pages<F> {
             }
         }
         o.size = size;
-        if size % PAGE == 0 {
+        if size.is_multiple_of(PAGE) {
             return None;
         }
         match self.lookup(o, size / PAGE) {
@@ -515,19 +532,41 @@ mod tests {
         let mut o = p.object(PAGE);
         assert_eq!(p.supply(&mut o, 1, 1, false, 2 * PAGE), Err(Refused::PastEnd));
         assert_eq!(o.size(), PAGE);
+        let mut short = p.object(100);
+        assert_eq!(p.supply(&mut short, 0, 2, false, PAGE), Ok(Supplied::Installed));
+        assert_eq!(short.size(), 100, "a clean page ending past the size leaves it");
         assert_eq!(p.supply(&mut o, 1, 1, true, PAGE + 10), Ok(Supplied::Installed));
         assert_eq!(o.size(), PAGE + 10, "the size covers exactly the bytes put in");
     }
 
+    /// R3: a reader between the pin and the unpin sees the old size, so the
+    /// bytes the copy has yet to write are never read as the file's zeros.
+    /// Growing the size first (`resize`, then the write) is what this refuses.
     #[test]
-    fn a_write_pin_extends_the_size_only_with_its_bytes() {
+    fn a_reader_racing_an_extending_write_never_sees_its_unwritten_bytes() {
         let mut p = Pages::new(8, 4);
         let mut o = p.object(100);
         p.supply(&mut o, 0, 7, false, 100).unwrap();
-        assert_eq!(p.write_pin(&mut o, 0, 300), Ok(7));
-        assert_eq!(o.size(), 300);
-        p.write_unpin(&o, 0);
-        assert_eq!(p.write_pin(&mut o, 1, PAGE + 1), Err(Refused::InvalidArgument), "an absent page is supplied, not pinned");
+        assert_eq!(p.write_pin(&mut o, 0), Ok(7));
+        assert_eq!(o.size(), 100, "the copy is in flight: a reader still stops at the old end");
+        p.write_unpin(&mut o, 0, 7, 300);
+        assert_eq!(o.size(), 300, "the bytes are in, and the size covers them");
+        assert_eq!(p.write_pin(&mut o, 1), Err(Refused::InvalidArgument), "an absent page is supplied, not pinned");
+    }
+
+    #[test]
+    fn an_unpin_after_a_shrink_removed_the_page_grows_nothing() {
+        let mut p = Pages::new(8, 4);
+        let mut o = p.object(PAGE);
+        p.supply(&mut o, 0, 7, false, PAGE).unwrap();
+        p.write_pin(&mut o, 0).unwrap();
+        p.resize(&mut o, 0, &mut none);
+        p.supply(&mut o, 0, 8, true, 10).unwrap();
+        p.write_unpin(&mut o, 0, 7, PAGE);
+        assert_eq!(o.size(), 10, "the shrink's size, and the new page's, stand over a copy they overtook");
+        assert_eq!(p.withdraw(&mut o, 0, 1, &mut none), 0, "the new page is dirty");
+        p.writeback_begin(&mut o, 0, 1).unwrap();
+        assert_eq!(p.writeback_end(&mut o, 0, 1, true).unwrap()[0], 0, "and holds no pin of the old one");
     }
 
     #[test]
@@ -552,11 +591,11 @@ mod tests {
         for page in 0..6 {
             p.supply(&mut o, page, page, true, (page + 1) * PAGE).unwrap();
         }
-        p.write_pin(&mut o, 0, PAGE).unwrap(); // pinned across the begin, released inside
+        p.write_pin(&mut o, 0).unwrap(); // pinned across the begin, released inside
         assert_eq!(p.writeback_begin(&mut o, 0, 6).unwrap()[0], 0b11_1111);
-        p.write_unpin(&o, 0);
-        p.write_pin(&mut o, 1, 2 * PAGE).unwrap(); // dirtied inside
-        p.write_unpin(&o, 1);
+        p.write_unpin(&mut o, 0, 0, PAGE);
+        p.write_pin(&mut o, 1).unwrap(); // dirtied inside
+        p.write_unpin(&mut o, 1, 1, 2 * PAGE);
         let mut freed = Vec::new();
         p.resize(&mut o, 5 * PAGE, &mut sink(&mut freed)); // page 5 removed inside
         p.fail(&mut o, 4, 1, &mut sink(&mut freed)).unwrap(); // page 4 failed inside
@@ -589,7 +628,7 @@ mod tests {
         p.supply(&mut o, 2, 12, true, 3 * PAGE).unwrap();
         p.supply(&mut o, 3, 13, false, 4 * PAGE).unwrap();
         p.writeback_begin(&mut o, 2, 1).unwrap(); // clean but under write-back
-        p.write_pin(&mut o, 3, 4 * PAGE).unwrap(); // write-pinned
+        p.write_pin(&mut o, 3).unwrap(); // write-pinned
         let mut freed = Vec::new();
         assert_eq!(p.withdraw(&mut o, 0, 4, &mut sink(&mut freed)), 1);
         assert_eq!(freed, [10]);

@@ -90,10 +90,13 @@ pub enum ObjectKind {
     Job = 14,
     Notice = 15,
     WakeLatency = 16,
+    Pager = 17,
+    PagedOwner = 18,
+    Paged = 19,
 }
 
 impl ObjectKind {
-    pub const ALL: [ObjectKind; 17] = [
+    pub const ALL: [ObjectKind; 20] = [
         Self::PipeRead,
         Self::PipeWrite,
         Self::Connection,
@@ -111,6 +114,9 @@ impl ObjectKind {
         Self::Job,
         Self::Notice,
         Self::WakeLatency,
+        Self::Pager,
+        Self::PagedOwner,
+        Self::Paged,
     ];
 
     pub const fn from_word(word: u32) -> Option<Self> {
@@ -261,10 +267,20 @@ impl Rights {
     ///
     /// [`SYS_WAKE_LATENCY_HOLD`]: crate::syscall::SYS_WAKE_LATENCY_HOLD
     pub const WAKE_LATENCY: Rights = Rights(1 << 17);
+    /// On a `SysCap` named by [`SpawnArgs::pager`]: start the child as a
+    /// pager, which may make the one pager object that supplies paged
+    /// objects ([`SYS_PAGER_CREATE`]). A pager holds every reader of its
+    /// files to its answers, so the supervisor alone confers it, and only on
+    /// a row the signed `system.toml` marks as one; no `syscap` name in a
+    /// manifest maps to it.
+    ///
+    /// [`SpawnArgs::pager`]: crate::syscall::SpawnArgs::pager
+    /// [`SYS_PAGER_CREATE`]: crate::syscall::SYS_PAGER_CREATE
+    pub const PAGER: Rights = Rights(1 << 18);
 
     /// Every bit that has a caller. A wider set than this is a bug in whoever
     /// composed it, not a right nobody uses.
-    pub const ALL: Rights = Rights(0x3_ffff);
+    pub const ALL: Rights = Rights(0x7_ffff);
 
     pub const fn from_bits(bits: u32) -> Option<Self> {
         if bits & !Self::ALL.0 == 0 { Some(Rights(bits)) } else { None }
@@ -295,7 +311,7 @@ impl Rights {
 /// refusal saying which right was missing.
 impl core::fmt::Debug for Rights {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
-        const NAMES: [(Rights, &str); 18] = [
+        const NAMES: [(Rights, &str); 19] = [
             (Rights::DUP, "DUP"),
             (Rights::TRANSFER, "TRANSFER"),
             (Rights::READ, "READ"),
@@ -314,6 +330,7 @@ impl core::fmt::Debug for Rights {
             (Rights::JOBS, "JOBS"),
             (Rights::FLOOR, "FLOOR"),
             (Rights::WAKE_LATENCY, "WAKE_LATENCY"),
+            (Rights::PAGER, "PAGER"),
         ];
         if self.0 == 0 {
             return f.write_str("NONE");
