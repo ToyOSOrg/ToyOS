@@ -134,11 +134,27 @@ while the ring sat full 10.2–10.4 s of each 15 s row. The part sent what it
 held at about 42,000 frames a second, 23.8 µs a frame against 12.3 µs of
 wire.
 
-**The cause, derived, which #1075's interleaved reading tests**: the
+**The cause, measured 2026-10-28** ([evidence `f9563de4f/`](https://github.com/ToyOSOrg/evidence/tree/d6fbb4b149683056857dd8554c2c77cfbdd465ef/r2/f9563de4f)): the
 bring-up wrote `TCTL` whole, clearing `MULR`, which the T14's NVM sets
 (`TCTL` read `0x3003f0f8` before the reset). With it clear "the 82574
 submits only one request at a time" for transmit data (82574 §10.2.6.1,
-§7.2.7). #1075 keeps the fields the part loads.
+§7.2.7). #1075 keeps the fields the part loads. One session alternated it
+with main's whole write, four of each, with Linux at both ends (111 and
+110 MB/s):
+
+- The bring-up left `TCTL` at `0x3003f0fa` with the fix and `0x0003f0fa`
+  without: the part kept `MULR` and `RRTHRESH`.
+- Upload p50 87, 86, 82 and 85 MB/s with the fix, against 58, 56, 55 and 56
+  without. The fix was faster in every pair, and over the eight runs the
+  exact rank test's one-sided p is 1/70.
+- The wire carried 870,000–912,000 frames a row with the fix, against
+  618,000–626,000 without. No completion was unreported at any full answer.
+- The ring still sat full 8.3–8.7 s of each 15 s row (10.3–10.6 s without),
+  and cwnd held the sender 4.1–4.5 s (2.3–2.6 s without).
+
+What is left, about 1.3 times short of Linux with the ring still full most
+of a row, is the next lead: the rest of the transmit setup the datasheet
+specifies.
 
 The transmit setup's own lead stays open in
 `issues/the-intel-driver-writes-txdctl-and-tidv-against-the-82574-datasheets-newer-revision.md`.
