@@ -21,18 +21,19 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::future::poll_fn;
 use std::task::{Poll, Waker};
 
-use toyos_blockdev::{within, Block, BlockDev, Error, BLOCK};
+use toyos_blockdev::{within, Block, BlockDev, Error, SharedBlock, BLOCK};
+use toyos_blockring::layout::{ARENA, DEPTH};
 use toyos_blockring::MAX_REQUEST_BLOCKS;
 
 use crate::session::{Answer, Error as SessionError, Session, Unsent, Waited};
 use crate::{Outcome, Ticket};
 
 /// What [`Served`] drives: a session's requests and their answers, as
-/// [`Session`] keeps them, whose contract this is. A flush takes no arena.
+/// [`Session`] keeps them, whose contract this is.
 pub trait Link {
     fn blocks(&self) -> u64;
     fn submit_read(&mut self, lba: u64, blocks: u32) -> Result<Ticket, Unsent>;
-    fn submit_write(&mut self, lba: u64, data: &[u8]) -> Result<Ticket, Unsent>;
+    fn submit_write(&mut self, lba: u64, blocks: &[SharedBlock]) -> Result<Ticket, Unsent>;
     fn submit_flush(&mut self) -> Result<Ticket, Unsent>;
     fn wait(&mut self, block: bool) -> Waited;
     fn reconnect(&mut self) -> Result<(), SessionError>;
@@ -45,8 +46,8 @@ impl Link for Session {
     fn submit_read(&mut self, lba: u64, blocks: u32) -> Result<Ticket, Unsent> {
         Session::submit_read(self, lba, blocks)
     }
-    fn submit_write(&mut self, lba: u64, data: &[u8]) -> Result<Ticket, Unsent> {
-        Session::submit_write(self, lba, data)
+    fn submit_write(&mut self, lba: u64, blocks: &[SharedBlock]) -> Result<Ticket, Unsent> {
+        Session::submit_write(self, lba, blocks)
     }
     fn submit_flush(&mut self) -> Result<Ticket, Unsent> {
         Session::submit_flush(self)
@@ -81,13 +82,8 @@ struct State {
     gone: bool,
 }
 
-/// Why a request was not answered.
-enum NotAnswered {
-    /// The session's arena has no room: a flush releases what acknowledged
-    /// writes hold.
-    Full,
-    Gone,
-}
+/// Why a request was not answered: the disk is gone.
+struct Gone;
 
 impl<L: Link> Served<L> {
     pub fn new(link: L) -> Self {
@@ -132,21 +128,23 @@ impl<L: Link> Served<L> {
         self.progress(true);
     }
 
+    /// How many requests of [`MAX_REQUEST_BLOCKS`] the session carries at
+    /// once: the most a caller gains by having in flight.
+    pub fn depth(&self) -> usize {
+        (DEPTH as usize).min(ARENA.slots() as usize / MAX_REQUEST_BLOCKS as usize)
+    }
+
     /// One request, asked again after each session end it was on the wire
     /// for.
-    async fn ask(&self, mut submit: impl FnMut(&mut L) -> Result<Ticket, Unsent>) -> Result<Answer, NotAnswered> {
+    async fn ask(&self, mut submit: impl FnMut(&mut L) -> Result<Ticket, Unsent>) -> Result<Answer, Gone> {
         let mut refusals = 0;
         loop {
             if self.state.borrow().gone {
-                return Err(NotAnswered::Gone);
+                return Err(Gone);
             }
-            let ticket = match submit(&mut self.link.borrow_mut()) {
-                Ok(ticket) => ticket,
-                Err(Unsent::ArenaFull) => return Err(NotAnswered::Full),
-                // `progress` reconnects as it finds an end, so a session
-                // still ended is one that would not reconnect.
-                Err(Unsent::Ended) => return Err(NotAnswered::Gone),
-            };
+            // `progress` reconnects as it finds an end, so a session still
+            // ended is one that would not reconnect.
+            let Ok(ticket) = submit(&mut self.link.borrow_mut()) else { return Err(Gone) };
             self.state.borrow_mut().asked.insert(ticket);
             let answer = self.answer(ticket).await?;
             if answer.outcome != Outcome::Refused {
@@ -155,12 +153,12 @@ impl<L: Link> Served<L> {
             refusals += 1;
             if refusals > MAX_RECONNECTS {
                 println!("a block request was refused across {refusals} session ends; the disk is gone");
-                return Err(NotAnswered::Gone);
+                return Err(Gone);
             }
         }
     }
 
-    async fn answer(&self, ticket: Ticket) -> Result<Answer, NotAnswered> {
+    async fn answer(&self, ticket: Ticket) -> Result<Answer, Gone> {
         poll_fn(|cx| {
             let mut state = self.state.borrow_mut();
             if let Some(answer) = state.answered.remove(&ticket) {
@@ -169,7 +167,7 @@ impl<L: Link> Served<L> {
             }
             if state.gone {
                 state.asked.remove(&ticket);
-                return Poll::Ready(Err(NotAnswered::Gone));
+                return Poll::Ready(Err(Gone));
             }
             state.waiting.insert(ticket, cx.waker().clone());
             Poll::Pending
@@ -177,15 +175,20 @@ impl<L: Link> Served<L> {
         .await
     }
 
-    /// [`Served::ask`], flushing first wherever the arena has no room.
-    async fn ask_room(&self, mut submit: impl FnMut(&mut L) -> Result<Ticket, Unsent>) -> Result<Answer, Error> {
-        loop {
-            match self.ask(&mut submit).await {
-                Ok(answer) => return Ok(answer),
-                Err(NotAnswered::Full) => self.flush().await?,
-                Err(NotAnswered::Gone) => return Err(Error::Gone),
+    /// `blocks` written at `lba`, shared: the session keeps them until a
+    /// flush covers the write, rather than a copy of them.
+    pub async fn write_shared(&self, lba: u64, blocks: &[SharedBlock]) -> Result<(), Error> {
+        within(lba, blocks.len(), self.blocks)?;
+        let per = MAX_REQUEST_BLOCKS as usize;
+        for (i, chunk) in blocks.chunks(per).enumerate() {
+            let at = lba + (i * per) as u64;
+            match self.ask(|link| link.submit_write(at, chunk)).await.map_err(|Gone| Error::Gone)?.outcome {
+                Outcome::Done => {}
+                Outcome::ReadOnly => return Err(Error::ReadOnly),
+                _ => return Err(Error::Device),
             }
         }
+        Ok(())
     }
 }
 
@@ -199,7 +202,7 @@ impl<L: Link> BlockDev for Served<L> {
         let per = MAX_REQUEST_BLOCKS as usize;
         for (i, chunk) in out.chunks_mut(per).enumerate() {
             let (at, n) = (lba + (i * per) as u64, chunk.len() as u32);
-            let answer = self.ask_room(|link| link.submit_read(at, n)).await?;
+            let answer = self.ask(|link| link.submit_read(at, n)).await.map_err(|Gone| Error::Gone)?;
             let chunk = chunk.as_flattened_mut();
             match (answer.outcome, answer.data) {
                 (Outcome::Done, Some(data)) if data.len() == chunk.len() => chunk.copy_from_slice(&data),
@@ -209,26 +212,17 @@ impl<L: Link> BlockDev for Served<L> {
         Ok(())
     }
 
+    /// A copy of `data`, which the session keeps until a flush covers it.
     async fn write(&self, lba: u64, data: &[Block]) -> Result<(), Error> {
-        within(lba, data.len(), self.blocks)?;
-        let per = MAX_REQUEST_BLOCKS as usize;
-        for (i, chunk) in data.chunks(per).enumerate() {
-            let at = lba + (i * per) as u64;
-            match self.ask_room(|link| link.submit_write(at, chunk.as_flattened())).await?.outcome {
-                Outcome::Done => {}
-                Outcome::ReadOnly => return Err(Error::ReadOnly),
-                _ => return Err(Error::Device),
-            }
-        }
-        Ok(())
+        let shared: Vec<SharedBlock> = data.iter().map(|block| std::rc::Rc::new(Box::new(*block))).collect();
+        self.write_shared(lba, &shared).await
     }
 
     async fn flush(&self) -> Result<(), Error> {
         match self.ask(Link::submit_flush).await {
             Ok(Answer { outcome: Outcome::Durable, .. }) => Ok(()),
             Ok(_) => Err(Error::Device),
-            Err(NotAnswered::Gone) => Err(Error::Gone),
-            Err(NotAnswered::Full) => unreachable!("diskserver: a flush took arena room"),
+            Err(Gone) => Err(Error::Gone),
         }
     }
 }

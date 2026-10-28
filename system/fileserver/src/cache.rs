@@ -2,8 +2,9 @@
 //! metadata and its files' data alike. It is a [`BlockDev`] over the disk.
 //!
 //! **A write lands here and reaches the disk at a flush.** A flush writes
-//! every dirty block, lowest first and in runs, then asks the disk to make
-//! them durable; a volume's sync is its own metadata written into the cache
+//! every dirty block in runs, as many at once as the disk takes
+//! ([`Disk::depth`]), handing the disk the cache's own blocks to share
+//! ([`Disk::write_shared`]), then asks the disk to make them durable; a volume's sync is its own metadata written into the cache
 //! and then this. A write that would take the cache past [`DIRTY_LIMIT`] dirty
 //! blocks flushes first, and is refused whole when that flush is, so memory
 //! bounds the write-back and not the other way round.
@@ -24,23 +25,47 @@
 use std::cell::RefCell;
 use std::collections::{BTreeMap, VecDeque};
 use std::future::{poll_fn, Future};
+use std::pin::Pin;
+use std::rc::Rc;
 use std::task::{Poll, Waker};
 
-use toyos_blockdev::{within, Block, BlockDev, Error, BLOCK};
+use toyos_blockdev::{within, Block, BlockDev, Error, SharedBlock, BLOCK};
 
 /// A disk this server owns, and what to do when nothing can go on until it
 /// answers.
+// Every future runs on the server's one thread, as `BlockDev`'s do.
+#[allow(async_fn_in_trait)]
 pub trait Disk: BlockDev {
     /// Returns once a request asked of this disk may have been answered. A
     /// disk that answers every request as it is asked is never waited on.
     fn wait(&self) {
         panic!("fileserver: a disk that answers as it is asked was waited on");
     }
+
+    /// How many writes a flush keeps in flight at once.
+    fn depth(&self) -> usize {
+        1
+    }
+
+    /// `blocks` written at `lba`: shared by a disk that keeps a write's bytes
+    /// until a flush covers it, copied by one that does not.
+    async fn write_shared(&self, lba: u64, blocks: &[SharedBlock]) -> Result<(), Error> {
+        let data: Vec<Block> = blocks.iter().map(|block| ***block).collect();
+        self.write(lba, &data).await
+    }
 }
 
 impl Disk for diskserver::disk::Served {
     fn wait(&self) {
         diskserver::disk::Served::wait(self)
+    }
+
+    fn depth(&self) -> usize {
+        diskserver::disk::Served::depth(self)
+    }
+
+    async fn write_shared(&self, lba: u64, blocks: &[SharedBlock]) -> Result<(), Error> {
+        diskserver::disk::Served::write_shared(self, lba, blocks).await
     }
 }
 
@@ -54,7 +79,9 @@ pub const DIRTY_LIMIT: usize = 8 * 1024;
 const RUN: usize = 32;
 
 struct Slot {
-    data: Box<Block>,
+    /// Shared with the disk while it keeps a write of it: a write here then
+    /// takes a block of its own.
+    data: SharedBlock,
     dirty: bool,
     /// Which write put `data` here, so a flush that carried an older copy
     /// leaves the block dirty.
@@ -141,7 +168,7 @@ impl<D: Disk> Cache<D> {
                 let mut inner = self.inner.borrow_mut();
                 inner.reads += 1;
                 if let Some(slot) = inner.slots.get(&block) {
-                    put(i, &slot.data);
+                    put(i, &**slot.data);
                     inner.hits += 1;
                     i += 1;
                     continue;
@@ -168,10 +195,10 @@ impl<D: Disk> Cache<D> {
                 // disk answered, and stays held until a flush that waited for
                 // this fetch has written it.
                 match inner.slots.get(&at) {
-                    Some(slot) => put(i + k, &slot.data),
+                    Some(slot) => put(i + k, &**slot.data),
                     None => {
                         put(i + k, data);
-                        inner.slots.insert(at, Slot { data: Box::new(*data), dirty: false, version: 0 });
+                        inner.slots.insert(at, Slot { data: Rc::new(Box::new(*data)), dirty: false, version: 0 });
                         inner.order.push_back(at);
                     }
                 }
@@ -241,12 +268,15 @@ impl<D: Disk> BlockDev for Cache<D> {
             let version = inner.versions;
             let newly = match inner.slots.get_mut(&block) {
                 Some(slot) => {
-                    *slot.data = *chunk;
+                    match Rc::get_mut(&mut slot.data) {
+                        Some(data) => **data = *chunk,
+                        None => slot.data = Rc::new(Box::new(*chunk)),
+                    }
                     slot.version = version;
                     !std::mem::replace(&mut slot.dirty, true)
                 }
                 None => {
-                    inner.slots.insert(block, Slot { data: Box::new(*chunk), dirty: true, version });
+                    inner.slots.insert(block, Slot { data: Rc::new(Box::new(*chunk)), dirty: true, version });
                     true
                 }
             };
@@ -257,57 +287,89 @@ impl<D: Disk> BlockDev for Cache<D> {
         Ok(())
     }
 
-    /// Every dirty block to the disk, lowest first and in runs, then the disk
-    /// made durable. A block the disk refused stays dirty. A disk written
+    /// Every dirty block to the disk in runs, up to [`Disk::depth`] of them in
+    /// flight, then the disk made durable. A block the disk refused stays
+    /// dirty, and once one run is refused no other is begun. A disk written
     /// nothing since the last flush it answered is asked nothing: every write
     /// it took is already durable.
     async fn flush(&self) -> Result<(), Error> {
         self.until(|inner| !inner.flushing).await;
         self.inner.borrow_mut().flushing = true;
         let _flushing = Flushing(self);
-        let dirty: Vec<u64> = self.inner.borrow().slots.iter().filter(|(_, s)| s.dirty).map(|(b, _)| *b).collect();
-        let mut buf: Vec<Block> = vec![[0; BLOCK]; RUN];
-        let mut i = 0;
-        while i < dirty.len() {
-            let first = dirty[i];
-            let mut run = 1;
-            while i + run < dirty.len() && run < RUN && dirty[i + run] == first + run as u64 {
-                run += 1;
+        let mut runs = self.dirty_runs().into_iter();
+        let mut flight: Vec<Pin<Box<dyn Future<Output = Result<(), Error>> + '_>>> = Vec::new();
+        let mut refused = Ok(());
+        poll_fn(|cx| loop {
+            while refused.is_ok() && flight.len() < self.disk.depth().max(1) {
+                let Some((first, count)) = runs.next() else { break };
+                flight.push(Box::pin(self.write_run(first, count)));
             }
-            let end = first + run as u64;
-            self.until(|inner| !inner.fetches.values().any(|f| f.first < end && first < f.first + f.count as u64))
-                .await;
-            let versions: Vec<u64> = {
-                let inner = self.inner.borrow();
-                (0..run)
-                    .map(|k| {
-                        // Only a flush cleans a block, and this is the one.
-                        let slot = inner.slots.get(&(first + k as u64)).expect("fileserver: a dirty block left the cache during its flush");
-                        buf[k] = *slot.data;
-                        slot.version
-                    })
-                    .collect()
-            };
-            self.inner.borrow_mut().unflushed = true;
-            self.disk.write(first, &buf[..run]).await?;
-            let mut inner = self.inner.borrow_mut();
-            for (k, version) in versions.into_iter().enumerate() {
-                let block = first + k as u64;
-                // A block written again meanwhile stays dirty.
-                let slot = inner.slots.get_mut(&block).expect("fileserver: a dirty block left the cache during its flush");
-                if slot.version == version {
-                    slot.dirty = false;
-                    inner.dirty -= 1;
-                    inner.order.push_back(block);
+            let before = flight.len();
+            flight.retain_mut(|run| match run.as_mut().poll(cx) {
+                Poll::Ready(done) => {
+                    refused = std::mem::replace(&mut refused, Ok(())).and(done);
+                    false
                 }
+                Poll::Pending => true,
+            });
+            if flight.is_empty() && (refused.is_err() || runs.len() == 0) {
+                return Poll::Ready(());
             }
-            i += run;
-        }
+            if flight.len() == before {
+                return Poll::Pending;
+            }
+        })
+        .await;
+        refused?;
         if self.inner.borrow().unflushed {
             self.disk.flush().await?;
             self.inner.borrow_mut().unflushed = false;
         }
         self.inner.borrow_mut().evict();
+        Ok(())
+    }
+}
+
+impl<D: Disk> Cache<D> {
+    /// The dirty blocks as runs of consecutive blocks, each at most [`RUN`].
+    fn dirty_runs(&self) -> Vec<(u64, usize)> {
+        let mut runs: Vec<(u64, usize)> = Vec::new();
+        for (&block, _) in self.inner.borrow().slots.iter().filter(|(_, s)| s.dirty) {
+            match runs.last_mut() {
+                Some((first, count)) if *first + *count as u64 == block && *count < RUN => *count += 1,
+                _ => runs.push((block, 1)),
+            }
+        }
+        runs
+    }
+
+    /// One run of a flush: written once no fetch is reading it, and each block
+    /// clean afterwards unless written again meanwhile.
+    async fn write_run(&self, first: u64, count: usize) -> Result<(), Error> {
+        let end = first + count as u64;
+        self.until(|inner| !inner.fetches.values().any(|f| f.first < end && first < f.first + f.count as u64)).await;
+        let (blocks, versions): (Vec<SharedBlock>, Vec<u64>) = {
+            let inner = self.inner.borrow();
+            (first..end)
+                .map(|block| {
+                    // Only a flush cleans a block, and this is the one.
+                    let slot = inner.slots.get(&block).expect("fileserver: a dirty block left the cache during its flush");
+                    (Rc::clone(&slot.data), slot.version)
+                })
+                .unzip()
+        };
+        self.inner.borrow_mut().unflushed = true;
+        self.disk.write_shared(first, &blocks).await?;
+        let mut inner = self.inner.borrow_mut();
+        for (block, version) in (first..).zip(versions) {
+            // A block written again meanwhile stays dirty.
+            let slot = inner.slots.get_mut(&block).expect("fileserver: a dirty block left the cache during its flush");
+            if slot.version == version {
+                slot.dirty = false;
+                inner.dirty -= 1;
+                inner.order.push_back(block);
+            }
+        }
         Ok(())
     }
 }
@@ -601,6 +663,15 @@ mod tests {
         /// `(first, count, write)` of each request in flight.
         flight: RefCell<Vec<(u64, u64, bool)>>,
         overlaps: Cell<u32>,
+        /// What [`Disk::depth`] answers.
+        depth: Cell<usize>,
+        /// Every write is refused while this is set.
+        refusing: Cell<bool>,
+        /// Requests the closed gate still lets through, one each.
+        passes: Cell<u32>,
+        writes: Cell<u32>,
+        /// Every block handed to [`Disk::write_shared`], as handed.
+        kept: RefCell<Vec<(u64, SharedBlock)>>,
     }
 
     impl Held {
@@ -611,18 +682,33 @@ mod tests {
                 waiting: RefCell::default(),
                 flight: RefCell::default(),
                 overlaps: Cell::new(0),
+                depth: Cell::new(1),
+                refusing: Cell::new(false),
+                passes: Cell::new(0),
+                writes: Cell::new(0),
+                kept: RefCell::default(),
             }
         }
 
         async fn gate(&self) {
-            poll_fn(|cx| match self.open.get() {
-                true => Poll::Ready(()),
-                false => {
-                    self.waiting.borrow_mut().push(cx.waker().clone());
-                    Poll::Pending
+            poll_fn(|cx| {
+                if self.open.get() {
+                    return Poll::Ready(());
                 }
+                if self.passes.get() > 0 {
+                    self.passes.set(self.passes.get() - 1);
+                    return Poll::Ready(());
+                }
+                self.waiting.borrow_mut().push(cx.waker().clone());
+                Poll::Pending
             })
             .await
+        }
+
+        /// Let one request waiting at the gate through, the first polled.
+        fn release_one(&self) {
+            self.passes.set(self.passes.get() + 1);
+            self.waiting.take().into_iter().for_each(Waker::wake);
         }
 
         fn release(&self) {
@@ -664,9 +750,13 @@ mod tests {
             Ok(())
         }
         async fn write(&self, lba: u64, data: &[Block]) -> Result<(), Error> {
+            self.writes.set(self.writes.get() + 1);
             self.send(lba, data.len(), true);
             self.gate().await;
             self.landed(lba, true);
+            if self.refusing.get() {
+                return Err(Error::Device);
+            }
             self.ram.write(lba, data).await
         }
         async fn flush(&self) -> Result<(), Error> {
@@ -675,7 +765,81 @@ mod tests {
         }
     }
 
-    impl Disk for Held {}
+    impl Disk for Held {
+        fn depth(&self) -> usize {
+            self.depth.get()
+        }
+
+        async fn write_shared(&self, lba: u64, blocks: &[SharedBlock]) -> Result<(), Error> {
+            self.kept.borrow_mut().extend((lba..).zip(blocks.iter().cloned()));
+            let data: Vec<Block> = blocks.iter().map(|block| ***block).collect();
+            self.write(lba, &data).await
+        }
+    }
+
+    /// Blocks 1, 3, 5, … written, one run each: `runs` of them.
+    fn runs_apart(c: &Cache<Held>, runs: u64) {
+        for k in 0..runs {
+            block_on_ready(c.write(2 * k + 1, &[[k as u8 + 1; BLOCK]])).unwrap();
+        }
+    }
+
+    /// A flush keeps as many runs in flight as the disk takes, and no more.
+    #[test]
+    fn a_flush_keeps_as_many_runs_in_flight_as_the_disk_takes() {
+        let c = Cache::new(Held::new(16));
+        c.disk.depth.set(3);
+        runs_apart(&c, 5);
+        c.disk.open.set(false);
+        let exec = Executor::new();
+        exec.spawn(async { c.flush().await.unwrap() });
+        exec.run_until_stalled();
+        assert_eq!(c.disk.writes_in_flight(), 3);
+        c.disk.release();
+        assert_eq!(exec.run_until_stalled(), 0);
+        assert_eq!(c.disk.overlaps.get(), 0);
+        assert_eq!(c.counts().dirty, 0);
+        for k in 0..5 {
+            assert_eq!(on_disk(&c.disk, 2 * k + 1), [k as u8 + 1; BLOCK]);
+        }
+    }
+
+    /// The disk is handed the cache's own blocks, not copies of them.
+    #[test]
+    fn a_flush_shares_the_cache_s_blocks_with_the_disk() {
+        let c = Cache::new(Held::new(16));
+        block_on_ready(c.write(3, &[[1; BLOCK]])).unwrap();
+        block_on_ready(c.flush()).unwrap();
+        let kept = c.disk.kept.borrow();
+        let inner = c.inner.borrow();
+        assert_eq!(kept.len(), 1);
+        assert!(Rc::ptr_eq(&kept[0].1, &inner.slots[&3].data), "the disk was handed a copy");
+    }
+
+    /// Once a run is refused no other is begun, though another is still in
+    /// flight, and every block not written stays dirty for the next flush.
+    #[test]
+    fn a_refused_run_begins_no_other_and_leaves_the_rest_dirty() {
+        let c = Cache::new(Held::new(16));
+        c.disk.depth.set(2);
+        runs_apart(&c, 4);
+        c.disk.refusing.set(true);
+        c.disk.open.set(false);
+        let exec = Executor::new();
+        exec.spawn(async { assert_eq!(c.flush().await, Err(Error::Device)) });
+        exec.run_until_stalled();
+        assert_eq!(c.disk.writes_in_flight(), 2);
+        c.disk.release_one();
+        exec.run_until_stalled();
+        assert_eq!(c.disk.writes_in_flight(), 1, "the refused run's place was taken");
+        c.disk.release();
+        assert_eq!(exec.run_until_stalled(), 0);
+        assert_eq!(c.disk.writes.get(), 2, "a run was begun after one was refused");
+        assert_eq!(c.counts().dirty, 4);
+        c.disk.refusing.set(false);
+        block_on_ready(c.flush()).unwrap();
+        assert_eq!(c.counts().dirty, 0);
+    }
 
     /// What block `block` holds on the disk.
     fn on_disk(disk: &Held, block: u64) -> Block {

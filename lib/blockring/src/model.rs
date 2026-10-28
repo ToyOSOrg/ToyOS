@@ -37,7 +37,7 @@ use std::collections::HashSet;
 use toyos_blockhold::Holds;
 use toyos::transport::{Consumer, Place, Producer, Violation, Word};
 
-use crate::client::{Client, Outcome, Ticket, MAX_ATTEMPTS};
+use crate::client::{Ask, Client, Outcome, Ticket, MAX_ATTEMPTS};
 use crate::entry::{Completion, Op, Request};
 use crate::layout::{ARENA, CQE_WORDS, SQE_WORDS};
 use crate::server::{ServerSession, Taken};
@@ -294,7 +294,9 @@ fn connect(world: &mut World) {
 
 /// Every request the client will send goes onto the ring.
 fn pump(world: &mut World) {
-    while let Some(request) = world.client.next_request() {
+    // A transfer's arena block is its ticket, a write's issued again too, so
+    // the device knows a write's value by the block it carries.
+    while let Some(request) = world.client.next_request(|p| ARENA.run(p.ticket as u32, p.blocks)) {
         world.queues.send(request);
     }
 }
@@ -371,6 +373,7 @@ fn fail(run: &mut Run, law: Law, why: String) {
 fn settle(script: &[Step], world: &mut World) -> Result<(), (Law, String)> {
     let answers: Vec<_> = world.client.take_answers().collect();
     let _ = world.client.take_released().count();
+    let _ = world.client.take_retired().count();
     for (ticket, outcome) in answers {
         let had = world.answers.entry(ticket).or_default();
         had.push(outcome);
@@ -518,8 +521,7 @@ fn next(script: &[Step], world: &World) -> Vec<(String, After)> {
             let mut w = world.clone();
             match script[world.next] {
                 Step::Write { block, .. } => {
-                    let run = ARENA.run(ticket as u32, 1).expect("a script's ticket is an arena block");
-                    w.client.submit(ticket, Op::Write { run, lba: block });
+                    w.client.submit(ticket, Ask::Write { lba: block, blocks: 1 });
                 }
                 Step::Flush => {
                     let acked = w
@@ -529,7 +531,7 @@ fn next(script: &[Step], world: &World) -> Vec<(String, After)> {
                         .map(|(t, _)| *t)
                         .collect();
                     w.acked_before.insert(ticket, acked);
-                    w.client.submit(ticket, Op::Flush);
+                    w.client.submit(ticket, Ask::Flush);
                 }
             }
             w.next += 1;
