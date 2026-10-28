@@ -37,6 +37,8 @@ and the C library beneath it are each system's own.
   0.05 is 2/70, so a resolved row is one whose every run of one system beat
   every run of the other. Fewer runs of either system than four cannot reach
   that, except against more of the other: three against five can (2/56).
+  Four a side is where a row can first resolve, a starting sample and no
+  promise of precision: a row whose runs overlap is unresolved, not equal.
   Boots of one image differ: the AMD bench's `crunch.single.deflate` read
   63.0 to 63.6 ms on some boots and 66.6 to 66.8 ms on others (2026-10-27),
   so no single boot stands for its system.
@@ -63,17 +65,23 @@ and the C library beneath it are each system's own.
   apart. A settle that ran out its 0.5 s says so (`unsettled`), and is
   counted rather than judged.
 
-## Linux makes the requests ToyOS makes
+## Linux as installed, and Linux under ToyOS's requests
 
-**The CPU's frequency.** Linux runs under the frequency request ToyOS's
-kernel makes of the same CPU, so the clock is the hardware's answer to one
-request on both systems:
+**The baseline is Linux as the bench boots it**: its own governor, its own
+clocksource, its own checks. What it does on that machine is ordinary OS
+behaviour and part of what is compared. A comparison names its
+configuration in its setup lines, and `osbench-compare` refuses to mix two.
+
+**A matched request is a controlled experiment, labelled as one.** It asks
+the CPU's frequency control for what ToyOS's kernel asks of the same CPU, so
+the clock is the hardware's answer to one request on both systems. It
+answers a different question from the baseline, and never replaces it:
 
 - **The T14** (i5-1135G7, `intel_pstate` with HWP). ToyOS asks for HWP's
   lowest to highest performance at EPP 0x80 (`kernel/pure/cpu.rs`). Ubuntu's
-  default `powersave` governor makes HWP's request with the EPP its
-  `energy_performance_preference` holds, so write 0x80 there before each
-  Linux run, which `intel_pstate` takes as a number:
+  `powersave` governor makes HWP's request with the EPP its
+  `energy_performance_preference` holds, so the experiment writes 0x80 there
+  before each Linux run, which `intel_pstate` takes as a number:
 
   ```text
   echo 128 | sudo tee /sys/devices/system/cpu/cpufreq/policy*/energy_performance_preference
@@ -86,9 +94,9 @@ request on both systems:
   row.
 - **The AMD bench** (Ryzen 7 4800U, `acpi-cpufreq`). ToyOS writes no P-state
   or boost register, so the firmware's P0 and Core Performance Boost stand.
-  Linux's `performance` governor asks for that. Set it before each Linux
-  run, since every ToyOS boot between them boots Linux back to `schedutil`,
-  and give `schedutil` back after the last:
+  Linux's `performance` governor asks for that. The experiment sets it
+  before each Linux run, since every ToyOS boot between them boots Linux
+  back to `schedutil`, and gives `schedutil` back after the last:
 
   ```text
   echo performance | sudo tee /sys/devices/system/cpu/cpufreq/policy*/scaling_governor
@@ -97,7 +105,7 @@ request on both systems:
 
   Check `governor=performance*16` and `boost=1`.
 
-When ToyOS's request changes, this section changes with it.
+When ToyOS's request changes, the experiment changes with it.
 
 **The groups.** `fair.apart` sets each workload in a group of its own: a
 ToyOS Job, and on Linux a scope's cgroup, which is a group only where the
@@ -105,11 +113,15 @@ user's manager delegates the `cpu` controller. Check
 `fair.apart.units=3xcgroup`. With `1xcgroup` Linux's `apart` is
 thread-fair, and the pair compares nothing.
 
-**The clock.** Every timestamp is read from the TSC on ToyOS, so Linux runs
-with `clocksource=tsc`. A clocksource the vDSO cannot read costs every
-`Instant::now` a syscall: on 2026-10-24 the AMD bench's Linux took 1.21 µs a
-read (`time.now`) against the T14's 14 ns, and every per-operation timing
-there carried it.
+**The clock.** Every timestamp is read from the TSC on ToyOS. The AMD
+bench's Linux keeps time on the HPET, having found its TSC unstable at boot
+(`issues/the-amd-benchs-linux-reads-its-clock-through-a-syscall.md`), so
+each of its `Instant::now` is a syscall: 1.21 µs on 2026-10-24 against the
+T14's 14 ns, carried by every per-operation timing there. That is its
+baseline, stated by the `clocksource` setup line. A Linux forced onto the
+TSC (`tsc=reliable`) has its stability checks switched off, so it is no
+baseline. It is an experiment, and only once the instability's cause is
+known.
 
 ## The disk is not yet one disk
 

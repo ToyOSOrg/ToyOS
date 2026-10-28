@@ -34,11 +34,12 @@ its groups:
 - a short CPU crunch, one thread then all, that stops at TjMax less 15 C
   where the package's temperature can be read: `crunch.*`.
 
-`tests/guest/osbench/README.md` is how a comparison is run: both halves
-from one revision, interleaved runs, and Linux under ToyOS's frequency
-request and on the TSC. `persist` is not yet one disk: ToyOS writes the boot
-stick's LOG volume, and moves to the bench's NVMe once ToyOS designates its
-DATA partition itself. The AMD bench's Linux reads no TSC
+`tests/guest/osbench/README.md` is how a comparison is run: both halves from
+one revision, interleaved runs, Linux as installed for the baseline, and
+Linux under ToyOS's frequency request as a labelled experiment. `persist` is
+not yet one disk: ToyOS writes the boot stick's LOG volume, and moves to the
+bench's NVMe once ToyOS designates its DATA partition itself. The AMD
+bench's Linux reads its clock through a syscall
 (`issues/the-amd-benchs-linux-reads-its-clock-through-a-syscall.md`).
 
 `internet.*`, HTTPS to Cloudflare's speed test, is exploratory evidence of a
