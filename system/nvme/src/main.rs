@@ -22,7 +22,7 @@ use toyos::PciDev;
 use toyos_abi::syscall::{SyscallError, DEV_PREFIX};
 use toyos_blockring::disk::Settled;
 use toyos_blockring::BLOCK_BYTES;
-use toyos_blockserve::link::Link;
+use toyos_blockserve::link::{Handed, Link};
 use toyos_blockserve::sessions::MAX_SESSIONS;
 use toyos_blockserve::{Device, Sessions};
 
@@ -134,8 +134,7 @@ fn main() {
         ctrl.sectors
     );
     let read = toyos_blockserve::table::read(&mut Sectors { ctrl: &mut ctrl, block: vec![0u8; BLOCK_BYTES] });
-    let parts = toyos_blockserve::table::say(&name, read);
-    let mut disk = Sessions::new(name.clone(), parts);
+    let mut disk = Sessions::new(name.clone(), read, toyos_blockserve::draw_token);
     link.offer(DISK, disk.offered());
     link.settle(Settled::Offered);
     serve(&name, &mut ctrl, &mut disk, &mut link, stop.as_ref())
@@ -156,8 +155,9 @@ fn idle(link: &mut Link, stop: Option<&toyos::Pipe>) -> ! {
             std::process::exit(0);
         }
         for handed in link.take() {
-            toyos_abi::syscall::close(handed.region);
-            drop(handed.conn);
+            if let Handed::Session { region, .. } = handed {
+                toyos_abi::syscall::close(region);
+            }
         }
     }
 }
@@ -200,12 +200,23 @@ fn serve(name: &str, ctrl: &mut Controller, disk: &mut Sessions, link: &mut Link
         }
 
         for handed in link.take() {
-            if handed.session.disk != DISK {
-                println!("{name}: the block service handed a session on disk {}, which this driver never offered", handed.session.disk);
-                toyos_abi::syscall::close(handed.region);
+            let on = match &handed {
+                Handed::Session { session, .. } => session.disk,
+                Handed::Describe { disk, .. } => *disk,
+                Handed::Designate { order, .. } => order.disk,
+            };
+            if on != DISK {
+                println!("{name}: the block service handed work on disk {on}, which this driver never offered");
+                if let Handed::Session { region, .. } = handed {
+                    toyos_abi::syscall::close(region);
+                }
                 continue;
             }
-            disk.open(ctrl, handed.conn, handed.region, handed.session.unique, handed.session.writes);
+            match handed {
+                Handed::Session { session, conn, region } => disk.open(ctrl, conn, region, session.unique, session.writes),
+                Handed::Describe { conn, .. } => disk.describe(conn),
+                Handed::Designate { order, conn } => disk.designate(ctrl, conn, order),
+            }
         }
         for id in disk.ids() {
             if ready.contains(&(TOKEN_SESSION + id)) {

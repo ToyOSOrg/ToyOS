@@ -51,6 +51,12 @@ impl Region {
         whole.sub(run.span().offset, run.span().len)
     }
 
+    /// The whole region, for the driver's own work on a region it made.
+    pub fn window(&self) -> Window {
+        // SAFETY: as `arena`'s.
+        unsafe { Window::new(self.memory.as_ptr(), SESSION_BYTES) }
+    }
+
     /// A second handle to the region, for a send.
     pub fn share(&self) -> Result<toyos::OwnedHandle, SyscallError> {
         self.memory.share()

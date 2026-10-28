@@ -31,6 +31,12 @@ pub fn designation(blocks: u64) -> [u8; BLOCK_SIZE] {
     block
 }
 
+/// Whether `block0` begins as a volume of this format's does, whatever state
+/// the rest of the volume is in.
+pub fn carries_volume(block0: &[u8]) -> bool {
+    block0.get(..MAGIC.len()) == Some(&MAGIC)
+}
+
 /// The block count a stamp at the front of `block0` names, or `None` where
 /// `block0` carries none.
 pub fn designated(block0: &[u8]) -> Option<u64> {

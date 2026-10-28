@@ -29,9 +29,9 @@ use toyos::poller::{Poller, READABLE, WRITABLE};
 use toyos::{AsHandle, PciDev};
 use toyos_abi::syscall::{SyscallError, DEV_PREFIX};
 use toyos_blockring::disk::Settled;
-use toyos_blockserve::link::Link;
+use toyos_blockserve::link::{Handed, Link};
 use toyos_blockserve::sessions::{Owner as Request, MAX_SESSIONS};
-use toyos_blockserve::{table, Device, Partition, Sessions};
+use toyos_blockserve::{table, Device, Sessions};
 use toyos_input::wire::{self, Record, MAX_PAYLOAD};
 use toyos_inspect::{Snapshot, MSG_INSPECT, MSG_SNAPSHOT};
 use toyos_pci_claim::{Bar, Grant};
@@ -70,7 +70,7 @@ impl Host for Process {
     }
 }
 
-type Driver = Usb<Bar, Grant, Process, Result<Vec<Partition>, String>>;
+type Driver = Usb<Bar, Grant, Process, table::Read>;
 
 /// The owner of input, over the `input` port.
 #[derive(Default)]
@@ -223,7 +223,9 @@ fn idle(mut link: Option<Link>, stop: Option<toyos::Pipe>) -> ! {
             std::process::exit(0);
         }
         for handed in link.iter_mut().flat_map(Link::take) {
-            toyos_abi::syscall::close(handed.region);
+            if let Handed::Session { region, .. } = handed {
+                toyos_abi::syscall::close(region);
+            }
         }
     }
 }
@@ -268,7 +270,7 @@ fn serve(
             match event {
                 Event::Arrived { disk, name: disk_name, table } => {
                     let label = format!("{name} {disk_name}");
-                    let sessions = Sessions::new(label.clone(), table::say(&label, table));
+                    let sessions = Sessions::new(label.clone(), table, toyos_blockserve::draw_token);
                     if let Some(link) = &mut link {
                         link.offer(disk, sessions.offered());
                     }
@@ -299,15 +301,23 @@ fn serve(
             }
         }
         for handed in link.iter_mut().flat_map(Link::take) {
-            match disks.get_mut(&handed.session.disk) {
-                Some(sessions) => {
-                    let mut port = Disk { usb, disk: handed.session.disk, claim: dev };
-                    sessions.open(&mut port, handed.conn, handed.region, handed.session.unique, handed.session.writes);
+            let on = match &handed {
+                Handed::Session { session, .. } => session.disk,
+                Handed::Describe { disk, .. } => *disk,
+                Handed::Designate { order, .. } => order.disk,
+            };
+            let Some(sessions) = disks.get_mut(&on) else {
+                println!("{name}: the block service handed work on disk {on}, which is not served");
+                if let Handed::Session { region, .. } = handed {
+                    toyos_abi::syscall::close(region);
                 }
-                None => {
-                    println!("{name}: the block service handed a session on disk {}, which is not served", handed.session.disk);
-                    toyos_abi::syscall::close(handed.region);
-                }
+                continue;
+            };
+            let mut port = Disk { usb, disk: on, claim: dev };
+            match handed {
+                Handed::Session { session, conn, region } => sessions.open(&mut port, conn, region, session.unique, session.writes),
+                Handed::Describe { conn, .. } => sessions.describe(conn),
+                Handed::Designate { order, conn } => sessions.designate(&mut port, conn, order),
             }
         }
         let submitted = usb.disks.submitted();
