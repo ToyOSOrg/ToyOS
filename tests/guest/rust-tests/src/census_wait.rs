@@ -6,10 +6,11 @@
 //! runs the hooks, so the release can land on another CPU after the caller's
 //! own drain site found the queue empty
 //! (`issues/deferred-release-outlives-its-syscall.md`). So a reading is
-//! a wait for an event, and a leak is the event that never comes: the harness
-//! ceiling reds it.
+//! a wait for an event, and a leak is the event that never comes: the wait
+//! panics past [`BOUND`] naming what it waited on, so a shared boot's later
+//! members still run.
 
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use toyos::census::Census;
 
@@ -18,8 +19,13 @@ use toyos::census::Census;
 /// sleeps keeps its CPU from ever reaching it.
 const PACE: Duration = Duration::from_millis(10);
 
+/// How long a wait takes before it is a failure: a liveness ceiling far above
+/// a release, whose deferred drain lands within milliseconds of the event.
+const BOUND: Duration = Duration::from_secs(10);
+
 /// The census once two readings a pace apart agree.
 pub fn settled() -> Census {
+    let deadline = Instant::now() + BOUND;
     let mut last = Census::now();
     loop {
         std::thread::sleep(PACE);
@@ -27,17 +33,26 @@ pub fn settled() -> Census {
         if next == last {
             return next;
         }
+        assert!(Instant::now() < deadline, "census_wait: no two readings agreed within {BOUND:?}: {last}, then {next}");
         last = next;
     }
 }
 
-/// The census once no kind has grown since `before`.
+/// The census once no kind has grown since `before`, or a panic past
+/// [`BOUND`] naming the kinds still grown.
 pub fn released_to(before: &Census) -> Census {
+    let deadline = Instant::now() + BOUND;
     loop {
         let now = Census::now();
-        if now.grown_since(before).next().is_none() {
+        let grown: Vec<String> = now.grown_since(before).map(|(kind, was, is)| format!("{kind:?} {was} -> {is}")).collect();
+        if grown.is_empty() {
             return now;
         }
+        assert!(
+            Instant::now() < deadline,
+            "census_wait: still grown since the first reading after {BOUND:?}: {}",
+            grown.join(", ")
+        );
         std::thread::sleep(PACE);
     }
 }
