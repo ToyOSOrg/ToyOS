@@ -44,7 +44,7 @@ impl HandleQueue {
         let bound = charge::arc::<Self>()
             + charge::array::<(u64, Vec<HandleEntry>)>(MAX_QUEUED_BATCHES.next_power_of_two())
             + MAX_QUEUED_BATCHES * charge::array::<HandleEntry>(MAX_TRANSFER_HANDLES);
-        let charge = Charge::new(bound)?;
+        let charge = Charge::current(bound)?;
         Ok(Arc::new(Self { batches: Lock::new(Some(Batches::new())), _charge: charge }))
     }
 

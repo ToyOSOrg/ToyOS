@@ -49,6 +49,13 @@ impl SharedMemory {
         Self::adopt(syscall::shm_create(size)?, size)
     }
 
+    /// [`create`](Self::create), counted to the job `job` is a handle to,
+    /// carrying `WRITE`, rather than this process's own: memory laid out
+    /// for a child started in it.
+    pub fn create_for(job: RawHandle, size: usize) -> Result<Self, SyscallError> {
+        Self::adopt(syscall::shm_create_for(job, size)?, size)
+    }
+
     /// [`create`](Self::create) for a region a device will be lent, by this
     /// process's driver or by a driver it sends the region to.
     pub fn create_for_device(size: usize) -> Result<Self, SyscallError> {

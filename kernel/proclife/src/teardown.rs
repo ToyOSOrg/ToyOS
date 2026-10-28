@@ -17,8 +17,8 @@
 
 use alloc::vec::Vec;
 
-use crate::proclife::table::{Lifecycle, Processes};
-use crate::proclife::{End, Pid, ThreadLocation, Tid, Watch, TORN_DOWN_THREAD_CODE};
+use crate::table::{Lifecycle, Processes};
+use crate::{End, Pid, ThreadLocation, Tid, Watch, TORN_DOWN_THREAD_CODE};
 
 /// Claim exclusive teardown of a process, for `end`.
 ///
@@ -153,7 +153,7 @@ pub fn route_thread_exit<T: Processes>(table: &T, pid: Pid, tid: Tid) -> ThreadE
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::proclife::model::World;
+    use crate::model::World;
 
     #[cfg(not(feature = "mutate-claim-teardown-always-wins"))]
     #[test]

@@ -181,6 +181,11 @@ pub const PAGE_SIZE: usize = 4096;
 /// [`SHM_DEVICE_PAGE`]s of one physical run, as a device's domain maps it.
 pub const SHM_DEVICE: u64 = 1;
 
+/// [`shm_create_for`]: the region is counted to the job the call's third
+/// argument names, a handle carrying `WRITE`, rather than the caller's: the
+/// authority to place a child in a job is the authority to make memory for it.
+pub const SHM_FOR_JOB: u64 = 1 << 1;
+
 /// What a [`SHM_DEVICE`] region is a whole number of.
 pub const SHM_DEVICE_PAGE: u64 = 2 * 1024 * 1024;
 
@@ -321,8 +326,15 @@ pub const SYS_VM_DISCARD: u64 = 141;
 pub const SYS_VM_DECOMMIT: u64 = 142;
 /// A memory object over part of another's pages. See [`shm_sub`].
 pub const SYS_SHM_SUB: u64 = 143;
+/// Hold memory back for a job however short every other runs, gated by
+/// [`Rights::FLOOR`] on a `SysCap`. See [`job_floor`].
+///
+/// [`Rights::FLOOR`]: crate::handle::Rights::FLOOR
+pub const SYS_JOB_FLOOR: u64 = 144;
+/// What a job's account holds. See [`account_info`].
+pub const SYS_ACCOUNT_INFO: u64 = 145;
 /// Resize a run of committed private memory, in place or moved. See [`vm_remap`].
-pub const SYS_VM_REMAP: u64 = 144;
+pub const SYS_VM_REMAP: u64 = 146;
 
 /// Bins in the per-process syscall profile — one for every number this ABI
 /// issues, and one at the end for every number it does not.
@@ -330,7 +342,7 @@ pub const SYS_VM_REMAP: u64 = 144;
 /// **The profile's parts sum to its total, and that is the whole requirement.**
 /// A bin array narrower than the ABI reaches drops calls out of the line while
 /// the total goes on counting them.
-pub const SYSCALL_PROFILE_BINS: usize = 146;
+pub const SYSCALL_PROFILE_BINS: usize = 148;
 
 /// Where a number this ABI does not issue is counted. Merging is a degradation
 /// a reader can see in the line; dropping is one nobody can.
@@ -397,7 +409,7 @@ crate::user_safe! {
         /// `PermissionDenied` for a handle without `WRITE` and `InvalidArgument`
         /// for one to no process, since a place is a handle a peer sent;
         /// `Gone` for a process being torn down, and `ResourceExhausted` for a
-        /// child more than `kernel::proclife::MAX_DEPTH` below the supervisor.
+        /// child more than `toyos_proclife::MAX_DEPTH` below the supervisor.
         ///
         /// [`Rights::WRITE`]: crate::handle::Rights::WRITE
         pub place: u64,
@@ -1733,6 +1745,31 @@ pub fn job_create(syscap: RawHandle) -> Result<RawHandle, SyscallError> {
     check(syscall(SYS_JOB_CREATE, syscap.0 as u64, 0, 0, 0)).map(|v| RawHandle(v as u32))
 }
 
+/// Hold `bytes` back for the job `job` names, which only it may then take
+/// however short every other job runs, presenting a `SysCap` handle that
+/// carries [`Rights::FLOOR`] and the job's handle with `WRITE`. The floor
+/// lasts while that job handle's object does, and goes with its last
+/// handle. `ResourceExhausted` where what is free now cannot hold it, and
+/// `AlreadyExists` where another handle's object already holds one for the
+/// job.
+///
+/// [`Rights::FLOOR`]: crate::handle::Rights::FLOOR
+pub fn job_floor(syscap: RawHandle, job: RawHandle, bytes: u64) -> Result<(), SyscallError> {
+    check_unit(syscall(SYS_JOB_FLOOR, syscap.0 as u64, job.0 as u64, bytes, 0))
+}
+
+/// What the account of the job `job` names holds, its handle carrying
+/// `READ`.
+pub fn account_info(job: RawHandle, info: &mut AccountInfo) -> Result<(), SyscallError> {
+    check_unit(syscall(
+        SYS_ACCOUNT_INFO,
+        job.0 as u64,
+        info as *mut AccountInfo as u64,
+        core::mem::size_of::<AccountInfo>() as u64,
+        0,
+    ))
+}
+
 /// A handle to the job the caller runs in, carrying `WRITE`, `DUP` and
 /// `TRANSFER`: what a launch carries for its program to join the caller's job.
 /// Asks no right: it names only what the caller is already in.
@@ -1951,6 +1988,14 @@ pub fn accept(acceptor: RawHandle) -> Result<RawHandle, SyscallError> {
     check(syscall(SYS_ACCEPT, acceptor.0 as u64, 0, 0, 0)).map(|v| RawHandle(v as u32))
 }
 
+/// [`accept`]'s flag: answer `WouldBlock` rather than wait when none is queued.
+pub const ACCEPT_NONBLOCK: u64 = 1;
+
+/// [`accept`] of a connection already queued; `WouldBlock` when none is.
+pub fn accept_nonblock(acceptor: RawHandle) -> Result<RawHandle, SyscallError> {
+    check(syscall(SYS_ACCEPT, acceptor.0 as u64, ACCEPT_NONBLOCK, 0, 0)).map(|v| RawHandle(v as u32))
+}
+
 /// Handles one [`message_send`] may carry.
 ///
 /// Policy on the primitive: a caller asking for one more is refused by name
@@ -2040,6 +2085,13 @@ pub fn shm_create(size: usize) -> Result<RawHandle, SyscallError> {
 /// [`shm_create`], with [`SHM_DEVICE`] for memory a device is lent.
 pub fn shm_create_flags(size: usize, flags: u64) -> Result<RawHandle, SyscallError> {
     check(syscall(SYS_SHM_CREATE, size as u64, flags, 0, 0)).map(|v| RawHandle(v as u32))
+}
+
+/// [`shm_create`], counted to the job `job` names (carrying `WRITE`) rather
+/// than the caller's: memory a launcher lays out for a child it starts in
+/// that job, such as its log ring.
+pub fn shm_create_for(job: RawHandle, size: usize) -> Result<RawHandle, SyscallError> {
+    check(syscall(SYS_SHM_CREATE, size as u64, SHM_FOR_JOB, job.0 as u64, 0)).map(|v| RawHandle(v as u32))
 }
 
 /// Map the region `shm` names into this process, readable and writable, and
@@ -2685,6 +2737,29 @@ pub fn modules(answer: &[u8]) -> impl Iterator<Item = (ModuleInfo, &[u8])> {
         let path = info.path_offset as usize;
         (info, &answer[path..path + info.path_len as usize])
     })
+}
+
+crate::user_safe! {
+    /// A job's account, as [`SYS_ACCOUNT_INFO`] answers it, in bytes. A
+    /// job's memory stays counted to it while an object it made lives, so
+    /// an account outlives the processes that ran in it.
+    #[derive(Clone, Copy, Default, Debug, PartialEq, Eq)]
+    pub struct AccountInfo {
+        /// Held back for it however short every other job runs.
+        pub floor: u64,
+        /// Private and object memory its processes committed.
+        pub committed: u64,
+        /// Kernel memory it caused: heap its objects keep, its page tables,
+        /// and runs such as pipe rings and memory a device is lent.
+        pub kernel: u64,
+        /// The most of the two it held at once.
+        pub peak: u64,
+        /// What it would have held had its last refused request been
+        /// granted; zero if none was.
+        pub wanted: u64,
+        /// How many of its requests were refused for memory.
+        pub refusals: u64,
+    }
 }
 
 crate::user_safe! {

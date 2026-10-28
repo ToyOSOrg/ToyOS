@@ -13,12 +13,12 @@
 //! entry and freed everything the process held; the load that pairs with it is
 //! the reason a pass that sees `finished` sees all of that too.
 //!
-//! [`Processes::published_exit`]: crate::proclife::table::Processes::published_exit
+//! [`Processes::published_exit`]: crate::table::Processes::published_exit
 
 use alloc::vec::Vec;
 
-use crate::proclife::table::Processes;
-use crate::proclife::Pid;
+use crate::table::Processes;
+use crate::Pid;
 
 /// Every process whose exit is published, in pid order.
 ///
@@ -38,8 +38,8 @@ pub fn finished_pids<T: Processes>(table: &T) -> Vec<Pid> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::proclife::End;
-    use crate::proclife::model::World;
+    use crate::End;
+    use crate::model::World;
 
     #[test]
     fn nothing_is_taken_from_a_table_of_live_processes() {

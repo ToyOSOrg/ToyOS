@@ -312,8 +312,8 @@ fn tls_alloc_block(module_id: u64) -> Result<u64, SyscallError> {
     let tls_vaddr = match existing {
         Some(vaddr) => vaddr,
         None => {
-            let place = Charge::new(charge::map_entry::<(process::Tid, u64), (process::KernelMapping, Charge)>())?;
-            let block = crate::object::shm::SharedMemObject::create(tls_memsz.max(1) as u64)?;
+            let place = Charge::current(charge::map_entry::<(process::Tid, u64), (process::KernelMapping, Charge)>())?;
+            let block = crate::object::shm::SharedMemObject::create(&crate::mm::charge::current(), tls_memsz.max(1) as u64)?;
             if let Some(template) = &tls_template {
                 // SAFETY: the template is a bounds-checked view of the module's
                 // own image, which its `LoadedLib` keeps alive.

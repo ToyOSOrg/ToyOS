@@ -1,24 +1,29 @@
-//! The kernel heap a process causes, charged before it is allocated and given
-//! back when what it covers goes.
+//! The kernel heap a process causes, charged to its job before it is
+//! allocated and given back when what it covers goes.
 //!
 //! **An object that outlives the call that made it holds a [`Charge`] for
 //! every heap allocation it keeps**, taken in its constructor before the
-//! allocations and dropped with it. A charge is refused, `ResourceExhausted`
-//! at the call, where covering it would take what the frame allocator holds
-//! back for the kernel (`pmm::charge`); an allocation it covers then finds
-//! room, since the heap grows into what charges reserved first, as long as
-//! the heap's fragmentation stays within what the charges' estimates
-//! overcount (`issues/the-kernel-heaps-fragmentation-is-charged-to-nobody.md`).
-//! What a call allocates and frees before it returns, past what its thread is
+//! allocations and dropped with it, against the job that made it: the
+//! caller's ([`current`]), or the one a spawn makes it for. A charge is
+//! refused, `ResourceExhausted` at the call, where covering it would take
+//! what the frame allocator holds back for the kernel or another job's floor
+//! (`pmm::charge`); an allocation it covers then finds room, since the heap
+//! grows into what charges reserved first, as long as the heap's
+//! fragmentation stays within what the charges' estimates overcount
+//! (`issues/the-kernel-heaps-fragmentation-is-charged-to-nobody.md`). What a
+//! call allocates and frees before it returns, past what its thread is
 //! charged for, is not charged: the kernel's kept superframes cover it.
 
+use alloc::sync::Arc;
 use core::alloc::Layout;
 
+use kernel::frames::PoolSplit;
+use kernel::sched::job::Job;
 use toyos_abi::syscall::SyscallError;
 
 use super::pmm;
 
-/// Covering a charge would take what the kernel holds back.
+/// Covering a charge would take what is held back.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub struct Exhausted;
 
@@ -28,63 +33,103 @@ impl From<Exhausted> for SyscallError {
     }
 }
 
-/// Bytes of the kernel heap charged, given back when it drops.
-#[derive(Debug)]
-pub struct Charge(u64);
+/// The job the running thread is in, whose account what its call causes is
+/// charged to; before any thread runs, the boot's own.
+pub fn current() -> Arc<Job> {
+    crate::sched::driver::current_job().unwrap_or_else(|| Arc::clone(boot()))
+}
+
+/// The account of what the kernel makes before any thread runs, made by
+/// [`init`].
+static BOOT: core::sync::atomic::AtomicPtr<Arc<Job>> = core::sync::atomic::AtomicPtr::new(core::ptr::null_mut());
+
+/// Make the boot's account; `mm::init` calls it once the heap is up.
+pub(super) fn init() {
+    let job: &'static Arc<Job> = alloc::boxed::Box::leak(alloc::boxed::Box::new(crate::object::job::new_job()));
+    BOOT.store(core::ptr::from_ref(job).cast_mut(), core::sync::atomic::Ordering::Release);
+}
+
+pub fn boot() -> &'static Arc<Job> {
+    let job = BOOT.load(core::sync::atomic::Ordering::Acquire);
+    assert!(!job.is_null(), "charge: a charge before `mm::init`");
+    // SAFETY: `init` stored a leaked box's pointer, never cleared or freed.
+    unsafe { &*job }
+}
+
+/// Bytes of the kernel heap charged to a job, given back when it drops. Each
+/// growth comes from the pool the job charges at the time (`frames::PoolSplit`).
+pub struct Charge {
+    job: Arc<Job>,
+    held: PoolSplit,
+}
+
+impl core::fmt::Debug for Charge {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        write!(f, "{:?} of job {}", self.held, self.job.key().0)
+    }
+}
 
 impl Charge {
-    /// No bytes: a charge to grow later.
-    pub const NONE: Self = Self(0);
+    /// No bytes yet, charged to `job` as it grows.
+    pub fn none(job: &Arc<Job>) -> Self {
+        Self { job: Arc::clone(job), held: PoolSplit::NONE }
+    }
 
-    /// `bytes` of heap.
-    pub fn new(bytes: usize) -> Result<Self, Exhausted> {
-        let mut charge = Self::NONE;
+    /// `bytes` of heap, charged to `job`.
+    pub fn new(job: &Arc<Job>, bytes: usize) -> Result<Self, Exhausted> {
+        let mut charge = Self::none(job);
         charge.grow(bytes)?;
         Ok(charge)
     }
 
+    /// `bytes` of heap, charged to the caller's job.
+    pub fn current(bytes: usize) -> Result<Self, Exhausted> {
+        Self::new(&current(), bytes)
+    }
+
     /// `more` bytes besides, refused whole.
     pub fn grow(&mut self, more: usize) -> Result<(), Exhausted> {
-        if more == 0 {
-            return Ok(());
+        if more == 0 || pmm::charge(&self.job, &mut self.held, more as u64) {
+            Ok(())
+        } else {
+            Err(Exhausted)
         }
-        if !pmm::charge(more as u64) {
-            return Err(Exhausted);
-        }
-        self.0 += more as u64;
-        Ok(())
     }
 
     /// `less` bytes fewer.
     pub fn shrink(&mut self, less: usize) {
-        let less = less as u64;
-        assert!(less <= self.0, "charge: {less} of {} bytes given back", self.0);
         if less > 0 {
-            pmm::uncharge(less);
-            self.0 -= less;
+            pmm::uncharge(&self.job, &mut self.held, less as u64);
         }
     }
 
     /// Hold exactly `bytes`: grown, refused whole, or shrunk.
     pub fn resize(&mut self, bytes: usize) -> Result<(), Exhausted> {
-        match (bytes as u64).checked_sub(self.0) {
+        let held = self.held.bytes();
+        match (bytes as u64).checked_sub(held) {
             Some(more) => self.grow(more as usize),
             None => {
-                self.shrink((self.0 - bytes as u64) as usize);
+                self.shrink((held - bytes as u64) as usize);
                 Ok(())
             }
         }
     }
 
     pub fn bytes(&self) -> usize {
-        self.0 as usize
+        self.held.bytes() as usize
+    }
+
+    /// The job it is charged to.
+    pub fn job(&self) -> &Arc<Job> {
+        &self.job
     }
 }
 
 impl Drop for Charge {
     fn drop(&mut self) {
-        if self.0 > 0 {
-            pmm::uncharge(self.0);
+        let bytes = self.held.bytes();
+        if bytes > 0 {
+            pmm::uncharge(&self.job, &mut self.held, bytes);
         }
     }
 }

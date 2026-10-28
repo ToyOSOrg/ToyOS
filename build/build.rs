@@ -119,6 +119,17 @@ struct SystemConfig {
     /// them, because a package directory is writable.
     #[serde(default)]
     apps: AppsConfig,
+    /// The supervisor's own row, which no `[programs]` key is.
+    #[serde(default)]
+    supervisor: SupervisorConfig,
+}
+
+/// **Unknown fields refused**, as a row's are.
+#[derive(Deserialize, Default)]
+#[serde(default, rename_all = "kebab-case", deny_unknown_fields)]
+struct SupervisorConfig {
+    /// Its job's floor, in MiB (`toyos_manifest::Manifest::supervisor_floor`).
+    memory_floor_mib: u64,
 }
 
 #[derive(Deserialize, Default)]
@@ -199,6 +210,10 @@ struct ProgramConfig {
     /// A login authority, for which the supervisor opens login sessions
     /// (`toyos_manifest::Program::login`).
     login: bool,
+    /// Its job's floor, in MiB: memory held back for it however short every
+    /// other job runs (`toyos_manifest::Program::memory_floor`). A control
+    /// path's alone, and reviewed as the privilege it is.
+    memory_floor_mib: u64,
 }
 
 /// The directories a program's crate sits directly under, by who uses it:
@@ -836,6 +851,7 @@ fn render_manifest(config: &SystemConfig) -> Vec<u8> {
                     starts: cfg.starts.clone(),
                     login: cfg.login,
                     folder: None,
+                    memory_floor: mib(cfg.memory_floor_mib),
                 }
             })
             .collect(),
@@ -843,9 +859,15 @@ fn render_manifest(config: &SystemConfig) -> Vec<u8> {
         apps: config.apps.receives.clone(),
         folder: apps_folder(config).expect("the gate above read it"),
         start: config.boot.start.clone(),
+        supervisor_floor: mib(config.supervisor.memory_floor_mib),
     };
     toyos_manifest::render(&manifest)
         .unwrap_or_else(|e| panic!("the image config cannot be rendered as a manifest: {e:?}"))
+}
+
+/// `mib` MiB in bytes; a floor past every machine is a broken config.
+fn mib(mib: u64) -> u64 {
+    mib.checked_mul(1 << 20).unwrap_or_else(|| panic!("a memory floor of {mib} MiB is past every machine"))
 }
 
 /// Which build `root`'s tree makes for `arch` against the sysroot whose key
@@ -3183,6 +3205,7 @@ mod tests {
         "tests/images/jobcase.toml",
         "tests/images/latencycase.toml",
         "tests/images/launchcase.toml",
+        "tests/images/floorcase.toml",
         "tests/images/libccase.toml",
         "tests/images/sessioncase.toml",
         "tests/images/metalcase.toml",

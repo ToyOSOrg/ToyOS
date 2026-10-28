@@ -32,8 +32,18 @@ pub const ADMIN_HOLDER: &str = "logout";
 /// The session owner's row.
 pub const OWNER: &str = "session";
 
-/// The label of the session owner's connection to the supervisor.
+/// The label of the namespace the session owner connects its link to the
+/// supervisor through, holding [`LINK`]: the owner connects, so the link is
+/// counted to the owner's job and not the supervisor's.
 pub const LINK_LABEL: &str = "session-link";
+
+/// The name of the link in the owner's [`LINK_LABEL`] namespace.
+pub const LINK: &str = "link";
+
+/// The name of a session's controls in a namespace a login authority is
+/// handed: it connects its control connection itself, which is then its
+/// own, as a launcher's is.
+pub const CONTROL: &str = "control";
 
 /// The label of the session launcher's acceptor in the session owner.
 pub const LAUNCHER_ACCEPTOR_LABEL: &str = "session-launcher";
@@ -43,13 +53,14 @@ pub const LAUNCHER_ACCEPTOR_LABEL: &str = "session-launcher";
 pub const CONTROL_ACCEPTOR_LABEL: &str = "session-controls";
 
 /// The label a login authority the supervisor started with its session holds
-/// that session's control connection under.
+/// that session's controls under, a namespace holding [`CONTROL`].
 pub const CONTROL_LABEL: &str = "session-control";
 
 /// On [`LOGIN_PORT`]: open a remote session. No payload.
 pub const MSG_OPEN: u32 = 1;
 /// The answer: the session's launcher, as a namespace holding
-/// `toyos::launch::LAUNCHER`, then its control connection.
+/// `toyos::launch::LAUNCHER`, then its controls, a namespace holding
+/// [`CONTROL`].
 pub const MSG_OPENED: u32 = 2;
 /// The answer to a request refused: the reason, UTF-8.
 pub const MSG_REFUSED: u32 = 3;
@@ -273,8 +284,11 @@ pub fn open(
         let n = conn.recv_bytes(&header, &mut why).unwrap_or(0);
         return Err(format!("the supervisor refused a session: {}", String::from_utf8_lossy(&why[..n])));
     }
-    let [launcher, control] = conn.recv_handles_exact::<2>(&header).ok_or("the session came without its handles")?;
-    Ok((toyos::namespace::Namespace::received(launcher), toyos::ipc::Connection::received(control)))
+    let [launcher, controls] = conn.recv_handles_exact::<2>(&header).ok_or("the session came without its handles")?;
+    let control = toyos::namespace::Namespace::received(controls)
+        .open(CONTROL)
+        .map_err(|e| format!("the session's controls refused its control connection: {e:?}"))?;
+    Ok((toyos::namespace::Namespace::received(launcher), control))
 }
 
 #[cfg(test)]

@@ -44,7 +44,7 @@ not perturb allocator order — proved by showing that with the countdown
 disabled the allocator's behaviour is byte-for-byte what it was. The result
 channel is preallocated at arm time, before the failure it exists to report.
 
-`issues/nothing-charges-kernel-memory-to-a-process.md` holds the terminal
-state every unbounded grower closes into — who dies when the heap gives out.
+`issues/no-physical-memory-fairness.md` holds the terminal state every
+unbounded grower closes into: which job is refused when memory runs out.
 Whichever of the two lands first, the other's closure runs through this
 actuator; they are not two answers to one question.

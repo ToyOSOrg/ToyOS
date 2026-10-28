@@ -48,7 +48,7 @@ use super::machine::{
 use super::machine::lower_sysinfo_bound;
 use super::proc::{
     spawn_place, sys_endowments, sys_exit, sys_nanosleep, sys_process_stats,
-    sys_job_create, sys_job_own, sys_process_quit, sys_process_wait, sys_rt_enter, sys_spawn, sys_thread_exit, sys_thread_join, sys_thread_spawn,
+    sys_account_info, sys_job_create, sys_job_floor, sys_job_own, sys_process_quit, sys_process_wait, sys_rt_enter, sys_spawn, sys_thread_exit, sys_thread_join, sys_thread_spawn,
 };
 use super::vm::{
     shared_image, sys_dlopen, sys_dlsym, sys_query_modules, sys_tls_alloc_block, sys_vm_decommit, sys_vm_discard, sys_vm_remap,
@@ -188,7 +188,7 @@ pub(crate) fn syscall_dispatch(num: u64, a1: u64, a2: u64, a3: u64, a4: u64) -> 
                 .map(|len| len.min(crate::user_ptr::MAX_USER_STR) as usize);
             let argv = crate::mm::charge::array::<&str>(copies[1] / 2 + 1);
             let past = (copies.iter().sum::<usize>() + argv).saturating_sub(2 * crate::user_ptr::MAX_USER_STR as usize);
-            let _copies = match crate::mm::charge::Charge::new(past) {
+            let _copies = match crate::mm::charge::Charge::current(past) {
                 Ok(charge) => charge,
                 Err(e) => return SyscallError::from(e).to_u64(),
             };
@@ -451,7 +451,7 @@ pub(crate) fn syscall_dispatch(num: u64, a1: u64, a2: u64, a3: u64, a4: u64) -> 
             };
             sys_trace_read(&ctx, RawHandle(a1 as u32), UserAddr::new(a2), &mut out, a4 as usize)
         }
-        SYS_ACCEPT => sys_accept(RawHandle(a1 as u32)),
+        SYS_ACCEPT => sys_accept(RawHandle(a1 as u32), a2),
         SYS_MESSAGE_SEND => {
             let Ok(args) = ctx.copy_in::<MessageSend>(UserAddr::new(a2)) else { return bad_addr };
             let unknown_flags = args.flags & !MESSAGE_NONBLOCK != 0;
@@ -485,7 +485,7 @@ pub(crate) fn syscall_dispatch(num: u64, a1: u64, a2: u64, a3: u64, a4: u64) -> 
             };
             sys_handle_recv(RawHandle(a1 as u32), &mut out, a3 as usize)
         }
-        SYS_SHM_CREATE => sys_shm_create(a1, a2),
+        SYS_SHM_CREATE => sys_shm_create(a1, a2, RawHandle(a3 as u32)),
         SYS_SHM_MAP => sys_shm_map(RawHandle(a1 as u32)),
         SYS_SHM_SUB => sys_shm_sub(RawHandle(a1 as u32), a2, a3),
         SYS_PORT_CREATE => sys_port_create(),
@@ -622,6 +622,12 @@ pub(crate) fn syscall_dispatch(num: u64, a1: u64, a2: u64, a3: u64, a4: u64) -> 
             // A translation outliving its entry, which only a TLB that keeps one shows.
             DA::GLOBAL_LEAF_REWRITE => crate::mm::paging::debug_global_leaf(a2),
             _ => SyscallError::InvalidArgument.to_u64(),
+        },
+        SYS_JOB_FLOOR => sys_job_floor(RawHandle(a1 as u32), RawHandle(a2 as u32), a3),
+        SYS_ACCOUNT_INFO => {
+            if a3 < core::mem::size_of::<toyos_abi::syscall::AccountInfo>() as u64 { return SyscallError::InvalidArgument.to_u64(); }
+            let Some(addr) = UserAddr::checked(a2) else { return bad_addr };
+            sys_account_info(&ctx, RawHandle(a1 as u32), addr)
         },
         SYS_PROCESS_STATS => {
             let stats_size = core::mem::size_of::<toyos_abi::syscall::ProcessStats>() as u64;

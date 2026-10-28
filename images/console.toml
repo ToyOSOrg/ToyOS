@@ -16,6 +16,10 @@
 
 assets = ["assets"]
 
+# The controls' floors, as `images/system.toml` gives them.
+[supervisor]
+memory-floor-mib = 96
+
 [boot]
 start = ["logkeeper", "diskserver", "fileserver", "console", "acpiserver", "ps2server"]
 
@@ -64,6 +68,7 @@ starts = ["toybox", "shell"]
 restart = true
 receives = ["input"]
 devices = ["isa:0060,0064:1,12"]
+memory-floor-mib = 24
 
 
 # `power` because `bin/shutdown` below is this binary, and on the machine this

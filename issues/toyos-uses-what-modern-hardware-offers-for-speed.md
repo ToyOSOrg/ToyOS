@@ -47,37 +47,28 @@ and contention).
   re-arm was at most 11.7 to 12.1 % of a pass's pick and switch on the T14,
   and at the AMD bench's TSC floor; it is to be read again
   (`issues/the-timer-is-a-lapic-count-re-armed-every-pass-never-a-tsc-deadline.md`).
+- Deep idle: on the T14 `hlt` holds a one-thread load to the turbo ratio
+  for three or more active cores, 38 of `MSR_TURBO_RATIO_LIMIT`'s
+  `0x2626262626262a2a` against 42 for one or two (#866's dump,
+  https://github.com/ToyOSOrg/ToyOS/pull/866#issuecomment-6119512404), the
+  limit bit logged being multi-core turbo. HWP's request (maximum 42),
+  turbo, the power limits and C1E promotion were ruled out. Under `hlt`,
+  `cpu.clock` reads at most 3789 MHz in every osbench group. What deep idle
+  reads is `issues/idle-cpus-enter-the-c-states-cst-names.md`'s. The AMD
+  bench has no such gap: its one-thread `crunch.single` deflate, matmul and
+  sha256 run at 0.98 to 1.02 of Linux's; parse, faster under ToyOS on both
+  benches, is no clock reading.
 
 **Moot.** PCID on the AMD bench: its CPUs read `pcid=0 invpcid=0`, so there
 is nothing to enable.
 
 **Unexplained, and the measurement each needs next.**
 
-- **The T14's clock under load.** Intel rates the T14's i5-1135G7 at a Max
-  Turbo Frequency of 4.20 GHz, the most one core reaches under Turbo Boost,
-  over a base of 2.40 GHz at its 28 W configurable TDP-up and 900 MHz at its
-  12 W TDP-down (Intel's specification of the part,
-  https://www.intel.com/content/www/us/en/products/sku/208658/intel-core-i51135g7-processor-8m-cache-up-to-4-20-ghz/specifications.html).
-  Over the `internet_download` row's download windows ToyOS's median
-  effective clock reads 2.67 GHz (`wt/toyos-scout-clock` at `fa6a2a829`), and
-  read 2.53 GHz in round 1 of PR #861: above that base and 1.53 GHz short of
-  that turbo, and what holds it there is unread. Ruled out: the power limits
-  (5.65 W median against a 20 W PL1, no power, thermal or current limit bit
-  logged), the HWP request (`0x80002a04`) and C1E promotion (allowed); the one
-  limit bit logged is multi-core turbo, whose ceiling per active core count
-  that specification does not give. ToyOS's cores never go below C1/C1E,
-  its package never leaves PC0, and its idle package draws 3.16 W, which is
-  `issues/idle-cpus-enter-the-c-states-cst-names.md`'s to answer; that the
-  idle state reaches HWP's clock choice is inference. Next: a T14 scout whose
-  idle CPUs wait in a deep C-state, read over the same windows.
-  #1065's network session on the T14 (`ToyOSOrg/evidence` branch
-  `pr-1065`, `r3/`) shows the same ceiling in `cpu.clock`, whose 200 probes
-  ramp from idle. Its maximum was 3789 MHz under ToyOS in every group that
-  reached its top, against 4188 to 4190 MHz in every Linux group. That
-  covers three ToyOS and four Linux runs of `osbench lan` and
-  `osbench internet`. The probes' p50, which reads idle and ramp policy
-  (`issues/osbench-times-cpus-leaving-idle-and-not-their-settled-clock.md`),
-  is no reading of this ceiling.
+- **The T14's effective clock over the `internet_download` row's download
+  windows**: its median is 2.67 GHz under ToyOS against 3.08 under Linux
+  (`wt/toyos-scout-clock` at `fa6a2a829`), and read 2.53 GHz in round 1 of
+  PR #861. The bin of 38 bounds it at 3.8 GHz and does not explain it. Next:
+  the same windows read again once idle CPUs leave `hlt`.
 - **Global-line contention** is bounded at 2 to 3 % of C0 on the T14 and not
   attributed; next, the HITM count attributed to its lines on both benches
   (`issues/per-cpu-scheduler-and-pmm-state-shares-lines-every-cpu-writes.md`).

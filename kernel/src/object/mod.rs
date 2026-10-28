@@ -106,6 +106,12 @@ impl ObjectCore {
         self.retired.load(Ordering::Acquire)
     }
 
+    /// The job the object is charged to: the caller's that made it, or the
+    /// one it was made for ([`KObjectVariant::new_core_for`]).
+    pub fn job(&self) -> &Arc<kernel::sched::job::Job> {
+        self._charge.job()
+    }
+
     fn enrol(live: &'static AtomicU64, charge: Charge) -> Self {
         live.fetch_add(1, Ordering::Relaxed);
         Self {
@@ -139,9 +145,15 @@ pub trait KObjectVariant: ZeroHandles + Send + Sync + Sized + 'static {
     fn from_ref(r: &KObjectRef) -> Option<&Arc<Self>>;
     fn core(&self) -> &ObjectCore;
     /// A fresh core, enrolled in this type's census — the only way to build
-    /// one — charged the object's own `Arc` and the `extra` heap bytes its
-    /// constructor keeps besides; refused before anything is allocated.
-    fn new_core(extra: usize) -> Result<ObjectCore, Exhausted>;
+    /// one — charged to the caller's job the object's own `Arc` and the
+    /// `extra` heap bytes its constructor keeps besides; refused before
+    /// anything is allocated.
+    fn new_core(extra: usize) -> Result<ObjectCore, Exhausted> {
+        Self::new_core_for(&charge::current(), extra)
+    }
+
+    /// [`new_core`](Self::new_core), charged to `job`.
+    fn new_core_for(job: &Arc<kernel::sched::job::Job>, extra: usize) -> Result<ObjectCore, Exhausted>;
 }
 
 /// Declares the closed set of object types; each row says whether its last
@@ -202,8 +214,8 @@ macro_rules! kobject {
                     &self.core
                 }
 
-                fn new_core(extra: usize) -> Result<ObjectCore, Exhausted> {
-                    let charge = Charge::new(charge::arc::<$ty>().saturating_add(extra))?;
+                fn new_core_for(job: &Arc<kernel::sched::job::Job>, extra: usize) -> Result<ObjectCore, Exhausted> {
+                    let charge = Charge::new(job, charge::arc::<$ty>().saturating_add(extra))?;
                     Ok(ObjectCore::enrol(&census::$variant, charge))
                 }
             }

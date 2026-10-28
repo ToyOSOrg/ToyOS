@@ -17,11 +17,13 @@ use alloc::boxed::Box;
 use alloc::sync::{Arc, Weak};
 use alloc::vec::Vec;
 
+use kernel::sched::job::Job;
+
 use toyos_abi::syscall::SyscallError;
 
 use crate::mm::charge::{self, Charge, Exhausted};
 use crate::mm::policy::CachePolicy;
-use crate::mm::pmm::{self, Frame, PhysPage};
+use crate::mm::pmm::{self, Frame, Run};
 use crate::mm::space::Space;
 use crate::mm::{PAGE_2M, PAGE_SIZE};
 use crate::{DirectMap, UserAddr};
@@ -42,7 +44,7 @@ enum Backing {
     Frames(Vec<Box<[Frame]>>),
     /// 2 MiB pages of its own in one physical run: what a device may be lent
     /// or granted, and what a kernel-built image addresses as one slice.
-    Run(Vec<PhysPage>),
+    Run(Run),
     /// A payload the loader verified and handed over at `phys`, `len` bytes
     /// of the object's pages: kept for the machine's life and written by
     /// nobody, so every mapping of it is read-only (`crate::bootimage`).
@@ -71,17 +73,17 @@ impl SharedMemObject {
         Arc::new(Self { core, backing, size, cache })
     }
 
-    /// `size` bytes of zeroed memory in whole pages, frame by frame;
-    /// `InvalidArgument` for no bytes or a size no page count holds,
-    /// `ResourceExhausted` where frames run out.
-    pub fn create(size: u64) -> Result<Arc<Self>, SyscallError> {
+    /// `size` bytes of zeroed memory in whole pages, frame by frame, counted
+    /// to `job`; `InvalidArgument` for no bytes or a size no page count
+    /// holds, `ResourceExhausted` where frames run out.
+    pub fn create(job: &Arc<Job>, size: u64) -> Result<Arc<Self>, SyscallError> {
         let pages = pages(size)?;
         let (count, full, rest) = (pages.div_ceil(CHUNK as u64), pages / CHUNK as u64, (pages % CHUNK as u64) as usize);
         let lists = charge::array::<Frame>(CHUNK).saturating_mul(full as usize).saturating_add(charge::array::<Frame>(rest));
-        let core = Self::new_core(charge::array::<Box<[Frame]>>(count as usize).saturating_add(lists))?;
+        let core = Self::new_core_for(job, charge::array::<Box<[Frame]>>(count as usize).saturating_add(lists))?;
         // Promised whole before any is taken: frames one at a time until none
         // is left would starve every other allocation meanwhile.
-        if !pmm::promise(pages) {
+        if !pmm::promise(job, pages) {
             return Err(SyscallError::ResourceExhausted);
         }
         let mut pieces = Vec::with_capacity(count as usize);
@@ -101,13 +103,14 @@ impl SharedMemObject {
     /// `size` bytes of zeroed memory in whole pages, over one run of whole
     /// 2 MiB pages: what a device can be lent, since a domain maps 2 MiB at a
     /// time and a device with no domain reaches memory by its physical address.
-    pub fn create_run(size: u64) -> Result<Arc<Self>, SyscallError> {
+    /// Counted to `job`.
+    pub fn create_run(job: &Arc<Job>, size: u64) -> Result<Arc<Self>, SyscallError> {
         let bytes = pages(size)? * PAGE_SIZE;
         let run = crate::mm::align_2m_checked(bytes).ok_or(SyscallError::InvalidArgument)?;
         let count = (run / PAGE_2M) as usize;
-        let core = Self::new_core(charge::array::<PhysPage>(count))?;
-        let pages = pmm::alloc_contiguous(count).ok_or(SyscallError::ResourceExhausted)?;
-        Ok(Self::new(core, Backing::Run(pages), bytes, CachePolicy::Normal))
+        let core = Self::new_core_for(job, 0)?;
+        let run = Run::new(job, count).ok_or(SyscallError::ResourceExhausted)?;
+        Ok(Self::new(core, Backing::Run(run), bytes, CachePolicy::Normal))
     }
 
     /// An aperture over `size` bytes of memory somebody else owns at `phys`,
@@ -118,7 +121,7 @@ impl SharedMemObject {
             (phys | size) & (PAGE_SIZE - 1) == 0 && size != 0,
             "shm: an aperture of {size:#x} bytes at {phys:#x} is not whole 4 KiB pages"
         );
-        let mapped = Held::new((Vec::new(), Charge::NONE));
+        let mapped = Held::new((Vec::new(), Charge::none(&charge::current())));
         Ok(Self::new(Self::new_core(0)?, Backing::Aperture { phys, mapped }, size, cache))
     }
 
@@ -201,7 +204,7 @@ impl SharedMemObject {
     /// included: one set of pages is never lent under two objects.
     pub fn run(&self) -> Option<(u64, u64)> {
         match &self.backing {
-            Backing::Run(pages) => Some((pages[0].direct_map().phys(), pages.len() as u64 * PAGE_2M)),
+            Backing::Run(run) => Some((run.direct_map().phys(), run.count() as u64 * PAGE_2M)),
             Backing::Frames(_) | Backing::Boot { .. } | Backing::Aperture { .. } | Backing::Sub { .. } => None,
         }
     }
@@ -215,7 +218,7 @@ impl SharedMemObject {
                 let frame = (page / PAGE_SIZE) as usize;
                 pieces[frame / CHUNK][frame % CHUNK].direct_map().phys()
             }
-            Backing::Run(pages) => pages[0].direct_map().phys() + page,
+            Backing::Run(run) => run.direct_map().phys() + page,
             Backing::Boot { phys, .. } | Backing::Aperture { phys, .. } => phys + page,
             Backing::Sub { whole, offset, .. } => whole.page(offset + page),
         }
@@ -303,11 +306,11 @@ impl Drop for SharedMemObject {
                 for mut piece in pieces.drain(..) {
                     piece.sort_unstable_by_key(|frame| frame.direct_map().phys());
                     crate::sched::futex::revoke_sorted(&piece, |frame| frame.direct_map().phys());
-                    pmm::free_all(piece);
+                    pmm::free_all(self.core.job(), piece);
                 }
             }
-            Backing::Run(pages) => {
-                crate::sched::futex::revoke_run(pages[0].direct_map().phys(), pages.len() as u64 * PAGE_2M);
+            Backing::Run(run) => {
+                crate::sched::futex::revoke_run(run.direct_map().phys(), run.count() as u64 * PAGE_2M);
             }
             Backing::Boot { .. } | Backing::Aperture { .. } | Backing::Sub { .. } => {}
         }

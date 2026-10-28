@@ -78,6 +78,15 @@ impl Guid {
         [0xAA, 0x07, 0x6A, 0xF8, 0xBE, 0x6D, 0x51, 0xE2],
     );
 
+    /// `51CC09F9-7442-435B-BC03-0FD8718B0FB5` — a bench's scratch disk, which
+    /// a destructive test may erase: the disk's one partition, and its mark.
+    pub const TOYOS_SCRATCH: Self = Self::from_fields(
+        0x51CC_09F9,
+        0x7442,
+        0x435B,
+        [0xBC, 0x03, 0x0F, 0xD8, 0x71, 0x8B, 0x0F, 0xB5],
+    );
+
     pub const fn from_fields(a: u32, b: u16, c: u16, d: [u8; 8]) -> Self {
         let a = a.to_le_bytes();
         let b = b.to_le_bytes();

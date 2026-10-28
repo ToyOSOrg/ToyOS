@@ -367,7 +367,6 @@ Each stage lands on its own, in this order.
    job-list mode. After a reset the firmware comes back to the loader because
    ToyOS's entry is first (stage 5).
    - `issues/a-hung-boots-log-partition-is-wiped-by-the-next-runs-flash.md`,
-     `issues/the-sudoers-rendering-has-no-host-side-judge.md`,
      `issues/the-metal-loop-writes-the-readback-volume-into-a-directory-it-has-not-made.md`
      and `issues/the-t14-stopped-answering-ssh-between-two-lan-boots.md`
      close here, each only as far as it is true of what lands.

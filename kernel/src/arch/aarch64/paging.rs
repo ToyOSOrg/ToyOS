@@ -28,7 +28,9 @@
 
 
 use toyos_bootmap::aarch64::{coverage, direct_map_end, Coverage, ATTR_DEVICE, ATTR_NORMAL, ATTR_NORMAL_NC};
+use alloc::sync::Arc;
 use kernel::pcid::{Alloc, Pcid, PcidPool};
+use kernel::sched::job::Job;
 
 use super::tlb;
 use crate::mm::policy::{CachePolicy, MmioPolicy, Prot};
@@ -142,13 +144,13 @@ impl Table {
         unsafe { Table::at_mut(frame.into_raw()) }
     }
 
-    /// A table of a user space, or `None` where taking a frame would cut into
-    /// what the kernel keeps (`pmm::alloc_table_frame`).
-    fn try_new() -> Option<&'static mut Self> {
-        let frame = crate::mm::pmm::alloc_table_frame()?;
+    /// A table of a user space, counted to `job`, or `None` where taking a
+    /// frame would cut into what is held back (`pmm::alloc_table_frame`).
+    fn try_new(job: &Job) -> Option<&'static mut Self> {
+        let phys = crate::mm::pmm::alloc_table_frame(job)?;
         // SAFETY: a zeroed frame just allocated: a table of invalid
         // descriptors nothing else names.
-        Some(unsafe { Table::at_mut(frame.into_raw()) })
+        Some(unsafe { Table::at_mut(phys) })
     }
 
     fn phys(&self) -> u64 {
@@ -190,11 +192,12 @@ fn published() {
     unsafe { core::arch::asm!("dsb ishst", "isb", options(nostack, preserves_flags)) };
 }
 
-/// Give back a table [`Table::new`] made, which nothing links any more.
-fn free_table(phys: u64) {
-    // SAFETY: the caller unlinked the table, and every table is a frame
-    // `Table::new` gave up.
-    drop(unsafe { crate::mm::pmm::Frame::from_raw(phys) });
+/// Give back a table of `job`'s user space [`Table::try_new`] made, which
+/// nothing links any more.
+fn free_table(job: &Job, phys: u64) {
+    // SAFETY: the caller unlinked the table, after the shootdown that let
+    // every CPU stop walking it.
+    unsafe { crate::mm::pmm::free_table_frame(job, phys) };
 }
 
 /// A root and every table under it, each a frame the descriptor linking it
@@ -557,13 +560,14 @@ impl Unlinked {
         self.head = phys;
     }
 
-    /// Free the tables, only after the shootdown that followed the unlink.
-    pub fn free(self) {
+    /// Free the tables of `job`'s space, only after the shootdown that
+    /// followed the unlink.
+    fn free(self, job: &Job) {
         let mut at = self.head;
         while at != 0 {
             // SAFETY: a table of the chain, which only this frees.
             let next = unsafe { Table::at_mut(at) }.0[0];
-            free_table(at);
+            free_table(job, at);
             at = next;
         }
     }
@@ -576,18 +580,20 @@ impl Unlinked {
 pub struct UserTables {
     tables: Tables,
     asid: Asid,
+    /// The job its tables are counted to.
+    job: Arc<Job>,
 }
 
 impl UserTables {
     /// An empty user half, or `None` when every user ASID is held or no
-    /// frame is free for its root.
-    pub fn new() -> Option<Self> {
-        let root = Table::try_new()?.phys();
+    /// frame is free for its root. Its tables are counted to `job`.
+    pub fn new(job: &Arc<Job>) -> Option<Self> {
+        let root = Table::try_new(job)?.phys();
         let Some(asid) = alloc_asid() else {
-            free_table(root);
+            free_table(job, root);
             return None;
         };
-        Some(Self { tables: Tables { root }, asid: Asid::User(asid) })
+        Some(Self { tables: Tables { root }, asid: Asid::User(asid), job: Arc::clone(job) })
     }
 
     /// The kernel's own space, whose user half is empty: what a kernel thread
@@ -595,7 +601,7 @@ impl UserTables {
     pub fn kernel() -> Self {
         let root = KERNEL_TTBR0.load(core::sync::atomic::Ordering::Acquire) & ADDR;
         assert!(root != 0, "paging: the kernel's space before `init`");
-        Self { tables: Tables { root }, asid: Asid::Kernel }
+        Self { tables: Tables { root }, asid: Asid::Kernel, job: Arc::clone(crate::mm::charge::boot()) }
     }
 
     pub fn root(&self) -> Root {
@@ -612,6 +618,7 @@ impl UserTables {
     /// built linked for an [`unlink`](Self::unlink). Only an invalid entry is
     /// written, which owes nothing.
     pub fn build(&mut self, start: u64, end: u64) -> Option<u64> {
+        let job = Arc::clone(&self.job);
         let mut built = 0;
         let mut va = start & !(PAGE_2M - 1);
         while va < end {
@@ -621,7 +628,7 @@ impl UserTables {
                 let table = unsafe { Table::at_mut(level) };
                 let i = index(va, depth);
                 if table.0[i] & VALID == 0 {
-                    let Some(child) = Table::try_new() else {
+                    let Some(child) = Table::try_new(&job) else {
                         published();
                         return None;
                     };
@@ -754,7 +761,13 @@ impl UserTables {
     /// Unlink every table over `[start, end)` whose span `needed` answers
     /// `false` for, and every table above one that is then empty. A table
     /// unlinked holds no leaf: a span no range needs maps nothing. They are
-    /// freed by [`Unlinked::free`], after the caller's shootdown.
+    /// freed by [`free`](Self::free), after the caller's shootdown.
+    /// Free tables [`unlink`](Self::unlink) took out, only after the
+    /// shootdown that followed it.
+    pub fn free(&self, unlinked: Unlinked) {
+        unlinked.free(&self.job);
+    }
+
     pub fn unlink(&mut self, start: u64, end: u64, needed: impl Fn(u64, u64) -> bool) -> Unlinked {
         let mut unlinked = Unlinked::none();
         // SAFETY: as `each_table`'s.
@@ -819,8 +832,8 @@ impl Drop for UserTables {
     fn drop(&mut self) {
         assert!(matches!(self.asid, Asid::User(_)), "paging: the kernel's address space dropped");
         let all = self.unlink(0, toyos_userbound::USER_TOP, |_, _| false);
-        all.free();
-        free_table(self.tables.root);
+        all.free(&self.job);
+        free_table(&self.job, self.tables.root);
     }
 }
 
