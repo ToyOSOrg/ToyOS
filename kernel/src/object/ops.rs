@@ -45,9 +45,11 @@ pub fn initial_rights(object: &KObjectRef) -> Rights {
         }
         // Every `SysCap` bit is authority the supervisor decides per program: no default, the creator states it.
         KObjectRef::SysCap(_) => Rights::NONE,
-        // `MAP` is the whole of it: a region is examined through the memory, not the handle.
-        KObjectRef::SharedMem(_) => {
-            Rights::DUP.union(Rights::TRANSFER).union(Rights::MAP)
+        // A region is examined through the memory, not the handle: `MAP` maps it
+        // readable and `WRITE` writable, which memory nobody writes never carries.
+        KObjectRef::SharedMem(m) => {
+            let read = Rights::DUP.union(Rights::TRANSFER).union(Rights::MAP);
+            if m.immutable().is_some() { read } else { read.union(Rights::WRITE) }
         }
         // A connector has no read/write path: put it in a namespace, or give the namespace away.
         KObjectRef::Connector(_) => Rights::DUP.union(Rights::TRANSFER),

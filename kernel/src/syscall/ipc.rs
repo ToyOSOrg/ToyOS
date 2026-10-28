@@ -20,6 +20,7 @@ use crate::{pipe, process};
 use toyos_abi::handle::{RawHandle, Rights};
 use toyos_abi::syscall::*;
 use kernel::sched::task::WaitClass;
+use kernel::vm::Prot;
 
 use super::{cancelled, HANDLE_LEN};
 use super::handles::handle_result;
@@ -335,7 +336,7 @@ pub(super) fn sys_port_badge(
     badge.len() as u64
 }
 
-/// Make a shared region and hand back the one handle to it, carrying MAP, DUP and TRANSFER — naming it is what authorizes mapping it.
+/// Make a shared region and hand back the one handle to it, carrying MAP, WRITE, DUP and TRANSFER — naming it is what authorizes mapping it.
 /// `SHM_DEVICE` asks for memory a device can be lent, and `SHM_FOR_JOB`
 /// counts it to the job `job` names rather than the caller's; any other
 /// bit is refused.
@@ -380,17 +381,25 @@ pub(super) fn sys_shm_sub(h: RawHandle, offset: u64, len: u64) -> u64 {
     })
 }
 
-pub(super) fn sys_shm_map(h: RawHandle) -> u64 {
+/// `toyos_abi::syscall::shm_map`: readable on `MAP`, writable on `MAP` and `WRITE`.
+pub(super) fn sys_shm_map(h: RawHandle, prot: u64) -> u64 {
+    let (prot, need) = match VmProt::from_u64(prot) {
+        Some(VmProt::Read) => (Prot::Read, Rights::MAP),
+        Some(VmProt::ReadWrite) => (Prot::ReadWrite, Rights::MAP.union(Rights::WRITE)),
+        Some(VmProt::None | VmProt::ReadExec) | None => return SyscallError::InvalidArgument.to_u64(),
+    };
     let shm = match process::with_process_data(|data| {
-        data.handles.get::<crate::object::shm::SharedMemObject>(h, Rights::MAP)
+        data.handles.get::<crate::object::shm::SharedMemObject>(h, need)
     }) {
         Ok(shm) => shm,
         Err(e) => return e.refuse(),
     };
+    assert!(
+        matches!(prot, Prot::Read) || shm.immutable().is_none(),
+        "shm: a handle to memory nobody writes carries WRITE"
+    );
     let pt = process::current_address_space();
     let len = shm.size();
-    // A boot image is mapped read-only, whatever the handle allows.
-    let prot = shm.max_prot();
     let mapped = pt.lock().map(alloc::sync::Arc::clone(&shm), 0, len, prot, crate::mm::space::At::ANYWHERE);
     let at = match mapped {
         Ok(at) => at,

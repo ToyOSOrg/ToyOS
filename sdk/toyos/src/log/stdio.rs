@@ -244,7 +244,7 @@ mod target {
             .map_err(Why::Dup)?;
         // SAFETY: `own` is a live shared-memory handle this process holds and
         // never closes, so the mapping stays for the process's life.
-        let at = unsafe { syscall::shm_map(own) }.map_err(Why::Map)?;
+        let at = unsafe { syscall::shm_map(own, syscall::VmProt::ReadWrite) }.map_err(Why::Map)?;
         let at = NonNull::new(at).ok_or(Why::Null)?;
         // SAFETY: a fresh mapping of a region at least `RING_BYTES` long.
         if !unsafe { Ring::at(at) }.is_laid_out() {

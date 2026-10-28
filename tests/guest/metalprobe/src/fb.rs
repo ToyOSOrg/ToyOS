@@ -71,25 +71,20 @@ impl Scanout {
     /// Copy `row` into row `y` of the scanout. A blit, not a word loop: what is
     /// measured has to be the path a compositor takes.
     fn put(&self, y: u32, row: &[u32]) {
-        let at = self.opened.memory().as_ptr() as *mut u32;
-        // SAFETY: `at` is the mapping the claim handed over, `stride * height * 4`
-        // bytes, so the row at `y * stride` for `width` words is inside it for
-        // every `y < height` and `width <= stride`.
-        unsafe {
-            let dst = at.add(y as usize * self.stride as usize);
-            std::ptr::copy_nonoverlapping(row.as_ptr(), dst, row.len());
-        }
+        // SAFETY: a `u32` slice's bytes, every one initialised.
+        let bytes = unsafe { std::slice::from_raw_parts(row.as_ptr().cast::<u8>(), size_of_val(row)) };
+        self.opened.memory().bytes().write(self.offset(y), bytes);
     }
 
     /// Row `y` of the scanout, copied out into ordinary memory.
     fn get(&self, y: u32, into: &mut [u32]) {
-        let at = self.opened.memory().as_ptr() as *const u32;
-        // SAFETY: as `put`, and `into` is this frame's own storage of exactly
-        // `width` words.
-        unsafe {
-            let src = at.add(y as usize * self.stride as usize);
-            std::ptr::copy_nonoverlapping(src, into.as_mut_ptr(), into.len());
-        }
+        // SAFETY: as `put`; any bytes are a valid `u32`.
+        let bytes = unsafe { std::slice::from_raw_parts_mut(into.as_mut_ptr().cast::<u8>(), size_of_val(into)) };
+        self.opened.memory().bytes().read(self.offset(y), bytes);
+    }
+
+    fn offset(&self, y: u32) -> usize {
+        y as usize * self.stride as usize * 4
     }
 
     /// Every write is in the fill buffers until this runs: a weakly-ordered

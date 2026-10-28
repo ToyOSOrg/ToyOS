@@ -25,7 +25,9 @@ The same gap is why no SDK type can prove a region exclusive: a safe `dup` of
 `as_handle()` and a safe send of the copy give a peer a writable mapping.
 `toyos::process::Image` forms slices over its own region under its
 encapsulation, and `Image::spawn_words` hands out the raw number that gap
-reaches.
+reaches; `window::Window::framebuffer` draws with plain stores into a buffer
+whose one writable handle the compositor sent (`toyos::shm::ReadOnly::create`),
+which a guessed number duplicates.
 
 Owner: `toyos-abi` and `toyos::ipc`.
 

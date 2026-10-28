@@ -17,7 +17,7 @@
 
 use toyos::endow;
 use toyos::ipc::{FrameRx, RxStep, TrySendError};
-use toyos::shm::SharedMemory;
+use toyos::shm::{ReadOnly, SharedMemory};
 use toyos::{Connection, OwnedHandle};
 
 use crate::{
@@ -132,7 +132,7 @@ impl Watcher {
                 let [region] = self.rx.take_handles::<1>().ok_or(CreateError::NoHandle)?;
                 // SAFETY: received with this frame, so this process's and nobody else's.
                 let region = unsafe { OwnedHandle::from_raw(region) };
-                let region = SharedMemory::lent(region, len).map_err(CreateError::Lent)?;
+                let region = ReadOnly::lent(region, len).map_err(CreateError::Lent)?;
                 let text = String::from_utf8(region.bytes().to_vec()).map_err(|_| WatchError::NotText)?;
                 self.conn.try_signal(MSG_CLIPBOARD_WATCH)?;
                 Ok(Watched::Copy(text))

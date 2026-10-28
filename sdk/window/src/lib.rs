@@ -18,7 +18,8 @@ use toyos::poller::{Poller, READABLE};
 use toyos::endow::{self, EndowError};
 use toyos::surface;
 use toyos::Connection;
-use toyos::shm::{Lent, SharedMemory};
+use toyos::shm::{Lent, ReadOnly, SharedMemory};
+use std::rc::Rc;
 /// Re-exported because [`KeyPress`] is made of them and a client that holds
 /// its own translator — `console`, a test that stands in for a surface —
 /// should not have to name a second crate to do what this one does.
@@ -533,12 +534,25 @@ fn copy(bytes: &[u8]) -> Result<(), CreateError> {
     Ok(conn.signal(MSG_COPY_COMMIT)?)
 }
 
+/// The bytes a window buffer of `height` rows of `stride` pixels holds, or
+/// `None` for a stride narrower than `width` or a size past the address space:
+/// the compositor's word, refused before anything is drawn by it.
+fn buffer_bytes(width: u32, stride: u32, height: u32) -> Option<usize> {
+    if stride < width {
+        return None;
+    }
+    (stride as usize).checked_mul(height as usize)?.checked_mul(4)
+}
+
 pub struct Window {
     conn: Connection,
     poller: Poller,
-    shm: SharedMemory,
+    /// The buffer, whose one writable handle the compositor sent; the
+    /// compositor maps its own read-only.
+    shm: Rc<SharedMemory>,
     width: u32,
     height: u32,
+    stride: u32,
     pixel_format: u32,
     scale: Scale,
     /// The buffer's generation, which every present carries.
@@ -607,8 +621,9 @@ impl Window {
         }
         let info: WindowInfo = conn.recv_payload(&header)?;
         let scale = Scale::from_wire(info.scale).ok_or(CreateError::Protocol(MSG_WINDOW_CREATED))?;
-
-        let buf_size = info.stride as usize * info.height as usize * 4;
+        let Some(buf_size) = buffer_bytes(info.width, info.stride, info.height) else {
+            return Err(CreateError::Protocol(MSG_WINDOW_CREATED));
+        };
         // The buffer travels in the frame. A compositor that announced a
         // window and sent nothing with it is not serving this client, whatever
         // else it is doing.
@@ -621,9 +636,10 @@ impl Window {
         Ok(Self {
             conn,
             poller,
-            shm,
+            shm: Rc::new(shm),
             width: info.width,
             height: info.height,
+            stride: info.stride,
             pixel_format: info.pixel_format,
             scale,
             generation: info.generation,
@@ -718,7 +734,9 @@ impl Window {
                 let Some(scale) = Scale::from_wire(info.scale) else {
                     return Event::Close;
                 };
-                let buf_size = info.stride as usize * info.height as usize * 4;
+                let Some(buf_size) = buffer_bytes(info.width, info.stride, info.height) else {
+                    return Event::Close;
+                };
                 // The compositor shows the old buffer only until this
                 // window's next present, which it reads from the new one, so a
                 // window that cannot map the new one has nothing to present.
@@ -730,9 +748,10 @@ impl Window {
                 let Ok(shm) = SharedMemory::lent(buffer, buf_size) else {
                     return Event::Close;
                 };
-                self.shm = shm;
+                self.shm = Rc::new(shm);
                 self.width = info.width;
                 self.height = info.height;
+                self.stride = info.stride;
                 self.pixel_format = info.pixel_format;
                 self.scale = scale;
                 self.generation = info.generation;
@@ -754,7 +773,7 @@ impl Window {
                 };
                 // SAFETY: received with this frame, so this process's and nobody else's.
                 let buffer = unsafe { OwnedHandle::from_raw(buffer) };
-                let Ok(shm) = SharedMemory::lent(buffer, info.len as usize) else {
+                let Ok(shm) = ReadOnly::lent(buffer, info.len as usize) else {
                     return Event::ClipboardPaste(Vec::new());
                 };
                 Event::ClipboardPaste(shm.bytes().to_vec())
@@ -813,24 +832,33 @@ impl Window {
         self.scale.factor()
     }
 
-    pub fn framebuffer(&self) -> Framebuffer {
-        Framebuffer::new(
-            self.shm.as_ptr(),
-            self.width as usize,
-            self.height as usize,
-            self.width as usize,
-            self.pixel_format,
-        )
+    /// The buffer, drawn with plain stores. One made before a resize draws
+    /// into the buffer it replaced, which nothing shows.
+    pub fn framebuffer(&self) -> Framebuffer<'static> {
+        // SAFETY: the compositor maps the buffer read-only and sent this
+        // process its one writable handle, which nothing here duplicates or
+        // sends; every value over `self.shm` is on this thread, as `Rc` keeps
+        // them. A handle number guessed in safe code is the gap
+        // `issues/a-handles-number-reaches-its-ownership-in-safe-code.md` records.
+        unsafe {
+            Framebuffer::mapped(
+                Rc::clone(&self.shm),
+                self.width as usize,
+                self.height as usize,
+                self.stride as usize,
+                self.pixel_format,
+            )
+        }
     }
 
     /// The same buffer as [`Window::framebuffer`], for a client that composes
     /// elsewhere and only ever hands finished pixels over.
     pub fn screen(&self) -> Screen {
         Screen::new(
-            self.shm.as_ptr(),
+            Rc::clone(&self.shm),
             self.width as usize,
             self.height as usize,
-            self.width as usize,
+            self.stride as usize,
             self.pixel_format,
         )
     }
@@ -874,6 +902,14 @@ mod tests {
         assert_eq!(Size::Logical { width: 200, height: 100 }.physical(two), Some((400, 200)));
         assert_eq!(Size::Physical { width: 200, height: 100 }.physical(two), Some((200, 100)));
         assert_eq!(Size::Any.physical(two), None);
+    }
+
+    #[test]
+    fn a_buffer_narrower_than_its_window_is_refused_and_one_that_fits_is_counted() {
+        assert_eq!(buffer_bytes(10, 10, 3), Some(120));
+        assert_eq!(buffer_bytes(10, 12, 3), Some(144));
+        assert_eq!(buffer_bytes(10, 9, 3), None);
+        assert_eq!(buffer_bytes(u32::MAX, u32::MAX, u32::MAX), None, "past the address space");
     }
 
     /// A zero on either axis asks the compositor to choose, as it always has.
