@@ -106,27 +106,22 @@ fn s_cc_016_acks_in_one_pass_each_grow_slow_start() {
     assert_eq!((one_at_a_time, h.info().cwnd), (29_200, 29_200));
 }
 
-/// RFC 9438 §5.8, RFC 7661 §4.3: the caller's credit is neither the application's limit nor the
-/// peer's. An opportunity it ends with at least half of cwnd in flight leaves the window in use;
-/// with less, the ACKs after it grow nothing.
+/// RFC 7661 §4.3, which RFC 9438 §4.6 admits: an opportunity the caller's credit ends with half
+/// of cwnd in flight leaves the window in use, and the ACK after it grows cwnd; a segment under
+/// half, it is application limited (§5.8), and grows nothing.
 #[test]
 fn s_cc_017_a_sender_the_card_holds_grows_a_window_half_in_flight() {
-    let mut h = fixture_e();
-    assert_eq!(h.send(0, 60_000).len(), 10, "a stop at the initial window");
-    h.credit = Some(1);
-    assert_eq!(h.deliver(seg(5001).ack(3921)).len(), 1);
-    assert_eq!(h.info().cwnd, 17_520, "the ACK after cwnd's stop grows it");
-    // 13,140 of 17,520 in flight as the card's credit ended the opportunity.
-    h.credit = Some(1);
-    assert_eq!(h.deliver(seg(5001).ack(5381)).len(), 1);
-    assert_eq!(h.info().cwnd, 18_980, "a window the card held over half in flight grew nothing");
-    // 4,380 of 29,200 in flight.
-    h.credit = Some(1);
-    assert_eq!(h.deliver(seg(5001).ack(15_601)).len(), 1);
-    assert_eq!(h.info().cwnd, 29_200);
-    h.credit = Some(0);
-    h.deliver(seg(5001).ack(17_061));
-    assert_eq!(h.info().cwnd, 29_200, "a window the card held under half in flight grew");
+    for (credit, grown) in [(9, 1460), (8, 0)] {
+        let mut h = fixture_e();
+        assert_eq!(h.send(0, 60_000).len(), 10, "a stop at the initial window");
+        h.credit = Some(credit);
+        assert_eq!(h.deliver(seg(5001).ack(15_601)).len(), credit);
+        let cwnd = h.info().cwnd;
+        assert_eq!(cwnd, 26_280, "the ACK after cwnd's stop grows it");
+        h.credit = Some(0);
+        h.deliver(seg(5001).ack(17_061));
+        assert_eq!(h.info().cwnd - cwnd, grown, "{credit} of the half's 9 segments in flight");
+    }
 }
 
 /// RFC 9406 §4.2 with §4.3's L = 8 for a sender that does not pace: an ACK of the whole flight

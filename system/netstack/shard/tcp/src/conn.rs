@@ -772,10 +772,14 @@ impl Sync {
             Recovery::Sack { .. } => {}
             Recovery::None => {
                 ctx.log.count(if self.cc.limited { Counter::AcksCwndLimited } else { Counter::AcksNotLimited });
-                ctx.log.add(Counter::AcksBytes, u64::from(bytes));
                 let before = self.cc.cwnd;
                 match self.cc.on_ack(&cc::Ack { now, bytes, una: ack, nxt: self.tx.nxt, rtt, srtt: self.rtt.srtt() }) {
-                    Some(SlowStart::Conservative) => ctx.log.count(Counter::HyStartCss),
+                    Some(SlowStart::Conservative { first }) => {
+                        ctx.log.count(Counter::HyStartCss);
+                        if first {
+                            ctx.log.count(Counter::HyStartCssRounds);
+                        }
+                    }
                     Some(SlowStart::Ended) => {
                         ctx.log.count(Counter::HyStartExits);
                         ctx.log.add(Counter::HyStartExitCwndBytes, u64::from(self.cc.cwnd));
@@ -1290,8 +1294,10 @@ impl Sync {
             self.sws = None;
             self.sws_fired = false;
             // Until the next stop says otherwise: an opportunity that ends on the caller's credit
-            // ends here. The caller is neither the application nor the peer (RFC 9438 §5.8), and
-            // a window at least half in flight is in use (RFC 7661 §4.3).
+            // ends here. Below cwnd, RFC 9438 §5.8 calls the flow application limited; at half of
+            // cwnd in flight it grows anyway, as RFC 7661 §4.3's validated window, which §4.6
+            // admits. cwnd then stays within twice the flight, and a loss sets ssthresh from the
+            // flight (§4.6).
             self.cc.limited = self.in_flight() >= self.cwnd() / 2;
         }
         let data_end = start.add(len);

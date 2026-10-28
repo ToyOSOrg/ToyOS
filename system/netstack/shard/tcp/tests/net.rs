@@ -427,10 +427,10 @@ fn syn_without_timestamps(from: usize, o: &O) -> Option<Vec<u8>> {
 /// The receive buffer grows to twice what its reader takes per round trip, by the receiver's own
 /// estimate of the round trip, with timestamps and without. The path's round trip quadruples once
 /// the handshake is done, so a downloader's SRTT, which only its own data samples, still says
-/// 20 ms. The writer starts after that, so its slow start sees one path and not a queue. The reader takes a burst every millisecond twice per 20 ms: it is never offered more
-/// than twice its rate over an estimate at most half again the path's 80 ms, plus a burst and a
-/// segment, and once the window has grown it is never kept waiting, which an estimate under the
-/// path's would.
+/// 20 ms. The writer starts after that, so its slow start sees one path and not a queue. The
+/// reader takes a burst every millisecond twice per 20 ms: it is never offered more than twice its
+/// rate over an estimate at most half again the path's 80 ms, plus a burst and a segment, and once
+/// the window has grown it is never kept waiting, which an estimate under the path's would.
 #[test]
 fn the_receive_window_grows_by_what_is_read_per_round_trip() {
     const BURST: u64 = 40_000;

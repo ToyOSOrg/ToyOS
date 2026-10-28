@@ -4,16 +4,17 @@ kind: defect
 opened: 2026-10-24
 ---
 
-# netstack sends TCP at a third of what the T14's wired link carries
+# [tcp] opens a connection's window slower than Linux in its first 300 ms
 
-On the T14's I219, a ToyOS TCP sender moves 41 MB/s where the same
-program under the bench's Linux moves 113 MB/s on the same path and the
-same peer. Received TCP is at parity on that path, so the link, the peer
-and the access point are not the limit.
+On the T14's wired path to the AMD bench's Wi-Fi peer, a ToyOS TCP sender
+delivers 2.1–3.3 MB in a new connection's first 100 ms and 24–25 MB by
+300 ms, where the bench's Linux delivers 6.4–6.5 MB and 29.7 MB. From then on
+both run at line rate. The upload row reads 112 MB/s against Linux's 113 in
+the same session (#1102's A/B, at the end of this record). Received TCP is at
+parity on that path.
 
-**Where it stands after #1102**: 112 MB/s against Linux's 113 in the same
-session. The rest of each connection's first 300 ms is what remains (end of
-this record).
+This record began as the upload at a third of Linux's (41 MB/s against 113).
+What follows is that history, the causes found and removed, and the residual.
 
 **Measured** on 2026-10-24 with `osbench lan` at `d99ef5a35`. The path is
 the T14's I219 at 1000 Mb/s, through the access point, to the AMD bench's
@@ -216,7 +217,7 @@ Pull request #1102 replaces the initial slow start with HyStart++
 (RFC 9406, which RFC 9438 §4.10 recommends for CUBIC), whose L = 8 for a
 sender that does not pace caps the growth an ACK gives at eight segments, and
 counts a card-held window as in use when at least half of it is in flight
-(RFC 7661 §4.3).
+(RFC 7661 §4.3's validated window, which RFC 9438 §4.6 admits).
 
 **#1102's A/B, 2026-10-28** ([evidence](https://github.com/ToyOSOrg/evidence/tree/8f70147d28011645de1fd458f3091297287b57b9/r2/ab)). A was the fix
 reverted, B the fix; three of each, A B A B A B, with Linux at both ends:

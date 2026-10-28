@@ -96,7 +96,7 @@ fn a_wait_that_ends_in_a_timeout_is_congestions() {
 }
 
 /// Each ACK outside recovery is counted by whether cwnd ended the opportunity before it, with
-/// what it acknowledged and what it grew cwnd by.
+/// what it grew cwnd by.
 #[test]
 fn each_ack_is_counted_with_what_it_acknowledged_and_grew() {
     let mut h = fixture_e();
@@ -105,6 +105,5 @@ fn each_ack_is_counted_with_what_it_acknowledged_and_grew() {
     h.input(20, seg(5001).ack(5381));
     assert_eq!(h.count(Counter::AcksCwndLimited), 1);
     assert_eq!(h.count(Counter::AcksNotLimited), 1);
-    assert_eq!(h.count(Counter::AcksBytes), 4380);
     assert_eq!(h.count(Counter::CwndGrownBytes), 2920);
 }

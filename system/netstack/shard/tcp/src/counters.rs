@@ -78,9 +78,9 @@ toyos_net_wire::counters! {
     CongestionStopsSrttMicros = "tcp.congestion-stops.srtt.us";
     AcksCwndLimited = "tcp.acks.cwnd-limited";
     AcksNotLimited = "tcp.acks.not-limited";
-    AcksBytes = "tcp.acks.bytes";
     CwndGrownBytes = "tcp.cwnd.grown.bytes";
     HyStartCss = "tcp.hystart.css";
+    HyStartCssRounds = "tcp.hystart.css.rounds";
     HyStartResumed = "tcp.hystart.resumed";
     HyStartExits = "tcp.hystart.exits";
     HyStartExitCwndBytes = "tcp.hystart.exit.cwnd.bytes";
