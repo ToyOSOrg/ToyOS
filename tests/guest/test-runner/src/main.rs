@@ -96,7 +96,8 @@ fn main() {
     let _ = io::stdout().flush();
 
     // **A machine with no host on the other end runs the jobs its manifest
-    // names**, one binary name per argument through the stdin path's own [`run_one`].
+    // names**, one job per argument — a binary name and its arguments —
+    // through the stdin path's own [`run_one`].
     let mut jobs: Vec<String> = std::env::args().skip(1).collect();
     // The one argument that is not a job: what the whole list gets.
     let mut bound_ms = toyos_tco::JOB_BOUND_MS;
@@ -108,13 +109,14 @@ fn main() {
     if !jobs.is_empty() {
         deadline(bound_ms);
         for job in &jobs {
-            // Fatal by name: nobody is reading this console, so a job that did not run must end the boot.
-            if job.split_whitespace().count() != 1 {
-                give_the_machine_back(&format!("job {job:?} is not one binary name"));
-            }
+            // A binary name and its arguments. Fatal by name: nobody is
+            // reading this console, so a job that did not run must end the boot.
+            let mut words = job.split_whitespace();
+            let Some(name) = words.next() else { give_the_machine_back("an empty job") };
+            let args: Vec<&str> = words.collect();
             *RUNNING.lock().expect("the deadline thread does not panic holding this") =
                 job.clone();
-            match run_one(job, &[], cap.as_ref()) {
+            match run_one(name, &args, cap.as_ref()) {
                 Ran::No => {
                     give_the_machine_back(&format!("job {job:?} did not run"))
                 }

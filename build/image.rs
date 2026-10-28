@@ -1,6 +1,5 @@
 use std::collections::BTreeMap;
 use std::io::{Cursor, Read, Seek, SeekFrom, Write};
-use std::num::NonZeroU64;
 use std::path::Path;
 
 use bcachefs::engine::{self, Meta, NodeRef, Tree};

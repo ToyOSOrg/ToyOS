@@ -5,8 +5,8 @@
 //! no serial port has nothing at the other end to type a job — so the
 //! stdin path every config in `tests/images/` but `jobcase.toml` leaves the runner on parks
 //! forever, and the loop refuses after `metal::return_secs`. What ends a boot
-//! is `[programs.test-runner] args`: the list's bound, one binary name per
-//! job, then `reboot`.
+//! is `[programs.test-runner] args`: the list's bound, one job per argument
+//! — a binary name and its arguments — then `reboot`.
 //!
 //! So a metal image is a committed boot config with that one field derived onto
 //! it. The derivation is here, pure, because what it changes about the config
@@ -145,6 +145,7 @@ mod tests {
         "tests/images/metalcase.toml",
         "tests/images/latencycase.toml",
         "tests/images/acpicase.toml",
+        "tests/images/designatecase.toml",
     ];
 
     fn derived(config: &str, jobs: &[&str]) -> String {

@@ -44,6 +44,19 @@ pub fn bytes() -> Vec<u8> {
     disk
 }
 
+/// Where the disk's ToyOS DATA partition is, in bytes: its first and its
+/// length.
+pub fn data_span() -> (u64, u64) {
+    let mut at = EDGE;
+    for (_, kind, len) in PARTS {
+        if kind == Guid::TOYOS_DATA {
+            return (at, len);
+        }
+        at += len;
+    }
+    unreachable!("the disk carries a ToyOS DATA partition")
+}
+
 /// What the nvme driver of `bb:dd.f` said, past its name: `nvme 04:00.0: `.
 fn said_by_nvme(line: &str) -> Option<&str> {
     let (_, rest) = line.split_once("nvme ")?;

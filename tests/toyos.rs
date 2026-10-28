@@ -588,6 +588,14 @@ const MACHINE_TESTS: &[&str] = &[
     // host test runs together, and the disk is read back whole on the host
     // after the stop. QEMU x86-64; on a bench it is `nvme_leaves_the_benchs_disk_alone`.
     "a_host_disk_beside_the_stick_is_left_alone",
+    // The same disk's DATA designated from inside the guest: the supervisor
+    // minting the designation image's one authorization, the block service
+    // resolving and routing it, and the NVMe driver judging, stamping,
+    // flushing and reading back are four processes and a claim no host build
+    // runs together; the host reads the disk image after the stop for the
+    // stamp and for every other byte. QEMU x86-64; on a bench it is
+    // `bench_data_designated`.
+    "the_data_partition_beside_the_stick_is_designated",
     // clang and LLD built for ToyOS, installed by `pkg` and compiling and
     // linking inside it: the claim is that they install and run on ToyOS,
     // which no host test can make, and the T14 would read nothing a guest does
@@ -1414,6 +1422,17 @@ const METAL: &[(&str, metal::Metal)] = &[
         metal::Metal { arms: TESTCASES, judge: |b| common::hostdisk::left_alone(&b[0].log()).map(|_| ()) },
     ),
     (
+        // The bench's DATA partition designated from inside ToyOS, and the
+        // next boot's DATA file server formatting it and mounting it: the
+        // driver of the NVMe disk judges the partition, writes the stamp,
+        // flushes and reads it back, under the one authorization the
+        // designation image grants its runner. Destructive and once per
+        // bench, so named only; the T14, whose p4 is the owner's empty
+        // ToyOS DATA.
+        "bench_data_designated",
+        metal::Metal { arms: DESIGNATE, judge: |b| bench_data_designated(&b[0].log(), &b[1].log()) },
+    ),
+    (
         // The stick written through usbd while the boot deadline resets the
         // machine, which touches no USB register (#901 §6): the stick must
         // enumerate on the next host within the bench's record. It is the
@@ -1722,6 +1741,17 @@ const TESTCASES_HELD: &[metal::Arm] = &[metal::Arm {
     last: Some("test_rs_acpi_hold"),
     ..metal::once("testcases", "tests/images/testcases.toml", &[], &[])
 }];
+
+/// Two boots of the designation image (`tests/images/designatecase.toml`):
+/// the first designates the machine's DATA partition, the second only
+/// reboots, which is where the file server formats what the first stamped.
+const DESIGNATE: &[metal::Arm] = &[
+    metal::Arm {
+        named_only: true,
+        ..metal::once("designate", "tests/images/designatecase.toml", &[], &["disks designate data --commit"])
+    },
+    metal::Arm { named_only: true, ..metal::once("designated", "tests/images/designatecase.toml", &[], &[]) },
+];
 
 /// Its own boot: `kernel_objects_refused` holds every frame a process may, so
 /// every other process's allocation is refused while it runs.
@@ -4456,6 +4486,7 @@ fn run_machine_test(name: &str, test_config: &Path) -> Result<(), String> {
         "desktop_without_x2apic" => desktop_without_x2apic(),
         "nvme_disk_boots" => nvme_disk_boots(test_config),
         "a_host_disk_beside_the_stick_is_left_alone" => a_host_disk_beside_the_stick_is_left_alone(test_config),
+        "the_data_partition_beside_the_stick_is_designated" => the_data_partition_beside_the_stick_is_designated(),
         "hosted_clang_hello" => common::hostedclang::hosted_clang_hello(),
         "libc_children" => common::libcchildren::libc_children(),
         "stream_holders" => stream_holders(test_config),
@@ -4673,6 +4704,71 @@ fn nvme_disk_boots(test_config: &Path) -> Result<(), String> {
         log.must_say(&format!("fileserver: {role}"))?;
     }
     Ok(())
+}
+
+/// The first boot designated the machine's DATA partition, judged and
+/// written by the NVMe driver and read back, through the runner's
+/// authorization; the second formatted it and serves it, and neither served
+/// DATA from memory.
+fn bench_data_designated(first: &serial::Serial, second: &serial::Serial) -> Result<(), String> {
+    first.must_say("supervisor: test-runner is authorized for `designate:data`")?;
+    let done = first.must_say(": designation of ")?;
+    if !done.contains("nvme ") || !done.ends_with(": Written") {
+        return Err(format!("the designation was not written by an NVMe driver: {done:?}"));
+    }
+    first.must_say("the DATA partition is designated: the stamp is on the disk and read back")?;
+    first.must_not_say("are in memory and will not survive a reboot")?;
+    second.must_say("fileserver: block 0 designates this partition for ToyOS; formatting it")?;
+    let serving = second.must_say("fileserver: Data serving ")?;
+    if !serving.contains(" — bcachefs") {
+        return Err(format!("DATA is served by no bcachefs volume: {serving:?}"));
+    }
+    second.must_not_say("are in memory and will not survive a reboot")?;
+    second.must_not_say("DATA is absent this boot")?;
+    Ok(())
+}
+
+/// A boot of the designation image beside [`common::hostdisk`]'s disk: a
+/// judge-only `disks designate data` writes nothing and says it would, the
+/// committed one is written by the NVMe driver and read back, and once the
+/// machine has stopped the disk's DATA partition begins with the stamp for its
+/// size and every other byte of the disk is as it was.
+fn the_data_partition_beside_the_stick_is_designated() -> Result<(), String> {
+    let config = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/images/designatecase.toml");
+    let options = BootOptions { profile: qemu::Profile::MetalBesideAHostDisk, qmp: true, ..Default::default() };
+    let mut qemu = QemuInstance::boot_with_options(&config, &[], &[], options);
+    let mut console = qemu.boot_log().to_string();
+    qemu::await_marker(&mut qemu, &mut console, "fileserver: Data serving", "DATA's file server to serve")?;
+    let judged = qemu.run_test("disks designate data", Duration::from_secs(60));
+    if judged.exit_code != Some(0) || !judged.stdout.contains("would be designated; nothing was written") {
+        return Err(format!("the judge-only designation: {:?}\n{}", judged.exit_code, judged.serial));
+    }
+    let done = qemu.run_test("disks designate data --commit", Duration::from_secs(60));
+    if done.exit_code != Some(0) || !done.stdout.contains("the stamp is on the disk and read back") {
+        return Err(format!("the designation: {:?}\n{}", done.exit_code, done.serial));
+    }
+    let written = serial::Serial::named("the designation", done.serial.clone());
+    let line = written.must_say(": designation of ")?;
+    if !line.contains("nvme ") || !line.ends_with(": Written") {
+        return Err(format!("the designation was not written by the NVMe driver: {line:?}"));
+    }
+    qemu::QmpShutdown::open(qemu.qmp_socket(), qemu.budget(qemu::GUEST_QUIET)).power_button();
+    let by = qemu.budget(Duration::from_secs(60));
+    console.push_str(&qemu.await_exit(by)?);
+    let log = serial::Serial::named("the boot", console);
+    log.must_say("supervisor: test-runner is authorized for `designate:data`")?;
+    log.must_say("fileserver: the DATA partition holds no volume of ours and no designation stamp; DATA is absent this boot")?;
+
+    let after = std::fs::read(qemu.nvme_image()).map_err(|e| e.to_string())?;
+    let mut want = common::hostdisk::bytes();
+    let (at, len) = common::hostdisk::data_span();
+    let at = at as usize;
+    want[at..at + 4096].copy_from_slice(&bcachefs::designation(len / 4096));
+    match want.iter().zip(&after).position(|(w, a)| w != a) {
+        None if want.len() == after.len() => Ok(()),
+        None => Err(format!("the disk was {} bytes and is {}", want.len(), after.len())),
+        Some(byte) => Err(format!("byte {byte} (sector {}) is not what the designation alone leaves", byte / 512)),
+    }
 }
 
 /// `hostdisk::left_alone` of a stick boot beside [`common::hostdisk`]'s disk,
