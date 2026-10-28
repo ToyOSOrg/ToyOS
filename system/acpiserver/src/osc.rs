@@ -11,7 +11,9 @@
 //! and what the firmware does with a statement is in the objects it then
 //! returns (`_CST` among them, [`crate::cst`]). A query some firmware answers
 //! with the same bit whatever was asked, nothing included, would otherwise
-//! decide what ToyOS says it does.
+//! decide what ToyOS says it does. So a processor commit that fails, is
+//! refused or masks bits gates nothing: `_CST` is read either way, and each
+//! state it returns is checked on its own terms.
 //!
 //! **What ToyOS claims is one declaration a UUID** ([`PLATFORM`],
 //! [`PROCESSOR`]), each bit set only where ToyOS does what the bit promises,
