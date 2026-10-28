@@ -255,7 +255,7 @@ fn each_copy_is_read_and_reported_alone() {
     }
 
     // A second valid table in the backup's place alone.
-    let mut changed = t.clone();
+    let mut changed = t;
     changed.slots.iter_mut().find(|s| s.is_used()).unwrap().name = Slot::named("renamed").unwrap();
     let mut differing = copy(&whole);
     let steps = owned(&changed, &g, false);

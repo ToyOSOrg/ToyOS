@@ -3,9 +3,8 @@
 //!
 //! Every partition lies outside every other and the table outside all of them,
 //! so no session can change it: the table a driver read is the one it serves
-//! until the driver itself changes the disk. A partition whose range is not
-//! whole 4 KiB blocks, or that its own table refuses, is offered and refused
-//! by name.
+//! for the disk's life. A partition whose range is not whole 4 KiB blocks, or
+//! that its own table refuses, is offered and refused by name.
 
 use toyos_blockring::BLOCK_BYTES;
 use toyos_gpt::edit::Copies;
