@@ -14,6 +14,8 @@
 
 extern crate alloc;
 
+mod arch;
+
 pub mod audio;
 pub mod census;
 pub mod device;

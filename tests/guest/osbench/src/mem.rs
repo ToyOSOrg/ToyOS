@@ -194,13 +194,14 @@ fn churn(size: usize, threads: usize) {
 /// A block grown by `realloc` from 1 MiB to 256 MiB, doubling, its first
 /// mebibyte written: ns for the whole growth and for its last doubling, five
 /// rounds after one. An allocator that can move the pages answers without
-/// copying; one that cannot copies each time.
+/// copying; one that cannot copies each time. The block escapes through
+/// `black_box`, or the compiler drops every call.
 fn realloc_grow() {
     let round = || -> (u64, u64) {
         let mut size = MIB;
         let layout = Layout::from_size_align(size, 16).expect("a layout");
         // SAFETY: a non-zero layout.
-        let mut ptr = unsafe { alloc(layout) };
+        let mut ptr = std::hint::black_box(unsafe { alloc(layout) });
         assert!(!ptr.is_null());
         // SAFETY: inside the block.
         unsafe { std::ptr::write_bytes(ptr, 0x33, MIB) };
@@ -208,7 +209,7 @@ fn realloc_grow() {
         while size < 256 * MIB {
             let t = Instant::now();
             // SAFETY: `ptr` holds `size` bytes allocated with this alignment.
-            ptr = unsafe { realloc(ptr, Layout::from_size_align(size, 16).expect("a layout"), size * 2) };
+            ptr = std::hint::black_box(unsafe { realloc(ptr, Layout::from_size_align(size, 16).expect("a layout"), size * 2) });
             last = ns_since(t);
             total += last;
             assert!(!ptr.is_null(), "realloc to {} bytes was refused", size * 2);

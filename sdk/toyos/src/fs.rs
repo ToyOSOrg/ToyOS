@@ -54,8 +54,7 @@ use toyos_abi::syscall::{SyscallError, MAX_BADGE, MAX_SERVICE_NAME, MAX_TRANSFER
 use crate::ipc::{Connection, IpcError};
 use crate::ipc_payload;
 use crate::namespace::Namespace;
-use crate::shm::SharedMemory;
-use crate::volatile::Window;
+use crate::shm::{Bytes, SharedMemory};
 use crate::{AsHandle, Pipe, RawHandle};
 
 /// What a directory capability's namespace name begins with.
@@ -561,25 +560,7 @@ pub fn wire_path(path: &str) -> Option<alloc::string::String> {
 // syscalls, which order the two sides, so honest peers never touch one span
 // at once. A dishonest one races only bytes it could have written anyway:
 // each side copies what it reads out of the window once, into memory of its
-// own, and acts on that copy alone. Nothing here polls the window or waits on
-// it, so it is copied as plain bytes — one fetch of each, as a volatile loop
-// would be, and no reference is ever formed over it.
-
-/// Copy `data` into `window` at `offset`.
-pub fn window_put(window: Window, offset: usize, data: &[u8]) {
-    let target = window.sub(offset, data.len());
-    // SAFETY: `sub` bounded `offset + data.len()` inside the window, which its
-    // constructor's contract says is mapped; `data` is this process's own
-    // memory and never the window, so the two do not overlap.
-    unsafe { core::ptr::copy_nonoverlapping(data.as_ptr(), target.as_ptr(), data.len()) }
-}
-
-/// Copy `out.len()` bytes out of `window` at `offset`.
-pub fn window_take(window: Window, offset: usize, out: &mut [u8]) {
-    let source = window.sub(offset, out.len());
-    // SAFETY: as in `window_put`, with the two sides swapped.
-    unsafe { core::ptr::copy_nonoverlapping(source.as_ptr(), out.as_mut_ptr(), out.len()) }
-}
+// own, and acts on that copy alone.
 
 /// What a file or directory is, and which. `volume` and `node` mean what
 /// `toyos_abi::syscall::Stat`'s do, `volume` with [`SERVED_VOLUME`] set once
@@ -779,10 +760,8 @@ impl Dir {
         self.writable
     }
 
-    fn window(&self) -> Window {
-        // SAFETY: the region is `WINDOW_BYTES` long and mapped for as long as
-        // `self.window` lives, which every window taken here does not outlive.
-        unsafe { Window::new(self.window.as_ptr(), WINDOW_BYTES) }
+    fn window(&self) -> Bytes<'_> {
+        self.window.bytes()
     }
 
     /// Open a fresh connection through the same connector, and lend it the
@@ -885,8 +864,8 @@ impl Dir {
         loop {
             let (fid, again) = self.base(bases[0])?;
             let (fid2, again2) = self.base(bases[1])?;
-            window_put(self.window(), 0, paths.first.as_bytes());
-            window_put(self.window(), paths.first.len(), paths.second);
+            self.window().write(0, paths.first.as_bytes());
+            self.window().write(paths.first.len(), paths.second);
             request.fid = fid;
             request.fid2 = fid2;
             request.at = 0;
@@ -907,7 +886,7 @@ impl Dir {
     /// The absolute path a [`Refused::Follow`] of `len` bytes left in the
     /// window.
     pub fn follow_target<'b>(&self, len: usize, buf: &'b mut [u8; MAX_PATH]) -> &'b [u8] {
-        window_take(self.window(), 0, &mut buf[..len]);
+        self.window().read(0, &mut buf[..len]);
         &buf[..len]
     }
 
@@ -962,7 +941,7 @@ impl Dir {
         let len = out.len().min(WINDOW_BYTES);
         let reply = self.fid_call(op, fid, Request { offset, ..Request::new() }, len)?;
         let n = counted(reply.value, len)?;
-        window_take(self.window(), 0, &mut out[..n]);
+        self.window().read(0, &mut out[..n]);
         Ok(n)
     }
 
@@ -971,7 +950,7 @@ impl Dir {
     /// how much, and the offset after it.
     pub fn write(&mut self, fid: Fid, data: &[u8]) -> Result<Written, Error> {
         let len = data.len().min(WINDOW_BYTES);
-        window_put(self.window(), 0, &data[..len]);
+        self.window().write(0, &data[..len]);
         let reply = self.fid_call(WRITE, fid, Request::new(), len)?;
         Ok(Written { len: counted(reply.value, len)?, offset: reply.value2 })
     }
@@ -980,7 +959,7 @@ impl Dir {
     /// description's offset where it is: how much.
     pub fn pwrite(&mut self, fid: Fid, offset: u64, data: &[u8]) -> Result<usize, Error> {
         let len = data.len().min(WINDOW_BYTES);
-        window_put(self.window(), 0, &data[..len]);
+        self.window().write(0, &data[..len]);
         let reply = self.fid_call(PWRITE, fid, Request { offset, ..Request::new() }, len)?;
         counted(reply.value, len)
     }
@@ -1006,7 +985,7 @@ impl Dir {
             return Err(Error::InvalidRequest);
         }
         for (i, fid) in fids.iter().enumerate() {
-            window_put(self.window(), i * 8, &self.held(*fid)?.to_le_bytes());
+            self.window().write(i * 8, &self.held(*fid)?.to_le_bytes());
         }
         let mut batch = [toyos_abi::HANDLE_INVALID; MAX_TRANSFER_HANDLES];
         let request = Request { len: fids.len() as u64, span: (fids.len() * 8) as u64, ..Request::new() };
@@ -1131,7 +1110,7 @@ impl Dir {
         let next = next_batch(n, reply.value2)?;
         out.clear();
         out.resize(n, 0);
-        window_take(self.window(), 0, out);
+        self.window().read(0, out);
         Ok(next)
     }
 
@@ -1169,7 +1148,7 @@ impl Dir {
     pub fn read_link(&mut self, base: Base, path: &str, out: &mut [u8; MAX_PATH]) -> Result<usize, Refused> {
         let reply = self.path_call(READLINK, Request::new(), [base, Base::Root], Paths { first: path, second: &[] }, MAX_PATH)?;
         let n = counted(reply.value, MAX_PATH)?;
-        window_take(self.window(), 0, &mut out[..n]);
+        self.window().read(0, &mut out[..n]);
         Ok(n)
     }
 
@@ -1329,30 +1308,6 @@ impl AsHandle for Dir {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    /// Every offset and length a path or a short read puts in the window,
-    /// aligned or not, round-trips byte for byte and touches nothing beside.
-    #[test]
-    fn the_window_copies_every_length_at_every_offset() {
-        let mut backing = vec![0u64; 64];
-        let base = backing.as_mut_ptr() as *mut u8;
-        // SAFETY: 512 bytes of a live, 8-aligned allocation this test owns.
-        let window = unsafe { Window::new(base, 512) };
-        for offset in 0..24 {
-            for len in 0..40 {
-                window.zero();
-                let data: Vec<u8> = (0..len).map(|i| (i as u8).wrapping_mul(7).wrapping_add(1)).collect();
-                window_put(window, offset, &data);
-                let mut back = vec![0u8; len];
-                window_take(window, offset, &mut back);
-                assert_eq!(back, data, "{len} bytes at {offset}");
-                let mut whole = vec![0u8; 512];
-                window_take(window, 0, &mut whole);
-                assert!(whole[..offset].iter().all(|&b| b == 0), "before {offset}");
-                assert!(whole[offset + len..].iter().all(|&b| b == 0), "after {offset}+{len}");
-            }
-        }
-    }
 
     /// A path from a directory may climb, which its server resolves; it never
     /// has an empty or `.` component, and a grant's root climbs nowhere.

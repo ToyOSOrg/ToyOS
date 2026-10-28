@@ -185,10 +185,10 @@ impl Card {
         }
     }
 
-    pub fn tx<R>(&self, len: usize, fill: impl FnOnce(&mut [u8]) -> R) -> R {
+    pub fn tx(&self, frame: &[u8]) {
         match self {
-            Self::Virtio(nic) => nic.tx(len, fill),
-            Self::Intel(nic) => nic.tx(len, fill),
+            Self::Virtio(nic) => nic.tx(frame),
+            Self::Intel(nic) => nic.tx(frame),
         }
     }
 

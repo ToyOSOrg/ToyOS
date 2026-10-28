@@ -13,7 +13,7 @@ pub use toyos_abi::RawHandle;
 use toyos_abi::syscall::SyscallError;
 
 use toyos::ipc;
-use toyos::AsHandle;
+use toyos::{AsHandle, OwnedHandle};
 use toyos::poller::{Poller, READABLE};
 use toyos::endow::{self, EndowError};
 use toyos::surface;
@@ -526,8 +526,10 @@ fn copy(bytes: &[u8]) -> Result<(), CreateError> {
         return Err(CreateError::Protocol(header.msg_type));
     }
     let [region] = conn.recv_handles_exact::<1>(&header).ok_or(CreateError::NoHandle)?;
-    let mut region = SharedMemory::lent(region, bytes.len()).map_err(CreateError::Lent)?;
-    region.as_mut_slice().copy_from_slice(bytes);
+    // SAFETY: received with this frame, so this process's and nobody else's.
+    let region = unsafe { OwnedHandle::from_raw(region) };
+    let region = SharedMemory::lent(region, bytes.len()).map_err(CreateError::Lent)?;
+    region.bytes().write(0, bytes);
     Ok(conn.signal(MSG_COPY_COMMIT)?)
 }
 
@@ -611,6 +613,8 @@ impl Window {
         // window and sent nothing with it is not serving this client, whatever
         // else it is doing.
         let [buffer] = conn.recv_handles_exact::<1>(&header).ok_or(CreateError::NoHandle)?;
+        // SAFETY: received with this frame, so this process's and nobody else's.
+        let buffer = unsafe { OwnedHandle::from_raw(buffer) };
         let shm = SharedMemory::lent(buffer, buf_size).map_err(CreateError::Lent)?;
 
         let poller = Poller::new(1);
@@ -721,6 +725,8 @@ impl Window {
                 let Some([buffer]) = self.conn.recv_handles_exact::<1>(header) else {
                     return Event::Close;
                 };
+                // SAFETY: received with this frame, so this process's and nobody else's.
+                let buffer = unsafe { OwnedHandle::from_raw(buffer) };
                 let Ok(shm) = SharedMemory::lent(buffer, buf_size) else {
                     return Event::Close;
                 };
@@ -746,10 +752,12 @@ impl Window {
                 let Some([buffer]) = self.conn.recv_handles_exact::<1>(header) else {
                     return Event::ClipboardPaste(Vec::new());
                 };
+                // SAFETY: received with this frame, so this process's and nobody else's.
+                let buffer = unsafe { OwnedHandle::from_raw(buffer) };
                 let Ok(shm) = SharedMemory::lent(buffer, info.len as usize) else {
                     return Event::ClipboardPaste(Vec::new());
                 };
-                Event::ClipboardPaste(shm.as_slice().to_vec())
+                Event::ClipboardPaste(shm.bytes().to_vec())
             }
             MSG_WINDOW_CLOSE => Event::Close,
             MSG_FRAME => Event::Frame,

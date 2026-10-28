@@ -99,23 +99,22 @@ pub struct AudioSlotWriter {
     slot_count: u32,
 }
 
-/// Exclusive access to one ring slot. Holding the guard mutably borrows the
-/// writer, so a second slot cannot be handed out until this one is committed
-/// or dropped — the aliasing that made repeated `slot_data_mut` calls unsound
-/// is unrepresentable.
+/// The next free slot, held until it is committed or dropped. Holding it
+/// mutably borrows the writer, so a second one cannot be handed out meanwhile.
 pub struct SlotWriteGuard<'a> {
     writer: &'a mut AudioSlotWriter,
     idx: u32,
 }
 
 impl SlotWriteGuard<'_> {
-    pub fn data(&mut self) -> &mut [u8] {
+    /// Copy one period of `data` into the slot and publish it to soundserver.
+    ///
+    /// # Panics
+    /// Unless `data` is one period long.
+    pub fn commit(self, data: &[u8]) {
         let slot = self.idx % self.writer.slot_count;
-        self.writer.slot_data_mut(slot)
-    }
-
-    /// Publish the filled slot to soundserver.
-    pub fn commit(self) {
+        assert_eq!(data.len(), self.writer.period_bytes as usize, "audio: a slot filled with part of a period");
+        self.writer.slot(slot).write(0, data);
         self.writer
             .header()
             .write_idx
@@ -132,11 +131,8 @@ impl AudioSlotWriter {
         unsafe { &*(self.shm.as_ptr() as *const AudioSlotHeader) }
     }
 
-    fn slot_data_mut(&mut self, slot_idx: u32) -> &mut [u8] {
-        let offset = AudioSlotHeader::SIZE + slot_idx as usize * self.period_bytes as usize;
-        unsafe {
-            core::slice::from_raw_parts_mut(self.shm.as_ptr().add(offset), self.period_bytes as usize)
-        }
+    fn slot(&self, slot_idx: u32) -> crate::shm::Bytes<'_> {
+        slot_bytes(&self.shm, slot_idx, self.period_bytes)
     }
 
     /// Acquire the next free slot for writing. Returns None if the ring is full.
@@ -152,6 +148,12 @@ impl AudioSlotWriter {
     }
 }
 
+/// Slot `slot_idx`'s period of the ring.
+fn slot_bytes(shm: &SharedMemory, slot_idx: u32, period_bytes: u32) -> crate::shm::Bytes<'_> {
+    let offset = AudioSlotHeader::SIZE + slot_idx as usize * period_bytes as usize;
+    shm.bytes().sub(offset, period_bytes as usize)
+}
+
 pub struct AudioSlotReader {
     shm: SharedMemory,
     period_bytes: u32,
@@ -165,13 +167,6 @@ impl AudioSlotReader {
 
     fn header(&self) -> &AudioSlotHeader {
         unsafe { &*(self.shm.as_ptr() as *const AudioSlotHeader) }
-    }
-
-    fn slot_data(&self, slot_idx: u32) -> &[u8] {
-        let offset = AudioSlotHeader::SIZE + slot_idx as usize * self.period_bytes as usize;
-        unsafe {
-            core::slice::from_raw_parts(self.shm.as_ptr().add(offset), self.period_bytes as usize)
-        }
     }
 
     /// The oldest filled slot, or None if the ring is empty (underrun).
@@ -202,8 +197,15 @@ pub struct SlotReadGuard<'a> {
 }
 
 impl SlotReadGuard<'_> {
-    pub fn data(&self) -> &[u8] {
-        self.reader.slot_data(self.idx % self.reader.slot_count)
+    /// Copy the slot's period out: the client may be writing it, whatever the
+    /// protocol says.
+    ///
+    /// # Panics
+    /// Unless `out` is one period long.
+    pub fn read(&self, out: &mut [u8]) {
+        assert_eq!(out.len(), self.reader.period_bytes as usize, "audio: a slot read into part of a period");
+        let slot = self.idx % self.reader.slot_count;
+        slot_bytes(&self.reader.shm, slot, self.reader.period_bytes).read(0, out);
     }
 
     /// Release the slot back to the client.
@@ -235,6 +237,8 @@ pub enum AudioError {
 pub struct AudioStream {
     control: crate::Connection,
     slot_writer: AudioSlotWriter,
+    /// The period the fill callback writes, copied into each slot it commits.
+    period: alloc::vec::Vec<u8>,
     signal: crate::Pipe,
     period_frames: u32,
     device_sample_rate: u32,
@@ -275,12 +279,14 @@ impl AudioStream {
 
         let slot_count = resp.slot_count as u32;
         let shm_size = AudioSlotHeader::SIZE + slot_count as usize * resp.client_period_bytes as usize;
-        let shm = SharedMemory::lent(batch[STREAM_OPENED_SHM], shm_size).map_err(AudioError::Lent)?;
+        let shm = SharedMemory::lent(crate::OwnedHandle(batch[STREAM_OPENED_SHM]), shm_size)
+            .map_err(AudioError::Lent)?;
         let slot_writer = AudioSlotWriter::new(shm, resp.client_period_bytes, slot_count);
 
         Ok(Self {
             control,
             slot_writer,
+            period: alloc::vec![0; resp.client_period_bytes as usize],
             signal,
             period_frames: resp.client_period_frames,
             device_sample_rate: resp.device_sample_rate,
@@ -302,9 +308,9 @@ impl AudioStream {
             Ok(_) => {}
             Err(e) => return Err(AudioError::Ipc(IpcError::Syscall(e))),
         }
-        while let Some(mut slot) = self.slot_writer.begin_fill() {
-            callback(slot.data());
-            slot.commit();
+        while let Some(slot) = self.slot_writer.begin_fill() {
+            callback(&mut self.period);
+            slot.commit(&self.period);
         }
         Ok(())
     }

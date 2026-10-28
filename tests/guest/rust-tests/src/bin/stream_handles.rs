@@ -237,8 +237,7 @@ fn reads_and_writes_on_two_threads() {
     assert_eq!(netstack.sent(), WRITTEN, "the write is in the send ring before the read is answered");
     let words = words_of(&netstack.region);
     let released = netstack.server.release(words, WRITTEN.len() as u32).expect("the client keeps the protocol");
-    // SAFETY: the receive ring is inside the mapping, past what the client already read.
-    unsafe { std::ptr::copy_nonoverlapping(LATER.as_ptr(), netstack.region.as_ptr().add(RECEIVE_RING + PEER.len()), LATER.len()) };
+    netstack.region.bytes().write(RECEIVE_RING + PEER.len(), LATER);
     let published = netstack.server.publish(words, LATER.len() as u32).expect("the client keeps the protocol");
     netstack.ring(released.and(published));
     assert_eq!(line(&mut out), "read");
@@ -444,14 +443,12 @@ impl Netstack {
     /// The bytes the holders published.
     fn sent(&mut self) -> Vec<u8> {
         let n = self.server.sent(words_of(&self.region)).expect("the holders keep the protocol") as usize;
-        // SAFETY: the send ring is inside the mapping, and the holders published `n` bytes at its start.
-        unsafe { std::slice::from_raw_parts(self.region.as_ptr().add(SEND_RING), n) }.to_vec()
+        self.region.bytes().sub(SEND_RING, n).to_vec()
     }
 
     /// `bytes` published into an empty receive ring, and the holders rung.
     fn publish(&mut self, bytes: &[u8]) {
-        // SAFETY: the receive ring is inside the mapping, and no holder reads past the tail.
-        unsafe { std::ptr::copy_nonoverlapping(bytes.as_ptr(), self.region.as_ptr().add(RECEIVE_RING), bytes.len()) };
+        self.region.bytes().write(RECEIVE_RING, bytes);
         let rings = self.server.publish(words_of(&self.region), bytes.len() as u32).expect("the holders keep the protocol");
         self.ring(rings);
     }
@@ -478,10 +475,10 @@ fn run(role: &str, peer: &[u8]) -> (Child, Netstack) {
     assert_eq!(header.msg_type, MsgType::TcpConnect as u32, "a stream's connect");
     let _: TcpConnectRequest = conn.recv_payload(&header).expect("the connect's request");
     let [region] = conn.recv_handles_exact::<1>(&header).expect("the stream's region");
-    let region = SharedMemory::lent(region, REGION_BYTES).expect("a region netstack takes");
+    // SAFETY: received with this frame, so this process's and nobody else's.
+    let region = SharedMemory::lent(unsafe { OwnedHandle::from_raw(region) }, REGION_BYTES).expect("a region netstack takes");
     let mut server = Server::new(words_of(&region), LAYOUT);
-    // SAFETY: the receive ring is inside the mapping, and the client reads nothing yet.
-    unsafe { std::ptr::copy_nonoverlapping(peer.as_ptr(), region.as_ptr().add(RECEIVE_RING), peer.len()) };
+    region.bytes().write(RECEIVE_RING, peer);
     let _ = server.publish(words_of(&region), peer.len() as u32).expect("the client keeps the protocol");
     let (receive_read, receive) = toyos::pipe_pair().expect("the receive bell");
     let (send_read, send) = toyos::pipe_pair().expect("the send bell");

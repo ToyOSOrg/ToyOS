@@ -610,6 +610,97 @@ impl AddressSpace {
         Ok(())
     }
 
+    /// Resize `[start, start + old)`, committed private memory of one
+    /// protection that is not executable, to `new` bytes, whole pages both
+    /// (`toyos_abi::syscall::vm_remap`): a shrink releases the tail, a growth
+    /// takes the free pages after it, or else, if `may_move`, its leaves move
+    /// to a new place and nothing is copied. Promised and all or nothing, as
+    /// [`reserve`](Self::reserve); answers where the range is now.
+    pub fn remap(&mut self, start: UserAddr, old: u64, new: u64, may_move: bool) -> Result<UserAddr, SyscallError> {
+        let (start, end) = self.held(start, old)?;
+        let (_, entry) = self.inventory.find(start).expect("space: a page `held` answered for");
+        let prot = entry.prot;
+        // Neighbours alike join, so one entry is the whole of one kind and protection.
+        if !matches!(entry.kind, Kind::Private { committed: true }) || prot == Prot::ReadExec || entry.end < end {
+            return Err(SyscallError::InvalidArgument);
+        }
+        if new == 0 || !new.is_multiple_of(PAGE_SIZE) || new > self.inventory.top() - self.inventory.floor() {
+            return Err(SyscallError::InvalidArgument);
+        }
+        if new <= old {
+            if new < old {
+                self.room(start + new, end, 0)?;
+                self.release(UserAddr::new(start + new), old - new);
+            }
+            return Ok(UserAddr::new(start));
+        }
+        let in_place = start.checked_add(new).is_some_and(|grown| self.inventory.holds(end, grown) && self.inventory.is_free(end, grown));
+        let to = if in_place {
+            self.room(end, start + new, 1)?;
+            start
+        } else if may_move {
+            self.room(start, end, 1)?;
+            self.inventory.place(new, PAGE_SIZE).ok_or(SyscallError::ResourceExhausted)?
+        } else {
+            return Err(SyscallError::ResourceExhausted);
+        };
+        let added = (new - old) / PAGE_SIZE;
+        if !pmm::promise(&self.job, added) {
+            return Err(SyscallError::ResourceExhausted);
+        }
+        let built = if in_place { self.build(end, start + new) } else { self.build(to, to + new) };
+        built.inspect_err(|_| pmm::unpromise(&self.job, added))?;
+        let kind = Kind::Private { committed: true };
+        if in_place {
+            self.inventory.insert(end, Entry { end: start + new, prot, kind });
+        } else {
+            let present = self.move_leaves(start, end, to);
+            self.inventory.remove(start, end);
+            self.inventory.insert(to, Entry { end: to + new, prot, kind });
+            let inventory = &self.inventory;
+            let unlinked = self.tables.unlink(start, end, |s, e| inventory.backed(s, e));
+            if present || !unlinked.is_empty() {
+                self.shoot_down(start, end, &unlinked);
+            }
+            self.tables.free(unlinked);
+            self.usage.taken.fetch_add(1, Relaxed);
+        }
+        self.usage.made.fetch_add(1, Relaxed);
+        self.settle();
+        Ok(UserAddr::new(to))
+    }
+
+    /// Move every leaf of `[from, end)` to the same place in the range from
+    /// `to`, whose tables are built and whose leaves are empty, leaving the
+    /// old ones empty: their frames stay this space's. Answers whether one
+    /// was present, which some CPU may still cache.
+    fn move_leaves(&mut self, from: u64, end: u64, to: u64) -> bool {
+        // A held `LeafTable` borrows all the tables, so leaves are taken out
+        // of the source a batch at a time and then written at the destination.
+        const BATCH: usize = 64;
+        let mut present = false;
+        let mut va = from;
+        while va < end {
+            let mut batch = [(0, Leaf::Empty); BATCH];
+            let mut n = 0;
+            let mut leaves = self.tables.leaf_table(va).unwrap_or_else(|| panic!("space: no tables under {va:#x}"));
+            while va < end && leaves.covers(va) && n < BATCH {
+                let leaf = leaves.get(va);
+                if leaf != Leaf::Empty {
+                    leaves.set(va, Leaf::Empty);
+                    batch[n] = (va, leaf);
+                    n += 1;
+                }
+                va += PAGE_SIZE;
+            }
+            for &(at, leaf) in &batch[..n] {
+                present |= matches!(leaf, Leaf::Mapped(_));
+                self.tables.set(at - from + to, leaf);
+            }
+        }
+        present
+    }
+
     /// `[start, start + len)` as pages every one of which a range holds.
     fn held(&self, start: UserAddr, len: u64) -> Result<(u64, u64), SyscallError> {
         let end = pages(start.raw(), len).ok_or(SyscallError::InvalidArgument)?;

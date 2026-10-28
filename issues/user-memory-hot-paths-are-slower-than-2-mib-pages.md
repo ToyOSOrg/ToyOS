@@ -70,7 +70,6 @@ each), what is still slower than the base:
 | `mem.first_touch.4k` ns/page | 887; 508 with runs | 11 (2 MiB pages; Linux 927) |
 | `mem.map_touch_unmap.4k` ns/page | 909; 532 with runs | 207 |
 | `mem.anon.total` ns/MiB | 228,677; 132,877 with runs | 51,612 (Linux 258,177) |
-| `mem.realloc_grow.1m_256m` ms | 116; 67 with runs | 30 (Linux 131 ns, by `mremap`) |
 | `fs.tmp.seq_read.1048576` MB/s | 6,060 | 9,425 |
 | `fs.tmp.seq_write.1048576` MB/s | 4,297 | 5,889 |
 | `fs.tmp.readdir.1000` ms | 1.20 | 0.74 |
@@ -79,11 +78,16 @@ each), what is still slower than the base:
 
 The copies (`fs.tmp`, `ipc`, `pipe`) point at the user-copy path above.
 "With runs" is `a75abd3f6` against `b48c7dd9d` on the T14, one run each;
-`6d826e313` gave 500, 521, 132,434 and 67 ms for the first four rows.
+`6d826e313` gave 500, 521 and 132,434 for the first three rows.
 
-`mem.realloc_grow` still copies: std's dlmalloc 0.2.14 never maps a block on
-its own, so its `remap` hook is never called, and moving pages instead needs
-large blocks mapped alone, which `mem.malloc_churn.1048576` would pay for.
+`mem.realloc_grow` no longer copies. std and libc map a block of 256 KiB or
+more on its own (`sdk/libc/src/mapped.rs`) and grow it by `vm_remap`, which
+moves pages. On the T14 at 204243e7f, `1m_256m` took 45.9 us, its last
+doubling 10.0 us. Linux, with osbench's block made to escape, took 86.5 and
+20.0 us. Its earlier 131 ns came from a build that never allocated. The owner
+accepted on 2026-10-27 that `mem.malloc_churn.1048576` loses heap reuse for
+this (T14: 29,505 to 194 kops/s; Linux 215) until ToyOS's own allocator
+brings it back.
 
 Owner: the memory track. Exit: each path above measured on the T14 at a
 change and at its base, and against Linux; a regression is fixed or its cost

@@ -78,6 +78,11 @@ struct Inner {
     fetches: BTreeMap<u64, Fetch>,
     fetched: u64,
     flushing: bool,
+    /// The disk may hold a write no flush it answered has made durable. Set at
+    /// mount, since a previous server may have written it, and only the
+    /// running flush writes the disk, so nothing is written between its
+    /// disk flush and the clearing of this.
+    unflushed: bool,
     /// Tasks waiting for a flush to end or a fetch to land.
     waiting: Vec<Waker>,
     reads: u64,
@@ -100,7 +105,7 @@ pub struct Counts {
 
 impl<D: Disk> Cache<D> {
     pub fn new(disk: D) -> Self {
-        Self { disk, inner: RefCell::default() }
+        Self { disk, inner: RefCell::new(Inner { unflushed: true, ..Inner::default() }) }
     }
 
     /// The disk, once nothing else holds the cache: what it holds is what the
@@ -253,7 +258,9 @@ impl<D: Disk> BlockDev for Cache<D> {
     }
 
     /// Every dirty block to the disk, lowest first and in runs, then the disk
-    /// made durable. A block the disk refused stays dirty.
+    /// made durable. A block the disk refused stays dirty. A disk written
+    /// nothing since the last flush it answered is asked nothing: every write
+    /// it took is already durable.
     async fn flush(&self) -> Result<(), Error> {
         self.until(|inner| !inner.flushing).await;
         self.inner.borrow_mut().flushing = true;
@@ -281,6 +288,7 @@ impl<D: Disk> BlockDev for Cache<D> {
                     })
                     .collect()
             };
+            self.inner.borrow_mut().unflushed = true;
             self.disk.write(first, &buf[..run]).await?;
             let mut inner = self.inner.borrow_mut();
             for (k, version) in versions.into_iter().enumerate() {
@@ -295,7 +303,10 @@ impl<D: Disk> BlockDev for Cache<D> {
             }
             i += run;
         }
-        self.disk.flush().await?;
+        if self.inner.borrow().unflushed {
+            self.disk.flush().await?;
+            self.inner.borrow_mut().unflushed = false;
+        }
         self.inner.borrow_mut().evict();
         Ok(())
     }
@@ -370,17 +381,25 @@ mod tests {
     use crate::ram::Ram;
     use toyos_blockdev::{block_on_ready, Executor};
 
-    /// A disk that counts what reaches it.
+    /// A disk that counts what reaches it, and refuses its flushes while
+    /// `refusing_flush` is set.
     struct Counting {
         ram: Ram,
         reads: Cell<u32>,
         writes: Cell<u32>,
         flushes: Cell<u32>,
+        refusing_flush: Cell<bool>,
     }
 
     impl Counting {
         fn new(blocks: u64) -> Self {
-            Self { ram: Ram::new(blocks), reads: Cell::new(0), writes: Cell::new(0), flushes: Cell::new(0) }
+            Self {
+                ram: Ram::new(blocks),
+                reads: Cell::new(0),
+                writes: Cell::new(0),
+                flushes: Cell::new(0),
+                refusing_flush: Cell::new(false),
+            }
         }
     }
 
@@ -398,6 +417,9 @@ mod tests {
         }
         async fn flush(&self) -> Result<(), Error> {
             self.flushes.set(self.flushes.get() + 1);
+            if self.refusing_flush.get() {
+                return Err(Error::Device);
+            }
             self.ram.flush().await
         }
     }
@@ -425,6 +447,31 @@ mod tests {
         let mut on_disk = [[0; BLOCK]];
         block_on_ready(c.disk.ram.read(7, &mut on_disk)).unwrap();
         assert_eq!(on_disk, [[0xAB; BLOCK]]);
+    }
+
+    /// The disk is asked to flush only when the cache wrote it since the last
+    /// flush it answered, and at the first flush, which answers for whatever
+    /// it held when the cache was made.
+    #[test]
+    fn a_flush_asks_the_disk_to_flush_only_what_it_wrote_since_its_last() {
+        let c = cache();
+        let flushed = |c: &Cache<Counting>| {
+            block_on_ready(c.flush()).unwrap();
+            (c.disk.writes.get(), c.disk.flushes.get())
+        };
+        assert_eq!(flushed(&c), (0, 1), "the first flush asks the disk");
+        assert_eq!(flushed(&c), (0, 1), "nothing written since");
+        block_on_ready(c.write(7, &[[1; BLOCK]])).unwrap();
+        assert_eq!(flushed(&c), (1, 2));
+        assert_eq!(flushed(&c), (1, 2));
+
+        block_on_ready(c.write(8, &[[2; BLOCK]])).unwrap();
+        c.disk.refusing_flush.set(true);
+        assert_eq!(block_on_ready(c.flush()), Err(Error::Device));
+        assert_eq!((c.disk.writes.get(), c.disk.flushes.get(), c.counts().dirty), (2, 3, 0));
+        c.disk.refusing_flush.set(false);
+        assert_eq!(flushed(&c), (2, 4), "a refused flush is owed with no block dirty");
+        assert_eq!(flushed(&c), (2, 4));
     }
 
     #[test]

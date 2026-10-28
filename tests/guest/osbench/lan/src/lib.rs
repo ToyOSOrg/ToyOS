@@ -189,8 +189,9 @@ impl Peer {
     }
 
     /// Bytes written for `span`, timed from the first write to the peer's
-    /// count of them, which must be all of them.
-    pub fn upload(&self, span: Duration) -> io::Result<Transfer> {
+    /// count of them, which must be all of them. `look` sees the connection
+    /// once the last write is in, before its end is sent.
+    pub fn upload(&self, span: Duration, look: &mut dyn FnMut(&TcpStream)) -> io::Result<Transfer> {
         let mut stream = self.open(Some(Request::Sink))?;
         let chunk = vec![0xa5u8; CHUNK];
         let t = Instant::now();
@@ -199,6 +200,7 @@ impl Peer {
             stream.write_all(&chunk)?;
             sent += CHUNK as u64;
         }
+        look(&stream);
         stream.shutdown(Shutdown::Write)?;
         let mut count = [0u8; 8];
         stream.read_exact(&mut count)?;
@@ -383,8 +385,10 @@ mod tests {
         for _ in 0..10 {
             echo.round_trip().unwrap();
         }
-        let up = peer.upload(Duration::from_millis(50)).unwrap();
+        let mut looked = 0;
+        let up = peer.upload(Duration::from_millis(50), &mut |_| looked += 1).unwrap();
         assert!(up.bytes >= CHUNK as u64, "{up:?}");
+        assert_eq!(looked, 1, "the upload shows its connection once");
         let down = peer.download(Duration::from_millis(50)).unwrap();
         assert!(down.bytes >= CHUNK as u64, "{down:?}");
     }

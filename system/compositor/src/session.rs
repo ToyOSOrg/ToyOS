@@ -1607,8 +1607,8 @@ impl Session {
         let sent = if len <= window::MAX_INLINE_PAYLOAD {
             w.conn.try_send_bytes(window::MSG_CLIPBOARD_PASTE, self.clipboard.as_bytes()).map_err(DropReason::from)
         } else {
-            match SharedMemory::create(len).and_then(|mut r| {
-                r.as_mut_slice()[..len].copy_from_slice(self.clipboard.as_bytes());
+            match SharedMemory::create(len).and_then(|r| {
+                r.bytes().write(0, self.clipboard.as_bytes());
                 r.share()
             }) {
                 Ok(theirs) => w
@@ -2136,7 +2136,7 @@ impl Session {
         // the send has moved it, so the compositor's own mapping goes at the end
         // of this function — where the old code kept the last paste mapped until
         // the next one replaced it.
-        let mut shm = match SharedMemory::create(self.clipboard.len()) {
+        let shm = match SharedMemory::create(self.clipboard.len()) {
             Ok(shm) => shm,
             Err(e) => {
                 eprintln!(
@@ -2154,7 +2154,7 @@ impl Session {
             );
             return;
         };
-        shm.as_mut_slice()[..self.clipboard.len()].copy_from_slice(self.clipboard.as_bytes());
+        shm.bytes().write(0, self.clipboard.as_bytes());
         deliver_with_handle(
             &mut self.dead,
             win,

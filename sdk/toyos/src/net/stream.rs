@@ -49,7 +49,7 @@ use toyos_abi::RawHandle;
 use super::ends::{narrowed, Ends, HELD_BELL, HELD_CONNECTION};
 
 use crate::ipc::{self, Connection, TrySendError};
-use crate::shm::SharedMemory;
+use crate::shm::{Bytes, SharedMemory};
 use crate::sync::Lock;
 use crate::transport::session::{self, Bells, Doorbell, Holder, HungUp, Layout, Mode, Polled, Receiving, Refused as Answer, Sending, Took, Waited};
 use crate::transport::stream::Place;
@@ -504,12 +504,10 @@ pub fn read(handle: RawHandle, buf: &mut [u8], wait: Wait) -> Result<usize, Refu
     let max = u32::try_from(buf.len()).unwrap_or(u32::MAX);
     call(handle, |call| {
         let base = call.base;
-        let out = buf.as_mut_ptr();
         let copy = |span: Span, at: usize| {
-            // SAFETY: the span lies in the region's receive ring, mapped for the
-            // call, and `at + span.len` is at most the `max` bytes of `buf`
-            // the read was handed; the region is never `buf`.
-            unsafe { core::ptr::copy_nonoverlapping((base + span.offset) as *const u8, out.add(at), span.len) }
+            // SAFETY: the span lies in the region's receive ring, mapped for the call.
+            let ring = unsafe { Bytes::from_raw((base + span.offset) as *mut u8, span.len) };
+            ring.read(0, &mut buf[at..at + span.len]);
         };
         let rx = Half(&call.halves().rx);
         let read = session::read(call.words(), &rx, &call.bells(), wait.mode(), max, copy);
@@ -523,10 +521,10 @@ pub fn write(handle: RawHandle, buf: &[u8], wait: Wait) -> Result<usize, Refused
     let len = u32::try_from(buf.len()).unwrap_or(u32::MAX);
     call(handle, |call| {
         let base = call.base;
-        let from = buf.as_ptr();
         let copy = |span: Span, at: usize| {
-            // SAFETY: as in `read`, with the two sides swapped.
-            unsafe { core::ptr::copy_nonoverlapping(from.add(at), (base + span.offset) as *mut u8, span.len) }
+            // SAFETY: the span lies in the region's send ring, mapped for the call.
+            let ring = unsafe { Bytes::from_raw((base + span.offset) as *mut u8, span.len) };
+            ring.write(0, &buf[at..at + span.len]);
         };
         let tx = Half(&call.halves().tx);
         let wrote = session::write(call.words(), &tx, &call.bells(), wait.mode(), len, copy);
@@ -948,7 +946,7 @@ pub(super) fn ask_export(connection: RawHandle) -> Result<OwnedHandle, NetError>
 pub(super) fn adopted(connection: Connection, first: Option<(&[u8], ipc::Batch)>) -> Option<RawHandle> {
     let slot = TABLE.lock().reserve()?;
     let taken = first.and_then(adoption).and_then(|(holder, adopt, [region, receive, send])| {
-        let Ok(region) = SharedMemory::lent(region, REGION_BYTES) else {
+        let Ok(region) = SharedMemory::lent(OwnedHandle(region), REGION_BYTES) else {
             [receive, send].into_iter().for_each(syscall::close);
             return None;
         };

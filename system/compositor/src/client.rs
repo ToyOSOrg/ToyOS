@@ -14,7 +14,6 @@
 //! handle a client sends stays queued until its connection closes.
 
 use std::fmt;
-use std::sync::atomic::Ordering;
 use std::time::{Duration, Instant};
 
 use toyos::shm::SharedMemory;
@@ -143,7 +142,7 @@ impl CopyRegion {
 
     /// Every byte, each read once, into memory no client can write.
     pub fn take(self) -> Vec<u8> {
-        self.0.as_atomic().iter().map(|b| b.load(Ordering::Relaxed)).collect()
+        self.0.bytes().to_vec()
     }
 }
 

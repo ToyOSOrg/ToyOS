@@ -333,11 +333,13 @@ pub const SYS_SHM_SUB: u64 = 143;
 pub const SYS_JOB_FLOOR: u64 = 144;
 /// What a job's account holds. See [`account_info`].
 pub const SYS_ACCOUNT_INFO: u64 = 145;
+/// Resize a run of committed private memory, in place or moved. See [`vm_remap`].
+pub const SYS_VM_REMAP: u64 = 146;
 /// Hold every idle CPU to waking within a bound, gated by
 /// [`Rights::WAKE_LATENCY`] on a `SysCap`. See [`wake_latency_hold`].
 ///
 /// [`Rights::WAKE_LATENCY`]: crate::handle::Rights::WAKE_LATENCY
-pub const SYS_WAKE_LATENCY_HOLD: u64 = 146;
+pub const SYS_WAKE_LATENCY_HOLD: u64 = 147;
 
 /// Bins in the per-process syscall profile — one for every number this ABI
 /// issues, and one at the end for every number it does not.
@@ -345,7 +347,7 @@ pub const SYS_WAKE_LATENCY_HOLD: u64 = 146;
 /// **The profile's parts sum to its total, and that is the whole requirement.**
 /// A bin array narrower than the ABI reaches drops calls out of the line while
 /// the total goes on counting them.
-pub const SYSCALL_PROFILE_BINS: usize = 148;
+pub const SYSCALL_PROFILE_BINS: usize = 149;
 
 /// Where a number this ABI does not issue is counted. Merging is a degradation
 /// a reader can see in the line; dropping is one nobody can.
@@ -2510,6 +2512,24 @@ pub unsafe fn vm_discard(addr: *mut u8, len: usize) -> Result<(), SyscallError> 
 /// Nothing reaches those pages meanwhile.
 pub unsafe fn vm_decommit(addr: *mut u8, len: usize) -> Result<(), SyscallError> {
     check_unit(syscall(SYS_VM_DECOMMIT, addr as u64, len as u64, 0, 0))
+}
+
+/// Resize `[addr, addr + old_len)`, committed private memory of one
+/// protection that is not executable, to `new_len` bytes, both rounded up to
+/// whole pages: its pages keep their contents and a grown tail reads as
+/// zeros. It grows in place where the pages after it are free; otherwise, if
+/// `may_move`, its pages move to a new place, unmapped at the old, with
+/// nothing copied. A shrink gives back the tail in place.
+/// Answers where the range is now. Refused, it is left as it was:
+/// `BadAddress` for a page no range holds, `InvalidArgument` for any other
+/// memory or a zero length, and `ResourceExhausted` where it has no room.
+///
+/// # Safety
+/// Nothing reaches the old pages after this answers a new place, nor past
+/// `new_len` after a shrink.
+pub unsafe fn vm_remap(addr: *mut u8, old_len: usize, new_len: usize, may_move: bool) -> Result<*mut u8, SyscallError> {
+    check(syscall(SYS_VM_REMAP, addr as u64, old_len as u64, new_len as u64, may_move as u64))
+        .map(|at| core::ptr::with_exposed_provenance_mut(at as usize))
 }
 
 /// Non-blocking read. Returns bytes read, or `Err(WouldBlock)` if no data available.

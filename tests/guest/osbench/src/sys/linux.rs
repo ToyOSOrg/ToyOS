@@ -514,6 +514,116 @@ pub fn mount_options(dir: &str) -> String {
     mount_of(dir).map_or_else(|| "unknown".into(), |(fstype, _, options)| format!("{fstype} {options}"))
 }
 
+/// What a transfer row reports of the stack beneath it: the kernel's TCP segment counts and
+/// its loss recovery, from `/proc/net/snmp` and `/proc/net/netstat`.
+pub fn net_counters() -> Result<Vec<(String, u64)>, String> {
+    const READ: [(&str, &str); 6] = [
+        ("Tcp", "OutSegs"),
+        ("Tcp", "RetransSegs"),
+        ("TcpExt", "TCPTimeouts"),
+        ("TcpExt", "TCPSackRecovery"),
+        ("TcpExt", "TCPRenoRecovery"),
+        ("TcpExt", "TCPLossProbes"),
+    ];
+    let mut table = std::collections::BTreeMap::new();
+    for file in ["/proc/net/snmp", "/proc/net/netstat"] {
+        let text = fs::read_to_string(file).map_err(|e| format!("{file}: {e}"))?;
+        let lines: Vec<&str> = text.lines().collect();
+        // Each table is a line of names and a line of values, both led by its name.
+        for [names, values] in lines.as_chunks::<2>().0 {
+            let (Some((name, keys)), Some((again, values))) = (names.split_once(':'), values.split_once(':')) else {
+                return Err(format!("{file}: a table's line has no name"));
+            };
+            if name != again {
+                return Err(format!("{file}: {name}'s names are followed by {again}'s values"));
+            }
+            for (key, value) in keys.split_whitespace().zip(values.split_whitespace()) {
+                if let Ok(value) = value.parse::<u64>() {
+                    table.insert(format!("{name}.{key}"), value);
+                }
+            }
+        }
+    }
+    Ok(READ.iter().filter_map(|(name, key)| table.get(&format!("{name}.{key}")).map(|v| (format!("{name}.{key}"), *v))).collect())
+}
+
+/// How a reading adds up over a row's rounds: a time its total, a state its mean.
+#[derive(Clone, Copy)]
+enum Over {
+    Total,
+    Mean,
+}
+
+type Reading = Vec<(&'static str, u64, Over)>;
+
+/// What a row's own connections say of themselves in `TCP_INFO`, each read just before its
+/// end: RFC 4898's sender limits as Linux keeps them (`tcpi_busy_time`, `tcpi_rwnd_limited`,
+/// `tcpi_sndbuf_limited`, microseconds), its congestion window in segments and its smoothed round
+/// trip in microseconds.
+pub struct StreamLog(Vec<Result<Reading, String>>);
+
+impl StreamLog {
+    pub fn new() -> Self {
+        Self(Vec::new())
+    }
+
+    pub fn look(&mut self, stream: &std::net::TcpStream) {
+        self.0.push(tcp_info(stream));
+    }
+
+    /// Each reading as `stream_<name>_total` or `stream_<name>_mean` over the rounds; a reading
+    /// that failed is one field saying why.
+    pub fn fields(&self) -> Vec<(String, String)> {
+        let mut sums: Reading = Vec::new();
+        for reading in &self.0 {
+            match reading {
+                Ok(fields) => {
+                    for &(name, value, over) in fields {
+                        match sums.iter_mut().find(|(n, _, _)| *n == name) {
+                            Some((_, sum, _)) => *sum = sum.saturating_add(value),
+                            None => sums.push((name, value, over)),
+                        }
+                    }
+                }
+                Err(why) => return vec![("stream_unread".to_string(), why.clone())],
+            }
+        }
+        let rounds = self.0.len().max(1) as u64;
+        sums.into_iter()
+            .map(|(name, sum, over)| match over {
+                Over::Total => (format!("stream_{name}_total"), sum.to_string()),
+                Over::Mean => (format!("stream_{name}_mean"), (sum / rounds).to_string()),
+            })
+            .collect()
+    }
+}
+
+fn tcp_info(stream: &std::net::TcpStream) -> Result<Reading, String> {
+    use std::os::fd::AsRawFd;
+    use Over::{Mean, Total};
+    // SAFETY: plain old data, which the kernel fills.
+    let mut info: libc::tcp_info = unsafe { std::mem::zeroed() };
+    let mut len = std::mem::size_of::<libc::tcp_info>() as libc::socklen_t;
+    // SAFETY: `info` is `len` writable bytes, and the descriptor is the stream's own.
+    let rc = unsafe {
+        libc::getsockopt(stream.as_raw_fd(), libc::IPPROTO_TCP, libc::TCP_INFO, (&raw mut info).cast(), &mut len)
+    };
+    if rc != 0 {
+        return Err(format!("TCP_INFO: {}", std::io::Error::last_os_error()));
+    }
+    let full = std::mem::offset_of!(libc::tcp_info, tcpi_sndbuf_limited) + std::mem::size_of::<u64>();
+    if (len as usize) < full {
+        return Err(format!("TCP_INFO answered {len} bytes, short of the sender limits' {full}"));
+    }
+    Ok(vec![
+        ("busy_us", info.tcpi_busy_time, Total),
+        ("rwnd_limited_us", info.tcpi_rwnd_limited, Total),
+        ("sndbuf_limited_us", info.tcpi_sndbuf_limited, Total),
+        ("snd_cwnd_segments", u64::from(info.tcpi_snd_cwnd), Mean),
+        ("srtt_us", u64::from(info.tcpi_rtt), Mean),
+    ])
+}
+
 /// The runner's home, and the filesystem and disk model holding it; the
 /// path itself names the user and is never printed.
 pub fn persistent_dir() -> Option<(String, String)> {

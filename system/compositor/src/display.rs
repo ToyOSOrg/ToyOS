@@ -15,6 +15,7 @@ use std::time::Duration;
 
 use toyos::poller::{Poller, READABLE};
 use toyos::shm::SharedMemory;
+use toyos::device::Scanout;
 use toyos::{endow, AsHandle, DmaRegion, FramebufferDev, PciDev};
 use toyos_abi::syscall::{DeviceType, PciId, SyscallError};
 use toyos_abi::RawHandle;
@@ -238,38 +239,32 @@ fn panel_scale(mode: Mode, edid: &[u8]) -> Scale {
 
 /// The firmware's framebuffer.
 pub struct Gop {
-    /// Held: closing it gives the framebuffer back to the kernel.
-    _claim: FramebufferDev,
-    info: toyos_abi::FramebufferInfo,
     /// Held because `screen` points into it.
-    _scanout: SharedMemory,
+    scanout: Scanout,
     screen: Screen,
     mode: Mode,
 }
 
 impl Gop {
     fn open(claim: FramebufferDev) -> Self {
-        let info = claim.info().expect("compositor: the framebuffer claim's description");
         // A handle the claim's own read installed, so a refusal is the kernel
         // contradicting itself and not a client doing anything.
-        let scanout = SharedMemory::adopt(info.scanout, info.stride as usize * info.height as usize * 4)
-            .expect("the scanout the framebuffer claim just handed over");
+        let scanout = claim.open().expect("compositor: the framebuffer claim's description and scanout");
+        let info = scanout.info();
         let screen = Screen::new(
-            scanout.as_ptr(),
+            scanout.memory().as_ptr(),
             info.width as usize,
             info.height as usize,
             info.stride as usize,
             info.pixel_format,
         );
         let mode = Mode::new(info.width, info.height);
-        Self { _claim: claim, info, _scanout: scanout, screen, mode }
+        Self { scanout, screen, mode }
     }
 
     fn edid(&self) -> &[u8] {
-        self.info
-            .edid
-            .get(..self.info.edid_len as usize)
-            .expect("the kernel hands over an EDID length of 0 or one block")
+        let info = self.scanout.info();
+        info.edid.get(..info.edid_len as usize).expect("the kernel hands over an EDID length of 0 or one block")
     }
 }
 

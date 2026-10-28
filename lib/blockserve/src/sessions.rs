@@ -134,6 +134,8 @@ impl Sessions {
         // A region the kernel did not allocate, or longer than a session,
         // which would spend the claim's bound on the kernel's side for every
         // other client, is refused whole.
+        // SAFETY: the client's, handed over to this call to consume.
+        let region = unsafe { toyos::OwnedHandle::from_raw(region) };
         let Ok(region) = Region::lent(region) else { return refuse(&conn, Refusal::Malformed) };
         let (first, blocks) = match self.place(unique, dev) {
             Ok(span) => span,
