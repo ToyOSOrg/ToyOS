@@ -16,6 +16,10 @@
 //! They are reached through [`Bytes`], or by `unsafe` code over
 //! [`SharedMemory::as_ptr`] keeping the same rule.
 //!
+//! **A region one party writes and another only reads** is handed to the
+//! reader without `WRITE` ([`ReadOnly`]): the kernel maps it readable only,
+//! and its holder can never map it writable or lend it to a device.
+//!
 //! A handle is judged by the kernel's answer before it is mapped
 //! ([`SharedMemory::lent`], [`SharedMemory::adopt`]), since mapping one that
 //! names no region ends this process.
@@ -28,7 +32,8 @@ use alloc::vec::Vec;
 use core::fmt;
 use core::marker::PhantomData;
 
-use toyos_abi::syscall::{self, FileType, Stat, SyscallError, PAGE_SIZE, SHM_DEVICE};
+use toyos_abi::handle::Rights;
+use toyos_abi::syscall::{self, FileType, Stat, SyscallError, VmProt, PAGE_SIZE, SHM_DEVICE};
 
 use crate::{AsHandle, OwnedHandle, RawHandle};
 
@@ -83,17 +88,19 @@ impl SharedMemory {
             return Err(SyscallError::InvalidArgument);
         }
         // A region the kernel maps is within the address space, so its length is a `usize`.
-        Ok(Self { ptr: map(&handle)?, handle, len, mapped: stat.size as usize })
+        Ok(Self { ptr: map(&handle, VmProt::ReadWrite)?, handle, len, mapped: stat.size as usize })
     }
 
     /// Map a region a peer lent, whose protocol says it is `bytes` long, and
     /// view those bytes; refused, and never mapped, unless the kernel answers
     /// it is memory it allocated, `bytes` rounded up to whole pages, as
-    /// [`Self::create`] makes it. The handle is consumed either way.
+    /// [`Self::create`] makes it. The handle is consumed either way; one
+    /// lent without `WRITE` is the kernel's `PermissionDenied`.
     pub fn lent(handle: OwnedHandle, bytes: usize) -> Result<Self, Lent> {
         let stat = syscall::fstat(handle.raw()).map_err(Lent::Kernel)?;
         judge(&stat, bytes)?;
-        Ok(Self { ptr: map(&handle).map_err(Lent::Kernel)?, handle, len: bytes, mapped: stat.size as usize })
+        let ptr = map(&handle, VmProt::ReadWrite).map_err(Lent::Kernel)?;
+        Ok(Self { ptr, handle, len: bytes, mapped: stat.size as usize })
     }
 
     /// A second handle to the same region, for sending to a peer.
@@ -104,10 +111,18 @@ impl SharedMemory {
         syscall::dup(self.handle.raw()).map(OwnedHandle)
     }
 
+    /// [`Self::share`], without `WRITE`: a peer's [`ReadOnly::lent`] maps it,
+    /// and nothing it does with the handle writes the region.
+    pub fn share_read_only(&self) -> Result<OwnedHandle, SyscallError> {
+        syscall::dup_narrowed(self.handle.raw(), READ_ONLY).map(OwnedHandle)
+    }
+
     /// The viewed bytes, as memory. A device's registers are reached through
     /// a [`Window`](crate::volatile::Window) instead.
     pub fn bytes(&self) -> Bytes<'_> {
-        Bytes { ptr: self.ptr, len: self.len, _mapping: PhantomData }
+        // SAFETY: the viewed bytes of this writable mapping, which lives as
+        // long as `self`; `SharedMemory` reaches them no other way.
+        unsafe { Bytes::from_raw(self.ptr, self.len) }
     }
 
     /// The first byte, for `unsafe` code that reaches the region as atomics
@@ -155,33 +170,24 @@ impl AsHandle for SharedMemory {
 /// A range of a mapping another party can write, borrowed from what keeps it
 /// mapped.
 ///
-/// Each read and write is one copy the compiler sees only as an access to the
-/// range (`crate::arch::copy`), so it is never repeated or assumed to hold
-/// still. It is no snapshot: a writer meanwhile changes which bytes arrive. A
-/// reader acts on its own copy and never reads the same bytes twice to check
-/// them.
+/// Each read is one copy the compiler sees only as an access to the range
+/// (`crate::arch::copy`), so it is never repeated or assumed to hold still.
+/// It is no snapshot: a writer meanwhile changes which bytes arrive. A reader
+/// acts on its own copy and never reads the same bytes twice to check them.
 #[derive(Clone, Copy)]
-pub struct Bytes<'a> {
-    ptr: *mut u8,
+pub struct ReadBytes<'a> {
+    ptr: *const u8,
     len: usize,
-    _mapping: PhantomData<&'a SharedMemory>,
+    _mapping: PhantomData<&'a ()>,
 }
 
 // SAFETY: a range of a mapping the process holds, reached only by opaque
 // copies that form no data race in Rust's model.
-unsafe impl Send for Bytes<'_> {}
+unsafe impl Send for ReadBytes<'_> {}
 // SAFETY: as for `Send`.
-unsafe impl Sync for Bytes<'_> {}
+unsafe impl Sync for ReadBytes<'_> {}
 
-impl<'a> Bytes<'a> {
-    /// # Safety
-    /// `ptr` names `len` bytes that stay mapped for all of `'a`, which this
-    /// process reaches only through `Bytes`, atomics or volatile accesses
-    /// meanwhile.
-    pub unsafe fn from_raw(ptr: *mut u8, len: usize) -> Self {
-        Self { ptr, len, _mapping: PhantomData }
-    }
-
+impl<'a> ReadBytes<'a> {
     pub fn len(self) -> usize {
         self.len
     }
@@ -209,19 +215,6 @@ impl<'a> Bytes<'a> {
         unsafe { crate::arch::copy(out.as_mut_ptr(), from.ptr, out.len()) }
     }
 
-    /// Copy `data` in at `offset`.
-    pub fn write(self, offset: usize, data: &[u8]) {
-        let to = self.sub(offset, data.len());
-        // SAFETY: as in `read`, with the two sides swapped.
-        unsafe { crate::arch::copy(to.ptr, data.as_ptr(), data.len()) }
-    }
-
-    /// Write zeroes over the whole range.
-    pub fn zero(self) {
-        // SAFETY: the whole range, which is mapped for `'a`.
-        unsafe { crate::arch::zero(self.ptr, self.len) }
-    }
-
     pub fn to_vec(self) -> Vec<u8> {
         let mut out = alloc::vec![0; self.len];
         self.read(0, &mut out);
@@ -239,9 +232,64 @@ impl<'a> Bytes<'a> {
     }
 }
 
-fn map(handle: &OwnedHandle) -> Result<*mut u8, SyscallError> {
+/// [`ReadBytes`] of a writable mapping, which each write reaches by one copy
+/// as each read is.
+#[derive(Clone, Copy)]
+pub struct Bytes<'a>(ReadBytes<'a>);
+
+impl<'a> Bytes<'a> {
+    /// # Safety
+    /// `ptr` names `len` writable bytes that stay mapped for all of `'a`,
+    /// which this process reaches only through `Bytes`, atomics or volatile
+    /// accesses meanwhile.
+    pub unsafe fn from_raw(ptr: *mut u8, len: usize) -> Self {
+        Self(ReadBytes { ptr, len, _mapping: PhantomData })
+    }
+
+    /// `len` of these bytes from `offset`.
+    pub fn sub(self, offset: usize, len: usize) -> Self {
+        Self(self.0.sub(offset, len))
+    }
+
+    /// Copy `data` in at `offset`.
+    pub fn write(self, offset: usize, data: &[u8]) {
+        let to = self.0.sub(offset, data.len());
+        // SAFETY: `sub` bounded the destination inside the range, which is
+        // writable, and `data` is a reference, so it is not the mapping.
+        unsafe { crate::arch::copy(to.ptr.cast_mut(), data.as_ptr(), data.len()) }
+    }
+
+    /// Write zeroes over the whole range.
+    pub fn zero(self) {
+        // SAFETY: the whole range, which is mapped writable for `'a`.
+        unsafe { crate::arch::zero(self.0.ptr.cast_mut(), self.0.len) }
+    }
+
+    /// Copy the whole range in from `src`.
+    ///
+    /// # Safety
+    /// `src` is readable for [`len`](ReadBytes::len) bytes, and no reference
+    /// reaches them meanwhile.
+    pub unsafe fn write_from(self, src: *const u8) {
+        // SAFETY: the caller's, and the range is mapped writable for `'a`.
+        unsafe { crate::arch::copy(self.0.ptr.cast_mut(), src, self.0.len) }
+    }
+}
+
+impl<'a> core::ops::Deref for Bytes<'a> {
+    type Target = ReadBytes<'a>;
+
+    fn deref(&self) -> &ReadBytes<'a> {
+        &self.0
+    }
+}
+
+/// What a region's writable handle carries, but `WRITE`.
+const READ_ONLY: Rights = Rights::MAP.union(Rights::DUP).union(Rights::TRANSFER);
+
+fn map(handle: &OwnedHandle, prot: VmProt) -> Result<*mut u8, SyscallError> {
     // SAFETY: the mapping lives as long as what holds it, which takes it away.
-    let ptr = unsafe { syscall::shm_map(handle.raw()) }?;
+    let ptr = unsafe { syscall::shm_map(handle.raw(), prot) }?;
     assert!(!ptr.is_null(), "shm_map answered null");
     Ok(ptr)
 }
@@ -286,6 +334,66 @@ fn judge(stat: &Stat, bytes: usize) -> Result<(), Lent> {
     Ok(())
 }
 
+/// A read-only mapping of a region another party may write, whose bytes are
+/// reached through [`ReadBytes`].
+pub struct ReadOnly {
+    handle: OwnedHandle,
+    ptr: *const u8,
+    len: usize,
+    mapped: usize,
+}
+
+// SAFETY: as for `SharedMemory`, through `ReadBytes`.
+unsafe impl Send for ReadOnly {}
+// SAFETY: as for `Send`.
+unsafe impl Sync for ReadOnly {}
+
+impl ReadOnly {
+    /// A fresh region of `len` bytes of zeroes, mapped here read-only, and
+    /// the one handle that maps it writable, for the party that writes it.
+    pub fn create(len: usize) -> Result<(Self, OwnedHandle), SyscallError> {
+        let writer = OwnedHandle(syscall::shm_create(len)?);
+        let handle = OwnedHandle(syscall::dup_narrowed(writer.raw(), READ_ONLY)?);
+        let ptr = map(&handle, VmProt::Read)?;
+        // `shm_create` refused any `len` whose pages overflow.
+        Ok((Self { handle, ptr, len, mapped: len.next_multiple_of(PAGE_SIZE) }, writer))
+    }
+
+    /// [`SharedMemory::lent`], mapped read-only, whatever the handle allows.
+    pub fn lent(handle: OwnedHandle, bytes: usize) -> Result<Self, Lent> {
+        let stat = syscall::fstat(handle.raw()).map_err(Lent::Kernel)?;
+        judge(&stat, bytes)?;
+        let ptr = map(&handle, VmProt::Read).map_err(Lent::Kernel)?;
+        Ok(Self { handle, ptr, len: bytes, mapped: stat.size as usize })
+    }
+
+    pub fn bytes(&self) -> ReadBytes<'_> {
+        ReadBytes { ptr: self.ptr, len: self.len, _mapping: PhantomData }
+    }
+
+    pub fn len(&self) -> usize {
+        self.len
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.len == 0
+    }
+}
+
+impl Drop for ReadOnly {
+    fn drop(&mut self) {
+        // SAFETY: the mapping `map` made, which nothing reaches once this drops;
+        // the handle closes after it.
+        let _ = unsafe { syscall::vm_release(self.ptr.cast_mut(), self.mapped) };
+    }
+}
+
+impl AsHandle for ReadOnly {
+    fn as_handle(&self) -> RawHandle {
+        self.handle.raw()
+    }
+}
+
 /// A region nobody can write, mapped read-only: a payload the loader verified,
 /// as the kernel hands it out (`toyos_abi::boot::BootImage`).
 pub struct Immutable {
@@ -309,7 +417,7 @@ impl Immutable {
             return Err(NotImmutable::Writable);
         }
         // A region the kernel maps is within the address space, so its length is a `usize`.
-        Ok(Self { ptr: map(&handle).map_err(NotImmutable::Kernel)?, handle, len: stat.size as usize })
+        Ok(Self { ptr: map(&handle, VmProt::Read).map_err(NotImmutable::Kernel)?, handle, len: stat.size as usize })
     }
 
     /// `len` of its bytes from `offset`, a whole page in, as a region of

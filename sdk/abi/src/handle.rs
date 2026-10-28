@@ -133,6 +133,8 @@ impl Rights {
     /// May be endowed at spawn or sent over a connection.
     pub const TRANSFER: Rights = Rights(1 << 1);
     pub const READ: Rights = Rights(1 << 2);
+    /// On memory: map it writable, or lend it to a device; a holder without
+    /// it maps the region only readable.
     pub const WRITE: Rights = Rights(1 << 3);
     /// Shared memory, a pipe's ring page, an [inbox](crate::inbox)'s rings.
     pub const MAP: Rights = Rights(1 << 4);

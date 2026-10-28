@@ -188,16 +188,6 @@ impl SharedMemObject {
         !matches!(self.backing, Backing::Aperture { .. })
     }
 
-    /// The most a mapping of it may allow: a boot image, and any part of
-    /// one, is read-only.
-    pub fn max_prot(&self) -> kernel::vm::Prot {
-        match &self.backing {
-            Backing::Boot { .. } => kernel::vm::Prot::Read,
-            Backing::Sub { whole, .. } => whole.max_prot(),
-            Backing::Frames(_) | Backing::Run(_) | Backing::Aperture { .. } => kernel::vm::Prot::ReadWrite,
-        }
-    }
-
     /// The physical run and its length in whole 2 MiB pages, for ordinary
     /// memory the kernel allocated in one run — the only kind a device may be
     /// lent (`pcidev::dma_map`). `None` for anything else, a part of a run
