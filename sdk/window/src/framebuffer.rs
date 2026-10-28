@@ -267,6 +267,27 @@ impl Framebuffer {
     /// Blit a buffer to a region of the framebuffer (row-by-row memcpy).
     /// `src_stride` is the width of the source buffer (may differ from `w` during resize).
     pub fn blit(&self, x: usize, y: usize, w: usize, h: usize, src_stride: usize, buffer: &[u8]) {
+        self.blit_rows(x, y, w, h, src_stride, |at, dst, bytes| {
+            let row = &buffer[at..at + bytes];
+            // SAFETY: `dst` is `bytes` of this framebuffer, and `row` is a
+            // reference, so it is not them.
+            unsafe { ptr::copy_nonoverlapping(row.as_ptr(), dst, bytes) }
+        });
+    }
+
+    /// [`Self::blit`] from bytes another party can write, such as a client's
+    /// buffer: each row one copy out of them.
+    pub fn blit_shared(&self, x: usize, y: usize, w: usize, h: usize, src_stride: usize, src: toyos::shm::Bytes<'_>) {
+        self.blit_rows(x, y, w, h, src_stride, |at, dst, bytes| {
+            // SAFETY: `dst` is `bytes` of this framebuffer, which composes into
+            // memory of its own and never into a source it reads.
+            unsafe { src.sub(at, bytes).read_to(dst) }
+        });
+    }
+
+    /// Hand `row` each row the blit covers: where it starts in the source, its
+    /// first byte here, and its length.
+    fn blit_rows(&self, x: usize, y: usize, w: usize, h: usize, src_stride: usize, mut row: impl FnMut(usize, *mut u8, usize)) {
         let blit_w = w.min(self.width.saturating_sub(x));
         if blit_w == 0 {
             return;
@@ -275,16 +296,10 @@ impl Framebuffer {
         let copy_bytes = blit_w * 4;
         let src_row_bytes = src_stride * 4;
         for dy in 0..rows {
-            let src_offset = dy * src_row_bytes;
             let dst_offset = ((y + dy) * self.stride + x) * 4;
             debug_assert!(dst_offset + copy_bytes <= self.len);
-            unsafe {
-                ptr::copy_nonoverlapping(
-                    buffer.as_ptr().add(src_offset),
-                    self.buf.add(dst_offset),
-                    copy_bytes,
-                );
-            }
+            // SAFETY: inside the framebuffer, as `new`'s caller mapped it.
+            row(dy * src_row_bytes, unsafe { self.buf.add(dst_offset) }, copy_bytes);
         }
     }
 

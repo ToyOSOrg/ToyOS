@@ -196,6 +196,8 @@ type Lent = (Region, [Pipe; BELLS], Rc<Holders>);
 /// ends the answer hands over, and the holders. Refused by name, nothing is
 /// mapped, and the connection is handed back with the refusal's word.
 fn lend(connection: Connection, region: toyos::RawHandle) -> Result<Lent, (Connection, u32)> {
+    // SAFETY: the holder's frame moved it here, and nothing else answers for it.
+    let region = unsafe { toyos::OwnedHandle::from_raw(region) };
     let mapping = match Region::judged(region) {
         Ok(mapping) => mapping,
         Err(why) => {

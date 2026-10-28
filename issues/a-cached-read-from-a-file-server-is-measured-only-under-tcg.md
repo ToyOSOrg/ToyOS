@@ -17,8 +17,8 @@ boots:
 | a 4 KiB read, the round trip | 153–188 µs | 3.9–5.1 µs |
 
 The server copies each cached block into the client's window once, and the
-client copies the window into its buffer once (`toyos::fs::window_take`, one
-`copy_nonoverlapping`). In the same guest a 256 KiB `copy_nonoverlapping` out
+client copies the window into its buffer once (`toyos::shm::Bytes::read`,
+one `copy_nonoverlapping` when this was measured). In the same guest a 256 KiB `copy_nonoverlapping` out
 of a shared-memory mapping into a heap buffer costs 2.86 ns a byte — about
 750 µs, the rest of the request — where the same copy between two heap
 buffers costs 0.23 ns a byte and a 2 MiB one out of the mapping 0.45 ns. What

@@ -99,6 +99,8 @@ impl core::fmt::Display for Departure {
 pub(crate) struct ClientStream {
     pub(crate) client_id: usize,
     pub(crate) slot_reader: AudioSlotReader,
+    /// One period of the ring, copied out of the slot it is decoded from.
+    period: Vec<u8>,
     /// The write end of the signal pipe. soundserver makes both ends and sends the
     /// read end to the client, so crash detection is by construction:
     /// the moment the client's table goes, the read end goes with it and the
@@ -244,6 +246,7 @@ pub(crate) fn open_stream(
     Some(ClientStream {
         client_id,
         slot_reader,
+        period: vec![0; client_period_bytes as usize],
         signal_write: signal_write.into_raw(),
         gain,
         client_channels: req.channels,
@@ -258,7 +261,7 @@ pub(crate) fn open_stream(
 /// ring could not supply a full period (silence mixed instead).
 ///
 /// Slots are consumed peek→copy-out→advance: read_idx is published only after
-/// the slot data has been decoded out of shared memory, so a concurrently
+/// the slot data has been copied out of shared memory, so a concurrently
 /// filling client can never overwrite a slot soundserver is still reading.
 pub(crate) fn mix_client(
     stream: &mut ClientStream,
@@ -287,8 +290,9 @@ pub(crate) fn mix_client(
                 stream.gain.advance_frames(device_period_frames as u32);
                 return false;
             };
-            decode_i16_to_f32(slot.data(), &mut decode_buf[..client_samples]);
+            slot.read(&mut stream.period);
             slot.advance();
+            decode_i16_to_f32(&stream.period, &mut decode_buf[..client_samples]);
             append_planar(&decode_buf[..client_samples], client_channels, &mut rs.accum);
         }
 
@@ -311,8 +315,9 @@ pub(crate) fn mix_client(
         stream.gain.advance_frames(device_period_frames as u32);
         return false;
     };
-    decode_i16_to_f32(slot.data(), &mut decode_buf[..client_samples]);
+    slot.read(&mut stream.period);
     slot.advance();
+    decode_i16_to_f32(&stream.period, &mut decode_buf[..client_samples]);
 
     mix_interleaved(
         mix_f32,

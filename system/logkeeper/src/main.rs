@@ -350,6 +350,8 @@ impl Log {
             toyos_abi::syscall::close(ring);
             return;
         }
+        // SAFETY: the supervisor's frame moved it here, and nothing else answers for it.
+        let ring = unsafe { toyos::OwnedHandle::from_raw(ring) };
         match Origin::open(tag, pid, ring, alive) {
             Ok(origin) => self.origins.push(origin),
             Err(why) => toyos::error!("logkeeper: refusing a ring the supervisor sent: {why}"),

@@ -20,7 +20,7 @@
 //! **A refusal after bring-up ends soundserver** by its own name, as netstack's
 //! does: no conforming device writes one.
 
-use toyos::shm::SharedMemory;
+use toyos::shm::{Bytes, SharedMemory};
 use toyos::{DmaRegion, PciDev};
 use toyos_abi::syscall::SyscallError;
 use toyos_pci_claim::virtio::{negotiate, Negotiated};
@@ -81,11 +81,10 @@ impl From<KernelRefused> for Refusal {
 pub struct Virtio {
     dev: PciDev,
     sound: Sound<Grant, Live<Bar>>,
-    grant: Grant,
     /// Held for their mappings' lives: the register window points into the
-    /// first and the grant into the second.
+    /// first and the grant into the second, whose periods are written here.
     _bar: SharedMemory,
-    _region: DmaRegion,
+    region: DmaRegion,
 }
 
 impl Virtio {
@@ -118,7 +117,7 @@ impl Virtio {
             "virtio-sound: configured stream {STREAM_ID}: {}Hz {}ch s16le",
             stream.rate, stream.channels
         );
-        let virtio = Self { dev, sound, grant, _bar: mapping, _region: region };
+        let virtio = Self { dev, sound, _bar: mapping, region };
         Ok((virtio, stream.rate, stream.channels))
     }
 
@@ -126,8 +125,9 @@ impl Virtio {
         &self.dev
     }
 
-    pub fn buffer(&self, idx: usize) -> *mut u8 {
-        self.grant.window().sub(Sound::<Grant, Live<Bar>>::period(idx), PERIOD_BYTES).as_ptr()
+    /// Period `idx` of the grant, over the region its window starts at.
+    pub fn period(&self, idx: usize) -> Bytes<'_> {
+        self.region.memory.bytes().sub(Sound::<Grant, Live<Bar>>::period(idx), PERIOD_BYTES)
     }
 
     /// The periods played since the last call, and when the device said so.

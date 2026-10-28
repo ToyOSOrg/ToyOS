@@ -317,6 +317,9 @@ pub(crate) fn mix_thread(
 
     let poller = Poller::new(64);
     let mut mix_f32 = vec![0.0f32; device_period_samples];
+    // The quantized period and its bytes, copied into the device's memory whole.
+    let mut quantized = vec![0i16; device_period_samples];
+    let mut period = vec![0u8; device_period_samples * 2];
     // Sized for the highest client rate accepted at stream open, so the mix
     // path never allocates.
     let max_client_frames = scratch_frames(device_period_frames, device_sample_rate as usize);
@@ -598,10 +601,11 @@ pub(crate) fn mix_thread(
                 any_streaming |= stream.is_streaming();
             }
 
-            let dma_buf = unsafe {
-                core::slice::from_raw_parts_mut(backend.buffer(idx) as *mut i16, device_period_samples)
-            };
-            quantize_period(dma_buf, &mix_f32, &mut dither_rng);
+            quantize_period(&mut quantized, &mix_f32, &mut dither_rng);
+            for (bytes, sample) in period.chunks_exact_mut(2).zip(&quantized) {
+                bytes.copy_from_slice(&sample.to_ne_bytes());
+            }
+            backend.period(idx).write(0, &period);
 
             if !started {
                 started = true;

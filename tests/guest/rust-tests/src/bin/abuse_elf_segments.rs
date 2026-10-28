@@ -139,9 +139,7 @@ fn spawn_err(name: &str, bytes: &[u8]) -> SyscallError {
 fn spawn_as(path: &str, image: &[u8]) -> SyscallError {
     let argv = format!("{path}\0");
     let object = toyos::shm::SharedMemory::create(image.len().max(1)).expect("a memory object for the image");
-    // SAFETY: the region is at least `image.len()` long, mapped here, and this
-    // process's alone; `image` is not in it.
-    unsafe { core::ptr::copy_nonoverlapping(image.as_ptr(), object.as_ptr(), image.len()) };
+    object.bytes().write(0, image);
     unsafe {
         syscall::spawn(&SpawnArgs {
             path_ptr: path.as_ptr() as u64,
