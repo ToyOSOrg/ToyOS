@@ -48,7 +48,6 @@ use toyos_link::wire::{Hello, Refusal};
 use toyos_net_ip::Nud;
 use toyos_net_node::Node;
 use toyos_net_shard::{Config, Secrets};
-use toyos_net_wire::ethernet::{IndividualMac, MacAddr};
 use toyos_net_wire::Instant;
 
 mod client;
@@ -308,16 +307,10 @@ fn answer_inspect(request: &Request, link: Option<(&Session, Option<&Counters>)>
     request.client.snapshot(&encoded);
 }
 
-/// Open the link `hello` asks for, unless the stack holds one or held one with
-/// another address.
-fn open(hello: Hello, conn: toyos::Connection, region: toyos_link::region::Region, held: Option<[u8; 6]>, groups: &[Group]) -> Option<Session> {
-    if held.is_some_and(|mac| mac != hello.mac) {
-        say!("netstack: refused {}'s link: netstack drives the one link it began with", hello.label);
-        link::refuse(&conn, Refusal::OneLink);
-        return None;
-    }
-    let label = hello.label.clone();
-    let opened = Session::open(hello, conn, region, groups);
+/// Open the link `asked` asks for, and say so.
+fn open(asked: Asked, groups: &[Group]) -> Option<Session> {
+    let label = asked.hello.label.clone();
+    let opened = Session::open(asked.hello, asked.conn, asked.region, groups);
     match &opened {
         Some(_) => say!("netstack: {label}'s link is open"),
         None => say!("netstack: {label} went before its link was opened"),
@@ -325,10 +318,18 @@ fn open(hello: Hello, conn: toyos::Connection, region: toyos_link::region::Regio
     opened
 }
 
-/// Hear each pending driver; a hello is opened, or refused while `link` holds
-/// one. Answers a link opened.
-fn hear_links(pending: &mut Vec<Pending>, link: &Option<Session>, mac: Option<[u8; 6]>, groups: &[Group]) -> Option<Session> {
-    let mut opened = None;
+/// Refuse `asked` by `why`, and say so.
+fn refuse(asked: &Asked, why: Refusal, because: &str) {
+    say!("netstack: refused {}'s link: {because}", asked.hello.label);
+    link::refuse(&asked.conn, why);
+}
+
+/// Every hello the pending drivers said, in the order heard; a connection
+/// that went, said what no driver says first, or has said nothing within
+/// [`HANDSHAKE_TIMEOUT`] is let go.
+fn hear_links(pending: &mut Vec<Pending>) -> Vec<Asked> {
+    pending.retain(|p| p.since.elapsed() < HANDSHAKE_TIMEOUT);
+    let mut asked = Vec::new();
     let mut i = 0;
     while i < pending.len() {
         match pending[i].hear() {
@@ -338,16 +339,26 @@ fn hear_links(pending: &mut Vec<Pending>, link: &Option<Session>, mac: Option<[u
             }
             Heard::Hello(hello, region) => {
                 let conn = pending.remove(i).into_conn();
-                if link.is_some() || opened.is_some() {
-                    say!("netstack: refused {}'s link: netstack drives one link (issues/netstack-drives-one-card.md)", hello.label);
-                    link::refuse(&conn, Refusal::OneLink);
-                } else {
-                    opened = open(hello, conn, region, mac, groups);
-                }
+                asked.push(Asked { hello, conn, region });
             }
         }
     }
-    opened
+    asked
+}
+
+/// End `link` for `why`; the node hears a change, not a state.
+fn end_link(link: &mut Option<Session>, why: Ended, node: &mut Node, now: Instant, faulted: &mut bool) {
+    let Some(session) = link.take() else { return };
+    match why {
+        Ended::HungUp => say!("netstack: {}'s link ended: it hung up", session.hello().label),
+        Ended::Fault(fault) => {
+            say!("netstack: {}'s link ended: it wrote {fault}", session.hello().label);
+            *faulted = true;
+        }
+    }
+    if session.is_up() {
+        node.link(now, false, draw);
+    }
 }
 
 /// A driver's connection, kept to hear its hello while there is room.
@@ -365,8 +376,15 @@ fn first_link(links: &Acceptor, groups: &[Group]) -> Option<Session> {
     let mut pending: Vec<Pending> = Vec::new();
     let mut poller = watches::Watches::new(1 + MAX_PENDING_LINKS);
     loop {
-        if let Some(link) = hear_links(&mut pending, &None, None, groups) {
-            return Some(link);
+        let mut opened = None;
+        for asked in hear_links(&mut pending) {
+            match opened {
+                Some(_) => refuse(&asked, Refusal::OneLink, "netstack drives one link (issues/netstack-drives-one-card.md)"),
+                None => opened = open(asked, groups),
+            }
+        }
+        if opened.is_some() {
+            return opened;
         }
         let Some(left) = LINK_BOUND.checked_sub(began.elapsed()) else { return None };
         poller.watch(links, READABLE, TOKEN_LINKS);
@@ -390,6 +408,13 @@ const _: () = assert!(
     toyos_inspect::MAX_SNAPSHOT_BYTES == ipc::MAX_FRAME_LEN as usize,
     "a snapshot is one frame"
 );
+
+/// A driver's hello, with what it came with.
+struct Asked {
+    hello: Hello,
+    conn: toyos::Connection,
+    region: toyos_link::region::Region,
+}
 
 /// An `inspect` waiting for the driver's counters.
 struct Inspecting {
@@ -417,7 +442,7 @@ fn main() {
     let began = Wall::now();
     let clock = || Instant::from_nanos(u64::try_from(began.elapsed().as_nanos()).unwrap_or(u64::MAX));
     let config = Config {
-        mac: IndividualMac::new(MacAddr(mac)).unwrap_or_else(|| panic!("netstack: the link's address is a group's")),
+        mac,
         receive_buffer: TCP_BUFFER,
         send_buffer: toyos::net::stream::SEND_BYTES,
         secrets: secrets(),
@@ -447,6 +472,9 @@ fn main() {
     let mut pending: Vec<PendingConn> = Vec::new();
     let mut pending_links: Vec<Pending> = Vec::new();
     let mut inspecting: Vec<Inspecting> = Vec::new();
+    // The held link ended for what its driver wrote, and its next hello is
+    // refused for it.
+    let mut faulted = false;
     // Accepts the kernel refused since the last it did not.
     let mut accept_refused: u64 = 0;
 
@@ -474,6 +502,10 @@ fn main() {
 
         // The driver's counters, once it answered them or its time to is up.
         if !inspecting.is_empty() {
+            // A link opened since the ask is asked in its turn.
+            if let Some(session) = &mut link {
+                session.ask_counters();
+            }
             let counters = link.as_mut().and_then(Session::counters);
             let late = inspecting.first().is_some_and(|i| i.since.elapsed() >= INSPECT_BOUND);
             if counters.is_some() || late || link.is_none() {
@@ -488,17 +520,8 @@ fn main() {
         {
             ended = Some(why);
         }
-        if let Some(why) = ended
-            && let Some(session) = link.take()
-        {
-            match why {
-                Ended::HungUp => say!("netstack: {}'s link ended: it hung up", session.hello().label),
-                Ended::Fault(fault) => say!("netstack: {}'s link ended: it wrote {fault}", session.hello().label),
-            }
-            // The node hears a change, not a state.
-            if session.is_up() {
-                node.link(clock(), false, draw);
-            }
+        if let Some(why) = ended {
+            end_link(&mut link, why, &mut node, clock(), &mut faulted);
         }
 
         sockets.settle(&mut node);
@@ -553,14 +576,32 @@ fn main() {
         });
         sockets.bridge(&mut node, clock());
 
-        // A driver's connection: a link that ended is opened again on its
-        // driver's hello, with the address the node was made with.
+        // A driver's connection: a hello with the address the node was made
+        // with is opened, once a link it replaces has ended. The kernel closes
+        // a dead driver's handles before its end is published, so a
+        // restarted driver's hello finds the old link already hung up.
         if ready.contains(&TOKEN_LINKS) {
             accept_link(&links, &mut pending_links);
         }
-        pending_links.retain(|p| p.since.elapsed() < HANDSHAKE_TIMEOUT);
-        if let Some(opened) = hear_links(&mut pending_links, &link, Some(mac), &groups) {
-            link = Some(opened);
+        for asked in hear_links(&mut pending_links) {
+            if asked.hello.mac != mac {
+                refuse(&asked, Refusal::OneLink, "its address is not the one netstack drives (issues/netstack-drives-one-card.md)");
+                continue;
+            }
+            if std::mem::take(&mut faulted) {
+                refuse(&asked, Refusal::Faulted, "its last link ended for what it wrote");
+                continue;
+            }
+            if let Some(session) = &link {
+                match session.alive() {
+                    Ok(()) => {
+                        refuse(&asked, Refusal::OneLink, "a link of its address is open");
+                        continue;
+                    }
+                    Err(why) => end_link(&mut link, why, &mut node, clock(), &mut faulted),
+                }
+            }
+            link = open(asked, &groups);
         }
         // On a pass that found nothing ready too: otherwise a silent client
         // is only ever timed out by some other client's traffic.

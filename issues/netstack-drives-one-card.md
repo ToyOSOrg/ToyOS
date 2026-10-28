@@ -6,9 +6,9 @@ opened: 2026-10-12
 
 # netstack drives one card
 
-netstack opens the first link a NIC driver brings, and no other: a second
-driver's hello, or one with another address after the first link ended, is
-refused `OneLink` (`system/netstack/src/main.rs`, `hear_links` and `open`).
+netstack opens the first link a NIC driver brings, and no other: a hello with
+another address, or with that address while its link is alive, is refused
+`OneLink` (`system/netstack/src/main.rs`'s loop).
 Its node is one interface with one DHCP client, made with the first link's
 address (`system/netstack/node/src/lib.rs`). So a machine with a wired and a
 wireless link uses only one of them, whichever driver says hello first.

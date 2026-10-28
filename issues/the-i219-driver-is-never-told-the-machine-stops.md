@@ -4,16 +4,17 @@ kind: defect
 opened: 2026-10-28
 ---
 
-# netstack is never told the machine stops
+# The I219 driver is never told the machine stops
 
 The supervisor tells only disk drivers that the machine stops
 (`toyos_quiesce::DRIVER_STOP`, `stop_drivers` in
-`system/supervisor/src/main.rs`). netstack is a `[boot] start` service holding
-its card through `devices`, so a reboot or power-off parks it in the kernel's
-quiesce and its I219 destructor never runs: `CTRL_EXT` bit 28, the host's word
-to the firmware that a driver holds the function (`toyos_i219`'s `pch`), stays
-set across the reset, and nothing the driver could say about the PHY at the end
-reaches the log.
+`system/supervisor/src/main.rs`). The `i219` driver is a `drives` row the
+supervisor gives no stop pipe, so a reboot or power-off parks it in the
+kernel's quiesce and its I219 destructor never runs: `CTRL_EXT` bit 28, the
+host's word to the firmware that a driver holds the function (`toyos_i219`'s
+`pch`), stays set across the reset, and nothing the driver could say about
+the PHY at the end reaches the log. The disk drivers' stop pipe is the
+mechanism a `drives` row already has for it.
 
 The next operating system's start does not depend on it: the driver disarms
 Ultra Low Power at its own start (`system/i219/driver/src/ulp.rs`), and a

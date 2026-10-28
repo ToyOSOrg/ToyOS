@@ -117,6 +117,11 @@ impl Session {
         &self.hello
     }
 
+    /// The link's end if its driver has hung up, read now.
+    pub fn alive(&self) -> Result<(), Ended> {
+        self.hear()
+    }
+
     /// Whether the node was last told this link is up.
     pub fn is_up(&self) -> bool {
         self.said.is_up()
@@ -208,6 +213,9 @@ impl Session {
     /// The counters asked for, once the driver answered; `None` while it owes
     /// them.
     pub fn counters(&mut self) -> Option<Counters> {
+        if !self.asked {
+            return None;
+        }
         let counters = self.end.counters(self.region.words())?;
         self.asked = false;
         Some(counters)
@@ -245,7 +253,7 @@ impl Session {
     /// stack nothing about one, and the stack serving as though it were up is
     /// its assumption rather than something it measured.
     pub fn inspect(&self, counters: Option<&Counters>, snap: &mut Snapshot) {
-        let m = self.hello.mac;
+        let m = self.hello.mac.get().0;
         snap.put("mac", format!("{:02x}:{:02x}:{:02x}:{:02x}:{:02x}:{:02x}", m[0], m[1], m[2], m[3], m[4], m[5]));
         snap.put("driver", self.hello.label.as_str());
         match self.said {

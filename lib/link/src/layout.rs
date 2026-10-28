@@ -5,7 +5,7 @@
 
 use toyos::transport::{Geometry, Place, Run};
 
-/// A link's whole region: the one size shared memory comes in.
+/// A link's whole region: `toyos::transport`'s region length.
 pub const REGION_BYTES: usize = Geometry::BYTES as usize;
 
 /// One frame's slot in the arena, and so the longest frame either way.
