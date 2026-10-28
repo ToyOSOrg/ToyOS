@@ -10,8 +10,10 @@
 //!
 //! **Clean blocks are kept up to the limit the cache is made with** and the
 //! oldest-read goes first; a dirty block is never dropped. A block read in
-//! is kept only if the allocator gives it room: refused, the read is answered
-//! from the disk's bytes and nothing is cached.
+//! is kept only if the allocator gives it and its place in the eviction order
+//! room: refused, the read is answered from the disk's bytes and nothing is
+//! cached. The block map's node, a small allocation every few inserts, is the
+//! one part of keeping it that still cannot be refused.
 //!
 //! **Several tasks may use it at once**, and the disk never has two requests
 //! for one block in flight when either is a write, which the block service's
@@ -173,9 +175,11 @@ impl<D: Disk> Cache<D> {
                     Some(slot) => put(i + k, &slot.data),
                     None => {
                         put(i + k, data);
-                        if let Some(data) = boxed(data) {
-                            inner.slots.insert(at, Slot { data, dirty: false, version: 0 });
-                            inner.order.push_back(at);
+                        if inner.order.try_reserve(1).is_ok() {
+                            if let Some(data) = boxed(data) {
+                                inner.slots.insert(at, Slot { data, dirty: false, version: 0 });
+                                inner.order.push_back(at);
+                            }
                         }
                     }
                 }

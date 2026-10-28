@@ -21,10 +21,14 @@ The eighth is the bound netstack and the compositor take for want of a
 kernel memory limit (`issues/no-physical-memory-fairness.md`); it is an
 interim, not a sizing.
 
-A clean block the allocator refuses is not kept, and the read is still
-answered. A dirty block and a fetch's staging buffer are still allocated
-without a refusal path, so a server whose job is out of memory can still
-abort there.
+A clean block the allocator refuses, or whose place in the eviction order it
+refuses, is not kept, and the read is still answered. Three allocations
+still have no refusal path, so a server whose job is out of memory can still
+abort at them:
+- the block map's node, a small one every few inserts of a clean or a dirty
+  block;
+- a dirty block;
+- a fetch's staging buffer.
 
 **Exit**: the file servers drop clean blocks when the memory service reports
 pressure, and `CLEAN_SHARE` is deleted.
