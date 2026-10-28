@@ -470,6 +470,21 @@ fn a_wake_to_a_busy_cpu_beside_an_idle_one_runs_within_two_hops() {
     );
 }
 
+/// **A pair that takes turns on one CPU stays there**: a wake whose poster
+/// parks in the pass that drains it runs where it was posted, so an idle CPU
+/// beside the pair is never handed a turn.
+///
+/// `scenarios::turn_taking_pair` starts both threads on cpu0 with the balance
+/// path off, so the forward is the only thing that could move either.
+#[test]
+fn a_turn_taking_pair_is_never_forwarded_off_its_cpu() {
+    const SEEDS: u64 = 40;
+    let scenario = scenarios::turn_taking_pair();
+    sweep(&scenario, SEEDS, |outcome| {
+        assert_eq!(outcome.migrations, 0, "a turn was handed to the idle CPU: {}", outcome.report());
+    });
+}
+
 /// **A wake due ahead of the running task waits out [`MIN_SLICE_NS`] and a
 /// hop, not a request** — on one CPU, against one rival process, every wake
 /// but one per run.
