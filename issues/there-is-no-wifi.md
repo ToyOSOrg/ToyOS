@@ -109,8 +109,8 @@ and the ACPI read-out in `s1-r2/`
   without `ECAP.EIM`: `kernel/src/arch/x86_64/vtd/mod.rs`) rests on `CFIS=0`
   alone.
 
-**S2, the link hop's cost on the T14.** A scout, never landing: two
-processes over `toyos::transport`, one entry per 1,514-byte frame, batches of
+**S2, the link hop's cost on the T14: done, reported under P4.** A scout,
+never landing: two processes over `toyos::transport`, one entry per 1,514-byte frame, batches of
 1, 8 and 32, both directions, each side copying each frame once. Owner: the
 orchestrator. Depends on: nothing. Exit: cycles per frame and frames a
 second on one CPU, reported in P4's design round. Beside them stands the
@@ -209,7 +209,12 @@ stage 3 of `issues/the-lan-is-not-yet-production-grade.md`, whole.
 - **Read on the T14:** `i219_carries_netstacks_link` and
   `i219_leaves_ulp_unarmed` passed on one boot at 8bdf49156
   (https://github.com/ToyOSOrg/evidence/blob/4d818727fb372e181c402149aeb2779808fa2ef2/p4-r1/metal-t14-judge.log).
-- **Owed:** S2.
+- **S2, reported:** on the T14, the hop costs one CPU about 3,300 TSC
+  cycles a frame with a doorbell per frame, 920 per batch of 8 and 620 per
+  batch of 32, both directions alike: about 740,000, 2.6 million and 3.9
+  million frames a second of one CPU at 2.42 GHz, against the 200,163 a
+  second each way full rate needs
+  (https://github.com/ToyOSOrg/evidence/blob/4a8d02243d626df929fe05365e991873574e0dc2/s2/README.md).
 
 **P5, netstack over several links.** Owner: the orchestrator; its defect is
 `issues/netstack-drives-one-card.md`. Depends on: P4.
