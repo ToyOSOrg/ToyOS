@@ -770,7 +770,13 @@ impl Sync {
                 self.cc.end_recovery();
             }
             Recovery::Sack { .. } => {}
-            Recovery::None => self.cc.on_ack(now, bytes, self.rtt.srtt()),
+            Recovery::None => {
+                ctx.log.count(if self.cc.limited { Counter::AcksCwndLimited } else { Counter::AcksNotLimited });
+                ctx.log.add(Counter::AcksBytes, u64::from(bytes));
+                let before = self.cc.cwnd;
+                self.cc.on_ack(now, bytes, self.rtt.srtt());
+                ctx.log.add(Counter::CwndGrownBytes, u64::from(self.cc.cwnd.saturating_sub(before)));
+            }
         }
         self.dupacks = 0;
         self.lt_budget = 0;

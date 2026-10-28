@@ -77,6 +77,7 @@ fn measure(peer: &Peer, [connect, rtt, upload, download]: &[String; 4]) {
     let download_of: Transfer = |peer, span, _| peer.download(span);
     for (bench, run) in [(upload, Peer::upload as Transfer), (download, download_of)] {
         let mut stack = Vec::new();
+        let mut ramps = Vec::new();
         let mut rounds = || -> Result<Vec<u64>, String> {
             run(peer, SPAN, &mut |_| {}).map_err(|e| e.to_string())?;
             crate::clock::settle();
@@ -85,6 +86,7 @@ fn measure(peer: &Peer, [connect, rtt, upload, download]: &[String; 4]) {
             let mbps = (0..ROUNDS)
                 .map(|_| {
                     let moved = run(peer, SPAN, &mut |stream| log.look(stream)).map_err(|e| e.to_string())?;
+                    ramps.extend(moved.ramp);
                     Ok(moved.bytes * 1000 / moved.ns)
                 })
                 .collect::<Result<Vec<u64>, String>>()?;
@@ -96,12 +98,29 @@ fn measure(peer: &Peer, [connect, rtt, upload, download]: &[String; 4]) {
             Ok(mut mbps) => {
                 let mut extra = vec![("span_ms".to_string(), SPAN.as_millis().to_string())];
                 extra.extend(stack);
+                extra.extend(ramp_means(&ramps));
                 let extra: Vec<(&str, String)> = extra.iter().map(|(k, v)| (k.as_str(), v.clone())).collect();
                 result(bench, "MB/s", &mut mbps, &extra)
             }
             Err(why) => refuse(bench, why),
         }
     }
+}
+
+/// The bytes the peer had received by each of its ramp marks, as a mean over the rounds: how
+/// fast each round's new connection opened, read at the receiver for every sender alike.
+fn ramp_means(ramps: &[osbench_lan::Ramp]) -> Vec<(String, String)> {
+    if ramps.is_empty() {
+        return Vec::new();
+    }
+    osbench_lan::RAMP_MARKS_MS
+        .iter()
+        .enumerate()
+        .map(|(at, ms)| {
+            let sum: u64 = ramps.iter().map(|ramp| ramp.0[at]).sum();
+            (format!("peer_received_by_{ms}ms_bytes_mean"), (sum / ramps.len() as u64).to_string())
+        })
+        .collect()
 }
 
 /// What the stack's counters moved by over a row's timed rounds, each as a field named
