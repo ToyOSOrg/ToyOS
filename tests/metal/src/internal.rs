@@ -29,7 +29,7 @@ const MIB: u64 = 1 << 20;
 const BENCH: u32 = 4;
 
 /// The fourth partition's name, which the owner gave the bench's DATA.
-const DATA_LABEL: &str = "ToyOS data";
+pub(crate) const DATA_LABEL: &str = "ToyOS data";
 
 /// The partitions an internal install owns, in table order from partition 5,
 /// laid out as the image lays out its own.

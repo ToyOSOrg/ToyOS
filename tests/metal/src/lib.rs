@@ -1,7 +1,8 @@
 //! `toyos-metal` — the loop that flashes ToyOS to a metal bench's stick, boots
 //! it once, and answers with [`toyos_build::bootlog`]'s verdict on what that boot
 //! wrote to the log partition; and beside it, the internal install
-//! ([`internal`]) that writes an image to the bench's own NVMe for a demo boot.
+//! ([`internal`]) that writes an image to the bench's own NVMe for a demo boot,
+//! and the designation of the bench's ToyOS DATA ([`stamp`]).
 //!
 //! It runs on the development host and reaches the machine over `ssh`: the
 //! T14 bench unless `--host` names another, whose account's home holds the
@@ -40,6 +41,7 @@ use crate::timings::{Machine, Record, Stick};
 
 pub mod image;
 pub mod internal;
+pub mod stamp;
 pub mod testargs;
 pub mod timings;
 
@@ -94,6 +96,7 @@ pub const STICK_SECS: u64 = 30;
 const DD: &str = "/usr/bin/dd";
 const EFIBOOTMGR: &str = "/usr/bin/efibootmgr";
 const MOUNT: &str = "/usr/bin/mount";
+const OD: &str = "/usr/bin/od";
 const PARTX: &str = "/usr/bin/partx";
 const SGDISK: &str = "/usr/sbin/sgdisk";
 const UMOUNT: &str = "/usr/bin/umount";
@@ -145,6 +148,8 @@ pub enum Refusal {
     Ambiguous { carrying: String, nodes: Vec<String> },
     /// The disk named to be adopted as scratch is not one this loop erases.
     Adopt(String),
+    /// The bench's DATA partition is not one this loop designates.
+    Designate(String),
     File { path: String, why: String },
     Table(String),
     /// The table does not hold exactly one partition of a type the loop needs.
@@ -255,6 +260,7 @@ impl fmt::Display for Refusal {
                 }
             ),
             Self::Adopt(why) => write!(f, "nothing was erased: {why}"),
+            Self::Designate(why) => write!(f, "no partition was designated: {why}"),
             Self::Ambiguous { carrying, nodes } => write!(
                 f,
                 "{} are each a recorded disk carrying {carrying}, so nothing was written: unplug \
@@ -661,6 +667,12 @@ enum Job {
     CreateInternal,
     Write(Owned),
     Scratch(Sd),
+    /// What signatures the partition at the node carries, writing nothing.
+    Signatures(String),
+    /// The partition's first block, as `od` writes bytes.
+    FirstBlock(String),
+    /// The stamp on stdin written over the partition's first block.
+    Stamp(String),
 }
 
 /// One word as the machine's login shell must receive it: `ssh` hands the whole
@@ -792,6 +804,9 @@ impl Target {
                 &sd.node().whole(),
             ]),
             Job::CreateInternal => create(&internal, Owned::Esp.index(), INTERNAL_LABEL),
+            Job::Signatures(node) => words(&[WIPEFS, "--no-act", "--noheadings", "--output", "TYPE", node]),
+            Job::FirstBlock(node) => words(&[OD, "-An", "-v", "-tx1", &format!("-N{}", stamp::BLOCK), node]),
+            Job::Stamp(node) => words(&[DD, &format!("of={node}"), &format!("bs={}", stamp::BLOCK), "count=1", "conv=fsync,nocreat"]),
             Job::Write(o) => words(&[DD, &format!("of={}", o.node(&self.internal)), "bs=4M", "conv=fsync,nocreat"]),
         }
     }
@@ -1649,6 +1664,7 @@ declare_flags!(METAL = {
     KEY = "--key", Next;
     DEVICE = "--device", Next;
     ADOPT_SCRATCH = "--adopt-scratch", Next;
+    DESIGNATE_DATA = "--designate-data", None;
     RECORD = "--record", Next;
     READBACK = "--readback", Next;
     FAT32_CHECK = "--fat32-check", None;
@@ -1694,6 +1710,9 @@ pub struct Args {
     /// The disk [`adopt_scratch`] erases into a scratch disk. An action of its
     /// own, beside nothing but the flags that say which machine and `--dry-run`.
     adopt_scratch: Option<Sd>,
+    /// Stamp the bench's ToyOS DATA partition ([`designate_data`]). An action
+    /// of its own, beside nothing but the machine's flags and `--dry-run`.
+    designate_data: bool,
 }
 
 impl Args {
@@ -1719,6 +1738,7 @@ impl Args {
             install_internal: value(&INSTALL_INTERNAL).map(PathBuf::from),
             boot_internal: METAL.present(args, &BOOT_INTERNAL),
             adopt_scratch: value(&ADOPT_SCRATCH).map(Sd::parse).transpose()?,
+            designate_data: METAL.present(args, &DESIGNATE_DATA),
         };
         if let Some(host) = value(&HOST) {
             let (user, machine) = host_of(host)?;
@@ -1735,8 +1755,11 @@ impl Args {
         // flag beside it that describes anything else is refused rather than
         // left for the action to fall through into — which is how a capture
         // once flashed whatever `--image` defaulted to.
-        let actions: [(&Flag, &[&Flag]); 2] =
-            [(&RECORD, &[&HOST, &KEY]), (&ADOPT_SCRATCH, &[&HOST, &KEY, &DRY_RUN])];
+        let actions: [(&Flag, &[&Flag]); 3] = [
+            (&RECORD, &[&HOST, &KEY]),
+            (&ADOPT_SCRATCH, &[&HOST, &KEY, &DRY_RUN]),
+            (&DESIGNATE_DATA, &[&HOST, &KEY, &DRY_RUN]),
+        ];
         for (action, alone) in actions {
             if !METAL.present(args, action) {
                 continue;
@@ -1851,6 +1874,55 @@ fn adopt_scratch(target: &Target, dry_run: bool, sd: Sd) -> Result<(), Refusal> 
     Ok(())
 }
 
+/// Designate a recorded bench's ToyOS DATA partition ([`stamp`]): found by
+/// type and name, refused where it carries a signature or a ToyOS volume,
+/// stamped through its GUID's node, and read back. The partition's contents
+/// are lost; its next ToyOS boot formats it. A dry run reads everything and
+/// writes nothing.
+fn designate_data(target: &Target, dry_run: bool) -> Result<(), Refusal> {
+    let driver = Driver::reach(target.clone(), dry_run)?;
+    driver.require_sudo()?;
+    driver.recorded_machine()?;
+    let data = stamp::find(&driver.ssh("listing the disks", stamp::QUERY)?).map_err(Refusal::Designate)?;
+    let node = data.by_guid();
+    let root = |job: Job| driver.target.remote(&job, &driver.home);
+    let signatures = driver.ssh("reading the partition's signatures", &root(Job::Signatures(node.clone())))?;
+    if !signatures.trim().is_empty() {
+        let found = signatures.split_whitespace().collect::<Vec<_>>().join(", ");
+        return Err(Refusal::Designate(format!("{} carries {found}", data.node)));
+    }
+    let first = |what: &str| -> Result<stamp::Block0, Refusal> {
+        let bytes = stamp::od_bytes(&driver.ssh(what, &root(Job::FirstBlock(node.clone())))?).map_err(Refusal::Designate)?;
+        Ok(stamp::classify(&data, &bytes))
+    };
+    let said = format!("{} ({}, {} blocks of {})", data.node, internal::DATA_LABEL, data.blocks, stamp::BLOCK);
+    match first("reading the partition's first block")? {
+        stamp::Block0::Stamped => {
+            println!("{said} already carries its designation; nothing was written");
+            return Ok(());
+        }
+        stamp::Block0::Volume => {
+            return Err(Refusal::Designate(format!("{said} holds a ToyOS volume, which a designation would destroy")));
+        }
+        stamp::Block0::Other => {}
+    }
+    let file = std::env::temp_dir().join(format!("toyos-metal-designation-{}", std::process::id()));
+    std::fs::write(&file, data.stamp()).map_err(|e| Refusal::File { path: file.display().to_string(), why: e.to_string() })?;
+    let feed = Feed { path: &file, at: 0, len: stamp::BLOCK as u64 };
+    let wrote = driver.as_root("writing the designation", Job::Stamp(node.clone()), Some(feed));
+    let _ = std::fs::remove_file(&file);
+    let Some(out) = wrote? else {
+        println!("dry run: {said} was read and nothing was written");
+        return Ok(());
+    };
+    driver.fed("writing the designation", &out, stamp::BLOCK as u64)?;
+    if first("reading the designation back")? != stamp::Block0::Stamped {
+        return Err(Refusal::Designate(format!("{said} was written and does not read back as its designation")));
+    }
+    println!("{said} is designated: the next ToyOS boot formats it");
+    Ok(())
+}
+
 /// Bytes of a local file one root command reads on its stdin.
 #[derive(Debug, Clone, Copy)]
 struct Feed<'a> {
@@ -1912,6 +1984,10 @@ pub fn run(args: &Args) -> Result<Option<u64>, Refusal> {
     }
     if let Some(sd) = args.adopt_scratch {
         adopt_scratch(&args.target, args.dry_run, sd)?;
+        return Ok(None);
+    }
+    if args.designate_data {
+        designate_data(&args.target, args.dry_run)?;
         return Ok(None);
     }
     let began = std::time::Instant::now();
@@ -3212,6 +3288,12 @@ mod tests {
         }
         let both = Args::parse(&words(&["--record", "/dev/sda", "--adopt-scratch", "/dev/sdb"])).unwrap_err();
         assert!(matches!(both, Refusal::Usage(_)));
+        let designate = Args::parse(&words(&["--designate-data", "--dry-run", "--host", "toyos@bench-amd"])).unwrap();
+        assert!(designate.designate_data && designate.dry_run);
+        for beside in boot.iter().copied().chain([&["--adopt-scratch", "/dev/sdb"][..]]) {
+            let line = [&["--designate-data"][..], beside].concat();
+            assert!(matches!(Args::parse(&words(&line)), Err(Refusal::Usage(ref why)) if why.contains(beside[0])), "{line:?}");
+        }
     }
 
     /// **The mount point is under the home the machine names**, and a home

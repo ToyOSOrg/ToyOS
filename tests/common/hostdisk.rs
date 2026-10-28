@@ -1,5 +1,6 @@
 //! Another system's disk, as a bench's internal disk is before ToyOS is
-//! installed on it, and the judge of what ToyOS did to it.
+//! installed on it, and the judge of what ToyOS did to it, there and on a
+//! bench whose DATA is designated.
 //!
 //! The layout is the benches': the host's ESP, its `/boot` and its root, and
 //! the owner's ToyOS DATA, unformatted. Every block of every partition carries
@@ -54,12 +55,23 @@ fn said_by_nvme(line: &str) -> Option<&str> {
     (at.len() == 7 && at[2] == b':' && at[5] == b'.').then_some(said)
 }
 
-/// A boot off a stick drove an NVMe disk that is another system's and left
-/// it alone: a driver brought a controller up and offered its partitions, it
-/// opened at least one session and each on a ToyOS DATA partition, and the file server
-/// found that DATA neither ours nor designated, and so neither mounted nor
-/// formatted it. Answers how many partitions the disks' tables named.
-pub fn left_alone(log: &Serial) -> Result<usize, String> {
+/// What the bench's DATA partition is to the file server: another system's,
+/// as this module's disk is, or designated for ToyOS, as a bench's is once
+/// `toyos-metal --designate-data` stamped it.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Data {
+    Foreign,
+    Designated,
+}
+
+/// A boot off a stick drove an NVMe disk that is another system's but for
+/// its DATA and left it alone: a driver brought a controller up and offered
+/// its partitions, it opened at least one session and each on a ToyOS DATA
+/// partition, and the file server found that DATA as `data` says: neither
+/// ours nor designated, so neither mounted nor formatted, or designated, so
+/// mounted or formatted off its stamp and never memory in its place.
+/// Answers how many partitions the disks' tables named.
+pub fn left_alone(log: &Serial, data: Data) -> Result<usize, String> {
     log.must_say("diskserver: every disk driver has settled")?;
     let said: Vec<&str> = log.text().lines().filter_map(said_by_nvme).collect();
     if !said.iter().any(|s| s.starts_with("up: ")) {
@@ -74,7 +86,7 @@ pub fn left_alone(log: &Serial) -> Result<usize, String> {
     if kinds.is_empty() {
         return Err(format!("no nvme driver named a partition of its disk\n{}", log.text()));
     }
-    let data = Guid::TOYOS_DATA.to_string();
+    let data_type = Guid::TOYOS_DATA.to_string();
     let opened: Vec<&str> = said
         .iter()
         .filter_map(|s| s.strip_prefix("session "))
@@ -86,12 +98,24 @@ pub fn left_alone(log: &Serial) -> Result<usize, String> {
     }
     for guid in opened {
         match kinds.iter().find(|(g, _)| *g == guid) {
-            Some((_, kind)) if *kind == data => {}
+            Some((_, kind)) if *kind == data_type => {}
             other => return Err(format!("an nvme driver opened a session on {guid}, of type {other:?}, which is no ToyOS DATA")),
         }
     }
-    log.must_say("fileserver: no volume of ours and no designation stamp; nothing will be written to this partition")?;
-    log.must_not_say("fileserver: mounted the DATA volume")?;
-    log.must_not_say("designates this partition for ToyOS; formatting it")?;
+    const MOUNTED: &str = "fileserver: mounted the DATA volume";
+    const FORMATTED: &str = "fileserver: block 0 designates this partition for ToyOS; formatting it";
+    match data {
+        Data::Foreign => {
+            log.must_say("fileserver: no volume of ours and no designation stamp; nothing will be written to this partition")?;
+            log.must_not_say(MOUNTED)?;
+            log.must_not_say(FORMATTED)?;
+        }
+        Data::Designated => {
+            if !log.text().contains(MOUNTED) && !log.text().contains(FORMATTED) {
+                return Err(format!("the designated DATA was neither mounted nor formatted\n{}", log.text()));
+            }
+            log.must_not_say("are in memory and will not survive a reboot")?;
+        }
+    }
     Ok(kinds.len())
 }

@@ -93,11 +93,19 @@ there carried it.
 bench's NVMe. On Linux that is the runner's home, ext4 on the bench's root
 partition. On ToyOS it is DATA: the bench's TOYOS-DATA partition, its fourth,
 named `ToyOS data`. It is served through the DATA file server and the NVMe
-driver. The partition holds a ToyOS volume only once its first block carries
-the designation stamp. Until then the file server writes nothing to it and
-keeps DATA in memory, and the row refuses the boot by name. The first boot
-after the stamp formats the volume, so it is not a measured run. Every row's
-`served_by` names the filesystem and the disk it measured.
+driver. The `osbench` row refuses a boot whose DATA was anything else. Every
+row's `served_by` names the filesystem and the disk it measured.
+
+The partition holds a ToyOS volume once, ever, after its first block
+carries the designation stamp:
+
+```text
+cargo run -p toyos-metal -- --designate-data --host <bench> --dry-run
+cargo run -p toyos-metal -- --designate-data --host <bench>
+```
+
+The first ToyOS boot after the stamp formats the volume. The `osbench` row
+refuses that boot as a run and says how long the format took.
 
 ## What is not a comparison
 

@@ -14,6 +14,8 @@ toyos-build = { path = "../.." }
 # The outside judge of the log partition the boot left on the stick.
 toyos-fat32-check = { path = "../../lib/fat32/check" }
 toyos-gpt = { path = "../../lib/gpt" }
+# A ToyOS volume's magic, which the DATA designation never writes over.
+bcachefs = { path = "../../lib/bcachefs" }
 toyos-quiesce = { path = "../../lib/quiesce" }
 toyos-tco = { path = "../../lib/tco" }
 
