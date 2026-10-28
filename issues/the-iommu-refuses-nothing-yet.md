@@ -67,6 +67,21 @@ a unit firmware left translating:
   boot, he answered: "You can do with the t14 what you want." The grant goes
   beyond the question asked.
 
+**Proposed, for the owner** (pull request #1086's review): a fault from an
+enumerated function that no driver runs halts the machine only when the
+address is one its domain maps. A mapped address means the unit contradicted
+tables this kernel wrote, which the shared identity domain does not confine
+to one unit. An unmapped address is firmware's DMA straying outside its
+grant: the function is stopped, the fault logged, and the machine goes on, as
+"Apply it at hand-over" already rules for reserved regions. An unclaimed
+function sits in the identity domain, which maps all of `[0, top)` with
+nothing carved out, so "unmapped" is `address >= top` and the handler stays
+bounded and lock-free. The change is to the representation: `Owner::Kernel`
+today merges functions this kernel drives with functions nobody drives, and
+the split gives the second its own arm. One caveat: the iGPU is not wholly
+undriven. Its scanout reads the firmware framebuffer the kernel's panic
+console draws into, so stopping it blanks that console.
+
 Owner: the orchestrator.
 
 **Exit**: a test or a T14 row reads each ruled refusal, each with its

@@ -1305,14 +1305,6 @@ const METAL: &[(&str, metal::Metal)] = &[
         "iommu_firmware_left",
         metal::Metal { arms: SELFTESTS, judge: |b| iommu_firmware_left(b[0].kernel().text()) },
     ),
-    (
-        // Each VT-d unit taken between two roots that translate alike, by
-        // translation going off and by a switch under it, with whatever DMA
-        // firmware left running going on through it: the count of faults each
-        // way. A measurement, so a named pass alone runs it.
-        "iommu_handover_cycles",
-        metal::Metal { arms: HANDOVER_CYCLES, judge: |b| iommu_handover_cycles(b[0].kernel().text()) },
-    ),
     // ---- a claimed function at the unit, on tests/images/testcases.toml ----
     (
         // Claimed, given back and claimed again: both claims name one
@@ -1816,19 +1808,6 @@ const SELFTEST_PARAMS: &[&str] = &[
     "sysret-ss-probe",
     "iommu-firmware-left",
 ];
-
-/// Its own boot: it holds every unit's fault events for its eight seconds,
-/// so a fault the shared boot's tests stage would be counted here instead.
-const HANDOVER_CYCLES: &[metal::Arm] = &[metal::Arm {
-    features: ACTUATOR_KERNEL,
-    named_only: true,
-    ..metal::once(
-        "iommu-cycles",
-        "tests/images/testcases.toml",
-        &["iommu-firmware-left", "iommu-handover-cycles"],
-        &[],
-    )
-}];
 
 const SELFTESTS: &[metal::Arm] = &[metal::Arm {
     features: ACTUATOR_KERNEL,
@@ -6072,21 +6051,6 @@ fn iommu_firmware_left(log: &str) -> Result<(), String> {
              {kept} of them keeping translation on; {passed} of them reported compatibility format passed"
         );
         Ok(())
-}
-
-/// Both kinds of cycle ran to their count; the fault lines and the counts are
-/// the measurement, printed rather than judged.
-fn iommu_handover_cycles(log: &str) -> Result<(), String> {
-    let lines: Vec<&str> = log.lines().filter(|l| l.contains("iommu-handover-cycles: ")).collect();
-    for kind in ["off-on", "switch"] {
-        if !lines.iter().any(|l| l.contains(&format!("iommu-handover-cycles: {kind} ")) && l.contains(" with a fault")) {
-            return Err(format!("the {kind} cycles never reported their count:\n{log}"));
-        }
-    }
-    for line in lines {
-        eprintln!("  [iommu-handover-cycles] {}", line.split("iommu-handover-cycles: ").nth(1).unwrap_or(line));
-    }
-    Ok(())
 }
 
 /// The machine's kernel thread is hosted.

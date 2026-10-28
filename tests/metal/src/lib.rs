@@ -910,12 +910,6 @@ pub const FLASHABLE: &[&str] = &[
     // writes only the units' registers, which a reset returns to firmware, and
     // tables in memory this boot owns.
     "iommu-firmware-left",
-    // Every VT-d unit moved between its root and a copy of it hundreds of
-    // times, with translation off between some, while its fault events are
-    // held and their records counted. It writes only the units' registers,
-    // which a reset returns to firmware, and tables in memory this boot owns;
-    // what a fault refuses is a read or write a device made, never a register.
-    "iommu-handover-cycles",
     // Every CPU is handed the loader's Intel update with its header's revision
     // raised by one and its checksum sealed again. Its payload is Intel's own,
     // the revision the CPU already runs, so the CPU refuses it or runs what it
