@@ -56,8 +56,12 @@ as that. A burst of wakes to CPUs in deep states pays their exits.
 each against its control with the deep states off, all else equal):
 
 - T14 `crunch.single` 1.10 to 1.11 times faster (deflate 60.3 to 54.5 ms,
-  Linux's 54.6 to 54.7), each row's thread at 4.21 to 4.23 GHz against
-  3.83 by APERF/MPERF, its idle cores 40 to 80 % of the row in core C7.
+  Linux's 54.6 to 54.7). By APERF/MPERF over windows that matched their
+  rows (the thread busy 989 ‰ across deflate's), deflate's thread ran at
+  4.23 GHz against 3.83, every other core 99.5 to 99.9 % of the row in core
+  C7. `malloc_churn.1048576.t1`'s threads ran at 4.19 to 4.21 GHz against
+  3.79, with the cores 40 to 99 % in C7, the lower ones having run part of
+  the row.
 - T14 `cpu.clock` at 4189 at 8 and 8 group starts of 17, the control at
   none; Linux reaches 4190 at 13. Boot, identity, energy, system and mem
   stay at 3789 even when every idle CPU waits deepest (#1073's first

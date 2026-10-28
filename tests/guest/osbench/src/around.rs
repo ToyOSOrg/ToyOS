@@ -2,7 +2,7 @@
 //! the CPUs the row's threads ran on, on both systems; and on ToyOS, where
 //! the boot grants the counters, each CPU's busy fraction, the clock it ran
 //! at, its core's C6 and C7 residency where the CPU counts them, and the
-//! idle periods the kernel chose a deep state for. A row that moves with the
+//! deep idle periods that ended, all over the readings' own window. A row that moves with the
 //! machine's idle states, or with where its threads ran, says so here.
 //!
 //! **Reading the counters kicks every CPU** (`toyos_abi::counters`), so they
@@ -49,32 +49,47 @@ impl Around {
     }
 }
 
-/// One line a CPU: what it did between `before` and `after`, `ns` apart.
+/// One line a CPU: what it did between `before` and `after`, read around a
+/// row of `row_ns`. Every figure is of the readings' own window, off the
+/// CPU's counter in each; a CPU whose readings are not the row's is refused
+/// by name ([`osbench_rules::window`]). Deep idle is counted as periods that
+/// ended in the window and their microseconds, as the kernel credits a
+/// period when it ends.
 #[cfg(target_os = "toyos")]
-pub fn cpus(bench: &str, before: &[crate::sys::diag::CpuCounts], after: &[crate::sys::diag::CpuCounts], ns: u64) {
+pub fn cpus(bench: &str, before: &[crate::sys::diag::CpuCounts], after: &[crate::sys::diag::CpuCounts], row_ns: u64) {
+    use osbench_rules::window;
+    let page = toyos_abi::clock::page();
+    let to_ns = |ticks: u64| toyos_abi::clock::ticks_to_nanos(ticks, page.period_fs);
     let delta = |x: Option<u64>, y: Option<u64>| x.zip(y).map(|(x, y)| y.wrapping_sub(x));
     let shown = |v: Option<u64>| v.map_or("-".to_string(), |v| v.to_string());
-    let permille = |part: Option<u64>, whole: Option<u64>| shown(part.zip(whole).map(|(p, w)| p * 1000 / w.max(1)));
     for b in after {
         let Some(a) = before.iter().find(|a| a.cpu == b.cpu) else { continue };
-        let stamp = delta(a.stamp, b.stamp);
+        let (ticks, window_ns) = match window::of(a.stamp, b.stamp, row_ns, to_ns) {
+            Ok(window) => window,
+            Err(why) => {
+                note(
+                    &format!("{bench}.cpus"),
+                    &[("cpu", b.cpu.to_string()), ("refused", why.to_string()), ("row_us", (row_ns / 1000).to_string())],
+                );
+                continue;
+            }
+        };
+        let permille = |part: Option<u64>| shown(part.map(|p| window::permille(p, ticks)));
         let (aperf, mperf) = (delta(a.aperf, b.aperf), delta(a.mperf, b.mperf));
-        // MPERF counts at the TSC's rate while the CPU runs, so APERF/MPERF
-        // of the TSC's rate is the clock it ran at.
-        let tsc_mhz = stamp.map(|s| s * 1000 / ns.max(1));
-        let run_mhz = aperf.zip(mperf).zip(tsc_mhz).map(|((a, m), t)| a * t / m.max(1));
+        let run_mhz = aperf.zip(mperf).and_then(|(a, m)| window::run_mhz(a, m, ticks, window_ns));
         note(
             &format!("{bench}.cpus"),
             &[
                 ("cpu", b.cpu.to_string()),
                 ("apic", b.apic.to_string()),
-                ("busy_permille", permille(mperf, stamp)),
+                ("window_us", (window_ns / 1000).to_string()),
+                ("row_us", (row_ns / 1000).to_string()),
+                ("busy_permille", permille(mperf)),
                 ("run_mhz", shown(run_mhz)),
-                ("core_c6_permille", permille(delta(a.core_c6, b.core_c6), stamp)),
-                ("core_c7_permille", permille(delta(a.core_c7, b.core_c7), stamp)),
-                // Counted when a period ends, so one begun before the row counts whole: past 1000 is that.
-                ("deep_idles", shown(delta(a.deep_idles, b.deep_idles))),
-                ("deep_permille", permille(delta(a.deep_idle_nanos, b.deep_idle_nanos), Some(ns))),
+                ("core_c6_permille", permille(delta(a.core_c6, b.core_c6))),
+                ("core_c7_permille", permille(delta(a.core_c7, b.core_c7))),
+                ("deep_ended", shown(delta(a.deep_idles, b.deep_idles))),
+                ("deep_ended_us", shown(delta(a.deep_idle_nanos, b.deep_idle_nanos).map(|ns| ns / 1000))),
                 ("kicks", shown(delta(a.kicks, b.kicks))),
                 ("smi", shown(delta(a.smi, b.smi))),
             ],
