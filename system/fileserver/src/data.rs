@@ -1378,8 +1378,8 @@ mod tests {
     /// `osbench`'s `fs.disk.seq_read.4096`: a 64 MiB file written in 4 KiB
     /// calls and synced, then opened, read whole in 4 KiB calls and closed,
     /// in rounds, on a volume whose cache holds twice the file. A round after
-    /// the first is answered from the cache, without one disk read: what an
-    /// open reads of the tree evicts none of the file.
+    /// the first is answered from the cache, without one disk read: an open,
+    /// a read and a close neither bypass the cache nor drop its blocks.
     #[test]
     fn a_file_the_cache_holds_is_read_again_from_the_cache() {
         const MIB: usize = 1 << 20;

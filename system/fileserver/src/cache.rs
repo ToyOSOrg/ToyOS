@@ -9,7 +9,9 @@
 //! bounds the write-back and not the other way round.
 //!
 //! **Clean blocks are kept up to the limit the cache is made with** and the
-//! oldest-read goes first; a dirty block is never dropped.
+//! oldest-read goes first; a dirty block is never dropped. A block read in
+//! is kept only if the allocator gives it room: refused, the read is answered
+//! from the disk's bytes and nothing is cached.
 //!
 //! **Several tasks may use it at once**, and the disk never has two requests
 //! for one block in flight when either is a write, which the block service's
@@ -171,8 +173,10 @@ impl<D: Disk> Cache<D> {
                     Some(slot) => put(i + k, &slot.data),
                     None => {
                         put(i + k, data);
-                        inner.slots.insert(at, Slot { data: Box::new(*data), dirty: false, version: 0 });
-                        inner.order.push_back(at);
+                        if let Some(data) = boxed(data) {
+                            inner.slots.insert(at, Slot { data, dirty: false, version: 0 });
+                            inner.order.push_back(at);
+                        }
                     }
                 }
             }
@@ -200,6 +204,14 @@ impl<D: Disk> Cache<D> {
         let waiting = std::mem::take(&mut self.inner.borrow_mut().waiting);
         waiting.into_iter().for_each(Waker::wake);
     }
+}
+
+/// `data` in a block of its own, or `None` where the allocator has no room.
+fn boxed(data: &Block) -> Option<Box<Block>> {
+    let mut bytes = Vec::new();
+    bytes.try_reserve_exact(BLOCK).ok()?;
+    bytes.extend_from_slice(data);
+    Some(bytes.into_boxed_slice().try_into().expect("a block's bytes"))
 }
 
 /// The one flush running, until this is dropped: when it finishes, is refused
