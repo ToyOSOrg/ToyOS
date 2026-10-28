@@ -177,7 +177,7 @@ const BY_NAME: [(&str, fn()); 2] = [("lan", lan::suite), ("internet", internet::
 fn group(name: &str, run: fn()) {
     report::group(name, "start");
     conditions();
-    clock::distribution();
+    around::ran_during(&format!("{name}.cpu.clock"), clock::distribution);
     let t = Instant::now();
     run();
     report::group(name, &format!("done secs={}", t.elapsed().as_secs()));

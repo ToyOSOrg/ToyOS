@@ -4,6 +4,11 @@
 //! at, its core's C6 and C7 residency where the CPU counts them, and the
 //! idle periods the kernel chose a deep state for. A row that moves with the
 //! machine's idle states, or with where its threads ran, says so here.
+//!
+//! **Reading the counters kicks every CPU** (`toyos_abi::counters`), so they
+//! are read around rows of seconds, where one wake is nothing, and never
+//! around `cpu.clock`'s few milliseconds, which [`ran_during`] names from the
+//! roster instead.
 
 use std::time::Instant;
 
@@ -75,4 +80,27 @@ pub fn cpus(bench: &str, before: &[crate::sys::diag::CpuCounts], after: &[crate:
             ],
         );
     }
+}
+
+/// Run `measure`, and note each process that ran on any CPU meanwhile, with
+/// its CPU time: on ToyOS from the roster, read on this CPU before and after,
+/// which wakes no other CPU and so leaves a short measurement as it was. A
+/// clock held below its one-core bin is then named by what ran beside it.
+pub fn ran_during(bench: &str, measure: impl FnOnce()) {
+    #[cfg(target_os = "toyos")]
+    let before = crate::sys::diag::shared().map(|d| d.roster());
+    measure();
+    #[cfg(target_os = "toyos")]
+    if let (Some(before), Some(d)) = (before, crate::sys::diag::shared()) {
+        let mut by_process: std::collections::BTreeMap<(u32, String), u64> = std::collections::BTreeMap::new();
+        for (&(pid, tid), (name, after)) in &d.roster() {
+            let was = before.get(&(pid, tid)).map_or(0, |(_, ns)| *ns);
+            *by_process.entry((pid, name.clone())).or_default() += after.saturating_sub(was);
+        }
+        for ((pid, name), ns) in by_process.into_iter().filter(|(_, ns)| *ns > 0) {
+            note(&format!("{bench}.ran"), &[("pid", pid.to_string()), ("name", name), ("us", (ns / 1000).to_string())]);
+        }
+    }
+    #[cfg(not(target_os = "toyos"))]
+    let _ = bench;
 }
