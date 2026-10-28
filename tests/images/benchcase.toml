@@ -74,6 +74,7 @@ args = [
 "bin/osbench_boot" = "/system/bin/osbench"
 "bin/osbench_identity" = "/system/bin/osbench"
 "bin/osbench_energy" = "/system/bin/osbench"
+"bin/osbench_park" = "/system/bin/osbench"
 "bin/osbench_system" = "/system/bin/osbench"
 "bin/osbench_sched" = "/system/bin/osbench"
 "bin/osbench_fair" = "/system/bin/osbench"

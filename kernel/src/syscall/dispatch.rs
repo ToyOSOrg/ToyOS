@@ -615,6 +615,9 @@ pub(crate) fn syscall_dispatch(num: u64, a1: u64, a2: u64, a3: u64, a4: u64) -> 
             // bound and its stale answer are the shipped paths.
             DA::COUNTERS_DEAF => crate::counters::deaf::stage(a2),
             DA::COUNTERS_HEAR => crate::counters::deaf::end(),
+            // A driverless function's power state, which no shipped path moves: what it holds the
+            // package at is measured by moving it.
+            DA::PCI_PARK_D3HOT => crate::pcidev::park_d3hot(a2),
             DA::TRACE_FLOOD if a2 <= DA::TRACE_FLOOD_MOST => crate::trace::flood(a2),
             // An interrupt inside a syscall's body, which nothing a guest does puts there on demand.
             DA::RING0_TIMER_IN_SYSCALL => ring0_timer_in_syscall(),

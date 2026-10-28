@@ -936,6 +936,11 @@ pub mod debug_action {
     /// another CPU by interrupt: what a change no other CPU runs the space on
     /// must leave as it was.
     pub const SPACE_REACHED: u64 = 29;
+    /// Put the PCI function whose requester id is the argument in D3hot,
+    /// where no claim holds it and no kernel driver drives it, and answer the
+    /// power state it was in (PCI PM 1.2 `PMCSR` bits 1:0). A measurement's
+    /// toggle: a later claim of the function finds it out of D0.
+    pub const PCI_PARK_D3HOT: u64 = 30;
     /// How many kernel objects of one kind are alive right now. The argument is
     /// an [`ObjectKind`](crate::handle::ObjectKind) word.
     ///
