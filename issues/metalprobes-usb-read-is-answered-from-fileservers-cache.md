@@ -10,8 +10,8 @@ opened: 2026-09-27
 and times reading it back as "a cache miss the stick has to answer" — true
 while the kernel's write-back dropped a closed file from its cache. `/log` is
 served by a file server now, whose block cache
-(`system/fileserver/src/cache.rs`) keeps clean blocks until it holds
-`CLEAN_LIMIT` of them and drops nothing at a close. So the timed read is the
+(`system/fileserver/src/cache.rs`) keeps clean blocks up to an eighth of
+physical memory and drops nothing at a close. So the timed read is the
 file server's memory, and the `usbread` span is no longer the stick's.
 
 **Exit**: the timed read is one the stick answers — a file the file server has

@@ -95,8 +95,8 @@ fn logged(what: &str, path: &str, e: Error) -> fs::Error {
 impl<D: Disk> FatVolume<D> {
     /// Mount the FAT32 volume on `disk`, or say why not; nothing is written
     /// before the volume is known to be FAT32.
-    pub fn mount(disk: D, writable: bool, clock: fn() -> u64) -> Result<Self, String> {
-        let cache = Rc::new(Cache::new(disk));
+    pub fn mount(disk: D, clean_limit: usize, writable: bool, clock: fn() -> u64) -> Result<Self, String> {
+        let cache = Rc::new(Cache::new(disk, clean_limit));
         let fs = cache.block_on(Fat32::mount(Rc::clone(&cache))).map_err(|e| format!("no FAT32 here: {e}"))?;
         let geom = fs.geometry();
         println!(
@@ -455,11 +455,13 @@ mod tests {
     use std::cell::Cell;
 
     use super::*;
-    use crate::cache::CLEAN_LIMIT;
     use crate::ram::Ram;
     use toyos_blockdev::{block_on_ready, Block, Bytes, BLOCK};
 
     impl Disk for Bytes<Vec<u8>> {}
+
+    /// The clean blocks every volume's cache here keeps.
+    const CLEAN_LIMIT: usize = 4096;
 
     /// A disk that refuses every read of one block, after the fixture's own
     /// bytes are on it.
@@ -508,7 +510,7 @@ mod tests {
         let spec = spec_volume::fixture();
         let ram = ram_with(&spec.bytes, spec.bytes.len().div_ceil(BLOCK) + 2 * CLEAN_LIMIT);
         let refused = Rc::new(Cell::new(u64::MAX));
-        let v = FatVolume::mount(Refusing { ram, refused: Rc::clone(&refused) }, true, clock).unwrap();
+        let v = FatVolume::mount(Refusing { ram, refused: Rc::clone(&refused) }, CLEAN_LIMIT, true, clock).unwrap();
         (v, refused, spec)
     }
 
@@ -552,7 +554,7 @@ mod tests {
         let epochs: Epochs = Rc::new(std::cell::RefCell::new(vec![Vec::new()]));
         let disk = Traced { image: Bytes::new(image), epochs: Rc::clone(&epochs) };
         LATER.store(1_717_245_296 * NANOS_PER_SEC, Relaxed);
-        let mut v = FatVolume::mount(disk, true, || LATER.load(Relaxed)).unwrap();
+        let mut v = FatVolume::mount(disk, CLEAN_LIMIT, true, || LATER.load(Relaxed)).unwrap();
         let a = v.open("a.txt", CREATE).unwrap();
         v.write(a, 0, &[1; 3000]).unwrap();
         assert_eq!(v.sync(), Ok(Vec::new()));
@@ -722,7 +724,7 @@ mod tests {
         const OPEN: OpenHow = OpenHow { create: false, create_new: false, truncate: false };
         let spec = spec_volume::fixture();
         let ram = ram_with(&spec.bytes, spec.bytes.len().div_ceil(BLOCK));
-        let mut v = FatVolume::mount(Granted(ram), false, || 1_717_245_296 * NANOS_PER_SEC).unwrap();
+        let mut v = FatVolume::mount(Granted(ram), CLEAN_LIMIT, false, || 1_717_245_296 * NANOS_PER_SEC).unwrap();
 
         assert_eq!(v.lstat("short.txt").unwrap().size, 100);
         v.list("sub").unwrap();
@@ -795,7 +797,7 @@ mod tests {
         let mut image = spec.bytes.clone();
         image.resize(spec.bytes.len().div_ceil(BLOCK) * BLOCK, 0);
         let epochs: Epochs = Rc::new(std::cell::RefCell::new(vec![Vec::new()]));
-        let mut v = FatVolume::mount(Traced { image: Bytes::new(image.clone()), epochs: Rc::clone(&epochs) }, true, clock)
+        let mut v = FatVolume::mount(Traced { image: Bytes::new(image.clone()), epochs: Rc::clone(&epochs) }, CLEAN_LIMIT, true, clock)
             .unwrap();
         let held: Vec<u8> = (0..3000u32).map(|i| (i % 251 + 1) as u8).collect();
         let appended: Vec<u8> = (0..3 * BLOCK as u32).map(|i| (i % 241 + 2) as u8).collect();
@@ -833,7 +835,7 @@ mod tests {
                     })
                     .collect();
                 assert!(refused.is_empty(), "{stop}: {}", describe(&refused));
-                let mut after = FatVolume::mount(Bytes::new(bytes), false, clock).unwrap_or_else(|e| panic!("{stop}: {e}"));
+                let mut after = FatVolume::mount(Bytes::new(bytes), CLEAN_LIMIT, false, clock).unwrap_or_else(|e| panic!("{stop}: {e}"));
                 let n = after.open("a.txt", OPEN).unwrap();
                 let size = after.lstat("a.txt").unwrap().size as usize;
                 let mut out = vec![0u8; size];
