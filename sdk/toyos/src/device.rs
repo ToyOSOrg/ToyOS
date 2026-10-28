@@ -88,7 +88,7 @@ impl AsRef<crate::shm::SharedMemory> for Scanout {
 }
 
 impl AsHandle for FramebufferDev {
-    fn as_handle(&self) -> RawHandle { self.0.as_handle() }
+    fn as_handle(&self) -> crate::BorrowedHandle<'_> { self.0.as_handle() }
 }
 
 /// One PCI function, driven by this process: the kernel keeps config space and
@@ -126,7 +126,7 @@ impl PciDev {
         offset: u32,
         width: toyos_abi::syscall::RegWidth,
     ) -> Result<u32, SyscallError> {
-        syscall::device_reg_read(self.0.as_handle(), u64::from(offset), width)
+        syscall::device_reg_read(self.0.as_handle().raw(), u64::from(offset), width)
     }
 
     /// Map memory BAR `bar`, bounded to the `bar_bytes` the description gave.
@@ -134,7 +134,7 @@ impl PciDev {
     /// The kernel's window is whole 4 KiB pages, so a BAR smaller than one is
     /// mapped with the rest of its page; the length here is the BAR's.
     pub fn map_bar(&self, bar: u32, bytes: u64) -> Result<crate::shm::SharedMemory, SyscallError> {
-        let handle = syscall::device_bar_map(self.0.as_handle(), bar)?;
+        let handle = syscall::device_bar_map(self.0.as_handle().raw(), bar)?;
         crate::shm::SharedMemory::adopt(crate::OwnedHandle(handle), bytes as usize)
     }
 
@@ -146,20 +146,20 @@ impl PciDev {
     /// State that this function issues `bits`-bit device addresses, before any
     /// grant or lend: every one is placed below `1 << bits`.
     pub fn dma_limit(&self, bits: u8) -> Result<(), SyscallError> {
-        syscall::device_dma_limit(self.0.as_handle(), bits)
+        syscall::device_dma_limit(self.0.as_handle().raw(), bits)
     }
 
     /// Let this function master the bus, once its driver has stopped it and
     /// laid out what it may reach. Until then it issues nothing, an interrupt
     /// included.
     pub fn dma_start(&self) -> Result<(), SyscallError> {
-        syscall::device_dma_start(self.0.as_handle())
+        syscall::device_dma_start(self.0.as_handle().raw())
     }
 
     /// `bytes` of memory this function can reach and nothing else can, below
     /// the width [`Self::dma_limit`] stated.
     pub fn dma_alloc(&self, bytes: u64) -> Result<DmaRegion, SyscallError> {
-        let grant = syscall::device_dma_alloc(self.0.as_handle(), bytes)?;
+        let grant = syscall::device_dma_alloc(self.0.as_handle().raw(), bytes)?;
         let memory = crate::shm::SharedMemory::adopt(crate::OwnedHandle(grant.shm), grant.bytes as usize)?;
         Ok(DmaRegion { memory, device_addr: grant.device_addr })
     }
@@ -168,14 +168,17 @@ impl PciDev {
     /// this function's address space, and answer where the function reaches
     /// it. The region stays alive while it is mapped; [`Self::dma_unmap`] or
     /// the claim's end takes it back.
-    pub fn dma_map(&self, region: RawHandle) -> Result<toyos_abi::pci::DmaMapping, SyscallError> {
-        syscall::device_dma_map(self.0.as_handle(), region)
+    pub fn dma_map(&self, region: crate::BorrowedHandle<'_>) -> Result<toyos_abi::pci::DmaMapping, SyscallError> {
+        // SAFETY: a borrow is live for the call, and no SDK type that relies on
+        // its region being written only through its own mapping lends its
+        // handle (`window::Window`'s buffer).
+        unsafe { syscall::device_dma_map(self.0.as_handle().raw(), region.raw()) }
     }
 
     /// Take back what [`Self::dma_map`] put at `device_addr`: from here the
     /// function reaches none of it.
     pub fn dma_unmap(&self, device_addr: u64) -> Result<(), SyscallError> {
-        syscall::device_dma_unmap(self.0.as_handle(), device_addr)
+        syscall::device_dma_unmap(self.0.as_handle().raw(), device_addr)
     }
 
     /// The interrupts since the last read, or `Err(WouldBlock)` for none.
@@ -224,38 +227,38 @@ impl AcpiDev {
     /// refuse it by name; beside either, the UEFI type firmware's map gives a
     /// memory address ([`toyos_abi::acpi::Access::memory_type`]).
     pub fn access(&self, mut access: toyos_abi::acpi::Access) -> Result<(Result<u64, toyos_abi::acpi::Refused>, u8), SyscallError> {
-        let made = syscall::acpi_access(self.as_handle(), &mut access)?;
+        let made = syscall::acpi_access(self.as_handle().raw(), &mut access)?;
         Ok((made, access.memory_type))
     }
 
     /// Try the firmware's Global Lock ([`syscall::acpi_lock_take`]): `false`
     /// where the firmware owns it and will raise `GBL_STS` on letting go.
     pub fn lock_take(&self) -> Result<bool, SyscallError> {
-        syscall::acpi_lock_take(self.as_handle())
+        syscall::acpi_lock_take(self.as_handle().raw())
     }
 
     pub fn lock_release(&self) -> Result<(), SyscallError> {
-        syscall::acpi_lock_release(self.as_handle())
+        syscall::acpi_lock_release(self.as_handle().raw())
     }
 
     /// Supply `\_S5`'s `SLP_TYPa` for the kernel's power-off
     /// ([`syscall::acpi_s5`]).
     pub fn s5(&self, slp_typ_a: u64) -> Result<(), SyscallError> {
-        syscall::acpi_s5(self.as_handle(), slp_typ_a)
+        syscall::acpi_s5(self.as_handle().raw(), slp_typ_a)
     }
 
     /// Declare one processor's idle states deeper than C1
     /// ([`syscall::acpi_idle`]).
     pub fn idle(&self, declaration: &toyos_abi::acpi::IdleDeclaration) -> Result<(), SyscallError> {
-        syscall::acpi_idle(self.as_handle(), declaration)
+        syscall::acpi_idle(self.as_handle().raw(), declaration)
     }
 }
 
 impl AsHandle for AcpiDev {
-    fn as_handle(&self) -> RawHandle { self.0.as_handle() }
+    fn as_handle(&self) -> crate::BorrowedHandle<'_> { self.0.as_handle() }
 }
 
 impl AsHandle for PciDev {
-    fn as_handle(&self) -> RawHandle { self.0.as_handle() }
+    fn as_handle(&self) -> crate::BorrowedHandle<'_> { self.0.as_handle() }
 }
 

@@ -65,8 +65,8 @@ impl SharedMemory {
     /// [`create`](Self::create), counted to the job `job` is a handle to,
     /// carrying `WRITE`, rather than this process's own: memory laid out
     /// for a child started in it.
-    pub fn create_for(job: RawHandle, len: usize) -> Result<Self, SyscallError> {
-        Self::adopt(OwnedHandle(syscall::shm_create_for(job, len)?), len)
+    pub fn create_for(job: crate::BorrowedHandle<'_>, len: usize) -> Result<Self, SyscallError> {
+        Self::adopt(OwnedHandle(syscall::shm_create_for(job.raw(), len)?), len)
     }
 
     /// [`create`](Self::create) for a region a device will be lent, by this
@@ -108,13 +108,13 @@ impl SharedMemory {
     /// The send *moves* what it is given, so a sender that wants to keep the
     /// region duplicates first — which is the same rule spawn endowment has.
     pub fn share(&self) -> Result<OwnedHandle, SyscallError> {
-        syscall::dup(self.handle.raw()).map(OwnedHandle)
+        self.handle.try_clone()
     }
 
     /// [`Self::share`], without `WRITE`: a peer's [`ReadOnly::lent`] maps it,
     /// and nothing it does with the handle writes the region.
     pub fn share_read_only(&self) -> Result<OwnedHandle, SyscallError> {
-        syscall::dup_narrowed(self.handle.raw(), READ_ONLY).map(OwnedHandle)
+        self.handle.as_handle().try_clone_narrowed(READ_ONLY)
     }
 
     /// The viewed bytes, as memory. A device's registers are reached through
@@ -162,8 +162,8 @@ impl Drop for SharedMemory {
 }
 
 impl AsHandle for SharedMemory {
-    fn as_handle(&self) -> RawHandle {
-        self.handle.raw()
+    fn as_handle(&self) -> crate::BorrowedHandle<'_> {
+        self.handle.as_handle()
     }
 }
 
@@ -353,7 +353,7 @@ impl ReadOnly {
     /// the one handle that maps it writable, for the party that writes it.
     pub fn create(len: usize) -> Result<(Self, OwnedHandle), SyscallError> {
         let writer = OwnedHandle(syscall::shm_create(len)?);
-        let handle = OwnedHandle(syscall::dup_narrowed(writer.raw(), READ_ONLY)?);
+        let handle = writer.as_handle().try_clone_narrowed(READ_ONLY)?;
         let ptr = map(&handle, VmProt::Read)?;
         // `shm_create` refused any `len` whose pages overflow.
         Ok((Self { handle, ptr, len, mapped: len.next_multiple_of(PAGE_SIZE) }, writer))
@@ -389,8 +389,8 @@ impl Drop for ReadOnly {
 }
 
 impl AsHandle for ReadOnly {
-    fn as_handle(&self) -> RawHandle {
-        self.handle.raw()
+    fn as_handle(&self) -> crate::BorrowedHandle<'_> {
+        self.handle.as_handle()
     }
 }
 
@@ -424,7 +424,9 @@ impl Immutable {
     /// their own over the same pages, unmapped here
     /// (`toyos_abi::syscall::shm_sub`).
     pub fn sub(&self, offset: u64, len: u64) -> Result<OwnedHandle, SyscallError> {
-        syscall::shm_sub(self.handle.raw(), offset, len).map(OwnedHandle)
+        // SAFETY: the handle is this region's own, and memory nobody writes
+        // has no writer to undo.
+        unsafe { syscall::shm_sub(self.handle.raw(), offset, len) }.map(OwnedHandle)
     }
 
     pub fn as_slice(&self) -> &[u8] {
@@ -453,8 +455,8 @@ impl fmt::Display for NotImmutable {
 }
 
 impl AsHandle for Immutable {
-    fn as_handle(&self) -> RawHandle {
-        self.handle.raw()
+    fn as_handle(&self) -> crate::BorrowedHandle<'_> {
+        self.handle.as_handle()
     }
 }
 

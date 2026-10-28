@@ -40,7 +40,7 @@ impl Login {
     pub fn command(&self, program: &str) -> Command {
         use std::os::toyos::process::CommandExt;
         let mut command = Command::new(program);
-        command.independent().detached().launcher(toyos::AsHandle::as_handle(&self.launcher).0);
+        command.independent().detached().launcher(toyos::AsHandle::as_handle(&self.launcher).into());
         command
     }
 }
@@ -65,12 +65,11 @@ pub struct Ender(toyos::process::Process);
 #[cfg(target_os = "toyos")]
 impl Ender {
     pub fn of(child: &Child) -> Result<Self, String> {
-        use std::os::toyos::process::ChildExt;
-        let handle = toyos::RawHandle(child.as_raw_handle());
-        let quit = toyos_abi::syscall::dup_narrowed(handle, toyos_abi::Rights::MANAGE)
+        use toyos::endow::FromHandle;
+        let quit = toyos::AsHandle::as_handle(child)
+            .try_clone_narrowed(toyos_abi::Rights::MANAGE)
             .map_err(|e| format!("no handle to end it was had ({e:?})"))?;
-        // SAFETY: a duplicate made here, which nothing else answers for.
-        Ok(Self(unsafe { toyos::process::Process::from_raw(quit) }))
+        Ok(Self(toyos::process::Process::from_handle(quit)))
     }
 
     /// Ask it to quit with a hang-up, whether or not a thread waits for it.

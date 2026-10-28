@@ -108,7 +108,7 @@ fn control(input: bool) {
         .arg("greedy")
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
-        .endow(JOB_LABEL, job.duplicate().expect("a second handle to its job").into_raw().0)
+        .endow(JOB_LABEL, job.duplicate().expect("a second handle to its job").into())
         .spawn()
         .expect("spawn the greedy job");
     let mut said = BufReader::new(greedy.stdout.take().expect("its stdout"));
@@ -126,7 +126,7 @@ fn control(input: bool) {
     let other = cap.new_job().expect("a job is a few bytes this job's floor holds");
     let refused = Command::new(ME)
         .arg("idle")
-        .endow(JOB_LABEL, other.into_raw().0)
+        .endow(JOB_LABEL, other.into())
         .spawn()
         .map(|_| ());
     assert!(
@@ -198,8 +198,8 @@ fn rings_are_the_clients(cap: &SysCap) {
         .arg("serve")
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
-        .endow(JOB_LABEL, job.duplicate().expect("a second handle to its job").into_raw().0)
-        .endow("acceptor", acceptor.into_raw().0)
+        .endow(JOB_LABEL, job.duplicate().expect("a second handle to its job").into())
+        .endow("acceptor", acceptor.into())
         .spawn()
         .expect("spawn the server");
     let names = toyos::namespace::build().add("served", &connector).finish().expect("a namespace of the port");

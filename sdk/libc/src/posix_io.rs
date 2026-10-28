@@ -57,7 +57,7 @@ pub(crate) fn fd_errno(e: toyos::fd::Error) -> Errno {
 
 /// A kernel handle this process just got, as the lowest free descriptor,
 /// inherited unless `cloexec`.
-pub(crate) fn install(handle: RawHandle, cloexec: bool) -> Result<i32, Errno> {
+pub(crate) fn install(handle: toyos::OwnedHandle, cloexec: bool) -> Result<i32, Errno> {
     toyos::fd::install(toyos::fd::Object::handle(handle), !cloexec, 0).map_err(fd_errno)
 }
 
@@ -102,7 +102,7 @@ pub unsafe extern "C" fn openat(dirfd: i32, path: *const u8, flags: i32, _mode: 
         Err(e) => return refuse(e),
     };
     if path == DEV_NULL {
-        return match syscall::null(null_rights(how.read, how.write)) {
+        return match toyos::null(null_rights(how.read, how.write)) {
             Ok(handle) => install(handle, how.cloexec).unwrap_or_else(refuse),
             Err(e) => set_errno(e),
         };
@@ -154,7 +154,8 @@ pub unsafe extern "C" fn creat(path: *const u8, mode: u32) -> i32 {
 
 #[no_mangle]
 pub unsafe extern "C" fn close(raw_fd: i32) -> i32 {
-    match toyos::fd::close(raw_fd) {
+    // SAFETY: C's `close`: the caller gives up `raw_fd`.
+    match unsafe { toyos::fd::close(raw_fd) } {
         Ok(()) => 0,
         Err(e) => refuse(fd_errno(e)),
     }
@@ -178,11 +179,11 @@ pub unsafe extern "C" fn read(raw_fd: i32, buf: *mut u8, count: usize) -> isize 
     };
     let Some(mut call) = Call::enter(None, false, false) else { return blocking(slice) };
     // Held for the call, so a `close` on another thread releases nothing it waits on.
-    let Ok((_held, object)) = toyos::fd::hold(raw_fd) else { return blocking(slice) };
-    if object.release.is_some() || object.handle == toyos_abi::HANDLE_INVALID {
+    let Ok(held) = toyos::fd::hold(raw_fd) else { return blocking(slice) };
+    let Some(handle) = held.object().kernel_handle().filter(|_| held.object().tag() != toyos::fd::STREAM) else {
         drop(call);
         return blocking(slice);
-    }
+    };
     loop {
         if let Some(delivery) = call.take() {
             if !call.interrupted(delivery) {
@@ -190,14 +191,14 @@ pub unsafe extern "C" fn read(raw_fd: i32, buf: *mut u8, count: usize) -> isize 
             }
             continue;
         }
-        match syscall::read_nonblock(object.handle, slice) {
+        match syscall::read_nonblock(handle.raw(), slice) {
             Ok(n) => return n as isize,
             Err(syscall::SyscallError::WouldBlock) => {}
             Err(e) => return set_errno(e) as isize,
         }
         let poller = toyos::poller::Poller::new(2);
-        poller.watch_raw(object.handle, toyos::poller::READABLE, 0);
-        poller.watch_raw(call.wake(), toyos::poller::READABLE, 1);
+        poller.watch(&handle, toyos::poller::READABLE, 0);
+        poller.watch(&call.wake(), toyos::poller::READABLE, 1);
         let mut refused = false;
         poller.wait_answers(1, u64::MAX, |token, answer| {
             refused |= token == 0 && answer == Err(syscall::SyscallError::NotSupported);
@@ -323,7 +324,8 @@ pub unsafe extern "C" fn dup(raw_fd: i32) -> i32 {
 /// closing what it named.
 #[no_mangle]
 pub unsafe extern "C" fn dup2(old_fd: i32, new_fd: i32) -> i32 {
-    match toyos::fd::dup2(old_fd, new_fd, true) {
+    // SAFETY: C's `dup2`: the caller gives up what `new_fd` named.
+    match unsafe { toyos::fd::dup2(old_fd, new_fd, true) } {
         Ok(fd) => {
             // The descriptor names something else now, so the stream is asked again.
             match fd {
@@ -339,21 +341,19 @@ pub unsafe extern "C" fn dup2(old_fd: i32, new_fd: i32) -> i32 {
 
 #[no_mangle]
 pub unsafe extern "C" fn pipe(pipefd: *mut i32) -> i32 {
-    let ends = match syscall::pipe() {
+    let (read, write) = match toyos::pipe_pair() {
         Ok(ends) => ends,
         Err(e) => return set_errno(e),
     };
-    let read = match install(ends.read, false) {
+    let read = match install(read.into(), false) {
         Ok(fd) => fd,
-        Err(e) => {
-            syscall::close(ends.write);
-            return refuse(e);
-        }
+        Err(e) => return refuse(e),
     };
-    let write = match install(ends.write, false) {
+    let write = match install(write.into(), false) {
         Ok(fd) => fd,
         Err(e) => {
-            let _ = toyos::fd::close(read);
+            // SAFETY: the descriptor installed just above, named nowhere else.
+            let _ = unsafe { toyos::fd::close(read) };
             return refuse(e);
         }
     };
@@ -562,7 +562,8 @@ impl crate::resolve::Kernel for TheKernel {
     }
 
     fn open(&mut self, at: &[u8]) -> Result<(), syscall::SyscallError> {
-        syscall::open(at, OpenFlags::READ).map(syscall::close)
+        // SAFETY: a handle just opened, closed once.
+        syscall::open(at, OpenFlags::READ).map(|h| unsafe { syscall::close(h) })
     }
 
     fn is_dir(&mut self, at: &[u8]) -> bool {
@@ -682,7 +683,8 @@ pub unsafe extern "C" fn opendir(path: *const u8) -> *mut DIR {
     }
     let dir = unsafe { fdopendir(fd) };
     if dir.is_null() {
-        let _ = toyos::fd::close(fd);
+        // SAFETY: the descriptor `open` answered above, which no `DIR` took.
+        let _ = unsafe { toyos::fd::close(fd) };
     }
     dir
 }
@@ -765,7 +767,8 @@ pub unsafe extern "C" fn closedir(dir: *mut DIR) -> i32 {
     if dir.is_null() { return -1; }
     // SAFETY: a `DIR` `opendir` or `fdopendir` answered, closed once.
     let dir = unsafe { Box::from_raw(dir) };
-    toyos::fd::close(dir.fd).map_or_else(|e| refuse(fd_errno(e)), |()| 0)
+    // SAFETY: the `DIR` owns its descriptor, and goes with it.
+    unsafe { toyos::fd::close(dir.fd) }.map_or_else(|e| refuse(fd_errno(e)), |()| 0)
 }
 
 // Positions and times
@@ -1020,7 +1023,7 @@ const MAX_POLLED: usize = toyos::poller::Poller::MAX_HANDLES as usize - 1;
 ///
 /// # Safety
 /// `fds` points at `n` entries.
-unsafe fn wait_fds(fds: *mut pollfd, n: usize, deadline: Option<u64>, wake: Option<RawHandle>) -> Result<Waited, i32> {
+unsafe fn wait_fds(fds: *mut pollfd, n: usize, deadline: Option<u64>, wake: Option<toyos::BorrowedHandle<'static>>) -> Result<Waited, i32> {
     use toyos::net::stream::{self, Poll, Way};
 
     const POLLIN: i16 = 1;
@@ -1037,10 +1040,10 @@ unsafe fn wait_fds(fds: *mut pollfd, n: usize, deadline: Option<u64>, wake: Opti
     // taken from its held object once: a `close` on another thread meanwhile
     // releases nothing this call watches or drains, and a number it reuses
     // is never looked at.
-    let held: alloc::vec::Vec<Option<(toyos::fd::Hold, toyos::fd::Object)>> =
-        entries.iter().map(|&(fd, _)| toyos::fd::hold(fd).ok()).collect();
-    let objects = || held.iter().map(|held| held.as_ref().map(|(_, object)| object));
-    let streams: alloc::vec::Vec<Option<RawHandle>> = objects().map(|object| object.and_then(crate::socket::stream_of)).collect();
+    let held: alloc::vec::Vec<Option<toyos::fd::Hold>> = entries.iter().map(|&(fd, _)| toyos::fd::hold(fd).ok()).collect();
+    let objects: alloc::vec::Vec<Option<toyos::fd::Lent<'_>>> = held.iter().map(|held| held.as_ref().map(toyos::fd::Hold::object)).collect();
+    let streams: alloc::vec::Vec<Option<toyos::BorrowedHandle<'_>>> =
+        objects.iter().map(|object| object.as_ref().and_then(crate::socket::stream_of)).collect();
     let ways = |events: i16| [(POLLIN, Way::Receive), (POLLOUT, Way::Send)].into_iter().filter(move |(flag, _)| events & flag != 0);
     let doorbells: usize = entries.iter().zip(&streams).filter(|(_, stream)| stream.is_some()).map(|((_, events), _)| ways(*events).count()).sum();
     // A C caller asking to watch more than a poller can is not a bug in this
@@ -1049,20 +1052,20 @@ unsafe fn wait_fds(fds: *mut pollfd, n: usize, deadline: Option<u64>, wake: Opti
         return Err(EINVAL);
     }
 
-    // The descriptors that are no stream, each as the kernel handle it is watched by.
+    // The descriptors that are no stream, each as the kernel handle it is
+    // watched by, and that handle's number, which `pollreq` plans by.
+    let watched: alloc::vec::Vec<Option<toyos::BorrowedHandle<'_>>> = objects
+        .iter()
+        .zip(&streams)
+        .map(|(object, stream)| match stream {
+            Some(_) => None,
+            None => object.as_ref().and_then(|object| crate::socket::watched_of(object).or_else(|| object.kernel_handle())),
+        })
+        .collect();
     let others: alloc::vec::Vec<(i32, i16)> = entries
         .iter()
-        .zip(objects())
-        .zip(&streams)
-        .map(|((&(_, events), object), stream)| match stream {
-            Some(_) => (-1, 0),
-            None => {
-                let handle = object.and_then(|object| {
-                    crate::socket::watched_of(object).or_else(|| object.kernel_handle())
-                });
-                (handle.map_or(-1, |handle| handle.0 as i32), events)
-            }
-        })
+        .zip(&watched)
+        .map(|(&(_, events), handle)| handle.map_or((-1, 0), |handle| (handle.raw().0 as i32, events)))
         .collect();
     // A descriptor that is not open answers `POLLNVAL`; a negative one is
     // ignored, as POSIX has it.
@@ -1087,18 +1090,18 @@ unsafe fn wait_fds(fds: *mut pollfd, n: usize, deadline: Option<u64>, wake: Opti
         };
         let wake_token = (n + watching.len()) as u64;
         let poller = toyos::poller::Poller::new((n + watching.len()) as u32 + 1);
-        for (entry, fd, interest) in crate::pollreq::watches(&others) {
-            if fd >= 0 {
-                poller.watch_raw(toyos_abi::RawHandle(fd as u32), interest, entry as u64);
+        for (entry, _, interest) in crate::pollreq::watches(&others) {
+            if let Some(handle) = watched[entry] {
+                poller.watch(&handle, interest, entry as u64);
             }
         }
         for (k, (_, _, doorbell, _)) in watching.iter().enumerate() {
             if let Ok(doorbell) = doorbell {
-                poller.watch_raw(*doorbell, toyos::poller::READABLE, (n + k) as u64);
+                poller.watch(doorbell, toyos::poller::READABLE, (n + k) as u64);
             }
         }
         if let Some(wake) = wake {
-            poller.watch_raw(wake, toyos::poller::READABLE, wake_token);
+            poller.watch(&wake, toyos::poller::READABLE, wake_token);
         }
         let mut answered = alloc::vec![false; n + watching.len()];
         let mut woken = false;

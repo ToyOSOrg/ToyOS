@@ -93,13 +93,11 @@ impl Usbd {
     fn start(id: PciId, dev: PciDev) -> Self {
         let (acceptor, conn) = toyos::port::create().expect("usbd_spare: a port");
         let mut child = Command::new(USBD)
-            .endow(&format!("{DEV_PREFIX}{}", spelled(id)), toyos::AsHandle::as_handle(&dev).0)
-            .endow(&format!("{SERVE_PREFIX}{}", USB.port), acceptor.into_raw().0)
+            .endow(&format!("{DEV_PREFIX}{}", spelled(id)), dev.into())
+            .endow(&format!("{SERVE_PREFIX}{}", USB.port), acceptor.into())
             .stdout(Stdio::piped())
             .spawn()
             .expect("usbd_spare: spawn usbd");
-        // Moved: the spawn holds them now.
-        std::mem::forget(dev);
         let out = BufReader::new(child.stdout.take().expect("usbd's piped stdout"));
         let (tx, said) = mpsc::channel();
         std::thread::spawn(move || {

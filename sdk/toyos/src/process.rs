@@ -73,7 +73,7 @@ impl Process {
     /// A second handle carrying **less** — how a supervisor hands on the right
     /// to wait without the right to kill.
     pub fn narrowed(&self, rights: Rights) -> Result<Self, SyscallError> {
-        syscall::dup_narrowed(self.0.raw(), rights).map(|h| Self(OwnedHandle(h)))
+        self.0.as_handle().try_clone_narrowed(rights).map(Self)
     }
 
     /// Give up ownership, for a handle about to be endowed or sent.
@@ -90,14 +90,14 @@ impl Process {
 }
 
 impl AsHandle for Process {
-    fn as_handle(&self) -> RawHandle {
-        self.0.raw()
+    fn as_handle(&self) -> crate::BorrowedHandle<'_> {
+        self.0.as_handle()
     }
 }
 
 impl FromHandle for Process {
-    unsafe fn from_handle(raw: RawHandle) -> Self {
-        Self(OwnedHandle(raw))
+    fn from_handle(handle: OwnedHandle) -> Self {
+        Self(handle)
     }
 }
 
@@ -141,7 +141,7 @@ impl Image {
     /// than this process's: the program of a child started in it, which
     /// keeps the image for as long as it runs.
     pub fn read_for<E>(
-        job: Option<RawHandle>,
+        job: Option<crate::BorrowedHandle<'_>>,
         len: u64,
         mut read: impl FnMut(&mut [u8]) -> Result<usize, E>,
     ) -> Result<Self, ImageRefused<E>> {
@@ -191,7 +191,7 @@ impl Image {
             Object::Read(object) => object.as_handle(),
             Object::Immutable(image) => image.as_handle(),
         };
-        (u64::from(handle.0), self.len)
+        (u64::from(handle.raw().0), self.len)
     }
 }
 

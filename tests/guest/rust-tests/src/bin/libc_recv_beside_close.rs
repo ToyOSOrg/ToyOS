@@ -118,7 +118,7 @@ fn test(role: &str) {
     let ns = namespace::build().add(SERVICE, &connector).finish().expect("a namespace");
     let mut child = Command::new(SELF_PATH)
         .arg(role)
-        .endow(SVC_LABEL, ns.into_raw().0)
+        .endow(SVC_LABEL, ns.into())
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .spawn()
@@ -131,8 +131,7 @@ fn test(role: &str) {
     assert_eq!(header.msg_type, MsgType::TcpConnect as u32, "a stream's connect");
     let _: TcpConnectRequest = conn.recv_payload(&header).expect("the connect's request");
     let [region] = conn.recv_handles_exact::<1>(&header).expect("the stream's region");
-    // SAFETY: received with this frame, so this process's and nobody else's.
-    let region = SharedMemory::lent(unsafe { OwnedHandle::from_raw(region) }, REGION_BYTES).expect("a region netstack takes");
+    let region = SharedMemory::lent(region, REGION_BYTES).expect("a region netstack takes");
     // SAFETY: the mapping is `REGION_BYTES`, 2 MiB aligned, and its header is reached only as atomics.
     let words = unsafe { &*(region.as_ptr() as *const Words) };
     let mut server = Server::new(words, LAYOUT);
@@ -159,7 +158,7 @@ fn test(role: &str) {
     // whose wait watches the stream looks at the second ring.
     for _ in 0..2 {
         words[RECEIVE_WANT].store(0, Ordering::Release);
-        syscall::write(receive.as_handle(), &[1]).expect("ring the reader");
+        syscall::write(receive.as_handle().raw(), &[1]).expect("ring the reader");
         if !looked(words) {
             let _ = child.kill();
             panic!("the {role}'s recv never looked at its stream again once its descriptor's number named a pipe");
@@ -168,7 +167,7 @@ fn test(role: &str) {
 
     region.bytes().write(RECEIVE_RING, PEER);
     let _ = server.publish(words, PEER.len() as u32).expect("the client keeps the protocol");
-    syscall::write(receive.as_handle(), &[1]).expect("ring the reader");
+    syscall::write(receive.as_handle().raw(), &[1]).expect("ring the reader");
 
     let said = line(&mut out);
     if said != format!("received {}", String::from_utf8_lossy(PEER)) {
@@ -179,12 +178,12 @@ fn test(role: &str) {
     // `toyos`, which holds the stream's end, lets it go, so its connection
     // hangs up while the child lives.
     let poller = Poller::new(1);
-    poller.watch_raw(conn.as_handle(), SERVER_WATCH, 0);
+    poller.watch(&conn, SERVER_WATCH, 0);
     let mut answered = false;
     poller.wait(1, CEILING_NANOS, |_| answered = true);
     let mut bytes = [0u8; 64];
-    while syscall::read_nonblock(conn.as_handle(), &mut bytes).is_ok_and(|n| n > 0) {}
-    let hung_up = answered && syscall::read_nonblock(conn.as_handle(), &mut bytes) == Ok(0);
+    while syscall::read_nonblock(conn.as_handle().raw(), &mut bytes).is_ok_and(|n| n > 0) {}
+    let hung_up = answered && syscall::read_nonblock(conn.as_handle().raw(), &mut bytes) == Ok(0);
     writeln!(tell, "exit").expect("tell the child to exit");
     let status = child.wait().expect("wait the child");
     assert!(hung_up, "the stream's end outlived its descriptor's close and its last call, in a child that lives on");

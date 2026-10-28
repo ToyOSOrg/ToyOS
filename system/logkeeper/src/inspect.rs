@@ -138,7 +138,7 @@ fn run(acceptor: &Acceptor, published: &Published, hub: &Hub) -> ! {
     loop {
         poller.watch(acceptor, READABLE, ACCEPT);
         for p in &pending {
-            poller.watch(&p.conn, READABLE, u64::from(p.conn.as_handle().0));
+            poller.watch(&p.conn, READABLE, u64::from(p.conn.as_handle().raw().0));
         }
         let timeout =
             if pending.is_empty() { u64::MAX } else { HANDSHAKE_TIMEOUT.as_nanos() as u64 };
@@ -161,7 +161,7 @@ fn run(acceptor: &Acceptor, published: &Published, hub: &Hub) -> ! {
         }
 
         pending.retain_mut(|p| {
-            if !ready.contains(&u64::from(p.conn.as_handle().0)) {
+            if !ready.contains(&u64::from(p.conn.as_handle().raw().0)) {
                 return true;
             }
             match p.rx.pump(&p.conn) {

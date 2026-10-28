@@ -15,9 +15,8 @@ use std::time::Duration;
 
 use toyos::poller::{Poller, READABLE};
 use toyos::shm::SharedMemory;
-use toyos::{endow, AsHandle, DmaRegion, FramebufferDev, PciDev};
+use toyos::{endow, AsHandle, BorrowedHandle, DmaRegion, FramebufferDev, PciDev};
 use toyos_abi::syscall::{DeviceType, PciId, SyscallError};
-use toyos_abi::RawHandle;
 use toyos_desktop::mode::{self, Start};
 use toyos_desktop::{Mode, Rect, Scale};
 use toyos_pci_claim::virtio::{negotiate, Negotiated};
@@ -98,7 +97,7 @@ impl Display {
     }
 
     /// The claim whose readiness is a wake of the device.
-    pub fn handle(&self) -> Option<RawHandle> {
+    pub fn handle(&self) -> Option<BorrowedHandle<'_>> {
         match self {
             Self::Virtio(v) => Some(v.dev.as_handle()),
             Self::Gop(_) => None,

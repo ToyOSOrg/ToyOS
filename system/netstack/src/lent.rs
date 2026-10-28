@@ -93,9 +93,7 @@ pub struct Holders {
 impl Holders {
     /// A second handle of the region, for a holder's [`ADOPT`](toyos::net::stream::ADOPT).
     pub fn region(&self) -> Result<OwnedHandle, SyscallError> {
-        let copy = toyos_abi::syscall::dup(toyos::AsHandle::as_handle(&self.region))?;
-        // SAFETY: a handle the kernel just made for this call, which nothing else answers for.
-        Ok(unsafe { OwnedHandle::from_raw(copy) })
+        self.region.try_clone()
     }
 }
 

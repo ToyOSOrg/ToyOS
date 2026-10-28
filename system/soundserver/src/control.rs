@@ -20,7 +20,6 @@ use toyos::poller::{Poller, READABLE};
 use toyos::port::Acceptor;
 use toyos::Connection;
 use toyos_abi::syscall;
-use toyos_abi::RawHandle;
 use toyos_mixer::{period_nanos, Gain, MAX_CLIENT_RATE, MIN_CLIENT_RATE};
 
 use crate::client::{open_stream, Departure};
@@ -133,8 +132,8 @@ pub(crate) fn control_thread(
     volume_acceptor: Acceptor,
     mut outputs: Outputs,
     cmd_ring: &CommandRing,
-    cmd_pipe_write: RawHandle,
-    ended_read: RawHandle,
+    cmd_pipe_write: toyos::BorrowedHandle<'_>,
+    ended_read: toyos::BorrowedHandle<'_>,
     mut device: Device,
     published: &Published,
 ) {
@@ -188,7 +187,7 @@ pub(crate) fn control_thread(
         }
 
         poller.watch(&acceptor, READABLE, TOKEN_ACCEPT);
-        poller.watch_raw(ended_read, READABLE, TOKEN_ENDED);
+        poller.watch(&ended_read, READABLE, TOKEN_ENDED);
         outputs.watch(&poller, TOKEN_OUTPUTS);
         poller.watch(&volume_acceptor, READABLE, TOKEN_VOLUME_ACCEPT);
         for (i, client) in clients.iter().enumerate() {
@@ -235,7 +234,7 @@ pub(crate) fn control_thread(
         }
         if ready.contains(&TOKEN_ENDED) {
             let mut drain = [0u8; 8];
-            while matches!(syscall::read_nonblock(ended_read, &mut drain), Ok(n) if n == drain.len()) {}
+            while matches!(syscall::read_nonblock(ended_read.raw(), &mut drain), Ok(n) if n == drain.len()) {}
             outputs.ended(&mut events);
         }
         outputs.serve(&ready, TOKEN_OUTPUTS, &mut events);

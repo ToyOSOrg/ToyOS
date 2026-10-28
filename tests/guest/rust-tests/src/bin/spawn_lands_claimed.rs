@@ -48,7 +48,7 @@ fn test() {
     let ns = namespace::build().add(BACK, &connector).finish().expect("a namespace carrying the port back");
     let mut place = Command::new(SELF_PATH)
         .arg("place")
-        .endow(SVC_LABEL, ns.into_raw().0)
+        .endow(SVC_LABEL, ns.into())
         .stdin(Stdio::null())
         .spawn()
         .expect("spawn the place");
@@ -63,8 +63,8 @@ fn test() {
         0,
         "this kernel does not carry SYS_DEBUG, so nothing kills the place"
     );
-    let child = spawn_under(place_self).expect("a spawn past its commit lands, whatever became of its place");
-    match spawn_under(place_self) {
+    let child = spawn_under(place_self.as_handle().raw()).expect("a spawn past its commit lands, whatever became of its place");
+    match spawn_under(place_self.as_handle().raw()) {
         Err(SyscallError::Gone) => {}
         Err(other) => panic!("a second spawn under the place answered {other:?}, not Gone"),
         Ok(_) => panic!("the kernel did not kill the place of the marked spawn"),
@@ -72,7 +72,7 @@ fn test() {
     assert_eq!(child.wait(), Ok(KILLED), "the child that landed under a claimed place was not ended, as killed");
     let status = place.wait().expect("wait for the place");
     assert_eq!(End::from_word(status.into_raw()), Some(KILLED), "the place was not ended, as killed");
-    syscall::close(place_self);
+    drop(place_self);
     println!("spawn_lands_claimed: the child landed claimed and was retired, and its place was published after it");
 }
 
@@ -106,7 +106,8 @@ fn spawn_under(place: RawHandle) -> Result<Process, SyscallError> {
 
 fn place() -> ! {
     let conn = endow::service(BACK).expect("the test endowed a port back");
-    let own = syscall::dup(endow::this_process().as_handle()).expect("a copy of this process's self");
+    // SAFETY: nothing relies on being the source's only holder.
+    let own = unsafe { syscall::dup(endow::this_process().as_handle().raw()) }.expect("a copy of this process's self");
     // SAFETY: a fresh duplicate, answered for by nothing else.
     conn.signal_with(MSG_SELF, [unsafe { OwnedHandle::from_raw(own) }]).expect("send the test this process's self");
     park()

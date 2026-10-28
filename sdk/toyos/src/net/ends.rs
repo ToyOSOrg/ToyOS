@@ -10,6 +10,8 @@ use toyos_abi::handle::Rights;
 use toyos_abi::syscall;
 use toyos_abi::RawHandle;
 
+use crate::{AsHandle, BorrowedHandle, OwnedHandle};
+
 use super::NetError;
 
 /// What a holder keeps of its connection: it reads, writes and waits on it, and duplicates it
@@ -19,12 +21,29 @@ pub(super) const HELD_CONNECTION: Rights = Rights::DUP.union(Rights::WAIT).union
 /// What a holder keeps of a bell netstack rings: it reads and waits on it, and duplicates it.
 pub(super) const HELD_BELL: Rights = Rights::DUP.union(Rights::WAIT).union(Rights::READ);
 
-/// `handle` held with `rights` alone, the original closed: refused, the original is closed all
-/// the same.
-pub(super) fn narrowed(handle: RawHandle, rights: Rights) -> Result<RawHandle, NetError> {
-    let narrowed = syscall::dup_narrowed(handle, rights);
-    syscall::close(handle);
-    narrowed.map_err(|_| NetError::Io)
+/// `handle` held with `rights` alone, the original closed, as a number the table keeps from
+/// here: refused, the original is closed all the same.
+pub(super) fn narrowed(handle: OwnedHandle, rights: Rights) -> Result<RawHandle, NetError> {
+    handle.as_handle().try_clone_narrowed(rights).map(OwnedHandle::into_raw).map_err(|_| NetError::Io)
+}
+
+/// A handle an end keeps, lent for a call.
+///
+/// # Safety
+/// `raw` is one of an end's handles, which only its module's `free` closes, once no handle and
+/// no call reaches the end: it is live for as long as a call is counted in.
+pub(super) unsafe fn kept<'a>(raw: RawHandle) -> BorrowedHandle<'a> {
+    // SAFETY: the caller's.
+    unsafe { BorrowedHandle::borrow_raw(raw) }
+}
+
+/// Close a handle an end kept, from its module's `free`.
+///
+/// # Safety
+/// No handle and no call reaches the end any more, and `raw` is one of its own.
+pub(super) unsafe fn close_kept(raw: RawHandle) {
+    // SAFETY: the caller's.
+    unsafe { syscall::close(raw) }
 }
 
 /// A slot of the table. `repr(u8)` puts `Free` at zero, so a table costs a program that makes no
@@ -83,6 +102,14 @@ impl<E: Copy, const N: usize> Ends<E, N> {
         let Slot::Live { end, calls, .. } = &mut self.slots[slot] else { return None };
         *calls += 1;
         Some((slot, *end))
+    }
+
+    /// The live end at `slot`, which a counted call keeps.
+    pub(super) fn at(&self, slot: usize) -> Option<E> {
+        match self.slots[slot] {
+            Slot::Live { end, .. } => Some(end),
+            Slot::Free | Slot::Making => None,
+        }
     }
 
     /// A call ends: the end, where it was its last use.

@@ -68,7 +68,7 @@ impl Hub {
     pub fn read(&self, conn: &Connection) {
         let end = self.shared.replay.lock().expect("logkeeper: the replay is poisoned").end();
         let Some(pipe) = hand_over(conn, end) else { return };
-        admit(&self.shared, format!("reader {}", conn.as_handle().0), PipeSink::new(pipe));
+        admit(&self.shared, format!("reader {}", conn.as_handle().raw().0), PipeSink::new(pipe));
     }
 
     /// The lines the file has just taken, for every reader.

@@ -109,6 +109,7 @@ fn main() {
             ring.complete_one(ROUNDS + token);
         }
     });
-    syscall::close(handle);
+    // SAFETY: no type holds this number.
+    unsafe { syscall::close(handle) };
     println!("ring_park_herd: {PARKED} threads parked in submit on one ring, woken by {ROUNDS} completions");
 }

@@ -90,8 +90,6 @@ crate::ipc_payload! {
 /// table and soundserver's next signal answers `Gone`, by construction rather than
 /// by bookkeeping.
 pub const STREAM_OPENED_HANDLES: usize = 2;
-pub const STREAM_OPENED_SHM: usize = 0;
-pub const STREAM_OPENED_SIGNAL: usize = 1;
 
 pub struct AudioSlotWriter {
     shm: SharedMemory,
@@ -272,14 +270,14 @@ impl AudioStream {
             other => return Err(AudioError::Protocol(other)),
         };
 
-        let batch = control
+        let [shm, signal] = control
             .recv_handles_exact::<STREAM_OPENED_HANDLES>(&header)
             .ok_or(AudioError::MissingHandles)?;
-        let signal = crate::Pipe(crate::OwnedHandle(batch[STREAM_OPENED_SIGNAL]));
+        let signal = crate::Pipe(signal);
 
         let slot_count = resp.slot_count as u32;
         let shm_size = AudioSlotHeader::SIZE + slot_count as usize * resp.client_period_bytes as usize;
-        let shm = SharedMemory::lent(crate::OwnedHandle(batch[STREAM_OPENED_SHM]), shm_size)
+        let shm = SharedMemory::lent(shm, shm_size)
             .map_err(AudioError::Lent)?;
         let slot_writer = AudioSlotWriter::new(shm, resp.client_period_bytes, slot_count);
 

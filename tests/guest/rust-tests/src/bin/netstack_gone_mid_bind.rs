@@ -124,7 +124,7 @@ fn spawn(connector: &port::Connector, role: &str) -> (Child, BufReader<ChildStdo
     let ns = namespace::build().add(SERVICE, connector).finish().expect("a namespace");
     let mut child = Command::new(SELF_PATH)
         .arg(role)
-        .endow(SVC_LABEL, ns.into_raw().0)
+        .endow(SVC_LABEL, ns.into())
         .stdout(Stdio::piped())
         .spawn()
         .unwrap_or_else(|e| panic!("spawn {role}: {e}"));
@@ -190,7 +190,7 @@ fn mid_flight(request: Request) -> ! {
     say("connected");
 
     let mut byte = [0u8; 1];
-    let n = syscall::read(watch.as_handle(), &mut byte).expect("read the watch connection");
+    let n = syscall::read(watch.as_handle().raw(), &mut byte).expect("read the watch connection");
     assert_eq!(n, 0, "the watch connection carried {n} byte(s); nobody ever wrote to it");
 
     let err = match request {

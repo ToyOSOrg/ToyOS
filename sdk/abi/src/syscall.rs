@@ -1066,7 +1066,9 @@ pub fn get_env(buf: &mut [u8]) -> usize {
 /// would have freed.
 ///
 /// # Safety
-/// The raw pointer fields in `SpawnArgs` must point to valid memory.
+/// The raw pointer fields in `SpawnArgs` must point to valid memory, and every
+/// handle its endowment names is the caller's to give away: a spawn moves them
+/// ([`crate::handle`]).
 pub unsafe fn spawn(args: &SpawnArgs) -> Result<RawHandle, SyscallError> {
     check(syscall(SYS_SPAWN, args as *const SpawnArgs as u64, 0, 0, 0))
         .map(|h| RawHandle(h as u32))
@@ -1199,7 +1201,11 @@ pub fn open(path: &[u8], flags: OpenFlags) -> Result<RawHandle, SyscallError> {
 }
 
 /// Close a handle.
-pub fn close(handle: RawHandle) {
+///
+/// # Safety
+/// `handle` is this process's and nothing else answers for it: no owner
+/// closes or uses it again ([`crate::handle`]).
+pub unsafe fn close(handle: RawHandle) {
     syscall(SYS_CLOSE, handle.0 as u64, 0, 0, 0);
 }
 
@@ -2060,7 +2066,11 @@ crate::user_safe! {
 ///   `nonblock` answers `WouldBlock`.
 ///
 /// [`Rights::TRANSFER`]: crate::handle::Rights::TRANSFER
-pub fn message_send(conn: RawHandle, bytes: &[u8], handles: &[RawHandle], nonblock: bool) -> Result<(), SyscallError> {
+///
+/// # Safety
+/// Each of `handles` is the caller's to give away: a sent handle leaves this
+/// process, so nothing may answer for it afterwards ([`crate::handle`]).
+pub unsafe fn message_send(conn: RawHandle, bytes: &[u8], handles: &[RawHandle], nonblock: bool) -> Result<(), SyscallError> {
     let args = MessageSend {
         bytes: bytes.as_ptr() as u64,
         len: bytes.len() as u64,
@@ -2140,7 +2150,10 @@ pub unsafe fn shm_map(shm: RawHandle, prot: VmProt) -> Result<*mut u8, SyscallEr
 /// window.
 ///
 /// [`Rights::MAP`]: crate::handle::Rights::MAP
-pub fn shm_sub(shm: RawHandle, offset: u64, len: u64) -> Result<RawHandle, SyscallError> {
+///
+/// # Safety
+/// As [`dup`]'s: the new handle reaches `shm`'s pages with its rights.
+pub unsafe fn shm_sub(shm: RawHandle, offset: u64, len: u64) -> Result<RawHandle, SyscallError> {
     check(syscall(SYS_SHM_SUB, shm.0 as u64, offset, len, 0)).map(|v| RawHandle(v as u32))
 }
 
@@ -2304,7 +2317,11 @@ pub fn nanosleep(nanos: u64) {
 pub const RIGHTS_UNCHANGED: u64 = u64::MAX;
 
 /// A second handle to the same object, carrying what the first carries.
-pub fn dup(handle: RawHandle) -> Result<RawHandle, SyscallError> {
+///
+/// # Safety
+/// `handle` is live in this process for the call, and nothing that answers
+/// for it relies on being the object's only holder ([`crate::handle`]).
+pub unsafe fn dup(handle: RawHandle) -> Result<RawHandle, SyscallError> {
     check(syscall(SYS_HANDLE_DUP, handle.0 as u64, RIGHTS_UNCHANGED, 0, 0))
         .map(|v| RawHandle(v as u32))
 }
@@ -2315,7 +2332,10 @@ pub fn dup(handle: RawHandle) -> Result<RawHandle, SyscallError> {
 /// shrink, and asking to widen is a bug in the asker rather than a request to
 /// be quietly cut down to size. This is how the supervisor hands a program an `RT`-only
 /// `SysCap` while keeping the full one.
-pub fn dup_narrowed(handle: RawHandle, rights: Rights) -> Result<RawHandle, SyscallError> {
+///
+/// # Safety
+/// As [`dup`]'s.
+pub unsafe fn dup_narrowed(handle: RawHandle, rights: Rights) -> Result<RawHandle, SyscallError> {
     check(syscall(SYS_HANDLE_DUP, handle.0 as u64, rights.bits() as u64, 0, 0))
         .map(|v| RawHandle(v as u32))
 }
@@ -2624,7 +2644,12 @@ pub fn device_dma_start(claim: RawHandle) -> Result<(), SyscallError> {
 /// mapped for this claim; `ResourceExhausted` with no run of the region's
 /// length left in the claim's [`LEND_WINDOW`](crate::pci::LEND_WINDOW), and
 /// `InvalidArgument` before the claim's [`device_dma_limit`] is stated.
-pub fn device_dma_map(claim: RawHandle, shm: RawHandle) -> Result<DmaMapping, SyscallError> {
+///
+/// # Safety
+/// `shm` is live in this process for the call, and nothing that answers for
+/// it relies on the region being written only through this process's own
+/// mapping ([`crate::handle`]).
+pub unsafe fn device_dma_map(claim: RawHandle, shm: RawHandle) -> Result<DmaMapping, SyscallError> {
     let mut mapping = DmaMapping { device_addr: 0, bytes: 0 };
     check_unit(syscall(
         SYS_DEVICE_DMA_MAP,

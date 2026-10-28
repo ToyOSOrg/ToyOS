@@ -126,7 +126,7 @@ impl Device for Disk<'_> {
         }
         cached
     }
-    fn dma_map(&mut self, region: toyos::RawHandle) -> Result<u64, SyscallError> {
+    fn dma_map(&mut self, region: toyos::BorrowedHandle<'_>) -> Result<u64, SyscallError> {
         self.claim.dma_map(region).map(|m| m.device_addr)
     }
     fn dma_unmap(&mut self, device_addr: u64) -> Result<(), SyscallError> {
@@ -222,11 +222,7 @@ fn idle(mut link: Option<Link>, stop: Option<toyos::Pipe>) -> ! {
         if stopping {
             std::process::exit(0);
         }
-        for handed in link.iter_mut().flat_map(Link::take) {
-            if let Handed::Session { region, .. } = handed {
-                toyos_abi::syscall::close(region);
-            }
-        }
+        link.iter_mut().flat_map(Link::take).for_each(drop);
     }
 }
 
@@ -308,9 +304,6 @@ fn serve(
             };
             let Some(sessions) = disks.get_mut(&on) else {
                 println!("{name}: the block service handed work on disk {on}, which is not served");
-                if let Handed::Session { region, .. } = handed {
-                    toyos_abi::syscall::close(region);
-                }
                 continue;
             };
             let mut port = Disk { usb, disk: on, claim: dev };
@@ -338,7 +331,7 @@ fn serve(
         if let (true, Some(acceptor)) = (ready.contains(&TOKEN_ACCEPT), &acceptor) {
             match acceptor.accept() {
                 Ok(conn) if pending.len() < MAX_PENDING => pending.push(Pending { conn, rx: FrameRx::new(), since: Instant::now() }),
-                Ok(conn) => println!("{name}: refusing client {} — {MAX_PENDING} are already waiting", conn.as_handle().0),
+                Ok(conn) => println!("{name}: refusing client {} — {MAX_PENDING} are already waiting", conn.as_handle().raw().0),
                 Err(why) => println!("{name}: the kernel refused a client's connection: {why:?}"),
             }
         }
@@ -346,7 +339,7 @@ fn serve(
             if p.since.elapsed() >= HANDSHAKE_TIMEOUT {
                 return false;
             }
-            if !ready.contains(&(TOKEN_PENDING + u64::from(p.conn.as_handle().0))) {
+            if !ready.contains(&(TOKEN_PENDING + u64::from(p.conn.as_handle().raw().0))) {
                 return true;
             }
             match p.rx.pump(&p.conn) {
@@ -383,7 +376,7 @@ fn serve(
             sessions.watch(&poller, TOKEN_SESSION | u64::from(disk) << 16);
         }
         for p in &pending {
-            poller.watch(&p.conn, READABLE, TOKEN_PENDING + u64::from(p.conn.as_handle().0));
+            poller.watch(&p.conn, READABLE, TOKEN_PENDING + u64::from(p.conn.as_handle().raw().0));
         }
         let now = usb.wake.now();
         let mut timeout = wake_at.map_or(u64::MAX, |at| at.saturating_sub(now));
@@ -500,6 +493,6 @@ fn answer(conn: &Connection, usb: &Driver, wakes: &Wakes, wake_at: Option<Nanos>
     snap.put("input.opened", input.opened);
     let encoded = snap.encode().unwrap_or_else(|why| panic!("usbd: its snapshot: {why}"));
     if let Err(why) = conn.try_send_bytes(MSG_SNAPSHOT, &encoded) {
-        println!("usbd: dropping client {} — its answer would not go: {why:?}", conn.as_handle().0);
+        println!("usbd: dropping client {} — its answer would not go: {why:?}", conn.as_handle().raw().0);
     }
 }

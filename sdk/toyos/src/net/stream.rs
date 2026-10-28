@@ -46,7 +46,7 @@ use toyos_abi::handle::Rights;
 use toyos_abi::syscall::{self, SyscallError};
 use toyos_abi::RawHandle;
 
-use super::ends::{narrowed, Ends, HELD_BELL, HELD_CONNECTION};
+use super::ends::{close_kept, kept, narrowed, Ends, HELD_BELL, HELD_CONNECTION};
 
 use crate::ipc::{self, Connection, TrySendError};
 use crate::shm::{Bytes, SharedMemory};
@@ -54,7 +54,7 @@ use crate::sync::Lock;
 use crate::transport::session::{self, Bells, Doorbell, Holder, HungUp, Layout, Mode, Polled, Receiving, Refused as Answer, Sending, Took, Waited};
 use crate::transport::stream::Place;
 use crate::transport::Span;
-use crate::OwnedHandle;
+use crate::{AsHandle, BorrowedHandle, OwnedHandle};
 
 use super::{answer, hangup, MsgType, NetError, NetstackConn, TcpAcceptResponse, TcpConnectRequest, TcpConnectResponse};
 
@@ -186,17 +186,25 @@ static TABLE: Lock<Ends<End, MAX_STREAMS>> = Lock::new(Ends::new());
 /// What an end holds besides its halves.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 struct End {
-    /// The region's handle and its mapping; `None` for an exported end whose
-    /// netstack said nothing of it, on which every call answers `Aborted`.
-    region: Option<(RawHandle, usize)>,
+    /// The region and its bells; `None` for an exported end whose netstack
+    /// said nothing of it, on which every call answers `Aborted`.
+    region: Option<Mapped>,
     /// The end's own handle of the connection, which every call rings and
     /// waits through and only [`free`] closes: a descriptor closed under a call
     /// hangs nothing up.
-    connection: RawHandle,
-    receive_bell: RawHandle,
-    send_bell: RawHandle,
+    connection: BorrowedHandle<'static>,
     peer: ([u8; 4], u16),
     local_port: u16,
+}
+
+/// An end's region, its handle and mapping, and the bells netstack rings for
+/// it, kept as [`kept`] says.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct Mapped {
+    handle: RawHandle,
+    base: usize,
+    receive_bell: BorrowedHandle<'static>,
+    send_bell: BorrowedHandle<'static>,
 }
 
 /// Lets go of an end no handle or call reaches: its halves, its connection,
@@ -204,16 +212,15 @@ struct End {
 fn free(slot: usize, end: End) {
     *HALVES[slot].rx.lock() = Kept::Empty;
     *HALVES[slot].tx.lock() = Kept::Empty;
-    if let Some((_, base)) = end.region {
+    let region = end.region.map(|mapped| {
         // SAFETY: the halves that read the mapping are gone, and nothing else
         // reaches it.
-        let _ = unsafe { syscall::vm_release(base as *mut u8, REGION_BYTES) };
-    }
-    let region = end.region.map(|(region, _)| region);
-    for handle in [Some(end.connection), Some(end.receive_bell), Some(end.send_bell), region].into_iter().flatten() {
-        if handle != toyos_abi::HANDLE_INVALID {
-            syscall::close(handle);
-        }
+        let _ = unsafe { syscall::vm_release(mapped.base as *mut u8, REGION_BYTES) };
+        [mapped.receive_bell.raw(), mapped.send_bell.raw(), mapped.handle]
+    });
+    for handle in core::iter::once(end.connection.raw()).chain(region.into_iter().flatten()) {
+        // SAFETY: no handle and no call reaches the end, whose own these are.
+        unsafe { close_kept(handle) };
     }
     TABLE.lock().unreserve(slot);
 }
@@ -340,15 +347,16 @@ impl Call {
     }
 
     fn bells(&self) -> Doorbells {
-        Doorbells { connection: self.end.connection, receive: self.end.receive_bell, send: self.end.send_bell }
+        let mapped = self.end.region.expect("a call is made only on an end with its region");
+        Doorbells { connection: self.end.connection, receive: mapped.receive_bell, send: mapped.send_bell }
     }
 }
 
 /// Runs `f` as a call through `handle`, its end kept until it returns. An end
 /// with no region answers `Aborted`.
-fn call<R>(handle: RawHandle, f: impl FnOnce(&Call) -> R) -> Result<R, Refused> {
-    let (slot, end) = TABLE.lock().call(handle).ok_or(Refused::NotThisProcess(handle))?;
-    let answer = end.region.map(|(_, base)| f(&Call { slot, end, base }));
+fn call<R>(handle: BorrowedHandle<'_>, f: impl FnOnce(&Call) -> R) -> Result<R, Refused> {
+    let (slot, end) = TABLE.lock().call(handle.raw()).ok_or(Refused::NotThisProcess(handle.raw()))?;
+    let answer = end.region.map(|mapped| f(&Call { slot, end, base: mapped.base }));
     ended(slot);
     answer.ok_or(Refused::Aborted)
 }
@@ -368,13 +376,13 @@ impl<T> session::Lock<T> for Half<T> {
 /// A call's doorbells, and the end's own handle of the connection it rings
 /// netstack on.
 struct Doorbells {
-    connection: RawHandle,
-    receive: RawHandle,
-    send: RawHandle,
+    connection: BorrowedHandle<'static>,
+    receive: BorrowedHandle<'static>,
+    send: BorrowedHandle<'static>,
 }
 
 impl Doorbells {
-    fn handle(&self, bell: Doorbell) -> RawHandle {
+    fn handle(&self, bell: Doorbell) -> BorrowedHandle<'static> {
         match bell {
             Doorbell::Receive => self.receive,
             Doorbell::Send => self.send,
@@ -390,7 +398,7 @@ impl Bells for Doorbells {
         let mut took = Took::Nothing;
         let mut bytes = [0u8; 64];
         loop {
-            match syscall::read_nonblock(self.handle(bell), &mut bytes) {
+            match syscall::read_nonblock(self.handle(bell).raw(), &mut bytes) {
                 Ok(0) => return Took::Gone,
                 Ok(_) => took = Took::Rung,
                 Err(SyscallError::WouldBlock) => return took,
@@ -403,7 +411,7 @@ impl Bells for Doorbells {
         let handle = self.handle(bell);
         let mut bytes = [0u8; 64];
         let Some(until) = until else {
-            return match syscall::read(handle, &mut bytes) {
+            return match syscall::read(handle.raw(), &mut bytes) {
                 Ok(0) | Err(_) => Waited::Gone,
                 Ok(_) => Waited::Rung,
             };
@@ -411,10 +419,10 @@ impl Bells for Doorbells {
         let left = until.saturating_sub(toyos_abi::clock::nanos_since_boot());
         if left > 0 {
             let poller = crate::poller::Poller::new(1);
-            poller.watch_raw(handle, crate::poller::READABLE, 0);
+            poller.watch(&handle, crate::poller::READABLE, 0);
             poller.wait(1, left, |_| {});
         }
-        match syscall::read_nonblock(handle, &mut bytes) {
+        match syscall::read_nonblock(handle.raw(), &mut bytes) {
             Ok(0) => Waited::Gone,
             Ok(_) => Waited::Rung,
             Err(SyscallError::WouldBlock) => Waited::TimedOut,
@@ -500,7 +508,7 @@ impl Wait {
 
 /// Reads into `buf`: a count of at least one byte, or 0 for the peer's FIN
 /// after its last byte or a receiving half shut down.
-pub fn read(handle: RawHandle, buf: &mut [u8], wait: Wait) -> Result<usize, Refused> {
+pub fn read(handle: BorrowedHandle<'_>, buf: &mut [u8], wait: Wait) -> Result<usize, Refused> {
     let max = u32::try_from(buf.len()).unwrap_or(u32::MAX);
     call(handle, |call| {
         let base = call.base;
@@ -517,7 +525,7 @@ pub fn read(handle: RawHandle, buf: &mut [u8], wait: Wait) -> Result<usize, Refu
 
 /// Writes from `buf`: a count of at least one byte. A failure netstack stored
 /// is answered, and nothing copied, whatever room there is.
-pub fn write(handle: RawHandle, buf: &[u8], wait: Wait) -> Result<usize, Refused> {
+pub fn write(handle: BorrowedHandle<'_>, buf: &[u8], wait: Wait) -> Result<usize, Refused> {
     let len = u32::try_from(buf.len()).unwrap_or(u32::MAX);
     call(handle, |call| {
         let base = call.base;
@@ -533,29 +541,29 @@ pub fn write(handle: RawHandle, buf: &[u8], wait: Wait) -> Result<usize, Refused
 }
 
 /// The sending half sends no more: netstack sends the FIN after its last byte.
-pub fn shutdown_write(handle: RawHandle) -> Result<(), Refused> {
+pub fn shutdown_write(handle: BorrowedHandle<'_>) -> Result<(), Refused> {
     call(handle, |call| session::shutdown(call.words(), &Half(&call.halves().tx), &call.bells()))
 }
 
 /// The receiving half reads no more: every read answers 0.
-pub fn shutdown_read(handle: RawHandle) -> Result<(), Refused> {
+pub fn shutdown_read(handle: BorrowedHandle<'_>) -> Result<(), Refused> {
     call(handle, |call| session::shutdown_read(call.words(), &Half(&call.halves().rx), &call.bells()))
 }
 
 /// Nagle's algorithm off or on, netstack rung to read it.
-pub fn set_nodelay(handle: RawHandle, nodelay: bool) -> Result<(), Refused> {
+pub fn set_nodelay(handle: BorrowedHandle<'_>, nodelay: bool) -> Result<(), Refused> {
     call(handle, |call| {
         call.words()[NODELAY].store(u32::from(nodelay), Ordering::Relaxed);
         LAYOUT.ring(call.words(), &call.bells());
     })
 }
 
-pub fn nodelay(handle: RawHandle) -> Result<bool, Refused> {
+pub fn nodelay(handle: BorrowedHandle<'_>) -> Result<bool, Refused> {
     call(handle, |call| call.words()[NODELAY].load(Ordering::Relaxed) != 0)
 }
 
 /// The failure that ended the stream, if one did.
-pub fn failure(handle: RawHandle) -> Result<Option<Refused>, Refused> {
+pub fn failure(handle: BorrowedHandle<'_>) -> Result<Option<Refused>, Refused> {
     call(handle, |call| match LAYOUT.received_end(call.words()) {
         session::OPEN | session::ORDERLY => None,
         code => Some(Refused::from(Answer::Failed(code))),
@@ -563,20 +571,20 @@ pub fn failure(handle: RawHandle) -> Result<Option<Refused>, Refused> {
 }
 
 /// The peer's address and port, and this end's port.
-pub fn endpoints(handle: RawHandle) -> Result<(([u8; 4], u16), u16), Refused> {
-    let end = TABLE.lock().get(handle).ok_or(Refused::NotThisProcess(handle))?;
+pub fn endpoints(handle: BorrowedHandle<'_>) -> Result<(([u8; 4], u16), u16), Refused> {
+    let end = TABLE.lock().get(handle.raw()).ok_or(Refused::NotThisProcess(handle.raw()))?;
     Ok((end.peer, end.local_port))
 }
 
 /// The handle a watch of `way` is made on, for reading: the holder's receive
 /// bell or its send bell.
-pub fn doorbell(handle: RawHandle, way: Way) -> Result<RawHandle, Refused> {
+pub fn doorbell<'a>(handle: BorrowedHandle<'a>, way: Way) -> Result<BorrowedHandle<'a>, Refused> {
     call(handle, |call| call.bells().handle(session::doorbell(way)))
 }
 
 /// A source registered for the ways named: each one's want armed, and
 /// netstack rung if one is ready, so its first event comes.
-pub fn register(handle: RawHandle, receive: bool, send: bool) -> Result<(), Refused> {
+pub fn register(handle: BorrowedHandle<'_>, receive: bool, send: bool) -> Result<(), Refused> {
     call(handle, |call| {
         let (rx, tx) = (Half(&call.halves().rx), Half(&call.halves().tx));
         session::register(call.words(), receive.then_some(&rx), send.then_some(&tx), &call.bells());
@@ -604,9 +612,9 @@ pub enum Poll {
 
 /// A poll of `way`: ready at once, or counted in, drained, armed and looked at
 /// again. An end with no region is ready, and its call answers `Aborted`.
-pub fn watch(handle: RawHandle, way: Way) -> Result<Poll, Refused> {
-    let (slot, end) = TABLE.lock().call(handle).ok_or(Refused::NotThisProcess(handle))?;
-    let Some((_, base)) = end.region else {
+pub fn watch(handle: BorrowedHandle<'_>, way: Way) -> Result<Poll, Refused> {
+    let (slot, end) = TABLE.lock().call(handle.raw()).ok_or(Refused::NotThisProcess(handle.raw()))?;
+    let Some(Mapped { base, .. }) = end.region else {
         ended(slot);
         return Ok(Poll::Ready);
     };
@@ -627,12 +635,12 @@ pub fn watch(handle: RawHandle, way: Way) -> Result<Poll, Refused> {
 /// Waits on `poller` (capacity 2, kept by the caller across waits) until
 /// `way` of the stream `handle` reaches may be ready or `wake` is readable;
 /// copies nothing. A wait under another holder's gate reports its stall.
-pub fn wait_ready(handle: RawHandle, way: Way, wake: RawHandle, poller: &crate::poller::Poller) -> Result<(), Refused> {
+pub fn wait_ready(handle: BorrowedHandle<'_>, way: Way, wake: BorrowedHandle<'_>, poller: &crate::poller::Poller) -> Result<(), Refused> {
     let Poll::Watching(watching) = watch(handle, way)? else { return Ok(()) };
     let bell = Call { slot: watching.slot, end: watching.end, base: watching.base }.bells().handle(session::doorbell(way));
     let wait = |timeout: u64| {
-        poller.watch_raw(bell, crate::poller::READABLE, 0);
-        poller.watch_raw(wake, crate::poller::READABLE, 1);
+        poller.watch(&bell, crate::poller::READABLE, 0);
+        poller.watch(&wake, crate::poller::READABLE, 1);
         let mut answered = false;
         poller.wait(1, timeout, |_| answered = true);
         if answered { Waited::Rung } else { Waited::TimedOut }
@@ -673,35 +681,37 @@ fn ended(slot: usize) {
 
 /// Whether `handle` reaches one of this process's stream ends. A lookup, and
 /// nothing is written.
-pub fn is_stream(handle: RawHandle) -> bool {
-    TABLE.lock().find(handle).is_some()
+pub fn is_stream(handle: BorrowedHandle<'_>) -> bool {
+    TABLE.lock().find(handle.raw()).is_some()
 }
 
 /// A raw handle taken back as a stream: one this process holds an end for
 /// shares it, and any other is refused by name, with nothing written on it.
-pub fn adopt(handle: RawHandle) -> Result<(), Misuse> {
-    if is_stream(handle) { Ok(()) } else { Err(Misuse::NotThisProcess(handle)) }
+pub fn adopt(handle: BorrowedHandle<'_>) -> Result<(), Misuse> {
+    if is_stream(handle) { Ok(()) } else { Err(Misuse::NotThisProcess(handle.raw())) }
 }
 
 /// `handle`, which reaches one of this process's stream ends, as a
 /// descriptor's object: let go by this copy of the crate, which holds the end
 /// (`crate::fd::STREAM`).
-pub fn descriptor(handle: RawHandle) -> crate::fd::Object {
+pub fn descriptor(handle: OwnedHandle) -> crate::fd::Object {
     crate::fd::Object::stream(handle, released)
 }
 
 /// A stream descriptor's object let go: its handle, by [`let_go`].
 extern "C" fn released(word: u64) {
     if let Ok(handle) = u32::try_from(word) {
-        let_go(RawHandle(handle));
+        // SAFETY: the table gives up a descriptor's handle when it releases
+        // its object, and names it no more.
+        let_go(unsafe { OwnedHandle::from_raw(RawHandle(handle)) });
     }
 }
 
 /// Closes `handle`: of a stream's connection, its end goes with the last
 /// handle and the last call; of anything else, the bare `close`.
-pub fn let_go(handle: RawHandle) {
-    let forgotten = TABLE.lock().forget(handle);
-    syscall::close(handle);
+pub fn let_go(handle: OwnedHandle) {
+    let forgotten = TABLE.lock().forget(handle.as_handle().raw());
+    drop(handle);
     if let Some(Some((slot, end))) = forgotten {
         free(slot, end);
     }
@@ -710,10 +720,10 @@ pub fn let_go(handle: RawHandle) {
 // ---- connect and accept ----
 
 /// A stream netstack connected.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Debug)]
 pub struct Connected {
     /// Its connection, which reaches its end.
-    pub handle: RawHandle,
+    pub handle: OwnedHandle,
     pub local_port: u16,
 }
 
@@ -730,9 +740,9 @@ pub fn connect(addr: [u8; 4], port: u16, timeout_ms: u32, nodelay: bool) -> Resu
 }
 
 /// A stream a listener's accept was handed.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Debug)]
 pub struct Accepted {
-    pub handle: RawHandle,
+    pub handle: OwnedHandle,
     pub remote_addr: [u8; 4],
     pub remote_port: u16,
     pub local_port: u16,
@@ -745,20 +755,14 @@ pub struct Accepted {
 /// its connection and bells in the answer, `drain` spent just before the
 /// request goes, once the slot and the region are made. Refused as [`connect`]
 /// is, and [`NetError::WouldBlock`] where none waits.
-pub(super) fn accept(listener: RawHandle, drain: super::socket::Drain<'_>) -> Result<Accepted, NetError> {
+pub(super) fn accept(listener: BorrowedHandle<'_>, drain: super::socket::Drain<'_>) -> Result<Accepted, NetError> {
     let opened = open(false, ([0; 4], 0), |region| {
         drain.now().accept(listener, region).map_err(hangup)?;
         let header = answer(listener)?;
         let accepted: TcpAcceptResponse = ipc::recv_payload(listener, &header).map_err(hangup)?;
-        let mut handles = [toyos_abi::HANDLE_INVALID; syscall::MAX_TRANSFER_HANDLES];
-        match ipc::recv_handles(listener, &header, &mut handles) {
-            Ok(3) => Ok((accepted, [handles[1], handles[2]], Connection::received(handles[0]))),
-            Ok(n) => {
-                handles[..n].iter().for_each(|&h| syscall::close(h));
-                Err(NetError::Protocol(header.msg_type))
-            }
-            Err(e) => Err(hangup(e)),
-        }
+        let handles = ipc::recv_handles(listener, &header).map_err(hangup)?;
+        let [connection, receive, send] = handles.exact::<3>().ok_or(NetError::Protocol(header.msg_type))?;
+        Ok((accepted, [receive, send], Connection::received(connection)))
     })?;
     let answer = opened.answer;
     Ok(Accepted {
@@ -772,7 +776,7 @@ pub(super) fn accept(listener: RawHandle, drain: super::socket::Drain<'_>) -> Re
 
 /// A request that made a stream, and its answer.
 struct Opened<A> {
-    handle: RawHandle,
+    handle: OwnedHandle,
     answer: A,
 }
 
@@ -807,7 +811,7 @@ impl Answered for TcpAcceptResponse {
 fn open<A: Answered>(
     nodelay: bool,
     peer: ([u8; 4], u16),
-    ask: impl FnOnce(OwnedHandle) -> Result<(A, [RawHandle; BELLS], Connection), NetError>,
+    ask: impl FnOnce(OwnedHandle) -> Result<(A, [OwnedHandle; BELLS], Connection), NetError>,
 ) -> Result<Opened<A>, NetError> {
     let slot = TABLE.lock().reserve().ok_or(NetError::ResourceExhausted)?;
     let made = (|| {
@@ -823,16 +827,18 @@ fn open<A: Answered>(
         let lent = region.share().map_err(|_| NetError::Io)?;
         let (answer, bells, connection) = ask(lent)?;
         let (region, base) = region.into_raw();
-        let held = take_up(connection.into_owned(), bells, region, base)?;
+        // SAFETY: `into_raw` gave this the region's handle, which nothing else answers for.
+        let held = take_up(connection.into_owned(), bells, unsafe { OwnedHandle::from_raw(region) }, base)?;
         *HALVES[slot].rx.lock() = Kept::Held(rx);
         *HALVES[slot].tx.lock() = Kept::Held(tx);
         let peer = answer.peer().unwrap_or(peer);
-        Ok((held.descriptor, held.end(base as usize, peer, answer.local_port()), answer))
+        let end = held.end(base as usize, peer, answer.local_port());
+        Ok((held.descriptor, end, answer))
     })();
     let mut table = TABLE.lock();
     match made {
         Ok((handle, end, answer)) => {
-            table.enter(slot, end, handle);
+            table.enter(slot, end, handle.as_handle().raw());
             Ok(Opened { handle, answer })
         }
         Err(refused) => {
@@ -845,7 +851,7 @@ fn open<A: Answered>(
 /// What a holder holds of its stream, each handle narrowed to keep no
 /// `TRANSFER`: the descriptor's handle of the connection and the end's own.
 struct Held {
-    descriptor: RawHandle,
+    descriptor: OwnedHandle,
     connection: RawHandle,
     receive_bell: RawHandle,
     send_bell: RawHandle,
@@ -855,24 +861,25 @@ struct Held {
 impl Held {
     /// The end, its region mapped at `base`.
     fn end(&self, base: usize, peer: ([u8; 4], u16), local_port: u16) -> End {
-        let (connection, receive_bell, send_bell) = (self.connection, self.receive_bell, self.send_bell);
-        End { region: Some((self.region, base)), connection, receive_bell, send_bell, peer, local_port }
+        // SAFETY: the handles `take_up` narrowed for this end, which keeps them until its `free`.
+        let (receive_bell, send_bell, connection) = unsafe { (kept(self.receive_bell), kept(self.send_bell), kept(self.connection)) };
+        let region = Mapped { handle: self.region, base, receive_bell, send_bell };
+        End { region: Some(region), connection, peer, local_port }
     }
 }
 
 /// The descriptor's handle and the end's own: `connection` narrowed, then
 /// duplicated. Refused, it is closed.
-pub(super) fn hold_connection(connection: OwnedHandle) -> Result<(RawHandle, RawHandle), NetError> {
-    let descriptor = narrowed(connection.into_raw(), HELD_CONNECTION)?;
-    syscall::dup(descriptor).map(|own| (descriptor, own)).map_err(|_| {
-        syscall::close(descriptor);
-        NetError::ResourceExhausted
-    })
+pub(super) fn hold_connection(connection: OwnedHandle) -> Result<(OwnedHandle, RawHandle), NetError> {
+    let descriptor = connection.as_handle().try_clone_narrowed(HELD_CONNECTION).map_err(|_| NetError::Io)?;
+    drop(connection);
+    let own = descriptor.try_clone().map_err(|_| NetError::ResourceExhausted)?;
+    Ok((descriptor, own.into_raw()))
 }
 
 /// A holder's connection, its bells and its region mapped at `base`, taken up
 /// as [`Held`]. Refused, the region is unmapped and every handle closed.
-fn take_up(connection: OwnedHandle, bells: [RawHandle; BELLS], region: RawHandle, base: *mut u8) -> Result<Held, NetError> {
+fn take_up(connection: OwnedHandle, bells: [OwnedHandle; BELLS], region: OwnedHandle, base: *mut u8) -> Result<Held, NetError> {
     let connection = hold_connection(connection);
     let [receive, send] = bells.map(|bell| narrowed(bell, HELD_BELL));
     let region = narrowed(region, HELD_REGION);
@@ -884,8 +891,9 @@ fn take_up(connection: OwnedHandle, bells: [RawHandle; BELLS], region: RawHandle
             // SAFETY: nothing has read the mapping through this end yet, and
             // nothing else reaches it.
             let _ = unsafe { syscall::vm_release(base, REGION_BYTES) };
-            let connection = connection.map(|(descriptor, own)| [descriptor, own]).into_iter().flatten();
-            connection.chain(receive).chain(send).chain(region).for_each(syscall::close);
+            let kept = connection.map(|(_, own)| own).into_iter().chain(receive).chain(send).chain(region);
+            // SAFETY: each narrowed here and kept by nothing yet.
+            kept.for_each(|handle| unsafe { close_kept(handle) });
             Err(NetError::Io)
         }
     }
@@ -898,7 +906,7 @@ fn take_up(connection: OwnedHandle, bells: [RawHandle; BELLS], region: RawHandle
 /// which `super::adopt_exported` takes up there. netstack gone is
 /// [`NetError::NetstackNotFound`]; netstack out of places for it is
 /// [`NetError::ResourceExhausted`].
-pub fn export(handle: RawHandle) -> Result<OwnedHandle, NetError> {
+pub fn export(handle: BorrowedHandle<'_>) -> Result<OwnedHandle, NetError> {
     let asked = call(handle, |call| {
         let _turn = call.halves().control.lock();
         ask_export(call.end.connection)
@@ -910,21 +918,38 @@ pub fn export(handle: RawHandle) -> Result<OwnedHandle, NetError> {
     }
 }
 
+/// A call through `handle` begun and left open, so its end stays until
+/// [`release`]: the slot. `None` for a handle that reaches no stream end.
+pub(super) fn hold(handle: BorrowedHandle<'_>) -> Option<usize> {
+    TABLE.lock().call(handle.raw()).map(|(slot, _)| slot)
+}
+
+/// [`export`] of the end a [`hold`] keeps at `slot`.
+pub(super) fn export_held(slot: usize) -> Result<OwnedHandle, NetError> {
+    let end = TABLE.lock().at(slot).expect("a held end is live");
+    if end.region.is_none() {
+        return Err(NetError::NetstackNotFound);
+    }
+    let _turn = HALVES[slot].control.lock();
+    ask_export(end.connection)
+}
+
+/// The call a [`hold`] began, ended.
+pub(super) fn release(slot: usize) {
+    ended(slot);
+}
+
 /// [`EXPORT`] on a holder's connection, a stream's or a socket's, and
 /// netstack's answer to it.
-pub(super) fn ask_export(connection: RawHandle) -> Result<OwnedHandle, NetError> {
+pub(super) fn ask_export(connection: BorrowedHandle<'_>) -> Result<OwnedHandle, NetError> {
     ipc::signal(connection, EXPORT).map_err(hangup)?;
     let header = ipc::recv_header(connection).map_err(hangup)?;
     match header.msg_type {
         EXPORTED => {
-            let mut handles = [toyos_abi::HANDLE_INVALID; syscall::MAX_TRANSFER_HANDLES];
-            match ipc::recv_handles(connection, &header, &mut handles) {
-                Ok(1) if header.is_empty() => Ok(OwnedHandle(handles[0])),
-                Ok(n) => {
-                    handles[..n].iter().for_each(|&h| syscall::close(h));
-                    Err(NetError::Protocol(EXPORTED))
-                }
-                Err(e) => Err(hangup(e)),
+            let handles = ipc::recv_handles(connection, &header).map_err(hangup)?;
+            match handles.exact::<1>() {
+                Some([end]) if header.is_empty() => Ok(end),
+                _ => Err(NetError::Protocol(EXPORTED)),
             }
         }
         REFUSED => {
@@ -942,14 +967,13 @@ pub(super) fn ask_export(connection: RawHandle) -> Result<OwnedHandle, NetError>
 /// malformed, or the region refused, the end is a stream still, every call on
 /// which answers `Aborted`. `None`, the end closed, where the process holds
 /// [`MAX_STREAMS`] or the kernel will not narrow it.
-pub(super) fn adopted(connection: Connection, first: Option<(&[u8], ipc::Batch)>) -> Option<RawHandle> {
+pub(super) fn adopted(connection: Connection, first: Option<(&[u8], ipc::Batch)>) -> Option<OwnedHandle> {
     let slot = TABLE.lock().reserve()?;
     let taken = first.and_then(adoption).and_then(|(holder, adopt, [region, receive, send])| {
-        let Ok(region) = SharedMemory::lent(OwnedHandle(region), REGION_BYTES) else {
-            [receive, send].into_iter().for_each(syscall::close);
-            return None;
-        };
+        let region = SharedMemory::lent(region, REGION_BYTES).ok()?;
         let (region, base) = region.into_raw();
+        // SAFETY: `into_raw` gave this the region's handle, which nothing else answers for.
+        let region = unsafe { OwnedHandle::from_raw(region) };
         Some((holder, adopt, base, [receive, send], region))
     });
     let made = match taken {
@@ -957,18 +981,18 @@ pub(super) fn adopted(connection: Connection, first: Option<(&[u8], ipc::Batch)>
             let (rx, tx) = session::holder(LAYOUT, holder);
             *HALVES[slot].rx.lock() = Kept::Held(rx);
             *HALVES[slot].tx.lock() = Kept::Held(tx);
-            (held.descriptor, held.end(base as usize, (adopt.peer_addr, adopt.peer_port), adopt.local_port))
+            let end = held.end(base as usize, (adopt.peer_addr, adopt.peer_port), adopt.local_port);
+            (held.descriptor, end)
         }),
         None => hold_connection(connection.into_owned()).map(|(descriptor, connection)| {
-            let invalid = toyos_abi::HANDLE_INVALID;
-            let end = End { region: None, connection, receive_bell: invalid, send_bell: invalid, peer: ([0; 4], 0), local_port: 0 };
-            (descriptor, end)
+            // SAFETY: the end's own connection, which it keeps until its `free`.
+            (descriptor, End { region: None, connection: unsafe { kept(connection) }, peer: ([0; 4], 0), local_port: 0 })
         }),
     };
     let mut table = TABLE.lock();
     match made {
         Ok((descriptor, end)) => {
-            table.enter(slot, end, descriptor);
+            table.enter(slot, end, descriptor.as_handle().raw());
             Some(descriptor)
         }
         Err(_) => {
@@ -979,16 +1003,10 @@ pub(super) fn adopted(connection: Connection, first: Option<(&[u8], ipc::Batch)>
 }
 
 /// An [`ADOPT`] frame's holder, payload and handles.
-fn adoption((payload, handles): (&[u8], ipc::Batch)) -> Option<(Holder, Adopt, [RawHandle; BELLS + 1])> {
+fn adoption((payload, handles): (&[u8], ipc::Batch)) -> Option<(Holder, Adopt, [OwnedHandle; BELLS + 1])> {
     let adopt: Adopt = ipc::decode_payload(payload).ok()?;
     let handles = handles.exact::<{ BELLS + 1 }>()?;
-    match Holder::new(adopt.holder) {
-        Some(holder) => Some((holder, adopt, handles)),
-        None => {
-            handles.into_iter().for_each(syscall::close);
-            None
-        }
-    }
+    Some((Holder::new(adopt.holder)?, adopt, handles))
 }
 
 #[cfg(test)]

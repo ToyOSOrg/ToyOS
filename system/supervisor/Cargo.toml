@@ -6,7 +6,7 @@ edition = "2021"
 license = "MIT OR Apache-2.0"
 
 [dependencies]
-toyos = { path = "../../sdk/toyos" }
+toyos = { path = "../../sdk/toyos", features = ["std"] }
 toyos-abi = { path = "../../sdk/abi" }
 toyos-manifest = { path = "../../lib/manifest" }
 # Its lifecycle decisions: what an end owes, which claims a start mints, and

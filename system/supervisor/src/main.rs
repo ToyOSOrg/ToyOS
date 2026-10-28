@@ -99,7 +99,8 @@ mod stopping;
 
 use std::cell::{Cell, RefCell};
 use std::collections::BTreeMap;
-use std::os::toyos::process::{ChildExt, CommandExt};
+use std::os::toyos::io::AsRawHandle;
+use std::os::toyos::process::CommandExt;
 use std::path::Path;
 use std::process::{Child, Command, Stdio};
 use std::rc::Rc;
@@ -116,7 +117,7 @@ use toyos_manifest::{Manifest, Program, Source, View};
 use toyos_supervisor::claims::{self, Missing, Unresolved};
 use toyos_supervisor::drives::{self, Act, Drives};
 use toyos_supervisor::restart::{self, AfterEnd, Budget};
-use toyos::endow::Endowments;
+use toyos::endow::{Endowments, FromHandle};
 use toyos::fs::{Access, Grant, CAPABILITY_PREFIX};
 use toyos::ipc::{self, Connection, RxStep};
 use toyos::launch::{self, Parent, Request, LAUNCHER};
@@ -295,7 +296,7 @@ struct Log {
     /// The supervisor's console as every program but `logkeeper` gets it for its stdin: one
     /// it may read and not write, so no program puts a line on the console but
     /// through `logkeeper` and under its name.
-    stdin: toyos::RawHandle,
+    stdin: toyos::OwnedHandle,
     /// What `logkeeper` answers on the connection, kept across flushes.
     rx: RefCell<ipc::FrameRx<8>>,
     /// Flushes asked for and not answered yet: one waited out past
@@ -321,7 +322,7 @@ fn new_ring() -> SharedMemory {
 /// [`new_ring`] for a program started in `job`, counted to it: a ring is the
 /// program's output, and the supervisor's own floor pays for none of it.
 /// Refused where `job` has no memory for it.
-fn ring_for(job: toyos::RawHandle) -> std::io::Result<SharedMemory> {
+fn ring_for(job: toyos::BorrowedHandle<'_>) -> std::io::Result<SharedMemory> {
     let region = SharedMemory::create_for(job, RING_BYTES).map_err(memory_refused)?;
     view(&region).lay_out_with_placeholder_owner();
     Ok(region)
@@ -351,7 +352,9 @@ impl Log {
             .finish()
             .expect("supervisor: no namespace for the log's origins");
         let conn = names.open(ORIGINS).expect("supervisor: the log's origins port refused the supervisor");
-        let stdin = toyos::fd::with(0, |o| toyos_abi::syscall::dup_narrowed(o.handle, STDIN_RIGHTS))
+        let stdin = toyos::fd::with(0, |o| o.handle().map(|console| console.try_clone_narrowed(STDIN_RIGHTS)))
+            .ok()
+            .flatten()
             .expect("supervisor: the kernel gave it no console as descriptor 0")
             .expect("supervisor: its console would not narrow");
         let log = Self {
@@ -364,14 +367,17 @@ impl Log {
         // The supervisor's own lines: a ring like every program's, as the two
         // descriptors the kernel gave its console.
         let ring = new_ring();
-        let copy = toyos_abi::syscall::dup(ring.as_handle()).expect("supervisor: its ring would not duplicate");
+        let copy = ring.as_handle().try_clone_to_owned().expect("supervisor: its ring would not duplicate");
         let held = toyos::fd::install(toyos::fd::Object::handle(copy), false, 0)
             .expect("supervisor: no descriptor for its own ring");
         for (fd, stream) in [(1, toyos::log::stdio::Stream::Out), (2, toyos::log::stdio::Stream::Err)] {
-            toyos::fd::dup2(held, fd, false).expect("supervisor: its ring would not take its own descriptor");
+            // SAFETY: the kernel's console descriptors, which nothing in this
+            // process owns: std's stdio names them by number and asks again.
+            unsafe { toyos::fd::dup2(held, fd, false) }.expect("supervisor: its ring would not take its own descriptor");
             toyos::log::stdio::forget(stream);
         }
-        toyos::fd::close(held).expect("supervisor: the ring's descriptor it just made");
+        // SAFETY: the descriptor installed above, named nowhere else.
+        unsafe { toyos::fd::close(held) }.expect("supervisor: the ring's descriptor it just made");
         let (alive, keep) = toyos::pipe_pair().expect("supervisor: no pipe to say it lives");
         // Held for the machine's life: the supervisor's end is the machine's.
         core::mem::forget(keep);
@@ -516,8 +522,7 @@ fn main() {
             }
             builder.finish().expect("supervisor: no namespace for its own files")
         };
-        // SAFETY: a namespace handle built here and used nowhere else.
-        if let Err(e) = unsafe { std::os::toyos::fs::adopt_namespace(build().into_raw().0) } {
+        if let Err(e) = std::os::toyos::fs::adopt_namespace(build().into()) {
             panic!("supervisor: std would not take its namespace ({e}), and the supervisor is endowed none");
         }
         Box::leak(Box::new(build()))
@@ -889,21 +894,21 @@ impl<'a> Service<'a> {
         }
         // The screen's row's desktop session, minted for this start alone.
         if let Some(desktop) = self.desktop.take() {
-            storage.endow.push((LAUNCHER, desktop.launcher.into_raw()));
-            storage.endow.push((toyos_session::CONTROL_LABEL, desktop.control.into_raw()));
+            storage.endow.push((LAUNCHER, desktop.launcher.into()));
+            storage.endow.push((toyos_session::CONTROL_LABEL, desktop.control.into()));
         }
         let job = match &self.job {
             Some(job) => job,
             None => self.job.insert(job_for(syscap, self.program)?),
         };
-        let endowed = job.duplicate().map_err(memory_refused)?.into_raw();
+        let endowed = job.duplicate().map_err(memory_refused)?;
         let ports = self.ports.borrow();
         let served = Served::Keep { acceptors: &ports, owed };
         let command = match source {
             Source::Path(path) => Command::new(path),
             Source::BootFileServer => {
                 let mut command = Command::new(&self.program.name);
-                command.boot_image(boot.fileserver.as_handle().0);
+                command.boot_image(boot.fileserver.as_handle().into());
                 command
             }
         };
@@ -1217,7 +1222,7 @@ impl<'a> Supervisor<'a> {
         let served = Served::Keep { acceptors: &[], owed: &[] };
         let path = row.source.path().ok_or_else(|| format!("{} runs {}, and a `drives` row runs a file", row.name, row.source))?;
         let job = job_for(self.syscap, row).map_err(|e| e.to_string())?;
-        let endowed = job.duplicate().map_err(|e| format!("its job would not duplicate: {e:?}"))?.into_raw();
+        let endowed = job.duplicate().map_err(|e| format!("its job would not duplicate: {e:?}"))?;
         let output = Output::Boot { log: &mut self.log, job: endowed };
         start(Command::new(path), row, self.system, self.syscap, served, &self.connectors, &self.grants, &[], extra, launcher, output)
             .map(|(child, _)| (child, stop, job))
@@ -1485,7 +1490,7 @@ impl<'a> Supervisor<'a> {
             poller.watch(&self.minted.admin, READABLE, TOKEN_ADMIN_ACCEPTOR);
             poller.watch(&self.watch.ended, READABLE, TOKEN_APPS);
             for login in &self.logins.open {
-                poller.watch_raw(login.link.handle(), READABLE, TOKEN_LINKS);
+                poller.watch(&login.link.handle(), READABLE, TOKEN_LINKS);
             }
             poller.watch(swap, READABLE, TOKEN_SWAP_ACCEPTOR);
             poller.watch(power, READABLE, TOKEN_POWER_ACCEPTOR);
@@ -1506,7 +1511,7 @@ impl<'a> Supervisor<'a> {
                 poller.watch(&asked.consent, READABLE, TOKEN_CONSENT);
             }
             for p in &pending {
-                poller.watch(&p.conn, READABLE, TOKEN_PENDING_BASE + p.conn.as_handle().0 as u64);
+                poller.watch(&p.conn, READABLE, TOKEN_PENDING_BASE + p.conn.as_handle().raw().0 as u64);
             }
             // A client that connects and then says nothing wakes nothing, so
             // the deadline that removes it has to be a wake in its own right —
@@ -1555,14 +1560,14 @@ impl<'a> Supervisor<'a> {
                     say!(
                         "supervisor: launcher: refusing client {} — {MAX_PENDING_LAUNCHES} connections \
                          are already waiting to say what they want",
-                        conn.as_handle().0
+                        conn.as_handle().raw().0
                     );
                     continue;
                 }
                 let port = match port(self, &conn) {
                     Ok(port) => port,
                     Err(why) => {
-                        say!("supervisor: launcher: dropping client {} — {why}", conn.as_handle().0);
+                        say!("supervisor: launcher: dropping client {} — {why}", conn.as_handle().raw().0);
                         continue;
                     }
                 };
@@ -1573,7 +1578,7 @@ impl<'a> Supervisor<'a> {
             // down, so leaving `i` alone visits each connection exactly once.
             let mut i = 0;
             while i < pending.len() {
-                let handle = pending[i].conn.as_handle();
+                let handle = pending[i].conn.as_handle().raw();
                 if !ready.contains(&(TOKEN_PENDING_BASE + handle.0 as u64)) {
                     i += 1;
                     continue;
@@ -1633,7 +1638,7 @@ impl<'a> Supervisor<'a> {
             for p in pending.iter().filter(|p| now.duration_since(p.since) >= HANDSHAKE_TIMEOUT) {
                 say!(
                     "supervisor: launcher: dropping client {} — it never finished its launch",
-                    p.conn.as_handle().0
+                    p.conn.as_handle().raw().0
                 );
             }
             pending.retain(|p| now.duration_since(p.since) < HANDSHAKE_TIMEOUT);
@@ -1928,7 +1933,7 @@ impl<'a> Supervisor<'a> {
                 break;
             }
             for instance in self.instances.iter().filter(|i| waiting.contains(&i.function.arrival)) {
-                poller.watch_raw(toyos::RawHandle(instance.child.as_raw_handle()), READABLE, TOKEN_ENDED);
+                poller.watch(&instance.child, READABLE, TOKEN_ENDED);
             }
             poller.wait(1, left.as_nanos() as u64, |_| {});
         }
@@ -1988,7 +1993,7 @@ impl<'a> Supervisor<'a> {
     fn watch_children(&self, poller: &Poller) {
         let services = self.services.iter().filter(|service| !service.swapping).filter_map(|service| service.child.as_ref());
         for child in services.chain(self.instances.iter().map(|instance| &instance.child)).chain(self.owners()) {
-            poller.watch_raw(toyos::RawHandle(child.as_raw_handle()), READABLE, TOKEN_ENDED);
+            poller.watch(&child, READABLE, TOKEN_ENDED);
         }
     }
 
@@ -2263,15 +2268,11 @@ impl Supervisor<'_> {
         if msg_type != launch::MSG_LAUNCH {
             return;
         }
-        let (batch, received) = carried.into_raw();
-
-        // **Owned on the statement after they arrive, and before anything can
-        // refuse.** The send moved them into the supervisor's table, so every path out of
-        // here releases them — a launcher that leaked a handle per refused launch
-        // would exhaust the one table the machine cannot do without, and a client
-        // picks which refusal it takes.
-        let mut held = Moved(batch[..received].to_vec());
-
+        // Owned from the frame on, so every path out of here releases them: a
+        // launcher that leaked a handle per refused launch would exhaust the
+        // one table the machine cannot do without, and a client picks which
+        // refusal it takes.
+        let received = carried.len();
         let Some(request) = Request::decode(payload) else { return };
         // `extra_names` drops an empty or non-UTF-8 name, so its count is what
         // will actually be paired with a handle. A frame whose two counts
@@ -2286,28 +2287,20 @@ impl Supervisor<'_> {
             return;
         }
 
-        // Past every refusal that does not know which handle is which, so ownership
-        // can be split. Every part still releases on every path below.
-        let all = held.take();
-        let (fd_handles, rest) = all.split_at(request.fd_count());
-        let (extra_handles, rest) = rest.split_at(request.extra_count);
-        let (place_handle, job_handle) = rest.split_at(rest.len() - 1);
-        let fds = Moved(fd_handles.to_vec());
-        let place = Moved(place_handle.to_vec());
-        let job = Moved(job_handle.to_vec());
-        // Owned, so they close when the launch is done with: `SYS_NAMESPACE_BUILD`
-        // copies a connector into the namespace and leaves the caller's handle,
-        // and the supervisor's copy of a client's connector has no life beyond
-        // this launch.
-        let extras: Vec<(String, Connector)> = names
-            .into_iter()
-            .zip(extra_handles.iter().copied())
-            // SAFETY: the kernel moved these into the supervisor's table with the frame, and
-            // nothing else answers for them. **Not a claim about the type** — a
-            // client sends what it likes, and everything below treats a wrong one
-            // as a refused launch rather than as the supervisor's own bug.
-            .map(|(name, handle)| (name.to_string(), unsafe { Connector::from_raw(handle) }))
-            .collect();
+        // Past every refusal that does not know which handle is which: the
+        // descriptors, the extras, the place if it names one, and the job.
+        let mut carried = carried;
+        let fds: Vec<toyos::OwnedHandle> = carried.by_ref().take(request.fd_count()).collect();
+        // `SYS_NAMESPACE_BUILD` copies a connector into the namespace and
+        // leaves the caller's handle, and the supervisor's copy of a client's
+        // connector has no life beyond this launch. **Not a claim about the
+        // type** — a client sends what it likes, and everything below treats a
+        // wrong one as a refused launch rather than as the supervisor's own bug.
+        let extras: Vec<(String, Connector)> =
+            names.into_iter().zip(carried.by_ref()).map(|(name, handle)| (name.to_string(), Connector::from_handle(handle))).collect();
+        let mut rest: Vec<toyos::OwnedHandle> = carried.collect();
+        let job = toyos::job::Job::from_handle(rest.pop().expect("a launch's batch ends with its job"));
+        let place = rest.pop();
 
         // std joins a relative `current_dir` onto the supervisor's own cwd, so passing one
         // on would start the child in the supervisor's `/` — the default this field removes.
@@ -2321,7 +2314,7 @@ impl Supervisor<'_> {
         // detached, under the supervisor. One that names neither is refused rather than
         // detached, which would let it outlive a caller that never asked it to.
         let under = match request.parent() {
-            Some(Parent::Place(())) => Some(place.0[0]),
+            Some(Parent::Place(())) => place.as_ref().map(toyos::AsHandle::as_handle),
             // Under the session's owner, or in the machine's session the supervisor.
             Some(Parent::Detached) => match self.logins.detached_place(caller.session) {
                 Ok(place) => place,
@@ -2358,18 +2351,50 @@ impl Supervisor<'_> {
             }
         }
         command.current_dir(request.cwd);
+        let placed = under.is_some();
         if let Some(place) = under {
-            command.under(place.0);
+            command.under(place.into());
         }
+        drop(place);
         for arg in request.argv.split(|&b| b == 0).skip(1).filter(|a| !a.is_empty()) {
             if let Ok(arg) = std::str::from_utf8(arg) {
                 command.arg(arg);
             }
         }
 
+        // A descriptor naming the caller's own log ring is replaced by the
+        // program's, which is made for the job it joins.
+        let fds: Option<Vec<(u32, LaunchFd)>> = request
+            .fds()
+            .zip(fds)
+            .map(|((fd, kind), handle)| {
+                let caller_ring = matches!(fd, 1 | 2)
+                    && kind == Some(toyos::fd::Kind::Handle)
+                    && toyos_abi::syscall::fstat(handle.as_handle().raw())
+                        .is_ok_and(|stat| stat.file_type == FileType::SharedMemory);
+                Some((fd, if caller_ring { LaunchFd::Ring } else { LaunchFd::Caller(handle, kind?) }))
+            })
+            .collect();
+        let Some(fds) = fds else {
+            say!("supervisor: launcher: refused a descriptor of a kind no launch carries");
+            let _ = conn.try_signal(launch::MSG_REFUSED);
+            return;
+        };
+        let ring = match fds.iter().any(|(_, given)| matches!(given, LaunchFd::Ring)) {
+            true => match ring_for(job.as_handle()) {
+                Ok(ring) => Some(ring),
+                Err(e) => {
+                    say!("supervisor: launcher: {} was not started: no ring for its log: {e}", request.program);
+                    let _ = conn.try_signal(launch::MSG_REFUSED);
+                    return;
+                }
+            },
+            false => None,
+        };
+
         // Endowed before `prepare` reads the program, so its image is read for the
         // job the child runs in, which keeps it as long as the child runs.
-        command.endow(JOB_LABEL, job.0[0].0);
+        command.endow(JOB_LABEL, job.into());
 
         // On the worker, every file the launch reads: a path under `/apps` is
         // read off its package, and the program and its working directory may
@@ -2447,26 +2472,14 @@ impl Supervisor<'_> {
             }
         };
         let session = caller.session;
-        let caller_fds: Option<Vec<(u32, toyos::RawHandle, toyos::fd::Kind)>> = request
-            .fds()
-            .zip(fds.0.iter().copied())
-            .map(|((fd, kind), handle)| Some((fd, handle, kind?)))
-            .collect();
-        let Some(caller_fds) = caller_fds else {
-            say!("supervisor: launcher: refused a descriptor of a kind no launch carries");
-            let _ = conn.try_signal(launch::MSG_REFUSED);
-            return;
-        };
         let launch = Launch {
             conn,
             program,
             command,
             session,
             fds,
-            caller_fds,
-            _place: place,
-            placed: under.is_some(),
-            job,
+            ring,
+            placed,
             extras,
             cwd: request.cwd.to_string(),
         };
@@ -2569,8 +2582,7 @@ impl Supervisor<'_> {
     /// Start `launch`, holding `folder` and in it ([`grants::cwd`]) where it
     /// holds one, and answer its caller.
     fn start_launch(&mut self, launch: Launch, folder: Option<grants::Folder>) {
-        let Launch { conn, mut program, mut command, session, fds, caller_fds, _place, placed, mut job, extras, cwd } =
-            launch;
+        let Launch { conn, mut program, mut command, session, fds, ring, placed, extras, cwd } = launch;
         if let Some(folder) = folder {
             // The image `prepare` read is kept: only the working directory is
             // judged again.
@@ -2625,14 +2637,13 @@ impl Supervisor<'_> {
             &extras,
             storage,
             Minting { minted: &self.minted, session, launches },
-            Output::Launch { log: &mut self.log, fds: &caller_fds, job: job.take()[0] },
+            Output::Launch { log: &mut self.log, fds: &fds, ring },
         );
         drop(fds);
         match started {
             Ok((child, _)) => {
-                self.started_in(session, &program.name, toyos::RawHandle(child.as_raw_handle()));
-                // SAFETY: `into_raw_handle` gave up the child's one handle in this table.
-                let handle = unsafe { toyos::OwnedHandle::from_raw(toyos::RawHandle(child.into_raw_handle())) };
+                self.started_in(session, &program.name, toyos::AsHandle::as_handle(&child));
+                let handle = toyos::OwnedHandle::from(std::os::toyos::io::OwnedHandle::from(child));
                 // Consumed either way, so the supervisor keeps no `Process` handle from a
                 // launch, or a client launching `/system/bin/true` in a loop exhausts the
                 // one table the machine cannot do without.
@@ -2663,15 +2674,12 @@ struct Launch {
     /// Prepared: its image read and hashed, its working directory judged.
     command: Command,
     session: Session,
-    /// The caller's stdio, owned until the spawn duplicates it.
-    fds: Moved,
-    caller_fds: Vec<(u32, toyos::RawHandle, toyos::fd::Kind)>,
-    /// The place the child is spawned under, owned until then.
-    _place: Moved,
+    /// The descriptors its caller sent, copied into the program.
+    fds: Vec<(u32, LaunchFd)>,
+    /// The program's own log ring, where its caller sent its own.
+    ring: Option<SharedMemory>,
     /// Whether it names a place, or the supervisor.
     placed: bool,
-    /// The job its caller named, owned until the spawn moves it.
-    job: Moved,
     extras: Vec<(String, Connector)>,
     /// The caller's working directory, which a granted folder's launch keeps
     /// where it lies inside the folder.
@@ -2713,27 +2721,6 @@ fn said(reply: &consent::Reply) -> String {
         consent::Reply::Always(folder) => format!("always, {} {}", folder.path, folder.access),
         consent::Reply::Deny => "denied, until `grants revoke`".to_string(),
         consent::Reply::Skip => "skipped, so its next launch asks again".to_string(),
-    }
-}
-
-/// Handles a launch moved into the supervisor, released on every path out of it.
-///
-/// A `Drop` and not a close at each `return`: a client picks which way out of
-/// `serve_launch` it takes by what it sends.
-struct Moved(Vec<toyos::RawHandle>);
-
-impl Moved {
-    /// Give up the obligation, for a caller taking it on itself.
-    fn take(&mut self) -> Vec<toyos::RawHandle> {
-        std::mem::take(&mut self.0)
-    }
-}
-
-impl Drop for Moved {
-    fn drop(&mut self) {
-        for handle in &self.0 {
-            toyos_abi::syscall::close(*handle);
-        }
     }
 }
 
@@ -2911,11 +2898,9 @@ fn translated(claim: toyos::Device, function: &Pci) -> Result<toyos::Device, Mis
     if !claims::is_virtio(function) {
         return Ok(claim);
     }
-    // SAFETY: the claim is this process's own, just minted, and moves in whole.
-    let dev = unsafe { <toyos::PciDev as toyos::endow::FromHandle>::from_handle(claim.into_raw()) };
+    let dev = toyos::PciDev::from_handle(claim.into());
     let offered = toyos_pci_claim::virtio::offers_access_platform(&dev);
-    // SAFETY: the same handle, moving back out whole.
-    let claim = unsafe { <toyos::Device as toyos::endow::FromHandle>::from_handle(dev.into_raw()) };
+    let claim = toyos::Device::from_handle(dev.into());
     match offered {
         Ok(true) => Ok(claim),
         Ok(false) => Err(Missing::Untranslated(None)),
@@ -2977,64 +2962,32 @@ fn start<'a>(
     // (`Supervisor::make_state_dir`), on the supervisor's file worker.
     command.env("HOME", program.home());
 
-    // **Everything endowed stays owned until the spawn that moves it
-    // succeeds.** `endow` records a number; a refused spawn moves nothing
-    // (`build_child_handles` is all-or-nothing), so a handle whose owner had
-    // already been forgotten would be one the supervisor holds for ever and a device
-    // class nothing can mint again. A client picks whether a spawn fails — an
-    // unreachable `cwd` is enough — so this is its path as much as a bug's.
-    let mut held = Moved(Vec::new());
-    // **Every service the supervisor starts is a job of its own**, which its
-    // caller made ([`job_for`]); a launch's program joins the job its caller
-    // named, which is the caller's own unless it holds that right itself.
-    let job = match &output {
-        Output::Boot { job, .. } | Output::Launch { job, .. } => *job,
-    };
-    // A launch's command was endowed its job before its image was read.
-    if matches!(output, Output::Boot { .. }) {
-        command.endow(JOB_LABEL, job.0);
-    }
-    held.0.push(job);
-    // Acceptors are given *back* rather than closed: a `serves` port whose
-    // acceptor is gone can never be served again.
-    let mut taken: Vec<(&'a str, Acceptor)> = Vec::new();
-
+    // Everything endowed is the command's: a refused spawn closes it, so an
+    // acceptor the supervisor must keep for a later start is endowed as a copy.
     for (label, claim) in claims {
-        let raw = claim.into_raw();
-        command.endow(&label, raw.0);
-        held.0.push(raw);
+        command.endow(&label, claim.into());
     }
     if let Some(stop) = stop {
-        let raw = stop.into_raw();
-        command.endow(toyos_quiesce::DRIVER_STOP, raw.0);
-        held.0.push(raw);
+        command.endow(toyos_quiesce::DRIVER_STOP, stop.into());
     }
     if let Some(root) = root {
-        command.endow(ROOT_IMAGE_LABEL, root.0);
-        held.0.push(root);
+        command.endow(ROOT_IMAGE_LABEL, root.into());
     }
     for (label, handle) in endow {
-        command.endow(label, handle.0);
-        held.0.push(handle);
+        command.endow(label, handle.into());
     }
     let mut view = grants.view(program, minting.session);
     view.extend(ports);
     view.extend(grants.authorizations(program).map_err(StartError::Refused)?);
     view.extend(grants.netstack(program, minting.session));
     if let Some(ns) = build_namespace(program, system, connectors, view, extras)? {
-        let raw = ns.into_raw();
-        command.endow(SVC_LABEL, raw.0);
-        held.0.push(raw);
+        command.endow(SVC_LABEL, ns.into());
     }
     if let Some(ns) = swap_namespace(program, connectors) {
-        let raw = ns.into_raw();
-        command.endow(toyos_swap::LABEL, raw.0);
-        held.0.push(raw);
+        command.endow(toyos_swap::LABEL, ns.into());
     }
     if let Some(ns) = minting.launches.and_then(|launches| launcher_namespace(program, launches)) {
-        let raw = ns.into_raw();
-        command.endow(LAUNCHER, raw.0);
-        held.0.push(raw);
+        command.endow(LAUNCHER, ns.into());
     }
     let minted = minting.minted;
     let badged = [
@@ -3042,14 +2995,10 @@ fn start<'a>(
         (toyos_session::ADMIN_PORT, program.receives.iter().any(|name| name == toyos_session::ADMIN_PORT), &minted.admin),
     ];
     for (name, _, acceptor) in badged.into_iter().filter(|(_, receives, _)| *receives) {
-        let raw = badged_namespace(program, name, acceptor, minting.session).into_raw();
-        command.endow(name, raw.0);
-        held.0.push(raw);
+        command.endow(name, badged_namespace(program, name, acceptor, minting.session).into());
     }
     if program.login {
-        let raw = login_namespace(program, &minted.login).into_raw();
-        command.endow(toyos_session::LOGIN_PORT, raw.0);
-        held.0.push(raw);
+        command.endow(toyos_session::LOGIN_PORT, login_namespace(program, &minted.login).into());
     }
 
     // The namespace answers with connections, so a child holding `surface`
@@ -3063,51 +3012,43 @@ fn start<'a>(
         let Ok(handed) = connector.duplicate() else {
             return Err(std::io::Error::other("a provided connector cannot be duplicated").into());
         };
-        let raw = handed.into_raw();
-        command.endow(&format!("{PROVIDE_PREFIX}{name}"), raw.0);
-        held.0.push(raw);
+        command.endow(&format!("{PROVIDE_PREFIX}{name}"), handed.into());
     }
 
-    let mut given_back = None;
+    // A `serves` port whose acceptor is gone can never be served again, so
+    // the child is endowed copies, and a launch's leave the map only once it
+    // runs.
     let owed: &[String] = match &served {
         Served::Keep { owed, .. } => owed,
         Served::Move(_) => &[],
     };
-    match served {
+    let moved = match served {
         Served::Move(acceptors) => {
             for name in &program.serves {
-                // `remove_entry` and not `remove`: the key is the map's own
-                // `&'a str`, which is what lets a package's synthesized row
-                // start through here.
-                let (key, acceptor) = acceptors.remove_entry(name.as_str()).unwrap_or_else(|| {
-                    // An acceptor is endowed by move, so a `serves` program
-                    // started this way is started exactly once per boot. A
-                    // second start with no acceptor left is refused by name
-                    // rather than spawned with a hole where its own service
-                    // should be.
+                // A `serves` program started this way is started exactly once
+                // per boot. A second start with no acceptor left is refused by
+                // name rather than spawned with a hole where its own service
+                // should be.
+                let acceptor = acceptors.get(name.as_str()).unwrap_or_else(|| {
                     panic!("supervisor: `{}` has already been given the `{name}` acceptor", program.name)
                 });
-                command.endow(&format!("{SERVE_PREFIX}{name}"), acceptor.as_handle().0);
-                taken.push((key, acceptor));
+                endow_served(&mut command, name, acceptor)?;
             }
-            given_back = Some(acceptors);
+            Some(acceptors)
         }
-        Served::Keep { acceptors: kept, .. } => {
+        Served::Keep { acceptors, .. } => {
             // Every acceptor the service keeps: its row's `serves`, or the
             // directories of a file server's role. None left is a service
             // whose ports closed for good.
-            if kept.is_empty() && (!program.serves.is_empty() || !program.roles.is_empty()) {
+            if acceptors.is_empty() && (!program.serves.is_empty() || !program.roles.is_empty()) {
                 return Err(std::io::Error::other("its ports are closed for good").into());
             }
-            for (name, acceptor) in kept {
-                let handed = toyos_abi::syscall::dup(acceptor.as_handle()).map_err(|e| {
-                    std::io::Error::other(format!("the `{name}` acceptor did not duplicate: {e:?}"))
-                })?;
-                command.endow(&format!("{SERVE_PREFIX}{name}"), handed.0);
-                held.0.push(handed);
+            for (name, acceptor) in acceptors {
+                endow_served(&mut command, name, acceptor)?;
             }
+            None
         }
-    }
+    };
 
     let mut endowed: Vec<String> = Vec::new();
     // Read at the first PCI matcher, and once.
@@ -3138,15 +3079,13 @@ fn start<'a>(
         // claimant looks the claim up by: one string, written once.
         let why = match minted {
             Ok(claim) => {
-                let raw = claim.into_raw();
-                command.endow(&format!("{DEV_PREFIX}{name}"), raw.0);
-                held.0.push(raw);
+                command.endow(&format!("{DEV_PREFIX}{name}"), claim.into());
                 endowed.push(name.clone());
                 continue;
             }
             Err(why) => why,
         };
-        // Nothing was spawned, so everything minted goes back with `held`.
+        // Nothing was spawned, so everything minted closes with the command.
         if !claims::goes_on_without(name, &why, owed) {
             let held_before = if owed.contains(name) { ", and the process it replaces held it" } else { "" };
             return Err(StartError::Refused(format!("{}{held_before}", missing(name, &why))));
@@ -3167,66 +3106,64 @@ fn start<'a>(
         let narrowed = syscap
             .narrowed(rights)
             .expect("supervisor: the system capability refused a narrowed duplicate");
-        let raw = narrowed.into_raw();
-        command.endow(SYSCAP_LABEL, raw.0);
-        held.0.push(raw);
+        command.endow(SYSCAP_LABEL, narrowed.into());
     }
 
-    // Where the program's output goes. Last before the spawn, so nothing above
-    // can refuse with a ring or `logkeeper`'s acceptor in flight.
+    // Where the program's output goes.
     //
     // A service the supervisor starts gets a ring of its own as its stdout and stderr
     // and the supervisor's console to read as its stdin; `logkeeper` also gets the acceptor
     // the rings reach it on and the one console handle that may write. A
     // launch keeps the descriptors its caller sent, but for a ring among them
-    // — the caller's own log — which is replaced by the program's, and a stdio
-    // descriptor it sent nothing for is a null, never this process's own.
-    let mut ring: Option<SharedMemory> = None;
-    let mut origins: Option<Acceptor> = None;
-    let log: &mut Log = match output {
-        Output::Boot { log, .. } => {
-            let own = ring.insert(ring_for(job)?).as_handle();
-            command.inherit_handle(0, log.stdin.0);
-            command.inherit_handle(1, own.0);
-            command.inherit_handle(2, own.0);
+    // — the caller's own log — which is replaced by the program's
+    // ([`LaunchFd::Ring`]), and a stdio descriptor it sent nothing for is a
+    // null, never this process's own.
+    let mut starts_logkeeper = false;
+    let (log, ring) = match output {
+        Output::Boot { log, job } => {
+            // **Every service the supervisor starts is a job of its own**,
+            // which its caller made ([`job_for`]).
+            let ring = ring_for(job.as_handle())?;
+            command.endow(JOB_LABEL, job.into());
+            command.inherit_handle(0, log.stdin.as_handle().into());
+            command.inherit_handle(1, ring.as_handle().into());
+            command.inherit_handle(2, ring.as_handle().into());
             if program.name == LOGKEEPER {
-                let Some(acceptor) = log.acceptor.take() else {
+                let Some(acceptor) = &log.acceptor else {
                     panic!("supervisor: `{LOGKEEPER}` is started twice, and the log's origins are the first's");
                 };
-                command.endow(ORIGINS, acceptor.as_handle().0);
-                origins = Some(acceptor);
-                let console = toyos::fd::with(0, |o| toyos_abi::syscall::dup(o.handle))
+                let origins = acceptor
+                    .as_handle()
+                    .try_clone_to_owned()
+                    .map_err(|e| std::io::Error::other(format!("the log's origins did not duplicate: {e:?}")))?;
+                command.endow(ORIGINS, origins.into());
+                let console = toyos::fd::with(0, |o| o.handle().map(|console| console.try_clone_to_owned()))
+                    .ok()
+                    .flatten()
                     .expect("supervisor: its console is descriptor 0")
                     .expect("supervisor: its console would not duplicate for logkeeper");
-                command.endow(CONSOLE, console.0);
-                held.0.push(console);
+                command.endow(CONSOLE, console.into());
+                starts_logkeeper = true;
             }
-            log
+            (log, Some(ring))
         }
-        Output::Launch { log, fds, .. } => {
+        Output::Launch { log, fds, ring } => {
             command.stdin(Stdio::null()).stdout(Stdio::null()).stderr(Stdio::null());
-            for &(fd, handle, kind) in fds {
-                let caller_ring = matches!(fd, 1 | 2)
-                    && kind == toyos::fd::Kind::Handle
-                    && toyos_abi::syscall::fstat(handle)
-                        .is_ok_and(|stat| stat.file_type == FileType::SharedMemory);
-                match kind {
-                    _ if caller_ring => {
-                        let own = match &mut ring {
-                            Some(ring) => ring.as_handle(),
-                            None => ring.insert(ring_for(job)?).as_handle(),
-                        };
-                        command.inherit_handle(fd, own.0);
+            for (fd, given) in fds {
+                match given {
+                    LaunchFd::Ring => {
+                        let ring = ring.as_ref().expect("a launch naming its caller's ring has the program's");
+                        command.inherit_handle(*fd, ring.as_handle().into());
                     }
-                    toyos::fd::Kind::Handle => {
-                        command.inherit_handle(fd, handle.0);
+                    LaunchFd::Caller(handle, toyos::fd::Kind::Handle) => {
+                        command.inherit_handle(*fd, handle.as_handle().into());
                     }
-                    toyos::fd::Kind::Exported => {
-                        command.inherit_exported(fd, handle.0);
+                    LaunchFd::Caller(handle, toyos::fd::Kind::Exported) => {
+                        command.inherit_exported(*fd, handle.as_handle().into());
                     }
                 }
             }
-            log
+            (log, ring)
         }
     };
     // The ring's end is its writer's: a pipe whose one write end the program
@@ -3235,54 +3172,56 @@ fn start<'a>(
     if ring.is_some() {
         let (read, write) = toyos::pipe_pair()
             .map_err(|e| std::io::Error::other(format!("no pipe for its log's end: {e:?}")))?;
-        let write = write.into_raw();
-        command.endow(ALIVE, write.0);
-        held.0.push(write);
+        command.endow(ALIVE, write.into());
         alive = Some(read);
     }
 
-    match command.spawn() {
-        Ok(child) => {
-            // The spawn moved every one of them into the child's table, so
-            // nothing here may close them.
-            held.take();
-            for (_, acceptor) in taken {
-                let _ = acceptor.into_raw();
-            }
-            if let Some(acceptor) = origins {
-                let _ = acceptor.into_raw();
-            }
-            if let (Some(ring), Some(alive)) = (ring, alive) {
-                log.register(&program.name, child.id(), ring, alive);
-            }
-            // A launch is answered to its caller and recorded in the kernel's
-            // `spawn:`; a line of the supervisor's for each would be a line on the
-            // console beside every command typed at it.
-            if booting {
-                say!("supervisor: started {}", program.name);
-            }
-            Ok((child, endowed))
-        }
-        Err(e) => {
-            if let Some(acceptors) = given_back {
-                for (name, acceptor) in taken {
-                    acceptors.insert(name, acceptor);
-                }
-            }
-            if let Some(acceptor) = origins {
-                log.acceptor = Some(acceptor);
-            }
-            Err(e.into())
+    let child = command.spawn()?;
+    if let Some(acceptors) = moved {
+        for name in &program.serves {
+            acceptors.remove(name.as_str());
         }
     }
+    if starts_logkeeper {
+        log.acceptor = None;
+    }
+    if let (Some(ring), Some(alive)) = (ring, alive) {
+        log.register(&program.name, child.id(), ring, alive);
+    }
+    // A launch is answered to its caller and recorded in the kernel's
+    // `spawn:`; a line of the supervisor's for each would be a line on the
+    // console beside every command typed at it.
+    if booting {
+        say!("supervisor: started {}", program.name);
+    }
+    Ok((child, endowed))
 }
 
-/// Where a started program's output goes: a service's own ring, or a
-/// launch's caller's descriptors with any ring among them replaced — and, for
-/// a launch, the job its caller named, which `start` owns from its first line.
+/// Endow a copy of `acceptor`, the `name` port's, which the supervisor keeps
+/// until the start succeeds.
+fn endow_served(command: &mut Command, name: &str, acceptor: &Acceptor) -> Result<(), StartError> {
+    let handed = acceptor
+        .as_handle()
+        .try_clone_to_owned()
+        .map_err(|e| std::io::Error::other(format!("the `{name}` acceptor did not duplicate: {e:?}")))?;
+    command.endow(&format!("{SERVE_PREFIX}{name}"), handed.into());
+    Ok(())
+}
+
+/// Where a started program's output goes: a service's own ring, made for the
+/// job it joins, or a launch's caller's descriptors with any ring among them
+/// replaced by the program's.
 enum Output<'l> {
-    Boot { log: &'l mut Log, job: toyos::RawHandle },
-    Launch { log: &'l mut Log, fds: &'l [(u32, toyos::RawHandle, toyos::fd::Kind)], job: toyos::RawHandle },
+    Boot { log: &'l mut Log, job: toyos::job::Job },
+    Launch { log: &'l mut Log, fds: &'l [(u32, LaunchFd)], ring: Option<SharedMemory> },
+}
+
+/// A launched program's descriptor.
+enum LaunchFd {
+    /// A handle its caller sent, a copy of which the program gets.
+    Caller(toyos::OwnedHandle, toyos::fd::Kind),
+    /// Its caller's own log ring, for which the program gets its own.
+    Ring,
 }
 
 /// The namespace this program's `receives` names, [`toyos_swap::PORT`] and
@@ -3569,13 +3508,13 @@ fn swapped(service: &str, word: Word, detail: &str) {
 struct Extra {
     args: Vec<String>,
     claims: Vec<(String, toyos::Device)>,
-    /// SYSTEM's ROOT image: a duplicate the start owns until the spawn moves it.
-    root: Option<toyos::RawHandle>,
+    /// SYSTEM's ROOT image, a duplicate.
+    root: Option<toyos::OwnedHandle>,
     ports: Vec<(String, Connector)>,
     /// A disk driver's end of its [`toyos_quiesce::DRIVER_STOP`] pipe.
     stop: Option<Pipe>,
-    /// Handles endowed by label, owned by the start until the spawn moves them.
-    endow: Vec<(&'static str, toyos::RawHandle)>,
+    /// Handles endowed by label.
+    endow: Vec<(&'static str, toyos::OwnedHandle)>,
 }
 
 /// The controller a `@boot` entry names, read once at start
@@ -3634,7 +3573,7 @@ fn storage_endowment(role: Option<&str>, syscap: &SysCap, grants: &Grants<'_>, b
     };
     storage.args.push(role.to_string());
     if role == toyos_manifest::SYSTEM {
-        let root = toyos_abi::syscall::dup(boot.root.as_handle())
+        let root = boot.root.try_clone()
             .map_err(|e| std::io::Error::other(format!("ROOT's image did not duplicate: {e:?}")))?;
         storage.root = Some(root);
         return Ok(storage);
@@ -3704,7 +3643,7 @@ fn read_system(path: &'static str, server: &Service<'_>) -> String {
 /// the console the kernel gave the supervisor, then a panic like any other.
 fn bootstrap_fails(why: String) -> ! {
     let line = format!("supervisor: {why}\n");
-    let _ = toyos::fd::with(0, |console| toyos_abi::syscall::write(console.handle, line.as_bytes()));
+    let _ = toyos::fd::with(0, |console| console.handle().map(|console| toyos_abi::syscall::write(console.raw(), line.as_bytes())));
     panic!("supervisor: {why}");
 }
 
@@ -3725,7 +3664,7 @@ impl Boot {
             let handle: toyos::OwnedHandle = Endowments::get()
                 .take(label)
                 .unwrap_or_else(|| panic!("supervisor: the kernel spawns this program holding `{label}`"));
-            let kind = toyos_abi::syscall::fstat(handle.as_handle()).map(|stat| stat.file_type);
+            let kind = toyos_abi::syscall::fstat(handle.as_handle().raw()).map(|stat| stat.file_type);
             assert_eq!(kind, Ok(FileType::ImmutableMemory), "supervisor: `{label}` is no image nobody writes");
             handle
         };

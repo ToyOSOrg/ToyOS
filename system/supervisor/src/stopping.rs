@@ -84,7 +84,7 @@ impl Supervisor<'_> {
                 let (done, acts) = self.stops.cancel();
                 (done.map(|()| 0), acts)
             }
-            other => return say!("supervisor: power: dropping client {} — frame {other} is no request", conn.as_handle().0),
+            other => return say!("supervisor: power: dropping client {} — frame {other} is no request", conn.as_handle().raw().0),
         };
         match answer {
             Ok(ticket) if msg_type == power::MSG_STOP => {

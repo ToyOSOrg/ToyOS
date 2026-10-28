@@ -92,7 +92,7 @@ impl Device for Controller {
         }
         self.vwc
     }
-    fn dma_map(&mut self, region: toyos::RawHandle) -> Result<u64, SyscallError> {
+    fn dma_map(&mut self, region: toyos::BorrowedHandle<'_>) -> Result<u64, SyscallError> {
         self.claim().dma_map(region).map(|m| m.device_addr)
     }
     fn dma_unmap(&mut self, device_addr: u64) -> Result<(), SyscallError> {
@@ -154,11 +154,7 @@ fn idle(link: &mut Link, stop: Option<&toyos::Pipe>) -> ! {
         if stopping {
             std::process::exit(0);
         }
-        for handed in link.take() {
-            if let Handed::Session { region, .. } = handed {
-                toyos_abi::syscall::close(region);
-            }
-        }
+        drop(link.take());
     }
 }
 
@@ -207,9 +203,6 @@ fn serve(name: &str, ctrl: &mut Controller, disk: &mut Sessions, link: &mut Link
             };
             if on != DISK {
                 println!("{name}: the block service handed work on disk {on}, which this driver never offered");
-                if let Handed::Session { region, .. } = handed {
-                    toyos_abi::syscall::close(region);
-                }
                 continue;
             }
             match handed {

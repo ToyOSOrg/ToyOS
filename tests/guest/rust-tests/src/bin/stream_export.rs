@@ -13,7 +13,6 @@
 use std::io::Write;
 use std::net::{Ipv4Addr, SocketAddr, TcpStream};
 use std::os::fd::FromRawFd;
-use std::os::toyos::io::AsRawHandle;
 use std::os::toyos::process::CommandExt;
 use std::process::{Command, Stdio};
 
@@ -42,7 +41,7 @@ fn parent(port: u16) {
     let mut stream = TcpStream::connect(SocketAddr::from((HOST, port))).expect("a connect through netstack to the harness");
     let status = Command::new(SELF_PATH)
         .arg("child")
-        .inherit_handle(HELD_FD as u32, stream.as_raw_handle())
+        .inherit_handle(HELD_FD as u32, std::os::toyos::io::AsHandle::as_handle(&stream))
         .stdout(Stdio::null())
         .status()
         .expect("spawn the child with a holder of the stream");

@@ -51,7 +51,7 @@ fn main() {
     let cap: SysCap = Endowments::get().take(SYSCAP_LABEL).expect("test-runner endows a device-minting capability");
     let claim = claim_off_the_boot_processor(&cap);
     let mut server = Command::new(SERVER)
-        .endow(&format!("{DEV_PREFIX}{}", DeviceType::Acpi.class_name()), claim.into_raw().0)
+        .endow(&format!("{DEV_PREFIX}{}", DeviceType::Acpi.class_name()), claim.into())
         .stdout(Stdio::piped())
         .spawn()
         .expect("acpi_release: spawn the server");

@@ -1,4 +1,4 @@
-use toyos_abi::{RawHandle, syscall};
+use toyos_abi::syscall;
 
 use crate::io::{self, BorrowedCursor, IoSlice, IoSliceMut};
 use crate::sys::{fd_error, new_fd, on_fd};
@@ -10,9 +10,9 @@ pub struct Pipe {
 }
 
 pub fn pipe() -> io::Result<(Pipe, Pipe)> {
-    let ends = syscall::pipe().map_err(crate::sys::to_io_error)?;
-    let read = new_fd(ends.read).inspect_err(|_| syscall::close(ends.write))?;
-    Ok((Pipe { fd: read }, Pipe { fd: new_fd(ends.write)? }))
+    let (read, write) = toyos::pipe_pair().map_err(crate::sys::to_io_error)?;
+    let read = new_fd(read.into())?;
+    Ok((Pipe { fd: read }, Pipe { fd: new_fd(write.into())? }))
 }
 
 impl Pipe {
@@ -21,7 +21,7 @@ impl Pipe {
     }
 
     /// The kernel handle behind this end, held for `f`.
-    pub fn with_handle<T>(&self, f: impl FnOnce(RawHandle) -> T) -> io::Result<T> {
+    pub fn with_handle<T>(&self, f: impl FnOnce(toyos::BorrowedHandle<'_>) -> T) -> io::Result<T> {
         on_fd(self.fd, |h| Ok(f(h)))
     }
 
@@ -30,7 +30,7 @@ impl Pipe {
     }
 
     pub fn read(&self, buf: &mut [u8]) -> io::Result<usize> {
-        on_fd(self.fd, |h| syscall::read(h, buf))
+        on_fd(self.fd, |h| syscall::read(h.raw(), buf))
     }
 
     pub fn read_buf(&self, mut buf: BorrowedCursor<'_, u8>) -> io::Result<()> {
@@ -66,7 +66,7 @@ impl Pipe {
     }
 
     pub fn write(&self, buf: &[u8]) -> io::Result<usize> {
-        on_fd(self.fd, |h| syscall::write(h, buf))
+        on_fd(self.fd, |h| syscall::write(h.raw(), buf))
     }
 
     pub fn write_vectored(&self, bufs: &[IoSlice<'_>]) -> io::Result<usize> {
@@ -83,6 +83,7 @@ impl Pipe {
 
 impl Drop for Pipe {
     fn drop(&mut self) {
-        let _ = toyos::fd::close(self.fd);
+        // SAFETY: the pipe owns its descriptor, and nothing names it after this.
+        let _ = unsafe { toyos::fd::close(self.fd) };
     }
 }

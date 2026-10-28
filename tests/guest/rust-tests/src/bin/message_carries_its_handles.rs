@@ -30,14 +30,15 @@ fn main() {
     let header = server.recv_header().expect("the frame");
     assert_eq!((header.msg_type, header.handles()), (7, 1), "the frame does not announce its handle");
     let [received] = server.recv_handles_exact::<1>(&header).expect("the handle, with its frame");
-    syscall::close(received);
+    drop(received);
     assert_eq!(gone(&read_end), Ok(OTHER_END_GONE), "the handle taken with its frame is not the one sent");
     println!("message_carries_its_handles: a frame's handle arrived with it");
 
     // Handles with no bytes are refused, and the server has nothing to read.
     let (stray_read, stray_write) = pipe_pair().expect("a pipe");
     assert_eq!(
-        syscall::message_send(client.as_handle(), &[], &[stray_write.as_handle()], false),
+        // SAFETY: no type holds the handles sent.
+        unsafe { syscall::message_send(client.as_handle().raw(), &[], &[stray_write.as_handle().raw()], false) },
         Err(SyscallError::InvalidArgument),
         "handles were sent with no bytes"
     );
@@ -54,7 +55,8 @@ fn main() {
     frame[..4].copy_from_slice(&9u32.to_ne_bytes());
     // Given up before the send, which moves it: this process no longer holds the number.
     let lied_write = lied_write.into_raw();
-    syscall::message_send(client.as_handle(), &frame, &[lied_write], false)
+    // SAFETY: no type holds the handles sent.
+    unsafe { syscall::message_send(client.as_handle().raw(), &frame, &[lied_write], false) }
         .expect("a message whose frame announces no handle");
     let mut rx = FrameRx::<0>::new();
     assert!(readable(&server, CEILING_NANOS), "the message did not make the server readable");
@@ -82,7 +84,7 @@ fn readable(conn: &Connection, timeout: u64) -> bool {
 /// What a watch for `end`'s other end leaving is answered, within the ceiling.
 fn gone(end: &Pipe) -> Result<u32, SyscallError> {
     let poller = Poller::new(1);
-    poller.watch_raw(end.as_handle(), OTHER_END_GONE, 1);
+    poller.watch(&end, OTHER_END_GONE, 1);
     let mut answer = None;
     poller.wait_answers(1, CEILING_NANOS, |_, said| answer = Some(said));
     answer.expect("the other end never left")

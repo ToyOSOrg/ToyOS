@@ -71,7 +71,7 @@ fn serve() {
         .expect("a namespace naming this binary soundserver");
     let mut child = Command::new(SELF)
         .arg("client")
-        .endow(SVC_LABEL, names.into_raw().0)
+        .endow(SVC_LABEL, names.into())
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .spawn()

@@ -85,7 +85,7 @@ fn child(role: &str, claim: Option<Device>) -> (String, bool) {
     let mut command = Command::new(SELF_PATH);
     command.arg(role).stdout(Stdio::piped());
     if let Some(claim) = claim {
-        command.endow(CLAIM_LABEL, claim.into_raw().0);
+        command.endow(CLAIM_LABEL, claim.into());
     }
     let out = command.output().expect("isa: spawn a child role");
     (String::from_utf8_lossy(&out.stdout).into_owned(), out.status.success())

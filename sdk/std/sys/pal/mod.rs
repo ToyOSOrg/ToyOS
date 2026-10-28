@@ -43,7 +43,7 @@ pub fn to_io_error(e: toyos_abi::syscall::SyscallError) -> crate::io::Error {
 /// and one a library keeps as no kernel handle is no file to a kernel call.
 pub fn on_fd<T>(
     fd: i32,
-    f: impl FnOnce(toyos_abi::RawHandle) -> Result<T, toyos_abi::syscall::SyscallError>,
+    f: impl FnOnce(toyos::BorrowedHandle<'_>) -> Result<T, toyos_abi::syscall::SyscallError>,
 ) -> crate::io::Result<T> {
     let answer = toyos::fd::with(fd, |object| match object.kernel_handle() {
         Some(handle) => f(handle).map_err(to_io_error),
@@ -150,7 +150,7 @@ pub fn refused(refused: toyos::spawn::Refused) -> crate::io::Error {
 
 /// A kernel handle this process just got, as a descriptor of its own: std
 /// creates descriptors not inherited, as std is close-on-exec on unix.
-pub fn new_fd(handle: toyos_abi::RawHandle) -> crate::io::Result<i32> {
+pub fn new_fd(handle: toyos::OwnedHandle) -> crate::io::Result<i32> {
     toyos::fd::install(toyos::fd::Object::handle(handle), false, 0).map_err(fd_error)
 }
 

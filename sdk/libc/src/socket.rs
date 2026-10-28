@@ -7,7 +7,6 @@
 use alloc::alloc::{alloc as heap_alloc, dealloc as heap_dealloc};
 use alloc::vec::Vec;
 use core::ptr;
-use toyos_abi::RawHandle;
 use toyos::net::socket::{self, Kind};
 use toyos::net::stream::{self, Wait};
 use toyos::net::{NetError, TcpOptions, OPT_BROADCAST, OPT_NODELAY};
@@ -78,19 +77,21 @@ static mut SOCKETS: [Option<SocketEntry>; MAX_SOCKETS] = [None; MAX_SOCKETS];
 /// thread meanwhile lets the socket go only once this drops, so a call never
 /// meets a handle closed under it. `None` for a descriptor that is no socket.
 fn sock_from_fd(fd: i32) -> Option<Sock> {
-    let (hold, object) = toyos::fd::hold(fd).ok()?;
-    if object.tag == toyos::fd::STREAM {
-        return Some(Sock::Stream(Held { _hold: hold, handle: object.handle }));
-    }
-    if object.tag == toyos::fd::SOCKET {
-        return match socket::kind(object.handle) {
-            Some(Kind::Listener) => Some(Sock::Listener(Held { _hold: hold, handle: object.handle })),
-            Some(Kind::Datagram) => Some(Sock::Datagram(Held { _hold: hold, handle: object.handle })),
+    let hold = toyos::fd::hold(fd).ok()?;
+    let object = hold.object();
+    match (object.tag(), object.handle()) {
+        (toyos::fd::STREAM, Some(_)) => Some(Sock::Stream(Held(hold))),
+        (toyos::fd::SOCKET, Some(handle)) => match socket::kind(handle) {
+            Some(Kind::Listener) => Some(Sock::Listener(Held(hold))),
+            Some(Kind::Datagram) => Some(Sock::Datagram(Held(hold))),
             // Another copy of `toyos`'s: this library holds no end of it.
             None => None,
-        };
+        },
+        _ => {
+            let idx = index_of(&object)?;
+            Some(Sock::Entry(Socket { _hold: hold, idx }))
+        }
     }
-    Some(Sock::Entry(Socket { _hold: hold, idx: index_of(&object)? }))
 }
 
 /// What a socket descriptor names, held.
@@ -106,19 +107,22 @@ enum Sock {
 }
 
 /// A descriptor of netstack's object, held for the call.
-struct Held {
-    _hold: toyos::fd::Hold,
-    handle: RawHandle,
+struct Held(toyos::fd::Hold);
+
+impl Held {
+    /// The stream's or the socket's handle, lent for the hold.
+    fn handle(&self) -> toyos::BorrowedHandle<'_> {
+        self.0.object().handle().expect("a stream's or a socket's descriptor names its handle")
+    }
 }
 
 /// The index of the socket `object` is, or `None` for an object that is no
 /// socket of this library's.
-fn index_of(object: &toyos::fd::Object) -> Option<usize> {
-    object.release?;
-    if object.word & !0xffff_ffff != SOCKET_TAG {
+fn index_of(object: &toyos::fd::Lent<'_>) -> Option<usize> {
+    if object.handle().is_some() || object.word() & !0xffff_ffff != SOCKET_TAG {
         return None;
     }
-    usize::try_from(object.word & 0xffff_ffff).ok().filter(|&i| i < MAX_SOCKETS)
+    usize::try_from(object.word() & 0xffff_ffff).ok().filter(|&i| i < MAX_SOCKETS)
 }
 
 /// A socket descriptor's entry, for as long as its descriptor is held.
@@ -204,14 +208,15 @@ unsafe fn fill_sockaddr(addr: *mut Sockaddr, addrlen: *mut SocklenT, ip: [u8; 4]
 /// handing over what was set before netstack held it and connecting it to
 /// `peer`: from here `fd` names netstack's socket, and the entry goes once the
 /// caller's hold does.
-fn bind_datagram(fd: i32, entry: &SocketEntry, ip: [u8; 4], port: u16, peer: Option<([u8; 4], u16)>) -> Result<RawHandle, i32> {
+fn bind_datagram(fd: i32, entry: &SocketEntry, ip: [u8; 4], port: u16, peer: Option<([u8; 4], u16)>) -> Result<toyos::fd::Hold, i32> {
     let bound = socket::bind(ip, port).map_err(net_err_to_errno)?;
+    let handle = toyos::AsHandle::as_handle(&bound.handle);
     let handed = (|| {
         if entry.broadcast {
-            socket::set_option(bound.handle, OPT_BROADCAST, 1)?;
+            socket::set_option(handle, OPT_BROADCAST, 1)?;
         }
         match peer {
-            Some((addr, port)) => socket::connect(bound.handle, addr, port),
+            Some((addr, port)) => socket::connect(handle, addr, port),
             None => Ok(()),
         }
     })();
@@ -219,8 +224,10 @@ fn bind_datagram(fd: i32, entry: &SocketEntry, ip: [u8; 4], port: u16, peer: Opt
         socket::let_go(bound.handle);
         return Err(net_err_to_errno(e));
     }
-    toyos::fd::replace(fd, socket::descriptor(bound.handle)).map_err(|_| EBADF)?;
-    Ok(bound.handle)
+    // SAFETY: `fd` names a socket entry, libc's own object, which its
+    // netstack socket replaces at the number C keeps using.
+    unsafe { toyos::fd::replace(fd, socket::descriptor(bound.handle)) }.map_err(|_| EBADF)?;
+    toyos::fd::hold(fd).map_err(|_| EBADF)
 }
 
 /// A datagram socket's sends: one netstack holds, or one it does not yet,
@@ -228,7 +235,8 @@ fn bind_datagram(fd: i32, entry: &SocketEntry, ip: [u8; 4], port: u16, peer: Opt
 struct Sending<'a> {
     fd: i32,
     entry: Option<&'a SocketEntry>,
-    bound: Option<RawHandle>,
+    /// The socket's descriptor, held for the sends.
+    bound: Option<toyos::fd::Hold>,
 }
 
 impl dgramreq::Datagrams for Sending<'_> {
@@ -242,7 +250,8 @@ impl dgramreq::Datagrams for Sending<'_> {
         Ok(())
     }
     fn send(&mut self, data: &[u8], ip: [u8; 4], port: u16) -> Result<usize, i32> {
-        let handle = self.bound.ok_or(EBADF)?;
+        let held = self.bound.as_ref().ok_or(EBADF)?;
+        let handle = held.object().handle().ok_or(EBADF)?;
         socket::send_to(handle, ip, port, data).map_err(net_err_to_errno)
     }
 }
@@ -283,7 +292,7 @@ pub unsafe extern "C" fn connect(fd: i32, addr: *const Sockaddr, addrlen: Sockle
     let mut socket = match sock_from_fd(fd) {
         Some(Sock::Entry(socket)) => socket,
         Some(Sock::Datagram(held)) => {
-            return match socket::connect(held.handle, ip, port) {
+            return match socket::connect(held.handle(), ip, port) {
                 Ok(()) => 0,
                 Err(e) => { set_errno(net_err_to_errno(e)); -1 }
             };
@@ -306,7 +315,9 @@ pub unsafe extern "C" fn connect(fd: i32, addr: *const Sockaddr, addrlen: Sockle
             };
             // The descriptor names the stream from here on; the entry goes once
             // this call's hold does.
-            match toyos::fd::replace(fd, stream::descriptor(connected.handle)) {
+            // SAFETY: `fd` names a socket entry, libc's own object, which its
+            // stream replaces at the number C keeps using.
+            match unsafe { toyos::fd::replace(fd, stream::descriptor(connected.handle)) } {
                 Ok(()) => 0,
                 Err(_) => { set_errno(EBADF); -1 }
             }
@@ -337,7 +348,9 @@ pub unsafe extern "C" fn bind(fd: i32, addr: *const Sockaddr, addrlen: SocklenT)
     let bound = match entry.kind {
         SocketKind::Tcp => socket::listen(ip, port, TcpOptions::new(entry.nodelay))
             .map_err(net_err_to_errno)
-            .and_then(|bound| toyos::fd::replace(fd, socket::descriptor(bound.handle)).map_err(|_| EBADF)),
+            // SAFETY: `fd` names a socket entry, libc's own object, which its
+            // listener replaces at the number C keeps using.
+            .and_then(|bound| unsafe { toyos::fd::replace(fd, socket::descriptor(bound.handle)) }.map_err(|_| EBADF)),
         SocketKind::Udp => bind_datagram(fd, &entry, ip, port, None).map(drop),
     };
     match bound {
@@ -363,7 +376,7 @@ pub unsafe extern "C" fn accept(
         Some(_) => { set_errno(EINVAL); return -1; }
         None => { set_errno(EBADF); return -1; }
     };
-    let handle = listener.handle;
+    let handle = listener.handle();
 
     // The descriptor's handle is the holder's bell: a connection that waits rings it.
     let mut poller = None;
@@ -374,8 +387,8 @@ pub unsafe extern "C" fn accept(
         },
         |wake| {
             let poller = poller.get_or_insert_with(|| toyos::poller::Poller::new(2));
-            poller.watch_raw(handle, toyos::poller::READABLE, 0);
-            poller.watch_raw(wake, toyos::poller::READABLE, 1);
+            poller.watch(&handle, toyos::poller::READABLE, 0);
+            poller.watch(&wake, toyos::poller::READABLE, 1);
             poller.wait(1, u64::MAX, |_| {});
             Ok(())
         },
@@ -405,8 +418,8 @@ pub unsafe extern "C" fn send(fd: i32, buf: *const u8, len: usize, _flags: i32) 
     }
     let data = core::slice::from_raw_parts(buf, len);
     match sock_from_fd(fd) {
-        Some(Sock::Stream(held)) => write_stream(held.handle, data),
-        Some(Sock::Datagram(held)) => match socket::send(held.handle, data) {
+        Some(Sock::Stream(held)) => write_stream(held.handle(), data),
+        Some(Sock::Datagram(held)) => match socket::send(held.handle(), data) {
             Ok(sent) => sent as isize,
             Err(e) => { set_errno(net_err_to_errno(e)); -1 }
         },
@@ -418,7 +431,7 @@ pub unsafe extern "C" fn send(fd: i32, buf: *const u8, len: usize, _flags: i32) 
 }
 
 /// `send` on a stream, and `write` on a stream's descriptor.
-fn write_stream(handle: RawHandle, data: &[u8]) -> isize {
+fn write_stream(handle: toyos::BorrowedHandle<'_>, data: &[u8]) -> isize {
     match stream::write(handle, data, Wait::Blocking(None)) {
         Ok(n) => n as isize,
         Err(refused) => { set_errno(crate::errcode::of_stream(refused)); -1 }
@@ -427,7 +440,7 @@ fn write_stream(handle: RawHandle, data: &[u8]) -> isize {
 
 /// `recv` on a stream, and `read` of its descriptor: a handler interrupts it
 /// as [`interruptibly`] says.
-fn read_stream(handle: RawHandle, data: &mut [u8]) -> isize {
+fn read_stream(handle: toyos::BorrowedHandle<'_>, data: &mut [u8]) -> isize {
     let mut poller = None;
     let read = interruptibly(
         |block| {
@@ -452,7 +465,7 @@ fn read_stream(handle: RawHandle, data: &mut [u8]) -> isize {
 /// A datagram into `data` from the datagram socket `handle` reaches, and where
 /// it came from: a handler interrupts the wait for it as [`interruptibly`]
 /// says.
-fn read_datagram(handle: RawHandle, data: &mut [u8]) -> Result<socket::Received, i32> {
+fn read_datagram(handle: toyos::BorrowedHandle<'_>, data: &mut [u8]) -> Result<socket::Received, i32> {
     let mut poller = None;
     let received = interruptibly(
         |block| match socket::recv_from(handle, data, if block { Wait::Blocking(None) } else { Wait::Nonblocking }) {
@@ -461,8 +474,8 @@ fn read_datagram(handle: RawHandle, data: &mut [u8]) -> Result<socket::Received,
         },
         |wake| {
             let poller = poller.get_or_insert_with(|| toyos::poller::Poller::new(2));
-            poller.watch_raw(handle, toyos::poller::READABLE, 0);
-            poller.watch_raw(wake, toyos::poller::READABLE, 1);
+            poller.watch(&handle, toyos::poller::READABLE, 0);
+            poller.watch(&wake, toyos::poller::READABLE, 1);
             poller.wait(1, u64::MAX, |_| {});
             Ok(())
         },
@@ -491,11 +504,11 @@ pub unsafe extern "C" fn sendto(
     let sock = sock_from_fd(fd);
     // A stream's `sendto` ignores the address, as `send`.
     if let Some(Sock::Stream(held)) = &sock {
-        return write_stream(held.handle, data);
+        return write_stream(held.handle(), data);
     }
     let Some((ip, port)) = parse_sockaddr(dest_addr, addrlen) else { set_errno(EINVAL); return -1; };
     match sock {
-        Some(Sock::Datagram(held)) => send_datagram(Sending { fd, entry: None, bound: Some(held.handle) }, data, ip, port),
+        Some(Sock::Datagram(held)) => send_datagram(Sending { fd, entry: None, bound: Some(held.0) }, data, ip, port),
         Some(Sock::Entry(mut socket)) => match *socket.slot() {
             Some(entry @ SocketEntry { kind: SocketKind::Udp, .. }) => send_datagram(Sending { fd, entry: Some(&entry), bound: None }, data, ip, port),
             Some(_) => { set_errno(ENOTCONN); -1 }
@@ -522,8 +535,8 @@ pub unsafe extern "C" fn recvfrom(
     let data = core::slice::from_raw_parts_mut(buf, len);
     match sock_from_fd(fd) {
         // A stream's `recvfrom` names no address, as `recv`.
-        Some(Sock::Stream(held)) => read_stream(held.handle, data),
-        Some(Sock::Datagram(held)) => match read_datagram(held.handle, data) {
+        Some(Sock::Stream(held)) => read_stream(held.handle(), data),
+        Some(Sock::Datagram(held)) => match read_datagram(held.handle(), data) {
             Ok(received) => {
                 if !src_addr.is_null() && !addrlen.is_null() {
                     fill_sockaddr(src_addr, addrlen, received.addr, received.port);
@@ -539,8 +552,8 @@ pub unsafe extern "C" fn recvfrom(
 
 #[no_mangle]
 pub unsafe extern "C" fn shutdown(fd: i32, how: i32) -> i32 {
-    let handle = match sock_from_fd(fd) {
-        Some(Sock::Stream(held)) => held.handle,
+    let held = match sock_from_fd(fd) {
+        Some(Sock::Stream(held)) => held,
         Some(Sock::Listener(_)) => { set_errno(ENOTCONN); return -1; }
         Some(Sock::Datagram(_)) => return 0,
         Some(Sock::Entry(mut socket)) => {
@@ -557,6 +570,7 @@ pub unsafe extern "C" fn shutdown(fd: i32, how: i32) -> i32 {
         set_errno(EINVAL);
         return -1;
     }
+    let handle = held.handle();
     if matches!(how, SHUT_RD | SHUT_RDWR) {
         let _ = stream::shutdown_read(handle);
     }
@@ -578,7 +592,7 @@ const SHUT_RDWR: i32 = 2;
 /// `attempt(true)` blocks for the answer.
 fn interruptibly<T>(
     mut attempt: impl FnMut(bool) -> Option<T>,
-    mut wait: impl FnMut(RawHandle) -> Result<(), i32>,
+    mut wait: impl FnMut(toyos::BorrowedHandle<'static>) -> Result<(), i32>,
 ) -> Result<T, i32> {
     let Some(mut call) = crate::signal::Call::enter(None, false, false) else {
         return Ok(attempt(true).expect("a blocking attempt answers"));
@@ -602,7 +616,7 @@ fn interruptibly<T>(
 /// owner is std's copy of `toyos`, which holds no end of libc's streams.
 pub(crate) fn read_if_stream(fd: i32, data: &mut [u8]) -> Option<isize> {
     match sock_from_fd(fd)? {
-        Sock::Stream(held) if stream::is_stream(held.handle) => Some(read_stream(held.handle, data)),
+        Sock::Stream(held) if stream::is_stream(held.handle()) => Some(read_stream(held.handle(), data)),
         _ => None,
     }
 }
@@ -610,21 +624,21 @@ pub(crate) fn read_if_stream(fd: i32, data: &mut [u8]) -> Option<isize> {
 /// `write` of `fd` where it names a stream of this library's, as `send`.
 pub(crate) fn write_if_stream(fd: i32, data: &[u8]) -> Option<isize> {
     match sock_from_fd(fd)? {
-        Sock::Stream(held) if stream::is_stream(held.handle) => Some(write_stream(held.handle, data)),
+        Sock::Stream(held) if stream::is_stream(held.handle()) => Some(write_stream(held.handle(), data)),
         _ => None,
     }
 }
 
 /// The handle of the stream a descriptor names, for `poll`, given the object
 /// of a descriptor `poll` holds.
-pub(crate) fn stream_of(object: &toyos::fd::Object) -> Option<RawHandle> {
-    (object.tag == toyos::fd::STREAM).then_some(object.handle)
+pub(crate) fn stream_of<'a>(object: &toyos::fd::Lent<'a>) -> Option<toyos::BorrowedHandle<'a>> {
+    object.handle().filter(|_| object.tag() == toyos::fd::STREAM)
 }
 
 /// The kernel handle a socket that is no stream is watched by, for `poll`:
 /// its holder's bell, readable while a connection or a datagram waits.
-pub(crate) fn watched_of(object: &toyos::fd::Object) -> Option<RawHandle> {
-    (object.tag == toyos::fd::SOCKET).then_some(object.handle)
+pub(crate) fn watched_of<'a>(object: &toyos::fd::Lent<'a>) -> Option<toyos::BorrowedHandle<'a>> {
+    object.handle().filter(|_| object.tag() == toyos::fd::SOCKET)
 }
 
 
@@ -659,9 +673,9 @@ pub unsafe extern "C" fn setsockopt(
     optlen: SocklenT,
 ) -> i32 {
     let mut socket = match sock_from_fd(fd) {
-        Some(Sock::Stream(held)) => return set_stream_option(held.handle, level, optname, optval, optlen),
-        Some(Sock::Listener(held)) => return set_held_option(held.handle, Kind::Listener, level, optname, optval, optlen),
-        Some(Sock::Datagram(held)) => return set_held_option(held.handle, Kind::Datagram, level, optname, optval, optlen),
+        Some(Sock::Stream(held)) => return set_stream_option(held.handle(), level, optname, optval, optlen),
+        Some(Sock::Listener(held)) => return set_held_option(held.handle(), Kind::Listener, level, optname, optval, optlen),
+        Some(Sock::Datagram(held)) => return set_held_option(held.handle(), Kind::Datagram, level, optname, optval, optlen),
         Some(Sock::Entry(socket)) => socket,
         None => { set_errno(EBADF); return -1; }
     };
@@ -690,7 +704,7 @@ pub unsafe extern "C" fn setsockopt(
 }
 
 /// `setsockopt` on a listener or a datagram socket: a request of netstack's.
-unsafe fn set_held_option(handle: RawHandle, kind: Kind, level: i32, optname: i32, optval: *const u8, optlen: SocklenT) -> i32 {
+unsafe fn set_held_option(handle: toyos::BorrowedHandle<'_>, kind: Kind, level: i32, optname: i32, optval: *const u8, optlen: SocklenT) -> i32 {
     let option = match sockopt::kept(level, optname, kind == Kind::Datagram) {
         Ok(Some(option)) => option,
         Ok(None) => return 0,
@@ -708,7 +722,7 @@ unsafe fn set_held_option(handle: RawHandle, kind: Kind, level: i32, optname: i3
 }
 
 /// `setsockopt` on a stream: its Nagle switch is a word of its region.
-unsafe fn set_stream_option(handle: RawHandle, level: i32, optname: i32, optval: *const u8, optlen: SocklenT) -> i32 {
+unsafe fn set_stream_option(handle: toyos::BorrowedHandle<'_>, level: i32, optname: i32, optval: *const u8, optlen: SocklenT) -> i32 {
     let option = match sockopt::kept(level, optname, false) {
         Ok(Some(option)) => option,
         Ok(None) => return 0,
@@ -738,7 +752,7 @@ pub unsafe extern "C" fn getsockopt(
 ) -> i32 {
     let (option, entry_value) = match sock_from_fd(fd) {
         Some(Sock::Stream(held)) => match sockopt::kept(level, optname, false) {
-            Ok(Some(Kept::NoDelay)) => match stream::nodelay(held.handle) {
+            Ok(Some(Kept::NoDelay)) => match stream::nodelay(held.handle()) {
                 Ok(on) => (Some(Kept::NoDelay), on as i32),
                 Err(refused) => { set_errno(crate::errcode::of_stream(refused)); return -1; }
             },
@@ -752,7 +766,7 @@ pub unsafe extern "C" fn getsockopt(
                 Sock::Entry(_) | Sock::Stream(_) => unreachable!("matched as netstack's socket"),
             };
             match sockopt::kept(level, optname, kind == Kind::Datagram) {
-                Ok(Some(kept)) => match held_option(kind, kept).map(|option| socket::option(held.handle, option)) {
+                Ok(Some(kept)) => match held_option(kind, kept).map(|option| socket::option(held.handle(), option)) {
                     Some(Ok(value)) => (Some(kept), (value != 0) as i32),
                     Some(Err(e)) => { set_errno(net_err_to_errno(e)); return -1; }
                     None => (Some(kept), 0),
@@ -789,11 +803,11 @@ pub unsafe extern "C" fn getpeername(
     addrlen: *mut SocklenT,
 ) -> i32 {
     let peer = match sock_from_fd(fd) {
-        Some(Sock::Stream(held)) => match stream::endpoints(held.handle) {
+        Some(Sock::Stream(held)) => match stream::endpoints(held.handle()) {
             Ok((peer, _)) => Some(peer),
             Err(refused) => { set_errno(crate::errcode::of_stream(refused)); return -1; }
         },
-        Some(Sock::Datagram(held)) => match socket::peer(held.handle) {
+        Some(Sock::Datagram(held)) => match socket::peer(held.handle()) {
             Ok(peer) => peer,
             Err(e) => { set_errno(net_err_to_errno(e)); return -1; }
         },
@@ -812,11 +826,11 @@ pub unsafe extern "C" fn getsockname(
     addrlen: *mut SocklenT,
 ) -> i32 {
     let local_port = match sock_from_fd(fd) {
-        Some(Sock::Stream(held)) => match stream::endpoints(held.handle) {
+        Some(Sock::Stream(held)) => match stream::endpoints(held.handle()) {
             Ok((_, local_port)) => local_port,
             Err(refused) => { set_errno(crate::errcode::of_stream(refused)); return -1; }
         },
-        Some(Sock::Listener(held) | Sock::Datagram(held)) => match socket::local(held.handle) {
+        Some(Sock::Listener(held) | Sock::Datagram(held)) => match socket::local(held.handle()) {
             Ok((_, port)) => port,
             Err(e) => { set_errno(net_err_to_errno(e)); return -1; }
         },

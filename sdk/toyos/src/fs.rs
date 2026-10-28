@@ -49,13 +49,13 @@
 
 use alloc::vec::Vec;
 
-use toyos_abi::syscall::{SyscallError, MAX_BADGE, MAX_SERVICE_NAME, MAX_TRANSFER_HANDLES};
+use toyos_abi::syscall::{SyscallError, MAX_BADGE, MAX_SERVICE_NAME};
 
 use crate::ipc::{Connection, IpcError};
 use crate::ipc_payload;
 use crate::namespace::Namespace;
 use crate::shm::{Bytes, SharedMemory};
-use crate::{AsHandle, Pipe, RawHandle};
+use crate::Pipe;
 
 /// What a directory capability's namespace name begins with.
 pub const CAPABILITY_PREFIX: &str = "fs:";
@@ -788,14 +788,26 @@ impl Dir {
         Ok(())
     }
 
+    /// The one handle a reply that answers with one carries; an error carries
+    /// none, and any other count ends the connection.
+    fn one(&mut self, msg_type: u32, reply: Reply, carried: crate::ipc::Batch) -> Result<crate::OwnedHandle, Error> {
+        let n = carried.len();
+        match (answer(msg_type, reply), carried.exact::<1>()) {
+            (Ok(_), Some([handle])) => Ok(handle),
+            (Err(e), None) if n == 0 => Err(e),
+            _ => {
+                self.conn = None;
+                Err(Error::Malformed)
+            }
+        }
+    }
+
     /// One request and its reply on the current connection. A connection that
     /// has ended answers `Gone` and is dropped, so the next call reconnects.
     fn call(&mut self, op: u32, request: Request) -> Result<(u32, Reply), Error> {
-        let mut batch = [toyos_abi::HANDLE_INVALID; MAX_TRANSFER_HANDLES];
-        let (msg_type, reply, carried) = self.call_with(op, request, &mut batch)?;
-        if carried != 0 {
+        let (msg_type, reply, carried) = self.call_with(op, request)?;
+        if !carried.is_empty() {
             // A reply that brings handles nobody asked for speaks another protocol.
-            close_all(&batch[..carried]);
             self.conn = None;
             return Err(Error::Malformed);
         }
@@ -808,8 +820,7 @@ impl Dir {
         &mut self,
         op: u32,
         mut request: Request,
-        batch: &mut [RawHandle; MAX_TRANSFER_HANDLES],
-    ) -> Result<(u32, Reply, usize), Error> {
+    ) -> Result<(u32, Reply, crate::ipc::Batch), Error> {
         if self.conn.is_none() {
             self.reconnect()?;
         }
@@ -819,9 +830,8 @@ impl Dir {
         let answered = conn.send(op, &request).map_err(transport).and_then(|()| {
             let header = conn.recv_header().map_err(transport)?;
             let reply: Reply = conn.recv_payload(&header).map_err(transport)?;
-            let carried = conn.recv_handles(&header, batch).map_err(transport)?;
+            let carried = conn.recv_handles(&header).map_err(transport)?;
             if reply.tag != request.tag {
-                close_all(&batch[..carried]);
                 return Err(Error::Malformed);
             }
             Ok((header.msg_type, reply, carried))
@@ -987,18 +997,9 @@ impl Dir {
         for (i, fid) in fids.iter().enumerate() {
             self.window().write(i * 8, &self.held(*fid)?.to_le_bytes());
         }
-        let mut batch = [toyos_abi::HANDLE_INVALID; MAX_TRANSFER_HANDLES];
         let request = Request { len: fids.len() as u64, span: (fids.len() * 8) as u64, ..Request::new() };
-        let (msg_type, reply, carried) = self.call_with(EXPORT, request, &mut batch)?;
-        match (answer(msg_type, reply), carried) {
-            (Ok(_), 1) => Ok(Connection::received(batch[0])),
-            (Err(e), 0) => Err(e),
-            (_, n) => {
-                close_all(&batch[..n]);
-                self.conn = None;
-                Err(Error::Malformed)
-            }
-        }
+        let (msg_type, reply, carried) = self.call_with(EXPORT, request)?;
+        self.one(msg_type, reply, carried).map(Connection::received)
     }
 
     /// What `path` names from `base`: the link itself where `follow` is
@@ -1068,34 +1069,16 @@ impl Dir {
     pub fn stream(&mut self, fid: Fid) -> Result<Pipe, Error> {
         let mut request = Request::new();
         request.fid = self.held(fid)?;
-        let mut batch = [toyos_abi::HANDLE_INVALID; MAX_TRANSFER_HANDLES];
-        let (msg_type, reply, carried) = self.call_with(STREAM, request, &mut batch)?;
-        match (answer(msg_type, reply), carried) {
-            (Ok(_), 1) => Ok(Pipe(crate::OwnedHandle(batch[0]))),
-            (Err(e), 0) => Err(e),
-            (_, n) => {
-                close_all(&batch[..n]);
-                self.conn = None;
-                Err(Error::Malformed)
-            }
-        }
+        let (msg_type, reply, carried) = self.call_with(STREAM, request)?;
+        self.one(msg_type, reply, carried).map(Pipe)
     }
 
     /// The bytes of the file `fid` opened, as [`IMAGE`] answers them.
     pub fn image(&mut self, fid: Fid) -> Result<crate::OwnedHandle, Error> {
         let mut request = Request::new();
         request.fid = self.held(fid)?;
-        let mut batch = [toyos_abi::HANDLE_INVALID; MAX_TRANSFER_HANDLES];
-        let (msg_type, reply, carried) = self.call_with(IMAGE, request, &mut batch)?;
-        match (answer(msg_type, reply), carried) {
-            (Ok(_), 1) => Ok(crate::OwnedHandle(batch[0])),
-            (Err(e), 0) => Err(e),
-            (_, n) => {
-                close_all(&batch[..n]);
-                self.conn = None;
-                Err(Error::Malformed)
-            }
-        }
+        let (msg_type, reply, carried) = self.call_with(IMAGE, request)?;
+        self.one(msg_type, reply, carried)
     }
 
     /// The entries of the directory `dir` opened, from `cursor` (0 at its
@@ -1249,12 +1232,6 @@ pub fn encode_entry(out: &mut Vec<u8>, entry: &Entry<'_>) -> Option<()> {
     Some(())
 }
 
-fn close_all(handles: &[RawHandle]) {
-    for h in handles {
-        toyos_abi::syscall::close(*h);
-    }
-}
-
 /// What a server answered a node is, its volume marked a server's.
 fn stat_of(reply: &Reply) -> Stat {
     Stat {
@@ -1296,12 +1273,6 @@ fn transport(e: IpcError) -> Error {
         IpcError::Malformed => Error::Malformed,
         IpcError::Syscall(e) => Error::kernel("a frame", e),
         IpcError::TooLarge => unreachable!("every frame of this protocol is one fixed payload"),
-    }
-}
-
-impl AsHandle for Dir {
-    fn as_handle(&self) -> RawHandle {
-        self.conn.as_ref().map_or(toyos_abi::HANDLE_INVALID, |c| c.as_handle())
     }
 }
 

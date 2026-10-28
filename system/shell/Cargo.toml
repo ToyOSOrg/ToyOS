@@ -6,7 +6,7 @@ edition = "2021"
 license = "MIT OR Apache-2.0"
 
 [dependencies]
-toyos = { path = "../../sdk/toyos" }
+toyos = { path = "../../sdk/toyos", features = ["std"] }
 # The quit a `-c` shell asks of a child spawned past its own interrupt.
 toyos-abi = { path = "../../sdk/abi" }
 

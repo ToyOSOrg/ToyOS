@@ -18,7 +18,6 @@ use core::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
 use toyos::poller::{Poller, READABLE};
 use toyos::quit::Reason;
 use toyos_abi::syscall::{self, SyscallError};
-use toyos_abi::RawHandle;
 
 use crate::errcode::ENOSYS;
 use crate::pthread::Lock;
@@ -27,19 +26,20 @@ use crate::sigreq::{Delivery, Kept, Raised, SigAction, Signals, SIGALRM, SIGCHLD
 /// The ends of a pipe this library made and never closes.
 #[derive(Clone, Copy)]
 struct Pipe {
-    read: RawHandle,
-    write: RawHandle,
+    read: toyos::BorrowedHandle<'static>,
+    write: toyos::BorrowedHandle<'static>,
 }
 
 impl Pipe {
     fn new() -> Self {
         let ends = syscall::pipe().expect("signals: no pipe for libc's own use");
-        Self { read: ends.read, write: ends.write }
+        // SAFETY: made here and never closed: libc's own for the process's life.
+        unsafe { Self { read: toyos::BorrowedHandle::borrow_raw(ends.read), write: toyos::BorrowedHandle::borrow_raw(ends.write) } }
     }
 
     /// One byte in, or none if one is already there to be read.
     fn knock(&self) {
-        match syscall::write_nonblock(self.write, &[0]) {
+        match syscall::write_nonblock(self.write.raw(), &[0]) {
             Ok(_) | Err(SyscallError::WouldBlock) => {}
             Err(e) => panic!("signals: a pipe of libc's own refused a byte: {e:?}"),
         }
@@ -48,7 +48,7 @@ impl Pipe {
     /// Every byte out.
     fn drain(&self) {
         let mut buf = [0u8; 64];
-        while matches!(syscall::read_nonblock(self.read, &mut buf), Ok(n) if n > 0) {}
+        while matches!(syscall::read_nonblock(self.read.raw(), &mut buf), Ok(n) if n > 0) {}
     }
 }
 
@@ -349,7 +349,7 @@ pub(crate) struct Call {
     tid: u32,
     mask: u64,
     children: bool,
-    wake: RawHandle,
+    wake: toyos::BorrowedHandle<'static>,
     inside: bool,
 }
 
@@ -378,7 +378,7 @@ impl Call {
     }
 
     /// What a blocking call watches, readable when it has something to look at.
-    pub(crate) fn wake(&self) -> RawHandle {
+    pub(crate) fn wake(&self) -> toyos::BorrowedHandle<'static> {
         self.wake
     }
 
@@ -451,7 +451,7 @@ pub(crate) fn sleep(nanos: u64) -> Result<(), u64> {
             return Ok(());
         }
         let poller = Poller::new(1);
-        poller.watch_raw(call.wake(), READABLE, 0);
+        poller.watch(&call.wake(), READABLE, 0);
         poller.wait(1, left, |_| {});
     }
 }
@@ -493,7 +493,7 @@ unsafe extern "C" fn keep(_: *mut u8) -> *mut u8 {
             }
             (control, state.listening, state.alarm)
         };
-        poller.watch_raw(control, READABLE, CONTROL);
+        poller.watch(&control, READABLE, CONTROL);
         if listening {
             let notice = toyos::quit::notice().expect("libc listens only to a notice it holds");
             poller.watch(notice, READABLE, NOTICE);

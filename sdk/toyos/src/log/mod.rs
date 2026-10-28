@@ -65,7 +65,7 @@ use crate::AsHandle;
 /// position per shard, a shard per CPU the firmware names. Asked of the
 /// kernel, which answers it to a cursor of no positions.
 pub fn cursor_words(cap: &SysCap) -> Result<usize, SyscallError> {
-    words_for(|cursor| syscall::log_read(cap.as_handle(), cursor, &mut [LogRecord::EMPTY]))
+    words_for(|cursor| syscall::log_read(cap.as_handle().raw(), cursor, &mut [LogRecord::EMPTY]))
 }
 
 /// [`cursor_words`] for a read of either kind.
@@ -123,7 +123,7 @@ impl<W: AsRef<[u64]> + AsMut<[u64]>> LogTail<W> {
         cap: &SysCap,
         out: &'a mut [LogRecord],
     ) -> Result<&'a [LogRecord], SyscallError> {
-        let count = syscall::log_read(cap.as_handle(), self.words.as_mut(), out)?;
+        let count = syscall::log_read(cap.as_handle().raw(), self.words.as_mut(), out)?;
         self.lost += head_of(self.words.as_ref()).lost;
         Ok(&out[..count])
     }

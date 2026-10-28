@@ -17,7 +17,6 @@ use toyos::endow::Endowments;
 use toyos::poller::{Poller, READABLE};
 use toyos::syscap::{SysCap, WakeLatencyHold};
 use toyos_abi::syscall;
-use toyos_abi::RawHandle;
 use toyos_sound_output::{run, Run};
 use toyos_mixer::{
     deferral_floor_nanos, period_nanos, quantize_period, scratch_frames, wake_left_idle, Dll,
@@ -89,7 +88,7 @@ fn flush(stats: &mut MixStats, totals: &mut Totals, clients: usize) -> Window {
 fn signal_clients(streams: &mut [ClientStream], ramp_frames: u32) {
     for stream in streams.iter_mut() {
         let gone = matches!(
-            syscall::write_nonblock(stream.signal_write, &[1]),
+            stream.signal_write.write_nonblock(&[1]),
             Err(syscall::SyscallError::Gone)
         );
         if gone {
@@ -116,11 +115,10 @@ fn apply_commands(
             MixCommand::Detach => return Some(Change::Detach),
             MixCommand::AddClient(client, opened_on) if opened_on != generation => {
                 say!("soundserver: client {} ended: it was opened on an output since gone", client.client_id);
-                syscall::close(client.signal_write);
             }
             MixCommand::AddClient(client, _) => {
                 say!("soundserver: client {} connected (id={})", streams.len(), client.client_id);
-                let _ = syscall::write_nonblock(client.signal_write, &[1]);
+                let _ = client.signal_write.write_nonblock(&[1]);
                 streams.push(*client);
             }
             MixCommand::RemoveClient { client_id, departure } => {
@@ -149,7 +147,6 @@ fn retain_active(streams: &mut Vec<ClientStream>) {
     streams.retain(|s| match s.departure {
         Some(how) if s.gain.is_idle() => {
             say!("soundserver: client {} removed ({how})", s.client_id);
-            syscall::close(s.signal_write);
             false
         }
         _ => true,
@@ -167,7 +164,6 @@ enum Change {
 fn end_streams(streams: &mut Vec<ClientStream>) {
     for stream in streams.drain(..) {
         say!("soundserver: client {} ended with its output", stream.client_id);
-        syscall::close(stream.signal_write);
     }
 }
 
@@ -224,7 +220,7 @@ pub(crate) fn mix_thread(
     backend: &mut dyn Backend,
     cmd_ring: &CommandRing,
     published: &Published,
-    cmd_pipe_read: RawHandle,
+    cmd_pipe_read: toyos::BorrowedHandle<'_>,
     num_buffers: usize,
     device_sample_rate: u32,
     device_channels: u16,
@@ -232,7 +228,7 @@ pub(crate) fn mix_thread(
     device_period_frames: usize,
     ramp_frames: u32,
     generation: u32,
-    ended_write: RawHandle,
+    ended_write: toyos::BorrowedHandle<'_>,
 ) -> String {
     let device_period_samples = device_period_frames * device_channels as usize;
     let period_nanos = period_nanos(device_period_frames as u64, device_sample_rate as u64);
@@ -367,8 +363,8 @@ pub(crate) fn mix_thread(
         let (timeout, armed_on) =
             armed(!streams.is_empty(), &dll, period_nanos, toyos_abi::clock::nanos_since_boot() as f64);
 
-        poller.watch_raw(backend.handle(), READABLE, TOKEN_AUDIO);
-        poller.watch_raw(cmd_pipe_read, READABLE, TOKEN_CMD);
+        poller.watch(&backend.handle(), READABLE, TOKEN_AUDIO);
+        poller.watch(&cmd_pipe_read, READABLE, TOKEN_CMD);
 
         let mut cmd_ready = false;
         poller.wait(1, timeout, |token| match token {
@@ -384,7 +380,7 @@ pub(crate) fn mix_thread(
 
         if cmd_ready {
             let mut drain = [0u8; 64];
-            while matches!(syscall::read_nonblock(cmd_pipe_read, &mut drain), Ok(n) if n == drain.len()) {}
+            while matches!(syscall::read_nonblock(cmd_pipe_read.raw(), &mut drain), Ok(n) if n == drain.len()) {}
         }
         match apply_commands(cmd_ring, &mut streams, ramp_frames, generation) {
             None => {}
@@ -404,7 +400,7 @@ pub(crate) fn mix_thread(
         let completed = backend.completion();
         if let Some(why) = backend.ended() {
             end_streams(&mut streams);
-            let _ = syscall::write_nonblock(ended_write, &[1]);
+            let _ = syscall::write_nonblock(ended_write.raw(), &[1]);
             return why.to_string();
         }
         if let Some(rec) = completed {
@@ -729,7 +725,7 @@ pub(crate) fn mix_thread(
 pub(crate) fn null_sink_thread(
     cmd_ring: &CommandRing,
     published: &Published,
-    cmd_pipe_read: RawHandle,
+    cmd_pipe_read: toyos::BorrowedHandle<'_>,
     device: &Device,
     generation: u32,
 ) -> Box<Attached> {
@@ -783,7 +779,7 @@ pub(crate) fn null_sink_thread(
             next_period_ns.saturating_sub(toyos_abi::clock::nanos_since_boot()).max(1)
         };
 
-        poller.watch_raw(cmd_pipe_read, READABLE, TOKEN_CMD);
+        poller.watch(&cmd_pipe_read, READABLE, TOKEN_CMD);
         let mut cmd_ready = false;
         poller.wait(1, timeout, |token| match token {
             TOKEN_CMD => cmd_ready = true,
@@ -796,7 +792,7 @@ pub(crate) fn null_sink_thread(
 
         if cmd_ready {
             let mut drain = [0u8; 64];
-            while matches!(syscall::read_nonblock(cmd_pipe_read, &mut drain), Ok(n) if n == drain.len()) {}
+            while matches!(syscall::read_nonblock(cmd_pipe_read.raw(), &mut drain), Ok(n) if n == drain.len()) {}
         }
         // Nothing is drained past an output to play to: what is behind it is
         // the output's.

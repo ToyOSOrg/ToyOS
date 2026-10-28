@@ -20,7 +20,6 @@ use toyos::audio::{
 use toyos::shm::SharedMemory;
 use toyos::Connection;
 use toyos_abi::audio::AudioSlotHeader;
-use toyos_abi::RawHandle;
 use toyos_mixer::{
     accumulate, append_planar, client_period_frames, decode_i16_to_f32, interleave,
     mix_interleaved, Gain, GainRamp,
@@ -105,7 +104,7 @@ pub(crate) struct ClientStream {
     /// read end to the client, so crash detection is by construction:
     /// the moment the client's table goes, the read end goes with it and the
     /// next signal breaks.
-    pub(crate) signal_write: RawHandle,
+    pub(crate) signal_write: toyos::Pipe,
     pub(crate) gain: GainRamp,
     pub(crate) client_channels: u16,
     pub(crate) client_period_frames: u32,
@@ -247,7 +246,7 @@ pub(crate) fn open_stream(
         client_id,
         slot_reader,
         period: vec![0; client_period_bytes as usize],
-        signal_write: signal_write.into_raw(),
+        signal_write,
         gain,
         client_channels: req.channels,
         client_period_frames,

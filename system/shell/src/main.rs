@@ -2,7 +2,7 @@ use std::env;
 use std::fs::{self, File, OpenOptions};
 use std::io::{self, Read, Write};
 use std::path::Path;
-use std::os::toyos::process::{ChildExt, CommandExt, ExitStatusExt};
+use std::os::toyos::process::{CommandExt, ExitStatusExt};
 use std::process::{Child, Command, ExitStatus, Stdio};
 use std::sync::{Mutex, OnceLock};
 
@@ -79,13 +79,13 @@ fn waiting_for(line: &[&Child]) {
         if ASKED.lock().unwrap().interrupted {
             for child in line {
                 // `Ok` for one already ended; a spawn's handle carries `MANAGE`.
-                let quit = toyos_abi::syscall::process_quit(toyos::RawHandle(child.as_raw_handle()), Reason::Interrupt);
+                let quit = toyos_abi::syscall::process_quit(toyos::AsHandle::as_handle(child).raw(), Reason::Interrupt);
                 quit.expect("shell: a child's handle refused the quit its spawn gave it");
             }
         }
         return;
     }
-    let handles: Vec<toyos::RawHandle> = line.iter().map(|c| toyos::RawHandle(c.as_raw_handle())).collect();
+    let handles: Vec<toyos::BorrowedHandle<'_>> = line.iter().map(toyos::AsHandle::as_handle).collect();
     FOREGROUND.lock().unwrap().get_or_insert_with(Foreground::default).set(&handles);
     let mut asked = ASKED.lock().unwrap();
     asked.waiting = true;
@@ -875,7 +875,7 @@ fn build_command(cmd: &SimpleCommand) -> Result<Command, i32> {
         for (name, connector) in provided() {
             // A duplicate per child: this shell keeps its own for the next one.
             if let Ok(handed) = connector.duplicate() {
-                command.provide(name, handed.into_raw().0);
+                command.provide(name, handed.into());
             }
         }
     }

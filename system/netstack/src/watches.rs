@@ -69,9 +69,9 @@ impl Watches {
     }
 
     pub fn watch(&mut self, handle: &impl AsHandle, flags: u32, token: u64) {
-        let raw = handle.as_handle();
-        if self.armed.submit(token, raw.0, flags) {
-            self.poller.watch_raw(raw, flags, token);
+        let lent = handle.as_handle();
+        if self.armed.submit(token, lent.raw().0, flags) {
+            self.poller.watch(&lent, flags, token);
         }
     }
 

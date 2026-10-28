@@ -16,21 +16,20 @@
 //! and the child has to have ended before it.
 
 use std::io::{Read, Write};
-use std::os::toyos::process::{ChildExt, CommandExt};
+use std::os::toyos::process::CommandExt;
 use std::process::{Child, Command, Stdio};
 use std::sync::atomic::{AtomicU32, AtomicU64, Ordering};
 use std::sync::{Arc, Barrier, OnceLock};
 use std::thread::JoinHandle;
 use std::time::Duration;
 
-use toyos::endow::{Endowments, FromHandle, SYSCAP_LABEL};
+use toyos::endow::{Endowments, SYSCAP_LABEL};
 use toyos::poller::{Poller, READABLE};
 use toyos::process::Process;
 use toyos::syscap::SysCap;
 use toyos::AsHandle;
 use toyos_abi::clock;
 use toyos_abi::syscall::{self, SyscallError};
-use toyos_abi::RawHandle;
 use std::os::toyos::process::ExitStatusExt;
 use toyos_abi::end::End;
 
@@ -41,15 +40,6 @@ const WAITED: &str = "waited";
 
 /// The label the posted-poll child finds the pipe it watches under.
 const POSTED: &str = "posted";
-
-/// That pipe's read end, which the child holds until it ends.
-struct Posted(RawHandle);
-
-impl FromHandle for Posted {
-    unsafe fn from_handle(raw: RawHandle) -> Self {
-        Self(raw)
-    }
-}
 
 /// The threads that post the pipe the posted-poll child watches.
 const POSTERS: usize = 4;
@@ -84,16 +74,17 @@ fn test() {
         // The process the process-wait child waits on, which nothing ends but this.
         let mut waited = (role == "process-wait").then(|| spawn("sleep", None));
         // The pipe the posted-poll child watches, which no byte ever enters.
-        let posted = (role == "posted-poll").then(|| syscall::pipe().expect("a pipe to post"));
-        let endow = waited
-            .as_ref()
-            .map(|w| {
-                let dup = syscall::dup(RawHandle(w.as_raw_handle())).expect("a handle to endow");
-                (WAITED.to_string(), dup.0)
-            })
-            .or(posted.as_ref().map(|pipe| (POSTED.to_string(), pipe.read.0)));
+        let posted = (role == "posted-poll").then(|| toyos::pipe_pair().expect("a pipe to post"));
+        let (endow, write) = match (&waited, posted) {
+            (Some(w), _) => {
+                let dup = AsHandle::as_handle(w).try_clone_to_owned().expect("a handle to endow");
+                (Some((WAITED, dup)), None)
+            }
+            (None, Some((read, write))) => (Some((POSTED, read.into())), Some(write)),
+            (None, None) => (None, None),
+        };
         let mut child = spawn(role, endow);
-        let posts = posted.map(|pipe| Posts::hold(child.id(), pipe.write));
+        let posts = write.map(|write| Posts::hold(child.id(), write));
         println!("  {role}: killing");
         child.kill().expect("kill the parked child");
         if let Some(posts) = posts {
@@ -111,11 +102,11 @@ fn test() {
 }
 
 /// Spawn a child in `role`, read its marker, and return once it is parked.
-fn spawn(role: &str, endow: Option<(String, u32)>) -> Child {
+fn spawn(role: &str, endow: Option<(&str, toyos::OwnedHandle)>) -> Child {
     let mut command = Command::new(SELF_PATH);
     command.arg(role).stdout(Stdio::piped());
     if let Some((label, handle)) = endow {
-        command.endow(&label, handle);
+        command.endow(label, handle.into());
     }
     let mut child = command.spawn().unwrap_or_else(|e| panic!("spawn {role}: {e}"));
     let out = child.stdout.as_mut().expect("child stdout");
@@ -149,25 +140,25 @@ struct Posts {
     threads: Vec<JoinHandle<bool>>,
     /// When the threads stop, in nanoseconds since boot: never, until the kill.
     stop_at: Arc<AtomicU64>,
-    write: RawHandle,
 }
 
 impl Posts {
     /// Start [`POSTERS`] threads, each writing no bytes into `write` until the
     /// pipe has no reader, and return once the roster shows `pid`'s main
     /// thread out of the park the posts woke it from.
-    fn hold(pid: u32, write: RawHandle) -> Self {
+    fn hold(pid: u32, write: toyos::Pipe) -> Self {
+        let write = Arc::new(write);
         let stop_at = Arc::new(AtomicU64::new(u64::MAX));
         let posting = Arc::new(Barrier::new(POSTERS + 1));
         let threads = (0..POSTERS)
             .map(|_| {
-                let (stop_at, posting) = (stop_at.clone(), posting.clone());
+                let (stop_at, posting, write) = (stop_at.clone(), posting.clone(), write.clone());
                 std::thread::spawn(move || {
                     let byte = [0u8];
                     posting.wait();
                     while clock::nanos_since_boot() < stop_at.load(Ordering::Relaxed) {
                         // A slice of a real buffer: the kernel is handed an address it can read.
-                        match syscall::write(write, &byte[..0]) {
+                        match write.write(&byte[..0]) {
                             Ok(0) => {}
                             // The child ended, and the pipe's one read end with it.
                             Err(SyscallError::Gone) => return true,
@@ -189,7 +180,7 @@ impl Posts {
                 RosterStatus::Gone => panic!("posted-poll: a write of no bytes ended the child's wait"),
             }
         }
-        Self { threads, stop_at, write }
+        Self { threads, stop_at }
     }
 
     /// After the kill: the posts go on until the child ends, and it has to
@@ -202,7 +193,6 @@ impl Posts {
                 "posted-poll: the child still watched its pipe {HELD:?} after its kill: the posts held it in its wait"
             );
         }
-        syscall::close(self.write);
     }
 }
 
@@ -259,23 +249,26 @@ fn child(role: &str) -> ! {
             poller.wait(1, u64::MAX, |_| {});
         }
         "posted-poll" => {
-            let Posted(read) = Endowments::get().take(POSTED).expect("the parent endowed a pipe");
+            let read: toyos::Pipe = Endowments::get().take(POSTED).expect("the parent endowed a pipe");
             let poller = Poller::new(Poller::MAX_HANDLES);
             // As many polls as a poller holds, one handle each: a post fires
             // them all, and the wait parks only if no post lands while it
             // looks at every one of them.
-            poller.watch_raw(read, READABLE, 0);
-            for token in 1..u64::from(Poller::MAX_HANDLES) {
-                let dup = syscall::dup(read).expect("another handle to the pipe");
-                poller.watch_raw(dup, READABLE, token);
-            }
+            poller.watch(&read, READABLE, 0);
+            let _dups: Vec<toyos::OwnedHandle> = (1..u64::from(Poller::MAX_HANDLES))
+                .map(|token| {
+                    let dup = read.as_handle().try_clone_to_owned().expect("another handle to the pipe");
+                    poller.watch(&dup, READABLE, token);
+                    dup
+                })
+                .collect();
             say(role);
             poller.wait(1, u64::MAX, |_| {});
         }
         "process-wait" => {
             let waited: Process = Endowments::get().take(WAITED).expect("the parent endowed a process");
             say(role);
-            let _ = syscall::process_wait(waited.as_handle());
+            let _ = syscall::process_wait(waited.as_handle().raw());
         }
         "thread-join" => {
             let parked = std::thread::spawn(|| loop {

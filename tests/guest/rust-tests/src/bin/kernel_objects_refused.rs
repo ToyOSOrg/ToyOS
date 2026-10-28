@@ -48,7 +48,8 @@ fn main() {
     syscall::mkdir(LONG).expect("the directory of long names");
     for n in 0..LONG_NAMES {
         let file = syscall::open(long_path(&mut [0; 4096], n), OpenFlags::WRITE | OpenFlags::CREATE).expect("a long name before anything is taken");
-        syscall::close(file);
+        // SAFETY: no type holds this number.
+        unsafe { syscall::close(file) };
     }
     let mut listing = [0u8; 64];
     let mut committed: Vec<(*mut u8, usize)> = Vec::with_capacity(128);
@@ -208,12 +209,15 @@ fn give_back(committed: &[(*mut u8, usize)], ranges: &[*mut u8], dirs: usize) {
 /// Everything refused above is served, and a spawn runs: the machine went on.
 fn served_again(unwritten: toyos_abi::handle::RawHandle, file: toyos_abi::handle::RawHandle) {
     let pipe = syscall::pipe().expect("a pipe once memory is given back");
-    syscall::close(pipe.read);
-    syscall::close(pipe.write);
+    // SAFETY: no type holds this number.
+    unsafe { syscall::close(pipe.read) };
+    // SAFETY: no type holds this number.
+    unsafe { syscall::close(pipe.write) };
     assert_eq!(syscall::write(unwritten, b"x"), Ok(1), "a pipe's first write once memory is given back");
     assert_eq!(syscall::write(file, &[0x5a; PAGE]), Ok(PAGE), "a /tmp write once memory is given back");
     assert_eq!(syscall::pwrite(file, &[0x5a; PAGE], HOLE), Ok(PAGE), "a /tmp pwrite once memory is given back");
-    syscall::close(file);
+    // SAFETY: no type holds this number.
+    unsafe { syscall::close(file) };
     syscall::delete(b"/tmp/kernel_objects_refused.bin").expect("delete the /tmp file");
     syscall::rmdir(DIRS).expect("remove the fill's directory");
     let mut listing = [0u8; 64];

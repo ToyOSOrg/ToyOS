@@ -847,7 +847,7 @@ checksum = "75b325c5dbd37f80359721ad39aca5a29fb04c89279657cffdda8736d0c0b9d2"
 [[package]]
 name = "dpi"
 version = "0.1.1"
-source = "git+https://github.com/ToyOSOrg/winit?branch=toyos-0.30.13#48c7022a44c7416107648d4cf8be4fdd042d0722"
+source = "git+https://github.com/ToyOSOrg/winit?branch=toyos-0.30.13#0121752b7c48bc640e221e3cebedefea3796609a"
 
 [[package]]
 name = "ecdsa"
@@ -1736,7 +1736,7 @@ dependencies = [
 [[package]]
 name = "mio"
 version = "1.2.0"
-source = "git+https://github.com/ToyOSOrg/mio?branch=toyos#5d013b872aae54a8bbf1ff84eb6c39ee145a0a1e"
+source = "git+https://github.com/ToyOSOrg/mio?branch=toyos#f76209283c8133df0e56be2cd402e05ebdec41c8"
 dependencies = [
  "libc",
  "toyos-abi",
@@ -4928,7 +4928,7 @@ checksum = "589f6da84c646204747d1270a2a5661ea66ed1cced2631d546fdfb155959f9ec"
 [[package]]
 name = "winit"
 version = "0.30.13"
-source = "git+https://github.com/ToyOSOrg/winit?branch=toyos-0.30.13#48c7022a44c7416107648d4cf8be4fdd042d0722"
+source = "git+https://github.com/ToyOSOrg/winit?branch=toyos-0.30.13#0121752b7c48bc640e221e3cebedefea3796609a"
 dependencies = [
  "ahash",
  "android-activity",

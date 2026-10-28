@@ -220,12 +220,12 @@ impl Host {
     }
 
     /// The acceptor, for the caller's poller.
-    pub fn acceptor_handle(&self) -> RawHandle {
+    pub fn acceptor_handle(&self) -> crate::BorrowedHandle<'_> {
         self.acceptor.as_handle()
     }
 
     /// Every connected client, for the caller's poller.
-    pub fn client_handles(&self) -> impl Iterator<Item = RawHandle> + '_ {
+    pub fn client_handles(&self) -> impl Iterator<Item = crate::BorrowedHandle<'_>> + '_ {
         self.peers.iter().flatten().map(|p| p.conn.as_handle())
     }
 
@@ -244,7 +244,7 @@ impl Host {
         let Ok(conn) = self.acceptor.accept() else {
             return;
         };
-        let id = ClientId(conn.as_handle());
+        let id = ClientId(conn.as_handle().raw());
         let Some(slot) = self.peers.iter().position(|p| p.is_none()) else {
             // Dropping the connection is the refusal: the client's next read
             // sees the hang-up.
@@ -292,9 +292,8 @@ impl Host {
                 }
                 RxStep::Frame { msg_type: MSG_FOREGROUND, payload_len: 4, .. } => {
                     let how = u32::from_ne_bytes(peer.rx.payload(4).try_into().expect("four bytes"));
-                    let (handles, n) = peer.rx.take_batch().into_raw();
-                    // SAFETY: the batch is this process's now, each handle once.
-                    let line = handles[..n].iter().map(|&h| unsafe { OwnedHandle::from_raw(h) });
+                    let line = peer.rx.take_batch();
+                    let n = line.len();
                     let held = if how == LINE_ADD { peer.line.len() } else { 0 };
                     if !line_takes(held, n) {
                         drop(line.collect::<Vec<_>>());
@@ -508,7 +507,7 @@ impl Keys {
 }
 
 impl AsHandle for Keys {
-    fn as_handle(&self) -> RawHandle {
+    fn as_handle(&self) -> crate::BorrowedHandle<'_> {
         self.conn.as_handle()
     }
 }
@@ -547,15 +546,14 @@ impl Foreground {
     /// `processes` are the line this process now waits for: a duplicate of
     /// each carrying `MANAGE` is handed over, and the caller keeps its own. The
     /// surface's going is no error: there is nobody left to press Ctrl+C.
-    pub fn set(&mut self, processes: &[RawHandle]) {
+    pub fn set(&mut self, processes: &[crate::BorrowedHandle<'_>]) {
         let Some(conn) = self.conn() else { return };
         // `TRANSFER` alone beside `MANAGE`, which the move takes.
         let rights = Rights::MANAGE.union(Rights::TRANSFER);
-        let mut copies = processes.iter().take(MAX_LINE).filter_map(|&p| syscall::dup_narrowed(p, rights).ok());
+        let mut copies = processes.iter().take(MAX_LINE).filter_map(|p| p.try_clone_narrowed(rights).ok());
         let mut how = LINE_REPLACE;
         loop {
-            // SAFETY: each a duplicate just made, which nothing else answers for.
-            let batch: Vec<OwnedHandle> = copies.by_ref().take(MAX_TRANSFER_HANDLES).map(|h| unsafe { OwnedHandle::from_raw(h) }).collect();
+            let batch: Vec<OwnedHandle> = copies.by_ref().take(MAX_TRANSFER_HANDLES).collect();
             let last = batch.len() < MAX_TRANSFER_HANDLES;
             if conn.send_with(MSG_FOREGROUND, &how, batch).is_err() {
                 self.conn = None;

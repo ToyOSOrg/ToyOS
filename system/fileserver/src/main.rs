@@ -73,7 +73,7 @@ use toyos::port::{self, Acceptor};
 use toyos::shm::{Bytes, SharedMemory};
 use toyos::Pipe;
 use toyos_abi::handle::Rights;
-use toyos_abi::syscall::{self, SyscallError, MAX_BADGE, SERVE_PREFIX};
+use toyos_abi::syscall::{SyscallError, MAX_BADGE, SERVE_PREFIX};
 
 /// What one turn of a stream appends at most.
 const STREAM_READ: usize = 64 * 1024;
@@ -208,7 +208,8 @@ impl Exports {
     fn connect(&self) -> Result<(Connection, Connection), Error> {
         let theirs = self.names.open(EXPORT_PORT).map_err(|e| Error::kernel("an export's connection", e))?;
         let ours = self.acceptor.accept().unwrap_or_else(|e| panic!("fileserver: the export port refused an accept ({e:?})"));
-        let narrowed = syscall::dup_narrowed(toyos::AsHandle::as_handle(&theirs), EXPORTED)
+        let narrowed = toyos::AsHandle::as_handle(&theirs)
+            .try_clone_narrowed(EXPORTED)
             .map_err(|e| Error::kernel("an export's narrowed end", e))?;
         Ok((Connection::received(narrowed), ours))
     }
@@ -698,8 +699,7 @@ impl Server {
             }
             let slot = if client.exported() { Slot::Taken } else { Slot::AtHello };
             // The window travels in the HELLO frame: its reader took it with the frame.
-            // SAFETY: the frame moved it here, and nothing else answers for it.
-            let lent = || client.rx.take_handles::<1>().map(|[lent]| SharedMemory::lent(unsafe { toyos::OwnedHandle::from_raw(lent) }, WINDOW_BYTES));
+            let lent = || client.rx.take_handles::<1>().map(|[lent]| SharedMemory::lent(lent, WINDOW_BYTES));
             match bounds::hello(slot, all, mine, lent) {
                 Hello::Served(window) => client.window = Some(window),
                 Hello::Refused(why) => return Answer::Refuse(Error::TooManyConnections, why),

@@ -18,7 +18,6 @@ use toyos::poller::{Poller, READABLE};
 use toyos::port::Acceptor;
 use toyos::shm::{Bytes, SharedMemory};
 use toyos::{AsHandle, Connection};
-use toyos_abi::RawHandle;
 use toyos_sound_output::{
     run, FromDriver, Master, Offer, Played, MSG_ACCEPTED, MSG_MASTER_MUTE, MSG_MASTER_STEP, MSG_PLAYED, MSG_REFUSED,
     MSG_START, MSG_STOP,
@@ -376,7 +375,7 @@ impl Backend for DriverBackend {
         Pipeline::Ring
     }
 
-    fn handle(&self) -> RawHandle {
+    fn handle(&self) -> toyos::BorrowedHandle<'_> {
         self.stream.as_handle()
     }
 

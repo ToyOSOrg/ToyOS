@@ -256,13 +256,7 @@ impl Poller {
     /// `flags` are [`READABLE`] / [`WRITABLE`] / [`OTHER_END_GONE`].
     /// `token` is returned in completions to identify which handle is ready.
     pub fn watch(&self, handle: &impl AsHandle, flags: u32, token: u64) {
-        self.watch_raw(handle.as_handle(), flags, token);
-    }
-
-    /// Watch a raw handle for readiness.
-    ///
-    /// Prefer [`watch`](Self::watch) when you have a typed handle.
-    pub fn watch_raw(&self, handle: RawHandle, flags: u32, token: u64) {
+        let handle = handle.as_handle().raw();
         // A panic, because this is first-party code exceeding a bound it
         // declared itself. A mid-batch flush here instead would make
         // completions reachable while the caller is still registering, and
@@ -376,7 +370,8 @@ impl Poller {
 
 impl Drop for Poller {
     fn drop(&mut self) {
-        syscall::close(self.inbox);
+        // SAFETY: the inbox `new` made, which nothing but this answers for.
+        unsafe { syscall::close(self.inbox) };
     }
 }
 

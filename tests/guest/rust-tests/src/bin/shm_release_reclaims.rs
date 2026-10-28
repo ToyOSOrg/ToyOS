@@ -76,7 +76,7 @@ fn main() {
         .expect("the kernel refused a namespace");
     let mut donor = Command::new(SELF_PATH)
         .arg("donor")
-        .endow(SVC_LABEL, ns.into_raw().0)
+        .endow(SVC_LABEL, ns.into())
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .spawn()
@@ -92,8 +92,7 @@ fn main() {
     out.read_line(&mut line).expect("donor release line");
     assert_eq!(line.trim(), "released", "the donor did not report letting go");
 
-    // SAFETY: received with this frame, so this process's and nobody else's.
-    let region = SharedMemory::lent(unsafe { toyos::OwnedHandle::from_raw(sent) }, REGION)
+    let region = SharedMemory::lent(sent, REGION)
         .expect("a region this process holds a handle to was reclaimed under it");
     assert_eq!(
         region.bytes().sub(0, PAYLOAD.len()).to_vec(),

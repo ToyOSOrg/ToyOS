@@ -431,7 +431,7 @@ fn main() {
         poller.watch(card.claim(), READABLE, TOKEN_NIC);
         sockets.watch(&mut poller);
         for p in pending.iter() {
-            poller.watch(&p.conn, READABLE, TOKEN_PENDING_BASE + p.conn.as_handle().0 as u64);
+            poller.watch(&p.conn, READABLE, TOKEN_PENDING_BASE + p.conn.as_handle().raw().0 as u64);
         }
 
         // The node's next deadline: a retransmission, a lease's timer, a
@@ -468,7 +468,7 @@ fn main() {
         for p in pending.iter().filter(|p| now_wall.duration_since(p.since) >= HANDSHAKE_TIMEOUT) {
             say!(
                 "netstack: dropping client {} — it never finished its request",
-                p.conn.as_handle().0
+                p.conn.as_handle().raw().0
             );
         }
         pending.retain(|p| now_wall.duration_since(p.since) < HANDSHAKE_TIMEOUT);
@@ -501,7 +501,7 @@ fn main() {
                 say!(
                     "netstack: refusing client {} — {MAX_PENDING_CONNS} connections are already \
                      waiting to say what they want",
-                    conn.as_handle().0
+                    conn.as_handle().raw().0
                 );
             } else {
                 pending.push(PendingConn { conn, rx: ClientRx::new(), since: Wall::now() });
@@ -515,7 +515,7 @@ fn main() {
         let mut i = 0;
         while i < pending.len() {
             let handle = pending[i].conn.as_handle();
-            if !ready.contains(&(TOKEN_PENDING_BASE + handle.0 as u64)) {
+            if !ready.contains(&(TOKEN_PENDING_BASE + handle.raw().0 as u64)) {
                 i += 1;
                 continue;
             }
@@ -536,7 +536,7 @@ fn main() {
                     say!(
                         "netstack: dropping client {} — it sent a frame this protocol cannot \
                          describe",
-                        pending[i].conn.as_handle().0
+                        pending[i].conn.as_handle().raw().0
                     );
                     pending.remove(i);
                 }

@@ -9,11 +9,13 @@ pub use framebuffer::{Color, Framebuffer, Screen};
 pub use scale::Scale;
 pub use wait::{Waiter, Waker, Woke};
 /// What [`Window::handle`] answers with, and what a [`Waiter`] waits on.
+pub use toyos::BorrowedHandle;
+/// A [`BorrowedHandle`]'s number.
 pub use toyos_abi::RawHandle;
 use toyos_abi::syscall::SyscallError;
 
 use toyos::ipc;
-use toyos::{AsHandle, OwnedHandle};
+use toyos::AsHandle;
 use toyos::poller::{Poller, READABLE};
 use toyos::endow::{self, EndowError};
 use toyos::surface;
@@ -527,8 +529,6 @@ fn copy(bytes: &[u8]) -> Result<(), CreateError> {
         return Err(CreateError::Protocol(header.msg_type));
     }
     let [region] = conn.recv_handles_exact::<1>(&header).ok_or(CreateError::NoHandle)?;
-    // SAFETY: received with this frame, so this process's and nobody else's.
-    let region = unsafe { OwnedHandle::from_raw(region) };
     let region = SharedMemory::lent(region, bytes.len()).map_err(CreateError::Lent)?;
     region.bytes().write(0, bytes);
     Ok(conn.signal(MSG_COPY_COMMIT)?)
@@ -628,8 +628,6 @@ impl Window {
         // window and sent nothing with it is not serving this client, whatever
         // else it is doing.
         let [buffer] = conn.recv_handles_exact::<1>(&header).ok_or(CreateError::NoHandle)?;
-        // SAFETY: received with this frame, so this process's and nobody else's.
-        let buffer = unsafe { OwnedHandle::from_raw(buffer) };
         let shm = SharedMemory::lent(buffer, buf_size).map_err(CreateError::Lent)?;
 
         let poller = Poller::new(1);
@@ -743,8 +741,6 @@ impl Window {
                 let Some([buffer]) = self.conn.recv_handles_exact::<1>(header) else {
                     return Event::Close;
                 };
-                // SAFETY: received with this frame, so this process's and nobody else's.
-                let buffer = unsafe { OwnedHandle::from_raw(buffer) };
                 let Ok(shm) = SharedMemory::lent(buffer, buf_size) else {
                     return Event::Close;
                 };
@@ -771,8 +767,6 @@ impl Window {
                 let Some([buffer]) = self.conn.recv_handles_exact::<1>(header) else {
                     return Event::ClipboardPaste(Vec::new());
                 };
-                // SAFETY: received with this frame, so this process's and nobody else's.
-                let buffer = unsafe { OwnedHandle::from_raw(buffer) };
                 let Ok(shm) = ReadOnly::lent(buffer, info.len as usize) else {
                     return Event::ClipboardPaste(Vec::new());
                 };
@@ -808,7 +802,7 @@ impl Window {
         let _ = self.conn.send(MSG_PRESENT, &PresentRect { x, y, w, h, generation: self.generation });
     }
 
-    pub fn handle(&self) -> toyos_abi::RawHandle {
+    pub fn handle(&self) -> toyos::BorrowedHandle<'_> {
         self.conn.as_handle()
     }
 
@@ -836,10 +830,9 @@ impl Window {
     /// into the buffer it replaced, which nothing shows.
     pub fn framebuffer(&self) -> Framebuffer<'static> {
         // SAFETY: the compositor maps the buffer read-only and sent this
-        // process its one writable handle, which nothing here duplicates or
-        // sends; every value over `self.shm` is on this thread, as `Rc` keeps
-        // them. A handle number guessed in safe code is the gap
-        // `issues/a-handles-number-reaches-its-ownership-in-safe-code.md` records.
+        // process its one writable handle, which this window owns and lends
+        // to nothing, so nothing duplicates or sends it; every value over
+        // `self.shm` is on this thread, as `Rc` keeps them.
         unsafe {
             Framebuffer::mapped(
                 Rc::clone(&self.shm),

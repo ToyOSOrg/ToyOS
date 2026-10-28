@@ -153,16 +153,20 @@ fn attacker(role: &str) -> ! {
 fn victim() -> ! {
     // A pipe made once every slot below the victim's is taken lands at the
     // next two fresh ones, and stays there when the fillers go.
-    let stdout = toyos::fd::with(1, |o| o.handle).expect("the victim is given a standard output");
     let mut fillers = Vec::new();
-    while fillers.last().is_none_or(|h: &RawHandle| h.slot() + 1 < VICTIM_READ_SLOT) {
-        fillers.push(syscall::dup(stdout).expect("fill the victim's table below its slots"));
+    while fillers.last().is_none_or(|h: &toyos::OwnedHandle| h.as_handle().raw().slot() + 1 < VICTIM_READ_SLOT) {
+        let filler = toyos::fd::with(1, |o| o.handle().map(|stdout| stdout.try_clone_to_owned()))
+            .ok()
+            .flatten()
+            .expect("the victim is given a standard output")
+            .expect("fill the victim's table below its slots");
+        fillers.push(filler);
     }
     let (read, write) = toyos::pipe_pair().expect("the pipe the attack is aimed at");
     let (parked_read, parked_write) = (read.as_handle(), write.as_handle());
-    assert_eq!((parked_read.slot(), parked_write.slot()), (VICTIM_READ_SLOT, VICTIM_WRITE_SLOT), "the pipe is not where it is published");
-    fillers.into_iter().for_each(syscall::close);
-    println!("{} {}", parked_read.0, parked_write.0);
+    assert_eq!((parked_read.raw().slot(), parked_write.raw().slot()), (VICTIM_READ_SLOT, VICTIM_WRITE_SLOT), "the pipe is not where it is published");
+    drop(fillers);
+    println!("{} {}", parked_read.raw().0, parked_write.raw().0);
     std::io::stdout().flush().expect("flush");
 
     // Block until the parent closes our stdin, keeping the pipe alive for the
@@ -172,12 +176,12 @@ fn victim() -> ! {
 
     let mut buf = [0u8; 32];
     assert_eq!(
-        syscall::read_nonblock(parked_read, &mut buf),
+        syscall::read_nonblock(parked_read.raw(), &mut buf),
         Err(SyscallError::WouldBlock),
         "victim: something was written into the pipe",
     );
-    syscall::write_nonblock(parked_write, b"mine").expect("victim: write its own pipe");
-    let n = syscall::read_nonblock(parked_read, &mut buf).expect("victim: read its own pipe");
+    syscall::write_nonblock(parked_write.raw(), b"mine").expect("victim: write its own pipe");
+    let n = syscall::read_nonblock(parked_read.raw(), &mut buf).expect("victim: read its own pipe");
     assert_eq!(&buf[..n], b"mine", "victim: its own bytes did not cross");
 
     println!("nothing arrived, and my own bytes did");

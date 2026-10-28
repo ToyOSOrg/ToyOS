@@ -1,11 +1,11 @@
 use std::io::{self, BufRead, Write};
-use std::os::toyos::process::{ChildExt, CommandExt};
+use std::os::toyos::process::CommandExt;
 use std::process::{Command, Stdio};
-use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
-use std::sync::Mutex;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Mutex, PoisonError};
 use std::time::Duration;
 
-use toyos::endow::{Endowments, SYSCAP_LABEL};
+use toyos::endow::{Endowments, FromHandle, SYSCAP_LABEL};
 use toyos::power::{Mode, Pending, Refused, Stop, Update};
 use toyos::process::Process;
 use toyos::syscap::SysCap;
@@ -17,14 +17,13 @@ static RUNNING: Mutex<String> = Mutex::new(String::new());
 static FINISHED: AtomicBool = AtomicBool::new(false);
 
 /// A second handle to the job now running, for the deadline to end it with, or
-/// zero between jobs.
+/// none between jobs.
 ///
-/// **Taken out with a swap, by whichever of the two gets there first**, so the
-/// handle has exactly one owner and the loop closing it cannot leave the
-/// deadline killing whatever the slot was handed to next. A duplicate and not
-/// the `Child`'s own handle, because a `Child` has one owner and the loop is
-/// blocked inside its `wait`.
-static JOB: AtomicU32 = AtomicU32::new(0);
+/// **Taken out by whichever of the two gets there first**, so the loop closing
+/// it cannot leave the deadline killing whatever the slot was handed to next. A
+/// duplicate and not the `Child`'s own handle, because a `Child` has one owner
+/// and the loop is blocked inside its `wait`.
+static JOB: Mutex<Option<Process>> = Mutex::new(None);
 
 /// What this row is endowed as a login authority, where it is one: its `login`
 /// connector, which each job is handed a copy of, and the launcher of the
@@ -74,12 +73,7 @@ fn stand_down() -> ! {
 
 /// Take the running job, if it is still this thread's to take.
 fn claim_the_job() -> Option<Process> {
-    match JOB.swap(0, Ordering::AcqRel) {
-        0 => None,
-        // SAFETY: the swap is what makes this the only holder of the duplicate
-        // `run_one` made; nothing else answers for it after this.
-        raw => Some(unsafe { Process::from_raw(toyos::RawHandle(raw)) }),
-    }
+    JOB.lock().unwrap_or_else(PoisonError::into_inner).take()
 }
 
 fn main() {
@@ -280,7 +274,7 @@ fn run_one(name: &str, args: &[&str], cap: Option<&SysCap>) -> Ran {
     // assertion about the log rather than about the handle.
     match cap.map(SysCap::duplicate) {
         Some(Ok(dup)) => {
-            command.endow(SYSCAP_LABEL, dup.into_raw().0);
+            command.endow(SYSCAP_LABEL, dup.into());
         }
         Some(Err(toyos_abi::syscall::SyscallError::PermissionDenied)) | None => {}
         Some(Err(e)) => {
@@ -297,9 +291,9 @@ fn run_one(name: &str, args: &[&str], cap: Option<&SysCap>) -> Ran {
     let launcher = login.map(|l| &l.session).or(toyos::endow::launcher());
     for (label, held) in [(toyos::launch::LAUNCHER, launcher), (LOGIN_PORT, login.map(|l| &l.connector))] {
         let Some(held) = held else { continue };
-        match toyos_abi::syscall::dup(toyos::AsHandle::as_handle(held)) {
+        match toyos::AsHandle::as_handle(held).try_clone_to_owned() {
             Ok(dup) => {
-                command.endow(label, dup.0);
+                command.endow(label, dup.into());
             }
             Err(e) => {
                 println!("===TEST_END {name} error=its {label} would not duplicate: {e:?}===");
@@ -319,8 +313,8 @@ fn run_one(name: &str, args: &[&str], cap: Option<&SysCap>) -> Ran {
             // outlives its bound and the machine is reset around it — and on a
             // machine with no console nothing anywhere says why. The list ends
             // here instead, by handing the machine back.
-            match toyos_abi::syscall::dup(toyos_abi::RawHandle(child.as_raw_handle())) {
-                Ok(watch) => JOB.store(watch.0, Ordering::Release),
+            match toyos::AsHandle::as_handle(&child).try_clone_to_owned() {
+                Ok(watch) => *JOB.lock().unwrap_or_else(PoisonError::into_inner) = Some(Process::from_handle(watch)),
                 Err(e) => give_the_machine_back(&format!(
                     "job {name:?} started and its handle would not duplicate ({e:?}), so the \
                      deadline has nothing to end it with"

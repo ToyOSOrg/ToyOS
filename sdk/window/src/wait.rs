@@ -17,7 +17,6 @@ use std::time::Duration;
 
 use toyos::poller::{Poller, READABLE};
 use toyos::wake::{self, Bell};
-use toyos::RawHandle;
 
 pub use toyos::wake::Waker;
 
@@ -68,9 +67,9 @@ impl Waiter {
     /// Each of `windows` is the [`handle`](crate::Window::handle) of a window
     /// this process still holds: the kernel ends a process that watches a
     /// handle it does not hold.
-    pub fn wait(
+    pub fn wait<'a>(
         &mut self,
-        windows: impl Iterator<Item = RawHandle> + Clone,
+        windows: impl Iterator<Item = toyos::BorrowedHandle<'a>> + Clone,
         timeout: Option<Duration>,
     ) -> Woke {
         let watched = u32::try_from(windows.clone().count())
@@ -84,7 +83,7 @@ impl Waiter {
             self.poller = Poller::new(self.capacity);
         }
         for window in windows {
-            self.poller.watch_raw(window, READABLE, 0);
+            self.poller.watch(&window, READABLE, 0);
         }
         // The tokens are not read: the caller drains every window after any wait.
         self.poller.watch(&self.bell, READABLE, 0);

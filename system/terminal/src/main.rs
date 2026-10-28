@@ -16,7 +16,7 @@
 use std::io::{Read, Write};
 use std::os::toyos::io::AsRawHandle;
 use std::os::toyos::process;
-use std::os::toyos::process::{ChildExt, CommandExt};
+use std::os::toyos::process::CommandExt;
 use std::process::Command;
 use std::time::Duration;
 
@@ -24,7 +24,6 @@ use terminal::Console;
 use toyos::poller::{Poller, READABLE};
 use toyos::port;
 use toyos::surface::{self, Delivery, Host, Leaving, Notice};
-use toyos::RawHandle;
 use window::Window;
 
 const TOKEN_STDOUT: u64 = 0;
@@ -102,12 +101,12 @@ fn main() {
     println!("terminal: ready");
 
     let leaving = loop {
-        poller.watch_raw(RawHandle(shell_stdout.as_raw_handle()), READABLE, TOKEN_STDOUT);
-        poller.watch_raw(RawHandle(shell_stderr.as_raw_handle()), READABLE, TOKEN_STDERR);
-        poller.watch_raw(window.handle(), READABLE, TOKEN_WINDOW);
-        poller.watch_raw(host.acceptor_handle(), READABLE, TOKEN_LISTEN);
+        poller.watch(&shell_stdout, READABLE, TOKEN_STDOUT);
+        poller.watch(&shell_stderr, READABLE, TOKEN_STDERR);
+        poller.watch(&window.handle(), READABLE, TOKEN_WINDOW);
+        poller.watch(&host.acceptor_handle(), READABLE, TOKEN_LISTEN);
         for client in host.client_handles() {
-            poller.watch_raw(client, READABLE, TOKEN_CLIENT);
+            poller.watch(&client, READABLE, TOKEN_CLIENT);
         }
         if let Some(notice) = notice {
             poller.watch(notice, READABLE, TOKEN_NOTICE);
@@ -255,11 +254,10 @@ fn main() {
 /// Wait for the shell to end, saying every [`STILL_WAITING`] how long it has
 /// been outstanding.
 fn wait_for(child: &mut std::process::Child) {
-    let shell = toyos::RawHandle(child.as_raw_handle());
     let poller = Poller::new(1);
     let mut waited = Duration::ZERO;
     loop {
-        poller.watch_raw(shell, READABLE, 0);
+        poller.watch(&*child, READABLE, 0);
         let mut ended = false;
         poller.wait(1, STILL_WAITING.as_nanos() as u64, |_| ended = true);
         if ended {
@@ -285,7 +283,7 @@ fn shell(surface: &toyos::port::Connector) -> std::process::Child {
         .expect("terminal: the kernel refused a duplicate of its own surface connector");
     Command::new("/system/bin/shell")
         .independent()
-        .provide(surface::SERVICE, handed.into_raw().0)
+        .provide(surface::SERVICE, handed.into())
         .stdin(process::tty_piped())
         .stdout(process::tty_piped())
         .stderr(process::tty_piped())

@@ -29,12 +29,12 @@
 //! halves of it — std's `Command` encodes and the supervisor decodes.
 
 use alloc::string::String;
+use alloc::vec::Vec;
 
-use toyos_abi::syscall::SyscallError;
 
 use crate::fd::Kind;
 use crate::ipc::{Connection, IpcError};
-use crate::{AsHandle, OwnedHandle, RawHandle};
+use crate::OwnedHandle;
 
 /// The label a holder is endowed its launcher under, and the one name in that
 /// namespace. **Never an entry of `svc`**, which std hands every direct spawn:
@@ -102,7 +102,7 @@ const PARENT_DETACHED: u32 = 2;
 
 /// Whom a launch asks the supervisor to place the program under.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
-pub enum Parent<H = RawHandle> {
+pub enum Parent<H> {
     /// The process a handle carrying `WRITE` names, moved as the batch's last
     /// handle.
     Place(H),
@@ -115,13 +115,10 @@ pub enum Parent<H = RawHandle> {
 /// `argv` and `env` are exactly the blobs `SYS_SPAWN` takes, so the launcher
 /// path and the direct path build one thing rather than two.
 ///
-/// **Every handle in `fds`, `extras`, `parent` and `job` is the caller's to
-/// give, and is named once.** [`launch`] consumes each one that it sends: it is moved
-/// to the launcher, or closed when the kernel refuses the move. A launch that
-/// names one twice, or the connection it is sent on, is a move the kernel
-/// refuses, and is consumed as one: each number it names is closed once, and
-/// the connection never.
-pub struct Launch<'a> {
+/// **It owns every handle it names** (`H`, an [`OwnedHandle`] but where a
+/// test encodes one), and [`launch`] consumes them: each is moved to the
+/// launcher, or closed when the kernel refuses the move.
+pub struct Launch<'a, H = OwnedHandle> {
     /// The program's path, exactly as the caller resolved it.
     ///
     /// **Not a `[programs]` key**, because `ls` is a symlink to
@@ -140,17 +137,17 @@ pub struct Launch<'a> {
     /// top of the manifest's. This is how a terminal gives its shell the
     /// `surface` port it made — a name the supervisor cannot know, because there is one
     /// per terminal.
-    pub extras: &'a [(&'a str, RawHandle)],
+    pub extras: Vec<(&'a str, H)>,
     /// `(child descriptor, handle, kind)`, at most [`MAX_LAUNCH_FDS`] of them,
     /// which the launcher endows as `fd:<n>` or `fd:<n>:<kind>`. The handles
     /// are **moved**, so a caller passing on its own stdout duplicates first.
-    pub fds: &'a [(u32, RawHandle, Kind)],
+    pub fds: Vec<(u32, H, Kind)>,
     /// Whom the program is placed under. A place is **moved** with the batch,
     /// and counts against [`MAX_LAUNCH_EXTRAS`].
-    pub parent: Parent,
+    pub parent: Parent<H>,
     /// The job the program joins, a handle carrying `WRITE`. **Moved** with the
     /// batch, its last handle, and counts against [`MAX_LAUNCH_EXTRAS`].
-    pub job: RawHandle,
+    pub job: H,
 }
 
 /// Why a request would not go on the wire.
@@ -162,38 +159,7 @@ pub enum EncodeError {
     TooLarge,
 }
 
-/// The handles of one launch, and how many of them.
-type Batch = ([RawHandle; MAX_LAUNCH_EXTRAS + MAX_LAUNCH_FDS], usize);
-
-impl Launch<'_> {
-    /// The numbers this launch names, each once and never `conn`: descriptors, then
-    /// extras, then the place, then the job. [`launch`] takes each as its own, and a number
-    /// with two owners is closed twice.
-    ///
-    /// `Err` where one was named twice or is `conn` itself, which is a batch
-    /// the kernel refuses `InvalidArgument`: what it holds is to close, not to
-    /// send.
-    fn batch(&self, conn: RawHandle) -> Result<Batch, Batch> {
-        let mut out = [RawHandle(0); MAX_LAUNCH_EXTRAS + MAX_LAUNCH_FDS];
-        let mut n = 0;
-        let mut sendable = true;
-        let place = match self.parent {
-            Parent::Place(place) => Some(place),
-            Parent::Detached => None,
-        };
-        let fds = self.fds.iter().map(|(_, h, _)| h);
-        let extras = self.extras.iter().map(|(_, h)| h);
-        for handle in fds.chain(extras).chain(&place).chain([&self.job]) {
-            if *handle == conn || out[..n].contains(handle) {
-                sendable = false;
-                continue;
-            }
-            out[n] = *handle;
-            n += 1;
-        }
-        if sendable { Ok((out, n)) } else { Err((out, n)) }
-    }
-
+impl<H> Launch<'_, H> {
     /// Write the request blob into `buf`, answering its length.
     pub fn encode(&self, buf: &mut [u8]) -> Result<usize, EncodeError> {
         let (place, word) = match self.parent {
@@ -234,7 +200,7 @@ impl Launch<'_> {
             buf[*at..*at + bytes.len()].copy_from_slice(bytes);
             *at += bytes.len();
         };
-        for (fd, _, kind) in self.fds {
+        for (fd, _, kind) in &self.fds {
             put(&fd.to_le_bytes(), &mut at);
             put(&kind_word(*kind).to_le_bytes(), &mut at);
         }
@@ -242,7 +208,7 @@ impl Launch<'_> {
         put(self.argv, &mut at);
         put(self.env, &mut at);
         put(self.cwd.as_bytes(), &mut at);
-        for (name, _) in self.extras {
+        for (name, _) in &self.extras {
             put(name.as_bytes(), &mut at);
             put(&[0], &mut at);
         }
@@ -374,27 +340,21 @@ pub fn program_path(program: &str, cwd: &str) -> String {
     }
 }
 
-/// Why a launch did not answer, and — the part that matters — whether the
-/// handles it was going to carry are still the caller's.
-///
-/// **A send consumes them.** `SYS_MESSAGE_SEND` takes them out of the sender's
-/// table, and a refused one closes them ([`Connection::send_bytes_with`]), so
-/// a caller that closed them after either would be closing handles it no
-/// longer holds — which, under the bad-handle policy, is the caller exiting. Which
-/// side owns them is therefore not a detail of the error but the whole of what
-/// the caller needs from it.
+/// Why a launch did not answer. The request's handles are consumed either
+/// way: moved to the launcher, or closed with a request that did not go.
 pub enum LaunchError {
-    /// The request did not encode. The handles are still here to close.
+    /// Nothing reached the launcher: the request does not fit one frame, or
+    /// the kernel refused its frame, as it refuses a handle without
+    /// `TRANSFER`.
     NotSent(IpcError),
-    /// The handles are gone from this process: moved to the launcher, or
-    /// closed on a refused move, and no answer came back.
+    /// The frame went, and no answer came back that this protocol reads.
     Sent(IpcError),
 }
 
 /// What a launch answered.
 pub enum Outcome {
     /// The handle the caller now holds for the child.
-    Started(RawHandle),
+    Started(OwnedHandle),
     /// Not permitted ([`MSG_NOT_PERMITTED`]).
     NotPermitted,
     /// Declared, and it did not start.
@@ -407,22 +367,19 @@ pub enum Outcome {
 ///
 /// The handles travel in the launch frame itself, and the `Process` handle
 /// comes back in the answer's.
-pub fn launch(conn: &Connection, request: &Launch<'_>) -> Result<Outcome, LaunchError> {
+pub fn launch(conn: &Connection, request: Launch<'_>) -> Result<Outcome, LaunchError> {
     let mut buf = [0u8; crate::ipc::MAX_FRAME_LEN as usize];
     let len = request
         .encode(&mut buf)
         .map_err(|_| LaunchError::NotSent(IpcError::TooLarge))?;
-    // Each is the caller's, which is `Launch`'s contract, and `batch` named it once.
-    let owned = |(handles, count): Batch| (0..count).map(move |i| OwnedHandle(handles[i]));
-    let sent = match request.batch(conn.as_handle()) {
-        Ok(batch) => conn.send_bytes_with(MSG_LAUNCH, &buf[..len], owned(batch)),
-        // Refused here as the kernel would refuse it, and closed as any refused move is.
-        Err(named) => {
-            owned(named).for_each(drop);
-            Err(IpcError::Syscall(SyscallError::InvalidArgument))
-        }
+    let Launch { extras, fds, parent, job, .. } = request;
+    let place = match parent {
+        Parent::Place(place) => Some(place),
+        Parent::Detached => None,
     };
-    sent.map_err(LaunchError::Sent)?;
+    // Descriptors, then extras, then the place, then the job, as `Request` reads them.
+    let handles = fds.into_iter().map(|(_, h, _)| h).chain(extras.into_iter().map(|(_, h)| h)).chain(place).chain([job]);
+    conn.send_bytes_with(MSG_LAUNCH, &buf[..len], handles).map_err(LaunchError::NotSent)?;
     let header = conn.recv_header().map_err(LaunchError::Sent)?;
     match header.msg_type {
         MSG_LAUNCHED => match conn.recv_handles_exact::<1>(&header) {
@@ -482,12 +439,12 @@ mod tests {
             argv: b"",
             env: b"",
             cwd: "/",
-            extras: &[],
-            fds: &[],
+            extras: Vec::new(),
+            fds: Vec::new(),
             parent,
-            job: RawHandle(10),
+            job: (),
         };
-        for (parent, named) in [(Parent::Place(RawHandle(9)), Parent::Place(())), (Parent::Detached, Parent::Detached)] {
+        for (parent, named) in [(Parent::Place(()), Parent::Place(())), (Parent::Detached, Parent::Detached)] {
             let len = request(parent).encode(&mut buf).expect("encode a launch");
             assert_eq!(Request::decode(&buf[..len]).expect("decode it").parent(), Some(named));
         }
@@ -503,16 +460,15 @@ mod tests {
     #[test]
     fn a_descriptor_crosses_with_its_kind() {
         let mut buf = [0u8; 256];
-        let fds = [(0, RawHandle(5), Kind::Handle), (1, RawHandle(6), Kind::Exported)];
         let request = Launch {
             program: "/system/bin/cat",
             argv: b"",
             env: b"",
             cwd: "/",
-            extras: &[],
-            fds: &fds,
+            extras: Vec::new(),
+            fds: vec![(0, (), Kind::Handle), (1, (), Kind::Exported)],
             parent: Parent::Detached,
-            job: RawHandle(10),
+            job: (),
         };
         let len = request.encode(&mut buf).expect("encode a launch");
         let decoded = Request::decode(&buf[..len]).expect("decode it");
@@ -524,53 +480,4 @@ mod tests {
         assert_eq!(decoded.fds().nth(1), Some((1, None)), "a word that names no kind");
     }
 
-    /// `launch` becomes the one owner of every number in the batch, so a
-    /// number named twice, or the connection's own, is a batch to close: each
-    /// number once, the connection's never.
-    #[test]
-    fn a_batch_names_each_handle_once_and_never_its_connection() {
-        const CONN: RawHandle = RawHandle(3);
-        let h = RawHandle;
-        let batch = |fds: &[(u32, RawHandle, Kind)], extras: &[(&str, RawHandle)], parent| {
-            let request = Launch {
-                program: "/system/bin/cat",
-                argv: b"",
-                env: b"",
-                cwd: "/",
-                extras,
-                fds,
-                parent,
-                job: RawHandle(10),
-            };
-            let named = |(handles, count): Batch| handles[..count].to_vec();
-            request.batch(CONN).map(named).map_err(named)
-        };
-        assert_eq!(
-            batch(&[(0, h(5), Kind::Handle), (1, h(6), Kind::Handle)], &[("a", h(7)), ("b", h(8))], Parent::Place(h(9))),
-            Ok(vec![h(5), h(6), h(7), h(8), h(9), h(10)]),
-        );
-        assert_eq!(batch(&[], &[("a", h(7)), ("b", h(7))], Parent::Detached), Err(vec![h(7), h(10)]), "two extras");
-        assert_eq!(batch(&[(0, h(5), Kind::Handle), (1, h(5), Kind::Handle)], &[], Parent::Detached), Err(vec![h(5), h(10)]), "two descriptors");
-        assert_eq!(
-            batch(&[(0, h(7), Kind::Handle), (1, h(6), Kind::Handle)], &[("a", h(7))], Parent::Detached),
-            Err(vec![h(7), h(6), h(10)]),
-            "a descriptor and an extra",
-        );
-        assert_eq!(
-            batch(&[(0, h(5), Kind::Handle)], &[("a", h(9))], Parent::Place(h(9))),
-            Err(vec![h(5), h(9), h(10)]),
-            "an extra and the place",
-        );
-        assert_eq!(
-            batch(&[(0, h(5), Kind::Handle)], &[("a", CONN), ("b", h(7))], Parent::Detached),
-            Err(vec![h(5), h(7), h(10)]),
-            "the connection as an extra",
-        );
-        assert_eq!(
-            batch(&[], &[("a", h(7))], Parent::Place(CONN)),
-            Err(vec![h(7), h(10)]),
-            "the connection as the place",
-        );
-        assert_eq!(batch(&[(0, h(10), Kind::Handle)], &[], Parent::Detached), Err(vec![h(10)]), "a descriptor and the job");
-    }
 }

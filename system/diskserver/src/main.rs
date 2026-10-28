@@ -347,7 +347,7 @@ impl Service {
                 poller.watch(drivers, READABLE, TOKEN_DRIVERS);
             }
             for p in &pending {
-                poller.watch(&p.conn, READABLE, TOKEN_PENDING + u64::from(p.conn.as_handle().0));
+                poller.watch(&p.conn, READABLE, TOKEN_PENDING + u64::from(p.conn.as_handle().raw().0));
             }
             for (id, d) in &self.drivers {
                 poller.watch(&d.conn, READABLE, TOKEN_DRIVER + id);
@@ -398,7 +398,7 @@ impl Service {
             }
             let mut i = 0;
             while i < pending.len() {
-                let token = TOKEN_PENDING + u64::from(pending[i].conn.as_handle().0);
+                let token = TOKEN_PENDING + u64::from(pending[i].conn.as_handle().raw().0);
                 if !ready.contains(&token) {
                     i += 1;
                     continue;
@@ -542,14 +542,8 @@ impl Service {
         let guid = wire::guid(p.rx.payload(payload_len));
         let handles = p.rx.take_handles::<1>();
         let (Some(guid), Some([region]), wire::MSG_OPEN) = (guid, handles, msg_type) else {
-            if let Some([region]) = handles {
-                toyos_abi::syscall::close(region);
-            }
             return refuse(&p.conn, Refusal::Malformed);
         };
-        // SAFETY: the handle arrived with this frame and nothing else in this
-        // process names it.
-        let region = unsafe { OwnedHandle::from_raw(region) };
         self.waiting.push(Waiting { conn: p.conn, badge, ask: Ask::Open { guid, region } });
     }
 

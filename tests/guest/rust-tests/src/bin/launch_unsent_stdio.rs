@@ -11,16 +11,15 @@
 //! `a_launch_gives_each_unsent_stdio_slot_a_null` runs it on QEMU x86-64
 //! (`tests/images/launchcase.toml`), whose test-runner holds a launcher.
 
-use toyos::AsHandle;
+use toyos::{AsHandle, BorrowedHandle};
 use toyos::spawn::{Parent, Spawn, Start};
 use toyos::fd::Kind;
-use toyos_abi::RawHandle;
 
 const UNSENT: &str = "nothing-sent-said-this";
 const SENT: &str = "slot-sent-said-this";
 
 /// `program` with `argv` launched with exactly `fds`, and waited for.
-fn launched(program: &str, argv: &[u8], fds: &[(u32, RawHandle, Kind)]) {
+fn launched(program: &str, argv: &[u8], fds: &[(u32, BorrowedHandle<'_>, Kind)]) {
     let request = Spawn {
         program,
         image: None,
@@ -29,8 +28,8 @@ fn launched(program: &str, argv: &[u8], fds: &[(u32, RawHandle, Kind)]) {
         env: b"",
         cwd: "/",
         fds,
-        endow: &[],
-        provided: &[],
+        endow: Vec::new(),
+        provided: Vec::new(),
         parent: Parent::Caller,
         independent: true,
         launcher: None,

@@ -71,12 +71,10 @@ fn rounds() {
     for round in 0..ROUNDS {
         let mut child = Command::new(SELF_PATH)
             .arg("hold")
-            .endow(CLAIM_LABEL, toyos::AsHandle::as_handle(&dev).0)
+            .endow(CLAIM_LABEL, dev.into())
             .stdout(Stdio::piped())
             .spawn()
             .expect("end_returns_claims: spawn the holder");
-        // Moved: the spawn holds it now.
-        std::mem::forget(dev);
         let mut said = String::new();
         BufReader::new(child.stdout.take().expect("the holder's piped stdout"))
             .read_line(&mut said)

@@ -68,7 +68,7 @@ fn served() {
 
     let mut server = Command::new(SELF_PATH)
         .arg("server")
-        .endow(ACCEPTOR_LABEL, acceptor.into_raw().0)
+        .endow(ACCEPTOR_LABEL, acceptor.into())
         .stdout(Stdio::piped())
         .spawn()
         .expect("spawn the server");
@@ -100,7 +100,7 @@ fn left() {
 
     let leaver = Command::new(SELF_PATH)
         .arg("leaver")
-        .endow(ACCEPTOR_LABEL, acceptor.into_raw().0)
+        .endow(ACCEPTOR_LABEL, acceptor.into())
         .status()
         .expect("spawn the leaver");
     assert!(leaver.success(), "the leaver exited nonzero");
@@ -123,7 +123,7 @@ fn start_client(connector: &port::Connector, expect: &str) -> (Child, BufReader<
     let mut client = Command::new(SELF_PATH)
         .arg("client")
         .arg(expect)
-        .endow(SVC_LABEL, ns.into_raw().0)
+        .endow(SVC_LABEL, ns.into())
         .stdout(Stdio::piped())
         .spawn()
         .expect("spawn the client");
@@ -150,7 +150,7 @@ fn client() -> ! {
     say("sent");
 
     let mut buf = [0u8; 64];
-    let n = syscall::read(conn.as_handle(), &mut buf).expect("read the connection");
+    let n = syscall::read(conn.as_handle().raw(), &mut buf).expect("read the connection");
     match expect.as_str() {
         "reply" => {
             assert_eq!(&buf[..n], ANSWER, "the reply was not the server's");
@@ -186,7 +186,7 @@ fn server() -> ! {
     conn.write_nonblock(ANSWER).expect("reply");
     // Held until the client has read the reply, which its own exit reports.
     let mut wait = [0u8; 1];
-    let _ = syscall::read(conn.as_handle(), &mut wait);
+    let _ = syscall::read(conn.as_handle().raw(), &mut wait);
     std::process::exit(0);
 }
 

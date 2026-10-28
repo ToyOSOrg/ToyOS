@@ -10,7 +10,6 @@
 //! before it is never lost.
 
 use toyos_abi::syscall::SyscallError;
-use toyos_abi::RawHandle;
 
 use crate::{pipe_pair, AsHandle, Pipe};
 
@@ -68,7 +67,7 @@ impl Bell {
 }
 
 impl AsHandle for Bell {
-    fn as_handle(&self) -> RawHandle {
+    fn as_handle(&self) -> crate::BorrowedHandle<'_> {
         self.0.as_handle()
     }
 }

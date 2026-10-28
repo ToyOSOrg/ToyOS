@@ -11,7 +11,7 @@
 
 use toyos_abi::RawHandle;
 use toyos_abi::syscall::{self, SyscallError};
-use crate::{AsHandle, OwnedHandle};
+use crate::{AsHandle, BorrowedHandle, OwnedHandle};
 
 /// A type that may cross an IPC boundary as a payload.
 ///
@@ -189,15 +189,15 @@ pub enum TrySendError {
 pub struct Connection(pub(crate) OwnedHandle);
 
 impl AsHandle for Connection {
-    fn as_handle(&self) -> RawHandle { self.0.raw() }
+    fn as_handle(&self) -> BorrowedHandle<'_> { self.0.as_handle() }
 }
 
 impl Connection {
     /// A connection end a peer sent, consumed. Its type is the sender's
     /// word: the kernel refuses each connection call on a handle of another
     /// type, so trust the sender only as far as its protocol says.
-    pub fn received(raw: RawHandle) -> Self {
-        Self(OwnedHandle(raw))
+    pub fn received(handle: OwnedHandle) -> Self {
+        Self(handle)
     }
 
     /// This end as a handle, to send it on in a frame ([`Self::send_with`]).
@@ -211,27 +211,27 @@ impl Connection {
     }
 
     pub fn send<T: IpcPayload>(&self, msg_type: u32, payload: &T) -> Result<(), IpcError> {
-        send(self.0.raw(), msg_type, payload)
+        send(self.as_handle(), msg_type, payload)
     }
 
     pub fn signal(&self, msg_type: u32) -> Result<(), IpcError> {
-        signal(self.0.raw(), msg_type)
+        signal(self.as_handle(), msg_type)
     }
 
     pub fn send_bytes(&self, msg_type: u32, data: &[u8]) -> Result<(), IpcError> {
-        send_bytes(self.0.raw(), msg_type, data)
+        send_bytes(self.as_handle(), msg_type, data)
     }
 
     pub fn try_send<T: IpcPayload>(&self, msg_type: u32, payload: &T) -> Result<(), TrySendError> {
-        try_send(self.0.raw(), msg_type, payload)
+        try_send(self.as_handle(), msg_type, payload)
     }
 
     pub fn try_signal(&self, msg_type: u32) -> Result<(), TrySendError> {
-        try_signal(self.0.raw(), msg_type)
+        try_signal(self.as_handle(), msg_type)
     }
 
     pub fn try_send_bytes(&self, msg_type: u32, data: &[u8]) -> Result<(), TrySendError> {
-        try_send_bytes(self.0.raw(), msg_type, data)
+        try_send_bytes(self.as_handle(), msg_type, data)
     }
 
     /// A frame and the handles it carries, as one message.
@@ -246,7 +246,7 @@ impl Connection {
         payload: &T,
         handles: impl IntoIterator<Item = OwnedHandle>,
     ) -> Result<(), IpcError> {
-        message(self.0.raw(), msg_type, as_bytes(payload), handles, false).map_err(blocking)
+        message(self.as_handle(), msg_type, as_bytes(payload), handles, false).map_err(blocking)
     }
 
     /// [`send_with`](Self::send_with) for a byte payload.
@@ -256,12 +256,12 @@ impl Connection {
         data: &[u8],
         handles: impl IntoIterator<Item = OwnedHandle>,
     ) -> Result<(), IpcError> {
-        message(self.0.raw(), msg_type, data, handles, false).map_err(blocking)
+        message(self.as_handle(), msg_type, data, handles, false).map_err(blocking)
     }
 
     /// [`send_with`](Self::send_with) for a bare header.
     pub fn signal_with(&self, msg_type: u32, handles: impl IntoIterator<Item = OwnedHandle>) -> Result<(), IpcError> {
-        message(self.0.raw(), msg_type, &[], handles, false).map_err(blocking)
+        message(self.as_handle(), msg_type, &[], handles, false).map_err(blocking)
     }
 
     /// [`send_with`](Self::send_with) without blocking: nothing is sent and
@@ -272,7 +272,7 @@ impl Connection {
         payload: &T,
         handles: impl IntoIterator<Item = OwnedHandle>,
     ) -> Result<(), TrySendError> {
-        message(self.0.raw(), msg_type, as_bytes(payload), handles, true).map_err(nonblocking)
+        message(self.as_handle(), msg_type, as_bytes(payload), handles, true).map_err(nonblocking)
     }
 
     /// [`try_send_with`](Self::try_send_with) for a byte payload.
@@ -282,7 +282,7 @@ impl Connection {
         data: &[u8],
         handles: impl IntoIterator<Item = OwnedHandle>,
     ) -> Result<(), TrySendError> {
-        message(self.0.raw(), msg_type, data, handles, true).map_err(nonblocking)
+        message(self.as_handle(), msg_type, data, handles, true).map_err(nonblocking)
     }
 
     /// [`try_send_with`](Self::try_send_with) for a bare header.
@@ -291,30 +291,26 @@ impl Connection {
         msg_type: u32,
         handles: impl IntoIterator<Item = OwnedHandle>,
     ) -> Result<(), TrySendError> {
-        message(self.0.raw(), msg_type, &[], handles, true).map_err(nonblocking)
+        message(self.as_handle(), msg_type, &[], handles, true).map_err(nonblocking)
     }
 
     pub fn recv_header(&self) -> Result<IpcHeader, IpcError> {
-        recv_header(self.0.raw())
+        recv_header(self.as_handle())
     }
 
     pub fn recv_payload<T: IpcPayload>(&self, header: &IpcHeader) -> Result<T, IpcError> {
-        recv_payload(self.0.raw(), header)
+        recv_payload(self.as_handle(), header)
     }
 
     pub fn recv<T: IpcPayload>(&self) -> Result<(u32, T), IpcError> {
-        recv(self.0.raw())
+        recv(self.as_handle())
     }
 
     /// The handles `header`'s frame announced, read after its payload: exactly
     /// that many, or [`IpcError::Malformed`] with whatever arrived closed. The
     /// kernel pins a frame's batch just past its bytes, so they are there.
-    pub fn recv_handles(
-        &self,
-        header: &IpcHeader,
-        out: &mut [RawHandle; syscall::MAX_TRANSFER_HANDLES],
-    ) -> Result<usize, IpcError> {
-        recv_handles(self.0.raw(), header, out)
+    pub fn recv_handles(&self, header: &IpcHeader) -> Result<Batch, IpcError> {
+        recv_handles(self.as_handle(), header)
     }
 
     /// The `N` handles a frame of this message type carries.
@@ -322,19 +318,12 @@ impl Connection {
     /// `None` for any other count, with whatever did arrive closed rather than
     /// leaked: a frame announcing another number speaks a protocol this
     /// endpoint does not.
-    pub fn recv_handles_exact<const N: usize>(&self, header: &IpcHeader) -> Option<[RawHandle; N]> {
-        const { assert!(N <= syscall::MAX_TRANSFER_HANDLES) };
-        let mut batch = [toyos_abi::HANDLE_INVALID; syscall::MAX_TRANSFER_HANDLES];
-        let n = self.recv_handles(header, &mut batch).ok()?;
-        if n != N {
-            close_all(&batch[..n]);
-            return None;
-        }
-        Some(core::array::from_fn(|i| batch[i]))
+    pub fn recv_handles_exact<const N: usize>(&self, header: &IpcHeader) -> Option<[OwnedHandle; N]> {
+        self.recv_handles(header).ok()?.exact()
     }
 
     pub fn recv_bytes(&self, header: &IpcHeader, buf: &mut [u8]) -> Result<usize, IpcError> {
-        recv_bytes(self.0.raw(), header, buf)
+        recv_bytes(self.as_handle(), header, buf)
     }
 
     pub fn read_nonblock(&self, buf: &mut [u8]) -> Result<usize, SyscallError> {
@@ -348,24 +337,24 @@ impl Connection {
     }
 }
 
-// Free functions — used by consumers that hold raw handles (compositor, netstack).
-// Will become pub(crate) once all callers migrate to Connection methods.
+// Free functions, for a connection a caller holds by something other than a
+// `Connection`.
 
-pub fn send<T: IpcPayload>(handle: RawHandle, msg_type: u32, payload: &T) -> Result<(), IpcError> {
-    message(handle, msg_type, as_bytes(payload), none(), false).map_err(blocking)
+pub fn send<T: IpcPayload>(conn: BorrowedHandle<'_>, msg_type: u32, payload: &T) -> Result<(), IpcError> {
+    message(conn, msg_type, as_bytes(payload), none(), false).map_err(blocking)
 }
 
-pub fn signal(handle: RawHandle, msg_type: u32) -> Result<(), IpcError> {
-    message(handle, msg_type, &[], none(), false).map_err(blocking)
+pub fn signal(conn: BorrowedHandle<'_>, msg_type: u32) -> Result<(), IpcError> {
+    message(conn, msg_type, &[], none(), false).map_err(blocking)
 }
 
-pub fn send_bytes(handle: RawHandle, msg_type: u32, data: &[u8]) -> Result<(), IpcError> {
-    message(handle, msg_type, data, none(), false).map_err(blocking)
+pub fn send_bytes(conn: BorrowedHandle<'_>, msg_type: u32, data: &[u8]) -> Result<(), IpcError> {
+    message(conn, msg_type, data, none(), false).map_err(blocking)
 }
 
 /// [`Connection::signal_with`] on a raw handle.
-pub(crate) fn signal_with(handle: RawHandle, msg_type: u32, handles: impl IntoIterator<Item = OwnedHandle>) -> Result<(), IpcError> {
-    message(handle, msg_type, &[], handles, false).map_err(blocking)
+pub(crate) fn signal_with(conn: BorrowedHandle<'_>, msg_type: u32, handles: impl IntoIterator<Item = OwnedHandle>) -> Result<(), IpcError> {
+    message(conn, msg_type, &[], handles, false).map_err(blocking)
 }
 
 /// Send a framed payload without ever blocking, or refuse the whole frame.
@@ -374,18 +363,18 @@ pub(crate) fn signal_with(handle: RawHandle, msg_type: u32, handles: impl IntoIt
 /// a blocking send parks in the kernel until the peer drains, which is a
 /// client deciding when the server runs again. This is the same frame, and the
 /// peer's backlog is an answer rather than a wait.
-pub fn try_send<T: IpcPayload>(handle: RawHandle, msg_type: u32, payload: &T) -> Result<(), TrySendError> {
-    message(handle, msg_type, as_bytes(payload), none(), true).map_err(nonblocking)
+pub fn try_send<T: IpcPayload>(conn: BorrowedHandle<'_>, msg_type: u32, payload: &T) -> Result<(), TrySendError> {
+    message(conn, msg_type, as_bytes(payload), none(), true).map_err(nonblocking)
 }
 
 /// [`signal`] without blocking.
-pub fn try_signal(handle: RawHandle, msg_type: u32) -> Result<(), TrySendError> {
-    message(handle, msg_type, &[], none(), true).map_err(nonblocking)
+pub fn try_signal(conn: BorrowedHandle<'_>, msg_type: u32) -> Result<(), TrySendError> {
+    message(conn, msg_type, &[], none(), true).map_err(nonblocking)
 }
 
 /// [`send_bytes`] without blocking.
-pub fn try_send_bytes(handle: RawHandle, msg_type: u32, data: &[u8]) -> Result<(), TrySendError> {
-    message(handle, msg_type, data, none(), true).map_err(nonblocking)
+pub fn try_send_bytes(conn: BorrowedHandle<'_>, msg_type: u32, data: &[u8]) -> Result<(), TrySendError> {
+    message(conn, msg_type, data, none(), true).map_err(nonblocking)
 }
 
 fn none() -> core::iter::Empty<OwnedHandle> {
@@ -417,7 +406,7 @@ fn nonblocking(e: Unsent) -> TrySendError {
 /// buffer, and `handles`, handed to the kernel as one message. Every handle is
 /// consumed whatever the answer.
 fn message<H: AsHandle>(
-    handle: RawHandle,
+    conn: BorrowedHandle<'_>,
     msg_type: u32,
     payload: &[u8],
     handles: impl IntoIterator<Item = H>,
@@ -433,7 +422,9 @@ fn message<H: AsHandle>(
             let end = IpcHeader::WIRE_SIZE + payload.len();
             frame[..IpcHeader::WIRE_SIZE].copy_from_slice(&header.to_wire());
             frame[IpcHeader::WIRE_SIZE..end].copy_from_slice(payload);
-            syscall::message_send(handle, &frame[..end], batch, nonblock)
+            // SAFETY: `move_batch` hands over only handles it was given to
+            // consume, and forgets them once they are sent.
+            unsafe { syscall::message_send(conn.raw(), &frame[..end], batch, nonblock) }
         };
         match payload.len() <= SMALL_PAYLOAD {
             true => send(&mut [0u8; IpcHeader::WIRE_SIZE + SMALL_PAYLOAD]),
@@ -461,7 +452,7 @@ fn move_batch<H: AsHandle>(
     }
     let mut raw = [toyos_abi::HANDLE_INVALID; syscall::MAX_TRANSFER_HANDLES];
     for (out, handle) in raw.iter_mut().zip(batch.iter().flatten()) {
-        *out = handle.as_handle();
+        *out = handle.as_handle().raw();
     }
     send(&raw[..count])?;
     #[expect(clippy::disallowed_methods, reason = "taken: the numbers are no longer this process's to close")]
@@ -469,23 +460,23 @@ fn move_batch<H: AsHandle>(
     Ok(())
 }
 
-pub fn recv_header(handle: RawHandle) -> Result<IpcHeader, IpcError> {
+pub fn recv_header(conn: BorrowedHandle<'_>) -> Result<IpcHeader, IpcError> {
     let mut bytes = [0u8; IpcHeader::WIRE_SIZE];
-    read_exact(handle, &mut bytes)?;
+    read_exact(conn.raw(), &mut bytes)?;
     IpcHeader::decode(&bytes)
 }
 
 /// The frame's payload as one `T`. A payload of any other length is read
 /// past, so the connection stays framed, and refused [`IpcError::Malformed`].
-pub fn recv_payload<T: IpcPayload>(handle: RawHandle, header: &IpcHeader) -> Result<T, IpcError> {
+pub fn recv_payload<T: IpcPayload>(conn: BorrowedHandle<'_>, header: &IpcHeader) -> Result<T, IpcError> {
     if let Err(e) = exactly::<T>(header.len as usize) {
-        skip(handle, header.len as usize)?;
+        skip(conn.raw(), header.len as usize)?;
         return Err(e);
     }
     let mut val = core::mem::MaybeUninit::<T>::uninit();
     // SAFETY: the slice covers exactly the `T` being filled, and `IpcPayload`
     // promises every bit pattern `read_exact` can write is a valid `T`.
-    read_exact(handle, unsafe {
+    read_exact(conn.raw(), unsafe {
         core::slice::from_raw_parts_mut(val.as_mut_ptr() as *mut u8, core::mem::size_of::<T>())
     })?;
     Ok(unsafe { val.assume_init() })
@@ -493,51 +484,40 @@ pub fn recv_payload<T: IpcPayload>(handle: RawHandle, header: &IpcHeader) -> Res
 
 /// Receive header + typed payload in one call, for a frame that carries no
 /// handles: one that does is [`IpcError::Malformed`], its batch closed.
-pub fn recv<T: IpcPayload>(handle: RawHandle) -> Result<(u32, T), IpcError> {
-    let header = recv_header(handle)?;
-    let payload = recv_payload(handle, &header)?;
+pub fn recv<T: IpcPayload>(conn: BorrowedHandle<'_>) -> Result<(u32, T), IpcError> {
+    let header = recv_header(conn)?;
+    let payload = recv_payload(conn, &header)?;
     if header.handles() != 0 {
-        let mut stray = [toyos_abi::HANDLE_INVALID; syscall::MAX_TRANSFER_HANDLES];
-        let _ = recv_handles(handle, &header, &mut stray).map(|n| close_all(&stray[..n]));
+        // Dropped, so closed.
+        let _ = recv_handles(conn, &header);
         return Err(IpcError::Malformed);
     }
     Ok((header.msg_type, payload))
 }
 
 /// Receive raw bytes. Returns the number of valid bytes read.
-pub fn recv_bytes(handle: RawHandle, header: &IpcHeader, buf: &mut [u8]) -> Result<usize, IpcError> {
+pub fn recv_bytes(conn: BorrowedHandle<'_>, header: &IpcHeader, buf: &mut [u8]) -> Result<usize, IpcError> {
     let count = (header.len as usize).min(buf.len());
     if count > 0 {
-        read_exact(handle, &mut buf[..count])?;
+        read_exact(conn.raw(), &mut buf[..count])?;
     }
-    skip(handle, header.len as usize - count)?;
+    skip(conn.raw(), header.len as usize - count)?;
     Ok(count)
 }
 
 /// The batch `header` announced, taken where the kernel pinned it: exactly
 /// [`IpcHeader::handles`] of them, or [`IpcError::Malformed`] with any that
 /// arrived closed.
-pub fn recv_handles(
-    handle: RawHandle,
-    header: &IpcHeader,
-    out: &mut [RawHandle; syscall::MAX_TRANSFER_HANDLES],
-) -> Result<usize, IpcError> {
+pub fn recv_handles(conn: BorrowedHandle<'_>, header: &IpcHeader) -> Result<Batch, IpcError> {
     let want = header.handles();
     if want == 0 {
-        return Ok(0);
+        return Ok(Batch::EMPTY);
     }
-    let n = syscall::handle_recv(handle, out).map_err(IpcError::Syscall)?;
-    if n != want {
-        close_all(&out[..n]);
+    let batch = Batch::take(conn).map_err(IpcError::Syscall)?;
+    if batch.len() != want {
         return Err(IpcError::Malformed);
     }
-    Ok(n)
-}
-
-fn close_all(handles: &[RawHandle]) {
-    for h in handles {
-        syscall::close(*h);
-    }
+    Ok(batch)
 }
 
 /// The memory twin of [`recv_payload`], for a reader that already holds the
@@ -602,8 +582,7 @@ pub struct FrameRx<const MAX: usize> {
     buf: [u8; MAX],
     len: usize,
     state: RxState,
-    held: [RawHandle; syscall::MAX_TRANSFER_HANDLES],
-    held_len: usize,
+    held: Batch,
 }
 
 enum RxState {
@@ -617,12 +596,6 @@ impl<const MAX: usize> Default for FrameRx<MAX> {
     }
 }
 
-impl<const MAX: usize> Drop for FrameRx<MAX> {
-    fn drop(&mut self) {
-        self.release();
-    }
-}
-
 impl<const MAX: usize> FrameRx<MAX> {
     pub const fn new() -> Self {
         Self {
@@ -630,8 +603,7 @@ impl<const MAX: usize> FrameRx<MAX> {
             buf: [0; MAX],
             len: 0,
             state: RxState::Header,
-            held: [toyos_abi::HANDLE_INVALID; syscall::MAX_TRANSFER_HANDLES],
-            held_len: 0,
+            held: Batch::EMPTY,
         }
     }
 
@@ -642,20 +614,13 @@ impl<const MAX: usize> FrameRx<MAX> {
 
     /// The handles the last frame carried, now the caller's to claim.
     pub fn take_batch(&mut self) -> Batch {
-        let batch = Batch { handles: self.held, len: self.held_len };
-        self.held_len = 0;
-        batch
+        core::mem::replace(&mut self.held, Batch::EMPTY)
     }
 
     /// The `N` handles the last frame carried, now the caller's; `None`, with
     /// them closed, when it carried another number.
-    pub fn take_handles<const N: usize>(&mut self) -> Option<[RawHandle; N]> {
+    pub fn take_handles<const N: usize>(&mut self) -> Option<[OwnedHandle; N]> {
         self.take_batch().exact::<N>()
-    }
-
-    fn release(&mut self) {
-        close_all(&self.held[..self.held_len]);
-        self.held_len = 0;
     }
 
     /// Read what is there, and report the first thing that happened.
@@ -664,7 +629,7 @@ impl<const MAX: usize> FrameRx<MAX> {
     /// peer that always has another frame ready must not be able to keep the
     /// rest from being served.
     pub fn pump(&mut self, conn: &Connection) -> RxStep {
-        self.release();
+        self.held = Batch::EMPTY;
         loop {
             match self.state {
                 RxState::Header => {
@@ -691,9 +656,8 @@ impl<const MAX: usize> FrameRx<MAX> {
                     self.state = RxState::Header;
                     if handles > 0 {
                         // Pinned just past the bytes now read, so it is there or never sent.
-                        let n = syscall::handle_recv(conn.as_handle(), &mut self.held).unwrap_or(0);
-                        self.held_len = n;
-                        if n != handles {
+                        self.held = Batch::take(conn.as_handle()).unwrap_or(Batch::EMPTY);
+                        if self.held.len() != handles {
                             return RxStep::Malformed;
                         }
                     }
@@ -712,35 +676,58 @@ impl<const MAX: usize> FrameRx<MAX> {
     }
 }
 
-/// The handles one frame carried, owned: what nobody claims is closed when
-/// this drops.
+/// The handles one frame carried, owned, handed out one at a time: what
+/// nobody takes is closed when this drops.
 pub struct Batch {
     handles: [RawHandle; syscall::MAX_TRANSFER_HANDLES],
+    next: usize,
     len: usize,
 }
 
 impl Batch {
-    /// Exactly `N` handles, now the caller's; `None`, with them closed, for
-    /// any other number.
-    pub fn exact<const N: usize>(mut self) -> Option<[RawHandle; N]> {
-        const { assert!(N <= syscall::MAX_TRANSFER_HANDLES) };
-        if self.len != N {
-            return None;
-        }
-        self.len = 0;
-        Some(core::array::from_fn(|i| self.handles[i]))
+    const EMPTY: Batch = Batch { handles: [toyos_abi::HANDLE_INVALID; syscall::MAX_TRANSFER_HANDLES], next: 0, len: 0 };
+
+    /// The batch the kernel pinned at `conn`'s place in its stream.
+    fn take(conn: BorrowedHandle<'_>) -> Result<Self, SyscallError> {
+        let mut handles = [toyos_abi::HANDLE_INVALID; syscall::MAX_TRANSFER_HANDLES];
+        // The kernel installed each number in this process's table for this
+        // call, so this batch is the only thing that answers for them.
+        let len = syscall::handle_recv(conn.raw(), &mut handles)?;
+        Ok(Self { handles, next: 0, len })
     }
 
-    /// Every handle, as numbers now the caller's to own and close.
-    pub fn into_raw(mut self) -> ([RawHandle; syscall::MAX_TRANSFER_HANDLES], usize) {
-        let len = core::mem::take(&mut self.len);
-        (self.handles, len)
+    /// The handles not yet taken.
+    pub fn len(&self) -> usize {
+        self.len - self.next
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.len() == 0
+    }
+
+    /// Exactly `N` handles; `None`, with them closed, for any other number.
+    pub fn exact<const N: usize>(mut self) -> Option<[OwnedHandle; N]> {
+        const { assert!(N <= syscall::MAX_TRANSFER_HANDLES) };
+        if self.len() != N {
+            return None;
+        }
+        Some(core::array::from_fn(|_| self.next().expect("counted above")))
+    }
+}
+
+impl Iterator for Batch {
+    type Item = OwnedHandle;
+
+    fn next(&mut self) -> Option<OwnedHandle> {
+        let raw = *self.handles[..self.len].get(self.next)?;
+        self.next += 1;
+        Some(OwnedHandle(raw))
     }
 }
 
 impl Drop for Batch {
     fn drop(&mut self) {
-        close_all(&self.handles[..self.len]);
+        self.by_ref().for_each(drop);
     }
 }
 
@@ -815,7 +802,8 @@ mod tests {
     }
 
     impl AsHandle for Probe {
-        fn as_handle(&self) -> RawHandle { self.raw }
+        // SAFETY: a number no syscall is made on: these tests' sends are closures.
+        fn as_handle(&self) -> BorrowedHandle<'_> { unsafe { BorrowedHandle::borrow_raw(self.raw) } }
     }
 
     impl Drop for Probe {

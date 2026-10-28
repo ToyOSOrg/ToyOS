@@ -263,9 +263,9 @@ fn launcher(queue: mpsc::Receiver<Ask>, login: Option<Namespace>, opened: mpsc::
             }
         };
         let mut command = Command::new(&program);
-        command.independent().detached().endow(JOB_LABEL, job.into_raw().0);
+        command.independent().detached().endow(JOB_LABEL, job.into());
         if let Some(launcher) = &session {
-            command.launcher(launcher.as_handle().0);
+            command.launcher(launcher.as_handle().into());
         }
         if let Err(e) = command.spawn() {
             eprintln!("compositor: {program} did not start: {e}");
