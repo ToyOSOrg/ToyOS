@@ -71,6 +71,7 @@
 
 mod aml;
 mod battery;
+mod cpu;
 mod cst;
 mod devices;
 mod ec;
@@ -135,9 +136,8 @@ struct Server<'a, K, P> {
     census: Census,
     /// What `_OSC` answered.
     negotiated: osc::Negotiated,
-    /// The processor is Intel's, whose `_OSC` interface a processor object
-    /// speaks ([`toyos_abi::processor_is_intel`]).
-    intel: bool,
+    /// The processor's vendor and family.
+    cpu: cpu::Cpu,
     /// The batteries and adapters the namespace names, which a Notify of an
     /// information change reads again.
     sources: (Vec<String>, Vec<String>),
@@ -372,7 +372,7 @@ impl<'a, K: Kernel, P: Ports> Server<'a, K, P> {
             census: Census::default(),
             negotiated: osc::Negotiated::default(),
             idle: Vec::new(),
-            intel: toyos_abi::processor_is_intel(),
+            cpu: cpu::Cpu::here(),
             sources: (Vec::new(), Vec::new()),
             gpe_runs: BTreeMap::new(),
             delivered: ledger::Ledger::default(),
@@ -460,7 +460,7 @@ impl<'a, K: Kernel, P: Ports> Server<'a, K, P> {
     fn negotiate(&mut self, names: Option<Names>) -> Option<Names> {
         let (names, aml) = (names?, self.aml.as_mut()?);
         let before = aml.interpreter.defined();
-        self.negotiated = osc::negotiate_all(aml, &names, self.intel);
+        self.negotiated = osc::negotiate_all(aml, &names, self.cpu.vendor == cpu::Vendor::Intel);
         let names = self.settle(before, names)?;
         let aml = self.aml.as_ref()?;
         println!(
@@ -483,7 +483,7 @@ impl<'a, K: Kernel, P: Ports> Server<'a, K, P> {
         self.idle = cst::processors(aml, names);
         let mut census = cst::Census::default();
         for processor in &self.idle {
-            if cst::declare(aml, self.kernel, processor, self.intel, &mut census).is_err() {
+            if cst::declare(aml, self.kernel, processor, self.cpu, &mut census).is_err() {
                 return;
             }
         }
@@ -494,7 +494,7 @@ impl<'a, K: Kernel, P: Ports> Server<'a, K, P> {
     fn redeclare_idle(&mut self, object: &str) {
         let (Some(aml), Some(processor)) = (&mut self.aml, self.idle.iter().find(|p| p.path == object)) else { return };
         let mut census = cst::Census::default();
-        if cst::declare(aml, self.kernel, processor, self.intel, &mut census).is_ok() {
+        if cst::declare(aml, self.kernel, processor, self.cpu, &mut census).is_ok() {
             println!("{OWN}{object}'s idle states read again: {}", census.line());
         }
     }
@@ -1169,11 +1169,13 @@ mod tests {
     /// calls neither reserved nor NVS, is refused and keeps nothing.
     #[test]
     fn osc_commits_only_what_toyos_claims_and_what_its_load_adds_is_initialised() {
-        for (intel, block_type, loaded) in [(true, 0, true), (false, 0, false), (true, 9, false)] {
+        let (intel, amd) = (cpu::Cpu { vendor: cpu::Vendor::Intel, family: 6 }, cpu::Cpu { vendor: cpu::Vendor::Amd, family: 0x17 });
+        for (cpu, block_type, loaded) in [(intel, 0, true), (amd, 0, false), (intel, 9, false)] {
+            let intel = cpu.vendor == cpu::Vendor::Intel;
             let kernel = osc_machine(block_type);
             let info = AcpiInfo { rsdp: CRAFTED_RSDP, pm1_event: Block::NONE, gpe0: GPE0, flags: FIXED_POWER_BUTTON, reserved: [0; 3] };
             let mut server = Server::new(&kernel, Bytes::default(), info);
-            server.intel = intel;
+            server.cpu = cpu;
             server.aml = load(&kernel, CRAFTED_RSDP).1;
             let names = server.initialise();
             server.arm_controller(names.as_ref());
@@ -1217,7 +1219,7 @@ mod tests {
         let kernel = crafted(&sealed(b"DSDT", &cat(&[&processor("\\_PR.CPU0", 2), &processor("\\_PR.CPU1", 5)])), &[]);
         let info = AcpiInfo { rsdp: CRAFTED_RSDP, pm1_event: Block::NONE, gpe0: GPE0, flags: FIXED_POWER_BUTTON, reserved: [0; 3] };
         let mut server = Server::new(&kernel, Bytes::default(), info);
-        server.intel = true;
+        server.cpu = cpu::Cpu { vendor: cpu::Vendor::Intel, family: 6 };
         server.aml = load(&kernel, CRAFTED_RSDP).1;
         let names = server.initialise().expect("the namespace stands");
         server.declare_idle(&names);

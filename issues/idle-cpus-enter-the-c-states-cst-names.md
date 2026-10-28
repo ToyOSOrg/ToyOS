@@ -12,11 +12,16 @@ processor's `_CST` names that it may enter as it is
 (`lib/userbound/src/idle.rs`) and chooses a state each idle period
 (`kernel/pure/sched/idle.rs`, `kernel/src/idle.rs`), and a `WakeLatency`
 hold bounds the exit (`soundserver` holds half a period while it plays).
-On the T14 that is `MWAIT 0x31` and `0x60` (253 and 1048 µs); on the AMD
-bench port 0x414 (400 µs), its type-3 0x415 withheld
-(`issues/the-amd-benchs-c3-is-withheld-for-want-of-a-coherence-statement.md`).
-AArch64 keeps `wfi` (`issues/aarch64-cpus-idle-only-in-wfi.md`). What
-remains is the exit below, read on metal.
+What is handed over is a rule per vendor and family: Intel's FFH `MWAIT`
+states, and trapped port reads off Intel, of type 3 only on AMD from Family
+17h and on Hygon. On the T14 that is `MWAIT 0x31` and `0x60` (253 and
+1048 µs); on the AMD bench, Family 17h, ports 0x414 and 0x415 (400 and
+350 µs). AArch64 keeps `wfi` (`issues/aarch64-cpus-idle-only-in-wfi.md`).
+What remains is the exit below, read on metal.
+
+Not established for the AMD rule: whether any Zen part needs BM_STS read
+before a type-3 entry, which ToyOS does not do; only PPR 55901 Vol. 5 speaks
+to it, for Family 19h Model 11h ("no longer used except for server CPU").
 
 Before it, ToyOS's cores never went below C1/C1E and its package never left
 PC0, and its idle package drew 3.16 W against Linux's 1.18 to 1.57 W (#866,
