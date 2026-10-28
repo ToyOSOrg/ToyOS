@@ -104,6 +104,8 @@ use std::os::toyos::process::CommandExt;
 use std::path::Path;
 use std::process::{Child, Command, Stdio};
 use std::rc::Rc;
+use std::sync::atomic::{AtomicU32, Ordering};
+use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use toyos_swap::{Refusal, Request as SwapRequest, Word};
@@ -127,9 +129,10 @@ use toyos::port::{self, Acceptor, Connector};
 use toyos::log::region::{Ring, RING_BYTES};
 use toyos::power;
 use toyos::say;
+use toyos::wake::{self, Bell, Waker};
 use toyos::shm::SharedMemory;
 use toyos::syscap::SysCap;
-use toyos::{AsHandle, Pipe};
+use toyos::AsHandle;
 use toyos_abi::Rights;
 use toyos_blockring::wire::{Grant as BlockGrant, Scope};
 use toyos_logstream::{
@@ -378,7 +381,7 @@ impl Log {
         }
         // SAFETY: the descriptor installed above, named nowhere else.
         unsafe { toyos::fd::close(held) }.expect("supervisor: the ring's descriptor it just made");
-        let (alive, keep) = toyos::pipe_pair().expect("supervisor: no pipe to say it lives");
+        let (keep, alive) = wake::pair().expect("supervisor: no event to say it lives");
         // Held for the machine's life: the supervisor's end is the machine's.
         core::mem::forget(keep);
         log.register("supervisor", toyos_abi::syscall::getpid().0, ring, alive);
@@ -386,9 +389,9 @@ impl Log {
     }
 
     /// Name program `pid` the owner of `ring`, its log, and move the ring to
-    /// `logkeeper` under `name`, with the read end of the pipe whose only writer is
-    /// that program.
-    fn register(&self, name: &str, pid: u32, ring: SharedMemory, alive: Pipe) {
+    /// `logkeeper` under `name`, with the bell whose only waker is that
+    /// program's.
+    fn register(&self, name: &str, pid: u32, ring: SharedMemory, alive: Bell) {
         let Some(tag) = Tag::new(name) else {
             panic!("supervisor: `{name}` is not a name a line of the log can carry");
         };
@@ -684,8 +687,10 @@ type Job = Box<dyn FnOnce() + Send>;
 /// and the loop waits on it and on the end together ([`Supervisor::files`]).
 struct Worker {
     jobs: std::sync::mpsc::Sender<Job>,
-    /// Readable once per job finished.
-    done: Pipe,
+    /// Rung as a job finishes.
+    done: Bell,
+    /// Jobs finished since last counted.
+    finished: Arc<AtomicU32>,
     /// Jobs handed over and not seen finished: one that outlived its bound is
     /// still here, and the worker takes no other until it finishes.
     owed: u32,
@@ -698,28 +703,28 @@ struct Worker {
 impl Worker {
     fn start() -> Self {
         let (jobs, queue) = std::sync::mpsc::channel::<Job>();
-        let (done, finished) = toyos::pipe_pair().expect("supervisor: no pipe for its file worker");
+        let (ring, done) = wake::pair().expect("supervisor: no event for its file worker");
+        let finished = Arc::new(AtomicU32::new(0));
+        let count = Arc::clone(&finished);
         std::thread::Builder::new()
             .name("files".into())
             .spawn(move || {
                 for job in queue {
                     job();
-                    finished.write(&[1]).expect("supervisor: its file worker could not say a job finished");
+                    count.fetch_add(1, Ordering::Release);
+                    ring.wake();
                 }
             })
             .expect("supervisor: its file worker could not be started");
-        Self { jobs, done, owed: 0, owed_what: String::new(), poller: Poller::new((1 + MAX_CHILDREN + sessions::MAX_SESSIONS) as u32) }
+        let poller = Poller::new((1 + MAX_CHILDREN + sessions::MAX_SESSIONS) as u32);
+        Self { jobs, done, finished, owed: 0, owed_what: String::new(), poller }
     }
 
-    /// Count the jobs that have finished since last asked.
+    /// Count the jobs that have finished since last asked: the bell is taken
+    /// first, so a job counted after it rings it again.
     fn settle(&mut self) {
-        let mut seen = [0u8; 8];
-        while self.owed > 0 {
-            match self.done.read_nonblock(&mut seen) {
-                Ok(n) if n > 0 => self.owed -= n as u32,
-                _ => return,
-            }
-        }
+        self.done.try_take().expect("supervisor: its file worker has ended");
+        self.owed -= self.finished.swap(0, Ordering::Acquire);
     }
 }
 
@@ -800,9 +805,9 @@ struct Instance {
     child: Child,
     /// The job it runs in, kept while it runs: what holds its row's floor.
     _job: toyos::job::Job,
-    /// A disk driver's [`toyos_quiesce::DRIVER_STOP`] pipe: closing it tells the
-    /// driver the machine stops.
-    stop: Option<Pipe>,
+    /// The waker of a disk driver's [`toyos_quiesce::DRIVER_STOP`] bell:
+    /// closing it tells the driver the machine stops.
+    stop: Option<Waker>,
 }
 
 /// A service's kept acceptors, shared with what [`Grants`] mints on them.
@@ -1199,7 +1204,7 @@ impl<'a> Supervisor<'a> {
 
     /// One `drives` process of `row`, holding `function`'s claim under
     /// `entry`'s spelling.
-    fn start_instance(&mut self, row: &'static Program, entry: PciMatch, function: Pci) -> Result<(Child, Option<Pipe>, toyos::job::Job), String> {
+    fn start_instance(&mut self, row: &'static Program, entry: PciMatch, function: Pci) -> Result<(Child, Option<Waker>, toyos::job::Job), String> {
         if self.services.len() + self.instances.len() >= MAX_CHILDREN {
             return Err(format!("the supervisor watches {MAX_CHILDREN} processes already"));
         }
@@ -1214,9 +1219,9 @@ impl<'a> Supervisor<'a> {
         let mut stop = None;
         if is_disk_driver(row) {
             extra.ports.push((toyos_blockring::disk::PORT.to_string(), self.grants.disk(function.arrival)?));
-            let (read, write) = toyos::pipe_pair().map_err(|e| format!("no pipe for its stop: {e:?}"))?;
-            extra.stop = Some(read);
-            stop = Some(write);
+            let (waker, bell) = wake::pair().map_err(|e| format!("no event for its stop: {e:?}"))?;
+            extra.stop = Some(bell);
+            stop = Some(waker);
         }
         let launcher = Minting::machine(&self.minted, row, self.sessions.machine());
         let served = Served::Keep { acceptors: &[], owed: &[] };
@@ -1906,7 +1911,7 @@ impl<'a> Supervisor<'a> {
         let until = Instant::now() + Duration::from_millis(toyos_quiesce::DRIVERS_MS);
         let mut waiting: Vec<Arrival> = Vec::new();
         for instance in &mut self.instances {
-            // The pipe's end closing is the word.
+            // The waker's closing is the word.
             if instance.stop.take().is_some() {
                 waiting.push(instance.function.arrival);
             }
@@ -3166,14 +3171,14 @@ fn start<'a>(
             (log, ring)
         }
     };
-    // The ring's end is its writer's: a pipe whose one write end the program
+    // The ring's end is its writer's: an event whose one waker the program
     // holds under a label no child inherits.
     let mut alive = None;
     if ring.is_some() {
-        let (read, write) = toyos::pipe_pair()
-            .map_err(|e| std::io::Error::other(format!("no pipe for its log's end: {e:?}")))?;
-        command.endow(ALIVE, write.into());
-        alive = Some(read);
+        let (waker, bell) = wake::pair()
+            .map_err(|e| std::io::Error::other(format!("no event for its log's end: {e:?}")))?;
+        command.endow(ALIVE, waker.into());
+        alive = Some(bell);
     }
 
     let child = command.spawn()?;
@@ -3511,8 +3516,8 @@ struct Extra {
     /// SYSTEM's ROOT image, a duplicate.
     root: Option<toyos::OwnedHandle>,
     ports: Vec<(String, Connector)>,
-    /// A disk driver's end of its [`toyos_quiesce::DRIVER_STOP`] pipe.
-    stop: Option<Pipe>,
+    /// The bell of a disk driver's [`toyos_quiesce::DRIVER_STOP`].
+    stop: Option<Bell>,
     /// Handles endowed by label.
     endow: Vec<(&'static str, toyos::OwnedHandle)>,
 }

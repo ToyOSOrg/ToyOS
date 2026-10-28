@@ -12,6 +12,7 @@
 //! is the one that can afford it.
 
 use toyos_abi::syscall;
+use toyos::wake::Waker;
 use toyos_mixer::Gain;
 
 use crate::client::{ClientStream, Departure};
@@ -75,11 +76,11 @@ impl CommandRing {
 /// forever) or asserting (soundserver dead at a client's choosing). The retry is
 /// unbounded because the mix thread is the process's main thread — if it has
 /// stopped, soundserver is already gone.
-pub(crate) fn submit(cmd_ring: &CommandRing, cmd_pipe_write: toyos::BorrowedHandle<'_>, cmd: MixCommand, period_nanos: u64) {
+pub(crate) fn submit(cmd_ring: &CommandRing, cmd_wake: &Waker, cmd: MixCommand, period_nanos: u64) {
     let mut cmd = cmd;
     loop {
         let full = cmd_ring.try_push(cmd);
-        let _ = syscall::write_nonblock(cmd_pipe_write.raw(), &[1]);
+        cmd_wake.wake();
         match full {
             Ok(()) => return,
             Err(returned) => {
@@ -97,14 +98,14 @@ pub(crate) fn submit(cmd_ring: &CommandRing, cmd_pipe_write: toyos::BorrowedHand
 /// instead of being reconstructed from a flag on the other side.
 pub(crate) fn remove(
     cmd_ring: &CommandRing,
-    cmd_pipe_write: toyos::BorrowedHandle<'_>,
+    cmd_wake: &Waker,
     client_id: usize,
     departure: Departure,
     period_nanos: u64,
 ) {
     submit(
         cmd_ring,
-        cmd_pipe_write,
+        cmd_wake,
         MixCommand::RemoveClient { client_id, departure },
         period_nanos,
     );

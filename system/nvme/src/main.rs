@@ -114,7 +114,7 @@ fn main() {
     let dev = claim();
     let info = dev.describe().unwrap_or_else(|why| panic!("nvme: the claim would not describe itself: {why:?}"));
     let name = format!("nvme {:02x}:{:02x}.{}", info.bus, info.dev, info.func);
-    let stop = Endowments::get().take::<toyos::Pipe>(toyos_quiesce::DRIVER_STOP);
+    let stop = Endowments::get().take::<toyos::wake::Bell>(toyos_quiesce::DRIVER_STOP);
     let mut link = Link::new(name.clone())
         .unwrap_or_else(|| panic!("{name}: started with no `{}` port: a disk driver's row receives it", toyos_blockring::disk::PORT));
     let mut ctrl = match Controller::open(dev, &info) {
@@ -142,7 +142,7 @@ fn main() {
 
 /// A driver whose controller cannot be used: it keeps its link, so the
 /// service goes on saying so, and opens nothing.
-fn idle(link: &mut Link, stop: Option<&toyos::Pipe>) -> ! {
+fn idle(link: &mut Link, stop: Option<&toyos::wake::Bell>) -> ! {
     let poller = Poller::new(2);
     loop {
         link.watch(&poller, TOKEN_LINK);
@@ -158,7 +158,7 @@ fn idle(link: &mut Link, stop: Option<&toyos::Pipe>) -> ! {
     }
 }
 
-fn serve(name: &str, ctrl: &mut Controller, disk: &mut Sessions, link: &mut Link, stop: Option<&toyos::Pipe>) -> ! {
+fn serve(name: &str, ctrl: &mut Controller, disk: &mut Sessions, link: &mut Link, stop: Option<&toyos::wake::Bell>) -> ! {
     let poller = Poller::new(3 + MAX_SESSIONS as u32);
     let mut ready: Vec<u64> = Vec::new();
     let mut done: Vec<Done> = Vec::new();

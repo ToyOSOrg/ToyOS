@@ -63,6 +63,7 @@ fn main() {
     let refused = [
         ("a pipe", syscall::pipe().map(|_| ())),
         ("a port", syscall::port_create().map(|_| ())),
+        ("an event", syscall::event_create().map(|_| ())),
         ("a directory", syscall::mkdir(b"/tmp/kernel_objects_refused_more")),
         ("a pipe's first write, its frame", syscall::write(unwritten.write, b"x").map(|_| ())),
         ("a /tmp file's page", syscall::write(file, &[0x5a; PAGE]).map(|_| ())),

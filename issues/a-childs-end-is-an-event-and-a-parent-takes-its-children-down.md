@@ -174,8 +174,8 @@ an explicit force issues it, and never a timer's.
    and the stage reverted whole, beside `signal_alarm`; the routing laws are
    host tests (`signal_dispositions.rs`), and so is a wait deciding from one
    read of each child's end (`spawn_requests.rs`). libc's own thread also watches its
-   control pipe, so it watches at most 254 children: the 255th is refused
-   `EAGAIN`, a `poll` takes 255 descriptors beside its wake pipe, and `SIG_IGN`
+   control event, so it watches at most 254 children: the 255th is refused
+   `EAGAIN`, a `poll` takes 255 descriptors beside its wake event, and `SIG_IGN`
    is shown over 255 children.
 5. **A login is a session under its owner**. **In review** (#1035, the P1b pull
    request). Per login the supervisor starts one session owner,

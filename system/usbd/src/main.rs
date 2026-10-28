@@ -160,7 +160,7 @@ fn main() {
     let host = Process { began: Instant::now(), name: format!("usbd {at}") };
     let name = host.name.clone();
     let acceptor = endow::acceptor(toyos_inspect::USB.port);
-    let stop = Endowments::get().take::<toyos::Pipe>(toyos_quiesce::DRIVER_STOP);
+    let stop = Endowments::get().take::<toyos::wake::Bell>(toyos_quiesce::DRIVER_STOP);
     let link = Link::new(name.clone());
     // xHCI 1.2 §5.2.1: the capability registers are in BAR 0.
     let (bar, _bar) = match Bar::map(&dev, 0, info.bar_bytes[0]) {
@@ -198,7 +198,7 @@ fn main() {
 
 /// A refusal this driver can name, before it serves anything: said once, the
 /// block service told this controller is unusable, and nothing served.
-fn not_serving(name: &str, why: &str, mut link: Option<Link>, stop: Option<toyos::Pipe>) -> ! {
+fn not_serving(name: &str, why: &str, mut link: Option<Link>, stop: Option<toyos::wake::Bell>) -> ! {
     println!("{name}: NOT SERVING — {why}");
     if let Some(link) = &mut link {
         link.settle(Settled::Unusable);
@@ -208,7 +208,7 @@ fn not_serving(name: &str, why: &str, mut link: Option<Link>, stop: Option<toyos
 
 /// A controller that cannot be used: it keeps its link, so the service goes
 /// on saying so, and serves nothing; it ends when the machine stops.
-fn idle(mut link: Option<Link>, stop: Option<toyos::Pipe>) -> ! {
+fn idle(mut link: Option<Link>, stop: Option<toyos::wake::Bell>) -> ! {
     let poller = Poller::new(2);
     loop {
         if let Some(link) = &mut link {
@@ -245,7 +245,7 @@ fn serve(
     usb: &Driver,
     acceptor: Option<toyos::port::Acceptor>,
     mut link: Option<Link>,
-    stop: Option<toyos::Pipe>,
+    stop: Option<toyos::wake::Bell>,
 ) -> ! {
     let mut tasks = usb.tasks();
     let mut disks: BTreeMap<u32, Sessions> = BTreeMap::new();

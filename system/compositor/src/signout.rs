@@ -25,7 +25,8 @@ use toyos::ipc::{self, Connection, RxStep};
 use toyos::job::JOB_LABEL;
 use toyos::namespace::Namespace;
 use toyos::syscap::SysCap;
-use toyos::{AsHandle, Pipe};
+use toyos::wake::{self, Bell, Waker};
+use toyos::AsHandle;
 use toyos_abi::syscall::SYSCAP_LABEL;
 use toyos_desktop::Opening;
 use toyos_session::{self as wire, Names, SignOut};
@@ -56,7 +57,7 @@ pub struct Desktop {
     /// The answers to the thread's opens: a control connection, or why none.
     opened: mpsc::Receiver<Result<Connection, String>>,
     /// Readable once per answer in `opened`.
-    wake: Pipe,
+    wake: Bell,
     opening: Opening,
 }
 
@@ -66,7 +67,7 @@ impl Desktop {
         let endowed = Endowments::get();
         let (asks, queue) = mpsc::channel();
         let (sent, opened) = mpsc::channel();
-        let (wake, woken) = toyos::pipe_pair().expect("compositor: no pipe for its session's opens");
+        let (woken, wake) = wake::pair().expect("compositor: no event for its session's opens");
         let login = endowed.take::<Namespace>(wire::LOGIN_PORT);
         std::thread::Builder::new()
             .name("launcher".into())
@@ -98,7 +99,7 @@ impl Desktop {
     }
 
     /// What the loop watches for an open made.
-    pub fn wake(&self) -> &Pipe {
+    pub fn wake(&self) -> &Bell {
         &self.wake
     }
 
@@ -119,8 +120,8 @@ impl Desktop {
     /// A session the thread opened, now the one this compositor signs out:
     /// `true` where there is one.
     pub fn opened(&mut self) -> bool {
-        let mut drained = [0u8; 16];
-        while self.wake.read_nonblock(&mut drained).is_ok_and(|n| n > 0) {}
+        // Its one waker is the launcher thread's, which ends only with this.
+        self.wake.try_take().expect("compositor: its launcher thread has ended");
         let mut took = false;
         while let Ok(answer) = self.opened.try_recv() {
             self.opening.answered();
@@ -219,7 +220,7 @@ impl Desktop {
 /// **Everything the desktop starts is a job of its own**, made with the
 /// `jobs` right this row's system capability carries: a program started from
 /// the taskbar is no helper of the compositor's, and must not share its CPU.
-fn launcher(queue: mpsc::Receiver<Ask>, login: Option<Namespace>, opened: mpsc::Sender<Result<Connection, String>>, wake: Pipe) {
+fn launcher(queue: mpsc::Receiver<Ask>, login: Option<Namespace>, opened: mpsc::Sender<Result<Connection, String>>, wake: Waker) {
     let jobs = endow::Endowments::get().take::<SysCap>(SYSCAP_LABEL);
     // A session this thread opened, whose launcher replaces the endowed one.
     let mut session: Option<Namespace> = None;
@@ -235,7 +236,7 @@ fn launcher(queue: mpsc::Receiver<Ask>, login: Option<Namespace>, opened: mpsc::
                     None => Err("this row holds no `login` connector".to_string()),
                 };
                 if opened.send(answer).is_ok() {
-                    let _ = wake.write_nonblock(&[1]);
+                    wake.wake();
                 }
                 continue;
             }

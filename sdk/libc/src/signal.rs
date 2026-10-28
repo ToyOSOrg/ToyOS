@@ -1,12 +1,12 @@
 //! The signals libc imitates, delivered: libc's own thread, which raises them
-//! from the events they stand for, the wake pipe a blocking call watches
+//! from the events they stand for, the wake event a blocking call watches
 //! beside what it waits for, and the handlers' runs. Where each goes is
 //! `sigreq`'s.
 //!
 //! **libc's own thread starts with the first thing it watches**: an alarm, a
 //! `SIGCHLD` handler, or the process's notice. It watches every child whose
 //! end has not raised `SIGCHLD`, at most [`crate::spawn::MAX_CHILDREN`],
-//! beside its control pipe and the notice, which fills one poller.
+//! beside its control event and the notice, which fills one poller.
 //!
 //! **libc listens to the notice once a quit's signal is off its default or
 //! blocked**, before the call that put it there returns: until then a quit
@@ -23,43 +23,43 @@ use crate::errcode::ENOSYS;
 use crate::pthread::Lock;
 use crate::sigreq::{Delivery, Kept, Raised, SigAction, Signals, SIGALRM, SIGCHLD, SIGHUP, SIGINT, SIGTERM};
 
-/// The ends of a pipe this library made and never closes.
+/// The sides of an event this library made and never closes: `wait` is
+/// readable while it is knocked.
 #[derive(Clone, Copy)]
-struct Pipe {
-    read: toyos::BorrowedHandle<'static>,
-    write: toyos::BorrowedHandle<'static>,
+struct Event {
+    wait: toyos::BorrowedHandle<'static>,
+    signal: toyos::BorrowedHandle<'static>,
 }
 
-impl Pipe {
+impl Event {
     fn new() -> Self {
-        let ends = syscall::pipe().expect("signals: no pipe for libc's own use");
+        let ends = syscall::event_create().expect("signals: no event for libc's own use");
         // SAFETY: made here and never closed: libc's own for the process's life.
-        unsafe { Self { read: toyos::BorrowedHandle::borrow_raw(ends.read), write: toyos::BorrowedHandle::borrow_raw(ends.write) } }
+        unsafe { Self { wait: toyos::BorrowedHandle::borrow_raw(ends.wait), signal: toyos::BorrowedHandle::borrow_raw(ends.signal) } }
     }
 
-    /// One byte in, or none if one is already there to be read.
     fn knock(&self) {
-        match syscall::write_nonblock(self.write.raw(), &[0]) {
-            Ok(_) | Err(SyscallError::WouldBlock) => {}
-            Err(e) => panic!("signals: a pipe of libc's own refused a byte: {e:?}"),
+        if let Err(e) = syscall::event_signal(self.signal.raw()) {
+            panic!("signals: an event of libc's own refused a signal: {e:?}");
         }
     }
 
-    /// Every byte out.
     fn drain(&self) {
-        let mut buf = [0u8; 64];
-        while matches!(syscall::read_nonblock(self.read.raw(), &mut buf), Ok(n) if n > 0) {}
+        match syscall::event_take(self.wait.raw()) {
+            Ok(()) | Err(SyscallError::WouldBlock) => {}
+            Err(e) => panic!("signals: an event of libc's own refused a take: {e:?}"),
+        }
     }
 }
 
 struct State {
     signals: Signals,
-    /// The pipe each interruptible blocking call watches, made by the first.
-    wake: Option<Pipe>,
-    /// Whether `wake` holds its byte.
+    /// The event each interruptible blocking call watches, made by the first.
+    wake: Option<Event>,
+    /// Whether `wake` is knocked.
     woken: bool,
-    /// libc's own thread's control pipe, once it runs.
-    keeper: Option<Pipe>,
+    /// libc's own thread's control event, once it runs.
+    keeper: Option<Event>,
     /// When the alarm is due, in the monotonic clock's nanoseconds.
     alarm: Option<u64>,
     /// Whether this process listens to its notice, which it does for good.
@@ -103,7 +103,7 @@ fn on_keeper(tid: u32) -> bool {
 static HANDLERS: AtomicBool = AtomicBool::new(false);
 
 impl State {
-    /// The wake pipe's byte made to agree with `Signals::wake_wanted`.
+    /// The wake event made to agree with `Signals::wake_wanted`.
     fn settle(&mut self) {
         let Some(wake) = self.wake else { return };
         match (self.signals.wake_wanted(), self.woken) {
@@ -119,7 +119,7 @@ impl State {
     fn kick(&mut self) {
         let keeper = *self.keeper.get_or_insert_with(|| {
             crate::pthread::spawn_own(keep);
-            Pipe::new()
+            Event::new()
         });
         keeper.knock();
     }
@@ -371,7 +371,7 @@ impl Call {
             true => crate::sigreq::KEEPER_MASK,
             false => mask.unwrap_or_else(|| state.signals.mask(tid)),
         };
-        let wake = state.wake.get_or_insert_with(Pipe::new).read;
+        let wake = state.wake.get_or_insert_with(Event::new).wait;
         state.signals.enter(tid, mask, children);
         state.settle();
         Some(Self { tid, mask, children, wake, inside: true })
@@ -480,7 +480,7 @@ unsafe extern "C" fn keep(_: *mut u8) -> *mut u8 {
     loop {
         let (control, listening, due) = {
             let state = STATE.lock();
-            let control = state.keeper.expect("libc's own thread runs only once its pipe is made").read;
+            let control = state.keeper.expect("libc's own thread runs only once its event is made").wait;
             let watched = match state.signals.kept(SIGCHLD) {
                 Kept::Handle(_) => crate::spawn::unraised(),
                 _ => alloc::vec::Vec::new(),
