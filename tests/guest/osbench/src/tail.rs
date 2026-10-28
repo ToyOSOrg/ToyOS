@@ -48,14 +48,14 @@ pub fn suite() {
     #[cfg(target_os = "toyos")]
     let diag = sys::diag::open();
     #[cfg(target_os = "toyos")]
-    let before = diag.as_ref().map(|d| d.counters());
+    let (before, began) = (diag.as_ref().map(|d| d.counters()), Instant::now());
 
     let late = periodic("tail.wake.periodic.60s", Duration::from_secs(60), &mut |_| {});
     print_outliers("tail.wake.periodic.60s", &late);
 
     #[cfg(target_os = "toyos")]
     if let (Some(d), Some(before)) = (diag.as_ref(), before) {
-        counters_over("tail.wake.periodic.60s", before, d);
+        counters_over("tail.wake.periodic.60s", before, d, crate::ns_since(began));
     }
 
     stolen(Duration::from_secs(10));
@@ -204,33 +204,12 @@ fn stolen(span: Duration) {
     }
 }
 
-/// Each CPU's SMIs, its average clock and its kicks between `before` and now,
-/// by the kernel's index of the CPU and its APIC id.
+/// What each CPU did between `before`, `ns` ago, and now ([`crate::around`]).
 #[cfg(target_os = "toyos")]
-fn counters_over(bench: &str, before: Result<Vec<sys::diag::CpuCounts>, String>, d: &sys::diag::Diag) {
-    let (before, after) = match (before, d.counters()) {
-        (Ok(before), Ok(after)) => (before, after),
-        (Err(why), _) | (_, Err(why)) => return note(&format!("{bench}.counters"), &[("failed", why)]),
-    };
-    for b in &after {
-        let Some(a) = before.iter().find(|a| a.cpu == b.cpu) else { continue };
-        let delta = |x: Option<u64>, y: Option<u64>| match (x, y) {
-            (Some(x), Some(y)) => Some(y.wrapping_sub(x)),
-            _ => None,
-        };
-        let shown = |v: Option<u64>| v.map_or("-".to_string(), |v| v.to_string());
-        let (aperf, mperf) = (delta(a.aperf, b.aperf), delta(a.mperf, b.mperf));
-        note(
-            &format!("{bench}.counters"),
-            &[
-                ("cpu", b.cpu.to_string()),
-                ("apic", b.apic.to_string()),
-                ("smi", shown(delta(a.smi, b.smi))),
-                ("kicks", shown(delta(a.kicks, b.kicks))),
-                ("aperf_per_mperf_permille", shown(aperf.zip(mperf).map(|(a, m)| a * 1000 / m.max(1)))),
-                ("mperf", shown(mperf)),
-            ],
-        );
+fn counters_over(bench: &str, before: Result<Vec<sys::diag::CpuCounts>, String>, d: &sys::diag::Diag, ns: u64) {
+    match (before, d.counters()) {
+        (Ok(before), Ok(after)) => crate::around::cpus(&format!("{bench}.counters"), &before, &after, ns),
+        (Err(why), _) | (_, Err(why)) => note(&format!("{bench}.counters"), &[("failed", why)]),
     }
 }
 

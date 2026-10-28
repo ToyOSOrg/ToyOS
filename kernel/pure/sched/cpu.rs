@@ -89,18 +89,25 @@ impl<X: SchedPayload> RunToken<X> {
 #[must_use]
 pub struct SleepToken {
     armed: Option<Nanos>,
+    idle: crate::sched::idle::Plan,
 }
 
 impl SleepToken {
-    fn new(_quiesced: Quiesced, timer: TimerApplied) -> Self {
+    fn new(_quiesced: Quiesced, timer: TimerApplied, idle: crate::sched::idle::Plan) -> Self {
         Self {
             armed: timer.armed(),
+            idle,
         }
     }
 
     /// What the timer is programmed to — the driver's `hlt` wakes on it.
     pub fn armed(&self) -> Option<Nanos> {
         self.armed
+    }
+
+    /// The idle state the pass chose, whose wake its timer plan includes.
+    pub fn idle(&self) -> &crate::sched::idle::Plan {
+        &self.idle
     }
 }
 
@@ -2116,7 +2123,14 @@ impl<H: Hw, P: PreemptGuard> SchedPass<'_, '_, H, P, Disposed> {
     fn try_sleep(&mut self) -> Result<Action<<H as Hw>::Payload>, ()> {
         self.post_steal_probe();
         let rearm = self.rearm_deadline();
-        let timer = self.apply_timer_no_later_than(rearm);
+        // The idle choice is made against the timer the CPU would sleep
+        // with, and its own wake joins the same plan: one write of the timer.
+        let deadline = TimerPlan::compute(None, self.cpu.earliest_deadline()).no_later_than(rearm).armed();
+        let idle = self.env.hw.idle_plan(deadline, self.now);
+        let timer = self.apply_timer_no_later_than(match (rearm, idle.wake_at().map(Nanos)) {
+            (Some(a), Some(b)) => Some(a.min(b)),
+            (a, b) => a.or(b),
+        });
         let arm: SleepArm<'_> = self.env.cpus.get(self.cpu.id).doorbell().arm_sleep();
         // [`Balance::PushOnSurplus`]'s other half, and the half that makes the
         // push an ordering rather than a hope: SLEEPING is published above, so
@@ -2131,7 +2145,7 @@ impl<H: Hw, P: PreemptGuard> SchedPass<'_, '_, H, P, Disposed> {
             return Err(());
         }
         match arm.confirm(&self.cpu.mailbox) {
-            Ok(quiesced) => Ok(Action::Idle(SleepToken::new(quiesced, timer))),
+            Ok(quiesced) => Ok(Action::Idle(SleepToken::new(quiesced, timer, idle))),
             Err(_awake) => {
                 self.env.cpus.get(self.cpu.id).doorbell().begin_pass();
                 self.cpu.drain(self.env, self.now);
@@ -2670,6 +2684,10 @@ mod tests {
         need_resched: Vec<CpuId>,
         kicks: Vec<CpuId>,
         switches: Vec<Option<TaskKey>>,
+        /// Each timer write, `None` a stop.
+        timers: Vec<Option<Nanos>>,
+        /// The revisit an idle plan asks, where a test sets one.
+        revisit: Option<u64>,
     }
 
     #[derive(Default)]
@@ -2694,8 +2712,17 @@ mod tests {
         fn now(&self) -> Nanos {
             Nanos::ZERO
         }
-        fn set_timer(&self, _deadline: Nanos) {}
-        fn stop_timer(&self) {}
+        fn set_timer(&self, deadline: Nanos) {
+            self.state().timers.push(Some(deadline));
+        }
+        fn stop_timer(&self) {
+            self.state().timers.push(None);
+        }
+        fn idle_plan(&self, deadline: Option<Nanos>, now: Nanos) -> crate::sched::idle::Plan {
+            let mut plan = crate::sched::idle::Plan::c1(deadline.map(|d| d.0), now.0);
+            plan.choice.revisit_after = self.state().revisit;
+            plan
+        }
         fn halt(&self) {}
         fn need_resched(&self, cpu: CpuId) {
             self.state().need_resched.push(cpu);
@@ -4302,6 +4329,44 @@ mod tests {
         for &cpu in cpus {
             handles.get(CpuId(cpu)).doorbell().begin_pass();
         }
+    }
+
+    /// **A spawn's placement reads no idle exit**: the shallowest-sleeper
+    /// preference is a wake forward's, so a new thread, the crunch row's or a
+    /// churn worker's, lands where it would with every CPU in C1, and a
+    /// thread that never blocks is never moved by it.
+    #[test]
+    fn a_spawn_lands_where_it_would_whatever_the_sleepers_exits() {
+        let (handles, _consumers) = bare_handles(two_llcs());
+        sleep(&handles, &[0, 1, 2, 3, 4, 5, 6, 7]);
+        let plain: Vec<CpuId> = (0..8).map(|start| handles.place(CpuId(start), NOW)).collect();
+        for (cpu, exit) in [(0, 1_048_000), (2, 253_000), (5, 1_048_000), (7, 253_000)] {
+            handles.get(CpuId(cpu)).publish_idle_exit(exit);
+        }
+        let deep: Vec<CpuId> = (0..8).map(|start| handles.place(CpuId(start), NOW)).collect();
+        assert_eq!(plain, deep);
+    }
+
+    /// **An idle CPU's plan joins its pass's one timer write**: the revisit
+    /// the plan asks is the instant the timer is armed for, written once, and
+    /// the sleep token carries the plan to the wait.
+    #[test]
+    fn an_idle_pass_arms_its_plans_wake_in_its_one_timer_write() {
+        let mut w = World::new(1);
+        w.hw.state().revisit = Some(500);
+        let (cpus, env) = w.split();
+        let pass = SchedPass::begin(&mut cpus[0], env, NOW);
+        let Action::Idle(token) = pass.dispose_none().finish() else { panic!("an empty CPU sleeps") };
+        assert_eq!(token.armed(), Some(Nanos(NOW.0 + 500)));
+        assert_eq!(token.idle().choice.revisit_after, Some(500));
+        assert_eq!(w.hw.state().timers, [Some(Nanos(NOW.0 + 500))], "one write, at the revisit");
+
+        let mut w = World::new(1);
+        let (cpus, env) = w.split();
+        let pass = SchedPass::begin(&mut cpus[0], env, NOW);
+        let Action::Idle(token) = pass.dispose_none().finish() else { panic!("an empty CPU sleeps") };
+        assert_eq!(token.armed(), None);
+        assert_eq!(w.hw.state().timers, [None], "a plan with no wake leaves the plan main makes: stopped");
     }
 
     /// **Locality first, then a free physical core, then rotation**: a forward

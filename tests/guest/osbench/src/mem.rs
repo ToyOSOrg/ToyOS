@@ -135,18 +135,20 @@ fn churn(size: usize, threads: usize) {
     let bench = format!("mem.malloc_churn.{size}.t{threads}");
     let ring = if size >= MIB { 4 } else { 64 };
     let layout = Layout::from_size_align(size, 16).expect("a small layout");
+    let placed = Arc::new(std::sync::Mutex::new(Vec::new()));
     let round = || -> u64 {
         let start = Arc::new(Barrier::new(threads + 1));
         let stop = Arc::new(AtomicBool::new(false));
         let done = Arc::new(AtomicU64::new(0));
         let workers: Vec<_> = (0..threads)
             .map(|_| {
-                let (start, stop, done) = (start.clone(), stop.clone(), done.clone());
+                let (start, stop, done, placed) = (start.clone(), stop.clone(), done.clone(), placed.clone());
                 thread::spawn(move || {
                     // SAFETY: `layout` has a non-zero size; every block is
                     // freed with it once, below.
                     let mut live: Vec<*mut u8> = (0..ring).map(|_| unsafe { alloc(layout) }).collect();
                     start.wait();
+                    let began_on = crate::sys::current_cpu();
                     let mut ops = 0u64;
                     while !stop.load(Ordering::Relaxed) {
                         for slot in live.iter_mut() {
@@ -166,6 +168,7 @@ fn churn(size: usize, threads: usize) {
                         unsafe { dealloc(block, layout) };
                     }
                     done.fetch_add(ops, Ordering::Relaxed);
+                    placed.lock().expect("a churn worker panicked holding the placements").push((began_on, crate::sys::current_cpu()));
                 })
             })
             .collect();
@@ -181,7 +184,10 @@ fn churn(size: usize, threads: usize) {
     };
     round();
     crate::clock::settle();
+    placed.lock().expect("no worker runs now").clear();
+    let around = crate::around::begin();
     let mut rates: Vec<u64> = (0..5).map(|_| round()).collect();
+    around.end(&bench, &placed.lock().expect("no worker runs now"));
     result(&bench, "kops/s", &mut rates, &[("block_bytes", size.to_string()), ("threads", threads.to_string()), ("ring", ring.to_string())]);
 }
 

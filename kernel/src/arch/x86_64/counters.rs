@@ -10,11 +10,14 @@ use super::cpu;
 use crate::counters::{Firmware, Hardware};
 
 const MSR_SMI_COUNT: u32 = 0x34;
+const MSR_CORE_C6_RESIDENCY: u32 = 0x3FD;
+const MSR_CORE_C7_RESIDENCY: u32 = 0x3FE;
 const IA32_MPERF: u32 = 0xE7;
 const IA32_APERF: u32 = 0xE8;
 
 const SMI: u8 = 1 << 0;
 const APERF_MPERF: u8 = 1 << 1;
+const CORE_RESIDENCY: u8 = 1 << 2;
 
 /// A CPU's verdict, written by that CPU before it reads a counter.
 pub struct Local {
@@ -40,7 +43,9 @@ pub fn bring_up() {
         cpuid_1_ecx,
         cpuid_6_ecx,
     });
-    let bits = if verdict.smi { SMI } else { 0 } | if verdict.aperf_mperf { APERF_MPERF } else { 0 };
+    let bits = if verdict.smi { SMI } else { 0 }
+        | if verdict.aperf_mperf { APERF_MPERF } else { 0 }
+        | if verdict.core_residency { CORE_RESIDENCY } else { 0 };
     admitted().store(bits, Relaxed);
 }
 
@@ -55,5 +60,7 @@ pub fn read() -> Hardware {
         mperf: msr(APERF_MPERF, IA32_MPERF),
         envelope: super::control_regs::envelope(),
         firmware: super::smi_cmd::counted().map(|(calls, nanos)| Firmware { calls, nanos }),
+        core_c6: msr(CORE_RESIDENCY, MSR_CORE_C6_RESIDENCY),
+        core_c7: msr(CORE_RESIDENCY, MSR_CORE_C7_RESIDENCY),
     }
 }

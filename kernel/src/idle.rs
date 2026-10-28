@@ -117,73 +117,83 @@ fn limit() -> Option<u64> {
     Some(LIMIT.load(Ordering::Relaxed)).filter(|&l| l != u64::MAX)
 }
 
-/// Wait, with interrupts masked and the scheduler's timer armed for `armed`,
-/// in the state this idle period chooses; returns once the CPU has left it,
-/// for an interrupt or, from `MWAIT`, for an event of the processor's own
-/// (SDM Vol. 2B, MWAIT), which is a short unforeseen period. The kernel's
-/// `Machine::idle_wait`.
-pub fn wait(armed: Option<Nanos>) {
+/// This CPU's declared states, read whole, and the declaration they came
+/// from; `None` with nothing declared or a declaration mid-publication, which
+/// this idle period treats as nothing declared and the next reads.
+struct Declared {
+    generation: u64,
+    len: usize,
+    entries: [Entry; MAX_STATES],
+    costs: [Cost; MAX_STATES],
+}
+
+fn declared(local: &Local) -> Option<Declared> {
+    let read = toyos_userbound::idle::read(&local.table.snapshot()?);
+    let mut d = Declared { generation: read.generation, len: 0, entries: [Entry::Mwait { hint: 0 }; MAX_STATES], costs: [Cost { exit: 0, residency: 0 }; MAX_STATES] };
+    for (i, state) in read.states.iter().flatten().enumerate() {
+        d.entries[i] = state.entry;
+        d.costs[i] = Cost { exit: state.exit_ns, residency: state.residency_ns };
+        d.len = i + 1;
+    }
+    Some(d)
+}
+
+/// What this CPU learned of its wakes, forgotten where its declaration is
+/// not the one it learned under.
+fn history(local: &Local, generation: u64) -> History {
+    let learned = History::from_bits(local.history.load(Ordering::Relaxed));
+    if generation == local.learned_under.load(Ordering::Relaxed) { learned } else { History::default() }
+}
+
+/// The idle state this CPU waits in once its pass ends, chosen with the
+/// scheduler's timer due at `deadline`: the kernel's `Machine::idle_plan`.
+/// The pass folds the plan's own wake into its one timer write.
+pub fn plan(deadline: Option<Nanos>, now: Nanos) -> idle::Plan {
+    let (deadline, now) = (deadline.map(|d| d.0), now.0);
     let local = &crate::cpu_local::here().idle;
-    let mut history = History::from_bits(local.history.load(Ordering::Relaxed));
-    let now = crate::clock::nanos_since_boot();
-    // A declaration mid-publication is this period in C1, and the next reads it.
-    let declared = local.table.snapshot().map(|words| toyos_userbound::idle::read(&words));
-    let mut entries = [Entry::Mwait { hint: 0 }; MAX_STATES];
-    let mut costs = [Cost { exit: 0, residency: 0 }; MAX_STATES];
-    let mut len = 0;
-    if let Some(d) = &declared {
-        for (i, state) in d.states.iter().flatten().enumerate() {
-            entries[i] = state.entry;
-            costs[i] = Cost { exit: state.exit_ns, residency: state.residency_ns };
-            len = i + 1;
-        }
-        if d.generation != local.learned_under.load(Ordering::Relaxed) {
-            history.forget();
-            local.learned_under.store(d.generation, Ordering::Relaxed);
-        }
-    }
-    let costs = &costs[..len];
-    let horizon = armed.map(|at| at.0.saturating_sub(now));
-    // Chosen under the bound read after the exit is published: a hold made
-    // meanwhile either is read here or sees this exit and wakes this CPU.
-    let mut bound = limit();
-    let choice = loop {
-        let choice = idle::choose(costs, &history, horizon, bound);
-        let exit = choice.state.map_or(0, |state| costs[state].exit);
-        crate::sched::driver::publish_idle_exit(exit);
-        fence(Ordering::SeqCst);
-        let now_bound = limit();
-        if now_bound.is_none_or(|b| exit <= b) {
-            break choice;
-        }
-        bound = now_bound;
-    };
-    let armed = armed.map(|at| at.0);
-    // The pass just armed the timer for `armed`, or stopped it (`SleepToken`),
-    // and `wake_at` is never later: one write moves it earlier, with no read
-    // of the timer, which on an xAPIC is an uncached access on every idle.
-    if let Some(at) = idle::wake_at(&choice, armed, now) {
-        crate::arch::irqchip::arm_one_shot(at.saturating_sub(now));
-    }
-    match choice.state {
-        Some(state) => crate::arch::idle::enter(entries[state]),
-        None => crate::arch::hw::halt(),
+    let Some(d) = declared(local).filter(|d| d.len > 0) else { return idle::Plan::c1(deadline, now) };
+    let costs = &d.costs[..d.len];
+    let choice = idle::choose(costs, &history(local, d.generation), deadline.map(|at| at.saturating_sub(now)), limit());
+    idle::Plan { choice, exit: choice.state.map_or(0, |state| costs[state].exit), declaration: d.generation, chosen_at: now, deadline }
+}
+
+/// Wait, with interrupts masked and the timer armed by the pass, in the
+/// state its `plan` chose; returns once the CPU has left it, for an
+/// interrupt or, from `MWAIT`, for an event of the processor's own (SDM Vol.
+/// 2B, MWAIT), which is a short unforeseen period. The kernel's
+/// `Machine::idle_wait`.
+///
+/// The plan's exit is published, fenced, and the bound read again: a hold
+/// made since the pass either is read here, and the CPU waits in C1 under
+/// the timer the plan armed, or sees the exit and wakes it.
+pub fn wait(plan: &idle::Plan) {
+    let local = &crate::cpu_local::here().idle;
+    let d = declared(local).filter(|d| d.len > 0 && d.generation == plan.declaration);
+    crate::sched::driver::publish_idle_exit(plan.exit);
+    fence(Ordering::SeqCst);
+    let state = plan.choice.state.filter(|_| d.is_some() && limit().is_none_or(|bound| plan.exit <= bound));
+    let entered = crate::clock::nanos_since_boot();
+    match (state, &d) {
+        (Some(state), Some(d)) => crate::arch::idle::enter(d.entries[state]),
+        _ => crate::arch::hw::halt(),
     }
     // Awake: no hold has a reason to wake this CPU until it waits again.
     crate::sched::driver::publish_idle_exit(0);
     let woke = crate::clock::nanos_since_boot();
-    let slept = woke.saturating_sub(now);
-    if choice.state.is_some() {
+    let slept = woke.saturating_sub(entered);
+    if state.is_some() {
         local.deep.fetch_add(1, Ordering::Relaxed);
         local.deep_nanos.fetch_add(slept, Ordering::Relaxed);
     }
-    if len > 0 {
-        match idle::ended(&choice, armed, now, woke) {
-            idle::Ended::Deadline => {}
-            idle::Ended::Revisit => history.quiet(costs, slept),
-            idle::Ended::Unforeseen => history.unforeseen(costs, slept),
-        }
+    let Some(d) = d else { return };
+    let costs = &d.costs[..d.len];
+    let mut history = history(local, d.generation);
+    match plan.ended(woke) {
+        idle::Ended::Deadline => {}
+        idle::Ended::Revisit => history.quiet(costs, woke.saturating_sub(plan.chosen_at)),
+        idle::Ended::Unforeseen => history.unforeseen(costs, woke.saturating_sub(plan.chosen_at)),
     }
+    local.learned_under.store(d.generation, Ordering::Relaxed);
     local.history.store(history.bits(), Ordering::Relaxed);
 }
 

@@ -96,7 +96,7 @@ impl History {
 }
 
 /// What [`choose`] picked.
-#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+#[derive(Clone, Copy, PartialEq, Eq, Debug, Default)]
 pub struct Choice {
     /// A declared state, or `None` for C1.
     pub state: Option<usize>,
@@ -107,6 +107,42 @@ pub struct Choice {
     /// alone kept the CPU from it: how soon to wake and choose again, the
     /// residency of the shallowest such state ([`History::quiet`]).
     pub revisit_after: Option<u64>,
+}
+
+/// What a CPU decided in its last pass before it sleeps, so the timer its
+/// choice needs is part of the pass's one timer plan ([`wake_at`]) and the
+/// wait enters what the pass chose.
+#[derive(Clone, Copy, PartialEq, Eq, Debug, Default)]
+pub struct Plan {
+    pub choice: Choice,
+    /// The chosen state's exit, 0 for C1.
+    pub exit: u64,
+    /// Which declaration the choice indexes, the machine's own token for it:
+    /// a wait that finds another declared since enters C1.
+    pub declaration: u64,
+    /// The pass's instant, at which the choice was made.
+    pub chosen_at: u64,
+    /// When the scheduler's own timer was due before the choice moved it.
+    pub deadline: Option<u64>,
+}
+
+impl Plan {
+    /// C1, with nothing declared or nothing chosen: what a machine with no
+    /// declaration plans.
+    pub const fn c1(deadline: Option<u64>, chosen_at: u64) -> Self {
+        Self { choice: Choice { state: None, wake_early_by: 0, revisit_after: None }, exit: 0, declaration: 0, chosen_at, deadline }
+    }
+
+    /// The instant the pass's timer must fire by for this plan, sooner than
+    /// its deadline ([`wake_at`]).
+    pub fn wake_at(&self) -> Option<u64> {
+        wake_at(&self.choice, self.deadline, self.chosen_at)
+    }
+
+    /// What ended the period that began with this plan and ended at `woke`.
+    pub fn ended(&self, woke: u64) -> Ended {
+        ended(&self.choice, self.deadline, self.chosen_at, woke)
+    }
 }
 
 /// The state to wait in. `horizon` is how long until the CPU's timer fires,

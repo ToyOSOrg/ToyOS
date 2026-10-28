@@ -11,8 +11,13 @@
 //!   MONITOR/MWAIT and its extensions (Intel SDM Vol. 2B, MWAIT, Table 1-3);
 //! - a port is one the holder could read itself through its claim: no port
 //!   the kernel keeps, protects or lent to another claim
-//!   (`crate::firmware::port`, asked by the caller), since a read the kernel
-//!   makes for the holder is one the holder's AML could make;
+//!   (`crate::firmware::port`, asked by the caller). The port comes from the
+//!   firmware's AML, which is trusted platform code, and a read the kernel
+//!   makes for the holder is one the holder's AML could make, so this fence
+//!   keeps the read off what the kernel owns and needs no list of which parts
+//!   trap which ports. On a part where the port is no trapped C-state request
+//!   the read returns at once and the CPU passes back through selection: a
+//!   short unforeseen period the history learns, never a hang;
 //! - the CPU keeps time in any state: its APIC timer always runs (CPUID.06H:
 //!   EAX[2]) and its TSC is invariant (CPUID.80000007H:EDX[8]). Without either a
 //!   deep state stops the clock or the one-shot, so a CPU lacking one keeps

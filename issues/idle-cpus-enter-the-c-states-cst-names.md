@@ -34,6 +34,24 @@ faster than a `hlt` control. Its `work.build_shaped.j1` p50 read 1176 ms
 against the control's 967, with its own 5 runs spread from 817 to 1594 ms,
 the control on a different `main`: unresolved.
 
+**The exit cost of deep states, accepted** (orchestrator, 2026-10-28, under
+the owner's direction of 2026-10-27), as #1073's first boots read it at
+`59dcd1f03`, p50 against main's `ea6414e53` and against Linux 6.8 on the same
+bench (Linux's 50 µs timer slack included):
+
+| row | T14 main | T14 deep idle | T14 Linux | AMD main | AMD deep idle | AMD Linux |
+|---|---|---|---|---|---|---|
+| `time.sleep_late.1ms` | 17.7 µs | 22.9 µs | 71.5-71.8 µs | 32.5 µs | 5.4 µs | 69.7-70.8 µs |
+| `time.sleep_late.10ms` | 17.8 µs | 29.5 µs | 213 µs | 32.6 µs | 32.3 µs | 342-344 µs |
+| `wake.storm.drain.w4` | 37 µs | 127 µs | 121-123 µs | 105 µs | 307 µs | 77-78 µs |
+| `wake.storm.drain.w16` | 77 µs | 144 µs | 370-1041 µs | 333 µs | 329 µs | 113-200 µs |
+
+A sleep long enough for a deep state is woken early by its exit and still
+lands later the deeper the state was (none at 100 µs, C2 at 1 ms, C10 at
+10 ms), which an early wake that fell short would make hundreds of µs:
+consistent with the cost of the caches a deep state powers off, not measured
+as that. A burst of wakes to CPUs in deep states pays their exits.
+
 **Exit**: on the T14, since a KVM guest's idle is its host's: the idle
 minute's package energy, timer lateness no worse than `hlt`'s by more than
 the chosen state's exit latency, and osbench's `cpu.clock` maximum at ratio

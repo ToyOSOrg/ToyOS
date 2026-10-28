@@ -223,10 +223,27 @@ pub mod diag {
     pub struct CpuCounts {
         pub cpu: u32,
         pub apic: u32,
+        /// The CPU's own counter when it read the rest (the TSC).
+        pub stamp: Option<u64>,
         pub smi: Option<u64>,
         pub aperf: Option<u64>,
         pub mperf: Option<u64>,
         pub kicks: Option<u64>,
+        /// Core C6 and C7 residency in TSC ticks, where the CPU counts it.
+        pub core_c6: Option<u64>,
+        pub core_c7: Option<u64>,
+        /// Idle periods the kernel chose a declared deep state for, and
+        /// their nanoseconds.
+        pub deep_idles: Option<u64>,
+        pub deep_idle_nanos: Option<u64>,
+    }
+
+    /// The capability's diagnostics for the rows that read the counters
+    /// around them ([`crate::around`]): opened once a process, and `None`
+    /// where the boot endows no capability.
+    pub fn shared() -> Option<&'static Diag> {
+        static SHARED: std::sync::OnceLock<Option<Diag>> = std::sync::OnceLock::new();
+        SHARED.get_or_init(open).as_ref()
     }
 
     pub fn open() -> Option<Diag> {
@@ -247,10 +264,15 @@ pub mod diag {
                     Ok(CpuCounts {
                         cpu: r.cpu,
                         apic: r.hardware_id,
+                        stamp: r.get(Counter::Stamp),
                         smi: r.get(Counter::Smi),
                         aperf: r.get(Counter::Aperf),
                         mperf: r.get(Counter::Mperf),
                         kicks: r.get(Counter::Kicks),
+                        core_c6: r.get(Counter::CoreC6),
+                        core_c7: r.get(Counter::CoreC7),
+                        deep_idles: r.get(Counter::DeepIdles),
+                        deep_idle_nanos: r.get(Counter::DeepIdleNanos),
                     })
                 })
                 .collect()
