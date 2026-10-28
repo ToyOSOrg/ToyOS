@@ -7,7 +7,7 @@
 use alloc::sync::Arc;
 
 use kernel::sched::hw::{CpuId, Machine, Nanos};
-use kernel::sched::task::{Refused, SafePoint, WaitClass, QUANTUM_NS};
+use kernel::sched::task::{Refused, SafePoint, WaitClass, WakeCause, WakeReason, QUANTUM_NS};
 
 use crate::arch::percpu;
 use crate::watch::{self, Cancel, Watch};
@@ -262,11 +262,23 @@ pub fn wake_pipe_readers(pipe: &PipeRef) {
 /// is real-time; `mark` records the loan for a consumer already runnable,
 /// which takes it with [`boost_current_rt_inherited`].
 pub fn post_lending(watch: &Watch, mark: impl FnOnce()) {
-    if driver::current_is_rt() {
-        mark();
-        watch.post_boosted(boost_window());
-    } else {
-        watch.post();
+    watch.post_as(lending(mark));
+}
+
+/// [`post_lending`] from a thread that parks next in the same call, on this
+/// CPU: the scheduler may run whoever it wakes where the poster leaves
+/// (`WakeCause::parks_next`).
+pub fn post_lending_parking(watch: &Watch, mark: impl FnOnce()) {
+    watch.post_as(lending(mark).parks_next(driver::current_cpu()));
+}
+
+fn lending(mark: impl FnOnce()) -> WakeCause {
+    match driver::current_is_rt() {
+        true => {
+            mark();
+            WakeCause::boosted(WakeReason::Woken, boost_window())
+        }
+        false => WakeCause::new(WakeReason::Woken),
     }
 }
 

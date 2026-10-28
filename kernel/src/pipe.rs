@@ -1,11 +1,7 @@
-use core::ops::Range;
-
+use crate::frame_bytes::FrameBytes;
 use crate::mm::charge::{self, Charge, Exhausted};
-use crate::mm::{pmm, DirectMap};
 
-use kernel::message::Window;
-use kernel::pipe::{Bytes, End, Holders, Landing, Released, MOST_FRAMES};
-use kernel::sched::job::Job;
+use kernel::pipe::{End, Holders, Released};
 
 use alloc::sync::Arc;
 
@@ -83,111 +79,6 @@ mod handle {
     }
 }
 
-
-/// What a pipe holds: its bytes, in frames counted to the job that made the
-/// pipe, and the heap their list takes, charged to it. The frames go back
-/// when it drops.
-struct Held {
-    bytes: Bytes<u64>,
-    list: Charge,
-}
-
-impl Held {
-    fn new(job: &Arc<Job>) -> Self {
-        Self { bytes: Bytes::new(), list: Charge::none(job) }
-    }
-
-    /// Take the frames a write of `n` bytes wants, all of them or none.
-    fn take_frames(&mut self, n: usize) -> Result<(), Exhausted> {
-        let wants = self.bytes.wants(n);
-        if wants == 0 {
-            return Ok(());
-        }
-        let frames = self.bytes.frames() + wants;
-        if frames > self.bytes.listed() {
-            let list = frames.next_power_of_two().min(MOST_FRAMES);
-            self.list.resize(charge::array::<u64>(list))?;
-            self.bytes.list(list);
-        }
-        let bytes = &mut self.bytes;
-        pmm::alloc_held(self.list.job(), wants, |frame| bytes.add(frame)).then_some(()).ok_or(Exhausted)
-    }
-
-    /// Give back the spares a read left past those it keeps.
-    fn give_back_surplus(&mut self) {
-        // SAFETY: a spare holds no byte, and nothing but this list names it.
-        unsafe { pmm::free_held(self.list.job(), self.bytes.surplus()) };
-    }
-}
-
-impl Drop for Held {
-    fn drop(&mut self) {
-        // SAFETY: nothing but this list names its frames.
-        unsafe { pmm::free_held(self.list.job(), self.bytes.clear()) };
-    }
-}
-
-/// One copy gathered from runs that continue each other in both source and
-/// destination, so a user page's piece over two physically adjacent frames
-/// is one copy, not two.
-struct Gather {
-    from: *const u8,
-    to: *mut u8,
-    len: usize,
-}
-
-impl Gather {
-    const NONE: Self = Self { from: core::ptr::null(), to: core::ptr::null_mut(), len: 0 };
-
-    /// Add `len` bytes from `from` to `to`, copying what was gathered first
-    /// unless these continue it.
-    ///
-    /// # Safety
-    /// `from` is readable and `to` writable for `len` bytes, and stay so
-    /// until the next [`Self::flush`]; the two never overlap.
-    #[inline(always)]
-    unsafe fn add(&mut self, from: *const u8, to: *mut u8, len: usize) {
-        if self.len > 0 && self.from.wrapping_add(self.len) == from && self.to.wrapping_add(self.len) == to {
-            self.len += len;
-            return;
-        }
-        // SAFETY: what was gathered meets this function's contract.
-        unsafe { self.flush() };
-        *self = Self { from, to, len };
-    }
-
-    /// Copy what was gathered.
-    ///
-    /// # Safety
-    /// As [`Self::add`] for every run gathered.
-    #[inline(always)]
-    unsafe fn flush(&mut self) {
-        if self.len > 0 {
-            // SAFETY: the runs gathered are contiguous on both sides and
-            // each met `add`'s contract.
-            unsafe { core::ptr::copy_nonoverlapping(self.from, self.to, self.len) };
-        }
-        *self = Self::NONE;
-    }
-}
-
-/// `within` of a frame a pipe holds, which no process maps and only that
-/// pipe's lock reaches.
-#[inline(always)]
-fn frame_bytes(frame: &u64, within: Range<usize>) -> *mut u8 {
-    if within.end > kernel::pipe::FRAME {
-        past_a_frame(within);
-    }
-    // SAFETY: inside the frame, which the direct map covers.
-    unsafe { DirectMap::from_phys(*frame).as_mut_ptr::<u8>().add(within.start) }
-}
-
-#[cold]
-#[inline(never)]
-fn past_a_frame(within: Range<usize>) -> ! {
-    panic!("pipe: bytes {within:?} past a frame")
-}
-
 struct Pipe {
     state: Lock<State>,
     /// The read end's and the write end's watches. Held by `Arc` so a blocking site or a
@@ -206,14 +97,10 @@ struct Pipe {
 /// What a pipe's lock holds.
 struct State {
     /// Given back once no reader is left to read it.
-    held: Held,
+    held: FrameBytes,
     holders: Holders,
     /// Set when a write should hand the next reader transient RT priority — covers readers already runnable, which the wake-time boost misses.
     rt_boost_pending: bool,
-    /// Bytes ever written and ever read: the stream positions a connection's
-    /// batches are pinned at (`kernel::message`), which never wrap.
-    written: u64,
-    read: u64,
 }
 
 impl Pipe {
@@ -229,9 +116,9 @@ impl Pipe {
 /// what it needs, or is refused if none is left.
 pub fn create() -> Result<(PipeReader, PipeWriter), Exhausted> {
     let charge = Charge::current(Pipe::heap())?;
-    let held = Held::new(charge.job());
+    let held = FrameBytes::new(charge.job());
     let pipe = PipeRef(Arc::new(Pipe {
-        state: Lock::new(State { held, holders: Holders::new(), rt_boost_pending: false, written: 0, read: 0 }),
+        state: Lock::new(State { held, holders: Holders::new(), rt_boost_pending: false }),
         read_watch: Arc::new(Watch::new()),
         write_watch: Arc::new(Watch::new()),
         left: [Arc::new(Watch::new()), Arc::new(Watch::new())],
@@ -240,14 +127,9 @@ pub fn create() -> Result<(PipeReader, PipeWriter), Exhausted> {
     Ok((PipeReader::acquire(&pipe), PipeWriter::acquire(&pipe)))
 }
 
-/// A read stopped at a batch pinned where the reader is.
-#[derive(Debug)]
-pub struct AtBatch;
-
 pub enum PipeWrite {
-    /// This many bytes, the stream ending at `end`.
-    Wrote { n: usize, end: u64 },
-    /// Not the room its landing needs now: wait for `Landing::room`.
+    Wrote(usize),
+    /// Not the room the write needs now: wait for `kernel::pipe::room`.
     NoRoom,
     BrokenPipe,
     /// The memory its bytes need could not be taken; no wait for room makes
@@ -261,50 +143,15 @@ impl PipeRef {
     }
 
     pub fn try_read(&self, buf: &mut UserBytesMut) -> Option<usize> {
-        self.try_read_within(buf, |_, available| Window::Bytes(available))
-            .map(|read| read.expect("a read with no window stops nowhere"))
-    }
-
-    /// [`Self::try_read`], taking only what `window` allows of the bytes the
-    /// pipe holds, given the reader's stream position: [`AtBatch`] where it
-    /// says the reader is at a pinned batch.
-    pub fn try_read_within(
-        &self,
-        buf: &mut UserBytesMut,
-        window: impl FnOnce(u64, usize) -> Window,
-    ) -> Option<Result<usize, AtBatch>> {
         let (result, boost) = {
             let mut pipe = self.0.state.lock();
-            let available = pipe.held.bytes.len();
-            let limit = match window(pipe.read, available) {
-                Window::AtBatch => return Some(Err(AtBatch)),
-                Window::Bytes(limit) => limit,
-            };
-            if available > 0 && limit > 0 {
-                let len = buf.len().min(limit);
-                let n = len.min(available);
-                let bytes = &mut pipe.held.bytes;
-                // One walk of the user window, each pinned piece copied out of
-                // the frames it covers.
-                buf.write_pieces(0, n, |to, at, piece| {
-                    let mut gather = Gather::NONE;
-                    bytes.peek(at, piece, |frame, within, off| {
-                        // SAFETY: `to` is valid for `piece` bytes until this
-                        // walk's callback returns, and `off + within.len()` is
-                        // at most `piece`; the frame is this pipe's alone,
-                        // reached only under its lock, and no process maps it.
-                        unsafe { gather.add(frame_bytes(frame, within.clone()), to.add(off), within.len()) }
-                    });
-                    // SAFETY: as above, before the callback returns.
-                    unsafe { gather.flush() };
-                });
-                bytes.consume(n);
-                pipe.held.give_back_surplus();
-                pipe.read += n as u64;
-                let boost = core::mem::take(&mut pipe.rt_boost_pending);
-                (Some(Ok(n)), boost)
+            let available = pipe.held.len();
+            if available > 0 {
+                let n = buf.len().min(available);
+                pipe.held.read(buf, n);
+                (Some(n), core::mem::take(&mut pipe.rt_boost_pending))
             } else if !pipe.holders.held(End::Write) && available == 0 {
-                (Some(Ok(0)), false)
+                (Some(0), false)
             } else {
                 (None, false)
             }
@@ -316,49 +163,29 @@ impl PipeRef {
         result
     }
 
-    /// The stream position the reader is at: every byte read so far.
-    pub fn read_position(&self) -> u64 {
-        self.0.state.lock().read
-    }
-
-    /// Write `buf` as `landing` has it land, under the one lock hold.
-    pub fn write(&self, buf: &UserBytes, landing: Landing) -> PipeWrite {
+    /// Write `buf` as a pipe write lands (`kernel::pipe::takes`), under the
+    /// one lock hold.
+    pub fn write(&self, buf: &UserBytes) -> PipeWrite {
         let mut pipe = self.0.state.lock();
         if !pipe.holders.held(End::Read) {
             return PipeWrite::BrokenPipe;
         }
-        let Some(n) = landing.takes(pipe.held.bytes.space(), buf.len()) else { return PipeWrite::NoRoom };
-        if pipe.held.take_frames(n).is_err() {
+        let Some(n) = kernel::pipe::takes(pipe.held.space(), buf.len()) else { return PipeWrite::NoRoom };
+        if pipe.held.write(buf, n).is_err() {
             return PipeWrite::NoMemory;
         }
-        let bytes = &mut pipe.held.bytes;
-        // One walk of the user window, each pinned piece copied into the
-        // frames it covers.
-        buf.read_pieces(0, n, |from, at, piece| {
-            let mut gather = Gather::NONE;
-            bytes.place(at, piece, |frame, within, off| {
-                // SAFETY: `from` is valid for `piece` bytes until this walk's
-                // callback returns, and `off + within.len()` is at most `piece`;
-                // the frame is this pipe's alone, as above.
-                unsafe { gather.add(from.add(off), frame_bytes(frame, within.clone()), within.len()) }
-            });
-            // SAFETY: as above, before the callback returns.
-            unsafe { gather.flush() };
-        });
-        bytes.commit(n);
-        pipe.written += n as u64;
-        PipeWrite::Wrote { n, end: pipe.written }
+        PipeWrite::Wrote(n)
     }
 
     pub fn has_data(&self) -> bool {
         let pipe = self.0.state.lock();
-        pipe.holders.readable(pipe.held.bytes.len())
+        pipe.holders.readable(pipe.held.len())
     }
 
     /// Whether a write waiting for `want` bytes of room answers now.
     pub fn has_space(&self, want: usize) -> bool {
         let pipe = self.0.state.lock();
-        pipe.holders.writable(pipe.held.bytes.space(), want)
+        pipe.holders.writable(pipe.held.space(), want)
     }
 
     /// Whether the end opposite `end` of this pipe has no holder left.
@@ -378,9 +205,9 @@ impl PipeRef {
         let (released, unread) = {
             let mut pipe = self.0.state.lock();
             let released = pipe.holders.release(end);
-            let unread = (!pipe.holders.held(End::Read) && pipe.held.bytes.frames() > 0).then(|| {
-                let job = Arc::clone(pipe.held.list.job());
-                core::mem::replace(&mut pipe.held, Held::new(&job))
+            let unread = (!pipe.holders.held(End::Read) && pipe.held.frames() > 0).then(|| {
+                let job = Arc::clone(pipe.held.job());
+                core::mem::replace(&mut pipe.held, FrameBytes::new(&job))
             });
             (released, unread)
         };

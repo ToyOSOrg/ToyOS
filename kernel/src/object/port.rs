@@ -13,22 +13,20 @@ use alloc::sync::Arc;
 use core::sync::atomic::{AtomicU64, Ordering};
 
 use crate::mm::charge::{self, Exhausted};
-use crate::pipe::{PipeReader, PipeWriter};
+use crate::message::{Receiver, Sender};
 use crate::sync::Lock;
 use crate::watch::Watch;
 
-use super::service::HandleQueue;
 use super::{KObjectVariant, ObjectCore, ZeroHandles};
 
 /// Unaccepted connections one port may hold; past it, connect returns `ResourceExhausted`.
 pub const MAX_PENDING_CONNECTIONS: usize = 32;
 
-/// A connection nobody has accepted yet: owns the server's pipe ends and handle queues.
+/// A connection nobody has accepted yet: owns the server's ends of its two
+/// directions.
 pub struct PendingConnection {
-    pub rx: PipeReader,
-    pub tx: PipeWriter,
-    pub inbox: Arc<HandleQueue>,
-    pub outbox: Arc<HandleQueue>,
+    pub rx: Receiver,
+    pub tx: Sender,
     /// [`Connector::stamp`] of the connector the client connected through.
     pub stamp: Stamp,
 }

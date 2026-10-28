@@ -69,7 +69,6 @@ pub(crate) fn of(e: SyscallError) -> i32 {
         SyscallError::ResourceExhausted => ENOMEM,
         SyscallError::NotSupported => EOPNOTSUPP,
         // A read of a connection met handles no frame announced: the peer broke its protocol.
-        SyscallError::HandlesPending => EPROTO,
         _ => EINVAL,
     }
 }

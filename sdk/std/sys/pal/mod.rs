@@ -33,7 +33,6 @@ pub fn to_io_error(e: toyos_abi::syscall::SyscallError) -> crate::io::Error {
         SyscallError::Io => ErrorKind::Other,
         SyscallError::Gone => ErrorKind::BrokenPipe,
         // A read of a connection met handles the peer sent with no frame announcing them.
-        SyscallError::HandlesPending => ErrorKind::InvalidData,
     };
     crate::io::Error::from(kind)
 }
