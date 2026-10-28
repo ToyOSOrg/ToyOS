@@ -10,6 +10,8 @@ use toyos_abi::handle::Rights;
 use toyos_abi::syscall;
 use toyos_abi::RawHandle;
 
+use crate::{AsHandle, BorrowedHandle, OwnedHandle};
+
 use super::NetError;
 
 /// What a holder keeps of its connection: it reads, writes and waits on it, and duplicates it
@@ -19,12 +21,27 @@ pub(super) const HELD_CONNECTION: Rights = Rights::DUP.union(Rights::WAIT).union
 /// What a holder keeps of a bell netstack rings: it reads and waits on it, and duplicates it.
 pub(super) const HELD_BELL: Rights = Rights::DUP.union(Rights::WAIT).union(Rights::READ);
 
-/// `handle` held with `rights` alone, the original closed: refused, the original is closed all
-/// the same.
-pub(super) fn narrowed(handle: RawHandle, rights: Rights) -> Result<RawHandle, NetError> {
-    let narrowed = syscall::dup_narrowed(handle, rights);
-    syscall::close(handle);
-    narrowed.map_err(|_| NetError::Io)
+/// `handle` held with `rights` alone, the original closed, as a number the table keeps from
+/// here: refused, the original is closed all the same.
+pub(super) fn narrowed(handle: OwnedHandle, rights: Rights) -> Result<RawHandle, NetError> {
+    handle.as_handle().try_clone_narrowed(rights).map(OwnedHandle::into_raw).map_err(|_| NetError::Io)
+}
+
+/// A handle an end keeps, lent for a call: **an end's handles are closed only by its module's
+/// `free`, once no handle and no call reaches it**, so one is live for as long as a call is
+/// counted in.
+pub(super) fn kept<'a>(raw: RawHandle) -> BorrowedHandle<'a> {
+    // SAFETY: the invariant above.
+    unsafe { BorrowedHandle::borrow_raw(raw) }
+}
+
+/// Close a handle an end kept, from its module's `free`.
+///
+/// # Safety
+/// No handle and no call reaches the end any more, and `raw` is one of its own.
+pub(super) unsafe fn close_kept(raw: RawHandle) {
+    // SAFETY: the caller's.
+    unsafe { syscall::close(raw) }
 }
 
 /// A slot of the table. `repr(u8)` puts `Free` at zero, so a table costs a program that makes no

@@ -36,7 +36,7 @@ fn watch_reports_only_the_readiness_that_fired() {
     };
     *submission = Submission::default();
     submission.op = OP_WATCH;
-    submission.handle = read.as_handle();
+    submission.handle = read.as_handle().raw();
     submission.op_flags = READABLE | WRITABLE;
     submission.token = 0x5EED;
     ring.tail.store(head.wrapping_add(1), Ordering::Release);
@@ -62,7 +62,8 @@ fn watch_reports_only_the_readiness_that_fired() {
         completion.result,
     );
 
-    syscall::close(inbox);
+    // SAFETY: no type holds this number.
+    unsafe { syscall::close(inbox) };
     println!("watch result: a two-direction watch reports the direction that fired");
 }
 
@@ -97,7 +98,8 @@ fn one_submission(op: u8, flags: u8, op_flags: u32, handle: toyos_abi::RawHandle
     };
     assert_eq!(completion.token, 0x5EED, "the completion is for another submission");
     let result = completion.result;
-    syscall::close(inbox);
+    // SAFETY: no type holds this number.
+    unsafe { syscall::close(inbox) };
     result
 }
 
@@ -115,12 +117,12 @@ fn a_submission_word_outside_what_the_abi_defines_is_refused() {
     let handle = read.as_handle();
 
     assert_eq!(
-        one_submission(OP_WATCH, 0, READABLE | UNDEFINED_INTEREST, handle),
+        one_submission(OP_WATCH, 0, READABLE | UNDEFINED_INTEREST, handle.raw()),
         invalid,
         "a watch asking for an interest this ABI does not define was registered",
     );
     assert_eq!(
-        one_submission(OP_WATCH, 0, READABLE, handle),
+        one_submission(OP_WATCH, 0, READABLE, handle.raw()),
         READABLE as i32,
         "the same watch without the bit did not report the readiness that fired",
     );
@@ -177,7 +179,8 @@ fn main() {
     let completions = syscall::inbox_submit(inbox, 1, 1, 0).expect("honest NOP submission");
     assert_eq!(completions, 1, "NOP did not complete after the rejected batches");
 
-    syscall::close(inbox);
+    // SAFETY: no type holds this number.
+    unsafe { syscall::close(inbox) };
     println!("submission ring header abuse rejected, inbox still usable");
 
     watch_reports_only_the_readiness_that_fired();

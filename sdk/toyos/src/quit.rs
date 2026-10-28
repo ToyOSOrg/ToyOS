@@ -47,14 +47,14 @@ fn reason(byte: u8) -> Reason {
 }
 
 impl AsHandle for Notice {
-    fn as_handle(&self) -> RawHandle {
-        self.0.raw()
+    fn as_handle(&self) -> crate::BorrowedHandle<'_> {
+        self.0.as_handle()
     }
 }
 
 impl FromHandle for Notice {
-    unsafe fn from_handle(raw: RawHandle) -> Self {
-        Self(OwnedHandle(raw))
+    fn from_handle(handle: OwnedHandle) -> Self {
+        Self(handle)
     }
 }
 

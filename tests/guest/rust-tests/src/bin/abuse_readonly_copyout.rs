@@ -18,7 +18,7 @@
 #[path = "../image.rs"]
 mod image;
 
-use std::os::toyos::process::ChildExt;
+use std::os::toyos::io::AsRawHandle;
 use std::process::Command;
 
 use toyos_abi::clock::{ClockPage, CLOCK_MAGIC, CLOCK_PAGE};
@@ -73,7 +73,8 @@ fn refused(what: &str, addr: u64, stats: RawHandle) -> Result<(), String> {
     let before = snapshot(addr);
     let fd = open_self();
     let ret = syscall::read(fd, unsafe { target(addr, LEN) });
-    syscall::close(fd);
+    // SAFETY: no type holds this number.
+    unsafe { syscall::close(fd) };
     if before != snapshot(addr) {
         return Err(format!("read wrote into {what}"));
     }
@@ -126,7 +127,8 @@ fn refused_across_pages() -> Result<(), String> {
         Ok(())
     };
     unsafe { syscall::vm_release(pages, 2 * PAGE_4K as usize) }.expect("release");
-    syscall::close(probe);
+    // SAFETY: no type holds this number.
+    unsafe { syscall::close(probe) };
     syscall::delete(PROBE_PATH).expect("delete the probe file");
     verdict
 }
@@ -153,7 +155,8 @@ fn main() {
     let fd = open_self();
     assert_eq!(syscall::read(fd, &mut ok), Ok(LEN), "read into a writable buffer");
     assert_eq!(&ok[..4], b"\x7fELF", "read put something other than this file in the buffer");
-    syscall::close(fd);
+    // SAFETY: no type holds this number.
+    unsafe { syscall::close(fd) };
     syscall::process_stats(stats, &mut ProcessStats::default()).expect("process_stats into a writable value");
 
     let mut wrote = 0;

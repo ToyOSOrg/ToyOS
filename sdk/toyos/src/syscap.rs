@@ -70,14 +70,13 @@ impl SysCap {
     /// as long as `job`'s handle and its duplicates live. Needs
     /// [`Rights::FLOOR`], which the supervisor alone holds.
     pub fn hold_floor(&self, job: &crate::job::Job, bytes: u64) -> Result<(), SyscallError> {
-        syscall::job_floor(self.0.raw(), job.as_handle(), bytes)
+        syscall::job_floor(self.0.raw(), job.as_handle().raw(), bytes)
     }
 
     fn mint<T: FromHandle>(&self, request: DeviceRequest) -> Result<T, SyscallError> {
-        let raw = syscall::device_claim(self.0.raw(), request)?;
-        // SAFETY: the kernel installed this handle in this process's table for
-        // this call and no other, so nothing else answers for it.
-        Ok(unsafe { T::from_handle(raw) })
+        // The kernel installed this handle in this process's table for this
+        // call and no other, so nothing else answers for it.
+        Ok(T::from_handle(OwnedHandle(syscall::device_claim(self.0.raw(), request)?)))
     }
 
     /// A second handle to this capability, carrying the same rights.
@@ -86,7 +85,7 @@ impl SysCap {
     /// the whole tree is the test estate: its binaries mint their own claims,
     /// and one boot runs several that each need the keyboard.
     pub fn duplicate(&self) -> Result<Self, SyscallError> {
-        syscall::dup(self.0.raw()).map(|h| Self(OwnedHandle(h)))
+        self.0.try_clone().map(Self)
     }
 
     /// Enter the real-time band. A device claim was never enough to confer
@@ -214,7 +213,7 @@ impl SysCap {
     /// How the supervisor gives a program the RT band and nothing else: rights only
     /// shrink, so the dup can never mint a claim however the holder asks.
     pub fn narrowed(&self, rights: Rights) -> Result<Self, SyscallError> {
-        syscall::dup_narrowed(self.0.raw(), rights).map(|h| Self(OwnedHandle(h)))
+        self.0.as_handle().try_clone_narrowed(rights).map(Self)
     }
 
     /// Give up ownership, for a handle about to be endowed.
@@ -224,8 +223,8 @@ impl SysCap {
 }
 
 impl AsHandle for SysCap {
-    fn as_handle(&self) -> RawHandle {
-        self.0.raw()
+    fn as_handle(&self) -> crate::BorrowedHandle<'_> {
+        self.0.as_handle()
     }
 }
 

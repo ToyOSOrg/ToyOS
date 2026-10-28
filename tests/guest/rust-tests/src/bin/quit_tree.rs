@@ -12,7 +12,8 @@
 //! clock decides anything.
 
 use std::io::{BufRead, BufReader, Read};
-use std::os::toyos::process::{ChildExt, ExitStatusExt};
+use std::os::toyos::io::AsRawHandle;
+use std::os::toyos::process::ExitStatusExt;
 use std::process::{Child, ChildStdout, Command, Stdio};
 
 use toyos::poller::{Poller, READABLE};
@@ -171,8 +172,10 @@ fn a_quit_needs_manage_and_an_ended_process_is_no_refusal() {
         Err(SyscallError::PermissionDenied),
         "a quit of a handle to no process, as a peer may send one: no such handle carries MANAGE, and the caller lives",
     );
-    toyos_abi::syscall::close(ends.read);
-    toyos_abi::syscall::close(ends.write);
+    // SAFETY: no type holds this number.
+    unsafe { toyos_abi::syscall::close(ends.read) };
+    // SAFETY: no type holds this number.
+    unsafe { toyos_abi::syscall::close(ends.write) };
     child.kill().expect("kill");
     assert_eq!(end(&mut child), End::Killed);
     assert_eq!(quit(&child, Reason::Interrupt), Ok(()), "a quit of an ended process");

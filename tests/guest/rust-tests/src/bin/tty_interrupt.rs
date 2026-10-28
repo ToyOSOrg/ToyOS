@@ -78,9 +78,9 @@ fn until_lines(host: &mut Host, held: &mut usize, lines: usize) {
         if *held == lines {
             return;
         }
-        poller.watch_raw(host.acceptor_handle(), READABLE, 0);
+        poller.watch(&host.acceptor_handle(), READABLE, 0);
         for client in host.client_handles() {
-            poller.watch_raw(client, READABLE, 1);
+            poller.watch(&client, READABLE, 1);
         }
         let mut accept = false;
         poller.wait(1, u64::MAX, |token| accept |= token == 0);
@@ -141,7 +141,7 @@ fn main() {
     }
     let ns = names.add(surface::SERVICE, &connector).finish().expect("the shell's namespace");
     let mut child = Command::new("/system/bin/shell")
-        .endow(SVC_LABEL, ns.into_raw().0)
+        .endow(SVC_LABEL, ns.into())
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .spawn()

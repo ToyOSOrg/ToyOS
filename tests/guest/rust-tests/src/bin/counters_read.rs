@@ -166,5 +166,5 @@ fn unheld() {
 
 /// The kernel handle this process's standard output is, descriptor 1's.
 fn stdout() -> RawHandle {
-    toyos::fd::with(1, |o| o.handle).expect("the test is given a standard output")
+    toyos::fd::with(1, |o| o.handle().map(toyos::BorrowedHandle::raw)).ok().flatten().expect("the test is given a standard output")
 }

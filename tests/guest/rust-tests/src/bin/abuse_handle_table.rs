@@ -123,7 +123,8 @@ fn main() {
     let mut filled = Vec::new();
     let mut refused = None;
     for n in 0..40_000u32 {
-        match syscall::dup(stdout()) {
+        // SAFETY: nothing relies on being the source's only holder.
+        match unsafe { syscall::dup(stdout()) } {
             Ok(handle) => filled.push(handle),
             Err(e) => {
                 refused = Some((n, e));
@@ -143,14 +144,18 @@ fn main() {
 
     // The cap is a live limit, not a latched failure.
     for handle in filled {
-        syscall::close(handle);
+        // SAFETY: no type holds this number.
+        unsafe { syscall::close(handle) };
     }
     // Judged once the table has room again: a panic at the cap aborts with no report.
     assert_eq!(spawned, Err(SyscallError::ResourceExhausted), "a spawn from a full table was not refused");
     // Still this process's: the close ends it if the refused spawn moved it.
-    syscall::close(last);
-    let reused = syscall::dup(stdout()).expect("dup must work again after closing handles");
-    syscall::close(reused);
+    // SAFETY: no type holds this number.
+    unsafe { syscall::close(last) };
+    // SAFETY: nothing relies on being the source's only holder.
+    let reused = unsafe { syscall::dup(stdout()) }.expect("dup must work again after closing handles");
+    // SAFETY: no type holds this number.
+    unsafe { syscall::close(reused) };
 
     unsafe { syscall::vm_release(region, REGION) }.expect("munmap");
     println!("handle table capped at {MAX_HANDLES} on every insert path (refused at {n})");
@@ -173,11 +178,14 @@ fn a_pair_is_refused_whole(filled: &mut Vec<RawHandle>) {
         );
     };
     refused("no slot free");
-    syscall::close(filled.pop().expect("the fill installed a handle"));
+    // SAFETY: no type holds this number.
+    unsafe { syscall::close(filled.pop().expect("the fill installed a handle")) };
     refused("one slot free");
-    filled.push(syscall::dup(stdout()).expect("the one free slot survived two refused pairs"));
+    // SAFETY: nothing relies on being the source's only holder.
+    filled.push(unsafe { syscall::dup(stdout()) }.expect("the one free slot survived two refused pairs"));
     assert_eq!(
-        syscall::dup(stdout()),
+        // SAFETY: nothing relies on being the source's only holder.
+        unsafe { syscall::dup(stdout()) },
         Err(SyscallError::ResourceExhausted),
         "a refused pair left a second slot free"
     );
@@ -222,8 +230,10 @@ fn a_caller_endows_no_self() {
         assert_eq!(syscall::write(ends.write, b"x"), Ok(1), "the end an endowment labelled {label} named is gone");
         let mut byte = [0u8; 1];
         assert_eq!(syscall::read(ends.read, &mut byte), Ok(1), "the byte did not arrive");
-        syscall::close(ends.read);
-        syscall::close(ends.write);
+        // SAFETY: no type holds this number.
+        unsafe { syscall::close(ends.read) };
+        // SAFETY: no type holds this number.
+        unsafe { syscall::close(ends.write) };
     }
 }
 
@@ -258,14 +268,16 @@ fn a_spawn_carries_two_entries_fewer_than_a_table() {
     let child = spawn_endowed(&entries[..fewer], &labels[..used])
         .unwrap_or_else(|e| panic!("a spawn carrying {fewer} entries was refused: {e:?}"));
     assert_eq!(syscall::process_wait(child), Ok(End::Exited(0)), "the child carrying {fewer} entries");
-    syscall::close(child);
+    // SAFETY: no type holds this number.
+    unsafe { syscall::close(child) };
     for &handle in &handles[fewer..] {
-        syscall::close(handle);
+        // SAFETY: no type holds this number.
+        unsafe { syscall::close(handle) };
     }
     println!("an endowment labelled self or quit and {over} entries are refused, and {fewer} start");
 }
 
 /// The kernel handle this process's standard output is, descriptor 1's.
 fn stdout() -> RawHandle {
-    toyos::fd::with(1, |o| o.handle).expect("the test is given a standard output")
+    toyos::fd::with(1, |o| o.handle().map(toyos::BorrowedHandle::raw)).ok().flatten().expect("the test is given a standard output")
 }

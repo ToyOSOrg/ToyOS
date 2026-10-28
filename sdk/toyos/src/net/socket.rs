@@ -40,9 +40,9 @@ use toyos_abi::RawHandle;
 use crate::ipc::{self, Connection};
 use crate::poller::Poller;
 use crate::sync::Lock;
-use crate::OwnedHandle;
+use crate::{AsHandle, BorrowedHandle, OwnedHandle};
 
-use super::ends::{narrowed, Ends, HELD_BELL, HELD_CONNECTION};
+use super::ends::{close_kept, kept, narrowed, Ends, HELD_BELL, HELD_CONNECTION};
 use super::stream::{self, Wait};
 use super::{answer, hangup, BoundResponse, MsgType, NetError, NetstackConn, TcpListenRequest, TcpOptions, UdpBindRequest};
 
@@ -155,10 +155,10 @@ pub const MAX_SOCKETS: usize = 128;
 struct End {
     kind: Kind,
     /// The end's own handle of its connection, which every request is made on and only [`free`]
-    /// closes.
-    connection: RawHandle,
+    /// closes, kept as [`kept`] says.
+    connection: BorrowedHandle<'static>,
     /// The end's own handle of its bell.
-    bell: RawHandle,
+    bell: BorrowedHandle<'static>,
     /// The address its listen or bind named, and the port it holds.
     addr: [u8; 4],
     port: u16,
@@ -174,8 +174,11 @@ static TURNS: [Lock<Option<Poller>>; MAX_SOCKETS] = [const { Lock::new(None) }; 
 /// Lets go of an end no handle or call reaches: its connection, which is its holder's leaving,
 /// and its bell.
 fn free(slot: usize, end: End) {
-    syscall::close(end.connection);
-    syscall::close(end.bell);
+    // SAFETY: no handle and no call reaches the end, whose own these are.
+    unsafe {
+        close_kept(end.connection.raw());
+        close_kept(end.bell.raw());
+    }
     *TURNS[slot].lock() = None;
     TABLE.lock().unreserve(slot);
 }
@@ -187,8 +190,8 @@ fn make_poller(slot: usize) -> Result<(), NetError> {
 }
 
 /// Runs `f` as a call through `handle`, its end kept until it returns.
-fn call<R>(handle: RawHandle, f: impl FnOnce(usize, End) -> Result<R, NetError>) -> Result<R, NetError> {
-    let (slot, end) = TABLE.lock().call(handle).ok_or(NetError::NotASocket)?;
+fn call<R>(handle: BorrowedHandle<'_>, f: impl FnOnce(usize, End) -> Result<R, NetError>) -> Result<R, NetError> {
+    let (slot, end) = TABLE.lock().call(handle.raw()).ok_or(NetError::NotASocket)?;
     let answer = f(slot, end);
     if let Some(end) = TABLE.lock().returned(slot) {
         free(slot, end);
@@ -197,14 +200,14 @@ fn call<R>(handle: RawHandle, f: impl FnOnce(usize, End) -> Result<R, NetError>)
 }
 
 /// A call on a socket of `kind` only.
-fn call_on<R>(handle: RawHandle, kind: Kind, f: impl FnOnce(usize, End) -> Result<R, NetError>) -> Result<R, NetError> {
+fn call_on<R>(handle: BorrowedHandle<'_>, kind: Kind, f: impl FnOnce(usize, End) -> Result<R, NetError>) -> Result<R, NetError> {
     call(handle, |slot, end| if end.kind == kind { f(slot, end) } else { Err(NetError::InvalidInput) })
 }
 
 /// Whether `bell` is readable, waiting for it at most `nanos` on `poller`: rung, or hung up
 /// with netstack. Nothing is read.
-fn rung(poller: &Poller, bell: RawHandle, nanos: u64) -> bool {
-    poller.watch_raw(bell, crate::poller::READABLE, 0);
+fn rung(poller: &Poller, bell: BorrowedHandle<'_>, nanos: u64) -> bool {
+    poller.watch(&bell, crate::poller::READABLE, 0);
     let mut answered = false;
     poller.wait(1, nanos, |_| answered = true);
     answered
@@ -229,12 +232,12 @@ pub(super) struct Drained(());
 
 impl Drained {
     /// [`ACCEPT`] on `listener`, lending the stream's `region`.
-    pub(super) fn accept(self, listener: RawHandle, region: OwnedHandle) -> Result<(), ipc::IpcError> {
+    pub(super) fn accept(self, listener: BorrowedHandle<'_>, region: OwnedHandle) -> Result<(), ipc::IpcError> {
         ipc::signal_with(listener, ACCEPT, [region])
     }
 
     /// [`RECEIVE`] on `connection`.
-    pub(super) fn receive(self, connection: RawHandle) -> Result<(), ipc::IpcError> {
+    pub(super) fn receive(self, connection: BorrowedHandle<'_>) -> Result<(), ipc::IpcError> {
         ipc::signal(connection, RECEIVE)
     }
 }
@@ -252,7 +255,7 @@ trait Bell {
 /// of the wait's own, which the end's other calls do not share.
 struct EndBell {
     slot: usize,
-    bell: RawHandle,
+    bell: BorrowedHandle<'static>,
 }
 
 impl Bell for EndBell {
@@ -271,7 +274,7 @@ impl Bell for EndBell {
 
     fn drain(&self) {
         let mut bytes = [0u8; 64];
-        while let Ok(1..) = syscall::read_nonblock(self.bell, &mut bytes) {}
+        while let Ok(1..) = syscall::read_nonblock(self.bell.raw(), &mut bytes) {}
     }
 }
 
@@ -301,9 +304,9 @@ fn look<T>(bell: &impl Bell, wait: Wait, mut ask: impl FnMut(Drain<'_>) -> Resul
 // ---- listen and bind ----
 
 /// A socket this process made, its first holder: the descriptor's handle, and its port.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Debug)]
 pub struct Bound {
-    pub handle: RawHandle,
+    pub handle: OwnedHandle,
     pub port: u16,
 }
 
@@ -326,7 +329,7 @@ pub fn bind(addr: [u8; 4], port: u16) -> Result<Bound, NetError> {
 /// hands over the bell and makes the connection this process's holder. Refused
 /// [`NetError::ResourceExhausted`] before anything is made where the process holds
 /// [`MAX_SOCKETS`].
-fn open(kind: Kind, addr: [u8; 4], ask: impl FnOnce(NetstackConn) -> Result<(BoundResponse, [RawHandle; 1], Connection), NetError>) -> Result<Bound, NetError> {
+fn open(kind: Kind, addr: [u8; 4], ask: impl FnOnce(NetstackConn) -> Result<(BoundResponse, [OwnedHandle; 1], Connection), NetError>) -> Result<Bound, NetError> {
     let slot = TABLE.lock().reserve().ok_or(NetError::ResourceExhausted)?;
     let made = make_poller(slot).and_then(|()| NetstackConn::connect()).and_then(ask).and_then(|(bound, [bell], connection)| {
         let (descriptor, connection, bell) = take_up(kind, connection.into_owned(), bell)?;
@@ -335,7 +338,7 @@ fn open(kind: Kind, addr: [u8; 4], ask: impl FnOnce(NetstackConn) -> Result<(Bou
     let mut table = TABLE.lock();
     match made {
         Ok((handle, end)) => {
-            table.enter(slot, end, handle);
+            table.enter(slot, end, handle.as_handle().raw());
             Ok(Bound { handle, port: end.port })
         }
         Err(refused) => {
@@ -349,62 +352,62 @@ fn open(kind: Kind, addr: [u8; 4], ask: impl FnOnce(NetstackConn) -> Result<(Bou
 /// A holder's connection and bell, narrowed to what a `kind` socket's holder uses, and a copy of
 /// the bell for the descriptor: the descriptor's, the connection, the bell. Refused, every handle
 /// is closed.
-fn take_up(kind: Kind, connection: OwnedHandle, bell: RawHandle) -> Result<(RawHandle, RawHandle, RawHandle), NetError> {
+fn take_up(kind: Kind, connection: OwnedHandle, bell: OwnedHandle) -> Result<(OwnedHandle, BorrowedHandle<'static>, BorrowedHandle<'static>), NetError> {
     let rights = match kind {
         Kind::Listener => HELD_CONNECTION.union(Rights::TRANSFER),
         Kind::Datagram => HELD_CONNECTION,
     };
-    let connection = narrowed(connection.into_raw(), rights);
+    let connection = narrowed(connection, rights);
     let bell = narrowed(bell, HELD_BELL);
-    match (connection, bell) {
-        (Ok(connection), Ok(bell)) => match syscall::dup(bell) {
-            Ok(descriptor) => Ok((descriptor, connection, bell)),
-            Err(_) => {
-                [connection, bell].into_iter().for_each(syscall::close);
-                Err(NetError::ResourceExhausted)
-            }
+    let refused = match (connection, bell) {
+        (Ok(connection), Ok(bell)) => match kept(bell).try_clone_to_owned() {
+            Ok(descriptor) => return Ok((descriptor, kept(connection), kept(bell))),
+            Err(_) => ([Some(connection), Some(bell)], NetError::ResourceExhausted),
         },
-        (connection, bell) => {
-            connection.into_iter().chain(bell).for_each(syscall::close);
-            Err(NetError::Io)
-        }
-    }
+        (connection, bell) => ([connection.ok(), bell.ok()], NetError::Io),
+    };
+    let (made, why) = refused;
+    // SAFETY: each narrowed here and kept by no end yet.
+    made.into_iter().flatten().for_each(|handle| unsafe { close_kept(handle) });
+    Err(why)
 }
 
 // ---- handles ----
 
 /// The kind of socket `handle` reaches, if it reaches one of this process's. A lookup, and
 /// nothing is written.
-pub fn kind(handle: RawHandle) -> Option<Kind> {
-    TABLE.lock().get(handle).map(|end| end.kind)
+pub fn kind(handle: BorrowedHandle<'_>) -> Option<Kind> {
+    TABLE.lock().get(handle.raw()).map(|end| end.kind)
 }
 
-pub fn is_socket(handle: RawHandle) -> bool {
+pub fn is_socket(handle: BorrowedHandle<'_>) -> bool {
     kind(handle).is_some()
 }
 
 /// The address the socket `handle` reaches is at, as its listen or bind named
 /// it, and the port it holds.
-pub fn local(handle: RawHandle) -> Result<([u8; 4], u16), NetError> {
-    TABLE.lock().get(handle).map(|end| (end.addr, end.port)).ok_or(NetError::NotASocket)
+pub fn local(handle: BorrowedHandle<'_>) -> Result<([u8; 4], u16), NetError> {
+    TABLE.lock().get(handle.raw()).map(|end| (end.addr, end.port)).ok_or(NetError::NotASocket)
 }
 
 /// `handle`, which reaches one of this process's sockets, as a descriptor's object: let go by
 /// this copy of the crate, which holds the end (`crate::fd::SOCKET`).
-pub fn descriptor(handle: RawHandle) -> crate::fd::Object {
+pub fn descriptor(handle: OwnedHandle) -> crate::fd::Object {
     crate::fd::Object::socket(handle, released)
 }
 
 extern "C" fn released(word: u64) {
     if let Ok(handle) = u32::try_from(word) {
-        let_go(RawHandle(handle));
+        // SAFETY: the table gives up a descriptor's handle when it releases
+        // its object, and names it no more.
+        let_go(unsafe { OwnedHandle::from_raw(RawHandle(handle)) });
     }
 }
 
 /// Closes `handle`; the end goes with its last handle and call.
-pub fn let_go(handle: RawHandle) {
-    let forgotten = TABLE.lock().forget(handle);
-    syscall::close(handle);
+pub fn let_go(handle: OwnedHandle) {
+    let forgotten = TABLE.lock().forget(handle.as_handle().raw());
+    drop(handle);
     if let Some(Some((slot, end))) = forgotten {
         free(slot, end);
     }
@@ -414,7 +417,7 @@ pub fn let_go(handle: RawHandle) {
 
 /// The oldest connection waiting at the listener `handle` reaches, as a stream: waiting for one
 /// as `wait` says, [`NetError::WouldBlock`] or [`NetError::TimedOut`] where none came.
-pub fn accept(handle: RawHandle, wait: Wait) -> Result<stream::Accepted, NetError> {
+pub fn accept(handle: BorrowedHandle<'_>, wait: Wait) -> Result<stream::Accepted, NetError> {
     call_on(handle, Kind::Listener, |slot, end| look(&EndBell { slot, bell: end.bell }, wait, |drain| stream::accept(end.connection, drain)))
 }
 
@@ -430,7 +433,7 @@ pub struct Received {
 }
 
 /// `data` as one datagram to `addr`:`port`: the bytes it took, all of them.
-pub fn send_to(handle: RawHandle, addr: [u8; 4], port: u16, data: &[u8]) -> Result<usize, NetError> {
+pub fn send_to(handle: BorrowedHandle<'_>, addr: [u8; 4], port: u16, data: &[u8]) -> Result<usize, NetError> {
     let mut frame = [0u8; MAX_FRAME];
     let frame = datagram(addr, port, data, &mut frame).ok_or(NetError::InvalidInput)?;
     call_on(handle, Kind::Datagram, |slot, end| {
@@ -443,7 +446,7 @@ pub fn send_to(handle: RawHandle, addr: [u8; 4], port: u16, data: &[u8]) -> Resu
 
 /// The oldest datagram waiting at the socket `handle` reaches, into `buf`: waiting for one as
 /// `wait` says, [`NetError::WouldBlock`] or [`NetError::TimedOut`] where none came.
-pub fn recv_from(handle: RawHandle, buf: &mut [u8], wait: Wait) -> Result<Received, NetError> {
+pub fn recv_from(handle: BorrowedHandle<'_>, buf: &mut [u8], wait: Wait) -> Result<Received, NetError> {
     call_on(handle, Kind::Datagram, |slot, end| {
         look(&EndBell { slot, bell: end.bell }, wait, |drain| {
             drain.now().receive(end.connection).map_err(hangup)?;
@@ -460,7 +463,7 @@ pub fn recv_from(handle: RawHandle, buf: &mut [u8], wait: Wait) -> Result<Receiv
 
 /// The socket `handle` reaches connected to `addr`:`port` (POSIX's `connect`), for every holder:
 /// from here it receives only the peer's datagrams, and [`send`] goes there.
-pub fn connect(handle: RawHandle, addr: [u8; 4], port: u16) -> Result<(), NetError> {
+pub fn connect(handle: BorrowedHandle<'_>, addr: [u8; 4], port: u16) -> Result<(), NetError> {
     call_on(handle, Kind::Datagram, |slot, end| {
         let _turn = TURNS[slot].lock();
         ipc::send(end.connection, CONNECT, &Datagram { addr, port, _pad: 0 }).map_err(hangup)?;
@@ -469,7 +472,7 @@ pub fn connect(handle: RawHandle, addr: [u8; 4], port: u16) -> Result<(), NetErr
 }
 
 /// The peer the socket `handle` reaches is connected to, by any of its holders.
-pub fn peer(handle: RawHandle) -> Result<Option<([u8; 4], u16)>, NetError> {
+pub fn peer(handle: BorrowedHandle<'_>) -> Result<Option<([u8; 4], u16)>, NetError> {
     call_on(handle, Kind::Datagram, |slot, end| {
         let _turn = TURNS[slot].lock();
         ipc::signal(end.connection, PEER).map_err(hangup)?;
@@ -486,7 +489,7 @@ pub fn peer(handle: RawHandle) -> Result<Option<([u8; 4], u16)>, NetError> {
 
 /// `data` as one datagram to the connected socket's peer: the bytes it took, all of them.
 /// [`NetError::NotConnected`] for a socket no holder connected.
-pub fn send(handle: RawHandle, data: &[u8]) -> Result<usize, NetError> {
+pub fn send(handle: BorrowedHandle<'_>, data: &[u8]) -> Result<usize, NetError> {
     if data.len() > MAX_DATAGRAM {
         return Err(NetError::InvalidInput);
     }
@@ -500,7 +503,7 @@ pub fn send(handle: RawHandle, data: &[u8]) -> Result<usize, NetError> {
 
 // ---- either's ----
 
-pub fn set_option(handle: RawHandle, option: u32, value: u32) -> Result<(), NetError> {
+pub fn set_option(handle: BorrowedHandle<'_>, option: u32, value: u32) -> Result<(), NetError> {
     call(handle, |slot, end| {
         let _turn = TURNS[slot].lock();
         ipc::send(end.connection, SET_OPTION, &OptionRequest { option, value }).map_err(hangup)?;
@@ -509,7 +512,7 @@ pub fn set_option(handle: RawHandle, option: u32, value: u32) -> Result<(), NetE
 }
 
 /// The value netstack holds for `option`, which any holder may have set.
-pub fn option(handle: RawHandle, option: u32) -> Result<u32, NetError> {
+pub fn option(handle: BorrowedHandle<'_>, option: u32) -> Result<u32, NetError> {
     call(handle, |slot, end| {
         let _turn = TURNS[slot].lock();
         ipc::send(end.connection, OPTION, &option).map_err(hangup)?;
@@ -519,7 +522,7 @@ pub fn option(handle: RawHandle, option: u32) -> Result<u32, NetError> {
 }
 
 /// An answer that carries nothing.
-fn bare(connection: RawHandle) -> Result<(), NetError> {
+fn bare(connection: BorrowedHandle<'_>) -> Result<(), NetError> {
     let header = answer(connection)?;
     match header.is_empty() && header.handles() == 0 {
         true => Ok(()),
@@ -533,7 +536,7 @@ fn bare(connection: RawHandle) -> Result<(), NetError> {
 /// which carries `TRANSFER` so a spawn can endow it, and which `super::adopt_exported` takes up
 /// there.
 /// netstack out of places for it is [`NetError::ResourceExhausted`].
-pub fn export(handle: RawHandle) -> Result<OwnedHandle, NetError> {
+pub fn export(handle: BorrowedHandle<'_>) -> Result<OwnedHandle, NetError> {
     call(handle, |slot, end| {
         let _turn = TURNS[slot].lock();
         stream::ask_export(end.connection)
@@ -545,29 +548,16 @@ pub fn export(handle: RawHandle) -> Result<OwnedHandle, NetError> {
 /// keep no `TRANSFER`. The descriptor's handle; `None`, with everything closed, where the frame
 /// is malformed, the process holds [`MAX_SOCKETS`] or the kernel makes no poller for the end or
 /// will not narrow them.
-pub(super) fn adopted(connection: Connection, payload: &[u8], handles: ipc::Batch) -> Option<RawHandle> {
+pub(super) fn adopted(connection: Connection, payload: &[u8], handles: ipc::Batch) -> Option<OwnedHandle> {
     let adopt: Adopt = ipc::decode_payload(payload).ok()?;
     let [bell] = handles.exact::<1>()?;
-    let Some(kind) = Kind::from_u32(adopt.kind) else {
-        syscall::close(bell);
-        return None;
-    };
-    let slot = TABLE.lock().reserve();
-    let Some(slot) = slot else {
-        syscall::close(bell);
-        return None;
-    };
-    let made = match make_poller(slot) {
-        Ok(()) => take_up(kind, connection.into_owned(), bell),
-        Err(refused) => {
-            syscall::close(bell);
-            Err(refused)
-        }
-    };
+    let kind = Kind::from_u32(adopt.kind)?;
+    let slot = TABLE.lock().reserve()?;
+    let made = make_poller(slot).and_then(|()| take_up(kind, connection.into_owned(), bell));
     let mut table = TABLE.lock();
     match made {
         Ok((descriptor, connection, bell)) => {
-            table.enter(slot, End { kind, connection, bell, addr: adopt.addr, port: adopt.port }, descriptor);
+            table.enter(slot, End { kind, connection, bell, addr: adopt.addr, port: adopt.port }, descriptor.as_handle().raw());
             Some(descriptor)
         }
         Err(_) => {

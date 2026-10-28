@@ -83,7 +83,7 @@ struct Holder(Device);
 
 impl Holder {
     fn handle(&self) -> RawHandle {
-        self.0.as_handle()
+        self.0.as_handle().raw()
     }
 
     fn ask(&self, mut access: Access) -> (Result<u64, Refused>, u8) {
@@ -152,7 +152,7 @@ fn probe() {
     // A holder that dies with the lock: the kernel gives it back with the claim.
     let kept = Command::new(SELF_PATH)
         .arg("keeper")
-        .endow(CLAIM_LABEL, claim(&cap).into_raw().0)
+        .endow(CLAIM_LABEL, claim(&cap).into())
         .stdout(Stdio::piped())
         .output()
         .expect("acpi: spawn the keeper");
@@ -618,9 +618,9 @@ const KEPT: &str = "keeper: holding the Global Lock, and leaving with it";
 fn keeper() {
     let claim: Device = Endowments::get().take(CLAIM_LABEL).expect("acpi: the keeper is endowed the claim");
     bind(&claim);
-    assert_eq!(syscall::acpi_s5(claim.as_handle(), NO_SLEEP_OF_Q35S), Ok(()), "keeper: a sleep type");
-    assert_eq!(syscall::acpi_s5(claim.as_handle(), Q35_SLP_TYP_A), Err(SyscallError::AlreadyExists), "keeper: a second sleep type");
-    assert_eq!(syscall::acpi_lock_take(claim.as_handle()), Ok(true), "keeper: the lock");
+    assert_eq!(syscall::acpi_s5(claim.as_handle().raw(), NO_SLEEP_OF_Q35S), Ok(()), "keeper: a sleep type");
+    assert_eq!(syscall::acpi_s5(claim.as_handle().raw(), Q35_SLP_TYP_A), Err(SyscallError::AlreadyExists), "keeper: a second sleep type");
+    assert_eq!(syscall::acpi_lock_take(claim.as_handle().raw()), Ok(true), "keeper: the lock");
     println!("{KEPT}");
 }
 
@@ -630,7 +630,7 @@ const SUPPLIED: &str = "supplier: this guest's own sleep type supplied, and leav
 fn supplier() {
     let claim: Device = Endowments::get().take(CLAIM_LABEL).expect("acpi: the supplier is endowed the claim");
     bind(&claim);
-    assert_eq!(syscall::acpi_s5(claim.as_handle(), Q35_SLP_TYP_A), Ok(()), "supplier: this guest's sleep type");
+    assert_eq!(syscall::acpi_s5(claim.as_handle().raw(), Q35_SLP_TYP_A), Ok(()), "supplier: this guest's sleep type");
     println!("{SUPPLIED}");
 }
 
@@ -641,7 +641,7 @@ fn outlived() {
     let cap: SysCap = Endowments::get().take(SYSCAP_LABEL).expect("test-runner endows a device-minting capability");
     let left = Command::new(SELF_PATH)
         .arg("supplier")
-        .endow(CLAIM_LABEL, claim(&cap).into_raw().0)
+        .endow(CLAIM_LABEL, claim(&cap).into())
         .stdout(Stdio::piped())
         .output()
         .expect("acpi: spawn the supplier");
@@ -670,7 +670,7 @@ const PRESS_SERVED: &str = "acpi: the press came as one SCI with its status latc
 /// The claim's interrupts since its last read, or `None` for none.
 fn sci(claim: &Device) -> Option<u64> {
     let mut record = [0u8; toyos_abi::pci::DeviceIrqRecord::SIZE];
-    match syscall::read_nonblock(claim.as_handle(), &mut record) {
+    match syscall::read_nonblock(claim.as_handle().raw(), &mut record) {
         Ok(n) => {
             assert_eq!(n, record.len(), "acpi: an interrupt record of {n} bytes");
             Some(u64::from(u32::from_ne_bytes(record[..4].try_into().expect("a count's four bytes"))))
@@ -695,7 +695,7 @@ fn press() {
         out8(info.gpe0.port + i, 0xFF);
     }
     out16(enable, PWRBTN);
-    syscall::write(claim.as_handle(), &ACK.to_ne_bytes()).expect("acpi: the claim's acknowledgement");
+    syscall::write(claim.as_handle().raw(), &ACK.to_ne_bytes()).expect("acpi: the claim's acknowledgement");
     assert_eq!(sci(&claim), None, "acpi: an SCI before the press, with every event but the button off");
     println!("{PRESS_ARMED}");
 
@@ -710,6 +710,6 @@ fn press() {
     assert_eq!(sci(&claim), None, "acpi: a second SCI while the press was unserved");
     out16(status, PWRBTN);
     assert_eq!(in16(status) & PWRBTN, 0, "acpi: PWRBTN_STS stayed set after its clear");
-    syscall::write(claim.as_handle(), &ACK.to_ne_bytes()).expect("acpi: the claim's acknowledgement");
+    syscall::write(claim.as_handle().raw(), &ACK.to_ne_bytes()).expect("acpi: the claim's acknowledgement");
     println!("{PRESS_SERVED}");
 }

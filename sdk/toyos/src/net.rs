@@ -12,7 +12,7 @@ pub mod stream;
 
 use crate::ipc::{IpcError, IpcHeader, IpcPayload};
 use crate::ipc_payload;
-use crate::{Connection, OwnedHandle, RawHandle};
+use crate::{Connection, OwnedHandle};
 
 /// The requests a new connection to netstack carries. Each that makes a
 /// socket makes the connection its first holder's; a request on a socket is
@@ -277,7 +277,7 @@ const MAX_ADOPT: usize = {
 /// so it is there or never sent. `None`, with everything closed, where the
 /// process takes up no holder of it.
 pub fn adopt_exported(end: OwnedHandle) -> Option<crate::fd::Object> {
-    let connection = Connection::received(end.into_raw());
+    let connection = Connection::received(end);
     let mut frames: crate::ipc::FrameRx<MAX_ADOPT> = crate::ipc::FrameRx::new();
     let first = match frames.pump(&connection) {
         crate::ipc::RxStep::Frame { msg_type, payload_len, .. } => {
@@ -333,7 +333,7 @@ pub(crate) fn hangup(e: IpcError) -> NetError {
 /// The header of netstack's answer on `connection`: a [`RespType::Result`]'s,
 /// whose payload and handles are the caller's to read, or the error a
 /// [`RespType::Error`] carries.
-pub(crate) fn answer(connection: RawHandle) -> Result<IpcHeader, NetError> {
+pub(crate) fn answer(connection: crate::BorrowedHandle<'_>) -> Result<IpcHeader, NetError> {
     let header = crate::ipc::recv_header(connection).map_err(hangup)?;
     if header.msg_type == RespType::Error as u32 {
         let err: ErrorResponse = crate::ipc::recv_payload(connection, &header).map_err(hangup)?;
@@ -366,7 +366,7 @@ impl PendingResponse {
 
     /// The answer, the `N` handles it hands over, and the connection, which
     /// is then the caller's.
-    pub fn answer_with_handles<Resp: IpcPayload, const N: usize>(self) -> Result<(Resp, [RawHandle; N], Connection), NetError> {
+    pub fn answer_with_handles<Resp: IpcPayload, const N: usize>(self) -> Result<(Resp, [OwnedHandle; N], Connection), NetError> {
         let header = self.recv_checked_header()?;
         let answer = self.conn().recv_payload(&header).map_err(hangup)?;
         let handles = self.conn().recv_handles_exact::<N>(&header).ok_or(NetError::Protocol(header.msg_type))?;

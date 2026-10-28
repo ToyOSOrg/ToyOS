@@ -272,7 +272,7 @@ pub fn announce(dead: &[Dead]) {
 pub fn note_closed(by: &str, win: &Win, remaining: usize) {
     println!(
         "compositor: window closed client={} by {by}, {remaining} left, presents={} frames={}",
-        win.client.conn.as_handle().0,
+        win.client.conn.as_handle().raw().0,
         win.client.presents,
         win.client.frames
     );
@@ -297,7 +297,7 @@ pub fn note_opened(client: RawHandle, content: toyos_desktop::Rect, live: usize)
 /// is the price of never blocking on a client.
 pub fn deliver<T: ipc::IpcPayload>(dead: &mut Vec<Dead>, win: &Win, msg_type: u32, payload: &T) {
     if let Err(e) = win.client.conn.try_send(msg_type, payload) {
-        mark_dead(dead, win.client.conn.as_handle(), e.into());
+        mark_dead(dead, win.client.conn.as_handle().raw(), e.into());
     }
 }
 
@@ -311,13 +311,13 @@ pub fn deliver_with_handle<T: ipc::IpcPayload>(
     payload: &T,
 ) {
     if let Err(e) = win.client.conn.try_send_with(msg_type, payload, [handle]) {
-        mark_dead(dead, win.client.conn.as_handle(), e.into());
+        mark_dead(dead, win.client.conn.as_handle().raw(), e.into());
     }
 }
 
 /// [`deliver`] for a message that is only its own header.
 pub fn deliver_signal(dead: &mut Vec<Dead>, win: &Win, msg_type: u32) {
     if let Err(e) = win.client.conn.try_signal(msg_type) {
-        mark_dead(dead, win.client.conn.as_handle(), e.into());
+        mark_dead(dead, win.client.conn.as_handle().raw(), e.into());
     }
 }

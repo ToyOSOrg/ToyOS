@@ -140,10 +140,9 @@ pub mod ipc {
         pub fn recv_with(&self, buf: &mut [u8]) -> io::Result<Token> {
             let header = self.0.recv_header().map_err(|e| failed("receive", e))?;
             self.0.recv_bytes(&header, buf).map_err(|e| failed("receive", e))?;
-            let [raw] = self.0.recv_handles_exact::<1>(&header).ok_or_else(|| io::Error::other("no handle came"))?;
-            // SAFETY: the kernel moved this handle into this process's table
-            // for this frame alone, and the peer sends only pipe ends.
-            Ok(unsafe { Pipe::from_handle(raw) })
+            let [handle] = self.0.recv_handles_exact::<1>(&header).ok_or_else(|| io::Error::other("no handle came"))?;
+            // The peer sends only pipe ends.
+            Ok(Pipe::from_handle(handle))
         }
     }
 
@@ -160,7 +159,7 @@ pub mod ipc {
         let conn = names.open(NAME).map_err(|e| failed("connect", e))?;
         let child = Command::new(exe)
             .arg("ipc-serve")
-            .endow(LABEL, acceptor.into_raw().0)
+            .endow(LABEL, acceptor.into())
             .stdin(Stdio::null())
             .spawn()?;
         Ok((child, Peer(conn)))

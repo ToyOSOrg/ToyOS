@@ -25,8 +25,7 @@ pub fn own() -> Result<Job, SyscallError> {
 impl Job {
     /// A second handle to the same job, for a spawn to move.
     pub fn duplicate(&self) -> Result<Job, SyscallError> {
-        // SAFETY: the kernel installed this handle for this call and no other.
-        syscall::dup(self.0.raw()).map(|raw| Job(unsafe { OwnedHandle::from_raw(raw) }))
+        self.0.try_clone().map(Job)
     }
 
     /// What its account holds.
@@ -43,7 +42,7 @@ impl Job {
 }
 
 impl AsHandle for Job {
-    fn as_handle(&self) -> RawHandle {
-        self.0.raw()
+    fn as_handle(&self) -> crate::BorrowedHandle<'_> {
+        self.0.as_handle()
     }
 }

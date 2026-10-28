@@ -31,7 +31,7 @@ fn main() {
     match std::env::args().nth(1).as_deref() {
         Some("exit") => std::process::exit(CODE),
         Some("speak") => {
-            let wrote = toyos::fd::with(1, |o| syscall::write(o.handle, b"x")).expect("the child's descriptor 1");
+            let wrote = toyos::fd::with(1, |o| o.handle().map(|h| syscall::write(h.raw(), b"x"))).ok().flatten().expect("the child's descriptor 1");
             assert_eq!(wrote, Ok(1), "the child's one byte");
         }
         Some(other) => panic!("unknown role {other:?}"),
@@ -49,7 +49,8 @@ fn test() {
         Ok(End::Exited(CODE)),
         "the child had not ended when its spawn answered, so the kernel held nothing"
     );
-    syscall::close(child);
+    // SAFETY: no type holds this number.
+    unsafe { syscall::close(child) };
     a_spawn_from_a_full_table_starts_no_child(&own);
     println!("spawn_child_ends_first: the spawn answered a child that had already ended, and a refused one started none");
 }
@@ -61,7 +62,8 @@ fn a_spawn_from_a_full_table_starts_no_child(own: &Image) {
     let ends = syscall::pipe().expect("a pipe for the child to speak into");
     let mut filled = Vec::new();
     let full = loop {
-        match syscall::dup(ends.read) {
+        // SAFETY: nothing relies on being the source's only holder.
+        match unsafe { syscall::dup(ends.read) } {
             Ok(handle) => filled.push(handle),
             Err(refused) => break refused,
         }
@@ -70,14 +72,17 @@ fn a_spawn_from_a_full_table_starts_no_child(own: &Image) {
     hold_the_next_spawn();
     let spawned = spawn(own, "speak", Some(ends.write));
     for handle in filled {
-        syscall::close(handle);
+        // SAFETY: no type holds this number.
+        unsafe { syscall::close(handle) };
     }
     // Judged once the table has room again: a panic at the cap aborts with no report.
     assert_eq!(spawned, Err(SyscallError::ResourceExhausted), "a spawn from a full table was not refused");
-    syscall::close(ends.write);
+    // SAFETY: no type holds this number.
+    unsafe { syscall::close(ends.write) };
     let mut byte = [0u8; 1];
     assert_eq!(syscall::read(ends.read, &mut byte), Ok(0), "the refused spawn's child started and spoke");
-    syscall::close(ends.read);
+    // SAFETY: no type holds this number.
+    unsafe { syscall::close(ends.read) };
 }
 
 fn hold_the_next_spawn() {

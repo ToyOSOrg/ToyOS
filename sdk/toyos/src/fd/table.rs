@@ -1,8 +1,7 @@
 //! The table's state, without its lock: every decision the table makes,
 //! which a host tests. Nothing in it panics.
 
-use super::{Error, Fd, Object, MAX_FDS};
-use toyos_abi::RawHandle;
+use super::{Error, Fd, Record, MAX_FDS};
 
 /// A descriptor's word: 0 for a free number, else its object's index plus
 /// one, with [`INHERITABLE`] set for an inheritable one. The empty table is
@@ -13,12 +12,12 @@ const _: () = assert!(MAX_FDS < INHERITABLE as usize);
 
 #[derive(Clone, Copy)]
 struct Held {
-    object: Object,
+    object: Record,
     /// The descriptors naming it and the calls holding it; 0 for a free one.
     refs: u32,
 }
 
-const FREE: Held = Held { object: Object::handle(RawHandle(0)), refs: 0 };
+const FREE: Held = Held { object: Record::FREE, refs: 0 };
 
 /// Why a table operation failed: refused, or the table found inconsistent,
 /// which the owner panics on only once its lock is released, since the panic
@@ -72,7 +71,7 @@ impl<const N: usize> Table<N> {
     }
 
     /// A free object holding `object`, referenced once.
-    fn hold(&mut self, object: Object) -> Result<usize, Error> {
+    fn hold(&mut self, object: Record) -> Result<usize, Error> {
         let slot = self.objects.iter().position(|h| h.refs == 0).ok_or(Error::Full)?;
         self.objects[slot] = Held { object, refs: 1 };
         Ok(slot)
@@ -82,21 +81,21 @@ impl<const N: usize> Table<N> {
         self.objects.get_mut(object).filter(|h| h.refs != 0).ok_or(Fault::Broken)
     }
 
-    fn reference(&mut self, object: usize) -> Result<Object, Fault> {
+    fn reference(&mut self, object: usize) -> Result<Record, Fault> {
         let held = self.held(object)?;
         held.refs = held.refs.checked_add(1).ok_or(Fault::Broken)?;
         Ok(held.object)
     }
 
     /// A reference fewer on `object`: the object, once none is left.
-    fn unref(&mut self, object: usize) -> Result<Option<Object>, Fault> {
+    fn unref(&mut self, object: usize) -> Result<Option<Record>, Fault> {
         let held = self.held(object)?;
         held.refs -= 1;
         Ok((held.refs == 0).then(|| core::mem::replace(held, FREE).object))
     }
 
     /// Name `object` by the lowest free descriptor at or above `floor`.
-    pub(super) fn install(&mut self, object: Object, inheritable: bool, floor: Fd) -> Result<Fd, Fault> {
+    pub(super) fn install(&mut self, object: Record, inheritable: bool, floor: Fd) -> Result<Fd, Fault> {
         let fd = self.lowest_free(floor)?;
         let slot = self.hold(object)?;
         self.set(fd, slot, inheritable)?;
@@ -105,7 +104,7 @@ impl<const N: usize> Table<N> {
 
     /// Name `object` by `fd` exactly: `BadFd` for a number past the table
     /// or already open.
-    pub(super) fn install_at(&mut self, fd: Fd, object: Object, inheritable: bool) -> Result<(), Fault> {
+    pub(super) fn install_at(&mut self, fd: Fd, object: Record, inheritable: bool) -> Result<(), Fault> {
         let i = usize::try_from(fd).map_err(|_| Error::BadFd)?;
         if self.fds.get(i) != Some(&0) {
             return Err(Error::BadFd.into());
@@ -126,7 +125,7 @@ impl<const N: usize> Table<N> {
 
     /// `new` on `old`'s object, whatever `new` named before: that object,
     /// if this was its last reference. `new == old` changes nothing.
-    pub(super) fn dup2(&mut self, old: Fd, new: Fd, inheritable: bool) -> Result<Option<Object>, Fault> {
+    pub(super) fn dup2(&mut self, old: Fd, new: Fd, inheritable: bool) -> Result<Option<Record>, Fault> {
         let (_, object, _) = self.entry(old)?;
         let slot = usize::try_from(new).ok().filter(|&i| i < N).ok_or(Error::BadFd)?;
         if new == old {
@@ -142,27 +141,27 @@ impl<const N: usize> Table<N> {
     }
 
     /// Forget `fd`: its object, if this was its last reference.
-    pub(super) fn close(&mut self, fd: Fd) -> Result<Option<Object>, Fault> {
+    pub(super) fn close(&mut self, fd: Fd) -> Result<Option<Record>, Fault> {
         let (i, object, _) = self.entry(fd)?;
         *self.fds.get_mut(i).ok_or(Fault::Broken)? = 0;
         self.unref(object)
     }
 
     /// `fd`'s object, held until [`Self::unuse`] of the token answered.
-    pub(super) fn acquire(&mut self, fd: Fd) -> Result<(usize, Object), Fault> {
+    pub(super) fn acquire(&mut self, fd: Fd) -> Result<(usize, Record), Fault> {
         let (_, object, _) = self.entry(fd)?;
         Ok((object, self.reference(object)?))
     }
 
     /// A call done with the object `token` names: the object, if nothing
     /// names it any more.
-    pub(super) fn unuse(&mut self, token: usize) -> Result<Option<Object>, Fault> {
+    pub(super) fn unuse(&mut self, token: usize) -> Result<Option<Record>, Fault> {
         self.unref(token)
     }
 
     /// Make `fd` name `object` from here on, in place: the object it named,
     /// if this was its last reference. Its flag stays.
-    pub(super) fn replace(&mut self, fd: Fd, object: Object) -> Result<Option<Object>, Fault> {
+    pub(super) fn replace(&mut self, fd: Fd, object: Record) -> Result<Option<Record>, Fault> {
         let (i, old, inheritable) = self.entry(fd)?;
         let slot = self.hold(object)?;
         self.set(i, slot, inheritable)?;
@@ -185,14 +184,14 @@ mod tests {
 
     extern "C" fn nothing(_: u64) {}
 
-    fn o(word: u64) -> Object {
-        Object::opaque(word, nothing)
+    fn o(word: u64) -> Record {
+        Record { handle: toyos_abi::HANDLE_INVALID, tag: super::super::UNTAGGED, word, release: Some(nothing) }
     }
 
     type T = Table<8>;
 
     /// The word of what a removal released, which names it in these tests.
-    fn w(released: Result<Option<Object>, Fault>) -> Result<Option<u64>, Fault> {
+    fn w(released: Result<Option<Record>, Fault>) -> Result<Option<u64>, Fault> {
         released.map(|o| o.map(|o| o.word))
     }
 

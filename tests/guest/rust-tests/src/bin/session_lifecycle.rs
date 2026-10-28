@@ -35,7 +35,7 @@ fn main() {
     let launched = |launcher: &Namespace, program: &str, args: &[&str]| {
         Command::new(program)
             .independent()
-            .launcher(launcher.as_handle().0)
+            .launcher(launcher.as_handle().into())
             .args(args)
             .current_dir("/")
             .output()
@@ -119,7 +119,7 @@ fn detach(launcher: &Namespace) -> u32 {
     let before = live(HOLDER);
     let shell = Command::new("/system/bin/shell")
         .independent()
-        .launcher(launcher.as_handle().0)
+        .launcher(launcher.as_handle().into())
         .args(["-c", &format!("detach /system/bin/{HOLDER}")])
         .stdin(Stdio::null())
         .stdout(Stdio::null())

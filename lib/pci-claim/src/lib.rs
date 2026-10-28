@@ -16,7 +16,7 @@ use std::sync::atomic::{fence, Ordering};
 
 use toyos::shm::SharedMemory;
 use toyos::volatile::Window;
-use toyos::{DmaRegion, PciDev, RawHandle};
+use toyos::{DmaRegion, PciDev};
 use toyos_abi::pci::{DmaMapping, PciFunctionInfo};
 use toyos_abi::syscall::SyscallError;
 use toyos_device_memory::{DmaBuffers, Registers};
@@ -50,7 +50,7 @@ pub fn start(dev: &PciDev) -> Result<(), KernelRefused> {
 
 /// `region`, which a peer lent, put into the claim's function's domain
 /// (`PciDev::dma_map`).
-pub fn lend(dev: &PciDev, region: RawHandle) -> Result<DmaMapping, KernelRefused> {
+pub fn lend(dev: &PciDev, region: toyos::BorrowedHandle<'_>) -> Result<DmaMapping, KernelRefused> {
     let call = "the lent region's mapping";
     dev.dma_map(region).map_err(|e| KernelRefused { call, why: Why::of_lent(call, e) })
 }

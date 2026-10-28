@@ -21,7 +21,6 @@
 use std::io::{BufRead, BufReader, Write};
 use std::net::{Ipv4Addr, SocketAddr, TcpListener, UdpSocket};
 use std::os::fd::FromRawFd;
-use std::os::toyos::io::AsRawHandle;
 use std::os::toyos::process::CommandExt;
 use std::process::{Command, Stdio};
 
@@ -61,8 +60,8 @@ fn main() {
         Command::new(SELF_PATH)
             .arg(role)
             .arg(port.to_string())
-            .inherit_handle(LISTENER_FD as u32, listener.as_raw_handle())
-            .inherit_handle(DATAGRAM_FD as u32, socket.as_raw_handle())
+            .inherit_handle(LISTENER_FD as u32, std::os::toyos::io::AsHandle::as_handle(&listener))
+            .inherit_handle(DATAGRAM_FD as u32, std::os::toyos::io::AsHandle::as_handle(&socket))
             .stdout(Stdio::piped())
             .spawn()
             .unwrap_or_else(|e| panic!("spawn the {role} with a holder of each socket: {e}"))

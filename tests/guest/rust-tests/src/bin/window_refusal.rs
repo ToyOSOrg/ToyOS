@@ -86,7 +86,7 @@ fn server() {
     // The child is spawned holding exactly one connector, and it points here.
     let mut child = Command::new(SELF_PATH)
         .arg("client")
-        .endow(SVC_LABEL, child_ns.into_raw().0)
+        .endow(SVC_LABEL, child_ns.into())
         .stdout(Stdio::inherit())
         .spawn()
         .expect("window_refusal: spawn the client");

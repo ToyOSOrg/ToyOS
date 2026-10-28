@@ -5,6 +5,17 @@
 //! outside that table: a number lifted out of another process's log, or counted
 //! up from zero, resolves to that process's own slot or to nothing at all — so
 //! holding a number is never the authority.
+//!
+//! **Only an owner ends, moves, duplicates or lends a handle.** The calls that
+//! do (`close`, `message_send`'s handles, `dup`, `dup_narrowed`, `shm_sub`,
+//! `shm_map`, `device_dma_map` and a spawn's endowment) are `unsafe`
+//! here, since a safe type over the same slot (a mapping, an exclusive writer)
+//! would otherwise be undone by a number. A call that only acts on the object
+//! (`read`, `write`, `fstat`, a poll) stays safe over a number: misdirected, it
+//! reaches the wrong object's protocol, not freed memory. Above this crate,
+//! every API takes an owned or borrowed handle (`toyos::OwnedHandle`,
+//! `toyos::BorrowedHandle`, `std::os::toyos::io`), so a raw number reaches it
+//! only through a visible conversion.
 
 crate::user_safe! {
     /// One entry in a process's handle table.

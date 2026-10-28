@@ -26,7 +26,6 @@ use toyos::fd::Kind;
 use toyos::process::{End, Process};
 use toyos::spawn::{Parent, Refused, Spawn, Start};
 use toyos_abi::syscall;
-use toyos_abi::RawHandle;
 
 use crate::errcode::{E2BIG, EACCES, EAGAIN, EBADF, ECHILD, EINTR, EINVAL, ENOENT, EPERM, ESRCH};
 use crate::pthread::Lock;
@@ -294,18 +293,23 @@ fn spawn_counted(path: &str, argv: &[u8], env: &[u8], actions: &[Action<Box<[u8]
         |fd| {
             let Some((copy, kind)) = toyos::fd::copy(fd as i32).map_err(errno_of)? else { return Ok(None) };
             let Ok(inheritable) = toyos::fd::inheritable(fd as i32) else { return Ok(None) };
-            let handle = toyos::AsHandle::as_handle(&copy);
+            let handle = toyos::AsHandle::as_handle(&copy).raw();
             held.push(copy);
             Ok(Some(((handle, kind), !inheritable)))
         },
         actions,
         |path, oflag, mode| crate::posix_io::open_handle(path, oflag, mode).map(|h| (h, Kind::Handle)),
-        |(handle, _)| syscall::close(handle),
+        // SAFETY: a file the plan opened and names nowhere else.
+        |(handle, _)| unsafe { syscall::close(handle) },
     )?;
-    let fds: Vec<(u32, RawHandle, Kind)> = plan.fds.iter().map(|&(fd, (handle, kind))| (fd, handle, kind)).collect();
+    // SAFETY: each a file the plan opened or a copy `held` owns, both closed
+    // only once the spawn has returned.
+    let fds: Vec<(u32, toyos::BorrowedHandle<'_>, Kind)> =
+        plan.fds.iter().map(|&(fd, (handle, kind))| (fd, unsafe { toyos::BorrowedHandle::borrow_raw(handle) }, kind)).collect();
     let started = start(path, argv, env, &fds);
     for (handle, _) in plan.opened {
-        syscall::close(handle);
+        // SAFETY: a file the plan opened, closed once.
+        unsafe { syscall::close(handle) };
     }
     drop(held);
     let process = started?;
@@ -323,7 +327,7 @@ fn spawn_counted(path: &str, argv: &[u8], env: &[u8], actions: &[Action<Box<[u8]
 
 /// A helper, from this process's own working directory: C's children are
 /// never launches.
-fn start(path: &str, argv: &[u8], env: &[u8], fds: &[(u32, RawHandle, Kind)]) -> Result<Process, i32> {
+fn start(path: &str, argv: &[u8], env: &[u8], fds: &[(u32, toyos::BorrowedHandle<'_>, Kind)]) -> Result<Process, i32> {
     let mut cwd = alloc::vec![0u8; syscall::MAX_PATH];
     let n = syscall::getcwd(&mut cwd);
     let cwd = core::str::from_utf8(&cwd[..n]).map_err(|_| EINVAL)?;
@@ -336,8 +340,8 @@ fn start(path: &str, argv: &[u8], env: &[u8], fds: &[(u32, RawHandle, Kind)]) ->
         env,
         cwd,
         fds,
-        endow: &[],
-        provided: &[],
+        endow: Vec::new(),
+        provided: Vec::new(),
         parent: Parent::Caller,
         independent: false,
     };
@@ -432,9 +436,7 @@ pub(crate) fn unraised() -> Vec<i32> {
 pub(crate) fn copy_of(pid: i32) -> Option<toyos::OwnedHandle> {
     let children = CHILDREN.lock();
     let child = children.iter().find(|c| c.pid == pid)?;
-    let copy = syscall::dup(toyos::AsHandle::as_handle(&child.process)).ok()?;
-    // SAFETY: a copy just made, which nothing else answers for.
-    Some(unsafe { toyos::OwnedHandle::from_raw(copy) })
+    toyos::AsHandle::as_handle(&child.process).try_clone_to_owned().ok()
 }
 
 /// Whether `pid` has ended and not yet raised `SIGCHLD`, which it now has.
@@ -472,7 +474,7 @@ fn wait_child(pid: i32, block: bool) -> Result<Option<(i32, End, toyos_abi::sysc
         let ignored = crate::signal::children_ignored();
         // Copies of the handles, watched with the table given up: a reap on
         // another thread closes the table's own.
-        let watched: Vec<(i32, RawHandle)> = {
+        let watched: Vec<(i32, toyos::OwnedHandle)> = {
             let mut children = CHILDREN.lock();
             // Each child's end is read once, and that read alone decides: a
             // child that ends after it is the next turn's.
@@ -498,26 +500,23 @@ fn wait_child(pid: i32, block: bool) -> Result<Option<(i32, End, toyos_abi::sysc
             };
             let mut copies = Vec::with_capacity(running.len());
             for child in running {
-                match syscall::dup(toyos::AsHandle::as_handle(&child.process)) {
+                match toyos::AsHandle::as_handle(&child.process).try_clone_to_owned() {
                     Ok(copy) => copies.push((child.pid, copy)),
-                    Err(e) => {
-                        copies.into_iter().for_each(|(_, h)| syscall::close(h));
-                        return Err(crate::errcode::of(e));
-                    }
+                    Err(e) => return Err(crate::errcode::of(e)),
                 }
             }
             copies
         };
         let poller = toyos::poller::Poller::new(watched.len() as u32 + 1);
         for (i, (_, handle)) in watched.iter().enumerate() {
-            poller.watch_raw(*handle, toyos::poller::READABLE, i as u64);
+            poller.watch(handle, toyos::poller::READABLE, i as u64);
         }
-        poller.watch_raw(call.wake(), toyos::poller::READABLE, u64::MAX);
+        poller.watch(&call.wake(), toyos::poller::READABLE, u64::MAX);
         // Whatever woke it, the next turn looks: an ended child is reaped
         // there, or forgotten under an ignored `SIGCHLD`.
         poller.wait(1, u64::MAX, |_| {});
         drop(poller);
-        watched.iter().for_each(|(_, h)| syscall::close(*h));
+        drop(watched);
     }
 }
 
@@ -675,7 +674,7 @@ pub unsafe extern "C" fn popen(command: *const u8, mode: *const u8) -> *mut crat
             return ptr::null_mut();
         }
     };
-    let ends = match syscall::pipe() {
+    let (read, write) = match toyos::pipe_pair() {
         Ok(ends) => ends,
         Err(e) => {
             crate::errno::set(crate::errcode::of(e));
@@ -683,11 +682,11 @@ pub unsafe extern "C" fn popen(command: *const u8, mode: *const u8) -> *mut crat
         }
     };
     let (theirs, ours, child) = match reading {
-        true => (ends.write, ends.read, 1),
-        false => (ends.read, ends.write, 0),
+        true => (write, read, 1),
+        false => (read, write, 0),
     };
     // Both ends as descriptors, this process's own closed on exec.
-    let (theirs, ours) = match (crate::posix_io::install(theirs, true), crate::posix_io::install(ours, true)) {
+    let (theirs, ours) = match (crate::posix_io::install(theirs.into(), true), crate::posix_io::install(ours.into(), true)) {
         (Ok(theirs), Ok(ours)) => (theirs, ours),
         (theirs, ours) => {
             for fd in [theirs, ours].into_iter().flatten() {

@@ -16,7 +16,8 @@
 //! Its verdict is its exit code; it prints the shares it measured.
 
 use std::io::Read;
-use std::os::toyos::process::{ChildExt, CommandExt};
+use std::os::toyos::io::AsRawHandle;
+use std::os::toyos::process::CommandExt;
 use std::process::{Child, Command, Stdio};
 use std::thread;
 use std::time::Duration;
@@ -70,7 +71,7 @@ fn run() {
                 Command::new(ME)
                     .args(["spin", &threads.to_string()])
                     .stdin(Stdio::piped())
-                    .endow(JOB_LABEL, copy.into_raw().0)
+                    .endow(JOB_LABEL, copy.into())
                     .spawn()
                     .expect("spawn a helper into its job")
             })

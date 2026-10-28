@@ -10,7 +10,6 @@
 
 use toyos::shm::Bytes;
 use toyos::AsHandle;
-use toyos_abi::RawHandle;
 
 use crate::virtio;
 
@@ -63,7 +62,7 @@ pub(crate) trait Backend {
     fn pipeline(&self) -> Pipeline;
 
     /// The handle a completion arrives on.
-    fn handle(&self) -> RawHandle;
+    fn handle(&self) -> toyos::BorrowedHandle<'_>;
 
     /// Period `idx` of the memory the device plays from, mapped once at
     /// claim, which the driver or the device may reach meanwhile.
@@ -108,7 +107,7 @@ impl Backend for VirtioBackend {
         Pipeline::Queue
     }
 
-    fn handle(&self) -> RawHandle {
+    fn handle(&self) -> toyos::BorrowedHandle<'_> {
         self.virtio.dev().as_handle()
     }
 

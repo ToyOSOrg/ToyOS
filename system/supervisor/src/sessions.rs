@@ -28,7 +28,7 @@ use toyos::launch::LAUNCHER;
 use toyos::namespace::{self, Namespace};
 use toyos::poller::{Poller, READABLE};
 use toyos::port::{self, Acceptor, Connector};
-use toyos::{say, AsHandle, OwnedHandle, Pipe, RawHandle};
+use toyos::{say, AsHandle, BorrowedHandle, OwnedHandle, Pipe};
 use toyos_abi::syscall;
 use toyos_abi::Rights;
 use toyos_manifest::launch::{Authority, Screen, Session};
@@ -85,7 +85,7 @@ pub(crate) enum Link {
 
 impl Link {
     /// What the loop watches for the owner's word, or its connect.
-    pub fn handle(&self) -> RawHandle {
+    pub fn handle(&self) -> BorrowedHandle<'_> {
         match self {
             Self::Waiting(acceptor) => acceptor.as_handle(),
             Self::Open(conn) => conn.as_handle(),
@@ -143,7 +143,7 @@ impl Logins {
     /// Where an app detached in `session` is placed: under that session's
     /// owner, `Ok(None)` in the machine's session, which is under the
     /// supervisor, and `Err` in a login session whose owner has given no place.
-    pub fn detached_place(&self, session: Session) -> Result<Option<RawHandle>, &'static str> {
+    pub fn detached_place(&self, session: Session) -> Result<Option<BorrowedHandle<'_>>, &'static str> {
         let place = self.of(session).and_then(|login| login.place.as_ref());
         match decide::detached(matches!(session, Session::Login(..)), place.is_some()) {
             decide::Placed::UnderSupervisor => Ok(None),
@@ -248,7 +248,7 @@ impl Watch {
                     apps.extend(added.try_iter());
                     poller.watch(&woken, READABLE, WAKE);
                     for (i, (_, _, handle)) in apps.iter().enumerate() {
-                        poller.watch_raw(handle.as_handle(), READABLE, i as u64);
+                        poller.watch(&handle, READABLE, i as u64);
                     }
                     ready.clear();
                     poller.wait(1, u64::MAX, |token| ready.push(token));
@@ -259,7 +259,7 @@ impl Watch {
                     let mut at = apps.len();
                     while at > 0 {
                         at -= 1;
-                        if syscall::process_wait_nonblock(apps[at].2.as_handle()).is_err() {
+                        if syscall::process_wait_nonblock(apps[at].2.as_handle().raw()).is_err() {
                             continue;
                         }
                         let (instance, session, _) = apps.swap_remove(at);
@@ -304,19 +304,19 @@ impl Supervisor<'_> {
         let (controls_acceptor, controls_connector) = port::create().map_err(|e| format!("no control port ({e:?})"))?;
         let (link_acceptor, link_connector) = port::create().map_err(|e| format!("no link ({e:?})"))?;
         let link = namespace::build().add(wire::LINK, &link_connector).finish().map_err(|e| format!("{e:?}"))?;
-        let accepting = syscall::dup(launcher.as_handle()).map_err(|e| format!("no copy of its launcher ({e:?})"))?;
+        let accepting = launcher.as_handle().try_clone_to_owned().map_err(|e| format!("no copy of its launcher ({e:?})"))?;
         let extra = Extra {
             endow: vec![
-                (wire::LINK_LABEL, link.into_raw()),
+                (wire::LINK_LABEL, link.into()),
                 (wire::LAUNCHER_ACCEPTOR_LABEL, accepting),
-                (wire::CONTROL_ACCEPTOR_LABEL, controls_acceptor.into_raw()),
+                (wire::CONTROL_ACCEPTOR_LABEL, controls_acceptor.into()),
             ],
             ..Extra::default()
         };
         self.make_state_dir(owner_row);
         let minting = Minting { minted: &self.minted, session, launches: None };
         let served = Served::Keep { acceptors: &[], owed: &[] };
-        let job = crate::job_for(self.syscap, owner_row).map_err(|e| format!("no job for its owner: {e}"))?.into_raw();
+        let job = crate::job_for(self.syscap, owner_row).map_err(|e| format!("no job for its owner: {e}"))?;
         let (owner, _) = start(
             Command::new(path),
             owner_row,
@@ -399,8 +399,7 @@ impl Supervisor<'_> {
             .and_then(|at| self.logins.open[at].handed_to(opener));
         match answered {
             Ok((ns, controls)) => {
-                // SAFETY: the two namespaces' own handles, given up here and to nothing else.
-                let handles = unsafe { [OwnedHandle::from_raw(ns.into_raw()), OwnedHandle::from_raw(controls.into_raw())] };
+                let handles: [OwnedHandle; 2] = [ns.into(), controls.into()];
                 if let Err(e) = conn.try_signal_with(wire::MSG_OPENED, handles) {
                     say!("supervisor: login: {}'s session was opened and not answered ({e:?})", opener.name);
                 }
@@ -440,10 +439,7 @@ impl Supervisor<'_> {
                         Err(why) => say!("supervisor: launcher: a launch session {} handed over is dropped: {why}", session.share()),
                     },
                     wire::MSG_PLACE => match batch.exact::<1>() {
-                        Some([handle]) => {
-                            // SAFETY: moved into this table with the frame, and nothing else answers for it.
-                            self.logins.open[at].place = Some(unsafe { OwnedHandle::from_raw(handle) });
-                        }
+                        Some([handle]) => self.logins.open[at].place = Some(handle),
                         None => say!("supervisor: session {}'s owner sent no place", session.share()),
                     },
                     wire::MSG_WAITING => {
@@ -477,18 +473,16 @@ impl Supervisor<'_> {
     }
 
     /// An app started in a login session: watched, and its owner told.
-    pub(crate) fn started_in(&mut self, session: Session, name: &str, process: RawHandle) {
+    pub(crate) fn started_in(&mut self, session: Session, name: &str, process: BorrowedHandle<'_>) {
         let Some(login) = self.logins.open.iter().find(|login| login.session == session) else { return };
         let instance = self.logins.next_instance;
         self.logins.next_instance += 1;
-        let watched = syscall::dup_narrowed(process, Rights::WAIT);
-        let managed = syscall::dup_narrowed(process, Rights::MANAGE.union(Rights::TRANSFER));
+        let watched = process.try_clone_narrowed(Rights::WAIT);
+        let managed = process.try_clone_narrowed(Rights::MANAGE.union(Rights::TRANSFER));
         let (Ok(watched), Ok(managed)) = (watched, managed) else {
             return say!("supervisor: {name} in session {} was started and is not watched", session.share());
         };
         let started = Started { instance, name: name.to_string() };
-        // SAFETY: a duplicate made above, which nothing else answers for.
-        let managed = unsafe { OwnedHandle::from_raw(managed) };
         let sent = match login.link.conn() {
             Some(link) => link.try_send_bytes_with(wire::MSG_STARTED, &started.encode(), [managed]).map_err(|e| format!("{e:?}")),
             None => Err("its link is not connected".to_string()),
@@ -496,8 +490,7 @@ impl Supervisor<'_> {
         if let Err(e) = sent {
             say!("supervisor: session {}'s owner was not told of {name} ({e:?})", session.share());
         }
-        // SAFETY: as above.
-        self.watch.add(instance, session, unsafe { OwnedHandle::from_raw(watched) });
+        self.watch.add(instance, session, watched);
     }
 
     /// Every app end the watch saw, told to its session's owner.

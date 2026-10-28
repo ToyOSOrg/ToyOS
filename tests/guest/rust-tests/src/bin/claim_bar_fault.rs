@@ -111,8 +111,10 @@ fn holder() {
             regs.read::<u64>(DMA_SOURCE) == MARK_SOURCE && regs.read::<u64>(DMA_DESTINATION) == MARK_DESTINATION,
             "claim_bar_fault: the refused read wrote into the BAR"
         );
-        syscall::close(pipe.read);
-        syscall::close(pipe.write);
+        // SAFETY: no type holds this number.
+        unsafe { syscall::close(pipe.read) };
+        // SAFETY: no type holds this number.
+        unsafe { syscall::close(pipe.write) };
         // A futex word the kernel would read through the direct map, which
         // reaches no BAR. The expected value is the marker's low word, so a
         // wait that read the register would park for ever.
@@ -132,7 +134,7 @@ fn holder() {
     for (role, fault) in [("frame", Fault::Instruction), ("jump", Fault::Memory)] {
         let status = Command::new(SELF_PATH)
             .arg(role)
-            .endow(SYSCAP_LABEL, cap.duplicate().expect("claim_bar_fault: a capability for the child").into_raw().0)
+            .endow(SYSCAP_LABEL, cap.duplicate().expect("claim_bar_fault: a capability for the child").into())
             .status()
             .expect("claim_bar_fault: spawn a child");
         assert_eq!(

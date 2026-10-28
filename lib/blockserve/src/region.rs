@@ -62,8 +62,7 @@ impl Region {
         self.memory.share()
     }
 
-    pub fn handle(&self) -> toyos::RawHandle {
-        use toyos::AsHandle;
-        self.memory.as_handle()
+    pub fn handle(&self) -> toyos::BorrowedHandle<'_> {
+        toyos::AsHandle::as_handle(&self.memory)
     }
 }

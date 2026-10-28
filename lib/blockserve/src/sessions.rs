@@ -62,7 +62,7 @@ pub trait Device {
     fn submit_flush(&mut self, owner: Owner) -> bool;
     /// Map `region` into the controller's domain, answering its device
     /// address.
-    fn dma_map(&mut self, region: toyos::RawHandle) -> Result<u64, SyscallError>;
+    fn dma_map(&mut self, region: toyos::BorrowedHandle<'_>) -> Result<u64, SyscallError>;
     fn dma_unmap(&mut self, device_addr: u64) -> Result<(), SyscallError>;
 }
 
@@ -170,7 +170,7 @@ impl Sessions {
     /// Serve the session the service handed over: answer the client's open on
     /// its own connection, or refuse it there. `region` is the client's and
     /// is consumed either way.
-    pub fn open(&mut self, dev: &mut impl Device, conn: Connection, region: toyos::RawHandle, unique: [u8; 16], writes: bool) {
+    pub fn open(&mut self, dev: &mut impl Device, conn: Connection, region: toyos::OwnedHandle, unique: [u8; 16], writes: bool) {
         let name = self.name.clone();
         let refuse = |conn: &Connection, why: Refusal| {
             println!("{name}: an open of {} refused: {why:?}", crate::guid_text(unique));
@@ -179,8 +179,6 @@ impl Sessions {
         // A region the kernel did not allocate, or longer than a session,
         // which would spend the claim's bound on the kernel's side for every
         // other client, is refused whole.
-        // SAFETY: the client's, handed over to this call to consume.
-        let region = unsafe { toyos::OwnedHandle::from_raw(region) };
         let Ok(region) = Region::lent(region) else { return refuse(&conn, Refusal::Malformed) };
         let (first, blocks) = match self.place(unique, dev) {
             Ok(span) => span,
@@ -537,7 +535,7 @@ mod tests {
         fn submit_flush(&mut self, _: Owner) -> bool {
             unreachable!()
         }
-        fn dma_map(&mut self, _: toyos::RawHandle) -> Result<u64, SyscallError> {
+        fn dma_map(&mut self, _: toyos::BorrowedHandle<'_>) -> Result<u64, SyscallError> {
             unreachable!()
         }
         fn dma_unmap(&mut self, _: u64) -> Result<(), SyscallError> {

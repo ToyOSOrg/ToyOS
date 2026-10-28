@@ -241,7 +241,7 @@ impl Grouping {
                 let cap = crate::sys::syscap().ok_or("no capability was endowed, so no job can be made")?;
                 let job = cap.new_job().map_err(|e| format!("a new job was refused: {e:?}"))?;
                 let mut command = Command::new(exe);
-                command.endow(toyos::job::JOB_LABEL, job.into_raw().0);
+                command.endow(toyos::job::JOB_LABEL, job.into());
                 Ok(command)
             }
             #[cfg(target_os = "linux")]

@@ -34,7 +34,8 @@ fn main() {
 
     // The control: the refusal is the length and not the call.
     let served = syscall::shm_create(4096).expect("a one-page region is served");
-    syscall::close(served);
+    // SAFETY: no type holds this number.
+    unsafe { syscall::close(served) };
 
     println!("an shm length past memory or past u64 is refused by name, and one page is served");
 }

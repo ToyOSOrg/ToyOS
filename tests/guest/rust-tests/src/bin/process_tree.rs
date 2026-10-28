@@ -28,10 +28,10 @@
 mod image;
 
 use std::io::{BufRead, BufReader};
-use std::os::toyos::process::{ChildExt, CommandExt};
+use std::os::toyos::process::CommandExt;
 use std::process::{Child, ChildStdin, Command, Stdio};
 
-use toyos::endow::{self, Endowments, SVC_LABEL, SYSCAP_LABEL};
+use toyos::endow::{self, Endowments, FromHandle, SVC_LABEL, SYSCAP_LABEL};
 use toyos::ipc::Connection;
 use toyos::launch::{self, Launch, Outcome, Parent, LAUNCHER};
 use toyos::process::Process;
@@ -121,7 +121,7 @@ struct Grown {
     conn: Connection,
     c: Process,
     d: Process,
-    b_self: RawHandle,
+    b_self: OwnedHandle,
     e: Process,
     /// The input D and E read, kept open so neither ends by itself.
     _held: ChildStdin,
@@ -139,8 +139,8 @@ fn grow() -> Grown {
         .expect("a namespace with the port back beside ours");
     let mut b = Command::new(SELF_PATH)
         .arg("b")
-        .endow(SVC_LABEL, ns.into_raw().0)
-        .endow(LAUNCHER, launcher_copy().0)
+        .endow(SVC_LABEL, ns.into())
+        .endow(LAUNCHER, launcher_copy().into())
         .stdin(Stdio::piped())
         .spawn()
         .expect("spawn B");
@@ -149,9 +149,7 @@ fn grow() -> Grown {
     let header = conn.recv_header().expect("B's word that its subtree is grown");
     assert_eq!(header.msg_type, MSG_GROWN, "B said something else");
     let [c, d, b_self, e] = conn.recv_handles_exact::<4>(&header).expect("B sent four handles");
-    // SAFETY: B moved each into this table with the frame, and nothing else
-    // answers for them.
-    let (c, d, e) = unsafe { (Process::from_raw(c), Process::from_raw(d), Process::from_raw(e)) };
+    let (c, d, e) = (Process::from_handle(c), Process::from_handle(d), Process::from_handle(e));
     Grown { b, conn, c, d, b_self, e, _held: held }
 }
 
@@ -182,31 +180,30 @@ fn an_end_takes_its_subtree(end: Ending) {
 
     grown.e.kill().expect("kill E");
     assert_eq!(grown.e.wait(), Ok(KILLED));
-    syscall::close(grown.b_self);
     println!("  B {end:?}: C and D ended, as killed; E, under its session's owner, ran on");
 }
 
 /// A spawn and a launch placed under B's `self` both answer `Gone`.
 fn under_b_is_gone(grown: &Grown) {
     let when = "after its kill";
-    match spawn_under(grown.b_self) {
+    match spawn_under(grown.b_self.as_handle().raw()) {
         Err(SyscallError::Gone) => {}
         Err(other) => panic!("a spawn under B {when} answered {other:?}, not Gone"),
         Ok(_) => panic!("a spawn under B {when} started"),
     }
-    let place = syscall::dup(grown.b_self).expect("a copy of B's self to send");
+    let place = grown.b_self.try_clone().expect("a copy of B's self to send");
     let conn = launcher();
     let request = Launch {
         program: HELD,
         argv: b"/system/bin/cat",
         env: b"",
         cwd: "/",
-        extras: &[],
-        fds: &[],
+        extras: Vec::new(),
+        fds: Vec::new(),
         parent: Parent::Place(place),
-        job: toyos::job::own().expect("a handle to this process's job").into_raw(),
+        job: toyos::job::own().expect("a handle to this process's job").into(),
     };
-    match launch::launch(&conn, &request) {
+    match launch::launch(&conn, request) {
         Ok(Outcome::Gone) => {}
         Ok(Outcome::Started(child)) => panic!("a launch under B {when} started {child:?}"),
         Ok(_) => panic!("a launch under B {when} was answered as something other than gone"),
@@ -223,9 +220,9 @@ fn launcher() -> Connection {
 }
 
 /// A duplicate of this process's launcher, for a child that launches.
-fn launcher_copy() -> RawHandle {
+fn launcher_copy() -> OwnedHandle {
     let held = endow::launcher().expect("test-runner endows every job its launcher");
-    syscall::dup(held.as_handle()).expect("a copy of the launcher")
+    held.as_handle().try_clone_to_owned().expect("a copy of the launcher")
 }
 
 /// `SYS_SPAWN` of this binary as a C under `place`, killed again if it starts.
@@ -260,14 +257,13 @@ fn spawn_under(place: RawHandle) -> Result<Process, SyscallError> {
 /// place: the right is refused, and the caller lives.
 fn a_manage_only_handle_is_no_place() {
     let mut child = Command::new(SELF_PATH).arg("c").spawn().expect("spawn a C");
-    let manage = syscall::dup_narrowed(RawHandle(child.as_raw_handle()), Rights::MANAGE)
-        .expect("a MANAGE-only copy");
-    match spawn_under(manage) {
+    let manage = AsHandle::as_handle(&child).try_clone_narrowed(Rights::MANAGE).expect("a MANAGE-only copy");
+    match spawn_under(manage.as_handle().raw()) {
         Err(SyscallError::PermissionDenied) => {}
         Err(other) => panic!("a MANAGE-only place answered {other:?}"),
         Ok(_) => panic!("a MANAGE-only place took a child"),
     }
-    syscall::close(manage);
+    drop(manage);
     child.kill().expect("kill the C");
     assert_eq!(End::from_word(child.wait().expect("wait the C").into_raw()), Some(KILLED));
     println!("  a MANAGE-only handle is no place: PermissionDenied");
@@ -278,19 +274,19 @@ fn a_manage_only_handle_is_no_place() {
 /// answering the next.
 fn a_pipe_is_no_place() {
     let (_read, write) = toyos::pipe_pair().expect("a pipe of our own");
-    let place = syscall::dup(write.as_handle()).expect("a duplicate to send");
+    let place = write.as_handle().try_clone_to_owned().expect("a duplicate to send");
     let conn = launcher();
     let request = Launch {
         program: HELD,
         argv: b"/system/bin/cat",
         env: b"",
         cwd: "/",
-        extras: &[],
-        fds: &[],
+        extras: Vec::new(),
+        fds: Vec::new(),
         parent: Parent::Place(place),
-        job: toyos::job::own().expect("a handle to this process's job").into_raw(),
+        job: toyos::job::own().expect("a handle to this process's job").into(),
     };
-    match launch::launch(&conn, &request) {
+    match launch::launch(&conn, request) {
         Ok(Outcome::Refused) => {}
         Ok(Outcome::Started(child)) => panic!("a launch whose place is a pipe started {child:?}"),
         Ok(_) => panic!("a launch whose place is a pipe was answered as something other than refused"),
@@ -404,13 +400,12 @@ fn b() -> ! {
     let e = Command::new(HELD).independent().detached().spawn().expect("B launches E detached");
     let own = endow::this_process();
     let handles = [
-        syscall::dup(RawHandle(c.as_raw_handle())).expect("a copy of C"),
-        syscall::dup(RawHandle(d.as_raw_handle())).expect("a copy of D"),
-        syscall::dup(own.as_handle()).expect("a copy of B's self"),
-        syscall::dup(RawHandle(e.as_raw_handle())).expect("a copy of E"),
+        AsHandle::as_handle(&c).try_clone_to_owned().expect("a copy of C"),
+        AsHandle::as_handle(&d).try_clone_to_owned().expect("a copy of D"),
+        own.as_handle().try_clone_to_owned().expect("a copy of B's self"),
+        AsHandle::as_handle(&e).try_clone_to_owned().expect("a copy of E"),
     ];
-    // SAFETY: four fresh duplicates, answered for by nothing else.
-    conn.signal_with(MSG_GROWN, handles.map(|h| unsafe { OwnedHandle::from_raw(h) })).expect("send A the subtree");
+    conn.signal_with(MSG_GROWN, handles).expect("send A the subtree");
 
     let header = conn.recv_header().expect("A's word to fault");
     assert_eq!(header.msg_type, MSG_FAULT, "A said something else");

@@ -195,9 +195,7 @@ type Lent = (Region, [Pipe; BELLS], Rc<Holders>);
 /// connection being `connection`: the session the node is lent, the bells' read
 /// ends the answer hands over, and the holders. Refused by name, nothing is
 /// mapped, and the connection is handed back with the refusal's word.
-fn lend(connection: Connection, region: toyos::RawHandle) -> Result<Lent, (Connection, u32)> {
-    // SAFETY: the holder's frame moved it here, and nothing else answers for it.
-    let region = unsafe { toyos::OwnedHandle::from_raw(region) };
+fn lend(connection: Connection, region: toyos::OwnedHandle) -> Result<Lent, (Connection, u32)> {
     let mapping = match Region::judged(region) {
         Ok(mapping) => mapping,
         Err(why) => {
@@ -574,7 +572,7 @@ impl Sockets {
             poller.watch(&holder.connection, READABLE, TOKEN_SOCKET | u64::from(*key));
         }
         for (_, client) in &self.lookups {
-            poller.watch(&client.conn, READABLE, TOKEN_LOOKUP | u64::from(client.conn.as_handle().0));
+            poller.watch(&client.conn, READABLE, TOKEN_LOOKUP | u64::from(client.conn.as_handle().raw().0));
         }
     }
 
@@ -589,7 +587,7 @@ impl Sockets {
             TOKEN_LOOKUP => {
                 // A lookup whose client has left ends now: its sockets and
                 // its place are another client's.
-                let spoke = |client: &Client| u64::from(client.conn.as_handle().0) == u64::from(key);
+                let spoke = |client: &Client| u64::from(client.conn.as_handle().raw().0) == u64::from(key);
                 self.lookups.retain(|(id, client)| {
                     let left = spoke(client) && client.gone();
                     if left {
@@ -778,7 +776,6 @@ impl Sockets {
             let (theirs, ours) = match exports.connect() {
                 Ok(pair) => pair,
                 Err(_) => {
-                    toyos_abi::syscall::close(region);
                     code = ERR_RESOURCE_EXHAUSTED;
                     return None;
                 }

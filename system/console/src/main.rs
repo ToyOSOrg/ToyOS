@@ -24,7 +24,6 @@
 //!   whose mapping is the scanout, so it is the one that pays for a read.
 
 use std::io::{Read, Write};
-use std::os::toyos::io::AsRawHandle;
 use std::os::toyos::process;
 use std::os::toyos::process::CommandExt;
 use std::process::{Child, ChildStderr, ChildStdin, ChildStdout, Command};
@@ -232,11 +231,11 @@ fn main() {
     // as it wrote it, for a line of the log to be drawn above.
     let mut partial: Vec<u8> = Vec::new();
     loop {
-        poller.watch_raw(toyos::RawHandle(shell.stdout.as_raw_handle()), READABLE, TOKEN_STDOUT);
-        poller.watch_raw(toyos::RawHandle(shell.stderr.as_raw_handle()), READABLE, TOKEN_STDERR);
-        poller.watch_raw(host.acceptor_handle(), READABLE, TOKEN_LISTEN);
+        poller.watch(&shell.stdout, READABLE, TOKEN_STDOUT);
+        poller.watch(&shell.stderr, READABLE, TOKEN_STDERR);
+        poller.watch(&host.acceptor_handle(), READABLE, TOKEN_LISTEN);
         for client in host.client_handles() {
-            poller.watch_raw(client, READABLE, TOKEN_CLIENT);
+            poller.watch(&client, READABLE, TOKEN_CLIENT);
         }
         if let Ok(log) = &log {
             poller.watch(&log.pipe, READABLE, TOKEN_LOG);
@@ -496,7 +495,7 @@ impl Shell {
             .expect("console: the kernel refused a duplicate of its own surface connector");
         let mut child = Command::new("/system/bin/shell")
             .independent()
-            .provide(surface::SERVICE, surface_copy.into_raw().0)
+            .provide(surface::SERVICE, surface_copy.into())
             .stdin(process::tty_piped())
             .stdout(process::tty_piped())
             .stderr(process::tty_piped())

@@ -7,7 +7,7 @@ license = "MIT OR Apache-2.0"
 
 [dependencies]
 terminal = { path = "../terminal" }
-toyos = { path = "../../sdk/toyos" }
+toyos = { path = "../../sdk/toyos", features = ["std"] }
 toyos-abi = { path = "../../sdk/abi" }
 toyos-input = { path = "../../lib/input" }
 toyos-font = { path = "../../sdk/font" }

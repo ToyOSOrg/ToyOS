@@ -49,9 +49,10 @@ fn main() {
         let names = namespace::build().add(NAME, &minted).finish().expect("a namespace");
         let _client = names.open(NAME).expect("connect");
         let server = accept_through_inbox(&acceptor);
-        let len = syscall::port_badge(acceptor.as_handle(), server, &mut out);
+        let len = syscall::port_badge(acceptor.as_handle().raw(), server, &mut out);
         assert_eq!(len.map(|len| &out[..len]), Ok(badge), "an inbox's accept lost the stamp");
-        syscall::close(server);
+        // SAFETY: no type holds this number.
+        unsafe { syscall::close(server) };
     }
     println!("  a minted badge comes back exact on its own port, through either accept, and on no other");
 
@@ -63,14 +64,15 @@ fn main() {
     for len in [0, MAX_BADGE + 1] {
         let badge = vec![1u8; len];
         assert_eq!(
-            syscall::port_mint(acceptor.as_handle(), &badge).err(),
+            syscall::port_mint(acceptor.as_handle().raw(), &badge).err(),
             Some(SyscallError::InvalidArgument),
             "a badge of {len} bytes was minted"
         );
     }
     println!("  a badge of 0 or {} bytes is refused", MAX_BADGE + 1);
 
-    let narrowed = syscall::dup_narrowed(acceptor.as_handle(), Rights::DUP.union(Rights::TRANSFER))
+    // SAFETY: nothing relies on being the source's only holder.
+    let narrowed = unsafe { syscall::dup_narrowed(acceptor.as_handle().raw(), Rights::DUP.union(Rights::TRANSFER)) }
         .expect("the acceptor without READ");
     // SAFETY: made by the call above, and owned here alone.
     let narrowed = unsafe { Acceptor::from_raw(narrowed) };
@@ -93,7 +95,7 @@ fn accept_through_inbox(acceptor: &Acceptor) -> RawHandle {
     let submission = unsafe {
         &mut *(base.add(SUBMISSIONS_OFF as usize + idx * core::mem::size_of::<Submission>()) as *mut Submission)
     };
-    *submission = Submission { op: OP_ACCEPT, handle: acceptor.as_handle(), token: 0xACCE, ..Submission::default() };
+    *submission = Submission { op: OP_ACCEPT, handle: acceptor.as_handle().raw(), token: 0xACCE, ..Submission::default() };
     ring.tail.store(head.wrapping_add(1), Ordering::Release);
 
     assert_eq!(syscall::inbox_submit(inbox, 1, 1, 0), Ok(1), "the accept did not complete");
@@ -110,7 +112,8 @@ fn accept_through_inbox(acceptor: &Acceptor) -> RawHandle {
     };
     assert_eq!(completion.token, 0xACCE, "the completion is for another submission");
     let handle = u32::try_from(completion.result).unwrap_or_else(|_| panic!("OP_ACCEPT refused: {}", completion.result));
-    syscall::close(inbox);
+    // SAFETY: no type holds this number.
+    unsafe { syscall::close(inbox) };
     RawHandle(handle)
 }
 

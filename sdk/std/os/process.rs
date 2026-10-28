@@ -13,28 +13,28 @@ pub fn tty_piped() -> crate::process::Stdio {
 #[stable(feature = "toyos_ext", since = "1.0.0")]
 pub trait CommandExt {
     /// Give the child descriptor `child_fd`, naming the kernel handle
-    /// `parent_handle`, which this process keeps: the spawn duplicates it, or,
-    /// for a stream's, a listener's or a datagram socket's, gives the child a
-    /// holder of its own. One of 0 to 2 replaces what the command's stdio
-    /// would have given.
+    /// `parent_handle`, which this process keeps: the command takes a
+    /// duplicate of it now, or, for a stream's, a listener's or a datagram
+    /// socket's, a holder of its own for the child. One of 0 to 2 replaces
+    /// what the command's stdio would have given; a refusal is the spawn's.
     #[stable(feature = "toyos_ext", since = "1.0.0")]
-    fn inherit_handle(&mut self, child_fd: u32, parent_handle: u32) -> &mut Self;
+    fn inherit_handle(&mut self, child_fd: u32, parent_handle: crate::os::toyos::io::BorrowedHandle<'_>) -> &mut Self;
 
     /// Give the child descriptor `child_fd` as the exported end `end`, which
-    /// `toyos::net`'s `export` made and which this process keeps: the spawn
-    /// duplicates it, and the child takes it up as a holder of the stream or
-    /// the socket.
+    /// `toyos::net`'s `export` made and which this process keeps: the command
+    /// takes a duplicate of it now, and the child takes it up as a holder of
+    /// the stream or the socket.
     #[stable(feature = "toyos_ext", since = "1.0.0")]
-    fn inherit_exported(&mut self, child_fd: u32, end: u32) -> &mut Self;
+    fn inherit_exported(&mut self, child_fd: u32, end: crate::os::toyos::io::BorrowedHandle<'_>) -> &mut Self;
 
     /// Give the child a handle under a name it can look itself up by.
     ///
-    /// The handle is **moved**: after a successful spawn the parent no longer
-    /// holds it, which is what lets a capability that admits only one holder —
-    /// a device claim — be handed over at all. A parent that wants to keep one
-    /// duplicates it first.
+    /// The handle is **moved**: into the command, then by its next spawn into
+    /// the child, or closed if that spawn is refused. That is what lets a
+    /// capability that admits only one holder, a device claim, be handed over
+    /// at all. A parent that wants to keep one duplicates it first.
     #[stable(feature = "toyos_ext", since = "1.0.0")]
-    fn endow(&mut self, label: &str, handle: u32) -> &mut Self;
+    fn endow(&mut self, label: &str, handle: crate::os::toyos::io::OwnedHandle) -> &mut Self;
 
     /// Put `connector` in an [`independent`](CommandExt::independent)
     /// child's namespace under `name`, on top of what its manifest row holds.
@@ -47,7 +47,7 @@ pub trait CommandExt {
     /// The connector is **moved**, like [`endow`](CommandExt::endow). A
     /// command that is not independent is refused `InvalidInput`.
     #[stable(feature = "toyos_ext", since = "1.0.0")]
-    fn provide(&mut self, name: &str, connector: u32) -> &mut Self;
+    fn provide(&mut self, name: &str, connector: crate::os::toyos::io::OwnedHandle) -> &mut Self;
 
     /// Make now, on this thread, every file read this command's spawn needs:
     /// find the program, judge the working directory, and read a program on a
@@ -82,18 +82,17 @@ pub trait CommandExt {
     /// child's `argv[0]` and nothing opens it. What the supervisor starts the
     /// file server with before any file can be read.
     #[stable(feature = "toyos_ext", since = "1.0.0")]
-    fn boot_image(&mut self, image: u32) -> &mut Self;
+    fn boot_image(&mut self, image: crate::os::toyos::io::BorrowedHandle<'_>) -> &mut Self;
 
     /// Place the child under the process `place` names rather than under this
     /// one, so that its end, not this process's, takes the child down.
     ///
     /// `place` is a handle carrying `WRITE` to that process: a copy of the
-    /// handle it holds to itself, which it handed on. The spawn is refused
-    /// `PermissionDenied` for a handle without `WRITE`, or without `DUP` for an
-    /// independent launch, which carries a copy, and `BrokenPipe` for a
-    /// process whose end has begun.
+    /// handle it holds to itself, which it handed on. The command takes a copy
+    /// of it now; the spawn is refused `PermissionDenied` for a handle without
+    /// `WRITE` or `DUP`, and `BrokenPipe` for a process whose end has begun.
     #[stable(feature = "toyos_ext", since = "1.0.0")]
-    fn under(&mut self, place: u32) -> &mut Self;
+    fn under(&mut self, place: crate::os::toyos::io::BorrowedHandle<'_>) -> &mut Self;
 
     /// Start the child as an **independent launch** through the session
     /// launcher this process holds: the program its manifest row declares,
@@ -124,27 +123,27 @@ pub trait CommandExt {
     /// authority's for a session it opened. It reaches only what that launcher
     /// does. A command that is not independent is refused `InvalidInput`.
     #[stable(feature = "toyos_ext", since = "1.0.0")]
-    fn launcher(&mut self, namespace: u32) -> &mut Self;
+    fn launcher(&mut self, namespace: crate::os::toyos::io::BorrowedHandle<'_>) -> &mut Self;
 }
 
 #[stable(feature = "toyos_ext", since = "1.0.0")]
 impl CommandExt for crate::process::Command {
-    fn inherit_handle(&mut self, child_fd: u32, parent_handle: u32) -> &mut Self {
+    fn inherit_handle(&mut self, child_fd: u32, parent_handle: crate::os::toyos::io::BorrowedHandle<'_>) -> &mut Self {
         self.as_inner_mut().inherit_handle(child_fd, parent_handle);
         self
     }
 
-    fn inherit_exported(&mut self, child_fd: u32, end: u32) -> &mut Self {
+    fn inherit_exported(&mut self, child_fd: u32, end: crate::os::toyos::io::BorrowedHandle<'_>) -> &mut Self {
         self.as_inner_mut().inherit_exported(child_fd, end);
         self
     }
 
-    fn endow(&mut self, label: &str, handle: u32) -> &mut Self {
+    fn endow(&mut self, label: &str, handle: crate::os::toyos::io::OwnedHandle) -> &mut Self {
         self.as_inner_mut().endow(label, handle);
         self
     }
 
-    fn provide(&mut self, name: &str, connector: u32) -> &mut Self {
+    fn provide(&mut self, name: &str, connector: crate::os::toyos::io::OwnedHandle) -> &mut Self {
         self.as_inner_mut().provide(name, connector);
         self
     }
@@ -163,12 +162,12 @@ impl CommandExt for crate::process::Command {
         self
     }
 
-    fn boot_image(&mut self, image: u32) -> &mut Self {
+    fn boot_image(&mut self, image: crate::os::toyos::io::BorrowedHandle<'_>) -> &mut Self {
         self.as_inner_mut().boot_image(image);
         self
     }
 
-    fn under(&mut self, place: u32) -> &mut Self {
+    fn under(&mut self, place: crate::os::toyos::io::BorrowedHandle<'_>) -> &mut Self {
         self.as_inner_mut().under(place);
         self
     }
@@ -183,7 +182,7 @@ impl CommandExt for crate::process::Command {
         self
     }
 
-    fn launcher(&mut self, namespace: u32) -> &mut Self {
+    fn launcher(&mut self, namespace: crate::os::toyos::io::BorrowedHandle<'_>) -> &mut Self {
         self.as_inner_mut().launcher(namespace);
         self
     }
@@ -215,39 +214,32 @@ impl ExitStatusExt for crate::process::ExitStatus {
     }
 }
 
-/// ToyOS-specific extensions to [`process::Child`].
+/// The child's process handle, for what a caller needs of a process beyond
+/// `wait` and `kill`: its accounting, or a narrowed copy to hand on.
 #[stable(feature = "toyos_ext", since = "1.0.0")]
-pub trait ChildExt {
-    /// Give up this process's handle, for one about to be sent or endowed.
-    ///
-    /// After this the parent no longer holds the child: it cannot wait for it,
-    /// kill it or read its accounting. The launcher is the caller —
-    /// it answers with the handle and keeps none, because a process that could
-    /// ask it to start `/bin/true` in a loop would otherwise exhaust the one
-    /// handle table the whole machine depends on.
-    #[stable(feature = "toyos_ext", since = "1.0.0")]
-    fn into_raw_handle(self) -> u32;
-
-    /// This child's process handle, without giving it up.
-    ///
-    /// **A number to pass to the ABI, not a second owner.** It is what a caller
-    /// wanting more of a process than `wait` and `kill` — its accounting, a
-    /// narrowed duplicate to hand on — reaches through, and it stays valid only
-    /// while the `Child` is alive. std deliberately does not wrap those calls:
-    /// their argument and answer types are `toyos-abi`'s, and a std signature
-    /// naming them would drag every caller onto the sysroot's copy of that
-    /// crate rather than its own.
-    #[stable(feature = "toyos_ext", since = "1.0.0")]
-    fn as_raw_handle(&self) -> u32;
+impl crate::os::toyos::io::AsHandle for crate::process::Child {
+    fn as_handle(&self) -> crate::os::toyos::io::BorrowedHandle<'_> {
+        crate::os::toyos::io::BorrowedHandle::from_inner(self.as_inner().handle())
+    }
 }
 
 #[stable(feature = "toyos_ext", since = "1.0.0")]
-impl ChildExt for crate::process::Child {
-    fn into_raw_handle(self) -> u32 {
-        self.into_inner().into_raw_handle()
+impl crate::os::toyos::io::AsRawHandle for crate::process::Child {
+    fn as_raw_handle(&self) -> crate::os::toyos::io::RawHandle {
+        self.as_inner().handle().raw().0
     }
+}
 
-    fn as_raw_handle(&self) -> u32 {
-        self.as_inner().as_raw_handle()
+#[stable(feature = "toyos_ext", since = "1.0.0")]
+impl crate::os::toyos::io::IntoRawHandle for crate::process::Child {
+    fn into_raw_handle(self) -> crate::os::toyos::io::RawHandle {
+        self.into_inner().into_handle().into_raw().0
+    }
+}
+
+#[stable(feature = "toyos_ext", since = "1.0.0")]
+impl From<crate::process::Child> for crate::os::toyos::io::OwnedHandle {
+    fn from(child: crate::process::Child) -> Self {
+        Self::from_inner(child.into_inner().into_handle())
     }
 }

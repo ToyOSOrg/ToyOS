@@ -323,10 +323,7 @@ impl Log {
                     let Some([ring, alive]) = self.supervisor_rx.take_handles::<2>() else {
                         panic!("logkeeper: the supervisor registered {name:?} with no ring");
                     };
-                    // SAFETY: the kernel moved this handle into this table with
-                    // the frame that names it, and nothing else answers for it.
-                    let alive = unsafe { Pipe::from_raw(alive) };
-                    self.take(registration.tag, registration.pid, ring, alive);
+                    self.take(registration.tag, registration.pid, ring, Pipe::from(alive));
                 }
                 // **The flush runs before the next frame is read**: the supervisor sends
                 // RESUME when the stop it flushed for was refused, which can be
@@ -341,17 +338,14 @@ impl Log {
     }
 
     /// A ring the supervisor registered, read from the next round on.
-    fn take(&mut self, tag: Tag<'_>, pid: u32, ring: toyos::RawHandle, alive: Pipe) {
+    fn take(&mut self, tag: Tag<'_>, pid: u32, ring: toyos::OwnedHandle, alive: Pipe) {
         if self.origins.len() >= MAX_ORIGINS {
             toyos::warn!(
                 "logkeeper: refusing {}'s ring: {MAX_ORIGINS} programs' rings are already read",
                 tag.as_str()
             );
-            toyos_abi::syscall::close(ring);
             return;
         }
-        // SAFETY: the supervisor's frame moved it here, and nothing else answers for it.
-        let ring = unsafe { toyos::OwnedHandle::from_raw(ring) };
         match Origin::open(tag, pid, ring, alive) {
             Ok(origin) => self.origins.push(origin),
             Err(why) => toyos::error!("logkeeper: refusing a ring the supervisor sent: {why}"),

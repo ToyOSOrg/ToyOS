@@ -10,9 +10,7 @@
 //! - **netstack's exit ends a blocked read in every holder** with `Aborted`.
 //! - **Within a process, every handle of a stream is one end**: handles given
 //!   out and taken back read on where the last read stopped; a bare `dup` is
-//!   refused by name with nothing written; a stream is no file; `endow` and
-//!   `provide` of a stream's own handle are refused, where a descriptor goes
-//!   as an exported holder.
+//!   refused by name with nothing written; a stream is no file.
 //! - **One end, two threads**: a write on one thread completes while another
 //!   is in a read the peer has not answered, and that read then takes what
 //!   the peer publishes. `sshserver` reads each connection on one thread and
@@ -39,7 +37,6 @@ use std::fs::File;
 use std::io::{BufRead, BufReader, Read, Write};
 use std::net::{SocketAddr, TcpStream};
 use std::os::fd::{AsFd, AsRawFd, FromRawFd, IntoRawFd, OwnedFd};
-use std::os::toyos::io::AsRawHandle;
 use std::os::toyos::net::TcpStreamExt;
 use std::os::toyos::process::CommandExt;
 use std::process::{Child, ChildStdout, Command, Stdio};
@@ -47,7 +44,7 @@ use std::sync::atomic::Ordering;
 
 use toyos::ipc::{FrameRx, RxStep};
 use toyos::net::stream::{
-    Adopt, Misuse, Server, Words, ADOPT, EXPORT, EXPORTED, LAYOUT, RECEIVE_RING, REGION_BYTES, RING, SEND_RING,
+    Adopt, Server, Words, ADOPT, EXPORT, EXPORTED, LAYOUT, RECEIVE_RING, REGION_BYTES, RING, SEND_RING,
     SERVER_WATCH,
 };
 use toyos::net::{MsgType, RespType, TcpConnectRequest, TcpConnectResponse};
@@ -56,7 +53,6 @@ use toyos::shm::SharedMemory;
 use toyos::transport::session::{Holder, Rings};
 use toyos::{namespace, port, AsHandle, Connection, OwnedHandle, Pipe};
 use toyos_abi::syscall::{self, SVC_LABEL};
-use toyos_abi::RawHandle;
 
 const SELF_PATH: &str = "/system/bin/test_rs_stream_handles";
 
@@ -100,7 +96,7 @@ fn main() {
 fn test() {
     a_holder_killed_inside_the_gate_leaves_the_parent_working();
     netstacks_exit_ends_a_blocked_read_in_every_holder();
-    shares_within_a_process_and_refuses_moves();
+    shares_within_a_process();
     refuses_a_foreign_handle_writing_nothing();
     refuses_a_stream_as_a_file();
     reads_and_writes_on_two_threads();
@@ -162,16 +158,15 @@ fn netstacks_exit_ends_a_blocked_read_in_every_holder() {
     println!("  netstack's exit: a blocked read in each holder answered ConnectionAborted");
 }
 
-/// The handles given out and taken back share one end, and a stream's own
-/// handle is neither endowed nor provided.
-fn shares_within_a_process_and_refuses_moves() {
+/// The handles given out and taken back share one end.
+fn shares_within_a_process() {
     let (mut child, netstack) = run("client", PEER);
     let out = BufReader::new(child.stdout.take().expect("the child's stdout"));
     let said: Vec<String> = out.lines().map(|line| line.expect("a line")).collect();
     let status = child.wait().expect("wait the client");
-    assert_eq!(said, ["shared", "endow refused", "provide refused"], "the client said otherwise");
+    assert_eq!(said, ["shared"], "the client said otherwise");
     assert!(status.success(), "the client exited {status:?}");
-    println!("  given out and taken back: one end; its own handle endowed or provided: refused");
+    println!("  given out and taken back: one end");
     hang_up_answers_the_server_watch(&netstack.holders[0].connection);
 }
 
@@ -179,13 +174,13 @@ fn shares_within_a_process_and_refuses_moves() {
 /// the kernel takes it and answers it, and the connection then reads its end.
 fn hang_up_answers_the_server_watch(conn: &Connection) {
     let poller = Poller::new(1);
-    poller.watch_raw(conn.as_handle(), SERVER_WATCH, 0);
+    poller.watch(&conn, SERVER_WATCH, 0);
     let mut answers = Vec::new();
     poller.wait_answers(1, CEILING_NANOS, |_, answer| answers.push(answer));
     assert!(matches!(answers[..], [Ok(_)]), "the kernel answered netstack's watch {answers:?}");
     let mut bytes = [0u8; 64];
-    while syscall::read_nonblock(conn.as_handle(), &mut bytes).is_ok_and(|n| n > 0) {}
-    assert_eq!(syscall::read_nonblock(conn.as_handle(), &mut bytes), Ok(0), "the hang-up is the connection's end");
+    while syscall::read_nonblock(conn.as_handle().raw(), &mut bytes).is_ok_and(|n| n > 0) {}
+    assert_eq!(syscall::read_nonblock(conn.as_handle().raw(), &mut bytes), Ok(0), "the hang-up is the connection's end");
     println!("  netstack's watch of a holder's connection: taken, and answered by the hang-up");
 }
 
@@ -198,13 +193,13 @@ fn refuses_a_foreign_handle_writing_nothing() {
     assert_eq!(line(&mut out), "duplicated");
     // What the connect may have rung, taken; from here the connection carries nothing but its end.
     let mut bytes = [0u8; 64];
-    while syscall::read_nonblock(conn.as_handle(), &mut bytes).is_ok_and(|n| n > 0) {}
+    while syscall::read_nonblock(conn.as_handle().raw(), &mut bytes).is_ok_and(|n| n > 0) {}
     child.stdin.take().expect("the child's stdin").write_all(b"go\n").expect("tell the child");
     let said = child.wait_with_output().expect("wait the child");
     let stderr = String::from_utf8_lossy(&said.stderr);
     assert!(!said.status.success(), "the foreign handle was taken: {}", String::from_utf8_lossy(&said.stdout));
     assert!(stderr.contains("is no stream of this process's"), "refused, but not by name: {stderr}");
-    let read = syscall::read(conn.as_handle(), &mut bytes);
+    let read = syscall::read(conn.as_handle().raw(), &mut bytes);
     assert_eq!(read, Ok(0), "the refusal wrote on the stream's connection before its end");
     println!("  a foreign handle: refused by name, nothing written");
 }
@@ -403,7 +398,7 @@ impl Netstack {
                 RxStep::Idle => {}
             }
             let poller = Poller::new(1);
-            poller.watch_raw(holding.connection.as_handle(), SERVER_WATCH, 0);
+            poller.watch(&holding.connection, SERVER_WATCH, 0);
             let mut answered = false;
             poller.wait(1, CEILING_NANOS, |_| answered = true);
             assert!(answered, "a holder said nothing within the ceiling");
@@ -464,7 +459,7 @@ fn run(role: &str, peer: &[u8]) -> (Child, Netstack) {
     let ns = namespace::build().keep_all(own).add(SERVICE, &connector).finish().expect("a namespace");
     let child = Command::new(SELF_PATH)
         .arg(role)
-        .endow(SVC_LABEL, ns.into_raw().0)
+        .endow(SVC_LABEL, ns.into())
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
@@ -475,8 +470,7 @@ fn run(role: &str, peer: &[u8]) -> (Child, Netstack) {
     assert_eq!(header.msg_type, MsgType::TcpConnect as u32, "a stream's connect");
     let _: TcpConnectRequest = conn.recv_payload(&header).expect("the connect's request");
     let [region] = conn.recv_handles_exact::<1>(&header).expect("the stream's region");
-    // SAFETY: received with this frame, so this process's and nobody else's.
-    let region = SharedMemory::lent(unsafe { OwnedHandle::from_raw(region) }, REGION_BYTES).expect("a region netstack takes");
+    let region = SharedMemory::lent(region, REGION_BYTES).expect("a region netstack takes");
     let mut server = Server::new(words_of(&region), LAYOUT);
     region.bytes().write(RECEIVE_RING, peer);
     let _ = server.publish(words_of(&region), peer.len() as u32).expect("the client keeps the protocol");
@@ -512,7 +506,7 @@ fn connect() -> TcpStream {
 /// and reads through what the child left.
 fn parent() -> ! {
     let mut stream = connect();
-    let handle = stream.as_raw_handle();
+    let handle = std::os::toyos::io::AsHandle::as_handle(&stream);
     let child = Command::new(SELF_PATH).arg("faulter").inherit_handle(HELD_FD, handle).stdout(Stdio::null()).spawn();
     let status = child.expect("spawn the faulter with a holder of the stream").wait().expect("wait the faulter");
     say(&format!("the child ended {status:?}"));
@@ -528,9 +522,11 @@ fn parent() -> ! {
     // watched until the departure rings it. (This binary's own copy of
     // `toyos` holds no end of std's stream.)
     stream.register(false, true).expect("register the stream for writing");
-    let bell = toyos_abi::RawHandle(stream.bell().expect("the send bell"));
+    let bell = stream.bell().expect("the send bell");
+    // SAFETY: the stream's send bell, which `stream` holds past the wait.
+    let bell = unsafe { std::os::toyos::io::BorrowedHandle::borrow_raw(bell) };
     let poller = Poller::new(1);
-    poller.watch_raw(bell, READABLE, 0);
+    poller.watch(&bell, READABLE, 0);
     let mut rung = false;
     poller.wait(1, CEILING_NANOS, |_| rung = true);
     if !rung {
@@ -565,7 +561,7 @@ fn reader() -> ! {
     let mut stream = connect();
     let mut child = Command::new(SELF_PATH)
         .arg("reader-child")
-        .inherit_handle(HELD_FD, stream.as_raw_handle())
+        .inherit_handle(HELD_FD, std::os::toyos::io::AsHandle::as_handle(&stream))
         .spawn()
         .expect("spawn the reader's child with a holder of the stream");
     say("reading parent");
@@ -591,8 +587,7 @@ fn reads(stream: &mut TcpStream, at: usize, n: usize) {
     assert_eq!(got, &PEER[at..at + n], "read from where the last read stopped");
 }
 
-/// A client whose stream's handle is given out three ways and taken back,
-/// then endowed and provided.
+/// A client whose stream's handle is given out three ways and taken back.
 fn client() -> ! {
     let stream = connect();
     let raw = stream.into_raw_fd();
@@ -607,41 +602,13 @@ fn client() -> ! {
     drop(cloned);
     reads(&mut taken, 12, 4);
     say("shared");
-
-    let handle = taken.as_raw_handle();
-    let paths: [(&str, fn(&mut Command, u32)); 2] = [
-        ("endow", |command, handle| {
-            command.endow("stream", handle);
-        }),
-        ("provide", |command, handle| {
-            command.provide("stream", handle);
-        }),
-    ];
-    for (path, moving) in paths {
-        let mut command = Command::new(SELF_PATH);
-        command.arg("child").stdout(Stdio::null());
-        moving(&mut command, handle);
-        match command.spawn() {
-            Err(refused)
-                if refused.kind() == std::io::ErrorKind::InvalidInput
-                    && refused.to_string() == Misuse::Moved(RawHandle(handle)).to_string() =>
-            {
-                say(&format!("{path} refused"));
-            }
-            Err(other) => say(&format!("{path} answered {other}")),
-            Ok(mut child) => {
-                let _ = child.wait();
-                say(&format!("{path} took the stream's handle"));
-            }
-        }
-    }
     std::process::exit(0)
 }
 
 /// A client that takes a bare `dup` of its stream's handle as a stream.
 fn foreign() -> ! {
     let stream = connect();
-    let copy = syscall::dup(RawHandle(stream.as_raw_handle())).expect("a bare duplicate");
+    let copy = AsHandle::as_handle(&stream).try_clone_to_owned().expect("a bare duplicate");
     let fd = toyos::fd::install(toyos::fd::Object::handle(copy), false, 0).expect("a descriptor for the duplicate");
     say("duplicated");
     let mut go = String::new();

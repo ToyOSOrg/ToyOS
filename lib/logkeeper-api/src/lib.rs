@@ -24,9 +24,7 @@ pub fn read() -> Result<Served, String> {
     }
     let boot_so_far: u64 =
         conn.recv_payload(&header).map_err(|e| format!("logkeeper's answer is not one `u64`: {e:?}"))?;
-    let [raw] = conn.recv_handles_exact::<1>(&header).ok_or("logkeeper's answer carried no pipe")?;
-    // SAFETY: the kernel moved this handle into this table with the frame
-    // that names it, and nothing else answers for it.
-    let pipe = unsafe { Pipe::from_raw(raw) };
+    let [pipe] = conn.recv_handles_exact::<1>(&header).ok_or("logkeeper's answer carried no pipe")?;
+    let pipe = Pipe::from(pipe);
     Ok(Served { pipe, boot_so_far })
 }

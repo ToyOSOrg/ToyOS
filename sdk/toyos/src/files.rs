@@ -36,7 +36,7 @@ use crate::fd::{self, Fd};
 use crate::fs;
 use crate::process::{Image, ImageRefused};
 use crate::shm::{Immutable, NotImmutable};
-use crate::{OwnedHandle, RawHandle};
+use crate::OwnedHandle;
 
 /// The deepest directory a capability names, in components.
 pub const MAX_CAPABILITY_DEPTH: usize = 4;
@@ -409,7 +409,7 @@ pub fn read_image(path: &[u8]) -> Result<Image, ImageRefused<Error>> {
 
 /// [`read_image`], a copy counted to the job `job` is a handle to: a
 /// child's program, which it keeps (`Image::read_for`).
-pub fn read_image_for(path: &[u8], job: Option<RawHandle>) -> Result<Image, ImageRefused<Error>> {
+pub fn read_image_for(path: &[u8], job: Option<crate::BorrowedHandle<'_>>) -> Result<Image, ImageRefused<Error>> {
     let fd = open(At::Cwd, path, Open { read: true, cloexec: true, ..Open::default() }).map_err(ImageRefused::Read)?;
     // SAFETY: a plain value; a handle answered is this process's alone.
     let held = decode(unsafe { toyos_fs_image(fd) }).map(|h| OwnedHandle(toyos_abi::RawHandle(h as u32)));

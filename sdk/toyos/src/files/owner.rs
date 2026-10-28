@@ -117,8 +117,8 @@ fn place(at: At, path: &[u8]) -> Result<Place, Error> {
 
 /// `path` from the directory `fd` names; the empty path is that directory.
 fn from_dir(fd: Fd, path: &str) -> Result<Place, Error> {
-    let named = fd::with(fd, |o| match o.tag {
-        SERVED_FILE | KERNEL_DIR if o.kernel_handle().is_none() => held(o.word),
+    let named = fd::with(fd, |o| match o.tag() {
+        SERVED_FILE | KERNEL_DIR if o.kernel_handle().is_none() => held(o.word()),
         _ => None,
     });
     match named.map_err(Error::Fd)?.as_deref() {
@@ -174,16 +174,16 @@ enum Named {
 /// holds open for it. A kernel directory answers `kernel_dir`.
 fn on_fd<T>(
     fd: Fd,
-    kernel: impl FnOnce(RawHandle) -> Result<T, SyscallError>,
+    kernel: impl FnOnce(crate::BorrowedHandle<'_>) -> Result<T, SyscallError>,
     kernel_dir: impl FnOnce(&str) -> Result<T, Error>,
     served: impl FnOnce(&mut Dir, Fid) -> Result<T, fs::Error>,
 ) -> Result<T, Error> {
     // A kernel call is made while the descriptor's object is held; an object
     // of this module's is taken out of it, counted, and asked after.
-    let named = fd::with(fd, |o| match (o.kernel_handle(), o.tag) {
+    let named = fd::with(fd, |o| match (o.kernel_handle(), o.tag()) {
         (Some(handle), _) => Ok(Err(kernel(handle).map_err(Error::Kernel))),
         (None, SERVED_FILE | KERNEL_DIR) => {
-            Ok(Ok(held(o.word).expect("toyos::files: a held descriptor names an object of this module's")))
+            Ok(Ok(held(o.word()).expect("toyos::files: a held descriptor names an object of this module's")))
         }
         (None, _) => Err(Error::NotAFile),
     });
@@ -198,10 +198,10 @@ fn on_fd<T>(
 
 /// What `fd` names, for a call that asks about it rather than through it.
 fn named(fd: Fd) -> Result<Named, Error> {
-    let named = fd::with(fd, |o| match (o.kernel_handle(), o.tag) {
-        (Some(handle), _) => Ok(Named::Handle(handle)),
+    let named = fd::with(fd, |o| match (o.kernel_handle(), o.tag()) {
+        (Some(handle), _) => Ok(Named::Handle(handle.raw())),
         (None, SERVED_FILE | KERNEL_DIR) => {
-            Ok(Named::Held(held(o.word).expect("toyos::files: a held descriptor names an object of this module's")))
+            Ok(Named::Held(held(o.word()).expect("toyos::files: a held descriptor names an object of this module's")))
         }
         (None, _) => Err(Error::NotAFile),
     });
@@ -270,7 +270,7 @@ unsafe fn bytes<'a>(ptr: *const u8, len: usize) -> &'a [u8] {
 
 /// What an open opened, before a descriptor names it.
 enum Opened {
-    Kernel(RawHandle),
+    Kernel(crate::OwnedHandle),
     Held(Held),
 }
 
@@ -301,7 +301,7 @@ fn kernel_open(abs: &str, how: Open) -> Result<Result<Opened, Error>, SyscallErr
     if how.create || how.create_new { flags |= OpenFlags::CREATE; }
     if how.create_new { flags |= OpenFlags::EXCLUSIVE; }
     if how.truncate { flags |= OpenFlags::TRUNCATE; }
-    syscall::open(abs.as_bytes(), flags).map(|handle| Ok(Opened::Kernel(handle)))
+    syscall::open(abs.as_bytes(), flags).map(|handle| Ok(Opened::Kernel(crate::OwnedHandle(handle))))
 }
 
 #[no_mangle]
@@ -372,9 +372,9 @@ unsafe extern "C" fn toyos_fs_stat(at: Fd, path: *const u8, len: usize, follow: 
 /// `f` on the stream `fd` names, held for the call, as a read or a write of
 /// its descriptor does it: through its region, since its connection carries
 /// frames. `None` for a descriptor that names no stream.
-fn on_stream<T>(fd: Fd, f: impl FnOnce(RawHandle) -> Result<T, crate::net::stream::Refused>) -> Option<Result<T, Error>> {
+fn on_stream<T>(fd: Fd, f: impl FnOnce(crate::BorrowedHandle<'_>) -> Result<T, crate::net::stream::Refused>) -> Option<Result<T, Error>> {
     let streamed = fd::with(fd, |o| {
-        (o.tag == fd::STREAM).then(|| f(o.handle).map_err(Error::Stream))
+        o.handle().filter(|_| o.tag() == fd::STREAM).map(|handle| f(handle).map_err(Error::Stream))
     });
     streamed.ok().flatten()
 }
@@ -393,7 +393,7 @@ unsafe extern "C" fn toyos_fs_read(fd: Fd, buf: *mut u8, len: usize) -> i64 {
     if let Some(n) = on_stream(fd, |h| crate::net::stream::read(h, out(), blocking)) {
         return answer(n.map(|n| n as u64));
     }
-    let n = on_fd(fd, |h| syscall::read(h, out()), is_a_directory, |dir, fid| dir.read(fid, out()));
+    let n = on_fd(fd, |h| syscall::read(h.raw(), out()), is_a_directory, |dir, fid| dir.read(fid, out()));
     answer(n.map(|n| n as u64))
 }
 
@@ -405,7 +405,7 @@ unsafe extern "C" fn toyos_fs_write(fd: Fd, buf: *const u8, len: usize) -> i64 {
     if let Some(n) = on_stream(fd, |h| crate::net::stream::write(h, buf, blocking)) {
         return answer(n.map(|n| n as u64));
     }
-    let n = on_fd(fd, |h| syscall::write(h, buf), is_a_directory, |dir, fid| dir.write(fid, buf).map(|w| w.len));
+    let n = on_fd(fd, |h| syscall::write(h.raw(), buf), is_a_directory, |dir, fid| dir.write(fid, buf).map(|w| w.len));
     answer(n.map(|n| n as u64))
 }
 
@@ -414,7 +414,7 @@ unsafe extern "C" fn toyos_fs_pread(fd: Fd, buf: *mut u8, len: usize, offset: u6
     // SAFETY: the caller lends `len` writable bytes for the call, and only
     // one of the closures runs.
     let out = || unsafe { core::slice::from_raw_parts_mut(buf, len) };
-    let n = on_fd(fd, |h| syscall::pread(h, out(), offset), is_a_directory, |dir, fid| dir.pread(fid, offset, out()));
+    let n = on_fd(fd, |h| syscall::pread(h.raw(), out(), offset), is_a_directory, |dir, fid| dir.pread(fid, offset, out()));
     answer(n.map(|n| n as u64))
 }
 
@@ -422,7 +422,7 @@ unsafe extern "C" fn toyos_fs_pread(fd: Fd, buf: *mut u8, len: usize, offset: u6
 unsafe extern "C" fn toyos_fs_pwrite(fd: Fd, buf: *const u8, len: usize, offset: u64) -> i64 {
     // SAFETY: the caller's.
     let buf = unsafe { bytes(buf, len) };
-    let n = on_fd(fd, |h| syscall::pwrite(h, buf, offset), is_a_directory, |dir, fid| dir.pwrite(fid, offset, buf));
+    let n = on_fd(fd, |h| syscall::pwrite(h.raw(), buf, offset), is_a_directory, |dir, fid| dir.pwrite(fid, offset, buf));
     answer(n.map(|n| n as u64))
 }
 
@@ -436,23 +436,23 @@ extern "C" fn toyos_fs_seek(fd: Fd, whence: u32, delta: i64) -> i64 {
     };
     // A kernel directory has no offset to move.
     let kernel_dir = |_: &str| Err(Error::Kernel(SyscallError::InvalidArgument));
-    answer(on_fd(fd, |h| syscall::seek(h, kernel), kernel_dir, |dir, fid| dir.seek(fid, served, delta)))
+    answer(on_fd(fd, |h| syscall::seek(h.raw(), kernel), kernel_dir, |dir, fid| dir.seek(fid, served, delta)))
 }
 
 #[no_mangle]
 extern "C" fn toyos_fs_truncate(fd: Fd, size: u64) -> i64 {
-    answer(on_fd(fd, |h| syscall::ftruncate(h, size), is_a_directory, |dir, fid| dir.truncate(fid, size)).map(|()| 0))
+    answer(on_fd(fd, |h| syscall::ftruncate(h.raw(), size), is_a_directory, |dir, fid| dir.truncate(fid, size)).map(|()| 0))
 }
 
 #[no_mangle]
 extern "C" fn toyos_fs_fsync(fd: Fd) -> i64 {
     // A kernel directory holds nothing its files' syncs do not write.
-    answer(on_fd(fd, syscall::fsync, |_| Ok(()), |dir, fid| dir.fsync(fid)).map(|()| 0))
+    answer(on_fd(fd, |h| syscall::fsync(h.raw()), |_| Ok(()), |dir, fid| dir.fsync(fid)).map(|()| 0))
 }
 
 #[no_mangle]
 extern "C" fn toyos_fs_stream(fd: Fd) -> i64 {
-    let handle = on_fd(fd, syscall::dup, is_a_directory, |dir, fid| dir.stream(fid).map(|pipe| pipe.into_raw()));
+    let handle = on_fd(fd, |h| h.try_clone_to_owned().map(crate::OwnedHandle::into_raw), is_a_directory, |dir, fid| dir.stream(fid).map(|pipe| pipe.into_raw()));
     answer(handle.map(|h| u64::from(h.0)))
 }
 

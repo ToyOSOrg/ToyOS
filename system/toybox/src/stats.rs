@@ -1,4 +1,4 @@
-use std::os::toyos::process::ChildExt;
+use std::os::toyos::io::AsRawHandle;
 use std::process::Command;
 use toyos_abi::syscall::{process_stats, ProcessStats};
 use toyos_abi::RawHandle;

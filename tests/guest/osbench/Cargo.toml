@@ -25,7 +25,7 @@ osbench-rules = { path = "rules" }
 toyos-abi = { path = "../../../sdk/abi" }
 # Native IPC (ports, connections, endowments) and the observation rights the
 # tail group reads the diary, the counters and the roster with.
-toyos = { path = "../../../sdk/toyos" }
+toyos = { path = "../../../sdk/toyos", features = ["std"] }
 toyos-trace = { path = "../../../lib/trace" }
 # netstack's counters, which the LAN group's transfer rows report, asked as the reader asks.
 inspect = { path = "../../../system/inspect" }

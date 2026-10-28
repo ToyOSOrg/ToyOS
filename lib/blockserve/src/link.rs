@@ -21,7 +21,7 @@ use toyos_blockring::disk::{self, Offer, Part, Settled};
 /// driver answers on.
 pub enum Handed {
     /// A session to open, over the region the client sent.
-    Session { session: disk::Session, conn: Connection, region: toyos::RawHandle },
+    Session { session: disk::Session, conn: Connection, region: toyos::OwnedHandle },
     /// A description of one of this driver's disks.
     Describe { disk: u32, conn: Connection },
     Designate { order: disk::Designation, conn: Connection },
@@ -163,10 +163,7 @@ impl Link {
                             handed.push(Handed::Session { session, conn, region });
                             continue;
                         }
-                        (_, Some(handles)) => {
-                            handles.into_iter().for_each(toyos_abi::syscall::close);
-                            "a session frame this protocol does not make"
-                        }
+                        (_, Some(_)) => "a session frame this protocol does not make",
                         (_, None) => "a session without its two handles",
                     }
                 }

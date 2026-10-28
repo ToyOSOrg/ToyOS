@@ -83,7 +83,8 @@ fn main() {
     assert!(err(ret).is_none(), "fstat refused a Stat across a page boundary: {ret:#x}");
     let got = unsafe { (straddling as *const [u8; STAT_LEN]).read_volatile() };
     assert_eq!(got, want, "fstat wrote a different Stat across the boundary than inside one page");
-    syscall::close(handle);
+    // SAFETY: no type holds this number.
+    unsafe { syscall::close(handle) };
 
     // 2. `SpawnArgs` straddling, read whole: the child it names starts.
     let argv = b"/system/bin/echo\0straddle\0";

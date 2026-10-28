@@ -456,9 +456,7 @@ fn offered(control: &Connection, offer: &Offer) -> Result<OwnedHandle, Refusal> 
             let [ring] = control
                 .recv_handles_exact::<{ output::ACCEPTED_HANDLES }>(&header)
                 .ok_or_else(|| refused("its acceptance carried no ring".into()))?;
-            // SAFETY: the kernel moved this handle into this table with the
-            // frame that names it, and nothing else answers for it.
-            Ok(unsafe { OwnedHandle::from_raw(ring) })
+            Ok(ring)
         }
         Some(ToDriver::Refused) => Err(Refusal::Declined),
         _ => Err(refused(format!("it answered the offer with frame {}", header.msg_type))),

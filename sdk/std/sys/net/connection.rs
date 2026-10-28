@@ -1,7 +1,6 @@
 use toyos::net::socket;
 use toyos::net::stream::{self, Refused, Wait};
 use toyos::net::NetError;
-use toyos_abi::RawHandle;
 
 use crate::fmt;
 use crate::io::{self, BorrowedCursor, IoSlice, IoSliceMut};
@@ -14,7 +13,7 @@ use crate::time::Duration;
 // --- Helpers ---
 
 /// A stream's handle this process just got, as an owned descriptor.
-fn stream_fd(handle: RawHandle) -> io::Result<OwnedFd> {
+fn stream_fd(handle: toyos::OwnedHandle) -> io::Result<OwnedFd> {
     let fd = toyos::fd::install(stream::descriptor(handle), false, 0).map_err(crate::sys::fd_error)?;
     // SAFETY: a descriptor just installed for this stream alone.
     Ok(unsafe { OwnedFd::from_raw_fd(fd) })
@@ -22,7 +21,7 @@ fn stream_fd(handle: RawHandle) -> io::Result<OwnedFd> {
 
 /// A listener's or a datagram socket's handle this process just got, as an
 /// owned descriptor.
-fn socket_fd(handle: RawHandle) -> io::Result<OwnedFd> {
+fn socket_fd(handle: toyos::OwnedHandle) -> io::Result<OwnedFd> {
     let fd = toyos::fd::install(socket::descriptor(handle), false, 0).map_err(crate::sys::fd_error)?;
     // SAFETY: a descriptor just installed for this socket alone.
     Ok(unsafe { OwnedFd::from_raw_fd(fd) })
@@ -30,8 +29,13 @@ fn socket_fd(handle: RawHandle) -> io::Result<OwnedFd> {
 
 /// The kernel handle an owned descriptor names. Its owner alone closes it,
 /// so one gone is another owner having closed it, against I/O safety.
-fn kernel(fd: &OwnedFd) -> RawHandle {
-    toyos::fd::with(fd.as_raw_fd(), |o| o.handle).expect("std::net: an owned descriptor was closed by another owner")
+fn kernel(fd: &OwnedFd) -> toyos::BorrowedHandle<'_> {
+    let raw = toyos::fd::with(fd.as_raw_fd(), |o| o.handle().map(|h| h.raw()))
+        .ok()
+        .flatten()
+        .expect("std::net: an owned descriptor was closed by another owner");
+    // SAFETY: `fd` owns the descriptor, which names the handle until it closes.
+    unsafe { toyos::BorrowedHandle::borrow_raw(raw) }
 }
 
 fn net_err_to_io(e: NetError) -> io::Error {
@@ -144,7 +148,7 @@ impl TcpStream {
         Ok(TcpStream::from_fd(stream_fd(connected.handle)?))
     }
 
-    fn handle(&self) -> RawHandle {
+    fn handle(&self) -> toyos::BorrowedHandle<'_> {
         kernel(&self.fd)
     }
 
@@ -290,14 +294,14 @@ impl TcpStream {
     /// reading.
     pub fn bell(&self) -> io::Result<u32> {
         let bell = stream::doorbell(self.handle(), stream::Way::Send).map_err(stream_refused)?;
-        Ok(bell.0)
+        Ok(bell.raw().0)
     }
 
     /// The stream's receive bell: the handle a watch for bytes is made on,
     /// for reading.
     pub fn receive_bell(&self) -> io::Result<u32> {
         let bell = stream::doorbell(self.handle(), stream::Way::Receive).map_err(stream_refused)?;
-        Ok(bell.0)
+        Ok(bell.raw().0)
     }
 
     /// Registered for readiness: each named way's want armed, and netstack rung
@@ -333,7 +337,7 @@ impl TcpListener {
         self.fd
     }
 
-    fn handle(&self) -> RawHandle {
+    fn handle(&self) -> toyos::BorrowedHandle<'_> {
         kernel(&self.fd)
     }
 
@@ -429,7 +433,7 @@ impl UdpSocket {
         self.fd
     }
 
-    fn handle(&self) -> RawHandle {
+    fn handle(&self) -> toyos::BorrowedHandle<'_> {
         kernel(&self.fd)
     }
 

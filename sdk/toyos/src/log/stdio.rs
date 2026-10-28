@@ -230,7 +230,7 @@ mod target {
         use why::Why;
         // A descriptor that is not open, or names a file a server holds, is
         // written as a descriptor.
-        let asked = crate::fd::with(stream as i32, |o| o.kernel_handle().map(syscall::fstat));
+        let asked = crate::fd::with(stream as i32, |o| o.kernel_handle().map(|h| syscall::fstat(h.raw())));
         let Ok(Some(stat)) = asked else { return Ok(DESCRIPTOR) };
         let stat = stat.map_err(Why::Fstat)?;
         if stat.file_type != FileType::SharedMemory {
@@ -239,9 +239,12 @@ mod target {
         if (stat.size as usize) < RING_BYTES {
             return Err(Why::Small(stat.size));
         }
-        let own = crate::fd::with(stream as i32, |o| syscall::dup(o.handle))
+        let own = crate::fd::with(stream as i32, |o| o.handle().map(|h| h.try_clone_to_owned()))
+            .ok()
+            .flatten()
             .unwrap_or(Err(SyscallError::NotFound))
-            .map_err(Why::Dup)?;
+            .map_err(Why::Dup)?
+            .into_raw();
         // SAFETY: `own` is a live shared-memory handle this process holds and
         // never closes, so the mapping stays for the process's life.
         let at = unsafe { syscall::shm_map(own, syscall::VmProt::ReadWrite) }.map_err(Why::Map)?;
@@ -376,11 +379,11 @@ mod target {
     /// its bytes, without waiting, since a line may be said from inside a call
     /// waiting on that very stream; a handle's by a plain write. `None` for
     /// nothing, and for a stream another copy of this crate holds.
-    fn write_line(object: crate::fd::Object, bytes: &[u8]) -> Option<usize> {
+    fn write_line(object: crate::fd::Lent<'_>, bytes: &[u8]) -> Option<usize> {
         let wait = crate::net::stream::Wait::Nonblocking;
         match object.kernel_handle() {
-            Some(handle) if object.tag == crate::fd::STREAM => crate::net::stream::write(handle, bytes, wait).ok(),
-            Some(handle) => syscall::write(handle, bytes).ok(),
+            Some(handle) if object.tag() == crate::fd::STREAM => crate::net::stream::write(handle, bytes, wait).ok(),
+            Some(handle) => syscall::write(handle.raw(), bytes).ok(),
             None => None,
         }
     }

@@ -42,7 +42,7 @@ impl Client {
             Err(toyos_abi::syscall::SyscallError::WouldBlock) => false,
             Ok(0) | Err(_) => true,
             Ok(_) => {
-                say!("netstack: dropping client {} — it spoke again before its answer", self.conn.as_handle().0);
+                say!("netstack: dropping client {} — it spoke again before its answer", self.conn.as_handle().raw().0);
                 true
             }
         }
@@ -63,7 +63,7 @@ impl Client {
                 ipc::TrySendError::TooLarge => "the answer netstack built is larger than a frame",
                 ipc::TrySendError::Syscall(_) => "its connection is gone",
             };
-            say!("netstack: dropping client {} — {why}", self.conn.as_handle().0);
+            say!("netstack: dropping client {} — {why}", self.conn.as_handle().raw().0);
         }
     }
 }

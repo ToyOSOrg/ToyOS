@@ -49,10 +49,7 @@ fn main() {
 
     // The place the session's detached apps are spawned under, before any
     // launch is handed over on the same link.
-    let place = toyos_abi::syscall::dup(toyos::endow::this_process().as_handle())
-        .expect("session: its own handle duplicates");
-    // SAFETY: a duplicate made here, which nothing else answers for.
-    let place = unsafe { toyos::OwnedHandle::from_raw(place) };
+    let place = toyos::endow::this_process().as_handle().try_clone_to_owned().expect("session: its own handle duplicates");
     link.signal_with(wire::MSG_PLACE, [place]).expect("session: its place reaches the supervisor");
 
     let mut owner = Owner::default();
@@ -156,8 +153,7 @@ fn from_supervisor(
         wire::MSG_STARTED => {
             let started = Started::decode(payload).expect("session: the supervisor's start is one it writes");
             let [handle] = batch.exact::<1>().expect("session: a start carries its app");
-            // SAFETY: moved into this table with the frame, and nothing else answers for it.
-            let process: Process = unsafe { toyos::endow::FromHandle::from_handle(handle) };
+            let process: Process = toyos::endow::FromHandle::from_handle(handle);
             apps.push((started.instance, process));
             owner.started(started.instance, started.name)
         }

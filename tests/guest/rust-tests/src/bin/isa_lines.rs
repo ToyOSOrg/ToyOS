@@ -91,7 +91,7 @@ fn claimed(cap: &SysCap, holder: &str) -> Device {
 fn role(role: &str, claim: Device) {
     let status = Command::new(SELF_PATH)
         .arg(role)
-        .endow(CLAIM_LABEL, claim.into_raw().0)
+        .endow(CLAIM_LABEL, claim.into())
         .status()
         .expect("isa: spawn a role");
     assert!(status.success(), "isa lines: {role} ended {:?}", status.code());
@@ -163,7 +163,7 @@ fn acknowledged(when: &str) {
 /// The record on `claim` if there is one, without waiting.
 fn record(claim: &Device) -> Option<u32> {
     let mut record = [0u8; DeviceIrqRecord::SIZE];
-    match syscall::read_nonblock(claim.as_handle(), &mut record) {
+    match syscall::read_nonblock(claim.as_handle().raw(), &mut record) {
         Ok(n) => {
             assert_eq!(n, DeviceIrqRecord::SIZE, "isa: a record of {n} bytes");
             Some(u32::from_ne_bytes([record[0], record[1], record[2], record[3]]))

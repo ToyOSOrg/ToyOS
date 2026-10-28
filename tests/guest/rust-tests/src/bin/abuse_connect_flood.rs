@@ -56,7 +56,7 @@ fn main() {
     let mut held: Vec<RawHandle> = Vec::new();
     let mut refused_after = None;
     for i in 0..ATTEMPTS {
-        match syscall::namespace_open(ns.as_handle(), NAME) {
+        match syscall::namespace_open(ns.as_handle().raw(), NAME) {
             Ok(handle) => held.push(handle),
             Err(SyscallError::ResourceExhausted) => {
                 refused_after = Some(i);
@@ -95,7 +95,7 @@ fn main() {
     println!("  {depth} unaccepted connections cost {} KiB of physical memory", grew / 1024);
 
     // A depth, not a permanent refusal: draining one must let one more in.
-    let accepted = syscall::accept(acceptor.as_handle()).expect("accept a queued connection");
+    let accepted = syscall::accept(acceptor.as_handle().raw()).expect("accept a queued connection");
 
     // The other direction, without which "costs nothing" could be a pipe that
     // never works: one byte on a live connection has to buy a ring. This is
@@ -111,13 +111,15 @@ fn main() {
     );
     println!("  the first write on a connection allocated {} KiB", ring / 1024);
 
-    syscall::close(accepted);
-    let handle = syscall::namespace_open(ns.as_handle(), NAME)
+    // SAFETY: no type holds this number.
+    unsafe { syscall::close(accepted) };
+    let handle = syscall::namespace_open(ns.as_handle().raw(), NAME)
         .expect("an open must succeed once the server drains one");
     held.push(handle);
 
     for handle in held {
-        syscall::close(handle);
+        // SAFETY: no type holds this number.
+        unsafe { syscall::close(handle) };
     }
 
     println!("connect refused after {depth} unaccepted, and resumed once one was drained");

@@ -7,13 +7,15 @@
 //! its own handle kills itself, and ends killed rather than exiting.
 
 use std::io::{Read, Write};
-use std::os::toyos::process::{ChildExt, CommandExt};
+use std::os::toyos::io::AsRawHandle;
+use std::os::toyos::process::CommandExt;
 use std::process::{Child, Command, Stdio};
 use std::sync::atomic::{AtomicU32, Ordering};
 
 use toyos::ipc::Connection;
 use toyos::process::Process;
 use toyos::shm::SharedMemory;
+use toyos::endow::FromHandle;
 use toyos::{endow, namespace, port, OwnedHandle};
 use toyos_abi::syscall::{self, SVC_LABEL};
 use toyos_abi::RawHandle;
@@ -84,7 +86,7 @@ fn killer_child() -> (Connection, Child) {
         .expect("a namespace carrying one connector");
     let child = Command::new(SELF_PATH)
         .arg("killer")
-        .endow(SVC_LABEL, ns.into_raw().0)
+        .endow(SVC_LABEL, ns.into())
         .stdout(Stdio::piped())
         .spawn()
         .expect("spawn a killer");
@@ -121,10 +123,8 @@ fn killer() -> ! {
     let header = conn.recv_header().expect("the arming frame");
     assert_eq!(header.msg_type, ARM, "an unexpected frame");
     let [word_handle, victim] = conn.recv_handles_exact::<2>(&header).expect("the word and the victim");
-    // SAFETY: received with this frame, so this process's and nobody else's.
-    let go = SharedMemory::lent(unsafe { OwnedHandle::from_raw(word_handle) }, WORD_BYTES).expect("map the word");
-    // SAFETY: the parent sent one handle to the victim, which nothing else here owns.
-    let victim = unsafe { Process::from_raw(victim) };
+    let go = SharedMemory::lent(word_handle, WORD_BYTES).expect("map the word");
+    let victim = Process::from_handle(victim);
 
     let mut out = std::io::stdout();
     out.write_all(b"armed\n").expect("say armed");

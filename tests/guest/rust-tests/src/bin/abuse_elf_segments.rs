@@ -154,7 +154,7 @@ fn spawn_as(path: &str, image: &[u8]) -> SyscallError {
             labels_len: 0,
             cwd_ptr: CWD.as_ptr() as u64,
             cwd_len: CWD.len() as u64,
-            image: toyos::AsHandle::as_handle(&object).0 as u64,
+            image: toyos::AsHandle::as_handle(&object).raw().0 as u64,
             image_len: image.len() as u64,
             place: u64::from(toyos_abi::HANDLE_INVALID.0),
         })

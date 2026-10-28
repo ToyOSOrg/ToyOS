@@ -62,7 +62,7 @@ impl Acceptor {
     /// a connection through an unbadged connector; one accepted from another
     /// port is `PermissionDenied`.
     pub fn badge<'a>(&self, conn: &Connection, out: &'a mut [u8; MAX_BADGE]) -> Result<&'a [u8], SyscallError> {
-        let len = syscall::port_badge(self.0.raw(), conn.as_handle(), out)?;
+        let len = syscall::port_badge(self.0.raw(), conn.as_handle().raw(), out)?;
         Ok(&out[..len])
     }
 
@@ -83,7 +83,7 @@ impl Connector {
     /// A second connector to the same port, for a holder handing one on while
     /// keeping its own.
     pub fn duplicate(&self) -> Result<Self, SyscallError> {
-        syscall::dup(self.0.raw()).map(|h| Self(OwnedHandle(h)))
+        self.0.try_clone().map(Self)
     }
 
     pub fn into_raw(self) -> RawHandle {
@@ -99,13 +99,13 @@ impl Connector {
 }
 
 impl AsHandle for Acceptor {
-    fn as_handle(&self) -> RawHandle {
-        self.0.raw()
+    fn as_handle(&self) -> crate::BorrowedHandle<'_> {
+        self.0.as_handle()
     }
 }
 
 impl AsHandle for Connector {
-    fn as_handle(&self) -> RawHandle {
-        self.0.raw()
+    fn as_handle(&self) -> crate::BorrowedHandle<'_> {
+        self.0.as_handle()
     }
 }
