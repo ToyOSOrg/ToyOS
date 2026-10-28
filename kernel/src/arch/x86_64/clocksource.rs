@@ -16,10 +16,12 @@ use core::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 
 use alloc::vec::Vec;
 
-use kernel::clock::reference::{self, Calibration, Failure, Kept, Offset, Reference, Sample, Watch};
+use kernel::clock::reference::{self, Agreement, Arbitration, Calibration, Failure, Kept, Offset, Reference, Sample, Watch};
 use toyos_abi::clock::Line;
 
 use super::cpu;
+use super::pio::{self, Declared};
+use toyos_userbound::{Mediated, Ports};
 use crate::log;
 use crate::mm::Mmio;
 use crate::mm::policy::MmioPolicy;
@@ -76,7 +78,7 @@ impl Hpet {
         if self.wide {
             self.mmio.read_u64(HPET_COUNTER)
         } else {
-            reference::extend(near, self.mmio.read_u32(HPET_COUNTER))
+            reference::extend(near, u64::from(self.mmio.read_u32(HPET_COUNTER)), 32)
         }
     }
 
@@ -108,10 +110,70 @@ impl Hpet {
     }
 }
 
+/// The ACPI PM timer, the second reference: which of the TSC and the HPET
+/// moved, where the two disagree. **It and the HPET are both the chipset's
+/// (the FCH's on AMD, the PCH's on Intel)**, and may share its clock, so a
+/// stall common to both reads as the TSC having moved.
+struct PmTimer {
+    port: Declared,
+    bits: u32,
+    reference: Reference,
+    last: Sample,
+}
+
+/// ACPI 6.5 §4.8.3.3: 3.579545 MHz. ACPI states no tolerance for it; the
+/// HPET's is taken, the same chipset's clock.
+const PM_TIMER_PERIOD_FS: u64 = 279_365_114;
+
+impl PmTimer {
+    fn new(named: toyos_acpi::PmTimer) -> Result<Self, alloc::string::String> {
+        let ports = Ports::new(named.port, 4).ok_or("its block runs past the port space")?;
+        let port = pio::declare("the ACPI PM timer", ports, Mediated::ReadOnly).map_err(|e| alloc::format!("{e:?}"))?;
+        let mut timer = Self {
+            port,
+            bits: u32::from(named.bits),
+            reference: hpet_reference(PM_TIMER_PERIOD_FS),
+            last: Sample { before: 0, after: 0, reference: 0 },
+        };
+        let first = timer.read_raw();
+        // A tick is 279 ns: a counter that does not move within 100 µs counts nothing.
+        let until = cpu::counter() + crate::clock::counter_ticks(100_000);
+        while timer.read_raw() == first {
+            if cpu::counter() > until {
+                return Err(alloc::format!("port {:#x} reads {first:#x} and does not count", named.port));
+            }
+        }
+        timer.last = timer.sample(timer.read_raw());
+        Ok(timer)
+    }
+
+    fn read_raw(&self) -> u64 {
+        u64::from(cpu::inl(self.port.port(0))) & ((1u64 << self.bits) - 1)
+    }
+
+    fn sample(&self, near: u64) -> Sample {
+        let before = cpu::rdtsc_ordered();
+        let low = self.read_raw();
+        let after = cpu::rdtsc_ordered();
+        Sample { before, after, reference: reference::extend(near, low, self.bits) }
+    }
+
+    /// The next sample, its wraps counted from the last by the kept rate.
+    fn next(&self, mult: u64) -> Sample {
+        let nanos = Line { counter: 0, stamp: 0, mult }.nanos(cpu::counter().saturating_sub(self.last.before));
+        self.sample(self.last.reference + (u128::from(nanos) * 1_000_000 / u128::from(PM_TIMER_PERIOD_FS)) as u64)
+    }
+}
+
 /// What the HPET's sampler holds, once the boot has started the clock.
 struct Held {
     hpet: Hpet,
     watch: Watch,
+    pm: Option<PmTimer>,
+    /// Spans left out, and of them those across which the HPET, and the PM
+    /// timer, disagreed with the TSC: what the left-out spans would have read.
+    unheld_hpet_apart: u64,
+    unheld_pm_apart: u64,
     /// Each CPU's [`crate::idle::Local::deep_periods`] at the last sample.
     idle: Vec<(u64, u64)>,
 }
@@ -165,7 +227,7 @@ impl Local {
 
 /// Start the clock on the TSC, at its stated rate or one measured against the
 /// HPET at `hpet_base`, and hand the HPET to the runtime check.
-pub fn start(hpet_base: u64) {
+pub fn start(hpet_base: u64, pm_timer: Result<toyos_acpi::PmTimer, alloc::string::String>) {
     admit("cpu0");
     TSC_ADJUST.store(cpu::has_tsc_adjust(), Ordering::Relaxed);
     note_adjust();
@@ -195,7 +257,19 @@ pub fn start(hpet_base: u64) {
         None => calibrate(&hpet),
     };
     crate::clock::set_counter(anchor.before, kept.mult);
-    *HELD.lock() = Some(Held { watch: Watch::new(hpet.reference, anchor, kept), hpet, idle: Vec::new() });
+    let pm = pm_timer.and_then(PmTimer::new);
+    match &pm {
+        Ok(pm) => log!("clock: the ACPI PM timer at {:#x}, {} bits, tells the TSC from the HPET where they disagree", pm.port.port(0).number(), pm.bits),
+        Err(why) => log!("clock: no ACPI PM timer to tell the TSC from the HPET ({why}); a step between them panics"),
+    }
+    *HELD.lock() = Some(Held {
+        watch: Watch::new(hpet.reference, anchor, kept),
+        hpet,
+        pm: pm.ok(),
+        unheld_hpet_apart: 0,
+        unheld_pm_apart: 0,
+        idle: Vec::new(),
+    });
 }
 
 /// The TSC's rate against the HPET over [`CALIBRATION`], first sample to last,
@@ -398,47 +472,90 @@ pub fn check(now_ns: u64) {
     }
 }
 
-/// One sample of the HPET, held to the TSC where the span since the last
-/// can be.
+/// One sample of the HPET, and of the PM timer beside it, held to the TSC
+/// where the span since the last can be.
 fn sample(held: &mut Held, cpu_id: u32) {
     let awake = held.some_cpu_stayed_awake();
-    let sample = held.hpet.sample(held.hpet.near(held.watch.last(), held.watch.kept().mult), 1);
+    let kept = held.watch.kept();
+    let last = held.watch.last();
+    let hpet = held.hpet.sample(held.hpet.near(last, kept.mult), 1);
+    let pm = held.pm.as_ref().map(|pm| (pm.last, pm.next(kept.mult)));
     #[cfg(feature = "boot-actuators")]
-    let sample = staged(sample, false);
-    match held.watch.take(sample, awake) {
+    let (hpet, pm) = staged(hpet, pm, false, held.hpet.reference.period_fs);
+    let against = |reference: Reference, from: Sample, to: Sample| {
+        let span = reference::Span::between(reference, from, to);
+        let tolerance = kept.bound_ppb + reference.tolerance_over(reference.span_ns(from, to));
+        reference::agree_over(reference, span, kept.mult, tolerance)
+    };
+    let pm_reference = held.pm.as_ref().map(|pm| pm.reference);
+    let pm_agreement = pm.zip(pm_reference).map(|((from, to), reference)| against(reference, from, to));
+    if let (Some(timer), Some((_, to))) = (held.pm.as_mut(), pm) {
+        timer.last = to;
+    }
+    if !awake {
+        held.unheld_hpet_apart += u64::from(!against(held.hpet.reference, last, hpet).holds());
+        held.unheld_pm_apart += u64::from(pm_agreement.is_some_and(|a| !a.holds()));
+        let _ = held.watch.take(hpet, false);
+        return;
+    }
+    match held.watch.take(hpet, true) {
         Ok(None) => {}
         Ok(Some(report)) => {
             #[cfg(feature = "boot-actuators")]
-            staged(sample, true);
+            staged(hpet, pm, true, held.hpet.reference.period_fs);
             let kept = Line { counter: 0, stamp: 0, mult: report.kept.mult };
             if report.retuned {
                 crate::clock::retune(report.kept.mult);
             }
             let measured = Line { counter: 0, stamp: 0, mult: report.measured.mult }.millihertz();
             let (span_s, bound) = (report.measured.span_ns / 1_000_000_000, report.measured.bound_ppb);
-            let unheld = report.unheld;
+            let unheld = alloc::format!(
+                "{} spans unheld, across which the HPET read apart from the TSC in {} and the PM timer in {}",
+                report.unheld, held.unheld_hpet_apart, held.unheld_pm_apart,
+            );
             match (report.kept.measured, report.retuned) {
                 (false, _) => log!(
                     "clock: over {span_s} s the TSC counted {measured} mHz against the HPET, within {bound} ppb; \
-                     the clock keeps CPUID 15H's {} mHz; {unheld} spans unheld",
+                     the clock keeps CPUID 15H's {} mHz; {unheld}",
                     kept.millihertz(),
                 ),
                 (true, retuned) => log!(
                     "clock: over {span_s} s the TSC counted {measured} mHz against the HPET, within {bound} ppb; \
-                     the clock {} {} mHz, within {} ppb; {unheld} spans unheld",
+                     the clock {} {} mHz, within {} ppb; {unheld}",
                     if retuned { "now keeps" } else { "keeps" },
                     kept.millihertz(),
                     report.kept.bound_ppb,
                 ),
             }
         }
-        Err(Failure::Step { from, to, agreement }) => panic!(
-            "clock: the TSC and the HPET disagree by {} ns over the {} ns the HPET counted since the last sample, {} \
-             allowed: one of them stepped (cpu{cpu_id}, {from:?} to {to:?})",
-            agreement.apart_ns,
-            agreement.reference_ns,
-            agreement.allowed_ns,
-        ),
+        Err(Failure::Step { from, to, agreement }) => {
+            let spans = spans(agreement, pm_agreement, from, to, pm);
+            match pm_agreement.map(|second| reference::arbitrate(agreement, second)) {
+                Some(Arbitration::FirstMoved) => {
+                    log!("clock: the HPET moved and the TSC did not, so this span is left out: {spans}");
+                    let _ = held.watch.take(hpet, false);
+                }
+                Some(Arbitration::AllDisagree) => {
+                    log!("clock: the TSC, the HPET and the ACPI PM timer all disagree, so this span is left out: {spans}");
+                    let _ = held.watch.take(hpet, false);
+                }
+                Some(Arbitration::CounterMoved) => panic!(
+                    "clock: the TSC and the HPET disagree by {} ns over the {} ns the HPET counted since the last \
+                     sample, {} allowed, and the ACPI PM timer agrees with the HPET: two of the chipset's counters \
+                     agree against the TSC, which moved, or both stalled together (cpu{cpu_id}; {spans})",
+                    agreement.apart_ns,
+                    agreement.reference_ns,
+                    agreement.allowed_ns,
+                ),
+                None => panic!(
+                    "clock: the TSC and the HPET disagree by {} ns over the {} ns the HPET counted since the last \
+                     sample, {} allowed, and no PM timer says which moved (cpu{cpu_id}; {spans})",
+                    agreement.apart_ns,
+                    agreement.reference_ns,
+                    agreement.allowed_ns,
+                ),
+            }
+        }
         Err(Failure::Drift { since, to, agreement }) => panic!(
             "clock: the TSC and the HPET disagree by {} ns over the {} ns the HPET counted in held spans, {} allowed: \
              their rates are further apart than the kept rate's bound and the HPET's tolerance (cpu{cpu_id}, the \
@@ -450,17 +567,54 @@ fn sample(held: &mut Held, cpu_id: u32) {
     }
 }
 
-/// `tsc-step`: from the first report on, every sample reads the TSC 10 ms
-/// ahead of where it is. A hypervisor's TSC may ignore a write (QEMU's TCG
-/// does), so the step is staged in the readings the sampler takes.
+/// All three counters' spans, for a disagreement's record.
+fn spans(
+    hpet: Agreement,
+    pm: Option<Agreement>,
+    from: Sample,
+    to: Sample,
+    pm_samples: Option<(Sample, Sample)>,
+) -> alloc::string::String {
+    let pm = match (pm, pm_samples) {
+        (Some(a), Some((pm_from, pm_to))) => alloc::format!(
+            "the PM timer counted {} ns and reads {} ns apart, {} allowed ({pm_from:?} to {pm_to:?})",
+            a.reference_ns, a.apart_ns, a.allowed_ns,
+        ),
+        _ => "no PM timer".into(),
+    };
+    alloc::format!(
+        "the TSC counted {} ticks, the HPET {} ns and reads {} ns apart, {} allowed ({from:?} to {to:?}); {pm}",
+        to.before.wrapping_sub(from.before),
+        hpet.reference_ns,
+        hpet.apart_ns,
+        hpet.allowed_ns,
+    )
+}
+
+/// `tsc-step` and `hpet-stall`: from the first report on, every sample reads
+/// either the TSC 10 ms ahead of where it is, in both references' readings,
+/// or the HPET 10 ms behind, as a TSC that stepped and an HPET that stood
+/// still. A hypervisor's TSC may ignore a write (QEMU's TCG does), so each is
+/// staged in the readings the sampler takes.
 #[cfg(feature = "boot-actuators")]
-fn staged(sample: Sample, reported: bool) -> Sample {
-    static AHEAD: AtomicU64 = AtomicU64::new(0);
-    if crate::actuator::tsc_step() && reported && AHEAD.load(Ordering::Relaxed) == 0 {
-        let ahead = crate::clock::counter_ticks(10_000_000);
-        AHEAD.store(ahead, Ordering::Relaxed);
-        log!("tsc-step: the TSC reads {ahead} cycles ahead from here");
+fn staged(hpet: Sample, pm: Option<(Sample, Sample)>, reported: bool, period_fs: u64) -> (Sample, Option<(Sample, Sample)>) {
+    static TSC_AHEAD: AtomicU64 = AtomicU64::new(0);
+    static HPET_BEHIND: AtomicU64 = AtomicU64::new(0);
+    if reported && TSC_AHEAD.load(Ordering::Relaxed) == 0 && HPET_BEHIND.load(Ordering::Relaxed) == 0 {
+        if crate::actuator::tsc_step() {
+            let ahead = crate::clock::counter_ticks(10_000_000);
+            TSC_AHEAD.store(ahead, Ordering::Relaxed);
+            log!("tsc-step: the TSC reads {ahead} cycles ahead from here");
+        }
+        if crate::actuator::hpet_stall() {
+            let behind = 10_000_000_000_000 / period_fs;
+            HPET_BEHIND.store(behind, Ordering::Relaxed);
+            log!("hpet-stall: the HPET reads {behind} ticks behind from here");
+        }
     }
-    let ahead = AHEAD.load(Ordering::Relaxed);
-    Sample { before: sample.before + ahead, after: sample.after + ahead, ..sample }
+    let ahead = TSC_AHEAD.load(Ordering::Relaxed);
+    let forward = |s: Sample| Sample { before: s.before + ahead, after: s.after + ahead, ..s };
+    let behind = HPET_BEHIND.load(Ordering::Relaxed);
+    let hpet = Sample { reference: hpet.reference - behind, ..forward(hpet) };
+    (hpet, pm.map(|(from, to)| (from, forward(to))))
 }
