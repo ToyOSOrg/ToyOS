@@ -578,6 +578,14 @@ impl H {
         outs
     }
 
+    /// Delivers `s` `us` microseconds past `t`, with no timer due before it.
+    pub fn input_past(&mut self, t: i64, us: u64, s: S) -> Vec<O> {
+        let at = Instant::from_nanos(self.instant(t).nanos() + us * 1_000);
+        assert!(at >= self.now && self.tcp.next_deadline().is_none_or(|d| d > at));
+        (self.t, self.now) = (t, at);
+        self.deliver(s)
+    }
+
     /// Delivers `s` at `t` from the fixture's peer (or `s.from`), then offers an opportunity.
     pub fn input(&mut self, t: i64, s: S) -> Vec<O> {
         let mut outs = self.at(t);
