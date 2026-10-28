@@ -48,7 +48,7 @@ mod card;
 mod client;
 mod i219;
 mod lent;
-mod pipes;
+mod bells;
 mod serve;
 mod virtio_net;
 mod watches;
@@ -102,12 +102,12 @@ const TCP_BUFFER: u32 = toyos::net::stream::RECEIVE_BYTES;
 const PIPE_BYTES: u64 = PIPE_CAPACITY as u64;
 
 /// What one holder of a stream can make this machine hold: the two pipes of
-/// its connection and its two bells, each full.
-const HOLDER_BYTES: u64 = 4 * PIPE_BYTES;
+/// its connection, each full. Its bells are events, which hold no bytes.
+const HOLDER_BYTES: u64 = 2 * PIPE_BYTES;
 
 /// What one holder of a listener or a datagram socket can make it hold: the
-/// two pipes of its connection and its bell.
-const SOCKET_HOLDER_BYTES: u64 = 3 * PIPE_BYTES;
+/// two pipes of its connection, its bell being an event.
+const SOCKET_HOLDER_BYTES: u64 = 2 * PIPE_BYTES;
 
 /// What one place can make this machine hold, at the largest of the things a
 /// place is (`toyos-net-node`'s `places`): a stream, its region and its first

@@ -47,7 +47,7 @@ const POSIX_SPAWN_SETSIGMASK: i16 = 0x08;
 const FLAGS: i16 = POSIX_SPAWN_RESETIDS | POSIX_SPAWN_SETPGROUP | POSIX_SPAWN_SETSIGDEF | POSIX_SPAWN_SETSIGMASK;
 
 /// The most children unwaited at once: libc's own thread watches them all on
-/// one poller, beside its own control pipe and the process's notice.
+/// one poller, beside its own control event and the process's notice.
 pub(crate) const MAX_CHILDREN: usize = toyos::poller::Poller::MAX_HANDLES as usize - 2;
 
 /// What the shell `system` and `popen` run a command with.
@@ -469,7 +469,7 @@ fn wait_child(pid: i32, block: bool) -> Result<Option<(i32, End, toyos_abi::sysc
             continue;
         }
         // Before the table is read: a child started after it moves the turn
-        // this records, and the wake pipe says so.
+        // this records, and the wake event says so.
         call.children_seen();
         let ignored = crate::signal::children_ignored();
         // Copies of the handles, watched with the table given up: a reap on

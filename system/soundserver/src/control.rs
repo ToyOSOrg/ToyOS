@@ -18,8 +18,8 @@ use toyos::audio::{
 use toyos::ipc::{self, RxStep};
 use toyos::poller::{Poller, READABLE};
 use toyos::port::Acceptor;
+use toyos::wake::{Bell, Waker};
 use toyos::Connection;
-use toyos_abi::syscall;
 use toyos_mixer::{period_nanos, Gain, MAX_CLIENT_RATE, MIN_CLIENT_RATE};
 
 use crate::client::{open_stream, Departure};
@@ -35,7 +35,7 @@ use crate::volume::{self, VolumeClient};
 /// size minus one. 64 costs the same 2 MiB page as 32; 63 simultaneous streams
 /// is already past what the mixer renders inside one 2.9 ms period, and costs
 /// 189 of the kernel's 4096 handle slots (a control connection plus both signal
-/// pipe ends per client).
+/// event sides per client).
 pub(crate) const MAX_CONTROL_CLIENTS: usize = 63;
 
 /// The widest control payload soundserver decodes: `StreamOpenRequest` is
@@ -132,8 +132,8 @@ pub(crate) fn control_thread(
     volume_acceptor: Acceptor,
     mut outputs: Outputs,
     cmd_ring: &CommandRing,
-    cmd_pipe_write: toyos::BorrowedHandle<'_>,
-    ended_read: toyos::BorrowedHandle<'_>,
+    cmd_wake: &Waker,
+    ended_bell: &Bell,
     mut device: Device,
     published: &Published,
 ) {
@@ -183,11 +183,11 @@ pub(crate) fn control_thread(
             device = crate::output_device(&attached.offer, attached.period_frames);
             period_nanos = toyos_mixer::period_nanos(device.period_frames as u64, device.rate as u64);
             ramp_frames = toyos_mixer::ramp_frames(device.rate);
-            submit(cmd_ring, cmd_pipe_write, MixCommand::Attach(attached), period_nanos);
+            submit(cmd_ring, cmd_wake, MixCommand::Attach(attached), period_nanos);
         }
 
         poller.watch(&acceptor, READABLE, TOKEN_ACCEPT);
-        poller.watch(&ended_read, READABLE, TOKEN_ENDED);
+        poller.watch(&ended_bell, READABLE, TOKEN_ENDED);
         outputs.watch(&poller, TOKEN_OUTPUTS);
         poller.watch(&volume_acceptor, READABLE, TOKEN_VOLUME_ACCEPT);
         for (i, client) in clients.iter().enumerate() {
@@ -233,8 +233,7 @@ pub(crate) fn control_thread(
             }
         }
         if ready.contains(&TOKEN_ENDED) {
-            let mut drain = [0u8; 8];
-            while matches!(syscall::read_nonblock(ended_read.raw(), &mut drain), Ok(n) if n == drain.len()) {}
+            ended_bell.take();
             outputs.ended(&mut events);
         }
         outputs.serve(&ready, TOKEN_OUTPUTS, &mut events);
@@ -247,7 +246,7 @@ pub(crate) fn control_thread(
                     device = crate::NULL_SINK;
                     period_nanos = toyos_mixer::period_nanos(device.period_frames as u64, device.rate as u64);
                     ramp_frames = toyos_mixer::ramp_frames(device.rate);
-                    submit(cmd_ring, cmd_pipe_write, MixCommand::Detach, period_nanos);
+                    submit(cmd_ring, cmd_wake, MixCommand::Detach, period_nanos);
                     if !relay.idle() {
                         volume::answer(&mut volume_clients, &mut relay, None);
                     }
@@ -278,7 +277,7 @@ pub(crate) fn control_thread(
                     // crashed is not knowable here.
                     RxStep::Eof => {
                         if let Some(idx) = clients[i].stream_idx {
-                            remove(cmd_ring, cmd_pipe_write, idx, Departure::Disconnected, period_nanos);
+                            remove(cmd_ring, cmd_wake, idx, Departure::Disconnected, period_nanos);
                         }
                         dead.push(i);
                         disconnected = true;
@@ -290,7 +289,7 @@ pub(crate) fn control_thread(
                     RxStep::Malformed => {
                         say!("soundserver: frame this protocol cannot describe, disconnecting client");
                         if let Some(idx) = clients[i].stream_idx {
-                            remove(cmd_ring, cmd_pipe_write, idx, Departure::Refused, period_nanos);
+                            remove(cmd_ring, cmd_wake, idx, Departure::Refused, period_nanos);
                         }
                         dead.push(i);
                         disconnected = true;
@@ -334,14 +333,14 @@ pub(crate) fn control_thread(
                             disconnected = true;
                             break 'msgs;
                         };
-                        submit(cmd_ring, cmd_pipe_write, MixCommand::AddClient(Box::new(client), generation), period_nanos);
+                        submit(cmd_ring, cmd_wake, MixCommand::AddClient(Box::new(client), generation), period_nanos);
                         clients[i].stream_idx = Some(idx);
                     }
                     Control::SetVolume { idx } => {
                         let raw = f32::from_le_bytes(payload[0..4].try_into().unwrap());
                         let Some(gain) = Gain::from_wire(raw) else {
                             say!("soundserver: volume is not a number, disconnecting client");
-                            remove(cmd_ring, cmd_pipe_write, idx, Departure::Refused, period_nanos);
+                            remove(cmd_ring, cmd_wake, idx, Departure::Refused, period_nanos);
                             dead.push(i);
                             disconnected = true;
                             break 'msgs;
@@ -349,7 +348,7 @@ pub(crate) fn control_thread(
                         clients[i].pending_volume = Some(gain);
                     }
                     Control::Close { idx } => {
-                        remove(cmd_ring, cmd_pipe_write, idx, Departure::Closed, period_nanos);
+                        remove(cmd_ring, cmd_wake, idx, Departure::Closed, period_nanos);
                         dead.push(i);
                         disconnected = true;
                         break 'msgs;
@@ -381,7 +380,7 @@ pub(crate) fn control_thread(
                     Control::Violation => {
                         say!("soundserver: protocol violation (msg {msg_type}), disconnecting client");
                         if let Some(idx) = clients[i].stream_idx {
-                            remove(cmd_ring, cmd_pipe_write, idx, Departure::Refused, period_nanos);
+                            remove(cmd_ring, cmd_wake, idx, Departure::Refused, period_nanos);
                         }
                         dead.push(i);
                         disconnected = true;
@@ -395,7 +394,7 @@ pub(crate) fn control_thread(
             // volume instead of at silence and strand the stream unremoved.
             if !disconnected {
                 if let (Some(client_id), Some(target)) = (clients[i].stream_idx, clients[i].pending_volume.take()) {
-                    submit(cmd_ring, cmd_pipe_write, MixCommand::SetVolume { client_id, target }, period_nanos);
+                    submit(cmd_ring, cmd_wake, MixCommand::SetVolume { client_id, target }, period_nanos);
                 }
             }
         }

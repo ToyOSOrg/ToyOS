@@ -48,9 +48,9 @@ impl Waiter {
     /// A waiter with room for a few windows; it grows when asked to wait on
     /// more.
     pub fn new() -> Self {
-        // As `Poller::new` does with its inbox: a kernel out of pipes is a
+        // As `Poller::new` does with its inbox: a kernel out of events is a
         // machine this process cannot wait on at all.
-        let (waker, bell) = wake::pair().expect("Waiter::new: no pipe for the wake");
+        let (waker, bell) = wake::pair().expect("Waiter::new: no event for the wake");
         let capacity = 4;
         Self { poller: Poller::new(capacity), capacity, bell, waker: Arc::new(waker) }
     }
