@@ -1,16 +1,20 @@
 //! x86-64's clock: the TSC, at the rate CPUID leaf 15H states where the part
-//! states one and at one measured against the HPET where it does not, held to
-//! the HPET by every CPU while it runs (`kernel::clock::reference`).
+//! states one and at one measured against the HPET where it does not, and held
+//! to the HPET while it runs (`kernel::clock::reference`).
 //!
 //! The clock counts the TSC only where every CPU states it invariant, or under
 //! a hypervisor, whose TSC is its own to synthesise and whose CPUID need not
-//! say so; there the HPET is all that holds it. Every CPU's TSC is bounded
-//! against the BSP's as it starts ([`measure_offset`]), and a write to it is
-//! caught where `IA32_TSC_ADJUST` is there to show one. Each failure panics:
-//! no other counter here can take the clock's place, because every process
-//! reads the TSC itself.
+//! say so; there the HPET is all that holds it. Every AP's TSC is bounded
+//! against the BSP's as it starts ([`measure_offset`]). While it runs, one CPU
+//! a second samples the HPET for the whole machine's rate and steps, over the
+//! spans in which some CPU stayed awake; and every CPU a second checks its
+//! `IA32_TSC_ADJUST` and that its TSC is not behind another's ([`check`]).
+//! Each failure panics: no other counter here can take the clock's place,
+//! because every process reads the TSC itself.
 
 use core::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+
+use alloc::vec::Vec;
 
 use kernel::clock::reference::{self, Calibration, Failure, Kept, Offset, Reference, Sample, Watch};
 use toyos_abi::clock::Line;
@@ -51,13 +55,9 @@ const CALIBRATION_SAMPLES: u64 = 6;
 /// Calibrations the boot tries before it refuses the machine.
 const CALIBRATION_TRIES: u32 = 3;
 
-/// What each CPU waits between its samples: about the half millisecond the
-/// HPET's tolerance allows a second, so a step of the 1.7 ms seen on the AMD
-/// bench fails the sample after it. One read of the HPET, once a second on
-/// each CPU, inside its scheduler pass: 14.8 µs on the T14, whose HPET read
-/// brackets 35,690 TSC cycles. One and not the boot's narrowest of three:
-/// every bound here allows the read's own bracket, so a read an SMI widened
-/// costs that sample precision and never a false failure.
+/// Once a second: the step allowance at this gap is about 0.5 ms, under the
+/// 1.7 ms step the AMD bench was seen to take. One HPET read a sample: every
+/// bound allows its bracket.
 const CHECK_EVERY_NS: u64 = 1_000_000_000;
 
 /// Round trips of a cache line between the BSP and each AP as it starts.
@@ -108,10 +108,32 @@ impl Hpet {
     }
 }
 
-/// What the runtime check holds, once the boot has started the clock.
+/// What the HPET's sampler holds, once the boot has started the clock.
 struct Held {
     hpet: Hpet,
     watch: Watch,
+    /// Each CPU's [`crate::idle::Local::deep_periods`] at the last sample.
+    idle: Vec<(u64, u64)>,
+}
+
+impl Held {
+    /// Whether some CPU stayed out of every declared idle state from the last
+    /// sample to now: no package state deeper than its own can have held in
+    /// between, so the HPET counted throughout. Where every CPU spent part of
+    /// the span in one, the package may have reached a state that stops the
+    /// HPET, and the span is not held.
+    fn some_cpu_stayed_awake(&mut self) -> bool {
+        let cpus = crate::smp::cpu_count() as usize;
+        self.idle.resize(cpus, (0, 0));
+        let mut awake = false;
+        for (cpu, was) in self.idle.iter_mut().enumerate() {
+            let local = crate::cpu_local::get(cpu as u32).expect("a CPU the roster counts has its record");
+            let now = local.idle.deep_periods();
+            awake |= now == *was && now.0 == now.1;
+            *was = now;
+        }
+        awake
+    }
 }
 
 static HELD: Lock<Option<Held>> = Lock::new(None);
@@ -119,24 +141,25 @@ static HELD: Lock<Option<Held>> = Lock::new(None);
 /// Whether CPUID states `IA32_TSC_ADJUST`, read once on the BSP.
 static TSC_ADJUST: AtomicBool = AtomicBool::new(false);
 
-/// Each CPU's part of the check: when it next samples, and the
+/// When the HPET is next sampled, by whichever CPU's pass gets there first.
+static NEXT_SAMPLE_NS: AtomicU64 = AtomicU64::new(0);
+
+/// The latest TSC any CPU's check read, on a line of its own.
+#[repr(align(64))]
+struct Latest(AtomicU64);
+
+static LATEST: Latest = Latest(AtomicU64::new(0));
+
+/// Each CPU's part of the check: when it next checks itself, and the
 /// `IA32_TSC_ADJUST` it started with.
 pub struct Local {
     due_ns: AtomicU64,
     adjust: AtomicU64,
-    /// What `tsc-step` adds to this CPU's readings.
-    #[cfg(feature = "boot-actuators")]
-    staged: AtomicU64,
 }
 
 impl Local {
     pub const fn new() -> Self {
-        Self {
-            due_ns: AtomicU64::new(0),
-            adjust: AtomicU64::new(0),
-            #[cfg(feature = "boot-actuators")]
-            staged: AtomicU64::new(0),
-        }
+        Self { due_ns: AtomicU64::new(0), adjust: AtomicU64::new(0) }
     }
 }
 
@@ -172,7 +195,7 @@ pub fn start(hpet_base: u64) {
         None => calibrate(&hpet),
     };
     crate::clock::set_counter(anchor.before, kept.mult);
-    *HELD.lock() = Some(Held { watch: Watch::new(hpet.reference, anchor, kept), hpet });
+    *HELD.lock() = Some(Held { watch: Watch::new(hpet.reference, anchor, kept), hpet, idle: Vec::new() });
 }
 
 /// The TSC's rate against the HPET over [`CALIBRATION`], first sample to last,
@@ -329,20 +352,19 @@ pub fn answer_offset() {
     OUT_DONE.store(true, Ordering::Release);
 }
 
-/// This CPU's sample against the HPET, at most once a [`CHECK_EVERY_NS`]:
-/// called from every scheduler pass, where a CPU not due pays one load.
+/// This CPU's checks, at most once a [`CHECK_EVERY_NS`], and the machine's
+/// HPET sample on the first CPU due: called from every scheduler pass, where a
+/// CPU not due pays one load.
+///
+/// A CPU checks that its `IA32_TSC_ADJUST` is the one it started with, and
+/// that its TSC reads no earlier than the latest any CPU's check read before
+/// this one loaded it: a reading behind it is this CPU's TSC proven behind by
+/// the difference (`reference::Offset`'s argument, one way).
 pub fn check(now_ns: u64) {
     let local = &crate::cpu_local::here().arch.clock;
     if now_ns < local.due_ns.load(Ordering::Relaxed) {
         return;
     }
-    // Another CPU sampling now: this one samples on its next pass.
-    let Some(mut held) = HELD.try_lock() else {
-        return;
-    };
-    let Some(held) = held.as_mut() else {
-        return;
-    };
     local.due_ns.store(now_ns + CHECK_EVERY_NS, Ordering::Relaxed);
     let cpu_id = super::percpu::cpu_id();
     if TSC_ADJUST.load(Ordering::Relaxed) {
@@ -355,38 +377,72 @@ pub fn check(now_ns: u64) {
             started as i64,
         );
     }
+    let latest = LATEST.0.load(Ordering::Acquire);
+    let mine = cpu::rdtsc_ordered();
+    assert!(
+        mine >= latest,
+        "clock: cpu{cpu_id}'s TSC read {mine}, {} cycles behind the {latest} another CPU's check read before it",
+        latest - mine,
+    );
+    LATEST.0.fetch_max(mine, Ordering::AcqRel);
+
+    let due = NEXT_SAMPLE_NS.load(Ordering::Relaxed);
+    if now_ns < due || NEXT_SAMPLE_NS.compare_exchange(due, now_ns + CHECK_EVERY_NS, Ordering::Relaxed, Ordering::Relaxed).is_err() {
+        return;
+    }
+    let Some(mut held) = HELD.try_lock() else {
+        return;
+    };
+    if let Some(held) = held.as_mut() {
+        sample(held, cpu_id);
+    }
+}
+
+/// One sample of the HPET, held to the TSC where the span since the last
+/// can be.
+fn sample(held: &mut Held, cpu_id: u32) {
+    let awake = held.some_cpu_stayed_awake();
     let sample = held.hpet.sample(held.hpet.near(held.watch.last(), held.watch.kept().mult), 1);
     #[cfg(feature = "boot-actuators")]
-    let sample = staged(local, sample, false);
-    match held.watch.take(sample) {
+    let sample = staged(sample, false);
+    match held.watch.take(sample, awake) {
         Ok(None) => {}
         Ok(Some(report)) => {
             #[cfg(feature = "boot-actuators")]
-            staged(local, sample, true);
+            staged(sample, true);
             let kept = Line { counter: 0, stamp: 0, mult: report.kept.mult };
             if report.retuned {
                 crate::clock::retune(report.kept.mult);
             }
-            log!(
-                "clock: over {} s the TSC counted {} mHz against the HPET, within {} ppb; the clock {} {} mHz, within {} ppb",
-                report.measured.span_ns / 1_000_000_000,
-                Line { counter: 0, stamp: 0, mult: report.measured.mult }.millihertz(),
-                report.measured.bound_ppb,
-                if report.retuned { "now keeps" } else if report.kept.measured { "keeps" } else { "keeps CPUID 15H's" },
-                kept.millihertz(),
-                report.kept.bound_ppb,
-            );
+            let measured = Line { counter: 0, stamp: 0, mult: report.measured.mult }.millihertz();
+            let (span_s, bound) = (report.measured.span_ns / 1_000_000_000, report.measured.bound_ppb);
+            let unheld = report.unheld;
+            match (report.kept.measured, report.retuned) {
+                (false, _) => log!(
+                    "clock: over {span_s} s the TSC counted {measured} mHz against the HPET, within {bound} ppb; \
+                     the clock keeps CPUID 15H's {} mHz; {unheld} spans unheld",
+                    kept.millihertz(),
+                ),
+                (true, retuned) => log!(
+                    "clock: over {span_s} s the TSC counted {measured} mHz against the HPET, within {bound} ppb; \
+                     the clock {} {} mHz, within {} ppb; {unheld} spans unheld",
+                    if retuned { "now keeps" } else { "keeps" },
+                    kept.millihertz(),
+                    report.kept.bound_ppb,
+                ),
+            }
         }
         Err(Failure::Step { from, to, agreement }) => panic!(
-            "clock: cpu{cpu_id}'s TSC stepped: {} ns apart from the HPET over {} ns since the last sample, {} allowed \
-             ({from:?} to {to:?})",
+            "clock: the TSC and the HPET disagree by {} ns over the {} ns the HPET counted since the last sample, {} \
+             allowed: one of them stepped (cpu{cpu_id}, {from:?} to {to:?})",
             agreement.apart_ns,
             agreement.reference_ns,
             agreement.allowed_ns,
         ),
-        Err(Failure::Drift { from, to, agreement }) => panic!(
-            "clock: cpu{cpu_id}'s TSC drifted from the rate the clock keeps: {} ns apart from the HPET over {} ns, {} \
-             allowed ({from:?} to {to:?})",
+        Err(Failure::Drift { since, to, agreement }) => panic!(
+            "clock: the TSC and the HPET disagree by {} ns over the {} ns the HPET counted in held spans, {} allowed: \
+             their rates are further apart than the kept rate's bound and the HPET's tolerance (cpu{cpu_id}, the \
+             open span from {since:?} to {to:?})",
             agreement.apart_ns,
             agreement.reference_ns,
             agreement.allowed_ns,
@@ -394,17 +450,17 @@ pub fn check(now_ns: u64) {
     }
 }
 
-/// `tsc-step`: from the first report on, the first CPU to report reads its
-/// TSC 10 ms ahead of where it is. A hypervisor's TSC may ignore a write
-/// (QEMU's TCG does), so the step is staged in the readings the check takes.
+/// `tsc-step`: from the first report on, every sample reads the TSC 10 ms
+/// ahead of where it is. A hypervisor's TSC may ignore a write (QEMU's TCG
+/// does), so the step is staged in the readings the sampler takes.
 #[cfg(feature = "boot-actuators")]
-fn staged(local: &Local, sample: Sample, reported: bool) -> Sample {
-    static STEPPED: AtomicBool = AtomicBool::new(false);
-    if crate::actuator::tsc_step() && reported && !STEPPED.swap(true, Ordering::Relaxed) {
+fn staged(sample: Sample, reported: bool) -> Sample {
+    static AHEAD: AtomicU64 = AtomicU64::new(0);
+    if crate::actuator::tsc_step() && reported && AHEAD.load(Ordering::Relaxed) == 0 {
         let ahead = crate::clock::counter_ticks(10_000_000);
-        local.staged.store(ahead, Ordering::Relaxed);
-        log!("tsc-step: cpu{}'s TSC reads {ahead} cycles ahead from here", super::percpu::cpu_id());
+        AHEAD.store(ahead, Ordering::Relaxed);
+        log!("tsc-step: the TSC reads {ahead} cycles ahead from here");
     }
-    let ahead = local.staged.load(Ordering::Relaxed);
+    let ahead = AHEAD.load(Ordering::Relaxed);
     Sample { before: sample.before + ahead, after: sample.after + ahead, ..sample }
 }

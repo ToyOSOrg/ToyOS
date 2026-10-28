@@ -124,9 +124,9 @@ actuators! {
     /// `kernel_wx_leaf_is_refused` and `virt_kernel_wx_leaf_is_refused`.
     kernel_wx_leaf = "kernel-wx-leaf";
 
-    /// Read one CPU's TSC 10 ms ahead once the clock has held for a second,
-    /// as a step `IA32_TSC_ADJUST` would not show, so the HPET alone can catch
-    /// it. The negative control on the clock's runtime check,
+    /// Read the TSC 10 ms ahead in the HPET's samples once the clock has
+    /// held for a second, as a step `IA32_TSC_ADJUST` would not show, so the
+    /// HPET alone can catch it. The negative control on the clock's runtime check,
     /// `a_stepped_tsc_panics`.
     tsc_step = "tsc-step";
 

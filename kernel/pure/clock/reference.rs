@@ -81,28 +81,80 @@ pub enum Unmeasurable {
     TooWide,
 }
 
+/// The counter and the reference over one or more segments, each from one
+/// sample to a later one: what a rate is measured over, and what a held span
+/// is checked over. Segments add, so a span can leave out the stretches the
+/// reference cannot be held across.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Span {
+    /// The counter's span between the brackets' midpoints, doubled.
+    counter2: i128,
+    /// The reference's ticks.
+    ticks: i128,
+    /// The brackets' widths at every segment's ends.
+    widths: u128,
+    /// Segments, each of which knows its reference span to one tick.
+    segments: u64,
+    /// The shortest segment's reference span, for the reference's tolerance.
+    shortest_ns: u64,
+}
+
+impl Span {
+    pub const EMPTY: Self = Self { counter2: 0, ticks: 0, widths: 0, segments: 0, shortest_ns: u64::MAX };
+
+    pub fn between(reference: Reference, a: Sample, b: Sample) -> Self {
+        Self {
+            counter2: b.mid2() as i128 - a.mid2() as i128,
+            ticks: b.reference as i128 - a.reference as i128,
+            widths: a.width() as u128 + b.width() as u128,
+            segments: 1,
+            shortest_ns: reference.span_ns(a, b),
+        }
+    }
+
+    pub fn then(self, more: Self) -> Self {
+        Self {
+            counter2: self.counter2 + more.counter2,
+            ticks: self.ticks + more.ticks,
+            widths: self.widths + more.widths,
+            segments: self.segments + more.segments,
+            shortest_ns: self.shortest_ns.min(more.shortest_ns),
+        }
+    }
+
+    /// The reference's count over the span, in nanoseconds; zero for one
+    /// that read backwards.
+    pub fn reference_ns(&self, reference: Reference) -> u64 {
+        (self.ticks.max(0) as u128 * reference.period_fs as u128 / FS_PER_NS) as u64
+    }
+}
+
 /// The rate from `a` to `b`, which is later.
+pub fn rate(reference: Reference, a: Sample, b: Sample) -> Result<Rate, Unmeasurable> {
+    rate_over(reference, Span::between(reference, a, b))
+}
+
+/// The rate over `span`.
 ///
 /// The counter moved `Δc` between the latches, known to the brackets' half
-/// widths `(wa + wb) / 2`, while the reference moved `Δn` ticks, known to one:
-/// so the relative error is `u = (wa + wb) / (2 Δc)` plus `r = 1 / Δn`, each
+/// widths, while the reference moved `Δn` ticks, known to one a segment: so
+/// the relative error is `u = Σw / (2 Δc)` plus `r = segments / Δn`, each
 /// taken against the measured span, and with the second-order terms of both
 /// the ratio and those spans `(u + r)·(1 + 6·max(u, r))`, which holds while
 /// both are under a quarter. `mult` is rounded down, which is one unit of it
 /// more.
-pub fn rate(reference: Reference, a: Sample, b: Sample) -> Result<Rate, Unmeasurable> {
-    if b.mid2() <= a.mid2() || b.reference <= a.reference {
+pub fn rate_over(reference: Reference, span: Span) -> Result<Rate, Unmeasurable> {
+    if span.counter2 <= 0 || span.ticks <= 0 {
         return Err(Unmeasurable::NotLater);
     }
-    let counter2 = b.mid2() - a.mid2();
-    let ticks = (b.reference - a.reference) as u128;
+    let counter2 = span.counter2 as u128;
+    let ticks = span.ticks as u128;
     let span_fs = ticks * reference.period_fs as u128;
-    let widths = a.width() as u128 + b.width() as u128;
-    if widths * 4 >= counter2 || ticks < 4 {
+    if span.widths * 4 >= counter2 || ticks < 4 * span.segments as u128 {
         return Err(Unmeasurable::TooWide);
     }
-    let u = (widths * PPB as u128).div_ceil(counter2);
-    let r = (PPB as u128).div_ceil(ticks);
+    let u = (span.widths * PPB as u128).div_ceil(counter2);
+    let r = (span.segments as u128 * PPB as u128).div_ceil(ticks);
     let first = u + r;
     // ns per tick, times 2^32: `(span_fs / 10⁶) / (counter2 / 2) · 2^32`.
     let mult = (span_fs << 33) / (FS_PER_NS * counter2);
@@ -110,8 +162,7 @@ pub fn rate(reference: Reference, a: Sample, b: Sample) -> Result<Rate, Unmeasur
     Ok(Rate { mult: mult as u64, bound_ppb: bound as u64, span_ns: (span_fs / FS_PER_NS) as u64 })
 }
 
-/// How the counter and the reference agree over the span from one sample to
-/// a later one, at a given rate.
+/// How the counter and the reference agree over a span, at a given rate.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Agreement {
     /// The span the reference counted, in nanoseconds.
@@ -129,23 +180,32 @@ impl Agreement {
 }
 
 /// The counter's span from `a` to `b` at `mult`, against the reference's.
-///
-/// Allowed: the brackets' half widths at `mult`, one reference tick, and
-/// `tolerance_ppb` of the span, which is what the rate itself may be off by;
-/// two nanoseconds more cover the rounding of each conversion. A `b` whose
-/// reference reads behind `a`'s is a span of zero, so a reference that went
-/// backwards is a disagreement.
 pub fn agree(reference: Reference, a: Sample, b: Sample, mult: u64, tolerance_ppb: u64) -> Agreement {
+    agree_over(reference, Span::between(reference, a, b), mult, tolerance_ppb)
+}
+
+/// The counter's span over `span` at `mult`, against the reference's.
+///
+/// Allowed: the brackets' half widths at `mult`, one reference tick a
+/// segment, and `tolerance_ppb` of the span, which is what the rate itself
+/// may be off by; two nanoseconds a segment more cover the rounding of each
+/// conversion. A segment whose reference reads behind its start counts as a
+/// span of zero, so a reference that went backwards is a disagreement.
+pub fn agree_over(reference: Reference, span: Span, mult: u64, tolerance_ppb: u64) -> Agreement {
     let nanos = |ticks2: u128| (ticks2 * mult as u128) >> 33;
-    let counter_ns = if b.mid2() >= a.mid2() { nanos(b.mid2() - a.mid2()) as i128 } else { -(nanos(a.mid2() - b.mid2()) as i128) };
-    let reference_ns = reference.span_ns(a, b);
-    let readings = nanos(a.width() as u128 + b.width() as u128) as u64;
+    let counter_ns = if span.counter2 >= 0 {
+        nanos(span.counter2 as u128) as i128
+    } else {
+        -(nanos(span.counter2.unsigned_abs()) as i128)
+    };
+    let reference_ns = span.reference_ns(reference);
+    let readings = nanos(span.widths) as u64;
     let tick = (reference.period_fs as u128).div_ceil(FS_PER_NS) as u64;
     let rated = (reference_ns as u128 * tolerance_ppb as u128).div_ceil(PPB as u128) as u64;
     Agreement {
         reference_ns,
         apart_ns: (counter_ns - reference_ns as i128).clamp(i64::MIN as i128, i64::MAX as i128) as i64,
-        allowed_ns: readings + tick + rated + 2,
+        allowed_ns: readings + span.segments * (tick + 2) + rated,
     }
 }
 
@@ -161,7 +221,8 @@ pub enum Calibration {
 
 /// The rate over `samples`, first to last, once every sample between is shown
 /// to sit on that line within what the readings allow: a step inside the
-/// window, which would skew the rate, is refused rather than averaged in.
+/// window larger than the readings resolve, which would skew the rate, is
+/// refused rather than averaged in.
 pub fn calibrate(reference: Reference, samples: &[Sample]) -> Result<Rate, Calibration> {
     let (Some(&first), Some(&last)) = (samples.first(), samples.last()) else {
         return Err(Calibration::Unmeasurable(Unmeasurable::NotLater));
@@ -191,40 +252,50 @@ const REPORT_FACTOR: u64 = 2;
 
 /// A counter's agreement with the reference over the life of a clock kept on
 /// it: each sample is held against the one before it, which catches a step,
-/// and against the first, which catches a rate that has moved.
+/// and against every held span since the first, which catches a rate that
+/// has moved. A span the reference cannot be held across is left out whole.
 #[derive(Clone, Copy, Debug)]
 pub struct Watch {
     reference: Reference,
-    anchor: Sample,
+    /// The held segments before the one now open.
+    closed: Span,
+    /// Where the open segment starts.
+    opened: Sample,
     last: Sample,
     kept: Kept,
     next_report_ns: u64,
+    /// Spans left out.
+    unheld: u64,
 }
 
 /// What a sample showed, where it held.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Report {
-    /// The rate measured since the first sample.
+    /// The rate measured over every held span.
     pub measured: Rate,
     /// The rate the clock keeps from here: a better measurement where the kept
     /// one was measured, and otherwise the one it kept.
     pub kept: Kept,
     /// Whether `kept` replaced the rate the clock was keeping.
     pub retuned: bool,
+    /// The spans left out so far.
+    pub unheld: u64,
 }
 
-/// What a sample showed, where it did not hold.
+/// What a sample showed, where it did not hold: the counter and the reference
+/// disagree, and the samples cannot say which of the two moved.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Failure {
-    /// Against the sample before it: the counter stepped.
+    /// Against the sample before it: one of them stepped.
     Step { from: Sample, to: Sample, agreement: Agreement },
-    /// Against the first: the counter's rate is not the one the clock keeps.
-    Drift { from: Sample, to: Sample, agreement: Agreement },
+    /// Over every held span: they count at rates further apart than the kept
+    /// rate's bound and the reference's tolerance.
+    Drift { since: Sample, to: Sample, agreement: Agreement },
 }
 
 impl Watch {
     pub const fn new(reference: Reference, anchor: Sample, kept: Kept) -> Self {
-        Self { reference, anchor, last: anchor, kept, next_report_ns: FIRST_REPORT_NS }
+        Self { reference, closed: Span::EMPTY, opened: anchor, last: anchor, kept, next_report_ns: FIRST_REPORT_NS, unheld: 0 }
     }
 
     pub const fn kept(&self) -> Kept {
@@ -236,18 +307,31 @@ impl Watch {
         self.last
     }
 
-    /// Hold `sample`, taken after every sample before it, to the kept rate.
-    /// `Some` at each report: the first a second after the anchor, then at
-    /// twice the span of the one before.
-    pub fn take(&mut self, sample: Sample) -> Result<Option<Report>, Failure> {
-        let tolerance = |from: Sample| self.kept.bound_ppb + self.reference.tolerance_over(self.reference.span_ns(from, sample));
-        let step = agree(self.reference, self.last, sample, self.kept.mult, tolerance(self.last));
+    /// Take `sample`, taken after every sample before it. `held` says whether
+    /// the reference can be held to the counter across the span from the last
+    /// sample; one that cannot is left out, and checks nothing. `Some` at each
+    /// report: the first at a second of held spans, then at twice the span of
+    /// the one before.
+    pub fn take(&mut self, sample: Sample, held: bool) -> Result<Option<Report>, Failure> {
+        if !held {
+            if self.last != self.opened {
+                self.closed = self.closed.then(Span::between(self.reference, self.opened, self.last));
+            }
+            self.opened = sample;
+            self.last = sample;
+            self.unheld += 1;
+            return Ok(None);
+        }
+        let tolerance = |span: &Span| self.kept.bound_ppb + self.reference.tolerance_over(span.shortest_ns);
+        let since_last = Span::between(self.reference, self.last, sample);
+        let step = agree_over(self.reference, since_last, self.kept.mult, tolerance(&since_last));
         if !step.holds() {
             return Err(Failure::Step { from: self.last, to: sample, agreement: step });
         }
-        let drift = agree(self.reference, self.anchor, sample, self.kept.mult, tolerance(self.anchor));
+        let whole = self.closed.then(Span::between(self.reference, self.opened, sample));
+        let drift = agree_over(self.reference, whole, self.kept.mult, tolerance(&whole));
         if !drift.holds() {
-            return Err(Failure::Drift { from: self.anchor, to: sample, agreement: drift });
+            return Err(Failure::Drift { since: self.opened, to: sample, agreement: drift });
         }
         self.last = sample;
         if drift.reference_ns < self.next_report_ns {
@@ -256,14 +340,14 @@ impl Watch {
         while self.next_report_ns <= drift.reference_ns {
             self.next_report_ns = self.next_report_ns.saturating_mul(REPORT_FACTOR);
         }
-        let Ok(measured) = rate(self.reference, self.anchor, sample) else {
+        let Ok(measured) = rate_over(self.reference, whole) else {
             return Ok(None);
         };
         let retuned = self.kept.measured && measured.bound_ppb < self.kept.bound_ppb;
         if retuned {
             self.kept = Kept { mult: measured.mult, bound_ppb: measured.bound_ppb, measured: true };
         }
-        Ok(Some(Report { measured, kept: self.kept, retuned }))
+        Ok(Some(Report { measured, kept: self.kept, retuned, unheld: self.unheld }))
     }
 }
 
@@ -409,7 +493,7 @@ mod tests {
     fn run(watch: &mut Watch, hz: u128, seconds: core::ops::Range<u64>, step: i64) -> Result<Vec<Report>, Failure> {
         let mut reports = Vec::new();
         for s in seconds {
-            if let Some(report) = watch.take(sample_at(hz, 1_000 + s * SECOND, (s * 977) % READ, step))? {
+            if let Some(report) = watch.take(sample_at(hz, 1_000 + s * SECOND, (s * 977) % READ, step), true)? {
                 reports.push(report);
             }
         }
@@ -486,8 +570,34 @@ mod tests {
         let latch = |n: u64| sample_at(HZ, n, 0, 0).before;
         let early = Sample { before: latch(n), after: latch(n) + wide, reference: n };
         let late = Sample { before: latch(n + 1_432) - wide, after: latch(n + 1_432), reference: n + 1_432 };
-        assert_eq!(watch.take(early).map(|_| ()), Ok(()));
-        assert_eq!(watch.take(late).map(|_| ()), Ok(()));
+        assert_eq!(watch.take(early, true).map(|_| ()), Ok(()));
+        assert_eq!(watch.take(late, true).map(|_| ()), Ok(()));
+    }
+
+    /// A reference that stood still for 30 s while the counter ran, as an HPET
+    /// may in a package state that stops it: the span is left out, so it is no
+    /// step, and the rate over the held spans either side is the counter's.
+    #[test]
+    fn an_unheld_span_is_left_out() {
+        let mut watch = watch(true);
+        run(&mut watch, HZ, 1..20, 0).unwrap();
+        // The reference resumes where it stopped; the counter is 30 s on.
+        let stood = (30 * SECOND as u128 * HPET.period_fs as u128 * HZ / 1_000_000_000_000_000) as i64;
+        let resumed = sample_at(HZ, 1_000 + 20 * SECOND, 0, stood);
+        assert!(matches!(watch.take(resumed, true), Err(Failure::Step { .. })), "the stood reference reads as a step when held");
+        let mut watch = watch_after(20);
+        assert_eq!(watch.take(resumed, false), Ok(None));
+        let reports = run(&mut watch, HZ, 21..300, stood).unwrap();
+        let last = reports.last().expect("held spans past the gap report");
+        assert_eq!(last.unheld, 1);
+        assert!(ppb_apart(last.measured.mult, HZ) <= last.measured.bound_ppb as u128, "{last:?}");
+        assert!(last.measured.span_ns / 1_000_000_000 >= 256);
+    }
+
+    fn watch_after(seconds: u64) -> Watch {
+        let mut watch = watch(true);
+        run(&mut watch, HZ, 1..seconds, 0).unwrap();
+        watch
     }
 
     /// A reference that reads backwards is a disagreement, never a span.
@@ -496,7 +606,7 @@ mod tests {
         let mut watch = watch(true);
         run(&mut watch, HZ, 1..5, 0).unwrap();
         let back = Sample { reference: watch.last().reference - 10, ..sample(1_000 + 6 * SECOND) };
-        assert!(watch.take(back).is_err());
+        assert!(watch.take(back, true).is_err());
     }
 
     #[test]
