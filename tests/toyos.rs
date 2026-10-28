@@ -5347,7 +5347,9 @@ fn crypto_instrument_prints_its_table(test_config: &Path) -> Result<(), String> 
 const CRYPTO_JOB_CEILING_SECS: u64 = 300;
 
 /// The guest port `test_rs_socket_export` listens on, which the boot forwards
-/// a port of the host's loopback to.
+/// a port of the host's loopback to. QEMU's user network listens there with a
+/// queue of one, and a macOS host resets a connect that finds it full, so the
+/// peer connects only once the guest has answered its last connection.
 const SOCKET_EXPORT_PORT: u16 = 7070;
 
 /// `test_rs_stream_export` and `test_rs_socket_export` on one boot of
@@ -5395,7 +5397,7 @@ fn stream_exported_to_a_child(qemu: &mut QemuInstance) -> Result<(), String> {
     });
     let result = qemu.run_test(&format!("test_rs_stream_export {port}"), Duration::from_secs(120));
     if let Some(why) = &result.error {
-        return Err(format!("{why}\nthe job said:\n{}", result.stdout));
+        return Err(format!("{why}\n{}\nthe job said:\n{}", peer_verdict(heard), result.stdout));
     }
     if result.exit_code != Some(0) {
         return Err(format!("the job ended {:?}:\n{}", result.exit_code, result.stdout));
@@ -5411,8 +5413,9 @@ fn stream_exported_to_a_child(qemu: &mut QemuInstance) -> Result<(), String> {
 /// `test_rs_socket_export`: for the child and then the parent, a datagram
 /// saying it is ready, answered by one saying go, and a connection through the
 /// forwarded port that it accepts and writes its line on; then, once the parent
-/// and a second child both say they are about to block, two connections and
-/// two datagrams, each taken once.
+/// and a second child both say they are about to block, two connections, the
+/// second once a racer wrote its line on the first, and two datagrams, each
+/// taken once.
 fn sockets_exported_to_a_child(qemu: &mut QemuInstance, forwarded: u16) -> Result<(), String> {
     use std::io::Read;
     /// A liveness ceiling on each of the peer's waits, never a timing.
@@ -5438,7 +5441,8 @@ fn sockets_exported_to_a_child(qemu: &mut QemuInstance, forwarded: u16) -> Resul
             }
         }
         // The race: both processes say they are about to block, then two
-        // connections and two datagrams, each taken once.
+        // connections, one at a time, and two datagrams at once, each taken
+        // once.
         let both = |what: &str| -> Result<std::net::SocketAddr, String> {
             let mut said = Vec::new();
             let mut from = None;
@@ -5455,10 +5459,8 @@ fn sockets_exported_to_a_child(qemu: &mut QemuInstance, forwarded: u16) -> Resul
             from.ok_or_else(|| "no racer spoke".to_string())
         };
         both("racing")?;
-        let conns: Vec<std::net::TcpStream> = (0..2)
-            .map(|_| std::net::TcpStream::connect(("127.0.0.1", forwarded)).map_err(|e| format!("a racer's connect: {e}")))
-            .collect::<Result<_, _>>()?;
-        for mut conn in conns {
+        for _ in 0..2 {
+            let mut conn = std::net::TcpStream::connect(("127.0.0.1", forwarded)).map_err(|e| format!("a racer's connect: {e}"))?;
             conn.set_read_timeout(Some(CEILING)).map_err(|e| e.to_string())?;
             let mut line = Vec::new();
             conn.read_to_end(&mut line).map_err(|e| format!("a racer's line: {e} after {line:?}"))?;
@@ -5474,7 +5476,7 @@ fn sockets_exported_to_a_child(qemu: &mut QemuInstance, forwarded: u16) -> Resul
     });
     let result = qemu.run_test(&format!("test_rs_socket_export {port}"), Duration::from_secs(300));
     if let Some(why) = &result.error {
-        return Err(format!("{why}\nthe job said:\n{}", result.stdout));
+        return Err(format!("{why}\n{}\nthe job said:\n{}", peer_verdict(heard), result.stdout));
     }
     if result.exit_code != Some(0) {
         return Err(format!("the job ended {:?}:\n{}", result.exit_code, result.stdout));
@@ -5488,6 +5490,19 @@ fn sockets_exported_to_a_child(qemu: &mut QemuInstance, forwarded: u16) -> Resul
         }
     }
     heard.join().map_err(|_| "the peer's thread panicked".to_string())?
+}
+
+/// What the peer's thread had come to when its job failed: a guest that waits
+/// for a step the peer could not take is no stall of the guest's.
+fn peer_verdict<T>(heard: std::thread::JoinHandle<Result<T, String>>) -> String {
+    if !heard.is_finished() {
+        return "the peer was still waiting on the guest".into();
+    }
+    match heard.join() {
+        Ok(Ok(_)) => "the peer had done its part".into(),
+        Ok(Err(why)) => format!("the peer failed first: {why}"),
+        Err(_) => "the peer's thread panicked".into(),
+    }
 }
 
 /// `test_rs_udp_recv_timeout` on `tests/images/netcase.toml`'s boot.
