@@ -16,11 +16,27 @@ const FS_PER_NS: u128 = 1_000_000;
 
 /// A reference timer: its tick, and how far its rate may wander from that tick
 /// by its own specification, which every check that compares rates over time
-/// allows on top of what the readings bound.
+/// allows on top of what the readings bound: `tolerance_ppb` over a span of
+/// `settled_ns` or more, and `short_tolerance_ppb` over a shorter one.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Reference {
     pub period_fs: u64,
     pub tolerance_ppb: u64,
+    pub settled_ns: u64,
+    pub short_tolerance_ppb: u64,
+}
+
+impl Reference {
+    /// The span from `a` to `b` the reference counted, zero where it read
+    /// backwards.
+    pub const fn span_ns(&self, a: Sample, b: Sample) -> u64 {
+        (b.reference.saturating_sub(a.reference) as u128 * self.period_fs as u128 / FS_PER_NS) as u64
+    }
+
+    /// What the reference's own rate may be off by over `span_ns`.
+    pub const fn tolerance_over(&self, span_ns: u64) -> u64 {
+        if span_ns >= self.settled_ns { self.tolerance_ppb } else { self.short_tolerance_ppb }
+    }
 }
 
 /// One reading of the reference, latched at some moment the counter read
@@ -122,7 +138,7 @@ impl Agreement {
 pub fn agree(reference: Reference, a: Sample, b: Sample, mult: u64, tolerance_ppb: u64) -> Agreement {
     let nanos = |ticks2: u128| (ticks2 * mult as u128) >> 33;
     let counter_ns = if b.mid2() >= a.mid2() { nanos(b.mid2() - a.mid2()) as i128 } else { -(nanos(a.mid2() - b.mid2()) as i128) };
-    let reference_ns = (b.reference.saturating_sub(a.reference) as u128 * reference.period_fs as u128 / FS_PER_NS) as u64;
+    let reference_ns = reference.span_ns(a, b);
     let readings = nanos(a.width() as u128 + b.width() as u128) as u64;
     let tick = (reference.period_fs as u128).div_ceil(FS_PER_NS) as u64;
     let rated = (reference_ns as u128 * tolerance_ppb as u128).div_ceil(PPB as u128) as u64;
@@ -224,12 +240,12 @@ impl Watch {
     /// `Some` at each report: the first a second after the anchor, then at
     /// twice the span of the one before.
     pub fn take(&mut self, sample: Sample) -> Result<Option<Report>, Failure> {
-        let tolerance = self.kept.bound_ppb + self.reference.tolerance_ppb;
-        let step = agree(self.reference, self.last, sample, self.kept.mult, tolerance);
+        let tolerance = |from: Sample| self.kept.bound_ppb + self.reference.tolerance_over(self.reference.span_ns(from, sample));
+        let step = agree(self.reference, self.last, sample, self.kept.mult, tolerance(self.last));
         if !step.holds() {
             return Err(Failure::Step { from: self.last, to: sample, agreement: step });
         }
-        let drift = agree(self.reference, self.anchor, sample, self.kept.mult, tolerance);
+        let drift = agree(self.reference, self.anchor, sample, self.kept.mult, tolerance(self.anchor));
         if !drift.holds() {
             return Err(Failure::Drift { from: self.anchor, to: sample, agreement: drift });
         }
@@ -293,8 +309,10 @@ mod tests {
     use super::*;
     use alloc::vec::Vec;
 
-    /// The AMD bench's HPET: 14.318 MHz, and the HPET specification's 0.05%.
-    const HPET: Reference = Reference { period_fs: 69_841_279, tolerance_ppb: 500_000 };
+    /// The AMD bench's HPET: 14.318 MHz, and the HPET specification's 0.05%
+    /// from 1 ms and 0.2% under it.
+    const HPET: Reference =
+        Reference { period_fs: 69_841_279, tolerance_ppb: 500_000, settled_ns: 1_000_000, short_tolerance_ppb: 2_000_000 };
     /// A counter at 1796.6248 MHz.
     const HZ: u128 = 1_796_624_800;
     /// What a read of the reference costs in counter ticks: 1.2 µs.
