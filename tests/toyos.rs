@@ -70,6 +70,9 @@ const RUST_SKIP: &[&str] = &[
     // It writes the stick for ever, so that its boot's deadline resets the
     // machine under it: `stick_survives_a_reset_under_load` runs it alone.
     "stick_load",
+    // It writes the scratch disk until the machine resets beneath it: the
+    // `scratch_written_through_*` rows run it alone.
+    "scratch_load",
     // The stick-write load `mask_windows` reads windows under, on the boot
     // whose kernel reports them.
     "stick_write",
@@ -1462,6 +1465,22 @@ const METAL: &[(&str, metal::Metal)] = &[
         },
     ),
     (
+        // The scratch stick written through usbd while the boot deadline
+        // resets the machine, which touches no USB register: a stimulus of
+        // `issues/a-reset-can-leave-a-usb-stick-hung-until-its-power-is-removed.md`,
+        // whose outcome the bench's Ubuntu reads. Destructive, so named only,
+        // on the bench with an adopted scratch disk: the T14.
+        "scratch_written_through_a_deadline_reset",
+        metal::Metal { arms: SCRATCH_DEADLINE, judge: |b| power::scratch_written_through_a_deadline_reset(b[0]) },
+    ),
+    (
+        // The same through the orderly reboot the load asks for while it
+        // writes, which has usbd reset every port and its controller before
+        // the kernel's stop.
+        "scratch_written_through_a_reboot",
+        metal::Metal { arms: SCRATCH_REBOOT, judge: |b| power::scratch_written_through_a_reboot(b[0]) },
+    ),
+    (
         // The T14's xHCI that does not hold the stick, which the image's
         // usbd row leaves, claimed, and usbd driving it: handed
         // over, MSI armed through remapping, and the No-Op answered by an
@@ -1786,6 +1805,17 @@ fn in_acpi_mode_before_any_job(boot: &metal::Readback) -> Result<(), String> {
 const TESTCASES_HELD: &[metal::Arm] = &[metal::Arm {
     last: Some("test_rs_acpi_hold"),
     ..metal::once("testcases", "tests/images/testcases.toml", &[], &[])
+}];
+
+/// The scratch image's two boots, one per reset that lands under
+/// [`metal::SCRATCH_LOAD_JOB`].
+const SCRATCH_DEADLINE: &[metal::Arm] = &[metal::Arm {
+    named_only: true,
+    ..metal::once("scratchdeadline", "tests/images/scratchcase.toml", &[], &[metal::SCRATCH_LOAD_JOB])
+}];
+const SCRATCH_REBOOT: &[metal::Arm] = &[metal::Arm {
+    named_only: true,
+    ..metal::once("scratchreboot", "tests/images/scratchcase.toml", &[], &["test_rs_scratch_load reboot"])
 }];
 
 /// Two boots of the designation image (`tests/images/designatecase.toml`):

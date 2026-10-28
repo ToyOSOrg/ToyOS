@@ -14,16 +14,21 @@ pub enum Authorization {
     /// Designations of the machine's one DATA partition, resolved each time
     /// one is asked for, for as long as the row runs.
     DesignateData,
+    /// Sessions, written, on every partition of a bench's scratch type
+    /// (`toyos_gpt::Guid::TOYOS_SCRATCH`), whose contents a destructive test
+    /// may erase.
+    WriteScratch,
 }
 
 impl Authorization {
-    pub const ALL: [Self; 2] = [Self::Tables, Self::DesignateData];
+    pub const ALL: [Self; 3] = [Self::Tables, Self::DesignateData, Self::WriteScratch];
 
     /// How a row spells it.
     pub const fn word(self) -> &'static str {
         match self {
             Self::Tables => "tables",
             Self::DesignateData => "designate:data",
+            Self::WriteScratch => "write:scratch",
         }
     }
 
@@ -36,11 +41,12 @@ impl Authorization {
         match self {
             Self::Tables => "block-tables",
             Self::DesignateData => "block-designate-data",
+            Self::WriteScratch => "block-scratch",
         }
     }
 
     /// Whether it changes a disk, rather than reading one.
     pub const fn changes(self) -> bool {
-        matches!(self, Self::DesignateData)
+        matches!(self, Self::DesignateData | Self::WriteScratch)
     }
 }

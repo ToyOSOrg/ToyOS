@@ -565,6 +565,10 @@ pub fn bytes_of_lines(text: &str, marker: &str) -> usize {
 /// is reset by its own deadline with a write in flight.
 pub const STICK_LOAD_JOB: &str = "test_rs_stick_load";
 
+/// The job that writes the bench's scratch disk for ever (`scratch_load.rs`),
+/// so its boot is reset by the same deadline with a write in flight.
+pub const SCRATCH_LOAD_JOB: &str = "test_rs_scratch_load";
+
 /// That boot's deadline: past both benches' `Boot: complete` (12 s on the
 /// T14) and the job's first synced mebibytes, and before the runner's list
 /// bound ([`toyos_tco::JOB_BOUND_MS`]).
@@ -600,12 +604,13 @@ impl Batch {
 
     /// The bound the kernel gives this whole boot, in milliseconds.
     ///
-    /// **A boot carrying [`STICK_LOAD_JOB`] is ended by it on purpose**, with
-    /// the job still writing the stick: [`STICK_LOAD_DEADLINE_MS`], below the
-    /// list's own bound, so the kernel's reset path, which touches no USB
-    /// register, lands before the runner would hand the machine back.
+    /// **A boot carrying [`STICK_LOAD_JOB`] or [`SCRATCH_LOAD_JOB`] is ended
+    /// by it on purpose**, with the job still writing its stick:
+    /// [`STICK_LOAD_DEADLINE_MS`], below the list's own bound, so the kernel's
+    /// reset path, which touches no USB register, lands before the runner
+    /// would hand the machine back.
     pub fn deadline_ms(&self) -> u64 {
-        if self.jobs.iter().any(|job| job == STICK_LOAD_JOB) {
+        if self.jobs.iter().any(|job| job == STICK_LOAD_JOB || job == SCRATCH_LOAD_JOB) {
             assert!(STICK_LOAD_DEADLINE_MS < self.bound_ms(), "the load's deadline is past its runner's bound");
             return STICK_LOAD_DEADLINE_MS;
         }
@@ -709,16 +714,21 @@ pub fn batches(
     for (label, batch) in &out {
         let mut recorded: BTreeMap<String, &str> = BTreeMap::new();
         for job in &batch.jobs {
-            if let Some(other) = recorded.insert(bootlog::recorded_name(job), job) {
+            if let Some(other) = recorded.insert(bootlog::recorded_name(binary(job)), job) {
                 return Err(format!(
                     "the boot {label:?} runs {other} and {job}, and the kernel records both as {:?}: one \
                      boot's log cannot tell their verdicts apart",
-                    bootlog::recorded_name(job)
+                    bootlog::recorded_name(binary(job))
                 ));
             }
         }
     }
     Ok(out)
+}
+
+/// The binary a job runs: a job is a command line, and this is its first word.
+fn binary(job: &str) -> &str {
+    job.split_whitespace().next().unwrap_or_default()
 }
 
 /// What `reachable`, a batch's text, names beside its `jobs`: every binary it
@@ -743,7 +753,7 @@ pub fn reached(
         // together are a fraction of one helper binary.
         if name.ends_with(".so") {
             out.push((format!("lib/{name}"), data.clone()));
-        } else if !jobs.contains(&staged) && names(&staged) {
+        } else if !jobs.iter().any(|job| binary(job) == staged) && names(&staged) {
             out.push((format!("bin/{staged}"), data.clone()));
         }
     }
@@ -779,12 +789,13 @@ fn build(
     // image carrying two hundred binaries it never runs is a minute of flash.
     let mut extra: Vec<(String, Vec<u8>)> = Vec::new();
     for job in &batch.jobs {
-        let Some(name) = job.strip_prefix("test_rs_") else { continue };
+        let binary = binary(job);
+        let Some(name) = binary.strip_prefix("test_rs_") else { continue };
         let (_, data) = rust_bins
             .iter()
             .find(|(n, _)| n == name)
             .ok_or_else(|| format!("the job {job:?} names no binary under tests/guest/rust-tests"))?;
-        extra.push((format!("bin/{job}"), data.clone()));
+        extra.push((format!("bin/{binary}"), data.clone()));
     }
     extra.extend(batch.files.iter().cloned());
     // **What a job spawns comes with it, and it is not optional.** A binary that
@@ -811,7 +822,7 @@ fn build(
             reachable.push_str(to);
         }
         for job in &batch.jobs {
-            let Some(name) = job.strip_prefix("test_rs_") else { continue };
+            let Some(name) = binary(job).strip_prefix("test_rs_") else { continue };
             if let Ok(source) = std::fs::read_to_string(bin.join(format!("{name}.rs"))) {
                 reachable.push('\n');
                 reachable.push_str(&source);

@@ -1167,6 +1167,32 @@ mod checks {
         assert!(judge(&[&readback("usbload", &wedged(""), kernel)]).is_err());
         let handed_back = format!("{}| log-tail: [20.200 cpu0 kernel] Rebooting.\n", wedged(""));
         assert!(judge(&[&readback("usbload", &handed_back, &wrote)]).is_err());
+
+        // The scratch loads' boots: the deadline or the reboot the load asked
+        // for ended a boot whose load made the scratch disk durable, and a
+        // load that wrote nothing, or was answered a failure, is no reset
+        // under load; nor is a boot ended the other way.
+        let said = |what: &str| format!("[2026-10-28 15:00:20 20.100 test-runner pid=12] scratch_load: {what}\n");
+        let durable = format!("{kernel}{}{}", said("16 MiB durable"), said("32 MiB durable"));
+        let judge = metal_judge("scratch_written_through_a_deadline_reset");
+        assert_eq!(judge(&[&readback("scratchdeadline", &wedged(""), &durable)]), Ok(()));
+        assert!(judge(&[&readback("scratchdeadline", &wedged(""), kernel)]).is_err());
+        let failed = format!("{durable}{}", said("a request was answered Device with 32 MiB durable"));
+        assert!(judge(&[&readback("scratchdeadline", &wedged(""), &failed)]).is_err());
+        assert!(judge(&[&readback("scratchdeadline", &handed_back, &durable)]).is_err());
+        let judge = metal_judge("scratch_written_through_a_reboot");
+        let asked = format!("{durable}{}", said("the reboot is asked for with 64 MiB durable, and the writes go on"));
+        let swept = "| log-tail: [ 1.209 cpu0 kernel] stop: 13 of 13 userland thread(s) stopped across 8 \
+                     cpu(s) in 0 ms of a 2010 ms budget over 1 sweep(s)\n";
+        let usbd = |code: u32| format!("| log-tail: [ 1.208 cpu0 kernel] exit: usbd pid=3 code={code} cpu=125ms\n");
+        let orderly = done(&format!("{}{swept}{rebooted}", usbd(0)));
+        assert_eq!(judge(&[&readback("scratchreboot", &orderly, &asked)]), Ok(()));
+        // A usbd that gave up on its stop, or none that exited at all.
+        let unfinished = done(&format!("{}{swept}{rebooted}", usbd(3)));
+        assert!(judge(&[&readback("scratchreboot", &unfinished, &asked)]).is_err());
+        assert!(judge(&[&readback("scratchreboot", &done(&format!("{swept}{rebooted}")), &asked)]).is_err());
+        assert!(judge(&[&readback("scratchreboot", &orderly, &durable)]).is_err(), "no reboot was asked for");
+        assert!(judge(&[&readback("scratchreboot", &wedged(""), &asked)]).is_err());
     }
 
     /// The foreign-identity arm's pass after the reset: the record it cleared
@@ -1219,6 +1245,10 @@ mod checks {
         // A longer name is another binary's.
         let longer = source.replace("test_rs_child", "test_rs_child_two");
         assert_eq!(staged(&format!("test_rs_parent\n{longer}")), ["lib/libfoo.so"]);
+        // A job given an argument runs the binary it names, staged as a job's.
+        let jobs = vec!["test_rs_parent reboot".to_string()];
+        let staged: Vec<String> = metal::reached("test_rs_parent reboot", &jobs, &bins).into_iter().map(|(path, _)| path).collect();
+        assert_eq!(staged, ["lib/libfoo.so"]);
     }
 
     /// `03_struct`'s output as `ccheck` prints it: the expectation the corpus

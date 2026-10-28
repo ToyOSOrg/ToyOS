@@ -3339,6 +3339,10 @@ impl Grants<'_> {
             let badge = match authorization {
                 Authorization::Tables => toyos_blockring::wire::Badge::Tables,
                 Authorization::DesignateData => toyos_blockring::wire::Badge::DesignateData,
+                Authorization::WriteScratch => toyos_blockring::wire::Badge::Partitions(BlockGrant {
+                    scope: Scope::Kind(toyos_gpt::Guid::TOYOS_SCRATCH.0),
+                    writes: true,
+                }),
             };
             let Some(ports) = &self.block else { return Err(format!("`{word}` is authorized and no block service runs")) };
             let ports = ports.borrow();

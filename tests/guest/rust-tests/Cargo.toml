@@ -39,6 +39,11 @@ toyos-crypto = { path = "../../../lib/crypto", features = ["sign"] }
 toyos-parity = { path = "../../../lib/parity" }
 ml-kem = { version = "0.3", features = ["hazmat"] }
 getrandom = "0.2"
+# A session on the bench's scratch partition, under the authorization its row
+# is minted, for `scratch_load`.
+diskserver = { path = "../../../system/diskserver" }
+toyos-blockring = { path = "../../../lib/blockring" }
+toyos-manifest = { path = "../../../lib/manifest" }
 
 # Outside the workspace, so it needs its own redirects: the forks
 # above depend on ToyOS crates by version, and only a patch maps those to the

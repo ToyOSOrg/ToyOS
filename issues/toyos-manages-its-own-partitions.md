@@ -11,12 +11,15 @@ it (`lib/blockserve`); diskserver routes a request to it under the badge its
 connector was minted with (`toyos_blockring::wire::Badge`); `toyos_gpt::edit`
 is the one GPT writer, laid in UEFI 2.10 §5.3.2's order; `/system/bin/disks`
 is the command. An authorization is one action on one target, and no badge
-that changes a disk opens a session or writes a byte a client chose.
+that changes a disk opens a session or writes a byte a client chose, except
+`write:scratch`, which opens written sessions on scratch-typed partitions
+alone.
 
-Built: `disks list` (`authorize = ["tables"]`) and the designation of the
-machine's one DATA partition (`authorize = ["designate:data"]`), which the
-build grants only a row no login can start (`build/build.rs`), so today only
-a signed test image's job holds it.
+Built: `disks list` (`authorize = ["tables"]`), the designation of the
+machine's one DATA partition (`authorize = ["designate:data"]`) and sessions
+on a bench's scratch partitions (`authorize = ["write:scratch"]`). The build
+grants the last two only to a row no login can start (`build/build.rs`), so
+today only a signed test image's job holds them.
 
 ## Stages, in order
 
