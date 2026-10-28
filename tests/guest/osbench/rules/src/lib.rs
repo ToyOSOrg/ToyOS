@@ -408,6 +408,14 @@ pub mod settle {
     /// How long the readings must agree.
     pub const STEADY_NS: u64 = 50_000_000;
 
+    /// The clock in MHz that `cycles` more adds in the long chain than in
+    /// the short one say, timed at `long_ns` and `short_ns`: `None` where the
+    /// long chain took no longer, as when the short one was preempted, which
+    /// would otherwise read as a clock of many THz.
+    pub fn probe_mhz(cycles: u64, short_ns: u64, long_ns: u64) -> Option<u64> {
+        long_ns.checked_sub(short_ns).filter(|&ns| ns > 0).map(|ns| cycles * 1000 / ns)
+    }
+
     /// The readings since the last one that disagreed.
     #[derive(Clone, Copy, Debug, PartialEq, Eq)]
     pub struct Plateau {
@@ -474,6 +482,16 @@ pub mod settle {
             assert!(!plateau.settled_with(41 * MS, 3700), "7.5% below");
             assert!(!plateau.settled_with(90 * MS, 3700), "49 ms since the disagreement");
             assert!(plateau.settled_with(91 * MS, 3700));
+        }
+
+        #[test]
+        fn a_probe_reads_the_difference_and_a_preempted_short_chain_reads_nothing() {
+            // 300,000 cycles over 70.7 µs, ToyOS's 4,241 MHz on the AMD bench.
+            assert_eq!(probe_mhz(300_000, 23_600, 94_340), Some(4240));
+            // The time read's cost, in both chains alike, cancels.
+            assert_eq!(probe_mhz(300_000, 23_600 + 1_210, 94_340 + 1_210), Some(4240));
+            assert_eq!(probe_mhz(300_000, 500_000, 94_340), None, "short chain preempted past the long");
+            assert_eq!(probe_mhz(300_000, 94_340, 94_340), None);
         }
 
         #[test]

@@ -8,7 +8,7 @@
 use std::sync::Mutex;
 use std::time::{Duration, Instant};
 
-use osbench_rules::settle::Plateau;
+use osbench_rules::settle::{probe_mhz, Plateau};
 
 use crate::report::result;
 use crate::ns_since;
@@ -25,8 +25,8 @@ pub struct Settled {
 }
 
 /// Turns in a probe's short chain, 100,000 cycles; its long one is
-/// [`LONG`] times that, so the difference is 300,000 cycles, 70 to 150 µs on
-/// either bench.
+/// [`LONG`] times that, so the difference is 300,000 cycles: 70 µs at the
+/// AMD bench's 4.24 GHz, 230 µs at 1.3 GHz.
 const TURNS: u64 = 1_000;
 const LONG: u64 = 4;
 const ADDS: u64 = crate::arch::ADDS_PER_TURN;
@@ -39,23 +39,29 @@ fn chain(turns: u64) -> u64 {
     ns_since(t)
 }
 
-/// One probe for `cpu.clock`'s distribution: the long chain's time less the
-/// short one's, in ns.
-fn burst() -> u64 {
+/// One probe for `cpu.clock`'s distribution, in MHz: `None` where the short
+/// chain was preempted past the long one.
+fn burst() -> Option<u64> {
     let short = chain(TURNS);
-    chain(TURNS * LONG).saturating_sub(short).max(1)
+    probe_mhz(CYCLES, short, chain(TURNS * LONG))
 }
 
 /// The clock the calling CPU runs at now, in MHz: the fastest of five of
 /// each chain, taken in turn, so an interrupt inside one reads as neither a
-/// slow clock nor, in the short chain, a fast one.
+/// slow clock nor, in the short chain, a fast one. A clock that rose so far
+/// between the two that the fastest long chain took no longer than the
+/// fastest short one is read again.
 pub fn mhz() -> u64 {
-    let (mut short, mut long) = (u64::MAX, u64::MAX);
-    for _ in 0..5 {
-        short = short.min(chain(TURNS));
-        long = long.min(chain(TURNS * LONG));
+    loop {
+        let (mut short, mut long) = (u64::MAX, u64::MAX);
+        for _ in 0..5 {
+            short = short.min(chain(TURNS));
+            long = long.min(chain(TURNS * LONG));
+        }
+        if let Some(mhz) = probe_mhz(CYCLES, short, long) {
+            return mhz;
+        }
     }
-    CYCLES * 1000 / long.saturating_sub(short).max(1)
 }
 
 /// The longest a settle spins before it takes the clock it has.
@@ -90,6 +96,6 @@ pub fn take_settled() -> Option<Settled> {
 /// CPU leaving idle show its ramp; the rest, the clock it settles at.
 pub fn distribution() {
     burst();
-    let mut mhz: Vec<u64> = (0..200).map(|_| CYCLES * 1000 / burst()).collect();
+    let mut mhz: Vec<u64> = (0..200).filter_map(|_| burst()).collect();
     result("cpu.clock", "MHz", &mut mhz, &[("cycles_per_probe", CYCLES.to_string())]);
 }
