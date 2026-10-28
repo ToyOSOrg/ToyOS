@@ -146,6 +146,10 @@ const RUST_SKIP: &[&str] = &[
     // every CPU, which the `counters` metal row judges; on a guest it would be
     // seconds of four CPUs spinning, read by nothing.
     "counters_metal",
+    // Its product is each CPU's deep idle periods once the ACPI server has
+    // declared the firmware's idle states. A guest's idle is its host's: the
+    // `idle_entered` metal row judges it.
+    "idle_entered",
     // Its product is what a diary record costs, which the `trace_record_cost`
     // metal row reads off the test kernel its flood needs.
     "trace_flood",
@@ -903,6 +907,17 @@ const METAL: &[(&str, metal::Metal)] = &[
         metal::Metal {
             arms: TESTCASES_HELD,
             judge: |b| acpi_tables_on_metal(b[0]),
+        },
+    ),
+    (
+        // The AMD bench's declared idle states as every CPU keeps them, and
+        // each CPU in one of them across an idle second:
+        // `idle_entered_on_metal` says what is held. The same boot as
+        // `acpi_tables_loaded`.
+        "idle_entered",
+        metal::Metal {
+            arms: &[metal::Arm { jobs: &["test_rs_idle_entered"], ..TESTCASES_HELD[0] }],
+            judge: |b| idle_entered_on_metal(b[0]),
         },
     ),
     (
@@ -6923,9 +6938,9 @@ const T14: Bench = Bench {
 /// table defines, refused whole as the owner ruled
 /// (`issues/the-amd-benchs-ssdt8-scopes-a-controller-no-table-defines.md`);
 /// its `\_S5`'s `SLP_TYPa` as the check outside the tree evaluated it; no
-/// processor names an `_OSC`; each `_CST` hands over its port 0x414 and
-/// withholds its type-3 0x415
-/// (`issues/the-amd-benchs-c3-is-withheld-for-want-of-a-coherence-statement.md`). Its controller's `_REG(3, 1)` and its
+/// processor names an `_OSC`; each `_CST` hands over its port 0x414 and its
+/// type-3 0x415, a Family 17h part's (`system/acpiserver/src/cst.rs`). Its
+/// controller's `_REG(3, 1)` and its
 /// adapter's `_PSR` each reach `ALIB`, whose mailbox writes the root
 /// complex's 0xB8 and 0xBC through ECAM, in 00:00.0's page at 0xF8000000.
 const AMD: Bench = Bench {
@@ -6934,7 +6949,7 @@ const AMD: Bench = Bench {
     refused: &[(9, "a name that does not resolve")],
     s5: "with SLP_TYPa=5,",
     loaded: &[],
-    idle: " with port 0x414 400 µs; withheld: a type-3 SystemIO state, whose caches OSPM keeps coherent (ACPI 6.5 §8.1.4) x16; unread: none",
+    idle: " with port 0x414 400 µs + port 0x415 350 µs; withheld: none; unread: none",
     kept: &[],
     first_written: &[At::Address(0xF800_0000)],
 };
@@ -7046,7 +7061,7 @@ fn acpi_tables_on_metal(back: &metal::Readback) -> Result<(), String> {
         }
         eprintln!("  [acpi] {}", processors.trim());
     }
-    let idle = log.must_say("acpiserver: the processors' idle states: ")?;
+    let idle = log.must_say(acpiserver_api::IDLE_CENSUS)?;
     if !idle.contains(" 0 refused by the kernel;") || !idle.trim_end().ends_with(bench.idle) {
         return Err(format!("the processors' idle states are not this bench's, or the kernel refused one: {idle}"));
     }
@@ -7069,6 +7084,54 @@ fn acpi_tables_on_metal(back: &metal::Readback) -> Result<(), String> {
     for line in [took, bytes, aml, census, size, gpes] {
         eprintln!("  [acpi] {}", line.trim());
     }
+    Ok(())
+}
+
+/// The end of the kernel's line for each of the AMD bench's CPUs, its `_CST`
+/// kept whole.
+const AMD_KEPT_STATES: &str = "waits in C1 or port 0x414 (exit 400 µs, residency 800 µs), port 0x415 (exit 350 µs, residency 700 µs)";
+
+/// The AMD bench's idle states kept on every CPU, and each CPU in one across
+/// an idle second: once the server's census is in the log, `idle_entered`
+/// reads each CPU's deep idle periods across the second, those the read
+/// ending it woke the CPU from included. Held: the kernel's line for every CPU
+/// the bring-up started names [`AMD_KEPT_STATES`], each CPU's reads fresh,
+/// and each CPU chose a declared state at least once in the second. Every such period is a
+/// request of port 0x415: the kernel chooses the deepest state whose exit and
+/// residency fit and whose history admits it (`kernel::sched::idle::choose`),
+/// and 0x415's exit and residency are both below 0x414's. What the core then
+/// entered no counter on this part says. The AMD bench alone: the T14 has not
+/// run it.
+fn idle_entered_on_metal(back: &metal::Readback) -> Result<(), String> {
+    back.job_passed("test_rs_idle_entered")?;
+    let kernel = back.kernel();
+    if !kernel.text().contains(AMD.row) {
+        return Err("this row runs on the AMD bench, and this machine's ACPI row is not that bench's".into());
+    }
+    let cpus = back.cpus()?;
+    for cpu in 0..cpus {
+        let kept = kernel.must_say(&format!("idle: cpu{cpu} (processor UID "))?;
+        if !kept.trim_end().ends_with(AMD_KEPT_STATES) {
+            return Err(format!("cpu{cpu} keeps {kept:?}, where the bench declares {AMD_KEPT_STATES:?}"));
+        }
+    }
+    let log = back.log();
+    let entered: Vec<&str> = log
+        .text()
+        .lines()
+        .filter_map(|l| toyos_logstream::program_line(l)?.text.strip_prefix("idle_entered: ").map(str::trim))
+        .collect();
+    if entered.len() != cpus as usize {
+        return Err(format!("idle_entered read {} CPUs, and the bring-up started {cpus}: {entered:#?}", entered.len()));
+    }
+    for (cpu, said) in entered.iter().enumerate() {
+        let periods = number_between(said, &format!("cpu{cpu} "), " deep idle periods")?;
+        if periods == 0 || said.ends_with(", stale") {
+            return Err(format!("cpu{cpu} chose no declared state across the idle second, or was read stale: {said}"));
+        }
+        eprintln!("  [idle] {said}");
+    }
+    eprintln!("  [idle] every CPU {AMD_KEPT_STATES}");
     Ok(())
 }
 

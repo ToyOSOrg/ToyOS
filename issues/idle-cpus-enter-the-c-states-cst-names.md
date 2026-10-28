@@ -12,11 +12,18 @@ processor's `_CST` names that it may enter as it is
 (`lib/userbound/src/idle.rs`) and chooses a state each idle period
 (`kernel/pure/sched/idle.rs`, `kernel/src/idle.rs`), and a `WakeLatency`
 hold bounds the exit (`soundserver` holds half a period while it plays).
-On the T14 that is `MWAIT 0x31` and `0x60` (253 and 1048 µs); on the AMD
-bench port 0x414 (400 µs), its type-3 0x415 withheld
-(`issues/the-amd-benchs-c3-is-withheld-for-want-of-a-coherence-statement.md`).
-AArch64 keeps `wfi` (`issues/aarch64-cpus-idle-only-in-wfi.md`). What
-remains is the exit below, read on metal.
+What is handed over is a rule per vendor and family: Intel's FFH `MWAIT`
+states, and trapped port reads off Intel, of type 3 only on AMD from Family
+17h and on Hygon. On the T14 that is `MWAIT 0x31` and `0x60` (253 and
+1048 µs); on the AMD bench, Family 17h, ports 0x414 and 0x415 (400 and
+350 µs). AArch64 keeps `wfi` (`issues/aarch64-cpus-idle-only-in-wfi.md`).
+What remains is the exit below, read on metal.
+
+Not established for the AMD rule: whether any Zen part needs BM_STS read
+before a type-3 entry, which ToyOS does not do, or BM_RLD set, which ToyOS
+leaves as firmware set it; only PPR 55901 Vol. 5 speaks to them, for Family
+19h Model 11h (BM_STS "no longer used except for server CPU", BM_RLD "no
+longer needed").
 
 Before it, ToyOS's cores never went below C1/C1E and its package never left
 PC0, and its idle package drew 3.16 W against Linux's 1.18 to 1.57 W (#866,
@@ -42,20 +49,29 @@ build (`f6510defd`) and one session a bench, B7 at `18fe4e150` beside them,
 and Linux 6.8 on the same bench (its 50 µs timer slack included; #1073's
 first boots):
 
-| row | T14 C1 | T14 deep | T14 delta | T14 Linux | AMD C1 | AMD deep | AMD delta | AMD Linux |
+| row | T14 C1 | T14 deep | T14 delta | T14 Linux | AMD C1 | AMD 0x414 | AMD 0x415 | AMD Linux |
 |---|---|---|---|---|---|---|---|---|
-| `time.sleep_late.1ms` | 17.7, 17.8 | 22.1, 14.6 (B7 17.2) | −3 to +4 | 71.5-71.8 | 32.2, 32.5 | 5.6, 5.6 (B7 5.4) | −27 | 69.7-70.8 |
-| `time.sleep_late.10ms` | 17.8, 17.8 | 28.3, 28.3 (B7 27.4) | +10.5 to +10.6 | 213 | 32.3, 32.6 | 32.6, 33.3 (B7 32.8) | 0 to +1 | 342-344 |
-| `wake.storm.drain.w4` | 38.5, 37.6 | 126.1, 128.6 (B7 127.9) | +88 to +91 | 121-123 | 306, 107 | 112, 306 (B7 107) | none: 107 or 306 either way | 77-78 |
-| `wake.storm.drain.w16` | 74.1, 77.6 | 161.1, 145.5 (B7 130.1) | +68 to +87 (B7 +52) | 370-1041 | 304, 328 | 321, 331 (B7 350) | within the spread | 113-200 |
+| `time.sleep_late.1ms` | 17.7, 17.8 | 22.1, 14.6 (B7 17.2) | −3 to +4 | 71.5-71.8 | 32.2, 32.5 | 5.6, 5.6 (B7 5.4) | 5.5 | 69.7-70.8 |
+| `time.sleep_late.10ms` | 17.8, 17.8 | 28.3, 28.3 (B7 27.4) | +10.5 to +10.6 | 213 | 32.3, 32.6 | 32.6, 33.3 (B7 32.8) | 52.4 | 342-344 |
+| `wake.storm.drain.w4` | 38.5, 37.6 | 126.1, 128.6 (B7 127.9) | +88 to +91 | 121-123 | 306, 107 | 112, 306 (B7 107) | 64.0 | 77-78 |
+| `wake.storm.drain.w16` | 74.1, 77.6 | 161.1, 145.5 (B7 130.1) | +68 to +87 (B7 +52) | 370-1041 | 304, 328 | 321, 331 (B7 350) | 80.3 | 113-200 |
+
+The AMD's 0x415 column is one benchcase boot of #1089 at `31db18c19`, where
+every deep period requests 0x415 (its exit and residency are both below
+0x414's). It is on a later `main` than the columns beside it, with main's
+scheduler placement change (`05da59f65`) between them. Against 0x414, a
+1 ms sleep lands as it did, and a 10 ms sleep lands 20 µs later (52.4
+against 32.6 to 33.3), consistent with a deeper state's exit and not measured as that. The storms drain
+faster than in either earlier column, but no control on the same base was
+read, so that is not attributed to 0x415.
 
 A sleep long enough for a deep state is woken early by its exit and still
 lands later the deeper the state was (none at 100 µs, C2 at 1 ms, C10 at
 10 ms), which an early wake that fell short would make hundreds of µs:
 consistent with the cost of the caches a deep state powers off, not measured
 as that. A burst of wakes to CPUs in deep states pays their exits. The cost
-is the T14's; on the AMD the deep state lands a 1 ms sleep 27 µs sooner and
-moves nothing else.
+is the T14's. On the AMD, 0x415 lands a 1 ms sleep 27 µs sooner than C1 and
+a 10 ms sleep 20 µs later, and its storms are not attributed (above).
 
 What it costs, as inference, not measured per workload:
 
@@ -64,7 +80,7 @@ What it costs, as inference, not measured per workload:
   about 70 to 90 µs later, against a 60 Hz frame's 16.7 ms.
 - **Audio**: while a stream plays, soundserver holds the exit to half its
   2.9 ms period, about 1.45 ms, which both T14 states (253 and 1048 µs) and
-  the AMD's (400 µs) are inside: so a period's wake may still pay up to
+  the AMD's (400 and 350 µs) are inside: so a period's wake may still pay up to
   1048 µs of exit on the T14, a third of the period. Measured, its worst IRQ
   lateness is not moved and no window underran (below).
 - **Normal workloads**: a server or build that wakes many sleeping threads
@@ -108,7 +124,8 @@ each against its control with the deep states off, all else equal):
   testcases boots: with every idle CPU in C1 (one boot a bench), T14 181 to
   572 µs and AMD 0 to 2661; with the deep states (two boots a bench), T14 0
   to 564 µs and AMD 0 to 2661. The deep states move neither, and no window
-  underran.
+  underran. With 0x415 (#1089's first testcases boot, 6 window lines), AMD 0
+  to 228 µs, and no underrun.
 
 **`cpu.clock` at group starts** is a diagnostic of the turbo grant, not a
 product target: the T14's reaches ratio 42 at 5 to 10 of 17 group starts

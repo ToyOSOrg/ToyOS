@@ -13,21 +13,31 @@
 //! - an Intel FFH state (302223-007 Table 4: vendor 1, class 2) is `MWAIT`
 //!   with Arg0 as its hint, withheld where Arg1 bit 1 asks bus-master
 //!   avoidance, which ToyOS does not track; any other FFH encoding has no
-//!   document in hand;
+//!   document in hand. On AMD from Family 17h `MWAIT` reaches only C1: CPUID
+//!   Fn0000_0005_EDX enumerates no deeper sub-state (PPR 55922, 57896), so no
+//!   AMD FFH state deeper than C1 exists to support;
 //! - a SystemIO state is a byte read of its register, handed over off Intel,
 //!   where the core traps it as a C-state request (AMD PPR 55922,
 //!   MSRC001_0073); on Intel it is a chipset's P_LVLx read (§8.1.3) no machine
 //!   ToyOS runs needs;
-//! - a type-3 SystemIO state is withheld: for one OSPM keeps the caches
-//!   coherent, on a multiprocessor by flushing them before entry (§8.1.4),
-//!   which ToyOS does not, and no document in hand says the processor's own
-//!   hardware makes that unnecessary for it
-//!   (`issues/the-amd-benchs-c3-is-withheld-for-want-of-a-coherence-statement.md`).
-//!   An Intel FFH state of any type is not: its entry is the vendor's native
-//!   instruction, whose only OSPM duty Intel encodes is bus-master avoidance
-//!   (302223-007 Table 4, withheld above), and the processor flushes what a
-//!   C-state powers off as it enters it (SDM Vol. 3B §20.19.6.4: data "may have
-//!   been flushed to memory during the process of entering the idle state");
+//! - a type-3 SystemIO state is handed over only on AMD from Family 17h and
+//!   on Hygon. For one OSPM keeps the caches coherent, on a multiprocessor by
+//!   flushing them before entry (§8.1.4), which ToyOS does not. AMD's rule for
+//!   those processors, which its engineers hold and no AMD document in hand
+//!   states, is that their caches stay coherent through it with no flush and
+//!   that ARB_DIS is unused. BM_STS, which §8.1.4 makes an optional input to
+//!   OSPM's C3 policy and no coherence duty, is not read, and BM_RLD, which
+//!   OSPM "can optionally" set for C3, stays as firmware set it: the rule
+//!   says nothing of either, and PPR 55901 Vol. 5 says of Family 19h Model
+//!   11h that BM_RLD is "no longer needed" and BM_STS "no longer used except
+//!   for server CPU". AMD's earlier families have no such rule, and their
+//!   BKDGs declare their I/O C-state type 2 (Family 16h's 52740
+//!   §2.5.3.2.3). An Intel FFH state of any type is handed over: its entry
+//!   is the vendor's native instruction, whose only OSPM duty Intel encodes
+//!   is bus-master avoidance (302223-007 Table 4, withheld above), and the
+//!   processor flushes what a C-state powers off as it enters it (SDM Vol.
+//!   3B §20.19.6.4: data "may have been flushed to memory during the process
+//!   of entering the idle state");
 //! - a state `_CSD` names for software coordination (Table 8.1, SW_ALL or
 //!   SW_ANY) is withheld: ToyOS coordinates no CPU's state with another's.
 //!   HW_ALL asks nothing of OSPM.
@@ -40,7 +50,9 @@
 //! **`_LPI` is not read**, though a platform may declare both: OSPM uses it in
 //! preference to `_CST` only once it has said in `\_SB._OSC` that it supports
 //! processor containers, and never mixes the two (§8.4.3.5, §6.2.11.2), which
-//! ToyOS does not say.
+//! ToyOS does not say. ACPI defines an x86 state's context-loss flags for
+//! Intel alone (§8.4.3.3.5), so an AMD `_LPI` state's 0 there has no defined
+//! meaning. AArch64's `_LPI` is `issues/aarch64-cpus-idle-only-in-wfi.md`.
 
 use std::collections::BTreeMap;
 
@@ -48,6 +60,7 @@ use toyos_abi::acpi::{IdleDeclaration, IdleEntry, IdleState, IDLE_STATES};
 use toyos_aml::{Kind, Value};
 
 use crate::aml::{kind, Aml};
+use crate::cpu::{Cpu, Vendor};
 use crate::host::{Declared, Kernel, Stopping, OWN};
 use crate::init::Names;
 use crate::ledger::Ledger;
@@ -108,7 +121,8 @@ impl Census {
     pub fn line(&self) -> String {
         let shapes: Vec<String> = self.shapes.iter().map(|(shape, n)| format!("{n} with {shape}")).collect();
         format!(
-            "acpiserver: the processors' idle states: {} kept, {} naming no CPU, {} refused by the kernel; kept: {}; withheld: {}; unread: {}",
+            "{}{} kept, {} naming no CPU, {} refused by the kernel; kept: {}; withheld: {}; unread: {}",
+            acpiserver_api::IDLE_CENSUS,
             self.kept,
             self.no_cpu,
             self.refused,
@@ -119,9 +133,9 @@ impl Census {
     }
 }
 
-/// Read `processor`'s `_CST` and `_CSD` and hand the kernel what of them it
-/// may enter: on an Intel processor where `intel`.
-pub fn declare<K: Kernel>(aml: &mut Aml<'_, K>, kernel: &K, processor: &Processor, intel: bool, census: &mut Census) -> Result<(), Stopping> {
+/// Read `processor`'s `_CST` and `_CSD` and hand the kernel what of them
+/// `cpu` may enter.
+pub fn declare<K: Kernel>(aml: &mut Aml<'_, K>, kernel: &K, processor: &Processor, cpu: Cpu, census: &mut Census) -> Result<(), Stopping> {
     let read = |aml: &mut Aml<'_, K>, method: &str| aml.interpreter.evaluate(&mut aml.host, &format!("{}.{method}", processor.path), &[]);
     let states = match read(aml, "_CST").map_err(|why| kind(&why)).and_then(|v| cst(&v)) {
         Ok(states) => states,
@@ -145,7 +159,7 @@ pub fn declare<K: Kernel>(aml: &mut Aml<'_, K>, kernel: &K, processor: &Processo
     } else {
         Vec::new()
     };
-    let (declaration, withheld) = translate(processor.uid, &states, &software, intel);
+    let (declaration, withheld) = translate(processor.uid, &states, &software, cpu);
     for why in withheld {
         census.withheld.see(&why);
     }
@@ -260,11 +274,11 @@ pub fn csd(value: &Value) -> Result<Vec<u64>, String> {
 
 /// What of `states` the kernel may enter as they are, and why each other was
 /// withheld.
-pub fn translate(uid: u32, states: &[CState], software: &[u64], intel: bool) -> (IdleDeclaration, Vec<String>) {
+pub fn translate(uid: u32, states: &[CState], software: &[u64], cpu: Cpu) -> (IdleDeclaration, Vec<String>) {
     let mut declaration = IdleDeclaration { processor_uid: uid, count: 0, states: [IdleState { address: 0, latency_us: 0, residency_us: 0, entry: 0, reserved: [0; 7] }; IDLE_STATES] };
     let mut withheld = Vec::new();
     for (index, state) in states.iter().enumerate() {
-        let entry = match enterable(state, software.contains(&(index as u64)), intel) {
+        let entry = match enterable(state, software.contains(&(index as u64)), cpu) {
             Ok(Some(entry)) => entry,
             Ok(None) => continue,
             Err(why) => {
@@ -293,7 +307,7 @@ pub fn translate(uid: u32, states: &[CState], software: &[u64], intel: bool) -> 
 }
 
 /// How `state` is entered, `None` for C1, or why ToyOS may not enter it as it is.
-fn enterable(state: &CState, software: bool, intel: bool) -> Result<Option<IdleEntry>, String> {
+fn enterable(state: &CState, software: bool, cpu: Cpu) -> Result<Option<IdleEntry>, String> {
     let r = state.register;
     match state.kind {
         1 => return Ok(None),
@@ -317,10 +331,22 @@ fn enterable(state: &CState, software: bool, intel: bool) -> Result<Option<IdleE
             }
         }
         FFH => Err(format!("FFH vendor {} class {}, an encoding no document in hand defines", r.bit_width, r.bit_offset)),
-        SYSTEM_IO if intel => Err("a SystemIO state on Intel, a chipset's P_LVLx read".into()),
-        SYSTEM_IO if state.kind == 3 => Err("a type-3 SystemIO state, whose caches OSPM keeps coherent (ACPI 6.5 §8.1.4)".into()),
+        SYSTEM_IO if cpu.vendor == Vendor::Intel => Err("a SystemIO state on Intel, a chipset's P_LVLx read".into()),
+        SYSTEM_IO if state.kind == 3 && !coherent_through_c3(cpu) => {
+            Err("a type-3 SystemIO state, whose caches OSPM keeps coherent (ACPI 6.5 §8.1.4), off AMD Family 17h on and Hygon".into())
+        }
         SYSTEM_IO => Ok(Some(IdleEntry::Port)),
         space => Err(format!("a state in space {space:#x}, which no C-state is entered through")),
+    }
+}
+
+/// Whether `cpu`'s caches stay coherent through a type-3 SystemIO state with
+/// no flush and no ARB_DIS: AMD's rule from Family 17h, and Hygon's.
+fn coherent_through_c3(cpu: Cpu) -> bool {
+    match cpu.vendor {
+        Vendor::Amd => cpu.family >= 0x17,
+        Vendor::Hygon => true,
+        Vendor::Intel | Vendor::Other => false,
     }
 }
 
@@ -336,14 +362,18 @@ mod tests {
         CState { register, kind, latency }
     }
 
-    /// The T14's `_CST` as its firmware answers ToyOS's processor `_OSC`
-    /// claim, decoded from its tables (#875's check outside the tree).
-    fn t14() -> Vec<CState> {
+    const INTEL: Cpu = Cpu { vendor: Vendor::Intel, family: 6 };
+    const AMD_17H: Cpu = Cpu { vendor: Vendor::Amd, family: 0x17 };
+
+    /// An Intel `_CST`: the T14's, as its firmware answers ToyOS's processor
+    /// `_OSC` claim, decoded from its tables (#875's check outside the tree).
+    fn intel_ffh() -> Vec<CState> {
         vec![state(reg(FFH, 1, 2, 1, 0x00), 1, 1), state(reg(FFH, 1, 2, 1, 0x31), 2, 253), state(reg(FFH, 1, 2, 1, 0x60), 3, 1048)]
     }
 
-    /// The AMD bench's.
-    fn amd() -> Vec<CState> {
+    /// An AMD `_CST` of C1 in FFH and two trapped port reads, the second type
+    /// 3: the AMD bench's (Family 17h).
+    fn amd_system_io() -> Vec<CState> {
         vec![state(reg(FFH, 2, 2, 0, 0x00), 1, 1), state(reg(SYSTEM_IO, 8, 0, 1, 0x414), 2, 400), state(reg(SYSTEM_IO, 8, 0, 1, 0x415), 3, 350)]
     }
 
@@ -352,42 +382,59 @@ mod tests {
     }
 
     #[test]
-    fn the_t14s_c2_and_c3_are_handed_over_as_mwait_and_its_c1_is_hlt() {
-        let (d, withheld) = translate(3, &t14(), &[], true);
+    fn intel_ffh_states_of_type_2_and_3_are_handed_over_as_mwait_and_c1_is_hlt() {
+        let (d, withheld) = translate(3, &intel_ffh(), &[], INTEL);
         assert_eq!(d.processor_uid, 3);
         assert_eq!(kept(&d), [(IdleEntry::Mwait as u8, 0x31, 253, 506), (IdleEntry::Mwait as u8, 0x60, 1048, 2096)]);
         assert!(withheld.is_empty(), "{withheld:?}");
     }
 
     #[test]
-    fn the_amds_c2_is_handed_over_and_its_type_3_state_withheld() {
-        let (d, withheld) = translate(0, &amd(), &[0], false);
-        assert_eq!(kept(&d), [(IdleEntry::Port as u8, 0x414, 400, 800)]);
-        assert_eq!(withheld, ["a type-3 SystemIO state, whose caches OSPM keeps coherent (ACPI 6.5 §8.1.4)"]);
+    fn a_type_3_systemio_state_is_handed_over_from_amd_family_17h_and_on_hygon() {
+        let both = [(IdleEntry::Port as u8, 0x414, 400, 800), (IdleEntry::Port as u8, 0x415, 350, 700)];
+        for family in [0x17, 0x19, 0x1A] {
+            let (d, withheld) = translate(0, &amd_system_io(), &[], Cpu { vendor: Vendor::Amd, family });
+            assert_eq!((kept(&d), withheld), (both.to_vec(), vec![]), "AMD Family {family:#x}");
+        }
+        let (d, withheld) = translate(0, &amd_system_io(), &[], Cpu { vendor: Vendor::Hygon, family: 0x18 });
+        assert_eq!((kept(&d), withheld), (both.to_vec(), vec![]), "Hygon");
+    }
+
+    #[test]
+    fn a_type_3_systemio_state_is_withheld_before_amd_family_17h_and_off_amd_and_hygon() {
+        let c3 = "a type-3 SystemIO state, whose caches OSPM keeps coherent (ACPI 6.5 §8.1.4), off AMD Family 17h on and Hygon";
+        for cpu in [Cpu { vendor: Vendor::Amd, family: 0x16 }, Cpu { vendor: Vendor::Amd, family: 0x15 }, Cpu { vendor: Vendor::Other, family: 0x17 }] {
+            let (d, withheld) = translate(0, &amd_system_io(), &[], cpu);
+            assert_eq!(kept(&d), [(IdleEntry::Port as u8, 0x414, 400, 800)], "{cpu:?}");
+            assert_eq!(withheld, [c3], "{cpu:?}");
+        }
+        let (d, withheld) = translate(0, &amd_system_io(), &[], INTEL);
+        assert_eq!(d.count, 0);
+        assert_eq!(withheld, ["a SystemIO state on Intel, a chipset's P_LVLx read"; 2]);
     }
 
     #[test]
     fn each_state_ospm_owes_work_around_is_withheld_by_name() {
-        let withheld = |s: CState, software: bool, intel: bool| {
-            let (d, why) = translate(0, &[s], if software { &[0] } else { &[] }, intel);
+        let withheld = |s: CState, software: bool, cpu: Cpu| {
+            let (d, why) = translate(0, &[s], if software { &[0] } else { &[] }, cpu);
             assert_eq!(d.count, 0);
             why
         };
-        assert_eq!(withheld(state(reg(FFH, 1, 2, 0b11, 0x31), 2, 253), false, true), ["an Intel FFH state asking bus-master avoidance"]);
-        assert_eq!(withheld(state(reg(FFH, 2, 2, 0, 0x10), 2, 50), false, false), ["FFH vendor 2 class 2, an encoding no document in hand defines"]);
-        assert_eq!(withheld(state(reg(FFH, 1, 1, 0, 0x1816), 2, 50), false, true), ["FFH vendor 1 class 1, an encoding no document in hand defines"]);
-        assert_eq!(withheld(state(reg(SYSTEM_IO, 8, 0, 0, 0x1816), 2, 253), false, true), ["a SystemIO state on Intel, a chipset's P_LVLx read"]);
-        assert_eq!(withheld(state(reg(SYSTEM_IO, 8, 0, 1, 0x414), 2, 400), true, false), ["coordinated in software by _CSD"]);
-        assert_eq!(withheld(state(reg(FFH, 1, 2, 1, 0x31), 4, 253), false, true), ["type 4, which Table 8.2 does not define"]);
-        assert_eq!(withheld(state(reg(FFH, 1, 2, 1, 0x31), 2, 0), false, true), ["a latency of 0"]);
-        assert_eq!(withheld(state(reg(FFH, 1, 2, 1, 1 << 32), 2, 10), false, true), ["an Intel FFH state whose hint sets reserved bits 63:32"]);
-        assert_eq!(withheld(state(reg(0, 8, 0, 1, 0x1000), 2, 10), false, false), ["a state in space 0x0, which no C-state is entered through"]);
+        assert_eq!(withheld(state(reg(FFH, 1, 2, 0b11, 0x31), 2, 253), false, INTEL), ["an Intel FFH state asking bus-master avoidance"]);
+        assert_eq!(withheld(state(reg(FFH, 2, 2, 0, 0x10), 2, 50), false, AMD_17H), ["FFH vendor 2 class 2, an encoding no document in hand defines"]);
+        assert_eq!(withheld(state(reg(FFH, 1, 1, 0, 0x1816), 2, 50), false, INTEL), ["FFH vendor 1 class 1, an encoding no document in hand defines"]);
+        assert_eq!(withheld(state(reg(SYSTEM_IO, 8, 0, 0, 0x1816), 2, 253), false, INTEL), ["a SystemIO state on Intel, a chipset's P_LVLx read"]);
+        assert_eq!(withheld(state(reg(SYSTEM_IO, 8, 0, 1, 0x415), 3, 350), true, AMD_17H), ["coordinated in software by _CSD"]);
+        assert_eq!(withheld(state(reg(FFH, 1, 2, 1, 0x31), 4, 253), false, INTEL), ["type 4, which Table 8.2 does not define"]);
+        assert_eq!(withheld(state(reg(FFH, 1, 2, 1, 0x31), 2, 0), false, INTEL), ["a latency of 0"]);
+        assert_eq!(withheld(state(reg(FFH, 1, 2, 1, 1 << 32), 2, 10), false, INTEL), ["an Intel FFH state whose hint sets reserved bits 63:32"]);
+        assert_eq!(withheld(state(reg(0, 8, 0, 1, 0x1000), 2, 10), false, AMD_17H), ["a state in space 0x0, which no C-state is entered through"]);
     }
 
     #[test]
     fn more_states_than_a_declaration_holds_are_withheld_past_the_last() {
         let many: Vec<CState> = (0..10).map(|i| state(reg(FFH, 1, 2, 1, 0x10 + i), 2, 10 + i)).collect();
-        let (d, withheld) = translate(0, &many, &[], true);
+        let (d, withheld) = translate(0, &many, &[], INTEL);
         assert_eq!(d.count as usize, IDLE_STATES);
         assert_eq!(withheld.len(), 2);
     }
