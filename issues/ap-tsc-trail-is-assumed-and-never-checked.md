@@ -70,7 +70,8 @@ it answers "trails by more than the boot took" and no smaller offset. Under
 the AMD bench's Linux, CPU 0 and each of the other 15 took turns reading
 their TSCs through idle gaps up to 1 s (`tsc-probe warp`, PR #1079's
 evidence). Every pair's worst step was positive, 54 to 342 cycles, which
-bounds each CPU's offset from CPU 0 by 342 cycles, some 190 ns. That is that firmware's synchronisation under Linux, not a
-ToyOS measurement: the log line this file owes is still a bracket, not an
-offset. `issues/the-system-clock-takes-the-tsc-on-one-reading-and-never-checks-it-again.md`
+bounds each CPU's offset from CPU 0 by 342 cycles, some 190 ns. That is that
+firmware's synchronisation under Linux, not a ToyOS measurement: the log
+line this file owes is still a bracket, not an offset.
+`issues/the-system-clock-takes-the-tsc-on-one-reading-and-never-checks-it-again.md`
 holds the clock's other unchecked assumptions.
