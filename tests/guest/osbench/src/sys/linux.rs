@@ -278,6 +278,145 @@ pub fn conditions() {
     condition("busy_permille_1s", busy_permille(Duration::from_secs(1)).map_or("unknown".into(), |p| p.to_string()));
 }
 
+/// Model-specific register addresses, by [`crate::arch`]'s choice for the
+/// CPU's vendor.
+pub struct PowerRegisters {
+    pub energy: u32,
+    pub power_unit: u32,
+    pub package_residency: [Option<u32>; 4],
+    pub core_residency: [Option<u32>; 2],
+    pub core_energy: Option<u32>,
+}
+
+/// The power counters through the `msr` driver's `/dev/cpu/<n>/msr`, which
+/// takes root: the package's on CPU 0, which reads them locally where the
+/// caller runs there, and each CPU's on that CPU, an IPI each.
+pub mod power {
+    use std::fs::File;
+    use std::os::unix::fs::FileExt;
+
+    use super::super::{CpuPower, Package, Refused};
+    use super::PowerRegisters;
+
+    const IA32_TIME_STAMP_COUNTER: u32 = 0x10;
+    const IA32_MPERF: u32 = 0xe7;
+    const IA32_APERF: u32 = 0xe8;
+
+    fn registers() -> Result<PowerRegisters, Refused> {
+        #[cfg(target_arch = "x86_64")]
+        let registers = crate::arch::power_registers();
+        #[cfg(not(target_arch = "x86_64"))]
+        let registers = None;
+        registers.ok_or_else(|| Refused::Absent("no CPU vendor whose power registers osbench reads".into()))
+    }
+
+    fn device(cpu: u32) -> Result<File, Refused> {
+        let path = format!("/dev/cpu/{cpu}/msr");
+        File::open(&path).map_err(|e| match e.kind() {
+            std::io::ErrorKind::NotFound => Refused::Withheld(format!("{path}: {e}: `sudo modprobe msr`")),
+            std::io::ErrorKind::PermissionDenied => Refused::Withheld(format!("{path}: {e}: `sudo osbench energy` reads it")),
+            _ => Refused::Failed(format!("{path}: {e}")),
+        })
+    }
+
+    /// The register, or `None` where the CPU lacks it: the driver answers a
+    /// `#GP` with `EIO`.
+    fn msr(dev: &File, cpu: u32, at: u32) -> Result<Option<u64>, Refused> {
+        let mut word = [0u8; 8];
+        match dev.read_at(&mut word, u64::from(at)) {
+            Ok(8) => Ok(Some(u64::from_le_bytes(word))),
+            Err(e) if e.raw_os_error() == Some(libc::EIO) => Ok(None),
+            other => Err(Refused::Failed(format!("cpu{cpu}'s MSR {at:#x}: {other:?}"))),
+        }
+    }
+
+    fn each(dev: &File, cpu: u32, at: Option<u32>) -> Result<Option<u64>, Refused> {
+        at.map_or(Ok(None), |at| msr(dev, cpu, at))
+    }
+
+    pub fn package() -> Result<Package, Refused> {
+        let r = registers()?;
+        let dev = device(0)?;
+        let tsc = msr(&dev, 0, IA32_TIME_STAMP_COUNTER)?.ok_or_else(|| Refused::Failed("cpu0 read no TSC".into()))?;
+        let mut residency = [None; 4];
+        for (slot, at) in residency.iter_mut().zip(r.package_residency) {
+            *slot = each(&dev, 0, at)?;
+        }
+        Ok(Package { tsc, energy: msr(&dev, 0, r.energy)?, power_unit: msr(&dev, 0, r.power_unit)?, residency })
+    }
+
+    pub fn cpus() -> Result<Vec<CpuPower>, Refused> {
+        let r = registers()?;
+        super::allowed_cpus()
+            .into_iter()
+            .map(|cpu| {
+                let cpu = cpu as u32;
+                let dev = device(cpu)?;
+                Ok(CpuPower {
+                    cpu,
+                    core: super::core_of(cpu),
+                    tsc: msr(&dev, cpu, IA32_TIME_STAMP_COUNTER)?
+                        .ok_or_else(|| Refused::Failed(format!("cpu{cpu} read no TSC")))?,
+                    aperf: msr(&dev, cpu, IA32_APERF)?,
+                    mperf: msr(&dev, cpu, IA32_MPERF)?,
+                    core_c6: each(&dev, cpu, r.core_residency[0])?,
+                    core_c7: each(&dev, cpu, r.core_residency[1])?,
+                    core_energy: each(&dev, cpu, r.core_energy)?,
+                })
+            })
+            .collect()
+    }
+
+    /// The CPU time the whole machine has been busy for, in nanoseconds, off
+    /// `/proc/stat` at its tick's resolution: everything but idle and iowait,
+    /// this sleeping process included.
+    pub fn busy_ns() -> Result<u64, Refused> {
+        let stat = std::fs::read_to_string("/proc/stat").map_err(|e| Refused::Failed(format!("/proc/stat: {e}")))?;
+        let fields: Vec<u64> =
+            stat.lines().next().unwrap_or_default().split_whitespace().skip(1).filter_map(|f| f.parse().ok()).collect();
+        let (Some(idle), Some(iowait)) = (fields.get(3), fields.get(4)) else {
+            return Err(Refused::Failed("/proc/stat's first line has no idle and iowait".into()));
+        };
+        // SAFETY: sysconf takes a name and reads nothing else.
+        let hz = u64::try_from(unsafe { libc::sysconf(libc::_SC_CLK_TCK) }).unwrap_or(100).max(1);
+        Ok((fields.iter().sum::<u64>() - idle - iowait) * 1_000_000_000 / hz)
+    }
+
+    /// The panel and its light, the radios and the links, which the package's
+    /// draw depends on: each connected DRM connector's DPMS, each backlight's
+    /// level, each rfkill switch, and each network link's state.
+    pub fn conditions() {
+        use crate::report::condition;
+        let listed = |dir: &str, said: &dyn Fn(&std::path::Path) -> Option<String>| -> String {
+            let mut seen: Vec<String> = std::fs::read_dir(dir)
+                .into_iter()
+                .flatten()
+                .flatten()
+                .filter_map(|e| said(&e.path()).map(|s| format!("{}:{s}", e.file_name().to_string_lossy())))
+                .collect();
+            seen.sort();
+            if seen.is_empty() { "none".into() } else { seen.join(",") }
+        };
+        let get = |at: &std::path::Path, f: &str| super::read(&at.join(f).to_string_lossy());
+        condition(
+            "energy.display",
+            listed("/sys/class/drm", &|at| (get(at, "status")? == "connected").then(|| get(at, "dpms").unwrap_or_default())),
+        );
+        condition(
+            "energy.backlight",
+            listed("/sys/class/backlight", &|at| Some(format!("{}/{}", get(at, "actual_brightness")?, get(at, "max_brightness")?))),
+        );
+        condition(
+            "energy.radios",
+            listed("/sys/class/rfkill", &|at| {
+                let blocked = get(at, "soft")? == "1" || get(at, "hard")? == "1";
+                Some(format!("{}_{}", get(at, "type")?, if blocked { "blocked" } else { "unblocked" }))
+            }),
+        );
+        condition("energy.links", listed("/sys/class/net", &|at| if at.ends_with("lo") { None } else { get(at, "operstate") }));
+    }
+}
+
 /// The cgroup whose `cpu` controller governs this process: the deepest one
 /// on its path whose parent enables `cpu` for its children, or `/` when
 /// none does.

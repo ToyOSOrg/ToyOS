@@ -49,7 +49,6 @@ args = [
     "--bound-ms=525000",
     "osbench_boot",
     "osbench_identity",
-    "osbench_energy",
     "osbench_system",
     "osbench_sched",
     "osbench_fair",

@@ -21,7 +21,7 @@
 //! tail group's diagnostics. Everything else is the same source on both.
 //!
 //! On Linux `nvme` and `energy` read what only root may (the raw namespace,
-//! the package's energy counter) and say so unprivileged. `README.md` is how
+//! the model-specific registers) and say so unprivileged. `README.md` is how
 //! the Linux half is built and how a comparison is run.
 
 mod arch;
@@ -131,13 +131,12 @@ fn files() {
 
 /// Every group the machine alone runs, in the order `all` and the ToyOS job
 /// list run them: `boot` first, since it reads how long the boot took to
-/// reach it; `energy` while the machine is still quiet; and `crunch`, which
-/// heats it, last: ToyOS reads no temperature to cool down by, so a group
-/// after it would start at a clock its Linux run does not.
-const GROUPS: [(&str, fn()); 17] = [
+/// reach it; and `crunch`, which heats it, last: ToyOS reads no temperature
+/// to cool down by, so a group after it would start at a clock its Linux run
+/// does not.
+const GROUPS: [(&str, fn()); 16] = [
     ("boot", boot::suite),
     ("identity", identity::suite),
-    ("energy", energy::suite),
     ("system", system),
     ("sched", sched),
     ("fair", fair),
@@ -154,9 +153,10 @@ const GROUPS: [(&str, fn()); 17] = [
     ("crunch", crunch::suite),
 ];
 
-/// The groups that need another party: `lan` the `osbench-peer` on the other
-/// bench, `internet` the public internet.
-const BY_NAME: [(&str, fn()); 2] = [("lan", lan::suite), ("internet", internet::suite)];
+/// The groups that run only by name: `lan` needs the `osbench-peer` on the
+/// other bench, `internet` the public internet, and `energy` a machine
+/// running nothing else, in a ToyOS boot of its own and as root on Linux.
+const BY_NAME: [(&str, fn()); 3] = [("lan", lan::suite), ("internet", internet::suite), ("energy", energy::suite)];
 
 /// A group between its first and last lines, after the machine's conditions
 /// and the clock its CPU starts at.
