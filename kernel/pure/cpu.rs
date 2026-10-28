@@ -300,7 +300,6 @@ pub fn topology_keys(levels: &[[u32; 4]], caches: &[[u32; 4]]) -> Result<CpuKeys
 
 #[cfg(test)]
 mod tests {
-
     use super::*;
 
     /// The T14's `control_regs:` line at its own boot: `hwp_capabilities=0x0104182a`,

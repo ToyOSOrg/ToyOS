@@ -499,6 +499,13 @@ const MACHINE_TESTS: &[&str] = &[
     // and its mask have no host build, QEMU raises the event on demand, and
     // nothing presses the T14's button but a hand.
     "acpi_press_is_one_sci",
+    // The osbench groups that use the runner's capability for a row of their
+    // own, on the image they are measured on: which endowments a job gets is
+    // the image's and the supervisor's, which no host build has, and the
+    // benches run osbench only nightly. `osbench_identity` and `osbench_fair`
+    // once exited 1 on every bench because an instrument took the one
+    // capability first.
+    "osbench_capability_groups_exit_0",
     // What the kernel reads and writes for the `acpi` claim's holder and what
     // it refuses. A red here is a write the kernel made — to RAM, to the
     // firmware's tables, to COM1, to `PM1a_CNT`, to a function's configuration
@@ -2688,6 +2695,32 @@ fn acpi_press_is_one_sci() -> Result<(), String> {
     Ok(())
 }
 
+/// `osbench identity` and `osbench fair` on tests/images/benchcase.toml with
+/// only those two jobs: each exits 0, which it does only once every row it
+/// ran measured or said why not, its capability rows among them.
+fn osbench_capability_groups_exit_0() -> Result<(), String> {
+    const JOBS: [&str; 2] = ["osbench_identity", "osbench_fair"];
+    let committed = compile::repo_root().join("tests/images/benchcase.toml");
+    let text = fs::read_to_string(&committed).map_err(|e| format!("{}: {e}", committed.display()))?;
+    let derived = toyos_metal::image::derive(&text, 300_000, &JOBS, &[]).map_err(|why| why.to_string())?;
+    let config = common::lane::dir().join("osbench-capability-groups.toml");
+    fs::write(&config, derived).map_err(|e| format!("{}: {e}", config.display()))?;
+    let mut qemu = QemuInstance::boot_with_options(
+        &config,
+        &[],
+        &[],
+        BootOptions { ready_marker: bootlog::COMPLETE, ..Default::default() },
+    );
+    let mut console = format!("{}\n", qemu.boot_log());
+    let last = format!("===TEST_END {} ", JOBS[JOBS.len() - 1]);
+    await_guest(&mut qemu, &mut console, "osbench's two groups to end", |said| said.contains(&last))?;
+    let said = serial::Serial::named("the osbench boot", console);
+    for job in JOBS {
+        said.must_say(&format!("===TEST_END {job} exit=0==="))?;
+    }
+    Ok(())
+}
+
 /// Boot the image `--console-boot` builds, on the machine shape with a panel
 /// for `/system/bin/console` to claim, and wait for what that image owes at
 /// boot: the console up on its panel, having read the log and the keyboard,
@@ -4398,6 +4431,7 @@ fn run_machine_test(name: &str, test_config: &Path) -> Result<(), String> {
         "nested_nmi_is_loud" => faults::nested_nmi_is_loud(test_config),
         "kernel_wx_leaf_is_refused" => faults::kernel_wx_leaf_is_refused(test_config, qemu::Profile::Metal),
         "acpi_press_is_one_sci" => acpi_press_is_one_sci(),
+        "osbench_capability_groups_exit_0" => osbench_capability_groups_exit_0(),
         "acpi_mediated_access" => acpi_mediated_access(2),
         "acpi_lock_given_back_on_one_cpu" => acpi_mediated_access(1),
         "acpi_supply_outlives_holder" => acpi_supply_outlives_holder(),

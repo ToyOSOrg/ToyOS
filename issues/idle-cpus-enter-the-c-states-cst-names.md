@@ -1,5 +1,5 @@
 ---
-status: assigned
+status: open
 kind: track
 opened: 2026-09-29
 ---
@@ -64,19 +64,26 @@ each against its control with the deep states off, all else equal):
   always-deepest control), so idle depth does not hold them there;
   osbench now names what ran beside each group's clock (`<group>.cpu.clock.ran`).
 - AMD: no clock gap and no throughput change; the IPC cost of the first
-  boots is gone with the idle choice folded into the pass's timer. The one
-  slow deflate is a property of the bench, not of the idle states: it came
-  back with every idle CPU in C1
-  (`issues/the-amd-benchs-deflate-runs-6-percent-slow-on-cpu-4-at-the-same-clock.md`).
+  boots is gone with the idle choice folded into the pass's timer. The slow
+  deflate is not the idle states: it came back with every idle CPU in C1,
+  at the same clock
+  (`issues/the-amd-benchs-deflate-runs-6-percent-slow-in-some-boots-at-the-same-clock.md`).
 - Third boots at `f6510defd`: the T14 at 4189 at 8 and 10 group starts.
   Boot, identity, energy and system run while acpiserver is still loading
-  its tables, about 12.2 s after power-on, and acpiserver ran for the whole
-  of each of those clock windows. At the starts of net, procs, mem, tail
-  and nvme still at 3789, the roster names nothing beside osbench for more
+  its tables (12.2 s by the kernel log's clock in the first B3 boot,
+  `r4/` in the evidence), and acpiserver ran for the whole of each of those
+  clock windows: a measured busy core beside the clock's thread. At the
+  starts of net, procs, mem, tail and nvme still at 3789, the roster names nothing beside osbench for more
   than 0.9 ms of the 5.5 ms window. Mem stays unexplained. Net, procs, tail
   and nvme reached 4189 under the always-deepest control, so the history
   holding idle CPUs shallow after the group before is the open hypothesis
   there; a per-CPU state read inside the window would test it.
+- The B4 boots at `d286dddf3` reached 4189 at 10 of 17 group starts.
+
+**#1066's exit is unmet** where this track stands: the T14's `cpu.clock` reaches
+ratio 42 at 8 to 10 of 17 group starts against Linux's 13. Four of those
+groups are held by acpiserver's measured start-up work. The rest are the
+open question above.
 
 **Exit**: on the T14, since a KVM guest's idle is its host's: the idle
 minute's package energy, timer lateness no worse than `hlt`'s by more than

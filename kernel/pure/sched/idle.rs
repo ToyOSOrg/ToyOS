@@ -421,6 +421,19 @@ mod tests {
     }
 
     #[test]
+    fn an_unforeseen_wake_is_learned_and_the_deadline_is_not() {
+        let fresh = History::default();
+        let choice = choose(&T14, &fresh, Some(10_000 * US), None);
+        let plan = Plan { choice, exit: 1048 * US, declaration: 1, chosen_at: 0, deadline: Some(10_000 * US) };
+        let mut h = fresh;
+        plan.learn(&mut h, &T14, 10 * US);
+        assert_eq!(h, History::from_bits(0x0101), "a 10 µs wake came sooner than both residencies");
+        let mut h = fresh;
+        plan.learn(&mut h, &T14, 10_000 * US - 1048 * US);
+        assert_eq!(h, fresh, "the early wake before the deadline is the scheduler's own");
+    }
+
+    #[test]
     fn the_least_bound_held_is_the_machines_and_goes_with_its_last_hold() {
         let mut b = Bounds::default();
         assert_eq!(b.least(), None);

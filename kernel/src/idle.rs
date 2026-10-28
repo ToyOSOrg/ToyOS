@@ -172,6 +172,10 @@ pub fn wait(plan: &idle::Plan) {
     crate::sched::driver::publish_idle_exit(plan.exit);
     fence(Ordering::SeqCst);
     let state = plan.choice.state.filter(|_| d.is_some() && limit().is_none_or(|bound| plan.exit <= bound));
+    if state.is_none() && plan.exit != 0 {
+        // Falling back to C1: what this CPU publishes is what it waits in.
+        crate::sched::driver::publish_idle_exit(0);
+    }
     let entered = crate::clock::nanos_since_boot();
     match (state, &d) {
         (Some(state), Some(d)) => crate::arch::idle::enter(d.entries[state]),

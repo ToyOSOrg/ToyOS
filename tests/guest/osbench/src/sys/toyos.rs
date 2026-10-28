@@ -197,6 +197,14 @@ pub mod ipc {
     }
 }
 
+/// The capability the runner endowed this process, `None` where the boot
+/// endows none. The endowment is taken once per process, so every row that
+/// uses the capability borrows it here.
+pub fn syscap() -> Option<&'static toyos::syscap::SysCap> {
+    static CAP: std::sync::OnceLock<Option<toyos::syscap::SysCap>> = std::sync::OnceLock::new();
+    CAP.get_or_init(|| toyos::endow::Endowments::get().take(toyos::endow::SYSCAP_LABEL)).as_ref()
+}
+
 /// What the tail group reads to say where a late wake's time went, through
 /// the runner's capability: each CPU's firmware interrupts and clock, the
 /// scheduler's diary and the roster's names. Read-only observation rights;
@@ -204,7 +212,6 @@ pub mod ipc {
 pub mod diag {
     use std::collections::BTreeMap;
 
-    use toyos::endow::{Endowments, SYSCAP_LABEL};
     use toyos::syscap::{SysCap, TraceCursor};
     use toyos_abi::counters::{Counter, RawRecord, Record};
     use toyos_abi::syscall::{SYSINFO_ENTRY_SIZE, SYSINFO_HEADER_SIZE};
@@ -212,7 +219,7 @@ pub mod diag {
     use toyos_trace::{Entry, Event};
 
     pub struct Diag {
-        cap: SysCap,
+        cap: &'static SysCap,
         cursor: Option<TraceCursor<Vec<u64>>>,
     }
 
@@ -247,7 +254,7 @@ pub mod diag {
     }
 
     pub fn open() -> Option<Diag> {
-        let cap: SysCap = Endowments::get().take(SYSCAP_LABEL)?;
+        let cap = super::syscap()?;
         let cursor = cap.trace_cursor_words().ok().map(|n| TraceCursor::new(vec![0u64; n]));
         Some(Diag { cap, cursor })
     }
