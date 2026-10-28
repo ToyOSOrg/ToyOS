@@ -14,5 +14,10 @@ and the loader reports it as `action_en=`, but nothing judges it. A Family 1Ah
 machine that reads 0 there is reported armed with no reset behind its bound.
 No Family 1Ah machine is in reach.
 
+Because the bit clears on power-saving entry, a check at the arm alone does
+not hold the bound for the boot; the kernel's feed already reads
+`WatchdogControl`.
+
 **Exit**: on a Family 1Ah FCH, an arm that reads `watchdogactionen` 0 is
-refused, and a host model case holds it.
+refused, a feed that reads it 0 says the machine is unwatched, and host model
+cases hold both.

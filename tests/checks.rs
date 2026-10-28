@@ -1126,7 +1126,7 @@ mod checks {
         let wedged = |tail: &str| sealed(census, tail);
         let kernel = "[2026-09-29 10:33:28  0.000 cpu0 kernel] panic console: armed 1920x1080 \
                       stride=1920 format=1 at 0x4000000000, write-combining\n";
-        let staged = "| [ 1.509 cpu1 kernel] wedge: staged, and only the boot deadline ends this machine: \
+        let staged = "| [ 1.509 cpu1 kernel] wedge: staged, and only a bound this machine runs under ends it: \
                       every CPU stops taking scheduler passes from here\n";
         let awake = |cpu: u32| format!("| [ 1.509 cpu{cpu} kernel] wedge: cpu{cpu} arrived with interrupts on\n");
         let deaf = "| [ 1.509 cpu1 kernel] wedge: cpu1 arrived with interrupts off, through the syscall \

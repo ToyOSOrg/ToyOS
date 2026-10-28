@@ -41,7 +41,7 @@ pub const DEADLINE_ARMED: &str = "boot deadline: ";
 /// What the `wedge-before-reset` actuator says before it stops every CPU, in
 /// `kernel/src/deadline.rs`. The witness that a deadline ended a wedge and not
 /// a boot merely slower than its bound, which is what makes that control one.
-pub const WEDGE_STAGED: &str = "wedge: staged, and only the boot deadline ends this machine";
+pub const WEDGE_STAGED: &str = "wedge: staged, and only a bound this machine runs under ends it";
 
 /// What each CPU the wedge takes says about the state it arrived in, also in
 /// `kernel/src/deadline.rs`: [`WEDGE_AWAKE`] with interrupts open, and

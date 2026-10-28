@@ -3,7 +3,8 @@
 //! §12.3.6), so a sequence the hardware would ignore fails here.
 
 use toyos_tco::fch::{
-    self, AcpiMmio, Control, Refused, Register, ResetStat, Window, TIMER, WATCHDOG_ISSUE_RESET,
+    self, AcpiMmio, Control, Refused, Register, ResetStat, Unsurveyed, Window, TIMER,
+    WATCHDOG_ISSUE_RESET,
 };
 
 /// `PMx000`'s reset value on Family 17h (55570): `WatchdogTmrEn` clear, the
@@ -15,6 +16,11 @@ struct Model {
     decode_en: u32,
     /// Firmware that holds `WatchdogTmrEn` clear.
     decode_locked: bool,
+    /// Firmware that clears `WatchdogTmrEn` at every reset, as the AMD
+    /// bench's was read to.
+    decode_clears_on_reset: bool,
+    /// An FCH that ignores a write of `PMx000`'s byte 3.
+    tick_locked: bool,
     alternate: u8,
     select: u8,
     reset_stat: u32,
@@ -38,6 +44,8 @@ impl Model {
         Self {
             decode_en: DECODE_EN_RESET,
             decode_locked: false,
+            decode_clears_on_reset: false,
+            tick_locked: false,
             alternate: 0,
             select: 0,
             reset_stat: 0,
@@ -97,13 +105,20 @@ impl Model {
         // A reset of type 1: the WDT block is in the S5 domain and keeps its
         // registers; the reset's own bit is the one `PMx0C0` keeps.
         self.reset_stat = self.reset_stat & !0x0FFF_0000 | WATCHDOG_ISSUE_RESET;
-        self.resets += 1;
+        self.reset();
     }
 
     /// A CF9 reset, which the S5-domain block also survives.
     fn cf9(&mut self) {
         self.reset_stat = self.reset_stat & !0x0FFF_0000 | 1 << 19;
+        self.reset();
+    }
+
+    fn reset(&mut self) {
         self.resets += 1;
+        if self.decode_clears_on_reset {
+            self.decode_en &= !fch::WATCHDOG_TMR_EN;
+        }
     }
 
     fn control(&self) -> u32 {
@@ -134,6 +149,7 @@ impl AcpiMmio for Model {
                 let value = if self.decode_locked { value & !(fch::WATCHDOG_TMR_EN as u8) } else { value };
                 self.decode_en = self.decode_en & !0xff | u32::from(value);
             }
+            0x303 if self.tick_locked => {}
             0x303 => self.decode_en = self.decode_en & 0x00ff_ffff | u32::from(value) << 24,
             _ => panic!("a byte write at ACPI-MMIO {offset:#x}, which nothing here should write"),
         }
@@ -208,9 +224,6 @@ fn boot(model: &mut Model) -> fch::Armed {
 fn take_over(model: &mut Model) {
     let found = fch::Found::read(model);
     assert!(found.armed(), "the kernel finds the loader's arm: {found:?}");
-    if found.control.fired() {
-        fch::clear_fired(model);
-    }
     fch::feed(model);
 }
 
@@ -272,8 +285,8 @@ fn a_stopped_timer_resets_nothing() {
     assert_eq!(model.resets, 0);
 }
 
-/// The boot after the reset: both records say so, the loader clears the
-/// FCH's and keeps the block's for the kernel, which clears it in turn.
+/// The boot after the reset: both records say so, the loader clears both,
+/// and the boot after that reads neither.
 #[test]
 fn the_boot_after_an_expiry_reads_it_and_the_next_does_not() {
     let mut model = Model::new();
@@ -282,18 +295,75 @@ fn the_boot_after_an_expiry_reads_it_and_the_next_does_not() {
     assert_eq!(model.resets, 1);
 
     let survey = fch::survey(&mut model).expect("ACPI-MMIO answers");
-    assert!(survey.issued_reset() && survey.fired() && survey.watchdog_reset(), "{survey:?}");
-    assert_eq!(model.reset_stat, 0, "the loader leaves the FCH's record set");
-    assert!(model.fired, "the loader cleared the block's record, which is the kernel's");
-    fch::arm(&mut model).expect("armed");
-    take_over(&mut model);
-    assert!(!model.fired, "the kernel left the block's record set");
+    assert!(survey.issued_reset() && survey.fired() == Some(true) && survey.watchdog_reset(), "{survey:?}");
+    assert!(matches!(survey.reset_stat, ResetStat::Read { after: 0, .. }), "{survey:?}");
+    assert_eq!(model.reset_stat, 0, "the loader left the FCH's record set");
+    assert!(!model.fired, "the loader left the block's record set");
 
-    // Ended on purpose: the kernel stops the timer, then resets.
-    fch::stop(&mut model);
+    // Unarmed, then a CF9 reset: no watchdog caused that one.
     model.cf9();
     let survey = fch::survey(&mut model).expect("ACPI-MMIO answers");
     assert!(!survey.watchdog_reset(), "a CF9 reset read as the watchdog's: {survey:?}");
+}
+
+/// Firmware that clears the decode at reset hides `WatchdogFired` from the
+/// survey; it outlives warm resets, so `arm` clears it as stale and no later
+/// pass reports it.
+#[test]
+fn a_fired_bit_the_survey_cannot_read_is_cleared_by_the_arm() {
+    let mut model = Model { decode_clears_on_reset: true, ..Model::new() };
+    boot(&mut model);
+    model.advance_ms(toyos_tco::BOUND_MS);
+    let survey = fch::survey(&mut model).expect("ACPI-MMIO answers");
+    assert_eq!(survey.fired(), None, "{survey:?}");
+    assert!(survey.issued_reset(), "{survey:?}");
+    assert!(model.fired);
+
+    let armed = fch::arm(&mut model).expect("armed");
+    assert!(armed.cleared_fired && !model.fired, "{armed:?}");
+    take_over(&mut model);
+    fch::stop(&mut model);
+    model.cf9();
+    let survey = fch::survey(&mut model).expect("ACPI-MMIO answers");
+    assert!(!survey.watchdog_reset(), "{survey:?}");
+    assert!(!fch::arm(&mut model).expect("armed").cleared_fired);
+}
+
+/// The decode gates the timer: a count cut off by a reset that cleared it
+/// stays still, the survey cannot stop it, and the arm restarts it whole.
+#[test]
+fn a_count_the_reset_left_undecoded_restarts_from_the_bound() {
+    let mut model = Model { decode_clears_on_reset: true, ..Model::new() };
+    boot(&mut model);
+    model.advance_ms(toyos_tco::BOUND_MS / 2);
+    model.cf9();
+    assert!(model.run && model.counting, "the reset stopped the count, so this tests nothing");
+
+    let survey = fch::survey(&mut model).expect("ACPI-MMIO answers");
+    assert!(survey.found.is_none() && !survey.stopped, "{survey:?}");
+    model.advance_ms(10 * toyos_tco::BOUND_MS);
+    assert_eq!(model.resets, 1, "an undecoded timer counted");
+
+    fch::arm(&mut model).expect("armed");
+    take_over(&mut model);
+    model.advance_ms(toyos_tco::BOUND_MS - fch::TICK_MS - 1);
+    assert_eq!(model.resets, 1, "the arm resumed the old count instead of a whole bound");
+    model.advance_ms(fch::TICK_MS + 1);
+    assert_eq!(model.resets, 2);
+}
+
+/// A refusal once the decode is on leaves the timer stopped, so a count the
+/// last boot left does not resume behind it for the kernel to take over.
+#[test]
+fn a_refusal_after_the_decode_leaves_the_timer_stopped() {
+    let mut model = Model { decode_clears_on_reset: true, ..Model::new() };
+    boot(&mut model);
+    model.cf9();
+    model.tick_locked = true;
+    model.decode_en &= !0x0f00_0000;
+    assert!(matches!(fch::arm(&mut model), Err(Refused::TickStuck(_))));
+    assert!(!model.run);
+    assert!(!fch::Found::read(&mut model).armed());
 }
 
 /// The block survives a CF9 reset, so a boot that reset the machine with the
@@ -327,8 +397,9 @@ fn every_write_keeps_the_bits_it_does_not_own() {
 /// Firmware's choices this cannot undo are refused with no timer written.
 #[test]
 fn what_firmware_holds_is_refused_by_name() {
-    let mut model = Model { alternate: 1, ..Model::new() };
+    let mut model = Model { alternate: 1, reset_stat: WATCHDOG_ISSUE_RESET, ..Model::new() };
     assert_eq!(fch::arm(&mut model), Err(Refused::AlternateBase(1)));
+    assert_eq!(fch::survey(&mut model), Err(Unsurveyed::AlternateBase(1)));
     assert_eq!(model.writes, 0, "a refusal wrote a register");
 
     let mut model = Model { decode_locked: true, ..Model::new() };
@@ -348,7 +419,7 @@ fn what_firmware_holds_is_refused_by_name() {
         fn write(&mut self, _: Register, _: u32) { panic!("written") }
     }
     assert_eq!(fch::arm(&mut Nothing), Err(Refused::AcpiMmioAbsent));
-    assert_eq!(fch::survey(&mut Nothing), None);
+    assert_eq!(fch::survey(&mut Nothing), Err(Unsurveyed::AcpiMmioAbsent));
 }
 
 /// Decode off: the block reads all ones, so the kernel finds nothing armed and

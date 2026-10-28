@@ -6,12 +6,12 @@
 //! the span before that. The FCH's tick is selected here and only here: its PM
 //! block shares a page with registers AML uses.
 //!
-//! The last reset's cause is read and never cleared where the kernel clears
-//! it, `TCO2_STS` and the FCH's `WatchdogFired`: a boot whose kernel never
-//! reaches its own arm still owes the value, and this file is the only channel
-//! such a boot has. The FCH's `S5ResetStat` is this file's alone, read and
-//! cleared on every pass by [`survey`], which also stops a count the last boot
-//! left running: the FCH's block survives the reset that ended that boot.
+//! `TCO2_STS` is read and never cleared here: whether the last boot ended in
+//! a TCO reset is latched there and the kernel is the one place that clears
+//! it, but a boot whose kernel never reaches its own arm still owes the value,
+//! and this file is the only channel such a boot has. The FCH's two records of
+//! it, `S5ResetStat` and `WatchdogFired`, are this file's alone: [`survey`]
+//! reads and clears them on every pass, armed or not.
 //!
 //! Every machine this cannot arm is refused by name on the console and boots
 //! anyway.
@@ -85,17 +85,21 @@ pub fn locate(system_table: &SystemTable, rsdp_addr: u64) -> Located {
 /// stop a count this boot did not start. Every pass, armed or not.
 pub fn survey(located: &Located) {
     let Ok(Some(Chipset::Fch { revision })) = located else { return };
-    let Some(survey) = fch::survey(&mut Fch) else {
-        return println!(
-            "watchdog: FCH rev {revision:#04x}: ACPI-MMIO at {:#x} reads all ones, so the last \
-             reset's cause is unread",
-            fch::ACPI_MMIO
-        );
+    let survey = match fch::survey(&mut Fch) {
+        Ok(survey) => survey,
+        Err(why) => {
+            return println!(
+                "watchdog: FCH rev {revision:#04x}: ACPI-MMIO at {:#x} is not surveyed ({why:?}), so \
+                 the last reset's cause is unread",
+                fch::ACPI_MMIO
+            )
+        }
     };
     match survey.reset_stat {
-        fch::ResetStat::Read(stat) => {
-            println!("watchdog: FCH S5ResetStat={stat:#010x} on this pass's entry, written back to clear it")
-        }
+        fch::ResetStat::Read { stat, after } => println!(
+            "watchdog: FCH S5ResetStat={stat:#010x} on this pass's entry, written back to clear it, \
+             and reads {after:#010x} after"
+        ),
         fch::ResetStat::DebugSelected(select) => {
             println!("watchdog: FCH PMx0C4={select:#04x} selects S5ResetStat's debug view, so it is unread")
         }
@@ -103,10 +107,11 @@ pub fn survey(located: &Located) {
     }
     match survey.found {
         Some(found) => println!(
-            "watchdog: FCH WatchdogControl={:#010x} WatchdogCount={} on this pass's entry{}",
+            "watchdog: FCH WatchdogControl={:#010x} WatchdogCount={} on this pass's entry{}{}",
             found.control.0,
             found.count,
-            if survey.stopped { ", running, so this pass stops the count the last boot left" } else { "" }
+            if survey.stopped { ", running, so this pass stops the count the last boot left" } else { "" },
+            if found.control.fired() { ", and WatchdogFired is cleared" } else { "" }
         ),
         None => println!(
             "watchdog: FCH PMx000={:#010x} leaves the watchdog undecoded, so its control is unread",
@@ -116,7 +121,10 @@ pub fn survey(located: &Located) {
     println!(
         "watchdog: watchdog_issue_reset={} fired={}, so {}",
         u8::from(survey.issued_reset()),
-        u8::from(survey.fired()),
+        match survey.fired() {
+            Some(fired) => if fired { "1" } else { "0" },
+            None => "unread",
+        },
         if survey.watchdog_reset() { fch::RESET_SAID } else { "no FCH watchdog reset is recorded" }
     );
 }
@@ -198,8 +206,11 @@ fn arm_fch(revision: u8) {
     let control = armed.control;
     println!(
         "watchdog: read back PMx000={:#010x} WatchdogControl={:#010x} WatchdogCount={} \
-         PMx0BE={reset_ctl1:#04x} PMx0C8={misc:#010x} MISCx0FC={gating:#010x}",
-        armed.decode_en, control.0, armed.count
+         PMx0BE={reset_ctl1:#04x} PMx0C8={misc:#010x} MISCx0FC={gating:#010x}{}",
+        armed.decode_en,
+        control.0,
+        armed.count,
+        if armed.cleared_fired { ", with a stale WatchdogFired cleared" } else { "" }
     );
     // What decides whether an expiry resets this machine, and how: named
     // rather than left for a reader to mask out. A warm reset is CPURST#

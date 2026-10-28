@@ -165,15 +165,6 @@ fn init_fch(pci: &PciDevice) {
         found.count,
         if already { ARMED_ON_ARRIVAL } else { UNARMED_ON_ARRIVAL }
     );
-    if found.control.fired() {
-        log!(
-            "watchdog: the last boot ended in an FCH watchdog reset (WatchdogControl={:#010x})",
-            found.control.0
-        );
-        // Cleared, so a reset is reported by the boot after it and not by every
-        // boot after it.
-        fch::clear_fired(wdt);
-    }
     if !already {
         log!("watchdog: the FCH's tick is the bootloader's to select, and it armed nothing — not armed");
         return;

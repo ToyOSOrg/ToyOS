@@ -2033,8 +2033,9 @@ fn boot_verdict(armed: &[String], loader: &str, log: &str) -> Result<u64, Refusa
 /// other can reach first, and the T14 read back a `hard-lockup-probe` boot as a
 /// failure for exactly that reason — this judge knew one line and the page
 /// carried the other. Under the chipset watchdog, its reset is the third
-/// ending, said by the pass after it as the chipset reports it: the wedge
-/// stops every feed, and the deadline stands past the watchdog's bound.
+/// ending: the pass after it finds a page no kernel sealed, and the chipset
+/// says its watchdog reset the machine. The wedge stops every feed, and the
+/// deadline stands past the watchdog's bound.
 fn wedged_boot(watched: bool, loader: &str, log: &str) -> Result<u64, Refusal> {
     if bootlog::handed_back(loader).is_ok() {
         return Err(Refusal::Wedge {
@@ -2065,8 +2066,12 @@ fn sealed_by(loader: &str) -> Option<&str> {
 }
 
 /// The line the pass after the reset printed where the chipset says its
-/// watchdog caused that reset. Only an FCH says so.
+/// watchdog caused that reset, above a page no kernel sealed: a panicked
+/// kernel the watchdog then reset is a panic. Only an FCH says so.
 fn reset_by_the_chipset(loader: &str) -> Option<&str> {
+    if !bootlog::sealed_nothing(loader) {
+        return None;
+    }
     let after = bootlog::after_the_reset(loader)?;
     after.lines().find(|l| l.contains(toyos_tco::fch::RESET_SAID))
 }
@@ -3337,6 +3342,14 @@ mod tests {
         // The first pass's survey speaks of the boot before this one.
         let before = format!("{said}{}\nPrevious boot's panic: the page still reads ARMED\n", bootlog::SEPARATOR);
         let why = wedged_boot(true, &before, booted).unwrap_err().to_string();
+        assert!(why.contains("reports neither of this kernel's bounds"), "{why}");
+        // A kernel that panicked and then went unfed: the chipset's reset
+        // ends it, and the page says it was a panic.
+        let panicked = format!(
+            "{}\n{said}Previous boot's panic: 812 bytes off 0x8000000\n",
+            bootlog::SEPARATOR
+        );
+        let why = wedged_boot(true, &panicked, booted).unwrap_err().to_string();
         assert!(why.contains("reports neither of this kernel's bounds"), "{why}");
     }
 

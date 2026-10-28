@@ -10,8 +10,13 @@
 //!
 //! **The WDT block is in the S5 power domain**, reset only by RsmRst and the
 //! reset button (55570 Table 74). A CF9 reset and the watchdog's own expiry
-//! leave its control and count as they were, so a timer the last boot armed
-//! is still configured when the next one starts: [`survey`] stops it.
+//! leave its control and count as they were. What keeps a count the last boot
+//! left harmless is `PMx000[7]`, which gates the timer as well as its window
+//! (55570 and 58264, `PMx000`): firmware may clear it at reset, and where it
+//! stays set [`survey`] stops the count. [`arm`] stops the timer before it
+//! writes its own count. `WatchdogFired`, cleared
+//! only by a cold reset, outlives warm boots the same way, so [`survey`] and
+//! [`arm`] clear it wherever they can read it.
 
 /// The function this watchdog is found by: the FCH's SMBus controller.
 pub const VENDOR: u16 = 0x1022;
@@ -192,16 +197,28 @@ pub enum Refused {
     NotStarted(u32),
 }
 
+/// Stop the timer where its window answers. Every refusal [`arm`] makes once
+/// the decode is on goes through here, so a count left from the last boot
+/// does not resume behind it.
+fn stop_where_decoded(fch: &mut impl Window) {
+    if Control(fch.read(Register::Control)).decoded() {
+        stop(fch);
+    }
+}
+
 /// What [`arm`] left counting.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub struct Armed {
     pub decode_en: u32,
     pub control: Control,
     pub count: u16,
+    /// A `WatchdogFired` it found and cleared: one [`survey`] could not read,
+    /// which says nothing of the last reset.
+    pub cleared_fired: bool,
 }
 
 /// Enable the window, select [`TICK`], and start a count of [`TIMER`] to a
-/// system reset. `WatchdogFired` is kept for the kernel to report and clear.
+/// system reset. A refusal once the decode is on leaves the timer stopped.
 pub fn arm(fch: &mut (impl AcpiMmio + Window)) -> Result<Armed, Refused> {
     let decode_en = fch.read_u32(PM_DECODE_EN);
     if decode_en == u32::MAX {
@@ -224,6 +241,7 @@ pub fn arm(fch: &mut (impl AcpiMmio + Window)) -> Result<Armed, Refused> {
         return Err(Refused::DecodeStuck(decode_en));
     }
     if (decode_en >> 24) as u8 & OPTIONS_AND_FREQ != TICK as u8 {
+        stop_where_decoded(fch);
         return Err(Refused::TickStuck(decode_en));
     }
 
@@ -235,7 +253,7 @@ pub fn arm(fch: &mut (impl AcpiMmio + Window)) -> Result<Armed, Refused> {
         return Err(Refused::Disabled(was.0));
     }
     let stopped = was.kept() & !(Control::RUN | Control::POWER_OFF);
-    fch.write(Register::Control, stopped);
+    fch.write(Register::Control, stopped | Control::FIRED);
     fch.write(Register::Count, u32::from(TIMER));
     // Two writes: one setting both bits does not start the count, which an
     // AMD engineer measured and the register text implies.
@@ -244,9 +262,10 @@ pub fn arm(fch: &mut (impl AcpiMmio + Window)) -> Result<Armed, Refused> {
 
     let control = Control(fch.read(Register::Control));
     if !control.running() || control.powers_off() {
+        stop_where_decoded(fch);
         return Err(Refused::NotStarted(control.0));
     }
-    Ok(Armed { decode_en, control, count: fch.read(Register::Count) as u16 })
+    Ok(Armed { decode_en, control, count: fch.read(Register::Count) as u16, cleared_fired: was.fired() })
 }
 
 /// Restart the count from [`TIMER`].
@@ -258,11 +277,6 @@ pub fn feed(wdt: &mut impl Window) {
 pub fn stop(wdt: &mut impl Window) {
     let control = Control(wdt.read(Register::Control));
     wdt.write(Register::Control, control.kept() & !Control::RUN);
-}
-
-pub fn clear_fired(wdt: &mut impl Window) {
-    let control = Control(wdt.read(Register::Control));
-    wdt.write(Register::Control, control.kept() | Control::FIRED);
 }
 
 /// The timer as a boot finds it.
@@ -277,8 +291,8 @@ impl Found {
         Self { control: Control(wdt.read(Register::Control)), count: wdt.read(Register::Count) as u16 }
     }
 
-    /// Counting to a reset within [`TIMER`]: the loader's arm, since
-    /// [`survey`] stopped whatever the last boot left counting.
+    /// Counting to a reset within [`TIMER`]: the loader's arm, which leaves
+    /// the timer stopped on every refusal once the window answers.
     pub fn armed(self) -> bool {
         self.control.running() && !self.control.powers_off() && self.count <= TIMER
     }
@@ -287,8 +301,8 @@ impl Found {
 /// `PMx0C0` as [`survey`] found it.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum ResetStat {
-    /// Read and written back to clear.
-    Read(u32),
+    /// Read, written back to clear, and read again.
+    Read { stat: u32, after: u32 },
     /// `SelectDebug` is set, with `PMx0C4` as read, so it was not read.
     DebugSelected(u8),
     /// All ones, which is no status.
@@ -307,30 +321,42 @@ pub struct Survey {
     pub stopped: bool,
 }
 
+/// Why [`survey`] read nothing: the region it would write is not where it reads.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum Unsurveyed {
+    AcpiMmioAbsent,
+    AlternateBase(u8),
+}
+
 impl Survey {
     pub fn issued_reset(&self) -> bool {
-        matches!(self.reset_stat, ResetStat::Read(stat) if stat & WATCHDOG_ISSUE_RESET != 0)
+        matches!(self.reset_stat, ResetStat::Read { stat, .. } if stat & WATCHDOG_ISSUE_RESET != 0)
     }
 
-    pub fn fired(&self) -> bool {
-        self.found.is_some_and(|found| found.control.fired())
+    /// `None` where the window is undecoded, which leaves it unread.
+    pub fn fired(&self) -> Option<bool> {
+        self.found.map(|found| found.control.fired())
     }
 
     /// Either record says the watchdog caused the last reset.
     pub fn watchdog_reset(&self) -> bool {
-        self.issued_reset() || self.fired()
+        self.issued_reset() || self.fired() == Some(true)
     }
 }
 
 /// What the loader says on a pass whose [`Survey::watchdog_reset`] holds.
 pub const RESET_SAID: &str = "the FCH watchdog caused the last reset";
 
-/// Read and clear the last reset's cause, and stop a timer this boot has not
-/// armed. `None` where ACPI-MMIO reads all ones.
-pub fn survey(fch: &mut (impl AcpiMmio + Window)) -> Option<Survey> {
+/// Read and clear both records of the last reset's cause, and stop a timer
+/// this boot has not armed.
+pub fn survey(fch: &mut (impl AcpiMmio + Window)) -> Result<Survey, Unsurveyed> {
     let decode_en = fch.read_u32(PM_DECODE_EN);
     if decode_en == u32::MAX {
-        return None;
+        return Err(Unsurveyed::AcpiMmioAbsent);
+    }
+    let alternate = fch.read_u8(PM_ALT_ACPI_MMIO_EN);
+    if alternate & 1 != 0 {
+        return Err(Unsurveyed::AlternateBase(alternate));
     }
     let select = fch.read_u8(PM_S5_RESET_STAT_SELECT);
     let reset_stat = if select & SELECT_DEBUG != 0 {
@@ -342,14 +368,21 @@ pub fn survey(fch: &mut (impl AcpiMmio + Window)) -> Option<Survey> {
                 if stat != 0 {
                     fch.write_u32(PM_S5_RESET_STAT, stat);
                 }
-                ResetStat::Read(stat)
+                ResetStat::Read { stat, after: fch.read_u32(PM_S5_RESET_STAT) }
             }
         }
     };
     let found = (decode_en & WATCHDOG_TMR_EN != 0).then(|| Found::read(fch));
     let stopped = found.is_some_and(|found| found.control.running());
-    if stopped {
-        stop(fch);
+    if let Some(found) = found.filter(|found| stopped || found.control.fired()) {
+        let mut word = found.control.kept();
+        if stopped {
+            word &= !Control::RUN;
+        }
+        if found.control.fired() {
+            word |= Control::FIRED;
+        }
+        fch.write(Register::Control, word);
     }
-    Some(Survey { decode_en, reset_stat, found, stopped })
+    Ok(Survey { decode_en, reset_stat, found, stopped })
 }
