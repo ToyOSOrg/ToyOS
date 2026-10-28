@@ -58,7 +58,7 @@ each against its control with the deep states off, all else equal):
 - T14 `crunch.single` 1.10 to 1.11 times faster (deflate 60.3 to 54.5 ms,
   Linux's 54.6 to 54.7), each row's thread at 4.21 to 4.23 GHz against
   3.83 by APERF/MPERF, its idle cores 40 to 80 % of the row in core C7.
-- T14 `cpu.clock` at 4189 at 8 and 9 group starts of 17, the control at
+- T14 `cpu.clock` at 4189 at 8 and 8 group starts of 17, the control at
   none; Linux reaches 4190 at 13. Boot, identity, energy, system and mem
   stay at 3789 even when every idle CPU waits deepest (#1073's first
   always-deepest control), so idle depth does not hold them there;
@@ -73,17 +73,27 @@ each against its control with the deep states off, all else equal):
   its tables (12.2 s by the kernel log's clock in the first B3 boot,
   `r4/` in the evidence), and acpiserver ran for the whole of each of those
   clock windows: a measured busy core beside the clock's thread. At the
-  starts of net, procs, mem, tail and nvme still at 3789, the roster names nothing beside osbench for more
-  than 0.9 ms of the 5.5 ms window. Mem stays unexplained. Net, procs, tail
+  starts of net, procs, mem, tail and nvme still at 3789, the roster names
+  nothing beside osbench for more than 0.9 ms of the 5.5 ms window. Mem stays unexplained. Net, procs, tail
   and nvme reached 4189 under the always-deepest control, so the history
   holding idle CPUs shallow after the group before is the open hypothesis
   there; a per-CPU state read inside the window would test it.
-- The B4 boots at `d286dddf3` reached 4189 at 10 of 17 group starts.
+- Group starts at 4189 across the six T14 boots with the deep states:
+  8 and 8 (r2), 8 and 10 (r3), 10 (B4) and 5 (B5 at `d60d727aa`), counted
+  as a maximum above 4100 MHz. Only sched, files, ipc and work reached it
+  in all six; B5 lost time, which every earlier boot had. It is a spread
+  from boot to boot, not a fixed set of groups.
+- Soundserver's worst IRQ lateness in the testcases boots, with every idle
+  CPU in C1 against with the deep states: T14 457 to 572 µs against 166 to
+  564; AMD 0 to 2661 µs against 0 to 2661, the 2661 µs window in both. The
+  deep states move neither, and no boot underran.
 
 **#1066's exit is unmet** where this track stands: the T14's `cpu.clock` reaches
-ratio 42 at 8 to 10 of 17 group starts against Linux's 13. Four of those
-groups are held by acpiserver's measured start-up work. The rest are the
-open question above.
+ratio 42 at 5 to 10 of 17 group starts against Linux's 13. Of the groups
+below it, boot, identity, energy and system are held by acpiserver's
+measured start-up work; the rest are the open question above, which two
+diagnostic boots take up next: the counters read around each group's clock,
+and the history switched off.
 
 **Exit**: on the T14, since a KVM guest's idle is its host's: the idle
 minute's package energy, timer lateness no worse than `hlt`'s by more than

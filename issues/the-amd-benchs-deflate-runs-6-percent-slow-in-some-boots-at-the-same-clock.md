@@ -7,12 +7,12 @@ opened: 2026-10-28
 # The AMD bench's deflate runs 6 % slow in some boots at the same clock
 
 osbench's `crunch.single.deflate` on the AMD bench (Ryzen 7 4800U) has two
-values across nine boots (`ToyOSOrg/evidence` branch `pr-1073`, `r3/` and
-`r4/`):
+values across ten boots (`ToyOSOrg/evidence` branch `pr-1073`, `r3/` to
+`r5/`):
 
 - In three boots its p50 was 66.6 to 66.8 ms. Two ran the thread on CPU 4
   and one on CPU 10.
-- In the six others it was 62.9 to 63.6 ms, on CPUs 0, 2, 10 and 12.
+- In the seven others it was 62.9 to 63.7 ms, on CPUs 0, 2, 10 and 12.
 
 APERF/MPERF put the thread's clock at 4214 to 4250 MHz in every boot. The
 slow boots include one with every idle CPU in C1 and two with the deep
