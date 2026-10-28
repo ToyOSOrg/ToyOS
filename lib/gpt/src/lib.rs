@@ -33,6 +33,7 @@
 )]
 
 mod crc32;
+pub mod edit;
 mod guid;
 
 use core::num::NonZeroU64;
@@ -385,7 +386,7 @@ struct Disk {
 /// driver's own accepted range, which is not a coincidence: above 4096 the
 /// block no longer divides the kernel's 4 KiB block, and below 512 the GPT
 /// header does not fit in one.
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum LbaSize {
     B512,
     B1024,
@@ -408,6 +409,15 @@ impl LbaSize {
     }
 
     const fn bytes(self) -> u32 {
+        match self {
+            Self::B512 => 512,
+            Self::B1024 => 1024,
+            Self::B2048 => 2048,
+            Self::B4096 => 4096,
+        }
+    }
+
+    const fn bytes_usize(self) -> usize {
         match self {
             Self::B512 => 512,
             Self::B1024 => 1024,

@@ -197,12 +197,7 @@ fn designated<D: Disk>(cache: &Cache<D>) -> bool {
         return false;
     }
     let [block0] = block0;
-    let magic = bcachefs::DESIGNATION_MAGIC;
-    let at = bcachefs::DESIGNATION_BLOCKS_OFFSET;
-    if block0[..magic.len()] != magic {
-        return false;
-    }
-    let stamped = u64::from_le_bytes(block0[at..at + 8].try_into().expect("eight bytes"));
+    let Some(stamped) = bcachefs::designated(&block0) else { return false };
     if stamped != cache.blocks() {
         println!(
             "fileserver: a designation stamp at block 0 names {stamped} blocks, and this partition has {}; ignoring it",

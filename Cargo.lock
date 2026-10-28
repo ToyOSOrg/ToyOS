@@ -3563,7 +3563,6 @@ dependencies = [
  "fatfs",
  "flate2",
  "getrandom 0.3.4",
- "gpt",
  "iced-x86",
  "kernel",
  "libc",

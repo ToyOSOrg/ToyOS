@@ -574,21 +574,12 @@ mod tests {
     fn image(dir: &Path, name: &str, parts: &[(Guid, Guid)], slots: [Option<(Guid, Guid)>; 2]) -> PathBuf {
         const ALIGN: u64 = 2048;
         const TOTAL: u64 = 32 << 20;
-        let entries: Vec<toyos_build::gptwrite::Entry<'_>> = (1..)
+        let entries: Vec<toyos_gpt::edit::Slot> = (1..)
             .zip(parts)
-            .map(|(i, (kind, unique))| toyos_build::gptwrite::Entry {
-                kind: *kind,
-                unique: *unique,
-                first_lba: i * ALIGN,
-                last_lba: i * ALIGN + 511,
-                name: "x",
-            })
+            .map(|(i, (kind, unique))| toyos_gpt::edit::Slot::new(*kind, *unique, i * ALIGN, i * ALIGN + 511, "x").unwrap())
             .collect();
-        let table = toyos_build::gptwrite::table(TOTAL / u64::from(LBA), toyos_build::gptwrite::random_guid(), &entries);
         let mut out = vec![0u8; TOTAL as usize];
-        out[..table.primary.len()].copy_from_slice(&table.primary);
-        let back = out.len() - table.backup.len();
-        out[back..].copy_from_slice(&table.backup);
+        toyos_build::image::write_gpt(&mut std::io::Cursor::new(&mut out), TOTAL, toyos_build::image::random_guid(), &entries);
         let slot = |s: Option<(Guid, Guid)>| s.map(|(b, r)| toyos_update::slots::Slot { boot: b.0, root: r.0, version: 1 });
         let slots = toyos_update::slots::Table { sequence: 1, marked: toyos_update::slots::Which::A, slots: slots.map(slot) };
         let at = parts.iter().position(|(k, _)| *k == Guid::TOYOS_SLOTS).expect("a slot table") as u64 + 1;
@@ -602,7 +593,7 @@ mod tests {
     #[test]
     fn an_image_is_admitted_piece_by_piece_by_its_slot_table() {
         let dir = toyos_tmpdir::TempDir::new("internal");
-        let g = |_| toyos_build::gptwrite::random_guid();
+        let g = |_| toyos_build::image::random_guid();
         let [esp, slots, log, ba, ra, bb, rb, other]: [Guid; 8] = std::array::from_fn(g);
         let built = [
             (Guid::EFI_SYSTEM, esp), (Guid::TOYOS_SLOTS, slots), (Guid::MICROSOFT_BASIC, log),

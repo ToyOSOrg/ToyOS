@@ -33,16 +33,14 @@ pub fn bytes() -> Vec<u8> {
     let mut entries = Vec::new();
     for (i, (name, kind, len)) in PARTS.iter().enumerate() {
         let unique = Guid::from_fields(0x7057_0000 + i as u32, 0, 0x4000, [0x80, 0, 0, 0, 0, 0, 0, i as u8]);
-        entries.push(toyos_build::gptwrite::Entry { kind: *kind, unique, first_lba: at / LBA, last_lba: (at + len) / LBA - 1, name });
+        entries.push(toyos_gpt::edit::Slot::new(*kind, unique, at / LBA, (at + len) / LBA - 1, name).expect("a short name"));
         for (sector, block) in disk[at as usize..(at + len) as usize].chunks_mut(LBA as usize).enumerate() {
             block.fill(((i as u8 + 1).wrapping_mul(0x25) ^ sector as u8) | 1);
         }
         at += len;
     }
-    let table = toyos_build::gptwrite::table(total / LBA, Guid::from_fields(0x7057_00ff, 0, 0x4000, [0x80; 8]), &entries);
-    disk[..table.primary.len()].copy_from_slice(&table.primary);
-    let backup = disk.len() - table.backup.len();
-    disk[backup..].copy_from_slice(&table.backup);
+    let disk_guid = Guid::from_fields(0x7057_00ff, 0, 0x4000, [0x80; 8]);
+    toyos_build::image::write_gpt(&mut std::io::Cursor::new(&mut disk), total, disk_guid, &entries);
     disk
 }
 

@@ -9,6 +9,7 @@ use crate::arch::Arch;
 use toyos_blockdev::{block_on_ready, Bytes, ReadOnlyBytes, BLOCK};
 use toyos_crypto::Random;
 use toyos_fat32::{Fat32, FatTime};
+use toyos_gpt::edit::{Geometry, Slot, Step, Table};
 use toyos_gpt::Guid;
 
 /// The image that goes on the ROOT partition: a bcachefs volume holding
@@ -246,9 +247,9 @@ pub fn create_boot_image(
     // kernel. The kernel is given the partition by name; nothing anywhere goes
     // looking for one by type or by format. Every slot partition is named the
     // same way, by the slot table.
-    let (log_guid, esp_guid, table_guid) = (crate::gptwrite::random_guid(), crate::gptwrite::random_guid(), crate::gptwrite::random_guid());
-    let a = (crate::gptwrite::random_guid(), crate::gptwrite::random_guid());
-    let b = second.map(|room| (crate::gptwrite::random_guid(), crate::gptwrite::random_guid(), room));
+    let (log_guid, esp_guid, table_guid) = (random_guid(), random_guid(), random_guid());
+    let a = (random_guid(), random_guid());
+    let b = second.map(|room| (random_guid(), random_guid(), room));
 
     let s = signed(release, params, signing);
     // Room for the slot's files twice over, so an update can write new ones
@@ -659,8 +660,8 @@ pub fn designate_data_disk(path: &Path, len: u64) -> (u64, u64) {
         .write(true)
         .open(path)
         .unwrap_or_else(|e| panic!("open {} to partition it: {e}", path.display()));
-    let starts = lay(&mut file, len, &[data_row(crate::gptwrite::random_guid(), data_bytes)]);
-    write_at(&mut file, starts[0], &designation(data_bytes / SECTOR as u64), "DATA partition's designation");
+    let starts = lay(&mut file, len, &[data_row(random_guid(), data_bytes)]);
+    write_at(&mut file, starts[0], &bcachefs::designation(data_bytes / SECTOR as u64), "DATA partition's designation");
     (starts[0], data_bytes)
 }
 
@@ -670,6 +671,28 @@ fn data_row(guid: Guid, len: u64) -> Row {
 }
 
 /// Write `bytes` at byte `at` of `disk`; `what` they are is what a refusal names.
+/// A version 4 GUID from the host's random source.
+pub fn random_guid() -> Guid {
+    let mut bytes = [0u8; 16];
+    getrandom::fill(&mut bytes).expect("the operating system's random source");
+    Guid::random_v4(bytes)
+}
+
+/// A protective MBR and both copies of a GPT carrying `slots` in their
+/// order, under `disk_guid`, on `disk` of `total` bytes.
+pub fn write_gpt(disk: &mut (impl Write + Seek), total: u64, disk_guid: Guid, slots: &[Slot]) {
+    let geometry = Geometry::new(LBA, total / u64::from(LBA)).expect("a disk that holds a table");
+    let mut table = Table::empty(&geometry, disk_guid);
+    assert!(slots.len() <= table.slots.len(), "{} partitions in a table of {}", slots.len(), table.slots.len());
+    table.slots[..slots.len()].copy_from_slice(slots);
+    let encoded = table.encode(&geometry).unwrap_or_else(|why| panic!("the partition table is not one UEFI admits: {why:?}"));
+    for step in encoded.steps(true) {
+        if let Step::Write { lba, bytes } = step {
+            write_at(disk, lba * u64::from(LBA), bytes, "partition table");
+        }
+    }
+}
+
 fn write_at(disk: &mut (impl Write + Seek), at: u64, bytes: &[u8], what: &str) {
     disk.seek(SeekFrom::Start(at))
         .and_then(|_| disk.write_all(bytes))
@@ -708,7 +731,7 @@ pub fn install(image: &[u8], disk: &Path, data_bytes: u64) {
         .collect();
 
     let (mut rows, volumes): (Vec<Row>, Vec<&[u8]>) = carried.into_iter().unzip();
-    rows.insert(0, data_row(crate::gptwrite::random_guid(), data_bytes));
+    rows.insert(0, data_row(random_guid(), data_bytes));
     let total = disk_bytes(rows.iter().map(|row| row.len));
 
     let mut file = std::fs::OpenOptions::new()
@@ -720,7 +743,7 @@ pub fn install(image: &[u8], disk: &Path, data_bytes: u64) {
     file.set_len(total).unwrap_or_else(|e| panic!("size {} to {total} bytes: {e}", disk.display()));
 
     let starts = lay(&mut file, total, &rows);
-    write_at(&mut file, starts[0], &designation(data_bytes / SECTOR as u64), "DATA partition's designation");
+    write_at(&mut file, starts[0], &bcachefs::designation(data_bytes / SECTOR as u64), "DATA partition's designation");
     for ((row, volume), start) in rows[1..].iter().zip(volumes).zip(&starts[1..]) {
         for (i, block) in volume.chunks(PARTITION_ALIGN).enumerate().filter(|(_, block)| block.iter().any(|byte| *byte != 0)) {
             write_at(&mut file, start + (i * PARTITION_ALIGN) as u64, block, &row.what);
@@ -731,15 +754,6 @@ pub fn install(image: &[u8], disk: &Path, data_bytes: u64) {
 /// The name a table this build wrote gives `part`.
 fn name_of(part: &toyos_gpt::Partition) -> String {
     String::from_utf16(part.name()).unwrap_or_else(|e| panic!("partition {}'s name is no UTF-16: {e}", part.unique_guid()))
-}
-
-/// Block 0 of a volume: the magic and its block count.
-fn designation(blocks: u64) -> [u8; SECTOR] {
-    let mut block = [0u8; SECTOR];
-    block[..bcachefs::DESIGNATION_MAGIC.len()].copy_from_slice(&bcachefs::DESIGNATION_MAGIC);
-    let at = bcachefs::DESIGNATION_BLOCKS_OFFSET;
-    block[at..at + 8].copy_from_slice(&blocks.to_le_bytes());
-    block
 }
 
 /// A disk file as logical blocks, for a reader that may not hold the image.
@@ -821,20 +835,15 @@ fn lay(disk: &mut (impl Write + Seek), total: u64, rows: &[Row]) -> Vec<u64> {
         })
         .collect();
     let lba = u64::from(LBA);
-    let entries: Vec<crate::gptwrite::Entry<'_>> = rows
+    let slots: Vec<Slot> = rows
         .iter()
         .zip(&starts)
-        .map(|(row, start)| crate::gptwrite::Entry {
-            kind: row.kind,
-            unique: row.guid,
-            first_lba: start / lba,
-            last_lba: (start + row.len) / lba - 1,
-            name: &row.name,
+        .map(|(row, start)| {
+            Slot::new(row.kind, row.guid, start / lba, (start + row.len) / lba - 1, &row.name)
+                .unwrap_or_else(|| panic!("the partition name {:?} is over {} UTF-16 units", row.name, toyos_gpt::edit::NAME_UNITS))
         })
         .collect();
-    let table = crate::gptwrite::table(total / lba, crate::gptwrite::random_guid(), &entries);
-    write_at(disk, 0, &table.primary, "partition table");
-    write_at(disk, total - table.backup.len() as u64, &table.backup, "backup partition table");
+    write_gpt(disk, total, random_guid(), &slots);
     starts
 }
 
@@ -1026,7 +1035,7 @@ mod tests {
         let root = tiny_root();
         let s = signed(release(b"kernel", &root), "", signing(&key));
         for (what, volume) in [
-            ("ESP", create_esp_volume(Arch::X86_64, b"bootloader", crate::gptwrite::random_guid())),
+            ("ESP", create_esp_volume(Arch::X86_64, b"bootloader", random_guid())),
             ("slot volume", create_slot_volume(Some(slot_files(release(b"kernel", &root), &s)), FAT32_MIN_BYTES)),
             ("empty slot volume", create_slot_volume(None, FAT32_MIN_BYTES)),
             ("log volume", create_log_volume()),
@@ -1114,7 +1123,7 @@ mod tests {
     #[test]
     fn the_esp_and_a_slot_carry_what_the_bootloader_looks_for() {
         assert_eq!(
-            files_of(create_esp_volume(Arch::X86_64, b"bootloader", crate::gptwrite::random_guid())),
+            files_of(create_esp_volume(Arch::X86_64, b"bootloader", random_guid())),
             ["EFI/BOOT/BOOTx64.EFI", "toyos/log.guid"]
         );
         let key = key();
@@ -1235,7 +1244,7 @@ mod tests {
         );
         let mut stamp = [0u8; SECTOR];
         disk.seek(SeekFrom::Start(PARTITION_ALIGN as u64)).and_then(|_| disk.read_exact(&mut stamp)).expect("read DATA");
-        assert_eq!(stamp, designation(DATA / SECTOR as u64));
+        assert_eq!(stamp, bcachefs::designation(DATA / SECTOR as u64));
         drop(disk);
 
         let theirs = dir.join("theirs.img");
