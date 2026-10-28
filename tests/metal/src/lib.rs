@@ -826,13 +826,19 @@ pub fn ended_by_its_deadline(armed: &[impl AsRef<str>]) -> bool {
 }
 
 /// The `boot-deadline=` bound an image armed with `armed` carries, whose
-/// runner bounds its list at `list_ms`.
+/// runner bounds its list at `list_ms`. A wedge staged under the chipset
+/// watchdog is the watchdog's to end, so its deadline stands behind it.
 pub fn bound_for(armed: &[impl AsRef<str>], list_ms: u64) -> u64 {
-    if stages_a_wedge(armed) {
-        toyos_tco::STAGED_BOUND_MS
-    } else {
-        toyos_tco::wedge_bound_ms(list_ms)
+    match (stages_a_wedge(armed), watched(armed)) {
+        (true, true) => toyos_tco::WATCHED_WEDGE_BOUND_MS,
+        (true, false) => toyos_tco::STAGED_BOUND_MS,
+        (false, _) => toyos_tco::wedge_bound_ms(list_ms),
     }
+}
+
+/// Whether this image is armed with the chipset watchdog.
+fn watched(armed: &[impl AsRef<str>]) -> bool {
+    armed.iter().any(|name| name.as_ref() == toyos_tco::PARAM)
 }
 
 /// Whether this image is armed so the pass after its reset clears its record
@@ -2003,7 +2009,7 @@ fn boot_verdict(armed: &[String], loader: &str, log: &str) -> Result<u64, Refusa
     // and not this list's — the arm says a bound was staged, and two of them
     // can reach a staged boot.
     if ended_by_its_deadline(armed) {
-        return wedged_boot(loader, log);
+        return wedged_boot(watched(armed), loader, log);
     }
     let ms = bootlog::verdict(log).map_err(Refusal::Log)?;
     if staged_hang {
@@ -2026,17 +2032,21 @@ fn boot_verdict(armed: &[String], loader: &str, log: &str) -> Result<u64, Refusa
 /// and nothing else may: an arm staged for one of them is still a machine the
 /// other can reach first, and the T14 read back a `hard-lockup-probe` boot as a
 /// failure for exactly that reason — this judge knew one line and the page
-/// carried the other.
-fn wedged_boot(loader: &str, log: &str) -> Result<u64, Refusal> {
+/// carried the other. Under the chipset watchdog, its reset is the third
+/// ending: the pass after it finds a page no kernel sealed, and the chipset
+/// says its watchdog reset the machine. The wedge stops every feed, and the
+/// deadline stands past the watchdog's bound.
+fn wedged_boot(watched: bool, loader: &str, log: &str) -> Result<u64, Refusal> {
     if bootlog::handed_back(loader).is_ok() {
         return Err(Refusal::Wedge {
             why: "it reached the shutdown's own last word, so nothing about it was wedged",
         });
     }
-    let Some(said) = sealed_by(loader) else {
+    let Some(said) = sealed_by(loader).or_else(|| watched.then(|| reset_by_the_chipset(loader)).flatten()) else {
         return Err(Refusal::Wedge {
-            why: "the pass after the reset reports neither of this kernel's bounds, so what \
-                  ended this boot was not one of them",
+            why: "the pass after the reset reports neither of this kernel's bounds, nor a reset \
+                  by the chipset watchdog it may be armed with, so what ended this boot was not \
+                  one of them",
         });
     };
     let ms = bootlog::boot_millis(log).ok_or(Refusal::Wedge {
@@ -2053,6 +2063,17 @@ fn sealed_by(loader: &str) -> Option<&str> {
     loader
         .lines()
         .find(|l| l.contains(bootlog::DEADLINE_EXPIRED) || l.contains(bootlog::LOCKED_UP))
+}
+
+/// The line the pass after the reset printed where the chipset says its
+/// watchdog caused that reset, above a page no kernel sealed: a panicked
+/// kernel the watchdog then reset is a panic. Only an FCH says so.
+fn reset_by_the_chipset(loader: &str) -> Option<&str> {
+    if !bootlog::sealed_nothing(loader) {
+        return None;
+    }
+    let after = bootlog::after_the_reset(loader)?;
+    after.lines().find(|l| l.contains(toyos_tco::fch::RESET_SAID))
 }
 
 /// The lateness of a deadline that expired, in milliseconds past the bound it
@@ -2596,6 +2617,15 @@ mod tests {
         assert!(!stages_a_wedge(&["watchdog".to_string(), bound]));
         assert_eq!(bound_for(&["watchdog"], 60_000), 120_000);
         assert_eq!(bound_for(&["watchdog"], 135_680), 271_360);
+    }
+
+    /// Under the chipset watchdog a staged wedge's deadline is past the
+    /// watchdog's reset, which lands within one bound of the last feed.
+    #[test]
+    fn a_wedge_under_the_watchdog_is_the_watchdogs_to_end() {
+        assert_eq!(bound_for(&[WEDGE_ARM, toyos_tco::PARAM], 60_000), 29_200);
+        const { assert!(toyos_tco::WATCHED_WEDGE_BOUND_MS > toyos_tco::STAGED_BOUND_MS + toyos_tco::BOUND_MS) };
+        assert_eq!(bound_for(&[WEDGE_ARM], 60_000), toyos_tco::STAGED_BOUND_MS);
     }
 
     /// A row for a name the kernel no longer declares is a ruling about
@@ -3276,7 +3306,7 @@ mod tests {
             bootlog::DEADLINE_EXPIRED
         );
         let booted = "[ 1.198 cpu0 kernel] Boot: complete (1198ms)\n";
-        assert_eq!(wedged_boot(&sealed, booted), Ok(1198));
+        assert_eq!(wedged_boot(false, &sealed, booted), Ok(1198));
 
         let done = format!(
             "Black box: {}\n| {}[ 1.300 cpu0 kernel] {}\n",
@@ -3284,14 +3314,43 @@ mod tests {
             bootlog::LOG_TAIL,
             bootlog::REBOOTING
         );
-        let why = wedged_boot(&done, booted).unwrap_err().to_string();
+        let why = wedged_boot(false, &done, booted).unwrap_err().to_string();
         assert!(why.contains("nothing about it was wedged"), "{why}");
 
-        let why = wedged_boot("no record here\n", booted).unwrap_err().to_string();
+        let why = wedged_boot(false, "no record here\n", booted).unwrap_err().to_string();
         assert!(why.contains("reports neither of this kernel's bounds"), "{why}");
 
-        let why = wedged_boot(&sealed, "nothing at all\n").unwrap_err().to_string();
+        let why = wedged_boot(false, &sealed, "nothing at all\n").unwrap_err().to_string();
         assert!(why.contains("no `Boot: complete`"), "{why}");
+    }
+
+    /// A wedge under the chipset watchdog ends in the chipset's reset, which
+    /// only the pass after it reports, and only an image armed with the
+    /// watchdog may end that way.
+    #[test]
+    fn a_watched_wedge_is_ended_by_the_chipsets_reset() {
+        let booted = "[ 1.300 cpu0 kernel] Boot: complete (1300ms)\n";
+        let said = format!("watchdog: watchdog_issue_reset=1 fired=0, so {}\n", toyos_tco::fch::RESET_SAID);
+        let after = format!(
+            "{}\n{said}Previous boot's panic: the page still reads ARMED, so that kernel died \
+             without reaching either its panic path or its shutdown\n",
+            bootlog::SEPARATOR
+        );
+        assert_eq!(wedged_boot(true, &after, booted), Ok(1300));
+        let why = wedged_boot(false, &after, booted).unwrap_err().to_string();
+        assert!(why.contains("reports neither of this kernel's bounds"), "{why}");
+        // The first pass's survey speaks of the boot before this one.
+        let before = format!("{said}{}\nPrevious boot's panic: the page still reads ARMED\n", bootlog::SEPARATOR);
+        let why = wedged_boot(true, &before, booted).unwrap_err().to_string();
+        assert!(why.contains("reports neither of this kernel's bounds"), "{why}");
+        // A kernel that panicked and then went unfed: the chipset's reset
+        // ends it, and the page says it was a panic.
+        let panicked = format!(
+            "{}\n{said}Previous boot's panic: 812 bytes off 0x8000000\n",
+            bootlog::SEPARATOR
+        );
+        let why = wedged_boot(true, &panicked, booted).unwrap_err().to_string();
+        assert!(why.contains("reports neither of this kernel's bounds"), "{why}");
     }
 
     /// **The record's own first line is what says which bound ended the boot.**
@@ -3307,7 +3366,7 @@ mod tests {
              |   pc=0xffff800060a5903f  <kernel::sync::Lock<..>>::lock+0x12f\n",
             bootlog::LOCKED_UP
         );
-        assert_eq!(wedged_boot(&locked, booted), Ok(1200));
+        assert_eq!(wedged_boot(false, &locked, booted), Ok(1200));
         assert_eq!(lockup_lateness_ms(&locked), Some(Ok(4)));
         // Each bound's lateness is read off its own record and off no other.
         assert_eq!(deadline_lateness_ms(&locked, booted), None);

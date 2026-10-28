@@ -5,7 +5,7 @@
 //! [`percpu`] owns every `gs:` access; nothing outside this directory writes one.
 //!
 //! The PC platform's own devices live here too, because no other architecture
-//! has them: the I/O APIC, the CMOS RTC, the chipset's TCO watchdog, VT-d and
+//! has them: the I/O APIC, the CMOS RTC, the chipset's watchdog, VT-d and
 //! AMD-Vi. Generic code reaches each through the concept it serves
 //! (`watchdog`, `iommu_unit`, …), never by its name.
 

@@ -214,17 +214,14 @@ const ARMED_ON_ARRIVAL: &str = "so the bootloader had already armed the timer";
 const UNARMED_ON_ARRIVAL: &str = "so nothing had armed the timer";
 
 /// The tail of the loader's own arm line, which names the shipped bound and so
-/// tells it from the kernel's, whatever the port and the PCI ids turn out to be.
+/// tells it from the kernel's, whatever the chipset and its PCI ids turn out to be.
 fn loader_armed() -> String {
-    format!(
-        "armed for {}ms, and the kernel takes it over",
-        toyos_tco::bound_of(toyos_tco::TIMER)
-    )
+    format!("armed for {}ms, and the kernel takes it over", toyos_tco::BOUND_MS)
 }
 
-/// The register value the loader wrote, as the kernel reports finding it.
-fn armed_on_arrival() -> String {
-    format!("TCO_TMR={} on arrival, {ARMED_ON_ARRIVAL}", toyos_tco::TIMER)
+/// The kernel's line once it feeds the timer, whichever chipset it is.
+fn kernel_feeds() -> String {
+    format!("this machine resets if no scheduler pass runs for {}ms", toyos_tco::BOUND_MS)
 }
 
 /// The `0x…` word printed straight after `label`, so a register is compared as
@@ -250,18 +247,41 @@ fn decimal_field(line: &str, label: &str) -> Result<u64, String> {
     rest[..end].parse().map_err(|e| format!("{label:?} in {line:?}: {e}"))
 }
 
-/// The armed boot's half: the loader wrote the register block and the kernel
-/// found the timer already running.
-///
-/// **`TCO1_CNT.TCO_LOCK` is not judged.** `toyos_tco`'s own header names it as
-/// the one bit a read-back may not be held to — firmware that set it leaves it
-/// set through every write this tree makes, and what it gates is `SMI_EN.TCO_EN`
-/// rather than the countdown or the reboot. It is reported and passed over.
+/// Each decoded bit `fields` names reads its value in `line`.
+fn bits_are(line: &str, fields: &[(&str, u64)]) -> Result<(), String> {
+    for (field, want) in fields {
+        let seen = decimal_field(line, field)?;
+        if seen != *want {
+            return Err(format!("the loader read {field}{seen} back and this machine is {want}\n{line}"));
+        }
+    }
+    Ok(())
+}
+
+/// The armed boot's half: the loader wrote the chipset's watchdog and the
+/// kernel found it running and feeds it.
 pub fn watchdog_armed(
     loader: &serial::Serial,
     kernel: &serial::Serial,
 ) -> Result<(), String> {
     let line = loader.must_say(&loader_armed())?.to_string();
+    if line.contains(" FCH watchdog at ") {
+        fch_armed(loader)?;
+    } else {
+        tco_armed(loader)?;
+    }
+    let arrival = kernel.must_say(ARMED_ON_ARRIVAL)?;
+    eprintln!("  [power] {}", arrival.trim());
+    kernel.must_say(&kernel_feeds())?;
+    eprintln!("  [power] the loader armed it and the kernel found it running: {}", line.trim());
+    Ok(())
+}
+
+/// **`TCO1_CNT.TCO_LOCK` is not judged.** `toyos_tco`'s own header names it as
+/// the one bit a read-back may not be held to — firmware that set it leaves it
+/// set through every write this tree makes, and what it gates is `SMI_EN.TCO_EN`
+/// rather than the countdown or the reboot. It is reported and passed over.
+fn tco_armed(loader: &serial::Serial) -> Result<(), String> {
     // The words, not the line: a read-back that printed a register the loader
     // never wrote would satisfy the line and is the failure worth catching.
     let read_back = loader.must_say("watchdog: read back TCO_RLD=")?.to_string();
@@ -275,22 +295,66 @@ pub fn watchdog_armed(
     // The reset gate is inside this block on the generations the table names, so
     // a machine whose armed timer could not reset it is one the bound is a lie on.
     let gates = loader.must_say("so a second expiry can reset this machine")?.to_string();
-    // The words of it, not the line: this is the register block's own account of
-    // whether an expiry reaches the machine, and a machine that has just armed
-    // the timer has not expired once.
-    for (field, want) in [("no_reboot=", 0), ("timeout=", 0)] {
-        let seen = decimal_field(&gates, field)?;
-        if seen != want {
-            return Err(format!(
-                "the loader read {field}{seen} back and this machine is {want}\n{gates}"
-            ));
-        }
-    }
-    kernel.must_say(&armed_on_arrival())?;
-
-    eprintln!("  [power] the loader armed it and the kernel found it running: {}", line.trim());
+    // This is the register block's own account of whether an expiry reaches
+    // the machine, and a machine that has just armed the timer has not expired once.
+    bits_are(&gates, &[("no_reboot=", 0), ("timeout=", 0)])?;
     eprintln!("  [power] {}", gates.trim());
     eprintln!("  [power] tco_lock={}, which no read-back is judged on", decimal_field(&gates, "tco_lock=")?);
+    Ok(())
+}
+
+/// The FCH's half: the decode and the tick took, the timer is counting the
+/// bound to a reset of the CPUs, and nothing the PPR documents gates that.
+/// `cold=`, `clock_gating_dis=` and `action_en=` are reported and not judged:
+/// the first is firmware's policy over every reset, the second's effect on the
+/// count is undocumented, and the third is reserved before Family 1Ah.
+fn fch_armed(loader: &serial::Serial) -> Result<(), String> {
+    use toyos_tco::fch;
+    let read_back = loader.must_say("watchdog: read back PMx000=")?.to_string();
+    let decode = hex_field(&read_back, "PMx000=")?;
+    let tick = (decode >> 24) & 0xf;
+    if decode & u64::from(fch::WATCHDOG_TMR_EN) == 0 || tick != fch::TICK as u64 {
+        return Err(format!("the loader read PMx000={decode:#010x} back: no decode, or not the {} ms tick\n{read_back}", fch::TICK_MS));
+    }
+    let control = fch::Control(hex_field(&read_back, "WatchdogControl=")? as u32);
+    if !control.running() || control.powers_off() {
+        return Err(format!("the loader read {control:?} back, which is not counting to a reset\n{read_back}"));
+    }
+    // Read straight after the trigger: the count written, or one tick under it.
+    let count = decimal_field(&read_back, "WatchdogCount=")?;
+    let timer = u64::from(fch::TIMER);
+    if !(timer - 1..=timer).contains(&count) {
+        return Err(format!("the loader read WatchdogCount={count} back and wrote {timer}\n{read_back}"));
+    }
+    let gates = loader.must_say("so an expiry can reset this machine")?.to_string();
+    bits_are(&gates, &[("power_off=", 0), ("use_cpu_rst=", 1)])?;
+    eprintln!("  [power] {}", read_back.trim());
+    eprintln!("  [power] {}", gates.trim());
+    Ok(())
+}
+
+/// A wedge under the chipset watchdog, read off the boot and the loader pass
+/// after its reset: the kernel took the loader's arm over and fed it to the
+/// stop where the wedge is staged; then the machine reset with nothing in the
+/// kernel ending it, and the FCH says its watchdog did.
+pub fn watchdog_reset_chain(
+    kernel: &serial::Serial,
+    log: &serial::Serial,
+    after: &serial::Serial,
+) -> Result<(), String> {
+    kernel.must_say(ARMED_ON_ARRIVAL)?;
+    kernel.must_say(&kernel_feeds())?;
+    bootlog::stopping_line(log.text()).ok_or_else(|| {
+        format!("the armed boot's log carries no {:?}: it never reached the stop the wedge is staged at", bootlog::STOPPING)
+    })?;
+    // An ARMED page is a kernel that neither its deadline nor its lockup
+    // detector ended; one lost with the reset is a black box the FCH's reset
+    // does not keep, and fails here.
+    after.must_say(&armed_and_nothing_else())?;
+    let said = after.must_say(toyos_tco::fch::RESET_SAID)?.to_string();
+    after.must_say(bootlog::CHAIN_ENDS_LINE)?;
+    says_nothing_of(after, bootlog::LOADER_LAST_LINE)?;
+    eprintln!("  [power] {}", said.trim());
     Ok(())
 }
 

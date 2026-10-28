@@ -1182,9 +1182,10 @@ pub fn judge_readbacks(
             );
         }
         let mut findings: Vec<String> = Vec::new();
-        // The census crosses only on the page, and a page the pass after the
-        // reset cleared as another image's carries none.
-        let owes_a_panel = bootlog::foreign_done(&back.loader).is_err();
+        // The census crosses only on the page, and neither a page the pass
+        // after the reset cleared as another image's nor one no kernel sealed
+        // carries one.
+        let owes_a_panel = bootlog::foreign_done(&back.loader).is_err() && !bootlog::sealed_nothing(&back.loader);
         for (field, value, owed) in [
             ("complete_ms", back.boot_ms, true),
             ("panel_max_us", panel.map(|panel| panel.max_micros), owes_a_panel),

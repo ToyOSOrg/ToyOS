@@ -41,7 +41,7 @@ pub const DEADLINE_ARMED: &str = "boot deadline: ";
 /// What the `wedge-before-reset` actuator says before it stops every CPU, in
 /// `kernel/src/deadline.rs`. The witness that a deadline ended a wedge and not
 /// a boot merely slower than its bound, which is what makes that control one.
-pub const WEDGE_STAGED: &str = "wedge: staged, and only the boot deadline ends this machine";
+pub const WEDGE_STAGED: &str = "wedge: staged, and only a bound this machine runs under ends it";
 
 /// What each CPU the wedge takes says about the state it arrived in, also in
 /// `kernel/src/deadline.rs`: [`WEDGE_AWAKE`] with interrupts open, and
@@ -385,6 +385,14 @@ pub fn foreign_done(loader: &str) -> Result<(), Unfit> {
     }
 }
 
+/// Whether the pass after the reset found the page as the loader armed it: a
+/// kernel that sealed nothing, its panel census among it. What a reset from
+/// outside the kernel, such as the chipset watchdog's, leaves.
+pub fn sealed_nothing(loader: &str) -> bool {
+    let armed = format!("{PREVIOUS_PANIC} the page still reads {}", toyos_blackbox::State::Armed.named());
+    after_the_reset(loader).is_some_and(|after| after.contains(&armed))
+}
+
 /// `loader.log` from [`SEPARATOR`] on: the pass that read what this boot left,
 /// or `None` where the chain did not go round.
 pub fn after_the_reset(loader: &str) -> Option<&str> {
@@ -651,6 +659,15 @@ mod tests {
         let source = std::fs::read_to_string(&path).expect("a loader module");
         let format = FOREIGN_DONE.replacen(toyos_blackbox::State::Done.named(), "{}", 1);
         assert!(source.contains(&format), "{} formats no {format:?}", path.display());
+    }
+
+    /// Only the pass after the reset speaks of this boot's page.
+    #[test]
+    fn a_page_no_kernel_sealed_is_read_off_the_pass_after_the_reset() {
+        let armed = format!("{PREVIOUS_PANIC} the page still reads {}, so that kernel died\n", toyos_blackbox::State::Armed.named());
+        assert!(sealed_nothing(&format!("first pass\n{SEPARATOR}\n{armed}")));
+        assert!(!sealed_nothing(&format!("{armed}{SEPARATOR}\n{PREVIOUS_PANIC} the last boot read WEDGED\n")));
+        assert!(!sealed_nothing(&armed), "a loader.log with no pass after the reset");
     }
 
     #[test]

@@ -927,6 +927,18 @@ fn main(handle: Handle, system_table: SystemTable) -> Status {
             Err(why) => println!("Anti-rollback floor: not raised, because the proven image is not verified: {why}"),
         }
     }
+    // Find ACPI 2.0 RSDP from UEFI configuration table
+    let rsdp_addr = system_table
+        .config_table()
+        .iter()
+        .find(|entry| entry.guid == ACPI2_GUID)
+        .map(|entry| entry.address as u64)
+        .expect("ACPI 2.0 RSDP not found in UEFI config table");
+    // On every pass, before either end of the chain: the last reset's cause is
+    // the report this pass may be making, and a count the last boot left
+    // running on an FCH would end this pass or the boot it hands to.
+    let chipset = watchdog::locate(&system_table, rsdp_addr);
+    watchdog::survey(&chipset);
     if retry {
         // **The hang, and the only bound there is on one.** The last boot of
         // this image was handed the machine and never reported — no panic, no
@@ -962,13 +974,6 @@ fn main(handle: Handle, system_table: SystemTable) -> Status {
         ),
     }
 
-    // Find ACPI 2.0 RSDP from UEFI configuration table
-    let rsdp_addr = system_table
-        .config_table()
-        .iter()
-        .find(|entry| entry.guid == ACPI2_GUID)
-        .map(|entry| entry.address as u64)
-        .expect("ACPI 2.0 RSDP not found in UEFI config table");
     println!("RSDP address: {:#x}", rsdp_addr);
 
     let boot_part = boot_partition(handle, &system_table);
@@ -1049,7 +1054,7 @@ fn main(handle: Handle, system_table: SystemTable) -> Status {
     // The last act before the jump, so the smallest possible span of this loader
     // is inside the bound: everything above it can still be reported, and a hang
     // between here and the kernel's own arm is what the bound is for.
-    watchdog::arm(&system_table, rsdp_addr, params);
+    watchdog::arm(&chipset, params);
 
     println!("Starting kernel...");
     start_kernel(loaded_kernel, kernel_bytes, cmdline, rsdp_addr, gop, boot_part, log_guid, Handed { root: chosen.root, supervisor: chosen.supervisor, fileserver: chosen.fileserver }, chosen.volume, microcode, entry_counter, wall_clock, system_table);
