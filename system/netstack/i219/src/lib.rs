@@ -488,6 +488,16 @@ pub struct Counters {
     pub spurious: u32,
     /// Frames the part took off the transmit ring and wrote `DD` back for.
     pub sent: u32,
+    /// Nanoseconds the transmit ring spent full: from a caller's first full
+    /// answer to the next room counted.
+    pub tx_full_nanos: u64,
+    /// At each full answer, frames `GPTC` counts on the wire whose `DD` this
+    /// driver had not yet read, summed: completions the ring was full of
+    /// without knowing it. 0 says the part sends what it holds no faster than
+    /// it writes it back.
+    pub tx_unreported: u64,
+    /// The most of those at any one full answer.
+    pub tx_unreported_max: u32,
     /// Frames the part filled a receive descriptor with and this driver handed
     /// up.
     pub received: u32,
@@ -495,11 +505,22 @@ pub struct Counters {
 
 impl Counters {
     /// The counts that are worth a line: every one but [`Self::spurious`],
-    /// [`Self::sent`], [`Self::received`] and the three of a full transmit
+    /// [`Self::sent`], [`Self::received`] and the six of a full transmit
     /// ring, which move on their own on a working card, so a diagnostic keyed
     /// on them would print on nothing having gone wrong.
     pub fn anomalies(&self) -> Self {
-        Self { spurious: 0, sent: 0, received: 0, tx_full: 0, tx_wake_armed: 0, tx_wake_taken: 0, ..*self }
+        Self {
+            spurious: 0,
+            sent: 0,
+            received: 0,
+            tx_full: 0,
+            tx_wake_armed: 0,
+            tx_wake_taken: 0,
+            tx_full_nanos: 0,
+            tx_unreported: 0,
+            tx_unreported_max: 0,
+            ..*self
+        }
     }
 }
 
@@ -578,9 +599,12 @@ const STRANDED_DEADLINE_NANOS: u64 =
 /// delivery of it and still a bound on a vector that never fires.
 pub const DELIVERY_DEADLINE_NANOS: u64 = 100_000_000;
 
-/// The transmit control [`I219::open`] writes: §4.6.6's suggested values with
-/// the transmitter enabled.
-const TX_CONTROL: u32 = tctl::EN | tctl::PSP | tctl::CT | tctl::COLD_FULL_DUPLEX;
+/// Every `TCTL` field, so what the bring-up leaves owes nothing to a previous
+/// holder: §4.6.6's `EN`, `PSP`, `CT` and `COLD`, and `MULR` and `RRTHRESH` at
+/// §10.2.6.1's initial values, which §4.6.6's "all other fields 0b" would clear.
+/// The T14's reset does not give §10.2.6.1's initial values.
+const TX_CONTROL: u32 =
+    tctl::EN | tctl::PSP | tctl::CT | tctl::COLD_FULL_DUPLEX | tctl::MULR | tctl::RRTHRESH_INITIAL;
 
 /// What [`reset`] leaves its caller.
 struct Reset {
@@ -884,6 +908,10 @@ pub struct BringUp {
     pub phy: Result<phy::Phy, phy::PhyRefusal>,
     /// The message the claim was proven to deliver.
     pub delivered: Delivered,
+    /// `TCTL` as the reset left it, before the bring-up wrote its fields.
+    pub reset_transmit_control: u32,
+    /// `TCTL` as the bring-up left it.
+    pub transmit_control: u32,
 }
 
 /// The function, brought up and driving.
@@ -920,6 +948,8 @@ pub struct I219<R: Registers, C, D, I> {
     /// Whether the transmit write-back is unmasked: a caller found the ring
     /// full and no pass has begun since.
     tx_wake: bool,
+    /// When the transmit ring was first answered full, while it still is.
+    tx_full_since: Option<u64>,
     /// The descriptors a link change left in the transmit ring that the part
     /// has not yet written back.
     stranded: Option<Stranded>,
@@ -1084,7 +1114,7 @@ impl<R: Registers, C: Clock, D: DmaBuffers, I: Interrupts> I219<R, C, D, I> {
             dma,
             irq,
             mac,
-            brought_up: BringUp { master_quiet, woke, reset: full, phy, delivered },
+            brought_up: BringUp { master_quiet, woke, reset: full, phy, delivered, reset_transmit_control: 0, transmit_control: 0 },
             link: Link::default(),
             opened_at: 0,
             link_up_at: None,
@@ -1094,6 +1124,7 @@ impl<R: Registers, C: Clock, D: DmaBuffers, I: Interrupts> I219<R, C, D, I> {
             tx_next: 0,
             tx_clean: 0,
             tx_wake: false,
+            tx_full_since: None,
             stranded: None,
             counters: Counters::default(),
             wire: Wire::default(),
@@ -1115,8 +1146,10 @@ impl<R: Registers, C: Clock, D: DmaBuffers, I: Interrupts> I219<R, C, D, I> {
         // transmitter.
         nic.regs.write32(regs::TXDCTL, txdctl::SUGGESTED);
         nic.regs.write32(regs::TIPG, regs::TIPG_DEFAULT);
+        nic.brought_up.reset_transmit_control = nic.regs.read32(regs::TCTL);
         nic.regs.write32(regs::TCTL, TX_CONTROL);
         nic.accepted(regs::TCTL, TX_CONTROL)?;
+        nic.brought_up.transmit_control = nic.regs.read32(regs::TCTL);
 
         // §4.6.5.1: the receiver last, "only after all other setup is
         // accomplished".
@@ -1504,7 +1537,14 @@ impl<R: Registers, C: Clock, D: DmaBuffers, I: Interrupts> I219<R, C, D, I> {
         if !self.link.is_up() {
             return 0;
         }
-        TX_RING - 1 - self.unsent()
+        let room = TX_RING - 1 - self.unsent();
+        if room > 0 {
+            if let Some(since) = self.tx_full_since.take() {
+                let waited = self.clock.nanos().saturating_sub(since);
+                self.counters.tx_full_nanos = self.counters.tx_full_nanos.saturating_add(waited);
+            }
+        }
+        room
     }
 
     /// Ask for a message when the part next writes a transmit descriptor
@@ -1533,6 +1573,17 @@ impl<R: Registers, C: Clock, D: DmaBuffers, I: Interrupts> I219<R, C, D, I> {
             return room;
         }
         self.counters.tx_full = self.counters.tx_full.saturating_add(1);
+        if self.tx_full_since.is_none() {
+            self.tx_full_since = Some(self.clock.nanos());
+        }
+        // §10.2.7.28's GPTC counts good frames transmitted; the driver's `sent`,
+        // those whose write-back it has read. One register read per full answer,
+        // GPTC alone, added up as `wire` adds it.
+        self.wire.sent = self.wire.sent.saturating_add(u64::from(self.regs.read32(regs::GPTC)));
+        let unreported = self.wire.sent.saturating_sub(u64::from(self.counters.sent));
+        self.counters.tx_unreported = self.counters.tx_unreported.saturating_add(unreported);
+        let most = u32::try_from(unreported).unwrap_or(u32::MAX);
+        self.counters.tx_unreported_max = self.counters.tx_unreported_max.max(most);
         if !self.tx_wake {
             self.regs.write32(regs::IMS, self.causes.tx_done);
             self.tx_wake = true;

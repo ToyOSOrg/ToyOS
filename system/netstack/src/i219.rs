@@ -156,7 +156,13 @@ fn granted(dev: &PciDev) -> Result<(Bar, Grant, SharedMemory, DmaRegion), Openin
 /// What a bring-up says about itself: a sentence each for what it asked the
 /// I219's PHY before its reset and what that reset did, and one for the rest.
 fn brought_up_words(brought_up: toyos_i219::BringUp) -> Vec<String> {
-    let mut words = vec![brought_up.delivered.to_string()];
+    let mut words = vec![
+        brought_up.delivered.to_string(),
+        format!(
+            "TCTL {:#010x} out of the reset and {:#010x} after the bring-up",
+            brought_up.reset_transmit_control, brought_up.transmit_control
+        ),
+    ];
     match brought_up.woke {
         Some(Ok(woke)) => words.push(format!("before the reset the PHY was asked: {woke}")),
         Some(Err(why)) => words.push(format!("the PHY was not asked before the reset: {why}")),

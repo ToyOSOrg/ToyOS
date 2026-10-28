@@ -102,9 +102,9 @@ fn bring_up_programs_what_the_initialization_sections_name() {
     );
     assert_eq!(
         nic.peek(regs::TCTL),
-        tctl::EN | tctl::PSP | tctl::CT | tctl::COLD_FULL_DUPLEX,
+        tctl::EN | tctl::PSP | tctl::CT | tctl::COLD_FULL_DUPLEX | tctl::MULR | tctl::RRTHRESH_INITIAL,
         "{}",
-        nic.because("TCTL is not §4.6.6's suggested configuration")
+        nic.because("TCTL is not §4.6.6's fields with MULR and RRTHRESH at §10.2.6.1's initial values")
     );
     assert_eq!(nic.peek(regs::TIPG), regs::TIPG_DEFAULT);
     assert_eq!(nic.peek(regs::TXDCTL), regs::txdctl::SUGGESTED);
@@ -3344,4 +3344,72 @@ fn quiesce_stops_what_a_previous_holder_left_running() {
     assert_eq!(read(crate::regs::RCTL), crate::regs::rctl::BAM);
     assert_eq!(read(crate::regs::TCTL), crate::regs::tctl::PSP);
     assert_eq!(read(crate::regs::IMC), u32::MAX);
+}
+
+/// Frames on the wire whose write-back the driver has not read yet, at each
+/// full answer: §7.2.4.2 lets the part hold a batch of write-backs, and the
+/// count is what the wire carried past what the driver reclaimed. A part that
+/// writes each back as it sends leaves none.
+#[test]
+fn a_full_ring_counts_the_frames_it_was_full_of_without_knowing() {
+    for (batched, seed) in [(true, 3u64), (true, 4), (false, 3)] {
+        let permits = Permits { batched_writeback: batched, ..Permits::default() };
+        let (nic, mut driver) = held_with_a_link(seed, Part::I219, permits);
+        let first = fill(&nic, &mut driver, 1);
+        nic.run();
+        let on_the_wire = nic.sent().len();
+        assert_eq!(on_the_wire, first.len(), "{}", nic.because("the held ring did not all leave"));
+        // Room for what was written back, refilled, so the ring is full again.
+        fill(&nic, &mut driver, 100);
+        assert_eq!(driver.wake_on_room(), 0);
+        let counters = driver.counters();
+        let unreported = (on_the_wire as u64).saturating_sub(u64::from(counters.sent));
+        assert_eq!(counters.tx_unreported, unreported, "{}", nic.because("the unreported frames were miscounted"));
+        assert_eq!(u64::from(counters.tx_unreported_max), unreported);
+        if batched {
+            assert!(unreported > 0, "{}", nic.because("seed {seed} held back no write-back, so this case reads nothing"));
+        } else {
+            assert_eq!(unreported, 0, "{}", nic.because("a part that writes each back left some unreported"));
+        }
+    }
+}
+
+/// The time a full ring waits is counted from the first full answer to the
+/// next room, whatever passes between.
+#[test]
+fn a_full_ring_counts_how_long_it_waited_for_room() {
+    let (nic, mut driver) = held_with_a_link(5, Part::I219, Permits::default());
+    fill(&nic, &mut driver, 1);
+    assert_eq!(driver.wake_on_room(), 0);
+    nic.time_passes(1_000_000);
+    // A second full answer, a millisecond in: the wait runs from the first.
+    assert_eq!(driver.wake_on_room(), 0);
+    nic.time_passes(5_000_000);
+    nic.run();
+    assert!(driver.tx_room() > 0, "{}", nic.because("the sent frames gave no room back"));
+    let waited = driver.counters().tx_full_nanos;
+    assert!((6_000_000..6_100_000).contains(&waited), "waited {waited} ns: a second full answer restarted the wait");
+    assert!(driver.tx_room() > 0);
+    assert_eq!(driver.counters().tx_full_nanos, waited, "room with no wait added time");
+}
+
+/// The bring-up leaves one `TCTL` whatever the last holder wrote: a reset that
+/// leaves the register as it was, as the T14's does, and one that resets it to
+/// §10.2.6.1's initial values, under a holder that left `MULR` set, one that
+/// left it clear, and none. Each left its transmitter stopped, as netstack's
+/// quiesce does before the bring-up.
+#[test]
+fn bring_up_sets_tctl_whatever_the_last_holder_left() {
+    let wanted = tctl::EN | tctl::PSP | tctl::CT | tctl::COLD_FULL_DUPLEX | tctl::MULR | tctl::RRTHRESH_INITIAL;
+    for reset_leaves_tctl in [true, false] {
+        for inherited in [0x3003_f0f8, 0x0003_f0f8, 0] {
+            let nic = Nic::with(7, Part::I219, Permits { reset_leaves_tctl, ..Permits::default() });
+            nic.inherit(regs::TCTL, inherited);
+            let driver = open(&nic);
+            assert_eq!(nic.peek(regs::TCTL), wanted, "{}", nic.because("the bring-up left a TCTL of the last holder's"));
+            assert_eq!(driver.brought_up().transmit_control, wanted);
+            let out_of_reset = if reset_leaves_tctl { inherited } else { tctl::PSP | tctl::MULR | tctl::RRTHRESH_INITIAL };
+            assert_eq!(driver.brought_up().reset_transmit_control, out_of_reset, "the bring-up reported another TCTL out of reset");
+        }
+    }
 }

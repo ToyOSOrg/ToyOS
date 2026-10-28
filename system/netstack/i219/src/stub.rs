@@ -107,6 +107,12 @@ pub struct Permits {
     /// moment the frame arrived, and the order inside a chunk is the
     /// hardware's.
     pub batched_writeback: bool,
+    /// What a reset leaves in `TCTL`. Off: §10.2.6.1's initial values, as §4.2
+    /// has a software reset re-read the NVM and reset the rest. On: the value
+    /// before the reset, which is what the T14 reads after it; whether its reset
+    /// keeps `TCTL` or this MAC's own reset value is that one, no reading says,
+    /// and the 82574's table does not describe the PCH's MAC.
+    pub reset_leaves_tctl: bool,
     /// §7.1.8: the head register "includes those descriptors completed but not
     /// yet stored in memory", so `RDH` may be ahead of what a driver can read.
     pub shadow_head: bool,
@@ -238,6 +244,7 @@ impl Default for Permits {
     fn default() -> Self {
         Self {
             batched_writeback: true,
+            reset_leaves_tctl: true,
             shadow_head: true,
             null_padding: true,
             spurious_interrupts: true,
@@ -777,10 +784,20 @@ impl Model {
     /// What the register file holds out of reset: the fields the documents give
     /// a value, which are the fields a driver has to carry.
     fn power_on(&mut self) {
+        let last_holders_tctl = self.get(regs::TCTL);
         for word in self.file.iter_mut() {
             *word = 0;
         }
         self.set(regs::CTRL, CTRL_RESERVED_SET);
+        let tctl = if self.permits.reset_leaves_tctl {
+            last_holders_tctl
+        } else {
+            // §10.2.6.1's initial values: `PSP`, `MULR` and `RRTHRESH` set,
+            // every other field it gives a value 0; `UNORTX` and `TXDSCMT` it
+            // gives none, and they are 0 here.
+            tctl::PSP | tctl::MULR | tctl::RRTHRESH_INITIAL
+        };
+        self.set(regs::TCTL, tctl);
         if self.permits.extcnf_carries_firmware_fields {
             self.set(regs::EXTCNF_CTRL, EXTCNF_FIRMWARE_FIELDS);
         }
@@ -2544,6 +2561,12 @@ impl Nic {
     /// [`Self::run`] says so.
     pub fn hold(&self) {
         self.0.borrow_mut().held = true;
+    }
+
+    /// One register written as a previous holder left it, before this driver
+    /// takes the function.
+    pub fn inherit(&self, reg: usize, value: u32) {
+        self.0.borrow_mut().set(reg, value);
     }
 
     /// One register, read without any of its side effects — for an assertion

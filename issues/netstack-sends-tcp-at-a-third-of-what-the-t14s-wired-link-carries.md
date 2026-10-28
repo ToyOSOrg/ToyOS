@@ -127,8 +127,50 @@ earlier sessions while Linux held 110–114. The fix is consistent with most
 of that, but not with `aeba59fb0`'s 62–65, above B's reading here. That
 part of the spread across sessions stays unexplained.
 
-The transmit setup's own lead stays open in
-`issues/the-intel-driver-writes-txdctl-and-tidv-against-the-82574-datasheets-newer-revision.md`.
+**The card sends slowly, read 2026-10-28** ([evidence `c54355277/`](https://github.com/ToyOSOrg/evidence/tree/5db2f7f5ed4e54c12fd74c8aa2368de4b4a6590a/r1/c54355277)).
+Pull request #1075 counted, at each full ring, the frames `GPTC` had on the
+wire that netstack had not seen written back: none, in either of two runs,
+while the ring sat full 10.2–10.4 s of each 15 s row. The part sent what it
+held at about 42,000 frames a second, 23.8 µs a frame against 12.3 µs of
+wire.
+
+**Measured 2026-10-28** ([evidence `f9563de4f/`](https://github.com/ToyOSOrg/evidence/tree/d6fbb4b149683056857dd8554c2c77cfbdd465ef/r2/f9563de4f)):
+`TCTL`'s `MULR` and `RRTHRESH` set, against the bring-up's whole write
+clearing both, raises the upload. One session alternated the two, four of
+each, with Linux at both ends (111 and 110 MB/s):
+
+- The bring-up left `TCTL` at `0x3003f0fa` with both fields and `0x0003f0fa`
+  without.
+- Upload p50 87, 86, 82 and 85 MB/s with them, against 58, 56, 55 and 56
+  without: faster in every pair, and over the eight runs the exact rank
+  test's one-sided p is 1/70.
+- The wire carried 870,000–912,000 frames a row with them, against
+  618,000–626,000 without. No completion was unreported at any full answer.
+- The ring still sat full 8.3–8.7 s of each 15 s row (10.3–10.6 s without),
+  and cwnd held the sender 4.1–4.5 s (2.3–2.6 s without).
+
+**Derived from the datasheet, not separated by the measurement**: which of
+the two fields the gain is. 82574 §10.2.6.1 has `MULR` set the number of
+read requests for transmit data: "When set to 0b, the 82574 submits only
+one request at a time, When set to 1b, the 82574 might submit up to four
+concurrent requests". It gives `MULR` an initial value of `1b` and
+`RRTHRESH` `01b`.
+
+**The T14's reset does not give §10.2.6.1's initial values.** §10.2.6.1
+says `MULR` "is loaded from the NVM word 0x24/0x14", and §4.2 that a
+software reset "re-reads the per-function NVM fields" and resets the bits
+normally read from the NVM to "their default hardware values". On the T14,
+`TCTL` read `0x3003f0f8` both before and after the bring-up's reset
+([evidence `19fbf239c/`](https://github.com/ToyOSOrg/evidence/tree/4cbc624ffec885040aa268ad47743ed5df94e51e/r4/19fbf239c)), `CT` and `COLD` included, where those
+values would read about `0x30000008`. Either the reset kept the register or
+this MAC's own reset value is that one: no reading separates the two, and
+the 82574's table does not describe the PCH's MAC. Either way the value the
+bring-up met was not one the driver can count on, so it now writes every
+`TCTL` field itself, `MULR` and `RRTHRESH` at §10.2.6.1's initial values.
+
+What is left, about 1.3 times short of Linux with the ring still full most
+of a row, is the next lead: the transmit descriptor control
+(`issues/the-intel-driver-writes-txdctl-and-tidv-against-the-82574-datasheets-newer-revision.md`).
 
 The clock does not separate the two systems. Each upload row's own
 readings, `mhz` just after it and `mhz_settled` before it, were about

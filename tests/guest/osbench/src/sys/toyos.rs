@@ -367,7 +367,7 @@ pub fn persistent_dir() -> Option<(String, String)> {
 /// [tcp]'s bytes, losses and the time its senders waited on each send limit, and the card's
 /// full-ring waits and missed frames. Those a card does not report are left out.
 pub fn net_counters() -> Result<Vec<(String, u64)>, String> {
-    const READ: [&str; 18] = [
+    const READ: [&str; 21] = [
         "net.tcp.sent.bytes",
         "net.tcp.retransmit.bytes",
         "net.tcp.rto",
@@ -385,7 +385,10 @@ pub fn net_counters() -> Result<Vec<(String, u64)>, String> {
         "net.transmit.full",
         "net.transmit.wake_armed",
         "net.transmit.wake_taken",
+        "net.transmit.full.ns",
+        "net.transmit.unreported",
         "net.errors.missed",
+        "net.wire.sent",
     ];
     let snap = inspect::ask(toyos_inspect::NET)?;
     Ok(READ
