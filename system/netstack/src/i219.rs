@@ -158,7 +158,10 @@ fn granted(dev: &PciDev) -> Result<(Bar, Grant, SharedMemory, DmaRegion), Openin
 fn brought_up_words(brought_up: toyos_i219::BringUp) -> Vec<String> {
     let mut words = vec![
         brought_up.delivered.to_string(),
-        format!("TCTL {:#010x} after the bring-up", brought_up.transmit_control),
+        format!(
+            "TCTL {:#010x} out of the reset and {:#010x} after the bring-up",
+            brought_up.reset_transmit_control, brought_up.transmit_control
+        ),
     ];
     match brought_up.woke {
         Some(Ok(woke)) => words.push(format!("before the reset the PHY was asked: {woke}")),

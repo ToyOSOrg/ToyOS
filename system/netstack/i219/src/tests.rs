@@ -3381,12 +3381,14 @@ fn a_full_ring_counts_how_long_it_waited_for_room() {
     let (nic, mut driver) = held_with_a_link(5, Part::I219, Permits::default());
     fill(&nic, &mut driver, 1);
     assert_eq!(driver.wake_on_room(), 0);
-    assert_eq!(driver.wake_on_room(), 0, "a second full answer starts no second wait");
+    nic.time_passes(1_000_000);
+    // A second full answer, a millisecond in: the wait runs from the first.
+    assert_eq!(driver.wake_on_room(), 0);
     nic.time_passes(5_000_000);
     nic.run();
     assert!(driver.tx_room() > 0, "{}", nic.because("the sent frames gave no room back"));
     let waited = driver.counters().tx_full_nanos;
-    assert!((5_000_000..5_100_000).contains(&waited), "waited {waited} ns");
+    assert!((6_000_000..6_100_000).contains(&waited), "waited {waited} ns: a second full answer restarted the wait");
     assert!(driver.tx_room() > 0);
     assert_eq!(driver.counters().tx_full_nanos, waited, "room with no wait added time");
 }
@@ -3401,6 +3403,12 @@ fn bring_up_keeps_what_the_part_loaded_into_tctl() {
         let driver = open(&nic);
         let tctl = nic.peek(regs::TCTL);
         assert_eq!(driver.brought_up().transmit_control, tctl, "the bring-up reported another TCTL");
+        let mulr = if nvm_sets_mulr { tctl::MULR } else { 0 };
+        assert_eq!(
+            driver.brought_up().reset_transmit_control,
+            tctl::PSP | tctl::RRTHRESH_RESET | mulr,
+            "the bring-up reported another TCTL out of reset"
+        );
         assert_eq!(tctl & tctl::MULR != 0, nvm_sets_mulr, "{}", nic.because("MULR is not the NVM's"));
         assert_eq!(tctl & tctl::RRTHRESH, tctl::RRTHRESH_RESET, "{}", nic.because("RRTHRESH is not its reset value"));
         assert_eq!(

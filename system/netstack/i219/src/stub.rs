@@ -785,8 +785,9 @@ impl Model {
             *word = 0;
         }
         self.set(regs::CTRL, CTRL_RESERVED_SET);
-        // §10.2.6.1's initial values: `PSP` and `RRTHRESH`, and `MULR` as the
-        // NVM loads it.
+        // §10.2.6.1's initial values: `PSP` and `RRTHRESH` set, `MULR` as the
+        // NVM loads it, and every other field it gives a value 0; `UNORTX` and
+        // `TXDSCMT` it gives none, and they are 0 here.
         let mulr = if self.permits.nvm_sets_mulr { tctl::MULR } else { 0 };
         self.set(regs::TCTL, tctl::PSP | tctl::RRTHRESH_RESET | mulr);
         if self.permits.extcnf_carries_firmware_fields {

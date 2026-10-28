@@ -367,7 +367,7 @@ pub fn persistent_dir() -> Option<(String, String)> {
 /// [tcp]'s bytes, losses and the time its senders waited on each send limit, and the card's
 /// full-ring waits and missed frames. Those a card does not report are left out.
 pub fn net_counters() -> Result<Vec<(String, u64)>, String> {
-    const READ: [&str; 22] = [
+    const READ: [&str; 21] = [
         "net.tcp.sent.bytes",
         "net.tcp.retransmit.bytes",
         "net.tcp.rto",
@@ -387,7 +387,6 @@ pub fn net_counters() -> Result<Vec<(String, u64)>, String> {
         "net.transmit.wake_taken",
         "net.transmit.full.ns",
         "net.transmit.unreported",
-        "net.transmit.unreported.max",
         "net.errors.missed",
         "net.wire.sent",
     ];

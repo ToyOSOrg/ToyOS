@@ -905,7 +905,9 @@ pub struct BringUp {
     pub phy: Result<phy::Phy, phy::PhyRefusal>,
     /// The message the claim was proven to deliver.
     pub delivered: Delivered,
-    /// `TCTL` as the bring-up left it, the part's loaded fields among it.
+    /// `TCTL` as the reset left it, before the bring-up wrote its fields.
+    pub reset_transmit_control: u32,
+    /// `TCTL` as the bring-up left it.
     pub transmit_control: u32,
 }
 
@@ -1109,7 +1111,7 @@ impl<R: Registers, C: Clock, D: DmaBuffers, I: Interrupts> I219<R, C, D, I> {
             dma,
             irq,
             mac,
-            brought_up: BringUp { master_quiet, woke, reset: full, phy, delivered, transmit_control: 0 },
+            brought_up: BringUp { master_quiet, woke, reset: full, phy, delivered, reset_transmit_control: 0, transmit_control: 0 },
             link: Link::default(),
             opened_at: 0,
             link_up_at: None,
@@ -1141,11 +1143,10 @@ impl<R: Registers, C: Clock, D: DmaBuffers, I: Interrupts> I219<R, C, D, I> {
         // transmitter.
         nic.regs.write32(regs::TXDCTL, txdctl::SUGGESTED);
         nic.regs.write32(regs::TIPG, regs::TIPG_DEFAULT);
-        // §4.6.6's fields, over what the part loaded for itself: written whole,
-        // `TCTL` would clear the NVM's `MULR` and the reset's `RRTHRESH`, and
-        // the part would fetch each frame's data one request at a time. §10.2.6.1
-        // allows the write: the head is the tail, nothing being published yet.
-        let tx = (nic.regs.read32(regs::TCTL) & tctl::LOADED) | TX_CONTROL;
+        // §4.6.6's fields over the part's own (`tctl::LOADED`).
+        let out_of_reset = nic.regs.read32(regs::TCTL);
+        nic.brought_up.reset_transmit_control = out_of_reset;
+        let tx = (out_of_reset & tctl::LOADED) | TX_CONTROL;
         nic.regs.write32(regs::TCTL, tx);
         nic.accepted(regs::TCTL, tx)?;
         nic.brought_up.transmit_control = nic.regs.read32(regs::TCTL);
@@ -1572,13 +1573,17 @@ impl<R: Registers, C: Clock, D: DmaBuffers, I: Interrupts> I219<R, C, D, I> {
             return room;
         }
         self.counters.tx_full = self.counters.tx_full.saturating_add(1);
-        self.tx_full_since.get_or_insert(self.clock.nanos());
-        // §10.2.7.28's GPTC counts good frames transmitted; the driver's `sent`, those
-        // whose write-back it has read. One register read per full answer.
-        let on_the_wire = self.wire().sent;
-        let unreported = on_the_wire.saturating_sub(u64::from(self.counters.sent));
+        if self.tx_full_since.is_none() {
+            self.tx_full_since = Some(self.clock.nanos());
+        }
+        // §10.2.7.28's GPTC counts good frames transmitted; the driver's `sent`,
+        // those whose write-back it has read. One register read per full answer,
+        // GPTC alone, added up as `wire` adds it.
+        self.wire.sent = self.wire.sent.saturating_add(u64::from(self.regs.read32(regs::GPTC)));
+        let unreported = self.wire.sent.saturating_sub(u64::from(self.counters.sent));
         self.counters.tx_unreported = self.counters.tx_unreported.saturating_add(unreported);
-        self.counters.tx_unreported_max = self.counters.tx_unreported_max.max(u32::try_from(unreported).unwrap_or(u32::MAX));
+        let most = u32::try_from(unreported).unwrap_or(u32::MAX);
+        self.counters.tx_unreported_max = self.counters.tx_unreported_max.max(most);
         if !self.tx_wake {
             self.regs.write32(regs::IMS, self.causes.tx_done);
             self.tx_wake = true;
