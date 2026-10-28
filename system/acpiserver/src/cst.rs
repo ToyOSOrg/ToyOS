@@ -15,9 +15,7 @@
 //!   avoidance, which ToyOS does not track; any other FFH encoding has no
 //!   document in hand. On AMD from Family 17h `MWAIT` reaches only C1: CPUID
 //!   Fn0000_0005_EDX enumerates no deeper sub-state (PPR 55922, 57896), so no
-//!   AMD FFH state deeper than C1 exists to support. Family 1Ah's second C1
-//!   sub-state (PPR 57896: EDX 21h) has no documented hint, since APM Vol. 3's
-//!   `MWAIT` defines only EAX[7:4];
+//!   AMD FFH state deeper than C1 exists to support;
 //! - a SystemIO state is a byte read of its register, handed over off Intel,
 //!   where the core traps it as a C-state request (AMD PPR 55922,
 //!   MSRC001_0073); on Intel it is a chipset's P_LVLx read (§8.1.3) no machine
@@ -28,16 +26,18 @@
 //!   those processors, which its engineers hold and no AMD document in hand
 //!   states, is that their caches stay coherent through it with no flush and
 //!   that ARB_DIS is unused. BM_STS, which §8.1.4 makes an optional input to
-//!   OSPM's C3 policy and no coherence duty, is not read: the rule says
-//!   nothing of it, and PPR 55901 Vol. 5 says Family 19h Model 11h's is "no
-//!   longer used except for server CPU". AMD's earlier families have no such
-//!   rule, and their BKDGs declare their I/O C-state type 2 (Family 16h's
-//!   52740 §2.5.3.2.3). An Intel FFH state of any type is handed over: its entry is
-//!   the vendor's native instruction, whose only OSPM duty Intel encodes is
-//!   bus-master avoidance (302223-007 Table 4, withheld above), and the
-//!   processor flushes what a C-state powers off as it enters it (SDM Vol. 3B
-//!   §20.19.6.4: data "may have been flushed to memory during the process of
-//!   entering the idle state");
+//!   OSPM's C3 policy and no coherence duty, is not read, and BM_RLD, which
+//!   OSPM "can optionally" set for C3, stays as firmware set it: the rule
+//!   says nothing of either, and PPR 55901 Vol. 5 says of Family 19h Model
+//!   11h that BM_RLD is "no longer needed" and BM_STS "no longer used except
+//!   for server CPU". AMD's earlier families have no such rule, and their
+//!   BKDGs declare their I/O C-state type 2 (Family 16h's 52740
+//!   §2.5.3.2.3). An Intel FFH state of any type is handed over: its entry
+//!   is the vendor's native instruction, whose only OSPM duty Intel encodes
+//!   is bus-master avoidance (302223-007 Table 4, withheld above), and the
+//!   processor flushes what a C-state powers off as it enters it (SDM Vol.
+//!   3B §20.19.6.4: data "may have been flushed to memory during the process
+//!   of entering the idle state");
 //! - a state `_CSD` names for software coordination (Table 8.1, SW_ALL or
 //!   SW_ANY) is withheld: ToyOS coordinates no CPU's state with another's.
 //!   HW_ALL asks nothing of OSPM.
@@ -50,9 +50,9 @@
 //! **`_LPI` is not read**, though a platform may declare both: OSPM uses it in
 //! preference to `_CST` only once it has said in `\_SB._OSC` that it supports
 //! processor containers, and never mixes the two (§8.4.3.5, §6.2.11.2), which
-//! ToyOS does not say. For x86 ACPI defines only Intel's context-loss flags
-//! (§8.4.3.3.5) and no mechanism for OS-initiated mode, so x86 stays on
-//! `_CST`; AArch64's `_LPI` is `issues/aarch64-cpus-idle-only-in-wfi.md`.
+//! ToyOS does not say. ACPI defines an x86 state's context-loss flags for
+//! Intel alone (§8.4.3.3.5), so an AMD `_LPI` state's 0 there has no defined
+//! meaning. AArch64's `_LPI` is `issues/aarch64-cpus-idle-only-in-wfi.md`.
 
 use std::collections::BTreeMap;
 

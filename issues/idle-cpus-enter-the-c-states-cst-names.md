@@ -20,8 +20,10 @@ states, and trapped port reads off Intel, of type 3 only on AMD from Family
 What remains is the exit below, read on metal.
 
 Not established for the AMD rule: whether any Zen part needs BM_STS read
-before a type-3 entry, which ToyOS does not do; only PPR 55901 Vol. 5 speaks
-to it, for Family 19h Model 11h ("no longer used except for server CPU").
+before a type-3 entry, which ToyOS does not do, or BM_RLD set, which ToyOS
+leaves as firmware set it; only PPR 55901 Vol. 5 speaks to them, for Family
+19h Model 11h (BM_STS "no longer used except for server CPU", BM_RLD "no
+longer needed").
 
 Before it, ToyOS's cores never went below C1/C1E and its package never left
 PC0, and its idle package drew 3.16 W against Linux's 1.18 to 1.57 W (#866,
@@ -60,7 +62,8 @@ lands later the deeper the state was (none at 100 µs, C2 at 1 ms, C10 at
 consistent with the cost of the caches a deep state powers off, not measured
 as that. A burst of wakes to CPUs in deep states pays their exits. The cost
 is the T14's; on the AMD the deep state lands a 1 ms sleep 27 µs sooner and
-moves nothing else.
+moves nothing else. The AMD's figures are 0x414's alone, before #1089 handed
+over 0x415, which every AMD deep period now requests.
 
 What it costs, as inference, not measured per workload:
 
@@ -69,7 +72,7 @@ What it costs, as inference, not measured per workload:
   about 70 to 90 µs later, against a 60 Hz frame's 16.7 ms.
 - **Audio**: while a stream plays, soundserver holds the exit to half its
   2.9 ms period, about 1.45 ms, which both T14 states (253 and 1048 µs) and
-  the AMD's (400 µs) are inside: so a period's wake may still pay up to
+  the AMD's (400 and 350 µs) are inside: so a period's wake may still pay up to
   1048 µs of exit on the T14, a third of the period. Measured, its worst IRQ
   lateness is not moved and no window underran (below).
 - **Normal workloads**: a server or build that wakes many sleeping threads

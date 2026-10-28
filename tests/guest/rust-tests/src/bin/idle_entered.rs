@@ -1,7 +1,7 @@
 //! Every CPU's deep idle periods across a span of an idle machine, once
 //! `/system/bin/acpiserver` has handed the kernel its processors' idle
 //! states, printed for the `idle_entered` metal row to judge
-//! (`tests/toyos.rs`). It asserts nothing: whether a CPU entered a declared
+//! (`tests/toyos.rs`). It asserts nothing: whether a CPU chose a declared
 //! state is the kernel's count to say.
 
 use std::time::{Duration, Instant};
@@ -40,12 +40,10 @@ fn main() {
     let after = round(&cap);
     let span = began.elapsed();
     for (b, a) in before.iter().zip(&after) {
-        let delta = |counter| a.get(counter).zip(b.get(counter)).map(|(a, b)| a - b);
-        let (Some(periods), Some(nanos)) = (delta(Counter::DeepIdles), delta(Counter::DeepIdleNanos)) else {
-            panic!("cpu{} carries no deep idle counters: {b:?} then {a:?}", a.cpu);
-        };
+        let periods = a.get(Counter::DeepIdles).zip(b.get(Counter::DeepIdles)).map(|(a, b)| a - b);
+        let Some(periods) = periods else { panic!("cpu{} carries no deep idle count: {b:?} then {a:?}", a.cpu) };
         println!(
-            "idle_entered: cpu{} {periods} deep idle periods for {nanos} ns of {} ns{}",
+            "idle_entered: cpu{} {periods} deep idle periods in {} ns{}",
             a.cpu,
             span.as_nanos(),
             if a.stale || b.stale { ", stale" } else { "" },

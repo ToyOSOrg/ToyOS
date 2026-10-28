@@ -30,7 +30,7 @@ pub fn counter() -> u64 {
 }
 
 /// AArch64 has no CPUID identity.
-pub fn processor_id() -> Option<([u8; 12], u32)> {
+pub fn processor_id() -> Option<crate::ProcessorId> {
     None
 }
 

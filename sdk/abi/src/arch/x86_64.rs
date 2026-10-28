@@ -38,14 +38,11 @@ pub fn counter() -> u64 {
     }
 }
 
-/// The processor's CPUID identity: leaf 0's vendor string, its EBX, EDX and
-/// ECX bytes in that order, and leaf 1's EAX, its family, model and stepping
-/// signature (Intel SDM Vol. 2A, "CPUID"; AMD APM Vol. 3, CPUID
-/// Fn0000_0001_EAX).
-pub fn processor_id() -> Option<([u8; 12], u32)> {
+/// The processor's CPUID identity.
+pub fn processor_id() -> Option<crate::ProcessorId> {
     let leaf_0 = core::arch::x86_64::__cpuid(0);
     let vendor = core::array::from_fn(|i| [leaf_0.ebx, leaf_0.edx, leaf_0.ecx][i / 4].to_le_bytes()[i % 4]);
-    Some((vendor, core::arch::x86_64::__cpuid(1).eax))
+    Some(crate::ProcessorId { vendor, signature: core::arch::x86_64::__cpuid(1).eax })
 }
 
 /// `in` and `out` from Ring 3: a port this process holds no grant for, which

@@ -1169,9 +1169,9 @@ mod tests {
     /// calls neither reserved nor NVS, is refused and keeps nothing.
     #[test]
     fn osc_commits_only_what_toyos_claims_and_what_its_load_adds_is_initialised() {
-        let (intel, amd) = (cpu::Cpu { vendor: cpu::Vendor::Intel, family: 6 }, cpu::Cpu { vendor: cpu::Vendor::Amd, family: 0x17 });
-        for (cpu, block_type, loaded) in [(intel, 0, true), (amd, 0, false), (intel, 9, false)] {
-            let intel = cpu.vendor == cpu::Vendor::Intel;
+        let (on_intel, on_amd) = (cpu::Cpu { vendor: cpu::Vendor::Intel, family: 6 }, cpu::Cpu { vendor: cpu::Vendor::Amd, family: 0x17 });
+        for (cpu, block_type, loaded) in [(on_intel, 0, true), (on_amd, 0, false), (on_intel, 9, false)] {
+            let intel = cpu == on_intel;
             let kernel = osc_machine(block_type);
             let info = AcpiInfo { rsdp: CRAFTED_RSDP, pm1_event: Block::NONE, gpe0: GPE0, flags: FIXED_POWER_BUTTON, reserved: [0; 3] };
             let mut server = Server::new(&kernel, Bytes::default(), info);
