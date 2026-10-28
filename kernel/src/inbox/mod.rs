@@ -223,7 +223,7 @@ struct RingState {
 /// One atomic word of one ring header; never `&RingHeader` — see the block above.
 fn ring_word(ring: &SharedMemObject, ring_off: u64, field_off: usize) -> &core::sync::atomic::AtomicU32 {
     let at = ring_off + field_off as u64;
-    let word = DirectMap::from_phys(ring.page(at) + at % crate::mm::PAGE_SIZE);
+    let word = DirectMap::from_phys(ring.page(at).expect("inbox: its ring is committed whole") + at % crate::mm::PAGE_SIZE);
     // SAFETY: the offset is in-bounds and 4-aligned, so inside one page of the
     // object, which outlives the borrow; `AtomicU32` is sound over memory the
     // process also writes.
