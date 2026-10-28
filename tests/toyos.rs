@@ -1414,12 +1414,14 @@ const METAL: &[(&str, metal::Metal)] = &[
         metal::Metal { arms: TESTCASES, judge: |b| usbd_serves_the_boot_stick(&b[0].kernel(), &b[0].log()) },
     ),
     (
-        // The bench's own NVMe disk, its host's partitions and the owner's
-        // unformatted ToyOS DATA, driven beside the stick by the row's class
-        // and left alone (`hostdisk::left_alone`). The T14 and the AMD bench;
-        // the metal loop's next boot of the host off that disk is the other half.
+        // The bench's own NVMe disk, driven beside the stick by the row's
+        // class: nothing on it is touched but its ToyOS DATA partition, which
+        // is left alone while it is foreign and formatted or mounted once it
+        // is designated (`hostdisk::left_alone`), and never stood in for by
+        // memory. The T14 and the AMD bench; the metal loop's next boot of the
+        // host off that disk is the other half.
         "nvme_leaves_the_benchs_disk_alone",
-        metal::Metal { arms: TESTCASES, judge: |b| common::hostdisk::left_alone(&b[0].log()).map(|_| ()) },
+        metal::Metal { arms: TESTCASES, judge: |b| common::hostdisk::left_alone(&b[0].log()).map(drop) },
     ),
     (
         // The bench's DATA partition designated from inside ToyOS, and the
@@ -4797,9 +4799,11 @@ fn a_host_disk_beside_the_stick_is_left_alone(test_config: &Path) -> Result<(), 
     console.push_str(&qemu.await_exit(by)?);
     let log = serial::Serial::named("the boot", console);
     log.must_say("vendor=8086 device=5845 prog_if=02")?;
+    // This disk's DATA is never designated: what it is judged on is that
+    // nothing writes to a disk that is not ours.
     match common::hostdisk::left_alone(&log)? {
-        4 => {}
-        named => return Err(format!("the driver named {named} partitions of a disk that has 4")),
+        (4, common::hostdisk::Data::Foreign) => {}
+        (named, data) => return Err(format!("the driver named {named} partitions of a disk that has 4, and DATA was {data:?}")),
     }
     let after = std::fs::read(qemu.nvme_image()).map_err(|e| e.to_string())?;
     let before = common::hostdisk::bytes();
