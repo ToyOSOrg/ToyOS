@@ -289,8 +289,8 @@ pub struct PowerRegisters {
 }
 
 /// The power counters through the `msr` driver's `/dev/cpu/<n>/msr`, which
-/// takes root: the package's on CPU 0, which reads them locally where the
-/// caller runs there, and each CPU's on that CPU, an IPI each.
+/// takes root: the package's on the caller's own CPU, read there without an
+/// IPI unless the scheduler moved it, and each CPU's on that CPU, an IPI each.
 pub mod power {
     use std::fs::File;
     use std::os::unix::fs::FileExt;
@@ -336,13 +336,14 @@ pub mod power {
 
     pub fn package() -> Result<Package, Refused> {
         let r = registers()?;
-        let dev = device(0)?;
-        let tsc = msr(&dev, 0, IA32_TIME_STAMP_COUNTER)?.ok_or_else(|| Refused::Failed("cpu0 read no TSC".into()))?;
+        let cpu = super::current_cpu();
+        let dev = device(cpu)?;
+        let tsc = msr(&dev, cpu, IA32_TIME_STAMP_COUNTER)?.ok_or_else(|| Refused::Failed(format!("cpu{cpu} read no TSC")))?;
         let mut residency = [None; 4];
         for (slot, at) in residency.iter_mut().zip(r.package_residency) {
-            *slot = each(&dev, 0, at)?;
+            *slot = each(&dev, cpu, at)?;
         }
-        Ok(Package { tsc, energy: msr(&dev, 0, r.energy)?, power_unit: msr(&dev, 0, r.power_unit)?, residency })
+        Ok(Package { tsc, energy: msr(&dev, cpu, r.energy)?, power_unit: msr(&dev, cpu, r.power_unit)?, residency })
     }
 
     pub fn cpus() -> Result<Vec<CpuPower>, Refused> {
