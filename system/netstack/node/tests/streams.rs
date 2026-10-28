@@ -595,7 +595,7 @@ fn a_deadline_moves_an_established_stream_with_no_opportunity_after_it() {
 #[test]
 fn a_write_larger_than_the_window_is_queued_whole_and_arrives_whole() {
     let (mut net, id, client) = established();
-    let sent = text(100_000);
+    let sent = text(toyos::net::stream::SEND_INITIAL as usize);
     assert_eq!(client.write(&sent), Ok(sent.len()), "the send ring holds all of it");
     net.node.bridge(net.now, [id]);
     net.pump();
@@ -728,7 +728,8 @@ fn room_released_rings_a_writer_over_a_full_send_ring_on_its_bell() {
         }
         net.bridge();
     }
-    assert_eq!(written, toyos::net::stream::SEND_BYTES as usize, "the ring is full");
+    // A deaf peer acknowledges nothing, so no byte is released and the ring stays as made.
+    assert_eq!(written, toyos::net::stream::SEND_INITIAL as usize, "the ring is full");
     let bell = client.bell();
     // The peer acknowledges every byte it heard of the node's.
     let heard = u32::try_from(net.far.segments.iter().map(|segment| segment.text.len()).sum::<usize>()).unwrap();
@@ -1111,4 +1112,34 @@ fn the_last_holder_leaving_is_the_streams_close() {
     net.pump();
     assert!(net.far.fin, "the last holder left");
     assert_eq!((first.dropped(), net.node.streams()), (true, 0));
+}
+
+// ---- the rings grow under load ----
+
+// A client that writes more than its send ring holds doubles the ring at each write the room
+// cannot take whole, to its place, and netstack reads the grown ring by the size the client
+// stored: the peer's stream is the client's, byte for byte.
+#[test]
+fn an_upload_larger_than_its_send_ring_grows_it_to_its_place() {
+    use toyos::net::stream::{SEND_BYTES, SEND_RING};
+    const PERIOD: usize = 251;
+    let byte = |i: usize| (i % PERIOD) as u8;
+    const WRITE: usize = 2 * SEND_BYTES as usize;
+    let pattern: Vec<u8> = (0..WRITE + PERIOD).map(byte).collect();
+    let (mut net, _, client) = established();
+    let mut offset = 0;
+    for _ in 0..1_000 {
+        if client.region.committed(SEND_RING) == SEND_BYTES as usize {
+            break;
+        }
+        match client.write(&pattern[offset % PERIOD..][..WRITE]) {
+            Ok(n) => offset += n,
+            Err(Refused::WouldBlock) => {}
+            Err(other) => panic!("{other:?}"),
+        }
+        net.bridge();
+    }
+    assert_eq!(client.region.committed(SEND_RING), SEND_BYTES as usize, "the send ring after {offset} bytes");
+    let heard = &net.far.received;
+    assert!(!heard.is_empty() && heard.iter().enumerate().all(|(i, &b)| b == byte(i)), "the peer's stream is the client's");
 }

@@ -461,9 +461,9 @@ impl Rx {
 
     /// Received text goes into `lent` from here on, everything held moved there at its offset:
     /// in-order text and out-of-order ranges, the FIN staying this side's state. The capacity
-    /// grows no further than its length. Only where [`Self::lendable`] says so.
+    /// grows no further than the most it holds, and holds what it holds now. Only where [`Self::lendable`] says so.
     pub fn lend(&mut self, lent: Box<dyn Lent>) {
-        self.max = self.max.min(lent.len());
+        self.max = self.max.min(lent.most());
         self.buf.lend(lent);
     }
 

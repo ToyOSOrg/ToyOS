@@ -102,4 +102,7 @@ pub enum Violation {
     /// This end's own cursor, as another holder of the end stored it, names no
     /// position.
     OwnCursor,
+    /// A ring's size is past its place, or names a growth further from this
+    /// end than the old ring.
+    Size,
 }

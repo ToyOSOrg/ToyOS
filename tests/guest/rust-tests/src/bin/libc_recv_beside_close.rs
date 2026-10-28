@@ -31,7 +31,7 @@ use std::io::{BufRead, BufReader, Write};
 use std::process::{Command, Stdio};
 use std::sync::atomic::{AtomicI32, Ordering};
 
-use toyos::net::stream::{Server, Words, LAYOUT, RECEIVE_RING, REGION_BYTES, SERVER_WATCH};
+use toyos::net::stream::{Server, Words, LAYOUT, RECEIVE_INITIAL, RECEIVE_RING, REGION_BYTES, SERVER_WATCH};
 use toyos::poller::Poller;
 use toyos::net::{MsgType, RespType, TcpConnectRequest, TcpConnectResponse};
 use toyos::shm::SharedMemory;
@@ -134,7 +134,7 @@ fn test(role: &str) {
     let region = SharedMemory::lent(region, REGION_BYTES).expect("a region netstack takes");
     // SAFETY: the mapping is `REGION_BYTES`, 2 MiB aligned, and its header is reached only as atomics.
     let words = unsafe { &*(region.as_ptr() as *const Words) };
-    let mut server = Server::new(words, LAYOUT);
+    let mut server = Server::new(words, LAYOUT, RECEIVE_INITIAL);
     let (receive_bell, receive) = toyos::pipe_pair().expect("the receive bell");
     let (send_bell, _send) = toyos::pipe_pair().expect("the send bell");
     let bells = [OwnedHandle::from(receive_bell), OwnedHandle::from(send_bell)];
