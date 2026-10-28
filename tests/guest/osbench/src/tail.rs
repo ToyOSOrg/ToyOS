@@ -48,14 +48,14 @@ pub fn suite() {
     #[cfg(target_os = "toyos")]
     let diag = sys::diag::open();
     #[cfg(target_os = "toyos")]
-    let (before, began) = (diag.as_ref().map(|d| d.counters()), Instant::now());
+    let before = diag.as_ref().map(crate::around::read);
 
     let late = periodic("tail.wake.periodic.60s", Duration::from_secs(60), &mut |_| {});
     print_outliers("tail.wake.periodic.60s", &late);
 
     #[cfg(target_os = "toyos")]
     if let (Some(d), Some(before)) = (diag.as_ref(), before) {
-        counters_over("tail.wake.periodic.60s", before, d, crate::ns_since(began));
+        counters_over("tail.wake.periodic.60s", before, d);
     }
 
     stolen(Duration::from_secs(10));
@@ -204,11 +204,11 @@ fn stolen(span: Duration) {
     }
 }
 
-/// What each CPU did between `before`, `ns` ago, and now ([`crate::around`]).
+/// What each CPU did between `before` and now ([`crate::around`]).
 #[cfg(target_os = "toyos")]
-fn counters_over(bench: &str, before: Result<Vec<sys::diag::CpuCounts>, String>, d: &sys::diag::Diag, ns: u64) {
-    match (before, d.counters()) {
-        (Ok(before), Ok(after)) => crate::around::cpus(&format!("{bench}.counters"), &before, &after, ns),
+fn counters_over(bench: &str, before: Result<crate::around::Reading, String>, d: &sys::diag::Diag) {
+    match (before, crate::around::read(d)) {
+        (Ok(before), Ok(after)) => crate::around::cpus(&format!("{bench}.counters"), &before, &after),
         (Err(why), _) | (_, Err(why)) => note(&format!("{bench}.counters"), &[("failed", why)]),
     }
 }
@@ -222,11 +222,11 @@ fn counters_over(bench: &str, before: Result<Vec<sys::diag::CpuCounts>, String>,
 fn diary_run(mut d: sys::diag::Diag) {
     const BENCH: &str = "tail.diag.periodic.30s";
     const SHOWN: usize = 16;
-    let (before, began) = (d.counters(), Instant::now());
+    let before = crate::around::read(&d);
     // The diary names a CPU by the kernel's index, and the sleeper's CPUs
     // are APIC ids: the counters records carry both.
     let index_of: std::collections::BTreeMap<u32, u32> =
-        before.iter().flatten().map(|c| (c.apic, c.cpu)).collect();
+        before.iter().flat_map(|r| &r.cpus).map(|c| (c.apic, c.cpu)).collect();
     let names_before = d.roster();
     d.diary();
     let mut shown = 0usize;
@@ -295,5 +295,5 @@ fn diary_run(mut d: sys::diag::Diag) {
     for ((pid, name), ns) in by_process.into_iter().filter(|(_, ns)| *ns > 0) {
         note(&format!("{BENCH}.cpu_time"), &[("pid", pid.to_string()), ("name", name), ("us", (ns / 1000).to_string())]);
     }
-    counters_over(BENCH, before, &d, crate::ns_since(began));
+    counters_over(BENCH, before, &d);
 }

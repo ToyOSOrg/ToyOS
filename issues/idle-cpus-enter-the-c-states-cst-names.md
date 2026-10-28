@@ -56,17 +56,18 @@ as that. A burst of wakes to CPUs in deep states pays their exits.
 each against its control with the deep states off, all else equal):
 
 - T14 `crunch.single` 1.10 to 1.11 times faster (deflate 60.3 to 54.5 ms,
-  Linux's 54.6 to 54.7). By APERF/MPERF over windows that matched their
-  rows (the thread busy 989 ‰ across deflate's), deflate's thread ran at
-  4.23 GHz against 3.83, every other core 99.5 to 99.9 % of the row in core
-  C7. `malloc_churn.1048576.t1`'s threads ran at 4.19 to 4.21 GHz against
-  3.79, with the cores 40 to 99 % in C7, the lower ones having run part of
-  the row.
+  Linux's 54.6 to 54.7). The clock beside both deflate and
+  `malloc_churn.1048576.t1` read 4187 to 4189 MHz in all seven boots with
+  the deep states, against 3788 to 3789 in the four A\* boots (each row's
+  `mhz`, `cpu.clock`'s reading beside it). Across deflate, every core but
+  the thread's was 99.5 to 99.9 % of the row in core C7, which counts at the
+  TSC's rate.
 - T14 `cpu.clock` at 4189 at 8 and 8 group starts of 17, the control at
   none; Linux reaches 4190 at 13. Boot, identity, energy, system and mem
   stay at 3789 even when every idle CPU waits deepest (#1073's first
   always-deepest control), so idle depth does not hold them there;
-  osbench now names what ran beside each group's clock (`<group>.cpu.clock.ran`).
+  osbench now names what ran beside each group's clock
+  (`<group>.cpu.clock.ran`).
 - AMD: no clock gap and no throughput change; the IPC cost of the first
   boots is gone with the idle choice folded into the pass's timer. The slow
   deflate is not the idle states: it came back with every idle CPU in C1,
@@ -97,9 +98,13 @@ each against its control with the deep states off, all else equal):
 **#1066's exit is unmet** where this track stands: the T14's `cpu.clock` reaches
 ratio 42 at 5 to 10 of 17 group starts against Linux's 13. Of the groups
 below it, boot, identity, energy and system are held by acpiserver's
-measured start-up work; the rest are the open question above, which two
-diagnostic boots take up next: the counters read around each group's clock,
-and the history switched off.
+measured start-up work; the rest are the open question above. Three
+diagnostic boots (#1073's `r6/`) read the counters around each group's
+clock, the same with the history switched off, and the scheduler's diary
+across it. The counters read came back as one reading twice in 13 of 17
+windows (`issues/a-counters-read-within-10-ms-of-another-returns-the-older-reading-as-new.md`),
+and switching the history off left the count inside the spread. The
+finding goes into this record with the track's next change.
 
 **Exit**: on the T14, since a KVM guest's idle is its host's: the idle
 minute's package energy, timer lateness no worse than `hlt`'s by more than

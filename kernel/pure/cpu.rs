@@ -212,13 +212,17 @@ pub fn counters(facts: &CounterFacts) -> Counters {
 /// The family 6 DisplayModels SDM Vol. 4 (325462-093) names as supporting
 /// Table 2-20, each in its section's opening (§2.11-§2.16 and §2.17), which
 /// defines `MSR_CORE_C6_RESIDENCY` (3FDH) and `MSR_CORE_C7_RESIDENCY` (3FEH)
-/// for them all. Of the tables that supersede it for these models, only
-/// Table 2-57 (06_AFH) names either address, and it defines both. AMD
-/// documents no core residency counter in the PPRs in hand.
-const CORE_RESIDENCY_MODELS: [u32; 37] = [
+/// as counting at the TSC's rate, the unit [`Counter::CoreC6`] promises.
+/// Of the tables that supersede it for these models, only Table 2-57 names
+/// either address, for 06_AFH, and counts both in units of the P1 clock,
+/// so 06_AFH is left out. AMD documents no core residency counter in the
+/// PPRs in hand.
+///
+/// [`Counter::CoreC6`]: toyos_abi::counters::Counter::CoreC6
+const CORE_RESIDENCY_MODELS: [u32; 36] = [
     0x2a, 0x2d, 0x3a, 0x3e, 0x3c, 0x45, 0x46, 0x3f, 0x3d, 0x47, 0x4f, 0x56,
     0x4e, 0x5e, 0x55, 0x8e, 0x9e, 0x66, 0xa5, 0xa6, 0x7e, 0x8c, 0x8d, 0x6a,
-    0x6c, 0x97, 0x9a, 0xba, 0xb7, 0xbf, 0x8f, 0xcf, 0xaa, 0xad, 0xae, 0xaf, 0xbd,
+    0x6c, 0x97, 0x9a, 0xba, 0xb7, 0xbf, 0x8f, 0xcf, 0xaa, 0xad, 0xae, 0xbd,
 ];
 
 fn counts_core_residency(id: &Ident) -> bool {
@@ -369,6 +373,13 @@ mod tests {
     #[test]
     fn the_t14_counts_smis_and_has_aperf_and_mperf() {
         assert_eq!(counters(&intel(T14_SIGNATURE)), Counters { aperf_mperf: true, smi: true, core_residency: true });
+    }
+
+    /// 06_AFH: Table 2-57 counts its core residency at P1, not the TSC.
+    #[test]
+    fn sierra_forest_counts_no_core_residency_in_tsc_ticks() {
+        assert!(!counters(&intel(0x000a_06f0)).core_residency);
+        assert!(counters(&intel(0x000a_06f0)).smi, "its 34H stands");
     }
 
     /// The AMD bench, Family 17h Model 60h: PPR 55922 gives it `EffFreq` and

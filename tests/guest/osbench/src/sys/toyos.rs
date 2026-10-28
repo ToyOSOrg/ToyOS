@@ -228,6 +228,9 @@ pub mod diag {
     /// names it by.
     #[derive(Clone)]
     pub struct CpuCounts {
+        /// The CPU did not answer within the read's bound: its values are the
+        /// last it published.
+        pub stale: bool,
         pub cpu: u32,
         pub apic: u32,
         /// The CPU's own counter when it read the rest (the TSC).
@@ -268,6 +271,7 @@ pub mod diag {
                 .map(|r| {
                     let r = Record::decode(r).map_err(|e| format!("a counters record did not decode: {e:?}"))?;
                     Ok(CpuCounts {
+                        stale: r.stale,
                         cpu: r.cpu,
                         apic: r.hardware_id,
                         stamp: r.get(Counter::Stamp),

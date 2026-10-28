@@ -247,72 +247,96 @@ pub mod energy {
 
 pub mod window {
     //! Whether one CPU's two counters readings describe the row they were
-    //! read around. Each reading carries the CPU's own counter as it was
-    //! taken, so the readings' window is the difference of the two, whatever
-    //! the kernel served: a read within its join interval of another is
-    //! served that read's values, which is one reading twice, or one taken
-    //! before the row began.
+    //! read around. Each reading carries the CPU's own counter as it
+    //! answered, so the readings' window is the difference of the two,
+    //! whatever the kernel served.
+    //!
+    //! The row is the span from the first read's call to the second read's
+    //! return. A CPU answers each read inside its call, so its window lies
+    //! within the row and is shorter by at most the two calls' cost, except
+    //! that a read issued within [`JOIN_NS`] of another round is served that
+    //! round, issued up to [`JOIN_NS`] before the call. A window outside
+    //! those bounds is not the row's.
 
-    /// How far the readings' window may differ from the row's: 10 %.
-    pub const SLACK_PERMILLE: u64 = 100;
+    /// The kernel's counters join interval (`kernel/src/counters.rs`'s
+    /// `JOIN`): how long before its call a read may be served a round.
+    pub const JOIN_NS: u64 = 10_000_000;
+
+    /// The row's span and what its two reads cost, in nanoseconds.
+    #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+    pub struct Span {
+        pub row_ns: u64,
+        pub reads_ns: u64,
+    }
 
     #[derive(Clone, Copy, Debug, PartialEq, Eq)]
     pub enum Refusal {
+        /// The kernel read the CPU stale: it did not answer within the
+        /// read's bound, and its values are the last it published.
+        Stale,
         /// A reading without the CPU's counter: no window can be read off it.
         NoStamp,
         /// Both readings are one: nothing was measured.
         OneReading,
-        /// The readings span `window_ns` against the row's `row_ns`.
-        NotTheRow { window_ns: u64, row_ns: u64 },
+        /// The readings span `window_ns`, outside what a row of `row_ns`
+        /// read at a cost of `reads_ns` allows.
+        NotTheRow { window_ns: u64, row_ns: u64, reads_ns: u64 },
     }
 
     impl std::fmt::Display for Refusal {
         fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
             match self {
+                Refusal::Stale => write!(f, "the kernel read this CPU stale"),
                 Refusal::NoStamp => write!(f, "a reading carries no counter"),
                 Refusal::OneReading => write!(f, "both reads were served one reading"),
-                Refusal::NotTheRow { window_ns, row_ns } => write!(
+                Refusal::NotTheRow { window_ns, row_ns, reads_ns } => write!(
                     f,
-                    "the readings span {} us against the row's {} us",
+                    "the readings span {} us against a row of {} us read in {} us",
                     window_ns / 1000,
-                    row_ns / 1000
+                    row_ns / 1000,
+                    reads_ns / 1000
                 ),
             }
         }
     }
 
-    /// The readings' window in counter ticks and nanoseconds, if it is the
-    /// row's within [`SLACK_PERMILLE`]. `to_ns` converts ticks of the CPU's
-    /// counter to nanoseconds.
+    /// The readings' window in counter ticks and nanoseconds, where it is
+    /// the row's. `to_ns` converts ticks of the CPU's counter to nanoseconds.
     pub fn of(
+        stale: bool,
         before: Option<u64>,
         after: Option<u64>,
-        row_ns: u64,
+        span: Span,
         to_ns: impl Fn(u64) -> u64,
     ) -> Result<(u64, u64), Refusal> {
+        if stale {
+            return Err(Refusal::Stale);
+        }
         let (Some(before), Some(after)) = (before, after) else { return Err(Refusal::NoStamp) };
         let ticks = after.wrapping_sub(before);
         if ticks == 0 {
             return Err(Refusal::OneReading);
         }
         let window_ns = to_ns(ticks);
-        let slack = row_ns * SLACK_PERMILLE / 1000;
-        if window_ns.abs_diff(row_ns) > slack {
-            return Err(Refusal::NotTheRow { window_ns, row_ns });
+        let shortest = span.row_ns.saturating_sub(span.reads_ns);
+        let longest = span.row_ns.saturating_add(JOIN_NS);
+        if !(shortest..=longest).contains(&window_ns) {
+            return Err(Refusal::NotTheRow { window_ns, row_ns: span.row_ns, reads_ns: span.reads_ns });
         }
         Ok((ticks, window_ns))
     }
 
-    /// `part` of the window's `ticks`, in thousandths.
+    /// `part` of the window's `ticks`, in thousandths: for a counter that
+    /// counts at the window counter's rate.
     pub fn permille(part: u64, ticks: u64) -> u64 {
         part.saturating_mul(1000) / ticks.max(1)
     }
 
-    /// The clock a CPU ran at while it ran, in MHz: APERF over MPERF of the
-    /// counter's rate, MPERF counting at that rate.
-    pub fn run_mhz(aperf: u64, mperf: u64, ticks: u64, window_ns: u64) -> Option<u64> {
-        let counter_mhz = ticks.saturating_mul(1000) / window_ns.max(1);
-        (mperf > 0).then(|| aperf.saturating_mul(counter_mhz) / mperf)
+    /// APERF over MPERF, in thousandths: the one figure SDM Vol. 3B §17.2
+    /// and AMD's APM Vol. 2 §17.3 define of the pair. Neither defines
+    /// MPERF's rate, so neither a clock nor a busy fraction is read off it.
+    pub fn aperf_mperf_permille(aperf: u64, mperf: u64) -> Option<u64> {
+        (mperf > 0).then(|| aperf.saturating_mul(1000) / mperf)
     }
 
     #[cfg(test)]
@@ -324,39 +348,49 @@ pub mod window {
             ticks / 2
         }
 
+        const ROW: Span = Span { row_ns: 1_000_000_000, reads_ns: 200_000 };
+
         #[test]
-        fn a_window_that_is_the_row_stands() {
-            assert_eq!(of(Some(1_000), Some(1_000 + 2_000_000_000), 1_000_000_000, ns), Ok((2_000_000_000, 1_000_000_000)));
-            assert_eq!(of(Some(0), Some(2_180_000_000), 1_000_000_000, ns), Ok((2_180_000_000, 1_090_000_000)), "within 10 %");
+        fn a_window_inside_the_row_by_less_than_its_reads_stands() {
+            assert_eq!(of(false, Some(1_000), Some(1_000 + 1_999_800_000), ROW, ns), Ok((1_999_800_000, 999_900_000)));
+            assert_eq!(of(false, Some(0), Some(1_999_600_000), ROW, ns), Ok((1_999_600_000, 999_800_000)), "short by the reads exactly");
         }
 
         #[test]
-        fn one_reading_served_twice_is_refused() {
-            assert_eq!(of(Some(77), Some(77), 5_000_000, ns), Err(Refusal::OneReading));
-        }
-
-        #[test]
-        fn a_reading_taken_before_a_short_row_is_refused() {
-            // A 2.5 ms row whose first read joined a reading 10 ms older.
+        fn a_before_served_from_a_joined_round_stands_within_the_join() {
+            assert_eq!(of(false, Some(0), Some(2_020_000_000), ROW, ns), Ok((2_020_000_000, 1_010_000_000)));
             assert_eq!(
-                of(Some(0), Some(25_000_000), 2_500_000, ns),
-                Err(Refusal::NotTheRow { window_ns: 12_500_000, row_ns: 2_500_000 })
+                of(false, Some(0), Some(2_020_000_002), ROW, ns),
+                Err(Refusal::NotTheRow { window_ns: 1_010_000_001, row_ns: 1_000_000_000, reads_ns: 200_000 })
             );
         }
 
         #[test]
-        fn a_missing_counter_is_refused() {
-            assert_eq!(of(None, Some(5), 5, ns), Err(Refusal::NoStamp));
+        fn a_window_shorter_than_the_row_less_its_reads_is_refused() {
+            // An `after` served a round issued inside the row.
+            assert_eq!(
+                of(false, Some(0), Some(1_900_000_000), ROW, ns),
+                Err(Refusal::NotTheRow { window_ns: 950_000_000, row_ns: 1_000_000_000, reads_ns: 200_000 })
+            );
         }
 
         #[test]
-        fn fractions_and_the_clock_are_of_the_readings_window() {
-            let (ticks, window_ns) = of(Some(0), Some(2_000_000_000), 1_000_000_000, ns).unwrap();
-            assert_eq!(permille(2_000_000_000, ticks), 1000, "running throughout");
-            assert_eq!(permille(500_000_000, ticks), 250);
-            // MPERF at the counter's 2000 MHz, APERF at 4200.
-            assert_eq!(run_mhz(4_200_000_000, 2_000_000_000, ticks, window_ns), Some(4200));
-            assert_eq!(run_mhz(5, 0, ticks, window_ns), None, "a CPU that never ran has no clock");
+        fn one_reading_served_twice_is_refused() {
+            assert_eq!(of(false, Some(77), Some(77), ROW, ns), Err(Refusal::OneReading));
+        }
+
+        #[test]
+        fn a_stale_or_unstamped_reading_is_refused() {
+            assert_eq!(of(true, Some(0), Some(2_000_000_000), ROW, ns), Err(Refusal::Stale));
+            assert_eq!(of(false, None, Some(5), ROW, ns), Err(Refusal::NoStamp));
+        }
+
+        #[test]
+        fn residency_is_a_fraction_of_the_window_and_the_pair_a_ratio() {
+            let (ticks, _) = of(false, Some(0), Some(2_000_000_000), ROW, ns).unwrap();
+            assert_eq!(permille(1_995_000_000, ticks), 997);
+            assert_eq!(aperf_mperf_permille(4_200, 2_400), Some(1750));
+            assert_eq!(aperf_mperf_permille(5, 0), None, "a CPU that never ran has no ratio");
         }
     }
 }
