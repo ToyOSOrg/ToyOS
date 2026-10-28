@@ -209,9 +209,11 @@ pub fn counters(facts: &CounterFacts) -> Counters {
     }
 }
 
-/// The family 6 DisplayModels SDM Vol. 4 names as supporting Table 2-20
-/// (§2.11-§2.17), which carries `MSR_CORE_C6_RESIDENCY` and
-/// `MSR_CORE_C7_RESIDENCY`; [`SMI_COUNT_MODELS`]' Table 2-20 run. AMD
+/// The family 6 DisplayModels SDM Vol. 4 (325462-093) names as supporting
+/// Table 2-20, each in its section's opening (§2.11-§2.16 and §2.17), which
+/// defines `MSR_CORE_C6_RESIDENCY` (3FDH) and `MSR_CORE_C7_RESIDENCY` (3FEH)
+/// for them all. Of the tables that supersede it for these models, only
+/// Table 2-57 (06_AFH) names either address, and it defines both. AMD
 /// documents no core residency counter in the PPRs in hand.
 const CORE_RESIDENCY_MODELS: [u32; 37] = [
     0x2a, 0x2d, 0x3a, 0x3e, 0x3c, 0x45, 0x46, 0x3f, 0x3d, 0x47, 0x4f, 0x56,

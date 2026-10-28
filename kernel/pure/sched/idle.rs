@@ -75,12 +75,6 @@ impl History {
         }
     }
 
-    /// The states a new declaration replaced are not its states: what was
-    /// learned of them says nothing about these.
-    pub fn forget(&mut self) {
-        *self = Self::default();
-    }
-
     /// The whole history as one word, for a CPU to keep in an atomic of its own.
     pub const fn bits(&self) -> u64 {
         u64::from_le_bytes(self.early)
@@ -96,7 +90,7 @@ impl History {
 }
 
 /// What [`choose`] picked.
-#[derive(Clone, Copy, PartialEq, Eq, Debug, Default)]
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub struct Choice {
     /// A declared state, or `None` for C1.
     pub state: Option<usize>,
@@ -112,7 +106,7 @@ pub struct Choice {
 /// What a CPU decided in its last pass before it sleeps, so the timer its
 /// choice needs is part of the pass's one timer plan ([`wake_at`]) and the
 /// wait enters what the pass chose.
-#[derive(Clone, Copy, PartialEq, Eq, Debug, Default)]
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub struct Plan {
     pub choice: Choice,
     /// The chosen state's exit, 0 for C1.
@@ -142,6 +136,18 @@ impl Plan {
     /// What ended the period that began with this plan and ended at `woke`.
     pub fn ended(&self, woke: u64) -> Ended {
         ended(&self.choice, self.deadline, self.chosen_at, woke)
+    }
+
+    /// What `history` learns from the period this plan began, ended at
+    /// `woke`. A revisit covers the residency it was armed for, however
+    /// early within [`FORESEEN_SLACK`] it fired.
+    pub fn learn(&self, history: &mut History, costs: &[Cost], woke: u64) {
+        let slept = woke.saturating_sub(self.chosen_at);
+        match self.ended(woke) {
+            Ended::Deadline => {}
+            Ended::Revisit => history.quiet(costs, slept.max(self.choice.revisit_after.unwrap_or(0))),
+            Ended::Unforeseen => history.unforeseen(costs, slept),
+        }
     }
 }
 
@@ -174,7 +180,7 @@ pub const FORESEEN_SLACK: u64 = 1_000;
 
 /// When the scheduler's own timer fires after this choice, where one is armed
 /// for `armed`: its deadline, pulled in by the chosen state's exit.
-pub fn deadline_fires(choice: &Choice, armed: Option<u64>) -> Option<u64> {
+fn deadline_fires(choice: &Choice, armed: Option<u64>) -> Option<u64> {
     armed.map(|at| at.saturating_sub(choice.wake_early_by))
 }
 
@@ -182,7 +188,7 @@ pub fn deadline_fires(choice: &Choice, armed: Option<u64>) -> Option<u64> {
 /// it, for `choice` made at `now`: the deadline pulled in by the exit, or the
 /// revisit, whichever is sooner. Never at or after `armed`, so writing it can
 /// only move the timer earlier; `None` leaves it as the scheduler armed it.
-pub fn wake_at(choice: &Choice, armed: Option<u64>, now: u64) -> Option<u64> {
+fn wake_at(choice: &Choice, armed: Option<u64>, now: u64) -> Option<u64> {
     let early = deadline_fires(choice, armed).filter(|_| choice.wake_early_by > 0);
     let revisit = choice.revisit_after.map(|after| now.saturating_add(after));
     early.into_iter().chain(revisit).min().filter(|&at| armed.is_none_or(|armed| at < armed))
@@ -191,7 +197,7 @@ pub fn wake_at(choice: &Choice, armed: Option<u64>, now: u64) -> Option<u64> {
 /// Whether a period that ended at `woke` was ended by the scheduler's own
 /// timer, firing for `fires`: what the history must not learn from, since the
 /// horizon already said it.
-pub fn foreseen(fires: Option<u64>, woke: u64) -> bool {
+fn foreseen(fires: Option<u64>, woke: u64) -> bool {
     fires.is_some_and(|fires| woke.saturating_add(FORESEEN_SLACK) >= fires)
 }
 
@@ -208,7 +214,7 @@ pub enum Ended {
 
 /// What ended an idle period chosen as `choice` at `now`, with the
 /// scheduler's timer armed for `armed`, that ended at `woke`.
-pub fn ended(choice: &Choice, armed: Option<u64>, now: u64, woke: u64) -> Ended {
+fn ended(choice: &Choice, armed: Option<u64>, now: u64, woke: u64) -> Ended {
     let revisit = choice.revisit_after.map(|after| now.saturating_add(after));
     if foreseen(deadline_fires(choice, armed), woke) {
         Ended::Deadline
@@ -337,16 +343,6 @@ mod tests {
     }
 
     #[test]
-    fn a_new_declaration_starts_with_nothing_learned() {
-        let mut h = History::default();
-        for _ in 0..WINDOW {
-            h.unforeseen(&T14, 10 * US);
-        }
-        h.forget();
-        assert_eq!(pick(&h, None, None), Some(1));
-    }
-
-    #[test]
     fn no_declared_state_is_c1() {
         assert_eq!(choose(&[], &History::default(), None, None), Choice { state: None, wake_early_by: 0, revisit_after: None });
     }
@@ -409,6 +405,19 @@ mod tests {
         let deep = Choice { state: Some(1), wake_early_by: 1048 * US, revisit_after: None };
         assert_eq!(ended(&deep, Some(10_000 * US), 0, 8952 * US), Ended::Deadline, "the early wake is the deadline's");
         assert_eq!(ended(&deep, None, 0, 9_000 * US), Ended::Unforeseen);
+    }
+
+    #[test]
+    fn a_revisit_a_tick_early_clears_the_state_it_was_armed_for() {
+        let mut h = History::default();
+        for _ in 0..WINDOW {
+            h.unforeseen(&T14, 10 * US);
+        }
+        let choice = choose(&T14, &h, None, None);
+        assert_eq!((choice.state, choice.revisit_after), (None, Some(506 * US)));
+        let plan = Plan { choice, exit: 0, declaration: 1, chosen_at: 0, deadline: None };
+        plan.learn(&mut h, &T14, 506 * US - FORESEEN_SLACK);
+        assert_eq!(pick(&h, None, None), Some(0), "C2 is admitted again, C3 still learns");
     }
 
     #[test]

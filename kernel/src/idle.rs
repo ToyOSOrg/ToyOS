@@ -188,11 +188,7 @@ pub fn wait(plan: &idle::Plan) {
     let Some(d) = d else { return };
     let costs = &d.costs[..d.len];
     let mut history = history(local, d.generation);
-    match plan.ended(woke) {
-        idle::Ended::Deadline => {}
-        idle::Ended::Revisit => history.quiet(costs, woke.saturating_sub(plan.chosen_at)),
-        idle::Ended::Unforeseen => history.unforeseen(costs, woke.saturating_sub(plan.chosen_at)),
-    }
+    plan.learn(&mut history, costs, woke);
     local.learned_under.store(d.generation, Ordering::Relaxed);
     local.history.store(history.bits(), Ordering::Relaxed);
 }

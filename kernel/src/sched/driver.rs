@@ -772,13 +772,7 @@ pub fn publish_idle_exit(nanos: u64) {
 /// Ring and kick every other CPU whose published exit exceeds `bound`, so it
 /// leaves its state and chooses again under the bound.
 pub fn wake_slower_than(bound: u64) {
-    let me = current_cpu();
-    for cpu in (0..cpus().len() as u32).map(CpuId).filter(|&cpu| cpu != me) {
-        let handle = cpus().get(cpu);
-        if handle.idle_exit() > bound && handle.poke() == Kick::Send {
-            HW.kick(cpu);
-        }
-    }
+    cpus().wake_slower_than(current_cpu(), bound, &HW);
 }
 
 pub fn current_cpu() -> CpuId {

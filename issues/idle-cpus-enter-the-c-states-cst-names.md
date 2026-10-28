@@ -61,12 +61,22 @@ each against its control with the deep states off, all else equal):
 - T14 `cpu.clock` at 4189 at 8 and 9 group starts of 17, the control at
   none; Linux reaches 4190 at 13. Boot, identity, energy, system and mem
   stay at 3789 even when every idle CPU waits deepest (#1073's first
-  always-deepest control), so three or more cores ran at those starts;
+  always-deepest control), so idle depth does not hold them there;
   osbench now names what ran beside each group's clock (`<group>.cpu.clock.ran`).
 - AMD: no clock gap and no throughput change; the IPC cost of the first
-  boots is gone with the idle choice folded into the pass's timer. A
-  thread whose SMT sibling waited in port 0x414 ran deflate 6 % slower at
-  the same clock, so a CPU beside a running sibling now waits in C1.
+  boots is gone with the idle choice folded into the pass's timer. The one
+  slow deflate is a property of the bench, not of the idle states: it came
+  back with every idle CPU in C1
+  (`issues/the-amd-benchs-deflate-runs-6-percent-slow-on-cpu-4-at-the-same-clock.md`).
+- Third boots at `f6510defd`: the T14 at 4189 at 8 and 10 group starts.
+  Boot, identity, energy and system run while acpiserver is still loading
+  its tables, about 12.2 s after power-on, and acpiserver ran for the whole
+  of each of those clock windows. At the starts of net, procs, mem, tail
+  and nvme still at 3789, the roster names nothing beside osbench for more
+  than 0.9 ms of the 5.5 ms window. Mem stays unexplained. Net, procs, tail
+  and nvme reached 4189 under the always-deepest control, so the history
+  holding idle CPUs shallow after the group before is the open hypothesis
+  there; a per-CPU state read inside the window would test it.
 
 **Exit**: on the T14, since a KVM guest's idle is its host's: the idle
 minute's package energy, timer lateness no worse than `hlt`'s by more than
