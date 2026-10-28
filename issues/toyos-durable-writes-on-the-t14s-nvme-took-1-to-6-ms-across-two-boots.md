@@ -21,10 +21,8 @@ each validation:
 No change to the NVMe driver, the block service, the file server or the
 DATA format lies between the two heads; the second rebased onto #1095's
 boot path, and both booted off the NVMe. Why one boot's durable writes cost
-six times the other's is unknown. The first followed DATA's format by less
-than a day, so the drive's own state is a candidate, an inference. The clean
-fsync's remaining 20x, a superblock write and a Flush where Linux issues
-neither, is
+six times the other's is unknown. The clean fsync's remaining 20x, a
+superblock write and a Flush where Linux's clean fsync takes 23 µs, is
 `issues/a-clean-fsync-on-data-writes-the-superblock-and-flushes-the-disk.md`.
 
 **Exit**: repeated boots on the T14 read ToyOS's `persist.write_4k_fsync`
