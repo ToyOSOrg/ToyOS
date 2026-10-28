@@ -267,7 +267,13 @@ pub fn with<R>(fd: Fd, f: impl FnOnce(Lent<'_>) -> R) -> Result<R, Error> {
     Ok(f(held.object()))
 }
 
-pub fn close(fd: Fd) -> Result<(), Error> {
+/// Close `fd`, letting its object go once no call holds it.
+///
+/// # Safety
+/// The caller owns `fd`: nothing else (an `OwnedFd`, a `File`, a stream)
+/// answers for it or uses it afterwards. As POSIX's `close` would, a close of
+/// another owner's descriptor ends the handle that owner still lends.
+pub unsafe fn close(fd: Fd) -> Result<(), Error> {
     // SAFETY: plain values.
     decode(unsafe { toyos_fd_close(fd) }).map(drop)
 }
@@ -279,7 +285,10 @@ pub fn dup(fd: Fd, floor: Fd, inheritable: bool) -> Result<Fd, Error> {
 
 /// POSIX's `dup2`: `new` on `old`'s object, after closing what `new` named;
 /// onto itself, nothing but `old` checked open.
-pub fn dup2(old: Fd, new: Fd, inheritable: bool) -> Result<Fd, Error> {
+///
+/// # Safety
+/// As [`close`]'s, for `new`.
+pub unsafe fn dup2(old: Fd, new: Fd, inheritable: bool) -> Result<Fd, Error> {
     // SAFETY: plain values.
     decode(unsafe { toyos_fd_dup2(old, new, inheritable) })
 }
@@ -287,7 +296,10 @@ pub fn dup2(old: Fd, new: Fd, inheritable: bool) -> Result<Fd, Error> {
 /// Make `fd` name `object` in place, letting go what it named: a socket
 /// that connects becomes its stream at the same number. On `BadFd` or
 /// `Full` the object is let go.
-pub fn replace(fd: Fd, object: Object) -> Result<(), Error> {
+///
+/// # Safety
+/// As [`close`]'s, for `fd`.
+pub unsafe fn replace(fd: Fd, object: Object) -> Result<(), Error> {
     // SAFETY: the owner's definition below, which takes the record's ownership.
     decode(unsafe { toyos_fd_replace(fd, object.into_record()) }).map(drop)
 }

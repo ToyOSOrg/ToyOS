@@ -24,6 +24,7 @@ use toyos_abi::syscall::{
 };
 
 use crate::fd::Kind as FdKind;
+use crate::ipc::IpcError;
 use crate::launch::{self, Launch, LaunchError, Outcome, MAX_LAUNCH_EXTRAS, MAX_LAUNCH_FDS};
 use crate::process::{Image, Process};
 use alloc::vec::Vec;
@@ -174,8 +175,9 @@ impl<'a> Spawn<'a> {
 
     /// Refuses, before anything moves, a descriptor naming a stream's own
     /// handle: a holder stays in its process, and what goes is an end of a new
-    /// one, which the caller exports. An endowment cannot be one: a stream's
-    /// handle is never an [`OwnedHandle`](crate::OwnedHandle).
+    /// one, which the caller exports. An endowment naming one, or a duplicate
+    /// of one, is the kernel's to refuse: every handle of a stream carries
+    /// `HELD_CONNECTION`, which has no `TRANSFER`.
     fn refuse_streams(&self) -> Result<(), Refused> {
         match self.fds.iter().map(|&(_, handle, _)| handle).find(|h| crate::net::stream::is_stream(*h)) {
             Some(stream) => Err(Refused::Stream(stream.raw())),
@@ -332,7 +334,9 @@ impl Independent<'_> {
             }
             Ok(Outcome::Refused) | Err(LaunchError::Sent(_)) => Err(Refused::NotStarted),
             Ok(Outcome::Gone) => Err(Refused::Syscall(SyscallError::Gone)),
-            Err(LaunchError::NotSent(_)) => Err(Refused::Invalid("the launch does not fit one frame")),
+            Err(LaunchError::NotSent(IpcError::TooLarge)) => Err(Refused::Invalid("the launch does not fit one frame")),
+            Err(LaunchError::NotSent(IpcError::Syscall(e))) => Err(Refused::Syscall(e)),
+            Err(LaunchError::NotSent(_)) => Err(Refused::NotStarted),
         }
     }
 }

@@ -10,7 +10,10 @@
 //! - **netstack's exit ends a blocked read in every holder** with `Aborted`.
 //! - **Within a process, every handle of a stream is one end**: handles given
 //!   out and taken back read on where the last read stopped; a bare `dup` is
-//!   refused by name with nothing written; a stream is no file.
+//!   refused by name with nothing written; a stream is no file; a duplicate of
+//!   a stream's handle, endowed or sent, is refused by the kernel, which moves
+//!   no handle without `TRANSFER`, where a descriptor goes as an exported
+//!   holder.
 //! - **One end, two threads**: a write on one thread completes while another
 //!   is in a read the peer has not answered, and that read then takes what
 //!   the peer publishes. `sshserver` reads each connection on one thread and
@@ -42,7 +45,7 @@ use std::os::toyos::process::CommandExt;
 use std::process::{Child, ChildStdout, Command, Stdio};
 use std::sync::atomic::Ordering;
 
-use toyos::ipc::{FrameRx, RxStep};
+use toyos::ipc::{FrameRx, IpcError, RxStep};
 use toyos::net::stream::{
     Adopt, Server, Words, ADOPT, EXPORT, EXPORTED, LAYOUT, RECEIVE_RING, REGION_BYTES, RING, SEND_RING,
     SERVER_WATCH,
@@ -52,7 +55,7 @@ use toyos::poller::{Poller, READABLE};
 use toyos::shm::SharedMemory;
 use toyos::transport::session::{Holder, Rings};
 use toyos::{namespace, port, AsHandle, Connection, OwnedHandle, Pipe};
-use toyos_abi::syscall::{self, SVC_LABEL};
+use toyos_abi::syscall::{self, SyscallError, SVC_LABEL};
 
 const SELF_PATH: &str = "/system/bin/test_rs_stream_handles";
 
@@ -96,7 +99,7 @@ fn main() {
 fn test() {
     a_holder_killed_inside_the_gate_leaves_the_parent_working();
     netstacks_exit_ends_a_blocked_read_in_every_holder();
-    shares_within_a_process();
+    shares_within_a_process_and_refuses_moves();
     refuses_a_foreign_handle_writing_nothing();
     refuses_a_stream_as_a_file();
     reads_and_writes_on_two_threads();
@@ -158,15 +161,16 @@ fn netstacks_exit_ends_a_blocked_read_in_every_holder() {
     println!("  netstack's exit: a blocked read in each holder answered ConnectionAborted");
 }
 
-/// The handles given out and taken back share one end.
-fn shares_within_a_process() {
+/// The handles given out and taken back share one end, and a duplicate of
+/// its handle is neither endowed nor sent.
+fn shares_within_a_process_and_refuses_moves() {
     let (mut child, netstack) = run("client", PEER);
     let out = BufReader::new(child.stdout.take().expect("the child's stdout"));
     let said: Vec<String> = out.lines().map(|line| line.expect("a line")).collect();
     let status = child.wait().expect("wait the client");
-    assert_eq!(said, ["shared"], "the client said otherwise");
+    assert_eq!(said, ["shared", "endow refused", "send refused"], "the client said otherwise");
     assert!(status.success(), "the client exited {status:?}");
-    println!("  given out and taken back: one end");
+    println!("  given out and taken back: one end; a duplicate of its handle endowed or sent: refused");
     hang_up_answers_the_server_watch(&netstack.holders[0].connection);
 }
 
@@ -587,7 +591,8 @@ fn reads(stream: &mut TcpStream, at: usize, n: usize) {
     assert_eq!(got, &PEER[at..at + n], "read from where the last read stopped");
 }
 
-/// A client whose stream's handle is given out three ways and taken back.
+/// A client whose stream's handle is given out three ways and taken back,
+/// then a duplicate of it endowed and sent.
 fn client() -> ! {
     let stream = connect();
     let raw = stream.into_raw_fd();
@@ -602,6 +607,30 @@ fn client() -> ! {
     drop(cloned);
     reads(&mut taken, 12, 4);
     say("shared");
+
+    // A duplicate carries the end's rights, which hold no `TRANSFER`: the
+    // kernel refuses to move it, into a child's table or into a frame. Its
+    // word reaches std as a bare kind, where the SDK's own refusals carry
+    // their reason.
+    let copy = || std::os::toyos::io::AsHandle::as_handle(&taken).try_clone_to_owned().expect("a duplicate of the stream's handle");
+    let mut command = Command::new(SELF_PATH);
+    command.arg("child").stdout(Stdio::null()).endow("stream", copy());
+    match command.spawn() {
+        Err(refused) if refused.kind() == std::io::ErrorKind::PermissionDenied && refused.get_ref().is_none() => say("endow refused"),
+        Err(other) => say(&format!("endow answered {other}")),
+        Ok(mut child) => {
+            let _ = child.wait();
+            say("endow took a duplicate of the stream's handle");
+        }
+    }
+    let (acceptor, connector) = port::create().expect("a port of the client's own");
+    let names = namespace::build().add("sink", &connector).finish().expect("its namespace");
+    let conn = names.open("sink").expect("a connection to it");
+    let _accepted = acceptor.accept().expect("its other end");
+    match conn.signal_with(1, [OwnedHandle::from(copy())]) {
+        Err(IpcError::Syscall(SyscallError::PermissionDenied)) => say("send refused"),
+        other => say(&format!("send answered {other:?}")),
+    }
     std::process::exit(0)
 }
 

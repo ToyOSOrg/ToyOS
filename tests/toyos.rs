@@ -5656,7 +5656,7 @@ fn stream_holders(test_config: &Path) -> Result<(), String> {
     for claim in [
         "a holder killed inside the gate: its hang-up came after it, and the parent wrote and read",
         "netstack's exit: a blocked read in each holder answered ConnectionAborted",
-        "given out and taken back: one end",
+        "given out and taken back: one end; a duplicate of its handle endowed or sent: refused",
         "one end, two threads: the write completes beside an unanswered read, which then takes the peer's next bytes",
         "piped children across threads: fed, read and waited for apart, and one killed beside its reader",
     ] {

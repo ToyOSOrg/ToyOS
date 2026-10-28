@@ -690,18 +690,21 @@ pub unsafe extern "C" fn popen(command: *const u8, mode: *const u8) -> *mut crat
         (Ok(theirs), Ok(ours)) => (theirs, ours),
         (theirs, ours) => {
             for fd in [theirs, ours].into_iter().flatten() {
-                let _ = toyos::fd::close(fd);
+                // SAFETY: an end installed just above, named nowhere else.
+                let _ = unsafe { toyos::fd::close(fd) };
             }
             crate::errno::set(crate::errcode::EMFILE);
             return ptr::null_mut();
         }
     };
     let started = shell(command, &[Action::Dup2 { fd: theirs as u32, newfd: child }]);
-    let _ = toyos::fd::close(theirs);
+    // SAFETY: the child's end, this function's own, which the spawn copied.
+    let _ = unsafe { toyos::fd::close(theirs) };
     let pid = match started {
         Ok(pid) => pid,
         Err(errno) => {
-            let _ = toyos::fd::close(ours);
+            // SAFETY: this function's own end, which no stream took.
+            let _ = unsafe { toyos::fd::close(ours) };
             crate::errno::set(errno);
             return ptr::null_mut();
         }
@@ -709,7 +712,8 @@ pub unsafe extern "C" fn popen(command: *const u8, mode: *const u8) -> *mut crat
     let stream = unsafe { crate::stdio::fdopen(ours, mode) };
     if stream.is_null() {
         // No stream to read the child by: its end goes, and the child is waited for.
-        let _ = toyos::fd::close(ours);
+        // SAFETY: this function's own end, which no stream took.
+        let _ = unsafe { toyos::fd::close(ours) };
         unsafe { waitpid(pid, ptr::null_mut(), 0) };
         crate::errno::set(crate::errcode::ENOMEM);
         return ptr::null_mut();

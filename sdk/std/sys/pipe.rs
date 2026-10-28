@@ -83,6 +83,7 @@ impl Pipe {
 
 impl Drop for Pipe {
     fn drop(&mut self) {
-        let _ = toyos::fd::close(self.fd);
+        // SAFETY: the pipe owns its descriptor, and nothing names it after this.
+        let _ = unsafe { toyos::fd::close(self.fd) };
     }
 }

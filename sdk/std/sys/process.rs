@@ -24,10 +24,11 @@ pub struct Command {
     stdout: Option<Stdio>,
     stderr: Option<Stdio>,
     /// The child's descriptors past its stdio, each a handle of the command's
-    /// own: a copy of the caller's, or an exported holder of its stream or
-    /// socket. A copy refused is the spawn's refusal.
+    /// own, which every spawn duplicates: a copy of the caller's, or an
+    /// exported holder of its stream or socket. A copy refused is each
+    /// spawn's refusal.
     extra_fds: Vec<(u32, io::Result<(toyos::OwnedHandle, toyos::fd::Kind)>)>,
-    /// Each moved to the child by the next spawn, or closed by its refusal.
+    /// Taken by the next spawn: moved to its child, or closed if it is refused.
     endowments: Vec<(String, toyos::OwnedHandle)>,
     provided: Vec<(String, toyos::OwnedHandle)>,
     parent: Parent,
@@ -44,7 +45,8 @@ pub struct Command {
     /// bytes the caller saw ([`Command::prepared_image`]).
     image: Option<(OsString, toyos::process::Image)>,
     /// A copy of a boot image this process holds, which the child runs
-    /// instead of any file ([`Command::boot_image`]).
+    /// instead of any file ([`Command::boot_image`]): each spawn adopts a
+    /// copy of its own.
     boot_image: Option<io::Result<toyos::OwnedHandle>>,
 }
 
@@ -56,7 +58,13 @@ enum Parent {
     Detached,
 }
 
-/// A copy of a handle the caller lends, owned by the command until a spawn.
+/// The job `endowments` puts the child in.
+fn job_of(endowments: &[(String, toyos::OwnedHandle)]) -> Option<toyos::BorrowedHandle<'_>> {
+    endowments.iter().find(|(label, _)| label == toyos::job::JOB_LABEL).map(|(_, handle)| toyos::AsHandle::as_handle(handle))
+}
+
+/// A copy of a handle the caller lends, owned by the command until it is
+/// dropped or set again.
 fn copy(handle: crate::os::toyos::io::BorrowedHandle<'_>) -> io::Result<toyos::OwnedHandle> {
     handle.try_clone_to_owned().map(|copy| copy.into_inner())
 }
@@ -241,7 +249,7 @@ impl Command {
     /// The job the child is endowed to run in, which its program image is
     /// read for: the child keeps the image as long as it runs.
     fn endowed_job(&self) -> Option<toyos::BorrowedHandle<'_>> {
-        self.endowments.iter().find(|(label, _)| label == toyos::job::JOB_LABEL).map(|(_, handle)| toyos::AsHandle::as_handle(handle))
+        job_of(&self.endowments)
     }
 
     /// Give the child `handle` under the name `label`, moved by the next spawn.
@@ -319,6 +327,10 @@ impl Command {
         default: Stdio,
         _needs_stdin: bool,
     ) -> io::Result<(Process, StdioPipes)> {
+        // Taken first: whatever refuses this spawn closes them, as the
+        // kernel's own refusal does.
+        let endowments = core::mem::take(&mut self.endowments);
+        let provided = core::mem::take(&mut self.provided);
         let prepared = self.prepared.take();
         let image = self.image.take().map(|(_, image)| image);
         let (resolved, cwd, prepared_image) = match prepared {
@@ -356,12 +368,14 @@ impl Command {
                 held.push((fd, handle, kind));
             }
         }
-        for (fd, given) in self.extra_fds.drain(..) {
-            let (handle, kind) = given?;
-            held.push((fd, handle, kind));
-        }
-        let fds: Vec<(u32, toyos::BorrowedHandle<'_>, toyos::fd::Kind)> =
+        let mut fds: Vec<(u32, toyos::BorrowedHandle<'_>, toyos::fd::Kind)> =
             held.iter().map(|(fd, h, kind)| (*fd, toyos::AsHandle::as_handle(h), *kind)).collect();
+        for (fd, given) in &self.extra_fds {
+            match given {
+                Ok((handle, kind)) => fds.push((*fd, toyos::AsHandle::as_handle(handle), *kind)),
+                Err(e) => return Err(io::Error::new(e.kind(), e.to_string())),
+            }
+        }
 
         let capture = self.env.capture();
         let env_buf = env_blob(&capture);
@@ -378,7 +392,11 @@ impl Command {
             Some(Ok(launcher)) => Some(toyos::AsHandle::as_handle(launcher)),
             Some(Err(e)) => return Err(io::Error::new(e.kind(), e.to_string())),
         };
-        let boot_image = self.boot_image.take().transpose()?;
+        let boot_image = match &self.boot_image {
+            None => None,
+            Some(Ok(image)) => Some(image.try_clone().map_err(crate::sys::to_io_error)?),
+            Some(Err(e)) => return Err(io::Error::new(e.kind(), e.to_string())),
+        };
         let image_held = prepared_image.is_some() || boot_image.is_some();
         // A helper's program on a file server is taken here as the memory
         // object its server holds it in, or read into one counted to the job
@@ -398,11 +416,11 @@ impl Command {
                 })?;
                 Some(toyos::process::Image::immutable(region))
             }
-            (None, None) if crate::sys::fs::is_served(source) => Some(crate::sys::fs::read_image(source, self.endowed_job())?),
+            (None, None) if crate::sys::fs::is_served(source) => Some(crate::sys::fs::read_image(source, job_of(&endowments))?),
             (None, None) => None,
         };
-        let (labels, endowed): (Vec<String>, Vec<toyos::OwnedHandle>) = self.endowments.drain(..).unzip();
-        let (names, provided): (Vec<String>, Vec<toyos::OwnedHandle>) = self.provided.drain(..).unzip();
+        let (labels, endowed): (Vec<String>, Vec<toyos::OwnedHandle>) = endowments.into_iter().unzip();
+        let (names, provided): (Vec<String>, Vec<toyos::OwnedHandle>) = provided.into_iter().unzip();
         let request = toyos::spawn::Spawn {
             program: launched.as_deref().unwrap_or(program),
             image: image_path,

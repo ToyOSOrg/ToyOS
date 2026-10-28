@@ -454,7 +454,8 @@ impl File {
 
 impl Drop for File {
     fn drop(&mut self) {
-        let _ = toyos::fd::close(self.0);
+        // SAFETY: the file owns its descriptor, and nothing names it after this.
+        let _ = unsafe { toyos::fd::close(self.0) };
     }
 }
 

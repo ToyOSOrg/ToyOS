@@ -371,10 +371,13 @@ impl Log {
         let held = toyos::fd::install(toyos::fd::Object::handle(copy), false, 0)
             .expect("supervisor: no descriptor for its own ring");
         for (fd, stream) in [(1, toyos::log::stdio::Stream::Out), (2, toyos::log::stdio::Stream::Err)] {
-            toyos::fd::dup2(held, fd, false).expect("supervisor: its ring would not take its own descriptor");
+            // SAFETY: the kernel's console descriptors, which nothing in this
+            // process owns: std's stdio names them by number and asks again.
+            unsafe { toyos::fd::dup2(held, fd, false) }.expect("supervisor: its ring would not take its own descriptor");
             toyos::log::stdio::forget(stream);
         }
-        toyos::fd::close(held).expect("supervisor: the ring's descriptor it just made");
+        // SAFETY: the descriptor installed above, named nowhere else.
+        unsafe { toyos::fd::close(held) }.expect("supervisor: the ring's descriptor it just made");
         let (alive, keep) = toyos::pipe_pair().expect("supervisor: no pipe to say it lives");
         // Held for the machine's life: the supervisor's end is the machine's.
         core::mem::forget(keep);

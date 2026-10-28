@@ -101,9 +101,8 @@ impl<'a> BorrowedHandle<'a> {
         Self(handle)
     }
 
-    pub(crate) fn inner(self) -> toyos::BorrowedHandle<'static> {
-        // SAFETY: crate-internal, held by its caller no longer than the borrow.
-        unsafe { toyos::BorrowedHandle::borrow_raw(self.0.raw()) }
+    pub(crate) fn inner(self) -> toyos::BorrowedHandle<'a> {
+        self.0
     }
 }
 

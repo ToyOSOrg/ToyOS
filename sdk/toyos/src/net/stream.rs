@@ -578,7 +578,7 @@ pub fn endpoints(handle: BorrowedHandle<'_>) -> Result<(([u8; 4], u16), u16), Re
 
 /// The handle a watch of `way` is made on, for reading: the holder's receive
 /// bell or its send bell.
-pub fn doorbell(handle: BorrowedHandle<'_>, way: Way) -> Result<BorrowedHandle<'static>, Refused> {
+pub fn doorbell<'a>(handle: BorrowedHandle<'a>, way: Way) -> Result<BorrowedHandle<'a>, Refused> {
     call(handle, |call| call.bells().handle(session::doorbell(way)))
 }
 
@@ -861,8 +861,10 @@ struct Held {
 impl Held {
     /// The end, its region mapped at `base`.
     fn end(&self, base: usize, peer: ([u8; 4], u16), local_port: u16) -> End {
-        let region = Mapped { handle: self.region, base, receive_bell: kept(self.receive_bell), send_bell: kept(self.send_bell) };
-        End { region: Some(region), connection: kept(self.connection), peer, local_port }
+        // SAFETY: the handles `take_up` narrowed for this end, which keeps them until its `free`.
+        let (receive_bell, send_bell, connection) = unsafe { (kept(self.receive_bell), kept(self.send_bell), kept(self.connection)) };
+        let region = Mapped { handle: self.region, base, receive_bell, send_bell };
+        End { region: Some(region), connection, peer, local_port }
     }
 }
 
@@ -962,7 +964,8 @@ pub(super) fn adopted(connection: Connection, first: Option<(&[u8], ipc::Batch)>
             (held.descriptor, end)
         }),
         None => hold_connection(connection.into_owned()).map(|(descriptor, connection)| {
-            (descriptor, End { region: None, connection: kept(connection), peer: ([0; 4], 0), local_port: 0 })
+            // SAFETY: the end's own connection, which it keeps until its `free`.
+            (descriptor, End { region: None, connection: unsafe { kept(connection) }, peer: ([0; 4], 0), local_port: 0 })
         }),
     };
     let mut table = TABLE.lock();

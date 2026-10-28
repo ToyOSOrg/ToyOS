@@ -27,11 +27,13 @@ pub(super) fn narrowed(handle: OwnedHandle, rights: Rights) -> Result<RawHandle,
     handle.as_handle().try_clone_narrowed(rights).map(OwnedHandle::into_raw).map_err(|_| NetError::Io)
 }
 
-/// A handle an end keeps, lent for a call: **an end's handles are closed only by its module's
-/// `free`, once no handle and no call reaches it**, so one is live for as long as a call is
-/// counted in.
-pub(super) fn kept<'a>(raw: RawHandle) -> BorrowedHandle<'a> {
-    // SAFETY: the invariant above.
+/// A handle an end keeps, lent for a call.
+///
+/// # Safety
+/// `raw` is one of an end's handles, which only its module's `free` closes, once no handle and
+/// no call reaches the end: it is live for as long as a call is counted in.
+pub(super) unsafe fn kept<'a>(raw: RawHandle) -> BorrowedHandle<'a> {
+    // SAFETY: the caller's.
     unsafe { BorrowedHandle::borrow_raw(raw) }
 }
 

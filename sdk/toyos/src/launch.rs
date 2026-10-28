@@ -340,20 +340,14 @@ pub fn program_path(program: &str, cwd: &str) -> String {
     }
 }
 
-/// Why a launch did not answer, and — the part that matters — whether the
-/// handles it was going to carry are still the caller's.
-///
-/// **A send consumes them.** `SYS_MESSAGE_SEND` takes them out of the sender's
-/// table, and a refused one closes them ([`Connection::send_bytes_with`]), so
-/// a caller that closed them after either would be closing handles it no
-/// longer holds — which, under the bad-handle policy, is the caller exiting. Which
-/// side owns them is therefore not a detail of the error but the whole of what
-/// the caller needs from it.
+/// Why a launch did not answer. The request's handles are consumed either
+/// way: moved to the launcher, or closed with a request that did not go.
 pub enum LaunchError {
-    /// The request did not encode. The handles are still here to close.
+    /// Nothing reached the launcher: the request does not fit one frame, or
+    /// the kernel refused its frame, as it refuses a handle without
+    /// `TRANSFER`.
     NotSent(IpcError),
-    /// The handles are gone from this process: moved to the launcher, or
-    /// closed on a refused move, and no answer came back.
+    /// The frame went, and no answer came back that this protocol reads.
     Sent(IpcError),
 }
 
@@ -385,7 +379,7 @@ pub fn launch(conn: &Connection, request: Launch<'_>) -> Result<Outcome, LaunchE
     };
     // Descriptors, then extras, then the place, then the job, as `Request` reads them.
     let handles = fds.into_iter().map(|(_, h, _)| h).chain(extras.into_iter().map(|(_, h)| h)).chain(place).chain([job]);
-    conn.send_bytes_with(MSG_LAUNCH, &buf[..len], handles).map_err(LaunchError::Sent)?;
+    conn.send_bytes_with(MSG_LAUNCH, &buf[..len], handles).map_err(LaunchError::NotSent)?;
     let header = conn.recv_header().map_err(LaunchError::Sent)?;
     match header.msg_type {
         MSG_LAUNCHED => match conn.recv_handles_exact::<1>(&header) {

@@ -4,7 +4,12 @@ use toyos_abi::syscall::SeekFrom;
 
 // Platform fd operations
 
-fn sys_close(fd: i32) { let _ = toyos::fd::close(fd); }
+/// # Safety
+/// The `FILE` closing owns `fd`.
+unsafe fn sys_close(fd: i32) {
+    // SAFETY: the caller's.
+    let _ = unsafe { toyos::fd::close(fd) };
+}
 
 fn sys_read(fd: i32, buf: &mut [u8]) -> isize {
     match files::read(fd, buf) {
@@ -321,7 +326,8 @@ pub unsafe extern "C" fn fopen(path: *const u8, mode: *const u8) -> *mut FILE {
 
     let f = super::memory::malloc(core::mem::size_of::<FILE>()) as *mut FILE;
     if f.is_null() {
-        sys_close(fd);
+        // SAFETY: the descriptor `open` answered above, which no `FILE` took.
+        unsafe { sys_close(fd) };
         return ptr::null_mut();
     }
     unsafe { ptr::write(f, new_stream(fd)); register_stream(f); }

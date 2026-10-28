@@ -154,7 +154,8 @@ pub unsafe extern "C" fn creat(path: *const u8, mode: u32) -> i32 {
 
 #[no_mangle]
 pub unsafe extern "C" fn close(raw_fd: i32) -> i32 {
-    match toyos::fd::close(raw_fd) {
+    // SAFETY: C's `close`: the caller gives up `raw_fd`.
+    match unsafe { toyos::fd::close(raw_fd) } {
         Ok(()) => 0,
         Err(e) => refuse(fd_errno(e)),
     }
@@ -323,7 +324,8 @@ pub unsafe extern "C" fn dup(raw_fd: i32) -> i32 {
 /// closing what it named.
 #[no_mangle]
 pub unsafe extern "C" fn dup2(old_fd: i32, new_fd: i32) -> i32 {
-    match toyos::fd::dup2(old_fd, new_fd, true) {
+    // SAFETY: C's `dup2`: the caller gives up what `new_fd` named.
+    match unsafe { toyos::fd::dup2(old_fd, new_fd, true) } {
         Ok(fd) => {
             // The descriptor names something else now, so the stream is asked again.
             match fd {
@@ -350,7 +352,8 @@ pub unsafe extern "C" fn pipe(pipefd: *mut i32) -> i32 {
     let write = match install(write.into(), false) {
         Ok(fd) => fd,
         Err(e) => {
-            let _ = toyos::fd::close(read);
+            // SAFETY: the descriptor installed just above, named nowhere else.
+            let _ = unsafe { toyos::fd::close(read) };
             return refuse(e);
         }
     };
@@ -680,7 +683,8 @@ pub unsafe extern "C" fn opendir(path: *const u8) -> *mut DIR {
     }
     let dir = unsafe { fdopendir(fd) };
     if dir.is_null() {
-        let _ = toyos::fd::close(fd);
+        // SAFETY: the descriptor `open` answered above, which no `DIR` took.
+        let _ = unsafe { toyos::fd::close(fd) };
     }
     dir
 }
@@ -763,7 +767,8 @@ pub unsafe extern "C" fn closedir(dir: *mut DIR) -> i32 {
     if dir.is_null() { return -1; }
     // SAFETY: a `DIR` `opendir` or `fdopendir` answered, closed once.
     let dir = unsafe { Box::from_raw(dir) };
-    toyos::fd::close(dir.fd).map_or_else(|e| refuse(fd_errno(e)), |()| 0)
+    // SAFETY: the `DIR` owns its descriptor, and goes with it.
+    unsafe { toyos::fd::close(dir.fd) }.map_or_else(|e| refuse(fd_errno(e)), |()| 0)
 }
 
 // Positions and times

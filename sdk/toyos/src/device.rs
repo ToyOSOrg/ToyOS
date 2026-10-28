@@ -250,7 +250,7 @@ impl AcpiDev {
     /// Declare one processor's idle states deeper than C1
     /// ([`syscall::acpi_idle`]).
     pub fn idle(&self, declaration: &toyos_abi::acpi::IdleDeclaration) -> Result<(), SyscallError> {
-        syscall::acpi_idle(self.as_handle(), declaration)
+        syscall::acpi_idle(self.as_handle().raw(), declaration)
     }
 }
 

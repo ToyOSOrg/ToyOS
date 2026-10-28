@@ -360,8 +360,10 @@ fn take_up(kind: Kind, connection: OwnedHandle, bell: OwnedHandle) -> Result<(Ow
     let connection = narrowed(connection, rights);
     let bell = narrowed(bell, HELD_BELL);
     let refused = match (connection, bell) {
-        (Ok(connection), Ok(bell)) => match kept(bell).try_clone_to_owned() {
-            Ok(descriptor) => return Ok((descriptor, kept(connection), kept(bell))),
+        // SAFETY: narrowed here for the end being made, which keeps them until its `free`.
+        (Ok(connection), Ok(bell)) => match unsafe { kept(bell) }.try_clone_to_owned() {
+            // SAFETY: as above.
+            Ok(descriptor) => return Ok((descriptor, unsafe { kept(connection) }, unsafe { kept(bell) })),
             Err(_) => ([Some(connection), Some(bell)], NetError::ResourceExhausted),
         },
         (connection, bell) => ([connection.ok(), bell.ok()], NetError::Io),

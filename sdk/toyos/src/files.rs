@@ -425,7 +425,8 @@ pub fn read_image_for(path: &[u8], job: Option<crate::BorrowedHandle<'_>>) -> Re
         Err(e) => Err(ImageRefused::Read(e)),
     };
     // A refused close leaves nothing this read depends on.
-    let _ = fd::close(fd);
+    // SAFETY: the descriptor this function opened, named nowhere else.
+    let _ = unsafe { fd::close(fd) };
     image
 }
 

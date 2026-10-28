@@ -85,6 +85,7 @@ fn read(path: &str, into: &mut [u8]) -> Result<usize, files::Error> {
             Err(e) => break Err(e),
         }
     };
-    let _ = toyos::fd::close(fd);
+    // SAFETY: the descriptor this function opened, named nowhere else.
+    let _ = unsafe { toyos::fd::close(fd) };
     read
 }

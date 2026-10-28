@@ -224,7 +224,9 @@ fn bind_datagram(fd: i32, entry: &SocketEntry, ip: [u8; 4], port: u16, peer: Opt
         socket::let_go(bound.handle);
         return Err(net_err_to_errno(e));
     }
-    toyos::fd::replace(fd, socket::descriptor(bound.handle)).map_err(|_| EBADF)?;
+    // SAFETY: `fd` names a socket entry, libc's own object, which its
+    // netstack socket replaces at the number C keeps using.
+    unsafe { toyos::fd::replace(fd, socket::descriptor(bound.handle)) }.map_err(|_| EBADF)?;
     toyos::fd::hold(fd).map_err(|_| EBADF)
 }
 
@@ -313,7 +315,9 @@ pub unsafe extern "C" fn connect(fd: i32, addr: *const Sockaddr, addrlen: Sockle
             };
             // The descriptor names the stream from here on; the entry goes once
             // this call's hold does.
-            match toyos::fd::replace(fd, stream::descriptor(connected.handle)) {
+            // SAFETY: `fd` names a socket entry, libc's own object, which its
+            // stream replaces at the number C keeps using.
+            match unsafe { toyos::fd::replace(fd, stream::descriptor(connected.handle)) } {
                 Ok(()) => 0,
                 Err(_) => { set_errno(EBADF); -1 }
             }
@@ -344,7 +348,9 @@ pub unsafe extern "C" fn bind(fd: i32, addr: *const Sockaddr, addrlen: SocklenT)
     let bound = match entry.kind {
         SocketKind::Tcp => socket::listen(ip, port, TcpOptions::new(entry.nodelay))
             .map_err(net_err_to_errno)
-            .and_then(|bound| toyos::fd::replace(fd, socket::descriptor(bound.handle)).map_err(|_| EBADF)),
+            // SAFETY: `fd` names a socket entry, libc's own object, which its
+            // listener replaces at the number C keeps using.
+            .and_then(|bound| unsafe { toyos::fd::replace(fd, socket::descriptor(bound.handle)) }.map_err(|_| EBADF)),
         SocketKind::Udp => bind_datagram(fd, &entry, ip, port, None).map(drop),
     };
     match bound {
