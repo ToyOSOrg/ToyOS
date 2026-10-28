@@ -31,12 +31,28 @@ pub fn settled() -> Census {
     }
 }
 
-/// The census once no kind has grown since `before`.
+/// Paces between two lines naming what a wait is still waiting on.
+const SAY_EVERY: u32 = 100;
+
+/// The census once no kind has grown since `before`. A wait past
+/// [`SAY_EVERY`] paces names the kinds still grown, again whenever they
+/// change, so a wait the harness ceiling ends says what it was waiting on.
 pub fn released_to(before: &Census) -> Census {
+    let mut paces = 0u32;
+    let mut said = String::new();
     loop {
         let now = Census::now();
-        if now.grown_since(before).next().is_none() {
+        let grown: Vec<String> = now.grown_since(before).map(|(kind, was, is)| format!("{kind:?} {was} -> {is}")).collect();
+        if grown.is_empty() {
             return now;
+        }
+        paces += 1;
+        if paces % SAY_EVERY == 0 {
+            let line = grown.join(", ");
+            if line != said {
+                println!("census_wait: after {paces} paces, still grown since the first reading: {line}");
+                said = line;
+            }
         }
         std::thread::sleep(PACE);
     }
