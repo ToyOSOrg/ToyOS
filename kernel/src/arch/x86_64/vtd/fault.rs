@@ -134,23 +134,7 @@ fn drain(index: usize, regs: Mmio, records: u64, count: u32) -> usize {
     let mut seen = 0usize;
     for i in 0..count {
         let record = records + i as u64 * 16;
-        let high = regs.read_u64(record + 8);
-        if high & (1u64 << 63) == 0 {
-            continue;
-        }
-        let stream = StreamId::pci(
-            (high >> 8) as u8,
-            ((high >> 3) & 0x1F) as u8,
-            (high & 0x7) as u8,
-        );
-        let reason = ((high >> 32) & 0xFF) as u8;
-        let fault = Fault {
-            who: Who::Function(stream),
-            address: regs.read_u64(record) & !0xFFF,
-            access: if high & (1u64 << 62) != 0 { Access::Read } else { Access::Write },
-            reason,
-            name: reason_name(reason),
-        };
+        let Some(fault) = read_record(regs, record) else { continue };
         let halts = policy::report(index, &UNITS[index].faults, fault);
         clear_record(regs, record);
         if halts {
@@ -161,8 +145,95 @@ fn drain(index: usize, regs: Mmio, records: u64, count: u32) -> usize {
     seen
 }
 
+/// The fault recording register at `record`, if its `F` bit is set.
+fn read_record(regs: Mmio, record: u64) -> Option<Fault> {
+    let high = regs.read_u64(record + 8);
+    if high & (1u64 << 63) == 0 {
+        return None;
+    }
+    let stream = StreamId::pci((high >> 8) as u8, ((high >> 3) & 0x1F) as u8, (high & 0x7) as u8);
+    let reason = ((high >> 32) & 0xFF) as u8;
+    Some(Fault {
+        who: Who::Function(stream),
+        address: regs.read_u64(record) & !0xFFF,
+        access: if high & (1u64 << 62) != 0 { Access::Read } else { Access::Write },
+        reason,
+        name: reason_name(reason),
+    })
+}
+
 fn clear_record(regs: Mmio, record: u64) {
     regs.write_u32(record + 12, RECORD_FAULT);
+}
+
+/// `FECTL.IM`: the unit records faults but raises no event for them.
+#[cfg(feature = "boot-actuators")]
+const FECTL_MASK: u32 = 1 << 31;
+
+/// Every armed unit's fault event masked, or unmasked once every record and
+/// status bit is cleared: [`crate::actuator::iommu_handover_cycles`] reads the
+/// records itself while it holds them, rather than [`service`] ending the
+/// machine on the first.
+#[cfg(feature = "boot-actuators")]
+pub(super) fn hold(held: bool) {
+    for unit in &UNITS {
+        let phys = unit.regs.load(Ordering::Acquire);
+        if phys == 0 {
+            continue;
+        }
+        let regs = window(phys);
+        if held {
+            regs.write_u32(FECTL_REG, FECTL_MASK);
+        } else {
+            let (records, count) = (unit.records.load(Ordering::Relaxed), unit.count.load(Ordering::Relaxed));
+            for i in 0..count {
+                clear_record(regs, records + i as u64 * 16);
+            }
+            regs.write_u32(FSTS_REG, regs.read_u32(FSTS_REG) & FSTS_WRITE_ONE_TO_CLEAR);
+            regs.write_u32(FECTL_REG, 0);
+        }
+    }
+}
+
+/// The index the unit whose registers are `regs` was armed under.
+#[cfg(feature = "boot-actuators")]
+pub(super) fn index_of(regs: Mmio) -> Option<usize> {
+    let phys = DirectMap::phys_of(regs.addr() as *const u8);
+    UNITS.iter().position(|unit| unit.regs.load(Ordering::Acquire) == phys)
+}
+
+/// One record a held unit took.
+#[cfg(feature = "boot-actuators")]
+pub(super) struct Held {
+    pub unit: usize,
+    pub fault: Fault,
+    /// `FSTS.PFO`: faults arrived with every record full, and are lost.
+    pub overflowed: bool,
+}
+
+/// Every record the held units took since the last call, each cleared.
+#[cfg(feature = "boot-actuators")]
+pub(super) fn take_held(mut each: impl FnMut(Held)) {
+    for (index, unit) in UNITS.iter().enumerate() {
+        let phys = unit.regs.load(Ordering::Acquire);
+        if phys == 0 {
+            continue;
+        }
+        let regs = window(phys);
+        let status = regs.read_u32(FSTS_REG);
+        if status & (FSTS_PENDING | FSTS_OVERFLOW) == 0 {
+            continue;
+        }
+        let (records, count) = (unit.records.load(Ordering::Relaxed), unit.count.load(Ordering::Relaxed));
+        for i in 0..count {
+            let record = records + i as u64 * 16;
+            if let Some(fault) = read_record(regs, record) {
+                clear_record(regs, record);
+                each(Held { unit: index, fault, overflowed: status & FSTS_OVERFLOW != 0 });
+            }
+        }
+        regs.write_u32(FSTS_REG, status & FSTS_WRITE_ONE_TO_CLEAR);
+    }
 }
 
 // Fault reasons by the condition VT-d 5.20's Table 30 (legacy mode) and

@@ -109,6 +109,14 @@ actuators! {
     /// `iommu_firmware_left` and `amdvi_firmware_left`.
     iommu_firmware_left = "iommu-firmware-left";
 
+    /// Once every VT-d unit is programmed, move each between its root and a
+    /// copy of it hundreds of times, alternately with translation going off
+    /// and staying on, and count the fault records each way. Judged by
+    /// `iommu_handover_cycles`.
+    // A VT-d unit's alone, so AArch64 builds an accessor it never reads.
+    #[allow(dead_code)]
+    iommu_handover_cycles = "iommu-handover-cycles";
+
     /// QEMU's two `iommu-testdev` asked three things of the AMD-Vi unit:
     /// one on a domain of its own writes where it maps, the other on the
     /// identity domain writes to memory, then where that domain maps

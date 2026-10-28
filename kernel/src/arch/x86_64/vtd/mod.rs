@@ -8,6 +8,8 @@
 //! cannot use leaves the unit switched off rather than halting, logged by
 //! register value rather than a bare "unsupported".
 
+#[cfg(feature = "boot-actuators")]
+mod cycles;
 pub mod dmar;
 pub mod domain;
 pub mod fault;
@@ -48,6 +50,9 @@ const FEUADDR_REG: u64 = 0x44;
 const IQH_REG: u64 = 0x80;
 const IQT_REG: u64 = 0x88;
 const IQA_REG: u64 = 0x90;
+
+/// `RTADDR_REG.TTM`, bits 11:10: `00` is legacy mode, the only one this kernel writes.
+const TRANSLATION_TABLE_MODE: u64 = 0b11 << 10;
 
 /// `GCMD` bits; `GSTS` confirms each at the same bit position.
 const TRANSLATION_ENABLE: u32 = 1 << 31;
@@ -155,6 +160,10 @@ pub fn init(rsdp_addr: u64, devices: &[PciDevice], windows: Option<&[RootBridgeW
     // meets them; nothing where no declaration is held.
     let mut reserved: Option<Vec<(u64, u64)>> = windows
         .map(|w| w.iter().map(|w| (w.base, w.end())).chain([super::iommu_unit::INTERRUPT_RANGE]).collect());
+    // Cleared by the first region this kernel's root does not translate as
+    // firmware must have: one outside the identity domain, or one naming a
+    // device no context entry is written for.
+    let mut regions_identity = true;
     for structure in dmar.structures() {
         match structure {
             Ok(Structure::Drhd(drhd)) => {
@@ -205,6 +214,7 @@ pub fn init(rsdp_addr: u64, devices: &[PciDevice], windows: Option<&[RootBridgeW
                     reserved.push((base, limit.saturating_add(1)));
                 }
                 describe_scopes("rmrr", regions, rmrr.scopes());
+                regions_identity &= held && rmrr.scopes().all(|scope| enumerated(devices, scope));
                 regions += 1;
                 held_regions += usize::from(held);
             }
@@ -234,13 +244,48 @@ pub fn init(rsdp_addr: u64, devices: &[PciDevice], windows: Option<&[RootBridgeW
 
     domain::avoid(reserved);
     let remap = remappable(&ready, units, dmar.flags);
+    let in_flight = in_flight(dmar.flags, regions_identity);
     // One identity-domain table set per address width: units may disagree on
     // `CAP.SAGAW`, and a shared set would be programmed at the wrong depth for one.
     let mut domains: [Option<Table>; 2] = [None, None];
     for (unit, plan) in ready {
-        enable(unit, plan, devices, &mut domains, remap);
+        enable(unit, plan, devices, &mut domains, remap, in_flight);
+    }
+    #[cfg(feature = "boot-actuators")]
+    if crate::actuator::iommu_handover_cycles() {
+        cycles::run(devices);
     }
     true
+}
+
+/// Whether an RMRR scope names a function this kernel writes a context entry for.
+fn enumerated(devices: &[PciDevice], scope: Result<Scope, Malformed>) -> bool {
+    let Ok(Some(stream)) = scope.map(|s| s.stream_id()) else { return false };
+    devices.iter().any(|d| StreamId::pci(d.bus, d.dev, d.func) == stream)
+}
+
+/// What a unit firmware left translating may have in flight when this kernel's
+/// root replaces firmware's.
+#[derive(Clone, Copy)]
+enum InFlight {
+    /// Only what this kernel's root translates as firmware's must: firmware
+    /// declares `DMA_CTRL_PLATFORM_OPT_IN` (§8.1), so the DMA it leaves running
+    /// reaches only its RMRRs, which §3.16 has it map identity and read-write,
+    /// and the identity domain does too for every device they name. §6.6 then
+    /// allows the switch with translation on.
+    Identical,
+    /// Anything, for the reason given.
+    Unknown(&'static str),
+}
+
+fn in_flight(flags: u8, regions_identity: bool) -> InFlight {
+    if flags & dmar::FLAG_DMA_CTRL_OPT_IN == 0 {
+        InFlight::Unknown("firmware does not declare its DMA confined to its reserved regions")
+    } else if !regions_identity {
+        InFlight::Unknown("a reserved region is one this kernel's root does not translate as firmware must")
+    } else {
+        InFlight::Identical
+    }
 }
 
 /// Whether every interrupt source may be moved to the remappable format, and
@@ -303,27 +348,30 @@ struct Unit {
     caps: Capabilities,
 }
 
-impl Unit {
-    /// Turn one `GCMD` field on or off by §11.4.4.1's recipe — every other
-    /// field as `GSTS` reports it — and wait for `GSTS` to agree.
-    fn command(&self, bit: u32, on: bool, what: &str) {
-        let status = self.regs.read_u32(GSTS_REG) & PERSISTENT;
-        self.regs.write_u32(GCMD_REG, if on { status | bit } else { status & !bit });
-        let state = if on { "" } else { " off" };
-        self.wait(what, state, || (self.regs.read_u32(GSTS_REG) & bit != 0) == on);
-    }
+/// Turn one `GCMD` field on or off by §11.4.4.1's recipe — every other field
+/// as `GSTS` reports it — and wait for `GSTS` to agree.
+fn command(index: usize, regs: Mmio, bit: u32, on: bool, what: &str) {
+    let status = regs.read_u32(GSTS_REG) & PERSISTENT;
+    regs.write_u32(GCMD_REG, if on { status | bit } else { status & !bit });
+    let state = if on { "" } else { " off" };
+    wait(index, regs, what, state, || (regs.read_u32(GSTS_REG) & bit != 0) == on);
+}
 
-    fn wait(&self, what: &str, state: &str, done: impl Fn() -> bool) {
-        let deadline = crate::clock::nanos_since_boot() + COMMAND_TIMEOUT.nanos();
-        while !done() {
-            assert!(
-                crate::clock::nanos_since_boot() < deadline,
-                "iommu: unit{} never reported {what}{state}, GSTS={:#010x}",
-                self.index,
-                self.regs.read_u32(GSTS_REG)
-            );
-            core::hint::spin_loop();
-        }
+fn wait(index: usize, regs: Mmio, what: &str, state: &str, done: impl Fn() -> bool) {
+    let deadline = crate::clock::nanos_since_boot() + COMMAND_TIMEOUT.nanos();
+    while !done() {
+        assert!(
+            crate::clock::nanos_since_boot() < deadline,
+            "iommu: unit{index} never reported {what}{state}, GSTS={:#010x}",
+            regs.read_u32(GSTS_REG)
+        );
+        core::hint::spin_loop();
+    }
+}
+
+impl Unit {
+    fn command(&self, bit: u32, on: bool, what: &str) {
+        command(self.index, self.regs, bit, on, what);
     }
 
     /// [`crate::actuator::iommu_firmware_left`]: the state [`Self::hand_over`]
@@ -357,17 +405,44 @@ impl Unit {
         }
     }
 
-    /// Every field of [`FIRMWARE_LEFT`] that is on, off.
-    fn hand_over(&self) {
+    /// Every field of [`FIRMWARE_LEFT`] that is on, off, except translation
+    /// through a legacy-mode root while `in_flight` is [`InFlight::Identical`]:
+    /// [`enable`] then moves the unit onto this kernel's root under translation,
+    /// as §6.6 allows (`RTADDR_REG.RTA` may change while `TES` is set, §11.4.5).
+    fn hand_over(&self, in_flight: InFlight) {
         for (bit, what) in FIRMWARE_LEFT {
             if self.regs.read_u32(GSTS_REG) & bit == 0 {
+                continue;
+            }
+            if bit == TRANSLATION_ENABLE {
+                let legacy = self.regs.read_u64(RTADDR_REG) & TRANSLATION_TABLE_MODE == 0;
+                match in_flight {
+                    InFlight::Identical if legacy => {
+                        log!(
+                            "iommu: unit{} was handed over with translation on; it stays on while \
+                             this kernel's root replaces firmware's",
+                            self.index
+                        );
+                        continue;
+                    }
+                    InFlight::Identical => log!(
+                        "iommu: unit{} was handed over with translation on; it goes off first: its \
+                         root table is not in legacy mode",
+                        self.index
+                    ),
+                    InFlight::Unknown(why) => log!(
+                        "iommu: unit{} was handed over with translation on; it goes off first: {why}",
+                        self.index
+                    ),
+                }
+                self.command(bit, false, what);
                 continue;
             }
             log!("iommu: unit{} was handed over with {what} on; it goes off first", self.index);
             if bit == QUEUED_INVALIDATION_ENABLE {
                 // §6.5.2: a queue is switched off only once it is empty and its
                 // last descriptor was a wait, which only firmware could have sent.
-                self.wait("its invalidation queue", " empty", || {
+                wait(self.index, self.regs, "its invalidation queue", " empty", || {
                     self.regs.read_u64(IQH_REG) == self.regs.read_u64(IQT_REG)
                 });
             }
@@ -488,15 +563,16 @@ fn plan(unit: &Unit) -> Option<Plan> {
     Some(Plan { width, records })
 }
 
-/// Programs the unit in its own order — queue, root pointer, interrupt remap
-/// pointer, global invalidation, then `TE` — each confirmed in `GSTS` before
-/// the next.
+/// Programs the unit in its own order — queue, root pointer and the global
+/// invalidation §6.6 owes it, interrupt remap pointer, then `TE` — each
+/// confirmed in `GSTS` before the next.
 fn enable(
     unit: Unit,
     plan: Plan,
     devices: &[PciDevice],
     domains: &mut [Option<Table>; 2],
     remap: Option<bool>,
+    in_flight: InFlight,
 ) {
     let index = unit.index;
     let Plan { width, records } = plan;
@@ -516,11 +592,11 @@ fn enable(
     }
     let root = identity_root(&mut TABLES.lock(), devices, domain, width);
 
-    // After the tables are built, so a unit firmware left translating passes DMA
-    // untranslated only while it is programmed
+    // After the tables are built, so a unit whose translation goes off passes
+    // DMA untranslated only while it is programmed
     // (`issues/a-unit-left-translating-passes-dma-untranslated-while-programmed.md`),
     // and before the queue is pointed, which §6.5.2 does only with it off.
-    unit.hand_over();
+    unit.hand_over(in_flight);
     let mut queue = Queue::new(&mut TABLES.lock(), unit.regs);
     // Outside the `TABLES` lock: `interrupt::arm` takes its own lock and
     // then that one, and the order this subsystem holds is the reverse.
@@ -532,12 +608,14 @@ fn enable(
     unit.command(QUEUED_INVALIDATION_ENABLE, true, "queued invalidation");
     unit.regs.write_u64(RTADDR_REG, root.phys());
     unit.command(SET_ROOT_TABLE_POINTER, true, "the root table pointer");
+    // At once on a unit still translating: until it completes, its walks may
+    // mix firmware's cached entries with this root's (§6.6).
+    queue.invalidate_all(unit.regs);
     if let Some(irta) = irta {
         unit.regs.write_u64(interrupt::IRTA_REG, irta);
         unit.command(interrupt::SET_TABLE_POINTER, true, "the interrupt remap table pointer");
         queue.invalidate_interrupts(unit.regs);
     }
-    queue.invalidate_all(unit.regs);
 
     unit.command(TRANSLATION_ENABLE, true, "translation");
     if remap.is_some() {

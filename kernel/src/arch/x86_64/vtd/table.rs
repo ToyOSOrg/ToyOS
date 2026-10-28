@@ -368,3 +368,85 @@ const _: () = {
     assert!(displaced.domain == KERNEL_DOMAIN && displaced.requester == 0x00F8);
     assert!(new.0 == 0x5000 | PRESENT && new.1 == (u16::MAX as u64) << 8 | 1);
 };
+
+/// A second root over the same context entries as `root`: every root and
+/// context entry copied, every domain shared, so the two translate alike.
+#[cfg(feature = "boot-actuators")]
+pub fn copy_root(tables: &mut Tables, root: Table) -> Table {
+    let copy = tables.alloc();
+    for bus in 0..TABLE_BYTES / 16 {
+        let (lo, hi) = root.read_pair(bus);
+        if lo & PRESENT == 0 {
+            continue;
+        }
+        let context = Table { phys: lo & ADDR_MASK };
+        let copied = tables.alloc();
+        for devfn in 0..TABLE_BYTES / 16 {
+            let (lo, hi) = context.read_pair(devfn);
+            if lo & PRESENT != 0 {
+                copied.write_pair(devfn, lo, hi);
+            }
+        }
+        copy.write_pair(bus, (lo & !ADDR_MASK) | copied.phys, hi);
+    }
+    copy
+}
+
+/// What a legacy-mode walk from `root` reads for `stream` at `at`, every
+/// entry fetched from memory rather than this CPU's cache: the root entry,
+/// both halves of the context entry, then each second-level entry down to
+/// the first that is a leaf or has neither `R` nor `W`.
+#[cfg(feature = "boot-actuators")]
+pub struct Walk {
+    entries: [u64; 8],
+    read: usize,
+}
+
+#[cfg(feature = "boot-actuators")]
+pub fn walk(root: Table, stream: StreamId, at: u64) -> Walk {
+    let mut walk = Walk { entries: [0; 8], read: 0 };
+    let mut push = |entry: u64| {
+        walk.entries[walk.read] = entry;
+        walk.read += 1;
+        entry
+    };
+    let fetch = |table: Table, index: usize| {
+        flush(table.slot(index).addr() as usize);
+        table.read(index)
+    };
+    let root_entry = push(fetch(root, stream.bus() as usize * 2));
+    if root_entry & PRESENT == 0 {
+        return walk;
+    }
+    let context = Table { phys: root_entry & ADDR_MASK };
+    let index = stream.devfn() as usize * 2;
+    let (lo, hi) = (push(fetch(context, index)), push(fetch(context, index + 1)));
+    if lo & PRESENT == 0 {
+        return walk;
+    }
+    let mut table = Table { phys: lo & ADDR_MASK };
+    let mut level = (hi & 0x7) + 2;
+    while level >= 1 {
+        let entry = push(fetch(table, ((at >> (12 + 9 * (level - 1))) & 0x1FF) as usize));
+        if entry & (SL_READ | SL_WRITE) == 0 || level == 1 || entry & SL_LARGE != 0 {
+            break;
+        }
+        table = Table { phys: entry & ADDR_MASK };
+        level -= 1;
+    }
+    walk
+}
+
+#[cfg(feature = "boot-actuators")]
+impl core::fmt::Display for Walk {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        f.write_str("[")?;
+        for (i, entry) in self.entries[..self.read].iter().enumerate() {
+            if i > 0 {
+                f.write_str(" ")?;
+            }
+            write!(f, "{entry:#x}")?;
+        }
+        f.write_str("]")
+    }
+}

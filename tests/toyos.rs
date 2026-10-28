@@ -482,6 +482,9 @@ const MACHINE_TESTS: &[&str] = &[
     // DMA it lets through are no host test's, and the AMD bench is staged by
     // hand rather than by CI.
     "amdvi_firmware_left",
+    // A VT-d unit left translating where the DMAR declares nothing in flight:
+    // the T14's declares it, so only QEMU's unit takes this hand-over.
+    "vtd_firmware_left",
     // A translating AMD-Vi unit's refusal, recorded and read: a kernel-owned
     // record halts the machine, so no metal row reaches it, and only QEMU's
     // `iommu-testdev` aims a DMA where no domain maps.
@@ -1302,6 +1305,14 @@ const METAL: &[(&str, metal::Metal)] = &[
         "iommu_firmware_left",
         metal::Metal { arms: SELFTESTS, judge: |b| iommu_firmware_left(b[0].kernel().text()) },
     ),
+    (
+        // Each VT-d unit taken between two roots that translate alike, by
+        // translation going off and by a switch under it, with whatever DMA
+        // firmware left running going on through it: the count of faults each
+        // way. A measurement, so a named pass alone runs it.
+        "iommu_handover_cycles",
+        metal::Metal { arms: HANDOVER_CYCLES, judge: |b| iommu_handover_cycles(b[0].kernel().text()) },
+    ),
     // ---- a claimed function at the unit, on tests/images/testcases.toml ----
     (
         // Claimed, given back and claimed again: both claims name one
@@ -1805,6 +1816,19 @@ const SELFTEST_PARAMS: &[&str] = &[
     "sysret-ss-probe",
     "iommu-firmware-left",
 ];
+
+/// Its own boot: it holds every unit's fault events for its eight seconds,
+/// so a fault the shared boot's tests stage would be counted here instead.
+const HANDOVER_CYCLES: &[metal::Arm] = &[metal::Arm {
+    features: ACTUATOR_KERNEL,
+    named_only: true,
+    ..metal::once(
+        "iommu-cycles",
+        "tests/images/testcases.toml",
+        &["iommu-firmware-left", "iommu-handover-cycles"],
+        &[],
+    )
+}];
 
 const SELFTESTS: &[metal::Arm] = &[metal::Arm {
     features: ACTUATOR_KERNEL,
@@ -4425,6 +4449,7 @@ fn run_machine_test(name: &str, test_config: &Path) -> Result<(), String> {
             common::iommu::the_kernel_tells_a_bypassing_console_physical_addresses()
         }
         "amdvi_firmware_left" => common::iommu::amdvi_firmware_left(test_config),
+        "vtd_firmware_left" => common::iommu::vtd_firmware_left(test_config),
         "amdvi_selftest" => common::iommu::amdvi_selftest(test_config),
         "nested_nmi_is_loud" => faults::nested_nmi_is_loud(test_config),
         "kernel_wx_leaf_is_refused" => faults::kernel_wx_leaf_is_refused(test_config, qemu::Profile::Metal),
@@ -5977,11 +6002,15 @@ fn sysret_ss(log: &str) -> Result<(), String> {
 }
 
 /// Every unit this kernel went on to program, and every AMD-Vi unit it
-/// switched off, said it was handed over with what the actuator left on.
+/// switched off, said it was handed over with what the actuator left on; and
+/// where firmware declares its DMA confined to reserved regions this kernel's
+/// root translates alike, as the T14's does, every VT-d unit kept translating.
 ///
 /// An AMD-Vi unit's lines are on the boot stick only because the switch-off
 /// let the stick's DMA through the unit the actuator left blocking it.
 fn iommu_firmware_left(log: &str) -> Result<(), String> {
+        let declared = log.contains(" dma_ctrl_opt_in=y")
+            && !log.lines().any(|l| l.contains("iommu: rmrr") && (l.contains(" OUTSIDE the identity domain") || l.contains("bridge walk")));
         let mut units = 0;
         for line in log.lines().filter(|l| l.contains(" translating gsts=")) {
             let unit = line
@@ -6005,6 +6034,12 @@ fn iommu_firmware_left(log: &str) -> Result<(), String> {
                          the state the actuator left was never switched off by the hand-over:\n{log}"
                     ));
                 }
+            }
+            if declared && !log.contains(&format!("iommu: {unit} was handed over with translation on; it stays on")) {
+                return Err(format!(
+                    "firmware declares its DMA confined to reserved regions this kernel's root \
+                     translates alike, and {unit} still took translation off:\n{log}"
+                ));
             }
             units += 1;
         }
@@ -6031,11 +6066,27 @@ fn iommu_firmware_left(log: &str) -> Result<(), String> {
             return Err(format!("no unit was programmed or switched off, so nothing was handed over:\n{log}"));
         }
         let passed = log.matches("handed over with compatibility-format pass-through on").count();
+        let kept = log.matches("handed over with translation on; it stays on").count();
         eprintln!(
-            "  [iommu-firmware-left] {units} unit(s) switched off what they were handed over with; \
-             {passed} of them reported compatibility format passed"
+            "  [iommu-firmware-left] {units} unit(s) switched off what they were handed over with, \
+             {kept} of them keeping translation on; {passed} of them reported compatibility format passed"
         );
         Ok(())
+}
+
+/// Both kinds of cycle ran to their count; the fault lines and the counts are
+/// the measurement, printed rather than judged.
+fn iommu_handover_cycles(log: &str) -> Result<(), String> {
+    let lines: Vec<&str> = log.lines().filter(|l| l.contains("iommu-handover-cycles: ")).collect();
+    for kind in ["off-on", "switch"] {
+        if !lines.iter().any(|l| l.contains(&format!("iommu-handover-cycles: {kind} ")) && l.contains(" with a fault")) {
+            return Err(format!("the {kind} cycles never reported their count:\n{log}"));
+        }
+    }
+    for line in lines {
+        eprintln!("  [iommu-handover-cycles] {}", line.split("iommu-handover-cycles: ").nth(1).unwrap_or(line));
+    }
+    Ok(())
 }
 
 /// The machine's kernel thread is hosted.
