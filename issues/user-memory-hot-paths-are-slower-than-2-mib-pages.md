@@ -38,6 +38,8 @@ did; the T14's numbers are below:
     (`UserTables::leaf_table`); cause not found. Accepted as a measured
     tradeoff by the coordinator on PR #1055, under the owner's delegation
     of implementation tradeoffs (2026-10-23), against about 380 ns saved per page touched in order.
+    That row now faults every 4 KiB (PR #1079, so both systems fault the
+    same bytes), so no osbench row measures a lone fault any more.
   - **Spawn.** `proc.spawn_wait_loop.100` rose 2.3% at `a75abd3f6` and is
     within 1.5% at `6d826e313`.
 - **Frees.** A clear walks the 64 futex buckets once per table of leaves that

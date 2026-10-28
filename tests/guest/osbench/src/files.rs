@@ -103,8 +103,7 @@ fn page_at(i: usize, pages: usize) -> u64 {
 }
 
 /// Every benchmark under `target`, each line naming what served it and its
-/// medium. Each
-/// one's comment is its warm-up and repetitions.
+/// medium. Each one's comment is its warm-up and repetitions.
 pub fn suite(target: &Target) {
     condition(&format!("fs.{}.served_by", target.name), &target.served_by);
     #[cfg(target_os = "linux")]

@@ -31,7 +31,9 @@
 //!
 //! A system's runs on one machine are one configuration ([`SETUP`]): runs that
 //! disagree on it are refused, since their median would mix two, and each
-//! machine's table states what each system's runs were taken under.
+//! machine's table states what each system's runs were taken under. What a
+//! system chooses afresh at each boot ([`PER_RUN`]) is part of that system as
+//! booted: it is stated run by run and never refused.
 
 use std::collections::BTreeMap;
 use std::fmt::Write as _;
@@ -275,9 +277,9 @@ pub fn better(unit: &str) -> Option<Better> {
 const PATHS: [(&str, &str, usize); 2] = [("lan.", "lan.peer_link", 2), ("internet.", "internet.link", 1)];
 
 /// The conditions every run of one system on one machine must share: the
-/// kernel, the CPU's frequency request and the clock every timestamp is read
-/// from, and what serves each filesystem the `fs` and `persist` rows use.
-pub const SETUP: [&str; 14] = [
+/// kernel, the CPU's frequency request, and what serves each filesystem the
+/// `fs` and `persist` rows use.
+pub const SETUP: [&str; 13] = [
     "kernel",
     "cpufreq_driver",
     "governor",
@@ -287,12 +289,30 @@ pub const SETUP: [&str; 14] = [
     "boost",
     "intel_no_turbo",
     "platform_profile",
-    "clocksource",
     "smt_active",
     "fs.mem.served_by",
     "fs.served.served_by",
     "persist.served_by",
 ];
+
+/// The conditions a system chooses at each boot, stated per run: the clock
+/// every timestamp is read from, which Linux's watchdog can move off the TSC
+/// in one boot and not the next.
+pub const PER_RUN: [&str; 1] = ["clocksource"];
+
+/// `os`'s [`PER_RUN`] conditions, each as `key=<run 1's>,<run 2's>...` in the
+/// runs' order, `absent` for a run that names none.
+fn per_run(runs: &[&Run], os: Os) -> Vec<String> {
+    let runs: Vec<&&Run> = runs.iter().filter(|r| r.os == os).collect();
+    PER_RUN
+        .iter()
+        .filter(|key| runs.iter().any(|r| r.conds.contains_key(**key)))
+        .map(|key| {
+            let said: Vec<&str> = runs.iter().map(|r| r.conds.get(*key).map_or("absent", String::as_str)).collect();
+            format!("{key}={}", said.join(","))
+        })
+        .collect()
+}
 
 /// `os`'s setup on these runs, as `key=value` in [`SETUP`]'s order, or the
 /// first key its runs disagree on.
@@ -345,6 +365,10 @@ pub fn compare(runs: &[Run]) -> Result<String, String> {
             if !said.is_empty() {
                 writeln!(out, "{} setup: {}.\n", os.name(), said.join(", ")).unwrap();
             }
+            let each = per_run(&runs, os);
+            if !each.is_empty() {
+                writeln!(out, "{} per run: {}.\n", os.name(), each.join(", ")).unwrap();
+            }
         }
         writeln!(out, "| bench | unit | Linux p50s | Linux median | Linux range | ToyOS p50s | ToyOS median | ToyOS range | ToyOS/Linux | p | verdict |").unwrap();
         writeln!(out, "|---|---|---|---|---|---|---|---|---|---|---|").unwrap();
@@ -372,7 +396,7 @@ fn compare_one(runs: &[&Run], name: &str) -> String {
     let mut fell: BTreeMap<Os, usize> = BTreeMap::new();
     let mut unsettled_runs: BTreeMap<Os, usize> = BTreeMap::new();
     let mut settled: BTreeMap<Os, Vec<u64>> = BTreeMap::new();
-    let mut media: BTreeMap<Os, std::collections::BTreeSet<String>> = BTreeMap::new();
+    let mut media: BTreeMap<Os, std::collections::BTreeSet<Option<String>>> = BTreeMap::new();
     let mut not: BTreeMap<Os, Vec<String>> = BTreeMap::new();
     for run in runs {
         match run.benches.get(name) {
@@ -384,7 +408,7 @@ fn compare_one(runs: &[&Run], name: &str) -> String {
                 *fell.entry(run.os).or_default() += usize::from(*clock_fell);
                 *unsettled_runs.entry(run.os).or_default() += usize::from(*unsettled);
                 settled.entry(run.os).or_default().extend(mhz.filter(|_| !*unsettled));
-                media.entry(run.os).or_default().extend(medium.clone());
+                media.entry(run.os).or_default().insert(medium.clone());
             }
             Some(Outcome::Not { kind, why }) => not.entry(run.os).or_default().push(format!("{kind}: {why}")),
             None => not.entry(run.os).or_default().push("absent".into()),
@@ -402,10 +426,15 @@ fn compare_one(runs: &[&Run], name: &str) -> String {
     };
     let [lp, lm, lr] = side(Os::Linux);
     let [tp, tm, tr] = side(Os::Toyos);
-    let all_media: std::collections::BTreeSet<&String> = media.values().flatten().collect();
+    // A side that names no medium is a medium of its own beside one that does.
+    let all_media: std::collections::BTreeSet<&Option<String>> = media.values().flatten().collect();
+    let differ = all_media.len() > 1 && all_media.iter().any(|m| m.is_some());
     let (ratio, p, verdict) = match (values.get(&Os::Linux), values.get(&Os::Toyos)) {
-        (Some(_), Some(_)) if all_media.len() > 1 => {
-            let named = |os: Os| media.get(&os).map_or("unnamed".to_string(), |m| m.iter().cloned().collect::<Vec<_>>().join("+"));
+        (Some(_), Some(_)) if differ => {
+            let named = |os: Os| {
+                let said = media.get(&os).into_iter().flatten().map(|m| m.as_deref().unwrap_or("unnamed"));
+                said.collect::<Vec<_>>().join("+")
+            };
             ("-".into(), "-".into(), format!("the media differ: Linux {}, ToyOS {}", named(Os::Linux), named(Os::Toyos)))
         }
         (Some(l), Some(t)) => {
@@ -673,6 +702,9 @@ mod tests {
         runs.push(fsync("linux", 69, "sata"));
         runs.extend([70, 71, 72, 73].iter().map(|v| fsync("toyos", *v, "nvme")));
         assert!(compare(&runs).unwrap().contains("the media differ: Linux nvme+sata, ToyOS nvme"), "nor one system's runs on two");
+        let mut runs: Vec<Run> = [67, 68, 66, 67].iter().map(|v| fsync("linux", *v, "nvme")).collect();
+        runs.extend([70, 71, 72, 73].iter().map(|v| run("toyos", &[&format!("bench=persist.fsync_clean unit=ns n=200 min=1 p50={v} max=1 mean=1")])));
+        assert!(compare(&runs).unwrap().contains("the media differ: Linux nvme, ToyOS unnamed"), "nor a named medium and none");
     }
 
     #[test]
@@ -685,9 +717,20 @@ mod tests {
         assert!(why.contains("the Linux runs disagree on governor: performance*16 / schedutil*16"), "{why}");
         let one = [under("linux", "performance*16"), under("linux", "performance*16")];
         let table = compare(&one).unwrap();
-        assert!(table.contains("Linux setup: governor=performance*16, clocksource=tsc."), "{table}");
+        assert!(table.contains("Linux setup: governor=performance*16."), "{table}");
         let absent = [under("linux", "performance*16"), run("linux", &["bench=time.now unit=ps n=15 min=1 p50=14 max=1 mean=1"])];
         assert!(compare(&absent).unwrap_err().contains("disagree on governor: absent / performance*16"));
+    }
+
+    #[test]
+    fn a_clocksource_each_boot_chose_is_stated_per_run_and_never_refused() {
+        let booted = |clocksource: &str| {
+            run("linux", &[&format!("cond clocksource={clocksource}"), "bench=time.now unit=ps n=15 min=1 p50=14 max=1 mean=1"])
+        };
+        let runs = [booted("hpet"), booted("tsc"), booted("hpet"), run("toyos", &["bench=time.now unit=ps n=15 min=1 p50=9 max=1 mean=1"])];
+        let table = compare(&runs).unwrap();
+        assert!(table.contains("Linux per run: clocksource=hpet,tsc,hpet."), "{table}");
+        assert!(!table.contains("ToyOS per run"), "{table}");
     }
 
     #[test]

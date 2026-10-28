@@ -49,12 +49,16 @@ and the C library beneath it are each system's own.
 - **Compare** every run of the bench in one call:
   `cargo run -p osbench-compare -- <linux runs> <toyos kernel.logs>`. It
   refuses runs of one system that disagree on their setup (`SETUP`) and
-  states each system's. Each row's verdict says whether the runs resolve a
+  states each system's, and what each run's boot chose (`PER_RUN`, the
+  clocksource) run by run. Each row's verdict says whether the runs resolve a
   difference. Each p is its row's alone: with no difference anywhere, about
   2.9% of rows resolve by chance, a few in a table this size.
 - **The clocks are told beside each verdict.** No program reads the
   package's limit state or temperature on ToyOS, so the clock is what both
-  systems report. A settled row carries the clock settled before it
+  systems report. A clock reading is the difference between a short add
+  chain's time and a long one's, so what reading the time costs is no part
+  of it; a settle holds once every reading for 50 ms agrees within 3%. A
+  settled row carries the clock settled before it
   (`mhz_settled`) and after it (`mhz_after`). The verdict counts per system
   the runs where the second is under nine tenths of the first. A power or
   heat limit reached inside the row is the likely cause, an inference: the
@@ -71,27 +75,22 @@ and the C library beneath it are each system's own.
 clocksource, its own checks. What it does on that machine is ordinary OS
 behaviour and part of what is compared. A comparison names its
 configuration in its setup lines, and `osbench-compare` refuses to mix two.
+What a boot chooses for itself, the clocksource, belongs to Linux as booted:
+each run states its own, and runs that differ are compared together.
 
 **A matched request is a controlled experiment, labelled as one.** It asks
 the CPU's frequency control for what ToyOS's kernel asks of the same CPU, so
 the clock is the hardware's answer to one request on both systems. It
 answers a different question from the baseline, and never replaces it:
 
-- **The T14** (i5-1135G7, `intel_pstate` with HWP). ToyOS asks for HWP's
-  lowest to highest performance at EPP 0x80 (`kernel/pure/cpu.rs`). Ubuntu's
-  `powersave` governor makes HWP's request with the EPP its
-  `energy_performance_preference` holds, so the experiment writes 0x80 there
-  before each Linux run, which `intel_pstate` takes as a number:
-
-  ```text
-  echo 128 | sudo tee /sys/devices/system/cpu/cpufreq/policy*/energy_performance_preference
-  ```
-
-  Check `governor=powersave*8` and `intel_no_turbo=0`; `epp` reads 128 by
-  the name the driver gives it, `balance_performance` where that is 0x80 on
-  this CPU. Linux's lowest request is `cpuinfo_min_freq`, which need not be
-  HWP's lowest, ToyOS's: that reaches a CPU waking from idle, not a settled
-  row.
+- **The T14** (i5-1135G7, `intel_pstate` with HWP) has no experiment: its
+  baseline already makes ToyOS's request but for the floor. ToyOS asks for
+  HWP's lowest to highest performance at EPP 0x80 (`kernel/pure/cpu.rs`).
+  The baseline's `IA32_HWP_REQUEST` read `0x80002a04` on every CPU
+  (2026-10-28): EPP 0x80 (`epp=balance_performance*8`), highest 0x2a, and
+  lowest 4 where ToyOS asks 1. The floor reaches a CPU waking from idle, not
+  a settled row. Check `governor=powersave*8`, `epp=balance_performance*8`
+  and `intel_no_turbo=0`.
 - **The AMD bench** (Ryzen 7 4800U, `acpi-cpufreq`). ToyOS writes no P-state
   or boost register, so the firmware's P0 and Core Performance Boost stand.
   Linux's `performance` governor asks for that. The experiment sets it
@@ -114,25 +113,26 @@ user's manager delegates the `cpu` controller. Check
 thread-fair, and the pair compares nothing.
 
 **The clock.** Every timestamp is read from the TSC on ToyOS. The AMD
-bench's Linux keeps time on the HPET in most boots: its clocksource watchdog
-distrusts the TSC early in boot. Each `Instant::now` there is then a
-syscall's cost, 1.21 µs against the T14's 14 ns, carried by every
-per-operation timing. That is its baseline, stated by the `clocksource`
-setup line. In 30 boots' kernel logs (2026-10-28) the watchdog fired in 18:
-- in 13, Linux's refined calibration read 1799.54 to 1799.61 MHz, some
+bench's Linux chooses its clocksource at each boot. Its watchdog moves it
+off the TSC when, early in boot, the TSC and the HPET disagree. On the HPET
+each `Instant::now` is a syscall's cost, 1.21 µs against the T14's 14 ns,
+carried by every per-operation timing of that run. In 30 boots' kernel logs
+(2026-10-28) the watchdog fired in 17:
+- in 12, Linux's refined calibration read 1799.54 to 1799.61 MHz, some
   1,630 ppm above the TSC's 1796.62 MHz;
 - in 5, with a right calibration, the TSC ran some 1.7 ms ahead of the HPET
   over half a second, a step whose cause is unknown.
 
-At runtime neither shows: across 16 CPUs and idle gaps up to 1 s, no CPU's
-TSC read behind another's and no step exceeded the 1.2 µs of a read. A
-Linux forced onto the TSC (`tsc=reliable`) has those checks switched off,
-so it is no baseline.
+In a 13th boot the calibration read 1799.565 MHz and the watchdog let it
+stand, so that Linux kept a TSC clock some 1,630 ppm fast for the whole
+boot. Its `clocksource=tsc` reads the same as a right one's. The 12 others
+kept the TSC on a right calibration. Each run's clocksource is part of the
+Linux it measured, so the compare states it per run.
 
-**On the T14 the baseline already makes ToyOS's request but for its
-floor.** Its Linux's `IA32_HWP_REQUEST` read `0x80002a04` on every CPU
-(2026-10-28): EPP 0x80 and highest 0x2a as ToyOS asks, and lowest 4 where
-ToyOS asks 1.
+At runtime neither fault shows: across 16 CPUs and idle gaps up to 1 s, no
+CPU's TSC read behind another's and no step exceeded the 1.2 µs of a read.
+A Linux forced onto the TSC (`tsc=reliable`) has those checks switched off,
+so it is no baseline.
 
 ## The disk is not yet one disk
 

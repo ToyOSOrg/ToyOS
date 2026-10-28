@@ -6,8 +6,9 @@
 //! Both systems fault each anonymous page in on its first touch: ToyOS in
 //! 4 KiB pages always, Linux in 4 KiB pages where huge pages are refused and
 //! in 2 MiB pages where they are asked for and given. `first_touch` faults in
-//! the same bytes either way, and `map_touch_unmap` is the whole cost. The allocator is each system's own: ToyOS std's dlmalloc
-//! under one lock, Linux's static musl malloc.
+//! the same bytes either way, and `map_touch_unmap` is the whole cost. The
+//! allocator is each system's own: ToyOS std's dlmalloc under one lock,
+//! Linux's static musl malloc.
 
 use std::alloc::{alloc, dealloc, realloc, Layout};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
