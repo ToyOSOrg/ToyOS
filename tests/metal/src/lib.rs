@@ -128,7 +128,7 @@ pub fn said_refusal(stderr: &str) -> Option<String> {
 pub enum Refusal {
     /// No `HOME`, so the default key path would be rooted at `/`.
     NoHome,
-    /// The disk did not answer what [`Identity::parse`] reads.
+    /// The disk's identity did not read, or is not a removable disk's.
     Identity { field: &'static str, want: String, got: String },
     /// The disk named to be adopted as scratch is not one this loop erases.
     Adopt(String),
