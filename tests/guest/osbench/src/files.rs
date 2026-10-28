@@ -1,7 +1,8 @@
 //! Files, through std's `fs` on both systems: the same operations under a
 //! filesystem each keeps in memory (`mem`) and under the one on the bench's
 //! disk (`disk`, which `storage` runs beside its durable writes). Nothing here
-//! asks for durability, so on the disk these are the cached path.
+//! asks for durability: each system's cache and write-back decide what reaches
+//! the disk, and that is part of what the rows measure.
 //!
 //! `mem` is Linux's `/dev/shm` through the VFS, and ToyOS's `/tmp`, which the
 //! kernel serves through syscalls. `disk` is each system's
@@ -92,8 +93,7 @@ fn page_at(i: usize, pages: usize) -> u64 {
 }
 
 /// Every benchmark under `target`, each line naming what served it and its
-/// medium. Each
-/// one's comment is its warm-up and repetitions.
+/// medium. Each one's comment is its warm-up and repetitions.
 pub fn suite(target: &Target) {
     condition(&format!("fs.{}.served_by", target.name), &target.served_by);
     #[cfg(target_os = "linux")]

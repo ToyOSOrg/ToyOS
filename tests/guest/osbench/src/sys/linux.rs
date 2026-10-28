@@ -496,8 +496,9 @@ pub mod ipc {
 }
 
 /// The mount holding `path`, off `/proc/self/mountinfo`: its filesystem
-/// type, its source and its options.
-fn mount_of(path: &str) -> Option<(String, String, String)> {
+/// type, its source, its mount's options and its superblock's, where a
+/// filesystem's own options such as ext4's `nobarrier` are.
+fn mount_of(path: &str) -> Option<(String, String, String, String)> {
     let mounts = fs::read_to_string("/proc/self/mountinfo").ok()?;
     // `id parent major:minor root mountpoint options... - fstype source superoptions`
     mounts
@@ -509,16 +510,18 @@ fn mount_of(path: &str) -> Option<(String, String, String)> {
             let options = left.next()?;
             let mut right = right.split_whitespace();
             let (fstype, source) = (right.next()?, right.next()?);
+            let superblock = right.next().unwrap_or_default();
             let under = path == point || point == "/" || path.starts_with(&format!("{point}/"));
-            under.then(|| (point.len(), (fstype.to_string(), source.to_string(), options.to_string())))
+            under.then(|| (point.len(), (fstype.to_string(), source.to_string(), options.to_string(), superblock.to_string())))
         })
         .max_by_key(|(len, _)| *len)
         .map(|(_, mount)| mount)
 }
 
-/// How `dir` is mounted, for a condition: its filesystem and options.
+/// How `dir` is mounted, for a condition: its filesystem, its mount's
+/// options and its superblock's.
 pub fn mount_options(dir: &str) -> String {
-    mount_of(dir).map_or_else(|| "unknown".into(), |(fstype, _, options)| format!("{fstype} {options}"))
+    mount_of(dir).map_or_else(|| "unknown".into(), |(fstype, _, options, superblock)| format!("{fstype} {options} {superblock}"))
 }
 
 /// What a transfer row reports of the stack beneath it: the kernel's TCP segment counts and
@@ -631,13 +634,15 @@ fn tcp_info(stream: &std::net::TcpStream) -> Result<Reading, String> {
     ])
 }
 
-/// The runner's home, the filesystem and disk model holding it, as `ext4,
-/// NVMe disk, model <model>`, and the disk's kind as a medium: `nvme`, `usb`,
+/// The runner's home, the filesystem and disk holding it, as `ext4, NVMe
+/// disk, model <model>, write cache write back` (the block layer's
+/// `queue/write_cache`: whether a sync must flush the device's cache), and
+/// the disk's kind as a medium: `nvme`, `usb`,
 /// `sata`, `mmc`, `virtio`, `other`, or `none` for no block device. The path
 /// itself names the user and is never printed.
 pub fn persistent_dir() -> Option<(String, String, String)> {
     let home = std::env::var("HOME").ok()?;
-    let (fstype, source, _) = mount_of(&home)?;
+    let (fstype, source, _, _) = mount_of(&home)?;
     // btrfs reports an anonymous `0:NN` that names no block device; its
     // source device's own number does.
     let sysfs = |devno: String| fs::canonicalize(format!("/sys/dev/block/{devno}")).ok();
@@ -652,6 +657,7 @@ pub fn persistent_dir() -> Option<(String, String, String)> {
     };
     let (disk, mapped) = backing_disk(device);
     let model = read(&disk.join("device/model").to_string_lossy()).unwrap_or_else(|| "unknown".into());
+    let cache = read(&disk.join("queue/write_cache").to_string_lossy()).unwrap_or_else(|| "unknown".into());
     let name = disk.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
     // A SCSI disk is a USB one where sysfs puts it under a USB device.
     let usb = disk.to_string_lossy().contains("/usb");
@@ -663,7 +669,7 @@ pub fn persistent_dir() -> Option<(String, String, String)> {
     let through = if mapped { " through device-mapper" } else { "" };
     // The device's own name is never printed: an installer or a user chose
     // a mapper's (`luks-<UUID>`, a volume group named for the host).
-    Some((home, format!("{fstype}{through}, {kind} disk, model {model}"), medium.into()))
+    Some((home, format!("{fstype}{through}, {kind} disk, model {model}, write cache {cache}"), medium.into()))
 }
 
 /// The `major:minor` of the filesystem holding `path`, off mountinfo's third

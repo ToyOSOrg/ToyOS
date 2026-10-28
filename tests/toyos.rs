@@ -1153,7 +1153,6 @@ const METAL: &[(&str, metal::Metal)] = &[
         metal::Metal {
             arms: BENCHCASE,
             judge: |b| {
-                not_the_format_boot(b[0])?;
                 data_on_the_nvme(b[0])?;
                 osbench_ran(b[0], &OSBENCH_GROUPS)
             },
@@ -1779,40 +1778,26 @@ fn osbench_ran(boot: &metal::Readback, jobs: &[&str]) -> Result<(), String> {
     Ok(())
 }
 
-/// The boot that formats a freshly designated DATA partition is no measured
-/// run: its start went to the format, and the volume it leaves is new. It
-/// says how long the format took.
-fn not_the_format_boot(boot: &metal::Readback) -> Result<(), String> {
-    const FORMATTING: &str = "fileserver: block 0 designates this partition for ToyOS; formatting it";
-    const SERVING: &str = "fileserver: Data serving ";
-    let log = boot.log();
-    let text = log.text();
-    let Some(began) = text.lines().find(|l| l.contains(FORMATTING)) else {
-        return Ok(());
-    };
-    let ended = text.lines().find(|l| l.contains(SERVING));
-    let secs = ended.and_then(since_boot).zip(since_boot(began)).map(|(end, start)| end - start);
-    let took = secs.map_or("its end unlogged".to_string(), |s| format!("{s:.3} s"));
-    Err(format!("this boot formatted DATA off its designation ({took}), and the format's boot is no measured run"))
-}
-
-/// DATA, which `osbench persist` writes, was a volume on a TOYOS-DATA
-/// partition the NVMe driver serves, mounted, and not memory standing in for
-/// a partition that is not ours. The file server refuses DATA where the block
-/// service offers two TOYOS-DATA partitions, so a mount beside the NVMe's
-/// partition is that partition's.
+/// DATA, which `osbench persist` writes, was a volume of ours on the bench's
+/// NVMe, mounted (`hostdisk::left_alone`, which also refuses DATA from
+/// memory). The boot that formatted it is no measured run: its start went to
+/// the format, and the volume it leaves is new; it says how long that took.
 fn data_on_the_nvme(boot: &metal::Readback) -> Result<(), String> {
     let log = boot.log();
-    let text = log.text();
-    let served = format!(" of type {} at block ", toyos_gpt::Guid::TOYOS_DATA);
-    if !text.lines().any(|l| l.contains("nvme] nvme ") && l.contains(&served)) {
-        return Err("the NVMe driver served no TOYOS-DATA partition, so persist measured no disk of the bench's".into());
+    let ours = common::hostdisk::loader_named(&boot.loader())?;
+    match common::hostdisk::left_alone(&log, &ours)?.1 {
+        common::hostdisk::Data::Mounted => Ok(()),
+        common::hostdisk::Data::Formatted => {
+            let text = log.text();
+            let at = |said: &str| text.lines().find(|l| l.contains(said)).and_then(since_boot);
+            let took = at("formatting it").zip(at("fileserver: Data serving ")).map(|(start, end)| end - start);
+            let took = took.map_or("its end unlogged".to_string(), |s| format!("{s:.3} s"));
+            Err(format!("this boot formatted DATA off its designation ({took}), and the format's boot is no measured run"))
+        }
+        common::hostdisk::Data::Foreign => {
+            Err("DATA on the bench's NVMe was no volume of ours, so persist measured no disk".into())
+        }
     }
-    if !text.contains("fileserver: mounted the DATA volume") || text.contains("it is absent this boot") {
-        let why = text.lines().find(|l| l.contains("fileserver: the DATA")).unwrap_or("the file server said nothing of DATA");
-        return Err(format!("DATA was not the NVMe's partition, so persist measured no disk: {why}"));
-    }
-    Ok(())
 }
 
 /// A log line's seconds since boot: `[2026-10-24 14:17:17 12.664 fileserver]`.
