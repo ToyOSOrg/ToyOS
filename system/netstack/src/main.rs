@@ -149,14 +149,6 @@ fn places_for(total_mem: u64) -> usize {
     (total_mem / PLACE_BUDGET_SHARE / PLACE_BYTES).clamp(1, u64::from(MAX_PLACES)) as usize
 }
 
-/// Total physical memory, as the kernel reports it.
-fn total_memory() -> u64 {
-    let mut buf = [0u8; toyos::system::SYSINFO_HEADER_SIZE];
-    let n = toyos::system::sysinfo(&mut buf);
-    assert!(n >= toyos::system::SYSINFO_HEADER_SIZE, "sysinfo returned {n} bytes");
-    toyos_abi::syscall::SysinfoHeader::decode(&buf).memory_total
-}
-
 /// One draw of the kernel's random source.
 fn draw() -> u32 {
     let mut bytes = [0u8; 4];
@@ -359,7 +351,7 @@ fn main() {
     node.answer_as(clock(), name, draw)
         .unwrap_or_else(|why| panic!("netstack: a new node refused the multicast DNS port: {why:?}"));
 
-    let total_mem = total_memory();
+    let total_mem = toyos::system::memory_total();
     let places = places_for(total_mem);
     node.set_places(places);
     let mut sockets = serve::Sockets::new(places);

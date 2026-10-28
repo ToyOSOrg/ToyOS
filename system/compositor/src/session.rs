@@ -352,7 +352,7 @@ impl Session {
         let apps = launcher_apps();
         let desk = Desk::new(mode_rect(mode), scale, apps.len());
         let font = shapes.font(&desk);
-        let total_mem = total_memory();
+        let total_mem = toyos::system::memory_total();
         let max_windows =
             toyos_desktop::max_windows(total_mem, desk.screen, MAX_WINDOW_SLOTS as usize);
         println!(
@@ -2165,14 +2165,6 @@ fn blit(screen: &Screen, back: &Framebuffer, regions: &[Rect]) -> u64 {
         pixels += region.area();
     }
     pixels
-}
-
-/// Total physical memory, as the kernel reports it.
-fn total_memory() -> u64 {
-    let mut buf = [0u8; system::SYSINFO_HEADER_SIZE];
-    let n = system::sysinfo(&mut buf);
-    assert!(n >= system::SYSINFO_HEADER_SIZE, "sysinfo returned {n} bytes");
-    toyos_abi::syscall::SysinfoHeader::decode(&buf).memory_total
 }
 
 /// The mode a window toggles into when it is maximized by button or chord.
