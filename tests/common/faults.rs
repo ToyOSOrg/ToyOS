@@ -136,30 +136,26 @@ pub fn kernel_wx_leaf_is_refused(test_config: &Path, profile: qemu::Profile) -> 
     }
 }
 
-/// What `tsc-step` says of the step it stages, and the middle of the clock
+/// What `tsc-step` says of the step it stages, and the head of the clock
 /// check's panic at it (`kernel/src/arch/x86_64/clocksource.rs`).
-const TSC_STEP_STAGED: &str = "tsc-step: cpu";
-const TSC_STEPPED: &str = "'s TSC stepped: ";
+const TSC_STEP_STAGED: &str = "tsc-step: the TSC reads ";
+const TSC_DISAGREES: &str = "clock: the TSC and the HPET disagree by ";
 
-/// A TSC `tsc-step` reads 10 ms ahead on one CPU: the clock's runtime check
-/// panics on that CPU, after the step, having read the HPET 9 ms or more apart
-/// from the clock.
+/// A TSC `tsc-step` reads 10 ms ahead: the clock's runtime check panics after
+/// the step, having read it 9 ms or more apart from the HPET, as a step.
 pub fn a_stepped_tsc_panics(test_config: &Path) -> Result<(), String> {
     let qemu = QemuInstance::boot_with_options(
         test_config,
         &[],
         &[],
-        BootOptions { profile: qemu::Profile::Metal, kernel_params: &["tsc-step"], ready_marker: TSC_STEPPED, ..Default::default() },
+        BootOptions { profile: qemu::Profile::Metal, kernel_params: &["tsc-step"], ready_marker: TSC_DISAGREES, ..Default::default() },
     );
     let serial = qemu.boot_log();
     let lines: Vec<&str> = serial.lines().collect();
     let staged = lines.iter().position(|l| l.contains(TSC_STEP_STAGED)).ok_or_else(|| format!("no {TSC_STEP_STAGED:?} line\n{serial}"))?;
-    let panicked = lines.iter().position(|l| l.contains(TSC_STEPPED)).ok_or_else(|| format!("no {TSC_STEPPED:?} panic\n{serial}"))?;
-    let cpu = |line: &str, head: &str| line.split(head).nth(1).and_then(|r| r.split(|c: char| !c.is_ascii_digit()).next()).map(str::to_string);
-    let stepped_cpu = cpu(lines[staged], TSC_STEP_STAGED);
-    let panicked_cpu = cpu(lines[panicked], "clock: cpu");
-    let apart: Option<i64> = lines[panicked].split(TSC_STEPPED).nth(1).and_then(|r| r.split(" ns apart").next()).and_then(|n| n.parse().ok());
-    if staged > panicked || stepped_cpu != panicked_cpu || !apart.is_some_and(|ns| ns >= 9_000_000) {
+    let panicked = lines.iter().position(|l| l.contains(TSC_DISAGREES)).ok_or_else(|| format!("no {TSC_DISAGREES:?} panic\n{serial}"))?;
+    let apart: Option<i64> = lines[panicked].split(TSC_DISAGREES).nth(1).and_then(|r| r.split(" ns over").next()).and_then(|n| n.parse().ok());
+    if staged > panicked || !lines[panicked].contains("since the last sample") || !apart.is_some_and(|ns| ns >= 9_000_000) {
         return Err(format!(
             "the step and the panic do not match: {:?} then {:?}\n{serial}",
             lines[staged].trim(),
