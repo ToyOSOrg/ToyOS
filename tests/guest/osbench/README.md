@@ -134,6 +134,59 @@ CPU's TSC read behind another's and no step exceeded the 1.2 µs of a read.
 A Linux forced onto the TSC (`tsc=reliable`) has those checks switched off,
 so it is no baseline.
 
+## Energy: its own boot, its own Linux run
+
+`energy` is a group by name, outside `all`: idle power is the whole
+machine's, so nothing else runs beside it. A ToyOS run is a boot of the
+`osbench_energy` metal row, the benchcase image with that one job:
+
+```text
+cargo test --test toyos-build -- --metal --metal-readback <dir> osbench_energy
+```
+
+A Linux run reads the same registers through the `msr` driver, as root:
+
+```text
+sudo modprobe msr
+sudo osbench energy </dev/null
+```
+
+Both read the package's energy counter in its own unit, its C2, C3, C6 and
+C7 residency where Intel documents them (not PC8 to PC10 on the T14, which
+SDM Vol. 4 gives no Tiger Lake), and each CPU's APERF/MPERF and core
+residency, and on AMD each core's energy (`cores_mw`). The group first waits,
+up to 120 s, for three seconds in a row in which the machine ran under 10 ms
+of CPU time (`energy.quiet`): a ToyOS boot reaches it while its services,
+the ACPI server's idle states among them, are still starting.
+
+The rows: `energy.idle` (60 s), `energy.wake_10ms` (one thread sleeping 10 ms
+over and over, 30 s), `energy.spin.t1` and `energy.spin.all` (one thread and
+one per CPU running the compute chunk, 30 s each), each a second's power
+(`.package`, mW), residency (`.pc2` to `.pc7`, permille) and under a spin a
+chunk's energy (`.per_chunk`, nJ). No unit is better higher or lower by
+itself: a spin that ran faster may draw more, and work is not slowed for
+power. ToyOS's every read kicks every CPU once a second; Linux's reads the
+package on CPU 0, where the reader is pinned, and each CPU only at a load's
+two ends.
+
+**The same devices, on both**:
+
+- **The panel lit.** ToyOS has no display driver: the firmware's GOP
+  scan-out stays on, and the kernel log's `GOP:` line names it. Linux keeps
+  its panel on and its console unblanked; `energy.display` and
+  `energy.backlight` say what it was.
+- **The radios off.** ToyOS drives no Wi-Fi or Bluetooth, so Linux blocks
+  both for the run: `sudo rfkill block all`, and on the AMD bench, whose
+  only link is its Wi-Fi, from a unit that outlives the session:
+
+  ```text
+  sudo systemd-run --unit=osbench-energy sh -c 'rfkill block all; /tmp/osbench energy </dev/null >/tmp/energy.txt; rfkill unblock all'
+  ```
+
+  `energy.radios` and `energy.links` say what each was. On the T14 both
+  systems keep the I219's link up.
+- **The machine on AC, and the same stick or none in it.**
+
 ## The disk is not yet one disk
 
 `persist` writes each system's persistent filesystem. On Linux that is the

@@ -1151,6 +1151,16 @@ const METAL: &[(&str, metal::Metal)] = &[
         metal::Metal { arms: BENCHCASE, judge: |b| osbench_ran(b[0], &OSBENCH_GROUPS) },
     ),
     (
+        // `osbench energy`: the package's power, idle and under defined loads,
+        // compared with the same program as root under the bench's Linux. A
+        // boot of its own, since idle power is the whole machine's: nothing
+        // else may run in it. Evidence and not a verdict, as `osbench` is; the
+        // row holds that the idle row measured, which it does only where the
+        // kernel reads the package's energy. The T14 and the AMD bench.
+        "osbench_energy",
+        metal::Metal { arms: OSBENCH_ENERGY, judge: |b| osbench_energy_measured(b[0]) },
+    ),
+    (
         // `osbench lan` against the `osbench-peer` the other bench's Linux runs,
         // compared with the same program under this bench's Linux on the same
         // path. A pass names it: the other bench has to be running the peer.
@@ -1674,10 +1684,9 @@ const TESTCASES: &[metal::Arm] = &[metal::once(
 /// `osbench`'s groups, each a job named by its symlink, in `osbench all`'s
 /// order: `boot` first, which reads how long the boot took to reach it, and
 /// `crunch` last, which heats the machine.
-const OSBENCH_GROUPS: [&str; 17] = [
+const OSBENCH_GROUPS: [&str; 16] = [
     "osbench_boot",
     "osbench_identity",
-    "osbench_energy",
     "osbench_system",
     "osbench_sched",
     "osbench_fair",
@@ -1707,6 +1716,14 @@ const OSBENCH_GROUPS: [&str; 17] = [
 const BENCHCASE: &[metal::Arm] = &[metal::Arm {
     adds_ms: 465_000,
     ..metal::once("benchcase", "tests/images/benchcase.toml", &[], &OSBENCH_GROUPS)
+}];
+
+/// `energy` waits up to 120 s for the machine to go quiet, then measures 60 s
+/// idle and three 30 s loads, settling the clock before and after each spin:
+/// under 160 s more. 300 s leaves its quiet wait 20 s over its own bound.
+const OSBENCH_ENERGY: &[metal::Arm] = &[metal::Arm {
+    adds_ms: 300_000,
+    ..metal::once("energybenchcase", "tests/images/benchcase.toml", &[], &["osbench_energy"])
 }];
 
 /// The two groups that need another party share one boot when one pass names
@@ -1767,6 +1784,13 @@ fn osbench_ran(boot: &metal::Readback, jobs: &[&str]) -> Result<(), String> {
         let group = job.strip_prefix("osbench_").expect("a group's job");
         boot.log().must_say(&format!("group={group} done"))?;
     }
+    Ok(())
+}
+
+/// `osbench energy` ran in ACPI mode, and its idle row measured the package.
+fn osbench_energy_measured(boot: &metal::Readback) -> Result<(), String> {
+    osbench_ran(boot, &["osbench_energy"])?;
+    boot.log().must_say("bench=energy.idle.package unit=mW ")?;
     Ok(())
 }
 
@@ -2790,11 +2814,12 @@ fn acpi_press_is_one_sci() -> Result<(), String> {
     Ok(())
 }
 
-/// `osbench identity` and `osbench fair` on tests/images/benchcase.toml with
-/// only those two jobs: each exits 0, which it does only once every row it
-/// ran measured or said why not, its capability rows among them.
+/// `osbench identity`, `osbench fair` and `osbench energy` on
+/// tests/images/benchcase.toml with only those jobs: each exits 0, which it
+/// does only once every row it ran measured or said why not, its capability
+/// rows among them. A guest reads no package energy, so `energy` says why.
 fn osbench_capability_groups_exit_0() -> Result<(), String> {
-    const JOBS: [&str; 2] = ["osbench_identity", "osbench_fair"];
+    const JOBS: [&str; 3] = ["osbench_identity", "osbench_fair", "osbench_energy"];
     let committed = compile::repo_root().join("tests/images/benchcase.toml");
     let text = fs::read_to_string(&committed).map_err(|e| format!("{}: {e}", committed.display()))?;
     let derived = toyos_metal::image::derive(&text, 300_000, &JOBS, &[]).map_err(|why| why.to_string())?;
@@ -2808,7 +2833,7 @@ fn osbench_capability_groups_exit_0() -> Result<(), String> {
     );
     let mut console = format!("{}\n", qemu.boot_log());
     let last = format!("===TEST_END {} ", JOBS[JOBS.len() - 1]);
-    await_guest(&mut qemu, &mut console, "osbench's two groups to end", |said| said.contains(&last))?;
+    await_guest(&mut qemu, &mut console, "osbench's groups to end", |said| said.contains(&last))?;
     let said = serial::Serial::named("osbench boot", console);
     for job in JOBS {
         said.must_say(&format!("===TEST_END {job} exit=0==="))?;
@@ -6599,7 +6624,8 @@ const SMI_SPAN_NS: u64 = 4_444_000_000;
 ///
 /// Read and not held: each CPU's idle busy fraction, which an SMI in the idle
 /// second raises on every CPU alike by the time it held them, its spinning
-/// clock, what one round cost its reader, and how late each CPU's kick handler
+/// clock, the package's power across the idle second and the spin, what one
+/// round cost its reader, and how late each CPU's kick handler
 /// ran under the `loaded` phase, which
 /// `issues/toyos-beats-linuxs-latency-on-the-t14.md` sets its bar for.
 fn counters_on_metal(back: &metal::Readback) -> Result<(), String> {
@@ -6658,7 +6684,9 @@ fn counters_on_metal(back: &metal::Readback) -> Result<(), String> {
         }
         for (cpu, counters) in read {
             let reads = kernel.must_say(&format!("counters: cpu{cpu} reads "))?;
-            for counter in ["smi", "aperf", "mperf", "hwp_request", "hwp_request_pkg", "energy_perf_bias"] {
+            for counter in
+                ["smi", "aperf", "mperf", "hwp_request", "hwp_request_pkg", "energy_perf_bias", "package_energy", "core_energy"]
+            {
                 if !reads.contains(&format!("{counter}={}", counters.contains_key(counter))) {
                     return Err(format!("{name}: cpu{cpu} carries {counters:?} and its bring-up said {reads:?}"));
                 }
@@ -6681,7 +6709,8 @@ fn counters_on_metal(back: &metal::Readback) -> Result<(), String> {
         }
     }
     for cpu in 0..cpus {
-        for (name, &value) in &idle1[&cpu] {
+        // The energy counters are 32 bits wide and wrap (`toyos_abi::counters`).
+        for (name, &value) in idle1[&cpu].iter().filter(|(name, _)| !name.ends_with("_energy")) {
             if idle0[&cpu][name] > value || value > spin[&cpu][name] {
                 return Err(format!("cpu{cpu}'s {name} went backwards: {idle0:?} {idle1:?} {spin:?}"));
             }
@@ -6749,6 +6778,18 @@ fn counters_on_metal(back: &metal::Readback) -> Result<(), String> {
         );
     }
     eprintln!("  [counters] the spin's read, a whole round, took its reader {} ns", clock["spin"].1);
+    if let (Some(&unit), Some(_)) = (idle0[&0].get("rapl_power_unit"), idle0[&0].get("package_energy")) {
+        let mw = |a: &Read, b: &Read, from: u64, to: u64| {
+            let steps = (b[&0]["package_energy"].wrapping_sub(a[&0]["package_energy"])) & 0xffff_ffff;
+            let uj = (u128::from(steps) * 1_000_000) >> ((unit >> 8) & 0x1f);
+            uj * 1_000_000 / u128::from((to - from).max(1))
+        };
+        eprintln!(
+            "  [counters] the package drew {} mW across the idle second and {} mW across the spin (a reading)",
+            mw(idle0, idle1, at0, at1),
+            mw(idle1, spin, at1, at2),
+        );
+    }
     if aperf_per_mperf.iter().any(|&r| r < 1.0) {
         return Err(format!("APERF ran {aperf_per_mperf:.3?} of MPERF across the spin, some cpu's busy clock below the rate MPERF counts at"));
     }
