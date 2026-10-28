@@ -407,6 +407,12 @@ pub mod capture_access;
 #[path = "../../../sdk/toyos/src/log/ring.rs"]
 pub mod log_ring;
 
+/// The clock page's latch, which the kernel replaces the clock's line through
+/// while every process and the kernel's own NMIs read it: not the kernel's
+/// file but the ABI's, driven by `tests/clock_latch.rs`.
+#[path = "../../../sdk/abi/src/clock/latch.rs"]
+pub mod clock_latch;
+
 /// The seqlock the panic console's descriptor and each CPU's counters are
 /// published through, driven by `tests/panic_console_publish.rs` and
 /// `tests/counters_round.rs`.

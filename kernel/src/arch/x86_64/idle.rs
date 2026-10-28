@@ -30,13 +30,12 @@ pub fn facts() -> CpuIdle {
     } else {
         (0, 0)
     };
-    let invariant_tsc = cpu::cpuid(0x8000_0000, 0).0 >= 0x8000_0007 && cpu::cpuid(0x8000_0007, 0).3 & 1 << 8 != 0;
     CpuIdle {
         monitor: cpuid_1_ecx & 1 << 3 != 0,
         mwait_extensions: cpuid_5_ecx & 1 != 0,
         mwait_substates: cpuid_5_edx,
         always_running_timer: cpu::leaf_6().0 & 1 << 2 != 0,
-        invariant_tsc,
+        invariant_tsc: cpu::invariant_tsc(),
     }
 }
 

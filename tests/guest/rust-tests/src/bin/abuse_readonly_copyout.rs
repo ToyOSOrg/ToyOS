@@ -21,7 +21,7 @@ mod image;
 use std::os::toyos::io::AsRawHandle;
 use std::process::Command;
 
-use toyos_abi::clock::{ClockPage, CLOCK_MAGIC, CLOCK_PAGE};
+use toyos_abi::clock::{ClockPage, CLOCK_PAGE};
 use toyos_abi::syscall::{self, OpenFlags, VmAt, VmProt, ProcessStats, SeekFrom, SyscallError};
 use toyos_abi::RawHandle;
 
@@ -140,8 +140,10 @@ fn second_reader() -> bool {
 
 fn main() {
     if std::env::args().nth(1).as_deref() == Some(CHILD_ARG) {
-        let page = unsafe { core::ptr::read_volatile(CLOCK_PAGE as *const ClockPage) };
-        assert_eq!(page.magic, CLOCK_MAGIC, "a second process found the clock page rewritten");
+        // SAFETY: the kernel maps the page read-only here in every address
+        // space, and every field of it is an atomic.
+        let page = unsafe { &*(CLOCK_PAGE as *const ClockPage) };
+        assert!(page.read().is_some(), "a second process found the clock page rewritten");
         std::process::exit(0);
     }
 
@@ -172,7 +174,11 @@ fn main() {
     }
 
     // Last, and said by its bit alone: its harm reaches every stamping reader.
-    if refused("the clock page", CLOCK_PAGE, stats).is_err() || !second_reader() {
+    // Half a page in, past the clock's own words, which the kernel rewrites
+    // when it retunes: the same frame, and bytes nothing moves.
+    const CLOCK_SPARE: u64 = CLOCK_PAGE + PAGE_4K / 2;
+    const _: () = assert!(core::mem::size_of::<ClockPage>() <= (PAGE_4K / 2) as usize && LEN <= (PAGE_4K / 2) as usize);
+    if refused("the clock page", CLOCK_SPARE, stats).is_err() || !second_reader() {
         wrote |= CLOCK_BIT;
     }
     if wrote != 0 {
