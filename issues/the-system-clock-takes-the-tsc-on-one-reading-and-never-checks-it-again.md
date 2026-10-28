@@ -24,14 +24,14 @@ then relies on go unchecked:
   the HPET or another reference, so a step or a change of rate after boot
   goes into every timestamp, timeout and deadline unannounced.
 
-On the AMD bench (Ryzen 7 4800U) the one calibration is also 40 to 66 ppm
-off (`issues/the-kernels-50-ms-tsc-calibration-misses-the-rate-by-tens-of-ppm.md`).
+On the AMD bench (Ryzen 7 4800U) the one calibration is also 41 to 66 ppm
+off (`issues/the-kernels-50-ms-tsc-calibration-misses-the-tscs-rate.md`).
 That CPU states the invariant bit. Under its Linux, it counts one rate in
 every phase over 10 minutes, and over 15 minutes across 16 CPUs and idle
 gaps up to 1 s no CPU's TSC read behind another's and no step exceeded a
 read's 1.2 µs. But in 5 of 30 boots' kernel logs that Linux's watchdog saw
-the TSC some 1.7 ms ahead of the HPET over half a second, 2 to 3 s into
-boot. Every time it was the same size, and it came with a calibration that
+the TSC some 1.7 ms ahead of the HPET over half a second, 2.6 s into boot
+in the one boot whose dmesg was kept. Every time it was the same size, and it came with a calibration that
 was right. The cause is unknown (`tsc-probe` and the boots' figures, PR
 #1079's evidence). ToyOS's one calibration also runs early in boot. A step
 inside its 50 ms would be a 3% error in every timestamp after it, and a
@@ -39,9 +39,15 @@ clock that never checks would not see it.
 
 **Exit**: the kernel keeps time on the TSC only where every CPU states it
 invariant. It bounds the CPUs' offsets at start to a figure it logs and
-derives, and checks the rate and offsets against a reference while it runs,
-failing clearly or falling back to a counter that holds when they leave
-their bound. Each part is shown on the T14 and the AMD bench.
+derives, and checks the rate and offsets against a reference while it runs.
+When they leave their bound it fails clearly, or falls back to a counter
+that holds and says so in the log. The runtime bound is derived from the
+reference's and the reads' own error, so the check does not mistake its
+own calibration for the TSC's: 12 of the 17 times the AMD's Linux watchdog
+fired, it was Linux's own calibration that was wrong. Where a vendor
+documents a cheaper detector, the check prefers it, such as `IA32_TSC_ADJUST`
+for a write to the TSC (Intel's SDM, Vol. 3). Each part is shown on the T14
+and the AMD bench.
 
 **Owner**: the kernel's x86-64 clock (`kernel/src/arch/x86_64/hpet.rs`,
 `kernel/src/clock.rs`).
