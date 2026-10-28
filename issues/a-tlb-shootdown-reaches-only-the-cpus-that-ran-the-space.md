@@ -24,8 +24,8 @@ pairing's fence removed; `tlb_shootdown_waits` shows on the test kernel that
 a change waits for a CPU running a thread of the space and for none when no
 other CPU runs one, each half red under its mutation.
 
-What is owed, since it waits on
-`issues/no-test-can-hold-a-thread-on-a-named-cpu.md`: on a machine with PCID,
+What is owed, now that a thread can be pinned
+(`toyos_abi::syscall::thread_set_affinity`): on a machine with PCID,
 a sibling that touches a page, blocks off its pinned CPU while a thread of
 another space runs there, and faults touching the page again after the
 initiator unmapped it meanwhile. The TCG model has no PCID

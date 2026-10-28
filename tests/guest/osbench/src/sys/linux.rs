@@ -151,6 +151,9 @@ fn set_affinity(tid: libc::pid_t, cpus: &[usize]) {
     assert_eq!(done, 0, "sched_setaffinity({tid}, {cpus:?}): {}", std::io::Error::last_os_error());
 }
 
+/// A thread of this process, as `sched_setaffinity` names it.
+pub type Tid = libc::pid_t;
+
 pub fn tid() -> libc::pid_t {
     // SAFETY: gettid takes no arguments and cannot fail.
     unsafe { libc::syscall(libc::SYS_gettid) as libc::pid_t }
