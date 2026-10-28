@@ -198,8 +198,10 @@ stage 3 of `issues/the-lan-is-not-yet-production-grade.md`, whole.
   refuses a second link by name. In a guest:
   `a_link_ends_under_a_held_stream_and_comes_back`, and
   `netstack_holders_exported_to_children` on virtio and on QEMU's `e1000e`.
-- **Owed:** the T14 rows `i219_carries_netstacks_link` and
-  `i219_leaves_ulp_unarmed`, and S2.
+- **Read on the T14:** `i219_carries_netstacks_link` and
+  `i219_leaves_ulp_unarmed` passed on one boot at 8bdf49156
+  (https://github.com/ToyOSOrg/evidence/blob/4d818727fb372e181c402149aeb2779808fa2ef2/p4-r1/metal-t14-judge.log).
+- **Owed:** S2.
 
 **P5, netstack over several links.** Owner: the orchestrator; its defect is
 `issues/netstack-drives-one-card.md`. Depends on: P4.
