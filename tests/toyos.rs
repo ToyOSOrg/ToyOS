@@ -42,9 +42,9 @@ const ACTUATOR_TESTS: &[&str] = &[
     // Action 16, the live-object census per kind. A leak is two readings and a
     // comparison, so on a kernel that answers `InvalidArgument` both readings
     // are the same error and the assertion passes having counted nothing.
-    // Both took action 16 in place of `SYS_SYSINFO`: a verdict about
-    // what one killed process gave back cannot be the whole machine's free
-    // memory, which every other binary in a shared boot moves under it.
+    // Each reads action 16 rather than `SYS_SYSINFO`: a verdict about what
+    // a process gave back cannot be the whole machine's free memory, which
+    // every other binary in a shared boot moves under it.
     "handle_lifetime",
     "shm_release_reclaims",
     "spawn_returns_the_census",
@@ -561,7 +561,8 @@ const MACHINE_TESTS: &[&str] = &[
     // `bent_supervisor_falls_back` metal row runs it on a bench.
     "a_bent_supervisor_is_refused_and_the_other_slot_boots",
     // A spawn and its child's end leave the census as it was, for a program
-    // the root server holds in memory and one copied to `/tmp`: the image's
+    // the root server holds in memory, one on DATA read whole and one in the
+    // kernel's `/tmp`: the image's
     // owners and the kernel's object lifetimes together, which no host test
     // holds. One boot of QEMU's x86-64 machine on the actuator kernel, for the
     // census.
@@ -2779,10 +2780,10 @@ fn console_image_boots() -> Result<(), String> {
     said.must_be_clean()
 }
 
-/// Eight spawns from each place a program is read from, a file the root
-/// server holds in memory and a copy in `/tmp`: each child maps its parent's
-/// log ring, and once they have ended the census is back to its first reading
-/// (`spawn_returns_the_census`). A census per kind and not the memory in use:
+/// Eight spawns from each of a file the root server holds in memory, a copy
+/// on DATA that the spawn reads whole, and a copy in the kernel's `/tmp`:
+/// each child maps its parent's log ring, and once they have ended the census
+/// is back to its first reading (`spawn_returns_the_census`). A census per kind and not the memory in use:
 /// a served image is a region over pages the server keeps, so one kept past
 /// its child costs no page.
 fn a_spawn_from_an_image_frees_it_when_the_child_ends(test_config: &Path) -> Result<(), String> {
@@ -2798,7 +2799,7 @@ fn a_spawn_from_an_image_frees_it_when_the_child_ends(test_config: &Path) -> Res
     if result.exit_code != Some(0) {
         return Err(format!("the job ended {:?}:\n{}", result.exit_code, result.stdout));
     }
-    for source in ["the served /system", "a copy in /tmp"] {
+    for source in ["the served /system", "a copy in /state", "a copy in /tmp"] {
         let claim = format!("8 spawns from {source}: the census came back to its first reading");
         if !result.stdout.contains(&claim) {
             return Err(format!("the job never said {claim:?}:\n{}", result.stdout));
