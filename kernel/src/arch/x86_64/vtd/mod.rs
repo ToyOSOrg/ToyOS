@@ -8,6 +8,8 @@
 //! cannot use leaves the unit switched off rather than halting, logged by
 //! register value rather than a bare "unsupported".
 
+#[cfg(feature = "boot-actuators")]
+mod cycles;
 pub mod dmar;
 pub mod domain;
 pub mod fault;
@@ -255,6 +257,10 @@ pub fn init(rsdp_addr: u64, devices: &[PciDevice], windows: Option<&[RootBridgeW
     for (unit, plan) in ready {
         enable(unit, plan, devices, &mut domains, remap, in_flight);
     }
+    #[cfg(feature = "boot-actuators")]
+    if crate::actuator::iommu_handover_cycles() {
+        cycles::run(devices);
+    }
     true
 }
 
@@ -356,6 +362,24 @@ struct Unit {
     base: u64,
     regs: Mmio,
     caps: Capabilities,
+}
+
+/// One `GCMD` field by §11.4.4.1's recipe, confirmed in `GSTS`, on a unit
+/// past `enable`.
+#[cfg(feature = "boot-actuators")]
+fn command(index: usize, regs: Mmio, bit: u32, on: bool, what: &str) {
+    let status = regs.read_u32(GSTS_REG) & PERSISTENT;
+    regs.write_u32(GCMD_REG, if on { status | bit } else { status & !bit });
+    let deadline = crate::clock::nanos_since_boot() + COMMAND_TIMEOUT.nanos();
+    while (regs.read_u32(GSTS_REG) & bit != 0) != on {
+        assert!(
+            crate::clock::nanos_since_boot() < deadline,
+            "iommu: unit{index} never reported {what} {}, GSTS={:#010x}",
+            if on { "on" } else { "off" },
+            regs.read_u32(GSTS_REG)
+        );
+        core::hint::spin_loop();
+    }
 }
 
 impl Unit {
