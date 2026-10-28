@@ -2,8 +2,10 @@
 # NVMe controller and soundserver's virtio-sound beside it: `iommu_virtio_platform`'s
 # machine, where every virtio function is a process's claim or a kernel driver's.
 #
-# netstack's `main` opens the NIC before anything else and returns on `NotFound`,
-# so a config with no NIC never reaches a line of the daemon proper.
+# The supervisor starts the NIC drivers before netstack and says how many, and
+# netstack with none leaves, so a machine with no NIC never reaches a line of
+# the daemon proper. Every NIC driver is here, so whichever NIC the machine has
+# comes up with no row naming it.
 #
 # test-runner is here for the same reason it is in metalcase: it makes the boot
 # announce itself.
@@ -18,14 +20,22 @@ start = ["logkeeper", "diskserver", "fileserver", "netstack", "soundserver", "te
 service = true
 syscap = ["logread"]
 
-# netstack holds the NIC's PCI function and drives it: the virtqueues, the register
-# window and the interrupt are its own, and the kernel keeps only the claim.
-# Named by class, vendor and device rather than by slot, so one row finds the card
-# wherever firmware put it.
+# netstack over the link a NIC driver brings on `link`; it claims no device.
 [programs.netstack]
 service = true
-serves = ["netstack"]
-devices = ["pci:02:00:00/1af4:1041"]
+serves = ["netstack", "link"]
+
+# The NIC drivers: one process per function a row's parts match, holding that
+# function alone, and started again when one ends other than by exit 0.
+[programs.virtio-net]
+drives = ["pci:02:00:00/1af4:1041"]
+receives = ["link"]
+restart = true
+
+[programs.i219]
+drives = ["pci:02:00:00/8086:15fc", "pci:02:00:00/8086:10d3"]
+receives = ["link"]
+restart = true
 
 [programs.soundserver]
 service = true

@@ -8,7 +8,7 @@ opened: 2026-10-09
 
 A link that changes while the transmit ring holds unsent descriptors leaves
 them the part's, on the 82574 and on the I219 alike
-(`system/netstack/i219/src/lib.rs`, "A frame is offered only to a ring with room for
+(`system/i219/driver/src/lib.rs`, "A frame is offered only to a ring with room for
 it"): they are counted `descriptors.stranded`, the part is owed their
 write-back within `STRANDED_DEADLINE_NANOS` (12.98 s) of the link being read
 up, and a part that has not written them back by then is refused by name, so

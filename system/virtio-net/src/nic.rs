@@ -1,4 +1,5 @@
-//! The virtio-net driver. It runs here, in netstack, not in the kernel.
+//! The virtio-net device, as this program drives it: in userland, not in the
+//! kernel.
 //!
 //! What the kernel keeps is the *claim*: config space, the interrupt vector it
 //! programmed into this function's MSI-X table, and the address space the
@@ -21,12 +22,11 @@
 //! Virtio 1.2 throughout: §4.1.4 for the PCI capability layout, §5.1 for the
 //! network device.
 
-use std::cell::RefCell;
-
-use toyos::shm::SharedMemory;
-use toyos::{DmaRegion, PciDev};
+use toyos::shm::{ReadBytes, SharedMemory};
+use toyos::{say, DmaRegion, PciDev};
 use toyos_abi::syscall::SyscallError;
 use toyos_device_memory::DmaBuffers;
+use toyos_link::state::{Group, Link};
 use toyos_pci_claim::virtio::{negotiate, Negotiated, Refusal};
 use toyos_pci_claim::{Bar, Grant};
 use toyos_virtio::pci::Live;
@@ -44,8 +44,8 @@ const TX_QUEUE: u16 = 1;
 /// `i` is posted at head `i` and nowhere else, so a completion's head *is* the
 /// buffer it filled and nothing the device wrote is used as an index.
 const RX_QUEUE_SIZE: u16 = 256;
-pub const RX_BUF_COUNT: usize = RX_QUEUE_SIZE as usize;
-pub const RX_BUF_SIZE: usize = 4096;
+const RX_BUF_COUNT: usize = RX_QUEUE_SIZE as usize;
+const RX_BUF_SIZE: usize = 4096;
 /// One descriptor per transmit buffer, and the two counts are one number for
 /// the same reason the receive side's are: buffer `i` is published at head `i`
 /// and nowhere else, so a head this driver holds names a buffer nothing else
@@ -53,11 +53,11 @@ pub const RX_BUF_SIZE: usize = 4096;
 /// emits several frames per poll, and the device reads a descriptor whenever it
 /// likes.
 const TX_QUEUE_SIZE: u16 = 16;
-pub const TX_BUF_COUNT: usize = TX_QUEUE_SIZE as usize;
-pub const TX_BUF_SIZE: usize = 4096;
+const TX_BUF_COUNT: usize = TX_QUEUE_SIZE as usize;
+const TX_BUF_SIZE: usize = 4096;
 /// The header virtio 1.0 puts in front of every frame, both directions: always
 /// twelve bytes with `VERSION_1`, `num_buffers` included (§5.1.6).
-pub const NET_HDR_SIZE: usize = 12;
+const NET_HDR_SIZE: usize = 12;
 
 /// The grant's layout: the receive queue's three parts on a page each, the
 /// transmit queue's three in one page, then the frames. One grant, because
@@ -86,7 +86,7 @@ const _: () = {
 fn finished(rings: &mut Virtqueue<Grant>) -> Option<Used> {
     rings
         .poll_used()
-        .unwrap_or_else(|why| panic!("netstack: this NIC cannot be driven on — {why}"))
+        .unwrap_or_else(|why| panic!("virtio-net: this NIC cannot be driven on — {why}"))
 }
 
 /// The virtio-net function, brought up and driving.
@@ -98,8 +98,8 @@ pub struct VirtioNet {
     _bar: SharedMemory,
     _region: DmaRegion,
     grant: Grant,
-    rx: RefCell<Virtqueue<Grant>>,
-    tx: RefCell<TxQueue>,
+    rx: Virtqueue<Grant>,
+    tx: TxQueue,
     mac: [u8; 6],
 }
 
@@ -109,7 +109,7 @@ impl VirtioNet {
     /// `toyos-virtio`'s types fix, which is virtio 1.2 §3.1.1's.
     pub fn open(dev: PciDev) -> Result<Self, Refusal> {
         let Negotiated { setup, mapping, features } = negotiate(&dev, VIRTIO_NET_F_MAC)?;
-        crate::say!("netstack: {features}");
+        say!("virtio-net: {features}");
 
         let (grant, region) = Grant::alloc(&dev, GRANT_BYTES)?;
         grant.window().zero();
@@ -128,14 +128,14 @@ impl VirtioNet {
             (setup, *byte) = setup.device_read8(at)?;
         }
 
-        let nic = Self {
+        let mut nic = Self {
             dev,
             device: setup.driver_ok(),
             _bar: mapping,
             _region: region,
             grant,
-            rx: RefCell::new(rx),
-            tx: RefCell::new(tx),
+            rx,
+            tx,
             mac,
         };
 
@@ -146,43 +146,24 @@ impl VirtioNet {
         Ok(nic)
     }
 
-    pub fn mac(&self) -> [u8; 6] {
-        self.mac
-    }
-
-    /// Drain the interrupt record, so the claim stops reading ready.
-    ///
-    /// The count is not acted on — what a message meant is in the rings — but
-    /// it has to be consumed, or the poller reports the same interrupt for ever.
-    /// `WouldBlock` is the ordinary "nothing since the last read". Any other
-    /// refusal is handed up as the kernel worded it: what it means is
-    /// `Card::begin_pass`'s call, made once for both drivers.
-    pub fn take_interrupt(&self) -> Result<u32, SyscallError> {
-        match self.dev.irq() {
-            Ok(record) => Ok(record.count),
-            Err(SyscallError::WouldBlock) => Ok(0),
-            Err(why) => Err(why),
-        }
-    }
-
     /// Post receive buffer `index` on its own head.
-    fn post_rx(&self, index: usize) {
+    fn post_rx(&mut self, index: usize) {
         let at = OFF_RX_BUFS + index * RX_BUF_SIZE;
         // The header is zeroed before the buffer is published: what the device
         // writes there is its own, and what it leaves behind is this driver's.
         self.grant.window().sub(at, NET_HDR_SIZE).zero();
         let buffer = Buffer::writable(self.grant.device_addr(at), RX_BUF_SIZE as u32);
-        let published = self.rx.borrow_mut().publish(index as u16, &[buffer]);
+        let published = self.rx.publish(index as u16, &[buffer]);
         self.device.notify(published);
     }
 
     /// The next received frame as `(buffer index, frame bytes)`, the virtio
     /// header excluded, or `None`.
-    pub fn poll_rx(&self) -> Option<(usize, usize)> {
+    fn poll_rx(&mut self) -> Option<(usize, usize)> {
         loop {
             // The head is below this queue's size, which is the buffer count,
             // and `written` no more than the one buffer its chain is.
-            let Used { head, written } = finished(&mut self.rx.borrow_mut())?;
+            let Used { head, written } = finished(&mut self.rx)?;
             let (index, total) = (head as usize, written as usize);
             if total <= NET_HDR_SIZE {
                 // Shorter than its own header is nothing to hand up, and the
@@ -193,45 +174,63 @@ impl VirtioNet {
             return Some((index, total - NET_HDR_SIZE));
         }
     }
+}
 
-    /// Give buffer `index` back to the device, after its frame has been read.
-    ///
-    /// A buffer never given back is a receive slot lost for the boot: 256 of
-    /// them and this NIC stops receiving.
-    pub fn rx_done(&self, index: usize) {
-        assert!(index < RX_BUF_COUNT, "netstack: buffer {index} is not one this NIC has");
-        self.post_rx(index);
+impl toyos_link::driver::Nic for VirtioNet {
+    fn mac(&self) -> [u8; 6] {
+        self.mac
     }
 
-    /// Where a received frame's bytes are, past the virtio header.
-    pub fn rx_frame(&self, index: usize, len: usize) -> &[u8] {
+    fn claim(&self) -> &PciDev {
+        &self.dev
+    }
+
+    /// Drain the interrupt record, so the claim stops reading ready. The
+    /// count is not acted on — what a message meant is in the rings — but it
+    /// has to be consumed, or the poller reports the same interrupt for ever.
+    ///
+    /// A claim that refuses the read for anything but `WouldBlock` is the
+    /// kernel saying this function is no longer this process's, and this
+    /// dies where it can be read.
+    ///
+    /// The link is unreported: this driver accepts no `VIRTIO_NET_F_STATUS`.
+    fn begin_pass(&mut self) -> Link {
+        match self.dev.irq() {
+            Ok(_) | Err(SyscallError::WouldBlock) => Link::Unreported,
+            Err(why) => panic!("virtio-net: this NIC cannot be driven on — {why:?}"),
+        }
+    }
+
+    /// A buffer is posted again once its frame was taken: one never given
+    /// back is a receive slot lost for the boot, and 256 of them and this NIC
+    /// stops receiving.
+    fn receive(&mut self, take: &mut dyn FnMut(&[u8])) -> bool {
+        let Some((index, len)) = self.poll_rx() else { return false };
         let window = self.grant.window().sub(OFF_RX_BUFS + index * RX_BUF_SIZE + NET_HDR_SIZE, len);
         // SAFETY: the window is inside the grant, which lives as long as
         // `self`; the device has finished with this buffer — its used-ring
-        // element is what said so — and it is not posted again until
-        // `rx_done`, which the caller makes after this borrow ends. virtio is
-        // the hypervisor's, inside the trusted base, so its protocol is believed;
-        // an external or hot-plug device's driver must copy instead.
-        unsafe { std::slice::from_raw_parts(window.as_ptr() as *const u8, len) }
+        // element is what said so — and it is not posted again until after
+        // this borrow ends. virtio is the hypervisor's, inside the trusted
+        // base, so its protocol is believed; an external or hot-plug device's
+        // driver must copy instead.
+        take(unsafe { std::slice::from_raw_parts(window.as_ptr() as *const u8, len) });
+        self.post_rx(index);
+        true
     }
 
-    /// How many frames the transmit queue takes now ([`TxQueue::room`]). A
-    /// caller answered 0 sleeps on the claim.
-    pub fn tx_room(&self) -> usize {
-        self.tx.borrow_mut().room()
+    fn tx_room(&mut self) -> usize {
+        self.tx.room()
     }
 
-    /// Copy `frame` into a transmit buffer and hand it to the device
-    /// ([`TxQueue::send`]).
-    pub fn tx(&self, frame: &[u8]) {
-        let ((), published) = self.tx.borrow_mut().send(frame.len(), |slot| slot.copy_from_slice(frame));
+    fn send(&mut self, frame: ReadBytes<'_>) {
+        let ((), published) = self.tx.send(frame.len(), |slot| frame.read(0, slot));
         self.device.notify(published);
     }
 
-    /// The claim, for the poller: readable means an interrupt has landed.
-    pub fn claim(&self) -> &PciDev {
-        &self.dev
-    }
+    /// Nothing to ask: this driver accepts no `VIRTIO_NET_F_CTRL_RX`, so it
+    /// programs no receive filter, and the frames the stack's groups are sent
+    /// arrive today without one.
+    fn join(&mut self, _group: Group) {}
 }
 
 /// The transmit queue: its rings, the heads nothing is in flight on, and the
@@ -281,12 +280,12 @@ impl TxQueue {
     fn send<R>(&mut self, len: usize, fill: impl FnOnce(&mut [u8]) -> R) -> (R, Published) {
         assert!(
             NET_HDR_SIZE + len <= TX_BUF_SIZE,
-            "netstack: a {len}-byte frame does not fit this NIC's transmit buffer"
+            "virtio-net: a {len}-byte frame does not fit this NIC's transmit buffer"
         );
         let head = self
             .free
             .pop()
-            .expect("netstack: a frame was offered to a transmit queue that had said it has no room");
+            .expect("virtio-net: a frame was offered to a transmit queue that had said it has no room");
         let at = OFF_TX_BUFS + head as usize * TX_BUF_SIZE;
         // The header is this driver's and zeroed before the frame goes in.
         self.grant.window().sub(at, NET_HDR_SIZE).zero();
@@ -379,7 +378,7 @@ mod tests {
         assert_eq!(queue.room(), 2);
     }
 
-    /// A frame offered to a queue that said it had no room is netstack's own
+    /// A frame offered to a queue that said it had no room is the driver's own
     /// bug, and dies by name instead of being written somewhere and dropped.
     #[test]
     #[should_panic(expected = "had said it has no room")]

@@ -698,6 +698,9 @@ pub enum Profile {
     /// `iommu_platform=on`, so behind the unit on paper and bypassing it in
     /// fact: the function a claim must never be handed.
     HeadlessNicUntranslated,
+    /// [`Profile::Headless`] with an `e1000e`, QEMU's 82574L, where its virtio
+    /// NIC was: a NIC the image's rows name no machine for.
+    HeadlessE1000e,
     /// [`Profile::Headless`] with the kernel's virtio console created without
     /// `iommu_platform=on`: a device the kernel itself must tell physical
     /// addresses.
@@ -805,6 +808,7 @@ impl Profile {
             | Self::HeadlessUsbSpare
             | Self::HeadlessNicBehindPort
             | Self::HeadlessNicUntranslated
+            | Self::HeadlessE1000e
             | Self::HeadlessConsoleUntranslated
             | Self::HeadlessTwoEdu
             | Self::Metal
@@ -931,6 +935,9 @@ enum Nic {
     BehindPort,
     /// The virtio NIC without `iommu_platform=on`, whatever unit the machine has.
     Untranslated,
+    /// QEMU's `e1000e`, which the unit decodes as it does every function
+    /// that is not virtio.
+    E1000e,
 }
 
 /// Everything a profile decides about the machine, in one table. A new
@@ -1134,6 +1141,7 @@ impl Profile {
             Self::HeadlessVirtioGpu => Shape { virtio_gpu: true, ..Self::Headless.shape() },
             Self::HeadlessNicBehindPort => Shape { nic: Nic::BehindPort, ..Self::Headless.shape() },
             Self::HeadlessNicUntranslated => Shape { nic: Nic::Untranslated, ..Self::Headless.shape() },
+            Self::HeadlessE1000e => Shape { nic: Nic::E1000e, ..Self::Headless.shape() },
             Self::HeadlessConsoleUntranslated => Shape { console_bypasses: true, ..Self::Headless.shape() },
             Self::HeadlessTwoEdu => Shape { probes: Probes::Edus, ..Self::Headless.shape() },
             Self::HeadlessUsbSpare => Shape {
@@ -2501,6 +2509,10 @@ fn qemu_command(
         }
         Nic::Untranslated => {
             qemu.arg("-netdev").arg(&netdev).arg("-device").arg("virtio-net-pci-non-transitional,netdev=net0");
+        }
+        // No option ROM: firmware has no use for the NIC.
+        Nic::E1000e => {
+            qemu.arg("-netdev").arg(&netdev).arg("-device").arg("e1000e,netdev=net0,romfile=");
         }
         Nic::BehindPort => {
             qemu.arg("-device").arg("pcie-root-port,id=nicport,chassis=9");

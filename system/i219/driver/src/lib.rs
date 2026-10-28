@@ -40,7 +40,7 @@
 //! taken after the load that found `DD` set, so a written-back length cannot
 //! be read from before the write-back.
 //!
-//! In netstack those four are the substrate's own: the mapped BAR, the monotonic
+//! In the `i219` program those four are the substrate's own: the mapped BAR, the monotonic
 //! clock, a `DmaRegion` in this function's IOMMU domain, and the claim's
 //! interrupt record. On the host they are `stub.rs`, which is the datasheet
 //! written down.
@@ -72,7 +72,7 @@
 //! Every number in a written-back descriptor is the device's, and this driver
 //! is on the far side of an IOMMU domain from the rest of the machine but on
 //! the *same* side as its own memory. A length longer than the buffer it was
-//! given becomes the length of a slice netstack hands to its stack, so `parse_rx`
+//! given becomes the length of a slice the program copies to the link, so `parse_rx`
 //! bounds it, and `RxRefusal` is every way a written-back descriptor is refused
 //! rather than believed.
 //!

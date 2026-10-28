@@ -6,8 +6,8 @@ opened: 2026-09-16
 
 # The MAC reset's ordering against the MDIO arbitration is unmeasured on this part
 
-`system/netstack/i219/src/lib.rs`'s `open` now resets the I219 on the properties
-`system/netstack/i219/src/wake.rs`'s header states, which Intel's host driver for this
+`system/i219/driver/src/lib.rs`'s `open` now resets the I219 on the properties
+`system/i219/driver/src/wake.rs`'s header states, which Intel's host driver for this
 family acts on: `CTRL.RST` with `CTRL.PHY_RST` beside it where `FWSM` bit 6
 allows, written under the software flag, then 20 ms with no register access,
 then a bounded wait on `STATUS` bit 9, the PHY configured. The 82574 path is

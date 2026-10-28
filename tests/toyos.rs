@@ -142,6 +142,10 @@ const RUST_SKIP: &[&str] = &[
     // It waits for netstack to answer, which follows the I219's bring-up: the
     // `i219_leaves_ulp_unarmed` metal row runs it on tests/images/benchcase.toml.
     "netstack_answers",
+    // It waits for a lease from the bench's router over the T14's I219: the
+    // `i219_carries_netstacks_link` metal row runs it on
+    // tests/images/benchcase.toml.
+    "lan_lease",
     // Its product is the T14's counters across an idle span and a spin on
     // every CPU, which the `counters` metal row judges; on a guest it would be
     // seconds of four CPUs spinning, read by nothing.
@@ -257,6 +261,10 @@ const RUST_SKIP: &[&str] = &[
     // A datagram receive bounded by its read timeout, through real netstack,
     // which a shared boot runs none of: `udp_receive_times_out` runs it.
     "udp_recv_timeout",
+    // It claims the NIC and starts its driver itself, which only
+    // tests/images/linkcase.toml leaves it to:
+    // `a_link_ends_under_a_held_stream_and_comes_back` runs it.
+    "link_restart",
     // It needs a launcher: `a_launch_gives_each_unsent_stdio_slot_a_null`
     // runs it on tests/images/launchcase.toml.
     "launch_unsent_stdio",
@@ -634,8 +642,10 @@ const MACHINE_TESTS: &[&str] = &[
     // processes and the real netstack, which no host test and
     // `stream_holders`' stand-in show. The harness is the peer, on the host's
     // loopback that QEMU's user network reaches and forwards one port of, so
-    // no public network. Both jobs in one boot. x86-64 alone
-    // (`qemu::SUITE_ARCH`).
+    // no public network. Both jobs in one boot, once on virtio and once on
+    // QEMU's `e1000e`, which the image's I219 row matches by its id alone: a
+    // NIC no row names a machine for, up with no configuration of its own.
+    // x86-64 alone (`qemu::SUITE_ARCH`).
     "netstack_holders_exported_to_children",
     // A datagram receive with a read timeout ends at it, a timeout under a
     // millisecond included, and a zero timeout is refused: std's conversion
@@ -644,6 +654,15 @@ const MACHINE_TESTS: &[&str] = &[
     // peer and no public network. Order and completion: QEMU's clock bounds
     // nothing but the hang. x86-64 alone (`qemu::SUITE_ARCH`).
     "udp_receive_times_out",
+    // A stream netstack holds across its link's end: the NIC's driver killed
+    // and started again on a fresh claim, and a line answered on the stream
+    // both before and after. netstack keeping its node across a link's end,
+    // the driver's hello on a new region and the kernel's claim given back
+    // and minted again cross three processes and a device, which no host test
+    // holds. QEMU x86-64 (`qemu::SUITE_ARCH`); the harness is the peer, on
+    // the host's loopback that QEMU's user network reaches, so no public
+    // network. Order and completion only.
+    "a_link_ends_under_a_held_stream_and_comes_back",
     // Login sessions: their owner parents, signs out and ends with each, and
     // the machine's reboot waits for them until forced, which only processes
     // in one boot show, as order, completion and counts. The reboot ends the
@@ -1176,11 +1195,18 @@ const METAL: &[(&str, metal::Metal)] = &[
     (
         // What the PHY's ULP registers hold after the I219's disarm and the
         // full reset, which the stub only assumes. The T14 only: the AMD bench
-        // has no card ToyOS drives. It rides `osbench`'s boot, whose netstack
-        // drives the card, and reads two of netstack's lines once its job has
-        // had netstack answer, which it does only after the bring-up.
+        // has no card ToyOS drives. It rides `osbench`'s boot, whose i219 row
+        // drives the card, and reads two of the driver's lines once its job
+        // has had netstack answer, which it does only after the bring-up.
         "i219_leaves_ulp_unarmed",
         metal::Metal { arms: BENCHCASE_ALONE, judge: |b| i219_leaves_ulp_unarmed(b[0]) },
+    ),
+    (
+        // The I219's driver a process of its own: its link open at netstack,
+        // up, and a lease from the bench's router carried over it, with no
+        // link ending. The T14 only, for the same reason, on the same boot.
+        "i219_carries_netstacks_link",
+        metal::Metal { arms: BENCHCASE_ALONE, judge: |b| i219_carries_netstacks_link(b[0]) },
     ),
     // ---- tests/images/jobcase.toml, each image armed to end its boot its own way ----
     (
@@ -1755,20 +1781,20 @@ const OSBENCH_INTERNET: &[metal::Arm] = &[metal::Arm {
     ..metal::once("netbenchcase", "tests/images/benchcase.toml", &[], &["osbench_internet"])
 }];
 
-/// [`BENCHCASE`]'s boot, with one job: netstack answering, which it does only
-/// once the card's bring-up has logged. Without it the list's `reboot` lands
-/// while the driver is still reaching the PHY.
+/// [`BENCHCASE`]'s boot, with two jobs: netstack answering, which it does only
+/// once the card's bring-up has logged, and its lease landing. Without them
+/// the list's `reboot` lands while the driver is still reaching the PHY.
 const BENCHCASE_ALONE: &[metal::Arm] =
-    &[metal::once("benchcase", "tests/images/benchcase.toml", &[], &["test_rs_netstack_answers"])];
+    &[metal::once("benchcase", "tests/images/benchcase.toml", &[], &["test_rs_netstack_answers", "test_rs_lan_lease"])];
 
-/// netstack's account of the I219's start: what its wake found of Ultra Low
-/// Power and disarmed, and the configuration its bring-up read back unarmed.
-/// Both lines are printed, because what was found is what the next boot's
-/// diagnosis reads.
+/// The I219 driver's account of its part's start: what its wake found of
+/// Ultra Low Power and disarmed, and the configuration its bring-up read back
+/// unarmed. Both lines are printed, because what was found is what the next
+/// boot's diagnosis reads.
 fn i219_leaves_ulp_unarmed(boot: &metal::Readback) -> Result<(), String> {
     boot.job_passed("test_rs_netstack_answers")?;
     let log = boot.log();
-    let woke = log.must_say("netstack: I219: before the reset the PHY was asked:")?;
+    let woke = log.must_say("i219: before the reset the PHY was asked:")?;
     let left = log.must_say("it is left with ULP configuration")?;
     eprintln!("  [i219] {woke}");
     eprintln!("  [i219] {left}");
@@ -1778,6 +1804,19 @@ fn i219_leaves_ulp_unarmed(boot: &metal::Readback) -> Result<(), String> {
     if !left.contains(" (unarmed, ") {
         return Err(format!("the I219's bring-up left ULP armed: {left}"));
     }
+    Ok(())
+}
+
+/// The I219's link as netstack holds it: opened from the driver's hello, up,
+/// and a lease carried over it, with no link ending in the boot.
+fn i219_carries_netstacks_link(boot: &metal::Readback) -> Result<(), String> {
+    boot.job_passed("test_rs_lan_lease")?;
+    let log = boot.log();
+    log.must_say("netstack: i219's link is open")?;
+    let up = log.must_say("i219: link up at ")?;
+    log.must_say("netstack: DHCP: lease ")?;
+    log.must_not_say("'s link ended")?;
+    eprintln!("  [i219] {up}");
     Ok(())
 }
 
@@ -4624,6 +4663,7 @@ fn run_machine_test(name: &str, test_config: &Path) -> Result<(), String> {
         "stream_holders" => stream_holders(test_config),
         "netstack_holders_exported_to_children" => netstack_holders_exported_to_children(),
         "udp_receive_times_out" => udp_receive_times_out(),
+        "a_link_ends_under_a_held_stream_and_comes_back" => a_link_ends_under_a_held_stream_and_comes_back(),
         "session_lifecycle" => common::sessionlifecycle::session_lifecycle(),
         "a_launch_gives_each_unsent_stdio_slot_a_null" => common::launchstdio::a_launch_gives_each_unsent_stdio_slot_a_null(),
         "a_row_reaches_its_own_state_and_no_other" => common::stateview::a_row_reaches_its_own_state_and_no_other(),
@@ -5549,8 +5589,18 @@ const SOCKET_EXPORT_PORT: u16 = 7070;
 /// `tests/images/netcase.toml`, the harness every socket's peer: a stream's
 /// child's line, then its parent's, then the FIN once both holders are gone;
 /// then a listener's and a datagram socket's child's datagram, its accept and
-/// its line, and the parent's after it.
+/// its line, and the parent's after it. Once over virtio, and once over QEMU's
+/// `e1000e`, which the image's rows name no machine for: the I219 driver's
+/// row matches it, and its link is the one netstack opens.
 fn netstack_holders_exported_to_children() -> Result<(), String> {
+    for (profile, driver) in [(qemu::Profile::Headless, "virtio-net"), (qemu::Profile::HeadlessE1000e, "82574")] {
+        holders_exported_over(profile, driver)?;
+        eprintln!("  [link] {driver}: a stream, a listener and a datagram socket exported to children");
+    }
+    Ok(())
+}
+
+fn holders_exported_over(profile: qemu::Profile, driver: &str) -> Result<(), String> {
     /// netstack's line once its lease landed: before it, a connect is refused.
     const LEASED: &str = "netstack: ready, at most";
     let tests = compile::repo_root().join("tests/guest/rust-tests");
@@ -5564,11 +5614,19 @@ fn netstack_holders_exported_to_children() -> Result<(), String> {
         .map_err(|e| format!("no loopback port to forward: {e}"))?
         .port();
     let config = compile::repo_root().join("tests/images/netcase.toml");
-    let options = BootOptions { forward: Some((forwarded, SOCKET_EXPORT_PORT)), ..BootOptions::default() };
+    let options = BootOptions { profile, forward: Some((forwarded, SOCKET_EXPORT_PORT)), ..BootOptions::default() };
     let mut qemu = QemuInstance::boot_with_options(&config, &[], &bins, options);
     serial::Serial::boot(&qemu).must_be_clean()?;
-    if !qemu.boot_log().contains(LEASED) && !qemu.drain_until(Duration::from_secs(60), |l| l.contains(LEASED)).contains(LEASED) {
-        return Err("netstack never said its lease landed".into());
+    let mut said = qemu.boot_log().to_string();
+    if !said.contains(LEASED) {
+        said.push_str(&qemu.drain_until(Duration::from_secs(60), |l| l.contains(LEASED)));
+    }
+    if !said.contains(LEASED) {
+        return Err(format!("{driver}: netstack never said its lease landed\n{said}"));
+    }
+    let opened = format!("netstack: {driver}'s link is open");
+    if !said.contains(&opened) {
+        return Err(format!("{driver}: netstack leased without saying {opened:?}\n{said}"));
     }
     stream_exported_to_a_child(&mut qemu)?;
     sockets_exported_to_a_child(&mut qemu, forwarded)
@@ -5693,6 +5751,57 @@ fn peer_verdict<T>(heard: std::thread::JoinHandle<Result<T, String>>) -> String 
         Ok(Err(why)) => format!("the peer failed first: {why}"),
         Err(_) => "the peer's thread panicked".into(),
     }
+}
+
+/// `test_rs_link_restart` on `tests/images/linkcase.toml`'s boot: the peer
+/// answers each line the job writes on one connection, the one before the
+/// job ends its driver and the one after it starts another, then reads the
+/// job's FIN and answers it with its own.
+fn a_link_ends_under_a_held_stream_and_comes_back() -> Result<(), String> {
+    use std::io::{BufRead, BufReader, Write};
+    const JOB: &str = "link_restart";
+    /// A liveness ceiling on the peer's waits, never a timing.
+    const CEILING: Duration = Duration::from_secs(240);
+    let tests = compile::repo_root().join("tests/guest/rust-tests");
+    let bin = qemu::build_toyos_bin(qemu::SUITE_ARCH, &tests, JOB);
+    let config = compile::repo_root().join("tests/images/linkcase.toml");
+    let mut qemu = QemuInstance::boot_with_options(&config, &[], &[(JOB.to_string(), bin)], BootOptions::default());
+    serial::Serial::boot(&qemu).must_be_clean()?;
+    let peer = std::net::TcpListener::bind("127.0.0.1:0").map_err(|e| format!("no loopback listener: {e}"))?;
+    let port = peer.local_addr().map_err(|e| format!("the listener's port: {e}"))?.port();
+    let heard = std::thread::spawn(move || -> Result<(), String> {
+        let (conn, _) = peer.accept().map_err(|e| format!("the guest's connect: {e}"))?;
+        conn.set_read_timeout(Some(CEILING)).map_err(|e| e.to_string())?;
+        let mut reader = BufReader::new(conn.try_clone().map_err(|e| e.to_string())?);
+        let mut answer = conn;
+        for word in ["before", "after"] {
+            let mut line = String::new();
+            reader.read_line(&mut line).map_err(|e| format!("the job's {word:?} line: {e}"))?;
+            if line != format!("{word}\n") {
+                return Err(format!("the peer heard {line:?} where the job's {word:?} line was owed"));
+            }
+            answer.write_all(format!("heard {word}\n").as_bytes()).map_err(|e| format!("the answer to {word:?}: {e}"))?;
+        }
+        let mut rest = String::new();
+        match reader.read_line(&mut rest) {
+            // The job's FIN, which this answers with its own as it drops.
+            Ok(0) => Ok(()),
+            Ok(_) => Err(format!("the peer heard {rest:?} after the job's last line")),
+            Err(e) => Err(format!("the stream's FIN: {e}")),
+        }
+    });
+    let result = qemu.run_test(&format!("test_rs_{JOB} {port}"), CEILING);
+    if let Some(why) = &result.error {
+        return Err(format!("{why}\n{}\nthe job said:\n{}", peer_verdict(heard), result.stdout));
+    }
+    if result.exit_code != Some(0) {
+        return Err(format!("the job ended {:?}:\n{}", result.exit_code, result.stdout));
+    }
+    heard.join().map_err(|_| "the peer's thread panicked".to_string())??;
+    for line in result.stdout.lines().filter(|l| l.contains("PASS: ")) {
+        eprintln!("  [link] {}", line.trim());
+    }
+    Ok(())
 }
 
 /// `test_rs_udp_recv_timeout` on `tests/images/netcase.toml`'s boot.

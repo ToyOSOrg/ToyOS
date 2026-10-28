@@ -110,7 +110,7 @@ result (`ok`, `MISSING` or `unreachable`). At evidence commit
 success or failure: it never reads out the ULP configuration it met, so a
 clean probe cannot tell an armed hand-off from an unarmed one.
 
-**Owner**: the I219 driver (`system/netstack/i219/`).
+**Owner**: the I219 driver (`system/i219/driver/`).
 
 **Exit**, in order:
 

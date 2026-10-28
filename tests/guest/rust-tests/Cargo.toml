@@ -23,7 +23,7 @@ acpiserver-api = { path = "../../../lib/acpiserver-api" }
 toyos-trace = { path = "../../../lib/trace" }
 # The I219's driver, the claim's register window and grant, and the kernel's
 # capability walk, for `i219_msi`'s judgement of its interrupts on the T14.
-toyos-i219 = { path = "../../../system/netstack/i219" }
+toyos-i219 = { path = "../../../system/i219/driver" }
 toyos-device-memory = { path = "../../../lib/device-memory" }
 toyos-pci-claim = { path = "../../../lib/pci-claim" }
 toyos-pci = { path = "../../../kernel/pci" }

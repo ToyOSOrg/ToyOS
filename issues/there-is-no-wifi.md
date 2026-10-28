@@ -192,6 +192,14 @@ stage 3 of `issues/the-lan-is-not-yet-production-grade.md`, whole.
   - the network suite unchanged under QEMU;
   - a T14 row reading the I219 working, with nothing regressed;
   - S2 rerun and reported.
+- **Built:** `toyos-link` (`lib/link`), and the I219 and virtio drivers as
+  `drives` rows of their own (`system/i219`, `system/virtio-net`), which the
+  supervisor's match table already binds; netstack claims no device and
+  refuses a second link by name. In a guest:
+  `a_link_ends_under_a_held_stream_and_comes_back`, and
+  `netstack_holders_exported_to_children` on virtio and on QEMU's `e1000e`.
+- **Owed:** the T14 rows `i219_carries_netstacks_link` and
+  `i219_leaves_ulp_unarmed`, and S2.
 
 **P5, netstack over several links.** Owner: the orchestrator; its defect is
 `issues/netstack-drives-one-card.md`. Depends on: P4.
