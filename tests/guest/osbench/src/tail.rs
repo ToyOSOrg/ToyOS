@@ -222,7 +222,7 @@ fn counters_over(bench: &str, before: Result<Vec<sys::diag::CpuCounts>, String>,
 fn diary_run(mut d: sys::diag::Diag) {
     const BENCH: &str = "tail.diag.periodic.30s";
     const SHOWN: usize = 16;
-    let before = d.counters();
+    let (before, began) = (d.counters(), Instant::now());
     // The diary names a CPU by the kernel's index, and the sleeper's CPUs
     // are APIC ids: the counters records carry both.
     let index_of: std::collections::BTreeMap<u32, u32> =
@@ -295,5 +295,5 @@ fn diary_run(mut d: sys::diag::Diag) {
     for ((pid, name), ns) in by_process.into_iter().filter(|(_, ns)| *ns > 0) {
         note(&format!("{BENCH}.cpu_time"), &[("pid", pid.to_string()), ("name", name), ("us", (ns / 1000).to_string())]);
     }
-    counters_over(BENCH, before, &d);
+    counters_over(BENCH, before, &d, crate::ns_since(began));
 }
