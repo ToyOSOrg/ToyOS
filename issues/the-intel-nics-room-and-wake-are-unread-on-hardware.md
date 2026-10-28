@@ -27,10 +27,9 @@ began whose one unmasked cause was the transmit one, so a cause the part
 recorded and raised nothing for is never counted.
 
 The same boot is the reading of `TXDCTL` as the bring-up writes it, with bit 22
-clear and a write-back per descriptor
-(`issues/the-intel-driver-writes-txdctl-and-tidv-against-the-82574-datasheets-newer-revision.md`):
-`descriptors.sent` short of `wire.sent`, or armed ahead of taken, makes that
-bit this path's.
+set as 82574 §10.2.6.11 requires and a write-back per descriptor:
+`descriptors.sent` short of `wire.sent`, or armed ahead of taken, makes the
+write-back policy this path's.
 
 What either part does with its ring across a link change is not in this
 exit: `issues/no-machine-has-read-an-intel-nic-across-a-link-change.md`.

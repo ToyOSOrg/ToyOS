@@ -169,8 +169,11 @@ bring-up met was not one the driver can count on, so it now writes every
 `TCTL` field itself, `MULR` and `RRTHRESH` at §10.2.6.1's initial values.
 
 What is left, about 1.3 times short of Linux with the ring still full most
-of a row, is the next lead: the transmit descriptor control
-(`issues/the-intel-driver-writes-txdctl-and-tidv-against-the-82574-datasheets-newer-revision.md`).
+of a row, is the next lead: the transmit descriptor control. Its bit 22,
+which 82574 §10.2.6.11 says "Must be set to 1b for proper operation", is
+set with the rest of what the datasheet requires, and its prefetch
+thresholds (§7.2.4.1) are tuned apart, each read against main's driver in
+one interleaved session.
 
 The clock does not separate the two systems. Each upload row's own
 readings, `mhz` just after it and `mhz_settled` before it, were about

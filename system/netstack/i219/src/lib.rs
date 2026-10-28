@@ -3,8 +3,10 @@
 //!
 //! The part is the T14's onboard `8086:15fc` at `00:1f.6`, or the `8086:10d3`
 //! that QEMU's `e1000e` models. Every `§` in this file and in [`regs`] is a
-//! section of the *Intel 82574 GbE Controller Family Datasheet* (317694-018,
-//! rev 2.7).
+//! section of the *Intel 82574 GbE Controller Family Datasheet*, document
+//! 317694, revision 3.4 (June 2014). The citations were first written against
+//! revision 2.7 (317694-018); those compared sit at the same numbers in 3.4,
+//! where `TXDCTL` is §10.2.6.11.
 //!
 //! **Below the register file the two parts are not one.** §3.2.1 puts the
 //! 82574's PHY on the controller's own die; the T14's is a MAC in the PCH whose
@@ -123,7 +125,7 @@ mod tests;
 use toyos_device_memory::{DmaBuffers, Registers};
 
 pub use delivery::{Delivery, NoDelivery};
-use regs::{cause, ctrl, ctrl_ext, ivar, rah, rctl, rx_desc, status, tctl, tx_desc, txdctl};
+use regs::{cause, ctrl, ctrl_ext, ivar, rah, rctl, rx_desc, status, tarc, tctl, tx_desc, txdctl};
 
 /// The clock, and the one way this driver gives the processor away.
 pub trait Clock {
@@ -908,10 +910,28 @@ pub struct BringUp {
     pub phy: Result<phy::Phy, phy::PhyRefusal>,
     /// The message the claim was proven to deliver.
     pub delivered: Delivered,
-    /// `TCTL` as the reset left it, before the bring-up wrote its fields.
-    pub reset_transmit_control: u32,
+    /// What the reset left in the registers the bring-up then writes, and in
+    /// the receive addresses it leaves to firmware.
+    pub out_of_reset: OutOfReset,
     /// `TCTL` as the bring-up left it.
     pub transmit_control: u32,
+}
+
+/// Registers as the reset left them, for the boot log: what this part's reset
+/// gives, which the bring-up does not rely on.
+#[derive(Clone, Copy, PartialEq, Eq, Debug, Default)]
+pub struct OutOfReset {
+    pub tctl: u32,
+    pub txdctl: u32,
+    pub tarc0: u32,
+    pub rxcsum: u32,
+    pub mrqc: u32,
+    pub rfctl: u32,
+    /// Bit `n` set where receive address entry `n`, 1 and up, is valid
+    /// (`RAH.AV`). The addresses themselves are not read: entries past the
+    /// first are manageability's (82574 §8's RAL15/RAH15; the I219's shared
+    /// receive addresses, 612523 §7.4.2.3.1), and this driver leaves them.
+    pub receive_addresses_valid: u16,
 }
 
 /// The function, brought up and driving.
@@ -1114,7 +1134,7 @@ impl<R: Registers, C: Clock, D: DmaBuffers, I: Interrupts> I219<R, C, D, I> {
             dma,
             irq,
             mac,
-            brought_up: BringUp { master_quiet, woke, reset: full, phy, delivered, reset_transmit_control: 0, transmit_control: 0 },
+            brought_up: BringUp { master_quiet, woke, reset: full, phy, delivered, out_of_reset: OutOfReset::default(), transmit_control: 0 },
             link: Link::default(),
             opened_at: 0,
             link_up_at: None,
@@ -1130,13 +1150,16 @@ impl<R: Registers, C: Clock, D: DmaBuffers, I: Interrupts> I219<R, C, D, I> {
             wire: Wire::default(),
         };
 
+        nic.brought_up.out_of_reset = nic.out_of_reset();
+
         // The throttle alone: the two receive timers hold back every frame's
         // interrupt, the first after a quiet spell too, and the throttle none
-        // of those.
+        // of those. `TIDV` is left alone: §10.2.6.10 says "Setting the value to
+        // 0b is not allowed", and it delays only a descriptor with `IDE` set,
+        // which this driver sets on none.
         nic.regs.write32(regs::ITR, THROTTLE);
         nic.regs.write32(regs::RDTR, 0);
         nic.regs.write32(regs::RADV, 0);
-        nic.regs.write32(regs::TIDV, 0);
         nic.regs.write32(regs::TADV, 0);
 
         nic.arm_rx_ring();
@@ -1146,10 +1169,20 @@ impl<R: Registers, C: Clock, D: DmaBuffers, I: Interrupts> I219<R, C, D, I> {
         // transmitter.
         nic.regs.write32(regs::TXDCTL, txdctl::SUGGESTED);
         nic.regs.write32(regs::TIPG, regs::TIPG_DEFAULT);
-        nic.brought_up.reset_transmit_control = nic.regs.read32(regs::TCTL);
+        let tarc0 = nic.regs.read32(regs::TARC0) | tarc::ENABLE;
+        nic.regs.write32(regs::TARC0, tarc0);
         nic.regs.write32(regs::TCTL, TX_CONTROL);
         nic.accepted(regs::TCTL, TX_CONTROL)?;
         nic.brought_up.transmit_control = nic.regs.read32(regs::TCTL);
+
+        // No receive offload, no second queue and no header filtering: the
+        // three registers' documented fields, all 0 but `RXCSUM`'s two
+        // checksum offloads, which §10.2.5.15 sets at reset and this driver
+        // reads nothing of. `MRQC` "can be modified only when receive to host
+        // is not enabled".
+        nic.regs.write32(regs::RXCSUM, 0);
+        nic.regs.write32(regs::MRQC, 0);
+        nic.regs.write32(regs::RFCTL, 0);
 
         // §4.6.5.1: the receiver last, "only after all other setup is
         // accomplished".
@@ -1187,6 +1220,24 @@ impl<R: Registers, C: Clock, D: DmaBuffers, I: Interrupts> I219<R, C, D, I> {
             Ok(())
         } else {
             Err(Refusal::NotAccepted { reg, wrote, read })
+        }
+    }
+
+    /// The registers the bring-up writes, as the reset left them, and which
+    /// receive addresses past the first are valid.
+    fn out_of_reset(&self) -> OutOfReset {
+        let read = |reg| self.regs.read32(reg);
+        let receive_addresses_valid = (1..regs::RECEIVE_ADDRESSES)
+            .filter(|&n| read(regs::rah(n)) & rah::AV != 0)
+            .fold(0u16, |valid, n| valid | 1 << n);
+        OutOfReset {
+            tctl: read(regs::TCTL),
+            txdctl: read(regs::TXDCTL),
+            tarc0: read(regs::TARC0),
+            rxcsum: read(regs::RXCSUM),
+            mrqc: read(regs::MRQC),
+            rfctl: read(regs::RFCTL),
+            receive_addresses_valid,
         }
     }
 

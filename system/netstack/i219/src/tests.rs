@@ -3403,13 +3403,68 @@ fn bring_up_sets_tctl_whatever_the_last_holder_left() {
     let wanted = tctl::EN | tctl::PSP | tctl::CT | tctl::COLD_FULL_DUPLEX | tctl::MULR | tctl::RRTHRESH_INITIAL;
     for reset_leaves_tctl in [true, false] {
         for inherited in [0x3003_f0f8, 0x0003_f0f8, 0] {
-            let nic = Nic::with(7, Part::I219, Permits { reset_leaves_tctl, ..Permits::default() });
+            let nic = Nic::with(7, Part::I219, Permits { reset_leaves_last_holders: reset_leaves_tctl, ..Permits::default() });
             nic.inherit(regs::TCTL, inherited);
             let driver = open(&nic);
             assert_eq!(nic.peek(regs::TCTL), wanted, "{}", nic.because("the bring-up left a TCTL of the last holder's"));
             assert_eq!(driver.brought_up().transmit_control, wanted);
             let out_of_reset = if reset_leaves_tctl { inherited } else { tctl::PSP | tctl::MULR | tctl::RRTHRESH_INITIAL };
-            assert_eq!(driver.brought_up().reset_transmit_control, out_of_reset, "the bring-up reported another TCTL out of reset");
+            assert_eq!(driver.brought_up().out_of_reset.tctl, out_of_reset, "the bring-up reported another TCTL out of reset");
         }
     }
+}
+
+/// The bring-up sets `TARC0`'s `ENABLE`, which §10.2.6.9 says "should always be
+/// set", as one bit and keeps the rest of the register, and writes `RXCSUM`,
+/// `MRQC` and `RFCTL` to 0, whatever a last holder left and whichever way the
+/// reset goes. It reports each as the reset left it.
+#[test]
+fn bring_up_owns_tarc0_enable_and_the_receive_filters() {
+    for reset_leaves_last_holders in [true, false] {
+        let nic = Nic::with(7, Part::I219, Permits { reset_leaves_last_holders, ..Permits::default() });
+        nic.inherit(regs::TARC0, 0x5);
+        nic.inherit(regs::RXCSUM, 0x0000_0300);
+        nic.inherit(regs::MRQC, 0x0001_0001);
+        nic.inherit(regs::RFCTL, 0x0000_8000);
+        let driver = open(&nic);
+        let reset = driver.brought_up().out_of_reset;
+        let (tarc0, rxcsum, mrqc, rfctl) = if reset_leaves_last_holders {
+            (0x5, 0x300, 0x0001_0001, 0x8000)
+        } else {
+            (0x3 | tarc::ENABLE, 0x300, 0, 0)
+        };
+        assert_eq!((reset.tarc0, reset.rxcsum, reset.mrqc, reset.rfctl), (tarc0, rxcsum, mrqc, rfctl));
+        assert_eq!(nic.peek(regs::TARC0), tarc0 | tarc::ENABLE, "{}", nic.because("TARC0 is not ENABLE over what the reset left"));
+        for reg in [regs::RXCSUM, regs::MRQC, regs::RFCTL] {
+            assert_eq!(nic.peek(reg), 0, "{}", nic.because("a receive filter register was left to the reset"));
+        }
+    }
+}
+
+/// `TIDV` is never written: §10.2.6.10 allows no 0, and this driver sets `IDE`
+/// on no descriptor. Nor is any receive address past the first, which are
+/// manageability's; the reset's valid ones are reported.
+#[test]
+fn bring_up_leaves_tidv_and_the_receive_addresses_past_the_first() {
+    let nic = Nic::with(7, Part::I219, Permits::default());
+    nic.inherit(regs::rah(3), rah::AV | 0x1234);
+    nic.inherit(regs::rah(15), rah::AV);
+    let driver = open(&nic);
+    let written = |reg| nic.trace().iter().any(|a| matches!(a, Access::Write { reg: r } if *r == reg));
+    assert!(!written(regs::TIDV), "{}", nic.because("the bring-up wrote TIDV"));
+    for n in 1..regs::RECEIVE_ADDRESSES {
+        assert!(!written(regs::ral(n)) && !written(regs::rah(n)), "receive address {n} was written");
+    }
+    assert_eq!(driver.brought_up().out_of_reset.receive_addresses_valid, 1 << 3 | 1 << 15);
+}
+
+/// §10.2.6.11: bit 22 "Must be set to 1b for proper operation", and the model
+/// refuses a `TXDCTL` write that clears it, so no driver change can.
+#[test]
+#[should_panic(expected = "Must be set to 1b")]
+fn the_model_refuses_txdctl_without_bit_22() {
+    let nic = Nic::with(7, Part::I219, Permits::default());
+    let mut driver = open(&nic);
+    let _ = driver.tx_room();
+    nic.write_register(regs::TXDCTL, txdctl::SUGGESTED & !txdctl::MUST_BE_SET);
 }

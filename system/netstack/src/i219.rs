@@ -159,8 +159,17 @@ fn brought_up_words(brought_up: toyos_i219::BringUp) -> Vec<String> {
     let mut words = vec![
         brought_up.delivered.to_string(),
         format!(
-            "TCTL {:#010x} out of the reset and {:#010x} after the bring-up",
-            brought_up.reset_transmit_control, brought_up.transmit_control
+            "out of the reset: TCTL {:#010x} TXDCTL {:#010x} TARC0 {:#010x} RXCSUM {:#010x} MRQC \
+             {:#010x} RFCTL {:#010x}, receive addresses past the first valid {:#06x} (left to \
+             firmware); TCTL {:#010x} after the bring-up",
+            brought_up.out_of_reset.tctl,
+            brought_up.out_of_reset.txdctl,
+            brought_up.out_of_reset.tarc0,
+            brought_up.out_of_reset.rxcsum,
+            brought_up.out_of_reset.mrqc,
+            brought_up.out_of_reset.rfctl,
+            brought_up.out_of_reset.receive_addresses_valid,
+            brought_up.transmit_control
         ),
     ];
     match brought_up.woke {
