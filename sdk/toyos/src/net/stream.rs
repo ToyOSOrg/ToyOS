@@ -747,7 +747,7 @@ pub struct Accepted {
 /// is, and [`NetError::WouldBlock`] where none waits.
 pub(super) fn accept(listener: RawHandle, drain: super::socket::Drain<'_>) -> Result<Accepted, NetError> {
     let opened = open(false, ([0; 4], 0), |region| {
-        drain.now().signal_with(listener, super::socket::ACCEPT, [region]).map_err(hangup)?;
+        drain.now().accept(listener, region).map_err(hangup)?;
         let header = answer(listener)?;
         let accepted: TcpAcceptResponse = ipc::recv_payload(listener, &header).map_err(hangup)?;
         let mut handles = [toyos_abi::HANDLE_INVALID; syscall::MAX_TRANSFER_HANDLES];

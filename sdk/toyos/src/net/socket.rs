@@ -201,12 +201,6 @@ fn call_on<R>(handle: RawHandle, kind: Kind, f: impl FnOnce(usize, End) -> Resul
     call(handle, |slot, end| if end.kind == kind { f(slot, end) } else { Err(NetError::InvalidInput) })
 }
 
-/// The rings `bell` holds, read: a request follows at once.
-fn drain(bell: RawHandle) {
-    let mut bytes = [0u8; 64];
-    while let Ok(1..) = syscall::read_nonblock(bell, &mut bytes) {}
-}
-
 /// Whether `bell` is readable, waiting for it at most `nanos` on `poller`: rung, or hung up
 /// with netstack. Nothing is read.
 fn rung(poller: &Poller, bell: RawHandle, nanos: u64) -> bool {
@@ -216,9 +210,11 @@ fn rung(poller: &Poller, bell: RawHandle, nanos: u64) -> bool {
     answered
 }
 
-/// One request's leave to read the bell. Only the [`Drained`] it is spent for sends an accept or
-/// a receive, so the bell is read once, before the request goes. Spend it after every step that
-/// can fail, so a call refused before its request leaves the ring in the bell.
+/// One request's read of the bell, handed out by [`look`] and spent once: spending it gives the
+/// [`Drained`] that [`Drained::accept`] and [`Drained::receive`] send their request
+/// with. Spend it after every step that can fail, so a call refused before its request leaves
+/// the ring in the bell. A raw [`ipc`] send of [`ACCEPT`] or [`RECEIVE`] bypasses it.
+#[must_use = "an accept or a receive is sent with the read it spends"]
 pub(super) struct Drain<'a>(&'a dyn Fn());
 
 impl Drain<'_> {
@@ -232,12 +228,14 @@ impl Drain<'_> {
 pub(super) struct Drained(());
 
 impl Drained {
-    pub(super) fn signal(self, connection: RawHandle, msg_type: u32) -> Result<(), ipc::IpcError> {
-        ipc::signal(connection, msg_type)
+    /// [`ACCEPT`] on `listener`, lending the stream's `region`.
+    pub(super) fn accept(self, listener: RawHandle, region: OwnedHandle) -> Result<(), ipc::IpcError> {
+        ipc::signal_with(listener, ACCEPT, [region])
     }
 
-    pub(super) fn signal_with(self, connection: RawHandle, msg_type: u32, handles: impl IntoIterator<Item = OwnedHandle>) -> Result<(), ipc::IpcError> {
-        ipc::signal_with(connection, msg_type, handles)
+    /// [`RECEIVE`] on `connection`.
+    pub(super) fn receive(self, connection: RawHandle) -> Result<(), ipc::IpcError> {
+        ipc::signal(connection, RECEIVE)
     }
 }
 
@@ -272,7 +270,8 @@ impl Bell for EndBell {
     }
 
     fn drain(&self) {
-        drain(self.bell)
+        let mut bytes = [0u8; 64];
+        while let Ok(1..) = syscall::read_nonblock(self.bell, &mut bytes) {}
     }
 }
 
@@ -447,7 +446,7 @@ pub fn send_to(handle: RawHandle, addr: [u8; 4], port: u16, data: &[u8]) -> Resu
 pub fn recv_from(handle: RawHandle, buf: &mut [u8], wait: Wait) -> Result<Received, NetError> {
     call_on(handle, Kind::Datagram, |slot, end| {
         look(&EndBell { slot, bell: end.bell }, wait, |drain| {
-            drain.now().signal(end.connection, RECEIVE).map_err(hangup)?;
+            drain.now().receive(end.connection).map_err(hangup)?;
             let header = answer(end.connection)?;
             let mut frame = [0u8; MAX_FRAME];
             let n = ipc::recv_bytes(end.connection, &header, &mut frame).map_err(hangup)?;
