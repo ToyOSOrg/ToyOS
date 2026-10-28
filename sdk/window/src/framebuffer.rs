@@ -132,11 +132,18 @@ impl Screen {
             src.height
         );
         let row_bytes = w * 4;
-        let panel = (*self.memory).as_ref().bytes();
+        let mapping = (*self.memory).as_ref();
+        let (panel, source) = (mapping.as_ptr() as usize, src.buf as usize);
+        assert!(
+            source + src.len <= panel || panel + mapping.len() <= source,
+            "Screen::blit: the source is in the screen's own mapping"
+        );
+        let panel = mapping.bytes();
         for dy in 0..h {
             let row = panel.sub(((y + dy) * self.stride + x) * 4, row_bytes);
-            // SAFETY: the assertion kept the row inside `src`, whose memory no
-            // reference reaches outside its own calls.
+            // SAFETY: the first assertion kept the row inside `src`, the
+            // second kept `src` outside the panel's mapping, and no reference
+            // reaches a framebuffer's memory outside its own calls.
             unsafe { row.write_from(src.at(src_x, src_y + dy)) }
         }
         // A scanout is write-combining, so the tail of the last row can sit in
@@ -162,7 +169,8 @@ fn pixels(stride: usize, height: usize) -> Option<usize> {
 
 /// A pixel surface drawn with plain loads and stores, through `&self`: no
 /// reference reaches its memory outside its own calls, and it is neither
-/// `Send` nor `Sync`, so no two of them overlap.
+/// `Send` nor `Sync`, so every surface over the same memory is on one thread
+/// and no two calls on them run at once.
 pub struct Framebuffer<'a> {
     buf: *mut u8,
     len: usize,
@@ -258,7 +266,8 @@ impl<'a> Framebuffer<'a> {
         if x < self.width && y < self.height {
             let offset = (y * self.stride + x) * 4;
             debug_assert!(offset + 4 <= self.len);
-            let pixel = unsafe { core::slice::from_raw_parts(self.buf.add(offset), 4) };
+            // SAFETY: inside the surface, and a copy rather than a reference.
+            let pixel = unsafe { self.buf.add(offset).cast::<[u8; 4]>().read_unaligned() };
             match self.pixel_format {
                 PixelFormat::Rgb => Color { r: pixel[0], g: pixel[1], b: pixel[2] },
                 PixelFormat::Bgr => Color { r: pixel[2], g: pixel[1], b: pixel[0] },

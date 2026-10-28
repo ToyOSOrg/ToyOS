@@ -534,11 +534,21 @@ fn copy(bytes: &[u8]) -> Result<(), CreateError> {
     Ok(conn.signal(MSG_COPY_COMMIT)?)
 }
 
+/// The bytes a window buffer of `height` rows of `stride` pixels holds, or
+/// `None` for a stride narrower than `width` or a size past the address space:
+/// the compositor's word, refused before anything is drawn by it.
+fn buffer_bytes(width: u32, stride: u32, height: u32) -> Option<usize> {
+    if stride < width {
+        return None;
+    }
+    (stride as usize).checked_mul(height as usize)?.checked_mul(4)
+}
+
 pub struct Window {
     conn: Connection,
     poller: Poller,
-    /// The buffer, whose one writable handle the compositor sent: it maps its
-    /// own read-only.
+    /// The buffer, whose one writable handle the compositor sent; the
+    /// compositor maps its own read-only.
     shm: Rc<SharedMemory>,
     width: u32,
     height: u32,
@@ -611,11 +621,9 @@ impl Window {
         }
         let info: WindowInfo = conn.recv_payload(&header)?;
         let scale = Scale::from_wire(info.scale).ok_or(CreateError::Protocol(MSG_WINDOW_CREATED))?;
-        if info.stride < info.width {
+        let Some(buf_size) = buffer_bytes(info.width, info.stride, info.height) else {
             return Err(CreateError::Protocol(MSG_WINDOW_CREATED));
-        }
-
-        let buf_size = info.stride as usize * info.height as usize * 4;
+        };
         // The buffer travels in the frame. A compositor that announced a
         // window and sent nothing with it is not serving this client, whatever
         // else it is doing.
@@ -726,10 +734,9 @@ impl Window {
                 let Some(scale) = Scale::from_wire(info.scale) else {
                     return Event::Close;
                 };
-                if info.stride < info.width {
+                let Some(buf_size) = buffer_bytes(info.width, info.stride, info.height) else {
                     return Event::Close;
-                }
-                let buf_size = info.stride as usize * info.height as usize * 4;
+                };
                 // The compositor shows the old buffer only until this
                 // window's next present, which it reads from the new one, so a
                 // window that cannot map the new one has nothing to present.
@@ -895,6 +902,14 @@ mod tests {
         assert_eq!(Size::Logical { width: 200, height: 100 }.physical(two), Some((400, 200)));
         assert_eq!(Size::Physical { width: 200, height: 100 }.physical(two), Some((200, 100)));
         assert_eq!(Size::Any.physical(two), None);
+    }
+
+    #[test]
+    fn a_buffer_narrower_than_its_window_is_refused_and_one_that_fits_is_counted() {
+        assert_eq!(buffer_bytes(10, 10, 3), Some(120));
+        assert_eq!(buffer_bytes(10, 12, 3), Some(144));
+        assert_eq!(buffer_bytes(10, 9, 3), None);
+        assert_eq!(buffer_bytes(u32::MAX, u32::MAX, u32::MAX), None, "past the address space");
     }
 
     /// A zero on either axis asks the compositor to choose, as it always has.

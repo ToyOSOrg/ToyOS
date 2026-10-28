@@ -268,8 +268,8 @@ impl<'a> Bytes<'a> {
     /// Copy the whole range in from `src`.
     ///
     /// # Safety
-    /// `src` is readable for [`len`](ReadBytes::len) bytes, and no reference
-    /// reaches them meanwhile.
+    /// `src` is readable for [`len`](ReadBytes::len) bytes, none of them is in
+    /// this range, and no reference reaches them meanwhile.
     pub unsafe fn write_from(self, src: *const u8) {
         // SAFETY: the caller's, and the range is mapped writable for `'a`.
         unsafe { crate::arch::copy(self.0.ptr.cast_mut(), src, self.0.len) }
