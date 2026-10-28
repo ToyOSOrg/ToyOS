@@ -201,12 +201,6 @@ fn call_on<R>(handle: RawHandle, kind: Kind, f: impl FnOnce(usize, End) -> Resul
     call(handle, |slot, end| if end.kind == kind { f(slot, end) } else { Err(NetError::InvalidInput) })
 }
 
-/// The rings `bell` holds, read: a request follows at once.
-fn drain(bell: RawHandle) {
-    let mut bytes = [0u8; 64];
-    while let Ok(1..) = syscall::read_nonblock(bell, &mut bytes) {}
-}
-
 /// Whether `bell` is readable, waiting for it at most `nanos` on `poller`: rung, or hung up
 /// with netstack. Nothing is read.
 fn rung(poller: &Poller, bell: RawHandle, nanos: u64) -> bool {
@@ -216,20 +210,80 @@ fn rung(poller: &Poller, bell: RawHandle, nanos: u64) -> bool {
     answered
 }
 
-/// `ask` while the end's bell is rung, until it takes something, waiting for the bell between
-/// as `wait` says. `ask` is handed [`drain`] for the bell, which it calls just before its
-/// request goes.
-fn look<T>(slot: usize, end: End, wait: Wait, mut ask: impl FnMut(&dyn Fn()) -> Result<T, NetError>) -> Result<T, NetError> {
-    let drained = || drain(end.bell);
+/// One request's read of the bell, handed out by [`look`] and spent once: spending it gives the
+/// [`Drained`] that [`Drained::accept`] and [`Drained::receive`] send their request
+/// with. Spend it after every step that can fail, so a call refused before its request leaves
+/// the ring in the bell. A raw [`ipc`] send of [`ACCEPT`] or [`RECEIVE`] bypasses it.
+pub(super) struct Drain<'a>(&'a dyn Fn());
+
+impl Drain<'_> {
+    pub(super) fn now(self) -> Drained {
+        (self.0)();
+        Drained(())
+    }
+}
+
+/// The bell read for one request, which sending the request spends.
+#[must_use = "the bell was read for a request: send it"]
+pub(super) struct Drained(());
+
+impl Drained {
+    /// [`ACCEPT`] on `listener`, lending the stream's `region`.
+    pub(super) fn accept(self, listener: RawHandle, region: OwnedHandle) -> Result<(), ipc::IpcError> {
+        ipc::signal_with(listener, ACCEPT, [region])
+    }
+
+    /// [`RECEIVE`] on `connection`.
+    pub(super) fn receive(self, connection: RawHandle) -> Result<(), ipc::IpcError> {
+        ipc::signal(connection, RECEIVE)
+    }
+}
+
+/// A holder's bell, as [`look`] reads it.
+trait Bell {
+    /// `f` under the end's turn, told whether the bell is rung now.
+    fn look_now<R>(&self, f: impl FnOnce(bool) -> R) -> R;
+    /// Until the bell is rung, or for at most `nanos`, out of the turn.
+    fn wait(&self, nanos: u64) -> Result<(), NetError>;
+    fn drain(&self);
+}
+
+/// An end's own bell: looked at with the end's poller under its turn, waited on with a poller
+/// of the wait's own, which the end's other calls do not share.
+struct EndBell {
+    slot: usize,
+    bell: RawHandle,
+}
+
+impl Bell for EndBell {
+    fn look_now<R>(&self, f: impl FnOnce(bool) -> R) -> R {
+        let turn = TURNS[self.slot].lock();
+        let Some(poller) = turn.as_ref() else { unreachable!("a live end has its poller") };
+        f(rung(poller, self.bell, 0))
+    }
+
+    fn wait(&self, nanos: u64) -> Result<(), NetError> {
+        // Netstack gone hangs the bell up, which is readable, and the next look says so.
+        let poller = Poller::try_new(1).map_err(|_| NetError::ResourceExhausted)?;
+        rung(&poller, self.bell, nanos);
+        Ok(())
+    }
+
+    fn drain(&self) {
+        let mut bytes = [0u8; 64];
+        while let Ok(1..) = syscall::read_nonblock(self.bell, &mut bytes) {}
+    }
+}
+
+/// `ask` while `bell` is rung, until it takes something, waiting for the bell between as
+/// `wait` says. Each `ask` is handed one [`Drain`].
+fn look<T>(bell: &impl Bell, wait: Wait, mut ask: impl FnMut(Drain<'_>) -> Result<T, NetError>) -> Result<T, NetError> {
+    let drain = || bell.drain();
     loop {
-        {
-            let turn = TURNS[slot].lock();
-            let Some(poller) = turn.as_ref() else { unreachable!("a live end has its poller") };
-            if rung(poller, end.bell, 0) {
-                match ask(&drained) {
-                    Err(NetError::WouldBlock) => {}
-                    answer => return answer,
-                }
+        if let Some(answer) = bell.look_now(|rung| rung.then(|| ask(Drain(&drain)))) {
+            match answer {
+                Err(NetError::WouldBlock) => {}
+                answer => return answer,
             }
         }
         let until = match wait {
@@ -240,11 +294,7 @@ fn look<T>(slot: usize, end: End, wait: Wait, mut ask: impl FnMut(&dyn Fn()) -> 
         if left == 0 {
             return Err(NetError::TimedOut);
         }
-        // Out of the turn, which the end's other calls take meanwhile, so on a poller of the
-        // wait's own. Netstack gone hangs the bell up, which is readable, and the next look says
-        // so.
-        let poller = Poller::try_new(1).map_err(|_| NetError::ResourceExhausted)?;
-        rung(&poller, end.bell, left);
+        bell.wait(left)?;
     }
 }
 
@@ -365,7 +415,7 @@ pub fn let_go(handle: RawHandle) {
 /// The oldest connection waiting at the listener `handle` reaches, as a stream: waiting for one
 /// as `wait` says, [`NetError::WouldBlock`] or [`NetError::TimedOut`] where none came.
 pub fn accept(handle: RawHandle, wait: Wait) -> Result<stream::Accepted, NetError> {
-    call_on(handle, Kind::Listener, |slot, end| look(slot, end, wait, |drain| stream::accept(end.connection, drain)))
+    call_on(handle, Kind::Listener, |slot, end| look(&EndBell { slot, bell: end.bell }, wait, |drain| stream::accept(end.connection, drain)))
 }
 
 // ---- a datagram socket's ----
@@ -395,9 +445,8 @@ pub fn send_to(handle: RawHandle, addr: [u8; 4], port: u16, data: &[u8]) -> Resu
 /// `wait` says, [`NetError::WouldBlock`] or [`NetError::TimedOut`] where none came.
 pub fn recv_from(handle: RawHandle, buf: &mut [u8], wait: Wait) -> Result<Received, NetError> {
     call_on(handle, Kind::Datagram, |slot, end| {
-        look(slot, end, wait, |drain| {
-            drain();
-            ipc::signal(end.connection, RECEIVE).map_err(hangup)?;
+        look(&EndBell { slot, bell: end.bell }, wait, |drain| {
+            drain.now().receive(end.connection).map_err(hangup)?;
             let header = answer(end.connection)?;
             let mut frame = [0u8; MAX_FRAME];
             let n = ipc::recv_bytes(end.connection, &header, &mut frame).map_err(hangup)?;
@@ -556,6 +605,116 @@ mod tests {
             assert!(datagram_of(&[0; 8][..len]).is_none(), "{len} bytes");
         }
         assert!(datagram_of(&[0; MAX_FRAME + 1]).is_none());
+    }
+
+    /// netstack's side of two holders' bells over one queue (`toyos-net-node`'s `holders`):
+    /// each holder is rung while something waits and it has not been rung since it last asked,
+    /// and every ask, whatever it takes, is followed by that telling.
+    #[derive(Default)]
+    struct Server {
+        queue: alloc::collections::VecDeque<u32>,
+        told: [bool; 2],
+        /// The rings in each holder's bell, unread.
+        bells: [u32; 2],
+        /// What happens while holder 1 waits, a batch a wait.
+        while_waiting: alloc::collections::VecDeque<alloc::vec::Vec<Event>>,
+        /// What arrives once an ask that found nothing is answered, before its holder reads
+        /// the answer.
+        after_nothing: Option<u32>,
+        taken: [Option<u32>; 2],
+    }
+
+    enum Event {
+        Arrives(u32),
+        /// Holder 0 makes its whole call, which must take something.
+        Looks,
+    }
+
+    impl Server {
+        fn tell(&mut self) {
+            for holder in 0..2 {
+                if !self.queue.is_empty() && !self.told[holder] {
+                    self.bells[holder] += 1;
+                    self.told[holder] = true;
+                }
+            }
+        }
+
+        fn arrives(&mut self, item: u32) {
+            self.queue.push_back(item);
+            self.tell();
+        }
+
+        fn ask(&mut self, holder: usize, _: Drained) -> Result<u32, NetError> {
+            self.told[holder] = false;
+            let taken = self.queue.pop_front();
+            self.tell();
+            if taken.is_none() {
+                if let Some(item) = self.after_nothing.take() {
+                    self.arrives(item);
+                }
+            }
+            taken.ok_or(NetError::WouldBlock)
+        }
+    }
+
+    struct Held<'a> {
+        holder: usize,
+        server: &'a core::cell::RefCell<Server>,
+    }
+
+    impl Bell for Held<'_> {
+        fn look_now<R>(&self, f: impl FnOnce(bool) -> R) -> R {
+            let rung = self.server.borrow().bells[self.holder] > 0;
+            f(rung)
+        }
+
+        /// Runs what the scenario says happens meanwhile; a holder still unrung when nothing is
+        /// left to happen would wait for good.
+        fn wait(&self, _: u64) -> Result<(), NetError> {
+            while self.server.borrow().bells[self.holder] == 0 {
+                let Some(batch) = self.server.borrow_mut().while_waiting.pop_front() else {
+                    panic!("holder {} waits for good with {:?} queued", self.holder, self.server.borrow().queue)
+                };
+                for event in batch {
+                    match event {
+                        Event::Arrives(item) => self.server.borrow_mut().arrives(item),
+                        Event::Looks => {
+                            let taken = call(0, self.server).expect("holder 0 takes what it was rung for");
+                            self.server.borrow_mut().taken[0] = Some(taken);
+                        }
+                    }
+                }
+            }
+            Ok(())
+        }
+
+        fn drain(&self) {
+            self.server.borrow_mut().bells[self.holder] = 0;
+        }
+    }
+
+    fn call(holder: usize, server: &core::cell::RefCell<Server>) -> Result<u32, NetError> {
+        look(&Held { holder, server }, Wait::Blocking(None), |drain| {
+            let drained = drain.now();
+            server.borrow_mut().ask(holder, drained)
+        })
+    }
+
+    /// Two holders blocked on one queue: both are rung for the first arrival, the other takes
+    /// it, and holder 1's ask finds nothing. The second arrives as that answer goes, before
+    /// holder 1 reads it, so its ring is already in the bell: a holder that read its bell after
+    /// asking would wait for good.
+    #[test]
+    fn the_holder_that_found_nothing_takes_the_next_arrival() {
+        let server = core::cell::RefCell::new(Server {
+            while_waiting: [alloc::vec![Event::Arrives(1), Event::Looks]].into(),
+            after_nothing: Some(2),
+            ..Server::default()
+        });
+        let taken = call(1, &server).expect("holder 1 takes the second arrival");
+        assert_eq!((server.borrow().taken[0], taken), (Some(1), 2));
+        assert!(server.borrow().queue.is_empty());
     }
 
     #[test]

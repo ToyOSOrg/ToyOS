@@ -356,6 +356,8 @@ fn every_holder_receives_from_one_queue_each_datagram_once_and_whole() {
     assert_eq!(&out[..got.len], b"two, longer", "the next datagram, whole, to the other holder");
     assert_eq!(lan.node.udp_recv_from(id, second, &mut out), Ok(None), "each datagram went once");
     assert_eq!(rings(), (1, 2), "nothing left, no ring");
+    lan.deliver(&udp(MAC, MAC_B, (B, 9_999), (A, 4_000), b"three"));
+    assert_eq!(rings(), (2, 3), "both looked since, the one that found nothing too, and both are told");
 
     lan.node.datagram_departed(lan.now, id, second);
     assert_eq!(lan.node.udp_recv_from(id, second, &mut out), Err(Refused::NotConnected), "a holder that left takes nothing");
