@@ -6900,10 +6900,10 @@ const AMD_KEPT_STATES: &str = "waits in C1 or port 0x414 (exit 400 µs, residenc
 
 /// The AMD bench's idle states kept on every CPU, and each CPU in one across
 /// an idle second: once the server's census is in the log, `idle_entered`
-/// reads each CPU's deep idle periods either side of the second. Held: the
-/// kernel's line for every CPU the bring-up started names
-/// [`AMD_KEPT_STATES`], each CPU's two reads fresh, and each CPU chose a
-/// declared state at least once in the second. Every such period is a
+/// reads each CPU's deep idle periods across the second, those the read
+/// ending it woke the CPU from included. Held: the kernel's line for every CPU
+/// the bring-up started names [`AMD_KEPT_STATES`], each CPU's reads fresh,
+/// and each CPU chose a declared state at least once in the second. Every such period is a
 /// request of port 0x415: the kernel chooses the deepest state whose exit and
 /// residency fit and whose history admits it (`kernel::sched::idle::choose`),
 /// and 0x415's exit and residency are both below 0x414's. What the core then

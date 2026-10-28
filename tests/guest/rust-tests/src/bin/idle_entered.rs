@@ -3,6 +3,12 @@
 //! states, printed for the `idle_entered` metal row to judge
 //! (`tests/toyos.rs`). It asserts nothing: whether a CPU chose a declared
 //! state is the kernel's count to say.
+//!
+//! **A period is counted once the CPU is back from it**, after the
+//! interrupt that ended it was handled, and the read that ends the span is
+//! itself a kick to every CPU: a CPU that waited deep through the whole span
+//! is counted only by a later round. So the span ends with a read that wakes
+//! every CPU, and the periods are those a fresh round after it counts.
 
 use std::time::{Duration, Instant};
 
@@ -37,8 +43,12 @@ fn main() {
     let before = round(&cap);
     let began = Instant::now();
     std::thread::sleep(IDLE);
-    let after = round(&cap);
+    round(&cap);
     let span = began.elapsed();
+    // A round issued after this call began, at least `INTERVAL_NS` after
+    // the waking round's (`kernel::counters`): every period that round ended is
+    // in it.
+    let after = round(&cap);
     for (b, a) in before.iter().zip(&after) {
         let periods = a.get(Counter::DeepIdles).zip(b.get(Counter::DeepIdles)).map(|(a, b)| a - b);
         let Some(periods) = periods else { panic!("cpu{} carries no deep idle count: {b:?} then {a:?}", a.cpu) };
