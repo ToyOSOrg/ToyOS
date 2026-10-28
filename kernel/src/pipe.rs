@@ -127,6 +127,48 @@ impl Drop for Held {
     }
 }
 
+/// One copy gathered from runs that continue each other in both source and
+/// destination, so a user page's piece over two physically adjacent frames
+/// is one copy, not two.
+struct Copy {
+    from: *const u8,
+    to: *mut u8,
+    len: usize,
+}
+
+impl Copy {
+    const NONE: Self = Self { from: core::ptr::null(), to: core::ptr::null_mut(), len: 0 };
+
+    /// Add `len` bytes from `from` to `to`, copying what was gathered first
+    /// unless these continue it.
+    ///
+    /// # Safety
+    /// `from` is readable and `to` writable for `len` bytes, and stay so
+    /// until the next [`Self::flush`]; the two never overlap.
+    unsafe fn add(&mut self, from: *const u8, to: *mut u8, len: usize) {
+        if self.len > 0 && self.from.wrapping_add(self.len) == from && self.to.wrapping_add(self.len) == to {
+            self.len += len;
+            return;
+        }
+        // SAFETY: what was gathered meets this function's contract.
+        unsafe { self.flush() };
+        *self = Self { from, to, len };
+    }
+
+    /// Copy what was gathered.
+    ///
+    /// # Safety
+    /// As [`Self::add`] for every run gathered.
+    unsafe fn flush(&mut self) {
+        if self.len > 0 {
+            // SAFETY: the runs gathered are contiguous on both sides and
+            // each met `add`'s contract.
+            unsafe { core::ptr::copy_nonoverlapping(self.from, self.to, self.len) };
+        }
+        *self = Self::NONE;
+    }
+}
+
 /// `within` of a frame a pipe holds, which no process maps and only that
 /// pipe's lock reaches.
 fn frame_bytes(frame: &u64, within: Range<usize>) -> *mut u8 {
@@ -234,13 +276,16 @@ impl PipeRef {
                 // One walk of the user window, each pinned piece copied out of
                 // the frames it covers.
                 buf.write_pieces(0, n, |to, at, piece| {
+                    let mut copy = Copy::NONE;
                     bytes.peek(at, piece, |frame, within, from| {
                         // SAFETY: `to` is valid for `piece` bytes until this
                         // walk's callback returns, and `from + within.len()` is
                         // at most `piece`; the frame is this pipe's alone,
                         // reached only under its lock, and no process maps it.
-                        unsafe { core::ptr::copy_nonoverlapping(frame_bytes(frame, within.clone()), to.add(from), within.len()) }
+                        unsafe { copy.add(frame_bytes(frame, within.clone()), to.add(from), within.len()) }
                     });
+                    // SAFETY: as above, before the callback returns.
+                    unsafe { copy.flush() };
                 });
                 bytes.consume(n);
                 pipe.held.give_back_surplus();
@@ -279,12 +324,15 @@ impl PipeRef {
         // One walk of the user window, each pinned piece copied into the
         // frames it covers.
         buf.read_pieces(0, n, |from, at, piece| {
+            let mut copy = Copy::NONE;
             bytes.place(at, piece, |frame, within, to| {
                 // SAFETY: `from` is valid for `piece` bytes until this walk's
                 // callback returns, and `to + within.len()` is at most `piece`;
                 // the frame is this pipe's alone, as above.
-                unsafe { core::ptr::copy_nonoverlapping(from.add(to), frame_bytes(frame, within.clone()), within.len()) }
+                unsafe { copy.add(from.add(to), frame_bytes(frame, within.clone()), within.len()) }
             });
+            // SAFETY: as above, before the callback returns.
+            unsafe { copy.flush() };
         });
         bytes.commit(n);
         pipe.written += n as u64;
