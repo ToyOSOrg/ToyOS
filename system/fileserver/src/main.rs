@@ -108,7 +108,7 @@ const RAM_BLOCKS: u64 = 1 << 18;
 
 /// The share of physical memory the file servers' caches together may keep
 /// in clean blocks, read or written: the log and boot roles take
-/// [`SMALL_CLEAN_BYTES`] each, DATA the rest.
+/// [`SMALL_CLEAN_BYTES`] each, DATA the rest ([`data_clean_limit`]).
 ///
 /// An interim bound and nothing more: no clean block is given back to
 /// another job, since nothing reports memory pressure
@@ -317,7 +317,7 @@ fn open_volume(role: Role, guid: Option<&str>, roots: &[&str]) -> (Box<dyn Volum
             // The supervisor starts this role with its partition's GUID.
             let guid = guid.unwrap_or_else(|| panic!("fileserver: the {role:?} server was started without its partition's GUID"));
             let parsed = toyos_gpt::Guid::parse(guid).unwrap_or_else(|| panic!("fileserver: {guid} is no partition GUID"));
-            match served(parsed.0).map(|disk| fat_on(disk, role)) {
+            match served(parsed.0).map(|disk| fat_on(disk, role == Role::Log)) {
                 Some(Ok(volume)) => volume,
                 Some(Err(why)) => {
                     println!("fileserver: the {role:?} partition does not mount: {why}");
@@ -353,7 +353,7 @@ fn absent(roots: &[&str], why: String) -> Box<dyn Volume> {
 }
 
 fn data_on<D: Disk + 'static>(disk: D, roots: &[&str]) -> Box<dyn Volume> {
-    match DataVolume::probe(disk, clean_limit(Role::Data), roots, fileserver::volume::now_nanos) {
+    match DataVolume::probe(disk, data_clean_limit(), roots, fileserver::volume::now_nanos) {
         Probed::Mounted(volume) => Box::new(volume),
         Probed::Unmountable(why) => {
             println!("fileserver: the DATA volume is ours and does not mount ({why}); it is absent this boot");
@@ -368,24 +368,24 @@ fn data_on<D: Disk + 'static>(disk: D, roots: &[&str]) -> Box<dyn Volume> {
 
 fn ram(roots: &[&str], why: &str) -> Box<dyn Volume> {
     println!("fileserver: {why}; /apps, /config, /home and /state are in memory and will not survive a reboot");
-    match DataVolume::format(Ram::new(RAM_BLOCKS), clean_limit(Role::Data), roots, fileserver::volume::now_nanos) {
+    match DataVolume::format(Ram::new(RAM_BLOCKS), data_clean_limit(), roots, fileserver::volume::now_nanos) {
         Ok(volume) => Box::new(volume),
         Err(why) => panic!("fileserver: a volume in memory would not format: {why}"),
     }
 }
 
-fn fat_on<D: Disk + 'static>(disk: D, role: Role) -> Result<Box<dyn Volume>, String> {
-    FatVolume::mount(disk, clean_limit(role), role == Role::Log, fileserver::volume::now_nanos)
+fn fat_on<D: Disk + 'static>(disk: D, writable: bool) -> Result<Box<dyn Volume>, String> {
+    FatVolume::mount(disk, blocks_of(SMALL_CLEAN_BYTES), writable, fileserver::volume::now_nanos)
         .map(|v| Box::new(v) as Box<dyn Volume>)
 }
 
-/// The clean blocks `role`'s cache keeps, of [`CLEAN_SHARE`] of physical memory.
-fn clean_limit(role: Role) -> usize {
-    let bytes = match role {
-        Role::Data => (toyos::system::memory_total() / CLEAN_SHARE).saturating_sub(2 * SMALL_CLEAN_BYTES),
-        Role::Log | Role::Boot => SMALL_CLEAN_BYTES,
-        Role::System => unreachable!("fileserver: ROOT is memory and has no cache"),
-    };
+/// The clean blocks DATA's cache keeps: [`CLEAN_SHARE`] of physical memory,
+/// less what the log and boot roles keep.
+fn data_clean_limit() -> usize {
+    blocks_of((toyos::system::memory_total() / CLEAN_SHARE).saturating_sub(2 * SMALL_CLEAN_BYTES))
+}
+
+fn blocks_of(bytes: u64) -> usize {
     usize::try_from(bytes / toyos_blockdev::BLOCK as u64).expect("a block count fits a usize")
 }
 
