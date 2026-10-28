@@ -9,7 +9,8 @@
 //!   the departure frees the gate and rings it, and its write and read work.
 //! - **netstack's exit ends a blocked read in every holder** with `Aborted`.
 //! - **One `Command` spawned twice gives each child a holder of its own**:
-//!   each spawn asks netstack for one, and both children write through it.
+//!   each spawn asks netstack for one, and both children write through their
+//!   own.
 //! - **Within a process, every handle of a stream is one end**: handles given
 //!   out and taken back read on where the last read stopped; a bare `dup` is
 //!   refused by name with nothing written; a stream is no file; a duplicate of

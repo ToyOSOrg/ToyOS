@@ -23,7 +23,7 @@ pub struct Command {
     stdin: Option<Stdio>,
     stdout: Option<Stdio>,
     stderr: Option<Stdio>,
-    /// The child's descriptors past its stdio, each lent to every spawn.
+    /// The child's descriptors past its stdio.
     extra_fds: Vec<(u32, Given)>,
     /// Taken by the next spawn: moved to its child, or closed if it is refused.
     endowments: Vec<(String, toyos::OwnedHandle)>,
