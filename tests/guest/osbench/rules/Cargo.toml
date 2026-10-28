@@ -1,6 +1,6 @@
 [package]
 name = "osbench-rules"
-description = "osbench's pure rules, host-tested: when a munmap pair's x2APIC readings admit its figure, where the CPU crunch stops for heat, and an energy counter's span across its wrap."
+description = "osbench's pure rules, host-tested: when a munmap pair's x2APIC readings admit its figure, where the CPU crunch stops for heat, an energy counter's span across its wrap, and when a CPU's clock has settled."
 version = "0.1.0"
 edition = "2021"
 license = "MIT OR Apache-2.0"

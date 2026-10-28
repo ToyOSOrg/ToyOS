@@ -225,7 +225,8 @@ fn busy_permille(span: Duration) -> Option<u64> {
     (total > 0).then(|| (total - (idle1 - idle0)) * 1000 / total)
 }
 
-/// What a Linux number depends on, read and never changed.
+/// What a Linux number depends on, read and never changed. `README.md` says
+/// which of them a comparison sets.
 pub fn conditions() {
     condition("kernel", read("/proc/sys/kernel/osrelease").unwrap_or_default());
     let distro = fs::read_to_string("/etc/os-release").ok().and_then(|text| {
@@ -238,6 +239,7 @@ pub fn conditions() {
     condition("cpufreq_driver", per_cpu("cpufreq/scaling_driver"));
     condition("governor", per_cpu("cpufreq/scaling_governor"));
     condition("epp", per_cpu("cpufreq/energy_performance_preference"));
+    condition("min_khz", per_cpu("cpufreq/scaling_min_freq"));
     condition("max_khz", per_cpu("cpufreq/scaling_max_freq"));
     condition(
         "intel_no_turbo",
@@ -245,6 +247,11 @@ pub fn conditions() {
     );
     condition("boost", read("/sys/devices/system/cpu/cpufreq/boost").unwrap_or_else(|| "absent".into()));
     condition("amd_pstate", read("/sys/devices/system/cpu/amd_pstate/status").unwrap_or_else(|| "absent".into()));
+    condition("platform_profile", read("/sys/firmware/acpi/platform_profile").unwrap_or_else(|| "absent".into()));
+    // What every timestamp here is read from: one the vDSO cannot read costs
+    // each `Instant::now` a syscall.
+    let clocksource = read("/sys/devices/system/clocksource/clocksource0/current_clocksource");
+    condition("clocksource", clocksource.unwrap_or_else(|| "absent".into()));
     for supply in fs::read_dir("/sys/class/power_supply").into_iter().flatten().flatten() {
         let at = supply.path();
         let get = |f: &str| read(&at.join(f).to_string_lossy());
@@ -514,8 +521,9 @@ pub fn mount_options(dir: &str) -> String {
     mount_of(dir).map_or_else(|| "unknown".into(), |(fstype, _, options)| format!("{fstype} {options}"))
 }
 
-/// The runner's home, and the filesystem and disk model holding it; the
-/// path itself names the user and is never printed.
+/// The runner's home, and the filesystem and disk model holding it, as
+/// `ext4, NVMe disk, model <model>`; the path itself names the user and is
+/// never printed.
 pub fn persistent_dir() -> Option<(String, String)> {
     let home = std::env::var("HOME").ok()?;
     let (fstype, source, _) = mount_of(&home)?;

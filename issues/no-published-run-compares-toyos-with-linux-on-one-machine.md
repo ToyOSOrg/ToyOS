@@ -34,6 +34,14 @@ its groups:
 - a short CPU crunch, one thread then all, that stops at TjMax less 15 C
   where the package's temperature can be read: `crunch.*`.
 
+`tests/guest/osbench/README.md` is how a comparison is run: both halves
+from one revision, interleaved runs, Linux under ToyOS's frequency request
+and on the TSC, and `persist` on the bench's NVMe under both. ToyOS reaches
+that disk only once the bench's TOYOS-DATA partition is designated, which
+neither bench's is: until then the `osbench` row refuses each boot. The AMD
+bench's Linux reads no TSC
+(`issues/the-amd-benchs-linux-reads-its-clock-through-a-syscall.md`).
+
 `internet.*`, HTTPS to Cloudflare's speed test, is exploratory evidence of a
 path neither system owns, run only when a pass names its row: no automated
 test depends on the public internet.

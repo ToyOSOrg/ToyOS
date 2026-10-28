@@ -5,8 +5,8 @@
 //!
 //! Both systems fault each anonymous page in on its first touch: ToyOS in
 //! 4 KiB pages always, Linux in 4 KiB pages where huge pages are refused and
-//! in 2 MiB pages where they are asked for and given. `map_touch_unmap` is the
-//! whole cost. The allocator is each system's own: ToyOS std's dlmalloc
+//! in 2 MiB pages where they are asked for and given. `first_touch` faults in
+//! the same bytes either way, and `map_touch_unmap` is the whole cost. The allocator is each system's own: ToyOS std's dlmalloc
 //! under one lock, Linux's static musl malloc.
 
 use std::alloc::{alloc, dealloc, realloc, Layout};
@@ -38,37 +38,40 @@ pub fn suite() {
     realloc_grow();
 }
 
-/// A fresh 64 MiB mapping written once per page: ns per page touched, each
-/// round's mean, and the whole map-touch-unmap per page; 4 KiB pages with
-/// huge pages refused, and 2 MiB pages with them asked for. Ten rounds after one.
+/// A fresh 64 MiB mapping written once per 4 KiB, so every byte of it is
+/// faulted in whatever page size backs it: ns per MiB touched, each round's,
+/// and the whole map-touch-unmap per MiB; with huge pages refused (`4k`) and
+/// asked for (`2m`). Ten rounds after one.
 fn first_touch() {
     const LEN: usize = 64 * MIB;
-    for (name, step, map) in [("4k", PAGE, sys::map_anon_4k as fn(usize) -> *mut u8), ("2m", HUGE, sys::map_anon_huge)] {
-        let pages = (LEN / step) as u64;
+    const MIBS: u64 = (LEN / MIB) as u64;
+    for (name, map) in [("4k", sys::map_anon_4k as fn(usize) -> *mut u8), ("2m", sys::map_anon_huge)] {
         let round = || {
             let t = Instant::now();
             let ptr = map(LEN);
             let mapped = ns_since(t);
             let before = sys::counts();
             let t = Instant::now();
-            for page in 0..LEN / step {
+            for page in 0..LEN / PAGE {
                 // SAFETY: inside the mapping just made.
-                unsafe { ptr.add(page * step).write_volatile(1) };
+                unsafe { ptr.add(page * PAGE).write_volatile(1) };
             }
             let touched = ns_since(t);
             let faults = sys::counts().faults.zip(before.faults).map(|(b, a)| b - a);
+            let huge = sys::huge_backing();
             let t = Instant::now();
             // SAFETY: the whole mapping, unused from here.
             unsafe { sys::unmap(ptr, LEN) };
-            (touched / pages, (mapped + touched + ns_since(t)) / pages, faults)
+            (touched / MIBS, (mapped + touched + ns_since(t)) / MIBS, faults, huge)
         };
         round();
         crate::clock::settle();
-        let rounds: Vec<(u64, u64, Option<u64>)> = (0..10).map(|_| round()).collect();
+        let rounds: Vec<(u64, u64, Option<u64>, String)> = (0..10).map(|_| round()).collect();
         let faults = rounds.iter().filter_map(|r| r.2).max().map_or("unread".to_string(), |f| f.to_string());
-        let extra = [("page_bytes", step.to_string()), ("faults_per_round_max", faults), ("huge_pages", sys::huge_backing())];
-        result(&format!("mem.first_touch.{name}"), "ns/page", &mut rounds.iter().map(|r| r.0).collect::<Vec<_>>(), &extra);
-        result(&format!("mem.map_touch_unmap.{name}"), "ns/page", &mut rounds.iter().map(|r| r.1).collect::<Vec<_>>(), &extra);
+        let huge = rounds.last().map(|r| r.3.clone()).unwrap_or_default();
+        let extra = [("mapping_bytes", LEN.to_string()), ("faults_per_round_max", faults), ("huge_pages_last_round", huge)];
+        result(&format!("mem.first_touch.{name}"), "ns/MiB", &mut rounds.iter().map(|r| r.0).collect::<Vec<_>>(), &extra);
+        result(&format!("mem.map_touch_unmap.{name}"), "ns/MiB", &mut rounds.iter().map(|r| r.1).collect::<Vec<_>>(), &extra);
     }
 }
 

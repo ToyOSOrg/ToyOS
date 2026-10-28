@@ -1108,10 +1108,17 @@ const METAL: &[(&str, metal::Metal)] = &[
     (
         // The numbers compared with the same program on the bench's own Linux.
         // Evidence and not a verdict: they are read off the log, and the row
-        // holds only that every group ran to its end. The T14 and the AMD bench.
-        // One boot runs the whole suite, so three readbacks are three runs.
+        // holds only that every group ran to its end on the bench's NVMe.
+        // The T14 and the AMD bench. One boot runs the whole suite, so three
+        // readbacks are three runs.
         "osbench",
-        metal::Metal { arms: BENCHCASE, judge: |b| osbench_ran(b[0], &OSBENCH_GROUPS) },
+        metal::Metal {
+            arms: BENCHCASE,
+            judge: |b| {
+                data_on_the_nvme(b[0])?;
+                osbench_ran(b[0], &OSBENCH_GROUPS)
+            },
+        },
     ),
     (
         // `osbench lan` against the `osbench-peer` the other bench's Linux runs,
@@ -1619,7 +1626,7 @@ const TESTCASES: &[metal::Arm] = &[metal::once(
 
 /// `osbench`'s groups, each a job named by its symlink, in `osbench all`'s
 /// order: `boot` first, which reads how long the boot took to reach it, and
-/// `persist` last, which writes the log volume.
+/// `persist` last, which writes the disk.
 const OSBENCH_GROUPS: [&str; 17] = [
     "osbench_boot",
     "osbench_identity",
@@ -1646,10 +1653,12 @@ const OSBENCH_GROUPS: [&str; 17] = [
 /// served 64 MiB write stalled and `files` took 80 s against 13. The groups
 /// since add at most 50 s by their own spans: `crunch`'s one-thread 16 s
 /// (ToyOS reads no temperature, so its all-core phase does not run), and
-/// under 30 s of memcpy sizes, pipe sizes and 1 ms timers. So a list bound of
-/// 430 s leaves that stall 136 s.
+/// under 30 s of memcpy sizes, pipe sizes and 1 ms timers. Each of the some
+/// ninety benchmarks that settle the clock settles it before and after
+/// itself, 50 ms where the clock holds and 0.5 s at most (`clock::settle`):
+/// under 95 s. So a list bound of 525 s leaves that stall 136 s.
 const BENCHCASE: &[metal::Arm] = &[metal::Arm {
-    adds_ms: 370_000,
+    adds_ms: 465_000,
     ..metal::once("benchcase", "tests/images/benchcase.toml", &[], &OSBENCH_GROUPS)
 }];
 
@@ -1684,6 +1693,26 @@ fn osbench_ran(boot: &metal::Readback, jobs: &[&str]) -> Result<(), String> {
         boot.job_passed(job)?;
         let group = job.strip_prefix("osbench_").expect("a group's job");
         boot.log().must_say(&format!("group={group} done"))?;
+    }
+    Ok(())
+}
+
+/// DATA, which `osbench persist` writes, was a volume on a TOYOS-DATA
+/// partition the NVMe driver serves: mounted, or formatted off its
+/// designation, and not memory standing in for a partition that is not ours.
+/// The block service refuses DATA where two disks carry one, so a mount
+/// alongside the NVMe's partition is that partition's.
+fn data_on_the_nvme(boot: &metal::Readback) -> Result<(), String> {
+    let log = boot.log();
+    let text = log.text();
+    let served = format!(" of type {} at block ", toyos_gpt::Guid::TOYOS_DATA);
+    if !text.lines().any(|l| l.contains("nvme] nvme ") && l.contains(&served)) {
+        return Err("the NVMe driver served no TOYOS-DATA partition, so persist measured no disk of the bench's".into());
+    }
+    let mounted = ["fileserver: mounted the DATA volume", "fileserver: block 0 designates this partition for ToyOS; formatting it"];
+    if !mounted.iter().any(|said| text.contains(said)) {
+        let why = text.lines().find(|l| l.contains("fileserver: the DATA")).unwrap_or("the file server said nothing of DATA");
+        return Err(format!("DATA was not the NVMe's partition, so persist measured no disk: {why}"));
     }
     Ok(())
 }

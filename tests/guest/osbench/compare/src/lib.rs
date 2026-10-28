@@ -11,6 +11,16 @@
 //! uncorrected for the table's other rows. Better or worse is judged only
 //! for a unit whose better direction is known ([`better`]); for any other
 //! the verdict says which way ToyOS differs.
+//!
+//! A row whose clock fell across a run's measurement, the clock settled
+//! after it (`mhz_after`) under nine tenths of the one settled before it
+//! (`mhz_settled`) ([`clock_fell`]), ran into a limit of the machine's, power
+//! or heat, which no program reads on both systems: the verdict says in how
+//! many of each system's runs it did.
+//!
+//! A system's runs on one machine are one configuration ([`SETUP`]): runs that
+//! disagree on it are refused, since their median would mix two, and each
+//! machine's table states what each system's runs were taken under.
 
 use std::collections::BTreeMap;
 use std::fmt::Write as _;
@@ -26,9 +36,19 @@ pub enum Os {
     Toyos,
 }
 
+impl Os {
+    pub fn name(self) -> &'static str {
+        match self {
+            Os::Linux => "Linux",
+            Os::Toyos => "ToyOS",
+        }
+    }
+}
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Outcome {
-    Measured { unit: String, p50: u64 },
+    /// `clock_fell` as [`clock_fell`] judges the line's two clocks.
+    Measured { unit: String, p50: u64, clock_fell: bool },
     /// Unmeasured, unsupported or refused, with the run's reason.
     Not { kind: String, why: String },
 }
@@ -49,7 +69,7 @@ impl Run {
 
 /// One run's lines. A benchmark a run reports in more than one group, as
 /// every group's `cpu.clock`, is named `<bench>@<group>`, and the `k`th of
-/// one name in a group, as `fair.flat`'s jobs, `<name>#k`. A run with no
+/// one name in a group `<name>#k`. A run with no
 /// osbench line, two systems' lines or one group started twice is refused.
 pub fn parse(text: &str) -> Result<Run, String> {
     let mut os = None;
@@ -89,7 +109,8 @@ pub fn parse(text: &str) -> Result<Run, String> {
         let fields: BTreeMap<&str, &str> = words.filter_map(|w| w.split_once('=')).collect();
         let outcome = if let Some(unit) = fields.get("unit") {
             let p50 = fields.get("p50").and_then(|v| v.parse().ok()).ok_or_else(|| format!("{bench}: no p50"))?;
-            Outcome::Measured { unit: unit.to_string(), p50 }
+            let mhz = |key: &str| fields.get(key).and_then(|v| v.parse().ok());
+            Outcome::Measured { unit: unit.to_string(), p50, clock_fell: clock_fell(mhz("mhz_settled"), mhz("mhz_after")) }
         } else if let Some((kind, why)) =
             ["unmeasured", "unsupported", "refused"].iter().find_map(|k| fields.get(k).map(|why| (*k, *why)))
         {
@@ -112,6 +133,13 @@ pub fn parse(text: &str) -> Result<Run, String> {
         benches.insert(name, outcome.clone());
     }
     Ok(Run { os: os.ok_or("no osbench line")?, conds, benches })
+}
+
+/// Whether the clock fell across a measurement: the clock settled after it
+/// under nine tenths of the clock settled before it. A line that settled no
+/// clock says nothing either way.
+pub fn clock_fell(settled: Option<u64>, after: Option<u64>) -> bool {
+    matches!((settled, after), (Some(settled), Some(after)) if after * 10 < settled * 9)
 }
 
 pub fn median(values: &[u64]) -> f64 {
@@ -212,6 +240,44 @@ pub fn better(unit: &str) -> Option<Better> {
 /// varies by the run.
 const PATHS: [(&str, &str, usize); 2] = [("lan.", "lan.peer_link", 2), ("internet.", "internet.link", 1)];
 
+/// The conditions every run of one system on one machine must share: the
+/// kernel, the CPU's frequency request and the clock every timestamp is read
+/// from, and what serves each filesystem the `fs` and `persist` rows use.
+pub const SETUP: [&str; 13] = [
+    "kernel",
+    "cpufreq_driver",
+    "governor",
+    "epp",
+    "min_khz",
+    "max_khz",
+    "boost",
+    "intel_no_turbo",
+    "platform_profile",
+    "clocksource",
+    "smt_active",
+    "fs.mem.served_by",
+    "fs.disk.served_by",
+];
+
+/// `os`'s setup on these runs, as `key=value` in [`SETUP`]'s order, or the
+/// first key its runs disagree on.
+fn setup(runs: &[&Run], os: Os) -> Result<Vec<String>, String> {
+    let runs: Vec<&&Run> = runs.iter().filter(|r| r.os == os).collect();
+    let mut said = Vec::new();
+    for key in SETUP {
+        let values: std::collections::BTreeSet<Option<&String>> = runs.iter().map(|r| r.conds.get(key)).collect();
+        match values.iter().collect::<Vec<_>>()[..] {
+            [] | [None] => {}
+            [Some(value)] => said.push(format!("{key}={value}")),
+            _ => {
+                let seen: Vec<&str> = values.iter().map(|v| v.map_or("absent", String::as_str)).collect();
+                return Err(format!("the {} runs disagree on {key}: {}", os.name(), seen.join(" / ")));
+            }
+        }
+    }
+    Ok(said)
+}
+
 fn path(said: &str, words: usize) -> String {
     said.split(['_', ' ']).take(words).collect::<Vec<_>>().join(" ")
 }
@@ -239,6 +305,12 @@ pub fn compare(runs: &[Run]) -> Result<String, String> {
             write!(out, " {cond}: {seen}.").unwrap();
         }
         writeln!(out, "\n").unwrap();
+        for os in [Os::Linux, Os::Toyos] {
+            let said = setup(&runs, os).map_err(|why| format!("{machine}: {why}"))?;
+            if !said.is_empty() {
+                writeln!(out, "{} setup: {}.\n", os.name(), said.join(", ")).unwrap();
+            }
+        }
         writeln!(out, "| bench | unit | Linux p50s | Linux median | Linux range | ToyOS p50s | ToyOS median | ToyOS range | ToyOS/Linux | p | verdict |").unwrap();
         writeln!(out, "|---|---|---|---|---|---|---|---|---|---|---|").unwrap();
         let names: std::collections::BTreeSet<&String> = runs.iter().flat_map(|r| r.benches.keys()).collect();
@@ -262,14 +334,16 @@ pub fn compare(runs: &[Run]) -> Result<String, String> {
 fn compare_one(runs: &[&Run], name: &str) -> String {
     let mut unit = None;
     let mut values: BTreeMap<Os, Vec<u64>> = BTreeMap::new();
+    let mut fell: BTreeMap<Os, usize> = BTreeMap::new();
     let mut not: BTreeMap<Os, Vec<String>> = BTreeMap::new();
     for run in runs {
         match run.benches.get(name) {
-            Some(Outcome::Measured { unit: u, p50 }) => {
+            Some(Outcome::Measured { unit: u, p50, clock_fell }) => {
                 if unit.get_or_insert(u.as_str()) != u {
                     return "| | | | | | | | | units differ between runs".into();
                 }
                 values.entry(run.os).or_default().push(*p50);
+                *fell.entry(run.os).or_default() += usize::from(*clock_fell);
             }
             Some(Outcome::Not { kind, why }) => not.entry(run.os).or_default().push(format!("{kind}: {why}")),
             None => not.entry(run.os).or_default().push("absent".into()),
@@ -309,13 +383,17 @@ fn compare_one(runs: &[&Run], name: &str) -> String {
         _ => ("-".into(), "-".into(), String::new()),
     };
     let mut verdict = verdict;
+    for (os, fell) in fell.iter().filter(|(_, n)| **n > 0) {
+        let sep = if verdict.is_empty() { "" } else { "; " };
+        let of = values.get(os).map_or(0, Vec::len);
+        verdict = format!("{verdict}{sep}the clock fell in {fell} of {of} {} run(s)", os.name());
+    }
     for (os, reasons) in &not {
         let mut distinct = reasons.clone();
         distinct.sort();
         distinct.dedup();
-        let who = if *os == Os::Linux { "Linux" } else { "ToyOS" };
         let sep = if verdict.is_empty() { "" } else { "; " };
-        verdict = format!("{verdict}{sep}{who} {} run(s) {}", reasons.len(), distinct.join(" / "));
+        verdict = format!("{verdict}{sep}{} {} run(s) {}", os.name(), reasons.len(), distinct.join(" / "));
     }
     format!("{} | {lp} | {lm} | {lr} | {tp} | {tm} | {tr} | {ratio} | {p} | {verdict}", unit.unwrap_or_default())
 }
@@ -345,7 +423,7 @@ mod tests {
         );
         assert_eq!(r.os, Os::Toyos);
         assert_eq!(r.machine(), Some("Bench_CPU"));
-        assert_eq!(r.benches["lan.wired.tcp.rtt.64"], Outcome::Measured { unit: "ns".into(), p50: 812 });
+        assert_eq!(r.benches["lan.wired.tcp.rtt.64"], Outcome::Measured { unit: "ns".into(), p50: 812, clock_fell: false });
         assert_eq!(
             r.benches["lan.wifi.tcp.upload"],
             Outcome::Not { kind: "unsupported".into(), why: "ToyOS_has_no_Wi-Fi_driver".into() }
@@ -360,8 +438,8 @@ mod tests {
         let groups = ["sched", "fair"].map(|g| format!("osbench v=2 os=linux group={g} start\nosbench v=2 os=linux bench=cpu.clock unit=MHz n=1 min=1 p50=4000 max=1 mean=1\n")).concat();
         let run = parse(&groups).unwrap();
         assert_eq!(run.benches.keys().collect::<Vec<_>>(), ["cpu.clock@fair", "cpu.clock@sched"]);
-        let jobs = "osbench v=2 os=linux bench=fair.flat unit=permille n=5 min=1 p50=63 max=1 mean=1 job=build\n".repeat(2);
-        assert_eq!(parse(&jobs).unwrap().benches.keys().collect::<Vec<_>>(), ["fair.flat#1", "fair.flat#2"]);
+        let jobs = "osbench v=2 os=linux bench=wake.storm unit=ns n=5 min=1 p50=63 max=1 mean=1\n".repeat(2);
+        assert_eq!(parse(&jobs).unwrap().benches.keys().collect::<Vec<_>>(), ["wake.storm#1", "wake.storm#2"]);
         let mixed = "osbench v=2 os=linux cond cpus=8\nosbench v=2 os=toyos cond cpus=8\n";
         assert!(parse(mixed).unwrap_err().contains("two systems"));
         assert!(parse("nothing here\n").is_err());
@@ -484,6 +562,37 @@ mod tests {
         assert!(!compare(&runs).unwrap().contains("different links"), "a signal is no other link");
         let runs = [peer("linux", "wireless_driver=iwlwifi_signal_dbm=-52", 10), peer("toyos", "wired_driver=e1000e_speed_mbps=1000", 12)];
         assert!(compare(&runs).unwrap().contains("| the runs disagree on lan.peer_link |"));
+    }
+
+    #[test]
+    fn a_row_whose_clock_fell_in_a_run_says_so_per_system() {
+        assert!(clock_fell(Some(4289), Some(1884)));
+        assert!(!clock_fell(Some(4289), Some(3861)), "a tenth down is not a fall");
+        assert!(clock_fell(Some(4289), Some(3860)));
+        assert!(!clock_fell(None, Some(1396)), "no settled clock, no judgement");
+        let deflate = |os: &str, p50: u64, after: u64| {
+            run(os, &[&format!("bench=crunch.single.deflate unit=ns n=63 min=1 p50={p50} max=1 mean=1 mhz_settled=4289 mhz_after={after} mhz=1300")])
+        };
+        let mut runs: Vec<Run> = [(65, 4200), (66, 4210), (64, 4190), (65, 4200)].iter().map(|&(p, m)| deflate("linux", p, m)).collect();
+        runs.extend([(63, 1884), (66, 1396), (63, 4200), (64, 4280)].iter().map(|&(p, m)| deflate("toyos", p, m)));
+        let table = compare(&runs).unwrap();
+        let row = table.lines().find(|l| l.starts_with("| crunch.single.deflate")).unwrap();
+        assert!(row.ends_with("not resolved; the clock fell in 2 of 4 ToyOS run(s) |"), "{row}");
+    }
+
+    #[test]
+    fn a_systems_runs_on_two_setups_are_refused_and_one_setup_is_stated() {
+        let under = |os: &str, governor: &str| {
+            run(os, &[&format!("cond governor={governor}"), "cond clocksource=tsc", "bench=time.now unit=ps n=15 min=1 p50=14 max=1 mean=1"])
+        };
+        let mixed = [under("linux", "performance*16"), under("linux", "schedutil*16"), under("toyos", "absent")];
+        let why = compare(&mixed).unwrap_err();
+        assert!(why.contains("the Linux runs disagree on governor: performance*16 / schedutil*16"), "{why}");
+        let one = [under("linux", "performance*16"), under("linux", "performance*16")];
+        let table = compare(&one).unwrap();
+        assert!(table.contains("Linux setup: governor=performance*16, clocksource=tsc."), "{table}");
+        let absent = [under("linux", "performance*16"), run("linux", &["bench=time.now unit=ps n=15 min=1 p50=14 max=1 mean=1"])];
+        assert!(compare(&absent).unwrap_err().contains("disagree on governor: absent / performance*16"));
     }
 
     #[test]

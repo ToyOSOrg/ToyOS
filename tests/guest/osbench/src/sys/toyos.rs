@@ -358,9 +358,11 @@ pub fn map_anon_4k(len: usize) -> *mut u8 {
     map_anon(len)
 }
 
-/// The one writable persistent volume a benchcase boot has, and what it is.
+/// DATA's `/home`, and what serves it. A program cannot ask which disk that
+/// is, or whether DATA is in memory instead; the boot's log says both.
 pub fn persistent_dir() -> Option<(String, String)> {
-    Some(("/log".into(), "boot USB stick TOYOS-LOG partition, FAT32, LOG file server over usbd mass storage".into()))
+    let served_by = "DATA volume, bcachefs crate's format, DATA file server over the block service";
+    Some(("/home".into(), served_by.into()))
 }
 
 /// What carries a connection on ToyOS: netstack drives one card, Ethernet.

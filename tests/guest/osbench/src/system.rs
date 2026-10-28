@@ -12,10 +12,9 @@ use crate::{chunk, ns_since};
 
 const MIB: usize = 1 << 20;
 
-/// What one chunk of the fairness work costs one thread, 200 after one: the
-/// same instructions on both systems, so a difference between them is the
-/// clock that thread ran at. It is a 2 ms single-threaded burst, so it reads
-/// the clock a CPU leaving idle has, not the clock it settles at.
+/// What one chunk of the fairness work costs one thread, 200 after a settle:
+/// the same instructions on both systems, so a difference between them is the
+/// clock that thread ran at.
 pub fn chunk_rate() {
     chunk();
     crate::clock::settle();

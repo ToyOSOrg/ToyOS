@@ -5,6 +5,8 @@
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, Instant};
 
+use osbench_rules::settle::Plateau;
+
 use crate::report::result;
 use crate::ns_since;
 
@@ -28,21 +30,22 @@ pub fn mhz() -> u64 {
     ADDS * TURNS * 1000 / ns
 }
 
+/// The longest a settle spins before it takes the clock it has.
+const SETTLE_LIMIT: Duration = Duration::from_millis(500);
+
 /// A steady-state warm-up of the calling CPU, for a benchmark to run after:
-/// probes back to back for at least 10 ms and until three in a row agree
-/// within 1%, or for 200 ms. The clock it reached is printed beside the next
-/// result as `mhz_settled`, and `mhz` beside it is the clock just after.
+/// [`mhz`] back to back until `osbench_rules::settle` calls the clock
+/// settled, or for [`SETTLE_LIMIT`]. The clock it reached is printed beside
+/// the next result as `mhz_settled`, and `mhz` beside it is the clock just
+/// after.
 pub fn settle() {
     let start = Instant::now();
-    let mut last = [0u64; 3];
+    let at = || u64::try_from(start.elapsed().as_nanos()).expect("a settle under 584 years");
+    let mut plateau = Plateau::new(at(), mhz());
     loop {
-        last.rotate_left(1);
-        last[2] = ADDS * TURNS * 1000 / burst();
-        let (lo, hi) = (last.iter().min().copied().unwrap_or(0), last.iter().max().copied().unwrap_or(0));
-        let steady = lo > 0 && (hi - lo) * 100 <= hi;
-        let spent = start.elapsed();
-        if (steady && spent >= Duration::from_millis(10)) || spent >= Duration::from_millis(200) {
-            SETTLED.store(last[2], Ordering::Relaxed);
+        let reading = mhz();
+        if plateau.settled_with(at(), reading) || start.elapsed() >= SETTLE_LIMIT {
+            SETTLED.store(reading, Ordering::Relaxed);
             return;
         }
     }

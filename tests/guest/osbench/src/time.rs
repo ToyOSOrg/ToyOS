@@ -7,11 +7,6 @@ use std::time::{Duration, Instant};
 use crate::report::result;
 use crate::ns_since;
 
-/// What std's `yield_now` is on each system: Linux's is `sched_yield`;
-/// ToyOS's enters no kernel (`sdk/std/sys/thread.rs`: there is no yield
-/// syscall, and it is a spin-loop hint).
-const YIELD: &str = if cfg!(target_os = "toyos") { "spin_hint_no_syscall" } else { "sched_yield" };
-
 pub fn suite() {
     clock_read();
     sleeps("");
@@ -72,9 +67,14 @@ fn sleeps(suffix: &str) {
     }
 }
 
-/// `thread::yield_now` with nothing else to run: 15 rounds of 100,000 calls
-/// after one, picoseconds per call.
+/// `thread::yield_now` with nothing else to run, `sched_yield` on Linux: 15
+/// rounds of 100,000 calls after one, picoseconds per call. ToyOS has no
+/// yield to measure: its std's `yield_now` is a spin-loop hint
+/// (`sdk/std/sys/thread.rs`).
 fn yields() {
+    if cfg!(target_os = "toyos") {
+        return crate::report::unsupported("time.yield", "no yield syscall: std's yield_now is a spin-loop hint");
+    }
     const CALLS: u64 = 100_000;
     let round = || {
         let t = Instant::now();
@@ -86,5 +86,5 @@ fn yields() {
     round();
     crate::clock::settle();
     let mut ps: Vec<u64> = (0..15).map(|_| round()).collect();
-    result("time.yield", "ps", &mut ps, &[("yield_is", YIELD.into()), ("calls_per_sample", CALLS.to_string())]);
+    result("time.yield", "ps", &mut ps, &[("calls_per_sample", CALLS.to_string())]);
 }

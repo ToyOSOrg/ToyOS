@@ -1,7 +1,8 @@
 //! The judgements osbench makes over what it read, apart from the reading, so
 //! a host tests them: whether a munmap pair's figure stands ([`pair`]), where
-//! the CPU crunch stops for heat ([`heat`]), and how far an energy counter
-//! advanced across its wrap ([`energy`]).
+//! the CPU crunch stops for heat ([`heat`]), how far an energy counter
+//! advanced across its wrap ([`energy`]), and when a CPU's clock has settled
+//! ([`settle`]).
 
 pub mod pair {
     //! A munmap pair is an initiator that unmaps and a sibling that touched
@@ -240,6 +241,83 @@ pub mod energy {
         fn a_reading_past_the_range_is_refused() {
             assert_eq!(span(1001, 5, 1000), None);
             assert_eq!(span(5, 1001, 1000), None);
+        }
+    }
+}
+
+pub mod settle {
+    //! A clock has settled once every reading over [`STEADY_NS`] agrees
+    //! within 1%. A frequency governor can hold a CPU that just turned busy
+    //! at a lower clock for tens of milliseconds before it steps up, so a
+    //! span much shorter than that takes the step for the settled clock.
+
+    /// How long the readings must agree.
+    pub const STEADY_NS: u64 = 50_000_000;
+
+    /// The readings since the last one that disagreed.
+    #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+    pub struct Plateau {
+        since_ns: u64,
+        lo: u64,
+        hi: u64,
+    }
+
+    impl Plateau {
+        pub fn new(at_ns: u64, mhz: u64) -> Self {
+            Plateau { since_ns: at_ns, lo: mhz, hi: mhz }
+        }
+
+        /// The reading `mhz` taken at `at_ns`: whether every reading for
+        /// [`STEADY_NS`] up to it agrees within 1%. A reading that does not
+        /// agree with those before it starts the span again from itself.
+        pub fn settled_with(&mut self, at_ns: u64, mhz: u64) -> bool {
+            let (lo, hi) = (self.lo.min(mhz), self.hi.max(mhz));
+            if (hi - lo) * 100 > hi {
+                *self = Plateau::new(at_ns, mhz);
+            } else {
+                (self.lo, self.hi) = (lo, hi);
+            }
+            at_ns - self.since_ns >= STEADY_NS
+        }
+    }
+
+    #[cfg(test)]
+    mod tests {
+        use super::*;
+
+        const MS: u64 = 1_000_000;
+
+        /// The first time a probe every quarter millisecond from `at` settles.
+        fn settles(readings: impl Fn(u64) -> u64) -> Option<(u64, u64)> {
+            let mut plateau = Plateau::new(0, readings(0));
+            (1..4000).map(|i| i * MS / 4).find_map(|at| plateau.settled_with(at, readings(at)).then(|| (at, readings(at))))
+        }
+
+        #[test]
+        fn a_governors_30_ms_step_is_not_the_settled_clock() {
+            let ramp = |at: u64| if at < 30 * MS { 1362 } else { 4033 };
+            assert_eq!(settles(ramp), Some((80 * MS, 4033)));
+        }
+
+        #[test]
+        fn readings_within_one_percent_hold_the_span() {
+            let wobble = |at: u64| if (at / MS).is_multiple_of(2) { 4000 } else { 3970 };
+            assert_eq!(settles(wobble), Some((50 * MS, wobble(50 * MS))));
+        }
+
+        #[test]
+        fn a_reading_that_disagrees_starts_the_span_again() {
+            let mut plateau = Plateau::new(0, 4000);
+            assert!(!plateau.settled_with(40 * MS, 4000));
+            assert!(!plateau.settled_with(41 * MS, 3900), "2.5% below");
+            assert!(!plateau.settled_with(90 * MS, 3900), "49 ms since the disagreement");
+            assert!(plateau.settled_with(91 * MS, 3900));
+        }
+
+        #[test]
+        fn a_slow_drift_settles_only_once_it_stops() {
+            let drift = |at: u64| 3000 + (at / MS).min(200) * 5;
+            assert_eq!(settles(drift).map(|(_, mhz)| mhz), Some(4000));
         }
     }
 }
