@@ -37,6 +37,34 @@ Linux reboot into ToyOS on this bench leaves ULP armed, which fits ToyOS's start
 finding the PHY silent over PCIe and answering only on SMBus on every logged
 boot. Before #1091 nothing in ToyOS cleared it.
 
+**What the T14 read** (2026-10-28 13:37 UTC, `2fb6b8c60`, booted from the
+bench's Linux with `Wake-on: g`; row `i219_leaves_ulp_unarmed` passed and
+Linux found the NIC afterwards):
+
+- The wake found ULP Configuration 1 at `0x1800`: bits 11 and 12, the two that
+  keep sticky ULP and SMBus across `PERST#`, with sticky ULP, reset to SMBus,
+  in-band exit and host wake clear and no power-up-from-ULP indication. It was
+  read after ToyOS's own `LANPHYPC` cycle and its forcing of SMBus, so those
+  two bits outlived Linux's shutdown, the host reset and a power cycle of the
+  PHY by its pin. Power control read `0x9084` (K1 off) and `0xE4` read
+  `0x80000000`, bit 5 already clear. `LANPHYPC` was held low for 10.09 µs.
+- After the disarm and the reset of MAC and PHY together, the bring-up read
+  ULP Configuration 1 at `0x0000`, power control `0x9084` again, `0xE4`
+  unchanged.
+
+So the premise of (a) is observed: Linux's reboot leaves an arming that
+reaches the next start through everything ToyOS's start did before #1091,
+which never cleared it. That it is what made e1000e fail is not shown: that
+is the trial count's question.
+
+**K1 reads off after the disarm.** The disarm wrote power control with bit 14
+set (`0xD084`), and the next read, after `RST|PHY_RST`, is `0x9084`. Nothing
+read the register between the write and the reset, so the readings cannot
+tell a write the PHY ignored from a reset that returns the register to
+`0x9084`. A read straight after the write tells them apart. K1's state at
+gigabit was already the open question above; the disarm's ULP result does
+not depend on it.
+
 **One cut-off trial.** That same boot, an `i219_leaves_ulp_unarmed` image with no
 job of its own at `a6ae98b35`, rebooted 3 ms after netstack started, so the
 driver was cut off part way through its wake. Linux found the NIC afterwards.
@@ -57,18 +85,13 @@ link fault at gigabit after #1091 points here first.
 
 **Owner**: the I219 driver (`system/netstack/i219/`).
 
-**Exit**, in order:
-
-1. The bench's Linux, its Wake-on-LAN setting recorded, reboots into a ToyOS
-   image carrying the instrument: the wake's reading is what Linux and the
-   firmware left.
-2. That image reboots into itself: the wake's reading is what ToyOS left
-   across a host reset.
-3. The image reboots into Linux, and e1000e's probe outcome from its log goes
-   in evidence (Linux is a black-box measurement here, not a committed
-   oracle).
-
-Steps 1 and 2 settle candidate (a). A clean step 3 alone proves nothing for a
+**Exit.** Step 1 of the original sequence, Linux with its Wake-on-LAN setting
+recorded into an image carrying the instrument, is done (above). Step 2, the
+image into itself, is no longer needed for (a): its premise is observed, and
+what step 2 would add is that the fixed driver's `0x0000` survives a host
+reset unarmed, which every trial's Linux probe after a fixed boot exercises
+directly. What remains is step 3 repeated: each T14 boot's e1000e probe after
+a ToyOS boot, in `nic-trials.tsv`. A clean trial alone proves nothing for a
 failure seen once: calling the defect fixed needs the base image's failure
 rate measured first, or, at a rate near the one in 176 logged boots, about
 500 clean cycles for 95% confidence.
