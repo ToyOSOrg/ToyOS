@@ -47,8 +47,9 @@
 //! **The pace these accesses are made at is
 //! [`crate::phy::ARBITRATION_PACE_NANOS`]**, because every one of them is under
 //! §8.2.4's flag and the T14 is the one machine whose answer to a faster pace
-//! was a power-off. The one exception is the write that releases `LANPHYPC`,
-//! which ends the pin's hold and is timed by it.
+//! was a power-off. Two accesses are not paced, as `MDIC`'s own poll is not:
+//! the `STATUS` read that flushes `LANPHYPC`'s low write and the write that
+//! releases it, which bound the pin's hold and are timed by it.
 
 use crate::phy::PhyRefusal;
 use crate::power::Settled;

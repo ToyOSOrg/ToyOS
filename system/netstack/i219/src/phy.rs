@@ -486,8 +486,10 @@ impl<'a, R: Registers, C: Clock> Arbitration<'a, R, C> {
     /// **The pace is over the agents and not over one register.** §8.2.4 calls
     /// what the flag arbitrates "shared CSR registers with the firmware and
     /// hardware" — a set and not a word — so every access this driver makes
-    /// under the flag is paced from the same clock reading, and `MDIC`'s own
-    /// poll is the one exception (it is the transaction, not the arbitration).
+    /// under the flag is paced from the same clock reading. The exceptions are
+    /// `MDIC`'s own poll (it is the transaction, not the arbitration) and the
+    /// `LANPHYPC` hold's flushing read and release write ([`Self::flush`],
+    /// [`Self::write_after`]), which the hold times.
     fn read_at(&self, reg: usize) -> u32 {
         self.pace();
         let reading = self.regs.read32(reg);

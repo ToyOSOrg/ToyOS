@@ -32,9 +32,10 @@ silent after its power cycle, answering once the MAC was forced onto SMBus.
 first answered, and the bring-up's what it holds after the reset. Every T14
 metal boot ends with `0xCF9` ← `06h` into the loader's chain pass and the
 bench's Linux, and the orchestrator's runner checks e1000e's probe after each
-one (`LINUX-NIC: ok|MISSING` in its summary): each boot is one trial of the
-failing transition, and the orchestrator's tally of them is this issue's
-trial count.
+one: each boot is one trial of the failing transition. The trials are
+`nic-trials.tsv` on the evidence repository's `bench-nic-trials` branch (date,
+run label, revision, `LINUX-NIC` result), appended after each boot; that file
+is this issue's trial count.
 
 **K1, not settled.** The disarm enables K1 (page 770 register 17 bit 14), as
 the vendor's disable does. Whether this PCH needs K1 off at gigabit is outside
