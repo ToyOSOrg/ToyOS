@@ -450,9 +450,8 @@ pub(crate) fn sleep(nanos: u64) -> Result<(), u64> {
         if left == 0 {
             return Ok(());
         }
-        let poller = Poller::new(1);
-        poller.watch(&call.wake(), READABLE, 0);
-        poller.wait(1, left, |_| {});
+        // Ready or the deadline: the take at the loop's top says which.
+        toyos::poller::wait_one(&call.wake(), READABLE, left).expect("signals: libc's own wake event refused a wait");
     }
 }
 

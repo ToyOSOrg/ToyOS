@@ -19,7 +19,7 @@ use std::collections::BTreeMap;
 
 use toyos::ipc::Connection;
 use toyos::namespace::Namespace;
-use toyos::poller::{Poller, READABLE};
+use toyos::poller::READABLE;
 use toyos::wake::{Bell, Waker};
 use toyos_abi::syscall::SyscallError;
 use toyos_blockring::client::{Client, Outcome, Ticket};
@@ -368,11 +368,7 @@ pub(crate) fn connect(names: &Namespace, service: &str) -> Result<Connection, Er
 /// The header of the service's answer on `conn`, once it is there, within
 /// [`wire::ANSWER_BOUND_NS`].
 pub(crate) fn answer(conn: &Connection) -> Result<toyos::ipc::IpcHeader, Error> {
-    let poller = Poller::new(1);
-    poller.watch(conn, READABLE, 0);
-    let mut ready = false;
-    poller.wait(1, wire::ANSWER_BOUND_NS, |_| ready = true);
-    if !ready {
+    if !toyos::poller::wait_one(conn, READABLE, wire::ANSWER_BOUND_NS).map_err(Error::Kernel)? {
         return Err(Error::Unanswered);
     }
     conn.recv_header().map_err(|_| Error::Ended)

@@ -418,7 +418,6 @@ impl Log {
             return;
         }
         self.unanswered.set(self.unanswered.get() + 1);
-        let poller = Poller::new(1);
         let began = Instant::now();
         loop {
             let step = self.rx.borrow_mut().pump(&self.conn);
@@ -449,8 +448,11 @@ impl Log {
                 );
                 return;
             }
-            poller.watch(&self.conn, READABLE, 0);
-            poller.wait(1, left.as_nanos() as u64, |_| {});
+            // Ready or the bound: the next pump and the check above say which.
+            if let Err(e) = toyos::poller::wait_one(&self.conn, READABLE, left.as_nanos() as u64) {
+                toyos::warn!("supervisor: the kernel refused a wait on logkeeper's answer ({e:?}); stopping without it");
+                return;
+            }
         }
     }
 }
