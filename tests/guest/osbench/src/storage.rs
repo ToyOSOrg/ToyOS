@@ -1,14 +1,15 @@
-//! Persistent storage, each system on the medium a measured boot has, so
-//! **not like for like** until ToyOS's DATA is the bench's partition: what
-//! these say is what a durable write costs there, each line naming it.
+//! The bench's disk, through each system's persistent filesystem
+//! ([`crate::files::disk`]): durable writes first, each made durable by
+//! `sync_all` or `sync_data` before the next, then `files`' cached operations
+//! under the same directory as `fs.disk.*`. Every line names what served it
+//! and its medium.
 //!
-//! On a ToyOS benchcase boot that is the boot USB stick's `TOYOS-LOG`
-//! partition, FAT32, through the LOG file server and usbd: the stick's other
-//! volumes are read-only, and DATA is the bench's partition only once ToyOS
-//! has designated it. On Linux it is a directory in the runner's home, on
-//! whatever disk and filesystem hold it. Every file here is removed at the
-//! end; the most alive at once is under 10 MiB, inside what the log volume
-//! leaves free.
+//! On Linux that is the runner's home, on whatever filesystem and disk hold
+//! it. On ToyOS it is `/home`, on the DATA volume: the bcachefs crate's
+//! format, through the DATA file server, the block service and the disk's
+//! driver. A ToyOS boot whose DATA is in memory measures memory here, which
+//! the `osbench` metal row refuses (`tests/toyos.rs`). Every file here is
+//! removed at the end.
 
 use std::fs::{self, File, OpenOptions};
 use std::io::{Read, Seek, SeekFrom, Write};
@@ -23,6 +24,11 @@ pub fn suite() {
     let Some(disk) = files::disk() else {
         return refuse("persist", "no persistent directory to write in");
     };
+    durable(&disk);
+    files::suite(&disk);
+}
+
+fn durable(disk: &files::Target) {
     let scratch = match Scratch::new(&disk.dir) {
         Ok(s) => s,
         Err(e) => return refuse("persist", format!("no scratch directory: {e}")),

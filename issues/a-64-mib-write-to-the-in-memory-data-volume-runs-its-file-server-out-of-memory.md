@@ -42,6 +42,9 @@ boots' 13 s, so the same write stalls on metal even where it completes.
 The server also refuses nothing on the way: every request answered until the
 allocator aborted the process, and the client saw `the file server is gone`.
 
+The same write is now `osbench persist`'s `fs.disk.seq_write.*`, which
+reaches the in-memory volume on a boot whose DATA is not designated.
+
 **Exit**: the server's memory for a 64 MiB file written to the in-memory volume
 is bounded by the file's size plus a stated overhead, shown by the same write
 under QEMU with its peak in the kernel's exit record; or the server refuses

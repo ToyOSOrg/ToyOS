@@ -36,10 +36,10 @@ its groups:
 
 `tests/guest/osbench/README.md` is how a comparison is run: both halves from
 one revision, interleaved runs, Linux as installed for the baseline, and
-Linux under ToyOS's frequency request as a labelled experiment. `persist` is
-not yet one disk: ToyOS writes the boot stick's LOG volume, and moves to the
-bench's NVMe once ToyOS designates its DATA partition itself. The README
-says why the AMD bench's Linux keeps time on the HPET.
+Linux under ToyOS's frequency request as a labelled experiment. `persist`
+runs on the bench's NVMe under both: the `osbench` row refuses a boot whose
+DATA is not the NVMe's TOYOS-DATA partition. The README says why the AMD
+bench's Linux keeps time on the HPET.
 
 `internet.*`, HTTPS to Cloudflare's speed test, is exploratory evidence of a
 path neither system owns, run only when a pass names its row: no automated

@@ -1,12 +1,13 @@
 //! Files, through std's `fs` on both systems: the same operations under a
-//! filesystem each keeps in memory (`mem`), and on ToyOS under `/home`
-//! (`served`). Persistent storage is `storage`'s.
+//! filesystem each keeps in memory (`mem`) and under the one on the bench's
+//! disk (`disk`, which `storage` runs beside its durable writes). Nothing here
+//! asks for durability: each system's cache and write-back decide what reaches
+//! the disk, and that is part of what the rows measure.
 //!
 //! `mem` is Linux's `/dev/shm` through the VFS, and ToyOS's `/tmp`, which the
-//! kernel serves through syscalls. `served` is ToyOS's DATA file server,
-//! through IPC per request: on the volume the bench's DATA partition holds
-//! where it holds one of ours, and in memory where it does not (the file
-//! server says which in the log).
+//! kernel serves through syscalls. `disk` is each system's
+//! [`crate::sys::persistent_dir`]: Linux's VFS and page cache over the
+//! runner's home, and ToyOS's DATA file server, through IPC per request.
 
 use std::fs::{self, File, OpenOptions};
 use std::io::{Read, Seek, SeekFrom, Write};
@@ -42,17 +43,6 @@ pub fn memory() -> Target {
         ("/dev/shm", "tmpfs, through the VFS")
     };
     Target { name: "mem", dir: dir.into(), served_by: served_by.into(), medium: Some("memory".into()) }
-}
-
-/// Every directory `files` measures under.
-pub fn targets() -> Vec<Target> {
-    let mut targets = vec![memory()];
-    if cfg!(target_os = "toyos") {
-        // Memory or the DATA partition's volume: the program cannot tell which.
-        let served_by = "the DATA file server, through IPC".into();
-        targets.push(Target { name: "served", dir: "/home".into(), served_by, medium: None });
-    }
-    targets
 }
 
 /// The persistent filesystem's directory, or `None` where the system has none.

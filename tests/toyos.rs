@@ -1145,10 +1145,18 @@ const METAL: &[(&str, metal::Metal)] = &[
     (
         // The numbers compared with the same program on the bench's own Linux.
         // Evidence and not a verdict: they are read off the log, and the row
-        // holds only that every group ran to its end. The T14 and the AMD bench.
-        // One boot runs the whole suite, so three readbacks are three runs.
+        // holds only that every group ran to its end on the bench's NVMe, on
+        // a boot that did not spend itself formatting DATA. The T14 and the
+        // AMD bench. One boot runs the whole suite, so three readbacks are
+        // three runs.
         "osbench",
-        metal::Metal { arms: BENCHCASE, judge: |b| osbench_ran(b[0], &OSBENCH_GROUPS) },
+        metal::Metal {
+            arms: BENCHCASE,
+            judge: |b| {
+                data_on_the_nvme(b[0])?;
+                osbench_ran(b[0], &OSBENCH_GROUPS)
+            },
+        },
     ),
     (
         // `osbench lan` against the `osbench-peer` the other bench's Linux runs,
@@ -1783,6 +1791,33 @@ fn osbench_ran(boot: &metal::Readback, jobs: &[&str]) -> Result<(), String> {
         boot.log().must_say(&format!("group={group} done"))?;
     }
     Ok(())
+}
+
+/// DATA, which `osbench persist` writes, was a volume of ours on the bench's
+/// NVMe, mounted (`hostdisk::left_alone`, which also refuses DATA from
+/// memory). The boot that formatted it is no measured run: its start went to
+/// the format, and the volume it leaves is new; it says how long that took.
+fn data_on_the_nvme(boot: &metal::Readback) -> Result<(), String> {
+    let log = boot.log();
+    let ours = common::hostdisk::loader_named(&boot.loader())?;
+    match common::hostdisk::left_alone(&log, &ours)?.1 {
+        common::hostdisk::Data::Mounted => Ok(()),
+        common::hostdisk::Data::Formatted => {
+            let text = log.text();
+            let at = |said: &str| text.lines().find(|l| l.contains(said)).and_then(since_boot);
+            let took = at("formatting it").zip(at("fileserver: Data serving ")).map(|(start, end)| end - start);
+            let took = took.map_or("its end unlogged".to_string(), |s| format!("{s:.3} s"));
+            Err(format!("this boot formatted DATA off its designation ({took}), and the format's boot is no measured run"))
+        }
+        common::hostdisk::Data::Foreign => {
+            Err("DATA on the bench's NVMe was no volume of ours, so persist measured no disk".into())
+        }
+    }
+}
+
+/// A log line's seconds since boot: `[2026-10-24 14:17:17 12.664 fileserver]`.
+fn since_boot(line: &str) -> Option<f64> {
+    line.strip_prefix('[')?.split_whitespace().nth(2)?.parse().ok()
 }
 
 /// A timing boot was in ACPI mode before its first job and stayed there, as a
