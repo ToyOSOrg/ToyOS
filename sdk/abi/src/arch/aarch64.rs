@@ -17,7 +17,7 @@ pub fn current_tid() -> Tid {
     Tid(unsafe { core::ptr::read_volatile((tp as usize + TCB_TID) as *const u32) })
 }
 
-/// The counter the clock page's two words describe: the generic timer's
+/// The counter the clock page's line describes: the generic timer's
 /// virtual count, which EL0 may read, read after every earlier instruction, as
 /// the x86-64 one is.
 #[inline]

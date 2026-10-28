@@ -534,6 +534,10 @@ pub(crate) const CONTROLS: &[Control] = &[
     red(KERNEL_LOOM, "seqlock-writer-fence-off", Some("panic_console_publish"), &[
         Fails("a_snapshot_is_one_publication_whole"),
     ]),
+    red(KERNEL_LOOM, "clock-latch-fence-off", Some("clock_latch"), &[
+        Fails("a_read_is_one_line_whole"),
+        Fails("a_later_read_is_never_an_older_line"),
+    ]),
     red(KERNEL_LOOM, "serial-try-lock-then-some", Some("serial_lock"), &[
         Fails("a_lost_try_lock_leaves_the_lock_held"),
         Fails("two_writers_never_overlap"),

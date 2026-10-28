@@ -15,6 +15,7 @@ pub mod apic;
 pub mod barrier;
 pub mod boot;
 pub mod cache;
+pub mod clocksource;
 pub mod control_regs;
 pub mod counters;
 pub mod console_uart;
@@ -22,7 +23,6 @@ pub mod cpu;
 pub mod entropy;
 pub mod entry;
 pub mod fpu;
-pub mod hpet;
 pub mod hw;
 pub mod idle;
 pub mod idt;
@@ -123,6 +123,7 @@ pub unsafe fn percpu_fetch_add(
 /// This architecture's part of a CPU's `cpu_local` record.
 pub struct CpuLocal {
     pub counters: counters::Local,
+    pub clock: clocksource::Local,
     pub idle_line: idle::Line,
     #[cfg(feature = "switch-witness")]
     pub hw: hw::Local,
@@ -132,6 +133,7 @@ impl CpuLocal {
     pub fn new() -> Self {
         Self {
             counters: counters::Local::new(),
+            clock: clocksource::Local::new(),
             idle_line: idle::Line::new(),
             #[cfg(feature = "switch-witness")]
             hw: hw::Local::new(),
