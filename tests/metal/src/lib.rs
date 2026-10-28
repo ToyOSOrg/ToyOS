@@ -1559,7 +1559,7 @@ impl Driver {
         }
         let own = |o: Owned| parts[Owned::ALL.iter().position(|x| *x == o).expect("listed")].clone();
         let kept = |o: Owned| own(o).unique.expect("recognise refuses a partition with no GUID");
-        let named = image.guids(toyos_build::gptwrite::random_guid);
+        let named = image.guids(toyos_build::image::random_guid);
         let mut every: Vec<toyos_gpt::Guid> = vec![kept(Owned::Esp), kept(Owned::Slots)];
         every.extend(named.iter().map(|(_, guid)| *guid));
         let holders = self.ssh("listing every partition's GUID", internal::HOLDERS)?;
@@ -3586,21 +3586,14 @@ mod tests {
     fn disk(parts: &[(&str, toyos_gpt::Guid)]) -> Vec<u8> {
         const TOTAL: u64 = 16 * 1024 * 1024;
         const ALIGN: u64 = 2048;
-        let entries: Vec<toyos_build::gptwrite::Entry<'_>> = (1..)
+        let entries: Vec<toyos_gpt::edit::Slot> = (1..)
             .zip(parts)
-            .map(|(i, (name, kind))| toyos_build::gptwrite::Entry {
-                kind: *kind,
-                unique: toyos_build::gptwrite::random_guid(),
-                first_lba: i * ALIGN,
-                last_lba: i * ALIGN + 511,
-                name,
+            .map(|(i, (name, kind))| {
+                toyos_gpt::edit::Slot::new(*kind, toyos_build::image::random_guid(), i * ALIGN, i * ALIGN + 511, name).unwrap()
             })
             .collect();
-        let table = toyos_build::gptwrite::table(TOTAL / u64::from(LBA), toyos_build::gptwrite::random_guid(), &entries);
         let mut out = vec![0u8; TOTAL as usize];
-        out[..table.primary.len()].copy_from_slice(&table.primary);
-        let back = out.len() - table.backup.len();
-        out[back..].copy_from_slice(&table.backup);
+        toyos_build::image::write_gpt(&mut std::io::Cursor::new(&mut out), TOTAL, toyos_build::image::random_guid(), &entries);
         out
     }
 

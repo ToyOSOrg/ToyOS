@@ -19,7 +19,6 @@ pub mod flash;
 pub mod fpgate;
 #[cfg(test)]
 pub mod gitfixture;
-pub mod gptwrite;
 pub mod hostedclang;
 pub mod flags;
 pub mod hostws;

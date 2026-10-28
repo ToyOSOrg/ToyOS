@@ -95,6 +95,7 @@ members = [
     "system/compositor/desktop",
     "system/compositor/virtio-gpu",
     "system/console",
+    "system/disks",
     "system/diskserver",
     "system/filepicker",
     "system/fileserver",
@@ -301,8 +302,6 @@ pem = "4"
 [dev-dependencies]
 # The FAT implementation `build/fatformat.rs` is judged against, byte for byte.
 fatfs = "0.3.6"
-# The GPT writer `build/gptwrite.rs` is judged against, byte for byte.
-gpt = "3.1.0"
 # `USER_TOP`, so the harness judges a held `rsp` against the bound the kernel
 # checks every user pointer against and not against a second copy of it.
 toyos-userbound = { path = "lib/userbound" }

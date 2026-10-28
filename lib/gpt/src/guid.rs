@@ -97,6 +97,16 @@ impl Guid {
         ])
     }
 
+    /// A version 4 GUID out of sixteen random bytes, in the on-disk order:
+    /// the version is the high nibble of byte 7, the third field being
+    /// little-endian, and the variant the top two bits of byte 8 (RFC 9562
+    /// §5.4).
+    pub const fn random_v4(mut bytes: [u8; 16]) -> Self {
+        bytes[7] = (bytes[7] & 0x0F) | 0x40;
+        bytes[8] = (bytes[8] & 0x3F) | 0x80;
+        Self(bytes)
+    }
+
     pub const fn is_zero(&self) -> bool {
         u128::from_ne_bytes(self.0) == 0
     }

@@ -11,3 +11,4 @@ toyos = { path = "../../sdk/toyos" }
 toyos-blockring = { path = "../blockring" }
 toyos-blockhold = { path = "../blockhold" }
 toyos-gpt = { path = "../gpt" }
+bcachefs = { path = "../bcachefs" }

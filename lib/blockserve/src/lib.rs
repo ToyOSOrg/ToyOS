@@ -7,6 +7,8 @@
 //! Every disk driver links this, whatever its controller: what differs is the
 //! [`sessions::Device`] beneath.
 
+pub mod content;
+pub mod designate;
 pub mod link;
 pub mod region;
 pub mod sessions;

@@ -44,9 +44,9 @@ pub struct Arm {
     /// What the image is armed with. Every name here is judged by the
     /// pre-flash gate (`toyos_metal::FLASHABLE`) before it is written.
     pub params: &'static [&'static str],
-    /// Binary names and runner builtins this test needs in the job list, in the
-    /// order it needs them. `reboot` is appended to every list by the
-    /// derivation and is never written here.
+    /// The jobs this test needs in the job list, in the order it needs them:
+    /// each a binary name or runner builtin and its arguments. `reboot` is
+    /// appended to every list by the derivation and is never written here.
     pub jobs: &'static [&'static str],
     /// The kernel build this boot needs, empty for the one an image ships.
     ///

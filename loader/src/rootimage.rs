@@ -16,7 +16,6 @@
 
 use alloc::alloc::Layout;
 use alloc::string::String;
-use core::num::NonZeroU64;
 
 use crate::payload::Payload;
 
@@ -234,10 +233,6 @@ impl Sectors for Disk<'_> {
 
     fn lba_count(&self) -> u64 {
         self.lba_count
-    }
-
-    fn lba_count_granularity(&self) -> NonZeroU64 {
-        NonZeroU64::MIN
     }
 
     fn read_lba(&mut self, lba: u64, buf: &mut [u8]) -> bool {

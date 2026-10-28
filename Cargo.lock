@@ -763,6 +763,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "disks"
+version = "0.1.0"
+dependencies = [
+ "diskserver",
+ "toyos",
+ "toyos-blockring",
+ "toyos-gpt",
+ "toyos-manifest",
+]
+
+[[package]]
 name = "diskserver"
 version = "0.0.0"
 dependencies = [
@@ -771,6 +782,7 @@ dependencies = [
  "toyos-blockdev",
  "toyos-blockring",
  "toyos-blockserve",
+ "toyos-gpt",
 ]
 
 [[package]]
@@ -3540,6 +3552,7 @@ dependencies = [
 name = "toyos-blockserve"
 version = "0.1.0"
 dependencies = [
+ "bcachefs",
  "toyos",
  "toyos-abi",
  "toyos-blockhold",
@@ -3563,7 +3576,6 @@ dependencies = [
  "fatfs",
  "flate2",
  "getrandom 0.3.4",
- "gpt",
  "iced-x86",
  "kernel",
  "libc",
