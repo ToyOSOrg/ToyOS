@@ -625,6 +625,8 @@ impl<X: SchedPayload> CpuSched<X> {
                 (core::mem::offset_of!(Self, parked), "parked (the park map)"),
                 (core::mem::offset_of!(Self, dying), "dying"),
                 (core::mem::offset_of!(Self, stopped), "stopped"),
+                (core::mem::offset_of!(Self, held), "held"),
+                (core::mem::offset_of!(Self, holding), "holding"),
                 (core::mem::offset_of!(Self, zombie), "zombie"),
                 (core::mem::offset_of!(Self, mailbox), "mailbox"),
                 (core::mem::offset_of!(Self, steal_probe), "steal_probe (excluded: a sibling writes it)"),
