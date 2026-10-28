@@ -3054,6 +3054,7 @@ fn eee_is_read_under_the_flag_paced_from_the_last_hold() {
         pcs_status: 0,
     };
     assert_eq!(eee, expected, "{}", nic.because("EEE read other than the PHY holds"));
+    assert!(!eee.to_string().contains("  "), "the boot log's EEE line is broken: {eee}");
     assert!(no_arbitration_nearer_than_the_pace(&nic), "{}", nic.because("the EEE hold broke the pace"));
     assert_eq!(nic.peek(regs::EXTCNF_CTRL) & extcnf::MDIO_SW_OWNERSHIP, 0, "{}", nic.because("the flag was kept"));
     let (_, mut other) = held_with_a_link(120, Part::E82574, Permits::default());

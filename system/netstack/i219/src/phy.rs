@@ -1008,7 +1008,9 @@ impl core::fmt::Display for Eee {
         let yes = |set: bool| if set { "yes" } else { "no" };
         write!(
             f,
-            "EEE: LPI GPIO Control {:#06x} (auto-enable {}), LPI Control {:#06x} (1000 Mb/s              enabled {}), capability {:#06x}, advertised {:#06x} (1000BASE-T {}), partner              {:#06x} (1000BASE-T {}), PCS status {:#06x}",
+            "EEE: LPI GPIO Control {:#06x} (auto-enable {}), LPI Control {:#06x} (1000 Mb/s \
+             enabled {}), capability {:#06x}, advertised {:#06x} (1000BASE-T {}), partner \
+             {:#06x} (1000BASE-T {}), PCS status {:#06x}",
             self.lpi_gpio_control,
             yes(self.lpi_gpio_control & LPI_GPIO_AUTO_ENABLE != 0),
             self.lpi_control,
