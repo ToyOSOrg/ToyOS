@@ -124,6 +124,18 @@ actuators! {
     /// `kernel_wx_leaf_is_refused` and `virt_kernel_wx_leaf_is_refused`.
     kernel_wx_leaf = "kernel-wx-leaf";
 
+    /// Read the TSC 10 ms ahead in the HPET's samples once the clock has
+    /// held for a second, as a step `IA32_TSC_ADJUST` would not show, so the
+    /// HPET alone can catch it. The negative control on the clock's runtime check,
+    /// `a_stepped_tsc_panics`.
+    tsc_step = "tsc-step";
+
+    /// Read the HPET 10 ms behind in its samples once the clock has held for
+    /// a second, as an HPET that stood still while the TSC and the ACPI PM
+    /// timer counted: the span is left out and the boot goes on. Judged by
+    /// `a_stalled_hpet_is_left_out`.
+    hpet_stall = "hpet-stall";
+
     /// Hand every CPU the loader's Intel update with its header's revision
     /// raised by one and its checksum sealed again: the read-back's negative
     /// control on real Intel, whose payload still says the revision it did.

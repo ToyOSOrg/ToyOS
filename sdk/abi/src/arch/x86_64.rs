@@ -24,7 +24,7 @@ pub fn current_tid() -> Tid {
     Tid(tid)
 }
 
-/// The counter the clock page's two words describe: the time-stamp counter,
+/// The counter the clock page's line describes: the time-stamp counter,
 /// read after every earlier load has completed, so a stamp taken after reading
 /// another writer's record cannot be older than that record's.
 #[inline]

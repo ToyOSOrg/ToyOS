@@ -4,9 +4,9 @@
 //! A record crossed the syscall boundary or came off a file, so it is input:
 //! [`Entry::decode`] refuses a kind the ABI does not name, and a kind that
 //! names its own task but carries no thread, each by name. A stamp is the
-//! writing CPU's counter, which the machine's `ClockPage` reads as a log
-//! line's time, from the counter's zero on the kernel's own formula, so a
-//! diary and a log line order against each other.
+//! writing CPU's counter, which the machine's `Clock` reads as a log line's
+//! time, from the counter's zero on the kernel's own formula, so a diary and a
+//! log line order against each other.
 //!
 //! Pure: `core` only, no `unsafe`, no I/O.
 
@@ -15,7 +15,7 @@
 
 use core::fmt;
 
-use toyos_abi::clock::ClockPage;
+use toyos_abi::clock::Clock;
 use toyos_abi::trace::{Kind, TraceRecord, NO_THREAD};
 
 /// A thread, by its process's id and its own, each as the writing CPU held
@@ -129,7 +129,7 @@ impl Entry {
 
     /// The line this entry prints as, its stamp read on `clock`:
     /// `[12.000345678 cpu3] wake 7/0`.
-    pub fn line(&self, clock: ClockPage) -> Line<'_> {
+    pub fn line(&self, clock: Clock) -> Line<'_> {
         Line { entry: self, clock }
     }
 }
@@ -137,7 +137,7 @@ impl Entry {
 /// What [`Entry::line`] renders.
 pub struct Line<'a> {
     entry: &'a Entry,
-    clock: ClockPage,
+    clock: Clock,
 }
 
 impl fmt::Display for Line<'_> {
@@ -188,10 +188,8 @@ mod tests {
 
     /// A 1 GHz counter that read 1000 at boot, two seconds after its zero:
     /// one tick a nanosecond.
-    const CLOCK: ClockPage = ClockPage {
-        magic: toyos_abi::clock::CLOCK_MAGIC,
-        counter_at_boot: 1_000,
-        period_fs: 1_000_000,
+    const CLOCK: Clock = Clock {
+        line: toyos_abi::clock::Line { counter: 1_000, stamp: 2_000_000_000, mult: 1 << toyos_abi::clock::MULT_SHIFT },
         stamp_at_boot: 2_000_000_000,
     };
 
