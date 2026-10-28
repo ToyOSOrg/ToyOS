@@ -2,7 +2,7 @@
 //! `toyos-blockring`.
 //!
 //! **What a request means is `toyos_blockring::client::Client`'s to decide**;
-//! this is the mapping, the arena, the doorbell and the connection around it.
+//! this is the mapping, the arena and the doorbells around it.
 //! A write's data is copied into the arena and stays there until a flush
 //! covers it, because after a loss it is the only copy there is; a read's is
 //! copied out when it is answered.
@@ -19,7 +19,8 @@ use std::collections::BTreeMap;
 
 use toyos::ipc::Connection;
 use toyos::namespace::Namespace;
-use toyos::poller::{Poller, READABLE};
+use toyos::poller::READABLE;
+use toyos::wake::{Bell, Waker};
 use toyos_abi::syscall::SyscallError;
 use toyos_blockring::client::{Client, Outcome, Ticket};
 use toyos_blockring::entry::{Completion, Op};
@@ -119,14 +120,14 @@ pub struct Session {
     service: String,
     guid: [u8; wire::GUID_BYTES],
     region: Region,
-    conn: Option<Connection>,
+    /// The open session's doorbells, `None` once it ended.
+    bells: Option<Bells>,
     rings: ClientRings,
     client: Client,
     opened: Opened,
     arena: Arena,
     next_ticket: Ticket,
     pending: BTreeMap<Ticket, Pending>,
-    poller: Poller,
     /// The most requests this session has had on the wire at once.
     peak: usize,
 }
@@ -137,7 +138,7 @@ impl Session {
     pub fn open(names: Namespace, service: &str, guid: [u8; wire::GUID_BYTES]) -> Result<Self, Error> {
         let region = Region::create().map_err(Error::Kernel)?;
         let rings = layout::client(region.words());
-        let (conn, opened) = handshake(&names, service, guid, &region)?;
+        let (bells, opened) = handshake(&names, service, guid, &region)?;
         let mut client = Client::new();
         client.session_started();
         Ok(Self {
@@ -145,14 +146,13 @@ impl Session {
             service: service.to_string(),
             guid,
             region,
-            conn: Some(conn),
+            bells: Some(bells),
             rings,
             client,
             opened,
             arena: Arena::new(),
             next_ticket: 0,
             pending: BTreeMap::new(),
-            poller: Poller::new(1),
             peak: 0,
         })
     }
@@ -181,7 +181,7 @@ impl Session {
     /// Ask for `data` (whole blocks) written at `lba`.
     pub fn submit_write(&mut self, lba: u64, data: &[u8]) -> Result<Ticket, Unsent> {
         let blocks = whole_blocks(data.len());
-        if self.conn.is_none() {
+        if self.bells.is_none() {
             return Err(Unsent::Ended);
         }
         let run = self.arena.alloc(blocks).ok_or(Unsent::ArenaFull)?;
@@ -195,7 +195,7 @@ impl Session {
     /// Ask for `blocks` read from `lba`; the answer carries the data.
     pub fn submit_read(&mut self, lba: u64, blocks: u32) -> Result<Ticket, Unsent> {
         assert!((1..=MAX_REQUEST_BLOCKS).contains(&blocks), "a read of {blocks} blocks");
-        if self.conn.is_none() {
+        if self.bells.is_none() {
             return Err(Unsent::Ended);
         }
         let run = self.arena.alloc(blocks).ok_or(Unsent::ArenaFull)?;
@@ -207,7 +207,7 @@ impl Session {
 
     /// Ask for every write acknowledged so far to be made durable.
     pub fn submit_flush(&mut self) -> Result<Ticket, Unsent> {
-        if self.conn.is_none() {
+        if self.bells.is_none() {
             return Err(Unsent::Ended);
         }
         let ticket = self.ticket();
@@ -219,15 +219,14 @@ impl Session {
     /// Put what the client will send on the ring, and ring the doorbell once
     /// for all of it.
     fn pump(&mut self) {
-        let Some(conn) = &self.conn else { return };
+        let Some(bells) = &self.bells else { return };
         let page = self.region.words();
         loop {
             match self.rings.0.space(page) {
                 Ok(0) => break,
                 Ok(_) => {}
                 // The server wrote an index no server writes: the session is
-                // over, and the next read of the connection is where that is
-                // acted on.
+                // over, and the next drain is where that is acted on.
                 Err(_) => break,
             }
             let Some(request) = self.client.next_request() else { break };
@@ -236,9 +235,8 @@ impl Session {
         }
         self.peak = self.peak.max(self.client.on_the_wire().count());
         if self.rings.0.publish(page) {
-            // A full pipe is a doorbell already rung; a gone one is a server
-            // that has ended, which the wait finds.
-            let _ = conn.write_nonblock(&[1]);
+            // A server that has ended is found by the wait.
+            bells.ring.wake();
         }
     }
 
@@ -246,7 +244,7 @@ impl Session {
     /// or the service has ended.
     pub fn wait(&mut self, block: bool) -> Waited {
         let mut waited = Waited::default();
-        if self.conn.is_none() {
+        if self.bells.is_none() {
             waited.ended = true;
             return waited;
         }
@@ -265,13 +263,11 @@ impl Session {
             if !waited.answers.is_empty() || !block {
                 return waited;
             }
-            let Some(conn) = &self.conn else {
+            let Some(bells) = &self.bells else {
                 waited.ended = true;
                 return waited;
             };
-            self.poller.watch(conn, READABLE, 0);
-            self.poller.wait(1, u64::MAX, |_| {});
-            if !self.take_doorbells() {
+            if bells.answered.wait_for(u64::MAX).is_err() {
                 // What the server posted before it went is real: read it
                 // before the rest is answered refused.
                 self.drain();
@@ -306,20 +302,6 @@ impl Session {
         violated
     }
 
-    /// Consume the doorbell bytes; `false` if the server has hung up.
-    fn take_doorbells(&mut self) -> bool {
-        let Some(conn) = &self.conn else { return false };
-        let mut sink = [0u8; 64];
-        loop {
-            match conn.read_nonblock(&mut sink) {
-                Ok(0) => return false,
-                Ok(_) => continue,
-                Err(SyscallError::WouldBlock) => return true,
-                Err(_) => return false,
-            }
-        }
-    }
-
     fn collect(&mut self, answers: &mut Vec<Answer>) {
         let decided: Vec<_> = self.client.take_answers().collect();
         for (ticket, outcome) in decided {
@@ -341,7 +323,7 @@ impl Session {
     }
 
     fn end(&mut self, waited: &mut Waited) {
-        self.conn = None;
+        self.bells = None;
         self.client.session_ended();
         self.collect(&mut waited.answers);
         waited.ended = true;
@@ -354,15 +336,15 @@ impl Session {
     /// name whose server is being restarted queues the connection until the
     /// new one accepts it.
     pub fn reconnect(&mut self) -> Result<(), Error> {
-        assert!(self.conn.is_none(), "diskserver: reconnect while a session is open");
+        assert!(self.bells.is_none(), "diskserver: reconnect while a session is open");
         // Before the region goes to the new server: it must find this end's
         // two indices at zero, as it will set its own.
         self.rings = layout::client(self.region.words());
-        let (conn, opened) = handshake(&self.names, &self.service, self.guid, &self.region)?;
+        let (bells, opened) = handshake(&self.names, &self.service, self.guid, &self.region)?;
         if opened != self.opened {
             return Err(Error::Protocol);
         }
-        self.conn = Some(conn);
+        self.bells = Some(bells);
         self.client.session_started();
         self.pump();
         Ok(())
@@ -386,30 +368,40 @@ pub(crate) fn connect(names: &Namespace, service: &str) -> Result<Connection, Er
 /// The header of the service's answer on `conn`, once it is there, within
 /// [`wire::ANSWER_BOUND_NS`].
 pub(crate) fn answer(conn: &Connection) -> Result<toyos::ipc::IpcHeader, Error> {
-    let poller = Poller::new(1);
-    poller.watch(conn, READABLE, 0);
-    let mut ready = false;
-    poller.wait(1, wire::ANSWER_BOUND_NS, |_| ready = true);
-    if !ready {
+    if !toyos::poller::wait_one(conn, READABLE, wire::ANSWER_BOUND_NS).map_err(Error::Kernel)? {
         return Err(Error::Unanswered);
     }
     conn.recv_header().map_err(|_| Error::Ended)
 }
 
-/// Connect, send the region with an open, and wait for the answer.
+/// An open session's two doorbells, which the server made and sent with its
+/// answer: the one this end rings for requests, and the one it rings for
+/// answers, whose waker going is the server's end.
+struct Bells {
+    ring: Waker,
+    answered: Bell,
+}
+
+/// Connect, send the region with an open, and wait for the answer, which
+/// carries the session's doorbells: the session is theirs from here, and the
+/// connection goes.
 fn handshake(
     names: &Namespace,
     service: &str,
     guid: [u8; wire::GUID_BYTES],
     region: &Region,
-) -> Result<(Connection, Opened), Error> {
+) -> Result<(Bells, Opened), Error> {
     let conn = connect(names, service)?;
     conn.send_bytes_with(wire::MSG_OPEN, &guid, [region.share().map_err(Error::Kernel)?]).map_err(|_| Error::Ended)?;
     let header = answer(&conn)?;
     let mut payload = [0u8; Opened::BYTES];
     let len = conn.recv_bytes(&header, &mut payload).map_err(|_| Error::Ended)?;
     match header.msg_type {
-        wire::MSG_OPENED => Opened::decode(&payload[..len]).map(|o| (conn, o)).ok_or(Error::Protocol),
+        wire::MSG_OPENED => {
+            let [ring, answered] = conn.recv_handles_exact::<{ wire::OPENED_HANDLES }>(&header).ok_or(Error::Protocol)?;
+            let opened = Opened::decode(&payload[..len]).ok_or(Error::Protocol)?;
+            Ok((Bells { ring: Waker::from(ring), answered: Bell::from(answered) }, opened))
+        }
         wire::MSG_REFUSED => Err(Refusal::decode(&payload[..len]).map_or(Error::Protocol, Error::Refused)),
         _ => Err(Error::Protocol),
     }

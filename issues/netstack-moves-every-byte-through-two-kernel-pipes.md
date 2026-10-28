@@ -56,7 +56,8 @@ The design and its roast are PR #863's body.
   in loom.
 - Stage 3, done (PR #905): a TCP stream, connected or accepted, is one
   region whose two rings are [tcp]'s buffers and the connection it was opened
-  on, which then carries only doorbells and the hang-up; std, libc, mio and
+  on, which then carries only exports; its doorbells and its holders' leaving
+  are events; std, libc, mio and
   socket2 reach it through `toyos::net::stream`, and `SYS_CONNECTION_JOIN` is
   gone. A stream is shared with a child as a holder of its own; other
   sockets are not yet (`issues/a-socket-libc-or-socket2-has-not-bound-is-not-shared-with-a-child.md`). A sent byte is copied

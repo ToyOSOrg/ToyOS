@@ -16,7 +16,7 @@ use std::time::Duration;
 use toyos::endow::Endowments;
 use toyos::poller::{Poller, READABLE};
 use toyos::syscap::{SysCap, WakeLatencyHold};
-use toyos_abi::syscall;
+use toyos::wake::{Bell, Waker};
 use toyos_sound_output::{run, Run};
 use toyos_mixer::{
     deferral_floor_nanos, period_nanos, quantize_period, scratch_frames, wake_left_idle, Dll,
@@ -74,25 +74,19 @@ fn flush(stats: &mut MixStats, totals: &mut Totals, clients: usize) -> Window {
 /// Signal every client before the wait so priority inheritance can fill their
 /// rings while soundserver blocks, and reap the ones that died doing it.
 ///
-/// A broken pipe here is the client's departure, caught here rather
+/// A ring that answers `Hungup` is the client's departure, caught here rather
 /// than left to the control connection — a client that goes mid-stream would
 /// otherwise stay `is_streaming()` and keep the loop deferring buffers for a
-/// producer that no longer exists. Departure is exactly `Err(Gone)`, the
-/// kernel's broken-pipe error; a full pipe is `Err(WouldBlock)` and means the
-/// client is merely behind on consuming signals, which must leave it untouched
-/// — a paused client stops reading its pipe indefinitely and is alive.
+/// producer that no longer exists. A signal still pending only coalesces: a
+/// paused client stops taking its signals indefinitely and is alive.
 ///
-/// It says nothing on its own: [`Departure::SignalPipeGone`] is the weakest of
+/// It says nothing on its own: [`Departure::SignalGone`] is the weakest of
 /// the four witnesses and the control thread's is on the way, so the word waits
 /// for `retain_active` and the strongest witness by then wins.
 fn signal_clients(streams: &mut [ClientStream], ramp_frames: u32) {
     for stream in streams.iter_mut() {
-        let gone = matches!(
-            stream.signal_write.write_nonblock(&[1]),
-            Err(syscall::SyscallError::Gone)
-        );
-        if gone {
-            stream.depart(Departure::SignalPipeGone, ramp_frames);
+        if stream.signal.ring().is_err() {
+            stream.depart(Departure::SignalGone, ramp_frames);
         }
     }
 }
@@ -118,7 +112,7 @@ fn apply_commands(
             }
             MixCommand::AddClient(client, _) => {
                 say!("soundserver: client {} connected (id={})", streams.len(), client.client_id);
-                let _ = client.signal_write.write_nonblock(&[1]);
+                client.signal.wake();
                 streams.push(*client);
             }
             MixCommand::RemoveClient { client_id, departure } => {
@@ -159,7 +153,7 @@ enum Change {
     Detach,
 }
 
-/// Every stream the device loop held ends with it: its signal pipe closes, so
+/// Every stream the device loop held ends with it: its signal side closes, so
 /// its client sees the stream end, and nothing plays it on.
 fn end_streams(streams: &mut Vec<ClientStream>) {
     for stream in streams.drain(..) {
@@ -220,7 +214,7 @@ pub(crate) fn mix_thread(
     backend: &mut dyn Backend,
     cmd_ring: &CommandRing,
     published: &Published,
-    cmd_pipe_read: toyos::BorrowedHandle<'_>,
+    cmd_bell: &Bell,
     num_buffers: usize,
     device_sample_rate: u32,
     device_channels: u16,
@@ -228,7 +222,7 @@ pub(crate) fn mix_thread(
     device_period_frames: usize,
     ramp_frames: u32,
     generation: u32,
-    ended_write: toyos::BorrowedHandle<'_>,
+    ended_wake: &Waker,
 ) -> String {
     let device_period_samples = device_period_frames * device_channels as usize;
     let period_nanos = period_nanos(device_period_frames as u64, device_sample_rate as u64);
@@ -364,7 +358,7 @@ pub(crate) fn mix_thread(
             armed(!streams.is_empty(), &dll, period_nanos, toyos_abi::clock::nanos_since_boot() as f64);
 
         poller.watch(&backend.handle(), READABLE, TOKEN_AUDIO);
-        poller.watch(&cmd_pipe_read, READABLE, TOKEN_CMD);
+        poller.watch(&cmd_bell, READABLE, TOKEN_CMD);
 
         let mut cmd_ready = false;
         poller.wait(1, timeout, |token| match token {
@@ -379,8 +373,7 @@ pub(crate) fn mix_thread(
         let started_at_wake = started;
 
         if cmd_ready {
-            let mut drain = [0u8; 64];
-            while matches!(syscall::read_nonblock(cmd_pipe_read.raw(), &mut drain), Ok(n) if n == drain.len()) {}
+            cmd_bell.take();
         }
         match apply_commands(cmd_ring, &mut streams, ramp_frames, generation) {
             None => {}
@@ -400,7 +393,7 @@ pub(crate) fn mix_thread(
         let completed = backend.completion();
         if let Some(why) = backend.ended() {
             end_streams(&mut streams);
-            let _ = syscall::write_nonblock(ended_write.raw(), &[1]);
+            ended_wake.wake();
             return why.to_string();
         }
         if let Some(rec) = completed {
@@ -719,13 +712,13 @@ pub(crate) fn mix_thread(
 /// After mixing one period it throws the samples away.
 ///
 /// Idle discipline: with no streams it holds no timer and takes no
-/// wakes, blocking on the command pipe alone, so an audience of zero costs
+/// wakes, blocking on the command bell alone, so an audience of zero costs
 /// exactly zero CPU. It does not request the RT band — it protects no audible
 /// output, so there is nothing for the band to protect.
 pub(crate) fn null_sink_thread(
     cmd_ring: &CommandRing,
     published: &Published,
-    cmd_pipe_read: toyos::BorrowedHandle<'_>,
+    cmd_bell: &Bell,
     device: &Device,
     generation: u32,
 ) -> Box<Attached> {
@@ -771,7 +764,7 @@ pub(crate) fn null_sink_thread(
         signal_clients(&mut streams, ramp_frames);
 
         // Idle discipline: no streams → no timer, no wakes. A connect
-        // arrives as a command-pipe byte, the only wake source the null sink
+        // arrives as a ring of the command bell, the only wake source the null sink
         // has. While streaming, wake at the next grid point.
         let timeout = if streams.is_empty() {
             u64::MAX
@@ -779,7 +772,7 @@ pub(crate) fn null_sink_thread(
             next_period_ns.saturating_sub(toyos_abi::clock::nanos_since_boot()).max(1)
         };
 
-        poller.watch(&cmd_pipe_read, READABLE, TOKEN_CMD);
+        poller.watch(&cmd_bell, READABLE, TOKEN_CMD);
         let mut cmd_ready = false;
         poller.wait(1, timeout, |token| match token {
             TOKEN_CMD => cmd_ready = true,
@@ -791,8 +784,7 @@ pub(crate) fn null_sink_thread(
         }
 
         if cmd_ready {
-            let mut drain = [0u8; 64];
-            while matches!(syscall::read_nonblock(cmd_pipe_read.raw(), &mut drain), Ok(n) if n == drain.len()) {}
+            cmd_bell.take();
         }
         // Nothing is drained past an output to play to: what is behind it is
         // the output's.

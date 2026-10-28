@@ -395,7 +395,7 @@ impl Signals {
 
     /// Whether some thread in a blocking call has something to look at: a
     /// signal it leaves unblocked, or children moved since it last looked.
-    /// libc's wake pipe holds its byte exactly while this holds.
+    /// libc's wake event is pending exactly while this holds.
     pub(crate) fn wake_wanted(&self) -> bool {
         self.waiters
             .iter()

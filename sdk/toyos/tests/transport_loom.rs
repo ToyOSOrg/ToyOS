@@ -340,7 +340,7 @@ type Rx = Receiving<BYTES, SESSION_WORDS>;
 type Tx = Sending<BYTES, SESSION_WORDS>;
 type End = Server<BYTES, BYTES, SESSION_WORDS>;
 
-/// A one-byte doorbell pipe.
+/// A doorbell that coalesces, as an event does.
 struct Pipe {
     level: Mutex<Level>,
     posted: Condvar,
@@ -366,9 +366,8 @@ impl Pipe {
         self.posted.notify_all();
     }
 
-    /// A holder's ring of the server: a byte that says it is a holder's, as a
-    /// `RING` frame does, so the server that takes it looks at the words after
-    /// the holder wrote them.
+    /// A holder's ring of the server, as its rung bell is, so the server that
+    /// takes it looks at the words after the holder wrote them.
     fn ring_as_holder(&self) {
         self.level.lock().unwrap().rang = true;
         self.ring();

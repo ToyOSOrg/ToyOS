@@ -27,11 +27,11 @@
 //!   reading them, and that read ends. `sshserver` runs every program so.
 //!
 //! **This test is netstack for its children**: a port of its own served to
-//! each as `netstack`, which answers a connect with the region judged and two
+//! each as `netstack`, which answers a connect with the region judged and its
 //! bells, an export with a holder made on its private port, and a departure
 //! with `Server::departed`, so no NIC and no peer is needed. Every step waits
-//! on an event: a line a child says, a child's exit, a connection's frame or
-//! its hang-up, each under a failure ceiling and never a fixed delay. It runs
+//! on an event: a line a child says, a child's exit, a holder's ring, frame or
+//! leaving, each under a failure ceiling and never a fixed delay. It runs
 //! in a guest because the claims are the kernel's: when a dead process's
 //! handles close, and what its fault ends.
 //!
@@ -49,15 +49,13 @@ use std::process::{Child, ChildStdout, Command, Stdio};
 use std::sync::atomic::Ordering;
 
 use toyos::ipc::{FrameRx, IpcError, RxStep};
-use toyos::net::stream::{
-    Adopt, Server, Words, ADOPT, EXPORT, EXPORTED, LAYOUT, RECEIVE_RING, REGION_BYTES, RING, SEND_RING,
-    SERVER_WATCH,
-};
+use toyos::net::stream::{Adopt, Server, Words, ADOPT, EXPORT, EXPORTED, LAYOUT, RECEIVE_RING, REGION_BYTES, SEND_RING};
 use toyos::net::{MsgType, RespType, TcpConnectRequest, TcpConnectResponse};
 use toyos::poller::{Poller, READABLE};
 use toyos::shm::SharedMemory;
 use toyos::transport::session::{Holder, Rings};
-use toyos::{namespace, port, AsHandle, Connection, OwnedHandle, Pipe};
+use toyos::wake::{self, Bell, Hungup, Waker};
+use toyos::{namespace, port, AsHandle, Connection, OwnedHandle};
 use toyos_abi::syscall::{self, SyscallError, SVC_LABEL};
 
 const SELF_PATH: &str = "/system/bin/test_rs_stream_handles";
@@ -197,33 +195,33 @@ fn shares_within_a_process_and_refuses_moves() {
     assert_eq!(said, ["shared", "endow refused", "send refused"], "the client said otherwise");
     assert!(status.success(), "the client exited {status:?}");
     println!("  given out and taken back: one end; a duplicate of its handle endowed or sent: refused");
-    hang_up_answers_the_server_watch(&netstack.holders[0].connection);
+    departure_answers_the_holders_bell(&netstack.holders[0].rung);
 }
 
-/// netstack's watch of a holder's connection, made after its client left:
-/// the kernel takes it and answers it, and the connection then reads its end.
-fn hang_up_answers_the_server_watch(conn: &Connection) {
+/// netstack's watch of a holder's bell, made after its client left: the
+/// kernel takes it and answers it, and the bell then reads its wakers' end.
+fn departure_answers_the_holders_bell(rung: &Bell) {
     let poller = Poller::new(1);
-    poller.watch(&conn, SERVER_WATCH, 0);
+    poller.watch(rung, READABLE, 0);
     let mut answers = Vec::new();
     poller.wait_answers(1, CEILING_NANOS, |_, answer| answers.push(answer));
     assert!(matches!(answers[..], [Ok(_)]), "the kernel answered netstack's watch {answers:?}");
-    let mut bytes = [0u8; 64];
-    while syscall::read_nonblock(conn.as_handle().raw(), &mut bytes).is_ok_and(|n| n > 0) {}
-    assert_eq!(syscall::read_nonblock(conn.as_handle().raw(), &mut bytes), Ok(0), "the hang-up is the connection's end");
-    println!("  netstack's watch of a holder's connection: taken, and answered by the hang-up");
+    while rung.try_take() == Ok(true) {}
+    assert_eq!(rung.try_take(), Err(Hungup), "the departure is the bell's wakers' end");
+    println!("  netstack's watch of a holder's bell: taken, and answered by its departure");
 }
 
 /// A bare `dup` of a stream's handle is no stream of the process: refused by
-/// name, with nothing written on its connection before the process ends.
+/// name, with nothing written on its connection nor rung before the process
+/// ends.
 fn refuses_a_foreign_handle_writing_nothing() {
     let (mut child, netstack) = run("foreign", &[]);
-    let conn = &netstack.holders[0].connection;
+    let (conn, rung) = (&netstack.holders[0].connection, &netstack.holders[0].rung);
     let mut out = BufReader::new(child.stdout.take().expect("the child's stdout"));
     assert_eq!(line(&mut out), "duplicated");
-    // What the connect may have rung, taken; from here the connection carries nothing but its end.
+    // What the connect may have rung, taken; from here the bell rings nothing but its end.
+    while rung.try_take() == Ok(true) {}
     let mut bytes = [0u8; 64];
-    while syscall::read_nonblock(conn.as_handle().raw(), &mut bytes).is_ok_and(|n| n > 0) {}
     child.stdin.take().expect("the child's stdin").write_all(b"go\n").expect("tell the child");
     let said = child.wait_with_output().expect("wait the child");
     let stderr = String::from_utf8_lossy(&said.stderr);
@@ -231,6 +229,7 @@ fn refuses_a_foreign_handle_writing_nothing() {
     assert!(stderr.contains("is no stream of this process's"), "refused, but not by name: {stderr}");
     let read = syscall::read(conn.as_handle().raw(), &mut bytes);
     assert_eq!(read, Ok(0), "the refusal wrote on the stream's connection before its end");
+    assert_eq!(rung.try_take(), Err(Hungup), "the refusal rang the stream before its end");
     println!("  a foreign handle: refused by name, nothing written");
 }
 
@@ -368,14 +367,24 @@ fn hold() -> ! {
     panic!("hold's stdin ended: nothing closes it")
 }
 
-/// One holder as this test keeps it: its connection and the write ends of
-/// its two bells.
+/// One holder as this test keeps it: its connection, the wakers of its two
+/// bells, and the bell it rings.
 struct Holding {
     number: Holder,
     connection: Connection,
     frames: FrameRx<0>,
-    receive: Pipe,
-    send: Pipe,
+    receive: Waker,
+    send: Waker,
+    rung: Bell,
+}
+
+/// A holder's three bells: what it is handed, in `BELLS`'s order, and the
+/// wakers and bell this test keeps.
+fn bells() -> ([OwnedHandle; 3], (Waker, Waker, Bell)) {
+    let (receive, receive_bell) = wake::pair().expect("a receive bell");
+    let (send, send_bell) = wake::pair().expect("a send bell");
+    let (rung_waker, rung) = wake::pair().expect("a rung bell");
+    ([receive_bell.into(), send_bell.into(), rung_waker.into()], (receive, send, rung))
 }
 
 /// A stream's server end as this test plays netstack, kept for the test's
@@ -407,31 +416,30 @@ impl Netstack {
     fn ring(&self, rings: Rings) {
         for holding in &self.holders {
             if rings.receive {
-                let _ = holding.receive.write_nonblock(&[1]);
+                holding.receive.wake();
             }
             if rings.send {
-                let _ = holding.send.write_nonblock(&[1]);
+                holding.send.wake();
             }
         }
     }
 
-    /// The next frame on `number`'s connection that is no ring, or `None` for
-    /// its hang-up, each wait for one under the ceiling.
+    /// The next frame on `number`'s connection, or `None` for its leaving,
+    /// each wait for its bell under the ceiling.
     fn next_frame(&mut self, number: Holder) -> Option<u32> {
         let holding = self.holder(number);
         loop {
             match holding.frames.pump(&holding.connection) {
-                RxStep::Frame { msg_type: RING, .. } => continue,
                 RxStep::Frame { msg_type, .. } => return Some(msg_type),
                 RxStep::Eof => return None,
                 RxStep::Malformed => panic!("a holder wrote a frame no holder writes"),
                 RxStep::Idle => {}
             }
-            let poller = Poller::new(1);
-            poller.watch(&holding.connection, SERVER_WATCH, 0);
-            let mut answered = false;
-            poller.wait(1, CEILING_NANOS, |_| answered = true);
-            assert!(answered, "a holder said nothing within the ceiling");
+            match holding.rung.wait_for(CEILING_NANOS) {
+                Ok(true) => {}
+                Ok(false) => panic!("a holder said nothing within the ceiling"),
+                Err(Hungup) => return None,
+            }
         }
     }
 
@@ -442,13 +450,12 @@ impl Netstack {
         let number = Holder::new(self.holders.len() as u16 + 1).expect("a holder's number");
         let theirs = self.exports.1.open("export").expect("a connection of the private port");
         let ours = self.exports.0.accept().expect("the private port's connection");
-        let (receive_read, receive) = toyos::pipe_pair().expect("a receive bell");
-        let (send_read, send) = toyos::pipe_pair().expect("a send bell");
+        let ([receive_bell, send_bell, rung_waker], (receive, send, rung)) = bells();
         let adopt = Adopt { holder: number.number(), peer_port: 80, peer_addr: [192, 0, 2, 2], local_port: 49_152, _pad: 0 };
         let region = self.region.share().expect("a handle of the region");
-        let handles = [region, OwnedHandle::from(receive_read), OwnedHandle::from(send_read)];
+        let handles = [region, receive_bell, send_bell, rung_waker];
         ours.send_with(ADOPT, &adopt, handles).expect("queue the holder's adoption");
-        self.holders.push(Holding { number, connection: ours, frames: FrameRx::new(), receive, send });
+        self.holders.push(Holding { number, connection: ours, frames: FrameRx::new(), receive, send, rung });
         self.holder(asker).connection.signal_with(EXPORTED, [theirs.into_owned()]).expect("answer the export");
         number
     }
@@ -505,14 +512,12 @@ fn run(role: &str, peer: &[u8]) -> (Child, Netstack) {
     let mut server = Server::new(words_of(&region), LAYOUT);
     region.bytes().write(RECEIVE_RING, peer);
     let _ = server.publish(words_of(&region), peer.len() as u32).expect("the client keeps the protocol");
-    let (receive_read, receive) = toyos::pipe_pair().expect("the receive bell");
-    let (send_read, send) = toyos::pipe_pair().expect("the send bell");
-    let bells = [OwnedHandle::from(receive_read), OwnedHandle::from(send_read)];
-    conn.send_with(RespType::Result as u32, &TcpConnectResponse { local_port: 49_152, _pad: 0 }, bells)
+    let (handed, (receive, send, rung)) = bells();
+    conn.send_with(RespType::Result as u32, &TcpConnectResponse { local_port: 49_152, _pad: 0 }, handed)
         .expect("answer the connect with the bells");
     let (exports, export_connector) = port::create().expect("the private port");
     let names = namespace::build().add("export", &export_connector).finish().expect("the private port's namespace");
-    let first = Holding { number: Holder::FIRST, connection: conn, frames: FrameRx::new(), receive, send };
+    let first = Holding { number: Holder::FIRST, connection: conn, frames: FrameRx::new(), receive, send, rung };
     (child, Netstack { region, server, holders: vec![first], exports: (exports, names) })
 }
 

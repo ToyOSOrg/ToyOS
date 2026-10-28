@@ -6,10 +6,11 @@ opened: 2026-08-01
 
 # A client cannot tell soundd it paused, so soundd cannot tell paused from wedged
 
-soundd infers a dead client from a pipe error: `NotFound` is a gone process,
-`WouldBlock` is "merely behind". That detects exactly one failure. A client that
-stops making progress while holding its fd — a wedged thread, a deadlock, a
-callback that never returns — produces `WouldBlock` forever and is
+soundd infers a dead client from its signal event alone: a ring answering
+`Hungup` is a gone process, and any other ring coalesces into a signal the
+client has not taken yet. That detects exactly one failure. A client that
+stops making progress while holding its handle — a wedged thread, a deadlock,
+a callback that never returns — takes no signal forever and is
 indistinguishable from one that deliberately paused. The ambiguity is not a
 soundd bug: pause is defined as the client's stream thread simply not reading,
 with no coordination, and the cpal backend confirms it — `pause()` stores a
@@ -18,7 +19,7 @@ state word and parks on a futex, and soundd is never told.
 The cost is that `is_streaming` latches on the first delivered period and never
 clears, so one paused client holds soundd out of idle for the life of the
 process: a wake per period forever, the DMA engine running, the codec voice
-open, and the client's shm, signal pipe and slot ring pinned.
+open, and the client's shm, signal event and slot ring pinned.
 
 **Design, as far as it is settled.** Liveness is declared intent × observed
 progress. Progress already exists as `write_idx`; intent does not. One

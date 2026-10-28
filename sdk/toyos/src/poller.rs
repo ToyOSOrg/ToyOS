@@ -11,6 +11,15 @@ use crate::AsHandle;
 
 pub use toyos_abi::inbox::{OTHER_END_GONE, READABLE, WRITABLE};
 
+/// Park until `handle` answers the one condition `interest` names
+/// ([`READABLE`], [`WRITABLE`] or [`OTHER_END_GONE`]), or `timeout_nanos`
+/// passes (`u64::MAX`: for good): `true` for the condition, `false` at the
+/// timeout. The answer is the one a poller's watch gets, with no inbox made
+/// for it ([`syscall::handle_wait`]).
+pub fn wait_one(handle: &impl AsHandle, interest: u32, timeout_nanos: u64) -> Result<bool, SyscallError> {
+    syscall::handle_wait(handle.as_handle().raw(), interest, timeout_nanos).map(|bit| bit != 0)
+}
+
 /// The inbox page, and the only thing in this crate that touches it.
 ///
 /// **The kernel is the second writer of every byte below, so no Rust reference

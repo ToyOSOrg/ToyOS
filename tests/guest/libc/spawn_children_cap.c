@@ -1,7 +1,7 @@
 /* At most 254 children wait unwaited, which libc's own thread watches
-   beside its control pipe and the notice: the 255th spawn is refused EAGAIN,
+   beside its control event and the notice: the 255th spawn is refused EAGAIN,
    and beside the 254 a poll of 255 descriptors, a poller's handles but the
-   wake pipe's, answers. */
+   wake event's, answers. */
 #include <poll.h>
 
 #include "check.h"

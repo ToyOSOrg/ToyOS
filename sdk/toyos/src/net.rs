@@ -184,7 +184,7 @@ ipc_payload! {
         pub timeout_ms: u32,
     }
 
-    /// The answer to [`MsgType::TcpConnect`], with the stream's two bells
+    /// The answer to [`MsgType::TcpConnect`], with the stream's bells
     /// (`net::stream::BELLS`).
     pub struct TcpConnectResponse {
         pub local_port: u16,
@@ -214,7 +214,7 @@ ipc_payload! {
     }
 
     /// The answer to a listener holder's [`socket::ACCEPT`], with the stream's
-    /// connection and its two bells: the peer, and whether Nagle's algorithm
+    /// connection and its bells: the peer, and whether Nagle's algorithm
     /// is off for the stream as its listener had it, which netstack has
     /// written into the region's header too.
     pub struct TcpAcceptResponse {

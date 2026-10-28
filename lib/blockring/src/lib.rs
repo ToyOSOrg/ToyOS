@@ -10,9 +10,10 @@
 //! and every field before it acts ([`entry::Request::decode`], the
 //! transport's cursor bounds).
 //!
-//! **A doorbell is a byte on the session's connection**, written after the
-//! entries it announces are published. The connection is also what tells each
-//! end the other has gone: its hang-up is the session's end.
+//! **A doorbell is an event each way**, rung after the entries it announces
+//! are published. The server makes both and hands the client its sides with
+//! the open's answer ([`wire::OPENED_HANDLES`]); each end's bell is also what
+//! tells it the other has gone: its waker's end is the session's end.
 //!
 //! **A completion means the device took the request, never that it is
 //! durable.** Durability is a flush's answer, and a flush answers for its own

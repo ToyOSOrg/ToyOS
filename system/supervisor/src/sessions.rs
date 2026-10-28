@@ -28,7 +28,8 @@ use toyos::launch::LAUNCHER;
 use toyos::namespace::{self, Namespace};
 use toyos::poller::{Poller, READABLE};
 use toyos::port::{self, Acceptor, Connector};
-use toyos::{say, AsHandle, BorrowedHandle, OwnedHandle, Pipe};
+use toyos::wake::{self, Bell, Waker};
+use toyos::{say, AsHandle, BorrowedHandle, OwnedHandle};
 use toyos_abi::syscall;
 use toyos_abi::Rights;
 use toyos_manifest::launch::{Authority, Screen, Session};
@@ -190,30 +191,30 @@ impl Logins {
 ///
 /// **One thread per [`PER_WATCHER`] apps**, each waiting on its own poller, so
 /// the set is bounded by the process table and not by one poller's width. An
-/// end reaches the loop through one pipe, which it watches under
+/// end reaches the loop as a ring of one bell, which it watches under
 /// `TOKEN_INSTANCES`.
 pub(crate) struct Watch {
-    /// Readable once per end.
-    pub ended: Pipe,
-    notify: Arc<Pipe>,
+    /// Rung once an end is sent.
+    pub ended: Bell,
+    notify: Arc<Waker>,
     ends: mpsc::Receiver<(u64, Session)>,
     sender: mpsc::Sender<(u64, Session)>,
     watchers: Vec<Watcher>,
 }
 
-/// What one watcher thread's poller holds beside its wake pipe.
+/// What one watcher thread's poller holds beside its bell.
 const PER_WATCHER: usize = Poller::MAX_HANDLES as usize - 1;
 const WAKE: u64 = u64::MAX;
 
 struct Watcher {
     add: mpsc::Sender<(u64, Session, OwnedHandle)>,
-    wake: Pipe,
+    wake: Waker,
     held: Arc<AtomicUsize>,
 }
 
 impl Watch {
     pub fn new() -> Self {
-        let (ended, notify) = toyos::pipe_pair().expect("supervisor: no pipe for its apps' ends");
+        let (notify, ended) = wake::pair().expect("supervisor: no event for its apps' ends");
         let (sender, ends) = mpsc::channel();
         Self { ended, notify: Arc::new(notify), ends, sender, watchers: Vec::new() }
     }
@@ -230,12 +231,12 @@ impl Watch {
         let watcher = &self.watchers[at];
         watcher.held.fetch_add(1, Ordering::Relaxed);
         watcher.add.send((instance, session, handle)).expect("supervisor: a watcher of its apps has ended");
-        let _ = watcher.wake.write_nonblock(&[1]);
+        watcher.wake.wake();
     }
 
     fn watcher(&self) -> Watcher {
         let (add, added) = mpsc::channel::<(u64, Session, OwnedHandle)>();
-        let (woken, wake) = toyos::pipe_pair().expect("supervisor: no pipe for a watcher of its apps");
+        let (waker, woken) = wake::pair().expect("supervisor: no event for a watcher of its apps");
         let held = Arc::new(AtomicUsize::new(0));
         let (notify, sender, count) = (Arc::clone(&self.notify), self.sender.clone(), Arc::clone(&held));
         std::thread::Builder::new()
@@ -253,8 +254,7 @@ impl Watch {
                     ready.clear();
                     poller.wait(1, u64::MAX, |token| ready.push(token));
                     if ready.contains(&WAKE) {
-                        let mut drained = [0u8; 64];
-                        while woken.read_nonblock(&mut drained).is_ok_and(|n| n > 0) {}
+                        woken.take();
                     }
                     let mut at = apps.len();
                     while at > 0 {
@@ -265,12 +265,12 @@ impl Watch {
                         let (instance, session, _) = apps.swap_remove(at);
                         count.fetch_sub(1, Ordering::Relaxed);
                         sender.send((instance, session)).expect("supervisor: its loop has ended");
-                        let _ = notify.write_nonblock(&[1]);
+                        notify.wake();
                     }
                 }
             })
             .expect("supervisor: a watcher of its apps could not be started");
-        Watcher { add, wake, held }
+        Watcher { add, wake: waker, held }
     }
 }
 
@@ -495,8 +495,7 @@ impl Supervisor<'_> {
 
     /// Every app end the watch saw, told to its session's owner.
     pub(crate) fn apps_ended(&mut self) {
-        let mut drained = [0u8; 64];
-        while self.watch.ended.read_nonblock(&mut drained).is_ok_and(|n| n > 0) {}
+        self.watch.ended.take();
         while let Ok((instance, session)) = self.watch.ends.try_recv() {
             if let Some(login) = self.logins.of(session) {
                 if let Some(link) = login.link.conn() {

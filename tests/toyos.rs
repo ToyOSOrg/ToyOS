@@ -257,6 +257,10 @@ const RUST_SKIP: &[&str] = &[
     // A datagram receive bounded by its read timeout, through real netstack,
     // which a shared boot runs none of: `udp_receive_times_out` runs it.
     "udp_recv_timeout",
+    // A connect killed while netstack has not answered it, through real
+    // netstack, which a shared boot runs none of:
+    // `a_client_killed_mid_connect_gives_its_place_back` runs it.
+    "netstack_connect_killed",
     // It needs a launcher: `a_launch_gives_each_unsent_stdio_slot_a_null`
     // runs it on tests/images/launchcase.toml.
     "launch_unsent_stdio",
@@ -644,6 +648,14 @@ const MACHINE_TESTS: &[&str] = &[
     // peer and no public network. Order and completion: QEMU's clock bounds
     // nothing but the hang. x86-64 alone (`qemu::SUITE_ARCH`).
     "udp_receive_times_out",
+    // A client killed while its connect is unanswered gives its place back to
+    // the real netstack of `tests/images/netcase.toml` at once, where only its
+    // connection can say it left: a process's death and netstack's watch of
+    // it, which no host test has. The peer is an address on QEMU's user
+    // network nothing answers, so no public network. Order and counts, QEMU's
+    // clock a hang ceiling far inside the connect's give-up. x86-64 alone
+    // (`qemu::SUITE_ARCH`).
+    "a_client_killed_mid_connect_gives_its_place_back",
     // Login sessions: their owner parents, signs out and ends with each, and
     // the machine's reboot waits for them until forced, which only processes
     // in one boot show, as order, completion and counts. The reboot ends the
@@ -4624,6 +4636,7 @@ fn run_machine_test(name: &str, test_config: &Path) -> Result<(), String> {
         "stream_holders" => stream_holders(test_config),
         "netstack_holders_exported_to_children" => netstack_holders_exported_to_children(),
         "udp_receive_times_out" => udp_receive_times_out(),
+        "a_client_killed_mid_connect_gives_its_place_back" => a_client_killed_mid_connect_gives_its_place_back(),
         "session_lifecycle" => common::sessionlifecycle::session_lifecycle(),
         "a_launch_gives_each_unsent_stdio_slot_a_null" => common::launchstdio::a_launch_gives_each_unsent_stdio_slot_a_null(),
         "a_row_reaches_its_own_state_and_no_other" => common::stateview::a_row_reaches_its_own_state_and_no_other(),
@@ -5709,6 +5722,28 @@ fn udp_receive_times_out() -> Result<(), String> {
     }
     if result.exit_code != Some(0) {
         return Err(format!("the job ended {:?}:\n{}", result.exit_code, result.stdout));
+    }
+    Ok(())
+}
+
+/// `test_rs_netstack_connect_killed` on `netcase`'s real netstack
+/// (`tests/guest/rust-tests/src/bin/netstack_connect_killed.rs`).
+fn a_client_killed_mid_connect_gives_its_place_back() -> Result<(), String> {
+    const JOB: &str = "netstack_connect_killed";
+    let tests = compile::repo_root().join("tests/guest/rust-tests");
+    let bin = qemu::build_toyos_bin(qemu::SUITE_ARCH, &tests, JOB);
+    let config = compile::repo_root().join("tests/images/netcase.toml");
+    let mut qemu = QemuInstance::boot_with_options(&config, &[], &[(JOB.to_string(), bin)], BootOptions::default());
+    serial::Serial::boot(&qemu).must_be_clean()?;
+    let result = qemu.run_test("test_rs_netstack_connect_killed", Duration::from_secs(120));
+    if let Some(why) = &result.error {
+        return Err(format!("{why}\nthe job said:\n{}", result.stdout));
+    }
+    if result.exit_code != Some(0) {
+        return Err(format!("the job ended {:?}:\n{}", result.exit_code, result.stdout));
+    }
+    if !result.stdout.contains("a client killed mid-connect gave its place back") {
+        return Err(format!("the job never said its claim:\n{}", result.stdout));
     }
     Ok(())
 }

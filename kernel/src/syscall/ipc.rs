@@ -37,7 +37,7 @@ pub(super) fn sys_pipe() -> u64 {
 }
 
 /// Install two objects or neither; the two handles come back packed into one word, which cannot be read as an error.
-fn install_pair(first: KObjectRef, second: KObjectRef) -> u64 {
+pub(super) fn install_pair(first: KObjectRef, second: KObjectRef) -> u64 {
     let installed = process::with_process_data(|data| {
         // Room for both before either: a refused pair installs nothing, so nothing is taken back.
         if !data.handles.make_room(2) {
