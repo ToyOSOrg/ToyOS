@@ -48,14 +48,14 @@ device that no host signal reaches. Neither warm reset nor bus reset applies
 while it presents neither. On these benches only taking its power away clears
 it, by replug or by AC. **No action ToyOS takes after such a reset can recover
 the stick. Only what precedes the reset can matter, if anything does.** The
-12:39 loss had no ToyOS reset before it.
+reset just before the 12:39 loss was Ubuntu's, not ToyOS's.
 
 ## The counts so far
 
 | reset | bench, stick | lost / cycles |
 |---|---|---|
 | ToyOS deadline reset under `stick_load` (`usbload`) | AMD, 0781:55a9 | 1 / 6 (21 Oct: 3 passes; 28 Oct: a loss, then 2 passes) |
-| every other ToyOS metal boot, each one Ubuntu restart, a ToyOS reset and the loader's reset | AMD, 0781:55a9 | 0 / about 230 orchestrator-recorded boots before 28 Oct |
+| every other ToyOS metal boot, each one Ubuntu restart, a ToyOS reset and the loader's reset | AMD, 0781:55a9 | 0 / about 230 (the orchestrator's AMD boot records, counted, not audited) |
 | an Ubuntu restart with no ToyOS boot | AMD, 0781:55a9 | 1 / unknown (the owner's restarts are not counted) |
 | hung ToyOS boots ended by the deadline (runs 25, 26, 33, 84) | T14, 0781:5581 | 4 losses (`issues/a-cut-bulk-only-command-does-not-brick-the-benchs-stick.md`) |
 
