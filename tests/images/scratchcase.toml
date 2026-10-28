@@ -1,0 +1,44 @@
+# The boots that write a bench's scratch disk while the machine resets
+# beneath the write (`tests/toyos.rs`'s `scratch_survives_*` rows): its runner,
+# the one row authorized to (`authorize = ["write:scratch"]`), runs
+# `scratch_load`. Its own image, so the authorization reaches no boot but the
+# ones that are for it; no row here starts another, so no login holds it.
+[boot]
+start = ["logkeeper", "diskserver", "fileserver", "acpiserver", "test-runner"]
+
+[programs.logkeeper]
+service = true
+syscap = ["logread"]
+serves = ["log"]
+
+[programs.acpiserver]
+service = true
+devices = ["acpi"]
+receives = ["power"]
+
+# `power` for the reboot that ends the list, and the one `scratch_load reboot`
+# asks for. Its jobs inherit its namespace, the authorization among it.
+[programs.test-runner]
+receives = ["power"]
+authorize = ["write:scratch"]
+
+[programs.toybox]
+
+[symlinks]
+"bin/reboot" = "/system/bin/toybox"
+
+[programs.diskserver]
+service = true
+restart = true
+serves = ["block", "disk"]
+
+# Every xHCI controller, so the scratch stick is served whichever of a
+# bench's ports holds it.
+[programs.usbd]
+drives = ["pci:0c:03:30"]
+receives = ["disk"]
+
+[programs.fileserver]
+restart = true
+roles = ["data", "log", "boot"]
+receives = ["block"]

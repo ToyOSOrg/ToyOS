@@ -41,6 +41,14 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "2af50177e190e07a26ab74f8b1efbfe2ef87da2116221318cb1c2e82baf7de06"
 
 [[package]]
+name = "bcachefs"
+version = "0.1.0"
+dependencies = [
+ "toyos-blockdev",
+ "toyos-crypto",
+]
+
+[[package]]
 name = "bitflags"
 version = "2.13.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -211,6 +219,18 @@ checksum = "f1dd6dbb5841937940781866fa1281a1ff7bd3bf827091440879f9994983d5c2"
 dependencies = [
  "block-buffer",
  "crypto-common",
+]
+
+[[package]]
+name = "diskserver"
+version = "0.0.0"
+dependencies = [
+ "toyos",
+ "toyos-abi",
+ "toyos-blockdev",
+ "toyos-blockring",
+ "toyos-blockserve",
+ "toyos-gpt",
 ]
 
 [[package]]
@@ -898,6 +918,34 @@ name = "toyos-abi"
 version = "0.16.0"
 
 [[package]]
+name = "toyos-blockdev"
+version = "0.1.0"
+
+[[package]]
+name = "toyos-blockhold"
+version = "0.1.0"
+
+[[package]]
+name = "toyos-blockring"
+version = "0.1.0"
+dependencies = [
+ "toyos",
+ "toyos-blockhold",
+]
+
+[[package]]
+name = "toyos-blockserve"
+version = "0.1.0"
+dependencies = [
+ "bcachefs",
+ "toyos",
+ "toyos-abi",
+ "toyos-blockhold",
+ "toyos-blockring",
+ "toyos-gpt",
+]
+
+[[package]]
 name = "toyos-crypto"
 version = "0.1.0"
 
@@ -941,6 +989,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "toyos-manifest"
+version = "0.1.0"
+dependencies = [
+ "toyos",
+ "toyos-abi",
+]
+
+[[package]]
 name = "toyos-parity"
 version = "0.1.0"
 
@@ -967,6 +1023,7 @@ version = "0.1.0"
 dependencies = [
  "acpiserver-api",
  "cpal",
+ "diskserver",
  "getrandom",
  "libloading",
  "logkeeper-api",
@@ -975,11 +1032,13 @@ dependencies = [
  "ring",
  "toyos",
  "toyos-abi",
+ "toyos-blockring",
  "toyos-crypto",
  "toyos-device-memory",
  "toyos-i219",
  "toyos-inspect",
  "toyos-logstream",
+ "toyos-manifest",
  "toyos-parity",
  "toyos-pci",
  "toyos-pci-claim",

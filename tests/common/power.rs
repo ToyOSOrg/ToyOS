@@ -584,3 +584,51 @@ pub fn stick_survives_a_reset_under_load(back: &super::metal::Readback) -> Resul
     eprintln!("  [power] {} KiB of the load's lines reached the stick before the reset", reached >> 10);
     back.measured("boot.usbload.stick_secs", back.stick_secs)
 }
+
+/// What `scratch_load` says every 16 MiB the scratch disk made durable.
+const SCRATCH_DURABLE: &str = " MiB durable";
+const SCRATCH_SAID: &str = "scratch_load: ";
+/// What it says once it has asked for the reboot it goes on writing through.
+const SCRATCH_ASKED: &str = "scratch_load: the reboot is asked for with ";
+
+/// The most mebibytes `log` says `scratch_load` made durable, or why it says
+/// none: the load reached the medium, and no request was answered other than
+/// done.
+fn scratch_durable(log: &serial::Serial) -> Result<u64, String> {
+    says_nothing_of(log, "scratch_load: a request was answered")?;
+    says_nothing_of(log, "scratch_load: the block service ended the session")?;
+    log.text()
+        .lines()
+        .filter_map(|line| line.split(SCRATCH_SAID).nth(1)?.strip_suffix(SCRATCH_DURABLE)?.parse::<u64>().ok())
+        .max()
+        .ok_or_else(|| "the log says no mebibyte of the scratch disk was made durable".to_string())
+}
+
+/// [`SCRATCH_LOAD_JOB`](super::metal::SCRATCH_LOAD_JOB)'s boot: the job wrote
+/// the scratch disk through usbd and the boot deadline ended the machine while
+/// it did, with no USB register touched. No boot of this image reads whether
+/// the stick came back; the bench's host does.
+pub fn scratch_written_through_a_deadline_reset(back: &super::metal::Readback) -> Result<(), String> {
+    let after = back.after_the_reset()?;
+    after.must_say(bootlog::PREVIOUS_PANIC)?;
+    after.must_say_after(bootlog::PREVIOUS_PANIC, bootlog::DEADLINE_EXPIRED)?;
+    says_nothing_of(&after, REBOOTING)?;
+    let mib = scratch_durable(&back.log())?;
+    eprintln!("  [power] {mib} MiB of the scratch disk were durable before the deadline reset");
+    Ok(())
+}
+
+/// `scratch_load reboot`'s boot: the job asked for the reboot with the scratch
+/// disk written, went on writing, and the machine stopped in order, usbd's
+/// port and controller resets among the stop.
+pub fn scratch_written_through_a_reboot(back: &super::metal::Readback) -> Result<(), String> {
+    let log = back.log();
+    let asked = log.must_say(SCRATCH_ASKED)?.trim().to_string();
+    scratch_durable(&log)?;
+    let after = back.after_the_reset()?;
+    after.must_say(bootlog::HANDED_BACK)?;
+    says_nothing_of(&after, bootlog::PREVIOUS_PANIC)?;
+    back.stop_completed()?;
+    eprintln!("  [power] {asked}");
+    Ok(())
+}

@@ -15,6 +15,10 @@ and refuses every session on it by name: a bench boot's log read
 2048+60060419 is not whole 4 KiB blocks of 512`. A destructive test given
 that stick has nothing to write.
 
+`--adopt-scratch` now lays the partition on whole mebibytes, so a stick
+adopted again is served; one adopted before that, the T14's among them, is
+not until it is.
+
 **Exit condition:** a scratch disk is initialized from inside ToyOS with one
 partition on whole 4 KiB blocks (`issues/toyos-manages-its-own-partitions.md`,
 stage 3), a bench boot serves a session on it, and `--adopt-scratch` is

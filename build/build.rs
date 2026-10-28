@@ -3264,6 +3264,7 @@ mod tests {
         "tests/images/panelcase.toml",
         "tests/images/proctreecase.toml",
         "tests/images/scalecase.toml",
+        "tests/images/scratchcase.toml",
         "tests/images/testcases.toml",
         "tests/images/virtclaimcase.toml",
         "tests/images/virtjobcase.toml",

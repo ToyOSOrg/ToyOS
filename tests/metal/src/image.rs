@@ -146,6 +146,7 @@ mod tests {
         "tests/images/latencycase.toml",
         "tests/images/acpicase.toml",
         "tests/images/designatecase.toml",
+        "tests/images/scratchcase.toml",
     ];
 
     fn derived(config: &str, jobs: &[&str]) -> String {
