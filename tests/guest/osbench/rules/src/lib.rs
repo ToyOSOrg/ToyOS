@@ -1,7 +1,7 @@
 //! The judgements osbench makes over what it read, apart from the reading, so
 //! a host tests them: whether a munmap pair's figure stands ([`pair`]), where
-//! the CPU crunch stops for heat ([`heat`]), how far an energy counter
-//! advanced across its wrap ([`energy`]), whether two counters readings
+//! the CPU crunch stops for heat ([`heat`]), what an energy counter
+//! read and when the machine is quiet ([`energy`]), whether two counters readings
 //! describe the row they were read around ([`window`]), and when a CPU's
 //! clock has settled ([`settle`]).
 
@@ -211,8 +211,13 @@ pub mod heat {
 }
 
 pub mod energy {
-    //! An energy counter that counts up from zero to its range and wraps to
-    //! zero, as Linux's powercap `energy_uj` does at `max_energy_range_uj`.
+    //! The package's energy counter as SDM Vol. 3B §17.10.1 and §17.10.3 and
+    //! PPR 55922's RAPL registers give it: 32 bits counting up and wrapping,
+    //! each step `1/2^ESU` J, ESU bits 12:8 of the unit register; and when
+    //! the machine is quiet enough for an idle reading to be its own.
+
+    /// The counter's width: bits 31:0.
+    pub const RANGE: u64 = u32::MAX as u64;
 
     /// What the counter advanced from `before` to `after`, where it wrapped at
     /// most once between them; `None` for a reading outside `0..=range`.
@@ -223,9 +228,32 @@ pub mod energy {
         Some(if after >= before { after - before } else { range - before + 1 + after })
     }
 
+    /// `steps` of the counter whose unit register reads `power_unit`, in µJ.
+    pub fn microjoules(steps: u64, power_unit: u64) -> u64 {
+        let esu = (power_unit >> 8) & 0x1f;
+        u64::try_from((u128::from(steps) * 1_000_000) >> esu).expect("32-bit steps of at most 1 J")
+    }
+
+    /// `uj` over `ns`, in mW.
+    pub fn milliwatts(uj: u64, ns: u64) -> u64 {
+        u64::try_from(u128::from(uj) * 1_000_000 / u128::from(ns.max(1))).unwrap_or(u64::MAX)
+    }
+
+    /// The most CPU time the machine may spend in a second for that second to
+    /// be quiet: a hundredth of one CPU.
+    pub const QUIET_NS: u64 = 10_000_000;
+    /// The quiet seconds in a row an idle reading waits for.
+    pub const QUIET_SECONDS: usize = 3;
+
+    /// Whether the last [`QUIET_SECONDS`] of `busy_ns`, each a second's CPU
+    /// time, were each quiet.
+    pub fn quiet(busy_ns: &[u64]) -> bool {
+        busy_ns.len() >= QUIET_SECONDS && busy_ns[busy_ns.len() - QUIET_SECONDS..].iter().all(|&ns| ns < QUIET_NS)
+    }
+
     #[cfg(test)]
     mod tests {
-        use super::span;
+        use super::*;
 
         #[test]
         fn a_counter_that_did_not_wrap_spans_the_difference() {
@@ -236,12 +264,40 @@ pub mod energy {
         fn a_wrap_counts_the_steps_to_the_range_and_on_from_zero() {
             assert_eq!(span(990, 9, 999), Some(19));
             assert_eq!(span(999, 0, 999), Some(1));
+            assert_eq!(span(RANGE, 4, RANGE), Some(5));
         }
 
         #[test]
         fn a_reading_past_the_range_is_refused() {
             assert_eq!(span(1001, 5, 1000), None);
             assert_eq!(span(5, 1001, 1000), None);
+        }
+
+        /// §17.10.1's default ESU, 10000b, is 15.3 µJ a step; the T14's
+        /// datasheet default (631122, `PACKAGE_POWER_SKU_UNIT` 000A0E03h)
+        /// is 0EH, 61 µJ. No other field of the register moves it.
+        #[test]
+        fn a_step_is_two_to_the_minus_esu_joules() {
+            assert_eq!(microjoules(1 << 16, 0x000a_1003), 1_000_000);
+            assert_eq!(microjoules(1 << 14, 0x000a_0e03), 1_000_000);
+            assert_eq!(microjoules(1000, 0x000a_0e03), 61_035);
+            assert_eq!(microjoules(1 << 14, 0xffff_e0ff | 0x0e00), 1_000_000);
+            assert_eq!(microjoules(RANGE, 0x1f00), 1_999_999);
+        }
+
+        #[test]
+        fn power_is_energy_over_time() {
+            assert_eq!(milliwatts(1_500_000, 1_000_000_000), 1_500);
+            assert_eq!(milliwatts(3_160, 1_000_000), 3_160);
+            assert_eq!(milliwatts(5, 0), 5_000_000, "no division by zero");
+        }
+
+        #[test]
+        fn quiet_is_every_one_of_the_last_seconds_under_the_bar() {
+            assert!(!quiet(&[0, 0]), "too few seconds");
+            assert!(quiet(&[50_000_000, 0, 9_999_999, 0]));
+            assert!(!quiet(&[0, 0, QUIET_NS, 0, 0]));
+            assert!(quiet(&[0, 0, QUIET_NS, 0, 0, 0]));
         }
     }
 }

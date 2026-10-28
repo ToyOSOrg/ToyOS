@@ -29,11 +29,16 @@ performance bias, on every CPU that has all of them
   writing that register whole. *Exit*: the ruling, and the bit declared or
   recorded as firmware's.
 - **The sampler**: a program that reads the envelope every 60 s and at a
-  span's start and end, with package power from `MSR_PKG_ENERGY_STATUS` and
-  temperature from `IA32_PACKAGE_THERM_STATUS` and `MSR_TEMPERATURE_TARGET`,
-  the bar's validity conditions. The energy counter is a side channel
-  (CVE-2020-8694), under `Rights::TRACE` like the rest. *Exit*: one valid
-  span on the T14.
+  span's start and end, with package power and temperature from
+  `IA32_PACKAGE_THERM_STATUS` and `MSR_TEMPERATURE_TARGET`, the bar's
+  validity conditions. The package's energy is read already, under
+  `Rights::TRACE` as a side channel (CVE-2020-8694): `Counter::PackageEnergy`
+  and its unit, its C2 to C7 residency, AMD's core energy, all on the boot
+  processor for its package but the last (`kernel/pure/cpu.rs`). A machine of
+  more than one package counts only the boot processor's; Intel's PP0 and PP1
+  planes, and the T14's PC8 to PC10, which SDM Vol. 4 does not give Tiger
+  Lake, are unread. Temperature is still to build. *Exit*: one valid span on
+  the T14.
 
 Not covered: hybrid Intel and AMD CPPC,
 `issues/the-perf-state-declaration-refuses-hybrid-intel-and-amd-cppc.md`;
