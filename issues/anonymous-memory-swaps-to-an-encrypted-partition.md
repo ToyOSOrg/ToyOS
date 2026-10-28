@@ -134,18 +134,21 @@ The symbols:
     atomically, and is refused whole if any is not free. A referenced block is
     never written.
   - **Free after durable.** `clean_end` comes only after a flush answers durable
-    for every write of the batch. The block client keeps acknowledged writes and
-    reissues them after a loss (`lib/blockring/src/client.rs`), and durable rests
-    on that.
+    for every write of the batch. The block client reissues an acknowledged
+    write after a loss until a flush covers it (`lib/blockring/src/client.rs`),
+    from the blocks the service hands the session shared, which the session
+    keeps until then; durable rests on that.
   - **Install before freeing.** Swap-in installs the frame and frees the block in
     one hold of the space lock.
   - **Re-dirtying.** A store, a kernel write copy, or a `mem_write` into a page
     being cleaned keeps it dirty, and keeps its frame.
 - **Arena reserve.** A swap session's arena has 511 blocks and its ring has 64
-  entries.
-  - Writes hold at most 447 blocks and 48 entries, leaving 64 blocks and 16
-    entries for swap-in reads.
-  - The service flushes once 223 acknowledged writes are held.
+  entries, and both carry only requests on the wire: an acknowledged write
+  holds neither.
+  - Writes on the wire hold at most 447 blocks and 48 entries, leaving 64
+    blocks and 16 entries for swap-in reads.
+  - The service flushes once it keeps the ciphertext of 223 acknowledged
+    writes, which bounds what the session holds shared for it.
 - **`CLEANING` on private leaves.**
   - A store faults and clears it. So does a kernel write copy, which takes its
     pin under the space lock. A read copy leaves it.

@@ -7,11 +7,16 @@
 //! that is not on the wire is the server breaking the session
 //! ([`Violation::Tag`]), not a second answer.
 //!
-//! **An acknowledged write is kept until a flush covers it.** Its arena blocks
-//! stay pinned ([`Client::take_released`] is when they come back) because a
-//! loss — a flush answered [`Status::Lost`] or [`Status::Device`], or a session
-//! that ended — means the device may no longer hold it, and the only copy left
-//! is the client's. After a loss every such write is issued again, in the order
+//! **The arena holds only what is on the wire.** A read or a write is given
+//! its arena blocks as it goes out ([`Client::next_request`]'s `place`) and
+//! gives them back when it is answered ([`Client::take_released`]); nothing
+//! waiting to go out, and nothing acknowledged, holds any.
+//!
+//! **An acknowledged write is kept until a flush covers it**, by its ticket:
+//! the caller keeps its bytes until [`Client::take_retired`] names it, because
+//! a loss — a flush answered [`Status::Lost`] or [`Status::Device`], or a
+//! session that ended — means the device may no longer hold it, and the only
+//! copy left is the caller's. After a loss every such write is issued again, in the order
 //! it was first acknowledged and never beside an earlier one it overlaps, and
 //! nothing else goes on the wire until they are all acknowledged again; the
 //! flush that was waiting is then asked again. A flush is answered
@@ -32,6 +37,11 @@
 //! **Requests in flight at once are unordered.** A caller must not have two in
 //! flight whose ranges overlap when either is a write, nor reuse arena blocks
 //! before they are released.
+//!
+//! **A write's bytes are the caller's to keep** from [`Client::submit`] until
+//! the write is answered anything but [`Outcome::Done`], or until
+//! [`Client::take_retired`] names its ticket; `place` copies them into the
+//! arena each time the write goes out.
 
 use alloc::collections::{BTreeMap, VecDeque};
 use alloc::vec::Vec;
@@ -39,6 +49,25 @@ use alloc::vec::Vec;
 use toyos::transport::{Inflight, Run, Violation};
 
 use crate::entry::{Completion, Op, Request, Status};
+
+/// What a caller asks for. A transfer names its blocks, not the arena blocks
+/// it will move through: those are given as it goes on the wire.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub enum Ask {
+    Read { lba: u64, blocks: u32 },
+    Write { lba: u64, blocks: u32 },
+    Flush,
+}
+
+/// A transfer going on the wire, for `place` to give arena blocks: a write's
+/// are filled with the bytes the caller keeps for `ticket`, the write's own,
+/// when it is the caller's or issued again.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub struct Placing {
+    pub ticket: Ticket,
+    pub write: bool,
+    pub blocks: u32,
+}
 use crate::layout::DEPTH;
 
 /// The caller's name for one thing it asked for.
@@ -74,7 +103,9 @@ pub enum Outcome {
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 struct Acked {
     lba: u64,
-    run: Run,
+    blocks: u32,
+    /// The caller's ticket for it, by which the caller keeps its bytes.
+    ticket: Ticket,
     /// When it was first acknowledged, which is the order it is issued again
     /// in.
     first: u64,
@@ -85,7 +116,7 @@ struct Acked {
 
 impl Acked {
     fn overlaps_range(&self, lba: u64, blocks: u32) -> bool {
-        self.lba < lba + u64::from(blocks) && lba < self.lba + u64::from(self.run.count())
+        self.lba < lba + u64::from(blocks) && lba < self.lba + u64::from(self.blocks)
     }
 }
 
@@ -103,17 +134,37 @@ enum Kind {
 /// A request not yet on the wire.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 struct Queued {
-    op: Op,
+    ask: Ask,
     kind: Kind,
 }
 
-/// A request on the wire, and for a flush the acknowledgement it covers below
-/// and the losses it was sent after.
+impl Queued {
+    /// The ticket whose bytes a write carries.
+    fn ticket(&self) -> Ticket {
+        match self.kind {
+            Kind::User(ticket) | Kind::Flush(ticket) => ticket,
+            Kind::Reissue(acked) => acked.ticket,
+        }
+    }
+}
+
+/// A request on the wire, the op it went as, and for a flush the
+/// acknowledgement it covers below and the losses it was sent after.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 struct Sent {
     queued: Queued,
+    op: Op,
     covers: u64,
     losses: u64,
+}
+
+impl Sent {
+    fn run(&self) -> Option<Run> {
+        match self.op {
+            Op::Read { run, .. } | Op::Write { run, .. } => Some(run),
+            Op::Flush => None,
+        }
+    }
 }
 
 /// `D` is the most requests it has on the wire at once: a session's [`DEPTH`].
@@ -132,6 +183,8 @@ pub struct Client<const D: usize = { DEPTH as usize }> {
     attempts: BTreeMap<Ticket, u32>,
     answers: VecDeque<(Ticket, Outcome)>,
     released: VecDeque<Run>,
+    /// Write tickets whose bytes nothing will send again.
+    retired: VecDeque<Ticket>,
     /// Writes put on the wire again after a loss, over the client's life.
     reissued: u64,
     /// An acknowledged write was given up: no flush is durable again.
@@ -146,12 +199,12 @@ impl<const D: usize> Client<D> {
     }
 
     /// Ask for a read, a write or a flush.
-    pub fn submit(&mut self, ticket: Ticket, op: Op) {
-        let kind = match op {
-            Op::Flush => Kind::Flush(ticket),
-            Op::Read { .. } | Op::Write { .. } => Kind::User(ticket),
+    pub fn submit(&mut self, ticket: Ticket, ask: Ask) {
+        let kind = match ask {
+            Ask::Flush => Kind::Flush(ticket),
+            Ask::Read { .. } | Ask::Write { .. } => Kind::User(ticket),
         };
-        self.outbox.push_back(Queued { op, kind });
+        self.outbox.push_back(Queued { ask, kind });
     }
 
     fn reissuing(&self) -> bool {
@@ -159,11 +212,13 @@ impl<const D: usize> Client<D> {
             || self.outbox.front().is_some_and(|q| matches!(q.kind, Kind::Reissue(_)))
     }
 
-    /// The next request to put on the wire, tagged; `None` while there is no
-    /// session, nothing to send, `D` on the wire, or what is next must
-    /// wait for writes being issued again.
-    pub fn next_request(&mut self) -> Option<Request> {
-        if !self.up {
+    /// The next request to put on the wire, tagged, its transfer placed in the
+    /// arena by `place`; `None` while there is no session, nothing to send,
+    /// `D` on the wire, what is next must wait for writes being issued again,
+    /// or `place` has no room for it, which a request on the wire answered
+    /// makes.
+    pub fn next_request(&mut self, mut place: impl FnMut(Placing) -> Option<Run>) -> Option<Request> {
+        if !self.up || self.wire.values().count() == D {
             return None;
         }
         let front = *self.outbox.front()?;
@@ -174,7 +229,7 @@ impl<const D: usize> Client<D> {
             // later one of the caller's.
             Kind::Reissue(acked) => {
                 let blocked = self.wire.values().any(|sent| {
-                    matches!(sent.queued.op, Op::Write { run, lba } if acked.overlaps_range(lba, run.count()))
+                    matches!(sent.op, Op::Write { run, lba } if acked.overlaps_range(lba, run.count()))
                 });
                 if blocked {
                     return None;
@@ -186,24 +241,37 @@ impl<const D: usize> Client<D> {
                 }
             }
         }
-        let tag = self.wire.insert(Sent { queued: front, covers: self.next_seq, losses: self.losses }).ok()?;
+        let op = match front.ask {
+            Ask::Flush => Op::Flush,
+            Ask::Read { lba, blocks } => {
+                Op::Read { run: place(Placing { ticket: front.ticket(), write: false, blocks })?, lba }
+            }
+            Ask::Write { lba, blocks } => {
+                Op::Write { run: place(Placing { ticket: front.ticket(), write: true, blocks })?, lba }
+            }
+        };
+        let sent = Sent { queued: front, op, covers: self.next_seq, losses: self.losses };
+        let tag = self.wire.insert(sent).expect("blockring: a slot counted free was taken");
         self.outbox.pop_front();
         if matches!(front.kind, Kind::Reissue(_)) {
             self.reissued += 1;
         }
-        Some(Request { op: front.op, tag })
+        Some(Request { op, tag })
     }
 
     /// What the server answered.
     pub fn complete(&mut self, completion: Completion) -> Result<(), Violation> {
         let sent = self.wire.answer(completion.tag)?;
         let q = sent.queued;
+        // Answered, whatever the word: its arena blocks are free once a read's
+        // data has been taken, which the caller does before it releases them.
+        self.released.extend(sent.run());
         match (q.kind, completion.status) {
             (Kind::User(ticket), Status::Ok) => {
-                match q.op {
+                match sent.op {
                     Op::Write { run, lba } => {
                         let seq = self.bump();
-                        let acked = Acked { lba, run, first: seq, seq, attempts: 0 };
+                        let acked = Acked { lba, blocks: run.count(), ticket, first: seq, seq, attempts: 0 };
                         // Sent before a loss it did not see: the device may
                         // have taken it and lost it, and an earlier write it
                         // overlaps is being issued again — so it is issued
@@ -214,19 +282,16 @@ impl<const D: usize> Client<D> {
                             self.acked.push_back(acked);
                         }
                     }
-                    Op::Read { run, .. } => self.released.push_back(run),
+                    Op::Read { .. } => {}
                     Op::Flush => return Err(Violation::Entry),
                 }
                 self.answers.push_back((ticket, Outcome::Done));
             }
             (Kind::User(ticket), status) => {
-                if let Op::Read { run, .. } | Op::Write { run, .. } = q.op {
-                    self.released.push_back(run);
-                }
                 let outcome = match status {
                     Status::Invalid => Outcome::Invalid,
                     Status::Device => Outcome::Device,
-                    Status::ReadOnly if matches!(q.op, Op::Write { .. }) => Outcome::ReadOnly,
+                    Status::ReadOnly if matches!(sent.op, Op::Write { .. }) => Outcome::ReadOnly,
                     // A read or a write answered `Lost`, or a read answered
                     // `ReadOnly`, is a server that does not know which op it
                     // was.
@@ -253,7 +318,7 @@ impl<const D: usize> Client<D> {
                 if acked.attempts > MAX_ATTEMPTS {
                     // The device will not take the only copy there is: every
                     // flush waiting is told so, and the write is gone.
-                    self.released.push_back(acked.run);
+                    self.retired.push_back(acked.ticket);
                     self.gave_up = true;
                     self.fail_waiting_flushes();
                 } else {
@@ -268,7 +333,7 @@ impl<const D: usize> Client<D> {
             (Kind::Flush(ticket), Status::Ok) => {
                 while self.acked.front().is_some_and(|a| a.seq < sent.covers) {
                     let a = self.acked.pop_front().expect("just seen");
-                    self.released.push_back(a.run);
+                    self.retired.push_back(a.ticket);
                 }
                 self.attempts.remove(&ticket);
                 let outcome = if self.gave_up { Outcome::Device } else { Outcome::Durable };
@@ -297,15 +362,11 @@ impl<const D: usize> Client<D> {
         let mut flushes = Vec::new();
         for sent in wire {
             let q = sent.queued;
+            self.released.extend(sent.run());
             match q.kind {
                 Kind::User(ticket) => {
                     #[cfg(not(feature = "mutate-session-end-forgets"))]
-                    {
-                        if let Op::Read { run, .. } | Op::Write { run, .. } = q.op {
-                            self.released.push_back(run);
-                        }
-                        self.answers.push_back((ticket, Outcome::Refused));
-                    }
+                    self.answers.push_back((ticket, Outcome::Refused));
                     #[cfg(feature = "mutate-session-end-forgets")]
                     let _ = ticket;
                 }
@@ -338,6 +399,12 @@ impl<const D: usize> Client<D> {
     /// Arena runs nothing will read or write again.
     pub fn take_released(&mut self) -> impl Iterator<Item = Run> + '_ {
         self.released.drain(..)
+    }
+
+    /// Acknowledged writes, by ticket, that nothing will send again: a flush
+    /// covered them, or they were given up.
+    pub fn take_retired(&mut self) -> impl Iterator<Item = Ticket> + '_ {
+        self.retired.drain(..)
     }
 
     /// Nothing is waiting, on the wire, or held for a flush.
@@ -377,7 +444,7 @@ impl<const D: usize> Client<D> {
                 Kind::User(_) | Kind::Flush(_) => true,
             })
             .unwrap_or(self.outbox.len());
-        self.outbox.insert(at, Queued { op: Op::Write { run: acked.run, lba: acked.lba }, kind: Kind::Reissue(acked) });
+        self.outbox.insert(at, Queued { ask: Ask::Write { lba: acked.lba, blocks: acked.blocks }, kind: Kind::Reissue(acked) });
     }
 
     /// Ask the flush `ticket` again, once every write being issued again is
@@ -388,7 +455,7 @@ impl<const D: usize> Client<D> {
             .iter()
             .position(|q| !matches!(q.kind, Kind::Reissue(_) | Kind::Flush(_)))
             .unwrap_or(self.outbox.len());
-        self.outbox.insert(at, Queued { op: Op::Flush, kind: Kind::Flush(ticket) });
+        self.outbox.insert(at, Queued { ask: Ask::Flush, kind: Kind::Flush(ticket) });
     }
 
     /// The device may no longer hold any write acknowledged and not covered:
@@ -426,8 +493,18 @@ mod tests {
     use super::*;
     use crate::layout::ARENA;
 
-    fn run(first: u32, count: u32) -> Run {
-        ARENA.run(first, count).unwrap()
+    /// The arena blocks every test gives a transfer: four from its ticket's
+    /// fourth, so each ticket's are its own and a test can name them.
+    fn run_of(ticket: Ticket, blocks: u32) -> Run {
+        ARENA.run(ticket as u32 * 4, blocks).unwrap()
+    }
+
+    fn place(p: Placing) -> Option<Run> {
+        Some(run_of(p.ticket, p.blocks))
+    }
+
+    fn next(client: &mut Client) -> Option<Request> {
+        client.next_request(place)
     }
 
     fn answer(client: &mut Client, request: Request, status: Status) {
@@ -437,45 +514,80 @@ mod tests {
     #[test]
     fn nothing_goes_out_before_a_session() {
         let mut client: Client = Client::new();
-        client.submit(1, Op::Read { run: run(0, 1), lba: 0 });
-        assert_eq!(client.next_request(), None);
+        client.submit(1, Ask::Read { lba: 0, blocks: 1 });
+        assert_eq!(next(&mut client), None);
         client.session_started();
-        assert!(client.next_request().is_some());
+        assert!(next(&mut client).is_some());
     }
 
     #[test]
     fn a_second_answer_for_one_tag_is_a_violation() {
         let mut client: Client = Client::new();
         client.session_started();
-        client.submit(1, Op::Read { run: run(0, 1), lba: 0 });
-        let r = client.next_request().unwrap();
+        client.submit(1, Ask::Read { lba: 0, blocks: 1 });
+        let r = next(&mut client).unwrap();
         answer(&mut client, r, Status::Ok);
         assert_eq!(client.complete(Completion { tag: r.tag, status: Status::Ok }), Err(Violation::Tag));
     }
 
+    /// An acknowledged write gives its arena blocks back at once, and its
+    /// ticket is retired only by the flush that covers it.
+    #[test]
+    fn a_write_holds_arena_blocks_only_on_the_wire() {
+        let mut client: Client = Client::new();
+        client.session_started();
+        client.submit(1, Ask::Write { lba: 5, blocks: 2 });
+        let w = next(&mut client).unwrap();
+        assert_eq!(w.op, Op::Write { run: run_of(1, 2), lba: 5 });
+        answer(&mut client, w, Status::Ok);
+        assert_eq!(client.take_released().collect::<Vec<_>>(), [run_of(1, 2)]);
+        assert_eq!(client.take_retired().count(), 0, "acknowledged, not yet covered");
+        client.submit(2, Ask::Flush);
+        let f = next(&mut client).unwrap();
+        answer(&mut client, f, Status::Ok);
+        assert_eq!(client.take_retired().collect::<Vec<_>>(), [1]);
+        assert!(client.quiet());
+    }
+
+    /// A request `place` has no room for waits, unsent and unanswered, and
+    /// goes once there is room.
+    #[test]
+    fn a_request_without_arena_room_waits_for_it() {
+        let mut client: Client = Client::new();
+        client.session_started();
+        client.submit(1, Ask::Write { lba: 0, blocks: 1 });
+        assert_eq!(client.next_request(|_| None), None);
+        assert_eq!(client.take_answers().count(), 0);
+        let w = next(&mut client).unwrap();
+        assert_eq!(w.op, Op::Write { run: run_of(1, 1), lba: 0 });
+    }
+
     /// A write acknowledged, then a flush answered `Lost`: the write goes out
-    /// again before the flush is asked again, and the flush's caller hears
-    /// `Durable` only from the second.
+    /// again, placed again under its own ticket, before the flush is asked
+    /// again, and the flush's caller hears `Durable` only from the second.
     #[test]
     fn a_lost_flush_reissues_then_asks_again() {
         let mut client: Client = Client::new();
         client.session_started();
-        client.submit(1, Op::Write { run: run(3, 2), lba: 5 });
-        let w = client.next_request().unwrap();
+        client.submit(1, Ask::Write { lba: 5, blocks: 2 });
+        let w = next(&mut client).unwrap();
         answer(&mut client, w, Status::Ok);
-        client.submit(2, Op::Flush);
-        let f = client.next_request().unwrap();
+        client.submit(2, Ask::Flush);
+        let f = next(&mut client).unwrap();
         answer(&mut client, f, Status::Lost);
-        let again = client.next_request().unwrap();
-        assert_eq!(again.op, Op::Write { run: run(3, 2), lba: 5 });
-        assert_eq!(client.next_request(), None, "the flush waits for the write");
+        let mut placed = Vec::new();
+        let again = client.next_request(|p| { placed.push(p); place(p) }).unwrap();
+        assert_eq!(placed, [Placing { ticket: 1, write: true, blocks: 2 }]);
+        assert_eq!(again.op, Op::Write { run: run_of(1, 2), lba: 5 });
+        assert_eq!(next(&mut client), None, "the flush waits for the write");
         answer(&mut client, again, Status::Ok);
-        let f2 = client.next_request().unwrap();
+        let f2 = next(&mut client).unwrap();
         assert_eq!(f2.op, Op::Flush);
         answer(&mut client, f2, Status::Ok);
         let answers: Vec<_> = client.take_answers().collect();
         assert_eq!(answers, [(1, Outcome::Done), (2, Outcome::Durable)]);
-        assert_eq!(client.take_released().collect::<Vec<_>>(), [run(3, 2)]);
+        assert_eq!(client.take_released().collect::<Vec<_>>(), [run_of(1, 2), run_of(1, 2)]);
+        assert_eq!(client.take_retired().collect::<Vec<_>>(), [1]);
         assert!(client.quiet());
     }
 
@@ -485,46 +597,47 @@ mod tests {
     fn overlapping_writes_go_out_again_in_order() {
         let mut client: Client = Client::new();
         client.session_started();
-        client.submit(1, Op::Write { run: run(0, 2), lba: 0 });
-        let a = client.next_request().unwrap();
+        client.submit(1, Ask::Write { lba: 0, blocks: 2 });
+        let a = next(&mut client).unwrap();
         answer(&mut client, a, Status::Ok);
-        client.submit(2, Op::Write { run: run(2, 1), lba: 1 });
-        let b = client.next_request().unwrap();
+        client.submit(2, Ask::Write { lba: 1, blocks: 1 });
+        let b = next(&mut client).unwrap();
         answer(&mut client, b, Status::Ok);
         client.session_ended();
         client.session_started();
-        let first = client.next_request().unwrap();
-        assert_eq!(first.op, Op::Write { run: run(0, 2), lba: 0 });
-        assert_eq!(client.next_request(), None, "the overlapping one waits");
+        let first = next(&mut client).unwrap();
+        assert_eq!(first.op, Op::Write { run: run_of(1, 2), lba: 0 });
+        assert_eq!(next(&mut client), None, "the overlapping one waits");
         answer(&mut client, first, Status::Ok);
-        let second = client.next_request().unwrap();
-        assert_eq!(second.op, Op::Write { run: run(2, 1), lba: 1 });
+        let second = next(&mut client).unwrap();
+        assert_eq!(second.op, Op::Write { run: run_of(2, 1), lba: 1 });
     }
 
     /// A write the device refused on every reissue is gone, and its caller was
-    /// told it was done: a flush asked for after that is answered the loss,
-    /// never durable.
+    /// told it was done: its ticket is retired, and a flush asked for after
+    /// that is answered the loss, never durable.
     #[test]
     fn a_write_given_up_poisons_every_later_flush() {
         let mut client: Client = Client::new();
         client.session_started();
-        client.submit(1, Op::Write { run: run(0, 1), lba: 0 });
-        let w = client.next_request().unwrap();
+        client.submit(1, Ask::Write { lba: 0, blocks: 1 });
+        let w = next(&mut client).unwrap();
         answer(&mut client, w, Status::Ok);
         client.session_ended();
         for _ in 0..=MAX_ATTEMPTS {
             client.session_started();
-            let again = client.next_request().unwrap();
-            assert_eq!(again.op, Op::Write { run: run(0, 1), lba: 0 });
+            let again = next(&mut client).unwrap();
+            assert_eq!(again.op, Op::Write { run: run_of(1, 1), lba: 0 });
             answer(&mut client, again, Status::Device);
         }
-        client.submit(2, Op::Flush);
-        let f = client.next_request().unwrap();
+        assert_eq!(client.take_retired().collect::<Vec<_>>(), [1]);
+        client.submit(2, Ask::Flush);
+        let f = next(&mut client).unwrap();
         assert_eq!(f.op, Op::Flush);
         answer(&mut client, f, Status::Ok);
         assert_eq!(client.take_answers().collect::<Vec<_>>(), [(1, Outcome::Done), (2, Outcome::Device)]);
-        client.submit(3, Op::Flush);
-        let f = client.next_request().unwrap();
+        client.submit(3, Ask::Flush);
+        let f = next(&mut client).unwrap();
         answer(&mut client, f, Status::Ok);
         assert_eq!(client.take_answers().collect::<Vec<_>>(), [(3, Outcome::Device)]);
     }
@@ -536,14 +649,14 @@ mod tests {
     fn read_only_answers_a_write_alone() {
         let mut client: Client = Client::new();
         client.session_started();
-        client.submit(1, Op::Write { run: run(0, 1), lba: 0 });
-        let w = client.next_request().unwrap();
+        client.submit(1, Ask::Write { lba: 0, blocks: 1 });
+        let w = next(&mut client).unwrap();
         answer(&mut client, w, Status::ReadOnly);
         assert_eq!(client.take_answers().collect::<Vec<_>>(), [(1, Outcome::ReadOnly)]);
-        assert_eq!(client.take_released().collect::<Vec<_>>(), [run(0, 1)]);
-        for op in [Op::Read { run: run(1, 1), lba: 0 }, Op::Flush] {
-            client.submit(2, op);
-            let r = client.next_request().unwrap();
+        assert_eq!(client.take_released().collect::<Vec<_>>(), [run_of(1, 1)]);
+        for ask in [Ask::Read { lba: 0, blocks: 1 }, Ask::Flush] {
+            client.submit(2, ask);
+            let r = next(&mut client).unwrap();
             assert_eq!(client.complete(Completion { tag: r.tag, status: Status::ReadOnly }), Err(Violation::Entry));
         }
     }
@@ -552,14 +665,14 @@ mod tests {
     fn what_was_on_the_wire_at_the_end_is_refused_and_what_was_not_waits() {
         let mut client: Client = Client::new();
         client.session_started();
-        client.submit(1, Op::Write { run: run(0, 1), lba: 0 });
-        client.submit(2, Op::Read { run: run(1, 1), lba: 4 });
-        let _ = client.next_request().unwrap();
+        client.submit(1, Ask::Write { lba: 0, blocks: 1 });
+        client.submit(2, Ask::Read { lba: 4, blocks: 1 });
+        let _ = client.next_request(place).unwrap();
         client.session_ended();
         assert_eq!(client.take_answers().collect::<Vec<_>>(), [(1, Outcome::Refused)]);
-        assert_eq!(client.take_released().collect::<Vec<_>>(), [run(0, 1)]);
+        assert_eq!(client.take_released().collect::<Vec<_>>(), [run_of(1, 1)]);
         client.session_started();
-        let r = client.next_request().unwrap();
-        assert_eq!(r.op, Op::Read { run: run(1, 1), lba: 4 });
+        let r = next(&mut client).unwrap();
+        assert_eq!(r.op, Op::Read { run: run_of(2, 1), lba: 4 });
     }
 }

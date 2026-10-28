@@ -33,6 +33,11 @@ pub const BLOCK: usize = 4096;
 /// One block.
 pub type Block = [u8; BLOCK];
 
+/// A block's bytes shared between whoever wrote them and a device that may
+/// write them again: a served disk keeps a write's until a flush covers it.
+/// The block is boxed on its own so its owner can allocate it fallibly.
+pub type SharedBlock = Rc<alloc::boxed::Box<Block>>;
+
 /// Why a device did not do what it was asked.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Error {
