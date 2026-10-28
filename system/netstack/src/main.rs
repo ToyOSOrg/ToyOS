@@ -51,9 +51,9 @@ use toyos_net_shard::{Config, Secrets};
 use toyos_net_wire::ethernet::IndividualMac;
 use toyos_net_wire::Instant;
 
+mod bells;
 mod client;
 mod lent;
-mod bells;
 mod link;
 mod serve;
 mod watches;

@@ -11,19 +11,20 @@
 //!
 //! **A stream has holders, each a process's session**: its connection to
 //! netstack, two bells netstack rings, a reader's and a writer's, so neither
-//! takes the other's wake, and the waker of the bell netstack watches it on. A doorbell says "look", never "there are
-//! bytes" (virtio 1.2 §2.9). The process that connected or accepted is the
-//! first holder; [`export`] asks netstack for another, whose connection end a
-//! spawn endows and the child takes up (`super::adopt_exported`). An accept is a
-//! listener holder's request (`super::socket`), answered with the stream's
-//! connection. Every holder
-//! shares the one region, and the session's gates make their calls take turns
-//! (`crate::transport::session`).
+//! takes the other's wake, and the waker of the bell netstack watches it on.
+//! A doorbell says "look", never "there are bytes" (virtio 1.2 §2.9). The
+//! process that connected or accepted is the first holder; [`export`] asks
+//! netstack for another, whose connection end a spawn endows and the child
+//! takes up (`super::adopt_exported`). An accept is a listener holder's
+//! request (`super::socket`), answered with the stream's connection. Every
+//! holder shares the one region, and the session's gates make their calls
+//! take turns (`crate::transport::session`).
 //!
 //! **A holder's connection carries frames**: the request and its answer, then
 //! [`EXPORT`] from the holder and netstack's answers to it. A holder rings
 //! its waker for anything netstack is to look at, and its waker's last handle
-//! going is the holder's leaving.
+//! going is the holder's leaving; before a connect is answered, the first
+//! holder holds no waker yet, and its connection's hang-up is its leaving.
 //!
 //! **A holder stays in its process.** Its connection, bells and region are
 //! held without `TRANSFER` once taken up, so no spawn or message can move one;

@@ -10,7 +10,7 @@ use core::sync::atomic::{AtomicBool, Ordering};
 
 use kernel::event::{Signaled, State, Taken};
 
-use crate::mm::charge::{self, Exhausted};
+use crate::mm::charge::{self, Charge, Exhausted};
 use crate::watch::Watch;
 
 use super::{KObjectVariant, ObjectCore, ZeroHandles};
@@ -23,6 +23,9 @@ pub struct Event {
     /// A real-time signaler's window, owed to whoever takes the signal next:
     /// a waiter already runnable misses the wake-time loan.
     lend_rt: AtomicBool,
+    /// Itself and its watch, charged to the job that made it for as long as
+    /// either side holds it.
+    _charge: Charge,
 }
 
 pub struct EventSignal {
@@ -35,11 +38,17 @@ pub struct EventWait {
     event: Arc<Event>,
 }
 
-/// A fresh event's two sides; the signal side is charged what they share.
+/// A fresh event's two sides.
 pub fn create() -> Result<(Arc<EventSignal>, Arc<EventWait>), Exhausted> {
-    let signal = EventSignal::new_core(charge::arc::<Event>() + charge::arc::<Watch>())?;
+    let charge = Charge::current(charge::arc::<Event>() + charge::arc::<Watch>())?;
+    let signal = EventSignal::new_core(0)?;
     let wait = EventWait::new_core(0)?;
-    let event = Arc::new(Event { state: State::new(), watch: Arc::new(Watch::new()), lend_rt: AtomicBool::new(false) });
+    let event = Arc::new(Event {
+        state: State::new(),
+        watch: Arc::new(Watch::new()),
+        lend_rt: AtomicBool::new(false),
+        _charge: charge,
+    });
     Ok((Arc::new(EventSignal { core: signal, event: event.clone() }), Arc::new(EventWait { core: wait, event })))
 }
 

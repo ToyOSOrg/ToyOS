@@ -191,7 +191,7 @@ impl Logins {
 ///
 /// **One thread per [`PER_WATCHER`] apps**, each waiting on its own poller, so
 /// the set is bounded by the process table and not by one poller's width. An
-/// end reaches the loop through one pipe, which it watches under
+/// end reaches the loop as a ring of one bell, which it watches under
 /// `TOKEN_INSTANCES`.
 pub(crate) struct Watch {
     /// Rung once an end is sent.

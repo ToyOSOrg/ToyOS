@@ -136,7 +136,8 @@ impl Session for Region {
         Box::new(Ring { mapping: self.mapping.clone(), base: SEND_RING, len: SEND_BYTES as usize })
     }
 
-    /// A bell whose holder is gone has a holder its own bell reports leaving.
+    /// A ring into a bell its holder no longer holds is dropped: that
+    /// holder's leaving is its rung bell's end, which netstack reads apart.
     fn ring(&self, rings: Rings) {
         for holding in self.holders.by_number.borrow().values() {
             if rings.receive {
