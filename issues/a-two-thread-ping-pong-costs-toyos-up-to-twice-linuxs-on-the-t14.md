@@ -31,8 +31,10 @@ futex rows read 6,141 to 6,248 ns (`same_cpu`) and 9,648 to 9,864 ns
 clocksource's. Where its round trip's time goes, the wait, the wake or the
 switch, is unmeasured.
 
-#1074 has since changed the pipe on main, so the `pipe` rows' current state
-is owed a new reading.
+#1074 has since changed the pipe on main and reads `pingpong.pipe.*` lower
+on its head than its base
+(`issues/a-64-kib-pipe-write-is-two-percent-below-the-two-mebibyte-ring.md`),
+so the `pipe` rows' current state against Linux is owed a new reading.
 The scheduler's pair-wake records bear on both kinds:
 `issues/a-wake-whose-waker-parks-next-is-forwarded-to-an-idle-cpu.md` and
 `issues/an-ordinary-wake-posted-on-its-own-cpu-waits-for-that-cpus-next-pass.md`.
