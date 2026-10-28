@@ -16,9 +16,9 @@
 //! session whose grant does not write is handed over as one, whose driver
 //! answers every write `ReadOnly`. A tables badge lists every partition and
 //! has a disk described by its driver, and opens nothing. A designation badge
-//! does one thing: the driver of the one disk carrying its partition carries
-//! out that designation, told whether the running system is on it
-//! (`--active`). A connection with no badge reaches nothing.
+//! does one thing: the machine's one DATA partition, resolved when it is
+//! asked, is designated by the driver of its disk, told whether the running
+//! system is on it (`--active`). A connection with no badge reaches nothing.
 //!
 //! **A driver is who the supervisor says it is**: the badge it minted the
 //! driver's `disk` connector with. It starts the disk drivers before this
@@ -71,8 +71,10 @@ const MAX_DRIVERS: usize = 16;
 const DRIVER: &str = "--driver";
 const UNDRIVEN: &str = "--undriven";
 /// Argv: a partition the running system is on, by unique GUID, which no
-/// designation changes.
+/// designation changes; or that which they are is unknown, and every
+/// partition is taken for one.
 const ACTIVE: &str = "--active";
+const ACTIVE_UNKNOWN: &str = "--active-unknown";
 
 const TOKEN_ACCEPT: u64 = 0;
 const TOKEN_DRIVERS: u64 = 1;
@@ -108,8 +110,9 @@ struct Known {
     undriven: Vec<String>,
     fates: BTreeMap<DriverBadge, Fate>,
     offered: Vec<Offered>,
-    /// The partitions the running system is on.
-    active: Vec<[u8; 16]>,
+    /// The partitions the running system is on, or `None` where the
+    /// supervisor could not say.
+    active: Option<Vec<[u8; 16]>>,
 }
 
 impl Known {
@@ -156,7 +159,7 @@ impl Known {
     /// every partition offered that it lists. **The badge is asked first**,
     /// so a connection with none learns nothing.
     fn listing(&self, badge: Option<Badge>, expired: bool) -> Option<Result<Vec<Listed>, Refusal>> {
-        let Some(badge) = badge.filter(|b| !matches!(b, Badge::Designate { .. })) else {
+        let Some(badge) = badge.filter(|b| *b != Badge::DesignateData) else {
             return Some(Err(Refusal::NotGranted));
         };
         if !self.settled() && !expired {
@@ -217,18 +220,26 @@ impl Known {
         Some(if self.offered.iter().any(|o| o.disk == disk) { Ok(disk) } else { Err(self.absent()) })
     }
 
-    /// Where the designation `badge` names is carried out, and whether the
-    /// running system is on it; or its refusal, or `None` while it waits. A
-    /// partition two disks carry is refused on both, as an open of it is.
+    /// Where the designation `badge` asks for is carried out — the one DATA
+    /// partition offered, resolved now — and whether the running system is on
+    /// it; or its refusal, or `None` while it waits. Two DATA partitions are
+    /// never guessed between, and a GUID two disks carry is refused on both,
+    /// as an open of it is.
     fn designation(&self, badge: Option<Badge>, expired: bool) -> Option<Result<(Offered, bool), Refusal>> {
-        let Some(Badge::Designate { unique, .. }) = badge else { return Some(Err(Refusal::NotGranted)) };
+        if badge != Some(Badge::DesignateData) {
+            return Some(Err(Refusal::NotGranted));
+        }
         if !self.settled() && !expired {
             return None;
         }
-        let carrying: Vec<&Offered> = self.offered.iter().filter(|o| o.part.unique == unique && unique != [0; 16]).collect();
-        Some(match carrying[..] {
-            [] => Err(self.absent()),
-            [one] if one.part.blocks.is_some() => Ok((*one, self.active.contains(&unique))),
+        let data: Vec<&Offered> = self.offered.iter().filter(|o| o.part.kind == toyos_gpt::Guid::TOYOS_DATA.0).collect();
+        let Some(one) = data.first().filter(|_| data.len() == 1) else {
+            return Some(Err(if data.is_empty() { self.absent() } else { Refusal::Unusable }));
+        };
+        let unique = one.part.unique;
+        let carrying = self.offered.iter().filter(|o| o.part.unique == unique).count();
+        Some(match (carrying, one.part.blocks) {
+            (1, Some(_)) => Ok((**one, self.active.as_ref().is_none_or(|a| a.contains(&unique)))),
             _ => Err(Refusal::Unusable),
         })
     }
@@ -283,13 +294,22 @@ fn main() {
     let args: Vec<String> = std::env::args().collect();
     let mut known = Known::default();
     let mut at = 1;
+    known.active = Some(Vec::new());
     while at < args.len() {
+        if args[at] == ACTIVE_UNKNOWN {
+            println!("diskserver: which partitions the running system is on is unknown; every designation is refused");
+            known.active = None;
+            at += 1;
+            continue;
+        }
         let value = args.get(at + 1).unwrap_or_else(|| panic!("diskserver: {} takes a value", args[at]));
         match args[at].as_str() {
             DRIVER => known.expected.push(value.parse().unwrap_or_else(|_| panic!("diskserver: {DRIVER} {value}"))),
             ACTIVE => {
                 let guid = toyos_gpt::Guid::parse(value).unwrap_or_else(|| panic!("diskserver: {ACTIVE} {value}"));
-                known.active.push(guid.0);
+                if let Some(active) = &mut known.active {
+                    active.push(guid.0);
+                }
             }
             UNDRIVEN => {
                 println!("diskserver: {value} is on this machine and no driver of it started; what it carries is refused");
@@ -571,8 +591,8 @@ impl Service {
                         refuse(&w.conn, why);
                     }
                     Some(Ok((offered, active))) => {
-                        let Some(Badge::Designate { unique, token }) = w.badge else { unreachable!("admitted through its badge") };
-                        let order = |disk| disk::Designation { disk, unique, token, active, commit }.encode().to_vec();
+                        let unique = offered.part.unique;
+                        let order = |disk| disk::Designation { disk, unique, active, commit }.encode().to_vec();
                         println!("diskserver: designation of {} handed to disk {}'s driver", guid_text(unique), offered.disk);
                         self.hand_work(offered.disk, disk::MSG_DESIGNATE, order, w.conn);
                     }
@@ -685,7 +705,7 @@ mod tests {
     const ROOT: [u8; 16] = [4; 16];
     const LOG_KIND: [u8; 16] = [0x10; 16];
     const BOOT_KIND: [u8; 16] = [0x20; 16];
-    const DATA_KIND: [u8; 16] = [0x30; 16];
+    const DATA_KIND: [u8; 16] = toyos_gpt::Guid::TOYOS_DATA.0;
     const ROOT_KIND: [u8; 16] = [0x40; 16];
     /// Two drivers, by the badges the supervisor minted them.
     const STICK: DriverBadge = 7;
@@ -866,30 +886,44 @@ mod tests {
     }
 
     /// A description reaches a disk only through a tables badge, and names
-    /// one the service has; a designation reaches only the partition its own
-    /// badge names, on the one disk that carries it, said active when the
-    /// running system is on it, and nothing a partitions grant or a tables
-    /// badge carries designates anything.
+    /// one the service has. A designation reaches only the machine's one DATA
+    /// partition, resolved when it is asked, said active when the running
+    /// system is on it, and is refused when two DATA partitions or two disks
+    /// carrying its GUID leave it no one partition; nothing a partitions grant
+    /// or a tables badge carries designates anything.
     #[test]
     fn only_its_own_badge_describes_or_designates() {
         let mut known = two_disks();
-        known.active.push(LOG);
+        known.active = Some(vec![LOG]);
         assert_eq!(known.describe(1, Some(Badge::Tables), false), Some(Ok(1)));
         assert_eq!(known.describe(7, Some(Badge::Tables), false), Some(Err(Refusal::NotFound)));
-        for other in [None, data().map(Badge::Partitions), Some(Badge::Designate { unique: DATA, token: [0; 16] })] {
+        for other in [None, data().map(Badge::Partitions), Some(Badge::DesignateData)] {
             assert_eq!(known.describe(1, other, false), Some(Err(Refusal::NotGranted)), "{other:?}");
         }
-        let designate = |unique| Some(Badge::Designate { unique, token: [8; 16] });
+        let designate = Some(Badge::DesignateData);
         let data_disk = Offered { disk: 1, part: part(DATA, DATA_KIND) };
-        assert_eq!(known.designation(designate(DATA), false), Some(Ok((data_disk, false))));
-        assert!(matches!(known.designation(designate(LOG), false), Some(Ok((_, true)))), "the running system's log");
-        assert_eq!(known.designation(designate([9; 16]), false), Some(Err(Refusal::NotFound)));
+        assert_eq!(known.designation(designate, false), Some(Ok((data_disk, false))));
         for other in [None, data().map(Badge::Partitions), Some(Badge::Tables)] {
             assert_eq!(known.designation(other, false), Some(Err(Refusal::NotGranted)), "{other:?}");
         }
-        assert_eq!(known.listing(designate(DATA), false), Some(Err(Refusal::NotGranted)), "a designation lists nothing");
+        assert_eq!(known.listing(designate, false), Some(Err(Refusal::NotGranted)), "a designation lists nothing");
         assert_eq!(known.listing(Some(Badge::Tables), false).map(|r| r.map(|l| l.len())), Some(Ok(4)));
-        known.offered.push(Offered { disk: 0, part: part(DATA, DATA_KIND) });
-        assert_eq!(known.designation(designate(DATA), false), Some(Err(Refusal::Unusable)), "on two disks");
+
+        known.active = Some(vec![DATA]);
+        assert_eq!(known.designation(designate, false), Some(Ok((data_disk, true))), "the running system's DATA");
+        known.active = None;
+        assert_eq!(known.designation(designate, false), Some(Ok((data_disk, true))), "nothing known is active");
+
+        let mut cloned = two_disks();
+        cloned.active = Some(Vec::new());
+        cloned.offered.push(Offered { disk: 0, part: part([7; 16], LOG_KIND) });
+        cloned.offered[0].part.unique = DATA;
+        assert_eq!(cloned.designation(designate, false), Some(Err(Refusal::Unusable)), "its GUID on two disks");
+        let mut two = two_disks();
+        two.offered.push(Offered { disk: 0, part: part([8; 16], DATA_KIND) });
+        assert_eq!(two.designation(designate, false), Some(Err(Refusal::Unusable)), "two DATA partitions");
+        let mut none = two_disks();
+        none.offered.retain(|o| o.part.kind != DATA_KIND);
+        assert_eq!(none.designation(designate, false), Some(Err(Refusal::NotFound)));
     }
 }

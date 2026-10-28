@@ -193,6 +193,8 @@ struct ProgramConfig {
     syscap: Vec<String>,
     /// The idle slot (`toyos_manifest::Program::slots`).
     slots: bool,
+    /// Disk authorizations minted at its start (`toyos_manifest::authorize`).
+    authorize: Vec<String>,
     /// A system service: the supervisor starts it with `HOME` at its own `/state/<name>`
     /// and makes that directory, where every other row gets the session's.
     service: bool,
@@ -717,6 +719,18 @@ fn held_by_their_holders_alone(config: &SystemConfig) -> Result<(), String> {
         if program.slots && config.boot.start.contains(name) {
             return Err(format!("`{name}` asks for `slots` and is in `[boot] start`, and the slots are granted to a launch alone"));
         }
+        // A row any login could start would hand every login what it holds:
+        // an authorization that changes a disk is the image's to grant, to a
+        // row only the boot starts.
+        for word in &program.authorize {
+            let Some(authorization) = toyos_manifest::authorize::Authorization::parse(word) else {
+                return Err(format!("`{name}` asks to be authorized for `{word}`, which is no disk authorization"));
+            };
+            let starters: Vec<&String> = config.programs.iter().filter(|(_, p)| p.starts.contains(name)).map(|(n, _)| n).collect();
+            if authorization.changes() && !starters.is_empty() {
+                return Err(format!("`{name}` is authorized for `{word}`, which changes a disk, and {starters:?} may start it"));
+            }
+        }
     }
     for (port, holders) in HELD_ALONE {
         if config.apps.receives.iter().any(|r| r == port) {
@@ -844,6 +858,7 @@ fn render_manifest(config: &SystemConfig) -> Vec<u8> {
                     drives: cfg.drives.clone(),
                     syscap: cfg.syscap.clone(),
                     slots: cfg.slots,
+                    authorize: cfg.authorize.clone(),
                     service: cfg.service,
                     state: cfg.state,
                     roles: cfg.roles.clone(),
@@ -2965,6 +2980,33 @@ mod tests {
             implied.is_empty(),
             "`test-actuators` implies {implied:?}, so it is several kernel builds again"
         );
+    }
+
+    /// No image this repository ships authorizes a change to a disk: that is
+    /// a test image's, for the one boot that makes it.
+    #[test]
+    fn no_shipped_boot_config_authorizes_a_disk_change() {
+        let root = Path::new(env!("CARGO_MANIFEST_DIR"));
+        for boot in [Boot::shipped(root), Boot::diag(root), Boot::console(root)] {
+            let config = parse_config(&boot.config);
+            for (name, program) in &config.programs {
+                let changes = program.authorize.iter().filter_map(|w| toyos_manifest::authorize::Authorization::parse(w)).any(|a| a.changes());
+                assert!(!changes, "{} authorizes `{name}` to change a disk: {:?}", boot.config.display(), program.authorize);
+            }
+        }
+    }
+
+    /// An authorization that changes a disk goes to a row only the boot
+    /// starts, never one a login can launch; reading the tables may go to
+    /// either; and a word that names nothing is refused.
+    #[test]
+    fn a_disk_changing_authorization_goes_to_no_row_a_login_can_start() {
+        let gate = |text: &str| held_by_their_holders_alone(&toml::from_str(text).unwrap());
+        assert!(gate("[programs.runner]\nauthorize = [\"designate:data\"]\n").is_ok());
+        assert!(gate("[programs.disks]\nauthorize = [\"tables\"]\n[programs.shell]\nstarts = [\"disks\"]\n").is_ok());
+        let launched = gate("[programs.disks]\nauthorize = [\"designate:data\"]\n[programs.shell]\nstarts = [\"disks\"]\n");
+        assert!(launched.unwrap_err().contains("may start it"));
+        assert!(gate("[programs.disks]\nauthorize = [\"format:everything\"]\n").unwrap_err().contains("no disk authorization"));
     }
 
     /// No image this repository ships starts sshserver.

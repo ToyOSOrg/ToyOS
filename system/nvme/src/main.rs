@@ -134,7 +134,7 @@ fn main() {
         ctrl.sectors
     );
     let read = toyos_blockserve::table::read(&mut Sectors { ctrl: &mut ctrl, block: vec![0u8; BLOCK_BYTES] });
-    let mut disk = Sessions::new(name.clone(), read, toyos_blockserve::draw_token);
+    let mut disk = Sessions::new(name.clone(), read);
     link.offer(DISK, disk.offered());
     link.settle(Settled::Offered);
     serve(&name, &mut ctrl, &mut disk, &mut link, stop.as_ref())

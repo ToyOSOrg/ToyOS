@@ -50,8 +50,8 @@ pub const MSG_DISK: u32 = 7;
 pub const MSG_SLOT: u32 = 8;
 /// The description is whole. No payload.
 pub const MSG_DESCRIBED: u32 = 9;
-/// Designate the partition a [`Badge::Designate`] names: payload one byte,
-/// 1 to write the stamp and 0 to judge only. Answered [`MSG_DESIGNATED`] or
+/// Designate the machine's DATA partition, for a [`Badge::DesignateData`]
+/// connection: payload one byte, 1 to write the stamp and 0 to judge only. Answered [`MSG_DESIGNATED`] or
 /// [`MSG_REFUSED`].
 pub const MSG_DESIGNATE: u32 = 10;
 /// A [`Designated`].
@@ -256,9 +256,6 @@ pub enum Refusal {
     /// minter of this protocol stamps, reaches none, and its listing is
     /// refused the same.
     NotGranted,
-    /// The token an authorization was minted against is not the disk's: the
-    /// disk was brought up again or changed since.
-    Stale,
     /// The partition backs the running system, which no authorization
     /// changes beneath it.
     Active,
@@ -276,9 +273,8 @@ impl Refusal {
             Self::Exhausted => 5,
             Self::ClaimRefused => 6,
             Self::NotGranted => 7,
-            Self::Stale => 8,
-            Self::Active => 9,
-            Self::Device => 10,
+            Self::Active => 8,
+            Self::Device => 9,
         }
     }
 
@@ -291,9 +287,8 @@ impl Refusal {
             5 => Some(Self::Exhausted),
             6 => Some(Self::ClaimRefused),
             7 => Some(Self::NotGranted),
-            8 => Some(Self::Stale),
-            9 => Some(Self::Active),
-            10 => Some(Self::Device),
+            8 => Some(Self::Active),
+            9 => Some(Self::Device),
             _ => None,
         }
     }
@@ -307,11 +302,6 @@ impl Refusal {
     }
 }
 
-/// A disk's table state, drawn by its driver at the disk's bring-up and
-/// again after every change it makes to the disk: what an authorization is
-/// bound to.
-pub type Token = [u8; GUID_BYTES];
-
 /// What a connector to the block service reaches: the badge the supervisor
 /// minted it with.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -321,9 +311,10 @@ pub enum Badge {
     /// Every disk's table, read: a listing of every partition and each disk's
     /// description. No session and no change.
     Tables,
-    /// One designation of the partition `unique` while its disk's token is
-    /// `token`, and nothing else.
-    Designate { unique: [u8; GUID_BYTES], token: Token },
+    /// Designations of the machine's DATA partition, resolved when one is
+    /// asked for: the one partition of `TOYOS_DATA`'s type the service
+    /// serves. Nothing else.
+    DesignateData,
 }
 
 impl Badge {
@@ -331,7 +322,7 @@ impl Badge {
         match self {
             Self::Partitions(grant) => grant.encode().to_vec(),
             Self::Tables => vec![3],
-            Self::Designate { unique, token } => [&[4][..], unique, token].concat(),
+            Self::DesignateData => vec![4],
         }
     }
 
@@ -340,10 +331,7 @@ impl Badge {
         match bytes.first()? {
             1 | 2 => Grant::decode(bytes).map(Self::Partitions),
             3 => (bytes.len() == 1).then_some(Self::Tables),
-            4 if bytes.len() == 1 + 2 * GUID_BYTES => Some(Self::Designate {
-                unique: bytes[1..1 + GUID_BYTES].try_into().ok()?,
-                token: bytes[1 + GUID_BYTES..].try_into().ok()?,
-            }),
+            4 => (bytes.len() == 1).then_some(Self::DesignateData),
             _ => None,
         }
     }
@@ -353,7 +341,7 @@ impl Badge {
         match self {
             Self::Partitions(grant) => grant.admits(unique, kind),
             Self::Tables => true,
-            Self::Designate { .. } => false,
+            Self::DesignateData => false,
         }
     }
 }
@@ -373,11 +361,10 @@ pub enum Lba0 {
 /// The longest copy state a [`DiskHead`] carries.
 pub const MAX_STATE: usize = 200;
 
-/// One disk as its driver describes it: its token, its size, and what each
-/// copy of its table is — `valid` or why not.
+/// One disk as its driver describes it: its size, and what each copy of its
+/// table is — `valid` or why not.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct DiskHead {
-    pub token: Token,
     pub lba_bytes: u32,
     pub sectors: u64,
     pub lba0: Lba0,
@@ -389,8 +376,7 @@ pub struct DiskHead {
 
 impl DiskHead {
     pub fn encode(&self) -> Vec<u8> {
-        let mut out = Vec::with_capacity(34 + self.primary.len() + self.backup.len() + 4);
-        out.extend_from_slice(&self.token);
+        let mut out = Vec::with_capacity(18 + self.primary.len() + self.backup.len() + 4);
         out.extend_from_slice(&self.lba_bytes.to_le_bytes());
         out.extend_from_slice(&self.sectors.to_le_bytes());
         out.push(match self.lba0 {
@@ -409,8 +395,7 @@ impl DiskHead {
     }
 
     pub fn decode(bytes: &[u8]) -> Option<Self> {
-        let (token, rest) = bytes.split_first_chunk::<GUID_BYTES>()?;
-        let (lba_bytes, rest) = rest.split_first_chunk::<4>()?;
+        let (lba_bytes, rest) = bytes.split_first_chunk::<4>()?;
         let (sectors, rest) = rest.split_first_chunk::<8>()?;
         let (&[lba0, agree], rest) = rest.split_first_chunk::<2>()?;
         let lba0 = match lba0 {
@@ -428,7 +413,6 @@ impl DiskHead {
         let (primary, rest) = text(rest)?;
         let (backup, rest) = text(rest)?;
         rest.is_empty().then(|| Self {
-            token: *token,
             lba_bytes: u32::from_le_bytes(*lba_bytes),
             sectors: u64::from_le_bytes(*sectors),
             lba0,

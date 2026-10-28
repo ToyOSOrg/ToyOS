@@ -168,6 +168,13 @@ login = true
 [programs.logout]
 receives = ["session-admin"]
 
+# The machine's disks and their tables, read: `launch disks`. Nothing here
+# lets it change a disk; an authorization that does (`designate:data`) is the
+# build's to refuse any row a login can start (`build/build.rs`), until the
+# administrative authorization every system change will share exists.
+[programs.disks]
+authorize = ["tables"]
+
 # `swap` is the authority to replace a running service's binary; the build
 # refuses it to any other program (`build/build.rs`). `ssh <machine> swap netstack
 # <sha256> <length> < netstack` runs it for a login.
@@ -225,7 +232,7 @@ starts = ["shell"]
 
 [programs.shell]
 receives = ["surface"]
-starts = ["toybox", "shell", "terminal", "doom", "snake", "calc", "editor", "paint", "files", "host", "inspect", "pkg", "sshserver", "swap", "toyfetch", "update", "grants", "logout", "/apps"]
+starts = ["toybox", "shell", "terminal", "doom", "snake", "calc", "editor", "paint", "files", "host", "inspect", "pkg", "sshserver", "swap", "toyfetch", "update", "grants", "logout", "disks", "/apps"]
 
 [programs.doom]
 receives = ["compositor", "soundserver"]

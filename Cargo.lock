@@ -763,6 +763,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "disks"
+version = "0.1.0"
+dependencies = [
+ "diskserver",
+ "toyos",
+ "toyos-blockring",
+ "toyos-gpt",
+ "toyos-manifest",
+]
+
+[[package]]
 name = "diskserver"
 version = "0.0.0"
 dependencies = [

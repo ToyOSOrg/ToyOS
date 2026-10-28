@@ -345,7 +345,10 @@ fn data_on<D: Disk + 'static>(disk: D, roots: &[&str]) -> Box<dyn Volume> {
             println!("fileserver: the DATA volume is ours and does not mount ({why}); it is absent this boot");
             Box::new(Absent::new(roots, why))
         }
-        Probed::Foreign => ram(roots, "the DATA partition is not ours"),
+        // A disk that is there and holds somebody's bytes is no machine without
+        // one: nothing stands in for it, and `disks designate data` is how it
+        // becomes ToyOS's.
+        Probed::Foreign => absent(roots, "the DATA partition holds no volume of ours and no designation stamp".into()),
     }
 }
 

@@ -1163,8 +1163,9 @@ impl<'a> Supervisor<'a> {
     }
 
     /// What the block service is started with: each disk driver running, by
-    /// its badge, which it waits for, and every disk driver's function the
-    /// boot started none on.
+    /// its badge, which it waits for; every disk driver's function the boot
+    /// started none on; and every partition the loader named, which the
+    /// running system is on and no designation changes.
     fn block_args(&self) -> Vec<String> {
         let mut args = Vec::new();
         for instance in self.instances.iter().filter(|i| is_disk_driver(i.row)) {
@@ -1172,6 +1173,21 @@ impl<'a> Supervisor<'a> {
         }
         for undriven in &self.undriven {
             args.extend(["--undriven".to_string(), undriven.clone()]);
+        }
+        match inventory(self.syscap) {
+            Ok(records) => {
+                let named = records.iter().filter_map(|r| match r {
+                    Record::Loaded(l) => Some(l.unique_guid),
+                    _ => None,
+                });
+                for guid in named {
+                    args.extend(["--active".to_string(), guid_text(guid)]);
+                }
+            }
+            Err(why) => {
+                say!("supervisor: the inventory was not read ({why}), so the block service designates nothing");
+                args.push("--active-unknown".to_string());
+            }
         }
         args
     }
@@ -3003,6 +3019,7 @@ fn start<'a>(
     }
     let mut view = grants.view(program, minting.session);
     view.extend(ports);
+    view.extend(grants.authorizations(program).map_err(StartError::Refused)?);
     view.extend(grants.netstack(program, minting.session));
     if let Some(ns) = build_namespace(program, system, connectors, view, extras)? {
         let raw = ns.into_raw();
@@ -3368,6 +3385,32 @@ impl Grants<'_> {
             .mint(&grant.encode())
             .map(Some)
             .map_err(|e| format!("no connector to the block service could be minted: {e:?}"))
+    }
+
+    /// What `program`'s row is authorized for on the machine's disks
+    /// (`toyos_manifest::authorize`), each a connector to the block service
+    /// minted with that one authorization's badge, under its name. The block
+    /// service resolves and judges each when it is used, so nothing here
+    /// waits for a disk.
+    fn authorizations(&self, program: &Program) -> Result<Vec<(String, Connector)>, String> {
+        use toyos_manifest::authorize::Authorization;
+        let mut minted = Vec::new();
+        for word in &program.authorize {
+            let authorization = Authorization::parse(word).unwrap_or_else(|| panic!("supervisor: `{word}` is no authorization the build admits"));
+            let badge = match authorization {
+                Authorization::Tables => toyos_blockring::wire::Badge::Tables,
+                Authorization::DesignateData => toyos_blockring::wire::Badge::DesignateData,
+            };
+            let Some(ports) = &self.block else { return Err(format!("`{word}` is authorized and no block service runs")) };
+            let ports = ports.borrow();
+            let Some((_, acceptor)) = ports.iter().find(|(name, _)| name == toyos_blockring::PORT) else {
+                return Err("the block service's port has closed for good".into());
+            };
+            let connector = acceptor.mint(&badge.encode()).map_err(|e| format!("no `{word}` connector could be minted: {e:?}"))?;
+            say!("supervisor: {} is authorized for `{word}`", program.name);
+            minted.push((authorization.name().to_string(), connector));
+        }
+        Ok(minted)
     }
 
     /// The block service's `disk` port minted for the disk driver of the

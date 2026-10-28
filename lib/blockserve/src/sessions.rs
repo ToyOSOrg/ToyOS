@@ -30,7 +30,7 @@ use toyos_blockring::entry::{Completion, Op};
 use toyos_blockring::layout::{ServerRings, DEPTH};
 use toyos_blockring::server::{ServerSession, Taken};
 use toyos_blockring::disk::Designation;
-use toyos_blockring::wire::{self, Designated, DiskHead, Lba0, Opened, Refusal, SlotLine, Token};
+use toyos_blockring::wire::{self, Designated, DiskHead, Lba0, Opened, Refusal, SlotLine};
 use toyos_blockring::Status;
 
 use crate::designate::{self, Ask};
@@ -110,9 +110,6 @@ pub struct Sessions {
     name: String,
     parts: Vec<Partition>,
     read: Read,
-    /// The disk's table state ([`wire::Token`]), and where a fresh one comes from.
-    token: Token,
-    draw: fn() -> Token,
     holds: Holds<u64>,
     /// The device's loss count: every reset may have dropped its cache.
     losses: u64,
@@ -122,16 +119,13 @@ pub struct Sessions {
 }
 
 impl Sessions {
-    /// The disk `read` describes, under a token `draw` draws now and after
-    /// every change this driver makes to the disk.
-    pub fn new(name: String, read: Read, draw: fn() -> Token) -> Self {
+    /// The disk `read` describes.
+    pub fn new(name: String, read: Read) -> Self {
         let parts = table::say(&name, &read);
         Self {
             name,
             parts,
             read,
-            token: draw(),
-            draw,
             holds: Holds::new(),
             losses: 0,
             sessions: BTreeMap::new(),
@@ -413,7 +407,6 @@ impl Sessions {
     pub fn describe(&self, conn: Connection) {
         let copies = self.read.copies.as_deref();
         let head = DiskHead {
-            token: self.token,
             lba_bytes: self.read.lba_bytes,
             sectors: self.read.sectors,
             lba0: match copies.map(|c| c.mbr) {
@@ -452,14 +445,11 @@ impl Sessions {
     }
 
     /// The span `order` designates, held for it; or its refusal, judged
-    /// against this disk's own state in this turn: its token, the running
-    /// system's partitions, its table and its holds.
+    /// against this disk's own state in this turn: the running system's
+    /// partitions, its table and its holds.
     fn admit(&mut self, order: &Designation, dev: &mut impl Device) -> Result<(u64, u64), Refusal> {
         if self.job.is_some() {
             return Err(Refusal::Exhausted);
-        }
-        if order.token != self.token {
-            return Err(Refusal::Stale);
         }
         if order.active {
             return Err(Refusal::Active);
@@ -522,9 +512,6 @@ impl Sessions {
         }
         self.holds.release(job.first);
         let what = crate::guid_text(job.order.unique);
-        if outcome == Ok(Designated::Written) {
-            self.token = (self.draw)();
-        }
         match outcome {
             Ok(done) => {
                 println!("{}: designation of {what}: {done:?}", self.name);
@@ -569,32 +556,30 @@ mod tests {
             Partition { unique: [1; 16], kind: [9; 16], span: Ok((0, 100)) },
             Partition { unique: [2; 16], kind: [9; 16], span: Err("not whole blocks".into()) },
         ];
-        Sessions::new("test".into(), Read { lba_bytes: 512, sectors: 1 << 20, copies: None, parts: Ok(parts) }, || [5; 16])
+        Sessions::new("test".into(), Read { lba_bytes: 512, sectors: 1 << 20, copies: None, parts: Ok(parts) })
     }
 
-    fn order(unique: [u8; 16], token: Token, active: bool) -> Designation {
-        Designation { disk: 0, unique, token, active, commit: true }
+    fn order(unique: [u8; 16], active: bool) -> Designation {
+        Designation { disk: 0, unique, active, commit: true }
     }
 
     /// A designation is judged against the disk's own state before it takes
-    /// anything: a token from another state of the disk, a partition the
-    /// running system is on, one a session holds, one the table does not
-    /// name and one it will not serve are each refused, and none of them
-    /// holds the partition.
+    /// anything: a partition the running system is on, one a session holds,
+    /// one the table does not name and one it will not serve are each
+    /// refused, and none of them holds the partition.
     #[test]
     fn a_designation_is_refused_on_the_disks_own_state_before_it_holds_anything() {
         let mut disk = disk();
         let refusals = [
-            (order([1; 16], [6; 16], false), Refusal::Stale),
-            (order([1; 16], [5; 16], true), Refusal::Active),
-            (order([3; 16], [5; 16], false), Refusal::NotFound),
-            (order([2; 16], [5; 16], false), Refusal::Unusable),
+            (order([1; 16], true), Refusal::Active),
+            (order([3; 16], false), Refusal::NotFound),
+            (order([2; 16], false), Refusal::Unusable),
         ];
         for (order, want) in refusals {
             assert_eq!(disk.admit(&order, &mut Nothing), Err(want), "{order:?}");
         }
         assert_eq!(disk.place([1; 16], &mut Nothing), Ok((0, 100)), "nothing refused held it");
-        assert_eq!(disk.admit(&order([1; 16], [5; 16], false), &mut Nothing), Err(Refusal::Held));
+        assert_eq!(disk.admit(&order([1; 16], false), &mut Nothing), Err(Refusal::Held));
     }
 
     /// What only the disk knows refuses an open the service admitted: a

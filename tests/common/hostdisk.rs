@@ -56,7 +56,8 @@ fn said_by_nvme(line: &str) -> Option<&str> {
 /// it alone: a driver brought a controller up and offered its partitions, it
 /// opened at least one session and each on a ToyOS DATA partition, and the file server
 /// found that DATA neither ours nor designated, and so neither mounted nor
-/// formatted it. Answers how many partitions the disks' tables named.
+/// formatted it, and served DATA absent rather than from memory. Answers how
+/// many partitions the disks' tables named.
 pub fn left_alone(log: &Serial) -> Result<usize, String> {
     log.must_say("diskserver: every disk driver has settled")?;
     let said: Vec<&str> = log.text().lines().filter_map(said_by_nvme).collect();
@@ -89,6 +90,8 @@ pub fn left_alone(log: &Serial) -> Result<usize, String> {
         }
     }
     log.must_say("fileserver: no volume of ours and no designation stamp; nothing will be written to this partition")?;
+    log.must_say("fileserver: the DATA partition holds no volume of ours and no designation stamp; DATA is absent this boot")?;
+    log.must_not_say("are in memory and will not survive a reboot")?;
     log.must_not_say("fileserver: mounted the DATA volume")?;
     log.must_not_say("designates this partition for ToyOS; formatting it")?;
     Ok(kinds.len())

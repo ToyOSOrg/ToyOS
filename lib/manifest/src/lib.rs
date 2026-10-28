@@ -23,6 +23,7 @@
 //! drive <matcher>           one process of it per PCI function the matcher names
 //! syscap <right>            a right on the SysCap dup the supervisor endows
 //! slots                     the idle slot's partitions and the slot table
+//! authorize <word>          a disk authorization the supervisor mints at its start ([`authorize`])
 //! service                   a system service: its `HOME` is `/state/<name>`, not the session's
 //! state                     it keeps machine state of its own in `/state/<name>`
 //! role <role>               a file server for `<role>`: one process of it per role
@@ -44,6 +45,7 @@
 //! package is granted, [`consent`] how the person at the screen is asked,
 //! [`clipboard`] who watches the clipboard and [`display`] who sets the display.
 
+pub mod authorize;
 pub mod clipboard;
 pub mod consent;
 pub mod device;
@@ -316,6 +318,10 @@ pub struct Program {
     /// runs is never among them. One program holds it — `build/build.rs` gates
     /// which.
     pub slots: bool,
+    /// Disk authorizations the supervisor mints at its start, by
+    /// [`authorize::Authorization::word`]: the signed image's word alone, and
+    /// `build/build.rs` gates which rows.
+    pub authorize: Vec<String>,
     /// A system service: its `HOME` is its own [`STATE`] directory rather
     /// than the session user's home, so what it keeps is machine state and no
     /// user's. It keeps state ([`Self::state_dir`]) whether or not
@@ -486,6 +492,8 @@ pub enum RenderError {
     ServesWithoutService(String),
     /// A `roles` entry naming no file-server role.
     NoSuchRole { program: String, role: String },
+    /// An `authorize` entry naming no [`authorize::Authorization`].
+    NoSuchAuthorization { program: String, word: String },
     /// A `devices` entry that names no device, or a `drives` entry that is
     /// no PCI matcher.
     NoSuchDevice { program: String, entry: String },
@@ -544,6 +552,12 @@ pub fn render(manifest: &Manifest) -> Result<Vec<u8>, RenderError> {
         }
         if program.slots {
             out.push_str("slots\n");
+        }
+        for word in &program.authorize {
+            if authorize::Authorization::parse(word).is_none() {
+                return Err(RenderError::NoSuchAuthorization { program: program.name.clone(), word: word.clone() });
+            }
+            out.push_str(&format!("authorize {word}\n"));
         }
         if program.service {
             out.push_str("service\n");
@@ -726,6 +740,7 @@ pub fn parse(text: &str) -> Manifest {
                     "drive" => program.drives.push(rest.to_string()),
                     "syscap" => program.syscap.push(rest.to_string()),
                     "slots" if rest.is_empty() => program.slots = true,
+                    "authorize" if authorize::Authorization::parse(rest).is_some() => program.authorize.push(rest.to_string()),
                     "service" => program.service = true,
                     "state" if rest.is_empty() => program.state = true,
                     "role" => program.roles.push(rest.to_string()),
@@ -773,6 +788,7 @@ mod tests {
                     source: Source::Path("/system/bin/update".into()),
                     slots: true,
                     state: true,
+                    authorize: vec!["tables".into(), "designate:data".into()],
                     ..Program::default()
                 },
                 Program {

@@ -102,6 +102,7 @@ members = [
     "system/host",
     "system/inspect",
     "system/logkeeper",
+    "system/disks",
     "system/logout",
     "system/netstack",
     "system/netstack/dhcp",

@@ -270,7 +270,7 @@ fn serve(
             match event {
                 Event::Arrived { disk, name: disk_name, table } => {
                     let label = format!("{name} {disk_name}");
-                    let sessions = Sessions::new(label.clone(), table, toyos_blockserve::draw_token);
+                    let sessions = Sessions::new(label.clone(), table);
                     if let Some(link) = &mut link {
                         link.offer(disk, sessions.offered());
                     }
