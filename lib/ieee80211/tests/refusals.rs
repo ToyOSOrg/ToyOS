@@ -132,7 +132,6 @@ fn cases() -> Vec<(Refused, Refused)> {
         (SnapHeaderAsAddress, amsdu(&[0xAA, 0xAA, 0x03, 0, 0, 0, 0x08, 0x00, 0x45, 0, 0, 0, 0, 0])),
         (NotSnap, ethernet(&[0xF0, 0xF0, 0x03, 0, 0, 0, 0x08, 0x00])),
         (UnknownOui, ethernet(&[0xAA, 0xAA, 0x03, 0x00, 0x10, 0x18, 0x08, 0x00])),
-        (TranslatedType, ethernet(&[0xAA, 0xAA, 0x03, 0, 0, 0, 0x81, 0x37])),
         (LengthField, ethernet(&[0xAA, 0xAA, 0x03, 0, 0, 0, 0x05, 0xFF])),
         (ExtendedIvClear, refusal(CcmpHeader::split(&[1, 0, 0, 0, 0, 0, 0, 0]))),
         (WindowSize, refusal(Window::<u16>::new(Seq::new(0), 257))),
@@ -408,17 +407,18 @@ fn an_rsnxe_ignores_octets_past_its_field() {
 }
 
 #[test]
-fn llc_snap_refuses_a_length_and_tunnels_aarp_and_ipx() {
+fn llc_snap_refuses_a_length_and_is_rfc_1042_for_every_type() {
     assert_eq!(llc_snap(0x05FF), Err(Refused::LengthField));
-    assert_eq!(llc_snap(0x8137).unwrap()[..6], [0xAA, 0xAA, 0x03, 0x00, 0x00, 0xF8]);
-    assert_eq!(llc_snap(0x80F3).unwrap()[..6], [0xAA, 0xAA, 0x03, 0x00, 0x00, 0xF8]);
-    assert_eq!(llc_snap(0x0800).unwrap(), [0xAA, 0xAA, 0x03, 0x00, 0x00, 0x00, 0x08, 0x00]);
+    for ethertype in [0x0800, 0x8137, 0x80F3] {
+        let [t0, t1] = u16::to_be_bytes(ethertype);
+        assert_eq!(llc_snap(ethertype).unwrap(), [0xAA, 0xAA, 0x03, 0x00, 0x00, 0x00, t0, t1]);
+    }
 }
 
 #[test]
-fn a_bridge_tunnel_msdu_is_its_ethertype_on_ethernet() {
-    let eth = Ethernet::from_msdu(Msdu { da: STA, sa: PEER, payload: &[0xAA, 0xAA, 0x03, 0, 0, 0xF8, 0x81, 0x37, 9] }).unwrap();
-    assert_eq!((eth.ethertype, eth.payload), (0x8137, &[9][..]));
+fn a_bridge_tunnel_msdu_is_refused_as_an_unknown_oui() {
+    let msdu = Msdu { da: STA, sa: PEER, payload: &[0xAA, 0xAA, 0x03, 0, 0, 0xF8, 0x81, 0x37, 9] };
+    assert_eq!(Ethernet::from_msdu(msdu), Err(Refused::UnknownOui));
 }
 
 #[test]

@@ -233,7 +233,7 @@ Depends on: nothing; W6 waits on it.
   - the elements: SSID, rates, DS, TIM, country, RSN, RSNXE, HT, VHT, HE,
     extended capabilities and WMM;
   - A-MSDU;
-  - 802.11 to Ethernet and back (RFC 1042, bridge-tunnel);
+  - 802.11 to Ethernet and back (RFC 1042);
   - the reorder window.
 - **Exit:** host tests of every refusal and hostile length, a malformed
   country element among them; a seeded structured fuzz of a fixed count, as
@@ -242,9 +242,14 @@ Depends on: nothing; W6 waits on it.
   pinned by hash.
 - **Landed** in #924 and #930; the exit is met, the readings checked
   against the text (#924, issuecomment-6173453493).
-- **Owed:** the bridge-tunnel OUI 00-00-F8 and its EtherTypes 0x80F3 and
-  0x8137 checked against ISO/IEC TR 11802-5:1997. Owner: the orchestrator.
-  Exit: checked, and fixed in `lib/ieee80211/src/data.rs` if contradicted.
+- **No bridge-tunnel.** Every MSDU is sent under RFC 1042's header, and one
+  under any other OUI is refused `UnknownOui`, the bridge-tunnel one
+  included: a departure from §5.1.4's recommendation of ISO/IEC TR
+  11802-5:1997's translation. What the selective translation table holds
+  stays unchecked (#924, issuecomment-6173453493, row 62) and nothing
+  depends on it. The decision rests instead on ToyOS's own EtherTypes
+  arriving under RFC 1042, which the capture corpus shows for IPv4 and ARP;
+  it holds no IPv6 or EAPOL frame.
 
 **W2, the handshakes, in `wlan`**, sans-IO: the 4-way and group-key
 handshakes, SAE by hash-to-element, PMF's keys, and the Transition Disable
