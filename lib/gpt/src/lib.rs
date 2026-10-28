@@ -73,10 +73,8 @@ const MBR_TYPE_PROTECTIVE: u8 = 0xEE;
 /// inside the parser: the parser must not have to know 4096-byte reads exist.
 pub trait Sectors {
     fn lba_bytes(&self) -> u32;
+    /// Every logical block of the device: the backup table is on the last.
     fn lba_count(&self) -> u64;
-    /// Granularity of `lba_count()` in logical blocks. A count floored by a
-    /// coarser reader can omit at most one less than this value.
-    fn lba_count_granularity(&self) -> NonZeroU64;
     /// Fill `buf` — exactly `lba_bytes()` long — with logical block `lba`.
     /// `false` means the read did not happen and its contents are unknown.
     fn read_lba(&mut self, lba: u64, buf: &mut [u8]) -> bool;
@@ -374,7 +372,6 @@ struct Disk {
     lba_count: u64,
     /// `lba_count - 1`, where the backup header is: at least 2.
     backup_header_lba: u64,
-    lba_count_slack: u64,
 }
 
 /// A logical block size this crate parses, so one block is a fixed prefix of
@@ -447,7 +444,6 @@ fn open_disk(dev: &mut dyn Sectors) -> Result<Disk, GptError> {
         Some(last) if last >= 2 => last,
         _ => return Err(GptError::DeviceTooSmall(lba_count)),
     };
-    let lba_count_slack = dev.lba_count_granularity().get().saturating_sub(1);
 
     let mut block: Block = [0; 4096];
     let block = lba.of_block(&mut block);
@@ -455,7 +451,7 @@ fn open_disk(dev: &mut dyn Sectors) -> Result<Disk, GptError> {
     read(dev, 0, block)?;
     check_protective_mbr(block)?;
 
-    Ok(Disk { lba, lba_count, backup_header_lba, lba_count_slack })
+    Ok(Disk { lba, lba_count, backup_header_lba })
 }
 
 /// [`locate_type`]'s work against one header, primary or backup.
@@ -586,7 +582,7 @@ impl StatedHeader {
 }
 
 fn parse_header(lba1: &[u8], disk: &Disk, header_lba: u64) -> Result<Header, GptError> {
-    let Disk { lba, lba_count, backup_header_lba, lba_count_slack } = *disk;
+    let Disk { lba, lba_count, .. } = *disk;
     let lba_bytes = lba.bytes();
     let Some(stated) = StatedHeader::decode(lba1) else {
         return Err(GptError::NoHeader);
@@ -657,13 +653,8 @@ fn parse_header(lba1: &[u8], disk: &Disk, header_lba: u64) -> Result<Header, Gpt
         return Err(GptError::EntryArrayMisplaced { lba: entry_array_lba, lbas: array_lbas });
     }
     // UEFI 2.11 §5.3.2: “The backup GPT Partition Entry Array must be located
-    // after the Last Usable LBA and end before the backup GPT Header.” A
-    // coarser [`Sectors`] reader concedes only its declared count-floor sliver;
-    // the clamp keeps the backup header itself unconcedable.
-    let backup_array_lba = lba_count
-        .saturating_add(lba_count_slack)
-        .saturating_sub(array_lbas.saturating_add(1))
-        .min(backup_header_lba);
+    // after the Last Usable LBA and end before the backup GPT Header.”
+    let backup_array_lba = lba_count.saturating_sub(array_lbas.saturating_add(1));
     if header_lba == 1 && last_usable_lba >= backup_array_lba {
         return Err(GptError::UsableRangeCoversBackup { last: last_usable_lba, backup_array_lba });
     }

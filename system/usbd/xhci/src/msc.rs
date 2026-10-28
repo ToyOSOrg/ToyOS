@@ -19,7 +19,7 @@ use alloc::format;
 use alloc::string::String;
 use alloc::vec::Vec;
 use core::cell::{Cell, RefCell};
-use core::num::{NonZeroU16, NonZeroU64};
+use core::num::NonZeroU16;
 
 use toyos_device_memory::{DmaBuffers, Registers};
 use toyos_scsi::{self as scsi, Cdb, Geometry, Reply, Sense, HOST_BLOCK, SENSE_BYTES};
@@ -441,13 +441,7 @@ impl<'d, 'u, R: Registers, D: DmaBuffers, C: Host, T> Msc<'d, 'u, R, D, C, T> {
     /// the read until it asks for none it has not been given.
     async fn table(&mut self, geometry: &Geometry) -> Result<T, Dead> {
         let per = HOST_BLOCK / geometry.sector_bytes();
-        let mut cache = Cache {
-            lba_bytes: geometry.sector_bytes(),
-            lbas: geometry.blocks() * u64::from(per),
-            per: NonZeroU64::new(u64::from(per)).expect("at least one sector a block"),
-            have: BTreeMap::new(),
-            missed: Vec::new(),
-        };
+        let mut cache = Cache { lba_bytes: geometry.sector_bytes(), lbas: geometry.sectors(), have: BTreeMap::new(), missed: Vec::new() };
         let mut reads = 0;
         loop {
             cache.missed.clear();
@@ -463,12 +457,17 @@ impl<'d, 'u, R: Registers, D: DmaBuffers, C: Host, T> Msc<'d, 'u, R, D, C, T> {
                 }
                 reads += 1;
                 let at = self.addr(self.block);
-                let cdb = Cdb::transfer(false, (block * u64::from(per)) as u32, per as u16);
-                let read = self.command(&cdb, Data::In { at, len: HOST_BLOCK }).await?;
-                for s in 0..u64::from(per) {
+                // The last block of a disk whose count is not whole blocks is
+                // read as far as the disk goes: the backup table is there.
+                let start = block * u64::from(per);
+                let sectors = u64::from(per).min(geometry.sectors() - start) as u32;
+                let len = sectors * geometry.sector_bytes();
+                let cdb = Cdb::transfer(false, start as u32, sectors as u16);
+                let read = self.command(&cdb, Data::In { at, len }).await?;
+                for s in 0..u64::from(sectors) {
                     let first = (s as usize) * geometry.sector_bytes() as usize;
                     let sector = match read {
-                        Reply::Ok { delivered } if delivered == HOST_BLOCK => Some(
+                        Reply::Ok { delivered } if delivered == len => Some(
                             (0..geometry.sector_bytes() as usize).map(|i| self.dev.read8(self.block + first + i)).collect(),
                         ),
                         _ => None,
@@ -762,7 +761,6 @@ fn status_of(sense: Sense) -> u32 {
 struct Cache {
     lba_bytes: u32,
     lbas: u64,
-    per: NonZeroU64,
     /// `None` for a sector whose read failed.
     have: BTreeMap<u64, Option<Vec<u8>>>,
     missed: Vec<u64>,
@@ -774,9 +772,6 @@ impl toyos_gpt::Sectors for Cache {
     }
     fn lba_count(&self) -> u64 {
         self.lbas
-    }
-    fn lba_count_granularity(&self) -> NonZeroU64 {
-        self.per
     }
     fn read_lba(&mut self, lba: u64, buf: &mut [u8]) -> bool {
         match self.have.get(&lba) {

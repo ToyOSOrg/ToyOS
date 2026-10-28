@@ -5,9 +5,7 @@
 //! [`ENTRIES`] entries of [`ENTRY_BYTES`]; a copy of another shape reads as
 //! [`CopyError::Shape`]. The writer lays the arrays where §5.3.1 puts them:
 //! the primary's at LBA 2, the backup's ending just before the device's last
-//! LBA, which holds the backup header. The device's true last LBA: a
-//! [`Sectors`] that floors its count reads a copy this writes at the wrong
-//! place.
+//! LBA, which holds the backup header.
 
 use crate::{check_protective_mbr, header_crc, parse_header, read, Block, Crc32, Disk, GptError, Guid, LbaSize, Sectors};
 
@@ -388,12 +386,7 @@ pub fn read_copies(dev: &mut dyn Sectors) -> Option<Copies> {
     } else {
         Mbr::Blank
     };
-    let disk = Disk {
-        lba: geometry.lba,
-        lba_count: geometry.lba_count,
-        backup_header_lba: geometry.backup_header_lba(),
-        lba_count_slack: dev.lba_count_granularity().get().saturating_sub(1),
-    };
+    let disk = Disk { lba: geometry.lba, lba_count: geometry.lba_count, backup_header_lba: geometry.backup_header_lba() };
     let primary = read_copy(dev, &disk, 1);
     let backup = read_copy(dev, &disk, geometry.backup_header_lba());
     Some(Copies { geometry, mbr, primary, backup })

@@ -14,7 +14,7 @@ use toyos_gpt::{GptError, Guid};
 const SEED: u64 = 0x6770_745F_6564_6974;
 
 fn image(lba_bytes: u32, lba_count: u64) -> Image {
-    Image { lba_bytes, lba_count, granularity: 1, bytes: vec![0; (lba_bytes as u64 * lba_count) as usize], fail_at: None }
+    Image { lba_bytes, lba_count, bytes: vec![0; (lba_bytes as u64 * lba_count) as usize], fail_at: None }
 }
 
 /// One step as a crash model holds it: a run of whole blocks, or a flush.
@@ -36,7 +36,7 @@ fn owned(table: &Table, geometry: &Geometry, mbr: bool) -> Vec<Owned> {
 }
 
 fn copy(img: &Image) -> Image {
-    Image { lba_bytes: img.lba_bytes, lba_count: img.lba_count, granularity: 1, bytes: img.bytes.clone(), fail_at: None }
+    Image { lba_bytes: img.lba_bytes, lba_count: img.lba_count, bytes: img.bytes.clone(), fail_at: None }
 }
 
 fn apply(img: &mut Image, lba: u64, bytes: &[u8]) {
@@ -83,9 +83,11 @@ fn some_table(rng: &mut Rng, geometry: &Geometry) -> Table {
     t
 }
 
-/// What `toyos_gpt::list`, the reader every disk driver serves from, finds:
-/// each partition's index, type, unique GUID and range.
-fn listed(img: &mut Image) -> Result<BTreeMap<u32, (Guid, Guid, u64, u64)>, GptError> {
+/// Each partition by index: its type, unique GUID, first and last block.
+type Listing = BTreeMap<u32, (Guid, Guid, u64, u64)>;
+
+/// What `toyos_gpt::list`, the reader every disk driver serves from, finds.
+fn listed(img: &mut Image) -> Result<Listing, GptError> {
     let mut out = [None; 128];
     toyos_gpt::list(img, &mut out)?;
     Ok(out
@@ -98,7 +100,7 @@ fn listed(img: &mut Image) -> Result<BTreeMap<u32, (Guid, Guid, u64, u64)>, GptE
         .collect())
 }
 
-fn listing_of(t: &Table) -> BTreeMap<u32, (Guid, Guid, u64, u64)> {
+fn listing_of(t: &Table) -> Listing {
     t.used().map(|(i, s)| (i, (s.type_guid, s.unique_guid, s.first, s.last))).collect()
 }
 
@@ -201,7 +203,8 @@ fn a_table_uefi_forbids_is_refused() {
         t
     };
     assert_eq!(base(&mut rng).check(&g), Ok(()));
-    let cases: [(&str, fn(&mut Table), Invalid); 8] = [
+    type Case = (&'static str, fn(&mut Table), Invalid);
+    let cases: [Case; 8] = [
         ("zero disk", |t| t.disk_guid = Guid::ZERO, Invalid::DiskGuid),
         ("usable over the primary", |t| t.first_usable = 33, Invalid::UsableRange { first: 33, last: 100_000 - 34 }),
         ("usable over the backup", |t| t.last_usable += 1, Invalid::UsableRange { first: 34, last: 100_000 - 33 }),

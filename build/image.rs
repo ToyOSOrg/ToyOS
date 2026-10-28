@@ -768,9 +768,6 @@ impl toyos_gpt::Sectors for FileSectors<'_> {
         self.0.metadata().map(|m| m.len()).unwrap_or(0) / u64::from(LBA)
     }
 
-    fn lba_count_granularity(&self) -> NonZeroU64 {
-        NonZeroU64::new(1).expect("one is not zero")
-    }
 
     fn read_lba(&mut self, lba: u64, buf: &mut [u8]) -> bool {
         self.0.seek(SeekFrom::Start(lba * u64::from(LBA))).is_ok() && self.0.read_exact(buf).is_ok()
@@ -881,9 +878,6 @@ impl toyos_gpt::Sectors for ImageSectors<'_> {
         self.0.len() as u64 / u64::from(LBA)
     }
 
-    fn lba_count_granularity(&self) -> NonZeroU64 {
-        NonZeroU64::new(1).expect("one is not zero")
-    }
 
     fn read_lba(&mut self, lba: u64, buf: &mut [u8]) -> bool {
         let at = lba as usize * LBA as usize;

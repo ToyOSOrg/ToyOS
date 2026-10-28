@@ -17,7 +17,6 @@ const SHAPE: Shape<'static> = Shape {
     types: &[Guid::EFI_SYSTEM, Guid::MICROSOFT_BASIC, Guid::TOYOS_DATA, Guid::TOYOS_ROOT],
     entry_sizes: &[128, 128, 128, 128, 256, 512],
     backup: true,
-    floored: true,
 };
 
 /// A partition as the parser handed it back.

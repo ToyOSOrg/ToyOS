@@ -236,9 +236,6 @@ impl Sectors for Disk<'_> {
         self.lba_count
     }
 
-    fn lba_count_granularity(&self) -> NonZeroU64 {
-        NonZeroU64::MIN
-    }
 
     fn read_lba(&mut self, lba: u64, buf: &mut [u8]) -> bool {
         let n = self.lba_bytes as usize;

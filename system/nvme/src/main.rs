@@ -47,8 +47,10 @@ const TOKEN_LINK: u64 = 1;
 const TOKEN_STOP: u64 = 2;
 const TOKEN_SESSION: u64 = 0x1_0000;
 
-/// The controller as `toyos_gpt` reads it: its own sectors, served a 4 KiB
-/// block at a time, and floored to whole blocks.
+/// The controller as `toyos_gpt` reads it: every sector of the namespace,
+/// a 4 KiB block at a time where the block is whole and one sector at a time
+/// past the last whole block, where the backup table is on a namespace whose
+/// count is not whole blocks.
 struct Sectors<'a> {
     ctrl: &'a mut Controller,
     block: Vec<u8>,
@@ -59,20 +61,19 @@ impl toyos_gpt::Sectors for Sectors<'_> {
         self.ctrl.lba_bytes
     }
     fn lba_count(&self) -> u64 {
-        let per = BLOCK_BYTES as u64 / self.ctrl.lba_bytes as u64;
-        self.ctrl.sectors / per * per
-    }
-    fn lba_count_granularity(&self) -> core::num::NonZeroU64 {
-        core::num::NonZeroU64::new(BLOCK_BYTES as u64 / self.ctrl.lba_bytes as u64).expect("at least one")
+        self.ctrl.sectors
     }
     fn read_lba(&mut self, lba: u64, buf: &mut [u8]) -> bool {
-        let lba_bytes = self.ctrl.lba_bytes as u64;
-        let at = lba * lba_bytes;
-        if !self.ctrl.read_block(at / BLOCK_BYTES as u64, &mut self.block) {
+        let per = BLOCK_BYTES as u64 / self.ctrl.lba_bytes as u64;
+        let first = lba / per * per;
+        if first + per > self.ctrl.sectors {
+            return self.ctrl.read_sectors(lba, buf);
+        }
+        if !self.ctrl.read_sectors(first, &mut self.block) {
             return false;
         }
-        let off = (at % BLOCK_BYTES as u64) as usize;
-        buf.copy_from_slice(&self.block[off..off + lba_bytes as usize]);
+        let off = ((lba - first) * self.ctrl.lba_bytes as u64) as usize;
+        buf.copy_from_slice(&self.block[off..off + self.ctrl.lba_bytes as usize]);
         true
     }
 }

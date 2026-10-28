@@ -580,10 +580,16 @@ impl Controller {
     /// # Panics
     /// With no room: the caller asks [`Self::has_room`] first.
     pub fn submit_io(&mut self, write: bool, block: u64, blocks: u32, at: u64, owner: Owner) {
-        let queue = self.roomiest().expect("nvme: an I/O submission with no queue room");
         let per = (toyos_blockring::BLOCK_BYTES as u32 / self.lba_bytes) as u64;
-        let sectors = blocks as u64 * per;
-        let pages = blocks as usize;
+        self.submit_sectors(write, block * per, blocks as u64 * per, at, owner);
+    }
+
+    /// [`Self::submit_io`] in the namespace's own sectors: `sectors` of them
+    /// from `lba`, which a table at the device's end needs when its sector
+    /// count is not whole blocks.
+    fn submit_sectors(&mut self, write: bool, lba: u64, sectors: u64, at: u64, owner: Owner) {
+        let queue = self.roomiest().expect("nvme: an I/O submission with no queue room");
+        let pages = (sectors * self.lba_bytes as u64).div_ceil(PAGE as u64) as usize;
         let (dma, dma_addr) = (self.dma, self.dma_addr);
         let list_base = OFF_PRP + queue * IO_DEPTH as usize * PAGE;
         let cmd = Command {
@@ -595,8 +601,8 @@ impl Controller {
                 2 => at + PAGE as u64,
                 _ => u64::MAX,
             },
-            cdw10: (block * per) as u32,
-            cdw11: ((block * per) >> 32) as u32,
+            cdw10: lba as u32,
+            cdw11: (lba >> 32) as u32,
             cdw12: (sectors - 1) as u32,
         };
         // Every page after the first, in this slot's list page (§4.1.1).
@@ -619,12 +625,14 @@ impl Controller {
         self.peak = self.peak.max(self.busy());
     }
 
-    /// Read one 4 KiB block synchronously into `out`, through this driver's
-    /// own scratch page: before any session exists, for the partition table.
-    pub fn read_block(&mut self, block: u64, out: &mut [u8]) -> bool {
-        assert_eq!(out.len(), toyos_blockring::BLOCK_BYTES);
+    /// Read `out.len()` bytes of whole sectors from `lba`, at most a page,
+    /// synchronously through this driver's own scratch page: while no
+    /// session's command is on the device, for the partition table.
+    pub fn read_sectors(&mut self, lba: u64, out: &mut [u8]) -> bool {
+        assert!(out.len() <= PAGE && out.len().is_multiple_of(self.lba_bytes as usize) && !out.is_empty());
         assert_eq!(self.busy(), 0, "nvme: a waited read beside other commands");
-        self.submit_io(false, block, 1, self.dma_addr + OFF_SCRATCH as u64, Owner::Driver);
+        let sectors = (out.len() / self.lba_bytes as usize) as u64;
+        self.submit_sectors(false, lba, sectors, self.dma_addr + OFF_SCRATCH as u64, Owner::Driver);
         let start = Instant::now();
         let mut done = Vec::new();
         let ok = loop {
