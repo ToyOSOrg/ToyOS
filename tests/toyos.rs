@@ -7499,7 +7499,8 @@ fn ppb_apart(a: u64, b: u64) -> u64 {
 /// was within the bound it derived, against the rate the HPET measured over
 /// the longest span the boot reached, which must be two minutes or more. A
 /// stated rate is CPUID 15H's, and against it the HPET's own 0.05% is all a
-/// document allows (IA-PC HPET Specification 1.0a), so its distance is printed.
+/// document allows (IA-PC HPET Specification 1.0a, §2.2), so its distance is
+/// printed.
 fn clock_holds_over_minutes(boot: &metal::Readback) -> Result<(), String> {
     let kernel = boot.kernel();
     let text = kernel.text();
