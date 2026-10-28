@@ -24,11 +24,15 @@ kernel stores is 3,227 Hz there, 1.8 ppm. Where it comes from, the HPET
 reads' cost against the window or the order of the reads, is unread.
 
 The T14 states its TSC's rate (CPUID 15H, 2,419,200,000 Hz), and the kernel
-logs its own measurement beside it. The session's T14 boot logs hold two
-clusters, 285 ppm under and 59 ppm over, in 344 and 250 log files (some of
-them copies of one boot), and a few readings between and beyond them. That the two clusters are two kernel
+logs its own measurement beside it. Over 5 minutes against the HPET under
+its Linux, the TSC counted 2419.2002 MHz, the stated rate within 0.1 ppm,
+worst residual 0.2 µs (`tsc-drift`, 2026-10-28). The session's T14 boot logs
+hold two clusters, 285 ppm under and 59 ppm over, in 344 and 250 log files
+(some of them copies of one boot), and a few readings between and beyond
+them. Those are the kernel's error. That the two clusters are two kernel
 revisions is an inference no one has checked. On that machine a stated rate
-is there to be used, and the kernel keeps its measurement instead.
+is there to be used, and right, and the kernel keeps its measurement
+instead.
 
 **Exit**: on the T14 and the AMD bench, the rate the kernel keeps is within a
 bound the fix derives and logs. That bound is set by its window, its reads'
