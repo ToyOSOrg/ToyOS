@@ -359,6 +359,10 @@ pub struct Sync {
     sws: Option<Instant>,
     sws_fired: bool,
     last_data_sent: Option<Instant>,
+    /// When this connection first sent data, and how many of [`RAMP_MARKS`] its cwnd has been
+    /// counted at since.
+    first_data_sent: Option<Instant>,
+    ramp_counted: usize,
     progress_since: Option<Instant>,
     acked_since: Option<Instant>,
     orphan_since: Option<Instant>,
@@ -402,6 +406,14 @@ impl SendLimit {
         }
     }
 }
+
+/// Where a connection's slow start is read: cwnd this long after its first data.
+const RAMP_MARKS: [(Duration, Counter, Counter); 4] = [
+    (Duration::from_millis(100), Counter::CwndAt100MsBytes, Counter::CwndAt100Ms),
+    (Duration::from_millis(300), Counter::CwndAt300MsBytes, Counter::CwndAt300Ms),
+    (Duration::from_secs(1), Counter::CwndAt1SBytes, Counter::CwndAt1S),
+    (Duration::from_secs(2), Counter::CwndAt2SBytes, Counter::CwndAt2S),
+];
 
 fn us32(n: usize) -> u32 {
     u32::try_from(n).unwrap_or(u32::MAX)
@@ -458,6 +470,8 @@ impl Sync {
             sws: None,
             sws_fired: false,
             last_data_sent: None,
+            first_data_sent: None,
+            ramp_counted: 0,
             progress_since: None,
             acked_since: None,
             orphan_since: None,
@@ -770,8 +784,15 @@ impl Sync {
                 self.cc.end_recovery();
             }
             Recovery::Sack { .. } => {}
-            Recovery::None => self.cc.on_ack(now, bytes, self.rtt.srtt()),
+            Recovery::None => {
+                ctx.log.count(if self.cc.limited { Counter::AcksCwndLimited } else { Counter::AcksNotLimited });
+                ctx.log.add(Counter::AcksBytes, u64::from(bytes));
+                let before = self.cc.cwnd;
+                self.cc.on_ack(now, bytes, self.rtt.srtt());
+                ctx.log.add(Counter::CwndGrownBytes, u64::from(self.cc.cwnd.saturating_sub(before)));
+            }
         }
+        self.count_ramp(now, ctx);
         self.dupacks = 0;
         self.lt_budget = 0;
         self.lt_bytes = 0;
@@ -787,6 +808,19 @@ impl Sync {
         }
         self.probe_due = false;
         self.schedule_probe(now);
+    }
+
+    /// cwnd at each of [`RAMP_MARKS`] after the first data, once each, at the first ACK past it.
+    fn count_ramp(&mut self, now: Instant, ctx: &mut Ctx<'_>) {
+        let Some(first) = self.first_data_sent else { return };
+        while let Some(&(mark, bytes, count)) = RAMP_MARKS.get(self.ramp_counted) {
+            if now.since(first) < mark {
+                return;
+            }
+            ctx.log.add(bytes, u64::from(self.cwnd()));
+            ctx.log.count(count);
+            self.ramp_counted = self.ramp_counted.saturating_add(1);
+        }
     }
 
     /// RFC 8985 §7.2, on new data sent and on an ACK that moves SND.UNA: with SACK, outside fast
@@ -1182,6 +1216,11 @@ impl Sync {
         let was = self.held_by.map(|(limit, _)| limit);
         if let Some((limit, since)) = self.held_by.filter(|_| held != was) {
             ctx.log.add(limit.counter(), u64::try_from(now.since(since).as_nanos()).unwrap_or(u64::MAX));
+            if let (SendLimit::Congestion, Some(first)) = (limit, self.first_data_sent) {
+                let second = first.after(Duration::from_secs(1));
+                let inside = now.min(second).since(since.max(first));
+                ctx.log.add(Counter::SendLimitedByCongestionFirstSecondNanos, u64::try_from(inside.as_nanos()).unwrap_or(u64::MAX));
+            }
         }
         if held != was {
             self.held_by = held.map(|limit| (limit, now));
@@ -1275,6 +1314,7 @@ impl Sync {
         }
         if len > 0 {
             self.last_data_sent = Some(now);
+            self.first_data_sent.get_or_insert(now);
             self.sws = None;
             self.sws_fired = false;
             // Until the next stop says otherwise: an opportunity that ends on the caller's credit

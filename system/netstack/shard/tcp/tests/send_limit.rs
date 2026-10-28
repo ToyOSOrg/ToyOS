@@ -94,3 +94,39 @@ fn a_wait_that_ends_in_a_timeout_is_congestions() {
     assert_eq!(h.send(t + 11, 1460).len(), 1);
     assert_eq!(held(&h), [11 * MS, 0, fired * MS]);
 }
+
+/// A slow start read where it stands: each ACK says whether cwnd limited the opportunity before
+/// it and how many bytes it acknowledged, the growth RFC 5681 §3.1 gave it is summed, cwnd is
+/// counted once at the first ACK past each mark after the first data, and congestion's wait is
+/// split at the first second.
+#[test]
+fn a_slow_start_is_read_at_its_marks() {
+    let mut h = fixture_e();
+    assert_eq!(h.send(0, 60_000).len(), 10, "the initial window");
+    // An ACK every 100 ms takes all in flight, a stretch ACK worth one SMSS of growth, and the
+    // buffer is topped up by what it freed, so cwnd alone stops the sender throughout.
+    let mut acked = 1001u32;
+    let mut sent = 15_601u32;
+    for k in 0..11u32 {
+        let t = 50 + 100 * i64::from(k);
+        let outs = h.input(t, seg(5001).ack(sent));
+        let freed = (sent - acked) as usize;
+        acked = sent;
+        sent += outs.iter().map(|o| o.len()).sum::<u32>();
+        let more = h.send(t, freed);
+        sent += more.iter().map(|o| o.len()).sum::<u32>();
+        assert_eq!(sent - acked, 14_600 + (k + 1) * 1460, "the window after {} ACKs", k + 1);
+    }
+    let cwnd_after = |acks: u32| u64::from(14_600 + acks * 1460);
+    assert_eq!(h.count(Counter::AcksCwndLimited), 11);
+    assert_eq!(h.count(Counter::AcksNotLimited), 0);
+    assert_eq!(h.count(Counter::AcksBytes), u64::from(acked - 1001));
+    assert_eq!(h.count(Counter::CwndGrownBytes), 11 * 1460);
+    let at = |bytes, count| (h.count(bytes), h.count(count));
+    assert_eq!(at(Counter::CwndAt100MsBytes, Counter::CwndAt100Ms), (cwnd_after(2), 1), "the ACK at 150 ms");
+    assert_eq!(at(Counter::CwndAt300MsBytes, Counter::CwndAt300Ms), (cwnd_after(4), 1), "the ACK at 350 ms");
+    assert_eq!(at(Counter::CwndAt1SBytes, Counter::CwndAt1S), (cwnd_after(11), 1), "the ACK at 1050 ms");
+    assert_eq!(at(Counter::CwndAt2SBytes, Counter::CwndAt2S), (0, 0), "not reached");
+    assert_eq!(held(&h), [0, 0, 1050 * MS]);
+    assert_eq!(h.count(Counter::SendLimitedByCongestionFirstSecondNanos), 1000 * MS);
+}

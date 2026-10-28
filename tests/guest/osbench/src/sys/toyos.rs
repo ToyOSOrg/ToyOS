@@ -398,7 +398,7 @@ pub fn persistent_dir() -> Option<(String, String)> {
 /// [tcp]'s bytes, losses and the time its senders waited on each send limit, and the card's
 /// full-ring waits and missed frames. Those a card does not report are left out.
 pub fn net_counters() -> Result<Vec<(String, u64)>, String> {
-    const READ: [&str; 23] = [
+    const READ: [&str; 37] = [
         "net.tcp.sent.bytes",
         "net.tcp.retransmit.bytes",
         "net.tcp.rto",
@@ -413,6 +413,19 @@ pub fn net_counters() -> Result<Vec<(String, u64)>, String> {
         "net.tcp.congestion-stops",
         "net.tcp.congestion-stops.cwnd.bytes",
         "net.tcp.congestion-stops.srtt.us",
+        "net.tcp.send-limited.congestion.first-s.ns",
+        "net.tcp.acks.cwnd-limited",
+        "net.tcp.acks.not-limited",
+        "net.tcp.acks.bytes",
+        "net.tcp.cwnd.grown.bytes",
+        "net.tcp.cwnd.at-100ms.bytes",
+        "net.tcp.cwnd.at-100ms",
+        "net.tcp.cwnd.at-300ms.bytes",
+        "net.tcp.cwnd.at-300ms",
+        "net.tcp.cwnd.at-1s.bytes",
+        "net.tcp.cwnd.at-1s",
+        "net.tcp.cwnd.at-2s.bytes",
+        "net.tcp.cwnd.at-2s",
         "net.transmit.full",
         "net.transmit.wake_armed",
         "net.transmit.wake_taken",
@@ -422,6 +435,7 @@ pub fn net_counters() -> Result<Vec<(String, u64)>, String> {
         "net.transmit.unreported",
         "net.errors.missed",
         "net.wire.sent",
+        "net.wire.received",
     ];
     let snap = inspect::ask(toyos_inspect::NET)?;
     Ok(READ
