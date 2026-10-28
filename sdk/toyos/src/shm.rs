@@ -452,6 +452,14 @@ impl fmt::Display for NotImmutable {
     }
 }
 
+impl Drop for Immutable {
+    fn drop(&mut self) {
+        // SAFETY: the mapping `map` made, which nothing reaches once this drops;
+        // the handle closes after it.
+        let _ = unsafe { syscall::vm_release(self.ptr.cast_mut(), self.len) };
+    }
+}
+
 impl AsHandle for Immutable {
     fn as_handle(&self) -> RawHandle {
         self.handle.raw()
