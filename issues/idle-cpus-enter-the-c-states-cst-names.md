@@ -52,6 +52,22 @@ lands later the deeper the state was (none at 100 µs, C2 at 1 ms, C10 at
 consistent with the cost of the caches a deep state powers off, not measured
 as that. A burst of wakes to CPUs in deep states pays their exits.
 
+**Where the exit stands** (#1073's second boots at `f8749dc69`, two boots
+each against its control with the deep states off, all else equal):
+
+- T14 `crunch.single` 1.10 to 1.11 times faster (deflate 60.3 to 54.5 ms,
+  Linux's 54.6 to 54.7), each row's thread at 4.21 to 4.23 GHz against
+  3.83 by APERF/MPERF, its idle cores 40 to 80 % of the row in core C7.
+- T14 `cpu.clock` at 4189 at 8 and 9 group starts of 17, the control at
+  none; Linux reaches 4190 at 13. Boot, identity, energy, system and mem
+  stay at 3789 even when every idle CPU waits deepest (#1073's first
+  always-deepest control), so three or more cores ran at those starts;
+  osbench now names what ran beside each group's clock (`<group>.cpu.clock.ran`).
+- AMD: no clock gap and no throughput change; the IPC cost of the first
+  boots is gone with the idle choice folded into the pass's timer. A
+  thread whose SMT sibling waited in port 0x414 ran deflate 6 % slower at
+  the same clock, so a CPU beside a running sibling now waits in C1.
+
 **Exit**: on the T14, since a KVM guest's idle is its host's: the idle
 minute's package energy, timer lateness no worse than `hlt`'s by more than
 the chosen state's exit latency, and osbench's `cpu.clock` maximum at ratio
