@@ -1,7 +1,6 @@
 //! Data frame bodies: the CCMP header (§12.5.2.2), A-MSDU (§9.3.2.2), and translation between an
-//! MSDU and an Ethernet II frame by an RFC 1042 LLC/SNAP header, every EtherType alike. The
-//! bridge-tunnel header, which only AppleTalk's AARP and IPX are sent under, is refused as any
-//! other OUI is: ToyOS speaks neither.
+//! MSDU and an Ethernet II frame under RFC 1042's LLC/SNAP header alone, every EtherType alike:
+//! §5.1.4's bridge-tunnel translation is not implemented, and its OUI is refused as any other.
 
 use crate::frame::Data;
 use crate::read::Reader;

@@ -415,7 +415,6 @@ fn llc_snap_refuses_a_length_and_is_rfc_1042_for_every_type() {
     }
 }
 
-/// A bridge-tunnel header is an OUI ToyOS does not decode, whatever type it carries.
 #[test]
 fn a_bridge_tunnel_msdu_is_refused_as_an_unknown_oui() {
     let msdu = Msdu { da: STA, sa: PEER, payload: &[0xAA, 0xAA, 0x03, 0, 0, 0xF8, 0x81, 0x37, 9] };

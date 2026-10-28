@@ -244,10 +244,12 @@ Depends on: nothing; W6 waits on it.
   against the text (#924, issuecomment-6173453493).
 - **No bridge-tunnel.** Every MSDU is sent under RFC 1042's header, and one
   under any other OUI is refused `UnknownOui`, the bridge-tunnel one
-  included. Its selective translation table (ISO/IEC TR 11802-5:1997,
-  formerly IEEE Std 802.1H) carries only AppleTalk's AARP and IPX, which
-  ToyOS neither sends nor receives, so under zero legacy it carries nothing
-  ToyOS needs, and no fact of it remains to check.
+  included: a departure from §5.1.4's recommendation of ISO/IEC TR
+  11802-5:1997's translation. What the selective translation table holds
+  stays unchecked (#924, issuecomment-6173453493, row 62) and nothing
+  depends on it. The decision rests instead on ToyOS's own EtherTypes
+  arriving under RFC 1042, which the capture corpus shows for IPv4 and ARP;
+  it holds no IPv6 or EAPOL frame.
 
 **W2, the handshakes, in `wlan`**, sans-IO: the 4-way and group-key
 handshakes, SAE by hash-to-element, PMF's keys, and the Transition Disable
