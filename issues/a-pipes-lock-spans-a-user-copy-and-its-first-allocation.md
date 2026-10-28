@@ -42,3 +42,7 @@ or drop and retry on the miss.
 **Exit**: no pipe lock is held across more than a bounded copy or any
 allocation, the hold time is read before and after, and `audio_tone`'s worst
 wake does not move.
+
+**Swap makes this a prerequisite**: a copy under the pipe's lock would wait on
+storage there. It closes with stage S0-a of
+`issues/anonymous-memory-swaps-to-an-encrypted-partition.md`.
