@@ -13,6 +13,7 @@ pub mod bootwrite;
 pub mod clock;
 pub mod cpu;
 pub mod dirnodes;
+pub mod dmaguard;
 pub mod frames;
 pub mod iova;
 pub mod message;

@@ -485,6 +485,9 @@ const MACHINE_TESTS: &[&str] = &[
     // DMA it lets through are no host test's, and the AMD bench is staged by
     // hand rather than by CI.
     "amdvi_firmware_left",
+    // A VT-d unit left translating, with no protected memory regions to guard
+    // its hand-over: the T14's units have them, so only QEMU's takes this one.
+    "vtd_firmware_left",
     // A translating AMD-Vi unit's refusal, recorded and read: a kernel-owned
     // record halts the machine, so no metal row reaches it, and only QEMU's
     // `iommu-testdev` aims a DMA where no domain maps.
@@ -1320,7 +1323,7 @@ const METAL: &[(&str, metal::Metal)] = &[
         // log running, on real silicon: each field goes off by its own write
         // before the unit is programmed or left off, and the boot goes on.
         "iommu_firmware_left",
-        metal::Metal { arms: SELFTESTS, judge: |b| iommu_firmware_left(b[0].kernel().text()) },
+        metal::Metal { arms: FIRMWARE_LEFT, judge: |b| iommu_firmware_left(b[0].kernel().text()) },
     ),
     // ---- a claimed function at the unit, on tests/images/testcases.toml ----
     (
@@ -1876,12 +1879,20 @@ const SELFTEST_PARAMS: &[&str] = &[
     "lapic-spurious-selftest",
     "unclaimed-vector-selftest",
     "sysret-ss-probe",
-    "iommu-firmware-left",
 ];
 
 const SELFTESTS: &[metal::Arm] = &[metal::Arm {
     features: ACTUATOR_KERNEL,
     ..metal::once("shared-debug", "tests/images/testcases.toml", SELFTEST_PARAMS, &[])
+}];
+
+/// Its own boot: on the T14 the hand-over it stages can halt the machine on
+/// the iGPU's fault
+/// (`issues/the-t14s-igpu-faults-read-permission-after-translation-goes-off-and-on-under-its-scanout.md`),
+/// which would take every row batched with it.
+const FIRMWARE_LEFT: &[metal::Arm] = &[metal::Arm {
+    features: ACTUATOR_KERNEL,
+    ..metal::once("iommu-firmware-left", "tests/images/testcases.toml", &["iommu-firmware-left"], &[])
 }];
 
 /// The two boots every discovered member rides on the T14, each behind its
@@ -4498,6 +4509,7 @@ fn run_machine_test(name: &str, test_config: &Path) -> Result<(), String> {
             common::iommu::the_kernel_tells_a_bypassing_console_physical_addresses()
         }
         "amdvi_firmware_left" => common::iommu::amdvi_firmware_left(test_config),
+        "vtd_firmware_left" => common::iommu::vtd_firmware_left(test_config),
         "amdvi_selftest" => common::iommu::amdvi_selftest(test_config),
         "nested_nmi_is_loud" => faults::nested_nmi_is_loud(test_config),
         "kernel_wx_leaf_is_refused" => faults::kernel_wx_leaf_is_refused(test_config, qemu::Profile::Metal),
@@ -6130,11 +6142,16 @@ fn sysret_ss(log: &str) -> Result<(), String> {
 }
 
 /// Every unit this kernel went on to program, and every AMD-Vi unit it
-/// switched off, said it was handed over with what the actuator left on.
+/// switched off, said it was handed over with what the actuator left on; and
+/// where every VT-d unit has protected memory regions, as the T14's do, they
+/// went on before the hand-over and off after it.
 ///
 /// An AMD-Vi unit's lines are on the boot stick only because the switch-off
 /// let the stick's DMA through the unit the actuator left blocking it.
 fn iommu_firmware_left(log: &str) -> Result<(), String> {
+        // VT-d unit lines alone: an AMD-Vi unit's read `iommu: amdvi unit`.
+        let vtd: Vec<&str> = log.lines().filter(|l| l.contains("iommu: unit") && l.contains(" cap=")).collect();
+        let guarded = !vtd.is_empty() && vtd.iter().all(|l| l.contains(" pmr=y"));
         let mut units = 0;
         for line in log.lines().filter(|l| l.contains(" translating gsts=")) {
             let unit = line
@@ -6183,10 +6200,25 @@ fn iommu_firmware_left(log: &str) -> Result<(), String> {
         if units == 0 {
             return Err(format!("no unit was programmed or switched off, so nothing was handed over:\n{log}"));
         }
+        let at = |needle: &str| log.lines().position(|l| l.contains(needle));
+        let armed = at("iommu: protected memory on for");
+        let first_off = at("was handed over with translation on; it goes off first");
+        let released = at("iommu: protected memory released on");
+        let first_translating = at(" translating gsts=");
+        if guarded
+            && !matches!((armed, first_off, released, first_translating),
+                (Some(a), Some(o), Some(r), Some(t)) if a < o && r < t)
+        {
+            return Err(format!(
+                "every unit has protected memory regions, and they did not go on before translation \
+                 first went off and come off before the first unit was programmed:\n{log}"
+            ));
+        }
         let passed = log.matches("handed over with compatibility-format pass-through on").count();
         eprintln!(
-            "  [iommu-firmware-left] {units} unit(s) switched off what they were handed over with; \
-             {passed} of them reported compatibility format passed"
+            "  [iommu-firmware-left] {units} unit(s) switched off what they were handed over with, \
+             {} protected memory; {passed} of them reported compatibility format passed",
+            if guarded { "inside" } else { "without" }
         );
         Ok(())
 }

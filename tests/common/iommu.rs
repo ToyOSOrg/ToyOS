@@ -4,6 +4,8 @@
 //! over behind the unit and refused where no unit is.
 //! `amdvi_firmware_left`: whether an AMD-Vi unit firmware left blocking is
 //! switched off before the boot stick is driven.
+//! `vtd_firmware_left`: whether a VT-d unit firmware left translating, with no
+//! protected memory regions, goes off before it is programmed.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::Path;
@@ -343,6 +345,31 @@ const XHCI_REFUSED: &str = "pcidev: PCI 00:03.0 NOT HANDED OVER — its interrup
 pub(crate) fn amdvi_left_on(unit: &str) -> [String; 3] {
     ["CmdBufEn", "EventLogEn", "IommuEn"]
         .map(|field| format!("iommu: amdvi {unit} was handed over with {field} on; it goes off"))
+}
+
+/// **A VT-d unit left translating, on a unit with no protected memory
+/// regions, goes off first and is programmed.** QEMU's unit reports
+/// `CAP.PLMR` and `CAP.PHMR` clear, so this is the hand-over without the guard
+/// the T14 takes (`iommu_firmware_left`'s row), logged as such. Under
+/// `iommu-firmware-left` the unit is left queueing, translating and remapping;
+/// each goes off by its own write, the root is set and invalidated through
+/// the queue, and the unit ends translating with the boot stick's DMA behind it.
+pub fn vtd_firmware_left(test_config: &Path) -> Result<(), String> {
+    let options = BootOptions { profile: Profile::Metal, kernel_params: &["iommu-firmware-left"], ..Default::default() };
+    let qemu = QemuInstance::boot_with_options(test_config, &[], &[], options);
+    let log = Serial::boot(&qemu);
+    log.must_be_clean()?;
+    let unguarded = log.must_say("iommu: the hand-over is unguarded: unit0 has no protected memory regions")?;
+    let off = log.must_say("iommu: unit0 was handed over with translation on; it goes off first")?;
+    log.must_say("iommu: unit0 was handed over with queued invalidation on; it goes off first")?;
+    log.must_not_say("iommu: protected memory on for")?;
+    let translating = log.must_say(" translating gsts=")?;
+    if !translating.contains(" tes=y ") {
+        return Err(format!("unit0 was programmed and is not translating: {translating:?}"));
+    }
+    log.must_say("Boot: complete")?;
+    eprintln!("  [vtd-firmware-left] {}; {}; {}", unguarded.trim(), off.trim(), translating.trim());
+    Ok(())
 }
 
 /// **A unit an AMD machine's firmware left on is switched off and

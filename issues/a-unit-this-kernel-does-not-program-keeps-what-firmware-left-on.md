@@ -7,11 +7,12 @@ opened: 2026-10-04
 # A unit this kernel does not program keeps what firmware left on
 
 `vtd::init` (`kernel/src/arch/x86_64/vtd/mod.rs`) switches off what firmware
-left on (`Unit::hand_over`) only inside `enable`, which a unit reaches only if
-`plan` accepts it and it is among the first `MAX_UNITS` described. A unit
+left on (`Unit::hand_over`) only in a unit's hand-over (`translate`), which a
+unit reaches only if `plan` accepts it and it is among the first `MAX_UNITS` described. A unit
 `plan` refuses, and every unit past `MAX_UNITS`, keeps whatever firmware left
 on while the kernel treats it as absent: translation through firmware's tables,
-and interrupt remapping, which blocks every compatibility-format message this
+protected memory regions (`vtd/pmr.rs` switches them off on programmed units
+only), and interrupt remapping, which blocks every compatibility-format message this
 kernel then sends through the unit unless firmware also left `CFI` on with
 `EIME` off (VT-d Rev. 4.1 §5.1.4). The module header's "leaves the unit
 switched off" is false of such a unit.

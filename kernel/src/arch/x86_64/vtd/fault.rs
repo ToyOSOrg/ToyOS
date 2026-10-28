@@ -134,23 +134,7 @@ fn drain(index: usize, regs: Mmio, records: u64, count: u32) -> usize {
     let mut seen = 0usize;
     for i in 0..count {
         let record = records + i as u64 * 16;
-        let high = regs.read_u64(record + 8);
-        if high & (1u64 << 63) == 0 {
-            continue;
-        }
-        let stream = StreamId::pci(
-            (high >> 8) as u8,
-            ((high >> 3) & 0x1F) as u8,
-            (high & 0x7) as u8,
-        );
-        let reason = ((high >> 32) & 0xFF) as u8;
-        let fault = Fault {
-            who: Who::Function(stream),
-            address: regs.read_u64(record) & !0xFFF,
-            access: if high & (1u64 << 62) != 0 { Access::Read } else { Access::Write },
-            reason,
-            name: reason_name(reason),
-        };
+        let Some(fault) = read_record(regs, record) else { continue };
         let halts = policy::report(index, &UNITS[index].faults, fault);
         clear_record(regs, record);
         if halts {
@@ -159,6 +143,23 @@ fn drain(index: usize, regs: Mmio, records: u64, count: u32) -> usize {
     }
     regs.write_u32(FSTS_REG, status & FSTS_WRITE_ONE_TO_CLEAR);
     seen
+}
+
+/// The fault recording register at `record`, if its `F` bit is set.
+fn read_record(regs: Mmio, record: u64) -> Option<Fault> {
+    let high = regs.read_u64(record + 8);
+    if high & (1u64 << 63) == 0 {
+        return None;
+    }
+    let stream = StreamId::pci((high >> 8) as u8, ((high >> 3) & 0x1F) as u8, (high & 0x7) as u8);
+    let reason = ((high >> 32) & 0xFF) as u8;
+    Some(Fault {
+        who: Who::Function(stream),
+        address: regs.read_u64(record) & !0xFFF,
+        access: if high & (1u64 << 62) != 0 { Access::Read } else { Access::Write },
+        reason,
+        name: reason_name(reason),
+    })
 }
 
 fn clear_record(regs: Mmio, record: u64) {
