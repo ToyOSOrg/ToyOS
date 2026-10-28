@@ -3,7 +3,7 @@
 # QEMU.
 #
 # What lives here is every decision the I219 driver makes — the descriptor
-# rings, the interrupt causes, the link — against four traits netstack implements
+# rings, the interrupt causes, the link — against four traits the `i219` program implements
 # one instruction deep, two of them the boundary every userland driver shares.
 # The device is on the far side of a trust boundary, so the numbers it writes
 # into a descriptor have to be driven with values no working card would send

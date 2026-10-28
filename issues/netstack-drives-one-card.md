@@ -6,11 +6,17 @@ opened: 2026-10-12
 
 # netstack drives one card
 
-netstack opens the first of `CARDS` the supervisor endowed, and no other
-(`system/netstack/src/main.rs`, `main`). It opens it behind `Card`, an enum
-of its in-process drivers (`system/netstack/src/card.rs`). Its node is one
-interface with one DHCP client (`system/netstack/node/src/lib.rs`). So a
-machine with a wired and a wireless link uses only one of them. [ip] already
+netstack opens the first link a NIC driver brings, and no other: a second
+driver's hello, or one with another address after the first link ended, is
+refused `OneLink` (`system/netstack/src/main.rs`, `hear_links` and `open`).
+Its node is one interface with one DHCP client, made with the first link's
+address (`system/netstack/node/src/lib.rs`). So a machine with a wired and a
+wireless link uses only one of them, whichever driver says hello first.
+
+Because the node needs that address, netstack serves nothing before a
+driver's hello: every client waits for it, and on a machine with no NIC
+driver for 30 s (`LINK_BOUND`, `system/netstack/src/main.rs`), after which
+netstack leaves and a client hears it gone. [ip] already
 routes over several interfaces, the lower index winning a tie
 (`system/netstack/ip/src/lib.rs`).
 
@@ -23,12 +29,13 @@ That reverses part of `issues/first-match-selection-that-remains.md`
 dropped" and that "Neither is a defect today". Under ruling 3 a second NIC
 dropped is this defect.
 
-Owner: P5 of `issues/there-is-no-wifi.md`, after the LAN track's stage 3
-moves the drivers out (`issues/the-lan-is-not-yet-production-grade.md`).
+Owner: P5 of `issues/there-is-no-wifi.md`. The drivers are out: each is a
+process of its own over a link (`toyos-link`).
 
 **Exit**:
 - one interface per link, each with its own DHCP client, lease and mDNS
-  responder, under one host name;
+  responder, under one host name, and a node that serves before any link,
+  so `LINK_BOUND` goes;
 - links ranked wired before wireless, then by arrival;
 - a guest with two virtio NICs in which the first's link is set off over
   QMP, and traffic leaves on the second;

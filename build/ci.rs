@@ -482,6 +482,7 @@ const KERNEL_SIM: &str = "kernel-sim";
 /// The kernel's models, which [`Part::Models`] tests beside their controls.
 const MODELS: [&str; 2] = [KERNEL_LOOM, KERNEL_SIM];
 const BLOCKRING: &str = "toyos-blockring";
+const LINK: &str = "toyos-link";
 const PROCLIFE: &str = "toyos-proclife";
 /// The SDK package, whose `transport` module carries its own controls.
 const SDK: &str = "toyos";
@@ -752,6 +753,8 @@ pub(crate) const CONTROLS: &[Control] = &[
     red(BLOCKRING, "mutate-no-reissue-after-loss", None, &[
         Fails("model::tests::what_a_flush_calls_durable_is_on_the_medium"),
     ]),
+    // The link's one: a full ring's want swapped `Relaxed`, a wake lost.
+    red(LINK, "mutate-want-relaxed", Some("ends_loom"), &[Fails("a_full_ring_is_never_left_asleep_on_room_it_has")]),
     red(SDK, "transport-publish-relaxed", Some("transport_loom"), &[
         Fails("a_published_entry_is_read_whole"),
         Fails("a_published_byte_is_read_as_written"),

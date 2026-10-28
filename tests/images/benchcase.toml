@@ -18,9 +18,11 @@
 [boot]
 start = ["logkeeper", "diskserver", "fileserver", "acpiserver", "netstack", "test-runner"]
 
+# `log`, which `lan_lease` waits for netstack's lease on.
 [programs.logkeeper]
 service = true
 syscap = ["logread"]
+serves = ["log"]
 
 # ACPI mode, as a shipped image and the bench's Linux run it. In the legacy
 # mode the T14's firmware hands over, it stops every CPU for 4.5 ms every 2.2 s
@@ -31,19 +33,24 @@ service = true
 devices = ["acpi"]
 receives = ["power"]
 
-# netstack on the T14's wired I219, the only card a bench has that ToyOS drives:
-# `osbench lan` reaches its peer and `osbench internet` the internet through it.
-# On the AMD bench, which has none, netstack leaves and both say so.
+# netstack over the T14's wired I219, the only card a bench has that ToyOS
+# drives: `osbench lan` reaches its peer and `osbench internet` the internet
+# through it. On the AMD bench, which has none, the supervisor starts no
+# driver, netstack leaves, and both say so.
 [programs.netstack]
 service = true
-serves = ["netstack"]
-devices = ["pci:02:00:00/8086:15fc"]
+serves = ["netstack", "link"]
+
+[programs.i219]
+drives = ["pci:02:00:00/8086:15fc"]
+receives = ["link"]
+restart = true
 
 # The order `osbench all` runs the groups in. The bound is the metal row's, its
 # 465 s on the 60 s every list has (`tests/toyos.rs`), restated for a boot of
 # this config built without the row; a derived metal config states its own.
 [programs.test-runner]
-receives = ["power", "netstack"]
+receives = ["power", "netstack", "log"]
 syscap = ["jobs", "counters", "trace", "roster", "inventory", "dup"]
 args = [
     "--bound-ms=525000",

@@ -74,21 +74,17 @@ survives unplug and replug, the handback is tested, the fuzzers run in CI.
 
 ## 3. One driver per device, one stack
 
-netd holds every NIC driver and the stack in one process, and `system.toml`
-names the card per machine (`devices = ["pci:1af4:1041"]`). Neither scales to
-all modern hardware: a bug in one driver takes every connection with it, a
-driver cannot restart without the stack's state, and a machine nobody has seen
-has no row.
+Built as P4 of `issues/there-is-no-wifi.md`, which holds what of its exit the
+benches still owe.
 
-- One driver process per network function, claiming exactly that function.
-- netd is the stack alone, and meets every driver through one narrow interface:
-  frames over shared-memory rings, link state, speed, MAC address, MTU, offloads.
-- init binds drivers to hardware from a declared match table by vendor, device
-  and class, instead of a row naming the card.
-
-The drivers already live in their own crates (`toyos-i219`, the virtio driver),
-so this is a move of hosts, not a rewrite. It lands before a second real NIC
-family is added, which is when the monolith starts to cost.
+- One driver process per network function, claiming exactly that function:
+  each driver a `drives` row (`system/i219`, `system/virtio-net`).
+- netstack is the stack alone, and meets every driver through one narrow
+  interface (`toyos-link`): frames over a shared region's rings, and the link
+  state, speed and MAC address. No MTU or offload is in it: the stack sends
+  frames of 1,514 bytes at most, and no driver offers an offload.
+- The supervisor binds drivers to hardware from the `drives` rows' match
+  table by vendor, device and class, instead of a row naming the card.
 
 **Exit**: killing a driver process restarts it with the stack's connections
 intact, and a machine with an unlisted but matching NIC comes up without a

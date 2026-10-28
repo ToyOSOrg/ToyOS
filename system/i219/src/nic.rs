@@ -1,6 +1,6 @@
-//! The I219, as netstack drives it: the clock and the claim the driver's logic
-//! is written against beside `toyos-pci-claim`'s register window and grant,
-//! and nothing else.
+//! The I219, as this program drives it: the clock and the claim the driver's
+//! logic is written against beside `toyos-pci-claim`'s register window and
+//! grant, and nothing else.
 //!
 //! What the kernel keeps is the *claim*: config space, the interrupt vector it
 //! programmed into this function, and the address space the function
@@ -9,22 +9,24 @@
 //! at the unit and recorded against this process.
 //!
 //! **Two views of one grant, and the split is the boundary itself.** `Grant`
-//! is the driver's, and it reaches descriptors — sixteen bytes each, read and
-//! written a word at a time. [`Nic::frames`] is netstack's, and it reaches
-//! payloads. The driver never touches a payload and netstack never touches a
-//! descriptor, which is what lets the driver's logic live in a crate that
-//! forbids `unsafe` at all.
+//! is the driver's logic's, and it reaches descriptors — sixteen bytes each,
+//! read and written a word at a time. [`Nic::frames`] is this file's, and it
+//! reaches payloads, which it copies to and from the link. The logic never
+//! touches a payload and this file never touches a descriptor, which is what
+//! lets the logic live in a crate that forbids `unsafe` at all.
 
-use std::cell::{Cell, RefCell};
+use std::cell::Cell;
 use std::rc::Rc;
 
 use toyos::poller::{Poller, READABLE};
 use toyos::shm::SharedMemory;
 use toyos::volatile::Window;
-use toyos::{DmaRegion, PciDev};
+use toyos::shm::ReadBytes;
+use toyos::{say, DmaRegion, PciDev};
 use toyos_abi::syscall::{RegWidth, SyscallError};
 use toyos_device_memory::Registers;
-use toyos_i219::{Clock, Delivery, Interrupts, NoDelivery};
+use toyos_i219::{Clock, Delivery, Interrupts, NoDelivery, Part};
+use toyos_link::state::{Counter, Counters, Group, Link};
 use toyos_pci_claim::{Bar, Grant, KernelRefused};
 
 /// The machine's monotonic clock: one syscall, which the kernel serves from an
@@ -94,21 +96,21 @@ impl std::fmt::Display for Opening {
 pub struct Nic {
     /// Above the mappings it reaches: dropping the driver writes the part's
     /// registers, and fields drop in the order they are declared.
-    driver: RefCell<Driver>,
+    driver: Driver,
     /// Held for their mappings' lives: the register window points into the
     /// first and the grant's into the second.
     _mapped: SharedMemory,
     region: DmaRegion,
     claim: Rc<PciDev>,
-    /// netstack's view of the same grant: the frame payloads, and nothing else.
+    /// This file's view of the same grant: the frame payloads, and nothing else.
     frames: Window,
     mac: [u8; 6],
-    part: toyos_i219::Part,
+    label: &'static str,
     reported: Latch<(toyos_i219::Counters, toyos_i219::Link)>,
 }
 
 /// The claim's register window, and the mapping it points into.
-fn registers(dev: &PciDev) -> Result<(Bar, SharedMemory), Opening> {
+fn registers(dev: &PciDev, label: &str) -> Result<(Bar, SharedMemory), Opening> {
     let info = toyos_pci_claim::describe(dev).map_err(Opening::Kernel)?;
     // The lowest BAR wide enough, rather than BAR 0 by name: the kernel
     // reports 0 bytes for a BAR it keeps back, and the MSI-X table's is one
@@ -121,8 +123,9 @@ fn registers(dev: &PciDev) -> Result<(Bar, SharedMemory), Opening> {
         .map(|(index, bytes)| (index as u32, *bytes))
         .ok_or(Opening::NoWindow)?;
     let (window, mapped) = Bar::map(dev, bar, bytes).map_err(Opening::Kernel)?;
-    crate::say!(
-        "netstack: I219: PCI {:02x}:{:02x}.{} registers in BAR {bar} ({bytes:#x} bytes)",
+    say!(
+        "{}: PCI {:02x}:{:02x}.{} registers in BAR {bar} ({bytes:#x} bytes)",
+        label,
         info.bus,
         info.dev,
         info.func,
@@ -134,14 +137,14 @@ fn registers(dev: &PciDev) -> Result<(Bar, SharedMemory), Opening> {
 /// it is asked: the register window, the part stopped, then one grant — as the
 /// driver reaches its descriptors — with the two mappings they point into, and
 /// the function started.
-fn granted(dev: &PciDev) -> Result<(Bar, Grant, SharedMemory, DmaRegion), Opening> {
-    let (bar, mapped) = registers(dev)?;
+fn granted(dev: &PciDev, label: &str) -> Result<(Bar, Grant, SharedMemory, DmaRegion), Opening> {
+    let (bar, mapped) = registers(dev, label)?;
     // Before the start: a part a previous holder left receiving would write
     // into its descriptors.
     // Said first: whether the kernel's release reset the part is read here, in
     // the receive and transmit enables it handed over.
-    crate::say!(
-        "netstack: I219: inherited RCTL {:#010x} TCTL {:#010x}",
+    say!(
+        "{label}: inherited RCTL {:#010x} TCTL {:#010x}",
         bar.read32(toyos_i219::regs::RCTL),
         bar.read32(toyos_i219::regs::TCTL)
     );
@@ -195,19 +198,23 @@ fn brought_up_words(brought_up: toyos_i219::BringUp) -> Vec<String> {
     words
 }
 
-fn say_brought_up(brought_up: toyos_i219::BringUp) {
+fn say_brought_up(label: &str, brought_up: toyos_i219::BringUp) {
     for words in brought_up_words(brought_up) {
-        crate::say!("netstack: I219: {words}");
+        say!("{label}: {words}");
     }
 }
 
 impl Nic {
     /// Take the claim's register window and one grant, and bring the part up.
-    pub fn open(dev: PciDev, part: toyos_i219::Part) -> Result<Self, Opening> {
+    pub fn open(dev: PciDev, part: Part) -> Result<Self, Opening> {
+        let label = match part {
+            Part::I219 => "i219",
+            Part::E82574 => "82574",
+        };
         let dev = Rc::new(dev);
         // Bound before the driver, so one that is refused lets its part go
         // while both are still mapped.
-        let (bar, grant, mapped, region) = granted(&dev)?;
+        let (bar, grant, mapped, region) = granted(&dev, label)?;
         let delivery = Delivery::of(|at| dev.config_read(at.into(), RegWidth::U32))
             .map_err(Opening::Delivery)?;
         let frames = grant.window();
@@ -215,114 +222,121 @@ impl Nic {
             toyos_i219::I219::open(part, delivery, bar, Monotonic, grant, Claim(Rc::clone(&dev)))
                 .map_err(Opening::Driver)?;
         let mac = driver.mac();
-        say_brought_up(driver.brought_up());
-        Ok(Self {
-            driver: RefCell::new(driver),
-            _mapped: mapped,
-            region,
-            claim: dev,
-            frames,
-            mac,
-            part,
-            reported: Latch::default(),
-        })
+        say_brought_up(label, driver.brought_up());
+        Ok(Self { driver, _mapped: mapped, region, claim: dev, frames, mac, label, reported: Latch::default() })
     }
 
-    pub fn mac(&self) -> [u8; 6] {
+    /// The driver's name for its part: its lines' and the link's.
+    pub fn label(&self) -> &'static str {
+        self.label
+    }
+
+    fn link(&self) -> Link {
+        match self.driver.link() {
+            toyos_i219::Link::Down => Link::Down,
+            toyos_i219::Link::Up { speed, full_duplex } => Link::Up { mbps: speed.mbps().into(), full_duplex },
+        }
+    }
+}
+
+impl toyos_link::driver::Nic for Nic {
+    fn mac(&self) -> [u8; 6] {
         self.mac
     }
 
-    pub fn part(&self) -> toyos_i219::Part {
-        self.part
-    }
-
-    /// The claim, for the poller: readable means an interrupt has landed.
-    pub fn claim(&self) -> &PciDev {
+    fn claim(&self) -> &PciDev {
         &self.claim
     }
 
-    /// Pass frames sent to the multicast address `group`.
-    pub fn accept_multicast(&self, group: [u8; 6]) {
-        self.driver.borrow().accept_multicast(group);
+    /// **A claim that refuses the read for anything but `WouldBlock` is the
+    /// kernel saying this function is no longer this process's**: a fault at
+    /// the unit is the one that happens, and by the time it is answered the
+    /// function's bus mastering is gone. So is a part that kept the frames a
+    /// link change left in its transmit ring past the driver's deadline.
+    /// Nothing drives either from here, and this dies where it can be read.
+    fn begin_pass(&mut self) -> Link {
+        if let Err(why) = self.driver.begin_pass() {
+            panic!("{}: this NIC cannot be driven on — {why}", self.label);
+        }
+        self.link()
     }
 
-    pub fn link(&self) -> toyos_i219::Link {
-        self.driver.borrow().link()
-    }
-
-    /// What the driver and the MAC have counted so far, the transmit ring
-    /// reclaimed first so a frame that has left is counted as sent.
-    pub fn counts(&self) -> (toyos_i219::Counters, toyos_i219::Wire) {
-        let mut driver = self.driver.borrow_mut();
-        driver.reclaim();
-        let wire = driver.wire();
-        (driver.counters(), wire)
-    }
-
-    /// Take the interrupt, acknowledge its causes and refresh the link — and
-    /// answer the link where this pass found it changed.
-    pub fn begin_pass(&self) -> Result<Option<toyos_i219::Link>, toyos_i219::PassRefused<SyscallError>> {
-        let pass = self.driver.borrow_mut().begin_pass()?;
-        Ok(pass.link_changed.then(|| self.link()))
-    }
-
-    /// How long until a pass has to begin with nothing arrived: the driver's
-    /// deadline for descriptors a link change left in the ring.
-    pub fn pass_due_in(&self) -> Option<u64> {
-        self.driver.borrow().pass_due_in()
-    }
-
-    pub fn poll_rx(&self) -> Option<toyos_i219::Frame> {
-        self.driver.borrow_mut().poll_rx()
-    }
-
-    /// The bytes of a received frame.
-    pub fn rx_frame(&self, frame: &toyos_i219::Frame) -> &[u8] {
+    fn receive(&mut self, take: &mut dyn FnMut(&[u8])) -> bool {
+        let Some(frame) = self.driver.poll_rx() else { return false };
         let window = self.frames.sub(frame.at, frame.len);
         // SAFETY: the window is inside the grant, which lives as long as
         // `self`; the device has finished with this buffer — the `DD` its
         // descriptor carries is what said so — and it is not published again
-        // until `rx_done`, which the caller makes after this borrow ends. The
-        // I219 is the chipset vendor's integrated MAC, inside the trusted base,
-        // so its descriptor protocol is believed; an external or hot-plug
-        // device's driver must copy instead.
-        unsafe { std::slice::from_raw_parts(window.as_ptr() as *const u8, frame.len) }
+        // until `rx_done`, after this borrow ends. The I219 is the chipset
+        // vendor's integrated MAC, inside the trusted base, so its descriptor
+        // protocol is believed; an external or hot-plug device's driver must
+        // copy instead.
+        take(unsafe { std::slice::from_raw_parts(window.as_ptr() as *const u8, frame.len) });
+        self.driver.rx_done(frame);
+        true
     }
 
-    /// Give the buffer back once its frame has been read.
-    pub fn rx_done(&self, frame: toyos_i219::Frame) {
-        self.driver.borrow_mut().rx_done(frame);
+    fn received(&mut self) {
+        self.driver.rx_flush();
     }
 
-    /// Hand the part every buffer the batch gave back.
-    pub fn rx_flush(&self) {
-        self.driver.borrow_mut().rx_flush();
+    fn tx_room(&mut self) -> usize {
+        self.driver.tx_room()
     }
 
-    /// How many frames the transmit ring takes now.
-    pub fn tx_room(&self) -> usize {
-        self.driver.borrow_mut().tx_room()
+    fn wake_on_room(&mut self) -> usize {
+        self.driver.wake_on_room()
     }
 
-    /// Have the part interrupt when a transmit descriptor comes back, and
-    /// answer the room there is once it has been told to.
-    pub fn wake_on_room(&self) -> usize {
-        self.driver.borrow_mut().wake_on_room()
-    }
-
-    /// Copy `frame` into a transmit buffer and hand it to the device.
-    ///
-    /// Non-blocking, and for a caller [`Self::tx_room`] answered in this
-    /// pass: a frame the driver has no slot for is a caller that did not ask,
-    /// or one that offered more than a buffer holds.
-    pub fn tx(&self, frame: &[u8]) {
+    fn send(&mut self, frame: ReadBytes<'_>) {
         let len = frame.len();
-        let slot = self.driver.borrow_mut().tx_reserve(len).unwrap_or_else(|| {
-            panic!("netstack: a {len}-byte frame was offered to a transmit ring that refuses it")
+        let slot = self.driver.tx_reserve(len).unwrap_or_else(|| {
+            panic!("{}: a {len}-byte frame was offered to a transmit ring that refuses it", self.label)
         });
-        // `frames` is the grant's window, which starts at the region's first byte.
-        self.region.memory.bytes().write(slot.at, frame);
-        self.driver.borrow_mut().tx_commit(slot);
+        let memory = &self.region.memory;
+        assert!(slot.at.checked_add(len).is_some_and(|end| end <= memory.len()), "{}: a transmit slot past the grant", self.label);
+        // SAFETY: the assertion keeps `len` bytes from `slot.at` inside the
+        // grant's mapping, which lives as long as `self`; the part reads none
+        // of them until `tx_commit` publishes the slot; and the link's region
+        // the frame is copied from is another mapping.
+        unsafe { frame.read_to(memory.as_ptr().add(slot.at)) };
+        self.driver.tx_commit(slot);
+    }
+
+    fn pass_due_in(&self) -> Option<u64> {
+        self.driver.pass_due_in()
+    }
+
+    fn join(&mut self, group: Group) {
+        self.driver.accept_multicast(group.mac());
+    }
+
+    /// What the driver and the MAC have counted so far, the transmit ring
+    /// reclaimed first so a frame that has left is counted as sent.
+    fn counters(&mut self) -> Counters {
+        self.driver.reclaim();
+        let wire = self.driver.wire();
+        let ours = self.driver.counters();
+        let mut counters = Counters::default();
+        for (counter, value) in [
+            (Counter::DescriptorsSent, ours.sent.into()),
+            (Counter::DescriptorsReceived, ours.received.into()),
+            (Counter::DescriptorsStranded, ours.stranded.into()),
+            (Counter::TransmitFull, ours.tx_full.into()),
+            (Counter::TransmitWakeArmed, ours.tx_wake_armed.into()),
+            (Counter::TransmitWakeTaken, ours.tx_wake_taken.into()),
+            (Counter::TransmitFullNanos, ours.tx_full_nanos),
+            (Counter::TransmitUnreported, ours.tx_unreported),
+            (Counter::TransmitUnreportedMax, ours.tx_unreported_max.into()),
+            (Counter::WireSent, wire.sent),
+            (Counter::WireReceived, wire.received),
+            (Counter::WireSeen, wire.seen),
+            (Counter::ErrorsMissed, wire.missed),
+            (Counter::ErrorsCrc, wire.crc_errors),
+        ] {
+            counters.set(counter, value);
+        }
+        counters
     }
 
     /// Say what this driver has refused or been told about, and what the link
@@ -332,18 +346,19 @@ impl Nic {
     ///
     /// Keyed on the anomalies and never on the spurious count: that one moves
     /// on its own.
-    pub fn report(&self) {
-        let driver = self.driver.borrow();
+    fn report(&mut self) {
+        let driver = &self.driver;
         let counters = driver.counters();
         let link = driver.link();
         let Some((was_counters, was_link)) = self.reported.moved((counters.anomalies(), link))
         else {
             return;
         };
+        let label = self.label;
         if link != was_link {
             match link {
-                toyos_i219::Link::Up { speed, full_duplex } => crate::say!(
-                    "netstack: I219: link up at {} Mb/s {}{}",
+                toyos_i219::Link::Up { speed, full_duplex } => say!(
+                    "{label}: link up at {} Mb/s {}{}",
                     speed.mbps(),
                     if full_duplex { "full duplex" } else { "half duplex" },
                     match driver.link_up_after_nanos() {
@@ -351,12 +366,12 @@ impl Nic {
                         None => String::new(),
                     },
                 ),
-                toyos_i219::Link::Down => crate::say!("netstack: I219: link down"),
+                toyos_i219::Link::Down => say!("{label}: link down"),
             }
         }
         if counters.anomalies() != was_counters {
-            crate::say!(
-                "netstack: I219: refused {} over-length, {} errored, {} split and {} empty \
+            say!(
+                "{label}: refused {} over-length, {} errored, {} split and {} empty \
                  descriptor(s); {} overrun(s), {} descriptor-starvation report(s), \
                  {} frame(s) left in the ring at a link change, {} spurious interrupt(s)",
                 counters.over_length,

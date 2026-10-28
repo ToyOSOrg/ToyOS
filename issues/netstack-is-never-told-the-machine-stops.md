@@ -16,7 +16,7 @@ set across the reset, and nothing the driver could say about the PHY at the end
 reaches the log.
 
 The next operating system's start does not depend on it: the driver disarms
-Ultra Low Power at its own start (`system/netstack/i219/src/ulp.rs`), and a
+Ultra Low Power at its own start (`system/i219/driver/src/ulp.rs`), and a
 machine cut off mid-boot gets no stop either.
 
 **Owner**: stage 3 of `issues/the-supervisor-is-host-tested-and-owns-the-stop.md`,
