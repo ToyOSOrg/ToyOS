@@ -10,9 +10,10 @@ The disk driver that drives a disk owns its table and makes every change to
 it (`lib/blockserve`); diskserver routes a request to it under the badge its
 connector was minted with (`toyos_blockring::wire::Badge`); `toyos_gpt::edit`
 is the one GPT writer, laid in UEFI 2.10 §5.3.2's order; `/system/bin/disks`
-is the command. An authorization is one action on one target. No badge that
-changes a disk's table opens a session or writes a byte a client chose;
-`write:scratch` opens sessions on a bench's scratch partitions alone.
+is the command. An authorization is one action on one target, and no badge
+that changes a disk opens a session or writes a byte a client chose, except
+`write:scratch`, which opens written sessions on scratch-typed partitions
+alone.
 
 Built: `disks list` (`authorize = ["tables"]`), the designation of the
 machine's one DATA partition (`authorize = ["designate:data"]`) and sessions

@@ -1184,8 +1184,13 @@ mod checks {
         let asked = format!("{durable}{}", said("the reboot is asked for with 64 MiB durable, and the writes go on"));
         let swept = "| log-tail: [ 1.209 cpu0 kernel] stop: 13 of 13 userland thread(s) stopped across 8 \
                      cpu(s) in 0 ms of a 2010 ms budget over 1 sweep(s)\n";
-        let orderly = done(&format!("{swept}{rebooted}"));
+        let usbd = |code: u32| format!("| log-tail: [ 1.208 cpu0 kernel] exit: usbd pid=3 code={code} cpu=125ms\n");
+        let orderly = done(&format!("{}{swept}{rebooted}", usbd(0)));
         assert_eq!(judge(&[&readback("scratchreboot", &orderly, &asked)]), Ok(()));
+        // A usbd that gave up on its stop, or none that exited at all.
+        let unfinished = done(&format!("{}{swept}{rebooted}", usbd(3)));
+        assert!(judge(&[&readback("scratchreboot", &unfinished, &asked)]).is_err());
+        assert!(judge(&[&readback("scratchreboot", &done(&format!("{swept}{rebooted}")), &asked)]).is_err());
         assert!(judge(&[&readback("scratchreboot", &orderly, &durable)]).is_err(), "no reboot was asked for");
         assert!(judge(&[&readback("scratchreboot", &wedged(""), &asked)]).is_err());
     }

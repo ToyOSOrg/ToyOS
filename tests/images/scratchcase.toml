@@ -1,8 +1,8 @@
 # The boots that write a bench's scratch disk while the machine resets
-# beneath the write (`tests/toyos.rs`'s `scratch_survives_*` rows): its runner,
-# the one row authorized to (`authorize = ["write:scratch"]`), runs
-# `scratch_load`. Its own image, so the authorization reaches no boot but the
-# ones that are for it; no row here starts another, so no login holds it.
+# beneath the write (`tests/toyos.rs`'s `scratch_written_through_*` rows):
+# its runner, the one row authorized to (`authorize = ["write:scratch"]`),
+# runs `scratch_load`. Its own image, so the authorization reaches no boot but
+# the ones that are for it; no row here starts another, so no login holds it.
 [boot]
 start = ["logkeeper", "diskserver", "fileserver", "acpiserver", "test-runner"]
 

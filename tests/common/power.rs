@@ -619,8 +619,10 @@ pub fn scratch_written_through_a_deadline_reset(back: &super::metal::Readback) -
 }
 
 /// `scratch_load reboot`'s boot: the job asked for the reboot with the scratch
-/// disk written, went on writing, and the machine stopped in order, usbd's
-/// port and controller resets among the stop.
+/// disk written, the machine stopped in order, and every usbd finished its
+/// stop's port and controller resets: its exit code says so
+/// (`system/usbd/src/main.rs`, `end_for_the_stop`), and 3 is a stop it gave up
+/// on, read wherever the record landed, the log or the sealed tail.
 pub fn scratch_written_through_a_reboot(back: &super::metal::Readback) -> Result<(), String> {
     let log = back.log();
     let asked = log.must_say(SCRATCH_ASKED)?.trim().to_string();
@@ -629,6 +631,18 @@ pub fn scratch_written_through_a_reboot(back: &super::metal::Readback) -> Result
     after.must_say(bootlog::HANDED_BACK)?;
     says_nothing_of(&after, bootlog::PREVIOUS_PANIC)?;
     back.stop_completed()?;
-    eprintln!("  [power] {asked}");
+    let exits: Vec<&str> = log
+        .text()
+        .lines()
+        .chain(after.text().lines())
+        .filter(|line| line.contains(&format!("{}usbd pid=", bootlog::EXIT)))
+        .collect();
+    if exits.is_empty() {
+        return Err("no usbd's exit was recorded, so its stop is unaccounted for".into());
+    }
+    if let Some(unfinished) = exits.iter().find(|line| !line.contains(" code=0 ")) {
+        return Err(format!("a usbd did not finish its stop: {unfinished}"));
+    }
+    eprintln!("  [power] {asked}; {} usbd exit(s), each code=0", exits.len());
     Ok(())
 }

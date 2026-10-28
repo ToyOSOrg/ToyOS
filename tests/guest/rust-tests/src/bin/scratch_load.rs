@@ -80,6 +80,9 @@ fn main() {
                         println!("scratch_load: {} MiB durable", durable / MIB);
                     }
                 }
+                // The stop's own doing, once it is asked for: usbd ends the
+                // device's commands before the machine stops.
+                (_, other) if asked => println!("scratch_load: in the stop a request was answered {other:?}"),
                 (_, other) => panic!("scratch_load: a request was answered {other:?} with {} MiB durable", durable / MIB),
             }
         }

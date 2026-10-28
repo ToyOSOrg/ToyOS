@@ -714,11 +714,11 @@ pub fn batches(
     for (label, batch) in &out {
         let mut recorded: BTreeMap<String, &str> = BTreeMap::new();
         for job in &batch.jobs {
-            if let Some(other) = recorded.insert(bootlog::recorded_name(job), job) {
+            if let Some(other) = recorded.insert(bootlog::recorded_name(binary(job)), job) {
                 return Err(format!(
                     "the boot {label:?} runs {other} and {job}, and the kernel records both as {:?}: one \
                      boot's log cannot tell their verdicts apart",
-                    bootlog::recorded_name(job)
+                    bootlog::recorded_name(binary(job))
                 ));
             }
         }
