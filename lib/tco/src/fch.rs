@@ -197,9 +197,9 @@ pub enum Refused {
     NotStarted(u32),
 }
 
-/// Stop the timer where its window answers. Every refusal [`arm`] makes once
-/// the decode is on goes through here, so a count left from the last boot
-/// does not resume behind it.
+/// Stop the timer where its window answers. [`arm`]'s refusals of a tick or
+/// a start that did not take go through here, so a count left from the last
+/// boot does not resume behind them; the others leave nothing to stop.
 fn stop_where_decoded(fch: &mut impl Window) {
     if Control(fch.read(Register::Control)).decoded() {
         stop(fch);
@@ -218,7 +218,7 @@ pub struct Armed {
 }
 
 /// Enable the window, select [`TICK`], and start a count of [`TIMER`] to a
-/// system reset. A refusal once the decode is on leaves the timer stopped.
+/// system reset. A refusal once the decode is on leaves no timer running.
 pub fn arm(fch: &mut (impl AcpiMmio + Window)) -> Result<Armed, Refused> {
     let decode_en = fch.read_u32(PM_DECODE_EN);
     if decode_en == u32::MAX {
@@ -292,7 +292,7 @@ impl Found {
     }
 
     /// Counting to a reset within [`TIMER`]: the loader's arm, which leaves
-    /// the timer stopped on every refusal once the window answers.
+    /// no timer running when it refuses.
     pub fn armed(self) -> bool {
         self.control.running() && !self.control.powers_off() && self.count <= TIMER
     }
