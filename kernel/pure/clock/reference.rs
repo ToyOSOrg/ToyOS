@@ -697,7 +697,7 @@ mod tests {
         assert_eq!(extend(0x2_0000_0010, 0xffff_fff0, 32), 0x1_ffff_fff0);
         assert_eq!(extend(0x5_1234_5678, 0x1234_5679, 32), 0x5_1234_5679);
         // The ACPI PM timer's 24 bits, across their wrap and back.
-        assert_eq!(extend(0x3_ff_fff0, 0x00_0010, 24), 0x4_00_0010);
-        assert_eq!(extend(0x4_00_0010, 0xff_fff0, 24), 0x3_ff_fff0);
+        assert_eq!(extend(0x03ff_fff0, 0x0010, 24), 0x0400_0010);
+        assert_eq!(extend(0x0400_0010, 0x00ff_fff0, 24), 0x03ff_fff0);
     }
 }
