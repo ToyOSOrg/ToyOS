@@ -158,7 +158,8 @@ pub struct Mounted<IO: BlockIO, Mode = ReadWrite> {
     sb: Superblock,
     alloc: BitmapAllocator,
     /// The superblock both copies hold on the medium, made durable by this
-    /// mount's last commit; `None` until one lands, and after one is refused.
+    /// mount's last commit; `None` until one lands, and after a sync refused
+    /// before its superblock landed.
     landed: Option<Superblock>,
     _mode: PhantomData<Mode>,
 }
@@ -929,9 +930,7 @@ impl<IO: BlockIO> Mounted<IO, ReadWrite> {
     /// Commit the tree as it stands: see this block's header. A commit whose
     /// superblock is the one the medium already holds writes none, since no
     /// node its root reaches has been written over since it landed; the
-    /// device is still flushed, for what is written in place. The allocation
-    /// cursor alone is no change: it is only where a scan begins, and a
-    /// commit's own frees move it after its superblock lands.
+    /// device is still flushed, for what is written in place.
     pub fn sync(&mut self) -> Result<(), FsError> {
         let landed = self.landed.take();
         self.io.flush()?;
@@ -939,8 +938,7 @@ impl<IO: BlockIO> Mounted<IO, ReadWrite> {
         self.sb.free_blocks = self.alloc.free_blocks + self.alloc.pending();
         self.sb.next_alloc = self.alloc.next_alloc;
         self.sb.set_clean(true);
-        let unchanged = landed.as_ref().is_some_and(|l| Superblock { next_alloc: l.next_alloc, ..self.sb.clone() } == *l);
-        if unchanged {
+        if landed.as_ref().is_some_and(|l| self.sb.same_commit(l)) {
             self.landed = landed;
         } else {
             // From the first superblock write on, this commit may be what a

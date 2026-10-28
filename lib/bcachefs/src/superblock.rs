@@ -117,6 +117,13 @@ pub struct Superblock {
 impl Superblock {
     pub(crate) const CRC_START: usize = 12; // CRC covers bytes [12..4096]
 
+    /// Whether `self` names the same commit as `other`, which the medium
+    /// holds. The allocation cursor is not compared: it is only where a scan
+    /// begins, and a commit's own frees move it after its superblock lands.
+    pub fn same_commit(&self, other: &Self) -> bool {
+        *self == Self { next_alloc: self.next_alloc, ..other.clone() }
+    }
+
     pub fn is_clean(&self) -> bool {
         self.flags & 1 != 0
     }

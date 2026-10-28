@@ -30,10 +30,14 @@ A third turned slow partway, between `append_4k_fsync` and
 `create_fsync_unlink`. No change to the NVMe driver, the block service, the
 file server or the DATA format lies between the two heads. The boots' NVMe
 and DATA log lines do not tell the slow ones apart, and the cause is
-unknown. A fast boot's clean fsync, a superblock write and a Flush, takes
-0.46 to 0.58 ms where Linux's takes 23 µs
-(`issues/a-clean-fsync-on-data-writes-the-superblock-and-flushes-the-disk.md`).
-The figures are evidence branch `scoreboard-2026-10-28`'s and PR #1097's.
+unknown. The figures are evidence branch `scoreboard-2026-10-28`'s and PR
+#1097's.
+
+A clean fsync now writes nothing (#1098): two boots of 34409c9c2 read it at
+15.9 and 16.1 µs, against Linux's 23 µs (evidence branch `pr-1099` at
+ac6b89a, `metal-t14/`). The second of those boots ran slow, its
+`write_4k_fsync` at 6.26 ms, and its clean fsync still read 16 µs: the slow
+mode appears only where a Flush or a write is owed.
 
 **Exit**: repeated boots on the T14 read every durable `persist` row
 (`write_4k_fsync`, `append_4k_fsync`, `create_fsync_unlink` and
