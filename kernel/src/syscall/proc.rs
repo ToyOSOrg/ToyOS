@@ -55,7 +55,7 @@ pub(super) fn sys_spawn(
     parent: process::Parent,
 ) -> u64 {
     // Nothing to clean up: spawn's frame owns the child's resources on error.
-    match process::spawn(path, args, |own| pending.commit(own), cwd, env, image, parent) {
+    match process::spawn(path, args, pending, cwd, env, image, parent) {
         Ok((_, handle)) => u64::from(handle.0),
         Err(e) => e.refuse(),
     }
@@ -193,7 +193,7 @@ pub(super) fn sys_thread_join(tid: u64) -> u64 {
     // None means never existed or already collected; the predicate below answers both.
     let target = process::thread_sched(caller, tid);
     let parkable = crate::scheduler::Parkable::at_entry();
-    let join = kernel::proclife::join::Join::default();
+    let join = toyos_proclife::join::Join::default();
     let ask = || process::ask_join(&join, tid, caller);
     loop {
         // Both refusals are one answer here; `JoinRefused` keeps them apart because they aren't the same fact.
@@ -255,6 +255,34 @@ pub(super) fn sys_process_stats(
         return SyscallError::NotFound.to_u64();
     };
     match ctx.copy_out(out, &stats) {
+        Ok(()) => 0,
+        Err(e) => e.to_u64(),
+    }
+}
+
+/// Hold memory back for the job a handle names, gated on a `SysCap` carrying
+/// [`Rights::FLOOR`] and the job handle's `WRITE`.
+pub(super) fn sys_job_floor(syscap: RawHandle, job: RawHandle, bytes: u64) -> u64 {
+    if let Err(e) = demand_syscap(syscap, Rights::FLOOR) {
+        return e.refuse();
+    }
+    let object = match process::with_process_data(|data| data.handles.get::<crate::object::job::JobObject>(job, Rights::WRITE)) {
+        Ok(object) => object,
+        Err(e) => return e.refuse(),
+    };
+    match object.set_floor(bytes) {
+        Ok(()) => 0,
+        Err(e) => e.to_u64(),
+    }
+}
+
+/// Copy out what the account of the job a handle names holds, gated on its `READ`.
+pub(super) fn sys_account_info(ctx: &crate::user_ptr::SyscallContext, job: RawHandle, out: UserAddr) -> u64 {
+    let object = match process::with_process_data(|data| data.handles.get::<crate::object::job::JobObject>(job, Rights::READ)) {
+        Ok(object) => object,
+        Err(e) => return e.refuse(),
+    };
+    match ctx.copy_out(out, &object.account()) {
         Ok(()) => 0,
         Err(e) => e.to_u64(),
     }

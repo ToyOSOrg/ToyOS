@@ -9,15 +9,15 @@
 //! Everything that makes a thread happens between the two.
 //!
 //! A teardown claims the process under that same lock
-//! ([`crate::proclife::teardown::claim_teardown`]), collects the tids it is going to
+//! ([`crate::teardown::claim_teardown`]), collects the tids it is going to
 //! retire, and gives the lock up to retire them. A thread inserted after that
 //! collection is a thread the retire sweep never names.
 //! `interleave::tests::a_published_exit_leaves_no_unretired_thread`
 //! is that whole sentence as a host test, and
 //! `mutate-spawn-skips-the-insert-recheck` is what it reds under.
 
-use crate::proclife::table::{Lifecycle, Processes};
-use crate::proclife::Pid;
+use crate::table::{Lifecycle, Processes};
+use crate::Pid;
 use toyos_abi::syscall::MAX_THREADS;
 
 /// Whether a new thread may join a process.
@@ -82,9 +82,9 @@ fn admit<P: Lifecycle>(proc: Option<&P>) -> Admit {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::proclife::End;
-    use crate::proclife::model::World;
-    use crate::proclife::{join, teardown, ThreadLocation};
+    use crate::End;
+    use crate::model::World;
+    use crate::{join, teardown, ThreadLocation};
 
     #[test]
     fn a_live_process_admits_a_thread_at_both_moments() {

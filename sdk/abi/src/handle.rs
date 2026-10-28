@@ -231,10 +231,17 @@ impl Rights {
     ///
     /// [`SYS_JOB_CREATE`]: crate::syscall::SYS_JOB_CREATE
     pub const JOBS: Rights = Rights(1 << 15);
+    /// On a `SysCap`: hold memory back for a job ([`SYS_JOB_FLOOR`]), which
+    /// every other job is then refused. What it holds is protected capacity
+    /// for the system's controls, so the supervisor alone holds it, and sets
+    /// what a signed `system.toml` row declares.
+    ///
+    /// [`SYS_JOB_FLOOR`]: crate::syscall::SYS_JOB_FLOOR
+    pub const FLOOR: Rights = Rights(1 << 16);
 
     /// Every bit that has a caller. A wider set than this is a bug in whoever
     /// composed it, not a right nobody uses.
-    pub const ALL: Rights = Rights(0xffff);
+    pub const ALL: Rights = Rights(0x1_ffff);
 
     pub const fn from_bits(bits: u32) -> Option<Self> {
         if bits & !Self::ALL.0 == 0 { Some(Rights(bits)) } else { None }
@@ -265,7 +272,7 @@ impl Rights {
 /// refusal saying which right was missing.
 impl core::fmt::Debug for Rights {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
-        const NAMES: [(Rights, &str); 16] = [
+        const NAMES: [(Rights, &str); 17] = [
             (Rights::DUP, "DUP"),
             (Rights::TRANSFER, "TRANSFER"),
             (Rights::READ, "READ"),
@@ -282,6 +289,7 @@ impl core::fmt::Debug for Rights {
             (Rights::COUNTERS, "COUNTERS"),
             (Rights::TRACE, "TRACE"),
             (Rights::JOBS, "JOBS"),
+            (Rights::FLOOR, "FLOOR"),
         ];
         if self.0 == 0 {
             return f.write_str("NONE");

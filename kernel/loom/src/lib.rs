@@ -419,6 +419,11 @@ pub mod seqlock;
 #[path = "../../src/drivers/serial_lock.rs"]
 pub mod serial_lock;
 
+/// What the job a scheduler task holds counts its memory in.
+#[cfg(feature = "loom")]
+#[path = "../../pure/frames.rs"]
+pub mod frames;
+
 /// The scheduler core, `kernel/pure/sched/`, driven by `tests/loom_*.rs` over
 /// [`sched_model`]'s scaffolding.
 ///

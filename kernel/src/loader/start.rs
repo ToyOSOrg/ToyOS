@@ -93,15 +93,16 @@ impl KernelStack {
     }
 }
 
-/// Allocate a kernel stack and lay out the frame `context_switch` will restore.
-pub(crate) fn alloc_kernel_stack(start: Start) -> Option<(KernelStack, u64)> {
+/// Allocate a kernel stack, charged to the job its task runs in, and lay out
+/// the frame `context_switch` will restore.
+pub(crate) fn alloc_kernel_stack(job: &Arc<Job>, start: Start) -> Option<(KernelStack, u64)> {
     use crate::arch::entry::{kernel_start, process_start, thread_start};
     let (trampoline, user_entry, user_sp, arg, user): (unsafe extern "C" fn(), _, _, _, _) = match start {
         Start::Process { entry, sp } => (process_start, entry.addr(), sp, 0, true),
         Start::Thread { entry, sp, arg } => (thread_start, entry.addr(), sp, arg, true),
         Start::Kernel { body, arg } => (kernel_start, body as usize as u64, 0, arg, false),
     };
-    let charge = Charge::new(KernelStack::heap(user)).ok()?;
+    let charge = Charge::new(job, KernelStack::heap(user)).ok()?;
     let layout = KernelStack::layout_for(user);
     let alloc = OwnedAlloc::new(layout.size(), layout.align())?;
     scheduler::write_stack_canary(&alloc);
@@ -126,14 +127,36 @@ pub struct PendingHandles {
     table: HandleTable,
     endow: Vec<u8>,
     labels: Vec<u8>,
+    /// The job the child runs in, which everything built for it is counted to.
+    job: Arc<Job>,
 }
 
-impl PendingHandles {
+/// What a spawn's caller gives the child: the job it runs in, and its handle
+/// table, made once nothing is left to refuse.
+pub trait Commit {
+    /// What the caller is left holding of the child.
+    type Held;
+
+    /// The job the child runs in, which everything built for it is counted to.
+    fn job(&self) -> &Arc<Job>;
+
+    /// The child's table around `own`, what the kernel puts beside its
+    /// endowments.
+    fn commit(self, own: Own) -> Result<(HandleTable, Endowments, Self::Held), Refusal>;
+}
+
+impl Commit for PendingHandles {
+    type Held = RawHandle;
+
+    fn job(&self) -> &Arc<Job> {
+        &self.job
+    }
+
     /// Take the endowed handles out of the caller's table and put its handle to the child in it, all under one lock hold: a refusal leaves the table unchanged.
-    /// `own` is what the kernel puts in the child's table beside the endowments. The child's job is the one endowed under
-    /// [`JOB_LABEL`], or else the caller's; the caller's handle to the child is the last answer.
-    pub fn commit(self, own: Own) -> Result<(HandleTable, Endowments, Arc<Job>, RawHandle), Refusal> {
-        let Self { mut table, endow, mut labels } = self;
+    /// `own` is what the kernel puts in the child's table beside the endowments; the caller's handle to the child is the
+    /// last answer. The handle under [`JOB_LABEL`] still names [`job`](Self::job), or the spawn is refused.
+    fn commit(self, own: Own) -> Result<(HandleTable, Endowments, RawHandle), Refusal> {
+        let Self { mut table, endow, mut labels, job } = self;
         let data_arc = process_data();
         let mut data = data_arc.lock();
 
@@ -174,6 +197,11 @@ impl PendingHandles {
             }
             moving.push((EndowEntry { label_off, label_len, handle, _pad: 0 }, handle));
         }
+        // Before any removal: the table changed under the spawn if the job
+        // everything was built for is no longer the one it names.
+        if !Arc::ptr_eq(&job, endowed_job.as_ref().unwrap_or(&data.job)) {
+            return Err(SyscallError::InvalidArgument.into());
+        }
         // Checked before any removal, so a failed install can't strand a handle out of a table that never spawned.
         if !table.make_room(moving.len() + Own::LABELS.len()) || !data.handles.make_room(1) {
             return Err(SyscallError::ResourceExhausted.into());
@@ -189,7 +217,7 @@ impl PendingHandles {
             if let KObjectRef::Console(parent_console) = data.handles.get_ref(*handle, Rights::NONE)? {
                 let key = Arc::as_ptr(parent_console) as usize;
                 if !minted.iter().any(|(seen, _)| *seen == key) {
-                    let console = crate::object::device::ConsoleObject::new().map_err(SyscallError::from)?;
+                    let console = crate::object::device::ConsoleObject::new(&job).map_err(SyscallError::from)?;
                     minted.push((key, KObjectRef::Console(console)));
                 }
             }
@@ -222,11 +250,10 @@ impl PendingHandles {
         // Minted while `own` is held, and `own` goes into a table no thread reaches until the child lands: another thread of the caller closing this handle never closes the object's last.
         let held = ops::install(&mut data.handles, own.process.object().clone())
             .expect("a caller's table with verified room refused its child");
-        let job = endowed_job.unwrap_or_else(|| data.job.clone());
         drop(data);
         drop(displaced);
         own.endow(&mut table, &mut entries, &mut labels);
-        Ok((table, Endowments::new(entries, labels), job, held))
+        Ok((table, Endowments::new(entries, labels), held))
     }
 }
 
@@ -272,5 +299,21 @@ pub fn build_child_handles(endow: &UserBytes, labels: &[u8]) -> Result<PendingHa
     }
     let mut raw = alloc::vec![0u8; endow.len()];
     endow.read_at(0, &mut raw);
-    Ok(PendingHandles { table: HandleTable::new(), endow: raw, labels: labels.to_vec() })
+    let job = child_job(&raw, labels)?;
+    Ok(PendingHandles { table: HandleTable::new(&job), endow: raw, labels: labels.to_vec(), job })
+}
+
+/// The job a child runs in: the one endowed under [`JOB_LABEL`], or else the
+/// caller's. Only looked up: [`PendingHandles::commit`] refuses the rest.
+fn child_job(raw: &[u8], labels: &[u8]) -> Result<Arc<Job>, Refusal> {
+    let data_arc = process_data();
+    let data = data_arc.lock();
+    for entry in raw.as_chunks::<ENDOW_ENTRY_LEN>().0 {
+        let word = |at: usize| u32::from_ne_bytes([entry[at], entry[at + 1], entry[at + 2], entry[at + 3]]) as usize;
+        let named = word(0).checked_add(word(4)).and_then(|end| labels.get(word(0)..end));
+        if named == Some(JOB_LABEL.as_bytes()) {
+            return Ok(data.handles.get_sent::<JobObject>(RawHandle(word(8) as u32), Rights::WRITE)?.job().clone());
+        }
+    }
+    Ok(data.job.clone())
 }

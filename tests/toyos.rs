@@ -170,6 +170,10 @@ const RUST_SKIP: &[&str] = &[
     // of it: `kernel_objects_refused_alone` runs it on QEMU and the
     // `kernel_objects_refused` metal row on the T14.
     "kernel_objects_refused",
+    // It holds every frame an ordinary job may, and needs the floors of
+    // `tests/images/floorcase.toml`: `memory_floor_holds_the_controls` runs it
+    // on QEMU and the `memory_floor` metal row on the T14.
+    "memory_floor",
     // Fills /tmp to the VFS listing limit, so it needs a boot nothing else
     // shares — every later `read_dir("/tmp")` in it would be refused.
     // `readdir_bound` gives it one.
@@ -654,6 +658,16 @@ const MACHINE_TESTS: &[&str] = &[
     // refused meanwhile. QEMU establishes the refusals and that the machine
     // goes on; nothing in it is timing.
     "kernel_objects_refused_alone",
+    // With one ordinary job holding every frame it may, the supervisor answers
+    // a stop's request, a key reaches the owner of input through ps2server, a
+    // system holder kills the greedy job, and a service the exhaustion ended is
+    // serving again once the memory is given back: the kernel's accounts and
+    // floors, the supervisor's restart and the input path together, which no
+    // host model has. On the two-CPU, 4 GiB q35 guest in a boot of its own,
+    // `tests/images/floorcase.toml`; QEMU types the key. Order and completion
+    // only: nothing in it is timing. The `memory_floor` metal row runs it on the
+    // T14 without the key.
+    "memory_floor_holds_the_controls",
     // The parity instrument's two builds in one boot, behind ring's known
     // answers: that every row runs and both builds print the same whole table.
     // Its timings decide nothing here; the `crypto_instrument` metal row takes
@@ -741,6 +755,10 @@ const METAL: &[(&str, metal::Metal)] = &[
             arms: TESTCASES_REFUSED,
             judge: |b| b[0].job_passed("test_rs_kernel_objects_refused"),
         },
+    ),
+    (
+        "memory_floor",
+        metal::Metal { arms: FLOORCASE, judge: |b| b[0].job_passed("test_rs_memory_floor") },
     ),
     (
         "readdir_bound",
@@ -1704,6 +1722,12 @@ const TESTCASES_HELD: &[metal::Arm] = &[metal::Arm {
 /// every other process's allocation is refused while it runs.
 const TESTCASES_REFUSED: &[metal::Arm] =
     &[metal::once("testcases-refused", "tests/images/testcases.toml", &[], &["test_rs_kernel_objects_refused"])];
+
+/// Its own boot: `memory_floor` holds every frame an ordinary job may, on
+/// `tests/images/floorcase.toml`'s floors. No key is typed on the bench, so
+/// the input arm is QEMU's alone.
+const FLOORCASE: &[metal::Arm] =
+    &[metal::once("floorcase", "tests/images/floorcase.toml", &[], &["test_rs_memory_floor"])];
 
 /// Its own boot: `readdir_bound` fills `/tmp` to the VFS listing limit, and
 /// every later `read_dir("/tmp")` in a boot it shared would be refused.
@@ -4428,6 +4452,7 @@ fn run_machine_test(name: &str, test_config: &Path) -> Result<(), String> {
         "vector_state_survives_a_switch" => vector_state_survives_a_switch(test_config),
         "std_threads_count_the_cpus_and_give_back_ended_threads" => std_threads_count_the_cpus_and_give_back_ended_threads(test_config),
         "kernel_objects_refused_alone" => kernel_objects_refused_alone(test_config),
+        "memory_floor_holds_the_controls" => memory_floor_holds_the_controls(),
         "the_opening_exchange_with_qemus_agent_completes" => the_opening_exchange_with_qemus_agent_completes(),
         "crypto_instrument_prints_its_table" => crypto_instrument_prints_its_table(test_config),
         "the_compositor_drives_the_virtio_gpu" => the_compositor_drives_the_virtio_gpu(),
@@ -5203,6 +5228,60 @@ fn kernel_objects_refused_alone(test_config: &Path) -> Result<(), String> {
     }
     Ok(())
 }
+
+/// `memory_floor --input` alone in `tests/images/floorcase.toml`'s boot, a key
+/// typed once every frame is held: the job holds what the controls did, and the
+/// supervisor said it was refused the starved service's restart, then started
+/// it once memory came back.
+fn memory_floor_holds_the_controls() -> Result<(), String> {
+    const JOB: &str = "memory_floor";
+    let bin = qemu::build_toyos_bin(qemu::SUITE_ARCH, &compile::repo_root().join("tests/guest/rust-tests"), JOB);
+    let mut qemu = QemuInstance::boot_with_options(
+        &compile::repo_root().join("tests/images/floorcase.toml"),
+        &[],
+        &[(JOB.to_string(), bin)],
+        BootOptions { profile: qemu::Profile::Metal, qmp: true, ..Default::default() },
+    );
+    let mut console = format!("{}\n", qemu.boot_log());
+    await_marker(&mut qemu, &mut console, ps2server::ARMED_BOTH, "ps2server to arm the i8042")?;
+    let from = console.len();
+    writeln!(qemu.stdin_mut(), "run test_rs_{JOB} --input").map_err(|e| e.to_string())?;
+    qemu.flush_stdin();
+    let said = |console: &str, why: String| format!("{why}\nthe boot said:\n{}", &console[from..]);
+    await_marker_new(&mut qemu, &mut console, MEMORY_FLOOR_PRESS, from, "the greedy job to hold every frame").map_err(|why| said(&console, why))?;
+    {
+        let mut input = qemu::QmpInput::open(qemu.qmp_socket());
+        input.keys(&[("a", true)]);
+        input.keys(&[("a", false)]);
+    }
+    await_marker_new(&mut qemu, &mut console, &format!("===TEST_END test_rs_{JOB} exit=0==="), from, "the job's end").map_err(|why| said(&console, why))?;
+    let said = &console[from..];
+    for line in [
+        "could not start again for want of memory",
+        "supervisor: starveling started again as pid ",
+    ] {
+        if !said.contains(line) {
+            return Err(format!("the supervisor never said {line:?}\n{said}"));
+        }
+    }
+    // Whatever else the exhaustion ended, a file server among them, starts
+    // again once the memory is given back.
+    for refused in said.lines().filter(|l| l.contains("could not start again for want of memory")) {
+        let Some(service) = refused.split("supervisor: ").nth(1).and_then(|rest| rest.split(" (pid").next()) else { continue };
+        if !said.contains(&format!("supervisor: {service} started again as pid ")) {
+            return Err(format!("{service} was refused its restart for memory and never started again\n{said}"));
+        }
+        eprintln!("  [floor] {service} was refused its restart for memory and started again");
+    }
+    for line in said.lines().filter(|l| l.contains("PASS: ") || l.contains("memory_floor: ") || l.contains("supervisor: starveling")) {
+        eprintln!("  [floor] {}", line.trim());
+    }
+    serial::Serial::named("the memory_floor boot", console).must_be_clean()
+}
+
+/// What `memory_floor` says once its greedy job holds every frame, the host's
+/// cue to type (`tests/guest/rust-tests/src/bin/memory_floor.rs`).
+const MEMORY_FLOOR_PRESS: &str = "memory_floor: every frame is held; press a key";
 
 /// Ring's known answers, then both builds of the parity instrument, in one
 /// boot: each ends cleanly and their lines read back as one whole table.

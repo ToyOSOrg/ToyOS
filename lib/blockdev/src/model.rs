@@ -16,6 +16,7 @@
 //! are at most its budget of them, and that many drawn from a seed otherwise.
 //! A [`Violation`] names the seed and the state, so a red run is replayed.
 
+use alloc::collections::BTreeMap;
 use alloc::string::String;
 use alloc::vec::Vec;
 use core::cell::RefCell;
@@ -97,13 +98,15 @@ impl Model {
 
     /// `judge` asked of every medium a crash now could leave, or of `budget`
     /// of them drawn from `seed` when there are more; the first it refuses.
+    /// Each medium is built in place over the durable bytes, so the judge
+    /// cannot use this model; one that writes takes an [`Overlay`] over it.
     pub fn check(
         &self,
         budget: u64,
         seed: u64,
         mut judge: impl FnMut(&[u8]) -> Result<(), String>,
     ) -> Result<Search, Violation> {
-        let state = self.state.borrow();
+        let mut state = self.state.borrow_mut();
         let units = self.units(&state);
         let total = units.iter().try_fold(1u64, |n, u| n.checked_mul(u.versions.len() as u64 + 1));
         let search = match total {
@@ -114,7 +117,11 @@ impl Model {
             Search::Every(n) => n,
             Search::Sampled { samples, .. } => samples,
         };
+        let State { durable, unflushed } = &mut *state;
+        let unit = self.unit;
+        let kept: Vec<u8> = units.iter().flat_map(|u| &durable[u.at..u.at + unit]).copied().collect();
         let mut choice = Vec::with_capacity(units.len());
+        let mut verdict = Ok(search);
         for index in 0..states {
             choice.clear();
             match search {
@@ -131,12 +138,26 @@ impl Model {
                     choice.extend(units.iter().map(|u| (rng.next() % (u.versions.len() as u64 + 1)) as usize));
                 }
             }
-            let image = self.medium(&state, &units, &choice);
-            if let Err(why) = judge(&image) {
-                return Err(Violation { search, state: index, why, image });
+            // 0 keeps the durable unit, `k` the `k`th version.
+            for (i, (u, &c)) in units.iter().zip(&choice).enumerate() {
+                let version = match c.checked_sub(1) {
+                    Some(k) => {
+                        let (w, offset) = u.versions[k];
+                        &unflushed[w].data[offset..offset + unit]
+                    }
+                    None => &kept[i * unit..(i + 1) * unit],
+                };
+                durable[u.at..u.at + unit].copy_from_slice(version);
+            }
+            if let Err(why) = judge(durable) {
+                verdict = Err(Violation { search, state: index, why, image: durable.clone() });
+                break;
             }
         }
-        Ok(search)
+        for (u, kept) in units.iter().zip(kept.chunks_exact(unit)) {
+            durable[u.at..u.at + unit].copy_from_slice(kept);
+        }
+        verdict
     }
 
     fn units(&self, state: &State) -> Vec<Unit> {
@@ -151,18 +172,6 @@ impl Model {
             }
         }
         units
-    }
-
-    /// The durable bytes, with each unit's `choice` over them: 0 keeps the
-    /// durable unit, `k` the `k`th version.
-    fn medium(&self, state: &State, units: &[Unit], choice: &[usize]) -> Vec<u8> {
-        let mut image = state.durable.clone();
-        for (u, &c) in units.iter().zip(choice) {
-            if let Some(&(w, offset)) = c.checked_sub(1).map(|k| &u.versions[k]) {
-                image[u.at..u.at + self.unit].copy_from_slice(&state.unflushed[w].data[offset..offset + self.unit]);
-            }
-        }
-        image
     }
 }
 
@@ -201,6 +210,48 @@ impl BlockDev for Model {
         for w in unflushed.drain(..) {
             durable[w.at..w.at + w.data.len()].copy_from_slice(&w.data);
         }
+        Ok(())
+    }
+}
+
+/// A device over a medium [`Model::check`] judges, which leaves it as it is:
+/// what is written here is kept apart and read back over it.
+pub struct Overlay<'a> {
+    base: &'a [u8],
+    written: RefCell<BTreeMap<u64, Block>>,
+}
+
+impl<'a> Overlay<'a> {
+    pub fn new(base: &'a [u8]) -> Self {
+        assert!(base.len().is_multiple_of(BLOCK), "a device over {} bytes, which are no whole blocks", base.len());
+        Self { base, written: RefCell::new(BTreeMap::new()) }
+    }
+}
+
+impl BlockDev for Overlay<'_> {
+    fn blocks(&self) -> u64 {
+        (self.base.len() / BLOCK) as u64
+    }
+
+    async fn read(&self, lba: u64, out: &mut [Block]) -> Result<(), Error> {
+        within(lba, out.len(), self.blocks())?;
+        let written = self.written.borrow();
+        for (block, out) in (lba..).zip(out) {
+            match written.get(&block) {
+                Some(data) => out.copy_from_slice(data),
+                None => out.copy_from_slice(&self.base[block as usize * BLOCK..][..BLOCK]),
+            }
+        }
+        Ok(())
+    }
+
+    async fn write(&self, lba: u64, data: &[Block]) -> Result<(), Error> {
+        within(lba, data.len(), self.blocks())?;
+        self.written.borrow_mut().extend((lba..).zip(data.iter().copied()));
+        Ok(())
+    }
+
+    async fn flush(&self) -> Result<(), Error> {
         Ok(())
     }
 }
@@ -345,5 +396,41 @@ mod tests {
         assert_ne!(draw(SEED + 1).1, first);
         let refused = dev.check(32, SEED, |_| Err("refused".into())).unwrap_err();
         assert_eq!(format!("{refused}"), format!("crash sample 0 of 32 from seed {SEED:#x}: refused"));
+    }
+
+    /// A check builds each medium over the durable bytes and leaves them as
+    /// they were, whether a judge refused one or not; a judge's writes through
+    /// an overlay reach neither.
+    #[test]
+    fn a_check_and_its_judges_writes_leave_the_durable_bytes_as_they_were() {
+        let dev = Model::new(vec![3; 2 * BLOCK], 512);
+        block_on_ready(dev.write(1, &[[9; BLOCK]])).unwrap();
+        // Which of the write's sectors each state keeps: every subset once, so
+        // no state inherits a unit the one before it chose.
+        let media = |dev: &Model| {
+            let mut seen = BTreeSet::new();
+            dev.check(1 << 10, SEED, |image| {
+                assert!(seen.insert((0..8).fold(0u8, |k, s| k | u8::from(image[BLOCK + s * 512] == 9) << s)));
+                Ok(())
+            })
+            .unwrap();
+            seen
+        };
+        let every: BTreeSet<u8> = (0..=255).collect();
+        assert_eq!(media(&dev), every, "each state is its own subset of the write");
+        assert!(dev.check(1 << 10, SEED, |image| if image[BLOCK] == 9 { Err("kept".into()) } else { Ok(()) }).is_err());
+        assert_eq!(media(&dev), every, "a refusal left a state behind");
+        block_on_ready(dev.write(0, &[[5; BLOCK]])).unwrap();
+        dev.check(1, SEED, |image| {
+            let overlay = Overlay::new(image);
+            block_on_ready(async {
+                overlay.write(0, &[[7; BLOCK]]).await.unwrap();
+                let mut out = [[0; BLOCK]; 2];
+                overlay.read(0, &mut out).await.unwrap();
+                assert_eq!((out[0], &out[1][..]), ([7; BLOCK], &image[BLOCK..]));
+            });
+            (image[0] != 7).then_some(()).ok_or_else(|| "an overlay wrote through".into())
+        })
+        .unwrap();
     }
 }

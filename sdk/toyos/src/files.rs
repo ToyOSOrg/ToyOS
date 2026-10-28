@@ -36,7 +36,7 @@ use crate::fd::{self, Fd};
 use crate::fs;
 use crate::process::{Image, ImageRefused};
 use crate::shm::{Immutable, NotImmutable};
-use crate::OwnedHandle;
+use crate::{OwnedHandle, RawHandle};
 
 /// The deepest directory a capability names, in components.
 pub const MAX_CAPABILITY_DEPTH: usize = 4;
@@ -404,6 +404,12 @@ pub fn read_dir(fd: Fd, cursor: u64) -> Result<(Vec<u8>, Option<u64>), Error> {
 /// ([`crate::fs::IMAGE`]), and otherwise a copy read into memory of this
 /// process's own.
 pub fn read_image(path: &[u8]) -> Result<Image, ImageRefused<Error>> {
+    read_image_for(path, None)
+}
+
+/// [`read_image`], a copy counted to the job `job` is a handle to: a
+/// child's program, which it keeps (`Image::read_for`).
+pub fn read_image_for(path: &[u8], job: Option<RawHandle>) -> Result<Image, ImageRefused<Error>> {
     let fd = open(At::Cwd, path, Open { read: true, cloexec: true, ..Open::default() }).map_err(ImageRefused::Read)?;
     // SAFETY: a plain value; a handle answered is this process's alone.
     let held = decode(unsafe { toyos_fs_image(fd) }).map(|h| OwnedHandle(toyos_abi::RawHandle(h as u32)));
@@ -413,7 +419,7 @@ pub fn read_image(path: &[u8]) -> Result<Image, ImageRefused<Error>> {
             NotImmutable::Writable => ImageRefused::Read(Error::Served(fs::Error::Malformed)),
         }),
         Err(Error::Served(fs::Error::Unsupported) | Error::Kernel(SyscallError::NotSupported)) => match fstat(fd) {
-            Ok(stat) => Image::read(stat.size, |buf| read(fd, buf)),
+            Ok(stat) => Image::read_for(job, stat.size, |buf| read(fd, buf)),
             Err(e) => Err(ImageRefused::Read(e)),
         },
         Err(e) => Err(ImageRefused::Read(e)),

@@ -139,7 +139,7 @@ stays open for it.
 
 ## The process table is not where this is, and that is now checked rather than argued
 
-`kernel/pure/proclife` enumerates every interleaving of the paths this file's shapes
+`kernel/proclife` enumerates every interleaving of the paths this file's shapes
 implicate — a spawn racing a kill and the idle pass that reaps the entry, a
 sibling's `SYS_THREAD_EXIT` beside the process's own exit and a spawn, two
 spawns racing one teardown, a join racing the kill that takes its target — and

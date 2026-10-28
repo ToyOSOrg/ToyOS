@@ -26,7 +26,7 @@
 //! ## What is *not* here
 //!
 //! The scheduler's own states. A live thread is running, ready or blocked and
-//! [`crate::sched`] is authoritative about which; this module knows only that it is
+//! the kernel's scheduler is authoritative about which; this module knows only that it is
 //! alive. The same split the kernel already had between [`ThreadLocation`] and
 //! `scheduler::task_sched_state`.
 //!
@@ -45,7 +45,13 @@
 //! [`Scheduled`]: ThreadLocation::Scheduled
 //! [`Zombie`]: ThreadLocation::Zombie
 
+#![no_std]
 #![forbid(unsafe_code)]
+
+extern crate alloc;
+
+#[cfg(test)]
+extern crate std;
 
 pub mod join;
 pub mod pids;

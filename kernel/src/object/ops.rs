@@ -192,7 +192,8 @@ pub fn close(table: &mut HandleTable, h: RawHandle) -> Result<(), super::HandleE
 /// Release every handle a process holds; runs on the kill path too, which
 /// does not unwind, and allocates nothing.
 pub fn close_all(table: &mut HandleTable) {
-    drop(core::mem::replace(table, HandleTable::new()));
+    let job = Arc::clone(table.job());
+    drop(core::mem::replace(table, HandleTable::new(&job)));
 }
 
 /// The pipe a read of `object` took from, held past the handle table's lock
@@ -240,6 +241,8 @@ pub fn pipe_write(object: &KObjectRef) -> Option<(&PipeRef, WaitClass, Landing)>
 /// share of one that goes with its object.
 pub enum WatchRef {
     Static(&'static Watch),
+    /// A static watch posted where nothing may be freed, as `pmm::returned` is.
+    InPlace(&'static crate::watch::IrqWatch),
     Shared(Arc<Watch>),
     /// The watch of the function or row a claim holds: named by the claim,
     /// and reached only with what the claim lends.
@@ -250,6 +253,7 @@ impl WatchRef {
     pub(crate) fn add_poll(&self, entry: PollEntry) {
         match self {
             Self::Static(watch) => watch.add_poll(entry),
+            Self::InPlace(watch) => watch.add_poll(entry),
             Self::Shared(watch) => watch.add_poll(entry),
             Self::Claim(claim) => claim.add_poll(entry),
         }
@@ -258,6 +262,7 @@ impl WatchRef {
     pub fn cancel_polls(&self) {
         match self {
             Self::Static(watch) => watch.cancel_polls(),
+            Self::InPlace(watch) => watch.cancel_polls(),
             Self::Shared(watch) => watch.cancel_polls(),
             // Its release answers them, and its close ends none (`close_ends_polls`).
             Self::Claim(_) => unreachable!("a claim's polls are cancelled by its release alone"),
@@ -274,6 +279,7 @@ pub fn read_watch(object: &KObjectRef) -> Option<WatchRef> {
         KObjectRef::Acceptor(a) => Some(WatchRef::Shared(a.watch().clone())),
         KObjectRef::Process(p) => Some(WatchRef::Shared(p.watch().clone())),
         KObjectRef::Notice(n) => Some(WatchRef::Shared(n.watch().clone())),
+        KObjectRef::Job(_) => Some(WatchRef::InPlace(crate::mm::pmm::returned())),
         // Nothing posts for a serial byte, so a console's readable poll has
         // no source (`issues/a-console-watch-waits-on-the-keyboard-not-the-serial-line.md`).
         KObjectRef::Console(_) => None,
@@ -287,12 +293,12 @@ pub fn read_watch(object: &KObjectRef) -> Option<WatchRef> {
         KObjectRef::SysCap(_) => Some(WatchRef::Static(&crate::log::user::WATCH)),
         KObjectRef::PipeWrite(_) | KObjectRef::File(_) | KObjectRef::Inbox(_)
         | KObjectRef::Connector(_) | KObjectRef::Namespace(_)
-        | KObjectRef::SharedMem(_) | KObjectRef::Null(_) | KObjectRef::Job(_) => None,
+        | KObjectRef::SharedMem(_) | KObjectRef::Null(_) => None,
     }
 }
 
 /// A readable poll is registered on this object: its process listens to a
-/// notice from now on (`kernel::proclife::quit`).
+/// notice from now on (`toyos_proclife::quit`).
 pub fn watched_readable(object: &KObjectRef) {
     match object {
         KObjectRef::Notice(n) => n.listen(),
@@ -724,7 +730,7 @@ pub fn has_data(object: &KObjectRef) -> bool {
         KObjectRef::Console(_) => serial::has_data(),
         KObjectRef::Acceptor(a) => a.has_pending(),
         KObjectRef::Process(p) => p.finished(),
-        KObjectRef::Job(_) => false,
+        KObjectRef::Job(j) => j.ready(),
         KObjectRef::Notice(n) => n.readable(),
         KObjectRef::File(_) | KObjectRef::Null(_) => true,
         KObjectRef::Device(d) => match d.class() {

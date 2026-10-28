@@ -69,7 +69,7 @@ static PAGE: core::sync::atomic::AtomicPtr<alloc::sync::Arc<crate::object::shm::
 /// space can map it, and never written again.
 fn publish_page(counter_at_boot: u64, period_fs: u64, stamp_at_boot: u64) {
     use toyos_abi::clock::{ClockPage, CLOCK_MAGIC};
-    let page = crate::object::shm::SharedMemObject::create(crate::mm::PAGE_SIZE).expect("clock: no frame for the clock page");
+    let page = crate::object::shm::SharedMemObject::create(crate::mm::charge::boot(), crate::mm::PAGE_SIZE).expect("clock: no frame for the clock page");
     let value = ClockPage { magic: CLOCK_MAGIC, counter_at_boot, period_fs, stamp_at_boot };
     // SAFETY: `ClockPage` is four `u64`s, `repr(C)`: every byte is a field's.
     let bytes = unsafe { core::slice::from_raw_parts((&value as *const ClockPage).cast::<u8>(), core::mem::size_of::<ClockPage>()) };

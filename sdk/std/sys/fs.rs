@@ -593,8 +593,8 @@ pub fn set_times_nofollow(p: &Path, times: FileTimes) -> io::Result<()> {
 
 /// The whole of the file at `path` as a program image: what a spawn of a
 /// program the kernel cannot open itself hands the kernel.
-pub fn read_image(path: &Path) -> io::Result<toyos::process::Image> {
-    files::read_image(bytes(path)).map_err(|refused| match refused {
+pub fn read_image(path: &Path, job: Option<toyos::RawHandle>) -> io::Result<toyos::process::Image> {
+    files::read_image_for(bytes(path), job).map_err(|refused| match refused {
         toyos::process::ImageRefused::Empty => {
             io::const_error!(io::ErrorKind::InvalidData, "the program is an empty file")
         }

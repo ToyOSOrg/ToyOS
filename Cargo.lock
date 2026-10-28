@@ -1380,6 +1380,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "inputsink"
+version = "0.1.0"
+dependencies = [
+ "toyos",
+ "toyos-abi",
+ "toyos-input",
+]
+
+[[package]]
 name = "inspect"
 version = "0.1.0"
 dependencies = [
@@ -1524,6 +1533,7 @@ dependencies = [
  "toyos-microcode",
  "toyos-pci",
  "toyos-phys",
+ "toyos-proclife",
  "toyos-quiesce",
  "toyos-random",
  "toyos-rootimage",
@@ -3169,6 +3179,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "starveling"
+version = "0.1.0"
+dependencies = [
+ "toyos",
+ "toyos-abi",
+]
+
+[[package]]
 name = "subtle"
 version = "2.6.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -3901,6 +3919,13 @@ dependencies = [
 [[package]]
 name = "toyos-phys"
 version = "0.1.0"
+
+[[package]]
+name = "toyos-proclife"
+version = "0.1.0"
+dependencies = [
+ "toyos-abi",
+]
 
 [[package]]
 name = "toyos-ps2"

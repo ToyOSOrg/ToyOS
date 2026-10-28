@@ -2,7 +2,8 @@
 //!
 //! Some things are reachable no other way — minting a device claim, entering
 //! the real-time band, listing every process in the machine, reading what the
-//! machine is made of and what its CPUs count, and taking its power away, off or back to firmware —
+//! machine is made of and what its CPUs count, holding memory back for a job,
+//! and taking its power away, off or back to firmware —
 //! and each is one bit on a handle to this. The kernel makes exactly one at boot, for the supervisor, so the set of
 //! processes that can ever do any of them is exactly what the supervisor endowed.
 
@@ -59,6 +60,13 @@ impl SysCap {
         let raw = syscall::job_create(self.0.raw())?;
         // SAFETY: the kernel installed this handle for this call and no other.
         Ok(crate::job::Job(unsafe { OwnedHandle::from_raw(raw) }))
+    }
+
+    /// Hold `bytes` back for `job` however short every other job runs, for
+    /// as long as `job`'s handle and its duplicates live. Needs
+    /// [`Rights::FLOOR`], which the supervisor alone holds.
+    pub fn hold_floor(&self, job: &crate::job::Job, bytes: u64) -> Result<(), SyscallError> {
+        syscall::job_floor(self.0.raw(), job.as_handle(), bytes)
     }
 
     fn mint<T: FromHandle>(&self, request: DeviceRequest) -> Result<T, SyscallError> {

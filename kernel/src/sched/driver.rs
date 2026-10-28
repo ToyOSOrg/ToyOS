@@ -705,6 +705,11 @@ pub fn current_shared() -> Option<Arc<KShared>> {
     try_with_cpu(|cpu| cpu.running().map(|t| t.shared().clone())).flatten()
 }
 
+/// The job the running task is in, whose account its call's memory is charged to. `None` off-task.
+pub fn current_job() -> Option<Arc<kernel::sched::job::Job>> {
+    try_with_cpu(|cpu| cpu.running().map(|t| t.job().clone())).flatten()
+}
+
 /// The running task's cross-CPU face, where its own watch lives. `None` off-task.
 pub fn current_handle() -> Option<Arc<crate::sched::payload::TaskHandle>> {
     try_with_cpu(|cpu| cpu.running().map(|t| t.ext().handle.clone())).flatten()

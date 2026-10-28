@@ -31,6 +31,7 @@ members = [
     "kernel/loom",
     "kernel/pci",
     "kernel/phys",
+    "kernel/proclife",
     "kernel/sim",
     "kernel/smmu",
     "lib/acpi",
@@ -143,6 +144,7 @@ members = [
     "system/vdagent",
     "system/vdagent/bridge",
     "tests/guest/hangupholder",
+    "tests/guest/inputsink",
     "tests/guest/kernelprobe",
     "tests/guest/metalprobe",
     "tests/guest/osbench",
@@ -150,6 +152,7 @@ members = [
     "tests/guest/osbench/lan",
     "tests/guest/osbench/rules",
     "tests/guest/pciholder",
+    "tests/guest/starveling",
     "tests/guest/test-runner",
     "tests/metal",
 ]

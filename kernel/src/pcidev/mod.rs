@@ -1384,7 +1384,7 @@ pub fn dma_alloc(
         if held + span > MAX_GRANT_TOTAL {
             return Err(SyscallError::ResourceExhausted);
         }
-        let memory = SharedMemObject::create_run(span)?;
+        let memory = SharedMemObject::create_run(&crate::mm::charge::current(), span)?;
         let (phys, _) = memory.run().expect("pcidev: a grant is one run");
         // The pages are the allocator's own and 2 MiB, so a domain that cannot
         // take them is a kernel bug rather than the device's answer.

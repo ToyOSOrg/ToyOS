@@ -54,7 +54,7 @@ use kernel_loom::sched::topology::Topology;
 use kernel_loom::sched::hw::CpuId;
 use kernel_loom::sched::mailbox::{mailbox, MailboxConsumer};
 use kernel_loom::sched_model::{
-    model, watch_list, Kicks, LoomLock, Msg, PreemptModel, RemoteGuard, CPU0, CPU1,
+    model, model_bounded, watch_list, Kicks, LoomLock, Msg, PreemptModel, RemoteGuard, CPU0, CPU1,
 };
 use kernel_loom::sched::park::{prepare, Cancel, Commit, CurrentTask};
 use kernel_loom::sched::task::{
@@ -869,10 +869,11 @@ fn a_fire_racing_a_submitters_park_is_never_lost() {
 /// other submitter, which reads nothing owed and parks, the fire's wake spent
 /// before it registered; the looker's answer then posts the watch both park
 /// on. A submitter parked with the answer written and no wake owed was lost
-/// to that look.
+/// to that look. Four threads: an answer that wakes nobody is red at one
+/// preemption, so the bound is two.
 #[test]
 fn an_answer_wakes_the_submitter_its_look_hid_the_poll_from() {
-    model(|| {
+    model_bounded(2, || {
         let (ring, mut mailboxes) = poll_ring([CPU0, CPU1]);
         let devices = devices_polled(&ring, 1);
         let submitters = [
