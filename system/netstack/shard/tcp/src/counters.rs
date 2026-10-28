@@ -76,6 +76,14 @@ toyos_net_wire::counters! {
     CongestionStops = "tcp.congestion-stops";
     CongestionStopsCwndBytes = "tcp.congestion-stops.cwnd.bytes";
     CongestionStopsSrttMicros = "tcp.congestion-stops.srtt.us";
+    AcksCwndLimited = "tcp.acks.cwnd-limited";
+    AcksNotLimited = "tcp.acks.not-limited";
+    CwndGrownBytes = "tcp.cwnd.grown.bytes";
+    HyStartCss = "tcp.hystart.css";
+    HyStartCssRounds = "tcp.hystart.css.rounds";
+    HyStartResumed = "tcp.hystart.resumed";
+    HyStartExits = "tcp.hystart.exits";
+    HyStartExitCwndBytes = "tcp.hystart.exit.cwnd.bytes";
     EventOverflow = "tcp.event-overflow";
 }
 

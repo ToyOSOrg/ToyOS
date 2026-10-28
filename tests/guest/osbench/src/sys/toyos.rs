@@ -397,11 +397,10 @@ pub fn persistent_dir() -> Option<(String, String, String)> {
     Some(("/home".into(), served_by.into(), "nvme".into()))
 }
 
-/// What a transfer row reports of the stack beneath it, as netstack's `inspect` answers it:
-/// [tcp]'s bytes, losses and the time its senders waited on each send limit, and the card's
-/// full-ring waits and missed frames. Those a card does not report are left out.
+/// What a transfer row reports of the stack beneath it, as netstack's `inspect` answers it: [tcp]'s
+/// and the card's counters. Those a card does not report are left out.
 pub fn net_counters() -> Result<Vec<(String, u64)>, String> {
-    const READ: [&str; 21] = [
+    const READ: [&str; 30] = [
         "net.tcp.sent.bytes",
         "net.tcp.retransmit.bytes",
         "net.tcp.rto",
@@ -416,6 +415,14 @@ pub fn net_counters() -> Result<Vec<(String, u64)>, String> {
         "net.tcp.congestion-stops",
         "net.tcp.congestion-stops.cwnd.bytes",
         "net.tcp.congestion-stops.srtt.us",
+        "net.tcp.acks.cwnd-limited",
+        "net.tcp.acks.not-limited",
+        "net.tcp.cwnd.grown.bytes",
+        "net.tcp.hystart.css",
+        "net.tcp.hystart.css.rounds",
+        "net.tcp.hystart.resumed",
+        "net.tcp.hystart.exits",
+        "net.tcp.hystart.exit.cwnd.bytes",
         "net.transmit.full",
         "net.transmit.wake_armed",
         "net.transmit.wake_taken",
@@ -423,6 +430,7 @@ pub fn net_counters() -> Result<Vec<(String, u64)>, String> {
         "net.transmit.unreported",
         "net.errors.missed",
         "net.wire.sent",
+        "net.wire.received",
     ];
     let snap = inspect::ask(toyos_inspect::NET)?;
     Ok(READ

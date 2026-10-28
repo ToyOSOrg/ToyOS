@@ -8,7 +8,7 @@
 //!
 //! Each TCP connection to the peer's [`PORT`] opens with one [`Request`]:
 //! echo fixed-size messages, sink everything to end-of-file and answer the
-//! count, or source for a span and close.
+//! count and its [`Ramp`], or source for a span and close.
 
 use std::io::{self, ErrorKind, Read, Write};
 use std::net::{IpAddr, Ipv4Addr, Shutdown, SocketAddr, TcpListener, TcpStream, UdpSocket};
@@ -23,8 +23,8 @@ pub const PORT: u16 = 47_321;
 
 /// What a bench broadcasts, and what the peer's answer starts with: the rest
 /// is its link's description, at most [`MAX_SAID`] bytes of printable ASCII.
-pub const HELLO: &[u8] = b"osbench-lan/2 hello";
-pub const ANSWER: &[u8] = b"osbench-lan/2 peer ";
+pub const HELLO: &[u8] = b"osbench-lan/3 hello";
+pub const ANSWER: &[u8] = b"osbench-lan/3 peer ";
 pub const MAX_SAID: usize = 160;
 
 /// How long either end waits on one read or write before it gives the
@@ -43,7 +43,8 @@ pub const MAX_SOURCE_MS: u32 = 30_000;
 pub enum Request {
     /// Echo every `size`-byte message until end-of-file.
     Echo { size: u32 },
-    /// Read to end-of-file, then answer the count as eight little-endian bytes.
+    /// Read to end-of-file, then answer the count and then the [`Ramp`], each
+    /// as eight little-endian bytes.
     Sink,
     /// Send for `millis`, then close.
     Source { millis: u32 },
@@ -145,11 +146,71 @@ pub fn discover(to: SocketAddr, patience: Duration) -> io::Result<Option<Found>>
     Ok(None)
 }
 
-/// A transfer's bytes and the bench's nanoseconds for them.
+/// A transfer's bytes and the bench's nanoseconds for them, and for an
+/// upload what the peer had received by each of [`RAMP_MARKS_MS`].
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Transfer {
     pub bytes: u64,
     pub ns: u64,
+    pub ramp: Option<Ramp>,
+}
+
+/// The milliseconds after a sink's first byte at which it reads its count: how
+/// fast the sender's slow start opened, read the same way for every sender.
+pub const RAMP_MARKS_MS: [u64; 4] = [100, 300, 1000, 2000];
+
+/// Bytes a sink had received by each of [`RAMP_MARKS_MS`] after its first byte.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct Ramp(pub [u64; RAMP_MARKS_MS.len()]);
+
+impl Ramp {
+    const BYTES: usize = RAMP_MARKS_MS.len() * 8;
+
+    fn encode(self) -> [u8; Self::BYTES] {
+        let mut out = [0; Self::BYTES];
+        for (at, bytes) in out.as_chunks_mut::<8>().0.iter_mut().zip(self.0) {
+            *at = bytes.to_le_bytes();
+        }
+        out
+    }
+
+    fn decode(bytes: &[u8; Self::BYTES]) -> Self {
+        let mut ramp = Self::default();
+        for (to, at) in ramp.0.iter_mut().zip(bytes.as_chunks::<8>().0) {
+            *to = u64::from_le_bytes(*at);
+        }
+        ramp
+    }
+}
+
+/// A sink's count as it reads: the count at each mark is what arrived before
+/// the read that passed it, and a mark the transfer ended before is the whole.
+struct RampCount {
+    first: Option<Instant>,
+    ramp: Ramp,
+    marked: usize,
+}
+
+impl RampCount {
+    fn new() -> Self {
+        Self { first: None, ramp: Ramp::default(), marked: 0 }
+    }
+
+    fn read(&mut self, count: u64) {
+        let first = *self.first.get_or_insert_with(Instant::now);
+        let since = first.elapsed();
+        while self.marked < RAMP_MARKS_MS.len() && since >= Duration::from_millis(RAMP_MARKS_MS[self.marked]) {
+            self.ramp.0[self.marked] = count;
+            self.marked += 1;
+        }
+    }
+
+    fn end(mut self, count: u64) -> Ramp {
+        for at in &mut self.ramp.0[self.marked..] {
+            *at = count;
+        }
+        self.ramp
+    }
 }
 
 fn ns_since(t: Instant) -> u64 {
@@ -205,11 +266,13 @@ impl Peer {
         let mut count = [0u8; 8];
         stream.read_exact(&mut count)?;
         let ns = ns_since(t);
+        let mut ramp = [0u8; Ramp::BYTES];
+        stream.read_exact(&mut ramp)?;
         let counted = u64::from_le_bytes(count);
         if counted != sent {
             return Err(io::Error::other(format!("the peer counted {counted} of the {sent} bytes sent")));
         }
-        Ok(Transfer { bytes: sent, ns })
+        Ok(Transfer { bytes: sent, ns, ramp: Some(Ramp::decode(&ramp)) })
     }
 
     /// What the peer sends for `span` after its first read, timed from that
@@ -229,7 +292,7 @@ impl Peer {
                 n => bytes += n as u64,
             }
         }
-        Ok(Transfer { bytes, ns: ns_since(t) })
+        Ok(Transfer { bytes, ns: ns_since(t), ramp: None })
     }
 }
 
@@ -313,13 +376,18 @@ fn session(mut stream: TcpStream, said: &dyn Fn(&str)) -> io::Result<()> {
         Request::Sink => {
             let mut buf = vec![0u8; CHUNK];
             let mut count = 0u64;
+            let mut ramp = RampCount::new();
             loop {
                 match stream.read(&mut buf)? {
                     0 => break,
-                    n => count += n as u64,
+                    n => {
+                        ramp.read(count);
+                        count += n as u64;
+                    }
                 }
             }
-            stream.write_all(&count.to_le_bytes())
+            stream.write_all(&count.to_le_bytes())?;
+            stream.write_all(&ramp.end(count).encode())
         }
         Request::Source { millis } => {
             let chunk = vec![0x3cu8; CHUNK];
@@ -389,18 +457,20 @@ mod tests {
         let up = peer.upload(Duration::from_millis(50), &mut |_| looked += 1).unwrap();
         assert!(up.bytes >= CHUNK as u64, "{up:?}");
         assert_eq!(looked, 1, "the upload shows its connection once");
+        let ramp = up.ramp.expect("an upload carries its ramp").0;
+        assert!(ramp.windows(2).all(|pair| pair[0] <= pair[1]) && ramp[3] == up.bytes, "{ramp:?}");
         let down = peer.download(Duration::from_millis(50)).unwrap();
         assert!(down.bytes >= CHUNK as u64, "{down:?}");
     }
 
     #[test]
     fn an_answer_carries_the_peers_link_and_nothing_else_is_one() {
-        assert_eq!(answered(b"osbench-lan/2 peer wired driver=e1000e speed_mbps=1000"), Some("wired driver=e1000e speed_mbps=1000"));
-        assert_eq!(answered(b"osbench-lan/2 peer "), Some(""));
+        assert_eq!(answered(b"osbench-lan/3 peer wired driver=e1000e speed_mbps=1000"), Some("wired driver=e1000e speed_mbps=1000"));
+        assert_eq!(answered(b"osbench-lan/3 peer "), Some(""));
         assert_eq!(answered(b"osbench-lan/1 peer"), None);
-        assert_eq!(answered(b"osbench-lan/2 hello"), None);
-        assert_eq!(answered(b"osbench-lan/2 peer wired\n"), None);
-        assert_eq!(answered("osbench-lan/2 peer ä".as_bytes()), None);
+        assert_eq!(answered(b"osbench-lan/3 hello"), None);
+        assert_eq!(answered(b"osbench-lan/3 peer wired\n"), None);
+        assert_eq!(answered("osbench-lan/3 peer ä".as_bytes()), None);
         let mut long = ANSWER.to_vec();
         long.extend([b'x'; MAX_SAID]);
         assert!(answered(&long).is_some());

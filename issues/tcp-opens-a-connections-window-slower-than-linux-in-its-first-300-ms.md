@@ -4,12 +4,17 @@ kind: defect
 opened: 2026-10-24
 ---
 
-# netstack sends TCP at a third of what the T14's wired link carries
+# [tcp] opens a connection's window slower than Linux in its first 300 ms
 
-On the T14's I219, a ToyOS TCP sender moves 41 MB/s where the same
-program under the bench's Linux moves 113 MB/s on the same path and the
-same peer. Received TCP is at parity on that path, so the link, the peer
-and the access point are not the limit.
+On the T14's wired path to the AMD bench's Wi-Fi peer, a ToyOS TCP sender
+delivers 2.1–3.3 MB in a new connection's first 100 ms and 24–25 MB by
+300 ms, where the bench's Linux delivers 6.4–6.5 MB and 29.7 MB. From then on
+both run at line rate. The upload row reads 112 MB/s against Linux's 113 in
+the same session (#1102's A/B, at the end of this record). Received TCP is at
+parity on that path.
+
+This record began as the upload at a third of Linux's (41 MB/s against 113).
+What follows is that history, the causes found and removed, and the residual.
 
 **Measured** on 2026-10-24 with `osbench lan` at `d99ef5a35`. The path is
 the T14's I219 at 1000 Mb/s, through the access point, to the AMD bench's
@@ -188,12 +193,58 @@ What is left, about 1.3 times short of Linux with the ring full about half
 of each row whatever the descriptor fetch does, is the next lead: what the
 part waits on for each frame once it holds it.
 
+**The part keeps line rate while it holds frames; the gap is each
+connection's first second, read 2026-10-28** ([evidence `d1ea41856/`](https://github.com/ToyOSOrg/evidence/tree/9f309c28654d89c37e8fb0defc9fd2b1c61cc91b/r1/d1ea41856)).
+On the full ring the I219 sent 83,600 frames a second, line rate. One session
+read what the peer had received after its first byte, a mean over each row's
+five connections, at `d1ea41856` (A) and A with a card-held stop counted as
+cwnd's (B), two of each, with Linux at both ends:
+
+| received by | 100 ms | 300 ms | 1 s | 2 s | upload p50 |
+|---|---|---|---|---|---|
+| Linux (2 runs) | 5.9–6.4 MB | 27.9–29.0 MB | 109–110 MB | 224–225 MB | 113, 113 |
+| A (2 runs) | 0.32 MB | 2.0–2.1 MB | 38–41 MB | 149–153 MB | 88, 89 |
+| B (2 runs) | 0.32–0.35 MB | 2.1–2.3 MB | 46–47 MB | 162–163 MB | 93, 92 |
+
+- From 1 s to 2 s ToyOS carried 112–117 MB, Linux 115. Nothing was lost.
+- The peer acknowledged about 50 KB, 34 segments, an ACK. Each ACK that grew
+  cwnd grew it by one SMSS (RFC 5681 §3.1's min(N, SMSS)), so slow start grew
+  a few percent a round trip instead of doubling.
+- Under A, 75–76 % of ACKs grew nothing: the card's room had ended the
+  opportunity before them with more than a segment of cwnd left.
+
+Pull request #1102 replaces the initial slow start with HyStart++
+(RFC 9406, which RFC 9438 §4.10 recommends for CUBIC), whose L = 8 for a
+sender that does not pace caps the growth an ACK gives at eight segments, and
+counts a card-held window as in use when at least half of it is in flight
+(RFC 7661 §4.3's validated window, which RFC 9438 §4.6 admits).
+
+**#1102's A/B, 2026-10-28** ([evidence](https://github.com/ToyOSOrg/evidence/tree/8f70147d28011645de1fd458f3091297287b57b9/r2/ab)). A was the fix
+reverted, B the fix; three of each, A B A B A B, with Linux at both ends:
+
+| | upload p50, MB/s | received by 100 ms | 300 ms | 1 s | 2 s |
+|---|---|---|---|---|---|
+| Linux (2 runs) | 113, 113 | 6.4–6.5 MB | 29.7 MB | 110–111 MB | 226–227 MB |
+| A (3 runs) | 87, 87, 87 | 0.33–0.34 MB | 2.0–2.1 MB | 34–38 MB | 144–149 MB |
+| B (3 runs) | 112, 112, 112 | 2.1–3.3 MB | 23.9–25.4 MB | 106–107 MB | 222–223 MB |
+
+- B was faster in every pair: one-sided p = 1/20. No segment was resent in
+  any B run, and no loss probe was sent.
+- B's rounds ran 111–115 MB/s. Linux's 113 in this session is above them,
+  inside Linux's 109–114 across this record's sessions.
+- What is left is the first 300 ms. In every B row HyStart++ entered
+  Conservative Slow Start 590–702 times, about 120–140 a connection, and
+  resumed every time, never exiting. CSS grows by a quarter while it lasts.
+  That this oscillation is the residual is an inference: no run separates it.
+
 The clock does not separate the two systems. Each upload row's own
 readings, `mhz` just after it and `mhz_settled` before it, were about
 1.6 GHz under ToyOS (settled 1.6, 1.8 or 3.8 GHz). Under Linux they were
 1.5 GHz (settled 1.5 or 4.2 GHz), and Linux still moved 113 MB/s. At most,
 the clock matters through what ToyOS spends per byte sent.
 
-**Exit**: `osbench_lan` on the T14 reads `lan.wired.tcp.upload` within
-Linux's run-to-run range on the same path, or the cause is named and owned
-by its own issue.
+**Exit**: `osbench_lan` on the T14 reads `lan.wired.tcp.upload` at Linux's
+in the same session, with the first 300 ms read at the receiver no slower, or
+the cause is named and owned by its own issue. The next leads are the CSS
+oscillation on this path (RFC 9406 §4.3 lets an implementation tune
+`MIN_RTT_THRESH` and `N_RTT_SAMPLE`) and pacing with L = ∞ (§4.3).
