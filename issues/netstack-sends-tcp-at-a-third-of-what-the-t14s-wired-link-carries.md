@@ -84,7 +84,7 @@ window is never the limit, and its own queue fills the path.
   `af239c8bb` had no counters, and `132d5ef75` charged Nagle holds to
   congestion.
 
-**Read at `d184223b0`, 2026-10-29**
+**Read at `d184223b0`, 2026-10-28**
 ([evidence `d184223b0/`](https://github.com/ToyOSOrg/evidence/tree/bc4188c1070d283e38f7a96019437b99697fe4c5/r4/d184223b0)), four runs on 16 descriptors and two on 256,
 against Linux's 112–113:
 
@@ -108,7 +108,7 @@ configuration (interrupt moderation, descriptor write-back, how often
 netstack learns of completions) and is taken up apart from this record's
 pull request.
 
-**The per-ACK fix, measured: 2026-10-29, interleaved with its control**
+**The per-ACK fix, measured: 2026-10-28, interleaved with its control**
 ([evidence `3599f5bb3/`](https://github.com/ToyOSOrg/evidence/tree/d03d7394ed2d34deb1f0c9244bd85f78d7551537/r5/3599f5bb3)). A was `3599f5bb3` with only the per-ACK
 fix reverted, every counter kept; B was `3599f5bb3`; four of each, A B A B,
 with Linux at the session's start and end (109 and 110 MB/s).
@@ -118,11 +118,11 @@ with Linux at the session's start and end (109 and 110 MB/s).
   1/70.
 - cwnd held each 15 s row 2.2–2.5 s under B, 5.5–8.9 s under A, at a mean
   cwnd of 335–354 KB against 266–301 KB.
-- Each of A's rows ranged from 30–32 MB/s to 35–60 between rounds; B's from
-  55–57 to 64–66.
+- Pooled across the four runs of each, A's rounds spanned 30–60 MB/s and
+  B's 55–66.
 
-So in one session the fix raises the rate and removes most of the swing
-between rounds and between runs. Heads without it read 31–65 MB/s across
+So in one session the fix raises the rate and narrows the spread of its
+rounds, pooled across runs, from 30 MB/s to 11. Heads without it read 31–65 MB/s across
 earlier sessions while Linux held 110–114. The fix is consistent with most
 of that, but not with `aeba59fb0`'s 62–65, above B's reading here. That
 part of the spread across sessions stays unexplained.
