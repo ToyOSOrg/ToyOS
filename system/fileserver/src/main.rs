@@ -73,7 +73,7 @@ use toyos::port::{self, Acceptor};
 use toyos::shm::{Bytes, SharedMemory};
 use toyos::Pipe;
 use toyos_abi::handle::Rights;
-use toyos_abi::syscall::{SyscallError, MAX_BADGE, SERVE_PREFIX};
+use toyos_abi::syscall::{SyscallError, MAX_BADGE, PIPE_CAPACITY, SERVE_PREFIX};
 
 /// What one turn of a stream appends at most.
 const STREAM_READ: usize = 64 * 1024;
@@ -81,7 +81,7 @@ const STREAM_READ: usize = 64 * 1024;
 /// The turns that drain what one stream holds before a request on its
 /// description: the most a pipe holds, so a writer that keeps writing cannot
 /// hold the loop.
-const STREAM_PRESENT: usize = syscall::PIPE_CAPACITY / STREAM_READ;
+const STREAM_PRESENT: usize = PIPE_CAPACITY / STREAM_READ;
 
 /// The name the private export port has in this server's own namespace.
 const EXPORT_PORT: &str = "export";
