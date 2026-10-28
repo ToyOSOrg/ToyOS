@@ -2,23 +2,22 @@
 //! decision about it and none of the accesses that carry it out.
 //!
 //! I219 §6.4 leaves ULP's entry and exit to "the host driver (on non ME
-//! systems) or the ME FW", and its configuration lives in the PHY's
-//! always-powered block, so a configuration another agent armed reaches this
-//! driver across a host reset and its own `LANPHYPC` cycle. This driver arms no
-//! wake, so it leaves ULP unarmed: the PHY then never powers itself down on a
-//! lost link, whether the machine is later stopped or cut off.
+//! systems) or the ME FW", so a configuration another agent armed may stand
+//! when this driver starts. This driver arms no wake, so it leaves ULP unarmed:
+//! the PHY then does not power itself down on a lost link.
 //!
 //! **Where the firmware is valid** (`FWSM` bit 15) the ME configures ULP, and
 //! this driver writes none of it.
 //!
 //! Every `§9.` here is the *Intel Ethernet Connection I219 Datasheet* (612523,
 //! rev 2.02). What it does not publish, and this driver relies on as properties
-//! of the part: ULP Configuration 1's bits 11 ("disable clear of sticky ULP on
-//! `PERST#`") and 12 ("disable SMBus release on `PERST#`"), which §9.5.7.1
+//! of the part: ULP Configuration 1's bit 11, which keeps sticky ULP across
+//! `PERST#`, and bit 12, which keeps SMBus across it, both of which §9.5.7.1
 //! calls reserved; page 770 register 17's bit 14, which enables K1 and which
-//! arming ULP clears; and `regs::ULP_SMBUS_HOLD`'s bit 5, the MAC's half of
-//! bit 12. Disarming clears all of them, commits the configuration with
-//! `START`, and is followed by the full reset of the MAC and PHY.
+//! ULP's entry clears; and `regs::ULP_SMBUS_HOLD`'s bit 5, the MAC's half of
+//! bit 12. Disarming sets K1, clears the rest and the power-up indication,
+//! commits the configuration with `START`, and is followed by the full reset
+//! of the MAC and PHY.
 
 use crate::phy::PhyRefusal;
 
@@ -30,6 +29,7 @@ pub const CONFIGURATION: u8 = 16;
 pub mod config {
     /// "Starts the auto ULP configuration"; the part clears it when done.
     pub const START: u16 = 1 << 0;
+    /// "Power-up-from-ULP indication": the part's, not an arming.
     pub const IND: u16 = 1 << 2;
     /// "Enter ULP on link disconnect".
     pub const STICKY: u16 = 1 << 4;
@@ -42,9 +42,8 @@ pub mod config {
     pub const KEEP_STICKY_ON_PERST: u16 = 1 << 11;
     pub const KEEP_SMBUS_ON_PERST: u16 = 1 << 12;
 
-    /// Every bit an arming sets and a disarm clears.
-    pub const ARMING: u16 = IND
-        | STICKY
+    /// Every bit an arming sets.
+    pub const ARMING: u16 = STICKY
         | INBAND_EXIT
         | WOL_HOST
         | RESET_TO_SMBUS
@@ -62,10 +61,13 @@ pub const K1_ENABLE: u16 = 1 << 14;
 /// `regs::ULP_SMBUS_HOLD`'s bit 5.
 pub const SMBUS_HOLD: u32 = 1 << 5;
 
-/// The configuration with every arming bit cleared, to be written and then
-/// written again with [`config::START`].
+/// Every bit the disarm clears: the arming and the power-up indication.
+pub const CLEARED: u16 = config::ARMING | config::IND;
+
+/// The configuration with [`CLEARED`] cleared, to be written and then written
+/// again with [`config::START`].
 pub fn disarmed(configuration: u16) -> u16 {
-    configuration & !(config::ARMING | config::START)
+    configuration & !(CLEARED | config::START)
 }
 
 pub fn k1_enabled(power_control: u16) -> u16 {
@@ -85,11 +87,10 @@ pub struct State {
 }
 
 impl State {
-    /// Whether any part of an arming stands in it.
+    /// Whether any part of an arming stands in it. K1 and the power-up
+    /// indication are not: ULP's entry moves them, an arming does not.
     pub fn armed(self) -> bool {
-        self.configuration & config::ARMING != 0
-            || self.power_control & K1_ENABLE == 0
-            || self.smbus_hold & SMBUS_HOLD != 0
+        self.configuration & config::ARMING != 0 || self.smbus_hold & SMBUS_HOLD != 0
     }
 }
 
@@ -97,13 +98,14 @@ impl core::fmt::Display for State {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
         write!(
             f,
-            "ULP configuration {:#06x}, power control {:#06x} (K1 {}), {:#x} {:#010x}: {}",
+            "ULP configuration {:#06x} ({}, {}), power control {:#06x} (K1 {}), {:#x} {:#010x}",
             self.configuration,
+            if self.armed() { "armed" } else { "unarmed" },
+            if self.configuration & config::IND != 0 { "up from ULP" } else { "not up from ULP" },
             self.power_control,
             if self.power_control & K1_ENABLE != 0 { "on" } else { "off" },
             crate::regs::ULP_SMBUS_HOLD,
             self.smbus_hold,
-            if self.armed() { "armed" } else { "unarmed" },
         )
     }
 }

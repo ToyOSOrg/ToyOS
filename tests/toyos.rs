@@ -1134,12 +1134,12 @@ const METAL: &[(&str, metal::Metal)] = &[
         metal::Metal { arms: OSBENCH_INTERNET, judge: |b| osbench_ran(b[0], &["osbench_internet"]) },
     ),
     (
-        // The I219's start disarms the Ultra Low Power configuration it finds,
-        // on the silicon whose PHY the model's disarm is written for: the
-        // registers the PHY holds are no model's. The T14, the one bench whose
-        // card ToyOS drives; the boot netstack drives it in, with no job.
+        // What the PHY's ULP registers hold after the I219's disarm and the
+        // full reset, which the stub only assumes. The T14 only: the AMD bench
+        // has no card ToyOS drives. It rides `osbench`'s boot, whose netstack
+        // drives the card, and reads two of netstack's lines.
         "i219_leaves_ulp_unarmed",
-        metal::Metal { arms: NETBENCHCASE, judge: |b| i219_leaves_ulp_unarmed(b[0]) },
+        metal::Metal { arms: BENCHCASE_ALONE, judge: |b| i219_leaves_ulp_unarmed(b[0]) },
     ),
     // ---- tests/images/jobcase.toml, each image armed to end its boot its own way ----
     (
@@ -1689,8 +1689,8 @@ const OSBENCH_INTERNET: &[metal::Arm] = &[metal::Arm {
     ..metal::once("netbenchcase", "tests/images/benchcase.toml", &[], &["osbench_internet"])
 }];
 
-/// The boot netstack drives the T14's I219 in, with nothing else asked of it.
-const NETBENCHCASE: &[metal::Arm] = &[metal::once("netbenchcase", "tests/images/benchcase.toml", &[], &[])];
+/// [`BENCHCASE`]'s boot, with no job of its own.
+const BENCHCASE_ALONE: &[metal::Arm] = &[metal::once("benchcase", "tests/images/benchcase.toml", &[], &[])];
 
 /// netstack's account of the I219's start: what its wake found of Ultra Low
 /// Power and disarmed, and the configuration its bring-up read back unarmed.
@@ -1705,7 +1705,7 @@ fn i219_leaves_ulp_unarmed(boot: &metal::Readback) -> Result<(), String> {
     if !woke.contains(", and disarmed") {
         return Err(format!("the I219's wake did not disarm ULP: {woke}"));
     }
-    if !left.trim_end().ends_with(": unarmed") {
+    if !left.contains(" (unarmed, ") {
         return Err(format!("the I219's bring-up left ULP armed: {left}"));
     }
     Ok(())

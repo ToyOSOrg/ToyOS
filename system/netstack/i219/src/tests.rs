@@ -2878,8 +2878,13 @@ fn ulp_left_armed_is_disarmed_and_a_lost_link_leaves_the_phy_in_reach() {
         };
         assert!(found.armed(), "{}", nic.because(&format!("found {found}")));
         let left = nic.ulp();
-        assert!(!left.armed(), "{}", nic.because(&format!("ULP left armed: {left}")));
-        assert_ne!(left.configuration & (1 << 9), 0, "{}", nic.because("a field ULP's disarm does not own moved"));
+        assert_eq!(
+            left.configuration,
+            crate::stub::ULP_UNMODELLED,
+            "{}",
+            nic.because(&format!("ULP left with more or less than the field it does not own: {left}"))
+        );
+        assert!(!left.armed() && left.power_control & ulp::K1_ENABLE != 0, "{}", nic.because(&format!("{left}")));
         let phy = driver.brought_up().phy.expect("the PHY in reach");
         assert_eq!(phy.ulp, Ok(left), "{}", nic.because("the bring-up read ULP as it is not"));
         assert!(woke.to_string().contains("and disarmed"), "{woke}");
@@ -2909,14 +2914,18 @@ fn ulp_is_left_alone_where_the_firmware_owns_it_or_the_phy_never_answers() {
 }
 
 /// `LANPHYPC` is held low for the cycle's 10 µs and let go as soon as that has
-/// passed, not at the arbitration's pace; the stub refuses a hold past 20 µs.
+/// passed, not at the arbitration's pace.
 #[test]
 fn lanphypc_is_held_low_for_the_cycle_and_no_longer() {
     let nic = Nic::i219(144);
     let driver = open(&nic);
     assert_eq!(nic.power_cycles(), 1);
     let held = woke_of(&driver, &nic).held_low_nanos.expect("the ladder cycled the pin");
-    assert!((wake::LANPHYPC_HOLD_NANOS..=20_000).contains(&held), "{}", nic.because(&format!("held {held} ns")));
+    assert!(
+        (wake::LANPHYPC_HOLD_NANOS..=crate::stub::LANPHYPC_HOLD_TARGET_NANOS).contains(&held),
+        "{}",
+        nic.because(&format!("held {held} ns"))
+    );
 }
 
 /// Where `FWSM` says the firmware blocks a PHY reset, neither `PHY_RST` nor a

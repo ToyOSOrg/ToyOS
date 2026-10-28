@@ -15,12 +15,13 @@ to the firmware that a driver holds the function (`toyos_i219`'s `pch`), stays
 set across the reset, and nothing the driver could say about the PHY at the end
 reaches the log.
 
-The next operating system's start is not left depending on it: the driver
-disarms Ultra Low Power at its start (`system/netstack/i219/src/ulp.rs`), so
-the PHY it leaves is the one a machine cut off mid-boot leaves too.
+The next operating system's start does not depend on it: the driver disarms
+Ultra Low Power at its own start (`system/netstack/i219/src/ulp.rs`), and a
+machine cut off mid-boot gets no stop either.
 
-**Owner**: `issues/a-device-function-is-driven-from-its-arrival-to-its-end.md`,
-whose ruling makes the NIC driver one process per function.
+**Owner**: stage 3 of `issues/the-supervisor-is-host-tested-and-owns-the-stop.md`,
+where the supervisor asks each service it started to finish before it calls
+the kernel.
 
 **Exit**: a T14 reboot whose log shows the I219's driver told of the stop, its
 destructor run and `CTRL_EXT` bit 28 clear before the kernel's reset.

@@ -21,7 +21,7 @@
 //!
 //! - `CTRL` bits 16 and 17 put `LANPHYPC` — I219 §5.2's `LAN_DISABLE_N`, "the
 //!   only external signal that can reset the PHY" — in the host's hand, and
-//!   holding it low for 10 µs to 20 µs takes the PHY's power away and restores
+//!   holding it low for at least 10 µs takes the PHY's power away and restores
 //!   it; the PHY's configuration time after that cycle is set to 50 ms first
 //!   (`regs::LANPHYPC_TIMING`), `CTRL_EXT` bit 2 reports the cycle done, and
 //!   the PHY is given 30 ms more before it is asked anything.
@@ -55,8 +55,9 @@ use crate::power::Settled;
 use crate::regs::{ctrl, ctrl_ext, fwsm, lanphypc_timing};
 use crate::ulp::Disarm;
 
-/// How long `LANPHYPC` is held low before it is given back: the release
-/// follows as soon as this has passed, inside the header's 20 µs.
+/// How long `LANPHYPC` is held low at least, from the low write's flush. The
+/// release follows as soon as this has passed: the driver's choice, since no
+/// document gives a longest hold.
 pub const LANPHYPC_HOLD_NANOS: u64 = 10_000;
 
 /// How long `CTRL_EXT`'s cycle-done bit is waited on, a driver-chosen bound.

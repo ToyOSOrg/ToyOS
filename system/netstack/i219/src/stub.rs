@@ -596,19 +596,16 @@ impl PhyModel {
     }
 }
 
-/// An arming as an operating system leaves one for a system sleep.
-const ULP_ARMED: u16 = ulp::config::STICKY
-    | ulp::config::RESET_TO_SMBUS
-    | ulp::config::KEEP_STICKY_ON_PERST
-    | ulp::config::KEEP_SMBUS_ON_PERST
-    | ULP_UNMODELLED;
+/// The worst case: every arming bit, and the part's power-up indication.
+const ULP_ARMED: u16 = ulp::CLEARED | ULP_UNMODELLED;
 /// A bit of each register that the model gives no meaning, set so a driver that
 /// composed the register instead of carrying it is caught clearing it.
-const ULP_UNMODELLED: u16 = 1 << 9;
+pub(crate) const ULP_UNMODELLED: u16 = 1 << 9;
 const SMBUS_HOLD_UNMODELLED: u32 = 1 << 1;
 
-/// The longest `LANPHYPC` may be held low ([`crate::wake`]'s header).
-const LANPHYPC_HOLD_MAX_NANOS: u64 = 20_000;
+/// The longest this driver means to hold `LANPHYPC` low: its own target, a
+/// release as soon as the floor has passed, and no property of the part.
+pub(crate) const LANPHYPC_HOLD_TARGET_NANOS: u64 = 20_000;
 
 /// The register file plus everything behind it.
 struct Model {
@@ -1449,9 +1446,9 @@ impl Model {
         if now & ctrl::LANPHYPC_HOST_DRIVEN == 0 {
             if let Some(at) = self.lanphypc_low_at.take() {
                 assert!(
-                    (wake::LANPHYPC_HOLD_NANOS..=LANPHYPC_HOLD_MAX_NANOS).contains(&(self.nanos - at)),
-                    "seed {}: the driver held LANPHYPC low {} ns, outside the 10 to 20 us a power \
-                     cycle takes",
+                    (wake::LANPHYPC_HOLD_NANOS..=LANPHYPC_HOLD_TARGET_NANOS).contains(&(self.nanos - at)),
+                    "seed {}: the driver held LANPHYPC low {} ns: under the 10 us a power cycle \
+                     takes, or past the prompt release it means to make",
                     self.seed,
                     self.nanos - at
                 );
@@ -1872,7 +1869,7 @@ impl Model {
                 self.refresh_phy_link();
             }
             PhyPlace::UlpConfiguration => {
-                let moved = ulp::config::ARMING | ulp::config::START;
+                let moved = ulp::CLEARED | ulp::config::START;
                 assert_eq!(
                     data & !moved,
                     self.phy.ulp_configuration & !moved,

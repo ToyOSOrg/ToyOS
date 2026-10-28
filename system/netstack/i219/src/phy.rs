@@ -513,6 +513,13 @@ impl<'a, R: Registers, C: Clock> Arbitration<'a, R, C> {
         now.saturating_sub(since)
     }
 
+    /// Read `STATUS` outside the pace, so the write before it has reached the
+    /// part before a hold is counted from it.
+    fn flush(&self) {
+        let _ = self.regs.read32(regs::STATUS);
+        self.last.set(Some(self.clock.nanos()));
+    }
+
     /// Give the processor away until `nanos` has passed since this driver's
     /// last access — a wait the part is owed after a step, which
     /// the pace alone would not keep where it is the shorter of the two.
@@ -838,6 +845,7 @@ impl<'a, R: Registers, C: Clock> Owned<'a, R, C> {
         let held = self.mdio.read_at(regs::CTRL);
         let low = wake::lanphypc_low(held);
         self.mdio.write_at(regs::CTRL, low);
+        self.mdio.flush();
         let held_low =
             self.mdio.write_after(regs::CTRL, wake::lanphypc_released(low), wake::LANPHYPC_HOLD_NANOS);
         let released_at = self.mdio.clock.nanos();
