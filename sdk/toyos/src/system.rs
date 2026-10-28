@@ -32,6 +32,14 @@ pub fn sysinfo(buf: &mut [u8; SYSINFO_HEADER_SIZE]) -> usize {
     syscall::sysinfo(toyos_abi::handle::HANDLE_INVALID, buf)
 }
 
+/// The machine's physical memory in bytes, as the kernel reports it.
+pub fn memory_total() -> u64 {
+    let mut buf = [0u8; SYSINFO_HEADER_SIZE];
+    let n = sysinfo(&mut buf);
+    assert!(n >= SYSINFO_HEADER_SIZE, "sysinfo returned {n} bytes");
+    syscall::SysinfoHeader::decode(&buf).memory_total
+}
+
 // Powering the machine off used to be a free function here, over a syscall that
 // took no argument. It is [`crate::syscap::SysCap::shutdown`] now: it is an
 // authority over the whole machine, and every one of those is a bit on a
