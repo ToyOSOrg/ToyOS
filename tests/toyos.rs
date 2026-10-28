@@ -2954,7 +2954,12 @@ fn the_log_lands_on_the_boot_stick(test_config: &Path) -> Result<(), String> {
     // power button is pressed, as the metal row's deadline finds it.
     writeln!(qemu.stdin_mut(), "run {}", metal::STICK_LOAD_JOB).map_err(|e| e.to_string())?;
     qemu.flush_stdin();
-    qemu::await_marker(&mut qemu, &mut console, "stick_load: line 1500 ", "the load to write the stick")?;
+    // Any line past the first 1500, not one exact line: logkeeper sheds its
+    // oldest console lines when the console falls behind the load.
+    let from = console.len();
+    qemu::await_guest(&mut qemu, &mut console, "the load to write the stick", |log| {
+        log[from..].lines().any(|l| stick_load_line(l).is_some_and(|n| n >= 1500))
+    })?;
     qemu::QmpShutdown::open(qemu.qmp_socket(), qemu.budget(qemu::GUEST_QUIET)).power_button();
     let by = qemu.budget(Duration::from_secs(60));
     console.push_str(&qemu.await_exit(by)?);
@@ -2979,6 +2984,12 @@ fn the_log_lands_on_the_boot_stick(test_config: &Path) -> Result<(), String> {
     }
     eprintln!("  [log] {} file(s) on the stick, {} bytes of this boot's log", names.len(), log.len());
     usb_stopped_before_the_reset(&log, &console)
+}
+
+fn stick_load_line(line: &str) -> Option<u64> {
+    let (_, rest) = line.split_once("stick_load: line ")?;
+    let digits = rest.find(|c: char| !c.is_ascii_digit()).unwrap_or(rest.len());
+    rest[..digits].parse().ok()
 }
 
 /// usbd ended for the stop with every connected port's reset finished and its
