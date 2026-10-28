@@ -20,7 +20,9 @@ pub const FRAME: usize = crate::frames::FRAME as usize;
 /// The most frames a pipe holds: its capacity, the first of them part-read.
 pub const MOST_FRAMES: usize = PIPE_CAPACITY / FRAME + 1;
 
-const _: () = assert!(PIPE_CAPACITY.is_multiple_of(FRAME) && MAX_WHOLE_PIPE_WRITE <= PIPE_CAPACITY);
+// A whole write fits the one frame an emptied pipe keeps, which is what
+// `PIPE_CAPACITY`'s promise to an empty pipe rests on.
+const _: () = assert!(PIPE_CAPACITY.is_multiple_of(FRAME) && MAX_WHOLE_PIPE_WRITE <= FRAME);
 
 /// One end of a pipe.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -204,39 +206,67 @@ impl<F> Bytes<F> {
         self.frames.push_back(frame);
     }
 
-    /// Append `n` bytes, which [`Self::wants`] no more frames for: `copy` is
+    /// Place the `len` bytes `at` past the last byte held, inside the room a
+    /// write that [`Self::wants`] no more frames for may fill: `copy` is
     /// handed each run of them as its frame, where they go in it, and where
-    /// they start among the `n`.
-    pub fn write(&mut self, n: usize, mut copy: impl FnMut(&mut F, Range<usize>, usize)) {
-        assert_eq!(self.wants(n), 0, "pipe: a write past the frames it was given");
-        let (mut done, mut at) = (0, self.head + self.len);
-        while done < n {
-            let (frame, off) = (at / FRAME, at % FRAME);
-            let run = (FRAME - off).min(n - done);
+    /// they start among the `len`. They are held once [`Self::commit`] counts
+    /// them.
+    pub fn place(&mut self, at: usize, len: usize, mut copy: impl FnMut(&mut F, Range<usize>, usize)) {
+        let end = self.head + self.len + at + len;
+        assert!(end <= self.frames.len() * FRAME, "pipe: bytes placed past the frames it was given");
+        let (mut done, mut pos) = (0, self.head + self.len + at);
+        while done < len {
+            let (frame, off) = (pos / FRAME, pos % FRAME);
+            let run = (FRAME - off).min(len - done);
             copy(&mut self.frames[frame], off..off + run, done);
-            (done, at) = (done + run, at + run);
+            (done, pos) = (done + run, pos + run);
         }
+    }
+
+    /// Count `n` more bytes held: what [`Self::place`] put at the end.
+    pub fn commit(&mut self, n: usize) {
+        assert_eq!(self.wants(n), 0, "pipe: bytes held past the frames it was given");
         self.len += n;
     }
 
-    /// Take up to `want` bytes from the front, handing `copy` each run as
-    /// [`Self::write`] does; a frame it empties becomes a spare. Answers how
-    /// many it took.
-    pub fn read(&mut self, want: usize, mut copy: impl FnMut(&F, Range<usize>, usize)) -> usize {
-        let n = want.min(self.len);
-        let mut done = 0;
-        while done < n {
-            let run = (FRAME - self.head).min(n - done);
-            copy(&self.frames[0], self.head..self.head + run, done);
-            (done, self.head, self.len) = (done + run, self.head + run, self.len - run);
-            if self.head == FRAME {
-                self.frames.rotate_left(1);
-                self.head = 0;
-            }
+    /// Append `n` bytes, which [`Self::wants`] no more frames for, as
+    /// [`Self::place`] hands them out, and count them held.
+    pub fn write(&mut self, n: usize, copy: impl FnMut(&mut F, Range<usize>, usize)) {
+        assert_eq!(self.wants(n), 0, "pipe: a write past the frames it was given");
+        self.place(0, n, copy);
+        self.len += n;
+    }
+
+    /// The `len` held bytes `at` past the oldest, handed to `copy` as
+    /// [`Self::place`] hands them out; [`Self::consume`] lets them go.
+    pub fn peek(&self, at: usize, len: usize, mut copy: impl FnMut(&F, Range<usize>, usize)) {
+        assert!(at + len <= self.len, "pipe: {len} bytes at {at} of {} held", self.len);
+        let (mut done, mut pos) = (0, self.head + at);
+        while done < len {
+            let (frame, off) = (pos / FRAME, pos % FRAME);
+            let run = (FRAME - off).min(len - done);
+            copy(&self.frames[frame], off..off + run, done);
+            (done, pos) = (done + run, pos + run);
         }
+    }
+
+    /// Let the `n` oldest bytes go; a frame it empties becomes a spare.
+    pub fn consume(&mut self, n: usize) {
+        assert!(n <= self.len, "pipe: {n} bytes let go of {} held", self.len);
+        let emptied = (self.head + n) / FRAME;
+        self.frames.rotate_left(emptied);
+        (self.head, self.len) = ((self.head + n) % FRAME, self.len - n);
         if self.len == 0 {
             self.head = 0;
         }
+    }
+
+    /// Take up to `want` bytes from the front, handed to `copy` as
+    /// [`Self::peek`] hands them out, then let them go. Answers how many.
+    pub fn read(&mut self, want: usize, copy: impl FnMut(&F, Range<usize>, usize)) -> usize {
+        let n = want.min(self.len);
+        self.peek(0, n, copy);
+        self.consume(n);
         n
     }
 
@@ -681,6 +711,57 @@ mod tests {
         assert_eq!(pipe.bytes.frames(), 1, "a drained pipe keeps one frame");
     }
 
+    /// A write placed in pieces, in any order and cut anywhere, as a user
+    /// window's pages cut it, and a read peeked the same way, carry the same
+    /// bytes as one copy each would.
+    #[test]
+    fn pieces_placed_and_peeked_in_any_order_are_one_copy() {
+        let mut seed = 0x51ed_270b_u64;
+        let mut random = move |below: usize| {
+            seed ^= seed << 13;
+            seed ^= seed >> 7;
+            seed ^= seed << 17;
+            (seed % below as u64) as usize
+        };
+        let mut pipe = Held::new();
+        let (mut written, mut read) = (0, 0);
+        for _ in 0..300 {
+            let n = random(3 * FRAME + 1).min(pipe.bytes.space());
+            for _ in 0..pipe.bytes.wants(n) {
+                pipe.bytes.add(Frame { id: pipe.taken, bytes: vec![0xEE; FRAME] });
+                pipe.taken += 1;
+            }
+            let src = pattern(written, n);
+            let mut cuts: Vec<usize> = (0..random(6)).map(|_| random(n + 1)).chain([0, n]).collect();
+            cuts.sort_unstable();
+            let mut pieces: Vec<(usize, usize)> = cuts.windows(2).map(|w| (w[0], w[1] - w[0])).collect();
+            pieces.reverse();
+            for (at, len) in pieces {
+                pipe.bytes.place(at, len, |frame, within, from| {
+                    frame.bytes[within.clone()].copy_from_slice(&src[at + from..at + from + within.len()]);
+                });
+            }
+            pipe.bytes.commit(n);
+            written += n;
+
+            let m = random(pipe.bytes.len() + 1);
+            let mut out = vec![0; m];
+            let mut at = 0;
+            while at < m {
+                let len = (1 + random(2 * FRAME)).min(m - at);
+                pipe.bytes.peek(at, len, |frame, within, from| {
+                    out[at + from..at + from + within.len()].copy_from_slice(&frame.bytes[within]);
+                });
+                at += len;
+            }
+            pipe.bytes.consume(m);
+            pipe.returned.extend(pipe.bytes.surplus().map(|frame| frame.id));
+            assert_eq!(out, pattern(read, m), "bytes {read}.. came back wrong");
+            read += m;
+            pipe.accounted();
+        }
+    }
+
     /// A full pipe whose first frame is part-read holds `MOST_FRAMES`.
     #[test]
     fn a_full_pipe_part_read_holds_the_most_frames() {
@@ -714,7 +795,7 @@ mod tests {
     }
 
     /// A pipe that held much and is drained gives back all but one frame,
-    /// and `clear` gives back every one.
+    /// which carries the next whole write, and `clear` gives back every one.
     #[test]
     fn a_drained_pipe_gives_its_frames_back() {
         let mut pipe = Held::new();
@@ -722,8 +803,8 @@ mod tests {
         assert_eq!(pipe.bytes.frames(), PIPE_CAPACITY / FRAME);
         pipe.read(PIPE_CAPACITY);
         assert_eq!((pipe.bytes.frames(), pipe.returned.len()), (1, PIPE_CAPACITY / FRAME - 1));
-        pipe.write(&[1; 3]);
-        assert_eq!(pipe.taken, PIPE_CAPACITY / FRAME, "the kept frame did not carry the next write");
+        pipe.write(&[1; MAX_WHOLE_PIPE_WRITE]);
+        assert_eq!(pipe.taken, PIPE_CAPACITY / FRAME, "the kept frame did not carry the next whole write");
         assert_eq!(pipe.bytes.clear().count(), 1);
         assert_eq!((pipe.bytes.len(), pipe.bytes.frames()), (0, 0));
     }

@@ -219,6 +219,17 @@ impl UserBytes<'_> {
         self.0.read_into(off, dst);
     }
 
+    /// Hand `copy` each piece of the window's `[off, off + len)`, as
+    /// [`read_at`](Self::read_at) reaches them, one chunk of pages pinned at
+    /// a time: a pointer to its bytes, its offset in that range and its
+    /// length. The pointer is valid for that length until `copy` returns,
+    /// with preemption off, and is never made a reference; a page the
+    /// process took away reads as zeros. Panics if out of bounds, as
+    /// [`read_at`](Self::read_at) does.
+    pub fn read_pieces(&self, off: usize, len: usize, mut copy: impl FnMut(*const u8, usize, usize)) {
+        self.0.pieces("UserBytes::read_pieces", off, len, |run, at, n| copy(run.cast_const(), at, n));
+    }
+
     /// The `len`-byte window at `off` inside this one.
     pub fn sub(&self, off: usize, len: usize) -> UserBytes<'_> {
         UserBytes(self.0.sub("UserBytes::sub", off, len), PhantomData)
@@ -240,6 +251,13 @@ impl UserBytesMut<'_> {
     /// Copy `src` into the window at `off`; panics if out of bounds, for the same reason as [`UserBytes::read_at`].
     pub fn write_at(&mut self, off: usize, src: &[u8]) {
         self.0.write_from(off, src);
+    }
+
+    /// [`UserBytes::read_pieces`] for a copy into the window: each pointer
+    /// may be written for its length until `copy` returns, and a page the
+    /// process took away drops what is written to it.
+    pub fn write_pieces(&mut self, off: usize, len: usize, copy: impl FnMut(*mut u8, usize, usize)) {
+        self.0.pieces("UserBytesMut::write_pieces", off, len, copy);
     }
 
     /// Zero `len` bytes of the window at `off`.

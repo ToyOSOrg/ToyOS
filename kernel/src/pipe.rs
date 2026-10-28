@@ -229,12 +229,20 @@ impl PipeRef {
             };
             if available > 0 && limit > 0 {
                 let len = buf.len().min(limit);
-                let n = pipe.held.bytes.read(len, |frame, within, at| {
-                    let n = within.len();
-                    // SAFETY: bytes of a frame this pipe holds, which only its
-                    // lock reaches and nothing writes while it is held.
-                    buf.write_at(at, unsafe { core::slice::from_raw_parts(frame_bytes(frame, within), n) });
+                let n = len.min(available);
+                let bytes = &mut pipe.held.bytes;
+                // One walk of the user window, each pinned piece copied out of
+                // the frames it covers.
+                buf.write_pieces(0, n, |to, at, piece| {
+                    bytes.peek(at, piece, |frame, within, from| {
+                        // SAFETY: `to` is valid for `piece` bytes until this
+                        // walk's callback returns, and `from + within.len()` is
+                        // at most `piece`; the frame is this pipe's alone,
+                        // reached only under its lock, and no process maps it.
+                        unsafe { core::ptr::copy_nonoverlapping(frame_bytes(frame, within.clone()), to.add(from), within.len()) }
+                    });
                 });
+                bytes.consume(n);
                 pipe.held.give_back_surplus();
                 pipe.read += n as u64;
                 let boost = core::mem::take(&mut pipe.rt_boost_pending);
@@ -267,12 +275,18 @@ impl PipeRef {
         if pipe.held.take_frames(n).is_err() {
             return PipeWrite::NoMemory;
         }
-        pipe.held.bytes.write(n, |frame, within, at| {
-            let n = within.len();
-            // SAFETY: bytes of a frame this pipe holds, which only its lock
-            // reaches and nothing reads while it is held.
-            buf.read_at(at, unsafe { core::slice::from_raw_parts_mut(frame_bytes(frame, within), n) });
+        let bytes = &mut pipe.held.bytes;
+        // One walk of the user window, each pinned piece copied into the
+        // frames it covers.
+        buf.read_pieces(0, n, |from, at, piece| {
+            bytes.place(at, piece, |frame, within, to| {
+                // SAFETY: `from` is valid for `piece` bytes until this walk's
+                // callback returns, and `to + within.len()` is at most `piece`;
+                // the frame is this pipe's alone, as above.
+                unsafe { core::ptr::copy_nonoverlapping(from.add(to), frame_bytes(frame, within.clone()), within.len()) }
+            });
         });
+        bytes.commit(n);
         pipe.written += n as u64;
         PipeWrite::Wrote { n, end: pipe.written }
     }

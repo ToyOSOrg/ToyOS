@@ -330,7 +330,8 @@ pub fn alloc_held(job: &Job, count: usize, each: impl FnMut(u64)) -> bool {
 }
 
 /// Give back `frames` [`alloc_table_frame`] or [`alloc_held`] took for
-/// `job`, under one hold of the allocator's lock, which none takes.
+/// `job`, under one hold of the allocator's lock; giving back none takes no
+/// lock.
 ///
 /// # Safety
 /// Nothing reaches any of them any more: no table links it, no CPU can still
