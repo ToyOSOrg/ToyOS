@@ -80,12 +80,15 @@ struct Shape {
     wanted: usize,
 }
 
+/// A ring's shape, shared by the pass and [tcp]'s storage.
+type Shared = Rc<Cell<Shape>>;
+
 /// One of the region's rings, as [tcp]'s storage.
 #[derive(Debug)]
 struct LentRing<const C: u32> {
     memory: Rc<dyn Memory>,
     place: Place<C, WORDS>,
-    shape: Rc<Cell<Shape>>,
+    shape: Shared,
 }
 
 impl<const C: u32> LentRing<C> {
@@ -196,7 +199,7 @@ struct Stream {
     conn: ConnId,
     session: Box<dyn Session>,
     /// The receive ring's and the send ring's shapes, as [tcp]'s storage reads them.
-    shapes: Option<(Rc<Cell<Shape>>, Rc<Cell<Shape>>)>,
+    shapes: Option<(Shared, Shared)>,
     /// What the next pass ends the stream with.
     broken: Option<Violation>,
     /// The session's server end, once the connection is established and its buffers are the
@@ -321,10 +324,8 @@ impl Stream {
             let sent = server.sent(words)?;
             let tx = tx_shape.get();
             let cap = server.send_size_cap();
-            if cap > tx.holds {
-                if !self.session.memory().commit(SEND_RING, usize::try_from(cap).unwrap_or(usize::MAX)) {
-                    return Err(Violation::Size);
-                }
+            if cap > tx.holds && !self.session.memory().commit(SEND_RING, usize::try_from(cap).unwrap_or(usize::MAX)) {
+                return Err(Violation::Size);
             }
             tx_shape.set(Shape { size: server.send_size(), holds: cap.max(tx.holds), ..tx });
             let fresh = sent.checked_sub(queued).ok_or(Violation::TailPastDepth)?;
