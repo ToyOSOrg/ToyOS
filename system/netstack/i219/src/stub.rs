@@ -53,7 +53,7 @@ use std::{format, vec};
 use crate::phy::{advertise, control, control_1000t, custom_mode, oem_bits, reg};
 use crate::regs::{
     self, cause, ctrl, ctrl_ext, extcnf, fwsm, lanphypc_timing, mdic, pbeccsts, phy_ctrl, rah, rctl,
-    rx_desc, status, tctl, tx_desc,
+    rx_desc, rxcsum, status, tarc, tctl, tx_desc, txdctl,
 };
 use crate::{phy, wake, Clock, Delivery, DmaBuffers, Interrupts, Part, Registers};
 
@@ -107,12 +107,16 @@ pub struct Permits {
     /// moment the frame arrived, and the order inside a chunk is the
     /// hardware's.
     pub batched_writeback: bool,
-    /// What a reset leaves in `TCTL`. Off: §10.2.6.1's initial values, as §4.2
-    /// has a software reset re-read the NVM and reset the rest. On: the value
-    /// before the reset, which is what the T14 reads after it; whether its reset
-    /// keeps `TCTL` or this MAC's own reset value is that one, no reading says,
-    /// and the 82574's table does not describe the PCH's MAC.
-    pub reset_leaves_tctl: bool,
+    /// What a reset leaves in the registers the bring-up writes whole or by a
+    /// bit: `TCTL`, `TARC0`, `RXCSUM`, `MRQC` and `RFCTL`, and the receive
+    /// addresses past the first. Off: the datasheet's initial values, as §4.2
+    /// has a software reset re-read the NVM and reset the rest. On: the values
+    /// before the reset, which is what the T14 reads after it for `TCTL`;
+    /// whether its reset keeps `TCTL` or this MAC's own reset value is that
+    /// one, no reading says, and the 82574's table does not describe the PCH's
+    /// MAC. The others read documented values on the T14, which cannot tell a
+    /// reset from a last holder that left the same values.
+    pub reset_leaves_last_holders: bool,
     /// §7.1.8: the head register "includes those descriptors completed but not
     /// yet stored in memory", so `RDH` may be ahead of what a driver can read.
     pub shadow_head: bool,
@@ -244,7 +248,7 @@ impl Default for Permits {
     fn default() -> Self {
         Self {
             batched_writeback: true,
-            reset_leaves_tctl: true,
+            reset_leaves_last_holders: true,
             shadow_head: true,
             null_padding: true,
             spurious_interrupts: true,
@@ -693,6 +697,9 @@ struct Model {
     lcd_reset_at: Option<u64>,
     power_cycles: u32,
     phy_resets: u32,
+    /// Whether the part has powered on once: a reset after that is the one the
+    /// last holder's values may survive.
+    powered: bool,
 }
 
 /// Where one PHY register address lands in [`PhyModel`].
@@ -776,6 +783,7 @@ impl Model {
             lcd_reset_at: None,
             power_cycles: 0,
             phy_resets: 0,
+            powered: false,
         };
         model.power_on();
         model
@@ -784,13 +792,19 @@ impl Model {
     /// What the register file holds out of reset: the fields the documents give
     /// a value, which are the fields a driver has to carry.
     fn power_on(&mut self) {
-        let last_holders_tctl = self.get(regs::TCTL);
+        let kept = [regs::TCTL, regs::TARC0, regs::RXCSUM, regs::MRQC, regs::RFCTL];
+        let last_holders = kept.map(|reg| self.get(reg));
+        let last_holders_addresses: Vec<(u32, u32)> =
+            (1..regs::RECEIVE_ADDRESSES).map(|n| (self.get(regs::ral(n)), self.get(regs::rah(n)))).collect();
         for word in self.file.iter_mut() {
             *word = 0;
         }
         self.set(regs::CTRL, CTRL_RESERVED_SET);
-        let tctl = if self.permits.reset_leaves_tctl {
-            last_holders_tctl
+        // Power-on gives the documented values; only a later reset may leave a
+        // last holder's.
+        let keep = self.permits.reset_leaves_last_holders && core::mem::replace(&mut self.powered, true);
+        let tctl = if keep {
+            last_holders[0]
         } else {
             // §10.2.6.1's initial values: `PSP`, `MULR` and `RRTHRESH` set,
             // every other field it gives a value 0; `UNORTX` and `TXDSCMT` it
@@ -798,6 +812,20 @@ impl Model {
             tctl::PSP | tctl::MULR | tctl::RRTHRESH_INITIAL
         };
         self.set(regs::TCTL, tctl);
+        // §10.2.6.9's `TARC0`: `COUNT` 0x3 and `ENABLE` 1b. §10.2.5.15's
+        // `RXCSUM`: `IPOFLD` and `TUOFLD` 1b. `TXDCTL`, `MRQC` and `RFCTL` are
+        // all 0 out of reset (§10.2.6.11, §10.2.5.25, §10.2.5.16).
+        self.set(regs::TARC0, 0x3 | tarc::ENABLE);
+        self.set(regs::RXCSUM, rxcsum::IPOFLD | rxcsum::TUOFLD);
+        if keep {
+            for (reg, value) in kept.into_iter().zip(last_holders).skip(1) {
+                self.set(reg, value);
+            }
+            for (n, (low, high)) in (1..).zip(last_holders_addresses) {
+                self.set(regs::ral(n), low);
+                self.set(regs::rah(n), high);
+            }
+        }
         if self.permits.extcnf_carries_firmware_fields {
             self.set(regs::EXTCNF_CTRL, EXTCNF_FIRMWARE_FIELDS);
         }
@@ -1330,6 +1358,16 @@ impl Model {
                 if !self.held {
                     self.run();
                 }
+            }
+            regs::TXDCTL => {
+                assert_ne!(
+                    value & txdctl::MUST_BE_SET,
+                    0,
+                    "seed {}: the driver wrote TXDCTL {value:#010x}, and §10.2.6.11 says bit 22 \
+                     \"Must be set to 1b for proper operation\"",
+                    self.seed
+                );
+                self.set(regs::TXDCTL, value);
             }
             _ => self.set(reg, value),
         }

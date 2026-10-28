@@ -48,23 +48,26 @@ why, and the boot still leases.
 - **Every received frame is hostile.** The receive path and every parser above
   it are fuzzed; a malformed frame ends netd at worst, never the kernel.
 - **Error counters** (CRC, missed, no-buffer) are read and asserted zero under load.
-- **No register is left to its reset value.** The T14's reset leaves `TCTL`
-  at the value it held before it, not §10.2.6.1's initial values (pull
-  request #1075, which now writes every `TCTL` field). The bring-up still
-  relies on whatever a reset leaves in registers it never writes: `TARC0`,
-  whose `ENABLE` (bit 10) "should always be set" (82574 §10.2.6.9; set as a
-  bit, since the PCH MAC's other `TARC` bits are unpublished, with the
-  `TXDCTL` change of
-  `issues/the-intel-driver-writes-txdctl-and-tidv-against-the-82574-datasheets-newer-revision.md`);
-  `RXCSUM` (§10.2.5.15), `MRQC` (§10.2.5.25), `RFCTL` (§10.2.5.16), and the
-  receive address entries `RAL`/`RAH` 1 and up. `regs.rs`'s `FRAME_IS_BAD`
-  leaves `IPE` and `TCPE` out because "this driver asks for none" receive
-  checksum offload, which is false even at the documented reset: §10.2.5.15
-  gives `RXCSUM.IPOFLD` and `TUOFLD` an initial value of `1b`. Ignoring the
-  two bits costs nothing; the reason given is wrong. Exit: the bring-up
-  writes or sets each of these to a value it chose, a T14 boot log says
-  their values out of the reset, and the comment's reason is the one that
-  holds.
+- **No register is left to its reset value, but `TIDV` and the receive
+  addresses past the first, deliberately.** Done for these registers (pull
+  request #1078). The T14's reset does not give
+  82574 §10.2.6.1's `TCTL`, which the bring-up now writes whole (pull
+  request #1075). It now also sets `TARC0`'s `ENABLE` (bit 10), which
+  §10.2.6.9 says "should always be set", as one bit, since the PCH MAC's
+  other `TARC` bits are unpublished; and writes `RXCSUM` (§10.2.5.15),
+  `MRQC` (§10.2.5.25) and `RFCTL` (§10.2.5.16) to their reset values but
+  `RXCSUM`'s two checksum offloads. `TIDV` is not written: §10.2.6.10 allows
+  no 0, and it delays only a descriptor with `IDE` set, which the driver
+  sets on none. The receive addresses past the first are left alone, the
+  orchestrator's decision: the driver programs entry 0 alone. On the 82574
+  a master reset clears `AV` in entries 0-14 and "Entry 15 is reserved for
+  manageability firmware usage" (§10.2.5.23); on the I219 "up to eleven"
+  shared addresses "can be allocated to manageability" (612523
+  §7.4.2.3.1), at offsets no PCH document publishes, so their valid bits
+  are read at the 82574's. On the T14, out of the reset ([evidence
+  `800e35c69/`](https://github.com/ToyOSOrg/evidence/tree/a911b388eac3990bde439b95091b41a00335748c/r1/800e35c69)): `TXDCTL` `0x00000000`, `TARC0` `0x00000403`,
+  `RXCSUM` `0x00000300`, `MRQC` and `RFCTL` `0x00000000`, each a value the
+  82574 documents, and no receive address past the first valid.
 
 **Exit**: 1000 full, line-rate TCP within a stated margin of Ubuntu's, link
 survives unplug and replug, the handback is tested, the fuzzers run in CI.
