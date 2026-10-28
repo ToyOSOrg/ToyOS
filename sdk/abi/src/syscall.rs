@@ -1195,6 +1195,11 @@ pub const MAX_PATH: usize = 4096;
 /// libc's `PIPE_BUF` (`sdk/libc/include/limits.h`).
 pub const MAX_WHOLE_PIPE_WRITE: usize = 4096;
 
+/// The most a pipe holds unread: a write past it waits for its reader. The
+/// kernel takes memory for what a pipe holds as it fills and gives it back as
+/// it drains, so this is a bound, not what a pipe costs.
+pub const PIPE_CAPACITY: usize = 2 << 20;
+
 /// Open a file.
 pub fn open(path: &[u8], flags: OpenFlags) -> Result<RawHandle, SyscallError> {
     check(syscall(SYS_OPEN, path.as_ptr() as u64, path.len() as u64, flags.0, 0)).map(|v| RawHandle(v as u32))

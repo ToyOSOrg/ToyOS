@@ -219,18 +219,6 @@ impl UserBytes<'_> {
         self.0.read_into(off, dst);
     }
 
-    /// Copy the window at `off` into one ring run; panics if out of bounds, as
-    /// [`read_at`](Self::read_at) does.
-    pub fn read_run(&self, off: usize, dst: &mut toyos_abi::ring::Dst<'_>) {
-        let into = dst.as_mut_ptr();
-        self.0.pieces("UserBytes::read_run", off, dst.len(), |run, at, n| {
-            // SAFETY: `pieces` bounds `[at, at + n)` inside the ring run, which
-            // `Ring::write` proved is inside its own data region, and `run..+n`
-            // inside one pinned page; the ring is kernel memory no window names.
-            unsafe { core::ptr::copy_nonoverlapping(run, into.add(at), n) }
-        });
-    }
-
     /// The `len`-byte window at `off` inside this one.
     pub fn sub(&self, off: usize, len: usize) -> UserBytes<'_> {
         UserBytes(self.0.sub("UserBytes::sub", off, len), PhantomData)
@@ -252,19 +240,6 @@ impl UserBytesMut<'_> {
     /// Copy `src` into the window at `off`; panics if out of bounds, for the same reason as [`UserBytes::read_at`].
     pub fn write_at(&mut self, off: usize, src: &[u8]) {
         self.0.write_from(off, src);
-    }
-
-    /// Copy one ring run into the window at `off`; panics if out of bounds, as
-    /// [`write_at`](Self::write_at) does.
-    pub fn write_run(&mut self, off: usize, src: &toyos_abi::ring::Src<'_>) {
-        let from = src.as_ptr();
-        self.0.pieces("UserBytesMut::write_run", off, src.len(), |run, at, n| {
-            // SAFETY: `pieces` bounds `[at, at + n)` inside the ring run, which
-            // `Ring::read` proved is inside its own data region, and `run..+n`
-            // inside one pinned page its range let the process write; the ring
-            // is kernel memory no window names.
-            unsafe { core::ptr::copy_nonoverlapping(from.add(at), run, n) }
-        });
     }
 
     /// Zero `len` bytes of the window at `off`.

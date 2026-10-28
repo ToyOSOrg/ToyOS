@@ -67,7 +67,7 @@ impl JobObject {
         AccountInfo {
             floor: pages(u.floor),
             committed: pages(u.committed),
-            kernel: u.heap.saturating_add(pages(u.tables)).saturating_add(u.runs.saturating_mul(PAGE_2M)),
+            kernel: u.heap.saturating_add(pages(u.held)).saturating_add(u.runs.saturating_mul(PAGE_2M)),
             peak: pages(u.peak),
             wanted: pages(u.wanted),
             refusals: u.refusals,
