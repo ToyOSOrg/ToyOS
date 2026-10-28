@@ -430,7 +430,7 @@ mod tests {
         assert_eq!(h, History::from_bits(0x0101), "a 10 µs wake came sooner than both residencies");
         let mut h = fresh;
         plan.learn(&mut h, &T14, 10_000 * US - 1048 * US);
-        assert_eq!(h, fresh, "the early wake before the deadline is the scheduler's own");
+        assert_eq!(h, fresh, "the deadline, pulled in by the exit, is the scheduler's own");
     }
 
     #[test]

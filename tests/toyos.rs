@@ -500,11 +500,9 @@ const MACHINE_TESTS: &[&str] = &[
     // nothing presses the T14's button but a hand.
     "acpi_press_is_one_sci",
     // The osbench groups that use the runner's capability for a row of their
-    // own, on the image they are measured on: which endowments a job gets is
-    // the image's and the supervisor's, which no host build has, and the
-    // benches run osbench only nightly. `osbench_identity` and `osbench_fair`
-    // once exited 1 on every bench because an instrument took the one
-    // capability first.
+    // own, on the image they are measured on, on QEMU x86-64's q35: which
+    // endowments a job gets is the image's and the supervisor's, which no
+    // host build has, and the benches run osbench only nightly.
     "osbench_capability_groups_exit_0",
     // What the kernel reads and writes for the `acpi` claim's holder and what
     // it refuses. A red here is a write the kernel made — to RAM, to the

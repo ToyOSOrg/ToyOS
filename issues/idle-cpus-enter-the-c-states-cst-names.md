@@ -74,19 +74,21 @@ each against its control with the deep states off, all else equal):
   `r4/` in the evidence), and acpiserver ran for the whole of each of those
   clock windows: a measured busy core beside the clock's thread. At the
   starts of net, procs, mem, tail and nvme still at 3789, the roster names
-  nothing beside osbench for more than 0.9 ms of the 5.5 ms window. Mem stays unexplained. Net, procs, tail
-  and nvme reached 4189 under the always-deepest control, so the history
-  holding idle CPUs shallow after the group before is the open hypothesis
-  there; a per-CPU state read inside the window would test it.
+  nothing beside osbench for more than 0.9 ms of the 5.5 ms window. Mem
+  stays unexplained. Net, procs, tail and nvme reached 4189 under the
+  always-deepest control, so the history holding idle CPUs shallow after
+  the group before is the open hypothesis there; a per-CPU state read
+  inside the window would test it.
 - Group starts at 4189 across the six T14 boots with the deep states:
   8 and 8 (r2), 8 and 10 (r3), 10 (B4) and 5 (B5 at `d60d727aa`), counted
   as a maximum above 4100 MHz. Only sched, files, ipc and work reached it
   in all six; B5 lost time, which every earlier boot had. It is a spread
   from boot to boot, not a fixed set of groups.
-- Soundserver's worst IRQ lateness in the testcases boots, with every idle
-  CPU in C1 against with the deep states: T14 457 to 572 µs against 166 to
-  564; AMD 0 to 2661 µs against 0 to 2661, the 2661 µs window in both. The
-  deep states move neither, and no boot underran.
+- Soundserver's worst IRQ lateness, over every window line of the
+  testcases boots: with every idle CPU in C1 (one boot a bench), T14 181 to
+  572 µs and AMD 0 to 2661; with the deep states (two boots a bench), T14 0
+  to 564 µs and AMD 0 to 2661. The deep states move neither, and no window
+  underran.
 
 **#1066's exit is unmet** where this track stands: the T14's `cpu.clock` reaches
 ratio 42 at 5 to 10 of 17 group starts against Linux's 13. Of the groups
