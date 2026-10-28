@@ -157,6 +157,9 @@ pub struct Mounted<IO: BlockIO, Mode = ReadWrite> {
     io: IO,
     sb: Superblock,
     alloc: BitmapAllocator,
+    /// The superblock both copies hold on the medium, made durable by this
+    /// mount's last commit; `None` until one lands, and after one is refused.
+    landed: Option<Superblock>,
     _mode: PhantomData<Mode>,
 }
 
@@ -557,7 +560,7 @@ impl<IO: BlockIO> Formatted<IO> {
 
         sb.write(&io)?;
 
-        Ok(Self(Mounted { io, sb, alloc, _mode: PhantomData }))
+        Ok(Self(Mounted { io, sb, alloc, landed: None, _mode: PhantomData }))
     }
 
     /// Name this filesystem, so whoever serves it can say which one it is.
@@ -588,7 +591,7 @@ impl<IO: BlockIO> Formatted<IO> {
     /// Mount this formatted filesystem for read-only access.
     pub fn mount_readonly(self) -> Mounted<IO, ReadOnly> {
         let Mounted { io, sb, alloc, .. } = self.0;
-        Mounted { io, sb, alloc, _mode: PhantomData }
+        Mounted { io, sb, alloc, landed: None, _mode: PhantomData }
     }
 
     /// Consume and return the underlying IO (for extracting the image bytes).
@@ -627,7 +630,7 @@ impl<IO: BlockIO, Mode> Mounted<IO, Mode> {
     fn read_superblock(io: IO) -> Result<Self, FsError> {
         let sb = Superblock::read(&io)?;
         let alloc = BitmapAllocator::open(&sb);
-        Ok(Mounted { io, sb, alloc, _mode: PhantomData })
+        Ok(Mounted { io, sb, alloc, landed: None, _mode: PhantomData })
     }
 
     /// The device this filesystem was opened over.
@@ -759,7 +762,7 @@ impl<IO: BlockIO, Mode> Mounted<IO, Mode> {
     pub fn into_formatted(self) -> Formatted<IO> {
         let Self { io, sb, mut alloc, .. } = self;
         alloc.shadow = false;
-        Formatted(Mounted { io, sb, alloc, _mode: PhantomData })
+        Formatted(Mounted { io, sb, alloc, landed: None, _mode: PhantomData })
     }
 
     /// Return the extents and file size for a file.
@@ -923,18 +926,30 @@ impl<IO: BlockIO> Mounted<IO, ReadWrite> {
         })
     }
 
-    /// Commit the tree as it stands: see this block's header.
+    /// Commit the tree as it stands: see this block's header. A commit whose
+    /// superblock is the one the medium already holds writes none, since no
+    /// node its root reaches has been written over since it landed; the
+    /// device is still flushed, for what is written in place. The allocation
+    /// cursor alone is no change: it is only where a scan begins, and a
+    /// commit's own frees move it after its superblock lands.
     pub fn sync(&mut self) -> Result<(), FsError> {
+        let landed = self.landed.take();
         self.io.flush()?;
         // What the volume holds free once this commit's own frees are made.
         self.sb.free_blocks = self.alloc.free_blocks + self.alloc.pending();
         self.sb.next_alloc = self.alloc.next_alloc;
         self.sb.set_clean(true);
-        // From the first superblock write on, this commit may be what a mount
-        // finds, even where the write is refused.
-        self.alloc.seal();
-        self.sb.write(&self.io)?;
-        self.io.flush()?;
+        let unchanged = landed.as_ref().is_some_and(|l| Superblock { next_alloc: l.next_alloc, ..self.sb.clone() } == *l);
+        if unchanged {
+            self.landed = landed;
+        } else {
+            // From the first superblock write on, this commit may be what a
+            // mount finds, even where the write is refused.
+            self.alloc.seal();
+            self.sb.write(&self.io)?;
+            self.io.flush()?;
+            self.landed = Some(self.sb.clone());
+        }
         self.alloc.committed(&self.io)
     }
 
@@ -1783,5 +1798,84 @@ mod tests {
             let dir = format!("d{i}");
             assert!(fs.is_dir(&dir).expect("a walk of a sound tree"), "{dir}");
         }
+    }
+
+    /// A device that records the blocks it is asked to write and counts its
+    /// syncs, and refuses the sync `refuse` numbers.
+    struct Counted {
+        io: VecBlockIO,
+        written: core::cell::RefCell<Vec<u64>>,
+        syncs: core::cell::Cell<u32>,
+        refuse: core::cell::Cell<Option<u32>>,
+    }
+
+    impl Counted {
+        fn counts(&self) -> (usize, u32) {
+            (self.written.borrow().len(), self.syncs.get())
+        }
+    }
+
+    impl BlockIO for Counted {
+        fn read_block(&self, block: BlockNum, buf: &mut BlockBuf) -> Result<(), DeviceError> {
+            self.io.read_block(block, buf)
+        }
+        fn write_block(&self, block: BlockNum, buf: &BlockBuf) -> Result<(), DeviceError> {
+            self.written.borrow_mut().push(block.raw());
+            self.io.write_block(block, buf)
+        }
+        fn block_count(&self) -> u64 {
+            self.io.block_count()
+        }
+        fn sync(&self) -> Result<(), DeviceError> {
+            let n = self.syncs.get();
+            self.syncs.set(n + 1);
+            if self.refuse.get() == Some(n) { Err(DeviceError::FAILED) } else { Ok(()) }
+        }
+    }
+
+    fn counted(blocks: u64) -> Mounted<Counted, ReadWrite> {
+        let io = Counted {
+            io: VecBlockIO::from_vec(image(blocks)),
+            written: core::cell::RefCell::default(),
+            syncs: core::cell::Cell::default(),
+            refuse: core::cell::Cell::default(),
+        };
+        Mounted::<_, ReadWrite>::open(io).expect("mount")
+    }
+
+    /// A sync with nothing changed since the last commit writes no block and
+    /// asks the device for one sync, for whatever was written in place; a
+    /// change after it is committed again.
+    #[test]
+    fn a_sync_with_nothing_uncommitted_writes_nothing() {
+        let mut fs = counted(128);
+        fs.create("a", b"one", 2).expect("create");
+        fs.sync().expect("the commit");
+        let (writes, syncs) = fs.io().counts();
+        fs.sync().expect("a clean sync");
+        assert_eq!(fs.io().counts(), (writes, syncs + 1));
+
+        fs.create("b", b"two", 3).expect("create");
+        fs.sync().expect("the next commit");
+        let (after, _) = fs.io().counts();
+        assert!(after > writes + 2, "a change and its commit wrote {} blocks", after - writes);
+        let raw = mount_rw(fs.io.io.into_vec()).expect("remount");
+        assert_eq!(raw.read_file("b").expect("read"), b"two");
+    }
+
+    /// A commit whose superblock was written and whose sync was refused is
+    /// made again by the next, though nothing changed between them.
+    #[test]
+    fn a_sync_after_a_refused_one_commits_again() {
+        let mut fs = counted(128);
+        fs.create("a", b"one", 2).expect("create");
+        fs.sync().expect("the commit");
+        fs.create("b", b"two", 3).expect("create");
+        fs.io().refuse.set(Some(fs.io().syncs.get() + 1));
+        assert!(fs.sync().is_err(), "the device refused the sync after the superblock");
+        let (writes, _) = fs.io().counts();
+        fs.sync().expect("the commit again");
+        let again = fs.io().written.borrow()[writes..].to_vec();
+        assert!(again.contains(&0) && again.contains(&127), "the retry wrote {again:?}, no superblock");
     }
 }

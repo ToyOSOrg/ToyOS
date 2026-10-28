@@ -98,7 +98,7 @@ impl fmt::Display for FsUuid {
 }
 
 /// On-disk superblock layout. Stored at block 0 and backed up at the last block.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Superblock {
     pub block_count: u64,
     pub root_node: BlockNum,
