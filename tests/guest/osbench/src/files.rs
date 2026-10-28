@@ -8,10 +8,6 @@
 //! kernel serves through syscalls. `disk` is each system's
 //! [`crate::sys::persistent_dir`]: Linux's VFS and page cache over the
 //! runner's home, and ToyOS's DATA file server, through IPC per request.
-//!
-//! Under a directory a file server serves, ToyOS also runs `direct.*`: the
-//! same requests through the server's client alone, without std's
-//! descriptor table and path routing (`sys::direct`).
 
 use std::fs::{self, File, OpenOptions};
 use std::io::{Read, Seek, SeekFrom, Write};
@@ -182,14 +178,18 @@ pub fn suite(target: &Target) {
             let fields = with(&[("file_bytes", (16 * MIB).to_string())]);
             parts(&name, &fields, &mut f, &mut buf, pages);
             #[cfg(target_os = "toyos")]
-            if let Some(mut dir) = crate::sys::direct::connect(&target.dir) {
-                let under = |p: &Path| p.strip_prefix(&target.dir).ok().and_then(Path::to_str).map(str::to_string);
-                match (under(&small), under(&big)) {
-                    (Some(s), Some(b)) => {
-                        crate::sys::direct::rows(&mut dir, &name, &fields, &s, &b, |i| page_at(i, pages));
+            match crate::sys::direct::connect(&target.dir) {
+                Ok(Some(mut dir)) => {
+                    let under = |p: &Path| p.strip_prefix(&target.dir).ok().and_then(Path::to_str).map(str::to_string);
+                    match (under(&small), under(&big)) {
+                        (Some(s), Some(b)) => {
+                            crate::sys::direct::rows(&mut dir, &name, &with(&[]), &fields, &s, &b, |i| page_at(i, pages));
+                        }
+                        _ => refuse(&name("direct"), "the scratch files are not under the served directory"),
                     }
-                    _ => refuse(&name("direct"), "the scratch files are not under the served directory"),
                 }
+                Ok(None) => {}
+                Err(why) => refuse(&name("direct"), why),
             }
         }
         Err(e) => refuse(&name("read_4k_at"), e),

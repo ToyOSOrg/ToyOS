@@ -183,4 +183,6 @@ What makes the disk rows one comparison, and what stays each system's own:
 The table also holds rows only one system can measure. They show the
 system's figure beside the other's reason: `unsupported` and `unmeasured`
 rows, Linux's `.slack1ns` variants and `fair.session`, and ToyOS's
-`tail.diag`. They are records, not verdicts.
+`tail.diag` and `fs.*.direct.*`, the file server's client without std's
+layer above it, which Linux has no counterpart to. They are records, not
+verdicts.
