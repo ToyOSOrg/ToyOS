@@ -214,7 +214,6 @@ fn rung(poller: &Poller, bell: RawHandle, nanos: u64) -> bool {
 /// [`Drained`] that [`Drained::accept`] and [`Drained::receive`] send their request
 /// with. Spend it after every step that can fail, so a call refused before its request leaves
 /// the ring in the bell. A raw [`ipc`] send of [`ACCEPT`] or [`RECEIVE`] bypasses it.
-#[must_use = "an accept or a receive is sent with the read it spends"]
 pub(super) struct Drain<'a>(&'a dyn Fn());
 
 impl Drain<'_> {
@@ -225,6 +224,7 @@ impl Drain<'_> {
 }
 
 /// The bell read for one request, which sending the request spends.
+#[must_use = "the bell was read for a request: send it"]
 pub(super) struct Drained(());
 
 impl Drained {
