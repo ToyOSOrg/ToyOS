@@ -1,5 +1,5 @@
 ---
-status: open
+status: assigned
 kind: finding
 opened: 2026-10-12
 ---
@@ -22,6 +22,12 @@ the AMD bench, base to head, one boot each, read from the second judgement's
 
 Owned by stage S3 of the scheduler design (#872), whose 1:1 pair rule decides
 where a pair's wakes go.
+
+Branch `sched-place` decides it: the opening drain of a pass holds a wake
+found behind the running task until the disposition, so a poster that parks
+or exits leaves it to run here, and one that yields or keeps the CPU still
+forwards it (`CpuSched::place`; the simulator's `turn_taking_pair`). The
+metal price is what remains.
 
 **Exit**: S3 decides this case, with a simulator scenario of a wake whose waker
 parks next and a metal row that prices the forward against the local switch.
