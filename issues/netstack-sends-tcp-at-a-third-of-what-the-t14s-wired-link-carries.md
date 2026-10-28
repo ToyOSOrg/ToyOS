@@ -135,29 +135,35 @@ held at about 42,000 frames a second, 23.8 µs a frame against 12.3 µs of
 wire.
 
 **Measured 2026-10-28** ([evidence `f9563de4f/`](https://github.com/ToyOSOrg/evidence/tree/d6fbb4b149683056857dd8554c2c77cfbdd465ef/r2/f9563de4f)):
-keeping `TCTL`'s `MULR` and `RRTHRESH` as the part sets them, instead of the
-bring-up's whole write clearing both, raises the upload. One session
-alternated #1075 with main's whole write, four of each, with Linux at both
-ends (111 and 110 MB/s):
+`TCTL`'s `MULR` and `RRTHRESH` set, against the bring-up's whole write
+clearing both, raises the upload. One session alternated the two, four of
+each, with Linux at both ends (111 and 110 MB/s):
 
-- The bring-up left `TCTL` at `0x3003f0fa` with #1075 and `0x0003f0fa`
-  without, so the two fields were kept.
-- Upload p50 87, 86, 82 and 85 MB/s with #1075, against 58, 56, 55 and 56
-  without. #1075 was faster in every pair; over the eight runs the exact rank
+- The bring-up left `TCTL` at `0x3003f0fa` with both fields and `0x0003f0fa`
+  without.
+- Upload p50 87, 86, 82 and 85 MB/s with them, against 58, 56, 55 and 56
+  without: faster in every pair, and over the eight runs the exact rank
   test's one-sided p is 1/70.
-- The wire carried 870,000–912,000 frames a row with #1075, against
+- The wire carried 870,000–912,000 frames a row with them, against
   618,000–626,000 without. No completion was unreported at any full answer.
 - The ring still sat full 8.3–8.7 s of each 15 s row (10.3–10.6 s without),
   and cwnd held the sender 4.1–4.5 s (2.3–2.6 s without).
 
 **Derived from the datasheet, not separated by the measurement**: which of
-the two fields the gain is. §10.2.6.1 has `MULR` set the number of read
-requests for transmit data: "When set to 0b, the 82574 submits only one
-request at a time, When set to 1b, the 82574 might submit up to four
-concurrent requests". It also says `MULR` "is loaded from the NVM word
-0x24/0x14", and gives `RRTHRESH` a reset value of `01b`. The `TCTL` value
-before the reset (`0x3003f0f8`) is what firmware's driver left; #1075's boot
-log also says the value out of the reset, which is where an NVM load shows.
+the two fields the gain is. 82574 §10.2.6.1 has `MULR` set the number of
+read requests for transmit data: "When set to 0b, the 82574 submits only
+one request at a time, When set to 1b, the 82574 might submit up to four
+concurrent requests". It gives `MULR` an initial value of `1b` and
+`RRTHRESH` `01b`.
+
+**Refuted for the T14's reset: that the part reloads these from its NVM.**
+§10.2.6.1 says `MULR` "is loaded from the NVM word 0x24/0x14", and §4.2 that
+a software reset "re-reads the per-function NVM fields". On the T14,
+`TCTL` read `0x3003f0f8` both before and after the bring-up's reset
+([evidence `19fbf239c/`](https://github.com/ToyOSOrg/evidence/tree/53b5659297ad1617d886a0ccfbcfcb9f99556851/r4/19fbf239c)): the previous holder's value, `CT`
+and `COLD` included. So the two fields were whatever ran before ToyOS. The
+bring-up now writes every `TCTL` field itself, `MULR` and `RRTHRESH` at
+§10.2.6.1's initial values.
 
 What is left, about 1.3 times short of Linux with the ring still full most
 of a row, is the next lead: the transmit descriptor control

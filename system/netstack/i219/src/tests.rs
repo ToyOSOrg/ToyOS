@@ -102,9 +102,9 @@ fn bring_up_programs_what_the_initialization_sections_name() {
     );
     assert_eq!(
         nic.peek(regs::TCTL),
-        tctl::EN | tctl::PSP | tctl::CT | tctl::COLD_FULL_DUPLEX | tctl::MULR | tctl::RRTHRESH_RESET,
+        tctl::EN | tctl::PSP | tctl::CT | tctl::COLD_FULL_DUPLEX | tctl::MULR | tctl::RRTHRESH_INITIAL,
         "{}",
-        nic.because("TCTL is not §4.6.6's fields over what the part loaded for itself")
+        nic.because("TCTL is not §4.6.6's fields with MULR and RRTHRESH at §10.2.6.1's initial values")
     );
     assert_eq!(nic.peek(regs::TIPG), regs::TIPG_DEFAULT);
     assert_eq!(nic.peek(regs::TXDCTL), regs::txdctl::SUGGESTED);
@@ -3393,29 +3393,23 @@ fn a_full_ring_counts_how_long_it_waited_for_room() {
     assert_eq!(driver.counters().tx_full_nanos, waited, "room with no wait added time");
 }
 
-/// §10.2.6.1: `MULR` "is loaded from the NVM word 0x24/0x14" and `RRTHRESH`
-/// comes out of reset at `01b`; the bring-up sets §4.6.6's fields and leaves
-/// those as the part loaded them, whichever way its NVM has `MULR`.
+/// The bring-up leaves one `TCTL` whatever the last holder wrote: a reset that
+/// leaves the register as it was, as the T14's does, and one that resets it to
+/// §10.2.6.1's initial values, under a holder that left `MULR` set, one that
+/// left it clear, and none. Each left its transmitter stopped, as netstack's
+/// quiesce does before the bring-up.
 #[test]
-fn bring_up_keeps_what_the_part_loaded_into_tctl() {
-    for nvm_sets_mulr in [true, false] {
-        let nic = Nic::with(7, Part::I219, Permits { nvm_sets_mulr, ..Permits::default() });
-        let driver = open(&nic);
-        let tctl = nic.peek(regs::TCTL);
-        assert_eq!(driver.brought_up().transmit_control, tctl, "the bring-up reported another TCTL");
-        let mulr = if nvm_sets_mulr { tctl::MULR } else { 0 };
-        assert_eq!(
-            driver.brought_up().reset_transmit_control,
-            tctl::PSP | tctl::RRTHRESH_RESET | mulr,
-            "the bring-up reported another TCTL out of reset"
-        );
-        assert_eq!(tctl & tctl::MULR != 0, nvm_sets_mulr, "{}", nic.because("MULR is not the NVM's"));
-        assert_eq!(tctl & tctl::RRTHRESH, tctl::RRTHRESH_RESET, "{}", nic.because("RRTHRESH is not its reset value"));
-        assert_eq!(
-            tctl & !tctl::LOADED,
-            tctl::EN | tctl::PSP | tctl::CT | tctl::COLD_FULL_DUPLEX,
-            "{}",
-            nic.because("the fields the driver decides are not §4.6.6's")
-        );
+fn bring_up_sets_tctl_whatever_the_last_holder_left() {
+    let wanted = tctl::EN | tctl::PSP | tctl::CT | tctl::COLD_FULL_DUPLEX | tctl::MULR | tctl::RRTHRESH_INITIAL;
+    for reset_leaves_tctl in [true, false] {
+        for inherited in [0x3003_f0f8, 0x0003_f0f8, 0] {
+            let nic = Nic::with(7, Part::I219, Permits { reset_leaves_tctl, ..Permits::default() });
+            nic.inherit(regs::TCTL, inherited);
+            let driver = open(&nic);
+            assert_eq!(nic.peek(regs::TCTL), wanted, "{}", nic.because("the bring-up left a TCTL of the last holder's"));
+            assert_eq!(driver.brought_up().transmit_control, wanted);
+            let out_of_reset = if reset_leaves_tctl { inherited } else { tctl::PSP | tctl::MULR | tctl::RRTHRESH_INITIAL };
+            assert_eq!(driver.brought_up().reset_transmit_control, out_of_reset, "the bring-up reported another TCTL out of reset");
+        }
     }
 }

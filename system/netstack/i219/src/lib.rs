@@ -601,7 +601,12 @@ pub const DELIVERY_DEADLINE_NANOS: u64 = 100_000_000;
 
 /// The transmit control [`I219::open`] writes: §4.6.6's suggested values with
 /// the transmitter enabled.
-const TX_CONTROL: u32 = tctl::EN | tctl::PSP | tctl::CT | tctl::COLD_FULL_DUPLEX;
+/// Every `TCTL` field, so what the bring-up leaves owes nothing to a previous
+/// holder: §4.6.6's `EN`, `PSP`, `CT` and `COLD`, and `MULR` and `RRTHRESH` at
+/// §10.2.6.1's initial values, which §4.6.6's "all other fields 0b" would clear.
+/// The T14's reset leaves `TCTL` as the last holder wrote it.
+const TX_CONTROL: u32 =
+    tctl::EN | tctl::PSP | tctl::CT | tctl::COLD_FULL_DUPLEX | tctl::MULR | tctl::RRTHRESH_INITIAL;
 
 /// What [`reset`] leaves its caller.
 struct Reset {
@@ -1143,12 +1148,9 @@ impl<R: Registers, C: Clock, D: DmaBuffers, I: Interrupts> I219<R, C, D, I> {
         // transmitter.
         nic.regs.write32(regs::TXDCTL, txdctl::SUGGESTED);
         nic.regs.write32(regs::TIPG, regs::TIPG_DEFAULT);
-        // §4.6.6's fields over the part's own (`tctl::LOADED`).
-        let out_of_reset = nic.regs.read32(regs::TCTL);
-        nic.brought_up.reset_transmit_control = out_of_reset;
-        let tx = (out_of_reset & tctl::LOADED) | TX_CONTROL;
-        nic.regs.write32(regs::TCTL, tx);
-        nic.accepted(regs::TCTL, tx)?;
+        nic.brought_up.reset_transmit_control = nic.regs.read32(regs::TCTL);
+        nic.regs.write32(regs::TCTL, TX_CONTROL);
+        nic.accepted(regs::TCTL, TX_CONTROL)?;
         nic.brought_up.transmit_control = nic.regs.read32(regs::TCTL);
 
         // §4.6.5.1: the receiver last, "only after all other setup is

@@ -107,9 +107,11 @@ pub struct Permits {
     /// moment the frame arrived, and the order inside a chunk is the
     /// hardware's.
     pub batched_writeback: bool,
-    /// §10.2.6.1: `TCTL.MULR` "is loaded from the NVM word 0x24/0x14", so a
-    /// part's NVM may set it or clear it. On: set, as the T14's is.
-    pub nvm_sets_mulr: bool,
+    /// What a reset leaves in `TCTL`. Off: §10.2.6.1's initial values, as §4.2
+    /// has a software reset re-read the NVM and reset the rest. On: whatever the
+    /// last holder wrote, which is what the T14's part does: its `TCTL` reads
+    /// the same before the bring-up's reset as after it.
+    pub reset_leaves_tctl: bool,
     /// §7.1.8: the head register "includes those descriptors completed but not
     /// yet stored in memory", so `RDH` may be ahead of what a driver can read.
     pub shadow_head: bool,
@@ -241,7 +243,7 @@ impl Default for Permits {
     fn default() -> Self {
         Self {
             batched_writeback: true,
-            nvm_sets_mulr: true,
+            reset_leaves_tctl: true,
             shadow_head: true,
             null_padding: true,
             spurious_interrupts: true,
@@ -781,15 +783,20 @@ impl Model {
     /// What the register file holds out of reset: the fields the documents give
     /// a value, which are the fields a driver has to carry.
     fn power_on(&mut self) {
+        let last_holders_tctl = self.get(regs::TCTL);
         for word in self.file.iter_mut() {
             *word = 0;
         }
         self.set(regs::CTRL, CTRL_RESERVED_SET);
-        // §10.2.6.1's initial values: `PSP` and `RRTHRESH` set, `MULR` as the
-        // NVM loads it, and every other field it gives a value 0; `UNORTX` and
-        // `TXDSCMT` it gives none, and they are 0 here.
-        let mulr = if self.permits.nvm_sets_mulr { tctl::MULR } else { 0 };
-        self.set(regs::TCTL, tctl::PSP | tctl::RRTHRESH_RESET | mulr);
+        // §10.2.6.1's initial values: `PSP`, `MULR` and `RRTHRESH` set, every
+        // other field it gives a value 0; `UNORTX` and `TXDSCMT` it gives none,
+        // and they are 0 here.
+        let tctl = if self.permits.reset_leaves_tctl {
+            last_holders_tctl
+        } else {
+            tctl::PSP | tctl::MULR | tctl::RRTHRESH_INITIAL
+        };
+        self.set(regs::TCTL, tctl);
         if self.permits.extcnf_carries_firmware_fields {
             self.set(regs::EXTCNF_CTRL, EXTCNF_FIRMWARE_FIELDS);
         }
@@ -2553,6 +2560,12 @@ impl Nic {
     /// [`Self::run`] says so.
     pub fn hold(&self) {
         self.0.borrow_mut().held = true;
+    }
+
+    /// One register written as a previous holder left it, before this driver
+    /// takes the function.
+    pub fn inherit(&self, reg: usize, value: u32) {
+        self.0.borrow_mut().set(reg, value);
     }
 
     /// One register, read without any of its side effects — for an assertion
