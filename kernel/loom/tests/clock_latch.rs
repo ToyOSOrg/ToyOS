@@ -14,9 +14,8 @@ use loom::thread;
 
 const WORDS: usize = 3;
 
-/// Interleavings past this many preemptions add nothing a two-party protocol
-/// of this length can do, and without a bound the two publications' twelve
-/// stores do not finish exploring.
+/// A bound so the two publications' twelve stores finish exploring; under it
+/// the `clock-latch-fence-off` control still reaches a torn read.
 const PREEMPTIONS: usize = 3;
 
 fn model(f: impl Fn() + Sync + Send + 'static) {
