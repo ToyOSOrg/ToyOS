@@ -58,9 +58,9 @@ transmit opportunity, so a pass's ACKs grew the window as one. #1069 makes
 each ACK count (RFC 5681 §3.1), and the window grow only after an
 opportunity cwnd ended, not one the card's room ended (RFC 9438 §5.8).
 That is a correction the RFCs require, held by [tcp]'s host tests
-`s_cc_016` and `s_cc_017`. What it does to the T14's upload rate is not yet
-measured: the readings below come from different sessions, and on this
-path that credits nothing (the finding after them).
+`s_cc_016` and `s_cc_017`. Its effect on the T14's upload is read by one
+session that alternated it with a control, below; the other readings come
+from separate sessions and credit it nothing.
 
 **Read at `afe0c7dac`, 2026-10-28**, a head that also grew the window while
 the card held the sender, so neither its rate nor its stop samples are the
@@ -101,20 +101,31 @@ against Linux's 112–113:
 
 So the first hypothesis did not hold: with the corrected slow start the
 deeper ring still reads no better. The second is not settled by this
-session either, which has no unfixed control. What remains open
+session, which has no unfixed control. What remains open
 is how fast the card drains what it is given: even at 256 descriptors it
 is full about 5,000 times a second. That lead is the I219's transmit
 configuration (interrupt moderation, descriptor write-back, how often
 netstack learns of completions) and is taken up apart from this record's
 pull request.
 
-**Unexplained: ToyOS's rate moves between sessions on the same code.** Heads
-without the per-ACK fix read 41, 48 and 31 MB/s (`d99ef5a35`, 2026-10-24),
-62–65 (`aeba59fb0`, 2026-10-24), 36–44 (`af239c8bb`, 2026-10-27, 256
-descriptors) and 31–36 (`132d5ef75`, 2026-10-28), while Linux read 110–114
-in every session. So a ToyOS reading is compared only with one interleaved
-in its own session: the per-ACK fix's effect is the reading of a session
-that alternates it with a control.
+**The per-ACK fix, measured: 2026-10-29, interleaved with its control**
+([evidence `3599f5bb3/`](https://github.com/ToyOSOrg/evidence/tree/d03d7394ed2d34deb1f0c9244bd85f78d7551537/r5/3599f5bb3)). A was `3599f5bb3` with only the per-ACK
+fix reverted, every counter kept; B was `3599f5bb3`; four of each, A B A B,
+with Linux at the session's start and end (109 and 110 MB/s).
+
+- B read 59, 56, 57 and 57 MB/s; A read 52, 31, 31 and 40. B was faster in
+  every pair, and over the eight runs the exact rank test's one-sided p is
+  1/70.
+- cwnd held each 15 s row 2.2–2.5 s under B, 5.5–8.9 s under A, at a mean
+  cwnd of 335–354 KB against 266–301 KB.
+- Each of A's rows ranged from 30–32 MB/s to 35–60 between rounds; B's from
+  55–57 to 64–66.
+
+So in one session the fix raises the rate and removes most of the swing
+between rounds and between runs. Heads without it read 31–65 MB/s across
+earlier sessions while Linux held 110–114. The fix is consistent with most
+of that, but not with `aeba59fb0`'s 62–65, above B's reading here. That
+part of the spread across sessions stays unexplained.
 
 The transmit setup's own lead stays open in
 `issues/the-intel-driver-writes-txdctl-and-tidv-against-the-82574-datasheets-newer-revision.md`.
