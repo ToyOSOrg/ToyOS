@@ -397,10 +397,20 @@ pub fn net_counters() -> Result<Vec<(String, u64)>, String> {
         .collect())
 }
 
-/// What a connection says of itself: nothing on ToyOS, whose stack's counters
-/// ([`net_counters`]) say it for every connection.
-pub fn stream_info(_stream: &std::net::TcpStream) -> Result<Vec<(&'static str, u64)>, String> {
-    Ok(Vec::new())
+/// What a row's own connections say of themselves: nothing on ToyOS, whose
+/// stack's counters ([`net_counters`]) say it for every connection.
+pub struct StreamLog;
+
+impl StreamLog {
+    pub fn new() -> Self {
+        Self
+    }
+
+    pub fn look(&mut self, _stream: &std::net::TcpStream) {}
+
+    pub fn fields(&self) -> Vec<(String, String)> {
+        Vec::new()
+    }
 }
 
 /// What carries a connection on ToyOS: netstack drives one card, Ethernet.

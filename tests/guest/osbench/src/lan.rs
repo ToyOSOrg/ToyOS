@@ -74,21 +74,22 @@ fn measure(peer: &Peer, [connect, rtt, upload, download]: &[String; 4]) {
         Err(e) => refuse(rtt, format!("the echo would not open: {e}")),
     }
     type Transfer = fn(&Peer, Duration, &mut dyn FnMut(&std::net::TcpStream)) -> std::io::Result<osbench_lan::Transfer>;
-    for (bench, run) in [(upload, Peer::upload as Transfer), (download, Peer::download)] {
+    let download_of: Transfer = |peer, span, _| peer.download(span);
+    for (bench, run) in [(upload, Peer::upload as Transfer), (download, download_of)] {
         let mut stack = Vec::new();
         let mut rounds = || -> Result<Vec<u64>, String> {
             run(peer, SPAN, &mut |_| {}).map_err(|e| e.to_string())?;
             crate::clock::settle();
             let before = crate::sys::net_counters();
-            let mut seen = Vec::new();
+            let mut log = crate::sys::StreamLog::new();
             let mbps = (0..ROUNDS)
                 .map(|_| {
-                    let moved = run(peer, SPAN, &mut |stream| seen.push(crate::sys::stream_info(stream))).map_err(|e| e.to_string())?;
+                    let moved = run(peer, SPAN, &mut |stream| log.look(stream)).map_err(|e| e.to_string())?;
                     Ok(moved.bytes * 1000 / moved.ns)
                 })
                 .collect::<Result<Vec<u64>, String>>()?;
             stack = stack_moved(before, crate::sys::net_counters());
-            stack.extend(streams_seen(&seen));
+            stack.extend(log.fields());
             Ok(mbps)
         };
         match rounds() {
@@ -117,24 +118,4 @@ fn stack_moved(before: Result<Vec<(String, u64)>, String>, after: Result<Vec<(St
             .collect(),
         (Err(why), _) | (_, Err(why)) => vec![("stack_unread".to_string(), why)],
     }
-}
-
-/// What the rounds' own connections said of themselves, each as a field named `stream_<name>`:
-/// the sum over the rounds, or a reading that failed as one field saying why.
-fn streams_seen(seen: &[Result<Vec<(&'static str, u64)>, String>]) -> Vec<(String, String)> {
-    let mut sums: Vec<(&'static str, u64)> = Vec::new();
-    for info in seen {
-        match info {
-            Ok(fields) => {
-                for &(name, value) in fields {
-                    match sums.iter_mut().find(|(n, _)| *n == name) {
-                        Some((_, sum)) => *sum = sum.saturating_add(value),
-                        None => sums.push((name, value)),
-                    }
-                }
-            }
-            Err(why) => return vec![("stream_unread".to_string(), why.clone())],
-        }
-    }
-    sums.into_iter().map(|(name, sum)| (format!("stream_{name}"), sum.to_string())).collect()
 }

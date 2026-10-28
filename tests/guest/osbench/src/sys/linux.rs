@@ -547,11 +547,60 @@ pub fn net_counters() -> Result<Vec<(String, u64)>, String> {
     Ok(READ.iter().filter_map(|(name, key)| table.get(&format!("{name}.{key}")).map(|v| (format!("{name}.{key}"), *v))).collect())
 }
 
-/// What a connection says of itself in `TCP_INFO`: RFC 4898's sender limits as Linux keeps them
-/// (`tcpi_busy_time`, `tcpi_rwnd_limited`, `tcpi_sndbuf_limited`, microseconds), and its
-/// congestion window in segments and smoothed round trip in microseconds as of now.
-pub fn stream_info(stream: &std::net::TcpStream) -> Result<Vec<(&'static str, u64)>, String> {
+/// How a reading adds up over a row's rounds: a time its total, a state its mean.
+#[derive(Clone, Copy)]
+enum Over {
+    Total,
+    Mean,
+}
+
+type Reading = Vec<(&'static str, u64, Over)>;
+
+/// What a row's own connections say of themselves in `TCP_INFO`, each read just before its
+/// end: RFC 4898's sender limits as Linux keeps them (`tcpi_busy_time`, `tcpi_rwnd_limited`,
+/// `tcpi_sndbuf_limited`, microseconds), its congestion window in segments and its smoothed round
+/// trip in microseconds.
+pub struct StreamLog(Vec<Result<Reading, String>>);
+
+impl StreamLog {
+    pub fn new() -> Self {
+        Self(Vec::new())
+    }
+
+    pub fn look(&mut self, stream: &std::net::TcpStream) {
+        self.0.push(tcp_info(stream));
+    }
+
+    /// Each reading as `stream_<name>_total` or `stream_<name>_mean` over the rounds; a reading
+    /// that failed is one field saying why.
+    pub fn fields(&self) -> Vec<(String, String)> {
+        let mut sums: Reading = Vec::new();
+        for reading in &self.0 {
+            match reading {
+                Ok(fields) => {
+                    for &(name, value, over) in fields {
+                        match sums.iter_mut().find(|(n, _, _)| *n == name) {
+                            Some((_, sum, _)) => *sum = sum.saturating_add(value),
+                            None => sums.push((name, value, over)),
+                        }
+                    }
+                }
+                Err(why) => return vec![("stream_unread".to_string(), why.clone())],
+            }
+        }
+        let rounds = self.0.len().max(1) as u64;
+        sums.into_iter()
+            .map(|(name, sum, over)| match over {
+                Over::Total => (format!("stream_{name}_total"), sum.to_string()),
+                Over::Mean => (format!("stream_{name}_mean"), (sum / rounds).to_string()),
+            })
+            .collect()
+    }
+}
+
+fn tcp_info(stream: &std::net::TcpStream) -> Result<Reading, String> {
     use std::os::fd::AsRawFd;
+    use Over::{Mean, Total};
     // SAFETY: plain old data, which the kernel fills.
     let mut info: libc::tcp_info = unsafe { std::mem::zeroed() };
     let mut len = std::mem::size_of::<libc::tcp_info>() as libc::socklen_t;
@@ -567,11 +616,11 @@ pub fn stream_info(stream: &std::net::TcpStream) -> Result<Vec<(&'static str, u6
         return Err(format!("TCP_INFO answered {len} bytes, short of the sender limits' {full}"));
     }
     Ok(vec![
-        ("busy_us", info.tcpi_busy_time),
-        ("rwnd_limited_us", info.tcpi_rwnd_limited),
-        ("sndbuf_limited_us", info.tcpi_sndbuf_limited),
-        ("snd_cwnd_segments", u64::from(info.tcpi_snd_cwnd)),
-        ("srtt_us", u64::from(info.tcpi_rtt)),
+        ("busy_us", info.tcpi_busy_time, Total),
+        ("rwnd_limited_us", info.tcpi_rwnd_limited, Total),
+        ("sndbuf_limited_us", info.tcpi_sndbuf_limited, Total),
+        ("snd_cwnd_segments", u64::from(info.tcpi_snd_cwnd), Mean),
+        ("srtt_us", u64::from(info.tcpi_rtt), Mean),
     ])
 }
 

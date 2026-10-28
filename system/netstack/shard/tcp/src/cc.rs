@@ -65,8 +65,10 @@ pub struct Cc {
     pub cwnd: u32,
     pub ssthresh: u32,
     pub smss: u32,
-    /// The sender's last stop was cwnd's: data waited with the peer's window open. Every ACK until
-    /// the next stop grows the window (RFC 5681 §3.1 counts each), however many one pass brings.
+    /// cwnd limited the end of the sender's last transmit opportunity: its last segment left the
+    /// window full, or it stopped with data waiting and the peer's window open. Every ACK until
+    /// the next opportunity grows the window (RFC 5681 §3.1 counts each), however many one pass
+    /// brings.
     pub limited: bool,
     w_max: Option<u32>,
     /// RFC 9438 §4.3's cwnd_prior: cwnd when ssthresh was last set, and before that the initial

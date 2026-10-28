@@ -213,8 +213,8 @@ impl Peer {
     }
 
     /// What the peer sends for `span` after its first read, timed from that
-    /// read to end-of-file. `look` sees the connection at its end.
-    pub fn download(&self, span: Duration, look: &mut dyn FnMut(&TcpStream)) -> io::Result<Transfer> {
+    /// read to end-of-file.
+    pub fn download(&self, span: Duration) -> io::Result<Transfer> {
         let millis = u32::try_from(span.as_millis()).unwrap_or(u32::MAX);
         let mut stream = self.open(Some(Request::Source { millis }))?;
         let mut buf = vec![0u8; CHUNK];
@@ -229,9 +229,7 @@ impl Peer {
                 n => bytes += n as u64,
             }
         }
-        let ns = ns_since(t);
-        look(&stream);
-        Ok(Transfer { bytes, ns })
+        Ok(Transfer { bytes, ns: ns_since(t) })
     }
 }
 
@@ -390,8 +388,8 @@ mod tests {
         let mut looked = 0;
         let up = peer.upload(Duration::from_millis(50), &mut |_| looked += 1).unwrap();
         assert!(up.bytes >= CHUNK as u64, "{up:?}");
-        let down = peer.download(Duration::from_millis(50), &mut |_| looked += 1).unwrap();
-        assert_eq!(looked, 2, "each transfer shows its connection once");
+        assert_eq!(looked, 1, "the upload shows its connection once");
+        let down = peer.download(Duration::from_millis(50)).unwrap();
         assert!(down.bytes >= CHUNK as u64, "{down:?}");
     }
 

@@ -375,8 +375,8 @@ pub struct Sync {
     held_by: Option<(SendLimit, Instant)>,
     /// Why [`Self::new_data`] last sent nothing.
     declined: SendLimit,
-    /// cwnd held a retransmission back in this transmit opportunity.
-    retransmission_held: bool,
+    /// Which window held a retransmission back in this transmit opportunity.
+    retransmission_held: Option<SendLimit>,
 }
 
 /// What a sender's new data waits on: RFC 4898 §4's `tcpEStatsPerfSndLimTime{Snd,Rwin,Cwnd}`.
@@ -471,7 +471,7 @@ impl Sync {
             delivery_problem: false,
             held_by: None,
             declined: SendLimit::User,
-            retransmission_held: false,
+            retransmission_held: None,
         };
         sync.refresh(now);
         sync
@@ -1158,15 +1158,15 @@ impl Sync {
     /// The time new data waits on the user, the peer's window or congestion is counted by which.
     pub fn next_segment<T>(&mut self, ctx: &mut Ctx<'_>, exit: &mut dyn Exit<T>) -> Result<bool, NotReady> {
         let before = self.tx.nxt;
-        self.retransmission_held = false;
+        self.retransmission_held = None;
         let sent = self.owed_segment(ctx, exit)?;
         let now = ctx.now;
         let held = if sent && self.tx.nxt.after(before) {
             None
         } else if sent {
             return Ok(true);
-        } else if self.retransmission_held {
-            Some(SendLimit::Congestion)
+        } else if let Some(limit) = self.retransmission_held {
+            Some(limit)
         } else {
             Some(self.declined)
         };
@@ -1271,6 +1271,10 @@ impl Sync {
             self.last_data_sent = Some(now);
             self.sws = None;
             self.sws_fired = false;
+            // Until the next stop says otherwise: an opportunity that ends on the caller's credit
+            // ends here, and cwnd limited it only if this left it full.
+            let in_flight = if self.sack_ok && self.dupacks > 0 { self.pipe() } else { self.tx.flight() };
+            self.cc.limited = self.cwnd().saturating_sub(in_flight) < self.smss();
         }
         let data_end = start.add(len);
         if data_end.after(old) {
@@ -1342,7 +1346,8 @@ impl Sync {
         let len = if pos.before(stop) { stop.since(pos) } else { 0 };
         let fin = self.fin_fits(pos.add(len)) && (len > 0 || fin_resend);
         if len == 0 && !fin {
-            self.retransmission_held = true;
+            self.retransmission_held =
+                Some(if self.cwnd() <= self.tx.window() { SendLimit::Congestion } else { SendLimit::Window });
             return Ok(false);
         }
         self.emit(ctx, exit, pos, len, fin, blocks)?;
@@ -1449,22 +1454,21 @@ impl Sync {
         let nagle = ctx.options.nodelay || self.tx.flight() == 0;
         let half = signed(self.tx.max_wnd / 2);
         let usable = d.min(w_rcv).min(w_cc).min(mss);
-        let rules = |w_rcv: i64| {
+        let rules = |w_rcv: i64, w_cc: i64| {
             d.min(w_rcv).min(w_cc) >= mss || (nagle && d <= w_rcv.min(w_cc)) || (nagle && d.min(w_rcv) >= half && w_cc > 0)
         };
-        let go = usable > 0 && (rules(w_rcv) || self.sws_fired || self.tx.fin.is_some());
+        let go = usable > 0 && (rules(w_rcv, w_cc) || self.sws_fired || self.tx.fin.is_some());
         if !go {
-            // Congestion where cwnd leaves less than the segment the rest would send, the peer's
-            // window where only it stands in the way (sender SWS avoidance included), else the
-            // sender's own Nagle hold.
-            self.declined = if w_cc < d.min(w_rcv).min(mss) {
-                SendLimit::Congestion
-            } else if !rules(w_rcv) && rules(i64::MAX) {
-                SendLimit::Window
-            } else {
-                SendLimit::User
+            // Whichever window alone stands in the way; where both do, the smaller; where neither
+            // does, the sender's own Nagle hold.
+            self.declined = match (rules(w_rcv, i64::MAX), rules(i64::MAX, w_cc)) {
+                (true, false) => SendLimit::Congestion,
+                (false, true) => SendLimit::Window,
+                _ if !rules(i64::MAX, i64::MAX) => SendLimit::User,
+                _ if w_cc <= w_rcv => SendLimit::Congestion,
+                _ => SendLimit::Window,
             };
-            if w_rcv > 0 && rules(i64::MAX) && self.sws.is_none() && !self.sws_fired {
+            if w_rcv > 0 && rules(i64::MAX, w_cc) && self.sws.is_none() && !self.sws_fired {
                 self.sws = Some(now.after(limits::SWS_OVERRIDE));
             }
             return Ok(false);
