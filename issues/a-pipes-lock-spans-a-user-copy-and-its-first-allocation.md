@@ -10,10 +10,11 @@ Each pipe owns its state behind its own `sync::Lock` (`kernel/src/pipe.rs`),
 which disables preemption before it spins (`kernel/src/sync.rs`). The bulk copy
 runs inside that lock:
 
-* `PipeRef::try_read_within` runs `bytes.read(len, ..)`, each frame's run
-  copied with `buf.write_at`, under it;
-* `PipeRef::write` runs `bytes.write(n, ..)`, each run copied with
-  `buf.read_at`, in the same acquisition.
+* `PipeRef::try_read_within` makes one walk of the caller's window,
+  `buf.write_pieces`, and copies each pinned piece out of the frames it
+  covers with `bytes.peek`, under it;
+* `PipeRef::write` makes one walk, `buf.read_pieces`, and copies each piece
+  into its frames with `bytes.place`, in the same acquisition.
 
 The copy is bounded only by the pipe: `PIPE_CAPACITY` is 2 MiB, the largest
 single copy under the lock, and nothing above caps it (`SYS_READ`/`SYS_WRITE`
@@ -23,8 +24,8 @@ zeroing.
 
 A write that grows the pipe also takes its frames under the same lock,
 nesting the frame allocator's lock: up to 513 frames, unzeroed, under one
-hold, and the heap the list of them grows into. A read gives back the frames
-it empties past those kept, under the same nesting.
+hold, and the heap the list of them grows into. A read that empties frames
+past the spares kept gives them back under the same nesting.
 
 What queues behind it is that one pipe's traffic: its other end's reads and
 writes, `has_data`/`has_space` from its blocking wrappers and polls, and its

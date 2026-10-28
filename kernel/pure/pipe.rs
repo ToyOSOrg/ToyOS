@@ -144,12 +144,12 @@ impl Landing {
 
 /// What a pipe holds, in frames taken as it fills and given back as it
 /// drains. Its first unread byte is `head` bytes into the first frame, and
-/// the frames past its last byte are spare: kept for the next write while
-/// there are no more of them than frames holding bytes, or than its last
-/// write spanned, or one. So a pipe holds at most the frames its bytes need
-/// and as many again or its last write's, never more than [`MOST_FRAMES`],
-/// and a stream of writes of one size takes no frame from the allocator
-/// whether its reader keeps up or lags.
+/// the frames past its last byte are spare, kept for the next write up to
+/// the largest of: the frames holding bytes, the frames the last write
+/// spanned, and one. So a pipe holds at most its bytes' frames plus that
+/// largest, never more than [`MOST_FRAMES`], and a stream of writes of one
+/// size takes no frame from the allocator whether its reader keeps up or
+/// lags.
 pub struct Bytes<F> {
     frames: VecDeque<F>,
     head: usize,
@@ -233,14 +233,6 @@ impl<F> Bytes<F> {
         self.len += n;
     }
 
-    /// Append `n` bytes, which [`Self::wants`] no more frames for, as
-    /// [`Self::place`] hands them out, and count them held.
-    pub fn write(&mut self, n: usize, copy: impl FnMut(&mut F, Range<usize>, usize)) {
-        assert_eq!(self.wants(n), 0, "pipe: a write past the frames it was given");
-        self.place(0, n, copy);
-        self.commit(n);
-    }
-
     /// The `len` held bytes `at` past the oldest, handed to `copy` as
     /// [`Self::place`] hands them out; [`Self::consume`] lets them go.
     pub fn peek(&self, at: usize, len: usize, mut copy: impl FnMut(&F, Range<usize>, usize)) {
@@ -263,15 +255,6 @@ impl<F> Bytes<F> {
         if self.len == 0 {
             self.head = 0;
         }
-    }
-
-    /// Take up to `want` bytes from the front, handed to `copy` as
-    /// [`Self::peek`] hands them out, then let them go. Answers how many.
-    pub fn read(&mut self, want: usize, copy: impl FnMut(&F, Range<usize>, usize)) -> usize {
-        let n = want.min(self.len);
-        self.peek(0, n, copy);
-        self.consume(n);
-        n
     }
 
     /// The spares past those it keeps, for the caller to give back.
@@ -644,24 +627,28 @@ mod tests {
             Self { bytes: Bytes::new(), taken: 0, returned: Vec::new() }
         }
 
-        /// Write `src` as `kernel::pipe` does: the frames it wants, then the
-        /// copy.
+        /// Write `src` as `kernel::pipe` does: the frames it wants, then
+        /// the copy placed and committed.
         fn write(&mut self, src: &[u8]) {
             for _ in 0..self.bytes.wants(src.len()) {
                 self.bytes.add(Frame { id: self.taken, bytes: vec![0xEE; FRAME] });
                 self.taken += 1;
             }
-            self.bytes.write(src.len(), |frame, within, at| {
+            self.bytes.place(0, src.len(), |frame, within, at| {
                 frame.bytes[within.clone()].copy_from_slice(&src[at..at + within.len()]);
             });
+            self.bytes.commit(src.len());
         }
 
+        /// Read up to `want` bytes as `kernel::pipe` does: peeked, consumed,
+        /// and the surplus given back.
         fn read(&mut self, want: usize) -> Vec<u8> {
-            let mut out = vec![0; want];
-            let n = self.bytes.read(want, |frame, within, at| {
+            let n = want.min(self.bytes.len());
+            let mut out = vec![0; n];
+            self.bytes.peek(0, n, |frame, within, at| {
                 out[at..at + within.len()].copy_from_slice(&frame.bytes[within]);
             });
-            out.truncate(n);
+            self.bytes.consume(n);
             self.returned.extend(self.bytes.surplus().map(|frame| frame.id));
             out
         }

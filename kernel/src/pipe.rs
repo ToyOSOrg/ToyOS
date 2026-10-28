@@ -130,13 +130,13 @@ impl Drop for Held {
 /// One copy gathered from runs that continue each other in both source and
 /// destination, so a user page's piece over two physically adjacent frames
 /// is one copy, not two.
-struct Copy {
+struct Gather {
     from: *const u8,
     to: *mut u8,
     len: usize,
 }
 
-impl Copy {
+impl Gather {
     const NONE: Self = Self { from: core::ptr::null(), to: core::ptr::null_mut(), len: 0 };
 
     /// Add `len` bytes from `from` to `to`, copying what was gathered first
@@ -276,16 +276,16 @@ impl PipeRef {
                 // One walk of the user window, each pinned piece copied out of
                 // the frames it covers.
                 buf.write_pieces(0, n, |to, at, piece| {
-                    let mut copy = Copy::NONE;
-                    bytes.peek(at, piece, |frame, within, from| {
+                    let mut gather = Gather::NONE;
+                    bytes.peek(at, piece, |frame, within, off| {
                         // SAFETY: `to` is valid for `piece` bytes until this
-                        // walk's callback returns, and `from + within.len()` is
+                        // walk's callback returns, and `off + within.len()` is
                         // at most `piece`; the frame is this pipe's alone,
                         // reached only under its lock, and no process maps it.
-                        unsafe { copy.add(frame_bytes(frame, within.clone()), to.add(from), within.len()) }
+                        unsafe { gather.add(frame_bytes(frame, within.clone()), to.add(off), within.len()) }
                     });
                     // SAFETY: as above, before the callback returns.
-                    unsafe { copy.flush() };
+                    unsafe { gather.flush() };
                 });
                 bytes.consume(n);
                 pipe.held.give_back_surplus();
@@ -324,15 +324,15 @@ impl PipeRef {
         // One walk of the user window, each pinned piece copied into the
         // frames it covers.
         buf.read_pieces(0, n, |from, at, piece| {
-            let mut copy = Copy::NONE;
-            bytes.place(at, piece, |frame, within, to| {
+            let mut gather = Gather::NONE;
+            bytes.place(at, piece, |frame, within, off| {
                 // SAFETY: `from` is valid for `piece` bytes until this walk's
-                // callback returns, and `to + within.len()` is at most `piece`;
+                // callback returns, and `off + within.len()` is at most `piece`;
                 // the frame is this pipe's alone, as above.
-                unsafe { copy.add(from.add(to), frame_bytes(frame, within.clone()), within.len()) }
+                unsafe { gather.add(from.add(off), frame_bytes(frame, within.clone()), within.len()) }
             });
             // SAFETY: as above, before the callback returns.
-            unsafe { copy.flush() };
+            unsafe { gather.flush() };
         });
         bytes.commit(n);
         pipe.written += n as u64;

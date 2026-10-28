@@ -104,12 +104,12 @@ fn main() {
     let before_write = used_bytes();
     let wrote = syscall::write(accepted, b"x").expect("write one byte to an accepted socket");
     assert_eq!(wrote, 1);
-    let ring = used_bytes().saturating_sub(before_write);
+    let took = used_bytes().saturating_sub(before_write);
     assert!(
-        ring >= syscall::PAGE_SIZE as u64,
-        "the first write to a connection grew physical memory by {ring} bytes; a pipe's bytes take a frame"
+        took >= syscall::PAGE_SIZE as u64,
+        "the first write to a connection grew physical memory by {took} bytes; a pipe's bytes take a frame"
     );
-    println!("  the first write on a connection allocated {} KiB", ring / 1024);
+    println!("  the first write on a connection allocated {} KiB", took / 1024);
 
     // SAFETY: no type holds this number.
     unsafe { syscall::close(accepted) };
