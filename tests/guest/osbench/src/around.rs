@@ -67,6 +67,7 @@ pub fn cpus(bench: &str, before: &[crate::sys::diag::CpuCounts], after: &[crate:
                 ("run_mhz", shown(run_mhz)),
                 ("core_c6_permille", permille(delta(a.core_c6, b.core_c6), stamp)),
                 ("core_c7_permille", permille(delta(a.core_c7, b.core_c7), stamp)),
+                // Counted when a period ends, so one begun before the row counts whole: past 1000 is that.
                 ("deep_idles", shown(delta(a.deep_idles, b.deep_idles))),
                 ("deep_permille", permille(delta(a.deep_idle_nanos, b.deep_idle_nanos), Some(ns))),
                 ("kicks", shown(delta(a.kicks, b.kicks))),

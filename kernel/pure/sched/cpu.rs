@@ -30,7 +30,7 @@ use crate::sched::mailbox::{
 };
 use crate::sched::msg::Msg;
 use crate::sched::queue::{RunQueue, MIN_SLICE_NS};
-use crate::sched::sync::{fence, Arc, AtomicU32, AtomicU64, Ordering};
+use crate::sched::sync::{fence, Arc, AtomicBool, AtomicU32, AtomicU64, Ordering};
 use crate::sched::task::{
     BlockedTask, Claim, DeadTask, ReadyTask, RunningTask, SchedPayload, TaskKey, TaskShared,
     TaskState, TransitTask, WaitClass, WakeCause, WakeReason, QUANTUM_NS,
@@ -1753,6 +1753,8 @@ impl<H: Hw, P: PreemptGuard> SchedPass<'_, '_, H, P, Disposed> {
                 // The re-arm's allowance is per idle period, so a CPU that is
                 // given work starts its next one with a full one.
                 self.cpu.idle_probes_spent = 0;
+                // Running, it is held by nothing: a sibling going to sleep owes it no poke.
+                handle.held_by_sibling.store(false, Ordering::Relaxed);
                 return self.switch_to_current();
             }
             if !self.cpu.is_idle() {
@@ -2126,7 +2128,7 @@ impl<H: Hw, P: PreemptGuard> SchedPass<'_, '_, H, P, Disposed> {
         // The idle choice is made against the timer the CPU would sleep
         // with, and its own wake joins the same plan: one write of the timer.
         let deadline = TimerPlan::compute(None, self.cpu.earliest_deadline()).no_later_than(rearm).armed();
-        let idle = self.env.hw.idle_plan(deadline, self.now);
+        let idle = self.held_shallow_by_a_running_sibling(self.env.hw.idle_plan(deadline, self.now));
         let timer = self.apply_timer_no_later_than(match (rearm, idle.wake_at().map(Nanos)) {
             (Some(a), Some(b)) => Some(a.min(b)),
             (a, b) => a.or(b),
@@ -2145,12 +2147,50 @@ impl<H: Hw, P: PreemptGuard> SchedPass<'_, '_, H, P, Disposed> {
             return Err(());
         }
         match arm.confirm(&self.cpu.mailbox) {
-            Ok(quiesced) => Ok(Action::Idle(SleepToken::new(quiesced, timer, idle))),
+            Ok(quiesced) => {
+                self.poke_held_siblings();
+                Ok(Action::Idle(SleepToken::new(quiesced, timer, idle)))
+            }
             Err(_awake) => {
                 self.env.cpus.get(self.cpu.id).doorbell().begin_pass();
                 self.cpu.drain(self.env, self.now);
                 self.cpu.fire_deadlines(self.env, self.now);
                 Err(())
+            }
+        }
+    }
+
+    /// **A deep state beside a running SMT sibling saves nothing**: a core
+    /// enters a core C-state only when every thread of it asks for one, and
+    /// the thread waiting deep still pays the deeper exit (and on Zen 2 slows
+    /// the sibling it shares the core with, #1073's readings). So a CPU whose
+    /// plan is deeper than C1 waits in C1 while a sibling runs, marked held,
+    /// and the sibling that sleeps next pokes it to choose again
+    /// ([`Self::poke_held_siblings`]). The mark is stored and fenced before
+    /// the siblings are read, and a sleeper's SLEEPING before it reads the
+    /// marks, so one of the two sees the other.
+    fn held_shallow_by_a_running_sibling(&self, plan: crate::sched::idle::Plan) -> crate::sched::idle::Plan {
+        if plan.choice.state.is_none() {
+            return plan;
+        }
+        let handle = self.env.cpus.get(self.cpu.id);
+        handle.held_by_sibling.store(true, Ordering::Relaxed);
+        fence(Ordering::SeqCst);
+        if self.env.cpus.busy_siblings(self.cpu.id) == 0 {
+            handle.held_by_sibling.store(false, Ordering::Relaxed);
+            return plan;
+        }
+        crate::sched::idle::Plan { declaration: plan.declaration, ..crate::sched::idle::Plan::c1(plan.deadline, plan.chosen_at) }
+    }
+
+    /// Poke each SMT sibling held in C1 for this CPU's running: SLEEPING is
+    /// published, so it now chooses again with this CPU asleep.
+    fn poke_held_siblings(&self) {
+        fence(Ordering::SeqCst);
+        for &sibling in self.env.cpus.topology().core(self.cpu.id) {
+            let handle = self.env.cpus.get(sibling);
+            if sibling != self.cpu.id && handle.held_by_sibling() && handle.poke() == Kick::Send {
+                self.env.hw.kick(sibling);
             }
         }
     }
@@ -2324,6 +2364,9 @@ pub struct CpuHandle<M> {
     /// waits, after it published SLEEPING, so a reader may see the previous
     /// idle period's: a tiebreak, never a correctness input.
     idle_exit: AtomicU64,
+    /// **This CPU waits in C1 only because an SMT sibling runs**: the sibling
+    /// that sleeps next pokes it to choose again ([`SchedPass::try_sleep`]).
+    held_by_sibling: AtomicBool,
     /// The on-target counterpart to the simulator's invariants: the sim asserts
     /// what a pass *does*, this measures what a pass *costs*.
     ///
@@ -2351,6 +2394,7 @@ impl<M: SchedMsg> CpuHandle<M> {
             weight: AtomicU64::new(0),
             last_pass: AtomicU64::new(0),
             idle_exit: AtomicU64::new(0),
+            held_by_sibling: AtomicBool::new(false),
             #[cfg(feature = "sched-check")]
             pass_costs: PassCosts::new(),
         }
@@ -2395,6 +2439,10 @@ impl<M: SchedMsg> CpuHandle<M> {
 
     pub fn publish_idle_exit(&self, nanos: u64) {
         self.idle_exit.store(nanos, Ordering::Relaxed);
+    }
+
+    pub fn held_by_sibling(&self) -> bool {
+        self.held_by_sibling.load(Ordering::Relaxed)
     }
 
     /// Stamp the numbers above with the pass that published them.
@@ -2688,6 +2736,8 @@ mod tests {
         timers: Vec<Option<Nanos>>,
         /// The revisit an idle plan asks, where a test sets one.
         revisit: Option<u64>,
+        /// Plans a declared state, 0, where a test sets it.
+        deep: bool,
     }
 
     #[derive(Default)]
@@ -2721,6 +2771,10 @@ mod tests {
         fn idle_plan(&self, deadline: Option<Nanos>, now: Nanos) -> crate::sched::idle::Plan {
             let mut plan = crate::sched::idle::Plan::c1(deadline.map(|d| d.0), now.0);
             plan.choice.revisit_after = self.state().revisit;
+            if self.state().deep {
+                plan.choice.state = Some(0);
+                plan.exit = 253_000;
+            }
             plan
         }
         fn halt(&self) {}
@@ -4329,6 +4383,51 @@ mod tests {
         for &cpu in cpus {
             handles.get(CpuId(cpu)).doorbell().begin_pass();
         }
+    }
+
+    /// One core of two threads, cpu0 and cpu1.
+    fn one_smt_core() -> Topology {
+        use crate::sched::topology::CpuKeys;
+        Topology::new([0, 0].iter().map(|&core| CpuKeys { core, llc: 0, package: 0 }).collect()).expect("a tree")
+    }
+
+    fn idle_pass(w: &mut World, cpu: usize) -> SleepToken {
+        let (cpus, env) = w.split();
+        let pass = SchedPass::begin(&mut cpus[cpu], env, NOW);
+        let Action::Idle(token) = pass.dispose_none().finish() else { panic!("an empty CPU sleeps") };
+        token
+    }
+
+    /// **A CPU beside a running sibling waits in C1, and the sibling that
+    /// sleeps wakes it to choose again**: the core saves nothing from one
+    /// thread deep, and the held CPU is not left in C1 once the core could go
+    /// deep, since a sibling's sleep is the event that says so.
+    #[test]
+    fn a_cpu_beside_a_running_sibling_waits_in_c1_until_the_sibling_sleeps() {
+        let mut w = World::on(one_smt_core());
+        w.hw.state().deep = true;
+        let held = idle_pass(&mut w, 0);
+        assert_eq!(held.idle().choice.state, None, "cpu1 runs, so cpu0 waits in C1");
+        assert!(w.handles.get(CpuId(0)).held_by_sibling());
+        let kicks = w.hw.state().kicks.len();
+        let sleeper = idle_pass(&mut w, 1);
+        assert_eq!(sleeper.idle().choice.state, Some(0), "cpu0 sleeps, so cpu1 may wait deep");
+        assert_eq!(w.hw.state().kicks[kicks..], [CpuId(0)], "cpu1's sleep pokes the cpu it held");
+        assert!(w.handles.get(CpuId(0)).doorbell().kick_pending());
+        let again = idle_pass(&mut w, 0);
+        assert_eq!(again.idle().choice.state, Some(0), "poked, cpu0 chooses again with the core asleep");
+        assert!(!w.handles.get(CpuId(0)).held_by_sibling());
+    }
+
+    /// With nothing declared nothing is held, so a sibling's sleep pokes no
+    /// one: a machine with C1 alone pays nothing for the rule.
+    #[test]
+    fn with_no_deep_plan_no_cpu_is_held_and_no_sleep_pokes() {
+        let mut w = World::on(one_smt_core());
+        let _ = idle_pass(&mut w, 0);
+        assert!(!w.handles.get(CpuId(0)).held_by_sibling());
+        let _ = idle_pass(&mut w, 1);
+        assert!(w.hw.state().kicks.is_empty());
     }
 
     /// **A spawn's placement reads no idle exit**: the shallowest-sleeper
