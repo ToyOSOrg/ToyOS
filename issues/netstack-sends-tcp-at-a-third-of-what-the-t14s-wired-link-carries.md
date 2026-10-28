@@ -161,7 +161,7 @@ says `MULR` "is loaded from the NVM word 0x24/0x14", and §4.2 that a
 software reset "re-reads the per-function NVM fields" and resets the bits
 normally read from the NVM to "their default hardware values". On the T14,
 `TCTL` read `0x3003f0f8` both before and after the bring-up's reset
-([evidence `19fbf239c/`](https://github.com/ToyOSOrg/evidence/tree/53b5659297ad1617d886a0ccfbcfcb9f99556851/r4/19fbf239c)), `CT` and `COLD` included, where those
+([evidence `19fbf239c/`](https://github.com/ToyOSOrg/evidence/tree/4cbc624ffec885040aa268ad47743ed5df94e51e/r4/19fbf239c)), `CT` and `COLD` included, where those
 values would read about `0x30000008`. Either the reset kept the register or
 this MAC's own reset value is that one: no reading separates the two, and
 the 82574's table does not describe the PCH's MAC. Either way the value the
