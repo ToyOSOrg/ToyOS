@@ -1906,12 +1906,11 @@ fn designate_data(target: &Target, dry_run: bool) -> Result<(), Refusal> {
         }
         stamp::Block0::Other => {}
     }
-    let file = std::env::temp_dir().join(format!("toyos-metal-designation-{}", std::process::id()));
+    let scratch = toyos_tmpdir::TempDir::new("designation");
+    let file = scratch.path().join("stamp");
     std::fs::write(&file, data.stamp()).map_err(|e| Refusal::File { path: file.display().to_string(), why: e.to_string() })?;
     let feed = Feed { path: &file, at: 0, len: stamp::BLOCK as u64 };
-    let wrote = driver.as_root("writing the designation", Job::Stamp(node.clone()), Some(feed));
-    let _ = std::fs::remove_file(&file);
-    let Some(out) = wrote? else {
+    let Some(out) = driver.as_root("writing the designation", Job::Stamp(node.clone()), Some(feed))? else {
         println!("dry run: {said} was read and nothing was written");
         return Ok(());
     };
