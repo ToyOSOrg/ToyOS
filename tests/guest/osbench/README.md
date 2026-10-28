@@ -134,14 +134,37 @@ CPU's TSC read behind another's and no step exceeded the 1.2 µs of a read.
 A Linux forced onto the TSC (`tsc=reliable`) has those checks switched off,
 so it is no baseline.
 
-## The disk is not yet one disk
+## Both write the bench's NVMe
 
-`persist` writes each system's persistent filesystem. On Linux that is the
-runner's home, ext4 on the bench's NVMe. On ToyOS it is still the boot
-stick's LOG volume, FAT32 over USB 2.0, because ToyOS's DATA is the bench's
-partition only once ToyOS has designated it, and ToyOS cannot yet do that
-itself. So `persist` compares two media. Its lines name theirs, and
-`osbench-compare` refuses a verdict on any row whose media differ.
+`persist` and `fs.disk` run on each system's persistent filesystem on the
+bench's NVMe. On Linux that is the runner's home, ext4 on the bench's root
+partition. On ToyOS it is DATA: the bench's TOYOS-DATA partition, its fourth,
+named `ToyOS data`, which ToyOS designates itself. It is served through the
+DATA file server and the NVMe driver. The `osbench` row refuses a boot whose
+DATA was anything else, and refuses the boot that formats a newly
+designated DATA as a run, saying how long the format took. Every row's
+`served_by` and `medium` name the filesystem and the disk it measured.
+
+What makes the disk rows one comparison, and what stays each system's own:
+
+- **One disk.** Both write the bench's one NVMe namespace: Linux its root
+  partition, ToyOS its fourth. They are different regions of one device,
+  through each system's own driver. Each row's `medium` is `nvme` on both,
+  and the compare refuses a verdict on any row where it is not.
+- **Each system's own filesystem.** ext4, and ToyOS's DATA format behind
+  its file server, are part of what is compared. Linux's mount options are
+  in `fs.disk.mount`. The free space they write into differs: Linux's root
+  holds its installation, and ToyOS's DATA is a volume of its own.
+- **One durability.** A `persist` row's write counts once `sync_all` or
+  `sync_data` returns. Both systems answer that after the device's own
+  cache has been flushed: Linux's ext4 by its default barriers, which a
+  `nobarrier` in `fs.disk.mount` would show, and ToyOS's NVMe driver by
+  issuing Flush where the controller has a volatile write cache, which its
+  boot log says. ToyOS's fsync makes its whole volume durable, not just the
+  file (`issues/an-fsync-of-a-served-file-syncs-its-whole-volume.md`).
+- **One cache state.** Every row writes its own files in its run, and its
+  reads find them in each system's cache. `persist.seq_read_cached` and
+  `fs.disk.*` are cached reads on both, and no row reads the disk cold.
 
 ## What is not a comparison
 

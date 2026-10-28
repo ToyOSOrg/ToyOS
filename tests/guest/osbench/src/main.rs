@@ -126,9 +126,7 @@ fn fair() {
 }
 
 fn files() {
-    for target in files::targets() {
-        files::suite(&target);
-    }
+    files::suite(&files::memory());
 }
 
 /// Every group the machine alone runs, in the order `all` and the ToyOS job

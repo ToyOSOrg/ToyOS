@@ -291,7 +291,7 @@ pub const SETUP: [&str; 13] = [
     "platform_profile",
     "smt_active",
     "fs.mem.served_by",
-    "fs.served.served_by",
+    "fs.disk.served_by",
     "persist.served_by",
 ];
 

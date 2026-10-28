@@ -388,11 +388,13 @@ pub fn map_anon_4k(len: usize) -> *mut u8 {
     map_anon(len)
 }
 
-/// The one writable volume a benchcase boot certainly has on a disk, what
-/// serves it, and its medium.
+/// DATA's `/home`, what serves it, and its medium. A program cannot ask
+/// which disk DATA is on, or whether it is memory instead; the `osbench` row
+/// refuses a boot whose DATA was not the NVMe's partition, so that is the
+/// medium a measured run's lines name.
 pub fn persistent_dir() -> Option<(String, String, String)> {
-    let served_by = "boot USB stick TOYOS-LOG partition, FAT32, LOG file server over usbd mass storage";
-    Some(("/log".into(), served_by.into(), "usb".into()))
+    let served_by = "DATA volume, bcachefs crate's format, DATA file server over the block service";
+    Some(("/home".into(), served_by.into(), "nvme".into()))
 }
 
 /// What a transfer row reports of the stack beneath it, as netstack's `inspect` answers it:
