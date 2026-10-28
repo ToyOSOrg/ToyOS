@@ -878,9 +878,9 @@ where
 /// into the caller's buffer: the count, at least one. A shutdown, the server's
 /// hang-up or a failure it stored is answered, and nothing copied, whatever
 /// room there is. A write of no bytes answers 0 at once. A write the room
-/// cannot take whole doubles the ring, up to its place, where `reach` makes
-/// the ring's first twice its capacity memory; where it cannot, the ring
-/// stays as it is.
+/// cannot take whole, or that fills the ring, doubles the ring, up to its
+/// place, where `reach` makes the ring's first twice its capacity memory;
+/// where it cannot, the ring stays as it is.
 pub fn write<W, L, B, const C: u32, const N: usize>(
     page: &[W; N],
     lock: &L,
@@ -915,7 +915,7 @@ where
             if !half.ring.advance(n) {
                 return (Err(Refused::Violation(Violation::HeadPastTail)), false);
             }
-            if n < len && half.ring.can_grow() {
+            if (n < len || n == room) && half.ring.can_grow() {
                 let cap = half.ring.capacity().saturating_mul(2);
                 if half.reached >= cap || reach(cap) {
                     half.reached = half.reached.max(cap);
