@@ -106,6 +106,14 @@ const NO_SUCH_OPERATION: &str = "it asked for an operation this protocol does no
 /// blocks, of which only what is written costs anything.
 const RAM_BLOCKS: u64 = 1 << 18;
 
+/// The share of physical memory a volume's cache may keep in clean blocks.
+///
+/// Policy, the eighth netstack and the compositor take: nothing in the kernel
+/// signals memory pressure (`issues/no-physical-memory-fairness.md`), so a
+/// clean block is dropped only for another, and this bound is all that keeps
+/// a cache from holding the machine.
+const CLEAN_SHARE: u64 = 8;
+
 const TOKEN_ACCEPTOR: u64 = 0;
 const TOKEN_CLIENT: u64 = 1 << 32;
 const TOKEN_STREAM: u64 = 2 << 32;
@@ -340,7 +348,7 @@ fn absent(roots: &[&str], why: String) -> Box<dyn Volume> {
 }
 
 fn data_on<D: Disk + 'static>(disk: D, roots: &[&str]) -> Box<dyn Volume> {
-    match DataVolume::probe(disk, roots, fileserver::volume::now_nanos) {
+    match DataVolume::probe(disk, clean_limit(), roots, fileserver::volume::now_nanos) {
         Probed::Mounted(volume) => Box::new(volume),
         Probed::Unmountable(why) => {
             println!("fileserver: the DATA volume is ours and does not mount ({why}); it is absent this boot");
@@ -355,14 +363,23 @@ fn data_on<D: Disk + 'static>(disk: D, roots: &[&str]) -> Box<dyn Volume> {
 
 fn ram(roots: &[&str], why: &str) -> Box<dyn Volume> {
     println!("fileserver: {why}; /apps, /config, /home and /state are in memory and will not survive a reboot");
-    match DataVolume::format(Ram::new(RAM_BLOCKS), roots, fileserver::volume::now_nanos) {
+    match DataVolume::format(Ram::new(RAM_BLOCKS), clean_limit(), roots, fileserver::volume::now_nanos) {
         Ok(volume) => Box::new(volume),
         Err(why) => panic!("fileserver: a volume in memory would not format: {why}"),
     }
 }
 
 fn fat_on<D: Disk + 'static>(disk: D, writable: bool) -> Result<Box<dyn Volume>, String> {
-    FatVolume::mount(disk, writable, fileserver::volume::now_nanos).map(|v| Box::new(v) as Box<dyn Volume>)
+    FatVolume::mount(disk, clean_limit(), writable, fileserver::volume::now_nanos).map(|v| Box::new(v) as Box<dyn Volume>)
+}
+
+/// The clean blocks a volume's cache keeps: [`CLEAN_SHARE`] of physical memory.
+fn clean_limit() -> usize {
+    let mut buf = [0u8; toyos::system::SYSINFO_HEADER_SIZE];
+    let n = toyos::system::sysinfo(&mut buf);
+    assert!(n >= toyos::system::SYSINFO_HEADER_SIZE, "fileserver: sysinfo returned {n} bytes");
+    let total = toyos_abi::syscall::SysinfoHeader::decode(&buf).memory_total;
+    usize::try_from(total / CLEAN_SHARE / toyos_blockdev::BLOCK as u64).expect("a block count fits a usize")
 }
 
 struct Server {
