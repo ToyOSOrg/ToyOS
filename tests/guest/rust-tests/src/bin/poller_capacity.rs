@@ -22,8 +22,7 @@ use toyos_abi::syscall;
 
 const SELF_PATH: &str = "/system/bin/test_rs_poller_capacity";
 
-/// Each pipe is one 2 MiB kernel page, so this is 128 MiB of ring — enough to
-/// be a real batch, small enough to leave the machine alone.
+/// Enough to be a real batch, small enough to leave the machine alone.
 const CAP: u32 = 64;
 
 /// Printed by a child immediately before the call that must not return.

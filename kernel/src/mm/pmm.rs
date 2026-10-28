@@ -6,7 +6,7 @@
 //! drops. Pins ([`pin_range`]) are taken without the allocator's lock.
 //!
 //! **What a process causes is counted to the job that caused it**, its
-//! account — a commitment, a page table, a pipe's ring, a run a device is
+//! account — a commitment, a page table, a pipe's bytes, a run a device is
 //! lent, a [`charge`] of the kernel heap — and is refused rather than take
 //! what the allocator holds back for the kernel or for another account's
 //! floor ([`set_floor`]); only the kernel's own allocations may take what it
@@ -309,21 +309,35 @@ pub fn alloc_promised() -> Frame {
 
 /// A zeroed frame for a page table of `job`'s, refused rather than take what
 /// is held back: a process's tables are not promised. It goes back through
-/// [`free_table_frame`].
+/// [`free_held`].
 pub fn alloc_table_frame(job: &Job) -> Option<u64> {
-    let phys = with(|f| f.alloc_table(job.memory()))?;
+    let mut phys = 0;
+    if !with(|f| f.alloc_held(job.memory(), 1, |frame| phys = frame)) {
+        return None;
+    }
     // SAFETY: just taken off the allocator, so unaliased, and inside the direct map.
     unsafe { core::ptr::write_bytes(DirectMap::from_phys(phys).as_mut_ptr::<u8>(), 0, FRAME as usize) };
     Some(phys)
 }
 
-/// Give back a frame [`alloc_table_frame`] took for `job`.
+/// `count` frames for kernel memory of `job`'s that no process maps and that
+/// is written before it is read, such as a pipe's bytes, each handed to
+/// `each` under one hold of the allocator's lock: refused whole rather than
+/// take what is held back. They hold what their last owner left, and go back
+/// through [`free_held`].
+pub fn alloc_held(job: &Job, count: usize, each: impl FnMut(u64)) -> bool {
+    count == 0 || with(|f| f.alloc_held(job.memory(), count as u64, each))
+}
+
+/// Give back `frames` [`alloc_table_frame`] or [`alloc_held`] took for
+/// `job`, under one hold of the allocator's lock.
 ///
 /// # Safety
-/// No table links it any more, and no CPU can still walk into it.
-pub unsafe fn free_table_frame(job: &Job, phys: u64) {
+/// Nothing reaches any of them any more: no table links it, no CPU can still
+/// walk into it, and nothing else frees it.
+pub unsafe fn free_held(job: &Job, frames: impl IntoIterator<Item = u64>) {
     let pins = pins();
-    with(|f| f.free_table(job.memory(), phys, &pins));
+    with(|f| f.free_held(job.memory(), frames, &pins));
 }
 
 /// One zeroed 2 MiB page for the kernel's own use.
@@ -338,8 +352,8 @@ fn zeroed(page: PhysPage) -> PhysPage {
     page
 }
 
-/// Physically contiguous 2 MiB pages a job holds, such as a pipe's ring or
-/// memory a device is lent; they go back, counted to it, when this drops.
+/// Physically contiguous 2 MiB pages a job holds, such as memory a device is
+/// lent; they go back, counted to it, when this drops.
 pub struct Run {
     base: u64,
     count: usize,

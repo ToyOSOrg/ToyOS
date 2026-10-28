@@ -141,7 +141,6 @@ const AUTO_TRAIT_IMPLS: &[(&str, usize)] = &[
     ("kernel/src/arch/x86_64/hw.rs", 1),
     ("kernel/src/mm/mmio.rs", 2),
     ("kernel/src/mm/region.rs", 2),
-    ("kernel/src/pipe.rs", 1),
     ("kernel/src/process.rs", 1),
     ("kernel/src/sched/driver.rs", 2),
     ("kernel/src/symbols.rs", 2),
@@ -680,14 +679,11 @@ mod tests {
     }
 
     /// A page a process can write while the kernel is inside it never becomes a
-    /// slice, and never an exclusive reference. Two files, named rather than
+    /// slice, and never an exclusive reference. The file is named rather than
     /// walked: both spellings are ordinary elsewhere.
-    ///
-    /// A *shared* reference is not banned: `Ring::header` soundly takes one over
-    /// the same page, its whole subject being an `AtomicU32`.
     #[test]
     fn no_slice_or_exclusive_reference_is_built_over_a_mapped_page() {
-        const OVER_A_MAPPING: &[&str] = &["sdk/abi/src/ring.rs", "kernel/src/user_ptr.rs"];
+        const OVER_A_MAPPING: &[&str] = &["kernel/src/user_ptr.rs"];
         const SLICES: &[&str] =
             &["from_raw_parts", "from_raw_parts_mut", "from_ptr_range", "from_ptr_range_mut"];
         const EXCLUSIVE: &str = "&mut *";

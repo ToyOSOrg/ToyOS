@@ -37,7 +37,7 @@ const LONG_NAME: usize = 3900;
 
 fn main() {
     // Made before anything is taken, so what follows needs no heap of its
-    // own: the pipe whose ring is not yet allocated, the file not yet
+    // own: the pipe that holds no frame yet, the file not yet
     // written, every list at its bound, and stdout's buffer.
     let unwritten = syscall::pipe().expect("a pipe before anything is taken");
     let file = syscall::open(b"/tmp/kernel_objects_refused.bin", OpenFlags::READ | OpenFlags::WRITE | OpenFlags::CREATE | OpenFlags::TRUNCATE)
@@ -63,7 +63,7 @@ fn main() {
         ("a pipe", syscall::pipe().map(|_| ())),
         ("a port", syscall::port_create().map(|_| ())),
         ("a directory", syscall::mkdir(b"/tmp/kernel_objects_refused_more")),
-        ("a pipe's first write, its ring", syscall::write(unwritten.write, b"x").map(|_| ())),
+        ("a pipe's first write, its frame", syscall::write(unwritten.write, b"x").map(|_| ())),
         ("a /tmp file's page", syscall::write(file, &[0x5a; PAGE]).map(|_| ())),
         ("a /tmp file's page at an offset", syscall::pwrite(file, &[0x5a; PAGE], HOLE).map(|_| ())),
         ("a memory object", syscall::shm_create(PAGE).map(|_| ())),

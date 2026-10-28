@@ -1,15 +1,26 @@
-//! Who holds a pipe's two ends, what a watch on one of them is told, and how
-//! a write lands in its ring.
+//! Who holds a pipe's two ends, what a watch on one of them is told, how a
+//! write lands, and the frames its bytes are kept in.
 //!
 //! A pipe end is held by counted references, one per object that names it: a
 //! handle duplicated or moved to another process is the same object or another
 //! reference, so an end is gone only when the last of them is. Every answer
-//! here is a function of the two counts and of what the ring holds, read under
+//! here is a function of the two counts and of what the pipe holds, read under
 //! the kernel's pipe lock.
 
 #![forbid(unsafe_code)]
 
-use toyos_abi::syscall::MAX_WHOLE_PIPE_WRITE;
+use alloc::collections::vec_deque::{Drain, VecDeque};
+use core::ops::Range;
+
+use toyos_abi::syscall::{MAX_WHOLE_PIPE_WRITE, PIPE_CAPACITY};
+
+/// The bytes of one frame a pipe's bytes are kept in.
+pub const FRAME: usize = crate::frames::FRAME as usize;
+
+/// The most frames a pipe holds: its capacity, the first of them part-read.
+pub const MOST_FRAMES: usize = PIPE_CAPACITY / FRAME + 1;
+
+const _: () = assert!(PIPE_CAPACITY.is_multiple_of(FRAME) && MAX_WHOLE_PIPE_WRITE <= PIPE_CAPACITY);
 
 /// One end of a pipe.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -82,23 +93,23 @@ impl Holders {
 
     /// A read answers now: with bytes, or with the end of a stream no writer
     /// can add to.
-    pub fn readable(&self, available: u32) -> bool {
+    pub fn readable(&self, available: usize) -> bool {
         available > 0 || !self.held(End::Write)
     }
 
     /// A write waiting for `want` bytes of room answers now: it lands, or is
     /// refused for want of a reader.
-    pub fn writable(&self, space: u32, want: usize) -> bool {
-        space as usize >= want || !self.held(End::Read)
+    pub fn writable(&self, space: usize, want: usize) -> bool {
+        space >= want || !self.held(End::Read)
     }
 
-    /// The end opposite `end` has no holder, whatever the ring holds.
+    /// The end opposite `end` has no holder, whatever the pipe holds.
     pub fn other_end_gone(&self, end: End) -> bool {
         !self.held(end.other())
     }
 }
 
-/// How a write lands in a pipe's ring.
+/// How a write lands in a pipe.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum Landing {
     /// All of it or none: a message.
@@ -123,9 +134,129 @@ impl Landing {
 
     /// How many of `len` bytes land with `space` free; `None` until there is
     /// [`Self::room`].
-    pub fn takes(self, space: u32, len: usize) -> Option<usize> {
-        let space = space as usize;
+    pub fn takes(self, space: usize, len: usize) -> Option<usize> {
         (space >= self.room(len)).then(|| len.min(space))
+    }
+}
+
+
+/// What a pipe holds, in frames taken as it fills and given back as it
+/// drains. Its first unread byte is `head` bytes into the first frame, and
+/// the frames past its last byte are spare: kept for the next write while
+/// there are no more of them than frames holding bytes, and one besides. So a
+/// pipe holds at most twice the frames its bytes need and one more, never more
+/// than [`MOST_FRAMES`], and a stream that keeps a backlog in it takes no
+/// frame from the allocator.
+pub struct Bytes<F> {
+    frames: VecDeque<F>,
+    head: usize,
+    len: usize,
+}
+
+impl<F> Bytes<F> {
+    pub const fn new() -> Self {
+        Self { frames: VecDeque::new(), head: 0, len: 0 }
+    }
+
+    pub fn len(&self) -> usize {
+        self.len
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.len == 0
+    }
+
+    pub fn space(&self) -> usize {
+        PIPE_CAPACITY - self.len
+    }
+
+    /// The frames it holds, spares among them.
+    pub fn frames(&self) -> usize {
+        self.frames.len()
+    }
+
+    /// The frames it can list without growing its list.
+    pub fn listed(&self) -> usize {
+        self.frames.capacity()
+    }
+
+    /// Grow its list to `frames`, at most [`MOST_FRAMES`].
+    pub fn list(&mut self, frames: usize) {
+        assert!(frames <= MOST_FRAMES, "pipe: a list of {frames} frames");
+        self.frames.reserve_exact(frames.saturating_sub(self.frames.len()));
+    }
+
+    /// The frames holding bytes.
+    fn used(&self) -> usize {
+        (self.head + self.len).div_ceil(FRAME)
+    }
+
+    /// How many frames more a write of `n` bytes, at most [`Self::space`],
+    /// needs than it holds.
+    pub fn wants(&self, n: usize) -> usize {
+        assert!(n <= self.space(), "pipe: a {n}-byte write with room for {}", self.space());
+        (self.head + self.len + n).div_ceil(FRAME).saturating_sub(self.frames.len())
+    }
+
+    /// One frame more for the next write.
+    pub fn add(&mut self, frame: F) {
+        assert!(self.frames.len() < MOST_FRAMES, "pipe: a frame past the most it holds");
+        self.frames.push_back(frame);
+    }
+
+    /// Append `n` bytes, which [`Self::wants`] no more frames for: `copy` is
+    /// handed each run of them as its frame, where they go in it, and where
+    /// they start among the `n`.
+    pub fn write(&mut self, n: usize, mut copy: impl FnMut(&mut F, Range<usize>, usize)) {
+        assert_eq!(self.wants(n), 0, "pipe: a write past the frames it was given");
+        let (mut done, mut at) = (0, self.head + self.len);
+        while done < n {
+            let (frame, off) = (at / FRAME, at % FRAME);
+            let run = (FRAME - off).min(n - done);
+            copy(&mut self.frames[frame], off..off + run, done);
+            (done, at) = (done + run, at + run);
+        }
+        self.len += n;
+    }
+
+    /// Take up to `want` bytes from the front, handing `copy` each run as
+    /// [`Self::write`] does; a frame it empties becomes a spare. Answers how
+    /// many it took.
+    pub fn read(&mut self, want: usize, mut copy: impl FnMut(&F, Range<usize>, usize)) -> usize {
+        let n = want.min(self.len);
+        let mut done = 0;
+        while done < n {
+            let run = (FRAME - self.head).min(n - done);
+            copy(&self.frames[0], self.head..self.head + run, done);
+            (done, self.head, self.len) = (done + run, self.head + run, self.len - run);
+            if self.head == FRAME {
+                self.frames.rotate_left(1);
+                self.head = 0;
+            }
+        }
+        if self.len == 0 {
+            self.head = 0;
+        }
+        n
+    }
+
+    /// The spares past those it keeps, for the caller to give back.
+    pub fn surplus(&mut self) -> Drain<'_, F> {
+        let used = self.used();
+        let keep = used + (self.frames.len() - used).min(used.max(1));
+        self.frames.drain(keep..)
+    }
+
+    /// Every frame, for the caller to give back, and with them every byte.
+    pub fn clear(&mut self) -> Drain<'_, F> {
+        (self.head, self.len) = (0, 0);
+        self.frames.drain(..)
+    }
+}
+
+impl<F> Default for Bytes<F> {
+    fn default() -> Self {
+        Self::new()
     }
 }
 
@@ -229,8 +360,8 @@ mod tests {
             Self { holders: made(), ring: VecDeque::new(), cap }
         }
 
-        fn space(&self) -> u32 {
-            (self.cap - self.ring.len()) as u32
+        fn space(&self) -> usize {
+            self.cap - self.ring.len()
         }
 
         fn write(&mut self, bytes: &[u8], landing: Landing) -> Wrote {
@@ -458,5 +589,142 @@ mod tests {
     #[test]
     fn competing_partial_writes_tear_in_the_same_run() {
         assert!(compete(Landing::Partial).is_err(), "the run never split a record, so it proves nothing");
+    }
+
+    /// A frame of the model: its bytes and a name, so a frame handed out twice
+    /// or lost is seen.
+    struct Frame {
+        id: usize,
+        bytes: Vec<u8>,
+    }
+
+    /// A pipe's bytes with an allocator that counts what it hands out.
+    struct Held {
+        bytes: Bytes<Frame>,
+        taken: usize,
+        returned: Vec<usize>,
+    }
+
+    impl Held {
+        fn new() -> Self {
+            Self { bytes: Bytes::new(), taken: 0, returned: Vec::new() }
+        }
+
+        /// Write `src` as `kernel::pipe` does: the frames it wants, then the
+        /// copy.
+        fn write(&mut self, src: &[u8]) {
+            for _ in 0..self.bytes.wants(src.len()) {
+                self.bytes.add(Frame { id: self.taken, bytes: vec![0xEE; FRAME] });
+                self.taken += 1;
+            }
+            self.bytes.write(src.len(), |frame, within, at| {
+                frame.bytes[within.clone()].copy_from_slice(&src[at..at + within.len()]);
+            });
+        }
+
+        fn read(&mut self, want: usize) -> Vec<u8> {
+            let mut out = vec![0; want];
+            let n = self.bytes.read(want, |frame, within, at| {
+                out[at..at + within.len()].copy_from_slice(&frame.bytes[within]);
+            });
+            out.truncate(n);
+            self.returned.extend(self.bytes.surplus().map(|frame| frame.id));
+            out
+        }
+
+        /// Each frame handed out once is held or was given back, never both.
+        fn accounted(&self) {
+            let mut seen: Vec<usize> = self.bytes.frames.iter().map(|f| f.id).chain(self.returned.iter().copied()).collect();
+            seen.sort_unstable();
+            assert_eq!(seen, (0..self.taken).collect::<Vec<_>>(), "a frame was lost or given back twice");
+        }
+    }
+
+    fn pattern(from: usize, len: usize) -> Vec<u8> {
+        (from..from + len).map(|i| (i % 251) as u8).collect()
+    }
+
+    /// Writes and reads of every size, across frame edges and the whole
+    /// capacity, come back as written, and what the pipe keeps stays within
+    /// its bound: twice the frames its bytes need and one, at most
+    /// `MOST_FRAMES`.
+    #[test]
+    fn a_stream_comes_back_exact_and_the_frames_stay_bounded() {
+        let mut seed = 0x9e37_79b9_u64;
+        let mut random = move |below: usize| {
+            seed ^= seed << 13;
+            seed ^= seed >> 7;
+            seed ^= seed << 17;
+            (seed % below as u64) as usize
+        };
+        let mut pipe = Held::new();
+        let (mut written, mut read) = (0, 0);
+        for turn in 0..4000 {
+            let most = [1, 64, FRAME - 1, FRAME + 1, 64 << 10, PIPE_CAPACITY][turn % 6];
+            let n = random(most + 1).min(pipe.bytes.space());
+            pipe.write(&pattern(written, n));
+            written += n;
+            assert!(pipe.bytes.frames() <= MOST_FRAMES);
+            let got = pipe.read(random(most + 1));
+            assert_eq!(got, pattern(read, got.len()), "turn {turn}: bytes {read}.. came back wrong");
+            read += got.len();
+            assert!(
+                pipe.bytes.frames() <= 2 * pipe.bytes.used() + 1,
+                "turn {turn}: {} frames kept for {} bytes",
+                pipe.bytes.frames(),
+                pipe.bytes.len()
+            );
+            pipe.accounted();
+        }
+        let rest = pipe.read(PIPE_CAPACITY);
+        assert_eq!(rest, pattern(read, written - read));
+        assert_eq!(pipe.bytes.frames(), 1, "a drained pipe keeps one frame");
+    }
+
+    /// A full pipe whose first frame is part-read holds `MOST_FRAMES`.
+    #[test]
+    fn a_full_pipe_part_read_holds_the_most_frames() {
+        let mut pipe = Held::new();
+        pipe.write(&pattern(0, 10));
+        assert_eq!(pipe.read(5), pattern(0, 5));
+        let rest = pipe.bytes.space();
+        pipe.write(&pattern(10, rest));
+        assert_eq!((pipe.bytes.len(), pipe.bytes.frames()), (PIPE_CAPACITY, MOST_FRAMES));
+        assert_eq!(pipe.read(PIPE_CAPACITY), [pattern(5, 5), pattern(10, rest)].concat());
+    }
+
+    /// A stream that keeps a backlog in the pipe, a little or nearly all of
+    /// it, takes no frame after its first round: the frames a read empties
+    /// carry the next write.
+    #[test]
+    fn a_steady_stream_takes_no_frames() {
+        const CHUNK: usize = 64 << 10;
+        for backlog in [CHUNK, PIPE_CAPACITY - CHUNK] {
+            let mut pipe = Held::new();
+            pipe.write(&vec![1; backlog]);
+            pipe.write(&vec![1; CHUNK]);
+            pipe.read(CHUNK);
+            let taken = pipe.taken;
+            for _ in 0..100 {
+                pipe.write(&vec![1; CHUNK]);
+                pipe.read(CHUNK);
+            }
+            assert_eq!(pipe.taken, taken, "a backlog of {backlog} bytes took frames each round");
+        }
+    }
+
+    /// A pipe that held much and is drained gives back all but one frame,
+    /// and `clear` gives back every one.
+    #[test]
+    fn a_drained_pipe_gives_its_frames_back() {
+        let mut pipe = Held::new();
+        pipe.write(&vec![1; PIPE_CAPACITY]);
+        assert_eq!(pipe.bytes.frames(), PIPE_CAPACITY / FRAME);
+        pipe.read(PIPE_CAPACITY);
+        assert_eq!((pipe.bytes.frames(), pipe.returned.len()), (1, PIPE_CAPACITY / FRAME - 1));
+        pipe.write(&[1; 3]);
+        assert_eq!(pipe.taken, PIPE_CAPACITY / FRAME, "the kept frame did not carry the next write");
+        assert_eq!(pipe.bytes.clear().count(), 1);
+        assert_eq!((pipe.bytes.len(), pipe.bytes.frames()), (0, 0));
     }
 }

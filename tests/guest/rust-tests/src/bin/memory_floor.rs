@@ -8,7 +8,7 @@
 //! while that holds them:
 //!
 //! - a server in an ordinary job answers this job's connection, before any of
-//!   that, and its account does not move: a connection's rings are its
+//!   that, and its account does not move: a connection's pipes are its
 //!   client's;
 //! - an ordinary job's spawn is refused, so the exhaustion is real;
 //! - the supervisor answers a stop's request on a new connection, which takes
@@ -17,7 +17,7 @@
 //!   refused it; the supervisor is refused its restart, which it says in the
 //!   log, and keeps its port, where a new client's request waits;
 //! - with `--input`, a key the host types reaches `inputsink` through
-//!   ps2server, whose floor holds the ring its connection's first write takes;
+//!   ps2server, whose floor holds the frames its connection's writes take;
 //!
 //! and then it kills the greedy job, and the waiting request is answered by a
 //! `starveling` the supervisor started again because memory came back.
@@ -86,7 +86,7 @@ fn control(input: bool) {
     println!("  memory_floor: this job's floor is {} KiB, and it holds {} KiB", account.floor >> 10, (account.committed + account.kernel) >> 10);
 
     // Every connection that crosses the exhaustion is made and used once
-    // before it, so neither end allocates a ring for it then.
+    // before it, so each of its pipes keeps a frame for what crosses it then.
     let keys = input.then(|| {
         let keys = endow::service("keys").expect("the image gives test-runner `keys`");
         keys.signal(HELLO).expect("hello to inputsink");
@@ -101,7 +101,7 @@ fn control(input: bool) {
     let mut log = Log { pipe: logkeeper_api::read().expect("the log, before anything is taken").pipe, bytes: vec![0; 64 << 10], held: 0 };
     log.drain();
 
-    rings_are_the_clients(&cap);
+    pipes_are_the_clients(&cap);
 
     let job = cap.new_job().expect("an ordinary job for the greedy one");
     let mut greedy = Command::new(ME)
@@ -188,10 +188,10 @@ fn control(input: bool) {
 }
 
 /// A server in an ordinary job of its own accepts this job's connection and
-/// answers it: both of the connection's rings are its client's, so the
+/// answers it: both of the connection's pipes are its client's, so the
 /// server's reply costs its job nothing, and no client can spend a server's
 /// floor by connecting to it.
-fn rings_are_the_clients(cap: &SysCap) {
+fn pipes_are_the_clients(cap: &SysCap) {
     let (acceptor, connector) = toyos::port::create().expect("a port");
     let job = cap.new_job().expect("a job for the server");
     let mut server = Command::new(ME)
@@ -217,7 +217,7 @@ fn rings_are_the_clients(cap: &SysCap) {
     assert_eq!(after.kernel, before.kernel, "the server's reply was charged to the server");
     server.kill().expect("end the server");
     server.wait().expect("the server's end");
-    println!("  PASS: a connection's rings are its client's: the server's reply cost its job nothing");
+    println!("  PASS: a connection's pipes are its client's: the server's reply cost its job nothing");
 }
 
 /// Accept one connection on the endowed acceptor and answer its [`PING`].

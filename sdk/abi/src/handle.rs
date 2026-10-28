@@ -134,7 +134,7 @@ impl Rights {
     pub const TRANSFER: Rights = Rights(1 << 1);
     pub const READ: Rights = Rights(1 << 2);
     pub const WRITE: Rights = Rights(1 << 3);
-    /// Shared memory, a pipe's ring page, an [inbox](crate::inbox)'s rings.
+    /// Shared memory, an [inbox](crate::inbox)'s rings.
     pub const MAP: Rights = Rights(1 << 4);
     /// Block on it, or name it in an [`OP_WATCH`](crate::inbox::OP_WATCH).
     pub const WAIT: Rights = Rights(1 << 5);
