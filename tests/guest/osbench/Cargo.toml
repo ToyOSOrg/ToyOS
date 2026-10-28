@@ -27,6 +27,9 @@ toyos-abi = { path = "../../../sdk/abi" }
 # tail group reads the diary, the counters and the roster with.
 toyos = { path = "../../../sdk/toyos" }
 toyos-trace = { path = "../../../lib/trace" }
+# netstack's counters, which the LAN group's transfer rows report, asked as the reader asks.
+inspect = { path = "../../../system/inspect" }
+toyos-inspect = { path = "../../../lib/inspect" }
 
 [target.'cfg(target_os = "linux")'.dependencies]
 libc = "0.2"
