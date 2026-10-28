@@ -460,3 +460,51 @@ pub fn link_of(_local: std::net::IpAddr) -> Result<(osbench_lan::link::Link, Str
 pub fn package_sensor() -> Result<super::Sensor, String> {
     Err("no counter or service carries the package's temperature".into())
 }
+
+/// Requests straight through the file server's client (`toyos::fs::Dir`),
+/// under none of std's descriptor table and path routing: beside the same
+/// rows through std, what that layer costs. Only for a directory a file
+/// server serves; the kernel's `/tmp` has no client to go around.
+pub mod direct {
+    use toyos::fs::{Base, Dir, Error, O_READ, SEEK_START};
+
+    use crate::measure::each;
+    use crate::report::refuse;
+
+    /// `dir`'s capability, connected: `None` where no file server serves it.
+    pub fn connect(dir: &str) -> Option<Dir> {
+        let names = toyos::endow::namespace()?;
+        match Dir::connect(names, &format!("{}{dir}", toyos::fs::CAPABILITY_PREFIX)) {
+            Ok(d) => Some(d),
+            Err(Error::NotHeld) => None,
+            Err(e) => panic!("osbench: {dir}'s file server would not connect: {e:?}"),
+        }
+    }
+
+    /// The `direct` rows, on `small` and `big` (`pages` pages), each a path
+    /// under the directory `dir` serves.
+    pub fn rows(
+        dir: &mut Dir,
+        name: &dyn Fn(&str) -> String,
+        fields: &[(&'static str, String)],
+        small: &str,
+        big: &str,
+        at: impl Fn(usize) -> u64,
+    ) {
+        let word = |e: Error| format!("{e:?}");
+        let opened = match dir.open(Base::Root, big, O_READ) {
+            Ok(o) => o.fid,
+            Err(e) => return refuse(&name("direct"), format!("{e:?}")),
+        };
+        let mut buf = vec![0u8; 4096];
+        each(&name("direct.seek"), 100, 2000, fields, |i| dir.seek(opened, SEEK_START, at(i) as i64).map(drop).map_err(word));
+        each(&name("direct.read_4k_at"), 100, 2000, fields, |i| {
+            dir.seek(opened, SEEK_START, at(i) as i64).map_err(word)?;
+            dir.read(opened, &mut buf).map(drop).map_err(word)
+        });
+        each(&name("direct.pread_4k"), 100, 2000, fields, |i| dir.pread(opened, at(i), &mut buf).map(drop).map_err(word));
+        each(&name("direct.fstat"), 100, 2000, fields, |_| dir.fstat(opened).map(drop).map_err(word));
+        each(&name("direct.stat"), 100, 2000, fields, |_| dir.stat(Base::Root, small, true).map(drop).map_err(|e| format!("{e:?}")));
+        dir.close(opened);
+    }
+}
