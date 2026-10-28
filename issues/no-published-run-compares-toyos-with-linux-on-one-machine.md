@@ -21,7 +21,9 @@ its groups:
   sides' IDs match or either side's changed across it;
 - lateness past a 1 ms timer: `time.timer_1ms.late`;
 - NVMe reads, read-only: `nvme.read.*`;
-- an idle minute's package energy: `energy.idle_60s.package`;
+- the package's power, idle and under defined loads, with its C-state
+  residency where Intel documents it: `energy.*`, run only by name, a ToyOS
+  boot of its own (`osbench_energy`) and as root under Linux;
 - the machine's PCI, USB, NVMe and cpuidle identity: `identity`, with no
   serial number or network identifier;
 - TCP connect, round trip and throughput between the two benches:
@@ -67,12 +69,13 @@ comparison until it can:
 - **NVMe reads**: a program reaches a disk's blocks only through a grant the
   supervisor mints for a file server's role or the idle slot, and the bench's
   NVMe holds another system.
-- **Package energy and temperature**: no counter carries either
+- **Package temperature**: no counter carries it
   (`toyos_abi::counters::Counter`), so the ToyOS crunch runs its one-thread
   phase alone and reports every all-core row `unmeasured`, with nothing to
-  stop it at. The kernel's sampler of `IA32_PACKAGE_THERM_STATUS`,
-  `MSR_TEMPERATURE_TARGET` and `MSR_PKG_ENERGY_STATUS` in
-  `issues/the-kernel-owns-cpu-performance-state.md` is what closes both. The
+  stop it at. The sampler's `IA32_PACKAGE_THERM_STATUS` and
+  `MSR_TEMPERATURE_TARGET` in
+  `issues/the-kernel-owns-cpu-performance-state.md` is what closes it; the
+  package's energy is a counter now (`Counter::PackageEnergy`). The
   first ToyOS crunch on the T14 held 3,788 MHz all-core where Linux fell to
   1.7-1.9 GHz, which
   `issues/the-t14s-thermal-modes-do-not-move-its-package-power-limits.md`

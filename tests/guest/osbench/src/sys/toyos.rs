@@ -244,6 +244,11 @@ pub mod diag {
         /// Idle periods the kernel chose a declared deep state for, counted
         /// as each ends.
         pub deep_idles: Option<u64>,
+        /// The package's counters, on the CPU that reads them.
+        pub package_energy: Option<u64>,
+        pub rapl_power_unit: Option<u64>,
+        pub package_residency: [Option<u64>; 4],
+        pub core_energy: Option<u64>,
     }
 
     /// The capability's diagnostics for the rows that read the counters
@@ -281,6 +286,11 @@ pub mod diag {
                         core_c6: r.get(Counter::CoreC6),
                         core_c7: r.get(Counter::CoreC7),
                         deep_idles: r.get(Counter::DeepIdles),
+                        package_energy: r.get(Counter::PackageEnergy),
+                        rapl_power_unit: r.get(Counter::RaplPowerUnit),
+                        package_residency: [Counter::PackageC2, Counter::PackageC3, Counter::PackageC6, Counter::PackageC7]
+                            .map(|c| r.get(c)),
+                        core_energy: r.get(Counter::CoreEnergy),
                     })
                 })
                 .collect()
@@ -366,6 +376,69 @@ pub mod diag {
             Some(t) => format!("{what}:{}/{}", t.pid, t.tid),
             None => what.to_string(),
         }
+    }
+}
+
+/// The power counters, through the runner's capability: `SYS_COUNTERS`
+/// under `Rights::TRACE`, the package's held by the boot processor. Every read
+/// kicks every CPU (`toyos_abi::counters`), the package's too.
+pub mod power {
+    use super::super::{CpuPower, Package, Refused};
+    use super::diag::{self, CpuCounts};
+
+    fn read() -> Result<Vec<CpuCounts>, Refused> {
+        let d = diag::shared().ok_or_else(|| Refused::Withheld("this boot endows osbench no capability".into()))?;
+        d.counters().map_err(Refused::Failed)
+    }
+
+    pub fn package() -> Result<Package, Refused> {
+        let cpus = read()?;
+        let held = cpus.into_iter().find(|c| c.package_energy.is_some() || c.package_residency.iter().any(Option::is_some));
+        let Some(c) = held else {
+            return Err(Refused::Absent(
+                "no CPU's record carries the package's counters: the kernel's `counters: cpu0 reads` line says whether it \
+                 reads them, or the capability holds no TRACE"
+                    .into(),
+            ));
+        };
+        if c.stale {
+            return Err(Refused::Failed(format!("cpu{}, which reads the package, answered stale", c.cpu)));
+        }
+        Ok(Package {
+            tsc: c.stamp.ok_or_else(|| Refused::Failed(format!("cpu{}'s record carries no stamp", c.cpu)))?,
+            energy: c.package_energy,
+            power_unit: c.rapl_power_unit,
+            residency: c.package_residency,
+        })
+    }
+
+    pub fn cpus() -> Result<Vec<CpuPower>, Refused> {
+        read()?
+            .into_iter()
+            .map(|c| {
+                if c.stale {
+                    return Err(Refused::Failed(format!("cpu{} answered stale", c.cpu)));
+                }
+                Ok(CpuPower {
+                    cpu: c.cpu,
+                    core: crate::arch::core_of(c.apic),
+                    tsc: c.stamp.ok_or_else(|| Refused::Failed(format!("cpu{}'s record carries no stamp", c.cpu)))?,
+                    aperf: c.aperf,
+                    mperf: c.mperf,
+                    core_c6: c.core_c6,
+                    core_c7: c.core_c7,
+                    core_energy: c.core_energy,
+                })
+            })
+            .collect()
+    }
+
+    /// The CPU time every process but this one has run for, in nanoseconds,
+    /// by the roster.
+    pub fn busy_ns() -> Result<u64, Refused> {
+        let d = diag::shared().ok_or_else(|| Refused::Withheld("this boot endows osbench no capability".into()))?;
+        let me = std::process::id();
+        Ok(d.roster().iter().filter(|((pid, _), _)| *pid != me).map(|(_, (_, ns))| ns).sum())
     }
 }
 

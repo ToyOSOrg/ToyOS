@@ -1,79 +1,253 @@
-//! An idle minute's package energy: this program asleep for 60 s and the
-//! CPU package's energy counter read each second, mW per second. Linux reads
-//! its powercap `package-0` zone, whose counter takes root to read; ToyOS's
-//! kernel counts no package energy for a program to read.
+//! The package's power, idle and under defined loads, read off the same
+//! registers on both systems (`sys::power`): its energy counter and unit
+//! (SDM Vol. 3B §17.10, PPR 55922's RAPL), its C-state residency where Intel
+//! documents it, and each CPU's APERF/MPERF, core residency and, on AMD, core
+//! energy. ToyOS reads them through `SYS_COUNTERS` under `Rights::TRACE`, and
+//! Linux through `/dev/cpu/<n>/msr` as root.
+//!
+//! **First the machine is let go quiet** ([`osbench_rules::energy::quiet`]),
+//! for at most [`QUIET_BOUND`]: a ToyOS boot starts the group while its
+//! services are still starting, the ACPI server's idle states among them.
+//!
+//! Then each load runs for its span, and the package is read once a second:
+//! each row is that second's power, its residency and, under a spin, its
+//! energy per [`crate::chunk`]. Each CPU's counters are read at the load's
+//! two ends, so Linux sends no IPI inside a second; ToyOS's every read kicks
+//! every CPU. No figure is better higher or lower by itself: a load that ran
+//! more work may draw more.
 
-const BENCH: &str = "energy.idle_60s.package";
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering::Relaxed};
+use std::time::{Duration, Instant};
+
+use osbench_rules::energy::{self, RANGE};
+
+use crate::report::{note, result};
+#[cfg(target_os = "linux")]
+use crate::sys;
+use crate::sys::{power, CpuPower, Package, Refused};
+
+/// The longest the group waits for the machine to go quiet.
+const QUIET_BOUND: Duration = Duration::from_secs(120);
+
+/// The residency rows, in [`Package::residency`]'s order.
+const STATES: [&str; 4] = ["pc2", "pc3", "pc6", "pc7"];
+
+#[derive(Clone, Copy)]
+enum Load {
+    Idle,
+    /// One thread sleeping this long and waking, over and over.
+    Wake(Duration),
+    /// This many threads each running [`crate::chunk`] back to back.
+    Spin(usize),
+}
 
 pub fn suite() {
-    imp::suite();
-}
-
-#[cfg(target_os = "toyos")]
-mod imp {
-    pub fn suite() {
-        crate::report::unsupported(
-            super::BENCH,
-            "no counter carries the package's energy: toyos_abi::counters::Counter has none",
-        );
+    #[cfg(target_os = "linux")]
+    {
+        power::conditions();
+        // Its own CPU is the one whose registers the package is read from.
+        sys::pin_self(0);
     }
-}
-
-#[cfg(target_os = "linux")]
-mod imp {
-    use std::fs;
-    use std::path::{Path, PathBuf};
-    use std::time::{Duration, Instant};
-
-    use crate::report::{condition, refuse, result, unmeasured};
-
-    const SECONDS: usize = 60;
-
-    fn read_u64(path: &Path) -> std::io::Result<u64> {
-        fs::read_to_string(path)?.trim().parse().map_err(std::io::Error::other)
-    }
-
-    /// The powercap zone whose name is `package-0`.
-    fn zone() -> Option<PathBuf> {
-        let mut zones: Vec<PathBuf> = fs::read_dir("/sys/class/powercap").ok()?.flatten().map(|e| e.path()).collect();
-        zones.sort();
-        zones.into_iter().find(|z| fs::read_to_string(z.join("name")).is_ok_and(|n| n.trim() == "package-0"))
-    }
-
-    pub fn suite() {
-        let Some(zone) = zone() else {
-            return unmeasured(super::BENCH, "no powercap zone is named package-0", &[]);
-        };
-        let energy = zone.join("energy_uj");
-        let range = match read_u64(&zone.join("max_energy_range_uj")) {
-            Ok(range) => range,
-            Err(e) => return refuse(super::BENCH, format!("max_energy_range_uj: {e}")),
-        };
-        let mut before = match read_u64(&energy) {
-            Ok(uj) => uj,
-            Err(e) if e.kind() == std::io::ErrorKind::PermissionDenied => {
-                return unmeasured(super::BENCH, &format!("energy_uj was refused ({e}): `sudo osbench energy` reads it"), &[]);
-            }
-            Err(e) => return refuse(super::BENCH, format!("energy_uj: {e}")),
-        };
-        condition("energy.zone", zone.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default());
-        let start = Instant::now();
-        let mut at = start;
-        let mut mw = Vec::with_capacity(SECONDS);
-        for second in 1..=SECONDS {
-            // The minute is the measurement: each read is due a second after the start, not after the last read.
-            std::thread::sleep((start + Duration::from_secs(second as u64)).saturating_duration_since(Instant::now()));
-            let after = match read_u64(&energy) {
-                Ok(uj) => uj,
-                Err(e) => return refuse(super::BENCH, format!("energy_uj: {e}")),
-            };
-            let now = Instant::now();
-            let Some(uj) = osbench_rules::energy::span(before, after, range) else {
-                return refuse(super::BENCH, format!("energy_uj read {after}, past its range {range}"));
-            };
-            mw.push(uj * 1000 / u64::try_from((now - at).as_micros()).unwrap_or(u64::MAX).max(1));
-            (before, at) = (after, now);
+    let loads = [
+        ("energy.idle", 60, Load::Idle),
+        ("energy.wake_10ms", 30, Load::Wake(Duration::from_millis(10))),
+        ("energy.spin.t1", 30, Load::Spin(1)),
+        ("energy.spin.all", 30, Load::Spin(crate::cpus())),
+    ];
+    if let Err(why) = power::package() {
+        for (bench, ..) in loads {
+            why.clone().report(&format!("{bench}.package"));
         }
-        result(super::BENCH, "mW", &mut mw, &[("seconds", SECONDS.to_string())]);
+        return;
+    }
+    wait_quiet();
+    for (bench, seconds, load) in loads {
+        let mut measured = Ok(());
+        crate::around::ran_during(bench, || measured = row(bench, seconds, load));
+        if let Err(why) = measured {
+            why.report(&format!("{bench}.package"));
+        }
+    }
+}
+
+/// Seconds of the machine's CPU time, each read a second apart, until the
+/// last few were each quiet or [`QUIET_BOUND`] has passed.
+fn wait_quiet() {
+    let start = Instant::now();
+    let mut seconds = Vec::new();
+    let mut before = match power::busy_ns() {
+        Ok(ns) => ns,
+        Err(why) => return note("energy.quiet", &[("unread", why.why())]),
+    };
+    while !energy::quiet(&seconds) && start.elapsed() < QUIET_BOUND {
+        std::thread::sleep(Duration::from_secs(1));
+        let now = match power::busy_ns() {
+            Ok(now) => now,
+            Err(why) => return note("energy.quiet", &[("unread", why.why())]),
+        };
+        // A ToyOS process that ended leaves the roster with its time.
+        seconds.push(now.saturating_sub(before));
+        before = now;
+    }
+    let last_us: Vec<String> = seconds.iter().rev().take(energy::QUIET_SECONDS).rev().map(|ns| (ns / 1000).to_string()).collect();
+    note(
+        "energy.quiet",
+        &[
+            ("quiet", energy::quiet(&seconds).to_string()),
+            ("waited_s", start.elapsed().as_secs().to_string()),
+            ("last_busy_us", last_us.join(",")),
+        ],
+    );
+}
+
+/// One thread's chunk count, on a line of its own.
+#[repr(align(128))]
+#[derive(Default)]
+struct Slot(AtomicU64);
+
+/// Run `load` for `seconds`, reading the package each second, and report.
+fn row(bench: &str, seconds: u64, load: Load) -> Result<(), Refused> {
+    if let Load::Spin(_) = load {
+        crate::clock::settle();
+    }
+    let threads = match load {
+        Load::Idle => 0,
+        Load::Wake(_) => 1,
+        Load::Spin(n) => n,
+    };
+    let stop = AtomicBool::new(false);
+    let counts: Vec<Slot> = (0..threads).map(|_| Slot::default()).collect();
+    let first = power::cpus()?;
+    let mut samples = Samples::default();
+    let sampled = std::thread::scope(|s| {
+        for slot in &counts {
+            let stop = &stop;
+            s.spawn(move || {
+                #[cfg(target_os = "linux")]
+                sys::unpin(sys::tid());
+                while !stop.load(Relaxed) {
+                    match load {
+                        Load::Wake(period) => std::thread::sleep(period),
+                        _ => {
+                            crate::chunk();
+                        }
+                    }
+                    slot.0.fetch_add(1, Relaxed);
+                }
+            });
+        }
+        let sampled = sample(seconds, &counts, matches!(load, Load::Spin(_)), &mut samples);
+        stop.store(true, Relaxed);
+        sampled
+    });
+    sampled?;
+    let last = power::cpus()?;
+    let unit = samples.power_unit;
+    let mut fields = vec![("seconds", seconds.to_string())];
+    let done: u64 = counts.iter().map(|c| c.0.load(Relaxed)).sum();
+    match load {
+        Load::Idle => {}
+        Load::Wake(_) => fields.push(("wakes", done.to_string())),
+        Load::Spin(n) => {
+            fields.push(("threads", n.to_string()));
+            fields.push(("chunks_per_s", (done / seconds.max(1)).to_string()));
+        }
+    }
+    if let Some(mw) = unit.and_then(|unit| cores_mw(&first, &last, unit, samples.span_ns)) {
+        fields.push(("cores_mw", mw.to_string()));
+    }
+    result(&format!("{bench}.package"), "mW", &mut samples.mw, &fields);
+    for (state, permille) in STATES.iter().zip(&mut samples.residency) {
+        if !permille.is_empty() {
+            result(&format!("{bench}.{state}"), "permille", permille, &[]);
+        }
+    }
+    if !samples.nj_per_chunk.is_empty() {
+        result(&format!("{bench}.per_chunk"), "nJ", &mut samples.nj_per_chunk, &[]);
+    }
+    cpus(bench, &first, &last);
+    Ok(())
+}
+
+#[derive(Default)]
+struct Samples {
+    mw: Vec<u64>,
+    residency: [Vec<u64>; 4],
+    nj_per_chunk: Vec<u64>,
+    power_unit: Option<u64>,
+    span_ns: u64,
+}
+
+/// A reading of the package each second for `seconds`, into `out`, with the
+/// energy per chunk where `per_chunk`.
+fn sample(seconds: u64, counts: &[Slot], per_chunk: bool, out: &mut Samples) -> Result<(), Refused> {
+    let chunks = || counts.iter().map(|c| c.0.load(Relaxed)).sum::<u64>();
+    let mut before: Package = power::package()?;
+    let (start, mut at, mut done) = (Instant::now(), Instant::now(), chunks());
+    out.power_unit = before.power_unit;
+    for second in 1..=seconds {
+        // The span is the measurement: each read is due a second after the start, not after the last read.
+        std::thread::sleep((start + Duration::from_secs(second)).saturating_duration_since(Instant::now()));
+        let after = power::package()?;
+        let (now, done_now) = (Instant::now(), chunks());
+        let ns = u64::try_from((now - at).as_nanos()).expect("a second under 584 years");
+        if let (Some(e0), Some(e1), Some(unit)) = (before.energy, after.energy, after.power_unit) {
+            let steps = energy::span(e0, e1, RANGE)
+                .ok_or_else(|| Refused::Failed(format!("the energy counter read {e1:#x}, past 32 bits")))?;
+            let uj = energy::microjoules(steps, unit);
+            out.mw.push(energy::milliwatts(uj, ns));
+            if per_chunk && done_now > done {
+                out.nj_per_chunk.push(uj * 1000 / (done_now - done));
+            }
+        }
+        let ticks = after.tsc.wrapping_sub(before.tsc);
+        for (i, rows) in out.residency.iter_mut().enumerate() {
+            if let (Some(r0), Some(r1)) = (before.residency[i], after.residency[i]) {
+                rows.push(osbench_rules::window::permille(r1.wrapping_sub(r0), ticks));
+            }
+        }
+        (before, at, done) = (after, now, done_now);
+    }
+    out.span_ns = u64::try_from(start.elapsed().as_nanos()).expect("a row under 584 years");
+    Ok(())
+}
+
+/// The cores' power over the row where each core counts its own energy:
+/// each core once, SMT siblings reading the same counter.
+fn cores_mw(first: &[CpuPower], last: &[CpuPower], unit: u64, span_ns: u64) -> Option<u64> {
+    let mut seen = std::collections::BTreeSet::new();
+    let mut steps = 0;
+    for b in last {
+        let a = first.iter().find(|a| a.cpu == b.cpu)?;
+        if seen.insert(b.core) {
+            steps += energy::span(a.core_energy?, b.core_energy?, RANGE)?;
+        }
+    }
+    (!seen.is_empty()).then(|| energy::milliwatts(energy::microjoules(steps, unit), span_ns))
+}
+
+/// One line a CPU: its APERF/MPERF ratio and its core's C6 and C7 residency
+/// over the row, each against its own TSC, which the residency counts at
+/// (SDM Vol. 4 Table 2-20).
+fn cpus(bench: &str, first: &[CpuPower], last: &[CpuPower]) {
+    let delta = |x: Option<u64>, y: Option<u64>| x.zip(y).map(|(x, y)| y.wrapping_sub(x));
+    let shown = |v: Option<u64>| v.map_or("-".to_string(), |v| v.to_string());
+    for b in last {
+        let Some(a) = first.iter().find(|a| a.cpu == b.cpu) else { continue };
+        let ticks = b.tsc.wrapping_sub(a.tsc);
+        let permille = |x, y| shown(delta(x, y).map(|d| osbench_rules::window::permille(d, ticks)));
+        let ratio = delta(a.aperf, b.aperf)
+            .zip(delta(a.mperf, b.mperf))
+            .and_then(|(aperf, mperf)| osbench_rules::window::aperf_mperf_permille(aperf, mperf));
+        note(
+            &format!("{bench}.cpus"),
+            &[
+                ("cpu", b.cpu.to_string()),
+                ("core", b.core.to_string()),
+                ("aperf_mperf_permille", shown(ratio)),
+                ("core_c6_permille", permille(a.core_c6, b.core_c6)),
+                ("core_c7_permille", permille(a.core_c7, b.core_c7)),
+            ],
+        );
     }
 }
