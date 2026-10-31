@@ -39,6 +39,16 @@ The kernel keeps only generic mechanisms:
 - A claim keeps its function's firmware-reserved ranges mapped in its domain from attach on: VT-d RMRRs, and AMD-Vi's unity ranges.
 - The panic surface: a linear buffer the driver lent, and the bounded register writes in its own BAR that make it visible.
 
+## AMD's adapter boundary
+
+- **DC is vendored unmodified where possible.** Its patch set covers only the OS interface DC is written against (`dm_services`, `os_types.h`) and its build. It is pinned with a hash under the fork rules, and its licence goes through the licence evaluator and `NOTICE`.
+- **ToyOS's side is Rust and written clean-room.** Linux's `amdgpu_dm` and the DRM helpers are another implementation of that side, so a reader derives facts from them and a separate writer implements. DC itself is used as published, not read as a specification.
+- **Where the line sits for external input.** Every byte a sink sends reaches a Rust parser first wherever DC takes it from its OS side:
+  - EDID: DC receives capabilities ToyOS's side derives in Rust (`toyos-edid`), never raw bytes.
+  - DPCD: read through the AUX path ToyOS's side carries, where DC routes AUX through its OS interface. Whether DC does so for every DPCD read is a fact the reader establishes first.
+  - HDCP: DC's HDCP module is not built, because DRM is out of release 1.
+- **What DC still parses itself is a recorded compromise.** That covers any DPCD and DSC capability DC reads straight off its AUX hardware. It stays contained by the driver's process and IOMMU domain, and it is filed in `issues/` with its exit: a Rust validator on that path, or upstream DC taking it from its OS side.
+
 ## Defaults the owner may overturn
 
 - **Display audio** (HDMI/DP) is in, after modesetting. The driver powers the audio path and publishes ELD; `hda` keeps the codec.
