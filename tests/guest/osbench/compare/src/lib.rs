@@ -277,9 +277,10 @@ pub fn better(unit: &str) -> Option<Better> {
 const PATHS: [(&str, &str, usize); 2] = [("lan.", "lan.peer_link", 2), ("internet.", "internet.link", 1)];
 
 /// The conditions every run of one system on one machine must share: the
-/// kernel, the CPU's frequency request, and what serves each filesystem the
-/// `fs` and `persist` rows use.
-pub const SETUP: [&str; 13] = [
+/// kernel, the CPU's frequency request, what serves each filesystem the `fs`
+/// and `persist` rows use, and the panel, its light, the radios and the links
+/// the `energy` rows draw beside.
+pub const SETUP: [&str; 17] = [
     "kernel",
     "cpufreq_driver",
     "governor",
@@ -293,6 +294,10 @@ pub const SETUP: [&str; 13] = [
     "fs.mem.served_by",
     "fs.disk.served_by",
     "persist.served_by",
+    "energy.display",
+    "energy.backlight",
+    "energy.radios",
+    "energy.links",
 ];
 
 /// The conditions a system chooses at each boot, stated per run: the clock
@@ -615,7 +620,7 @@ mod tests {
 
     #[test]
     fn a_unit_of_no_known_direction_is_told_only_which_way_it_differs() {
-        let power = |os: &str, v: u64| run(os, &[&format!("bench=energy.idle_60s.package unit=mW n=1 min=1 p50={v} max=9 mean=5")]);
+        let power = |os: &str, v: u64| run(os, &[&format!("bench=energy.idle.package unit=mW n=1 min=1 p50={v} max=9 mean=5")]);
         let mut runs: Vec<Run> = [900, 910, 920, 930].iter().map(|v| power("linux", *v)).collect();
         runs.extend([1500, 1510, 1520, 1530].iter().map(|v| power("toyos", *v)));
         let table = compare(&runs).unwrap();

@@ -57,6 +57,17 @@ pub struct Hardware {
     /// `MSR_CORE_C6_RESIDENCY` and `MSR_CORE_C7_RESIDENCY`, where admitted.
     pub core_c6: Option<u64>,
     pub core_c7: Option<u64>,
+    pub package: Option<Package>,
+    /// The package's C2, C3, C6 and C7 residency, where admitted.
+    pub package_residency: Option<[u64; 4]>,
+    pub core_energy: Option<u64>,
+}
+
+/// The package's energy counter and its unit register, where this CPU reads
+/// them for its package.
+pub struct Package {
+    pub energy: u64,
+    pub power_unit: u64,
 }
 
 /// The commands this CPU wrote to the firmware, where it is the one that
@@ -109,7 +120,7 @@ pub fn bring_up() {
     let me = percpu::cpu_id() as usize;
     let words = sample(me);
     block(me).publish(words);
-    let [smi, aperf, mperf, request, pkg, epb, c6, c7] = [
+    let [smi, aperf, mperf, request, pkg, epb, c6, c7, energy, pc, core_energy] = [
         Counter::Smi,
         Counter::Aperf,
         Counter::Mperf,
@@ -118,11 +129,15 @@ pub fn bring_up() {
         Counter::EnergyPerfBias,
         Counter::CoreC6,
         Counter::CoreC7,
+        Counter::PackageEnergy,
+        Counter::PackageC2,
+        Counter::CoreEnergy,
     ]
     .map(|c| held(&words, c));
     log!(
         "counters: cpu{me} reads smi={smi} aperf={aperf} mperf={mperf} hwp_request={request} \
-         hwp_request_pkg={pkg} energy_perf_bias={epb} core_c6={c6} core_c7={c7}"
+         hwp_request_pkg={pkg} energy_perf_bias={epb} core_c6={c6} core_c7={c7} \
+         package_energy={energy} package_residency={pc} core_energy={core_energy}"
     );
 }
 
@@ -151,6 +166,13 @@ fn sample(me: usize) -> [u64; WORDS] {
             Counter::DeepIdles => Some(crate::cpu_local::of(me as u32).idle.deep()),
             Counter::CoreC6 => hardware.core_c6,
             Counter::CoreC7 => hardware.core_c7,
+            Counter::PackageEnergy => hardware.package.as_ref().map(|p| p.energy),
+            Counter::RaplPowerUnit => hardware.package.as_ref().map(|p| p.power_unit),
+            Counter::PackageC2 => hardware.package_residency.map(|r| r[0]),
+            Counter::PackageC3 => hardware.package_residency.map(|r| r[1]),
+            Counter::PackageC6 => hardware.package_residency.map(|r| r[2]),
+            Counter::PackageC7 => hardware.package_residency.map(|r| r[3]),
+            Counter::CoreEnergy => hardware.core_energy,
         };
         if let Some(value) = value {
             words[1] |= 1 << counter as usize;
