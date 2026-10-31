@@ -249,6 +249,14 @@ doorbell-kick-relaxed = []
 #   cargo test -p kernel-loom --features push-fence-relaxed --test loom_push
 #
 push-fence-relaxed = []
+# The negative control for the affinity pairing. It weakens `affinity.rs`'s
+# `affinity_fence` to a release fence, so a mask setter's read of the task's
+# state word and an adopting CPU's read of the mask version may each miss the
+# other's store, and `loom_affinity.rs` must red:
+#
+#   cargo test -p kernel-loom --features affinity-fence-relaxed --test loom_affinity
+#
+affinity-fence-relaxed = []
 # The one feature here that models nothing away. It lets the mailbox model's
 # victim stop taking passes — what a CPU that stops does — and the model must
 # red, because `MailboxNode::in_flight` is the consumer's to clear and a

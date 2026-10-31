@@ -14,8 +14,8 @@ use crate::sched::hw::{CpuId, Nanos};
 use crate::sched::job::Job;
 use crate::sched::mailbox::MailboxNode;
 use crate::sched::msg::Msg;
-use crate::sched::affinity::{CpuMask, SharedMask};
-use crate::sched::sync::{fence, Arc, AtomicBool, AtomicU64, Ordering};
+use crate::sched::affinity::{affinity_fence, CpuMask, SharedMask};
+use crate::sched::sync::{Arc, AtomicBool, AtomicU64, Ordering};
 use crate::sched::park::CommittedTicket;
 
 /// Monotonic, never reused. Stale messages keyed by `TaskKey` are provably
@@ -1038,10 +1038,7 @@ impl<X: SchedPayload> TransitTask<X> {
             "adopt of a task that is not in transit to this CPU: {:?}",
             task.0.shared.state(),
         );
-        // Paired with the fence that ends `SharedMask::store`: either the
-        // setter's next read of the state word finds this CPU and kicks it, or
-        // the refresh that places the task here reads the setter's version.
-        fence(Ordering::SeqCst);
+        affinity_fence();
         ReadyTask(task)
     }
 
