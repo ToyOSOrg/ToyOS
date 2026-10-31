@@ -1452,18 +1452,9 @@ mod tests {
     /// bytes a deleted file left in the blocks the write was given.
     #[test]
     fn a_write_refused_after_allocating_leaves_no_old_bytes_past_the_end() {
-        let mut v = DataVolume::format(Stops::new(1024), 0, &["home", "apps"], clock).unwrap();
-        let old = v.open("home/old", CREATE).unwrap();
-        // As far past its first block as a file's next run is looked for when
-        // the block after it is taken, so the write below lands in it.
-        for page in 0..512u64 {
-            v.write(old, page * BLOCK as u64, &[0xAB; BLOCK]).unwrap();
-        }
-        v.close(old).unwrap();
-        assert_eq!(v.sync(), Ok(Vec::new()));
-        v.unlink("home/old").unwrap();
-        assert_eq!(v.sync(), Ok(Vec::new()));
-        assert_eq!(v.sync(), Ok(Vec::new()));
+        // Every block the volume does not write holds what an earlier tenant left.
+        let stale: Image = (0..1024).map(|b| (b, Box::new([0xAB; BLOCK]))).collect();
+        let mut v = DataVolume::format(Stops::from(&stale, 1024, usize::MAX, None), 0, &["home", "apps"], clock).unwrap();
 
         let n = v.open("home/f", CREATE).unwrap();
         v.write(n, 0, &[1; BLOCK]).unwrap();
@@ -1471,7 +1462,9 @@ mod tests {
         let first = block_for(&v.open[&n].extents, 0).unwrap();
         v.cache.disk().refuse_read.set(Some(first));
         // Half of page 0, whose read is refused, and page 1, allocated first.
-        assert!(v.write(n, BLOCK as u64 / 2, &[2; BLOCK]).is_err());
+        let room = v.room().unwrap().free;
+        assert_eq!(v.write(n, BLOCK as u64 / 2, &[2; BLOCK]), Err(Error::Io));
+        assert_eq!(v.room().unwrap().free, room, "the refused write kept blocks, or gave back more");
         v.cache.disk().refuse_read.set(None);
 
         v.truncate(n, 2 * BLOCK as u64).unwrap();
