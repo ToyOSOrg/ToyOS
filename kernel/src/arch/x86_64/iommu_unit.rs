@@ -147,6 +147,16 @@ pub mod domain {
         }
     }
 
+    /// Map what firmware reserved for `stream` at its own addresses in `id`,
+    /// before `stream` attaches to it. AMD-Vi refuses such a function a claim
+    /// ([`unclaimable`]), so it has nothing to map.
+    pub fn keep_reserved(id: DomainId, stream: StreamId) -> Result<(), IommuError> {
+        match backend() {
+            Backend::Vtd => vtd::domain::keep_reserved(id, stream),
+            Backend::AmdVi | Backend::None => Ok(()),
+        }
+    }
+
     /// Why `stream` keeps the machine's own addresses rather than a domain of
     /// its own, if it does: AMD-Vi's reasons. VT-d answers `None` for every
     /// function, an RMRR's included, which it moves off the identity domain

@@ -132,6 +132,14 @@ drives = ["pci:04:03:*"]
 receives = ["sound-output"]
 syscap = ["rt"]
 
+# The Tiger Lake display driver: the T14's iGPU, held for the boot. It keeps
+# the firmware's mode and surface, which the compositor draws on through the
+# kernel's framebuffer claim, and programs the display engine's power. Not
+# started again: the claim's release resets the function, which ends the
+# firmware's scan-out (`issues/each-gpu-drives-its-displays-from-a-userland-driver.md`).
+[programs.tgl-display]
+drives = ["pci:03:00:00/8086:9a49"]
+
 # The network stack, over the link a NIC driver brings on `link`; it claims no
 # device. It serves once the first driver says hello, and leaves a machine
 # none says hello on within 30 s.

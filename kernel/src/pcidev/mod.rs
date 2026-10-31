@@ -935,13 +935,18 @@ fn bars(pci: &PciDevice, windows: &[RootBridgeWindow]) -> Result<([u64; BARS], [
     Ok((bar_at, bar_bytes))
 }
 
-/// Function `number`'s address space, made on its first claim.
+/// Function `number`'s address space, made on its first claim with what
+/// firmware reserved for the function already mapped, so a function firmware
+/// left running against that memory, a scan-out among them, keeps reaching it
+/// across the attach.
 fn function_space(number: usize) -> Result<Space, IommuError> {
-    let mut held = function(number).space.lock();
+    let function = function(number);
+    let mut held = function.space.lock();
     match *held {
         Some(space) => Ok(space),
         None => {
-            let (space, lend) = OwnSpace::create(LEND_WINDOW)?;
+            let who = function.who;
+            let (space, lend) = OwnSpace::create(LEND_WINDOW, (who >> 8) as u8, ((who >> 3) & 0x1f) as u8, (who & 7) as u8)?;
             *held = Some(Space { space, lend });
             Ok(Space { space, lend })
         }

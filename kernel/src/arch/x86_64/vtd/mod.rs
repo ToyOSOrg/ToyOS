@@ -180,11 +180,12 @@ pub fn init(rsdp_addr: u64, devices: &[PciDevice], windows: Option<&[RootBridgeW
                     }
                 }
             }
-            // Kernel devices get RMRR regions for free and userspace handoff of
-            // one is refused elsewhere; QEMU publishes none, so this arm is
-            // untested by the harness.
+            // A kernel device reaches its RMRRs through the identity domain, and
+            // a claimed one through its own domain, which maps them at their own
+            // addresses (`domain::keep_reserved`). QEMU publishes none, so this
+            // arm is untested by the harness.
             //
-            // **"For free" is a claim about one address range, and it is
+            // **"Through the identity domain" is a claim about one address range, and it is
             // checked here.** The identity domain is built over `[0, top)`
             // exactly (`table::identity_domain`), so a region whose limit falls
             // at or above `top` is one firmware requires stay mapped and this
@@ -215,6 +216,9 @@ pub fn init(rsdp_addr: u64, devices: &[PciDevice], windows: Option<&[RootBridgeW
                 }
                 rmrrs.push((base, limit.saturating_add(1)));
                 describe_scopes("rmrr", regions, rmrr.scopes());
+                for stream in rmrr.scopes().filter_map(Result::ok).filter(|s| s.kind() == SCOPE_ENDPOINT).filter_map(|s| s.stream_id()) {
+                    domain::reserve_for(stream, base, limit.saturating_add(1));
+                }
                 regions += 1;
                 held_regions += usize::from(held);
             }
@@ -731,6 +735,9 @@ fn describe_scopes(owner: &str, index: usize, scopes: Scopes) {
         }
     }
 }
+
+/// Device scope type 1, a PCI endpoint, whose path names one function.
+const SCOPE_ENDPOINT: u8 = 1;
 
 /// Device scope type 3, whose enumeration id is an I/O APIC's MADT id.
 const SCOPE_IOAPIC: u8 = 3;
