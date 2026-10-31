@@ -11,6 +11,8 @@ toyos = { path = "../../../sdk/toyos", features = ["std"] }
 toyos-window = { path = "../../../sdk/window" }
 toyos-tco = { path = "../../../lib/tco" }
 toyos-inspect = { path = "../../../lib/inspect" }
+# The reader's question to netstack, for `link_failover`'s per-link counts.
+inspect = { path = "../../../system/inspect" }
 # A login session opened by a job, for `app_view`'s grants.
 toyos-session = { path = "../../../lib/session" }
 # The log as logkeeper serves it, and the asking for it, for `counters_metal`'s

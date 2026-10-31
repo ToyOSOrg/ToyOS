@@ -216,15 +216,21 @@ stage 3 of `issues/the-lan-is-not-yet-production-grade.md`, whole.
   second each way full rate needs
   (https://github.com/ToyOSOrg/evidence/blob/4a8d02243d626df929fe05365e991873574e0dc2/s2/README.md).
 
-**P5, netstack over several links.** Owner: the orchestrator; its defect is
-`issues/netstack-drives-one-card.md`. Depends on: P4.
+**P5, netstack over several links: built.** Owner: the orchestrator.
+Depends on: P4.
 - **Exit:**
   - host tests of rank (wired before wireless, then arrival), failover and
     return, resolvers, mDNS per link, and a flow bound to a lost address;
   - a guest with two virtio NICs, in which the first's link is set off over
     QMP and traffic leaves on the second;
-  - `issues/netstack-drives-one-card.md` closed, and the NIC taken out of
-    the virtio bullet of `issues/first-match-selection-that-remains.md`.
+  - its defect closed, and the NIC taken out of the virtio bullet of
+    `issues/first-match-selection-that-remains.md`.
+- **What it is.** One stack over every link a driver brings, up to eight:
+  each an interface of `ip`'s with a rank (a hello says Wired or Wireless),
+  its own lease, DHCP client and mDNS responder under one host name; lookups
+  ask the resolvers of the first link up holding a lease. A connection whose
+  address goes ends `AddressGone`; one whose link only goes down keeps it.
+  netstack serves from the start, so `LINK_BOUND` and `OneLink` are gone.
 - Its T14 row, both links leasing with the wired one the default route, is
   W6's: it needs a radio.
 

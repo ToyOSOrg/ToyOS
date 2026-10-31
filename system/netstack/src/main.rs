@@ -1,5 +1,5 @@
-//! The network server: ToyOS's own stack (`toyos-net-node`) over the link a
-//! NIC driver brings (`toyos-link`), served to programs over `toyos::net`'s
+//! The network server: ToyOS's own stack (`toyos-net-node`) over every link
+//! a NIC driver brings (`toyos-link`), served to programs over `toyos::net`'s
 //! protocol.
 //!
 //! **This program holds no protocol and drives no device.** Every byte off the
@@ -10,18 +10,17 @@
 //! holders are rung on (`bells`), the clients' connections (`client`) and
 //! their requests (`serve`).
 //!
-//! **One link, until netstack runs several**
-//! (`issues/netstack-drives-one-card.md`): the node is made with the first
-//! driver's address, so nothing is served before that driver's hello, and a
-//! machine none says hello on within [`LINK_BOUND`] has no network: netstack
-//! leaves, as a client then hears. A link that ends leaves every connection
-//! to the node, and only a hello with that address is opened again.
+//! **Every link a driver brings**, up to [`MAX_LINKS`]: each is an interface
+//! of the node's, ranked wired before wireless and then by arrival, with its
+//! own lease. The node serves from the start, before any link. A link that
+//! ends keeps its interface, down, and a hello with its address is opened
+//! on it again; a hello with the address of a link that is open is refused.
 //!
-//! **One pass**: the link's state and its received frames, as one batch, go to the node, then
-//! every deadline that is due, then the node is offered the link's transmit
-//! room until it has no frame left or the link no room; what the node has to
+//! **One pass**: each link's state and its received frames, as one batch, go to the node, then
+//! every deadline that is due, then the node is offered every link's transmit
+//! room until it has no frame left or no link room; what the node has to
 //! say is written to the log and to the clients that waited for it; and the
-//! loop sleeps on the kernel until the link, a client, a watched handle or the
+//! loop sleeps on the kernel until a link, a client, a watched handle or the
 //! node's next deadline wakes it. A request is carried out in the pass that
 //! read it and its frames leave in the next, which follows at once.
 //!
@@ -44,9 +43,9 @@ use toyos_abi::syscall::PIPE_CAPACITY;
 use toyos_dhcp::{HostName, Lease};
 use toyos_inspect::Snapshot;
 use toyos_link::state::{Counters, Group};
-use toyos_link::wire::{Hello, Refusal};
+use toyos_link::wire::{Hello, Medium, Refusal};
 use toyos_net_ip::Nud;
-use toyos_net_node::Node;
+use toyos_net_node::{IfIndex, Node, Rank};
 use toyos_net_shard::{Config, Secrets};
 use toyos_net_wire::ethernet::IndividualMac;
 use toyos_net_wire::Instant;
@@ -61,13 +60,11 @@ mod watches;
 use client::{Client, ClientRx, HANDSHAKE_TIMEOUT, MAX_PENDING_CONNS, PendingConn, Request};
 use link::{Ended, Heard, Pending, Session};
 
-/// How long netstack waits for its first link before it leaves as a machine
-/// with no network. Policy: a driver says hello once its device is up, which
-/// is seconds of this; a machine with no NIC driver waits it out, and its
-/// clients with it.
-const LINK_BOUND: Duration = Duration::from_secs(30);
+/// The most links netstack drives. Each is an interface of the node's for
+/// the boot, kept for its driver's return; a machine has a handful of NICs.
+const MAX_LINKS: u32 = 8;
 
-/// How long an `inspect` waits for the driver's counters. The driver answers
+/// How long an `inspect` waits for the drivers' counters. A driver answers
 /// in the pass the ask's doorbell starts; one that does not is answered for
 /// without them.
 const INSPECT_BOUND: Duration = Duration::from_secs(1);
@@ -80,7 +77,7 @@ const MAX_PENDING_LINKS: u32 = 2;
 /// one machine.
 pub const HOSTNAME: &str = "toyos-t14";
 
-/// How long this machine waits for its first lease before saying it has none.
+/// How long this machine waits for its first lease, on any link, before saying it has none.
 /// It bounds the report, never the client: the node asks for the life of the
 /// boot and a lease that lands later is applied like any other.
 const LEASE_BOUND: Duration = Duration::from_millis(toyos_tco::LEASE_BOUND_MS);
@@ -129,9 +126,9 @@ const PLACE_BYTES: u64 = {
 /// this in favour of a kernel memory limit, not in favour of a bigger number.
 const PLACE_BUDGET_SHARE: u64 = 8;
 
-/// Watches that are no place's: the service's two acceptors, the link, and
+/// Watches that are no place's: the service's two acceptors, the links, and
 /// the drivers' connections that have not said hello.
-const FIXED_WATCHES: u32 = 3 + MAX_PENDING_LINKS;
+const FIXED_WATCHES: u32 = 2 + MAX_LINKS + MAX_PENDING_LINKS;
 
 /// The most places one poller can watch: each place is one watched handle, a
 /// holder's connection of a stream, a listener or a datagram socket, asked
@@ -197,30 +194,36 @@ impl Said {
     }
 }
 
-/// What the boot's log has said of the lease, and still owes.
+/// What the boot's log has said of each link's lease, and still owes.
 struct Leases {
     began: Wall,
-    said: Option<Said>,
-    /// Whether this boot has settled the question once: a lease landed, or
-    /// the bound passed with none.
+    said: Vec<(IfIndex, Said)>,
+    /// Whether this boot has settled the question once: a lease landed on a
+    /// link, or the bound passed with none.
     settled: bool,
 }
 
 impl Leases {
-    /// Says what changed of the lease the node holds, and answers whether
-    /// this machine's address question has just been settled.
-    fn pass(&mut self, held: Option<&Lease>) -> bool {
-        let held = held.map(Said::of);
-        if held != self.said {
+    /// Says what changed of each link's lease, `label` naming the link, and
+    /// answers whether this machine's address question has just been
+    /// settled.
+    fn pass(&mut self, node: &Node, label: impl Fn(IfIndex) -> String) -> bool {
+        for link in node.links() {
+            let held = node.lease(link).map(Said::of);
+            let at = self.said.iter().position(|(on, _)| *on == link);
+            if held.as_ref() == at.map(|at| &self.said[at].1) {
+                continue;
+            }
             match &held {
                 // One record carrying every field the lease decided: a boot
                 // read off a stick or a stream has this line and nothing else
                 // to say what this machine's network was.
                 Some(lease) => say!(
-                    "netstack: DHCP: lease {}/{} from {}, gateway {}, dns [{}], {} ms after \
+                    "netstack: DHCP: lease {}/{} on {}, from {}, gateway {}, dns [{}], {} ms after \
                      netstack came up",
                     lease.address,
                     lease.prefix_len,
+                    label(link),
                     lease.server,
                     match lease.router {
                         Some(router) => router.to_string(),
@@ -229,20 +232,25 @@ impl Leases {
                     lease.dns(),
                     self.began.elapsed().as_millis(),
                 ),
-                None => say!("netstack: DHCP: the lease is gone; this machine has no address"),
+                None => say!("netstack: DHCP: the lease on {} is gone; that link has no address", label(link)),
             }
-            self.said = held;
+            match (held, at) {
+                (Some(held), Some(at)) => self.said[at].1 = held,
+                (Some(held), None) => self.said.push((link, held)),
+                (None, Some(at)) => drop(self.said.remove(at)),
+                (None, None) => {}
+            }
         }
         if self.settled {
             return false;
         }
-        if self.said.is_none() {
+        if self.said.is_empty() {
             if self.began.elapsed() < LEASE_BOUND {
                 return false;
             }
             say!(
-                "netstack: DHCP: no lease as {} in {} s; this machine has no address and every \
-                 connect through it is refused",
+                "netstack: DHCP: no lease as {} on any link in {} s; this machine has no address \
+                 and every connect through it is refused",
                 HOSTNAME,
                 self.began.elapsed().as_secs(),
             );
@@ -256,23 +264,22 @@ impl Leases {
         (!self.settled).then(|| LEASE_BOUND.saturating_sub(self.began.elapsed()))
     }
 
-    /// The lease as `inspect` reads it, and the router's entry in the
-    /// stack's neighbour table where the lease names one.
-    fn inspect(&self, node: &Node, snap: &mut Snapshot) {
-        let Some(held) = &self.said else {
-            snap.put("lease.held", false);
+    /// `link`'s lease as `inspect` reads it, under `at`, and the router's
+    /// entry in the stack's neighbour table where the lease names one.
+    fn inspect(&self, node: &Node, link: IfIndex, at: &str, snap: &mut Snapshot) {
+        let Some((_, held)) = self.said.iter().find(|(on, _)| *on == link) else {
+            snap.put(&format!("{at}.lease.held"), false);
             return;
         };
-        snap.put("lease.held", true);
-        snap.put("lease.address", format!("{}/{}", held.address, held.prefix_len));
-        snap.put("lease.server", held.server.to_string());
-        snap.put("lease.dns", held.dns());
+        snap.put(&format!("{at}.lease.held"), true);
+        snap.put(&format!("{at}.lease.address"), format!("{}/{}", held.address, held.prefix_len));
+        snap.put(&format!("{at}.lease.server"), held.server.to_string());
+        snap.put(&format!("{at}.lease.dns"), held.dns());
         let Some(router) = held.router else { return };
-        snap.put("lease.router", router.to_string());
-        let shard = node.shard();
+        snap.put(&format!("{at}.lease.router"), router.to_string());
         snap.put(
-            "neighbour.router",
-            match shard.ip().neighbour(shard.iface(), router) {
+            &format!("{at}.neighbour.router"),
+            match node.shard().ip().neighbour(link, router) {
                 None => "none",
                 Some(Nud::Incomplete(_)) => "incomplete",
                 Some(Nud::Reachable(_)) => "reachable",
@@ -286,24 +293,59 @@ impl Leases {
     }
 }
 
+/// A link netstack has opened this boot: its interface, kept for its driver's
+/// return, and its session while the link is open.
+struct Held {
+    iface: IfIndex,
+    mac: IndividualMac,
+    label: String,
+    session: Option<Session>,
+    /// Its last link ended for what its driver wrote: its next hello is
+    /// refused for it.
+    faulted: bool,
+}
+
+/// Where a link stands among the others: wired before wireless.
+fn rank(medium: Medium) -> Rank {
+    match medium {
+        Medium::Wired => Rank(0),
+        Medium::Wireless => Rank(1),
+    }
+}
+
+/// `link.<n>`, the `n`th link opened this boot, in `inspect`'s paths.
+fn path(n: usize) -> String {
+    format!("link.{n}")
+}
+
 /// Answer `inspect` with what this pass knows, in one non-blocking write, and
 /// let the connection close as every other answer does.
-fn answer_inspect(request: &Request, link: Option<(&Session, Option<&Counters>)>, leases: &Leases, sockets: &serve::Sockets, node: &Node) {
+fn answer_inspect(request: &Request, links: &[Held], counters: &[(IfIndex, Counters)], leases: &Leases, sockets: &serve::Sockets, node: &Node) {
     let mut snap = Snapshot::new(toyos_inspect::NET);
-    match link {
-        Some((link, counters)) => link.inspect(counters, &mut snap),
-        None => snap.put("link.state", "none"),
+    snap.put("links", links.len() as u32);
+    for (n, held) in links.iter().enumerate() {
+        let at = path(n);
+        match &held.session {
+            Some(session) => session.inspect(&at, counters.iter().find(|(on, _)| *on == held.iface).map(|(_, c)| c), &mut snap),
+            None => {
+                snap.put(&format!("{at}.driver"), held.label.as_str());
+                snap.put(&format!("{at}.state"), "ended");
+            }
+        }
+        leases.inspect(node, held.iface, &at, &mut snap);
+        if node.asked() == Some(held.iface) {
+            snap.put("dns.link", n as u32);
+        }
     }
-    leases.inspect(node, &mut snap);
     sockets.inspect(node, &mut snap);
     let encoded = snap.encode().unwrap_or_else(|why| panic!("netstack: its snapshot: {why}"));
     request.client.snapshot(&encoded);
 }
 
-/// Open the link `asked` asks for, and say so.
-fn open(asked: Asked, groups: &[Group]) -> Option<Session> {
+/// Open the link `asked` asks for on the node's `iface`, and say so.
+fn open(asked: Asked, iface: IfIndex, groups: &[Group]) -> Option<Session> {
     let label = asked.hello.label.clone();
-    let opened = Session::open(asked.hello, asked.mac, asked.conn, asked.region, groups);
+    let opened = Session::open(asked.hello, iface, asked.conn, asked.region, groups);
     match &opened {
         Some(_) => say!("netstack: {label}'s link is open"),
         None => say!("netstack: {label} went before its link was opened"),
@@ -339,18 +381,56 @@ fn hear_links(pending: &mut Vec<Pending>) -> Vec<Asked> {
     asked
 }
 
-/// End `link` for `why`; the node hears a change, not a state.
-fn end_link(link: &mut Option<Session>, why: Ended, node: &mut Node, now: Instant, faulted: &mut bool) {
-    let Some(session) = link.take() else { return };
+/// End `held`'s link for `why`; the node hears a change, not a state.
+fn end_link(held: &mut Held, why: Ended, node: &mut Node, now: Instant) {
+    let Some(session) = held.session.take() else { return };
     match why {
-        Ended::HungUp => say!("netstack: {}'s link ended: it hung up", session.hello().label),
+        Ended::HungUp => say!("netstack: {}'s link ended: it hung up", held.label),
         Ended::Fault(fault) => {
-            say!("netstack: {}'s link ended: it wrote {fault}", session.hello().label);
-            *faulted = true;
+            say!("netstack: {}'s link ended: it wrote {fault}", held.label);
+            held.faulted = true;
         }
     }
     if session.is_up() {
-        node.link(now, false, draw);
+        node.link(now, held.iface, false, draw);
+    }
+}
+
+/// Open, refuse or take back the link each hello asks for.
+fn hellos(asked: Vec<Asked>, links: &mut Vec<Held>, node: &mut Node, now: Instant, groups: &[Group]) {
+    for asked in asked {
+        let at = links.iter().position(|held| held.mac == asked.mac);
+        let Some(at) = at else {
+            if links.len() >= MAX_LINKS as usize {
+                refuse(&asked, Refusal::Full, &format!("netstack drives at most {MAX_LINKS} links"));
+                continue;
+            }
+            let iface = node.add_link(now, asked.mac, rank(asked.hello.medium), draw);
+            let label = asked.hello.label.clone();
+            let mac = asked.mac;
+            let session = open(asked, iface, groups);
+            links.push(Held { iface, mac, label, session, faulted: false });
+            continue;
+        };
+        let held = &mut links[at];
+        if std::mem::take(&mut held.faulted) {
+            refuse(&asked, Refusal::Faulted, "its last link ended for what it wrote");
+            continue;
+        }
+        // The kernel closes a dead driver's handles before its end is
+        // published, so a restarted driver's hello finds the old link already
+        // hung up.
+        if let Some(session) = &held.session {
+            match session.alive() {
+                Ok(()) => {
+                    refuse(&asked, Refusal::Open, "a link of its address is open");
+                    continue;
+                }
+                Err(why) => end_link(held, why, node, now),
+            }
+        }
+        held.label = asked.hello.label.clone();
+        held.session = open(asked, held.iface, groups);
     }
 }
 
@@ -363,39 +443,11 @@ fn accept_link(links: &Acceptor, pending: &mut Vec<Pending>) {
     }
 }
 
-/// The first link a driver brings, within [`LINK_BOUND`].
-fn first_link(links: &Acceptor, groups: &[Group]) -> Option<Session> {
-    let began = Wall::now();
-    let mut pending: Vec<Pending> = Vec::new();
-    let mut poller = watches::Watches::new(1 + MAX_PENDING_LINKS);
-    loop {
-        let mut opened = None;
-        for asked in hear_links(&mut pending) {
-            match opened {
-                Some(_) => refuse(&asked, Refusal::OneLink, "netstack drives one link (issues/netstack-drives-one-card.md)"),
-                None => opened = open(asked, groups),
-            }
-        }
-        if opened.is_some() {
-            return opened;
-        }
-        let left = LINK_BOUND.checked_sub(began.elapsed())?;
-        poller.watch(links, READABLE, TOKEN_LINKS);
-        for (i, p) in pending.iter().enumerate() {
-            p.watch(&mut poller, TOKEN_LINK_PENDING_BASE + i as u64);
-        }
-        let mut accept = false;
-        poller.wait_answers(1, u64::try_from(left.as_nanos()).unwrap_or(u64::MAX), |token, _| accept |= token == TOKEN_LINKS);
-        if accept {
-            accept_link(links, &mut pending);
-        }
-    }
-}
-
 const TOKEN_ACCEPTOR: u64 = 0;
 const TOKEN_LINKS: u64 = 1;
-const TOKEN_LINK: u64 = 2;
-const TOKEN_LINK_PENDING_BASE: u64 = 3;
+const TOKEN_LINK_PENDING_BASE: u64 = 2;
+/// The `n`th link's token.
+const TOKEN_LINK_BASE: u64 = TOKEN_LINK_PENDING_BASE + MAX_PENDING_LINKS as u64;
 
 const _: () = assert!(
     toyos_inspect::MAX_SNAPSHOT_BYTES == ipc::MAX_FRAME_LEN as usize,
@@ -410,7 +462,7 @@ struct Asked {
     region: toyos_link::region::Region,
 }
 
-/// An `inspect` waiting for the driver's counters.
+/// An `inspect` waiting for the drivers' counters.
 struct Inspecting {
     request: Request,
     since: Wall,
@@ -426,23 +478,16 @@ fn main() {
     let links = endow::acceptor(toyos_link::PORT)
         .expect("the manifest declares this program serves `link`");
     let groups = [Group::new(toyos_mdns::GROUP_MAC).unwrap_or_else(|| panic!("netstack: mDNS's address is no group's"))];
-    let Some(first) = first_link(&links, &groups) else {
-        say!("netstack: no NIC driver brought a link in {} s; this machine has no network, exiting", LINK_BOUND.as_secs());
-        return;
-    };
-    let mac = first.mac();
-    let mut link = Some(first);
 
     let began = Wall::now();
     let clock = || Instant::from_nanos(u64::try_from(began.elapsed().as_nanos()).unwrap_or(u64::MAX));
     let config = Config {
-        mac,
         receive_buffer: TCP_BUFFER,
         send_buffer: toyos::net::stream::SEND_BYTES,
         secrets: secrets(),
     };
     let host = HostName::new(HOSTNAME).unwrap_or_else(|| panic!("netstack: {HOSTNAME:?} is no host name"));
-    let mut node = Node::new(clock(), config, Some(host), draw)
+    let mut node = Node::new(clock(), config, Some(host))
         .unwrap_or_else(|why| panic!("netstack: the stack refused its configuration: {why:?}"));
 
     let name = toyos_mdns::Host::new(HOSTNAME).unwrap_or_else(|_| panic!("netstack: {HOSTNAME:?} is no host name"));
@@ -453,7 +498,8 @@ fn main() {
     let places = places_for(total_mem);
     node.set_places(places);
     let mut sockets = serve::Sockets::new(places);
-    let mut leases = Leases { began, said: None, settled: false };
+    let mut leases = Leases { began, said: Vec::new(), settled: false };
+    let mut held: Vec<Held> = Vec::new();
 
     let mut poller = watches::Watches::new(
         FIXED_WATCHES + MAX_PLACES + MAX_PENDING_CONNS + serve::LOOKUP_WATCHES,
@@ -466,62 +512,71 @@ fn main() {
     let mut pending: Vec<PendingConn> = Vec::new();
     let mut pending_links: Vec<Pending> = Vec::new();
     let mut inspecting: Vec<Inspecting> = Vec::new();
-    // The held link ended for what its driver wrote, and its next hello is
-    // refused for it.
-    let mut faulted = false;
+    // What the drivers have answered of the counters `inspecting` waits for.
+    let mut gathered: Vec<(IfIndex, Counters)> = Vec::new();
     // Accepts the kernel refused since the last it did not.
     let mut accept_refused: u64 = 0;
 
     loop {
-        // The node begins with its link down, and hears each change of it here.
+        // The node begins with each link down, and hears each change of it here.
         let now = clock();
         let mut owed = false;
-        let mut ended = None;
-        if let Some(session) = &mut link {
+        let mut ended: Vec<(IfIndex, Ended)> = Vec::new();
+        for session in held.iter_mut().filter_map(|h| h.session.as_mut()) {
             match session.receive(&mut node, now, draw) {
-                Ok(more) => owed = more,
-                Err(why) => ended = Some(why),
+                Ok(more) => owed |= more,
+                Err(why) => ended.push((session.iface(), why)),
             }
         }
         let now = clock();
         if node.next_deadline().is_some_and(|at| at <= now) {
             node.fire(now, draw);
         }
-        if ended.is_none()
-            && let Some(session) = &mut link
-            && let Err(why) = session.transmit(&mut node, now, draw)
-        {
-            ended = Some(why);
-        }
+        let mut open: Vec<&mut Session> =
+            held.iter_mut().filter_map(|h| h.session.as_mut()).filter(|s| !ended.iter().any(|(at, _)| *at == s.iface())).collect();
+        ended.extend(link::transmit(&mut open, &mut node, now, draw).into_iter().map(|(at, fault)| (at, Ended::Fault(fault))));
 
-        // The driver's counters, once it answered them or its time to is up.
+        // The drivers' counters, once each open link's driver answered them or
+        // the time to is up.
         if !inspecting.is_empty() {
-            // A link opened since the ask is asked in its turn.
-            if let Some(session) = &mut link {
+            let mut owing = false;
+            for session in held.iter_mut().filter_map(|h| h.session.as_mut()) {
+                if gathered.iter().any(|(at, _)| *at == session.iface()) {
+                    continue;
+                }
+                // A link opened since the ask is asked in its turn.
                 session.ask_counters();
-            }
-            let counters = link.as_mut().and_then(Session::counters);
-            let late = inspecting.first().is_some_and(|i| i.since.elapsed() >= INSPECT_BOUND);
-            if counters.is_some() || late || link.is_none() {
-                for waiting in inspecting.drain(..) {
-                    answer_inspect(&waiting.request, link.as_ref().map(|l| (l, counters.as_ref())), &leases, &sockets, &node);
+                match session.counters() {
+                    Some(c) => gathered.push((session.iface(), c)),
+                    None => owing = true,
                 }
             }
+            let late = inspecting.first().is_some_and(|i| i.since.elapsed() >= INSPECT_BOUND);
+            if !owing || late {
+                for waiting in inspecting.drain(..) {
+                    answer_inspect(&waiting.request, &held, &gathered, &leases, &sockets, &node);
+                }
+                gathered.clear();
+            }
         }
-        if ended.is_none()
-            && let Some(session) = &mut link
-            && let Err(why) = session.ring()
-        {
-            ended = Some(why);
+        for session in held.iter_mut().filter_map(|h| h.session.as_mut()) {
+            if !ended.iter().any(|(at, _)| *at == session.iface())
+                && let Err(why) = session.ring()
+            {
+                ended.push((session.iface(), why));
+            }
         }
-        if let Some(why) = ended {
-            end_link(&mut link, why, &mut node, clock(), &mut faulted);
+        for (iface, why) in ended {
+            if let Some(link) = held.iter_mut().find(|h| h.iface == iface) {
+                end_link(link, why, &mut node, clock());
+            }
         }
 
-        sockets.settle(&mut node);
+        let label = |iface: IfIndex| held.iter().find(|h| h.iface == iface).map_or_else(String::new, |h| h.label.clone());
+        sockets.settle(&mut node, label);
         // Before anything is served: the lease is what gives this machine an
         // address, a route and its resolvers.
-        if leases.pass(node.lease()) {
+        if leases.pass(&node, label) {
             say!(
                 "netstack: ready, at most {places} places ({} MiB each of {} MiB total)",
                 PLACE_BYTES / (1024 * 1024),
@@ -531,8 +586,8 @@ fn main() {
 
         poller.watch(&acceptor, READABLE, TOKEN_ACCEPTOR);
         poller.watch(&links, READABLE, TOKEN_LINKS);
-        if let Some(session) = &link {
-            session.watch(&mut poller, TOKEN_LINK);
+        for (n, session) in held.iter().enumerate().filter_map(|(n, h)| h.session.as_ref().map(|s| (n, s))) {
+            session.watch(&mut poller, TOKEN_LINK_BASE + n as u64);
         }
         for (i, p) in pending_links.iter().enumerate() {
             p.watch(&mut poller, TOKEN_LINK_PENDING_BASE + i as u64);
@@ -570,33 +625,12 @@ fn main() {
         });
         sockets.bridge(&mut node, clock());
 
-        // A driver's connection: a hello with the address the node was made
-        // with is opened, once a link it replaces has ended. The kernel closes
-        // a dead driver's handles before its end is published, so a
-        // restarted driver's hello finds the old link already hung up.
+        // A driver's connection: each hello is opened on a link of its own, or on
+        // its address's once that link has ended.
         if ready.contains(&TOKEN_LINKS) {
             accept_link(&links, &mut pending_links);
         }
-        for asked in hear_links(&mut pending_links) {
-            if asked.mac != mac {
-                refuse(&asked, Refusal::OneLink, "its address is not the one netstack drives (issues/netstack-drives-one-card.md)");
-                continue;
-            }
-            if std::mem::take(&mut faulted) {
-                refuse(&asked, Refusal::Faulted, "its last link ended for what it wrote");
-                continue;
-            }
-            if let Some(session) = &link {
-                match session.alive() {
-                    Ok(()) => {
-                        refuse(&asked, Refusal::OneLink, "a link of its address is open");
-                        continue;
-                    }
-                    Err(why) => end_link(&mut link, why, &mut node, clock(), &mut faulted),
-                }
-            }
-            link = open(asked, &groups);
-        }
+        hellos(hear_links(&mut pending_links), &mut held, &mut node, clock(), &groups);
         // On a pass that found nothing ready too: otherwise a silent client
         // is only ever timed out by some other client's traffic.
         let now_wall = Wall::now();
@@ -697,11 +731,13 @@ fn main() {
                 // not this protocol.
                 if request.payload_len != 0 {
                     request.client.error(toyos::net::ERR_INVALID_INPUT);
-                } else if let Some(session) = link.as_mut().filter(|_| inspecting.len() < MAX_PENDING_CONNS as usize) {
-                    session.ask_counters();
+                } else if held.iter().any(|h| h.session.is_some()) && inspecting.len() < MAX_PENDING_CONNS as usize {
+                    for session in held.iter_mut().filter_map(|h| h.session.as_mut()) {
+                        session.ask_counters();
+                    }
                     inspecting.push(Inspecting { request, since: Wall::now() });
                 } else {
-                    answer_inspect(&request, link.as_ref().map(|l| (l, None)), &leases, &sockets, &node);
+                    answer_inspect(&request, &held, &[], &leases, &sockets, &node);
                 }
                 continue;
             }

@@ -475,9 +475,9 @@ pub fn persistent_dir() -> Option<(String, String, String)> {
 }
 
 /// What a transfer row reports of the stack beneath it, as netstack's `inspect` answers it: [tcp]'s
-/// and the card's counters. Those a card does not report are left out.
+/// counters, and the cards' summed over netstack's links. Those no card reports are left out.
 pub fn net_counters() -> Result<Vec<(String, u64)>, String> {
-    const READ: [&str; 33] = [
+    const READ: [&str; 25] = [
         "net.tcp.sent.bytes",
         "net.tcp.retransmit.bytes",
         "net.tcp.rto",
@@ -503,23 +503,30 @@ pub fn net_counters() -> Result<Vec<(String, u64)>, String> {
         "net.tcp.hystart.resumed",
         "net.tcp.hystart.exits",
         "net.tcp.hystart.exit.cwnd.bytes",
-        "net.transmit.full",
-        "net.transmit.wake_armed",
-        "net.transmit.wake_taken",
-        "net.transmit.full.ns",
-        "net.transmit.unreported",
-        "net.errors.missed",
-        "net.wire.sent",
-        "net.wire.received",
+    ];
+    /// Each link's, under `net.link.<n>.`.
+    const CARD: [&str; 8] = [
+        "transmit.full",
+        "transmit.wake_armed",
+        "transmit.wake_taken",
+        "transmit.full.ns",
+        "transmit.unreported",
+        "errors.missed",
+        "wire.sent",
+        "wire.received",
     ];
     let snap = inspect::ask(toyos_inspect::NET)?;
-    Ok(READ
-        .iter()
-        .filter_map(|key| match snap.get(*key) {
-            Some(toyos_inspect::Value::U64(v)) => Some((key.to_string(), *v)),
-            _ => None,
-        })
-        .collect())
+    let number = |key: &str| match snap.get(key) {
+        Some(toyos_inspect::Value::U64(v)) => Some(*v),
+        _ => None,
+    };
+    let links = number("net.links").unwrap_or(0);
+    let tcp = READ.iter().filter_map(|key| number(key).map(|v| (key.to_string(), v)));
+    let cards = CARD.iter().filter_map(|key| {
+        let each: Vec<u64> = (0..links).filter_map(|n| number(&format!("net.link.{n}.{key}"))).collect();
+        (!each.is_empty()).then(|| (format!("net.{key}"), each.iter().sum()))
+    });
+    Ok(tcp.chain(cards).collect())
 }
 
 /// What a row's own connections say of themselves: nothing on ToyOS, whose
@@ -538,9 +545,25 @@ impl StreamLog {
     }
 }
 
-/// What carries a connection on ToyOS: netstack drives one card, Ethernet.
-pub fn link_of(_local: std::net::IpAddr) -> Result<(osbench_lan::link::Link, String), String> {
-    Ok((osbench_lan::link::Link::Wired, "wired netstack's one Ethernet card".into()))
+/// What carries a connection on ToyOS: the netstack link whose lease holds its local address.
+pub fn link_of(local: std::net::IpAddr) -> Result<(osbench_lan::link::Link, String), String> {
+    let snap = inspect::ask(toyos_inspect::NET)?;
+    let text = |key: String| match snap.get(&key) {
+        Some(toyos_inspect::Value::Text(t)) => Some(t.clone()),
+        _ => None,
+    };
+    let links = match snap.get("net.links") {
+        Some(toyos_inspect::Value::U64(n)) => *n,
+        _ => 0,
+    };
+    let held = (0..links).find(|n| text(format!("net.link.{n}.lease.address")).is_some_and(|a| a.split('/').next() == Some(&local.to_string())));
+    let Some(n) = held else { return Err(format!("no netstack link holds {local}")) };
+    let driver = text(format!("net.link.{n}.driver")).unwrap_or_default();
+    match text(format!("net.link.{n}.medium")).as_deref() {
+        Some("wired") => Ok((osbench_lan::link::Link::Wired, format!("netstack's wired link, {driver}"))),
+        Some("wireless") => Ok((osbench_lan::link::Link::Wifi, format!("netstack's wireless link, {driver}"))),
+        other => Err(format!("netstack's link {n} is carried over {other:?}")),
+    }
 }
 
 /// ToyOS reads no temperature: the kernel counts none

@@ -2,9 +2,9 @@
 # NVMe controller and soundserver's virtio-sound beside it: `iommu_virtio_platform`'s
 # machine, where every virtio function is a process's claim or a kernel driver's.
 #
-# netstack serves once a NIC driver says hello, and leaves a machine none says
-# hello on within 30 s. Every NIC driver is here, so whichever NIC the machine
-# has comes up with no row naming it.
+# netstack serves every link a NIC driver brings, from the start. Every NIC
+# driver is here, so whichever NICs the machine has come up with no row
+# naming them.
 #
 # test-runner is here for the same reason it is in metalcase: it makes the boot
 # announce itself.

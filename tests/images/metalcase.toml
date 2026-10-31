@@ -45,8 +45,8 @@ drives = ["pci:04:03:*"]
 receives = ["sound-output"]
 syscap = ["rt"]
 
-# netstack over the link a NIC driver brings; on a machine with no virtio NIC
-# the supervisor starts no driver, and netstack leaves.
+# netstack over every link a NIC driver brings; on a machine with no virtio NIC
+# the supervisor starts no driver, and netstack serves with no address.
 [programs.netstack]
 service = true
 serves = ["netstack", "link"]

@@ -269,6 +269,9 @@ const RUST_SKIP: &[&str] = &[
     // netstack, which a shared boot runs none of:
     // `a_client_killed_mid_connect_gives_its_place_back` runs it.
     "netstack_connect_killed",
+    // It needs two NICs and a harness that sets one's link down:
+    // `traffic_leaves_by_the_second_link_while_the_first_is_down` runs it.
+    "link_failover",
     // It needs a launcher: `a_launch_gives_each_unsent_stdio_slot_a_null`
     // runs it on tests/images/launchcase.toml.
     "launch_unsent_stdio",
@@ -676,6 +679,16 @@ const MACHINE_TESTS: &[&str] = &[
     // netstack takes to give the address up, or the test is red. x86-64 alone
     // (`qemu::SUITE_ARCH`).
     "a_client_killed_mid_connect_gives_its_place_back",
+    // netstack over two links: the default route leaves by the first, by the
+    // second while QMP holds the first's NIC down, and by the first again
+    // when it is up. Two drivers' links, a NIC's carrier and netstack's
+    // routes cross three processes and two devices, which the node's and the
+    // shard's host tests of rank, failover and return hold below the drivers.
+    // QEMU x86-64 (`qemu::SUITE_ARCH`), on two user networks; the datagrams go
+    // to RFC 5737's TEST-NET-1, which answers nothing, and the harness is the
+    // peer on the host's loopback, so no public network. Order and counts
+    // only.
+    "traffic_leaves_by_the_second_link_while_the_first_is_down",
     // Login sessions: their owner parents, signs out and ends with each, and
     // the machine's reboot waits for them until forced, which only processes
     // in one boot show, as order, completion and counts. The reboot ends the
@@ -4703,6 +4716,7 @@ fn run_machine_test(name: &str, test_config: &Path) -> Result<(), String> {
         "udp_receive_times_out" => udp_receive_times_out(),
         "a_link_ends_under_a_held_stream_and_comes_back" => a_link_ends_under_a_held_stream_and_comes_back(),
         "a_client_killed_mid_connect_gives_its_place_back" => a_client_killed_mid_connect_gives_its_place_back(),
+        "traffic_leaves_by_the_second_link_while_the_first_is_down" => traffic_leaves_by_the_second_link_while_the_first_is_down(),
         "session_lifecycle" => common::sessionlifecycle::session_lifecycle(),
         "a_launch_gives_each_unsent_stdio_slot_a_null" => common::launchstdio::a_launch_gives_each_unsent_stdio_slot_a_null(),
         "a_row_reaches_its_own_state_and_no_other" => common::stateview::a_row_reaches_its_own_state_and_no_other(),
@@ -5796,6 +5810,57 @@ fn peer_verdict<T>(heard: std::thread::JoinHandle<Result<T, String>>) -> String 
 /// answers each line the job writes on one connection, the one before the
 /// job ends its driver and the one after it starts another, then reads the
 /// job's FIN and answers it with its own.
+/// `test_rs_link_failover` on two virtio NICs: the harness, asked over the
+/// second link's network, sets the first link's NIC down and then up.
+fn traffic_leaves_by_the_second_link_while_the_first_is_down() -> Result<(), String> {
+    use std::io::{BufRead, BufReader, Write};
+    const JOB: &str = "link_failover";
+    /// A liveness ceiling on the job and the peer's waits, never a timing.
+    const CEILING: Duration = Duration::from_secs(300);
+    let tests = compile::repo_root().join("tests/guest/rust-tests");
+    let bin = qemu::build_toyos_bin(qemu::SUITE_ARCH, &tests, JOB);
+    let config = compile::repo_root().join("tests/images/netcase.toml");
+    let options = BootOptions { profile: qemu::Profile::HeadlessTwoNics, qmp: true, ..BootOptions::default() };
+    let mut qemu = QemuInstance::boot_with_options(&config, &[], &[(JOB.to_string(), bin)], options);
+    serial::Serial::boot(&qemu).must_be_clean()?;
+    let peer = std::net::TcpListener::bind("127.0.0.1:0").map_err(|e| format!("no loopback listener: {e}"))?;
+    let port = peer.local_addr().map_err(|e| format!("the listener's port: {e}"))?.port();
+    let socket = qemu.qmp_socket().to_path_buf();
+    let heard = std::thread::spawn(move || -> Result<(), String> {
+        let (conn, _) = peer.accept().map_err(|e| format!("the guest's connect: {e}"))?;
+        conn.set_read_timeout(Some(CEILING)).map_err(|e| e.to_string())?;
+        let mut reader = BufReader::new(conn.try_clone().map_err(|e| e.to_string())?);
+        let mut answer = conn;
+        let mut link = qemu::QmpLink::open(&socket);
+        for word in ["down", "up"] {
+            let mut line = String::new();
+            reader.read_line(&mut line).map_err(|e| format!("the job's {word:?} ask: {e}"))?;
+            let Some((said, network)) = line.trim_end().split_once(' ') else { return Err(format!("the job asked {line:?}")) };
+            if said != word {
+                return Err(format!("the job asked {line:?} where {word:?} was owed"));
+            }
+            let Some((id, _)) = qemu::TWO_NICS.iter().find(|(_, net)| net.split('/').next() == Some(network)) else {
+                return Err(format!("the job named {network:?}, which is neither NIC's network"));
+            };
+            link.set(id, word == "up");
+            answer.write_all(format!("{word}\n").as_bytes()).map_err(|e| format!("the answer to {word:?}: {e}"))?;
+        }
+        Ok(())
+    });
+    let result = qemu.run_test(&format!("test_rs_{JOB} {port}"), CEILING);
+    if let Some(why) = &result.error {
+        return Err(format!("{why}\n{}\nthe job said:\n{}", peer_verdict(heard), result.stdout));
+    }
+    if result.exit_code != Some(0) {
+        return Err(format!("the job ended {:?}:\n{}", result.exit_code, result.stdout));
+    }
+    heard.join().map_err(|_| "the peer's thread panicked".to_string())??;
+    for line in result.stdout.lines().filter(|l| l.contains("PASS: ")) {
+        eprintln!("  [links] {}", line.trim());
+    }
+    Ok(())
+}
+
 fn a_link_ends_under_a_held_stream_and_comes_back() -> Result<(), String> {
     use std::io::{BufRead, BufReader, Write};
     const JOB: &str = "link_restart";
