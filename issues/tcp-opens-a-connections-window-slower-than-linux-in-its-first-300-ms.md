@@ -244,7 +244,7 @@ readings, `mhz` just after it and `mhz_settled` before it, were about
 the clock matters through what ToyOS spends per byte sent.
 
 **#1112's session, 2026-10-29**
-([evidence](https://github.com/ToyOSOrg/evidence/tree/c990b1f2eb8b0de24e7c9556952be74ea2eb0fe8/r1/t14)).
+([evidence](https://github.com/ToyOSOrg/evidence/tree/f2909c1f099308bf83e50d94fb6c5bb39aa1733b/r1/t14)).
 B was #1102's head, C per-segment RTT samples (#1112), D C with L = ∞ and
 no pacing, a diagnostic arm that does not land. Three of each, B C D B C D
 B C D, with Linux at both ends:
@@ -263,8 +263,8 @@ B C D, with Linux at both ends:
   was not needed for parity.
 - Finer RTT samples (C) did not change the ramp.
 
-RFC 9406 §4.3 gives L = ∞ only to a paced sender. Pull request #1114 paces [tcp]
-(RFC 9002 §7.7) and removes the cap.
+RFC 9406 §4.3 gives L = ∞ only to a paced sender. Pull request #1114
+paces [tcp] (RFC 9002 §7.7) and removes the cap.
 
 **Exit**: `osbench_lan` on the T14 reads `lan.wired.tcp.upload` at Linux's
 in the same session, with the first 300 ms read at the receiver no slower, or
