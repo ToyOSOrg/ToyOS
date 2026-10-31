@@ -1169,10 +1169,11 @@ const METAL: &[(&str, metal::Metal)] = &[
         metal::Metal { arms: OSBENCH_ENERGY, judge: |b| osbench_energy_measured(b[0]) },
     ),
     (
-        // Scout, not for landing: the T14's driverless functions parked in
-        // D3hot one more at a time, the package's idle read after each.
-        "power_park",
-        metal::Metal { arms: POWER_PARK, judge: |b| osbench_ran(b[0], &["osbench_park"]) },
+        // Scout, not for landing: the T14's package idle without netstack,
+        // under wake periods, and after each of the I219's park, the NVMe's
+        // LTR off and the display's scan-out stopped.
+        "power_scout",
+        metal::Metal { arms: POWER_SCOUT, judge: |b| osbench_ran(b[0], &["osbench_scout"]) },
     ),
     (
         // `osbench lan` against the `osbench-peer` the other bench's Linux runs,
@@ -1755,12 +1756,12 @@ const OSBENCH_ENERGY: &[metal::Arm] = &[metal::Arm {
     ..metal::once("energybenchcase", "tests/images/benchcase.toml", &[], &["osbench_energy"])
 }];
 
-/// The park scout: up to 120 s for quiet, then twelve 30 s idle rows.
-const POWER_PARK: &[metal::Arm] = &[metal::Arm {
-    adds_ms: 540_000,
+/// The scout: up to 120 s for quiet, then nine 30 s rows.
+const POWER_SCOUT: &[metal::Arm] = &[metal::Arm {
+    adds_ms: 480_000,
     features: &["test-actuators"],
     named_only: true,
-    ..metal::once("parkbenchcase", "tests/images/benchcase.toml", &[], &["osbench_park"])
+    ..metal::once("scoutcase", "tests/images/scoutcase.toml", &[], &["osbench_scout"])
 }];
 
 /// The two groups that need another party share one boot when one pass names

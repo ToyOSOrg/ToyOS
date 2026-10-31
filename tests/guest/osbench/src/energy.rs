@@ -258,46 +258,47 @@ fn cpus(bench: &str, first: &[CpuPower], last: &[CpuPower]) {
     }
 }
 
-/// A measurement scout, ToyOS-only and not for landing: the T14's driverless
-/// functions parked in D3hot one more at a time (`SYS_DEBUG`'s
-/// `PCI_PARK_D3HOT`, a test-actuators kernel), 30 s of idle read after each.
-/// Each function is named by its requester id, bus << 8 | device << 3 |
-/// function; the iGPU last, since it takes the panel's scan-out with it.
+/// A measurement scout, ToyOS-only and not for landing, on an image without
+/// netstack, so the T14's I219 is left as firmware handed it over. Each step
+/// is 30 s of idle; the toggles (`SYS_DEBUG` in a test-actuators kernel) are
+/// cumulative and never undone:
+///
+/// 1. the PCIe power registers of every function, logged;
+/// 2. the base, and one thread waking every 1 ms, 10 ms, 100 ms and 1 s;
+/// 3. the I219 (00:1f.6) parked in D3hot;
+/// 4. the NVMe's (04:00.0) LTR Mechanism Enable cleared;
+/// 5. pipe A's planes disabled, then its transcoder;
+/// 6. the registers again.
 #[cfg(target_os = "toyos")]
-pub fn park() {
-    const LADDER: [(&str, u16); 9] = [
-        ("sdreader_0a.00.0", 0x0a00),
-        ("wifi_09.00.0", 0x0900),
-        ("audio_00.1f.3", 0x00fb),
-        ("usb4dma_00.0d.2", 0x006a),
-        ("usb4dma_00.0d.3", 0x006b),
-        ("tcss_xhci_00.0d.0", 0x0068),
-        ("heci_00.16.0", 0x00b0),
-        ("pch_xhci_00.14.0", 0x00a0),
-        ("igpu_00.02.0", 0x0010),
-    ];
+pub fn scout() {
+    use toyos_abi::syscall::{debug_action as da, debug_with};
     if let Err(why) = power::package() {
-        return why.report("energy.park.0_base.package");
+        return why.report("energy.scout.0_base.package");
     }
     wait_quiet();
-    let step = |bench: String| {
+    note("energy.scout", &[("functions", debug_with(da::PCI_POWER_REPORT, 0).to_string())]);
+    let step = |bench: &str, load: Load| {
+        let bench = format!("energy.scout.{bench}");
         let mut measured = Ok(());
-        crate::around::ran_during(&bench, || measured = row(&bench, 30, Load::Idle));
+        crate::around::ran_during(&bench, || measured = row(&bench, 30, load));
         if let Err(why) = measured {
             why.report(&format!("{bench}.package"));
         }
     };
-    step("energy.park.0_base".into());
-    // Under the T14's MWAIT 0x60 exit (1048 us) and over its 0x31's (253 us):
-    // every idle CPU waits in 0x31 or C1 while it is held.
-    let held = crate::sys::syscap().map(|cap| cap.hold_wake_latency(Duration::from_micros(800)));
-    note("energy.park", &[("hold_800us", format!("{:?}", held.as_ref().map(|h| h.as_ref().map(|_| ()))))]);
-    step("energy.park.0_hold_800us".into());
-    drop(held);
-    step("energy.park.0_released".into());
-    for (i, (name, who)) in LADDER.iter().enumerate() {
-        let was = toyos_abi::syscall::debug_with(toyos_abi::syscall::debug_action::PCI_PARK_D3HOT, u64::from(*who));
-        note("energy.park", &[("function", name.to_string()), ("answered", was.to_string())]);
-        step(format!("energy.park.{}_{name}", i + 1));
+    step("0_base", Load::Idle);
+    for (name, ms) in [("1ms", 1), ("10ms", 10), ("100ms", 100), ("1s", 1000)] {
+        step(&format!("0_wake_{name}"), Load::Wake(Duration::from_millis(ms)));
     }
+    let toggles: [(&str, u64, u64); 4] = [
+        ("1_i219_d3hot", da::PCI_PARK_D3HOT, 0x00fe),
+        ("2_nvme_ltr_off", da::PCI_LTR_OFF, 0x0400),
+        ("3_planes_off", da::DISPLAY_OFF, 1),
+        ("4_transcoder_off", da::DISPLAY_OFF, 2),
+    ];
+    for (name, action, arg) in toggles {
+        let answered = debug_with(action, arg);
+        note("energy.scout", &[("step", name.to_string()), ("answered", answered.to_string())]);
+        step(name, Load::Idle);
+    }
+    debug_with(da::PCI_POWER_REPORT, 0);
 }

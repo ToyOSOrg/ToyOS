@@ -941,6 +941,14 @@ pub mod debug_action {
     /// power state it was in (PCI PM 1.2 `PMCSR` bits 1:0). A measurement's
     /// toggle: a later claim of the function finds it out of D0.
     pub const PCI_PARK_D3HOT: u64 = 30;
+    /// Log every PCI function's PCIe power registers; answers how many.
+    pub const PCI_POWER_REPORT: u64 = 31;
+    /// Clear LTR Mechanism Enable in the function the argument's requester
+    /// id names; answers whether it was set.
+    pub const PCI_LTR_OFF: u64 = 32;
+    /// Stop the firmware's scan-out on an Intel iGPU's pipe A: argument 1
+    /// disables its planes, 2 its transcoder.
+    pub const DISPLAY_OFF: u64 = 33;
     /// How many kernel objects of one kind are alive right now. The argument is
     /// an [`ObjectKind`](crate::handle::ObjectKind) word.
     ///

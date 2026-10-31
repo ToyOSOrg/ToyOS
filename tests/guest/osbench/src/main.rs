@@ -160,7 +160,7 @@ const GROUPS: [(&str, fn()); 16] = [
 const BY_NAME: [(&str, fn()); 3] = [("lan", lan::suite), ("internet", internet::suite), ("energy", energy::suite)];
 #[cfg(target_os = "toyos")]
 const BY_NAME: [(&str, fn()); 4] =
-    [("lan", lan::suite), ("internet", internet::suite), ("energy", energy::suite), ("park", energy::park)];
+    [("lan", lan::suite), ("internet", internet::suite), ("energy", energy::suite), ("scout", energy::scout)];
 
 /// A group between its first and last lines, after the machine's conditions
 /// and the clock its CPU starts at.

@@ -111,6 +111,8 @@
 /// No `crate::` reference, so `kernel-loom` compiles it and models the
 /// interleaving no guest test lands on.
 pub(crate) mod record;
+#[cfg(feature = "test-actuators")]
+pub mod scout;
 
 use alloc::boxed::Box;
 use alloc::string::String;
