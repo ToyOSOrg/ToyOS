@@ -1,4 +1,5 @@
-//! The monotonic clock a process reads without a syscall.
+//! The monotonic clock a process reads without a syscall, until the kernel
+//! demotes the counter it reads.
 //!
 //! The clock is a straight [`Line`] through the counter: from a counter
 //! reading, the nanoseconds since the counter's zero, and the rate after it.
@@ -9,6 +10,12 @@
 //! the line in force through the page's [`latch`], which the kernel's own
 //! clock reads too, so a stamp taken here and one taken by the kernel's log
 //! order against each other.
+//!
+//! **A demoted page sends every reading to the kernel.** Where the counter
+//! steps again after a slewed step, or steps back, the kernel marks the page
+//! demoted ([`ClockPage::demoted`]); [`nanos_since_boot`] and [`stamp_ns`]
+//! then ask [`crate::syscall::clock_now`], which reads the reference instead.
+//! The line stays, for a recorded counter reading.
 //!
 //! **Every word of the page is atomic.** The kernel writes it while processes
 //! read it, so it is reached as atomics and never as plain memory.
@@ -26,7 +33,7 @@ pub const CLOCK_PAGE: u64 = 0x1_0000_0000;
 
 /// What the page opens with, so a reader that finds anything else refuses
 /// rather than computes a time out of it.
-pub const CLOCK_MAGIC: u64 = 0x544F_594F_434C_4B32; // "TOYOCLK2"
+pub const CLOCK_MAGIC: u64 = 0x544F_594F_434C_4B33; // "TOYOCLK3"
 
 /// The binary point of [`Line::mult`]: nanoseconds per tick in 32.32 fixed
 /// point, which keeps a 5 GHz counter's rate to a part in 10⁹ and a 1 Hz
@@ -121,6 +128,7 @@ impl Clock {
 pub struct ClockPage {
     magic: AtomicU64,
     stamp_at_boot: AtomicU64,
+    demoted: AtomicU64,
     line: Latch<3>,
 }
 
@@ -137,6 +145,16 @@ impl ClockPage {
         self.line.publish(line.words());
     }
 
+    /// Send every reading to the kernel from now on: the kernel's, once.
+    pub fn demote(&self) {
+        self.demoted.store(1, Ordering::Release);
+    }
+
+    /// Whether a reading of now asks the kernel rather than the line.
+    pub fn demoted(&self) -> bool {
+        self.demoted.load(Ordering::Acquire) != 0
+    }
+
     /// The clock now, or `None` on a page that carries none.
     pub fn read(&self) -> Option<Clock> {
         if self.magic.load(Ordering::Acquire) != CLOCK_MAGIC {
@@ -147,35 +165,51 @@ impl ClockPage {
     }
 }
 
-/// Nanoseconds since boot, off this process's clock page.
+/// Nanoseconds since boot, off this process's clock page, or the kernel's
+/// clock where the page is demoted.
 ///
 /// # Panics
 /// As [`page`].
 pub fn nanos_since_boot() -> u64 {
-    let clock = page();
+    let page = mapped();
+    let clock = read(page);
+    if page.demoted() {
+        return crate::syscall::clock_now().saturating_sub(clock.stamp_at_boot);
+    }
     clock.nanos_since_boot(crate::arch::counter())
 }
 
 /// Now as a log line's time: nanoseconds since the counter's zero, the kernel
 /// log's own `clock::stamp`, which every line of the log carries
-/// (`log::LogRecord::at_ns`).
+/// (`log::LogRecord::at_ns`); the kernel's clock where the page is demoted.
 ///
 /// # Panics
 /// As [`page`].
 pub fn stamp_ns() -> u64 {
-    page().stamp_of(crate::arch::counter())
+    let page = mapped();
+    if page.demoted() {
+        return crate::syscall::clock_now();
+    }
+    read(page).stamp_of(crate::arch::counter())
 }
 
-/// The clock, off this process's page.
+/// The clock, off this process's page: its line, for a counter reading.
 ///
 /// # Panics
 /// On a page that does not carry [`CLOCK_MAGIC`]: every address space the
 /// kernel builds maps one, so its absence is a kernel that broke the ABI.
 pub fn page() -> Clock {
+    read(mapped())
+}
+
+fn mapped() -> &'static ClockPage {
     // SAFETY: the kernel maps the page read-only at `CLOCK_PAGE` in every
     // address space before the first instruction runs and never unmaps it;
     // every field is an atomic, so a shared reference reads it as atomics.
-    let page = unsafe { &*(CLOCK_PAGE as *const ClockPage) };
+    unsafe { &*(CLOCK_PAGE as *const ClockPage) }
+}
+
+fn read(page: &ClockPage) -> Clock {
     page.read().unwrap_or_else(|| panic!("the clock page at {CLOCK_PAGE:#x} carries no clock"))
 }
 
@@ -234,7 +268,7 @@ mod tests {
 
     #[test]
     fn the_page_publishes_whole_lines() {
-        let page = ClockPage { magic: AtomicU64::new(0), stamp_at_boot: AtomicU64::new(0), line: Latch::new() };
+        let page = ClockPage { magic: AtomicU64::new(0), stamp_at_boot: AtomicU64::new(0), demoted: AtomicU64::new(0), line: Latch::new() };
         assert_eq!(page.read(), None);
         let first = Line { counter: 7, stamp: 9, mult: GHZ };
         page.init(9, first);
@@ -244,5 +278,8 @@ mod tests {
         assert_eq!(page.read().map(|c| c.line), Some(second));
         page.publish(first);
         assert_eq!(page.read().map(|c| c.line), Some(first));
+        assert!(!page.demoted());
+        page.demote();
+        assert!(page.demoted());
     }
 }

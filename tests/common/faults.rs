@@ -136,33 +136,42 @@ pub fn kernel_wx_leaf_is_refused(test_config: &Path, profile: qemu::Profile) -> 
     }
 }
 
-/// What `tsc-step` says of the step it stages, and the head of the clock
-/// check's panic at it (`kernel/src/arch/x86_64/clocksource.rs`).
+/// What `tsc-step` says of each step it stages, and the clock's records of
+/// slewing the first away and demoting the TSC at the second
+/// (`kernel/src/arch/x86_64/clocksource.rs`).
 const TSC_STEP_STAGED: &str = "tsc-step: the TSC reads ";
-const TSC_DISAGREES: &str = "clock: the TSC and the HPET disagree by ";
+const TSC_STEP_SLEWED: &str = "clock: TSC STEP: the TSC stepped ";
+const TSC_SLEWED_AWAY: &str = "clock: the TSC's step is slewed away";
+const TSC_STEP_AGAIN: &str = "cycles further ahead from here";
+const TSC_DEMOTED: &str = "clock: DEMOTED: ";
+const DEMOTED_READS: &str = "clock: a process's reading of now asked the kernel since the TSC was demoted";
 
-/// A TSC `tsc-step` reads 10 ms ahead: the clock's runtime check panics after
-/// the step, having read it 9 ms or more apart from the HPET, as a step.
-pub fn a_stepped_tsc_panics(test_config: &Path) -> Result<(), String> {
-    let qemu = QemuInstance::boot_with_options(
+/// A TSC `tsc-step` reads 10 ms ahead, and 10 ms further once the clock has
+/// slewed the first step away: the first is slewed, the second demotes the
+/// TSC, and processes' readings of now reach the kernel after it.
+pub fn a_stepped_tsc_is_slewed_then_demoted(test_config: &Path) -> Result<(), String> {
+    let mut qemu = QemuInstance::boot_with_options(
         test_config,
         &[],
         &[],
-        BootOptions { profile: qemu::Profile::Metal, kernel_params: &["tsc-step"], ready_marker: TSC_DISAGREES, ..Default::default() },
+        BootOptions { profile: qemu::Profile::Metal, kernel_params: &["tsc-step"], ready_marker: TSC_STEP_SLEWED, ..Default::default() },
     );
-    let serial = qemu.boot_log();
+    let mut serial = qemu.boot_log().to_string();
+    // A 10 ms step at 500 ppm is 20 s of slewing; the rest is the RTC's edges either side of each step.
+    serial.push_str(&qemu.drain_until(std::time::Duration::from_secs(120), |l| l.contains(DEMOTED_READS) || l.contains("PANIC")));
     let lines: Vec<&str> = serial.lines().collect();
-    let staged = lines.iter().position(|l| l.contains(TSC_STEP_STAGED)).ok_or_else(|| format!("no {TSC_STEP_STAGED:?} line\n{serial}"))?;
-    let panicked = lines.iter().position(|l| l.contains(TSC_DISAGREES)).ok_or_else(|| format!("no {TSC_DISAGREES:?} panic\n{serial}"))?;
-    let apart: Option<i64> = lines[panicked].split(TSC_DISAGREES).nth(1).and_then(|r| r.split(" ns over").next()).and_then(|n| n.parse().ok());
-    if staged > panicked || !lines[panicked].contains("since the last sample") || !apart.is_some_and(|ns| ns >= 9_000_000) {
-        return Err(format!(
-            "the step and the panic do not match: {:?} then {:?}\n{serial}",
-            lines[staged].trim(),
-            lines[panicked].trim()
-        ));
+    let at = |marker: &str| lines.iter().position(|l| l.contains(marker)).ok_or_else(|| format!("no {marker:?} line\n{serial}"));
+    let order = [at(TSC_STEP_STAGED)?, at(TSC_STEP_SLEWED)?, at(TSC_SLEWED_AWAY)?, at(TSC_STEP_AGAIN)?, at(TSC_DEMOTED)?, at(DEMOTED_READS)?];
+    if !order.is_sorted() || serial.contains("PANIC") {
+        return Err(format!("the steps, the slew and the demotion are out of order: {order:?}\n{serial}"));
     }
-    eprintln!("  [tsc_step] {}", lines[panicked].trim());
+    let stepped: Option<i64> = lines[order[1]].split(TSC_STEP_SLEWED).nth(1).and_then(|r| r.split(" ns").next()).and_then(|n| n.parse().ok());
+    if !stepped.is_some_and(|ns| (9_000_000..=11_000_000).contains(&ns)) {
+        return Err(format!("the slewed step is not the staged 10 ms: {}\n{serial}", lines[order[1]].trim()));
+    }
+    for i in [1, 4, 5] {
+        eprintln!("  [tsc_step] {}", lines[order[i]].trim());
+    }
     Ok(())
 }
 

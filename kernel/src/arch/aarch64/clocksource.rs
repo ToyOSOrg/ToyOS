@@ -4,3 +4,9 @@
 
 /// No reference to sample against.
 pub fn check(_now: u64) {}
+
+/// Now as a log line's time, for a process: the generic timer's clock, which
+/// nothing here demotes.
+pub fn stamp_now() -> u64 {
+    crate::clock::stamp_at(super::cpu::counter())
+}

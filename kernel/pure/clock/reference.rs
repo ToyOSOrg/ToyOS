@@ -9,6 +9,8 @@
 //! statistic, so a bound that fails is a counter, a reference or a read that
 //! did not do what it says.
 
+use toyos_abi::clock::MULT_SHIFT;
+
 /// Parts per billion in one.
 pub const PPB: u64 = 1_000_000_000;
 
@@ -30,7 +32,12 @@ impl Reference {
     /// The span from `a` to `b` the reference counted, zero where it read
     /// backwards.
     pub const fn span_ns(&self, a: Sample, b: Sample) -> u64 {
-        (b.reference.saturating_sub(a.reference) as u128 * self.period_fs as u128 / FS_PER_NS) as u64
+        self.ns_of(b.reference.saturating_sub(a.reference))
+    }
+
+    /// `ticks` of the reference, in nanoseconds.
+    pub const fn ns_of(&self, ticks: u64) -> u64 {
+        (ticks as u128 * self.period_fs as u128 / FS_PER_NS) as u64
     }
 
     /// What the reference's own rate may be off by over `span_ns`.
@@ -264,8 +271,6 @@ pub struct Watch {
     last: Sample,
     kept: Kept,
     next_report_ns: u64,
-    /// Spans left out.
-    unheld: u64,
 }
 
 /// What a sample showed, where it held.
@@ -278,8 +283,6 @@ pub struct Report {
     pub kept: Kept,
     /// Whether `kept` replaced the rate the clock was keeping.
     pub retuned: bool,
-    /// The spans left out so far.
-    pub unheld: u64,
 }
 
 /// What a sample showed, where it did not hold: the counter and the reference
@@ -295,7 +298,7 @@ pub enum Failure {
 
 impl Watch {
     pub const fn new(reference: Reference, anchor: Sample, kept: Kept) -> Self {
-        Self { reference, closed: Span::EMPTY, opened: anchor, last: anchor, kept, next_report_ns: FIRST_REPORT_NS, unheld: 0 }
+        Self { reference, closed: Span::EMPTY, opened: anchor, last: anchor, kept, next_report_ns: FIRST_REPORT_NS }
     }
 
     pub const fn kept(&self) -> Kept {
@@ -319,7 +322,6 @@ impl Watch {
             }
             self.opened = sample;
             self.last = sample;
-            self.unheld += 1;
             return Ok(None);
         }
         let tolerance = |span: &Span| self.kept.bound_ppb + self.reference.tolerance_over(span.shortest_ns);
@@ -347,7 +349,7 @@ impl Watch {
         if retuned {
             self.kept = Kept { mult: measured.mult, bound_ppb: measured.bound_ppb, measured: true };
         }
-        Ok(Some(Report { measured, kept: self.kept, retuned, unheld: self.unheld }))
+        Ok(Some(Report { measured, kept: self.kept, retuned }))
     }
 }
 
@@ -416,6 +418,153 @@ pub const fn arbitrate(first: Agreement, second: Agreement) -> Arbitration {
         Arbitration::CounterMoved
     } else {
         Arbitration::AllDisagree
+    }
+}
+
+/// The RTC's edges the sampler has read, the latest [`EDGES_KEPT`]: each
+/// edge's count and the counter as its interrupt was taken, which is the edge
+/// plus the interrupt's latency, never earlier.
+#[derive(Clone, Copy, Debug)]
+pub struct Edges {
+    kept: [(u64, u64); EDGES_KEPT],
+    len: usize,
+}
+
+pub const EDGES_KEPT: usize = 16;
+/// The edges either side of a span its least-latency edge is taken from.
+pub const EDGES_EACH_SIDE: usize = 3;
+
+impl Edges {
+    pub const fn new() -> Self {
+        Self { kept: [(0, 0); EDGES_KEPT], len: 0 }
+    }
+
+    /// Keep the edge `seen` as the counter read `at`, where it is later than
+    /// the latest kept.
+    pub fn push(&mut self, seen: u64, at: u64) {
+        if self.len > 0 && self.kept[self.len - 1].0 >= seen {
+            return;
+        }
+        if self.len == EDGES_KEPT {
+            self.kept.copy_within(1.., 0);
+            self.len -= 1;
+        }
+        self.kept[self.len] = (seen, at);
+        self.len += 1;
+    }
+
+    /// Whether [`EDGES_EACH_SIDE`] edges have come after the counter read `to`.
+    pub fn complete_after(&self, to: u64) -> bool {
+        self.kept[..self.len].iter().filter(|&&(_, at)| at >= to).count() >= EDGES_EACH_SIDE
+    }
+
+    /// The counter's span, at `mult`, less the RTC's seconds, from before
+    /// `from` to after `to`: from the least-latency of the [`EDGES_EACH_SIDE`]
+    /// edges before `from` to that of those after `to`. An edge reads late by
+    /// its interrupt's latency and never early, so the least on each side is
+    /// the nearest its edge. `None` without an edge either side.
+    pub fn apart_across(&self, from: u64, to: u64, mult: u64) -> Option<i64> {
+        let kept = &self.kept[..self.len];
+        let before = kept.iter().rev().filter(|&&(_, at)| at <= from).take(EDGES_EACH_SIDE);
+        let after = kept.iter().filter(|&&(_, at)| at >= to).take(EDGES_EACH_SIDE);
+        let &(seen_ref, at_ref) = kept.iter().rev().find(|&&(_, at)| at <= from)?;
+        let offset = |&(seen, at): &(u64, u64)| {
+            let ns = ((at as i128 - at_ref as i128) * mult as i128) >> MULT_SHIFT;
+            ns - (seen as i128 - seen_ref as i128) * 1_000_000_000
+        };
+        let least_before = before.map(offset).min()?;
+        let least_after = after.map(offset).min()?;
+        Some((least_after - least_before) as i64)
+    }
+}
+
+impl Default for Edges {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+/// Which of the counter's step and no step at all a third reference, on
+/// another oscillator, reads nearest: within a quarter of the step of
+/// either, or of neither.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Third {
+    /// It reads the step: the counter moved.
+    Counter,
+    /// It reads no step: the two references moved together.
+    References,
+    /// It reads neither, or has no edge either side of the span yet.
+    Unsure,
+}
+
+pub fn third_says(step_ns: i64, apart_ns: Option<i64>) -> Third {
+    let Some(apart) = apart_ns else { return Third::Unsure };
+    let zone = step_ns.unsigned_abs() / 4;
+    if apart.abs_diff(step_ns) <= zone {
+        Third::Counter
+    } else if apart.unsigned_abs() <= zone {
+        Third::References
+    } else {
+        Third::Unsure
+    }
+}
+
+/// What the clock does about a step of its counter: the boot's first, forward,
+/// is slewed away; a second, or one back, leaves the counter for the
+/// reference.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Response {
+    Slew,
+    Demote,
+}
+
+pub const fn respond(step_ns: i64, slewed_before: u32) -> Response {
+    if step_ns > 0 && slewed_before == 0 { Response::Slew } else { Response::Demote }
+}
+
+/// The most a slew moves the clock's rate: 500 ppm, the frequency tolerance
+/// NTP disciplines a clock within (RFC 5905, Appendix A.1.1, `MAXFREQ`), so
+/// a reader that tolerates an NTP-disciplined clock tolerates this one. A
+/// step of `d` is slewed away in `2000 d`: 1.7 ms in 3.4 s.
+pub const SLEW_MOST_PPB: i64 = 500_000;
+/// A debt this small is paid.
+const SLEW_SETTLED_NS: u64 = 1_000;
+
+/// How far the clock stands ahead of the reference's time, which a slew pays
+/// off by running the clock slower than the kept rate.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Slew {
+    debt_ns: i64,
+}
+
+impl Slew {
+    pub const fn new(debt_ns: i64) -> Self {
+        Self { debt_ns }
+    }
+
+    pub const fn debt_ns(&self) -> i64 {
+        self.debt_ns
+    }
+
+    pub const fn settled(&self) -> bool {
+        self.debt_ns.unsigned_abs() <= SLEW_SETTLED_NS
+    }
+
+    /// `ticks` the clock ran at `ran` where the reference's time runs at
+    /// `kept`: what it fell behind is paid off the debt.
+    pub fn ran(&mut self, ticks: u64, kept: u64, ran: u64) {
+        let line = |mult| ((ticks as u128 * mult as u128) >> MULT_SHIFT) as i128;
+        self.debt_ns -= (line(kept) - line(ran)) as i64;
+    }
+
+    /// The rate to run at for the next `period_ns`: the debt paid over that
+    /// period, at most [`SLEW_MOST_PPB`] from `kept`, and `kept` once settled.
+    pub fn mult(&self, kept: u64, period_ns: u64) -> u64 {
+        if self.settled() {
+            return kept;
+        }
+        let ppb = (self.debt_ns as i128 * 1_000_000_000 / period_ns as i128).clamp(-(SLEW_MOST_PPB as i128), SLEW_MOST_PPB as i128);
+        (kept as i128 - kept as i128 * ppb / 1_000_000_000) as u64
     }
 }
 
@@ -605,11 +754,11 @@ mod tests {
         assert_eq!(watch.take(late, true).map(|_| ()), Ok(()));
     }
 
-    /// A reference that stood still for 30 s while the counter ran, as an HPET
-    /// may in a package state that stops it: the span is left out, so it is no
-    /// step, and the rate over the held spans either side is the counter's.
+    /// A reference that stood still for 30 s while the counter ran: held, the
+    /// span reads as a step; left out, it is none, and the rate over the held
+    /// spans either side is the counter's.
     #[test]
-    fn an_unheld_span_is_left_out() {
+    fn a_span_left_out_checks_nothing() {
         let mut watch = watch(true);
         run(&mut watch, HZ, 1..20, 0).unwrap();
         // The reference resumes where it stopped; the counter is 30 s on.
@@ -620,7 +769,6 @@ mod tests {
         assert_eq!(watch.take(resumed, false), Ok(None));
         let reports = run(&mut watch, HZ, 21..300, stood).unwrap();
         let last = reports.last().expect("held spans past the gap report");
-        assert_eq!(last.unheld, 1);
         assert!(ppb_apart(last.measured.mult, HZ) <= last.measured.bound_ppb as u128, "{last:?}");
         assert!(last.measured.span_ns / 1_000_000_000 >= 256);
     }
@@ -699,5 +847,80 @@ mod tests {
         // The ACPI PM timer's 24 bits, across their wrap and back.
         assert_eq!(extend(0x03ff_fff0, 0x0010, 24), 0x0400_0010);
         assert_eq!(extend(0x0400_0010, 0x00ff_fff0, 24), 0x03ff_fff0);
+    }
+
+    /// A 1 GHz counter, so ticks are nanoseconds.
+    const NS: u64 = 1 << MULT_SHIFT;
+
+    /// Edges a second apart on the RTC, each read as late as its latency;
+    /// the counter steps by `step` at `step_at`.
+    fn edges(latency_ns: &[u64], step_at: u64, step: u64) -> Edges {
+        let mut edges = Edges::new();
+        for (n, latency) in latency_ns.iter().enumerate() {
+            let edge = 10_000_000_000 + n as u64 * 1_000_000_000;
+            edges.push(n as u64 + 1, edge + latency + if edge >= step_at { step } else { 0 });
+        }
+        edges
+    }
+
+    /// The least-latency edge either side reads the step, however late the
+    /// edge nearest it was taken; and reads none where there was none.
+    #[test]
+    fn the_rtc_reads_a_step_through_its_interrupts_latency() {
+        let latency = [40_000, 700_000, 3_000, 650_000, 520_000, 9_000, 700_000, 2_000];
+        let step = 1_700_000;
+        let stepped = edges(&latency, 14_500_000_000, step);
+        let (from, to) = (13_900_000_000, 14_900_000_000);
+        assert!(stepped.complete_after(to + step));
+        let apart = stepped.apart_across(from, to + step, NS).expect("edges either side");
+        assert!(apart.abs_diff(step as i64) <= 10_000, "read {apart} ns for a {step} ns step");
+        assert_eq!(third_says(step as i64, Some(apart)), Third::Counter);
+
+        let still = edges(&latency, u64::MAX, 0);
+        let apart = still.apart_across(from, to, NS).expect("edges either side");
+        assert!(apart.unsigned_abs() <= 10_000, "read {apart} ns where nothing stepped");
+        assert_eq!(third_says(step as i64, Some(apart)), Third::References);
+    }
+
+    #[test]
+    fn the_rtc_is_unsure_without_an_edge_either_side_or_between_the_two() {
+        let few = edges(&[1_000, 1_000], u64::MAX, 0);
+        assert_eq!(few.apart_across(9_000_000_000, 10_500_000_000, NS), None);
+        assert!(!few.complete_after(10_500_000_000));
+        assert_eq!(third_says(1_700_000, None), Third::Unsure);
+        assert_eq!(third_says(1_700_000, Some(850_000)), Third::Unsure);
+        assert_eq!(third_says(-1_700_000, Some(-1_600_000)), Third::Counter);
+    }
+
+    #[test]
+    fn only_a_first_forward_step_is_slewed() {
+        assert_eq!(respond(1_700_000, 0), Response::Slew);
+        assert_eq!(respond(1_700_000, 1), Response::Demote);
+        assert_eq!(respond(-1_700_000, 0), Response::Demote);
+    }
+
+    /// Samples land 0.8 to 1.4 s apart: the slew never moves the rate past
+    /// 500 ppm, and the debt is paid within the time that rate takes and two
+    /// periods more.
+    #[test]
+    fn a_slew_pays_its_debt_within_its_bound() {
+        let kept = toyos_abi::clock::Line::mult_of_hz(1_796_624_780);
+        let ticks_per_ns = 1.796_624_78;
+        let debt = 1_700_000i64;
+        let mut slew = Slew::new(debt);
+        let gaps = [1_000_000_000u64, 1_400_000_000, 800_000_000, 1_200_000_000, 1_000_000_000, 1_300_000_000];
+        let mut elapsed = 0u64;
+        for gap in gaps.iter().cycle().take(32) {
+            if slew.settled() {
+                break;
+            }
+            let ran = slew.mult(kept, 1_000_000_000);
+            let ppb = (kept as i128 - ran as i128) * 1_000_000_000 / kept as i128;
+            assert!(ppb.unsigned_abs() <= SLEW_MOST_PPB as u128, "{ppb} ppb");
+            slew.ran((*gap as f64 * ticks_per_ns) as u64, kept, ran);
+            elapsed += gap;
+        }
+        assert!(slew.settled(), "{} ns left", slew.debt_ns());
+        assert!(elapsed <= 2_000 * debt as u64 + 2 * 1_400_000_000, "took {elapsed} ns");
     }
 }

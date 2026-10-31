@@ -25,6 +25,9 @@ pub enum Source {
     UserDev,
     /// Vector 0x25, the remapping unit's fault event.
     DmaFault,
+    /// Vector 0x26, x86-64's RTC update-ended interrupt, once a second.
+    #[cfg_attr(not(target_arch = "x86_64"), allow(dead_code))]
+    Rtc,
     /// Vector 0xFE, the TLB shootdown IPI.
     Tlb,
     /// Vector 0x02, which `crate::hardlockup` samples a CPU with.
@@ -38,11 +41,11 @@ pub enum Source {
 }
 
 impl Source {
-    pub const COUNT: usize = 8;
+    pub const COUNT: usize = 9;
 
     /// Order `tests/toyos.rs`'s `irq_census_conservation` parses back; must match variant order.
     pub const NAMES: [&'static str; Self::COUNT] = [
-        "timer", "kick", "userdev", "dmafault", "tlb", "nmi", "spurious", "unclaimed",
+        "timer", "kick", "userdev", "dmafault", "rtc", "tlb", "nmi", "spurious", "unclaimed",
     ];
 }
 

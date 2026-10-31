@@ -124,10 +124,10 @@ actuators! {
     /// `kernel_wx_leaf_is_refused` and `virt_kernel_wx_leaf_is_refused`.
     kernel_wx_leaf = "kernel-wx-leaf";
 
-    /// Read the TSC 10 ms ahead in the HPET's samples once the clock has
-    /// held for a second, as a step `IA32_TSC_ADJUST` would not show, so the
-    /// HPET alone can catch it. The negative control on the clock's runtime check,
-    /// `a_stepped_tsc_panics`.
+    /// Read the TSC 10 ms ahead in the clock's samples once it has held for
+    /// a second, and 10 ms further once that step is slewed away, as steps
+    /// `IA32_TSC_ADJUST` would not show: the first is slewed, the second
+    /// demotes the TSC. Judged by `a_stepped_tsc_is_slewed_then_demoted`.
     tsc_step = "tsc-step";
 
     /// Read the HPET 10 ms behind in its samples once the clock has held for

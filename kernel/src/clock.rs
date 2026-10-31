@@ -67,16 +67,31 @@ pub fn set_counter(boot: u64, mult: u64) {
     LINES.store(lines as *const ClockPage as *mut ClockPage, Release);
 }
 
-/// Go on at `mult` from now: the line from here starts where the clock
-/// stands, so it bends and never steps. The line now in force.
-pub fn retune(mult: u64) -> Line {
+/// Go on at `mult` from the counter reading `at`: the line from there starts
+/// where the clock stands, so it bends and never steps. The line now in force.
+pub fn retune(at: u64, mult: u64) -> Line {
     let page = lines().expect("clock: retuned before it started");
     let _one = RETUNING.lock();
-    let now = cpu::counter();
-    let at = page.read().expect("clock: the page `set_counter` laid out carries no clock").stamp_of(now);
-    let line = Line { counter: now, stamp: at, mult };
+    let stamp = page.read().expect("clock: the page `set_counter` laid out carries no clock").stamp_of(at);
+    let line = Line { counter: at, stamp, mult };
     page.publish(line);
     line
+}
+
+/// The rate the line in force runs at.
+pub fn mult() -> u64 {
+    clock().expect("clock: read before it started").line.mult
+}
+
+/// The clock at the counter reading `at`, as a log line's time.
+pub fn stamp_at(at: u64) -> u64 {
+    clock().expect("clock: read before it started").stamp_of(at)
+}
+
+/// Send every process's reading of now to the kernel from here on
+/// (`toyos_abi::clock::ClockPage::demoted`).
+pub fn demote() {
+    lines().expect("clock: demoted before it started").demote();
 }
 
 fn lines() -> Option<&'static ClockPage> {

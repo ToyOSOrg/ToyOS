@@ -520,12 +520,12 @@ const MACHINE_TESTS: &[&str] = &[
     // the same audit passing. q35 on `Profile::Metal`, whose 16550 carries
     // the panic.
     "kernel_wx_leaf_is_refused",
-    // The clock's runtime check failing loud on a TSC an actuator stepped
-    // where `IA32_TSC_ADJUST` would not show it: the panic ends the boot, and
-    // no bench's TSC steps on demand. q35 on `Profile::Metal`, whose 16550
-    // carries the panic; the order of the step and the panic, and the size
-    // the check read, are what it holds.
-    "a_stepped_tsc_panics",
+    // The clock's response to TSC steps an actuator stages where
+    // `IA32_TSC_ADJUST` would not show them: the first slewed away, the
+    // second demoting the TSC, after which processes' readings of now reach
+    // the kernel. q35 on `Profile::Metal`; the order, the step's size and a
+    // demoted reading are what it holds, and no bench's TSC steps on demand.
+    "a_stepped_tsc_is_slewed_then_demoted",
     // Its counterpart: the HPET an actuator stalled while the TSC and the PM
     // timer count on is left out, and the boot goes on. q35 on
     // `Profile::Metal`, whose PM timer is at 0x608; no bench's HPET stalls on
@@ -4685,7 +4685,7 @@ fn run_machine_test(name: &str, test_config: &Path) -> Result<(), String> {
         "amdvi_selftest" => common::iommu::amdvi_selftest(test_config),
         "nested_nmi_is_loud" => faults::nested_nmi_is_loud(test_config),
         "kernel_wx_leaf_is_refused" => faults::kernel_wx_leaf_is_refused(test_config, qemu::Profile::Metal),
-        "a_stepped_tsc_panics" => faults::a_stepped_tsc_panics(test_config),
+        "a_stepped_tsc_is_slewed_then_demoted" => faults::a_stepped_tsc_is_slewed_then_demoted(test_config),
         "a_stalled_hpet_is_left_out" => faults::a_stalled_hpet_is_left_out(test_config),
         "acpi_press_is_one_sci" => acpi_press_is_one_sci(),
         "osbench_capability_groups_exit_0" => osbench_capability_groups_exit_0(),

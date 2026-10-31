@@ -630,6 +630,7 @@ pub(crate) fn syscall_dispatch(num: u64, a1: u64, a2: u64, a3: u64, a4: u64) -> 
         SYS_EVENT_SIGNAL => sys_event_signal(RawHandle(a1 as u32)),
         SYS_EVENT_TAKE => sys_event_take(RawHandle(a1 as u32)),
         SYS_HANDLE_WAIT => sys_handle_wait(RawHandle(a1 as u32), a2, a3),
+        SYS_CLOCK_NOW => crate::arch::clocksource::stamp_now(),
         SYS_ACCOUNT_INFO => {
             if a3 < core::mem::size_of::<toyos_abi::syscall::AccountInfo>() as u64 { return SyscallError::InvalidArgument.to_u64(); }
             let Some(addr) = UserAddr::checked(a2) else { return bad_addr };
