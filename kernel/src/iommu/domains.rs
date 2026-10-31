@@ -98,6 +98,22 @@ impl<S: Copy> Domains<S> {
     }
 }
 
+impl<S: Copy> Domains<S> {
+    /// The domain's tables, for a range firmware reserved placed at its own
+    /// address `at`: one no domain's window hands out, which is what makes
+    /// the identity placement collide with nothing.
+    pub fn reserved_space(&self, id: DomainId, at: u64) -> Result<S, IommuError> {
+        aligned(at)?;
+        let reserved = self.reserved.as_deref().ok_or(IommuError::Undeclared)?;
+        assert!(
+            reserved.iter().any(|&(start, end)| (start..end).contains(&at)),
+            "iommu: domain{} placing {at:#x} at its own address, which no domain avoids",
+            id.raw()
+        );
+        Ok(self.live[usize::from(id.raw() - self.first)].0)
+    }
+}
+
 fn aligned(phys: u64) -> Result<(), IommuError> {
     if phys.is_multiple_of(PAGE_2M) {
         Ok(())

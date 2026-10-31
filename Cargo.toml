@@ -138,6 +138,8 @@ members = [
     "system/swap",
     "system/symbolize",
     "system/terminal",
+    "system/tgl-display",
+    "system/tgl-display/driver",
     "system/toybox",
     "system/toybox/copies",
     "system/trace",

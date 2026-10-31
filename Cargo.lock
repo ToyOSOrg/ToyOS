@@ -3333,6 +3333,18 @@ dependencies = [
 ]
 
 [[package]]
+name = "tgl-display"
+version = "0.0.0"
+dependencies = [
+ "toyos",
+ "toyos-abi",
+ "toyos-device-memory",
+ "toyos-manifest",
+ "toyos-pci-claim",
+ "toyos-tgl-display",
+]
+
+[[package]]
 name = "thiserror"
 version = "1.0.69"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -4066,6 +4078,13 @@ dependencies = [
 [[package]]
 name = "toyos-tco"
 version = "0.1.0"
+
+[[package]]
+name = "toyos-tgl-display"
+version = "0.1.0"
+dependencies = [
+ "toyos-device-memory",
+]
 
 [[package]]
 name = "toyos-tmpdir"
