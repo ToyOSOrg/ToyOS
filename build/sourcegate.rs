@@ -803,15 +803,20 @@ mod tests {
     /// Only text has a shape. A value spelled as bytes, a GUID, and a serial
     /// that nothing on its line calls a serial number are the reader's to see.
     /// A home-directory path carrying the owner's first name is not private,
-    /// and is no shape here.
+    /// and is no shape here. Vendor firmware is not read: its row's digest
+    /// pins it unmodified, and its licence leaves only the container a loader
+    /// parses to be read.
     #[test]
     fn no_tracked_file_identifies_a_machine_or_its_network() {
         let root = repo_root();
         let listing = crate::sysroot::tracked_files(&root, &[]).unwrap_or_else(|e| panic!("{e}"));
         let mut complaints = Vec::new();
         let mut kept = std::collections::BTreeSet::new();
+        let firmware = |name: &str| {
+            COMMITTED_FILES.iter().any(|(f, _, _, terms)| *f == name && matches!(terms, crate::licence::Terms::Firmware(_)))
+        };
         // The fork's gitlink is a commit, and every other tracked path a file.
-        for name in listing.iter().filter(|name| *name != NOT_OURS) {
+        for name in listing.iter().filter(|name| *name != NOT_OURS && !firmware(name)) {
             let bytes = std::fs::read(root.join(name)).unwrap_or_else(|e| panic!("{name}: {e}"));
             for (n, line) in String::from_utf8_lossy(&bytes).lines().enumerate() {
                 for (shape, value) in identifying(line) {

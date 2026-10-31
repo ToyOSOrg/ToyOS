@@ -88,9 +88,12 @@ const FONTS_ONLY: &[&str] = &["OFL-1.1"];
 const DATA_ONLY: &[&str] = &["CDLA-Permissive-2.0"];
 
 /// Allowed for a [`Terms::Firmware`] row, and nowhere else: the owner's
-/// ruling that vendor firmware a device or CPU verifies by its maker's
-/// signature may ship, pinned and unmodified (root `CLAUDE.md`).
-const FIRMWARE_ONLY: &[&str] = &["LicenseRef-AMD-Microcode", "LicenseRef-Intel-Microcode"];
+/// rulings that vendor firmware may ship, pinned and unmodified (root
+/// `CLAUDE.md`): CPU microcode its CPU verifies by its maker's signature, and
+/// each Intel radio's newest linux-firmware build, whose verification by the
+/// card nothing shows (`issues/nothing-shows-the-ax200-or-ax210-verifies-its-firmware.md`).
+const FIRMWARE_ONLY: &[&str] =
+    &["LicenseRef-AMD-Microcode", "LicenseRef-Intel-Microcode", "LicenseRef-Intel-iwlwifi-Firmware"];
 
 /// What a licence is judged as: [`FONTS_ONLY`] passes only for a font,
 /// [`DATA_ONLY`] only for the trust roots and [`FIRMWARE_ONLY`] only for
@@ -127,8 +130,8 @@ pub enum Terms {
     /// A font's glyphs, or a raster of them, under an SPDX expression: the one
     /// place [`FONTS_ONLY`] passes.
     Font(&'static str),
-    /// Vendor firmware a device or CPU verifies by its maker's signature,
-    /// under an SPDX expression: the one place [`FIRMWARE_ONLY`] passes.
+    /// Vendor firmware shipped pinned and unmodified, under an SPDX
+    /// expression: the one place [`FIRMWARE_ONLY`] passes.
     Firmware(&'static str),
 }
 
@@ -1117,6 +1120,24 @@ pub const COMMITTED_FILES: &[(&str, &str, &str, Terms)] = &[
         "4e43bb4d23c3638f8c16967d61e8f6456ae0da2ddd1da82ab579a50715147bb1",
         "NOTICE",
         Terms::Firmware("LicenseRef-Intel-Microcode"),
+    ),
+    (
+        "system/ax2xx/firmware/iwlwifi-cc-a0-77.ucode",
+        "1866a58a1daee56b120362122d5f7548b443b53d33f2558a7e4407d58fd27dab",
+        "NOTICE",
+        Terms::Firmware("LicenseRef-Intel-iwlwifi-Firmware"),
+    ),
+    (
+        "system/ax2xx/firmware/iwlwifi-ty-a0-gf-a0-89.ucode",
+        "792478ef7752595525379a5068e2d47e310a2c344636b7df866c54746ced1dc0",
+        "NOTICE",
+        Terms::Firmware("LicenseRef-Intel-iwlwifi-Firmware"),
+    ),
+    (
+        "system/ax2xx/firmware/iwlwifi-ty-a0-gf-a0.pnvm",
+        "9697e327f8171454b3c19b1ec9449753d5b934d4e91722f469616818a6d477b0",
+        "NOTICE",
+        Terms::Firmware("LicenseRef-Intel-iwlwifi-Firmware"),
     ),
 ];
 

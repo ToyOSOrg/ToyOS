@@ -716,6 +716,37 @@ derived from it; no reverse engineering, decompilation or disassembly; and
 export law is observed.
 
 
+system/ax2xx/firmware/* — Intel Wi-Fi firmware, redistributable unmodified
+--------------------------------------------------------------------------
+
+    iwlwifi-cc-a0-77.ucode        1,368,100 bytes, the AX200's firmware,
+                                  API 77
+      sha256 1866a58a1daee56b120362122d5f7548b443b53d33f2558a7e4407d58fd27dab
+    iwlwifi-ty-a0-gf-a0-89.ucode  1,679,080 bytes, the AX210's firmware,
+                                  API 89
+      sha256 792478ef7752595525379a5068e2d47e310a2c344636b7df866c54746ced1dc0
+    iwlwifi-ty-a0-gf-a0.pnvm      55,020 bytes, the AX210's platform NVM
+      sha256 9697e327f8171454b3c19b1ec9449753d5b934d4e91722f469616818a6d477b0
+    Upstream: https://git.kernel.org/pub/scm/linux/kernel/git/firmware/linux-firmware.git,
+    `intel/iwlwifi/` at commit b9df1a1aa45bc4fb2be9de2413203fd626233b9c,
+    byte for byte
+    Copyright: Intel Corporation
+    Licence text: licenses/Intel-iwlwifi-firmware-license.txt (upstream's
+    `LICENSES/LICENCE.iwlwifi_firmware` at that commit,
+    sha256 16d5040c7cf851fc693b7542e20870935b99802533ea1bfd231c377a2305e5c5)
+    SPDX-License-Identifier: LicenseRef-Intel-iwlwifi-Firmware
+
+Each radio's newest linux-firmware build at that commit, which the `ax2xx`
+driver hands its card; `toyos-ax2xx`'s host tests decode their containers.
+The licence permits redistribution in binary form, without modification, on
+three conditions: the copyright notice and the disclaimer are reproduced with
+the distribution, which an image carrying these files must do beside them;
+Intel's name endorses nothing derived from them; and no reverse engineering,
+decompilation or disassembly, so of each file only the container a loader
+parses is read. Whether the cards verify these files is unconfirmed:
+issues/nothing-shows-the-ax200-or-ax210-verifies-its-firmware.md.
+
+
 tests/cavp/SHA*.rsp — NIST's SHA-2 test vectors, CAVP SHAVS
 ------------------------------------------------------------
 
