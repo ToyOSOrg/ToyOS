@@ -259,24 +259,49 @@ impl BitmapAllocator {
     }
 
     /// Mark a contiguous range of blocks as used, one write per bitmap block.
+    /// A write the device refuses clears again what the run had marked, as far
+    /// as the device lets it, so a run is not left marked and named by nothing.
     fn set_range_used(&self, io: &dyn BlockIO, start: BlockNum, count: u64) -> Result<(), FsError> {
         let end = start.raw() + count;
         let mut block = start.raw();
         while block < end {
-            let (bitmap_block, _, _) = self.bit_of(BlockNum::new(block));
-            let mut buf = BlockBuf::zeroed();
-            io.read(bitmap_block, &mut buf)?;
-            while block < end {
-                let (holding, byte_off, bit) = self.bit_of(BlockNum::new(block));
-                if holding != bitmap_block {
-                    break;
+            match self.set_bits(io, block, end, true) {
+                Ok(next) => block = next,
+                Err(e) => {
+                    let mut undo = start.raw();
+                    while undo < block {
+                        match self.set_bits(io, undo, block, false) {
+                            Ok(next) => undo = next,
+                            Err(_) => break,
+                        }
+                    }
+                    return Err(e);
                 }
-                buf.0[byte_off] |= 1 << bit;
-                block += 1;
             }
-            io.write(bitmap_block, &buf)?;
         }
         Ok(())
+    }
+
+    /// Set or clear, in one read-modify-write, the bits of `from..end` that
+    /// lie in `from`'s bitmap block; the first block past them.
+    fn set_bits(&self, io: &dyn BlockIO, from: u64, end: u64, used: bool) -> Result<u64, FsError> {
+        let (bitmap_block, _, _) = self.bit_of(BlockNum::new(from));
+        let mut buf = BlockBuf::zeroed();
+        io.read(bitmap_block, &mut buf)?;
+        let mut block = from;
+        while block < end {
+            let (holding, byte_off, bit) = self.bit_of(BlockNum::new(block));
+            if holding != bitmap_block {
+                break;
+            }
+            match used {
+                true => buf.0[byte_off] |= 1 << bit,
+                false => buf.0[byte_off] &= !(1 << bit),
+            }
+            block += 1;
+        }
+        io.write(bitmap_block, &buf)?;
+        Ok(block)
     }
 
     /// Allocate a single block.
@@ -306,6 +331,44 @@ impl BitmapAllocator {
         let wanted = wanted.max(1).min(u32::try_from(spare).unwrap_or(u32::MAX));
         let (start, len) = self.longest_free_run(io, from % self.total_blocks, wanted)?;
         self.reserve(io, start, len.min(wanted))
+    }
+
+    /// Reserve the first free run at or after block `from`, wrapping once, of
+    /// at most `wanted` blocks: one pass to the first free block, then on to
+    /// the end of its run. Never empty.
+    pub fn alloc_first_fit(&mut self, io: &dyn BlockIO, from: u64, wanted: u32) -> Result<Run, FsError> {
+        let spare = self.spare();
+        if spare == 0 {
+            return Err(FsError::NoSpace { requested: wanted, available: 0 });
+        }
+        let wanted = wanted.max(1).min(u32::try_from(spare).unwrap_or(u32::MAX));
+        let total = self.total_blocks;
+        let (start, len) = {
+            let mut cached = (u64::MAX, BlockBuf::zeroed());
+            let mut free = |pos: u64| -> Result<bool, FsError> {
+                let (bitmap_block, byte_off, bit) = self.bit_of(BlockNum::new(pos));
+                if cached.0 != bitmap_block.raw() {
+                    io.read(bitmap_block, &mut cached.1)?;
+                    cached.0 = bitmap_block.raw();
+                }
+                Ok(cached.1 .0[byte_off] & (1 << bit) == 0)
+            };
+            let from = from % total;
+            let mut start = None;
+            for pos in (from..total).chain(0..from) {
+                if free(pos)? {
+                    start = Some(pos);
+                    break;
+                }
+            }
+            let start = start.ok_or(FsError::NoSpace { requested: wanted, available: self.free_blocks })?;
+            let mut len = 1;
+            while len < wanted && start + u64::from(len) < total && free(start + u64::from(len))? {
+                len += 1;
+            }
+            (start, len)
+        };
+        self.reserve(io, start, len)
     }
 
     /// Reserve all of `count` or nothing, for callers that cannot place a
@@ -481,5 +544,76 @@ impl BitmapAllocator {
         alloc.free_blocks -= 1;
 
         Ok(alloc)
+    }
+}
+
+#[cfg(all(test, feature = "std"))]
+mod tests {
+    use super::*;
+    use crate::block_io::{DeviceError, VecBlockIO};
+    use core::cell::{Cell, RefCell};
+
+    /// A bitmap device that records the blocks written to it, and refuses a
+    /// write to `refuse` once armed.
+    struct Counted {
+        io: VecBlockIO,
+        written: RefCell<Vec<u64>>,
+        refuse: Cell<Option<u64>>,
+    }
+
+    impl BlockIO for Counted {
+        fn read_block(&self, block: BlockNum, buf: &mut BlockBuf) -> Result<(), DeviceError> {
+            self.io.read_block(block, buf)
+        }
+        fn write_block(&self, block: BlockNum, buf: &BlockBuf) -> Result<(), DeviceError> {
+            if self.refuse.get() == Some(block.raw()) {
+                return Err(DeviceError::FAILED);
+            }
+            self.written.borrow_mut().push(block.raw());
+            self.io.write_block(block, buf)
+        }
+        fn block_count(&self) -> u64 {
+            self.io.block_count()
+        }
+        fn sync(&self) -> Result<(), DeviceError> {
+            Ok(())
+        }
+    }
+
+    /// A volume of two bitmap blocks; the device holds only the bitmap.
+    fn two_bitmap_blocks() -> (Counted, BitmapAllocator) {
+        let io = Counted { io: VecBlockIO::new(2), written: RefCell::default(), refuse: Cell::new(None) };
+        let alloc = BitmapAllocator::format(&io, BlockNum::new(0), 2, 40_000, 2).expect("format");
+        io.written.borrow_mut().clear();
+        (io, alloc)
+    }
+
+    /// A run across the boundary of two bitmap blocks writes each once and
+    /// marks its blocks, and only those.
+    #[test]
+    fn a_run_across_two_bitmap_blocks_writes_each_once() {
+        let (io, mut alloc) = two_bitmap_blocks();
+        let free = alloc.free_blocks;
+        let at = BITS_PER_BLOCK - 8;
+        let run = alloc.alloc_first_fit(&io, at, 16).expect("a run");
+        assert_eq!((run.start.raw(), run.len), (at, 16));
+        assert_eq!(*io.written.borrow(), [0, 1]);
+        for (block, taken) in [(at - 1, false), (at, true), (at + 15, true), (at + 16, false)] {
+            assert_eq!(alloc.is_free(&io, BlockNum::new(block)).unwrap(), !taken, "block {block}");
+        }
+        alloc.count_free(&io).expect("count");
+        assert_eq!(alloc.free_blocks, free - 16);
+    }
+
+    /// A run whose second bitmap block the device refuses is refused, and
+    /// what it marked in the first is cleared again.
+    #[test]
+    fn a_run_refused_halfway_leaves_nothing_marked() {
+        let (io, mut alloc) = two_bitmap_blocks();
+        let free = alloc.free_blocks;
+        io.refuse.set(Some(1));
+        assert!(alloc.alloc_first_fit(&io, BITS_PER_BLOCK - 8, 16).is_err());
+        alloc.count_free(&io).expect("count");
+        assert_eq!(alloc.free_blocks, free, "blocks stayed marked that nothing names");
     }
 }

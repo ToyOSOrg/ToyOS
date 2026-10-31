@@ -792,7 +792,7 @@ impl<IO: BlockIO, Mode> Mounted<IO, Mode> {
 ///
 /// That is true of names, and of each entry's length and extents; not of a
 /// file's bytes. A page written over where the file already holds it
-/// ([`Mounted::resolve_or_alloc_block`]) is written in place, so a kill can
+/// (`block_for`) is written in place, so a kill can
 /// leave a file's committed blocks holding pages from both sides of a write
 /// (`issues/a-write-over-a-files-committed-page-is-not-shadowed.md`). What a
 /// kill costs besides is the blocks taken since the last commit and those only
@@ -1049,26 +1049,11 @@ impl<IO: BlockIO> Mounted<IO, ReadWrite> {
         Ok(())
     }
 
-    /// Resolve a page index to a block number, allocating blocks to reach it:
-    /// [`Self::allocate`] for the one page the caller writes.
-    pub fn resolve_or_alloc_block(
-        &mut self,
-        extents: &mut Vec<Extent>,
-        page_idx: u32,
-    ) -> Result<u64, FsError> {
-        self.allocate(extents, page_idx..=page_idx)?;
-        block_for(extents, page_idx).ok_or(FsError::NotFound)
-    }
-
-    /// Allocate blocks until `extents` reach every page of `pages`, which the
-    /// caller then writes whole or in part. Each run asks for every page still
-    /// missing.
-    ///
-    /// The allocator answers with a run that may be shorter than the request,
-    /// so covering the pages means looping until the extents reach them.
-    /// Reading the short run as a complete one returned a block past the end
-    /// of the extent just recorded: the page's write went to a block
-    /// belonging to another file.
+    /// Allocate blocks until `extents` reach every page of `pages`. The caller
+    /// writes every page of `pages`, zero-filling what it does not cover; the
+    /// pages bridged before them are zeroed here. Each run is the first free
+    /// one from the file's end, up to every page still missing, so a call is
+    /// one pass over the blocks it walks.
     pub fn allocate(&mut self, extents: &mut Vec<Extent>, pages: core::ops::RangeInclusive<u32>) -> Result<(), FsError> {
         let end = *pages.end() as u64 + 1;
         let mut covered: u64 = extents.iter().map(|e| e.block_count as u64).sum();
@@ -1081,7 +1066,7 @@ impl<IO: BlockIO> Mounted<IO, ReadWrite> {
                 Some(next) if next < total && self.alloc.is_free(&self.io, BlockNum::new(next))? => next,
                 Some(next) => next % total + SPREAD,
             };
-            let run = self.alloc.alloc_up_to(&self.io, from, want)?;
+            let run = self.alloc.alloc_first_fit(&self.io, from, want)?;
             push_extent(extents, run.start.raw(), run.len);
             covered += run.len as u64;
         }
@@ -1628,7 +1613,7 @@ mod tests {
 
     #[test]
     fn a_page_resolved_against_an_extent_at_the_end_of_the_address_space_is_total() {
-        // Two halves of one hole. The list `resolve_or_alloc_block` extends is
+        // Two halves of one hole. The list `allocate` extends is
         // the one `decode_leaf_value` handed out, so the door is where the
         // refusal belongs — and the arithmetic behind the door is total anyway,
         // because `u64::MAX + 1` under the kernel's `overflow-checks` is a
@@ -1648,7 +1633,8 @@ mod tests {
             block_count: 1,
             _reserved: 0,
         }]);
-        let block = fs.resolve_or_alloc_block(&mut extents, 1).expect("a block for page 1");
+        fs.allocate(&mut extents, 1..=1).expect("a block for page 1");
+        let block = block_for(&extents, 1).expect("page 1 resolves");
         assert!(block < blocks, "page 1 resolved to block {block}, which is not on this volume");
 
         // And the door itself: nothing gets to hand that list to the kernel.
@@ -1670,7 +1656,7 @@ mod tests {
         fs.create("shrink.bin", b"", 1).expect("create");
         let mut extents = Vec::new();
         for page in 0..3 {
-            fs.resolve_or_alloc_block(&mut extents, page).expect("allocate");
+            fs.allocate(&mut extents, page..=page).expect("allocate");
         }
         fs.update_metadata("shrink.bin", &extents, 3 * BLOCK_SIZE as u64, 2)
             .expect("record three pages");
@@ -1719,7 +1705,8 @@ mod tests {
         stamped.0.fill(0xA7);
         let mut extents = Vec::new();
         for page in 0..3u32 {
-            let block = fs.resolve_or_alloc_block(&mut extents, page).expect("allocate");
+            fs.allocate(&mut extents, page..=page).expect("allocate");
+            let block = block_for(&extents, page).expect("allocated");
             fs.io.write_block(BlockNum::new(block), &stamped).expect("stamp");
         }
         let first = extents[0].start_block;
@@ -1729,7 +1716,8 @@ mod tests {
         // The shrunk list, then a write that reaches page 2 again: page 1 is
         // the gap, and the allocator answers with the blocks just freed.
         let mut short = vec![Extent { start_block: first, block_count: 1, _reserved: 0 }];
-        let target = fs.resolve_or_alloc_block(&mut short, 2).expect("allocate through the gap");
+        fs.allocate(&mut short, 2..=2).expect("allocate through the gap");
+        let target = block_for(&short, 2).expect("page 2 resolves");
         assert_eq!(target, first + 2, "the allocator did not reuse the freed tail");
         let gap = block_for(&short, 1).expect("page 1 resolves");
         assert_eq!(gap, first + 1, "page 1 is not the block the shrink freed");

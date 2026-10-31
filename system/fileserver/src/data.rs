@@ -1130,7 +1130,7 @@ mod tests {
         let mut v = DataVolume::format(Ram::new(1024), CLEAN_LIMIT, &["home"], clock).unwrap();
         let mut run = Vec::new();
         let mut page = 0;
-        while v.fs.resolve_or_alloc_block(&mut run, page).is_ok() {
+        while v.fs.allocate(&mut run, page..=page).is_ok() {
             page += 1;
         }
         let taken: Vec<u64> = run.iter().flat_map(|e| e.start_block..e.start_block + e.block_count as u64).collect();
@@ -1138,7 +1138,7 @@ mod tests {
             taken.iter().step_by(2).map(|&b| Extent { start_block: b, block_count: 1, _reserved: 0 }).collect();
         v.fs.free_extents(&holes).unwrap();
         let mut tail = vec![Extent { start_block: *taken.last().unwrap(), block_count: 1, _reserved: 0 }];
-        v.fs.resolve_or_alloc_block(&mut tail, 16).unwrap();
+        v.fs.allocate(&mut tail, 16..=16).unwrap();
         v
     }
 
