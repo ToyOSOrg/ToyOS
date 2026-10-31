@@ -159,8 +159,13 @@ const GROUPS: [(&str, fn()); 16] = [
 #[cfg(not(target_os = "toyos"))]
 const BY_NAME: [(&str, fn()); 3] = [("lan", lan::suite), ("internet", internet::suite), ("energy", energy::suite)];
 #[cfg(target_os = "toyos")]
-const BY_NAME: [(&str, fn()); 4] =
-    [("lan", lan::suite), ("internet", internet::suite), ("energy", energy::suite), ("scout", energy::scout)];
+const BY_NAME: [(&str, fn()); 5] = [
+    ("lan", lan::suite),
+    ("internet", internet::suite),
+    ("energy", energy::suite),
+    ("scout", energy::scout),
+    ("display_scout", energy::display_scout),
+];
 
 /// A group between its first and last lines, after the machine's conditions
 /// and the clock its CPU starts at.

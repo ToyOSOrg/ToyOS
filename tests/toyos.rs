@@ -1176,6 +1176,12 @@ const METAL: &[(&str, metal::Metal)] = &[
         metal::Metal { arms: POWER_SCOUT, judge: |b| osbench_ran(b[0], &["osbench_scout"]) },
     ),
     (
+        // Scout, not for landing: the T14's display engine as the GOP left it,
+        // read only, around one 30 s idle row.
+        "display_scout",
+        metal::Metal { arms: DISPLAY_SCOUT, judge: |b| osbench_ran(b[0], &["osbench_display_scout"]) },
+    ),
+    (
         // `osbench lan` against the `osbench-peer` the other bench's Linux runs,
         // compared with the same program under this bench's Linux on the same
         // path. A pass names it: the other bench has to be running the peer.
@@ -1762,6 +1768,14 @@ const POWER_SCOUT: &[metal::Arm] = &[metal::Arm {
     features: &["test-actuators"],
     named_only: true,
     ..metal::once("scoutcase", "tests/images/scoutcase.toml", &[], &["osbench_scout"])
+}];
+
+/// The display scout: up to 120 s for quiet, two reads and one 30 s row.
+const DISPLAY_SCOUT: &[metal::Arm] = &[metal::Arm {
+    adds_ms: 240_000,
+    features: &["test-actuators"],
+    named_only: true,
+    ..metal::once("scoutcase", "tests/images/scoutcase.toml", &[], &["osbench_display_scout"])
 }];
 
 /// The two groups that need another party share one boot when one pass names

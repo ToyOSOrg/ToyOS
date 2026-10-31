@@ -178,3 +178,122 @@ fn wait_until_or(at: u64, done: impl Fn() -> bool) {
         core::hint::spin_loop();
     }
 }
+
+/// Read-only: what the firmware's GOP left in the display engine's
+/// watermark, buffer, power and PSR state, and pcode's memory values, from
+/// Intel's Tiger Lake references (IHD-OS-TGL-Vol 12-12.21 "Display Watermark
+/// Programming", "Memory Values", "SAGV", "Display C5 and C6"; addresses from
+/// IHD-OS-TGL-Vol 2c-12.21). Writes no display register; the only writes are
+/// the GT driver mailbox's own queries (commands 06h, 23h and 0Dh).
+pub fn display_read(pass: u64) -> u64 {
+    let Some(gpu) = MACHINE.lock().functions.iter().find(|p| (p.bus, p.dev, p.func) == (0, 2, 0) && p.vendor_id() == 0x8086).copied()
+    else {
+        return SyscallError::NotFound.to_u64();
+    };
+    let Ok(base) = gpu.memory_bar(0).map(bar::Memory::address) else { return SyscallError::NotSupported.to_u64() };
+    // GTTMMADR: MMIO in its first 2 MiB, the GGTT from 8 MiB (Vol 2c GTTMMADR_0_2_0_PCI).
+    let regs = crate::mm::paging::map_mmio(base, 0x100_0000, MmioPolicy::Uncacheable);
+    log!("scout: display read {pass}: GTTMMADR {base:#x}, device {:04x}", gpu.device_id());
+
+    // Config space whole: PCICMD (04h), MGGC0 (50h), BDSM (5Ch) among it.
+    for row in 0..16u64 {
+        let mut line = String::new();
+        for word in 0..4 {
+            let _ = write!(line, " {:08x}", gpu.read_config_u32(row * 16 + word * 4));
+        }
+        log!("scout: display cfg {:02x}:{line}", row * 16);
+    }
+
+    let one = |name: &str, at: u64| log!("scout: display {name} [{at:05x}] = {:08x}", regs.read_u32(at));
+    for (name, at) in [
+        ("fuse_status", 0x4_2000),
+        ("de_power1", 0x4_2400),
+        ("de_power2", 0x4_2404),
+        ("arb_ctl2", 0x4_5004),
+        ("dbuf_ctl_s1", 0x4_5008),
+        ("dbuf_ctl_s2", 0x4_4FE8),
+        ("mbus_abox_ctl", 0x4_5038),
+        ("wm_linetime_a", 0x4_5270),
+        ("pwr_well_ctl1", 0x4_5400),
+        ("pwr_well_ctl2", 0x4_5404),
+        ("dc_state_en", 0x4_5504),
+        ("dc_45520", 0x4_5520),
+        ("cdclk_ctl", 0x4_6000),
+        ("trans_ddi_func_ctl_a", 0x6_0400),
+        ("srd_ctl_a", 0x6_0800),
+        ("srd_status_a", 0x6_0840),
+        ("srd_perf_cnt_a", 0x6_0844),
+        ("psr2_ctl_a", 0x6_0900),
+        ("psr2_status_a", 0x6_0940),
+        ("trans_conf_a", 0x7_0008),
+        ("pipe_arb_ctl_a", 0x7_0028),
+    ] {
+        one(name, at);
+    }
+
+    // Dense, zeros omitted: transcoder A's timings and M/N (60000h..),
+    // pipe A's cursor and planes 1-7 with their WM_0..7, WM_TRANS and
+    // BUF_CFG (70080h..7087Fh), the CSR program storage's first words
+    // (80000h) and the DMC's registers (8F000h..).
+    for (from, to) in [(0x6_0000u64, 0x6_0080u64), (0x7_0000, 0x7_0880), (0x8_0000, 0x8_0040), (0x8_F000, 0x8_F100)] {
+        let mut at = from;
+        while at < to {
+            let mut line = String::new();
+            for word in 0..8 {
+                let value = regs.read_u32(at + word * 4);
+                if value != 0 {
+                    let _ = write!(line, " {:05x}={value:08x}", at + word * 4);
+                }
+            }
+            if !line.is_empty() {
+                log!("scout: display dump{line}");
+            }
+            at += 32;
+        }
+    }
+
+    // The plane's surface through the GGTT: the PTE of its first page.
+    let surf = u64::from(regs.read_u32(0x7_019C) & !0xFFF);
+    let pte = regs.read_u64(0x80_0000 + (surf >> 12) * 8);
+    log!("scout: display plane 1 surface ggtt {surf:#x} pte {pte:016x}");
+
+    // The refresh rate the pipe runs at, over half a second of frames.
+    let (frame, start) = (regs.read_u32(PIPE_FRMCNT_A), crate::clock::nanos_since_boot());
+    wait_until_or(start + 500_000_000, || false);
+    let (frames, nanos) = (regs.read_u32(PIPE_FRMCNT_A).wrapping_sub(frame), crate::clock::nanos_since_boot() - start);
+    log!("scout: display pipe A counted {frames} frames in {} us", nanos / 1000);
+
+    // GT driver mailbox (Vol 12 "Mailbox Commands"): interface 138124h with
+    // Run/Busy bit 31, PARAM1 15:8 and the command 7:0; data 138128h/13812Ch.
+    // A transaction still running after 150 us is not ours to disturb: skipped.
+    let mailbox = |name: &str, data0: u32, command: u32, param1: u32, param2: u32| {
+        let idle = || regs.read_u32(0x13_8124) & (1 << 31) == 0;
+        wait_until_or(crate::clock::nanos_since_boot() + 150_000, idle);
+        if !idle() {
+            log!("scout: display pcode {name}: the mailbox stayed busy, {:08x}; not asked", regs.read_u32(0x13_8124));
+            return;
+        }
+        regs.write_u32(0x13_8128, data0);
+        regs.write_u32(0x13_812C, 0);
+        // PARAM2 at 23:16 is an inference: the reference names the field and gives no position.
+        regs.write_u32(0x13_8124, (1 << 31) | (param2 << 16) | (param1 << 8) | command);
+        let start = crate::clock::nanos_since_boot();
+        wait_until_or(start + 1_000_000, idle);
+        log!(
+            "scout: display pcode {name}: interface {:08x} data {:08x} {:08x} after {} us",
+            regs.read_u32(0x13_8124),
+            regs.read_u32(0x13_8128),
+            regs.read_u32(0x13_812C),
+            (crate::clock::nanos_since_boot() - start) / 1000
+        );
+    };
+    mailbox("latency_0_3", 0, 0x06, 0, 0);
+    // The second set takes 1 in Data0 (Vol 12 "Retrieve Memory Latency Data" step 6).
+    mailbox("latency_4_7", 1, 0x06, 0, 0);
+    mailbox("sagv_block_us", 0, 0x23, 0, 0);
+    mailbox("mem_ss_global", 0, 0x0D, 0, 0);
+    for (name, point) in [("qgv_point_0", 0), ("qgv_point_1", 1), ("qgv_point_2", 2), ("qgv_point_3", 3)] {
+        mailbox(name, 0, 0x0D, 1, point);
+    }
+    0
+}

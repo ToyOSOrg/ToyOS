@@ -302,3 +302,24 @@ pub fn scout() {
     }
     debug_with(da::PCI_POWER_REPORT, 0);
 }
+
+/// A read-only measurement scout, ToyOS-only and not for landing: the display
+/// engine's state as the firmware's GOP left it, read by the kernel
+/// (`SYS_DEBUG` `DISPLAY_READ`) once quiet, then a 30 s idle row, then read
+/// again, so a register that moves at idle shows.
+#[cfg(target_os = "toyos")]
+pub fn display_scout() {
+    use toyos_abi::syscall::{debug_action as da, debug_with};
+    if let Err(why) = power::package() {
+        return why.report("energy.display_scout.idle.package");
+    }
+    wait_quiet();
+    note("energy.display_scout", &[("read", "0".to_string()), ("answered", debug_with(da::DISPLAY_READ, 0).to_string())]);
+    let bench = "energy.display_scout.idle";
+    let mut measured = Ok(());
+    crate::around::ran_during(bench, || measured = row(bench, 30, Load::Idle));
+    if let Err(why) = measured {
+        why.report(&format!("{bench}.package"));
+    }
+    note("energy.display_scout", &[("read", "1".to_string()), ("answered", debug_with(da::DISPLAY_READ, 1).to_string())]);
+}

@@ -949,6 +949,10 @@ pub mod debug_action {
     /// Stop the firmware's scan-out on an Intel iGPU's pipe A: argument 1
     /// disables its planes, 2 its transcoder.
     pub const DISPLAY_OFF: u64 = 33;
+    /// Log an Intel iGPU's display watermark, buffer, power and PSR registers
+    /// and pcode's memory values; writes no display register. The argument
+    /// numbers the pass in the log.
+    pub const DISPLAY_READ: u64 = 34;
     /// How many kernel objects of one kind are alive right now. The argument is
     /// an [`ObjectKind`](crate::handle::ObjectKind) word.
     ///

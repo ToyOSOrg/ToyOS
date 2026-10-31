@@ -621,6 +621,7 @@ pub(crate) fn syscall_dispatch(num: u64, a1: u64, a2: u64, a3: u64, a4: u64) -> 
             DA::PCI_POWER_REPORT => crate::pcidev::scout::power_report(),
             DA::PCI_LTR_OFF => crate::pcidev::scout::ltr_off(a2),
             DA::DISPLAY_OFF => crate::pcidev::scout::display_off(a2),
+            DA::DISPLAY_READ => crate::pcidev::scout::display_read(a2),
             DA::TRACE_FLOOD if a2 <= DA::TRACE_FLOOD_MOST => crate::trace::flood(a2),
             // An interrupt inside a syscall's body, which nothing a guest does puts there on demand.
             DA::RING0_TIMER_IN_SYSCALL => ring0_timer_in_syscall(),

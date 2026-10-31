@@ -53,6 +53,7 @@ args = [
 "bin/osbench_identity" = "/system/bin/osbench"
 "bin/osbench_energy" = "/system/bin/osbench"
 "bin/osbench_scout" = "/system/bin/osbench"
+"bin/osbench_display_scout" = "/system/bin/osbench"
 "bin/osbench_system" = "/system/bin/osbench"
 "bin/osbench_sched" = "/system/bin/osbench"
 "bin/osbench_fair" = "/system/bin/osbench"
