@@ -720,16 +720,16 @@ pub fn spawn_thread(
     tcb.write((tp_offset + toyos_abi::TCB_TID) as u64, &tid.raw().to_ne_bytes());
 
     // Enqueue while still holding the table lock: this thread is fully visible to the scheduler before any retire sweep can start.
-    let (sched, _dst) = scheduler::enqueue_new(
-        TaskId(parent_process, tid),
-        ks_alloc,
-        ks_sp,
-        parent_addr_space,
+    let (sched, _dst) = scheduler::enqueue_new(scheduler::NewTask {
+        id: TaskId(parent_process, tid),
+        kernel_stack: ks_alloc,
+        entry_sp: ks_sp,
+        address_space: parent_addr_space,
         thread_pointer,
-        image,
         job,
-        crate::sched::driver::current_mask(),
-    );
+        image,
+        mask: crate::sched::driver::current_mask(),
+    });
     proc.threads.get_mut(tid).unwrap().set_sched(sched);
     drop(guard);
     Some(tid)

@@ -411,17 +411,17 @@ pub fn spawn<C: Commit>(
         let tid = table.get(pid).unwrap().main_tid();
         // Placed while still holding the table lock: kill_process claims teardown
         // under it, so a retire sweep can never see the pid before its thread is scheduled.
-        let (sched, _placed) = scheduler::enqueue_new(
-            scheduler::TaskId(pid, tid),
-            ks_alloc,
-            ks_sp,
-            child_pt.clone(),
+        let (sched, _placed) = scheduler::enqueue_new(scheduler::NewTask {
+            id: scheduler::TaskId(pid, tid),
+            kernel_stack: ks_alloc,
+            entry_sp: ks_sp,
+            address_space: child_pt.clone(),
             thread_pointer,
-            Some(image),
             job,
+            image: Some(image),
             // The spawning thread's, as a new thread's is.
-            crate::sched::driver::current_mask(),
-        );
+            mask: crate::sched::driver::current_mask(),
+        });
         table.get_mut(pid).unwrap().threads_mut().get_mut(tid).unwrap().set_sched(sched);
     });
     drop(guard);

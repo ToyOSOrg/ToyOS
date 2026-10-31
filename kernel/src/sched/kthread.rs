@@ -103,16 +103,16 @@ pub fn spawn(name: &str, body: extern "C" fn(u64) -> !, arg: u64) -> ThreadSched
     let tid = table.get(pid).expect("kthread: the entry just inserted is gone").main_tid();
     claim.publish(TaskId(pid, tid));
     // The kernel address space, named so one declaration decides every task's `cr3`.
-    let (sched, _dst) = scheduler::enqueue_new(
-        TaskId(pid, tid),
-        stack,
+    let (sched, _dst) = scheduler::enqueue_new(scheduler::NewTask {
+        id: TaskId(pid, tid),
+        kernel_stack: stack,
         entry_sp,
-        crate::mm::space::kernel(),
-        0,
-        None,
+        address_space: crate::mm::space::kernel(),
+        thread_pointer: 0,
         job,
-        kernel::sched::affinity::CpuMask::ANY,
-    );
+        image: None,
+        mask: kernel::sched::affinity::CpuMask::ANY,
+    });
     table
         .get_mut(pid)
         .and_then(|p| p.threads_mut().get_mut(tid))
