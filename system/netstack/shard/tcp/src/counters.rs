@@ -32,6 +32,8 @@ toyos_net_wire::counters! {
     TsMissing = "tcp.ts-missing", logged;
     PawsReject = "tcp.paws-reject";
     TsEcrInvalid = "tcp.ts-ecr-invalid";
+    RttFromDeparture = "tcp.rtt.departure";
+    RttFromEcho = "tcp.rtt.echo";
     RstChallenged = "tcp.rst-challenged", logged;
     SynChallenged = "tcp.syn-challenged", logged;
     AckOutOfRange = "tcp.ack-out-of-range", logged;

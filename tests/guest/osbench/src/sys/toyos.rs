@@ -400,7 +400,7 @@ pub fn persistent_dir() -> Option<(String, String, String)> {
 /// What a transfer row reports of the stack beneath it, as netstack's `inspect` answers it: [tcp]'s
 /// and the card's counters. Those a card does not report are left out.
 pub fn net_counters() -> Result<Vec<(String, u64)>, String> {
-    const READ: [&str; 30] = [
+    const READ: [&str; 32] = [
         "net.tcp.sent.bytes",
         "net.tcp.retransmit.bytes",
         "net.tcp.rto",
@@ -409,6 +409,8 @@ pub fn net_counters() -> Result<Vec<(String, u64)>, String> {
         "net.tcp.loss-probe",
         "net.tcp.loss-probe-recovery",
         "net.tcp.dsack-rcvd",
+        "net.tcp.rtt.departure",
+        "net.tcp.rtt.echo",
         "net.tcp.send-limited.user.ns",
         "net.tcp.send-limited.window.ns",
         "net.tcp.send-limited.congestion.ns",

@@ -349,10 +349,12 @@ pub struct Sync {
     pub rtx_timer: Option<Instant>,
     rto_pending: bool,
     timeout_rtx: bool,
-    /// When each segment of new data in flight left, by its end, while none has been resent since
-    /// it did (RFC 6298 §3, Karn): the samples an ACK gives at the clock's own resolution (RFC 8985
-    /// §6.1). At most [`TIMED`]; a segment sent while it is full is not timed.
-    departures: VecDeque<(Seq, Instant)>,
+    /// When the new data in flight left, while none of it has been resent since (RFC 6298 §3,
+    /// Karn): the samples an ACK gives at the clock's own resolution (RFC 8985 §6.1). Every send
+    /// is timed. A send at the same instant as the last joins its run, and so does one shorter than
+    /// SMSS after a run shorter than SMSS. The record then holds at most two runs for each SMSS in
+    /// flight and one more, and a joined small send is timed from its run's start, never later.
+    departures: VecDeque<Departure>,
     /// RFC 8985 §7: when the loss probe is due, whether it is, the probe in flight (SND.NXT once
     /// it left and whether it was a retransmission), and whether an RTT sample came since the last.
     probe_at: Option<Instant>,
@@ -407,9 +409,13 @@ impl SendLimit {
     }
 }
 
-/// The departures a connection times at once: one stretch ACK's worth after another for a window
-/// of hundreds of segments, at a fixed cost per connection.
-const TIMED: usize = 64;
+/// `[start, end)` of new data, which left at `at`.
+#[derive(Clone, Copy, Debug)]
+struct Departure {
+    start: Seq,
+    end: Seq,
+    at: Instant,
+}
 
 fn us32(n: usize) -> u32 {
     u32::try_from(n).unwrap_or(u32::MAX)
@@ -839,8 +845,9 @@ impl Sync {
         }
     }
 
-    /// The ACK's RTT sample: from the departure of the newest segment it newly acknowledges, else
-    /// from the timestamp it echoes, which also times a retransmission (RFC 7323 §4.1). Either is
+    /// The ACK's RTT sample: from the departure of the newest segment it newly acknowledges, else,
+    /// for data a resend or an expiry took out of the record, from the timestamp it echoes, which
+    /// also times a retransmission (RFC 7323 §4.1). Every ACK of new data is a sample, so each is
     /// weighted by RFC 7323 Appendix G's ExpectedSamples.
     fn sample(&mut self, seg: &In<'_>, ack: Seq, flight: u32, ctx: &mut Ctx<'_>) -> Option<Duration> {
         let now = ctx.now;
@@ -852,11 +859,24 @@ impl Sync {
             rtt
         });
         let mut departed = None;
-        while let Some(&(_, at)) = self.departures.front().filter(|&&(end, _)| ack.at_or_after(end)) {
+        while let Some(run) = self.departures.front().copied().filter(|run| ack.after(run.start)) {
+            departed = Some(run.at);
+            if ack.before(run.end) {
+                break;
+            }
             self.departures.pop_front();
-            departed = Some(at);
         }
-        let rtt = departed.map(|at| now.since(at)).or(echoed)?;
+        let rtt = match (departed, echoed) {
+            (Some(at), _) => {
+                ctx.log.count(Counter::RttFromDeparture);
+                now.since(at)
+            }
+            (None, Some(rtt)) => {
+                ctx.log.count(Counter::RttFromEcho);
+                rtt
+            }
+            (None, None) => return None,
+        };
         self.rtt.sample(rtt, flight.div_ceil(self.smss().saturating_mul(2).max(1)).max(1));
         self.sampled = true;
         Some(rtt)
@@ -1157,7 +1177,8 @@ impl Sync {
         }
         self.rto_pending = true;
         self.rtt.back_off();
-        // An expiry puts every departure in doubt, whether or not its retransmission has left.
+        // RFC 6298 §5: after a back-off, a new RTT measurement "can only happen when new data has
+        // been sent and acknowledged", so the backed-off RTO stands until then.
         self.departures.clear();
         (self.probe_at, self.probe_due, self.probe) = (None, false, None);
         let repeat = core::mem::replace(&mut self.timeout_rtx, true);
@@ -1321,8 +1342,12 @@ impl Sync {
             if start == self.tx.una {
                 self.rto_pending = false;
             }
-        } else if end.after(old) && self.departures.len() < TIMED {
-            self.departures.push_back((end, now));
+        } else if end.after(old) {
+            let smss = self.smss();
+            match self.departures.back_mut() {
+                Some(run) if run.end == start && (run.at == now || (run.end.since(run.start) < smss && len < smss)) => run.end = end,
+                _ => self.departures.push_back(Departure { start, end, at: now }),
+            }
         }
         self.arm(now);
         if len > 0 && !resent {
