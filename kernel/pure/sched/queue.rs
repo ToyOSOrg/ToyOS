@@ -66,6 +66,9 @@ pub struct RunQueue<X: SchedPayload> {
     /// Of `ready_fair`, those whose mask names one CPU: what no other CPU
     /// can be given. A queued task's mask does not change.
     pinned_fair: usize,
+    /// Of `ready_fair`, those whose mask is [`CpuMask::ANY`]: while one is
+    /// queued, every CPU may take this queue's surplus.
+    unrestricted_fair: usize,
     /// Negative-gate escape hatches only; see
     /// [`Self::set_lowest_key_within_group`] and [`Self::set_double_charge`].
     #[cfg(feature = "protocol-port")]
@@ -85,6 +88,7 @@ impl<X: SchedPayload> RunQueue<X> {
             running: None,
             ready_fair: 0,
             pinned_fair: 0,
+            unrestricted_fair: 0,
             #[cfg(feature = "protocol-port")]
             lowest_key_within_group: false,
             #[cfg(feature = "protocol-port")]
@@ -125,7 +129,7 @@ impl<X: SchedPayload> RunQueue<X> {
         let job = task.job().clone();
         let jk = job.key();
         job.enter();
-        self.pinned_fair += usize::from(task.affinity().single().is_some());
+        self.count_in(task.affinity());
         let standing = task.standing_mut();
         let carried = core::mem::take(&mut standing.group_lag);
         let left = standing.left.take();
@@ -226,7 +230,7 @@ impl<X: SchedPayload> RunQueue<X> {
         let at = self.pick_fair()?;
         let task = self.threads.payload_mut(at.thread).take().expect("the pick has its value");
         self.ready_fair -= 1;
-        self.pinned_fair -= usize::from(task.affinity().single().is_some());
+        self.count_out(task.affinity());
         self.running = Some(at);
         Some(task)
     }
@@ -270,7 +274,7 @@ impl<X: SchedPayload> RunQueue<X> {
                         self.groups.end_request(&mut self.group_slots, at.group);
                         self.group_slots.payload_mut(at.group).threads.end_request(&mut self.threads, at.thread);
                     }
-                    self.pinned_fair += usize::from(task.affinity().single().is_some());
+                    self.count_in(task.affinity());
                     *self.threads.payload_mut(at.thread) = Some(task);
                     self.ready_fair += 1;
                 }
@@ -318,7 +322,7 @@ impl<X: SchedPayload> RunQueue<X> {
     fn take(&mut self, at: Place) -> ReadyTask<X> {
         let mut task = self.threads.payload_mut(at.thread).take().expect("a ready task");
         self.ready_fair -= 1;
-        self.pinned_fair -= usize::from(task.affinity().single().is_some());
+        self.count_out(task.affinity());
         self.leave(at, task.standing_mut());
         task
     }
@@ -385,13 +389,27 @@ impl<X: SchedPayload> RunQueue<X> {
         self.ready_fair - self.pinned_fair
     }
 
-    /// Every CPU a movable queued fair task may run on: the CPUs a push may
-    /// ring for it.
-    pub fn movable_mask(&self) -> CpuMask {
+    /// Every CPU a movable queued fair task may run on: the CPUs that may
+    /// take this queue's surplus. O(1) while a task of mask
+    /// [`CpuMask::ANY`] is queued; otherwise a walk of the band.
+    pub fn takers(&self) -> CpuMask {
+        if self.unrestricted_fair > 0 {
+            return CpuMask::ANY;
+        }
         self.ready()
             .map(|(_, task)| task.affinity())
             .filter(|mask| mask.single().is_none())
             .fold(CpuMask::NONE, CpuMask::union)
+    }
+
+    fn count_in(&mut self, mask: CpuMask) {
+        self.pinned_fair += usize::from(mask.single().is_some());
+        self.unrestricted_fair += usize::from(mask == CpuMask::ANY);
+    }
+
+    fn count_out(&mut self, mask: CpuMask) {
+        self.pinned_fair -= usize::from(mask.single().is_some());
+        self.unrestricted_fair -= usize::from(mask == CpuMask::ANY);
     }
 
     /// Is `key` queued in the fair band with a mask naming more than one CPU?

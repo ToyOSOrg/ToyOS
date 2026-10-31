@@ -5,8 +5,7 @@
 
 use crate::errcode::EINVAL;
 
-/// The words a kernel mask has: [`toyos_abi::syscall::CPU_MASK_WORDS`].
-pub(crate) const WORDS: usize = 16;
+pub(crate) use toyos_abi::syscall::CPU_MASK_WORDS as WORDS;
 
 /// The mask a `cpusetsize`-byte set asks for on a machine of `online` CPUs, as
 /// Linux reads it: CPUs past the online count are dropped, and a set naming

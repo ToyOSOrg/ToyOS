@@ -171,7 +171,7 @@ extern "C" fn thread_trampoline(data: u64) {
 
 /// The CPUs the calling thread may run on, as Linux's counts its affinity.
 pub fn available_parallelism() -> io::Result<NonZero<usize>> {
-    let mask = syscall::thread_affinity(0)
+    let mask = syscall::thread_affinity(u64::from(toyos_abi::current_tid().0))
         .map_err(|_| io::const_error!(io::ErrorKind::NotFound, "the kernel reads no mask for this thread"))?;
     NonZero::new(mask.iter().map(|word| word.count_ones() as usize).sum())
         .ok_or(io::const_error!(io::ErrorKind::NotFound, "the thread's mask names no CPU"))

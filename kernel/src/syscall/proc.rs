@@ -215,16 +215,11 @@ pub(super) fn sys_thread_spawn(entry: u64, stack_ptr: u64, arg: u64, stack_base:
         .map_or(SyscallError::ResourceExhausted.to_u64(), |t| t.raw() as u64)
 }
 
-/// The scheduler face of the calling process's live thread `tid`, 0 the caller. Another process's thread is
-/// not one of them, which is the whole of the authority: a mask is a placement choice a process makes for its own
-/// threads.
+/// The scheduler face of the calling process's live thread `tid`. Another process's thread is not one of them,
+/// which is the whole of the authority: a mask is a placement choice a process makes for its own threads.
 fn own_thread(tid: u64) -> Option<alloc::sync::Arc<crate::sched::payload::KShared>> {
-    let shared = if tid == 0 {
-        crate::sched::driver::current_shared()?
-    } else {
-        let tid = process::Tid::from_raw(u32::try_from(tid).ok()?);
-        process::thread_sched(process::current_process(), tid)?.shared
-    };
+    let tid = process::Tid::from_raw(u32::try_from(tid).ok()?);
+    let shared = process::thread_sched(process::current_process(), tid)?.shared;
     (shared.state() != kernel::sched::task::TaskState::Dead).then_some(shared)
 }
 

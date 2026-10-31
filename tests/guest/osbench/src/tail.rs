@@ -123,7 +123,6 @@ fn periodic(bench: &str, span: Duration, on_late: &mut dyn FnMut(&Late)) -> Vec<
 /// Each outlier as a note, and the spacing between them: a source that
 /// strikes on a period shows as gaps that agree.
 fn print_outliers(bench: &str, late: &[Late]) {
-    let (slept, woke) = (format!("slept_{}", sys::CPU_NAMING), format!("woke_{}", sys::CPU_NAMING));
     for (i, l) in late.iter().take(PRINTED).enumerate() {
         note(
             &format!("{bench}.outlier"),
@@ -131,8 +130,8 @@ fn print_outliers(bench: &str, late: &[Late]) {
                 ("i", i.to_string()),
                 ("log_s", log_s(l.target_ns)),
                 ("late_us", (l.late_ns / 1000).to_string()),
-                (&slept, l.slept_on.to_string()),
-                (&woke, l.woke_on.to_string()),
+                ("slept_cpu", l.slept_on.to_string()),
+                ("woke_cpu", l.woke_on.to_string()),
             ],
         );
     }
@@ -198,7 +197,7 @@ fn stolen(span: Duration) {
                 ("i", i.to_string()),
                 ("log_s", log_s(*at)),
                 ("gap_us", (gap / 1000).to_string()),
-                (sys::CPU_NAMING, cpu.to_string()),
+                ("cpu", cpu.to_string()),
             ],
         );
     }

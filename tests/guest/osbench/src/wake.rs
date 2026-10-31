@@ -153,7 +153,7 @@ const ROUNDS: usize = 200;
 /// A wake onto a CPU a spinner holds, beside idle CPUs: each round, from a
 /// waker spinning on a CPU of its own, wakes a fresh partner that parked on
 /// the busy one and times it to running, ns. Both systems pin the waker, each
-/// partner until just before its wake, and the spinner. Either kernel may run
+/// partner until it has parked, and the spinner. Either kernel may run
 /// the wake where it is or move it to an idle CPU, and `ran_on_busy` counts
 /// how often it stayed.
 pub fn onto_busy() {
@@ -241,14 +241,19 @@ fn rounds_onto_busy() -> Measured {
     };
     let mut failed = spin_until("the spinner's start", || spinning.load(Ordering::Relaxed)).err();
 
-    let mut ns = Vec::with_capacity(ROUNDS);
-    let mut ran_on_busy = 0usize;
+    // Each partner is unpinned once it has parked, before any round: a parked
+    // thread stays where it parked until its wake places it, and the unpin's
+    // kick of the busy CPU then lands outside every timed wake.
     for (partner, seat) in partners.iter().filter(|_| failed.is_none()) {
         if let Err(why) = spin_until("a partner's park", || seat.parked.load(Ordering::Acquire)) {
             failed = Some(why);
             break;
         }
         partner.release();
+    }
+    let mut ns = Vec::with_capacity(ROUNDS);
+    let mut ran_on_busy = 0usize;
+    for (partner, seat) in partners.iter().filter(|_| failed.is_none()) {
         let sent = Instant::now();
         seat.phase.store(RUN, Ordering::Release);
         partner.thread.thread().unpark();

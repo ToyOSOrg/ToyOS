@@ -365,7 +365,8 @@ pub const SYS_MESSAGE_RECV: u64 = 159;
 pub const SYS_CONSOLE_CARRIED: u64 = 160;
 /// Set the CPUs one of the caller's own threads may run on. See [`thread_set_affinity`].
 pub const SYS_THREAD_SET_AFFINITY: u64 = 161;
-/// Read them back. See [`thread_affinity`].
+/// Read them back into a buffer of at least [`CPU_MASK_WORDS`] words, or
+/// `InvalidArgument`. See [`thread_affinity`].
 pub const SYS_THREAD_GET_AFFINITY: u64 = 162;
 /// The CPU the caller is running on. See [`current_cpu`].
 pub const SYS_CURRENT_CPU: u64 = 163;
@@ -1250,8 +1251,10 @@ pub fn thread_join(tid: u64) -> u64 {
 /// Linux's `CPU_SETSIZE`.
 pub const CPU_MASK_WORDS: usize = 16;
 
-/// Let thread `tid` of the calling process run only on the CPUs `mask` names;
-/// `tid` 0 is the calling thread. A shorter mask's missing words are empty.
+/// Let thread `tid` of the calling process run only on the CPUs `mask` names.
+/// `tid` names a thread as [`thread_join`]'s does, 0 the main thread; a
+/// thread names itself by [`current_tid`](crate::current_tid). A shorter
+/// mask's missing words are empty.
 ///
 /// The mask is a placement choice, not a right: any non-empty set of online
 /// CPUs is accepted, wider or narrower than the last. A new thread or process
@@ -1264,8 +1267,9 @@ pub fn thread_set_affinity(tid: u64, mask: &[u64]) -> Result<(), SyscallError> {
     check(syscall(SYS_THREAD_SET_AFFINITY, tid, mask.as_ptr() as u64, mask.len() as u64, 0)).map(|_| ())
 }
 
-/// The online CPUs thread `tid` of the calling process may run on, `tid` 0
-/// the caller. Errors as [`thread_set_affinity`]'s, but for the mask.
+/// The online CPUs thread `tid` of the calling process may run on, `tid` as
+/// [`thread_set_affinity`] names it. `NotFound` for a `tid` that is not a
+/// live thread of this process.
 pub fn thread_affinity(tid: u64) -> Result<[u64; CPU_MASK_WORDS], SyscallError> {
     let mut mask = [0u64; CPU_MASK_WORDS];
     check(syscall(SYS_THREAD_GET_AFFINITY, tid, mask.as_mut_ptr() as u64, CPU_MASK_WORDS as u64, 0))?;
