@@ -1,0 +1,30 @@
+# A member of the host workspace (root `Cargo.toml`). The link protocol
+# between netstack and each NIC driver: the region's layout, both ends of its
+# rings, the state words and the opening frames, all pure and host-tested; the
+# region's mapping; and the pass every NIC driver runs over a device.
+
+[package]
+name = "toyos-link"
+description = "The link protocol between the network stack and each NIC driver: frames over one shared region's rings, the link's state, and the driver's side of it."
+version = "0.1.0"
+edition = "2024"
+license = "MIT OR Apache-2.0"
+
+[features]
+# Declared, never enabled by any build that ships: `build/ci.rs`'s `CONTROLS`
+# runs it and demands `tests/ends_loom.rs`'s own FAILED line. The want's two
+# swaps are `Relaxed`, so a full ring's producer can miss the room a release
+# gave back while the consumer misses its want: a wake lost for good.
+mutate-want-relaxed = []
+
+[dependencies]
+toyos-abi = { path = "../../sdk/abi" }
+# The rings on the region's header page: `toyos::transport`.
+toyos = { path = "../../sdk/toyos" }
+
+[lints.rust]
+warnings = "deny"
+
+[dev-dependencies]
+# `tests/ends_loom.rs`: the full ring's want on two CPUs.
+loom = "0.7"

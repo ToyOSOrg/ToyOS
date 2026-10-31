@@ -132,14 +132,29 @@ drives = ["pci:04:03:*"]
 receives = ["sound-output"]
 syscap = ["rt"]
 
-# netstack holds the NIC's PCI function and drives it: the virtqueues, the register
-# window and the interrupt are its own, and the kernel keeps only the claim.
-# Named by class, vendor and device rather than by slot, so one row finds the card
-# wherever firmware put it.
+# The network stack, over the link a NIC driver brings on `link`; it claims no
+# device. It serves once the first driver says hello, and leaves a machine
+# none says hello on within 30 s.
 [programs.netstack]
 service = true
-serves = ["netstack"]
-devices = ["pci:02:00:00/1af4:1041"]
+serves = ["netstack", "link"]
+
+# The NIC drivers: one process per function a row's parts match, by class,
+# vendor and device rather than by slot, holding that function alone and
+# bringing its link to netstack, which keeps every connection across a
+# link's end. virtio's is started again when it ends other than by exit 0.
+[programs.virtio-net]
+drives = ["pci:02:00:00/1af4:1041"]
+receives = ["link"]
+restart = true
+
+# The I219, the T14's onboard NIC, and the 82574, which QEMU's `e1000e` models.
+# Not started again: its start resets the part, and over a ring a link change
+# left it that reset is not known to be safe
+# (`issues/no-machine-has-read-an-intel-nic-across-a-link-change.md`).
+[programs.i219]
+drives = ["pci:02:00:00/8086:15fc", "pci:02:00:00/8086:10d3"]
+receives = ["link"]
 
 # The shared clipboard with QEMU's host: one process per virtio-serial
 # function the kernel does not drive (the kernel's console is `1af4:1043` too),

@@ -3257,6 +3257,7 @@ mod tests {
         "tests/images/launchcase.toml",
         "tests/images/floorcase.toml",
         "tests/images/libccase.toml",
+        "tests/images/linkcase.toml",
         "tests/images/sessioncase.toml",
         "tests/images/metalcase.toml",
         "tests/images/metaldevicecase.toml",

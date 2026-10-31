@@ -1323,6 +1323,19 @@ dependencies = [
 ]
 
 [[package]]
+name = "i219"
+version = "0.0.0"
+dependencies = [
+ "toyos",
+ "toyos-abi",
+ "toyos-device-memory",
+ "toyos-i219",
+ "toyos-link",
+ "toyos-manifest",
+ "toyos-pci-claim",
+]
+
+[[package]]
 name = "iana-time-zone"
 version = "0.1.65"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1804,12 +1817,10 @@ version = "0.0.0"
 dependencies = [
  "toyos",
  "toyos-abi",
- "toyos-device-memory",
  "toyos-dhcp",
  "toyos-dns",
- "toyos-i219",
  "toyos-inspect",
- "toyos-manifest",
+ "toyos-link",
  "toyos-mdns",
  "toyos-net-ip",
  "toyos-net-node",
@@ -1817,9 +1828,7 @@ dependencies = [
  "toyos-net-tcp",
  "toyos-net-udp",
  "toyos-net-wire",
- "toyos-pci-claim",
  "toyos-tco",
- "toyos-virtio",
 ]
 
 [[package]]
@@ -3792,6 +3801,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "toyos-link"
+version = "0.1.0"
+dependencies = [
+ "loom",
+ "toyos",
+ "toyos-abi",
+]
+
+[[package]]
 name = "toyos-logstream"
 version = "0.1.0"
 dependencies = [
@@ -4361,6 +4379,19 @@ name = "version_check"
 version = "0.9.5"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "0b928f33d975fc6ad9f86c8f283853ad26bdd5b10b7f1542aa2fa15e2289105a"
+
+[[package]]
+name = "virtio-net"
+version = "0.0.0"
+dependencies = [
+ "toyos",
+ "toyos-abi",
+ "toyos-device-memory",
+ "toyos-link",
+ "toyos-manifest",
+ "toyos-pci-claim",
+ "toyos-virtio",
+]
 
 [[package]]
 name = "walkdir"

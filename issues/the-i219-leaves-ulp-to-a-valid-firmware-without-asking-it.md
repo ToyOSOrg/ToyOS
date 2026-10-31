@@ -8,7 +8,7 @@ opened: 2026-10-28
 
 Where `FWSM` bit 15 reports the firmware valid, the Management Engine
 configures the PHY's Ultra Low Power, and `toyos_i219` writes none of it
-(`system/netstack/i219/src/ulp.rs`). It also asks the engine for nothing: a
+(`system/i219/driver/src/ulp.rs`). It also asks the engine for nothing: a
 host driver on such a machine asks it to leave ULP through the MAC's
 host-to-ME register at `0x5B50` and waits on `FWSM` for the engine's answer,
 and this driver has neither. A PHY the engine left in ULP there stays out of

@@ -6,7 +6,7 @@ opened: 2026-09-23
 
 # `EXTCNF_CTRL` bit 7 is read as manageability's MDIO ownership on a MAC where it gates the PHY's automatic configuration
 
-`system/netstack/i219/src/regs.rs`'s `extcnf::MDIO_MNG_OWNERSHIP` names bit 7 of
+`system/i219/driver/src/regs.rs`'s `extcnf::MDIO_MNG_OWNERSHIP` names bit 7 of
 `EXTCNF_CTRL` after the 82574's §4.5.2, and `phy::Others`, the
 `SoftwareFlagStoodBeside*` refusals and exit codes 73 to 75 read it that way on
 the T14 too. The PCH's own datasheet (631120, rev 002, §8.2.4) calls bit 7

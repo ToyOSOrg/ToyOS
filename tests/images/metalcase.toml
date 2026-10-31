@@ -45,12 +45,16 @@ drives = ["pci:04:03:*"]
 receives = ["sound-output"]
 syscap = ["rt"]
 
-# netstack holds the NIC's PCI function and drives it: the virtqueues, the register
-# window and the interrupt are its own, and the kernel keeps only the claim.
+# netstack over the link a NIC driver brings; on a machine with no virtio NIC
+# the supervisor starts no driver, and netstack leaves.
 [programs.netstack]
 service = true
-serves = ["netstack"]
-devices = ["pci:02:00:00/1af4:1041"]
+serves = ["netstack", "link"]
+
+[programs.virtio-net]
+drives = ["pci:02:00:00/1af4:1041"]
+receives = ["link"]
+restart = true
 
 [programs.sshserver]
 service = true

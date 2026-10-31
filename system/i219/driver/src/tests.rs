@@ -18,7 +18,7 @@ use crate::*;
 type Driver = I219<crate::stub::Bar, crate::stub::Ticker, crate::stub::Grant, crate::stub::Line>;
 
 /// The mode the claim was armed in, read off the modelled configuration space
-/// the way netstack reads the claim's.
+/// the way the `i219` program reads the claim's.
 fn delivery(nic: &Nic) -> Delivery {
     Delivery::of(|at| Ok::<_, ()>(nic.config(at)))
         .unwrap_or_else(|why| panic!("{}", nic.because(&format!("no delivery: {why}"))))
@@ -3471,7 +3471,7 @@ fn a_full_ring_counts_how_long_it_waited_for_room() {
 /// The bring-up leaves one `TCTL` whatever the last holder wrote: a reset that
 /// leaves the register as it was, as the T14's does, and one that resets it to
 /// §10.2.6.1's initial values, under a holder that left `MULR` set, one that
-/// left it clear, and none. Each left its transmitter stopped, as netstack's
+/// left it clear, and none. Each left its transmitter stopped, as the program's
 /// quiesce does before the bring-up.
 #[test]
 fn bring_up_sets_tctl_whatever_the_last_holder_left() {
