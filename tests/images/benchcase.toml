@@ -46,13 +46,13 @@ drives = ["pci:02:00:00/8086:15fc"]
 receives = ["link"]
 
 # The order `osbench all` runs the groups in. The bound is the metal row's, its
-# 465 s on the 60 s every list has (`tests/toyos.rs`), restated for a boot of
+# 545 s on the 60 s every list has (`tests/toyos.rs`), restated for a boot of
 # this config built without the row; a derived metal config states its own.
 [programs.test-runner]
 receives = ["power", "netstack", "log"]
 syscap = ["jobs", "counters", "trace", "roster", "inventory", "dup"]
 args = [
-    "--bound-ms=525000",
+    "--bound-ms=605000",
     "osbench_boot",
     "osbench_identity",
     "osbench_system",

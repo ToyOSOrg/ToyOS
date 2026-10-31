@@ -124,6 +124,7 @@ members = [
     "system/netstack/udp",
     "system/netstack/wire",
     "system/nvme",
+    "system/nvme/apst",
     "system/pkg",
     "system/ps2server",
     "system/ps2server/ps2",

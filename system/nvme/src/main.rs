@@ -133,11 +133,44 @@ fn main() {
         ctrl.lba_bytes,
         ctrl.sectors
     );
+    say_power(&name, &ctrl.power);
     let read = toyos_blockserve::table::read(&mut Sectors { ctrl: &mut ctrl, block: vec![0u8; BLOCK_BYTES] });
     let mut disk = Sessions::new(name.clone(), read);
     link.offer(DISK, disk.offered());
     link.settle(Settled::Offered);
     serve(&name, &mut ctrl, &mut disk, &mut link, stop.as_ref())
+}
+
+/// The controller's power states and the APST table set over them, one line
+/// each: what a bench's idle power and its first I/O after idle are read
+/// against.
+fn say_power(name: &str, power: &nvme::Power) {
+    match power {
+        nvme::Power::Unsupported => println!("{name}: no autonomous power state transitions: the controller supports none"),
+        nvme::Power::Refused(status) => {
+            println!("{name}: no autonomous power state transitions: the controller refused the table (status {status:#x})")
+        }
+        nvme::Power::Autonomous { states, plan } => {
+            for (n, s) in states.iter().enumerate() {
+                let watts = |p: Option<u64>| p.map_or("unreported".to_string(), |p| format!("{}.{:04} W", p / 10_000, p % 10_000));
+                println!(
+                    "{name}: power state {n}: {}, entry {} us, exit {} us, max {}, idle {}",
+                    if s.non_operational { "non-operational" } else { "operational" },
+                    s.entry_us,
+                    s.exit_us,
+                    watts(s.max_power),
+                    watts(s.idle_power),
+                );
+            }
+            let steps: Vec<String> =
+                plan.iter().enumerate().filter_map(|(n, t)| t.map(|t| format!("{n}->{} after {} ms", t.to, t.after_ms))).collect();
+            println!(
+                "{name}: autonomous power state transitions on, round trips within {} us: {}",
+                nvme_apst::EXIT_BOUND_US,
+                if steps.is_empty() { "no state admitted".to_string() } else { steps.join(", ") }
+            );
+        }
+    }
 }
 
 /// A driver whose controller cannot be used: it keeps its link, so the

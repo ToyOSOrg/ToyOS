@@ -11,6 +11,7 @@ toyos-blockring = { path = "../../lib/blockring" }
 toyos-blockserve = { path = "../../lib/blockserve" }
 toyos-gpt = { path = "../../lib/gpt" }
 toyos-quiesce = { path = "../../lib/quiesce" }
+nvme-apst = { path = "apst" }
 
 [package.metadata.toyos.host]
 exempt.owns = "the NVMe controller ToyOS claims for it"
