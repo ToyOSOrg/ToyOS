@@ -10,18 +10,18 @@ use crate::versions::{self, Message, ReceivedForm};
 
 /// A payload that is not its message's layout.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub struct Malformed {
-    pub message: &'static str,
-    /// The length the layout gives, for the counts the payload states.
-    pub expected: usize,
-    pub got: usize,
+pub enum Malformed {
+    /// Not the length the layout gives for the counts the payload states.
+    Length { message: &'static str, expected: usize, got: usize },
+    /// A count past the most the layout holds.
+    Count { message: &'static str, count: u32, most: usize },
 }
 
 /// `payload` when it is exactly `len` bytes.
 fn exactly(message: Message, payload: &[u8], len: usize) -> Result<&[u8], Malformed> {
     match payload.len() == len {
         true => Ok(payload),
-        false => Err(Malformed { message: message.name, expected: len, got: payload.len() }),
+        false => Err(Malformed::Length { message: message.name, expected: len, got: payload.len() }),
     }
 }
 
@@ -145,9 +145,12 @@ pub struct CountryAnswer {
 impl CountryAnswer {
     pub fn parse(payload: &[u8]) -> Result<CountryAnswer, Malformed> {
         let message = versions::COUNTRY_ANSWER;
-        let short = Malformed { message: message.name, expected: 20, got: payload.len() };
-        let count = u32_at(payload, 16).ok_or(short)?;
-        let count = usize::try_from(count).ok().filter(|&n| n <= PROFILE_CHANNELS).ok_or(short)?;
+        let short = Malformed::Length { message: message.name, expected: 20, got: payload.len() };
+        let stated = u32_at(payload, 16).ok_or(short)?;
+        let count = usize::try_from(stated)
+            .ok()
+            .filter(|&n| n <= PROFILE_CHANNELS)
+            .ok_or(Malformed::Count { message: message.name, count: stated, most: PROFILE_CHANNELS })?;
         let p = exactly(message, payload, count.saturating_mul(4).saturating_add(20))?;
         Ok(CountryAnswer {
             status: word(p, 0),
@@ -204,7 +207,7 @@ pub struct IterationDone {
 impl IterationDone {
     pub fn parse(payload: &[u8]) -> Result<IterationDone, Malformed> {
         let message = versions::SCAN_ITERATION_DONE;
-        let count = usize::from(u8_at(payload, 4).ok_or(Malformed { message: message.name, expected: 16, got: payload.len() })?);
+        let count = usize::from(u8_at(payload, 4).ok_or(Malformed::Length { message: message.name, expected: 16, got: payload.len() })?);
         let p = exactly(message, payload, count.saturating_mul(8).saturating_add(16))?;
         let result = |i: usize| {
             let at = i.saturating_mul(8).saturating_add(16);
@@ -336,7 +339,7 @@ impl<'a> Received<'a> {
         let frame = descriptor
             .checked_add(length)
             .and_then(|end| payload.get(descriptor..end))
-            .ok_or(Malformed { message: name, expected: descriptor.saturating_add(length), got: payload.len() })?;
+            .ok_or(Malformed::Length { message: name, expected: descriptor.saturating_add(length), got: payload.len() })?;
         let p = payload;
         // The tail's offsets of the rate, then the energies, channel, arrival
         // and TSF that follow it in both forms.

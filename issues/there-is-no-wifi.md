@@ -290,8 +290,8 @@ W1, P6.
   that carries a trace's bytes: revision 1 states measured values and no
   bytes, and the writer reads no demo log.
 - **Revision 1 leaves two container facts unsaid.** Both pinned files list
-  (0x0e, 0x17) twice in their command-version record, once per side, and
-  §6.5 does not say how two entries combine; the driver exchanges nothing of
+  (0x0e, 0x17) twice in their command-version record (c1 n0 and c99 n1,
+  read here as one entry per side), and §6.5 does not say how two entries combine; the driver exchanges nothing of
   it, and refuses a file that repeats a message it does. The hardware-type
   record is 12 bytes, and §6.3 names only its first four.
 

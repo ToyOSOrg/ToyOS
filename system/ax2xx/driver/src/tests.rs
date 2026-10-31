@@ -8,7 +8,7 @@ use alloc::vec::Vec;
 use crate::command::{self, Band, Command, CoexistenceMode, Probe, ScanChannel, ScanRefused, ScanRequest, Segment};
 use crate::container::{self, Firmware, Image, Refused};
 use crate::notification::{self, Alive, CountryAnswer, IterationDone, Malformed, NvmInfo, Received};
-use crate::part::{self, Hardware, NotServed, Part};
+use crate::part::{Hardware, NotServed, Part};
 use crate::pnvm::{self, Choice, Pnvm};
 use crate::versions::{self, Declared, Id, ReceivedForm, Repeated, ScanForm, Side, Unsupported, Versions};
 
@@ -220,13 +220,15 @@ fn a_part_is_served_only_as_the_hardware_its_file_is_for() {
     assert_eq!(ax200_read, Hardware { mac: 0x34, rf: 0x10a });
     assert_eq!(ax210_read, Hardware { mac: 0x42, rf: 0x10d });
     let (a, b) = (ax200(), ax210());
-    assert_eq!(part::serve(0x8086, 0x2723, ax200_read, &a), Ok(Part::Ax200));
-    assert_eq!(part::serve(0x8086, 0x2725, ax210_read, &b), Ok(Part::Ax210));
-    assert_eq!(
-        part::serve(0x8086, 0x2723, ax200_read, &b),
-        Err(NotServed::Hardware { part: Part::Ax200, read: ax200_read, file: b.hardware })
-    );
-    assert_eq!(part::serve(0x8086, 0x2726, ax210_read, &b), Err(NotServed::Device { vendor: 0x8086, device: 0x2726 }));
+    assert_eq!(Part::of(0x8086, 0x2723), Some(Part::Ax200));
+    assert_eq!(Part::of(0x8086, 0x2725), Some(Part::Ax210));
+    assert_eq!(Part::of(0x8086, 0x2726), None);
+    assert_eq!(Part::Ax200.serve(ax200_read, &a), Ok(()));
+    assert_eq!(Part::Ax210.serve(ax210_read, &b), Ok(()));
+    // The other part's file, whatever the card reads as.
+    assert_eq!(Part::Ax200.serve(ax210_read, &b), Err(NotServed::File { part: Part::Ax200, file: b.hardware }));
+    // Its own file, and a card reading as other hardware.
+    assert_eq!(Part::Ax200.serve(ax210_read, &a), Err(NotServed::Hardware { part: Part::Ax200, read: ax210_read }));
     assert_eq!(Part::Ax200.firmware(), "iwlwifi-cc-a0-77.ucode");
     assert_eq!(Part::Ax210.pnvm(), Some("iwlwifi-ty-a0-gf-a0.pnvm"));
 }
@@ -519,7 +521,7 @@ fn a_scan_requests_lists_land_at_their_offsets() {
 
 #[test]
 fn every_notification_is_refused_off_its_asserted_size() {
-    let short = |message: versions::Message, expected: usize, got: usize| Err::<(), _>(Malformed { message: message.name, expected, got });
+    let short = |message: versions::Message, expected: usize, got: usize| Err::<(), _>(Malformed::Length { message: message.name, expected, got });
     assert_eq!(Alive::parse(&[0; 143]).map(|_| ()), short(versions::ALIVE, 144, 143));
     assert_eq!(NvmInfo::parse(&[0; 469]).map(|_| ()), short(versions::NVM_INFO_ANSWER, 468, 469));
     assert_eq!(notification::ScanDone::parse(&[0; 12]).map(|_| ()), short(versions::SCAN_DONE, 16, 12));
@@ -562,11 +564,11 @@ fn a_country_answer_is_its_header_and_four_bytes_a_channel() {
     assert_eq!((answer.channels.len(), answer.channels[0]), (51, 0x0f01));
     assert_eq!(
         CountryAnswer::parse(&p[..220]),
-        Err(Malformed { message: "country update answer", expected: 224, got: 220 })
+        Err(Malformed::Length { message: "country update answer", expected: 224, got: 220 })
     );
     let mut over = vec![0; 20 + 4 * 111];
     over[16] = 111;
-    assert_eq!(CountryAnswer::parse(&over), Err(Malformed { message: "country update answer", expected: 20, got: over.len() }));
+    assert_eq!(CountryAnswer::parse(&over), Err(Malformed::Count { message: "country update answer", count: 111, most: 110 }));
 }
 
 #[test]
@@ -582,7 +584,7 @@ fn an_iteration_is_its_header_and_eight_bytes_a_channel() {
     assert_eq!(done.results[0], notification::ChannelResult { channel: 1, band: 1, probe_status: 0, probes_not_sent: 0, duration: 110_000 });
     assert_eq!(
         IterationDone::parse(&p[..p.len() - 1]),
-        Err(Malformed { message: "scan iteration done", expected: 320, got: 319 })
+        Err(Malformed::Length { message: "scan iteration done", expected: 320, got: 319 })
     );
 }
 
@@ -617,7 +619,7 @@ fn a_received_frame_is_exactly_its_mpdu_length_after_its_descriptor() {
         let cut = &p[..form.descriptor() + 240];
         assert_eq!(
             Received::parse(cut, form),
-            Err(Malformed { message: "received frame", expected: form.descriptor() + 241, got: cut.len() })
+            Err(Malformed::Length { message: "received frame", expected: form.descriptor() + 241, got: cut.len() })
         );
     }
     assert_eq!(ReceivedForm::V4.descriptor(), 48);

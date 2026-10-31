@@ -737,7 +737,8 @@ system/ax2xx/firmware/* — Intel Wi-Fi firmware, redistributable unmodified
     SPDX-License-Identifier: LicenseRef-Intel-iwlwifi-Firmware
 
 Each radio's newest linux-firmware build at that commit, which the `ax2xx`
-driver hands its card; `toyos-ax2xx`'s host tests decode their containers.
+driver will hand its card from W5; `toyos-ax2xx`'s host tests decode their
+containers. No image carries them yet.
 The licence permits redistribution in binary form, without modification, on
 three conditions: the copyright notice and the disclaimer are reproduced with
 the distribution, which an image carrying these files must do beside them;

@@ -59,21 +59,34 @@ fn twelve_bits(word: u32) -> u16 {
     u16::try_from(word & 0xfff).unwrap_or(u16::MAX)
 }
 
-/// Why a function is not served.
+/// Why a part is not served.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum NotServed {
-    /// Neither part's PCI identity.
-    Device { vendor: u16, device: u16 },
+    /// The file handed over is for other hardware than the part's file.
+    File { part: Part, file: Hardware },
     /// The part reads as other hardware than its file is for.
-    Hardware { part: Part, read: Hardware, file: Hardware },
+    Hardware { part: Part, read: Hardware },
 }
 
-/// The part a function is, when its identity names one and it reads as the
-/// hardware its file is for.
-pub fn serve(vendor: u16, device: u16, read: Hardware, file: &Firmware<'_>) -> Result<Part, NotServed> {
-    let part = Part::of(vendor, device).ok_or(NotServed::Device { vendor, device })?;
-    match read == file.hardware {
-        true => Ok(part),
-        false => Err(NotServed::Hardware { part, read, file: file.hardware }),
+impl Part {
+    /// The hardware the part's own file is for (§1): what its hardware-type
+    /// record names, and what the part must read as.
+    pub const fn hardware(self) -> Hardware {
+        match self {
+            Part::Ax200 => Hardware { mac: 0x34, rf: 0x10a },
+            Part::Ax210 => Hardware { mac: 0x42, rf: 0x10d },
+        }
+    }
+
+    /// Whether `file` is this part's and the function reads as the hardware
+    /// it is for.
+    pub fn serve(self, read: Hardware, file: &Firmware<'_>) -> Result<(), NotServed> {
+        if file.hardware != self.hardware() {
+            return Err(NotServed::File { part: self, file: file.hardware });
+        }
+        match read == file.hardware {
+            true => Ok(()),
+            false => Err(NotServed::Hardware { part: self, read }),
+        }
     }
 }

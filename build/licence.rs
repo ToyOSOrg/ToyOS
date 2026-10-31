@@ -87,11 +87,8 @@ const FONTS_ONLY: &[&str] = &["OFL-1.1"];
 /// CDLA-Permissive-2.0 for the Mozilla roots.
 const DATA_ONLY: &[&str] = &["CDLA-Permissive-2.0"];
 
-/// Allowed for a [`Terms::Firmware`] row, and nowhere else: the owner's
-/// rulings that vendor firmware may ship, pinned and unmodified (root
-/// `CLAUDE.md`): CPU microcode its CPU verifies by its maker's signature, and
-/// each Intel radio's newest linux-firmware build, whose verification by the
-/// card nothing shows (`issues/nothing-shows-the-ax200-or-ax210-verifies-its-firmware.md`).
+/// Allowed for a [`Terms::Firmware`] row, and nowhere else: vendor firmware
+/// the owner ruled may ship, pinned and unmodified.
 const FIRMWARE_ONLY: &[&str] =
     &["LicenseRef-AMD-Microcode", "LicenseRef-Intel-Microcode", "LicenseRef-Intel-iwlwifi-Firmware"];
 
