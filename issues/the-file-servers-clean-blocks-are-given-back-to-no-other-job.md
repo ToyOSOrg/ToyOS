@@ -23,13 +23,15 @@ interim, not a sizing.
 
 A clean block the allocator refuses, or whose place in the eviction order it
 refuses, is not kept: a read is still answered, and a flushed block is already
-on the disk. Four allocations still have no refusal path, so a server whose job is out of memory can still
-abort at them:
+on the disk. These allocations still have no refusal path, so a server whose
+job is out of memory can still abort at them:
 - the block map's node, a small one every few inserts of a clean or a dirty
   block;
+- a block's share count, a small one per block kept;
 - a dirty block;
 - a fetch's staging buffer;
-- a flush's list of the dirty blocks and its buffer for one run.
+- a flush's list of runs, the writes it keeps in flight, and each run's list
+  of shares.
 
 **Exit**: the file servers drop clean blocks when the memory service reports
 pressure, and `CLEAN_SHARE` is deleted.

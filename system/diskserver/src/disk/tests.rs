@@ -6,7 +6,7 @@ use std::cell::Cell;
 use std::collections::VecDeque;
 use std::rc::Rc;
 
-use toyos_blockdev::{block_on, Block, BlockDev, Error, Executor, BLOCK};
+use toyos_blockdev::{block_on, Block, BlockDev, Error, Executor, SharedBlock, BLOCK};
 
 use super::{Link, Served, MAX_RECONNECTS};
 use crate::session::{Answer, Error as SessionError, Unsent, Waited};
@@ -36,8 +36,6 @@ struct Script {
     /// Each reconnect's answer, in turn; `Ok` once they run out.
     reconnects: VecDeque<Result<(), SessionError>>,
     reconnected: u32,
-    /// Writes the next this many write submissions refuse for want of room.
-    full: u32,
     read_only: bool,
 }
 
@@ -53,7 +51,6 @@ impl Script {
             up: true,
             reconnects: VecDeque::new(),
             reconnected: 0,
-            full: 0,
             read_only: false,
         }
     }
@@ -96,12 +93,8 @@ impl Link for Script {
         self.ask(Asked::Read { lba, blocks })
     }
 
-    fn submit_write(&mut self, lba: u64, data: &[u8]) -> Result<Ticket, Unsent> {
-        if self.full > 0 && self.up {
-            self.full -= 1;
-            return Err(Unsent::ArenaFull);
-        }
-        self.ask(Asked::Write { lba, data: data.to_vec() })
+    fn submit_write(&mut self, lba: u64, blocks: &[SharedBlock]) -> Result<Ticket, Unsent> {
+        self.ask(Asked::Write { lba, data: blocks.iter().flat_map(|b| b.iter().copied()).collect() })
     }
 
     fn submit_flush(&mut self) -> Result<Ticket, Unsent> {
@@ -195,17 +188,6 @@ fn a_refused_reconnect_makes_the_disk_gone_for_every_request() {
 
     let script = disk.link.borrow();
     assert_eq!((script.log.len(), script.reconnected), (1, 1));
-}
-
-/// A write the arena has no room for is asked again after a flush, which is
-/// what releases the room acknowledged writes hold.
-#[test]
-fn a_write_without_arena_room_is_asked_again_after_a_flush() {
-    let mut script = Script::new(4);
-    script.full = 1;
-    let disk = Served::new(script);
-    now(&disk, disk.write(2, &blocks(7, 1))).unwrap();
-    assert_eq!(disk.link.borrow().log, [Asked::Flush, Asked::Write { lba: 2, data: vec![7; BLOCK] }]);
 }
 
 /// A transfer longer than one request carries is asked in requests of at
