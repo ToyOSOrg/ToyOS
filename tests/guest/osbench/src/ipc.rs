@@ -80,6 +80,7 @@ pub fn suite() {
                 peer.recv(&mut buf)?;
             }
             crate::clock::settle();
+            let ran = crate::ran::start();
             let before = sys::counts();
             let mut ns = Vec::with_capacity(samples as usize);
             for _ in 0..samples {
@@ -88,7 +89,9 @@ pub fn suite() {
                 peer.recv(&mut buf)?;
                 ns.push(ns_since(t));
             }
-            Ok((ns, Counts::per_op(&before, u64::from(samples))))
+            let mut counts = Counts::per_op(&before, u64::from(samples));
+            counts.extend(ran.fields());
+            Ok((ns, counts))
         };
         match run() {
             Ok((mut ns, counts)) => {
@@ -125,6 +128,7 @@ pub fn suite() {
             token = trip(token)?;
         }
         crate::clock::settle();
+        let ran = crate::ran::start();
         let before = sys::counts();
         let mut ns = Vec::with_capacity(samples as usize);
         for _ in 0..samples {
@@ -132,7 +136,9 @@ pub fn suite() {
             token = trip(token)?;
             ns.push(ns_since(t));
         }
-        Ok((ns, Counts::per_op(&before, u64::from(samples))))
+        let mut counts = Counts::per_op(&before, u64::from(samples));
+        counts.extend(ran.fields());
+        Ok((ns, counts))
     };
     match run() {
         Ok((mut ns, counts)) => {
