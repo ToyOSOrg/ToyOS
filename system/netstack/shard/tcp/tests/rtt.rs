@@ -210,3 +210,58 @@ fn s_rt_021_a_segment_after_small_sends_is_timed_from_its_own_departure() {
     h.input(20, seg(5001).ack(2661));
     assert_eq!(h.info().srtt, Some(std::time::Duration::from_micros(10_625)), "one 15 ms sample");
 }
+
+/// An app-limited sender of small writes: 100 bytes every 10 ms with Nagle off, each ACKed 20 ms
+/// after it left. Its writes join a run only until an ACK lands in it, so every sample is the
+/// path's 20 ms and srtt stays there, where timing each from its run's first send would grow it.
+#[test]
+fn s_rt_022_small_periodic_writes_are_each_timed_by_the_path() {
+    let mut h = H::new(65_535);
+    h.start(-20);
+    h.conn = Some(h.tcp.connect(h.now(), A, Some(port(49152)), ep(B, 80)).unwrap());
+    h.transmit();
+    h.input(0, seg(5000).ack(1001).syn().wnd(65_535).mss(1460));
+    let (_, outs) = h.call(0, |tcp, now, id| tcp.set_options(now, id, toyos_net_tcp::Options { nodelay: true, ..Default::default() }));
+    nothing(&outs);
+    for i in 0..30u32 {
+        let t = i64::from(i) * 10;
+        if i >= 2 {
+            h.input(t, seg(5001).ack(1001 + (i - 1) * 100));
+            assert_eq!(h.info().srtt, Some(ms(20)), "the ACK at {t} ms");
+        }
+        assert_eq!(h.send(t, 100).len(), 1);
+    }
+    assert_eq!(h.count(Counter::RttFromDeparture), 28);
+}
+
+/// A window that left at one instant is one run, and every ACK into it is timed exactly, however
+/// many land partway.
+#[test]
+fn s_rt_023_each_ack_into_a_burst_is_timed() {
+    let mut h = fixture_e();
+    assert_eq!(h.send(0, 14_600).len(), 10);
+    for (t, segments) in [(10, 3), (11, 6), (12, 10)] {
+        h.input(t, seg(5001).ack(1001 + segments * 1460));
+    }
+    assert_eq!(h.count(Counter::RttFromDeparture), 3);
+}
+
+/// Small writes at 0, 5 and 8 ms join one run. The ACK of the first is timed from it; the ACK of
+/// the second lands where the run no longer says when its newest byte left, and is not timed; the
+/// ACK of the rest is timed from the last write: 20 ms each time it is.
+#[test]
+fn s_rt_024_a_later_ack_partway_into_a_run_of_writes_is_not_timed() {
+    let mut h = fixture_e();
+    let (_, outs) = h.call(0, |tcp, now, id| tcp.set_options(now, id, toyos_net_tcp::Options { nodelay: true, ..Default::default() }));
+    nothing(&outs);
+    for t in [0, 5, 8] {
+        h.send(t, 100);
+    }
+    h.input(20, seg(5001).ack(1101));
+    let srtt = h.info().srtt;
+    assert_eq!(srtt, Some(std::time::Duration::from_micros(11_250)), "a 20 ms sample");
+    h.input(25, seg(5001).ack(1201));
+    assert_eq!((h.info().srtt, h.count(Counter::RttFromDeparture)), (srtt, 1), "no sample");
+    h.input(28, seg(5001).ack(1301));
+    assert_eq!(h.info().srtt, Some(std::time::Duration::from_micros(12_343)), "a 20 ms sample");
+}

@@ -351,9 +351,13 @@ pub struct Sync {
     timeout_rtx: bool,
     /// When the new data in flight left, while none of it has been resent since (RFC 6298 §3,
     /// Karn): the samples an ACK gives at the clock's own resolution (RFC 8985 §6.1). Every send
-    /// is timed. A send at the same instant as the last joins its run, and so does one shorter than
-    /// SMSS after a run shorter than SMSS. The record then holds at most two runs for each SMSS in
-    /// flight and one more, and a joined small send is timed from its run's start, never later.
+    /// is timed. A send at the same instant as the last joins its run, and so does any send after
+    /// a run shorter than SMSS until an ACK lands in the run. Only the oldest run can be both short
+    /// and closed, so the record holds at most a run for each SMSS in flight and two more. An ACK
+    /// of a whole run is timed from its last send, and one partway into a run that left at one
+    /// instant from that instant. In a run of several instants, the first ACK partway is timed
+    /// from its first send, which overstates it by less than the joins took before that ACK ended
+    /// them; a later partway ACK is not timed.
     departures: VecDeque<Departure>,
     /// RFC 8985 §7: when the loss probe is due, whether it is, the probe in flight (SND.NXT once
     /// it left and whether it was a retransmission), and whether an RTT sample came since the last.
@@ -409,12 +413,14 @@ impl SendLimit {
     }
 }
 
-/// `[start, end)` of new data, which left at `at`.
+/// `[start, end)` of new data, sent from `first` to `last`; `sampled` once an ACK landed in it.
 #[derive(Clone, Copy, Debug)]
 struct Departure {
     start: Seq,
     end: Seq,
-    at: Instant,
+    first: Instant,
+    last: Instant,
+    sampled: bool,
 }
 
 fn us32(n: usize) -> u32 {
@@ -859,11 +865,15 @@ impl Sync {
             rtt
         });
         let mut departed = None;
-        while let Some(run) = self.departures.front().copied().filter(|run| ack.after(run.start)) {
-            departed = Some(run.at);
+        while let Some(run) = self.departures.front_mut().filter(|run| ack.after(run.start)) {
             if ack.before(run.end) {
+                if core::mem::replace(&mut run.sampled, true) && run.first != run.last {
+                    return None;
+                }
+                departed = Some(run.first);
                 break;
             }
+            departed = Some(run.last);
             self.departures.pop_front();
         }
         let rtt = match (departed, echoed) {
@@ -1345,8 +1355,10 @@ impl Sync {
         } else if end.after(old) {
             let smss = self.smss();
             match self.departures.back_mut() {
-                Some(run) if run.end == start && (run.at == now || (run.end.since(run.start) < smss && len < smss)) => run.end = end,
-                _ => self.departures.push_back(Departure { start, end, at: now }),
+                Some(run) if run.end == start && (run.last == now || (!run.sampled && run.end.since(run.start) < smss)) => {
+                    (run.end, run.last) = (end, now);
+                }
+                _ => self.departures.push_back(Departure { start, end, first: now, last: now, sampled: false }),
             }
         }
         self.arm(now);
