@@ -265,3 +265,18 @@ fn s_rt_024_a_later_ack_partway_into_a_run_of_writes_is_not_timed() {
     h.input(28, seg(5001).ack(1301));
     assert_eq!(h.info().srtt, Some(std::time::Duration::from_micros(12_343)), "a 20 ms sample");
 }
+
+/// HTTP's shape: a short header, then a window of body a millisecond later. The body is its own
+/// run, not joined to the header's, so every ACK into it is a sample: four ACKs, four samples.
+#[test]
+fn s_rt_025_a_body_after_a_header_is_timed_by_each_ack() {
+    let mut h = fixture_e();
+    let (_, outs) = h.call(0, |tcp, now, id| tcp.set_options(now, id, toyos_net_tcp::Options { nodelay: true, ..Default::default() }));
+    nothing(&outs);
+    assert_eq!(h.send(0, 200).len(), 1);
+    assert_eq!(h.send(1, 4 * 1460).len(), 4);
+    for (t, ack) in [(20, 1201), (21, 1201 + 1460), (22, 1201 + 3 * 1460), (23, 1201 + 4 * 1460)] {
+        h.input(t, seg(5001).ack(ack));
+    }
+    assert_eq!(h.count(Counter::RttFromDeparture), 4);
+}

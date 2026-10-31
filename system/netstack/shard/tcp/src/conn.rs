@@ -352,13 +352,13 @@ pub struct Sync {
     timeout_rtx: bool,
     /// When the new data in flight left, while none of it has been resent since (RFC 6298 §3,
     /// Karn): the samples an ACK gives at the clock's own resolution (RFC 8985 §6.1). Every send
-    /// is timed. A send at the same instant as the last joins its run, and so does any send after
-    /// a run shorter than SMSS until an ACK lands in the run. Only the oldest run can be both short
-    /// and closed, so the record holds at most a run for each SMSS in flight and two more. An ACK
-    /// of a whole run is timed from its last send, and one partway into a run that left at one
-    /// instant from that instant. In a run of several instants, the first ACK partway is timed
-    /// from its first send, which overstates it by less than the joins took before that ACK ended
-    /// them; a later partway ACK is not timed.
+    /// is timed. A send at the same instant as the last joins its run, and so does one shorter than
+    /// SMSS after a run shorter than SMSS until an ACK lands in the run, so a burst after a short
+    /// header starts its own run and its ACKs are each timed. The record holds at most two runs
+    /// for each SMSS in flight and two more. An ACK of a whole run is timed from its last send, and
+    /// one partway into a run that left at one instant from that instant. In a run of several
+    /// instants, the first ACK partway is timed from its first send, which overstates it by less
+    /// than the joins took before that ACK ended them; a later partway ACK is not timed.
     departures: VecDeque<Departure>,
     /// RFC 8985 §7: when the loss probe is due, whether it is, the probe in flight (SND.NXT once
     /// it left and whether it was a retransmission), and whether an RTT sample came since the last.
@@ -1371,7 +1371,7 @@ impl Sync {
         } else if end.after(old) {
             let smss = self.smss();
             match self.departures.back_mut() {
-                Some(run) if run.end == start && (run.last == now || (!run.sampled && run.end.since(run.start) < smss)) => {
+                Some(run) if run.end == start && (run.last == now || (!run.sampled && run.end.since(run.start) < smss && len < smss)) => {
                     (run.end, run.last) = (end, now);
                 }
                 _ => self.departures.push_back(Departure { start, end, first: now, last: now, sampled: false }),
