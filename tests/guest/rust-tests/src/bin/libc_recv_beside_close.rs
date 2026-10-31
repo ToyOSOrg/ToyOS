@@ -14,7 +14,7 @@
 //!
 //! **This test is netstack for its child**, as `stream_handles` is: the
 //! child's `connect` reaches a port of this test's, which answers with the
-//! region judged and two bells, so no NIC and no peer is needed. The order is
+//! region judged and its bells, so no NIC and no peer is needed. The order is
 //! awaited, never timed: a look of the child's `recv` that finds the ring
 //! empty arms the ring's want for data, which the test cleared, and that is
 //! past the descriptor's lookup. Only then does the child close the
@@ -31,13 +31,13 @@ use std::io::{BufRead, BufReader, Write};
 use std::process::{Command, Stdio};
 use std::sync::atomic::{AtomicI32, Ordering};
 
-use toyos::net::stream::{Server, Words, LAYOUT, RECEIVE_RING, REGION_BYTES, SERVER_WATCH};
-use toyos::poller::Poller;
+use toyos::net::stream::{Server, Words, LAYOUT, RECEIVE_RING, REGION_BYTES};
+use toyos::wake::{self, Hungup};
 use toyos::net::{MsgType, RespType, TcpConnectRequest, TcpConnectResponse};
 use toyos::shm::SharedMemory;
-use toyos::{namespace, port, AsHandle, OwnedHandle};
+use toyos::{namespace, port, OwnedHandle};
 use std::os::toyos::process::CommandExt;
-use toyos_abi::syscall::{self, SVC_LABEL};
+use toyos_abi::syscall::SVC_LABEL;
 
 const SELF_PATH: &str = "/system/bin/test_rs_libc_recv_beside_close";
 
@@ -135,9 +135,10 @@ fn test(role: &str) {
     // SAFETY: the mapping is `REGION_BYTES`, 2 MiB aligned, and its header is reached only as atomics.
     let words = unsafe { &*(region.as_ptr() as *const Words) };
     let mut server = Server::new(words, LAYOUT);
-    let (receive_bell, receive) = toyos::pipe_pair().expect("the receive bell");
-    let (send_bell, _send) = toyos::pipe_pair().expect("the send bell");
-    let bells = [OwnedHandle::from(receive_bell), OwnedHandle::from(send_bell)];
+    let (receive, receive_bell) = wake::pair().expect("the receive bell");
+    let (_send, send_bell) = wake::pair().expect("the send bell");
+    let (rung_waker, rung) = wake::pair().expect("the rung bell");
+    let bells = [OwnedHandle::from(receive_bell), send_bell.into(), rung_waker.into()];
     conn.send_with(RespType::Result as u32, &TcpConnectResponse { local_port: 49_152, _pad: 0 }, bells)
         .expect("answer the connect with the bells");
     assert_eq!(line(&mut out), "connected");
@@ -158,7 +159,7 @@ fn test(role: &str) {
     // whose wait watches the stream looks at the second ring.
     for _ in 0..2 {
         words[RECEIVE_WANT].store(0, Ordering::Release);
-        syscall::write(receive.as_handle().raw(), &[1]).expect("ring the reader");
+        receive.ring().expect("ring the reader");
         if !looked(words) {
             let _ = child.kill();
             panic!("the {role}'s recv never looked at its stream again once its descriptor's number named a pipe");
@@ -167,7 +168,7 @@ fn test(role: &str) {
 
     region.bytes().write(RECEIVE_RING, PEER);
     let _ = server.publish(words, PEER.len() as u32).expect("the client keeps the protocol");
-    syscall::write(receive.as_handle().raw(), &[1]).expect("ring the reader");
+    receive.ring().expect("ring the reader");
 
     let said = line(&mut out);
     if said != format!("received {}", String::from_utf8_lossy(PEER)) {
@@ -175,15 +176,17 @@ fn test(role: &str) {
         panic!("the {role} ended {status:?} after the close, having said {said:?}");
     }
     // The recv returned, and with it the socket's last hold: libc's copy of
-    // `toyos`, which holds the stream's end, lets it go, so its connection
-    // hangs up while the child lives.
-    let poller = Poller::new(1);
-    poller.watch(&conn, SERVER_WATCH, 0);
-    let mut answered = false;
-    poller.wait(1, CEILING_NANOS, |_| answered = true);
-    let mut bytes = [0u8; 64];
-    while syscall::read_nonblock(conn.as_handle().raw(), &mut bytes).is_ok_and(|n| n > 0) {}
-    let hung_up = answered && syscall::read_nonblock(conn.as_handle().raw(), &mut bytes) == Ok(0);
+    // `toyos`, which holds the stream's end, lets it go, so its waker of the
+    // bell netstack watches it on closes while the child lives.
+    let until = toyos_abi::clock::nanos_since_boot() + CEILING_NANOS;
+    let hung_up = loop {
+        let left = until.saturating_sub(toyos_abi::clock::nanos_since_boot());
+        match rung.wait_for(left) {
+            Ok(true) => continue,
+            Ok(false) => break false,
+            Err(Hungup) => break true,
+        }
+    };
     writeln!(tell, "exit").expect("tell the child to exit");
     let status = child.wait().expect("wait the child");
     assert!(hung_up, "the stream's end outlived its descriptor's close and its last call, in a child that lives on");

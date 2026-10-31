@@ -90,10 +90,12 @@ pub enum ObjectKind {
     Job = 14,
     Notice = 15,
     WakeLatency = 16,
+    EventSignal = 17,
+    EventWait = 18,
 }
 
 impl ObjectKind {
-    pub const ALL: [ObjectKind; 17] = [
+    pub const ALL: [ObjectKind; 19] = [
         Self::PipeRead,
         Self::PipeWrite,
         Self::Connection,
@@ -111,6 +113,8 @@ impl ObjectKind {
         Self::Job,
         Self::Notice,
         Self::WakeLatency,
+        Self::EventSignal,
+        Self::EventWait,
     ];
 
     pub const fn from_word(word: u32) -> Option<Self> {

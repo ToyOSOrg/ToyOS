@@ -1002,12 +1002,12 @@ pub struct pollfd {
 struct Waited {
     /// Entries ready, their `revents` written.
     ready: i32,
-    /// Whether the wake pipe beside them was readable.
+    /// Whether the wake event beside them was readable.
     woken: bool,
 }
 
 /// The most entries and doorbells one poll watches: a poller's handles, one of
-/// them the wake pipe a handler interrupts it by.
+/// them the wake event a handler interrupts it by.
 const MAX_POLLED: usize = toyos::poller::Poller::MAX_HANDLES as usize - 1;
 
 /// `poll`'s wait over the `n` entries at `fds` until `deadline`, in the

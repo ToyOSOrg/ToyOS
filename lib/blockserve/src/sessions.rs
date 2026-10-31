@@ -1,7 +1,7 @@
 //! One disk's sessions, as its driver serves them.
 //!
 //! **A session is a partition held**, from the open the block service hands
-//! over to the client's hang-up: one holder per partition
+//! over to the client's leaving, which its doorbell's end says: one holder per partition
 //! (`toyos-blockhold`), every request bounded to the partition and the arena
 //! before the device sees it (`toyos_blockring::server`), the data moved by
 //! the device straight into and out of the client's own region, which the
@@ -10,8 +10,8 @@
 //! naming it has been answered, never before.
 //!
 //! **A server never blocks on a client.** The open is answered with one
-//! `try_send` on the client's own connection, and a doorbell is one
-//! non-blocking write whose refusal is a full pipe — a doorbell already rung.
+//! `try_send` on the client's own connection, carrying the session's
+//! doorbells, which the driver makes; a ring never waits.
 //!
 //! **A designation is the driver's own work on one partition** ([`Job`]): it
 //! holds the partition as a session would for as long as it runs, so nothing
@@ -23,6 +23,7 @@ use std::collections::BTreeMap;
 
 use toyos::ipc::Connection;
 use toyos::poller::{Poller, READABLE};
+use toyos::wake::{self, Bell, Waker};
 use toyos_abi::syscall::SyscallError;
 use toyos_blockhold::Holds;
 use toyos_blockring::disk::Part;
@@ -68,13 +69,16 @@ pub trait Device {
 
 /// A partition held, over a client's region.
 struct Served {
-    conn: Connection,
+    /// Rung by the client for its requests; its waker going is the client's leaving.
+    heard: Bell,
+    /// Rung for the client's answers.
+    ring: Waker,
     region: Region,
     device_addr: u64,
     rings: ServerRings,
     state: ServerSession,
     unique: [u8; 16],
-    /// The client hung up, or broke the protocol: nothing more is taken, and
+    /// The client left, or broke the protocol: nothing more is taken, and
     /// the session ends once nothing of it is on the device.
     closing: bool,
     requests: u64,
@@ -191,8 +195,16 @@ impl Sessions {
                 return refuse(&conn, if why == SyscallError::ResourceExhausted { Refusal::Exhausted } else { Refusal::Malformed });
             }
         };
+        let bells = wake::pair().and_then(|requests| Ok((requests, wake::pair()?)));
+        let Ok(((client_ring, heard), (ring, answered))) = bells else {
+            if let Err(why) = dev.dma_unmap(device_addr) {
+                panic!("{}: the kernel would not take a refused session's region back: {why:?}", self.name);
+            }
+            self.holds.release(first);
+            return refuse(&conn, Refusal::Exhausted);
+        };
         let (rings, opened) = Opened::over(region.words(), blocks, unique);
-        if conn.try_send_bytes(wire::MSG_OPENED, &opened.encode()).is_err() {
+        if conn.try_send_bytes_with(wire::MSG_OPENED, &opened.encode(), [client_ring.into(), answered.into()]).is_err() {
             // The client went before it heard: nothing of the session reached
             // the device, and what was taken for it goes back.
             if let Err(why) = dev.dma_unmap(device_addr) {
@@ -203,17 +215,17 @@ impl Sessions {
         let id = self.next_id;
         self.next_id += 1;
         let state = ServerSession::new(first, opened.blocks(), writes);
-        let served = Served { conn, region, device_addr, rings, state, unique, closing: false, requests: 0, posted: false };
+        let served = Served { heard, ring, region, device_addr, rings, state, unique, closing: false, requests: 0, posted: false };
         self.sessions.insert(id, served);
         let access = if writes { "" } else { ", read-only" };
         println!("{}: session {id} opened {} ({blocks} blocks{access})", self.name, crate::guid_text(unique));
     }
 
-    /// Watch every session's connection, under `base` plus its id.
+    /// Watch every session's doorbell, under `base` plus its id.
     pub fn watch(&self, poller: &Poller, base: u64) {
         for (id, s) in &self.sessions {
             if !s.closing {
-                poller.watch(&s.conn, READABLE, base + id);
+                poller.watch(&s.heard, READABLE, base + id);
             }
         }
     }
@@ -319,27 +331,18 @@ impl Sessions {
                 continue;
             }
             s.posted = false;
-            if s.rings.1.publish(s.region.words()) {
-                match s.conn.write_nonblock(&[1]) {
-                    Ok(_) | Err(SyscallError::WouldBlock) => {}
-                    Err(_) => s.closing = true,
-                }
+            if s.rings.1.publish(s.region.words()) && s.ring.ring().is_err() {
+                s.closing = true;
             }
         }
     }
 
-    /// Consume session `id`'s doorbell bytes; once its client has hung up,
-    /// the session is closing.
+    /// Take session `id`'s doorbell; once its client has left, the session is
+    /// closing.
     pub fn hear(&mut self, id: u64) {
         let s = self.sessions.get_mut(&id).expect("a session");
-        let mut sink = [0u8; 64];
-        while !s.closing {
-            match s.conn.read_nonblock(&mut sink) {
-                Ok(0) => s.closing = true,
-                Ok(_) => {}
-                Err(SyscallError::WouldBlock) => return,
-                Err(_) => s.closing = true,
-            }
+        if s.heard.try_take().is_err() {
+            s.closing = true;
         }
     }
 

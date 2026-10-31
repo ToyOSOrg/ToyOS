@@ -39,8 +39,8 @@ crate::ipc_payload! {
         pub format: u16,
     }
 
-    /// What the ring is shaped like. **The ring itself and the signal pipe
-    /// arrive as handles**, sent ahead of this frame — see
+    /// What the ring is shaped like. **The ring itself and the signal
+    /// arrive as handles**, sent with this frame — see
     /// [`STREAM_OPENED_HANDLES`].
     pub struct StreamOpenResponse {
         pub client_period_frames: u32,
@@ -83,12 +83,12 @@ crate::ipc_payload! {
 }
 
 /// The two handles `MSG_STREAM_OPENED` is sent with: the slot ring, then the
-/// read end of the pipe soundserver signals on.
+/// wait side of the event soundserver signals on.
 ///
 /// **Both travel soundserver → client**, which is the direction that makes a dead
-/// client detectable: the last `PipeReadEnd` handle goes with the client's
-/// table and soundserver's next signal answers `Gone`, by construction rather than
-/// by bookkeeping.
+/// client detectable: the wait side goes with the client's table and
+/// soundserver's next signal answers `Gone`, by construction rather than by
+/// bookkeeping.
 pub const STREAM_OPENED_HANDLES: usize = 2;
 
 pub struct AudioSlotWriter {
@@ -220,10 +220,10 @@ pub enum AudioError {
     NotFound,
     /// soundserver rejected the requested format/channels/rate.
     Rejected,
-    /// soundserver closed the signal pipe (daemon exit or client removal).
+    /// soundserver let go of the stream's signal (daemon exit or client removal).
     Disconnected,
     /// soundserver announced the stream and did not send the ring and the signal
-    /// pipe with it. Handles travel in the frame that names them, so a short
+    /// with it. Handles travel in the frame that names them, so a short
     /// batch is a protocol violation and never something to wait for.
     MissingHandles,
     /// The slot ring soundserver sent is refused ([`SharedMemory::lent`]).
@@ -237,7 +237,7 @@ pub struct AudioStream {
     slot_writer: AudioSlotWriter,
     /// The period the fill callback writes, copied into each slot it commits.
     period: alloc::vec::Vec<u8>,
-    signal: crate::Pipe,
+    signal: crate::wake::Bell,
     period_frames: u32,
     device_sample_rate: u32,
     device_channels: u16,
@@ -273,7 +273,7 @@ impl AudioStream {
         let [shm, signal] = control
             .recv_handles_exact::<STREAM_OPENED_HANDLES>(&header)
             .ok_or(AudioError::MissingHandles)?;
-        let signal = crate::Pipe(signal);
+        let signal = crate::wake::Bell::from(signal);
 
         let slot_count = resp.slot_count as u32;
         let shm_size = AudioSlotHeader::SIZE + slot_count as usize * resp.client_period_bytes as usize;
@@ -297,14 +297,12 @@ impl AudioStream {
     /// Block until soundserver signals, then fill all available ring slots via the
     /// callback. Each callback invocation receives one period-sized buffer.
     ///
-    /// Returns `Err(Disconnected)` on signal-pipe EOF (soundserver is gone or
-    /// removed this client) — the caller must stop the stream, not retry.
+    /// Returns `Err(Disconnected)` once soundserver has let go of the signal
+    /// (it is gone or removed this client) — the caller must stop the stream,
+    /// not retry.
     pub fn wait_and_fill(&mut self, mut callback: impl FnMut(&mut [u8])) -> Result<(), AudioError> {
-        let mut buf = [0u8; 64];
-        match self.signal.read(&mut buf) {
-            Ok(0) => return Err(AudioError::Disconnected),
-            Ok(_) => {}
-            Err(e) => return Err(AudioError::Ipc(IpcError::Syscall(e))),
+        if self.signal.wait_for(u64::MAX).is_err() {
+            return Err(AudioError::Disconnected);
         }
         while let Some(slot) = self.slot_writer.begin_fill() {
             callback(&mut self.period);

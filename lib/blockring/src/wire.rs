@@ -3,8 +3,8 @@
 //! **One way in, one answer.** On the service's port a client opens a
 //! partition by its unique GUID ([`MSG_OPEN`]), sending the session's region
 //! with it, and is answered [`MSG_OPENED`] or [`MSG_REFUSED`] with a
-//! [`Refusal`]. After `MSG_OPENED` the connection carries nothing but doorbell
-//! bytes, each way.
+//! [`Refusal`]. `MSG_OPENED` carries the session's doorbells, and the
+//! connection carries nothing after it.
 //!
 //! **What a connection may open is its [`Grant`]**, the badge the holder of
 //! the service's acceptor minted its connector with, which the kernel stamps
@@ -29,8 +29,12 @@ use crate::layout::{self, ServerRings, RING_WORDS};
 /// Open the partition whose unique GUID is the payload, over the region sent
 /// with it, if the connection's [`Grant`] admits it. Handles: the region.
 pub const MSG_OPEN: u32 = 1;
-/// The session is open; the payload is [`Opened`].
+/// The session is open; the payload is [`Opened`], and the handles are
+/// [`OPENED_HANDLES`].
 pub const MSG_OPENED: u32 = 2;
+/// What [`MSG_OPENED`] carries, in order: the waker the client rings for its
+/// requests, and the bell the server rings for its answers.
+pub const OPENED_HANDLES: usize = 2;
 /// Refused; the payload is a [`Refusal`]'s word.
 pub const MSG_REFUSED: u32 = 3;
 /// What partitions the service serves that the connection's [`Grant`]

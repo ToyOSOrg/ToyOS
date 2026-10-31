@@ -18,6 +18,7 @@ use crate::mm::charge::{self, Charge, Exhausted};
 use crate::sync::Lock;
 
 pub mod device;
+pub mod event;
 pub mod file;
 pub mod handle;
 pub mod inbox;
@@ -262,6 +263,9 @@ kobject! {
     deferred Device => device::DeviceClaim,
     deferred Acceptor => port::Acceptor,
     deferred Inbox => inbox::InboxObject,
+    // Each side's last handle is that side's end, which the other side reads.
+    deferred EventSignal => event::EventSignal,
+    deferred EventWait => event::EventWait,
     // The flush that makes releasing it safe waits for every CPU, so it runs from the queue, never inline.
     deferred SharedMem => shm::SharedMemObject,
     // A service with no clients right now is not a service that has stopped.

@@ -23,8 +23,7 @@
 //! rung makes what its request needs and reads the bell empty just before the request goes,
 //! and what another holder took first is answered `WouldBlock` too. A call that fails before
 //! its request goes leaves the ring in the bell, where a poller still sees it. Nothing else
-//! reads the bell. The look is made with a poller of the end's own, made with the end, so a
-//! call that does not wait asks the kernel for nothing it can refuse.
+//! takes the bell; a look observes it and takes nothing.
 //!
 //! **A handle with no end here is refused** [`NetError::NotASocket`]. A descriptor's handle is
 //! a copy of its end's bell, so a poller watches it for reading; the end keeps its own
@@ -38,7 +37,6 @@ use toyos_abi::syscall;
 use toyos_abi::RawHandle;
 
 use crate::ipc::{self, Connection};
-use crate::poller::Poller;
 use crate::sync::Lock;
 use crate::{AsHandle, BorrowedHandle, OwnedHandle};
 
@@ -166,9 +164,8 @@ struct End {
 
 static TABLE: Lock<Ends<End, MAX_SOCKETS>> = Lock::new(Ends::new());
 
-/// Each end's turn on its connection, one request and its answer at a time, and the poller its
-/// look at its bell is made with: `Some` from the end's making until [`free`].
-static TURNS: [Lock<Option<Poller>>; MAX_SOCKETS] = [const { Lock::new(None) }; MAX_SOCKETS];
+/// Each end's turn on its connection, one request and its answer at a time.
+static TURNS: [Lock<()>; MAX_SOCKETS] = [const { Lock::new(()) }; MAX_SOCKETS];
 
 
 /// Lets go of an end no handle or call reaches: its connection, which is its holder's leaving,
@@ -179,14 +176,7 @@ fn free(slot: usize, end: End) {
         close_kept(end.connection.raw());
         close_kept(end.bell.raw());
     }
-    *TURNS[slot].lock() = None;
     TABLE.lock().unreserve(slot);
-}
-
-/// The poller a reserved slot's end looks at its bell with. Refused, nothing is made.
-fn make_poller(slot: usize) -> Result<(), NetError> {
-    *TURNS[slot].lock() = Some(Poller::try_new(1).map_err(|_| NetError::ResourceExhausted)?);
-    Ok(())
 }
 
 /// Runs `f` as a call through `handle`, its end kept until it returns.
@@ -204,13 +194,13 @@ fn call_on<R>(handle: BorrowedHandle<'_>, kind: Kind, f: impl FnOnce(usize, End)
     call(handle, |slot, end| if end.kind == kind { f(slot, end) } else { Err(NetError::InvalidInput) })
 }
 
-/// Whether `bell` is readable, waiting for it at most `nanos` on `poller`: rung, or hung up
-/// with netstack. Nothing is read.
-fn rung(poller: &Poller, bell: BorrowedHandle<'_>, nanos: u64) -> bool {
-    poller.watch(&bell, crate::poller::READABLE, 0);
-    let mut answered = false;
-    poller.wait(1, nanos, |_| answered = true);
-    answered
+/// Whether `bell` is readable, waiting for it at most `nanos`: rung, or hung up with netstack.
+/// Nothing is taken.
+fn rung(bell: BorrowedHandle<'_>, nanos: u64) -> Result<bool, NetError> {
+    match syscall::handle_wait(bell.raw(), crate::poller::READABLE, nanos) {
+        Ok(ready) => Ok(ready != 0),
+        Err(_) => Err(NetError::Io),
+    }
 }
 
 /// One request's read of the bell, handed out by [`look`] and spent once: spending it gives the
@@ -245,36 +235,32 @@ impl Drained {
 /// A holder's bell, as [`look`] reads it.
 trait Bell {
     /// `f` under the end's turn, told whether the bell is rung now.
-    fn look_now<R>(&self, f: impl FnOnce(bool) -> R) -> R;
+    fn look_now<R>(&self, f: impl FnOnce(bool) -> R) -> Result<R, NetError>;
     /// Until the bell is rung, or for at most `nanos`, out of the turn.
     fn wait(&self, nanos: u64) -> Result<(), NetError>;
     fn drain(&self);
 }
 
-/// An end's own bell: looked at with the end's poller under its turn, waited on with a poller
-/// of the wait's own, which the end's other calls do not share.
+/// An end's own bell: looked at under the end's turn, waited on out of it.
 struct EndBell {
     slot: usize,
     bell: BorrowedHandle<'static>,
 }
 
 impl Bell for EndBell {
-    fn look_now<R>(&self, f: impl FnOnce(bool) -> R) -> R {
-        let turn = TURNS[self.slot].lock();
-        let Some(poller) = turn.as_ref() else { unreachable!("a live end has its poller") };
-        f(rung(poller, self.bell, 0))
+    fn look_now<R>(&self, f: impl FnOnce(bool) -> R) -> Result<R, NetError> {
+        let _turn = TURNS[self.slot].lock();
+        rung(self.bell, 0).map(f)
     }
 
     fn wait(&self, nanos: u64) -> Result<(), NetError> {
-        // Netstack gone hangs the bell up, which is readable, and the next look says so.
-        let poller = Poller::try_new(1).map_err(|_| NetError::ResourceExhausted)?;
-        rung(&poller, self.bell, nanos);
-        Ok(())
+        // Netstack gone leaves the bell readable for good, and the next look says so.
+        rung(self.bell, nanos).map(drop)
     }
 
     fn drain(&self) {
-        let mut bytes = [0u8; 64];
-        while let Ok(1..) = syscall::read_nonblock(self.bell.raw(), &mut bytes) {}
+        // A bell netstack let go of answers `Gone`, which the request it was read for answers.
+        let _ = syscall::event_take(self.bell.raw());
     }
 }
 
@@ -283,7 +269,7 @@ impl Bell for EndBell {
 fn look<T>(bell: &impl Bell, wait: Wait, mut ask: impl FnMut(Drain<'_>) -> Result<T, NetError>) -> Result<T, NetError> {
     let drain = || bell.drain();
     loop {
-        if let Some(answer) = bell.look_now(|rung| rung.then(|| ask(Drain(&drain)))) {
+        if let Some(answer) = bell.look_now(|rung| rung.then(|| ask(Drain(&drain))))? {
             match answer {
                 Err(NetError::WouldBlock) => {}
                 answer => return answer,
@@ -331,7 +317,7 @@ pub fn bind(addr: [u8; 4], port: u16) -> Result<Bound, NetError> {
 /// [`MAX_SOCKETS`].
 fn open(kind: Kind, addr: [u8; 4], ask: impl FnOnce(NetstackConn) -> Result<(BoundResponse, [OwnedHandle; 1], Connection), NetError>) -> Result<Bound, NetError> {
     let slot = TABLE.lock().reserve().ok_or(NetError::ResourceExhausted)?;
-    let made = make_poller(slot).and_then(|()| NetstackConn::connect()).and_then(ask).and_then(|(bound, [bell], connection)| {
+    let made = NetstackConn::connect().and_then(ask).and_then(|(bound, [bell], connection)| {
         let (descriptor, connection, bell) = take_up(kind, connection.into_owned(), bell)?;
         Ok((descriptor, End { kind, connection, bell, addr, port: bound.port }))
     });
@@ -342,7 +328,6 @@ fn open(kind: Kind, addr: [u8; 4], ask: impl FnOnce(NetstackConn) -> Result<(Bou
             Ok(Bound { handle, port: end.port })
         }
         Err(refused) => {
-            *TURNS[slot].lock() = None;
             table.unreserve(slot);
             Err(refused)
         }
@@ -541,7 +526,7 @@ fn bare(connection: BorrowedHandle<'_>) -> Result<(), NetError> {
 pub fn export(handle: BorrowedHandle<'_>) -> Result<OwnedHandle, NetError> {
     call(handle, |slot, end| {
         let _turn = TURNS[slot].lock();
-        stream::ask_export(end.connection)
+        stream::ask_export(end.connection, None)
     })
 }
 
@@ -555,7 +540,7 @@ pub(super) fn hold(handle: BorrowedHandle<'_>) -> Option<usize> {
 pub(super) fn export_held(slot: usize) -> Result<OwnedHandle, NetError> {
     let end = TABLE.lock().at(slot).expect("a held end is live");
     let _turn = TURNS[slot].lock();
-    stream::ask_export(end.connection)
+    stream::ask_export(end.connection, None)
 }
 
 /// The call a [`hold`] began, ended.
@@ -568,14 +553,13 @@ pub(super) fn release(slot: usize) {
 /// An exported end taken up as this process's holder of its socket, `payload` and `handles` the
 /// [`ADOPT`] netstack queued on it (`super::adopt_exported`): the end and its bell narrowed to
 /// keep no `TRANSFER`. The descriptor's handle; `None`, with everything closed, where the frame
-/// is malformed, the process holds [`MAX_SOCKETS`] or the kernel makes no poller for the end or
-/// will not narrow them.
+/// is malformed, the process holds [`MAX_SOCKETS`] or the kernel will not narrow them.
 pub(super) fn adopted(connection: Connection, payload: &[u8], handles: ipc::Batch) -> Option<OwnedHandle> {
     let adopt: Adopt = ipc::decode_payload(payload).ok()?;
     let [bell] = handles.exact::<1>()?;
     let kind = Kind::from_u32(adopt.kind)?;
     let slot = TABLE.lock().reserve()?;
-    let made = make_poller(slot).and_then(|()| take_up(kind, connection.into_owned(), bell));
+    let made = take_up(kind, connection.into_owned(), bell);
     let mut table = TABLE.lock();
     match made {
         Ok((descriptor, connection, bell)) => {
@@ -583,7 +567,6 @@ pub(super) fn adopted(connection: Connection, payload: &[u8], handles: ipc::Batc
             Some(descriptor)
         }
         Err(_) => {
-            *TURNS[slot].lock() = None;
             table.unreserve(slot);
             None
         }
@@ -676,9 +659,9 @@ mod tests {
     }
 
     impl Bell for Held<'_> {
-        fn look_now<R>(&self, f: impl FnOnce(bool) -> R) -> R {
+        fn look_now<R>(&self, f: impl FnOnce(bool) -> R) -> Result<R, NetError> {
             let rung = self.server.borrow().bells[self.holder] > 0;
-            f(rung)
+            Ok(f(rung))
         }
 
         /// Runs what the scenario says happens meanwhile; a holder still unrung when nothing is

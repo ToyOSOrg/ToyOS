@@ -21,7 +21,7 @@ use std::process::Command;
 use std::time::Duration;
 
 use terminal::Console;
-use toyos::poller::{Poller, READABLE};
+use toyos::poller::{wait_one, Poller, READABLE};
 use toyos::port;
 use toyos::surface::{self, Delivery, Host, Leaving, Notice};
 use window::Window;
@@ -254,12 +254,10 @@ fn main() {
 /// Wait for the shell to end, saying every [`STILL_WAITING`] how long it has
 /// been outstanding.
 fn wait_for(child: &mut std::process::Child) {
-    let poller = Poller::new(1);
     let mut waited = Duration::ZERO;
     loop {
-        poller.watch(&*child, READABLE, 0);
-        let mut ended = false;
-        poller.wait(1, STILL_WAITING.as_nanos() as u64, |_| ended = true);
+        let ended = wait_one(&*child, READABLE, STILL_WAITING.as_nanos() as u64)
+            .expect("terminal: the kernel refused a wait on the shell it started");
         if ended {
             return;
         }

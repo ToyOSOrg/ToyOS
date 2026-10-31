@@ -97,8 +97,9 @@ divide an eighth of physical memory by what one unit costs and refuse past it,
 and a pipe takes memory for its bytes as it holds them rather than at
 `create`. Their
 memory is counted to whichever job made it: a client's own connection is
-its job's, but a pipe a server makes and hands out (fileserver's stream
-pipes, netstack's bells) is the server's, which the server bounds. With no
+its job's, but a pipe or an event a server makes and hands out
+(fileserver's stream pipes, netstack's bells) is the server's, which the
+server bounds. With no
 per-job limit a cap is still the only thing between one client and the
 machine. The file servers' block caches hold an eighth between them, and no
 other job gets it back

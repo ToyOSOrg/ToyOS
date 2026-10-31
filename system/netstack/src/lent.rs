@@ -22,7 +22,8 @@ use toyos::ipc::FrameRx;
 use toyos::net::stream::{Words, RECEIVE_BYTES, RECEIVE_RING, REGION_BYTES, SEND_BYTES, SEND_RING};
 use toyos::shm::{self, SharedMemory};
 use toyos::transport::session::{Holder, Rings};
-use toyos::{Connection, OwnedHandle, Pipe};
+use toyos::wake::{Bell, Waker};
+use toyos::{Connection, OwnedHandle};
 use toyos_abi::syscall::SyscallError;
 use toyos_net_node::Session;
 use toyos_net_tcp::Lent;
@@ -74,14 +75,15 @@ impl Lent for Ring {
 
 /// One holder of a stream, as netstack keeps it.
 pub struct Holding {
-    /// What it rings and asks on, and whose hang-up is its leaving.
+    /// What it asks on.
     pub connection: Connection,
-    /// Its frames, each bare: rings and exports.
+    /// Its frames, each a bare export.
     pub frames: FrameRx<0>,
-    /// The two bells' write ends, rung for a reader and for a writer: the holder holds the read
-    /// ends.
-    pub receive: Pipe,
-    pub send: Pipe,
+    /// The wakers of the two bells the holder holds, rung for a reader and for a writer.
+    pub receive: Waker,
+    pub send: Waker,
+    /// The bell the holder rings, whose wakers going is its leaving.
+    pub rung: Bell,
 }
 
 /// A stream's holders by number, and a handle of its region for the holders netstack makes.
@@ -134,15 +136,15 @@ impl Session for Region {
         Box::new(Ring { mapping: self.mapping.clone(), base: SEND_RING, len: SEND_BYTES as usize })
     }
 
-    /// A doorbell that is full is rung already, and one whose reader is gone has a holder its
-    /// connection's hang-up reports.
+    /// A ring into a bell its holder no longer holds is dropped: that
+    /// holder's leaving is its rung bell's end.
     fn ring(&self, rings: Rings) {
         for holding in self.holders.by_number.borrow().values() {
             if rings.receive {
-                let _ = holding.receive.write_nonblock(&[1]);
+                holding.receive.wake();
             }
             if rings.send {
-                let _ = holding.send.write_nonblock(&[1]);
+                holding.send.wake();
             }
         }
     }

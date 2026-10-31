@@ -20,6 +20,8 @@ use super::NetError;
 pub(super) const HELD_CONNECTION: Rights = Rights::DUP.union(Rights::WAIT).union(Rights::READ).union(Rights::WRITE);
 /// What a holder keeps of a bell netstack rings: it reads and waits on it, and duplicates it.
 pub(super) const HELD_BELL: Rights = Rights::DUP.union(Rights::WAIT).union(Rights::READ);
+/// What a holder keeps of the bell it rings netstack on: it signals it, and duplicates it.
+pub(super) const HELD_RUNG: Rights = Rights::DUP.union(Rights::WRITE);
 
 /// `handle` held with `rights` alone, the original closed, as a number the table keeps from
 /// here: refused, the original is closed all the same.
