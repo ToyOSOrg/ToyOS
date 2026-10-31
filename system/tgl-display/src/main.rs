@@ -38,27 +38,30 @@ impl toyos_tgl_display::Clock for Monotonic {
 fn main() {
     let dev = endow::claim::<PciDev>(&FUNCTION.to_string()).expect("tgl-display: the drives row endows this process the iGPU's claim");
     let info = toyos_pci_claim::describe(&dev).unwrap_or_else(|why| panic!("tgl-display: {why}"));
+    // The window covers only the registers this driver reaches, in whole
+    // pages, and not the GGTT above them: the kernel maps the BAR whole, and
+    // the window is what bounds every access (`Registers`' contract).
+    let span = (toyos_tgl_display::regs::SPAN as u64).next_multiple_of(4096);
     let bytes = info.bar_bytes[BAR as usize];
-    assert!(
-        bytes >= toyos_tgl_display::regs::SPAN as u64,
-        "tgl-display: BAR {BAR} is {bytes:#x} bytes, short of the registers this driver reaches"
-    );
-    let (regs, _mapped) = Bar::map(&dev, BAR, bytes).unwrap_or_else(|why| panic!("tgl-display: {why}"));
+    assert!(bytes >= span, "tgl-display: BAR {BAR} is {bytes:#x} bytes, short of the registers this driver reaches");
+    let (regs, _mapped) = Bar::map(&dev, BAR, span).unwrap_or_else(|why| panic!("tgl-display: {why}"));
     // The firmware's scan-out is a transfer this function masters: started at
     // once, since the claim's domain already maps what it reads.
     toyos_pci_claim::start(&dev).unwrap_or_else(|why| panic!("tgl-display: {why}"));
-    say!("tgl-display: PCI {:02x}:{:02x}.{} registers in BAR {BAR} ({bytes:#x} bytes)", info.bus, info.dev, info.func);
+    say!("tgl-display: PCI {:02x}:{:02x}.{} registers in BAR {BAR}, {span:#x} of its {bytes:#x} bytes", info.bus, info.dev, info.func);
 
     match toyos_tgl_display::keep_memory_low_power(&regs, &Monotonic) {
         Ok(done) => {
             say!(
-                "tgl-display: plane {} {} px wide, totals {}x{}, at {} kHz; latencies {:?} us, SAGV block {} us; WM levels were {:08x?}",
+                "tgl-display: plane {} {} px wide, totals {}x{}, {} blocks, at {} kHz; latencies {} {:?} us, SAGV block {} us; WM levels were {:08x?}",
                 done.scanout.plane,
                 done.scanout.width,
                 done.scanout.htotal,
                 done.scanout.vtotal,
+                done.scanout.allocation,
                 done.pixel_rate_khz,
-                done.latencies.0,
+                done.latencies.zero,
+                done.latencies.above,
                 done.sagv_block_us,
                 done.before,
             );

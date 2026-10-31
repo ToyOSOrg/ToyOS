@@ -11,9 +11,15 @@ Held by the display task. Owner rulings, 2026-10-31:
 - The display engine is release-1 scope on both benches: the internal panel and external outputs, modesetting, hotplug, EDID, refresh rates including high refresh and VRR where the sink offers them, and power (watermarks, SAGV, DMC and DC states, PSR). Video and render acceleration are out.
 - **Several outputs, extended or mirrored**, each with its own mode and refresh rate, with hotplug.
 - **Intel is a Rust driver from Intel's published PRMs** (IHD-OS-TGL-Vol 2c and Vol 12, 12.21), cited at each register.
-- **AMD adapts AMD's Display Core.** It is pinned with a minimal patch set under the fork rules, runs in a userland driver behind its IOMMU domain, and keeps ToyOS's side and every parser of external input in Rust.
+- **AMD adapts AMD's Display Core**, under root `CLAUDE.md`'s vendor-component rule (#1124).
 - **The driver registers a panic surface with the kernel.**
-- The firmware's GOP stays the floor. Intel's first stages keep the firmware's mode and surface and add only power programming.
+
+Earlier owner decisions this track builds on:
+
+- 2026-09-01: "GOP is the floor, and the mode is the firmware's" (`issues/gop-is-not-the-path-every-boot-takes.md`).
+- 2026-10-31: the approved power design keeps the firmware's mode and surface for Intel's power stages, adding only power programming.
+
+The rest of this file is the display task's design, not a ruling.
 
 ## Ownership
 
@@ -58,19 +64,23 @@ The kernel keeps only generic mechanisms:
 ## Stages
 
 1. **Intel watermarks and SAGV on the firmware's surface.**
-   - Memory latencies and SAGV block time from pcode; WM levels 0-7 and transition by Vol 12's algorithm; SAGV masked when the plane cannot tolerate it.
+   - Memory latencies and SAGV block time from pcode; WM levels 0-7 by Vol 12's algorithm.
+   - The transition watermark stays disabled.
+   - A plane that cannot tolerate SAGV is refused and left as found, because masking QGV points needs the bandwidth calculation the modesetting stage brings.
    - Needs the claim's reserved-range mapping. The plane's GGTT entry points into the T14's RMRR (BDSM 0x9c800000).
    - What the T14's GOP leaves (a read-only scout, 2026-10-31):
      - one linear RGB8888 plane, 1920x1080, htotal 2080, about 60 Hz;
      - WM level 0 only, with levels 1-7 and the transition watermark disabled;
      - a correct linetime;
-     - a 682-block allocation;
+     - a 682-block allocation (PLANE_BUF_CFG 0..681; Buffer End is inclusive, as Vol 12 "Display Buffer Allocation" gives 0-159 as 0x009F0000);
      - DC_STATE_EN 0, PSR1 and PSR2 off.
    - pcode on the T14 gives latencies 3, 54, 54, 54, 54, 73, 110, 115 µs after Vol 12's +3 µs rule, and an SAGV block time of 11 µs.
    - At that mode every level fits the GOP's allocation, so this stage writes no DBUF.
-   - **Exit:** the T14's idle package with the panel lit, against Linux. Until NVMe APST lands, the NVMe caps the package at PC3, so that is the most this stage can show.
+   - **Exit:** on the T14 with the panel lit, `osbench energy`'s idle row reads PC2 at most 400 ‰ and PC3 at least 600 ‰.
+     - That is the residency stopping the plane's fetches altogether gave (pr-1100 r7: 338 ‰ and 656 ‰). PC3 is the most this stage can show until NVMe APST lands, because the NVMe caps the package there.
+     - The power figure against Linux's 1622 mW idle is judged once APST lands.
 2. **Intel DMC and DC5/DC6** (Intel's signed payload, pinned by version and hash), and
-3. **PSR on the eDP panel**. These two are measured together. DC5 with a pipe running needs PSR active (Vol 12, "Display C5 and C6"), so stage 2 alone saves nothing with the panel lit. PSR's first-frame exit latency goes to the owner in absolute numbers before PSR lands.
+3. **PSR on the eDP panel**. The display task measures these two together. DC5 with a pipe running needs PSR active (Vol 12, "Display C5 and C6"), so stage 2 alone saves nothing with the panel lit. PSR's first-frame exit latency goes to the owner in absolute numbers before PSR lands.
 4. **`display-output`.** The compositor moves onto it, with virtio-gpu and the framebuffer as drivers. The panic surface lands here.
 5. **Intel modesetting**: combo-PHY DDIs, DPLLs and CDCLK, DP link training with DSC, HDMI 2.0 with SCDC, EDID over AUX and GMBUS, several outputs.
 6. **Intel Type-C DP alt mode**: FIA/IOM state, TCCOLD, the Dekel PHY, hotplug.

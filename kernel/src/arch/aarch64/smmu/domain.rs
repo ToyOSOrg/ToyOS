@@ -86,14 +86,12 @@ impl Live {
     }
 }
 
-/// Why `function` keeps the machine's own addresses rather than a domain of
-/// its own: never, since nothing this kernel reads of the IORT says so.
 /// What firmware reserved for a function, mapped at its own addresses: no
 /// firmware table this kernel reads on AArch64 reserves any.
-pub fn keep_reserved(_id: DomainId, _function: StreamId) -> Result<(), IommuError> {
-    Ok(())
-}
+pub fn keep_reserved(_id: DomainId, _function: StreamId) {}
 
+/// Why `function` keeps the machine's own addresses rather than a domain of
+/// its own: never, since nothing this kernel reads of the IORT says so.
 pub fn untranslated(_function: StreamId) -> Option<&'static str> {
     None
 }

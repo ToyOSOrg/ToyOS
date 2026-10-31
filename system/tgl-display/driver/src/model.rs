@@ -48,7 +48,6 @@ impl Engine {
         r.insert(regs::TRANS_VTOTAL_A, 0x0457_0437);
         r.insert(regs::WM_LINETIME_A, 0x78);
         r.insert(regs::plane_ctl(0, 1), 0x8400_0008);
-        r.insert(regs::plane_stride(0, 1), 0x78);
         r.insert(regs::plane_size(0, 1), 0x0437_077f);
         r.insert(regs::plane_wm(0, 1, 0), 0x8000_4011);
         r.insert(regs::plane_wm(0, 1, 1), 0x0000_4011);
