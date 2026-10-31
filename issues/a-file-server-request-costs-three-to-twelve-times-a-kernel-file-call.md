@@ -6,8 +6,9 @@ opened: 2026-10-28
 
 # A file server request costs three to twelve times a kernel file call
 
-Every file operation on DATA is a request to the DATA file server process.
-On the AMD bench (2026-10-28, `osbench` at PR #1097's c8f3fbfb0, DATA on its
+Every file operation on DATA is a request to the DATA file server process,
+but for a seek from the start or the current offset of a file no other
+process shares, which the client keeps (#1110). On the AMD bench (2026-10-28, `osbench` at PR #1097's c8f3fbfb0, DATA on its
 NVMe), that boot's cached rows on DATA against its kernel `/tmp`, and the
 bench's Linux page cache on the same NVMe:
 
@@ -27,6 +28,16 @@ unattributed. Both tables are in PR #1097's evidence. What the round trip
 spends its time on, on metal, is unmeasured.
 `issues/a-cached-read-from-a-file-server-is-measured-only-under-tcg.md`
 splits it under TCG.
+
+**#1110, the client's offset** (base b3dbfbfb0, head 1293be570, two pairs
+per bench, p50 µs, [evidence](https://github.com/ToyOSOrg/evidence/tree/d08c7dceb4e9f4301f0faff8905b867c467d1226/s1-ab)):
+`seek` is local, and `read_4k_at` and `write_4k_at` are one round trip.
+
+| row | T14 | AMD |
+|---|---|---|
+| `seek` | 8.43 → 0.24, 8.31 → 0.24 | 7.84 → 0.19, 9.79 → 0.20 |
+| `read_4k_at` | 18.17 → 9.96, 17.82 → 10.13 | 17.10 → 9.48, 20.99 → 11.36 |
+| `write_4k_at` | 18.22 → 10.05, 17.98 → 10.21 | 17.69 → 10.06, 21.64 → 11.98 |
 
 **Exit**: the cached `fs.disk.*` rows within Linux's on both benches, or
 each row's remaining difference measured to its parts and justified, in a

@@ -957,12 +957,14 @@ impl Dir {
 
     /// Write at most the window of `data` at the description's offset, or at
     /// the end for a file opened to append; the offset moves past it. Answers
-    /// how much, and the offset after it.
+    /// how much, and the offset after it, which is never past
+    /// [`MAX_FILE_BYTES`].
     pub fn write(&mut self, fid: Fid, data: &[u8]) -> Result<Written, Error> {
         let len = data.len().min(WINDOW_BYTES);
         self.window().write(0, &data[..len]);
         let reply = self.fid_call(WRITE, fid, Request::new(), len)?;
-        Ok(Written { len: counted(reply.value, len)?, offset: reply.value2 })
+        let offset = Some(reply.value2).filter(|&at| at <= MAX_FILE_BYTES).ok_or(Error::Malformed)?;
+        Ok(Written { len: counted(reply.value, len)?, offset })
     }
 
     /// Write at most the window of `data` at `offset`, leaving the

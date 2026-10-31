@@ -49,7 +49,11 @@ impl Drop for Held {
 /// A served file's offset: kept here while this process is the
 /// description's only holder, so a seek costs no request and a read or a
 /// write goes at it as a positioned one; the server's from the moment the
-/// description is shared with another process, which is for good.
+/// description is shared with another process, which is for good, and a
+/// directory's from the start, as the server refuses to move one.
+///
+/// [`Position::stream`] is the one request that shares a description, so it
+/// hands the offset over itself; another that ever does belongs beside it.
 ///
 /// Reached only under the capability's turn, so a read or write and the
 /// offset's move are one step against every other thread's.
@@ -65,8 +69,9 @@ enum Offset {
 }
 
 impl Position {
-    fn new(append: bool) -> Self {
-        Self { append, at: Lock::new(Offset::Here(0)) }
+    fn new(append: bool, directory: bool) -> Self {
+        let at = if directory { Offset::Server } else { Offset::Here(0) };
+        Self { append, at: Lock::new(at) }
     }
 
     fn read(&self, dir: &mut Dir, fid: Fid, out: &mut [u8]) -> Result<usize, fs::Error> {
@@ -114,15 +119,16 @@ impl Position {
         Ok(landed)
     }
 
-    /// Hand the offset to the server, ahead of anything that shares the
-    /// description with another process; it is the server's from then on.
-    fn share(&self, dir: &mut Dir, fid: Fid) -> Result<(), fs::Error> {
+    /// A stream the server writes at the description's offset for another
+    /// process ([`Dir::stream`]): the offset is handed to the server first,
+    /// and is its from then on.
+    fn stream(&self, dir: &mut Dir, fid: Fid) -> Result<crate::Pipe, fs::Error> {
         let mut at = self.at.lock();
         if let Offset::Here(offset) = *at {
             dir.seek(fid, fs::SEEK_START, offset as i64)?;
             *at = Offset::Server;
         }
-        Ok(())
+        dir.stream(fid)
     }
 }
 
@@ -405,7 +411,7 @@ unsafe extern "C" fn toyos_fs_open(at: Fd, path: *const u8, len: usize, how: Ope
                 true => dir.create_unnamed(base, rel, flags)?,
                 false => dir.open(base, rel, flags)?,
             };
-            let position = Position::new(how.append);
+            let position = Position::new(how.append, opened.stat.kind == fs::KIND_DIR);
             Ok(Ok(Opened::Held(Held::Served { cap: Arc::clone(cap), fid: opened.fid, position })))
         },
     )
@@ -534,8 +540,7 @@ extern "C" fn toyos_fs_fsync(fd: Fd) -> i64 {
 #[no_mangle]
 extern "C" fn toyos_fs_stream(fd: Fd) -> i64 {
     let handle = on_fd(fd, |h| h.try_clone_to_owned().map(crate::OwnedHandle::into_raw), is_a_directory, |dir, fid, position| {
-        position.share(dir, fid)?;
-        dir.stream(fid).map(|pipe| pipe.into_raw())
+        position.stream(dir, fid).map(|pipe| pipe.into_raw())
     });
     answer(handle.map(|h| u64::from(h.0)))
 }
