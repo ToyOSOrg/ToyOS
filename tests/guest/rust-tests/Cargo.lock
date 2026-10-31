@@ -297,6 +297,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "inspect"
+version = "0.1.0"
+dependencies = [
+ "toyos",
+ "toyos-abi",
+ "toyos-inspect",
+]
+
+[[package]]
 name = "jni"
 version = "0.22.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -980,6 +989,7 @@ dependencies = [
  "acpiserver-api",
  "cpal",
  "getrandom",
+ "inspect",
  "libloading",
  "logkeeper-api",
  "memmap2",

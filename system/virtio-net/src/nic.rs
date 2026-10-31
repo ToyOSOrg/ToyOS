@@ -34,6 +34,13 @@ use toyos_virtio::queue::{avail_bytes, desc_bytes, Buffer, Parts, Published, Use
 
 /// §5.1.3: the device has a MAC address of its own to read.
 const VIRTIO_NET_F_MAC: u64 = 1 << 5;
+/// §5.1.3: the device reports its link in `status`, and a change of it is a
+/// configuration change (§5.1.4.2).
+const VIRTIO_NET_F_STATUS: u64 = 1 << 16;
+/// §5.1.4: `status`, after the six bytes of `mac`; its bit 0 is
+/// `VIRTIO_NET_S_LINK_UP`.
+const STATUS_AT: usize = 6;
+const VIRTIO_NET_S_LINK_UP: u16 = 1;
 
 /// The one MSI-X table entry the kernel programs.
 const MSIX_ENTRY: u16 = 0;
@@ -101,6 +108,8 @@ pub struct VirtioNet {
     rx: Virtqueue<Grant>,
     tx: TxQueue,
     mac: [u8; 6],
+    /// The device accepted `VIRTIO_NET_F_STATUS`, and reports its link.
+    status: bool,
 }
 
 impl VirtioNet {
@@ -108,7 +117,8 @@ impl VirtioNet {
     /// feature negotiation, both queues and their vectors in the order
     /// `toyos-virtio`'s types fix, which is virtio 1.2 §3.1.1's.
     pub fn open(dev: PciDev) -> Result<Self, Refusal> {
-        let Negotiated { setup, mapping, features } = negotiate(&dev, VIRTIO_NET_F_MAC)?;
+        let Negotiated { setup, mapping, features } = negotiate(&dev, VIRTIO_NET_F_MAC | VIRTIO_NET_F_STATUS)?;
+        let status = setup.features() & VIRTIO_NET_F_STATUS != 0;
         say!("virtio-net: {features}");
 
         let (grant, region) = Grant::alloc(&dev, GRANT_BYTES)?;
@@ -137,6 +147,7 @@ impl VirtioNet {
             rx,
             tx,
             mac,
+            status,
         };
 
         // Every receive buffer posted before a frame can arrive.
@@ -195,11 +206,22 @@ impl toyos_link::driver::Nic for VirtioNet {
     /// kernel saying this function is no longer this process's, and this
     /// dies where it can be read.
     ///
-    /// The link is unreported: this driver accepts no `VIRTIO_NET_F_STATUS`.
+    /// The link is `status`'s where the device accepted
+    /// `VIRTIO_NET_F_STATUS`, read each pass: a change of it raises the
+    /// configuration vector, the one interrupt, so a pass follows it. A
+    /// device without the feature reports none.
     fn begin_pass(&mut self) -> Link {
         match self.dev.irq() {
-            Ok(_) | Err(SyscallError::WouldBlock) => Link::Unreported,
+            Ok(_) | Err(SyscallError::WouldBlock) => {}
             Err(why) => panic!("virtio-net: this NIC cannot be driven on — {why:?}"),
+        }
+        if !self.status {
+            return Link::Unreported;
+        }
+        match self.device.device_read16(STATUS_AT) {
+            Ok(word) if word & VIRTIO_NET_S_LINK_UP != 0 => Link::UpWithoutSpeed,
+            Ok(_) => Link::Down,
+            Err(why) => panic!("virtio-net: its link status is not where §5.1.4 puts it — {why}"),
         }
     }
 

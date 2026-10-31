@@ -265,6 +265,7 @@ impl Session {
         match self.said {
             Link::Down => snap.put(&format!("{at}.state"), "down"),
             Link::Unreported => snap.put(&format!("{at}.state"), "unreported"),
+            Link::UpWithoutSpeed => snap.put(&format!("{at}.state"), "up"),
             Link::Up { mbps, full_duplex } => {
                 snap.put(&format!("{at}.state"), "up");
                 snap.put(&format!("{at}.speed_mbps"), mbps);

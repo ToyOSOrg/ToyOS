@@ -9,9 +9,6 @@
 //! first link's NIC down; the next datagrams leave by the other link and none
 //! by the first. Asked to set it up again, the datagrams return to it.
 
-#[path = "../served_log.rs"]
-mod served_log;
-
 use std::collections::BTreeMap;
 use std::io::{BufRead, BufReader, Write};
 use std::net::{Ipv4Addr, SocketAddr, TcpStream, UdpSocket};
@@ -85,13 +82,9 @@ fn main() {
         .nth(1)
         .and_then(|port| port.parse().ok())
         .expect("link_failover: the harness's port is this job's argument");
-    let mut leases = 0;
-    served_log::Log::open().until("both links' leases", BOUND, |line| {
-        leases += usize::from(line.contains("netstack: DHCP: lease "));
-        leases == 2
+    let snap = until("both links' leases", |snap| {
+        snap.get("net.links") == Some(&Value::U64(2)) && (0..2).all(|n| snap.get(&format!("net.link.{n}.lease.held")) == Some(&Value::Bool(true)))
     });
-    let snap = snapshot();
-    assert_eq!(snap.get("net.links"), Some(&Value::U64(2)), "link_failover: two links");
     // Each link's network, by its lease's address: QEMU's host is `.2` of it.
     let network = |n: usize| {
         let address = text(&snap, &format!("net.link.{n}.lease.address")).unwrap_or_else(|| panic!("link_failover: link {n} holds no lease"));

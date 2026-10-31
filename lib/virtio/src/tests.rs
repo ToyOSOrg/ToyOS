@@ -482,6 +482,25 @@ fn a_live_device_reads_and_writes_its_own_fields_inside_the_structure() {
     }
 }
 
+/// §4.1.3.1: a 16-bit field is read 16 bits wide, and one that is not a whole
+/// aligned word of the structure is refused, with `FAILED`, and not read.
+#[test]
+fn a_live_devices_16_bit_field_is_read_16_bits_wide_and_only_inside_the_structure() {
+    let machine = Machine::new();
+    let (mut device, _queue) = live(&machine);
+    machine.forget_trace();
+    assert_eq!(device.device_read16(4), Ok(0x5634));
+    assert_eq!(machine.trace(), [Event::DeviceConfig { at: 4 }]);
+    for at in [6, 5, usize::MAX] {
+        let machine = Machine::new();
+        let (mut device, _queue) = live(&machine);
+        machine.forget_trace();
+        assert_eq!(device.device_read16(at), Err(Refusal::PastDeviceConfig { at, bytes: 6 }));
+        let failed = status::ACKNOWLEDGE | status::DRIVER | status::FEATURES_OK | status::DRIVER_OK | status::FAILED;
+        assert_eq!(machine.trace(), [Event::Status(failed)]);
+    }
+}
+
 // --- PCI 3.0 §6.7: the capability list ---
 
 /// A function's configuration space: 256 bytes, and the offsets a claim

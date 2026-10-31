@@ -365,8 +365,15 @@ impl<R: Registers> Wires<R> {
     /// Where in the BAR the 32-bit device-specific field `at` is, read or
     /// written 32 bits wide as §4.1.3.1 has one.
     fn device32(&mut self, at: usize) -> Result<usize, Refusal> {
+        self.device_field(at, 4)
+    }
+
+    /// Where the `width`-byte field `at` bytes into the device-specific
+    /// structure is, refusing one that is not a whole aligned field of it
+    /// (§4.1.3.1).
+    fn device_field(&mut self, at: usize, width: usize) -> Result<usize, Refusal> {
         let Region { at: base, bytes } = self.device;
-        if at.checked_add(4).is_none_or(|end| end > bytes) || !at.is_multiple_of(4) {
+        if at.checked_add(width).is_none_or(|end| end > bytes) || !at.is_multiple_of(width) {
             return Err(self.refuse(Refusal::PastDeviceConfig { at, bytes }));
         }
         Ok(base + at)
@@ -574,6 +581,13 @@ impl<R: Registers> Live<R> {
     pub fn device_read32(&mut self, at: usize) -> Result<u32, Refusal> {
         let at = self.wires.device32(at)?;
         Ok(self.wires.regs.read32(at))
+    }
+
+    /// The 16-bit field `at` bytes into the device-specific structure, read
+    /// 16 bits wide (§4.1.3.1). A refusal sets `FAILED`.
+    pub fn device_read16(&mut self, at: usize) -> Result<u16, Refusal> {
+        let at = self.wires.device_field(at, 2)?;
+        Ok(self.wires.regs.read16(at))
     }
 
     /// Write the 32-bit field `at` bytes into the device-specific structure.
