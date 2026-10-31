@@ -66,6 +66,7 @@ pub use resolve::{Ended, LookupId, NotStarted, Resolved, Resolving};
 
 toyos_net_wire::counters! {
     DhcpUnsent = "node.dhcp-unsent";
+    DhcpOtherLink = "node.dhcp-other-link";
     AddressRefused = "node.address-refused";
     RouterRefused = "node.router-refused";
     NameUnsent = "node.name-unsent";
@@ -84,20 +85,28 @@ pub enum Event {
     Name { link: IfIndex, event: toyos_mdns::Event },
 }
 
+/// One link's DHCP client.
+struct LinkClient {
+    link: IfIndex,
+    mac: IndividualMac,
+    client: Client,
+    /// Its refusals pass through it as the stack's pass through the shard's: one line a rule in
+    /// any 10 s, carrying how many were not.
+    log: toyos_dhcp::RefusalLog,
+}
+
 pub struct Node {
     stack: Stack,
     /// The name each link's client asks its network to record.
     host_name: Option<HostName>,
-    /// Each link's DHCP client, in the order the links were added.
-    clients: Vec<(IfIndex, Client)>,
+    /// Each link's DHCP client, its link's address and the log its refusals pass through, in
+    /// the order the links were added.
+    clients: Vec<LinkClient>,
     /// The responders for the machine's name, once [`Self::answer_as`] started them.
     name: Option<name::Name>,
     resolver: resolve::Resolver,
     counters: Counters,
     events: Vec<Event>,
-    /// The clients' refusals pass through it as the stack's pass through the shard's: one line a
-    /// rule in any 10 s, carrying how many were not.
-    dhcp_log: toyos_dhcp::RefusalLog,
     /// Room for the largest message the client accepts.
     datagram: Vec<u8>,
     streams: streams::Streams,
@@ -121,7 +130,6 @@ impl Node {
             resolver: resolve::Resolver::new(),
             counters: Counters::default(),
             events: Vec::new(),
-            dhcp_log: toyos_dhcp::RefusalLog::default(),
             datagram: vec![0; usize::from(toyos_dhcp::limits::MAX_MESSAGE)],
             streams: streams::Streams::default(),
             listeners: listeners::Listeners::default(),
@@ -136,7 +144,7 @@ impl Node {
     pub fn add_link(&mut self, now: Instant, mac: IndividualMac, rank: Rank, draw: impl FnMut() -> u32) -> IfIndex {
         let iface = self.stack.add_link(now, mac, rank);
         let (client, _unsent) = Client::start(now, mac, self.host_name.clone(), draw);
-        self.clients.push((iface, client));
+        self.clients.push(LinkClient { link: iface, mac, client, log: toyos_dhcp::RefusalLog::default() });
         if let Some(name) = &mut self.name {
             name.add_link(now, &mut self.stack, iface);
         }
@@ -173,8 +181,8 @@ impl Node {
     }
 
     fn client(&mut self, link: IfIndex) -> &mut Client {
-        match self.clients.iter_mut().find(|(at, _)| *at == link) {
-            Some((_, client)) => client,
+        match self.clients.iter_mut().find(|c| c.link == link) {
+            Some(c) => &mut c.client,
             None => unreachable!("{link:?} is no link of the node's"),
         }
     }
@@ -244,7 +252,7 @@ impl Node {
 
     pub fn next_deadline(&self) -> Option<Instant> {
         let name = self.name.as_ref().and_then(name::Name::next_deadline);
-        let clients = self.clients.iter().filter_map(|(_, client)| client.next_deadline());
+        let clients = self.clients.iter().filter_map(|c| c.client.next_deadline());
         self.stack.next_deadline().into_iter().chain(clients).chain(name).chain(self.resolver.next_deadline()).chain(self.streams.next_deadline()).min()
     }
 
@@ -253,9 +261,9 @@ impl Node {
         self.stack.fire(now);
         self.settle(now, &mut draw);
         for at in 0..self.clients.len() {
-            let Some((link, client)) = self.clients.get_mut(at) else { continue };
-            let link = *link;
-            let out = client.timer(now, &mut draw);
+            let Some(c) = self.clients.get_mut(at) else { continue };
+            let link = c.link;
+            let out = c.client.timer(now, &mut draw);
             self.carry_out(now, link, out, None, &mut draw);
         }
         self.settle(now, &mut draw);
@@ -276,8 +284,16 @@ impl Node {
                     Report::NotVerified => (link, client.not_verified(now, &mut *draw), None),
                 }
             } else if let Some((payload, from, link)) = self.stack.recv(&mut self.datagram) {
-                let Some((_, client)) = self.clients.iter_mut().find(|(at, _)| *at == link) else { unreachable!("[ip] delivered from no link of the node's") };
-                (link, client.receive(now, payload, from, &mut *draw), None)
+                // On a LAN two of the links share, a reply for one link's client reaches the
+                // other's too: it is that link's, and this one's client never hears it.
+                let other = toyos_dhcp::addressed_to(payload)
+                    .is_some_and(|to| self.clients.iter().any(|c| c.link != link && c.mac.get() == to));
+                if other {
+                    self.counters.add(Counter::DhcpOtherLink, 1);
+                    continue;
+                }
+                let Some(c) = self.clients.iter_mut().find(|c| c.link == link) else { unreachable!("[ip] delivered from no link of the node's") };
+                (link, c.client.receive(now, payload, from, &mut *draw), None)
             } else {
                 break;
             };
@@ -292,10 +308,10 @@ impl Node {
     fn log(&mut self, now: Instant) {
         let events = &mut self.events;
         self.stack.refusals(|refusal, suppressed| events.push(Event::Stack { refusal, suppressed }));
-        for (link, client) in &mut self.clients {
-            for refusal in client.drain_refusals() {
-                if let Some(suppressed) = self.dhcp_log.admit(now, refusal.rule) {
-                    events.push(Event::Dhcp { link: *link, refusal, suppressed });
+        for c in &mut self.clients {
+            for refusal in c.client.drain_refusals() {
+                if let Some(suppressed) = c.log.admit(now, refusal.rule) {
+                    events.push(Event::Dhcp { link: c.link, refusal, suppressed });
                 }
             }
         }

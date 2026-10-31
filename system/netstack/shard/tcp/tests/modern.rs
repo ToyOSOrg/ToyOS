@@ -88,7 +88,7 @@ fn s_mod_005_a_bulk_peer_leaves_room_for_refusals() {
     h.arrive(seg(7000).syn().rst().from(Ipv4Addr::new(192, 0, 2, 3), 1234).to(A, 81));
     h.transmit();
     assert_eq!(h.info().snd_una.get(), 1001 + limits::EVENTS as u32 + 1);
-    assert_eq!(h.events.iter().filter(|e| **e == Event::Reachable(B)).count(), 1);
+    assert_eq!(h.events.iter().filter(|e| **e == Event::Reachable { local: A, remote: B }).count(), 1);
     assert_eq!(h.refusals(Counter::SynRst).len(), 1);
     assert_eq!(h.count(Counter::EventOverflow), 0);
 }

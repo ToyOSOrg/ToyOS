@@ -69,8 +69,9 @@ const MAX_LINKS: u32 = 8;
 /// without them.
 const INSPECT_BOUND: Duration = Duration::from_secs(1);
 
-/// Drivers' connections that have not said hello, watched at once.
-const MAX_PENDING_LINKS: u32 = 2;
+/// Drivers' connections that have not said hello, watched at once: every
+/// link's driver may be starting together.
+const MAX_PENDING_LINKS: u32 = MAX_LINKS;
 
 /// The name this machine asks its network to record for it, and answers to on
 /// it as `<name>.local` once no other host does. One name, because there is
@@ -342,13 +343,14 @@ fn answer_inspect(request: &Request, links: &[Held], counters: &[(IfIndex, Count
     request.client.snapshot(&encoded);
 }
 
-/// Open the link `asked` asks for on the node's `iface`, and say so.
-fn open(asked: Asked, iface: IfIndex, groups: &[Group]) -> Option<Session> {
+/// Open the link `asked` asks for on the node's `iface`, the `n`th link of
+/// the boot, and say so.
+fn open(asked: Asked, iface: IfIndex, n: usize, groups: &[Group]) -> Option<Session> {
     let label = asked.hello.label.clone();
     let opened = Session::open(asked.hello, iface, asked.conn, asked.region, groups);
     match &opened {
-        Some(_) => say!("netstack: {label}'s link is open"),
-        None => say!("netstack: {label} went before its link was opened"),
+        Some(_) => say!("netstack: {label}'s link is open, as link {n}"),
+        None => say!("netstack: {label} went before its link {n} was opened"),
     }
     opened
 }
@@ -408,7 +410,7 @@ fn hellos(asked: Vec<Asked>, links: &mut Vec<Held>, node: &mut Node, now: Instan
             let iface = node.add_link(now, asked.mac, rank(asked.hello.medium), draw);
             let label = asked.hello.label.clone();
             let mac = asked.mac;
-            let session = open(asked, iface, groups);
+            let session = open(asked, iface, links.len(), groups);
             links.push(Held { iface, mac, label, session, faulted: false });
             continue;
         };
@@ -430,7 +432,7 @@ fn hellos(asked: Vec<Asked>, links: &mut Vec<Held>, node: &mut Node, now: Instan
             }
         }
         held.label = asked.hello.label.clone();
-        held.session = open(asked, held.iface, groups);
+        held.session = open(asked, held.iface, at, groups);
     }
 }
 
@@ -572,7 +574,9 @@ fn main() {
             }
         }
 
-        let label = |iface: IfIndex| held.iter().find(|h| h.iface == iface).map_or_else(String::new, |h| h.label.clone());
+        let label = |iface: IfIndex| {
+            held.iter().position(|h| h.iface == iface).map_or_else(String::new, |n| format!("link {n} ({})", held[n].label))
+        };
         sockets.settle(&mut node, label);
         // Before anything is served: the lease is what gives this machine an
         // address, a route and its resolvers.

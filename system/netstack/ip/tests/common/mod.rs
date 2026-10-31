@@ -300,7 +300,7 @@ impl H {
         let reply = eth(MAC_A, m, 0x0806, &arp_packet(2, m, addr, MAC_A, A));
         let _ = h.ip.receive(setup, h.if0, &reply);
         h.settle();
-        h.ip.advise(h.clock(), addr, toyos_net_ip::Advice::Confirmed);
+        h.ip.advise(h.clock(), addr, toyos_net_ip::Source::Any, toyos_net_ip::Advice::Confirmed);
         assert!(matches!(h.ip.neighbour(h.if0, addr), Some(Nud::Reachable(r)) if r.confirmed() == H::instant(0)));
         h.rebase();
         h
@@ -750,7 +750,7 @@ impl H {
         self.collect();
         sent.map(|s| match s {
             Sent::Frame { len: n, .. } => Some(frame[..n].to_vec()),
-            Sent::Pending(_) => None,
+            Sent::Pending { .. } => None,
             Sent::NoRoom { .. } => unreachable!("every interface has room"),
         })
     }

@@ -779,7 +779,7 @@ impl Sync {
         self.acked_since = Some(now);
         self.stalled = 0;
         self.orphan_progress(now);
-        ctx.log.event(Event::Reachable(ctx.tuple.remote.addr));
+        ctx.log.event(Event::Reachable { local: ctx.tuple.local.addr, remote: ctx.tuple.remote.addr });
         let smss = self.smss();
         match self.recovery {
             Recovery::Fast { .. } if ack.sub(1).at_or_after(self.recover) => {
@@ -1225,7 +1225,7 @@ impl Sync {
         self.stalled = self.stalled.saturating_add(1);
         if self.stalled == 3 {
             self.delivery_problem = true;
-            ctx.log.event(Event::Reverify(ctx.tuple.remote.addr));
+            ctx.log.event(Event::Reverify { local: ctx.tuple.local.addr, remote: ctx.tuple.remote.addr });
         }
     }
 

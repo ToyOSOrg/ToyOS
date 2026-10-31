@@ -4,10 +4,10 @@
 //! `/system/bin/sshserver` has one clean exit for a machine with no network and it is keyed
 //! on an error kind: `ErrorKind::NotConnected`, which is what
 //! `NetError::NetstackNotFound` becomes. Anything else panics, by design — a
-//! machine that *has* a NIC and cannot bind must be loud. On a NIC-less machine
-//! netstack prints its line and exits, and whether sshserver took the quiet arm or put a
-//! tokio backtrace across the boot depended on which side of netstack's teardown
-//! its bind landed.
+//! machine that *has* a NIC and cannot bind must be loud. netstack that exits, as it
+//! once did on a NIC-less machine, can do so under a bind, and whether sshserver took
+//! the quiet arm or put a tokio backtrace across the boot depended on which side of
+//! netstack's teardown its bind landed.
 //!
 //! **The race is not staged here. The sequence is.** What made the defect hard
 //! to see is that it is a handful of instructions wide in a real boot; what

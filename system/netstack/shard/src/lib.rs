@@ -129,7 +129,7 @@ const TCP_MTU: u16 = {
 /// on the link its route leaves by.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
 enum Wait {
-    Hop(Ipv4Addr),
+    Hop(IfIndex, Ipv4Addr),
     Room,
     Link(IfIndex),
 }
@@ -285,7 +285,7 @@ impl Shard {
         for iface in room {
             for hop in self.waiting.remove(&Wait::Link(iface)).into_iter().flatten() {
                 self.tcp.wake(hop);
-                self.udp.wake(hop);
+                self.udp.wake(iface, hop);
             }
         }
         self.settle(now);
@@ -388,10 +388,10 @@ impl Shard {
                 });
                 Offer::Taken
             }
-            Ok(Sent::Pending(next_hop)) => Offer::Waits(next_hop),
+            Ok(Sent::Pending { iface, next_hop }) => Offer::Waits { iface, hop: next_hop },
             Ok(Sent::NoRoom { iface, hop }) => {
                 waiting.entry(Wait::Link(iface)).or_default().insert(hop);
-                Offer::Waits(hop)
+                Offer::Waits { iface, hop }
             }
             // Counted by [ip], which tells the datagram's flow.
             Err(_) => Offer::Taken,
@@ -425,8 +425,8 @@ impl Shard {
                         events.push(Event::Refused { refusal: Refusal::Tcp(r), suppressed });
                     }
                 }
-                toyos_net_tcp::Event::Reachable(peer) => ip.advise(now, peer, Advice::Confirmed),
-                toyos_net_tcp::Event::Reverify(peer) => ip.advise(now, peer, Advice::Reverify),
+                toyos_net_tcp::Event::Reachable { local, remote } => ip.advise(now, remote, Source::Bound(local), Advice::Confirmed),
+                toyos_net_tcp::Event::Reverify { local, remote } => ip.advise(now, remote, Source::Bound(local), Advice::Reverify),
             }
         }
         for event in ip.drain_events() {
@@ -437,16 +437,16 @@ impl Shard {
                     }
                 }
                 toyos_net_ip::Event::Unreachable(flow) => udp.unreachable(&flow),
-                toyos_net_ip::Event::Resolved { next_hop, .. } => {
-                    wake(tcp, waiting, Wait::Hop(next_hop));
-                    udp.wake(next_hop);
+                toyos_net_ip::Event::Resolved { iface, next_hop } => {
+                    wake(tcp, waiting, Wait::Hop(iface, next_hop));
+                    udp.wake(iface, next_hop);
                 }
-                toyos_net_ip::Event::Failed { next_hop, .. } => {
-                    wake(tcp, waiting, Wait::Hop(next_hop));
-                    udp.fail(next_hop);
+                toyos_net_ip::Event::Failed { iface, next_hop } => {
+                    wake(tcp, waiting, Wait::Hop(iface, next_hop));
+                    udp.fail(iface, next_hop);
                 }
                 // No datagram waits on a failed next hop: the failure dropped them.
-                toyos_net_ip::Event::Cleared { next_hop, .. } => wake(tcp, waiting, Wait::Hop(next_hop)),
+                toyos_net_ip::Event::Cleared { iface, next_hop } => wake(tcp, waiting, Wait::Hop(iface, next_hop)),
                 toyos_net_ip::Event::Room { .. } => wake(tcp, waiting, Wait::Room),
                 toyos_net_ip::Event::Verified { iface, addr } => events.push(Event::Verified { iface, addr }),
                 toyos_net_ip::Event::Conflict { iface, addr, mac } => events.push(Event::Conflict { iface, addr, mac }),
@@ -759,12 +759,12 @@ fn hop(ip: &mut Ip, now: Instant, credit: &impl Credit, tuple: &Tuple, waiting: 
     let (answer, wait) = match ip.neighbour(iface, next_hop) {
         Some(entry) => match entry.mac() {
             Some(mac) => (Hop::Ready(Via { iface, source, next_hop, mac }), None),
-            None if matches!(entry, Nud::Failed) => (Hop::Unreachable, Some(Wait::Hop(next_hop))),
-            None => (Hop::Pending, Some(Wait::Hop(next_hop))),
+            None if matches!(entry, Nud::Failed) => (Hop::Unreachable, Some(Wait::Hop(iface, next_hop))),
+            None => (Hop::Pending, Some(Wait::Hop(iface, next_hop))),
         },
         None => match ip.resolve(now, iface, next_hop, route.source) {
             Resolution::Resolved(mac) => (Hop::Ready(Via { iface, source, next_hop, mac }), None),
-            Resolution::Pending => (Hop::Pending, Some(Wait::Hop(next_hop))),
+            Resolution::Pending => (Hop::Pending, Some(Wait::Hop(iface, next_hop))),
             Resolution::Failed => (Hop::Unreachable, Some(Wait::Room)),
         },
     };

@@ -277,8 +277,8 @@ impl U {
         for event in &events {
             match event {
                 Event::Unreachable(flow) => self.udp.unreachable(flow),
-                Event::Resolved { next_hop, .. } => self.udp.wake(*next_hop),
-                Event::Failed { next_hop, .. } => self.udp.fail(*next_hop),
+                Event::Resolved { iface, next_hop } => self.udp.wake(*iface, *next_hop),
+                Event::Failed { iface, next_hop } => self.udp.fail(*iface, *next_hop),
                 _ => {}
             }
         }
@@ -314,7 +314,7 @@ impl U {
                         framed = true;
                         Offer::Taken
                     }
-                    Ok(Sent::Pending(next_hop)) => Offer::Waits(next_hop),
+                    Ok(Sent::Pending { iface, next_hop }) => Offer::Waits { iface, hop: next_hop },
                     Ok(Sent::NoRoom { .. }) => unreachable!("every interface has room"),
                     Err(_) => Offer::Taken,
                 }

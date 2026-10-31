@@ -268,13 +268,14 @@ fn s_ip_acd_017_detection_starts_at_the_first_announcement() {
     assert_eq!(h.count(Counter::AcdDefended), 1);
 }
 
-/// if1 at 198.51.100.1/24 beside if0, which holds no address.
+/// if0 holding 198.51.100.1/24 and nothing else yet, its control queue for the tests to fill
+/// with answers to it: each interface's share of the queue is its own.
 fn beside_if1() -> (H, IfIndex) {
     let mut h = H::raw();
-    let if1 = h.add_if1();
-    h.assign(if1, ip4(198, 51, 100, 1), 24, 0);
+    let if0 = h.if0;
+    h.assign(if0, ip4(198, 51, 100, 1), 24, 0);
     h.settle();
-    (h, if1)
+    (h, if0)
 }
 
 #[test]

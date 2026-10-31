@@ -9,8 +9,8 @@
 //! - a lease is held only against a [`Verified`], which only [`Stack::report`] makes, from [ip]'s
 //!   report for the link's address under probe, so no address is in use before conflict
 //!   detection ends;
-//! - the resolvers lookups ask are one link's held lease's: of the links holding one, the first
-//!   up, by rank and then arrival ([`Stack::asked`]). The answers they gave go with every write of any
+//! - the resolvers lookups ask are one link's held lease's: of the links up and holding one, the
+//!   first by rank and then arrival, and with none up the link asked before ([`Stack::asked`]). The answers they gave go with every write of any
 //!   link's state, every link that goes down and every change of the link asked: after any of
 //!   them the next lookup may be asking another network, so none is answered from this one's.
 //!
@@ -70,6 +70,9 @@ pub(crate) struct Stack {
     socket: SocketId,
     /// In the order they were added.
     links: Vec<Link>,
+    /// The link lookups ask ([`Stack::asked`]), kept as each write of a link's state or link
+    /// leaves it.
+    asked: Option<IfIndex>,
     /// What the asked link's resolvers answered: emptied with every write of a link's state,
     /// every link that goes down and every change of the link asked.
     answers: Cache,
@@ -97,7 +100,7 @@ impl Stack {
     pub(crate) fn new(now: Instant, config: Config) -> Result<Self, toyos_net_tcp::ConfigError> {
         let mut shard = Shard::new(now, config)?;
         let Ok(socket) = shard.acquisition() else { unreachable!("a new shard has no socket on port 68") };
-        Ok(Self { shard, socket, links: Vec::new(), answers: Cache::default(), inbox: VecDeque::new() })
+        Ok(Self { shard, socket, links: Vec::new(), asked: None, answers: Cache::default(), inbox: VecDeque::new() })
     }
 
     /// A link's interface, down and unaddressed.
@@ -136,12 +139,23 @@ impl Stack {
         }
     }
 
-    /// The link lookups ask, of those holding a lease: one that is up before one that is not,
-    /// and then the first by rank and by when it was added. A link down keeps its lease, so with
-    /// none up the lookups keep asking the one they asked.
+    /// The link lookups ask: of the links up and holding a lease, the first by rank and then by
+    /// when it was added. With none such, the link asked before while it still holds its lease,
+    /// since a link down keeps it; and failing that the first by rank holding one.
     pub(crate) fn asked(&self) -> Option<IfIndex> {
+        self.asked
+    }
+
+    /// [`Self::asked`] chosen again after a link's state or link changed; `true` when it moved.
+    fn choose_asked(&mut self) -> bool {
         let held = |link: &&Link| matches!(link.state, State::Held(_));
-        self.links.iter().filter(held).min_by_key(|link| (!link.up, link.rank)).map(|link| link.iface)
+        let up = self.links.iter().filter(held).filter(|link| link.up).min_by_key(|link| link.rank);
+        let kept = self.asked.and_then(|asked| self.links.iter().filter(held).find(|link| link.iface == asked));
+        let any = self.links.iter().filter(held).min_by_key(|link| link.rank);
+        let asked = up.or(kept).or(any).map(|link| link.iface);
+        let moved = asked != self.asked;
+        self.asked = asked;
+        moved
     }
 
     /// The asked link's lease, whose resolvers lookups ask.
@@ -160,6 +174,7 @@ impl Stack {
     /// Writes `iface`'s state; the answers go with it.
     fn set(&mut self, iface: IfIndex, state: State) {
         self.link_mut(iface).state = state;
+        self.choose_asked();
         self.answers.empty();
     }
 
@@ -185,10 +200,9 @@ impl Stack {
     /// that the lease's verification never hears from. Up or down, a change of the link asked
     /// empties them too.
     pub(crate) fn link(&mut self, now: Instant, iface: IfIndex, up: bool) {
-        let asked = self.asked();
         agreed(if up { self.shard.link_up(now, iface) } else { self.shard.link_down(now, iface) });
         self.link_mut(iface).up = up;
-        if !up || self.asked() != asked {
+        if self.choose_asked() || !up {
             self.answers.empty();
         }
     }

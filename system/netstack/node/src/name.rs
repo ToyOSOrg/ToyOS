@@ -6,6 +6,10 @@
 //! - **One name, a responder per link.** A message is its arrival link's responder's alone, and
 //!   what a responder sends leaves by its link alone. A name lost on one link is that link's: the
 //!   responder there probes for the same name again later (§8.1), and the others keep it.
+//! - **A message from one of this machine's own addresses never reaches a responder**: [ip]
+//!   refuses a datagram whose source any of its interfaces holds (`ip.own-source`), so on one LAN
+//!   two links share, as a wired and a wireless link bridged (§14), this machine hears its own
+//!   messages from neither and never conflicts with itself.
 //! - The record is the link's held lease's on a link that is up: its address and prefix are what the
 //!   responder is told, and it is told it has no link from the moment the lease goes or the link
 //!   does. Nothing is probed for, announced or answered for an address still under probe, or on a

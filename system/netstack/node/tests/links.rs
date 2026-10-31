@@ -32,6 +32,9 @@ struct Net {
 }
 
 const WIRED_NET: Net = Net { mac: [2, 0, 0, 0, 0, 0x01], addr: Ipv4Addr::new(192, 0, 2, 10), router: Ipv4Addr::new(192, 0, 2, 1), dns: Ipv4Addr::new(192, 0, 2, 53) };
+/// A wired and a wireless link on one LAN: one router and server, one resolver.
+const LAN_WIRED: Net = Net { mac: [2, 0, 0, 0, 0, 0x01], addr: Ipv4Addr::new(192, 168, 1, 10), router: Ipv4Addr::new(192, 168, 1, 1), dns: Ipv4Addr::new(192, 168, 1, 53) };
+const LAN_WIRELESS: Net = Net { mac: [2, 0, 0, 0, 0, 0x02], addr: Ipv4Addr::new(192, 168, 1, 20), router: Ipv4Addr::new(192, 168, 1, 1), dns: Ipv4Addr::new(192, 168, 1, 53) };
 const WIRELESS_NET: Net =
     Net { mac: [2, 0, 0, 0, 0, 0x02], addr: Ipv4Addr::new(198, 51, 100, 10), router: Ipv4Addr::new(198, 51, 100, 1), dns: Ipv4Addr::new(198, 51, 100, 53) };
 
@@ -53,7 +56,7 @@ fn read(frame: &[u8]) -> Out {
             let v4 = |b: &[u8]| Ipv4Addr::new(b[0], b[1], b[2], b[3]);
             Out::ArpRequest { sender: v4(arp.sender_protocol_addr()), target: v4(arp.target_protocol_addr()) }
         }
-        (Some(NetSlice::Ipv4(ip)), Some(TransportSlice::Udp(udp))) if udp.destination_port() == 67 => {
+        (Some(NetSlice::Ipv4(_)), Some(TransportSlice::Udp(udp))) if udp.destination_port() == 67 => {
             let message = udp.payload();
             let xid = u32::from_be_bytes(message[4..8].try_into().unwrap());
             let mut at = 240;
@@ -64,7 +67,6 @@ fn read(frame: &[u8]) -> Out {
                 }
                 at += 2 + len;
             };
-            let _ = ip;
             Out::Dhcp { kind, xid }
         }
         (Some(NetSlice::Ipv4(ip)), Some(TransportSlice::Udp(udp))) => {
@@ -93,8 +95,8 @@ fn arp_reply(net: &Net, addr: Ipv4Addr) -> Vec<u8> {
 }
 
 /// `net`'s server's `kind` message for transaction `xid`, offering or acknowledging its address
-/// for an hour, with its router and resolver.
-fn dhcp(net: &Net, kind: u8, xid: u32) -> Vec<u8> {
+/// for an hour, with its router and resolver; to the client's own addresses, or broadcast.
+fn dhcp(net: &Net, kind: u8, xid: u32, broadcast: bool) -> Vec<u8> {
     let mut m = vec![2, 1, 6, 0];
     m.extend_from_slice(&xid.to_be_bytes());
     m.extend_from_slice(&[0; 8]);
@@ -117,7 +119,10 @@ fn dhcp(net: &Net, kind: u8, xid: u32) -> Vec<u8> {
         m.extend_from_slice(&value);
     }
     m.push(255);
-    udp_frame(net.mac, ROUTER_MAC, (net.router, 67), (net.addr, 68), &m)
+    match broadcast {
+        false => udp_frame(net.mac, ROUTER_MAC, (net.router, 67), (net.addr, 68), &m),
+        true => udp_frame([0xff; 6], ROUTER_MAC, (net.router, 67), (Ipv4Addr::BROADCAST, 68), &m),
+    }
 }
 
 struct Two {
@@ -128,6 +133,11 @@ struct Two {
     draws: u32,
     /// Every frame the node sent, with the link it left by.
     sent: Vec<(IfIndex, Out)>,
+    /// The two links are bridged onto one LAN: a group or broadcast frame sent on one is heard
+    /// on the other, and a server's reply reaches both.
+    bridged: bool,
+    wired_net: &'static Net,
+    wireless_net: &'static Net,
 }
 
 fn counter(draws: &mut u32) -> impl FnMut() -> u32 + '_ {
@@ -150,11 +160,20 @@ impl Two {
         node.set_places(8);
         let wireless = node.add_link(now, IndividualMac::new(MacAddr(WIRELESS_NET.mac)).unwrap(), WIRELESS, counter(&mut draws));
         let wired = node.add_link(now, IndividualMac::new(MacAddr(WIRED_NET.mac)).unwrap(), WIRED, counter(&mut draws));
-        Self { node, wired, wireless, now, draws, sent: Vec::new() }
+        Self { node, wired, wireless, now, draws, sent: Vec::new(), bridged: false, wired_net: &WIRED_NET, wireless_net: &WIRELESS_NET }
+    }
+
+    /// Both links on one LAN behind one server.
+    fn bridged() -> Self {
+        Self { bridged: true, wired_net: &LAN_WIRED, wireless_net: &LAN_WIRELESS, ..Self::new() }
     }
 
     fn net(&self, link: IfIndex) -> &'static Net {
-        if link == self.wired { &WIRED_NET } else { &WIRELESS_NET }
+        if link == self.wired { self.wired_net } else { self.wireless_net }
+    }
+
+    fn other(&self, link: IfIndex) -> IfIndex {
+        if link == self.wired { self.wireless } else { self.wired }
     }
 
     fn deliver(&mut self, link: IfIndex, frame: &[u8]) {
@@ -168,9 +187,27 @@ impl Two {
     fn pump(&mut self) {
         loop {
             let mut out = Vec::new();
-            self.node.transmit(self.now, usize::MAX, |link, frame| out.push((link, read(frame))), counter(&mut self.draws));
+            let mut heard = Vec::new();
+            let bridged = self.bridged;
+            self.node.transmit(
+                self.now,
+                usize::MAX,
+                |link, frame| {
+                    out.push((link, read(frame)));
+                    // A group or broadcast frame's destination has its low bit of the first byte set.
+                    if bridged && frame[0] & 1 == 1 {
+                        heard.push((link, frame.to_vec()));
+                    }
+                },
+                counter(&mut self.draws),
+            );
             if out.is_empty() {
                 return;
+            }
+            for (link, frame) in heard {
+                let other = self.other(link);
+                let mut frames = Some(frame.as_slice());
+                self.node.receive(self.now, other, 256, |sink| frames.take().map(&mut *sink).is_some(), counter(&mut self.draws));
             }
             let replies: Vec<(IfIndex, Vec<u8>)> = out
                 .iter()
@@ -222,23 +259,37 @@ impl Two {
         .expect("a DHCP message of that type on the link")
     }
 
+    /// A server's reply on `link`, which on a bridged LAN reaches the other link too.
+    fn reply(&mut self, link: IfIndex, frame: &[u8]) {
+        if self.bridged {
+            let other = self.other(link);
+            self.deliver(other, frame);
+        }
+        self.deliver(link, frame);
+    }
+
     /// `link` up, and its server's offer and acknowledgement through to a lease held.
     fn lease(&mut self, link: IfIndex) {
         self.link(link, true);
         let net = self.net(link);
         let xid = self.last_dhcp(link, 1);
-        self.deliver(link, &dhcp(net, 2, xid));
+        // A server on a LAN two links share broadcasts its replies, so each link hears both.
+        let broadcast = self.bridged;
+        self.reply(link, &dhcp(net, 2, xid, broadcast));
         assert_eq!(self.last_dhcp(link, 3), xid, "the REQUEST");
-        self.deliver(link, &dhcp(net, 5, xid));
+        self.reply(link, &dhcp(net, 5, xid, broadcast));
         assert!(self.run_until(Duration::from_secs(10), |two| two.node.lease(link).is_some()), "the lease is held");
     }
 
     fn leased() -> Self {
-        let mut two = Self::new();
-        let (wired, wireless) = (two.wired, two.wireless);
-        two.lease(wireless);
-        two.lease(wired);
-        two
+        Self::new().leasing()
+    }
+
+    fn leasing(mut self) -> Self {
+        let (wired, wireless) = (self.wired, self.wireless);
+        self.lease(wireless);
+        self.lease(wired);
+        self
     }
 
     /// The DNS queries that left from `from`, each with its link and resolver.
@@ -291,13 +342,42 @@ fn lookups_ask_the_wired_links_resolver_fail_over_and_return() {
     assert_eq!(two.queries(from), [(wired, WIRED_NET.dns)]);
 }
 
+/// Whichever link goes down last, lookups keep asking the link they asked while it was up.
 #[test]
 fn with_no_link_up_lookups_ask_the_lease_they_asked() {
     let mut two = Two::leased();
-    let wired = two.wired;
-    two.link(two.wireless, false);
+    let (wired, wireless) = (two.wired, two.wireless);
+    two.link(wireless, false);
     two.link(wired, false);
-    assert_eq!(two.node.asked(), Some(wired));
+    assert_eq!(two.node.asked(), Some(wired), "the wireless link down first, then the wired one it asked");
+    let mut two = Two::leased();
+    two.link(wired, false);
+    assert_eq!(two.node.asked(), Some(wireless), "failed over");
+    two.link(wireless, false);
+    assert_eq!(two.node.asked(), Some(wireless), "the wired link down first: the wireless one it then asked");
+}
+
+/// RFC 6762 §14's laptop: a wired and a wireless link bridged onto one LAN. Each link hears
+/// the other's group frames and the server's replies to both, and the machine claims its name
+/// on both and refuses no server's reply.
+#[test]
+fn on_one_lan_by_two_links_the_name_is_claimed_on_both_and_no_reply_is_refused() {
+    let mut two = Two::bridged().leasing();
+    let (wired, wireless) = (two.wired, two.wireless);
+    assert_eq!(two.node.lease(wired).map(|l| l.address), Some(LAN_WIRED.addr));
+    assert_eq!(two.node.lease(wireless).map(|l| l.address), Some(LAN_WIRELESS.addr));
+    two.node.answer_as(two.now, Host::new("toyos").unwrap(), counter(&mut two.draws)).unwrap();
+    two.pump();
+    let mut events: Vec<Event> = two.node.drain_events().collect();
+    let claimed = |events: &[Event], link| events.contains(&Event::Name { link, event: toyos_mdns::Event::Claimed });
+    assert!(two.run_until(Duration::from_secs(10), |two| {
+        events.extend(two.node.drain_events());
+        claimed(&events, wired) && claimed(&events, wireless)
+    }), "claimed on both links: {events:?}");
+    assert!(!events.iter().any(|e| matches!(e, Event::Name { event: toyos_mdns::Event::Lost, .. })), "{events:?}");
+    assert!(!events.iter().any(|e| matches!(e, Event::Dhcp { .. })), "no server's reply refused: {events:?}");
+    assert!(two.node.shard().ip().counters().get(toyos_net_ip::Counter::IpOwnSource) > 0, "the premise: each link heard the other's messages, which [ip] refused");
+    assert!(two.node.counters().get(toyos_net_node::Counter::DhcpOtherLink) > 0, "the premise: each link heard the other's replies");
 }
 
 const NAME: &[u8] = b"\x05toyos\x05local\x00";

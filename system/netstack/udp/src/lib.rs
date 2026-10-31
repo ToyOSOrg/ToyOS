@@ -218,9 +218,9 @@ struct Queued {
     payload: Vec<u8>,
     /// The interface the send named, which alone it may leave by.
     iface: Option<IfIndex>,
-    /// The next hop whose link address it waits for, or the hop of a link with no room: not
-    /// offered until [`Udp::wake`] names it.
-    waits: Option<Ipv4Addr>,
+    /// The next hop, and its interface, whose link address it waits for, or the hop of a link
+    /// with no room: not offered until [`Udp::wake`] names both.
+    waits: Option<(IfIndex, Ipv4Addr)>,
 }
 
 impl Queued {
@@ -278,9 +278,10 @@ pub enum Sender {
 pub enum Offer {
     /// It left [udp]: in a frame, or refused by [ip], which counted it and told its flow.
     Taken,
-    /// The link address of this next hop is being asked for: the datagram stays with its sender
-    /// until [`Udp::wake`] or [`Udp::fail`] names the hop.
-    Waits(Ipv4Addr),
+    /// The link address of this next hop on this interface is being asked for, or the interface
+    /// has no room: the datagram stays with its sender until [`Udp::wake`] or [`Udp::fail`] names
+    /// the hop on its interface.
+    Waits { iface: IfIndex, hop: Ipv4Addr },
 }
 
 /// What [`Udp::serve`] handed the caller.
@@ -795,7 +796,7 @@ impl Udp {
                     taken = Some(at);
                     break;
                 }
-                Offer::Waits(next_hop) => queued.waits = Some(next_hop),
+                Offer::Waits { iface, hop } => queued.waits = Some((iface, hop)),
             }
         }
         let taken = taken.and_then(|at| queue.remove(at)).is_some();
@@ -809,14 +810,15 @@ impl Udp {
         }
     }
 
-    /// [ip] gave `next_hop` up: every datagram that waited for it is dropped and counted, and
-    /// the connected socket it left from is told.
-    pub fn fail(&mut self, next_hop: Ipv4Addr) {
+    /// [ip] gave `next_hop` on `iface` up: every datagram that waited for it there is dropped
+    /// and counted, and the connected socket it left from is told. One waiting on the same
+    /// address on another link stays.
+    pub fn fail(&mut self, iface: IfIndex, next_hop: Ipv4Addr) {
         let mut lost = Vec::new();
         let queues = self.slots.iter_mut().filter_map(|slot| slot.socket.as_mut()).map(|socket| &mut socket.tx).chain([&mut self.closed]);
         for queue in queues {
             queue.retain(|queued| {
-                let waited = queued.waits == Some(next_hop);
+                let waited = queued.waits == Some((iface, next_hop));
                 if waited {
                     lost.push(queued.flow());
                 }
@@ -829,9 +831,10 @@ impl Udp {
         }
     }
 
-    /// `next_hop`'s link address is known: the datagrams that wait for it are offered again.
-    pub fn wake(&mut self, next_hop: Ipv4Addr) {
-        self.rouse(|waits| waits == next_hop);
+    /// `next_hop`'s link address on `iface` is known, or `iface` has room: the datagrams that
+    /// wait for it there are offered again.
+    pub fn wake(&mut self, iface: IfIndex, next_hop: Ipv4Addr) {
+        self.rouse(|waits| waits == (iface, next_hop));
     }
 
     /// The routes changed: every waiting datagram's next hop is asked for again.
@@ -840,7 +843,7 @@ impl Udp {
     }
 
     /// Ends the wait of every datagram whose next hop `woken` names, and offers its sender.
-    fn rouse(&mut self, woken: impl Fn(Ipv4Addr) -> bool) {
+    fn rouse(&mut self, woken: impl Fn((IfIndex, Ipv4Addr)) -> bool) {
         let Self { slots, closed, closed_offered, eligible, .. } = self;
         let mut rouse = |queue: &mut VecDeque<Queued>, offered: &mut bool, sender: Sender| {
             let mut any = false;

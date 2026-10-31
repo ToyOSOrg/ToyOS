@@ -139,12 +139,9 @@ const RUST_SKIP: &[&str] = &[
     // It measures the T14's I219, which no guest has: the
     // `i219_messages_on_its_msi_vector` metal row runs it.
     "i219_msi",
-    // It waits for netstack to answer, which follows the I219's bring-up: the
-    // `i219_leaves_ulp_unarmed` metal row runs it on tests/images/benchcase.toml.
-    "netstack_answers",
-    // It waits for a lease from the bench's router over the T14's I219: the
-    // `i219_carries_netstacks_link` metal row runs it on
-    // tests/images/benchcase.toml.
+    // It waits for a lease from the bench's router over the T14's I219, which
+    // follows the card's bring-up: the `i219_carries_netstacks_link` and
+    // `i219_leaves_ulp_unarmed` metal rows run it on tests/images/benchcase.toml.
     "lan_lease",
     // Its product is the T14's counters across an idle span and a spin on
     // every CPU, which the `counters` metal row judges; on a guest it would be
@@ -684,10 +681,10 @@ const MACHINE_TESTS: &[&str] = &[
     // when it is up. Two drivers' links, a NIC's carrier and netstack's
     // routes cross three processes and two devices, which the node's and the
     // shard's host tests of rank, failover and return hold below the drivers.
-    // QEMU x86-64 (`qemu::SUITE_ARCH`), on two user networks; the datagrams go
-    // to RFC 5737's TEST-NET-1, which answers nothing, and the harness is the
-    // peer on the host's loopback, so no public network. Order and counts
-    // only.
+    // QEMU x86-64 (`qemu::SUITE_ARCH`), on two restricted user networks: the
+    // datagrams to RFC 5737's TEST-NET-1 leave no further than QEMU, and the
+    // harness is the peer each network forwards `.100:7` to on the host's
+    // loopback, so no public network. Order and counts only.
     "traffic_leaves_by_the_second_link_while_the_first_is_down",
     // Login sessions: their owner parents, signs out and ends with each, and
     // the machine's reboot waits for them until forced, which only processes
@@ -1824,18 +1821,17 @@ const OSBENCH_INTERNET: &[metal::Arm] = &[metal::Arm {
     ..metal::once("netbenchcase", "tests/images/benchcase.toml", &[], &["osbench_internet"])
 }];
 
-/// [`BENCHCASE`]'s boot, with two jobs: netstack answering, which it does only
-/// once the card's bring-up has logged, and its lease landing. Without them
-/// the list's `reboot` lands while the driver is still reaching the PHY.
-const BENCHCASE_ALONE: &[metal::Arm] =
-    &[metal::once("benchcase", "tests/images/benchcase.toml", &[], &["test_rs_netstack_answers", "test_rs_lan_lease"])];
+/// [`BENCHCASE`]'s boot, with one job: the lease landing, which follows the
+/// card's bring-up and every line it logged. Without it the list's `reboot`
+/// lands while the driver is still reaching the PHY.
+const BENCHCASE_ALONE: &[metal::Arm] = &[metal::once("benchcase", "tests/images/benchcase.toml", &[], &["test_rs_lan_lease"])];
 
 /// The I219 driver's account of its part's start: what its wake found of
 /// Ultra Low Power and disarmed, and the configuration its bring-up read back
 /// unarmed. Both lines are printed, because what was found is what the next
 /// boot's diagnosis reads.
 fn i219_leaves_ulp_unarmed(boot: &metal::Readback) -> Result<(), String> {
-    boot.job_passed("test_rs_netstack_answers")?;
+    boot.job_passed("test_rs_lan_lease")?;
     let log = boot.log();
     let woke = log.must_say("i219: before the reset the PHY was asked:")?;
     let left = log.must_say("it is left with ULP configuration")?;
@@ -5806,10 +5802,6 @@ fn peer_verdict<T>(heard: std::thread::JoinHandle<Result<T, String>>) -> String 
     }
 }
 
-/// `test_rs_link_restart` on `tests/images/linkcase.toml`'s boot: the peer
-/// answers each line the job writes on one connection, the one before the
-/// job ends its driver and the one after it starts another, then reads the
-/// job's FIN and answers it with its own.
 /// `test_rs_link_failover` on two virtio NICs: the harness, asked over the
 /// second link's network, sets the first link's NIC down and then up.
 fn traffic_leaves_by_the_second_link_while_the_first_is_down() -> Result<(), String> {
@@ -5820,11 +5812,11 @@ fn traffic_leaves_by_the_second_link_while_the_first_is_down() -> Result<(), Str
     let tests = compile::repo_root().join("tests/guest/rust-tests");
     let bin = qemu::build_toyos_bin(qemu::SUITE_ARCH, &tests, JOB);
     let config = compile::repo_root().join("tests/images/netcase.toml");
-    let options = BootOptions { profile: qemu::Profile::HeadlessTwoNics, qmp: true, ..BootOptions::default() };
-    let mut qemu = QemuInstance::boot_with_options(&config, &[], &[(JOB.to_string(), bin)], options);
-    serial::Serial::boot(&qemu).must_be_clean()?;
     let peer = std::net::TcpListener::bind("127.0.0.1:0").map_err(|e| format!("no loopback listener: {e}"))?;
     let port = peer.local_addr().map_err(|e| format!("the listener's port: {e}"))?.port();
+    let options = BootOptions { profile: qemu::Profile::HeadlessTwoNics, qmp: true, peer: Some(port), ..BootOptions::default() };
+    let mut qemu = QemuInstance::boot_with_options(&config, &[], &[(JOB.to_string(), bin)], options);
+    serial::Serial::boot(&qemu).must_be_clean()?;
     let socket = qemu.qmp_socket().to_path_buf();
     let heard = std::thread::spawn(move || -> Result<(), String> {
         let (conn, _) = peer.accept().map_err(|e| format!("the guest's connect: {e}"))?;
@@ -5847,7 +5839,7 @@ fn traffic_leaves_by_the_second_link_while_the_first_is_down() -> Result<(), Str
         }
         Ok(())
     });
-    let result = qemu.run_test(&format!("test_rs_{JOB} {port}"), CEILING);
+    let result = qemu.run_test(&format!("test_rs_{JOB}"), CEILING);
     if let Some(why) = &result.error {
         return Err(format!("{why}\n{}\nthe job said:\n{}", peer_verdict(heard), result.stdout));
     }
@@ -5861,6 +5853,10 @@ fn traffic_leaves_by_the_second_link_while_the_first_is_down() -> Result<(), Str
     Ok(())
 }
 
+/// `test_rs_link_restart` on `tests/images/linkcase.toml`'s boot: the peer
+/// answers each line the job writes on one connection, the one before the
+/// job ends its driver and the one after it starts another, then reads the
+/// job's FIN and answers it with its own.
 fn a_link_ends_under_a_held_stream_and_comes_back() -> Result<(), String> {
     use std::io::{BufRead, BufReader, Write};
     const JOB: &str = "link_restart";
