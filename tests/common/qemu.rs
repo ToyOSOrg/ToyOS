@@ -951,10 +951,6 @@ enum Nic {
 /// QEMU's host is `.2` of. The first is QEMU's default network.
 pub const TWO_NICS: [(&str, &str); 2] = [("nic0", "10.0.2.0/24"), ("nic1", "10.0.3.0/24")];
 
-/// Where a guest on [`TWO_NICS`]'s networks reaches [`BootOptions::peer`]:
-/// host `.100` of its link's network, port 7.
-pub const PEER: (u8, u16) = (100, 7);
-
 /// Everything a profile decides about the machine, in one table. A new
 /// variant answers every question here or does not compile — which `self !=
 /// Profile::Metal` did the opposite of: it handed anything that was not
@@ -1233,11 +1229,6 @@ pub struct BootOptions {
     /// forwards to the guest's port `.1`: what a peer on the host connects to a
     /// guest's listener through. Only a profile with a NIC may set it.
     pub forward: Option<(u16, u16)>,
-    /// A TCP port of the host's loopback that the guest reaches at [`PEER`] on
-    /// each of [`TWO_NICS`]'s networks. Only [`Profile::HeadlessTwoNics`] may
-    /// set it, whose networks are restricted: nothing else of the guest's
-    /// leaves the host.
-    pub peer: Option<u16>,
 }
 
 impl BootOptions {
@@ -1280,7 +1271,6 @@ impl Default for BootOptions {
             rtc_base: None,
             bent: None,
             forward: None,
-            peer: None,
         }
     }
 }
@@ -2533,7 +2523,6 @@ fn qemu_command(
     // other still creates it after the unit and before everything else.
     // `iommu_platform` is virtio's own way of asking to be decoded.
     assert!(options.forward.is_none() || shape.nic != Nic::Absent, "a forwarded port needs a profile with a NIC");
-    assert!(options.peer.is_none() || shape.nic == Nic::VirtioPair, "a peer is two NICs' networks'");
     let netdev = match options.forward {
         Some((host, guest)) => format!("user,id=net0,hostfwd=tcp:127.0.0.1:{host}-:{guest}"),
         None => "user,id=net0".to_string(),
@@ -2553,14 +2542,8 @@ fn qemu_command(
             qemu.arg("-netdev").arg(&netdev).arg("-device").arg("e1000e,netdev=net0,romfile=");
         }
         Nic::VirtioPair => {
-            assert!(options.forward.is_none(), "two NICs' networks forward nothing in; a peer is `peer`'s");
             for (n, (id, net)) in TWO_NICS.iter().enumerate() {
-                // `restrict=on`: the guest reaches nothing past QEMU but the peer.
-                let mut netdev = format!("user,id=net{n},net={net},restrict=on");
-                if let Some(port) = options.peer {
-                    let base = net.split('/').next().and_then(|b| b.rsplit_once('.')).map(|(prefix, _)| prefix).expect("a network's address");
-                    netdev.push_str(&format!(",guestfwd=tcp:{base}.{}:{}-tcp:127.0.0.1:{port}", PEER.0, PEER.1));
-                }
+                let netdev = if n == 0 { netdev.clone() } else { format!("user,id=net{n},net={net}") };
                 qemu.arg("-netdev").arg(&netdev).arg("-device").arg(format!(
                     "virtio-net-pci-non-transitional,netdev=net{n},id={id},mac=52:54:00:12:34:5{}{platform}",
                     6 + n

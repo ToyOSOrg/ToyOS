@@ -5,11 +5,9 @@
 //! this job waits for both links' leases, then sends datagrams to an address
 //! off both networks: they leave by the link netstack's default route takes,
 //! which netstack's own count of each link's frames (`inspect net.link.<n>.sent`)
-//! names. It asks the harness, on a stream over the other link to the peer
-//! QEMU forwards each network's `.100:7` to, to set the first link's NIC
-//! down; the next datagrams leave by the other link and none by the first.
-//! Asked to set it up again, the datagrams return to it. The networks are
-//! restricted, so the datagrams leave no further than QEMU.
+//! names. It asks the harness, on a stream over the other link, to set the
+//! first link's NIC down; the next datagrams leave by the other link and none
+//! by the first. Asked to set it up again, the datagrams return to it.
 
 use std::collections::BTreeMap;
 use std::io::{BufRead, BufReader, Write};
@@ -80,6 +78,10 @@ fn carried(by: [u64; 2]) -> (usize, usize) {
 }
 
 fn main() {
+    let port: u16 = std::env::args()
+        .nth(1)
+        .and_then(|port| port.parse().ok())
+        .expect("link_failover: the harness's port is this job's argument");
     let snap = until("both links' leases", |snap| {
         snap.get("net.links") == Some(&Value::U64(2)) && (0..2).all(|n| snap.get(&format!("net.link.{n}.lease.held")) == Some(&Value::Bool(true)))
     });
@@ -96,9 +98,9 @@ fn main() {
     let (first, second) = carried(round(&socket));
     println!("  PASS: a round left by link {first}, on {}", networks[first]);
 
-    // The harness, on a stream over the second link: its network's `.100:7`.
+    // The harness, on a stream over the second link: its network's own host.
     let [a, b, c, _] = networks[second].octets();
-    let mut control = TcpStream::connect(SocketAddr::from((Ipv4Addr::new(a, b, c, 100), 7))).expect("link_failover: a stream to the harness over the second link");
+    let mut control = TcpStream::connect(SocketAddr::from((Ipv4Addr::new(a, b, c, 2), port))).expect("link_failover: a stream to the harness over the second link");
     control.set_read_timeout(Some(BOUND)).expect("link_failover: a read timeout");
     let mut answers = BufReader::new(control.try_clone().expect("link_failover: the stream's reader"));
     let mut ask = |word: &str| {

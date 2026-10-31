@@ -681,10 +681,12 @@ const MACHINE_TESTS: &[&str] = &[
     // when it is up. Two drivers' links, a NIC's carrier and netstack's
     // routes cross three processes and two devices, which the node's and the
     // shard's host tests of rank, failover and return hold below the drivers.
-    // QEMU x86-64 (`qemu::SUITE_ARCH`), on two restricted user networks: the
-    // datagrams to RFC 5737's TEST-NET-1 leave no further than QEMU, and the
-    // harness is the peer each network forwards `.100:7` to on the host's
-    // loopback, so no public network. Order and counts only.
+    // QEMU x86-64 (`qemu::SUITE_ARCH`), on two user networks; the datagrams go
+    // to RFC 5737's TEST-NET-1, which answers nothing, and the harness is the
+    // peer on the host's loopback, so no public network. The networks are not
+    // `restrict=on`: with it the job's first datagram off both networks was
+    // refused for want of a route, and the default route is what is tested.
+    // Order and counts only.
     "traffic_leaves_by_the_second_link_while_the_first_is_down",
     // Login sessions: their owner parents, signs out and ends with each, and
     // the machine's reboot waits for them until forced, which only processes
@@ -5812,11 +5814,11 @@ fn traffic_leaves_by_the_second_link_while_the_first_is_down() -> Result<(), Str
     let tests = compile::repo_root().join("tests/guest/rust-tests");
     let bin = qemu::build_toyos_bin(qemu::SUITE_ARCH, &tests, JOB);
     let config = compile::repo_root().join("tests/images/netcase.toml");
-    let peer = std::net::TcpListener::bind("127.0.0.1:0").map_err(|e| format!("no loopback listener: {e}"))?;
-    let port = peer.local_addr().map_err(|e| format!("the listener's port: {e}"))?.port();
-    let options = BootOptions { profile: qemu::Profile::HeadlessTwoNics, qmp: true, peer: Some(port), ..BootOptions::default() };
+    let options = BootOptions { profile: qemu::Profile::HeadlessTwoNics, qmp: true, ..BootOptions::default() };
     let mut qemu = QemuInstance::boot_with_options(&config, &[], &[(JOB.to_string(), bin)], options);
     serial::Serial::boot(&qemu).must_be_clean()?;
+    let peer = std::net::TcpListener::bind("127.0.0.1:0").map_err(|e| format!("no loopback listener: {e}"))?;
+    let port = peer.local_addr().map_err(|e| format!("the listener's port: {e}"))?.port();
     let socket = qemu.qmp_socket().to_path_buf();
     let heard = std::thread::spawn(move || -> Result<(), String> {
         let (conn, _) = peer.accept().map_err(|e| format!("the guest's connect: {e}"))?;
@@ -5839,7 +5841,7 @@ fn traffic_leaves_by_the_second_link_while_the_first_is_down() -> Result<(), Str
         }
         Ok(())
     });
-    let result = qemu.run_test(&format!("test_rs_{JOB}"), CEILING);
+    let result = qemu.run_test(&format!("test_rs_{JOB} {port}"), CEILING);
     if let Some(why) = &result.error {
         return Err(format!("{why}\n{}\nthe job said:\n{}", peer_verdict(heard), result.stdout));
     }
