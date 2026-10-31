@@ -43,7 +43,7 @@ Use general, widely used crates as published when they are the cleanest solution
 
 Rust and QEMU are the development prerequisites. Other host tools must be buildable from C or C++ for eventual self-hosting, justified where Rust tools do not suffice, and declared in `issues/the-build-runs-host-tools-outside-rust-and-qemu.md`. No dependency on a binary for only one host OS. ToyOS's own maintained code is Rust, not Python, Perl or shell. Bootstrapping all the way from source without a binary seed is out of scope.
 
-`NOTICE` records committed third-party files, hashes, origins and licences. Vendor-signed firmware may ship pinned by version and hash when redistribution permits it. Device firmware is loaded by its owning driver through its IOMMU domain; CPU microcode loading is privileged kernel work. Loading responsibility does not require embedding firmware payloads in the kernel binary.
+`NOTICE` records committed third-party files, hashes, origins and licences. Vendor firmware may ship unmodified, pinned by version and hash, when redistribution permits it: signed CPU microcode, and device firmware whose DMA the IOMMU contains, even when no vendor statement shows the device verifies it; that unverified status is recorded in `issues/`. Device firmware is loaded by its owning driver through its IOMMU domain; CPU microcode loading is privileged kernel work. Loading responsibility does not require embedding firmware payloads in the kernel binary.
 
 ## Testing and evidence
 
