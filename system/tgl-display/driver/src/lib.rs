@@ -3,7 +3,7 @@
 //! IHD-OS-TGL-Vol 12-12.21 (Display Engine) and IHD-OS-TGL-Vol 2c-12.21
 //! (registers). Each register and sequence is cited where it is used.
 //!
-//! **What it does today is power on the firmware's surface**
+//! **What it does today is program watermarks on the firmware's surface**
 //! ([`keep_memory_low_power`]): the mode, the plane and its buffer are the
 //! GOP's and stay so. It reads the one plane the firmware scans out, pcode's
 //! memory latencies and SAGV block time, computes watermark levels 0-7 by
@@ -54,6 +54,10 @@ pub enum Refusal {
     Format(u32),
     /// The plane's tiling, PLANE_CTL 12:10, is not one Vol 2c names.
     Tiling(u32),
+    /// The plane is rotated 90 or 270 degrees (PLANE_CTL 1:0), or reads a
+    /// compressed surface (bits 15 and 4), which the algorithm here does not
+    /// size.
+    Layout(u32),
     /// The frame counter did not advance within a frame's ceiling.
     PipeStopped,
     /// The mailbox stayed busy, or answered an error code, to `command`.
@@ -74,6 +78,7 @@ impl fmt::Display for Refusal {
             Self::NotOnePlane(why) => write!(f, "the firmware's display is not one plane on pipe A: {why}"),
             Self::Format(format) => write!(f, "the plane's pixel format {format:#07b} is not packed RGB"),
             Self::Tiling(tiling) => write!(f, "the plane's tiling {tiling:#05b} is not one Vol 2c names"),
+            Self::Layout(ctl) => write!(f, "the plane is rotated 90/270 or decompresses (PLANE_CTL {ctl:#010x})"),
             Self::PipeStopped => write!(f, "pipe A's frame counter did not advance within {} ms", FRAME_CEILING_NANOS / 1_000_000),
             Self::Mailbox { command, interface } => {
                 write!(f, "pcode did not answer command {command:#04x}: the mailbox reads {interface:#010x}")
@@ -95,8 +100,8 @@ pub struct Scanout {
     pub width: u64,
     pub bytes_per_pixel: u64,
     pub tiling: Tiling,
-    /// Blocks, from PLANE_BUF_CFG; the end is not counted, so a reading of
-    /// it as inclusive allocates one block more than assumed here.
+    /// Blocks, from PLANE_BUF_CFG, whose Buffer End is inclusive: Vol 12
+    /// "Display Buffer Allocation" gives blocks 0-159 as 0x009F0000.
     pub allocation: u64,
     pub htotal: u64,
     pub vtotal: u64,
@@ -126,6 +131,11 @@ pub fn scanout<R: Registers>(regs: &R) -> Result<Scanout, Refusal> {
         0b01100 => 8,
         format => return Err(Refusal::Format(format)),
     };
+    // Vol 2c PLANE_CTL: Plane Rotation 1:0 (01b 90, 11b 270), Render
+    // Decomp 15, Media Decomp 4.
+    if ctl & 0b01 != 0 || ctl & (1 << 15 | 1 << 4) != 0 {
+        return Err(Refusal::Layout(ctl));
+    }
     let tiling = match (ctl >> 10) & 0x7 {
         0b000 => Tiling::Linear,
         0b001 => Tiling::X,
@@ -141,7 +151,7 @@ pub fn scanout<R: Registers>(regs: &R) -> Result<Scanout, Refusal> {
         width: u64::from(size & 0x1FFF) + 1,
         bytes_per_pixel,
         tiling,
-        allocation: end.saturating_sub(start),
+        allocation: (end + 1).saturating_sub(start),
         htotal: total(regs::TRANS_HTOTAL_A),
         vtotal: total(regs::TRANS_VTOTAL_A),
     })
@@ -153,24 +163,25 @@ pub fn scanout<R: Registers>(regs: &R) -> Result<Scanout, Refusal> {
 /// mode actually runs at, which is what the watermarks follow, and
 /// [`keep_memory_low_power`] holds it against the firmware's own line time.
 pub fn pixel_rate_khz<R: Registers, C: Clock>(regs: &R, clock: &C, scanout: &Scanout) -> Result<u64, Refusal> {
-    let next_frame = |after: u32| -> Result<u64, Refusal> {
+    // The count and the time it was seen at, read together, so an edge is
+    // never counted against another edge's time.
+    let next_frame = |after: u32| -> Result<(u32, u64), Refusal> {
         let deadline = clock.nanos() + FRAME_CEILING_NANOS;
         loop {
-            if regs.read32(regs::PIPE_FRMCNT_A) != after {
-                return Ok(clock.nanos());
+            let (count, at) = (regs.read32(regs::PIPE_FRMCNT_A), clock.nanos());
+            if count != after {
+                return Ok((count, at));
             }
-            if clock.nanos() > deadline {
+            if at > deadline {
                 return Err(Refusal::PipeStopped);
             }
             clock.pause(FRAME_POLL_NANOS);
         }
     };
-    let start = next_frame(regs.read32(regs::PIPE_FRMCNT_A))?;
-    let base = regs.read32(regs::PIPE_FRMCNT_A);
-    let (mut end, mut seen) = (start, base);
+    let (base, start) = next_frame(regs.read32(regs::PIPE_FRMCNT_A))?;
+    let (mut seen, mut end) = (base, start);
     while seen.wrapping_sub(base) < MEASURED_FRAMES {
-        end = next_frame(seen)?;
-        seen = regs.read32(regs::PIPE_FRMCNT_A);
+        (seen, end) = next_frame(seen)?;
     }
     let frames = u64::from(seen.wrapping_sub(base));
     let pixels = scanout.htotal * scanout.vtotal * frames;
@@ -254,8 +265,8 @@ pub fn keep_memory_low_power<R: Registers, C: Clock>(regs: &R, clock: &C) -> Res
         return Err(Refusal::SagvIntolerant);
     }
     let before = core::array::from_fn(|level| regs.read32(regs::plane_wm(0, scanout.plane, level)));
-    for (level, computed) in watermarks.levels.iter().enumerate() {
-        regs.write32(regs::plane_wm(0, scanout.plane, level), computed.map_or(0, |l| l.register()));
+    for (level, word) in watermarks.registers().into_iter().enumerate() {
+        regs.write32(regs::plane_wm(0, scanout.plane, level), word);
     }
     // The surface written again, unchanged: the arm for the double-buffered
     // watermarks, which take effect at the next vertical blank.

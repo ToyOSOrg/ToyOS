@@ -12,11 +12,10 @@ pub const LEVELS: usize = 8;
 const PIPE_STRIDE: usize = 0x1000;
 const PLANE_STRIDE_BYTES: usize = 0x100;
 
-/// TRANS_CONF_A, 70008h: bit 31 Transcoder Enable, bit 30 Transcoder State.
+/// TRANS_CONF_A, 70008h: bit 30 Transcoder State.
 pub fn trans_conf(pipe: usize) -> usize {
     0x7_0008 + pipe * PIPE_STRIDE
 }
-pub const TRANSCODER_ENABLE: u32 = 1 << 31;
 pub const TRANSCODER_STATE: u32 = 1 << 30;
 
 /// TRANS_HTOTAL_A, 60000h: 29:16 Horizontal Total, in pixels minus one.
@@ -48,11 +47,6 @@ pub fn plane_ctl(pipe: usize, n: usize) -> usize {
     plane(pipe, n, 0x7_0180)
 }
 pub const PLANE_ENABLE: u32 = 1 << 31;
-
-/// PLANE_STRIDE_1_A, 70188h: 10:0 stride, 64-byte chunks for linear memory.
-pub fn plane_stride(pipe: usize, n: usize) -> usize {
-    plane(pipe, n, 0x7_0188)
-}
 
 /// PLANE_SIZE_1_A, 70190h: 28:16 height minus one, 12:0 width minus one.
 pub fn plane_size(pipe: usize, n: usize) -> usize {

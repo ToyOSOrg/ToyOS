@@ -2,8 +2,9 @@
 //! plane, and "SAGV Interaction with Watermarks", in exact integer arithmetic:
 //! every quantity the algorithm takes a ceiling of is held as a fraction.
 //!
-//! Scaling, interlacing, rotation and YUV 4:2:0 are outside what this driver
-//! programs, so a plane here is unscaled, unrotated and packed.
+//! Scaling, interlacing, 90/270 rotation and YUV 4:2:0 are outside what
+//! this driver programs, so a plane here is unscaled, at 0 or 180 degrees and
+//! packed; [`crate::scanout`] refuses any other.
 
 use crate::regs::LEVELS;
 
@@ -136,9 +137,13 @@ pub fn level(latency_us: u64, plane: &Plane, pipe: &Pipe) -> Option<Level> {
 }
 
 /// The memory latencies pcode reports (Vol 12 "Memory Latency Data
-/// Definition"), in µs; `None` for a level that is invalid.
+/// Definition"), in µs: level 0, which is always valid, and the levels above,
+/// `None` from the first invalid one.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub struct Latencies(pub [Option<u64>; LEVELS]);
+pub struct Latencies {
+    pub zero: u64,
+    pub above: [Option<u64>; LEVELS - 1],
+}
 
 impl Latencies {
     /// From the two Data0 words, level 0 in the first word's low byte. "If
@@ -147,26 +152,37 @@ impl Latencies {
     /// data for level 0 is 0us, add 3 microseconds to the result for each
     /// valid level".
     pub fn from_pcode(first: u32, second: u32) -> Self {
-        let raw: [u64; LEVELS] = core::array::from_fn(|i| u64::from((if i < 4 { first } else { second } >> (8 * (i % 4))) & 0xFF));
-        let add = if raw[0] == 0 { 3 } else { 0 };
-        let mut levels = [None; LEVELS];
-        for i in 0..LEVELS {
-            if i > 0 && raw[i] == 0 {
-                break;
+        let raw = |i: usize| u64::from((if i < 4 { first } else { second } >> (8 * (i % 4))) & 0xFF);
+        let add = if raw(0) == 0 { 3 } else { 0 };
+        let mut above = [None; LEVELS - 1];
+        for (i, level) in above.iter_mut().enumerate() {
+            match raw(i + 1) {
+                0 => break,
+                us => *level = Some(us + add),
             }
-            levels[i] = Some(raw[i] + add);
         }
-        Self(levels)
+        Self { zero: raw(0) + add, above }
     }
 }
 
-/// A plane's watermarks: each level enabled or not, and whether it tolerates
-/// SAGV.
+/// A plane's watermarks: level 0, each level above enabled or not, and
+/// whether it tolerates SAGV.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Watermarks {
-    pub levels: [Option<Level>; LEVELS],
+    pub zero: Level,
+    pub above: [Option<Level>; LEVELS - 1],
     /// Level 0 was computed with the SAGV block time added and fits.
     pub tolerates_sagv: bool,
+}
+
+impl Watermarks {
+    /// PLANE_WM for each level, 0 first; a disabled level is 0.
+    pub fn registers(&self) -> [u32; LEVELS] {
+        core::array::from_fn(|i| match i {
+            0 => self.zero.register(),
+            i => self.above[i - 1].map_or(0, Level::register),
+        })
+    }
 }
 
 /// Every level for `plane` on `pipe` (Vol 12 step 5A, and "SAGV Interaction
@@ -179,20 +195,21 @@ pub struct Watermarks {
 /// `None` where level 0 does not fit even without SAGV: "the plane must not
 /// be enabled".
 pub fn watermarks(latencies: &Latencies, sagv_block_us: u64, plane: &Plane, pipe: &Pipe) -> Option<Watermarks> {
-    let base = latencies.0[0].expect("level 0 is always valid");
-    let tolerates_sagv = level(base + sagv_block_us, plane, pipe).is_some();
-    let mut levels = [None; LEVELS];
-    let mut below = 0;
-    for (i, latency) in latencies.0.iter().enumerate() {
+    let with_sagv = level(latencies.zero + sagv_block_us, plane, pipe);
+    let tolerates_sagv = with_sagv.is_some();
+    let (zero, mut below) = match with_sagv {
+        Some(zero) => (zero, latencies.zero + sagv_block_us),
+        None => (level(latencies.zero, plane, pipe)?, latencies.zero),
+    };
+    let mut above = [None; LEVELS - 1];
+    for (slot, latency) in above.iter_mut().zip(latencies.above) {
         let Some(latency) = latency else { break };
-        let latency = if i == 0 && tolerates_sagv { latency + sagv_block_us } else { *latency };
         let latency = latency.max(below);
         let Some(computed) = level(latency, plane, pipe) else { break };
-        levels[i] = Some(computed);
+        *slot = Some(computed);
         below = latency;
     }
-    levels[0]?;
-    Some(Watermarks { levels, tolerates_sagv })
+    Some(Watermarks { zero, above, tolerates_sagv })
 }
 
 /// Vol 12 step 2B: WM_LINETIME's line time, roundup[8 × htotal / rate MHz].

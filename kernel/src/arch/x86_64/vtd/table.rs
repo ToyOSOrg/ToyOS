@@ -236,6 +236,27 @@ pub fn put(tables: &mut Tables, space: Space, at: u64, phys: u64) {
     map_2m(tables, space.root, levels(space.width), Iova::translated(at), phys, LEAF_PERM);
 }
 
+/// The 4 KiB page at `at` in `space` reads and writes `phys`, through a page
+/// table its 2 MiB entry points to (VT-d Rev. 4.0 §9.8: `PS` clear at the
+/// page-directory level names a page table). Only for a range firmware
+/// reserved, which no 2 MiB leaf of a grant ever shares and nothing takes back.
+pub fn put_4k(tables: &mut Tables, space: Space, at: u64, phys: u64) {
+    let directory = descend(tables, space.root, levels(space.width), Iova::translated(at));
+    let index = ((at >> 21) & 0x1FF) as usize;
+    let entry = directory.read(index);
+    assert!(entry & SL_LARGE == 0 || entry & (SL_READ | SL_WRITE) == 0, "iommu: {at:#x} is inside a live 2 MiB leaf");
+    let table = if entry & (SL_READ | SL_WRITE) != 0 {
+        Table { phys: entry & ADDR_MASK }
+    } else {
+        let next = tables.alloc();
+        directory.write(index, next.phys | SL_READ | SL_WRITE);
+        next
+    };
+    let leaf = ((at >> 12) & 0x1FF) as usize;
+    assert!(table.read(leaf) & (SL_READ | SL_WRITE) == 0, "iommu: {at:#x} was still mapped when a new page was written there");
+    table.write(leaf, (phys & ADDR_MASK) | LEAF_PERM);
+}
+
 /// Clears the leaf at `at`; `false` where none is mapped. The caller
 /// invalidates before the page behind it is reused.
 pub fn take(space: Space, at: u64) -> bool {

@@ -180,19 +180,18 @@ pub fn init(rsdp_addr: u64, devices: &[PciDevice], windows: Option<&[RootBridgeW
                     }
                 }
             }
-            // A kernel device reaches its RMRRs through the identity domain, and
-            // a claimed one through its own domain, which maps them at their own
-            // addresses (`domain::keep_reserved`). QEMU publishes none, so this
-            // arm is untested by the harness.
+            // A kernel device reaches its RMRRs through the identity domain; a
+            // claimed one only where [`classify`] keeps them, in its own domain.
+            // QEMU publishes none, so this arm is untested by the harness.
             //
-            // **"Through the identity domain" is a claim about one address range, and it is
-            // checked here.** The identity domain is built over `[0, top)`
-            // exactly (`table::identity_domain`), so a region whose limit falls
-            // at or above `top` is one firmware requires stay mapped and this
-            // kernel does not map — a device in its scope would fault on the
-            // access firmware reserved the range for. The other half, that it
-            // is mapped *nowhere else*, is structural: every domain's addresses
-            // are built clear of it (`domain::avoid`).
+            // **The identity domain's half is checked here.** It is built over
+            // `[0, top)` exactly (`table::identity_domain`), so a region whose
+            // limit falls at or above `top` is one firmware requires stay
+            // mapped and this kernel does not map — a device in its scope would
+            // fault on the access firmware reserved the range for. No domain
+            // hands these addresses out (`domain::avoid`); the only one that
+            // maps them is the own domain of the one function [`classify`]
+            // keeps them for, at their own address.
             Ok(Structure::Rmrr(rmrr)) => {
                 let held = rmrr.limit() < identity_top;
                 // Spelled whole in each arm rather than with the verdict as a
@@ -216,9 +215,7 @@ pub fn init(rsdp_addr: u64, devices: &[PciDevice], windows: Option<&[RootBridgeW
                 }
                 rmrrs.push((base, limit.saturating_add(1)));
                 describe_scopes("rmrr", regions, rmrr.scopes());
-                for stream in rmrr.scopes().filter_map(Result::ok).filter(|s| s.kind() == SCOPE_ENDPOINT).filter_map(|s| s.stream_id()) {
-                    domain::reserve_for(stream, base, limit.saturating_add(1));
-                }
+                classify(regions, rmrr.scopes(), devices, base, limit.saturating_add(1));
                 regions += 1;
                 held_regions += usize::from(held);
             }
@@ -736,8 +733,67 @@ fn describe_scopes(owner: &str, index: usize, scopes: Scopes) {
     }
 }
 
-/// Device scope type 1, a PCI endpoint, whose path names one function.
+/// Device scope type 1, a PCI endpoint, whose path names one function, and
+/// type 2, a bridge and every function below it (VT-d Rev. 4.0 §8.3.1).
 const SCOPE_ENDPOINT: u8 = 1;
+const SCOPE_SUBHIERARCHY: u8 = 2;
+
+/// Each function an RMRR over `start..end` names, kept or refused by
+/// `kernel::rmrr::verdict`, which no claim of it then crosses
+/// (`domain::unclaimable`). A scope whose path this kernel cannot follow, or
+/// a bridge's sub-hierarchy, is another device sharing the range, and every
+/// function below such a bridge is named.
+fn classify(index: usize, scopes: Scopes, devices: &[PciDevice], start: u64, end: u64) {
+    let mut named: Vec<StreamId> = Vec::new();
+    let mut shared = false;
+    for scope in scopes.filter_map(Result::ok) {
+        let kind = scope.kind();
+        if kind != SCOPE_ENDPOINT && kind != SCOPE_SUBHIERARCHY {
+            continue;
+        }
+        let Some(at) = resolve(&scope, devices) else {
+            log!("iommu: rmrr{index} names a function behind a bridge this kernel enumerated no path to");
+            shared = true;
+            continue;
+        };
+        if kind == SCOPE_SUBHIERARCHY {
+            shared = true;
+            let (secondary, subordinate) = (at.read_config_u8(0x19), at.read_config_u8(0x1A));
+            named.extend(devices.iter().filter(|d| (secondary..=subordinate).contains(&d.bus)).map(stream_of));
+        }
+        named.push(stream_of(at));
+    }
+    let alone = named.len() == 1 && !shared;
+    for stream in named {
+        let class = devices.iter().find(|d| stream_of(d) == stream).map(|d| d.read_config_u32(0x08) >> 8);
+        let verdict = kernel::rmrr::verdict(alone, class, start, end);
+        match verdict {
+            kernel::rmrr::Verdict::Kept(..) => log!("iommu: rmrr{index} is {stream}'s alone, kept in its own domain"),
+            kernel::rmrr::Verdict::Refused(why) => log!("iommu: rmrr{index} makes {stream} unclaimable: {why}"),
+        }
+        domain::reserve(stream, verdict);
+    }
+}
+
+fn stream_of(device: &PciDevice) -> StreamId {
+    StreamId::pci(device.bus, device.dev, device.func)
+}
+
+/// The function a scope's path ends at: each step but the last a bridge this
+/// kernel enumerated, whose secondary bus the next step is on (VT-d Rev. 4.0
+/// §8.3.1).
+fn resolve<'a>(scope: &Scope, devices: &'a [PciDevice]) -> Option<&'a PciDevice> {
+    let mut bus = scope.start_bus();
+    let mut path = scope.path().peekable();
+    while let Some((device, function)) = path.next() {
+        let found = devices.iter().find(|d| (d.bus, d.dev, d.func) == (bus, device, function))?;
+        if path.peek().is_none() {
+            return Some(found);
+        }
+        bus = found.read_config_u8(0x19);
+    }
+    None
+}
 
 /// Device scope type 3, whose enumeration id is an I/O APIC's MADT id.
 const SCOPE_IOAPIC: u8 = 3;

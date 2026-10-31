@@ -96,21 +96,18 @@ impl<S: Copy> Domains<S> {
         assert!(window.handed_out(at.raw(), bytes), "iommu: domain{} never handed out {:#x}+{bytes:#x}", id.raw(), at.raw());
         Ok(*space)
     }
-}
 
-impl<S: Copy> Domains<S> {
-    /// The domain's tables, for a range firmware reserved placed at its own
-    /// address `at`: one no domain's window hands out, which is what makes
-    /// the identity placement collide with nothing.
-    pub fn reserved_space(&self, id: DomainId, at: u64) -> Result<S, IommuError> {
-        aligned(at)?;
-        let reserved = self.reserved.as_deref().ok_or(IommuError::Undeclared)?;
+    /// The domain's tables, for `start..end`, a range firmware reserved,
+    /// placed at its own address: one every domain's window avoids, which is
+    /// what makes the placement collide with nothing.
+    pub fn reserved_space(&self, id: DomainId, start: u64, end: u64) -> S {
+        let reserved = self.reserved.as_deref().expect("iommu: a domain exists only where a declaration is held");
         assert!(
-            reserved.iter().any(|&(start, end)| (start..end).contains(&at)),
-            "iommu: domain{} placing {at:#x} at its own address, which no domain avoids",
+            reserved.iter().any(|&(from, to)| from <= start && end <= to),
+            "iommu: domain{} placing {start:#x}..{end:#x} at its own address, which no domain avoids",
             id.raw()
         );
-        Ok(self.live[usize::from(id.raw() - self.first)].0)
+        self.live[usize::from(id.raw() - self.first)].0
     }
 }
 
