@@ -38,8 +38,8 @@ pub fn tid() -> Tid {
     u64::from(toyos_abi::current_tid().0)
 }
 
-/// The CPUs this process may run on: the calling thread's mask.
-pub fn allowed_cpus() -> Vec<usize> {
+/// The CPUs the calling thread may run on.
+pub fn thread_cpus() -> Vec<usize> {
     let mask = syscall::thread_affinity(0).expect("the calling thread's own mask");
     (0..mask.len() * 64).filter(|&cpu| mask[cpu / 64] & 1 << (cpu % 64) != 0).collect()
 }
@@ -59,7 +59,7 @@ pub fn pin_self(cpu: usize) {
 
 /// Let thread `tid` run anywhere this process may.
 pub fn unpin(tid: Tid) {
-    set_affinity(tid, &allowed_cpus());
+    set_affinity(tid, &super::allowed_cpus());
 }
 
 pub fn null_syscall() {
