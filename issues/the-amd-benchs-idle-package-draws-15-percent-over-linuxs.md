@@ -15,9 +15,15 @@ every Linux run (p = 0.029):
 - The median of the runs' per-second p50s is 1688 mW against 1472 mW.
 - The median of the runs' means is 1688 mW against 1501 mW.
 
-The cores are not the consumer. Their own energy counters give ToyOS 0 mW
-over the idle minute and Linux 11 mW, so the gap of about 200 mW lies
-outside the cores: in the SoC, memory, I/O or devices. Its 10 ms sleeper,
+These runs predate the matched read. In them, Linux read only the package
+each second, while ToyOS's read kicked every CPU. That asymmetry adds to
+ToyOS's figure in exactly this row, by an amount not yet measured; a run of
+the matched read settles it.
+
+The cores are not the consumer. Their own energy counters give ToyOS 0-1 mW
+over the idle minute across the four runs, against Linux's 11-20 mW, so the
+gap of about 200 mW lies outside the cores: in the SoC, memory, I/O or
+devices. Its 10 ms sleeper,
 1700-1710 against 1391-1705 mW, is not resolved. Work may not be slowed to
 close the gap.
 
