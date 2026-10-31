@@ -258,10 +258,23 @@ impl BitmapAllocator {
         Ok(())
     }
 
-    /// Mark a contiguous range of blocks as used.
+    /// Mark a contiguous range of blocks as used, one write per bitmap block.
     fn set_range_used(&self, io: &dyn BlockIO, start: BlockNum, count: u64) -> Result<(), FsError> {
-        for i in 0..count {
-            self.set_used(io, BlockNum::new(start.raw() + i))?;
+        let end = start.raw() + count;
+        let mut block = start.raw();
+        while block < end {
+            let (bitmap_block, _, _) = self.bit_of(BlockNum::new(block));
+            let mut buf = BlockBuf::zeroed();
+            io.read(bitmap_block, &mut buf)?;
+            while block < end {
+                let (holding, byte_off, bit) = self.bit_of(BlockNum::new(block));
+                if holding != bitmap_block {
+                    break;
+                }
+                buf.0[byte_off] |= 1 << bit;
+                block += 1;
+            }
+            io.write(bitmap_block, &buf)?;
         }
         Ok(())
     }

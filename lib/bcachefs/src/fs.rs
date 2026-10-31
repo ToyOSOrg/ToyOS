@@ -1049,28 +1049,32 @@ impl<IO: BlockIO> Mounted<IO, ReadWrite> {
         Ok(())
     }
 
-    /// Resolve a page index to a block number, allocating blocks to reach it.
-    ///
-    /// The allocator answers with a run that may be shorter than the request,
-    /// so covering a page means looping until the extents reach it — the same
-    /// loop `write_data` has always had. Reading the short run as a complete
-    /// one returned a block past the end of the extent that had just been
-    /// recorded: the page's write went to a block belonging to another file,
-    /// and a later read of the same page resolved somewhere else again.
+    /// Resolve a page index to a block number, allocating blocks to reach it:
+    /// [`Self::allocate`] for the one page the caller writes.
     pub fn resolve_or_alloc_block(
         &mut self,
         extents: &mut Vec<Extent>,
         page_idx: u32,
     ) -> Result<u64, FsError> {
-        if let Some(block) = block_for(extents, page_idx) {
-            return Ok(block);
-        }
+        self.allocate(extents, page_idx..=page_idx)?;
+        block_for(extents, page_idx).ok_or(FsError::NotFound)
+    }
 
-        let target = page_idx as u64;
+    /// Allocate blocks until `extents` reach every page of `pages`, which the
+    /// caller then writes whole or in part. Each run asks for every page still
+    /// missing.
+    ///
+    /// The allocator answers with a run that may be shorter than the request,
+    /// so covering the pages means looping until the extents reach them.
+    /// Reading the short run as a complete one returned a block past the end
+    /// of the extent just recorded: the page's write went to a block
+    /// belonging to another file.
+    pub fn allocate(&mut self, extents: &mut Vec<Extent>, pages: core::ops::RangeInclusive<u32>) -> Result<(), FsError> {
+        let end = *pages.end() as u64 + 1;
         let mut covered: u64 = extents.iter().map(|e| e.block_count as u64).sum();
         let hole = covered;
-        while covered <= target {
-            let want = (target - covered + 1).min(u32::MAX as u64) as u32;
+        while covered < end {
+            let want = (end - covered).min(u32::MAX as u64) as u32;
             let total = self.alloc.total_blocks;
             let from = match extents.last().and_then(|e| e.start_block.checked_add(e.block_count as u64)) {
                 None => self.alloc.next_alloc,
@@ -1084,14 +1088,13 @@ impl<IO: BlockIO> Mounted<IO, ReadWrite> {
 
         // The blocks that bridge the gap are the allocator's most recently freed
         // and still hold what the file that gave them up left there; the caller
-        // overwrites only `page_idx`, so every other one is a hole and reads zero.
+        // writes only `pages`, so every block before them is a hole and reads zero.
         let zero = BlockBuf::zeroed();
-        for page in hole..target {
+        for page in hole..*pages.start() as u64 {
             let block = block_for(extents, page as u32).ok_or(FsError::NotFound)?;
             self.io.write(BlockNum::new(block), &zero)?;
         }
-
-        block_for(extents, page_idx).ok_or(FsError::NotFound)
+        Ok(())
     }
 }
 
@@ -1839,6 +1842,27 @@ mod tests {
             refuse: core::cell::Cell::default(),
         };
         Mounted::<_, ReadWrite>::open(io).expect("mount")
+    }
+
+    /// A write's pages are allocated as the runs the volume has, with one
+    /// write to each bitmap block their bits lie in, and no page the caller
+    /// writes is written here. Only a hole before the pages is zeroed.
+    #[test]
+    fn a_range_of_pages_is_allocated_with_one_write_per_bitmap_block() {
+        let mut fs = counted(4096);
+        let bitmap = fs.alloc.bitmap_start.raw();
+        let mut extents = Vec::new();
+        let written = |fs: &Mounted<Counted, ReadWrite>, from: usize| fs.io().written.borrow()[from..].to_vec();
+
+        let from = fs.io().counts().0;
+        fs.allocate(&mut extents, 0..=255).expect("allocate");
+        assert_eq!(extents.len(), 1, "256 pages on an empty volume took {extents:?}");
+        assert_eq!(written(&fs, from), [bitmap], "allocating 256 pages wrote these blocks");
+
+        let from = fs.io().counts().0;
+        fs.allocate(&mut extents, 260..=299).expect("allocate past a hole");
+        let hole: Vec<u64> = (256..260).map(|page| block_for(&extents, page).expect("allocated")).collect();
+        assert_eq!(written(&fs, from), [vec![bitmap], hole].concat(), "a write after a 4-page hole wrote these blocks");
     }
 
     /// A sync with nothing changed since the last commit writes no block and

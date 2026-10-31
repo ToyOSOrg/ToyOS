@@ -27,7 +27,8 @@ server's heap reached every byte the machine had.
 
 The growth is not isolated. The server's own allocations per write are a
 block (`cache.write` of a dirty block, `data.rs`'s `write`) and an allocation
-in the volume's metadata per page grown (`resolve_or_alloc_block`); a
+in the volume's metadata per page grown (`resolve_or_alloc_block` then;
+`Mounted::allocate` now allocates a write's pages at once); a
 metadata update that writes a whole btree node through the unbounded dirty
 side of the cache per page would come to gigabytes for 16,384 pages, but that
 is an inference from the code, not a measurement.
