@@ -23,7 +23,7 @@ use alloc::collections::{BTreeMap, BTreeSet, VecDeque};
 use alloc::vec::Vec;
 use core::marker::PhantomData;
 
-use crate::sched::affinity::CpuMask;
+use crate::sched::affinity::{CpuMask, MASK_WORDS};
 use crate::sched::hw::{CpuId, Hw, Kicker, Nanos, TraceEvent, TraceKind};
 use crate::sched::mailbox::{
     Doorbell, Kick, MailboxConsumer, MailboxNode, MailboxProducer, PostSlot, PreemptGuard,
@@ -31,7 +31,7 @@ use crate::sched::mailbox::{
 };
 use crate::sched::msg::Msg;
 use crate::sched::queue::{RunQueue, MIN_SLICE_NS};
-use crate::sched::sync::{fence, Arc, AtomicU32, AtomicU64, Ordering};
+use crate::sched::sync::{fence, Arc, AtomicBool, AtomicU32, AtomicU64, Ordering};
 use crate::sched::task::{
     BlockedTask, Claim, DeadTask, ReadyTask, RunningTask, SchedPayload, TaskKey, TaskShared,
     TaskState, TransitTask, WaitClass, WakeCause, WakeReason, QUANTUM_NS,
@@ -1844,13 +1844,14 @@ impl<H: Hw, P: PreemptGuard> SchedPass<'_, '_, H, P, Disposed> {
             // pass, and nothing would come for the one it queues.
             let handle = self.env.cpus.get(self.cpu.id);
             let surplus = self.cpu.rq.movable_fair() as u32;
+            let takers = if surplus >= PUSH_THRESHOLD { self.cpu.rq.takers() } else { CpuMask::NONE };
             handle.publish_load((self.cpu.rq.len() + self.cpu.dying.len()) as u32);
-            self.env.cpus.publish_surplus(self.cpu.id, surplus);
+            self.env.cpus.publish_surplus(self.cpu.id, surplus, takers);
             self.cpu.rq.refresh();
             handle.publish_weight(self.cpu.rq.weight());
             // The stamp goes with them: it is what says they are about now.
             handle.publish_pass(self.now);
-            self.push_on_surplus(surplus);
+            self.push_on_surplus(surplus, takers);
             if self.cpu.running.is_some() {
                 // The re-arm's allowance is per idle period, so a CPU that is
                 // given work starts its next one with a full one.
@@ -2136,7 +2137,7 @@ impl<H: Hw, P: PreemptGuard> SchedPass<'_, '_, H, P, Disposed> {
         let heaviest = STEAL_RINGS
             .into_iter()
             .flat_map(|(inner, outer)| cpus.topology().ring(me, inner, outer, 0))
-            .filter(|&cpu| cpus.offers_surplus(cpu) && cpus.get(cpu).answering(now))
+            .filter(|&cpu| cpus.offers_surplus(cpu) && cpus.get(cpu).takes(me) && cpus.get(cpu).answering(now))
             .map(|cpu| (cpus.get(cpu).weight(), cpu))
             .fold(None, |best: Option<(u64, CpuId)>, (weight, cpu)| match best {
                 Some((most, _)) if most >= weight => best,
@@ -2375,7 +2376,7 @@ impl<H: Hw, P: PreemptGuard> SchedPass<'_, '_, H, P, Disposed> {
         STEAL_RINGS.into_iter().find_map(|(inner, outer)| {
             cpus.topology()
                 .ring(me, inner, outer, 0)
-                .filter(|&cpu| cpus.offers_surplus(cpu) && cpus.get(cpu).answering(self.now))
+                .filter(|&cpu| cpus.offers_surplus(cpu) && cpus.get(cpu).takes(me) && cpus.get(cpu).answering(self.now))
                 .max_by_key(|&cpu| cpus.get(cpu).surplus())
         })
     }
@@ -2393,7 +2394,7 @@ impl<H: Hw, P: PreemptGuard> SchedPass<'_, '_, H, P, Disposed> {
     /// The fence is [`balance_fence`]'s, and it is the price: an `mfence` on the
     /// exit of every pass that has surplus, which under [`Balance::Pull`] costs
     /// nothing because this returns before reaching it.
-    fn push_on_surplus(&mut self, surplus: u32) {
+    fn push_on_surplus(&mut self, surplus: u32, takers: CpuMask) {
         let Some(threshold) = self.env.balance.push_threshold() else {
             return;
         };
@@ -2405,9 +2406,8 @@ impl<H: Hw, P: PreemptGuard> SchedPass<'_, '_, H, P, Disposed> {
         let now = self.now;
         // Only a sleeper some movable task may run on: one that may take none
         // probes, is answered nothing, and its probe's pass rings it again.
-        let wanted = self.cpu.rq.movable_mask();
         let Some(target) = cpus.idle_near(self.cpu.id, self.cpu.cursor, |cpu| {
-            wanted.contains(cpu.id()) && cpu.doorbell().sleeping() && cpu.answering(now)
+            takers.contains(cpu.id()) && cpu.doorbell().sleeping() && cpu.answering(now)
         }) else {
             return;
         };
@@ -2441,6 +2441,15 @@ pub struct CpuHandle<M> {
     /// with nothing, and sleeps — and the probe is one-shot per idle trip, so
     /// the genuinely surplus-holding CPU goes unprobed for a whole idle round.
     surplus: AtomicU32,
+    /// **Which CPUs may take [`Self::surplus`]**: the union of the masks of
+    /// the movable queued fair tasks, published with it so that a probe, a
+    /// busy balance and a push all ask [`Self::takes`]. `takers_any` stands
+    /// for every CPU, so the words are written only for a queue whose every
+    /// movable task is restricted. A reader may pair a fresh flag with stale
+    /// words; that costs one probe or one ring, never a repeated one, because
+    /// the next pass publishes both again.
+    takers_any: AtomicBool,
+    takers: [AtomicU64; MASK_WORDS],
     /// **The summed weight of this CPU's job groups**, published for busy
     /// balancing ([`SchedPass::balance_busy`]) and for nothing else.
     weight: AtomicU64,
@@ -2479,6 +2488,8 @@ impl<M: SchedMsg> CpuHandle<M> {
             doorbell: Doorbell::new(),
             load: AtomicU32::new(0),
             surplus: AtomicU32::new(0),
+            takers_any: AtomicBool::new(true),
+            takers: core::array::from_fn(|_| AtomicU64::new(0)),
             weight: AtomicU64::new(0),
             last_pass: AtomicU64::new(0),
             idle_exit: AtomicU64::new(0),
@@ -2510,6 +2521,12 @@ impl<M: SchedMsg> CpuHandle<M> {
 
     pub fn surplus(&self) -> u32 {
         self.surplus.load(Ordering::Relaxed)
+    }
+
+    /// Whether `cpu` may take a task of this CPU's [`Self::surplus`].
+    pub fn takes(&self, cpu: CpuId) -> bool {
+        self.takers_any.load(Ordering::Relaxed)
+            || self.takers.get(cpu.0 as usize / 64).is_some_and(|w| w.load(Ordering::Relaxed) & 1 << (cpu.0 % 64) != 0)
     }
 
     pub fn weight(&self) -> u64 {
@@ -2647,12 +2664,20 @@ impl<M: SchedMsg> CpuHandles<M> {
         }
     }
 
-    /// Publish how many fair-band tasks `cpu` could give away; called by that
-    /// CPU's own pass. Its bit in the offering mask changes with the threshold,
-    /// before the pass's [`balance_fence`], so the mask is what the push's
-    /// sleeper half reads.
-    pub fn publish_surplus(&self, cpu: CpuId, fair: u32) {
+    /// Publish how many fair-band tasks `cpu` could give away and which CPUs
+    /// may take them ([`CpuHandle::takes`]); called by that CPU's own pass.
+    /// Its bit in the offering mask changes with the threshold, before the
+    /// pass's [`balance_fence`], so the mask is what the push's sleeper half
+    /// reads.
+    pub fn publish_surplus(&self, cpu: CpuId, fair: u32, takers: CpuMask) {
         let handle = self.get(cpu);
+        let any = takers == CpuMask::ANY;
+        if !any {
+            for (word, &value) in handle.takers.iter().zip(takers.words()) {
+                word.store(value, Ordering::Relaxed);
+            }
+        }
+        handle.takers_any.store(any, Ordering::Relaxed);
         let was = handle.surplus() >= PUSH_THRESHOLD;
         handle.surplus.store(fair, Ordering::Relaxed);
         let (word, bit) = (&self.offering[cpu.0 as usize / 64], 1u64 << (cpu.0 % 64));
@@ -4884,13 +4909,32 @@ mod tests {
             for cpu in 0..8 {
                 w.handles.get(CpuId(cpu)).publish_pass(NOW);
             }
-            w.handles.publish_surplus(CpuId(near), 1);
-            w.handles.publish_surplus(CpuId(1), 5);
+            w.handles.publish_surplus(CpuId(near), 1, CpuMask::ANY);
+            w.handles.publish_surplus(CpuId(1), 5, CpuMask::ANY);
             w.run_a_pass(C0);
             let asked: Vec<u32> = (0..8u32).filter(|&cpu| !w.cpus[cpu as usize].mailbox_is_empty()).collect();
             assert_eq!(asked, [victim], "the probe's victim");
             w.abandon();
         }
+    }
+
+    /// **A probe skips a victim whose surplus it may not take**: cpu0's SMT
+    /// sibling offers one task masked away from cpu0, and cpu1 offers one any
+    /// CPU may take. The probe goes past the nearer CPU to cpu1.
+    #[test]
+    fn a_steal_probe_passes_a_surplus_its_mask_leaves_out() {
+        let mut w = World::on(two_llcs());
+        w.balance = Balance::Pull;
+        for cpu in 0..8 {
+            w.handles.get(CpuId(cpu)).publish_pass(NOW);
+        }
+        let not_c0 = CpuMask::from_words(&[0b1111_1110], 8).unwrap();
+        w.handles.publish_surplus(CpuId(4), 1, not_c0);
+        w.handles.publish_surplus(CpuId(1), 1, CpuMask::ANY);
+        w.run_a_pass(C0);
+        let asked: Vec<u32> = (0..8u32).filter(|&cpu| !w.cpus[cpu as usize].mailbox_is_empty()).collect();
+        assert_eq!(asked, [1], "the probe went to a victim that would answer it with nothing");
+        w.abandon();
     }
 }
 

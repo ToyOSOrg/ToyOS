@@ -472,9 +472,6 @@ pub fn log_time_ns(monotonic: u64) -> u64 {
 /// Linux gives a thread the stack its builder asks for.
 pub const STACK_FLOOR: &str = "none";
 
-/// What [`current_cpu`] names a CPU by, for the fields that print one.
-pub const CPU_NAMING: &str = "cpu";
-
 pub fn protect(ptr: *mut u8, len: usize, writable: bool) -> Result<(), super::Refused> {
     let prot = if writable { libc::PROT_READ | libc::PROT_WRITE } else { libc::PROT_READ };
     // SAFETY: the caller's mapping; a protection change moves no memory.

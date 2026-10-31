@@ -40,7 +40,7 @@ pub fn tid() -> Tid {
 
 /// The CPUs the calling thread may run on.
 pub fn thread_cpus() -> Vec<usize> {
-    let mask = syscall::thread_affinity(0).expect("the calling thread's own mask");
+    let mask = syscall::thread_affinity(tid()).expect("the calling thread's own mask");
     (0..mask.len() * 64).filter(|&cpu| mask[cpu / 64] & 1 << (cpu % 64) != 0).collect()
 }
 
@@ -54,7 +54,7 @@ fn set_affinity(tid: Tid, cpus: &[usize]) {
 
 /// Keep the calling thread on CPU `cpu`.
 pub fn pin_self(cpu: usize) {
-    set_affinity(0, &[cpu]);
+    set_affinity(tid(), &[cpu]);
 }
 
 /// Let thread `tid` run anywhere this process may.
@@ -129,9 +129,6 @@ pub fn log_time_ns(monotonic: u64) -> u64 {
 
 /// ToyOS gives a thread the stack its builder asks for, in whole pages.
 pub const STACK_FLOOR: &str = "none";
-
-/// What [`current_cpu`] names a CPU by, for the fields that print one.
-pub const CPU_NAMING: &str = "cpu";
 
 /// Native IPC: a connection through a port, between this process and a child
 /// it endows the port's acceptor.
