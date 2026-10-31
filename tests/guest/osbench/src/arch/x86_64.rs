@@ -8,6 +8,8 @@ pub use cpuid::{cpu_id, cpu_id_is};
 pub use cpuid::{core_of, cpu_model, current_cpu, threads_per_core};
 #[cfg(target_os = "linux")]
 pub use cpuid::power_registers;
+#[cfg(target_os = "toyos")]
+pub use cpuid::llc_of_apic;
 
 /// `turns` turns of 100 dependent register adds, each waiting one cycle for
 /// the one before it on every x86-64 core either bench has (Intel's and AMD's
@@ -167,6 +169,34 @@ mod cpuid {
     #[cfg(target_os = "toyos")]
     pub fn threads_per_core() -> u32 {
         1 << topology().smt_shift
+    }
+
+    /// The last-level cache an APIC ID's CPU belongs to, or `None` where
+    /// CPUID describes no cache. The highest level the deterministic cache
+    /// parameters list (leaf 04H on Intel, SDM Vol. 2A; 8000_001DH on AMD,
+    /// APM Vol. 3, where 8000_0001H ECX[22] says the leaf exists) is shared
+    /// by EAX[25:14] + 1 logical processors, whose APIC IDs differ only below
+    /// that count rounded up to a power of two.
+    #[cfg(target_os = "toyos")]
+    pub fn llc_of_apic(apic: u32) -> Option<u32> {
+        static SHIFT: OnceLock<Option<u32>> = OnceLock::new();
+        let shift = SHIFT.get_or_init(|| {
+            let amd = __cpuid_count(0x8000_0000, 0).eax >= 0x8000_001d
+                && __cpuid_count(0x8000_0001, 0).ecx & (1 << 22) != 0;
+            let leaf = if __cpuid_count(0, 0).eax >= 4 && __cpuid_count(4, 0).eax & 0x1f != 0 {
+                4
+            } else if amd {
+                0x8000_001d
+            } else {
+                return None;
+            };
+            (0..16)
+                .map(|sub| __cpuid_count(leaf, sub).eax)
+                .take_while(|eax| eax & 0x1f != 0)
+                .max_by_key(|eax| (eax >> 5) & 0x7)
+                .map(|eax| (((eax >> 14) & 0xfff) + 1).next_power_of_two().trailing_zeros())
+        });
+        shift.map(|shift| apic >> shift)
     }
 
     /// The processor brand string, CPUID 8000_0002H to 8000_0004H.
