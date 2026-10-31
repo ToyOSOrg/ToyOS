@@ -1206,7 +1206,7 @@ pub const TURN_TAKING_ROUNDS: usize = 8;
 pub fn masked_steals(partial: u64) -> Scenario {
     let run = Op::Run(MS / 2);
     let nap = Op::Block { queue: 0, deadline: Some(MS / 4) };
-    let looped = |first: Op| Script::looping(vec![first, run.clone(), nap.clone(), run.clone()], MASKED_STEALS_ROUNDS);
+    let looped = |first: Op| Script::looping(vec![first, run, nap, run], MASKED_STEALS_ROUNDS);
     scenario(
         "masked_steals",
         4,
@@ -1218,7 +1218,7 @@ pub fn masked_steals(partial: u64) -> Scenario {
                 "wanderer",
                 vec![0],
                 vec![Script::looping(
-                    vec![Op::SetAffinity(0b0011), run.clone(), nap.clone(), Op::SetAffinity(0b1100), run.clone(), nap.clone()],
+                    vec![Op::SetAffinity(0b0011), run, nap, Op::SetAffinity(0b1100), run, nap],
                     MASKED_STEALS_ROUNDS,
                 )],
             ),
@@ -1226,8 +1226,8 @@ pub fn masked_steals(partial: u64) -> Scenario {
                 "parent",
                 vec![0],
                 vec![
-                    Script::looping(vec![Op::SetAffinity(0b1000), Op::Spawn { template: 1 }, run.clone(), nap.clone()], 1),
-                    Script::looping(vec![run.clone(), nap.clone(), run.clone()], MASKED_STEALS_ROUNDS),
+                    Script::looping(vec![Op::SetAffinity(0b1000), Op::Spawn { template: 1 }, run, nap], 1),
+                    Script::looping(vec![run, nap, run], MASKED_STEALS_ROUNDS),
                 ],
             ),
         ],

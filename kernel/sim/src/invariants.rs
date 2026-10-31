@@ -613,18 +613,21 @@ fn check_waits(vm: &mut Vm<'_>) {
 /// being the modelled fault `stopped_cpu` measures.
 fn check_work_conservation(vm: &mut Vm<'_>) {
     let cpus = vm.scenario.cpus();
-    let takes = |vm: &Vm<'_>, victim: usize, thief: usize| {
-        vm.cpus[victim].rq().tasks().filter(|t| !t.rt().is_rt() && t.affinity().contains(CpuId(thief as u32))).count()
+    let takes = |vm: &Vm<'_>, victim: usize, thief: usize, enough: usize| {
+        let tasks = vm.cpus[victim].rq().tasks();
+        tasks.filter(|t| !t.rt().is_rt() && t.affinity().contains(CpuId(thief as u32))).take(enough).count()
     };
-    let victim_for = |vm: &Vm<'_>, thief: usize| {
-        (0..cpus).find(|&cpu| !vm.is_stopped(cpu) && takes(vm, cpu, thief) as u32 >= PROBE_WORTH_IT)
-    };
+    let worth = PROBE_WORTH_IT as usize;
+    let deep: Vec<usize> = (0..cpus)
+        .filter(|&cpu| !vm.is_stopped(cpu) && vm.cpus[cpu].rq().fair_len() as u32 >= PROBE_WORTH_IT)
+        .collect();
+    let victim_for = |vm: &Vm<'_>, thief: usize| deep.iter().copied().find(|&cpu| takes(vm, cpu, thief, worth) == worth);
     let bound = work_conservation_bound(vm.scenario.balance, cpus).unwrap_or(u64::MAX);
     let completed = vm.round - std::mem::replace(&mut vm.wc_round_seen, vm.round);
     let mut problems = Vec::new();
     for cpu in 0..cpus {
         let idle = !vm.is_stopped(cpu) && vm.cpus[cpu].running().is_none();
-        let Some(victim) = victim_for(vm, cpu).filter(|_| idle) else {
+        let Some(victim) = idle.then(|| victim_for(vm, cpu)).flatten() else {
             vm.wc_idle[cpu] = None;
             continue;
         };
@@ -636,7 +639,7 @@ fn check_work_conservation(vm: &mut Vm<'_>) {
             problems.push(format!(
                 "I15: cpu{cpu} has been idle for {rounds} rounds while cpu{victim} holds {} \
                  queued fair task(s) it may run (bound {bound} rounds)",
-                takes(vm, victim, cpu),
+                takes(vm, victim, cpu, usize::MAX),
             ));
         }
     }
