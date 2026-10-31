@@ -304,7 +304,7 @@ pub unsafe extern "C" fn sched_setaffinity(pid: i32, cpusetsize: usize, mask: *c
     }
     let set = unsafe { core::slice::from_raw_parts(mask, cpusetsize) };
     match crate::affinity::requested(set, toyos_abi::syscall::cpu_count() as usize) {
-        Ok(words) => match toyos_abi::syscall::thread_set_affinity(0, &words) {
+        Ok(words) => match toyos_abi::syscall::thread_set_affinity(u64::from(toyos_abi::current_tid().0), &words) {
             Ok(()) => 0,
             Err(e) => crate::posix_io::set_errno(e),
         },
@@ -319,7 +319,7 @@ pub unsafe extern "C" fn sched_getaffinity(pid: i32, cpusetsize: usize, mask: *m
     if pid != 0 {
         return crate::posix_io::refuse(ESRCH);
     }
-    let words = match toyos_abi::syscall::thread_affinity(0) {
+    let words = match toyos_abi::syscall::thread_affinity(u64::from(toyos_abi::current_tid().0)) {
         Ok(words) => words,
         Err(e) => return crate::posix_io::set_errno(e),
     };

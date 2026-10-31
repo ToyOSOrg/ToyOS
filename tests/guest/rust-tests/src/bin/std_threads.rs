@@ -18,7 +18,7 @@ fn stack_base() -> u64 {
 
 fn main() {
     if std::env::args().nth(1).as_deref() == Some("mask") {
-        let mask = toyos_abi::syscall::thread_affinity(0).expect("its own mask");
+        let mask = toyos_abi::syscall::thread_affinity(own()).expect("its own mask");
         println!("{mask:?}");
         return;
     }
@@ -34,10 +34,10 @@ fn main() {
     let last = (counted - 1) as u64;
     let mut one = [0u64; toyos_abi::syscall::CPU_MASK_WORDS];
     one[(last / 64) as usize] = 1 << (last % 64);
-    toyos_abi::syscall::thread_set_affinity(0, &one).expect("a mask of one online CPU");
+    toyos_abi::syscall::thread_set_affinity(own(), &one).expect("a mask of one online CPU");
     assert_eq!(thread::available_parallelism().expect("available_parallelism").get(), 1);
     let (inherited, ran_on) = thread::spawn(|| {
-        (toyos_abi::syscall::thread_affinity(0).expect("its own mask"), toyos_abi::syscall::current_cpu())
+        (toyos_abi::syscall::thread_affinity(own()).expect("its own mask"), toyos_abi::syscall::current_cpu())
     })
     .join()
     .expect("a thread reading its mask");
@@ -55,7 +55,7 @@ fn main() {
     for cpu in 0..counted {
         all[cpu / 64] |= 1 << (cpu % 64);
     }
-    toyos_abi::syscall::thread_set_affinity(0, &all).expect("every online CPU");
+    toyos_abi::syscall::thread_set_affinity(own(), &all).expect("every online CPU");
     assert_eq!(thread::available_parallelism().expect("available_parallelism").get(), counted);
 
     // Stacks still allocated cannot share a base. A freed one can be the next
@@ -99,4 +99,9 @@ fn main() {
         joined.len(),
         bases.len()
     );
+}
+
+/// The calling thread's id, as the affinity calls name it.
+fn own() -> u64 {
+    u64::from(toyos_abi::current_tid().0)
 }

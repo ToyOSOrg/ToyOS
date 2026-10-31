@@ -45,7 +45,9 @@ impl CpuMask {
     }
 
     /// The mask `words` names on a machine of `online` CPUs, where word `i`
-    /// bit `b` is CPU `64 * i + b`. A missing word is empty.
+    /// bit `b` is CPU `64 * i + b`. A missing word is empty. One naming every
+    /// online CPU is [`Self::ANY`], the one spelling a run queue counts as
+    /// takeable by any CPU.
     pub fn from_words(words: &[u64], online: usize) -> Result<Self, MaskRefused> {
         if words.len() > MASK_WORDS {
             return Err(MaskRefused::TooLong);
@@ -59,7 +61,7 @@ impl CpuMask {
         if mask != mask.within(online) {
             return Err(MaskRefused::Offline);
         }
-        Ok(mask)
+        Ok(if mask == Self::ANY.within(online) { Self::ANY } else { mask })
     }
 
     /// This mask less every CPU at or past `online`.
@@ -186,6 +188,8 @@ mod tests {
         assert_eq!(CpuMask::from_words(&[], 8), Err(MaskRefused::Empty));
         assert_eq!(CpuMask::from_words(&[0, 0], 8), Err(MaskRefused::Empty));
         assert_eq!(CpuMask::from_words(&[1; MASK_WORDS + 1], MAX_CPUS), Err(MaskRefused::TooLong));
+        assert_eq!(CpuMask::from_words(&[0b111], 3), Ok(CpuMask::ANY), "every online CPU is ANY");
+        assert_eq!(CpuMask::from_words(&[u64::MAX, 1], 65), Ok(CpuMask::ANY));
     }
 
     #[test]

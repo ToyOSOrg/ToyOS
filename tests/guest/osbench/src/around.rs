@@ -32,7 +32,7 @@ impl Around {
     /// [`crate::sys::current_cpu`]'s naming.
     pub fn end(self, bench: &str, placed: &[(u32, u32)]) {
         let placed: Vec<String> = placed.iter().map(|(from, to)| format!("{from}>{to}")).collect();
-        note(&format!("{bench}.placement"), &[(crate::sys::CPU_NAMING, placed.join(","))]);
+        note(&format!("{bench}.placement"), &[("cpu", placed.join(","))]);
         #[cfg(target_os = "toyos")]
         if let (Some(before), Some(d)) = (self.before, crate::sys::diag::shared()) {
             match read(d) {

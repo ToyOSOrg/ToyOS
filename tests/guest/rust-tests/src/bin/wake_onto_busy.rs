@@ -6,7 +6,8 @@
 //! CPU idle. So each round wakes a partner it has never woken: all of them are
 //! pinned to one CPU, other than the waker's and the one device interrupts
 //! target, and park there beside a spinner pinned there too; each is unpinned
-//! just before its wake, says where it ran, and parks again where it is. A
+//! once it has pinned itself, before any round, which leaves it parked where
+//! it is until its wake places it; it says where it ran, and parks again. A
 //! kernel that leaves the wake on the busy CPU until that CPU's own quantum
 //! ends waits up to a quantum every round; one that drains it at once and
 //! hands it to an idle CPU waits an interrupt or two. The waker is pinned and
@@ -115,9 +116,10 @@ fn partner(busy: u32) -> (JoinHandle<()>, Arc<Seat>) {
     let thread = {
         let seat = seat.clone();
         thread::spawn(move || {
-            pin(0, busy);
+            let me = toyos_abi::current_tid().0;
+            pin(u64::from(me), busy);
             assert_eq!(syscall::current_cpu(), busy, "a partner pinned to CPU {busy}");
-            seat.tid.store(toyos_abi::current_tid().0, Ordering::Release);
+            seat.tid.store(me, Ordering::Release);
             if park_until(&seat, &[RUN, STOP]) == STOP {
                 return;
             }
@@ -141,7 +143,7 @@ impl Spinner {
         let thread = {
             let (stop, started) = (stop.clone(), started.clone());
             thread::spawn(move || {
-                pin(0, busy);
+                pin(u64::from(toyos_abi::current_tid().0), busy);
                 assert_eq!(syscall::current_cpu(), busy, "a spinner pinned to CPU {busy}");
                 started.store(true, Ordering::Release);
                 let mut x = 1u64;
@@ -193,6 +195,14 @@ fn main() {
             refuse(Refusal::NotStaged, &why);
         }
     }
+    // Each partner is unpinned once it has pinned itself, before the spinner
+    // and every round: it parks where it ran, stays there until its wake
+    // places it, and the unpin's kick of the busy CPU lands outside every
+    // timed wake.
+    for (_, seat) in &partners {
+        syscall::thread_set_affinity(u64::from(seat.tid.load(Ordering::Acquire)), &everywhere)
+            .expect("a partner's own process unpins it");
+    }
     let spinner = match Spinner::on(busy) {
         Ok(spinner) => spinner,
         Err(why) => {
@@ -208,8 +218,6 @@ fn main() {
     let mut off_busy = 0usize;
     let begun = nanos_since_boot();
     for (partner, seat) in &partners {
-        syscall::thread_set_affinity(u64::from(seat.tid.load(Ordering::Acquire)), &everywhere)
-            .expect("a partner's own process unpins it");
         let sent = nanos_since_boot();
         seat.phase.store(RUN, Ordering::Release);
         partner.thread().unpark();
