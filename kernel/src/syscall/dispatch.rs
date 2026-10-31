@@ -47,8 +47,9 @@ use super::machine::{
 };
 #[cfg(feature = "test-actuators")]
 use super::machine::lower_sysinfo_bound;
+use super::paged::{sys_paged_create, sys_paged_holder, sys_paged_notices, sys_paged_op, sys_paged_read, sys_pager_create};
 use super::proc::{
-    spawn_place, sys_endowments, sys_exit, sys_nanosleep, sys_process_stats,
+    spawn_pager, spawn_place, sys_endowments, sys_exit, sys_nanosleep, sys_process_stats,
     sys_account_info, sys_job_create, sys_job_floor, sys_job_own, sys_process_quit, sys_process_wait, sys_rt_enter, sys_spawn, sys_thread_exit, sys_thread_join, sys_thread_spawn, sys_wake_latency_hold,
 };
 use super::vm::{
@@ -180,6 +181,10 @@ pub(crate) fn syscall_dispatch(num: u64, a1: u64, a2: u64, a3: u64, a4: u64) -> 
                 Ok(parent) => parent,
                 Err(refused) => return refused,
             };
+            let pager = match spawn_pager(args.pager) {
+                Ok(pager) => pager,
+                Err(refused) => return refused,
+            };
             // What is copied below past what a thread is charged for one
             // call's copies, and the list of argv's strings, a pointer pair
             // for every two bytes at most, held until the call returns; each
@@ -216,7 +221,7 @@ pub(crate) fn syscall_dispatch(num: u64, a1: u64, a2: u64, a3: u64, a4: u64) -> 
                 Ok(bytes) => bytes,
                 Err(e) => return e.to_u64(),
             };
-            let pending = match process::build_child_handles(&endow, &labels) {
+            let pending = match process::build_child_handles(&endow, &labels, pager) {
                 Ok(built) => built,
                 Err(e) => return e.refuse(),
             };
@@ -662,6 +667,20 @@ pub(crate) fn syscall_dispatch(num: u64, a1: u64, a2: u64, a3: u64, a4: u64) -> 
         // kernel decides each access by what its address is.
         SYS_ACPI => sys_acpi(&ctx, RawHandle(a1 as u32), a2, a3),
         SYS_DEVICE_REG_READ => sys_device_reg_read(RawHandle(a1 as u32), a2, a3),
+        SYS_PAGER_CREATE => sys_pager_create(a1, a2, a3),
+        SYS_PAGED_CREATE => sys_paged_create(RawHandle(a1 as u32), a2, a3),
+        SYS_PAGED_HOLDER => sys_paged_holder(RawHandle(a1 as u32)),
+        SYS_PAGED_READ => {
+            let Some(mut buf) = ctx.user_bytes_mut(UserAddr::new(a2), a3) else { return bad_addr };
+            sys_paged_read(RawHandle(a1 as u32), &mut buf, a4)
+        }
+        SYS_PAGED_OP => sys_paged_op(&ctx, RawHandle(a1 as u32), a2, UserAddr::new(a3)),
+        SYS_PAGED_NOTICES => {
+            let size = core::mem::size_of::<PagedNotice>();
+            let Some(len) = (a3 as usize).checked_mul(size) else { return SyscallError::InvalidArgument.to_u64() };
+            let Some(mut buf) = ctx.user_bytes_mut(UserAddr::new(a2), len as u64) else { return bad_addr };
+            sys_paged_notices(RawHandle(a1 as u32), &mut buf)
+        }
         _ => SyscallError::InvalidArgument.to_u64(),
     } })();
 

@@ -104,5 +104,6 @@ receives = ["disk", "input"]
 # one ends, on the same ports.
 [programs.fileserver]
 restart = true
+pager = true
 roles = ["data", "log", "boot"]
 receives = ["block"]

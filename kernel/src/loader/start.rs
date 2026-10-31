@@ -129,6 +129,8 @@ pub struct PendingHandles {
     labels: Vec<u8>,
     /// The job the child runs in, which everything built for it is counted to.
     job: Arc<Job>,
+    /// `SpawnArgs::pager` named a `SysCap` carrying `Rights::PAGER`.
+    pager: bool,
 }
 
 /// What a spawn's caller gives the child: the job it runs in, and its handle
@@ -139,6 +141,9 @@ pub trait Commit {
 
     /// The job the child runs in, which everything built for it is counted to.
     fn job(&self) -> &Arc<Job>;
+
+    /// Whether the child starts as a pager (`process::PagerRole`).
+    fn pager(&self) -> bool;
 
     /// The child's table around `own`, what the kernel puts beside its
     /// endowments.
@@ -152,11 +157,15 @@ impl Commit for PendingHandles {
         &self.job
     }
 
+    fn pager(&self) -> bool {
+        self.pager
+    }
+
     /// Take the endowed handles out of the caller's table and put its handle to the child in it, all under one lock hold: a refusal leaves the table unchanged.
     /// `own` is what the kernel puts in the child's table beside the endowments; the caller's handle to the child is the
     /// last answer. The handle under [`JOB_LABEL`] still names [`job`](Self::job), or the spawn is refused.
     fn commit(self, own: Own) -> Result<(HandleTable, Endowments, RawHandle), Refusal> {
-        let Self { mut table, endow, mut labels, job } = self;
+        let Self { mut table, endow, mut labels, job, .. } = self;
         let data_arc = process_data();
         let mut data = data_arc.lock();
 
@@ -290,7 +299,7 @@ impl Own {
 
 /// Reads `SpawnArgs`'s endowments into the child's pending handle state.
 // Every refusal here precedes any child state, so nothing is enqueued or orphaned.
-pub fn build_child_handles(endow: &UserBytes, labels: &[u8]) -> Result<PendingHandles, Refusal> {
+pub fn build_child_handles(endow: &UserBytes, labels: &[u8], pager: bool) -> Result<PendingHandles, Refusal> {
     if endow.len() / ENDOW_ENTRY_LEN > MAX_SPAWN_ENDOWMENTS {
         return Err(SyscallError::InvalidArgument.into());
     }
@@ -300,7 +309,7 @@ pub fn build_child_handles(endow: &UserBytes, labels: &[u8]) -> Result<PendingHa
     let mut raw = alloc::vec![0u8; endow.len()];
     endow.read_at(0, &mut raw);
     let job = child_job(&raw, labels)?;
-    Ok(PendingHandles { table: HandleTable::new(&job), endow: raw, labels: labels.to_vec(), job })
+    Ok(PendingHandles { table: HandleTable::new(&job), endow: raw, labels: labels.to_vec(), job, pager })
 }
 
 /// The job a child runs in: the one endowed under [`JOB_LABEL`], or else the

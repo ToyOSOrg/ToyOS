@@ -7,7 +7,9 @@
 //! `mem` is Linux's `/dev/shm` through the VFS, and ToyOS's `/tmp`, which the
 //! kernel serves through syscalls. `disk` is each system's
 //! [`crate::sys::persistent_dir`]: Linux's VFS and page cache over the
-//! runner's home, and ToyOS's DATA file server, through IPC per request.
+//! runner's home, and ToyOS's DATA file server, through IPC per request but
+//! for a read of a file opened to read, which the kernel answers from the
+//! file's paged object.
 
 use std::fs::{self, File, OpenOptions};
 use std::io::{Read, Seek, SeekFrom, Write};

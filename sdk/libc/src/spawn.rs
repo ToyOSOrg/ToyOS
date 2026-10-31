@@ -336,6 +336,7 @@ fn start(path: &str, argv: &[u8], env: &[u8], fds: &[(u32, toyos::BorrowedHandle
         image: None,
         image_held: false,
         launcher: None,
+        pager: None,
         argv,
         env,
         cwd,

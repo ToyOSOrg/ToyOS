@@ -257,6 +257,7 @@ fn spawn_argv(path: &str, argv: &str) -> Result<RawHandle, SyscallError> {
             image: 0,
             image_len: 0,
             place: u64::from(toyos_abi::HANDLE_INVALID.0),
+            pager: u64::from(toyos_abi::HANDLE_INVALID.0),
         })
     }
 }
@@ -307,6 +308,7 @@ fn spawn_image(path: &str, bytes: &[u8]) -> Result<RawHandle, SyscallError> {
             image: toyos::AsHandle::as_handle(&object).raw().0 as u64,
             image_len: bytes.len() as u64,
             place: u64::from(toyos_abi::HANDLE_INVALID.0),
+            pager: u64::from(toyos_abi::HANDLE_INVALID.0),
         })
     }
 }

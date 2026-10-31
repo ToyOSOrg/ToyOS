@@ -5,7 +5,7 @@
 //! grant's directory, and never a description's.
 //!
 //! A description lives while an id or a stream holds it, and a file's node is
-//! closed when the last goes: every removal answers the node that is then
+//! closed when the last goes: every removal answers the file that is then
 //! no longer held, for the server to close on the volume.
 //!
 //! **A directory is held by its volume path**, which the server moves with
@@ -51,10 +51,14 @@ pub struct Description {
 /// A description, shared.
 pub type Shared = Rc<RefCell<Description>>;
 
-/// The file's node `shared` held, when it was its last holder.
-pub fn release(shared: Shared) -> Option<Node> {
-    match Rc::try_unwrap(shared).ok()?.into_inner().held {
-        Held::File(node) => Some(node),
+/// A file no description holds open any more: its node and its identity.
+pub type Closed = (Node, u64);
+
+/// The file `shared` held, when it was its last holder.
+pub fn release(shared: Shared) -> Option<Closed> {
+    let description = Rc::try_unwrap(shared).ok()?.into_inner();
+    match description.held {
+        Held::File(node) => Some((node, description.identity)),
         Held::Dir { .. } => None,
     }
 }
@@ -105,8 +109,8 @@ impl Ids {
         self.insert(shared)
     }
 
-    /// Forget `id`: the node, when it was its description's last holder.
-    pub fn close(&mut self, id: u64) -> Result<Option<Node>, Error> {
+    /// Forget `id`: the file, when it was its description's last holder.
+    pub fn close(&mut self, id: u64) -> Result<Option<Closed>, Error> {
         self.ids.remove(&id).map(release).ok_or(Error::UnknownFile)
     }
 
@@ -123,8 +127,8 @@ impl Ids {
         Ok(out)
     }
 
-    /// Every id gone with its connection: the nodes no longer held.
-    pub fn drain(&mut self) -> Vec<Node> {
+    /// Every id gone with its connection: the files no longer held.
+    pub fn drain(&mut self) -> Vec<Closed> {
         core::mem::take(&mut self.ids).into_values().filter_map(release).collect()
     }
 
@@ -159,7 +163,7 @@ mod tests {
         ids.get(first).unwrap().borrow_mut().offset = 42;
         assert_eq!(ids.get(second).unwrap().borrow().offset, 42, "a dup has an offset of its own");
         assert_eq!(ids.close(first), Ok(None), "the node closed while a dup still held it");
-        assert_eq!(ids.close(second), Ok(Some(7)));
+        assert_eq!(ids.close(second), Ok(Some((7, 7))));
         assert_eq!(ids.close(second), Err(Error::UnknownFile));
     }
 
@@ -175,10 +179,10 @@ mod tests {
         assert_eq!(child.get(2).unwrap().borrow().node(), Ok(1));
         child.get(1).unwrap().borrow_mut().offset = 9;
         assert_eq!(parent.get(b).unwrap().borrow().offset, 9, "the child moved an offset of its own");
-        assert_eq!(parent.drain(), Vec::<Node>::new(), "the parent's end closed nodes the child holds");
+        assert_eq!(parent.drain(), Vec::<Closed>::new(), "the parent's end closed nodes the child holds");
         let mut closed = child.drain();
         closed.sort_unstable();
-        assert_eq!(closed, [1, 2]);
+        assert_eq!(closed, [(1, 1), (2, 2)]);
     }
 
     #[test]
@@ -187,7 +191,7 @@ mod tests {
         let a = parent.insert(opened(1)).unwrap();
         assert!(matches!(parent.export(&[]), Err(Error::InvalidRequest)));
         assert!(matches!(parent.export(&[a, a + 1]), Err(Error::UnknownFile)));
-        assert_eq!(parent.close(a), Ok(Some(1)), "a refused export kept a holder");
+        assert_eq!(parent.close(a), Ok(Some((1, 1))), "a refused export kept a holder");
     }
 
     /// A directory's path follows a rename of it or of a directory above it,

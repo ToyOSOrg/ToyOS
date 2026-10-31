@@ -342,8 +342,10 @@ receives = ["disk", "input"]
 
 # The file servers: DATA, the log and the boot volume, one process
 # each, serving every program the directories of its role. Started again when
-# one ends, on the same ports.
+# one ends, on the same ports. A pager: its readers wait on the pages it
+# supplies, which only a row of this file may make a program do.
 [programs.fileserver]
 restart = true
+pager = true
 roles = ["data", "log", "boot"]
 receives = ["block"]

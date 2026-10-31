@@ -157,6 +157,7 @@ fn spawn_as(path: &str, image: &[u8]) -> SyscallError {
             image: toyos::AsHandle::as_handle(&object).raw().0 as u64,
             image_len: image.len() as u64,
             place: u64::from(toyos_abi::HANDLE_INVALID.0),
+            pager: u64::from(toyos_abi::HANDLE_INVALID.0),
         })
     }
     .map(|pid| panic!("{path}: spawn succeeded (pid {pid:?}) — the header is malformed"))

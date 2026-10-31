@@ -333,6 +333,25 @@ pub struct ProcessData {
     pub job: Arc<kernel::sched::job::Job>,
     /// What [`ProcessData::charge`] charged, and its executable's TLS beside.
     pub charge: Charge,
+    /// Whether it was started as a pager, which no call changes, and whether
+    /// it made its one pager object.
+    pub pager: PagerRole,
+}
+
+/// A process's part in paged objects (`object::paged`): set at its spawn.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum PagerRole {
+    None,
+    /// Started as a pager; it has not made its pager object.
+    May,
+    /// It made it.
+    Made,
+}
+
+impl PagerRole {
+    pub fn is_pager(self) -> bool {
+        self != PagerRole::None
+    }
 }
 
 impl ProcessData {

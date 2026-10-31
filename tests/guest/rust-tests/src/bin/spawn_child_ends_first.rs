@@ -117,6 +117,7 @@ fn spawn(own: &Image, role: &str, stdout: Option<RawHandle>) -> Result<RawHandle
         image,
         image_len,
         place: u64::from(toyos_abi::HANDLE_INVALID.0),
+        pager: u64::from(toyos_abi::HANDLE_INVALID.0),
     };
     // SAFETY: every pointer names a buffer of this frame that outlives the call.
     unsafe { syscall::spawn(&args) }

@@ -12,11 +12,12 @@
 //! what its entry records, so a lookup, a stat, a listing and "is this a
 //! directory" are map queries and never a search of the tree.
 //!
-//! **A file's data lives in the blocks its extents name, in the cache.** A
-//! write resolves (allocating where it must) the block of each page it
-//! touches and writes the page into the cache; its new length and extents
-//! reach the file's entry at its close, an fsync, or the volume's sync, and a
-//! sync writes every such entry before the cache is flushed. A length that
+//! **A file's data lives in the blocks its extents name**, read and written
+//! past the cache ([`crate::cache`]). A reserve resolves (allocating where it
+//! must) the block of each page a write will touch and moves the length; the
+//! write-back puts the pages; the new length and extents reach the file's
+//! entry at its close, an fsync, or the volume's sync, and a sync writes every
+//! such entry before the cache is flushed. A length that
 //! shrinks is recorded before the blocks past it are freed, so a failure
 //! between the two leaks blocks rather than leaving an entry naming freed ones.
 //!
@@ -46,6 +47,9 @@ use crate::volume::{join, parent, Identities, Kind, Listed, Meta, Node, OpenHow,
 /// The longest symlink target read back: the wire's path bound.
 const MAX_LINK: u64 = toyos::fs::MAX_PATH as u64;
 
+/// The most blocks one data request carries.
+const RUN: u64 = 256;
+
 /// One file open, while any client holds it.
 struct Open {
     path: String,
@@ -74,6 +78,8 @@ pub struct DataVolume<D: Disk> {
     clock: fn() -> u64,
     /// By path: the format keeps nothing that names a file across a rename.
     ids: Identities<String>,
+    /// Where a data request's blocks land, kept so one allocates nothing.
+    span: Vec<Block>,
 }
 
 /// What a DATA partition turned out to be, as the kernel's mount decided it.
@@ -268,6 +274,7 @@ impl<D: Disk> DataVolume<D> {
             next: 1,
             clock,
             ids: Identities::new(),
+            span: Vec::new(),
         })
     }
 
@@ -496,61 +503,57 @@ impl<D: Disk> Volume for DataVolume<D> {
 
     fn read(&mut self, node: Node, offset: u64, out: &mut dyn Out) -> Result<usize, Error> {
         let cache = Rc::clone(&self.cache);
+        let mut span = std::mem::take(&mut self.span);
         let open = self.entry(node)?;
         if offset >= open.size {
+            self.span = span;
             return Ok(0);
         }
         let n = out.len().min((open.size - offset) as usize);
         let mut done = 0;
-        while done < n {
+        let mut read = Ok(());
+        while done < n && read.is_ok() {
             let at = offset + done as u64;
             let page = at / BLOCK as u64;
             let within = (at % BLOCK as u64) as usize;
-            // Whole pages whose blocks are consecutive go as one cache read.
-            if within == 0 && n - done >= BLOCK {
-                if let Some(first) = block_for(&open.extents, page) {
-                    let mut run = 1u64;
-                    while ((run + 1) as usize) * BLOCK <= n - done
-                        && run < 256
-                        && block_for(&open.extents, page + run) == Some(first + run)
-                    {
-                        run += 1;
-                    }
-                    let base = done;
-                    let visit = cache.visit(first, run as usize, |k, block| out.put(base + k * BLOCK, block));
-                    cache.block_on(visit).map_err(disk_word)?;
-                    done += run as usize * BLOCK;
-                    continue;
-                }
-            }
             let take = (BLOCK - within).min(n - done);
-            match block_for(&open.extents, page) {
-                Some(block) => {
-                    let base = done;
-                    let visit = cache.visit(block, 1, |_, b| out.put(base, &b[within..within + take]));
-                    cache.block_on(visit).map_err(disk_word)?;
-                }
+            let Some(first) = block_for(&open.extents, page) else {
                 // Past the extents: a hole, whose bytes are zeros.
-                None => out.zero(done, take),
+                out.zero(done, take);
+                done += take;
+                continue;
+            };
+            // The pages from here whose blocks are consecutive go as one read.
+            let need = (within + (n - done)).div_ceil(BLOCK) as u64;
+            let mut run = 1u64;
+            while run < need.min(RUN) && block_for(&open.extents, page + run) == Some(first + run) {
+                run += 1;
             }
-            done += take;
+            span.resize(run as usize, [0; BLOCK]);
+            read = cache.block_on(cache.read_data(first, &mut span[..run as usize])).map_err(disk_word);
+            if read.is_ok() {
+                let bytes = &span[..run as usize].as_flattened()[within..];
+                let take = bytes.len().min(n - done);
+                out.put(done, &bytes[..take]);
+                done += take;
+            }
         }
-        Ok(n)
+        self.span = span;
+        read.map(|()| n)
     }
 
-    fn write(&mut self, node: Node, offset: u64, data: &[u8]) -> Result<(), Error> {
-        let end = offset.checked_add(data.len() as u64).ok_or(Error::FileTooLarge)?;
-        let cache = Rc::clone(&self.cache);
+    fn reserve(&mut self, node: Node, offset: u64, len: u64) -> Result<(), Error> {
+        let end = offset.checked_add(len).ok_or(Error::FileTooLarge)?;
         let now = (self.clock)();
         let open = self.open.get_mut(&node).ok_or(Error::Stale)?;
         if open.gone {
             return Err(Error::Stale);
         }
-        // Every page past the extents is allocated before a byte is written,
-        // so a write the file's one entry could not name is refused whole.
+        // Every page past the extents is allocated before the size moves, so
+        // a write the file's one entry could not name is refused whole.
         let covered: u64 = open.extents.iter().map(|e| e.block_count as u64).sum();
         let last = end.div_ceil(BLOCK as u64).saturating_sub(1);
-        let grown = match !data.is_empty() && last >= covered {
+        let grown = match len != 0 && last >= covered {
             false => Ok(()),
             true => u32::try_from(offset / BLOCK as u64)
                 .and_then(|first| Ok(first..=u32::try_from(last)?))
@@ -569,37 +572,7 @@ impl<D: Disk> Volume for DataVolume<D> {
                     }
                 }),
         };
-        let written = grown.and_then(|()| {
-            let mut done = 0;
-            let mut page_buf: [Block; 1] = [[0; BLOCK]];
-            while done < data.len() {
-                let at = offset + done as u64;
-                let page = at / BLOCK as u64;
-                let within = (at % BLOCK as u64) as usize;
-                let take = (BLOCK - within).min(data.len() - done);
-                let block = block_for(&open.extents, page).expect("allocated above");
-                if take == BLOCK {
-                    let whole = data[done..done + BLOCK].as_chunks::<BLOCK>().0;
-                    cache.block_on(cache.write(block, whole)).map_err(disk_word)?;
-                } else {
-                    // A page written in part keeps the rest of what it held,
-                    // which for a page the file never reached is zeros.
-                    if page < covered && page * (BLOCK as u64) < open.size {
-                        cache.block_on(cache.read(block, &mut page_buf)).map_err(disk_word)?;
-                    } else {
-                        page_buf[0].fill(0);
-                    }
-                    page_buf[0][within..within + take].copy_from_slice(&data[done..done + take]);
-                    cache.block_on(cache.write(block, &page_buf)).map_err(disk_word)?;
-                }
-                done += take;
-            }
-            Ok(())
-        });
-        // A refused write gives back every block it took: one it allocated and
-        // did not write holds what the file that last had it left there, which
-        // a later extend would bring under this file's length.
-        if let Err(e) = written {
+        if let Err(e) = grown {
             let dropped = keep_blocks(&mut open.extents, covered);
             mapped("a refused write's free", &open.path, self.fs.free_extents(&dropped))?;
             return Err(e);
@@ -608,6 +581,38 @@ impl<D: Disk> Volume for DataVolume<D> {
         open.mtime = now;
         open.dirty = true;
         Ok(())
+    }
+
+    fn write_back(&mut self, node: Node, offset: u64, data: &[u8]) -> Result<(), Error> {
+        let cache = Rc::clone(&self.cache);
+        let mut span = std::mem::take(&mut self.span);
+        let open = self.entry(node)?;
+        let written = (|| {
+            let end = offset.checked_add(data.len() as u64).ok_or(Error::FileTooLarge)?;
+            if !offset.is_multiple_of(BLOCK as u64) || end > open.size {
+                println!("fileserver: a write-back of '{}' at {offset}+{} lies outside its {} bytes", open.path, data.len(), open.size);
+                return Err(Error::Io);
+            }
+            let first = offset / BLOCK as u64;
+            let pages = data.len().div_ceil(BLOCK);
+            let mut k = 0;
+            while k < pages {
+                let block = block_for(&open.extents, first + k as u64).ok_or(Error::Io)?;
+                let mut run = 1;
+                while k + run < pages && run < RUN as usize && block_for(&open.extents, first + (k + run) as u64) == Some(block + run as u64) {
+                    run += 1;
+                }
+                span.clear();
+                span.resize(run, [0; BLOCK]);
+                let bytes = &data[k * BLOCK..((k + run) * BLOCK).min(data.len())];
+                span.as_flattened_mut()[..bytes.len()].copy_from_slice(bytes);
+                cache.block_on(cache.write_data(block, &span)).map_err(disk_word)?;
+                k += run;
+            }
+            Ok(())
+        })();
+        self.span = span;
+        written
     }
 
     fn truncate(&mut self, node: Node, size: u64) -> Result<(), Error> {
@@ -629,9 +634,9 @@ impl<D: Disk> Volume for DataVolume<D> {
         if within != 0 {
             if let Some(block) = block_for(&open.extents, size / BLOCK as u64) {
                 let mut page: [Block; 1] = [[0; BLOCK]];
-                cache.block_on(cache.read(block, &mut page)).map_err(disk_word)?;
+                cache.block_on(cache.read_data(block, &mut page)).map_err(disk_word)?;
                 page[0][within..].fill(0);
-                cache.block_on(cache.write(block, &page)).map_err(disk_word)?;
+                cache.block_on(cache.write_data(block, &page)).map_err(disk_word)?;
             }
         }
         let dropped = keep_blocks(&mut open.extents, size.div_ceil(BLOCK as u64));
@@ -834,6 +839,7 @@ mod tests {
     use std::collections::HashMap;
 
     use super::*;
+    use crate::volume::Writes;
     use crate::ram::Ram;
     use crate::volume::Buf;
 
@@ -885,6 +891,22 @@ mod tests {
         assert_eq!(v.mkdir("home/toy/Games/sub"), Err(Error::NotADirectory));
         let listed: Vec<String> = v.list("home/toy/Apps/other").unwrap().into_iter().map(|e| e.name).collect();
         assert_eq!(listed, ["kept"]);
+    }
+
+    /// A file's pages are the paged objects' to keep: written and read, they
+    /// leave the block cache holding the volume's structures and no more.
+    #[test]
+    fn a_files_pages_pass_the_cache_by() {
+        let mut v = vol();
+        let n = v.open("home/big", CREATE).unwrap();
+        v.write(n, 0, &vec![7u8; 256 * BLOCK]).unwrap();
+        v.sync().unwrap();
+        let before = v.cache.counts().cached;
+        let mut out = vec![0u8; 256 * BLOCK];
+        assert_eq!(v.read(n, 0, &mut Buf(&mut out)).unwrap(), out.len());
+        assert!(out.iter().all(|&b| b == 7));
+        assert_eq!(v.cache.counts().cached, before, "a data read keeps nothing");
+        assert!(before < 64, "{before} blocks held for one file's structures");
     }
 
     #[test]
@@ -1414,63 +1436,6 @@ mod tests {
         assert!(writes > synced.0 && flushes > synced.1, "the write over the page asked {:?} after {synced:?}", (writes, flushes));
         let block = block_for(&v.open[&n].extents, 0).unwrap();
         assert_eq!(v.cache.disk().image.borrow()[&block][..], [2; BLOCK][..]);
-    }
-
-    /// `osbench`'s `fs.disk.seq_read.4096`: a 64 MiB file written in 4 KiB
-    /// calls and synced, then opened, read whole in 4 KiB calls and closed,
-    /// in rounds, on a volume whose cache holds twice the file. A round after
-    /// the first is answered from the cache, without one disk read: an open,
-    /// a read and a close neither bypass the cache nor drop its blocks.
-    #[test]
-    fn a_file_the_cache_holds_is_read_again_from_the_cache() {
-        const MIB: usize = 1 << 20;
-        let mut v = DataVolume::format(Stops::new(20_000), 2 * 64 * MIB / BLOCK, &["home", "apps"], clock).unwrap();
-        let n = v.open("home/seq", CREATE).unwrap();
-        let page: Vec<u8> = (0..BLOCK).map(|i| (i % 253) as u8).collect();
-        for k in 0..64 * MIB / BLOCK {
-            v.write(n, (k * BLOCK) as u64, &page).unwrap();
-        }
-        v.close(n).unwrap();
-        assert_eq!(v.sync(), Ok(Vec::new()));
-        let mut out = vec![0u8; BLOCK];
-        let mut round = |v: &mut DataVolume<Stops>| {
-            let before = v.cache.disk().reads.get();
-            let n = v.open("home/seq", PLAIN).unwrap();
-            for k in 0..64 * MIB / BLOCK {
-                assert_eq!(v.read(n, (k * BLOCK) as u64, &mut Buf(&mut out)).unwrap(), BLOCK);
-            }
-            v.close(n).unwrap();
-            v.cache.disk().reads.get() - before
-        };
-        round(&mut v);
-        let again: Vec<usize> = (0..3).map(|_| round(&mut v)).collect();
-        assert_eq!(again, [0; 3], "blocks each round after the first read from the disk");
-    }
-
-    /// A write refused after its pages were allocated gives them back: a file
-    /// extended over where it would have reached reads zeros there, not the
-    /// bytes a deleted file left in the blocks the write was given.
-    #[test]
-    fn a_write_refused_after_allocating_leaves_no_old_bytes_past_the_end() {
-        // Every block the volume does not write holds what an earlier tenant left.
-        let stale: Image = (0..1024).map(|b| (b, Box::new([0xAB; BLOCK]))).collect();
-        let mut v = DataVolume::format(Stops::from(&stale, 1024, usize::MAX, None), 0, &["home", "apps"], clock).unwrap();
-
-        let n = v.open("home/f", CREATE).unwrap();
-        v.write(n, 0, &[1; BLOCK]).unwrap();
-        assert_eq!(v.sync(), Ok(Vec::new()));
-        let first = block_for(&v.open[&n].extents, 0).unwrap();
-        v.cache.disk().refuse_read.set(Some(first));
-        // Half of page 0, whose read is refused, and page 1, allocated first.
-        let room = v.room().unwrap().free;
-        assert_eq!(v.write(n, BLOCK as u64 / 2, &[2; BLOCK]), Err(Error::Io));
-        assert_eq!(v.room().unwrap().free, room, "the refused write kept blocks, or gave back more");
-        v.cache.disk().refuse_read.set(None);
-
-        v.truncate(n, 2 * BLOCK as u64).unwrap();
-        let mut out = vec![0u8; BLOCK];
-        assert_eq!(v.read(n, BLOCK as u64, &mut Buf(&mut out)).unwrap(), BLOCK);
-        assert!(out.iter().all(|&b| b == 0), "page 1 reads {:#04x}, not zeros", out[out.iter().position(|&b| b != 0).unwrap()]);
     }
 
     fn take(v: DataVolume<Stops>) -> Stops {

@@ -70,7 +70,11 @@ impl Volume for Absent {
         Err(Error::NotFound)
     }
 
-    fn write(&mut self, _node: Node, _offset: u64, _data: &[u8]) -> Result<(), Error> {
+    fn reserve(&mut self, _node: Node, _offset: u64, _len: u64) -> Result<(), Error> {
+        Err(Error::NotFound)
+    }
+
+    fn write_back(&mut self, _node: Node, _offset: u64, _data: &[u8]) -> Result<(), Error> {
         Err(Error::NotFound)
     }
 

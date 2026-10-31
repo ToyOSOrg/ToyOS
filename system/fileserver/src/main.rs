@@ -62,7 +62,8 @@ use fileserver::fat::FatVolume;
 use fileserver::resolve::{self, Found, Refusal as Escape, Resolved};
 use fileserver::rights;
 use fileserver::root::RootVolume;
-use fileserver::volume::{Kind, Meta, Node, OpenHow, Out, Volume};
+use fileserver::pages::Files;
+use fileserver::volume::{Kind, Meta, Node, OpenHow, Volume};
 use fileserver::writeback::WriteBack;
 use toyos::endow::{self, Endowments};
 use toyos::fs::*;
@@ -106,22 +107,21 @@ const NO_SUCH_OPERATION: &str = "it asked for an operation this protocol does no
 /// blocks, of which only what is written costs anything.
 const RAM_BLOCKS: u64 = 1 << 18;
 
-/// The share of physical memory the file servers' caches together may keep
-/// in clean blocks, read or written: the log and boot roles take
-/// [`SMALL_CLEAN_BYTES`] each, DATA the rest ([`data_clean_limit`]).
-///
-/// An interim bound and nothing more: no clean block is given back to
-/// another job, since nothing reports memory pressure
-/// (`issues/the-file-servers-clean-blocks-are-given-back-to-no-other-job.md`).
-const CLEAN_SHARE: u64 = 8;
-
-/// What the log and boot roles keep clean: their FAT and directories, and
-/// little of what logkeeper writes is read again.
-const SMALL_CLEAN_BYTES: u64 = 16 << 20;
+/// What a volume's cache keeps clean: its tree, or its FAT and directories.
+/// A file's pages are its paged object's ([`pager`]).
+const CLEAN_BLOCKS: usize = (16 << 20) / toyos_blockdev::BLOCK;
 
 const TOKEN_ACCEPTOR: u64 = 0;
 const TOKEN_CLIENT: u64 = 1 << 32;
 const TOKEN_STREAM: u64 = 2 << 32;
+const TOKEN_PAGER: u64 = 3 << 32;
+
+/// Notices read per call.
+const NOTICES: usize = 64;
+
+/// How long a reader waits on a page before the kernel reports it overdue;
+/// it goes on waiting.
+const REPORT: Duration = Duration::from_secs(5);
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 enum Role {
@@ -256,6 +256,8 @@ fn main() {
     );
     Server {
         volume,
+        files: Files::new(pager(role)),
+        pager_armed: false,
         memory,
         acceptor,
         clients: BTreeMap::new(),
@@ -269,6 +271,22 @@ fn main() {
         acceptor_armed: false,
     }
     .serve()
+}
+
+/// The role's pager, its files' pages and how many may be dirty: none for
+/// SYSTEM, whose files are immutable and are served from ROOT's memory.
+/// DATA's is the cache's interim fixed size
+/// (`issues/a-pager-holds-a-fixed-capacity-until-the-memory-service-reclaims-its-clean-pages.md`).
+fn pager(role: Role) -> Option<toyos::paged::Pager> {
+    let (capacity, dirty) = match role {
+        Role::System => return None,
+        Role::Data => (toyos::paged::PAGER_MAX_PAGES, 8 * 1024),
+        Role::Log => (2 * 1024, 512),
+        Role::Boot => (4 * 1024, 0),
+    };
+    let pager = toyos::paged::Pager::create(capacity, dirty, REPORT)
+        .unwrap_or_else(|e| panic!("fileserver: the {role:?} server makes no pager ({e:?}); its row is no pager row"));
+    Some(pager)
 }
 
 /// A session on the partition diskserver serves under `guid`.
@@ -353,7 +371,7 @@ fn absent(roots: &[&str], why: String) -> Box<dyn Volume> {
 }
 
 fn data_on<D: Disk + 'static>(disk: D, roots: &[&str]) -> Box<dyn Volume> {
-    match DataVolume::probe(disk, data_clean_limit(), roots, fileserver::volume::now_nanos) {
+    match DataVolume::probe(disk, CLEAN_BLOCKS, roots, fileserver::volume::now_nanos) {
         Probed::Mounted(volume) => Box::new(volume),
         Probed::Unmountable(why) => {
             println!("fileserver: the DATA volume is ours and does not mount ({why}); it is absent this boot");
@@ -368,29 +386,23 @@ fn data_on<D: Disk + 'static>(disk: D, roots: &[&str]) -> Box<dyn Volume> {
 
 fn ram(roots: &[&str], why: &str) -> Box<dyn Volume> {
     println!("fileserver: {why}; /apps, /config, /home and /state are in memory and will not survive a reboot");
-    match DataVolume::format(Ram::new(RAM_BLOCKS), data_clean_limit(), roots, fileserver::volume::now_nanos) {
+    match DataVolume::format(Ram::new(RAM_BLOCKS), CLEAN_BLOCKS, roots, fileserver::volume::now_nanos) {
         Ok(volume) => Box::new(volume),
         Err(why) => panic!("fileserver: a volume in memory would not format: {why}"),
     }
 }
 
 fn fat_on<D: Disk + 'static>(disk: D, writable: bool) -> Result<Box<dyn Volume>, String> {
-    FatVolume::mount(disk, blocks_of(SMALL_CLEAN_BYTES), writable, fileserver::volume::now_nanos)
+    FatVolume::mount(disk, CLEAN_BLOCKS, writable, fileserver::volume::now_nanos)
         .map(|v| Box::new(v) as Box<dyn Volume>)
-}
-
-/// The clean blocks DATA's cache keeps: [`CLEAN_SHARE`] of physical memory,
-/// less what the log and boot roles keep.
-fn data_clean_limit() -> usize {
-    blocks_of((toyos::system::memory_total() / CLEAN_SHARE).saturating_sub(2 * SMALL_CLEAN_BYTES))
-}
-
-fn blocks_of(bytes: u64) -> usize {
-    usize::try_from(bytes / toyos_blockdev::BLOCK as u64).expect("a block count fits a usize")
 }
 
 struct Server {
     volume: Box<dyn Volume>,
+    /// Its files' pages, in the kernel's paged objects.
+    files: Files<toyos::paged::Pager>,
+    /// A watch on the pager waits in the poller.
+    pager_armed: bool,
     /// The memory nobody writes that the volume is, which
     /// [`Volume::in_place`] names bytes of: ROOT's, and no other volume's.
     memory: Option<&'static toyos::shm::Immutable>,
@@ -442,24 +454,6 @@ fn window_of(clients: &BTreeMap<u64, Client>, id: u64) -> Bytes<'_> {
     clients[&id].window.as_ref().expect("a request comes after the window").bytes()
 }
 
-/// A read's destination: the first bytes of a client's window, which the
-/// volume copies its cache's blocks into once and never holds a reference to.
-struct WindowOut<'a>(Bytes<'a>);
-
-impl Out for WindowOut<'_> {
-    fn len(&self) -> usize {
-        self.0.len()
-    }
-
-    fn put(&mut self, at: usize, bytes: &[u8]) {
-        self.0.write(at, bytes);
-    }
-
-    fn zero(&mut self, at: usize, len: usize) {
-        self.0.sub(at, len).zero();
-    }
-}
-
 impl Server {
     /// Whether another accepted connection may wait on its hello.
     fn takes_handshakes(&self) -> bool {
@@ -481,6 +475,10 @@ impl Server {
                 poller.watch(&c.conn, READABLE, TOKEN_CLIENT + id);
                 c.armed = true;
             }
+            if let (false, Some(pager)) = (self.pager_armed, self.files.pager()) {
+                poller.watch(pager, READABLE, TOKEN_PAGER);
+                self.pager_armed = true;
+            }
             for (id, s) in self.streams.iter_mut().filter(|(_, s)| !s.armed) {
                 poller.watch(&s.pipe, READABLE, TOKEN_STREAM + id);
                 s.armed = true;
@@ -501,6 +499,9 @@ impl Server {
                 if token == TOKEN_ACCEPTOR {
                     self.acceptor_armed = false;
                     self.accept();
+                } else if token == TOKEN_PAGER {
+                    self.pager_armed = false;
+                    self.notices();
                 } else if token < TOKEN_STREAM {
                     let id = token - TOKEN_CLIENT;
                     if let Some(c) = self.clients.get_mut(&id) {
@@ -577,10 +578,29 @@ impl Server {
         if !why.is_empty() {
             println!("fileserver: dropping client {id} of {:?}, share {}: {why}", client.root, client.share);
         }
-        for node in client.fids.drain() {
+        for (node, identity) in client.fids.drain() {
             // Nobody is left to answer: a refused close is said, and its node
             // kept for the next sync.
-            let _ = self.volume.close(node);
+            let _ = self.files.closed(&mut *self.volume, identity, node);
+        }
+    }
+
+    /// What the pager's objects ask: each reader's pages read off the volume.
+    fn notices(&mut self) {
+        let mut buf = [toyos::paged::PagedNotice::default(); NOTICES];
+        loop {
+            let Some(pager) = self.files.pager() else { return };
+            let notices: Vec<_> = match pager.notices(&mut buf) {
+                Ok(notices) => notices.collect(),
+                Err(e) => panic!("fileserver: its own pager refused its notices ({e:?})"),
+            };
+            let more = notices.len() == NOTICES;
+            for notice in notices {
+                self.files.notice(&mut *self.volume, notice);
+            }
+            if !more {
+                return;
+            }
         }
     }
 
@@ -822,8 +842,8 @@ impl Server {
                 // Nobody waits on the answer: an id the client does not hold
                 // closes nothing, and a refused close is its volume's to say.
                 let client = self.clients.get_mut(&id).expect("pumped");
-                if let Ok(Some(node)) = client.fids.close(r.fid) {
-                    let _ = self.volume.close(node);
+                if let Ok(Some((node, identity))) = client.fids.close(r.fid) {
+                    let _ = self.files.closed(&mut *self.volume, identity, node);
                 }
                 Ok(Answer::Nothing)
             }
@@ -836,7 +856,8 @@ impl Server {
                 let (file, node, (span_at, span)) = self.file_and_span(id, &r)?;
                 let at = if op == READ { file.borrow().offset } else { r.offset };
                 let window = window_of(&self.clients, id).sub(span_at, span);
-                let n = self.volume.read(node, at, &mut WindowOut(window))?;
+                let identity = file.borrow().identity;
+                let n = self.files.read(&mut *self.volume, identity, node, at, window)?;
                 if op == READ {
                     file.borrow_mut().offset = at + n as u64;
                 }
@@ -985,7 +1006,13 @@ impl Server {
                             }
                         });
                     }
-                    false => self.volume.unlink(&path)?,
+                    false => {
+                        let gone = self.volume.identity(&path).ok();
+                        self.volume.unlink(&path)?;
+                        if let Some(identity) = gone {
+                            self.files.forget(&mut *self.volume, identity);
+                        }
+                    }
                 }
                 self.dirtied();
                 Ok(Answer::Reply(Reply::ok()))
@@ -1003,7 +1030,14 @@ impl Server {
                 if from.is_empty() || to.is_empty() || root.as_deref() == Some(from.as_str()) {
                     return Err(Error::Root);
                 }
+                let over = match self.volume.lstat(&to) {
+                    Ok(meta) if meta.kind == Kind::File => self.volume.identity(&to).ok(),
+                    _ => None,
+                };
                 self.volume.rename(&from, &to)?;
+                if let Some(identity) = over {
+                    self.files.forget(&mut *self.volume, identity);
+                }
                 self.each_dir(|held, _| descriptions::moved(held, &from, &to));
                 self.dirtied();
                 Ok(Answer::Reply(Reply::ok()))
@@ -1074,6 +1108,11 @@ impl Server {
                     create_new: r.flags & O_CREATE_NEW != 0,
                     truncate: r.flags & O_TRUNCATE != 0,
                 };
+                // A file's object holds no page past a truncation by the time
+                // the volume frees its blocks.
+                if how.truncate && found.is_some() {
+                    self.files.truncating(self.volume.identity(&path)?)?;
+                }
                 let node = self.volume.open(&path, how)?;
                 match self.volume.node_meta(node) {
                     Ok(meta) => {
@@ -1098,12 +1137,38 @@ impl Server {
                 return Err(e);
             }
         };
+        let mut holder = None;
+        if let Held::File(node) = held {
+            if let Err(e) = self.files.opened(&mut *self.volume, identity, node) {
+                let _ = self.volume.close(node);
+                return Err(e);
+            }
+            // An open to read is answered with a holder of the file's
+            // object, which reads without asking this server.
+            if r.flags & O_READ != 0 {
+                holder = match self.files.object(identity).map(toyos::paged::PagedOwner::holder) {
+                    Some(Ok(handle)) => Some(handle),
+                    Some(Err(e)) => {
+                        println!("fileserver: file {identity}'s object made no holder ({e:?}); it is read through requests");
+                        None
+                    }
+                    None => None,
+                };
+            }
+        }
         let write = r.flags & (O_WRITE | O_APPEND) != 0;
         let append = r.flags & O_APPEND != 0;
         let file = Description { held, identity, write, append, offset: 0 };
         let client = self.clients.get_mut(&id).expect("pumped");
         let fid = client.fids.insert(Rc::new(RefCell::new(file)))?;
-        Ok(Answer::Reply(Reply { value: fid, ..stat_reply(meta, identity, self.volume_id) }))
+        let reply = Reply { value: fid, ..stat_reply(meta, identity, self.volume_id) };
+        Ok(match holder {
+            Some(handle) => {
+                self.files.held(identity);
+                Answer::WithHandle(reply, handle)
+            }
+            None => Answer::Reply(reply),
+        })
     }
 
     /// `SETATTR`: a size only through an id opened to write and no path; an
@@ -1121,15 +1186,15 @@ impl Server {
                 return Err(Error::InvalidRequest);
             }
             let file = self.fid(id, r.fid)?;
-            let (node, write) = {
+            let (node, write, identity) = {
                 let f = file.borrow();
-                (f.node()?, f.write)
+                (f.node()?, f.write, f.identity)
             };
             if !write {
                 return Err(Error::NotOpenForWriting);
             }
             bounds::in_a_file(size, 0)?;
-            self.volume.truncate(node, size)?;
+            self.files.truncate(&mut *self.volume, identity, node, size)?;
             self.dirtied();
         }
         let Some(mtime) = change.mtime else { return Ok(Answer::Reply(Reply::ok())) };
@@ -1161,7 +1226,7 @@ impl Server {
     /// every file did. A file whose entry was refused keeps the write-back
     /// due, so the next one tries it again.
     fn sync(&mut self, node: Option<Node>) -> Result<Answer, Error> {
-        let unwritten = self.volume.sync()?;
+        let unwritten = self.files.sync(&mut *self.volume)?;
         self.writeback.synced(!unwritten.is_empty(), Instant::now());
         match unwritten.into_iter().find(|&(n, _)| node.is_none_or(|node| n == node)) {
             Some((_, e)) => Err(e),
@@ -1195,9 +1260,12 @@ impl Server {
     /// Write the scratch's first `len` bytes to `file` at `at`: the offset
     /// after them.
     fn write_to(&mut self, file: &Shared, at: u64, len: usize) -> Result<u64, Error> {
-        let node = file.borrow().node()?;
+        let (node, identity) = {
+            let f = file.borrow();
+            (f.node()?, f.identity)
+        };
         let end = bounds::in_a_file(at, len as u64)?;
-        self.volume.write(node, at, &self.scratch[..len])?;
+        self.files.write(&mut *self.volume, identity, node, at, &self.scratch[..len])?;
         self.dirtied();
         Ok(end)
     }
@@ -1264,10 +1332,10 @@ impl Server {
             println!("fileserver: a stream is ended: {why}");
         }
         if let Some(stream) = self.streams.remove(&sid) {
-            if let Some(node) = descriptions::release(stream.file) {
+            if let Some((node, identity)) = descriptions::release(stream.file) {
                 // Nobody is left to answer: a refused close is said, and its
                 // node kept for the next sync.
-                let _ = self.volume.close(node);
+                let _ = self.files.closed(&mut *self.volume, identity, node);
             }
         }
         false

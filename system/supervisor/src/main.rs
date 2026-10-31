@@ -3104,6 +3104,12 @@ fn start<'a>(
         say!("supervisor: {}: {}", program.name, missing(name, &why));
     }
 
+    // The signed image's row alone starts a pager: the right stays here, and
+    // the child holds only what it was started as.
+    if program.pager {
+        command.pager(syscap.as_handle().into());
+    }
+
     if !program.syscap.is_empty() {
         // A duplicate carrying exactly what the manifest asked for and nothing
         // else. Rights only shrink, so soundserver's `rt` cap can never mint a claim

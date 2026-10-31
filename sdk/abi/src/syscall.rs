@@ -350,6 +350,18 @@ pub const SYS_EVENT_TAKE: u64 = 150;
 pub const SYS_HANDLE_WAIT: u64 = 151;
 /// The clock now, read by the kernel. See [`clock_now`].
 pub const SYS_CLOCK_NOW: u64 = 152;
+/// Make this process's one pager object. See [`pager_create`].
+pub const SYS_PAGER_CREATE: u64 = 153;
+/// A paged object a pager supplies. See [`paged_create`].
+pub const SYS_PAGED_CREATE: u64 = 154;
+/// A holder handle on a paged object. See [`paged_holder`].
+pub const SYS_PAGED_HOLDER: u64 = 155;
+/// Read a paged object. See [`paged_read`].
+pub const SYS_PAGED_READ: u64 = 156;
+/// An owner's call on its paged object. See [`PagedOp`].
+pub const SYS_PAGED_OP: u64 = 157;
+/// What a pager's objects ask of it. See [`paged_notices`].
+pub const SYS_PAGED_NOTICES: u64 = 158;
 
 /// Bins in the per-process syscall profile — one for every number this ABI
 /// issues, and one at the end for every number it does not.
@@ -357,7 +369,7 @@ pub const SYS_CLOCK_NOW: u64 = 152;
 /// **The profile's parts sum to its total, and that is the whole requirement.**
 /// A bin array narrower than the ABI reaches drops calls out of the line while
 /// the total goes on counting them.
-pub const SYSCALL_PROFILE_BINS: usize = 154;
+pub const SYSCALL_PROFILE_BINS: usize = 160;
 
 /// Where a number this ABI does not issue is counted. Merging is a degradation
 /// a reader can see in the line; dropping is one nobody can.
@@ -428,6 +440,13 @@ crate::user_safe! {
         ///
         /// [`Rights::WRITE`]: crate::handle::Rights::WRITE
         pub place: u64,
+        /// A `SysCap` handle carrying [`Rights::PAGER`], which starts the
+        /// child as a pager for its life, or [`HANDLE_INVALID`] for none.
+        /// `PermissionDenied` for a handle without the right. The handle stays
+        /// the caller's.
+        ///
+        /// [`Rights::PAGER`]: crate::handle::Rights::PAGER
+        pub pager: u64,
     }
 }
 
@@ -3156,4 +3175,144 @@ mod tests {
     fn a_short_dirent_is_a_broken_kernel() {
         read_listing(&[1, b'x', 0, 0, 0]);
     }
+}
+
+
+// ---------------------------------------------------------------------------
+// Paged objects: memory a pager supplies, read by its holders through the kernel.
+// ---------------------------------------------------------------------------
+
+/// The most pages a pager's object table holds: 96 MiB.
+pub const PAGER_MAX_PAGES: u64 = 24 * 1024;
+
+/// The most pages one write-back range covers.
+pub const PAGED_RANGE_PAGES: u64 = 512;
+
+/// What an owner asks of its paged object through [`SYS_PAGED_OP`], each
+/// with a [`PagedArgs`].
+#[repr(u64)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum PagedOp {
+    /// Copy `len` bytes from `buf` into fresh pages at `offset`, a whole page
+    /// in: clean, or dirty with [`PAGED_DIRTY`], which also grows the size to
+    /// the end of the bytes. A page already present is left as it is.
+    /// Answers the pages installed; `ResourceExhausted` where no page could
+    /// be had, `WouldBlock` at the dirty ceiling, `InvalidArgument` for a
+    /// clean page past the size or a dirty one past its end.
+    Supply = 0,
+    /// Copy `len` bytes from `buf` into the present pages at `offset`, dirty,
+    /// growing the size to their end as each page's bytes land. Answers the
+    /// bytes written, stopping at the first absent page; `NotFound` when the
+    /// first is absent, `WouldBlock` at the dirty ceiling.
+    Write = 1,
+    /// Remove the clean pages of `len` pages from page `offset` that no
+    /// write-back or write holds. Answers how many went.
+    Withdraw = 2,
+    /// Mark `len` pages from page `offset` failed: each read of one answers
+    /// `Io` until it is supplied again.
+    Fail = 3,
+    /// Set the size to `offset`. A shrink drops every page past it, dirty or
+    /// not, and zeroes the last page's tail; the new range of a growth reads
+    /// as the pager supplies it.
+    Resize = 4,
+    /// Begin writing back `len` pages from page `offset`, at most
+    /// [`PAGED_RANGE_PAGES`]: each dirty page is cleaned and held until the
+    /// end. `buf` receives a 64-byte bitmap of the pages begun.
+    WritebackBegin = 5,
+    /// End exactly a range begun, written to the device or not
+    /// ([`PAGED_WRITTEN`]): `buf` receives a 64-byte bitmap of the pages
+    /// still dirty, dirtied again since the begin or not written.
+    WritebackEnd = 6,
+}
+
+/// [`PagedOp::Supply`]'s pages are dirty.
+pub const PAGED_DIRTY: u64 = 1;
+/// [`PagedOp::WritebackEnd`]'s range reached the device.
+pub const PAGED_WRITTEN: u64 = 1;
+
+crate::user_safe! {
+    /// [`SYS_PAGED_OP`]'s arguments: what each word means is its
+    /// [`PagedOp`]'s.
+    #[derive(Clone, Copy, Default, Debug)]
+    pub struct PagedArgs {
+        pub offset: u64,
+        pub len: u64,
+        pub buf: u64,
+        pub flags: u64,
+    }
+}
+
+crate::user_safe! {
+    /// One thing a pager's object asks of it ([`paged_notices`]): the
+    /// object by the cookie its owner made it with, and either pages a
+    /// reader waits for or that its last holder went.
+    #[derive(Clone, Copy, Default, Debug, PartialEq, Eq)]
+    pub struct PagedNotice {
+        pub cookie: u64,
+        pub kind: u64,
+        /// [`NOTICE_REQUESTED`]'s first page and how many.
+        pub first: u64,
+        pub count: u64,
+    }
+}
+
+/// A reader waits for pages of the object.
+pub const NOTICE_REQUESTED: u64 = 1;
+/// The object's last holder handle went: it may be dropped.
+pub const NOTICE_NO_HOLDERS: u64 = 2;
+
+/// Make this process's one pager object, whose objects' pages are at most
+/// `capacity` (≤ [`PAGER_MAX_PAGES`]), `dirty` of them dirty at once. A
+/// reader waiting past `report_ns` (bounded by the kernel) is reported
+/// overdue and waits on. Held back for it at once: `dirty` pages and the
+/// headroom a read's pages need. `PermissionDenied` for a process not
+/// started as a pager, `AlreadyExists` for a second.
+pub fn pager_create(capacity: u64, dirty: u64, report_ns: u64) -> Result<RawHandle, SyscallError> {
+    check(syscall(SYS_PAGER_CREATE, capacity, dirty, report_ns, 0)).map(|raw| RawHandle(raw as u32))
+}
+
+/// A paged object of `size` bytes, its pages absent, which `pager`'s
+/// notices name by `cookie`: the owner handle, which neither duplicates nor
+/// transfers. Its last handle takes every page and answers its holders `Gone`.
+pub fn paged_create(pager: RawHandle, size: u64, cookie: u64) -> Result<RawHandle, SyscallError> {
+    check(syscall(SYS_PAGED_CREATE, pager.0 as u64, size, cookie, 0)).map(|raw| RawHandle(raw as u32))
+}
+
+/// A holder handle on the object `owner` names, carrying `READ`, which may
+/// be narrowed, duplicated and sent.
+pub fn paged_holder(owner: RawHandle) -> Result<RawHandle, SyscallError> {
+    check(syscall(SYS_PAGED_HOLDER, owner.0 as u64, 0, 0, 0)).map(|raw| RawHandle(raw as u32))
+}
+
+/// Read at most `out.len()` bytes at `offset`, up to the size; 0 at or past
+/// it. A holder waits for every absent page until its pager supplies or fails
+/// it, the object shrinks or the pager ends: `Io` for a failed page before any
+/// byte was read (a short count after some), `Gone` once the pager ended. A
+/// pager's process is refused a holder's read, `PermissionDenied`. The owner
+/// never waits: `WouldBlock` where the first page is absent, a short count
+/// where a later one is.
+pub fn paged_read(handle: RawHandle, out: &mut [u8], offset: u64) -> Result<usize, SyscallError> {
+    // SAFETY: `out` is `out.len()` writable bytes of this process.
+    unsafe { paged_read_into(handle, out.as_mut_ptr(), out.len(), offset) }
+}
+
+/// [`paged_read`] into `len` bytes at `out`, which may be memory another
+/// process writes and so is never a slice here.
+///
+/// # Safety
+/// `out` names `len` bytes this process may write.
+pub unsafe fn paged_read_into(handle: RawHandle, out: *mut u8, len: usize, offset: u64) -> Result<usize, SyscallError> {
+    check(syscall(SYS_PAGED_READ, handle.0 as u64, out as u64, len as u64, offset)).map(|n| n as usize)
+}
+
+/// One [`PagedOp`] on the object `owner` names.
+pub fn paged_op(owner: RawHandle, op: PagedOp, args: &PagedArgs) -> Result<u64, SyscallError> {
+    check(syscall(SYS_PAGED_OP, owner.0 as u64, op as u64, args as *const PagedArgs as u64, 0))
+}
+
+/// What `pager`'s objects ask of it, into `out`: how many it filled. Each is
+/// answered once; what does not fit waits for the next call, and the pager
+/// reads ready while any does.
+pub fn paged_notices(pager: RawHandle, out: &mut [PagedNotice]) -> Result<usize, SyscallError> {
+    check(syscall(SYS_PAGED_NOTICES, pager.0 as u64, out.as_mut_ptr() as u64, out.len() as u64, 0)).map(|n| n as usize)
 }

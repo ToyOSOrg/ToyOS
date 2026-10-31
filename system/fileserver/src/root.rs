@@ -210,7 +210,11 @@ impl Volume for RootVolume {
         Ok(run)
     }
 
-    fn write(&mut self, _: Node, _: u64, _: &[u8]) -> Result<(), Error> {
+    fn reserve(&mut self, _: Node, _: u64, _: u64) -> Result<(), Error> {
+        Err(Error::ReadOnly)
+    }
+
+    fn write_back(&mut self, _: Node, _: u64, _: &[u8]) -> Result<(), Error> {
         Err(Error::ReadOnly)
     }
 
@@ -259,6 +263,7 @@ impl Volume for RootVolume {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::volume::Writes;
     use crate::volume::Buf;
     use bcachefs::engine::{Meta as Owner, Options, Tree};
 

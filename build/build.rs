@@ -207,6 +207,8 @@ struct ProgramConfig {
     roles: Vec<String>,
     /// The supervisor starts it again when it ends (`toyos_manifest::Program::restart`).
     restart: bool,
+    /// Started as a pager (`toyos_manifest::Program::pager`): the file server's row.
+    pager: bool,
     /// The rows it may start through the launcher (`toyos_manifest::Program::starts`).
     starts: Vec<String>,
     /// A login authority, for which the supervisor opens login sessions
@@ -867,6 +869,7 @@ fn render_manifest(config: &SystemConfig) -> Vec<u8> {
                     state: cfg.state,
                     roles: cfg.roles.clone(),
                     restart: cfg.restart,
+                    pager: cfg.pager,
                     starts: cfg.starts.clone(),
                     login: cfg.login,
                     folder: None,

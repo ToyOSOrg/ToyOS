@@ -109,6 +109,7 @@ fn main() {
         image,
         image_len,
         place: u64::from(toyos_abi::HANDLE_INVALID.0),
+        pager: u64::from(toyos_abi::HANDLE_INVALID.0),
     };
     let placed = (boundary - 8) as *mut SpawnArgs;
     unsafe { placed.write_volatile(args) };

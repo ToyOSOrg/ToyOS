@@ -187,6 +187,7 @@ pub fn spawn<C: Commit>(
     parent: Parent,
 ) -> Result<(Pid, C::Held), crate::object::Refusal> {
     let job = Arc::clone(commit.job());
+    let pager = if commit.pager() { crate::process::PagerRole::May } else { crate::process::PagerRole::None };
     // An argv of only separators survives sys_spawn's split as an empty slice.
     let Some(&name) = argv.first() else {
         return Err(SyscallError::InvalidArgument.into());
@@ -383,6 +384,7 @@ pub fn spawn<C: Commit>(
         endowments,
         job: job.clone(),
         charge,
+        pager,
     }));
 
     let thread_data = Arc::new(Lock::new(ThreadData {
@@ -481,7 +483,8 @@ pub fn spawn_supervisor(images: crate::bootimage::Objects) -> Pid {
         .union(Rights::ROSTER)
         .union(Rights::INVENTORY)
         .union(Rights::COUNTERS)
-        .union(Rights::TRACE);
+        .union(Rights::TRACE)
+        .union(Rights::PAGER);
     let cap_handle = handles
         .install(crate::object::HandleEntry::new(cap, rights))
         .expect("spawn_supervisor: an empty table refused the system capability");
@@ -537,6 +540,10 @@ impl Commit for SupervisorTable {
 
     fn job(&self) -> &Arc<kernel::sched::job::Job> {
         &self.job
+    }
+
+    fn pager(&self) -> bool {
+        false
     }
 
     fn commit(self, own: start::Own) -> Result<(HandleTable, Endowments, ()), crate::object::Refusal> {

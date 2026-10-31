@@ -608,10 +608,14 @@ pub struct Fid {
 }
 
 /// An open answered.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Debug)]
 pub struct Opened {
     pub fid: Fid,
     pub stat: Stat,
+    /// A holder of the file's paged object, through which it is read
+    /// without a request ([`crate::paged::Paged`]): a regular file opened to
+    /// read on a server that keeps its files' pages there.
+    pub holder: Option<crate::OwnedHandle>,
 }
 
 /// Where a path a request names is resolved from.
@@ -864,7 +868,25 @@ impl Dir {
     /// is `room` bytes at least for what the answer puts there. A server that
     /// has gone is asked again once on a fresh connection when every base is
     /// the root, since a path from it means the same thing on both.
-    fn path_call(&mut self, op: u32, mut request: Request, bases: [Base; 2], paths: Paths<'_>, room: usize) -> Result<Reply, Refused> {
+    fn path_call(&mut self, op: u32, request: Request, bases: [Base; 2], paths: Paths<'_>, room: usize) -> Result<Reply, Refused> {
+        let (reply, carried) = self.path_call_with(op, request, bases, paths, room)?;
+        if !carried.is_empty() {
+            // A reply that brings handles nobody asked for speaks another protocol.
+            self.conn = None;
+            return Err(Refused::Error(Error::Malformed));
+        }
+        Ok(reply)
+    }
+
+    /// [`Self::path_call`], and the handles the reply carries.
+    fn path_call_with(
+        &mut self,
+        op: u32,
+        mut request: Request,
+        bases: [Base; 2],
+        paths: Paths<'_>,
+        room: usize,
+    ) -> Result<(Reply, crate::ipc::Batch), Refused> {
         if !relative(paths.first) {
             return Err(Refused::Error(Error::InvalidPath));
         }
@@ -882,8 +904,8 @@ impl Dir {
             request.span = span as u64;
             request.len = paths.first.len() as u64;
             request.len2 = paths.second.len() as u64;
-            match self.call(op, request) {
-                Ok((msg_type, reply)) => return path_answer(msg_type, reply, span),
+            match self.call_with(op, request) {
+                Ok((msg_type, reply, carried)) => return path_answer(msg_type, reply, span).map(|reply| (reply, carried)),
                 Err(Error::Gone) if attempt == 0 && again && again2 => {
                     attempt += 1;
                     self.reconnect()?;
@@ -920,9 +942,16 @@ impl Dir {
     }
 
     fn opened(&mut self, op: u32, base: Base, path: &str, flags: u64) -> Result<Opened, Refused> {
-        let reply = self.path_call(op, Request { flags, ..Request::new() }, [base, Base::Root], Paths { first: path, second: &[] }, 0)?;
+        let paths = Paths { first: path, second: &[] };
+        let (reply, mut carried) = self.path_call_with(op, Request { flags, ..Request::new() }, [base, Base::Root], paths, 0)?;
         let fid = Fid { id: reply.value, generation: self.generation };
-        Ok(Opened { fid, stat: stat_of(&reply) })
+        let holder = carried.next();
+        if !carried.is_empty() {
+            self.close(fid);
+            self.conn = None;
+            return Err(Refused::Error(Error::Malformed));
+        }
+        Ok(Opened { fid, stat: stat_of(&reply), holder })
     }
 
     /// Let `fid` go, without waiting for the server: [`CLOSE`] is answered

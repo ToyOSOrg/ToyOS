@@ -32,8 +32,9 @@ enum Place {
 
 /// What a descriptor of this module's names.
 enum Held {
-    /// A file or directory a file server holds open.
-    Served { cap: Arc<Capability>, fid: Fid, position: Position },
+    /// A file or directory a file server holds open, and the holder of its
+    /// paged object where the server sent one.
+    Served { cap: Arc<Capability>, fid: Fid, position: Position, holder: Option<crate::paged::Paged> },
     /// A directory the kernel serves, by its absolute path.
     KernelDir(String),
 }
@@ -84,6 +85,17 @@ impl Position {
             }
             Offset::Server => dir.read(fid, out),
         }
+    }
+
+    /// A read at the local offset through the file's paged object, which
+    /// takes no turn on the capability: `None` where the offset is the
+    /// server's or the object would not answer, and the server is asked.
+    fn read_held(&self, holder: &crate::paged::Paged, out: &mut [u8]) -> Option<usize> {
+        let mut at = self.at.lock();
+        let Offset::Here(offset) = *at else { return None };
+        let n = holder.read(out, offset).ok()?;
+        *at = Offset::Here(offset + n as u64);
+        Some(n)
     }
 
     fn write(&self, dir: &mut Dir, fid: Fid, data: &[u8]) -> Result<usize, fs::Error> {
@@ -276,7 +288,7 @@ fn on_fd<T>(
     match named.map_err(Error::Fd)?? {
         Err(answer) => answer,
         Ok(held) => match &*held {
-            Held::Served { cap, fid, position } => served(&mut cap.dir.lock(), *fid, position).map_err(Error::Served),
+            Held::Served { cap, fid, position, .. } => served(&mut cap.dir.lock(), *fid, position).map_err(Error::Served),
             Held::KernelDir(path) => kernel_dir(path),
         },
     }
@@ -412,7 +424,8 @@ unsafe extern "C" fn toyos_fs_open(at: Fd, path: *const u8, len: usize, how: Ope
                 false => dir.open(base, rel, flags)?,
             };
             let position = Position::new(how.append, opened.stat.kind == fs::KIND_DIR);
-            Ok(Ok(Opened::Held(Held::Served { cap: Arc::clone(cap), fid: opened.fid, position })))
+            let holder = opened.holder.map(crate::paged::Paged::received);
+            Ok(Ok(Opened::Held(Held::Served { cap: Arc::clone(cap), fid: opened.fid, position, holder })))
         },
     )
     .and_then(|opened| opened);
@@ -480,8 +493,23 @@ unsafe extern "C" fn toyos_fs_read(fd: Fd, buf: *mut u8, len: usize) -> i64 {
     if let Some(n) = on_stream(fd, |h| crate::net::stream::read(h, out(), blocking)) {
         return answer(n.map(|n| n as u64));
     }
+    if let Some(n) = held_read(fd, |holder, position| position.read_held(holder, out())) {
+        return answer(Ok(n as u64));
+    }
     let n = on_fd(fd, |h| syscall::read(h.raw(), out()), is_a_directory, |dir, fid, position| position.read(dir, fid, out()));
     answer(n.map(|n| n as u64))
+}
+
+/// `read` through the holder of `fd`'s paged object, without the
+/// capability's turn, so a reader waiting for a page holds up no request of
+/// another thread's: `None` for a descriptor without one, or one whose
+/// object would not answer, which the server answers instead.
+fn held_read(fd: Fd, read: impl FnOnce(&crate::paged::Paged, &Position) -> Option<usize>) -> Option<usize> {
+    let Ok(Named::Held(held)) = named(fd) else { return None };
+    match &*held {
+        Held::Served { holder: Some(holder), position, .. } => read(holder, position),
+        _ => None,
+    }
 }
 
 #[no_mangle]
@@ -501,6 +529,9 @@ unsafe extern "C" fn toyos_fs_pread(fd: Fd, buf: *mut u8, len: usize, offset: u6
     // SAFETY: the caller lends `len` writable bytes for the call, and only
     // one of the closures runs.
     let out = || unsafe { core::slice::from_raw_parts_mut(buf, len) };
+    if let Some(n) = held_read(fd, |holder, _| holder.read(out(), offset).ok()) {
+        return answer(Ok(n as u64));
+    }
     let n = on_fd(fd, |h| syscall::pread(h.raw(), out(), offset), is_a_directory, |dir, fid, _| dir.pread(fid, offset, out()));
     answer(n.map(|n| n as u64))
 }

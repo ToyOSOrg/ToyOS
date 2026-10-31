@@ -27,6 +27,7 @@ pub mod namespace;
 pub mod notice;
 pub mod null;
 pub mod ops;
+pub mod paged;
 pub mod pipe;
 pub mod port;
 pub mod process;
@@ -286,6 +287,12 @@ kobject! {
     immediate Notice => notice::NoticeObject,
     // What it holds is released by its last reference: nothing waits on it.
     immediate WakeLatency => wake_latency::WakeLatencyObject,
+    // Its one handle is its process's: its last ends every object it serves.
+    deferred Pager => paged::PagerObject,
+    // Its last handle takes the object's pages and answers its holders `Gone`.
+    deferred PagedOwner => paged::PagedOwnerObject,
+    // Its last handle may be its object's last holder, which its pager is told.
+    deferred Paged => paged::PagedHolderObject,
 }
 
 /// Objects whose last handle has gone, waiting for release with nothing held;

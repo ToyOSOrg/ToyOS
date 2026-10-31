@@ -27,38 +27,63 @@ fn blocks_of(offset: u64, len: usize) -> Result<(u64, usize, usize), Error> {
 pub(crate) trait Volume {
     async fn read_at(&self, offset: u64, buf: &mut [u8]) -> Result<(), Error>;
     async fn write_at(&self, offset: u64, buf: &[u8]) -> Result<(), Error>;
+    /// [`read_at`](Self::read_at) of a file's data ([`BlockDev::read_data`]).
+    async fn read_data_at(&self, offset: u64, buf: &mut [u8]) -> Result<(), Error>;
+    /// [`write_at`](Self::write_at) of a file's data ([`BlockDev::write_data`]).
+    async fn write_data_at(&self, offset: u64, buf: &[u8]) -> Result<(), Error>;
 }
 
 impl<D: BlockDev> Volume for D {
     async fn read_at(&self, offset: u64, buf: &mut [u8]) -> Result<(), Error> {
-        let (first, count, at) = blocks_of(offset, buf.len())?;
-        if at == 0 && buf.len().is_multiple_of(BLOCK) {
-            return self.read(first, buf.as_chunks_mut::<BLOCK>().0).await;
-        }
-        let mut span: Vec<Block> = vec![[0; BLOCK]; count];
-        self.read(first, &mut span).await?;
-        buf.copy_from_slice(&span.as_flattened()[at..at + buf.len()]);
-        Ok(())
+        read(self, offset, buf, false).await
     }
 
     async fn write_at(&self, offset: u64, buf: &[u8]) -> Result<(), Error> {
-        let (first, count, at) = blocks_of(offset, buf.len())?;
-        if at == 0 && buf.len().is_multiple_of(BLOCK) {
-            return self.write(first, buf.as_chunks::<BLOCK>().0).await;
-        }
-        let mut span: Vec<Block> = vec![[0; BLOCK]; count];
-        // What the range leaves of its first and last blocks is another
-        // structure's, read before it is written back.
-        let last = count - 1;
-        if at != 0 {
-            self.read(first, &mut span[..1]).await?;
-        }
-        if !(at + buf.len()).is_multiple_of(BLOCK) && !(last == 0 && at != 0) {
-            self.read(first + last as u64, &mut span[last..]).await?;
-        }
-        span.as_flattened_mut()[at..at + buf.len()].copy_from_slice(buf);
-        self.write(first, &span).await
+        write(self, offset, buf, false).await
     }
+
+    async fn read_data_at(&self, offset: u64, buf: &mut [u8]) -> Result<(), Error> {
+        read(self, offset, buf, true).await
+    }
+
+    async fn write_data_at(&self, offset: u64, buf: &[u8]) -> Result<(), Error> {
+        write(self, offset, buf, true).await
+    }
+}
+
+async fn blocks_in<D: BlockDev>(dev: &D, first: u64, out: &mut [Block], data: bool) -> Result<(), Error> {
+    if data { dev.read_data(first, out).await } else { dev.read(first, out).await }
+}
+
+async fn read<D: BlockDev>(dev: &D, offset: u64, buf: &mut [u8], data: bool) -> Result<(), Error> {
+    let (first, count, at) = blocks_of(offset, buf.len())?;
+    if at == 0 && buf.len().is_multiple_of(BLOCK) {
+        return blocks_in(dev, first, buf.as_chunks_mut::<BLOCK>().0, data).await;
+    }
+    let mut span: Vec<Block> = vec![[0; BLOCK]; count];
+    blocks_in(dev, first, &mut span, data).await?;
+    buf.copy_from_slice(&span.as_flattened()[at..at + buf.len()]);
+    Ok(())
+}
+
+async fn write<D: BlockDev>(dev: &D, offset: u64, buf: &[u8], data: bool) -> Result<(), Error> {
+    let (first, count, at) = blocks_of(offset, buf.len())?;
+    let put = async |lba: u64, blocks: &[Block]| if data { dev.write_data(lba, blocks).await } else { dev.write(lba, blocks).await };
+    if at == 0 && buf.len().is_multiple_of(BLOCK) {
+        return put(first, buf.as_chunks::<BLOCK>().0).await;
+    }
+    let mut span: Vec<Block> = vec![[0; BLOCK]; count];
+    // What the range leaves of its first and last blocks is another
+    // structure's, read before it is written back.
+    let last = count - 1;
+    if at != 0 {
+        blocks_in(dev, first, &mut span[..1], data).await?;
+    }
+    if !(at + buf.len()).is_multiple_of(BLOCK) && !(last == 0 && at != 0) {
+        blocks_in(dev, first + last as u64, &mut span[last..], data).await?;
+    }
+    span.as_flattened_mut()[at..at + buf.len()].copy_from_slice(buf);
+    put(first, &span).await
 }
 
 #[cfg(test)]
