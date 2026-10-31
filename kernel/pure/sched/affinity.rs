@@ -133,10 +133,7 @@ impl SharedMask {
         }
     }
 
-    /// Publish `mask`, then a full fence: what a setter reads after this —
-    /// the task's state word, in [`crate::sched::cpu::CpuHandles::realign`] —
-    /// is ordered against an adopter's read of the version in
-    /// [`crate::sched::task::TransitTask::adopt`].
+    /// Publish `mask`, then [`affinity_fence`].
     pub fn store(&self, mask: CpuMask, _preempt: &impl PreemptGuard) {
         let mut version = self.version.load(Ordering::Relaxed);
         loop {
@@ -155,8 +152,25 @@ impl SharedMask {
             word.store(value, Ordering::Relaxed);
         }
         self.version.store(version + 2, Ordering::Release);
-        fence(Ordering::SeqCst);
+        affinity_fence();
     }
+}
+
+#[cfg(not(feature = "affinity-fence-relaxed"))]
+const AFFINITY_FENCE: Ordering = Ordering::SeqCst;
+#[cfg(feature = "affinity-fence-relaxed")]
+const AFFINITY_FENCE: Ordering = Ordering::Release;
+
+/// The barrier of a store-buffering pair, so `SeqCst` on both sides. A setter
+/// stores the version and then reads the task's state word, in
+/// [`crate::sched::cpu::CpuHandles::realign`]; an adopter stores the state word
+/// and then reads the version, in [`crate::sched::task::TransitTask::adopt`].
+/// Either the setter finds the adopter's CPU and kicks it, or the adopter's
+/// refresh finds the new mask. `kernel-loom`'s `affinity-fence-relaxed` makes it
+/// a release fence and `loom_affinity.rs` must red; the kernel declares the name
+/// only so `cfg` checking knows it.
+pub fn affinity_fence() {
+    fence(AFFINITY_FENCE);
 }
 
 #[cfg(test)]
