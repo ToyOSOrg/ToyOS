@@ -598,28 +598,6 @@ fn block_of(extents: &[Extent], page: u32) -> u64 {
     panic!("page {page} is past {extents:?}")
 }
 
-/// One call takes what a page at a time takes: the first free run from the
-/// file's end, up to every page still missing, and no longer run beyond it.
-/// Twin volumes with a 4-block hole before a long free run give a 100-page
-/// file the same extents either way.
-#[test]
-fn a_range_is_placed_as_its_pages_one_at_a_time_would_be() {
-    let twin = || {
-        let mut fs = Formatted::format(VecBlockIO::new(4096)).expect("format").mount();
-        let held = write_pages(&mut fs, 300);
-        let hole = Extent { start_block: held[0].start_block + 10, block_count: 4, _reserved: 0 };
-        fs.free_extents(&[hole]).expect("a 4-block hole");
-        fs
-    };
-    let (mut paged, mut whole) = (twin(), twin());
-    let by_page = write_pages(&mut paged, 100);
-    let mut at_once = Vec::new();
-    whole.allocate(&mut at_once, 0..=99).expect("allocate 100 pages");
-    assert_eq!(by_page[0].block_count, 4, "the hole was not where the first page went: {by_page:?}");
-    let runs = |e: &[Extent]| e.iter().map(|e| (e.start_block, e.block_count)).collect::<Vec<_>>();
-    assert_eq!(runs(&at_once), runs(&by_page));
-}
-
 #[test]
 fn a_sequential_file_needs_one_extent() {
     let mut fs = Formatted::format(VecBlockIO::new(4096)).expect("format").mount();

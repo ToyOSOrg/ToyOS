@@ -1051,13 +1051,18 @@ impl<IO: BlockIO> Mounted<IO, ReadWrite> {
 
     /// Allocate blocks until `extents` reach every page of `pages`. The caller
     /// writes every page of `pages`, zero-filling what it does not cover; the
-    /// pages bridged before them are zeroed here. Each run is the first free
-    /// one from the file's end, up to every page still missing, so a call is
-    /// one pass over the blocks it walks.
+    /// pages bridged before them are zeroed here.
+    ///
+    /// Each run is the first free one from the file's end at least [`MIN_RUN`]
+    /// long, or every page still missing if fewer, so holes left by freed
+    /// tree nodes do not each become a run of the file. Once a pass finds no
+    /// such run, the rest of the call takes runs as they come: at most two
+    /// passes over the bitmap a call.
     pub fn allocate(&mut self, extents: &mut Vec<Extent>, pages: core::ops::RangeInclusive<u32>) -> Result<(), FsError> {
         let end = *pages.end() as u64 + 1;
         let mut covered: u64 = extents.iter().map(|e| e.block_count as u64).sum();
         let hole = covered;
+        let mut min = MIN_RUN;
         while covered < end {
             let want = (end - covered).min(u32::MAX as u64) as u32;
             let total = self.alloc.total_blocks;
@@ -1066,7 +1071,10 @@ impl<IO: BlockIO> Mounted<IO, ReadWrite> {
                 Some(next) if next < total && self.alloc.is_free(&self.io, BlockNum::new(next))? => next,
                 Some(next) => next % total + SPREAD,
             };
-            let run = self.alloc.alloc_first_fit(&self.io, from, want)?;
+            let run = self.alloc.alloc_first_fit(&self.io, from, want, min.min(want))?;
+            if run.len < min.min(want) {
+                min = 1;
+            }
             push_extent(extents, run.start.raw(), run.len);
             covered += run.len as u64;
         }
@@ -1082,6 +1090,11 @@ impl<IO: BlockIO> Mounted<IO, ReadWrite> {
         Ok(())
     }
 }
+
+/// The shortest run a file's write takes while a pass can find one: 32 blocks,
+/// the most one block-ring request carries, so a run shorter than this costs
+/// the flush a request of its own.
+pub const MIN_RUN: u32 = 32;
 
 /// How far past a file's last block its next run is looked for when another
 /// file has taken that block. Two files that grow in turn then each extend
@@ -1851,6 +1864,101 @@ mod tests {
         fs.allocate(&mut extents, 260..=299).expect("allocate past a hole");
         let hole: Vec<u64> = (256..260).map(|page| block_for(&extents, page).expect("allocated")).collect();
         assert_eq!(written(&fs, from), [vec![bitmap], hole].concat(), "a write after a 4-page hole wrote these blocks");
+    }
+
+    /// Mark `blocks` used on the bitmap directly, as freed tree nodes and
+    /// other files leave a volume, and recount what is free.
+    fn mark_used<IO: BlockIO>(fs: &mut Mounted<IO, ReadWrite>, blocks: impl Iterator<Item = u64>) {
+        let bits = (BLOCK_SIZE * 8) as u64;
+        let mut buf = BlockBuf::zeroed();
+        let mut held = u64::MAX;
+        let start = fs.alloc.bitmap_start.raw();
+        for block in blocks {
+            if block / bits != held {
+                if held != u64::MAX {
+                    fs.io.write_block(BlockNum::new(start + held), &buf).expect("write the bitmap");
+                }
+                held = block / bits;
+                fs.io.read_block(BlockNum::new(start + held), &mut buf).expect("read the bitmap");
+            }
+            buf.0[(block % bits / 8) as usize] |= 1 << (block % 8);
+        }
+        if held != u64::MAX {
+            fs.io.write_block(BlockNum::new(start + held), &buf).expect("write the bitmap");
+        }
+        fs.alloc.count_free(&fs.io).expect("recount");
+    }
+
+    /// Single free blocks at the cursor, as a commit's freed nodes leave them,
+    /// then a long free run: a write's pages go to the long run as one extent,
+    /// where a page at a time takes the holes one by one.
+    #[test]
+    fn a_write_skips_single_holes_for_a_run_a_request_long() {
+        let volume = || {
+            let mut fs = Formatted::format(VecBlockIO::new(4096)).expect("format").mount();
+            let at = fs.alloc.next_alloc;
+            mark_used(&mut fs, (at..at + 64).step_by(2));
+            (fs, at)
+        };
+        let (mut fs, at) = volume();
+        let mut extents = Vec::new();
+        fs.allocate(&mut extents, 0..=63).expect("allocate");
+        let runs: Vec<(u64, u32)> = extents.iter().map(|e| (e.start_block, e.block_count)).collect();
+        assert_eq!(runs, [(at + 63, 64)], "64 pages after 32 single holes");
+
+        let (mut paged, at) = volume();
+        let mut extents = Vec::new();
+        for page in 0..4 {
+            paged.allocate(&mut extents, page..=page).expect("allocate");
+        }
+        assert_eq!(extents[0].start_block, at + 1, "a page at a time takes the first hole");
+    }
+
+    /// A device that keeps only the blocks written to it, the rest reading
+    /// zeros, and counts its reads.
+    struct Sparse {
+        blocks: u64,
+        held: core::cell::RefCell<alloc::collections::BTreeMap<u64, BlockBuf>>,
+        reads: core::cell::Cell<u64>,
+    }
+
+    impl BlockIO for Sparse {
+        fn read_block(&self, block: BlockNum, buf: &mut BlockBuf) -> Result<(), DeviceError> {
+            self.reads.set(self.reads.get() + 1);
+            buf.0 = self.held.borrow().get(&block.raw()).map_or([0; BLOCK_SIZE], |b| b.0);
+            Ok(())
+        }
+        fn write_block(&self, block: BlockNum, buf: &BlockBuf) -> Result<(), DeviceError> {
+            self.held.borrow_mut().insert(block.raw(), BlockBuf(buf.0));
+            Ok(())
+        }
+        fn block_count(&self) -> u64 {
+            self.blocks
+        }
+        fn sync(&self) -> Result<(), DeviceError> {
+            Ok(())
+        }
+    }
+
+    /// On a volume of eight bitmap blocks with no free run longer than one
+    /// block, a 16-page write reads the bitmap once whole, looking for a run
+    /// a request long, and then takes runs as they come: about three reads a
+    /// run (the file's next block, the run, its mark). A pass per run would
+    /// read all eight bitmap blocks for each.
+    #[test]
+    fn a_write_on_a_volume_of_single_holes_passes_its_bitmap_twice_at_most() {
+        const BITMAP_BLOCKS: u64 = 8;
+        let blocks = BITMAP_BLOCKS * (BLOCK_SIZE * 8) as u64;
+        let io = Sparse { blocks, held: core::cell::RefCell::default(), reads: core::cell::Cell::default() };
+        let mut fs = Formatted::format(io).expect("format").mount();
+        mark_used(&mut fs, (1..blocks).step_by(2));
+        fs.io.reads.set(0);
+        let mut extents = Vec::new();
+        fs.allocate(&mut extents, 0..=15).expect("allocate");
+        assert!(extents.iter().all(|e| e.block_count == 1), "a run longer than one block: {extents:?}");
+        assert_eq!(extents.len(), 16);
+        let reads = fs.io.reads.get();
+        assert!(reads <= 2 * BITMAP_BLOCKS + 3 * 16, "16 runs read the bitmap {reads} times");
     }
 
     /// A sync with nothing changed since the last commit writes no block and
