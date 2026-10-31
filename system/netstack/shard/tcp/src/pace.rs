@@ -1,9 +1,23 @@
 //! Pacing (RFC 9002 §7.7): new data leaves at `N · cwnd / srtt` through a token bucket, and every
-//! data segment sent spends from it. A retransmission spends but is not held: recovery's pipe and a
-//! timeout's one-segment window bound those already. The bucket holds the larger of the initial
-//! window, the burst §7.7 bounds a sender to, and what the rate brings in [`GRANULARITY`]. A held
-//! sender is released once the bucket holds half that, so a wake up to half a [`GRANULARITY`] late
-//! loses no rate. Without a smoothed RTT nothing is paced.
+//! data segment sent spends from it.
+//!
+//! The bucket holds what the rate brings in [`GRANULARITY`], at most half of cwnd, and never less
+//! than the initial window. §7.7 bounds a burst at the initial window unless the path is known to
+//! absorb more. The millisecond departs from that so that a fast sender is woken at most every
+//! half millisecond. The half-window bound keeps the bucket below cwnd at any srtt, so a window
+//! past the initial one always leaves in more than one burst. That is what lets HyStart++ take
+//! L = infinity (RFC 9406 §4.3) whatever the path's round trip.
+//!
+//! Some data spends from the bucket but is never held:
+//! - retransmissions: recovery's pipe and a timeout's one-segment window bound them;
+//! - new data in SACK recovery: RFC 6675's pipe sends it a segment at a time;
+//! - a loss probe of new data: RFC 8985 §7.3's single segment at the PTO, which a hold would only
+//!   delay.
+//!
+//! A held sender is offered its data again once the bucket holds half its capacity, so a wake up
+//! to half a [`GRANULARITY`] late loses no rate. In a small window that wait is half the initial
+//! window's time at the rate, even when one segment would do. Without a smoothed RTT nothing is
+//! paced; cwnd is at most the initial window until the first sample.
 
 use core::num::{NonZeroU128, NonZeroU64};
 use core::time::Duration;
@@ -11,8 +25,8 @@ use core::time::Duration;
 use crate::cc::{initial_window, Cc};
 use crate::Instant;
 
-/// What a full bucket holds at the pacing rate, once that is more than the initial window: the
-/// span that sizes a paced sender's bursts and its wakes.
+/// What a full bucket holds at the pacing rate, while that is under half of cwnd and over the
+/// initial window: the span that sizes a paced sender's bursts and its wakes.
 const GRANULARITY: Duration = Duration::from_millis(1);
 
 /// RFC 9002 §7.7's N, in quarters, where cwnd holds across the round trip.
@@ -47,8 +61,8 @@ impl Rate {
         Duration::from_nanos(u64::try_from(ns).unwrap_or(u64::MAX))
     }
 
-    fn capacity(self, smss: u32) -> u64 {
-        self.over(GRANULARITY).max(u64::from(initial_window(smss)))
+    fn capacity(self, cc: &Cc) -> u64 {
+        self.over(GRANULARITY).min(u64::from(cc.cwnd / 2)).max(u64::from(initial_window(cc.smss)))
     }
 }
 
@@ -68,10 +82,10 @@ impl Pacer {
         self.at = Some(now);
     }
 
-    /// When a segment of `len` bytes may leave: `None` for now.
+    /// `None` if a segment of `len` bytes may leave now; else when to offer the held data again.
     pub fn hold(&mut self, now: Instant, len: u32, cc: &Cc, srtt: Option<Duration>) -> Option<Instant> {
         let rate = Rate::of(cc, srtt)?;
-        let capacity = rate.capacity(cc.smss);
+        let capacity = rate.capacity(cc);
         self.refill(now, rate, capacity);
         let len = u64::from(len);
         if self.tokens >= len {
@@ -84,7 +98,7 @@ impl Pacer {
     /// `len` bytes of data left, new or resent.
     pub fn spend(&mut self, now: Instant, len: u32, cc: &Cc, srtt: Option<Duration>) {
         if let Some(rate) = Rate::of(cc, srtt) {
-            self.refill(now, rate, rate.capacity(cc.smss));
+            self.refill(now, rate, rate.capacity(cc));
             self.tokens = self.tokens.saturating_sub(u64::from(len));
         }
     }
@@ -154,13 +168,23 @@ mod tests {
         assert_eq!(burst(&mut p, at(0), &cc, 10 * MS), (10, Some(at(2_000))));
     }
 
-    /// Past the initial window the bucket holds a millisecond at the rate: 2 · 1,460,000 / 2 ms is
-    /// 1,460,000 bytes a millisecond, a thousand segments.
+    /// Past the initial window the bucket holds a millisecond at the rate: 2 · 1,460,000 / 8 ms is
+    /// 365,000 bytes a millisecond, 250 segments, under half the window's thousand.
     #[test]
     fn a_fast_bucket_holds_a_millisecond() {
         let mut p = Pacer::default();
         let cc = cc(1_460_000, true);
-        assert_eq!(burst(&mut p, at(0), &cc, 2 * MS), (1000, Some(at(500))));
+        assert_eq!(burst(&mut p, at(0), &cc, 8 * MS), (250, Some(at(500))));
+    }
+
+    /// On a short round trip a millisecond at the rate is more than the window: at 2 · 146,000 /
+    /// 1 ms the bucket holds half the window, 50 of its 100 segments, so the window still leaves in
+    /// bursts, the next half bucket 125 µs later.
+    #[test]
+    fn a_bucket_holds_at_most_half_the_window() {
+        let mut p = Pacer::default();
+        let cc = cc(146_000, true);
+        assert_eq!(burst(&mut p, at(0), &cc, MS), (50, Some(at(125))));
     }
 
     /// However long the sender was idle, the bucket holds no more than its capacity.

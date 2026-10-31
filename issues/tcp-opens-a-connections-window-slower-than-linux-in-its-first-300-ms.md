@@ -244,7 +244,7 @@ readings, `mhz` just after it and `mhz_settled` before it, were about
 the clock matters through what ToyOS spends per byte sent.
 
 **#1112's session, 2026-10-29**
-([evidence](https://github.com/ToyOSOrg/evidence/tree/f2909c1f099308bf83e50d94fb6c5bb39aa1733b/r1/t14)).
+([evidence](https://github.com/ToyOSOrg/evidence/tree/96c693b58d242d8ec236e0805b34b714306ec4c2/r1/t14)).
 B was #1102's head, C per-segment RTT samples (#1112), D C with L = ∞ and
 no pacing, a diagnostic arm that does not land. Three of each, B C D B C D
 B C D, with Linux at both ends:
@@ -265,6 +265,29 @@ B C D, with Linux at both ends:
 
 RFC 9406 §4.3 gives L = ∞ only to a paced sender. Pull request #1114
 paces [tcp] (RFC 9002 §7.7) and removes the cap.
+
+**#1114's A/B, 2026-10-31**
+([evidence](https://github.com/ToyOSOrg/evidence/tree/58dcdecab592116996c0e3cc84e4e3c8b7aa50c7/r4/t14)).
+C was #1112 after its first review, P #1114's pacing with N = 2 in slow
+start, Q P with N = 1.25 throughout. Three of each, C P Q C P Q C P Q, with
+Linux at both ends, on trees from before netstack's drivers became their
+own processes (#1106):
+
+| | upload p50, MB/s | received by 100 ms | 300 ms | 1 s |
+|---|---|---|---|---|
+| Linux (2 runs) | 112, 112 | 5.7 MB | 26.1–26.2 MB | 105.7–106.4 MB |
+| C (3 runs) | 112, 112, 112 | 2.0–3.1 MB | 23.8–25.4 MB | 105.4–106.8 MB |
+| P (3 runs) | 114, 114, 114 | 6.3–6.6 MB | 29.3–29.9 MB | 110.9–111.1 MB |
+| Q (3 runs) | 114, 114, 114 | 5.9–6.3 MB | 29.1–29.5 MB | 110.2–111.0 MB |
+
+- P beat C at 300 ms in every pair, and resent nothing.
+- P beat Q at 100 ms in every pair, by 0.1–0.5 MB, so N = 2 in slow start
+  stays.
+- In C every RTT sample but two came from a segment's departure.
+- That session's bucket could hold up to a millisecond at the rate, which on
+  a short round trip is more than the window. The landed pacer holds at most
+  half the window. The parity read waits on a boot of that head, on current
+  main.
 
 **Exit**: `osbench_lan` on the T14 reads `lan.wired.tcp.upload` at Linux's
 in the same session, with the first 300 ms read at the receiver no slower, or
