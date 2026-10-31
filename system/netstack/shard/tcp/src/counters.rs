@@ -32,6 +32,8 @@ toyos_net_wire::counters! {
     TsMissing = "tcp.ts-missing", logged;
     PawsReject = "tcp.paws-reject";
     TsEcrInvalid = "tcp.ts-ecr-invalid";
+    RttFromDeparture = "tcp.rtt.departure";
+    RttFromEcho = "tcp.rtt.echo";
     RstChallenged = "tcp.rst-challenged", logged;
     SynChallenged = "tcp.syn-challenged", logged;
     AckOutOfRange = "tcp.ack-out-of-range", logged;
@@ -80,7 +82,7 @@ toyos_net_wire::counters! {
     AcksNotLimited = "tcp.acks.not-limited";
     CwndGrownBytes = "tcp.cwnd.grown.bytes";
     HyStartCss = "tcp.hystart.css";
-    HyStartCssRounds = "tcp.hystart.css.rounds";
+    HyStartCssEntryRounds = "tcp.hystart.css.entry-rounds";
     HyStartResumed = "tcp.hystart.resumed";
     HyStartExits = "tcp.hystart.exits";
     HyStartExitCwndBytes = "tcp.hystart.exit.cwnd.bytes";

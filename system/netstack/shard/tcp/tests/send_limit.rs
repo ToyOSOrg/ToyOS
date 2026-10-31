@@ -98,7 +98,7 @@ fn a_wait_that_ends_in_a_timeout_is_congestions() {
 /// Each ACK outside recovery is counted by whether cwnd ended the opportunity before it, with
 /// what it grew cwnd by.
 #[test]
-fn each_ack_is_counted_with_what_it_acknowledged_and_grew() {
+fn each_ack_is_counted_by_its_limit_with_what_it_grew() {
     let mut h = fixture_e();
     assert_eq!(h.send(0, 16_060).len(), 10, "cwnd stops the sender with a segment waiting");
     assert_eq!(h.input(10, seg(5001).ack(3921)).len(), 1, "the user's data ends the next");
