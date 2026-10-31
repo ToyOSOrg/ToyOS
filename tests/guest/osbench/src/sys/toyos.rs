@@ -419,7 +419,7 @@ pub fn net_counters() -> Result<Vec<(String, u64)>, String> {
         "net.tcp.acks.not-limited",
         "net.tcp.cwnd.grown.bytes",
         "net.tcp.hystart.css",
-        "net.tcp.hystart.css.rounds",
+        "net.tcp.hystart.css.entry-rounds",
         "net.tcp.hystart.resumed",
         "net.tcp.hystart.exits",
         "net.tcp.hystart.exit.cwnd.bytes",

@@ -785,7 +785,7 @@ impl Sync {
                     Some(SlowStart::Conservative { first }) => {
                         ctx.log.count(Counter::HyStartCss);
                         if first {
-                            ctx.log.count(Counter::HyStartCssRounds);
+                            ctx.log.count(Counter::HyStartCssEntryRounds);
                         }
                     }
                     Some(SlowStart::Ended) => {
