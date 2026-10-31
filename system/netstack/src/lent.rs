@@ -137,7 +137,7 @@ impl Session for Region {
     }
 
     /// A ring into a bell its holder no longer holds is dropped: that
-    /// holder's leaving is its rung bell's end, which netstack reads apart.
+    /// holder's leaving is its rung bell's end.
     fn ring(&self, rings: Rings) {
         for holding in self.holders.by_number.borrow().values() {
             if rings.receive {

@@ -672,7 +672,8 @@ const MACHINE_TESTS: &[&str] = &[
     // connection can say it left: a process's death and netstack's watch of
     // it, which no host test has. The peer is an address on QEMU's user
     // network nothing answers, so no public network. Order and counts, QEMU's
-    // clock a hang ceiling far inside the connect's give-up. x86-64 alone
+    // clock a hang ceiling only: the kill has to land within the about 3 s
+    // netstack takes to give the address up, or the test is red. x86-64 alone
     // (`qemu::SUITE_ARCH`).
     "a_client_killed_mid_connect_gives_its_place_back",
     // Login sessions: their owner parents, signs out and ends with each, and

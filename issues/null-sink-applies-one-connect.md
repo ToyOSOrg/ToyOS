@@ -27,8 +27,8 @@ shape is the same in both and it is narrow:
 - Every later client is stranded: the control thread keeps running (it printed
   `opening stream` for doom 14 s later) and `open_stream` answers, but no
   `client N connected` follows, so the mixer never signals it and it blocks
-  reading its signal pipe (an event since #1108) forever. That is `tone` never exiting and doom
-  wedging with a black window before its render loop.
+  reading its signal pipe (an event since #1108) forever. That is `tone` never
+  exiting and doom wedging with a black window before its render loop.
 
 **Not reproduced in QEMU.** `tests/desktopaudiocase` was built for this: the
 T14's shape, with the client's three descriptors as pipes to a terminal that is
@@ -42,10 +42,11 @@ with a terminal opened afterwards.
 (`null_sink_shipped_client`, adopted from `wt/toyos-hdaprobe` `fa47241`, two
 `/system/bin/tone` in series at 1.16 s and 1.15 s). soundd blocking on a client
 (`signal_clients` used `write_nonblock`, and an event's signal never blocks;
-there is no blocking write in the mix loop). The accept path being held by a stuck client (accept and mix are
-separate threads and the control thread ran for 14 s afterwards). A CQ overflow
-(`Poller::wait`'s `dropped` assertion would have killed soundd, and soundd is
-alive). A panic anywhere in soundd, for the same reason.
+there is no blocking write in the mix loop). The accept path being held by a
+stuck client (accept and mix are separate threads and the control thread ran
+for 14 s afterwards). A CQ overflow (`Poller::wait`'s `dropped` assertion
+would have killed soundd, and soundd is alive). A panic anywhere in soundd, for
+the same reason.
 
 **Eliminated by reading, and recorded so it is not re-derived.** The mix loop
 holds no lock across its wait, and neither `PIPES` nor `IO_URINGS` was held on

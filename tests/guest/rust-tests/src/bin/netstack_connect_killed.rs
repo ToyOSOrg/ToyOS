@@ -28,7 +28,10 @@ const SELF_PATH: &str = "/system/bin/test_rs_netstack_connect_killed";
 /// On QEMU's user network, where no host answers for it.
 const NOWHERE: &str = "10.0.2.77:80";
 
-/// A hang ceiling under QEMU, far inside the connect's own give-up.
+/// A hang ceiling under QEMU, nothing more. The kill has to land before
+/// netstack gives the address up (`nud::BROADCAST_SOLICIT` requests
+/// `nud::RETRANS` apart, about 3 s), and a run that misses it is red at "a
+/// child ended before it was killed".
 const CEILING: Duration = Duration::from_secs(20);
 
 /// Between two questions to netstack.
