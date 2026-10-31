@@ -1431,34 +1431,20 @@ fn a_stopped_cpu_stops_taking_work() {
 #[test]
 fn masked_threads_run_only_where_their_masks_name() {
     const SEEDS: u64 = 40;
-    let scenario = scenarios::masked_steals(scenarios::MASKED_STEALS_PARTIAL);
+    let scenario = scenarios::masked_steals();
     sweep(&scenario, SEEDS, |outcome| {
         assert!(outcome.migrations > 0, "nothing was ever moved, so no mask was tested: {}", outcome.report());
     });
 }
 
-/// **What a partial mask costs the push, measured** rather than bounded: the
-/// push wakes a sleeper for surplus without asking whose mask names it, so a
-/// queued thread no sleeper may take wakes one for nothing. The same load
-/// with every CPU allowed is the comparison. Prints both; asserts only that
-/// each run passed.
-///
-/// `cargo test --release -p kernel-sim --test policy masked -- --nocapture`
+/// **A steal reaches the queue a mask allows past a sibling's that it does
+/// not**: on [`scenarios::masked_siblings`], each idle CPU's nearest victim
+/// holds only work it may not run, and the work it may run sits one core
+/// away. Across seeds the run ends with every thread done and I15 holding.
 #[test]
-fn the_push_cost_of_a_partial_mask_is_measured() {
-    const SEEDS: u64 = 40;
-    let mean = |partial: u64| {
-        let (mut kicks, mut elapsed) = (0u64, 0u64);
-        sweep(&scenarios::masked_steals(partial), SEEDS, |outcome| {
-            kicks += outcome.kicks;
-            elapsed += outcome.elapsed;
-        });
-        (kicks / SEEDS, elapsed / SEEDS)
-    };
-    let (partial_kicks, partial_ns) = mean(scenarios::MASKED_STEALS_PARTIAL);
-    let (any_kicks, any_ns) = mean(scenarios::MASKED_STEALS_ANY);
-    println!(
-        "masked_steals over {SEEDS} seeds: partial mask {partial_kicks} kicks in {partial_ns} ns, \
-         every CPU {any_kicks} kicks in {any_ns} ns"
-    );
+fn a_masked_queue_past_a_siblings_is_stolen() {
+    sweep(&scenarios::masked_siblings(), 40, |outcome| {
+        assert!(outcome.migrations > 0, "nothing was ever stolen: {}", outcome.report());
+    });
 }
+

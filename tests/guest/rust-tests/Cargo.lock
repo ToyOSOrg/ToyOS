@@ -117,7 +117,7 @@ checksum = "a6ef517f0926dd24a1582492c791b6a4818a4d94e789a334894aa15b0d12f55c"
 [[package]]
 name = "core_affinity"
 version = "0.8.3"
-source = "git+https://github.com/ToyOSOrg/core_affinity?branch=toyos-0.8.3#24dc3bf947343c9021b9937d7cbd2cef835ced69"
+source = "git+https://github.com/ToyOSOrg/core_affinity?branch=toyos-0.8.3#9b2f9bdfef0d77e000496d48689ae3048f7e2283"
 dependencies = [
  "libc",
  "num_cpus",
