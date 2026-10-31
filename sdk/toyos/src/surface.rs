@@ -476,8 +476,8 @@ impl Keys {
     pub fn grab() -> Result<Self, GrabError> {
         let conn = crate::endow::service(SERVICE).map_err(|_| GrabError::HostGone)?;
         conn.signal(MSG_GRAB_KEYS).map_err(|_| GrabError::HostGone)?;
-        let header = conn.recv_header().map_err(|_| GrabError::HostGone)?;
-        match header.msg_type {
+        let frame = FrameRx::<0>::new().recv(&conn).map_err(|_| GrabError::HostGone)?;
+        match frame.msg_type {
             MSG_GRAB_GRANTED => Ok(Self { conn, poller: Poller::new(1) }),
             MSG_GRAB_REFUSED => Err(GrabError::Busy),
             other => Err(GrabError::Protocol(other)),
@@ -496,9 +496,10 @@ impl Keys {
             if !ready {
                 return None;
             }
-            let header = self.conn.recv_header().ok()?;
-            match header.msg_type {
-                MSG_KEY => return self.conn.recv_payload::<RawKeyEvent>(&header).ok(),
+            let mut rx = FrameRx::<{ core::mem::size_of::<RawKeyEvent>() }>::new();
+            let frame = rx.recv(&self.conn).ok()?;
+            match frame.msg_type {
+                MSG_KEY => return ipc::decode_payload::<RawKeyEvent>(rx.payload(frame.payload_len)).ok(),
                 MSG_LAYOUT_CHANGED => {}
                 _ => return None,
             }

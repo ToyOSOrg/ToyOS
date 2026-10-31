@@ -60,15 +60,12 @@ fn ask(msg: u32, payload: &[u8]) -> (bool, String) {
     if let Err(e) = supervisor.send_bytes(msg, payload) {
         return (false, format!("logout: the request was not sent: {e:?}"));
     }
-    let answer = match supervisor.recv_header() {
+    let mut rx = Box::new(toyos::ipc::FrameRx::<{ toyos::ipc::MAX_FRAME_LEN as usize }>::new());
+    let answer = match rx.recv(&supervisor) {
         Ok(answer) => answer,
         Err(e) => return (false, format!("logout: the supervisor did not answer: {e:?}")),
     };
-    let mut text = vec![0u8; answer.len() as usize];
-    let said = match supervisor.recv_bytes(&answer, &mut text) {
-        Ok(n) => String::from_utf8_lossy(&text[..n]).into_owned(),
-        Err(e) => return (false, format!("logout: the supervisor's answer did not arrive whole: {e:?}")),
-    };
+    let said = String::from_utf8_lossy(rx.payload(answer.payload_len)).into_owned();
     match answer.msg_type {
         wire::MSG_SESSIONS | wire::MSG_DONE => (true, said),
         wire::MSG_REFUSED => (false, said),

@@ -6,7 +6,7 @@
 //! answered: the compositor drops the connection by name.
 
 use toyos::endow::{self, EndowError};
-use toyos::ipc::{self, IpcError};
+use toyos::ipc::{self, FrameRx, IpcError};
 use toyos::Connection;
 use toyos_abi::syscall::SyscallError;
 
@@ -235,14 +235,16 @@ pub fn set_scale(port: &str, setting: Setting) -> Result<Shown, Error> {
 fn ask(port: &str, request: impl FnOnce(&Connection) -> Result<(), IpcError>) -> Result<Shown, Error> {
     let conn = endow::service(port)?;
     request(&conn)?;
-    let header = conn.recv_header()?;
-    match header.msg_type {
+    let mut rx = FrameRx::<{ core::mem::size_of::<State>() }>::new();
+    let frame = rx.recv(&conn)?;
+    let payload = rx.payload(frame.payload_len);
+    match frame.msg_type {
         MSG_STATE => {
-            let state: State = conn.recv_payload(&header)?;
+            let state: State = ipc::decode_payload(payload)?;
             Shown::from_wire(state).ok_or(Error::Protocol(MSG_STATE))
         }
         MSG_REFUSED => {
-            let refusal: Refusal = conn.recv_payload(&header)?;
+            let refusal: Refusal = ipc::decode_payload(payload)?;
             Err(Error::Refused(Refused::from_wire(refusal.reason)))
         }
         other => Err(Error::Protocol(other)),

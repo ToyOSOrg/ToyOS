@@ -278,13 +278,13 @@ pub fn open(
 ) -> Result<(toyos::namespace::Namespace, toyos::ipc::Connection), String> {
     let conn = login.open(LOGIN_PORT).map_err(|e| format!("the supervisor's login port refused: {e:?}"))?;
     conn.signal(MSG_OPEN).map_err(|e| format!("the open was not sent: {e:?}"))?;
-    let header = conn.recv_header().map_err(|e| format!("the open was not answered: {e:?}"))?;
-    if header.msg_type != MSG_OPENED {
-        let mut why = vec![0u8; header.len() as usize];
-        let n = conn.recv_bytes(&header, &mut why).unwrap_or(0);
-        return Err(format!("the supervisor refused a session: {}", String::from_utf8_lossy(&why[..n])));
+    let mut rx = Box::new(toyos::ipc::FrameRx::<{ toyos::ipc::MAX_FRAME_LEN as usize }>::new());
+    let frame = rx.recv(&conn).map_err(|e| format!("the open was not answered: {e:?}"))?;
+    if frame.msg_type != MSG_OPENED {
+        let why = String::from_utf8_lossy(rx.payload(frame.payload_len));
+        return Err(format!("the supervisor refused a session: {why}"));
     }
-    let [launcher, controls] = conn.recv_handles_exact::<2>(&header).ok_or("the session came without its handles")?;
+    let [launcher, controls] = rx.take_handles::<2>().ok_or("the session came without its handles")?;
     let control = toyos::namespace::Namespace::received(controls)
         .open(CONTROL)
         .map_err(|e| format!("the session's controls refused its control connection: {e:?}"))?;

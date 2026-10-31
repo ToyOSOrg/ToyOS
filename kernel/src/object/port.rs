@@ -13,22 +13,20 @@ use alloc::sync::Arc;
 use core::sync::atomic::{AtomicU64, Ordering};
 
 use crate::mm::charge::{self, Exhausted};
-use crate::pipe::{PipeReader, PipeWriter};
+use crate::message::{Receiver, Sender};
 use crate::sync::Lock;
 use crate::watch::Watch;
 
-use super::service::HandleQueue;
 use super::{KObjectVariant, ObjectCore, ZeroHandles};
 
 /// Unaccepted connections one port may hold; past it, connect returns `ResourceExhausted`.
 pub const MAX_PENDING_CONNECTIONS: usize = 32;
 
-/// A connection nobody has accepted yet: owns the server's pipe ends and handle queues.
+/// A connection nobody has accepted yet: owns the server's ends of its two
+/// directions.
 pub struct PendingConnection {
-    pub rx: PipeReader,
-    pub tx: PipeWriter,
-    pub inbox: Arc<HandleQueue>,
-    pub outbox: Arc<HandleQueue>,
+    pub rx: Receiver,
+    pub tx: Sender,
     /// [`Connector::stamp`] of the connector the client connected through.
     pub stamp: Stamp,
 }
@@ -187,17 +185,13 @@ impl Connector {
 impl ZeroHandles for Acceptor {
     fn on_zero_handles(&self) {
         // `queued` drops only after the guard releases, since dropping a
-        // handle can re-enter another object's hook.
+        // handle can re-enter another object's hook. Its receivers go with
+        // it, so a client's send on a connection nobody accepted is `Gone`.
         let queued = {
             let mut queue = self.shared.queue.lock();
             queue.closed = true;
             core::mem::take(&mut queue.pending)
         };
-        // Nobody will ever hold this inbox's read end, so a queued
-        // `SYS_MESSAGE_SEND` on it must say `Gone`, not queue.
-        for connection in &queued {
-            connection.inbox.close_now();
-        }
         drop(queued);
         // A poll on the port is answered as gone, not as ready: nothing will ever queue again.
         self.shared.watch.cancel_polls();

@@ -227,8 +227,8 @@ fn refuses_a_foreign_handle_writing_nothing() {
     let stderr = String::from_utf8_lossy(&said.stderr);
     assert!(!said.status.success(), "the foreign handle was taken: {}", String::from_utf8_lossy(&said.stdout));
     assert!(stderr.contains("is no stream of this process's"), "refused, but not by name: {stderr}");
-    let read = syscall::read(conn.as_handle().raw(), &mut bytes);
-    assert_eq!(read, Ok(0), "the refusal wrote on the stream's connection before its end");
+    let taken = syscall::message_recv(conn.as_handle().raw(), &mut bytes, &mut [], false);
+    assert_eq!(taken, Err(SyscallError::Gone), "the refusal sent on the stream's connection before its end");
     assert_eq!(rung.try_take(), Err(Hungup), "the refusal rang the stream before its end");
     println!("  a foreign handle: refused by name, nothing written");
 }
@@ -504,10 +504,11 @@ fn run(role: &str, peer: &[u8]) -> (Child, Netstack) {
         .spawn()
         .unwrap_or_else(|e| panic!("spawn {role}: {e}"));
     let conn = acceptor.accept().expect("the child's connect");
-    let header = conn.recv_header().expect("a request");
-    assert_eq!(header.msg_type, MsgType::TcpConnect as u32, "a stream's connect");
-    let _: TcpConnectRequest = conn.recv_payload(&header).expect("the connect's request");
-    let [region] = conn.recv_handles_exact::<1>(&header).expect("the stream's region");
+    let mut rx = toyos::ipc::FrameRx::<{ toyos::ipc::MAX_FRAME_LEN as usize }>::new();
+    let frame = rx.recv(&conn).expect("a request");
+    assert_eq!(frame.msg_type, MsgType::TcpConnect as u32, "a stream's connect");
+    let _: TcpConnectRequest = toyos::ipc::decode_payload(rx.payload(frame.payload_len)).expect("the connect's request");
+    let [region] = rx.take_handles::<1>().expect("the stream's region");
     let region = SharedMemory::lent(region, REGION_BYTES).expect("a region netstack takes");
     let mut server = Server::new(words_of(&region), LAYOUT);
     region.bytes().write(RECEIVE_RING, peer);

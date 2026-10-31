@@ -8,12 +8,11 @@ use alloc::sync::Arc;
 
 use toyos_abi::handle::{RawHandle, Rights};
 use toyos_abi::syscall::{FileType, OpenFlags, SeekFrom, SyscallError, MAX_WHOLE_PIPE_WRITE};
-use kernel::sched::task::WaitClass;
 
 use crate::drivers::serial;
 use crate::file_cache;
 use crate::pipe::{self, PipeRef};
-use kernel::pipe::{End, Landing};
+use kernel::pipe::End;
 use crate::user_ptr::{UserBytes, UserBytesMut};
 use crate::inbox::PollEntry;
 use crate::watch::Watch;
@@ -206,21 +205,19 @@ pub fn close_all(table: &mut HandleTable) {
 /// The pipe a read of `object` took from, held past the handle table's lock
 /// to wake its writers.
 pub fn read_pipe(object: &KObjectRef) -> Option<PipeRef> {
-    pipe_read(object).map(|(pipe, _)| pipe.clone())
+    pipe_read(object).cloned()
 }
 
 /// The pipe a write to `object` filled, held the same way to wake its readers.
 pub fn written_pipe(object: &KObjectRef) -> Option<PipeRef> {
-    pipe_write(object).map(|(pipe, _, _)| pipe.clone())
+    pipe_write(object).cloned()
 }
 
-/// The pipe a blocking read of `object` parks on, and the class its wait is
-/// charged to: a connection's is its peer's answer, which is IPC.
-pub fn pipe_read(object: &KObjectRef) -> Option<(&PipeRef, WaitClass)> {
+/// The pipe a blocking read of `object` parks on.
+pub fn pipe_read(object: &KObjectRef) -> Option<&PipeRef> {
     match object {
-        KObjectRef::PipeRead(r) => Some((r.pipe(), WaitClass::Pipe)),
-        KObjectRef::Connection(c) => Some((c.rx(), WaitClass::Ipc)),
-        KObjectRef::PipeWrite(_) | KObjectRef::File(_) | KObjectRef::Device(_)
+        KObjectRef::PipeRead(r) => Some(r.pipe()),
+        KObjectRef::Connection(_) | KObjectRef::PipeWrite(_) | KObjectRef::File(_) | KObjectRef::Device(_)
         | KObjectRef::Console(_) | KObjectRef::Acceptor(_) | KObjectRef::Inbox(_)
         | KObjectRef::SysCap(_)
         | KObjectRef::Connector(_) | KObjectRef::WakeLatency(_) | KObjectRef::EventSignal(_) | KObjectRef::EventWait(_) | KObjectRef::Pager(_) | KObjectRef::Paged(_) | KObjectRef::Namespace(_)
@@ -229,13 +226,11 @@ pub fn pipe_read(object: &KObjectRef) -> Option<(&PipeRef, WaitClass)> {
     }
 }
 
-/// [`pipe_read`]'s answer for a blocking write, and how a write lands in
-/// that pipe.
-pub fn pipe_write(object: &KObjectRef) -> Option<(&PipeRef, WaitClass, Landing)> {
+/// [`pipe_read`]'s answer for a blocking write.
+pub fn pipe_write(object: &KObjectRef) -> Option<&PipeRef> {
     match object {
-        KObjectRef::PipeWrite(w) => Some((w.pipe(), WaitClass::Pipe, Landing::Pipe)),
-        KObjectRef::Connection(c) => Some((c.tx(), WaitClass::Ipc, Landing::Partial)),
-        KObjectRef::PipeRead(_) | KObjectRef::File(_) | KObjectRef::Device(_)
+        KObjectRef::PipeWrite(w) => Some(w.pipe()),
+        KObjectRef::Connection(_) | KObjectRef::PipeRead(_) | KObjectRef::File(_) | KObjectRef::Device(_)
         | KObjectRef::Console(_) | KObjectRef::Acceptor(_) | KObjectRef::Inbox(_)
         | KObjectRef::SysCap(_)
         | KObjectRef::Connector(_) | KObjectRef::WakeLatency(_) | KObjectRef::EventSignal(_) | KObjectRef::EventWait(_) | KObjectRef::Pager(_) | KObjectRef::Paged(_) | KObjectRef::Namespace(_)
@@ -552,12 +547,6 @@ pub fn try_read(object: &KObjectRef, buf: &mut UserBytesMut) -> Option<u64> {
     match object {
         KObjectRef::File(f) => read_file(f, buf),
         KObjectRef::PipeRead(r) => r.pipe().try_read(buf).map(|n| n as u64),
-        // A batch pinned where the reader is answers the read, so no byte
-        // after it is read until the batch is taken.
-        KObjectRef::Connection(c) => c.read(buf).map(|read| match read {
-            Ok(n) => n as u64,
-            Err(crate::pipe::AtBatch) => SyscallError::HandlesPending.to_u64(),
-        }),
         KObjectRef::Device(_) => unreachable!("a device claim is read by `read_device`"),
         KObjectRef::Console(_) => {
             let mut count = 0usize;
@@ -586,7 +575,8 @@ pub fn try_read(object: &KObjectRef, buf: &mut UserBytesMut) -> Option<u64> {
             buf.write_at(0, &[reason.to_byte()]);
             1
         }),
-        KObjectRef::PipeWrite(_) | KObjectRef::Acceptor(_) | KObjectRef::Inbox(_)
+        // A connection carries whole messages, which `SYS_MESSAGE_RECV` takes.
+        KObjectRef::Connection(_) | KObjectRef::PipeWrite(_) | KObjectRef::Acceptor(_) | KObjectRef::Inbox(_)
         | KObjectRef::SysCap(_)
         | KObjectRef::Connector(_) | KObjectRef::WakeLatency(_) | KObjectRef::EventSignal(_) | KObjectRef::EventWait(_) | KObjectRef::Pager(_) | KObjectRef::Paged(_) | KObjectRef::Namespace(_)
         | KObjectRef::SharedMem(_) | KObjectRef::Process(_) | KObjectRef::Job(_) => Some(SyscallError::PermissionDenied.to_u64()),
@@ -594,12 +584,12 @@ pub fn try_read(object: &KObjectRef, buf: &mut UserBytesMut) -> Option<u64> {
 }
 
 fn write_pipe(object: &KObjectRef, buf: &UserBytes) -> Option<u64> {
-    let (pipe, _, landing) = pipe_write(object).expect("a pipe's write end writes its pipe");
-    match pipe.write(buf, landing) {
+    let pipe = pipe_write(object).expect("a pipe's write end writes its pipe");
+    match pipe.write(buf) {
         // The reader is gone, not absent: `NotFound` means the name is not there and nothing else may say so.
         pipe::PipeWrite::BrokenPipe => Some(SyscallError::Gone.to_u64()),
         pipe::PipeWrite::NoMemory => Some(SyscallError::ResourceExhausted.to_u64()),
-        pipe::PipeWrite::Wrote { n, .. } => Some(n as u64),
+        pipe::PipeWrite::Wrote(n) => Some(n as u64),
         pipe::PipeWrite::NoRoom => None,
     }
 }
@@ -611,13 +601,14 @@ pub fn try_write(object: &KObjectRef, buf: &UserBytes) -> Option<u64> {
             state.position += written;
             Some(answer)
         }),
-        KObjectRef::PipeWrite(_) | KObjectRef::Connection(_) => write_pipe(object, buf),
+        KObjectRef::PipeWrite(_) => write_pipe(object, buf),
         // The whole lines `klogd`'s queue has room for, and a trailing partial one:
         // a short count is a writer ahead of the console, told so.
         KObjectRef::Console(c) => Some(c.write(buf) as u64),
         KObjectRef::Device(d) => Some(write_device(d, buf)),
         KObjectRef::Null(_) => Some(buf.len() as u64),
-        KObjectRef::PipeRead(_) | KObjectRef::Acceptor(_)
+        // A connection carries whole messages, which `SYS_MESSAGE_SEND` sends.
+        KObjectRef::Connection(_) | KObjectRef::PipeRead(_) | KObjectRef::Acceptor(_)
         | KObjectRef::Inbox(_) | KObjectRef::SharedMem(_) | KObjectRef::SysCap(_)
         | KObjectRef::Connector(_) | KObjectRef::WakeLatency(_) | KObjectRef::EventSignal(_) | KObjectRef::EventWait(_) | KObjectRef::Pager(_) | KObjectRef::Paged(_) | KObjectRef::Namespace(_)
         | KObjectRef::Process(_) | KObjectRef::Job(_) | KObjectRef::Notice(_) => {
@@ -735,7 +726,7 @@ pub fn ftruncate(object: &KObjectRef, size: u64) -> u64 {
 pub fn has_data(object: &KObjectRef) -> bool {
     match object {
         KObjectRef::PipeRead(r) => r.pipe().has_data(),
-        KObjectRef::Connection(c) => c.has_data(),
+        KObjectRef::Connection(c) => c.rx().readable(),
         KObjectRef::Console(_) => serial::has_data(),
         KObjectRef::Acceptor(a) => a.has_pending(),
         KObjectRef::Process(p) => p.finished(),
@@ -780,7 +771,7 @@ pub fn has_space(object: &KObjectRef) -> bool {
         // Writable is room for any write that lands whole, so a non-blocking
         // one refused, retried on readiness, lands.
         KObjectRef::PipeWrite(w) => w.pipe().has_space(MAX_WHOLE_PIPE_WRITE),
-        KObjectRef::Connection(c) => c.tx().has_space(1),
+        KObjectRef::Connection(c) => c.tx().writable(),
         KObjectRef::File(_) | KObjectRef::Null(_) => true,
         KObjectRef::Console(_) => crate::log::console::has_room(),
         KObjectRef::PipeRead(_) | KObjectRef::Device(_) | KObjectRef::Acceptor(_)

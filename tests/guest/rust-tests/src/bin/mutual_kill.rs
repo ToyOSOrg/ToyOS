@@ -120,9 +120,10 @@ fn word(go: &SharedMemory) -> &AtomicU32 {
 fn killer() -> ! {
     let ns = endow::namespace().expect("the parent endowed a namespace");
     let conn = ns.open(SERVICE).expect("connect through the endowed connector");
-    let header = conn.recv_header().expect("the arming frame");
-    assert_eq!(header.msg_type, ARM, "an unexpected frame");
-    let [word_handle, victim] = conn.recv_handles_exact::<2>(&header).expect("the word and the victim");
+    let mut rx = toyos::ipc::FrameRx::<{ toyos::ipc::MAX_FRAME_LEN as usize }>::new();
+    let frame = rx.recv(&conn).expect("the arming frame");
+    assert_eq!(frame.msg_type, ARM, "an unexpected frame");
+    let [word_handle, victim] = rx.take_handles::<2>().expect("the word and the victim");
     let go = SharedMemory::lent(word_handle, WORD_BYTES).expect("map the word");
     let victim = Process::from_handle(victim);
 

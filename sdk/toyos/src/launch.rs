@@ -380,9 +380,10 @@ pub fn launch(conn: &Connection, request: Launch<'_>) -> Result<Outcome, LaunchE
     // Descriptors, then extras, then the place, then the job, as `Request` reads them.
     let handles = fds.into_iter().map(|(_, h, _)| h).chain(extras.into_iter().map(|(_, h)| h)).chain(place).chain([job]);
     conn.send_bytes_with(MSG_LAUNCH, &buf[..len], handles).map_err(LaunchError::NotSent)?;
-    let header = conn.recv_header().map_err(LaunchError::Sent)?;
-    match header.msg_type {
-        MSG_LAUNCHED => match conn.recv_handles_exact::<1>(&header) {
+    let mut rx = crate::ipc::FrameRx::<0>::new();
+    let frame = rx.recv(&conn).map_err(LaunchError::Sent)?;
+    match frame.msg_type {
+        MSG_LAUNCHED => match rx.take_handles::<1>() {
             Some([process]) => Ok(Outcome::Started(process)),
             None => Err(LaunchError::Sent(IpcError::Malformed)),
         },

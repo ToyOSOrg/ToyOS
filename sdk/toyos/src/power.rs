@@ -324,11 +324,9 @@ fn asked(msg_type: u32, payload: &[u8]) -> Result<(), Refused> {
 
 /// One whole frame off `conn`, waiting for it.
 fn frame(conn: &Connection) -> Result<(u32, Vec<u8>), ()> {
-    let header = conn.recv_header().map_err(drop)?;
-    let mut payload = alloc::vec![0u8; header.len() as usize];
-    let n = conn.recv_bytes(&header, &mut payload).map_err(drop)?;
-    payload.truncate(n);
-    Ok((header.msg_type, payload))
+    let mut rx = crate::ipc::FrameRx::<{ crate::ipc::MAX_FRAME_LEN as usize }>::new();
+    let frame = rx.recv(conn).map_err(drop)?;
+    Ok((frame.msg_type, rx.payload(frame.payload_len).to_vec()))
 }
 
 #[cfg(test)]

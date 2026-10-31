@@ -34,7 +34,7 @@ device_info!(
 ///
 /// Bounded by [`IpcPayload`] and not by `Copy`: the answer's bytes are
 /// *reinterpreted* as a `T`, so what the bound has to promise is that every bit
-/// pattern of that width is one — the contract [`crate::ipc::recv_payload`]
+/// pattern of that width is one — the contract [`crate::ipc::decode_payload`]
 /// reads on, held here by the kernel rather than by a peer.
 pub(crate) fn read_info<T: IpcPayload>(dev: &Device) -> Result<T, SyscallError> {
     let size = core::mem::size_of::<T>();

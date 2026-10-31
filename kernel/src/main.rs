@@ -78,6 +78,8 @@ mod watch;
 mod object;
 mod inbox;
 mod pipe;
+mod frame_bytes;
+mod message;
 
 mod device;
 mod pcidev;

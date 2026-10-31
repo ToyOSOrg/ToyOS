@@ -127,10 +127,11 @@ fn test(role: &str) {
     let mut out = BufReader::new(child.stdout.take().expect("the child's stdout"));
 
     let conn = acceptor.accept().expect("the child's connect");
-    let header = conn.recv_header().expect("a request");
-    assert_eq!(header.msg_type, MsgType::TcpConnect as u32, "a stream's connect");
-    let _: TcpConnectRequest = conn.recv_payload(&header).expect("the connect's request");
-    let [region] = conn.recv_handles_exact::<1>(&header).expect("the stream's region");
+    let mut rx = toyos::ipc::FrameRx::<{ toyos::ipc::MAX_FRAME_LEN as usize }>::new();
+    let frame = rx.recv(&conn).expect("a request");
+    assert_eq!(frame.msg_type, MsgType::TcpConnect as u32, "a stream's connect");
+    let _: TcpConnectRequest = toyos::ipc::decode_payload(rx.payload(frame.payload_len)).expect("the connect's request");
+    let [region] = rx.take_handles::<1>().expect("the stream's region");
     let region = SharedMemory::lent(region, REGION_BYTES).expect("a region netstack takes");
     // SAFETY: the mapping is `REGION_BYTES`, 2 MiB aligned, and its header is reached only as atomics.
     let words = unsafe { &*(region.as_ptr() as *const Words) };

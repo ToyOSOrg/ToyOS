@@ -8,8 +8,8 @@
 //! while that holds them:
 //!
 //! - a server in an ordinary job answers this job's connection, before any of
-//!   that, and its account does not move: a connection's pipes are its
-//!   client's;
+//!   that, and its account does not move: a connection's two directions are
+//!   its client's;
 //! - an ordinary job's spawn is refused, so the exhaustion is real;
 //! - the supervisor answers a stop's request on a new connection, which takes
 //!   nothing of the supervisor's own;
@@ -101,7 +101,7 @@ fn control(input: bool) {
     let mut log = Log { pipe: logkeeper_api::read().expect("the log, before anything is taken").pipe, bytes: vec![0; 64 << 10], held: 0 };
     log.drain();
 
-    pipes_are_the_clients(&cap);
+    directions_are_the_clients(&cap);
 
     let job = cap.new_job().expect("an ordinary job for the greedy one");
     let mut greedy = Command::new(ME)
@@ -162,7 +162,7 @@ fn control(input: bool) {
     };
     println!("  memory_floor: the greedy job took back {} KiB, starveling having given back {} KiB", taken >> 10, given >> 10);
     starved.signal(END).expect("tell starveling to end");
-    assert!(starved.recv_header().is_err(), "starveling answered, and was to end");
+    assert!(toyos::ipc::FrameRx::<0>::new().recv(&starved).is_err(), "starveling answered, and was to end");
     log.await_line(&["supervisor: starveling (pid ", REFUSED_RESTART]);
     println!("  PASS: starveling ended, and its restart was refused for memory");
     // Asked of a port no process serves now: it waits for the next.
@@ -188,10 +188,10 @@ fn control(input: bool) {
 }
 
 /// A server in an ordinary job of its own accepts this job's connection and
-/// answers it: both of the connection's pipes are its client's, so the
+/// answers it: both of the connection's directions are its client's, so the
 /// server's reply costs its job nothing, and no client can spend a server's
 /// floor by connecting to it.
-fn pipes_are_the_clients(cap: &SysCap) {
+fn directions_are_the_clients(cap: &SysCap) {
     let (acceptor, connector) = toyos::port::create().expect("a port");
     let job = cap.new_job().expect("a job for the server");
     let mut server = Command::new(ME)
@@ -217,7 +217,7 @@ fn pipes_are_the_clients(cap: &SysCap) {
     assert_eq!(after.kernel, before.kernel, "the server's reply was charged to the server");
     server.kill().expect("end the server");
     server.wait().expect("the server's end");
-    println!("  PASS: a connection's pipes are its client's: the server's reply cost its job nothing");
+    println!("  PASS: a connection's directions are its client's: the server's reply cost its job nothing");
 }
 
 /// Accept one connection on the endowed acceptor and answer its [`PING`].
@@ -292,11 +292,9 @@ fn ping(conn: &Connection) -> Result<(), String> {
 
 /// One whole frame off `conn`, waiting for it.
 fn frame(conn: &Connection) -> (u32, Vec<u8>) {
-    let header = conn.recv_header().expect("a frame's header");
-    let mut payload = vec![0u8; header.len() as usize];
-    let n = conn.recv_bytes(&header, &mut payload).expect("a frame's payload");
-    payload.truncate(n);
-    (header.msg_type, payload)
+    let mut rx = toyos::ipc::FrameRx::<{ toyos::ipc::MAX_FRAME_LEN as usize }>::new();
+    let frame = rx.recv(&conn).expect("a frame");
+    (frame.msg_type, rx.payload(frame.payload_len).to_vec())
 }
 
 /// Wait until `conn` has something to read, within [`CEILING`].
