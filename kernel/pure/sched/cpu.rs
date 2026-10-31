@@ -2442,12 +2442,16 @@ pub struct CpuHandle<M> {
     /// the genuinely surplus-holding CPU goes unprobed for a whole idle round.
     surplus: AtomicU32,
     /// **Which CPUs may take [`Self::surplus`]**: the union of the masks of
-    /// the movable queued fair tasks, published with it so that a probe, a
-    /// busy balance and a push all ask [`Self::takes`]. `takers_any` stands
-    /// for every CPU, so the words are written only for a queue whose every
-    /// movable task is restricted. A reader may pair a fresh flag with stale
-    /// words; that costs one probe or one ring, never a repeated one, because
-    /// the next pass publishes both again.
+    /// the movable queued fair tasks, published with it so that a probe and
+    /// a busy balance ask [`Self::takes`] what the push reads from its own
+    /// pass. Written only by a pass whose surplus reaches the threshold, and
+    /// read only while [`CpuHandles::offers_surplus`] says one does.
+    /// `takers_any` stands for every CPU, so the words are written only when
+    /// every movable queued task is restricted. A reader may pair the flag
+    /// with words of another pass: it then probes a CPU that answers nothing,
+    /// or skips one whose task it could have taken, even when this CPU's push
+    /// rang it for that task, until this CPU's next pass with surplus
+    /// publishes again.
     takers_any: AtomicBool,
     takers: [AtomicU64; MASK_WORDS],
     /// **The summed weight of this CPU's job groups**, published for busy
@@ -2664,20 +2668,22 @@ impl<M: SchedMsg> CpuHandles<M> {
         }
     }
 
-    /// Publish how many fair-band tasks `cpu` could give away and which CPUs
-    /// may take them ([`CpuHandle::takes`]); called by that CPU's own pass.
-    /// Its bit in the offering mask changes with the threshold, before the
-    /// pass's [`balance_fence`], so the mask is what the push's sleeper half
-    /// reads.
+    /// Publish how many fair-band tasks `cpu` could give away and, when they
+    /// reach the threshold, which CPUs may take them ([`CpuHandle::takes`]);
+    /// called by that CPU's own pass. Its bit in the offering mask changes
+    /// with the threshold, before the pass's [`balance_fence`], so the mask is
+    /// what the push's sleeper half reads.
     pub fn publish_surplus(&self, cpu: CpuId, fair: u32, takers: CpuMask) {
         let handle = self.get(cpu);
-        let any = takers == CpuMask::ANY;
-        if !any {
-            for (word, &value) in handle.takers.iter().zip(takers.words()) {
-                word.store(value, Ordering::Relaxed);
+        if fair >= PUSH_THRESHOLD {
+            let any = takers == CpuMask::ANY;
+            if !any {
+                for (word, &value) in handle.takers.iter().zip(takers.words()) {
+                    word.store(value, Ordering::Relaxed);
+                }
             }
+            handle.takers_any.store(any, Ordering::Relaxed);
         }
-        handle.takers_any.store(any, Ordering::Relaxed);
         let was = handle.surplus() >= PUSH_THRESHOLD;
         handle.surplus.store(fair, Ordering::Relaxed);
         let (word, bit) = (&self.offering[cpu.0 as usize / 64], 1u64 << (cpu.0 % 64));
@@ -4918,6 +4924,30 @@ mod tests {
         }
     }
 
+    /// **A busy balance asks only a CPU whose surplus it may take**: cpu0
+    /// runs a fair task, its SMT sibling cpu4 weighs most but offers only a
+    /// task masked away from cpu0, and cpu1 weighs less and offers one any CPU
+    /// may take. The request goes to cpu1.
+    #[test]
+    fn a_busy_balance_passes_a_heavier_surplus_its_mask_leaves_out() {
+        let mut w = World::on(two_llcs());
+        w.balance = Balance::Pull;
+        for cpu in 0..8 {
+            w.handles.get(CpuId(cpu)).publish_pass(NOW);
+        }
+        let not_c0 = CpuMask::from_words(&[0b1111_1110], 8).unwrap();
+        w.handles.publish_surplus(CpuId(4), 1, not_c0);
+        w.handles.get(CpuId(4)).publish_weight(1 << 50);
+        w.handles.publish_surplus(CpuId(1), 1, CpuMask::ANY);
+        w.handles.get(CpuId(1)).publish_weight(1 << 40);
+        w.spawn(C0);
+        w.run_a_pass(C0);
+        assert!(w.cpus[0].running().is_some(), "cpu0 runs a fair task, so its pass balances busy");
+        let asked: Vec<u32> = (1..8u32).filter(|&cpu| !w.cpus[cpu as usize].mailbox_is_empty()).collect();
+        w.abandon();
+        assert_eq!(asked, [1], "the busy balance asked a CPU that would answer it with nothing");
+    }
+
     /// **A probe skips a victim whose surplus it may not take**: cpu0's SMT
     /// sibling offers one task masked away from cpu0, and cpu1 offers one any
     /// CPU may take. The probe goes past the nearer CPU to cpu1.
@@ -4933,8 +4963,8 @@ mod tests {
         w.handles.publish_surplus(CpuId(1), 1, CpuMask::ANY);
         w.run_a_pass(C0);
         let asked: Vec<u32> = (0..8u32).filter(|&cpu| !w.cpus[cpu as usize].mailbox_is_empty()).collect();
-        assert_eq!(asked, [1], "the probe went to a victim that would answer it with nothing");
         w.abandon();
+        assert_eq!(asked, [1], "the probe went to a victim that would answer it with nothing");
     }
 }
 
