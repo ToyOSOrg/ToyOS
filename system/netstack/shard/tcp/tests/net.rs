@@ -481,9 +481,13 @@ fn syn_offering_1392(from: usize, o: &O) -> Option<Vec<u8>> {
     })
 }
 
+/// What a reader that keeps up on a gigabit path with a 15 ms round trip grows its window to at
+/// least: twice what it reads per round trip.
+const TWICE_THE_PATH: u32 = 2 * 125_000 * 15;
+
 /// A download shaped like the T14's from a CDN: gigabit, a 15 ms round trip, timestamps and SACK,
 /// and a peer whose segments are shorter than the downloader's own send MSS. Full-sized is what
-/// the peer sends, so its echoes are sampled and the window grows to the whole buffer; measured
+/// the peer sends, so its echoes are sampled and the window grows to twice the path; measured
 /// against the send MSS, none ever was, and the window stayed at 65,535.
 #[test]
 fn a_peer_sending_segments_shorter_than_our_send_mss_still_grows_the_window() {
@@ -497,12 +501,12 @@ fn a_peer_sending_segments_shorter_than_our_send_mss_still_grows_the_window() {
     net.assert_exact();
     let longest = net.wire.iter().filter(|(from, _)| *from == 1).map(|(_, o)| o.payload.len()).max();
     assert_eq!((longest, peaks[0].shifts), (Some(1380), Some((7, 7))));
-    assert_eq!(peaks[0].window, BUFFER, "{:?}", peaks[0]);
+    assert!(peaks[0].window >= TWICE_THE_PATH, "{:?}", peaks[0]);
 }
 
 /// The same download into a lent receive ring, as a stream's region is: the reader takes text out
 /// of the ring itself and gives it back with `consume`, which grows the window as a read does, so
-/// the window passes 65,535 and reaches the whole buffer.
+/// the window passes 65,535 and reaches twice the path.
 #[test]
 fn a_lent_receive_ring_grows_the_window_as_a_read_does() {
     let mut net = Net::buffered(15, BUFFER);
@@ -514,8 +518,7 @@ fn a_lent_receive_ring_grows_the_window_as_a_read_does() {
     let peaks = watch(&mut net, 600_000);
     assert!(net.finished(), "the transfer did not finish:\n{}", net.dump());
     net.assert_exact();
-    assert!(peaks[0].window > 65_535, "{:?}", peaks[0]);
-    assert_eq!(peaks[0].window, BUFFER, "{:?}", peaks[0]);
+    assert!(peaks[0].window >= TWICE_THE_PATH, "{:?}", peaks[0]);
 }
 
 /// RFC 8985 §7.3: no probe leaves unless an RTT sample came since the last. Without timestamps a

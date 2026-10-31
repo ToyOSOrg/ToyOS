@@ -243,8 +243,29 @@ readings, `mhz` just after it and `mhz_settled` before it, were about
 1.5 GHz (settled 1.5 or 4.2 GHz), and Linux still moved 113 MB/s. At most,
 the clock matters through what ToyOS spends per byte sent.
 
+**#1112's session, 2026-10-29**
+([evidence](https://github.com/ToyOSOrg/evidence/tree/c990b1f2eb8b0de24e7c9556952be74ea2eb0fe8/r1/t14)).
+B was #1102's head, C per-segment RTT samples (#1112), D C with L = ∞ and
+no pacing, a diagnostic arm that does not land. Three of each, B C D B C D
+B C D, with Linux at both ends:
+
+| | upload p50, MB/s | received by 100 ms | 300 ms | 1 s |
+|---|---|---|---|---|
+| Linux (2 runs) | 113, 114 | 5.9–6.0 MB | 27.2–29.0 MB | 108–110 MB |
+| B (3 runs) | 112, 112, 112 | 2.1–2.4 MB | 24.0–24.7 MB | 105.5–105.8 MB |
+| C (3 runs) | 112, 112, 112 | 2.2–3.2 MB | 24.3–25.6 MB | 105.2–106.6 MB |
+| D (3 runs) | 114, 113, 114 | 5.2–6.4 MB | 28.3–29.7 MB | 109.9–111.2 MB |
+
+- L = 8 is what holds the ramp. Without it D reached Linux's marks, and
+  nothing was resent.
+- CSS entries were 2.0–2.7 times the rounds that entered CSS, in D as in B
+  and C. Most of them are flaps within a round (s_cc_023), and removing them
+  was not needed for parity.
+- Finer RTT samples (C) did not change the ramp.
+
+RFC 9406 §4.3 gives L = ∞ only to a paced sender. Pull request #1114 paces [tcp]
+(RFC 9002 §7.7) and removes the cap.
+
 **Exit**: `osbench_lan` on the T14 reads `lan.wired.tcp.upload` at Linux's
 in the same session, with the first 300 ms read at the receiver no slower, or
-the cause is named and owned by its own issue. The next leads are the CSS
-oscillation on this path (RFC 9406 §4.3 lets an implementation tune
-`MIN_RTT_THRESH` and `N_RTT_SAMPLE`) and pacing with L = ∞ (§4.3).
+the cause is named and owned by its own issue.

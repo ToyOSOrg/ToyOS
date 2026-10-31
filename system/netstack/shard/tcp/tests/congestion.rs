@@ -111,27 +111,28 @@ fn s_cc_016_acks_in_one_pass_each_grow_slow_start() {
 /// half, it is application limited (§5.8), and grows nothing.
 #[test]
 fn s_cc_017_a_sender_the_card_holds_grows_a_window_half_in_flight() {
-    for (credit, grown) in [(9, 1460), (8, 0)] {
+    for (credit, grown) in [(10, 1460), (9, 0)] {
         let mut h = fixture_e();
         assert_eq!(h.send(0, 60_000).len(), 10, "a stop at the initial window");
         h.credit = Some(credit);
-        assert_eq!(h.deliver(seg(5001).ack(15_601)).len(), credit);
+        assert_eq!(h.input(10, seg(5001).ack(15_601)).len(), credit);
         let cwnd = h.info().cwnd;
-        assert_eq!(cwnd, 26_280, "the ACK after cwnd's stop grows it");
+        assert_eq!(cwnd, 29_200, "the ACK after cwnd's stop grows it");
         h.credit = Some(0);
         h.deliver(seg(5001).ack(17_061));
-        assert_eq!(h.info().cwnd - cwnd, grown, "{credit} of the half's 9 segments in flight");
+        assert_eq!(h.info().cwnd - cwnd, grown, "{credit} of the half's 10 segments in flight");
     }
 }
 
-/// RFC 9406 §4.2 with §4.3's L = 8 for a sender that does not pace: an ACK of the whole flight
-/// grows the initial slow start by eight segments, where RFC 5681 §3.1 grows it by one.
+/// RFC 9406 §4.2 with §4.3's L = infinity for a paced sender: an ACK of the whole flight grows the
+/// initial slow start by the whole flight, where RFC 5681 §3.1 grows it by one segment.
 #[test]
-fn s_cc_018_a_stretch_ack_grows_the_initial_slow_start_by_eight_segments() {
+fn s_cc_018_a_stretch_ack_grows_the_initial_slow_start_by_all_it_acknowledged() {
     let mut h = fixture_e();
     assert_eq!(h.send(0, 60_000).len(), 10);
-    assert_eq!(h.input(10, seg(5001).ack(15_601)).len(), 18);
-    assert_eq!(h.info().cwnd, 26_280);
-    h.input(20, seg(5001).ack(41_881));
-    assert_eq!(h.info().cwnd, 37_960);
+    h.input(10, seg(5001).ack(15_601));
+    assert_eq!(h.info().cwnd, 29_200);
+    assert_eq!(h.at(19).len(), 10, "the pacer releases the rest of the window");
+    h.input(20, seg(5001).ack(44_801));
+    assert_eq!(h.info().cwnd, 58_400);
 }
