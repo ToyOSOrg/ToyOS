@@ -3580,6 +3580,7 @@ dependencies = [
  "kernel",
  "libc",
  "libm",
+ "osbench-rules",
  "pem",
  "rustls",
  "serde",

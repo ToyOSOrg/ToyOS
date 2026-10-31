@@ -6840,10 +6840,11 @@ fn counters_on_metal(back: &metal::Readback) -> Result<(), String> {
     }
     eprintln!("  [counters] the spin's read, a whole round, took its reader {} ns", clock["spin"].1);
     if let (Some(&unit), Some(_)) = (idle0[&0].get("rapl_power_unit"), idle0[&0].get("package_energy")) {
+        use osbench_rules::energy;
         let mw = |a: &Read, b: &Read, from: u64, to: u64| {
-            let steps = (b[&0]["package_energy"].wrapping_sub(a[&0]["package_energy"])) & 0xffff_ffff;
-            let uj = (u128::from(steps) * 1_000_000) >> ((unit >> 8) & 0x1f);
-            uj * 1_000_000 / u128::from((to - from).max(1))
+            energy::span(a[&0]["package_energy"], b[&0]["package_energy"], energy::RANGE)
+                .map(|steps| energy::milliwatts(energy::microjoules(steps, unit), to - from))
+                .map_or("unreadable".to_string(), |mw| mw.to_string())
         };
         eprintln!(
             "  [counters] the package drew {} mW across the idle second and {} mW across the spin (a reading)",

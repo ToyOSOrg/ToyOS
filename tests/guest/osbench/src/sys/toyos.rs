@@ -383,7 +383,7 @@ pub mod diag {
 /// under `Rights::TRACE`, the package's held by the boot processor. Every read
 /// kicks every CPU (`toyos_abi::counters`), the package's too.
 pub mod power {
-    use super::super::{CpuPower, Package, Refused};
+    use super::super::{CpuPower, Package, Refused, Round};
     use super::diag::{self, CpuCounts};
 
     fn read() -> Result<Vec<CpuCounts>, Refused> {
@@ -391,9 +391,14 @@ pub mod power {
         d.counters().map_err(Refused::Failed)
     }
 
-    pub fn package() -> Result<Package, Refused> {
-        let cpus = read()?;
-        let held = cpus.into_iter().find(|c| c.package_energy.is_some() || c.package_residency.iter().any(Option::is_some));
+    /// One `SYS_COUNTERS` round, which kicks every CPU.
+    pub fn round() -> Result<Round, Refused> {
+        let read = read()?;
+        Ok(Round { package: package(&read)?, cpus: cpus(read)? })
+    }
+
+    fn package(cpus: &[CpuCounts]) -> Result<Package, Refused> {
+        let held = cpus.iter().find(|c| c.package_energy.is_some() || c.package_residency.iter().any(Option::is_some));
         let Some(c) = held else {
             return Err(Refused::Absent(
                 "no CPU's record carries the package's counters: the kernel's `counters: cpu0 reads` line says whether it \
@@ -412,9 +417,8 @@ pub mod power {
         })
     }
 
-    pub fn cpus() -> Result<Vec<CpuPower>, Refused> {
-        read()?
-            .into_iter()
+    fn cpus(read: Vec<CpuCounts>) -> Result<Vec<CpuPower>, Refused> {
+        read.into_iter()
             .map(|c| {
                 if c.stale {
                     return Err(Refused::Failed(format!("cpu{} answered stale", c.cpu)));

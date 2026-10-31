@@ -227,8 +227,10 @@ impl Rights {
     ///
     /// Beside [`COUNTERS`](Self::COUNTERS), [`SYS_COUNTERS`] answers each
     /// CPU's `APERF` and `MPERF` — its frequency and busy fraction, the
-    /// Hertzbleed power channel — the kicks it took, the wake-ups that time
-    /// keystrokes, and the power envelope it runs under. [`SYS_TRACE_READ`]
+    /// Hertzbleed power channel — the package's energy and C-state
+    /// residency and each AMD core's energy, the RAPL power channel
+    /// (CVE-2020-8694), the kicks it took, the wake-ups that time keystrokes,
+    /// and the power envelope it runs under. [`SYS_TRACE_READ`]
     /// answers, on this alone, when every thread in the machine was woken, ran
     /// and parked, and on which CPU. Admin tools hold it, `inspect`, `trace`
     /// and `test-runner`; no

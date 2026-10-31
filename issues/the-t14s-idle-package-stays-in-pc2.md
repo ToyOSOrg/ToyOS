@@ -9,11 +9,14 @@ opened: 2026-10-31
 Held by the power task that follows #1100.
 
 On the T14, `osbench_energy` gives an idle package of 7137 mW under ToyOS
-against 1648 mW under Linux, 4.3×. Under a 10 ms sleeper it is 2863 against
+against 1648 mW under Linux, 4.3×: the median, over four runs a side, of
+each run's per-second p50. The medians of the runs' means are 8272 against
+2167 mW, 3.8×. Under a 10 ms sleeper it is 2863 against
 1219 mW. ToyOS's package spends 994 ‰ of the idle minute in PC2 and none
 deeper, against Linux's 102 ‰ in PC2. Every ToyOS core waits in C7. Power
 belongs in the idle states and in device power management: none of this gap
-may be closed by slowing work. The AMD bench is at 1.15×.
+may be closed by slowing work. The AMD bench's smaller gap is
+`issues/the-amd-benchs-idle-package-draws-15-percent-over-linuxs.md`.
 
 Intel's datasheet (631121 Vol. 1 §3.2.5, Table 3-5) holds the package in PC2
 when its cores are in C6 or deeper and its graphics in RC6, but an LTR, a

@@ -155,9 +155,10 @@ Both read the package's energy counter in its own unit, its C2, C3, C6 and
 C7 residency where Intel documents them (not PC8 to PC10 on the T14, which
 SDM Vol. 4 gives no Tiger Lake), and each CPU's APERF/MPERF and core
 residency, and on AMD each core's energy (`cores_mw`). The group first waits,
-up to 120 s, for three seconds in a row in which the machine ran under 10 ms
-of CPU time (`energy.quiet`): a ToyOS boot reaches it while its services,
-the ACPI server's idle states among them, are still starting.
+up to 120 s, for three seconds in a row in which the machine ran at most
+10 ms of CPU time (`energy.quiet`): a ToyOS boot reaches it while its
+services are still starting. The wait measures CPU time alone; each row's
+core C6/C7 note says whether the cores had reached their deepest idle state.
 
 The rows: `energy.idle` (60 s), `energy.wake_10ms` (one thread sleeping 10 ms
 over and over, 30 s), `energy.spin.t1` and `energy.spin.all` (one thread and
@@ -165,9 +166,9 @@ one per CPU running the compute chunk, 30 s each), each a second's power
 (`.package`, mW), residency (`.pc2` to `.pc7`, permille) and under a spin a
 chunk's energy (`.per_chunk`, nJ). No unit is better higher or lower by
 itself: a spin that ran faster may draw more, and work is not slowed for
-power. ToyOS's every read kicks every CPU once a second; Linux's reads the
-package on CPU 0, where the reader is pinned, and each CPU only at a load's
-two ends.
+power. Each second both systems read the package and every CPU's counters
+in one round, which reaches every CPU: ToyOS's kicks each, and Linux's `msr`
+driver interrupts each but the reader's own.
 
 **The same devices, on both**:
 

@@ -95,6 +95,13 @@ pub struct CpuPower {
     pub core_energy: Option<u64>,
 }
 
+/// One reading of the power counters, the package's and every CPU's
+/// together: on either system it reaches every CPU.
+pub struct Round {
+    pub package: Package,
+    pub cpus: Vec<CpuPower>,
+}
+
 /// A whole anonymous read-write mapping, unmapped on drop.
 pub struct Mapping {
     ptr: *mut u8,

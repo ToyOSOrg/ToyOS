@@ -319,6 +319,9 @@ toyos-metal = { path = "tests/metal" }
 toyos-quiesce = { path = "lib/quiesce" }
 # The parity table `crypto_parity` prints and the judge reads, under one rule.
 toyos-parity = { path = "lib/parity" }
+# The package energy counter's decode, so the `counters` judge's reading of
+# it is osbench's rule and not a second one.
+osbench-rules = { path = "tests/guest/osbench/rules" }
 
 [patch.crates-io]
 loom = { git = "https://github.com/ToyOSOrg/loom", branch = "toyos" }

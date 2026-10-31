@@ -7,14 +7,15 @@
 //!
 //! **First the machine is let go quiet** ([`osbench_rules::energy::quiet`]),
 //! for at most [`QUIET_BOUND`]: a ToyOS boot starts the group while its
-//! services are still starting, the ACPI server's idle states among them.
+//! services are still starting. The gate measures CPU time alone; whether
+//! the cores had reached their deepest idle state is each row's core C6/C7
+//! note.
 //!
-//! Then each load runs for its span, and the package is read once a second:
-//! each row is that second's power, its residency and, under a spin, its
-//! energy per [`crate::chunk`]. Each CPU's counters are read at the load's
-//! two ends, so Linux reads the package on the reader's own CPU inside a
-//! second; ToyOS's every read kicks every CPU. No figure is better higher or lower by itself: a load that ran
-//! more work may draw more.
+//! Then each load runs for its span, read once a second by a round of every
+//! CPU's counters and the package's (`power::round`), which reaches every CPU
+//! on both systems: each row is that second's power, its residency and,
+//! under a spin, its energy per [`crate::chunk`]. No figure is better higher
+//! or lower by itself: a load that ran more work may draw more.
 
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering::Relaxed};
 use std::time::{Duration, Instant};
@@ -22,12 +23,12 @@ use std::time::{Duration, Instant};
 use osbench_rules::energy::{self, RANGE};
 
 use crate::report::{note, result};
-use crate::sys::{power, CpuPower, Package, Refused};
+use crate::sys::{power, CpuPower, Refused, Round};
 
 /// The longest the group waits for the machine to go quiet.
 const QUIET_BOUND: Duration = Duration::from_secs(120);
 
-/// The residency rows, in [`Package::residency`]'s order.
+/// The residency rows, in [`crate::sys::Package::residency`]'s order.
 const STATES: [&str; 4] = ["pc2", "pc3", "pc6", "pc7"];
 
 #[derive(Clone, Copy)]
@@ -48,7 +49,7 @@ pub fn suite() {
         ("energy.spin.t1", 30, Load::Spin(1)),
         ("energy.spin.all", 30, Load::Spin(crate::cpus())),
     ];
-    if let Err(why) = power::package() {
+    if let Err(why) = power::round() {
         for (bench, ..) in loads {
             why.clone().report(&format!("{bench}.package"));
         }
@@ -111,7 +112,6 @@ fn row(bench: &str, seconds: u64, load: Load) -> Result<(), Refused> {
     };
     let stop = AtomicBool::new(false);
     let counts: Vec<Slot> = (0..threads).map(|_| Slot::default()).collect();
-    let first = power::cpus()?;
     let mut samples = Samples::default();
     let sampled = std::thread::scope(|s| {
         for slot in &counts {
@@ -133,7 +133,7 @@ fn row(bench: &str, seconds: u64, load: Load) -> Result<(), Refused> {
         sampled
     });
     sampled?;
-    let last = power::cpus()?;
+    let (first, last) = (&samples.first_cpus, &samples.last_cpus);
     let unit = samples.power_unit;
     let mut fields = vec![("seconds", seconds.to_string())];
     let done: u64 = counts.iter().map(|c| c.0.load(Relaxed)).sum();
@@ -145,7 +145,7 @@ fn row(bench: &str, seconds: u64, load: Load) -> Result<(), Refused> {
             fields.push(("chunks_per_s", (done / seconds.max(1)).to_string()));
         }
     }
-    if let Some(mw) = unit.and_then(|unit| cores_mw(&first, &last, unit, samples.span_ns)) {
+    if let Some(mw) = unit.and_then(|unit| cores_mw(first, last, unit, samples.span_ns)) {
         fields.push(("cores_mw", mw.to_string()));
     }
     let series: Vec<String> = samples.mw.iter().map(u64::to_string).collect();
@@ -159,7 +159,7 @@ fn row(bench: &str, seconds: u64, load: Load) -> Result<(), Refused> {
     if !samples.nj_per_chunk.is_empty() {
         result(&format!("{bench}.per_chunk"), "nJ", &mut samples.nj_per_chunk, &[]);
     }
-    cpus(bench, &first, &last);
+    cpus(bench, first, last);
     Ok(())
 }
 
@@ -170,19 +170,24 @@ struct Samples {
     nj_per_chunk: Vec<u64>,
     power_unit: Option<u64>,
     span_ns: u64,
+    /// Each CPU's counters at the row's first and last rounds.
+    first_cpus: Vec<CpuPower>,
+    last_cpus: Vec<CpuPower>,
 }
 
 /// A reading of the package each second for `seconds`, into `out`, with the
 /// energy per chunk where `per_chunk`.
 fn sample(seconds: u64, counts: &[Slot], per_chunk: bool, out: &mut Samples) -> Result<(), Refused> {
     let chunks = || counts.iter().map(|c| c.0.load(Relaxed)).sum::<u64>();
-    let mut before: Package = power::package()?;
+    let Round { package: mut before, cpus } = power::round()?;
+    out.first_cpus = cpus;
     let (start, mut at, mut done) = (Instant::now(), Instant::now(), chunks());
     out.power_unit = before.power_unit;
     for second in 1..=seconds {
         // The span is the measurement: each read is due a second after the start, not after the last read.
         std::thread::sleep((start + Duration::from_secs(second)).saturating_duration_since(Instant::now()));
-        let after = power::package()?;
+        let Round { package: after, cpus } = power::round()?;
+        out.last_cpus = cpus;
         let (now, done_now) = (Instant::now(), chunks());
         let ns = u64::try_from((now - at).as_nanos()).expect("a second under 584 years");
         if let (Some(e0), Some(e1), Some(unit)) = (before.energy, after.energy, after.power_unit) {

@@ -289,13 +289,13 @@ pub struct PowerRegisters {
 }
 
 /// The power counters through the `msr` driver's `/dev/cpu/<n>/msr`, which
-/// takes root: the package's on the caller's own CPU, read there without an
-/// IPI unless the scheduler moved it, and each CPU's on that CPU, an IPI each.
+/// takes root: the package's on whichever CPU the caller runs on, and each
+/// CPU's on that CPU, an IPI to each but the caller's.
 pub mod power {
     use std::fs::File;
     use std::os::unix::fs::FileExt;
 
-    use super::super::{CpuPower, Package, Refused};
+    use super::super::{CpuPower, Package, Refused, Round};
     use super::PowerRegisters;
 
     const IA32_TIME_STAMP_COUNTER: u32 = 0x10;
@@ -303,11 +303,7 @@ pub mod power {
     const IA32_APERF: u32 = 0xe8;
 
     fn registers() -> Result<PowerRegisters, Refused> {
-        #[cfg(target_arch = "x86_64")]
-        let registers = crate::arch::power_registers();
-        #[cfg(not(target_arch = "x86_64"))]
-        let registers = None;
-        registers.ok_or_else(|| Refused::Absent("no CPU vendor whose power registers osbench reads".into()))
+        crate::arch::power_registers().ok_or_else(|| Refused::Absent("no CPU vendor whose power registers osbench reads".into()))
     }
 
     fn device(cpu: u32) -> Result<File, Refused> {
@@ -334,8 +330,14 @@ pub mod power {
         at.map_or(Ok(None), |at| msr(dev, cpu, at))
     }
 
-    pub fn package() -> Result<Package, Refused> {
+    /// The package's counters and then every CPU's, as ToyOS's round reads
+    /// them: a read of every CPU each time.
+    pub fn round() -> Result<Round, Refused> {
         let r = registers()?;
+        Ok(Round { package: package(&r)?, cpus: cpus(&r)? })
+    }
+
+    fn package(r: &PowerRegisters) -> Result<Package, Refused> {
         let cpu = super::current_cpu();
         let dev = device(cpu)?;
         let tsc = msr(&dev, cpu, IA32_TIME_STAMP_COUNTER)?.ok_or_else(|| Refused::Failed(format!("cpu{cpu} read no TSC")))?;
@@ -346,8 +348,7 @@ pub mod power {
         Ok(Package { tsc, energy: msr(&dev, cpu, r.energy)?, power_unit: msr(&dev, cpu, r.power_unit)?, residency })
     }
 
-    pub fn cpus() -> Result<Vec<CpuPower>, Refused> {
-        let r = registers()?;
+    fn cpus(r: &PowerRegisters) -> Result<Vec<CpuPower>, Refused> {
         super::allowed_cpus()
             .into_iter()
             .map(|cpu| {
