@@ -45,6 +45,9 @@ pub struct Local {
     /// each starts.
     deep: AtomicU64,
     entered: AtomicU64,
+    /// Idle periods started in each declared state, by its index in the
+    /// declaration.
+    by_state: [AtomicU64; MAX_STATES],
 }
 
 impl Local {
@@ -56,6 +59,7 @@ impl Local {
             learned_under: AtomicU64::new(0),
             deep: AtomicU64::new(0),
             entered: AtomicU64::new(0),
+            by_state: [const { AtomicU64::new(0) }; MAX_STATES],
         }
     }
 
@@ -69,6 +73,12 @@ impl Local {
     pub fn deep_periods(&self) -> (u64, u64) {
         let entered = self.entered.load(Ordering::Acquire);
         (entered, self.deep.load(Ordering::Acquire))
+    }
+
+    /// The idle periods this CPU has started in each declared state, by the
+    /// state's index in its declaration.
+    pub fn entered_by_state(&self) -> [u64; MAX_STATES] {
+        core::array::from_fn(|state| self.by_state[state].load(Ordering::Relaxed))
     }
 }
 
@@ -188,6 +198,7 @@ pub fn wait(plan: &idle::Plan) {
         (Some(state), Some(d)) => {
             // This CPU's alone to write, so a store and not a locked add.
             local.entered.store(local.entered.load(Ordering::Relaxed) + 1, Ordering::Release);
+            local.by_state[state].store(local.by_state[state].load(Ordering::Relaxed) + 1, Ordering::Relaxed);
             crate::arch::idle::enter(d.entries[state]);
         }
         _ => crate::arch::hw::halt(),

@@ -16,6 +16,7 @@ use core::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 
 use alloc::vec::Vec;
 
+use kernel::sched::idle::MAX_STATES;
 use kernel::clock::reference::{self, Agreement, Arbitration, Calibration, Failure, Kept, Offset, Reference, Sample, Watch};
 use toyos_abi::clock::Line;
 
@@ -174,27 +175,104 @@ struct Held {
     /// timer, disagreed with the TSC: what the left-out spans would have read.
     unheld_hpet_apart: u64,
     unheld_pm_apart: u64,
-    /// Each CPU's [`crate::idle::Local::deep_periods`] at the last sample.
-    idle: Vec<(u64, u64)>,
+    /// Spans left out, by the deepest declared state any CPU entered in them.
+    unheld_by_deepest: [u64; MAX_STATES],
+    /// Each CPU's [`crate::idle::Local::deep_periods`] and
+    /// [`crate::idle::Local::entered_by_state`] at the last sample.
+    idle: Vec<((u64, u64), [u64; MAX_STATES])>,
+    /// The RTC's edge at the last sample, the spans between edges it timed,
+    /// and the one furthest from the TSC.
+    rtc: Option<(u64, u64)>,
+    rtc_spans: u64,
+    rtc_widest: Option<RtcSpan>,
 }
+
+/// The idle periods every CPU started in each declared state over one span,
+/// and how many CPUs started one there, by the state's index in the
+/// declaration.
+#[derive(Clone, Copy, Default)]
+struct SpanIdle {
+    periods: [u64; MAX_STATES],
+    cpus: [u32; MAX_STATES],
+}
+
+impl SpanIdle {
+    fn deepest(&self) -> Option<usize> {
+        (0..MAX_STATES).rev().find(|&state| self.periods[state] > 0)
+    }
+}
+
+impl core::fmt::Display for SpanIdle {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        let Some(deepest) = self.deepest() else { return f.write_str("no CPU entered a declared idle state") };
+        write!(f, "idle periods by declared state:")?;
+        for state in (0..=deepest).filter(|&state| self.periods[state] > 0) {
+            write!(f, " s{state} {} on {} CPUs", self.periods[state], self.cpus[state])?;
+        }
+        write!(f, ", the deepest s{deepest}")
+    }
+}
+
+/// The RTC's edges over a span: the seconds they counted, and the TSC's span
+/// between them at the kept rate less those seconds. Each edge is taken as
+/// its interrupt arrives, so a CPU's wake from an idle state widens it.
+#[derive(Clone, Copy)]
+struct RtcSpan {
+    seconds: u64,
+    apart_ns: i64,
+}
+
+impl core::fmt::Display for RtcSpan {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        write!(f, "the RTC's edges {} s apart, the TSC {} ns from them", self.seconds, self.apart_ns)
+    }
+}
+
+/// An RTC span further from the TSC than this is logged: past the 400 µs exit
+/// of the deepest state either bench declares.
+const RTC_LOGGED_NS: u64 = 500_000;
 
 impl Held {
     /// Whether some CPU stayed out of every declared idle state from the last
-    /// sample to now: no package state deeper than its own can have held in
-    /// between, so the HPET counted throughout. Where every CPU spent part of
-    /// the span in one, the package may have reached a state that stops the
-    /// HPET, and the span is not held.
-    fn some_cpu_stayed_awake(&mut self) -> bool {
+    /// sample to now, and what states the CPUs entered: no package state
+    /// deeper than an awake CPU's own can have held in between, so the HPET
+    /// counted throughout. Where every CPU spent part of the span in one, the
+    /// package may have reached a state that stops the HPET, and the span is
+    /// not held.
+    fn idle_since_last(&mut self) -> (bool, SpanIdle) {
         let cpus = crate::smp::cpu_count() as usize;
-        self.idle.resize(cpus, (0, 0));
+        self.idle.resize(cpus, ((0, 0), [0; MAX_STATES]));
         let mut awake = false;
-        for (cpu, was) in self.idle.iter_mut().enumerate() {
+        let mut span = SpanIdle::default();
+        for (cpu, (was, was_by_state)) in self.idle.iter_mut().enumerate() {
             let local = crate::cpu_local::get(cpu as u32).expect("a CPU the roster counts has its record");
             let now = local.idle.deep_periods();
+            let by_state = local.idle.entered_by_state();
             awake |= now == *was && now.0 == now.1;
+            for state in 0..MAX_STATES {
+                let periods = by_state[state] - was_by_state[state];
+                span.periods[state] += periods;
+                span.cpus[state] += u32::from(periods > 0);
+            }
             *was = now;
+            *was_by_state = by_state;
         }
-        awake
+        (awake, span)
+    }
+
+    /// The RTC's span since the last edge the sampler read, where an edge
+    /// has come since.
+    fn rtc_since_last(&mut self, mult: u64) -> Option<RtcSpan> {
+        let (seen, at) = super::rtc::last_edge()?;
+        let (was_seen, was_at) = self.rtc.replace((seen, at))?;
+        let seconds = seen.checked_sub(was_seen).filter(|&s| s > 0)?;
+        let tsc_ns = Line { counter: 0, stamp: 0, mult }.nanos(at - was_at);
+        let span = RtcSpan { seconds, apart_ns: tsc_ns as i64 - (seconds * 1_000_000_000) as i64 };
+        self.rtc_spans += 1;
+        if self.rtc_widest.is_none_or(|w| span.apart_ns.unsigned_abs() > w.apart_ns.unsigned_abs()) {
+            self.rtc_widest = Some(span);
+        }
+        Some(span)
     }
 }
 
@@ -268,7 +346,11 @@ pub fn start(hpet_base: u64, pm_timer: Result<toyos_acpi::PmTimer, alloc::string
         pm: pm.ok(),
         unheld_hpet_apart: 0,
         unheld_pm_apart: 0,
+        unheld_by_deepest: [0; MAX_STATES],
         idle: Vec::new(),
+        rtc: None,
+        rtc_spans: 0,
+        rtc_widest: None,
     });
 }
 
@@ -475,11 +557,12 @@ pub fn check(now_ns: u64) {
 /// One sample of the HPET, and of the PM timer beside it, held to the TSC
 /// where the span since the last can be.
 fn sample(held: &mut Held, cpu_id: u32) {
-    let awake = held.some_cpu_stayed_awake();
+    let (awake, idle) = held.idle_since_last();
     let kept = held.watch.kept();
     let last = held.watch.last();
     let hpet = held.hpet.sample(held.hpet.near(last, kept.mult), 1);
     let pm = held.pm.as_ref().map(|pm| (pm.last, pm.next(kept.mult)));
+    let rtc = held.rtc_since_last(kept.mult);
     #[cfg(feature = "boot-actuators")]
     let (hpet, pm) = staged(hpet, pm, false, held.hpet.reference.period_fs);
     let against = |reference: Reference, from: Sample, to: Sample| {
@@ -492,9 +575,36 @@ fn sample(held: &mut Held, cpu_id: u32) {
     if let (Some(timer), Some((_, to))) = (held.pm.as_mut(), pm) {
         timer.last = to;
     }
+    let rtc_said = rtc.map_or_else(|| "no RTC span".into(), |span| alloc::format!("{span}"));
+    if let Some(span) = rtc.filter(|span| span.apart_ns.unsigned_abs() > RTC_LOGGED_NS) {
+        log!(
+            "clock: {span}, in a span {}; {idle}",
+            if awake { "some CPU stayed awake through" } else { "every CPU idled in" },
+        );
+    }
     if !awake {
-        held.unheld_hpet_apart += u64::from(!against(held.hpet.reference, last, hpet).holds());
-        held.unheld_pm_apart += u64::from(pm_agreement.is_some_and(|a| !a.holds()));
+        let hpet_agreement = against(held.hpet.reference, last, hpet);
+        let pm_apart = pm_agreement.is_some_and(|a| !a.holds());
+        held.unheld_hpet_apart += u64::from(!hpet_agreement.holds());
+        held.unheld_pm_apart += u64::from(pm_apart);
+        if let Some(deepest) = idle.deepest() {
+            held.unheld_by_deepest[deepest] += 1;
+        }
+        if !hpet_agreement.holds() || pm_apart {
+            let verdict = match pm_agreement {
+                None => "no PM timer",
+                Some(_) if hpet_agreement.holds() => "the HPET agrees with the TSC and the PM timer does not",
+                Some(pm) => match reference::arbitrate(hpet_agreement, pm) {
+                    Arbitration::FirstMoved => "the PM timer agrees with the TSC",
+                    Arbitration::CounterMoved => "the HPET and the PM timer agree with each other",
+                    Arbitration::AllDisagree => "all three disagree",
+                },
+            };
+            log!(
+                "clock: a span every CPU idled in reads apart, {verdict}: {}; {rtc_said}; {idle}",
+                spans(hpet_agreement, pm_agreement, last, hpet, pm),
+            );
+        }
         let _ = held.watch.take(hpet, false);
         return;
     }
@@ -510,8 +620,14 @@ fn sample(held: &mut Held, cpu_id: u32) {
             let measured = Line { counter: 0, stamp: 0, mult: report.measured.mult }.millihertz();
             let (span_s, bound) = (report.measured.span_ns / 1_000_000_000, report.measured.bound_ppb);
             let unheld = alloc::format!(
-                "{} spans unheld, across which the HPET read apart from the TSC in {} and the PM timer in {}",
-                report.unheld, held.unheld_hpet_apart, held.unheld_pm_apart,
+                "{} spans unheld, across which the HPET read apart from the TSC in {} and the PM timer in {}, \
+                 by the deepest declared state entered {:?}; the RTC timed {} spans{}",
+                report.unheld,
+                held.unheld_hpet_apart,
+                held.unheld_pm_apart,
+                held.unheld_by_deepest,
+                held.rtc_spans,
+                held.rtc_widest.map_or_else(alloc::string::String::new, |w| alloc::format!(", the widest {w}")),
             );
             match (report.kept.measured, report.retuned) {
                 (false, _) => log!(
@@ -529,7 +645,7 @@ fn sample(held: &mut Held, cpu_id: u32) {
             }
         }
         Err(Failure::Step { from, to, agreement }) => {
-            let spans = spans(agreement, pm_agreement, from, to, pm);
+            let spans = alloc::format!("{}; {rtc_said}; {idle}", spans(agreement, pm_agreement, from, to, pm));
             match pm_agreement.map(|second| reference::arbitrate(agreement, second)) {
                 Some(Arbitration::FirstMoved) => {
                     log!("clock: the HPET moved and the TSC did not, so this span is left out: {spans}");
