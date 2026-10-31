@@ -106,6 +106,19 @@ const NO_SUCH_OPERATION: &str = "it asked for an operation this protocol does no
 /// blocks, of which only what is written costs anything.
 const RAM_BLOCKS: u64 = 1 << 18;
 
+/// The share of physical memory the file servers' caches together may keep
+/// in clean blocks, read or written: the log and boot roles take
+/// [`SMALL_CLEAN_BYTES`] each, DATA the rest ([`data_clean_limit`]).
+///
+/// An interim bound and nothing more: no clean block is given back to
+/// another job, since nothing reports memory pressure
+/// (`issues/the-file-servers-clean-blocks-are-given-back-to-no-other-job.md`).
+const CLEAN_SHARE: u64 = 8;
+
+/// What the log and boot roles keep clean: their FAT and directories, and
+/// little of what logkeeper writes is read again.
+const SMALL_CLEAN_BYTES: u64 = 16 << 20;
+
 const TOKEN_ACCEPTOR: u64 = 0;
 const TOKEN_CLIENT: u64 = 1 << 32;
 const TOKEN_STREAM: u64 = 2 << 32;
@@ -340,7 +353,7 @@ fn absent(roots: &[&str], why: String) -> Box<dyn Volume> {
 }
 
 fn data_on<D: Disk + 'static>(disk: D, roots: &[&str]) -> Box<dyn Volume> {
-    match DataVolume::probe(disk, roots, fileserver::volume::now_nanos) {
+    match DataVolume::probe(disk, data_clean_limit(), roots, fileserver::volume::now_nanos) {
         Probed::Mounted(volume) => Box::new(volume),
         Probed::Unmountable(why) => {
             println!("fileserver: the DATA volume is ours and does not mount ({why}); it is absent this boot");
@@ -355,14 +368,25 @@ fn data_on<D: Disk + 'static>(disk: D, roots: &[&str]) -> Box<dyn Volume> {
 
 fn ram(roots: &[&str], why: &str) -> Box<dyn Volume> {
     println!("fileserver: {why}; /apps, /config, /home and /state are in memory and will not survive a reboot");
-    match DataVolume::format(Ram::new(RAM_BLOCKS), roots, fileserver::volume::now_nanos) {
+    match DataVolume::format(Ram::new(RAM_BLOCKS), data_clean_limit(), roots, fileserver::volume::now_nanos) {
         Ok(volume) => Box::new(volume),
         Err(why) => panic!("fileserver: a volume in memory would not format: {why}"),
     }
 }
 
 fn fat_on<D: Disk + 'static>(disk: D, writable: bool) -> Result<Box<dyn Volume>, String> {
-    FatVolume::mount(disk, writable, fileserver::volume::now_nanos).map(|v| Box::new(v) as Box<dyn Volume>)
+    FatVolume::mount(disk, blocks_of(SMALL_CLEAN_BYTES), writable, fileserver::volume::now_nanos)
+        .map(|v| Box::new(v) as Box<dyn Volume>)
+}
+
+/// The clean blocks DATA's cache keeps: [`CLEAN_SHARE`] of physical memory,
+/// less what the log and boot roles keep.
+fn data_clean_limit() -> usize {
+    blocks_of((toyos::system::memory_total() / CLEAN_SHARE).saturating_sub(2 * SMALL_CLEAN_BYTES))
+}
+
+fn blocks_of(bytes: u64) -> usize {
+    usize::try_from(bytes / toyos_blockdev::BLOCK as u64).expect("a block count fits a usize")
 }
 
 struct Server {

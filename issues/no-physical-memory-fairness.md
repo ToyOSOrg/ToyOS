@@ -100,7 +100,9 @@ memory is counted to whichever job made it: a client's own connection is
 its job's, but a pipe a server makes and hands out (fileserver's stream
 pipes, netstack's bells) is the server's, which the server bounds. With no
 per-job limit a cap is still the only thing between one client and the
-machine.
+machine. The file servers' block caches hold an eighth between them, and no
+other job gets it back
+(`issues/the-file-servers-clean-blocks-are-given-back-to-no-other-job.md`).
 
 **Promoted to `defect` 2026-08-25** (finding-lifecycle ruling: isolation
 findings are security-adjacent and are promoted, never folded). One job
