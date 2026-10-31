@@ -12,8 +12,9 @@
 //! oldest-read goes first; a dirty block is never dropped. A block read in
 //! is kept only if the allocator gives it and its place in the eviction order
 //! room: refused, the read is answered from the disk's bytes and nothing is
-//! cached. The block map's node, a small allocation every few inserts, is the
-//! one part of keeping it that still cannot be refused.
+//! cached. A block a flush cleans whose place is refused is dropped, since the
+//! disk holds it. The block map's node, a small allocation every few inserts,
+//! is the one part of keeping a block read in that still cannot be refused.
 //!
 //! **Several tasks may use it at once**, and the disk never has two requests
 //! for one block in flight when either is a write, which the block service's
@@ -314,7 +315,13 @@ impl<D: Disk> BlockDev for Cache<D> {
                 if slot.version == version {
                     slot.dirty = false;
                     inner.dirty -= 1;
-                    inner.order.push_back(block);
+                    // The disk holds it now, so a block whose place in the
+                    // eviction order is refused is dropped rather than kept.
+                    if inner.order.try_reserve(1).is_ok() {
+                        inner.order.push_back(block);
+                    } else {
+                        inner.slots.remove(&block);
+                    }
                 }
             }
             i += run;
