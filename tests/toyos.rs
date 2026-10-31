@@ -1188,6 +1188,12 @@ const METAL: &[(&str, metal::Metal)] = &[
         metal::Metal { arms: OSBENCH_ENERGY, judge: |b| osbench_energy_measured(b[0]) },
     ),
     (
+        // Measurement, not for landing: `osbench energy` with the Tiger Lake
+        // display driver's watermarks, the B of stage 1's A/B.
+        "display_energy",
+        metal::Metal { arms: DISPLAY_ENERGY, judge: |b| osbench_energy_measured(b[0]) },
+    ),
+    (
         // `osbench lan` against the `osbench-peer` the other bench's Linux runs,
         // compared with the same program under this bench's Linux on the same
         // path. A pass names it: the other bench has to be running the peer.
@@ -1773,6 +1779,13 @@ const BENCHCASE: &[metal::Arm] = &[metal::Arm {
 const OSBENCH_ENERGY: &[metal::Arm] = &[metal::Arm {
     adds_ms: 300_000,
     ..metal::once("energybenchcase", "tests/images/benchcase.toml", &[], &["osbench_energy"])
+}];
+
+/// As [`OSBENCH_ENERGY`], on the image with the display driver.
+const DISPLAY_ENERGY: &[metal::Arm] = &[metal::Arm {
+    adds_ms: 300_000,
+    named_only: true,
+    ..metal::once("displayenergycase", "tests/images/benchcase-display.toml", &[], &["osbench_energy"])
 }];
 
 /// The two groups that need another party share one boot when one pass names
