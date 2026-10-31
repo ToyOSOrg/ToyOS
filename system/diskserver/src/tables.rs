@@ -13,11 +13,9 @@ const FRAME: usize = 4 + 2 * (2 + wire::MAX_STATE) + 64;
 
 /// One frame's type and payload on `conn`, within the answer bound.
 fn frame(conn: &toyos::ipc::Connection) -> Result<(u32, Vec<u8>), Error> {
-    let header = answer(conn)?;
-    let mut payload = vec![0u8; (header.len() as usize).min(FRAME)];
-    let len = conn.recv_bytes(&header, &mut payload).map_err(|_| Error::Ended)?;
-    payload.truncate(len);
-    Ok((header.msg_type, payload))
+    let mut rx = toyos::ipc::FrameRx::<FRAME>::new();
+    let frame = answer(conn, &mut rx)?;
+    Ok((frame.msg_type, rx.payload(frame.payload_len).to_vec()))
 }
 
 fn refused(payload: &[u8]) -> Error {

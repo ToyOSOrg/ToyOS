@@ -111,34 +111,20 @@ impl Holders {
     }
 }
 
-/// How a write lands in a pipe.
-#[derive(Clone, Copy, PartialEq, Eq, Debug)]
-pub enum Landing {
-    /// All of it or none: a message.
-    Whole,
-    /// Whole up to [`MAX_WHOLE_PIPE_WRITE`] bytes, and as far as it fits past
-    /// that: a pipe end's write.
-    Pipe,
-    /// As far as it fits: a connection's plain write.
-    Partial,
+/// The room a pipe write of `len` bytes waits for: it lands as soon as there
+/// is this much, and not before. Whole up to [`MAX_WHOLE_PIPE_WRITE`] bytes,
+/// and as far as it fits past that.
+pub fn room(len: usize) -> usize {
+    match len <= MAX_WHOLE_PIPE_WRITE {
+        true => len,
+        false => 1,
+    }
 }
 
-impl Landing {
-    /// The room a write of `len` bytes waits for: it lands as soon as there is
-    /// this much, and not before.
-    pub fn room(self, len: usize) -> usize {
-        match self {
-            Self::Whole => len,
-            Self::Pipe if len <= MAX_WHOLE_PIPE_WRITE => len,
-            Self::Pipe | Self::Partial => len.min(1),
-        }
-    }
-
-    /// How many of `len` bytes land with `space` free; `None` until there is
-    /// [`Self::room`].
-    pub fn takes(self, space: usize, len: usize) -> Option<usize> {
-        (space >= self.room(len)).then(|| len.min(space))
-    }
+/// How many of `len` bytes a pipe write lands with `space` free; `None`
+/// until there is [`room`].
+pub fn takes(space: usize, len: usize) -> Option<usize> {
+    (space >= room(len)).then(|| len.min(space))
 }
 
 
@@ -356,11 +342,35 @@ mod tests {
 
     const MAX: usize = MAX_WHOLE_PIPE_WRITE;
 
+    /// How a model write lands: a pipe end's, or as far as it fits, which no
+    /// write makes: the tearing test's control.
+    #[derive(Clone, Copy, Debug)]
+    enum Landing {
+        Pipe,
+        Partial,
+    }
+
+    impl Landing {
+        fn room(self, len: usize) -> usize {
+            match self {
+                Self::Pipe => room(len),
+                Self::Partial => len.min(1),
+            }
+        }
+
+        fn takes(self, space: usize, len: usize) -> Option<usize> {
+            match self {
+                Self::Pipe => takes(space, len),
+                Self::Partial => (space >= self.room(len)).then(|| len.min(space)),
+            }
+        }
+    }
+
     /// What a write answers, as `kernel::pipe::write` does.
     #[derive(PartialEq, Eq, Debug)]
     enum Wrote {
         Bytes(usize),
-        /// A blocking write waits for [`Landing::room`]; a non-blocking one
+        /// A blocking write waits for [`room`]; a non-blocking one
         /// answers `WouldBlock`.
         NoRoom,
         Broken,
@@ -457,14 +467,12 @@ mod tests {
     /// ring, and still answers a missing reader.
     #[test]
     fn an_empty_write_waits_for_nothing() {
-        for landing in [Landing::Whole, Landing::Pipe, Landing::Partial] {
-            let mut pipe = Model::new(64);
-            pipe.ring.extend([0; 64]);
-            assert!(pipe.wakes(0, landing), "{landing:?}: an empty write waits on a full ring");
-            assert_eq!(pipe.write(&[], landing), Wrote::Bytes(0));
-            assert_eq!(pipe.holders.release(End::Read), Released::EndGone);
-            assert_eq!(pipe.write(&[], landing), Wrote::Broken);
-        }
+        let mut pipe = Model::new(64);
+        pipe.ring.extend([0; 64]);
+        assert!(pipe.wakes(0, Landing::Pipe), "an empty write waits on a full ring");
+        assert_eq!(pipe.write(&[], Landing::Pipe), Wrote::Bytes(0));
+        assert_eq!(pipe.holders.release(End::Read), Released::EndGone);
+        assert_eq!(pipe.write(&[], Landing::Pipe), Wrote::Broken);
     }
 
     /// A writer waiting for room is answered when the reader leaves, and its
@@ -487,15 +495,13 @@ mod tests {
     #[test]
     fn a_waiting_writer_wakes_exactly_when_its_write_lands() {
         let cap = 2 * MAX + 3;
-        for landing in [Landing::Whole, Landing::Pipe, Landing::Partial] {
-            for len in [0, 1, 2, 40, MAX - 1, MAX, MAX + 1, 2 * MAX] {
-                for space in 0..=cap {
-                    let mut pipe = Model::new(cap);
-                    pipe.ring.extend(core::iter::repeat_n(0, cap - space));
-                    let wakes = pipe.wakes(len, landing);
-                    let lands = pipe.write(&vec![7; len], landing) != Wrote::NoRoom;
-                    assert_eq!(wakes, lands, "{landing:?}, {len} bytes, {space} free: woken {wakes}, lands {lands}");
-                }
+        for len in [0, 1, 2, 40, MAX - 1, MAX, MAX + 1, 2 * MAX] {
+            for space in 0..=cap {
+                let mut pipe = Model::new(cap);
+                pipe.ring.extend(core::iter::repeat_n(0, cap - space));
+                let wakes = pipe.wakes(len, Landing::Pipe);
+                let lands = pipe.write(&vec![7; len], Landing::Pipe) != Wrote::NoRoom;
+                assert_eq!(wakes, lands, "{len} bytes, {space} free: woken {wakes}, lands {lands}");
             }
         }
     }

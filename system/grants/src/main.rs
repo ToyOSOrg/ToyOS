@@ -64,15 +64,12 @@ fn ask(request: &Request) -> (bool, String) {
     if let Err(e) = supervisor.send_bytes(msg_type, &payload) {
         return (false, format!("the supervisor did not take the request: {e:?}"));
     }
-    let answer = match supervisor.recv_header() {
+    let mut rx = Box::new(toyos::ipc::FrameRx::<{ toyos::ipc::MAX_FRAME_LEN as usize }>::new());
+    let answer = match rx.recv(&supervisor) {
         Ok(answer) => answer,
         Err(e) => return (false, format!("the supervisor did not answer: {e:?}")),
     };
-    let mut text = vec![0u8; answer.len() as usize];
-    let said = match supervisor.recv_bytes(&answer, &mut text) {
-        Ok(n) => String::from_utf8_lossy(&text[..n]).into_owned(),
-        Err(e) => return (false, format!("the supervisor's answer did not arrive whole: {e:?}")),
-    };
+    let said = String::from_utf8_lossy(rx.payload(answer.payload_len)).into_owned();
     match answer.msg_type {
         grants::MSG_DONE => (true, said),
         grants::MSG_REFUSED => (false, said),

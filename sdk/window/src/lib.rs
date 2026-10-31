@@ -524,11 +524,12 @@ fn copy(bytes: &[u8]) -> Result<(), CreateError> {
         return Ok(conn.send_bytes(MSG_CLIPBOARD_SET, bytes)?);
     }
     conn.send(MSG_COPY_BEGIN, &ClipboardShmMsg { len: bytes.len() as u32 })?;
-    let header = conn.recv_header()?;
-    if header.msg_type != MSG_COPY_REGION || !header.is_empty() {
-        return Err(CreateError::Protocol(header.msg_type));
+    let mut rx = ipc::FrameRx::<0>::new();
+    let frame = rx.recv(&conn)?;
+    if frame.msg_type != MSG_COPY_REGION {
+        return Err(CreateError::Protocol(frame.msg_type));
     }
-    let [region] = conn.recv_handles_exact::<1>(&header).ok_or(CreateError::NoHandle)?;
+    let [region] = rx.take_handles::<1>().ok_or(CreateError::NoHandle)?;
     let region = SharedMemory::lent(region, bytes.len()).map_err(CreateError::Lent)?;
     region.bytes().write(0, bytes);
     Ok(conn.signal(MSG_COPY_COMMIT)?)
@@ -546,6 +547,8 @@ fn buffer_bytes(width: u32, stride: u32, height: u32) -> Option<usize> {
 
 pub struct Window {
     conn: Connection,
+    /// The compositor's events, each taken whole.
+    rx: Box<ipc::FrameRx<MAX_INLINE_PAYLOAD>>,
     poller: Poller,
     /// The buffer, whose one writable handle the compositor sent; the
     /// compositor maps its own read-only.
@@ -607,19 +610,20 @@ impl Window {
         req.title_len = len as u8;
         conn.send(MSG_CREATE_WINDOW, &req)?;
 
-        // Header first, then the payload the message type calls for: the two
-        // answers carry different structs, and a payload of another length than
-        // the type it was asked for is a refusal from `recv_payload`, not a window.
-        let header = conn.recv_header()?;
-        match header.msg_type {
+        // The two answers carry different structs, and a payload of another
+        // length than its type's is a refusal from `decode_payload`, not a window.
+        let mut rx = ipc::FrameRx::<{ core::mem::size_of::<WindowInfo>() }>::new();
+        let frame = rx.recv(&conn)?;
+        let payload = rx.payload(frame.payload_len);
+        match frame.msg_type {
             MSG_WINDOW_CREATED => {}
             MSG_WINDOW_REFUSED => {
-                let refused: WindowRefused = conn.recv_payload(&header)?;
+                let refused: WindowRefused = ipc::decode_payload(payload)?;
                 return Err(CreateError::from_wire(refused.reason));
             }
             other => return Err(CreateError::Protocol(other)),
         }
-        let info: WindowInfo = conn.recv_payload(&header)?;
+        let info: WindowInfo = ipc::decode_payload(payload)?;
         let scale = Scale::from_wire(info.scale).ok_or(CreateError::Protocol(MSG_WINDOW_CREATED))?;
         let Some(buf_size) = buffer_bytes(info.width, info.stride, info.height) else {
             return Err(CreateError::Protocol(MSG_WINDOW_CREATED));
@@ -627,12 +631,13 @@ impl Window {
         // The buffer travels in the frame. A compositor that announced a
         // window and sent nothing with it is not serving this client, whatever
         // else it is doing.
-        let [buffer] = conn.recv_handles_exact::<1>(&header).ok_or(CreateError::NoHandle)?;
+        let [buffer] = rx.take_handles::<1>().ok_or(CreateError::NoHandle)?;
         let shm = SharedMemory::lent(buffer, buf_size).map_err(CreateError::Lent)?;
 
         let poller = Poller::new(1);
         Ok(Self {
             conn,
+            rx: Box::new(ipc::FrameRx::new()),
             poller,
             shm: Rc::new(shm),
             width: info.width,
@@ -672,10 +677,10 @@ impl Window {
     }
 
     pub fn recv_event(&mut self) -> Event {
-        let Ok(header) = self.conn.recv_header() else {
+        let Ok(frame) = self.rx.recv(&self.conn) else {
             return Event::Close;
         };
-        self.decode_event(&header)
+        self.decode_event(frame)
     }
 
     /// The next event, or `None` when `timeout_nanos` passes — and `None`
@@ -709,9 +714,10 @@ impl Window {
     /// A message the compositor cannot have meant closes the window rather
     /// than killing the client: this side is a library inside somebody else's
     /// program, and it has a way to say "the session is over".
-    fn decode_event(&mut self, header: &ipc::IpcHeader) -> Event {
-        match header.msg_type {
-            MSG_KEY_INPUT => match self.conn.recv_payload::<KeyEvent>(header) {
+    fn decode_event(&mut self, frame: ipc::Frame) -> Event {
+        let payload = self.rx.payload(frame.payload_len);
+        match frame.msg_type {
+            MSG_KEY_INPUT => match ipc::decode_payload::<KeyEvent>(payload) {
                 Ok(key) => Event::KeyInput(key),
                 Err(_) => Event::Close,
             },
@@ -719,12 +725,12 @@ impl Window {
                 load_layout(&mut self.translator);
                 Event::LayoutChanged
             }
-            MSG_MOUSE_INPUT => match self.conn.recv_payload(header) {
+            MSG_MOUSE_INPUT => match ipc::decode_payload(payload) {
                 Ok(ev) => Event::MouseInput(ev),
                 Err(_) => Event::Close,
             },
             MSG_WINDOW_RESIZED => {
-                let Ok(info) = self.conn.recv_payload::<ResizeInfo>(header) else {
+                let Ok(info) = ipc::decode_payload::<ResizeInfo>(payload) else {
                     return Event::Close;
                 };
                 // A scale outside the protocol is a compositor this client
@@ -738,7 +744,7 @@ impl Window {
                 // The compositor shows the old buffer only until this
                 // window's next present, which it reads from the new one, so a
                 // window that cannot map the new one has nothing to present.
-                let Some([buffer]) = self.conn.recv_handles_exact::<1>(header) else {
+                let Some([buffer]) = self.rx.take_handles::<1>() else {
                     return Event::Close;
                 };
                 let Ok(shm) = SharedMemory::lent(buffer, buf_size) else {
@@ -753,18 +759,12 @@ impl Window {
                 self.generation = info.generation;
                 Event::Resized
             }
-            MSG_CLIPBOARD_PASTE => {
-                let mut buf = [0u8; MAX_INLINE_PAYLOAD];
-                let Ok(n) = self.conn.recv_bytes(header, &mut buf) else {
-                    return Event::Close;
-                };
-                Event::ClipboardPaste(buf[..n].to_vec())
-            }
+            MSG_CLIPBOARD_PASTE => Event::ClipboardPaste(payload.to_vec()),
             MSG_CLIPBOARD_PASTE_SHM => {
-                let Ok(info) = self.conn.recv_payload::<ClipboardShmMsg>(header) else {
+                let Ok(info) = ipc::decode_payload::<ClipboardShmMsg>(payload) else {
                     return Event::Close;
                 };
-                let Some([buffer]) = self.conn.recv_handles_exact::<1>(header) else {
+                let Some([buffer]) = self.rx.take_handles::<1>() else {
                     return Event::ClipboardPaste(Vec::new());
                 };
                 let Ok(shm) = ReadOnly::lent(buffer, info.len as usize) else {

@@ -72,14 +72,13 @@ pub fn pick_file(mode: PickerMode, start_dir: &str) -> Result<Option<String>, Pi
     conn.send_bytes(MSG_FILEPICKER_REQUEST, &data[..1 + len])
         .map_err(|_| PickError::PickerGone)?;
 
-    let header = conn.recv_header().map_err(|_| PickError::PickerGone)?;
-    if header.msg_type != MSG_FILEPICKER_RESULT {
-        return Err(PickError::Protocol(header.msg_type));
+    let mut rx = Box::new(toyos::ipc::FrameRx::<{ toyos::ipc::MAX_FRAME_LEN as usize }>::new());
+    let frame = rx.recv(&conn).map_err(|_| PickError::PickerGone)?;
+    if frame.msg_type != MSG_FILEPICKER_RESULT {
+        return Err(PickError::Protocol(frame.msg_type));
     }
-    if header.len() == 0 {
+    if frame.payload_len == 0 {
         return Ok(None);
     }
-    let mut buf = [0u8; 4096];
-    let n = conn.recv_bytes(&header, &mut buf).map_err(|_| PickError::PickerGone)?;
-    String::from_utf8(buf[..n].to_vec()).map(Some).map_err(|_| PickError::NotUtf8)
+    String::from_utf8(rx.payload(frame.payload_len).to_vec()).map(Some).map_err(|_| PickError::NotUtf8)
 }

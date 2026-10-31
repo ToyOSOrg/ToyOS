@@ -1,12 +1,10 @@
 //! Everything between a client's pipe and a decision.
 //!
-//! **The compositor never reads a client with a blocking read**, and never
-//! writes one with a blocking write. `ipc::recv_header` and `ipc::recv_payload`
-//! park the caller until the peer sends the bytes it promised, which hands a
-//! client the decision of when the desktop runs again; a blocking `send` hands
-//! it the same decision by not reading. Here a peer that stops halfway through
-//! a frame costs a buffer and a deadline, and one that will not take a message
-//! costs itself.
+//! **The compositor never waits on a client**, to receive or to send. A
+//! blocking receive hands a client the decision of when the desktop runs
+//! again, and a blocking `send` hands it the same decision by not reading.
+//! Frames are taken with `ipc::FrameRx::pump`, and one a client will not take
+//! costs that client itself.
 //!
 //! **The compositor never receives a handle from a client.** A received handle's
 //! kind is unknowable, and using one of the wrong kind ends the process that
@@ -111,9 +109,8 @@ impl ClientFrame {
 
 /// A connection that has been accepted and has not yet said what it is for.
 ///
-/// It exists because `accept` and the first frame are two events, and the
-/// compositor used to fuse them with a blocking `recv_header` — so a client
-/// that connected and sent four bytes owned the desktop until it disconnected.
+/// It exists because `accept` and the first frame are two events: a client
+/// that connects and sends nothing must not hold the desktop.
 pub struct PendingConn {
     pub conn: Connection,
     pub rx: ClientRx,
@@ -170,14 +167,13 @@ pub enum DropReason {
     /// `window::MSG_RETIRED_CLIPBOARD_SET_SHM`, whose handle this compositor
     /// never takes.
     Retired,
-    /// Its pipe would not take a whole frame — an entire pipe of messages it
-    /// has not read.
+    /// Its connection would not take a whole frame — a full queue of messages
+    /// it has not taken.
     NotReading,
     /// Its other end closed: the one send error that is a client's routine end.
     Gone,
-    /// The kernel refused a send to it for any other reason — a handle send
-    /// to a peer that leaves `MAX_QUEUED_BATCHES` unreceived is
-    /// `ResourceExhausted`.
+    /// The kernel refused a send to it for any other reason, such as no memory
+    /// for the frame's bytes (`ResourceExhausted`).
     Refused(SyscallError),
     /// A message to it that this end will not frame.
     TooLarge,
@@ -195,7 +191,7 @@ impl fmt::Display for DropReason {
                 f.write_str("it sent the retired clipboard region, whose handle is never taken")
             }
             Self::NotReading => {
-                f.write_str("its pipe will not take another message and it is not reading")
+                f.write_str("its connection will not take another message and it is not reading")
             }
             Self::Gone => f.write_str("its connection is gone"),
             Self::Refused(e) => write!(f, "the kernel refused a send to it: {e}"),

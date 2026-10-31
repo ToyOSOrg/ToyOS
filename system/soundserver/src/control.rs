@@ -47,12 +47,10 @@ const _: () = assert!(
     "a control payload wider than the frame buffer would be refused as malformed",
 );
 
-/// One client's inbound framing.
+/// One client's inbound frames.
 ///
-/// **soundserver never reads a client with a blocking read.** `ipc::recv_header` and
-/// `ipc::recv_payload` park the caller until the peer sends the bytes it
-/// promised, which hands a client the decision of when the control thread runs
-/// again: one client parking a partial header would wedge accept and
+/// **soundserver never waits on a client's receive**: one client deciding
+/// when the control thread runs again would wedge accept and
 /// volume/close/disconnect handling for every other client (the mix thread is
 /// unaffected either way). The doctrine is `system/CLAUDE.md`'s.
 type ControlRx = ipc::FrameRx<MAX_PAYLOAD>;

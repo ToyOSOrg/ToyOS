@@ -74,7 +74,7 @@ The design and its roast are PR #863's body.
   datagram socket are already their holders' connections and bells
   (`toyos::net::socket`), each datagram one frame on its holder's
   connection, and the pipe ABI's messages and `toyos::net`'s pipe handles are
-  gone; a datagram is still copied through the connection's pipes. netstack copies each datagram record's
+  gone; a datagram is still copied through the connection. netstack copies each datagram record's
   `len`, `port` and `addr` out of the region once and judges the copy: a
   `len` past the bytes the record holds ends that socket alone. `toyos::net`'s `send_to` refuses
   what a sender can judge and writes no record: a payload past

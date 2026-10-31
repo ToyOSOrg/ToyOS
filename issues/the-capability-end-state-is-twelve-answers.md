@@ -229,7 +229,7 @@ process has.
 is created with `Rights::NONE` there because "every bit on a `SysCap` is an
 authority init decides per program" — the machine's only one is minted with
 `TRANSFER` at `kernel/src/loader/mod.rs:946`. The mechanisms are
-`SYS_MESSAGE_SEND`/`SYS_HANDLE_RECV` over a `Connection`, where the connection
+`SYS_MESSAGE_SEND`/`SYS_MESSAGE_RECV` over a `Connection`, where the connection
 and every handle must carry `TRANSFER`, no handle may be named twice, and the
 connection may not be sent over itself (`4a98107f^:kernel/src/arch/syscall.rs:2086`,
 `:2090`); and `SpawnArgs::endow`. Nothing else crosses a process boundary — the

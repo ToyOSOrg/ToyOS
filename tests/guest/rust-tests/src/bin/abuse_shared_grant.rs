@@ -167,8 +167,9 @@ fn marker(role: &str) {
 
 fn invited() {
     let conn = toyos::endow::service(SERVICE).expect("the invited peer holds a connector");
-    let header = conn.recv_header().expect("the owner's announcement");
-    let [handle] = conn.recv_handles_exact::<1>(&header).expect("the region the owner sent");
+    let mut rx = toyos::ipc::FrameRx::<{ toyos::ipc::MAX_FRAME_LEN as usize }>::new();
+    rx.recv(&conn).expect("the owner's announcement");
+    let [handle] = rx.take_handles::<1>().expect("the region the owner sent");
     let region = SharedMemory::lent(handle, REGION).expect("take the region");
     println!("read {}", String::from_utf8_lossy(&region.bytes().sub(0, SECRET.len()).to_vec()));
     std::io::stdout().flush().expect("invited: flush the report");
