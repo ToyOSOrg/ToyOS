@@ -726,6 +726,13 @@ impl Shard {
         Ok(id)
     }
 
+    /// [`Udp::send_via`](toyos_net_udp::Udp::send_via): a datagram that leaves by `iface` alone.
+    pub fn send_via(&mut self, now: Instant, id: SocketId, iface: IfIndex, destination: Ipv4Addr, port: u16, payload: &[u8]) -> Result<(), toyos_net_udp::Error> {
+        let queued = self.udp.send_via(&mut self.ip, id, iface, destination, port, payload);
+        self.settle(now);
+        queued
+    }
+
     /// The acquisition socket's send, naming its source, 0.0.0.0 to the limited broadcast or an
     /// assigned address, and the interface whose address it acquires.
     pub fn send_from(&mut self, now: Instant, id: SocketId, origin: Origin, destination: Ipv4Addr, port: u16, payload: &[u8]) -> Result<(), toyos_net_udp::Error> {

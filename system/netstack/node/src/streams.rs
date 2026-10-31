@@ -29,7 +29,7 @@ use alloc::collections::{BTreeMap, VecDeque};
 use core::sync::atomic::Ordering;
 use core::time::Duration;
 
-use toyos::net::stream::{Server, Words, LAYOUT, NODELAY, RECEIVE_BYTES, RESET, TIMED_OUT, UNREACHABLE};
+use toyos::net::stream::{Server, Words, ADDRESS_GONE, LAYOUT, NODELAY, RECEIVE_BYTES, RESET, TIMED_OUT, UNREACHABLE};
 use toyos_net_shard::ConnectError;
 use toyos_net_tcp::{ConnId, Endpoint, Error, Failure, Lent, Options, State, Status};
 use toyos_net_wire::{Instant, Port};
@@ -92,6 +92,7 @@ const fn code(failure: Failure) -> u32 {
         Failure::TimedOut => TIMED_OUT,
         Failure::Unreachable(_) | Failure::Prohibited => UNREACHABLE,
         Failure::Refused | Failure::Reset => RESET,
+        Failure::AddressGone => ADDRESS_GONE,
     }
 }
 

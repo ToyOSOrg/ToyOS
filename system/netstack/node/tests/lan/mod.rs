@@ -117,6 +117,7 @@ pub fn udp(to: [u8; 6], from: [u8; 6], source: (Ipv4Addr, u16), destination: (Ip
 
 pub struct Lan {
     pub node: Node,
+    pub link: toyos_net_node::IfIndex,
     pub now: Instant,
     /// Every frame the node emitted, in order, with the time it left.
     pub sent: Vec<(Instant, Seen)>,
@@ -134,14 +135,14 @@ fn draw(draws: &mut u32) -> impl FnMut() -> u32 + '_ {
 impl Lan {
     /// `common`'s node, an hour into the clock, its link down.
     pub fn new() -> Self {
-        let Wire { node, now, .. } = Wire::new();
-        Self { node, now, sent: Vec::new(), draws: 0x6b00_0000 }
+        let Wire { node, link, now, .. } = Wire::new();
+        Self { node, link, now, sent: Vec::new(), draws: 0x6b00_0000 }
     }
 
     /// One transmit opportunity with all the credit the node wants. Returns how many frames left.
     pub fn opportunity(&mut self) -> usize {
         let (sent, now) = (&mut self.sent, self.now);
-        self.node.transmit(now, usize::MAX, |frame| sent.push((now, outside(frame))), draw(&mut self.draws))
+        self.node.transmit(now, usize::MAX, |_, frame| sent.push((now, outside(frame))), draw(&mut self.draws))
     }
 
     /// Opportunities until the node sends nothing more, the router and B answering each ARP
@@ -161,18 +162,18 @@ impl Lan {
                 .collect();
             for target in asked {
                 let mac = if target == R { MAC_R } else { MAC_B };
-                self.node.receive(self.now, BUDGET, batch(&[&arp(MAC, false, mac, target, A)]), draw(&mut self.draws));
+                self.node.receive(self.now, self.link, BUDGET, batch(&[&arp(MAC, false, mac, target, A)]), draw(&mut self.draws));
             }
         }
     }
 
     pub fn deliver(&mut self, frame: &[u8]) {
-        self.node.receive(self.now, BUDGET, batch(&[frame]), draw(&mut self.draws));
+        self.node.receive(self.now, self.link, BUDGET, batch(&[frame]), draw(&mut self.draws));
         self.pump();
     }
 
     pub fn link(&mut self, up: bool) {
-        self.node.link(self.now, up, draw(&mut self.draws));
+        self.node.link(self.now, self.link, up, draw(&mut self.draws));
         self.pump();
     }
 
@@ -208,13 +209,13 @@ impl Lan {
         let id = xid(&discover);
         self.deliver(&from_server(MAC, A, &message_of(OFFER, id, terms)));
         self.deliver(&from_server(BROADCAST, Ipv4Addr::BROADCAST, &message_of(ACK, id, terms)));
-        assert_eq!(self.node.lease(), None, "acknowledged is not held");
+        assert_eq!(self.node.lease(self.link), None, "acknowledged is not held");
     }
 
     /// [`Self::acknowledge`], and conflict detection run to its end: the lease is held.
     pub fn lease_on(&mut self, terms: &[(u8, Vec<u8>)]) {
         self.acknowledge(terms);
-        assert!(self.run_until(Duration::from_secs(10), |lan| lan.node.lease().is_some()), "the lease is held");
+        assert!(self.run_until(Duration::from_secs(10), |lan| lan.node.lease(lan.link).is_some()), "the lease is held");
     }
 
     /// A lease of `A`/24 for `seconds`, through the router.

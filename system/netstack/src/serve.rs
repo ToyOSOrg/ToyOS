@@ -281,6 +281,8 @@ fn connect_failed(failure: Failure) -> u32 {
         Failure::Refused => ERR_CONNECTION_REFUSED,
         Failure::Reset => ERR_CONNECTION_RESET,
         Failure::TimedOut => ERR_TIMED_OUT,
+        // The address it was made from went under it: as no address at all.
+        Failure::AddressGone => ERR_NOT_CONNECTED,
         Failure::Unreachable(_) | Failure::Prohibited => {
             say!("netstack: a connect ended {failure:?}");
             ERR_OTHER

@@ -518,14 +518,14 @@ impl Udp {
 
     /// Queues `payload` for `destination:port`. Accepted means queued, not sent.
     pub fn send_to(&mut self, ip: &mut Ip, id: SocketId, destination: Ipv4Addr, port: u16, payload: &[u8]) -> Result<(), Error> {
-        self.submit(ip, id, None, destination, port, payload)
+        self.submit(ip, id, (None, None), destination, port, payload)
     }
 
     /// Queues `payload` for the connected peer.
     pub fn send(&mut self, ip: &mut Ip, id: SocketId, payload: &[u8]) -> Result<(), Error> {
         let socket = self.socket(id)?;
         match socket.binding {
-            Binding::Connected { peer, peer_port, .. } => self.submit(ip, id, None, peer, peer_port.get(), payload),
+            Binding::Connected { peer, peer_port, .. } => self.submit(ip, id, (None, None), peer, peer_port.get(), payload),
             Binding::Any | Binding::Specific(_) => {
                 self.count(Counter::NotConnected);
                 Err(Error::Refused(Counter::NotConnected))
@@ -536,12 +536,18 @@ impl Udp {
     /// The acquisition socket's send, naming its source: 0.0.0.0 to the limited broadcast, or an
     /// assigned address.
     pub fn send_from(&mut self, ip: &mut Ip, id: SocketId, origin: Origin, destination: Ipv4Addr, port: u16, payload: &[u8]) -> Result<(), Error> {
-        self.submit(ip, id, Some((origin.source, origin.iface)), destination, port, payload)
+        self.submit(ip, id, (Some(origin.source), Some(origin.iface)), destination, port, payload)
     }
 
-    fn submit(&mut self, ip: &mut Ip, id: SocketId, named: Option<(Ipv4Addr, IfIndex)>, destination: Ipv4Addr, port: u16, payload: &[u8]) -> Result<(), Error> {
-        let iface = named.map(|(_, iface)| iface);
-        let named = named.map(|(source, _)| source);
+    /// A datagram that leaves by `iface` alone, from the address the socket's binding and that
+    /// interface give it: one host's datagram to a group on each of its links.
+    pub fn send_via(&mut self, ip: &mut Ip, id: SocketId, iface: IfIndex, destination: Ipv4Addr, port: u16, payload: &[u8]) -> Result<(), Error> {
+        self.submit(ip, id, (None, Some(iface)), destination, port, payload)
+    }
+
+    /// `from` is the source a send names and the interface it names, either absent.
+    fn submit(&mut self, ip: &mut Ip, id: SocketId, from: (Option<Ipv4Addr>, Option<IfIndex>), destination: Ipv4Addr, port: u16, payload: &[u8]) -> Result<(), Error> {
+        let (named, iface) = from;
         let socket = self.socket(id)?;
         if let Some(error) = socket.pending.take() {
             return Err(Error::Failed(error));
