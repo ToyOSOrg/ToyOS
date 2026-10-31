@@ -5,9 +5,10 @@
 //!   cargo test -p toyos-link --features mutate-want-relaxed --test ends_loom
 
 use core::sync::atomic::Ordering;
+use std::rc::Rc;
 
+use loom::sync::Notify;
 use loom::sync::atomic::AtomicU32;
-use loom::sync::{Arc, Notify};
 use toyos::transport::Word;
 use toyos_link::ends::{Driver, Stack};
 use toyos_link::layout::WORDS;
@@ -31,30 +32,47 @@ impl Word for Shared {
     }
 }
 
+/// The region's page and the stack's doorbell. Held in an `Rc`, as
+/// `toyos`'s `transport_loom` holds its streams: loom's `Arc` panics again in
+/// its drop when a deadlock unwinds the model, which aborts the run before it
+/// says which test failed
+/// (`issues/loom-arc-panics-in-its-drop-while-a-failed-model-unwinds.md`). The
+/// page is built on the heap: its words on the model's 32 KiB coroutine stack
+/// leave too little of it to unwind.
+struct Link {
+    page: Box<[Shared; WORDS]>,
+    bell: Notify,
+}
+
+fn link() -> Rc<Link> {
+    let words: Box<[Shared]> = (0..WORDS).map(|_| Shared(AtomicU32::new(0))).collect();
+    let page = words.try_into().ok().expect("WORDS words");
+    Rc::new(Link { page, bell: Notify::new() })
+}
+
 /// The stack fills the transmit ring and sleeps on its doorbell until it has
 /// room; the driver takes one frame and rings only if the stack wanted it.
 #[test]
 fn a_full_ring_is_never_left_asleep_on_room_it_has() {
     loom::model(|| {
-        let page: Arc<[Shared; WORDS]> = Arc::new(core::array::from_fn(|_| Shared(AtomicU32::new(0))));
-        let mut driver = Driver::new(&page);
-        let mut stack = Stack::new(&page);
-        while stack.room(&page).unwrap() > 0 {
-            stack.send(&page, 60).unwrap();
+        let link = link();
+        let mut driver = Driver::new(&link.page);
+        let mut stack = Stack::new(&link.page);
+        while stack.room(&link.page).unwrap() > 0 {
+            stack.send(&link.page, 60).unwrap();
         }
-        stack.publish(&page);
-        let bell = Arc::new(Notify::new());
+        stack.publish(&link.page);
         let consumer = {
-            let (page, bell) = (Arc::clone(&page), Arc::clone(&bell));
+            let link = Rc::clone(&link);
             loom::thread::spawn(move || {
-                assert!(driver.to_send(&page).unwrap().is_some(), "a frame published");
-                if driver.release(&page) {
-                    bell.notify();
+                assert!(driver.to_send(&link.page).unwrap().is_some(), "a frame published");
+                if driver.release(&link.page) {
+                    link.bell.notify();
                 }
             })
         };
-        while stack.want_room(&page).unwrap() == 0 {
-            bell.wait();
+        while stack.want_room(&link.page).unwrap() == 0 {
+            link.bell.wait();
         }
         consumer.join().unwrap();
     });

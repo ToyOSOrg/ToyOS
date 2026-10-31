@@ -32,4 +32,5 @@ its control `transport-want-relaxed` of `toyos`.
 
 **Exit**: a test on the fork's `toyos` branch in which a model that deadlocks
 with a `loom::sync::Arc` live prints loom's `deadlock` message and its test
-fails without an abort, and that stream model holds its state in loom's `Arc`.
+fails without an abort, and that stream model and `lib/link/tests/ends_loom.rs`
+hold their state in loom's `Arc`.
