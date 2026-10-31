@@ -98,7 +98,7 @@ pub fn current_cpu() -> u32 {
 pub fn core_of(cpu: u32) -> u32 {
     static CORES: OnceLock<Vec<u32>> = OnceLock::new();
     let cores = CORES.get_or_init(|| {
-        let max = allowed_cpus().into_iter().max().unwrap_or(0);
+        let max = super::allowed_cpus().into_iter().max().unwrap_or(0);
         (0..=max)
             .map(|cpu| {
                 let topology = |file: &str| -> u32 {
@@ -114,7 +114,7 @@ pub fn core_of(cpu: u32) -> u32 {
 }
 
 pub fn threads_per_core() -> u32 {
-    let cpus = allowed_cpus();
+    let cpus = super::allowed_cpus();
     let first = core_of(cpus[0] as u32);
     cpus.iter().filter(|&&cpu| core_of(cpu as u32) == first).count() as u32
 }
@@ -127,13 +127,12 @@ pub fn cpu_model() -> String {
     model.unwrap_or_else(|| "unknown".into())
 }
 
-/// The CPUs this process may run on, by Linux's numbering: its main
-/// thread's mask, which nothing here pins.
-pub fn allowed_cpus() -> Vec<usize> {
+/// The CPUs the calling thread may run on, by Linux's numbering.
+pub fn thread_cpus() -> Vec<usize> {
     // SAFETY: a zeroed cpu_set_t is an empty set.
     let mut set: libc::cpu_set_t = unsafe { std::mem::zeroed() };
-    // SAFETY: getpid cannot fail; `set` is a valid out-pointer of the size given.
-    let got = unsafe { libc::sched_getaffinity(libc::getpid(), std::mem::size_of::<libc::cpu_set_t>(), &mut set) };
+    // SAFETY: `set` is a valid out-pointer of the size given; 0 names the caller.
+    let got = unsafe { libc::sched_getaffinity(0, std::mem::size_of::<libc::cpu_set_t>(), &mut set) };
     assert_eq!(got, 0, "sched_getaffinity: {}", std::io::Error::last_os_error());
     // SAFETY: CPU_ISSET reads the set within its size.
     (0..libc::CPU_SETSIZE as usize).filter(|&cpu| unsafe { libc::CPU_ISSET(cpu, &set) }).collect()
@@ -166,7 +165,7 @@ pub fn pin_self(cpu: usize) {
 
 /// Let thread `tid` run anywhere this process may.
 pub fn unpin(tid: libc::pid_t) {
-    set_affinity(tid, &allowed_cpus());
+    set_affinity(tid, &super::allowed_cpus());
 }
 
 /// The calling thread's timer slack, which pads each of its sleeps by up to
@@ -191,7 +190,7 @@ fn read(path: &str) -> Option<String> {
 /// it: `powersave*8`.
 fn per_cpu(file: &str) -> String {
     let mut seen: Vec<(String, usize)> = Vec::new();
-    for cpu in allowed_cpus() {
+    for cpu in super::allowed_cpus() {
         let value = read(&format!("/sys/devices/system/cpu/cpu{cpu}/{file}")).unwrap_or_else(|| "absent".into());
         match seen.iter_mut().find(|(v, _)| *v == value) {
             Some((_, n)) => *n += 1,

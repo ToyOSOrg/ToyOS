@@ -16,6 +16,20 @@ mod imp;
 
 pub use imp::*;
 
+static ALLOWED: std::sync::OnceLock<Vec<usize>> = std::sync::OnceLock::new();
+
+/// Read the CPUs this process may run on, before any thread is pinned.
+pub fn start() {
+    ALLOWED.set(thread_cpus()).expect("sys::start runs once");
+}
+
+/// The CPUs this process may run on, as its main thread began with them. A
+/// mask is per thread on both systems, so a placed thread's own names only its
+/// CPU, and a placement made from one must not read it.
+pub fn allowed_cpus() -> Vec<usize> {
+    ALLOWED.get().expect("sys::start ran first").clone()
+}
+
 /// What a process can read of its own accounting: Linux its context
 /// switches and page faults; ToyOS nothing.
 pub struct Counts {
