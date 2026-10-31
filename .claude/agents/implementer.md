@@ -36,7 +36,7 @@ All scratch files, logs, patches and PR bodies live under the brief's scratch di
 
 ## A fork
 
-Forks carry upstream-quality source changes. A standalone C program normally uses patch files against a hash-pinned upstream archive; use a fork only when the delta is too large to review that way. Packaging alone does not justify a source fork.
+Forks carry upstream-quality source changes. Third-party C source normally uses patch files against a hash-pinned upstream archive; use a fork only when the delta is too large to review that way. Packaging alone does not justify a source fork.
 
 Fork clones live beside the monorepo and are registered in `.cargo/local.toml`. They are shared: use explicit paths, never stash or switch branches in them. Each fork has one append-only branch per upstream base. Forks depend on ToyOS crates by version, never by path. Land every changed consumed fork commit with all lockfile and gitlink updates that name it.
 
