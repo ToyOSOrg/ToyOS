@@ -33,16 +33,102 @@ enum Place {
 /// What a descriptor of this module's names.
 enum Held {
     /// A file or directory a file server holds open.
-    Served { cap: Arc<Capability>, fid: Fid },
+    Served { cap: Arc<Capability>, fid: Fid, position: Position },
     /// A directory the kernel serves, by its absolute path.
     KernelDir(String),
 }
 
 impl Drop for Held {
     fn drop(&mut self) {
-        if let Held::Served { cap, fid } = self {
+        if let Held::Served { cap, fid, .. } = self {
             cap.dir.lock().close(*fid);
         }
+    }
+}
+
+/// A served file's offset: kept here while this process is the
+/// description's only holder, so a seek costs no request and a read or a
+/// write goes at it as a positioned one; the server's from the moment the
+/// description is shared with another process, which is for good, and a
+/// directory's from the start, as the server refuses to move one.
+///
+/// [`Position::stream`] is the one request that shares a description, so it
+/// hands the offset over itself; another that ever does belongs beside it.
+///
+/// Reached only under the capability's turn, so a read or write and the
+/// offset's move are one step against every other thread's.
+struct Position {
+    /// Every write lands at the end, which only the server knows.
+    append: bool,
+    at: Lock<Offset>,
+}
+
+enum Offset {
+    Here(u64),
+    Server,
+}
+
+impl Position {
+    fn new(append: bool, directory: bool) -> Self {
+        let at = if directory { Offset::Server } else { Offset::Here(0) };
+        Self { append, at: Lock::new(at) }
+    }
+
+    fn read(&self, dir: &mut Dir, fid: Fid, out: &mut [u8]) -> Result<usize, fs::Error> {
+        let mut at = self.at.lock();
+        match *at {
+            Offset::Here(offset) => {
+                let n = dir.pread(fid, offset, out)?;
+                *at = Offset::Here(offset + n as u64);
+                Ok(n)
+            }
+            Offset::Server => dir.read(fid, out),
+        }
+    }
+
+    fn write(&self, dir: &mut Dir, fid: Fid, data: &[u8]) -> Result<usize, fs::Error> {
+        let mut at = self.at.lock();
+        match *at {
+            Offset::Here(offset) if !self.append => {
+                let n = dir.pwrite(fid, offset, data)?;
+                *at = Offset::Here(offset + n as u64);
+                Ok(n)
+            }
+            // The server writes at the end and answers where that left it.
+            Offset::Here(_) => dir.write(fid, data).map(|w| {
+                *at = Offset::Here(w.offset);
+                w.len
+            }),
+            Offset::Server => dir.write(fid, data).map(|w| w.len),
+        }
+    }
+
+    /// Where a seek lands, by the rule the server keeps for its own offsets:
+    /// at or below [`fs::MAX_FILE_BYTES`] and not before the start. From the
+    /// end, the server is asked, since only it knows the size.
+    fn seek(&self, dir: &mut Dir, fid: Fid, whence: u64, delta: i64) -> Result<u64, fs::Error> {
+        let mut at = self.at.lock();
+        let Offset::Here(offset) = *at else { return dir.seek(fid, whence, delta) };
+        let landed = match whence {
+            fs::SEEK_START => 0u64.checked_add_signed(delta),
+            fs::SEEK_CURRENT => offset.checked_add_signed(delta),
+            _ => Some(dir.seek(fid, whence, delta)?),
+        };
+        let landed = landed.filter(|&l| l <= fs::MAX_FILE_BYTES).ok_or(fs::Error::InvalidRequest)?;
+        *at = Offset::Here(landed);
+        Ok(landed)
+    }
+
+    /// A stream the server writes at the description's offset for another
+    /// process ([`Dir::stream`]): the offset is handed to the server first,
+    /// and is its from then on.
+    fn stream(&self, dir: &mut Dir, fid: Fid) -> Result<crate::Pipe, fs::Error> {
+        let mut at = self.at.lock();
+        if let Offset::Here(offset) = *at {
+            dir.seek(fid, fs::SEEK_START, offset as i64)?;
+            *at = Offset::Server;
+        }
+        dir.stream(fid)
     }
 }
 
@@ -122,7 +208,7 @@ fn from_dir(fd: Fd, path: &str) -> Result<Place, Error> {
         _ => None,
     });
     match named.map_err(Error::Fd)?.as_deref() {
-        Some(Held::Served { cap, fid }) => {
+        Some(Held::Served { cap, fid, .. }) => {
             let rel = fs::wire_path(path).ok_or(Error::Served(fs::Error::NameTooLong))?;
             Ok(Place::Served(Arc::clone(cap), Base::Fid(*fid), rel))
         }
@@ -176,7 +262,7 @@ fn on_fd<T>(
     fd: Fd,
     kernel: impl FnOnce(crate::BorrowedHandle<'_>) -> Result<T, SyscallError>,
     kernel_dir: impl FnOnce(&str) -> Result<T, Error>,
-    served: impl FnOnce(&mut Dir, Fid) -> Result<T, fs::Error>,
+    served: impl FnOnce(&mut Dir, Fid, &Position) -> Result<T, fs::Error>,
 ) -> Result<T, Error> {
     // A kernel call is made while the descriptor's object is held; an object
     // of this module's is taken out of it, counted, and asked after.
@@ -190,7 +276,7 @@ fn on_fd<T>(
     match named.map_err(Error::Fd)?? {
         Err(answer) => answer,
         Ok(held) => match &*held {
-            Held::Served { cap, fid } => served(&mut cap.dir.lock(), *fid).map_err(Error::Served),
+            Held::Served { cap, fid, position } => served(&mut cap.dir.lock(), *fid, position).map_err(Error::Served),
             Held::KernelDir(path) => kernel_dir(path),
         },
     }
@@ -325,7 +411,8 @@ unsafe extern "C" fn toyos_fs_open(at: Fd, path: *const u8, len: usize, how: Ope
                 true => dir.create_unnamed(base, rel, flags)?,
                 false => dir.open(base, rel, flags)?,
             };
-            Ok(Ok(Opened::Held(Held::Served { cap: Arc::clone(cap), fid: opened.fid })))
+            let position = Position::new(how.append, opened.stat.kind == fs::KIND_DIR);
+            Ok(Ok(Opened::Held(Held::Served { cap: Arc::clone(cap), fid: opened.fid, position })))
         },
     )
     .and_then(|opened| opened);
@@ -350,7 +437,7 @@ unsafe extern "C" fn toyos_fs_stat(at: Fd, path: *const u8, len: usize, follow: 
         (At::Fd(fd), true) => match named(fd) {
             Ok(Named::Handle(handle)) => syscall::fstat(handle).map(Stat::of_kernel).map_err(Error::Kernel),
             Ok(Named::Held(held)) => match &*held {
-                Held::Served { cap, fid } => cap.dir.lock().fstat(*fid).map(stat_of).map_err(Error::Served),
+                Held::Served { cap, fid, .. } => cap.dir.lock().fstat(*fid).map(stat_of).map_err(Error::Served),
                 Held::KernelDir(dir) => syscall::stat(dir.as_bytes(), true).map(Stat::of_kernel).map_err(Error::Kernel),
             },
             Err(e) => Err(e),
@@ -393,7 +480,7 @@ unsafe extern "C" fn toyos_fs_read(fd: Fd, buf: *mut u8, len: usize) -> i64 {
     if let Some(n) = on_stream(fd, |h| crate::net::stream::read(h, out(), blocking)) {
         return answer(n.map(|n| n as u64));
     }
-    let n = on_fd(fd, |h| syscall::read(h.raw(), out()), is_a_directory, |dir, fid| dir.read(fid, out()));
+    let n = on_fd(fd, |h| syscall::read(h.raw(), out()), is_a_directory, |dir, fid, position| position.read(dir, fid, out()));
     answer(n.map(|n| n as u64))
 }
 
@@ -405,7 +492,7 @@ unsafe extern "C" fn toyos_fs_write(fd: Fd, buf: *const u8, len: usize) -> i64 {
     if let Some(n) = on_stream(fd, |h| crate::net::stream::write(h, buf, blocking)) {
         return answer(n.map(|n| n as u64));
     }
-    let n = on_fd(fd, |h| syscall::write(h.raw(), buf), is_a_directory, |dir, fid| dir.write(fid, buf).map(|w| w.len));
+    let n = on_fd(fd, |h| syscall::write(h.raw(), buf), is_a_directory, |dir, fid, position| position.write(dir, fid, buf));
     answer(n.map(|n| n as u64))
 }
 
@@ -414,7 +501,7 @@ unsafe extern "C" fn toyos_fs_pread(fd: Fd, buf: *mut u8, len: usize, offset: u6
     // SAFETY: the caller lends `len` writable bytes for the call, and only
     // one of the closures runs.
     let out = || unsafe { core::slice::from_raw_parts_mut(buf, len) };
-    let n = on_fd(fd, |h| syscall::pread(h.raw(), out(), offset), is_a_directory, |dir, fid| dir.pread(fid, offset, out()));
+    let n = on_fd(fd, |h| syscall::pread(h.raw(), out(), offset), is_a_directory, |dir, fid, _| dir.pread(fid, offset, out()));
     answer(n.map(|n| n as u64))
 }
 
@@ -422,7 +509,7 @@ unsafe extern "C" fn toyos_fs_pread(fd: Fd, buf: *mut u8, len: usize, offset: u6
 unsafe extern "C" fn toyos_fs_pwrite(fd: Fd, buf: *const u8, len: usize, offset: u64) -> i64 {
     // SAFETY: the caller's.
     let buf = unsafe { bytes(buf, len) };
-    let n = on_fd(fd, |h| syscall::pwrite(h.raw(), buf, offset), is_a_directory, |dir, fid| dir.pwrite(fid, offset, buf));
+    let n = on_fd(fd, |h| syscall::pwrite(h.raw(), buf, offset), is_a_directory, |dir, fid, _| dir.pwrite(fid, offset, buf));
     answer(n.map(|n| n as u64))
 }
 
@@ -436,30 +523,32 @@ extern "C" fn toyos_fs_seek(fd: Fd, whence: u32, delta: i64) -> i64 {
     };
     // A kernel directory has no offset to move.
     let kernel_dir = |_: &str| Err(Error::Kernel(SyscallError::InvalidArgument));
-    answer(on_fd(fd, |h| syscall::seek(h.raw(), kernel), kernel_dir, |dir, fid| dir.seek(fid, served, delta)))
+    answer(on_fd(fd, |h| syscall::seek(h.raw(), kernel), kernel_dir, |dir, fid, position| position.seek(dir, fid, served, delta)))
 }
 
 #[no_mangle]
 extern "C" fn toyos_fs_truncate(fd: Fd, size: u64) -> i64 {
-    answer(on_fd(fd, |h| syscall::ftruncate(h.raw(), size), is_a_directory, |dir, fid| dir.truncate(fid, size)).map(|()| 0))
+    answer(on_fd(fd, |h| syscall::ftruncate(h.raw(), size), is_a_directory, |dir, fid, _| dir.truncate(fid, size)).map(|()| 0))
 }
 
 #[no_mangle]
 extern "C" fn toyos_fs_fsync(fd: Fd) -> i64 {
     // A kernel directory holds nothing its files' syncs do not write.
-    answer(on_fd(fd, |h| syscall::fsync(h.raw()), |_| Ok(()), |dir, fid| dir.fsync(fid)).map(|()| 0))
+    answer(on_fd(fd, |h| syscall::fsync(h.raw()), |_| Ok(()), |dir, fid, _| dir.fsync(fid)).map(|()| 0))
 }
 
 #[no_mangle]
 extern "C" fn toyos_fs_stream(fd: Fd) -> i64 {
-    let handle = on_fd(fd, |h| h.try_clone_to_owned().map(crate::OwnedHandle::into_raw), is_a_directory, |dir, fid| dir.stream(fid).map(|pipe| pipe.into_raw()));
+    let handle = on_fd(fd, |h| h.try_clone_to_owned().map(crate::OwnedHandle::into_raw), is_a_directory, |dir, fid, position| {
+        position.stream(dir, fid).map(|pipe| pipe.into_raw())
+    });
     answer(handle.map(|h| u64::from(h.0)))
 }
 
 /// A kernel file is `NotSupported`: the kernel opens its own files for a spawn.
 #[no_mangle]
 extern "C" fn toyos_fs_image(fd: Fd) -> i64 {
-    let image = on_fd(fd, |_| Err(SyscallError::NotSupported), is_a_directory, |dir, fid| dir.image(fid).map(|h| h.into_raw()));
+    let image = on_fd(fd, |_| Err(SyscallError::NotSupported), is_a_directory, |dir, fid, _| dir.image(fid).map(|h| h.into_raw()));
     answer(image.map(|h| u64::from(h.0)))
 }
 
@@ -617,7 +706,7 @@ unsafe extern "C" fn toyos_fs_set_times(at: Fd, path: *const u8, len: usize, fol
         // What the descriptor names itself.
         (At::Fd(fd), true) => match named(fd) {
             Ok(Named::Held(held)) => match &*held {
-                Held::Served { cap, fid } => cap.dir.lock().set_attr(Base::Fid(*fid), "", follow, &change).map_err(crossing),
+                Held::Served { cap, fid, .. } => cap.dir.lock().set_attr(Base::Fid(*fid), "", follow, &change).map_err(crossing),
                 Held::KernelDir(_) => unsupported(),
             },
             Ok(Named::Handle(_)) => unsupported(),
@@ -665,7 +754,7 @@ unsafe extern "C" fn toyos_fs_readdir(fd: Fd, cursor: u64, out: *mut u8, cap: us
             0 => kernel_listing(abs).map(|listing| (listing, None)),
             _ => Ok((Vec::new(), None)),
         },
-        |dir, fid| {
+        |dir, fid, _| {
             let mut batch = Vec::new();
             dir.read_dir(fid, cursor, cap, &mut batch).map(|next| (batch, next))
         },
