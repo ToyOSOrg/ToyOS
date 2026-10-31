@@ -92,6 +92,7 @@ members = [
     "sdk/window",
     "system/acpiserver",
     "system/acpiserver/aml",
+    "system/ax2xx/driver",
     "system/compositor",
     "system/compositor/desktop",
     "system/compositor/virtio-gpu",

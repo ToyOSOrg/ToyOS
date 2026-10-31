@@ -298,15 +298,25 @@ W1, P6.
   - each part's newest linux-firmware build at the pin: one file for the
     AX200, two for the AX210, committed unmodified in
     `system/ax2xx/firmware/` with `NOTICE` and `COMMITTED_FILES` rows.
-- **A file ships only once the specification shows, from a vendor
-  statement, that its part verifies it**; one nothing shows verified waits
-  for the owner.
+- **Each part's newest build ships unmodified, pinned by hash, whether or
+  not a vendor statement shows its part verifies it**: the owner's ruling.
+  That nothing shows it is
+  `issues/nothing-shows-the-ax200-or-ax210-verifies-its-firmware.md`.
 - **Its licence forbids reverse engineering**, so of a file, only the
   container a loader parses is read.
 - **Exit:** host tests that the pinned files decode; that every command
   sent is declared at a typed version; that sizes match those the
   specification asserts; and that recorded bench traces, addresses
   scrubbed, are answered.
+- **Built, but not done** (`system/ax2xx/driver`, `toyos-ax2xx`). The first
+  three exits are host tests. The fourth waits for a specification revision
+  that carries a trace's bytes: revision 1 states measured values and no
+  bytes, and the writer reads no demo log.
+- **Revision 1 leaves two container facts unsaid.** Both pinned files list
+  (0x0e, 0x17) twice in their command-version record (c1 n0 and c99 n1,
+  read here as one entry per side), and §6.5 does not say how two entries combine; the driver exchanges nothing of
+  it, and refuses a file that repeats a message it does. The hardware-type
+  record is 12 bytes, and §6.3 names only its first four.
 
 **W4, `wlan`, `radio`, `wifi` and the settings program.** Depends on: W1,
 W2.
