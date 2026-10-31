@@ -1,6 +1,11 @@
 //! What osbench needs written for AArch64 in particular, on Linux: a chain of
-//! dependent adds to time the clock with, and the bytes of a program that
-//! exits. ToyOS on AArch64 is refused by the selector.
+//! dependent adds to time the clock with, the bytes of a program that exits,
+//! and no power registers. ToyOS on AArch64 is refused by the selector.
+
+/// The energy group reads no AArch64 power counter.
+pub fn power_registers() -> Option<crate::sys::PowerRegisters> {
+    None
+}
 
 /// `turns` turns of 100 dependent register adds, each waiting on the one
 /// before it. Inline assembly, so the chain is the one written whatever the

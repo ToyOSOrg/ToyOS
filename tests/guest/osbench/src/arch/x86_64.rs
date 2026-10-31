@@ -6,6 +6,8 @@
 pub use cpuid::{cpu_id, cpu_id_is};
 #[cfg(target_os = "toyos")]
 pub use cpuid::{core_of, cpu_model, current_cpu, threads_per_core};
+#[cfg(target_os = "linux")]
+pub use cpuid::power_registers;
 
 /// `turns` turns of 100 dependent register adds, each waiting one cycle for
 /// the one before it on every x86-64 core either bench has (Intel's and AMD's
@@ -67,6 +69,45 @@ const _: () = assert!(toyos_abi::syscall::SYS_EXIT == 0x48);
 mod cpuid {
     use core::arch::x86_64::__cpuid_count;
     use std::sync::OnceLock;
+
+    /// The registers the energy group reads on Linux for the counters ToyOS's
+    /// kernel reads (`kernel/pure/cpu.rs`), by CPUID.0's vendor: Intel's from
+    /// SDM Vol. 4 Table 2-20, AMD's from PPR 55922 on Family 17h with
+    /// `CPUID_Fn80000007_EDX[RAPL]`, where they are 32-bit counters; another
+    /// AMD family is refused, as the kernel refuses it. A register a CPU
+    /// lacks reads as absent.
+    #[cfg(target_os = "linux")]
+    pub fn power_registers() -> Option<crate::sys::PowerRegisters> {
+        let id = __cpuid_count(0, 0);
+        let vendor: Vec<u8> = [id.ebx, id.edx, id.ecx].iter().flat_map(|r| r.to_le_bytes()).collect();
+        match &vendor[..] {
+            b"GenuineIntel" => Some(crate::sys::PowerRegisters {
+                energy: 0x611,
+                power_unit: 0x606,
+                package_residency: [Some(0x60d), Some(0x3f8), Some(0x3f9), Some(0x3fa)],
+                core_residency: [Some(0x3fd), Some(0x3fe)],
+                core_energy: None,
+            }),
+            b"AuthenticAMD" if amd_family_17h_rapl() => Some(crate::sys::PowerRegisters {
+                energy: 0xc001_029b,
+                power_unit: 0xc001_0299,
+                package_residency: [None; 4],
+                core_residency: [None; 2],
+                core_energy: Some(0xc001_029a),
+            }),
+            _ => None,
+        }
+    }
+
+    /// Family 17h (CPUID.1:EAX base family 0FH plus extended family 08H) with
+    /// RAPL, bit 14 of CPUID_Fn80000007_EDX (PPR 55922).
+    #[cfg(target_os = "linux")]
+    fn amd_family_17h_rapl() -> bool {
+        let eax = __cpuid_count(1, 0).eax;
+        let family = ((eax >> 8) & 0xf) + ((eax >> 20) & 0xff);
+        let rapl = __cpuid_count(0x8000_0000, 0).eax >= 0x8000_0007 && __cpuid_count(0x8000_0007, 0).edx & (1 << 14) != 0;
+        family == 0x17 && rapl
+    }
 
     struct Topology {
         /// CPUID leaf 0BH enumerates topology (SDM Vol. 2A: a subleaf 0 whose
