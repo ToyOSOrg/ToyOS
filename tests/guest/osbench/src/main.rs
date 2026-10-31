@@ -189,6 +189,7 @@ fn all() {
 }
 
 fn main() {
+    sys::start();
     let args: Vec<String> = std::env::args().collect();
     let invoked = args.first().and_then(|a| a.rsplit('/').next()).unwrap_or_default();
     let command = match args.get(1) {
