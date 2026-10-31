@@ -2,7 +2,7 @@
 
 use core::sync::atomic::Ordering;
 use toyos_abi::audio::AudioSlotHeader;
-use crate::ipc::IpcError;
+use crate::ipc::{self, FrameRx, IpcError};
 use crate::shm::SharedMemory;
 
 pub const MSG_STREAM_OPEN: u32 = 1;
@@ -250,9 +250,10 @@ pub struct AudioStream {
 pub fn describe_device() -> Result<DeviceDescription, AudioError> {
     let control = AudioStream::connect_soundserver()?;
     control.signal(MSG_DEVICE_DESCRIBE).map_err(AudioError::Ipc)?;
-    let header = control.recv_header().map_err(AudioError::Ipc)?;
-    match header.msg_type {
-        MSG_DEVICE_DESCRIBED => control.recv_payload(&header).map_err(AudioError::Ipc),
+    let mut rx = FrameRx::<{ core::mem::size_of::<DeviceDescription>() }>::new();
+    let frame = rx.recv(&control).map_err(AudioError::Ipc)?;
+    match frame.msg_type {
+        MSG_DEVICE_DESCRIBED => ipc::decode_payload(rx.payload(frame.payload_len)).map_err(AudioError::Ipc),
         other => Err(AudioError::Protocol(other)),
     }
 }
@@ -263,16 +264,15 @@ impl AudioStream {
         let req = StreamOpenRequest { sample_rate, channels, format };
         control.send(MSG_STREAM_OPEN, &req).map_err(AudioError::Ipc)?;
 
-        let header = control.recv_header().map_err(AudioError::Ipc)?;
-        let resp: StreamOpenResponse = match header.msg_type {
-            MSG_STREAM_OPENED => control.recv_payload(&header).map_err(AudioError::Ipc)?,
+        let mut rx = FrameRx::<{ core::mem::size_of::<StreamOpenResponse>() }>::new();
+        let frame = rx.recv(&control).map_err(AudioError::Ipc)?;
+        let resp: StreamOpenResponse = match frame.msg_type {
+            MSG_STREAM_OPENED => ipc::decode_payload(rx.payload(frame.payload_len)).map_err(AudioError::Ipc)?,
             MSG_STREAM_ERROR => return Err(AudioError::Rejected),
             other => return Err(AudioError::Protocol(other)),
         };
 
-        let [shm, signal] = control
-            .recv_handles_exact::<STREAM_OPENED_HANDLES>(&header)
-            .ok_or(AudioError::MissingHandles)?;
+        let [shm, signal] = rx.take_handles::<STREAM_OPENED_HANDLES>().ok_or(AudioError::MissingHandles)?;
         let signal = crate::wake::Bell::from(signal);
 
         let slot_count = resp.slot_count as u32;

@@ -38,10 +38,11 @@
 //! `NetError::Io`, which is `ErrorKind::Other`, which is sshserver's `panic!`.
 //!
 //! **Nothing here waits.** The child's ordering edge is a *second* connection
-//! to the same port, read with a blocking read: `Acceptor::on_zero_handles`
-//! closes every queued connection's inbox and only then drops the connections,
-//! so a read that answers `0` on one of them proves the other one's outbox is
-//! already closed. The hook is deferred to a drain site
+//! to the same port, taken with a blocking receive: `Acceptor::on_zero_handles`
+//! drops the queued connections in the order they were made, each one's
+//! receiving end before its sending end, so a receive that answers `Gone` on
+//! the second proves the first can no longer be sent to. The hook is deferred
+//! to a drain site
 //! (`kernel/src/object/mod.rs`'s `ZERO_QUEUE`), so a sleep would be a guess and
 //! this is not one.
 
@@ -53,7 +54,7 @@ use std::process::{Child, ChildStdout, Command, Stdio};
 use toyos::endow::EndowError;
 use toyos::net::{BoundResponse, MsgType, NetError, NetstackConn, TcpConnectRequest, TcpListenRequest, TcpOptions};
 use toyos::{namespace, port, AsHandle};
-use toyos_abi::syscall::{self, SVC_LABEL};
+use toyos_abi::syscall::{self, SyscallError, SVC_LABEL};
 
 const SELF_PATH: &str = "/system/bin/test_rs_netstack_gone_mid_bind";
 
@@ -190,8 +191,8 @@ fn mid_flight(request: Request) -> ! {
     say("connected");
 
     let mut byte = [0u8; 1];
-    let n = syscall::read(watch.as_handle().raw(), &mut byte).expect("read the watch connection");
-    assert_eq!(n, 0, "the watch connection carried {n} byte(s); nobody ever wrote to it");
+    let taken = syscall::message_recv(watch.as_handle().raw(), &mut byte, &mut [], false);
+    assert_eq!(taken, Err(SyscallError::Gone), "the watch connection carried a message; nobody ever sent one");
 
     let err = match request {
         Request::Handle => {

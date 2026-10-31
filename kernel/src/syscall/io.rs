@@ -22,8 +22,8 @@ use super::handles::with_object_ref;
 
 /// What `sys_write` does when the object took nothing.
 enum WriteBlock {
-    /// The pipe, the class of the wait, and the room the write waits for.
-    Pipe(pipe::PipeRef, WaitClass, usize),
+    /// The pipe, and the room the write waits for.
+    Pipe(pipe::PipeRef, usize),
     Refused(u64),
     /// Carried out of the process's lock: `HandleError::refuse` may take the
     /// process down and cannot run under a guard.
@@ -32,7 +32,7 @@ enum WriteBlock {
 
 /// What `sys_read` parks on when the handle has nothing to give.
 enum ReadBlock {
-    Pipe(pipe::PipeRef, WaitClass),
+    Pipe(pipe::PipeRef),
     /// A notice with no reason in it, until a quit puts one there.
     Notice(alloc::sync::Arc<crate::object::notice::NoticeObject>),
     /// A console, which reads the serial line and nothing else: nothing posts
@@ -55,7 +55,7 @@ pub(super) fn sys_write(h: RawHandle, buf: &UserBytes) -> u64 {
             match ops::try_write(object, buf) {
                 Some(n) => Ok((n, ops::written_pipe(object))),
                 None => Err(match ops::pipe_write(object) {
-                    Some((pipe, class, landing)) => WriteBlock::Pipe(pipe.clone(), class, landing.room(buf.len())),
+                    Some(pipe) => WriteBlock::Pipe(pipe.clone(), kernel::pipe::room(buf.len())),
                     None => WriteBlock::Refused(SyscallError::NotFound.to_u64()),
                 }),
             }
@@ -65,9 +65,9 @@ pub(super) fn sys_write(h: RawHandle, buf: &UserBytes) -> u64 {
                 if let Some(pipe) = pipe { process::wake_pipe_readers(&pipe); }
                 return n;
             }
-            Err(WriteBlock::Pipe(pipe, class, room)) => {
+            Err(WriteBlock::Pipe(pipe, room)) => {
                 let parkable = crate::scheduler::Parkable::at_entry();
-                if watch::wait_until(&parkable, pipe.write_watch(), 0, class, Deadline::never(), || pipe.has_space(room))
+                if watch::wait_until(&parkable, pipe.write_watch(), 0, WaitClass::Pipe, Deadline::never(), || pipe.has_space(room))
                     .is_err()
                 {
                     return cancelled();
@@ -91,7 +91,7 @@ fn read_block(object: &KObjectRef) -> ReadBlock {
             );
             ReadBlock::Console(Deadline::at(crate::clock::now() + CONSOLE_REPOLL.duration()))
         }
-        _ => match ops::pipe_read(object).map(|(pipe, class)| ReadBlock::Pipe(pipe.clone(), class)) {
+        _ => match ops::pipe_read(object).map(|pipe| ReadBlock::Pipe(pipe.clone())) {
             Some(block) => block,
             None => ReadBlock::Refused(SyscallError::NotFound.to_u64()),
         },
@@ -129,9 +129,9 @@ pub(super) fn sys_read(h: RawHandle, buf: &mut UserBytesMut) -> u64 {
                 if let Some(pipe) = pipe { process::wake_pipe_writers(&pipe); }
                 return n;
             }
-            Err(ReadBlock::Pipe(pipe, class)) => {
+            Err(ReadBlock::Pipe(pipe)) => {
                 let parkable = crate::scheduler::Parkable::at_entry();
-                if watch::wait_until(&parkable, pipe.read_watch(), 0, class, Deadline::never(), || pipe.has_data())
+                if watch::wait_until(&parkable, pipe.read_watch(), 0, WaitClass::Pipe, Deadline::never(), || pipe.has_data())
                     .is_err()
                 {
                     return cancelled();

@@ -36,7 +36,8 @@ use super::io::{
     sys_null, sys_random, sys_read, sys_read_nonblock, sys_write, sys_write_nonblock,
 };
 use super::ipc::{
-    sys_accept, sys_handle_recv, sys_inbox_setup, sys_message_send,
+    Incoming, Outgoing,
+    sys_accept, sys_inbox_setup, sys_message_recv, sys_message_send,
     sys_inbox_submit, sys_namespace_build, sys_namespace_open, sys_pipe,
     sys_port_badge, sys_port_create, sys_port_mint, sys_shm_create, sys_shm_map, sys_shm_sub,
 };
@@ -455,36 +456,15 @@ pub(crate) fn syscall_dispatch(num: u64, a1: u64, a2: u64, a3: u64, a4: u64) -> 
         SYS_ACCEPT => sys_accept(RawHandle(a1 as u32), a2),
         SYS_MESSAGE_SEND => {
             let Ok(args) = ctx.copy_in::<MessageSend>(UserAddr::new(a2)) else { return bad_addr };
-            let unknown_flags = args.flags & !MESSAGE_NONBLOCK != 0;
-            if unknown_flags || args.count as usize > MAX_TRANSFER_HANDLES || args.len as usize > MAX_MESSAGE_LEN {
-                return SyscallError::InvalidArgument.to_u64();
-            }
-            let Some(bytes) = ctx.user_bytes(UserAddr::new(args.bytes), args.len) else { return bad_addr };
-            let Some(handles) = (args.count as usize)
-                .checked_mul(HANDLE_LEN)
-                .and_then(|len| ctx.user_bytes(UserAddr::new(args.handles), len as u64))
-            else {
-                return bad_addr;
-            };
-            sys_message_send(
-                RawHandle(a1 as u32),
-                &bytes,
-                &handles,
-                args.count as usize,
-                args.flags & MESSAGE_NONBLOCK != 0,
-            )
+            let Ok(out) = outgoing(&ctx, &args) else { return SyscallError::InvalidArgument.to_u64() };
+            let Some(out) = out else { return bad_addr };
+            sys_message_send(RawHandle(a1 as u32), &out, args.flags & MESSAGE_NONBLOCK != 0)
         }
-        SYS_HANDLE_RECV => {
-            if a3 as usize > MAX_TRANSFER_HANDLES {
-                return SyscallError::InvalidArgument.to_u64();
-            }
-            let Some(mut out) = (a3 as usize)
-                .checked_mul(HANDLE_LEN)
-                .and_then(|len| ctx.user_bytes_mut(UserAddr::new(a2), len as u64))
-            else {
-                return bad_addr;
-            };
-            sys_handle_recv(RawHandle(a1 as u32), &mut out, a3 as usize)
+        SYS_MESSAGE_RECV => {
+            let Ok(args) = ctx.copy_in::<MessageRecv>(UserAddr::new(a2)) else { return bad_addr };
+            let Ok(into) = incoming(&ctx, &args) else { return SyscallError::InvalidArgument.to_u64() };
+            let Some(mut into) = into else { return bad_addr };
+            sys_message_recv(RawHandle(a1 as u32), &mut into, args.flags & MESSAGE_NONBLOCK != 0)
         }
         SYS_SHM_CREATE => sys_shm_create(a1, a2, RawHandle(a3 as u32)),
         SYS_SHM_MAP => sys_shm_map(RawHandle(a1 as u32), a2),
@@ -674,4 +654,38 @@ pub(crate) fn syscall_dispatch(num: u64, a1: u64, a2: u64, a3: u64, a4: u64) -> 
     crate::sched::driver::note_syscall(num, elapsed);
 
     result
+}
+
+/// A send's buffers, bounded: `Err` for arguments past the ABI's bounds or an
+/// unknown flag, `None` for an address the caller does not have.
+fn outgoing<'a>(ctx: &SyscallContext<'a>, args: &MessageSend) -> Result<Option<Outgoing<'a>>, ()> {
+    if args.flags & !MESSAGE_NONBLOCK != 0 || args.count as usize > MAX_TRANSFER_HANDLES || args.len as usize > MAX_MESSAGE_LEN {
+        return Err(());
+    }
+    let count = args.count as usize;
+    Ok((|| {
+        Some(Outgoing {
+            bytes: ctx.user_bytes(UserAddr::new(args.bytes), args.len)?,
+            handles: ctx.user_bytes(UserAddr::new(args.handles), (count * HANDLE_LEN) as u64)?,
+            count,
+        })
+    })())
+}
+
+/// A receive's buffers, bounded the same way. A buffer larger than any
+/// message or batch holds every one, so only its first
+/// [`MAX_MESSAGE_LEN`] bytes and [`MAX_TRANSFER_HANDLES`] slots are taken.
+fn incoming<'a>(ctx: &SyscallContext<'a>, args: &MessageRecv) -> Result<Option<Incoming<'a>>, ()> {
+    if args.flags & !MESSAGE_NONBLOCK != 0 {
+        return Err(());
+    }
+    let len = args.len.min(MAX_MESSAGE_LEN as u64);
+    let cap = (args.cap as usize).min(MAX_TRANSFER_HANDLES);
+    Ok((|| {
+        Some(Incoming {
+            bytes: ctx.user_bytes_mut(UserAddr::new(args.bytes), len)?,
+            handles: ctx.user_bytes_mut(UserAddr::new(args.handles), (cap * HANDLE_LEN) as u64)?,
+            cap,
+        })
+    })())
 }

@@ -143,11 +143,10 @@ impl Usbd {
         let ns = toyos::namespace::build().add(USB.port, &self.conn).finish().expect("usbd_spare: a namespace");
         let conn: Connection = ns.open(USB.port).expect("usbd_spare: a connection to usbd");
         conn.signal(MSG_INSPECT).expect("usbd_spare: the request");
-        let header = conn.recv_header().expect("usbd_spare: usbd's answer");
-        assert_eq!(header.msg_type, MSG_SNAPSHOT, "usbd_spare: usbd answered something that is not a snapshot");
-        let mut buf = vec![0u8; header.len() as usize];
-        let n = conn.recv_bytes(&header, &mut buf).expect("usbd_spare: the snapshot's bytes");
-        let snapshot = toyos_inspect::decode(&buf[..n], USB).expect("usbd_spare: a snapshot for `usb`");
+        let mut rx = Box::new(toyos::ipc::FrameRx::<{ toyos::ipc::MAX_FRAME_LEN as usize }>::new());
+        let frame = rx.recv(&conn).expect("usbd_spare: usbd's answer");
+        assert_eq!(frame.msg_type, MSG_SNAPSHOT, "usbd_spare: usbd answered something that is not a snapshot");
+        let snapshot = toyos_inspect::decode(rx.payload(frame.payload_len), USB).expect("usbd_spare: a snapshot for `usb`");
         for (path, value) in &snapshot {
             println!("usbd_spare: {when}: {}", toyos_inspect::line(path, value));
         }

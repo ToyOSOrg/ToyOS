@@ -36,13 +36,13 @@ use toyos_abi::handle::Rights;
 use toyos_abi::syscall;
 use toyos_abi::RawHandle;
 
-use crate::ipc::{self, Connection};
+use crate::ipc::{self, Connection, FrameRx};
 use crate::sync::Lock;
 use crate::{AsHandle, BorrowedHandle, OwnedHandle};
 
 use super::ends::{close_kept, kept, narrowed, Ends, HELD_BELL, HELD_CONNECTION};
 use super::stream::{self, Wait};
-use super::{answer, hangup, BoundResponse, MsgType, NetError, NetstackConn, TcpListenRequest, TcpOptions, UdpBindRequest};
+use super::{answer, hangup, BoundResponse, MAX_ANSWER, MsgType, NetError, NetstackConn, TcpListenRequest, TcpOptions, UdpBindRequest};
 
 pub use super::stream::{EXPORT, EXPORTED, REFUSED};
 
@@ -437,10 +437,9 @@ pub fn recv_from(handle: BorrowedHandle<'_>, buf: &mut [u8], wait: Wait) -> Resu
     call_on(handle, Kind::Datagram, |slot, end| {
         look(&EndBell { slot, bell: end.bell }, wait, |drain| {
             drain.now().receive(end.connection).map_err(hangup)?;
-            let header = answer(end.connection)?;
-            let mut frame = [0u8; MAX_FRAME];
-            let n = ipc::recv_bytes(end.connection, &header, &mut frame).map_err(hangup)?;
-            let (from, data) = datagram_of(&frame[..n]).filter(|_| n == header.len() as usize).ok_or(NetError::Protocol(RECEIVE))?;
+            let mut rx = FrameRx::<MAX_FRAME>::new();
+            let frame = answer(&end.connection, &mut rx)?;
+            let (from, data) = datagram_of(rx.payload(frame.payload_len)).ok_or(NetError::Protocol(RECEIVE))?;
             let len = data.len().min(buf.len());
             buf[..len].copy_from_slice(&data[..len]);
             Ok(Received { len, addr: from.addr, port: from.port })
@@ -463,9 +462,10 @@ pub fn peer(handle: BorrowedHandle<'_>) -> Result<Option<([u8; 4], u16)>, NetErr
     call_on(handle, Kind::Datagram, |slot, end| {
         let _turn = TURNS[slot].lock();
         ipc::signal(end.connection, PEER).map_err(hangup)?;
-        match answer(end.connection) {
-            Ok(header) => {
-                let peer: Datagram = ipc::recv_payload(end.connection, &header).map_err(|_| NetError::Protocol(PEER))?;
+        let mut rx = FrameRx::<MAX_ANSWER>::new();
+        match answer(&end.connection, &mut rx) {
+            Ok(frame) => {
+                let peer: Datagram = ipc::decode_payload(rx.payload(frame.payload_len)).map_err(|_| NetError::Protocol(PEER))?;
                 Ok(Some((peer.addr, peer.port)))
             }
             Err(NetError::NotConnected) => Ok(None),
@@ -503,17 +503,19 @@ pub fn option(handle: BorrowedHandle<'_>, option: u32) -> Result<u32, NetError> 
     call(handle, |slot, end| {
         let _turn = TURNS[slot].lock();
         ipc::send(end.connection, OPTION, &option).map_err(hangup)?;
-        let header = answer(end.connection)?;
-        ipc::recv_payload(end.connection, &header).map_err(|_| NetError::Protocol(OPTION))
+        let mut rx = FrameRx::<MAX_ANSWER>::new();
+        let frame = answer(&end.connection, &mut rx)?;
+        ipc::decode_payload(rx.payload(frame.payload_len)).map_err(|_| NetError::Protocol(OPTION))
     })
 }
 
 /// An answer that carries nothing.
 fn bare(connection: BorrowedHandle<'_>) -> Result<(), NetError> {
-    let header = answer(connection)?;
-    match header.is_empty() && header.handles() == 0 {
+    let mut rx = FrameRx::<MAX_ANSWER>::new();
+    let frame = answer(&connection, &mut rx)?;
+    match frame.payload_len == 0 && frame.handles == 0 {
         true => Ok(()),
-        false => Err(NetError::Protocol(header.msg_type)),
+        false => Err(NetError::Protocol(frame.msg_type)),
     }
 }
 

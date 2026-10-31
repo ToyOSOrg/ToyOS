@@ -50,7 +50,7 @@ use toyos_abi::RawHandle;
 
 use super::ends::{close_kept, kept, narrowed, Ends, HELD_BELL, HELD_CONNECTION, HELD_RUNG};
 
-use crate::ipc::{self, Connection};
+use crate::ipc::{self, Connection, FrameRx};
 use crate::shm::{Bytes, SharedMemory};
 use crate::sync::Lock;
 use crate::transport::session::{self, Bells, Doorbell, Holder, HungUp, Layout, Mode, Polled, Receiving, Refused as Answer, Sending, Took, Waited};
@@ -748,10 +748,10 @@ pub struct Accepted {
 pub(super) fn accept(listener: BorrowedHandle<'_>, drain: super::socket::Drain<'_>) -> Result<Accepted, NetError> {
     let opened = open(false, ([0; 4], 0), |region| {
         drain.now().accept(listener, region).map_err(hangup)?;
-        let header = answer(listener)?;
-        let accepted: TcpAcceptResponse = ipc::recv_payload(listener, &header).map_err(hangup)?;
-        let handles = ipc::recv_handles(listener, &header).map_err(hangup)?;
-        let [connection, receive, send, rung] = handles.exact::<{ BELLS + 1 }>().ok_or(NetError::Protocol(header.msg_type))?;
+        let mut rx = FrameRx::<{ super::MAX_ANSWER }>::new();
+        let frame = answer(&listener, &mut rx)?;
+        let accepted: TcpAcceptResponse = ipc::decode_payload(rx.payload(frame.payload_len)).map_err(hangup)?;
+        let [connection, receive, send, rung] = rx.take_handles::<{ BELLS + 1 }>().ok_or(NetError::Protocol(frame.msg_type))?;
         Ok((accepted, [receive, send, rung], Connection::received(connection)))
     })?;
     let answer = opened.answer;
@@ -941,17 +941,15 @@ pub(super) fn ask_export(connection: BorrowedHandle<'_>, rung: Option<BorrowedHa
     if let Some(rung) = rung {
         syscall::event_signal(rung.raw()).map_err(|_| NetError::NetstackNotFound)?;
     }
-    let header = ipc::recv_header(connection).map_err(hangup)?;
-    match header.msg_type {
-        EXPORTED => {
-            let handles = ipc::recv_handles(connection, &header).map_err(hangup)?;
-            match handles.exact::<1>() {
-                Some([end]) if header.is_empty() => Ok(end),
-                _ => Err(NetError::Protocol(EXPORTED)),
-            }
-        }
+    let mut rx = FrameRx::<4>::new();
+    let frame = rx.recv(&connection).map_err(hangup)?;
+    match frame.msg_type {
+        EXPORTED => match rx.take_handles::<1>() {
+            Some([end]) if frame.payload_len == 0 => Ok(end),
+            _ => Err(NetError::Protocol(EXPORTED)),
+        },
         REFUSED => {
-            let code: u32 = ipc::recv_payload(connection, &header).map_err(hangup)?;
+            let code: u32 = ipc::decode_payload(rx.payload(frame.payload_len)).map_err(hangup)?;
             Err(NetError::from_error_code(code))
         }
         other => Err(NetError::Protocol(other)),

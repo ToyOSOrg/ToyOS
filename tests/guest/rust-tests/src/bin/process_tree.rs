@@ -146,9 +146,10 @@ fn grow() -> Grown {
         .expect("spawn B");
     let held = b.stdin.take().expect("B's input");
     let conn = acceptor.accept().expect("B connected back");
-    let header = conn.recv_header().expect("B's word that its subtree is grown");
-    assert_eq!(header.msg_type, MSG_GROWN, "B said something else");
-    let [c, d, b_self, e] = conn.recv_handles_exact::<4>(&header).expect("B sent four handles");
+    let mut rx = toyos::ipc::FrameRx::<{ toyos::ipc::MAX_FRAME_LEN as usize }>::new();
+    let frame = rx.recv(&conn).expect("B's word that its subtree is grown");
+    assert_eq!(frame.msg_type, MSG_GROWN, "B said something else");
+    let [c, d, b_self, e] = rx.take_handles::<4>().expect("B sent four handles");
     let (c, d, e) = (Process::from_handle(c), Process::from_handle(d), Process::from_handle(e));
     Grown { b, conn, c, d, b_self, e, _held: held }
 }
@@ -407,8 +408,9 @@ fn b() -> ! {
     ];
     conn.signal_with(MSG_GROWN, handles).expect("send A the subtree");
 
-    let header = conn.recv_header().expect("A's word to fault");
-    assert_eq!(header.msg_type, MSG_FAULT, "A said something else");
+    let mut rx = toyos::ipc::FrameRx::<{ toyos::ipc::MAX_FRAME_LEN as usize }>::new();
+    let frame = rx.recv(&conn).expect("A's word to fault");
+    assert_eq!(frame.msg_type, MSG_FAULT, "A said something else");
     // SAFETY: a volatile write to address 0, which no region of this process
     // covers: it faults, and the kernel ends this process before anything
     // after it runs.

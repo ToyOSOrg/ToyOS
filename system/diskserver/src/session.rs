@@ -17,7 +17,7 @@
 
 use std::collections::BTreeMap;
 
-use toyos::ipc::Connection;
+use toyos::ipc::{Connection, Frame, FrameRx};
 use toyos::namespace::Namespace;
 use toyos::poller::READABLE;
 use toyos::wake::{Bell, Waker};
@@ -365,13 +365,16 @@ pub(crate) fn connect(names: &Namespace, service: &str) -> Result<Connection, Er
     })
 }
 
-/// The header of the service's answer on `conn`, once it is there, within
+/// The service's answer on `conn`, taken into `rx` once it is there, within
 /// [`wire::ANSWER_BOUND_NS`].
-pub(crate) fn answer(conn: &Connection) -> Result<toyos::ipc::IpcHeader, Error> {
+pub(crate) fn answer<const MAX: usize>(conn: &Connection, rx: &mut FrameRx<MAX>) -> Result<Frame, Error> {
     if !toyos::poller::wait_one(conn, READABLE, wire::ANSWER_BOUND_NS).map_err(Error::Kernel)? {
         return Err(Error::Unanswered);
     }
-    conn.recv_header().map_err(|_| Error::Ended)
+    rx.recv(conn).map_err(|e| match e {
+        toyos::ipc::IpcError::Malformed => Error::Protocol,
+        _ => Error::Ended,
+    })
 }
 
 /// An open session's two doorbells, which the server made and sent with its
@@ -393,16 +396,15 @@ fn handshake(
 ) -> Result<(Bells, Opened), Error> {
     let conn = connect(names, service)?;
     conn.send_bytes_with(wire::MSG_OPEN, &guid, [region.share().map_err(Error::Kernel)?]).map_err(|_| Error::Ended)?;
-    let header = answer(&conn)?;
-    let mut payload = [0u8; Opened::BYTES];
-    let len = conn.recv_bytes(&header, &mut payload).map_err(|_| Error::Ended)?;
-    match header.msg_type {
+    let mut rx = Box::new(FrameRx::<{ toyos::ipc::MAX_FRAME_LEN as usize }>::new());
+    let frame = answer(&conn, &mut rx)?;
+    match frame.msg_type {
         wire::MSG_OPENED => {
-            let [ring, answered] = conn.recv_handles_exact::<{ wire::OPENED_HANDLES }>(&header).ok_or(Error::Protocol)?;
-            let opened = Opened::decode(&payload[..len]).ok_or(Error::Protocol)?;
+            let [ring, answered] = rx.take_handles::<{ wire::OPENED_HANDLES }>().ok_or(Error::Protocol)?;
+            let opened = Opened::decode(rx.payload(frame.payload_len)).ok_or(Error::Protocol)?;
             Ok((Bells { ring: Waker::from(ring), answered: Bell::from(answered) }, opened))
         }
-        wire::MSG_REFUSED => Err(Refusal::decode(&payload[..len]).map_or(Error::Protocol, Error::Refused)),
+        wire::MSG_REFUSED => Err(Refusal::decode(rx.payload(frame.payload_len)).map_or(Error::Protocol, Error::Refused)),
         _ => Err(Error::Protocol),
     }
 }
@@ -412,14 +414,12 @@ fn handshake(
 pub fn list(names: &Namespace, service: &str) -> Result<Vec<wire::Listed>, Error> {
     let conn = connect(names, service)?;
     conn.signal(wire::MSG_LIST).map_err(|_| Error::Ended)?;
-    let header = answer(&conn)?;
-    let mut payload = vec![0u8; header.len() as usize];
-    let len = conn.recv_bytes(&header, &mut payload).map_err(|_| Error::Ended)?;
-    match header.msg_type {
-        wire::MSG_LISTED => {
-            wire::Listed::decode_all(&payload[..len]).map(Iterator::collect).ok_or(Error::Protocol)
-        }
-        wire::MSG_REFUSED => Err(Refusal::decode(&payload[..len]).map_or(Error::Protocol, Error::Refused)),
+    let mut rx = Box::new(FrameRx::<{ toyos::ipc::MAX_FRAME_LEN as usize }>::new());
+    let frame = answer(&conn, &mut rx)?;
+    let payload = rx.payload(frame.payload_len);
+    match frame.msg_type {
+        wire::MSG_LISTED => wire::Listed::decode_all(payload).map(Iterator::collect).ok_or(Error::Protocol),
+        wire::MSG_REFUSED => Err(Refusal::decode(payload).map_or(Error::Protocol, Error::Refused)),
         _ => Err(Error::Protocol),
     }
 }

@@ -53,9 +53,10 @@ fn test() {
         .spawn()
         .expect("spawn the place");
     let conn = acceptor.accept().expect("the place connected back");
-    let header = conn.recv_header().expect("the place's word");
-    assert_eq!(header.msg_type, MSG_SELF, "the place said something else");
-    let [place_self] = conn.recv_handles_exact::<1>(&header).expect("the place sent its self");
+    let mut rx = toyos::ipc::FrameRx::<{ toyos::ipc::MAX_FRAME_LEN as usize }>::new();
+    let frame = rx.recv(&conn).expect("the place's word");
+    assert_eq!(frame.msg_type, MSG_SELF, "the place said something else");
+    let [place_self] = rx.take_handles::<1>().expect("the place sent its self");
     assert!(place.try_wait().expect("ask after the place").is_none(), "the place ended before the marked spawn");
 
     assert_eq!(

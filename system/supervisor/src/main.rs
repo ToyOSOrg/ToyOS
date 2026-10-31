@@ -170,13 +170,9 @@ const MAX_PENDING_LAUNCHES: usize = 32;
 /// sends it, and it is what guarantees the table above drains.
 const HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(2);
 
-/// One caller's inbound framing.
-///
-/// **The supervisor never reads a client with a blocking read.** `recv_header` and
-/// `recv_bytes` park the caller until the peer sends the bytes it promised. The
-/// whole request blob is kept because a launch carries the child's argv,
-/// environment and working directory, and a truncated one is a launch refused
-/// for a reason the caller did not cause.
+/// One caller's inbound frames, taken without waiting: the supervisor never
+/// waits on a client. Room for the largest frame, because a launch carries
+/// the child's argv, environment and working directory.
 type LaunchRx = ipc::FrameRx<{ ipc::MAX_FRAME_LEN as usize }>;
 
 /// A connection that has been accepted and has not yet said what to start.
