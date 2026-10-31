@@ -33,15 +33,21 @@ Ruled out, by measurement:
 - **The cores and graphics as consumers.** PP0 is about 0.3 W and PP1 under
   0.03 W, so about 6.8 W lies outside both planes. On Linux the equivalent
   is about 1.5 W.
+- **The I219.** Parking it under ToyOS, or unbinding it under Linux,
+  changed nothing.
 
-Still to separate:
+The two causes, each reproduced on Linux by putting ToyOS's state there:
 
-- **the display engine** scanning out under the firmware's GOP programming,
-  with no DMC firmware. Intel's Tiger Lake display reference (Vol. 12, "Display
-  C5 and C6") requires DMC for DC5 and DC6.
-- **the NVMe** in its operational state, with no APST
-  (`issues/diskserver-drives-nvme-apst.md`), and its link's power state.
-- **the I219** under netstack, through its LTR.
+- **The NVMe without APST** (`issues/diskserver-drives-nvme-apst.md`).
+  - With APST off, Linux's idle rises from 1622 to 5127 mW (per-second p50), and its package goes no deeper than PC3.
+  - The rise is large when nothing wakes and smaller under a 10 ms sleeper, which is ToyOS's own shape.
+  - The link's ASPM, L1 substates and LTR are as firmware left them, the same on both systems.
+- **The display as the GOP left it.**
+  - With no graphics driver (`nomodeset`), Linux idles at 2796 mW and stays in PC2 976 ‰. Its 10 ms sleeper draws 2864 mW, against ToyOS's 2831.
+  - Under ToyOS, stopping the scan-out's plane fetches (Intel's PLANE_CTL Plane Enable) releases PC2 for PC3.
+  - Linux's driver reaches PC8 with the panel lit. The fix is ToyOS's own display programming, with the panel lit; turning it off is not the fix. Per Intel's Tiger Lake display reference (Vol. 12), that means watermarks, SAGV, DMC firmware for DC5/DC6, and PSR for PC9/PC10. A driver for it is an owner decision.
+
+APST is the larger share and comes first.
 
 **Exit**: the T14's `energy.idle.package` row is unresolved against Linux's
 in `osbench_energy`, or the remaining gap is a cause named and recorded at its
