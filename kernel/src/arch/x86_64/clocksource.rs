@@ -278,6 +278,62 @@ impl Held {
 
 static HELD: Lock<Option<Held>> = Lock::new(None);
 
+/// Scout: how many of the boot's first [`EPISODES`] spells with every CPU in
+/// a declared state have been recorded, and how many of them logged.
+const EPISODES: usize = 64;
+static EPISODES_TAKEN: AtomicU64 = AtomicU64::new(0);
+static EPISODE_LOG: Lock<([Episode; EPISODES], usize)> =
+    Lock::new(([Episode { began: 0, ended: 0, state: 0, apart_ns: 0 }; EPISODES], 0));
+
+/// One spell: the TSC as the last CPU entered a declared state and as the
+/// first left, the state that CPU left, and the TSC against the HPET as it
+/// left, since the sampler's last sample.
+#[derive(Clone, Copy)]
+struct Episode {
+    began: u64,
+    ended: u64,
+    state: usize,
+    apart_ns: i64,
+}
+
+/// Scout: the first CPU out of a spell in which every CPU sat in a declared
+/// state reads the HPET, for the boot's first [`EPISODES`] spells.
+pub fn all_idle_ended(began: u64, state: usize) {
+    if EPISODES_TAKEN.load(Ordering::Relaxed) >= EPISODES as u64 {
+        return;
+    }
+    let Some(held) = HELD.try_lock() else { return };
+    let Some(held) = held.as_ref() else { return };
+    let Some(mut log) = EPISODE_LOG.try_lock() else { return };
+    let index = EPISODES_TAKEN.fetch_add(1, Ordering::Relaxed) as usize;
+    if index >= EPISODES {
+        return;
+    }
+    let kept = held.watch.kept();
+    let last = held.watch.last();
+    let hpet = held.hpet.sample(held.hpet.near(last, kept.mult), 1);
+    let apart_ns = reference::agree(held.hpet.reference, last, hpet, kept.mult, 0).apart_ns;
+    log.0[index] = Episode { began, ended: hpet.before, state, apart_ns };
+}
+
+/// Scout: the spells recorded since the last call, logged.
+fn log_episodes(mult: u64) {
+    let Some(mut log) = EPISODE_LOG.try_lock() else { return };
+    let taken = (EPISODES_TAKEN.load(Ordering::Relaxed) as usize).min(EPISODES);
+    let line = Line { counter: 0, stamp: 0, mult };
+    for index in log.1..taken {
+        let e = log.0[index];
+        log!(
+            "clock: all-idle spell {index}: from TSC {} for {} ns, left from s{}, the TSC {} ns from the HPET since the last sample",
+            e.began,
+            line.nanos(e.ended.saturating_sub(e.began)),
+            e.state,
+            e.apart_ns,
+        );
+    }
+    log.1 = taken;
+}
+
 /// Whether CPUID states `IA32_TSC_ADJUST`, read once on the BSP.
 static TSC_ADJUST: AtomicBool = AtomicBool::new(false);
 
@@ -559,6 +615,7 @@ pub fn check(now_ns: u64) {
 fn sample(held: &mut Held, cpu_id: u32) {
     let (awake, idle) = held.idle_since_last();
     let kept = held.watch.kept();
+    log_episodes(kept.mult);
     let last = held.watch.last();
     let hpet = held.hpet.sample(held.hpet.near(last, kept.mult), 1);
     let pm = held.pm.as_ref().map(|pm| (pm.last, pm.next(kept.mult)));

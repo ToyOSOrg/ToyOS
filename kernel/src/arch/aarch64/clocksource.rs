@@ -4,3 +4,6 @@
 
 /// No reference to sample against.
 pub fn check(_now: u64) {}
+
+/// Scout: x86-64's all-idle spells; nothing here samples a second counter.
+pub fn all_idle_ended(_began: u64, _state: usize) {}

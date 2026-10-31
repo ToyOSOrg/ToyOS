@@ -16,7 +16,7 @@
 //! published exit exceeds it. So either the CPU sees the bound, or the hold
 //! sees the CPU.
 
-use core::sync::atomic::{fence, AtomicU64, Ordering};
+use core::sync::atomic::{fence, AtomicU32, AtomicU64, Ordering};
 
 use kernel::sched::hw::Nanos;
 use kernel::sched::idle::{self, Bounds, Cost, History, MAX_STATES};
@@ -26,6 +26,11 @@ use toyos_userbound::idle::{Entry, Table, WORDS};
 
 use crate::seqlock::Published;
 use crate::sync::Lock;
+
+/// Scout: the CPUs in a declared state now, and the TSC when the last of them
+/// entered one.
+static IN_DECLARED: AtomicU32 = AtomicU32::new(0);
+static ALL_SINCE: AtomicU64 = AtomicU64::new(0);
 
 /// Tells one declaration of a CPU from the next, so the CPU forgets what it
 /// learned of the states it replaced.
@@ -199,7 +204,13 @@ pub fn wait(plan: &idle::Plan) {
             // This CPU's alone to write, so a store and not a locked add.
             local.entered.store(local.entered.load(Ordering::Relaxed) + 1, Ordering::Release);
             local.by_state[state].store(local.by_state[state].load(Ordering::Relaxed) + 1, Ordering::Relaxed);
+            if IN_DECLARED.fetch_add(1, Ordering::AcqRel) + 1 == crate::smp::cpu_count() {
+                ALL_SINCE.store(crate::arch::cpu::counter(), Ordering::Release);
+            }
             crate::arch::idle::enter(d.entries[state]);
+            if IN_DECLARED.fetch_sub(1, Ordering::AcqRel) == crate::smp::cpu_count() {
+                crate::arch::clocksource::all_idle_ended(ALL_SINCE.load(Ordering::Acquire), state);
+            }
         }
         _ => crate::arch::hw::halt(),
     }
