@@ -25,6 +25,7 @@ pub fn each(
             op(i)?;
         }
         crate::clock::settle();
+        let ran = crate::ran::start();
         let before = sys::counts();
         let mut ns = Vec::with_capacity(samples);
         for i in 0..samples {
@@ -32,7 +33,9 @@ pub fn each(
             op(warmup + i)?;
             ns.push(ns_since(t));
         }
-        Ok((ns, Counts::per_op(&before, samples as u64)))
+        let mut counts = Counts::per_op(&before, samples as u64);
+        counts.extend(ran.fields());
+        Ok((ns, counts))
     };
     match run() {
         Ok((mut ns, counts)) => {

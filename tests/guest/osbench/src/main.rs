@@ -43,6 +43,7 @@ mod nvme;
 mod pingpong;
 mod place;
 mod procs;
+mod ran;
 mod report;
 mod storage;
 mod sys;
