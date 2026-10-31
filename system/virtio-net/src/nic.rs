@@ -177,6 +177,8 @@ impl VirtioNet {
 }
 
 impl toyos_link::driver::Nic for VirtioNet {
+    const MEDIUM: toyos_link::wire::Medium = toyos_link::wire::Medium::Wired;
+
     fn mac(&self) -> [u8; 6] {
         self.mac
     }

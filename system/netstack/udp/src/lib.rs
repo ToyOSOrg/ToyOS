@@ -42,7 +42,7 @@ use alloc::collections::{BTreeMap, VecDeque};
 use alloc::vec::Vec;
 use core::net::Ipv4Addr;
 
-use toyos_net_ip::{Arrival, Cast, ErrorClass, Flow, Ip, Source, Transport, TransportError, UdpOut};
+use toyos_net_ip::{Arrival, Cast, ErrorClass, Flow, IfIndex, Ip, Source, Transport, TransportError, UdpOut};
 use toyos_net_wire::addr::is_martian;
 use toyos_net_wire::ethernet::MacClass;
 use toyos_net_wire::ipv4::Ttl;
@@ -158,6 +158,8 @@ pub struct Received {
     pub destination: Ipv4Addr,
     pub ttl: u8,
     pub link_broadcast: bool,
+    /// The interface it arrived by.
+    pub iface: IfIndex,
     pub at: Instant,
 }
 
@@ -189,7 +191,16 @@ struct Stored {
     destination: Ipv4Addr,
     ttl: u8,
     link_broadcast: bool,
+    iface: IfIndex,
     at: Instant,
+}
+
+/// Where the acquisition socket's datagram is from: the source it names, and the interface whose
+/// address it acquires, which alone it leaves by.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Origin {
+    pub iface: IfIndex,
+    pub source: Ipv4Addr,
 }
 
 /// A datagram accepted for sending, with the addressing it was accepted with.
@@ -205,7 +216,10 @@ struct Queued {
     /// leaves is decided by this, not by what the socket holds then.
     broadcast: bool,
     payload: Vec<u8>,
-    /// The next hop whose link address it waits for: not offered until [`Udp::wake`] names it.
+    /// The interface the send named, which alone it may leave by.
+    iface: Option<IfIndex>,
+    /// The next hop whose link address it waits for, or the hop of a link with no room: not
+    /// offered until [`Udp::wake`] names it.
     waits: Option<Ipv4Addr>,
 }
 
@@ -216,6 +230,7 @@ impl Queued {
             destination: self.destination,
             ttl: self.ttl,
             broadcast: self.broadcast,
+            iface: self.iface,
             datagram: UdpBuilder { source: self.source_port, destination: self.port, data: &self.payload },
         }
     }
@@ -520,11 +535,13 @@ impl Udp {
 
     /// The acquisition socket's send, naming its source: 0.0.0.0 to the limited broadcast, or an
     /// assigned address.
-    pub fn send_from(&mut self, ip: &mut Ip, id: SocketId, source: Ipv4Addr, destination: Ipv4Addr, port: u16, payload: &[u8]) -> Result<(), Error> {
-        self.submit(ip, id, Some(source), destination, port, payload)
+    pub fn send_from(&mut self, ip: &mut Ip, id: SocketId, origin: Origin, destination: Ipv4Addr, port: u16, payload: &[u8]) -> Result<(), Error> {
+        self.submit(ip, id, Some((origin.source, origin.iface)), destination, port, payload)
     }
 
-    fn submit(&mut self, ip: &mut Ip, id: SocketId, named: Option<Ipv4Addr>, destination: Ipv4Addr, port: u16, payload: &[u8]) -> Result<(), Error> {
+    fn submit(&mut self, ip: &mut Ip, id: SocketId, named: Option<(Ipv4Addr, IfIndex)>, destination: Ipv4Addr, port: u16, payload: &[u8]) -> Result<(), Error> {
+        let iface = named.map(|(_, iface)| iface);
+        let named = named.map(|(source, _)| source);
         let socket = self.socket(id)?;
         if let Some(error) = socket.pending.take() {
             return Err(Error::Failed(error));
@@ -572,7 +589,7 @@ impl Udp {
             }
             (None, Binding::Any) => (Ipv4Addr::UNSPECIFIED, Source::Any),
         };
-        let source = match ip.route(destination, lookup, None) {
+        let source = match ip.route(destination, lookup, iface) {
             Ok(route) if lookup == Source::Any => route.source,
             Ok(_) => source,
             Err(refusal) => return self.refuse(route_refusal(refusal), me, peer),
@@ -582,7 +599,7 @@ impl Udp {
             return self.refuse(Counter::TxQueueFull, me, peer);
         }
         let ttl = if destination.is_multicast() { multicast_ttl } else { ttl };
-        socket.tx.push_back(Queued { source, source_port: local_port, destination, port, ttl, broadcast: broadcast_permitted, payload: payload.to_vec(), waits: None });
+        socket.tx.push_back(Queued { source, source_port: local_port, destination, port, ttl, broadcast: broadcast_permitted, payload: payload.to_vec(), iface, waits: None });
         if !core::mem::replace(&mut socket.offered, true) {
             self.eligible.push(Sender::Socket(id));
         }
@@ -611,6 +628,7 @@ impl Udp {
             destination: d.destination,
             ttl: d.ttl,
             link_broadcast: d.link_broadcast,
+            iface: d.iface,
             at: d.at,
         }))
     }
@@ -689,6 +707,7 @@ impl Udp {
             destination,
             ttl: arrival.packet.ttl(),
             link_broadcast: arrival.link == MacClass::Broadcast,
+            iface: arrival.iface,
             at: now,
         });
         self.count(Counter::RxDelivered);

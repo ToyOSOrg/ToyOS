@@ -35,43 +35,74 @@ pub const MSG_REFUSED: u32 = 3;
 /// The longest driver name a hello carries.
 pub const MAX_LABEL: usize = 32;
 
-/// Who a driver is: its device's address, which is an individual one, and its
-/// name for the stack's lines: ASCII letters, digits and `-`.
+/// What a link is carried over, which the stack ranks links by: wired before
+/// wireless.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Medium {
+    Wired,
+    Wireless,
+}
+
+impl Medium {
+    fn encode(self) -> u8 {
+        match self {
+            Self::Wired => 1,
+            Self::Wireless => 2,
+        }
+    }
+
+    fn decode(byte: u8) -> Option<Self> {
+        match byte {
+            1 => Some(Self::Wired),
+            2 => Some(Self::Wireless),
+            _ => None,
+        }
+    }
+}
+
+/// Who a driver is: its device's address, which is an individual one, what
+/// the link is carried over, and its name for the stack's lines: ASCII
+/// letters, digits and `-`.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Hello {
     pub mac: Address,
+    pub medium: Medium,
     pub label: String,
 }
 
 impl Hello {
-    pub const MAX_BYTES: usize = 6 + MAX_LABEL;
+    pub const MAX_BYTES: usize = 7 + MAX_LABEL;
 
     pub fn encode(&self) -> Vec<u8> {
-        let mut out = Vec::with_capacity(6 + self.label.len());
+        let mut out = Vec::with_capacity(7 + self.label.len());
         out.extend_from_slice(&self.mac.bytes());
+        out.push(self.medium.encode());
         out.extend_from_slice(self.label.as_bytes());
         out
     }
 
     /// `None` for bytes [`Self::encode`] does not make: too short, a group's
-    /// address, or a name that is empty, too long or not one.
+    /// address, no medium, or a name that is empty, too long or not one.
     pub fn decode(bytes: &[u8]) -> Option<Self> {
-        let (mac, label) = bytes.split_first_chunk::<6>()?;
+        let (mac, rest) = bytes.split_first_chunk::<6>()?;
         let mac = Address::new(*mac)?;
+        let (&medium, label) = rest.split_first()?;
+        let medium = Medium::decode(medium)?;
         let named = |b: &u8| b.is_ascii_alphanumeric() || *b == b'-';
         if label.is_empty() || label.len() > MAX_LABEL || !label.iter().all(named) {
             return None;
         }
-        Some(Self { mac, label: String::from(core::str::from_utf8(label).ok()?) })
+        Some(Self { mac, medium, label: String::from(core::str::from_utf8(label).ok()?) })
     }
 }
 
 /// Why the stack would not open a link.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Refusal {
-    /// The stack drives one link, and its address is another's, or a link of
-    /// this address is open and alive (`issues/netstack-drives-one-card.md`).
-    OneLink,
+    /// A link of this address is open and alive.
+    Open,
+    /// The stack drives the most links it drives.
+    Full,
     /// The stack ended this address's last link for what its driver wrote.
     /// The driver ends on it, so its supervisor's restart budget bounds a
     /// driver that keeps writing what no driver writes.
@@ -83,18 +114,20 @@ pub enum Refusal {
 impl Refusal {
     pub fn encode(self) -> [u8; 4] {
         match self {
-            Self::OneLink => 1u32,
+            Self::Open => 1u32,
             Self::Malformed => 2,
             Self::Faulted => 3,
+            Self::Full => 4,
         }
         .to_le_bytes()
     }
 
     pub fn decode(bytes: &[u8]) -> Option<Self> {
         match u32::from_le_bytes(bytes.try_into().ok()?) {
-            1 => Some(Self::OneLink),
+            1 => Some(Self::Open),
             2 => Some(Self::Malformed),
             3 => Some(Self::Faulted),
+            4 => Some(Self::Full),
             _ => None,
         }
     }
@@ -110,9 +143,10 @@ mod tests {
 
     #[test]
     fn a_hello_reads_back_as_written() {
-        let hello = Hello { mac: mac([0x52, 0x54, 0, 0x12, 0x34, 0x56]), label: "virtio-net".into() };
+        let hello = Hello { mac: mac([0x52, 0x54, 0, 0x12, 0x34, 0x56]), medium: Medium::Wired, label: "virtio-net".into() };
         assert_eq!(Hello::decode(&hello.encode()), Some(hello));
-        let longest = Hello { mac: mac([2; 6]), label: "a".repeat(MAX_LABEL) };
+        let longest = Hello { mac: mac([2; 6]), medium: Medium::Wireless, label: "a".repeat(MAX_LABEL) };
+        assert_eq!(longest.encode().len(), Hello::MAX_BYTES);
         assert_eq!(Hello::decode(&longest.encode()), Some(longest));
     }
 
@@ -120,8 +154,12 @@ mod tests {
     /// group's address among them: the node is made with the address.
     #[test]
     fn a_hello_no_driver_writes_is_refused() {
-        let named = |mac: [u8; 6], label: &[u8]| [mac.as_slice(), label].concat();
+        let named = |mac: [u8; 6], label: &[u8]| [mac.as_slice(), &[1], label].concat();
         assert_eq!(Hello::decode(&[2, 0, 0, 0, 0]), None, "short of an address");
+        assert_eq!(Hello::decode(&[2, 0, 0, 0, 0, 0]), None, "no medium");
+        for medium in [0, 3, 0xff] {
+            assert_eq!(Hello::decode(&[[2, 0, 0, 0, 0, 0, medium].as_slice(), b"i219"].concat()), None, "medium {medium}");
+        }
         assert_eq!(Hello::decode(&named([0x01, 0x00, 0x5e, 0, 0, 0xfb], b"i219")), None, "a group's address");
         assert_eq!(Hello::decode(&named([0xff; 6], b"i219")), None, "the broadcast address");
         assert_eq!(Hello::decode(&named([2; 6], &[b'a'; MAX_LABEL + 1])), None, "a name too long");
@@ -133,7 +171,7 @@ mod tests {
 
     #[test]
     fn every_refusal_reads_back_and_no_other_word_does() {
-        for why in [Refusal::OneLink, Refusal::Malformed, Refusal::Faulted] {
+        for why in [Refusal::Open, Refusal::Full, Refusal::Malformed, Refusal::Faulted] {
             assert_eq!(Refusal::decode(&why.encode()), Some(why));
         }
         assert_eq!(Refusal::decode(&0u32.to_le_bytes()), None);

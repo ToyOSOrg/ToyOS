@@ -27,11 +27,14 @@ use crate::ends::{Driver, Fault};
 use crate::layout::{RX_DEPTH, SLOT_BYTES, TX_DEPTH};
 use crate::region::Region;
 use crate::state::{Counters, Group, Link};
-use crate::wire::{self, Address, Hello, Refusal};
+use crate::wire::{self, Address, Hello, Medium, Refusal};
 use crate::PORT;
 
 /// The device under a link, as its driver drives it.
 pub trait Nic {
+    /// What the device's link is carried over.
+    const MEDIUM: Medium;
+
     fn mac(&self) -> [u8; 6];
 
     /// The claim, for the poller: readable means an interrupt has landed.
@@ -131,12 +134,12 @@ struct Session<'a> {
 
 impl<'a> Session<'a> {
     /// A fresh region and its end, said hello with over `conn`.
-    fn open(label: &'a str, nic: &impl Nic, conn: Connection) -> Self {
+    fn open<N: Nic>(label: &'a str, nic: &N, conn: Connection) -> Self {
         let region = Region::create().unwrap_or_else(|why| panic!("{label}: no region for a link: {why:?}"));
         let end = Driver::new(region.words());
         let mac = Address::new(nic.mac())
             .unwrap_or_else(|| panic!("{label}: the device's address is a group's, which no link carries"));
-        let hello = Hello { mac, label: label.into() };
+        let hello = Hello { mac, medium: N::MEDIUM, label: label.into() };
         let shared = region.share().unwrap_or_else(|why| panic!("{label}: the link's region would not share: {why:?}"));
         // A connection that will not take the hello is one whose stack has
         // gone: its hang-up is read in the first pass.

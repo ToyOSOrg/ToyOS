@@ -8,7 +8,7 @@
 use std::net::Ipv4Addr;
 use std::time::Duration;
 
-use toyos_net_shard::Event;
+
 use toyos_net_tcp::{ConnId, Endpoint, State};
 use toyos_net_testnet::Net;
 use toyos_net_wire::arp::{Arp, Operation};
@@ -39,10 +39,10 @@ pub fn segment() -> (Net, usize, usize) {
     let mut net = Net::new(Instant::from_millis(3_600_000));
     let a = net.add_node(MAC_A, A, 24);
     let b = net.add_node(MAC_B, B, 24);
-    let verified = |net: &mut Net, n: usize, addr| net.nodes[n].events.contains(&Event::Verified(addr));
+    let verified = |net: &mut Net, n: usize, addr| net.nodes[n].verified(addr);
     assert!(net.run_until(Duration::from_secs(1), |net| verified(net, a, A) && verified(net, b, B)), "both addresses verified");
     net.advance(toyos_net_ip::limits::acd::ANNOUNCE_INTERVAL * 2);
-    let none = |n: usize, addr| net.nodes[n].shard.ip().neighbour(net.nodes[n].shard.iface(), addr).is_none();
+    let none = |n: usize, addr| net.nodes[n].shard.ip().neighbour(net.nodes[n].iface, addr).is_none();
     assert!(none(a, B) && none(b, A), "no neighbour entries yet");
     (net, a, b)
 }

@@ -212,6 +212,8 @@ pub enum Failure {
     Unreachable(SoftError),
     /// ICMP destination unreachable, administratively prohibited, during the handshake.
     Prohibited,
+    /// The host gave up the connection's local address ([`Tcp::lose_address`]).
+    AddressGone,
 }
 
 /// An ICMP error that did not end the connection; reported as the reason if it later gives up.

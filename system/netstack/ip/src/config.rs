@@ -121,7 +121,7 @@ impl Ip {
     /// gateway's for an off-link peer.
     pub fn advise(&mut self, now: Instant, remote: Ipv4Addr, advice: Advice) {
         let now = self.clock(now);
-        let Ok(route) = route::lookup(&self.ifaces, remote, Source::Any, None) else { return };
+        let Ok(route) = route::lookup(&self.ifaces, &self.order, remote, Source::Any, None) else { return };
         let NextHop::Neighbour(next_hop) = route.next_hop else { return };
         let Some((i, mut cx)) = self.split(now, route.iface) else { return };
         nud::advise(i, &mut cx, next_hop, advice == Advice::Confirmed);

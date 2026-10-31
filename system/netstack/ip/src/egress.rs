@@ -113,8 +113,10 @@ impl Control {
         }
     }
 
-    fn pop(&mut self) -> Option<Item> {
-        let item = self.items.pop_front()?;
+    /// The oldest item whose interface `room` says has room.
+    fn pop(&mut self, mut room: impl FnMut(IfIndex) -> bool) -> Option<Item> {
+        let at = self.items.iter().position(|item| room(item.iface()))?;
+        let item = self.items.remove(at)?;
         self.forget(&item);
         self.refill();
         Some(item)
@@ -164,6 +166,33 @@ impl Control {
     }
 }
 
+/// The room a transmit opportunity has, interface by interface. A count is
+/// room on every interface alike.
+pub trait Credit {
+    /// Whether `iface` takes one frame more.
+    fn room(&self, iface: IfIndex) -> bool;
+    /// One frame left by `iface`.
+    fn spend(&mut self, iface: IfIndex);
+}
+
+impl Credit for usize {
+    fn room(&self, _: IfIndex) -> bool {
+        *self > 0
+    }
+    fn spend(&mut self, _: IfIndex) {
+        *self = self.saturating_sub(1);
+    }
+}
+
+impl<C: Credit + ?Sized> Credit for &mut C {
+    fn room(&self, iface: IfIndex) -> bool {
+        (**self).room(iface)
+    }
+    fn spend(&mut self, iface: IfIndex) {
+        (**self).spend(iface);
+    }
+}
+
 /// A UDP datagram a transport hands [ip] at a transmit opportunity.
 #[derive(Clone, Copy, Debug)]
 pub struct UdpOut<'a> {
@@ -174,16 +203,22 @@ pub struct UdpOut<'a> {
     /// Whether its socket held the broadcast permission when it accepted the datagram: one
     /// without it never leaves in a link broadcast, whatever the prefixes have become since.
     pub broadcast: bool,
+    /// The interface it may leave by, where its send named one.
+    pub iface: Option<IfIndex>,
     pub datagram: UdpBuilder<'a>,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Sent {
-    /// This many bytes of the caller's buffer are the frame: one credit spent.
-    Frame(usize),
+    /// This many bytes of the caller's buffer are the frame, for this interface: one of its
+    /// credit to spend.
+    Frame { len: usize, iface: IfIndex },
     /// Not taken: this next hop's link address is being asked for. [`Event::Resolved`] or
     /// [`Event::Failed`] names it when that ends, unless the routes change first.
     Pending(Ipv4Addr),
+    /// Not taken: its interface has no room in this opportunity. The hop is its next hop, or
+    /// its destination where it has none on the link.
+    NoRoom { iface: IfIndex, hop: Ipv4Addr },
 }
 
 /// Where a datagram goes on the link.
@@ -205,15 +240,17 @@ fn build_vec<B: FrameBody>(source: IndividualMac, destination: MacAddr, body: &B
 }
 
 impl Ip {
-    /// A transmit opportunity with room for `credit` frames: [ip]'s own frames and the datagrams
+    /// A transmit opportunity with `credit`'s room: [ip]'s own frames and the datagrams
     /// resolution released, in the order they were queued, each handed to `sink` with its
-    /// interface. Returns how many left.
-    pub fn transmit(&mut self, now: Instant, credit: usize, mut sink: impl FnMut(IfIndex, &[u8])) -> usize {
+    /// interface; one whose interface has no room waits without holding back another's. Returns
+    /// how many left.
+    pub fn transmit(&mut self, now: Instant, mut credit: impl Credit, mut sink: impl FnMut(IfIndex, &[u8])) -> usize {
         let now = self.clock(now);
         let mut sent = 0usize;
-        while sent < credit {
-            let Some(item) = self.control.pop() else { break };
+        while let Some(item) = self.control.pop(|iface| credit.room(iface)) {
+            let iface = item.iface();
             if self.emit(now, item, &mut sink) {
+                credit.spend(iface);
                 sent = sent.saturating_add(1);
             }
         }
@@ -301,7 +338,7 @@ impl Ip {
     /// is known, and otherwise not taken, its next hop asked for. The route is the one of this
     /// moment, so a link broadcast is refused a datagram that does not carry the permission. A
     /// refusal is counted and the datagram's flow is told it is unreachable.
-    pub fn send_udp(&mut self, now: Instant, out: &UdpOut<'_>, frame: &mut [u8; FRAME]) -> Result<Sent, Counter> {
+    pub fn send_udp(&mut self, now: Instant, credit: &impl Credit, out: &UdpOut<'_>, frame: &mut [u8; FRAME]) -> Result<Sent, Counter> {
         let now = self.clock(now);
         let flow = Flow {
             source: out.source,
@@ -310,7 +347,14 @@ impl Ip {
             destination_port: out.datagram.destination,
         };
         let source = if out.source.is_unspecified() { Source::Unspecified } else { Source::Bound(out.source) };
-        let sent = self.route(out.destination, source, None).and_then(|route| {
+        let sent = self.route(out.destination, source, out.iface).and_then(|route| {
+            if !credit.room(route.iface) {
+                let hop = match route.next_hop {
+                    NextHop::Neighbour(next_hop) => next_hop,
+                    NextHop::Broadcast | NextHop::Multicast(_) => out.destination,
+                };
+                return Ok(Sent::NoRoom { iface: route.iface, hop });
+            }
             let builder = Ipv4Builder {
                 source: Ipv4Source::new(route.source).map_err(|_| Counter::RouteNoSourceAddress)?,
                 destination: out.destination,
@@ -322,7 +366,7 @@ impl Ip {
             self.fits(&builder)?;
             let Some((i, mut cx)) = self.split(now, route.iface) else { return Err(Counter::UnknownInterface) };
             match hop(i, &mut cx, &route, out.destination, out.broadcast)? {
-                Hop::To(mac) => build(i.mac, mac, &builder, frame).map(Sent::Frame).ok_or(Counter::IpExceedsMtu),
+                Hop::To(mac) => build(i.mac, mac, &builder, frame).map(|len| Sent::Frame { len, iface: route.iface }).ok_or(Counter::IpExceedsMtu),
                 Hop::Asked(next_hop) => Ok(Sent::Pending(next_hop)),
             }
         });
