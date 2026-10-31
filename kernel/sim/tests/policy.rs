@@ -1447,4 +1447,3 @@ fn a_masked_queue_past_a_siblings_is_stolen() {
         assert!(outcome.migrations > 0, "nothing was ever stolen: {}", outcome.report());
     });
 }
-
