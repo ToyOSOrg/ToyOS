@@ -243,6 +243,20 @@ impl Connection {
         let mut msg_type = [0; TYPE_LEN];
         receive(self.as_handle(), &mut msg_type, payload, false).map_err(Refused::blocking)
     }
+
+    /// Send a request and take the frame the peer sends next straight into
+    /// `payload`, in one kernel call ([`syscall::message_call`]): for a
+    /// protocol whose peer answers each request in turn, its answer. A
+    /// refused request sends nothing; once it is sent, the answer fails as
+    /// [`Self::recv_into`] does.
+    pub fn call(&self, msg_type: u32, request: &[u8], payload: &mut [u8]) -> Result<(Frame, Batch), IpcError> {
+        let mut frame = core::mem::MaybeUninit::<Wire<[u8; MAX_FRAME_LEN as usize]>>::uninit();
+        let sent = framed(&mut frame, msg_type, request).ok_or(IpcError::TooLarge)?;
+        let mut answer_type = [0; TYPE_LEN];
+        let mut handles = [toyos_abi::HANDLE_INVALID; syscall::MAX_TRANSFER_HANDLES];
+        let got = syscall::message_call(self.as_handle().raw(), sent, &mut answer_type, payload, &mut handles);
+        taken(got, answer_type, handles).map_err(Refused::blocking)
+    }
 }
 
 // Free functions, for a connection a caller holds by something other than a

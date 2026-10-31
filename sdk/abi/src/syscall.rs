@@ -347,6 +347,9 @@ pub const SYS_EVENT_TAKE: u64 = 150;
 pub const SYS_HANDLE_WAIT: u64 = 151;
 /// Take a connection's next whole message. See [`message_recv`].
 pub const SYS_MESSAGE_RECV: u64 = 152;
+/// Send a whole message, then take the next one on the same connection. See
+/// [`message_call`].
+pub const SYS_MESSAGE_CALL: u64 = 153;
 
 /// Bins in the per-process syscall profile — one for every number this ABI
 /// issues, and one at the end for every number it does not.
@@ -354,13 +357,13 @@ pub const SYS_MESSAGE_RECV: u64 = 152;
 /// **The profile's parts sum to its total, and that is the whole requirement.**
 /// A bin array narrower than the ABI reaches drops calls out of the line while
 /// the total goes on counting them.
-pub const SYSCALL_PROFILE_BINS: usize = 154;
+pub const SYSCALL_PROFILE_BINS: usize = 155;
 
 /// Where a number this ABI does not issue is counted. Merging is a degradation
 /// a reader can see in the line; dropping is one nobody can.
 pub const SYSCALL_PROFILE_OTHER: usize = SYSCALL_PROFILE_BINS - 1;
 
-const _: () = assert!(SYS_MESSAGE_RECV < SYSCALL_PROFILE_OTHER as u64);
+const _: () = assert!(SYS_MESSAGE_CALL < SYSCALL_PROFILE_OTHER as u64);
 
 pub const WNOHANG: u64 = 1;
 /// Every bit `SYS_PROCESS_WAIT`'s flag word defines; a wait carrying another
@@ -2212,6 +2215,38 @@ pub fn message_recv(
 ) -> Result<Received, SyscallError> {
     let args = MessageRecv::new(head, bytes, handles, nonblock);
     check(syscall(SYS_MESSAGE_RECV, conn.0 as u64, &args as *const MessageRecv as u64, 0, 0)).map(Received::decode)
+}
+
+crate::user_safe! {
+    /// Arguments for `SYS_MESSAGE_CALL`, passed as a single pointer. Neither
+    /// half takes a flag: a call waits for room and for its answer. The
+    /// request carries no handles: `send.count` other than zero is
+    /// `InvalidArgument`.
+    #[derive(Clone, Copy)]
+    pub struct MessageCall {
+        pub send: MessageSend,
+        pub recv: MessageRecv,
+    }
+}
+
+/// [`message_send`] and then [`message_recv`] on the same `conn`, in one
+/// call: the request, and the next message the peer sends, which a protocol
+/// whose peer answers each request in turn makes its answer.
+///
+/// A refused send
+/// answers as [`message_send`] does with nothing sent; once the request is
+/// queued, the receive answers as [`message_recv`] does, the request sent
+/// whatever it answers. **The request carries no handles**: an error could
+/// come from either half, so a caller could not know whether they had moved.
+pub fn message_call(
+    conn: RawHandle,
+    bytes: &[u8],
+    head: &mut [u8],
+    answer: &mut [u8],
+    answer_handles: &mut [RawHandle],
+) -> Result<Received, SyscallError> {
+    let args = MessageCall { send: MessageSend::new(bytes, &[], false), recv: MessageRecv::new(head, answer, answer_handles, false) };
+    check(syscall(SYS_MESSAGE_CALL, conn.0 as u64, &args as *const MessageCall as u64, 0, 0)).map(Received::decode)
 }
 
 /// Make a shared-memory region of zeroed memory and answer a handle to it.

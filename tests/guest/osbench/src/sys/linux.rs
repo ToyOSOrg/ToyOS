@@ -532,6 +532,12 @@ pub mod ipc {
             (&self.0).read_exact(buf)
         }
 
+        /// `request`, then its answer: a stream has no call of its own.
+        pub fn call(&self, request: &[u8], reply: &mut [u8]) -> io::Result<()> {
+            self.send(request)?;
+            self.recv(reply)
+        }
+
         /// `data` and `token` in one `sendmsg`, then this process's copy
         /// closed, so the descriptor ends up the peer's alone as a ToyOS
         /// handle moved would.

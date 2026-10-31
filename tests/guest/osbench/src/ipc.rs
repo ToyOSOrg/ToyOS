@@ -3,7 +3,9 @@
 //! request/reply every service speaks; on Linux a Unix stream socket. **The
 //! mechanisms differ by design**, and that difference is what is measured.
 //! A ToyOS message past one frame (8 KiB) goes as consecutive frames, which
-//! `frames_each_way` counts; a Linux one is one write.
+//! `frames_each_way` counts; a Linux one is one write. A ToyOS request's last
+//! frame and its answer's first are one call (`SYS_MESSAGE_CALL`); a Linux
+//! request is a write and its answer a read.
 //!
 //! The child is this program as `osbench ipc-serve`. Each phase starts with a
 //! control message, `[bytes, rounds, mode]` as three little-endian `u32`s;
@@ -72,20 +74,19 @@ pub fn suite() {
     // 200 at 8 B and 4 KiB, 2,000 after 100 at 64 KiB.
     for (bytes, warmup, samples) in [(8usize, 200u32, 5000u32), (4096, 200, 5000), (65536, 100, 2000)] {
         let bench = format!("ipc.reqrep.{bytes}");
-        let mut buf = vec![0x42u8; bytes];
-        let mut run = || -> std::io::Result<Samples<'_>> {
+        let buf = vec![0x42u8; bytes];
+        let run = || -> std::io::Result<Samples<'_>> {
             control(&peer, bytes as u32, warmup + samples, ECHO)?;
+            let mut reply = vec![0u8; bytes];
             for _ in 0..warmup {
-                peer.send(&buf)?;
-                peer.recv(&mut buf)?;
+                peer.call(&buf, &mut reply)?;
             }
             crate::clock::settle();
             let before = sys::counts();
             let mut ns = Vec::with_capacity(samples as usize);
             for _ in 0..samples {
                 let t = Instant::now();
-                peer.send(&buf)?;
-                peer.recv(&mut buf)?;
+                peer.call(&buf, &mut reply)?;
                 ns.push(ns_since(t));
             }
             Ok((ns, Counts::per_op(&before, u64::from(samples))))

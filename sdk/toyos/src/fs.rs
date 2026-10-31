@@ -827,14 +827,13 @@ impl Dir {
         self.tag = self.tag.wrapping_add(1);
         request.tag = self.tag;
         let conn = self.conn.as_ref().expect("connected above");
-        let mut rx = FrameRx::<{ core::mem::size_of::<Reply>() }>::new();
-        let answered = conn.send(op, &request).map_err(transport).and_then(|()| {
-            let frame = rx.recv(conn).map_err(transport)?;
-            let reply: Reply = crate::ipc::decode_payload(rx.payload(frame.payload_len)).map_err(transport)?;
+        let mut answer = [0u8; core::mem::size_of::<Reply>()];
+        let answered = conn.call(op, crate::ipc::as_bytes(&request), &mut answer).map_err(transport).and_then(|(frame, batch)| {
+            let reply: Reply = crate::ipc::decode_payload(&answer[..frame.payload_len]).map_err(transport)?;
             if reply.tag != request.tag {
                 return Err(Error::Malformed);
             }
-            Ok((frame.msg_type, reply, rx.take_batch()))
+            Ok((frame.msg_type, reply, batch))
         });
         if answered.is_err() {
             self.conn = None;

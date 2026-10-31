@@ -37,7 +37,7 @@ use super::io::{
 };
 use super::ipc::{
     Incoming, Outgoing,
-    sys_accept, sys_inbox_setup, sys_message_recv, sys_message_send,
+    sys_accept, sys_inbox_setup, sys_message_call, sys_message_recv, sys_message_send,
     sys_inbox_submit, sys_namespace_build, sys_namespace_open, sys_pipe,
     sys_port_badge, sys_port_create, sys_port_mint, sys_shm_create, sys_shm_map, sys_shm_sub,
 };
@@ -465,6 +465,19 @@ pub(crate) fn syscall_dispatch(num: u64, a1: u64, a2: u64, a3: u64, a4: u64) -> 
             let Ok(into) = incoming(&ctx, &args) else { return SyscallError::InvalidArgument.to_u64() };
             let Some(mut into) = into else { return bad_addr };
             sys_message_recv(RawHandle(a1 as u32), &mut into, args.flags & MESSAGE_NONBLOCK != 0)
+        }
+        SYS_MESSAGE_CALL => {
+            let Ok(args) = ctx.copy_in::<MessageCall>(UserAddr::new(a2)) else { return bad_addr };
+            // A call's request moves no handles: a refusal from either half
+            // would leave its caller not knowing whether they moved.
+            if args.send.flags != 0 || args.recv.flags != 0 || args.send.count != 0 {
+                return SyscallError::InvalidArgument.to_u64();
+            }
+            let (Ok(out), Ok(into)) = (outgoing(&ctx, &args.send), incoming(&ctx, &args.recv)) else {
+                return SyscallError::InvalidArgument.to_u64();
+            };
+            let (Some(out), Some(mut into)) = (out, into) else { return bad_addr };
+            sys_message_call(RawHandle(a1 as u32), &out, &mut into)
         }
         SYS_SHM_CREATE => sys_shm_create(a1, a2, RawHandle(a3 as u32)),
         SYS_SHM_MAP => sys_shm_map(RawHandle(a1 as u32), a2),

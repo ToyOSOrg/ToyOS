@@ -1,8 +1,8 @@
 //! A connection carries whole messages: each is taken whole, in the order it
 //! was sent, with exactly the handles it carried, or refused with nothing of
 //! it moved. What a host test of the queue cannot show is the kernel's own
-//! boundary: the syscalls' refusals, the handles moving between tables and
-//! the bounds as a sender meets them.
+//! boundary: the syscalls' refusals, the handles moving between tables, the
+//! bounds as a sender meets them, and a call's send and receive in one.
 //!
 //! - Three messages arrive in order, each with its own bytes and handles.
 //! - A buffer a byte or a handle short is refused, and the message stays
@@ -13,6 +13,7 @@
 //! - Plain reads and writes of a connection are refused.
 //! - A receive after the peer has gone takes what it sent, then answers
 //!   `Gone`; a send to a peer gone answers `Gone`.
+//! - A call sends and takes the answer the peer sends back, its handle with it.
 
 use toyos::ipc::Connection;
 use toyos::poller::OTHER_END_GONE;
@@ -43,6 +44,8 @@ fn main() {
     bytes_alone_are_refused(pair());
     println!("messages_are_whole: plain reads and writes were refused");
     gone_after_what_was_sent(pair());
+    println!("messages_are_whole: a peer's leaving came after its messages");
+    a_call_takes_the_answer(pair());
     println!("messages_are_whole: ok");
 }
 
@@ -185,4 +188,25 @@ fn gone_after_what_was_sent((client, server): (Connection, Connection)) {
     assert_eq!(recv(&server).map(|(b, _)| b), Ok(b"last".to_vec()), "the message sent before leaving");
     assert_eq!(recv(&server).err(), Some(SyscallError::Gone), "after the last message, the leaving");
     assert_eq!(send(&server, b"x", vec![], false), Err(SyscallError::Gone), "a send to a peer gone");
+}
+
+fn a_call_takes_the_answer((client, server): (Connection, Connection)) {
+    let peer = std::thread::spawn(move || {
+        let mut bytes = [0u8; 16];
+        let mut handles = [RawHandle(0); MAX_TRANSFER_HANDLES];
+        let got = syscall::message_recv(server.as_handle().raw(), &mut [], &mut bytes, &mut handles, false).expect("the request");
+        assert_eq!(&bytes[..got.len], b"ask", "the request came cut");
+        let (h, seen) = token();
+        send(&server, b"answer", vec![h], false).expect("the answer");
+        seen
+    });
+    let (mut head, mut answer) = ([0u8; 3], [0u8; 16]);
+    let mut handles = [RawHandle(0); MAX_TRANSFER_HANDLES];
+    let got = syscall::message_call(client.as_handle().raw(), b"ask", &mut head, &mut answer, &mut handles).expect("the call's answer");
+    assert_eq!((got.len, got.handles), (6, 1), "the call took another answer");
+    assert_eq!((&head, &answer[..3]), (b"ans", &b"wer"[..]), "the call's answer was not split across its two places");
+    let seen = peer.join().expect("the peer");
+    // SAFETY: installed for this call.
+    drop(unsafe { OwnedHandle::from_raw(handles[0]) });
+    assert!(gone(&seen), "the answer's handle is not the one the peer sent");
 }

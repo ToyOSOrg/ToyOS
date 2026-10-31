@@ -430,6 +430,15 @@ pub(super) fn sys_message_recv(conn_h: RawHandle, into: &mut Incoming<'_>, nonbl
     recv(conn_h, into, nonblock)
 }
 
+/// Send, then take the next message on the same connection
+/// ([`toyos_abi::syscall::message_call`]).
+pub(super) fn sys_message_call(conn_h: RawHandle, out: &Outgoing<'_>, into: &mut Incoming<'_>) -> u64 {
+    match send(conn_h, out, false) {
+        Ok(()) => recv(conn_h, into, false),
+        Err(word) => word,
+    }
+}
+
 /// [`sys_message_send`]'s work, or the word its refusal answers.
 fn send(conn_h: RawHandle, out: &Outgoing<'_>, nonblock: bool) -> Result<(), u64> {
     let mut wanted = [RawHandle(0); MAX_TRANSFER_HANDLES];

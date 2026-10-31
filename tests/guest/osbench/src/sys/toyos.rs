@@ -131,6 +131,21 @@ pub mod ipc {
             }
         }
 
+        /// `request` and its answer of `reply.len()` bytes, the answer's
+        /// first frame taken in the same call as the request's last, straight
+        /// into `reply`.
+        pub fn call(&self, request: &[u8], reply: &mut [u8]) -> io::Result<()> {
+            let last = request.len().saturating_sub(1) / FRAME * FRAME;
+            for chunk in request[..last].chunks(FRAME) {
+                self.0.send_bytes(1, chunk).map_err(|e| failed("send", e))?;
+            }
+            let (frame, _) = self.0.call(1, &request[last..], reply).map_err(|e| failed("call", e))?;
+            if frame.payload_len < reply.len() {
+                self.recv(&mut reply[frame.payload_len..])?;
+            }
+            Ok(())
+        }
+
         /// One frame into the front of `buf`, straight from the kernel: the
         /// bytes it held.
         fn take(&self, buf: &mut [u8]) -> io::Result<usize> {
