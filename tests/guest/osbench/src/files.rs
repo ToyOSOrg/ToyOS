@@ -137,6 +137,13 @@ pub fn suite(target: &Target) {
     }
     each(&name("open_close"), 100, 2000, &with(&[]), |_| io("open", File::open(&small)).map(drop));
 
+    // The same file opened, read whole and closed: what a file read again
+    // after its last close costs, its pages kept or not. 2,000 after 100.
+    let mut page = [0u8; 4096];
+    each(&name("reopen_read_4k"), 100, 2000, &with(&[("bytes", "4096".into())]), |_| {
+        io("reopen", File::open(&small).and_then(|mut f| f.read_exact(&mut page)))
+    });
+
     // `metadata` of the same file, by its path and through a descriptor
     // held open: 2,000 after 100 each.
     each(&name("stat"), 100, 2000, &with(&[]), |_| io("stat", fs::metadata(&small)).map(drop));
