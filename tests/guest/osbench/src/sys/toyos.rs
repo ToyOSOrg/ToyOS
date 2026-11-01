@@ -84,10 +84,8 @@ pub mod ipc {
     use std::os::toyos::process::CommandExt;
     use std::process::{Child, Command, Stdio};
 
-    use std::cell::RefCell;
-
     use toyos::endow::{Endowments, FromHandle};
-    use toyos::ipc::{Connection, FrameRx, MAX_FRAME_LEN};
+    use toyos::ipc::{Connection, MAX_FRAME_LEN};
     use toyos::port::{self, Acceptor};
     use toyos::{OwnedHandle, Pipe};
 
@@ -98,7 +96,7 @@ pub mod ipc {
     /// One end of a connection. A message longer than one frame
     /// ([`MAX_FRAME_LEN`]) goes as consecutive frames: a ToyOS connection
     /// frames each message, and a frame carries at most that much.
-    pub struct Peer(Connection, RefCell<Box<FrameRx<FRAME>>>);
+    pub struct Peer(Connection);
 
     /// What a message carries beside its bytes: one end of a pipe.
     pub type Token = Pipe;
@@ -133,11 +131,11 @@ pub mod ipc {
             }
         }
 
-        /// One frame into the front of `buf`: the bytes it held.
+        /// One frame into the front of `buf`, straight from the kernel: the
+        /// bytes it held.
         fn take(&self, buf: &mut [u8]) -> io::Result<usize> {
-            let mut rx = self.1.borrow_mut();
-            let frame = rx.recv(&self.0).map_err(|e| failed("receive", e))?;
-            Ok(copy(rx.payload(frame.payload_len), buf))
+            let (frame, _) = self.0.recv_into(buf).map_err(|e| failed("receive", e))?;
+            Ok(frame.payload_len)
         }
 
         /// One frame of `data` (at most one frame's worth) and `token`, moved.
@@ -146,24 +144,11 @@ pub mod ipc {
         }
 
         pub fn recv_with(&self, buf: &mut [u8]) -> io::Result<Token> {
-            let mut rx = self.1.borrow_mut();
-            let frame = rx.recv(&self.0).map_err(|e| failed("receive", e))?;
-            copy(rx.payload(frame.payload_len), buf);
-            let [handle] = rx.take_handles::<1>().ok_or_else(|| io::Error::other("no handle came"))?;
+            let (_, handles) = self.0.recv_into(buf).map_err(|e| failed("receive", e))?;
+            let [handle] = handles.exact::<1>().ok_or_else(|| io::Error::other("no handle came"))?;
             // The peer sends only pipe ends.
             Ok(Pipe::from_handle(handle))
         }
-    }
-
-    /// As much of `from` as `to` holds, at its front.
-    fn copy(from: &[u8], to: &mut [u8]) -> usize {
-        let n = from.len().min(to.len());
-        to[..n].copy_from_slice(&from[..n]);
-        n
-    }
-
-    fn peer(conn: Connection) -> Peer {
-        Peer(conn, RefCell::new(Box::new(FrameRx::new())))
     }
 
     pub fn token() -> io::Result<Token> {
@@ -182,14 +167,14 @@ pub mod ipc {
             .endow(LABEL, acceptor.into())
             .stdin(Stdio::null())
             .spawn()?;
-        Ok((child, peer(conn)))
+        Ok((child, Peer(conn)))
     }
 
     /// The child's end: the connection its parent made to the port it was
     /// endowed.
     pub fn served() -> io::Result<Peer> {
         let acceptor: Acceptor = Endowments::get().take(LABEL).ok_or_else(|| io::Error::other("no port endowed"))?;
-        acceptor.accept().map(peer).map_err(|e| failed("accept", e))
+        acceptor.accept().map(Peer).map_err(|e| failed("accept", e))
     }
 
     /// A port this process both connects to and accepts on, for timing a

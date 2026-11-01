@@ -384,13 +384,19 @@ impl PendingResponse {
         crate::ipc::decode_payload(rx.payload(frame.payload_len)).map_err(hangup)
     }
 
-    /// The answer's bytes, as many as `buf` holds.
+    /// The answer's bytes, taken straight into `buf`: their length. An
+    /// answer longer than `buf` is [`NetError::Io`].
     pub fn response_bytes(self, buf: &mut [u8]) -> Result<usize, NetError> {
-        let mut rx = FrameRx::<{ crate::ipc::MAX_FRAME_LEN as usize }>::new();
-        let frame = answer(self.conn(), &mut rx)?;
-        let n = frame.payload_len.min(buf.len());
-        buf[..n].copy_from_slice(&rx.payload(frame.payload_len)[..n]);
-        Ok(n)
+        let (frame, _) = self.conn().recv_into(buf).map_err(hangup)?;
+        let payload = &buf[..frame.payload_len];
+        match frame.msg_type {
+            t if t == RespType::Error as u32 => {
+                let err: ErrorResponse = crate::ipc::decode_payload(payload).map_err(hangup)?;
+                Err(NetError::from_error_code(err.code))
+            }
+            t if t == RespType::Result as u32 => Ok(frame.payload_len),
+            other => Err(NetError::Protocol(other)),
+        }
     }
 
     /// The answer, the `N` handles it hands over, and the connection, which

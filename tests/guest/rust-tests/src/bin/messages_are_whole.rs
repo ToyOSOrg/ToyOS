@@ -6,7 +6,8 @@
 //!
 //! - Three messages arrive in order, each with its own bytes and handles.
 //! - A buffer a byte or a handle short is refused, and the message stays
-//!   queued to be taken whole.
+//!   queued to be taken whole; one taken into two places fills them in
+//!   order.
 //! - Each bound (256 messages, 64 handles, 2 MiB of bytes) refuses the send
 //!   past it with nothing moved, and room comes back as messages are taken.
 //! - Plain reads and writes of a connection are refused.
@@ -64,7 +65,7 @@ fn send(conn: &Connection, bytes: &[u8], handles: Vec<OwnedHandle>, nonblock: bo
 fn recv(conn: &Connection) -> Result<(Vec<u8>, Vec<OwnedHandle>), SyscallError> {
     let mut bytes = vec![0u8; MAX_MESSAGE_LEN];
     let mut handles = [RawHandle(0); MAX_TRANSFER_HANDLES];
-    let got = syscall::message_recv(conn.as_handle().raw(), &mut bytes, &mut handles, true)?;
+    let got = syscall::message_recv(conn.as_handle().raw(), &mut [], &mut bytes, &mut handles, true)?;
     bytes.truncate(got.len);
     // SAFETY: the kernel installed these numbers in this process for this call.
     Ok((bytes, handles[..got.handles].iter().map(|&h| unsafe { OwnedHandle::from_raw(h) }).collect()))
@@ -111,20 +112,31 @@ fn a_short_buffer_leaves_it_queued((client, server): (Connection, Connection)) {
     let raw = server.as_handle().raw();
     let mut handles = [RawHandle(0); MAX_TRANSFER_HANDLES];
     assert_eq!(
-        syscall::message_recv(raw, &mut [0; 7], &mut handles, true),
+        syscall::message_recv(raw, &mut [], &mut [0; 7], &mut handles, true),
         Err(SyscallError::InvalidArgument),
         "a buffer a byte short"
     );
     assert_eq!(
-        syscall::message_recv(raw, &mut [0; 8], &mut handles[..1], true),
+        syscall::message_recv(raw, &mut [], &mut [0; 8], &mut handles[..1], true),
         Err(SyscallError::InvalidArgument),
         "a handle buffer one short"
     );
+    assert_eq!(
+        syscall::message_recv(raw, &mut [0; 3], &mut [0; 4], &mut handles, true),
+        Err(SyscallError::InvalidArgument),
+        "two places a byte short together"
+    );
     let mut bytes = [0u8; 8];
-    let got = syscall::message_recv(raw, &mut bytes, &mut handles, true).expect("the message, whole");
+    let got = syscall::message_recv(raw, &mut [], &mut bytes, &mut handles, true).expect("the message, whole");
     assert_eq!((got, bytes), (Received { len: 8, handles: 2 }, [7; 8]), "the refused receives took part of it");
     // SAFETY: installed for this call.
     handles[..2].iter().for_each(|&h| drop(unsafe { OwnedHandle::from_raw(h) }));
+
+    // Its first bytes fill the head, and the rest the body, in order.
+    send(&client, &[1, 2, 3, 4, 5], vec![], false).expect("a message of five bytes");
+    let (mut head, mut body) = ([0u8; 2], [0u8; 8]);
+    let got = syscall::message_recv(raw, &mut head, &mut body, &mut [], true).expect("the message, split");
+    assert_eq!((got.len, head, &body[..3]), (5, [1, 2], &[3, 4, 5][..]), "a split receive cut or reordered the message");
 }
 
 fn each_bound_refuses_the_send_past_it((client, server): (Connection, Connection)) {

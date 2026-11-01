@@ -411,6 +411,8 @@ pub(super) struct Outgoing<'a> {
 
 /// A receive's buffers as the dispatch bounded them.
 pub(super) struct Incoming<'a> {
+    /// Where the message's first bytes go, before [`Self::bytes`].
+    pub head: crate::user_ptr::UserBytesMut<'a>,
     pub bytes: crate::user_ptr::UserBytesMut<'a>,
     pub handles: crate::user_ptr::UserBytesMut<'a>,
     pub cap: usize,
@@ -487,7 +489,7 @@ fn recv(conn_h: RawHandle, into: &mut Incoming<'_>, nonblock: bool) -> u64 {
         let taken = process::with_process_data(|data| {
             let conn = data.handles.get::<ConnectionEnd>(conn_h, Rights::READ)?;
             let rx = conn.rx().clone();
-            let taken = rx.recv(&mut into.bytes, into.cap, &mut data.handles);
+            let taken = rx.recv(&mut into.head, &mut into.bytes, into.cap, &mut data.handles);
             Ok::<_, crate::object::Refusal>((rx, taken))
         });
         let rx = match taken {

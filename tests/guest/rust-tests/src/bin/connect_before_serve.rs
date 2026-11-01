@@ -155,7 +155,7 @@ fn client() -> ! {
     say("sent");
 
     let mut buf = [0u8; 64];
-    let got = syscall::message_recv(conn.as_handle().raw(), &mut buf, &mut [], false);
+    let got = syscall::message_recv(conn.as_handle().raw(), &mut [], &mut buf, &mut [], false);
     match expect.as_str() {
         "reply" => {
             let n = got.expect("the reply").len;
@@ -181,13 +181,13 @@ fn server() -> ! {
     // The instruction after `accept`, and it must not wait: the client sent
     // before this process existed, so the message is queued already.
     let mut buf = [0u8; 64];
-    let n = syscall::message_recv(conn.as_handle().raw(), &mut buf, &mut [], true)
+    let n = syscall::message_recv(conn.as_handle().raw(), &mut [], &mut buf, &mut [], true)
         .expect("the client's message was not queued at the server's first look")
         .len;
     say(&format!("already here: {}", String::from_utf8_lossy(&buf[..n])));
     send(&conn, ANSWER, false).expect("reply");
     // Held until the client has taken the reply, which its own exit reports.
-    let _ = syscall::message_recv(conn.as_handle().raw(), &mut [], &mut [], false);
+    let _ = syscall::message_recv(conn.as_handle().raw(), &mut [], &mut [], &mut [], false);
     std::process::exit(0);
 }
 

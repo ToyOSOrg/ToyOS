@@ -2170,9 +2170,12 @@ pub unsafe fn message_send(conn: RawHandle, bytes: &[u8], handles: &[RawHandle],
 
 crate::user_safe! {
     /// Arguments for `SYS_MESSAGE_RECV`, passed as a single pointer: where
-    /// the message's bytes and handles go.
+    /// the message's bytes go, its first `head_len` to `head` and the rest to
+    /// `bytes`, and where its handles go.
     #[derive(Clone, Copy)]
     pub struct MessageRecv {
+        pub head: u64,
+        pub head_len: u64,
         pub bytes: u64,
         pub len: u64,
         pub handles: u64,
@@ -2183,8 +2186,10 @@ crate::user_safe! {
 }
 
 impl MessageRecv {
-    fn new(bytes: &mut [u8], handles: &mut [RawHandle], nonblock: bool) -> Self {
+    fn new(head: &mut [u8], bytes: &mut [u8], handles: &mut [RawHandle], nonblock: bool) -> Self {
         Self {
+            head: head.as_mut_ptr() as u64,
+            head_len: head.len() as u64,
             bytes: bytes.as_mut_ptr() as u64,
             len: bytes.len() as u64,
             handles: handles.as_mut_ptr() as u64,
@@ -2215,17 +2220,25 @@ impl Received {
 
 const _: () = assert!(Received::encode(MAX_MESSAGE_LEN, MAX_TRANSFER_HANDLES) < u64::MAX - 255);
 
-/// Take `conn`'s next message whole: its bytes into `bytes` and its handles,
-/// each installed in this process's table, into `handles`.
+/// Take `conn`'s next message whole: its first bytes into `head`, the rest
+/// into `bytes`, and its handles, each installed in this process's table,
+/// into `handles`. Two places, so a protocol's own header and the payload
+/// behind it each land where the caller keeps them, with no copy between.
 ///
 /// Waits for one unless `nonblock`, which answers `WouldBlock`. Once the peer
 /// has gone and nothing is queued, `Gone`. **A message is never cut**: one
-/// larger than `bytes` or carrying more handles than `handles` holds is
-/// `InvalidArgument`, and a table without room for its handles
-/// `ResourceExhausted`, both leaving it queued. A protocol bounds its own
-/// messages, so either is the peer breaking it.
-pub fn message_recv(conn: RawHandle, bytes: &mut [u8], handles: &mut [RawHandle], nonblock: bool) -> Result<Received, SyscallError> {
-    let args = MessageRecv::new(bytes, handles, nonblock);
+/// larger than `head` and `bytes` together, or carrying more handles than
+/// `handles` holds, is `InvalidArgument`, and a table without room for its
+/// handles `ResourceExhausted`, both leaving it queued. A protocol bounds its
+/// own messages, so either is the peer breaking it.
+pub fn message_recv(
+    conn: RawHandle,
+    head: &mut [u8],
+    bytes: &mut [u8],
+    handles: &mut [RawHandle],
+    nonblock: bool,
+) -> Result<Received, SyscallError> {
+    let args = MessageRecv::new(head, bytes, handles, nonblock);
     check(syscall(SYS_MESSAGE_RECV, conn.0 as u64, &args as *const MessageRecv as u64, 0, 0)).map(Received::decode)
 }
 
