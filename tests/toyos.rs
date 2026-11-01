@@ -530,6 +530,8 @@ const MACHINE_TESTS: &[&str] = &[
     // endowments a job gets is the image's and the supervisor's, which no
     // host build has, and the benches run osbench only nightly.
     "osbench_capability_groups_exit_0",
+    // Measurement only, never lands.
+    "copyat_runs",
     // What the kernel reads and writes for the `acpi` claim's holder and what
     // it refuses. A red here is a write the kernel made — to RAM, to the
     // firmware's tables, to COM1, to `PM1a_CNT`, to a function's configuration
@@ -1202,6 +1204,11 @@ const METAL: &[(&str, metal::Metal)] = &[
             },
         },
     ),
+    // Measurement only, never lands: a memcpy by where its two ends sit.
+    (
+        "copyat",
+        metal::Metal { arms: COPYAT, judge: |b| osbench_ran(b[0], &["osbench_copyat", "osbench_ipc", "osbench_mem"]) },
+    ),
     (
         // `osbench energy`: the package's power, idle and under defined loads,
         // compared with the same program as root under the bench's Linux. A
@@ -1790,6 +1797,13 @@ const OSBENCH_GROUPS: [&str; 16] = [
 const BENCHCASE: &[metal::Arm] = &[metal::Arm {
     adds_ms: 465_000,
     ..metal::once("benchcase", "tests/images/benchcase.toml", &[], &OSBENCH_GROUPS)
+}];
+
+/// Measurement only, never lands.
+const COPYAT: &[metal::Arm] = &[metal::Arm {
+    adds_ms: 360_000,
+    named_only: true,
+    ..metal::once("copyat", "tests/images/benchcase.toml", &[], &["osbench_copyat", "osbench_ipc", "osbench_mem"])
 }];
 
 /// `energy` waits up to 120 s for the machine to go quiet, then measures 60 s
@@ -2951,6 +2965,22 @@ fn osbench_capability_groups_exit_0() -> Result<(), String> {
     for job in JOBS {
         said.must_say(&format!("===TEST_END {job} exit=0==="))?;
     }
+    Ok(())
+}
+
+/// Measurement only, never lands: `osbench copyat` exits 0.
+fn copyat_runs() -> Result<(), String> {
+    const JOBS: [&str; 1] = ["osbench_copyat"];
+    let committed = compile::repo_root().join("tests/images/benchcase.toml");
+    let text = fs::read_to_string(&committed).map_err(|e| format!("{}: {e}", committed.display()))?;
+    let derived = toyos_metal::image::derive(&text, 300_000, &JOBS, &[]).map_err(|why| why.to_string())?;
+    let config = common::lane::dir().join("copyat-runs.toml");
+    fs::write(&config, derived).map_err(|e| format!("{}: {e}", config.display()))?;
+    let mut qemu = QemuInstance::boot_with_options(&config, &[], &[], BootOptions { ready_marker: bootlog::COMPLETE, ..Default::default() });
+    let mut console = format!("{}\n", qemu.boot_log());
+    await_guest(&mut qemu, &mut console, "osbench copyat to end", |said| said.contains("===TEST_END osbench_copyat "))?;
+    let said = serial::Serial::named("osbench boot", console);
+    said.must_say("===TEST_END osbench_copyat exit=0===")?;
     Ok(())
 }
 
@@ -4680,6 +4710,7 @@ fn run_machine_test(name: &str, test_config: &Path) -> Result<(), String> {
         "kernel_wx_leaf_is_refused" => faults::kernel_wx_leaf_is_refused(test_config, qemu::Profile::Metal),
         "acpi_press_is_one_sci" => acpi_press_is_one_sci(),
         "osbench_capability_groups_exit_0" => osbench_capability_groups_exit_0(),
+        "copyat_runs" => copyat_runs(),
         "acpi_mediated_access" => acpi_mediated_access(2),
         "acpi_lock_given_back_on_one_cpu" => acpi_mediated_access(1),
         "acpi_supply_outlives_holder" => acpi_supply_outlives_holder(),

@@ -182,3 +182,100 @@ mod cpuid {
         String::from_utf8_lossy(&bytes).trim_matches(char::from(0)).trim().to_string()
     }
 }
+
+/// Measurement only, never lands: the copies `copyat` sets beside the
+/// library's `memcpy`. Each copies `n` bytes, at least 64, between two
+/// disjoint ranges.
+pub mod copies {
+    use std::arch::asm;
+
+    /// One `rep movsb`, as the library's `memcpy` is.
+    pub unsafe fn movsb(d: *mut u8, s: *const u8, n: usize) {
+        unsafe { asm!("rep movsb", inout("rdi") d => _, inout("rsi") s => _, inout("rcx") n => _, options(nostack)) };
+    }
+
+    /// The first 64 bytes by SSE2, then one `rep movsb` from the first
+    /// 64-byte boundary of the destination past its start.
+    pub unsafe fn movsb_dst_aligned(d: *mut u8, s: *const u8, n: usize) {
+        let skip = 64 - (d as usize % 64);
+        unsafe {
+            head64(d, s);
+            movsb(d.add(skip), s.add(skip), n - skip);
+        }
+    }
+
+    /// As [`movsb_dst_aligned`], aligning the source instead.
+    pub unsafe fn movsb_src_aligned(d: *mut u8, s: *const u8, n: usize) {
+        let skip = 64 - (s as usize % 64);
+        unsafe {
+            head64(d, s);
+            movsb(d.add(skip), s.add(skip), n - skip);
+        }
+    }
+
+    unsafe fn head64(d: *mut u8, s: *const u8) {
+        unsafe {
+            asm!(
+                "movups xmm0, [{s}]", "movups xmm1, [{s} + 16]", "movups xmm2, [{s} + 32]", "movups xmm3, [{s} + 48]",
+                "movups [{d}], xmm0", "movups [{d} + 16], xmm1", "movups [{d} + 32], xmm2", "movups [{d} + 48], xmm3",
+                s = in(reg) s, d = in(reg) d,
+                out("xmm0") _, out("xmm1") _, out("xmm2") _, out("xmm3") _,
+                options(nostack, preserves_flags),
+            )
+        };
+    }
+
+    /// 64 bytes a step by SSE2, lowest first; the last 64 bytes are loaded
+    /// first and stored last, so the final step may overlap the one before.
+    pub unsafe fn sse_up(d: *mut u8, s: *const u8, n: usize) {
+        unsafe {
+            asm!(
+                "movups xmm4, [{s} + {n} - 64]", "movups xmm5, [{s} + {n} - 48]",
+                "movups xmm6, [{s} + {n} - 32]", "movups xmm7, [{s} + {n} - 16]",
+                "xor {i:e}, {i:e}",
+                "2:",
+                "lea {e}, [{i} + 64]",
+                "cmp {e}, {n}",
+                "jae 3f",
+                "movups xmm0, [{s} + {i}]", "movups xmm1, [{s} + {i} + 16]",
+                "movups xmm2, [{s} + {i} + 32]", "movups xmm3, [{s} + {i} + 48]",
+                "movups [{d} + {i}], xmm0", "movups [{d} + {i} + 16], xmm1",
+                "movups [{d} + {i} + 32], xmm2", "movups [{d} + {i} + 48], xmm3",
+                "mov {i}, {e}",
+                "jmp 2b",
+                "3:",
+                "movups [{d} + {n} - 64], xmm4", "movups [{d} + {n} - 48], xmm5",
+                "movups [{d} + {n} - 32], xmm6", "movups [{d} + {n} - 16], xmm7",
+                s = in(reg) s, d = in(reg) d, n = in(reg) n, i = out(reg) _, e = out(reg) _,
+                out("xmm0") _, out("xmm1") _, out("xmm2") _, out("xmm3") _,
+                out("xmm4") _, out("xmm5") _, out("xmm6") _, out("xmm7") _,
+                options(nostack),
+            )
+        };
+    }
+
+    /// As [`sse_up`], highest first; the first 64 bytes are loaded first and
+    /// stored last.
+    pub unsafe fn sse_down(d: *mut u8, s: *const u8, n: usize) {
+        unsafe {
+            asm!(
+                "movups xmm4, [{s}]", "movups xmm5, [{s} + 16]", "movups xmm6, [{s} + 32]", "movups xmm7, [{s} + 48]",
+                "2:",
+                "cmp {p}, 64",
+                "jbe 3f",
+                "sub {p}, 64",
+                "movups xmm0, [{s} + {p}]", "movups xmm1, [{s} + {p} + 16]",
+                "movups xmm2, [{s} + {p} + 32]", "movups xmm3, [{s} + {p} + 48]",
+                "movups [{d} + {p}], xmm0", "movups [{d} + {p} + 16], xmm1",
+                "movups [{d} + {p} + 32], xmm2", "movups [{d} + {p} + 48], xmm3",
+                "jmp 2b",
+                "3:",
+                "movups [{d}], xmm4", "movups [{d} + 16], xmm5", "movups [{d} + 32], xmm6", "movups [{d} + 48], xmm7",
+                s = in(reg) s, d = in(reg) d, p = inout(reg) n => _,
+                out("xmm0") _, out("xmm1") _, out("xmm2") _, out("xmm3") _,
+                out("xmm4") _, out("xmm5") _, out("xmm6") _, out("xmm7") _,
+                options(nostack),
+            )
+        };
+    }
+}
