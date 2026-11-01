@@ -25,8 +25,8 @@ pub(crate) fn nonzero(value: u64) -> u64 {
     (value | value.wrapping_neg()) >> 63
 }
 
-/// Whether `a` and `b` hold the same bytes. Its time depends on their lengths alone, never on
-/// their contents: compare a received authenticator with the expected one through this.
+/// Whether `a` and `b` hold the same bytes, without branching or indexing on their contents:
+/// compare a received authenticator with the expected one through this.
 pub fn equal(a: &[u8], b: &[u8]) -> bool {
     if a.len() != b.len() {
         return false;

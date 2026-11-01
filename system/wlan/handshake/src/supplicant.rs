@@ -3,9 +3,10 @@
 //!
 //! - **Replays.** A frame whose Key Replay Counter is not above the last one whose MIC verified is
 //!   refused, message 1 included; message 1 carries no MIC, so it never moves the counter.
-//! - **Message 1 resent.** Until a message 3 verifies, a message 1 is answered with the SNonce
-//!   the first one drew, under whatever ANonce it carries. Once a pairwise key is installed, a
-//!   message 1 starts a rekey with a fresh SNonce.
+//! - **Message 1 resent.** Until a message 3 is accepted, a message 1 is answered with the
+//!   SNonce the first one drew, under whatever ANonce it carries; a message 3 refused after its
+//!   MIC verified accepts nothing, and the caller leaves the network. Once a pairwise key is
+//!   installed, a message 1 starts a rekey with a fresh SNonce.
 //! - **No reinstallation.** A message 3 resent for a handshake already completed is answered and
 //!   installs no pairwise key. A group key is handed out to install only when it is not the key
 //!   already installed under its ID.
@@ -175,7 +176,7 @@ struct Handshake {
     ptk: Ptk,
 }
 
-/// More than any EAPOL-Key frame an MPDU of 2,304 octets carries can wrap.
+/// More than the Key Data of any EAPOL-Key frame an MSDU of at most 2,304 octets carries.
 const KEY_DATA_MAX: usize = 2304;
 
 pub struct Supplicant {
@@ -188,7 +189,7 @@ pub struct Supplicant {
     own: Vec<u8>,
     protected: bool,
     replay: Option<u64>,
-    /// The handshake message 2 answered, until its message 3 verifies.
+    /// The handshake message 2 answered, until a message 3 for it is accepted.
     pending: Option<Handshake>,
     /// The handshake whose TK is installed.
     current: Option<Handshake>,

@@ -296,8 +296,7 @@ W1, P6.
   - an SAE Commit with an invalid scalar or element;
   - a PSK handshake for a network marked by Transition Disable.
 - **W2a, WPA2-Personal: built** (`system/wlan/handshake`,
-  `toyos-wlan-handshake`), since it needs nothing of P6 beyond `lib/crypto`'s
-  `ct::equal` and `Secret`, published for it. The 4-way and group key
+  `toyos-wlan-handshake`), on `lib/crypto`'s `ct::equal` and `Secret`. The 4-way and group key
   handshakes under AKM 2 with CCMP-128, the IGTK under BIP-CMAC-128 when
   PMF is negotiated. The first six refusals above are host tests against an
   authenticator in the tests that shares no crypto code with the crate;

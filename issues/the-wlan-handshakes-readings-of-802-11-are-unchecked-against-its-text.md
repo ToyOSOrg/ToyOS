@@ -38,3 +38,10 @@ citations or the refusals, which no capture exercises.
 | 15 | `supplicant.rs` | GTK key ID 0 is never a group key; an IGTK's is 4 or 5 |
 | 16 | `supplicant.rs` | The RSNE defaults: CCMP-128 for the ciphers, 802.1X for the AKM, BIP-CMAC-128 for group management |
 | 17 | `supplicant.rs` | CCMP's PN is Key RSC's first six octets, least significant first |
+| 18 | `supplicant.rs` | Every frame an authenticator sends has Key Ack set and Request and Error clear |
+| 19 | `supplicant.rs` | Message 1: Pairwise, no MIC, Install clear, Encrypted Key Data clear |
+| 20 | `supplicant.rs` | Message 3: Pairwise, MIC, Install, Secure and Encrypted Key Data set |
+| 21 | `supplicant.rs` | Group message 1: Key Type group, MIC, Secure and Encrypted Key Data set, Install clear |
+| 22 | `supplicant.rs` | Key Length is 16 for CCMP-128 in messages 1 and 3, and need not be checked in group message 1 |
+| 23 | `supplicant.rs` | Key RSC, and the IGTK KDE's IPN, are the last packet number the authenticator sent under the key, which the receive replay check starts from (`GroupKey::rsc`, `IntegrityKey::ipn`) |
+| 24 | `supplicant.rs` | PMF is negotiated when both sides set MFPC; either side's MFPR without the other's MFPC refuses the association |

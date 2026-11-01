@@ -115,9 +115,10 @@ impl<'a> Key<'a> {
     /// Whether the Key MIC is HMAC-SHA1-128 under `kck` of the PDU with its MIC zeroed (§12.7.2).
     pub(crate) fn mic_verifies(&self, kck: &[u8]) -> bool {
         let mut zeroed = self.pdu.to_vec();
-        if let Some(mic) = zeroed.get_mut(MIC_AT..MIC_AT.saturating_add(MIC_LEN)) {
-            mic.fill(0);
-        }
+        zeroed
+            .get_mut(MIC_AT..MIC_AT.saturating_add(MIC_LEN))
+            .expect("a PDU parsed has its whole fixed body")
+            .fill(0);
         ct::equal(&mic(kck, &zeroed), &self.mic)
     }
 }
@@ -157,9 +158,9 @@ impl Reply<'_> {
         pdu.extend_from_slice(&data_len.to_be_bytes());
         pdu.extend_from_slice(self.data);
         let tag = mic(kck, &pdu);
-        if let Some(field) = pdu.get_mut(MIC_AT..MIC_AT.saturating_add(MIC_LEN)) {
-            field.copy_from_slice(&tag);
-        }
+        pdu.get_mut(MIC_AT..MIC_AT.saturating_add(MIC_LEN))
+            .expect("a reply has its whole fixed body")
+            .copy_from_slice(&tag);
         pdu
     }
 }

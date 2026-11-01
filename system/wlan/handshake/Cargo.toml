@@ -13,8 +13,8 @@ publish = false
 toyos-crypto = { path = "../../../lib/crypto", features = ["wpa2"] }
 toyos-ieee80211 = { path = "../../../lib/ieee80211" }
 
-# The test authenticator's HMAC-SHA1, PRF and AES key wrap, from code other than
-# toyos-crypto's.
+# The test authenticator's HMAC-SHA1 (ring) and AES block cipher (aes), from
+# code other than toyos-crypto's; its PRF and key wrap are the tests' own.
 [dev-dependencies]
 ring = "0.17.14"
 aes = "0.8.4"

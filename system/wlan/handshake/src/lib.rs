@@ -78,7 +78,7 @@ reasons! {
         DescriptorVersion = "a Key Descriptor Version other than 2, HMAC-SHA1-128 and AES key wrap, which AKM 2 with CCMP-128 uses";
         KeyDataLength = "a Key Data Length other than the octets that follow it";
         NotFromAuthenticator = "Key Ack clear, or Request or Error set: no authenticator sends such a frame";
-        UnknownMessage = "a group key frame without a Key MIC, or a message 3 without Install and Secure";
+        UnknownMessage = "Key Information no handshake message has: a message 1 with Install, a message 3 without Install or Secure, or a group key frame without a Key MIC or Secure, or with Install";
         KeyLength = "a pairwise Key Length other than CCMP-128's 16 octets";
         Replayed = "a Key Replay Counter not above the last one whose MIC verified";
         Mic = "a Key MIC that does not verify";
