@@ -7,6 +7,7 @@
 //! ends the job. `hangupholder` is the app that ignores every quit.
 
 use std::os::toyos::process::CommandExt;
+use std::io::{BufRead, BufReader};
 use std::process::{Command, Stdio};
 use std::time::{Duration, Instant};
 
@@ -43,10 +44,9 @@ fn main() {
     };
     let logout = || String::from_utf8_lossy(&launched(&admin, "/system/bin/logout", &[]).stdout).into_owned();
 
-    // A detached app outlives the shell that started it. The shell's output
-    // is nobody's, since the holder it detaches keeps what it inherits open.
+    // An app detached in the session runs there, listening for its quits.
     let holder = detach(&launcher);
-    println!("session_lifecycle: a detached app (pid {holder}) outlives its shell");
+    println!("session_lifecycle: a detached app (pid {holder}) runs in the session");
 
     // What `logout` lists active now, among which this job's session is.
     let active: Vec<u64> = logout()
@@ -113,22 +113,27 @@ fn main() {
     panic!("session_lifecycle: the forced reboot ended {:?}", pending.outcome());
 }
 
-/// `hangupholder` detached in `launcher`'s session by a shell that has ended:
-/// its pid.
+/// `hangupholder` detached in `launcher`'s session, once it listens for its
+/// quits: its pid. Until it listens a quit ends it, so a stop asked before
+/// that would find nothing to wait for.
 fn detach(launcher: &Namespace) -> u32 {
     let before = live(HOLDER);
-    let shell = Command::new("/system/bin/shell")
+    let mut holder = Command::new(format!("/system/bin/{HOLDER}"))
         .independent()
+        .detached()
         .launcher(launcher.as_handle().into())
-        .args(["-c", &format!("detach /system/bin/{HOLDER}")])
         .stdin(Stdio::null())
-        .stdout(Stdio::null())
+        .stdout(Stdio::piped())
         .stderr(Stdio::null())
         .current_dir("/")
-        .status()
-        .expect("launch a shell in the session");
-    assert!(shell.success(), "the shell's detach ended {shell:?}");
-    live(HOLDER).into_iter().find(|pid| !before.contains(pid)).expect("the detached holder runs once its shell has ended")
+        .spawn()
+        .expect("detach the holder in the session");
+    let mut said = String::new();
+    BufReader::new(holder.stdout.take().expect("the holder's stdout"))
+        .read_line(&mut said)
+        .expect("the holder's first line");
+    assert_eq!(said.trim_end(), "hangupholder: holding", "the holder said something else first");
+    live(HOLDER).into_iter().find(|pid| !before.contains(pid)).expect("the detached holder runs")
 }
 
 /// The stop's lists until one names the holder: the first may be read before
