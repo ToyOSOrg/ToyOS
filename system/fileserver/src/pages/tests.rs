@@ -339,6 +339,33 @@ fn a_write_refused_part_way_is_cut_back_to_what_it_put() {
     assert_eq!(on_volume(&mut v, "home/f"), b"kept");
 }
 
+/// A write into a hole the file was extended over, refused before any byte
+/// landed: the block its reserve took there goes back, though the hole lies
+/// inside the old size, and the hole still reads zeros.
+#[test]
+fn a_write_refused_in_a_hole_gives_back_the_block_it_took() {
+    // Every block the volume does not write holds what an earlier tenant left.
+    let disk = Ram::new(4096);
+    let stale = vec![[0xAB; toyos_blockdev::BLOCK]; 4096];
+    toyos_blockdev::block_on(toyos_blockdev::BlockDev::write(&disk, 0, &stale), || ()).unwrap();
+    let mut v = DataVolume::format(disk, 256, &["home"], clock).unwrap();
+    let fake = Fake::new(64, 16);
+    let mut files = Files::new(Some(fake.clone()));
+    let (node, id) = open(&mut files, &mut v, "home/f");
+    files.write(&mut v, id, node, 0, &pattern(PAGE as usize, 4)).unwrap();
+    files.truncate(&mut v, id, node, 3 * PAGE).unwrap();
+    files.sync(&mut v).unwrap();
+    let room = v.room().unwrap().free;
+    fake.0.borrow_mut().refusing = true;
+    assert!(files.write(&mut v, id, node, PAGE, &pattern(PAGE as usize, 5)).is_err());
+    assert_eq!(v.room().unwrap().free, room, "the refused write kept the hole's block, or gave back more");
+    assert_eq!(v.node_meta(node).unwrap().size, 3 * PAGE);
+    fake.0.borrow_mut().refusing = false;
+    let mut out = vec![0xEEu8; PAGE as usize];
+    assert_eq!(v.read(node, PAGE, &mut Buf(&mut out)).unwrap(), PAGE as usize);
+    assert!(out.iter().all(|&b| b == 0), "the hole reads {:#04x}, not zeros", out[out.iter().position(|&b| b != 0).unwrap()]);
+}
+
 #[test]
 fn a_requested_page_is_supplied_by_its_notice() {
     let mut v = volume();
