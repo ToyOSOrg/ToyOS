@@ -142,7 +142,7 @@ use toyos_blockring::wire::{Grant as BlockGrant, Scope};
 use toyos_logstream::{
     Registration, Tag, ALIVE, CONSOLE, FLUSH, FLUSHED, LOGKEEPER, MAX_TAG, ORIGINS, REGISTER, RESUME, STOPPING,
 };
-use toyos_abi::inventory::{Arrival, Pci, PciAddr};
+use toyos_abi::inventory::{Arrival, Pci, PciAddr, Record};
 use toyos_abi::syscall::{
     DeviceRequest, FileType, SyscallError, DEV_PREFIX, FILESERVER_IMAGE_LABEL, JOB_LABEL, MAX_BADGE, PROVIDE_PREFIX,
     ROOT_IMAGE_LABEL, SERVE_PREFIX, SVC_LABEL, SYSCAP_LABEL,

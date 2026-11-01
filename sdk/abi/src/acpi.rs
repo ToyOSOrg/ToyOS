@@ -30,6 +30,11 @@
 //! until a holder has supplied it [`crate::syscall::SYS_SHUTDOWN`] is refused
 //! [`crate::syscall::SyscallError::NotSupported`].
 //!
+//! **So are the idle states deeper than C1, per processor** ([`op::IDLE`]):
+//! what `_CST` names is in the AML too. The holder hands over only states the
+//! kernel may enter as they are ([`IdleDeclaration`]); until it has, every CPU
+//! waits in C1.
+//!
 //! **The PCI root bridges are the holder's to declare, once** ([`op::DECLARE`],
 //! [`Apertures`]): each root's memory windows from its `_CRS`, and what its
 //! `_OSC` granted, are AML. Until a declaration is held the kernel hands over
@@ -41,11 +46,6 @@
 //! no fixed hardware: its claim names no block and raises no SCI, and its
 //! holder reaches the tables, firmware's memory and configuration space
 //! through [`Access`] alone.
-//!
-//! **So are the idle states deeper than C1, per processor** ([`op::IDLE`]):
-//! what `_CST` names is in the AML too. The holder hands over only states the
-//! kernel may enter as they are ([`IdleDeclaration`]); until it has, every CPU
-//! waits in C1.
 
 crate::user_safe! {
     /// A run of ports a register block occupies; `len` 0 is no block.

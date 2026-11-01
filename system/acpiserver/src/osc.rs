@@ -159,7 +159,7 @@ pub struct Committed {
 
 /// `path`'s `_OSC` committed with `claim` whole, no query first.
 pub fn commit<K: Kernel>(aml: &mut Aml<'_, K>, path: &str, claim: &Claim) -> Result<Committed, String> {
-    let [status, granted] = evaluate(aml, path, &claim.uuid, 0, claim.capabilities)?;
+    let [status, granted] = evaluate(aml, path, &claim.uuid, [0, claim.capabilities])?;
     Ok(Committed { status, granted: granted & claim.capabilities })
 }
 

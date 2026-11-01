@@ -10,6 +10,7 @@ use alloc::sync::Arc;
 use core::sync::atomic::{AtomicU64, Ordering};
 
 use super::{KObjectVariant, ObjectCore};
+use crate::mm::charge::Exhausted;
 
 pub struct DeviceSet {
     pub(super) core: ObjectCore,
@@ -18,8 +19,8 @@ pub struct DeviceSet {
 }
 
 impl DeviceSet {
-    pub fn new() -> Arc<Self> {
-        Arc::new(Self { core: Self::new_core(), seen: AtomicU64::new(0) })
+    pub fn new() -> Result<Arc<Self>, Exhausted> {
+        Ok(Arc::new(Self { core: Self::new_core(0)?, seen: AtomicU64::new(0) }))
     }
 
     /// Whether the set changed since this handle last read it.

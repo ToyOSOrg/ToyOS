@@ -375,7 +375,10 @@ pub(super) fn sys_device_set(syscap: RawHandle) -> u64 {
     if let Err(e) = demand_syscap(syscap, Rights::DEVICE) {
         return e.refuse();
     }
-    let set = crate::object::devset::DeviceSet::new();
+    let set = match crate::object::devset::DeviceSet::new() {
+        Ok(set) => set,
+        Err(e) => return SyscallError::from(e).to_u64(),
+    };
     process::with_process_data(|data| {
         super::handles::handle_result(crate::object::ops::install(&mut data.handles, crate::object::KObjectRef::DeviceSet(set)))
     })

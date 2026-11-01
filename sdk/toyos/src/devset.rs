@@ -11,7 +11,7 @@ use toyos_abi::devset::{self, Malformed, Snapshot};
 use toyos_abi::inventory::RawRecord;
 use toyos_abi::syscall::{self, SyscallError};
 
-use crate::{AsHandle, OwnedHandle, RawHandle};
+use crate::{AsHandle, OwnedHandle};
 
 pub struct DeviceSet(pub(crate) OwnedHandle);
 
@@ -64,7 +64,7 @@ impl DeviceSet {
 }
 
 impl AsHandle for DeviceSet {
-    fn as_handle(&self) -> RawHandle {
-        self.0.raw()
+    fn as_handle(&self) -> crate::BorrowedHandle<'_> {
+        self.0.as_handle()
     }
 }
