@@ -75,6 +75,7 @@ pub fn suite() {
         let mut buf = vec![0x42u8; bytes];
         let mut run = || -> std::io::Result<Samples<'_>> {
             control(&peer, bytes as u32, warmup + samples, ECHO)?;
+            let ran = crate::ran::start();
             for _ in 0..warmup {
                 peer.send(&buf)?;
                 peer.recv(&mut buf)?;
@@ -88,7 +89,9 @@ pub fn suite() {
                 peer.recv(&mut buf)?;
                 ns.push(ns_since(t));
             }
-            Ok((ns, Counts::per_op(&before, u64::from(samples))))
+            let mut counts = Counts::per_op(&before, u64::from(samples));
+            counts.extend(ran.fields());
+            Ok((ns, counts))
         };
         match run() {
             Ok((mut ns, counts)) => {
@@ -121,6 +124,7 @@ pub fn suite() {
             peer.send_with(&buf, token)?;
             peer.recv_with(&mut buf)
         };
+        let ran = crate::ran::start();
         for _ in 0..warmup {
             token = trip(token)?;
         }
@@ -132,7 +136,9 @@ pub fn suite() {
             token = trip(token)?;
             ns.push(ns_since(t));
         }
-        Ok((ns, Counts::per_op(&before, u64::from(samples))))
+        let mut counts = Counts::per_op(&before, u64::from(samples));
+        counts.extend(ran.fields());
+        Ok((ns, counts))
     };
     match run() {
         Ok((mut ns, counts)) => {
