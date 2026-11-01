@@ -13,6 +13,10 @@
 //! no CPU holds more than one chunk's pins. A page the process took away since
 //! the window was made reads as zeros and drops what is written to it.
 //!
+//! **A copy is never made under its space's lock**, which its fault-in takes:
+//! every entry here refuses one by name ([`crate::mm::space::Space::held_here`]) rather than spin
+//! on itself, whether or not the page is populated yet.
+//!
 //! Every single-word user read is `read_volatile`, including the futex word
 //! and the crash dump's walk, both outside this module.
 
@@ -46,9 +50,25 @@ fn asked(access: Access) -> Asked {
 /// Translate a user virtual address to its direct-map address, populating its
 /// page if needed; `pub(crate)` because the futex word outlives its syscall.
 pub(crate) fn translate_user(addr: UserAddr, access: Access) -> Option<crate::mm::DirectMap> {
-    let space = crate::process::current_address_space();
+    let space = unheld_space();
     let phys = space.lock().reach(addr.raw(), asked(access))?;
     Some(crate::mm::DirectMap::from_phys(phys))
+}
+
+/// The current space, refused where this CPU already holds its lock.
+fn unheld_space() -> crate::mm::space::PageTables {
+    let space = crate::process::current_address_space();
+    if space.held_here() {
+        under_its_lock();
+    }
+    space
+}
+
+/// The backtrace names the copy's caller.
+#[cold]
+#[inline(never)]
+fn under_its_lock() -> ! {
+    panic!("user_ptr: a user copy under its own space's lock: its fault-in would wait on itself");
 }
 
 /// Context for a single syscall invocation; the lifetime `'a` keeps validated references from escaping it.
@@ -136,7 +156,7 @@ impl View {
         if len == 0 {
             return Some(view);
         }
-        let space = crate::process::current_address_space();
+        let space = unheld_space();
         let allowed = space.lock().allows(ptr.raw(), ptr.raw() + len, asked(access));
         allowed.then_some(view)
     }
@@ -146,7 +166,7 @@ impl View {
     /// panics if out of bounds — the kernel's own arithmetic, never user input.
     fn pieces(&self, what: &str, off: usize, len: usize, mut copy: impl FnMut(*mut u8, usize, usize)) {
         assert!(off.checked_add(len).is_some_and(|end| end <= self.len), "{what} {off}+{len} past a {}-byte window", self.len);
-        let space = crate::process::current_address_space();
+        let space = unheld_space();
         let mut done = 0;
         while done < len {
             let mut frames = [None::<u64>; CHUNK_PAGES];
