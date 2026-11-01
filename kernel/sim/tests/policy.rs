@@ -485,6 +485,30 @@ fn a_turn_taking_pair_is_never_forwarded_off_its_cpu() {
     });
 }
 
+/// **A pair split across LLCs is brought into one**: on
+/// `scenarios::split_pair`, with balancing off, the one move is a wake
+/// following its waker's LLC, and after it every wake stays inside that LLC.
+#[test]
+fn a_split_pair_moves_once_into_one_llc() {
+    sweep(&scenarios::split_pair(), 40, |outcome| {
+        assert_eq!(outcome.migrations, 1, "the pair did not settle into one LLC with one move: {}", outcome.report());
+    });
+}
+
+/// **A server woken from two LLCs in turn mostly stays put**: on
+/// `scenarios::server_of_two_llcs` the server moves only when two consecutive
+/// wakes name the same other LLC, which the order the clients' requests
+/// land in makes rare. Over 40 seeds it averages at most one move in a run
+/// of 24 wakes (measured: 36 moves in all, at most 3 in one run). Following
+/// every wake's LLC moves it about 220 times over the same seeds.
+#[test]
+fn a_server_woken_from_two_llcs_in_turn_does_not_follow_them() {
+    const SEEDS: u64 = 40;
+    let mut moves = 0;
+    sweep(&scenarios::server_of_two_llcs(), SEEDS, |outcome| moves += outcome.migrations);
+    assert!(moves <= SEEDS, "the server followed its clients' LLCs: {moves} moves over {SEEDS} runs");
+}
+
 /// **A wake due ahead of the running task waits out [`MIN_SLICE_NS`] and a
 /// hop, not a request** — on one CPU, against one rival process, every wake
 /// but one per run.

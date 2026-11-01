@@ -122,6 +122,11 @@ impl SimHw {
         self.with(|s| core::mem::replace(&mut s.poster, cpu))
     }
 
+    /// The CPU whose step is posting, as a kernel wake names its waker.
+    pub fn poster(&self) -> Option<CpuId> {
+        self.with(|s| s.poster)
+    }
+
     fn cpu(state: &SimHwState) -> usize {
         state
             .current

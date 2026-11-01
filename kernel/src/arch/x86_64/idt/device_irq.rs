@@ -1,6 +1,6 @@
 //! Shared device interrupt entry: saves scratch GPRs, brackets the handler
-//! with the percpu preempt count, and on Ring 3 return runs the
-//! deferred-preempt epilogue.
+//! with the percpu preempt count and interrupt depth, and on Ring 3 return
+//! runs the deferred-preempt epilogue.
 //!
 //! IF stays 0 through the entry (interrupt gate; handlers never sti), satisfying
 //! `kernel_exit_to_user_check`'s IF=0-on-entry contract without an explicit cli.
@@ -34,6 +34,7 @@ macro_rules! device_irq_entry {
                 "push r11",
                 "push rbp",
                 "add dword ptr gs:[{preempt_count}], 1",
+                "add dword ptr gs:[{irq_depth}], 1",
                 // Ring 0 entry has unknown rsp alignment; align via the rbp save.
                 "mov rbp, rsp",
                 "and rsp, -16",
@@ -45,6 +46,7 @@ macro_rules! device_irq_entry {
                 "mov rdi, [rbp + {cs}]",
                 #[cfg(feature = "mask-windows")]
                 "call {windows_leaving}",
+                "sub dword ptr gs:[{irq_depth}], 1",
                 "sub dword ptr gs:[{preempt_count}], 1",
                 "test dword ptr [rbp + {cs}], 3",
                 "jz 1f",
@@ -67,6 +69,7 @@ macro_rules! device_irq_entry {
                 cs = const $cs,
                 exit_to_user = sym crate::arch::idt::kernel_exit_to_user_check,
                 preempt_count = const $crate::arch::percpu::OFF_PREEMPT_COUNT,
+                irq_depth = const $crate::arch::percpu::OFF_IRQ_DEPTH,
                 #[cfg(feature = "mask-windows")]
                 windows_entered = sym super::device_irq::windows_entered,
                 #[cfg(feature = "mask-windows")]

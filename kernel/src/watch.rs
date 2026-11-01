@@ -29,7 +29,7 @@ pub use kernel::sched::park::Cancel;
 
 use crate::hw::HW;
 use crate::inbox::PollEntry;
-use crate::sched::driver::{cpus, preempt_off};
+use crate::sched::driver::{cpus, preempt_off, waker};
 use crate::sched::payload::{KMsg, KShared, KernelLock, TaskHandle};
 use crate::sync::Masked;
 use crate::scheduler::Parkable;
@@ -79,12 +79,12 @@ impl Watch {
     /// Something about the object changed: wake every thread waiting on it and
     /// fire every poll.
     pub fn post(&self) {
-        self.post_as(WakeCause::new(WakeReason::Woken));
+        self.post_as(WakeCause::new(WakeReason::Woken).from(waker()));
     }
 
     /// The same, lending the poster's real-time window to whoever it wakes.
     pub fn post_boosted(&self, until: Nanos) {
-        self.post_as(WakeCause::boosted(WakeReason::Woken, until));
+        self.post_as(WakeCause::boosted(WakeReason::Woken, until).from(waker()));
     }
 
     fn post_as(&self, cause: WakeCause) {
@@ -99,7 +99,7 @@ impl Watch {
     pub fn post_n(&self, token: u64, limit: usize) -> usize {
         preempt_off(|p| {
             let env = Poster { cpus: cpus(), kicker: &HW, preempt: p };
-            self.0.post_n(token, limit, WakeCause::new(WakeReason::Woken), &env)
+            self.0.post_n(token, limit, WakeCause::new(WakeReason::Woken).from(waker()), &env)
         })
     }
 
@@ -109,7 +109,7 @@ impl Watch {
     pub fn revoke(&self, ended: impl Fn(u64) -> bool) -> usize {
         preempt_off(|p| {
             let env = Poster { cpus: cpus(), kicker: &HW, preempt: p };
-            self.0.revoke(ended, WakeCause::new(WakeReason::Woken), &env)
+            self.0.revoke(ended, WakeCause::new(WakeReason::Woken).from(waker()), &env)
         })
     }
 }
@@ -127,7 +127,7 @@ impl IrqWatch {
     pub fn post_in_place(&self) {
         preempt_off(|p| {
             let env = Poster { cpus: cpus(), kicker: &HW, preempt: p };
-            self.0.post_in_place(WakeCause::new(WakeReason::Woken), &env);
+            self.0.post_in_place(WakeCause::new(WakeReason::Woken).from(waker()), &env);
         });
     }
 }
