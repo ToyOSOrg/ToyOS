@@ -34,6 +34,8 @@ pub struct Command {
     /// A copy of the launcher an independent launch goes through, where it is
     /// not the endowed one.
     launcher: Option<io::Result<toyos::OwnedHandle>>,
+    /// A copy of the `SysCap` that starts a helper's child as a pager.
+    pager: Option<io::Result<toyos::OwnedHandle>>,
     /// The program the child runs, when it is not the one `argv[0]` names.
     image_path: Option<OsString>,
     prepared: Option<Prepared>,
@@ -122,6 +124,7 @@ impl Command {
             parent: Parent::Caller,
             independent: false,
             launcher: None,
+            pager: None,
             image_path: None,
             prepared: None,
             image: None,
@@ -282,6 +285,12 @@ impl Command {
         self.launcher = Some(copy(namespace));
     }
 
+    /// Start the child as a pager, by a copy of `syscap`, which carries
+    /// `Rights::PAGER`.
+    pub fn pager(&mut self, syscap: crate::os::toyos::io::BorrowedHandle<'_>) {
+        self.pager = Some(copy(syscap));
+    }
+
     /// Place a launched child under the launcher's owner, so it outlives this process.
     pub fn detached(&mut self) {
         self.parent = Parent::Detached;
@@ -406,6 +415,11 @@ impl Command {
             Some(Ok(launcher)) => Some(toyos::AsHandle::as_handle(launcher)),
             Some(Err(e)) => return Err(io::Error::new(e.kind(), e.to_string())),
         };
+        let pager = match &self.pager {
+            None => None,
+            Some(Ok(syscap)) => Some(toyos::AsHandle::as_handle(syscap)),
+            Some(Err(e)) => return Err(io::Error::new(e.kind(), e.to_string())),
+        };
         let boot_image = match &self.boot_image {
             None => None,
             Some(Ok(image)) => Some(image.try_clone().map_err(crate::sys::to_io_error)?),
@@ -448,6 +462,7 @@ impl Command {
             parent,
             independent: self.independent,
             launcher,
+            pager,
         };
         let pipes = |stdin, stdout, stderr| StdioPipes { stdin, stdout, stderr };
         let handle = match request.start().map_err(refused)? {

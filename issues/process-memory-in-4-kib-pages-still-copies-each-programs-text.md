@@ -102,3 +102,10 @@ live split of a user leaf.
    nothing measures the TLB misses of a workload against 2 MiB leaves. Exit:
    whole aligned spans of one range get a 2 MiB leaf where a measurement
    shows it pays, or the measurement shows it does not.
+
+**Paged objects** (memory design §7, `issues/toyos-builds-itself.md` item 13)
+are split in two. **7a**, delivered by the storage track's file-server work:
+a pager's objects, read through `SYS_PAGED_READ` and never mapped
+(`kernel/src/object/paged.rs`). **7b** stays this track's: mappings of them,
+faults that park, their page tables and reverse records, holders' kernel
+writes and their admission, after stage 4's seal.

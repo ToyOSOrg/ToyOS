@@ -101,9 +101,10 @@ its job's, but a pipe or an event a server makes and hands out
 (fileserver's stream pipes, netstack's bells) is the server's, which the
 server bounds. With no
 per-job limit a cap is still the only thing between one client and the
-machine. The file servers' block caches hold an eighth between them, and no
-other job gets it back
-(`issues/the-file-servers-clean-blocks-are-given-back-to-no-other-job.md`).
+machine. The file servers' block caches hold 16 MiB each, and their pagers'
+clean pages up to an eighth of physical memory between them, and no other job gets either back
+(`issues/the-file-servers-clean-blocks-are-given-back-to-no-other-job.md`,
+`issues/a-pager-holds-a-fixed-capacity-until-the-memory-service-reclaims-its-clean-pages.md`).
 
 **Promoted to `defect` 2026-08-25** (finding-lifecycle ruling: isolation
 findings are security-adjacent and are promoted, never folded). One job

@@ -71,6 +71,17 @@ pub trait BlockDev {
 
     /// Every write that completed before this was asked, on the medium.
     async fn flush(&self) -> Result<(), Error>;
+
+    /// [`read`](Self::read) of a file's data rather than the filesystem's own
+    /// structures: a device that caches the structures may pass this by.
+    async fn read_data(&self, lba: u64, out: &mut [Block]) -> Result<(), Error> {
+        self.read(lba, out).await
+    }
+
+    /// [`write`](Self::write) of a file's data, as [`read_data`](Self::read_data).
+    async fn write_data(&self, lba: u64, data: &[Block]) -> Result<(), Error> {
+        self.write(lba, data).await
+    }
 }
 
 /// `Ok` if `count` blocks from `lba` lie on a device of `blocks` blocks.
@@ -94,6 +105,12 @@ impl<D: BlockDev + ?Sized> BlockDev for &D {
     async fn flush(&self) -> Result<(), Error> {
         (**self).flush().await
     }
+    async fn read_data(&self, lba: u64, out: &mut [Block]) -> Result<(), Error> {
+        (**self).read_data(lba, out).await
+    }
+    async fn write_data(&self, lba: u64, data: &[Block]) -> Result<(), Error> {
+        (**self).write_data(lba, data).await
+    }
 }
 
 impl<D: BlockDev + ?Sized> BlockDev for Rc<D> {
@@ -108,5 +125,11 @@ impl<D: BlockDev + ?Sized> BlockDev for Rc<D> {
     }
     async fn flush(&self) -> Result<(), Error> {
         (**self).flush().await
+    }
+    async fn read_data(&self, lba: u64, out: &mut [Block]) -> Result<(), Error> {
+        (**self).read_data(lba, out).await
+    }
+    async fn write_data(&self, lba: u64, data: &[Block]) -> Result<(), Error> {
+        (**self).write_data(lba, data).await
     }
 }

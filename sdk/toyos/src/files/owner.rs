@@ -32,8 +32,9 @@ enum Place {
 
 /// What a descriptor of this module's names.
 enum Held {
-    /// A file or directory a file server holds open.
-    Served { cap: Arc<Capability>, fid: Fid, position: Position },
+    /// A file or directory a file server holds open, and the holder of its
+    /// paged object where the server sent one.
+    Served { cap: Arc<Capability>, fid: Fid, position: Position, holder: Option<crate::paged::Paged> },
     /// A directory the kernel serves, by its absolute path.
     KernelDir(String),
 }
@@ -84,6 +85,17 @@ impl Position {
             }
             Offset::Server => dir.read(fid, out),
         }
+    }
+
+    /// A read at the local offset through the file's paged object, which
+    /// takes no turn on the capability: `None` where the offset is the
+    /// server's or the object would not answer, and the server is asked.
+    fn read_held(&self, holder: &crate::paged::Paged, out: &mut [u8]) -> Option<usize> {
+        let mut at = self.at.lock();
+        let Offset::Here(offset) = *at else { return None };
+        let n = holder.read(out, offset).ok()?;
+        *at = Offset::Here(offset + n as u64);
+        Some(n)
     }
 
     fn write(&self, dir: &mut Dir, fid: Fid, data: &[u8]) -> Result<usize, fs::Error> {
@@ -264,6 +276,20 @@ fn on_fd<T>(
     kernel_dir: impl FnOnce(&str) -> Result<T, Error>,
     served: impl FnOnce(&mut Dir, Fid, &Position) -> Result<T, fs::Error>,
 ) -> Result<T, Error> {
+    on_fd_held(fd, kernel, kernel_dir, |_, _| None, served)
+}
+
+/// [`on_fd`], trying `holding` first on a served file whose paged object
+/// this descriptor holds, without the capability's turn, so a reader waiting
+/// for a page holds up no request of another thread's; `None` from it, and
+/// the server is asked.
+fn on_fd_held<T>(
+    fd: Fd,
+    kernel: impl FnOnce(crate::BorrowedHandle<'_>) -> Result<T, SyscallError>,
+    kernel_dir: impl FnOnce(&str) -> Result<T, Error>,
+    holding: impl FnOnce(&crate::paged::Paged, &Position) -> Option<T>,
+    served: impl FnOnce(&mut Dir, Fid, &Position) -> Result<T, fs::Error>,
+) -> Result<T, Error> {
     // A kernel call is made while the descriptor's object is held; an object
     // of this module's is taken out of it, counted, and asked after.
     let named = fd::with(fd, |o| match (o.kernel_handle(), o.tag()) {
@@ -276,7 +302,10 @@ fn on_fd<T>(
     match named.map_err(Error::Fd)?? {
         Err(answer) => answer,
         Ok(held) => match &*held {
-            Held::Served { cap, fid, position } => served(&mut cap.dir.lock(), *fid, position).map_err(Error::Served),
+            Held::Served { cap, fid, position, holder } => match holder.as_ref().and_then(|h| holding(h, position)) {
+                Some(answer) => Ok(answer),
+                None => served(&mut cap.dir.lock(), *fid, position).map_err(Error::Served),
+            },
             Held::KernelDir(path) => kernel_dir(path),
         },
     }
@@ -412,7 +441,17 @@ unsafe extern "C" fn toyos_fs_open(at: Fd, path: *const u8, len: usize, how: Ope
                 false => dir.open(base, rel, flags)?,
             };
             let position = Position::new(how.append, opened.stat.kind == fs::KIND_DIR);
-            Ok(Ok(Opened::Held(Held::Served { cap: Arc::clone(cap), fid: opened.fid, position })))
+            // What a reply carries is a holder only as the kernel answers for
+            // it; a pager's process reads through the server.
+            let holder = match opened.holder.map(crate::paged::Paged::received) {
+                None | Some(Err(crate::paged::NotAHolder::Refused | crate::paged::NotAHolder::Ended)) => None,
+                Some(Ok(holder)) => Some(holder),
+                Some(Err(crate::paged::NotAHolder::Other)) => {
+                    dir.close(opened.fid);
+                    return Err(Refused::Error(fs::Error::Malformed));
+                }
+            };
+            Ok(Ok(Opened::Held(Held::Served { cap: Arc::clone(cap), fid: opened.fid, position, holder })))
         },
     )
     .and_then(|opened| opened);
@@ -473,14 +512,21 @@ fn is_a_directory<T>(_: &str) -> Result<T, Error> {
 
 #[no_mangle]
 unsafe extern "C" fn toyos_fs_read(fd: Fd, buf: *mut u8, len: usize) -> i64 {
-    // SAFETY: the caller lends `len` writable bytes for the call, and only
-    // one of the closures runs.
+    // SAFETY: the caller lends `len` writable bytes for the call. The
+    // closures that run, run one after another, and each slice is dead
+    // before the next is made, so no two live at once.
     let out = || unsafe { core::slice::from_raw_parts_mut(buf, len) };
     let blocking = crate::net::stream::Wait::Blocking(None);
     if let Some(n) = on_stream(fd, |h| crate::net::stream::read(h, out(), blocking)) {
         return answer(n.map(|n| n as u64));
     }
-    let n = on_fd(fd, |h| syscall::read(h.raw(), out()), is_a_directory, |dir, fid, position| position.read(dir, fid, out()));
+    let n = on_fd_held(
+        fd,
+        |h| syscall::read(h.raw(), out()),
+        is_a_directory,
+        |holder, position| position.read_held(holder, out()),
+        |dir, fid, position| position.read(dir, fid, out()),
+    );
     answer(n.map(|n| n as u64))
 }
 
@@ -498,10 +544,17 @@ unsafe extern "C" fn toyos_fs_write(fd: Fd, buf: *const u8, len: usize) -> i64 {
 
 #[no_mangle]
 unsafe extern "C" fn toyos_fs_pread(fd: Fd, buf: *mut u8, len: usize, offset: u64) -> i64 {
-    // SAFETY: the caller lends `len` writable bytes for the call, and only
-    // one of the closures runs.
+    // SAFETY: the caller lends `len` writable bytes for the call. The
+    // closures that run, run one after another, and each slice is dead
+    // before the next is made, so no two live at once.
     let out = || unsafe { core::slice::from_raw_parts_mut(buf, len) };
-    let n = on_fd(fd, |h| syscall::pread(h.raw(), out(), offset), is_a_directory, |dir, fid, _| dir.pread(fid, offset, out()));
+    let n = on_fd_held(
+        fd,
+        |h| syscall::pread(h.raw(), out(), offset),
+        is_a_directory,
+        |holder, _| holder.read(out(), offset).ok(),
+        |dir, fid, _| dir.pread(fid, offset, out()),
+    );
     answer(n.map(|n| n as u64))
 }
 

@@ -68,8 +68,14 @@ syscap = ["rt"]
 # `/state/test-runner` and nothing else of `/state`.
 [programs.test-runner]
 state = true
+# `pagerprobe`, a pager row, which `a_pager_s_end_answers_its_waiting_holders_gone` launches.
+starts = ["pagerprobe"]
 receives = ["soundserver", "volume", "power", "log"]
 syscap = ["device", "dup", "logread", "power", "roster", "counters", "trace", "inventory", "jobs"]
+
+# A pager a test ends under a waiting reader (`tests/guest/pagerprobe`).
+[programs.pagerprobe]
+pager = true
 
 [programs.toybox]
 receives = ["soundserver"]
@@ -121,5 +127,6 @@ receives = ["disk"]
 # one ends, on the same ports.
 [programs.fileserver]
 restart = true
+pager = true
 roles = ["data", "log", "boot"]
 receives = ["block"]

@@ -28,6 +28,7 @@
 //! state                     it keeps machine state of its own in `/state/<name>`
 //! role <role>               a file server for `<role>`: one process of it per role
 //! restart                   the supervisor starts it again when it ends
+//! pager                     started as a pager: it may make the paged objects its files are read through
 //! memory-floor <bytes>      memory held back for its job however short every other runs
 //! supervisor-floor <bytes>  the same for the supervisor's own job
 //! supervisor-serve <name>   a name the supervisor serves itself
@@ -337,6 +338,10 @@ pub struct Program {
     /// The supervisor starts it again when it ends other than by exit 0, on the
     /// same ports or function, within the supervisor's restart budget.
     pub restart: bool,
+    /// Started as a pager (`toyos_abi::handle::Rights::PAGER`): it may make
+    /// the paged objects its readers wait on. The signed image's row alone
+    /// confers it; no [`syscap_rights`] name and no package row reaches it.
+    pub pager: bool,
     /// The folder of the session's home a package's launch was granted
     /// ([`grants::decide`]): set by the supervisor on the row it synthesizes
     /// for that launch, and never on a declared row.
@@ -574,6 +579,9 @@ pub fn render(manifest: &Manifest) -> Result<Vec<u8>, RenderError> {
         if program.restart {
             out.push_str("restart\n");
         }
+        if program.pager {
+            out.push_str("pager\n");
+        }
         for key in &program.starts {
             check(&program.name, "starts", key)?;
             out.push_str(&format!("starts {key}\n"));
@@ -745,6 +753,7 @@ pub fn parse(text: &str) -> Manifest {
                     "state" if rest.is_empty() => program.state = true,
                     "role" => program.roles.push(rest.to_string()),
                     "restart" if rest.is_empty() => program.restart = true,
+                    "pager" if rest.is_empty() => program.pager = true,
                     "starts" => program.starts.push(rest.to_string()),
                     "login" if rest.is_empty() => program.login = true,
                     "memory-floor" => program.memory_floor = bytes(line, rest),
@@ -797,6 +806,7 @@ mod tests {
                     receives: vec!["block".into()],
                     roles: vec!["data".into(), "log".into()],
                     restart: true,
+                    pager: true,
                     ..Program::default()
                 },
                 Program {
@@ -835,6 +845,7 @@ mod tests {
         assert!(row.serves.is_empty());
         assert!(row.provides.is_empty());
         assert_eq!(row.memory_floor, 0, "a package's row held memory back");
+        assert!(!row.pager, "a package's row is a pager");
         assert_eq!(row.source.path(), Some("/apps/gbae/gbae"));
     }
 
@@ -1070,6 +1081,19 @@ mod tests {
         assert!(syscap_rights(&["sysinfo".into()]).is_err());
     }
 
+    /// **No `syscap` name confers the pager right**: a row's `pager` is the
+    /// only way to it, so a manifest's right list cannot start a pager.
+    #[test]
+    fn no_syscap_name_is_the_pager_right() {
+        for (name, _) in SYSCAP_RIGHTS {
+            let rights = syscap_rights(&[(*name).to_string()]).unwrap();
+            assert!(!rights.contains(Rights::PAGER), "`{name}` carries PAGER");
+        }
+        let every: Vec<String> = SYSCAP_RIGHTS.iter().map(|(n, _)| (*n).to_string()).collect();
+        assert!(!syscap_rights(&every).unwrap().contains(Rights::PAGER));
+        assert!(syscap_rights(&["pager".into()]).is_err());
+    }
+
     /// A file server's roles reach the supervisor as records, and a name that is no
     /// role is refused where it is written: the supervisor would start a server for
     /// directories nobody named.
@@ -1079,6 +1103,7 @@ mod tests {
         let fileserver = m.program("fileserver").unwrap();
         assert_eq!(fileserver.roles, ["data", "log"]);
         assert!(fileserver.restart);
+        assert!(fileserver.pager);
         let dirs = |role| role_dirs(role).map(|dirs| dirs.iter().map(|d| (d.dir, d.root)).collect::<Vec<_>>());
         assert_eq!(
             dirs("data"),

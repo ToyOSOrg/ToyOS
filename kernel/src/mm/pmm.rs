@@ -469,6 +469,11 @@ pub fn pin_range(phys: u64, len: usize) -> bool {
     true
 }
 
+/// Whether a pin holds the frame at `phys`.
+pub fn pinned(phys: u64) -> bool {
+    pins().pinned(phys)
+}
+
 /// Release a pin [`pin_range`] took over the same range.
 pub fn unpin_range(phys: u64, len: usize) {
     let pins = pins();

@@ -28,7 +28,7 @@ use toyos_blockdev::BlockDev;
 use toyos_fat32::{Error, Fat32, FatTime};
 
 use crate::cache::{Cache, Disk};
-use crate::volume::{parent, Identities, Kind, Listed, Meta, Node, OpenHow, Out, Volume, NANOS_PER_SEC};
+use crate::volume::{parent, Identities, Kind, Listed, Meta, Node, OpenHow, Out, Reserved, Volume, NANOS_PER_SEC};
 
 /// The most entries one directory listing materialises.
 const MAX_LIST: usize = 16_384;
@@ -305,13 +305,25 @@ impl<D: Disk> Volume for FatVolume<D> {
         Ok(n)
     }
 
-    fn write(&mut self, node: Node, offset: u64, data: &[u8]) -> Result<(), fs::Error> {
+    fn reserve(&mut self, node: Node, offset: u64, len: u64) -> Result<Reserved, fs::Error> {
         let open = self.open.get_mut(&node).ok_or(fs::Error::Stale)?;
         if open.gone {
             return Err(fs::Error::Stale);
         }
         open.dirty = true;
-        self.cache.block_on(self.fs.write(&mut open.file, offset, data)).map_err(|e| logged("write", &open.path, e))
+        // A chain has no holes: it holds a block for every page of its size.
+        let reserved = Reserved { size: open.file.len(), held: open.file.len().div_ceil(toyos_blockdev::BLOCK as u64) };
+        self.cache.block_on(self.fs.reserve(&mut open.file, offset, len)).map_err(|e| logged("reserve", &open.path, e))?;
+        Ok(reserved)
+    }
+
+    fn write_back(&mut self, node: Node, offset: u64, data: &[u8]) -> Result<(), fs::Error> {
+        let open = self.open.get_mut(&node).ok_or(fs::Error::Stale)?;
+        if open.gone {
+            return Err(fs::Error::Stale);
+        }
+        open.dirty = true;
+        self.cache.block_on(self.fs.write_back(&mut open.file, offset, data)).map_err(|e| logged("write-back", &open.path, e))
     }
 
     fn truncate(&mut self, node: Node, size: u64) -> Result<(), fs::Error> {
@@ -455,6 +467,7 @@ mod tests {
     use std::cell::Cell;
 
     use super::*;
+    use crate::volume::Writes;
     use crate::ram::Ram;
     use toyos_blockdev::{block_on_ready, Block, Bytes, BLOCK};
 

@@ -61,6 +61,15 @@ pub(super) fn sys_spawn(
     }
 }
 
+/// `SpawnArgs::pager`: none, or a `SysCap` carrying [`Rights::PAGER`].
+pub(super) fn spawn_pager(pager: u64) -> Result<bool, u64> {
+    if pager == u64::from(toyos_abi::HANDLE_INVALID.0) {
+        return Ok(false);
+    }
+    let raw = u32::try_from(pager).map_err(|_| SyscallError::InvalidArgument.to_u64())?;
+    demand_syscap(RawHandle(raw), Rights::PAGER).map(|_| true).map_err(|refused| refused.refuse())
+}
+
 /// Take how a process ended, blocking until it has; repeatable across waiters, and `WNOHANG` skips the block.
 pub(super) fn sys_process_wait(h: RawHandle, flags: u64) -> u64 {
     // First, so the answer is the bit and not the handle's own refusal — which

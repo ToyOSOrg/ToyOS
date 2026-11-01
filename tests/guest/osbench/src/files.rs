@@ -7,7 +7,9 @@
 //! `mem` is Linux's `/dev/shm` through the VFS, and ToyOS's `/tmp`, which the
 //! kernel serves through syscalls. `disk` is each system's
 //! [`crate::sys::persistent_dir`]: Linux's VFS and page cache over the
-//! runner's home, and ToyOS's DATA file server, through IPC per request.
+//! runner's home, and ToyOS's DATA file server, through IPC per request but
+//! for a read of a file opened to read, which the kernel answers from the
+//! file's paged object.
 
 use std::fs::{self, File, OpenOptions};
 use std::io::{Read, Seek, SeekFrom, Write};
@@ -136,6 +138,13 @@ pub fn suite(target: &Target) {
         return refuse(&name("setup"), e);
     }
     each(&name("open_close"), 100, 2000, &with(&[]), |_| io("open", File::open(&small)).map(drop));
+
+    // The same file opened, read whole and closed: what a file read again
+    // after its last close costs, its pages kept or not. 2,000 after 100.
+    let mut page = [0u8; 4096];
+    each(&name("reopen_read_4k"), 100, 2000, &with(&[("bytes", "4096".into())]), |_| {
+        io("reopen", File::open(&small).and_then(|mut f| f.read_exact(&mut page)))
+    });
 
     // `metadata` of the same file, by its path and through a descriptor
     // held open: 2,000 after 100 each.

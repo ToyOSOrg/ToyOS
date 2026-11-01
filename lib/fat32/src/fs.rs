@@ -602,7 +602,7 @@ impl<D: BlockDev> Fat32<D> {
             let chunk = ((run * bpc - within) as usize).min(n - done);
             let dst = buf.get_mut(done..done + chunk).ok_or(Error::Io)?;
             let at = self.geom.cluster_offset(cluster) + within;
-            self.dev.read_at(at, dst).await?;
+            self.dev.read_data_at(at, dst).await?;
             done += chunk;
         }
         Ok(n)
@@ -678,7 +678,7 @@ impl<D: BlockDev> Fat32<D> {
             let src = data.get(done..done + chunk).ok_or(Error::Io)?;
             let at = self.geom.cluster_offset(cluster) + within;
             self.invalidate_sector();
-            self.dev.write_at(at, src).await?;
+            self.dev.write_data_at(at, src).await?;
             done += chunk;
         }
         Ok(())
@@ -740,15 +740,49 @@ impl<D: BlockDev> Fat32<D> {
         end: u64,
         old_size: u64,
     ) -> Result<(), Error> {
+        self.reserve_inner(f, offset, end, old_size).await?;
+        self.write_allocated(f, offset, data).await
+    }
+
+    async fn reserve_inner(&mut self, f: &mut File, offset: u64, end: u64, old_size: u64) -> Result<(), Error> {
         self.ensure_capacity(f, end).await?;
         if offset > old_size {
             self.zero_range(f, old_size, offset).await?;
         }
-        self.write_allocated(f, offset, data).await?;
         if end > old_size {
             f.size = end as u32;
         }
         Ok(())
+    }
+
+    /// The first half of a [`Self::write`] of `len` bytes at `offset`: the
+    /// chain covers them, what lies between the old end and `offset` is
+    /// zeroed, and the size reaches their end; their bytes are not written,
+    /// and read as whatever the clusters held until [`Self::write_back`]
+    /// writes them. All or nothing, as a write.
+    pub async fn reserve(&mut self, f: &mut File, offset: u64, len: u64) -> Result<(), Error> {
+        let end = offset.checked_add(len).ok_or(Error::TooLarge)?;
+        if end > MAX_FILE_SIZE {
+            return Err(Error::TooLarge);
+        }
+        if len == 0 {
+            return Ok(());
+        }
+        let before = *f;
+        self.atomic(async |fs| {
+            fs.live_entry(f).await?;
+            fs.reserve_inner(f, offset, end, before.size as u64).await
+        }).await
+        .inspect_err(|_| *f = before)
+    }
+
+    /// `data` at `offset`, inside the file's size, into the clusters it
+    /// already holds: the second half of a [`Self::write`].
+    pub async fn write_back(&mut self, f: &mut File, offset: u64, data: &[u8]) -> Result<(), Error> {
+        match offset.checked_add(data.len() as u64) {
+            Some(end) if end <= f.size as u64 => self.write_allocated(f, offset, data).await,
+            _ => Err(Error::TooLarge),
+        }
     }
 
     /// Set a file's length, allocating and zeroing on growth and releasing

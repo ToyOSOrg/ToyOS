@@ -207,6 +207,8 @@ struct ProgramConfig {
     roles: Vec<String>,
     /// The supervisor starts it again when it ends (`toyos_manifest::Program::restart`).
     restart: bool,
+    /// Started as a pager (`toyos_manifest::Program::pager`): the file server's row.
+    pager: bool,
     /// The rows it may start through the launcher (`toyos_manifest::Program::starts`).
     starts: Vec<String>,
     /// A login authority, for which the supervisor opens login sessions
@@ -747,6 +749,19 @@ fn held_by_their_holders_alone(config: &SystemConfig) -> Result<(), String> {
     apps_folder(config).map(drop)
 }
 
+/// A row serving a file-server role is a pager: its server makes the paged
+/// objects its files are read through, and panics started as none.
+///
+/// **Checked on every manifest rendered**, so a config whose row lacks it
+/// is refused by name at the build rather than met as a boot of servers
+/// that end at their start.
+fn file_servers_are_pagers(config: &SystemConfig) -> Result<(), String> {
+    match config.programs.iter().find(|(_, row)| !row.roles.is_empty() && !row.pager) {
+        Some((name, _)) => Err(format!("`{name}` serves file-server roles and is no `pager`")),
+        None => Ok(()),
+    }
+}
+
 /// What a row may start through the launcher, and which rows open a login
 /// session (`toyos_manifest::launch`).
 ///
@@ -834,6 +849,7 @@ fn render_manifest(config: &SystemConfig) -> Vec<u8> {
     for gate in [
         held_by_their_holders_alone,
         starts_name_what_a_launch_can_start,
+        file_servers_are_pagers,
         receives_reach_a_running_server,
         logins_have_their_owner,
     ] {
@@ -867,6 +883,7 @@ fn render_manifest(config: &SystemConfig) -> Vec<u8> {
                     state: cfg.state,
                     roles: cfg.roles.clone(),
                     restart: cfg.restart,
+                    pager: cfg.pager,
                     starts: cfg.starts.clone(),
                     login: cfg.login,
                     folder: None,
@@ -3423,6 +3440,18 @@ mod tests {
         assert!(toml::from_str::<SystemConfig>("[apps]\nfolders = \"read-write\"\n").is_err());
     }
 
+    /// Every committed config's file-server row is a pager, and one that is
+    /// not is refused.
+    #[test]
+    fn a_file_server_row_is_a_pager() {
+        for cfg in ALL_CONFIGS {
+            file_servers_are_pagers(&load(cfg)).unwrap_or_else(|e| panic!("{cfg}: {e}"));
+        }
+        let gate = |toml: &str| file_servers_are_pagers(&toml::from_str(toml).unwrap());
+        assert!(gate("[programs.fileserver]\nroles = [\"data\"]\npager = true\n").is_ok());
+        assert!(gate("[programs.fileserver]\nroles = [\"data\"]\n").is_err());
+    }
+
     /// Every committed config passes, and each refusal has a config that
     /// takes it and nothing else.
     #[test]
@@ -3435,7 +3464,7 @@ mod tests {
         assert!(gate("[programs.shell]\nstarts = [\"ghost\"]\n").is_err());
         assert!(gate("[programs.shell]\nstarts = [\"apps\"]\n").is_err());
         assert!(gate("[programs.shell]\nstarts = [\"compositor\"]\n[programs.compositor]\nserves = [\"compositor\"]\n").is_err());
-        assert!(gate("[programs.shell]\nstarts = [\"fileserver\"]\n[programs.fileserver]\nroles = [\"data\"]\n").is_err());
+        assert!(gate("[programs.shell]\nstarts = [\"fileserver\"]\n[programs.fileserver]\nroles = [\"data\"]\npager = true\n").is_err());
         assert!(toml::from_str::<SystemConfig>("[programs.shell]\nstart = [\"toybox\"]\n").is_err());
     }
 

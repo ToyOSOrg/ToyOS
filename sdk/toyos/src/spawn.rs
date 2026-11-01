@@ -83,6 +83,9 @@ pub struct Spawn<'a> {
     /// which a launch goes through in place of the one it was endowed:
     /// borrowed, and refused a helper.
     pub launcher: Option<BorrowedHandle<'a>>,
+    /// A `SysCap` carrying `Rights::PAGER`, borrowed, which starts the child
+    /// as a pager (`SpawnArgs::pager`): a helper's alone.
+    pub pager: Option<BorrowedHandle<'a>>,
 }
 
 /// Why nothing was started.
@@ -126,6 +129,7 @@ struct Shape {
     image_named: bool,
     provided: bool,
     launcher_named: bool,
+    pager: bool,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -148,6 +152,7 @@ fn kind(shape: Shape) -> Result<Kind, &'static str> {
     match (shape.endowed, shape.extra_fds, shape.image_named) {
         (true, _, _) => Err("a launch carries no endowment but its job"),
         (_, true, _) => Err("a launch carries descriptors 0 to 2 alone"),
+        _ if shape.pager => Err("a launch starts its row as its row declares, never as a pager the caller names"),
         (_, _, true) => Err("a launch runs its row's own program, so it takes no image the caller names"),
         _ => Ok(Kind::Launch),
     }
@@ -166,6 +171,7 @@ impl<'a> Spawn<'a> {
             image_named: self.image.is_some() || self.image_held,
             provided: !self.provided.is_empty(),
             launcher_named: self.launcher.is_some(),
+            pager: self.pager.is_some(),
         };
         match kind(shape).map_err(Refused::Invalid)? {
             Kind::Helper => Ok(Start::Helper(Helper(self))),
@@ -257,6 +263,7 @@ impl Helper<'_> {
                 Parent::Place(place) => u64::from(place.raw().0),
                 Parent::Detached => unreachable!("a detached child is refused a helper's spawn"),
             },
+            pager: s.pager.map_or(u64::from(toyos_abi::HANDLE_INVALID.0), |h| u64::from(h.raw().0)),
         };
         // SAFETY: every pointer is to a buffer above that outlives the call,
         // and every handle the endowment names is one `moved` owns.
@@ -373,6 +380,7 @@ mod tests {
             Shape { endowed: true, ..Shape::default() },
             Shape { extra_fds: true, ..Shape::default() },
             Shape { image_named: true, ..Shape::default() },
+            Shape { pager: true, ..Shape::default() },
         ] {
             assert_eq!(kind(shape), Ok(Kind::Helper), "{shape:?}");
         }
@@ -383,7 +391,7 @@ mod tests {
     #[test]
     fn each_kind_refuses_what_the_other_alone_takes() {
         const LAUNCH: Shape =
-            Shape { independent: true, detached: false, endowed: false, extra_fds: false, image_named: false, provided: false, launcher_named: false };
+            Shape { independent: true, detached: false, endowed: false, extra_fds: false, image_named: false, provided: false, launcher_named: false, pager: false };
         assert_eq!(kind(LAUNCH), Ok(Kind::Launch));
         assert_eq!(kind(Shape { detached: true, provided: true, launcher_named: true, ..LAUNCH }), Ok(Kind::Launch));
         for shape in [
@@ -397,6 +405,7 @@ mod tests {
             Shape { endowed: true, ..LAUNCH },
             Shape { extra_fds: true, ..LAUNCH },
             Shape { image_named: true, ..LAUNCH },
+            Shape { pager: true, ..LAUNCH },
         ] {
             assert!(kind(shape).is_err(), "{shape:?}");
         }

@@ -46,6 +46,7 @@ fn main() {
         image: 0,
         image_len: 0,
         place: u64::from(toyos_abi::HANDLE_INVALID.0),
+        pager: u64::from(toyos_abi::HANDLE_INVALID.0),
     };
 
     let err = unsafe {

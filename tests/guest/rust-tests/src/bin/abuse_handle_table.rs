@@ -95,6 +95,7 @@ fn main() {
             image,
             image_len,
             place: u64::from(toyos_abi::HANDLE_INVALID.0),
+            pager: u64::from(toyos_abi::HANDLE_INVALID.0),
         };
         unsafe { syscall::spawn(&args) }
     };
@@ -214,6 +215,7 @@ fn spawn_endowed(entries: &[EndowEntry], labels: &[u8]) -> Result<RawHandle, Sys
             image,
             image_len,
             place: u64::from(toyos_abi::HANDLE_INVALID.0),
+            pager: u64::from(toyos_abi::HANDLE_INVALID.0),
         })
     }
 }

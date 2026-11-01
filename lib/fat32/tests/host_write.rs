@@ -247,6 +247,31 @@ fn appending_extends_the_chain() {
     assert_eq!(host_tree(&image)["grown.bin"], want);
 }
 
+/// A write in two halves: the reserve sizes the file and zeroes the gap
+/// before its offset, the write-back puts its bytes, and a write-back past
+/// the reserved size is refused with nothing written.
+#[test]
+fn a_reserve_then_its_write_back_is_one_write() {
+    let image = image();
+    let data = pattern(3000, 41);
+    {
+        let mut fs = now(Fat32::mount(image.device())).expect("mount");
+        let mut f = now(fs.create("split.bin", stamp())).expect("create");
+        now(fs.write(&mut f, 0, b"head")).expect("write");
+        now(fs.reserve(&mut f, 1000, data.len() as u64)).expect("reserve");
+        assert_eq!(f.len(), 1000 + data.len() as u64);
+        assert_eq!(now(fs.write_back(&mut f, 1001, &data)), Err(Error::TooLarge), "one byte past the size");
+        now(fs.write_back(&mut f, 1000, &data)).expect("write back");
+        now(fs.flush_meta(&mut f, stamp())).expect("flush");
+        now(fs.sync()).expect("sync");
+    }
+    image.fsck();
+    let mut want = b"head".to_vec();
+    want.resize(1000, 0);
+    want.extend_from_slice(&data);
+    assert_eq!(host_tree(&image)["split.bin"], want);
+}
+
 /// Delete a large file, then write another that must land on the clusters the
 /// first one gave back. A free that misses an entry leaves the volume with a
 /// cross-link `fsck` will find.

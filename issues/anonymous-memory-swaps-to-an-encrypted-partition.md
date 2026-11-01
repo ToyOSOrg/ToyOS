@@ -110,7 +110,11 @@ The symbols:
     - kernel-written objects (inbox rings, TLS blocks, the clock page);
     - anything lent to a device, where lending moves the charge from `A` to `W`;
     - sealed immutable versions;
-    - boot payloads.
+    - boot payloads;
+    - a pager's core (`kernel/src/object/paged.rs`): its dirty ceiling, the
+      page-in headroom a read's supply can always draw, its index and
+      notices. Its clean pages above that are the memory service's slack
+      (`issues/a-pager-holds-a-fixed-capacity-until-the-memory-service-reclaims-its-clean-pages.md`).
   - Everything else is `A`.
 - **A swappable fault** takes an unpromised frame. Failing that, it takes the
   mechanical fallback: a clean, unpinned slack page, preferring the service's
@@ -260,7 +264,9 @@ Who uses which:
 objects the supervisor holds:
 - the supervisor, the input servers, usbd and the compositor;
 - soundserver and the audio drivers;
-- the memory service, the storage driver and diskserver.
+- the memory service, the storage driver and diskserver;
+- the file servers, for their pagers' cores alone: a file's pages are backed by
+  the file, so a dirty one is written back by its pager and never swapped.
 
 Each row states a `restart-hold` in whole superframes. The hold is kept while the
 process is dead, counted as that job's `W`, and released only to its next start.
@@ -299,11 +305,13 @@ No in-tree track yet covers two of these, and their owners file it.
   - There is no in-tree track yet. The owner of
     `issues/process-memory-in-4-kib-pages-still-copies-each-programs-text.md` files it.
 - **The paged-object interface and coherent shared file mappings:** item 13 of
-  `issues/toyos-builds-itself.md`.
-- **The file server's data cache deleted**, with `system/fileserver/src/cache.rs`
-  gone and one paged object per open file as its cache.
-  - There is no in-tree track yet. The storage track files it in
-    `issues/storage-is-layers-and-a-role-is-a-filesystem.md`.
+  `issues/toyos-builds-itself.md`. Its first part, paged objects read through
+  `SYS_PAGED_READ` and no mapping, is built (memory stage 7a,
+  `kernel/src/object/paged.rs`); mappings are stage 7b
+  (`issues/process-memory-in-4-kib-pages-still-copies-each-programs-text.md`).
+- **The file server's data cache deleted**: done with 7a. A file's pages are its
+  paged object's (`system/fileserver/src/pages.rs`), and
+  `system/fileserver/src/cache.rs` keeps the volumes' structures alone.
 
 ## Stages
 

@@ -259,6 +259,11 @@ impl<'a> Bytes<'a> {
         unsafe { crate::arch::copy(to.ptr.cast_mut(), data.as_ptr(), data.len()) }
     }
 
+    /// Where the range begins, for a kernel call that writes it.
+    pub(crate) fn as_mut_ptr(self) -> *mut u8 {
+        self.0.ptr.cast_mut()
+    }
+
     /// Write zeroes over the whole range.
     pub fn zero(self) {
         // SAFETY: the whole range, which is mapped writable for `'a`.

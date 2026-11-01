@@ -29,6 +29,7 @@ pub mod wake;
 pub mod ipc;
 pub mod job;
 pub mod namespace;
+pub mod paged;
 pub mod launch;
 pub mod log;
 pub mod net;

@@ -5,7 +5,7 @@
 
 use toyos::fs::Error;
 
-use crate::volume::{Kind, Listed, Meta, Node, OpenHow, Out, Volume};
+use crate::volume::{Kind, Listed, Meta, Node, OpenHow, Out, Reserved, Volume};
 
 pub struct Absent {
     roots: Vec<String>,
@@ -70,7 +70,11 @@ impl Volume for Absent {
         Err(Error::NotFound)
     }
 
-    fn write(&mut self, _node: Node, _offset: u64, _data: &[u8]) -> Result<(), Error> {
+    fn reserve(&mut self, _node: Node, _offset: u64, _len: u64) -> Result<Reserved, Error> {
+        Err(Error::NotFound)
+    }
+
+    fn write_back(&mut self, _node: Node, _offset: u64, _data: &[u8]) -> Result<(), Error> {
         Err(Error::NotFound)
     }
 
