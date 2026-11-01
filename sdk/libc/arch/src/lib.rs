@@ -217,23 +217,50 @@ mod tests {
         }
     }
 
-    /// A forward copy at every distance of its destination above its source
-    /// modulo 4 KiB below 1 KiB, and some above, from sources at four line
-    /// offsets: the distances some architecture copies another way.
+    /// A copy with its destination exactly `distance` above its source modulo
+    /// 4 KiB, the source `at` bytes past a 64-byte boundary, both ends in one
+    /// buffer: the whole buffer against `copy_within`.
+    fn agrees_at(what: &str, copy: unsafe fn(*mut u8, *const u8, usize), distance: usize, at: usize, n: usize) {
+        let mut got = pattern(4 * 4096 + 256);
+        let base = got.as_ptr().align_offset(64);
+        let (from, to) = (base + at, base + at + 8192 + distance);
+        let mut want = got.clone();
+        want.copy_within(from..from + n, to);
+        let p = got.as_mut_ptr();
+        // SAFETY: both ranges are inside `got`, 8 KiB or more apart, `n` at most 4096.
+        unsafe { copy(p.add(to), p.add(from), n) };
+        assert_eq!(got, want, "{what}: n {n} at {at} distance {distance}");
+    }
+
+    /// A forward copy at every distance below 1 KiB, and some above, from
+    /// sources at four line offsets: the distances some architecture copies
+    /// another way.
     #[test]
     fn a_forward_copy_agrees_at_every_page_distance() {
-        let distances = (0..1024).chain([2048, 4032, 4095]);
-        let src = pattern(4096 + 64);
-        for d in distances {
+        for distance in (0..1024).chain([2048, 4032, 4095]) {
             for at in [0, 1, 17, 63] {
                 for n in [0, 1, 63, 64, 65, 127, 128, 200, 1000, 4096] {
-                    let mut got = vec![0xAAu8; 2 * 4096 + d + 64];
-                    let to = 4096 + d + at;
-                    // SAFETY: `n` bytes at `at` of `src` and at `to` of `got`, two buffers.
-                    unsafe { arch::copy_forward(got.as_mut_ptr().add(to), src.as_ptr().add(at), n) };
-                    let mut want = vec![0xAAu8; 2 * 4096 + d + 64];
-                    want[to..to + n].copy_from_slice(&src[at..at + n]);
-                    assert_eq!(got, want, "n {n} at {at} distance {d}");
+                    agrees_at("copy_forward", arch::copy_forward, distance, at, n);
+                }
+            }
+        }
+    }
+
+    /// x86-64's two descending loops, each called directly so the one this
+    /// host's `copy_forward` does not take is checked too; AVX's only where
+    /// the host has it.
+    #[cfg(target_arch = "x86_64")]
+    #[test]
+    fn both_descending_loops_agree() {
+        let mut loops: Vec<(&str, unsafe fn(*mut u8, *const u8, usize))> = vec![("sse2", arch::copy_down_sse2)];
+        if arch::has_avx() {
+            // SAFETY: `has_avx` answered for this CPU.
+            loops.push(("avx", |d, s, n| unsafe { arch::copy_down_avx(d, s, n) }));
+        }
+        for (name, copy) in loops {
+            for n in (64..300).chain([511, 512, 513, 4095, 4096]) {
+                for (distance, at) in [(1, 0), (16, 16), (63, 1), (511, 63)] {
+                    agrees_at(name, copy, distance, at, n);
                 }
             }
         }
