@@ -581,7 +581,7 @@ fn format_mount_unmount_create_mount_roundtrip() {
 fn write_pages(fs: &mut Mounted<VecBlockIO, ReadWrite>, pages: u32) -> Vec<bcachefs::Extent> {
     let mut extents = Vec::new();
     for page in 0..pages {
-        fs.allocate(&mut extents, page..=page).expect("allocate a block for the page");
+        fs.allocate(&mut extents, page..=page, 1).expect("allocate a block for the page");
     }
     extents
 }
@@ -863,7 +863,7 @@ fn one_block_holes(blocks: u64) -> (Mounted<VecBlockIO, ReadWrite>, Vec<u64>) {
     let mut fs = Formatted::format(VecBlockIO::new(blocks)).expect("format").mount();
     let mut run = Vec::new();
     let mut page = 0;
-    while fs.allocate(&mut run, page..=page).is_ok() {
+    while fs.allocate(&mut run, page..=page, 1).is_ok() {
         page += 1;
     }
     let taken: Vec<u64> = run.iter().flat_map(|e| e.start_block..e.start_block + e.block_count as u64).collect();
@@ -872,7 +872,7 @@ fn one_block_holes(blocks: u64) -> (Mounted<VecBlockIO, ReadWrite>, Vec<u64>) {
         taken.iter().step_by(2).map(|&b| Extent { start_block: b, block_count: 1, _reserved: 0 }).collect();
     fs.free_extents(&holes).expect("give every other block back");
     let mut tail = vec![Extent { start_block: *taken.last().unwrap(), block_count: 1, _reserved: 0 }];
-    fs.allocate(&mut tail, NODE_RESERVE..=NODE_RESERVE).expect("the run left for nodes");
+    fs.allocate(&mut tail, NODE_RESERVE..=NODE_RESERVE, 1).expect("the run left for nodes");
 
     let sb = bcachefs::Superblock::read(fs.io()).expect("the superblock");
     let mut bitmap = bcachefs::BlockBuf::zeroed();
@@ -891,7 +891,7 @@ fn a_sparse_write_resolves_inside_the_blocks_it_reserved() {
     // longer than one. `alloc_contiguous` says so in its second return value;
     // this caller used to read it as "all four, starting here".
     let mut extents = Vec::new();
-    fs.allocate(&mut extents, 3..=3).expect("allocate page 3");
+    fs.allocate(&mut extents, 3..=3, 1).expect("allocate page 3");
     let block = block_of(&extents, 3);
 
     let reserved: Vec<u64> = extents
@@ -910,7 +910,7 @@ fn every_page_of_a_fragmented_file_owns_a_distinct_block() {
     let (mut fs, _) = one_block_holes(64);
 
     let mut extents = Vec::new();
-    fs.allocate(&mut extents, 5..=5).expect("allocate through page 5");
+    fs.allocate(&mut extents, 5..=5, 1).expect("allocate through page 5");
     let covered: u32 = extents.iter().map(|e| e.block_count).sum();
     assert_eq!(covered, 6, "six pages need six blocks, got {extents:?}");
 
@@ -1092,7 +1092,7 @@ fn a_file_grown_past_what_the_volume_spares_leaves_the_reserve() {
     let mut fs = mkfs.mount();
     let (mut extents, _) = fs.file_extents("f00").expect("file_extents").expect("f00 is on the volume");
 
-    let grown = fs.allocate(&mut extents, 128..=128);
+    let grown = fs.allocate(&mut extents, 128..=128, 1);
     assert!(matches!(grown, Err(FsError::NoSpace { .. })), "a page past every block of the volume: {grown:?}");
     assert_eq!(extents.len(), 1, "the run is not contiguous with the file, so this proves nothing: {extents:?}");
     let blocks = extents[0].block_count as u64;

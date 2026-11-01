@@ -333,10 +333,19 @@ impl BitmapAllocator {
         self.reserve(io, start, len.min(wanted))
     }
 
-    /// Reserve a run at or after block `from`, wrapping once, of at most
-    /// `wanted` blocks: the first free run at least `min` long, or, if one pass
-    /// finds none, the longest it saw. Never empty.
-    pub fn alloc_first_fit(&mut self, io: &dyn BlockIO, from: u64, wanted: u32, min: u32) -> Result<Run, FsError> {
+    /// Reserve a run at or after block `from`, of at most `wanted` blocks: the
+    /// first free run at least `min` long, or else the longest one seen once
+    /// the scan has gone round the volume or examined `budget` blocks. Each
+    /// block examined until a run is chosen comes off `budget`. `None` if no
+    /// free block was seen within it.
+    pub fn alloc_first_fit(
+        &mut self,
+        io: &dyn BlockIO,
+        from: u64,
+        wanted: u32,
+        min: u32,
+        budget: &mut u64,
+    ) -> Result<Option<Run>, FsError> {
         let spare = self.spare();
         if spare == 0 {
             return Err(FsError::NoSpace { requested: wanted, available: 0 });
@@ -344,7 +353,7 @@ impl BitmapAllocator {
         let wanted = wanted.max(1).min(u32::try_from(spare).unwrap_or(u32::MAX));
         let min = min.clamp(1, wanted);
         let total = self.total_blocks;
-        let (start, len) = {
+        let chosen = {
             let mut cached = (u64::MAX, BlockBuf::zeroed());
             let mut free = |pos: u64| -> Result<bool, FsError> {
                 let (bitmap_block, byte_off, bit) = self.bit_of(BlockNum::new(pos));
@@ -359,9 +368,14 @@ impl BitmapAllocator {
             let (mut run, mut best) = ((0u64, 0u32), (0u64, 0u32));
             let mut found = None;
             for pos in (from..total).chain(0..from) {
+                // Block 0 does not follow the volume's last block.
                 if pos == 0 {
                     run.1 = 0;
                 }
+                if *budget == 0 {
+                    break;
+                }
+                *budget -= 1;
                 if !free(pos)? {
                     run.1 = 0;
                     continue;
@@ -374,23 +388,24 @@ impl BitmapAllocator {
                     best = run;
                 }
                 if run.1 >= min {
-                    found = Some(run.0);
+                    found = Some(run);
                     break;
                 }
             }
             match found {
-                Some(start) => {
-                    let mut len = min;
+                Some((start, mut len)) => {
                     while len < wanted && start + u64::from(len) < total && free(start + u64::from(len))? {
                         len += 1;
                     }
-                    (start, len)
+                    Some((start, len))
                 }
-                None if best.1 > 0 => best,
-                None => return Err(FsError::NoSpace { requested: wanted, available: self.free_blocks }),
+                None => (best.1 > 0).then_some(best),
             }
         };
-        self.reserve(io, start, len)
+        match chosen {
+            Some((start, len)) => self.reserve(io, start, len).map(Some),
+            None => Ok(None),
+        }
     }
 
     /// Reserve all of `count` or nothing, for callers that cannot place a
@@ -617,7 +632,8 @@ mod tests {
         let (io, mut alloc) = two_bitmap_blocks();
         let free = alloc.free_blocks;
         let at = BITS_PER_BLOCK - 8;
-        let run = alloc.alloc_first_fit(&io, at, 16, 1).expect("a run");
+        let mut budget = u64::MAX;
+        let run = alloc.alloc_first_fit(&io, at, 16, 1, &mut budget).expect("a run").expect("a free block");
         assert_eq!((run.start.raw(), run.len), (at, 16));
         assert_eq!(*io.written.borrow(), [0, 1]);
         for (block, taken) in [(at - 1, false), (at, true), (at + 15, true), (at + 16, false)] {
@@ -634,7 +650,8 @@ mod tests {
         let (io, mut alloc) = two_bitmap_blocks();
         let free = alloc.free_blocks;
         io.refuse.set(Some(1));
-        assert!(alloc.alloc_first_fit(&io, BITS_PER_BLOCK - 8, 16, 1).is_err());
+        let mut budget = u64::MAX;
+        assert!(alloc.alloc_first_fit(&io, BITS_PER_BLOCK - 8, 16, 1, &mut budget).is_err());
         alloc.count_free(&io).expect("count");
         assert_eq!(alloc.free_blocks, free, "blocks stayed marked that nothing names");
     }
