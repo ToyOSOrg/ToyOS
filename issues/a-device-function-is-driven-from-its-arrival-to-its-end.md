@@ -122,8 +122,8 @@ started. Nothing reaches userland when a device arrives or leaves.
       child's `Process` handle and its waiter threads went; vdagent is a
       `drives` row. `a_drives_row_holds_one_process_per_function` is the
       guest arm, on `Profile::HeadlessTwoEdu`.
-2. **Functions arrive and leave** (#934, after the apertures track's stage B,
-   #935, whose declaration carries each root bridge's `_OSC` commit).
+2. **Functions arrive and leave** (#934, which carries the apertures track's
+   stage B, #935: its declaration carries each root bridge's `_OSC` commit).
    - Readers get a device-set object (`toyos_abi::devset`): a
      level-triggered snapshot of every PCI function the kernel hands out,
      minted from `DEVICE`, carrying `READ` and `WAIT` and neither `DUP` nor
@@ -192,6 +192,13 @@ started. Nothing reaches userland when a device arrives or leaves.
    - §6.6.1's 100 ms after the link comes up is waited out on every port;
      Readiness Notifications (§6.23), which end it early where a port and
      device support them, are not read.
+   - **A departed function's BAR mapping outlives it**: a departure drops
+     its BARs from `Machine::decoded`, so the next arrival behind the port
+     can be assigned the same addresses while a process still holds a
+     mapping made through the departed claim
+     (`issues/a-bars-mapping-outlives-the-claim-it-was-asked-on.md`). Exit:
+     that issue's revocation at a claim's end covers a departed function's
+     release.
    - On AArch64's SMMUv3 a function that arrived after the unit was
      programmed is refused a claim by name: its routes are read for the
      functions enumerated at boot.

@@ -22,6 +22,11 @@ holder drives: it can aim that function's queues at any address the new
 holder's grants map, which is the new holder's memory read out and written
 through a device neither the unit nor the domain refuses.
 
+Behind a hot-plug slot the next holder can be another device: a departed
+function's BARs leave `Machine::decoded`, and the next arrival there is
+assigned the lowest free addresses in the port's windows, which can be the
+departed one's (`toyos_pci::hotplug::assign`).
+
 **Read from the code, not run.** A guest arm is the one `bar_map_again`
 (`tests/toyos.rs`) boots: claim the virtio NIC, map a BAR, close the claim,
 claim again from a second process, and read the first mapping.

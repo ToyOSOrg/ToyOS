@@ -23,6 +23,13 @@ console stays on the UART`) rather than wait on a queue that completes
 nothing, which panicked the kernel in `wait_used` before #934 (measured at
 #935's merge of `main` `3962d606f`, QEMU 11.1.1 under HVF).
 
+Its claims are handed over since the `acpi` claim's holder declares the
+root bridges: the NVMe driver serves its partition and `vdagent: port 1
+open` is in the file. The refused console function is left to a claim, and
+vdagent's row matches it: the second vdagent panics on it ("it negotiated
+no VIRTIO_CONSOLE_F_MULTIPORT").
+Read at #934's `f47e0af18`.
+
 The owner's ruling: the virtio console moves to a userland driver over an
 ordinary claim, with the UART for early boot and the fatal path, and a
 driver in this kernel gets no IOMMU exception. That is #1062, which deletes

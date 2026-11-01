@@ -159,7 +159,7 @@ impl core::fmt::Display for IommuError {
 /// machine's own, since every domain is built clear of the root bridges'
 /// declared windows and a driver here comes up before they are declared.
 /// Until the last one moves to userland
-/// (`issues/an-aarch64-cargo-run-boot-hands-over-no-pci-claim.md`).
+/// (`issues/an-aarch64-cargo-run-boot-shows-nothing-on-its-terminal.md`).
 #[derive(Clone, Copy)]
 pub enum DeviceSpace {
     /// Nothing translates here, so a device address is a physical address.
