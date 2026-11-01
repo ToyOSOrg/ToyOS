@@ -419,6 +419,8 @@ pub fn spawn<C: Commit>(
             thread_pointer,
             Some(image),
             job,
+            // The spawning thread's, as a new thread's is.
+            crate::sched::driver::current_mask(),
         );
         table.get_mut(pid).unwrap().threads_mut().get_mut(tid).unwrap().set_sched(sched);
     });

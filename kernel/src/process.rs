@@ -728,6 +728,7 @@ pub fn spawn_thread(
         thread_pointer,
         image,
         job,
+        crate::sched::driver::current_mask(),
     );
     proc.threads.get_mut(tid).unwrap().set_sched(sched);
     drop(guard);

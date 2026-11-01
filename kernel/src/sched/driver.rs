@@ -11,6 +11,7 @@ use core::cell::UnsafeCell;
 use core::ptr;
 use core::sync::atomic::{AtomicBool, AtomicPtr, AtomicU64, Ordering};
 
+use kernel::sched::affinity::CpuMask;
 use kernel::sched::cpu::{Action, Balance, CpuHandle, CpuHandles, CpuSched, Env, SchedPass};
 use kernel::sched::hw::{CpuId, Hw, Kicker, Machine, Nanos};
 use kernel::sched::mailbox::{mailbox, Kick, PreemptGuard, Urgency};
@@ -400,11 +401,11 @@ fn idle_ctx() -> KernelCtx {
 
 /// Where a spawn goes: the rule is [`CpuHandles::place`]'s; this supplies the rotating start, load-bearing at
 /// boot since every program the supervisor starts is spawned before any CPU has published a load.
-fn placement(now: Nanos) -> CpuId {
+fn placement(now: Nanos, mask: CpuMask) -> CpuId {
     static ROTATE: AtomicU64 = AtomicU64::new(0);
     let count = crate::smp::cpu_count() as u64;
     let start = CpuId((ROTATE.fetch_add(1, Ordering::Relaxed) % count) as u32);
-    cpus().place(start, now)
+    cpus().place(start, now, mask)
 }
 
 /// Everything a new thread needs. `entry_sp` points at the trampoline frame `alloc_kernel_stack` built;
@@ -420,6 +421,8 @@ pub struct NewTask {
     pub job: Arc<kernel::sched::job::Job>,
     /// The process's image; `None` for a kernel thread.
     pub image: Option<Arc<crate::process::UserImage>>,
+    /// The CPUs it may run on.
+    pub mask: CpuMask,
 }
 
 /// Place a new task by message — never by reaching into the destination's queue.
@@ -452,8 +455,9 @@ pub fn spawn(new: NewTask) -> (ThreadSched, CpuId) {
             image: new.image,
         },
         rt: RtState::default(),
+        mask: new.mask,
     }
-    .build(placement(now), now);
+    .build(placement(now, new.mask), now);
     let sched = ThreadSched {
         handle,
         shared: task.shared().clone(),
@@ -705,6 +709,18 @@ extern "C" fn idle_loop() -> ! {
 /// The running task's rendezvous word, cloned so the caller can hold it without borrowing `CpuSched`.
 pub fn current_shared() -> Option<Arc<KShared>> {
     try_with_cpu(|cpu| cpu.running().map(|t| t.shared().clone())).flatten()
+}
+
+/// The running task's mask, which a thread or process it spawns starts with; every CPU off-task, as at boot.
+pub fn current_mask() -> CpuMask {
+    current_shared().map_or(CpuMask::ANY, |shared| shared.mask().load().0)
+}
+
+/// Let the thread whose shared face is `shared` run only on `mask`'s CPUs, and kick the CPU it is on so the
+/// change takes effect there now.
+pub fn set_affinity(shared: &KShared, mask: CpuMask) {
+    preempt_off(|p| shared.mask().store(mask, p));
+    cpus().realign(shared, &HW);
 }
 
 /// The job the running task is in, whose account its call's memory is charged to. `None` off-task.

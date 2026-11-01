@@ -342,6 +342,9 @@ const DRIVEN_AND_SHARED: &[&str] = &[
     // Its shared run is each bench's verdict;
     // `std_threads_count_the_cpus_and_give_back_ended_threads` runs it under QEMU.
     "std_threads",
+    // Its shared run is each bench's verdict;
+    // `affinity_pins_hold_on_every_cpu` runs it under QEMU's TCG.
+    "affinity_pins",
     // Its shared run is each bench's verdict, on the T14's AVX-512 and the AMD
     // bench's AVX; `vector_state_survives_a_switch` runs it under QEMU.
     "vector_state",
@@ -739,6 +742,11 @@ const MACHINE_TESTS: &[&str] = &[
     // thread's stack and table place given back, joined or detached, on the
     // two-CPU q35 guest: std's ToyOS layer, which no host builds.
     "std_threads_count_the_cpus_and_give_back_ended_threads",
+    // A thread pinned to each CPU in turn stays there across sleeps beside a
+    // spinner pinned with it, by the CPU's own x2APIC ID, on the two-CPU q35
+    // guest under TCG: placement against a real scheduler and CPUs, which no
+    // host model has. Order and identity only, nothing timed.
+    "affinity_pins_hold_on_every_cpu",
     // A process holding every frame it may is refused every kernel object it
     // asks for more, and the kernel never panics for it: on the two-CPU,
     // 4 GiB q35 guest, in a boot of its own, since every other process is
@@ -4821,6 +4829,7 @@ fn run_machine_test(name: &str, test_config: &Path) -> Result<(), String> {
         }
         "vector_state_survives_a_switch" => vector_state_survives_a_switch(test_config),
         "std_threads_count_the_cpus_and_give_back_ended_threads" => std_threads_count_the_cpus_and_give_back_ended_threads(test_config),
+        "affinity_pins_hold_on_every_cpu" => affinity_pins_hold_on_every_cpu(test_config),
         "kernel_objects_refused_alone" => kernel_objects_refused_alone(test_config),
         "memory_floor_holds_the_controls" => memory_floor_holds_the_controls(),
         "the_opening_exchange_with_qemus_agent_completes" => the_opening_exchange_with_qemus_agent_completes(),
@@ -5608,6 +5617,30 @@ fn std_threads_count_the_cpus_and_give_back_ended_threads(test_config: &Path) ->
     for line in result.stdout.lines().filter(|l| l.contains("std_threads: ")) {
         eprintln!("  [std] {}", line.trim());
     }
+    Ok(())
+}
+
+/// `affinity_pins` on a guest of [`BootOptions`]' CPUs: it asserts every pin
+/// itself, and the CPUs it names are held here to the CPUs the guest booted.
+fn affinity_pins_hold_on_every_cpu(test_config: &Path) -> Result<(), String> {
+    const JOB: &str = "affinity_pins";
+    let bin = qemu::build_toyos_bin(qemu::SUITE_ARCH, &compile::repo_root().join("tests/guest/rust-tests"), JOB);
+    let options = BootOptions::default();
+    let booted = options.smp;
+    let mut qemu = QemuInstance::boot_with_options(test_config, &[], &[(JOB.to_string(), bin)], options);
+    serial::Serial::boot(&qemu).must_be_clean()?;
+    let result = qemu.run_test("test_rs_affinity_pins", Duration::from_secs(300));
+    if let Some(why) = &result.error {
+        return Err(format!("{why}\nthe job said:\n{}", result.stdout));
+    }
+    if result.exit_code != Some(0) {
+        return Err(format!("the job ended {:?}:\n{}", result.exit_code, result.stdout));
+    }
+    let held = format!("affinity_pins: {booted} CPUs held");
+    let Some(line) = result.stdout.lines().find(|l| l.contains(&held)) else {
+        return Err(format!("the guest was booted with {booted} CPUs and the pins said otherwise:\n{}", result.stdout));
+    };
+    eprintln!("  [pins] {}", line.trim());
     Ok(())
 }
 

@@ -869,6 +869,7 @@ pub fn all() -> Vec<Scenario> {
         busy_home(),
         sleep_spin_siblings(),
         turn_taking_pair(),
+        masked_steals(MASKED_STEALS_PARTIAL),
     ]
 }
 
@@ -1193,6 +1194,53 @@ pub fn turn_taking_pair() -> Scenario {
 
 /// How many turns each of [`turn_taking_pair`]'s threads takes.
 pub const TURN_TAKING_ROUNDS: usize = 8;
+
+/// **Masks under stealing**, every thread spawned on cpu0 of four with the
+/// shipped balance policy: two threads pinned to cpu0, two whose mask is
+/// `partial`, one that moves itself between halves of the machine as it runs,
+/// and one that spawns a child under its mask. Every thread naps between
+/// bursts, so wakes and steals both place it.
+///
+/// `partial` is a parameter so the push's cost can be read against the same
+/// load with every CPU allowed ([`MASKED_STEALS_ANY`]).
+pub fn masked_steals(partial: u64) -> Scenario {
+    let run = Op::Run(MS / 2);
+    let nap = Op::Block { queue: 0, deadline: Some(MS / 4) };
+    let looped = |first: Op| Script::looping(vec![first, run.clone(), nap.clone(), run.clone()], MASKED_STEALS_ROUNDS);
+    scenario(
+        "masked_steals",
+        4,
+        vec![queue(WaitClass::Other)],
+        vec![
+            process("pinned", vec![0, 0], vec![looped(Op::SetAffinity(0b0001))]),
+            process("partial", vec![0, 0], vec![looped(Op::SetAffinity(partial))]),
+            process(
+                "wanderer",
+                vec![0],
+                vec![Script::looping(
+                    vec![Op::SetAffinity(0b0011), run.clone(), nap.clone(), Op::SetAffinity(0b1100), run.clone(), nap.clone()],
+                    MASKED_STEALS_ROUNDS,
+                )],
+            ),
+            process(
+                "parent",
+                vec![0],
+                vec![
+                    Script::looping(vec![Op::SetAffinity(0b1000), Op::Spawn { template: 1 }, run.clone(), nap.clone()], 1),
+                    Script::looping(vec![run.clone(), nap.clone(), run.clone()], MASKED_STEALS_ROUNDS),
+                ],
+            ),
+        ],
+    )
+    .with_placement(PlacementShape::AllOn(0))
+}
+
+/// [`masked_steals`]' partial mask, cpu1 and cpu2, and every CPU.
+pub const MASKED_STEALS_PARTIAL: u64 = 0b0110;
+pub const MASKED_STEALS_ANY: u64 = 0b1111;
+
+/// How many bursts each of [`masked_steals`]' threads runs.
+pub const MASKED_STEALS_ROUNDS: usize = 6;
 
 /// **Two threads of one process on one CPU: one that sleeps a microsecond
 /// between millisecond bursts, and one that never sleeps.**

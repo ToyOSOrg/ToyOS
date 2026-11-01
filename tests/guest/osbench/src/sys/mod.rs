@@ -1,9 +1,10 @@
 //! What std does not offer portably, as each OS offers it: the cheapest
 //! syscall, a futex, a clock every process shares, anonymous mappings, IPC
 //! between processes, a process's own accounting, the machine's
-//! conditions and its power counters (`power`). Both modules export the same names; Linux adds affinity,
-//! which ToyOS has none of, and the readers of its cgroup and autogroup, and
-//! ToyOS the diagnostics the tail group reads (`diag`).
+//! conditions and its power counters (`power`), and the CPU a thread runs on
+//! and is pinned to. Both modules export the same names; Linux adds the
+//! readers of its cgroup and autogroup, and ToyOS the diagnostics the tail
+//! group reads (`diag`).
 
 #[cfg(target_os = "linux")]
 #[path = "linux.rs"]

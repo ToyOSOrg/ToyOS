@@ -15,7 +15,8 @@
 use alloc::collections::{BTreeMap, VecDeque};
 
 use crate::sched::eevdf::{Arena, Lag, Queue, Slot};
-use crate::sched::hw::Nanos;
+use crate::sched::affinity::CpuMask;
+use crate::sched::hw::{CpuId, Nanos};
 use crate::sched::job::{Job, JobKey};
 use crate::sched::sync::Arc;
 use crate::sched::task::{ReadyTask, SchedPayload, Standing, TaskKey};
@@ -62,6 +63,9 @@ pub struct RunQueue<X: SchedPayload> {
     /// value is not.
     running: Option<Place>,
     ready_fair: usize,
+    /// Of `ready_fair`, those whose mask names one CPU: what no other CPU
+    /// can be given. A queued task's mask does not change.
+    pinned_fair: usize,
     /// Negative-gate escape hatches only; see
     /// [`Self::set_lowest_key_within_group`] and [`Self::set_double_charge`].
     #[cfg(feature = "protocol-port")]
@@ -80,6 +84,7 @@ impl<X: SchedPayload> RunQueue<X> {
             members: BTreeMap::new(),
             running: None,
             ready_fair: 0,
+            pinned_fair: 0,
             #[cfg(feature = "protocol-port")]
             lowest_key_within_group: false,
             #[cfg(feature = "protocol-port")]
@@ -120,6 +125,7 @@ impl<X: SchedPayload> RunQueue<X> {
         let job = task.job().clone();
         let jk = job.key();
         job.enter();
+        self.pinned_fair += usize::from(task.affinity().single().is_some());
         let standing = task.standing_mut();
         let carried = core::mem::take(&mut standing.group_lag);
         let left = standing.left.take();
@@ -220,6 +226,7 @@ impl<X: SchedPayload> RunQueue<X> {
         let at = self.pick_fair()?;
         let task = self.threads.payload_mut(at.thread).take().expect("the pick has its value");
         self.ready_fair -= 1;
+        self.pinned_fair -= usize::from(task.affinity().single().is_some());
         self.running = Some(at);
         Some(task)
     }
@@ -263,6 +270,7 @@ impl<X: SchedPayload> RunQueue<X> {
                         self.groups.end_request(&mut self.group_slots, at.group);
                         self.group_slots.payload_mut(at.group).threads.end_request(&mut self.threads, at.thread);
                     }
+                    self.pinned_fair += usize::from(task.affinity().single().is_some());
                     *self.threads.payload_mut(at.thread) = Some(task);
                     self.ready_fair += 1;
                 }
@@ -310,6 +318,7 @@ impl<X: SchedPayload> RunQueue<X> {
     fn take(&mut self, at: Place) -> ReadyTask<X> {
         let mut task = self.threads.payload_mut(at.thread).take().expect("a ready task");
         self.ready_fair -= 1;
+        self.pinned_fair -= usize::from(task.affinity().single().is_some());
         self.leave(at, task.standing_mut());
         task
     }
@@ -317,12 +326,13 @@ impl<X: SchedPayload> RunQueue<X> {
     /// The ready fair task a balance request is best answered with, out of
     /// the band: the one whose move from this CPU's summed group weight to the
     /// asker's `asking` brings the two closest, never `loaded` — the context
-    /// this CPU still stands on (`SchedPass::answer_steal_requests`). An idle
+    /// this CPU still stands on (`SchedPass::answer_steal_requests`), and
+    /// never one whose mask leaves out `thief`. An idle
     /// asker is answered with that task whatever the move does; a busy one only
     /// if the move narrows the difference by a quarter of the thread's weight,
     /// so that floor rounding cannot hand an odd split back and forth. Each
     /// group offers its newest ready thread.
-    pub fn pop_surplus(&mut self, loaded: Option<TaskKey>, asking: u64) -> Option<ReadyTask<X>> {
+    pub fn pop_surplus(&mut self, loaded: Option<TaskKey>, asking: u64, thief: CpuId) -> Option<ReadyTask<X>> {
         self.refresh();
         let diff = self.weight() as i128 - asking as i128;
         let (_, _, _, at) = self
@@ -333,8 +343,9 @@ impl<X: SchedPayload> RunQueue<X> {
                 let (key, thread) = g
                     .threads
                     .slots(&self.threads)
-                    .filter_map(|t| self.threads.payload(t).as_ref().map(|task| (task.key(), t)))
-                    .filter(|&(key, _)| Some(key) != loaded)
+                    .filter_map(|t| self.threads.payload(t).as_ref().map(|task| (task, t)))
+                    .filter(|(task, _)| Some(task.key()) != loaded && task.affinity().contains(thief))
+                    .map(|(task, t)| (task.key(), t))
                     .max_by_key(|&(key, _)| key)?;
                 let w = g.job.thread_weight() as i128;
                 (asking == 0 || w + w / 4 <= diff).then_some(((diff - 2 * w).abs(), jk, key, Place { group, thread }))
@@ -369,9 +380,23 @@ impl<X: SchedPayload> RunQueue<X> {
         self.ready_fair
     }
 
-    /// Is `key` queued in the fair band?
-    pub fn holds_fair(&self, key: TaskKey) -> bool {
-        self.ready().any(|(_, task)| task.key() == key)
+    /// Of [`Self::fair_len`], those whose mask names more than one CPU.
+    pub fn movable_fair(&self) -> usize {
+        self.ready_fair - self.pinned_fair
+    }
+
+    /// Every CPU a movable queued fair task may run on: the CPUs a push may
+    /// ring for it.
+    pub fn movable_mask(&self) -> CpuMask {
+        self.ready()
+            .map(|(_, task)| task.affinity())
+            .filter(|mask| mask.single().is_none())
+            .fold(CpuMask::NONE, CpuMask::union)
+    }
+
+    /// Is `key` queued in the fair band with a mask naming more than one CPU?
+    pub fn holds_movable(&self, key: TaskKey) -> bool {
+        self.ready().any(|(_, task)| task.key() == key && task.affinity().single().is_none())
     }
 
     pub fn is_empty(&self) -> bool {

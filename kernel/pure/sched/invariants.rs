@@ -30,6 +30,9 @@ pub enum Container {
     /// dying task's does, but no pick serves this band, so `Ready` here is
     /// where it stays.
     Stopped,
+    /// Taken off this CPU because its mask leaves it out, while this CPU
+    /// still stood on its context; the next pass sends it on.
+    Outbound,
     Parked,
     Zombie,
 }
@@ -44,6 +47,7 @@ pub fn residents<X: SchedPayload>(
         .chain(cpu.rq().keys().map(|k| (k, Container::Ready)))
         .chain(cpu.dying().map(|t| (t.key(), Container::Dying)))
         .chain(cpu.stopped().map(|t| (t.key(), Container::Stopped)))
+        .chain(cpu.outbound().map(|t| (t.key(), Container::Outbound)))
         .chain(cpu.parked().map(|p| (p.key(), Container::Parked)))
         .chain(cpu.zombie_key().map(|k| (k, Container::Zombie)))
 }
@@ -61,6 +65,22 @@ pub fn check_cpu<X: SchedPayload>(cpu: &CpuSched<X>) {
             "running task {:?} disagrees with its state word",
             running.key(),
         );
+        assert!(
+            running.affinity().contains(id) || running.shared().kill_pending(),
+            "running task {:?} is outside its mask {:?}",
+            running.key(),
+            running.affinity(),
+        );
+    }
+
+    for task in cpu.outbound() {
+        assert_eq!(
+            task.shared().state(),
+            TaskState::Ready(id),
+            "outbound task {:?} disagrees with its state word",
+            task.key(),
+        );
+        assert!(!task.affinity().contains(id), "outbound task {:?} may run here", task.key());
     }
 
     for task in cpu.dying() {

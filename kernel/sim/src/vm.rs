@@ -14,6 +14,7 @@ use std::cell::Cell;
 use std::collections::{BTreeMap, BTreeSet};
 use std::sync::Arc as StdArc;
 
+use kernel::sched::affinity::CpuMask;
 use kernel::sched::cpu::{Action, CpuHandle, CpuSched, Env, SchedPass};
 use kernel::sched::job::{Job, JobKey};
 use kernel::sched::hw::{CpuId, Hw, Kicker, Machine, Nanos, TraceEvent, TraceKind};
@@ -686,7 +687,7 @@ impl<'q> Vm<'q> {
         };
         for (index, spec) in vm.scenario.procs.clone().iter().enumerate() {
             for &template in &spec.initial {
-                vm.spawn(index, template);
+                vm.spawn(index, template, CpuMask::ANY);
             }
         }
         // Spawned before any CPU took a step, so sent by none of them.
@@ -710,7 +711,7 @@ impl<'q> Vm<'q> {
         all
     }
 
-    fn spawn(&mut self, process: usize, template: usize) {
+    fn spawn(&mut self, process: usize, template: usize, mask: CpuMask) {
         if self.live.len() >= self.scenario.max_tasks {
             return;
         }
@@ -746,7 +747,7 @@ impl<'q> Vm<'q> {
         // differ in where a task lands and in nothing else.
         let least_loaded = self
             .handles
-            .place(CpuId(self.next_spawn_cpu as u32), self.clock)
+            .place(CpuId(self.next_spawn_cpu as u32), self.clock, mask)
             .0 as usize;
         self.next_spawn_cpu = (least_loaded + 1) % self.scenario.cpus();
         let dst = match self.scenario.placement {
@@ -764,6 +765,7 @@ impl<'q> Vm<'q> {
                 address_space,
             },
             rt,
+            mask,
         };
         let task = builder.build(CpuId(dst as u32), self.clock);
         self.shared.insert(key, task.shared().clone());
@@ -1517,9 +1519,18 @@ impl<'q> Vm<'q> {
                 self.cpus[cpu].set_current_rt(self.clock, true);
                 self.programs.get_mut(&key).expect("live").pc += 1;
             }
+            Op::SetAffinity(cpus) => {
+                let mask = CpuMask::from_words(&[cpus], self.scenario.cpus()).expect("a scenario names online CPUs");
+                let shared = self.shared[&key].clone();
+                shared.mask().store(mask, &SimPreempt);
+                self.handles.realign(&shared, &self.hw);
+                self.programs.get_mut(&key).expect("live").pc += 1;
+            }
             Op::Spawn { template } => {
                 let process = self.programs[&key].process;
-                self.spawn(process, template);
+                // A new thread starts with its spawner's mask.
+                let mask = self.shared[&key].mask().load().0;
+                self.spawn(process, template, mask);
                 self.programs.get_mut(&key).expect("live").pc += 1;
             }
             Op::Wake { queue, all, boost } => {
@@ -1923,7 +1934,7 @@ impl<'q> Vm<'q> {
     }
 
     fn old_steal(&mut self, thief: usize, victim: usize) {
-        if let Some(task) = self.cpus[victim].steal_ready() {
+        if let Some(task) = self.cpus[victim].steal_ready(CpuId(thief as u32)) {
             self.transit[thief] = Some(task);
         }
     }
