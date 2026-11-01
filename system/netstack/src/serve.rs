@@ -1019,7 +1019,7 @@ fn asked(kind: Kind, msg_type: u32, payload: &[u8], handles: usize) -> Option<As
 enum Reply {
     Bare,
     Word(u32),
-    Peer(socket::Datagram),
+    Peer(socket::Peer),
     Bytes(Vec<u8>),
 }
 
@@ -1042,7 +1042,12 @@ fn answer_socket(node: &mut Node, now: Instant, socket: Held, holder: HolderId, 
             node.udp_connect(now, id, Ipv4Addr::from(to), port).map(|()| Reply::Bare).map_err(refused)
         }
         (Held::Datagram(id), Asked::Peer) => match node.udp_peer(id).map_err(refused)? {
-            Some((addr, port)) => Ok(Reply::Peer(socket::Datagram { addr: addr.octets(), port: port.get(), _pad: 0 })),
+            Some(peer) => Ok(Reply::Peer(socket::Peer {
+                addr: peer.addr.octets(),
+                port: peer.port.get(),
+                _pad: 0,
+                local_addr: peer.local.octets(),
+            })),
             None => Err(ERR_NOT_CONNECTED),
         },
         (Held::Datagram(id), Asked::SendPeer(data)) => node.udp_send(now, id, &data).map(|()| Reply::Bare).map_err(refused),

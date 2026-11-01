@@ -352,8 +352,8 @@ run and the run's own spread.
 **The exit's first session read no ToyOS row, 2026-11-01**
 ([evidence](https://github.com/ToyOSOrg/evidence/tree/35f09268e09714a8547496bdd766bcd3ca998325/r1)). This was Linux, ToyOS at `4f52c3056`, Linux, all
 exiting 0. ToyOS's `osbench_lan` found the peer and then refused the group:
-`no netstack link holds 10.0.2.15`. std's `TcpStream::local_addr` answers
-QEMU's user-network address whatever the lease is, and since #1122 osbench
+`no netstack link holds 10.0.2.15`. std's `TcpStream::local_addr` answered
+QEMU's user-network address whatever the lease was, and since #1122 osbench
 names a connection's link by that address. The T14's lease is not it. So the
 session does not decide. The next one runs on a head where netstack's
 answers carry each stream's local address and std, libc and the SDK return it.

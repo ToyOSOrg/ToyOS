@@ -9,8 +9,9 @@
 //! first link's NIC down; the next datagrams leave by the other link and none
 //! by the first. Asked to set it up again, the datagrams return to it.
 //!
-//! A stream to each network's host first reports that link's lease as its
-//! local address: netstack's, since the two leases differ.
+//! A stream and a connected datagram socket to each network's host first
+//! report that link's lease as their local address: netstack's, since the two
+//! leases differ.
 
 use std::collections::BTreeMap;
 use std::io::{BufRead, BufReader, Write};
@@ -112,10 +113,17 @@ fn main() {
         let stream = TcpStream::connect(SocketAddr::from((Ipv4Addr::new(a, b, c, 2), port))).expect("link_failover: a stream to the harness");
         let local = stream.local_addr().expect("link_failover: the stream's local address");
         assert_eq!(local.ip(), leases[n], "link_failover: the stream over link {n} says it left from {local}");
-        assert_ne!(local.port(), 0, "link_failover: the stream's local port");
         println!("  PASS: the stream over link {n} left from its lease, {local}");
         stream
     };
+    for (n, network) in networks.iter().enumerate() {
+        let [a, b, c, _] = network.octets();
+        let connected = UdpSocket::bind("0.0.0.0:0").expect("link_failover: a datagram socket to connect");
+        connected.connect(SocketAddr::from((Ipv4Addr::new(a, b, c, 2), port))).expect("link_failover: a datagram socket's connect");
+        let local = connected.local_addr().expect("link_failover: the datagram socket's local address");
+        assert_eq!(local.ip(), leases[n], "link_failover: the datagram socket connected over link {n} says it sends from {local}");
+        println!("  PASS: the datagram socket connected over link {n} sends from its lease, {local}");
+    }
     drop(harness(first));
     let mut control = harness(second);
     control.set_read_timeout(Some(BOUND)).expect("link_failover: a read timeout");

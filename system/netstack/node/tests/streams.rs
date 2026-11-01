@@ -417,7 +417,6 @@ fn established() -> (Net, StreamId, Rc<Client>) {
 fn established_within(timeout: Option<Duration>) -> (Net, StreamId, Rc<Client>) {
     let mut net = Net::new();
     let (id, client) = net.connect(timeout);
-    // The address the stream left from is the node's lease, as the SYN carried it.
     let local = Endpoint { addr: A, port: Port::new(net.far.port).expect("the SYN's source port") };
     assert_eq!(net.events(), [StreamEvent::Connected { id, local }]);
     (net, id, client)

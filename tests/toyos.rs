@@ -695,10 +695,10 @@ const MACHINE_TESTS: &[&str] = &[
     // when it is up. Two drivers' links, a NIC's carrier and netstack's
     // routes cross three processes and two devices, which the node's and the
     // shard's host tests of rank, failover and return hold below the drivers.
-    // std's `local_addr` of a stream over each link is that link's lease, and
-    // the two differ, so one is not QEMU's 10.0.2.15: what netstack answered
-    // through the SDK, which the node's host tests hold only as far as the
-    // node.
+    // std's `local_addr` of a stream and of a connected datagram socket over
+    // each link is that link's lease, and the two differ, so one is not QEMU's
+    // 10.0.2.15: what netstack answered through the SDK, which the node's host
+    // tests hold only as far as the node.
     // QEMU x86-64 (`qemu::SUITE_ARCH`), on two user networks; the datagrams go
     // to RFC 5737's TEST-NET-1, which answers nothing, and the harness is the
     // peer on the host's loopback, so it depends on no public network. The networks are not
@@ -6060,6 +6060,7 @@ fn stream_holders(test_config: &Path) -> Result<(), String> {
         "given out and taken back: one end; a duplicate of its handle endowed or sent: refused",
         "one end, two threads: the write completes beside an unanswered read, which then takes the peer's next bytes",
         "piped children across threads: fed, read and waited for apart, and one killed beside its reader",
+        "a stream's local address: the answer's, and none refused",
     ] {
         if !result.stdout.contains(claim) {
             return Err(format!("the job never said {claim:?}:\n{}", result.stdout));
