@@ -2007,7 +2007,8 @@ fn wake(
             WakeCause::boosted(WakeReason::Woken, until)
         }
         None => WakeCause::new(WakeReason::Woken),
-    };
+    }
+    .from(hw.poster());
     let env = Poster { cpus: handles, kicker: hw, preempt: &SimPreempt };
     if all {
         q.queue.post(cause, &env);

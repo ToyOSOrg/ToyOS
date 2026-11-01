@@ -1178,7 +1178,48 @@ impl<X: SchedPayload> CpuSched<X> {
         let mut task = entry.task.wake(self.id, cause, entry.class, now);
         self.trace(env, now, TraceKind::Wake { task: key, name: task.ext().name() });
         task.refresh_affinity();
-        self.place(task, env, now);
+        match self.toward_its_waker(&mut task, cause, env, now) {
+            Some(dst) => self.hand_off(task, dst, env, now),
+            None => self.place(task, env, now),
+        }
+    }
+
+    /// **A woken partner follows its waker's LLC.** A wake from another LLC
+    /// whose previous wake came from that LLC too goes to a sleeping CPU of
+    /// the waker's LLC that the task's mask names, nearest the waker and
+    /// quickest to wake, so a request/reply pair split across LLCs shares one
+    /// after its second round trip, and no message crosses the LLCs again.
+    /// A task woken from two LLCs in turn, such as a server with a client in
+    /// each, never moves, because no two consecutive wakes name one other
+    /// LLC. Every wake that names a waker records that waker's LLC. A
+    /// real-time task keeps the RT band's placement, and a stopped or killed
+    /// one [`Self::place`]'s.
+    fn toward_its_waker<H: Hw<Payload = X>, P: PreemptGuard>(
+        &self,
+        task: &mut ReadyTask<X>,
+        cause: WakeCause,
+        env: Env<'_, H, P>,
+        now: Nanos,
+    ) -> Option<CpuId> {
+        let waker = cause.waker?;
+        let topology = env.cpus.topology();
+        let llc = topology.llc_index(waker);
+        let again = task.swap_waker_llc(llc) == Some(llc);
+        if !again
+            || llc == topology.llc_index(self.id)
+            || task.is_rt()
+            || task.shared().stop_pending()
+            || task.shared().kill_pending()
+        {
+            return None;
+        }
+        let mask = task.affinity();
+        env.cpus.idle_near(waker, topology.position(waker), |cpu| {
+            topology.llc_index(cpu.id()) == llc
+                && mask.contains(cpu.id())
+                && cpu.doorbell().sleeping()
+                && cpu.answering(now)
+        })
     }
 
     fn handle_adopt<H: Hw<Payload = X>, P: PreemptGuard>(
@@ -3124,7 +3165,10 @@ mod tests {
             shared: &Arc<TaskShared<Msg<TestPayload>>>,
             reason: WakeReason,
         ) {
-            let cause = WakeCause::new(reason);
+            self.post_claimed_cause(cpu, shared, WakeCause::new(reason));
+        }
+
+        fn post_claimed_cause(&self, cpu: CpuId, shared: &Arc<TaskShared<Msg<TestPayload>>>, cause: WakeCause) {
             let slot = shared
                 .wake_node()
                 .claim()
@@ -4594,6 +4638,79 @@ mod tests {
         }
         assert_eq!(w.handles.place(C0, NOW, CpuMask::one(CpuId(2))), CpuId(2));
         w.abandon();
+    }
+
+    /// A task parked on cpu0, in [`two_llcs`]' LLC 0, every other CPU
+    /// asleep. LLC 1 is cpu1, cpu3, cpu5 and cpu7.
+    fn parked_in_llc_0(w: &mut World, mask: CpuMask) -> Arc<TaskShared<Msg<TestPayload>>> {
+        let job = Arc::new(Job::new(JobKey(1000 + w.next_key)));
+        let (_, task) = w.spawn_masked(C0, RtState::default(), job, mask);
+        w.run_a_pass(C0);
+        w.park_running(C0);
+        for cpu in 1..8 {
+            w.run_a_pass(CpuId(cpu));
+        }
+        task
+    }
+
+    /// Wake the task parked on cpu0 as the thread running on `waker` would,
+    /// and let cpu0 take the wake.
+    fn woken_from(w: &mut World, task: &Arc<TaskShared<Msg<TestPayload>>>, waker: u32) {
+        assert_eq!(task.claim_wake(), Claim::Parked(C0), "the task is parked on cpu0");
+        w.post_claimed_cause(C0, task, WakeCause::new(WakeReason::Woken).from(Some(CpuId(waker))));
+        w.run_a_pass(C0);
+    }
+
+    /// **A task woken twice in a row from another LLC moves into it**, onto a
+    /// sleeping CPU there; one wake from it is not enough.
+    #[test]
+    fn a_task_woken_twice_from_another_llc_moves_into_it() {
+        let mut w = World::on(two_llcs());
+        let task = parked_in_llc_0(&mut w, CpuMask::ANY);
+        woken_from(&mut w, &task, 1);
+        let first = task.state();
+        w.park_running(C0);
+        woken_from(&mut w, &task, 1);
+        let second = task.state();
+        w.abandon();
+        assert_eq!(first, TaskState::Running(C0), "one wake from LLC 1 left it at home");
+        assert!(
+            matches!(second, TaskState::InTransit(cpu) if cpu.0 % 2 == 1),
+            "the second wake from LLC 1 handed it to a CPU of LLC 1, and it is {second:?}",
+        );
+    }
+
+    /// **A task woken from two LLCs in turn stays home**: no two consecutive
+    /// wakes name one other LLC.
+    #[test]
+    fn a_task_woken_from_two_llcs_in_turn_stays_home() {
+        let mut w = World::on(two_llcs());
+        let task = parked_in_llc_0(&mut w, CpuMask::ANY);
+        let mut states = Vec::new();
+        for waker in [1, 2, 3, 4, 5] {
+            woken_from(&mut w, &task, waker);
+            states.push(task.state());
+            w.park_running(C0);
+        }
+        w.abandon();
+        assert!(states.iter().all(|&s| s == TaskState::Running(C0)), "it moved: {states:?}");
+    }
+
+    /// **The move stays inside the mask**: a task whose mask names only LLC
+    /// 0 stays home however often LLC 1 wakes it.
+    #[test]
+    fn a_task_masked_out_of_its_wakers_llc_stays_home() {
+        let mut w = World::on(two_llcs());
+        let llc_0 = CpuMask::from_words(&[0b0101_0101], 8).unwrap();
+        let task = parked_in_llc_0(&mut w, llc_0);
+        let mut states = Vec::new();
+        for _ in 0..3 {
+            woken_from(&mut w, &task, 1);
+            states.push(task.state());
+            w.park_running(C0);
+        }
+        w.abandon();
+        assert!(states.iter().all(|&s| s == TaskState::Running(C0)), "it left its mask: {states:?}");
     }
 
     /// **One forward per idle sibling**: wakes drained in one pass are handed
