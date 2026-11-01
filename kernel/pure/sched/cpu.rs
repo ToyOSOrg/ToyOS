@@ -533,6 +533,21 @@ impl<X: SchedPayload> CpuSched<X> {
         self.leave_fair_for_rt(now);
     }
 
+    /// The CPU a wake the running task posts names as its waker
+    /// ([`WakeCause::waker`]): this one, unless nothing runs here or the
+    /// running thread is leaving its process. A dying waker is no partner
+    /// for [`Self::toward_its_waker`] to follow: a parent woken by each
+    /// child's exit would chase children it never talks to again.
+    pub fn waker(&self) -> Option<CpuId> {
+        self.running.as_ref().filter(|task| !task.is_leaving()).map(|_| self.id)
+    }
+
+    /// The running thread has begun leaving its process: no wake it posts
+    /// from now on names a waker.
+    pub fn current_leaves(&mut self) {
+        self.running.as_mut().expect("a thread leaving its process is running").begin_leaving();
+    }
+
     /// `SYS_RT_ENTER` on the running task — permanent RT, as opposed to the
     /// bounded window a waker lends. The privilege gate lives at the syscall
     /// layer.
@@ -4746,6 +4761,33 @@ mod tests {
             matches!(state, TaskState::InTransit(cpu) if cpu.0 == 3 || cpu.0 == 7),
             "the task went to cpu3 or cpu7, off cpu1's core with cpu5, and it is {state:?}",
         );
+    }
+
+    /// **A thread leaving its process names no waker**: the thread running
+    /// on cpu1 wakes the task one short of [`WAKER_RUN`], then begins
+    /// leaving, and a full run of wakes it posts on its way out leaves the
+    /// task home.
+    #[test]
+    fn a_leaving_threads_wakes_leave_the_task_home() {
+        let mut w = World::on(two_llcs());
+        let task = parked_in_llc_0(&mut w, CpuMask::ANY);
+        w.spawn(C1);
+        w.run_a_pass(C1);
+        let woken_by_cpu1 = |w: &mut World, times| {
+            for _ in 0..times {
+                assert_eq!(task.claim_wake(), Claim::Parked(C0), "the task is parked on cpu0");
+                let cause = WakeCause::new(WakeReason::Woken).from(w.cpus[1].waker());
+                w.post_claimed_cause(C0, &task, cause);
+                w.run_a_pass(C0);
+                assert_eq!(task.state(), TaskState::Running(C0), "a wake from cpu1 moved the task");
+                w.park_running(C0);
+            }
+        };
+        assert_eq!(w.cpus[1].waker(), Some(C1), "cpu1's running thread names itself");
+        woken_by_cpu1(&mut w, WAKER_RUN - 1);
+        w.cpus[1].current_leaves();
+        woken_by_cpu1(&mut w, WAKER_RUN);
+        w.abandon();
     }
 
     /// **Two runs ending in one drain go to two CPUs**: the first move rings

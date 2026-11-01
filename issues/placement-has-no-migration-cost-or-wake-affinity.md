@@ -21,7 +21,12 @@ lacks:
   waker (shared data stays warm — pipe/IPC pairs) and away from it
   (parallelism). The first half is in `CpuSched::toward_its_waker`:
   - Every wake a thread posts names its CPU; one a device interrupt's
-    handler, a deadline or a retire posts names none.
+    handler, a deadline or a retire posts names none, and so does one a
+    thread posts once it has begun leaving its process (`thread_exit`,
+    `process::leave`): a parent woken by each child's exit, its join or its
+    teardown's closes would otherwise follow children it never talks to
+    again. The thread's task carries that as one bit, set once; it is the
+    thread's lifecycle, not placement accounting.
   - A run of `WAKER_RUN` (8) or more wakes from one other LLC moves the
     task to a sleeping CPU there that its mask names, that no kick is on
     its way to and that is off the waker's own core. A pair split across

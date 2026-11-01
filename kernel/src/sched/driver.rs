@@ -711,12 +711,19 @@ pub fn current_shared() -> Option<Arc<KShared>> {
     try_with_cpu(|cpu| cpu.running().map(|t| t.shared().clone())).flatten()
 }
 
-/// The CPU a wake posted here names as its waker: this one, while a thread
-/// runs on it outside a device interrupt's handler, which posts for the
-/// device and not for the thread it interrupted.
+/// The CPU a wake posted here names as its waker ([`CpuSched::waker`]); none
+/// inside a device interrupt's handler, which posts for the device and not
+/// for the thread it interrupted, or inside a pass.
 pub fn waker() -> Option<CpuId> {
-    let thread = percpu::current_tid().is_some() && !percpu::in_device_irq();
-    thread.then(|| CpuId(percpu::cpu_id()))
+    if percpu::in_device_irq() {
+        return None;
+    }
+    try_with_cpu(CpuSched::waker).flatten()
+}
+
+/// The running thread has begun leaving its process ([`CpuSched::current_leaves`]).
+pub fn current_leaves() {
+    with_cpu(CpuSched::current_leaves);
 }
 
 /// The running task's mask, which a thread or process it spawns starts with; every CPU off-task, as at boot.

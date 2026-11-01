@@ -836,6 +836,8 @@ struct TaskInner<X: SchedPayload> {
     /// Where this task's recent wakes came from. Kept by the owner CPU, as
     /// the mask copy is.
     waker_streak: WakerStreak,
+    /// Set once the thread has begun leaving its process, and never cleared.
+    leaving: bool,
     /// When the current residency began: enqueue time while ready, dispatch
     /// time while running, park time while blocked. One field, because a task
     /// is in exactly one state.
@@ -1055,6 +1057,7 @@ impl<X: SchedPayload> TaskBuilder<X> {
             affinity: self.mask,
             affinity_version: 0,
             waker_streak: WakerStreak::default(),
+            leaving: false,
             since: now,
             adopt_node: MailboxNode::new(),
             ext: Some(self.ext),
@@ -1163,6 +1166,15 @@ impl<X: SchedPayload> ReadyTask<X> {
 impl<X: SchedPayload> RunningTask<X> {
     pub(crate) fn refresh_affinity(&mut self) -> bool {
         self.0.refresh_affinity()
+    }
+
+    /// The thread has begun leaving its process, for good.
+    pub(crate) fn begin_leaving(&mut self) {
+        self.0 .0.leaving = true;
+    }
+
+    pub fn is_leaving(&self) -> bool {
+        self.0 .0.leaving
     }
 
     pub(crate) fn standing_mut(&mut self) -> &mut Standing {
