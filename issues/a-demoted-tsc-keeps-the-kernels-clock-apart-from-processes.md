@@ -25,6 +25,11 @@ After a forward second step, processes' time holds at the TSC's clock until
 the HPET's count reaches it, then follows the HPET. The kernel's clock stays
 ahead by the step.
 
+Where one CPU's TSC is apart from the others' (written, found behind, or an
+offset an AP's start proves), processes' time holds at the furthest-ahead
+CPU's clock at the demotion until the HPET's count reaches it. The kernel's
+clock on each CPU stays apart by that CPU's offset.
+
 **Owner:** the clock.
 
 **Exit:** after a demotion, the kernel's clock follows the reference too, so

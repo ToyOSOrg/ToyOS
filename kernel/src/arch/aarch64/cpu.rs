@@ -17,8 +17,9 @@ pub fn counter() -> u64 {
 /// one: the read the clock takes inside its line's read section.
 pub fn counter_ordered() -> u64 {
     let count: u64;
-    // SAFETY: as `counter`'s; the second `ISB` touches nothing either.
-    unsafe { asm!("isb", "mrs {}, cntvct_el0", "isb", out(reg) count, options(nomem, nostack, preserves_flags)) };
+    // SAFETY: as `counter`'s; the second `ISB` touches nothing either. Not
+    // `nomem`, which would let the compiler move the latch's loads across it.
+    unsafe { asm!("isb", "mrs {}, cntvct_el0", "isb", out(reg) count, options(nostack, preserves_flags)) };
     count
 }
 

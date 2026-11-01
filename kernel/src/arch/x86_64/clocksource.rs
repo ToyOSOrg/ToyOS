@@ -15,10 +15,10 @@
 //! or the TSC; the RTC's edges, off its own 32.768 kHz crystal, choose: with
 //! the TSC, the span is left out; with the chipset's counters, or saying
 //! neither, the TSC stepped. The boot's first forward step is slewed away;
-//! a second, one back, or a check that finds a CPU's TSC written or behind
-//! demotes the TSC ([`demote`]), and every process's reading of now asks the
-//! kernel, which counts by the HPET. A rate that drifts past both bounds
-//! panics.
+//! a second, one back, a check that finds a CPU's TSC written or behind, or
+//! an AP's start that proves its offset demotes the TSC ([`demote`]), and
+//! every process's reading of now asks the kernel, which counts by the HPET.
+//! A rate that drifts past both bounds panics.
 
 use core::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 
@@ -31,6 +31,7 @@ use toyos_userbound::{Mediated, Ports};
 use crate::log;
 use crate::mm::Mmio;
 use crate::mm::policy::MmioPolicy;
+use crate::shootdown::{Reach, Shootdown};
 use crate::sync::Lock;
 use crate::time::{Delay, Duration, AP_START};
 
@@ -238,10 +239,16 @@ struct Demoted {
 }
 
 static DEMOTED: Lock<Option<Demoted>> = Lock::new(None);
+/// Taken by the first [`demote`]; every later one only logs.
 static IS_DEMOTED: AtomicBool = AtomicBool::new(false);
-/// The latest reading the kernel has answered a process since the demotion,
-/// which no later answer reads before.
+/// What no answer since the demotion reads before: every online CPU's clock
+/// once it saw the page marked ([`HANDOVER`]), and every answer given.
 static DEMOTED_LATEST: AtomicU64 = AtomicU64::new(0);
+/// The demotion's one round: each online CPU, once the page is marked, floors
+/// [`DEMOTED_LATEST`] at its own clock ([`floor_here`]).
+static HANDOVER: Shootdown = Shootdown::new();
+/// Every online CPU has answered [`HANDOVER`]: no process is answered before.
+static HANDED_OVER: AtomicBool = AtomicBool::new(false);
 static DEMOTED_ANSWERED: AtomicBool = AtomicBool::new(false);
 /// The rate the watch keeps, for a demotion on any CPU to retune the line to.
 static KEPT_MULT: AtomicU64 = AtomicU64::new(0);
@@ -269,6 +276,11 @@ impl Local {
     pub const fn new() -> Self {
         Self { due_ns: AtomicU64::new(0), adjust: AtomicU64::new(0) }
     }
+}
+
+/// The handover's answer for each of the `cpus` CPUs the firmware names.
+pub fn size(cpus: usize) {
+    HANDOVER.size(cpus);
 }
 
 /// Start the clock on the TSC, at its stated rate or one measured against the
@@ -437,8 +449,8 @@ fn arrive(turn: u64) -> Option<i64> {
 }
 
 /// The BSP's half of [`ROUNDS`] round trips with the AP just started: how far
-/// `cpu_id`'s TSC can be from this one's (`reference::Offset`). Panics on an
-/// offset the trips prove, and on an AP that stops answering.
+/// `cpu_id`'s TSC can be from this one's (`reference::Offset`). Demotes the TSC
+/// on an offset the trips prove, and panics on an AP that stops answering.
 pub fn measure_offset(cpu_id: u32) {
     let mut least_back = i64::MAX;
     for round in 0..u64::from(ROUNDS) {
@@ -454,11 +466,11 @@ pub fn measure_offset(cpu_id: u32) {
     let offset = Offset { least_out: LEAST_OUT.load(Ordering::Relaxed) as i64, least_back };
     match offset.bound() {
         Ok((lo, hi)) => log!("clock: cpu{cpu_id}'s TSC is within {lo}..={hi} cycles of cpu0's, over {ROUNDS} round trips"),
-        Err(proven) => panic!(
-            "clock: cpu{cpu_id}'s TSC is {} cpu0's by at least {} cycles, which {ROUNDS} round trips prove ({offset:?})",
+        Err(proven) => demote(format_args!(
+            "cpu{cpu_id}'s TSC is {} cpu0's by at least {} cycles, which {ROUNDS} round trips prove ({offset:?})",
             if proven < 0 { "behind" } else { "ahead of" },
             proven.unsigned_abs(),
-        ),
+        )),
     }
 }
 
@@ -530,15 +542,12 @@ pub fn check(now_ns: u64) {
 
 /// Leave the TSC for the HPET for the rest of the boot, or, after that, log
 /// what was found. Every process's reading of now then asks the kernel
-/// ([`stamp_now`]), which counts by the HPET from the last held sample's clock;
-/// and none answers before the clock at the first counter read after the page
-/// was marked, which is after every counter a page reader that found it
-/// unmarked read. The line goes back to the kept rate, unslewed, and the
-/// kernel's own clock and deadlines stay on it.
+/// ([`stamp_now`]), which counts by the HPET from the last held sample's clock,
+/// and answers none before every online CPU's clock once it saw the page
+/// marked ([`hand_over`]). The line goes back to the kept rate, unslewed, and
+/// the kernel's own clock and deadlines stay on it.
 fn demote(why: core::fmt::Arguments) {
-    let mut demoted = DEMOTED.lock();
-    if demoted.is_some() {
-        drop(demoted);
+    if IS_DEMOTED.swap(true, Ordering::SeqCst) {
         return log!("clock: DEMOTED TSC: {why}");
     }
     // A publication in progress ends within its few stores.
@@ -553,37 +562,91 @@ fn demote(why: core::fmt::Arguments) {
     let first = cpu::counter_ordered();
     let at_hpet = hpet.read(hpet.ahead_of(held_hpet, held_tsc, first, mult));
     let at_stamp = held_stamp + hpet.reference.ns_of(at_hpet.saturating_sub(held_hpet));
-    *demoted = Some(Demoted { hpet, at_hpet, at_stamp, last_tsc: first, last_hpet: at_hpet, mult });
-    IS_DEMOTED.store(true, Ordering::SeqCst);
+    *DEMOTED.lock() = Some(Demoted { hpet, at_hpet, at_stamp, last_tsc: first, last_hpet: at_hpet, mult });
     crate::clock::demote();
     core::sync::atomic::fence(Ordering::SeqCst);
+    hand_over();
     let after = cpu::counter_ordered();
     let on_line = crate::clock::stamp_at(after);
-    DEMOTED_LATEST.fetch_max(on_line, Ordering::AcqRel);
     crate::clock::retune(after, mult);
-    drop(demoted);
+    HANDED_OVER.store(true, Ordering::Release);
     log!(
         "clock: DEMOTED: {why}, so the TSC no longer keeps the clock: every process's reading of now asks the kernel, \
-         which counts by the HPET from {at_stamp} ns, {} ns from the TSC's clock and held at that clock till it \
-         catches up; the kernel's own clock and deadlines stay on the TSC, at the kept rate",
+         which counts by the HPET from {at_stamp} ns, {} ns from the TSC's clock and held at every CPU's clock at \
+         the handover till it catches up; the kernel's own clock and deadlines stay on the TSC, at the kept rate",
         at_stamp as i64 - on_line as i64,
     );
+}
+
+/// The handover's round, on the page marked: every online CPU floors
+/// [`DEMOTED_LATEST`] at its own clock, this one first. A page reader that
+/// found the page unmarked read its counter before its CPU's floor, on that
+/// CPU's TSC, so no answer reads before it however far that TSC leads; one
+/// that read a line replaced since is ahead of the floor only by the bend
+/// every retune makes, the change of rate over that CPU's lead. Before the
+/// APs are released no other CPU has run a process, and none is asked.
+///
+/// Never logs, as `tlb::wait_for`: a CPU blocked on the console's lock with
+/// interrupts closed could not answer.
+fn hand_over() {
+    let generation = HANDOVER.issue(Reach::Narrow);
+    serve_here();
+    if !crate::smp::answering() {
+        return;
+    }
+    super::apic::kick_all_but_self();
+    for cpu in 0..crate::smp::cpu_count() as usize {
+        awaiting("answer to the handover from every CPU", || {
+            serve_here();
+            HANDOVER.served(cpu, generation)
+        });
+    }
+}
+
+/// This CPU's answer to the handover, if it owes one: the kick handler's, and
+/// every waiter's on its own CPU.
+pub fn serve_here() {
+    let _closed = super::IrqGuard::close();
+    HANDOVER.serve_if_owed(super::percpu::cpu_id() as usize, |_| floor_here());
+}
+
+/// Floor every answer after the demotion at this CPU's clock now: after the
+/// mark, so after the counter of every page reader on this CPU that found
+/// the page unmarked.
+fn floor_here() {
+    DEMOTED_LATEST.fetch_max(crate::clock::stamp_at(cpu::counter_ordered()), Ordering::AcqRel);
+}
+
+/// Spin until `done`, which serves this CPU's handover itself, and panic past
+/// `time::DEAF_CPU`: a CPU that takes no kick in five seconds is wedged.
+fn awaiting(what: &str, mut done: impl FnMut() -> bool) {
+    let deaf = crate::time::DEAF_CPU.nanos();
+    let deadline = crate::clock::nanos_since_boot().saturating_add(deaf);
+    while !done() {
+        assert!(crate::clock::nanos_since_boot() < deadline, "clock: no {what} in {deaf} ns since the TSC was demoted");
+        core::hint::spin_loop();
+    }
 }
 
 /// The HPET, for [`demote`] on whichever CPU's check finds the TSC moved.
 static HPET_COPY: Lock<Option<Hpet>> = Lock::new(None);
 
 /// Now as a log line's time, for a process: the TSC's clock, or, once
-/// demoted, the HPET's count on from where the TSC was demoted. The counter is
-/// read before the mark, as a page reader reads it.
+/// demoted, the HPET's count on from where the TSC was demoted, never before
+/// the handover's floor. The counter is read before the mark, as a page reader
+/// reads it.
 pub fn stamp_now() -> u64 {
     let on_line = crate::clock::stamp_at(cpu::counter_ordered());
     if !IS_DEMOTED.load(Ordering::SeqCst) {
         return on_line;
     }
+    awaiting("end to the handover", || {
+        serve_here();
+        HANDED_OVER.load(Ordering::Acquire)
+    });
     let stamp = {
         let mut demoted = DEMOTED.lock();
-        let d = demoted.as_mut().expect("demoted before the mark");
+        let d = demoted.as_mut().expect("handed over before the demotion was recorded");
         let now = cpu::counter_ordered();
         let reading = d.hpet.read(d.hpet.ahead_of(d.last_hpet, d.last_tsc, now, d.mult));
         (d.last_tsc, d.last_hpet) = (now, reading);
@@ -685,6 +748,7 @@ fn settle(held: &mut Held, pending: Pending) {
         Third::Counter => "confirmed by the RTC",
         Third::Unsure => "unconfirmed by the RTC",
     };
+    held.edges.forget_before(pending.to.after);
     if IS_DEMOTED.load(Ordering::Acquire) {
         return log!("clock: TSC STEP: the demoted TSC stepped {step} ns against the HPET and the PM timer, {confirmed} ({rtc}); not slewed");
     }

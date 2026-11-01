@@ -24,8 +24,9 @@ pub fn current_tid() -> Tid {
 pub fn counter() -> u64 {
     let now: u64;
     // SAFETY: two `isb`s and a read of `CNTVCT_EL0` into a register; none
-    // touches memory.
-    unsafe { core::arch::asm!("isb", "mrs {now}, cntvct_el0", "isb", now = out(reg) now, options(nomem, nostack)) };
+    // touches memory. Not `nomem`, which would let the compiler move memory
+    // accesses, the clock page's loads among them, across the read.
+    unsafe { core::arch::asm!("isb", "mrs {now}, cntvct_el0", "isb", now = out(reg) now, options(nostack, preserves_flags)) };
     now
 }
 

@@ -10,7 +10,7 @@
 //!
 //! The line lives on the clock page every process maps
 //! (`toyos_abi::clock`), and the kernel reads it there too, so the two clocks
-//! are one.
+//! are one until the architecture demotes the page ([`demote`]).
 
 use core::sync::atomic::{AtomicBool, AtomicPtr, AtomicU64, Ordering::{Acquire, Relaxed, Release}};
 

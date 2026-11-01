@@ -455,6 +455,16 @@ impl Edges {
         self.len += 1;
     }
 
+    /// Drop the edges taken before the counter read `at`, where the counter
+    /// stepped: an edge from before a step and one from after it measure the
+    /// step, not the RTC crystal's drift, so neither a drift base nor a side
+    /// of a later span may reach across it.
+    pub fn forget_before(&mut self, at: u64) {
+        let kept = self.kept[..self.len].iter().position(|&(_, taken)| taken >= at).unwrap_or(self.len);
+        self.kept.copy_within(kept..self.len, 0);
+        self.len -= kept;
+    }
+
     /// Whether [`EDGES_EACH_SIDE`] edges have come after the counter read `to`.
     pub fn complete_after(&self, to: u64) -> bool {
         self.kept[..self.len].iter().filter(|&&(_, at)| at >= to).count() >= EDGES_EACH_SIDE
@@ -976,5 +986,33 @@ mod tests {
         let apart = drifting(0).apart_across(from, to, NS).expect("edges either side");
         assert!(apart.unsigned_abs() <= 30_000, "a stall read {apart} ns through the drift");
         assert_eq!(third_says(1_700_000, Some(apart)), Third::References);
+    }
+
+    /// A 1.7 ms step after a 4 ms one reads as itself once the edges from
+    /// before the first are forgotten; with them, the drift base reaches
+    /// across the first step and takes a quarter of it for the crystal's drift.
+    #[test]
+    fn a_drift_base_never_reaches_across_a_step() {
+        let (first, second) = (4_000_000u64, 1_700_000u64);
+        let stepped = || {
+            let mut edges = Edges::new();
+            for n in 0..EDGES_KEPT as u64 {
+                let edge = 10_000_000_000 + n * 1_000_000_000;
+                let latency = [3_000, 650_000, 20_000][n as usize % 3];
+                let steps = if n >= 4 { first } else { 0 } + if n >= 13 { second } else { 0 };
+                edges.push(n + 1, edge + latency + steps);
+            }
+            edges
+        };
+        let first_taken_at = 14_000_000_000 + first;
+        let (from, to) = (22_500_000_000 + first, 22_900_000_000 + first + second);
+
+        let mut forgotten = stepped();
+        forgotten.forget_before(first_taken_at);
+        let apart = forgotten.apart_across(from, to, NS).expect("edges either side");
+        assert_eq!(third_says(second as i64, Some(apart)), Third::Counter, "read {apart} ns");
+
+        let apart = stepped().apart_across(from, to, NS).expect("edges either side");
+        assert_ne!(third_says(second as i64, Some(apart)), Third::Counter, "read {apart} ns across the first step");
     }
 }
