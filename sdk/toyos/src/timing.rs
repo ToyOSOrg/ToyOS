@@ -25,8 +25,8 @@ use crate::arch::timing;
 #[must_use = "the protection ends when this drops"]
 pub struct Protection {
     active: bool,
-    /// Whether the mode was off before this, so this turns it off again.
-    restore_off: bool,
+    /// The mode to turn off again, where it was off before this.
+    restore: Option<timing::Mode>,
     _thread: PhantomData<*const ()>,
 }
 
@@ -42,18 +42,19 @@ impl Protection {
 /// until the answer drops.
 #[inline]
 pub fn protect() -> Protection {
-    let was = timing::mode();
-    if was == Some(false) {
-        timing::set_mode(true);
+    let mode = timing::mode();
+    let restore = mode.filter(|mode| !mode.is_on());
+    if let Some(mode) = restore {
+        mode.set(true);
     }
-    Protection { active: was.is_some(), restore_off: was == Some(false), _thread: PhantomData }
+    Protection { active: mode.is_some(), restore, _thread: PhantomData }
 }
 
 impl Drop for Protection {
     #[inline]
     fn drop(&mut self) {
-        if self.restore_off {
-            timing::set_mode(false);
+        if let Some(mode) = self.restore {
+            mode.set(false);
         }
     }
 }

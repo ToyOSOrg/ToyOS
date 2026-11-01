@@ -2632,11 +2632,8 @@ pub fn cpu_count() -> u32 {
     syscall(SYS_CPU_COUNT, 0, 0, 0, 0) as u32
 }
 
-/// Whether every CPU lets a thread turn on data-independent timing for
-/// itself: Arm's `PSTATE.DIT` (FEAT_DIT), which EL0 writes and every exception
-/// from EL0 keeps in the thread's saved state, so it is the thread's own across
-/// switches and CPUs. False on x86-64, where no such mode is a thread's to set.
-/// `toyos::timing` is the interface.
+/// Whether every CPU has FEAT_DIT, so a thread may set its own
+/// `PSTATE.DIT`; false on x86-64. `toyos::timing` is the interface.
 pub fn timing_control() -> bool {
     syscall(SYS_TIMING_CONTROL, 0, 0, 0, 0) != 0
 }
