@@ -8,7 +8,7 @@ use std::vec::Vec;
 
 use crate::dmc::{self, Malformed, Package, Stepping, TGL_PACKAGE};
 use crate::model::Engine;
-use crate::{allow_display_c6, regs, scanout, Refusal};
+use crate::{allow_display_c6, regs, Refusal};
 
 const C0: Stepping = Stepping { letter: b'C', digit: b'0' };
 const D0: Stepping = Stepping { letter: b'D', digit: b'0' };
@@ -148,10 +148,9 @@ fn t14_program() -> dmc::Program<'static> {
 #[test]
 fn the_t14_loads_the_program_powers_down_pg3_to_pg5_and_allows_dc6_last() {
     let engine = Engine::t14();
-    let one = scanout(&engine).expect("one plane");
     let main = t14_program();
-    let allowed = allow_display_c6(&engine, &engine, &one, &main).expect("allowed");
-    assert_eq!(allowed.before, [0x55, 0xff, 0]);
+    let allowed = allow_display_c6(&engine, &engine, &main).expect("allowed");
+    assert_eq!((allowed.before, allowed.ddi), ([0x55, 0xff, 0], 1));
     let written = engine.written();
     let words: Vec<_> = main.words().enumerate().map(|(n, w)| (0x8_0000 + 4 * n, w)).collect();
     let header: Vec<_> = main.writes().collect();
@@ -164,6 +163,7 @@ fn the_t14_loads_the_program_powers_down_pg3_to_pg5_and_allows_dc6_last() {
         [
             (regs::PWR_WELL_CTL2, 0x7f),
             (regs::PWR_WELL_CTL2, 0x1f),
+            (regs::AUDIO_PIN_BUF_CTL, 0),
             (regs::DC_PREREQUISITE, 0b11),
             (regs::DC_STATE_EN, 0b10),
         ]
@@ -175,16 +175,14 @@ fn the_t14_loads_the_program_powers_down_pg3_to_pg5_and_allows_dc6_last() {
 fn dc_states_already_allowed_are_disallowed_before_the_load() {
     let engine = Engine::t14();
     engine.set(regs::DC_STATE_EN, 0b01);
-    let one = scanout(&engine).expect("one plane");
-    allow_display_c6(&engine, &engine, &one, &t14_program()).expect("allowed");
+    allow_display_c6(&engine, &engine, &t14_program()).expect("allowed");
     let written = engine.written();
     assert_eq!(written.first(), Some(&(regs::DC_STATE_EN, 0)));
     assert_eq!(written.last(), Some(&(regs::DC_STATE_EN, 0b10)));
 }
 
 fn refused(engine: &Engine, why: Refusal) -> Vec<(usize, u32)> {
-    let one = scanout(engine).expect("one plane");
-    assert_eq!(allow_display_c6(engine, engine, &one, &t14_program()).map(|_| ()), Err(why));
+    assert_eq!(allow_display_c6(engine, engine, &t14_program()).map(|_| ()), Err(why));
     assert_ne!(engine.get(regs::DC_STATE_EN) & regs::DYNAMIC_DC_STATE, regs::UP_TO_DC6, "DC6 is not allowed");
     engine.written()
 }
@@ -194,6 +192,25 @@ fn a_type_c_port_is_refused_untouched() {
     let engine = Engine::t14();
     engine.set(regs::TRANS_DDI_FUNC_CTL_A, 1 << 31 | 0b0100 << regs::DDI_SELECT_SHIFT);
     assert_eq!(refused(&engine, Refusal::Port(0b0100)), []);
+}
+
+/// DDI B is in PG1 too, but DC6 may lose a combo PHY's programming other
+/// than port A's.
+#[test]
+fn a_panel_on_ddi_b_is_refused_untouched() {
+    let engine = Engine::t14();
+    engine.set(regs::TRANS_DDI_FUNC_CTL_A, 1 << 31 | 0b0010 << regs::DDI_SELECT_SHIFT);
+    assert_eq!(refused(&engine, Refusal::Port(0b0010)), []);
+}
+
+/// A wait preempted past its deadline while the well was still turning off
+/// reads it once more, off, rather than calling it held.
+#[test]
+fn a_wait_preempted_past_its_deadline_reads_the_well_again() {
+    let engine = Engine::t14();
+    engine.preempted.set(true);
+    allow_display_c6(&engine, &engine, &t14_program()).expect("allowed");
+    assert_eq!(engine.get(regs::DC_STATE_EN), 0b10);
 }
 
 #[test]

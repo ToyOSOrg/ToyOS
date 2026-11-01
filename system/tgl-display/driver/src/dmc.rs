@@ -20,8 +20,8 @@ pub const TGL_PACKAGE: &[u8] = include_bytes!("../../firmware/tgl_dmc_ver2_12.bi
 /// to it too.
 pub const WINDOW: core::ops::Range<usize> = 0x8_0000..0x9_0000;
 
-/// CSS header 1.0, package header 2 and DMC header 3: major version 2 of the
-/// package, which Vol 12 says changes whenever any header layout does.
+/// CSS header 1.0, package header 2 and DMC header 3, each checked at its
+/// header.
 const CSS_MODULE_DMC: u32 = 0x09;
 const CSS_HEADER_VERSION: u32 = 0x1_0000;
 const CSS_VERSION_AT: usize = 0x58;

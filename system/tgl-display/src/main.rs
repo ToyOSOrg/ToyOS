@@ -52,8 +52,6 @@ fn main() {
     toyos_pci_claim::start(&dev).unwrap_or_else(|why| panic!("tgl-display: {why}"));
     say!("tgl-display: PCI {:02x}:{:02x}.{} registers in BAR {BAR}, {span:#x} of its {bytes:#x} bytes", info.bus, info.dev, info.func);
 
-    // The pinned package parses on the host (`toyos-tgl-display`'s tests), so
-    // a failure here is this build's, not the machine's.
     let package = Package::parse(TGL_PACKAGE).unwrap_or_else(|why| panic!("tgl-display: the DMC package is malformed: {why:?}"));
     let revision = dev.config_read(0x08, RegWidth::U32).unwrap_or_else(|why| panic!("tgl-display: config space: {why:?}")) as u8;
 
@@ -80,18 +78,21 @@ fn main() {
                 .ok_or(Refusal::Revision(revision))
                 .and_then(|stepping| package.main_program(stepping).ok_or(Refusal::NoProgram(stepping)))
                 .and_then(|program| {
-                    toyos_tgl_display::allow_display_c6(&regs, &Monotonic, &done.scanout, &program).map(|allowed| (program, allowed))
+                    toyos_tgl_display::allow_display_c6(&regs, &Monotonic, &program).map(|allowed| (program, allowed))
                 });
             match allowed {
                 Ok((program, allowed)) => say!(
-                    "tgl-display: DMC package {:08x}, main program {:08x} at {:#x} for revision {revision:#04x}; PWR_WELL_CTL1/2 and DC_STATE_EN were {:08x?}, now {:08x} {:08x} {:08x}",
+                    "tgl-display: DMC package {:08x}, main program {:08x} at {:#x} for revision {revision:#04x}, DDI select {:#x}; PWR_WELL_CTL1/2 and DC_STATE_EN were {:08x?}, now {:08x} {:08x} {:08x}, AUDIO_PIN_BUF_CTL {:08x}; pipe A frame {}",
                     package.version,
                     program.version,
                     program.start,
+                    allowed.ddi,
                     allowed.before,
                     regs.read32(toyos_tgl_display::regs::PWR_WELL_CTL1),
                     regs.read32(toyos_tgl_display::regs::PWR_WELL_CTL2),
                     regs.read32(toyos_tgl_display::regs::DC_STATE_EN),
+                    regs.read32(toyos_tgl_display::regs::AUDIO_PIN_BUF_CTL),
+                    regs.read32(toyos_tgl_display::regs::PIPE_FRMCNT_A),
                 ),
                 Err(why) => say!("tgl-display: DC5 and DC6 stay disallowed — {why}"),
             }

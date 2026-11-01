@@ -77,6 +77,12 @@ pub const WM_ENABLE: u32 = 1 << 31;
 pub const TRANS_DDI_FUNC_CTL_A: usize = 0x6_0400;
 pub const DDI_SELECT_SHIFT: u32 = 27;
 pub const DDI_SELECT: u32 = 0xF;
+pub const DDI_A: u32 = 1;
+
+/// AUDIO_PIN_BUF_CTL, 48414h: bit 31 Enable, the display audio pins' I/O
+/// buffers.
+pub const AUDIO_PIN_BUF_CTL: usize = 0x4_8414;
+pub const AUDIO_BUFFER_ENABLE: u32 = 1 << 31;
 
 /// VGA_CONTROL, 41000h: bit 31 VGA Display Disable.
 pub const VGA_CONTROL: usize = 0x4_1000;

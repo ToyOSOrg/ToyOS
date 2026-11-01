@@ -11,7 +11,8 @@
 //! memory reach the latencies the levels name. [`allow_display_c6`] loads the
 //! DMC's program ([`dmc`]), powers down the wells the scan-out does not use and
 //! lets the engine enter DC5 and DC6. Anything it does not understand of the
-//! firmware's state is refused by name and left as found.
+//! firmware's state is refused by name. A refusal before a write leaves the
+//! state as found, and no refusal leaves DC6 allowed.
 
 #![no_std]
 #![forbid(unsafe_code)]
@@ -58,7 +59,8 @@ const POWER_WELL_NANOS: u64 = 20_000;
 /// display on eDP").
 const UNUSED_WELLS: [u32; 3] = [5, 4, 3];
 
-/// Why the firmware's state was left as found.
+/// Why this driver stopped short; [`keep_memory_low_power`] and
+/// [`allow_display_c6`] say how far each got.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Refusal {
     /// The firmware's state is not one pipe A plane scanning out alone.
@@ -87,8 +89,10 @@ pub enum Refusal {
     Revision(u8),
     /// The DMC package has no main program for the display stepping.
     NoProgram(dmc::Stepping),
-    /// Transcoder A drives a DDI outside PG1 (TRANS_DDI_FUNC_CTL_A's DDI
-    /// Select), so powering down PG3 would end the scan-out.
+    /// Transcoder A drives another DDI than A (TRANS_DDI_FUNC_CTL_A's DDI
+    /// Select, 1h for A). Vol 12 "Sequence to Allow DC5 or DC6": "Ports A
+    /// IO/PHY programming is preserved when DC6 is enabled. The programming
+    /// for other combo PHY ports may not be."
     Port(u32),
     /// VGA display is enabled, which needs PG3.
     Vga,
@@ -119,7 +123,7 @@ impl fmt::Display for Refusal {
             Self::NoProgram(s) => {
                 write!(f, "the DMC package has no main program for display stepping {}{}", s.letter as char, s.digit as char)
             }
-            Self::Port(ddi) => write!(f, "transcoder A drives DDI select {ddi:#x}, outside PG1"),
+            Self::Port(ddi) => write!(f, "transcoder A drives DDI select {ddi:#x}, not DDI A, whose PHY alone DC6 preserves"),
             Self::Vga => write!(f, "VGA display is enabled"),
             Self::NotStored { at, wrote, read } => {
                 write!(f, "the CSR storage at {at:#x} reads {read:#010x}, not the {wrote:#010x} written")
@@ -317,24 +321,26 @@ pub fn keep_memory_low_power<R: Registers, C: Clock>(regs: &R, clock: &C) -> Res
 pub struct Allowed {
     /// PWR_WELL_CTL1, PWR_WELL_CTL2 and DC_STATE_EN as the firmware left them.
     pub before: [u32; 3],
+    /// TRANS_DDI_FUNC_CTL_A's DDI Select.
+    pub ddi: u32,
 }
 
 /// Vol 12 "Sequence to Allow DC5 or DC6", up to DC6, under the firmware's
-/// scan-out on pipe A, which [`scanout`] found alone.
+/// eDP scan-out on pipe A and DDI A.
 ///
 /// DC states are disallowed first, since a switch between DC5 and DC6 goes
 /// through "Disable" and a reload. Then `program` is loaded, the wells the
 /// scan-out does not use are powered down and DC6 is allowed. With the pipe
-/// lit, Vol 12 lets the engine enter DC5 only while PSR is active.
-pub fn allow_display_c6<R: Registers, C: Clock>(
-    regs: &R,
-    clock: &C,
-    _alone: &Scanout,
-    program: &dmc::Program<'_>,
-) -> Result<Allowed, Refusal> {
+/// lit, Vol 12 lets the engine enter DC5 only while PSR is active. A DDI AUX
+/// transaction or a mode set must disallow DC5 and DC6 around it (the same
+/// section).
+///
+/// The refusals before the load write nothing. One after it leaves DC states
+/// disallowed, and whatever wells were already withdrawn stay so.
+pub fn allow_display_c6<R: Registers, C: Clock>(regs: &R, clock: &C, program: &dmc::Program<'_>) -> Result<Allowed, Refusal> {
     let before = [regs::PWR_WELL_CTL1, regs::PWR_WELL_CTL2, regs::DC_STATE_EN].map(|at| regs.read32(at));
     let ddi = (regs.read32(regs::TRANS_DDI_FUNC_CTL_A) >> regs::DDI_SELECT_SHIFT) & regs::DDI_SELECT;
-    if !(1..=3).contains(&ddi) {
+    if ddi != regs::DDI_A {
         return Err(Refusal::Port(ddi));
     }
     if regs.read32(regs::VGA_CONTROL) & regs::VGA_DISPLAY_DISABLE == 0 {
@@ -348,14 +354,23 @@ pub fn allow_display_c6<R: Registers, C: Clock>(
     for well in UNUSED_WELLS {
         power_down(regs, clock, well)?;
     }
+    // Vol 12 "Audio Bios Programming Sequence": "GFX driver disables
+    // AUDIO_PIN_BUF_CTL bit 31 after turning off the power well for audio
+    // (PG3)".
+    let pins = regs.read32(regs::AUDIO_PIN_BUF_CTL);
+    if pins & regs::AUDIO_BUFFER_ENABLE != 0 {
+        regs.write32(regs::AUDIO_PIN_BUF_CTL, pins & !regs::AUDIO_BUFFER_ENABLE);
+    }
     regs.write32(regs::DC_PREREQUISITE, regs.read32(regs::DC_PREREQUISITE) | regs::DC_PREREQUISITE_BITS);
     let dc = regs.read32(regs::DC_STATE_EN);
     regs.write32(regs::DC_STATE_EN, dc & !regs::DYNAMIC_DC_STATE | regs::UP_TO_DC6);
-    Ok(Allowed { before })
+    Ok(Allowed { before, ddi })
 }
 
 /// Power well `well`'s requests withdrawn from both instances Vol 2c names,
-/// and its state awaited (Vol 12 "Power Well" disable sequence).
+/// and its state awaited (Vol 12 "Power Well" disable sequence). The verdict
+/// past the deadline is a read made after it, so a wait preempted past the
+/// deadline is not called a held well.
 fn power_down<R: Registers, C: Clock>(regs: &R, clock: &C, well: u32) -> Result<(), Refusal> {
     let request = regs::power_well_request(well);
     for ctl in [regs::PWR_WELL_CTL1, regs::PWR_WELL_CTL2] {
@@ -365,10 +380,13 @@ fn power_down<R: Registers, C: Clock>(regs: &R, clock: &C, well: u32) -> Result<
         }
     }
     let deadline = clock.nanos() + POWER_WELL_NANOS;
-    while regs.read32(regs::PWR_WELL_CTL2) & regs::power_well_state(well) != 0 {
-        if clock.nanos() > deadline {
+    loop {
+        let late = clock.nanos() > deadline;
+        if regs.read32(regs::PWR_WELL_CTL2) & regs::power_well_state(well) == 0 {
+            return Ok(());
+        }
+        if late {
             return Err(Refusal::PowerWellHeld(well));
         }
     }
-    Ok(())
 }

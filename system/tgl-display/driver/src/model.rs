@@ -42,6 +42,12 @@ pub struct Engine {
     pub held_wells: Cell<u32>,
     /// The program storage drops every write, as a window that misses it.
     pub storage_drops: Cell<bool>,
+    /// The driver is preempted once after its first read of a well's state
+    /// following a withdrawal: that read still shows the well on, and the
+    /// clock reading after it is 30 µs later. The well is off by then.
+    pub preempted: Cell<bool>,
+    stale: Cell<Option<u32>>,
+    jump: Cell<u64>,
 }
 
 impl Engine {
@@ -66,6 +72,8 @@ impl Engine {
         // in DP SST is assumed, and read on the bench.
         r.insert(regs::VGA_CONTROL, regs::VGA_DISPLAY_DISABLE);
         r.insert(regs::TRANS_DDI_FUNC_CTL_A, 1 << 31 | 1 << regs::DDI_SELECT_SHIFT | 0b010 << 24);
+        // Enabled, which the driver clears after PG3; the scout did not read it.
+        r.insert(regs::AUDIO_PIN_BUF_CTL, regs::AUDIO_BUFFER_ENABLE);
         r.insert(crate::dmc::WINDOW.start, 0x0c00_4040);
         r.insert(crate::dmc::WINDOW.start + 4, 0x0001_0002);
         let pcode = Pcode { latency_first: 0x3333_3300, latency_second: 0x706b_4633, sagv_block_us: 11, busy_reads: 3, error: 0 };
@@ -83,6 +91,9 @@ impl Engine {
             busy: Cell::new(0),
             held_wells: Cell::new(0),
             storage_drops: Cell::new(false),
+            preempted: Cell::new(false),
+            stale: Cell::new(None),
+            jump: Cell::new(0),
         }
     }
 
@@ -117,6 +128,9 @@ impl Engine {
     /// and a well a hidden requester holds stays on.
     fn request(&self, at: usize, value: u32) {
         const REQUESTS: u32 = 0x2AA;
+        if self.preempted.replace(false) {
+            self.stale.set(Some(self.get(regs::PWR_WELL_CTL2)));
+        }
         self.set(at, value & REQUESTS);
         let requested = self.get(regs::PWR_WELL_CTL1) | self.get(regs::PWR_WELL_CTL2);
         let state = (requested & REQUESTS) >> 1 | self.held_wells.get();
@@ -138,6 +152,12 @@ impl Registers for Engine {
     }
     fn read32(&self, at: usize) -> u32 {
         assert!(at.is_multiple_of(4) && at < regs::SPAN, "an access at {at:#x}");
+        if at == regs::PWR_WELL_CTL2 {
+            if let Some(stale) = self.stale.take() {
+                self.jump.set(30_000);
+                return stale;
+            }
+        }
         if at == regs::PIPE_FRMCNT_A {
             return self.frame_nanos.map_or(0x276, |period| (self.now.get() / period) as u32);
         }
@@ -180,7 +200,7 @@ impl Registers for Engine {
 /// Every reading of the clock is a microsecond later, so a busy wait ends.
 impl Clock for Engine {
     fn nanos(&self) -> u64 {
-        self.now.set(self.now.get() + 1_000);
+        self.now.set(self.now.get() + 1_000 + self.jump.take());
         self.now.get()
     }
     fn pause(&self, nanos: u64) {
