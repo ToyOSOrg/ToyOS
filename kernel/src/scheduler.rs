@@ -6,6 +6,7 @@
 
 use alloc::sync::Arc;
 
+use kernel::sched::affinity::CpuMask;
 use kernel::sched::hw::{CpuId, Machine, Nanos};
 use kernel::sched::task::{Refused, SafePoint, WaitClass, QUANTUM_NS};
 
@@ -115,6 +116,7 @@ pub fn enqueue_new(
     thread_pointer: u64,
     image: Option<alloc::sync::Arc<crate::process::UserImage>>,
     job: Arc<kernel::sched::job::Job>,
+    mask: CpuMask,
 ) -> (ThreadSched, CpuId) {
     driver::spawn(NewTask {
         id,
@@ -124,6 +126,7 @@ pub fn enqueue_new(
         thread_pointer,
         job,
         image,
+        mask,
     })
 }
 

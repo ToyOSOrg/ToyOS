@@ -12,6 +12,7 @@
 
 #![deny(unsafe_code)]
 
+pub mod affinity;
 pub mod cpu;
 pub mod eevdf;
 pub mod hw;

@@ -1424,3 +1424,41 @@ fn a_stopped_cpu_stops_taking_work() {
         scenarios::STOPPED_CPU_PROGRAMS,
     );
 }
+
+/// **Masks hold under stealing**: pinned, partial and moving masks on four
+/// CPUs with every thread spawned on cpu0, across seeds, with the core's own
+/// check that no CPU runs a task outside its mask after every pass.
+#[test]
+fn masked_threads_run_only_where_their_masks_name() {
+    const SEEDS: u64 = 40;
+    let scenario = scenarios::masked_steals(scenarios::MASKED_STEALS_PARTIAL);
+    sweep(&scenario, SEEDS, |outcome| {
+        assert!(outcome.migrations > 0, "nothing was ever moved, so no mask was tested: {}", outcome.report());
+    });
+}
+
+/// **What a partial mask costs the push, measured** rather than bounded: the
+/// push wakes a sleeper for surplus without asking whose mask names it, so a
+/// queued thread no sleeper may take wakes one for nothing. The same load
+/// with every CPU allowed is the comparison. Prints both; asserts only that
+/// each run passed.
+///
+/// `cargo test --release -p kernel-sim --test policy masked -- --nocapture`
+#[test]
+fn the_push_cost_of_a_partial_mask_is_measured() {
+    const SEEDS: u64 = 40;
+    let mean = |partial: u64| {
+        let (mut kicks, mut elapsed) = (0u64, 0u64);
+        sweep(&scenarios::masked_steals(partial), SEEDS, |outcome| {
+            kicks += outcome.kicks;
+            elapsed += outcome.elapsed;
+        });
+        (kicks / SEEDS, elapsed / SEEDS)
+    };
+    let (partial_kicks, partial_ns) = mean(scenarios::MASKED_STEALS_PARTIAL);
+    let (any_kicks, any_ns) = mean(scenarios::MASKED_STEALS_ANY);
+    println!(
+        "masked_steals over {SEEDS} seeds: partial mask {partial_kicks} kicks in {partial_ns} ns, \
+         every CPU {any_kicks} kicks in {any_ns} ns"
+    );
+}
