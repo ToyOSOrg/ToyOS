@@ -247,8 +247,8 @@ mod tests {
     }
 
     /// x86-64's two descending loops, each called directly so the one this
-    /// host's `copy_forward` does not take is checked too; AVX's only where
-    /// the host has it.
+    /// host's `copy_forward` does not take is checked too, at every
+    /// destination offset in a store; AVX's only where the host has it.
     #[cfg(target_arch = "x86_64")]
     #[test]
     fn both_descending_loops_agree() {
@@ -259,8 +259,11 @@ mod tests {
         }
         for (name, copy) in loops {
             for n in (64..300).chain([511, 512, 513, 4095, 4096]) {
-                for (distance, at) in [(1, 0), (16, 16), (63, 1), (511, 63)] {
-                    agrees_at(name, copy, distance, at, n);
+                // Every destination offset in a 32-byte store, from two source offsets.
+                for distance in 1..=32 {
+                    for at in [0, 17] {
+                        agrees_at(name, copy, distance, at, n);
+                    }
                 }
             }
         }

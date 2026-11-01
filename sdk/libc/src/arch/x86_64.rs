@@ -47,7 +47,7 @@ pub(crate) unsafe fn copy_forward(dest: *mut u8, src: *const u8, n: usize) {
 unsafe fn copy_short_alias(dest: *mut u8, src: *const u8, n: usize) {
     // SAFETY: `n` is at least 64; down only between disjoint ranges.
     unsafe {
-        if (dest as usize).abs_diff(src as usize) < n {
+        if (n > ROUTED_MOST && has_erms()) || (dest as usize).abs_diff(src as usize) < n {
             movsb(dest, src, n);
         } else if has_avx() {
             copy_down_avx(dest, src, n);
@@ -73,52 +73,89 @@ unsafe fn movsb(dest: *mut u8, src: *const u8, n: usize) {
 /// The distance under which [`copy_forward`] copies highest first.
 const SHORT_ALIAS: usize = 512;
 
+/// The longest copy [`copy_forward`] copies highest first where `rep movsb`
+/// is a fast string at every length (ERMS): a longer one is bound by memory
+/// bandwidth, where its stores, which need not read a line before writing it
+/// whole (Intel 64 and IA-32 Architectures Optimization Reference Manual,
+/// "Enhanced REP MOVSB and STOSB"), outrun the loop's.
+const ROUTED_MOST: usize = 1 << 20;
+
 /// Whether this CPU runs AVX and its system saves the YMM state: CPUID.1:ECX
 /// AVX (bit 28) and OSXSAVE (bit 27), and XCR0's SSE and AVX bits (1 and 2).
-/// Asked once; a racing first call asks twice and stores the same answer.
 pub(crate) fn has_avx() -> bool {
-    use core::sync::atomic::{AtomicU8, Ordering};
-    static AVX: AtomicU8 = AtomicU8::new(0);
-    match AVX.load(Ordering::Relaxed) {
-        1 => false,
-        2 => true,
-        _ => {
-            let ecx = core::arch::x86_64::__cpuid(1).ecx;
-            let avx = ecx & (1 << 28) != 0 && ecx & (1 << 27) != 0 && {
-                let (lo, _hi): (u32, u32);
-                // SAFETY: OSXSAVE says XGETBV exists; XCR0 is readable at every privilege level.
-                unsafe { core::arch::asm!("xgetbv", in("ecx") 0, out("eax") lo, out("edx") _hi, options(nomem, nostack, preserves_flags)) };
-                lo & 0b110 == 0b110
-            };
-            AVX.store(if avx { 2 } else { 1 }, Ordering::Relaxed);
-            avx
-        }
-    }
+    features() & AVX != 0
 }
 
-/// Copy `n` bytes, at least 64, between disjoint ranges, 64 bytes a step by
-/// SSE2 from the top; the lowest 64 are loaded first and stored last, so the
-/// last step may overlap them.
+/// Whether `rep movsb` is a fast string at any length: ERMS, CPUID.(7,0):EBX
+/// bit 9.
+fn has_erms() -> bool {
+    features() & ERMS != 0
+}
+
+const AVX: u8 = 1 << 0;
+const ERMS: u8 = 1 << 1;
+const ASKED: u8 = 1 << 7;
+
+/// The CPU's answers [`has_avx`] and [`has_erms`] read, asked once; a racing
+/// first call asks twice and stores the same answer.
+fn features() -> u8 {
+    use core::sync::atomic::{AtomicU8, Ordering};
+    static FEATURES: AtomicU8 = AtomicU8::new(0);
+    let known = FEATURES.load(Ordering::Relaxed);
+    if known & ASKED != 0 {
+        return known;
+    }
+    let ecx = core::arch::x86_64::__cpuid(1).ecx;
+    let avx = ecx & (1 << 28) != 0 && ecx & (1 << 27) != 0 && {
+        let (lo, _hi): (u32, u32);
+        // SAFETY: OSXSAVE says XGETBV exists; XCR0 is readable at every privilege level.
+        unsafe { core::arch::asm!("xgetbv", in("ecx") 0, out("eax") lo, out("edx") _hi, options(nomem, nostack, preserves_flags)) };
+        lo & 0b110 == 0b110
+    };
+    let erms = core::arch::x86_64::__cpuid_count(7, 0).ebx & (1 << 9) != 0;
+    let answer = ASKED | if avx { AVX } else { 0 } | if erms { ERMS } else { 0 };
+    FEATURES.store(answer, Ordering::Relaxed);
+    answer
+}
+
+/// Where a descending loop of `width`-byte stores starts: the offset of the
+/// last `width` boundary of the destination at or below its end. The bytes
+/// above it go in one unaligned 64-byte store; every store below it is
+/// aligned, since a store split across two lines costs both benches' cores
+/// as much as the stall this loop avoids.
+fn aligned_end(dest: *mut u8, n: usize, width: usize) -> usize {
+    ((dest as usize + n) & !(width - 1)) - dest as usize
+}
+
+/// Copy `n` bytes, at least 64, between disjoint ranges by SSE2 from the
+/// top, 64 bytes a step from [`aligned_end`]: the first and last 64 bytes are
+/// loaded first and stored last, so the steps may overlap them.
 pub(crate) unsafe fn copy_down_sse2(dest: *mut u8, src: *const u8, n: usize) {
     unsafe {
         core::arch::asm!(
             "movups xmm4, [{s}]", "movups xmm5, [{s} + 16]", "movups xmm6, [{s} + 32]", "movups xmm7, [{s} + 48]",
+            "movups xmm8, [{s} + {n} - 64]", "movups xmm9, [{s} + {n} - 48]",
+            "movups xmm10, [{s} + {n} - 32]", "movups xmm11, [{s} + {n} - 16]",
             "2:",
             "cmp {p}, 64",
             "jbe 3f",
             "sub {p}, 64",
             "movups xmm0, [{s} + {p}]", "movups xmm1, [{s} + {p} + 16]",
             "movups xmm2, [{s} + {p} + 32]", "movups xmm3, [{s} + {p} + 48]",
-            "movups [{d} + {p}], xmm0", "movups [{d} + {p} + 16], xmm1",
-            "movups [{d} + {p} + 32], xmm2", "movups [{d} + {p} + 48], xmm3",
+            "movaps [{d} + {p}], xmm0", "movaps [{d} + {p} + 16], xmm1",
+            "movaps [{d} + {p} + 32], xmm2", "movaps [{d} + {p} + 48], xmm3",
             "jmp 2b",
             "3:",
+            "movups [{d} + {n} - 64], xmm8", "movups [{d} + {n} - 48], xmm9",
+            "movups [{d} + {n} - 32], xmm10", "movups [{d} + {n} - 16], xmm11",
             "movups [{d}], xmm4", "movups [{d} + 16], xmm5", "movups [{d} + 32], xmm6", "movups [{d} + 48], xmm7",
             s = in(reg) src,
             d = in(reg) dest,
-            p = inout(reg) n => _,
+            n = in(reg) n,
+            p = inout(reg) aligned_end(dest, n, 16) => _,
             out("xmm0") _, out("xmm1") _, out("xmm2") _, out("xmm3") _,
             out("xmm4") _, out("xmm5") _, out("xmm6") _, out("xmm7") _,
+            out("xmm8") _, out("xmm9") _, out("xmm10") _, out("xmm11") _,
             options(nostack),
         );
     }
@@ -135,19 +172,22 @@ pub(crate) unsafe fn copy_down_avx(dest: *mut u8, src: *const u8, n: usize) {
     unsafe {
         core::arch::asm!(
             "vmovdqu ymm2, [{s}]", "vmovdqu ymm3, [{s} + 32]",
+            "vmovdqu ymm4, [{s} + {n} - 64]", "vmovdqu ymm5, [{s} + {n} - 32]",
             "2:",
             "cmp {p}, 64",
             "jbe 3f",
             "sub {p}, 64",
             "vmovdqu ymm0, [{s} + {p}]", "vmovdqu ymm1, [{s} + {p} + 32]",
-            "vmovdqu [{d} + {p}], ymm0", "vmovdqu [{d} + {p} + 32], ymm1",
+            "vmovdqa [{d} + {p}], ymm0", "vmovdqa [{d} + {p} + 32], ymm1",
             "jmp 2b",
             "3:",
+            "vmovdqu [{d} + {n} - 64], ymm4", "vmovdqu [{d} + {n} - 32], ymm5",
             "vmovdqu [{d}], ymm2", "vmovdqu [{d} + 32], ymm3",
             "vzeroupper",
             s = in(reg) src,
             d = in(reg) dest,
-            p = inout(reg) n => _,
+            n = in(reg) n,
+            p = inout(reg) aligned_end(dest, n, 32) => _,
             // `vzeroupper` clears every YMM register's upper half.
             out("ymm0") _, out("ymm1") _, out("ymm2") _, out("ymm3") _,
             out("ymm4") _, out("ymm5") _, out("ymm6") _, out("ymm7") _,
