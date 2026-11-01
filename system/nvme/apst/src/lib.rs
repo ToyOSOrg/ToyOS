@@ -35,8 +35,8 @@ pub const STATES: usize = 32;
 pub const EXIT_BOUND_US: u64 = 100_000;
 
 /// Idle time before a transition, per unit of its round-trip latency: the
-/// drive spends at most 1/50 of an idle period waking from it.
-pub const IDLE_PER_LATENCY: u64 = 50;
+/// drive spends at most 1/500 of an idle period waking from it.
+pub const IDLE_PER_LATENCY: u64 = 500;
 
 /// ITPT's width: bits 31:08 of an entry, in milliseconds (Figure 393).
 const ITPT_MAX_MS: u64 = (1 << 24) - 1;
@@ -215,9 +215,9 @@ mod tests {
     fn every_operational_state_steps_to_the_shallowest_admitted_one_and_that_to_the_next() {
         let (_, s) = states(&identify(&client(), true)).unwrap();
         let plan = plan(&s);
-        let three = Some(Transition { to: 3, after_ms: 150 });
+        let three = Some(Transition { to: 3, after_ms: 1_500 });
         assert_eq!(plan[..3], [three, three, three]);
-        assert_eq!(plan[3], Some(Transition { to: 4, after_ms: 2_250 }));
+        assert_eq!(plan[3], Some(Transition { to: 4, after_ms: 22_500 }));
         assert_eq!(plan[4], None);
         assert!(plan[5..].iter().all(Option::is_none));
     }
@@ -234,7 +234,7 @@ mod tests {
         // Exactly the bound is within it.
         d[4] = descriptor(1, true, 10_000, 90_000, 0);
         let (_, s) = states(&identify(&d, true)).unwrap();
-        assert_eq!(super::plan(&s)[3], Some(Transition { to: 4, after_ms: 5_000 }));
+        assert_eq!(super::plan(&s)[3], Some(Transition { to: 4, after_ms: 50_000 }));
     }
 
     #[test]
@@ -262,16 +262,16 @@ mod tests {
         ];
         let (_, s) = states(&identify(&d, true)).unwrap();
         let plan = plan(&s);
-        assert_eq!(plan[0], Some(Transition { to: 2, after_ms: 750 }));
-        assert_eq!(plan[1], Some(Transition { to: 2, after_ms: 750 }));
+        assert_eq!(plan[0], Some(Transition { to: 2, after_ms: 7_500 }));
+        assert_eq!(plan[1], Some(Transition { to: 2, after_ms: 7_500 }));
     }
 
     #[test]
     fn the_table_encodes_itpt_in_bits_31_8_and_itps_in_7_3() {
         let (_, s) = states(&identify(&client(), true)).unwrap();
         let table = encode(&plan(&s));
-        assert_eq!(u64::from_le_bytes(table[0..8].try_into().unwrap()), (150 << 8) | (3 << 3));
-        assert_eq!(u64::from_le_bytes(table[24..32].try_into().unwrap()), (2_250 << 8) | (4 << 3));
+        assert_eq!(u64::from_le_bytes(table[0..8].try_into().unwrap()), (1_500 << 8) | (3 << 3));
+        assert_eq!(u64::from_le_bytes(table[24..32].try_into().unwrap()), (22_500 << 8) | (4 << 3));
         assert!(table[32..].iter().all(|&b| b == 0));
     }
 
