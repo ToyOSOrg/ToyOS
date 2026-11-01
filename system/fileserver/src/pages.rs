@@ -549,6 +549,28 @@ impl<P: Pager> Files<P> {
         Ok(unwritten)
     }
 
+    /// An fsync: `file`'s pages to the volume, and every file's the volume's
+    /// commit carries, then the commit. A carried file whose pages would not
+    /// go refuses it, since its entry would name blocks without its bytes.
+    pub fn fsync(&mut self, volume: &mut dyn Volume, file: Option<(u64, Node)>) -> Result<(), Error> {
+        let named = file.map(|(identity, _)| identity);
+        let owed: Vec<u64> = self
+            .files
+            .iter()
+            .filter(|(id, f)| f.dirty.is_some() && (Some(**id) == named || volume.carried(f.node)))
+            .map(|(id, _)| *id)
+            .collect();
+        for id in owed {
+            if let Err(e) = self.write_back(volume, id) {
+                if Some(id) != named {
+                    println!("fileserver: file {id}'s pages would not go to the volume ({e:?}); an fsync of another is refused");
+                }
+                return Err(e);
+            }
+        }
+        volume.commit(file.map(|(_, node)| node))
+    }
+
     /// What the pager's objects asked.
     pub fn notice(&mut self, volume: &mut dyn Volume, notice: Notice) {
         match notice {

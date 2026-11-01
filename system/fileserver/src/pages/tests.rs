@@ -555,3 +555,73 @@ fn a_write_of_many_calls_is_read_whole_or_not_at_all() {
     assert!(files.write(&mut v, at.1, at.0, 7 * page as u64 + 50, &pattern(3 * page, 12)).is_err());
     assert!(fake.0.borrow().held.is_empty(), "a refused write was left under way");
 }
+
+/// A volume whose every block holds what an earlier tenant left, 0xAB.
+fn stale_volume() -> DataVolume<Ram> {
+    let disk = Ram::new(4096);
+    let stale = vec![[0xAB; toyos_blockdev::BLOCK]; 4096];
+    toyos_blockdev::block_on(toyos_blockdev::BlockDev::write(&disk, 0, &stale), || ()).unwrap();
+    DataVolume::format(disk, 256, &["home"], clock).unwrap()
+}
+
+/// `v` stopped now and mounted again: what its last commit left.
+fn after_a_stop(v: DataVolume<Ram>) -> DataVolume<Ram> {
+    match DataVolume::probe(v.stopped(), 256, &["home"], clock) {
+        crate::data::Probed::Mounted(v) => v,
+        _ => panic!("the volume does not mount after a stop"),
+    }
+}
+
+/// An fsync makes its own file durable, and leaves another file's write
+/// over blocks the volume already named in the object, unwritten: nothing
+/// the commit makes durable names those blocks anew.
+#[test]
+fn an_fsync_makes_its_file_durable_and_no_other_files_overwrite() {
+    let page = PAGE as usize;
+    let mut v = stale_volume();
+    let mut files = Files::new(Some(Fake::new(64, 16)));
+    let b = open(&mut files, &mut v, "home/b");
+    files.write(&mut v, b.1, b.0, 0, &pattern(2 * page, 1)).unwrap();
+    assert_eq!(files.sync(&mut v).unwrap(), []);
+    let a = open(&mut files, &mut v, "home/a");
+    files.write(&mut v, a.1, a.0, 0, &pattern(2 * page, 2)).unwrap();
+    files.write(&mut v, b.1, b.0, 0, &pattern(2 * page, 3)).unwrap();
+
+    files.fsync(&mut v, Some((a.1, a.0))).unwrap();
+    assert!(files.files[&b.1].dirty.is_some(), "the other file's overwrite was written back");
+    let mut v = after_a_stop(v);
+    assert!(on_volume(&mut v, "home/a") == pattern(2 * page, 2), "the fsynced file is not as written");
+    assert!(on_volume(&mut v, "home/b") == pattern(2 * page, 1), "the other file's overwrite reached the volume");
+}
+
+/// A file whose blocks the commit holds as taken is carried by an fsync of
+/// another: its pages reach the volume first and its entry goes with them,
+/// so after a stop it names no block that holds an earlier tenant's bytes,
+/// and no block is held that nothing names.
+#[test]
+fn an_fsync_writes_first_the_pages_of_every_file_its_commit_carries() {
+    let page = PAGE as usize;
+    let mut v = stale_volume();
+    let mut files = Files::new(Some(Fake::new(64, 16)));
+    let a = open(&mut files, &mut v, "home/a");
+    let c = open(&mut files, &mut v, "home/c");
+    files.write(&mut v, a.1, a.0, 0, &pattern(page, 4)).unwrap();
+    files.write(&mut v, c.1, c.0, 0, &pattern(3 * page, 5)).unwrap();
+
+    files.fsync(&mut v, Some((a.1, a.0))).unwrap();
+    let mut v = after_a_stop(v);
+    assert!(on_volume(&mut v, "home/a") == pattern(page, 4), "the fsynced file is not as written");
+    let carried = on_volume(&mut v, "home/c");
+    assert!(carried == pattern(3 * page, 5), "the carried file reads {} bytes, not its own", carried.len());
+}
+
+/// A directory's fsync commits the names every change already wrote.
+#[test]
+fn a_directorys_fsync_makes_a_new_name_durable() {
+    let mut v = stale_volume();
+    let mut files = Files::new(Some(Fake::new(64, 16)));
+    v.mkdir("home/d").unwrap();
+    files.fsync(&mut v, None).unwrap();
+    let mut v = after_a_stop(v);
+    assert_eq!(v.lstat("home/d").map(|m| m.kind), Ok(crate::volume::Kind::Dir));
+}
