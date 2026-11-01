@@ -9,7 +9,7 @@ start = ["logkeeper", "diskserver", "fileserver", "netstack", "test-runner"]
 [programs.logkeeper]
 service = true
 syscap = ["logread"]
-serves = ["log"]
+serves = ["log", "log-carrier"]
 
 [programs.netstack]
 service = true
@@ -44,3 +44,8 @@ pager = true
 restart = true
 roles = ["data", "log", "boot"]
 receives = ["block"]
+
+# The virtio-serial driver, for the VM's console alone: this image runs no agent.
+[programs.virtio-console]
+drives = ["pci:07:80:00/1af4:1043"]
+receives = ["log-carrier"]

@@ -13,9 +13,9 @@ half that is not: `KernelSlice` is `Copy` and carries no lifetime, so a copy
 taken while the `PageAlloc`/`OwnedAlloc` is alive stays nameable after it has
 been dropped and its pages reissued.
 
-`mm::Dma` is the shape that answers it: `Dma<'pool>` borrows the pool it came
-out of, and `DmaPool::leak` is the only way to reach `'static`. The same
-signature here would be `KernelSlice<'alloc>`.
+The shape that answers it is a view that borrows what it came out of, with
+one named way to reach `'static` — as the deleted `mm::Dma<'pool>` did with
+`DmaPool::leak`: `KernelSlice<'alloc>`.
 
 What makes it more than a `git sed`: `elf::cache` holds a `cached_image:
 KernelSlice` over pages the cache owns and hands it to every process that
@@ -33,6 +33,5 @@ reproduction.
 to promote, and a memory-safety residual is the worst thing to lose to a wrong
 fold). `KernelSlice` being `Copy` with no lifetime means nothing but hand-checking
 stops a copy naming pages that have been reissued — and the hand-check was done
-once, in 2026-08-22, against holders that have moved since. `mm::Dma<'pool>` is
-the shape that answers it. Owed by whoever writes the four holders' lifetimes
+once, in 2026-08-22, against holders that have moved since. Owed by whoever writes the four holders' lifetimes
 down: `elf::cache`'s `cached_image`, `LoadedLib`, `TlsModule` and `UserStack`.

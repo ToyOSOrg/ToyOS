@@ -401,7 +401,6 @@ toyos-abi = { path = "../sdk/abi" }
 toyos-proclife = { path = "proclife" }
 toyos-acpi = { path = "../lib/acpi" }
 toyos-amdvi = { path = "amdvi" }
-toyos-dma = { path = "dma" }
 toyos-blackbox = { path = "../lib/blackbox" }
 toyos-bootmap = { path = "../lib/bootmap" }
 toyos-elf = { path = "../lib/elf" }
@@ -410,6 +409,7 @@ toyos-its = { path = "its" }
 toyos-microcode = { path = "../lib/microcode" }
 toyos-pci = { path = "pci" }
 toyos-phys = { path = "phys" }
+toyos-register = { path = "register" }
 toyos-smmu = { path = "smmu" }
 toyos-tco = { path = "../lib/tco" }
 toyos-tsc = { path = "../lib/tsc" }

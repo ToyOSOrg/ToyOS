@@ -361,6 +361,8 @@ pub const SYS_PAGED_OP: u64 = 157;
 pub const SYS_PAGED_NOTICES: u64 = 158;
 /// Take a connection's next whole message. See [`message_recv`].
 pub const SYS_MESSAGE_RECV: u64 = 159;
+/// Whether a console holder carries the log off the machine. See [`console_carried`].
+pub const SYS_CONSOLE_CARRIED: u64 = 160;
 
 /// Bins in the per-process syscall profile — one for every number this ABI
 /// issues, and one at the end for every number it does not.
@@ -368,13 +370,13 @@ pub const SYS_MESSAGE_RECV: u64 = 159;
 /// **The profile's parts sum to its total, and that is the whole requirement.**
 /// A bin array narrower than the ABI reaches drops calls out of the line while
 /// the total goes on counting them.
-pub const SYSCALL_PROFILE_BINS: usize = 161;
+pub const SYSCALL_PROFILE_BINS: usize = 162;
 
 /// Where a number this ABI does not issue is counted. Merging is a degradation
 /// a reader can see in the line; dropping is one nobody can.
 pub const SYSCALL_PROFILE_OTHER: usize = SYSCALL_PROFILE_BINS - 1;
 
-const _: () = assert!(SYS_MESSAGE_RECV < SYSCALL_PROFILE_OTHER as u64);
+const _: () = assert!(SYS_CONSOLE_CARRIED < SYSCALL_PROFILE_OTHER as u64);
 
 pub const WNOHANG: u64 = 1;
 /// Every bit `SYS_PROCESS_WAIT`'s flag word defines; a wait carrying another
@@ -2298,6 +2300,19 @@ pub unsafe fn shm_map(shm: RawHandle, prot: VmProt) -> Result<*mut u8, SyscallEr
 /// As [`dup`]'s: the new handle reaches `shm`'s pages with its rights.
 pub unsafe fn shm_sub(shm: RawHandle, offset: u64, len: u64) -> Result<RawHandle, SyscallError> {
     check(syscall(SYS_SHM_SUB, shm.0 as u64, offset, len, 0)).map(|v| RawHandle(v as u32))
+}
+
+/// Say whether the holder of `console` carries the machine's log off it by
+/// another channel, so the kernel puts on the console UART only a fatal
+/// path's and the stop's lines; the console's end lets go of it.
+///
+/// Needs [`Rights::WRITE`]. `AlreadyExists` while another holder carries it,
+/// and `NotSupported` once a fatal path or the stop has given the log to the
+/// UART for good; letting go always answers `Ok`.
+///
+/// [`Rights::WRITE`]: crate::handle::Rights::WRITE
+pub fn console_carried(console: RawHandle, elsewhere: bool) -> Result<(), SyscallError> {
+    check(syscall(SYS_CONSOLE_CARRIED, console.0 as u64, elsewhere as u64, 0, 0)).map(drop)
 }
 
 /// The machine's [header](SYSINFO_HEADER_SIZE), then as much of the process

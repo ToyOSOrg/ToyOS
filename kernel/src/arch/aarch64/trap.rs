@@ -137,6 +137,7 @@ extern "C" fn dispatch(frame: &mut Frame, entry: u64) {
 /// EL1, or an FIQ or SError from anywhere. The panic handler's branch puts it
 /// on the console and the panel.
 fn exception(frame: &Frame, entry: u64) -> ! {
+    crate::log::console::on_the_uart_for_good();
     let entry = Entry(entry);
     log!("KERNEL PANIC: {entry}: {} (ESR={:#010x})", class_name(frame.esr), frame.esr);
     log!("  elr={:#018x}  far={:#018x}  spsr={:#010x}", frame.elr, frame.far, frame.spsr);
@@ -337,6 +338,10 @@ fn user_abort(frame: &mut Frame) {
 fn user_fatal(frame: &Frame) -> ! {
     let prev = percpu::swap_fault_state(CpuFaultState::Fatal);
     let recursive = matches!(prev, CpuFaultState::Fatal | CpuFaultState::Panic);
+    // Before the first record of a report that halts the machine.
+    if recursive {
+        crate::log::console::on_the_uart_for_good();
+    }
     // First: a panic anywhere below reaches the panic handler as DOUBLE
     // PANIC, which can only report what was captured here.
     crate::panic::record_fault(class_name(frame.esr), frame.elr, frame.far, frame.esr);

@@ -16,8 +16,13 @@
 //! record the stop commits reaches the wire before a CPU is taken down. A
 //! holder that keeps it through [`LET_GO`] has the stop write over it, through
 //! the registers, from a position the stop alone walks.
+//!
+//! **A console holder may carry the log elsewhere** ([`carried_by`]): `klogd`
+//! says so on the wire and advances past what it would have written, until
+//! the holder lets go or its console ends. A fatal path and the stop take the
+//! log back to the UART for good ([`on_the_uart_for_good`]).
 
-use core::sync::atomic::{AtomicPtr, AtomicU64, AtomicU8, Ordering};
+use core::sync::atomic::{AtomicPtr, AtomicU64, Ordering};
 
 use alloc::sync::Arc;
 
@@ -102,7 +107,7 @@ pub fn post_wake() {
 }
 
 /// Put every committed record this machine has not yet spoken on the wire,
-/// where the wire is free: the boot before `klogd` runs, and a backend's
+/// where the wire is free: the boot before `klogd` runs, and the UART's
 /// arrival. Declining loses nothing: the record stays committed, and whoever
 /// holds the wire drains it too.
 pub fn drain_inline() {
@@ -192,6 +197,7 @@ impl StopWire {
 /// sync behind this is not spent behind a slow wire: the boot's last word
 /// drains it.
 pub fn take_for_the_stop(parkable: &Parkable) -> StopWire {
+    on_the_uart_for_good();
     // Armed before the ask: a release posted between the ask and the park is
     // one the park returns on at once.
     let armed = watch::arm(&RELEASED, 0, WaitClass::Other).expect("console: the stop holds no task to park");
@@ -240,10 +246,12 @@ pub fn drain_locked(guard: &mut BackendGuard) {
     drain_ordered(&Shards, &mut &DRAINED, &mut sink);
 }
 
-/// Advances the position with no backend: standing still, an armed waiter would find the same record on every rescan and spin.
-/// Safe to advance: shards keep every record for the panel regardless, and a backend arriving later rewinds this position whole.
-fn discard_pending() {
-    let mut sink = Discard;
+/// Advances the position with no UART, or while a holder carries the log
+/// (`carried`), until it no longer does: standing still, an armed waiter
+/// would find the same record on every rescan and spin. Safe to advance:
+/// shards keep every record for the panel and the log's reader regardless.
+fn discard_pending(carried: bool) {
+    let mut sink = Discard { carried };
     drain_ordered(&Shards, &mut &DRAINED, &mut sink);
 }
 
@@ -263,19 +271,34 @@ pub unsafe fn drain_bypassed(uart: &mut PanicUart) {
     drain_ordered(&Shards, &mut &DRAINED, &mut sink);
 }
 
-/// Which backend the drain has already spoken to, as `serial::Backend`'s discriminant.
-static SPOKEN_TO: AtomicU8 = AtomicU8::new(serial::Backend::None as u8);
+/// Who carries the log off this machine ([`kernel::carrier`]).
+static CARRIER: kernel::carrier::Carrier = kernel::carrier::Carrier::new();
 
-/// A backend has appeared or changed. Rewind and drain the boot again into the current one.
-/// Fires only on an actual change, and the wire targets one backend at a time, so the replay never duplicates onto the backend already spoken to.
-pub fn backend_changed() {
-    let now = serial::backend() as u8;
-    if SPOKEN_TO.swap(now, Ordering::Relaxed) != now {
-        DRAINED.rewind();
-    }
-    drain_inline();
-    // post_wake: the rewind above moved the position backwards under a parked `klogd`, with no new commit to wake it.
+/// What `klogd` puts on the wire as a holder takes the log off it, and as the
+/// log comes back to it: the UART's account of where its lines went.
+pub const CARRIED_ELSEWHERE: &str =
+    "console: the log is carried elsewhere from here; the UART takes the stop's and a fatal path's lines";
+pub const BACK_ON_THE_UART: &str = "console: the UART carries the log again";
+
+/// The console holder `holder` carries the log from now, and `klogd` advances
+/// past every record and queued line without putting it on the UART.
+pub fn carried_by(holder: usize) -> Result<(), kernel::carrier::Refused> {
+    CARRIER.carry(holder)?;
     post_wake();
+    Ok(())
+}
+
+/// `holder` no longer carries the log, by its word or by its console's end.
+pub fn released_by(holder: usize) {
+    if CARRIER.release(holder) {
+        post_wake();
+    }
+}
+
+/// Every record from here goes on the UART, whoever carried the log: a fatal
+/// path's, before its first record, and the stop's.
+pub fn on_the_uart_for_good() {
+    CARRIER.for_good();
 }
 
 /// Lines console holders queued for the wire. Fixed, because a console
@@ -492,12 +515,16 @@ impl RecordSink for Registers<'_> {
     }
 }
 
-/// Advances the position with no backend; no bytes are built.
-struct Discard;
+/// Advances the position; no bytes are built. Read after its record, so a
+/// fatal path's records, which follow its [`on_the_uart_for_good`], are
+/// never advanced past while a holder carried the log.
+struct Discard {
+    carried: bool,
+}
 
 impl RecordSink for Discard {
     fn put(&mut self, _record: &LogRecord) -> bool {
-        true
+        !self.carried || CARRIER.elsewhere()
     }
 }
 
@@ -517,17 +544,34 @@ extern "C" fn body(_arg: u64) -> ! {
 
     let parkable = scheduler::Parkable::at_entry();
     let handle = crate::sched::driver::current_handle().expect("klogd runs as a task");
+    // Whether the wire last said the log is carried elsewhere.
+    let mut said_elsewhere = false;
     loop {
         let (freed, asked) = if serial::has_console() {
             // A chunk of each per hold, with interrupts on throughout.
             let wire = serial::wire(&parkable);
             #[cfg(feature = "boot-actuators")]
             staged::hold_if_staged(&parkable, &handle);
-            drain_records(&wire, CHUNK, Yield::ToTheStop);
-            let freed = drain_queue(&wire, CHUNK as usize, Yield::ToTheStop);
-            (freed, let_wire_go(wire))
+            let elsewhere = CARRIER.elsewhere();
+            if elsewhere != said_elsewhere {
+                said_elsewhere = elsewhere;
+                crate::log!("{}", if elsewhere { CARRIED_ELSEWHERE } else { BACK_ON_THE_UART });
+                // The change's own line is on the wire before the UART goes
+                // quiet, so what the UART carried ends at it.
+                if elsewhere {
+                    drain_records(&wire, u64::MAX, Yield::ToTheStop);
+                }
+            }
+            if elsewhere {
+                discard_pending(true);
+                (discard_queue(), let_wire_go(wire))
+            } else {
+                drain_records(&wire, CHUNK, Yield::ToTheStop);
+                let freed = drain_queue(&wire, CHUNK as usize, Yield::ToTheStop);
+                (freed, let_wire_go(wire))
+            }
         } else {
-            discard_pending();
+            discard_pending(false);
             (discard_queue(), HANDOFF.asked())
         };
         if asked {
@@ -554,7 +598,7 @@ extern "C" fn body(_arg: u64) -> ! {
         // on one watch at a time. `post_wake` notifies this thread's word
         // directly; nothing else posts this watch but the thread's own end.
         let armed = watch::arm(handle.watch(), 0, WaitClass::Other).expect("klogd runs as a task");
-        // Safe with no backend because `discard_pending` still advances the position each pass.
+        // Safe with no UART, or with the log carried elsewhere, because `discard_pending` still advances the position each pass.
         if shard::arm_waiter(shard::log_waiter(), || {
             // The registration above forgot the staging's wake if it came
             // while this thread ran: the staging's own word is the recheck.

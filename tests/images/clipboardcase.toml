@@ -13,12 +13,13 @@
 assets = ["assets"]
 
 [boot]
-start = ["logkeeper", "compositor", "test-runner"]
+start = ["logkeeper", "compositor", "vdagent", "test-runner"]
 
 # `every_boot_config_runs_logkeeper` is what refuses a boot config without it.
 [programs.logkeeper]
 service = true
 syscap = ["logread"]
+serves = ["log-carrier"]
 
 [programs.compositor]
 service = true
@@ -26,10 +27,16 @@ serves = ["compositor", "prompt", "clipboard", "input", "display", "display-outp
 devices = ["pci:03:80:00/1af4:1050"]
 args = ["scale=2"]
 
-# One process per virtio-serial function the kernel does not drive: the
-# clipboard's channel, beside the kernel's console.
+# The agent, on the port the driver below hands it.
 [programs.vdagent]
-drives = ["pci:07:80:00/1af4:1043"]
+service = true
+serves = ["vdagent"]
 receives = ["clipboard"]
 
 [programs.test-runner]
+
+# The virtio-serial driver: the console's port to `logkeeper`, the clipboard's
+# to `vdagent`.
+[programs.virtio-console]
+drives = ["pci:07:80:00/1af4:1043"]
+receives = ["log-carrier", "vdagent"]

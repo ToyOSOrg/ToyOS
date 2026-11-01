@@ -408,6 +408,13 @@ impl Console {
     pub fn write_nonblock(&self, buf: &[u8]) -> Result<usize, toyos_abi::syscall::SyscallError> {
         self.0.write_nonblock(buf)
     }
+
+    /// Say whether this holder carries the log off the machine by another
+    /// channel (`toyos_abi::syscall::console_carried`); the console's end
+    /// lets go of it.
+    pub fn carry_elsewhere(&self, elsewhere: bool) -> Result<(), toyos_abi::syscall::SyscallError> {
+        toyos_abi::syscall::console_carried(self.0.raw(), elsewhere)
+    }
 }
 
 impl AsHandle for Console {

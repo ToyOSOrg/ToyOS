@@ -25,13 +25,13 @@ members = [
     "build/root",
     "kernel",
     "kernel/amdvi",
-    "kernel/dma",
     "kernel/gicv3",
     "kernel/its",
     "kernel/loom",
     "kernel/pci",
     "kernel/phys",
     "kernel/proclife",
+    "kernel/register",
     "kernel/sim",
     "kernel/smmu",
     "lib/acpi",
@@ -81,6 +81,7 @@ members = [
     "lib/userbound",
     "lib/vdagent",
     "lib/virtio",
+    "lib/virtio-serial",
     "lib/wallclock",
     "lib/wifi",
     "loader",
@@ -151,6 +152,7 @@ members = [
     "system/usbd",
     "system/usbd/xhci",
     "system/vdagent",
+    "system/virtio-console",
     "system/vdagent/bridge",
     "system/virtio-net",
     "system/wifi",
@@ -276,6 +278,7 @@ toyos-wifi = { path = "lib/wifi" }
 # QEMU's clipboard channel's port name, id and port count, so the launch reads
 # the declaration the guest's agent drives.
 toyos-vdagent = { path = "lib/vdagent" }
+toyos-virtio-serial = { path = "lib/virtio-serial" }
 # The watchdog's parameter name, so the gate over `kernel/src/params.rs` reads
 # the same constant the kernel and the bootloader do.
 toyos-tco = { path = "lib/tco" }

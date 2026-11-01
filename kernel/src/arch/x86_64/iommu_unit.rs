@@ -156,20 +156,10 @@ pub mod domain {
         }
     }
 
-    /// Why `stream` keeps the machine's own addresses rather than a domain of
-    /// its own, if it does: AMD-Vi's reasons. VT-d answers `None` for every
-    /// function: one an RMRR keeps moves off the identity domain with the
-    /// range mapped in its own.
-    pub fn untranslated(stream: StreamId) -> Option<&'static str> {
-        match backend() {
-            Backend::AmdVi => amdvi::domain::untranslated(stream),
-            Backend::Vtd | Backend::None => None,
-        }
-    }
-
-    /// Why no claim may have `stream`, if none may: [`untranslated`]'s
-    /// reasons and the requester ids AMD-Vi's platform speaks as; on VT-d, an
-    /// RMRR that names it and does not keep it (`vtd::classify`).
+    /// Why no claim may have `stream`, if none may: AMD-Vi's reasons for a
+    /// function that keeps the machine's own addresses, and the requester ids
+    /// its platform speaks as; on VT-d, an RMRR that names it and does not
+    /// keep it (`vtd::classify`).
     pub fn unclaimable(stream: StreamId) -> Option<&'static str> {
         match backend() {
             Backend::AmdVi => amdvi::domain::unclaimable(stream),

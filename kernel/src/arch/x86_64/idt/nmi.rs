@@ -131,7 +131,7 @@ fn stage_nested_if_armed() {
 /// Logs nothing: the interrupted context may be mid-publish of its own record, and one from here would garble the ring `halt_all_cpus` reads. `build/sourcegate.rs`'s `nmi_does_not_log` is the gate.
 extern "sysv64" fn nested_nmi(rip: u64, rsp: u64) -> ! {
     // Let go of before the halt: its flush, finding this CPU's own fatal path
-    // holding the registers, would drain raw and leave virtio-console out.
+    // holding the registers, would drain raw.
     {
         let mut uart = crate::drivers::serial::panic_registers();
         uart.write(b"\n[nmi] NESTED NMI on cpu ");

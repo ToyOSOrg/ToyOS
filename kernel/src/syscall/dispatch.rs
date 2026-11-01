@@ -33,7 +33,7 @@ use super::fs::{
 };
 use super::handles::{sys_close, sys_handle_dup, with_object, with_object_ref};
 use super::io::{
-    sys_null, sys_random, sys_read, sys_read_nonblock, sys_write, sys_write_nonblock,
+    sys_console_carried, sys_null, sys_random, sys_read, sys_read_nonblock, sys_write, sys_write_nonblock,
 };
 use super::ipc::{
     Incoming, Outgoing,
@@ -474,6 +474,7 @@ pub(crate) fn syscall_dispatch(num: u64, a1: u64, a2: u64, a3: u64, a4: u64) -> 
         SYS_SHM_CREATE => sys_shm_create(a1, a2, RawHandle(a3 as u32)),
         SYS_SHM_MAP => sys_shm_map(RawHandle(a1 as u32), a2),
         SYS_SHM_SUB => sys_shm_sub(RawHandle(a1 as u32), a2, a3),
+        SYS_CONSOLE_CARRIED => sys_console_carried(RawHandle(a1 as u32), a2),
         SYS_PORT_CREATE => sys_port_create(),
         SYS_PORT_MINT => {
             // Copied in before any handle is looked up: the kernel holds the badge, never the caller's page.
@@ -536,7 +537,11 @@ pub(crate) fn syscall_dispatch(num: u64, a1: u64, a2: u64, a3: u64, a4: u64) -> 
                 crate::scheduler::yield_now();
                 0
             }
-            DA::FATAL_HALT => { log!("{}", FATAL_HALT_NONCE); crate::panic::halt_all_cpus(); }
+            DA::FATAL_HALT => {
+                crate::log::console::on_the_uart_for_good();
+                log!("{}", FATAL_HALT_NONCE);
+                crate::panic::halt_all_cpus();
+            }
             DA::DOUBLE_FAULT => {
                 log!("SYS_DEBUG: provoking a double fault");
                 crate::arch::trap::provoke_double_fault()

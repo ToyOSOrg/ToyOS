@@ -203,6 +203,11 @@ pub fn report(unit: usize, count: &AtomicU32, fault: Fault) -> bool {
         Some(function) if crate::pcidev::note_fault(function.who.requester()) => Owner::Process,
         Some(_) => Owner::Kernel,
     };
+    // A fault this kernel's own function made halts the machine: before its
+    // line, as every fatal path's first record.
+    if matches!(owner, Owner::Kernel) {
+        crate::log::console::on_the_uart_for_good();
+    }
     let count = count.fetch_add(1, Ordering::Relaxed) + 1;
     // A stray's line is bounded by its count, never by the device: the next
     // line it writes says how many were read in between.

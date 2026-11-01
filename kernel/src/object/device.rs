@@ -173,11 +173,39 @@ impl ConsoleObject {
     pub fn write(&self, buf: &crate::user_ptr::UserBytes) -> usize {
         self.line.lock().write(buf)
     }
+
+    /// Whether this holder carries the log off the machine, so the UART does
+    /// not (`log::console::carried_by`); its last handle lets go of it.
+    pub fn carry(&self, elsewhere: bool) -> Result<(), kernel::carrier::Refused> {
+        match elsewhere {
+            true => {
+                crate::log::console::carried_by(self.holder())?;
+                // A last handle closed beside this call ran its release
+                // before the carry landed: the carry is given back here.
+                core::sync::atomic::fence(Ordering::SeqCst);
+                if self.core.retired() {
+                    crate::log::console::released_by(self.holder());
+                }
+                Ok(())
+            }
+            false => {
+                crate::log::console::released_by(self.holder());
+                Ok(())
+            }
+        }
+    }
+
+    fn holder(&self) -> usize {
+        self as *const Self as usize
+    }
 }
 
-// Flushes the partial line on last handle instead of dropping it.
-impl Drop for ConsoleObject {
-    fn drop(&mut self) {
+// Flushes the partial line and gives the log back to the UART if this holder
+// carried it, on last handle: a dying holder's releases run before its end is
+// published, so its end never leaves the UART quiet.
+impl ZeroHandles for ConsoleObject {
+    fn on_zero_handles(&self) {
         self.line.lock().finish();
+        crate::log::console::released_by(self.holder());
     }
 }

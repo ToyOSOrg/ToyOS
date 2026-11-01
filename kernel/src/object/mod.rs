@@ -275,7 +275,8 @@ kobject! {
     immediate Namespace => namespace::Namespace,
     // A file's flush and cache reference ride the last `Arc`; `read`/`write` on a file never park.
     immediate File => file::FileObject,
-    immediate Console => device::ConsoleObject,
+    // Its last handle lets go of the log's carrier, which a stranded `Arc` must not hold.
+    deferred Console => device::ConsoleObject,
     // The authority is the rights on the handle; a handle going away *is* the whole event.
     immediate SysCap => syscap::SysCap,
     // The last handle's loss is the loss of the *ability to wait*, not proof the process should stop.

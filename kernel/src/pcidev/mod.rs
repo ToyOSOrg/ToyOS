@@ -124,7 +124,7 @@ use toyos_abi::boot::RootBridgeWindow;
 use toyos_abi::inventory::Arrival;
 use toyos_abi::pci::{DeviceIrqRecord, PciFunctionInfo, BARS, LEND_WINDOW};
 use toyos_abi::syscall::{PciId, RegWidth, SyscallError};
-use toyos_dma::Register;
+use toyos_register::Register;
 use toyos_pci::{af, aperture, bar, express, pages, pm};
 
 use crate::device::{Claim, ClaimError};
@@ -1535,8 +1535,8 @@ pub fn dma_unmap(binding: &Binding, at: u64) -> Result<Arc<SharedMemObject>, Sys
 
 /// The window a claim's configuration reads are checked against, for the one
 /// caller that turns an offset from userland into a [`Register`].
-pub fn config_window(offset: u64, width: RegWidth) -> Result<Register, toyos_dma::RefusedRegister> {
-    toyos_dma::register(offset, width.bytes(), CONFIG_BYTES)
+pub fn config_window(offset: u64, width: RegWidth) -> Result<Register, toyos_register::RefusedRegister> {
+    toyos_register::register(offset, width.bytes(), CONFIG_BYTES)
 }
 
 /// One dword, word or byte of this function's own config space.
