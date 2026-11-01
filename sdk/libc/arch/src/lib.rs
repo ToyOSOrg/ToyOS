@@ -1,7 +1,8 @@
 //! libc's modules that read and set nothing but what they are handed, on the
 //! host, differentially. The architecture module: every copy and fill it has,
 //! over every length to 300 and every source and destination offset to 20,
-//! against `copy_within` and `fill`, with the two buffers overlapping both ways;
+//! against `copy_within` and `fill`, with the two buffers overlapping both ways,
+//! and a forward copy at every page distance below 1 KiB;
 //! and its square roots against `f64::sqrt` and `f32::sqrt`. Each host
 //! architecture checks its own module. The UTF-8 reader against
 //! `core::str::from_utf8`, the number reader against the host C library's and
@@ -212,6 +213,75 @@ mod tests {
                     want[at..at + n].copy_from_slice(&src[at..at + n]);
                     assert_eq!(got, want, "n {n} at {at} backward {backward}");
                 }
+            }
+        }
+    }
+
+    /// A copy with its destination exactly `distance` above its source modulo
+    /// 4 KiB, the source `at` bytes past a 64-byte boundary, both ends in one
+    /// buffer: the whole buffer against `copy_within`.
+    fn agrees_at(what: &str, copy: unsafe fn(*mut u8, *const u8, usize), distance: usize, at: usize, n: usize) {
+        let mut got = pattern(4 * 4096 + 256);
+        let base = got.as_ptr().align_offset(64);
+        let (from, to) = (base + at, base + at + 8192 + distance);
+        let mut want = got.clone();
+        want.copy_within(from..from + n, to);
+        let p = got.as_mut_ptr();
+        // SAFETY: both ranges are inside `got`, 8 KiB or more apart, `n` at most 4096.
+        unsafe { copy(p.add(to), p.add(from), n) };
+        assert_eq!(got, want, "{what}: n {n} at {at} distance {distance}");
+    }
+
+    /// A forward copy at every distance below 1 KiB, and some above, from
+    /// sources at four line offsets: the distances some architecture copies
+    /// another way.
+    #[test]
+    fn a_forward_copy_agrees_at_every_page_distance() {
+        for distance in (0..1024).chain([2048, 4032, 4095]) {
+            for at in [0, 1, 17, 63] {
+                for n in [0, 1, 63, 64, 65, 127, 128, 200, 1000, 4096] {
+                    agrees_at("copy_forward", arch::copy_forward, distance, at, n);
+                }
+            }
+        }
+    }
+
+    /// x86-64's two descending loops, each called directly so the one this
+    /// host's `copy_forward` does not take is checked too; AVX's only where
+    /// the host has it.
+    #[cfg(target_arch = "x86_64")]
+    #[test]
+    fn both_descending_loops_agree() {
+        let mut loops: Vec<(&str, unsafe fn(*mut u8, *const u8, usize))> = vec![("sse2", arch::copy_down_sse2)];
+        if arch::has_avx() {
+            // SAFETY: `has_avx` answered for this CPU.
+            loops.push(("avx", |d, s, n| unsafe { arch::copy_down_avx(d, s, n) }));
+        }
+        for (name, copy) in loops {
+            for n in (64..300).chain([511, 512, 513, 4095, 4096]) {
+                for (distance, at) in [(1, 0), (16, 16), (63, 1), (511, 63)] {
+                    agrees_at(name, copy, distance, at, n);
+                }
+            }
+        }
+    }
+
+    /// A forward copy whose destination sits below an overlapping source by
+    /// just under 4 KiB, so modulo 4 KiB it is a short way above it: it must
+    /// still copy lowest first.
+    #[test]
+    fn an_overlapping_forward_copy_a_page_apart_agrees() {
+        for gap in [3584, 3600, 4000, 4080, 4095] {
+            for over in [1, 64, 500] {
+                let n = gap + over;
+                let base = pattern(n + gap);
+                let mut want = base.clone();
+                want.copy_within(gap..gap + n, 0);
+                let mut got = base.clone();
+                let p = got.as_mut_ptr();
+                // SAFETY: both ranges are inside `got`, the destination below the source.
+                unsafe { arch::copy_forward(p, p.add(gap), n) };
+                assert_eq!(got, want, "gap {gap} n {n}");
             }
         }
     }
