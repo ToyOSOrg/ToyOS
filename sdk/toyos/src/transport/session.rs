@@ -877,10 +877,13 @@ where
 /// Writes at most `len` bytes, each span copied in by `copy` from its offset
 /// into the caller's buffer: the count, at least one. A shutdown, the server's
 /// hang-up or a failure it stored is answered, and nothing copied, whatever
-/// room there is. A write of no bytes answers 0 at once. A write the room
-/// cannot take whole, or that fills the ring, doubles the ring, up to its
-/// place, where `reach` makes the ring's first twice its capacity memory;
-/// where it cannot, the ring stays as it is.
+/// room there is. A write of no bytes answers 0 at once. Before it copies
+/// past a capacity this process has not reached, as another holder may have
+/// grown the ring to, `reach` makes the ring's first that many bytes memory;
+/// one it cannot is [`Violation::Size`]. A write the room cannot take whole,
+/// or that fills the ring, doubles the ring, up to its place, where `reach`
+/// makes the ring's first twice its capacity memory; where it cannot, the
+/// ring stays as it is.
 pub fn write<W, L, B, const C: u32, const N: usize>(
     page: &[W; N],
     lock: &L,
@@ -904,6 +907,14 @@ where
         Writable::Failed(end) => (Err(Refused::Failed(end)), false),
         Writable::Room(room) => {
             let n = room.min(len);
+            // A size another holder stored is believed only once it is memory.
+            let resumed = half.ring.capacity();
+            if resumed > half.reached {
+                if !reach(resumed) {
+                    return (Err(Refused::Violation(Violation::Size)), false);
+                }
+                half.reached = resumed;
+            }
             let Some(spans) = half.ring.span(0, n) else {
                 return (Err(Refused::Violation(Violation::HeadPastTail)), false);
             };
@@ -1586,6 +1597,23 @@ mod tests {
 
     /// Once one holder saw the server hang up, a write with room in another
     /// answers it and copies nothing, and a read answers it after the bytes.
+    /// A holder that joined believes the size the last holder stored only
+    /// once it made that much of the ring memory: a size it cannot commit,
+    /// which another holder may have stored without committing, is
+    /// `Violation::Size`, and nothing is copied.
+    #[test]
+    fn a_joined_writer_commits_the_size_it_resumed_before_it_copies() {
+        let page = page();
+        let ((_, _), (_, other_tx)) = two(&page);
+        let bells = quiet();
+        let mut copied = 0;
+        let refused = write(&page, &other_tx, &bells, Mode::Nonblocking, 1, |_| false, |span, _| copied += span.len);
+        assert_eq!((refused, copied), (Err(Refused::Violation(Violation::Size)), 0));
+        let mut reached = Vec::new();
+        let wrote = write(&page, &other_tx, &bells, Mode::Nonblocking, 1, |cap| { reached.push(cap); true }, |_, _| {});
+        assert_eq!((wrote, reached), (Ok(1), vec![C]), "the resumed capacity, committed once");
+    }
+
     #[test]
     fn a_hang_up_one_holder_saw_is_every_holders() {
         let page = page();

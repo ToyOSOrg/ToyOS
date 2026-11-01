@@ -75,7 +75,8 @@ pub trait Memory: core::fmt::Debug {
 #[derive(Clone, Copy, Debug)]
 struct Shape {
     size: Size,
-    /// What it holds from the oldest byte unread.
+    /// [tcp]'s storage length: the receive ring's capacity from its oldest byte unread, and the
+    /// most of the send ring netstack committed.
     holds: u32,
     /// What [tcp] last asked it to hold.
     wanted: usize,
