@@ -45,20 +45,24 @@ macro_rules! curve_api {
             }
             impl SecretKey {
                 pub fn from_bytes(bytes: [u8; $bytes]) -> Result<Self, Error> {
+                    let _protection = crate::timing::protect();
                     let bytes = Secret(bytes);
                     Ok(Self(Scalar::from_bytes(&bytes.0)?))
                 }
                 pub fn generate(random: &mut impl Random) -> Result<Self, Error> {
+                    let _protection = crate::timing::protect();
                     let mut candidates = Secret([0; 4 * $bytes]);
                     random.fill(&mut candidates.0)?;
                     Ok(Self(Scalar::first_valid(&candidates.0)?))
                 }
                 pub fn public_key(&self) -> PublicKey {
+                    let _protection = crate::timing::protect();
                     let mut encoded = [0; $encoded];
                     let point = Point::public_key(&self.0, &mut encoded);
                     PublicKey { point, encoded }
                 }
                 pub fn agree(self, peer: &PublicKey) -> Result<SharedSecret, Error> {
+                    let _protection = crate::timing::protect();
                     let mut out = Secret([0; $bytes]);
                     peer.point.agree(&self.0, &mut out.0);
                     Ok(SharedSecret(out))

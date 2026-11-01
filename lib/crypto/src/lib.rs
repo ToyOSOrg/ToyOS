@@ -1,8 +1,9 @@
 //! Cryptographic primitives for TLS, SSH, boot verification, passphrase-derived
 //! keys and WPA2.
 //!
-//! The core has no allocator, entropy source, runtime dependency or host build
-//! tool. Inputs crossing an encoding boundary return [`Error`]; fixed-size
+//! The core has no allocator, entropy source, host build tool or runtime
+//! dependency but, on ToyOS, its timing protection (`timing`). Inputs
+//! crossing an encoding boundary return [`Error`]; fixed-size
 //! representations hold the invariants inside that boundary. Message lengths,
 //! algorithm choices and CPU capabilities are public. Module contracts identify
 //! operations permitted to depend on public data.
@@ -49,6 +50,7 @@ mod secret;
 pub use secret::{Secret, Zeroable};
 pub mod siphash;
 pub mod ssh;
+mod timing;
 #[cfg(feature = "wpa2")]
 pub mod wpa2;
 pub mod x25519;

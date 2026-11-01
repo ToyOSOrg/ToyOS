@@ -290,6 +290,7 @@ impl EncapsulationKey {
         &self,
         random: &mut impl Random,
     ) -> Result<([u8; 1088], SharedSecret), Error> {
+        let _protection = crate::timing::protect();
         let mut message = Secret([0; 32]);
         random.fill(&mut message.0)?;
         let hash = keccak::h(&[&self.bytes]);
@@ -324,6 +325,7 @@ impl EncapsulationKey {
 }
 impl DecapsulationKey {
     pub fn generate(random: &mut impl Random) -> Result<Self, Error> {
+        let _protection = crate::timing::protect();
         let mut seeds = Secret([0; 64]);
         random.fill(&mut seeds.0)?;
         let expanded = Secret(keccak::g(&[&seeds.0[..32], &[3]]));
@@ -354,6 +356,7 @@ impl DecapsulationKey {
     /// Invalid, correctly sized ciphertexts return a pseudorandom shared secret.
     /// The calling protocol discovers failure through its key confirmation.
     pub fn decapsulate(self, ciphertext: &[u8]) -> Result<SharedSecret, Error> {
+        let _protection = crate::timing::protect();
         if ciphertext.len() != 1088 {
             return Err(Error::Length);
         }

@@ -597,6 +597,7 @@ pub struct SigningKey {
 #[cfg(feature = "sign")]
 impl SigningKey {
     pub fn from_seed(seed: [u8; 32]) -> Self {
+        let _protection = crate::timing::protect();
         let seed = Secret(seed);
         let mut expanded = Secret(Sha512::digest(&seed.0).expect("fixed 32-byte seed"));
         expanded.0[0] &= 248;
@@ -620,6 +621,7 @@ impl SigningKey {
         &self.public
     }
     pub fn sign(&self, message: &[u8]) -> Result<[u8; 64], Error> {
+        let _protection = crate::timing::protect();
         let mut h = Sha512::new();
         h.update(&self.prefix.0)?;
         h.update(message)?;

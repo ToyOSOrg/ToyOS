@@ -54,6 +54,10 @@ review has been done, and passing vectors does not show it is safer than ring.
   2.6 GB/s against the portable rounds' 0.52, and SHA-512 at 1.36 against
   0.83. ToyOS's own AArch64 targets do not promise them and nothing detects
   them at run time, so they hash portably; see the weaknesses.
+- **On ToyOS each secret operation runs under the thread's timing
+  protection** (`src/timing.rs`, `toyos::timing`): `PSTATE.DIT` on AArch64.
+  x86-64 has no such mode a thread sets, and ToyOS turns Intel's DOITM on for
+  none, so constant time there rests on the code, as on AMD.
 
 ## Consumers and what each needs
 
@@ -652,6 +656,16 @@ Not consumers:
 
 ## Weaknesses until the exits hold
 
+- On x86-64 nothing but the code keeps secret work's timing independent of
+  its data. The T14's store-forwarding predictor once timed P-256 by its
+  data, which DOITM, PSFD or SSBD removed
+  (`issues/intels-store-forwarding-predictor-times-constant-time-code-by-its-data.md`).
+  Intel's MXCSR-dependent timing can also delay `VPMULUDQ`, which the AVX2
+  Poly1305 kernel runs, by up to a cycle on its data, on a CPU that does not
+  enumerate `MCDT_NO` (CPUID.(07H,2):EDX[5]); the T14 does not, and the
+  kernel runs under the default MXCSR. **Owner**: this track. **Exit**: that
+  issue's, and the AVX2 Poly1305 kernel runs under Intel's MXCSR 0x1FBF
+  sequence where `MCDT_NO` is clear, its cost measured on the T14.
 - Erasure is what `lib/crypto/src/secret.rs`'s contract states: secret
   owners, each key agreement's shared value and named workspaces are
   erased. Since the parity work's 5x51 field (#992), 2^255 - 19 field
