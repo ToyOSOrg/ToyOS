@@ -483,7 +483,7 @@ pub mod power {
                 }
                 Ok(CpuPower {
                     cpu: c.cpu,
-                    core: crate::arch::core_of(c.apic),
+                    core: crate::arch::core_of_apic(c.apic),
                     tsc: c.stamp.ok_or_else(|| Refused::Failed(format!("cpu{}'s record carries no stamp", c.cpu)))?,
                     aperf: c.aperf,
                     mperf: c.mperf,
