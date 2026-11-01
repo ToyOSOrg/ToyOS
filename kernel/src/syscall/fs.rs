@@ -115,13 +115,11 @@ pub(super) fn spawn_cwd(path: &str) -> Result<alloc::string::String, SyscallErro
 
 /// Returns the length needed; writes the cwd only when it fits (`n <= out.len()`).
 pub(super) fn sys_getcwd(out: &mut UserBytesMut) -> u64 {
-    process::with_process_data(|data| {
-        let cwd = data.cwd.as_bytes();
-        if cwd.len() <= out.len() {
-            out.write_at(0, cwd);
-        }
-        cwd.len() as u64
-    })
+    let cwd = process::with_process_data(|data| data.cwd.clone());
+    if cwd.len() <= out.len() {
+        out.write_at(0, cwd.as_bytes());
+    }
+    cwd.len() as u64
 }
 
 pub(super) fn sys_rename(old: &str, new: &str) -> u64 {
@@ -179,9 +177,12 @@ pub(super) fn sys_symlink(target: &str, link: &str) -> u64 {
 
 pub(super) fn sys_readlink(path: &str, out: &mut UserBytesMut) -> u64 {
     let cwd = process::with_process_data(|d| d.cwd.clone());
-    let mut vfs = vfs::lock();
-    let resolved = vfs.resolve_absolute(&cwd, path);
-    match vfs.read_link(&resolved) {
+    let target = {
+        let mut vfs = vfs::lock();
+        let resolved = vfs.resolve_absolute(&cwd, path);
+        vfs.read_link(&resolved)
+    };
+    match target {
         Ok(Some(target)) => {
             let bytes = target.as_bytes();
             let len = bytes.len().min(out.len());

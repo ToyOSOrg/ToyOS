@@ -11,7 +11,7 @@ use alloc::vec::Vec;
 
 use crate::watch;
 use crate::object::{ops, port, KObjectRef};
-use crate::message::{SendRefused, Taken};
+use crate::message::{SendRefused, Unclaimed};
 use crate::object::service::ConnectionEnd;
 use crate::time::Deadline;
 use crate::user_ptr::SyscallContext;
@@ -442,58 +442,81 @@ fn send(conn_h: RawHandle, out: &Outgoing<'_>, nonblock: bool) -> Result<(), u64
     // `TRANSFER` on the connection only when it carries handles: bytes alone
     // are a write, which `WRITE` already allows.
     let need = if out.count == 0 { Rights::WRITE } else { Rights::WRITE.union(Rights::TRANSFER) };
+    // Every handle is checked before anything is queued or moved, and again
+    // under the hold that moves them.
+    let checked = |data: &process::ProcessData| {
+        let conn = data.handles.get::<ConnectionEnd>(conn_h, need)?;
+        for (i, h) in wanted.iter().enumerate() {
+            if *h == conn_h || wanted[..i].contains(h) {
+                return Err(SyscallError::InvalidArgument.into());
+            }
+            let rights = data.handles.rights_of(*h)?;
+            if !rights.contains(Rights::TRANSFER) {
+                return Err(SyscallError::PermissionDenied.into());
+            }
+        }
+        Ok::<_, crate::object::Refusal>(conn.tx().clone())
+    };
 
+    let parkable = crate::scheduler::Parkable::at_entry();
     loop {
-        let sent = process::with_process_data(|data| {
-            let conn = data.handles.get::<ConnectionEnd>(conn_h, need)?;
-            // Every handle is checked before anything is queued or moved.
-            for (i, h) in wanted.iter().enumerate() {
-                if *h == conn_h || wanted[..i].contains(h) {
-                    return Err(SyscallError::InvalidArgument.into());
-                }
-                let rights = data.handles.rights_of(*h)?;
-                if !rights.contains(Rights::TRANSFER) {
-                    return Err(SyscallError::PermissionDenied.into());
-                }
-            }
-            // A refusal restores every handle at its own number, so it is invisible.
-            let tx = conn.tx().clone();
-            let moved = data.handles.transfer(wanted, |batch| tx.send(&out.bytes, batch));
-            Ok::<_, crate::object::Refusal>((tx, moved))
-        });
-        let tx = match sent {
-            Ok((tx, Ok(()))) => {
-                crate::scheduler::post_lending(tx.read_watch(), || tx.set_rt_boost_pending());
-                return Ok(());
-            }
-            Ok((tx, Err(SendRefused::NoRoom))) if !nonblock => tx,
-            Ok((_, Err(SendRefused::NoRoom))) => return Err(SyscallError::WouldBlock.to_u64()),
-            Ok((_, Err(SendRefused::Gone))) => return Err(SyscallError::Gone.to_u64()),
-            Ok((_, Err(SendRefused::NoMemory))) => return Err(SyscallError::ResourceExhausted.to_u64()),
+        let tx = match process::with_process_data(|data| checked(data)) {
+            Ok(tx) => tx,
             Err(e) => return Err(e.refuse()),
         };
+        let refused = match tx.claim_send(&parkable, &out.bytes, out.count) {
+            Ok(mut claim) => {
+                // A refusal restores every handle at its own number, so it is invisible.
+                let moved = process::with_process_data(|data| {
+                    checked(data)?;
+                    Ok::<_, crate::object::Refusal>(data.handles.transfer(wanted, |batch| claim.commit(batch)))
+                });
+                drop(claim);
+                match moved {
+                    Ok(Ok(())) => {
+                        crate::scheduler::post_lending(tx.read_watch(), || tx.set_rt_boost_pending());
+                        return Ok(());
+                    }
+                    Ok(Err(refused)) => refused,
+                    Err(e) => return Err(e.refuse()),
+                }
+            }
+            Err(refused) => refused,
+        };
+        match refused {
+            SendRefused::NoRoom if !nonblock => {}
+            SendRefused::NoRoom => return Err(SyscallError::WouldBlock.to_u64()),
+            SendRefused::Gone => return Err(SyscallError::Gone.to_u64()),
+            SendRefused::NoMemory => return Err(SyscallError::ResourceExhausted.to_u64()),
+            SendRefused::Cancelled => return Err(cancelled()),
+        }
         // Outside every lock: room appears as the receiver takes messages, and each receive posts this watch.
         let (len, count) = (out.bytes.len(), out.count);
-        if watch::wait_until(&crate::scheduler::Parkable::at_entry(), tx.write_watch(), 0, WaitClass::Ipc, Deadline::never(), || {
-            tx.fits(len, count)
-        })
-        .is_err()
-        {
+        if watch::wait_until(&parkable, tx.write_watch(), 0, WaitClass::Ipc, Deadline::never(), || tx.fits(len, count)).is_err() {
             return Err(cancelled());
         }
     }
 }
 
 fn recv(conn_h: RawHandle, into: &mut Incoming<'_>, nonblock: bool) -> u64 {
+    let parkable = crate::scheduler::Parkable::at_entry();
     loop {
-        let taken = process::with_process_data(|data| {
-            let conn = data.handles.get::<ConnectionEnd>(conn_h, Rights::READ)?;
-            let rx = conn.rx().clone();
-            let taken = rx.recv(&mut into.head, &mut into.bytes, into.cap, &mut data.handles);
-            Ok::<_, crate::object::Refusal>((rx, taken))
-        });
-        let rx = match taken {
-            Ok((rx, Taken::Message(head, installed))) => {
+        let rx = match process::with_process_data(|data| data.handles.get::<ConnectionEnd>(conn_h, Rights::READ).map(|conn| conn.rx().clone())) {
+            Ok(rx) => rx,
+            // Refused outside this hold: ending the caller takes the same non-reentrant lock.
+            Err(e) => return e.refuse(),
+        };
+        match rx.claim_recv(&parkable, into.head.len() + into.bytes.len(), into.cap) {
+            Ok(mut claim) => {
+                claim.copy(&mut into.head, &mut into.bytes);
+                let head = claim.head();
+                let taken = process::with_process_data(|data| claim.take(&mut data.handles));
+                drop(claim);
+                let installed = match taken {
+                    Ok(installed) => installed,
+                    Err(kernel::message::Untaken::NoRoom) => return SyscallError::ResourceExhausted.to_u64(),
+                    Err(kernel::message::Untaken::TooSmall) => unreachable!("a claimed message fits its reader"),
+                };
                 for (i, h) in installed[..head.handles].iter().enumerate() {
                     into.handles.write_at(i * HANDLE_LEN, &h.0.to_ne_bytes());
                 }
@@ -501,19 +524,14 @@ fn recv(conn_h: RawHandle, into: &mut Incoming<'_>, nonblock: bool) -> u64 {
                 rx.write_watch().post();
                 return toyos_abi::syscall::Received::encode(head.len, head.handles);
             }
-            Ok((_, Taken::Gone)) => return SyscallError::Gone.to_u64(),
-            Ok((_, Taken::Untaken(kernel::message::Untaken::TooSmall))) => return SyscallError::InvalidArgument.to_u64(),
-            Ok((_, Taken::Untaken(kernel::message::Untaken::NoRoom))) => return SyscallError::ResourceExhausted.to_u64(),
-            Ok((_, Taken::Empty)) if nonblock => return SyscallError::WouldBlock.to_u64(),
-            Ok((rx, Taken::Empty)) => rx,
-            // Refused outside this hold: ending the caller takes the same non-reentrant lock.
-            Err(e) => return e.refuse(),
-        };
-        if watch::wait_until(&crate::scheduler::Parkable::at_entry(), rx.read_watch(), 0, WaitClass::Ipc, Deadline::never(), || {
-            rx.readable()
-        })
-        .is_err()
-        {
+            Err(Unclaimed::Gone) => return SyscallError::Gone.to_u64(),
+            Err(Unclaimed::Untaken(kernel::message::Untaken::TooSmall)) => return SyscallError::InvalidArgument.to_u64(),
+            Err(Unclaimed::Untaken(kernel::message::Untaken::NoRoom)) => unreachable!("a front is untaken only for want of buffer"),
+            Err(Unclaimed::Cancelled) => return cancelled(),
+            Err(Unclaimed::Empty) if nonblock => return SyscallError::WouldBlock.to_u64(),
+            Err(Unclaimed::Empty) => {}
+        }
+        if watch::wait_until(&parkable, rx.read_watch(), 0, WaitClass::Ipc, Deadline::never(), || rx.readable()).is_err() {
             return cancelled();
         }
     }

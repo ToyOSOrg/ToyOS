@@ -36,8 +36,10 @@ fn assert_baseline(baseline: u32) {
 }
 
 /// Depth an unnested trap handler runs at: one level, raised by the entry asm
-/// and lowered on the way out.
-const BASELINE_TRAP: u32 = 1;
+/// and lowered on the way out (x86_64's `syscall_entry` and `common_entry`,
+/// AArch64's `trap::syscall` and `trap::user_abort`). A user copy runs at it
+/// and no deeper (`user_ptr`).
+pub(crate) const BASELINE_TRAP: u32 = 1;
 
 /// Depth the deferred-preempt poll runs at: zero, since all three entry paths
 /// are past the trap entry level.

@@ -11,7 +11,7 @@ use crate::file_backing::{BlockError, FileBacking};
 use crate::mm::charge::{self, Charge, Exhausted};
 use crate::mm::space::CopySource;
 use crate::sync::Lock;
-use crate::user_ptr::{ByteSource, UserBytesMut};
+use crate::user_ptr::UserBytesMut;
 
 pub type FileId = u64;
 
@@ -207,33 +207,40 @@ pub fn touch(file_id: FileId, mtime: u64) {
 }
 
 /// Read a file page into `buf`; on `Err` the fetch failed and `buf` holds zeros, not the file's bytes.
+/// The copy runs with the cache's lock let go, out of the page as it was: a
+/// write meanwhile writes a copy of it (`Page::own`).
 pub fn read_page(
     file_id: FileId,
     page_idx: u32,
     offset: usize,
     buf: &mut UserBytesMut,
 ) -> Result<(), BlockError> {
-    let backing;
-    {
+    let backing = {
         let mut cache = FILE_CACHE.lock();
         let Some(file) = cache.files.get_mut(&file_id) else { return Ok(()) };
         let file_size = file.size;
-
-        // Beyond file size: zero-fill, no cache insert.
         if (page_idx as u64) * PAGE_SIZE as u64 >= file_size {
+            None
+        } else if let Some(page) = file.pages.get_mut(&page_idx) {
+            page.referenced = true;
+            Some(Ok((Arc::clone(&page.data), valid_bytes_in_page(page_idx, file_size))))
+        } else {
+            Some(Err(file.backing.clone()))
+        }
+    };
+    let backing = match backing {
+        // Beyond file size: zero-fill, no cache insert.
+        None => {
             buf.fill_zero(0, buf.len());
             return Ok(());
         }
-
-        if let Some(page) = file.pages.get_mut(&page_idx) {
-            page.referenced = true;
-            let avail = valid_bytes_in_page(page_idx, file_size);
-            copy_page_region_to_buf(&page.data[..], offset, buf, avail);
+        Some(Ok((page, avail))) => {
+            copy_page_region_to_buf(&page[..], offset, buf, avail);
             return Ok(());
         }
-        backing = file.backing.clone();
-    }
-    // Cache miss: unlock, fetch from backing, re-lock, insert if still absent.
+        // Cache miss: fetch from backing with the lock let go, re-lock, insert if still absent.
+        Some(Err(backing)) => backing,
+    };
 
     let mut fetched = match Page::blank() {
         Ok(page) => page,
@@ -256,35 +263,33 @@ pub fn read_page(
     }
     // else: tmpfs miss → zero-filled page (fetched is already zeroed)
 
-    let mut cache = FILE_CACHE.lock();
-    let mut added = 0;
-    {
-        let Some(file) = cache.files.get_mut(&file_id) else { return Ok(()) };
-        let is_cache = file.is_cache();
-        if let Entry::Vacant(slot) = file.pages.entry(page_idx) {
-            slot.insert(CachedPage::new(fetched));
-            added = is_cache as usize;
-        }
-        let file_size = file.size;
-        let page = file.pages.get_mut(&page_idx).unwrap();
-        page.referenced = true;
-        let avail = valid_bytes_in_page(page_idx, file_size);
-        copy_page_region_to_buf(&page.data[..], offset, buf, avail);
-    }
-    cache.cached_pages += added;
-    evict_if_needed(&mut cache);
+    let (page, avail) = {
+        let mut cache = FILE_CACHE.lock();
+        let mut added = 0;
+        let found = {
+            let Some(file) = cache.files.get_mut(&file_id) else { return Ok(()) };
+            let is_cache = file.is_cache();
+            if let Entry::Vacant(slot) = file.pages.entry(page_idx) {
+                slot.insert(CachedPage::new(fetched));
+                added = is_cache as usize;
+            }
+            let file_size = file.size;
+            let page = file.pages.get_mut(&page_idx).unwrap();
+            page.referenced = true;
+            (Arc::clone(&page.data), valid_bytes_in_page(page_idx, file_size))
+        };
+        cache.cached_pages += added;
+        evict_if_needed(&mut cache);
+        found
+    };
+    copy_page_region_to_buf(&page[..], offset, buf, avail);
     Ok(())
 }
 
 /// Write data into a file page; the lock is not held during disk I/O on a cache miss.
 /// `Err` means the page could not be re-read and nothing was written — merging into zeros would destroy 4 KiB of a file that was fine —
 /// or that no memory is left to keep it in.
-pub fn write_page<S: ByteSource + ?Sized>(
-    file_id: FileId,
-    page_idx: u32,
-    offset: usize,
-    data: &S,
-) -> Result<(), BlockError> {
+pub fn write_page(file_id: FileId, page_idx: u32, offset: usize, data: &[u8]) -> Result<(), BlockError> {
     // A resident page is written under the same lock acquisition that found it; the fetch path below drops the lock, and a sibling's eviction in that window would otherwise merge the write into a blank page.
     let backing;
     {
@@ -334,15 +339,10 @@ pub fn write_page<S: ByteSource + ?Sized>(
 
 /// Refused, the page is unchanged: a snapshot shares it and no copy can be
 /// charged.
-fn apply_write<S: ByteSource + ?Sized>(
-    file: &mut CachedFile,
-    page_idx: u32,
-    offset: usize,
-    data: &S,
-) -> Result<(), Exhausted> {
+fn apply_write(file: &mut CachedFile, page_idx: u32, offset: usize, data: &[u8]) -> Result<(), Exhausted> {
     let page = file.pages.get_mut(&page_idx).expect("write_page: page not resident");
     let end = (offset + data.len()).min(PAGE_SIZE);
-    data.read_at(0, &mut Page::own(&mut page.data)?[offset..end]);
+    Page::own(&mut page.data)?[offset..end].copy_from_slice(&data[..end - offset]);
     page.referenced = true;
 
     let write_end = page_idx as u64 * PAGE_SIZE as u64 + end as u64;

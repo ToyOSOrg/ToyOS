@@ -13,6 +13,12 @@
 //! no CPU holds more than one chunk's pins. A page the process took away since
 //! the window was made reads as zeros and drops what is written to it.
 //!
+//! **A copy holds no kernel lock**: its fault-in takes its space's lock, and
+//! will wait on a pager. Every spin lock raises the preemption count, so each
+//! entry here refuses a copy made above the depth its syscall's entry runs at
+//! ([`unlocked_space`]), whether or not a page needs populating. A sleeping
+//! lock (`crate::sleeplock`) raises nothing, and a copy may run under one.
+//!
 //! Every single-word user read is `read_volatile`, including the futex word
 //! and the crash dump's walk, both outside this module.
 
@@ -46,9 +52,26 @@ fn asked(access: Access) -> Asked {
 /// Translate a user virtual address to its direct-map address, populating its
 /// page if needed; `pub(crate)` because the futex word outlives its syscall.
 pub(crate) fn translate_user(addr: UserAddr, access: Access) -> Option<crate::mm::DirectMap> {
-    let space = crate::process::current_address_space();
+    let space = unlocked_space();
     let phys = space.lock().reach(addr.raw(), asked(access))?;
     Some(crate::mm::DirectMap::from_phys(phys))
+}
+
+/// The current space, for a copy made holding no lock: a kernel bug
+/// otherwise, never a user's doing.
+fn unlocked_space() -> crate::mm::space::PageTables {
+    let depth = crate::preempt::count();
+    if depth > crate::scheduler::BASELINE_TRAP {
+        under_a_lock(depth);
+    }
+    crate::process::current_address_space()
+}
+
+/// The backtrace names the copy's caller.
+#[cold]
+#[inline(never)]
+fn under_a_lock(depth: u32) -> ! {
+    panic!("user_ptr: a user copy at preemption depth {depth}, past its syscall's: a lock is held, and its fault-in may wait");
 }
 
 /// Context for a single syscall invocation; the lifetime `'a` keeps validated references from escaping it.
@@ -136,7 +159,7 @@ impl View {
         if len == 0 {
             return Some(view);
         }
-        let space = crate::process::current_address_space();
+        let space = unlocked_space();
         let allowed = space.lock().allows(ptr.raw(), ptr.raw() + len, asked(access));
         allowed.then_some(view)
     }
@@ -146,7 +169,7 @@ impl View {
     /// panics if out of bounds — the kernel's own arithmetic, never user input.
     fn pieces(&self, what: &str, off: usize, len: usize, mut copy: impl FnMut(*mut u8, usize, usize)) {
         assert!(off.checked_add(len).is_some_and(|end| end <= self.len), "{what} {off}+{len} past a {}-byte window", self.len);
-        let space = crate::process::current_address_space();
+        let space = unlocked_space();
         let mut done = 0;
         while done < len {
             let mut frames = [None::<u64>; CHUNK_PAGES];
@@ -242,11 +265,6 @@ impl UserBytes<'_> {
             unsafe { core::ptr::copy_nonoverlapping(run, dst.add(at), n) }
         });
     }
-
-    /// The `len`-byte window at `off` inside this one.
-    pub fn sub(&self, off: usize, len: usize) -> UserBytes<'_> {
-        UserBytes(self.0.sub("UserBytes::sub", off, len), PhantomData)
-    }
 }
 
 /// A bulk buffer the kernel copies into and never reads back, so it cannot act on a value another thread substituted.
@@ -297,31 +315,5 @@ impl UserBytesMut<'_> {
     /// The `len`-byte window at `off` inside this one.
     pub fn sub(&mut self, off: usize, len: usize) -> UserBytesMut<'_> {
         UserBytesMut(self.0.sub("UserBytesMut::sub", off, len), PhantomData)
-    }
-}
-
-/// Bytes the kernel copies *from*, wherever they live — lets `file_cache::write_page` name the capability it needs instead of a concrete window type.
-pub trait ByteSource {
-    fn len(&self) -> usize;
-    fn read_at(&self, off: usize, dst: &mut [u8]);
-}
-
-impl ByteSource for [u8] {
-    fn len(&self) -> usize {
-        <[u8]>::len(self)
-    }
-
-    fn read_at(&self, off: usize, dst: &mut [u8]) {
-        dst.copy_from_slice(&self[off..off + dst.len()]);
-    }
-}
-
-impl ByteSource for UserBytes<'_> {
-    fn len(&self) -> usize {
-        UserBytes::len(self)
-    }
-
-    fn read_at(&self, off: usize, dst: &mut [u8]) {
-        UserBytes::read_at(self, off, dst);
     }
 }

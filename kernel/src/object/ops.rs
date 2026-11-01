@@ -431,13 +431,16 @@ fn write_file_at(state: &mut OpenFileState, position: usize, buf: &UserBytes) ->
     }
     let mut written = 0;
     let mut refused = None;
+    // Each page's bytes copied in first: the cache writes them under its lock.
+    let mut page = [0u8; 4096];
     while written < buf.len() {
         let abs_pos = position + written;
         let page_idx = (abs_pos / 4096) as u32;
         let offset_in_page = abs_pos % 4096;
         let to_write = (4096 - offset_in_page).min(buf.len() - written);
+        buf.read_at(written, &mut page[..to_write]);
         // A page that cannot be re-read off the device is refused, not merged into zeros.
-        if let Err(e) = file_cache::write_page(state.file_id, page_idx, offset_in_page, &buf.sub(written, to_write)) {
+        if let Err(e) = file_cache::write_page(state.file_id, page_idx, offset_in_page, &page[..to_write]) {
             refused = Some(e);
             break;
         }
@@ -467,31 +470,55 @@ pub fn pwrite(object: &KObjectRef, offset: u64, buf: &UserBytes) -> u64 {
     file.with(|state| write_file_at(state, position, buf).0)
 }
 
-/// Read a device claim; takes `table` because describing a device installs handles into it.
-pub fn read_device(
-    claim: &DeviceClaim,
-    table: &mut HandleTable,
-    buf: &mut UserBytesMut,
-) -> Option<u64> {
+/// What a device read answers, to copy out once no lock is held.
+pub enum DeviceRead {
+    /// The claim's description, which the reader takes as much of as fits.
+    Description(alloc::boxed::Box<[u8]>),
+    Record(toyos_abi::pci::DeviceIrqRecord),
+    /// The answer, with nothing to copy.
+    Word(u64),
+}
+
+impl DeviceRead {
+    /// Copy what it answers into `buf`, answering the syscall's word.
+    pub fn deliver(self, buf: &mut UserBytesMut) -> u64 {
+        match self {
+            Self::Description(bytes) => {
+                let count = buf.len().min(bytes.len());
+                buf.write_at(0, &bytes[..count]);
+                count as u64
+            }
+            Self::Record(record) => {
+                buf.write_at(0, record_bytes(&record));
+                toyos_abi::pci::DeviceIrqRecord::SIZE as u64
+            }
+            Self::Word(word) => word,
+        }
+    }
+}
+
+/// Read a device claim into a reader with `room` bytes; takes `table`
+/// because describing a device installs handles into it.
+pub fn read_device(claim: &DeviceClaim, table: &mut HandleTable, room: usize) -> Option<DeviceRead> {
+    let refused = |e: SyscallError| Some(DeviceRead::Word(e.to_u64()));
+    let described = |table: &mut HandleTable| Some(claim.describe(table).map_or_else(|e| DeviceRead::Word(e.to_u64()), DeviceRead::Description));
     match claim.class() {
-        device_registry::DeviceType::Framebuffer => Some(claim.describe(table, buf)),
+        device_registry::DeviceType::Framebuffer => described(table),
         // The description first and interrupts after: a driver reads what it
         // is driving once, and everything it reads afterwards is what its
         // device has been doing.
         device_registry::DeviceType::PciFunction => {
             if !claim.info_read() {
-                return Some(claim.describe(table, buf));
+                return described(table);
             }
-            if buf.len() < toyos_abi::pci::DeviceIrqRecord::SIZE {
-                return Some(SyscallError::InvalidArgument.to_u64());
+            if room < toyos_abi::pci::DeviceIrqRecord::SIZE {
+                return refused(SyscallError::InvalidArgument);
             }
-            let record = match claim.pci(crate::pcidev::take_record) {
-                Some(Ok(record)) => record?,
-                Some(Err(refused)) => return Some(refused.to_u64()),
-                None => return Some(SyscallError::Gone.to_u64()),
-            };
-            buf.write_at(0, record_bytes(&record));
-            Some(toyos_abi::pci::DeviceIrqRecord::SIZE as u64)
+            match claim.pci(crate::pcidev::take_record) {
+                Some(Ok(record)) => record.map(DeviceRead::Record),
+                Some(Err(e)) => refused(e),
+                None => refused(SyscallError::Gone),
+            }
         }
         // The PCI shape, but the description is what binds the ports to the
         // reader, and nothing after it answers any other process.
@@ -499,11 +526,11 @@ pub fn read_device(
             let pid = crate::process::current_process();
             if !claim.info_read() {
                 if claim.isa(|row| crate::isa::bind(row, pid)).is_none() {
-                    return Some(SyscallError::Gone.to_u64());
+                    return refused(SyscallError::Gone);
                 }
-                return Some(claim.describe(table, buf));
+                return described(table);
             }
-            let room = buf.len() >= toyos_abi::pci::DeviceIrqRecord::SIZE;
+            let room = room >= toyos_abi::pci::DeviceIrqRecord::SIZE;
             // The holder's check and the take are one borrow of the row.
             let taken = claim.isa(|row| {
                 if !crate::isa::held_by(row, pid) {
@@ -514,13 +541,11 @@ pub fn read_device(
                     Ok(crate::isa::take_record(row))
                 }
             });
-            let record = match taken {
-                Some(Ok(record)) => record?,
-                Some(Err(refused)) => return Some(refused.to_u64()),
-                None => return Some(SyscallError::Gone.to_u64()),
-            };
-            buf.write_at(0, record_bytes(&record));
-            Some(toyos_abi::pci::DeviceIrqRecord::SIZE as u64)
+            match taken {
+                Some(Ok(record)) => record.map(DeviceRead::Record),
+                Some(Err(e)) => refused(e),
+                None => refused(SyscallError::Gone),
+            }
         }
     }
 }
@@ -546,7 +571,12 @@ fn record_bytes(record: &toyos_abi::pci::DeviceIrqRecord) -> &[u8] {
 pub fn try_read(object: &KObjectRef, buf: &mut UserBytesMut) -> Option<u64> {
     match object {
         KObjectRef::File(f) => read_file(f, buf),
-        KObjectRef::PipeRead(r) => r.pipe().try_read(buf).map(|n| n as u64),
+        // A kill that ends the wait for another read's claim answers what
+        // a cancelled wait does; no answer reaches its Ring 3.
+        KObjectRef::PipeRead(r) => match r.pipe().read(&crate::scheduler::Parkable::at_entry(), buf) {
+            Ok(read) => read.map(|n| n as u64),
+            Err(_) => Some(SyscallError::Gone.to_u64()),
+        },
         KObjectRef::Device(_) => unreachable!("a device claim is read by `read_device`"),
         KObjectRef::Console(_) => {
             let mut count = 0usize;
@@ -585,7 +615,11 @@ pub fn try_read(object: &KObjectRef, buf: &mut UserBytesMut) -> Option<u64> {
 
 fn write_pipe(object: &KObjectRef, buf: &UserBytes) -> Option<u64> {
     let pipe = pipe_write(object).expect("a pipe's write end writes its pipe");
-    match pipe.write(buf) {
+    let Ok(wrote) = pipe.write(&crate::scheduler::Parkable::at_entry(), buf) else {
+        // As a read's cancelled wait for its turn answers.
+        return Some(SyscallError::Gone.to_u64());
+    };
+    match wrote {
         // The reader is gone, not absent: `NotFound` means the name is not there and nothing else may say so.
         pipe::PipeWrite::BrokenPipe => Some(SyscallError::Gone.to_u64()),
         pipe::PipeWrite::NoMemory => Some(SyscallError::ResourceExhausted.to_u64()),

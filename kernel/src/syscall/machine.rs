@@ -266,7 +266,20 @@ pub(super) fn sys_sysinfo(syscap: RawHandle, out: &mut UserBytesMut) -> u64 {
             return e.refuse();
         }
     }
+    match sysinfo_laid(max_entries) {
+        Ok(laid) => {
+            out.write_at(0, &laid);
+            laid.len() as u64
+        }
+        Err(e) => e.to_u64(),
+    }
+}
 
+/// [`sys_sysinfo`]'s answer, its header and at most `max_entries` entries,
+/// laid out under the process table's lock for the caller to copy out after.
+fn sysinfo_laid(max_entries: usize) -> Result<Vec<u8>, SyscallError> {
+    const HEADER_SIZE: usize = toyos_abi::syscall::SYSINFO_HEADER_SIZE;
+    const ENTRY_SIZE: usize = toyos_abi::syscall::SYSINFO_ENTRY_SIZE;
     let (total_mem, used_mem) = crate::mm::pmm::stats();
     let cpu_count = crate::smp::cpu_count();
     let uptime = crate::clock::nanos_since_boot();
@@ -278,7 +291,7 @@ pub(super) fn sys_sysinfo(syscap: RawHandle, out: &mut UserBytesMut) -> u64 {
 
     let entry_count = live_threads(table) as u32;
     if entry_count as usize > sysinfo_thread_bound() {
-        return SyscallError::ResourceExhausted.to_u64();
+        return Err(SyscallError::ResourceExhausted);
     }
 
     let mut header = [0u8; HEADER_SIZE];
@@ -289,19 +302,20 @@ pub(super) fn sys_sysinfo(syscap: RawHandle, out: &mut UserBytesMut) -> u64 {
     header[24..32].copy_from_slice(&uptime.to_le_bytes());
     header[32..40].copy_from_slice(&total_cpu_ns.to_le_bytes());
     header[40..48].copy_from_slice(&total_available_ns.to_le_bytes());
-    out.write_at(0, &header);
+    let mut laid = Vec::new();
+    laid.extend_from_slice(&header);
 
-    // Header-only callers pay for no allocation and no sort of the roster below.
+    // Header-only callers pay for no sort of the roster below.
     if max_entries == 0 {
-        return HEADER_SIZE as u64;
+        return Ok(laid);
     }
+    laid.reserve_exact(max_entries.min(entry_count as usize) * ENTRY_SIZE);
 
     let mut entries: Vec<(process::Tid, &process::ProcessEntry, &process::ThreadEntry)> =
         Vec::with_capacity(entry_count as usize);
     entries.extend(table.iter().flat_map(|(_, proc)| proc.threads().iter().map(move |(tid, thread)| (tid, proc, thread))));
     entries.sort_by_key(|(tid, proc, _)| (proc.pid(), *tid));
 
-    let mut pos = HEADER_SIZE;
     for (i, &(tid, proc, thread)) in entries.iter().enumerate() {
         if i >= max_entries {
             break;
@@ -330,12 +344,9 @@ pub(super) fn sys_sysinfo(syscap: RawHandle, out: &mut UserBytesMut) -> u64 {
         entry[16..24].copy_from_slice(&memory.to_le_bytes());
         entry[24..32].copy_from_slice(&cpu_ns.to_le_bytes());
         entry[32..60].copy_from_slice(name);
-        out.write_at(pos, &entry);
-
-        pos += ENTRY_SIZE;
+        laid.extend_from_slice(&entry);
     }
-
-    pos as u64
+    Ok(laid)
 }
 
 /// Every online CPU's counters into `out`, or the CPU count when `out` is

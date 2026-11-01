@@ -108,4 +108,14 @@ are split in two. **7a**, delivered by the storage track's file-server work:
 a pager's objects, read through `SYS_PAGED_READ` and never mapped
 (`kernel/src/object/paged.rs`). **7b** stays this track's: mappings of them,
 faults that park, their page tables and reverse records, holders' kernel
-writes and their admission, after stage 4's seal.
+writes and their admission. **7b comes before stage 4**, by the
+orchestrator's ruling of 2026-11-01 on the owner's delegation: file mappings
+are on the critical path for file parity with Linux and for the storage
+track's name cache, and stage 4's seal layers onto mappings rather than the
+reverse. Its one prerequisite is the swap track's S0-a, met: every user copy
+runs outside every spin lock, since a fault that parks on a pager can hold
+none, and `user_ptr` refuses one made under a lock. A copy may still run under
+a sleeping lock, an open file's position or a console's line
+(`kernel/src/object/file.rs`, `object/device.rs`), so a fault parked there
+holds it: a pager that waits on the same description or console deadlocks
+against its own fault, which 7b's admission has to refuse.

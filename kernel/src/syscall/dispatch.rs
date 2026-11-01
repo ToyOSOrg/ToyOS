@@ -8,7 +8,7 @@
 //! runs for a decode refusal exactly as for a handler. `syscall_total` and
 //! `syscall_total_ns` then count and time the same set of calls.
 
-use crate::object::{ops, KObjectRef};
+use crate::object::ops;
 use crate::user_ptr::SyscallContext;
 use crate::UserAddr;
 use crate::process;
@@ -31,7 +31,7 @@ use super::fs::{
     spawn_cwd, sys_chdir, sys_delete, sys_getcwd, sys_mkdir, sys_open, sys_readdir, sys_readlink,
     sys_rename, sys_rmdir, sys_stat, sys_symlink,
 };
-use super::handles::{sys_close, sys_handle_dup, with_object, with_object_ref};
+use super::handles::{object, sys_close, sys_handle_dup, with_object};
 use super::io::{
     sys_console_carried, sys_null, sys_random, sys_read, sys_read_nonblock, sys_write, sys_write_nonblock,
 };
@@ -111,8 +111,8 @@ pub(crate) fn syscall_dispatch(num: u64, a1: u64, a2: u64, a3: u64, a4: u64) -> 
         }
         // No right: fstat moves no content, so gating on READ would fail isatty() on write-only handles.
         SYS_FSTAT => {
-            let stat = match with_object_ref(RawHandle(a1 as u32), Rights::NONE, ops::fstat) {
-                Ok(stat) => stat,
+            let stat = match object(RawHandle(a1 as u32), Rights::NONE) {
+                Ok(object) => ops::fstat(&object),
                 Err(e) => return e.refuse(),
             };
             match ctx.copy_out(UserAddr::new(a2), &stat) {
@@ -124,7 +124,7 @@ pub(crate) fn syscall_dispatch(num: u64, a1: u64, a2: u64, a3: u64, a4: u64) -> 
         // attempts, and a park under that lock is what the baseline tripwire refuses.
         // The clone outlives a concurrent close, the only other way this object is revoked.
         SYS_FSYNC => {
-            match with_object_ref(RawHandle(a1 as u32), Rights::WRITE, KObjectRef::clone) {
+            match object(RawHandle(a1 as u32), Rights::WRITE) {
                 Ok(object) => ops::fsync(&object),
                 Err(e) => e.refuse(),
             }

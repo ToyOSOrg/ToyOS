@@ -3,7 +3,7 @@
 use alloc::sync::Arc;
 
 use crate::file_cache::{self, FileId};
-use crate::sync::Lock;
+use crate::sleeplock::SleepLock;
 
 use super::ObjectCore;
 
@@ -24,16 +24,23 @@ impl Drop for OpenFileState {
 
 pub struct FileObject {
     pub(super) core: ObjectCore,
-    state: Lock<OpenFileState>,
+    /// A sleeping lock: a read or a write copies to or from its caller under
+    /// it, which keeps the position's update atomic with the transfer (POSIX
+    /// XSH 2.9.7) and holds no spin lock across the copy.
+    state: SleepLock<OpenFileState>,
 }
 
 impl FileObject {
     /// Over `core`, which the open charged before it opened the file.
     pub fn new(core: ObjectCore, state: OpenFileState) -> Arc<Self> {
-        Arc::new(Self { core, state: Lock::new(state) })
+        Arc::new(Self { core, state: SleepLock::new(state) })
     }
 
+    /// `f` over the open file's state; called holding no spin lock, as a
+    /// syscall does once it has cloned the object out of its handle table.
     pub fn with<R>(&self, f: impl FnOnce(&mut OpenFileState) -> R) -> R {
-        f(&mut self.state.lock())
+        let parkable = crate::scheduler::Parkable::at_entry();
+        let mut state = self.state.lock(&parkable);
+        f(&mut state)
     }
 }

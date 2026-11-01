@@ -87,20 +87,30 @@ impl<H> Queue<H> {
         self.messages.push_back(Head { len, handles: count });
     }
 
+    /// The front message, where a reader holding `buf` bytes and `cap`
+    /// handles can take it whole: what a receive claims before it copies the
+    /// message's bytes out.
+    pub fn front(&self, buf: usize, cap: usize) -> Option<Result<Head, Untaken>> {
+        let head = self.head()?;
+        Some(match head.len > buf || head.handles > cap {
+            true => Err(Untaken::TooSmall),
+            false => Ok(head),
+        })
+    }
+
     /// Take the front message into a reader holding `buf` bytes and `cap`
     /// handles, whose table `room` says can take its handles, which come
-    /// back in order. Its bytes are the caller's to copy out before this
-    /// hold ends.
+    /// back in order. Its bytes are the caller's to let go of.
     pub fn pop(
         &mut self,
         buf: usize,
         cap: usize,
         room: impl FnOnce(usize) -> bool,
     ) -> Option<Result<(Head, impl Iterator<Item = H> + '_), Untaken>> {
-        let head = self.head()?;
-        if head.len > buf || head.handles > cap {
-            return Some(Err(Untaken::TooSmall));
-        }
+        let head = match self.front(buf, cap)? {
+            Ok(head) => head,
+            Err(untaken) => return Some(Err(untaken)),
+        };
         if head.handles > 0 && !room(head.handles) {
             return Some(Err(Untaken::NoRoom));
         }
@@ -184,6 +194,21 @@ mod tests {
     }
 
     /// The table's room is asked only for a message that carries handles.
+    /// A receive claims the front without taking it: `front` refuses what the
+    /// reader cannot hold as `pop` would, and leaves the queue as it was.
+    #[test]
+    fn the_front_is_answered_and_left_queued() {
+        let mut d = Direction::new(64);
+        assert!(d.send(4, &[1, 2]));
+        assert!(d.send(1, &[]));
+        assert_eq!(d.queue.front(3, 8), Some(Err(Untaken::TooSmall)));
+        assert_eq!(d.queue.front(4, 1), Some(Err(Untaken::TooSmall)));
+        assert_eq!(d.queue.front(4, 2), Some(Ok(Head { len: 4, handles: 2 })));
+        assert_eq!(d.queue.len(), 2, "an answered front left the queue");
+        assert_eq!(d.recv(4, 2, true), Some(Ok((alloc::vec![0, 1, 2, 3], alloc::vec![1, 2]))));
+        assert_eq!(d.queue.front(1, 0), Some(Ok(Head { len: 1, handles: 0 })));
+    }
+
     #[test]
     fn a_message_without_handles_asks_no_room() {
         let mut d = Direction::new(8);

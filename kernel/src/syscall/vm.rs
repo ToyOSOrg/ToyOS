@@ -362,7 +362,8 @@ pub(super) fn sys_query_modules(out: &mut UserBytesMut) -> u64 {
     use toyos_abi::syscall::ModuleInfo;
     let info_size = core::mem::size_of::<ModuleInfo>();
 
-    process::with_process_data(|data| {
+    // Laid out under the process's lock and copied out after it.
+    let laid = process::with_process_data(|data| {
         let module_count = 1 + data.elf.loaded_libs.len();
 
         let exe_path_bytes = data.exe_path.as_bytes();
@@ -371,8 +372,10 @@ pub(super) fn sys_query_modules(out: &mut UserBytesMut) -> u64 {
 
         let required = module_count * info_size + total_path_bytes;
         if out.len() < required {
-            return required as u64;
+            return Err(required as u64);
         }
+        let mut laid = alloc::vec![0u8; required];
+        let mut put = |at: usize, bytes: &[u8]| laid[at..at + bytes.len()].copy_from_slice(bytes);
 
         // Record array ends at the first module's `path_offset`; paths are
         // packed after it in module order.
@@ -390,8 +393,8 @@ pub(super) fn sys_query_modules(out: &mut UserBytesMut) -> u64 {
             path_offset,
             path_len: exe_path_bytes.len() as u32,
         };
-        out.write_at(0, toyos_abi::usersafe::bytes(&exe_info));
-        out.write_at(path_offset as usize, exe_path_bytes);
+        put(0, toyos_abi::usersafe::bytes(&exe_info));
+        put(path_offset as usize, exe_path_bytes);
         path_offset += exe_path_bytes.len() as u32;
 
         for (i, lib) in data.elf.loaded_libs.iter().enumerate() {
@@ -410,11 +413,17 @@ pub(super) fn sys_query_modules(out: &mut UserBytesMut) -> u64 {
                 path_offset,
                 path_len: lib_path_bytes.len() as u32,
             };
-            out.write_at((1 + i) * info_size, toyos_abi::usersafe::bytes(&lib_info));
-            out.write_at(path_offset as usize, lib_path_bytes);
+            put((1 + i) * info_size, toyos_abi::usersafe::bytes(&lib_info));
+            put(path_offset as usize, lib_path_bytes);
             path_offset += lib_path_bytes.len() as u32;
         }
-
-        required as u64
-    })
+        Ok(laid)
+    });
+    match laid {
+        Ok(laid) => {
+            out.write_at(0, &laid);
+            laid.len() as u64
+        }
+        Err(required) => required,
+    }
 }

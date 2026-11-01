@@ -11,6 +11,7 @@ use toyos_abi::FramebufferInfo;
 
 use crate::device::{Claim, DeviceType};
 use crate::mm::charge::Exhausted;
+use crate::sleeplock::SleepLock;
 
 use super::handle::{HandleEntry, HandleTable};
 use super::shm::SharedMemObject;
@@ -124,24 +125,16 @@ impl DeviceClaim {
         self.info_read.load(Ordering::Relaxed)
     }
 
-    /// Write this claim's description into `buf`, minting handles on first call only.
-    pub fn describe(
-        &self,
-        table: &mut HandleTable,
-        buf: &mut crate::user_ptr::UserBytesMut,
-    ) -> u64 {
+    /// This claim's description, for its reader to copy out, minting handles
+    /// on first call only.
+    pub fn describe(&self, table: &mut HandleTable) -> Result<Box<[u8]>, SyscallError> {
         let mut described = self.described.lock();
         if described.bytes.is_none() {
-            match described.info.mint(table) {
-                Ok(minted) => described.bytes = Some(minted),
-                Err(e) => return e.to_u64(),
-            }
+            described.bytes = Some(described.info.mint(table)?);
         }
-        let bytes = described.bytes.as_deref().expect("just minted");
-        let count = buf.len().min(bytes.len());
-        buf.write_at(0, &bytes[..count]);
+        let bytes = described.bytes.clone().expect("just minted");
         self.info_read.store(true, Ordering::Relaxed);
-        count as u64
+        Ok(bytes)
     }
 }
 
@@ -155,8 +148,9 @@ impl ZeroHandles for DeviceClaim {
 /// One holder's view of the machine's serial console — each holder gets its own, never a shared handle.
 pub struct ConsoleObject {
     pub(super) core: ObjectCore,
-    // Lock order process_data -> line -> the console queue; taking them in reverse deadlocks.
-    line: crate::sync::Lock<crate::drivers::serial::ConsoleLine>,
+    /// A sleeping lock, which a write copies its caller's bytes under: one
+    /// write's lines are never interleaved with another's.
+    line: SleepLock<crate::drivers::serial::ConsoleLine>,
 }
 
 impl ConsoleObject {
@@ -164,14 +158,14 @@ impl ConsoleObject {
     pub fn new(job: &Arc<kernel::sched::job::Job>) -> Result<Arc<Self>, Exhausted> {
         Ok(Arc::new(Self {
             core: Self::new_core_for(job, 0)?,
-            line: crate::sync::Lock::new(crate::drivers::serial::ConsoleLine::new()),
+            line: SleepLock::new(crate::drivers::serial::ConsoleLine::new()),
         }))
     }
 
     /// Take a userland write, queueing every whole line it completes that the
     /// console has room for; answers the bytes taken.
     pub fn write(&self, buf: &crate::user_ptr::UserBytes) -> usize {
-        self.line.lock().write(buf)
+        self.line.lock(&crate::scheduler::Parkable::at_entry()).write(buf)
     }
 
     /// Whether this holder carries the log off the machine, so the UART does
@@ -200,12 +194,20 @@ impl ConsoleObject {
     }
 }
 
-// Flushes the partial line and gives the log back to the UART if this holder
-// carried it, on last handle: a dying holder's releases run before its end is
-// published, so its end never leaves the UART quiet.
+// Gives the log back to the UART if this holder carried it, on last handle: a
+// dying holder's releases run before its end is published, so its end never
+// leaves the UART quiet.
 impl ZeroHandles for ConsoleObject {
     fn on_zero_handles(&self) {
-        self.line.lock().finish();
         crate::log::console::released_by(self.holder());
+    }
+}
+
+// Flushes the partial line with the last reference, where no write can hold
+// the line: a write in flight holds a reference, and the release queue may
+// run `on_zero_handles` where no sleeping lock is taken.
+impl Drop for ConsoleObject {
+    fn drop(&mut self) {
+        self.line.try_lock().expect("a console's line held past its last reference").finish();
     }
 }
