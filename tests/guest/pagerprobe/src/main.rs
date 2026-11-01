@@ -39,7 +39,7 @@ fn main() {
         return hold();
     }
     let pager = Pager::create(LARGE + 16, 0, 4, Duration::from_secs(1)).expect("pagerprobe: its row starts it as a pager");
-    let large = pager.object(LARGE * PAGE).expect("pagerprobe: the large object");
+    let large = pager.object(LARGE * PAGE, 0).expect("pagerprobe: the large object");
     fill(&pager, large);
     assert_eq!(pager.withdraw(large, 0, u64::MAX), Ok(LARGE), "pagerprobe: the whole object withdrawn at once");
     fill(&pager, large);
@@ -49,10 +49,10 @@ fn main() {
         Err(Refused::Kernel(SyscallError::InvalidArgument)),
         "pagerprobe: a second release of one object was taken"
     );
-    let left = pager.object(LARGE * PAGE).expect("pagerprobe: the object the pager's end takes");
+    let left = pager.object(LARGE * PAGE, 0).expect("pagerprobe: the object the pager's end takes");
     fill(&pager, left);
     println!("pagerprobe: more than 512 MiB in one object withdrawn, released and left for the end");
-    let object = pager.object(4096).expect("pagerprobe: an object");
+    let object = pager.object(4096, 0).expect("pagerprobe: an object");
     let own = pager.holder(object).expect("pagerprobe: a holder for itself");
     // The handle is a holder, and this process a pager: refused by the kernel.
     assert_eq!(

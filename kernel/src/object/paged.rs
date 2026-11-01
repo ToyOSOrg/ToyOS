@@ -48,7 +48,7 @@ use core::sync::atomic::{AtomicU32, Ordering};
 use kernel::chunked::{Chunked, Stack};
 use kernel::paged::{Core, Draw, Leave, Lookup, Object, Pages, Refused, Supplied, Version, PAGE};
 use kernel::sched::task::WaitClass;
-use toyos_abi::syscall::{PagedNotice, SyscallError, NOTICE_NO_HOLDERS, NOTICE_REQUESTED};
+use toyos_abi::syscall::{PagedNotice, PagedStat, SyscallError, NOTICE_NO_HOLDERS, NOTICE_REQUESTED};
 
 use crate::mm::pmm;
 use crate::process::Pid;
@@ -271,9 +271,9 @@ impl PagerObject {
         unreported || state.no_holders > 0
     }
 
-    /// A new object of `size` bytes: its id. `ResourceExhausted` where every
-    /// slot holds one.
-    pub fn add(&self, size: u64) -> u64 {
+    /// A new object of `size` bytes last written at `mtime`: its id.
+    /// `ResourceExhausted` where every slot holds one.
+    pub fn add(&self, size: u64, mtime: u64) -> u64 {
         if size > kernel::paged::LAST_END {
             return SyscallError::InvalidArgument.to_u64();
         }
@@ -282,7 +282,7 @@ impl PagerObject {
             return SyscallError::Gone.to_u64();
         }
         let Some(slot) = state.free.pop() else { return SyscallError::ResourceExhausted.to_u64() };
-        let object = state.pages.object(slot, size);
+        let object = state.pages.object(slot, size, mtime);
         state.entries[slot as usize] = Some(Entry { object, refs: 1, holders: 0, owned: true, no_holders: false });
         u64::from(slot)
     }
@@ -588,15 +588,43 @@ impl PagerObject {
         Step::Copy(count)
     }
 
-    /// A write call on object `id` begins: its slot, held by a reference until
-    /// [`Self::write_end`], so no release can hand it to another object.
-    fn write_begin(&self, id: u64) -> Result<u32, SyscallError> {
+    /// A write call on object `id` begins, stamping it `mtime` where given:
+    /// its slot, held by a reference until [`Self::write_end`], so no release
+    /// can hand it to another object.
+    fn write_begin(&self, id: u64, mtime: Option<u64>) -> Result<u32, SyscallError> {
         let mut state = self.state.lock();
         let slot = state.live(id)?;
         let entry = state.entry_mut(slot);
         entry.refs += 1;
         entry.object.write_begin();
+        if let Some(mtime) = mtime {
+            entry.object.set_mtime(mtime);
+        }
         Ok(slot)
+    }
+
+    /// Stamp object `id` last written at `mtime`.
+    pub fn stamp(&self, id: u64, mtime: u64) -> u64 {
+        let mut state = self.state.lock();
+        match state.live(id) {
+            Ok(slot) => {
+                state.entry_mut(slot).object.set_mtime(mtime);
+                0
+            }
+            Err(e) => e.to_u64(),
+        }
+    }
+
+    /// What the object at `slot` publishes to a holder: `WouldBlock` while a
+    /// write is under way.
+    fn stat(&self, slot: u32) -> Result<PagedStat, SyscallError> {
+        let state = self.state.lock();
+        let object = &state.entry(slot).object;
+        if state.gone || object.gone() {
+            return Err(SyscallError::Gone);
+        }
+        let version = object.published().ok_or(SyscallError::WouldBlock)?;
+        Ok(PagedStat { size: object.size(), mtime: object.mtime(), version })
     }
 
     /// The write call [`Self::write_begin`] began ends, `whole` where it took
@@ -627,7 +655,7 @@ impl PagerObject {
         if !dirty {
             return self.supply_pages(id, offset, src, false);
         }
-        let slot = match self.write_begin(id) {
+        let slot = match self.write_begin(id, None) {
             Ok(slot) => slot,
             Err(e) => return e.to_u64(),
         };
@@ -728,11 +756,11 @@ impl PagerObject {
         installed
     }
 
-    /// Copy `src` into the present pages of object `id` from `offset`, dirty:
-    /// the bytes written, up to the first absent page. The caller checked the
-    /// span is in reach.
-    pub fn write(&self, id: u64, offset: u64, src: &UserBytes) -> u64 {
-        let slot = match self.write_begin(id) {
+    /// Copy `src` into the present pages of object `id` from `offset`, dirty,
+    /// stamping it `mtime`: the bytes written, up to the first absent page.
+    /// The caller checked the span is in reach.
+    pub fn write(&self, id: u64, offset: u64, src: &UserBytes, mtime: u64) -> u64 {
+        let slot = match self.write_begin(id, Some(mtime)) {
             Ok(slot) => slot,
             Err(e) => return e.to_u64(),
         };
@@ -819,11 +847,12 @@ impl PagerObject {
         }
     }
 
-    pub fn resize(&self, id: u64, size: u64) -> u64 {
+    pub fn resize(&self, id: u64, size: u64, mtime: u64) -> u64 {
         if size > kernel::paged::LAST_END {
             return SyscallError::InvalidArgument.to_u64();
         }
         let resized = self.removing(id, |pages, object, out| {
+            object.set_mtime(mtime);
             if let Some(phys) = pages.resize(object, size, &mut |f| out(f)) {
                 let within = (size % PAGE) as usize;
                 // SAFETY: the last page's frame, the object's while the lock is
@@ -1087,6 +1116,10 @@ impl PagedHolderObject {
 
     pub fn read(&self, out: &mut UserBytesMut, offset: u64) -> u64 {
         self.named.pager.read(self.named.slot, out, offset, true)
+    }
+
+    pub fn stat(&self) -> Result<PagedStat, SyscallError> {
+        self.named.pager.stat(self.named.slot)
     }
 }
 
