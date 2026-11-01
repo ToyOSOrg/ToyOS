@@ -11,7 +11,7 @@ use crate::model::{Engine, Pcode};
 use crate::watermark::{self, Latencies, Level, Pipe, Plane, Tiling};
 use crate::{keep_memory_low_power, regs, Refusal};
 
-const T14_PLANE: Plane = Plane { width: 1920, bytes_per_pixel: 4, tiling: Tiling::Linear, allocation: 681 };
+const T14_PLANE: Plane = Plane { width: 1920, bytes_per_pixel: 4, tiling: Tiling::Linear, allocation: 682 };
 const T14_PIPE: Pipe = Pipe { htotal: 2080, pixel_rate_khz: 138_778 };
 
 fn lvl(blocks: u64, lines: u64) -> Option<Level> {
@@ -21,14 +21,13 @@ fn lvl(blocks: u64, lines: u64) -> Option<Level> {
 #[test]
 fn the_t14s_pcode_words_are_its_latencies_with_three_us_added() {
     let found = Latencies::from_pcode(0x3333_3300, 0x706b_4633);
-    let us = [3, 54, 54, 54, 54, 73, 110, 115];
-    assert_eq!(found, Latencies(us.map(Some)));
+    assert_eq!(found, Latencies { zero: 3, above: [54, 54, 54, 54, 73, 110, 115].map(Some) });
 }
 
 #[test]
 fn a_zero_level_above_zero_ends_the_valid_levels() {
     let found = Latencies::from_pcode(0x0012_3305, 0x0000_0040);
-    assert_eq!(found.0, [Some(5), Some(0x33), Some(0x12), None, None, None, None, None]);
+    assert_eq!(found, Latencies { zero: 5, above: [Some(0x33), Some(0x12), None, None, None, None, None] });
 }
 
 #[test]
@@ -38,7 +37,8 @@ fn every_t14_level_fits_and_level_zero_carries_sagv() {
     // 16 blocks a line; ceiling[latency × 138.778 / 2080] lines of them.
     // Level 0 at 3 + 11 µs: 1 line; 54 µs: 4; 73 µs: 5; 110 and 115 µs: 8.
     assert!(found.tolerates_sagv);
-    assert_eq!(found.levels, [lvl(17, 1), lvl(65, 4), lvl(65, 4), lvl(65, 4), lvl(65, 4), lvl(81, 5), lvl(129, 8), lvl(129, 8)]);
+    assert_eq!(found.zero, Level { blocks: 17, lines: 1 });
+    assert_eq!(found.above, [lvl(65, 4), lvl(65, 4), lvl(65, 4), lvl(65, 4), lvl(81, 5), lvl(129, 8), lvl(129, 8)]);
 }
 
 #[test]
@@ -47,8 +47,8 @@ fn a_level_past_the_allocation_disables_it_and_every_level_above() {
     // 129 blocks need 142 with Vol 12's tenth; 81 need 90.
     let plane = Plane { allocation: 100, ..T14_PLANE };
     let found = watermark::watermarks(&latencies, 11, &plane, &T14_PIPE).expect("level 0 fits");
-    assert_eq!(found.levels[5], lvl(81, 5));
-    assert_eq!(found.levels[6..], [None, None]);
+    assert_eq!(found.above[4], lvl(81, 5));
+    assert_eq!(found.above[5..], [None, None]);
 }
 
 #[test]
@@ -149,6 +149,36 @@ fn level_zero_takes_the_sagv_block_time_and_the_levels_above_do_not() {
     let latencies = Latencies::from_pcode(0x3333_3300, 0x706b_4633);
     // Level 0 at 3 + 30 µs: ceiling[33 × 138.778 / 2080] = 3 lines, 48 + 1 blocks.
     let found = watermark::watermarks(&latencies, 30, &T14_PLANE, &T14_PIPE).expect("level 0 fits");
-    assert_eq!(found.levels[0], lvl(49, 3));
-    assert_eq!(found.levels[1], lvl(65, 4));
+    assert_eq!(found.zero, Level { blocks: 49, lines: 3 });
+    assert_eq!(found.above[0], lvl(65, 4));
+}
+
+#[test]
+fn an_allocation_short_of_a_line_takes_method_one_below_a_line_time() {
+    // 10 blocks hold less than a line's 16, and 3 µs is under the 15 µs line
+    // time, so method 1: 3 × 138.778 × 4 / 512 + 1 = 4.25, so 5 + 1 blocks, 1 line.
+    let plane = Plane { allocation: 10, ..T14_PLANE };
+    assert_eq!(watermark::level(3, &plane, &T14_PIPE), lvl(6, 1));
+}
+
+#[test]
+fn a_mailbox_that_stays_busy_is_refused_with_no_display_register_written() {
+    let engine = Engine::t14();
+    let r: BTreeMap<_, _> = engine.regs.borrow().clone();
+    let stuck = Engine::new(r, Some(16_666_667), Pcode { latency_first: 0, latency_second: 0, sagv_block_us: 0, busy_reads: u32::MAX, error: 0 });
+    refused(&stuck, Refusal::Mailbox { command: 0x06, interface: regs::RUN_BUSY });
+}
+
+#[test]
+fn a_plane_rotated_90_is_refused_untouched() {
+    let engine = Engine::t14();
+    engine.set(regs::plane_ctl(0, 1), 0x8400_0009);
+    refused(&engine, Refusal::Layout(0x8400_0009));
+}
+
+#[test]
+fn a_decompressing_plane_is_refused_untouched() {
+    let engine = Engine::t14();
+    engine.set(regs::plane_ctl(0, 1), 0x8400_8008);
+    refused(&engine, Refusal::Layout(0x8400_8008));
 }

@@ -235,7 +235,7 @@ impl OwnSpace {
     /// it at its own addresses, before the function can attach.
     pub fn create(room: u64, bus: u8, device: u8, function: u8) -> Result<(Self, u64), IommuError> {
         let (id, at) = unit::domain::create(room)?;
-        unit::domain::keep_reserved(id, StreamId::pci(bus, device, function))?;
+        unit::domain::keep_reserved(id, StreamId::pci(bus, device, function));
         Ok((Self(id), at.raw()))
     }
 

@@ -95,7 +95,11 @@ negative control:
   `00:07.0` or `00:07.2`) is refused by name;
 - a claim of a function an RMRR names is refused unless it is a display or USB
   controller that RMRR names alone, whose region is then mapped into its
-  driver's domain (the T14's iGPU row);
+  driver's domain (the T14's iGPU row). **Built:**
+  - VT-d's `unclaimable` refuses the rest by name, from `kernel::rmrr::verdict`.
+  - Host tests cover the verdict.
+  - The T14 row is `tgl-display`'s claim (pull request #1125). Its boot reads `iommu: domainN keeps 00:02.0's reserved 0x9c000000..0xa0800000`.
+  - Still owed: the refusal read on a machine whose RMRR names another class or several devices.
 - from the hand-over on, a device that is neither a display nor a USB
   controller faults on its own RMRR region, is logged and stopped, and the
   machine keeps running; a display or USB controller whose RMRR also names
