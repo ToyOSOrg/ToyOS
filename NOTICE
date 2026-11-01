@@ -663,6 +663,44 @@ recorded for its own over-reads. Nothing in this repository fetches
 them, and no test reads tcpdump's dissection of them.
 
 
+system/wlan/handshake/tests/fixtures/ — handshakes wpa_supplicant recorded
+--------------------------------------------------------------------------
+
+    psk.pcap     1,289 bytes
+      sha256 ae7b93c03d1e5a236fc3c4537c7550021367095a2a8a020ab66f59edba7de6bc
+    pmf.pcap     1,333 bytes
+      sha256 c6e7ede7c923975dc260e84efdfd5825e2ab4e09dc1ad1a723a3bd3255e7152b
+    SPDX-License-Identifier: MIT OR Apache-2.0
+
+`toyos-wlan-handshake`'s `tests/capture.rs` replays these. Each holds six frames
+of one recorded join, unmodified: the access point's Probe Response, the
+station's Association Request and the four EAPOL-Key frames. They are six
+records of a radiotap capture of every frame on the medium (tcpdump on `hwsim0`),
+copied with their pcap header and nothing else.
+
+The join was between two wpa_supplicant v2.10 processes, Ubuntu 24.04's
+package. One was an access point (`mode=2`), and both ran over two
+`mac80211_hwsim` radios on a Linux bench on 2026-11-01. The settings were
+SSID `toyos-w2a`, passphrase `ThisIsAPassword`, RSN, WPA-PSK and CCMP, with
+`eapol_version=2`. `ieee80211w` was 0 for `psk.pcap` and 2 for `pmf.pcap`.
+The addresses are locally administered ones that the capture script set
+(02:00:00:00:a0:01 and 02:00:00:00:b0:02). The nonces and keys are those runs'
+random values, for a network that exists nowhere else. The script and both
+sides' logs are on `ToyOSOrg/evidence`, branch `pr-1130`.
+
+`rekey-psk.txt` and `rekey-pmf.txt` come from a second run of the same setup.
+That run added one change: the station's `wpa_ptk_rekey=6`, so twice per run it
+asked for a new 4-way handshake. Each file is text that
+`tools/rekeyfixture.py` on the evidence branch wrote. It holds the addresses
+and the RSNEs from that run's Probe Response and Association Request, then every
+EAPOL-Key frame and key that the station's `-dd -K` log printed, in order. On
+air the rekeys are CCMP-protected, so the log is the record of their bytes.
+
+wpa_supplicant is BSD-3-Clause. That licence covers the program, not the frames
+it sent over a simulated medium for this repository's own test network. Those
+frames are protocol messages computed from our settings and the run's random
+values, so the bytes are this project's own.
+
 build/microcode/intel-ucode/* — Intel microcode, redistributable unmodified
 ---------------------------------------------------------------------------
 

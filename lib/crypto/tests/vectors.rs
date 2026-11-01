@@ -247,3 +247,52 @@ fn rfc7914_scrypt() {
         assert_eq!(out, spaced::<64>(expected), "N = 2^{log_n}, r = {r}, p = {p}");
     }
 }
+
+/// IEEE Std 802.11-2020 Annex J: the PRF's four test vectors and the pass-phrase-to-PSK
+/// mapping's two beyond `differential.rs`'s ("password", "IEEE").
+#[cfg(feature = "wpa2")]
+#[test]
+fn ieee80211_annex_j_prf_and_psk() {
+    use toyos_crypto::wpa2;
+    fn prf<const N: usize>(key: &[u8], label: &str, data: &str) -> [u8; N] {
+        let mut out = [0; N];
+        wpa2::prf(key, label.as_bytes(), data.as_bytes(), &mut out).unwrap();
+        out
+    }
+    assert_eq!(
+        prf::<24>(&[0x0b; 20], "prefix", "Hi There"),
+        hex("bcd4c650b30b9684951829e0d75f9d54b862175ed9f00606")
+    );
+    assert_eq!(
+        prf::<32>(b"Jefe", "prefix-2", "what do ya want for nothing?"),
+        hex("47c4908e30c947521ad20be9053450ecbea23d3aa604b77326d8b3825ff7475c")
+    );
+    assert_eq!(
+        prf::<48>(&[0xaa; 80], "prefix-3", "Test Using Larger Than Block-Size Key - Hash Key First"),
+        hex("0ab6c33ccf70d0d736f4b04c8a7373255511abc5073713163bd0b8c9eeb7e1956fa066820a73ddee3f6d3bd407e0682a")
+    );
+    assert_eq!(
+        prf::<64>(&[0x0b; 20], "prefix-4", "Hi There Again"),
+        hex(
+            "248cfbc532ab38ffa483c8a2e40bf170eb542a2e0916d7bf6d97da2c4c5ca877\
+             736c53a65b03fa4b3745ce7613f6ad68e0e4a798b7cf691c96176fd634a59a49"
+        )
+    );
+    assert_eq!(
+        wpa2::derive_pmk(b"ThisIsAPassword", b"ThisIsASSID").unwrap().as_bytes(),
+        &hex("0dc0d6eb90555ed6419756b9a15ec3e3209b63df707dd508d14581f8982721af")
+    );
+    assert_eq!(
+        wpa2::derive_pmk(&[b'a'; 32], &[b'Z'; 32]).unwrap().as_bytes(),
+        &hex("becb93866bb8c3832cb777c2f559807c8c59afcb6eae734885001300a981cc62")
+    );
+}
+
+/// RFC 6070's one PBKDF2-HMAC-SHA1 case at the PMK's 4096 iterations whose password and salt
+/// a pass-phrase and SSID can be: its 20 octets are the PMK's first.
+#[cfg(feature = "wpa2")]
+#[test]
+fn rfc6070_pbkdf2_hmac_sha1_at_4096_iterations() {
+    let pmk = toyos_crypto::wpa2::derive_pmk(b"password", b"salt").unwrap();
+    assert_eq!(pmk.as_bytes()[..20], hex::<20>("4b007901b765489abead49d926f721d065a429c1"));
+}

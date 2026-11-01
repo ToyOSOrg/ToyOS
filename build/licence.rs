@@ -496,6 +496,20 @@ pub const COMMITTED_FILES: &[(&str, &str, &str, Terms)] = &[
         "NOTICE",
         Terms::Spdx("(MIT OR Apache-2.0) AND BSD-2-Clause"),
     ),
+    // Handshakes two wpa_supplicants recorded over mac80211_hwsim, read by
+    // `system/wlan/handshake/tests/capture.rs`; `NOTICE` says how.
+    (
+        "system/wlan/handshake/tests/fixtures/pmf.pcap",
+        "c6e7ede7c923975dc260e84efdfd5825e2ab4e09dc1ad1a723a3bd3255e7152b",
+        "NOTICE",
+        Terms::Spdx("MIT OR Apache-2.0"),
+    ),
+    (
+        "system/wlan/handshake/tests/fixtures/psk.pcap",
+        "ae7b93c03d1e5a236fc3c4537c7550021367095a2a8a020ab66f59edba7de6bc",
+        "NOTICE",
+        Terms::Spdx("MIT OR Apache-2.0"),
+    ),
     // Captures from tcpdump's test suite, read hermetically by `lib/ieee80211/tests/corpus.rs`.
     (
         "lib/ieee80211/tests/fixtures/tcpdump/ieee802.11_exthdr.pcap",

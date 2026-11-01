@@ -73,7 +73,7 @@ pub(crate) fn wipe64(words: &mut [u64]) {
 /// The all-zero bit pattern must be a valid `Self`: no references,
 /// `NonZero` fields or enums without a zero discriminant. `Self` has no
 /// padding, so its bytes are all initialised.
-pub(crate) unsafe trait Zeroable: Copy {}
+pub unsafe trait Zeroable: Copy {}
 // SAFETY: an integer is valid at zero.
 unsafe impl Zeroable for u8 {}
 // SAFETY: as `u8`.
@@ -95,8 +95,24 @@ pub(crate) fn erase<T: Zeroable>(value: &mut T) {
     wipe(unsafe { core::slice::from_raw_parts_mut((value as *mut T).cast::<u8>(), core::mem::size_of::<T>()) });
 }
 
-/// An owned array of `N` words, erased on drop.
-pub(crate) struct Secret<const N: usize, T: Zeroable = u8>(pub(crate) [T; N]);
+/// An owned array of `N` words, erased on drop: its own storage is overwritten with zeros by
+/// volatile stores, under the module's contract. A copy made before it was owned, such as the
+/// array [`Secret::new`] moves in from, is the caller's to erase.
+pub struct Secret<const N: usize, T: Zeroable = u8>(pub(crate) [T; N]);
+
+impl<const N: usize, T: Zeroable> Secret<N, T> {
+    pub const fn new(value: [T; N]) -> Self {
+        Self(value)
+    }
+
+    pub const fn expose(&self) -> &[T; N] {
+        &self.0
+    }
+
+    pub fn expose_mut(&mut self) -> &mut [T; N] {
+        &mut self.0
+    }
+}
 
 impl<const N: usize, T: Zeroable> Drop for Secret<N, T> {
     fn drop(&mut self) {

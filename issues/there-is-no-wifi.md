@@ -295,6 +295,27 @@ W1, P6.
   - an SAE Confirm that does not verify;
   - an SAE Commit with an invalid scalar or element;
   - a PSK handshake for a network marked by Transition Disable.
+- **W2a, WPA2-Personal: built** (`system/wlan/handshake`,
+  `toyos-wlan-handshake`), on `lib/crypto`'s `ct::equal` and `Secret`. The 4-way and group key
+  handshakes under AKM 2 with CCMP-128, the IGTK under BIP-CMAC-128 when
+  PMF is negotiated. The first six refusals above are host tests against an
+  authenticator in the tests that shares no crypto code with the crate;
+  Annex J's PRF and pass-phrase vectors, and RFC 6070's one case a
+  pass-phrase and SSID can be, are `lib/crypto`'s.
+  - **The captured handshake** is two of wpa_supplicant v2.10's, one an
+    access point, over `mac80211_hwsim`: plain PSK and PMF required. Messages
+    2 and 4 are answered byte for byte, and the keys are the station's own.
+    So are two PTK rekeys per run, which the station asked for. As the
+    station did, they reinstall no group key.
+  - **No group key handshake is recorded.** v2.10's access point parsed
+    `group_rekey` and never rekeyed, and its `wpa_cli` has no `REKEY_GTK`.
+    Group message 1 is tested only against the tests' authenticator, and is
+    first met for real in W6's T14 rows.
+  - Its readings of the text are
+    `issues/the-wlan-handshakes-readings-of-802-11-are-unchecked-against-its-text.md`.
+  - **W2b waits for P6:** SAE, AES-CMAC, AKM 6 (PSK-SHA256), and the
+    Transition Disable KDE with its PSK refusal. RFCs 4493 and 9380 are its
+    vectors.
 
 **W3, the firmware: done.** Depends on: the specification, revision 2.
 - **Scope:**

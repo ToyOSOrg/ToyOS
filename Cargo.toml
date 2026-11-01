@@ -150,6 +150,7 @@ members = [
     "system/vdagent",
     "system/vdagent/bridge",
     "system/virtio-net",
+    "system/wlan/handshake",
     "tests/guest/hangupholder",
     "tests/guest/inputsink",
     "tests/guest/kernelprobe",
