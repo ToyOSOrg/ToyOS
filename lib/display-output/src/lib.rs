@@ -300,6 +300,98 @@ impl Presenting {
     }
 }
 
+/// Why the compositor ends a driver's connection.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum Ended {
+    /// No hello came before the deadline.
+    Late,
+    /// The hello offers an output of another size than the desktop is drawn
+    /// at.
+    Size { offered: Size, drawn: Size },
+    /// A frame this protocol does not have, or one carrying handles, which
+    /// none of its frames carries.
+    Frame(u32),
+    /// A frame of this protocol that the connection's state has not: a second
+    /// hello, or an answer before the hello.
+    OutOfState(u32),
+    /// An answer to no outstanding present.
+    Unasked(Unasked),
+}
+
+/// What a frame from the driver did.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum Received {
+    /// The hello was taken.
+    Offered(Size),
+    /// A present was answered: the driver's first answer or a later one, and
+    /// the present owed since, if any.
+    Answered { first: bool, presented: Presented, next: Option<Present> },
+}
+
+/// The compositor's side of one driver's connection: its hello awaited until
+/// a deadline, then its output presented to.
+#[derive(Debug)]
+pub struct Output {
+    deadline_nanos: u64,
+    serving: Option<Serving>,
+}
+
+#[derive(Debug)]
+struct Serving {
+    size: Size,
+    presenting: Presenting,
+    answered: bool,
+}
+
+impl Output {
+    /// A connection accepted, whose hello is due by `deadline_nanos`.
+    pub fn new(deadline_nanos: u64) -> Self {
+        Self { deadline_nanos, serving: None }
+    }
+
+    /// Whether its hello is overdue at `now_nanos`.
+    pub fn overdue(&self, now_nanos: u64) -> bool {
+        self.serving.is_none() && now_nanos > self.deadline_nanos
+    }
+
+    /// The output it scans out, once its hello was taken.
+    pub fn size(&self) -> Option<Size> {
+        self.serving.as_ref().map(|serving| serving.size)
+    }
+
+    /// A frame of `msg_type` carrying `payload` and `handles` handles, read
+    /// at `now_nanos` from a driver of a desktop drawn at `drawn`.
+    pub fn received(&mut self, now_nanos: u64, msg_type: u32, payload: &[u8], handles: usize, drawn: Size) -> Result<Received, Ended> {
+        if self.overdue(now_nanos) {
+            return Err(Ended::Late);
+        }
+        if handles != 0 {
+            return Err(Ended::Frame(msg_type));
+        }
+        match (FromDriver::decode(msg_type, payload).ok_or(Ended::Frame(msg_type))?, &mut self.serving) {
+            (FromDriver::Hello(hello), None) => {
+                if hello.size != drawn {
+                    return Err(Ended::Size { offered: hello.size, drawn });
+                }
+                self.serving = Some(Serving { size: hello.size, presenting: Presenting::new(), answered: false });
+                Ok(Received::Offered(hello.size))
+            }
+            (FromDriver::Presented(presented), Some(serving)) => {
+                let next = serving.presenting.presented(&presented).map_err(Ended::Unasked)?;
+                let first = !core::mem::replace(&mut serving.answered, true);
+                Ok(Received::Answered { first, presented, next })
+            }
+            _ => Err(Ended::OutOfState(msg_type)),
+        }
+    }
+
+    /// `rects` of the output were composed: the present to send now, if one
+    /// is due. Nothing before the hello.
+    pub fn composed(&mut self, rects: impl IntoIterator<Item = Rect>) -> Option<Present> {
+        self.serving.as_mut()?.presenting.damaged(rects)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -397,6 +489,48 @@ mod tests {
         assert_eq!(presenting.presented(&answer(2)), Ok(None), "nothing is owed");
         assert_eq!(presenting.damaged([]), None, "no damage is no present");
         assert_eq!(presenting.damaged([rect(1, 1, 1, 1)]).map(|p| p.sequence), Some(3));
+    }
+
+    /// A hello that comes after the deadline ends the connection by name,
+    /// in the same call that reads it: no other state can be stale.
+    #[test]
+    fn a_hello_after_the_deadline_ends_the_connection() {
+        let hello = Hello { size: HD }.encode();
+        let mut output = Output::new(2_000);
+        assert!(!output.overdue(2_000));
+        assert!(output.overdue(2_001));
+        assert_eq!(output.received(2_001, MSG_HELLO, &hello, 0, HD), Err(Ended::Late));
+        let mut output = Output::new(2_000);
+        assert_eq!(output.received(1_999, MSG_HELLO, &hello, 0, HD), Ok(Received::Offered(HD)));
+        assert!(!output.overdue(u64::MAX), "a hello taken is never overdue");
+    }
+
+    #[test]
+    fn a_driver_out_of_protocol_ends_its_connection_by_name() {
+        let hello = Hello { size: HD }.encode();
+        let other = Size { width: 1280, height: 800 };
+        assert_eq!(Output::new(10).received(0, MSG_HELLO, &hello, 0, other), Err(Ended::Size { offered: HD, drawn: other }));
+        assert_eq!(Output::new(10).received(0, MSG_HELLO, &hello, 1, HD), Err(Ended::Frame(MSG_HELLO)), "a handle");
+        assert_eq!(Output::new(10).received(0, 99, &[], 0, HD), Err(Ended::Frame(99)));
+        let answer = Presented { sequence: 1, vblank_nanos: 5, refresh_interval_nanos: 16_666_667 }.encode();
+        assert_eq!(Output::new(10).received(0, MSG_PRESENTED, &answer, 0, HD), Err(Ended::OutOfState(MSG_PRESENTED)), "before the hello");
+        let mut output = Output::new(10);
+        output.received(0, MSG_HELLO, &hello, 0, HD).expect("taken");
+        assert_eq!(output.received(0, MSG_HELLO, &hello, 0, HD), Err(Ended::OutOfState(MSG_HELLO)), "a second hello");
+        assert_eq!(output.received(0, MSG_PRESENTED, &answer, 0, HD), Err(Ended::Unasked(Unasked { sequence: 1, outstanding: None })));
+    }
+
+    #[test]
+    fn a_served_output_is_presented_to_and_its_first_answer_is_said() {
+        let mut output = Output::new(10);
+        assert_eq!(output.composed([rect(0, 0, 1, 1)]), None, "nothing before the hello");
+        output.received(0, MSG_HELLO, &Hello { size: HD }.encode(), 0, HD).expect("taken");
+        let first = output.composed([rect(0, 0, 1, 1)]).expect("a present");
+        let presented = Presented { sequence: first.sequence, vblank_nanos: 5, refresh_interval_nanos: 16_666_667 };
+        assert_eq!(output.received(100, MSG_PRESENTED, &presented.encode(), 0, HD), Ok(Received::Answered { first: true, presented, next: None }));
+        let second = output.composed([rect(1, 1, 1, 1)]).expect("a present");
+        let presented = Presented { sequence: second.sequence, ..presented };
+        assert!(matches!(output.received(200, MSG_PRESENTED, &presented.encode(), 0, HD), Ok(Received::Answered { first: false, .. })));
     }
 
     #[test]

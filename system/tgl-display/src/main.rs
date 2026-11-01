@@ -117,28 +117,57 @@ fn park() -> ! {
 const TOKEN_CLAIM: u64 = 0;
 const TOKEN_COMPOSITOR: u64 = 1;
 
-/// The firmware's output offered on `display-output`, once: when the
-/// connection ends, for whatever reason is said, presents stop and the
-/// scan-out stays. A connection the compositor refused would only be refused
-/// again.
+/// How many times the driver connects again after a connection that was
+/// answering presents ended with the compositor gone. Past it, presents stop
+/// for the boot.
+const RECONNECTS: u32 = 8;
+
+/// Why a connection ended.
+enum Ended {
+    /// The compositor went away: it hung up, or took no answer. `answered`:
+    /// the connection had answered a present, so its hello was taken.
+    Gone { answered: bool, why: String },
+    /// A frame out of protocol, or this driver could not answer: connecting
+    /// again would end the same way.
+    Refused(String),
+}
+
+/// The firmware's output offered on `display-output`, again after a
+/// compositor that was taking presents goes away, at most [`RECONNECTS`]
+/// times. The connection is made at once whether or not the compositor
+/// serves yet; the next present is the event that it does. Presents stop,
+/// and say why, at a refusal, or a compositor gone before it took a hello;
+/// the scan-out stays either way.
 fn serve(dev: &PciDev, regs: &Bar, done: &Programmed) {
     let size = Size { width: done.scanout.width as u32, height: done.scanout.height as u32 };
     interrupt::claim(regs);
-    let conn = match endow::service(PORT) {
-        Ok(conn) => conn,
-        Err(why) => return say!("tgl-display: no `{PORT}` connection ({why:?}); presents go unanswered"),
-    };
-    if let Err(why) = conn.send_bytes(MSG_HELLO, &Hello { size }.encode()) {
-        return say!("tgl-display: the compositor took no hello ({why:?}); presents go unanswered");
+    let mut reconnects = 0;
+    loop {
+        let conn = match endow::service(PORT) {
+            Ok(conn) => conn,
+            Err(why) => break say!("tgl-display: no `{PORT}` connection ({why:?}); presents go unanswered"),
+        };
+        if let Err(why) = conn.send_bytes(MSG_HELLO, &Hello { size }.encode()) {
+            break say!("tgl-display: the compositor took no hello ({why:?}); presents go unanswered");
+        }
+        say!("tgl-display: offered the compositor its {}x{} output", size.width, size.height);
+        match answer(dev, regs, &conn, size, done.refresh_interval_nanos()) {
+            Ended::Gone { answered: true, why } if reconnects < RECONNECTS => {
+                reconnects += 1;
+                say!("tgl-display: {why}; connecting again ({reconnects} of {RECONNECTS})");
+            }
+            Ended::Gone { answered: true, why } => {
+                break say!("tgl-display: presents go unanswered — {why}, after {RECONNECTS} connections again");
+            }
+            Ended::Gone { answered: false, why } | Ended::Refused(why) => break say!("tgl-display: presents go unanswered — {why}"),
+        }
     }
-    say!("tgl-display: offered the compositor its {}x{} output", size.width, size.height);
-    let why = answer(dev, regs, &conn, size, done.refresh_interval_nanos());
-    say!("tgl-display: presents go unanswered — {why}");
+    interrupt::release(regs);
 }
 
 /// Every present on `conn` answered at the vblank after it arrived, until
 /// one cannot be: why.
-fn answer(dev: &PciDev, regs: &Bar, conn: &Connection, size: Size, refresh_interval_nanos: u64) -> String {
+fn answer(dev: &PciDev, regs: &Bar, conn: &Connection, size: Size, refresh_interval_nanos: u64) -> Ended {
     let poller = Poller::new(2);
     let mut rx = FrameRx::<MAX_FRAME>::new();
     // The present waiting for its vblank, and when that vblank is overdue.
@@ -156,7 +185,7 @@ fn answer(dev: &PciDev, regs: &Bar, conn: &Connection, size: Size, refresh_inter
                     if let Some((sequence, _)) = outstanding.take() {
                         let presented = Presented { sequence, vblank_nanos: record.last_nanos, refresh_interval_nanos };
                         if let Err(why) = conn.send_bytes(MSG_PRESENTED, &presented.encode()) {
-                            return format!("the compositor took no answer ({why:?})");
+                            return Ended::Gone { answered, why: format!("the compositor took no answer ({why:?})") };
                         }
                         if !answered {
                             answered = true;
@@ -165,21 +194,24 @@ fn answer(dev: &PciDev, regs: &Bar, conn: &Connection, size: Size, refresh_inter
                     }
                 }
                 Ok(false) => {}
-                Err(why) => return why.to_string(),
+                Err(why) => return Ended::Refused(why.to_string()),
             },
             Err(SyscallError::WouldBlock) => {}
             Err(why) => panic!("tgl-display: the claim's interrupt record: {why:?}"),
         }
         if outstanding.is_some_and(|(_, overdue)| toyos_abi::clock::nanos_since_boot() >= overdue) {
-            return format!("no vblank within {} ms of a present", FRAME_CEILING_NANOS / 1_000_000);
+            return Ended::Refused(format!("no vblank within {} ms of a present", FRAME_CEILING_NANOS / 1_000_000));
         }
 
         loop {
             let (msg_type, payload_len) = match rx.pump(conn) {
                 RxStep::Idle => break,
-                RxStep::Frame { msg_type, payload_len, .. } => (msg_type, payload_len),
-                RxStep::Eof => return format!("the compositor hung up `{PORT}`"),
-                RxStep::Malformed => return "the compositor sent a frame no protocol here can make".into(),
+                RxStep::Frame { msg_type, payload_len, handles: 0 } => (msg_type, payload_len),
+                RxStep::Frame { msg_type, .. } => {
+                    return Ended::Refused(format!("the compositor sent frame {msg_type} with handles, which `{PORT}` has none of"));
+                }
+                RxStep::Eof => return Ended::Gone { answered, why: format!("the compositor hung up `{PORT}`") },
+                RxStep::Malformed => return Ended::Refused("the compositor sent a frame no protocol here can make".into()),
             };
             let present = Present::decode(msg_type, rx.payload(payload_len), size);
             match (present, outstanding) {
@@ -188,9 +220,9 @@ fn answer(dev: &PciDev, regs: &Bar, conn: &Connection, size: Size, refresh_inter
                     outstanding = Some((present.sequence, toyos_abi::clock::nanos_since_boot() + FRAME_CEILING_NANOS));
                 }
                 (Some(present), Some((waiting, _))) => {
-                    return format!("the compositor sent present {} while {waiting} waits", present.sequence);
+                    return Ended::Refused(format!("the compositor sent present {} while {waiting} waits", present.sequence));
                 }
-                (None, _) => return format!("the compositor sent frame {msg_type}, which `{PORT}` has not"),
+                (None, _) => return Ended::Refused(format!("the compositor sent frame {msg_type}, which `{PORT}` has not")),
             }
         }
     }

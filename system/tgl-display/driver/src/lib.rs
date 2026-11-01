@@ -60,8 +60,8 @@ const POWER_WELL_NANOS: u64 = 20_000;
 /// display on eDP").
 const UNUSED_WELLS: [u32; 3] = [5, 4, 3];
 
-/// Why this driver stopped short; [`keep_memory_low_power`] and
-/// [`allow_display_c6`] say how far each got.
+/// Why this driver stopped short; [`keep_memory_low_power`],
+/// [`allow_display_c6`] and [`interrupt::serve`] say how far each got.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Refusal {
     /// The firmware's state is not one pipe A plane scanning out alone.

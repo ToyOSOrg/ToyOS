@@ -6,9 +6,11 @@ use toyos_device_memory::Registers;
 
 use crate::{regs, Refusal};
 
-/// Every display interrupt but pipe A's vblank masked and disabled, pipe A's
-/// identity cleared and display and primary interrupts enabled. Nothing is
-/// raised until [`arm`].
+/// Every category Vol 2c gives registers for masked and disabled but pipe
+/// A's vblank, pipe A's identity cleared and display and primary interrupts
+/// enabled. Nothing is raised until [`arm`]. The PCH and PICA categories
+/// have no registers in Vol 2c and are left as found; one pending is
+/// refused by [`serve`].
 pub fn claim<R: Registers>(regs: &R) {
     for ier in regs::UNUSED_IERS {
         regs.write32(ier, 0);
@@ -52,6 +54,14 @@ pub fn serve<R: Registers>(regs: &R) -> Result<bool, Refusal> {
     regs.write32(regs::DISPLAY_INT_CTL, regs::DISPLAY_INTERRUPT_ENABLE);
     regs.write32(regs::GFX_MSTR_INTR, regs::PRIMARY_INTERRUPT);
     Ok(vblank)
+}
+
+/// Nothing armed and display and primary interrupts disabled: what a driver
+/// that has stopped answering presents leaves.
+pub fn release<R: Registers>(regs: &R) {
+    regs.write32(regs::PIPE_A_IER, 0);
+    regs.write32(regs::DISPLAY_INT_CTL, 0);
+    regs.write32(regs::GFX_MSTR_INTR, 0);
 }
 
 /// Pipe A's identity bits cleared, both events it can hold ("The IIR can
@@ -108,6 +118,17 @@ mod tests {
         assert_eq!(engine.get(regs::GFX_MSTR_INTR), regs::PRIMARY_INTERRUPT, "re-enabled after the clear");
         engine.vblank();
         assert!(!raised(&engine), "disarmed by the vblank it served");
+    }
+
+    #[test]
+    fn a_released_claim_raises_nothing_even_armed() {
+        let engine = Engine::t14();
+        claim(&engine);
+        arm(&engine);
+        release(&engine);
+        engine.vblank();
+        assert!(!raised(&engine));
+        assert_eq!((engine.get(regs::DISPLAY_INT_CTL), engine.get(regs::GFX_MSTR_INTR)), (0, 0));
     }
 
     #[test]

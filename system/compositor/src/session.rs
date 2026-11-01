@@ -508,7 +508,6 @@ impl Session {
         let clipboard_ready = self.is_ready(self.clipboards.as_handle().raw());
         let settings_ready = self.is_ready(self.settings.as_handle().raw());
         let outputs_ready = self.is_ready(self.outputs.as_handle().raw());
-        let output_ready = self.output.as_ref().is_some_and(|d| self.is_ready(d.conn().as_handle().raw()));
         let volume_ready = self.volume.as_ref().is_some_and(|(conn, _)| self.is_ready(conn.as_handle().raw()));
         let display_ready = self.display.handle().is_some_and(|handle| self.is_ready(handle.raw()));
         let session_ready = self.desktop.conn().is_some_and(|c| self.is_ready(c.as_handle().raw()));
@@ -530,9 +529,11 @@ impl Session {
             eprintln!("compositor: dropping client {} — {}", p.conn.as_handle().raw().0, reason);
         }
         self.pending.retain(|p| now.duration_since(p.since) < HANDSHAKE_TIMEOUT);
-        if self.output.as_ref().is_some_and(|d| d.overdue(now)) {
-            self.drop_output("its hello did not come in time".into());
+        if self.output.as_ref().is_some_and(|d| d.overdue()) {
+            self.drop_output(format!("its hello did not come within {HANDSHAKE_TIMEOUT:?}"));
         }
+        // After the sweep: a driver it dropped is not read.
+        let output_ready = self.output.as_ref().is_some_and(|d| self.is_ready(d.conn().as_handle().raw()));
 
         if !inputs_ready
             && sources_ready.is_empty()
@@ -578,13 +579,11 @@ impl Session {
         }
         if output_ready {
             let mode = self.display.mode();
-            let read = self.output.as_mut().expect("a ready driver is held").read(mode);
-            match read {
-                Ok(()) => {
-                    let conn = self.output.as_ref().expect("a ready driver is held").conn();
-                    self.poller.watch(conn, READABLE, conn.as_handle().raw().0 as u64);
+            if let Some(driver) = self.output.as_mut() {
+                match driver.read(mode) {
+                    Ok(()) => self.poller.watch(driver.conn(), READABLE, driver.conn().as_handle().raw().0 as u64),
+                    Err(why) => self.drop_output(why),
                 }
-                Err(why) => self.drop_output(why),
             }
         }
         if volume_ready {
@@ -620,7 +619,7 @@ impl Session {
             Ok(_) if self.output.is_some() => eprintln!("compositor: refusing a display driver — one is connected"),
             Ok(conn) => {
                 self.poller.watch(&conn, READABLE, conn.as_handle().raw().0 as u64);
-                self.output = Some(crate::output::Driver::new(conn));
+                self.output = Some(crate::output::Driver::new(conn, self.epoch));
             }
         }
     }

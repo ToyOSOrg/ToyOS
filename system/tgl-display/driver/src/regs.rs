@@ -122,7 +122,8 @@ pub const RUN_BUSY: u32 = 1 << 31;
 /// DE_PIPE_INTERRUPT_A (Vol 2c), 44400h-4440Fh: ISR, IMR, IIR and IER, bit 0
 /// Vblank. The other categories this driver enables nothing in, at their IER:
 /// pipes B-D, DE_PORT_INTERRUPT, DE_MISC_INTERRUPT, DE_HPD_INTERRUPT and
-/// AUD_INTERRUPT. Each IMR is 4 below its IER.
+/// AUD_INTERRUPT. Each IMR is 8 below its IER: ISR, IMR, IIR and IER at +0,
+/// +4, +8 and +Ch.
 pub const PIPE_A_IMR: usize = 0x4_4404;
 pub const PIPE_A_IIR: usize = 0x4_4408;
 pub const PIPE_A_IER: usize = 0x4_440C;
