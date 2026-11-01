@@ -56,6 +56,28 @@ fn durable(disk: &files::Target) {
         Err(e) => refuse("persist.write_4k_fsync", e),
     }
 
+    // As `write_4k_fsync`, each after 1 MiB written over another 1 MiB file
+    // and not synced: 100 after 5. An fsync of one file that makes another's
+    // write durable too pays for it here.
+    let beside = scratch.at("beside");
+    let made = (|| -> std::io::Result<(File, File)> {
+        fs::write(&beside, vec![2u8; MIB])?;
+        let other = OpenOptions::new().write(true).open(&beside)?;
+        other.sync_all()?;
+        Ok((OpenOptions::new().write(true).open(&file)?, other))
+    })();
+    let other_bytes = vec![0x3cu8; MIB];
+    match made {
+        Ok((mut f, mut other)) => each("persist.write_4k_fsync_beside_1m", 5, 100, &served, |_| {
+            io("seek", other.seek(SeekFrom::Start(0)))?;
+            io("write", other.write_all(&other_bytes))?;
+            io("seek", f.seek(SeekFrom::Start(0)))?;
+            io("write", f.write_all(&block))?;
+            io("fsync", f.sync_all())
+        }),
+        Err(e) => refuse("persist.write_4k_fsync_beside_1m", e),
+    }
+
     // 4 KiB appended, then `sync_data`: 100 after 5, so the file grows by 420 KiB.
     match OpenOptions::new().create(true).append(true).open(scratch.at("log")) {
         Ok(mut f) => each("persist.append_4k_fsync", 5, 100, &served, |_| {
