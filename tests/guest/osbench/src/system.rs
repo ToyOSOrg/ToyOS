@@ -100,18 +100,32 @@ pub fn process_spawn() {
 /// to end-of-file. One unread round, then seven.
 pub fn pipe_throughput(size: usize) {
     let bench = format!("pipe.throughput.{size}");
+    // Diagnostic: the CPU each side ran on most, sampled as pingpong samples its sides.
+    let mode = |seen: Vec<u32>| {
+        let mut counts = std::collections::BTreeMap::new();
+        for cpu in seen {
+            *counts.entry(cpu).or_insert(0u32) += 1;
+        }
+        counts.into_iter().max_by_key(|&(_, n)| n).map_or(u32::MAX, |(cpu, _)| cpu)
+    };
+    let sides = std::cell::RefCell::new(Vec::new());
+    let spans = std::cell::RefCell::new(Vec::new());
     let round = || -> std::io::Result<u64> {
+        let span = crate::ran::start();
         let (mut reader, mut writer) = std::io::pipe()?;
-        let writing = thread::spawn(move || -> std::io::Result<()> {
+        let writing = thread::spawn(move || -> std::io::Result<Vec<u32>> {
             let chunk = vec![0x5au8; size];
             let start = Instant::now();
+            let mut seen = Vec::new();
             while start.elapsed() < Duration::from_millis(100) {
                 for _ in 0..64 {
                     writer.write_all(&chunk)?;
                 }
+                seen.push(sys::current_cpu());
             }
-            Ok(())
+            Ok(seen)
         });
+        let mut read_seen = Vec::new();
         let mut buf = vec![0u8; 64 * 1024];
         // The clock starts at the first byte; what it carried is not counted.
         if reader.read(&mut buf)? == 0 {
@@ -123,9 +137,12 @@ pub fn pipe_throughput(size: usize) {
                 0 => break,
                 n => bytes += n as u64,
             }
+            read_seen.push(sys::current_cpu());
         }
         let ns = ns_since(start).max(1);
-        writing.join().expect("the writer panicked")?;
+        let write_seen = writing.join().expect("the writer panicked")?;
+        sides.borrow_mut().push((mode(read_seen), mode(write_seen)));
+        spans.borrow_mut().push(span.moves());
         Ok(bytes * 1000 / ns)
     };
     let run = || -> std::io::Result<Vec<u64>> {
@@ -134,7 +151,23 @@ pub fn pipe_throughput(size: usize) {
         (0..7).map(|_| round()).collect()
     };
     match run() {
-        Ok(mut mbps) => result(&bench, "MB/s", &mut mbps, &[("write_bytes", size.to_string())]),
+        Ok(mut mbps) => {
+            let sides = sides.borrow();
+            let timed = &sides[1..];
+            let one_core = timed.iter().filter(|&&(r, w)| sys::core_of(r) == sys::core_of(w)).count();
+            let on: Vec<String> = timed.iter().map(|&(r, w)| format!("{r}+{w}")).collect();
+            result(
+                &bench,
+                "MB/s",
+                &mut mbps,
+                &[
+                    ("write_bytes", size.to_string()),
+                    ("reader_writer_cpus", on.join(",")),
+                    ("one_core", format!("{one_core}/{}", timed.len())),
+                    ("moves_xllc_wakes_picks", spans.borrow()[1..].join(",")),
+                ],
+            )
+        }
         Err(e) => refuse(&bench, e),
     }
 }
