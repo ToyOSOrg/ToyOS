@@ -28,7 +28,7 @@ use toyos_blockdev::BlockDev;
 use toyos_fat32::{Error, Fat32, FatTime};
 
 use crate::cache::{Cache, Disk};
-use crate::volume::{parent, Identities, Kind, Listed, Meta, Node, OpenHow, Out, Volume, NANOS_PER_SEC};
+use crate::volume::{parent, Identities, Kind, Listed, Meta, Node, OpenHow, Out, Reserved, Volume, NANOS_PER_SEC};
 
 /// The most entries one directory listing materialises.
 const MAX_LIST: usize = 16_384;
@@ -305,13 +305,16 @@ impl<D: Disk> Volume for FatVolume<D> {
         Ok(n)
     }
 
-    fn reserve(&mut self, node: Node, offset: u64, len: u64) -> Result<(), fs::Error> {
+    fn reserve(&mut self, node: Node, offset: u64, len: u64) -> Result<Reserved, fs::Error> {
         let open = self.open.get_mut(&node).ok_or(fs::Error::Stale)?;
         if open.gone {
             return Err(fs::Error::Stale);
         }
         open.dirty = true;
-        self.cache.block_on(self.fs.reserve(&mut open.file, offset, len)).map_err(|e| logged("reserve", &open.path, e))
+        // A chain has no holes: a cut back to the old size gives back its room.
+        let reserved = Reserved { size: open.file.len(), held: 0 };
+        self.cache.block_on(self.fs.reserve(&mut open.file, offset, len)).map_err(|e| logged("reserve", &open.path, e))?;
+        Ok(reserved)
     }
 
     fn write_back(&mut self, node: Node, offset: u64, data: &[u8]) -> Result<(), fs::Error> {

@@ -21,7 +21,7 @@ use bcachefs::engine::{self, DirentType};
 use toyos::fs::Error;
 use toyos_blockdev::{block_on_ready, ReadOnlyBytes, BLOCK};
 
-use crate::volume::{join, Kind, Listed, Meta, Node, OpenHow, Out, Volume};
+use crate::volume::{join, Kind, Listed, Meta, Node, OpenHow, Out, Reserved, Volume};
 
 /// The longest read asked of the reader at once, so a large client window
 /// costs this much memory and no more.
@@ -210,7 +210,7 @@ impl Volume for RootVolume {
         Ok(run)
     }
 
-    fn reserve(&mut self, _: Node, _: u64, _: u64) -> Result<(), Error> {
+    fn reserve(&mut self, _: Node, _: u64, _: u64) -> Result<Reserved, Error> {
         Err(Error::ReadOnly)
     }
 

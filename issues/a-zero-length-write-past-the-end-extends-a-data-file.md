@@ -6,7 +6,7 @@ opened: 2026-10-31
 
 # A zero-length write past the end extends a DATA file
 
-DATA's `write` (`system/fileserver/src/data.rs`) sets the file's length to at
+DATA's `reserve` (`system/fileserver/src/data.rs`), which a write takes first, sets the file's length to at
 least the write's end even when it writes no bytes. So a zero-length write
 at an offset past the end makes the file that long, and stamps its time.
 POSIX `write()`: "If nbyte is zero and the file is a regular file, the

@@ -368,16 +368,17 @@ impl<P: Pager> Files<P> {
         if self.pager.is_none() || !self.files.contains_key(&identity) {
             return volume.write(node, offset, data);
         }
-        let old = volume.node_meta(node)?.size;
-        volume.reserve(node, offset, data.len() as u64)?;
+        let reserved = volume.reserve(node, offset, data.len() as u64)?;
+        let old = reserved.size;
         self.touch(identity);
         let mut done = 0;
         let put = self.put(volume, &Writing { identity, node, old, offset, data }, &mut done);
         let id = self.files[&identity].object;
         if let Err(e) = put {
             // What was reserved and not put would read as the blocks' old bytes.
-            let cut = if done > 0 { old.max(offset + done as u64) } else { old };
-            let resized = self.pg().resize(id, cut).map_err(word).and(volume.truncate(node, cut));
+            let landed = if done > 0 { offset + done as u64 } else { 0 };
+            let cut = old.max(landed);
+            let resized = self.pg().resize(id, cut).map_err(word).and(volume.unreserve(node, reserved, landed));
             if let Err(again) = resized {
                 println!("fileserver: a refused write of file {identity} was not cut back to {cut} ({again:?})");
             }

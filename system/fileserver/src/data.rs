@@ -42,7 +42,7 @@ use toyos::fs::Error;
 use toyos_blockdev::{Block, BlockDev, BLOCK};
 
 use crate::cache::{Cache, Disk, Shared};
-use crate::volume::{join, parent, Identities, Kind, Listed, Meta, Node, OpenHow, Out, Volume};
+use crate::volume::{join, parent, Identities, Kind, Listed, Meta, Node, OpenHow, Out, Reserved, Volume};
 
 /// The longest symlink target read back: the wire's path bound.
 const MAX_LINK: u64 = toyos::fs::MAX_PATH as u64;
@@ -541,7 +541,7 @@ impl<D: Disk> Volume for DataVolume<D> {
         read.map(|()| n)
     }
 
-    fn reserve(&mut self, node: Node, offset: u64, len: u64) -> Result<(), Error> {
+    fn reserve(&mut self, node: Node, offset: u64, len: u64) -> Result<Reserved, Error> {
         let end = offset.checked_add(len).ok_or(Error::FileTooLarge)?;
         let now = (self.clock)();
         let open = self.open.get_mut(&node).ok_or(Error::Stale)?;
@@ -551,6 +551,7 @@ impl<D: Disk> Volume for DataVolume<D> {
         // Every page past the extents is allocated before the size moves, so
         // a write the file's one entry could not name is refused whole.
         let covered: u64 = open.extents.iter().map(|e| e.block_count as u64).sum();
+        let reserved = Reserved { size: open.size, held: covered };
         let last = end.div_ceil(BLOCK as u64).saturating_sub(1);
         let grown = match len != 0 && last >= covered {
             false => Ok(()),
@@ -580,7 +581,19 @@ impl<D: Disk> Volume for DataVolume<D> {
         open.mtime = now;
         open.dirty = true;
         noted(&mut self.names, open);
-        Ok(())
+        Ok(reserved)
+    }
+
+    fn unreserve(&mut self, node: Node, reserved: Reserved, landed: u64) -> Result<(), Error> {
+        let open = self.open.get_mut(&node).ok_or(Error::Stale)?;
+        // A block a write took in a hole below the old end lies inside the
+        // old size, so it goes back by what the file held, not by the size.
+        let dropped = keep_blocks(&mut open.extents, reserved.held.max(landed.div_ceil(BLOCK as u64)));
+        open.size = reserved.size.max(landed);
+        noted(&mut self.names, open);
+        // No entry names them: only the file's own calls write its entry.
+        let path = open.path.clone();
+        mapped("a refused write's free", &path, self.fs.free_extents(&dropped))
     }
 
     fn write_back(&mut self, node: Node, offset: u64, data: &[u8]) -> Result<(), Error> {
@@ -1438,6 +1451,58 @@ mod tests {
         assert!(writes > synced.0 && flushes > synced.1, "the write over the page asked {:?} after {synced:?}", (writes, flushes));
         let block = block_for(&v.open[&n].extents, 0).unwrap();
         assert_eq!(v.cache.disk().image.borrow()[&block][..], [2; BLOCK][..]);
+    }
+
+    /// A write refused after its pages were allocated gives them back: a file
+    /// extended over where it would have reached reads zeros there, not the
+    /// bytes a deleted file left in the blocks the write was given.
+    #[test]
+    fn a_write_refused_after_allocating_leaves_no_old_bytes_past_the_end() {
+        // Every block the volume does not write holds what an earlier tenant left.
+        let stale: Image = (0..1024).map(|b| (b, Box::new([0xAB; BLOCK]))).collect();
+        let mut v = DataVolume::format(Stops::from(&stale, 1024, usize::MAX, None), 0, &["home", "apps"], clock).unwrap();
+
+        let n = v.open("home/f", CREATE).unwrap();
+        v.write(n, 0, &[1; BLOCK]).unwrap();
+        assert_eq!(v.sync(), Ok(Vec::new()));
+        let first = block_for(&v.open[&n].extents, 0).unwrap();
+        v.cache.disk().refuse_read.set(Some(first));
+        // Half of page 0, whose read is refused, and page 1, allocated first.
+        let room = v.room().unwrap().free;
+        assert_eq!(v.write(n, BLOCK as u64 / 2, &[2; BLOCK]), Err(Error::Io));
+        assert_eq!(v.room().unwrap().free, room, "the refused write kept blocks, or gave back more");
+        v.cache.disk().refuse_read.set(None);
+
+        v.truncate(n, 2 * BLOCK as u64).unwrap();
+        let mut out = vec![0u8; BLOCK];
+        assert_eq!(v.read(n, BLOCK as u64, &mut Buf(&mut out)).unwrap(), BLOCK);
+        assert!(out.iter().all(|&b| b == 0), "page 1 reads {:#04x}, not zeros", out[out.iter().position(|&b| b != 0).unwrap()]);
+    }
+
+    /// The same inside the size: a refused write into a hole the file was
+    /// extended over gives back the block it took there, which no cut back to
+    /// the old size would, and the hole still reads zeros.
+    #[test]
+    fn a_write_refused_in_a_hole_leaves_the_hole_reading_zeros() {
+        let stale: Image = (0..1024).map(|b| (b, Box::new([0xAB; BLOCK]))).collect();
+        let mut v = DataVolume::format(Stops::from(&stale, 1024, usize::MAX, None), 0, &["home", "apps"], clock).unwrap();
+
+        let n = v.open("home/f", CREATE).unwrap();
+        v.write(n, 0, &[1; BLOCK]).unwrap();
+        v.truncate(n, 3 * BLOCK as u64).unwrap();
+        assert_eq!(v.sync(), Ok(Vec::new()));
+        let first = block_for(&v.open[&n].extents, 0).unwrap();
+        v.cache.disk().refuse_read.set(Some(first));
+        // Half of page 0, whose read is refused, and page 1, in the hole.
+        let room = v.room().unwrap().free;
+        assert_eq!(v.write(n, BLOCK as u64 / 2, &[2; BLOCK]), Err(Error::Io));
+        assert_eq!(v.room().unwrap().free, room, "the refused write kept the hole's block, or gave back more");
+        v.cache.disk().refuse_read.set(None);
+
+        assert_eq!(v.node_meta(n).unwrap().size, 3 * BLOCK as u64);
+        let mut out = vec![0u8; BLOCK];
+        assert_eq!(v.read(n, BLOCK as u64, &mut Buf(&mut out)).unwrap(), BLOCK);
+        assert!(out.iter().all(|&b| b == 0), "page 1 reads {:#04x}, not zeros", out[out.iter().position(|&b| b != 0).unwrap()]);
     }
 
     fn take(v: DataVolume<Stops>) -> Stops {

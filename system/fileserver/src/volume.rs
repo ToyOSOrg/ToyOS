@@ -148,8 +148,19 @@ pub trait Volume {
     /// zeroing what lies between the old end and `offset` where the format
     /// holds no hole: whole or refused. The bytes are not written, and read
     /// as whatever the blocks held until [`Self::write_back`] writes them, so
-    /// nothing may read them from here before then.
-    fn reserve(&mut self, node: Node, offset: u64, len: u64) -> Result<(), Error>;
+    /// nothing may read them from here before then: a write refused after
+    /// its reserve gives back its room through [`Self::unreserve`].
+    fn reserve(&mut self, node: Node, offset: u64, len: u64) -> Result<Reserved, Error>;
+
+    /// A write refused after its reserve: the size back to the reserve's old
+    /// one, or to `landed` where the write's bytes reached past it, and every
+    /// block the reserve took past both given back, since it holds what the
+    /// file that last had it left there. `landed` is 0 where none landed.
+    /// Called before any other call on the file, so nothing has recorded the
+    /// reserve's blocks.
+    fn unreserve(&mut self, node: Node, reserved: Reserved, landed: u64) -> Result<(), Error> {
+        self.truncate(node, reserved.size.max(landed))
+    }
 
     /// `data` at the whole-page `offset`, inside the size, into the room
     /// [`Self::reserve`] made; a last page in part is zeros past the size.
@@ -186,6 +197,15 @@ pub trait Volume {
     fn describe(&self) -> String;
 }
 
+/// What a file held before a [`Volume::reserve`], for [`Volume::unreserve`].
+#[derive(Clone, Copy, Debug)]
+pub struct Reserved {
+    pub size: u64,
+    /// The pages it held blocks for, where the format holds holes, which a
+    /// cut back to `size` alone would not give back.
+    pub held: u64,
+}
+
 /// A write straight to the volume, for a file with no paged object — on a
 /// server with no pager, or one whose object went — and for a volume's
 /// tests: the reserve, then each page it touches written back, what the page
@@ -193,18 +213,26 @@ pub trait Volume {
 pub trait Writes: Volume {
     fn write(&mut self, node: Node, offset: u64, data: &[u8]) -> Result<(), Error> {
         const PAGE: u64 = toyos_blockdev::BLOCK as u64;
-        let old = self.node_meta(node)?.size;
-        self.reserve(node, offset, data.len() as u64)?;
+        let reserved = self.reserve(node, offset, data.len() as u64)?;
         let size = self.node_meta(node)?.size;
         let end = offset + data.len() as u64;
+        let mut landed = 0;
         for start in (offset / PAGE * PAGE..end).step_by(PAGE as usize) {
             let mut page = vec![0u8; PAGE as usize];
-            let below = old.saturating_sub(start).min(PAGE) as usize;
-            self.read(node, start, &mut Buf(&mut page[..below]))?;
+            let below = reserved.size.saturating_sub(start).min(PAGE) as usize;
             let (from, to) = (offset.max(start), end.min(start + PAGE));
-            page[(from - start) as usize..(to - start) as usize]
-                .copy_from_slice(&data[(from - offset) as usize..(to - offset) as usize]);
-            self.write_back(node, start, &page[..(size - start).min(PAGE) as usize])?;
+            let written = self.read(node, start, &mut Buf(&mut page[..below])).and_then(|_| {
+                page[(from - start) as usize..(to - start) as usize]
+                    .copy_from_slice(&data[(from - offset) as usize..(to - offset) as usize]);
+                self.write_back(node, start, &page[..(size - start).min(PAGE) as usize])
+            });
+            if let Err(e) = written {
+                if let Err(again) = self.unreserve(node, reserved, landed) {
+                    println!("fileserver: a refused write was not cut back ({again:?})");
+                }
+                return Err(e);
+            }
+            landed = to;
         }
         Ok(())
     }
