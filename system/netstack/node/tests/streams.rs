@@ -417,7 +417,8 @@ fn established() -> (Net, StreamId, Rc<Client>) {
 fn established_within(timeout: Option<Duration>) -> (Net, StreamId, Rc<Client>) {
     let mut net = Net::new();
     let (id, client) = net.connect(timeout);
-    let local = Port::new(net.far.port).expect("the SYN's source port");
+    // The address the stream left from is the node's lease, as the SYN carried it.
+    let local = Endpoint { addr: A, port: Port::new(net.far.port).expect("the SYN's source port") };
     assert_eq!(net.events(), [StreamEvent::Connected { id, local }]);
     (net, id, client)
 }
@@ -427,7 +428,7 @@ fn established_within(timeout: Option<Duration>) -> (Net, StreamId, Rc<Client>) 
 // RFC 9293 §3.5, figure 6: a SYN that acknowledges nothing, and after the peer's SYN-ACK an ACK
 // of its sequence number plus one from ours plus one.
 #[test]
-fn a_connect_is_a_handshake_and_its_answer_names_the_port() {
+fn a_connect_is_a_handshake_and_its_answer_names_the_address_and_port() {
     let (net, _, client) = established();
     let [syn, ack] = &net.far.segments[..] else { panic!("a SYN and an ACK, not {:?}", net.far.segments) };
     assert!(syn.syn && syn.ack.is_none() && syn.text.is_empty() && !syn.fin && !syn.rst, "{syn:?}");
@@ -1073,8 +1074,9 @@ fn a_holder_past_the_first_takes_a_place_and_none_is_made_past_the_places() {
     let (mut net, id, _client) = established();
     net.node.set_places(2);
     assert_eq!(net.node.held(), 1);
-    let (remote, _) = net.node.export(id).expect("a place for the second holder");
+    let (remote, local) = net.node.export(id).expect("a place for the second holder");
     assert_eq!(remote, peer(), "the holder is told the stream's peer");
+    assert_eq!(local.addr, A, "and the address the stream left from");
     assert_eq!(net.node.held(), 2);
     assert_eq!(net.node.export(id), Err(ExportRefused::Full));
     assert_eq!(net.node.held(), 2, "a refused export took nothing");

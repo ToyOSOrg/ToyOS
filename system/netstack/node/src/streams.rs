@@ -32,7 +32,7 @@ use core::time::Duration;
 use toyos::net::stream::{Server, Words, ADDRESS_GONE, LAYOUT, NODELAY, RECEIVE_BYTES, RESET, TIMED_OUT, UNREACHABLE};
 use toyos_net_shard::ConnectError;
 use toyos_net_tcp::{ConnId, Endpoint, Error, Failure, Lent, Options, State, Status};
-use toyos_net_wire::{Instant, Port};
+use toyos_net_wire::Instant;
 use toyos::transport::session::{Holder, Rings};
 use toyos::transport::Violation;
 
@@ -74,8 +74,8 @@ pub struct StreamId(u64);
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum StreamEvent {
-    /// The answer to a connect: established, from this port.
-    Connected { id: StreamId, local: Port },
+    /// The answer to a connect: established, from this address and port.
+    Connected { id: StreamId, local: Endpoint },
     /// The answer to a connect: the peer refused it or [tcp] gave it up.
     Failed { id: StreamId, failure: Failure },
     /// The answer to a connect: its deadline passed first.
@@ -150,7 +150,7 @@ impl Stream {
                 (_, Some(failure)) => StreamEvent::Failed { id, failure },
                 (State::SynSent | State::SynReceived, None) if self.deadline.is_some_and(|at| at <= now) => StreamEvent::TimedOut { id },
                 (State::SynSent | State::SynReceived, None) => return true,
-                (_, None) => StreamEvent::Connected { id, local: stack.tcp_local_port(conn) },
+                (_, None) => StreamEvent::Connected { id, local: stack.tcp_local(conn) },
             };
             events.push_back(event);
             if !matches!(event, StreamEvent::Connected { .. }) {
@@ -325,8 +325,8 @@ impl Node {
     }
 
     /// A holder more for established stream `id`, which takes a place: the stream's peer and
-    /// its local port, for the holder to be told.
-    pub fn export(&mut self, id: StreamId) -> Result<(Endpoint, Port), ExportRefused> {
+    /// its own end, for the holder to be told.
+    pub fn export(&mut self, id: StreamId) -> Result<(Endpoint, Endpoint), ExportRefused> {
         if self.room() == 0 {
             return Err(ExportRefused::Full);
         }
