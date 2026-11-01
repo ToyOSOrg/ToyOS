@@ -596,8 +596,7 @@ fn an_fsync_makes_its_file_durable_and_no_other_files_overwrite() {
 
 /// A file whose blocks the commit holds as taken is carried by an fsync of
 /// another: its pages reach the volume first and its entry goes with them,
-/// so after a stop it names no block that holds an earlier tenant's bytes,
-/// and no block is held that nothing names.
+/// so after a stop it reads its own bytes, never an earlier tenant's.
 #[test]
 fn an_fsync_writes_first_the_pages_of_every_file_its_commit_carries() {
     let page = PAGE as usize;
