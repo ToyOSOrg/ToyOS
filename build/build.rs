@@ -960,6 +960,15 @@ pub const MICROCODE_LICENCES: [(&str, &[u8]); 2] = [
     ("share/licenses/Intel-microcode-license.txt", include_bytes!("../licenses/Intel-microcode-license.txt")),
 ];
 
+/// The program that embeds Intel's display firmware, where on ROOT that
+/// firmware's licence is, and its text: the licence asks that a
+/// redistribution carry it.
+pub const DISPLAY_FIRMWARE_LICENCE: (&str, &str, &[u8]) = (
+    "tgl-display",
+    "share/licenses/Intel-i915-firmware-license.txt",
+    include_bytes!("../licenses/Intel-i915-firmware-license.txt"),
+);
+
 /// The Mozilla root program's authorities as `webpki-root-certs` publishes
 /// them, each certificate a PEM block in the published order.
 pub fn trust_roots() -> Vec<u8> {
@@ -999,6 +1008,10 @@ fn build_and_assemble(
     }
 
     root_files.push((TRUST_ROOTS.to_string(), trust_roots()));
+    let (embedder, path, text) = DISPLAY_FIRMWARE_LICENCE;
+    if programs.contains(embedder) {
+        root_files.push((path.to_string(), text.to_vec()));
+    }
     root_files.push((TRUST_ROOTS_LICENCE.0.to_string(), TRUST_ROOTS_LICENCE.1.to_vec()));
     match arch {
         Arch::X86_64 => {

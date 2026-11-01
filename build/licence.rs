@@ -90,7 +90,7 @@ const DATA_ONLY: &[&str] = &["CDLA-Permissive-2.0"];
 /// Allowed for a [`Terms::Firmware`] row, and nowhere else: vendor firmware
 /// the owner ruled may ship, pinned and unmodified.
 const FIRMWARE_ONLY: &[&str] =
-    &["LicenseRef-AMD-Microcode", "LicenseRef-Intel-Microcode", "LicenseRef-Intel-iwlwifi-Firmware"];
+    &["LicenseRef-AMD-Microcode", "LicenseRef-Intel-Microcode", "LicenseRef-Intel-iwlwifi-Firmware", "LicenseRef-Intel-i915-Firmware"];
 
 /// What a licence is judged as: [`FONTS_ONLY`] passes only for a font,
 /// [`DATA_ONLY`] only for the trust roots and [`FIRMWARE_ONLY`] only for
@@ -1149,6 +1149,12 @@ pub const COMMITTED_FILES: &[(&str, &str, &str, Terms)] = &[
         "9697e327f8171454b3c19b1ec9449753d5b934d4e91722f469616818a6d477b0",
         "NOTICE",
         Terms::Firmware("LicenseRef-Intel-iwlwifi-Firmware"),
+    ),
+    (
+        "system/tgl-display/firmware/tgl_dmc_ver2_12.bin",
+        "3c013ef0ad96ba73aee8e5bd04a8e27cc9b1c6e9183b1a83ce124485f325afca",
+        "NOTICE",
+        Terms::Firmware("LicenseRef-Intel-i915-Firmware"),
     ),
 ];
 

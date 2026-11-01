@@ -11,10 +11,12 @@
 //! which ends the scan-out it was given.
 
 use toyos::{endow, say, PciDev};
-use toyos_abi::syscall::PciId;
+use toyos_abi::syscall::{PciId, RegWidth};
 use toyos_device_memory::Registers;
 use toyos_manifest::device::PciMatch;
 use toyos_pci_claim::Bar;
+use toyos_tgl_display::dmc::{Package, Stepping, TGL_PACKAGE};
+use toyos_tgl_display::Refusal;
 
 /// The T14's iGPU, Tiger Lake GT2 (`8086:9a49`), a VGA-compatible display
 /// controller, class `03:00:00`, as the row spells it.
@@ -50,6 +52,9 @@ fn main() {
     toyos_pci_claim::start(&dev).unwrap_or_else(|why| panic!("tgl-display: {why}"));
     say!("tgl-display: PCI {:02x}:{:02x}.{} registers in BAR {BAR}, {span:#x} of its {bytes:#x} bytes", info.bus, info.dev, info.func);
 
+    let package = Package::parse(TGL_PACKAGE).unwrap_or_else(|why| panic!("tgl-display: the DMC package is malformed: {why:?}"));
+    let revision = dev.config_read(0x08, RegWidth::U32).unwrap_or_else(|why| panic!("tgl-display: config space: {why:?}")) as u8;
+
     match toyos_tgl_display::keep_memory_low_power(&regs, &Monotonic) {
         Ok(done) => {
             say!(
@@ -69,6 +74,28 @@ fn main() {
                 .map(|level| format!("{:08x}", regs.read32(toyos_tgl_display::regs::plane_wm(0, done.scanout.plane, level))))
                 .collect();
             say!("tgl-display: WM levels now {}", now.join(" "));
+            let allowed = Stepping::of_9a49(revision)
+                .ok_or(Refusal::Revision(revision))
+                .and_then(|stepping| package.main_program(stepping).ok_or(Refusal::NoProgram(stepping)))
+                .and_then(|program| {
+                    toyos_tgl_display::allow_display_c6(&regs, &Monotonic, &program).map(|allowed| (program, allowed))
+                });
+            match allowed {
+                Ok((program, allowed)) => say!(
+                    "tgl-display: DMC package {:08x}, main program {:08x} at {:#x} for revision {revision:#04x}, DDI select {:#x}; PWR_WELL_CTL1/2 and DC_STATE_EN were {:08x?}, now {:08x} {:08x} {:08x}, AUDIO_PIN_BUF_CTL {:08x}; pipe A frame {}",
+                    package.version,
+                    program.version,
+                    program.start,
+                    allowed.ddi,
+                    allowed.before,
+                    regs.read32(toyos_tgl_display::regs::PWR_WELL_CTL1),
+                    regs.read32(toyos_tgl_display::regs::PWR_WELL_CTL2),
+                    regs.read32(toyos_tgl_display::regs::DC_STATE_EN),
+                    regs.read32(toyos_tgl_display::regs::AUDIO_PIN_BUF_CTL),
+                    regs.read32(toyos_tgl_display::regs::PIPE_FRMCNT_A),
+                ),
+                Err(why) => say!("tgl-display: DC5 and DC6 stay disallowed — {why}"),
+            }
         }
         Err(why) => say!("tgl-display: the firmware's display is left as found — {why}"),
     }

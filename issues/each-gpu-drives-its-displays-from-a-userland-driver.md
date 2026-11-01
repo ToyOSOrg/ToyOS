@@ -79,14 +79,21 @@ The kernel keeps only generic mechanisms:
    - **Exit:** on the T14 with the panel lit, `osbench energy`'s idle row reads PC2 at most 400 ‰ and PC3 at least 600 ‰.
      - That is the residency stopping the plane's fetches altogether gave (pr-1100 r7: 338 ‰ and 656 ‰). PC3 is the most this stage can show until NVMe APST lands, because the NVMe caps the package there.
      - The power figure against Linux's 1622 mW idle is judged once APST lands.
-2. **Intel DMC and DC5/DC6** (Intel's signed payload, pinned by version and hash), and
-3. **PSR on the eDP panel**. The display task measures these two together. DC5 with a pipe running needs PSR active (Vol 12, "Display C5 and C6"), so stage 2 alone saves nothing with the panel lit. PSR's first-frame exit latency goes to the owner in absolute numbers before PSR lands.
-4. **`display-output`.** The compositor moves onto it, with virtio-gpu and the framebuffer as drivers. The panic surface lands here.
-5. **Intel modesetting**: combo-PHY DDIs, DPLLs and CDCLK, DP link training with DSC, HDMI 2.0 with SCDC, EDID over AUX and GMBUS, several outputs.
-6. **Intel Type-C DP alt mode**: FIA/IOM state, TCCOLD, the Dekel PHY, hotplug.
-7. **Intel high refresh and VRR.**
-8. **AMD**: the Display Core adapter, to the same protocol.
-9. **Display audio.**
+2. **Intel DMC and DC5/DC6.** Intel's package, pinned by version and hash (`NOTICE`), with its main program loaded through the iGPU's own registers.
+   - PG3-PG5 are powered down, since the GOP leaves PG1-PG4 requested. PG1 holds pipe A, transcoder A with its PSR, and DDI A-C. AUDIO_PIN_BUF_CTL's enable is cleared after PG3 (Vol 12 "Audio Bios Programming Sequence"). Then DC6 is allowed.
+   - DC6 is allowed only with the panel on DDI A, since Vol 12 says only port A's PHY programming survives it.
+   - With the pipe lit, the engine enters DC5 only while PSR is active (Vol 12, "Display C5 and C6"), so this stage alone saves little.
+   - What it can show alone is the program held in storage, PG3-PG5 off, and the scan-out and `hda` unharmed. `hda`'s display codec is in PG3.
+3. **Present and damage.** The `display-output` piece PSR needs is the compositor telling the driver which frame changed, and where. Otherwise PSR1 sees a CPU write only through FBC host tracking of a graphics-aperture fence (Vol 12 "CPU Host Front Buffer Tracking", "on projects that support that"). Whether that reaches the GOP's surface is unverified. This is ordered before PSR, rather than an interim signal. Its shape goes to the orchestrator before it is built, because it crosses the compositor.
+4. **PSR on the eDP panel**, measured together with stage 2. PSR's first-frame exit latency goes to the owner in absolute numbers before PSR lands.
+5. **The rest of `display-output`.** virtio-gpu and the framebuffer become drivers. The panic surface lands here.
+6. **Intel modesetting**: combo-PHY DDIs, DPLLs and CDCLK, DP link training with DSC, HDMI 2.0 with SCDC, EDID over AUX and GMBUS, several outputs.
+7. **Intel Type-C DP alt mode**: FIA/IOM state, TCCOLD, the Dekel PHY, hotplug.
+8. **Intel high refresh and VRR.**
+9. **AMD**: the Display Core adapter, to the same protocol.
+10. **Display audio.**
+    - PG3 holds `hda`'s display codec, and since stage 2 `tgl-display` powers it down on its own. Display audio needs `hda` to ask the display driver for PG3.
+    - Vol 12 "Audio Programming Sequence for Link Wakeup" orders the iDisp link: the audio driver stops it (LCTL1.SPA = 0, then CPA = 0) before AUDIO_PIN_BUF_CTL is cleared. Today only the buffer is cleared, after PG3, so the two drivers must coordinate here.
 
 ## Tests
 

@@ -786,6 +786,35 @@ parses is read. Whether the cards verify these files is unconfirmed:
 issues/nothing-shows-the-ax200-or-ax210-verifies-its-firmware.md.
 
 
+system/tgl-display/firmware/* — Intel display firmware, redistributable unmodified
+-----------------------------------------------------------------------------------
+
+    tgl_dmc_ver2_12.bin  19,760 bytes, Tiger Lake's Display Micro-Controller
+                         package, version 2.12
+      sha256 3c013ef0ad96ba73aee8e5bd04a8e27cc9b1c6e9183b1a83ce124485f325afca
+    Upstream: https://git.kernel.org/pub/scm/linux/kernel/git/firmware/linux-firmware.git,
+    `i915/` at tag 20261019 (commit a2dcb924f0897368b0b4f305cbf9808cdda90ce0),
+    byte for byte
+    Copyright: Intel Corporation
+    Licence text: licenses/Intel-i915-firmware-license.txt (upstream's
+    `LICENSES/LICENSE.i915` at that commit, which WHENCE names
+    LicenseRef-LICENSE.i915,
+    sha256 8542aeabf2761935122d693561e16766ce1bcc2b0d003204f9040b7d6d929f2e)
+    SPDX-License-Identifier: LicenseRef-Intel-i915-Firmware
+
+The newest Tiger Lake build at that tag. `toyos-tgl-display` embeds it, and
+the `tgl-display` driver loads its main program into the display engine's
+program storage through its own registers. An image building `tgl-display`
+carries the licence as /system/share/licenses/Intel-i915-firmware-license.txt.
+The licence permits redistribution in binary form, without modification, on
+three conditions: the copyright notice and the disclaimer are reproduced with
+the distribution; Intel's name endorses nothing derived from it; and no
+reverse engineering, decompilation or disassembly, so of the file only the
+headers Vol 12 "DMC Firmware Package" lays out are read. Its patent licence
+covers use alone or with an operating system under an OSI-approved licence.
+Whether the display engine verifies the program is unknown:
+issues/nothing-shows-the-tiger-lake-display-engine-verifies-its-dmc-program.md.
+
 tests/cavp/SHA*.rsp — NIST's SHA-2 test vectors, CAVP SHAVS
 ------------------------------------------------------------
 

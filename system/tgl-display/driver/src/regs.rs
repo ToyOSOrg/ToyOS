@@ -73,6 +73,44 @@ pub fn plane_buf_cfg(pipe: usize, n: usize) -> usize {
 /// PLANE_WM: bit 31 Enable, 18:14 Lines, 10:0 Blocks.
 pub const WM_ENABLE: u32 = 1 << 31;
 
+/// TRANS_DDI_FUNC_CTL_A, 60400h: 30:27 DDI Select, 1h-3h for DDI A-C.
+pub const TRANS_DDI_FUNC_CTL_A: usize = 0x6_0400;
+pub const DDI_SELECT_SHIFT: u32 = 27;
+pub const DDI_SELECT: u32 = 0xF;
+pub const DDI_A: u32 = 1;
+
+/// AUDIO_PIN_BUF_CTL, 48414h: bit 31 Enable, the display audio pins' I/O
+/// buffers.
+pub const AUDIO_PIN_BUF_CTL: usize = 0x4_8414;
+pub const AUDIO_BUFFER_ENABLE: u32 = 1 << 31;
+
+/// VGA_CONTROL, 41000h: bit 31 VGA Display Disable.
+pub const VGA_CONTROL: usize = 0x4_1000;
+pub const VGA_DISPLAY_DISABLE: u32 = 1 << 31;
+
+/// PWR_WELL_CTL1, 45400h, generally the BIOS's, and PWR_WELL_CTL2, 45404h,
+/// generally the driver's: requests from every instance are ORed. Power well
+/// `n` (1-5) has its request at bit `2n - 1` and its state at bit `2n - 2`.
+pub const PWR_WELL_CTL1: usize = 0x4_5400;
+pub const PWR_WELL_CTL2: usize = 0x4_5404;
+pub fn power_well_request(well: u32) -> u32 {
+    1 << (2 * well - 1)
+}
+pub fn power_well_state(well: u32) -> u32 {
+    1 << (2 * well - 2)
+}
+
+/// DC_STATE_EN, 45504h: 1:0 Dynamic DC State Enable, 10b "Enable up to DC6".
+/// Bits 9, 8 and 4 are hardware's and must not be changed.
+pub const DC_STATE_EN: usize = 0x4_5504;
+pub const DYNAMIC_DC_STATE: u32 = 0b11;
+pub const UP_TO_DC6: u32 = 0b10;
+
+/// 45520h, which Vol 12 "Sequence to Allow DC5 or DC6" step 3 names by address
+/// alone: bits 1:0 set before DC5 or DC6 is allowed, and never cleared.
+pub const DC_PREREQUISITE: usize = 0x4_5520;
+pub const DC_PREREQUISITE_BITS: u32 = 0b11;
+
 /// The GT driver mailbox (Vol 2c GTDRIVER_MAILBOX_*; fields from Vol 12
 /// "Mailbox Commands" and "Sequence Before Frequency Change"): Run/Busy bit
 /// 31, PARAM1 15:8, the command and its answered error code 7:0.
