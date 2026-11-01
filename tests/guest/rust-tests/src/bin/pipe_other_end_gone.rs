@@ -105,8 +105,9 @@ fn test() {
     let (reader, writer) = pipe("");
     client.signal_with(1, [OwnedHandle::from(writer)]).expect("the write end into the connection's queue");
     held(&reader, "its handle sits unreceived in a connection's queue");
-    let header = server.recv_header().expect("the frame that carried it");
-    let [received] = server.recv_handles_exact::<1>(&header).expect("the handle the queue held");
+    let mut rx = toyos::ipc::FrameRx::<{ toyos::ipc::MAX_FRAME_LEN as usize }>::new();
+    rx.recv(&server).expect("the frame that carried it");
+    let [received] = rx.take_handles::<1>().expect("the handle the queue held");
     held(&reader, "its handle was received");
     drop(received);
     assert_eq!(at_last(&reader), Ok(OTHER_END_GONE), "the received handle closed");

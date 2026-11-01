@@ -444,20 +444,17 @@ fn offered(control: &Connection, offer: &Offer) -> Result<OwnedHandle, Refusal> 
     if !answered {
         return Err(refused(format!("it did not answer the offer within {OFFER_ANSWER:?}")));
     }
-    let header = control.recv_header().map_err(|why| refused(format!("no answer to the offer ({why:?})")))?;
-    let mut payload = [0u8; MAX_REQUEST];
-    let n = control
-        .recv_bytes(&header, &mut payload)
-        .map_err(|why| refused(format!("an answer of {} bytes ({why:?})", header.len())))?;
-    match ToDriver::decode(header.msg_type, &payload[..n]) {
+    let mut rx = FrameRx::<MAX_REQUEST>::new();
+    let frame = rx.recv(control).map_err(|why| refused(format!("no answer to the offer ({why:?})")))?;
+    match ToDriver::decode(frame.msg_type, rx.payload(frame.payload_len)) {
         Some(ToDriver::Accepted) => {
-            let [ring] = control
-                .recv_handles_exact::<{ output::ACCEPTED_HANDLES }>(&header)
+            let [ring] = rx
+                .take_handles::<{ output::ACCEPTED_HANDLES }>()
                 .ok_or_else(|| refused("its acceptance carried no ring".into()))?;
             Ok(ring)
         }
         Some(ToDriver::Refused) => Err(Refusal::Declined),
-        _ => Err(refused(format!("it answered the offer with frame {}", header.msg_type))),
+        _ => Err(refused(format!("it answered the offer with frame {}", frame.msg_type))),
     }
 }
 

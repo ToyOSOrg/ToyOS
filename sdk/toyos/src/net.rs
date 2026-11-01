@@ -48,7 +48,7 @@ impl Drop for Exporter {
     }
 }
 
-use crate::ipc::{IpcError, IpcHeader, IpcPayload};
+use crate::ipc::{Frame, FrameRx, IpcError, IpcPayload};
 use crate::ipc_payload;
 use crate::{Connection, OwnedHandle};
 
@@ -316,7 +316,7 @@ const MAX_ADOPT: usize = {
 /// process takes up no holder of it.
 pub fn adopt_exported(end: OwnedHandle) -> Option<crate::fd::Object> {
     let connection = Connection::received(end);
-    let mut frames: crate::ipc::FrameRx<MAX_ADOPT> = crate::ipc::FrameRx::new();
+    let mut frames: FrameRx<MAX_ADOPT> = FrameRx::new();
     let first = match frames.pump(&connection) {
         crate::ipc::RxStep::Frame { msg_type, payload_len, .. } => {
             let handles = frames.take_batch();
@@ -335,31 +335,14 @@ pub fn adopt_exported(end: OwnedHandle) -> Option<crate::fd::Object> {
 
 /// A netstack that hung up mid-exchange is a netstack that is not there.
 ///
-/// **[`NetstackConn::connect`] already says so and the exchange did not, which is
-/// a distinction this architecture removed.** A connector is in the namespace
-/// from a program's first instruction, so connecting to a netstack that has
-/// already exited *succeeds* — the connection queues on a port nobody will
-/// ever accept from — and the hang-up arrives at the first send or the first
-/// read instead. Reporting that as [`NetError::Io`] left every caller unable
-/// to tell "this machine has no network" from "netstack failed", and `sshserver`
-/// panicked across the boot of every NIC-less machine that lost the race
-/// rather than exiting with the line it has for exactly this.
-///
-/// **`Disconnected` is only the word for a hang-up this endpoint *read*, and a
-/// request is sent before anything is read.** `IpcError::Disconnected` is
-/// raised in one place — `ipc::read_exact`, on a `read` that answered zero — so
-/// it is what a peer that left while this endpoint was waiting for the response
-/// looks like. A peer that left *before* the request went out is refused by the
-/// kernel at the send instead, which answers `Gone` on a connection whose
-/// handle is still live and still this process's: when the server end's last
-/// handle goes, `port::Acceptor::on_zero_handles` closes every queued
-/// connection's inbox — this end's *outbox*, so `SYS_MESSAGE_SEND` refuses a
-/// message rather than filling a queue nobody will drain — and drops the
-/// connection, which drops the server's read end, so the stream has no reader.
-///
-/// `Gone` cannot mean anything else here. This is applied only to `read` and
-/// `message_send` on a connection this process holds, and a handle a process
-/// does not hold ends it at the kernel rather than answering a word.
+/// A connector is in the namespace from a program's first instruction, so
+/// connecting to a netstack that has already exited *succeeds*: the
+/// connection queues on a port nobody will accept from, and the hang-up
+/// arrives at the first send or receive instead. The kernel answers a send
+/// `Gone` once no receiver is left, and a receive `Gone` (`Disconnected`)
+/// once the peer has gone with nothing queued. Either is
+/// [`NetError::NetstackNotFound`], so a caller can tell "this machine has no
+/// network" from "netstack failed".
 pub(crate) fn hangup(e: IpcError) -> NetError {
     match e {
         IpcError::Disconnected
@@ -368,56 +351,70 @@ pub(crate) fn hangup(e: IpcError) -> NetError {
     }
 }
 
-/// The header of netstack's answer on `connection`: a [`RespType::Result`]'s,
-/// whose payload and handles are the caller's to read, or the error a
+/// netstack's answer on `connection`, taken into `rx`: a [`RespType::Result`],
+/// whose payload and handles are the caller's, or the error a
 /// [`RespType::Error`] carries.
-pub(crate) fn answer(connection: crate::BorrowedHandle<'_>) -> Result<IpcHeader, NetError> {
-    let header = crate::ipc::recv_header(connection).map_err(hangup)?;
-    if header.msg_type == RespType::Error as u32 {
-        let err: ErrorResponse = crate::ipc::recv_payload(connection, &header).map_err(hangup)?;
+pub(crate) fn answer<const MAX: usize>(
+    connection: &impl crate::AsHandle,
+    rx: &mut FrameRx<MAX>,
+) -> Result<Frame, NetError> {
+    let frame = rx.recv(connection).map_err(hangup)?;
+    if frame.msg_type == RespType::Error as u32 {
+        let err: ErrorResponse = crate::ipc::decode_payload(rx.payload(frame.payload_len)).map_err(hangup)?;
         return Err(NetError::from_error_code(err.code));
     }
-    if header.msg_type != RespType::Result as u32 {
-        return Err(NetError::Protocol(header.msg_type));
+    if frame.msg_type != RespType::Result as u32 {
+        return Err(NetError::Protocol(frame.msg_type));
     }
-    Ok(header)
+    Ok(frame)
 }
+
+/// The widest typed answer netstack sends.
+pub(crate) const MAX_ANSWER: usize = 64;
 
 pub struct PendingResponse(NetstackConn);
 
 impl PendingResponse {
     fn conn(&self) -> &Connection { &(self.0).0 }
 
-    fn recv_checked_header(&self) -> Result<IpcHeader, NetError> {
-        answer(crate::AsHandle::as_handle(self.conn()))
-    }
-
     pub fn response<Resp: IpcPayload>(self) -> Result<Resp, NetError> {
-        let header = self.recv_checked_header()?;
-        self.conn().recv_payload(&header).map_err(hangup)
+        const { assert!(core::mem::size_of::<Resp>() <= MAX_ANSWER && core::mem::size_of::<ErrorResponse>() <= MAX_ANSWER) };
+        let mut rx = FrameRx::<MAX_ANSWER>::new();
+        let frame = answer(self.conn(), &mut rx)?;
+        crate::ipc::decode_payload(rx.payload(frame.payload_len)).map_err(hangup)
     }
 
+    /// The answer's bytes, taken straight into `buf`: their length. An
+    /// answer longer than `buf` is [`NetError::Io`], an error answer
+    /// included, so `buf` must hold an [`ErrorResponse`] too.
     pub fn response_bytes(self, buf: &mut [u8]) -> Result<usize, NetError> {
-        let header = self.recv_checked_header()?;
-        self.conn().recv_bytes(&header, buf).map_err(hangup)
+        let (frame, _) = self.conn().recv_into(buf).map_err(hangup)?;
+        let payload = &buf[..frame.payload_len];
+        match frame.msg_type {
+            t if t == RespType::Error as u32 => {
+                let err: ErrorResponse = crate::ipc::decode_payload(payload).map_err(hangup)?;
+                Err(NetError::from_error_code(err.code))
+            }
+            t if t == RespType::Result as u32 => Ok(frame.payload_len),
+            other => Err(NetError::Protocol(other)),
+        }
     }
 
     /// The answer, the `N` handles it hands over, and the connection, which
     /// is then the caller's.
     pub fn answer_with_handles<Resp: IpcPayload, const N: usize>(self) -> Result<(Resp, [OwnedHandle; N], Connection), NetError> {
-        let header = self.recv_checked_header()?;
-        let answer = self.conn().recv_payload(&header).map_err(hangup)?;
-        let handles = self.conn().recv_handles_exact::<N>(&header).ok_or(NetError::Protocol(header.msg_type))?;
+        const { assert!(core::mem::size_of::<Resp>() <= MAX_ANSWER && core::mem::size_of::<ErrorResponse>() <= MAX_ANSWER) };
+        let mut rx = FrameRx::<MAX_ANSWER>::new();
+        let frame = answer(self.conn(), &mut rx)?;
+        let answer = crate::ipc::decode_payload(rx.payload(frame.payload_len)).map_err(hangup)?;
+        let handles = rx.take_handles::<N>().ok_or(NetError::Protocol(frame.msg_type))?;
         Ok((answer, handles, (self.0).0))
     }
 
+    /// An answer whose payload says nothing past its type.
     pub fn status(self) -> Result<(), NetError> {
-        let header = self.recv_checked_header()?;
-        if !header.is_empty() {
-            let mut skip = [0u8; 128];
-            let _ = self.conn().recv_bytes(&header, &mut skip);
-        }
-        Ok(())
+        let mut rx = FrameRx::<MAX_ANSWER>::new();
+        answer(self.conn(), &mut rx).map(drop)
     }
 }
 

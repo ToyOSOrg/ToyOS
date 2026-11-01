@@ -13,9 +13,11 @@ may never use:
   `SYS_SHM_CREATE` takes and zeroes each of its 2048 frames before it answers
   (`kernel/src/object/shm.rs`), and netstack maps all of them before the SYN
   leaves.
-- **The connection's two pipes**, 2 MiB each: the request's page on the
+- **The connection's two directions**, 2 MiB each: the request's page on the
   client's write and the answer's on netstack's, each zeroed whole on that
   first write (`issues/a-pipe-is-a-two-mebibyte-page-for-a-mapping-nothing-makes.md`).
+  Since #1074 a direction takes 4 KiB frames as it fills and zeroes none, so
+  this part is measured no longer.
 
 **Measured** by the paired `osbench lan` sessions from the T14's I219 to the
 AMD bench's Linux peer over its Wi-Fi:

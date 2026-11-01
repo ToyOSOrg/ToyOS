@@ -124,12 +124,18 @@ pub mod ipc {
         pub fn recv(&self, buf: &mut [u8]) -> io::Result<()> {
             let mut at = 0;
             loop {
-                let header = self.0.recv_header().map_err(|e| failed("receive", e))?;
-                at += self.0.recv_bytes(&header, &mut buf[at..]).map_err(|e| failed("receive", e))?;
+                at += self.take(&mut buf[at..])?;
                 if at >= buf.len() {
                     return Ok(());
                 }
             }
+        }
+
+        /// One frame into the front of `buf`, straight from the kernel: the
+        /// bytes it held.
+        fn take(&self, buf: &mut [u8]) -> io::Result<usize> {
+            let (frame, _) = self.0.recv_into(buf).map_err(|e| failed("receive", e))?;
+            Ok(frame.payload_len)
         }
 
         /// One frame of `data` (at most one frame's worth) and `token`, moved.
@@ -138,9 +144,8 @@ pub mod ipc {
         }
 
         pub fn recv_with(&self, buf: &mut [u8]) -> io::Result<Token> {
-            let header = self.0.recv_header().map_err(|e| failed("receive", e))?;
-            self.0.recv_bytes(&header, buf).map_err(|e| failed("receive", e))?;
-            let [handle] = self.0.recv_handles_exact::<1>(&header).ok_or_else(|| io::Error::other("no handle came"))?;
+            let (_, handles) = self.0.recv_into(buf).map_err(|e| failed("receive", e))?;
+            let [handle] = handles.exact::<1>().ok_or_else(|| io::Error::other("no handle came"))?;
             // The peer sends only pipe ends.
             Ok(Pipe::from_handle(handle))
         }

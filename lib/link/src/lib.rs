@@ -8,10 +8,12 @@
 //! [`state`]); its arena holds a slot per ring entry, which a frame is copied
 //! into and out of once on each side ([`ends`]).
 //!
-//! **A doorbell is a byte on the connection**, written after what it
-//! announces is in the region. The connection's hang-up is the link's end:
-//! the stack keeps every connection it carries across it, and the driver
-//! started again opens a new link.
+//! **A doorbell is an event**, rung after what it announces is in the
+//! region: the stack makes both and sends the driver its ends with its
+//! answer ([`wire`]), so it holds no event a driver sent. A bell whose waker
+//! is gone is the link's
+//! end: the stack keeps every connection it carries across it, and the
+//! driver started again opens a new link.
 //!
 //! The rings, the frames' lengths and every state word are pure and
 //! host-tested; [`region`] maps the region and [`driver`] carries a device's

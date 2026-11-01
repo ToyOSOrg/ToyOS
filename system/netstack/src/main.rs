@@ -89,19 +89,20 @@ const LEASE_BOUND: Duration = Duration::from_millis(toyos_tco::LEASE_BOUND_MS);
 /// keeps up (`toyos-net-tcp`'s `rx`); a send buffer is the region's send ring.
 const TCP_BUFFER: u32 = toyos::net::stream::RECEIVE_BYTES;
 
-/// The most a kernel pipe holds unread; the frames it takes for that add a
-/// frame and their list's few KiB (`kernel::pipe::MOST_FRAMES`). A client's
-/// pipes are counted to it, and netstack holding their far ends keeps what is
-/// in them alive.
-const PIPE_BYTES: u64 = PIPE_CAPACITY as u64;
+/// The most bytes one direction of a connection holds unreceived; the frames
+/// it takes for that add a frame and their list's few KiB
+/// (`kernel::pipe::MOST_FRAMES`). A connection is counted to the client that
+/// made it, and netstack holding its far end keeps what is in it alive.
+const DIRECTION_BYTES: u64 = PIPE_CAPACITY as u64;
 
-/// What one holder of a stream can make this machine hold: the two pipes of
-/// its connection, each full. Its bells are events, which hold no bytes.
-const HOLDER_BYTES: u64 = 2 * PIPE_BYTES;
+/// What one holder of a stream can make this machine hold: the two
+/// directions of its connection, each full. Its bells are events, which hold
+/// no bytes.
+const HOLDER_BYTES: u64 = 2 * DIRECTION_BYTES;
 
 /// What one holder of a listener or a datagram socket can make it hold: the
-/// two pipes of its connection, its bell being an event.
-const SOCKET_HOLDER_BYTES: u64 = 2 * PIPE_BYTES;
+/// two directions of its connection, its bell being an event.
+const SOCKET_HOLDER_BYTES: u64 = 2 * DIRECTION_BYTES;
 
 /// What one place can make this machine hold, at the largest of the things a
 /// place is (`toyos-net-node`'s `places`): a stream, its region and its first

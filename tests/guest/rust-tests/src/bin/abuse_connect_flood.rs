@@ -97,19 +97,19 @@ fn main() {
     // A depth, not a permanent refusal: draining one must let one more in.
     let accepted = syscall::accept(acceptor.as_handle().raw()).expect("accept a queued connection");
 
-    // The other direction, without which "costs nothing" could be a pipe that
-    // never works: one byte on a live connection has to buy a frame. This is
-    // the negative control for the ceiling above — a kernel that allocated
-    // nothing ever would pass that assertion and fail this one.
+    // The other direction, without which "costs nothing" could be a
+    // connection that never works: one byte on a live connection has to buy a
+    // frame. This is the negative control for the ceiling above — a kernel
+    // that allocated nothing ever would pass that assertion and fail this one.
     let before_write = used_bytes();
-    let wrote = syscall::write(accepted, b"x").expect("write one byte to an accepted socket");
-    assert_eq!(wrote, 1);
+    // SAFETY: no handles travel.
+    unsafe { syscall::message_send(accepted, b"x", &[], false) }.expect("send one byte on an accepted connection");
     let took = used_bytes().saturating_sub(before_write);
     assert!(
         took >= syscall::PAGE_SIZE as u64,
-        "the first write to a connection grew physical memory by {took} bytes; a pipe's bytes take a frame"
+        "the first message on a connection grew physical memory by {took} bytes; its bytes take a frame"
     );
-    println!("  the first write on a connection allocated {} KiB", took / 1024);
+    println!("  the first message on a connection allocated {} KiB", took / 1024);
 
     // SAFETY: no type holds this number.
     unsafe { syscall::close(accepted) };

@@ -83,8 +83,9 @@ fn main() {
         .expect("spawn donor");
 
     let conn = acceptor.accept().expect("the donor connects");
-    let header = conn.recv_header().expect("the donor announces its region");
-    let [sent] = conn.recv_handles_exact::<1>(&header).expect("the donor sent the region with the frame");
+    let mut rx = toyos::ipc::FrameRx::<{ toyos::ipc::MAX_FRAME_LEN as usize }>::new();
+    rx.recv(&conn).expect("the donor announces its region");
+    let [sent] = rx.take_handles::<1>().expect("the donor sent the region with the frame");
 
     // Only now, after the donor has let go — its line says so.
     let mut out = BufReader::new(donor.stdout.take().expect("donor stdout"));

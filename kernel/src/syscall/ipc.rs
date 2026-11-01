@@ -11,11 +11,12 @@ use alloc::vec::Vec;
 
 use crate::watch;
 use crate::object::{ops, port, KObjectRef};
-use crate::object::service::SendRefused;
+use crate::message::{SendRefused, Taken};
+use crate::object::service::ConnectionEnd;
 use crate::time::Deadline;
 use crate::user_ptr::SyscallContext;
 use crate::UserAddr;
-use crate::{pipe, process};
+use crate::{message, pipe, process};
 
 use toyos_abi::handle::{RawHandle, Rights};
 use toyos_abi::syscall::*;
@@ -198,24 +199,11 @@ fn connect_through(connector: &port::Connector) -> u64 {
         return SyscallError::Gone.to_u64();
     }
     let made = (|| {
-        let (cs_reader, cs_writer) = pipe::create()?; // client → server
-        let (sc_reader, sc_writer) = pipe::create()?; // server → client
-        // Cross-wired here only: the server's end is built from the same two queues when it accepts.
-        let (to_server, to_client) = crate::object::service::ConnectionEnd::pair_queues()?;
-
-        let object = KObjectRef::Connection(crate::object::service::ConnectionEnd::new(
-            sc_reader,          // client reads from server→client
-            cs_writer,          // client writes to client→server
-            to_client.clone(),  // and receives what the server sent
-            to_server.clone(),
-        )?);
-        let pending = port::PendingConnection {
-            rx: cs_reader, // server reads from client→server
-            tx: sc_writer, // server writes to server→client
-            inbox: to_server,
-            outbox: to_client,
-            stamp: connector.stamp(),
-        };
+        let (to_server_rx, to_server_tx) = message::create()?;
+        let (to_client_rx, to_client_tx) = message::create()?;
+        // Cross-wired here only: the server's end is built from the pending half when it accepts.
+        let object = KObjectRef::Connection(ConnectionEnd::new(to_client_rx, to_server_tx)?);
+        let pending = port::PendingConnection { rx: to_server_rx, tx: to_client_tx, stamp: connector.stamp() };
         Ok::<_, crate::mm::charge::Exhausted>((object, pending))
     })();
     let (object, pending) = match made {
@@ -237,7 +225,7 @@ fn connect_through(connector: &port::Connector) -> u64 {
     });
     let h = match installed {
         Ok(h) => h,
-        // Both halves of a refused connection drop here, with the hold given up: their pipes go with them.
+        // Both halves of a refused connection drop here, with the hold given up: their queues go with them.
         Err((e, _client, _server)) => return e.to_u64(),
     };
     // The port's one watch carries both: the server blocked in `accept` and every ring polling it.
@@ -260,13 +248,13 @@ pub(super) fn sys_accept(h: RawHandle, flags: u64) -> u64 {
 
     loop {
         // Charged before a connection is taken, so a refusal leaves it queued.
-        let core = match crate::object::service::ConnectionEnd::accept_core() {
+        let core = match ConnectionEnd::accept_core() {
             Ok(core) => core,
             Err(e) => return SyscallError::from(e).to_u64(),
         };
         if let Some(conn) = acceptor.pop() {
-            // PipeReader/PipeWriter move from queue into connection: ownership transfers, no refcount change.
-            let object = KObjectRef::Connection(crate::object::service::ConnectionEnd::accepted(core, conn));
+            // The ends move from the port's queue into the connection: ownership transfers, no count changes.
+            let object = KObjectRef::Connection(ConnectionEnd::accepted(core, conn));
             let installed = process::with_process_data(|data| {
                 ops::install(&mut data.handles, object)
             });
@@ -320,7 +308,7 @@ pub(super) fn sys_port_badge(
 ) -> u64 {
     let found = process::with_process_data(|data| {
         let acceptor = data.handles.get::<port::Acceptor>(acceptor_h, Rights::READ)?;
-        let conn = data.handles.get::<crate::object::service::ConnectionEnd>(conn_h, Rights::READ)?;
+        let conn = data.handles.get::<ConnectionEnd>(conn_h, Rights::READ)?;
         Ok::<_, crate::object::HandleError>((acceptor.port_id(), conn.stamp().cloned()))
     });
     let (port, stamp) = match found {
@@ -414,32 +402,51 @@ pub(super) fn sys_shm_map(h: RawHandle, prot: u64) -> u64 {
     at.raw()
 }
 
-/// Write a message's bytes to a connection and move its handles to the peer,
+/// A send's arguments as the dispatch bounded them.
+pub(super) struct Outgoing<'a> {
+    pub bytes: crate::user_ptr::UserBytes<'a>,
+    pub handles: crate::user_ptr::UserBytes<'a>,
+    pub count: usize,
+}
+
+/// A receive's buffers as the dispatch bounded them.
+pub(super) struct Incoming<'a> {
+    /// Where the message's first bytes go, before [`Self::bytes`].
+    pub head: crate::user_ptr::UserBytesMut<'a>,
+    pub bytes: crate::user_ptr::UserBytesMut<'a>,
+    pub handles: crate::user_ptr::UserBytesMut<'a>,
+    pub cap: usize,
+}
+
+/// Queue a whole message on a connection and move its handles to the peer,
 /// together or not at all ([`toyos_abi::syscall::message_send`]). Rights,
-/// `TRANSFER` included, travel unchanged. Waits for room in the stream unless
-/// `nonblock`; the copy is the caller's, bounded by `MAX_MESSAGE_LEN`.
-pub(super) fn sys_message_send(
-    conn_h: RawHandle,
-    bytes: &crate::user_ptr::UserBytes,
-    handles: &crate::user_ptr::UserBytes,
-    count: usize,
-    nonblock: bool,
-) -> u64 {
+/// `TRANSFER` included, travel unchanged. Waits for room unless `nonblock`.
+pub(super) fn sys_message_send(conn_h: RawHandle, out: &Outgoing<'_>, nonblock: bool) -> u64 {
+    send(conn_h, out, nonblock).map_or_else(|word| word, |()| 0)
+}
+
+/// Take a connection's next whole message ([`toyos_abi::syscall::message_recv`]).
+pub(super) fn sys_message_recv(conn_h: RawHandle, into: &mut Incoming<'_>, nonblock: bool) -> u64 {
+    recv(conn_h, into, nonblock)
+}
+
+/// [`sys_message_send`]'s work, or the word its refusal answers.
+fn send(conn_h: RawHandle, out: &Outgoing<'_>, nonblock: bool) -> Result<(), u64> {
     let mut wanted = [RawHandle(0); MAX_TRANSFER_HANDLES];
-    for (i, slot) in wanted.iter_mut().enumerate().take(count) {
+    for (i, slot) in wanted.iter_mut().enumerate().take(out.count) {
         let mut raw = [0u8; HANDLE_LEN];
-        handles.read_at(i * HANDLE_LEN, &mut raw);
+        out.handles.read_at(i * HANDLE_LEN, &mut raw);
         *slot = RawHandle(u32::from_ne_bytes(raw));
     }
-    let wanted = &wanted[..count];
+    let wanted = &wanted[..out.count];
     // `TRANSFER` on the connection only when it carries handles: bytes alone
     // are a write, which `WRITE` already allows.
-    let need = if count == 0 { Rights::WRITE } else { Rights::WRITE.union(Rights::TRANSFER) };
+    let need = if out.count == 0 { Rights::WRITE } else { Rights::WRITE.union(Rights::TRANSFER) };
 
     loop {
         let sent = process::with_process_data(|data| {
-            let conn = data.handles.get::<crate::object::service::ConnectionEnd>(conn_h, need)?;
-            // Every handle is checked before anything is written or moved.
+            let conn = data.handles.get::<ConnectionEnd>(conn_h, need)?;
+            // Every handle is checked before anything is queued or moved.
             for (i, h) in wanted.iter().enumerate() {
                 if *h == conn_h || wanted[..i].contains(h) {
                     return Err(SyscallError::InvalidArgument.into());
@@ -450,55 +457,65 @@ pub(super) fn sys_message_send(
                 }
             }
             // A refusal restores every handle at its own number, so it is invisible.
-            let moved = data.handles.transfer(wanted, |batch| conn.send(bytes, batch));
-            Ok::<_, crate::object::Refusal>((conn.tx().clone(), moved))
+            let tx = conn.tx().clone();
+            let moved = data.handles.transfer(wanted, |batch| tx.send(&out.bytes, batch));
+            Ok::<_, crate::object::Refusal>((tx, moved))
         });
         let tx = match sent {
             Ok((tx, Ok(()))) => {
-                process::wake_pipe_readers(&tx);
-                return 0;
+                crate::scheduler::post_lending(tx.read_watch(), || tx.set_rt_boost_pending());
+                return Ok(());
             }
             Ok((tx, Err(SendRefused::NoRoom))) if !nonblock => tx,
-            Ok((_, Err(SendRefused::NoRoom))) => return SyscallError::WouldBlock.to_u64(),
-            Ok((_, Err(SendRefused::Error(e)))) => return e.to_u64(),
+            Ok((_, Err(SendRefused::NoRoom))) => return Err(SyscallError::WouldBlock.to_u64()),
+            Ok((_, Err(SendRefused::Gone))) => return Err(SyscallError::Gone.to_u64()),
+            Ok((_, Err(SendRefused::NoMemory))) => return Err(SyscallError::ResourceExhausted.to_u64()),
+            Err(e) => return Err(e.refuse()),
+        };
+        // Outside every lock: room appears as the receiver takes messages, and each receive posts this watch.
+        let (len, count) = (out.bytes.len(), out.count);
+        if watch::wait_until(&crate::scheduler::Parkable::at_entry(), tx.write_watch(), 0, WaitClass::Ipc, Deadline::never(), || {
+            tx.fits(len, count)
+        })
+        .is_err()
+        {
+            return Err(cancelled());
+        }
+    }
+}
+
+fn recv(conn_h: RawHandle, into: &mut Incoming<'_>, nonblock: bool) -> u64 {
+    loop {
+        let taken = process::with_process_data(|data| {
+            let conn = data.handles.get::<ConnectionEnd>(conn_h, Rights::READ)?;
+            let rx = conn.rx().clone();
+            let taken = rx.recv(&mut into.head, &mut into.bytes, into.cap, &mut data.handles);
+            Ok::<_, crate::object::Refusal>((rx, taken))
+        });
+        let rx = match taken {
+            Ok((rx, Taken::Message(head, installed))) => {
+                for (i, h) in installed[..head.handles].iter().enumerate() {
+                    into.handles.write_at(i * HANDLE_LEN, &h.0.to_ne_bytes());
+                }
+                // Room for the sender.
+                rx.write_watch().post();
+                return toyos_abi::syscall::Received::encode(head.len, head.handles);
+            }
+            Ok((_, Taken::Gone)) => return SyscallError::Gone.to_u64(),
+            Ok((_, Taken::Untaken(kernel::message::Untaken::TooSmall))) => return SyscallError::InvalidArgument.to_u64(),
+            Ok((_, Taken::Untaken(kernel::message::Untaken::NoRoom))) => return SyscallError::ResourceExhausted.to_u64(),
+            Ok((_, Taken::Empty)) if nonblock => return SyscallError::WouldBlock.to_u64(),
+            Ok((rx, Taken::Empty)) => rx,
+            // Refused outside this hold: ending the caller takes the same non-reentrant lock.
             Err(e) => return e.refuse(),
         };
-        // Outside every lock: room appears as the reader drains, and its read posts this watch.
-        let len = bytes.len();
-        if watch::wait_until(&crate::scheduler::Parkable::at_entry(), tx.write_watch(), 0, WaitClass::Ipc, Deadline::never(), || {
-            tx.has_space(len)
+        if watch::wait_until(&crate::scheduler::Parkable::at_entry(), rx.read_watch(), 0, WaitClass::Ipc, Deadline::never(), || {
+            rx.readable()
         })
         .is_err()
         {
             return cancelled();
         }
-    }
-}
-
-/// Take the batch pinned at the reader's place in the stream. Never blocks;
-/// zero means no batch sits here.
-pub(super) fn sys_handle_recv(
-    conn_h: RawHandle,
-    out: &mut crate::user_ptr::UserBytesMut,
-    cap: usize,
-) -> u64 {
-    let taken = process::with_process_data(|data| {
-        let conn = data
-            .handles
-            .get::<crate::object::service::ConnectionEnd>(conn_h, Rights::READ)?;
-        // Width and room are measured before the batch is taken: refusing after taking would drop handles nobody could ask for again.
-        let Some(batch) = conn.recv(cap, |width| data.handles.make_room(width))? else { return Ok(0) };
-        let count = batch.len();
-        for (i, entry) in batch.into_iter().enumerate() {
-            let h = data.handles.install(entry).expect("room was asked for first");
-            out.write_at(i * HANDLE_LEN, &h.0.to_ne_bytes());
-        }
-        Ok::<_, crate::object::Refusal>(count as u64)
-    });
-    // Refused outside this hold: ending the caller takes the same non-reentrant lock.
-    match taken {
-        Ok(n) => n,
-        Err(e) => e.refuse(),
     }
 }
 

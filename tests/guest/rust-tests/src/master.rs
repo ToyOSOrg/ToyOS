@@ -8,13 +8,14 @@ pub fn connect() -> toyos::Connection {
 }
 
 fn answer(volume: &toyos::Connection) -> Volume {
-    let header = volume.recv_header().expect("soundserver answers the request");
+    let mut rx = toyos::ipc::FrameRx::<{ core::mem::size_of::<Volume>() }>::new();
+    let frame = rx.recv(volume).expect("soundserver answers the request");
     assert_ne!(
-        header.msg_type, MSG_VOLUME_UNAVAILABLE,
+        frame.msg_type, MSG_VOLUME_UNAVAILABLE,
         "soundserver has no master to set: it plays to no audio device with one"
     );
-    assert_eq!(header.msg_type, MSG_VOLUME, "soundserver answered with message {}", header.msg_type);
-    let read: Volume = volume.recv_payload(&header).expect("the answer is a volume");
+    assert_eq!(frame.msg_type, MSG_VOLUME, "soundserver answered with message {}", frame.msg_type);
+    let read: Volume = toyos::ipc::decode_payload(rx.payload(frame.payload_len)).expect("the answer is a volume");
     println!("master: position {} of {}, muted {}", read.position, read.bottom, read.muted);
     read
 }

@@ -18,10 +18,10 @@
 
 use toyos::endow::{self, EndowError};
 use toyos::ipc::{Connection, FrameRx, RxStep};
+use toyos::wake::{Bell, Waker};
 use toyos::poller::{Poller, READABLE};
 use toyos::shm::ReadBytes;
 use toyos::{say, PciDev};
-use toyos_abi::syscall::SyscallError;
 
 use crate::ends::{Driver, Fault};
 use crate::layout::{RX_DEPTH, SLOT_BYTES, TX_DEPTH};
@@ -121,11 +121,14 @@ enum Ended {
 
 struct Session<'a> {
     label: &'a str,
-    conn: Connection,
+    /// The hello's connection, until the stack answers it.
+    conn: Option<Connection>,
     region: Region,
     end: Driver,
     rx: FrameRx<4>,
-    opened: bool,
+    /// Once the link is open, the stack's two bells: the waker rung for the
+    /// stack, and the bell it rings, its waker going being the stack's end.
+    bells: Option<(Waker, Bell)>,
     said: Option<Link>,
     /// Received frames longer than a slot, dropped.
     oversize: u64,
@@ -144,21 +147,35 @@ impl<'a> Session<'a> {
         // A connection that will not take the hello is one whose stack has
         // gone: its hang-up is read in the first pass.
         let _ = conn.try_send_bytes_with(wire::MSG_HELLO, &hello.encode(), [shared]);
-        Self { label, conn, region, end, rx: FrameRx::new(), opened: false, said: None, oversize: 0, oversize_said: 0 }
+        Self {
+            label,
+            conn: Some(conn),
+            region,
+            end,
+            rx: FrameRx::new(),
+            bells: None,
+            said: None,
+            oversize: 0,
+            oversize_said: 0,
+        }
     }
 
     fn serve(&mut self, nic: &mut impl Nic) -> Ended {
         let poller = Poller::new(2);
         loop {
             let ring = self.pass(nic).unwrap_or_else(|why| panic!("{}: the stack wrote {why}", self.label));
-            if ring && self.opened {
-                match self.conn.write_nonblock(&[1]) {
-                    Ok(_) | Err(SyscallError::WouldBlock) => {}
-                    Err(_) => return Ended::HungUp("it would not take a doorbell"),
-                }
+            if let Some((waker, _)) = &self.bells
+                && ring
+                && waker.ring().is_err()
+            {
+                return Ended::HungUp("its doorbell is gone");
             }
             poller.watch(nic.claim(), READABLE, TOKEN_CLAIM);
-            poller.watch(&self.conn, READABLE, TOKEN_LINK);
+            match (&self.bells, &self.conn) {
+                (Some((_, rung)), _) => poller.watch(rung, READABLE, TOKEN_LINK),
+                (None, Some(conn)) => poller.watch(conn, READABLE, TOKEN_LINK),
+                (None, None) => unreachable!("{}: a link neither opening nor open", self.label),
+            }
             poller.wait(1, nic.pass_due_in().unwrap_or(u64::MAX), |_| {});
             if let Some(ended) = self.hear() {
                 return ended;
@@ -234,35 +251,31 @@ impl<'a> Session<'a> {
         Ok(ring)
     }
 
-    /// Read the stack's answer, then its doorbells; the end of the session
+    /// Read the stack's answer, then its doorbell; the end of the session
     /// if that is what came.
     fn hear(&mut self) -> Option<Ended> {
-        if !self.opened {
-            return match self.rx.pump(&self.conn) {
-                RxStep::Idle => None,
-                RxStep::Eof => Some(Ended::HungUp("its process ended before it answered")),
-                RxStep::Frame { msg_type: wire::MSG_OPENED, payload_len: 0, handles: 0 } => {
-                    self.opened = true;
-                    say!("{}: the link is open", self.label);
-                    self.hear()
-                }
-                RxStep::Frame { msg_type: wire::MSG_REFUSED, payload_len, handles: 0 } => {
-                    match Refusal::decode(self.rx.payload(payload_len)) {
-                        Some(why) => Some(Ended::Refused(why)),
-                        None => panic!("{}: the stack refused this link with a word no stack writes", self.label),
-                    }
-                }
-                RxStep::Frame { .. } | RxStep::Malformed => panic!("{}: the stack answered a hello with a frame no stack writes", self.label),
-            };
+        if let Some((_, rung)) = &self.bells {
+            return rung.try_take().err().map(|_| Ended::HungUp("its process ended"));
         }
-        let mut sink = [0u8; 64];
-        loop {
-            match self.conn.read_nonblock(&mut sink) {
-                Ok(0) => return Some(Ended::HungUp("its process ended")),
-                Ok(_) => {}
-                Err(SyscallError::WouldBlock) => return None,
-                Err(_) => return Some(Ended::HungUp("it refused a read")),
+        let conn = self.conn.as_ref().expect("a link not open is opening");
+        match self.rx.pump(conn) {
+            RxStep::Idle => None,
+            RxStep::Eof => Some(Ended::HungUp("its process ended before it answered")),
+            RxStep::Frame { msg_type: wire::MSG_OPENED, payload_len: 0, handles: wire::OPENED_HANDLES } => {
+                let [ring, rung] = self.rx.take_handles::<{ wire::OPENED_HANDLES }>().expect("counted above");
+                self.bells = Some((Waker::from(ring), Bell::from(rung)));
+                // Its work is done: the bells carry the link from here.
+                self.conn = None;
+                say!("{}: the link is open", self.label);
+                self.hear()
             }
+            RxStep::Frame { msg_type: wire::MSG_REFUSED, payload_len, handles: 0 } => {
+                match Refusal::decode(self.rx.payload(payload_len)) {
+                    Some(why) => Some(Ended::Refused(why)),
+                    None => panic!("{}: the stack refused this link with a word no stack writes", self.label),
+                }
+            }
+            RxStep::Frame { .. } | RxStep::Malformed => panic!("{}: the stack answered a hello with a frame no stack writes", self.label),
         }
     }
 }

@@ -44,7 +44,6 @@ pub(crate) const ENOPROTOOPT: i32 = 92;
 pub(crate) const EOPNOTSUPP: i32 = 95;
 pub(crate) const EAFNOSUPPORT: i32 = 97;
 pub(crate) const EADDRINUSE: i32 = 98;
-pub(crate) const EPROTO: i32 = 71;
 pub(crate) const ECONNABORTED: i32 = 103;
 pub(crate) const ECONNRESET: i32 = 104;
 pub(crate) const EISCONN: i32 = 106;
@@ -69,8 +68,6 @@ pub(crate) fn of(e: SyscallError) -> i32 {
         // The kernel's word for a full handle table and for no memory alike.
         SyscallError::ResourceExhausted => ENOMEM,
         SyscallError::NotSupported => EOPNOTSUPP,
-        // A read of a connection met handles no frame announced: the peer broke its protocol.
-        SyscallError::HandlesPending => EPROTO,
         _ => EINVAL,
     }
 }

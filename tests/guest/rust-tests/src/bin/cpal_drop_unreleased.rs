@@ -81,11 +81,12 @@ fn serve() {
     // it, and the stream is the connection whose first frame is an open.
     let conn = loop {
         let conn = acceptor.accept().expect("the client's connection");
-        let header = conn.recv_header().expect("the client's first frame");
-        match header.msg_type {
+        let mut rx = toyos::ipc::FrameRx::<{ toyos::ipc::MAX_FRAME_LEN as usize }>::new();
+        let frame = rx.recv(&conn).expect("the client's first frame");
+        match frame.msg_type {
             MSG_DEVICE_DESCRIBE => conn.send(MSG_DEVICE_DESCRIBED, &DEVICE).expect("the description"),
             MSG_STREAM_OPEN => {
-                let _: StreamOpenRequest = conn.recv_payload(&header).expect("the client's open");
+                let _: StreamOpenRequest = toyos::ipc::decode_payload(rx.payload(frame.payload_len)).expect("the client's open");
                 break conn;
             }
             other => panic!("the client's first frame is message {other}, neither a describe nor an open"),
@@ -99,7 +100,8 @@ fn serve() {
     conn.send_with(MSG_STREAM_OPENED, &OPENED, [ring.share().expect("the ring to share"), signal_bell.into()])
         .expect("the open answered with its handles");
 
-    let close = conn.recv_header().expect("the client's close");
+    let mut rx = toyos::ipc::FrameRx::<{ toyos::ipc::MAX_FRAME_LEN as usize }>::new();
+    let close = rx.recv(&conn).expect("the client's close");
     assert_eq!(close.msg_type, MSG_STREAM_CLOSE, "the dropped stream did not close");
 
     // The signal side is held until the client has gone, so nothing but its
@@ -113,11 +115,11 @@ fn serve() {
     print!("{said}");
 
     signal.ring().expect("a signal to the stream thread");
-    match conn.recv_header() {
+    match rx.recv(&conn) {
         Err(IpcError::Disconnected) => {}
         other => panic!(
             "the stream's connection gave {:?} after its close, not its end",
-            other.map(|h| h.msg_type)
+            other.map(|f| f.msg_type)
         ),
     }
     // The client exits once its stdin closes, so the connection's end above

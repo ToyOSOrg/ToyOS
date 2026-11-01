@@ -91,11 +91,10 @@ fn until(wanted: impl Fn(&BTreeMap<String, Value>) -> bool, what: &str) {
 fn snapshot() -> BTreeMap<String, Value> {
     let conn = endow::service(NET.port).expect("the image gives test-runner netstack");
     conn.signal(MSG_INSPECT).expect("the inspect request");
-    let header = conn.recv_header().expect("netstack's answer");
-    assert_eq!(header.msg_type, MSG_SNAPSHOT, "netstack answered something that is not a snapshot");
-    let mut buf = vec![0u8; header.len() as usize];
-    let n = conn.recv_bytes(&header, &mut buf).expect("the snapshot's bytes");
-    toyos_inspect::decode(&buf[..n], NET).expect("a snapshot for `net`")
+    let mut rx = toyos::ipc::FrameRx::<{ toyos::ipc::MAX_FRAME_LEN as usize }>::new();
+    let frame = rx.recv(&conn).expect("netstack's answer");
+    assert_eq!(frame.msg_type, MSG_SNAPSHOT, "netstack answered something that is not a snapshot");
+    toyos_inspect::decode(rx.payload(frame.payload_len), NET).expect("a snapshot for `net`")
 }
 
 /// The places a snapshot says netstack holds.

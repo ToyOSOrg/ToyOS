@@ -1,5 +1,6 @@
-//! The stack's side of a link: the driver's connection, the region it sent,
-//! and the stack's end of the region's rings (`toyos-link`).
+//! The stack's side of a link: the region a driver sent with its hello, the
+//! stack's end of the region's rings (`toyos-link`) and the two doorbells,
+//! both of which the stack makes, so that it holds no event a driver sent.
 //!
 //! **What the driver writes is believed only as `toyos-link`'s ends bound
 //! it**: a frame's length by its slot, the link by its word, and the counters
@@ -9,7 +10,7 @@
 use toyos::ipc::{Connection, FrameRx, RxStep};
 use toyos::poller::READABLE;
 use toyos::say;
-use toyos_abi::syscall::SyscallError;
+use toyos::wake::{Bell, Waker};
 use toyos_inspect::Snapshot;
 use toyos_link::ends::{Fault, Stack};
 use toyos_link::layout::{RX_DEPTH, SLOT_BYTES};
@@ -36,8 +37,8 @@ pub enum Heard {
     Nothing,
     /// The driver went, or said what no driver says: it was refused, or let go.
     Gone,
-    /// The driver said who it is, its address as the node takes one: its
-    /// connection is [`Pending::into_conn`].
+    /// The driver said who it is, its address as the node takes one, with
+    /// its region: its connection is [`Pending::into_conn`].
     Hello(Hello, IndividualMac, Region),
 }
 
@@ -61,8 +62,8 @@ impl Pending {
             RxStep::Frame { msg_type: wire::MSG_HELLO, payload_len, handles: 1 } => {
                 let hello = Hello::decode(self.rx.payload(payload_len));
                 let mac = hello.as_ref().and_then(|hello| IndividualMac::new(MacAddr(hello.mac.bytes())));
-                let region = self.rx.take_handles::<1>().and_then(|[region]| Region::lent(region).ok());
-                match (hello, mac, region) {
+                let [region] = self.rx.take_handles::<1>().expect("counted above");
+                match (hello, mac, Region::lent(region).ok()) {
                     (Some(hello), Some(mac), Some(region)) => Heard::Hello(hello, mac, region),
                     _ => {
                         say!("netstack: a NIC driver's hello is not one this protocol makes, or its region is none");
@@ -92,7 +93,10 @@ pub enum Ended {
 
 /// A link the stack opened.
 pub struct Session {
-    conn: Connection,
+    /// Rung for the driver.
+    ring_driver: Waker,
+    /// The driver's doorbell; its waker going is the driver's end.
+    rung: Bell,
     region: Region,
     end: Stack,
     hello: Hello,
@@ -110,14 +114,31 @@ pub struct Session {
 
 impl Session {
     /// Open the link `hello` asked for over `region` as the node's `iface`,
-    /// and say so to the driver; `None` for a driver gone before it heard.
+    /// and say so to the driver with its ends of the two bells, its `conn`
+    /// let go then; `None` for a driver gone before it heard.
     pub fn open(hello: Hello, iface: IfIndex, conn: Connection, region: Region, groups: &[Group]) -> Option<Self> {
         let mut end = Stack::new(region.words());
         for group in groups {
             assert!(end.join(region.words(), *group), "netstack: more groups than a link holds");
         }
-        conn.try_send_bytes(wire::MSG_OPENED, &[]).ok()?;
-        Some(Self { conn, region, end, hello, iface, sent: 0, said: Link::Down, frame: Box::new([0; SLOT_BYTES]), asked: false, ring: true })
+        let (Ok((ring_driver, driver_hears)), Ok((driver_rings, rung))) = (toyos::wake::pair(), toyos::wake::pair()) else {
+            say!("netstack: no doorbells for {}'s link", hello.label);
+            return None;
+        };
+        conn.try_signal_with(wire::MSG_OPENED, [driver_rings.into(), driver_hears.into()]).ok()?;
+        Some(Self {
+            ring_driver,
+            rung,
+            region,
+            end,
+            hello,
+            iface,
+            sent: 0,
+            said: Link::Down,
+            frame: Box::new([0; SLOT_BYTES]),
+            asked: false,
+            ring: true,
+        })
     }
 
     pub fn iface(&self) -> IfIndex {
@@ -135,7 +156,7 @@ impl Session {
     }
 
     pub fn watch(&self, poller: &mut Watches, token: u64) {
-        poller.watch(&self.conn, READABLE, token);
+        poller.watch(&self.rung, READABLE, token);
     }
 
     /// The link's state, the frames the driver received, and what is due
@@ -219,29 +240,17 @@ impl Session {
         Some(counters)
     }
 
-    /// Ring the driver if this pass gave it anything to do; a refusal is a
-    /// full pipe, a doorbell already rung.
+    /// Ring the driver if this pass gave it anything to do.
     pub fn ring(&mut self) -> Result<(), Ended> {
         if std::mem::take(&mut self.ring) {
-            match self.conn.write_nonblock(&[1]) {
-                Ok(_) | Err(SyscallError::WouldBlock) => {}
-                Err(_) => return Err(Ended::HungUp),
-            }
+            self.ring_driver.ring().map_err(|_| Ended::HungUp)?;
         }
         Ok(())
     }
 
-    /// Consume the driver's doorbell bytes; its hang-up is the link's end.
+    /// Take the driver's doorbell; its waker gone is the link's end.
     fn hear(&self) -> Result<(), Ended> {
-        let mut sink = [0u8; 64];
-        loop {
-            match self.conn.read_nonblock(&mut sink) {
-                Ok(0) => return Err(Ended::HungUp),
-                Ok(_) => {}
-                Err(SyscallError::WouldBlock) => return Ok(()),
-                Err(_) => return Err(Ended::HungUp),
-            }
-        }
+        self.rung.try_take().map(drop).map_err(|_| Ended::HungUp)
     }
 
     /// What `inspect` reads about the link: its driver, its address, its

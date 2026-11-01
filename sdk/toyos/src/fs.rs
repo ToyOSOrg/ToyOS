@@ -51,7 +51,7 @@ use alloc::vec::Vec;
 
 use toyos_abi::syscall::{SyscallError, MAX_BADGE, MAX_SERVICE_NAME};
 
-use crate::ipc::{Connection, IpcError};
+use crate::ipc::{Connection, FrameRx, IpcError};
 use crate::ipc_payload;
 use crate::namespace::Namespace;
 use crate::shm::{Bytes, SharedMemory};
@@ -831,14 +831,14 @@ impl Dir {
         self.tag = self.tag.wrapping_add(1);
         request.tag = self.tag;
         let conn = self.conn.as_ref().expect("connected above");
+        let mut rx = FrameRx::<{ core::mem::size_of::<Reply>() }>::new();
         let answered = conn.send(op, &request).map_err(transport).and_then(|()| {
-            let header = conn.recv_header().map_err(transport)?;
-            let reply: Reply = conn.recv_payload(&header).map_err(transport)?;
-            let carried = conn.recv_handles(&header).map_err(transport)?;
+            let frame = rx.recv(conn).map_err(transport)?;
+            let reply: Reply = crate::ipc::decode_payload(rx.payload(frame.payload_len)).map_err(transport)?;
             if reply.tag != request.tag {
                 return Err(Error::Malformed);
             }
-            Ok((header.msg_type, reply, carried))
+            Ok((frame.msg_type, reply, rx.take_batch()))
         });
         if answered.is_err() {
             self.conn = None;
@@ -1292,9 +1292,10 @@ fn hello(conn: &Connection, window: &SharedMemory) -> Result<Reply, Error> {
         Ok(()) | Err(Error::Gone) => {}
         Err(e) => return Err(e),
     }
-    let header = conn.recv_header().map_err(transport)?;
-    let reply = conn.recv_payload(&header).map_err(transport)?;
-    answer(header.msg_type, reply)
+    let mut rx = FrameRx::<{ core::mem::size_of::<Reply>() }>::new();
+    let frame = rx.recv(conn).map_err(transport)?;
+    let reply = crate::ipc::decode_payload(rx.payload(frame.payload_len)).map_err(transport)?;
+    answer(frame.msg_type, reply)
 }
 
 /// A connection's transport refused, as the protocol names it.

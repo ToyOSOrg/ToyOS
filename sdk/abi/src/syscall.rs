@@ -164,9 +164,6 @@ pub const SYS_NAMESPACE_BUILD: u64 = 101;
 /// no other place to ask, and a name it was not given resolves to nothing.
 pub const SYS_NAMESPACE_OPEN: u64 = 102;
 
-/// Take the batch of handles at the reader's place in the connection's bytes.
-/// See [`handle_recv`].
-pub const SYS_HANDLE_RECV: u64 = 104;
 /// Make a shared-memory region, sized up to whole [`PAGE_SIZE`]s.
 /// See [`shm_create`].
 pub const SYS_SHM_CREATE: u64 = 105;
@@ -296,8 +293,8 @@ pub const SYS_NULL: u64 = 130;
 pub const SYS_DEVICE_DMA_LIMIT: u64 = 131;
 /// Let a claimed PCI function master the bus. See [`device_dma_start`].
 pub const SYS_DEVICE_DMA_START: u64 = 132;
-/// Write a message's bytes to a connection and move the handles it carries,
-/// together or not at all. See [`message_send`].
+/// Queue a whole message on a connection, its bytes and the handles it
+/// carries, or nothing of it. See [`message_send`].
 pub const SYS_MESSAGE_SEND: u64 = 133;
 /// A handle to the job the caller runs in. See [`job_own`].
 pub const SYS_JOB_OWN: u64 = 134;
@@ -362,6 +359,8 @@ pub const SYS_PAGED_READ: u64 = 156;
 pub const SYS_PAGED_OP: u64 = 157;
 /// What a pager's objects ask of it. See [`paged_notices`].
 pub const SYS_PAGED_NOTICES: u64 = 158;
+/// Take a connection's next whole message. See [`message_recv`].
+pub const SYS_MESSAGE_RECV: u64 = 159;
 
 /// Bins in the per-process syscall profile — one for every number this ABI
 /// issues, and one at the end for every number it does not.
@@ -369,13 +368,13 @@ pub const SYS_PAGED_NOTICES: u64 = 158;
 /// **The profile's parts sum to its total, and that is the whole requirement.**
 /// A bin array narrower than the ABI reaches drops calls out of the line while
 /// the total goes on counting them.
-pub const SYSCALL_PROFILE_BINS: usize = 160;
+pub const SYSCALL_PROFILE_BINS: usize = 161;
 
 /// Where a number this ABI does not issue is counted. Merging is a degradation
 /// a reader can see in the line; dropping is one nobody can.
 pub const SYSCALL_PROFILE_OTHER: usize = SYSCALL_PROFILE_BINS - 1;
 
-const _: () = assert!(SYS_PAGED_NOTICES < SYSCALL_PROFILE_OTHER as u64);
+const _: () = assert!(SYS_MESSAGE_RECV < SYSCALL_PROFILE_OTHER as u64);
 
 pub const WNOHANG: u64 = 1;
 /// Every bit `SYS_PROCESS_WAIT`'s flag word defines; a wait carrying another
@@ -592,9 +591,6 @@ pub enum SyscallError {
     /// the same rule the storage layer already obeys applies here: a dead peer
     /// must not be indistinguishable from a handle that was never there.
     Gone = 10,
-    /// A read of a connection reached a batch of handles the peer sent with
-    /// the bytes before it: take the batch ([`handle_recv`]) before reading on.
-    HandlesPending = 11,
 }
 
 impl SyscallError {
@@ -619,7 +615,6 @@ impl SyscallError {
             8 => Some(Self::NotSupported),
             9 => Some(Self::Io),
             10 => Some(Self::Gone),
-            11 => Some(Self::HandlesPending),
             _ => Some(Self::Unknown),
         }
     }
@@ -639,7 +634,6 @@ impl core::fmt::Display for SyscallError {
             Self::NotSupported => f.write_str("not supported"),
             Self::Io => f.write_str("the device did not complete the transfer"),
             Self::Gone => f.write_str("the other end is gone"),
-            Self::HandlesPending => f.write_str("handles the peer sent wait at this point of the stream"),
         }
     }
 }
@@ -2107,15 +2101,20 @@ pub fn accept_nonblock(acceptor: RawHandle) -> Result<RawHandle, SyscallError> {
 /// and never truncated to fit.
 pub const MAX_TRANSFER_HANDLES: usize = 8;
 
-/// Batches one direction of a connection may hold unreceived.
-pub const MAX_QUEUED_BATCHES: usize = 16;
+/// Messages one direction of a connection may hold unreceived.
+pub const MAX_QUEUED_MESSAGES: usize = 256;
 
-/// The most bytes one [`message_send`] writes. Policy on the primitive: the
-/// bytes are copied whole under the connection's locks, so the copy is
-/// bounded, and every frame a protocol here sends is far smaller.
+/// Handles one direction of a connection may hold unreceived, across its
+/// messages.
+pub const MAX_QUEUED_HANDLES: usize = 64;
+
+/// The most bytes one message carries. Policy on the primitive: the bytes are
+/// copied whole under the connection's lock, so the copy is bounded, and bulk
+/// data travels in shared memory.
 pub const MAX_MESSAGE_LEN: usize = 16 * 1024;
 
-/// [`message_send`] answers `WouldBlock` rather than waiting for room.
+/// [`message_send`] or [`message_recv`] answers `WouldBlock` rather than
+/// waiting.
 pub const MESSAGE_NONBLOCK: u64 = 1;
 
 crate::user_safe! {
@@ -2131,21 +2130,33 @@ crate::user_safe! {
     }
 }
 
-/// Write `bytes` to `conn` and move `handles` to its peer, as one message.
+impl MessageSend {
+    fn new(bytes: &[u8], handles: &[RawHandle], nonblock: bool) -> Self {
+        Self {
+            bytes: bytes.as_ptr() as u64,
+            len: bytes.len() as u64,
+            handles: handles.as_ptr() as u64,
+            count: handles.len() as u64,
+            flags: if nonblock { MESSAGE_NONBLOCK } else { 0 },
+        }
+    }
+}
+
+/// Queue `bytes` and `handles` on `conn` as one message for its peer.
 ///
-/// **All or nothing, and in order.** The bytes go into the connection's
-/// stream whole, and the handles are queued at the byte just past them: the
-/// peer reads the bytes, then takes the batch ([`handle_recv`]), and no read
-/// of its crosses the batch before it is taken. Nothing is written and no
-/// handle moves on a refusal:
+/// **All or nothing, and in order.** The peer takes each message whole, its
+/// bytes and exactly its handles, in the order they were sent
+/// ([`message_recv`]). Nothing is queued and no handle moves on a refusal:
 /// - every handle must carry [`Rights::TRANSFER`], and so must `conn` when
 ///   there are any; `conn` itself and a handle named twice are refused;
-/// - handles need bytes (`InvalidArgument`), and past [`MAX_MESSAGE_LEN`]
-///   bytes or [`MAX_TRANSFER_HANDLES`] handles is `InvalidArgument`;
-/// - a peer already holding [`MAX_QUEUED_BATCHES`] is `ResourceExhausted`, and
-///   a peer that is gone is `Gone`;
-/// - a stream without room for the whole message waits for it, or with
-///   `nonblock` answers `WouldBlock`.
+/// - past [`MAX_MESSAGE_LEN`] bytes or [`MAX_TRANSFER_HANDLES`] handles is
+///   `InvalidArgument`;
+/// - a peer that is gone is `Gone`, and memory for the bytes the machine
+///   does not have is `ResourceExhausted`;
+/// - without room for the whole message beside the peer's unreceived ones
+///   (at most [`MAX_QUEUED_MESSAGES`], [`MAX_QUEUED_HANDLES`] and
+///   [`PIPE_CAPACITY`] bytes) it waits for room, or with `nonblock` answers
+///   `WouldBlock`. `conn` polls writable once the largest message fits.
 ///
 /// [`Rights::TRANSFER`]: crate::handle::Rights::TRANSFER
 ///
@@ -2153,32 +2164,82 @@ crate::user_safe! {
 /// Each of `handles` is the caller's to give away: a sent handle leaves this
 /// process, so nothing may answer for it afterwards ([`crate::handle`]).
 pub unsafe fn message_send(conn: RawHandle, bytes: &[u8], handles: &[RawHandle], nonblock: bool) -> Result<(), SyscallError> {
-    let args = MessageSend {
-        bytes: bytes.as_ptr() as u64,
-        len: bytes.len() as u64,
-        handles: handles.as_ptr() as u64,
-        count: handles.len() as u64,
-        flags: if nonblock { MESSAGE_NONBLOCK } else { 0 },
-    };
+    let args = MessageSend::new(bytes, handles, nonblock);
     check_unit(syscall(SYS_MESSAGE_SEND, conn.0 as u64, &args as *const MessageSend as u64, 0, 0))
 }
 
-/// Take the batch the peer sent at this reader's place in the connection's
-/// bytes, into `out`. Answers how many it wrote.
+crate::user_safe! {
+    /// Arguments for `SYS_MESSAGE_RECV`, passed as a single pointer: where
+    /// the message's bytes go, its first `head_len` to `head` and the rest to
+    /// `bytes`, and where its handles go.
+    #[derive(Clone, Copy)]
+    pub struct MessageRecv {
+        pub head: u64,
+        pub head_len: u64,
+        pub bytes: u64,
+        pub len: u64,
+        pub handles: u64,
+        pub cap: u64,
+        /// [`MESSAGE_NONBLOCK`] or none; any other bit is `InvalidArgument`.
+        pub flags: u64,
+    }
+}
+
+impl MessageRecv {
+    fn new(head: &mut [u8], bytes: &mut [u8], handles: &mut [RawHandle], nonblock: bool) -> Self {
+        Self {
+            head: head.as_mut_ptr() as u64,
+            head_len: head.len() as u64,
+            bytes: bytes.as_mut_ptr() as u64,
+            len: bytes.len() as u64,
+            handles: handles.as_mut_ptr() as u64,
+            cap: handles.len() as u64,
+            flags: if nonblock { MESSAGE_NONBLOCK } else { 0 },
+        }
+    }
+}
+
+/// A message taken: how many bytes and handles it carried.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub struct Received {
+    pub len: usize,
+    pub handles: usize,
+}
+
+impl Received {
+    /// The answer's word: the length low, the handle count above it.
+    fn decode(word: u64) -> Self {
+        Self { len: (word & 0xFFFF_FFFF) as usize, handles: (word >> 32) as usize }
+    }
+
+    /// The word the kernel answers.
+    pub const fn encode(len: usize, handles: usize) -> u64 {
+        len as u64 | (handles as u64) << 32
+    }
+}
+
+const _: () = assert!(Received::encode(MAX_MESSAGE_LEN, MAX_TRANSFER_HANDLES) < u64::MAX - 255);
+
+/// Take `conn`'s next message whole: its first bytes into `head`, the rest
+/// into `bytes`, and its handles, each installed in this process's table,
+/// into `handles`. Two places, so a protocol's own header and the payload
+/// behind it each land where the caller keeps them, with no copy between.
 ///
-/// Never blocks: zero means no batch sits here, which for a reader that has
-/// just read a message carrying handles is a peer that broke its protocol. A
-/// batch larger than `out` is `InvalidArgument` and stays queued — `out`
-/// should be [`MAX_TRANSFER_HANDLES`] long.
-pub fn handle_recv(conn: RawHandle, out: &mut [RawHandle]) -> Result<usize, SyscallError> {
-    check(syscall(
-        SYS_HANDLE_RECV,
-        conn.0 as u64,
-        out.as_mut_ptr() as u64,
-        out.len() as u64,
-        0,
-    ))
-    .map(|n| n as usize)
+/// Waits for one unless `nonblock`, which answers `WouldBlock`. Once the peer
+/// has gone and nothing is queued, `Gone`. **A message is never cut**: one
+/// larger than `head` and `bytes` together, or carrying more handles than
+/// `handles` holds, is `InvalidArgument`, and a table without room for its
+/// handles `ResourceExhausted`, both leaving it queued. A protocol bounds its
+/// own messages, so either is the peer breaking it.
+pub fn message_recv(
+    conn: RawHandle,
+    head: &mut [u8],
+    bytes: &mut [u8],
+    handles: &mut [RawHandle],
+    nonblock: bool,
+) -> Result<Received, SyscallError> {
+    let args = MessageRecv::new(head, bytes, handles, nonblock);
+    check(syscall(SYS_MESSAGE_RECV, conn.0 as u64, &args as *const MessageRecv as u64, 0, 0)).map(Received::decode)
 }
 
 /// Make a shared-memory region of zeroed memory and answer a handle to it.
