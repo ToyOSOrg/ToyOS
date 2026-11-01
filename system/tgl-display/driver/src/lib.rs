@@ -23,6 +23,7 @@ use toyos_device_memory::Registers;
 
 pub mod dmc;
 pub mod interrupt;
+pub mod opregion;
 pub mod regs;
 pub mod watermark;
 

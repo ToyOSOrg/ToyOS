@@ -65,6 +65,101 @@ pub struct DmaGrant {
 
 const _: () = assert!(core::mem::size_of::<DmaGrant>() == 4 + 4 + 8 + 8);
 
+/// A window into memory firmware set up for a function, granted only by the
+/// signed image's manifest (`firmware = [...]`).
+#[repr(u64)]
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum FirmwareWindow {
+    /// The IGD OpRegion of an Intel graphics function, at its ASLS register.
+    IgdOpRegion = 1,
+}
+
+impl FirmwareWindow {
+    pub const fn from_raw(raw: u64) -> Option<Self> {
+        match raw {
+            1 => Some(Self::IgdOpRegion),
+            _ => None,
+        }
+    }
+}
+
+/// The firmware windows a PCI function claim is granted at its mint, one bit
+/// per [`FirmwareWindow`], carried in the mint's second selector word.
+#[derive(Clone, Copy, PartialEq, Eq, Debug, Default)]
+pub struct FirmwareWindows(u64);
+
+impl FirmwareWindows {
+    pub const NONE: Self = Self(0);
+    const KNOWN: u64 = 1 << FirmwareWindow::IgdOpRegion as u64;
+
+    pub fn of(windows: &[FirmwareWindow]) -> Self {
+        Self(windows.iter().fold(0, |mask, &window| mask | 1 << window as u64))
+    }
+
+    /// The mask off the wire, or `None` naming a window there is none of.
+    pub const fn from_mask(mask: u64) -> Option<Self> {
+        if mask & !Self::KNOWN != 0 { None } else { Some(Self(mask)) }
+    }
+
+    pub const fn mask(self) -> u64 {
+        self.0
+    }
+
+    pub fn contains(self, window: FirmwareWindow) -> bool {
+        self.0 & 1 << window as u64 != 0
+    }
+
+    pub fn iter(self) -> impl Iterator<Item = FirmwareWindow> {
+        [FirmwareWindow::IgdOpRegion].into_iter().filter(move |&window| self.contains(window))
+    }
+}
+
+/// A firmware window as [`crate::syscall::device_firmware_window`] answers
+/// it: whole pages in `shm`, and the window `offset` bytes into them.
+#[repr(C)]
+#[derive(Clone, Copy)]
+pub struct WindowGrant {
+    /// The pages, as an object to map; the caller owns this handle.
+    pub shm: crate::RawHandle,
+    /// Where the kernel refused the window, a [`WindowRefused`]; 0
+    /// otherwise.
+    pub refused: u32,
+    pub offset: u64,
+    /// The window's length; its pages run to `offset + len`, rounded up.
+    pub len: u64,
+}
+
+const _: () = assert!(core::mem::size_of::<WindowGrant>() == 4 + 4 + 8 + 8);
+
+/// Why the kernel refused a firmware window firmware set up.
+#[repr(u32)]
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum WindowRefused {
+    /// The header does not carry the window's signature.
+    Signature = 1,
+    /// The size its header gives is none the window can be.
+    Size = 2,
+    /// A page of it is not memory firmware keeps for itself.
+    NotFirmware = 3,
+    /// A page of it is memory the kernel hands out.
+    Usable = 4,
+    /// A page of it is one a device decodes.
+    Device = 5,
+}
+
+impl WindowRefused {
+    pub const fn from_raw(raw: u32) -> Option<Self> {
+        match raw {
+            1 => Some(Self::Signature),
+            2 => Some(Self::Size),
+            3 => Some(Self::NotFirmware),
+            4 => Some(Self::Usable),
+            5 => Some(Self::Device),
+            _ => None,
+        }
+    }
+}
+
 /// Where a function reaches a region its holder mapped into its address space
 /// ([`crate::syscall::device_dma_map`]).
 ///

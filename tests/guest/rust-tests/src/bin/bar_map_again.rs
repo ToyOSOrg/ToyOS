@@ -4,7 +4,7 @@
 //! answer is still held, where the two are two mappings and the later one
 //! outlives the earlier; after a close; and after an ask a full handle table
 //! refused, which is an object whose only handle went before its holder ever
-//! had it.
+//! had it. And a handle kept past the claim's end maps nothing.
 //!
 //! The function is QEMU's virtio NIC, which no program of `tests/images/testcases.toml`
 //! holds.
@@ -107,6 +107,15 @@ fn main() {
     let after = ask(&nic, bar, bytes);
     assert_eq!(after, first, "bar_map_again: the ask after the refusal maps another window");
     println!("bar_map_again: answered after the refusal with a handle that maps");
+
+    // A BAR's handle kept past its claim's end maps nothing: the claim's end
+    // revoked every aperture it handed out.
+    let kept = syscall::device_bar_map(nic.as_handle().raw(), bar).expect("bar_map_again: the BAR, asked for");
+    drop(nic);
+    // SAFETY: a refused map makes no mapping; one made is never written.
+    let mapped = unsafe { syscall::shm_map(kept, toyos_abi::syscall::VmProt::ReadWrite) };
+    assert_eq!(mapped.err(), Some(SyscallError::Gone), "bar_map_again: a BAR's handle mapped after its claim ended");
+    println!("bar_map_again: a BAR's handle kept past its claim's end maps nothing");
 }
 
 /// The kernel handle this process's standard output is, descriptor 1's.

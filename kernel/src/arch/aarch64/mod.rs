@@ -35,6 +35,7 @@ pub mod fpu;
 pub mod hw;
 pub mod idle;
 pub mod irqchip;
+pub mod opregion;
 pub mod paging;
 pub mod percpu;
 pub mod pio;

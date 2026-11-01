@@ -308,6 +308,10 @@ pub struct Program {
     /// holding that function's claim. Such a row serves nothing and is never
     /// in [`Manifest::start`]; it reaches its consumer through `receives`.
     pub drives: Vec<String>,
+    /// Firmware windows ([`firmware_window`]) the supervisor grants each
+    /// function's claim of a `drives` row, before it endows it: a privilege
+    /// beyond the claim, which only the signed image's rows can name.
+    pub firmware: Vec<String>,
     /// Rights on the `SysCap` duplicate the supervisor endows this program, by the names
     /// [`syscap_rights`] takes. Empty for all but a handful: nothing else in
     /// the system may enter the RT band, mint a device claim, read the machine
@@ -510,6 +514,18 @@ pub enum RenderError {
     /// another row's `starts`, either of which would start it holding no
     /// function.
     Drives { program: String, also: &'static str },
+    /// A `firmware` entry naming no window ([`firmware_window`]).
+    NoSuchFirmware { program: String, window: String },
+    /// A `firmware` entry on a row with no `drives`, whose claim it would be.
+    FirmwareWithoutDrives(String),
+}
+
+/// The firmware window a row's `firmware` entry names.
+pub fn firmware_window(word: &str) -> Option<toyos_abi::pci::FirmwareWindow> {
+    match word {
+        "igd-opregion" => Some(toyos_abi::pci::FirmwareWindow::IgdOpRegion),
+        _ => None,
+    }
 }
 
 pub fn render(manifest: &Manifest) -> Result<Vec<u8>, RenderError> {
@@ -554,6 +570,15 @@ pub fn render(manifest: &Manifest) -> Result<Vec<u8>, RenderError> {
                 check(&program.name, field, value)?;
                 out.push_str(&format!("{word} {value}\n"));
             }
+        }
+        for window in &program.firmware {
+            if firmware_window(window).is_none() {
+                return Err(RenderError::NoSuchFirmware { program: program.name.clone(), window: window.clone() });
+            }
+            if program.drives.is_empty() {
+                return Err(RenderError::FirmwareWithoutDrives(program.name.clone()));
+            }
+            out.push_str(&format!("firmware {window}\n"));
         }
         if program.slots {
             out.push_str("slots\n");
@@ -746,6 +771,7 @@ pub fn parse(text: &str) -> Manifest {
                     "receive" => program.receives.push(rest.to_string()),
                     "device" => program.devices.push(rest.to_string()),
                     "drive" => program.drives.push(rest.to_string()),
+                    "firmware" if firmware_window(rest).is_some() => program.firmware.push(rest.to_string()),
                     "syscap" => program.syscap.push(rest.to_string()),
                     "slots" if rest.is_empty() => program.slots = true,
                     "authorize" if authorize::Authorization::parse(rest).is_some() => program.authorize.push(rest.to_string()),
@@ -1201,6 +1227,22 @@ mod tests {
         assert_eq!(drives(|m| m.programs[0].devices = vec!["acpi".into()]), refused("devices"));
         assert_eq!(drives(|m| m.start = vec!["a".into()]), refused("[boot] start"));
         assert_eq!(drives(|m| m.programs[0].starts = vec!["a".into()]), refused("starts"));
+    }
+
+    /// A firmware window is a privilege beyond the claim of a `drives` row:
+    /// a named one, on such a row, round-trips; anything else is refused.
+    #[test]
+    fn a_firmware_window_is_named_and_only_on_a_drives_row() {
+        let mut m = with_rows(&[("a", &[], &["pci:03:00:00/8086:9a49"])]);
+        m.programs[0].firmware = vec!["igd-opregion".into()];
+        let rendered = render(&m).expect("renders");
+        assert_eq!(parse(core::str::from_utf8(&rendered).expect("text")).programs[0].firmware, ["igd-opregion"]);
+        m.programs[0].firmware = vec!["opregion".into()];
+        assert_eq!(render(&m), Err(RenderError::NoSuchFirmware { program: "a".into(), window: "opregion".into() }));
+        let mut m = with_rows(&[("a", &["acpi"], &[])]);
+        m.programs[0].firmware = vec!["igd-opregion".into()];
+        assert_eq!(render(&m), Err(RenderError::FirmwareWithoutDrives("a".into())));
+        assert_eq!(firmware_window("igd-opregion"), Some(toyos_abi::pci::FirmwareWindow::IgdOpRegion));
     }
 
     #[test]

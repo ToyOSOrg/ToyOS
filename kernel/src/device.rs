@@ -167,7 +167,14 @@ pub fn try_claim(class: DeviceType, selector: [u64; 2]) -> Result<Arc<DeviceClai
             // The function's own guard, taken inside: a PCI claim's exclusivity is
             // per function rather than per class, so there is no flag here to
             // acquire first.
+            let windows = toyos_abi::pci::FirmwareWindows::from_mask(selector[1]).ok_or(ClaimError::Unusable)?;
             let (info, claim) = crate::pcidev::claim(toyos_abi::inventory::Arrival(arrival))?;
+            // Granted before the claim exists for anyone: a window is the
+            // mint's, and nothing after it can add one. A window this function
+            // has none of refuses the mint, and the claim's drop releases it.
+            for window in windows.iter() {
+                claim.binding().map(|binding| crate::pcidev::grant_firmware(binding, window)).transpose().map_err(|_| ClaimError::Unusable)?;
+            }
             Ok(DeviceClaim::new(class, DeviceInfo::PciFunction(info), claim)?)
         }
         DeviceType::Isa => {

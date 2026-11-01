@@ -44,6 +44,7 @@ The kernel keeps only generic mechanisms:
 
 - A claim keeps its function's firmware-reserved ranges mapped in its domain from attach on: VT-d RMRRs, and AMD-Vi's unity ranges.
 - The panic surface: a linear buffer the driver lent, and the bounded register writes in its own BAR that make it visible.
+- A claim's firmware windows, which only the signed image's `drives` row can name (`firmware = [...]`). Today that is the IGD OpRegion: the kernel finds it at ASLS, holds it to firmware's own memory and maps it for the driver. Its VBT is handed out raw. Intel has published no VBT layout, so parsing it waits for a clean-room fact brief.
 
 ## AMD's adapter boundary
 

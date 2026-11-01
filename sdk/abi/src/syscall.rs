@@ -370,6 +370,9 @@ pub const SYS_THREAD_SET_AFFINITY: u64 = 161;
 pub const SYS_THREAD_GET_AFFINITY: u64 = 162;
 /// The CPU the caller is running on. See [`current_cpu`].
 pub const SYS_CURRENT_CPU: u64 = 163;
+/// Map a firmware window a claim was granted at its mint. See
+/// [`device_firmware_window`].
+pub const SYS_DEVICE_FIRMWARE_WINDOW: u64 = 164;
 
 /// Bins in the per-process syscall profile — one for every number this ABI
 /// issues, and one at the end for every number it does not.
@@ -377,13 +380,13 @@ pub const SYS_CURRENT_CPU: u64 = 163;
 /// **The profile's parts sum to its total, and that is the whole requirement.**
 /// A bin array narrower than the ABI reaches drops calls out of the line while
 /// the total goes on counting them.
-pub const SYSCALL_PROFILE_BINS: usize = 165;
+pub const SYSCALL_PROFILE_BINS: usize = 166;
 
 /// Where a number this ABI does not issue is counted. Merging is a degradation
 /// a reader can see in the line; dropping is one nobody can.
 pub const SYSCALL_PROFILE_OTHER: usize = SYSCALL_PROFILE_BINS - 1;
 
-const _: () = assert!(SYS_CURRENT_CPU < SYSCALL_PROFILE_OTHER as u64);
+const _: () = assert!(SYS_DEVICE_FIRMWARE_WINDOW < SYSCALL_PROFILE_OTHER as u64);
 
 pub const WNOHANG: u64 = 1;
 /// Every bit `SYS_PROCESS_WAIT`'s flag word defines; a wait carrying another
@@ -1747,7 +1750,8 @@ fn decimal_line(text: &str) -> Option<u8> {
 }
 
 /// What a claim asks for: a class, and for [`DeviceType::PciFunction`] which
-/// function, and for an ISA function which ports and lines.
+/// function and the firmware windows its claim is granted at the mint, and
+/// for an ISA function which ports and lines.
 ///
 /// Every request but a PCI function's is also a `devices` entry, spelled once
 /// here ([`Self::parse`], [`Self::write_name`]): the manifest that names it and
@@ -1755,7 +1759,7 @@ fn decimal_line(text: &str) -> Option<u8> {
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum DeviceRequest {
     Class(DeviceType),
-    Function(crate::inventory::Arrival),
+    Function(crate::inventory::Arrival, crate::pci::FirmwareWindows),
     Isa(IsaId),
 }
 
@@ -1785,7 +1789,7 @@ impl DeviceRequest {
     pub const fn class(self) -> DeviceType {
         match self {
             Self::Class(class) => class,
-            Self::Function(_) => DeviceType::PciFunction,
+            Self::Function(..) => DeviceType::PciFunction,
             Self::Isa(_) => DeviceType::Isa,
         }
     }
@@ -1795,7 +1799,7 @@ impl DeviceRequest {
     pub fn selector(self) -> [u64; 2] {
         match self {
             Self::Class(_) => [0, 0],
-            Self::Function(arrival) => [arrival.0 as u64, 0],
+            Self::Function(arrival, windows) => [arrival.0 as u64, windows.mask()],
             Self::Isa(set) => set.wire(),
         }
     }
@@ -1806,7 +1810,7 @@ impl DeviceRequest {
     /// under, and it is composed here so the two cannot drift.
     pub fn write_name(self, buf: &mut [u8; Self::MAX_NAME]) -> Option<&str> {
         Some(match self {
-            Self::Function(_) => return None,
+            Self::Function(..) => return None,
             Self::Class(class) => {
                 let name = class.class_name();
                 buf[..name.len()].copy_from_slice(name.as_bytes());
@@ -2785,6 +2789,24 @@ pub fn device_bar_map(claim: RawHandle, bar: u32) -> Result<RawHandle, SyscallEr
         .map(|v| RawHandle(v as u32))
 }
 
+/// The firmware window `window` the claim was granted at its mint
+/// ([`DeviceRequest::Function`]), as an object
+/// `SYS_SHM_MAP` maps read/write and cacheable, carrying neither `DUP` nor
+/// `TRANSFER`; or why the kernel refused what firmware set up.
+/// `PermissionDenied` for a window the claim was not granted, and `NotFound`
+/// where firmware set none up.
+pub fn device_firmware_window(
+    claim: RawHandle,
+    window: crate::pci::FirmwareWindow,
+) -> Result<Result<crate::pci::WindowGrant, crate::pci::WindowRefused>, SyscallError> {
+    let mut grant = crate::pci::WindowGrant { shm: crate::HANDLE_INVALID, refused: 0, offset: 0, len: 0 };
+    check(syscall(SYS_DEVICE_FIRMWARE_WINDOW, claim.0 as u64, window as u64, &mut grant as *mut _ as u64, 0))?;
+    Ok(match crate::pci::WindowRefused::from_raw(grant.refused) {
+        Some(refused) => Err(refused),
+        None => Ok(grant),
+    })
+}
+
 /// A DMA buffer for a claimed PCI function: memory in this process's address
 /// space and in that function's own at the unit, and in no other's.
 ///
@@ -3146,9 +3168,11 @@ mod tests {
     /// arrival, which no entry spells.
     #[test]
     fn a_devices_entry_is_a_class_or_one_named_device() {
-        let function = DeviceRequest::Function(crate::inventory::Arrival(7));
+        let function = DeviceRequest::Function(crate::inventory::Arrival(7), crate::pci::FirmwareWindows::NONE);
         assert_eq!(function.class(), DeviceType::PciFunction);
         assert_eq!(function.selector(), [7, 0]);
+        let granted = crate::pci::FirmwareWindows::of(&[crate::pci::FirmwareWindow::IgdOpRegion]);
+        assert_eq!(DeviceRequest::Function(crate::inventory::Arrival(7), granted).selector(), [7, 1 << 1]);
         assert_eq!(function.write_name(&mut [0; DeviceRequest::MAX_NAME]), None);
         assert_eq!(
             DeviceRequest::parse("framebuffer"),
