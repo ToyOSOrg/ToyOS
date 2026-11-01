@@ -858,6 +858,10 @@ impl<D: Disk> Volume for DataVolume<D> {
         self.open.get(&node).is_some_and(|open| open.carried && !open.gone)
     }
 
+    fn owes(&self) -> bool {
+        self.open.values().any(|open| open.dirty && !open.gone)
+    }
+
     fn commit(&mut self, node: Option<Node>) -> Result<(), Error> {
         if let Some(node) = node {
             self.persist(node)?;
@@ -1184,6 +1188,24 @@ mod tests {
     /// A clock that reads no whole second.
     fn nanosecond_clock() -> u64 {
         1_717_245_296_123_456_789
+    }
+
+    /// A commit leaves owed the entry of a file it did not carry, an overwrite
+    /// within the file's own blocks, and nothing once that entry is committed.
+    #[test]
+    fn a_commit_owes_the_entry_of_a_file_it_did_not_carry() {
+        let mut v = vol();
+        let a = v.open("home/a", CREATE).unwrap();
+        let b = v.open("home/b", CREATE).unwrap();
+        v.write(a, 0, b"a").unwrap();
+        v.write(b, 0, b"b").unwrap();
+        v.commit(Some(a)).unwrap();
+        assert!(!v.owes(), "b took blocks, so the commit carried its entry");
+        v.write(b, 0, b"B").unwrap();
+        v.commit(Some(a)).unwrap();
+        assert!(v.owes(), "b's overwrite took no block and was not carried");
+        v.commit(Some(b)).unwrap();
+        assert!(!v.owes());
     }
 
     /// DATA stamps a write with the nanosecond its clock read, and the entry

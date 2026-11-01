@@ -23,6 +23,8 @@ struct Model {
     supplies: u32,
     /// Every supply from here is refused.
     refusing: bool,
+    /// This object's write-backs are refused.
+    unwritable: Option<u64>,
     /// Objects a call that did not take all it was given left written.
     held: BTreeSet<u64>,
     /// Each object's pages as a holder could read them after each change
@@ -208,6 +210,9 @@ impl Pager for Fake {
     }
 
     fn writeback_begin(&self, id: u64, first: u64, count: u64) -> Result<[u64; 8], Refused> {
+        if self.0.borrow().unwritable == Some(id) {
+            return Err(Refused::Kernel(SyscallError::Io));
+        }
         let mut bits = [0u64; 8];
         for (&(c, p), page) in self.0.borrow_mut().pages.iter_mut() {
             if c == id && (first..first + count).contains(&p) && page.dirty {
@@ -589,6 +594,7 @@ fn an_fsync_makes_its_file_durable_and_no_other_files_overwrite() {
 
     files.fsync(&mut v, Some((a.1, a.0))).unwrap();
     assert!(files.files[&b.1].dirty.is_some(), "the other file's overwrite was written back");
+    assert!(files.owes(&v), "the other file's overwrite is owed to a later sync");
     let mut v = after_a_stop(v);
     assert!(on_volume(&mut v, "home/a") == pattern(2 * page, 2), "the fsynced file is not as written");
     assert!(on_volume(&mut v, "home/b") == pattern(2 * page, 1), "the other file's overwrite reached the volume");
@@ -608,10 +614,32 @@ fn an_fsync_writes_first_the_pages_of_every_file_its_commit_carries() {
     files.write(&mut v, c.1, c.0, 0, &pattern(3 * page, 5)).unwrap();
 
     files.fsync(&mut v, Some((a.1, a.0))).unwrap();
+    assert!(!files.owes(&v), "the fsync left a change owed");
     let mut v = after_a_stop(v);
     assert!(on_volume(&mut v, "home/a") == pattern(page, 4), "the fsynced file is not as written");
     let carried = on_volume(&mut v, "home/c");
     assert!(carried == pattern(3 * page, 5), "the carried file reads {} bytes, not its own", carried.len());
+}
+
+/// A file whose pages a sync could not write is owed after an fsync of
+/// another, though that sync made its entry durable and the commit does not
+/// carry it.
+#[test]
+fn a_file_a_sync_could_not_write_back_stays_owed_past_another_s_fsync() {
+    let page = PAGE as usize;
+    let mut v = volume();
+    let fake = Fake::new(64, 16);
+    let mut files = Files::new(Some(fake.clone()));
+    let a = open(&mut files, &mut v, "home/a");
+    let f = open(&mut files, &mut v, "home/f");
+    files.write(&mut v, f.1, f.0, 0, &pattern(page, 6)).unwrap();
+    fake.0.borrow_mut().unwritable = Some(files.files[&f.1].object);
+    assert_eq!(files.sync(&mut v).map(|u| u.len()), Ok(1), "the sync wrote the refused file's pages");
+    assert!(!v.owes(), "the sync left f's entry owed");
+    files.write(&mut v, a.1, a.0, 0, &pattern(page, 7)).unwrap();
+
+    files.fsync(&mut v, Some((a.1, a.0))).unwrap();
+    assert!(files.owes(&v), "f's unwritten pages are owed to a later sync");
 }
 
 /// A directory's fsync commits the names every change already wrote.

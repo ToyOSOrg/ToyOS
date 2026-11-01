@@ -199,6 +199,12 @@ pub trait Volume {
         false
     }
 
+    /// Whether an open file's entry is changed past what a commit or sync
+    /// last made durable. Everything else written is durable after either.
+    fn owes(&self) -> bool {
+        false
+    }
+
     /// `node`'s entry durable, with every entry [`Self::carried`] names and
     /// no other open file's: an fsync's commit. `None` commits only those, as
     /// a directory's fsync does, whose names every change writes at once.

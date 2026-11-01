@@ -439,6 +439,10 @@ impl<D: Disk> Volume for FatVolume<D> {
         self.open.get(&node).is_some_and(|open| !open.gone && (open.dirty || open.file.needs_reconcile()))
     }
 
+    fn owes(&self) -> bool {
+        self.open.keys().any(|&node| self.carried(node))
+    }
+
     fn commit(&mut self, node: Option<Node>) -> Result<(), fs::Error> {
         if !self.writable {
             return Ok(());
@@ -571,6 +575,20 @@ mod tests {
         v.close(a).unwrap();
         evict(&v);
         assert_eq!(v.lstat("a.txt").unwrap().mtime, 1_717_245_300 * NANOS_PER_SEC);
+    }
+
+    /// A write is owed until a commit, and a commit naming another file
+    /// carries it: FAT's flush writes every chain it holds.
+    #[test]
+    fn a_commit_of_one_file_leaves_no_other_s_write_owed() {
+        const CREATE: OpenHow = OpenHow { create: true, create_new: false, truncate: false };
+        let (mut v, _, _) = spec_fat();
+        let a = v.open("a.txt", CREATE).unwrap();
+        let b = v.open("b.txt", CREATE).unwrap();
+        v.write(b, 0, &[2; 3000]).unwrap();
+        assert!(v.owes());
+        v.commit(Some(a)).unwrap();
+        assert!(!v.owes());
     }
 
     /// What [`a_sync_of_files_nothing_changed_asks_the_disk_nothing`]'s volume

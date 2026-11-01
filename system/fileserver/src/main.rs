@@ -934,6 +934,10 @@ impl Server {
                     Held::Dir { .. } => None,
                 };
                 self.files.fsync(&mut *self.volume, named)?;
+                // One that left nothing to make durable did the write-back's work.
+                if !self.files.owes(&*self.volume) {
+                    self.writeback.synced(false, Instant::now());
+                }
                 Ok(Answer::Reply(Reply::ok()))
             }
             SYNC => self.sync(),

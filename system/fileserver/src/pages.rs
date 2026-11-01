@@ -571,6 +571,12 @@ impl<P: Pager> Files<P> {
         volume.commit(file.map(|(_, node)| node))
     }
 
+    /// Whether a change is not yet durable: a dirty page, or an entry the
+    /// volume owes ([`Volume::owes`]).
+    pub fn owes(&self, volume: &dyn Volume) -> bool {
+        self.files.values().any(|f| f.dirty.is_some()) || volume.owes()
+    }
+
     /// What the pager's objects asked.
     pub fn notice(&mut self, volume: &mut dyn Volume, notice: Notice) {
         match notice {
