@@ -135,3 +135,75 @@ pub fn kernel_wx_leaf_is_refused(test_config: &Path, profile: qemu::Profile) -> 
         _ => Err(format!("the audit did not name {at} alone under both rules: {refusal}\n{serial}")),
     }
 }
+
+/// What `tsc-step` says of each step it stages, and the clock's records of
+/// slewing the first away and demoting the TSC at the second
+/// (`kernel/src/arch/x86_64/clocksource.rs`).
+const TSC_STEP_STAGED: &str = "tsc-step: the TSC reads ";
+const TSC_STEP_SLEWED: &str = "clock: TSC STEP: the TSC stepped ";
+const TSC_SLEWED_AWAY: &str = "clock: the TSC's step is slewed away";
+const TSC_STEP_AGAIN: &str = "cycles further ahead from here";
+const TSC_DEMOTED: &str = "clock: DEMOTED: ";
+const DEMOTED_READS: &str = "clock: a process's reading of now asked the kernel since the TSC was demoted";
+
+/// A TSC `tsc-step` reads 10 ms ahead, and 10 ms further once the clock has
+/// slewed the first step away: the first is slewed, the second demotes the
+/// TSC, and processes' readings of now reach the kernel after it.
+pub fn a_stepped_tsc_is_slewed_then_demoted(test_config: &Path) -> Result<(), String> {
+    let mut qemu = QemuInstance::boot_with_options(
+        test_config,
+        &[],
+        &[],
+        BootOptions { profile: qemu::Profile::Metal, kernel_params: &["tsc-step"], ready_marker: TSC_STEP_SLEWED, ..Default::default() },
+    );
+    let mut serial = qemu.boot_log().to_string();
+    // A 10 ms step at 500 ppm is 20 s of slewing; the rest is the RTC's edges either side of each step.
+    serial.push_str(&qemu.drain_until(std::time::Duration::from_secs(120), |l| l.contains(DEMOTED_READS) || l.contains("PANIC")));
+    let lines: Vec<&str> = serial.lines().collect();
+    let at = |marker: &str| lines.iter().position(|l| l.contains(marker)).ok_or_else(|| format!("no {marker:?} line\n{serial}"));
+    let order = [at(TSC_STEP_STAGED)?, at(TSC_STEP_SLEWED)?, at(TSC_SLEWED_AWAY)?, at(TSC_STEP_AGAIN)?, at(TSC_DEMOTED)?, at(DEMOTED_READS)?];
+    if !order.is_sorted() || serial.contains("PANIC") {
+        return Err(format!("the steps, the slew and the demotion are out of order: {order:?}\n{serial}"));
+    }
+    let stepped: Option<i64> = lines[order[1]].split(TSC_STEP_SLEWED).nth(1).and_then(|r| r.split(" ns").next()).and_then(|n| n.parse().ok());
+    if !stepped.is_some_and(|ns| (9_000_000..=11_000_000).contains(&ns)) {
+        return Err(format!("the slewed step is not the staged 10 ms: {}\n{serial}", lines[order[1]].trim()));
+    }
+    for i in [1, 4, 5] {
+        eprintln!("  [tsc_step] {}", lines[order[i]].trim());
+    }
+    Ok(())
+}
+
+/// What `hpet-stall` says of the stall it stages, the sampler's record of
+/// leaving the span out, and a report after it.
+const HPET_STALL_STAGED: &str = "hpet-stall: the HPET reads ";
+const HPET_MOVED: &str = "clock: the HPET moved and the TSC did not, so this span is left out: ";
+const CLOCK_REPORT: &str = "clock: over ";
+
+/// An HPET `hpet-stall` reads 10 ms behind while the TSC and the ACPI PM timer
+/// count on: the sampler says the HPET moved, leaves the span out, and the
+/// clock goes on reporting rather than panicking.
+pub fn a_stalled_hpet_is_left_out(test_config: &Path) -> Result<(), String> {
+    let mut qemu = QemuInstance::boot_with_options(
+        test_config,
+        &[],
+        &[],
+        BootOptions { profile: qemu::Profile::Metal, kernel_params: &["hpet-stall"], ready_marker: HPET_MOVED, ..Default::default() },
+    );
+    let staged_then_moved = {
+        let serial = qemu.boot_log();
+        let staged = serial.find(HPET_STALL_STAGED);
+        let moved = serial.find(HPET_MOVED);
+        match (staged, moved) {
+            (Some(staged), Some(moved)) if staged < moved => Ok(serial[moved..].lines().next().unwrap_or_default().to_string()),
+            _ => Err(format!("no {HPET_STALL_STAGED:?} before {HPET_MOVED:?}\n{serial}")),
+        }
+    }?;
+    let after = qemu.drain_until(std::time::Duration::from_secs(60), |l| l.contains(CLOCK_REPORT) || l.contains("PANIC"));
+    if after.contains("PANIC") || !after.contains(CLOCK_REPORT) {
+        return Err(format!("the clock did not report again after it left the span out\n{after}"));
+    }
+    eprintln!("  [hpet_stall] {}", staged_then_moved.trim());
+    Ok(())
+}

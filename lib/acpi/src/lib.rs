@@ -32,9 +32,9 @@ use toyos_bootmap::DirectMapEnd;
 pub use ecdt::{ecdt, Ec, EcRefused, EcRegister, ECDT_NEEDED};
 pub use facs::{acquire, facs, release, Facs, FacsRefused, FACS_GLOBAL_LOCK, OWNED, PENDING};
 pub use fadt::{
-    century_of, dsdt_address, fixed_hardware, pm1a_control, psci, reset_register,
+    century_of, dsdt_address, fixed_hardware, pm1a_control, pm_timer, psci, reset_register,
     rtc_century,
-    Century, Field, FixedHardware, FixedRefused, LegacyMode, PowerButton, Psci, Reset, SmiCmd, CMOS_RAM,
+    Century, Field, FixedHardware, FixedRefused, LegacyMode, PmTimer, PowerButton, Psci, Reset, SmiCmd, CMOS_RAM,
     FADT_FOR_FIXED_HARDWARE, FADT_PM1A_CNT_BLK,
 };
 use fadt::FADT_DSDT;

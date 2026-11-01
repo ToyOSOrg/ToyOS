@@ -24,9 +24,13 @@ pub fn current_tid() -> Tid {
     Tid(tid)
 }
 
-/// The counter the clock page's two words describe: the time-stamp counter,
+/// The counter the clock page's line describes: the time-stamp counter,
 /// read after every earlier load has completed, so a stamp taken after reading
-/// another writer's record cannot be older than that record's.
+/// another writer's record cannot be older than that record's, and before any
+/// later instruction starts, so a load after it cannot have been answered
+/// before it (SDM Vol. 2B, RDTSC: "If software requires RDTSC to be executed
+/// prior to execution of any subsequent instruction (including any memory
+/// accesses), it can execute the sequence LFENCE immediately after RDTSC").
 #[inline]
 pub fn counter() -> u64 {
     // SAFETY: `lfence` has no operands; `rdtsc` is unprivileged while CR4.TSD
@@ -34,7 +38,9 @@ pub fn counter() -> u64 {
     // every CPU.
     unsafe {
         core::arch::x86_64::_mm_lfence();
-        core::arch::x86_64::_rdtsc()
+        let now = core::arch::x86_64::_rdtsc();
+        core::arch::x86_64::_mm_lfence();
+        now
     }
 }
 

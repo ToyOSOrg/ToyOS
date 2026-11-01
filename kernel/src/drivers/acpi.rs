@@ -201,6 +201,13 @@ pub fn find_hpet_base(rsdp_addr: u64) -> Option<u64> {
     Some(base)
 }
 
+/// The ACPI PM timer the FADT names, or why there is none.
+pub fn pm_timer(rsdp_addr: u64) -> Result<toyos_acpi::PmTimer, alloc::string::String> {
+    let fadt = toyos_acpi::find_table(direct_phys(), rsdp_addr, b"FACP", toyos_acpi::FADT_FOR_FIXED_HARDWARE)
+        .map_err(|e| alloc::format!("the FADT is unusable ({e:?})"))?;
+    toyos_acpi::pm_timer(&fadt).map_err(|e| alloc::format!("{e:?}"))
+}
+
 /// How many processors the MADT enables, of either architecture's kind: its
 /// Local APIC and x2APIC entries, or its GICC entries. What every per-CPU
 /// table is sized by, before either architecture's own walk of the MADT.

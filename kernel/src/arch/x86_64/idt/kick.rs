@@ -4,6 +4,7 @@ extern "sysv64" fn kick_handler() {
     crate::arch::percpu::irq_took!(Kick);
     crate::counters::serve_here();
     crate::arch::smi_cmd::serve_here();
+    crate::arch::clocksource::serve_here();
     if crate::sched::driver::pass_owed() {
         crate::preempt::set_need_resched();
     }

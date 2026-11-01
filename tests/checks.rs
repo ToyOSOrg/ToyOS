@@ -575,6 +575,15 @@ mod checks {
         Ok(())
     }
 
+    /// A slewed step passes the clock's rows and a demotion fails them.
+    #[test]
+    fn a_demoted_clock_fails_its_rows() {
+        let slewed = "[ 20.778 cpu12 kernel] clock: TSC STEP: the TSC stepped 1695132 ns forward against the HPET\n";
+        assert_eq!(clock_kept_its_counter(slewed), Ok(()));
+        let demoted = format!("{slewed}[ 33.252 cpu1 kernel] clock: DEMOTED: the TSC stepped 10000110 ns\n");
+        assert!(clock_kept_its_counter(&demoted).is_err());
+    }
+
     /// [`irq_census`] over two censuses, X's from cpu2 and Y's from cpu3, whose
     /// lines are in no read order: a CPU's census is the largest count each
     /// source reaches on any of its lines, and the largest issuer total bounds
@@ -585,7 +594,7 @@ mod checks {
             let userdev = if cpu == 0 { 40 } else { 0 };
             format!(
                 "[ {at} cpu{on} kernel] irq: cpu{cpu} timer=100 kick={kick} userdev={userdev} \
-                 dmafault=0 tlb={tlb} nmi=0 spurious=0 unclaimed=0\n"
+                 dmafault=0 rtc=0 tlb={tlb} nmi=0 spurious=0 unclaimed=0\n"
             )
         };
         let issued = |at: &str, on: u32, total: u64| {
@@ -1104,7 +1113,7 @@ mod checks {
         assert!(judge(&[&readback("jobcase", &done(stopped), jobcase)]).is_err());
 
         // What the seal itself writes of the machine, above the ring's tail.
-        let census = "| irq: cpu0 timer=9 kick=2 userdev=1729 dmafault=0 tlb=0 \
+        let census = "| irq: cpu0 timer=9 kick=2 userdev=1729 dmafault=0 rtc=0 tlb=0 \
                       nmi=0 spurious=0 unclaimed=0\n\
                       | tlb: shootdowns=4 wait=12us max=3us dlopen=0 pcid=0 mmio=0 unmap=4 pipe=0 staged=0 \
                       bench=0\n\

@@ -348,6 +348,8 @@ pub const SYS_EVENT_SIGNAL: u64 = 149;
 pub const SYS_EVENT_TAKE: u64 = 150;
 /// Park on one handle's one condition, with a timeout. See [`handle_wait`].
 pub const SYS_HANDLE_WAIT: u64 = 151;
+/// The clock now, read by the kernel. See [`clock_now`].
+pub const SYS_CLOCK_NOW: u64 = 152;
 
 /// Bins in the per-process syscall profile — one for every number this ABI
 /// issues, and one at the end for every number it does not.
@@ -355,13 +357,13 @@ pub const SYS_HANDLE_WAIT: u64 = 151;
 /// **The profile's parts sum to its total, and that is the whole requirement.**
 /// A bin array narrower than the ABI reaches drops calls out of the line while
 /// the total goes on counting them.
-pub const SYSCALL_PROFILE_BINS: usize = 153;
+pub const SYSCALL_PROFILE_BINS: usize = 154;
 
 /// Where a number this ABI does not issue is counted. Merging is a degradation
 /// a reader can see in the line; dropping is one nobody can.
 pub const SYSCALL_PROFILE_OTHER: usize = SYSCALL_PROFILE_BINS - 1;
 
-const _: () = assert!(SYS_HANDLE_WAIT < SYSCALL_PROFILE_OTHER as u64);
+const _: () = assert!(SYS_CLOCK_NOW < SYSCALL_PROFILE_OTHER as u64);
 
 pub const WNOHANG: u64 = 1;
 /// Every bit `SYS_PROCESS_WAIT`'s flag word defines; a wait carrying another
@@ -1414,6 +1416,13 @@ pub fn reboot(syscap: RawHandle) -> SyscallError {
             return e;
         }
     }
+}
+
+/// The clock now as a log line's time, nanoseconds since the counter's zero,
+/// read by the kernel: what [`crate::clock::stamp_ns`] answers where the page
+/// is demoted. Needs no handle; it fails for nobody.
+pub fn clock_now() -> u64 {
+    syscall(SYS_CLOCK_NOW, 0, 0, 0, 0)
 }
 
 /// Which stop [`machine_stops`] asks about.

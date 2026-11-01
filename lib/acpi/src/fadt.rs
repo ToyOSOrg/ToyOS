@@ -167,10 +167,12 @@ const FADT_PSTATE_CNT: usize = 55;
 const FADT_PM1A_EVT_BLK: usize = 56;
 const FADT_PM1B_EVT_BLK: usize = 60;
 const FADT_PM1B_CNT_BLK: usize = 68;
+const FADT_PM_TMR_BLK: usize = 76;
 const FADT_GPE0_BLK: usize = 80;
 const FADT_GPE1_BLK: usize = 84;
 const FADT_PM1_EVT_LEN: usize = 88;
 const FADT_PM1_CNT_LEN: usize = 89;
+const FADT_PM_TMR_LEN: usize = 91;
 const FADT_GPE0_BLK_LEN: usize = 92;
 const FADT_GPE1_BLK_LEN: usize = 93;
 const FADT_CST_CNT: usize = 95;
@@ -178,6 +180,7 @@ const FADT_X_PM1A_EVT_BLK: usize = 148;
 const FADT_X_PM1B_EVT_BLK: usize = 160;
 const FADT_X_PM1A_CNT_BLK: usize = 172;
 const FADT_X_PM1B_CNT_BLK: usize = 184;
+const FADT_X_PM_TMR_BLK: usize = 208;
 const FADT_X_GPE0_BLK: usize = 220;
 const FADT_X_GPE1_BLK: usize = 232;
 /// The end of `X_GPE1_BLK`, the last field [`fixed_hardware`] reads where the
@@ -187,6 +190,9 @@ const FADT_X_END: usize = FADT_X_GPE1_BLK + 12;
 /// Table 5.10's `PWR_BUTTON` (bit 4): set, the power button is a control
 /// method device, which only AML serves; and `HW_REDUCED_ACPI` (bit 20).
 const PWR_BUTTON: u32 = 1 << 4;
+/// Table 5.10's `TMR_VAL_EXT` (bit 8): set, the PM timer's value is 32 bits
+/// wide, and clear, 24.
+const TMR_VAL_EXT: u32 = 1 << 8;
 const HW_REDUCED_ACPI: u32 = 1 << 20;
 
 /// The bytes [`fixed_hardware`] needs at least: through the flags.
@@ -286,6 +292,7 @@ pub enum Field {
     Pm1aEvent,
     Pm1aControl,
     Gpe0,
+    PmTimer,
 }
 
 /// Why the FADT's fixed hardware is none this kernel serves, one reason each.
@@ -344,6 +351,36 @@ fn block(field: Field, address: u64, len: u8) -> Result<toyos_abi::acpi::Block, 
         Ok(port) if u32::from(port) + u32::from(len) <= 0x1_0000 => Ok(toyos_abi::acpi::Block { port, len: u16::from(len) }),
         _ => Err(FixedRefused::PastPorts { field, address }),
     }
+}
+
+/// The ACPI PM timer: a free-running counter at 3.579545 MHz (§4.8.3.3) in
+/// the port its block names, its value 24 or 32 bits wide.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub struct PmTimer {
+    pub port: u16,
+    pub bits: u8,
+}
+
+/// The PM timer's block, checked against its `X_` twin where the table holds
+/// one, and its width; refused on a hardware-reduced machine, which has no
+/// fixed hardware (§4.1).
+pub fn pm_timer<P: Phys>(fadt: &Table<P>) -> Result<PmTimer, FixedRefused> {
+    let short = FixedRefused::Short { len: fadt.len() };
+    let flags = fadt.u32_at(FADT_FLAGS).ok_or(short)?;
+    if flags & HW_REDUCED_ACPI != 0 {
+        return Err(FixedRefused::HardwareReduced);
+    }
+    // §5.2.9: `PM_TMR_LEN` is 4 where the timer is supported.
+    let len = fadt.byte(FADT_PM_TMR_LEN).ok_or(short)?;
+    let at = address(fadt, Field::PmTimer, FADT_PM_TMR_BLK, FADT_X_PM_TMR_BLK)?;
+    if at == 0 {
+        return Err(FixedRefused::Absent { field: Field::PmTimer });
+    }
+    if len != 4 {
+        return Err(FixedRefused::Length { field: Field::PmTimer, len });
+    }
+    let block = block(Field::PmTimer, at, len)?;
+    Ok(PmTimer { port: block.port, bits: if flags & TMR_VAL_EXT != 0 { 32 } else { 24 } })
 }
 
 /// The PM1a control block, checked against its `X_` twin where the table

@@ -277,13 +277,15 @@ pub fn serve_ipi() {
 
 /// Answers a pending shootdown without taking a lock or allocating, so it is
 /// safe from inside `Lock::lock`'s spin; and, on the boot processor, a write
-/// to `SMI_CMD` asked of it, which a spinner with `IF` clear owes the same way.
+/// to `SMI_CMD` asked of it, and a demoted clock's handover, which a spinner
+/// with `IF` clear owes the same way.
 #[inline]
 pub fn poll() {
     super::smi_cmd::serve_here();
     if !smp::answering() {
         return;
     }
+    super::clocksource::serve_here();
     let cpu = percpu::cpu_id() as usize;
     SHOOTDOWN.serve_if_owed(cpu, answer(Answerer::Asked));
 }

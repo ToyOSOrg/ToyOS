@@ -82,8 +82,8 @@ pub fn read(d: &crate::sys::diag::Diag) -> Result<Reading, String> {
 #[cfg(target_os = "toyos")]
 pub fn cpus(bench: &str, before: &Reading, after: &Reading) {
     use osbench_rules::window;
-    let page = toyos_abi::clock::page();
-    let to_ns = |ticks: u64| toyos_abi::clock::ticks_to_nanos(ticks, page.period_fs);
+    let line = toyos_abi::clock::page().line;
+    let to_ns = |ticks: u64| line.nanos(ticks);
     let span = window::Span {
         row_ns: u64::try_from(after.called.duration_since(before.called).as_nanos()).expect("a row under 584 years")
             + after.cost_ns,

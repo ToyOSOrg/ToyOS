@@ -519,6 +519,7 @@ pub fn pass(dispose: Dispose) {
     crate::object::drain_zero_handles();
     let now = HW.now();
     crate::arch::watchdog::feed(now.0);
+    crate::arch::clocksource::check(now.0);
     #[cfg(feature = "heap-sweep")]
     maybe_sweep(now);
     #[cfg(feature = "pass-spin")]

@@ -13,6 +13,16 @@ pub fn counter() -> u64 {
     count
 }
 
+/// [`counter`] ordered after every earlier instruction and before every later
+/// one: the read the clock takes inside its line's read section.
+pub fn counter_ordered() -> u64 {
+    let count: u64;
+    // SAFETY: as `counter`'s; the second `ISB` touches nothing either. Not
+    // `nomem`, which would let the compiler move the latch's loads across it.
+    unsafe { asm!("isb", "mrs {}, cntvct_el0", "isb", out(reg) count, options(nostack, preserves_flags)) };
+    count
+}
+
 /// The counter's frequency as firmware states it in `CNTFRQ_EL0`, which the
 /// Arm ARM makes firmware's duty to program. Zero states nothing.
 pub fn stated_counter_hz() -> Option<u64> {

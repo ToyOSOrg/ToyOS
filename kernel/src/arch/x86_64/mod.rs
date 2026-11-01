@@ -9,12 +9,25 @@
 //! AMD-Vi. Generic code reaches each through the concept it serves
 //! (`watchdog`, `iommu_unit`, …), never by its name.
 
+/// The interrupt sources only this architecture counts, handed to the
+/// census's list (`irq_census`).
+macro_rules! census_sources {
+    ($list:ident) => {
+        $list! {
+            /// Vector 0x26, the RTC's update-ended interrupt, once a second.
+            Rtc => "rtc",
+        }
+    };
+}
+pub(crate) use census_sources;
+
 pub mod acpi_mode;
 pub mod amdvi;
 pub mod apic;
 pub mod barrier;
 pub mod boot;
 pub mod cache;
+pub mod clocksource;
 pub mod control_regs;
 pub mod counters;
 pub mod console_uart;
@@ -22,7 +35,6 @@ pub mod cpu;
 pub mod entropy;
 pub mod entry;
 pub mod fpu;
-pub mod hpet;
 pub mod hw;
 pub mod idle;
 pub mod idt;
@@ -123,6 +135,7 @@ pub unsafe fn percpu_fetch_add(
 /// This architecture's part of a CPU's `cpu_local` record.
 pub struct CpuLocal {
     pub counters: counters::Local,
+    pub clock: clocksource::Local,
     pub idle_line: idle::Line,
     #[cfg(feature = "switch-witness")]
     pub hw: hw::Local,
@@ -132,6 +145,7 @@ impl CpuLocal {
     pub fn new() -> Self {
         Self {
             counters: counters::Local::new(),
+            clock: clocksource::Local::new(),
             idle_line: idle::Line::new(),
             #[cfg(feature = "switch-witness")]
             hw: hw::Local::new(),
@@ -144,4 +158,5 @@ impl CpuLocal {
 pub fn size(cpus: usize) {
     tlb::size(cpus);
     smi_cmd::size(cpus);
+    clocksource::size(cpus);
 }

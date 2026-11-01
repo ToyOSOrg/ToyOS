@@ -1,6 +1,7 @@
 pub(crate) mod exceptions;
 mod device_irq;
 mod dma_fault;
+mod rtc;
 mod isa;
 mod kick;
 mod nmi;
@@ -35,6 +36,9 @@ pub const ISA_VECTORS: [u8; crate::isa::MAX_ROWS] = [Vector::Isa0 as u8, Vector:
 
 /// The vector an IOMMU writes into its own `FEDATA`.
 pub const DMA_FAULT_VECTOR: u8 = Vector::DmaFault as u8;
+
+/// The vector the RTC's IRQ8 is routed to.
+pub const RTC_VECTOR: u8 = Vector::Rtc as u8;
 
 const PF_PRESENT: u64 = 1 << 0;
 const PF_WRITE: u64 = 1 << 1;
@@ -242,6 +246,7 @@ idt_vectors! {
         Nmi          = 0x02, nmi::nmi_entry, ist 2;
         Timer        = 0x20, timer::timer_entry;
         DmaFault     = 0x25, dma_fault::dma_fault_entry;
+        Rtc          = 0x26, rtc::rtc_entry;
         Isa0         = 0x2C, isa::isa0_entry;
         Isa1         = 0x2D, isa::isa1_entry;
         Kick         = 0xFC, kick::kick_entry;
