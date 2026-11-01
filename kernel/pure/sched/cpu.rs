@@ -1120,28 +1120,7 @@ impl<X: SchedPayload> CpuSched<X> {
         };
         let task = entry.task.wake(self.id, cause, entry.class, now);
         self.trace(env, now, TraceKind::Wake { task: key, name: task.ext().name() });
-        match cause.parker.filter(|&parker| self.joins_its_parker(&task, parker, env)) {
-            Some(parker) => self.hand_off(task, parker, env, now),
-            None => self.place(task, env, now),
-        }
-    }
-
-    /// Whether a wake whose poster parks next on `parker` goes there: the CPU
-    /// it frees runs the woken task with no IPI behind it, and every wake of
-    /// the pair after this one is local. Inside one LLC, where the move costs
-    /// a refill from the shared cache; a fair task, so the RT band's own
-    /// placement is unchanged; and never a stopped or killed task, which
-    /// [`Self::place`] keeps here.
-    fn joins_its_parker<H: Hw<Payload = X>, P: PreemptGuard>(
-        &self,
-        task: &ReadyTask<X>,
-        parker: CpuId,
-        env: Env<'_, H, P>,
-    ) -> bool {
-        env.cpus.topology().level(self.id, parker).is_some_and(|shared| shared <= Level::Llc)
-            && !task.is_rt()
-            && !task.shared().stop_pending()
-            && !task.shared().kill_pending()
+        self.place(task, env, now);
     }
 
     fn handle_adopt<H: Hw<Payload = X>, P: PreemptGuard>(
@@ -2990,10 +2969,7 @@ mod tests {
             shared: &Arc<TaskShared<Msg<TestPayload>>>,
             reason: WakeReason,
         ) {
-            self.post_claimed_cause(cpu, shared, WakeCause::new(reason));
-        }
-
-        fn post_claimed_cause(&self, cpu: CpuId, shared: &Arc<TaskShared<Msg<TestPayload>>>, cause: WakeCause) {
+            let cause = WakeCause::new(reason);
             let slot = shared
                 .wake_node()
                 .claim()
@@ -4286,67 +4262,6 @@ mod tests {
             let _ = SchedPass::begin(&mut cpus[0], env, Nanos(NOW.0 + 1)).dispose_yield().finish();
         }
         assert_eq!(sleeper.state(), TaskState::InTransit(C1), "the wake was forwarded");
-        w.abandon();
-    }
-
-    /// A task parked on `home` and a hog running on `parker`, which is about
-    /// to post the parked task's wake and park. Answers the parked task.
-    fn parked_on_and_a_parker(w: &mut World, home: CpuId, parker: CpuId) -> Arc<TaskShared<Msg<TestPayload>>> {
-        let (_, sleeper) = w.spawn(home);
-        w.run_a_pass(home);
-        w.park_running(home);
-        let _ = w.spawn(parker);
-        w.run_a_pass(parker);
-        sleeper
-    }
-
-    fn wake_from_a_parker(w: &World, home: CpuId, parker: CpuId, shared: &Arc<TaskShared<Msg<TestPayload>>>) {
-        assert_eq!(shared.claim_wake(), Claim::Parked(home), "the task is parked there");
-        w.post_claimed_cause(home, shared, WakeCause::new(WakeReason::Woken).parks_next(parker));
-    }
-
-    /// **A wake whose poster parks next goes to the poster's CPU inside its
-    /// LLC**, and runs there in the poster's park: the pair's next wakes are
-    /// local, with no IPI behind them.
-    #[test]
-    fn a_wake_whose_poster_parks_next_runs_on_the_posters_cpu() {
-        let (parker, home) = (CpuId(0), CpuId(2));
-        let mut w = World::on(two_llcs());
-        let sleeper = parked_on_and_a_parker(&mut w, home, parker);
-        wake_from_a_parker(&w, home, parker, &sleeper);
-        w.run_a_pass_at(home, Nanos(NOW.0 + 1));
-        assert_eq!(sleeper.state(), TaskState::InTransit(parker), "cpu2 shares cpu0's LLC: handed to the parker");
-        w.park_running(parker);
-        assert_eq!(w.cpus[0].running().map(|t| t.key()), Some(sleeper.key()), "and run in the parker's park");
-        w.abandon();
-    }
-
-    /// **Across LLCs the wake stays home**: the move would refill the task
-    /// from memory rather than a shared cache.
-    #[test]
-    fn a_wake_whose_poster_parks_next_in_another_llc_stays_home() {
-        let (parker, home) = (CpuId(0), CpuId(1));
-        let mut w = World::on(two_llcs());
-        let sleeper = parked_on_and_a_parker(&mut w, home, parker);
-        wake_from_a_parker(&w, home, parker, &sleeper);
-        w.run_a_pass_at(home, Nanos(NOW.0 + 1));
-        assert_eq!(w.cpus[1].running().map(|t| t.key()), Some(sleeper.key()), "cpu1 is in the other LLC: run at home");
-        w.abandon();
-    }
-
-    /// **A real-time wake keeps the RT band's placement**, whoever posted it.
-    #[test]
-    fn a_real_time_wake_whose_poster_parks_next_stays_home() {
-        let (parker, home) = (CpuId(0), CpuId(2));
-        let mut w = World::on(two_llcs());
-        let (_, sleeper) = w.spawn_rt(home);
-        w.run_a_pass(home);
-        w.park_running(home);
-        let _ = w.spawn(parker);
-        w.run_a_pass(parker);
-        wake_from_a_parker(&w, home, parker, &sleeper);
-        w.run_a_pass_at(home, Nanos(NOW.0 + 1));
-        assert_eq!(w.cpus[2].running().map(|t| t.key()), Some(sleeper.key()), "the RT task runs at home");
         w.abandon();
     }
 
