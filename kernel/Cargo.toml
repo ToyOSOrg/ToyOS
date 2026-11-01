@@ -383,6 +383,8 @@ entry-df-unclean = []
 # own cost into the arm it is being compared against.
 pass-spin = []
 heap-lockspin = ["pass-spin"]
+# Measurement only, never lands: diary marks around a message's copies.
+scout-ipc-marks = []
 
 [lib]
 path = "pure/lib.rs"

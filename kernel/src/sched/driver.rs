@@ -555,6 +555,8 @@ pub fn pass(dispose: Dispose) {
         crate::quiesce::note_progress();
     }
     execute(action);
+    #[cfg(feature = "scout-ipc-marks")]
+    crate::trace::scout::mark(crate::trace::scout::RESUMED, 0);
     crate::preempt::enable_no_resched();
 }
 
@@ -623,6 +625,8 @@ pub fn pass_block(ticket: Ticket, deadline: Option<Nanos>) {
         crate::quiesce::note_progress();
     }
     execute(action);
+    #[cfg(feature = "scout-ipc-marks")]
+    crate::trace::scout::mark(crate::trace::scout::RESUMED, 0);
     crate::preempt::enable_no_resched();
 }
 

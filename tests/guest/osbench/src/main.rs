@@ -35,6 +35,7 @@ mod files;
 mod identity;
 mod internet;
 mod ipc;
+mod ipccopy;
 mod lan;
 mod measure;
 mod mem;
@@ -156,7 +157,7 @@ const GROUPS: [(&str, fn()); 17] = [
 
 /// The groups that need another party: `lan` the `osbench-peer` on the other
 /// bench, `internet` the public internet.
-const BY_NAME: [(&str, fn()); 2] = [("lan", lan::suite), ("internet", internet::suite)];
+const BY_NAME: [(&str, fn()); 3] = [("lan", lan::suite), ("internet", internet::suite), ("ipccopy", ipccopy::suite)];
 
 /// A group between its first and last lines, after the machine's conditions
 /// and the clock its CPU starts at.

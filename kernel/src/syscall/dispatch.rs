@@ -73,6 +73,12 @@ pub(crate) fn syscall_dispatch(num: u64, a1: u64, a2: u64, a3: u64, a4: u64) -> 
     #[cfg(feature = "boot-actuators")]
     task_probes();
     let entered = crate::arch::cpu::counter();
+    #[cfg(feature = "scout-ipc-marks")]
+    let scouted = crate::trace::scout::marked(num);
+    #[cfg(feature = "scout-ipc-marks")]
+    if scouted {
+        crate::trace::scout::mark(crate::trace::scout::SYS_ENTER, num as u32);
+    }
 
     // SAFETY: current process's page tables remain active for the duration of this call.
     let ctx = unsafe { SyscallContext::new() };
@@ -652,6 +658,10 @@ pub(crate) fn syscall_dispatch(num: u64, a1: u64, a2: u64, a3: u64, a4: u64) -> 
     // Wall-clock, not CPU time: elapsed includes any preemption.
     let elapsed = crate::arch::cpu::counter().saturating_sub(entered);
     crate::sched::driver::note_syscall(num, elapsed);
+    #[cfg(feature = "scout-ipc-marks")]
+    if scouted {
+        crate::trace::scout::mark(crate::trace::scout::SYS_EXIT, num as u32);
+    }
 
     result
 }

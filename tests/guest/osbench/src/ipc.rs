@@ -23,7 +23,7 @@ const HANDLE: u32 = 1;
 const MECHANISM: &str = if cfg!(target_os = "toyos") { "toyos_connection" } else { "unix_stream_socket" };
 const HANDLE_MECHANISM: &str = if cfg!(target_os = "toyos") { "toyos_moved_pipe_end" } else { "scm_rights_then_close" };
 
-fn control(peer: &Peer, bytes: u32, rounds: u32, mode: u32) -> std::io::Result<()> {
+pub(crate) fn control(peer: &Peer, bytes: u32, rounds: u32, mode: u32) -> std::io::Result<()> {
     let mut words = [0u8; 12];
     for (slot, word) in words.as_chunks_mut::<4>().0.iter_mut().zip([bytes, rounds, mode]) {
         *slot = word.to_le_bytes();

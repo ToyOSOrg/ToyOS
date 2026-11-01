@@ -61,6 +61,28 @@ pub fn trace(kind: Kind, data: u32) {
     push(kind, None, data);
 }
 
+/// Measurement only, never lands: `osbench ipccopy` decodes these codes.
+#[cfg(feature = "scout-ipc-marks")]
+pub mod scout {
+    pub const SYS_ENTER: u32 = 1;
+    pub const SYS_EXIT: u32 = 2;
+    pub const RESUMED: u32 = 8;
+    pub const COPY_IN: u32 = 20;
+    pub const COPIED_IN: u32 = 21;
+    pub const COPY_OUT: u32 = 22;
+    pub const COPIED_OUT: u32 = 23;
+
+    #[inline]
+    pub fn mark(code: u32, arg: u32) {
+        super::trace(super::Kind::Mark, code << 24 | (arg & 0x00FF_FFFF));
+    }
+
+    pub fn marked(num: u64) -> bool {
+        use toyos_abi::syscall::*;
+        matches!(num, SYS_MESSAGE_SEND | SYS_MESSAGE_RECV)
+    }
+}
+
 /// Reserve, stamp and publish under one guard, on the ring of the CPU the guard holds us to.
 #[inline]
 fn push(kind: Kind, task: Option<(u32, u32)>, data: u32) {

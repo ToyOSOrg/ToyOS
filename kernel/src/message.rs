@@ -155,7 +155,12 @@ impl QueueRef {
         if !state.queue.fits(state.bytes.space(), bytes.len(), batch.len()) {
             return Err((batch, SendRefused::NoRoom));
         }
-        if state.bytes.write(bytes, bytes.len()).is_err() {
+        #[cfg(feature = "scout-ipc-marks")]
+        crate::trace::scout::mark(crate::trace::scout::COPY_IN, 0);
+        let wrote = state.bytes.write(bytes, bytes.len());
+        #[cfg(feature = "scout-ipc-marks")]
+        crate::trace::scout::mark(crate::trace::scout::COPIED_IN, 0);
+        if wrote.is_err() {
             return Err((batch, SendRefused::NoMemory));
         }
         state.queue.push(bytes.len(), batch.into_iter());
@@ -175,7 +180,11 @@ impl QueueRef {
                     for (slot, entry) in installed.iter_mut().zip(handles) {
                         *slot = table.install(entry).expect("room was made first");
                     }
+                    #[cfg(feature = "scout-ipc-marks")]
+                    crate::trace::scout::mark(crate::trace::scout::COPY_OUT, 0);
                     bytes.read(buf, head.len);
+                    #[cfg(feature = "scout-ipc-marks")]
+                    crate::trace::scout::mark(crate::trace::scout::COPIED_OUT, 0);
                     (Taken::Message(head, installed), core::mem::take(rt_boost_pending))
                 }
                 Some(Err(untaken)) => (Taken::Untaken(untaken), false),

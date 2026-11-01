@@ -137,7 +137,11 @@ pub mod ipc {
         fn take(&self, buf: &mut [u8]) -> io::Result<usize> {
             let mut rx = self.1.borrow_mut();
             let frame = rx.recv(&self.0).map_err(|e| failed("receive", e))?;
-            Ok(copy(rx.payload(frame.payload_len), buf))
+            let t = std::time::Instant::now();
+            let n = copy(rx.payload(frame.payload_len), buf);
+            USER_COPY_NS.fetch_add(t.elapsed().as_nanos() as u64, std::sync::atomic::Ordering::Relaxed);
+            USER_COPIES.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            Ok(n)
         }
 
         /// One frame of `data` (at most one frame's worth) and `token`, moved.
@@ -154,6 +158,11 @@ pub mod ipc {
             Ok(Pipe::from_handle(handle))
         }
     }
+
+    /// Measurement only: the time this process spent copying frames out of
+    /// its receive buffer, and how many.
+    pub static USER_COPY_NS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+    pub static USER_COPIES: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
 
     /// As much of `from` as `to` holds, at its front.
     fn copy(from: &[u8], to: &mut [u8]) -> usize {
