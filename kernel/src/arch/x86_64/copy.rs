@@ -7,12 +7,14 @@
 //! Architectures Optimization Reference Manual). A forward copy whose
 //! destination is `d` bytes above its source modulo 4 KiB, `0 < d < n`, loads
 //! each byte `d` bytes after storing one with the same bits; copied highest
-//! first, that store comes 4 KiB minus `d` later. The kernel touches no vector
-//! register (`build/fpgate.rs`), so the descending copy moves 8 bytes a store.
+//! first, the nearest older store with those bits is 4 KiB minus `d` back.
+//! The kernel touches no vector register (`build/fpgate.rs`), so the
+//! descending copy moves 8 bytes a store.
 //!
 //! The file uses nothing but `core`, so `kernel-copies` tests it on the host;
 //! only the freestanding kernel exports the symbol.
 
+#[cfg(target_os = "none")]
 use core::sync::atomic::{AtomicUsize, Ordering};
 
 /// Which copies go highest first.
@@ -48,23 +50,28 @@ impl Rule {
 }
 
 /// The rule `memcpy` copies by, [`Rule::NEVER`] until [`set_rule`].
+#[cfg(target_os = "none")]
 static WINDOW: AtomicUsize = AtomicUsize::new(0);
+#[cfg(target_os = "none")]
 static MOST: AtomicUsize = AtomicUsize::new(0);
 
 /// Set the rule every later copy goes by, before another CPU runs.
+#[cfg(target_os = "none")]
 pub fn set_rule(rule: Rule) {
     WINDOW.store(rule.window, Ordering::Relaxed);
     MOST.store(rule.most, Ordering::Relaxed);
 }
 
+#[cfg(target_os = "none")]
 fn rule() -> Rule {
     Rule { window: WINDOW.load(Ordering::Relaxed), most: MOST.load(Ordering::Relaxed) }
 }
 
-/// Copy `n` bytes from `src` to `dest`, which do not overlap, as `rule` says.
+/// Copy `n` bytes from `src` to `dest` as `rule` says.
 ///
 /// # Safety
-/// `src` is readable and `dest` writable for `n` bytes, and the two do not overlap.
+/// `src` is readable and `dest` writable for `n` bytes, and the two ranges
+/// are disjoint or identical, as LLVM's `memcpy` allows.
 #[inline(always)]
 pub unsafe fn copy_by(dest: *mut u8, src: *const u8, n: usize, rule: Rule) {
     // SAFETY: as this function's caller promises; `goes_down` holds `n` to at least 8.

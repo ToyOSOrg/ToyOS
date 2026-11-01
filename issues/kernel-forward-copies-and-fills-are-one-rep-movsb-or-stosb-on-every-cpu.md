@@ -7,7 +7,12 @@ opened: 2026-09-29
 # Kernel forward copies and fills are one `rep movsb` or `rep stosb` on every CPU
 
 The kernel's `memcpy` is its own (`kernel/src/arch/x86_64/copy.rs`): one
-`rep movsb` on every CPU, but for a copy it sends highest first. Its `memset`
+`rep movsb` on every CPU, but for a copy it sends highest first. It replaced
+`compiler_builtins`' `rep movsb; rep movsq; rep movsb`, so every forward copy
+changed with it, on Zen 2 without ERMS too. Which copies go down is one rule
+per CPUID vendor, each measured on one microarchitecture only: AMD's on Zen 2,
+Intel's on Tiger Lake. Another AMD or Intel core takes its vendor's rule
+unmeasured, until its own figures confirm or replace it. Its `memset`
 and `memmove` are `compiler_builtins`', which
 frame `rep movsq` or `rep stosq` with two byte strings, and take one `rep movsb`
 or `rep stosb` only when built with the `ermsb` target feature
@@ -21,8 +26,8 @@ and it moves the sysroot key (`RECIPE`, `build/sysroot.rs:65`). One path on ever
 CPU: `rep movsb` is correct without ERMS, CPUID.(7,0):EBX bit 9, and no CPU is
 refused. Zen 2 lacks ERMS (a Ryzen 9 PRO 3900, family 0x17, reads EBX
 0x219C91A9: InstLatx64 ddff8a92,
-`AuthenticAMD/AuthenticAMD0870F10_K17_Matisse_CPUID.txt:52`), and no proving
-machine is family 0x17.
+`AuthenticAMD/AuthenticAMD0870F10_K17_Matisse_CPUID.txt:52`); the AMD bench's
+Ryzen 7 4800U is family 0x17 as well.
 
 **Exit**: a gate over `kernel.elf`, on the decoder of
 `issues/no-gate-decodes-kernel-elfs-instructions.md`, finds `memset`
