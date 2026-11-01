@@ -9,7 +9,7 @@ macro_rules! curve_api {
             use crate::{
                 Error, Random,
                 hash::$hash,
-                nist::{$curve, Curve, Point, Scalar},
+                nist::{$curve, Point, Scalar},
                 secret::Secret,
             };
             pub struct PublicKey {
@@ -54,11 +54,8 @@ macro_rules! curve_api {
                     Ok(Self(Scalar::first_valid(&candidates.0)?))
                 }
                 pub fn public_key(&self) -> PublicKey {
-                    // The base point's multiple by a nonzero scalar below n
-                    // is finite and on the curve.
-                    let point = <$curve as Curve<$limbs>>::base_mul(&self.0);
                     let mut encoded = [0; $encoded];
-                    point.encode(&mut encoded).expect("nonzero prime-order scalar");
+                    let point = Point::public_key(&self.0, &mut encoded);
                     PublicKey { point, encoded }
                 }
                 pub fn agree(self, peer: &PublicKey) -> Result<SharedSecret, Error> {
