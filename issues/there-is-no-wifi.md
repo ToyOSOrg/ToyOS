@@ -295,6 +295,19 @@ W1, P6.
   - an SAE Confirm that does not verify;
   - an SAE Commit with an invalid scalar or element;
   - a PSK handshake for a network marked by Transition Disable.
+- **W2a, WPA2-Personal: built** (`system/wlan/handshake`,
+  `toyos-wlan-handshake`), since it needs nothing of P6 beyond `lib/crypto`'s
+  `ct::equal` and `Secret`, published for it. The 4-way and group key
+  handshakes under AKM 2 with CCMP-128, the IGTK under BIP-CMAC-128 when
+  PMF is negotiated. The first six refusals above are host tests against an
+  authenticator in the tests that shares no crypto code with the crate;
+  Annex J's PRF and pass-phrase vectors, and RFC 6070's one case a
+  pass-phrase and SSID can be, are `lib/crypto`'s.
+  - **Not met yet:** the captured handshake, from two wpa_supplicants over
+    `mac80211_hwsim` on a Linux bench.
+  - **W2b waits for P6:** SAE, AES-CMAC, AKM 6 (PSK-SHA256), and the
+    Transition Disable KDE with its PSK refusal. RFCs 4493 and 9380 are its
+    vectors.
 
 **W3, the firmware: done.** Depends on: the specification, revision 2.
 - **Scope:**

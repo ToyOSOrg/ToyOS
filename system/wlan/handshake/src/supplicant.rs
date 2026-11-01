@@ -7,8 +7,8 @@
 //!   the first one drew, under whatever ANonce it carries. Once a pairwise key is installed, a
 //!   message 1 starts a rekey with a fresh SNonce.
 //! - **No reinstallation.** A message 3 resent for a handshake already completed is answered and
-//!   installs no pairwise key. A group key arrives to be installed only when it is not the key
-//!   installed under its ID.
+//!   installs no pairwise key. A group key is handed out to install only when it is not the key
+//!   already installed under its ID.
 
 use alloc::vec::Vec;
 use toyos_crypto::{

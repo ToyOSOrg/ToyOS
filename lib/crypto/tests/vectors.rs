@@ -287,3 +287,12 @@ fn ieee80211_annex_j_prf_and_psk() {
         &hex("becb93866bb8c3832cb777c2f559807c8c59afcb6eae734885001300a981cc62")
     );
 }
+
+/// RFC 6070's one PBKDF2-HMAC-SHA1 case at the PMK's 4096 iterations whose password and salt
+/// a pass-phrase and SSID can be: its 20 octets are the PMK's first.
+#[cfg(feature = "wpa2")]
+#[test]
+fn rfc6070_pbkdf2_hmac_sha1_at_4096_iterations() {
+    let pmk = toyos_crypto::wpa2::derive_pmk(b"password", b"salt").unwrap();
+    assert_eq!(pmk.as_bytes()[..20], hex::<20>("4b007901b765489abead49d926f721d065a429c1"));
+}
