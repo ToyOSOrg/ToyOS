@@ -1505,6 +1505,26 @@ mod tests {
         assert!(out.iter().all(|&b| b == 0), "page 1 reads {:#04x}, not zeros", out[out.iter().position(|&b| b != 0).unwrap()]);
     }
 
+    /// A byte written into a hole below the old end: the rest of its page
+    /// reads zeros, not what the block its reserve took last held.
+    #[test]
+    fn a_write_in_part_into_a_hole_reads_zeros_around_it() {
+        let stale: Image = (0..1024).map(|b| (b, Box::new([0xAB; BLOCK]))).collect();
+        let mut v = DataVolume::format(Stops::from(&stale, 1024, usize::MAX, None), 0, &["home", "apps"], clock).unwrap();
+
+        let n = v.open("home/f", CREATE).unwrap();
+        v.write(n, 0, &[1; BLOCK]).unwrap();
+        v.truncate(n, 3 * BLOCK as u64).unwrap();
+        assert_eq!(v.sync(), Ok(Vec::new()));
+        v.write(n, 6000, &[2]).unwrap();
+
+        let mut out = vec![0u8; BLOCK];
+        assert_eq!(v.read(n, BLOCK as u64, &mut Buf(&mut out)).unwrap(), BLOCK);
+        let mut want = vec![0u8; BLOCK];
+        want[6000 - BLOCK] = 2;
+        assert!(out == want, "page 1 reads {:#04x} where nothing was written", out[out.iter().zip(&want).position(|(a, b)| a != b).unwrap()]);
+    }
+
     fn take(v: DataVolume<Stops>) -> Stops {
         let DataVolume { fs, cache, .. } = v;
         drop(fs);

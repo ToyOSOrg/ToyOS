@@ -366,6 +366,32 @@ fn a_write_refused_in_a_hole_gives_back_the_block_it_took() {
     assert!(out.iter().all(|&b| b == 0), "the hole reads {:#04x}, not zeros", out[out.iter().position(|&b| b != 0).unwrap()]);
 }
 
+/// A byte written into a hole below the old end, as the server writes one:
+/// a holder and the volume after write-back read zeros around it, not what
+/// the block its reserve took last held.
+#[test]
+fn a_write_in_part_into_a_hole_supplies_zeros_around_it() {
+    let disk = Ram::new(4096);
+    let stale = vec![[0xAB; toyos_blockdev::BLOCK]; 4096];
+    toyos_blockdev::block_on(toyos_blockdev::BlockDev::write(&disk, 0, &stale), || ()).unwrap();
+    let mut v = DataVolume::format(disk, 256, &["home"], clock).unwrap();
+    let fake = Fake::new(64, 16);
+    let mut files = Files::new(Some(fake.clone()));
+    let (node, id) = open(&mut files, &mut v, "home/f");
+    files.write(&mut v, id, node, 0, &pattern(PAGE as usize, 4)).unwrap();
+    files.truncate(&mut v, id, node, 3 * PAGE).unwrap();
+    files.sync(&mut v).unwrap();
+    files.write(&mut v, id, node, 6000, &[2]).unwrap();
+
+    let mut want = vec![0u8; PAGE as usize];
+    want[6000 - PAGE as usize] = 2;
+    assert!(read(&mut files, &mut v, (node, id), PAGE, PAGE as usize) == want, "a holder reads another file's bytes");
+    files.sync(&mut v).unwrap();
+    let mut out = vec![0xEEu8; PAGE as usize];
+    assert_eq!(v.read(node, PAGE, &mut Buf(&mut out)).unwrap(), PAGE as usize);
+    assert!(out == want, "the volume holds another file's bytes after write-back");
+}
+
 #[test]
 fn a_requested_page_is_supplied_by_its_notice() {
     let mut v = volume();

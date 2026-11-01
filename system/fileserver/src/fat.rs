@@ -311,8 +311,8 @@ impl<D: Disk> Volume for FatVolume<D> {
             return Err(fs::Error::Stale);
         }
         open.dirty = true;
-        // A chain has no holes: a cut back to the old size gives back its room.
-        let reserved = Reserved { size: open.file.len(), held: 0 };
+        // A chain has no holes: it holds a block for every page of its size.
+        let reserved = Reserved { size: open.file.len(), held: open.file.len().div_ceil(toyos_blockdev::BLOCK as u64) };
         self.cache.block_on(self.fs.reserve(&mut open.file, offset, len)).map_err(|e| logged("reserve", &open.path, e))?;
         Ok(reserved)
     }

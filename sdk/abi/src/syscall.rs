@@ -375,7 +375,7 @@ pub const SYSCALL_PROFILE_BINS: usize = 160;
 /// a reader can see in the line; dropping is one nobody can.
 pub const SYSCALL_PROFILE_OTHER: usize = SYSCALL_PROFILE_BINS - 1;
 
-const _: () = assert!(SYS_CLOCK_NOW < SYSCALL_PROFILE_OTHER as u64);
+const _: () = assert!(SYS_PAGED_NOTICES < SYSCALL_PROFILE_OTHER as u64);
 
 pub const WNOHANG: u64 = 1;
 /// Every bit `SYS_PROCESS_WAIT`'s flag word defines; a wait carrying another

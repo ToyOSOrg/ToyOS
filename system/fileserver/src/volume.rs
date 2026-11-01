@@ -201,15 +201,23 @@ pub trait Volume {
 #[derive(Clone, Copy, Debug)]
 pub struct Reserved {
     pub size: u64,
-    /// The pages it held blocks for, where the format holds holes, which a
-    /// cut back to `size` alone would not give back.
+    /// The pages it held blocks for. Past them a page below `size` is a hole,
+    /// whose block, if the reserve took one, holds what another file left.
     pub held: u64,
+}
+
+impl Reserved {
+    /// Where the file's old bytes on the volume end: a page in part reads
+    /// what it held below this, and zeros from here.
+    pub fn contents(&self) -> u64 {
+        self.size.min(self.held.saturating_mul(toyos_blockdev::BLOCK as u64))
+    }
 }
 
 /// A write straight to the volume, for a file with no paged object — on a
 /// server with no pager, or one whose object went — and for a volume's
 /// tests: the reserve, then each page it touches written back, what the page
-/// held below the old end read first.
+/// held below the old contents' end read first.
 pub trait Writes: Volume {
     fn write(&mut self, node: Node, offset: u64, data: &[u8]) -> Result<(), Error> {
         const PAGE: u64 = toyos_blockdev::BLOCK as u64;
@@ -219,7 +227,7 @@ pub trait Writes: Volume {
         let mut landed = 0;
         for start in (offset / PAGE * PAGE..end).step_by(PAGE as usize) {
             let mut page = vec![0u8; PAGE as usize];
-            let below = reserved.size.saturating_sub(start).min(PAGE) as usize;
+            let below = reserved.contents().saturating_sub(start).min(PAGE) as usize;
             let (from, to) = (offset.max(start), end.min(start + PAGE));
             let written = self.read(node, start, &mut Buf(&mut page[..below])).and_then(|_| {
                 page[(from - start) as usize..(to - start) as usize]

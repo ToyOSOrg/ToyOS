@@ -370,7 +370,7 @@ impl<P: Pager> Files<P> {
         let old = reserved.size;
         self.touch(identity);
         let mut done = 0;
-        let put = self.put(volume, &Writing { identity, node, old, offset, data }, &mut done);
+        let put = self.put(volume, &Writing { identity, node, old, contents: reserved.contents(), offset, data }, &mut done);
         let id = self.files[&identity].object;
         if let Err(e) = put {
             // What was reserved and not put would read as the blocks' old bytes.
@@ -388,7 +388,7 @@ impl<P: Pager> Files<P> {
     /// The bytes of a write into the object, each absent page supplied dirty,
     /// counting into `done` what landed.
     fn put(&mut self, volume: &mut dyn Volume, w: &Writing<'_>, done: &mut usize) -> Result<(), Error> {
-        let Writing { identity, node, old, offset, data } = *w;
+        let Writing { identity, node, old, contents, offset, data } = *w;
         let end = offset + data.len() as u64;
         while *done < data.len() {
             let at = offset + *done as u64;
@@ -416,14 +416,16 @@ impl<P: Pager> Files<P> {
                 }
                 continue;
             }
-            // A page in part: what it held below the old end, then the write's.
+            // A page in part: what it held below the old end, zeros past the
+            // old contents, then the write's.
             let start = page * PAGE;
             let below = old.saturating_sub(start).min(PAGE) as usize;
+            let held = contents.saturating_sub(start).min(PAGE) as usize;
             let upto = end.min(start + PAGE);
             let mut buf = std::mem::take(&mut self.buf);
             buf.clear();
             buf.resize(PAGE as usize, 0);
-            let read = volume.read(node, start, &mut Buf(&mut buf[..below]));
+            let read = volume.read(node, start, &mut Buf(&mut buf[..held]));
             let supplied = read.and_then(|_| {
                 buf[(at - start) as usize..(upto - start) as usize].copy_from_slice(&data[*done..*done + (upto - at) as usize]);
                 let len = below.max((upto - start) as usize);
@@ -562,6 +564,8 @@ struct Writing<'a> {
     identity: u64,
     node: Node,
     old: u64,
+    /// The end of the old bytes the volume holds ([`crate::volume::Reserved::contents`]).
+    contents: u64,
     offset: u64,
     data: &'a [u8],
 }

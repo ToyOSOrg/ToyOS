@@ -85,8 +85,8 @@ struct Request {
 /// One object of a pager's, at its id's slot.
 struct Entry {
     object: Object,
-    /// The pager's own reference, while unreleased, and each holder object's:
-    /// the slot is free again with the last.
+    /// The pager's own reference, while unreleased, each holder object's, and
+    /// each owner read's, while it runs: the slot is free again with the last.
     refs: u32,
     /// Holder objects whose handles have not all gone.
     holders: u32,
