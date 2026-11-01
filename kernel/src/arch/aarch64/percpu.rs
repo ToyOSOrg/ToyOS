@@ -33,6 +33,10 @@ pub struct PerCpu {
     current_tid: AtomicU32,
     current_pid: AtomicU32,
     preempt_count: AtomicU32,
+    /// Non-zero while this CPU runs a device interrupt's arm, written only by
+    /// `trap`'s `irq`: a wake posted there is the device's, not the
+    /// interrupted thread's.
+    irq_depth: AtomicU32,
     need_resched: AtomicU8,
     fault_state: AtomicU8,
     /// Timer interrupts taken at EL1, which only count and ask for a pass.
@@ -81,6 +85,7 @@ pub fn alloc(cpu_id: u32) -> &'static PerCpu {
         current_tid: AtomicU32::new(u32::MAX),
         current_pid: AtomicU32::new(u32::MAX),
         preempt_count: AtomicU32::new(0),
+        irq_depth: AtomicU32::new(0),
         need_resched: AtomicU8::new(0),
         fault_state: AtomicU8::new(CpuFaultState::Normal as u8),
         kernel_timer_fires: AtomicU32::new(0),
@@ -126,6 +131,20 @@ pub fn init_bsp() {
 
 pub fn cpu_id() -> u32 {
     this().cpu_id
+}
+
+/// Whether this CPU is inside a device interrupt's arm.
+pub fn in_device_irq() -> bool {
+    this().irq_depth.load(Relaxed) != 0
+}
+
+/// Bracket a device interrupt's arm, as [`in_device_irq`] reads it.
+pub fn irq_depth_up() {
+    this().irq_depth.fetch_add(1, Relaxed);
+}
+
+pub fn irq_depth_down() {
+    this().irq_depth.fetch_sub(1, Relaxed);
 }
 
 /// `None` means idle.

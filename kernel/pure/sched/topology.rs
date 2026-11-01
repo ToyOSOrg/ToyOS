@@ -136,6 +136,13 @@ impl Topology {
         self.keys.len()
     }
 
+    /// A number for the LLC `cpu` is in, the same for every CPU of that LLC
+    /// and different for every other: the position of its first CPU in the
+    /// topology's order.
+    pub fn llc_index(&self, cpu: CpuId) -> u16 {
+        u16::try_from(self.places[cpu.0 as usize].llc.start).expect("a CPU mask names at most 1024 CPUs")
+    }
+
     pub fn keys(&self, cpu: CpuId) -> CpuKeys {
         self.keys[cpu.0 as usize]
     }
