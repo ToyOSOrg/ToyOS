@@ -695,6 +695,10 @@ const MACHINE_TESTS: &[&str] = &[
     // when it is up. Two drivers' links, a NIC's carrier and netstack's
     // routes cross three processes and two devices, which the node's and the
     // shard's host tests of rank, failover and return hold below the drivers.
+    // std's `local_addr` of a stream over each link is that link's lease, and
+    // the two differ, so one is not QEMU's 10.0.2.15: what netstack answered
+    // through the SDK, which the node's host tests hold only as far as the
+    // node.
     // QEMU x86-64 (`qemu::SUITE_ARCH`), on two user networks; the datagrams go
     // to RFC 5737's TEST-NET-1, which answers nothing, and the harness is the
     // peer on the host's loopback, so it depends on no public network. The networks are not
@@ -5904,6 +5908,8 @@ fn traffic_leaves_by_the_second_link_while_the_first_is_down() -> Result<(), Str
     let port = peer.local_addr().map_err(|e| format!("the listener's port: {e}"))?.port();
     let socket = qemu.qmp_socket().to_path_buf();
     let heard = std::thread::spawn(move || -> Result<(), String> {
+        // The job's stream over its first link only reports its local address.
+        drop(peer.accept().map_err(|e| format!("the guest's first connect: {e}"))?);
         let (conn, _) = peer.accept().map_err(|e| format!("the guest's connect: {e}"))?;
         conn.set_read_timeout(Some(CEILING)).map_err(|e| e.to_string())?;
         let mut reader = BufReader::new(conn.try_clone().map_err(|e| e.to_string())?);

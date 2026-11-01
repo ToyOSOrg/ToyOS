@@ -215,8 +215,8 @@ impl TcpStream {
     }
 
     pub fn socket_addr(&self) -> io::Result<SocketAddr> {
-        let (_, local_port) = stream::endpoints(self.handle()).map_err(stream_refused)?;
-        Ok(SocketAddr::V4(SocketAddrV4::new(Ipv4Addr::new(10, 0, 2, 15), local_port)))
+        let (_, (addr, port)) = stream::endpoints(self.handle()).map_err(stream_refused)?;
+        Ok(SocketAddr::V4(SocketAddrV4::new(Ipv4Addr::from(addr), port)))
     }
 
     pub fn shutdown(&self, how: Shutdown) -> io::Result<()> {

@@ -145,6 +145,7 @@ crate::ipc_payload! {
         pub holder: u16,
         pub peer_port: u16,
         pub peer_addr: [u8; 4],
+        pub local_addr: [u8; 4],
         pub local_port: u16,
         pub _pad: u16,
     }
@@ -159,6 +160,9 @@ const HELD_REGION: Rights = Rights::DUP.union(Rights::MAP);
 /// The most streams one process holds: the per-process bound libc's socket
 /// table has. An estimate: no measurement sets it.
 pub const MAX_STREAMS: usize = 128;
+
+/// An IPv4 address and a port: one end of a stream.
+pub type EndAddr = ([u8; 4], u16);
 
 type Rx = Receiving<RECEIVE_BYTES, WORDS>;
 type Tx = Sending<SEND_BYTES, WORDS>;
@@ -196,7 +200,7 @@ struct End {
     /// hangs nothing up.
     connection: BorrowedHandle<'static>,
     peer: ([u8; 4], u16),
-    local_port: u16,
+    local: ([u8; 4], u16),
 }
 
 /// An end's region, its handle and mapping, the bells netstack rings for it
@@ -569,10 +573,17 @@ pub fn failure(handle: BorrowedHandle<'_>) -> Result<Option<Refused>, Refused> {
     })
 }
 
-/// The peer's address and port, and this end's port.
-pub fn endpoints(handle: BorrowedHandle<'_>) -> Result<(([u8; 4], u16), u16), Refused> {
+/// The peer's address and port, and this end's: the address netstack sent the
+/// stream from.
+pub fn endpoints(handle: BorrowedHandle<'_>) -> Result<(EndAddr, EndAddr), Refused> {
     let end = TABLE.lock().get(handle.raw()).ok_or(Refused::NotThisProcess(handle.raw()))?;
-    Ok((end.peer, end.local_port))
+    Ok((end.peer, end.local))
+}
+
+/// A stream's own end as netstack names it, where it can be one: a unicast
+/// address, neither unspecified, multicast nor broadcast, and a port.
+fn local_end(addr: [u8; 4], port: u16) -> Option<([u8; 4], u16)> {
+    (addr != [0; 4] && addr[0] < 224 && port != 0).then_some((addr, port))
 }
 
 /// The handle a watch of `way` is made on, for reading: the holder's receive
@@ -723,7 +734,6 @@ pub fn let_go(handle: OwnedHandle) {
 pub struct Connected {
     /// Its connection, which reaches its end.
     pub handle: OwnedHandle,
-    pub local_port: u16,
 }
 
 /// An active open to `addr`:`port`, answered once the handshake ends or
@@ -735,7 +745,7 @@ pub fn connect(addr: [u8; 4], port: u16, timeout_ms: u32, nodelay: bool) -> Resu
     let opened = open(nodelay, (addr, port), |region| {
         NetstackConn::connect()?.request_with_handles([region], MsgType::TcpConnect, &request)?.answer_with_handles::<TcpConnectResponse, BELLS>()
     })?;
-    Ok(Connected { handle: opened.handle, local_port: opened.answer.local_port })
+    Ok(Connected { handle: opened.handle })
 }
 
 /// A stream a listener's accept was handed.
@@ -744,7 +754,6 @@ pub struct Accepted {
     pub handle: OwnedHandle,
     pub remote_addr: [u8; 4],
     pub remote_port: u16,
-    pub local_port: u16,
     /// Whether Nagle's algorithm is off for it, as its listener had it.
     pub nodelay: bool,
 }
@@ -768,7 +777,6 @@ pub(super) fn accept(listener: BorrowedHandle<'_>, drain: super::socket::Drain<'
         handle: opened.handle,
         remote_addr: answer.remote_addr,
         remote_port: answer.remote_port,
-        local_port: answer.local_port,
         nodelay: answer.nodelay != 0,
     })
 }
@@ -781,14 +789,18 @@ struct Opened<A> {
 
 /// What an answer says of the stream's endpoints.
 trait Answered {
-    fn local_port(&self) -> u16;
+    /// The message the answer is to, which a malformed one is refused as.
+    const ASKED: u32;
+    /// This end, as the answer spells it.
+    fn local(&self) -> ([u8; 4], u16);
     /// The peer, where the answer names it.
     fn peer(&self) -> Option<([u8; 4], u16)>;
 }
 
 impl Answered for TcpConnectResponse {
-    fn local_port(&self) -> u16 {
-        self.local_port
+    const ASKED: u32 = MsgType::TcpConnect as u32;
+    fn local(&self) -> ([u8; 4], u16) {
+        (self.local_addr, self.local_port)
     }
     fn peer(&self) -> Option<([u8; 4], u16)> {
         None
@@ -796,8 +808,9 @@ impl Answered for TcpConnectResponse {
 }
 
 impl Answered for TcpAcceptResponse {
-    fn local_port(&self) -> u16 {
-        self.local_port
+    const ASKED: u32 = super::socket::ACCEPT;
+    fn local(&self) -> ([u8; 4], u16) {
+        (self.local_addr, self.local_port)
     }
     fn peer(&self) -> Option<([u8; 4], u16)> {
         Some((self.remote_addr, self.remote_port))
@@ -825,13 +838,15 @@ fn open<A: Answered>(
         let (rx, tx) = session::client(words, LAYOUT);
         let lent = region.share().map_err(|_| NetError::Io)?;
         let (answer, bells, connection) = ask(lent)?;
+        let (addr, port) = answer.local();
+        let local = local_end(addr, port).ok_or(NetError::Protocol(A::ASKED))?;
         let (region, base) = region.into_raw();
         // SAFETY: `into_raw` gave this the region's handle, which nothing else answers for.
         let held = take_up(connection.into_owned(), bells, unsafe { OwnedHandle::from_raw(region) }, base)?;
         *HALVES[slot].rx.lock() = Kept::Held(rx);
         *HALVES[slot].tx.lock() = Kept::Held(tx);
         let peer = answer.peer().unwrap_or(peer);
-        let end = held.end(base as usize, peer, answer.local_port());
+        let end = held.end(base as usize, peer, local);
         Ok((held.descriptor, end, answer))
     })();
     let mut table = TABLE.lock();
@@ -860,12 +875,12 @@ struct Held {
 
 impl Held {
     /// The end, its region mapped at `base`.
-    fn end(&self, base: usize, peer: ([u8; 4], u16), local_port: u16) -> End {
+    fn end(&self, base: usize, peer: ([u8; 4], u16), local: ([u8; 4], u16)) -> End {
         // SAFETY: the handles `take_up` narrowed for this end, which keeps them until its `free`.
         let (receive_bell, send_bell, rung, connection) =
             unsafe { (kept(self.receive_bell), kept(self.send_bell), kept(self.rung), kept(self.connection)) };
         let region = Mapped { handle: self.region, base, receive_bell, send_bell, rung };
-        End { region: Some(region), connection, peer, local_port }
+        End { region: Some(region), connection, peer, local }
     }
 }
 
@@ -974,24 +989,24 @@ pub(super) fn ask_export(connection: BorrowedHandle<'_>, rung: Option<BorrowedHa
 /// [`MAX_STREAMS`] or the kernel will not narrow it.
 pub(super) fn adopted(connection: Connection, first: Option<(&[u8], ipc::Batch)>) -> Option<OwnedHandle> {
     let slot = TABLE.lock().reserve()?;
-    let taken = first.and_then(adoption).and_then(|(holder, adopt, [region, receive, send, rung])| {
+    let taken = first.and_then(adoption).and_then(|(holder, adopt, local, [region, receive, send, rung])| {
         let region = SharedMemory::lent(region, REGION_BYTES).ok()?;
         let (region, base) = region.into_raw();
         // SAFETY: `into_raw` gave this the region's handle, which nothing else answers for.
         let region = unsafe { OwnedHandle::from_raw(region) };
-        Some((holder, adopt, base, [receive, send, rung], region))
+        Some((holder, adopt, local, base, [receive, send, rung], region))
     });
     let made = match taken {
-        Some((holder, adopt, base, bells, region)) => take_up(connection.into_owned(), bells, region, base).map(|held| {
+        Some((holder, adopt, local, base, bells, region)) => take_up(connection.into_owned(), bells, region, base).map(|held| {
             let (rx, tx) = session::holder(LAYOUT, holder);
             *HALVES[slot].rx.lock() = Kept::Held(rx);
             *HALVES[slot].tx.lock() = Kept::Held(tx);
-            let end = held.end(base as usize, (adopt.peer_addr, adopt.peer_port), adopt.local_port);
+            let end = held.end(base as usize, (adopt.peer_addr, adopt.peer_port), local);
             (held.descriptor, end)
         }),
         None => hold_connection(connection.into_owned()).map(|(descriptor, connection)| {
             // SAFETY: the end's own connection, which it keeps until its `free`.
-            (descriptor, End { region: None, connection: unsafe { kept(connection) }, peer: ([0; 4], 0), local_port: 0 })
+            (descriptor, End { region: None, connection: unsafe { kept(connection) }, peer: ([0; 4], 0), local: ([0; 4], 0) })
         }),
     };
     let mut table = TABLE.lock();
@@ -1007,16 +1022,30 @@ pub(super) fn adopted(connection: Connection, first: Option<(&[u8], ipc::Batch)>
     }
 }
 
-/// An [`ADOPT`] frame's holder, payload and handles.
-fn adoption((payload, handles): (&[u8], ipc::Batch)) -> Option<(Holder, Adopt, [OwnedHandle; BELLS + 1])> {
+/// An [`ADOPT`] frame's holder, payload, this end and handles.
+fn adoption((payload, handles): (&[u8], ipc::Batch)) -> Option<(Holder, Adopt, EndAddr, [OwnedHandle; BELLS + 1])> {
     let adopt: Adopt = ipc::decode_payload(payload).ok()?;
     let handles = handles.exact::<{ BELLS + 1 }>()?;
-    Some((Holder::new(adopt.holder)?, adopt, handles))
+    let local = local_end(adopt.local_addr, adopt.local_port)?;
+    Some((Holder::new(adopt.holder)?, adopt, local, handles))
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A stream's own end is a unicast address and a port: an answer naming
+    /// the unspecified address, a multicast or the broadcast one, or no port,
+    /// is no end a stream can have.
+    #[test]
+    fn a_streams_own_end_is_a_unicast_address_and_a_port() {
+        assert_eq!(local_end([192, 0, 2, 1], 49152), Some(([192, 0, 2, 1], 49152)));
+        assert_eq!(local_end([223, 255, 255, 254], 1), Some(([223, 255, 255, 254], 1)));
+        for addr in [[0; 4], [224, 0, 0, 1], [239, 255, 255, 250], [255; 4]] {
+            assert_eq!(local_end(addr, 49152), None, "{addr:?}");
+        }
+        assert_eq!(local_end([192, 0, 2, 1], 0), None);
+    }
 
     /// A wait for a gate that lasts is reported each stall interval and goes
     /// on until rung; one with a deadline ends at the deadline, reported only

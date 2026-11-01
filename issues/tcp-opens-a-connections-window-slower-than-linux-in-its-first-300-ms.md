@@ -355,8 +355,8 @@ exiting 0. ToyOS's `osbench_lan` found the peer and then refused the group:
 `no netstack link holds 10.0.2.15`. std's `TcpStream::local_addr` answers
 QEMU's user-network address whatever the lease is, and since #1122 osbench
 names a connection's link by that address. The T14's lease is not it. So the
-session does not decide, and the next one waits on
-`issues/getsockname-answers-an-address-nobody-asked-netstack-for.md`.
+session does not decide. The next one runs on a head where netstack's
+answers carry each stream's local address and std, libc and the SDK return it.
 
 Its Linux runs do give the per-connection spread the rule needs:
 

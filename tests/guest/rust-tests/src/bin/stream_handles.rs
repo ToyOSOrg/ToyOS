@@ -451,7 +451,7 @@ impl Netstack {
         let theirs = self.exports.1.open("export").expect("a connection of the private port");
         let ours = self.exports.0.accept().expect("the private port's connection");
         let ([receive_bell, send_bell, rung_waker], (receive, send, rung)) = bells();
-        let adopt = Adopt { holder: number.number(), peer_port: 80, peer_addr: [192, 0, 2, 2], local_port: 49_152, _pad: 0 };
+        let adopt = Adopt { holder: number.number(), peer_port: 80, peer_addr: [192, 0, 2, 2], local_addr: [192, 0, 2, 1], local_port: 49_152, _pad: 0 };
         let region = self.region.share().expect("a handle of the region");
         let handles = [region, receive_bell, send_bell, rung_waker];
         ours.send_with(ADOPT, &adopt, handles).expect("queue the holder's adoption");
@@ -514,7 +514,7 @@ fn run(role: &str, peer: &[u8]) -> (Child, Netstack) {
     region.bytes().write(RECEIVE_RING, peer);
     let _ = server.publish(words_of(&region), peer.len() as u32).expect("the client keeps the protocol");
     let (handed, (receive, send, rung)) = bells();
-    conn.send_with(RespType::Result as u32, &TcpConnectResponse { local_port: 49_152, _pad: 0 }, handed)
+    conn.send_with(RespType::Result as u32, &TcpConnectResponse { local_addr: [192, 0, 2, 1], local_port: 49_152, _pad: 0 }, handed)
         .expect("answer the connect with the bells");
     let (exports, export_connector) = port::create().expect("the private port");
     let names = namespace::build().add("export", &export_connector).finish().expect("the private port's namespace");

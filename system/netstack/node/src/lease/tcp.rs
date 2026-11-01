@@ -29,14 +29,14 @@ impl Stack {
         held(self.shard.status(id))
     }
 
-    pub(crate) fn tcp_local_port(&mut self, id: ConnId) -> Port {
-        held(self.shard.tuple(id)).local.port
+    pub(crate) fn tcp_local(&mut self, id: ConnId) -> Endpoint {
+        held(self.shard.tuple(id)).local
     }
 
-    /// The connection's peer and its local port.
-    pub(crate) fn tcp_endpoints(&mut self, id: ConnId) -> (Endpoint, Port) {
+    /// The connection's peer and its own end.
+    pub(crate) fn tcp_endpoints(&mut self, id: ConnId) -> (Endpoint, Endpoint) {
         let tuple = held(self.shard.tuple(id));
-        (tuple.remote, tuple.local.port)
+        (tuple.remote, tuple.local)
     }
 
     /// [`toyos_net_tcp::Tcp::lend`].

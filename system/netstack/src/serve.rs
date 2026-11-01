@@ -533,7 +533,7 @@ impl Sockets {
             let answer_to = self.by_stream.get(&id).and_then(|key| self.streams.get_mut(key)?.answer.take());
             let Some((bells, holders)) = answer_to else { unreachable!("the node answered a connect nobody waits for") };
             match answer {
-                Ok(local) => hand_over(&holders, bells, &TcpConnectResponse { local_port: local.get(), _pad: 0 }),
+                Ok(local) => hand_over(&holders, bells, &TcpConnectResponse { local_addr: local.addr.octets(), local_port: local.port.get(), _pad: 0 }),
                 Err(code) => answer_refused(&holders, code),
             }
         }
@@ -716,7 +716,8 @@ impl Sockets {
             holder: number.number(),
             peer_port: peer.port.get(),
             peer_addr: peer.addr.octets(),
-            local_port: local.get(),
+            local_addr: local.addr.octets(),
+            local_port: local.port.get(),
             _pad: 0,
         };
         let handles = [region, receive_bell, send_bell, rung_waker];
@@ -833,7 +834,8 @@ impl Sockets {
                 let answer = TcpAcceptResponse {
                     remote_addr: accepted.remote.addr.octets(),
                     remote_port: accepted.remote.port.get(),
-                    local_port: accepted.local.get(),
+                    local_port: accepted.local.port.get(),
+                    local_addr: accepted.local.addr.octets(),
                     nodelay: u32::from(accepted.nodelay),
                 };
                 self.hold_stream(accepted.id, &holders, None);
