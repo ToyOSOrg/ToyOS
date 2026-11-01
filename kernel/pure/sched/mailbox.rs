@@ -520,6 +520,13 @@ impl Doorbell {
     pub fn sleeping(&self) -> bool {
         self.bits.load(Ordering::Acquire) & SLEEPING != 0
     }
+
+    /// Sleeping with no kick on its way: no work sent here yet is waking it.
+    /// A kicked sleeper keeps reading SLEEPING until its next pass, so work
+    /// handed to every sleeper in a burst would pile on the first one.
+    pub fn sleeping_unrung(&self) -> bool {
+        self.bits.load(Ordering::Acquire) & (SLEEPING | KICK_PENDING) == SLEEPING
+    }
 }
 
 impl Default for Doorbell {
