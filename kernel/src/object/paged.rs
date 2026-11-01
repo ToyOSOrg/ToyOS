@@ -132,7 +132,7 @@ impl Held {
         }
         // SAFETY: `phys` is a frame this pager drew, out of its index or never
         // in it, which nothing maps; a reader's pin defers its reuse.
-        unsafe { pmm::free_drawn(job, &[phys]) };
+        unsafe { pmm::free_drawn(job, [phys]) };
     }
 
     /// Move each held-aside frame no copy pins any more to the spare ones.
@@ -948,7 +948,7 @@ impl ZeroHandles for PagerObject {
         while let Some(phys) = state.held.spare.pop().or_else(|| state.held.draining.pop()) {
             // SAFETY: a frame this pager drew and held aside, which nothing
             // maps; a pin defers its free to its last unpin.
-            unsafe { pmm::free_drawn(job, &[phys]) };
+            unsafe { pmm::free_drawn(job, [phys]) };
         }
         let pool = state.held.core.end();
         pmm::unpromise(job, pool);
