@@ -89,7 +89,7 @@ The kernel keeps only generic mechanisms:
    - One present is outstanding at a time. Damage composed meanwhile is merged, past 8 rectangles into their bounding box, and sent when the answer arrives.
    - The compositor serves `display-output`, one driver at a time, and never waits on it.
    - `tgl-display` answers each present at the vblank after it arrived. That vblank is pipe A's interrupt, enabled only while a present waits, and its wait has a hang ceiling.
-   - When a compositor that was taking presents goes away (a restart, a `swap`), the driver connects again, at most 8 times a boot. A protocol refusal, or a compositor gone before it took a hello, ends presents for the boot, by name.
+   - When a connection a present arrived on ends from the compositor's side (a restart, a `swap`, or the compositor dropping the driver), the driver connects again, at most 8 times a boot. A protocol refusal, or a connection that ended before any present arrived on it, ends presents for the boot, by name.
    - The compositor does not yet pace frames by `Presented`. It still blits the firmware's framebuffer itself until stage 5.
 4. **PSR on the eDP panel**, measured together with stage 2. PSR's first-frame exit latency goes to the owner in absolute numbers before PSR lands.
 5. **The rest of `display-output`.** virtio-gpu and the framebuffer become drivers. The panic surface lands here.
