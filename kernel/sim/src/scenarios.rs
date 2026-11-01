@@ -1222,8 +1222,9 @@ pub fn split_pair() -> Scenario {
 
 /// **One server woken from both LLCs in turn**: a server on cpu0 answers a
 /// client pinned to cpu1, in its LLC, and one pinned to cpu9, in the other,
-/// with balancing off. Following each wake's LLC would move the server on
-/// every other request.
+/// with balancing off. Which client's request finds the server parked is
+/// the run's timing, so following each wake's LLC would move it back and
+/// forth.
 pub fn server_of_two_llcs() -> Scenario {
     let turn = MS / 10;
     let wake = |queue| Op::Wake { queue, all: false, boost: None };
@@ -1249,7 +1250,7 @@ pub fn server_of_two_llcs() -> Scenario {
 }
 
 /// How many turns [`split_pair`]'s and [`server_of_two_llcs`]' threads take.
-pub const WAKE_LLC_ROUNDS: usize = 12;
+pub const WAKE_LLC_ROUNDS: usize = 24;
 
 /// **Masks under stealing**, every thread spawned on cpu0 of four with the
 /// shipped balance policy: two threads pinned to cpu0, two masked to cpu1 and
