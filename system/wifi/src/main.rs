@@ -31,7 +31,7 @@ const LINE: usize = toyos_wifi::MAX_PASSPHRASE + 1;
 /// echo the passphrase as it is typed, and keep it in std's line buffer. A backspace erases
 /// the octet before it, and other control octets are dropped.
 fn passphrase(line: &mut [u8; LINE]) -> Option<usize> {
-    let (mut len, mut byte) = (0, [0u8; 1]);
+    let (mut len, mut byte) = (0usize, [0u8; 1]);
     loop {
         match toyos::files::read(0, &mut byte) {
             Ok(1) => match byte[0] {
