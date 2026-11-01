@@ -7867,8 +7867,7 @@ fn run_debug_mode(c_tests: &[(String, Vec<u8>)], rust_bins: &[(String, Vec<u8>)]
         c_tests,
         rust_bins,
         BootOptions {
-            gdb_stub: true,
-            debug_wait: true,
+            kernel_features: ACTUATOR_KERNEL,
             ..Default::default()
         },
     );
