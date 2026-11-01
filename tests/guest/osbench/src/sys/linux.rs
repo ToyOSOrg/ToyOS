@@ -351,7 +351,7 @@ pub mod power {
     }
 
     fn cpus(r: &PowerRegisters) -> Result<Vec<CpuPower>, Refused> {
-        super::allowed_cpus()
+        crate::sys::allowed_cpus()
             .into_iter()
             .map(|cpu| {
                 let cpu = cpu as u32;
