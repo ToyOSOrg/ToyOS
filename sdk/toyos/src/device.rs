@@ -138,6 +138,22 @@ impl PciDev {
         crate::shm::SharedMemory::adopt(crate::OwnedHandle(handle), bytes as usize)
     }
 
+    /// The firmware window `window` the signed image's row granted this claim
+    /// at its mint:
+    /// whole pages mapped cacheable, the window's offset into them and its
+    /// length. Or why the kernel refused what firmware set up.
+    pub fn firmware_window(
+        &self,
+        window: toyos_abi::pci::FirmwareWindow,
+    ) -> Result<Result<(crate::shm::SharedMemory, usize, usize), toyos_abi::pci::WindowRefused>, SyscallError> {
+        let grant = match syscall::device_firmware_window(self.0.as_handle().raw(), window)? {
+            Ok(grant) => grant,
+            Err(refused) => return Ok(Err(refused)),
+        };
+        let memory = crate::shm::SharedMemory::adopt(crate::OwnedHandle(grant.shm), (grant.offset + grant.len) as usize)?;
+        Ok(Ok((memory, grant.offset as usize, grant.len as usize)))
+    }
+
     /// Give up ownership, for a claim about to be endowed.
     pub fn into_raw(self) -> RawHandle {
         self.0.into_raw()

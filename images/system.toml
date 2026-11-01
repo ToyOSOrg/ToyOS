@@ -139,9 +139,13 @@ syscap = ["rt"]
 # the compositor's presents on `display-output`. Not started again: the
 # claim's release resets the function, which ends the firmware's scan-out
 # (`issues/each-gpu-drives-its-displays-from-a-userland-driver.md`).
+# `firmware` grants its claim the IGD OpRegion, the firmware memory its VBT
+# and backlight mailbox live in: a privilege beyond the claim, which only this
+# signed image's rows can name.
 [programs.tgl-display]
 drives = ["pci:03:00:00/8086:9a49"]
 receives = ["display-output"]
+firmware = ["igd-opregion"]
 
 # The network stack, over every link a NIC driver brings on `link`; it claims
 # no device. It serves from the start, links or none.

@@ -122,9 +122,11 @@ pub(super) fn sys_device_claim(syscap: RawHandle, class: u64, selector: [u64; 2]
     let Some(class) = device::DeviceType::from_raw(class) else {
         return SyscallError::InvalidArgument.to_u64();
     };
+    // A PCI function's second word is the firmware windows its claim is
+    // granted at the mint (`toyos_abi::pci::FirmwareWindows`).
     let read = match class {
         device::DeviceType::Framebuffer | device::DeviceType::Acpi => 0,
-        device::DeviceType::PciFunction => 1,
+        device::DeviceType::PciFunction => 2,
         device::DeviceType::Isa => 2,
     };
     if selector[read..].iter().any(|&word| word != 0) {
@@ -198,6 +200,42 @@ pub(super) fn sys_device_bar_map(handle: RawHandle, index: u64) -> u64 {
     process::with_process_data(|data| {
         handle_result(ops::install(&mut data.handles, KObjectRef::SharedMem(object)))
     })
+}
+
+/// A firmware window the claim was granted, as an object its holder can map
+/// and neither duplicate nor move: [`Rights::MAP`] and [`Rights::WRITE`]
+/// alone. A refusal of what firmware set up goes back in the grant's word.
+pub(super) fn sys_device_firmware_window(ctx: &SyscallContext, handle: RawHandle, window: u64, out: UserAddr) -> u64 {
+    let claim = match pci_claim(handle) {
+        Ok(claim) => claim,
+        Err(e) => return e.refuse(),
+    };
+    let Some(window) = toyos_abi::pci::FirmwareWindow::from_raw(window) else {
+        return SyscallError::InvalidArgument.to_u64();
+    };
+    let len = core::mem::size_of::<toyos_abi::pci::WindowGrant>() as u64;
+    let Some(mut out) = ctx.user_bytes_mut(out, len) else {
+        return SyscallError::BadAddress.to_u64();
+    };
+    let mut grant = toyos_abi::pci::WindowGrant { shm: toyos_abi::HANDLE_INVALID, refused: 0, offset: 0, len: 0 };
+    match on_function(&claim, |function| crate::pcidev::firmware_window(function, window)) {
+        Err(e) => return e.to_u64(),
+        Ok(Err(refused)) => grant.refused = refused as u32,
+        Ok(Ok(crate::pcidev::Opened { object, offset, len })) => {
+            let entry = crate::object::HandleEntry::new(KObjectRef::SharedMem(object), Rights::MAP.union(Rights::WRITE));
+            let installed = process::with_process_data(|data| data.handles.install(entry));
+            match installed {
+                Ok(shm) => grant = toyos_abi::pci::WindowGrant { shm, refused: 0, offset, len },
+                Err(_) => return SyscallError::ResourceExhausted.to_u64(),
+            }
+        }
+    }
+    // SAFETY: `grant` is a live reference readable for its own size, and the
+    // layout assertion beside its declaration proves every byte of it is an
+    // initialised field.
+    let bytes = unsafe { core::slice::from_raw_parts(&grant as *const _ as *const u8, len as usize) };
+    out.write_at(0, bytes);
+    0
 }
 
 /// Memory the claimed function may reach and nothing else may.

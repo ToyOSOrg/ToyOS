@@ -456,20 +456,29 @@ fn send(conn_h: RawHandle, out: &Outgoing<'_>, nonblock: bool) -> Result<(), u64
                     return Err(SyscallError::PermissionDenied.into());
                 }
             }
+            // A device claim that moves takes back every mapping made
+            // through it: its last holder keeps none.
+            let claims: Vec<_> = wanted
+                .iter()
+                .filter_map(|h| data.handles.get::<crate::object::device::DeviceClaim>(*h, Rights::TRANSFER).ok())
+                .collect();
             // A refusal restores every handle at its own number, so it is invisible.
             let tx = conn.tx().clone();
             let moved = data.handles.transfer(wanted, |batch| tx.send(&out.bytes, batch));
-            Ok::<_, crate::object::Refusal>((tx, moved))
+            Ok::<_, crate::object::Refusal>((tx, moved, claims))
         });
         let tx = match sent {
-            Ok((tx, Ok(()))) => {
+            Ok((tx, Ok(()), claims)) => {
+                for claim in claims {
+                    claim.revoke_mappings();
+                }
                 crate::scheduler::post_lending(tx.read_watch(), || tx.set_rt_boost_pending());
                 return Ok(());
             }
-            Ok((tx, Err(SendRefused::NoRoom))) if !nonblock => tx,
-            Ok((_, Err(SendRefused::NoRoom))) => return Err(SyscallError::WouldBlock.to_u64()),
-            Ok((_, Err(SendRefused::Gone))) => return Err(SyscallError::Gone.to_u64()),
-            Ok((_, Err(SendRefused::NoMemory))) => return Err(SyscallError::ResourceExhausted.to_u64()),
+            Ok((tx, Err(SendRefused::NoRoom), _)) if !nonblock => tx,
+            Ok((_, Err(SendRefused::NoRoom), _)) => return Err(SyscallError::WouldBlock.to_u64()),
+            Ok((_, Err(SendRefused::Gone), _)) => return Err(SyscallError::Gone.to_u64()),
+            Ok((_, Err(SendRefused::NoMemory), _)) => return Err(SyscallError::ResourceExhausted.to_u64()),
             Err(e) => return Err(e.refuse()),
         };
         // Outside every lock: room appears as the receiver takes messages, and each receive posts this watch.

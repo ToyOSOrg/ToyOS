@@ -122,7 +122,7 @@ use core::sync::atomic::{AtomicBool, AtomicPtr, Ordering};
 use record::Interrupt;
 use toyos_abi::boot::RootBridgeWindow;
 use toyos_abi::inventory::Arrival;
-use toyos_abi::pci::{DeviceIrqRecord, PciFunctionInfo, BARS, LEND_WINDOW};
+use toyos_abi::pci::{DeviceIrqRecord, FirmwareWindow, PciFunctionInfo, WindowRefused, BARS, LEND_WINDOW};
 use toyos_abi::syscall::{PciId, RegWidth, SyscallError};
 use toyos_dma::Register;
 use toyos_pci::{af, aperture, bar, express, pages, pm};
@@ -312,6 +312,12 @@ struct Bound {
     /// holder's or firmware's queue addresses acts on none of them before its
     /// holder has stopped it.
     mastering: bool,
+    /// The firmware windows the supervisor granted this claim, one bit per
+    /// [`FirmwareWindow`].
+    firmware: u8,
+    /// Every aperture this claim handed out, BARs and firmware windows: each
+    /// is revoked when the claim ends or moves ([`revoke_handed`]).
+    handed: Vec<alloc::sync::Weak<SharedMemObject>>,
 }
 
 impl Bound {
@@ -886,6 +892,8 @@ fn bring_up(pci: PciDevice, id: PciId, number: usize, windows: &[RootBridgeWindo
         residue: Vec::new(),
         limit: None,
         mastering: false,
+        firmware: 0,
+        handed: Vec::new(),
     })
 }
 
@@ -1360,12 +1368,94 @@ pub fn bar_object(binding: &Binding, index: u64) -> Result<Arc<SharedMemObject>,
             return Err(SyscallError::InvalidArgument);
         }
         // Registers, and the memory type is not firmware's to decide.
-        Ok(SharedMemObject::aperture(
+        let object = SharedMemObject::aperture(
             bound.bar_at[index],
             bound.bar_bytes[index].next_multiple_of(pages::PAGE),
             CachePolicy::Uncacheable,
-        )?)
+        )?;
+        bound.hand(&object);
+        Ok(object)
     })
+}
+
+impl Bound {
+    /// Record an aperture handed out on this claim; the ones gone already are
+    /// let go, so the list holds only what may still be mapped.
+    fn hand(&mut self, object: &Arc<SharedMemObject>) {
+        self.handed.retain(|weak| weak.strong_count() > 0);
+        self.handed.push(Arc::downgrade(object));
+    }
+}
+
+/// Every aperture the claim handed out revoked: taken out of every space
+/// that maps it, so no mapping made through the claim outlives it. The one
+/// function every end of a claim calls: its release, its holder's death, its
+/// move to another holder, and its function's departure.
+pub fn revoke_handed(binding: &Binding) {
+    // Under the lock alone and not `with_bound`, which refuses a faulted
+    // function: that one's mappings go too. Revoked after it is let go.
+    let handed = binding.function().bound.lock().as_mut().map(|bound| core::mem::take(&mut bound.handed)).unwrap_or_default();
+    for object in handed.iter().filter_map(alloc::sync::Weak::upgrade) {
+        object.revoke();
+    }
+}
+
+/// The ASL Storage register (IGD OpRegion specification §5.1.2): "The
+/// system BIOS places the memory offset of the OpRegion in this register".
+const ASLS: u64 = 0xFC;
+
+/// Grant the claim `window` at its mint, which the signed image's row names
+/// (`toyos_abi::pci::FirmwareWindows`). A window only one kind of function
+/// has is `NotSupported` on any other: a bug fence on the row.
+pub fn grant_firmware(binding: &Binding, window: FirmwareWindow) -> Result<(), SyscallError> {
+    with_bound(binding, |bound| {
+        let has = match window {
+            // An Intel function of class 03h, display controller.
+            FirmwareWindow::IgdOpRegion => bound.id.vendor == 0x8086 && bound.pci.read_config_u8(0x0B) == 0x03,
+        };
+        if !has {
+            return Err(SyscallError::NotSupported);
+        }
+        bound.firmware |= 1 << window as u64;
+        Ok(())
+    })
+}
+
+/// A firmware window, mapped: an object over its whole pages, and where in
+/// them the window lies.
+pub struct Opened {
+    pub object: Arc<SharedMemObject>,
+    pub offset: u64,
+    pub len: u64,
+}
+
+/// The firmware window `window` this claim was granted, as an object over
+/// its whole pages, its offset into them and its length; or why it was
+/// refused (`toyos_userbound::window`). A fresh object for every ask.
+pub fn firmware_window(
+    binding: &Binding,
+    window: FirmwareWindow,
+) -> Result<Result<Opened, WindowRefused>, SyscallError> {
+    let asls = with_bound(binding, |bound| {
+        if bound.firmware & 1 << window as u64 == 0 {
+            return Err(SyscallError::PermissionDenied);
+        }
+        Ok(bound.pci.read_config_u32(ASLS))
+    })?;
+    if asls == 0 {
+        return Err(SyscallError::NotFound);
+    }
+    let window = match crate::arch::opregion::window(asls) {
+        Ok(window) => window,
+        Err(refused) => return Ok(Err(refused)),
+    };
+    // Cacheable, as the direct map has it and §2.3 types it.
+    let object = SharedMemObject::aperture(window.start, window.bytes, CachePolicy::Normal)?;
+    with_bound(binding, |bound| {
+        bound.hand(&object);
+        Ok(())
+    })?;
+    Ok(Ok(Opened { object, offset: window.offset, len: window.len }))
 }
 
 /// Memory this function may reach, and nothing else may.

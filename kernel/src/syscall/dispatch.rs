@@ -22,7 +22,7 @@ use super::HANDLE_LEN;
 #[cfg(feature = "test-actuators")]
 use super::debug::{canary, debug_heap_alloc, ring0_timer_in_syscall, FATAL_HALT_NONCE, LOCK_ACROSS_SWITCH};
 use super::device::{
-    sys_acpi, sys_device_bar_map, sys_device_claim, sys_device_dma_alloc, sys_device_dma_map,
+    sys_acpi, sys_device_bar_map, sys_device_claim, sys_device_dma_alloc, sys_device_dma_map, sys_device_firmware_window,
     sys_device_dma_limit, sys_device_dma_start, sys_device_dma_unmap,
     sys_device_reg_read,
 };
@@ -616,6 +616,10 @@ pub(crate) fn syscall_dispatch(num: u64, a1: u64, a2: u64, a3: u64, a4: u64) -> 
         SYS_EVENT_TAKE => sys_event_take(RawHandle(a1 as u32)),
         SYS_HANDLE_WAIT => sys_handle_wait(RawHandle(a1 as u32), a2, a3),
         SYS_CLOCK_NOW => crate::arch::clocksource::stamp_now(),
+        SYS_DEVICE_FIRMWARE_WINDOW => {
+            let Some(out) = UserAddr::checked(a3) else { return bad_addr };
+            sys_device_firmware_window(&ctx, RawHandle(a1 as u32), a2, out)
+        }
         SYS_ACCOUNT_INFO => {
             if a3 < core::mem::size_of::<toyos_abi::syscall::AccountInfo>() as u64 { return SyscallError::InvalidArgument.to_u64(); }
             let Some(addr) = UserAddr::checked(a2) else { return bad_addr };

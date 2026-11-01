@@ -187,6 +187,9 @@ struct ProgramConfig {
     /// PCI matchers: one process of this row per function one names
     /// (`toyos_manifest::Program::drives`).
     drives: Vec<String>,
+    /// Firmware windows each function's claim is granted
+    /// (`toyos_manifest::Program::firmware`).
+    firmware: Vec<String>,
     /// Rights on the `SysCap` duplicate the supervisor endows this program, by the names
     /// `toyos_manifest::syscap_rights` takes. A handful of rows in the whole
     /// tree declare one.
@@ -876,6 +879,7 @@ fn render_manifest(config: &SystemConfig) -> Vec<u8> {
                     receives: cfg.receives.clone(),
                     devices: cfg.devices.clone(),
                     drives: cfg.drives.clone(),
+                    firmware: cfg.firmware.clone(),
                     syscap: cfg.syscap.clone(),
                     slots: cfg.slots,
                     authorize: cfg.authorize.clone(),
