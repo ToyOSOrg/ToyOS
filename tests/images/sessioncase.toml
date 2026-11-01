@@ -7,9 +7,10 @@
 # out, which Escape cancels and Enter forces.
 #
 # test-runner's row is `login`, so its job opens sessions with its `login`
-# connector, and lists what a session's launcher starts: a shell, which
-# detaches `hangupholder`, the app that ignores a hang-up; and `logout`, the
-# one row receiving `session-admin`. `session` owns each session opened.
+# connector, and lists what a session's launcher starts: `hangupholder`, the
+# app that ignores a hang-up, which the job detaches with its stdout a pipe,
+# to hear that it listens; and `logout`, the one row receiving
+# `session-admin`. `session` owns each session opened.
 # test-runner receives `power` for `session_lifecycle`'s closing reboot, which
 # waits for the sessions until the job forces it.
 
@@ -22,12 +23,12 @@ start = ["logkeeper", "compositor", "ps2server", "test-runner"]
 service = true
 syscap = ["logread"]
 
-# `roster`, which the job reads to see the holder outlive its shell and end
+# `roster`, which the job reads to find the holder it detached and see it end
 # when forced; `dup`, because test-runner hands each job its capability.
 [programs.test-runner]
 syscap = ["dup", "roster"]
 receives = ["power"]
-starts = ["shell", "logout"]
+starts = ["hangupholder", "logout"]
 login = true
 
 [programs.compositor]
