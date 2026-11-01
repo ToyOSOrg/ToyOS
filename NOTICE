@@ -688,6 +688,14 @@ The addresses are locally administered ones that the capture script set
 random values, for a network that exists nowhere else. The script and both
 sides' logs are on `ToyOSOrg/evidence`, branch `pr-1130`.
 
+`rekey-psk.txt` and `rekey-pmf.txt` come from a second run of the same setup.
+That run added one change: the station's `wpa_ptk_rekey=6`, so twice per run it
+asked for a new 4-way handshake. Each file is text that
+`tools/rekeyfixture.py` on the evidence branch wrote. It holds the addresses
+and the RSNEs from that run's Probe Response and Association Request, then every
+EAPOL-Key frame and key that the station's `-dd -K` log printed, in order. On
+air the rekeys are CCMP-protected, so the log is the record of their bytes.
+
 wpa_supplicant is BSD-3-Clause. That licence covers the program, not the frames
 it sent over a simulated medium for this repository's own test network. Those
 frames are protocol messages computed from our settings and the run's random

@@ -193,3 +193,79 @@ fn a_recorded_handshake_with_management_frame_protection_is_answered_byte_for_by
         },
     );
 }
+
+/// A recorded join and two PTK rekeys the station asked for (its `wpa_ptk_rekey`), as
+/// `tools/rekeyfixture.py` on `ToyOSOrg/evidence` wrote them from the second capture: the
+/// addresses and RSNEs from its radio capture, then each EAPOL-Key frame and key the station's
+/// `-dd -K` log printed, in order. The rekeys travel CCMP-protected on air, so the log is the
+/// record of their bytes.
+fn replay_rekeys(fixture: &str) {
+    let lines: Vec<(&str, Vec<u8>)> = fixture
+        .lines()
+        .map(|l| {
+            let (tag, value) = l.split_once(' ').unwrap();
+            let bytes = (0..value.len() / 2)
+                .map(|i| u8::from_str_radix(&value[2 * i..2 * i + 2], 16).unwrap());
+            (tag, bytes.collect())
+        })
+        .collect();
+    let field = |name: &str| {
+        lines
+            .iter()
+            .find(|(t, _)| *t == name)
+            .map(|(_, v)| v.clone())
+    };
+    let address = |name: &str| Address(field(name).unwrap().try_into().unwrap());
+    let (beacon_rsne, own_rsne) = (field("beacon_rsne").unwrap(), field("own_rsne").unwrap());
+    let (beacon_rsnxe, own_rsnxe) = (field("beacon_rsnxe"), field("own_rsnxe"));
+    let join = Join {
+        authenticator: address("aa"),
+        supplicant: address("spa"),
+        beacon_rsne: &beacon_rsne,
+        beacon_rsnxe: beacon_rsnxe.as_deref(),
+        own_rsne: &own_rsne,
+        own_rsnxe: own_rsnxe.as_deref(),
+    };
+    let mut sta = Supplicant::new(wpa2::derive_pmk(PASSPHRASE, SSID).unwrap(), &join).unwrap();
+    let (gtk, igtk) = (field("gtk").unwrap(), field("igtk"));
+    let (mut ptk, mut completed) = (Vec::new(), 0);
+    for (at, (tag, frame)) in lines.iter().enumerate() {
+        match *tag {
+            "ptk" => ptk = frame.clone(),
+            "rx" => {
+                // The station's next frame, past the EAPOL-Key Requests it sends on its own.
+                let reply = lines[at..]
+                    .iter()
+                    .find(|(t, f)| *t == "tx" && u16::from_be_bytes([f[5], f[6]]) & (1 << 11) == 0)
+                    .map(|(_, f)| f)
+                    .expect("the station answered");
+                let snonce: [u8; 32] = reply[17..49].try_into().unwrap();
+                let step = sta.receive(frame, || snonce).unwrap();
+                assert_eq!(&step.reply, reply, "the answer to line {at}, byte for byte");
+                if let Some(tk) = step.pairwise {
+                    assert_eq!(tk.key()[..], ptk[32..], "handshake {completed}'s TK");
+                    // The station installed the group keys once, and reinstalled neither.
+                    assert_eq!(
+                        step.group.map(|g| g.key().to_vec()),
+                        (completed == 0).then(|| gtk.clone())
+                    );
+                    let delivered = step.integrity.map(|k| k.key().to_vec());
+                    assert_eq!(delivered, igtk.clone().filter(|_| completed == 0));
+                    completed += 1;
+                }
+            }
+            _ => {}
+        }
+    }
+    assert_eq!(completed, 3, "the join and two rekeys");
+}
+
+#[test]
+fn recorded_ptk_rekeys_are_answered_byte_for_byte_and_reinstall_no_group_key() {
+    replay_rekeys(include_str!("fixtures/rekey-psk.txt"));
+}
+
+#[test]
+fn recorded_ptk_rekeys_under_management_frame_protection_are_answered_byte_for_byte() {
+    replay_rekeys(include_str!("fixtures/rekey-pmf.txt"));
+}

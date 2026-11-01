@@ -305,7 +305,12 @@ W1, P6.
   - **The captured handshake** is two of wpa_supplicant v2.10's, one an
     access point, over `mac80211_hwsim`: plain PSK and PMF required. Messages
     2 and 4 are answered byte for byte, and the keys are the station's own.
-    No group key handshake is recorded: the access point never rekeyed.
+    So are two PTK rekeys per run, which the station asked for. As the
+    station did, they reinstall no group key.
+  - **No group key handshake is recorded.** v2.10's access point parsed
+    `group_rekey` and never rekeyed, and its `wpa_cli` has no `REKEY_GTK`.
+    Group message 1 is tested only against the tests' authenticator, and is
+    first met for real in W6's T14 rows.
   - Its readings of the text are
     `issues/the-wlan-handshakes-readings-of-802-11-are-unchecked-against-its-text.md`.
   - **W2b waits for P6:** SAE, AES-CMAC, AKM 6 (PSK-SHA256), and the
