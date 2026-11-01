@@ -4,13 +4,14 @@ kind: defect
 opened: 2026-11-01
 ---
 
-# The wlan handshakes' readings of 802.11 are unchecked against its text
+# wlan's readings of 802.11 are unchecked against its text
 
 `system/wlan/handshake` cites IEEE Std 802.11-2020 and IEEE Std 802.1X-2020 by
-clause, and its rules rest on readings of them. They were written without the
-text at hand. The recorded handshakes (`tests/capture.rs`) confirm the frames
-and keys a correct authenticator and supplicant exchange, but not the
-citations or the refusals, which no capture exercises.
+clause, `system/wlan/station` and `lib/radio` IEEE Std 802.11-2024, and their
+rules rest on readings of them. They were written without the text at hand.
+The recorded handshakes (`handshake/tests/capture.rs`, `station/tests/join.rs`)
+confirm the frames and keys a correct authenticator and supplicant exchange,
+but not the citations or the refusals, which no capture exercises.
 
 - **Owner:** the orchestrator, who holds the text, as for W1's check (#924,
   issuecomment-6173453493).
@@ -45,3 +46,9 @@ citations or the refusals, which no capture exercises.
 | 22 | `supplicant.rs` | Key Length is 16 for CCMP-128 in messages 1 and 3, and need not be checked in group message 1 |
 | 23 | `supplicant.rs` | Key RSC, and the IGTK KDE's IPN, are the last packet number the authenticator sent under the key, which the receive replay check starts from (`GroupKey::rsc`, `IntegrityKey::ipn`) |
 | 24 | `supplicant.rs` | PMF is negotiated when both sides set MFPC; either side's MFPR without the other's MFPC refuses the association |
+| 25 | `station/src/lib.rs` | A passphrase is 8 to 63 characters, each of code 32 to 126 (Annex J.4.1) |
+| 26 | `station/src/choice.rs` | A rate is at most 108 in units of 500 kb/s; a value above, with its basic bit set, is a BSS membership selector a station must meet to join (§9.4.2.3, Table 9-131) |
+| 27 | `station/src/choice.rs` | A BSS's own channel is its DSSS Parameter Set's, its HT Operation's primary channel or its HE Operation's 6 GHz primary channel, and a Beacon heard on another is not to be joined there |
+| 28 | `station/src/choice.rs` | A hidden network's Beacon carries an empty SSID or one of zero octets |
+| 29 | `lib/radio/src/lib.rs` | Channel numbers: 2.4 GHz channel n at 2407 + 5n MHz and 14 at 2484; 5 GHz channel n at 5000 + 5n for 32 to 177; 6 GHz 20 MHz channels at 5950 + 5n for n 1, 5, ... 233, and channel 2 at 5935 (Annex E) |
+| 30 | `lib/radio/src/lib.rs` | The Status Code (§9.4.1.9) and Reason Code (§9.4.1.7) fields are 16 bits |

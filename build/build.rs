@@ -671,8 +671,9 @@ const SUPERVISOR_SERVED: &[&str] = &[toyos_swap::PORT, "power", toyos_manifest::
 /// does, the input port, whose holders type into the focused window, the
 /// clipboard port, whose holder is sent every copy made in the session, the
 /// display port, whose holder sets the mode and the scale every window is
-/// drawn at, and the session-admin port, whose holder signs its user's
-/// sessions out.
+/// drawn at, the session-admin port, whose holder signs its user's sessions
+/// out, the wifi port, whose holder joins networks and hands over their
+/// passphrases, and the radio port, whose holder is sent a network's keys.
 const HELD_ALONE: &[(&str, &[&str])] = &[
     (toyos_swap::PORT, &[toyos_swap::HOLDER]),
     (toyos_manifest::grants::PORT, &[toyos_manifest::grants::HOLDER]),
@@ -681,6 +682,8 @@ const HELD_ALONE: &[(&str, &[&str])] = &[
     (toyos_manifest::clipboard::PORT, &[toyos_manifest::clipboard::HOLDER]),
     (toyos_manifest::display::PORT, &[toyos_manifest::display::HOLDER]),
     (toyos_session::ADMIN_PORT, &[toyos_session::ADMIN_HOLDER]),
+    (toyos_wifi::PORT, toyos_wifi::HOLDERS),
+    (toyos_radio::PORT, toyos_radio::HOLDERS),
 ];
 
 /// Rows, as a refusal names them.

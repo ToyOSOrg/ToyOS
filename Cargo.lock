@@ -3641,6 +3641,7 @@ dependencies = [
  "toyos-osrelease",
  "toyos-parity",
  "toyos-quiesce",
+ "toyos-radio",
  "toyos-session",
  "toyos-ssh",
  "toyos-swap",
@@ -3651,6 +3652,7 @@ dependencies = [
  "toyos-userbound",
  "toyos-vdagent",
  "toyos-wallclock",
+ "toyos-wifi",
  "ureq",
  "webpki-root-certs",
 ]
@@ -4000,6 +4002,13 @@ name = "toyos-quiesce"
 version = "0.1.0"
 
 [[package]]
+name = "toyos-radio"
+version = "0.1.0"
+dependencies = [
+ "toyos-ieee80211",
+]
+
+[[package]]
 name = "toyos-random"
 version = "0.1.0"
 
@@ -4183,6 +4192,13 @@ name = "toyos-wallclock"
 version = "0.1.0"
 
 [[package]]
+name = "toyos-wifi"
+version = "0.1.0"
+dependencies = [
+ "toyos-radio",
+]
+
+[[package]]
 name = "toyos-window"
 version = "0.20.0"
 dependencies = [
@@ -4200,6 +4216,19 @@ dependencies = [
  "ring",
  "toyos-crypto",
  "toyos-ieee80211",
+]
+
+[[package]]
+name = "toyos-wlan-station"
+version = "0.1.0"
+dependencies = [
+ "aes",
+ "ring",
+ "toyos-crypto",
+ "toyos-ieee80211",
+ "toyos-radio",
+ "toyos-wifi",
+ "toyos-wlan-handshake",
 ]
 
 [[package]]
@@ -4717,6 +4746,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "wifi"
+version = "0.0.0"
+dependencies = [
+ "toyos",
+ "toyos-crypto",
+ "toyos-wifi",
+]
+
+[[package]]
 name = "winapi"
 version = "0.3.9"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -5147,6 +5185,17 @@ dependencies = [
  "serde_json",
  "unicode-xid",
  "wasmparser",
+]
+
+[[package]]
+name = "wlan"
+version = "0.0.0"
+dependencies = [
+ "toyos",
+ "toyos-abi",
+ "toyos-radio",
+ "toyos-wifi",
+ "toyos-wlan-station",
 ]
 
 [[package]]
