@@ -123,6 +123,13 @@ impl Pager {
         self.op(PagedOp::Write, args, Some(SyscallError::NotFound)).map(|n| n as usize)
     }
 
+    /// End the write of object `id` that a [`Self::write`] or dirty
+    /// [`Self::supply`] which did not take all it was given left under way:
+    /// until this, every holder's read of it is asked of this pager instead.
+    pub fn end_write(&self, id: u64) -> Result<(), Refused> {
+        self.op(PagedOp::EndWrite, PagedArgs { object: id, ..PagedArgs::default() }, None).map(drop)
+    }
+
     /// Drop the clean pages of `count` from page `first` that nothing holds:
     /// how many went.
     pub fn withdraw(&self, id: u64, first: u64, count: u64) -> Result<u64, Refused> {
@@ -200,7 +207,8 @@ impl Paged {
     /// Up to `out.len()` bytes at `offset`, 0 at or past the size, waiting for
     /// every absent page until it is supplied, failed (`Io`, or a short count
     /// after some bytes), cut off by a shrink, or its object or pager ends
-    /// (`Gone`).
+    /// (`Gone`). A read a write of the pager's met is `WouldBlock`: ask the
+    /// pager, whose writes order its own reads.
     pub fn read(&self, out: &mut [u8], offset: u64) -> Result<usize, SyscallError> {
         syscall::paged_read(self.0.raw(), out, offset)
     }

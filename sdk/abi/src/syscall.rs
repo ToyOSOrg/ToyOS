@@ -3253,15 +3253,18 @@ pub const PAGED_RANGE_PAGES: u64 = 512;
 pub enum PagedOp {
     /// Copy `len` bytes from `buf` into fresh pages at `offset`, a whole page
     /// in: clean, or dirty with [`PAGED_DIRTY`], which also grows the size to
-    /// the end of the bytes. A page already present is left as it is.
-    /// Answers the pages installed; `ResourceExhausted` where no page could
-    /// be had, `WouldBlock` at the dirty ceiling, `InvalidArgument` for a
-    /// clean page past the size or a dirty one past its end.
+    /// the end of the bytes and is a write ([`PagedOp::Write`]). A page
+    /// already present is left as it is. Answers the pages installed;
+    /// `ResourceExhausted` where no page could be had, `WouldBlock` at the
+    /// dirty ceiling, `InvalidArgument` for a clean page past the size or a
+    /// dirty one past its end.
     Supply = 0,
     /// Copy `len` bytes from `buf` into the present pages at `offset`, dirty,
     /// growing the size to their end as each page's bytes land. Answers the
     /// bytes written, stopping at the first absent page; `NotFound` when the
-    /// first is absent, `WouldBlock` at the dirty ceiling.
+    /// first is absent, `WouldBlock` at the dirty ceiling. A holder's read
+    /// that meets a write is answered `WouldBlock`; a write that does not take
+    /// all it was given stays under way until [`PagedOp::EndWrite`].
     Write = 1,
     /// Remove the clean pages of `len` pages from page `offset` that no
     /// write-back or write holds. Answers how many went.
@@ -3287,6 +3290,9 @@ pub enum PagedOp {
     /// Let the object go: its pages go, its holders answer `Gone`, and its id
     /// names another object once its last holder has gone.
     Release = 8,
+    /// End the write a short [`PagedOp::Write`] or dirty supply left under
+    /// way; `InvalidArgument` where none is.
+    EndWrite = 9,
 }
 
 /// [`PagedOp::Supply`]'s pages are dirty.
