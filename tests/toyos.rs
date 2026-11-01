@@ -6108,6 +6108,8 @@ fn bar_map_again(test_config: &Path) -> Result<(), String> {
         "bar_map_again: two answers held at once map apart, and the later outlives the earlier",
         "bar_map_again: answered with a handle that maps",
         "bar_map_again: answered after the refusal with a handle that maps",
+        "bar_map_again: a BAR's handle kept past its claim's move maps nothing, and the new holder's maps",
+        "bar_map_again: a BAR's handle kept past its claim's end maps nothing",
     ] {
         let Some(line) = result.stdout.lines().find(|l| l.contains(answered)) else {
             return Err(format!("the job never said `{answered}`:\n{}", result.stdout));

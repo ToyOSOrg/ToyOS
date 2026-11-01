@@ -129,7 +129,9 @@ pub(super) fn sys_device_claim(syscap: RawHandle, class: u64, selector: [u64; 2]
         device::DeviceType::PciFunction => 2,
         device::DeviceType::Isa => 2,
     };
-    if selector[read..].iter().any(|&word| word != 0) {
+    let windows_known = class != device::DeviceType::PciFunction
+        || toyos_abi::pci::FirmwareWindows::from_mask(selector[1]).is_some();
+    if !windows_known || selector[read..].iter().any(|&word| word != 0) {
         return SyscallError::InvalidArgument.to_u64();
     }
     if let Err(e) = demand_syscap(syscap, Rights::DEVICE) {
@@ -197,8 +199,27 @@ pub(super) fn sys_device_bar_map(handle: RawHandle, index: u64) -> u64 {
         Ok(object) => object,
         Err(e) => return e.to_u64(),
     };
+    let object = KObjectRef::SharedMem(object);
+    let rights = ops::initial_rights(&object);
+    handle_result(install_handed(handle, &claim, crate::object::HandleEntry::new(object, rights)))
+}
+
+/// `entry`, an aperture `claim` handed out, installed only while the
+/// caller's table still holds `claim` at `handle`, under the one lock its
+/// release or move takes it out under. That move or release revokes what the
+/// claim handed out once the lock is let go, so every aperture either met
+/// that revoke or is refused here, `Gone`, and its object ends unmapped.
+fn install_handed(
+    handle: RawHandle,
+    claim: &Arc<DeviceClaim>,
+    entry: crate::object::HandleEntry,
+) -> Result<RawHandle, SyscallError> {
     process::with_process_data(|data| {
-        handle_result(ops::install(&mut data.handles, KObjectRef::SharedMem(object)))
+        let held = data.handles.get::<DeviceClaim>(handle, Rights::NONE).is_ok_and(|held| Arc::ptr_eq(&held, claim));
+        if !held {
+            return Err(SyscallError::Gone);
+        }
+        data.handles.install(entry).map_err(|_| SyscallError::ResourceExhausted)
     })
 }
 
@@ -223,10 +244,9 @@ pub(super) fn sys_device_firmware_window(ctx: &SyscallContext, handle: RawHandle
         Ok(Err(refused)) => grant.refused = refused as u32,
         Ok(Ok(crate::pcidev::Opened { object, offset, len })) => {
             let entry = crate::object::HandleEntry::new(KObjectRef::SharedMem(object), Rights::MAP.union(Rights::WRITE));
-            let installed = process::with_process_data(|data| data.handles.install(entry));
-            match installed {
+            match install_handed(handle, &claim, entry) {
                 Ok(shm) => grant = toyos_abi::pci::WindowGrant { shm, refused: 0, offset, len },
-                Err(_) => return SyscallError::ResourceExhausted.to_u64(),
+                Err(e) => return e.to_u64(),
             }
         }
     }

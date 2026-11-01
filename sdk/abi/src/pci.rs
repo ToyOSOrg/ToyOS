@@ -65,8 +65,10 @@ pub struct DmaGrant {
 
 const _: () = assert!(core::mem::size_of::<DmaGrant>() == 4 + 4 + 8 + 8);
 
-/// A window into memory firmware set up for a function, granted only by the
-/// signed image's manifest (`firmware = [...]`).
+/// A window into memory firmware set up for a function, granted at its
+/// claim's mint ([`FirmwareWindows`]). The kernel checks only the minter's
+/// `DEVICE` right; the supervisor sets a window only from the signed image's
+/// own row (`firmware = [...]`).
 #[repr(u64)]
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum FirmwareWindow {
@@ -75,11 +77,22 @@ pub enum FirmwareWindow {
 }
 
 impl FirmwareWindow {
+    /// Every window there is.
+    pub const ALL: [Self; 1] = [Self::IgdOpRegion];
+
     pub const fn from_raw(raw: u64) -> Option<Self> {
-        match raw {
-            1 => Some(Self::IgdOpRegion),
-            _ => None,
+        let mut i = 0;
+        while i < Self::ALL.len() {
+            if Self::ALL[i] as u64 == raw {
+                return Some(Self::ALL[i]);
+            }
+            i += 1;
         }
+        None
+    }
+
+    const fn bit(self) -> u64 {
+        1 << self as u64
     }
 }
 
@@ -90,10 +103,17 @@ pub struct FirmwareWindows(u64);
 
 impl FirmwareWindows {
     pub const NONE: Self = Self(0);
-    const KNOWN: u64 = 1 << FirmwareWindow::IgdOpRegion as u64;
+    const KNOWN: u64 = {
+        let (mut mask, mut i) = (0, 0);
+        while i < FirmwareWindow::ALL.len() {
+            mask |= FirmwareWindow::ALL[i].bit();
+            i += 1;
+        }
+        mask
+    };
 
     pub fn of(windows: &[FirmwareWindow]) -> Self {
-        Self(windows.iter().fold(0, |mask, &window| mask | 1 << window as u64))
+        Self(windows.iter().fold(0, |mask, &window| mask | window.bit()))
     }
 
     /// The mask off the wire, or `None` naming a window there is none of.
@@ -106,11 +126,11 @@ impl FirmwareWindows {
     }
 
     pub fn contains(self, window: FirmwareWindow) -> bool {
-        self.0 & 1 << window as u64 != 0
+        self.0 & window.bit() != 0
     }
 
     pub fn iter(self) -> impl Iterator<Item = FirmwareWindow> {
-        [FirmwareWindow::IgdOpRegion].into_iter().filter(move |&window| self.contains(window))
+        FirmwareWindow::ALL.into_iter().filter(move |&window| self.contains(window))
     }
 }
 

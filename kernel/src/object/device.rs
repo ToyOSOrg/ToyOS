@@ -146,18 +146,23 @@ impl DeviceClaim {
 }
 
 impl DeviceClaim {
-    /// Every mapping made through this claim taken back
-    /// (`pcidev::revoke_handed`): at its end, and when it moves to another
-    /// holder, so its last holder keeps none.
-    pub fn revoke_mappings(&self) {
-        self.pci(crate::pcidev::revoke_handed);
+    /// What this claim handed out so far, taken off it for a move: taken
+    /// under the lock that moves it, and revoked once that lock is let go,
+    /// so its last holder keeps no mapping and its next one loses none.
+    pub fn take_mappings(&self) -> Option<crate::pcidev::Handed> {
+        self.pci(crate::pcidev::take_handed)
+    }
+
+    /// `handed` given back, for a move refused.
+    pub fn restore_mappings(&self, handed: crate::pcidev::Handed) {
+        self.pci(|binding| crate::pcidev::restore_handed(binding, handed));
     }
 }
 
 // Released on last handle, not last Arc: a parked daemon can strand an Arc without releasing.
 impl ZeroHandles for DeviceClaim {
     fn on_zero_handles(&self) {
-        self.revoke_mappings();
+        self.pci(|binding| crate::pcidev::revoke_handed(binding.number()));
         self.reference.release();
     }
 }
