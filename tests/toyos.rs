@@ -1174,6 +1174,11 @@ const METAL: &[(&str, metal::Metal)] = &[
         metal::Metal { arms: TESTCASES, judge: |b| job_fairness(b[0]) },
     ),
     // ---- one image: tests/images/benchcase.toml, `osbench`'s ToyOS half ----
+    // Measurement only, never lands.
+    (
+        "ipcwake",
+        metal::Metal { arms: IPCWAKE, judge: |b| osbench_ran(b[0], &["osbench_ipcwake", "osbench_ipc"]) },
+    ),
     (
         // The numbers compared with the same program on the bench's own Linux.
         // Evidence and not a verdict: they are read off the log, and the row
@@ -1766,6 +1771,13 @@ const OSBENCH_GROUPS: [&str; 17] = [
 /// ninety benchmarks that settle the clock settles it before and after
 /// itself, 50 ms where the clock holds and 0.5 s at most (`clock::settle`):
 /// under 95 s. So a list bound of 525 s leaves that stall 136 s.
+/// Measurement only, never lands.
+const IPCWAKE: &[metal::Arm] = &[metal::Arm {
+    adds_ms: 120_000,
+    named_only: true,
+    ..metal::once("ipcwake", "tests/images/benchcase.toml", &[], &["osbench_ipcwake", "osbench_ipc"])
+}];
+
 const BENCHCASE: &[metal::Arm] = &[metal::Arm {
     adds_ms: 465_000,
     ..metal::once("benchcase", "tests/images/benchcase.toml", &[], &OSBENCH_GROUPS)
