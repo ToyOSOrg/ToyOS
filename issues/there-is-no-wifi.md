@@ -303,8 +303,12 @@ W1, P6.
   authenticator in the tests that shares no crypto code with the crate;
   Annex J's PRF and pass-phrase vectors, and RFC 6070's one case a
   pass-phrase and SSID can be, are `lib/crypto`'s.
-  - **Not met yet:** the captured handshake, from two wpa_supplicants over
-    `mac80211_hwsim` on a Linux bench.
+  - **The captured handshake** is two of wpa_supplicant v2.10's, one an
+    access point, over `mac80211_hwsim`: plain PSK and PMF required. Messages
+    2 and 4 are answered byte for byte, and the keys are the station's own.
+    No group key handshake is recorded: the access point never rekeyed.
+  - Its readings of the text are
+    `issues/the-wlan-handshakes-readings-of-802-11-are-unchecked-against-its-text.md`.
   - **W2b waits for P6:** SAE, AES-CMAC, AKM 6 (PSK-SHA256), and the
     Transition Disable KDE with its PSK refusal. RFCs 4493 and 9380 are its
     vectors.
