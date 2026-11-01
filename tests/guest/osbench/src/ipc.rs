@@ -75,12 +75,12 @@ pub fn suite() {
         let mut buf = vec![0x42u8; bytes];
         let mut run = || -> std::io::Result<Samples<'_>> {
             control(&peer, bytes as u32, warmup + samples, ECHO)?;
+            let ran = crate::ran::start();
             for _ in 0..warmup {
                 peer.send(&buf)?;
                 peer.recv(&mut buf)?;
             }
             crate::clock::settle();
-            let ran = crate::ran::start();
             let before = sys::counts();
             let mut ns = Vec::with_capacity(samples as usize);
             for _ in 0..samples {
@@ -124,11 +124,11 @@ pub fn suite() {
             peer.send_with(&buf, token)?;
             peer.recv_with(&mut buf)
         };
+        let ran = crate::ran::start();
         for _ in 0..warmup {
             token = trip(token)?;
         }
         crate::clock::settle();
-        let ran = crate::ran::start();
         let before = sys::counts();
         let mut ns = Vec::with_capacity(samples as usize);
         for _ in 0..samples {

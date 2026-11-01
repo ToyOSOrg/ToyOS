@@ -21,11 +21,11 @@ pub fn each(
     mut op: impl FnMut(usize) -> Result<(), String>,
 ) {
     let mut run = || -> Result<Samples<'_>, String> {
+        let ran = crate::ran::start();
         for i in 0..warmup {
             op(i)?;
         }
         crate::clock::settle();
-        let ran = crate::ran::start();
         let before = sys::counts();
         let mut ns = Vec::with_capacity(samples);
         for i in 0..samples {

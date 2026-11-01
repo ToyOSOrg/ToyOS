@@ -2,13 +2,14 @@
 //! span between [`start`] and [`Ran::fields`]. Each process the diary saw
 //! picked there is listed with the CPU it was picked on most, that CPU's
 //! last-level cache and the share of its picks on that CPU. One
-//! `ran=name.pid@cpuN/llcL:share%,...` field lists them, most picked first. A
-//! request/reply pair whose sides sit in two LLCs moves its lines between
-//! caches on every trip; this field says whether a row ran that way.
+//! `ran=name.pid@cpuN/llcL:share%,...` field lists them, most picked first.
+//! [`start`] reads the whole diary, so a row opens the span before its
+//! warmup, which then rebuilds what the samples run in; the span covers both.
 //!
 //! Linux reports nothing, and neither does a ToyOS boot that endows no
-//! `trace`. A ring that overwrote records inside the span leaves the latest;
-//! `ran_lost` counts the rest.
+//! `trace`. A ring that overwrote records inside the span leaves the latest,
+//! and `ran_lost` counts the rest. Each CPU has its own ring, so a busy CPU's
+//! share is then counted short against a quiet one's.
 
 /// The processes listed, at most.
 #[cfg(target_os = "toyos")]
@@ -19,14 +20,13 @@ pub struct Ran {
     diag: Option<crate::sys::diag::Diag>,
 }
 
-/// Begin the span: what the diary held before now is read and dropped.
+/// Begin the span: what the diary held before now is read and dropped. A
+/// read that fails reports nothing, since the span would include its rest.
 pub fn start() -> Ran {
     #[cfg(target_os = "toyos")]
     {
-        let mut diag = crate::sys::diag::open().filter(|d| d.has_diary());
-        if let Some(d) = diag.as_mut() {
-            let _ = d.diary();
-        }
+        let diag = crate::sys::diag::open().filter(|d| d.has_diary());
+        let diag = diag.and_then(|mut d| d.diary().2.is_none().then_some(d));
         Ran { diag }
     }
     #[cfg(not(target_os = "toyos"))]
