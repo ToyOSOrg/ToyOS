@@ -57,7 +57,20 @@ r1-r3).
   - **The excursions.** 2-20 seconds a minute at or above each run's p25 + 4 W,
     against Linux's 1-2 (4 under `nomodeset`). Every core is in C7 through
     them, so they are not CPU work.
-- r4 times both against the kernel's diary and the drive's I/O.
+- **The excursions follow no software-visible event** (r4).
+  - Each idle second was set against the kernel's diary and the drive's I/O:
+    which tasks woke, timer fires, idle entries, each CPU's C0 and every NVMe
+    command.
+  - No candidate was present in at least 80% of excursion seconds and at most
+    30% of the others. NVMe commands fell in 9% of them.
+  - The drive's states may raise their rate. With the drive reaching PS4
+    400 ms after I/O, five boots gave 12-22. Without APST, seven gave 2-20
+    (median 7).
+  - Linux under `nomodeset` enters PS4 100 ms after I/O and shows 4.
+  - So the trigger is hardware the platform runs as ToyOS leaves it. The one
+    link setting that differs from Linux's is LTR_L1.2_THRESHOLD: 107,520 ns,
+    as firmware left it, against Linux's 101,376 ns. The LTR max, T_PwrOn and
+    T_CommonMode match.
 
 **Exit**: the T14's `energy.idle.package` row is unresolved against Linux's
 in `osbench_energy`, or the remaining gap is a cause named and recorded at its

@@ -39,6 +39,12 @@ ac6b89a, `metal-t14/`). The second of those boots ran slow, its
 `write_4k_fsync` at 6.26 ms, and its clean fsync still read 16 µs: the slow
 mode appears only where a Flush or a write is owed.
 
+PR #1131's `osbench_disk` boots on the T14 add two readings
+(evidence `pr-1131` r1, r3, r4):
+- The slow mode took all 4 boots without APST, and 2 of 5 with it.
+- The drive is not short of host memory. Its HMPRE and HMMIN are 0, and it
+  refuses Feature 0Dh as an invalid field, so it uses no Host Memory Buffer.
+
 **Exit**: repeated boots on the T14 read every durable `persist` row
 (`write_4k_fsync`, `append_4k_fsync`, `create_fsync_unlink` and
 `seq_write_fsync`) within Linux's, in every boot and for the whole of each
