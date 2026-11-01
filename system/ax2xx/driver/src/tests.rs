@@ -10,7 +10,7 @@ use crate::container::{self, Firmware, Image, Refused};
 use crate::notification::{self, Alive, CountryAnswer, IterationDone, Malformed, NvmInfo, Received};
 use crate::part::{Hardware, NotServed, Part};
 use crate::pnvm::{self, Choice, Pnvm};
-use crate::versions::{self, Declared, Id, ReceivedForm, Repeated, ScanForm, Side, Unsupported, Versions};
+use crate::versions::{self, Declared, Id, ReceivedForm, ScanForm, Side, Unsupported, Versions};
 
 const AX200: &[u8] = include_bytes!("../../firmware/iwlwifi-cc-a0-77.ucode");
 const AX210: &[u8] = include_bytes!("../../firmware/iwlwifi-ty-a0-gf-a0-89.ucode");
@@ -133,8 +133,8 @@ fn the_files_declare_what_the_summary_table_says() {
         (versions::THERMAL_SHUTDOWN, Some(2), Some(2)),
     ];
     for &(message, ax200, ax210) in rows {
-        assert_eq!(a.of(message.id, message.side), Ok(ax200), "{}", message.name);
-        assert_eq!(b.of(message.id, message.side), Ok(ax210), "{}", message.name);
+        assert_eq!(a.of(message.id, message.side), ax200, "{}", message.name);
+        assert_eq!(b.of(message.id, message.side), ax210, "{}", message.name);
     }
 }
 
@@ -147,26 +147,29 @@ fn a_message_declared_at_a_version_without_a_layout_refuses_the_file() {
     record[at + 2] = 16;
     let declared = Declared::parse(&record).expect("whole entries");
     assert_eq!(Versions::of(&declared), Err(Unsupported::Version { message: "scan request", declared: Some(16) }));
-    // An unknown version is no layout's either.
+    // An unknown version is the caller's default, as no entry is: no layout's, for a message
+    // Intel gives several.
     record[at + 2] = versions::UNKNOWN;
     let declared = Declared::parse(&record).expect("whole entries");
-    assert_eq!(Versions::of(&declared), Err(Unsupported::Version { message: "scan request", declared: Some(99) }));
+    assert_eq!(Versions::of(&declared), Err(Unsupported::Version { message: "scan request", declared: None }));
     // Nor is no entry, for a message Intel gives several layouts.
     record.drain(at..at + 4);
     let declared = Declared::parse(&record).expect("whole entries");
     assert_eq!(Versions::of(&declared), Err(Unsupported::Version { message: "scan request", declared: None }));
 }
 
+/// The first entry answers a lookup (§6.5): the pinned files' (0x0e, 0x17) reads command 1 and
+/// notification 0, and a second entry after a message's own changes nothing.
 #[test]
-fn a_message_the_driver_exchanges_declared_twice_refuses_the_file() {
-    let mut record: Vec<u8> = ax200().declared.entries().flat_map(|(id, e)| [id.id, id.group, e.command, e.notification]).collect();
-    // The pinned files list (0x0e, 0x17) twice; the driver exchanges nothing
-    // of it.
+fn a_lookup_takes_the_first_entry_for_its_message() {
     let twice = Id { group: 0x0e, id: 0x17 };
-    assert_eq!(ax200().declared.of(twice, Side::Command), Err(Repeated(twice)));
-    record.extend([0x0d, 0x01, 15, 0]);
+    for f in [ax200(), ax210()] {
+        assert_eq!((f.declared.of(twice, Side::Command), f.declared.of(twice, Side::Notification)), (Some(1), Some(0)));
+    }
+    let mut record: Vec<u8> = ax200().declared.entries().flat_map(|(id, e)| [id.id, id.group, e.command, e.notification]).collect();
+    record.extend([0x0d, 0x01, 16, 0]);
     let declared = Declared::parse(&record).expect("whole entries");
-    assert_eq!(Versions::of(&declared), Err(Unsupported::Repeated { message: "scan request" }));
+    assert_eq!(Versions::of(&declared), Ok(Versions { scan: ScanForm::BandByte, received: ReceivedForm::V4 }));
     assert_eq!(Declared::parse(&record[..7]), None);
 }
 
@@ -624,4 +627,37 @@ fn a_received_frame_is_exactly_its_mpdu_length_after_its_descriptor() {
     }
     assert_eq!(ReceivedForm::V4.descriptor(), 48);
     assert_eq!(ReceivedForm::V5.descriptor(), 64);
+}
+
+#[test]
+fn an_empty_table_names_nothing() {
+    use crate::errors::{self, Lmac, Umac};
+    assert_eq!(Lmac::read(&[0; errors::LMAC_DWORDS]), None);
+    assert_eq!(Umac::read(&[0; errors::UMAC_DWORDS]), None);
+}
+
+#[test]
+fn an_error_is_named_with_its_bits_31_to_28_masked() {
+    use crate::errors::name;
+    assert_eq!(name(0x0000_0071), "UMAC fatal");
+    assert_eq!(name(0xf000_0071), "UMAC fatal");
+    assert_eq!(name(0x1000_0034), "watchdog NMI");
+    assert_eq!(name(0x0100_0071), "advanced system assert");
+    assert_eq!(name(0x2010_02fd), "advanced system assert");
+}
+
+#[test]
+fn the_profile_maps_a_part_s_entries_to_their_channels() {
+    for part in [Part::Ax200, Part::Ax210] {
+        assert_eq!(part.profile_channel(0), Some((Band::Ghz2_4, 1)));
+        assert_eq!(part.profile_channel(13), Some((Band::Ghz2_4, 14)));
+        assert_eq!(part.profile_channel(14), Some((Band::Ghz5, 36)));
+        assert_eq!(part.profile_channel(41), Some((Band::Ghz5, 144)));
+        assert_eq!(part.profile_channel(42), Some((Band::Ghz5, 149)));
+        assert_eq!(part.profile_channel(50), Some((Band::Ghz5, 181)));
+    }
+    assert_eq!(Part::Ax200.profile_channel(51), None);
+    assert_eq!(Part::Ax210.profile_channel(51), Some((Band::Ghz6, 1)));
+    assert_eq!(Part::Ax210.profile_channel(109), Some((Band::Ghz6, 233)));
+    assert_eq!(Part::Ax210.profile_channel(110), None);
 }
