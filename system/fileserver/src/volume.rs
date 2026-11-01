@@ -190,6 +190,22 @@ pub trait Volume {
     /// volume's own flush refused.
     fn sync(&mut self) -> Result<Vec<(Node, Error)>, Error>;
 
+    /// Whether the volume's next commit carries `node`'s entry whatever it is
+    /// asked to: one written since the last, or one naming blocks taken since,
+    /// which the commit holds as taken. The file's pages reach the volume
+    /// before that commit, so no entry it makes durable names a block that
+    /// does not hold the file's bytes.
+    fn carried(&self, _node: Node) -> bool {
+        false
+    }
+
+    /// `node`'s entry durable, with every entry [`Self::carried`] names and
+    /// no other open file's: an fsync's commit. `None` commits only those, as
+    /// a directory's fsync does, whose names every change writes at once.
+    /// `Err` is `node`'s entry or the commit refused; another's refused entry
+    /// is said, and kept for the next commit.
+    fn commit(&mut self, node: Option<Node>) -> Result<(), Error>;
+
     /// What more can be written to the volume: none, where nothing can be.
     fn room(&mut self) -> Result<toyos::fs::Room, Error>;
 

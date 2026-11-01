@@ -132,6 +132,7 @@ pub(super) fn sys_paged_op(ctx: &SyscallContext<'_>, h: RawHandle, op: u64, args
         x if x == PagedOp::Fail as u64 => pager.fail(id, args.offset, args.len),
         x if x == PagedOp::Resize as u64 => pager.resize(id, args.offset),
         x if x == PagedOp::Release as u64 => pager.release(id),
+        x if x == PagedOp::EndWrite as u64 => pager.end_write(id),
         x if x == PagedOp::WritebackBegin as u64 || x == PagedOp::WritebackEnd as u64 => {
             let end = (x == PagedOp::WritebackEnd as u64).then_some(args.flags & PAGED_WRITTEN != 0);
             if args.flags & !PAGED_WRITTEN != 0 || (end.is_none() && args.flags != 0) || !range_ok(args.len) {

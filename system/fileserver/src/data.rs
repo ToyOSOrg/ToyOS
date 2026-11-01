@@ -17,7 +17,9 @@
 //! must) the block of each page a write will touch and moves the length; the
 //! write-back puts the pages; the new length and extents reach the file's
 //! entry at its close, an fsync, or the volume's sync, and a sync writes every
-//! such entry before the cache is flushed. A length that
+//! such entry before the cache is flushed. An fsync's commit writes its own
+//! file's and those of the files it carries ([`Volume::carried`]): any whose
+//! entry is written, or whose blocks were taken, since the last. A length that
 //! shrinks is recorded before the blocks past it are freed, so a failure
 //! between the two leaks blocks rather than leaving an entry naming freed ones.
 //!
@@ -58,6 +60,9 @@ struct Open {
     mtime: u64,
     /// Length or extents changed since the entry was last written.
     dirty: bool,
+    /// The entry was written, or blocks taken, since the last commit
+    /// ([`Volume::carried`]).
+    carried: bool,
     /// Unlinked or renamed over: its blocks are no longer its own.
     gone: bool,
     holders: u32,
@@ -336,10 +341,25 @@ impl<D: Disk> DataVolume<D> {
         }
         mapped("the entry", &open.path, self.fs.update_metadata(&open.path, &open.extents, open.size, open.mtime))?;
         open.dirty = false;
+        open.carried = true;
         if let Some(meta) = self.names.get_mut(&open.path) {
             (meta.size, meta.mtime) = (open.size, open.mtime);
         }
         Ok(())
+    }
+
+    /// The disk as a stop now leaves it: what the last flush wrote.
+    #[cfg(test)]
+    pub(crate) fn stopped(self) -> D {
+        drop(self.fs);
+        Rc::try_unwrap(self.cache).ok().expect("one owner").into_disk()
+    }
+
+    /// A commit landed: no entry it made durable is owed to the next.
+    fn committed(&mut self) {
+        for open in self.open.values_mut().filter(|open| !open.dirty) {
+            open.carried = false;
+        }
     }
 
     /// Forget a node nobody holds and whose entry is written.
@@ -362,7 +382,7 @@ impl<D: Disk> DataVolume<D> {
     fn new_node(&mut self, path: &str, extents: Vec<Extent>, size: u64, mtime: u64) -> Node {
         let node = self.next;
         self.next += 1;
-        self.open.insert(node, Open { path: path.to_string(), extents, size, mtime, dirty: false, gone: false, holders: 0 });
+        self.open.insert(node, Open { path: path.to_string(), extents, size, mtime, dirty: false, carried: false, gone: false, holders: 0 });
         self.by_path.insert(path.to_string(), node);
         node
     }
@@ -580,6 +600,7 @@ impl<D: Disk> Volume for DataVolume<D> {
         open.size = open.size.max(end);
         open.mtime = now;
         open.dirty = true;
+        open.carried |= open.extents.iter().map(|e| e.block_count as u64).sum::<u64>() > covered;
         noted(&mut self.names, open);
         Ok(reserved)
     }
@@ -659,6 +680,7 @@ impl<D: Disk> Volume for DataVolume<D> {
         // Recorded first, freed second.
         mapped("a truncate", &open.path, self.fs.update_metadata(&open.path, &open.extents, size, now))?;
         open.dirty = false;
+        open.carried = true;
         if let Some(meta) = self.names.get_mut(&open.path) {
             (meta.size, meta.mtime) = (size, now);
         }
@@ -828,7 +850,29 @@ impl<D: Disk> Volume for DataVolume<D> {
             }
         }
         mapped("sync", "", self.fs.sync())?;
+        self.committed();
         Ok(unwritten)
+    }
+
+    fn carried(&self, node: Node) -> bool {
+        self.open.get(&node).is_some_and(|open| open.carried && !open.gone)
+    }
+
+    fn commit(&mut self, node: Option<Node>) -> Result<(), Error> {
+        if let Some(node) = node {
+            self.persist(node)?;
+        }
+        let carried: Vec<Node> = self.open.keys().copied().filter(|&n| self.carried(n)).collect();
+        for n in carried {
+            match self.persist(n) {
+                Err(e) => println!("fileserver: node {n}'s entry was not written at a commit ({e:?}); the next one writes it"),
+                Ok(()) if self.open[&n].holders == 0 => self.release(n),
+                Ok(()) => {}
+            }
+        }
+        mapped("sync", "", self.fs.sync())?;
+        self.committed();
+        Ok(())
     }
 
     fn room(&mut self) -> Result<toyos::fs::Room, Error> {
@@ -1160,9 +1204,7 @@ mod tests {
     }
 
     fn remount(v: DataVolume<Ram>) -> DataVolume<Ram> {
-        let DataVolume { fs, cache, .. } = v;
-        drop(fs);
-        let disk = Rc::try_unwrap(cache).ok().expect("one owner").into_disk();
+        let disk = v.stopped();
         let Probed::Mounted(again) = DataVolume::probe(disk, CLEAN_LIMIT, &["home"], clock) else { panic!("remount") };
         again
     }

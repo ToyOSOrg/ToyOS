@@ -433,6 +433,30 @@ impl<D: Disk> Volume for FatVolume<D> {
         Ok(unlevel)
     }
 
+    /// A flush writes every chain the cache holds, whichever file asked: an
+    /// open file changed since its entry was level is carried.
+    fn carried(&self, node: Node) -> bool {
+        self.open.get(&node).is_some_and(|open| !open.gone && (open.dirty || open.file.needs_reconcile()))
+    }
+
+    fn commit(&mut self, node: Option<Node>) -> Result<(), fs::Error> {
+        if !self.writable {
+            return Ok(());
+        }
+        if let Some(node) = node {
+            self.level(node)?;
+        }
+        let carried: Vec<Node> = self.open.keys().copied().filter(|&n| self.carried(n)).collect();
+        for n in carried {
+            match self.level(n) {
+                Err(e) => println!("fileserver: node {n} was not brought level at a commit ({e:?}); the next one does it"),
+                Ok(()) if self.open[&n].holders == 0 => self.release(n),
+                Ok(()) => {}
+            }
+        }
+        self.cache.block_on(self.fs.sync()).map_err(|e| logged("sync", "", e))
+    }
+
     fn room(&mut self) -> Result<fs::Room, fs::Error> {
         let unit = u64::from(self.fs.geometry().bytes_per_cluster());
         if !self.writable {

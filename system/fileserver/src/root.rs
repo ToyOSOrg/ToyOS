@@ -250,6 +250,10 @@ impl Volume for RootVolume {
         Ok(Vec::new())
     }
 
+    fn commit(&mut self, _node: Option<Node>) -> Result<(), Error> {
+        Ok(())
+    }
+
     /// None: ROOT is read-only.
     fn room(&mut self) -> Result<toyos::fs::Room, Error> {
         Ok(toyos::fs::Room { free: 0, unit: BLOCK as u64 })

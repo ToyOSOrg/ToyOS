@@ -110,6 +110,10 @@ impl Volume for Absent {
         Ok(Vec::new())
     }
 
+    fn commit(&mut self, _node: Option<Node>) -> Result<(), Error> {
+        Ok(())
+    }
+
     fn room(&mut self) -> Result<toyos::fs::Room, Error> {
         Ok(toyos::fs::Room { free: 0, unit: 1 })
     }
