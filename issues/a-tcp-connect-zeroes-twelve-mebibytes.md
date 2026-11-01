@@ -9,10 +9,11 @@ opened: 2026-10-27
 Before a ToyOS TCP connect returns, it makes and zeroes memory the connection
 may never use:
 
-- **The stream region**, 8 MiB (`toyos::net::stream::REGION_BYTES`).
-  `SYS_SHM_CREATE` takes and zeroes each of its 2048 frames before it answers
-  (`kernel/src/object/shm.rs`), and netstack maps all of them before the SYN
-  leaves.
+- **The stream region**, 8 MiB (`toyos::net::stream::REGION_BYTES`), whose
+  2048 frames `SYS_SHM_CREATE` took and zeroed before it answered. Since
+  #1077 a connect commits its header and 64 KiB of each ring, 132 KiB, and
+  each ring's producer commits more as it doubles the ring
+  (`toyos::transport::stream`); the T14's reading of that is owed.
 - **The connection's two directions**, 2 MiB each: the request's page on the
   client's write and the answer's on netstack's, each zeroed whole on that
   first write (`issues/a-pipe-is-a-two-mebibyte-page-for-a-mapping-nothing-makes.md`).
