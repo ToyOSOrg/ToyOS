@@ -1,5 +1,6 @@
 //! The stack's side of a link: the region a driver sent with its hello, the
-//! stack's end of the region's rings (`toyos-link`) and the two doorbells.
+//! stack's end of the region's rings (`toyos-link`) and the two doorbells,
+//! both of which the stack makes, so that it holds no event a driver sent.
 //!
 //! **What the driver writes is believed only as `toyos-link`'s ends bound
 //! it**: a frame's length by its slot, the link by its word, and the counters
@@ -37,9 +38,8 @@ pub enum Heard {
     /// The driver went, or said what no driver says: it was refused, or let go.
     Gone,
     /// The driver said who it is, its address as the node takes one, with
-    /// its region and the bell it rings: its connection is
-    /// [`Pending::into_conn`].
-    Hello(Hello, IndividualMac, Region, Bell),
+    /// its region: its connection is [`Pending::into_conn`].
+    Hello(Hello, IndividualMac, Region),
 }
 
 impl Pending {
@@ -59,12 +59,12 @@ impl Pending {
         match self.rx.pump(&self.conn) {
             RxStep::Idle => Heard::Nothing,
             RxStep::Eof => Heard::Gone,
-            RxStep::Frame { msg_type: wire::MSG_HELLO, payload_len, handles: wire::HELLO_HANDLES } => {
+            RxStep::Frame { msg_type: wire::MSG_HELLO, payload_len, handles: 1 } => {
                 let hello = Hello::decode(self.rx.payload(payload_len));
                 let mac = hello.as_ref().and_then(|hello| IndividualMac::new(MacAddr(hello.mac.bytes())));
-                let [region, rung] = self.rx.take_handles::<{ wire::HELLO_HANDLES }>().expect("counted above");
+                let [region] = self.rx.take_handles::<1>().expect("counted above");
                 match (hello, mac, Region::lent(region).ok()) {
-                    (Some(hello), Some(mac), Some(region)) => Heard::Hello(hello, mac, region, Bell::from(rung)),
+                    (Some(hello), Some(mac), Some(region)) => Heard::Hello(hello, mac, region),
                     _ => {
                         say!("netstack: a NIC driver's hello is not one this protocol makes, or its region is none");
                         refuse(&self.conn, Refusal::Malformed);
@@ -114,18 +114,18 @@ pub struct Session {
 
 impl Session {
     /// Open the link `hello` asked for over `region` as the node's `iface`,
-    /// and say so to the driver with the bell this end rings, its `conn` let
-    /// go then; `None` for a driver gone before it heard.
-    pub fn open(hello: Hello, iface: IfIndex, conn: Connection, region: Region, rung: Bell, groups: &[Group]) -> Option<Self> {
+    /// and say so to the driver with its ends of the two bells, its `conn`
+    /// let go then; `None` for a driver gone before it heard.
+    pub fn open(hello: Hello, iface: IfIndex, conn: Connection, region: Region, groups: &[Group]) -> Option<Self> {
         let mut end = Stack::new(region.words());
         for group in groups {
             assert!(end.join(region.words(), *group), "netstack: more groups than a link holds");
         }
-        let Ok((ring_driver, driver_hears)) = toyos::wake::pair() else {
-            say!("netstack: no doorbell for {}'s link", hello.label);
+        let (Ok((ring_driver, driver_hears)), Ok((driver_rings, rung))) = (toyos::wake::pair(), toyos::wake::pair()) else {
+            say!("netstack: no doorbells for {}'s link", hello.label);
             return None;
         };
-        conn.try_signal_with(wire::MSG_OPENED, [driver_hears.into()]).ok()?;
+        conn.try_signal_with(wire::MSG_OPENED, [driver_rings.into(), driver_hears.into()]).ok()?;
         Some(Self {
             ring_driver,
             rung,

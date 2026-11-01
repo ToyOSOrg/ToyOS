@@ -234,7 +234,6 @@ impl Connection {
         message(self.as_handle(), msg_type, &[], handles, true).map_err(nonblocking)
     }
 
-
     /// Wait for the next frame and take its payload straight into
     /// `payload`, with the handles it carried. For a caller that keeps the
     /// payload in its own buffer: a [`FrameRx`] would be one more copy. A

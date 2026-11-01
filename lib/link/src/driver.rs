@@ -126,11 +126,9 @@ struct Session<'a> {
     region: Region,
     end: Driver,
     rx: FrameRx<4>,
-    /// Rung for the stack; the stack's bell answers `Hungup` once it goes.
-    ring: Waker,
-    /// The stack's doorbell, once the link is open; its waker going is the
-    /// stack's end.
-    rung: Option<Bell>,
+    /// Once the link is open, the stack's two bells: the waker rung for the
+    /// stack, and the bell it rings, its waker going being the stack's end.
+    bells: Option<(Waker, Bell)>,
     said: Option<Link>,
     /// Received frames longer than a slot, dropped.
     oversize: u64,
@@ -146,18 +144,16 @@ impl<'a> Session<'a> {
             .unwrap_or_else(|| panic!("{label}: the device's address is a group's, which no link carries"));
         let hello = Hello { mac, medium: N::MEDIUM, label: label.into() };
         let shared = region.share().unwrap_or_else(|why| panic!("{label}: the link's region would not share: {why:?}"));
-        let (ring, stack_hears) = toyos::wake::pair().unwrap_or_else(|why| panic!("{label}: no doorbell for a link: {why:?}"));
         // A connection that will not take the hello is one whose stack has
         // gone: its hang-up is read in the first pass.
-        let _ = conn.try_send_bytes_with(wire::MSG_HELLO, &hello.encode(), [shared, stack_hears.into()]);
+        let _ = conn.try_send_bytes_with(wire::MSG_HELLO, &hello.encode(), [shared]);
         Self {
             label,
             conn: Some(conn),
             region,
             end,
             rx: FrameRx::new(),
-            ring,
-            rung: None,
+            bells: None,
             said: None,
             oversize: 0,
             oversize_said: 0,
@@ -168,12 +164,15 @@ impl<'a> Session<'a> {
         let poller = Poller::new(2);
         loop {
             let ring = self.pass(nic).unwrap_or_else(|why| panic!("{}: the stack wrote {why}", self.label));
-            if ring && self.rung.is_some() && self.ring.ring().is_err() {
+            if let Some((waker, _)) = &self.bells
+                && ring
+                && waker.ring().is_err()
+            {
                 return Ended::HungUp("its doorbell is gone");
             }
             poller.watch(nic.claim(), READABLE, TOKEN_CLAIM);
-            match (&self.rung, &self.conn) {
-                (Some(rung), _) => poller.watch(rung, READABLE, TOKEN_LINK),
+            match (&self.bells, &self.conn) {
+                (Some((_, rung)), _) => poller.watch(rung, READABLE, TOKEN_LINK),
                 (None, Some(conn)) => poller.watch(conn, READABLE, TOKEN_LINK),
                 (None, None) => unreachable!("{}: a link neither opening nor open", self.label),
             }
@@ -255,16 +254,16 @@ impl<'a> Session<'a> {
     /// Read the stack's answer, then its doorbell; the end of the session
     /// if that is what came.
     fn hear(&mut self) -> Option<Ended> {
-        if let Some(rung) = &self.rung {
+        if let Some((_, rung)) = &self.bells {
             return rung.try_take().err().map(|_| Ended::HungUp("its process ended"));
         }
         let conn = self.conn.as_ref().expect("a link not open is opening");
         match self.rx.pump(conn) {
             RxStep::Idle => None,
             RxStep::Eof => Some(Ended::HungUp("its process ended before it answered")),
-            RxStep::Frame { msg_type: wire::MSG_OPENED, payload_len: 0, handles: 1 } => {
-                let [rung] = self.rx.take_handles::<1>().expect("counted above");
-                self.rung = Some(Bell::from(rung));
+            RxStep::Frame { msg_type: wire::MSG_OPENED, payload_len: 0, handles: wire::OPENED_HANDLES } => {
+                let [ring, rung] = self.rx.take_handles::<{ wire::OPENED_HANDLES }>().expect("counted above");
+                self.bells = Some((Waker::from(ring), Bell::from(rung)));
                 // Its work is done: the bells carry the link from here.
                 self.conn = None;
                 say!("{}: the link is open", self.label);

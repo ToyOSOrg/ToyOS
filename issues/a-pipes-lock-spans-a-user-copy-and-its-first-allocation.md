@@ -17,6 +17,9 @@ runs inside that lock, through the frame store pipes and connections share
 * `FrameBytes::write` makes one walk, `buf.read_pieces`, and copies each piece
   into its frames with `bytes.place`, in the same acquisition.
 
+Each 16 pages of either copy take the caller's space lock and populate any
+untouched page, a frame from the allocator and a 4 KiB zeroing.
+
 A pipe's copy is bounded only by the pipe: `PIPE_CAPACITY` is 2 MiB, the
 largest single copy under the lock, and nothing above caps it
 (`SYS_READ`/`SYS_WRITE` pass the caller's length through).
@@ -26,9 +29,7 @@ its queue's lock, so its copy is bounded at `MAX_MESSAGE_LEN`, 16 KiB, and its
 frames are taken the same way. Both its send and its receive run that copy
 inside `process::with_process_data`, nesting the queue's lock in the process
 lock: the receive installs the message's handles in the caller's table and
-copies its bytes in one hold, so a refusal takes nothing. Each 16 pages of it take the caller's space
-lock and populate any untouched page, a frame from the allocator and a 4 KiB
-zeroing.
+copies its bytes in one hold, so a refusal takes nothing.
 
 A write that grows the pipe also takes its frames under the same lock,
 nesting the frame allocator's lock: up to 513 frames, unzeroed, under one
@@ -51,7 +52,7 @@ be taken before the lock and given back after it, as the read end's last
 holder already gives back what the pipe held.
 
 **Exit**: no pipe or queue lock is held across more than a bounded copy or any
-allocation, the connection's nesting in the process lock included, the hold time is read before and after, and `audio_tone`'s worst
-wake does not move.
+allocation, the connection's nesting in the process lock included, the hold
+time is read before and after, and `audio_tone`'s worst wake does not move.
 
 This is stage S0-a of `issues/anonymous-memory-swaps-to-an-encrypted-partition.md`.

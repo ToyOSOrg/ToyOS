@@ -692,9 +692,9 @@ fn outgoing<'a>(ctx: &SyscallContext<'a>, args: &MessageSend) -> Result<Option<O
     })())
 }
 
-/// A receive's buffers, bounded the same way. Room past any message's or
-/// batch's holds nothing, so only [`MAX_MESSAGE_LEN`] bytes across `head`
-/// and `bytes`, `head`'s first, and [`MAX_TRANSFER_HANDLES`] slots are taken.
+/// A receive's buffers, bounded the same way. No message is longer than
+/// [`MAX_MESSAGE_LEN`] or carries more than [`MAX_TRANSFER_HANDLES`], so only
+/// that much of the two byte windows (`head` first) and of `handles` is taken.
 fn incoming<'a>(ctx: &SyscallContext<'a>, args: &MessageRecv) -> Result<Option<Incoming<'a>>, ()> {
     if args.flags & !MESSAGE_NONBLOCK != 0 {
         return Err(());
