@@ -19,10 +19,10 @@
 //!
 //! A held sender is offered its data again once the bucket holds half its capacity: it wakes once
 //! per half the bucket's refill time, and a wake up to that much late loses no rate. That is half
-//! a [`GRANULARITY`] while the millisecond sets the bucket, and less where half the window or the
-//! initial window does. In a small window the wait is half the initial window's time at the rate,
-//! even when one segment would do. Without a smoothed RTT nothing is paced; cwnd is at most the
-//! initial window until the first sample.
+//! a [`GRANULARITY`] while the millisecond sets the bucket, less where half the window sets it,
+//! and more where the initial window does. In a small window the wait is half the initial
+//! window's time at the rate, even when one segment would do. Without a smoothed RTT nothing is
+//! paced; cwnd is at most the initial window until the first sample.
 
 use core::num::{NonZeroU128, NonZeroU64};
 use core::time::Duration;
