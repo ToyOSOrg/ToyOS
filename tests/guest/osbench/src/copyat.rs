@@ -13,7 +13,7 @@
 //! (SSE2, 64 bytes a step, lowest or highest first).
 //! `downavx` is `down` 32 bytes a step. `copyat.<bytes>.heap`: `libc` between
 //! two 64 KiB `Vec`s as the heap places them, with their offsets noted; and
-//! `libc` at 1 MiB and 64 MiB, d = 0, 16 and 256, past the caches.
+//! `libc` from 64 KiB to 64 MiB, d = 0, 16 and 256, past the caches.
 
 use std::time::Instant;
 
@@ -74,7 +74,7 @@ pub fn suite() {
     let mut big = Mapping::huge(2 * LARGE + 8192);
     big.words().fill(3);
     let base = big.ptr();
-    for (size, rounds) in [(MIB, 200), (LARGE, 20)] {
+    for (size, rounds) in [(64 * 1024, 500), (256 * 1024, 500), (MIB, 200), (4 * MIB, 50), (LARGE, 20)] {
         for d in [0usize, 16, 256] {
             // SAFETY: both ranges lie inside the mapping and are 64 MiB + 4 KiB + `d` apart.
             let (src, dst) = unsafe { (base, base.add(LARGE + 4096 + d)) };
