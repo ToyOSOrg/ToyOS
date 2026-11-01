@@ -34,7 +34,7 @@ One process per GPU function, an ordinary device claim (`drives = [...]`), bring
 | Frame content | the compositor, composed in RAM and blitted into a lent buffer |
 | Present | the compositor sends `present(buffer, damage, target time)`; the driver answers `presented(sequence, vblank time, refresh interval)` and the buffer's release. Damage drives PSR2 selective update; target time drives VRR. |
 | Cursor | the driver's cursor plane |
-| Blanking on idle or lid | the compositor decides, the driver does it |
+| Blanking on idle or lid | the compositor decides, the driver does it; nothing yet reads the lid (`issues/the-internal-panel-stays-lit-with-the-lid-closed.md`) |
 
 Wire types and state live in `lib/display-output`, host-tested. The compositor is the server and never blocks on a driver (`system/CLAUDE.md`).
 
@@ -92,6 +92,9 @@ The kernel keeps only generic mechanisms:
    - When a connection a present arrived on ends from the compositor's side (a restart, a `swap`, or the compositor dropping the driver), the driver connects again, at most 8 times a boot. A protocol refusal, or a connection that ended before any present arrived on it, ends presents for the boot, by name.
    - The compositor does not yet pace frames by `Presented`. It still blits the firmware's framebuffer itself until stage 5.
 4. **PSR on the eDP panel**, measured together with stage 2. PSR's first-frame exit latency goes to the owner in absolute numbers before PSR lands.
+   - **The T14's panel has no PSR** (2026-11-01). Its DPCD reads 00070h (PSR_SUPPORT) `00` and 00700h `01`, eDP 1.2; PSR1 is an eDP 1.3 feature. Two boots read it, `823066157` and `f714a5161`, both with the lid closed. The panel still answered AUX with a coherent capability set (eDP 1.2, 2 lanes at 2.7 Gbps), and PSR_SUPPORT is a capability field, so the reading is taken as the panel's and not as a lid artefact. That is an inference: a read with the lid open would confirm it. SRD_STATUS stayed IDLE with the link full on (evidence: https://github.com/ToyOSOrg/evidence/blob/5830b5b51493cce5d952acd8f2c2c98a0b16fe7e/r4/README.md). No other bench has an Intel panel. So #1136 (PSR1) is closed unlanded, since no bench can verify it and nothing calls it.
+   - **This caps the T14's display-side idle saving.** With the pipe lit, DC5 and DC6 are reached only while PSR is active (Vol 12, "Display C5 and C6"). On this panel they are unreachable, so stage 2's DC6 allow saves nothing while the panel is lit, and stage 1's watermarks are the display's idle saving there.
+   - **The restart point**, if a PSR-capable panel appears: branch `display-stage4` (`f714a5161`), and the clean-room PSR brief the display task was given, which the orchestrator holds outside this repository.
 5. **The rest of `display-output`.** virtio-gpu and the framebuffer become drivers. The panic surface lands here.
 6. **Intel modesetting**: combo-PHY DDIs, DPLLs and CDCLK, DP link training with DSC, HDMI 2.0 with SCDC, EDID over AUX and GMBUS, several outputs.
 7. **Intel Type-C DP alt mode**: FIA/IOM state, TCCOLD, the Dekel PHY, hotplug.

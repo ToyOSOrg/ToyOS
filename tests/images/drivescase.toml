@@ -9,6 +9,7 @@ start = ["acpiserver", "logkeeper", "test-runner"]
 [programs.logkeeper]
 service = true
 syscap = ["logread"]
+serves = ["log-carrier"]
 
 # Started on each function the kernel does not drive, never by `[boot] start`.
 [programs.pciholder]
@@ -26,3 +27,8 @@ syscap = ["inventory", "dup"]
 service = true
 devices = ["acpi"]
 receives = ["power"]
+
+# The virtio-serial driver, for the VM's console alone: this image runs no agent.
+[programs.virtio-console]
+drives = ["pci:07:80:00/1af4:1043"]
+receives = ["log-carrier"]

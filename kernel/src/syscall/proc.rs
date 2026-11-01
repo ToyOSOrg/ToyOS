@@ -14,6 +14,7 @@ use crate::process;
 
 use toyos_abi::handle::{RawHandle, Rights};
 use toyos_abi::syscall::*;
+use kernel::sched::affinity::CpuMask;
 use kernel::sched::task::WaitClass;
 
 use super::cancelled;
@@ -212,6 +213,32 @@ pub(super) fn sys_thread_spawn(entry: u64, stack_ptr: u64, arg: u64, stack_base:
     // A None here is a resource failure or teardown race, never a bad argument.
     process::spawn_thread(entry, stack_ptr, arg, stack_base)
         .map_or(SyscallError::ResourceExhausted.to_u64(), |t| t.raw() as u64)
+}
+
+/// The scheduler face of the calling process's live thread `tid`. Another process's thread is not one of them,
+/// which is the whole of the authority: a mask is a placement choice a process makes for its own threads.
+fn own_thread(tid: u64) -> Option<alloc::sync::Arc<crate::sched::payload::KShared>> {
+    let tid = process::Tid::from_raw(u32::try_from(tid).ok()?);
+    let shared = process::thread_sched(process::current_process(), tid)?.shared;
+    (shared.state() != kernel::sched::task::TaskState::Dead).then_some(shared)
+}
+
+pub(super) fn sys_thread_set_affinity(tid: u64, words: &[u64]) -> u64 {
+    let mask = match CpuMask::from_words(words, crate::smp::cpu_count() as usize) {
+        Ok(mask) => mask,
+        Err(_) => return SyscallError::InvalidArgument.to_u64(),
+    };
+    let Some(shared) = own_thread(tid) else {
+        return SyscallError::NotFound.to_u64();
+    };
+    crate::sched::driver::set_affinity(&shared, mask);
+    0
+}
+
+/// Its mask, less the CPUs that are not online.
+pub(super) fn sys_thread_get_affinity(tid: u64) -> Result<[u64; CPU_MASK_WORDS], SyscallError> {
+    let shared = own_thread(tid).ok_or(SyscallError::NotFound)?;
+    Ok(*shared.mask().load().0.within(crate::smp::cpu_count() as usize).words())
 }
 
 /// Wait for a thread of this process to die.

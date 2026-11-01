@@ -24,7 +24,6 @@ pub mod flags;
 pub mod hostws;
 pub mod identity;
 pub mod image;
-pub mod kernelconsole;
 pub mod signing;
 /// Which kernel containers may be hashed, and by whose keys; read by nothing
 /// but its own tests.
@@ -51,6 +50,7 @@ pub mod tether;
 pub mod toolchain;
 pub mod userlandhost;
 pub mod vdagent;
+pub mod vmconsole;
 pub mod wallpaper;
 
 use std::path::{Path, PathBuf};

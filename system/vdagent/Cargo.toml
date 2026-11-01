@@ -1,19 +1,16 @@
 [package]
 name = "vdagent"
-description = "The shared clipboard with QEMU's host: the virtio-serial function its vdagent chardev is on, claimed from the kernel and driven here, bridged to the compositor's clipboard."
+description = "The shared clipboard with QEMU's host: the agent's port, handed over by the virtio-serial driver, bridged to the compositor's clipboard."
 edition = "2024"
 license = "MIT OR Apache-2.0"
 
 [dependencies]
 toyos-abi = { path = "../../sdk/abi" }
 toyos = { path = "../../sdk/toyos" }
-toyos-device-memory = { path = "../../lib/device-memory" }
-toyos-virtio = { path = "../../lib/virtio" }
-toyos-pci-claim = { path = "../../lib/pci-claim" }
 toyos-vdagent = { path = "../../lib/vdagent" }
 toyos-vdagent-bridge = { path = "bridge" }
 toyos-manifest = { path = "../../lib/manifest" }
 toyos-window = { path = "../../sdk/window" }
 
 [package.metadata.toyos.host]
-exempt.owns = "the virtio-serial function QEMU's clipboard channel is on, and the compositor's clipboard port"
+exempt.owns = "the agent's port the virtio-serial driver hands over, and the compositor's clipboard port"

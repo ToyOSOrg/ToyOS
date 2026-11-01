@@ -43,6 +43,9 @@ ring = "0.17"
 toyos-crypto = { path = "../../../lib/crypto", features = ["sign"] }
 toyos-parity = { path = "../../../lib/parity" }
 ml-kem = { version = "0.3", features = ["hazmat"] }
+# The ecosystem's way to pin a thread, for `affinity_pins`: its ToyOS arm is
+# what holds that existing Rust pins as it does on Linux.
+core_affinity = "0.8"
 getrandom = "0.2"
 
 # Outside the workspace, so it needs its own redirects: the forks
@@ -54,6 +57,7 @@ toyos = { path = "../../../sdk/toyos" }
 memmap2 = { git = "https://github.com/ToyOSOrg/memmap2-rs", branch = "toyos-0.9.11" }
 ring = { git = "https://github.com/ToyOSOrg/ring", branch = "toyos-0.17.14" }
 getrandom = { git = "https://github.com/ToyOSOrg/getrandom", branch = "toyos-0.2-sdk-0.12", package = "getrandom" }
+core_affinity = { git = "https://github.com/ToyOSOrg/core_affinity", branch = "toyos-0.8.3" }
 
 [lints.rust]
 warnings = "deny"

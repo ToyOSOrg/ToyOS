@@ -1,0 +1,15 @@
+[package]
+name = "wlan"
+description = "The Wi-Fi supplicant: holds the credential of the network joined and runs its handshakes over each radio driver's radio connection, serving the settings programs on wifi."
+edition = "2024"
+license = "MIT OR Apache-2.0"
+
+[dependencies]
+toyos-abi = { path = "../../sdk/abi" }
+toyos = { path = "../../sdk/toyos" }
+toyos-radio = { path = "../../lib/radio" }
+toyos-wifi = { path = "../../lib/wifi" }
+toyos-wlan-station = { path = "station" }
+
+[package.metadata.toyos.host]
+exempt.manages = "ToyOS's Wi-Fi: the credential and handshakes of the network joined over a ToyOS radio driver, served to its settings programs"

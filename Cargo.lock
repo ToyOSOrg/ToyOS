@@ -1552,7 +1552,6 @@ dependencies = [
  "toyos-blackbox",
  "toyos-bootmap",
  "toyos-devicepath",
- "toyos-dma",
  "toyos-elf",
  "toyos-gicv3",
  "toyos-its",
@@ -1562,6 +1561,7 @@ dependencies = [
  "toyos-proclife",
  "toyos-quiesce",
  "toyos-random",
+ "toyos-register",
  "toyos-rootimage",
  "toyos-smmu",
  "toyos-symbols",
@@ -3642,6 +3642,7 @@ dependencies = [
  "toyos-osrelease",
  "toyos-parity",
  "toyos-quiesce",
+ "toyos-radio",
  "toyos-session",
  "toyos-ssh",
  "toyos-swap",
@@ -3651,7 +3652,9 @@ dependencies = [
  "toyos-update",
  "toyos-userbound",
  "toyos-vdagent",
+ "toyos-virtio-serial",
  "toyos-wallclock",
+ "toyos-wifi",
  "ureq",
  "webpki-root-certs",
 ]
@@ -3710,10 +3713,6 @@ dependencies = [
 
 [[package]]
 name = "toyos-display-output"
-version = "0.1.0"
-
-[[package]]
-name = "toyos-dma"
 version = "0.1.0"
 
 [[package]]
@@ -4001,7 +4000,18 @@ name = "toyos-quiesce"
 version = "0.1.0"
 
 [[package]]
+name = "toyos-radio"
+version = "0.1.0"
+dependencies = [
+ "toyos-ieee80211",
+]
+
+[[package]]
 name = "toyos-random"
+version = "0.1.0"
+
+[[package]]
+name = "toyos-register"
 version = "0.1.0"
 
 [[package]]
@@ -4171,6 +4181,10 @@ dependencies = [
 ]
 
 [[package]]
+name = "toyos-virtio-serial"
+version = "0.1.0"
+
+[[package]]
 name = "toyos-virtio-sound"
 version = "0.1.0"
 dependencies = [
@@ -4182,6 +4196,13 @@ dependencies = [
 [[package]]
 name = "toyos-wallclock"
 version = "0.1.0"
+
+[[package]]
+name = "toyos-wifi"
+version = "0.1.0"
+dependencies = [
+ "toyos-radio",
+]
 
 [[package]]
 name = "toyos-window"
@@ -4201,6 +4222,19 @@ dependencies = [
  "ring",
  "toyos-crypto",
  "toyos-ieee80211",
+]
+
+[[package]]
+name = "toyos-wlan-station"
+version = "0.1.0"
+dependencies = [
+ "aes",
+ "ring",
+ "toyos-crypto",
+ "toyos-ieee80211",
+ "toyos-radio",
+ "toyos-wifi",
+ "toyos-wlan-handshake",
 ]
 
 [[package]]
@@ -4415,12 +4449,9 @@ version = "0.0.0"
 dependencies = [
  "toyos",
  "toyos-abi",
- "toyos-device-memory",
  "toyos-manifest",
- "toyos-pci-claim",
  "toyos-vdagent",
  "toyos-vdagent-bridge",
- "toyos-virtio",
  "toyos-window",
 ]
 
@@ -4429,6 +4460,21 @@ name = "version_check"
 version = "0.9.5"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "0b928f33d975fc6ad9f86c8f283853ad26bdd5b10b7f1542aa2fa15e2289105a"
+
+[[package]]
+name = "virtio-console"
+version = "0.0.0"
+dependencies = [
+ "logkeeper-api",
+ "toyos",
+ "toyos-abi",
+ "toyos-device-memory",
+ "toyos-manifest",
+ "toyos-pci-claim",
+ "toyos-vdagent",
+ "toyos-virtio",
+ "toyos-virtio-serial",
+]
 
 [[package]]
 name = "virtio-net"
@@ -4715,6 +4761,15 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "7dcd9d09a39985f5344844e66b0c530a33843579125f23e21e9f0f220850f22a"
 dependencies = [
  "rustls-pki-types",
+]
+
+[[package]]
+name = "wifi"
+version = "0.0.0"
+dependencies = [
+ "toyos",
+ "toyos-crypto",
+ "toyos-wifi",
 ]
 
 [[package]]
@@ -5148,6 +5203,17 @@ dependencies = [
  "serde_json",
  "unicode-xid",
  "wasmparser",
+]
+
+[[package]]
+name = "wlan"
+version = "0.0.0"
+dependencies = [
+ "toyos",
+ "toyos-abi",
+ "toyos-radio",
+ "toyos-wifi",
+ "toyos-wlan-station",
 ]
 
 [[package]]

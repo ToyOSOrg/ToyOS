@@ -45,6 +45,9 @@ pub enum Op {
     },
     /// Become RT permanently (the privilege-gated syscall).
     SetRt,
+    /// Set the running thread's own mask to the CPUs whose bits are set, as
+    /// `SYS_THREAD_SET_AFFINITY` does: published, then its CPU kicked.
+    SetAffinity(u64),
     /// Retire every *other* thread of this process, then exit: process
     /// teardown, the shape the recorded double-drop died in.
     Teardown,

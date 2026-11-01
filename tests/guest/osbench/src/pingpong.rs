@@ -109,9 +109,9 @@ fn bench(kind: &str, at: Where) -> String {
     format!("pingpong.{kind}.{at}")
 }
 
-/// Round-trip time as the pinger sees it, ns. Linux pins both sides; ToyOS
-/// stages them and `placed_held` counts the checks that found them where they
-/// were put. Neither side is put on the interrupts' CPU.
+/// Round-trip time as the pinger sees it, ns. Both sides are pinned, and
+/// `placed_held` counts the checks that found them where they were pinned.
+/// Neither side is put on the interrupts' CPU.
 fn run(kind: &str, at: Where, mut pinger: impl Channel, mut ponger: impl Channel) {
     let bench = bench(kind, at);
     let (go_ping, ping_go) = mpsc::channel::<bool>();

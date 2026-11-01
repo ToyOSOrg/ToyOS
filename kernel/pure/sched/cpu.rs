@@ -23,6 +23,7 @@ use alloc::collections::{BTreeMap, BTreeSet, VecDeque};
 use alloc::vec::Vec;
 use core::marker::PhantomData;
 
+use crate::sched::affinity::{CpuMask, MASK_WORDS};
 use crate::sched::hw::{CpuId, Hw, Kicker, Nanos, TraceEvent, TraceKind};
 use crate::sched::mailbox::{
     Doorbell, Kick, MailboxConsumer, MailboxNode, MailboxProducer, PostSlot, PreemptGuard,
@@ -30,7 +31,7 @@ use crate::sched::mailbox::{
 };
 use crate::sched::msg::Msg;
 use crate::sched::queue::{RunQueue, MIN_SLICE_NS};
-use crate::sched::sync::{fence, Arc, AtomicU32, AtomicU64, Ordering};
+use crate::sched::sync::{fence, Arc, AtomicBool, AtomicU32, AtomicU64, Ordering};
 use crate::sched::task::{
     BlockedTask, Claim, DeadTask, ReadyTask, RunningTask, SchedPayload, TaskKey, TaskShared,
     TaskState, TransitTask, WaitClass, WakeCause, WakeReason, QUANTUM_NS,
@@ -303,6 +304,10 @@ pub struct CpuSched<X: SchedPayload> {
     /// Set by [`SchedPass::begin`] and cleared by the disposition, so only
     /// the pass's opening holds.
     holding: bool,
+    /// Tasks whose mask leaves this CPU out, taken off it while it still
+    /// stood on their context; the next pass, on another context, sends them
+    /// on ([`SchedPass::begin`]).
+    outbound: Vec<ReadyTask<X>>,
     /// The task that exited on this CPU, freed by the NEXT pass — a pass
     /// cannot free the stack it is running on.
     zombie: Option<DeadTask<X>>,
@@ -403,6 +408,7 @@ impl<X: SchedPayload> CpuSched<X> {
             stopped: VecDeque::new(),
             held: Vec::new(),
             holding: false,
+            outbound: Vec::new(),
             zombie: None,
             mailbox,
             steal_probe: MailboxNode::new(),
@@ -464,6 +470,10 @@ impl<X: SchedPayload> CpuSched<X> {
 
     pub fn stopped(&self) -> impl Iterator<Item = &ReadyTask<X>> + '_ {
         self.stopped.iter()
+    }
+
+    pub fn outbound(&self) -> impl Iterator<Item = &ReadyTask<X>> + '_ {
+        self.outbound.iter()
     }
 
     pub fn zombie_key(&self) -> Option<TaskKey> {
@@ -627,6 +637,7 @@ impl<X: SchedPayload> CpuSched<X> {
                 (core::mem::offset_of!(Self, stopped), "stopped"),
                 (core::mem::offset_of!(Self, held), "held"),
                 (core::mem::offset_of!(Self, holding), "holding"),
+                (core::mem::offset_of!(Self, outbound), "outbound"),
                 (core::mem::offset_of!(Self, zombie), "zombie"),
                 (core::mem::offset_of!(Self, mailbox), "mailbox"),
                 (core::mem::offset_of!(Self, steal_probe), "steal_probe (excluded: a sibling writes it)"),
@@ -663,8 +674,8 @@ impl<X: SchedPayload> CpuSched<X> {
     /// `None` rather than [`CpuSched::loaded_key`], deliberately: this is the
     /// pre-cutover steal ported as it was, and a port that quietly acquired a
     /// later fix is a negative gate that no longer reproduces what it names.
-    pub fn steal_ready(&mut self) -> Option<ReadyTask<X>> {
-        self.rq.pop_surplus(None, 0)
+    pub fn steal_ready(&mut self, thief: CpuId) -> Option<ReadyTask<X>> {
+        self.rq.pop_surplus(None, 0, thief)
     }
 
     pub fn install_stolen(&mut self, task: ReadyTask<X>) {
@@ -1002,7 +1013,7 @@ impl<X: SchedPayload> CpuSched<X> {
     }
 
     /// The CPU [`CpuHandles::idle_near`] chooses for a wake forward among those
-    /// that have published SLEEPING and have no kick coming: one an earlier
+    /// in `mask` that have published SLEEPING and have no kick coming: one an earlier
     /// forward kicked is already being handed work, and a burst of wakes
     /// drained in one pass would otherwise all land on it. Reading the doorbells is a heuristic: a CPU that woke up
     /// in the meantime simply gets an ordinary adopt.
@@ -1013,13 +1024,23 @@ impl<X: SchedPayload> CpuSched<X> {
     /// it, and the edge it never clears refuses it every forward after.
     fn forward_target<H: Hw<Payload = X>, P: PreemptGuard>(
         &mut self,
+        mask: CpuMask,
         env: Env<'_, H, P>,
     ) -> Option<CpuId> {
         let cpu = env.cpus.idle_near(self.id, self.cursor, |cpu| {
-            cpu.doorbell().sleeping() && !cpu.doorbell().kick_pending()
+            mask.contains(cpu.id()) && cpu.doorbell().sleeping() && !cpu.doorbell().kick_pending()
         })?;
         self.cursor = env.cpus.topology().position(cpu) + 1;
         Some(cpu)
+    }
+
+    /// Send a task whose mask leaves this CPU out to a CPU it names: an idle
+    /// one if there is one, as a wake forward chooses, otherwise where
+    /// [`CpuHandles::place`] would spawn it.
+    fn relocate<H: Hw<Payload = X>, P: PreemptGuard>(&mut self, task: ReadyTask<X>, env: Env<'_, H, P>, now: Nanos) {
+        let mask = task.affinity();
+        let dst = self.forward_target(mask, env).unwrap_or_else(|| env.cpus.place(self.id, now, mask));
+        self.hand_off(task, dst, env, now);
     }
 
     /// Wake placement: keep the task local — that is where its cache lines
@@ -1033,6 +1054,9 @@ impl<X: SchedPayload> CpuSched<X> {
     /// thread's dispatch, or now if it has run that long: the floor is what
     /// bounds the switching a stream of short wakes can cost the thread they
     /// preempt.
+    ///
+    /// Only inside the task's mask: a task whose mask leaves this CPU out is
+    /// relocated, and a forward goes only to a CPU the mask names.
     fn place<H: Hw<Payload = X>, P: PreemptGuard>(
         &mut self,
         task: ReadyTask<X>,
@@ -1062,7 +1086,7 @@ impl<X: SchedPayload> CpuSched<X> {
     /// already queued here.
     fn place_behind<H: Hw<Payload = X>, P: PreemptGuard>(
         &mut self,
-        task: ReadyTask<X>,
+        mut task: ReadyTask<X>,
         queued_ahead: bool,
         env: Env<'_, H, P>,
         now: Nanos,
@@ -1075,6 +1099,13 @@ impl<X: SchedPayload> CpuSched<X> {
         // dispatching it to unwind would each undo that.
         if task.shared().stop_pending() {
             self.keep_stopped(task);
+            return;
+        }
+        task.refresh_affinity();
+        let mask = task.affinity();
+        // A corpse unwinds where it is, as `hand_off` keeps it.
+        if !mask.contains(self.id) && !task.shared().kill_pending() {
+            self.relocate(task, env, now);
             return;
         }
         // **The forward is decided first, and the kill check stays inside
@@ -1095,7 +1126,7 @@ impl<X: SchedPayload> CpuSched<X> {
                 self.held.push(task);
                 return;
             }
-            if let Some(dst) = self.forward_target(env) {
+            if let Some(dst) = self.forward_target(mask, env) {
                 self.hand_off(task, dst, env, now);
                 return;
             }
@@ -1145,8 +1176,9 @@ impl<X: SchedPayload> CpuSched<X> {
             // provably about a task that is no longer waiting — a benign no-op.
             return;
         };
-        let task = entry.task.wake(self.id, cause, entry.class, now);
+        let mut task = entry.task.wake(self.id, cause, entry.class, now);
         self.trace(env, now, TraceKind::Wake { task: key, name: task.ext().name() });
+        task.refresh_affinity();
         self.place(task, env, now);
     }
 
@@ -1615,6 +1647,11 @@ impl<'c, 'e, H: Hw, P: PreemptGuard> SchedPass<'c, 'e, H, P, Undisposed> {
             }
         }
         assert!(!cpu.holding && cpu.held.is_empty(), "the previous pass on cpu{} was never disposed", cpu.id.0);
+        // Not standing on any of them now: the pass that took them switched away.
+        for task in core::mem::take(&mut cpu.outbound) {
+            assert!(Some(task.key()) != cpu.loaded_key(), "cpu {:?} still stands on outbound {:?}", cpu.id, task.key());
+            cpu.relocate(task, env, now);
+        }
         cpu.holding = true;
         cpu.drain(env, now);
         cpu.fire_deadlines(env, now);
@@ -1796,7 +1833,7 @@ impl<H: Hw, P: PreemptGuard> SchedPass<'_, '_, H, P, Disposed> {
             // mid-unwind is exactly that: it is dispatched ahead of the fair
             // band, so counting `rq` alone makes a CPU holding two teardowns
             // look as empty as an idle one. The steal probe wants what this
-            // CPU could hand over, which is the fair band and only the fair band;
+            // CPU could hand over, which is the fair band's movable tasks and only those;
             // publishing the first number to the second reader sends thieves to
             // CPUs with nothing to give.
             //
@@ -1806,14 +1843,15 @@ impl<H: Hw, P: PreemptGuard> SchedPass<'_, '_, H, P, Disposed> {
             // taking two tasks in turn would otherwise publish none at every
             // pass, and nothing would come for the one it queues.
             let handle = self.env.cpus.get(self.cpu.id);
-            let surplus = self.cpu.rq.fair_len() as u32;
+            let surplus = self.cpu.rq.movable_fair() as u32;
+            let takers = if surplus >= PUSH_THRESHOLD { self.cpu.rq.takers() } else { CpuMask::NONE };
             handle.publish_load((self.cpu.rq.len() + self.cpu.dying.len()) as u32);
-            self.env.cpus.publish_surplus(self.cpu.id, surplus);
+            self.env.cpus.publish_surplus(self.cpu.id, surplus, takers);
             self.cpu.rq.refresh();
             handle.publish_weight(self.cpu.rq.weight());
             // The stamp goes with them: it is what says they are about now.
             handle.publish_pass(self.now);
-            self.push_on_surplus(surplus);
+            self.push_on_surplus(surplus, takers);
             if self.cpu.running.is_some() {
                 // The re-arm's allowance is per idle period, so a CPU that is
                 // given work starts its next one with a full one.
@@ -1835,9 +1873,12 @@ impl<H: Hw, P: PreemptGuard> SchedPass<'_, '_, H, P, Disposed> {
     /// Quantum expiry, RT preemption and a pending kill: the reasons a running
     /// task loses the CPU without asking.
     fn preempt_if_due(&mut self) {
-        let Some(current) = self.cpu.running.as_ref() else {
+        let Some(current) = self.cpu.running.as_mut() else {
             return;
         };
+        // A setter kicks the CPU it finds the task on; this is that kick's pass.
+        current.refresh_affinity();
+        let current = &*current;
         // The RT arm does not fire against an aged corpse inside its granted
         // chunk — that grant is the whole of the bounded deferral, and the
         // quantum arm above is what ends it.
@@ -1860,7 +1901,15 @@ impl<H: Hw, P: PreemptGuard> SchedPass<'_, '_, H, P, Disposed> {
         // request, so a recomputed decision alone would never reach the end of
         // the one the last pass armed. A stale armed instant at worst decides
         // early, and the pick keeps `dispatched_at` if it picks this thread again.
-        let due = self.now >= self.cpu.decide_at || self.now >= self.cpu.settle_decision(self.now) || rt_due || kill_due;
+        // Leaving is the pick's: the task goes back to its queue, and the pick
+        // sends it on.
+        let outside = !current.affinity().contains(self.cpu.id)
+            && matches!(current.shared().state(), TaskState::Running(_));
+        let due = self.now >= self.cpu.decide_at
+            || self.now >= self.cpu.settle_decision(self.now)
+            || rt_due
+            || kill_due
+            || outside;
         if !due {
             return;
         }
@@ -1969,7 +2018,18 @@ impl<H: Hw, P: PreemptGuard> SchedPass<'_, '_, H, P, Disposed> {
         // A lapsed borrowed window must not demote the task out of the RT band
         // here: queue time spends none of it, so `ReadyTask::dispatch` re-arms
         // it instead. The band stays whatever it was at insert.
-        if let Some(task) = self.cpu.rq.pop_next() {
+        while let Some(mut task) = self.cpu.rq.pop_next() {
+            task.refresh_affinity();
+            if !task.affinity().contains(self.cpu.id) && !task.shared().kill_pending() {
+                self.cpu.rq.leave_running(task.key(), task.standing_mut());
+                if Some(task.key()) == self.cpu.loaded_key() {
+                    self.cpu.outbound.push(task);
+                    self.env.hw.need_resched(self.cpu.id);
+                } else {
+                    self.cpu.relocate(task, self.env, self.now);
+                }
+                continue;
+            }
             let key = task.key();
             let name = task.ext().name();
             // The task this CPU stands on, picked again, is still in the run it
@@ -1985,6 +2045,7 @@ impl<H: Hw, P: PreemptGuard> SchedPass<'_, '_, H, P, Disposed> {
             self.cpu.decide_at = self.now.after(QUANTUM_NS);
             self.cpu
                 .trace(self.env, self.now, TraceKind::Schedule { task: key, name });
+            return;
         }
     }
 
@@ -2039,10 +2100,11 @@ impl<H: Hw, P: PreemptGuard> SchedPass<'_, '_, H, P, Disposed> {
         }
         while let Some(&(thief, asking)) = self.cpu.steal_requests.last() {
             if self.stealable() == 0 {
-                if self.cpu.rq.fair_len() > 0 {
-                    // The one queued task is the one this CPU still stands on,
-                    // and the pass after the switch hands it over: the probes
-                    // wait for that pass, asked for now.
+                if self.cpu.rq.movable_fair() > 0 {
+                    // The one movable queued task is the one this CPU still
+                    // stands on, and the pass after the switch hands it over:
+                    // the probes wait for that pass, asked for now. Tasks
+                    // pinned here are never handed over, so they ask nothing.
                     self.env.hw.need_resched(self.cpu.id);
                 } else {
                     self.cpu.steal_requests.clear();
@@ -2051,7 +2113,7 @@ impl<H: Hw, P: PreemptGuard> SchedPass<'_, '_, H, P, Disposed> {
             }
             self.cpu.steal_requests.pop();
             // A busy asker that no move brings closer goes without.
-            if let Some(task) = self.cpu.rq.pop_surplus(self.cpu.loaded_key(), asking) {
+            if let Some(task) = self.cpu.rq.pop_surplus(self.cpu.loaded_key(), asking, thief) {
                 self.cpu.hand_off(task, thief, self.env, self.now);
             }
         }
@@ -2075,7 +2137,7 @@ impl<H: Hw, P: PreemptGuard> SchedPass<'_, '_, H, P, Disposed> {
         let heaviest = STEAL_RINGS
             .into_iter()
             .flat_map(|(inner, outer)| cpus.topology().ring(me, inner, outer, 0))
-            .filter(|&cpu| cpus.offers_surplus(cpu) && cpus.get(cpu).answering(now))
+            .filter(|&cpu| cpus.offers_surplus(cpu) && cpus.get(cpu).takes(me) && cpus.get(cpu).answering(now))
             .map(|cpu| (cpus.get(cpu).weight(), cpu))
             .fold(None, |best: Option<(u64, CpuId)>, (weight, cpu)| match best {
                 Some((most, _)) if most >= weight => best,
@@ -2094,14 +2156,15 @@ impl<H: Hw, P: PreemptGuard> SchedPass<'_, '_, H, P, Disposed> {
         }
     }
 
-    /// The fair tasks a probe could be answered with: the band, less the task
-    /// this CPU still stands on where this pass put it back there.
+    /// The fair tasks a probe could be answered with: the band's movable
+    /// ones, less the task this CPU still stands on where this pass put it
+    /// back there.
     fn stealable(&self) -> usize {
         let loaded_queued = self.cpu.loaded_key().is_some_and(|loaded| {
             self.cpu.running.as_ref().is_none_or(|running| running.key() != loaded)
-                && self.cpu.rq.holds_fair(loaded)
+                && self.cpu.rq.holds_movable(loaded)
         });
-        self.cpu.rq.fair_len() - usize::from(loaded_queued)
+        self.cpu.rq.movable_fair() - usize::from(loaded_queued)
     }
 
     fn apply_timer(&mut self) -> TimerApplied {
@@ -2313,7 +2376,7 @@ impl<H: Hw, P: PreemptGuard> SchedPass<'_, '_, H, P, Disposed> {
         STEAL_RINGS.into_iter().find_map(|(inner, outer)| {
             cpus.topology()
                 .ring(me, inner, outer, 0)
-                .filter(|&cpu| cpus.offers_surplus(cpu) && cpus.get(cpu).answering(self.now))
+                .filter(|&cpu| cpus.offers_surplus(cpu) && cpus.get(cpu).takes(me) && cpus.get(cpu).answering(self.now))
                 .max_by_key(|&cpu| cpus.get(cpu).surplus())
         })
     }
@@ -2331,7 +2394,7 @@ impl<H: Hw, P: PreemptGuard> SchedPass<'_, '_, H, P, Disposed> {
     /// The fence is [`balance_fence`]'s, and it is the price: an `mfence` on the
     /// exit of every pass that has surplus, which under [`Balance::Pull`] costs
     /// nothing because this returns before reaching it.
-    fn push_on_surplus(&mut self, surplus: u32) {
+    fn push_on_surplus(&mut self, surplus: u32, takers: CpuMask) {
         let Some(threshold) = self.env.balance.push_threshold() else {
             return;
         };
@@ -2341,9 +2404,11 @@ impl<H: Hw, P: PreemptGuard> SchedPass<'_, '_, H, P, Disposed> {
         balance_fence();
         let cpus = self.env.cpus;
         let now = self.now;
-        let Some(target) =
-            cpus.idle_near(self.cpu.id, self.cpu.cursor, |cpu| cpu.doorbell().sleeping() && cpu.answering(now))
-        else {
+        // Only a sleeper some movable task may run on: one that may take none
+        // probes, is answered nothing, and its probe's pass rings it again.
+        let Some(target) = cpus.idle_near(self.cpu.id, self.cpu.cursor, |cpu| {
+            takers.contains(cpu.id()) && cpu.doorbell().sleeping() && cpu.answering(now)
+        }) else {
             return;
         };
         self.cpu.cursor = cpus.topology().position(target) + 1;
@@ -2376,6 +2441,19 @@ pub struct CpuHandle<M> {
     /// with nothing, and sleeps — and the probe is one-shot per idle trip, so
     /// the genuinely surplus-holding CPU goes unprobed for a whole idle round.
     surplus: AtomicU32,
+    /// **Which CPUs may take [`Self::surplus`]**: the union of the masks of
+    /// the movable queued fair tasks, published with it so that a probe and
+    /// a busy balance ask [`Self::takes`] what the push reads from its own
+    /// pass. Written only by a pass whose surplus reaches the threshold, and
+    /// read only while [`CpuHandles::offers_surplus`] says one does.
+    /// `takers_any` stands for every CPU, so the words are written only when
+    /// every movable queued task is restricted. A reader may pair the flag
+    /// with words of another pass: it then probes a CPU that answers nothing,
+    /// or skips one whose task it could have taken, even when this CPU's push
+    /// rang it for that task, until this CPU's next pass with surplus
+    /// publishes again.
+    takers_any: AtomicBool,
+    takers: [AtomicU64; MASK_WORDS],
     /// **The summed weight of this CPU's job groups**, published for busy
     /// balancing ([`SchedPass::balance_busy`]) and for nothing else.
     weight: AtomicU64,
@@ -2414,6 +2492,8 @@ impl<M: SchedMsg> CpuHandle<M> {
             doorbell: Doorbell::new(),
             load: AtomicU32::new(0),
             surplus: AtomicU32::new(0),
+            takers_any: AtomicBool::new(true),
+            takers: core::array::from_fn(|_| AtomicU64::new(0)),
             weight: AtomicU64::new(0),
             last_pass: AtomicU64::new(0),
             idle_exit: AtomicU64::new(0),
@@ -2445,6 +2525,12 @@ impl<M: SchedMsg> CpuHandle<M> {
 
     pub fn surplus(&self) -> u32 {
         self.surplus.load(Ordering::Relaxed)
+    }
+
+    /// Whether `cpu` may take a task of this CPU's [`Self::surplus`].
+    pub fn takes(&self, cpu: CpuId) -> bool {
+        self.takers_any.load(Ordering::Relaxed)
+            || self.takers.get(cpu.0 as usize / 64).is_some_and(|w| w.load(Ordering::Relaxed) & 1 << (cpu.0 % 64) != 0)
     }
 
     pub fn weight(&self) -> u64 {
@@ -2582,12 +2668,22 @@ impl<M: SchedMsg> CpuHandles<M> {
         }
     }
 
-    /// Publish how many fair-band tasks `cpu` could give away; called by that
-    /// CPU's own pass. Its bit in the offering mask changes with the threshold,
-    /// before the pass's [`balance_fence`], so the mask is what the push's
-    /// sleeper half reads.
-    pub fn publish_surplus(&self, cpu: CpuId, fair: u32) {
+    /// Publish how many fair-band tasks `cpu` could give away and, when they
+    /// reach the threshold, which CPUs may take them ([`CpuHandle::takes`]);
+    /// called by that CPU's own pass. Its bit in the offering mask changes
+    /// with the threshold, before the pass's [`balance_fence`], so the mask is
+    /// what the push's sleeper half reads.
+    pub fn publish_surplus(&self, cpu: CpuId, fair: u32, takers: CpuMask) {
         let handle = self.get(cpu);
+        if fair >= PUSH_THRESHOLD {
+            let any = takers == CpuMask::ANY;
+            if !any {
+                for (word, &value) in handle.takers.iter().zip(takers.words()) {
+                    word.store(value, Ordering::Relaxed);
+                }
+            }
+            handle.takers_any.store(any, Ordering::Relaxed);
+        }
         let was = handle.surplus() >= PUSH_THRESHOLD;
         handle.surplus.store(fair, Ordering::Relaxed);
         let (word, bit) = (&self.offering[cpu.0 as usize / 64], 1u64 << (cpu.0 % 64));
@@ -2684,7 +2780,7 @@ impl<M: SchedMsg> CpuHandles<M> {
         None
     }
 
-    /// Where a new task goes: the CPU still answering whose queue it would wait
+    /// Where a new task goes: the CPU in `mask` still answering whose queue it would wait
     /// least behind, and among those one that sleeps, then one whose SMT
     /// siblings run least. Scanned from `start` so that ties spread instead of
     /// piling on one CPU.
@@ -2697,12 +2793,12 @@ impl<M: SchedMsg> CpuHandles<M> {
     /// A machine where no CPU is answering falls back to the plain minimum: the
     /// test breaks a tie against a CPU that will never answer, and a machine
     /// with none has no such tie to break.
-    pub fn place(&self, start: CpuId, now: Nanos) -> CpuId {
+    pub fn place(&self, start: CpuId, now: Nanos, mask: CpuMask) -> CpuId {
         let n = self.handles.len();
         let scan = |answering_only: bool| {
             (0..n)
                 .map(|offset| CpuId(((start.0 as usize + offset) % n) as u32))
-                .filter(|&cpu| !answering_only || self.get(cpu).answering(now))
+                .filter(|&cpu| mask.contains(cpu) && (!answering_only || self.get(cpu).answering(now)))
                 .min_by_key(|&cpu| {
                     let handle = self.get(cpu);
                     (handle.load(), !handle.doorbell().sleeping(), self.busy_siblings(cpu))
@@ -2710,7 +2806,23 @@ impl<M: SchedMsg> CpuHandles<M> {
         };
         scan(true)
             .or_else(|| scan(false))
-            .expect("placing a task on a machine with no cpus")
+            .expect("a task's mask names no cpu of this machine")
+    }
+
+    /// After a setter has stored a task's mask: kick the CPU its state word
+    /// names, so the pass that refreshes it there runs now.
+    ///
+    /// **One read is enough.** [`crate::sched::affinity::SharedMask::store`] ends in a full fence, and
+    /// so does an adopt before its refresh, so a move this read misses is
+    /// adopted with the new mask. A pass the kick finds already running may
+    /// still decide with the old one, but its doorbell edge stays raised for
+    /// a pass after it, which reads the new.
+    pub fn realign(&self, shared: &TaskShared<M>, hw: &impl Kicker) {
+        if let Some(cpu) = home_of(shared.state()) {
+            if self.get(cpu).poke() == Kick::Send {
+                hw.kick(cpu);
+            }
+        }
     }
 }
 
@@ -2933,6 +3045,16 @@ mod tests {
             rt: RtState,
             job: Arc<Job>,
         ) -> (TaskKey, Arc<TaskShared<Msg<TestPayload>>>) {
+            self.spawn_masked(dst, rt, job, CpuMask::ANY)
+        }
+
+        fn spawn_masked(
+            &mut self,
+            dst: CpuId,
+            rt: RtState,
+            job: Arc<Job>,
+            mask: CpuMask,
+        ) -> (TaskKey, Arc<TaskShared<Msg<TestPayload>>>) {
             let key = TaskKey(self.next_key);
             self.next_key += 1;
             let task = TaskBuilder {
@@ -2941,6 +3063,7 @@ mod tests {
                 ctx: (),
                 ext: TestPayload,
                 rt,
+                mask,
             }
             .build(dst, NOW);
             let shared = task.shared().clone();
@@ -4334,6 +4457,143 @@ mod tests {
         w.abandon();
     }
 
+    fn pinned(w: &mut World, dst: CpuId, to: CpuId) -> Arc<TaskShared<Msg<TestPayload>>> {
+        let job = Arc::new(Job::new(JobKey(1000 + w.next_key)));
+        w.spawn_masked(dst, RtState::default(), job, CpuMask::one(to)).1
+    }
+
+    fn set_mask(w: &World, shared: &Arc<TaskShared<Msg<TestPayload>>>, mask: CpuMask) {
+        shared.mask().store(mask, &NoPreempt);
+        w.handles.realign(shared, &w.hw);
+    }
+
+    /// **An adopt outside the task's mask is sent on**, to the one CPU the
+    /// mask names, though nothing runs where it landed.
+    #[test]
+    fn a_task_adopted_outside_its_mask_is_sent_to_a_cpu_it_names() {
+        let mut w = World::new(2);
+        let task = pinned(&mut w, C0, C1);
+        assert_eq!(task.state(), TaskState::InTransit(C1), "the adopt on cpu0 forwarded it");
+        w.run_a_pass(C1);
+        assert_eq!(task.state(), TaskState::Running(C1));
+        w.abandon();
+    }
+
+    /// **A wake behind a running task is forwarded only inside the mask**: a
+    /// sleeper pinned to its home queues there behind the hog while cpu1
+    /// sleeps, where an unpinned one is forwarded (the yield test above).
+    #[test]
+    fn a_pinned_wake_queues_at_home_rather_than_forwarding() {
+        let mut w = World::new(2);
+        let sleeper = pinned(&mut w, C0, C0);
+        w.run_a_pass(C0);
+        w.park_running(C0);
+        let _ = w.spawn(C0);
+        w.run_a_pass(C0);
+        w.run_a_pass(C1);
+        assert!(w.handles.get(C1).doorbell().sleeping(), "cpu1 has published SLEEPING");
+        wake(&w, C0, &sleeper);
+        {
+            let (cpus, env) = w.split();
+            let _ = SchedPass::begin(&mut cpus[0], env, Nanos(NOW.0 + 1)).dispose_yield().finish();
+        }
+        assert!(matches!(sleeper.state(), TaskState::Ready(C0) | TaskState::Running(C0)), "{:?}", sleeper.state());
+        w.abandon();
+    }
+
+    /// **A running task whose mask moves off its CPU leaves at the kick's
+    /// pass**: the pass takes it while still standing on its context, and
+    /// the next one sends it.
+    #[test]
+    fn a_running_task_set_off_its_cpu_moves_to_one_its_mask_names() {
+        let mut w = World::new(2);
+        let (_, task) = w.spawn(C0);
+        w.run_a_pass(C0);
+        assert_eq!(task.state(), TaskState::Running(C0));
+        set_mask(&w, &task, CpuMask::one(C1));
+        assert!(w.hw.state().kicks.contains(&C0), "the setter kicked the CPU it found the task on");
+        w.run_a_pass(C0);
+        assert_eq!(w.cpus[0].outbound().count(), 1, "taken off while cpu0 stood on it");
+        assert!(w.hw.state().need_resched.contains(&C0), "and the pass that sends it was asked for");
+        w.run_a_pass(C0);
+        assert_eq!(task.state(), TaskState::InTransit(C1));
+        w.run_a_pass(C1);
+        assert_eq!(task.state(), TaskState::Running(C1));
+        w.abandon();
+    }
+
+    /// **A queued task whose mask moved is sent on when the pick reaches it.**
+    #[test]
+    fn a_queued_task_set_off_its_cpu_is_sent_on_by_the_pick() {
+        let mut w = World::new(2);
+        let (_, first) = w.spawn(C0);
+        let (_, second) = w.spawn(C0);
+        w.run_a_pass(C0);
+        let (running, queued) = if first.state() == TaskState::Running(C0) { (first, second) } else { (second, first) };
+        assert_eq!(queued.state(), TaskState::Ready(C0));
+        set_mask(&w, &queued, CpuMask::one(C1));
+        w.park_running(C0);
+        assert_eq!(queued.state(), TaskState::InTransit(C1), "the pick sent it rather than run it");
+        assert_eq!(running.state(), TaskState::Blocked(C0));
+        w.abandon();
+    }
+
+    /// **A wake whose home its mask has since left out goes to a CPU it names
+    /// at once**, rather than queueing behind the hog at home until a pick.
+    #[test]
+    fn a_parked_task_set_off_its_home_wakes_onto_a_cpu_it_names() {
+        let mut w = World::new(2);
+        let (_, sleeper) = w.spawn(C0);
+        w.run_a_pass(C0);
+        w.park_running(C0);
+        let (hog, _) = w.spawn(C0);
+        w.run_a_pass(C0);
+        set_mask(&w, &sleeper, CpuMask::one(C1));
+        wake(&w, C0, &sleeper);
+        w.run_a_pass(C0);
+        assert_eq!(w.cpus[0].running().map(|t| t.key()), Some(hog), "the hog keeps cpu0");
+        assert_eq!(sleeper.state(), TaskState::InTransit(C1));
+        w.abandon();
+    }
+
+    /// **A thief is given only a task its mask names**, and a CPU whose queue
+    /// holds only tasks pinned to it publishes no surplus.
+    #[test]
+    fn a_steal_takes_only_a_task_whose_mask_names_the_thief() {
+        let mut w = World::new(3);
+        let (_, _hog) = w.spawn(C0);
+        w.run_a_pass(C0);
+        let job = Arc::new(Job::new(JobKey(77)));
+        let (_, two) = w.spawn_masked(C0, RtState::default(), job.clone(), CpuMask::from_words(&[0b011], 3).unwrap());
+        let (_, own) = w.spawn_masked(C0, RtState::default(), job, CpuMask::one(C0));
+        w.run_a_pass(C0);
+        assert_eq!(w.cpus[0].rq().fair_len(), 2);
+        assert_eq!(w.cpus[0].rq().movable_fair(), 1, "the one pinned to cpu0 is not surplus");
+        assert!(w.cpus[0].rq.pop_surplus(None, 0, CpuId(2)).is_none(), "cpu2 is in neither mask");
+        let stolen = w.cpus[0].rq.pop_surplus(None, 0, C1).expect("cpu1 is in one");
+        assert_eq!(stolen.key(), two.key());
+        assert_eq!(own.state(), TaskState::Ready(C0));
+        w.cpus[0].rq.insert(stolen);
+        w.abandon();
+    }
+
+    /// **Spawn placement chooses only inside the mask**, idle CPUs outside it
+    /// notwithstanding.
+    #[test]
+    fn spawn_placement_chooses_only_inside_the_mask() {
+        let mut w = World::new(4);
+        for cpu in 0..4 {
+            w.run_a_pass(CpuId(cpu));
+        }
+        let mask = CpuMask::from_words(&[0b1010], 4).unwrap();
+        for start in 0..4 {
+            let at = w.handles.place(CpuId(start), NOW, mask);
+            assert!(mask.contains(at), "start {start} chose {at:?}");
+        }
+        assert_eq!(w.handles.place(C0, NOW, CpuMask::one(CpuId(2))), CpuId(2));
+        w.abandon();
+    }
+
     /// **One forward per idle sibling**: wakes drained in one pass are handed
     /// to a sibling only while it has no kick coming, so a burst does not pile
     /// onto the first sleeper — the rest queue here.
@@ -4416,6 +4676,28 @@ mod tests {
         w.abandon();
     }
 
+    /// **A probe to a CPU whose queue holds only tasks pinned to it is
+    /// dropped**: no pass will ever hand one over, so asking for the next pass
+    /// would ask for it for ever.
+    #[test]
+    fn a_probe_to_a_cpu_holding_only_pinned_tasks_is_dropped() {
+        let mut w = World::new(2);
+        w.balance = Balance::Pull;
+        let job = Arc::new(Job::new(JobKey(88)));
+        for _ in 0..2 {
+            let _ = w.spawn_masked(C1, RtState::default(), job.clone(), CpuMask::one(C1));
+        }
+        w.run_a_pass(C1);
+        assert_eq!(w.cpus[1].rq().fair_len(), 1, "one runs and one is queued");
+
+        w.cpus[1].steal_requests.push((C0, 0));
+        w.run_a_pass_at(C1, Nanos(NOW.0 + QUANTUM_NS + 1));
+        assert_eq!(w.handles.get(C1).surplus(), 0, "a pinned task is not surplus");
+        assert!(w.cpus[1].steal_requests.is_empty(), "the probe is dropped");
+        assert!(w.hw.state().need_resched.is_empty(), "and no pass is asked for it");
+        w.abandon();
+    }
+
     /// The four arms of the staleness rule, one at a time — a `CpuHandles` and
     /// nothing else, because the decision is a function of the published words.
     /// The sim's `stopped_cpu` says what the rule is *worth* over a run; a
@@ -4445,14 +4727,14 @@ mod tests {
         handles.get(idle).publish_load(0);
         handles.get(busy).publish_load(4);
         handles.get(stopped).publish_load(0);
-        assert_eq!(handles.place(idle, Nanos(2)), idle);
-        assert_eq!(handles.place(busy, Nanos(2)), stopped, "ties go to the scan order");
+        assert_eq!(handles.place(idle, Nanos(2), CpuMask::ANY), idle);
+        assert_eq!(handles.place(busy, Nanos(2), CpuMask::ANY), stopped, "ties go to the scan order");
 
         // Handed a message and never taking the pass that clears the edge: its
         // zero is believed inside the window and refused outside it.
         owe_a_pass(stopped);
-        assert_eq!(handles.place(busy, Nanos(2)), stopped);
-        assert_eq!(handles.place(busy, late), idle);
+        assert_eq!(handles.place(busy, Nanos(2), CpuMask::ANY), stopped);
+        assert_eq!(handles.place(busy, late, CpuMask::ANY), idle);
 
         // A CPU that is merely *busy* is not stale: it owes a pass and its last
         // one is recent, which is every wake on a working machine.
@@ -4460,7 +4742,7 @@ mod tests {
         handles.get(busy).publish_pass(late);
         handles.get(busy).publish_load(0);
         handles.get(idle).publish_load(1);
-        assert_eq!(handles.place(busy, late), busy);
+        assert_eq!(handles.place(busy, late, CpuMask::ANY), busy);
 
         // And a machine where nothing answers still places somebody.
         owe_a_pass(idle);
@@ -4469,7 +4751,7 @@ mod tests {
         handles.get(idle).publish_load(3);
         handles.get(busy).publish_load(2);
         handles.get(stopped).publish_load(9);
-        assert_eq!(handles.place(idle, late), busy);
+        assert_eq!(handles.place(idle, late, CpuMask::ANY), busy);
     }
 
     /// One package of two LLCs, each two cores of two threads, listed against
@@ -4514,11 +4796,11 @@ mod tests {
     fn a_spawn_lands_where_it_would_whatever_the_sleepers_exits() {
         let (handles, _consumers) = bare_handles(two_llcs());
         sleep(&handles, &[0, 1, 2, 3, 4, 5, 6, 7]);
-        let plain: Vec<CpuId> = (0..8).map(|start| handles.place(CpuId(start), NOW)).collect();
+        let plain: Vec<CpuId> = (0..8).map(|start| handles.place(CpuId(start), NOW, CpuMask::ANY)).collect();
         for (cpu, exit) in [(0, 1_048_000), (2, 253_000), (5, 1_048_000), (7, 253_000)] {
             handles.get(CpuId(cpu)).publish_idle_exit(exit);
         }
-        let deep: Vec<CpuId> = (0..8).map(|start| handles.place(CpuId(start), NOW)).collect();
+        let deep: Vec<CpuId> = (0..8).map(|start| handles.place(CpuId(start), NOW, CpuMask::ANY)).collect();
         assert_eq!(plain, deep);
     }
 
@@ -4615,12 +4897,12 @@ mod tests {
             handles.get(CpuId(cpu)).publish_pass(NOW);
         }
         sleep(&handles, &[1, 2, 3, 4, 5, 6, 7]);
-        assert_eq!(handles.place(CpuId(4), NOW), CpuId(5), "4's sibling runs; 5's core is free");
-        assert_eq!(handles.place(CpuId(0), NOW), CpuId(1), "0 itself runs");
+        assert_eq!(handles.place(CpuId(4), NOW, CpuMask::ANY), CpuId(5), "4's sibling runs; 5's core is free");
+        assert_eq!(handles.place(CpuId(0), NOW, CpuMask::ANY), CpuId(1), "0 itself runs");
         wake_up(&handles, &[1, 2, 3, 5, 6, 7]);
-        assert_eq!(handles.place(CpuId(0), NOW), CpuId(4), "the one sleeper is placed on, sibling or not");
+        assert_eq!(handles.place(CpuId(0), NOW, CpuMask::ANY), CpuId(4), "the one sleeper is placed on, sibling or not");
         handles.get(CpuId(4)).publish_load(1);
-        assert_eq!(handles.place(CpuId(0), NOW), CpuId(0), "a queue outweighs who runs");
+        assert_eq!(handles.place(CpuId(0), NOW, CpuMask::ANY), CpuId(0), "a queue outweighs who runs");
     }
 
     /// **A probe goes to the nearest CPU with surplus**: an SMT sibling's one
@@ -4633,13 +4915,56 @@ mod tests {
             for cpu in 0..8 {
                 w.handles.get(CpuId(cpu)).publish_pass(NOW);
             }
-            w.handles.publish_surplus(CpuId(near), 1);
-            w.handles.publish_surplus(CpuId(1), 5);
+            w.handles.publish_surplus(CpuId(near), 1, CpuMask::ANY);
+            w.handles.publish_surplus(CpuId(1), 5, CpuMask::ANY);
             w.run_a_pass(C0);
             let asked: Vec<u32> = (0..8u32).filter(|&cpu| !w.cpus[cpu as usize].mailbox_is_empty()).collect();
             assert_eq!(asked, [victim], "the probe's victim");
             w.abandon();
         }
+    }
+
+    /// **A busy balance asks only a CPU whose surplus it may take**: cpu0
+    /// runs a fair task, its SMT sibling cpu4 weighs most but offers only a
+    /// task masked away from cpu0, and cpu1 weighs less and offers one any CPU
+    /// may take. The request goes to cpu1.
+    #[test]
+    fn a_busy_balance_passes_a_heavier_surplus_its_mask_leaves_out() {
+        let mut w = World::on(two_llcs());
+        w.balance = Balance::Pull;
+        for cpu in 0..8 {
+            w.handles.get(CpuId(cpu)).publish_pass(NOW);
+        }
+        let not_c0 = CpuMask::from_words(&[0b1111_1110], 8).unwrap();
+        w.handles.publish_surplus(CpuId(4), 1, not_c0);
+        w.handles.get(CpuId(4)).publish_weight(1 << 50);
+        w.handles.publish_surplus(CpuId(1), 1, CpuMask::ANY);
+        w.handles.get(CpuId(1)).publish_weight(1 << 40);
+        w.spawn(C0);
+        w.run_a_pass(C0);
+        assert!(w.cpus[0].running().is_some(), "cpu0 runs a fair task, so its pass balances busy");
+        let asked: Vec<u32> = (1..8u32).filter(|&cpu| !w.cpus[cpu as usize].mailbox_is_empty()).collect();
+        w.abandon();
+        assert_eq!(asked, [1], "the busy balance asked a CPU that would answer it with nothing");
+    }
+
+    /// **A probe skips a victim whose surplus it may not take**: cpu0's SMT
+    /// sibling offers one task masked away from cpu0, and cpu1 offers one any
+    /// CPU may take. The probe goes past the nearer CPU to cpu1.
+    #[test]
+    fn a_steal_probe_passes_a_surplus_its_mask_leaves_out() {
+        let mut w = World::on(two_llcs());
+        w.balance = Balance::Pull;
+        for cpu in 0..8 {
+            w.handles.get(CpuId(cpu)).publish_pass(NOW);
+        }
+        let not_c0 = CpuMask::from_words(&[0b1111_1110], 8).unwrap();
+        w.handles.publish_surplus(CpuId(4), 1, not_c0);
+        w.handles.publish_surplus(CpuId(1), 1, CpuMask::ANY);
+        w.run_a_pass(C0);
+        let asked: Vec<u32> = (0..8u32).filter(|&cpu| !w.cpus[cpu as usize].mailbox_is_empty()).collect();
+        w.abandon();
+        assert_eq!(asked, [1], "the probe went to a victim that would answer it with nothing");
     }
 }
 

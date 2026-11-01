@@ -13,10 +13,9 @@ a real slice at `region.rs:68`. One record turns on that:
 `issues/kernelslice-outlives-its-allocation.md` — the allocation can
 be gone.
 
-**The shape of the answer is already written down, in the first of those.** It
-names `mm::Dma` as the precedent — `Dma<'pool>` borrows the pool it came out of,
-and `DmaPool::leak` is the only way to reach `'static` — and says the same
-signature here is `KernelSlice<'alloc>`. It also names who owes the work: the
+**The shape of the answer is already written down, in the first of those.** A
+view that borrows the allocation it came out of, with one named way to reach
+`'static`: `KernelSlice<'alloc>`. It also names who owes the work: the
 four holders whose lifetimes have to be written down, `elf::cache`'s
 `cached_image`, `LoadedLib`, `TlsModule` and `UserStack`. This track adds two
 things that record does not carry, and nothing else.

@@ -288,8 +288,8 @@ const PAIR_PER_WINDOW: u64 = 200;
 /// munmap, each of which has to reach the sibling's TLB. Ten windows of 200
 /// after 50. Each side reads its APIC ID before and after each window, and a
 /// window counts only where `osbench_rules::pair::admit` admits the four
-/// readings; `windows_refused` counts the rest. Linux pins both sides; ToyOS
-/// stages them. Neither is put on the interrupts' CPU.
+/// readings; `windows_refused` counts the rest. Both sides are pinned.
+/// Neither is put on the interrupts' CPU.
 fn unmap_touched_remote() {
     const BENCH: &str = "mem.munmap_touched_remote.4k";
     if let Err(why) = crate::arch::cpu_id() {

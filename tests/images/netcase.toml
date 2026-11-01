@@ -18,6 +18,7 @@ start = ["acpiserver", "logkeeper", "diskserver", "fileserver", "netstack", "sou
 [programs.logkeeper]
 service = true
 syscap = ["logread"]
+serves = ["log-carrier"]
 
 # netstack over the link a NIC driver brings on `link`; it claims no device.
 [programs.netstack]
@@ -84,3 +85,8 @@ receives = ["block"]
 service = true
 devices = ["acpi"]
 receives = ["power"]
+
+# The virtio-serial driver, for the VM's console alone: this image runs no agent.
+[programs.virtio-console]
+drives = ["pci:07:80:00/1af4:1043"]
+receives = ["log-carrier"]

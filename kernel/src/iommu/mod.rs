@@ -147,46 +147,6 @@ impl core::fmt::Display for IommuError {
     }
 }
 
-/// Where a device's addresses come from, for a driver **in this kernel**: the
-/// machine's own, since every domain is built clear of the root bridges'
-/// declared windows and a driver here comes up before they are declared.
-/// Until the last one moves to userland
-/// (`issues/an-aarch64-cargo-run-boot-shows-nothing-on-its-terminal.md`).
-#[derive(Clone, Copy)]
-pub enum DeviceSpace {
-    /// Nothing translates here, so a device address is a physical address.
-    Untranslated,
-}
-
-impl DeviceSpace {
-    /// The machine's own addresses for `functions`, or `None` where the unit
-    /// lets a function with no domain of its own reach nothing, which is said.
-    pub fn create(functions: &[crate::drivers::pci::PciDevice]) -> Option<Self> {
-        for function in functions {
-            let stream = StreamId::pci(function.bus, function.dev, function.func);
-            if let Some(why) = unit::domain::untranslated(stream) {
-                log!("iommu: {stream} keeps the machine's addresses: {why}");
-                continue;
-            }
-            if unit::domain::aborts_undomained(stream) {
-                log!("iommu: {stream} reaches nothing: the unit aborts a function with no domain, and none is made before the root bridges are declared");
-                return None;
-            }
-        }
-        Some(Self::Untranslated)
-    }
-
-    /// Put `bytes` at `phys` in this space, ending at or below `limit`, the
-    /// device's own address width; returns what to program the device with.
-    pub fn map(self, phys: u64, bytes: u64, limit: Limit) -> Result<u64, IommuError> {
-        match self {
-            // The pages are the address, so nothing chooses one the device reaches.
-            Self::Untranslated if phys.saturating_add(bytes) > limit.end() => Err(IommuError::AddressesExhausted(limit)),
-            Self::Untranslated => Ok(phys),
-        }
-    }
-}
-
 /// A device's own address space, for a function a *process* drives: it has no
 /// untranslated form, so nothing holding one can hand that process a physical
 /// address to write into a descriptor.
@@ -213,7 +173,13 @@ impl OwnSpace {
         Ok((Self(id), at.raw()))
     }
 
-    /// [`DeviceSpace::map`].
+    /// Put `bytes` at `phys` in this space, ending at or below `limit`, the
+    /// device's own address width; returns what to program the device with.
+    ///
+    /// Read and write both, always: nothing here can give a permission set a
+    /// second value. The only leaf is 2 MiB, and QEMU drops an access its
+    /// cached translation denies rather than recording a fault —
+    /// unexpressible and unobservable both.
     pub fn map(self, phys: u64, bytes: u64, limit: Limit) -> Result<u64, IommuError> {
         unit::domain::map(self.0, phys, bytes, limit).map(Iova::raw)
     }
@@ -231,12 +197,13 @@ impl OwnSpace {
         unit::domain::place(self.0, Iova::translated(at), phys, bytes)
     }
 
-    /// [`DeviceSpace::unmap`].
+    /// Take `bytes` at `at` back, so the pages behind them can be reused.
     pub fn unmap(self, at: u64, bytes: u64) -> Result<(), IommuError> {
         unit::domain::unmap(self.0, Iova::translated(at), bytes)
     }
 
-    /// [`DeviceSpace::attach`].
+    /// Move `bus:device.function` onto this space, every mapping it needs already
+    /// in place: the device is translating the moment this returns.
     pub fn attach(self, bus: u8, device: u8, function: u8) {
         unit::domain::attach(StreamId::pci(bus, device, function), self.0);
     }

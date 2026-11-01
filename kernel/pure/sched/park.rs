@@ -300,6 +300,7 @@ impl<M: SchedMsg> Drop for WaitTicket<M> {
 
 #[cfg(test)]
 mod tests {
+    use crate::sched::affinity::CpuMask;
     extern crate std;
 
     use super::*;
@@ -347,7 +348,7 @@ mod tests {
     const C0: CpuId = CpuId(0);
 
     fn task(key: u64) -> Arc<TaskShared<Msg>> {
-        Arc::new(TaskShared::new(TaskKey(key), TaskState::Running(C0)))
+        Arc::new(TaskShared::new(TaskKey(key), TaskState::Running(C0), CpuMask::ANY))
     }
 
     fn cpus() -> (CpuHandles<Msg>, MailboxConsumer<Msg>) {

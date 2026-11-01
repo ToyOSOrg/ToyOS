@@ -90,19 +90,6 @@ impl Live {
 /// firmware table this kernel reads on AArch64 reserves any.
 pub fn keep_reserved(_id: DomainId, _function: StreamId) {}
 
-/// Why `function` keeps the machine's own addresses rather than a domain of
-/// its own: never, since nothing this kernel reads of the IORT says so.
-pub fn untranslated(_function: StreamId) -> Option<&'static str> {
-    None
-}
-
-/// Whether `function`, given no domain of its own, reaches nothing: the IORT
-/// routes it through the armed unit, whose stream table aborts every stream
-/// no claim gave a domain.
-pub fn aborts_undomained(function: StreamId) -> bool {
-    UNIT.lock().as_ref().is_some_and(|live| live.routes.iter().any(|(stream, ..)| *stream == function))
-}
-
 /// Whether the armed unit governs every requester on `buses`, so one seen
 /// first after boot is aborted: the IORT routes each of their RIDs through
 /// it, where an invalid STE or a StreamID past the table aborts what no

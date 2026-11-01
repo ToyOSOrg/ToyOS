@@ -102,6 +102,7 @@ fn home_of(state: TaskState) -> Option<CpuId> {
 
 #[cfg(test)]
 mod tests {
+    use crate::sched::affinity::CpuMask;
     extern crate std;
 
     use super::*;
@@ -168,7 +169,7 @@ mod tests {
     }
 
     fn task(key: u64, state: TaskState) -> Arc<TaskShared<Msg>> {
-        Arc::new(TaskShared::new(TaskKey(key), state))
+        Arc::new(TaskShared::new(TaskKey(key), state, CpuMask::ANY))
     }
 
     #[test]

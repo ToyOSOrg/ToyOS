@@ -1424,3 +1424,26 @@ fn a_stopped_cpu_stops_taking_work() {
         scenarios::STOPPED_CPU_PROGRAMS,
     );
 }
+
+/// **Masks hold under stealing**: pinned, partial and moving masks on four
+/// CPUs with every thread spawned on cpu0, across seeds, with the core's own
+/// check that no CPU runs a task outside its mask after every pass.
+#[test]
+fn masked_threads_run_only_where_their_masks_name() {
+    const SEEDS: u64 = 40;
+    let scenario = scenarios::masked_steals();
+    sweep(&scenario, SEEDS, |outcome| {
+        assert!(outcome.migrations > 0, "nothing was ever moved, so no mask was tested: {}", outcome.report());
+    });
+}
+
+/// **A steal reaches the queue a mask allows past a sibling's that it does
+/// not**: on [`scenarios::masked_siblings`], each idle CPU's nearest victim
+/// holds only work it may not run, and the work it may run sits one core
+/// away. Across seeds the run ends with every thread done and I15 holding.
+#[test]
+fn a_masked_queue_past_a_siblings_is_stolen() {
+    sweep(&scenarios::masked_siblings(), 40, |outcome| {
+        assert!(outcome.migrations > 0, "nothing was ever stolen: {}", outcome.report());
+    });
+}

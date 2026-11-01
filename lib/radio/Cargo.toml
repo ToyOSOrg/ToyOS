@@ -1,0 +1,17 @@
+[package]
+name = "toyos-radio"
+description = "The radio protocol between wlan and each Wi-Fi driver: scans, joins, EAPOL frames, keys and the link's end, every frame decoded once and refused by name."
+version = "0.1.0"
+edition = "2024"
+license = "MIT OR Apache-2.0"
+publish = false
+
+[lib]
+doctest = false
+
+[dependencies]
+toyos-ieee80211 = { path = "../ieee80211" }
+
+[lints.rust]
+unsafe_code = "forbid"
+warnings = "deny"

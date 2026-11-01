@@ -362,6 +362,7 @@ fn crash_report_panic(info: &core::panic::PanicInfo, rbp: u64) {
 
 /// Double fault handler — runs on IST1. Always from kernel. Never returns.
 pub(super) fn double_fault_handler(frame: &TrapFrame) -> ! {
+    crate::log::console::on_the_uart_for_good();
     let cr2 = cpu::read_cr2();
     let cpu_id = percpu::cpu_id();
     let tid = percpu::current_tid();
@@ -448,6 +449,7 @@ pub(super) fn double_fault_handler(frame: &TrapFrame) -> ! {
 // Untested: firmware leaves CR4.MCE set, so a machine check reaches here, but
 // nothing in the suite can stage one.
 pub(super) fn machine_check_handler(frame: &TrapFrame) -> ! {
+    crate::log::console::on_the_uart_for_good();
     log!("MACHINE CHECK on CPU {}", percpu::cpu_id());
     let ctx = ExceptionContext { frame, cr2: 0 };
     crash_report(&CrashInfo::Exception(&ctx));
@@ -468,6 +470,10 @@ pub(super) fn page_fault_handler(frame: &TrapFrame) {
     }
 
     let fault_addr = cpu::read_cr2();
+    // A Ring 0 fault halts below: before its first record.
+    if !Ring::of_cs(frame.cs).is_user() {
+        crate::log::console::on_the_uart_for_good();
+    }
 
     if frame.error_code & PF_PRESENT != 0 && !Ring::of_cs(frame.cs).is_user()
         && mm::is_kernel_addr(fault_addr)
@@ -518,6 +524,10 @@ pub(super) fn exception_handler(frame: &TrapFrame) -> ! {
 fn fatal_exception(ctx: &ExceptionContext) -> ! {
     let prev = percpu::swap_fault_state(CpuFaultState::Fatal);
     let recursive = prev == CpuFaultState::Fatal || prev == CpuFaultState::Panic;
+    // Before the first record of a report that halts the machine.
+    if recursive || !ctx.ring().is_user() {
+        crate::log::console::on_the_uart_for_good();
+    }
 
     // Must run first: a panic anywhere below reaches the panic handler as
     // DOUBLE PANIC, which can only report what was captured here.

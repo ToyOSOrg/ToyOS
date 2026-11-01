@@ -529,7 +529,9 @@ enum Job {
     AddPartitions,
     Retag(Vec<(Owned, Guid)>),
     Write(Owned),
-    Scratch(Sd),
+    /// A scratch disk's table on `sd`, which `sysfs` sizes at `sectors` of
+    /// 512 bytes whatever its logical block.
+    Scratch { sd: Sd, sectors: u64 },
 }
 
 /// One word as the machine's login shell must receive it: `ssh` hands the whole
@@ -661,12 +663,12 @@ impl Target {
                 out.push(internal);
                 out
             }
-            // A fresh table whose one partition spans the disk (sgdisk(8),
-            // `--new`'s 0 for the first and last sector), marked scratch.
-            Job::Scratch(sd) => words(&[
+            // A fresh table whose one partition starts at the default first
+            // sector, 1 MiB (sgdisk(8), `--new`'s 0), marked scratch.
+            Job::Scratch { sd, sectors } => words(&[
                 SGDISK,
                 "--clear",
-                "--new=1:0:0",
+                &format!("--new=1:0:+{}M", scratch_mib(*sectors)),
                 &format!("--typecode=1:{}", Guid::TOYOS_SCRATCH),
                 "--change-name=1:ToyOS-scratch",
                 &sd.node().whole(),
@@ -1101,9 +1103,9 @@ impl Driver {
     /// disk erases its tables and nothing inside a partition, and the new
     /// partition starts where the old first one did, so the old ESP's FAT would
     /// otherwise be read as the scratch partition's.
-    fn make_scratch(&self, sd: Sd) -> Result<bool, Refusal> {
+    fn make_scratch(&self, sd: Sd, sectors: u64) -> Result<bool, Refusal> {
         self.as_root("wiping its signatures", Job::Wipe(sd), None)?;
-        if self.as_root("writing the scratch table", Job::Scratch(sd), None)?.is_none() {
+        if self.as_root("writing the scratch table", Job::Scratch { sd, sectors }, None)?.is_none() {
             return Ok(false);
         }
         self.reread(sd)?;
@@ -1610,6 +1612,13 @@ fn parts_of(listing: &str, sd: Sd) -> Result<Vec<Listed>, Refusal> {
         .ok_or_else(|| Refusal::Adopt(format!("{} is no disk the machine lists", sd.node().whole())))
 }
 
+/// The scratch partition's length on a disk of `sectors` 512-byte sectors.
+/// Whole mebibytes are whole 4 KiB blocks, which the block service serves no
+/// partition without, and the mebibyte left at the end holds the backup table.
+fn scratch_mib(sectors: u64) -> u64 {
+    ((sectors * 512) >> 20).saturating_sub(2)
+}
+
 /// Whether `sd` of `listing` may be erased to make it a scratch disk: listed,
 /// and holding no ToyOS image, which a disk somebody flashed may still be.
 fn adoptable(listing: &str, sd: Sd, image: Carrying) -> Result<(), Refusal> {
@@ -1649,7 +1658,7 @@ fn adopt_scratch(target: &Target, dry_run: bool, sd: Sd) -> Result<(), Refusal> 
     if !disk.removable {
         return Err(Refusal::Identity { field: "removable", want: "1".to_string(), got: "0".to_string() });
     }
-    if !driver.make_scratch(sd)? {
+    if !driver.make_scratch(sd, disk.sectors)? {
         println!("dry run: nothing was erased");
         return Ok(());
     }
@@ -2931,6 +2940,20 @@ mod tests {
         assert!(matches!(Args::parse(&words(&["--adopt-scratch", "/dev/mmcblk0"])), Err(Refusal::Usage(_))));
         let both = Args::parse(&words(&["--record", "--adopt-scratch", "/dev/sdb"])).unwrap_err();
         assert!(matches!(both, Refusal::Usage(_)));
+    }
+
+    /// **A scratch partition is whole 4 KiB blocks**, on the T14's scratch
+    /// stick whose sector count is not, with room for the backup table after
+    /// it.
+    #[test]
+    fn a_scratch_partition_is_whole_blocks_short_of_the_backup() {
+        let sectors = 60_062_500;
+        let argv = target().argv(&Job::Scratch { sd: Sd(b'b'), sectors }, &home());
+        assert_eq!(argv[2], "--new=1:0:+29325M");
+        let (first, count) = (2048, scratch_mib(sectors) * 2048);
+        assert_eq!(count % 8, 0);
+        assert!(first + count + 33 <= sectors, "the backup table has no room");
+        assert_eq!(scratch_mib(4 << 11), 2, "a 4 MiB disk keeps two");
     }
 
     /// **The mount point is under the home the machine names**, and a home

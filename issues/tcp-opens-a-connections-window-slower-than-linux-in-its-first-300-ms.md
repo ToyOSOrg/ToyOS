@@ -314,6 +314,70 @@ after it:
   bucket. The half-window bound holds more on the short round trip, as
   expected.
 
-**Exit**: `osbench_lan` on the T14 reads `lan.wired.tcp.upload` at Linux's
-in the same session, with the first 300 ms read at the receiver no slower, or
-the cause is named and owned by its own issue.
+**The 100 ms miss is not resolved by the bench, 2026-11-01.** Three readings
+say the parity boot's 30 KB is below what the session form can tell apart:
+
+- The rule cannot pass reliably at parity. With one ToyOS run between two Linux
+  runs and all three drawn alike, ToyOS is the lowest of the three one time in
+  three. A third of sessions would miss at exact parity.
+- The instrument's step is a read. The peer counts at a mark what it had
+  before the read that passed it, and it reads up to 64 KiB at a time
+  (`osbench-lan`'s `RampCount`). So each round's mark can sit up to 64 KiB
+  low, and how far depends on how the sender's segments meet the peer's
+  reads.
+- The marks spread more than the miss, and where they spread is the session.
+  Linux's two runs differed by 280 KB at 100 ms in the parity boot. Across
+  this record's sessions Linux read 5.7–6.5 MB. The paced sender read 6.3–6.6
+  MB in its A/B, above both Linux runs (5.7 MB) in all three pairs, and 6.07 MB
+  in the parity boot.
+
+A model of the ramp gives no candidate either. On [tcp]'s host network, a
+1 Gb/s sender into a card at 78 frames a millisecond (113 MB/s) at round trips
+of 2, 4 and 8 ms delivers 10.26, 8.27 and 3.49 MB by 100 ms.
+
+- Two changes move those by under 0.1 MB: the 1 ms bucket without the
+  half-window bound, and a window stop that grows cwnd at half of cwnd in
+  flight, as a card stop does (RFC 9438 §4.6 admits RFC 7661 there).
+- Removing pacing costs 0.07, 0.48 and 1.1 MB.
+
+That model's receiver is [tcp]'s, not the peer's Linux. On the bench, both
+senders are held by the peer's window first: ToyOS for 66 ms a connection in
+the parity boot, Linux for 92–148 ms. So the first 100 ms reads mostly the
+receiver's window growth, which both senders share.
+
+`osbench` now reports each round's marks beside their mean
+(`peer_received_by_<ms>ms_bytes`), so a session gives five connections a
+run and the run's own spread.
+
+**The exit's first session read no ToyOS row, 2026-11-01**
+([evidence](https://github.com/ToyOSOrg/evidence/tree/35f09268e09714a8547496bdd766bcd3ca998325/r1)). This was Linux, ToyOS at `4f52c3056`, Linux, all
+exiting 0. ToyOS's `osbench_lan` found the peer and then refused the group:
+`no netstack link holds 10.0.2.15`. std's `TcpStream::local_addr` answers
+QEMU's user-network address whatever the lease is, and since #1122 osbench
+names a connection's link by that address. The T14's lease is not it. So the
+session does not decide, and the next one waits on
+`issues/getsockname-answers-an-address-nobody-asked-netstack-for.md`.
+
+Its Linux runs do give the per-connection spread the rule needs:
+
+- p50 113 and 113 MB/s.
+- At 100 ms the rounds ran 5.82–6.63 MB and 5.13–6.38 MB, a standard
+  deviation of 478 KB over the ten. The parity boot's 30 KB miss is a
+  sixteenth of that.
+- At 300 ms they ran 28.8–30.0 MB and 27.7–29.7 MB.
+- The two runs do not differ: the two-sided rank test gives p = 0.69 at
+  100 ms and 0.42 at 300 ms. So the rule's exchangeability check passes.
+
+**Exit**: in one T14 session, Linux, ToyOS, Linux, `osbench_lan`'s
+`lan.wired.tcp.upload` reads:
+
+- p50 at or above the lower Linux run's, less 1 MB/s;
+- nothing resent beyond a loss probe;
+- at 100 ms and at 300 ms, ToyOS's five rounds not ranked below Linux's ten:
+  the exact one-sided rank test gives p > 0.05, so parity fails one session
+  in twenty.
+
+If Linux's two runs differ at either mark at p ≤ 0.05 by the exact two-sided
+rank test, the connections are not exchangeable across runs. Then the session
+does not decide, and an interleaving of Linux, ToyOS, Linux, ToyOS, Linux
+compares runs instead. Or the cause is named and owned by its own issue.

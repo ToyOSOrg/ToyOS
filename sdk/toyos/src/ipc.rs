@@ -470,6 +470,16 @@ impl<const MAX: usize> FrameRx<MAX> {
         &self.payload[..len]
     }
 
+    /// Zero the payload buffer, so a secret a frame carried does not outlive its reading. The
+    /// stores are volatile: a buffer about to be freed is still wiped.
+    pub fn wipe(&mut self) {
+        for byte in &mut self.payload {
+            // SAFETY: a valid, exclusively borrowed `u8`.
+            unsafe { core::ptr::write_volatile(byte, 0) };
+        }
+        core::sync::atomic::compiler_fence(core::sync::atomic::Ordering::SeqCst);
+    }
+
     /// The handles the last frame carried, now the caller's to claim.
     pub fn take_batch(&mut self) -> Batch {
         core::mem::replace(&mut self.held, Batch::EMPTY)

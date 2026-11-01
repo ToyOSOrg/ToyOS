@@ -33,6 +33,11 @@ the boot stick lost it:
 
 QEMU's machines still boot off a stick (`the_log_lands_on_the_boot_stick`).
 
+No row that writes the scratch disk is built. The owner declined the
+comparison of ToyOS's resets with Linux's restart
+(`issues/a-reset-can-leave-a-usb-stick-hung-until-its-power-is-removed.md`),
+and that does not discharge this exit.
+
 **Exit**: a metal row drives a USB stick that is not the boot disk — the
 scratch disk (`issues/the-scratch-disk-adopt-scratch-makes-is-not-served.md`)
 — and judges usbd serving it, a reset under a write to it, and a tone beside

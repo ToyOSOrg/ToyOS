@@ -49,6 +49,7 @@ extern crate alloc;
 
 use loom::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 use loom::sync::Arc;
+use kernel_loom::sched::affinity::CpuMask;
 use kernel_loom::sched::cpu::{CpuHandle, CpuHandles};
 use kernel_loom::sched::topology::Topology;
 use kernel_loom::sched::hw::CpuId;
@@ -173,7 +174,7 @@ fn world() -> (Arc<World>, MailboxConsumer<Msg>) {
 }
 
 fn task(key: u64) -> Arc<TaskShared<Msg>> {
-    Arc::new(TaskShared::new(TaskKey(key), TaskState::Running(CPU0)))
+    Arc::new(TaskShared::new(TaskKey(key), TaskState::Running(CPU0), CpuMask::ANY))
 }
 
 fn drain(rx: &mut MailboxConsumer<Msg>, preempt: &PreemptModel) -> Vec<Msg> {
@@ -553,7 +554,7 @@ fn a_transition_racing_an_opening_gate_is_never_missed() {
         let (world, mut rx) = world();
         let gate = Arc::new(Gate::new(0));
         let stopper = task(1);
-        let thread = Arc::new(TaskShared::<Msg>::new(TaskKey(2), TaskState::Running(CPU1)));
+        let thread = Arc::new(TaskShared::<Msg>::new(TaskKey(2), TaskState::Running(CPU1), CpuMask::ANY));
 
         let poster = {
             let world = world.clone();
@@ -878,7 +879,7 @@ fn an_answer_wakes_the_submitter_its_look_hid_the_poll_from() {
         let devices = devices_polled(&ring, 1);
         let submitters = [
             (task(1), CPU0),
-            (Arc::new(TaskShared::new(TaskKey(2), TaskState::Running(CPU1))), CPU1),
+            (Arc::new(TaskShared::new(TaskKey(2), TaskState::Running(CPU1), CpuMask::ANY)), CPU1),
         ];
 
         let waiting: Vec<_> = submitters

@@ -1,9 +1,10 @@
 //! What std does not offer portably, as each OS offers it: the cheapest
 //! syscall, a futex, a clock every process shares, anonymous mappings, IPC
 //! between processes, a process's own accounting, the machine's
-//! conditions and its power counters (`power`). Both modules export the same names; Linux adds affinity,
-//! which ToyOS has none of, and the readers of its cgroup and autogroup, and
-//! ToyOS the diagnostics the tail group reads (`diag`).
+//! conditions and its power counters (`power`), and the CPU a thread runs on
+//! and is pinned to. Both modules export the same names; Linux adds the
+//! readers of its cgroup and autogroup, and ToyOS the diagnostics the tail
+//! group reads (`diag`).
 
 #[cfg(target_os = "linux")]
 #[path = "linux.rs"]
@@ -14,6 +15,20 @@ mod imp;
 mod imp;
 
 pub use imp::*;
+
+static ALLOWED: std::sync::OnceLock<Vec<usize>> = std::sync::OnceLock::new();
+
+/// Read the CPUs this process may run on, before any thread is pinned.
+pub fn start() {
+    ALLOWED.set(thread_cpus()).expect("sys::start runs once");
+}
+
+/// The CPUs this process may run on, as its main thread began with them. A
+/// mask is per thread on both systems, so a placed thread's own names only its
+/// CPU, and a placement made from one must not read it.
+pub fn allowed_cpus() -> Vec<usize> {
+    ALLOWED.get().expect("sys::start ran first").clone()
+}
 
 /// What a process can read of its own accounting: Linux its context
 /// switches and page faults; ToyOS nothing.

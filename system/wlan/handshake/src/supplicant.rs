@@ -315,7 +315,7 @@ impl Supplicant {
     ) -> Result<Step, Refused> {
         if key.info.has(Info::INSTALL) || key.info.has(Info::ENCRYPTED) {
             return Err(if key.info.has(Info::ENCRYPTED) {
-                Refused::Plaintext
+                Refused::EncryptedMessage1
             } else {
                 Refused::UnknownMessage
             });

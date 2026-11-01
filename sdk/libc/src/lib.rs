@@ -4,6 +4,7 @@
 
 extern crate alloc;
 
+mod affinity;
 mod alarmreq;
 mod signal;
 mod sigreq;

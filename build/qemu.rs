@@ -46,13 +46,19 @@
 //! slow is the clock, RTF well below 1.0 is synthesis not keeping up.
 
 use std::fs::File;
-use std::io::IsTerminal;
+use std::io::{IsTerminal, Write};
 use std::os::fd::AsFd;
+use std::os::unix::net::UnixListener;
 use std::path::PathBuf;
 use std::process::{Command, Stdio};
 
 use toyos_build::arch::{Accel, Arch};
-use toyos_build::kernelconsole;
+use toyos_build::vmconsole;
+
+/// The UART's socket on a virtio machine, and the file every byte it says is
+/// kept in.
+const UART_SOCKET: &str = "/tmp/toyos-uart.sock";
+const UART_LOG: &str = "/tmp/toyos-uart-early.log";
 
 /// The hardware shape QEMU presents to the guest.
 ///
@@ -61,7 +67,7 @@ use toyos_build::kernelconsole;
 /// virtio device, which changes the console, the network, and audio too.
 #[derive(Clone, Copy, PartialEq)]
 pub enum Profile {
-    /// virtio-gpu for the display, virtio-console for the console, plus
+    /// virtio-gpu for the display, a virtio-serial port for the console, plus
     /// virtio-net and virtio-sound.
     Virtio,
     /// `-vga std`, so firmware publishes a GOP and the kernel takes the
@@ -256,24 +262,21 @@ pub fn launch(opts: &Options) {
         qemu.arg("-device")
             .arg(format!("virtio-sound-pci,audiodev=audio0,streams=1{platform}"));
 
-        // The clipboard's channel, just before the console's function, so it
-        // enumerates first and the kernel's console rule runs.
         qemu.args(toyos_build::vdagent::args(platform));
 
-        // Console wiring: virtio-console on stdio is the primary I/O channel
-        // (the kernel switches to it once virtio-console init completes —
-        // see drivers/virtio_console.rs). UART stays on a file so early-boot
-        // logs (before virtio is up) and panic fallback are still captured.
-        qemu.arg("-serial")
-            .arg("file:/tmp/toyos-uart-early.log")
+        // The console's port on stdio, where `/system/bin/virtio-console`
+        // carries the log once userland runs; the UART on a socket this
+        // launch listens on, whose lines the port cannot carry — a fatal
+        // path's report, the stop's, the whole log again once the carrier
+        // goes or stalls — the terminal is shown beside it, every byte of it
+        // kept in [`UART_LOG`].
+        qemu.arg("-chardev")
+            .arg(format!("socket,id=uart0,path={UART_SOCKET}"))
+            .arg("-serial")
+            .arg("chardev:uart0")
             .arg("-chardev")
             .arg("stdio,id=cs0,signal=off")
-            .arg("-device")
-            .arg(format!(
-                "virtio-serial-pci-non-transitional,id=virtio-serial0,max_ports=1{platform}"
-            ))
-            .arg("-device")
-            .arg("virtconsole,chardev=cs0,id=console0");
+            .args(toyos_build::vmconsole::args("cs0", platform));
     } else if opts.mute {
         eprintln!("metal-sim: no 16550 — the framebuffer is the only channel out");
         qemu.arg("-serial").arg("none");
@@ -309,8 +312,15 @@ pub fn launch(opts: &Options) {
     qemu.stderr(stderr_file);
 
     eprintln!("QEMU stderr log: /tmp/toyos-qemu-stderr.log");
-    // A terminal is shown the console in colour; a file or a pipe gets its bytes.
-    if !std::io::stdout().is_terminal() {
+    // Listening before QEMU starts, which connects as it makes the chardev.
+    let listener = shape.virtio.then(|| {
+        let _ = std::fs::remove_file(UART_SOCKET);
+        UnixListener::bind(UART_SOCKET).unwrap_or_else(|e| panic!("the UART's socket {UART_SOCKET}: {e}"))
+    });
+    // A terminal is shown the console in colour; a file or a pipe gets its
+    // bytes. Without a UART to merge in, QEMU writes to it itself.
+    let terminal_out = std::io::stdout().is_terminal();
+    if !terminal_out && listener.is_none() {
         qemu.status().expect("failed to execute QEMU");
         return;
     }
@@ -318,9 +328,29 @@ pub fn launch(opts: &Options) {
     let mut terminal = File::from(std::io::stdout().as_fd().try_clone_to_owned().expect("this process's stdout"));
     let mut child = qemu.stdout(Stdio::piped()).spawn().expect("failed to execute QEMU");
     let console = child.stdout.take().expect("QEMU's stdout is piped");
+    let uart = listener.map(|listener| {
+        eprintln!("UART log: {UART_LOG}");
+        vmconsole::UartSocket::accept(&listener, &mut child, std::path::Path::new(UART_LOG)).unwrap_or_else(|why| {
+            let _ = child.kill();
+            panic!("{why}")
+        })
+    });
+    let relayed = if terminal_out {
+        vmconsole::relay(console, uart, &mut terminal)
+    } else {
+        let mut failed = None;
+        vmconsole::merge(console, uart, |line| match terminal.write_all(line) {
+            Ok(()) => true,
+            Err(e) => {
+                failed = Some(e);
+                false
+            }
+        });
+        failed.map_or(Ok(()), Err)
+    };
     // The console ends when QEMU does; a relay that fails first ends QEMU, which
     // would otherwise run on into a pipe nobody reads.
-    if let Err(relay) = kernelconsole::relay(console, &mut terminal) {
+    if let Err(relay) = relayed {
         // SIGTERM, not `Child::kill`'s SIGKILL: QEMU gives the terminal back its
         // modes only on its own exit path.
         let pid = libc::pid_t::try_from(child.id()).expect("a pid is a pid_t");

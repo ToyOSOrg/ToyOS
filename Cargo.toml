@@ -25,13 +25,13 @@ members = [
     "build/root",
     "kernel",
     "kernel/amdvi",
-    "kernel/dma",
     "kernel/gicv3",
     "kernel/its",
     "kernel/loom",
     "kernel/pci",
     "kernel/phys",
     "kernel/proclife",
+    "kernel/register",
     "kernel/sim",
     "kernel/smmu",
     "lib/acpi",
@@ -64,6 +64,7 @@ members = [
     "lib/parity",
     "lib/pci-claim",
     "lib/quiesce",
+    "lib/radio",
     "lib/random",
     "lib/rootimage",
     "lib/scsi",
@@ -80,7 +81,9 @@ members = [
     "lib/userbound",
     "lib/vdagent",
     "lib/virtio",
+    "lib/virtio-serial",
     "lib/wallclock",
+    "lib/wifi",
     "loader",
     "sdk/abi",
     "sdk/filepicker",
@@ -149,9 +152,13 @@ members = [
     "system/usbd",
     "system/usbd/xhci",
     "system/vdagent",
+    "system/virtio-console",
     "system/vdagent/bridge",
     "system/virtio-net",
+    "system/wifi",
+    "system/wlan",
     "system/wlan/handshake",
+    "system/wlan/station",
     "tests/guest/hangupholder",
     "tests/guest/inputsink",
     "tests/guest/kernelprobe",
@@ -265,9 +272,13 @@ toyos-osrelease = { path = "sdk/osrelease" }
 # gate on every manifest reads what the supervisor reads.
 toyos-swap = { path = "lib/swap" }
 toyos-session = { path = "lib/session" }
+# The radio and wifi ports and the rows alone that may hold them.
+toyos-radio = { path = "lib/radio" }
+toyos-wifi = { path = "lib/wifi" }
 # QEMU's clipboard channel's port name, id and port count, so the launch reads
 # the declaration the guest's agent drives.
 toyos-vdagent = { path = "lib/vdagent" }
+toyos-virtio-serial = { path = "lib/virtio-serial" }
 # The watchdog's parameter name, so the gate over `kernel/src/params.rs` reads
 # the same constant the kernel and the bootloader do.
 toyos-tco = { path = "lib/tco" }

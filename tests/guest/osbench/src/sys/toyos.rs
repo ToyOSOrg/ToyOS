@@ -2,9 +2,65 @@ use std::sync::atomic::AtomicU32;
 
 use toyos_abi::syscall::{self, VmAt, VmProt};
 
-/// ToyOS has no call that says which CPU runs a thread, so CPUs are named as
-/// the architecture's own instructions name them.
-pub use crate::arch::{core_of, cpu_model, current_cpu, threads_per_core};
+pub use crate::arch::{cpu_model, threads_per_core};
+
+/// The kernel's index of the CPU running the caller: what a mask, the
+/// kernel's own records and every CPU field this program prints name it by.
+pub fn current_cpu() -> u32 {
+    syscall::current_cpu()
+}
+
+/// The core CPU `cpu` belongs to: two CPUs of one core are SMT siblings.
+/// ToyOS has no call that says, so each CPU reads its APIC ID once, from a
+/// thread pinned there.
+pub fn core_of(cpu: u32) -> u32 {
+    static APICS: std::sync::OnceLock<Vec<u32>> = std::sync::OnceLock::new();
+    let apics = APICS.get_or_init(|| {
+        (0..syscall::cpu_count() as usize)
+            .map(|on| {
+                std::thread::spawn(move || {
+                    pin_self(on);
+                    assert_eq!(current_cpu() as usize, on, "pinned to CPU {on}");
+                    crate::arch::apic_id()
+                })
+                .join()
+                .expect("a CPU's APIC ID reader panicked")
+            })
+            .collect()
+    });
+    crate::arch::core_of_apic(apics[cpu as usize])
+}
+
+/// A thread of this process, as [`thread_set_affinity`](syscall::thread_set_affinity) names it.
+pub type Tid = u64;
+
+pub fn tid() -> Tid {
+    u64::from(toyos_abi::current_tid().0)
+}
+
+/// The CPUs the calling thread may run on.
+pub fn thread_cpus() -> Vec<usize> {
+    let mask = syscall::thread_affinity(tid()).expect("the calling thread's own mask");
+    (0..mask.len() * 64).filter(|&cpu| mask[cpu / 64] & 1 << (cpu % 64) != 0).collect()
+}
+
+fn set_affinity(tid: Tid, cpus: &[usize]) {
+    let mut mask = [0u64; syscall::CPU_MASK_WORDS];
+    for &cpu in cpus {
+        mask[cpu / 64] |= 1 << (cpu % 64);
+    }
+    syscall::thread_set_affinity(tid, &mask).unwrap_or_else(|e| panic!("thread_set_affinity({tid}, {cpus:?}): {e:?}"));
+}
+
+/// Keep the calling thread on CPU `cpu`.
+pub fn pin_self(cpu: usize) {
+    set_affinity(tid(), &[cpu]);
+}
+
+/// Let thread `tid` run anywhere this process may.
+pub fn unpin(tid: Tid) {
+    set_affinity(tid, &super::allowed_cpus());
+}
 
 pub fn null_syscall() {
     std::hint::black_box(syscall::getpid());
@@ -73,9 +129,6 @@ pub fn log_time_ns(monotonic: u64) -> u64 {
 
 /// ToyOS gives a thread the stack its builder asks for, in whole pages.
 pub const STACK_FLOOR: &str = "none";
-
-/// What [`current_cpu`] names a CPU by, for the fields that print one.
-pub const CPU_NAMING: &str = "apic";
 
 /// Native IPC: a connection through a port, between this process and a child
 /// it endows the port's acceptor.
@@ -227,9 +280,9 @@ pub mod diag {
         cursor: Option<TraceCursor<Vec<u64>>>,
     }
 
-    /// One CPU's counters, by the kernel's index of the CPU and the APIC id
-    /// it read off itself, which is what [`current_cpu`](super::current_cpu)
-    /// names it by.
+    /// One CPU's counters, by the kernel's index of the CPU, which is what
+    /// [`current_cpu`](super::current_cpu) names it by, and the APIC id it
+    /// read off itself.
     #[derive(Clone)]
     pub struct CpuCounts {
         /// The CPU did not answer within the read's bound: its values are the
@@ -430,7 +483,7 @@ pub mod power {
                 }
                 Ok(CpuPower {
                     cpu: c.cpu,
-                    core: crate::arch::core_of(c.apic),
+                    core: crate::arch::core_of_apic(c.apic),
                     tsc: c.stamp.ok_or_else(|| Refused::Failed(format!("cpu{}'s record carries no stamp", c.cpu)))?,
                     aperf: c.aperf,
                     mperf: c.mperf,

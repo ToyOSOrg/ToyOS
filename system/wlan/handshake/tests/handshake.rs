@@ -338,7 +338,7 @@ fn key_information_no_authenticator_sends_is_refused() {
         (REQUEST, 0, Refused::NotFromAuthenticator),
         (ERROR, 0, Refused::NotFromAuthenticator),
         (INSTALL, 0, Refused::UnknownMessage),
-        (ENCRYPTED, 0, Refused::Plaintext),
+        (ENCRYPTED, 0, Refused::EncryptedMessage1),
     ] {
         let mut m1 = b.ap.message_1();
         m1.info = (m1.info | set) & !clear;

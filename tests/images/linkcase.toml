@@ -9,7 +9,7 @@ start = ["acpiserver", "logkeeper", "diskserver", "fileserver", "netstack", "tes
 [programs.logkeeper]
 service = true
 syscap = ["logread"]
-serves = ["log"]
+serves = ["log", "log-carrier"]
 
 [programs.netstack]
 service = true
@@ -51,3 +51,8 @@ receives = ["block"]
 service = true
 devices = ["acpi"]
 receives = ["power"]
+
+# The virtio-serial driver, for the VM's console alone: this image runs no agent.
+[programs.virtio-console]
+drives = ["pci:07:80:00/1af4:1043"]
+receives = ["log-carrier"]

@@ -109,7 +109,7 @@ a stop whose usbd died, its function reset by its claim's release. The
 guard for that path was `stick_survives_a_reset_under_load`'s
 `boot.usbload.stick_secs`, `stick_load` writing the stick through usbd until
 the boot deadline reset the machine. Since the benches boot off their NVMe it
-writes the NVMe, and no row writes a stick on a bench
+writes the NVMe, and no row writes a stick on a bench: that row is not built
 (`issues/no-bench-row-drives-usb-storage-since-the-benches-boot-off-nvme.md`).
 
 ## Exit condition

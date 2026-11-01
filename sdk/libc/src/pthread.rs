@@ -292,6 +292,49 @@ pub unsafe extern "C" fn pthread_sigmask(how: i32, set: *const u64, old: *mut u6
     }
 }
 
+/// Linux's, for the calling thread: `pid` 0, the one thread this library can
+/// name. Any other is `ESRCH`.
+///
+/// # Safety
+/// `mask` points at `cpusetsize` readable bytes.
+#[no_mangle]
+pub unsafe extern "C" fn sched_setaffinity(pid: i32, cpusetsize: usize, mask: *const u8) -> i32 {
+    if pid != 0 {
+        return crate::posix_io::refuse(ESRCH);
+    }
+    let set = unsafe { core::slice::from_raw_parts(mask, cpusetsize) };
+    match crate::affinity::requested(set, toyos_abi::syscall::cpu_count() as usize) {
+        Ok(words) => match toyos_abi::syscall::thread_set_affinity(u64::from(toyos_abi::current_tid().0), &words) {
+            Ok(()) => 0,
+            Err(e) => crate::posix_io::set_errno(e),
+        },
+        Err(errno) => crate::posix_io::refuse(errno),
+    }
+}
+
+/// # Safety
+/// `mask` points at `cpusetsize` writable bytes.
+#[no_mangle]
+pub unsafe extern "C" fn sched_getaffinity(pid: i32, cpusetsize: usize, mask: *mut u8) -> i32 {
+    if pid != 0 {
+        return crate::posix_io::refuse(ESRCH);
+    }
+    let words = match toyos_abi::syscall::thread_affinity(u64::from(toyos_abi::current_tid().0)) {
+        Ok(words) => words,
+        Err(e) => return crate::posix_io::set_errno(e),
+    };
+    let set = unsafe { core::slice::from_raw_parts_mut(mask, cpusetsize) };
+    match crate::affinity::fill(set, &words, toyos_abi::syscall::cpu_count() as usize) {
+        Ok(()) => 0,
+        Err(errno) => crate::posix_io::refuse(errno),
+    }
+}
+
+#[no_mangle]
+pub extern "C" fn sched_getcpu() -> i32 {
+    toyos_abi::syscall::current_cpu() as i32
+}
+
 #[no_mangle]
 pub extern "C" fn sched_yield() -> i32 {
     // No syscall gives the processor up; this is what std's `yield_now` does.

@@ -126,9 +126,10 @@ const RUN: u8 = 1;
 const DONE: u8 = 2;
 const STOP: u8 = 3;
 
-/// A partner: where it parked, where it ran when woken, and how far it has got.
+/// A partner: whether it has parked, where it ran when woken, and how far it
+/// has got.
 struct Seat {
-    parked_on: AtomicU32,
+    parked: AtomicBool,
     ran_on: AtomicU32,
     phase: AtomicU8,
 }
@@ -143,22 +144,18 @@ fn park_until(seat: &Seat, until: &[u8]) -> u8 {
     }
 }
 
-/// The CPU device interrupts reach on ToyOS (`kernel/src/arch/x86_64/apic.rs`),
-/// left out of the staging on both systems so an interrupt's pass never
-/// drains a wake early.
+/// The CPU device interrupts reach on ToyOS, the kernel's cpu0
+/// (`kernel/src/arch/x86_64/apic.rs`), left out on both systems so an
+/// interrupt's pass never drains a wake early.
 pub const IRQ_CPU: u32 = 0;
 const ROUNDS: usize = 200;
 
 /// A wake onto a CPU a spinner holds, beside idle CPUs: each round, from a
 /// waker spinning on a CPU of its own, wakes a fresh partner that parked on
-/// the busy one and times it to running, ns. Linux pins the waker, each
-/// partner until just before its wake, and the spinner. ToyOS has no
-/// affinity and stages them, so a round is skipped and counted whenever its
-/// partner parked elsewhere, the spinner left the busy CPU, or the waker is
-/// on the busy CPU or the interrupts'. Either kernel may run the wake where it
-/// is or move it to an idle CPU, and `ran_on_busy` counts how often it stayed.
-/// A run every round of which was skipped is reported, not refused: on ToyOS
-/// that is the placement this benchmark could not hold.
+/// the busy one and times it to running, ns. Both systems pin the waker, each
+/// partner until it has parked, and the spinner. Either kernel may run
+/// the wake where it is or move it to an idle CPU, and `ran_on_busy` counts
+/// how often it stayed.
 pub fn onto_busy() {
     const BENCH: &str = "wake.onto_busy";
     if crate::cpus() < 3 {
@@ -176,9 +173,6 @@ pub fn onto_busy() {
     waker.thread.join().expect("the waker panicked");
     let measured = outcome.lock().unwrap().take().expect("the waker said nothing");
     match measured {
-        Ok((ns, extra)) if ns.is_empty() => {
-            crate::report::unmeasured(BENCH, "every round was skipped, as the counts say", &extra)
-        }
         Ok((mut ns, extra)) => result(BENCH, "ns", &mut ns, &extra),
         Err(why) => refuse(BENCH, why),
     }
@@ -188,8 +182,12 @@ type Measured = Result<(Vec<u64>, Vec<(&'static str, String)>), String>;
 
 fn rounds_onto_busy() -> Measured {
     let waker_on = sys::current_cpu();
+    let busy = sys::allowed_cpus()
+        .into_iter()
+        .map(|cpu| cpu as u32)
+        .find(|&on| on != waker_on && on != IRQ_CPU)
+        .ok_or("no CPU but the waker's and the interrupts' to keep busy")?;
     let mut partners: Vec<(Placed, Arc<Seat>)> = Vec::with_capacity(ROUNDS);
-    let mut busy = None;
     let end = |partners: Vec<(Placed, Arc<Seat>)>| {
         for (partner, seat) in partners {
             seat.phase.store(STOP, Ordering::Release);
@@ -198,16 +196,11 @@ fn rounds_onto_busy() -> Measured {
         }
     };
     while partners.len() < ROUNDS {
-        let seat = Arc::new(Seat {
-            parked_on: AtomicU32::new(u32::MAX),
-            ran_on: AtomicU32::new(u32::MAX),
-            phase: AtomicU8::new(PARKED),
-        });
-        let wanted = |on: u32| on != waker_on && on != IRQ_CPU && busy.is_none_or(|b| b == on);
+        let seat = Arc::new(Seat { parked: AtomicBool::new(false), ran_on: AtomicU32::new(u32::MAX), phase: AtomicU8::new(PARKED) });
         let body = {
             let seat = seat.clone();
             move || {
-                seat.parked_on.store(sys::current_cpu(), Ordering::Release);
+                seat.parked.store(true, Ordering::Release);
                 if park_until(&seat, &[RUN, STOP]) == RUN {
                     seat.ran_on.store(sys::current_cpu(), Ordering::Relaxed);
                     seat.phase.store(DONE, Ordering::Release);
@@ -215,29 +208,25 @@ fn rounds_onto_busy() -> Measured {
                 }
             }
         };
-        match place::spawn_on(wanted, body) {
-            Ok(placed) => {
-                busy = Some(placed.cpu);
-                partners.push((placed, seat));
-            }
+        match place::spawn_on(|on| on == busy, body) {
+            Ok(placed) => partners.push((placed, seat)),
             Err(why) => {
-                let staged = partners.len();
+                let placed = partners.len();
                 end(partners);
-                return Err(format!("partner {staged} was not placed: {why}"));
+                return Err(format!("partner {placed} was not placed: {why}"));
             }
         }
     }
-    let busy = busy.expect("ROUNDS is not zero");
 
     let stop = Arc::new(AtomicBool::new(false));
-    let at = Arc::new(AtomicU32::new(u32::MAX));
+    let spinning = Arc::new(AtomicBool::new(false));
     let spinner = {
-        let (stop, at) = (stop.clone(), at.clone());
+        let (stop, spinning) = (stop.clone(), spinning.clone());
         place::spawn_on(
             |on| on == busy,
             move || {
+                spinning.store(true, Ordering::Relaxed);
                 while !stop.load(Ordering::Relaxed) {
-                    at.store(sys::current_cpu(), Ordering::Relaxed);
                     std::hint::black_box(crate::chunk());
                 }
             },
@@ -250,30 +239,21 @@ fn rounds_onto_busy() -> Measured {
             return Err(format!("no spinner on CPU {busy}: {why}"));
         }
     };
-    let spinning = spin_until("the spinner's first word", || at.load(Ordering::Relaxed) != u32::MAX);
+    let mut failed = spin_until("the spinner's start", || spinning.load(Ordering::Relaxed)).err();
 
-    let mut ns = Vec::with_capacity(ROUNDS);
-    let (mut ran_on_busy, mut spinner_away, mut parked_elsewhere, mut waker_crowded) = (0usize, 0usize, 0usize, 0usize);
-    let mut failed = spinning.err();
+    // Each partner is unpinned once it has parked, before any round: a parked
+    // thread stays where it parked until its wake places it, and the unpin's
+    // kick of the busy CPU then lands outside every timed wake.
     for (partner, seat) in partners.iter().filter(|_| failed.is_none()) {
-        if let Err(why) = spin_until("a partner's park", || seat.parked_on.load(Ordering::Acquire) != u32::MAX) {
+        if let Err(why) = spin_until("a partner's park", || seat.parked.load(Ordering::Acquire)) {
             failed = Some(why);
             break;
         }
-        if seat.parked_on.load(Ordering::Acquire) != busy {
-            parked_elsewhere += 1;
-            continue;
-        }
-        if at.load(Ordering::Relaxed) != busy {
-            spinner_away += 1;
-            continue;
-        }
-        let waker_at = sys::current_cpu();
-        if waker_at == busy || waker_at == IRQ_CPU {
-            waker_crowded += 1;
-            continue;
-        }
         partner.release();
+    }
+    let mut ns = Vec::with_capacity(ROUNDS);
+    let mut ran_on_busy = 0usize;
+    for (partner, seat) in partners.iter().filter(|_| failed.is_none()) {
         let sent = Instant::now();
         seat.phase.store(RUN, Ordering::Release);
         partner.thread.thread().unpark();
@@ -296,9 +276,6 @@ fn rounds_onto_busy() -> Measured {
             ("busy_cpu", busy.to_string()),
             ("waker_cpu", waker_on.to_string()),
             ("ran_on_busy", ran_on_busy.to_string()),
-            ("skipped_spinner_away", spinner_away.to_string()),
-            ("skipped_parked_elsewhere", parked_elsewhere.to_string()),
-            ("skipped_waker_on_busy_or_irq", waker_crowded.to_string()),
         ],
     ))
 }

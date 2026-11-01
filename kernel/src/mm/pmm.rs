@@ -441,21 +441,6 @@ pub fn alloc_frame() -> Option<Frame> {
     Some(frame)
 }
 
-/// `count` physically contiguous zeroed 2 MiB pages for the kernel's own use,
-/// such as a kernel driver's DMA pool.
-pub fn alloc_contiguous_for_kernel(count: usize) -> Option<alloc::vec::Vec<PhysPage>> {
-    assert!(count > 0, "pmm: a kernel run of no pages");
-    let base = FRAMES.lock().as_mut()?.alloc_run(count)?;
-    let mut pages = alloc::vec::Vec::with_capacity(count);
-    for i in 0..count as u64 {
-        let page = PhysPage { phys: base + i * PAGE_2M };
-        // SAFETY: every superframe of the run was just taken off the allocator, so it is unaliased and within the direct map.
-        unsafe { core::ptr::write_bytes(page.direct_map().as_mut_ptr::<u8>(), 0, PAGE_2M as usize) };
-        pages.push(page);
-    }
-    Some(pages)
-}
-
 /// Pin every managed frame `[phys, phys + len)` touches so none is reissued while a user-copy window covers it; `false`, and nothing pinned, on a pin-count overflow.
 pub fn pin_range(phys: u64, len: usize) -> bool {
     let pins = pins();

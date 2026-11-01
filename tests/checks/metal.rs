@@ -544,6 +544,12 @@ pub fn rows_run_before_members_under_a_bound_the_members_widen() {
         panic!("two jobs the kernel records under one name were batched");
     };
     assert!(refused.contains("the kernel records both as \"test_rs_a_name_past_what_is\""), "{refused}");
+    // The kernel records a process by its binary, not its command line.
+    let argued = members("shared", &[("disks designate data --commit", 860), ("disks list", 860)]);
+    let Err(refused) = metal::batches(&rows, &[argued]) else {
+        panic!("two jobs of one binary were batched");
+    };
+    assert!(refused.contains("the kernel records both as \"disks\""), "{refused}");
 }
 
 /// **What a run's words take**: no word the whole profile but its named-only

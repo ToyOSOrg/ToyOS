@@ -10,6 +10,8 @@
 #![allow(unsafe_code)]
 
 use std::alloc::{GlobalAlloc, Layout, System};
+
+use crate::sched::affinity::CpuMask;
 use std::boxed::Box;
 use std::cell::{Cell, RefCell};
 use std::sync::atomic::{AtomicU32, Ordering::{AcqRel, Acquire, Relaxed}};
@@ -167,7 +169,7 @@ fn watch() -> TestWatch {
 }
 
 fn task(key: u64) -> Arc<TaskShared<Msg>> {
-    Arc::new(TaskShared::new(TaskKey(key), TaskState::Running(C0)))
+    Arc::new(TaskShared::new(TaskKey(key), TaskState::Running(C0), CpuMask::ANY))
 }
 
 fn clean(phase: &str) {

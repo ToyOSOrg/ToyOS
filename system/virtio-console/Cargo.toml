@@ -1,0 +1,19 @@
+[package]
+name = "virtio-console"
+description = "The virtio console device's driver: one process per virtio-serial function, holding its claim and handing its one named port to the service the name is for, logkeeper's console carrier or the clipboard's agent."
+edition = "2024"
+license = "MIT OR Apache-2.0"
+
+[dependencies]
+toyos = { path = "../../sdk/toyos" }
+toyos-abi = { path = "../../sdk/abi" }
+toyos-device-memory = { path = "../../lib/device-memory" }
+toyos-manifest = { path = "../../lib/manifest" }
+toyos-pci-claim = { path = "../../lib/pci-claim" }
+toyos-vdagent = { path = "../../lib/vdagent" }
+toyos-virtio = { path = "../../lib/virtio" }
+toyos-virtio-serial = { path = "../../lib/virtio-serial" }
+logkeeper-api = { path = "../../lib/logkeeper-api" }
+
+[package.metadata.toyos.host]
+exempt.owns = "one virtio-serial function, claimed from the kernel, and the endpoints its named port is handed to"

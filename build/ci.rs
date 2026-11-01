@@ -612,6 +612,10 @@ pub(crate) const CONTROLS: &[Control] = &[
         test: "a_cpu_that_halts_without_seeing_the_surplus_was_pushed",
         message: "published and no push behind it",
     }]),
+    red(KERNEL_LOOM, "affinity-fence-relaxed", Some("loom_affinity"), &[Says {
+        test: "a_moved_task_meets_its_new_mask_or_its_cpu_is_kicked",
+        message: "neither saw the other",
+    }]),
     // The watch's lost wake, staged: the waiter parks over a post it was flagged
     // with.
     red(KERNEL_LOOM, "commit-ignores-notify", Some("loom_watch"), &[

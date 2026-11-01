@@ -85,7 +85,8 @@ reasons! {
         NoMessage1 = "a message 3 with no message 1 before it";
         AnonceChanged = "a message 3 whose ANonce is not its message 1's";
         NoPairwiseKey = "a group key message before a 4-way handshake completed";
-        Plaintext = "a message 3 or group message 1 whose Key Data is not encrypted, or a message 1 whose Key Data is";
+        EncryptedMessage1 = "a message 1 whose Key Data is encrypted";
+        Plaintext = "a message 3 or group message 1 whose Key Data is not encrypted";
         WrappedLength = "encrypted Key Data whose length AES key wrap does not produce, or longer than a frame carries";
         Unwrap = "encrypted Key Data whose AES key wrap integrity check fails";
         KeyDataElement = "an element or KDE whose length runs past the Key Data";
@@ -100,5 +101,46 @@ reasons! {
         NoIgtk = "management frame protection was negotiated and no IGTK KDE came";
         IgtkLength = "an IGTK KDE whose key is not BIP-CMAC-128's 16 octets";
         IgtkKeyId = "an IGTK under a key ID other than 4 or 5";
+    }
+}
+
+impl Refused {
+    /// Whether a frame refused for this reason had a Key MIC that verified: its sender holds
+    /// the PTK, so the refusal is the authenticator's own, and the station leaves the network.
+    /// Every other refusal drops the frame alone.
+    pub const fn verified(self) -> bool {
+        match self {
+            Self::Truncated
+            | Self::ProtocolVersion
+            | Self::PacketType
+            | Self::BodyLength
+            | Self::DescriptorType
+            | Self::DescriptorVersion
+            | Self::KeyDataLength
+            | Self::NotFromAuthenticator
+            | Self::UnknownMessage
+            | Self::KeyLength
+            | Self::Replayed
+            | Self::Mic
+            | Self::NoMessage1
+            | Self::AnonceChanged
+            | Self::NoPairwiseKey
+            | Self::EncryptedMessage1 => false,
+            Self::Plaintext
+            | Self::WrappedLength
+            | Self::Unwrap
+            | Self::KeyDataElement
+            | Self::Duplicate
+            | Self::SecondRsne
+            | Self::RsneDiffers
+            | Self::RsnxeDiffers
+            | Self::NoGtk
+            | Self::GtkLength
+            | Self::GroupKeyIdZero
+            | Self::Rsc
+            | Self::NoIgtk
+            | Self::IgtkLength
+            | Self::IgtkKeyId => true,
+        }
     }
 }

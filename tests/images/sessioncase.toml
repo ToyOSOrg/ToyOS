@@ -22,6 +22,7 @@ start = ["logkeeper", "compositor", "ps2server", "test-runner"]
 [programs.logkeeper]
 service = true
 syscap = ["logread"]
+serves = ["log-carrier"]
 
 # `roster`, which the job reads to find the holder it detached and see it end
 # when forced; `dup`, because test-runner hands each job its capability.
@@ -59,3 +60,8 @@ starts = ["hangupholder"]
 
 [programs.logout]
 receives = ["session-admin"]
+
+# The virtio-serial driver, for the VM's console alone: this image runs no agent.
+[programs.virtio-console]
+drives = ["pci:07:80:00/1af4:1043"]
+receives = ["log-carrier"]

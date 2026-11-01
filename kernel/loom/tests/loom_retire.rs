@@ -13,6 +13,7 @@
 use std::sync::atomic::{AtomicBool, Ordering as StdOrdering};
 
 use loom::sync::Arc;
+use kernel_loom::sched::affinity::CpuMask;
 use kernel_loom::sched::cpu::{Balance, CpuHandle, CpuHandles, CpuSched, Env, RunToken, SchedPass};
 use kernel_loom::sched::topology::Topology;
 use kernel_loom::sched::hw::{CpuId, Hw, Kicker, Machine, Nanos, TraceEvent};
@@ -63,7 +64,7 @@ fn drain(rx: &mut MailboxConsumer<Msg>, preempt: &PreemptModel) -> Vec<Msg> {
 fn a_wake_and_a_retire_ride_distinct_nodes() {
     model(|| {
         let (world, mut rx) = world();
-        let task = Arc::new(TaskShared::<Msg>::new(TaskKey(1), TaskState::Blocked(CPU0)));
+        let task = Arc::new(TaskShared::<Msg>::new(TaskKey(1), TaskState::Blocked(CPU0), CpuMask::ANY));
 
         let waker = {
             let world = world.clone();
@@ -116,7 +117,7 @@ fn a_wake_and_a_retire_ride_distinct_nodes() {
 fn a_retire_racing_the_park_commit_always_leaves_someone_to_reap() {
     model(|| {
         let (world, mut rx) = world();
-        let waiter = Arc::new(TaskShared::<Msg>::new(TaskKey(1), TaskState::Running(CPU0)));
+        let waiter = Arc::new(TaskShared::<Msg>::new(TaskKey(1), TaskState::Running(CPU0), CpuMask::ANY));
         let ticket = prepare(&CurrentTask::new(&waiter, CPU0), Cancel::Answers, WaitClass::Pipe)
             .expect("nothing has posted to this task");
 
@@ -169,7 +170,7 @@ fn the_retire_chase_reuses_one_node_under_a_racing_migration() {
 
     model(|| {
         let (world, mut rx) = world();
-        let task = Arc::new(TaskShared::<Msg>::new(TaskKey(1), TaskState::Ready(CPU0)));
+        let task = Arc::new(TaskShared::<Msg>::new(TaskKey(1), TaskState::Ready(CPU0), CpuMask::ANY));
         assert_eq!(
             retire::begin(&task).post(&world.cpus, &world.kicks, &RemoteGuard),
             Some(CPU0),
@@ -223,7 +224,7 @@ fn the_retire_chase_reuses_one_node_under_a_racing_migration() {
 fn an_adopting_cpu_always_observes_the_kill_bit() {
     model(|| {
         let (world, mut rx) = world();
-        let task = Arc::new(TaskShared::<Msg>::new(TaskKey(1), TaskState::InTransit(CPU1)));
+        let task = Arc::new(TaskShared::<Msg>::new(TaskKey(1), TaskState::InTransit(CPU1), CpuMask::ANY));
 
         let adopter = {
             let task = task.clone();
@@ -274,7 +275,7 @@ fn an_adopting_cpu_always_observes_the_kill_bit() {
 fn a_retire_and_a_wake_never_both_claim_a_parked_task() {
     model(|| {
         let (world, mut rx) = world();
-        let task = Arc::new(TaskShared::<Msg>::new(TaskKey(1), TaskState::Blocked(CPU0)));
+        let task = Arc::new(TaskShared::<Msg>::new(TaskKey(1), TaskState::Blocked(CPU0), CpuMask::ANY));
 
         // The waker: an ordinary post through the same claim CAS every wake
         // goes through.
@@ -461,6 +462,7 @@ fn the_retire_arm_never_loses_a_parked_task_to_a_racing_wake() {
                 ctx: (),
                 ext: Payload,
                 rt: RtState::default(),
+                mask: CpuMask::ANY,
             }
             .build(CPU0, NOW);
             let shared = task.shared().clone();

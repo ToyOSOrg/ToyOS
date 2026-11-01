@@ -38,13 +38,21 @@ const MAX_READERS: usize = 2;
 /// slot is let go: a wait on its sink taking bytes, bounded by this.
 const STALLED: Duration = Duration::from_secs(10);
 
+/// The replay, and what of it the carrier is not owed.
+struct Held {
+    replay: Replay,
+    /// Bytes the console UART carried while the machine stopped, which the
+    /// carrier skips ([`Hub::append_carried`]).
+    carried: Option<(u64, u64)>,
+}
+
 /// The replay, and the wake a caught-up reader waits on.
 pub struct Hub {
     shared: Arc<Shared>,
 }
 
 struct Shared {
-    replay: Mutex<Replay>,
+    replay: Mutex<Held>,
     grew: Condvar,
     readers: AtomicUsize,
     /// The wall clock the boot started at, for a line a reader is owed.
@@ -55,7 +63,7 @@ impl Hub {
     /// A reader is handed over by the `log` port's thread ([`Hub::read`]).
     pub fn start(cap: usize, boot_secs: Option<u64>) -> Self {
         let shared = Arc::new(Shared {
-            replay: Mutex::new(Replay::new(cap)),
+            replay: Mutex::new(Held { replay: Replay::new(cap), carried: None }),
             grew: Condvar::new(),
             readers: AtomicUsize::new(0),
             boot_secs,
@@ -66,15 +74,45 @@ impl Hub {
     /// A reader that asked for the log: it gets the read end
     /// of a pipe of its own, which the log is written into.
     pub fn read(&self, conn: &Connection) {
-        let end = self.shared.replay.lock().expect("logkeeper: the replay is poisoned").end();
-        let Some(pipe) = hand_over(conn, end) else { return };
+        let Some(pipe) = self.hand_over(conn) else { return };
         admit(&self.shared, format!("reader {}", conn.as_handle().raw().0), PipeSink::new(pipe));
     }
 
     /// The lines the file has just taken, for every reader.
     pub fn append(&self, lines: &[u8]) {
-        self.shared.replay.lock().expect("logkeeper: the replay is poisoned").append(lines);
+        self.shared.replay.lock().expect("logkeeper: the replay is poisoned").replay.append(lines);
         self.shared.grew.notify_all();
+    }
+
+    /// [`Self::append`], of lines the console UART has carried already, which
+    /// the carrier skips: what the machine said while it stopped, once the
+    /// stop was refused.
+    pub fn append_carried(&self, lines: &[u8]) {
+        let mut held = self.shared.replay.lock().expect("logkeeper: the replay is poisoned");
+        let from = held.replay.end();
+        held.replay.append(lines);
+        held.carried = Some((from, held.replay.end()));
+        drop(held);
+        self.shared.grew.notify_all();
+    }
+
+    /// How long the boot is so far.
+    pub fn end(&self) -> u64 {
+        self.shared.replay.lock().expect("logkeeper: the replay is poisoned").replay.end()
+    }
+
+    /// The pipe a reader on `conn` is handed, and the boot's length it starts
+    /// with: `None` where the reader is already gone.
+    pub fn hand_over(&self, conn: &Connection) -> Option<Pipe> {
+        hand_over(conn, self.end())
+    }
+
+    /// The bytes after `at` for the carrier, at most [`CHUNK`] of them, once
+    /// there are any, skipping what the UART carried; `at` moves past them. A
+    /// carrier the replay no longer holds the bytes of is handed the line that
+    /// says so instead.
+    pub fn next_for_the_carrier(&self, at: &mut u64) -> Vec<u8> {
+        next(&self.shared, at, true)
     }
 }
 
@@ -137,28 +175,39 @@ fn feed(shared: &Shared, mut sink: impl Write) -> (u64, Left) {
     let mut at = 0u64;
     let mut sent = 0u64;
     loop {
-        let chunk = {
-            let mut replay = shared.replay.lock().expect("logkeeper: the replay is poisoned");
-            loop {
-                match replay.next(at, CHUNK) {
-                    Next::Bytes(bytes) => {
-                        at += bytes.len() as u64;
-                        break bytes.to_vec();
-                    }
-                    Next::Evicted { lost, at: resume } => {
-                        at = resume;
-                        break evicted(shared.boot_secs, lost);
-                    }
-                    Next::CaughtUp => {
-                        replay = shared.grew.wait(replay).expect("logkeeper: the replay is poisoned");
-                    }
-                }
-            }
-        };
+        let chunk = next(shared, &mut at, false);
         match sink.write_all(&chunk) {
             Ok(()) => sent += chunk.len() as u64,
             Err(e) if e.kind() == std::io::ErrorKind::TimedOut => return (sent, Left::Stalled),
             Err(_) => return (sent, Left::Gone),
+        }
+    }
+}
+
+/// The bytes after `at`, as [`Hub::next_for_the_carrier`] says, skipping what
+/// the UART carried where `carrier` asks.
+fn next(shared: &Shared, at: &mut u64, carrier: bool) -> Vec<u8> {
+    let mut held = shared.replay.lock().expect("logkeeper: the replay is poisoned");
+    loop {
+        let mut most = CHUNK;
+        if let (true, Some((from, to))) = (carrier, held.carried) {
+            if *at >= from {
+                *at = (*at).max(to);
+                held.carried = None;
+            } else {
+                most = most.min((from - *at) as usize);
+            }
+        }
+        match held.replay.next(*at, most) {
+            Next::Bytes(bytes) => {
+                *at += bytes.len() as u64;
+                return bytes.to_vec();
+            }
+            Next::Evicted { lost, at: resume } => {
+                *at = resume;
+                return evicted(shared.boot_secs, lost);
+            }
+            Next::CaughtUp => held = shared.grew.wait(held).expect("logkeeper: the replay is poisoned"),
         }
     }
 }

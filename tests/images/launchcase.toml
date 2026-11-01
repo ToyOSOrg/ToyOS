@@ -8,6 +8,7 @@ start = ["logkeeper", "test-runner"]
 [programs.logkeeper]
 service = true
 syscap = ["logread"]
+serves = ["log-carrier"]
 
 [programs.test-runner]
 starts = ["toybox"]
@@ -17,3 +18,8 @@ starts = ["toybox"]
 [symlinks]
 "bin/cat" = "/system/bin/toybox"
 "bin/echo" = "/system/bin/toybox"
+
+# The virtio-serial driver, for the VM's console alone: this image runs no agent.
+[programs.virtio-console]
+drives = ["pci:07:80:00/1af4:1043"]
+receives = ["log-carrier"]

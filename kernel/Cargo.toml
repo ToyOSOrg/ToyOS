@@ -97,6 +97,11 @@ doorbell-kick-relaxed = []
 # `kernel/loom/tests/loom_push.rs` must red — `Balance::PushOnSurplus`'s own
 # negative control.
 push-fence-relaxed = []
+# `pure/sched/affinity.rs`'s `affinity_fence` between a mask setter's version
+# store and its read of the task's state word, and between an adopt's state
+# store and its read of the version, is weakened, and
+# `kernel/loom/tests/loom_affinity.rs` must red.
+affinity-fence-relaxed = []
 # `pure/sched/task.rs`'s `begin_commit` goes blind to the notified bit — a post
 # landing between a waiter's registration on a watch and its commit is lost —
 # and `kernel/loom/tests/loom_watch.rs` must red.
@@ -401,7 +406,6 @@ toyos-abi = { path = "../sdk/abi" }
 toyos-proclife = { path = "proclife" }
 toyos-acpi = { path = "../lib/acpi" }
 toyos-amdvi = { path = "amdvi" }
-toyos-dma = { path = "dma" }
 toyos-blackbox = { path = "../lib/blackbox" }
 toyos-bootmap = { path = "../lib/bootmap" }
 toyos-elf = { path = "../lib/elf" }
@@ -410,6 +414,7 @@ toyos-its = { path = "its" }
 toyos-microcode = { path = "../lib/microcode" }
 toyos-pci = { path = "pci" }
 toyos-phys = { path = "phys" }
+toyos-register = { path = "register" }
 toyos-smmu = { path = "smmu" }
 toyos-tco = { path = "../lib/tco" }
 toyos-tsc = { path = "../lib/tsc" }

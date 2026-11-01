@@ -1,0 +1,15 @@
+# A member of the host workspace (root `Cargo.toml`), like toyos-vdagent: it is
+# pure and its tests run on the host. It is an input boundary of its own: every
+# control message it decodes is the host's, written by QEMU's virtio-serial
+# device.
+
+[package]
+name = "toyos-virtio-serial"
+description = "virtio-serial as its driver speaks it, pure: the launch's declarations, and the control messages and port names decoded bounded."
+version = "0.1.0"
+edition = "2021"
+license = "MIT OR Apache-2.0"
+publish = false
+
+[lib]
+doctest = false

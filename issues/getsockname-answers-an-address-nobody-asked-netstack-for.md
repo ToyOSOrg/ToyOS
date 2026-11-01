@@ -1,6 +1,6 @@
 ---
 status: open
-kind: finding
+kind: defect
 opened: 2026-09-08
 ---
 
@@ -26,3 +26,14 @@ answer; what it costs to leave is that the one caller of `getsockname` in a
 POSIX program is the one that then advertises an address nothing can reach.
 Nothing in the tree reads it today, which is why this is a finding and not a
 defect.
+
+**Now a defect, 2026-11-01.** std carries the same literal:
+`sdk/std/sys/net/connection.rs`'s `TcpStream::socket_addr` answers
+`10.0.2.15` with the stream's local port. Since #1122, osbench's
+`sys::link_of` names a connection's link by its local address, so on any
+network that leases another address `osbench_lan` refuses the group. The
+T14 session for the ramp issue read `bench=lan refused=no_netstack_link_holds_10.0.2.15`
+on a lease from the bench's router. QEMU's guest test passes only because
+slirp leases that address. The fix gives a stream's local address with
+its port: netstack's connect and accept answers carry it, and the SDK's
+`stream::endpoints`, std and libc return it.

@@ -361,16 +361,25 @@ pub const SYS_PAGED_OP: u64 = 157;
 pub const SYS_PAGED_NOTICES: u64 = 158;
 /// Take a connection's next whole message. See [`message_recv`].
 pub const SYS_MESSAGE_RECV: u64 = 159;
+/// Whether a console holder carries the log off the machine. See [`console_carried`].
+pub const SYS_CONSOLE_CARRIED: u64 = 160;
+/// Set the CPUs one of the caller's own threads may run on. See [`thread_set_affinity`].
+pub const SYS_THREAD_SET_AFFINITY: u64 = 161;
+/// Read them back into a buffer of at least [`CPU_MASK_WORDS`] words, or
+/// `InvalidArgument`. See [`thread_affinity`].
+pub const SYS_THREAD_GET_AFFINITY: u64 = 162;
+/// The CPU the caller is running on. See [`current_cpu`].
+pub const SYS_CURRENT_CPU: u64 = 163;
 
 /// Mint a handle to the device set ([`crate::devset`]), which carries `READ`
 /// and `WAIT` and neither `DUP` nor `TRANSFER`. Gated by
 /// [`Rights::DEVICE`] on a `SysCap`. See [`device_set`].
 ///
 /// [`Rights::DEVICE`]: crate::handle::Rights::DEVICE
-pub const SYS_DEVICE_SET: u64 = 163;
+pub const SYS_DEVICE_SET: u64 = 164;
 
 /// The device set's snapshot, read whole. See [`device_set_read`].
-pub const SYS_DEVICE_SET_READ: u64 = 164;
+pub const SYS_DEVICE_SET_READ: u64 = 165;
 
 /// Bins in the per-process syscall profile — one for every number this ABI
 /// issues, and one at the end for every number it does not.
@@ -378,7 +387,7 @@ pub const SYS_DEVICE_SET_READ: u64 = 164;
 /// **The profile's parts sum to its total, and that is the whole requirement.**
 /// A bin array narrower than the ABI reaches drops calls out of the line while
 /// the total goes on counting them.
-pub const SYSCALL_PROFILE_BINS: usize = 166;
+pub const SYSCALL_PROFILE_BINS: usize = 167;
 
 /// Where a number this ABI does not issue is counted. Merging is a degradation
 /// a reader can see in the line; dropping is one nobody can.
@@ -1245,6 +1254,42 @@ pub unsafe fn thread_spawn(entry: u64, stack: u64, arg: u64, stack_base: u64) ->
 /// Wait for thread `tid` to exit.
 pub fn thread_join(tid: u64) -> u64 {
     syscall(SYS_THREAD_JOIN, tid, 0, 0, 0)
+}
+
+/// Words in a CPU mask: word `i` bit `b` is CPU `64 * i + b`, by the dense
+/// index [`current_cpu`] reports and [`cpu_count`] counts. 1024 CPUs, as
+/// Linux's `CPU_SETSIZE`.
+pub const CPU_MASK_WORDS: usize = 16;
+
+/// Let thread `tid` of the calling process run only on the CPUs `mask` names.
+/// `tid` names a thread as [`thread_join`]'s does, 0 the main thread; a
+/// thread names itself by [`current_tid`](crate::current_tid). A shorter
+/// mask's missing words are empty.
+///
+/// The mask is a placement choice, not a right: any non-empty set of online
+/// CPUs is accepted, wider or narrower than the last. A new thread or process
+/// starts with its spawning thread's mask.
+///
+/// `NotFound` for a `tid` that is not a live thread of this process;
+/// `InvalidArgument` for an empty mask, one naming a CPU at or past
+/// [`cpu_count`], or one longer than [`CPU_MASK_WORDS`].
+pub fn thread_set_affinity(tid: u64, mask: &[u64]) -> Result<(), SyscallError> {
+    check(syscall(SYS_THREAD_SET_AFFINITY, tid, mask.as_ptr() as u64, mask.len() as u64, 0)).map(|_| ())
+}
+
+/// The online CPUs thread `tid` of the calling process may run on, `tid` as
+/// [`thread_set_affinity`] names it. `NotFound` for a `tid` that is not a
+/// live thread of this process.
+pub fn thread_affinity(tid: u64) -> Result<[u64; CPU_MASK_WORDS], SyscallError> {
+    let mut mask = [0u64; CPU_MASK_WORDS];
+    check(syscall(SYS_THREAD_GET_AFFINITY, tid, mask.as_mut_ptr() as u64, CPU_MASK_WORDS as u64, 0))?;
+    Ok(mask)
+}
+
+/// The CPU the caller was running on during the call, by the index a mask
+/// names. It may have moved by the time this returns.
+pub fn current_cpu() -> u32 {
+    syscall(SYS_CURRENT_CPU, 0, 0, 0, 0) as u32
 }
 
 /// Set the name of the calling thread (up to 28 bytes, truncated).
@@ -2308,6 +2353,19 @@ pub unsafe fn shm_map(shm: RawHandle, prot: VmProt) -> Result<*mut u8, SyscallEr
 /// As [`dup`]'s: the new handle reaches `shm`'s pages with its rights.
 pub unsafe fn shm_sub(shm: RawHandle, offset: u64, len: u64) -> Result<RawHandle, SyscallError> {
     check(syscall(SYS_SHM_SUB, shm.0 as u64, offset, len, 0)).map(|v| RawHandle(v as u32))
+}
+
+/// Say whether the holder of `console` carries the machine's log off it by
+/// another channel, so the kernel puts on the console UART only a fatal
+/// path's and the stop's lines; the console's end lets go of it.
+///
+/// Needs [`Rights::WRITE`]. `AlreadyExists` while another holder carries it,
+/// and `NotSupported` once a fatal path or the stop has given the log to the
+/// UART for good; letting go always answers `Ok`.
+///
+/// [`Rights::WRITE`]: crate::handle::Rights::WRITE
+pub fn console_carried(console: RawHandle, elsewhere: bool) -> Result<(), SyscallError> {
+    check(syscall(SYS_CONSOLE_CARRIED, console.0 as u64, elsewhere as u64, 0, 0)).map(drop)
 }
 
 /// The machine's [header](SYSINFO_HEADER_SIZE), then as much of the process

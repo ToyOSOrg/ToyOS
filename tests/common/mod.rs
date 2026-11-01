@@ -25,5 +25,7 @@ pub mod screen;
 pub mod serial;
 pub mod slots;
 pub mod stateview;
+/// The VM's console on a virtio machine.
+pub mod vmconsole;
 /// A VNC client, as far as resizing a host window takes one.
 pub mod vnc;

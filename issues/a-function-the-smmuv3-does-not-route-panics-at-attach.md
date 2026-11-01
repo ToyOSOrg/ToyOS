@@ -6,10 +6,9 @@ opened: 2026-10-10
 
 # A function the SMMUv3 does not route panics at attach
 
-`OwnSpace::create` takes no function, and `DeviceSpace::create` asks of its
-functions only `domain::untranslated`, which on the SMMUv3
-(`kernel/src/arch/aarch64/smmu/domain.rs`) answers `None` for every one, so a
-domain is made for any caller. `attach` then looks the function up in the unit's
+`OwnSpace::create` takes no function, so a domain is made for any caller,
+and the SMMUv3's `domain::unclaimable`
+(`kernel/src/arch/aarch64/smmu/domain.rs`) answers `None` for every function. `attach` then looks the function up in the unit's
 routes, and `Live::stream` panics where it finds none: an enumerated function
 whose IORT route names another unit, names none, or was refused
 (`kernel/src/arch/aarch64/smmu/mod.rs`, `init`'s route loop). A gap in a

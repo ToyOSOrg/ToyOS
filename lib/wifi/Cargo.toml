@@ -1,0 +1,17 @@
+[package]
+name = "toyos-wifi"
+description = "The wifi protocol between wlan and the network settings programs: scan, connect, disconnect and status, every frame decoded once and refused by name."
+version = "0.1.0"
+edition = "2024"
+license = "MIT OR Apache-2.0"
+publish = false
+
+[lib]
+doctest = false
+
+[dependencies]
+toyos-radio = { path = "../radio" }
+
+[lints.rust]
+unsafe_code = "forbid"
+warnings = "deny"

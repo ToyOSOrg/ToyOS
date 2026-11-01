@@ -47,6 +47,7 @@
 
 use loom::sync::atomic::{AtomicUsize, Ordering};
 use loom::sync::Arc;
+use kernel_loom::sched::affinity::CpuMask;
 use kernel_loom::sched::cpu::{balance_fence, CpuHandle, CpuHandles};
 use kernel_loom::sched::hw::CpuId;
 use kernel_loom::sched::mailbox::{mailbox, Kick, MailboxConsumer};
@@ -92,7 +93,7 @@ impl World {
     /// `SchedPass::push_on_surplus`, as the pass runs it: publish, fence, look
     /// for a sleeper, ring it.
     fn publish_and_push(&self) {
-        self.cpus.publish_surplus(VICTIM, THRESHOLD);
+        self.cpus.publish_surplus(VICTIM, THRESHOLD, CpuMask::ANY);
         balance_fence();
         if self.thief().doorbell().sleeping() {
             self.pokes.fetch_add(1, Ordering::AcqRel);

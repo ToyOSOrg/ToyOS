@@ -48,13 +48,19 @@
 //! into what the file already has, and the console takes only the whole lines
 //! it has room for — the rest waits here, bounded ([`CONSOLE_BYTES`]).
 //!
+//! **One reader can carry the console instead** ([`carrier`]): a VM's console
+//! channel, asked for on [`toyos_logstream::CARRIER`]. Once its channel takes
+//! the log, the kernel is told the UART is quiet, and no program line is
+//! written to it; its end, or the stop, gives the console back.
+//!
 //! # Its whole authority
 //!
 //! One `SysCap` duplicate carrying `Rights::LOG | Rights::WAIT`, which its
 //! manifest row asks for by the name `logread`; the origins acceptor and the
 //! writable console the supervisor endows it; and what its row adds — the `log` acceptor, where this
 //! machine's readers ask for the log and `inspect` asks where it is going
-//! ([`inspect`]'s module, which grants nothing). It claims no device and can
+//! ([`inspect`]'s module, which grants nothing), and the `log-carrier`
+//! acceptor, where the console's carrier asks. It claims no device and can
 //! name no process. Writing files is ambient — a known residual of the
 //! capability endowment, and not this program's to close.
 //!
@@ -71,6 +77,7 @@
 //! refused is the supervisor's [`toyos_logstream::RESUME`], and what was held is written
 //! then.
 
+mod carrier;
 mod inspect;
 mod origin;
 mod policy;
@@ -91,11 +98,12 @@ use toyos::wake::Bell;
 use toyos::Console;
 use toyos_abi::syscall::SyscallError;
 use toyos_logstream::{
-    ProgramLine, Registration, Tag, CONSOLE, FLUSH, FLUSHED, LOG_OPENED, MAX_TAG, ORIGINS, REGISTER, RESUME,
-    SERVICE,
+    ProgramLine, Registration, Tag, CARRIER, CONSOLE, FLUSH, FLUSHED, LOG_OPENED, MAX_TAG, ORIGINS, REGISTER,
+    RESUME, SERVICE,
 };
 use toyos_wallclock::Civil;
 
+use carrier::Carrier;
 use origin::{Origin, Said};
 use policy::{Step, LOG_WRITE_BUDGET};
 use store::{Volume, DIR, MAX_LOG_BYTES, MAX_LOG_FILES};
@@ -140,6 +148,7 @@ fn main() {
     let Some(console) = Endowments::get().take::<Console>(CONSOLE) else {
         panic!("logkeeper: the supervisor endowed no `{CONSOLE}`, so no program's line can reach the console");
     };
+    let console = Arc::new(console);
     // The supervisor connected before it started anything, so this is already queued.
     let from_supervisor: Connection = acceptor.accept().expect("logkeeper: the supervisor's origins connection");
 
@@ -165,6 +174,7 @@ fn main() {
     if let Some(acceptor) = endow::acceptor(SERVICE) {
         inspect::serve(acceptor, Arc::clone(&published), Arc::clone(&hub));
     }
+    let carrier = endow::acceptor(CARRIER).map(|acceptor| Carrier::serve(acceptor, Arc::clone(&console), Arc::clone(&hub)));
 
     let words =
         toyos::log::cursor_words(&cap).unwrap_or_else(|e| panic!("logkeeper: SYS_LOG_READ sized no cursor ({e:?})"));
@@ -174,6 +184,7 @@ fn main() {
         from_supervisor,
         supervisor_rx: ipc::FrameRx::new(),
         console,
+        carrier,
         console_held: Vec::new(),
         console_unshown: 0,
         origins: Vec::new(),
@@ -195,7 +206,8 @@ struct Log {
     cap: SysCap,
     from_supervisor: Connection,
     supervisor_rx: ipc::FrameRx<{ 4 + MAX_TAG }>,
-    console: Console,
+    console: Arc<Console>,
+    carrier: Option<Arc<Carrier>>,
     /// Program lines the console has not taken yet, whole lines only.
     console_held: Vec<u8>,
     console_unshown: u64,
@@ -260,7 +272,7 @@ impl Log {
             poller.watch(&self.cap, READABLE, KERNEL_TOKEN);
             poller.watch(&self.from_supervisor, READABLE, ORIGINS_TOKEN);
             if !self.console_held.is_empty() {
-                poller.watch(&self.console, WRITABLE, CONSOLE_TOKEN);
+                poller.watch(&*self.console, WRITABLE, CONSOLE_TOKEN);
             }
             for (i, origin) in self.origins.iter().enumerate() {
                 poller.watch(&origin.alive, READABLE, ORIGIN_BASE + i as u64);
@@ -492,6 +504,7 @@ impl Log {
             return;
         }
         lines.sort_by_key(|line| line.at_ns);
+        let carried = self.carried();
         let mut file = String::new();
         for line in &lines {
             match &line.kind {
@@ -513,9 +526,11 @@ impl Log {
                         text: &said.text,
                     };
                     file.push_str(&format!("{line}\n"));
-                    line.stamp = "";
-                    let console = format!("{line}\n");
-                    self.console_line(console.as_bytes());
+                    if !carried {
+                        line.stamp = "";
+                        let console = format!("{line}\n");
+                        self.console_line(console.as_bytes());
+                    }
                 }
             }
         }
@@ -559,8 +574,19 @@ impl Log {
         held.extend_from_slice(line);
     }
 
-    /// As many held lines as the console takes now; the rest wait for its room.
+    /// Whether the console's carrier carries the program lines, so the UART
+    /// takes none.
+    fn carried(&self) -> bool {
+        self.carrier.as_ref().is_some_and(|carrier| carrier.quiet())
+    }
+
+    /// As many held lines as the console takes now; the rest wait for its
+    /// room. None while the carrier carries them, which has them all.
     fn feed_console(&mut self) {
+        if self.carried() {
+            self.console_held.clear();
+            self.console_unshown = 0;
+        }
         while !self.console_held.is_empty() {
             match self.console.write_nonblock(&self.console_held) {
                 Ok(0) | Err(SyscallError::WouldBlock) => break,
@@ -655,6 +681,11 @@ impl Log {
     fn flushed(&mut self) {
         let refused = self.sync().err();
         self.answered(refused);
+        // The console's carrier takes the log up to here, and the UART what
+        // the machine says from here as it stops.
+        if let Some(carrier) = &self.carrier {
+            carrier.stop(self.hub.end());
+        }
         self.stopping = Some(Stopping { text: String::new(), unwritten: 0 });
         self.feed_console();
         if let Err(e) = self.from_supervisor.signal(FLUSHED) {
@@ -677,7 +708,10 @@ impl Log {
             );
         }
         self.to_volume(held.text.as_bytes(), true);
-        self.hub.append(held.text.as_bytes());
+        self.hub.append_carried(held.text.as_bytes());
+        if let Some(carrier) = &self.carrier {
+            carrier.resume();
+        }
     }
 }
 

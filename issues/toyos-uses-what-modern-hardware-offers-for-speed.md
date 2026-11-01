@@ -79,7 +79,6 @@ is nothing to enable.
 taken: the instruments, then what is measured, then the design rounds not
 yet measured.
 
-- `issues/no-test-can-hold-a-thread-on-a-named-cpu.md`
 - `issues/no-published-run-compares-toyos-with-linux-on-one-machine.md`
 - `issues/no-row-holds-a-wake-beside-seven-spinners-to-100-us.md`
 - `issues/per-cpu-scheduler-and-pmm-state-shares-lines-every-cpu-writes.md`
