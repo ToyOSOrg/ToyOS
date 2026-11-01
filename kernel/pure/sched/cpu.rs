@@ -1184,16 +1184,18 @@ impl<X: SchedPayload> CpuSched<X> {
         }
     }
 
-    /// **A woken partner follows its waker's LLC.** The wake that makes
-    /// [`WAKER_RUN`] in a row from one other LLC goes to a CPU of that LLC
-    /// the task's mask names, [`Doorbell::sleeping_unrung`], nearest the
-    /// waker and quickest to wake. Every wake that names a waker counts, and
-    /// only one that finds the task parked reaches here. So a request/reply
-    /// pair split across LLCs shares one after [`WAKER_RUN`] round trips,
-    /// and a server with clients in both LLCs still moves when [`WAKER_RUN`]
-    /// of its parked wakes in a row happen to come from the other one. A
-    /// real-time task keeps the RT band's placement, and a stopped or killed
-    /// one [`Self::place`]'s.
+    /// **A woken partner follows its waker's LLC.** A wake from another LLC
+    /// whose run from it is at or past [`WAKER_RUN`] goes to a CPU of that
+    /// LLC the task's mask names, [`Doorbell::sleeping_unrung`], nearest the
+    /// waker and quickest to wake. Only a wake that finds the task parked
+    /// reaches here, so only those are counted: one that finds it running or
+    /// about to park is a flag the task consumes unseen. A request/reply pair
+    /// split across LLCs shares one after [`WAKER_RUN`] round trips. A server
+    /// with a client in each LLC follows the far one when the near one's
+    /// requests keep finding it running; once moved, both are counted. The
+    /// run is not reset by a move, so a task stolen out of the LLC it was
+    /// woken from goes back on that LLC's next wake. A real-time task keeps
+    /// the RT band's placement, and a stopped or killed one [`Self::place`]'s.
     fn toward_its_waker<H: Hw<Payload = X>, P: PreemptGuard>(
         &self,
         task: &mut ReadyTask<X>,
@@ -2671,10 +2673,10 @@ pub struct CpuHandles<M> {
     offering: Box<[AtomicU64]>,
 }
 
-/// How many wakes in a row from one other LLC move a task into it
+/// How many parked wakes in a row from one other LLC move a task into it
 /// ([`CpuSched::toward_its_waker`]). A split pair pays this many split round
-/// trips once; a task whose wakes come from two LLCs independently and
-/// evenly moves on about one parked wake in 2^(n+1) - 2, 1 in 510 at 8.
+/// trips once; a task whose parked wakes come from two LLCs independently
+/// and evenly moves on about one in 2^(n+1) - 2, 1 in 510 at 8.
 pub const WAKER_RUN: u16 = 8;
 
 /// The CPUs an idle CPU is chosen among, nearest first: `me`'s LLC, then the
