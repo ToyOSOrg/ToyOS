@@ -41,8 +41,7 @@ struct Vtd {
     domains: Domains<Space>,
 }
 
-/// Every function the RMRRs name, written while the DMAR is walked, before
-/// any domain is made.
+/// Every function the RMRRs name, with its verdict, before any domain is made.
 static RESERVED: Lock<Vec<(StreamId, Reserved)>> = Lock::new(Vec::new());
 
 static DOMAINS: Lock<Vtd> =

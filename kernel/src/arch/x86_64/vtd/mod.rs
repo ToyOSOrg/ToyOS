@@ -217,12 +217,15 @@ pub fn init(rsdp_addr: u64, devices: &[PciDevice], windows: Option<&[RootBridgeW
                 }
                 rmrrs.push((base, limit.saturating_add(1)));
                 describe_scopes("rmrr", regions, rmrr.scopes());
-                let scopes = rmrr.scopes().map(|scope| scope.ok()).collect::<Vec<_>>();
-                reservations.push(kernel::rmrr::Region {
-                    start: base,
-                    end: limit.saturating_add(1),
-                    scopes: resolved(regions, &scopes, devices),
-                });
+                // Functions are enumerated on one segment group: a region on
+                // another names devices this kernel cannot tell from its own.
+                let scopes = if seg == toyos_acpi::SEGMENT_GROUP {
+                    resolved(regions, &rmrr.scopes().map(|scope| scope.ok()).collect::<Vec<_>>(), devices)
+                } else {
+                    log!("iommu: rmrr{regions} is on segment {seg}, which this kernel enumerates no function on");
+                    alloc::vec![kernel::rmrr::Scope::Unknown]
+                };
+                reservations.push(kernel::rmrr::Region { start: base, end: limit.saturating_add(1), scopes });
                 regions += 1;
                 held_regions += usize::from(held);
             }

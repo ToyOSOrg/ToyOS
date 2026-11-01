@@ -80,17 +80,19 @@ pub enum Verdict {
 /// answers config space's class code (dword 08h shifted right by 8) for a
 /// function, or `None` for one nobody enumerated.
 pub fn classify(regions: &[Region], class: impl Fn(u16) -> Option<u32>) -> Vec<(u16, Verdict)> {
-    let mut functions: Vec<u16> = regions.iter().flat_map(|r| r.named().0).collect();
+    let named: Vec<(&Region, (Vec<u16>, bool))> = regions.iter().map(|r| (r, r.named())).collect();
+    let mut functions: Vec<u16> = named.iter().flat_map(|(_, (ids, _))| ids.iter().copied()).collect();
     functions.sort_unstable();
     functions.dedup();
     functions
         .into_iter()
         .map(|id| {
-            let own: Vec<&Region> = regions.iter().filter(|r| r.named().0.contains(&id)).collect();
-            let alone = regions.iter().filter(|r| own.iter().any(|o| r.overlaps(o.start, o.end))).all(|r| {
-                let (named, other) = r.named();
-                !other && named == [id]
-            });
+            let own: Vec<&(&Region, (Vec<u16>, bool))> = named.iter().filter(|(_, (ids, _))| ids.contains(&id)).collect();
+            let alone = named
+                .iter()
+                .filter(|(r, _)| own.iter().any(|(o, _)| r.overlaps(o.start, o.end)))
+                .all(|(_, (ids, other))| !other && ids[..] == [id]);
+            let own: Vec<&Region> = own.iter().map(|(r, _)| *r).collect();
             let controller = class(id).is_some_and(|c| c >> 16 == DISPLAY || c >> 8 == USB);
             let whole = own.iter().all(|r| r.start.is_multiple_of(PAGE) && r.end.is_multiple_of(PAGE) && r.start < r.end);
             let verdict = if !alone {
@@ -105,6 +107,11 @@ pub fn classify(regions: &[Region], class: impl Fn(u16) -> Option<u32>) -> Vec<(
             (id, verdict)
         })
         .collect()
+}
+
+/// Whether `start..end` lies wholly inside the union of `ranges`.
+pub fn covered(ranges: &[(u64, u64)], start: u64, end: u64) -> bool {
+    merged(ranges.iter().copied()).iter().any(|&(from, to)| from <= start && end <= to)
 }
 
 /// The union of `ranges`, as disjoint ranges in order.
@@ -241,6 +248,22 @@ mod tests {
             region(T14.1 - 0x20_0000, T14.1 + 0x1000, vec![Scope::Endpoint(IGPU)]),
         ];
         assert_eq!(classify(&regions, class), [(IGPU, Verdict::Kept(vec![(T14.0, T14.1 + 0x1000)]))]);
+    }
+
+    #[test]
+    fn every_kept_range_is_covered_by_the_rmrrs_it_came_from_and_by_no_single_one() {
+        let regions = [
+            region(T14.0, T14.1, vec![Scope::Endpoint(IGPU)]),
+            region(T14.1 - 0x20_0000, T14.1 + 0x1000, vec![Scope::Endpoint(IGPU)]),
+        ];
+        let sources: Vec<(u64, u64)> = regions.iter().map(|r| (r.start, r.end)).collect();
+        let [(_, Verdict::Kept(kept))] = &classify(&regions, class)[..] else { panic!("kept") };
+        for &(start, end) in kept {
+            assert!(covered(&sources, start, end));
+            // The merged range spans both: what a per-region check refused.
+            assert!(!sources.iter().any(|&(from, to)| from <= start && end <= to));
+        }
+        assert!(!covered(&sources, T14.0, T14.1 + 0x2000));
     }
 
     #[test]
