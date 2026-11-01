@@ -22,6 +22,7 @@ use core::fmt;
 use toyos_device_memory::Registers;
 
 pub mod dmc;
+pub mod interrupt;
 pub mod regs;
 pub mod watermark;
 
@@ -44,7 +45,7 @@ pub trait Clock {
 const MEASURED_FRAMES: u32 = 30;
 /// The longest one frame may take before the pipe is called stopped: two
 /// frames at 24 Hz. A hang's ceiling.
-const FRAME_CEILING_NANOS: u64 = 84_000_000;
+pub const FRAME_CEILING_NANOS: u64 = 84_000_000;
 /// Between two reads of the frame counter.
 const FRAME_POLL_NANOS: u64 = 50_000;
 /// Vol 12 "Retrieve Memory Latency Data" and "SAGV Block Time": "Timeout after
@@ -59,8 +60,8 @@ const POWER_WELL_NANOS: u64 = 20_000;
 /// display on eDP").
 const UNUSED_WELLS: [u32; 3] = [5, 4, 3];
 
-/// Why this driver stopped short; [`keep_memory_low_power`] and
-/// [`allow_display_c6`] say how far each got.
+/// Why this driver stopped short; [`keep_memory_low_power`],
+/// [`allow_display_c6`] and [`interrupt::serve`] say how far each got.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Refusal {
     /// The firmware's state is not one pipe A plane scanning out alone.
@@ -101,6 +102,9 @@ pub enum Refusal {
     /// A power well stayed on after every request this driver can see was
     /// withdrawn.
     PowerWellHeld(u32),
+    /// DISPLAY_INT_CTL named a pending category this driver enabled nothing
+    /// in.
+    Interrupts(u32),
 }
 
 impl fmt::Display for Refusal {
@@ -129,6 +133,7 @@ impl fmt::Display for Refusal {
                 write!(f, "the CSR storage at {at:#x} reads {read:#010x}, not the {wrote:#010x} written")
             }
             Self::PowerWellHeld(well) => write!(f, "power well {well} stayed on with its requests withdrawn"),
+            Self::Interrupts(pending) => write!(f, "DISPLAY_INT_CTL names pending categories {pending:#010x} beyond pipe A's"),
         }
     }
 }
@@ -139,6 +144,7 @@ pub struct Scanout {
     /// Which of pipe A's planes, from 1.
     pub plane: usize,
     pub width: u64,
+    pub height: u64,
     pub bytes_per_pixel: u64,
     pub tiling: Tiling,
     /// Blocks, from PLANE_BUF_CFG, whose Buffer End is inclusive: Vol 12
@@ -190,6 +196,7 @@ pub fn scanout<R: Registers>(regs: &R) -> Result<Scanout, Refusal> {
     Ok(Scanout {
         plane,
         width: u64::from(size & 0x1FFF) + 1,
+        height: u64::from((size >> 16) & 0x1FFF) + 1,
         bytes_per_pixel,
         tiling,
         allocation: (end + 1).saturating_sub(start),
@@ -272,6 +279,13 @@ pub struct Programmed {
     pub watermarks: Watermarks,
     /// PLANE_WM levels 0-7 as the firmware left them.
     pub before: [u32; regs::LEVELS],
+}
+
+impl Programmed {
+    /// One frame of the measured mode.
+    pub fn refresh_interval_nanos(&self) -> u64 {
+        self.scanout.htotal * self.scanout.vtotal * 1_000_000 / self.pixel_rate_khz
+    }
 }
 
 /// Watermark levels 0-7 for the firmware's plane, programmed and armed (Vol 12

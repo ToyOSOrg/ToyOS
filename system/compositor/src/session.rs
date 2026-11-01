@@ -44,7 +44,7 @@ use crate::display::Display;
 use crate::render::{self, Assets, SystemStats, TitleBarIcons};
 use crate::stats::FrameTotals;
 use crate::{
-    launcher_apps, CLIPBOARD_POLL_HANDLES, DISPLAY_PORT_POLL_HANDLES, DOUBLE_CLICK_TIME, DRAIN_BUDGET,
+    launcher_apps, CLIPBOARD_POLL_HANDLES, DISPLAY_OUTPUT_POLL_HANDLES, DISPLAY_PORT_POLL_HANDLES, DOUBLE_CLICK_TIME, DRAIN_BUDGET,
     FIXED_POLL_HANDLES, FRAME_INTERVAL, INPUT_POLL_HANDLES, MAX_WINDOW_SLOTS, PROMPT_POLL_HANDLES,
     VOLUME_POLL_HANDLES,
 };
@@ -236,6 +236,9 @@ pub struct Session {
     /// The display's settings' port ([`toyos_manifest::display::PORT`]), which
     /// one program alone holds.
     settings: Acceptor,
+    /// The `display-output` port, and the display driver on it.
+    outputs: Acceptor,
+    output: Option<crate::output::Driver>,
     watcher: Option<Watcher>,
     /// What the watcher has asked and is sent, for the compositor's whole life:
     /// a copy made while no watcher is there is the next one's.
@@ -320,6 +323,8 @@ impl Session {
             .expect("the manifest declares this program serves `display`");
         let inputs = endow::acceptor(wire::PORT)
             .expect("the manifest declares this program serves `input`");
+        let outputs = endow::acceptor(toyos_display_output::PORT)
+            .expect("the manifest declares this program serves `display-output`");
         let (mut display, panel) = Display::claim();
         let desktop = crate::signout::Desktop::start();
         let mode = display.mode();
@@ -370,6 +375,7 @@ impl Session {
                 + PROMPT_POLL_HANDLES
                 + CLIPBOARD_POLL_HANDLES
                 + DISPLAY_PORT_POLL_HANDLES
+                + DISPLAY_OUTPUT_POLL_HANDLES
                 + INPUT_POLL_HANDLES
                 + VOLUME_POLL_HANDLES,
         );
@@ -378,6 +384,7 @@ impl Session {
         poller.watch(&prompts, READABLE, prompts.as_handle().raw().0 as u64);
         poller.watch(&clipboards, READABLE, clipboards.as_handle().raw().0 as u64);
         poller.watch(&settings, READABLE, settings.as_handle().raw().0 as u64);
+        poller.watch(&outputs, READABLE, outputs.as_handle().raw().0 as u64);
         if let Some(handle) = display.handle() {
             poller.watch(&handle, READABLE, handle.raw().0 as u64);
         }
@@ -405,6 +412,8 @@ impl Session {
             owed: PromptGate::default(),
             clipboards,
             settings,
+            outputs,
+            output: None,
             watcher: None,
             watch: Watch::default(),
             inputs,
@@ -498,6 +507,7 @@ impl Session {
         let prompt_ready = self.is_ready(self.prompts.as_handle().raw());
         let clipboard_ready = self.is_ready(self.clipboards.as_handle().raw());
         let settings_ready = self.is_ready(self.settings.as_handle().raw());
+        let outputs_ready = self.is_ready(self.outputs.as_handle().raw());
         let volume_ready = self.volume.as_ref().is_some_and(|(conn, _)| self.is_ready(conn.as_handle().raw()));
         let display_ready = self.display.handle().is_some_and(|handle| self.is_ready(handle.raw()));
         let session_ready = self.desktop.conn().is_some_and(|c| self.is_ready(c.as_handle().raw()));
@@ -519,6 +529,11 @@ impl Session {
             eprintln!("compositor: dropping client {} — {}", p.conn.as_handle().raw().0, reason);
         }
         self.pending.retain(|p| now.duration_since(p.since) < HANDSHAKE_TIMEOUT);
+        if self.output.as_ref().is_some_and(|d| d.overdue()) {
+            self.drop_output(format!("its hello did not come within {HANDSHAKE_TIMEOUT:?}"));
+        }
+        // After the sweep: a driver it dropped is not read.
+        let output_ready = self.output.as_ref().is_some_and(|d| self.is_ready(d.conn().as_handle().raw()));
 
         if !inputs_ready
             && sources_ready.is_empty()
@@ -526,6 +541,8 @@ impl Session {
             && !prompt_ready
             && !clipboard_ready
             && !settings_ready
+            && !outputs_ready
+            && !output_ready
             && !client_ready
             && !volume_ready
             && !display_ready
@@ -557,6 +574,18 @@ impl Session {
         if settings_ready {
             self.accept(Port::Display);
         }
+        if outputs_ready {
+            self.accept_output();
+        }
+        if output_ready {
+            let mode = self.display.mode();
+            if let Some(driver) = self.output.as_mut() {
+                match driver.read(mode) {
+                    Ok(()) => self.poller.watch(driver.conn(), READABLE, driver.conn().as_handle().raw().0 as u64),
+                    Err(why) => self.drop_output(why),
+                }
+            }
+        }
         if volume_ready {
             self.volume_answers();
         }
@@ -577,7 +606,27 @@ impl Session {
         self.reap();
         self.prompt_gone();
         self.rearm(inputs_ready, accept_ready, prompt_ready, clipboard_ready, settings_ready);
+        if outputs_ready {
+            self.poller.watch(&self.outputs, READABLE, self.outputs.as_handle().raw().0 as u64);
+        }
         true
+    }
+
+    /// A display driver off `display-output`, where none is connected.
+    fn accept_output(&mut self) {
+        match self.outputs.accept() {
+            Err(e) => eprintln!("compositor: a display driver could not be accepted ({e:?})"),
+            Ok(_) if self.output.is_some() => eprintln!("compositor: refusing a display driver — one is connected"),
+            Ok(conn) => {
+                self.poller.watch(&conn, READABLE, conn.as_handle().raw().0 as u64);
+                self.output = Some(crate::output::Driver::new(conn, self.epoch));
+            }
+        }
+    }
+
+    fn drop_output(&mut self, why: String) {
+        eprintln!("compositor: dropping the display driver — {why}");
+        self.output = None;
     }
 
     /// Nanoseconds since the session's epoch, the clock the overlay is timed by.
@@ -1948,6 +1997,9 @@ impl Session {
         let damage_px = blit(self.display.screen(), &self.back, &regions);
         self.totals.record(started.elapsed().as_nanos() as u64, regions.len(), damage_px);
         self.display.present(&regions);
+        if let Some(Err(why)) = self.output.as_mut().map(|d| d.composed(&regions)) {
+            self.drop_output(why);
+        }
         if self.totals.frames() == 1 {
             println!("compositor: the first frame is on the panel");
         }

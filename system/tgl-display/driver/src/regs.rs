@@ -119,5 +119,30 @@ pub const MAILBOX_DATA0: usize = 0x13_8128;
 pub const MAILBOX_DATA1: usize = 0x13_812C;
 pub const RUN_BUSY: u32 = 1 << 31;
 
+/// DE_PIPE_INTERRUPT_A (Vol 2c), 44400h-4440Fh: ISR, IMR, IIR and IER, bit 0
+/// Vblank. The other categories this driver enables nothing in, at their IER:
+/// pipes B-D, DE_PORT_INTERRUPT, DE_MISC_INTERRUPT, DE_HPD_INTERRUPT and
+/// AUD_INTERRUPT. Each IMR is 8 below its IER: ISR, IMR, IIR and IER at +0,
+/// +4, +8 and +Ch.
+pub const PIPE_A_IMR: usize = 0x4_4404;
+pub const PIPE_A_IIR: usize = 0x4_4408;
+pub const PIPE_A_IER: usize = 0x4_440C;
+pub const VBLANK: u32 = 1 << 0;
+pub const UNUSED_IERS: [usize; 7] = [0x4_441C, 0x4_442C, 0x4_443C, 0x4_444C, 0x4_446C, 0x4_447C, 0x4_448C];
+
+/// DISPLAY_INT_CTL, 44200h: bit 31 Display Interrupt Enable, 25:16 the
+/// categories pending, pipe A's at 16.
+pub const DISPLAY_INT_CTL: usize = 0x4_4200;
+pub const DISPLAY_INTERRUPT_ENABLE: u32 = 1 << 31;
+pub const PENDING: u32 = 0x3FF << 16;
+pub const PIPE_A_PENDING: u32 = 1 << 16;
+
+/// GFX_MSTR_INTR, 190010h: bit 31 Primary Interrupt, the control every
+/// graphics interrupt needs to reach the PCI function's message; bit 16
+/// Display.
+pub const GFX_MSTR_INTR: usize = 0x19_0010;
+pub const PRIMARY_INTERRUPT: u32 = 1 << 31;
+pub const DISPLAY_PENDING: u32 = 1 << 16;
+
 /// The highest offset this driver reaches, for the window's bound.
-pub const SPAN: usize = MAILBOX_DATA1 + 4;
+pub const SPAN: usize = GFX_MSTR_INTR + 4;

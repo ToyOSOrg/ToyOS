@@ -445,6 +445,7 @@ dependencies = [
  "toyos",
  "toyos-abi",
  "toyos-desktop",
+ "toyos-display-output",
  "toyos-edid",
  "toyos-font",
  "toyos-icon",
@@ -3347,6 +3348,7 @@ dependencies = [
  "toyos",
  "toyos-abi",
  "toyos-device-memory",
+ "toyos-display-output",
  "toyos-manifest",
  "toyos-pci-claim",
  "toyos-tgl-display",
@@ -3704,6 +3706,10 @@ dependencies = [
  "toyos-net-udp",
  "toyos-net-wire",
 ]
+
+[[package]]
+name = "toyos-display-output"
+version = "0.1.0"
 
 [[package]]
 name = "toyos-dma"

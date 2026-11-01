@@ -48,6 +48,18 @@ pub fn judges_verdict() -> Result<(), String> {
         &format!("{}{configured}{next}", tone(stats(0, 0)).replace(configured, "")),
         false,
     )?;
+    // A job that waits after its spawn: the output offered after the spawn and
+    // before its stream connects is the one it played to; offered after the
+    // stream connected, it played to the null sink.
+    let waiting = |offered_between: bool| {
+        let spawned = spawn("test_rs_audio_tone");
+        match offered_between {
+            true => format!("{spawned}{configured}{}{next}", session(stats(0, 1), stats(0, 0))),
+            false => format!("{spawned}{}{configured}{next}", session(stats(0, 1), stats(0, 0))),
+        }
+    };
+    judged("a tone whose output was offered after its spawn and before its stream", tone_on_metal, &waiting(true), true)?;
+    judged("a tone whose stream connected before the output was offered", tone_on_metal, &waiting(false), false)?;
     // The next job's stream connected before soundserver let the tone's go, so the
     // tone's last window is both streams' whatever it counted.
     judged(

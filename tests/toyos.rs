@@ -211,6 +211,9 @@ const RUST_SKIP: &[&str] = &[
     // queries, and no guest's machine has that controller: the
     // `acpi_server_events` metal row runs it.
     "acpi_counted",
+    // It waits for tgl-display's DC6 allow, which only the T14's iGPU has:
+    // the `display_output_presents` metal row runs it.
+    "tone_after_dc6",
     // It claims the fixed hardware itself, which needs a boot that starts no
     // server, and stages the firmware's side of the Global Lock, which needs
     // the test kernel: `acpi_mediated_access` and `acpi_press_is_one_sci`
@@ -1413,6 +1416,16 @@ const METAL: &[(&str, metal::Metal)] = &[
             },
         },
     ),
+    (
+        // The T14's display driver offers the compositor the firmware's
+        // output on `display-output`, and the compositor's presents are
+        // answered at their vblanks, which only the iGPU's interrupt raises.
+        // Beside it `hda` still plays to the analog codec with the display
+        // engine's PG3, which holds the display codec, powered down. The T14
+        // alone: no other bench has a Tiger Lake iGPU.
+        "display_output_presents",
+        metal::Metal { arms: METALCASE_TONE, judge: |b| display_output_presents(b[0]) },
+    ),
     // ---- the `SYS_DEBUG` members' boot, armed ----
     // The cheapest cluster there is: every one of these arms a check that runs
     // at init, logs its verdict and does nothing else, so they cost no flash
@@ -2009,6 +2022,49 @@ fn exited(job: &str) -> String {
     format!("{}{} pid=", toyos_build::bootlog::EXIT, toyos_build::bootlog::recorded_name(job))
 }
 
+/// What [`display_output_presents`] reads off the T14's metalcase boot:
+/// - the driver's DMC line, with DC6 allowed on DDI A;
+/// - its hello taken and a present answered, at a later frame of pipe A's
+///   counter than the allow, so the timing generator ran through DC6 being
+///   allowed;
+/// - nothing dropped;
+/// - `tone_after_dc6`'s tone played whole to `hda`'s output, which it starts
+///   only once PG3 is down.
+///
+/// Whether `hda` walked its codecs before or after PG3 went down is said,
+/// since only the later order tests the display codec's power.
+fn display_output_presents(boot: &metal::Readback) -> Result<(), String> {
+    let log = boot.log();
+    let frame = |line: &str, after: &str| -> Result<u64, String> {
+        line.split_once(after).and_then(|(_, n)| n.trim().parse().ok()).ok_or_else(|| format!("no frame number in {line:?}"))
+    };
+    let dc6 = log.must_say("tgl-display: DMC package")?;
+    if !dc6.contains("DDI select 0x1;") || !dc6.contains(" 00000002, AUDIO_PIN_BUF_CTL") {
+        return Err(format!("DC6 was not allowed on DDI A: {dc6}"));
+    }
+    let answered = log.must_say("tgl-display: first present answered at pipe A frame")?;
+    let (allowed_at, answered_at) = (frame(dc6, "pipe A frame")?, frame(answered, "pipe A frame")?);
+    if answered_at <= allowed_at {
+        return Err(format!("pipe A's frame counter read {allowed_at} at the allow and {answered_at} at the first answer"));
+    }
+    log.must_say("compositor: a display driver scans out the 1920x1080 output")?;
+    log.must_say("compositor: the display driver answered its first present")?;
+    for refused in ["compositor: dropping the display driver", "tgl-display: presents go unanswered"] {
+        if let Some(line) = log.text().lines().find(|line| line.contains(refused)) {
+            return Err(format!("the driver's presents stopped: {line}"));
+        }
+    }
+    boot.job_passed("test_rs_tone_after_dc6")?;
+    audio::tone_played(&log, "test_rs_tone_after_dc6")?;
+    let at = |line: &str| log.text().find(line).expect("a line said is in the log");
+    let offered = log.must_say("offered to soundserver")?;
+    let order = if at(offered) > at(dc6) { "after" } else { "before" };
+    println!(
+        "display_output_presents: pipe A frames {allowed_at} -> {answered_at}; hda offered its output {order} PG3 went down, and the tone played after"
+    );
+    Ok(())
+}
+
 /// `tests/images/metalcase.toml`, ended once ps2server's probe has: a boot
 /// that ended sooner would cut off what `ps2server_arms` reads.
 const METALCASE: &[metal::Arm] = &[metal::Arm {
@@ -2021,6 +2077,13 @@ const METALCASE: &[metal::Arm] = &[metal::Arm {
 const METALCASE_SCALE: &[metal::Arm] = &[metal::Arm {
     last: Some("test_rs_ps2server_hold"),
     ..metal::once("metalcase", "tests/images/metalcase.toml", &[], &["test_rs_scale_window"])
+}];
+
+/// [`METALCASE`] with `tone_after_dc6`, which `display_output_presents`
+/// plays once the display driver has PG3 down, muted like every metal tone.
+const METALCASE_TONE: &[metal::Arm] = &[metal::Arm {
+    last: Some("test_rs_ps2server_hold"),
+    ..metal::once("metalcase", "tests/images/metalcase.toml", &[], &["test_rs_tone_after_dc6"])
 }];
 
 /// A launcher and a declared `cat` and shell, which `process_tree`'s subtree

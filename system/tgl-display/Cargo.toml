@@ -1,12 +1,13 @@
 [package]
 name = "tgl-display"
-description = "The Tiger Lake display driver: one process for the iGPU's display function, holding its claim and programming the display engine's power on the firmware's surface."
+description = "The Tiger Lake display driver: one process for the iGPU's display function, holding its claim, programming the display engine's power on the firmware's surface and answering the compositor's presents."
 edition = "2024"
 license = "MIT OR Apache-2.0"
 
 [dependencies]
 toyos-abi = { path = "../../sdk/abi" }
 toyos = { path = "../../sdk/toyos" }
+toyos-display-output = { path = "../../lib/display-output" }
 toyos-device-memory = { path = "../../lib/device-memory" }
 toyos-manifest = { path = "../../lib/manifest" }
 toyos-pci-claim = { path = "../../lib/pci-claim" }

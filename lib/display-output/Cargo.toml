@@ -1,0 +1,14 @@
+[package]
+name = "toyos-display-output"
+description = "The compositor's display-output protocol: the output a display driver offers, the frames the compositor presents to it and their answers, decoded once."
+version = "0.1.0"
+edition = "2024"
+license = "MIT OR Apache-2.0"
+publish = false
+
+[lib]
+doctest = false
+
+[lints.rust]
+unsafe_code = "forbid"
+warnings = "deny"
