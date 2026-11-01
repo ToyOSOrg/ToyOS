@@ -349,6 +349,25 @@ receiver's window growth, which both senders share.
 (`peer_received_by_<ms>ms_bytes`), so a session gives five connections a
 run and the run's own spread.
 
+**The exit's first session read no ToyOS row, 2026-11-01**
+([evidence](https://github.com/ToyOSOrg/evidence/tree/35f09268e09714a8547496bdd766bcd3ca998325/r1)). This was Linux, ToyOS at `4f52c3056`, Linux, all
+exiting 0. ToyOS's `osbench_lan` found the peer and then refused the group:
+`no netstack link holds 10.0.2.15`. std's `TcpStream::local_addr` answers
+QEMU's user-network address whatever the lease is, and since #1122 osbench
+names a connection's link by that address. The T14's lease is not it. So the
+session does not decide, and the next one waits on
+`issues/getsockname-answers-an-address-nobody-asked-netstack-for.md`.
+
+Its Linux runs do give the per-connection spread the rule needs:
+
+- p50 113 and 113 MB/s.
+- At 100 ms the rounds ran 5.82–6.63 MB and 5.13–6.38 MB, a standard
+  deviation of 478 KB over the ten. The parity boot's 30 KB miss is a
+  sixteenth of that.
+- At 300 ms they ran 28.8–30.0 MB and 27.7–29.7 MB.
+- The two runs do not differ: the two-sided rank test gives p = 0.69 at
+  100 ms and 0.42 at 300 ms. So the rule's exchangeability check passes.
+
 **Exit**: in one T14 session, Linux, ToyOS, Linux, `osbench_lan`'s
 `lan.wired.tcp.upload` reads:
 
