@@ -155,69 +155,42 @@ impl core::fmt::Display for IommuError {
     }
 }
 
-/// Where a device's addresses come from. Not a bare `DomainId`: a machine with no
-/// unit has to be something this type can say, or every driver grows the branch.
+/// Where a device's addresses come from, for a driver **in this kernel**: the
+/// machine's own, since every domain is built clear of the root bridges'
+/// declared windows and a driver here comes up before they are declared.
+/// Until the last one moves to userland
+/// (`issues/an-aarch64-cargo-run-boot-hands-over-no-pci-claim.md`).
 #[derive(Clone, Copy)]
 pub enum DeviceSpace {
     /// Nothing translates here, so a device address is a physical address.
     Untranslated,
-    /// The device reaches exactly what is mapped in this and nothing else.
-    Own(DomainId),
 }
 
 impl DeviceSpace {
-    /// The machine's own, with the reason, for a driver **in this kernel**,
-    /// whose addresses are the kernel's either way: where any of `functions`
-    /// keeps the machine's addresses, and otherwise because every domain is
-    /// built clear of the root bridges' declared windows and a driver in this
-    /// kernel comes up before they are declared. So no driver here is given a
-    /// domain of its own (`issues/an-aarch64-cargo-run-boot-hands-over-no-pci-claim.md`).
-    pub fn create(functions: &[crate::drivers::pci::PciDevice]) -> Self {
+    /// The machine's own addresses for `functions`, or `None` where the unit
+    /// lets a function with no domain of its own reach nothing, which is said.
+    pub fn create(functions: &[crate::drivers::pci::PciDevice]) -> Option<Self> {
         for function in functions {
             let stream = StreamId::pci(function.bus, function.dev, function.func);
             if let Some(why) = unit::domain::untranslated(stream) {
                 log!("iommu: {stream} keeps the machine's addresses: {why}");
-                return Self::Untranslated;
+                continue;
+            }
+            if unit::domain::aborts_undomained(stream) {
+                log!("iommu: {stream} reaches nothing: the unit aborts a function with no domain, and none is made before the root bridges are declared");
+                return None;
             }
         }
-        match unit::domain::create(0, None) {
-            Ok((id, _)) => Self::Own(id),
-            Err(why) => {
-                log!("iommu: no domain of its own for a device: {why}");
-                Self::Untranslated
-            }
-        }
+        Some(Self::Untranslated)
     }
 
     /// Put `bytes` at `phys` in this space, ending at or below `limit`, the
     /// device's own address width; returns what to program the device with.
-    ///
-    /// Read and write both, always: nothing here can give a permission set a
-    /// second value. The only leaf is 2 MiB, coarser than any split a driver's
-    /// pools offer, and QEMU drops an access its cached translation denies
-    /// rather than recording a fault — unexpressible and unobservable both.
     pub fn map(self, phys: u64, bytes: u64, limit: Limit) -> Result<u64, IommuError> {
         match self {
             // The pages are the address, so nothing chooses one the device reaches.
             Self::Untranslated if phys.saturating_add(bytes) > limit.end() => Err(IommuError::AddressesExhausted(limit)),
             Self::Untranslated => Ok(phys),
-            Self::Own(id) => unit::domain::map(id, phys, bytes, limit).map(Iova::raw),
-        }
-    }
-
-    /// Take `bytes` at `at` back, so the pages behind them can be reused.
-    pub fn unmap(self, at: u64, bytes: u64) -> Result<(), IommuError> {
-        match self {
-            Self::Untranslated => Ok(()),
-            Self::Own(id) => unit::domain::unmap(id, Iova::translated(at), bytes),
-        }
-    }
-
-    /// Move `bus:device.function` onto this space, every mapping it needs already
-    /// in place: the device is translating the moment this returns.
-    pub fn attach(self, bus: u8, device: u8, function: u8) {
-        if let Self::Own(id) = self {
-            OwnSpace(id).attach(bus, device, function);
         }
     }
 }

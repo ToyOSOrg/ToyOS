@@ -96,6 +96,13 @@ pub fn untranslated(_function: StreamId) -> Option<&'static str> {
     None
 }
 
+/// Whether `function`, given no domain of its own, reaches nothing: the IORT
+/// routes it through the armed unit, whose stream table aborts every stream
+/// no claim gave a domain.
+pub fn aborts_undomained(function: StreamId) -> bool {
+    UNIT.lock().as_ref().is_some_and(|live| live.routes.iter().any(|(stream, ..)| *stream == function))
+}
+
 /// Why no claim may have `function`: it arrived after the unit was
 /// programmed, and its IORT route was read only for the functions enumerated
 /// then.

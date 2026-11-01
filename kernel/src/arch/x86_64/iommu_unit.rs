@@ -166,6 +166,12 @@ pub mod domain {
         }
     }
 
+    /// Whether a function with no domain of its own reaches nothing: never,
+    /// since both backends leave it on the identity domain.
+    pub fn aborts_undomained(_stream: StreamId) -> bool {
+        false
+    }
+
     /// Why no claim may have `stream`, if none may: [`untranslated`]'s
     /// reasons and the requester ids AMD-Vi's platform speaks as; on VT-d, an
     /// RMRR that names it and does not keep it (`vtd::classify`).
