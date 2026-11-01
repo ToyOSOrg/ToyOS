@@ -20,8 +20,8 @@ data-dependent prefetcher.
   and the attribution boot by mode,
   https://github.com/ToyOSOrg/evidence/tree/56a9678bcec3939074783b0f0a363eb14c1a25da/combined/fsfp-attribution.
 - Intel lists FSFP on Ice Lake U/Y and SP, Lakefield, Tiger Lake U/H, Rocket
-  Lake and Alder Lake P/M/S, and later parts enumerate PSFD
-  (CPUID.(7,2).EDX[0]). It does not document what makes the predictor
+  Lake and Alder Lake P/M/S, and says later parts declare it by enumerating
+  PSFD (CPUID.(7,2).EDX[0]), as the T14 does too (EDX 0x1). It does not document what makes the predictor
   forward wrongly, so no coding rule avoids it.
 - Current code passes on the T14 with every such control off. That rests on
   avoiding the value pattern that triggered it (#1013 keeps the running point

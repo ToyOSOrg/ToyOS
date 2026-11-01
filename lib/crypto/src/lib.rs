@@ -50,7 +50,7 @@ mod secret;
 pub use secret::{Secret, Zeroable};
 pub mod siphash;
 pub mod ssh;
-mod timing;
+pub mod timing;
 #[cfg(feature = "wpa2")]
 pub mod wpa2;
 pub mod x25519;

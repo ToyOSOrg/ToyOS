@@ -28,6 +28,7 @@ pub(crate) fn nonzero(value: u64) -> u64 {
 /// Whether `a` and `b` hold the same bytes, without branching or indexing on their contents:
 /// compare a received authenticator with the expected one through this.
 pub fn equal(a: &[u8], b: &[u8]) -> bool {
+    let _protection = crate::timing::protect();
     if a.len() != b.len() {
         return false;
     }
