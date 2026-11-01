@@ -64,18 +64,25 @@ fn on_an_output(log: &str, job: &str) -> Result<(), String> {
         .ok_or_else(|| format!("soundserver never said `{PLAYING}`: no output was offered, and it stayed the null sink"))?;
     let head = format!("spawn: /system/bin/{job} ");
     let spawned = log.find(&head).ok_or_else(|| format!("no `{head}` record: {job} never ran"))?;
+    let mut at = spawned;
     let opened = log[spawned..]
-        .find(OPENING)
-        .map(|at| spawned + at)
-        .ok_or_else(|| format!("soundserver never said `{OPENING}` after {job} spawned: it opened no stream"))?;
+        .split_inclusive('\n')
+        .find_map(|line| {
+            let here = at;
+            at += line.len();
+            (line.contains(CLIENT) && line.contains(CONNECTED)).then_some(here)
+        })
+        .ok_or_else(|| format!("soundserver never said a client connected after {job} spawned: it opened no stream"))?;
     if playing > opened {
         return Err(format!("soundserver played to an output only after {job} opened its stream, so it played to the null sink"));
     }
     Ok(())
 }
 
-/// What soundserver says as a client's stream opens.
-const OPENING: &str = "soundserver: opening stream";
+/// What soundserver says as a client's stream connects:
+/// `soundserver: client 0 connected (id=0)`.
+const CLIENT: &str = "soundserver: client ";
+const CONNECTED: &str = " connected (id=";
 
 /// The tone client played to its end through the HDA controller an `hda`
 /// driver drives, played to before it ran, and no period of it went unfilled.
