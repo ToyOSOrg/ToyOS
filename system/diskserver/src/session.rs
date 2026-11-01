@@ -3,9 +3,11 @@
 //!
 //! **What a request means is `toyos_blockring::client::Client`'s to decide**;
 //! this is the mapping, the arena and the doorbells around it.
-//! A write's data is copied into the arena and stays there until a flush
-//! covers it, because after a loss it is the only copy there is; a read's is
-//! copied out when it is answered.
+//! A request takes arena blocks only while it is on the wire. A write's blocks
+//! are the caller's, shared: the client keeps them with the write until a
+//! flush covers it, at most [`KEPT_BLOCKS`] before it flushes for them, and
+//! the session copies them into the arena each time the write goes out. A
+//! read's data is copied out when it is answered.
 //!
 //! **A service that ends is survivable and not invisible.** [`Session::wait`]
 //! reads every completion the server posted before it hung up, answers what
@@ -22,13 +24,20 @@ use toyos::namespace::Namespace;
 use toyos::poller::READABLE;
 use toyos::wake::{Bell, Waker};
 use toyos_abi::syscall::SyscallError;
-use toyos_blockring::client::{Client, Outcome, Ticket};
-use toyos_blockring::entry::{Completion, Op};
+use toyos_blockdev::SharedBlock;
+use toyos_blockring::client::{Ask, Client, Outcome, Placing, Ticket};
+use toyos_blockring::entry::Completion;
 use toyos_blockring::layout::{self, ClientRings, ARENA, MAX_REQUEST_BLOCKS};
 use toyos_blockring::wire::{self, Opened, Refusal};
 use toyos_blockring::{Run, BLOCK_BYTES};
 
 use toyos_blockserve::region::Region;
+
+/// The most blocks of acknowledged writes a session keeps before the caller's
+/// next write waits for a flush of its own: 32 MiB, no less than a file
+/// server cache's dirty bound, so a cache that flushes by that bound is never
+/// made to flush by this one.
+pub const KEPT_BLOCKS: u64 = 8 * 1024;
 
 /// Why a session could not be opened or go on.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -70,8 +79,6 @@ pub struct Waited {
 /// caller that gave up on it would find it done under writes it made since.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Unsent {
-    /// The arena has no room: a flush releases what acknowledged writes hold.
-    ArenaFull,
     /// The session has ended: [`Session::reconnect`] first.
     Ended,
 }
@@ -110,7 +117,7 @@ impl Arena {
 }
 
 enum Pending {
-    Read { run: Run },
+    Read,
     Write,
     Flush,
 }
@@ -123,11 +130,13 @@ pub struct Session {
     /// The open session's doorbells, `None` once it ended.
     bells: Option<Bells>,
     rings: ClientRings,
-    client: Client,
+    client: Client<Vec<SharedBlock>>,
     opened: Opened,
     arena: Arena,
     next_ticket: Ticket,
     pending: BTreeMap<Ticket, Pending>,
+    /// Each read on the wire's arena blocks.
+    reads: BTreeMap<Ticket, Run>,
     /// The most requests this session has had on the wire at once.
     peak: usize,
 }
@@ -139,7 +148,7 @@ impl Session {
         let region = Region::create().map_err(Error::Kernel)?;
         let rings = layout::client(region.words());
         let (bells, opened) = handshake(&names, service, guid, &region)?;
-        let mut client = Client::new();
+        let mut client = Client::new(KEPT_BLOCKS);
         client.session_started();
         Ok(Self {
             names,
@@ -153,6 +162,7 @@ impl Session {
             arena: Arena::new(),
             next_ticket: 0,
             pending: BTreeMap::new(),
+            reads: BTreeMap::new(),
             peak: 0,
         })
     }
@@ -178,30 +188,29 @@ impl Session {
         t
     }
 
-    /// Ask for `data` (whole blocks) written at `lba`.
-    pub fn submit_write(&mut self, lba: u64, data: &[u8]) -> Result<Ticket, Unsent> {
-        let blocks = whole_blocks(data.len());
+    /// Ask for `blocks` written at `lba`, which the session keeps a share of
+    /// until a flush covers the write. With [`KEPT_BLOCKS`] kept, it goes out
+    /// after a flush of the session's own.
+    pub fn submit_write(&mut self, lba: u64, blocks: &[SharedBlock]) -> Result<Ticket, Unsent> {
+        let count = transfer_blocks(blocks.len());
         if self.bells.is_none() {
             return Err(Unsent::Ended);
         }
-        let run = self.arena.alloc(blocks).ok_or(Unsent::ArenaFull)?;
-        self.region.arena(&run).copy_in(0, data);
         let ticket = self.ticket();
-        self.client.submit(ticket, Op::Write { run, lba });
+        self.client.submit(ticket, Ask::Write { lba, blocks: count, payload: blocks.to_vec() });
         self.pending.insert(ticket, Pending::Write);
         Ok(ticket)
     }
 
     /// Ask for `blocks` read from `lba`; the answer carries the data.
     pub fn submit_read(&mut self, lba: u64, blocks: u32) -> Result<Ticket, Unsent> {
-        assert!((1..=MAX_REQUEST_BLOCKS).contains(&blocks), "a read of {blocks} blocks");
+        transfer_blocks(blocks as usize);
         if self.bells.is_none() {
             return Err(Unsent::Ended);
         }
-        let run = self.arena.alloc(blocks).ok_or(Unsent::ArenaFull)?;
         let ticket = self.ticket();
-        self.client.submit(ticket, Op::Read { run, lba });
-        self.pending.insert(ticket, Pending::Read { run });
+        self.client.submit(ticket, Ask::Read { lba, blocks });
+        self.pending.insert(ticket, Pending::Read);
         Ok(ticket)
     }
 
@@ -211,7 +220,7 @@ impl Session {
             return Err(Unsent::Ended);
         }
         let ticket = self.ticket();
-        self.client.submit(ticket, Op::Flush);
+        self.client.submit(ticket, Ask::Flush);
         self.pending.insert(ticket, Pending::Flush);
         Ok(ticket)
     }
@@ -219,25 +228,42 @@ impl Session {
     /// Put what the client will send on the ring, and ring the doorbell once
     /// for all of it.
     fn pump(&mut self) {
-        let Some(bells) = &self.bells else { return };
-        let page = self.region.words();
+        let Self { bells, region, rings, client, arena, reads, .. } = self;
+        let Some(bells) = bells else { return };
+        let page = region.words();
+        let mut place = |p: Placing<'_, Vec<SharedBlock>>| match p {
+            Placing::Read { ticket, blocks } => {
+                let run = arena.alloc(blocks)?;
+                reads.insert(ticket, run);
+                Some(run)
+            }
+            Placing::Write { payload, blocks } => {
+                let run = arena.alloc(blocks)?;
+                let window = region.arena(&run);
+                for (k, block) in payload.iter().enumerate() {
+                    window.copy_in(k * BLOCK_BYTES, &***block);
+                }
+                Some(run)
+            }
+        };
         loop {
-            match self.rings.0.space(page) {
+            match rings.0.space(page) {
                 Ok(0) => break,
                 Ok(_) => {}
                 // The server wrote an index no server writes: the session is
                 // over, and the next drain is where that is acted on.
                 Err(_) => break,
             }
-            let Some(request) = self.client.next_request() else { break };
-            let pushed = self.rings.0.push(page, request.encode());
+            let Some(request) = client.next_request(&mut place) else { break };
+            let pushed = rings.0.push(page, request.encode());
             assert_eq!(pushed, Ok(true), "diskserver: a request past the room just counted");
         }
-        self.peak = self.peak.max(self.client.on_the_wire().count());
-        if self.rings.0.publish(page) {
+        let on_the_wire = client.on_the_wire().count();
+        if rings.0.publish(page) {
             // A server that has ended is found by the wait.
             bells.ring.wake();
         }
+        self.peak = self.peak.max(on_the_wire);
     }
 
     /// Every answer there is; with `block`, wait until there is at least one
@@ -307,12 +333,18 @@ impl Session {
         for (ticket, outcome) in decided {
             let pending = self.pending.remove(&ticket).expect("diskserver: an answer for no ticket");
             let data = match (pending, outcome) {
-                (Pending::Read { run }, Outcome::Done) => {
-                    let mut data = vec![0u8; run.span().len];
-                    self.region.arena(&run).copy_out(0, &mut data);
-                    Some(data)
+                (Pending::Read, outcome) => {
+                    let run = self.reads.remove(&ticket);
+                    match (run, outcome) {
+                        (Some(run), Outcome::Done) => {
+                            let mut data = vec![0u8; run.span().len];
+                            self.region.arena(&run).copy_out(0, &mut data);
+                            Some(data)
+                        }
+                        _ => None,
+                    }
                 }
-                _ => None,
+                (Pending::Write | Pending::Flush, _) => None,
             };
             answers.push(Answer { ticket, outcome, data });
         }
@@ -351,11 +383,9 @@ impl Session {
     }
 }
 
-fn whole_blocks(len: usize) -> u32 {
-    assert!(len > 0 && len % BLOCK_BYTES == 0, "diskserver: a transfer of {len} bytes is no whole blocks");
-    let blocks = (len / BLOCK_BYTES) as u32;
-    assert!(blocks <= MAX_REQUEST_BLOCKS, "diskserver: a transfer of {blocks} blocks");
-    blocks
+fn transfer_blocks(blocks: usize) -> u32 {
+    assert!((1..=MAX_REQUEST_BLOCKS as usize).contains(&blocks), "diskserver: a transfer of {blocks} blocks");
+    blocks as u32
 }
 
 pub(crate) fn connect(names: &Namespace, service: &str) -> Result<Connection, Error> {

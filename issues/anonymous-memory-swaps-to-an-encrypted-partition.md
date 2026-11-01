@@ -134,18 +134,29 @@ The symbols:
     atomically, and is refused whole if any is not free. A referenced block is
     never written.
   - **Free after durable.** `clean_end` comes only after a flush answers durable
-    for every write of the batch. The block client keeps acknowledged writes and
-    reissues them after a loss (`lib/blockring/src/client.rs`), and durable rests
-    on that.
+    for every write of the batch. The block client keeps an acknowledged
+    write's blocks, which the service hands the session shared, until a flush
+    covers it, and reissues it from them after a loss
+    (`lib/blockring/src/client.rs`); durable rests on that.
   - **Install before freeing.** Swap-in installs the frame and frees the block in
     one hold of the space lock.
   - **Re-dirtying.** A store, a kernel write copy, or a `mem_write` into a page
     being cleaned keeps it dirty, and keeps its frame.
 - **Arena reserve.** A swap session's arena has 511 blocks and its ring has 64
-  entries.
-  - Writes hold at most 447 blocks and 48 entries, leaving 64 blocks and 16
-    entries for swap-in reads.
-  - The service flushes once 223 acknowledged writes are held.
+  entries, and both carry only requests on the wire: an acknowledged write
+  holds neither.
+  - Writes on the wire hold at most 447 blocks and 48 entries, leaving 64
+    blocks and 16 entries for swap-in reads.
+  - What the session keeps shared is bounded by the batch: `clean_end` waits
+    for a flush covering it. Past `diskserver::session::KEPT_BLOCKS` the
+    session flushes for itself before the next write. The service's batch size
+    is its own choice and needs no arena arithmetic.
+  - **A swap-in read can wait behind a write.** Requests go out in the order
+    asked, so a read asked after a write waits while that write has no
+    contiguous arena room, or waits at the session's kept limit for its flush.
+    The 64-block reserve bounds how many reads fit, not that wait. If swap-in
+    latency matters, reads go out ahead of waiting writes, which the client's
+    one outbox does not do today.
 - **`CLEANING` on private leaves.**
   - A store faults and clears it. So does a kernel write copy, which takes its
     pin under the space lock. A read copy leaves it.
