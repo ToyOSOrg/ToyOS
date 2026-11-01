@@ -26,7 +26,7 @@ use core::net::Ipv4Addr;
 
 use toyos_dhcp::{Lease, Transmission};
 use toyos_dns::Cache;
-use toyos_net_shard::{Config, Credit, Event, IfIndex, Origin, Rank, Refusal, Shard};
+use toyos_net_shard::{Config, Credit, Event, IfIndex, Origin, Rank, Refusal, Shard, UdpPeer};
 use toyos_net_udp::{Received, SocketId};
 use toyos_net_wire::ethernet::{IndividualMac, MacAddr};
 use toyos_net_wire::ipv4::{MulticastAddr, Ttl};
@@ -264,7 +264,7 @@ impl Stack {
         self.shard.udp_readable(id)
     }
 
-    pub(crate) fn peer(&mut self, id: SocketId) -> Result<Option<(Ipv4Addr, Port)>, toyos_net_udp::Error> {
+    pub(crate) fn peer(&mut self, id: SocketId) -> Result<Option<UdpPeer>, toyos_net_udp::Error> {
         self.shard.udp_peer(id)
     }
 

@@ -13,7 +13,7 @@ use std::time::Duration;
 
 use common::{from_server, message_of, terms, xid, A, ACK, BROADCAST, DNS, MAC, MAC_B, MAC_R, R};
 use lan::{udp, unreachable, Lan, Seen, Udp, B, OFF_LINK};
-use toyos_net_node::{Datagram, Event, ExportRefused, HolderId, Refused};
+use toyos_net_node::{Datagram, Event, ExportRefused, HolderId, Refused, UdpPeer};
 use toyos_net_shard::Refusal;
 use toyos_net_udp::Counter;
 use toyos_net_wire::Port;
@@ -276,7 +276,8 @@ fn a_connected_sockets_peer_is_every_holders() {
     assert_eq!((lan.node.udp_peer(id), lan.node.udp_send(lan.now, id, b"x")), (Ok(None), Err(Refused::NotConnected)));
     assert_eq!(lan.node.udp_connect(lan.now, id, B, 0), Err(Refused::InvalidInput), "port 0");
     lan.node.udp_connect(lan.now, id, B, 7).expect("one host of the link");
-    assert_eq!(lan.node.udp_peer(id), Ok(Some((B, Port::new(7).unwrap()))));
+    // A is the lease, which the route to B leaves from.
+    assert_eq!(lan.node.udp_peer(id), Ok(Some(UdpPeer { addr: B, port: Port::new(7).unwrap(), local: A })));
     lan.node.udp_send(lan.now, id, b"to the peer").expect("a connected socket's send");
     lan.pump();
     let last = lan.datagrams().last().map(|(_, udp)| (udp.destination, udp.port, udp.payload.clone()));

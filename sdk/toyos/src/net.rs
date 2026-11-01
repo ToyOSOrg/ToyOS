@@ -155,6 +155,13 @@ pub enum NetError {
     Io,
 }
 
+/// Whether `addr` can be a host's own: neither unspecified, multicast nor broadcast, the
+/// check an answer naming this machine's end of a stream or a connected socket passes.
+fn unicast(addr: [u8; 4]) -> bool {
+    let addr = core::net::Ipv4Addr::from(addr);
+    !addr.is_unspecified() && !addr.is_multicast() && !addr.is_broadcast()
+}
+
 impl NetError {
     pub fn from_error_code(code: u32) -> Self {
         match code {
