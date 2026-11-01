@@ -22,10 +22,21 @@
 
 #![forbid(unsafe_code)]
 
-use alloc::vec;
 use alloc::vec::Vec;
 
-pub const PAGE: u64 = 4096;
+use crate::chunked::Chunked;
+
+pub use crate::vm::PAGE;
+
+/// The furthest a page of an object ends: every offset, size and range end is
+/// at or below it, so no page's end overflows.
+pub const LAST_END: u64 = u64::MAX / PAGE * PAGE;
+
+/// Whether `len` bytes from `offset` end at or below [`LAST_END`]: what every
+/// offset and length a pager names is checked against before it is used.
+pub fn within_reach(offset: u64, len: u64) -> bool {
+    offset.checked_add(len).is_some_and(|end| end <= LAST_END)
+}
 
 /// The most pages one write-back range covers: a 64-byte bitmap.
 pub const RANGE_PAGES: u64 = 512;
@@ -34,6 +45,105 @@ pub const RANGE_PAGES: u64 = 512;
 pub const OPEN_RANGES: usize = 8;
 
 const NONE: u32 = u32::MAX;
+
+/// A pager's core commitment: `core` frames committed at its making and kept
+/// for its life, each promised, in the index, out on a supply or held aside
+/// for the next one. A frame leaving the index while the core would hold
+/// less without it is held aside rather than given back, so no later supply
+/// within the core waits on a promise the allocator may refuse.
+pub struct Core {
+    core: u64,
+    pool: u64,
+    drawn: u64,
+    aside: u64,
+    out: u64,
+}
+
+/// Where a supply's frame comes from.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum Draw {
+    /// One held aside: the caller's list hands it out.
+    Aside,
+    /// A promise the core holds.
+    Pool,
+    /// None the core holds: the caller asks the allocator for a promise.
+    Beyond,
+}
+
+/// Where a frame that leaves the index, or never entered it, goes.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum Leave {
+    /// Held aside for the core.
+    Aside,
+    /// Given back: the core holds enough without it.
+    Free,
+}
+
+impl Core {
+    pub fn new(core: u64) -> Self {
+        Self { core, pool: core, drawn: 0, aside: 0, out: 0 }
+    }
+
+    /// Frames the core holds now.
+    pub fn held(&self) -> u64 {
+        self.pool + self.drawn + self.aside + self.out
+    }
+
+    /// Promised and not drawn.
+    pub fn pool(&self) -> u64 {
+        self.pool
+    }
+
+    /// A frame for a supply, from aside where `aside_ready` (one held aside is
+    /// unpinned), then the pool, else beyond the core.
+    pub fn draw(&mut self, aside_ready: bool) -> Draw {
+        if aside_ready && self.aside > 0 {
+            self.aside -= 1;
+            self.out += 1;
+            Draw::Aside
+        } else if self.pool > 0 {
+            self.pool -= 1;
+            self.out += 1;
+            Draw::Pool
+        } else {
+            Draw::Beyond
+        }
+    }
+
+    /// A promise the allocator made beyond the core, now out on a supply.
+    pub fn promised(&mut self) {
+        self.out += 1;
+    }
+
+    /// A frame out on a supply entered the index.
+    pub fn installed(&mut self) {
+        self.out -= 1;
+        self.drawn += 1;
+    }
+
+    /// A frame leaves: out of the index where `drawn`, else one out on a
+    /// supply that did not enter it.
+    pub fn leave(&mut self, drawn: bool) -> Leave {
+        match drawn {
+            true => self.drawn -= 1,
+            false => self.out -= 1,
+        }
+        if self.held() < self.core {
+            self.aside += 1;
+            Leave::Aside
+        } else {
+            Leave::Free
+        }
+    }
+
+    /// The pager ended: every frame goes back, and the promises with them.
+    /// The promises left to take back.
+    pub fn end(&mut self) -> u64 {
+        let pool = self.pool;
+        *self = Self { core: 0, pool: 0, drawn: 0, aside: 0, out: 0 };
+        pool
+    }
+}
 
 /// Why a call on an object was refused.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -80,7 +190,7 @@ struct State {
 impl State {
     const CLEAN: Self = Self { dirty: false, writeback: false, write_pins: 0, pinned_since_begin: false };
 
-    fn holds_slot(&self) -> bool {
+    fn counts_dirty(&self) -> bool {
         self.dirty || self.writeback
     }
 }
@@ -127,35 +237,55 @@ impl Object {
 
 /// A pager's table: `capacity` slots and a hash of them, both made here.
 pub struct Pages<F> {
-    slots: Vec<Option<Slot<F>>>,
-    free: Vec<u32>,
-    buckets: Vec<u32>,
+    slots: Chunked<Option<Slot<F>>>,
+    /// The free slots: a stack, `free_len` deep.
+    free: Chunked<u32>,
+    free_len: usize,
+    buckets: Chunked<u32>,
     dirty_ceiling: usize,
-    slots_held: usize,
-    next_object: u32,
+    dirty_held: usize,
+    /// Probes [`find`](Self::find) made, which a test bounds a walk by.
+    #[cfg(test)]
+    probes: core::cell::Cell<usize>,
 }
 
 impl<F: Copy> Pages<F> {
-    /// A table of `capacity` pages, of which at most `dirty_ceiling` hold a
-    /// dirty slot at once. Every allocation it will ever make is made here.
-    pub fn new(capacity: usize, dirty_ceiling: usize) -> Self {
-        assert!(capacity > 0 && capacity < NONE as usize / 2 && dirty_ceiling <= capacity);
-        let mut slots = Vec::with_capacity(capacity);
-        slots.resize_with(capacity, || None);
-        Self {
-            slots,
-            free: (0..capacity as u32).rev().collect(),
-            buckets: vec![NONE; (capacity * 2).next_power_of_two()],
-            dirty_ceiling,
-            slots_held: 0,
-            next_object: 0,
+    /// The most pages a table holds.
+    pub const MAX_CAPACITY: usize = NONE as usize / 4;
+
+    /// A table of `capacity` pages, of which at most `dirty_ceiling` are dirty
+    /// at once; `None` past [`Self::MAX_CAPACITY`], for a ceiling past the
+    /// capacity, or where the heap refuses it. Every allocation it will ever
+    /// make is made here.
+    pub fn new(capacity: usize, dirty_ceiling: usize) -> Option<Self> {
+        if capacity == 0 || capacity > Self::MAX_CAPACITY || dirty_ceiling > capacity {
+            return None;
         }
+        let width = (capacity * 2).next_power_of_two();
+        let slots = Chunked::new(capacity, || None)?;
+        let mut next = capacity as u32;
+        let free = Chunked::new(capacity, || {
+            next -= 1;
+            next
+        })?;
+        let buckets = Chunked::new(width, || NONE)?;
+        Some(Self {
+            slots,
+            free,
+            free_len: capacity,
+            buckets,
+            dirty_ceiling,
+            dirty_held: 0,
+            #[cfg(test)]
+            probes: core::cell::Cell::new(0),
+        })
     }
 
     /// The heap a table of `capacity` pages takes, all of it made by [`new`](Self::new).
     pub fn heap_bytes(capacity: usize) -> usize {
-        capacity * (core::mem::size_of::<Option<Slot<F>>>() + core::mem::size_of::<u32>())
-            + (capacity * 2).next_power_of_two() * core::mem::size_of::<u32>()
+        Chunked::<Option<Slot<F>>>::heap_bytes(capacity)
+            + Chunked::<u32>::heap_bytes(capacity)
+            + Chunked::<u32>::heap_bytes((capacity * 2).next_power_of_two())
     }
 
     pub fn capacity(&self) -> usize {
@@ -164,17 +294,19 @@ impl<F: Copy> Pages<F> {
 
     /// Pages present or failed, across every object.
     pub fn used(&self) -> usize {
-        self.slots.len() - self.free.len()
+        self.slots.len() - self.free_len
     }
 
-    /// Pages holding a dirty slot.
-    pub fn dirty_slots(&self) -> usize {
-        self.slots_held
+    /// Pages dirty or under write-back, which the dirty ceiling bounds.
+    pub fn dirty_held(&self) -> usize {
+        self.dirty_held
     }
 
-    pub fn object(&mut self, size: u64) -> Object {
-        let id = self.next_object;
-        self.next_object = self.next_object.checked_add(1).expect("a pager's object ids wrapped");
+    /// An object of `size` bytes, at most [`LAST_END`], named `id`: an id no
+    /// live object of this table has, which a released one's may be, since
+    /// [`release`](Self::release) takes every page it held.
+    pub fn object(&mut self, id: u32, size: u64) -> Object {
+        assert!(size <= LAST_END, "an object of {size} bytes past the last page");
         Object { id, size, gone: false, head: NONE, pages: 0, open: [None; OPEN_RANGES] }
     }
 
@@ -184,6 +316,8 @@ impl<F: Copy> Pages<F> {
     }
 
     fn find(&self, object: u32, page: u64) -> Option<u32> {
+        #[cfg(test)]
+        self.probes.set(self.probes.get() + 1);
         let mut at = self.hash(object, page);
         loop {
             let slot = self.buckets[at];
@@ -207,7 +341,11 @@ impl<F: Copy> Pages<F> {
     }
 
     fn insert(&mut self, o: &mut Object, page: u64, frame: Option<F>, state: State) -> Result<(), Refused> {
-        let i = self.free.pop().ok_or(Refused::NoRoom)?;
+        if self.free_len == 0 {
+            return Err(Refused::NoRoom);
+        }
+        self.free_len -= 1;
+        let i = self.free[self.free_len];
         let next = o.head;
         if next != NONE {
             self.slot_mut(next).prev = i;
@@ -220,8 +358,8 @@ impl<F: Copy> Pages<F> {
             at = (at + 1) & (self.buckets.len() - 1);
         }
         self.buckets[at] = i;
-        if state.holds_slot() {
-            self.slots_held += 1;
+        if state.counts_dirty() {
+            self.dirty_held += 1;
         }
         Ok(())
     }
@@ -267,10 +405,11 @@ impl<F: Copy> Pages<F> {
             self.slot_mut(s.next).prev = s.prev;
         }
         o.pages -= 1;
-        if s.state.holds_slot() {
-            self.slots_held -= 1;
+        if s.state.counts_dirty() {
+            self.dirty_held -= 1;
         }
-        self.free.push(i);
+        self.free[self.free_len] = i;
+        self.free_len += 1;
         s.frame
     }
 
@@ -308,7 +447,7 @@ impl<F: Copy> Pages<F> {
             }
             None => {}
         }
-        if dirty && self.slots_held >= self.dirty_ceiling {
+        if dirty && self.dirty_held >= self.dirty_ceiling {
             return Err(Refused::DirtyFull);
         }
         let state = State { dirty, ..State::CLEAN };
@@ -331,8 +470,8 @@ impl<F: Copy> Pages<F> {
         let i = self.find(o.id, page).ok_or(Refused::InvalidArgument)?;
         let s = self.slot(i);
         let frame = s.frame.ok_or(Refused::InvalidArgument)?;
-        let needs_slot = !s.state.holds_slot();
-        if needs_slot && self.slots_held >= self.dirty_ceiling {
+        let needs_slot = !s.state.counts_dirty();
+        if needs_slot && self.dirty_held >= self.dirty_ceiling {
             return Err(Refused::DirtyFull);
         }
         let s = self.slot_mut(i);
@@ -342,7 +481,7 @@ impl<F: Copy> Pages<F> {
             s.state.pinned_since_begin = true;
         }
         if needs_slot {
-            self.slots_held += 1;
+            self.dirty_held += 1;
         }
         Ok(frame)
     }
@@ -416,7 +555,7 @@ impl<F: Copy> Pages<F> {
                 s.state.dirty = true;
                 kept[k as usize / 64] |= 1 << (k % 64);
             } else {
-                self.slots_held -= 1;
+                self.dirty_held -= 1;
             }
         }
         Ok(kept)
@@ -443,7 +582,7 @@ impl<F: Copy> Pages<F> {
         let mut removed = 0;
         for i in held {
             let s = self.slot(i);
-            if s.state.holds_slot() || s.state.write_pins > 0 {
+            if s.state.counts_dirty() || s.state.write_pins > 0 {
                 continue;
             }
             if let Some(frame) = self.remove(o, i) {
@@ -531,8 +670,8 @@ mod tests {
 
     #[test]
     fn a_supplied_page_is_found_and_a_second_supply_changes_nothing() {
-        let mut p = Pages::new(8, 4);
-        let mut o = p.object(3 * PAGE);
+        let mut p = Pages::new(8, 4).unwrap();
+        let mut o = p.object(1, 3 * PAGE);
         assert_eq!(p.lookup(&o, 1), Lookup::Absent);
         assert_eq!(p.supply(&mut o, 1, 100, false, 2 * PAGE), Ok(Supplied::Installed));
         assert_eq!(p.supply(&mut o, 1, 200, false, 2 * PAGE), Ok(Supplied::Present));
@@ -542,11 +681,11 @@ mod tests {
 
     #[test]
     fn a_clean_supply_past_the_size_is_refused_and_a_dirty_one_extends_it() {
-        let mut p = Pages::new(8, 4);
-        let mut o = p.object(PAGE);
+        let mut p = Pages::new(8, 4).unwrap();
+        let mut o = p.object(2, PAGE);
         assert_eq!(p.supply(&mut o, 1, 1, false, 2 * PAGE), Err(Refused::PastEnd));
         assert_eq!(o.size(), PAGE);
-        let mut short = p.object(100);
+        let mut short = p.object(3, 100);
         assert_eq!(p.supply(&mut short, 0, 2, false, PAGE), Ok(Supplied::Installed));
         assert_eq!(short.size(), 100, "a clean page ending past the size leaves it");
         assert_eq!(p.supply(&mut o, 1, 1, true, PAGE + 10), Ok(Supplied::Installed));
@@ -558,8 +697,8 @@ mod tests {
     /// Growing the size first (`resize`, then the write) is what this refuses.
     #[test]
     fn a_reader_racing_an_extending_write_never_sees_its_unwritten_bytes() {
-        let mut p = Pages::new(8, 4);
-        let mut o = p.object(100);
+        let mut p = Pages::new(8, 4).unwrap();
+        let mut o = p.object(4, 100);
         p.supply(&mut o, 0, 7, false, 100).unwrap();
         assert_eq!(p.write_pin(&mut o, 0), Ok(7));
         assert_eq!(o.size(), 100, "the copy is in flight: a reader still stops at the old end");
@@ -570,8 +709,8 @@ mod tests {
 
     #[test]
     fn an_unpin_after_a_shrink_removed_the_page_grows_nothing() {
-        let mut p = Pages::new(8, 4);
-        let mut o = p.object(PAGE);
+        let mut p = Pages::new(8, 4).unwrap();
+        let mut o = p.object(5, PAGE);
         p.supply(&mut o, 0, 7, false, PAGE).unwrap();
         p.write_pin(&mut o, 0).unwrap();
         p.resize(&mut o, 0, &mut none);
@@ -585,23 +724,23 @@ mod tests {
 
     #[test]
     fn the_dirty_ceiling_refuses_and_a_write_back_frees_it() {
-        let mut p = Pages::new(8, 2);
-        let mut o = p.object(4 * PAGE);
+        let mut p = Pages::new(8, 2).unwrap();
+        let mut o = p.object(6, 4 * PAGE);
         for page in 0..2 {
             p.supply(&mut o, page, page, true, (page + 1) * PAGE).unwrap();
         }
         assert_eq!(p.supply(&mut o, 2, 2, true, 3 * PAGE), Err(Refused::DirtyFull));
         p.writeback_begin(&mut o, 0, 2).unwrap();
-        assert_eq!(p.dirty_slots(), 2, "a page under write-back keeps its slot");
+        assert_eq!(p.dirty_held(), 2, "a page under write-back keeps its slot");
         assert_eq!(p.writeback_end(&mut o, 0, 2, true), Ok([0; 8]));
-        assert_eq!(p.dirty_slots(), 0);
+        assert_eq!(p.dirty_held(), 0);
         assert_eq!(p.supply(&mut o, 2, 2, true, 3 * PAGE), Ok(Supplied::Installed));
     }
 
     #[test]
     fn kept_is_exactly_the_pages_dirtied_or_pinned_since_the_begin_or_unwritten() {
-        let mut p = Pages::new(16, 16);
-        let mut o = p.object(8 * PAGE);
+        let mut p = Pages::new(16, 16).unwrap();
+        let mut o = p.object(7, 8 * PAGE);
         for page in 0..6 {
             p.supply(&mut o, page, page, true, (page + 1) * PAGE).unwrap();
         }
@@ -615,15 +754,15 @@ mod tests {
         p.fail(&mut o, 4, 1, &mut sink(&mut freed)).unwrap(); // page 4 failed inside
         let kept = p.writeback_end(&mut o, 0, 6, true).unwrap()[0];
         assert_eq!(kept, 0b11, "pinned since the begin and dirtied since it; the removed are clear");
-        assert_eq!(p.dirty_slots(), 2);
+        assert_eq!(p.dirty_held(), 2);
         p.writeback_begin(&mut o, 0, 2).unwrap();
         assert_eq!(p.writeback_end(&mut o, 0, 2, false).unwrap()[0], 0b11, "a failed write-back keeps every page");
     }
 
     #[test]
     fn a_range_must_be_ended_exactly_as_begun_and_once() {
-        let mut p: Pages<u64> = Pages::new(8, 8);
-        let mut o = p.object(PAGE * 1024);
+        let mut p: Pages<u64> = Pages::new(8, 8).unwrap();
+        let mut o = p.object(8, PAGE * 1024);
         p.writeback_begin(&mut o, 0, 4).unwrap();
         assert_eq!(p.writeback_begin(&mut o, 3, 2), Err(Refused::InvalidArgument), "overlapping");
         assert_eq!(p.writeback_end(&mut o, 0, 3, true), Err(Refused::InvalidArgument), "not the range begun");
@@ -635,8 +774,8 @@ mod tests {
 
     #[test]
     fn only_clean_unheld_pages_are_withdrawn() {
-        let mut p = Pages::new(8, 8);
-        let mut o = p.object(4 * PAGE);
+        let mut p = Pages::new(8, 8).unwrap();
+        let mut o = p.object(9, 4 * PAGE);
         p.supply(&mut o, 0, 10, false, PAGE).unwrap();
         p.supply(&mut o, 1, 11, true, 2 * PAGE).unwrap();
         p.supply(&mut o, 2, 12, true, 3 * PAGE).unwrap();
@@ -649,31 +788,90 @@ mod tests {
         assert_eq!(p.lookup(&o, 0), Lookup::Absent);
     }
 
-    /// A withdrawal of every page there could be costs the pages there are.
+    /// R6: however often the allocator refuses, a pager whose pages come and
+    /// go never holds less than its core, and supplies its core's worth of
+    /// pages without a promise. Giving each leaving frame back and promising
+    /// again, which the allocator may refuse, is what this refuses.
     #[test]
-    fn a_withdrawal_of_the_whole_range_walks_the_objects_pages() {
-        let mut p = Pages::new(8, 8);
-        let mut o = p.object(u64::MAX);
+    fn a_core_is_kept_whatever_the_allocator_refuses() {
+        let mut core = Core::new(4);
+        for round in 0..3 {
+            let mut supplied = 0;
+            for _ in 0..4 {
+                match core.draw(true) {
+                    Draw::Aside | Draw::Pool => {
+                        core.installed();
+                        supplied += 1;
+                    }
+                    // The allocator refuses every promise beyond the core.
+                    Draw::Beyond => {}
+                }
+            }
+            assert_eq!(supplied, 4, "round {round}: the core supplied {supplied} of 4");
+            for _ in 0..4 {
+                assert_eq!(core.leave(true), Leave::Aside, "round {round}: a core frame was given back");
+            }
+            assert_eq!(core.held(), 4);
+        }
+        // One beyond the core goes back when it leaves.
+        assert_eq!(core.draw(true), Draw::Aside);
+        core.installed();
+        for _ in 0..3 {
+            core.draw(true);
+            core.installed();
+        }
+        assert_eq!(core.draw(true), Draw::Beyond);
+        core.promised();
+        core.installed();
+        assert_eq!(core.leave(true), Leave::Free, "a frame beyond the core");
+        assert_eq!(core.leave(true), Leave::Aside);
+        assert_eq!(core.end(), 0);
+    }
+
+    /// A withdrawal of a range far longer than the object costs the pages it
+    /// holds, never a probe per page of the range.
+    #[test]
+    fn a_withdrawal_of_a_long_range_walks_the_objects_pages() {
+        let mut p = Pages::new(8, 8).unwrap();
+        let mut o = p.object(1, LAST_END);
         p.supply(&mut o, 7, 1, false, 8 * PAGE).unwrap();
         p.supply(&mut o, 1 << 40, 2, false, ((1 << 40) + 1) * PAGE).unwrap();
         let mut freed = Vec::new();
+        p.probes.set(0);
+        assert_eq!(p.withdraw(&mut o, 8, 1 << 24, &mut sink(&mut freed)), 0, "neither page lies in 8..8+2^24");
+        assert!(p.probes.get() < 8, "{} probes for a range of 2^24 pages", p.probes.get());
         assert_eq!(p.withdraw(&mut o, 8, u64::MAX, &mut sink(&mut freed)), 1);
         assert_eq!(freed, [2], "only the page inside the range");
         assert_eq!(p.withdraw(&mut o, 0, u64::MAX, &mut sink(&mut freed)), 1);
         assert_eq!(o.pages(), 0);
     }
 
+    /// Every offset a pager names is bounded where it enters, so no page's
+    /// end overflows past it.
+    #[test]
+    fn an_offset_or_range_past_the_last_page_is_out_of_reach() {
+        assert!(within_reach(LAST_END - PAGE, PAGE));
+        assert!(!within_reach(LAST_END - PAGE + 1, PAGE));
+        assert!(!within_reach(u64::MAX - PAGE + 1, PAGE), "the supply that wrapped `ends`");
+        assert!(!within_reach(1, u64::MAX));
+        let mut p = Pages::new(8, 8).unwrap();
+        let mut o = p.object(1, LAST_END);
+        let last = LAST_END / PAGE - 1;
+        assert_eq!(p.supply(&mut o, last, 1, true, LAST_END), Ok(Supplied::Installed), "the last page");
+        assert!(Pages::<u64>::new(Pages::<u64>::MAX_CAPACITY + 1, 0).is_none());
+    }
+
     #[test]
     fn a_shrink_removes_dirty_pages_releases_their_slots_and_names_the_tail() {
-        let mut p = Pages::new(8, 8);
-        let mut o = p.object(3 * PAGE);
+        let mut p = Pages::new(8, 8).unwrap();
+        let mut o = p.object(11, 3 * PAGE);
         for page in 0..3 {
             p.supply(&mut o, page, page + 100, true, (page + 1) * PAGE).unwrap();
         }
         let mut freed = Vec::new();
         assert_eq!(p.resize(&mut o, PAGE + 5, &mut sink(&mut freed)), Some(101));
         assert_eq!(freed, [102]);
-        assert_eq!(p.dirty_slots(), 2);
+        assert_eq!(p.dirty_held(), 2);
         assert_eq!(p.lookup(&o, 2), Lookup::PastEnd);
         assert_eq!(p.resize(&mut o, 4 * PAGE, &mut none), None, "growth removes nothing");
         assert_eq!(p.lookup(&o, 2), Lookup::Absent, "and leaves the new range absent");
@@ -681,8 +879,8 @@ mod tests {
 
     #[test]
     fn a_failed_page_answers_failed_until_supplied_again() {
-        let mut p = Pages::new(8, 8);
-        let mut o = p.object(2 * PAGE);
+        let mut p = Pages::new(8, 8).unwrap();
+        let mut o = p.object(12, 2 * PAGE);
         p.supply(&mut o, 0, 5, false, PAGE).unwrap();
         let mut freed = Vec::new();
         p.fail(&mut o, 0, 2, &mut sink(&mut freed)).unwrap();
@@ -694,23 +892,23 @@ mod tests {
 
     #[test]
     fn an_invalidated_object_answers_gone_and_gives_every_frame_back() {
-        let mut p = Pages::new(8, 8);
-        let mut o = p.object(4 * PAGE);
+        let mut p = Pages::new(8, 8).unwrap();
+        let mut o = p.object(13, 4 * PAGE);
         p.supply(&mut o, 0, 1, true, PAGE).unwrap();
         p.supply(&mut o, 2, 3, false, 3 * PAGE).unwrap();
         let mut freed = Vec::new();
         p.invalidate(&mut o, &mut sink(&mut freed));
         freed.sort();
         assert_eq!(freed, [1, 3]);
-        assert_eq!((p.used(), p.dirty_slots()), (0, 0));
+        assert_eq!((p.used(), p.dirty_held()), (0, 0));
         assert_eq!(p.lookup(&o, 0), Lookup::Gone);
         assert_eq!(p.supply(&mut o, 0, 9, false, PAGE), Err(Refused::Gone));
     }
 
     #[test]
     fn a_full_table_refuses_and_every_slot_is_reached_after_churn() {
-        let mut p = Pages::new(64, 64);
-        let mut objects: Vec<Object> = (0..4).map(|_| p.object(1 << 30)).collect();
+        let mut p = Pages::new(64, 64).unwrap();
+        let mut objects: Vec<Object> = (0..4).map(|i| p.object(i, 1 << 30)).collect();
         let mut model: BTreeSet<(usize, u64)> = BTreeSet::new();
         let mut x = 1u64;
         for round in 0..20_000u64 {

@@ -93,12 +93,11 @@ pub enum ObjectKind {
     EventSignal = 17,
     EventWait = 18,
     Pager = 19,
-    PagedOwner = 20,
-    Paged = 21,
+    Paged = 20,
 }
 
 impl ObjectKind {
-    pub const ALL: [ObjectKind; 22] = [
+    pub const ALL: [ObjectKind; 21] = [
         Self::PipeRead,
         Self::PipeWrite,
         Self::Connection,
@@ -119,7 +118,6 @@ impl ObjectKind {
         Self::EventSignal,
         Self::EventWait,
         Self::Pager,
-        Self::PagedOwner,
         Self::Paged,
     ];
 

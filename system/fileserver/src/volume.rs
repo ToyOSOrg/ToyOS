@@ -186,12 +186,13 @@ pub trait Volume {
     fn describe(&self) -> String;
 }
 
-/// A write straight to the volume, as a server with no paged objects makes
-/// one: the reserve, then each page it touches written back, what the page
+/// A write straight to the volume, for a file with no paged object — on a
+/// server with no pager, or one whose object went — and for a volume's
+/// tests: the reserve, then each page it touches written back, what the page
 /// held below the old end read first.
 pub trait Writes: Volume {
     fn write(&mut self, node: Node, offset: u64, data: &[u8]) -> Result<(), Error> {
-        const PAGE: u64 = 4096;
+        const PAGE: u64 = toyos_blockdev::BLOCK as u64;
         let old = self.node_meta(node)?.size;
         self.reserve(node, offset, data.len() as u64)?;
         let size = self.node_meta(node)?.size;

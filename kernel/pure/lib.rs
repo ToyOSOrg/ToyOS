@@ -21,6 +21,7 @@ pub mod message;
 pub mod microcode;
 pub mod mtrr;
 pub mod owners;
+pub mod chunked;
 pub mod paged;
 pub mod pcid;
 pub mod pipe;

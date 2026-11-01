@@ -10,11 +10,14 @@ use crate::ram::Ram;
 use crate::volume::OpenHow;
 
 /// The kernel's paged objects as far as the server can tell them apart: a
-/// table of `capacity` pages, `ceiling` of them dirty or under write-back.
+/// table of `capacity` pages, `ceiling` of them dirty or under write-back,
+/// and at most `objects` objects.
 #[derive(Default)]
 struct Model {
     capacity: usize,
     ceiling: usize,
+    objects: usize,
+    next: u64,
     pages: BTreeMap<(u64, u64), Page>,
     sizes: BTreeMap<u64, u64>,
     supplies: u32,
@@ -37,45 +40,41 @@ impl Model {
 #[derive(Clone)]
 struct Fake(Rc<RefCell<Model>>);
 
-struct FakeObject {
-    model: Rc<RefCell<Model>>,
-    cookie: u64,
-}
-
 impl Fake {
     fn new(capacity: usize, ceiling: usize) -> Self {
-        Self(Rc::new(RefCell::new(Model { capacity, ceiling, ..Model::default() })))
+        Self(Rc::new(RefCell::new(Model { capacity, ceiling, objects: usize::MAX, ..Model::default() })))
     }
 
-    fn pages_of(&self, cookie: u64) -> usize {
-        self.0.borrow().pages.keys().filter(|(c, _)| *c == cookie).count()
+    fn pages_of(&self, object: u64) -> usize {
+        self.0.borrow().pages.keys().filter(|(c, _)| *c == object).count()
     }
 }
 
 impl Pager for Fake {
-    type Object = FakeObject;
-    fn create(&self, size: u64, cookie: u64) -> Result<FakeObject, Refused> {
-        self.0.borrow_mut().sizes.insert(cookie, size);
-        Ok(FakeObject { model: Rc::clone(&self.0), cookie })
+    fn object(&self, size: u64) -> Result<u64, Refused> {
+        let mut m = self.0.borrow_mut();
+        if m.sizes.len() >= m.objects {
+            return Err(Refused::NoRoom);
+        }
+        m.next += 1;
+        let id = m.next;
+        m.sizes.insert(id, size);
+        Ok(id)
     }
-}
 
-impl Drop for FakeObject {
-    fn drop(&mut self) {
-        let mut m = self.model.borrow_mut();
-        m.pages.retain(|(c, _), _| *c != self.cookie);
-        m.sizes.remove(&self.cookie);
+    fn release(&self, id: u64) -> Result<(), Refused> {
+        let mut m = self.0.borrow_mut();
+        m.pages.retain(|(c, _), _| *c != id);
+        m.sizes.remove(&id).map(drop).ok_or(Refused::Gone)
     }
-}
 
-impl Object for FakeObject {
-    fn read(&self, out: Bytes<'_>, offset: u64) -> Result<usize, Refused> {
-        let m = self.model.borrow();
-        let size = m.sizes[&self.cookie];
+    fn read(&self, id: u64, out: Bytes<'_>, offset: u64) -> Result<usize, Refused> {
+        let m = self.0.borrow();
+        let size = m.sizes[&id];
         let end = size.min(offset + out.len() as u64);
         let mut at = offset;
         while at < end {
-            let Some(page) = m.pages.get(&(self.cookie, at / PAGE)) else { break };
+            let Some(page) = m.pages.get(&(id, at / PAGE)) else { break };
             let within = (at % PAGE) as usize;
             let n = ((PAGE as usize - within) as u64).min(end - at) as usize;
             out.write((at - offset) as usize, &page.bytes[within..within + n]);
@@ -87,8 +86,8 @@ impl Object for FakeObject {
         }
     }
 
-    fn supply(&self, offset: u64, bytes: &[u8], dirty: bool) -> Result<u64, Refused> {
-        let mut m = self.model.borrow_mut();
+    fn supply(&self, id: u64, offset: u64, bytes: &[u8], dirty: bool) -> Result<u64, Refused> {
+        let mut m = self.0.borrow_mut();
         m.supplies += 1;
         if m.refusing {
             return Err(Refused::Kernel(SyscallError::Io));
@@ -96,10 +95,10 @@ impl Object for FakeObject {
         let mut installed = 0;
         for (k, chunk) in bytes.chunks(PAGE as usize).enumerate() {
             let page = offset / PAGE + k as u64;
-            let size = m.sizes[&self.cookie];
+            let size = m.sizes[&id];
             let why = if !dirty && page >= size.div_ceil(PAGE) {
                 Some(Refused::Kernel(SyscallError::InvalidArgument))
-            } else if m.pages.contains_key(&(self.cookie, page)) {
+            } else if m.pages.contains_key(&(id, page)) {
                 continue;
             } else if m.pages.len() >= m.capacity {
                 Some(Refused::NoRoom)
@@ -114,9 +113,9 @@ impl Object for FakeObject {
             let mut held = vec![0u8; PAGE as usize];
             let n = if dirty { chunk.len() } else { chunk.len().min((size - page * PAGE) as usize) };
             held[..n].copy_from_slice(&chunk[..n]);
-            m.pages.insert((self.cookie, page), Page { bytes: held, dirty, writeback: false });
+            m.pages.insert((id, page), Page { bytes: held, dirty, writeback: false });
             if dirty {
-                let s = m.sizes.get_mut(&self.cookie).unwrap();
+                let s = m.sizes.get_mut(&id).unwrap();
                 *s = (*s).max(page * PAGE + chunk.len() as u64);
             }
             installed += 1;
@@ -124,12 +123,12 @@ impl Object for FakeObject {
         Ok(installed)
     }
 
-    fn write(&self, offset: u64, bytes: &[u8]) -> Result<usize, Refused> {
-        let mut m = self.model.borrow_mut();
+    fn write(&self, id: u64, offset: u64, bytes: &[u8]) -> Result<usize, Refused> {
+        let mut m = self.0.borrow_mut();
         let mut done = 0;
         while done < bytes.len() {
             let at = offset + done as u64;
-            let key = (self.cookie, at / PAGE);
+            let key = (id, at / PAGE);
             let Some(page) = m.pages.get(&key) else { break };
             if !page.dirty && !page.writeback && m.held() >= m.ceiling {
                 return if done > 0 { Ok(done) } else { Err(Refused::DirtyFull) };
@@ -139,40 +138,40 @@ impl Object for FakeObject {
             let page = m.pages.get_mut(&key).unwrap();
             page.bytes[within..within + n].copy_from_slice(&bytes[done..done + n]);
             page.dirty = true;
-            let s = m.sizes.get_mut(&self.cookie).unwrap();
+            let s = m.sizes.get_mut(&id).unwrap();
             *s = (*s).max(at + n as u64);
             done += n;
         }
         if done == 0 { Err(Refused::Absent) } else { Ok(done) }
     }
 
-    fn withdraw(&self, first: u64, count: u64) -> Result<u64, Refused> {
-        let mut m = self.model.borrow_mut();
+    fn withdraw(&self, id: u64, first: u64, count: u64) -> Result<u64, Refused> {
+        let mut m = self.0.borrow_mut();
         let before = m.pages.len();
         let end = first.saturating_add(count);
-        m.pages.retain(|(c, p), page| *c != self.cookie || !(first..end).contains(p) || page.dirty || page.writeback);
+        m.pages.retain(|(c, p), page| *c != id || !(first..end).contains(p) || page.dirty || page.writeback);
         Ok((before - m.pages.len()) as u64)
     }
 
-    fn fail(&self, first: u64, count: u64) -> Result<(), Refused> {
-        self.model.borrow_mut().pages.retain(|(c, p), _| *c != self.cookie || !(first..first + count).contains(p));
+    fn fail(&self, id: u64, first: u64, count: u64) -> Result<(), Refused> {
+        self.0.borrow_mut().pages.retain(|(c, p), _| *c != id || !(first..first + count).contains(p));
         Ok(())
     }
 
-    fn resize(&self, size: u64) -> Result<(), Refused> {
-        let mut m = self.model.borrow_mut();
-        m.pages.retain(|(c, p), _| *c != self.cookie || *p < size.div_ceil(PAGE));
-        if let Some(page) = m.pages.get_mut(&(self.cookie, size / PAGE)) {
+    fn resize(&self, id: u64, size: u64) -> Result<(), Refused> {
+        let mut m = self.0.borrow_mut();
+        m.pages.retain(|(c, p), _| *c != id || *p < size.div_ceil(PAGE));
+        if let Some(page) = m.pages.get_mut(&(id, size / PAGE)) {
             page.bytes[(size % PAGE) as usize..].fill(0);
         }
-        m.sizes.insert(self.cookie, size);
+        m.sizes.insert(id, size);
         Ok(())
     }
 
-    fn writeback_begin(&self, first: u64, count: u64) -> Result<[u64; 8], Refused> {
+    fn writeback_begin(&self, id: u64, first: u64, count: u64) -> Result<[u64; 8], Refused> {
         let mut bits = [0u64; 8];
-        for (&(c, p), page) in self.model.borrow_mut().pages.iter_mut() {
-            if c == self.cookie && (first..first + count).contains(&p) && page.dirty {
+        for (&(c, p), page) in self.0.borrow_mut().pages.iter_mut() {
+            if c == id && (first..first + count).contains(&p) && page.dirty {
                 page.dirty = false;
                 page.writeback = true;
                 bits[((p - first) / 64) as usize] |= 1 << ((p - first) % 64);
@@ -181,10 +180,10 @@ impl Object for FakeObject {
         Ok(bits)
     }
 
-    fn writeback_end(&self, first: u64, count: u64, written: bool) -> Result<[u64; 8], Refused> {
+    fn writeback_end(&self, id: u64, first: u64, count: u64, written: bool) -> Result<[u64; 8], Refused> {
         let mut bits = [0u64; 8];
-        for (&(c, p), page) in self.model.borrow_mut().pages.iter_mut() {
-            if c == self.cookie && (first..first + count).contains(&p) && page.writeback {
+        for (&(c, p), page) in self.0.borrow_mut().pages.iter_mut() {
+            if c == id && (first..first + count).contains(&p) && page.writeback {
                 page.writeback = false;
                 page.dirty |= !written;
                 if page.dirty {
@@ -306,8 +305,8 @@ fn room_is_made_by_a_file_nobody_holds_before_any_other() {
     let c = open(&mut files, &mut v, "home/c");
     assert_eq!(read(&mut files, &mut v, c, 0, 4 * PAGE as usize), pattern(4 * PAGE as usize, 4));
     assert!(files.object(b.1).is_none(), "the closed file's object went");
-    assert_eq!(fake.pages_of(a.1), 4, "the open file, older, kept its pages");
-    assert_eq!(fake.pages_of(c.1), 4);
+    assert_eq!(fake.pages_of(files.object(a.1).unwrap()), 4, "the open file, older, kept its pages");
+    assert_eq!(fake.pages_of(files.object(c.1).unwrap()), 4);
 }
 
 #[test]
@@ -349,10 +348,11 @@ fn a_requested_page_is_supplied_by_its_notice() {
     let fake = Fake::new(64, 16);
     let mut files = Files::new(Some(fake.clone()));
     let (_, id) = open(&mut files, &mut v, "home/f");
-    files.notice(&mut v, Notice::Requested { cookie: id, first: 1, count: 1 });
-    assert_eq!(fake.pages_of(id), 1, "the page asked for, and no other");
-    files.notice(&mut v, Notice::Requested { cookie: id, first: 9, count: 4 });
-    assert_eq!(fake.pages_of(id), 1, "nothing past the size");
+    let object = files.object(id).unwrap();
+    files.notice(&mut v, Notice::Requested { object, first: 1, count: 1 });
+    assert_eq!(fake.pages_of(files.object(id).unwrap()), 1, "the page asked for, and no other");
+    files.notice(&mut v, Notice::Requested { object, first: 9, count: 4 });
+    assert_eq!(fake.pages_of(files.object(id).unwrap()), 1, "nothing past the size");
 }
 
 /// An open that truncates, as the server makes one: the object is emptied
@@ -364,11 +364,13 @@ fn a_truncating_open_leaves_the_object_no_page_of_before() {
     let mut files = Files::new(Some(fake.clone()));
     let (node, id) = open(&mut files, &mut v, "home/f");
     files.write(&mut v, id, node, 0, &pattern(2 * PAGE as usize, 8)).unwrap();
-    files.truncating(id).unwrap();
+    
     let truncate = OpenHow { create: false, create_new: false, truncate: true };
     let again = v.open("home/f", truncate).unwrap();
+    files.truncated(id).unwrap();
     files.opened(&mut v, id, again).unwrap();
-    assert_eq!((fake.0.borrow().sizes[&id], fake.pages_of(id)), (0, 0), "a holder reads the object, and finds nothing of before");
+    let object = files.object(id).unwrap();
+    assert_eq!((fake.0.borrow().sizes[&object], fake.pages_of(object)), (0, 0), "a holder reads the object, and finds nothing of before");
     assert_eq!(read(&mut files, &mut v, (again, id), 0, 100), b"", "no byte of before");
     assert_eq!(files.sync(&mut v).unwrap(), []);
     assert_eq!(on_volume(&mut v, "home/f"), b"");
@@ -399,4 +401,24 @@ fn a_file_the_pager_holds_is_read_again_from_its_object_across_closes() {
     assert!(round(&mut files, &mut v) > 0);
     let again: Vec<u32> = (0..3).map(|_| round(&mut files, &mut v)).collect();
     assert_eq!(again, [0; 3], "supplies each round after the first");
+}
+
+/// The pager serves a bounded count of objects: a refused create makes room
+/// by letting a file nobody holds go, and an open one is kept.
+#[test]
+fn an_object_refused_for_room_is_made_by_a_closed_files_going() {
+    let mut v = volume();
+    let fake = Fake::new(64, 16);
+    fake.0.borrow_mut().objects = 2;
+    let mut files = Files::new(Some(fake.clone()));
+    let a = open(&mut files, &mut v, "home/a");
+    let b = open(&mut files, &mut v, "home/b");
+    files.closed(&mut v, b.1, b.0).unwrap();
+    let c = open(&mut files, &mut v, "home/c");
+    assert!(files.object(c.1).is_some(), "the new file has its object");
+    assert!(files.object(b.1).is_none(), "the closed file's went");
+    assert!(files.object(a.1).is_some(), "the open file's stays");
+    let n = v.open("home/d", CREATE).unwrap();
+    let identity = v.identity("home/d").unwrap();
+    assert_eq!(files.opened(&mut v, identity, n), Err(Error::NoSpace), "both held open: refused, by name");
 }

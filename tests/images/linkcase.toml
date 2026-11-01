@@ -40,6 +40,7 @@ drives = ["pci:0c:03:30/1033:0194", "pci:0c:03:30@boot"]
 receives = ["disk"]
 
 [programs.fileserver]
+pager = true
 restart = true
 roles = ["data", "log", "boot"]
 receives = ["block"]

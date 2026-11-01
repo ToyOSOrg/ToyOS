@@ -32,55 +32,50 @@ use crate::volume::{Buf, Node, Volume, Window, Writes};
 /// The most pages one supply or write-back carries.
 const RANGE: u64 = PAGED_RANGE_PAGES;
 
-/// One object's calls, as `toyos::paged::PagedOwner` makes them.
-pub trait Object {
-    fn read(&self, out: Bytes<'_>, offset: u64) -> Result<usize, Refused>;
-    fn supply(&self, offset: u64, bytes: &[u8], dirty: bool) -> Result<u64, Refused>;
-    fn write(&self, offset: u64, bytes: &[u8]) -> Result<usize, Refused>;
-    fn withdraw(&self, first: u64, count: u64) -> Result<u64, Refused>;
-    fn fail(&self, first: u64, count: u64) -> Result<(), Refused>;
-    fn resize(&self, size: u64) -> Result<(), Refused>;
-    fn writeback_begin(&self, first: u64, count: u64) -> Result<[u64; 8], Refused>;
-    fn writeback_end(&self, first: u64, count: u64, written: bool) -> Result<[u64; 8], Refused>;
-}
-
-/// What makes the objects: `toyos::paged::Pager`.
+/// A pager's calls on its objects, by id, as `toyos::paged::Pager` makes them.
 pub trait Pager {
-    type Object: Object;
-    fn create(&self, size: u64, cookie: u64) -> Result<Self::Object, Refused>;
-}
-
-impl Object for toyos::paged::PagedOwner {
-    fn read(&self, out: Bytes<'_>, offset: u64) -> Result<usize, Refused> {
-        toyos::paged::PagedOwner::read(self, out, offset)
-    }
-    fn supply(&self, offset: u64, bytes: &[u8], dirty: bool) -> Result<u64, Refused> {
-        toyos::paged::PagedOwner::supply(self, offset, bytes, dirty)
-    }
-    fn write(&self, offset: u64, bytes: &[u8]) -> Result<usize, Refused> {
-        toyos::paged::PagedOwner::write(self, offset, bytes)
-    }
-    fn withdraw(&self, first: u64, count: u64) -> Result<u64, Refused> {
-        toyos::paged::PagedOwner::withdraw(self, first, count)
-    }
-    fn fail(&self, first: u64, count: u64) -> Result<(), Refused> {
-        toyos::paged::PagedOwner::fail(self, first, count)
-    }
-    fn resize(&self, size: u64) -> Result<(), Refused> {
-        toyos::paged::PagedOwner::resize(self, size)
-    }
-    fn writeback_begin(&self, first: u64, count: u64) -> Result<[u64; 8], Refused> {
-        toyos::paged::PagedOwner::writeback_begin(self, first, count)
-    }
-    fn writeback_end(&self, first: u64, count: u64, written: bool) -> Result<[u64; 8], Refused> {
-        toyos::paged::PagedOwner::writeback_end(self, first, count, written)
-    }
+    fn object(&self, size: u64) -> Result<u64, Refused>;
+    fn read(&self, id: u64, out: Bytes<'_>, offset: u64) -> Result<usize, Refused>;
+    fn supply(&self, id: u64, offset: u64, bytes: &[u8], dirty: bool) -> Result<u64, Refused>;
+    fn write(&self, id: u64, offset: u64, bytes: &[u8]) -> Result<usize, Refused>;
+    fn withdraw(&self, id: u64, first: u64, count: u64) -> Result<u64, Refused>;
+    fn fail(&self, id: u64, first: u64, count: u64) -> Result<(), Refused>;
+    fn resize(&self, id: u64, size: u64) -> Result<(), Refused>;
+    fn writeback_begin(&self, id: u64, first: u64, count: u64) -> Result<[u64; 8], Refused>;
+    fn writeback_end(&self, id: u64, first: u64, count: u64, written: bool) -> Result<[u64; 8], Refused>;
+    fn release(&self, id: u64) -> Result<(), Refused>;
 }
 
 impl Pager for toyos::paged::Pager {
-    type Object = toyos::paged::PagedOwner;
-    fn create(&self, size: u64, cookie: u64) -> Result<Self::Object, Refused> {
-        toyos::paged::PagedOwner::create(self, size, cookie).map_err(Refused::Kernel)
+    fn object(&self, size: u64) -> Result<u64, Refused> {
+        toyos::paged::Pager::object(self, size)
+    }
+    fn read(&self, id: u64, out: Bytes<'_>, offset: u64) -> Result<usize, Refused> {
+        toyos::paged::Pager::read(self, id, out, offset)
+    }
+    fn supply(&self, id: u64, offset: u64, bytes: &[u8], dirty: bool) -> Result<u64, Refused> {
+        toyos::paged::Pager::supply(self, id, offset, bytes, dirty)
+    }
+    fn write(&self, id: u64, offset: u64, bytes: &[u8]) -> Result<usize, Refused> {
+        toyos::paged::Pager::write(self, id, offset, bytes)
+    }
+    fn withdraw(&self, id: u64, first: u64, count: u64) -> Result<u64, Refused> {
+        toyos::paged::Pager::withdraw(self, id, first, count)
+    }
+    fn fail(&self, id: u64, first: u64, count: u64) -> Result<(), Refused> {
+        toyos::paged::Pager::fail(self, id, first, count)
+    }
+    fn resize(&self, id: u64, size: u64) -> Result<(), Refused> {
+        toyos::paged::Pager::resize(self, id, size)
+    }
+    fn writeback_begin(&self, id: u64, first: u64, count: u64) -> Result<[u64; 8], Refused> {
+        toyos::paged::Pager::writeback_begin(self, id, first, count)
+    }
+    fn writeback_end(&self, id: u64, first: u64, count: u64, written: bool) -> Result<[u64; 8], Refused> {
+        toyos::paged::Pager::writeback_end(self, id, first, count, written)
+    }
+    fn release(&self, id: u64) -> Result<(), Refused> {
+        toyos::paged::Pager::release(self, id)
     }
 }
 
@@ -93,8 +88,9 @@ fn word(why: Refused) -> Error {
     }
 }
 
-struct File<O> {
-    object: O,
+struct File {
+    /// Its object's id on the pager.
+    object: u64,
     node: Node,
     /// Descriptions open on it.
     opens: u32,
@@ -106,7 +102,7 @@ struct File<O> {
     used: u64,
 }
 
-impl<O> File<O> {
+impl File {
     fn dirtied(&mut self, first: u64, end: u64) {
         let (lo, hi) = self.dirty.unwrap_or((first, end));
         self.dirty = Some((lo.min(first), hi.max(end)));
@@ -119,7 +115,9 @@ impl<O> File<O> {
 
 pub struct Files<P: Pager> {
     pager: Option<P>,
-    files: BTreeMap<u64, File<P::Object>>,
+    files: BTreeMap<u64, File>,
+    /// Each object's file, by the object's id, which the notices name.
+    by_object: BTreeMap<u64, u64>,
     tick: u64,
     /// A supply's or a write-back's pages, kept so one allocates nothing.
     buf: Vec<u8>,
@@ -127,7 +125,7 @@ pub struct Files<P: Pager> {
 
 impl<P: Pager> Files<P> {
     pub fn new(pager: Option<P>) -> Self {
-        Self { pager, files: BTreeMap::new(), tick: 0, buf: Vec::new() }
+        Self { pager, files: BTreeMap::new(), by_object: BTreeMap::new(), tick: 0, buf: Vec::new() }
     }
 
     /// The pager, which reads ready while a notice is owed.
@@ -135,9 +133,13 @@ impl<P: Pager> Files<P> {
         self.pager.as_ref()
     }
 
-    /// The object of the file `identity` names, for a holder of it.
-    pub fn object(&self, identity: u64) -> Option<&P::Object> {
-        self.files.get(&identity).map(|f| &f.object)
+    fn pg(&self) -> &P {
+        self.pager.as_ref().expect("fileserver: a paged file on a server with no pager")
+    }
+
+    /// The object id of the file `identity` names, for a holder of it.
+    pub fn object(&self, identity: u64) -> Option<u64> {
+        self.files.get(&identity).map(|f| f.object)
     }
 
     /// A holder of `identity`'s object went out.
@@ -153,7 +155,7 @@ impl<P: Pager> Files<P> {
         format!("{} paged files, {dirty} dirty", self.files.len())
     }
 
-    fn touch(&mut self, identity: u64) -> Option<&mut File<P::Object>> {
+    fn touch(&mut self, identity: u64) -> Option<&mut File> {
         self.tick += 1;
         let tick = self.tick;
         let f = self.files.get_mut(&identity)?;
@@ -161,12 +163,14 @@ impl<P: Pager> Files<P> {
         Some(f)
     }
 
-    /// Before an open of `identity` that truncates: its object holds no page
-    /// once the volume frees the blocks.
-    pub fn truncating(&mut self, identity: u64) -> Result<(), Error> {
-        let Some(f) = self.files.get_mut(&identity) else { return Ok(()) };
-        f.object.resize(0).map_err(word)?;
-        f.dirty = None;
+    /// After an open of `identity` that truncated: its object holds no page
+    /// of before. The volume went first, so a refused open changed nothing,
+    /// and nothing writes back between the two.
+    pub fn truncated(&mut self, identity: u64) -> Result<(), Error> {
+        let Some(f) = self.files.get(&identity) else { return Ok(()) };
+        let id = f.object;
+        self.pg().resize(id, 0).map_err(word)?;
+        self.files.get_mut(&identity).expect("found").dirty = None;
         Ok(())
     }
 
@@ -187,9 +191,17 @@ impl<P: Pager> Files<P> {
             None => {}
         }
         let size = volume.node_meta(node)?.size;
-        let pager = self.pager.as_ref().expect("paged");
-        let object = pager.create(size, identity).map_err(word)?;
+        // Objects are bounded by count as pages are: a file nobody holds goes
+        // to make room for another's.
+        let object = loop {
+            match self.pg().object(size) {
+                Ok(object) => break object,
+                Err(Refused::NoRoom) if self.drop_oldest(volume, identity) => {}
+                Err(why) => return Err(word(why)),
+            }
+        };
         self.files.insert(identity, File { object, node, opens: 1, held: false, dirty: None, used: 0 });
+        self.by_object.insert(object, identity);
         self.touch(identity);
         Ok(())
     }
@@ -210,7 +222,10 @@ impl<P: Pager> Files<P> {
     /// holders answer `Gone`, and its node is let go.
     pub fn forget(&mut self, volume: &mut dyn Volume, identity: u64) {
         if let Some(f) = self.files.remove(&identity) {
-            drop(f.object);
+            self.by_object.remove(&f.object);
+            if let Err(why) = self.pg().release(f.object) {
+                println!("fileserver: file {identity}'s object would not be released ({why:?})");
+            }
             if let Err(e) = volume.close(f.node) {
                 println!("fileserver: a forgotten file's node {} would not close ({e:?})", f.node);
             }
@@ -230,8 +245,8 @@ impl<P: Pager> Files<P> {
         let mut done = 0;
         while done < want {
             let at = offset + done as u64;
-            let f = self.touch(identity).expect("checked");
-            match f.object.read(out.sub(done, want - done), at) {
+            let id = self.touch(identity).expect("checked").object;
+            match self.pg().read(id, out.sub(done, want - done), at) {
                 Ok(n) if n > 0 => {
                     done += n;
                     continue;
@@ -285,8 +300,8 @@ impl<P: Pager> Files<P> {
     /// and a write-back where its dirty ceiling is reached: the pages installed.
     fn supplied(&mut self, volume: &mut dyn Volume, identity: u64, first: u64, pages: u64, bytes: &[u8], dirty: bool) -> Result<u64, Error> {
         loop {
-            let f = self.files.get(&identity).ok_or(Error::Stale)?;
-            match f.object.supply(first * PAGE, bytes, dirty) {
+            let id = self.files.get(&identity).ok_or(Error::Stale)?.object;
+            match self.pg().supply(id, first * PAGE, bytes, dirty) {
                 Ok(n) => return Ok(n),
                 Err(Refused::NoRoom) if self.make_room(volume, identity, first, pages)? => {}
                 Err(Refused::DirtyFull) if self.write_back_some(volume) => {}
@@ -299,25 +314,40 @@ impl<P: Pager> Files<P> {
     /// nobody holds dropped, else another's clean pages withdrawn, else this
     /// one's outside the range, else the dirty written back. Whether any went.
     fn make_room(&mut self, volume: &mut dyn Volume, identity: u64, first: u64, count: u64) -> Result<bool, Error> {
-        let oldest = |files: &BTreeMap<u64, File<P::Object>>, pick: &dyn Fn(&File<P::Object>) -> bool| {
-            let mut by_age: Vec<(u64, u64)> = files.iter().filter(|(id, f)| **id != identity && pick(f)).map(|(id, f)| (f.used, *id)).collect();
-            by_age.sort_unstable();
-            by_age.into_iter().map(|(_, id)| id).collect::<Vec<_>>()
-        };
-        if let Some(&id) = oldest(&self.files, &File::droppable).first() {
-            self.forget(volume, id);
+        if self.drop_oldest(volume, identity) {
             return Ok(true);
         }
-        for id in oldest(&self.files, &|_| true) {
-            if self.files[&id].object.withdraw(0, u64::MAX).map_err(word)? > 0 {
+        for id in self.oldest(identity, &|_| true) {
+            let object = self.files[&id].object;
+            if self.pg().withdraw(object, 0, u64::MAX).map_err(word)? > 0 {
                 return Ok(true);
             }
         }
-        let own = &self.files[&identity].object;
-        if own.withdraw(0, first).map_err(word)? + own.withdraw(first + count, u64::MAX).map_err(word)? > 0 {
+        let own = self.files[&identity].object;
+        if self.pg().withdraw(own, 0, first).map_err(word)? + self.pg().withdraw(own, first + count, u64::MAX).map_err(word)? > 0 {
             return Ok(true);
         }
         Ok(self.write_back_some(volume))
+    }
+
+    /// The files but `identity` that `pick` takes, the least recently used first.
+    fn oldest(&self, identity: u64, pick: &dyn Fn(&File) -> bool) -> Vec<u64> {
+        let mut by_age: Vec<(u64, u64)> =
+            self.files.iter().filter(|(id, f)| **id != identity && pick(f)).map(|(id, f)| (f.used, *id)).collect();
+        by_age.sort_unstable();
+        by_age.into_iter().map(|(_, id)| id).collect()
+    }
+
+    /// The oldest file nobody holds, open or dirties, but `identity`,
+    /// forgotten: whether there was one.
+    fn drop_oldest(&mut self, volume: &mut dyn Volume, identity: u64) -> bool {
+        match self.oldest(identity, &File::droppable).first() {
+            Some(&id) => {
+                self.forget(volume, id);
+                true
+            }
+            None => false,
+        }
     }
 
     /// Every dirty file written back, for room: whether any page was.
@@ -343,11 +373,11 @@ impl<P: Pager> Files<P> {
         self.touch(identity);
         let mut done = 0;
         let put = self.put(volume, &Writing { identity, node, old, offset, data }, &mut done);
-        let f = self.files.get_mut(&identity).expect("checked");
+        let id = self.files[&identity].object;
         if let Err(e) = put {
             // What was reserved and not put would read as the blocks' old bytes.
             let cut = if done > 0 { old.max(offset + done as u64) } else { old };
-            let resized = f.object.resize(cut).map_err(word).and(volume.truncate(node, cut));
+            let resized = self.pg().resize(id, cut).map_err(word).and(volume.truncate(node, cut));
             if let Err(again) = resized {
                 println!("fileserver: a refused write of file {identity} was not cut back to {cut} ({again:?})");
             }
@@ -363,8 +393,8 @@ impl<P: Pager> Files<P> {
         let end = offset + data.len() as u64;
         while *done < data.len() {
             let at = offset + *done as u64;
-            let f = self.files.get(&identity).ok_or(Error::Stale)?;
-            match f.object.write(at, &data[*done..]) {
+            let id = self.files.get(&identity).ok_or(Error::Stale)?.object;
+            match self.pg().write(id, at, &data[*done..]) {
                 Ok(n) => {
                     self.landed(identity, at, n);
                     *done += n;
@@ -418,21 +448,18 @@ impl<P: Pager> Files<P> {
         }
     }
 
-    /// `node`'s file cut or grown to `size`: the object first, so no dirty
-    /// page outlives the blocks it would go to.
+    /// `node`'s file cut or grown to `size`: the volume first, so a refusal
+    /// changes nothing, then the object, before anything can write a page
+    /// past the size back.
     pub fn truncate(&mut self, volume: &mut dyn Volume, identity: u64, node: Node, size: u64) -> Result<(), Error> {
-        let Some(f) = self.files.get_mut(&identity) else { return volume.truncate(node, size) };
-        let old = volume.node_meta(node)?.size;
-        f.object.resize(size).map_err(word)?;
+        volume.truncate(node, size)?;
+        let Some(f) = self.files.get_mut(&identity) else { return Ok(()) };
         if let Some((lo, hi)) = f.dirty {
             let hi = hi.min(size.div_ceil(PAGE));
             f.dirty = (lo < hi).then_some((lo, hi));
         }
-        volume.truncate(node, size).inspect_err(|_| {
-            if size > old {
-                let _ = f.object.resize(old);
-            }
-        })
+        let id = f.object;
+        self.pg().resize(id, size).map_err(word)
     }
 
     /// `identity`'s dirty pages written to the volume. A page dirtied again
@@ -449,8 +476,9 @@ impl<P: Pager> Files<P> {
         let mut first = lo;
         while first < hi {
             let count = (hi - first).min(RANGE);
-            let object = &self.files[&identity].object;
-            let begun = object.writeback_begin(first, count).map_err(word)?;
+            let object = self.files[&identity].object;
+            let pager = self.pager.as_ref().expect("paged");
+            let begun = pager.writeback_begin(object, first, count).map_err(word)?;
             let mut written = Ok(());
             for (start, pages) in runs(&begun, count) {
                 let at = (first + start) * PAGE;
@@ -460,7 +488,7 @@ impl<P: Pager> Files<P> {
                 // SAFETY: `buf` is this process's, reached only through these
                 // bytes while they live.
                 let out = unsafe { Bytes::from_raw(buf.as_mut_ptr(), len) };
-                written = match object.read(out, at) {
+                written = match pager.read(object, out, at) {
                     Ok(n) if n == len => volume.write_back(node, at, &buf),
                     Ok(n) => {
                         println!("fileserver: file {identity}'s pages under write-back at {at} read {n} of {len} bytes");
@@ -472,7 +500,7 @@ impl<P: Pager> Files<P> {
                     break;
                 }
             }
-            let still = object.writeback_end(first, count, written.is_ok()).map_err(word)?;
+            let still = pager.writeback_end(object, first, count, written.is_ok()).map_err(word)?;
             for (start, pages) in runs(&still, count) {
                 let (a, b) = (first + start, first + start + pages);
                 let (x, y) = kept.unwrap_or((a, b));
@@ -504,22 +532,24 @@ impl<P: Pager> Files<P> {
     /// What the pager's objects asked.
     pub fn notice(&mut self, volume: &mut dyn Volume, notice: Notice) {
         match notice {
-            Notice::Requested { cookie, first, count } => {
-                if !self.files.contains_key(&cookie) {
-                    return;
-                }
+            Notice::Requested { object, first, count } => {
+                let Some(&identity) = self.by_object.get(&object) else { return };
                 let count = count.min(RANGE);
-                if let Err(e) = self.fill(volume, cookie, first, count) {
-                    // A reader waits for its pages until they are supplied or
-                    // failed: one the volume will not read is failed.
-                    println!("fileserver: pages {first}+{count} of file {cookie} would not read ({e:?}); failing them");
-                    if let Err(why) = self.files[&cookie].object.fail(first, count) {
-                        println!("fileserver: and the failure was refused ({why:?})");
-                    }
+                // A reader waits for its pages until they are supplied or
+                // failed: a range the volume will not read, or holds none of,
+                // is failed.
+                let why = match self.fill(volume, identity, first, count) {
+                    Ok(0) => "the volume holds none of them".to_string(),
+                    Ok(_) => return,
+                    Err(e) => format!("{e:?}"),
+                };
+                println!("fileserver: pages {first}+{count} of file {identity} were not supplied ({why}); failing them");
+                if let Err(why) = self.pg().fail(object, first, count) {
+                    println!("fileserver: and the failure was refused ({why:?})");
                 }
             }
-            Notice::NoHolders { cookie } => {
-                if let Some(f) = self.files.get_mut(&cookie) {
+            Notice::NoHolders { object } => {
+                if let Some(f) = self.by_object.get(&object).and_then(|identity| self.files.get_mut(identity)) {
                     f.held = false;
                 }
             }

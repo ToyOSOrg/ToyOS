@@ -2,32 +2,37 @@
 //! one object per file node, which holders read only through
 //! `SYS_PAGED_READ`. Nothing here is mapped.
 //!
-//! **Three kinds.** A [`PagerObject`] is its process's one pager: its page
-//! table of `capacity` slots ([`kernel::paged::Pages`]), its readers'
-//! requests and its notices. It neither duplicates nor transfers, so its last
-//! handle goes with its process, and that ends every object it serves: each
-//! reader answers `Gone`. A [`PagedOwnerObject`] is the pager's handle on one
-//! object, which supplies, writes and writes back. A [`PagedHolderObject`]
-//! reads it, and may be narrowed and sent.
+//! **Two kinds.** A [`PagerObject`] is its process's one pager: its index of
+//! `capacity` pages ([`kernel::paged::Pages`]), its objects by id, its
+//! readers' requests and its notices. Every owner call names an object by id
+//! through it, so a pager holds one handle however many objects it serves. It
+//! neither duplicates nor transfers, so its last handle goes with its
+//! process, and that ends every object it serves: each reader answers `Gone`.
+//! A [`PagedHolderObject`] reads one object, and may be narrowed and sent.
 //!
 //! **Supply copies into fresh frames**, so no frame the pager still maps
 //! enters an object. A frame leaves at withdrawal, failure, shrink or the
-//! object's end: out of the table under the pager's lock, then freed, which a
-//! reader's pin defers to its last unpin.
+//! object's release: out of the index under the pager's lock, then freed,
+//! which a reader's pin defers to its last unpin.
 //!
 //! **A reader waits only on its pager.** An absent page is requested in the
 //! waiter's own record, linked on its pager's list, and the wait ends on a
-//! supply, a failure, a shrink, the pager's end or a kill; past the pager's
-//! report time it is counted and logged overdue and goes on waiting. A pager's
-//! own process is refused a holder's read, so no pager waits on a pager.
+//! supply, a failure, a shrink, a release, the pager's end or a kill; a wait
+//! past the pager's report time is counted and logged overdue and goes on.
+//! A pager's own process is refused a holder's read, so no pager waits on a
+//! pager.
 //!
 //! **Lock order.** The pager's lock is innermost but for the allocator's. A
 //! copy to or from user memory holds pins, never the lock; no wait holds a
 //! pin.
 //!
-//! What a pager holds: `dirty` pages and a read's headroom promised at once,
-//! the rest of `capacity` promised a page at a time and given back as each
-//! goes (`issues/a-pager-holds-a-fixed-capacity-until-the-memory-service-reclaims-its-clean-pages.md`).
+//! **What a pager holds** (`issues/a-pager-holds-a-fixed-capacity-until-the-memory-service-reclaims-its-clean-pages.md`):
+//! its core — `dirty` pages and a read's headroom — committed at its making
+//! and kept for its life, every frame of it either promised, in the index or
+//! held aside for the next supply; the rest of `capacity` promised a page at
+//! a time and given back as each goes. Its index, objects and the frames it
+//! holds aside are charged with it, so no call on it allocates but the
+//! transient lists a removal collects.
 
 use alloc::sync::Arc;
 use alloc::vec::Vec;
@@ -37,11 +42,11 @@ use core::pin::Pin;
 use core::ptr;
 use core::sync::atomic::{AtomicU32, Ordering};
 
-use kernel::paged::{Lookup, Object, Pages, Refused, Supplied, PAGE};
+use kernel::chunked::{Chunked, Stack};
+use kernel::paged::{Core, Draw, Leave, Lookup, Object, Pages, Refused, Supplied, PAGE};
 use kernel::sched::task::WaitClass;
 use toyos_abi::syscall::{PagedNotice, SyscallError, NOTICE_NO_HOLDERS, NOTICE_REQUESTED};
 
-use crate::mm::charge;
 use crate::mm::pmm;
 use crate::process::Pid;
 use crate::sync::Lock;
@@ -55,8 +60,8 @@ use super::{KObjectVariant, ObjectCore, ZeroHandles};
 /// Pages one copy pins, and one supply or write draws, at once.
 const CHUNK: usize = 16;
 
-/// The page-in headroom held back beside the dirty ceiling: what a read's
-/// supply can always draw.
+/// The page-in headroom held beside the dirty ceiling: what a read's supply
+/// can always draw.
 const HEADROOM: u64 = 512;
 
 /// The longest a pager may let a reader wait before it is reported overdue.
@@ -76,33 +81,34 @@ struct Request {
     next: *mut Request,
 }
 
-/// One object of a pager's.
+/// One object of a pager's, at its id's slot.
 struct Entry {
     object: Object,
-    cookie: u64,
-    /// Owner and holder objects that name this entry: it goes with the last.
+    /// The pager's own reference, while unreleased, and each holder object's:
+    /// the slot is free again with the last.
     refs: u32,
     /// Holder objects whose handles have not all gone.
     holders: u32,
-    /// The owner's handle has not gone.
+    /// Not released: owner calls reach it.
     owned: bool,
     /// The last holder went and no notice has said so.
     no_holders: bool,
-    /// Posted on every change a waiter re-reads: supply, failure, shrink, end.
-    watch: Arc<Watch>,
 }
 
 struct State {
     pages: Pages<u64>,
-    entries: Vec<Option<Entry>>,
-    free: Vec<u32>,
+    /// Every object's slot, made with the pager.
+    entries: Chunked<Option<Entry>>,
+    free: Stack<u32>,
     requests: *mut Request,
     /// Entries whose `no_holders` is set.
     no_holders: usize,
-    /// Frames promised and not yet drawn.
-    pool: u64,
-    /// Frames the table holds.
-    drawn: u64,
+    /// The frames the core holds, wherever each is.
+    core: Core,
+    /// Frames out of the index the core holds aside for the next supply:
+    /// `spare` unpinned, `draining` still pinned by a copy that read them.
+    spare: Stack<u64>,
+    draining: Stack<u64>,
     gone: bool,
 }
 
@@ -120,10 +126,35 @@ impl State {
         self.entries[slot as usize].as_mut().expect("paged: a slot an object names is held")
     }
 
-    /// The table and the object at `slot`, borrowed apart.
+    /// The slot of the unreleased object `id` names: the caller's word,
+    /// refused `InvalidArgument` where it names none.
+    fn live(&self, id: u64) -> Result<u32, SyscallError> {
+        let slot = u32::try_from(id).map_err(|_| SyscallError::InvalidArgument)?;
+        let entry = (slot as usize) < self.entries.len() && self.entries[slot as usize].as_ref().is_some_and(|e| e.owned);
+        match entry {
+            true if !self.gone => Ok(slot),
+            _ if self.gone => Err(SyscallError::Gone),
+            _ => Err(SyscallError::InvalidArgument),
+        }
+    }
+
+    /// The index and the object at `slot`, borrowed apart.
     fn split(&mut self, slot: u32) -> (&mut Pages<u64>, &mut Object) {
         let entry = self.entries[slot as usize].as_mut().expect("paged: a slot an object names is held");
         (&mut self.pages, &mut entry.object)
+    }
+
+    /// Move each held-aside frame no copy pins any more to the spare ones.
+    fn settle(&mut self) {
+        let mut k = 0;
+        while k < self.draining.len() {
+            if pmm::pinned(self.draining.get(k)) {
+                k += 1;
+            } else {
+                let phys = self.draining.swap_remove(k);
+                self.spare.push(phys);
+            }
+        }
     }
 }
 
@@ -132,10 +163,11 @@ pub struct PagerObject {
     state: Lock<State>,
     /// Posted when a notice is owed.
     watch: Arc<Watch>,
+    /// Posted on every change a waiter reads again: a supply, a failure, a
+    /// shrink, a release, the end.
+    changed: Arc<Watch>,
     pid: Pid,
     report: Duration,
-    /// Frames held whatever the table holds.
-    core_pages: u64,
     overdue: AtomicU32,
 }
 
@@ -146,28 +178,44 @@ pub enum Unmade {
 }
 
 impl PagerObject {
-    pub const RIGHTS: toyos_abi::handle::Rights = toyos_abi::handle::Rights::READ.union(toyos_abi::handle::Rights::WAIT);
+    pub const RIGHTS: toyos_abi::handle::Rights =
+        toyos_abi::handle::Rights::READ.union(toyos_abi::handle::Rights::WRITE).union(toyos_abi::handle::Rights::WAIT);
 
     /// The calling process's pager: `capacity` pages, `dirty` of them dirty at
-    /// once, readers overdue past `report_ns`.
-    pub fn create(capacity: u64, dirty: u64, report_ns: u64) -> Result<Arc<Self>, Unmade> {
-        if capacity == 0 || capacity > toyos_abi::syscall::PAGER_MAX_PAGES || dirty > capacity {
+    /// once, at most `objects` objects, readers overdue past `report_ns`.
+    pub fn create(capacity: u64, dirty: u64, objects: u64, report_ns: u64) -> Result<Arc<Self>, Unmade> {
+        let fits = |n: u64| usize::try_from(n).ok().filter(|&n| n > 0 && n <= Pages::<u64>::MAX_CAPACITY);
+        let (Some(slots), Some(count)) = (fits(capacity), fits(objects)) else { return Err(Unmade::Invalid) };
+        if dirty > capacity {
             return Err(Unmade::Invalid);
         }
-        let slots = capacity as usize;
-        let core = Self::new_core(Pages::<u64>::heap_bytes(slots)).map_err(|_| Unmade::Exhausted)?;
         let core_pages = dirty + (capacity - dirty).min(HEADROOM);
+        let held = core_pages as usize;
+        let tables = Pages::<u64>::heap_bytes(slots)
+            + Chunked::<Option<Entry>>::heap_bytes(count)
+            + Stack::<u32>::heap_bytes(count)
+            + 2 * Stack::<u64>::heap_bytes(held);
+        let core = Self::new_core(tables).map_err(|_| Unmade::Exhausted)?;
+        let pages = Pages::new(slots, dirty as usize).ok_or(Unmade::Exhausted)?;
+        let entries = Chunked::new(count, || None).ok_or(Unmade::Exhausted)?;
+        let mut free = Stack::new(count).ok_or(Unmade::Exhausted)?;
+        for slot in (0..count as u32).rev() {
+            free.push(slot);
+        }
+        let spare = Stack::new(held).ok_or(Unmade::Exhausted)?;
+        let draining = Stack::new(held).ok_or(Unmade::Exhausted)?;
         if !pmm::promise(core.job(), core_pages) {
             return Err(Unmade::Exhausted);
         }
         let state = State {
-            pages: Pages::new(slots, dirty as usize),
-            entries: Vec::new(),
-            free: Vec::new(),
+            pages,
+            entries,
+            free,
             requests: ptr::null_mut(),
             no_holders: 0,
-            pool: core_pages,
-            drawn: 0,
+            core: Core::new(core_pages),
+            spare,
+            draining,
             gone: false,
         };
         let report = Duration::from_nanos(report_ns.clamp(1, REPORT_CEILING.nanos()));
@@ -175,9 +223,9 @@ impl PagerObject {
             core,
             state: Lock::new(state),
             watch: Arc::new(Watch::new()),
+            changed: Arc::new(Watch::new()),
             pid: crate::process::current_process(),
             report,
-            core_pages,
             overdue: AtomicU32::new(0),
         }))
     }
@@ -195,69 +243,88 @@ impl PagerObject {
         unreported || state.no_holders > 0
     }
 
-    /// A new object of `size` bytes named by `cookie`, with the one reference
-    /// its owner holds.
-    fn add(&self, size: u64, cookie: u64) -> Result<u32, SyscallError> {
-        let watch = Arc::new(Watch::new());
+    /// A new object of `size` bytes: its id. `ResourceExhausted` where every
+    /// slot holds one.
+    pub fn add(&self, size: u64) -> u64 {
+        if size > kernel::paged::LAST_END {
+            return SyscallError::InvalidArgument.to_u64();
+        }
         let mut state = self.state.lock();
         if state.gone {
-            return Err(SyscallError::Gone);
+            return SyscallError::Gone.to_u64();
         }
-        let object = state.pages.object(size);
-        let entry = Entry { object, cookie, refs: 1, holders: 0, owned: true, no_holders: false, watch };
-        let slot = match state.free.pop() {
-            Some(slot) => {
-                state.entries[slot as usize] = Some(entry);
-                slot
-            }
-            None => {
-                state.entries.push(Some(entry));
-                (state.entries.len() - 1) as u32
-            }
-        };
-        Ok(slot)
+        let Some(slot) = state.free.pop() else { return SyscallError::ResourceExhausted.to_u64() };
+        let object = state.pages.object(slot, size);
+        state.entries[slot as usize] = Some(Entry { object, refs: 1, holders: 0, owned: true, no_holders: false });
+        u64::from(slot)
     }
 
-    /// Give a frame drawn for the table back, and refill the promise toward
-    /// the pager's core.
+    /// A frame drawn for the index gives up its place: kept aside while the
+    /// core would hold less without it, given back otherwise. `drawn` where
+    /// it was in the index.
     fn give_back(&self, state: &mut State, phys: u64, drawn: bool) {
-        // SAFETY: `phys` is a frame this pager drew, out of its table or never
+        if !state.gone && state.core.leave(drawn) == Leave::Aside {
+            // Out of the index, so no copy can pin it from here.
+            match pmm::pinned(phys) {
+                true => state.draining.push(phys),
+                false => state.spare.push(phys),
+            }
+            return;
+        }
+        // SAFETY: `phys` is a frame this pager drew, out of its index or never
         // in it, which nothing maps; a reader's pin defers its reuse.
         unsafe { pmm::free_drawn(self.core.job(), &[phys]) };
-        if drawn {
-            state.drawn -= 1;
-        }
-        let short = self.core_pages.saturating_sub(state.drawn + state.pool);
-        if short > 0 && pmm::promise(self.core.job(), short) {
-            state.pool += short;
-        }
     }
 
-    /// Frames the table answered as removed, each given back.
+    /// Frames the index answered as removed, each given back.
     fn removed(&self, state: &mut State, frames: &[u64]) {
         for &phys in frames {
             self.give_back(state, phys, true);
         }
     }
 
-    /// `f` over the table and the object at `slot`, collecting each frame it
-    /// removes, which goes back after.
-    fn removing<R>(&self, slot: u32, f: impl FnOnce(&mut Pages<u64>, &mut Object, &mut dyn FnMut(u64)) -> R) -> R {
+    /// `f` over the index and the live object `id`, collecting each frame it
+    /// removes, which goes back after; waiters read again.
+    fn removing<R>(&self, id: u64, f: impl FnOnce(&mut Pages<u64>, &mut Object, &mut dyn FnMut(u64)) -> R) -> Result<R, SyscallError> {
         let mut state = self.state.lock();
+        let slot = state.live(id)?;
         let mut frames = Vec::new();
         let answer = {
             let (pages, object) = state.split(slot);
             f(pages, object, &mut |phys| frames.push(phys))
         };
         self.removed(&mut state, &frames);
-        state.entry(slot).watch.post();
-        answer
+        self.changed.post();
+        Ok(answer)
     }
 
-    /// The owner's handle went: the object answers `Gone` from now on.
-    fn owner_gone(&self, slot: u32) {
-        self.state.lock().entry_mut(slot).owned = false;
-        self.removing(slot, |pages, object, out| pages.invalidate(object, &mut |f| out(f)));
+    /// The pager lets object `id` go: it answers `Gone` from now on, its
+    /// pages go, and its slot with its last holder.
+    pub fn release(&self, id: u64) -> u64 {
+        let freed = self.removing(id, |pages, object, out| pages.invalidate(object, &mut |f| out(f)));
+        if let Err(e) = freed {
+            return e.to_u64();
+        }
+        let mut state = self.state.lock();
+        let slot = u32::try_from(id).expect("live above");
+        let entry = state.entry_mut(slot);
+        entry.owned = false;
+        let no_holders = core::mem::take(&mut entry.no_holders);
+        state.no_holders -= usize::from(no_holders);
+        drop(state);
+        self.unref(slot);
+        0
+    }
+
+    /// A holder of object `id`, which counts as one once its handle is
+    /// installed ([`PagedHolderObject::held`]).
+    pub fn holder(self: &Arc<Self>, id: u64) -> Result<Arc<PagedHolderObject>, SyscallError> {
+        let core = PagedHolderObject::new_core(0)?;
+        let mut state = self.state.lock();
+        let slot = state.live(id)?;
+        state.entry_mut(slot).refs += 1;
+        drop(state);
+        Ok(Arc::new(PagedHolderObject { core, named: Named { pager: Arc::clone(self), slot } }))
     }
 
     /// A holder object's handles went.
@@ -273,7 +340,8 @@ impl PagerObject {
         }
     }
 
-    /// An object naming `slot` went; the entry goes with the last.
+    /// A reference to `slot` went; its entry goes with the last, and the slot
+    /// is free for another object.
     fn unref(&self, slot: u32) {
         let mut state = self.state.lock();
         let entry = state.entry_mut(slot);
@@ -310,22 +378,23 @@ impl PagerObject {
                     if !reported {
                         // SAFETY: as above.
                         unsafe { (*at).reported = true };
-                        batch[n] = PagedNotice { cookie: state.entry(slot).cookie, kind: NOTICE_REQUESTED, first, count };
+                        batch[n] = PagedNotice { object: u64::from(slot), kind: NOTICE_REQUESTED, first, count };
                         n += 1;
                     }
                     at = next;
                 }
                 let mut owed = state.no_holders;
-                for entry in state.entries.iter_mut().flatten() {
+                for slot in 0..state.entries.len() {
                     if n == want || owed == 0 {
                         break;
                     }
+                    let Some(entry) = state.entries[slot].as_mut() else { continue };
                     if entry.no_holders {
                         entry.no_holders = false;
                         owed -= 1;
                         // Said only while still so: a holder made since is held.
                         if entry.holders == 0 {
-                            batch[n] = PagedNotice { cookie: entry.cookie, kind: NOTICE_NO_HOLDERS, first: 0, count: 0 };
+                            batch[n] = PagedNotice { object: slot as u64, kind: NOTICE_NO_HOLDERS, first: 0, count: 0 };
                             n += 1;
                         }
                     }
@@ -344,14 +413,22 @@ impl PagerObject {
         filled as u64
     }
 
+    /// The owner's read of object `id`: `out.len()` bytes from `offset`,
+    /// answered `WouldBlock` where the first page is absent.
+    pub fn owner_read(&self, id: u64, out: &mut UserBytesMut, offset: u64) -> u64 {
+        let live = self.state.lock().live(id);
+        match live {
+            Ok(slot) => self.read(slot, out, offset, false),
+            Err(e) => e.to_u64(),
+        }
+    }
+
     /// Read `out.len()` bytes of the object at `slot` from `offset`; a holder
     /// waits for absent pages, an owner is answered `WouldBlock`.
     fn read(&self, slot: u32, out: &mut UserBytesMut, offset: u64, waits: bool) -> u64 {
         let want = out.len();
         let mut done = 0usize;
         let waiting = core::pin::pin!(Waiting::new(self, slot));
-        let mut overdue: Option<Overdue<'_>> = None;
-        let began = crate::clock::now();
         let mut pieces = [Piece::default(); CHUNK];
         loop {
             let at = offset.saturating_add(done as u64);
@@ -398,26 +475,24 @@ impl PagerObject {
                 Step::Absent(_) if !waits && done > 0 => return done as u64,
                 Step::Absent(_) if !waits => return SyscallError::WouldBlock.to_u64(),
                 Step::Absent(page) => {
-                    let watch = Arc::clone(&self.state.lock().entry(slot).watch);
                     let ready = || {
                         let state = self.state.lock();
                         state.gone || !matches!(state.pages.lookup(&state.entry(slot).object, page), Lookup::Absent)
                     };
                     let parkable = crate::scheduler::Parkable::at_entry();
-                    let deadline = match overdue {
-                        Some(_) => Deadline::never(),
-                        None => Deadline::at(began + self.report),
-                    };
+                    let began = crate::clock::now();
                     // Never read: a killed thread exits before it reaches its process again.
-                    if watch::wait_until(&parkable, &watch, 0, WaitClass::Io, deadline, ready).is_err() {
+                    let report = Deadline::at(began + self.report);
+                    if watch::wait_until(&parkable, &self.changed, 0, WaitClass::Io, report, ready).is_err() {
                         return SyscallError::Gone.to_u64();
                     }
-                    if overdue.is_none() && !ready() && deadline.reached(crate::clock::now()) {
-                        let (cookie, (first, count)) = {
-                            let state = self.state.lock();
-                            (state.entry(slot).cookie, waiting.range(&state))
-                        };
-                        overdue = Some(Overdue::begin(self, cookie, first, count, began));
+                    if !ready() {
+                        // This wait, and no other, is overdue until it ends.
+                        let (first, count) = waiting.range(&self.state.lock());
+                        let _overdue = Overdue::begin(self, slot, first, count, began);
+                        if watch::wait_until(&parkable, &self.changed, 0, WaitClass::Io, Deadline::never(), ready).is_err() {
+                            return SyscallError::Gone.to_u64();
+                        }
                     }
                 }
             }
@@ -466,9 +541,10 @@ impl PagerObject {
         Step::Copy(count)
     }
 
-    /// Copy `src` into fresh pages from page-aligned `offset`, clean or
-    /// dirty: the pages installed.
-    fn supply(&self, slot: u32, offset: u64, src: &UserBytes, dirty: bool) -> u64 {
+    /// Copy `src` into fresh pages of object `id` from page-aligned `offset`,
+    /// clean or dirty: the pages installed. The caller checked the span is in
+    /// reach.
+    pub fn supply(&self, id: u64, offset: u64, src: &UserBytes, dirty: bool) -> u64 {
         if !offset.is_multiple_of(PAGE) || src.len() == 0 {
             return SyscallError::InvalidArgument.to_u64();
         }
@@ -477,22 +553,27 @@ impl PagerObject {
         while done < src.len() {
             let first = (offset + done as u64) / PAGE;
             let pages = (src.len() - done).div_ceil(PAGE as usize).min(CHUNK);
-            // Promises first, under the lock: what a page drawn below may take.
-            let (reserved, size) = {
+            // Frames first, under the lock: one held aside, or a promise.
+            let mut aside = [None; CHUNK];
+            let (slot, reserved, size) = {
                 let mut state = self.state.lock();
-                if state.gone || state.entry(slot).object.gone() {
-                    return refusal(installed, SyscallError::Gone);
-                }
+                let slot = match state.live(id) {
+                    Ok(slot) => slot,
+                    Err(e) => return refusal(installed, e),
+                };
+                state.settle();
                 let mut reserved = 0;
                 while reserved < pages {
-                    if state.pool > 0 {
-                        state.pool -= 1;
-                    } else if !pmm::promise(self.core.job(), 1) {
-                        break;
+                    let ready = !state.spare.is_empty();
+                    match state.core.draw(ready) {
+                        Draw::Aside => aside[reserved] = state.spare.pop(),
+                        Draw::Pool => {}
+                        Draw::Beyond if pmm::promise(self.core.job(), 1) => state.core.promised(),
+                        Draw::Beyond => break,
                     }
                     reserved += 1;
                 }
-                (reserved, state.entry(slot).object.size())
+                (slot, reserved, state.entry(slot).object.size())
             };
             if reserved == 0 {
                 return refusal(installed, SyscallError::ResourceExhausted);
@@ -507,25 +588,34 @@ impl PagerObject {
                 if !dirty {
                     n = n.min(size.saturating_sub(page_at) as usize);
                 }
-                let frame = pmm::alloc_promised();
+                let phys = match aside[k] {
+                    Some(phys) => {
+                        // SAFETY: a frame held aside, out of the index and
+                        // unpinned, which nothing else reaches.
+                        unsafe { core::ptr::write_bytes(DirectMap::from_phys(phys).as_mut_ptr::<u8>(), 0, PAGE as usize) };
+                        phys
+                    }
+                    None => pmm::alloc_promised().into_raw(),
+                };
                 // SAFETY: a frame just drawn, which nothing else reaches yet.
-                unsafe { src.read_raw(from, frame.direct_map().as_mut_ptr::<u8>(), n) };
-                frames[k] = frame.into_raw();
+                unsafe { src.read_raw(from, DirectMap::from_phys(phys).as_mut_ptr::<u8>(), n) };
+                frames[k] = phys;
                 ends[k] = page_at + (src.len() - from).min(PAGE as usize) as u64;
             }
             let mut refused = None;
             {
                 let mut state = self.state.lock();
                 for k in 0..reserved {
-                    let answer = if state.gone {
-                        Err(Refused::Gone)
-                    } else {
-                        let (pages, object) = state.split(slot);
-                        pages.supply(object, first + k as u64, frames[k], dirty, ends[k])
+                    let answer = match state.live(id) {
+                        Ok(_) => {
+                            let (pages, object) = state.split(slot);
+                            pages.supply(object, first + k as u64, frames[k], dirty, ends[k])
+                        }
+                        Err(_) => Err(Refused::Gone),
                     };
                     match answer {
                         Ok(Supplied::Installed) => {
-                            state.drawn += 1;
+                            state.core.installed();
                             installed += 1;
                         }
                         Ok(Supplied::Present) => self.give_back(&mut state, frames[k], false),
@@ -535,8 +625,8 @@ impl PagerObject {
                         }
                     }
                 }
-                state.entry(slot).watch.post();
             }
+            self.changed.post();
             if let Some(why) = refused {
                 return refusal(installed, word(why));
             }
@@ -545,19 +635,21 @@ impl PagerObject {
         installed
     }
 
-    /// Copy `src` into the present pages from `offset`, dirty: the bytes
-    /// written, up to the first absent page.
-    fn write(&self, slot: u32, offset: u64, src: &UserBytes) -> u64 {
+    /// Copy `src` into the present pages of object `id` from `offset`, dirty:
+    /// the bytes written, up to the first absent page. The caller checked the
+    /// span is in reach.
+    pub fn write(&self, id: u64, offset: u64, src: &UserBytes) -> u64 {
         let mut done = 0usize;
         while done < src.len() {
             let mut pinned = [(0u64, 0u64, 0usize, 0usize); CHUNK];
             let mut count = 0;
             let mut stopped = None;
-            {
+            let slot = {
                 let mut state = self.state.lock();
-                if state.gone {
-                    return refusal(done as u64, SyscallError::Gone);
-                }
+                let slot = match state.live(id) {
+                    Ok(slot) => slot,
+                    Err(e) => return refusal(done as u64, e),
+                };
                 let mut pos = offset + done as u64;
                 while count < CHUNK && (pos - offset) < src.len() as u64 {
                     let page = pos / PAGE;
@@ -577,7 +669,8 @@ impl PagerObject {
                         }
                     }
                 }
-            }
+                slot
+            };
             let mut from = done;
             for &(_, phys, within, n) in &pinned[..count] {
                 // SAFETY: a frame of the object, pinned and write-pinned above.
@@ -587,6 +680,10 @@ impl PagerObject {
             {
                 let mut state = self.state.lock();
                 for &(page, phys, within, n) in &pinned[..count] {
+                    // A release meanwhile took the object: nothing left to unpin.
+                    if state.live(id) != Ok(slot) {
+                        break;
+                    }
                     let (pages, object) = state.split(slot);
                     pages.write_unpin(object, page, phys, page * PAGE + (within + n) as u64);
                 }
@@ -604,22 +701,26 @@ impl PagerObject {
         done as u64
     }
 
-    fn withdraw(&self, slot: u32, first: u64, count: u64) -> u64 {
-        self.removing(slot, |pages, object, out| pages.withdraw(object, first, count, &mut |f| out(f))) as u64
-    }
-
-    fn fail(&self, slot: u32, first: u64, count: u64) -> u64 {
-        match self.removing(slot, |pages, object, out| pages.fail(object, first, count, &mut |f| out(f))) {
-            Ok(()) => 0,
-            Err(why) => word(why).to_u64(),
+    pub fn withdraw(&self, id: u64, first: u64, count: u64) -> u64 {
+        match self.removing(id, |pages, object, out| pages.withdraw(object, first, count, &mut |f| out(f))) {
+            Ok(n) => n as u64,
+            Err(e) => e.to_u64(),
         }
     }
 
-    fn resize(&self, slot: u32, size: u64) -> u64 {
-        let resized = self.removing(slot, |pages, object, out| {
-            if object.gone() {
-                return Err(SyscallError::Gone);
-            }
+    pub fn fail(&self, id: u64, first: u64, count: u64) -> u64 {
+        match self.removing(id, |pages, object, out| pages.fail(object, first, count, &mut |f| out(f))) {
+            Ok(Ok(())) => 0,
+            Ok(Err(why)) => word(why).to_u64(),
+            Err(e) => e.to_u64(),
+        }
+    }
+
+    pub fn resize(&self, id: u64, size: u64) -> u64 {
+        if size > kernel::paged::LAST_END {
+            return SyscallError::InvalidArgument.to_u64();
+        }
+        let resized = self.removing(id, |pages, object, out| {
             if let Some(phys) = pages.resize(object, size, &mut |f| out(f)) {
                 let within = (size % PAGE) as usize;
                 // SAFETY: the last page's frame, the object's while the lock is
@@ -627,7 +728,6 @@ impl PagerObject {
                 // through a reference, as a reader may copy it meanwhile.
                 unsafe { core::ptr::write_bytes(DirectMap::from_phys(phys).as_mut_ptr::<u8>().add(within), 0, PAGE as usize - within) };
             }
-            Ok(())
         });
         match resized {
             Ok(()) => 0,
@@ -635,9 +735,13 @@ impl PagerObject {
         }
     }
 
-    fn writeback(&self, slot: u32, first: u64, count: u64, end: Option<bool>, out: &mut UserBytesMut) -> u64 {
+    pub fn writeback(&self, id: u64, first: u64, count: u64, end: Option<bool>, out: &mut UserBytesMut) -> u64 {
         let bits = {
             let mut state = self.state.lock();
+            let slot = match state.live(id) {
+                Ok(slot) => slot,
+                Err(e) => return e.to_u64(),
+            };
             let (pages, object) = state.split(slot);
             match end {
                 None => pages.writeback_begin(object, first, count),
@@ -776,16 +880,16 @@ impl Drop for Waiting<'_> {
     }
 }
 
-/// A reader past its pager's report time, counted until its wait ends.
+/// A reader's wait past its pager's report time, counted until it ends.
 struct Overdue<'a> {
     pager: &'a PagerObject,
 }
 
 impl<'a> Overdue<'a> {
-    fn begin(pager: &'a PagerObject, cookie: u64, first: u64, count: u64, began: crate::time::Instant) -> Self {
+    fn begin(pager: &'a PagerObject, object: u32, first: u64, count: u64, began: crate::time::Instant) -> Self {
         if pager.overdue.fetch_add(1, Ordering::Relaxed) == 0 {
             log!(
-                "paged: pid {}'s pager has a read overdue: object {cookie} pages {first}+{count}, waiting {}",
+                "paged: pid {}'s pager has a read overdue: object {object} pages {first}+{count}, waiting {}",
                 pager.pid,
                 crate::clock::now() - began
             );
@@ -803,22 +907,38 @@ impl Drop for Overdue<'_> {
 }
 
 /// The pager's process ended: every object answers `Gone`, every waiter is
-/// woken, every frame goes back.
+/// woken, and every frame goes back.
 impl ZeroHandles for PagerObject {
     fn on_zero_handles(&self) {
         let mut state = self.state.lock();
         state.gone = true;
         let mut frames = Vec::new();
+        let mut released = Vec::new();
         let State { pages, entries, .. } = &mut *state;
-        for entry in entries.iter_mut().flatten() {
+        for slot in 0..entries.len() {
+            let Some(entry) = entries[slot].as_mut() else { continue };
             pages.invalidate(&mut entry.object, &mut |phys| frames.push(phys));
             entry.no_holders = false;
-            entry.watch.post();
+            if core::mem::take(&mut entry.owned) {
+                released.push(slot as u32);
+            }
         }
         state.no_holders = 0;
         self.removed(&mut state, &frames);
-        pmm::unpromise(self.core.job(), state.pool);
-        state.pool = 0;
+        let mut aside = Vec::new();
+        while let Some(phys) = state.spare.pop().or_else(|| state.draining.pop()) {
+            aside.push(phys);
+        }
+        // SAFETY: frames this pager drew and holds aside, which nothing maps;
+        // a pin defers a free to its last unpin.
+        unsafe { pmm::free_drawn(self.core.job(), &aside) };
+        let pool = state.core.end();
+        pmm::unpromise(self.core.job(), pool);
+        drop(state);
+        for slot in released {
+            self.unref(slot);
+        }
+        self.changed.post();
     }
 }
 
@@ -826,11 +946,12 @@ impl Drop for PagerObject {
     fn drop(&mut self) {
         let state = self.state.lock();
         assert!(state.requests.is_null(), "paged: a pager went with a reader still linked");
-        pmm::unpromise(self.core.job(), state.pool);
+        assert!(state.spare.is_empty() && state.draining.is_empty(), "paged: a pager went holding frames aside");
+        pmm::unpromise(self.core.job(), state.core.pool());
     }
 }
 
-/// What owner and holder objects share: the entry they name.
+/// A holder's reference to its pager's object.
 struct Named {
     pager: Arc<PagerObject>,
     slot: u32,
@@ -839,71 +960,6 @@ struct Named {
 impl Drop for Named {
     fn drop(&mut self) {
         self.pager.unref(self.slot);
-    }
-}
-
-pub struct PagedOwnerObject {
-    pub(super) core: ObjectCore,
-    named: Named,
-}
-
-impl PagedOwnerObject {
-    /// Neither `DUP` nor `TRANSFER`: its handle is its pager's.
-    pub const RIGHTS: toyos_abi::handle::Rights = toyos_abi::handle::Rights::READ.union(toyos_abi::handle::Rights::WRITE);
-
-    /// A new object of `pager`'s.
-    pub fn create(pager: &Arc<PagerObject>, size: u64, cookie: u64) -> Result<Arc<Self>, SyscallError> {
-        let core = Self::new_core(charge::arc::<Watch>() + 2 * core::mem::size_of::<Option<Entry>>())?;
-        let slot = pager.add(size, cookie)?;
-        Ok(Arc::new(Self { core, named: Named { pager: Arc::clone(pager), slot } }))
-    }
-
-    /// A holder of the same object, which counts as one once its handle is
-    /// installed ([`PagedHolderObject::held`]).
-    pub fn holder(&self) -> Result<Arc<PagedHolderObject>, SyscallError> {
-        let core = PagedHolderObject::new_core(0)?;
-        let Named { pager, slot } = &self.named;
-        let mut state = pager.state.lock();
-        if state.gone || !state.entry(*slot).owned {
-            return Err(SyscallError::Gone);
-        }
-        state.entry_mut(*slot).refs += 1;
-        drop(state);
-        Ok(Arc::new(PagedHolderObject { core, named: Named { pager: Arc::clone(pager), slot: *slot } }))
-    }
-
-    pub fn read(&self, out: &mut UserBytesMut, offset: u64) -> u64 {
-        self.named.pager.read(self.named.slot, out, offset, false)
-    }
-
-    pub fn supply(&self, offset: u64, src: &UserBytes, dirty: bool) -> u64 {
-        self.named.pager.supply(self.named.slot, offset, src, dirty)
-    }
-
-    pub fn write(&self, offset: u64, src: &UserBytes) -> u64 {
-        self.named.pager.write(self.named.slot, offset, src)
-    }
-
-    pub fn withdraw(&self, first: u64, count: u64) -> u64 {
-        self.named.pager.withdraw(self.named.slot, first, count)
-    }
-
-    pub fn fail(&self, first: u64, count: u64) -> u64 {
-        self.named.pager.fail(self.named.slot, first, count)
-    }
-
-    pub fn resize(&self, size: u64) -> u64 {
-        self.named.pager.resize(self.named.slot, size)
-    }
-
-    pub fn writeback(&self, first: u64, count: u64, end: Option<bool>, out: &mut UserBytesMut) -> u64 {
-        self.named.pager.writeback(self.named.slot, first, count, end, out)
-    }
-}
-
-impl ZeroHandles for PagedOwnerObject {
-    fn on_zero_handles(&self) {
-        self.named.pager.owner_gone(self.named.slot);
     }
 }
 

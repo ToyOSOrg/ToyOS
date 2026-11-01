@@ -1,0 +1,10 @@
+[package]
+name = "pagerprobe"
+description = "Test-only: a pager whose end a reader parked on its object answers `Gone`, and which is itself refused a holder's read."
+version = "0.1.0"
+edition = "2021"
+license = "MIT OR Apache-2.0"
+
+[dependencies]
+toyos-abi = { path = "../../../sdk/abi" }
+toyos = { path = "../../../sdk/toyos" }

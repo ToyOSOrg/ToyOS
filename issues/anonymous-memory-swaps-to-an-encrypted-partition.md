@@ -112,7 +112,7 @@ The symbols:
     - sealed immutable versions;
     - boot payloads;
     - a pager's core (`kernel/src/object/paged.rs`): its dirty ceiling, the
-      page-in headroom a read's supply can always draw, its page table and
+      page-in headroom a read's supply can always draw, its index and
       notices. Its clean pages above that are the memory service's slack
       (`issues/a-pager-holds-a-fixed-capacity-until-the-memory-service-reclaims-its-clean-pages.md`).
   - Everything else is `A`.

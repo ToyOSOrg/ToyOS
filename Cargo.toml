@@ -159,6 +159,7 @@ members = [
     "tests/guest/osbench/compare",
     "tests/guest/osbench/lan",
     "tests/guest/osbench/rules",
+    "tests/guest/pagerprobe",
     "tests/guest/pciholder",
     "tests/guest/starveling",
     "tests/guest/test-runner",

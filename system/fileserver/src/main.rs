@@ -273,18 +273,33 @@ fn main() {
     .serve()
 }
 
-/// The role's pager, its files' pages and how many may be dirty: none for
-/// SYSTEM, whose files are immutable and are served from ROOT's memory.
-/// DATA's is the cache's interim fixed size
+/// The share of physical memory the file servers' pagers together hold in
+/// pages: LOG and BOOT [`SMALL_PAGES`] each, DATA the rest. An interim
+/// bound, since nothing reclaims a pager's clean pages for another job
 /// (`issues/a-pager-holds-a-fixed-capacity-until-the-memory-service-reclaims-its-clean-pages.md`).
+const PAGES_SHARE: u64 = 8;
+
+/// What LOG and BOOT hold: 16 MiB of pages each.
+const SMALL_PAGES: u64 = (16 << 20) / toyos::paged::PAGE;
+
+/// The most pages a DATA pager holds dirty: 32 MiB.
+const DATA_DIRTY: u64 = 8 * 1024;
+
+/// The role's pager: how many pages its files hold, how many of them may be
+/// dirty and how many files it keeps. None for SYSTEM, whose files are
+/// immutable and are served from ROOT's memory.
 fn pager(role: Role) -> Option<toyos::paged::Pager> {
-    let (capacity, dirty) = match role {
+    let (capacity, dirty, objects) = match role {
         Role::System => return None,
-        Role::Data => (toyos::paged::PAGER_MAX_PAGES, 8 * 1024),
-        Role::Log => (2 * 1024, 512),
-        Role::Boot => (4 * 1024, 0),
+        Role::Data => {
+            let share = toyos::system::memory_total() / PAGES_SHARE / toyos::paged::PAGE;
+            let capacity = share.saturating_sub(2 * SMALL_PAGES).max(SMALL_PAGES);
+            (capacity, DATA_DIRTY.min(capacity / 2), 64 * 1024)
+        }
+        Role::Log => (SMALL_PAGES, 512, 1024),
+        Role::Boot => (SMALL_PAGES, 0, 1024),
     };
-    let pager = toyos::paged::Pager::create(capacity, dirty, REPORT)
+    let pager = toyos::paged::Pager::create(capacity, dirty, objects, REPORT)
         .unwrap_or_else(|e| panic!("fileserver: the {role:?} server makes no pager ({e:?}); its row is no pager row"));
     Some(pager)
 }
@@ -1108,12 +1123,16 @@ impl Server {
                     create_new: r.flags & O_CREATE_NEW != 0,
                     truncate: r.flags & O_TRUNCATE != 0,
                 };
-                // A file's object holds no page past a truncation by the time
-                // the volume frees its blocks.
-                if how.truncate && found.is_some() {
-                    self.files.truncating(self.volume.identity(&path)?)?;
-                }
                 let node = self.volume.open(&path, how)?;
+                // The volume truncated first, so a refused open changed
+                // nothing; the object follows before anything writes back.
+                if how.truncate && found.is_some() {
+                    let truncated = self.volume.identity(&path).and_then(|identity| self.files.truncated(identity));
+                    if let Err(e) = truncated {
+                        let _ = self.volume.close(node);
+                        return Err(e);
+                    }
+                }
                 match self.volume.node_meta(node) {
                     Ok(meta) => {
                         if how.create || how.truncate || how.create_new {
@@ -1146,7 +1165,8 @@ impl Server {
             // An open to read is answered with a holder of the file's
             // object, which reads without asking this server.
             if r.flags & O_READ != 0 {
-                holder = match self.files.object(identity).map(toyos::paged::PagedOwner::holder) {
+                let minted = self.files.pager().zip(self.files.object(identity)).map(|(pager, object)| pager.holder(object));
+                holder = match minted {
                     Some(Ok(handle)) => Some(handle),
                     Some(Err(e)) => {
                         println!("fileserver: file {identity}'s object made no holder ({e:?}); it is read through requests");

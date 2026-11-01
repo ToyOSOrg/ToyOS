@@ -8,14 +8,13 @@ opened: 2026-10-28
 
 **Since memory stage 7a** a file's pages are no longer in the block cache
 (`system/fileserver/src/cache.rs`), which keeps the volumes' structures: they
-are the file's paged object's, within the DATA pager's fixed capacity of
-24,576 pages, 96 MiB (`system/fileserver/src/pages.rs`). That is less than the
-eighth of physical memory #1099 gave the block cache on a machine of more than
-768 MiB, so the 64 MiB file below still fits, and a file between 96 MiB and
-that eighth falls off a cliff again. When the capacity is full, the eviction
-drops a file nobody holds, then another file's clean pages, then the read
-file's own outside the range asked for, so a file larger than the capacity is
-read off the disk whole on every pass.
+are the file's paged object's, within the DATA pager's capacity, which is
+what #1099 gave the block cache, most of an eighth of physical memory
+(`system/fileserver/src/main.rs`, `pager`). So the 64 MiB file below fits.
+When the capacity is full, the eviction drops a file nobody holds, then
+another file's clean pages, then the read file's own outside the range asked
+for, so a file larger than the capacity is read off the disk whole on every
+pass.
 
 Before 7a the block cache kept clean blocks up to the limit the server gave
 it, and evicted them in the order they arrived. A hit did not move a block.

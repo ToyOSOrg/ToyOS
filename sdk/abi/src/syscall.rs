@@ -3182,14 +3182,11 @@ mod tests {
 // Paged objects: memory a pager supplies, read by its holders through the kernel.
 // ---------------------------------------------------------------------------
 
-/// The most pages a pager's object table holds: 96 MiB.
-pub const PAGER_MAX_PAGES: u64 = 24 * 1024;
-
 /// The most pages one write-back range covers.
 pub const PAGED_RANGE_PAGES: u64 = 512;
 
-/// What an owner asks of its paged object through [`SYS_PAGED_OP`], each
-/// with a [`PagedArgs`].
+/// What a pager asks of one of its objects through [`SYS_PAGED_OP`], each
+/// with a [`PagedArgs`] naming the object by the id [`paged_create`] answered.
 #[repr(u64)]
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum PagedOp {
@@ -3223,6 +3220,12 @@ pub enum PagedOp {
     /// ([`PAGED_WRITTEN`]): `buf` receives a 64-byte bitmap of the pages
     /// still dirty, dirtied again since the begin or not written.
     WritebackEnd = 6,
+    /// Read `len` bytes at `offset` into `buf`, never waiting: `WouldBlock`
+    /// where the first page is absent, a short count where a later one is.
+    Read = 7,
+    /// Let the object go: its pages go, its holders answer `Gone`, and its id
+    /// names another object once its last holder has gone.
+    Release = 8,
 }
 
 /// [`PagedOp::Supply`]'s pages are dirty.
@@ -3232,9 +3235,11 @@ pub const PAGED_WRITTEN: u64 = 1;
 
 crate::user_safe! {
     /// [`SYS_PAGED_OP`]'s arguments: what each word means is its
-    /// [`PagedOp`]'s.
+    /// [`PagedOp`]'s. Every offset and length ends at or below the last page
+    /// a `u64` can end, or the call is refused `InvalidArgument`.
     #[derive(Clone, Copy, Default, Debug)]
     pub struct PagedArgs {
+        pub object: u64,
         pub offset: u64,
         pub len: u64,
         pub buf: u64,
@@ -3244,11 +3249,11 @@ crate::user_safe! {
 
 crate::user_safe! {
     /// One thing a pager's object asks of it ([`paged_notices`]): the
-    /// object by the cookie its owner made it with, and either pages a
-    /// reader waits for or that its last holder went.
+    /// object by its id, and either pages a reader waits for or that its last
+    /// holder went.
     #[derive(Clone, Copy, Default, Debug, PartialEq, Eq)]
     pub struct PagedNotice {
-        pub cookie: u64,
+        pub object: u64,
         pub kind: u64,
         /// [`NOTICE_REQUESTED`]'s first page and how many.
         pub first: u64,
@@ -3258,56 +3263,47 @@ crate::user_safe! {
 
 /// A reader waits for pages of the object.
 pub const NOTICE_REQUESTED: u64 = 1;
-/// The object's last holder handle went: it may be dropped.
+/// The object's last holder handle went: it may be released.
 pub const NOTICE_NO_HOLDERS: u64 = 2;
 
-/// Make this process's one pager object, whose objects' pages are at most
-/// `capacity` (≤ [`PAGER_MAX_PAGES`]), `dirty` of them dirty at once. A
-/// reader waiting past `report_ns` (bounded by the kernel) is reported
-/// overdue and waits on. Held back for it at once: `dirty` pages and the
-/// headroom a read's pages need. `PermissionDenied` for a process not
+/// Make this process's one pager, whose objects' pages are at most
+/// `capacity`, `dirty` of them dirty at once, and which serves at most
+/// `objects` objects. A reader waiting past `report_ns` (bounded by the
+/// kernel) is reported overdue and waits on. Committed at once, and charged
+/// with the pager: `dirty` pages and the headroom a read's pages need, and
+/// the index and object table, which a capacity the job cannot hold is
+/// refused for (`ResourceExhausted`). `PermissionDenied` for a process not
 /// started as a pager, `AlreadyExists` for a second.
-pub fn pager_create(capacity: u64, dirty: u64, report_ns: u64) -> Result<RawHandle, SyscallError> {
-    check(syscall(SYS_PAGER_CREATE, capacity, dirty, report_ns, 0)).map(|raw| RawHandle(raw as u32))
+pub fn pager_create(capacity: u64, dirty: u64, objects: u64, report_ns: u64) -> Result<RawHandle, SyscallError> {
+    check(syscall(SYS_PAGER_CREATE, capacity, dirty, objects, report_ns)).map(|raw| RawHandle(raw as u32))
 }
 
-/// A paged object of `size` bytes, its pages absent, which `pager`'s
-/// notices name by `cookie`: the owner handle, which neither duplicates nor
-/// transfers. Its last handle takes every page and answers its holders `Gone`.
-pub fn paged_create(pager: RawHandle, size: u64, cookie: u64) -> Result<RawHandle, SyscallError> {
-    check(syscall(SYS_PAGED_CREATE, pager.0 as u64, size, cookie, 0)).map(|raw| RawHandle(raw as u32))
+/// A paged object of `size` bytes, its pages absent: its id, which `pager`'s
+/// calls and notices name it by. `ResourceExhausted` where the pager serves
+/// as many objects as it was made for.
+pub fn paged_create(pager: RawHandle, size: u64) -> Result<u64, SyscallError> {
+    check(syscall(SYS_PAGED_CREATE, pager.0 as u64, size, 0, 0))
 }
 
-/// A holder handle on the object `owner` names, carrying `READ`, which may
+/// A holder handle on `pager`'s object `object`, carrying `READ`, which may
 /// be narrowed, duplicated and sent.
-pub fn paged_holder(owner: RawHandle) -> Result<RawHandle, SyscallError> {
-    check(syscall(SYS_PAGED_HOLDER, owner.0 as u64, 0, 0, 0)).map(|raw| RawHandle(raw as u32))
+pub fn paged_holder(pager: RawHandle, object: u64) -> Result<RawHandle, SyscallError> {
+    check(syscall(SYS_PAGED_HOLDER, pager.0 as u64, object, 0, 0)).map(|raw| RawHandle(raw as u32))
 }
 
-/// Read at most `out.len()` bytes at `offset`, up to the size; 0 at or past
-/// it. A holder waits for every absent page until its pager supplies or fails
-/// it, the object shrinks or the pager ends: `Io` for a failed page before any
-/// byte was read (a short count after some), `Gone` once the pager ended. A
-/// pager's process is refused a holder's read, `PermissionDenied`. The owner
-/// never waits: `WouldBlock` where the first page is absent, a short count
-/// where a later one is.
-pub fn paged_read(handle: RawHandle, out: &mut [u8], offset: u64) -> Result<usize, SyscallError> {
-    // SAFETY: `out` is `out.len()` writable bytes of this process.
-    unsafe { paged_read_into(handle, out.as_mut_ptr(), out.len(), offset) }
+/// A holder's read of at most `out.len()` bytes at `offset`, up to the size;
+/// 0 at or past it. It waits for every absent page until its pager supplies
+/// or fails it, the object shrinks or is released, or the pager ends: `Io`
+/// for a failed page before any byte was read (a short count after some),
+/// `Gone` once the object or the pager ended. A pager's process is refused,
+/// `PermissionDenied`; any handle but a holder, `NotSupported`.
+pub fn paged_read(holder: RawHandle, out: &mut [u8], offset: u64) -> Result<usize, SyscallError> {
+    check(syscall(SYS_PAGED_READ, holder.0 as u64, out.as_mut_ptr() as u64, out.len() as u64, offset)).map(|n| n as usize)
 }
 
-/// [`paged_read`] into `len` bytes at `out`, which may be memory another
-/// process writes and so is never a slice here.
-///
-/// # Safety
-/// `out` names `len` bytes this process may write.
-pub unsafe fn paged_read_into(handle: RawHandle, out: *mut u8, len: usize, offset: u64) -> Result<usize, SyscallError> {
-    check(syscall(SYS_PAGED_READ, handle.0 as u64, out as u64, len as u64, offset)).map(|n| n as usize)
-}
-
-/// One [`PagedOp`] on the object `owner` names.
-pub fn paged_op(owner: RawHandle, op: PagedOp, args: &PagedArgs) -> Result<u64, SyscallError> {
-    check(syscall(SYS_PAGED_OP, owner.0 as u64, op as u64, args as *const PagedArgs as u64, 0))
+/// One [`PagedOp`] on one of `pager`'s objects.
+pub fn paged_op(pager: RawHandle, op: PagedOp, args: &PagedArgs) -> Result<u64, SyscallError> {
+    check(syscall(SYS_PAGED_OP, pager.0 as u64, op as u64, args as *const PagedArgs as u64, 0))
 }
 
 /// What `pager`'s objects ask of it, into `out`: how many it filled. Each is

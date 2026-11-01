@@ -424,7 +424,16 @@ unsafe extern "C" fn toyos_fs_open(at: Fd, path: *const u8, len: usize, how: Ope
                 false => dir.open(base, rel, flags)?,
             };
             let position = Position::new(how.append, opened.stat.kind == fs::KIND_DIR);
-            let holder = opened.holder.map(crate::paged::Paged::received);
+            // What a reply carries is a holder only as the kernel answers for
+            // it; a pager's process reads through the server.
+            let holder = match opened.holder.map(crate::paged::Paged::received) {
+                None | Some(Err(crate::paged::NotAHolder::Pager)) => None,
+                Some(Ok(holder)) => Some(holder),
+                Some(Err(crate::paged::NotAHolder::Other)) => {
+                    dir.close(opened.fid);
+                    return Err(Refused::Error(fs::Error::Malformed));
+                }
+            };
             Ok(Ok(Opened::Held(Held::Served { cap: Arc::clone(cap), fid: opened.fid, position, holder })))
         },
     )

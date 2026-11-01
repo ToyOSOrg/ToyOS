@@ -43,7 +43,7 @@ fn main() {
     assert_eq!(dir.pwrite(writer.fid, (data.len() / 2) as u64, &data[data.len() / 2..]), Ok(data.len() - data.len() / 2));
 
     let reader = dir.open(Base::Root, NAME, O_READ).expect("open to read");
-    let holder = Paged::received(reader.holder.expect("an open to read carries a holder"));
+    let holder = Paged::received(reader.holder.expect("an open to read carries a holder")).expect("a holder");
     assert_eq!(read(&holder, 0, data.len() + 4096), data, "every byte, and none past the size");
     assert_eq!(read(&holder, 4090, 20), data[4090..4110], "across a page");
     assert_eq!(read(&holder, data.len() as u64, 10), b"", "nothing at the size");
@@ -59,7 +59,7 @@ fn main() {
     drop(holder);
     dir.close(writer.fid);
     let again = dir.open(Base::Root, NAME, O_READ).expect("open again");
-    let holder = Paged::received(again.holder.expect("a holder again"));
+    let holder = Paged::received(again.holder.expect("a holder again")).expect("a holder");
     let want = [&data[..3], b"XYZ", &data[6..100]].concat();
     assert_eq!(read(&holder, 0, 4096), want, "the same bytes after the last close");
     dir.close(again.fid);
@@ -83,7 +83,7 @@ fn main() {
     println!("a_served_file_reads_through_its_paged_object: std reads the same");
 
     assert_eq!(
-        Pager::create(1, 0, std::time::Duration::from_secs(1)).err(),
+        Pager::create(1, 0, 1, std::time::Duration::from_secs(1)).err(),
         Some(toyos_abi::syscall::SyscallError::PermissionDenied),
         "a process started as no pager made one"
     );
