@@ -67,7 +67,8 @@ fn main() {
     let held = account();
     // SAFETY: the mapping is this test's, and nothing reads it after.
     unsafe { syscall::vm_release(at, PAGES * PAGE_SIZE) }.expect("unmap the region");
-    syscall::close(shm);
+    // SAFETY: this test's own handle, used no more.
+    unsafe { syscall::close(shm) };
     assert_eq!(held - account(), (PAGES * PAGE_SIZE) as u64, "the region's pages went back with it");
     println!("  PASS: the region's pages leave the account with it");
     println!("shm_commit: committed pages are memory, and only they");
@@ -84,8 +85,11 @@ fn output_is_refused(at: *mut u8) {
     let mut out = [0u8; 4];
     assert_eq!(syscall::read(ends.read, &mut out), Ok(4), "the refused read took nothing");
     assert_eq!(&out, b"held");
-    syscall::close(ends.read);
-    syscall::close(ends.write);
+    // SAFETY: this test's own pipe, used no more.
+    unsafe {
+        syscall::close(ends.read);
+        syscall::close(ends.write);
+    }
     println!("  PASS: a syscall's output into a page not committed is BadAddress, and nothing is lost");
 }
 
@@ -113,10 +117,12 @@ fn a_spawn_from_nothing_committed_is_refused() {
             image: image.0 as u64,
             image_len: (2 * PAGE_SIZE) as u64,
             place: u64::from(toyos_abi::HANDLE_INVALID.0),
+            pager: u64::from(toyos_abi::HANDLE_INVALID.0),
         })
     };
     assert!(spawned.is_err(), "an image of nothing committed was spawned");
-    syscall::close(image);
+    // SAFETY: this test's own handle, used no more.
+    unsafe { syscall::close(image) };
     println!("  PASS: a spawn from a region nothing committed is refused: {spawned:?}");
 }
 

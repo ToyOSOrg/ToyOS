@@ -260,8 +260,8 @@ const RUST_SKIP: &[&str] = &[
     // A connect whose region nothing committed, to real netstack, which goes
     // on serving: `netstack_holders_exported_to_children`'s boot runs it.
     "stream_region_refused",
-    // A loopback stream's bytes through its rings' growth, which needs the
-    // real netstack: `netstack_holders_exported_to_children`'s boot runs it.
+    // A stream's bytes through its rings' growth, the harness its peer:
+    // `netstack_holders_exported_to_children`'s boot runs it.
     "stream_grows",
     // A stream's holders across processes, as their own netstack: it spawns a
     // child that faults, which a shared boot's other members must not watch,
@@ -5795,7 +5795,7 @@ const SOCKET_EXPORT_PORT: u16 = 7070;
 /// child's line, then its parent's, then the FIN once both holders are gone;
 /// then a listener's and a datagram socket's child's datagram, its accept and
 /// its line, and the parent's after it; then a connect whose region nothing
-/// committed, and a loopback stream through its rings' growth. Once over
+/// committed, and a stream to the harness through its rings' growth. Once over
 /// virtio, and once over QEMU's `e1000e`, which the image's rows name no
 /// machine for: the I219 driver's row matches it, and its link is the one
 /// netstack opens.
@@ -5837,13 +5837,11 @@ fn holders_exported_over(profile: qemu::Profile, driver: &str) -> Result<(), Str
     }
     stream_exported_to_a_child(&mut qemu)?;
     sockets_exported_to_a_child(&mut qemu, forwarded)?;
-    for job in ["test_rs_stream_region_refused", "test_rs_stream_grows"] {
-        let result = qemu.run_test(job, Duration::from_secs(120));
-        if result.error.is_some() || result.exit_code != Some(0) {
-            return Err(format!("{driver}: {job}: {:?}, ended {:?}; the job said:\n{}", result.error, result.exit_code, result.stdout));
-        }
+    let result = qemu.run_test("test_rs_stream_region_refused", Duration::from_secs(60));
+    if result.error.is_some() || result.exit_code != Some(0) {
+        return Err(format!("{driver}: {:?}, ended {:?}; the job said:\n{}", result.error, result.exit_code, result.stdout));
     }
-    Ok(())
+    stream_grows_with_the_harness(&mut qemu, forwarded)
 }
 
 /// `test_rs_stream_export`: the child's line, then the parent's, then the FIN
@@ -5952,6 +5950,56 @@ fn sockets_exported_to_a_child(qemu: &mut QemuInstance, forwarded: u16) -> Resul
         }
     }
     heard.join().map_err(|_| "the peer's thread panicked".to_string())?
+}
+
+/// What `test_rs_stream_grows` and the harness each send.
+const STREAM_GROWS_BYTES: usize = 4 << 20;
+
+/// The byte at stream position `at` of either way: `stream_grows.rs`'s `byte`.
+fn stream_grows_byte(at: usize) -> u8 {
+    ((at as u64).wrapping_mul(0x9E37_79B9_7F4A_7C15) >> 56) as u8
+}
+
+/// `test_rs_stream_grows`, the harness its peer through the forwarded port:
+/// once the job's datagram says it listens, the harness connects, sends
+/// [`STREAM_GROWS_BYTES`] and its FIN, and reads as many back, each in place.
+fn stream_grows_with_the_harness(qemu: &mut QemuInstance, forwarded: u16) -> Result<(), String> {
+    use std::io::{Read, Write};
+    /// A liveness ceiling on each of the peer's waits, never a timing.
+    const CEILING: Duration = Duration::from_secs(120);
+    let datagrams = std::net::UdpSocket::bind("127.0.0.1:0").map_err(|e| format!("no loopback datagram socket: {e}"))?;
+    datagrams.set_read_timeout(Some(CEILING)).map_err(|e| e.to_string())?;
+    let port = datagrams.local_addr().map_err(|e| format!("the datagram socket's port: {e}"))?.port();
+    let peer = std::thread::spawn(move || -> Result<(), String> {
+        let mut ready = [0u8; 64];
+        let (n, _) = datagrams.recv_from(&mut ready).map_err(|e| format!("the job's ready datagram: {e}"))?;
+        if &ready[..n] != b"grows ready" {
+            return Err(format!("the peer heard {:?}", String::from_utf8_lossy(&ready[..n])));
+        }
+        let conn = std::net::TcpStream::connect(("127.0.0.1", forwarded)).map_err(|e| format!("the connect: {e}"))?;
+        conn.set_read_timeout(Some(CEILING)).map_err(|e| e.to_string())?;
+        let mut sending = conn.try_clone().map_err(|e| format!("a second handle to the connection: {e}"))?;
+        let sent = std::thread::spawn(move || -> Result<(), String> {
+            let all: Vec<u8> = (0..STREAM_GROWS_BYTES).map(stream_grows_byte).collect();
+            sending.write_all(&all).map_err(|e| format!("the peer's send: {e}"))?;
+            sending.shutdown(std::net::Shutdown::Write).map_err(|e| format!("the peer's FIN: {e}"))
+        });
+        let mut got = Vec::with_capacity(STREAM_GROWS_BYTES);
+        (&conn).read_to_end(&mut got).map_err(|e| format!("the job's bytes, until its FIN: {e} after {}", got.len()))?;
+        sent.join().map_err(|_| "the peer's sender panicked".to_string())??;
+        if got.len() != STREAM_GROWS_BYTES {
+            return Err(format!("the job sent {} bytes, not {STREAM_GROWS_BYTES}", got.len()));
+        }
+        match got.iter().enumerate().find(|&(at, &b)| b != stream_grows_byte(at)) {
+            Some((at, &b)) => Err(format!("the job's byte at {at} is {b:#04x}, not {:#04x}", stream_grows_byte(at))),
+            None => Ok(()),
+        }
+    });
+    let result = qemu.run_test(&format!("test_rs_stream_grows {port}"), Duration::from_secs(300));
+    if result.error.is_some() || result.exit_code != Some(0) {
+        return Err(format!("{:?}, ended {:?}; {}\nthe job said:\n{}", result.error, result.exit_code, peer_verdict(peer), result.stdout));
+    }
+    peer.join().map_err(|_| "the peer's thread panicked".to_string())?
 }
 
 /// What the peer's thread had come to when its job failed: a guest that waits
