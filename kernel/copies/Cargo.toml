@@ -1,0 +1,11 @@
+[package]
+name = "kernel-copies"
+description = "A host test of the kernel's x86-64 memcpy: its descending copy and every rule it copies by, against copy_within."
+version = "0.1.0"
+edition = "2021"
+license = "MIT OR Apache-2.0"
+publish = false
+
+# A package of its own because the kernel is a freestanding binary: this
+# compiles only `kernel/src/arch/x86_64/copy.rs`, as `toyos-libc-copies`
+# compiles libc's.
