@@ -19,14 +19,15 @@ pub static ROSTER: Roster = Roster::new();
 /// the boot CPU runs alone and before its own per-CPU block exists: once, and
 /// never freed, so no fatal path allocates.
 ///
-/// Bounded by the trace diary's record, which names its CPU in 16 bits
-/// (`toyos_abi::trace::TraceRecord::cpu`): a machine past it is refused by
-/// name. The MADT's own length bounds what firmware can ask for below that.
+/// Bounded by a thread's CPU mask, which names
+/// [`kernel::sched::affinity::MAX_CPUS`]: a machine past it is refused by
+/// name.
 pub fn size(capacity: usize) {
     assert!(capacity > 0, "smp: the MADT enables no processor, the boot CPU's own among them");
     assert!(
-        capacity <= usize::from(u16::MAX) + 1,
-        "smp: the MADT enables {capacity} processors and a diary record names a CPU in 16 bits"
+        capacity <= kernel::sched::affinity::MAX_CPUS,
+        "smp: the MADT enables {capacity} processors and a CPU mask names {}",
+        kernel::sched::affinity::MAX_CPUS,
     );
     ROSTER.size(capacity);
     crate::cpu_local::size(capacity);
