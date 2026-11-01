@@ -21,7 +21,8 @@
 //! waits on the lock, whose spin answers the shootdown, and finds it gone.
 
 use alloc::sync::Arc;
-use core::sync::atomic::{AtomicU64, Ordering::Relaxed};
+use core::ops::{Deref, DerefMut};
+use core::sync::atomic::{AtomicU32, AtomicU64, Ordering::Relaxed};
 
 use kernel::vm::{self, Access, Entry, Kind, Prot};
 use toyos_abi::syscall::SyscallError;
@@ -151,6 +152,45 @@ impl Usage {
 pub struct Space {
     inner: Lock<AddressSpace>,
     usage: Arc<Usage>,
+    /// The CPU that holds `inner`, as [`this_cpu`] names it, or [`NOBODY`]:
+    /// written only by that CPU under the lock, which pins it to that CPU.
+    holder: AtomicU32,
+}
+
+const NOBODY: u32 = 0;
+
+/// This CPU, as [`Space::holder`] records it; the boot CPU before its
+/// per-CPU block exists, when it is the only one.
+fn this_cpu() -> u32 {
+    match crate::log::PERCPU_READY.load(Relaxed) {
+        true => crate::arch::percpu::cpu_id() + 1,
+        false => u32::MAX,
+    }
+}
+
+/// A space's lock, held: [`Space::held_here`] answers true until it drops.
+pub struct SpaceGuard<'a> {
+    guard: LockGuard<'a, AddressSpace>,
+    holder: &'a AtomicU32,
+}
+
+impl Deref for SpaceGuard<'_> {
+    type Target = AddressSpace;
+    fn deref(&self) -> &AddressSpace {
+        &self.guard
+    }
+}
+
+impl DerefMut for SpaceGuard<'_> {
+    fn deref_mut(&mut self) -> &mut AddressSpace {
+        &mut self.guard
+    }
+}
+
+impl Drop for SpaceGuard<'_> {
+    fn drop(&mut self) {
+        self.holder.store(NOBODY, Relaxed);
+    }
 }
 
 /// How every thread of a process, and the scheduler, names its space.
@@ -170,17 +210,28 @@ impl Space {
             ranges: Charge::none(job),
             job: Arc::clone(job),
         };
-        Some(Arc::new(Self { inner: Lock::new(space), usage }))
+        Some(Arc::new(Self { inner: Lock::new(space), usage, holder: AtomicU32::new(NOBODY) }))
     }
 
     #[track_caller]
-    pub fn lock(&self) -> LockGuard<'_, AddressSpace> {
-        self.inner.lock()
+    pub fn lock(&self) -> SpaceGuard<'_> {
+        self.held(self.inner.lock())
     }
 
     #[track_caller]
-    pub fn try_lock(&self) -> Option<LockGuard<'_, AddressSpace>> {
-        self.inner.try_lock()
+    pub fn try_lock(&self) -> Option<SpaceGuard<'_>> {
+        self.inner.try_lock().map(|guard| self.held(guard))
+    }
+
+    fn held<'a>(&'a self, guard: LockGuard<'a, AddressSpace>) -> SpaceGuard<'a> {
+        self.holder.store(this_cpu(), Relaxed);
+        SpaceGuard { guard, holder: &self.holder }
+    }
+
+    /// Whether this CPU holds the space's lock: the one lock a user copy's
+    /// fault-in takes, so a copy made under it would wait on itself.
+    pub fn held_here(&self) -> bool {
+        self.holder.load(Relaxed) == this_cpu()
     }
 
     pub fn usage(&self) -> &Usage {
@@ -209,7 +260,7 @@ pub(super) fn init_kernel() {
         job: Arc::clone(charge::boot()),
     };
     // Leaked: it outlives every task, and its tables are the kernel's.
-    let space: &'static PageTables = alloc::boxed::Box::leak(alloc::boxed::Box::new(Arc::new(Space { inner: Lock::new(space), usage })));
+    let space: &'static PageTables = alloc::boxed::Box::leak(alloc::boxed::Box::new(Arc::new(Space { inner: Lock::new(space), usage, holder: AtomicU32::new(NOBODY) })));
     KERNEL.store(core::ptr::from_ref(space).cast_mut(), core::sync::atomic::Ordering::Release);
 }
 
