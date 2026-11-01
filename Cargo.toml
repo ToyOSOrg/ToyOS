@@ -25,6 +25,7 @@ members = [
     "build/root",
     "kernel",
     "kernel/amdvi",
+    "kernel/copies",
     "kernel/dma",
     "kernel/gicv3",
     "kernel/its",

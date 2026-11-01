@@ -6,7 +6,9 @@ opened: 2026-09-29
 
 # Kernel forward copies and fills are one `rep movsb` or `rep stosb` on every CPU
 
-The kernel's `memcpy`, `memset` and `memmove` are `compiler_builtins`', which
+The kernel's `memcpy` is its own (`kernel/src/arch/x86_64/copy.rs`): one
+`rep movsb` on every CPU, but for a copy it sends highest first. Its `memset`
+and `memmove` are `compiler_builtins`', which
 frame `rep movsq` or `rep stosq` with two byte strings, and take one `rep movsb`
 or `rep stosb` only when built with the `ermsb` target feature
 (`rust/library/compiler-builtins/compiler-builtins/src/mem/x86_64.rs:15-17,23-58,88-126`);
@@ -23,8 +25,8 @@ refused. Zen 2 lacks ERMS (a Ryzen 9 PRO 3900, family 0x17, reads EBX
 machine is family 0x17.
 
 **Exit**: a gate over `kernel.elf`, on the decoder of
-`issues/no-gate-decodes-kernel-elfs-instructions.md`, finds `memcpy`,
-`memset` and `memmove`'s forward branch each one `rep movsb` or `rep stosb`,
+`issues/no-gate-decodes-kernel-elfs-instructions.md`, finds `memset`
+and `memmove`'s forward branch each one `rep movsb` or `rep stosb`,
 with no `rep movsq` or `rep stosq`; the T14's pipe figures; and Zen 2's cost
 recorded, as a family-0x17 figure against the build without `ermsb` or as a
 `tooling` issue that owes it. **Mutation**: the build without `ermsb` reds the
