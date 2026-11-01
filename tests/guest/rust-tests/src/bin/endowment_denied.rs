@@ -181,7 +181,7 @@ fn only_what_was_given() {
 
     let narrow = namespace::build().add(OPEN, &open).finish().expect("the narrow namespace");
     assert_eq!(
-        probe_with(narrow.into_raw()),
+        probe_with(narrow),
         format!("{OPEN}=ok {PRIVILEGED}=NotFound"),
         "a child endowed one name reached the other",
     );
@@ -192,7 +192,7 @@ fn only_what_was_given() {
         .finish()
         .expect("the wide namespace");
     assert_eq!(
-        probe_with(wide.into_raw()),
+        probe_with(wide),
         format!("{OPEN}=ok {PRIVILEGED}=ok"),
         "a child endowed both names could not reach one of them",
     );
@@ -214,14 +214,14 @@ fn the_base_plus_one_more_name() {
         .add(PRIVILEGED, &privileged)
         .finish()
         .expect("the base's one name listed, plus one more");
-    let by_name = probe_with(listed.into_raw());
+    let by_name = probe_with(listed);
     let merged = namespace::build()
         .keep_all(&base)
         .add(PRIVILEGED, &privileged)
         .finish()
         .expect("the whole base, plus one more name");
     assert_eq!(
-        probe_with(merged.into_raw()),
+        probe_with(merged),
         by_name,
         "keep_all and a keep list over the same base reached different children",
     );
@@ -232,7 +232,7 @@ fn the_base_plus_one_more_name() {
     );
 
     let undefined = NamespaceBuild {
-        base: base.as_handle(),
+        base: base.as_handle().raw(),
         flags: NAMESPACE_KEEP_ALL | UNDEFINED_FLAG,
         keep_ptr: 0,
         keep_n: 0,
@@ -253,14 +253,15 @@ fn the_base_plus_one_more_name() {
     let defined = NamespaceBuild { flags: NAMESPACE_KEEP_ALL, ..undefined };
     // SAFETY: as above.
     let built = unsafe { syscall::namespace_build(&defined) }.expect("the request without the bit");
-    syscall::close(built);
+    // SAFETY: no type holds this number.
+    unsafe { syscall::close(built) };
     println!("  keep_all: the whole base carried over, and an undefined flags bit was refused");
 }
 
-fn probe_with(ns: RawHandle) -> String {
+fn probe_with(ns: namespace::Namespace) -> String {
     let mut child = Command::new(SELF_PATH)
         .arg("probe")
-        .endow(SVC_LABEL, ns.0)
+        .endow(SVC_LABEL, ns.into())
         .stdout(Stdio::piped())
         .spawn()
         .expect("spawn the probe");
@@ -280,14 +281,14 @@ fn a_right_the_capability_lacks_is_a_word() {
     let cap = cap();
 
     assert_eq!(
-        syscall::rt_enter(cap.as_handle()),
+        syscall::rt_enter(cap.as_handle().raw()),
         Err(SyscallError::PermissionDenied),
         "a capability without RT entered the real-time band",
     );
 
     let toothless = cap.narrowed(Rights::DUP).expect("a capability carrying less");
     assert_eq!(
-        syscall::device_claim(toothless.as_handle(), DeviceRequest::Class(DeviceType::Framebuffer)).err(),
+        syscall::device_claim(toothless.as_handle().raw(), DeviceRequest::Class(DeviceType::Framebuffer)).err(),
         Some(SyscallError::PermissionDenied),
         "a capability without DEVICE minted a claim",
     );
@@ -339,14 +340,15 @@ fn a_right_the_capability_lacks_is_a_word() {
     // the assertion says only that it is not the refusal. A claim is released
     // as soon as it is taken, because a claim moves and the boot runs other
     // binaries that need this one.
-    let with_the_bit = syscall::device_claim(cap.as_handle(), DeviceRequest::Class(DeviceType::Framebuffer));
+    let with_the_bit = syscall::device_claim(cap.as_handle().raw(), DeviceRequest::Class(DeviceType::Framebuffer));
     assert_ne!(
         with_the_bit.err(),
         Some(SyscallError::PermissionDenied),
         "the estate's capability does not carry DEVICE either, so the refusal above proved nothing",
     );
     if let Ok(claim) = with_the_bit {
-        syscall::close(claim);
+        // SAFETY: no type holds this number.
+        unsafe { syscall::close(claim) };
     }
     println!("  capability: refused for the bit it lacks and for having none, allowed for the bit it has");
     println!("  power: a capability without POWER, and a pipe, were both refused the machine");
@@ -595,5 +597,5 @@ fn not_a_handle(role: &str) -> ! {
 
 /// The kernel handle this process's standard output is, descriptor 1's.
 fn stdout() -> RawHandle {
-    toyos::fd::with(1, |o| o.handle).expect("the test is given a standard output")
+    toyos::fd::with(1, |o| o.handle().map(toyos::BorrowedHandle::raw)).ok().flatten().expect("the test is given a standard output")
 }

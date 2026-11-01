@@ -4,13 +4,14 @@
 //! else holds it. A read takes the reason asked, one byte
 //! (`toyos_abi::quit::Reason::to_byte`), and blocks while none is; a read or
 //! an armed readable watch makes the process a listener, which a quit asks
-//! rather than kills (`kernel::proclife::quit`).
+//! rather than kills (`toyos_proclife::quit`).
 
 use alloc::sync::Arc;
 
-use kernel::proclife::quit::{Notice, Reason};
+use toyos_proclife::quit::{Notice, Reason};
 use toyos_abi::handle::Rights;
 
+use crate::mm::charge::{self, Exhausted};
 use crate::sync::Lock;
 use crate::watch::Watch;
 
@@ -30,8 +31,9 @@ impl NoticeObject {
     /// `TRANSFER`: a notice is its process's alone.
     pub const RIGHTS: Rights = Rights::READ.union(Rights::WAIT);
 
-    pub fn new() -> Arc<Self> {
-        Arc::new(Self { core: Self::new_core(), state: Lock::new(Notice::new()), watch: Arc::new(Watch::new()) })
+    pub fn new() -> Result<Arc<Self>, Exhausted> {
+        let core = Self::new_core(charge::arc::<Watch>())?;
+        Ok(Arc::new(Self { core, state: Lock::new(Notice::new()), watch: Arc::new(Watch::new()) }))
     }
 
     /// The notice's state, for a decision about it; `f` takes no other lock.

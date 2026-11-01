@@ -7,6 +7,7 @@ use toyos_abi::syscall::SyscallError;
 pub(crate) const EPERM: i32 = 1;
 pub(crate) const ENOENT: i32 = 2;
 pub(crate) const ESRCH: i32 = 3;
+pub(crate) const EINTR: i32 = 4;
 pub(crate) const EIO: i32 = 5;
 pub(crate) const E2BIG: i32 = 7;
 pub(crate) const ENOEXEC: i32 = 8;
@@ -43,13 +44,14 @@ pub(crate) const ENOPROTOOPT: i32 = 92;
 pub(crate) const EOPNOTSUPP: i32 = 95;
 pub(crate) const EAFNOSUPPORT: i32 = 97;
 pub(crate) const EADDRINUSE: i32 = 98;
-pub(crate) const EPROTO: i32 = 71;
 pub(crate) const ECONNABORTED: i32 = 103;
 pub(crate) const ECONNRESET: i32 = 104;
+pub(crate) const EISCONN: i32 = 106;
 pub(crate) const ENOTCONN: i32 = 107;
 pub(crate) const ETIMEDOUT: i32 = 110;
 pub(crate) const ECONNREFUSED: i32 = 111;
 pub(crate) const EHOSTUNREACH: i32 = 113;
+pub(crate) const EADDRNOTAVAIL: i32 = 99;
 pub(crate) const ESTALE: i32 = 116;
 
 /// The errno a kernel refusal is answered with.
@@ -66,8 +68,6 @@ pub(crate) fn of(e: SyscallError) -> i32 {
         // The kernel's word for a full handle table and for no memory alike.
         SyscallError::ResourceExhausted => ENOMEM,
         SyscallError::NotSupported => EOPNOTSUPP,
-        // A read of a connection met handles no frame announced: the peer broke its protocol.
-        SyscallError::HandlesPending => EPROTO,
         _ => EINVAL,
     }
 }
@@ -94,6 +94,24 @@ pub(crate) fn of_files(e: toyos::files::Error) -> i32 {
         Error::NotUtf8 => EILSEQ,
         Error::Loop => ELOOP,
         Error::CrossesServers => EXDEV,
+        Error::NotADirectory => ENOTDIR,
+        Error::Stream(refused) => of_stream(refused),
+    }
+}
+
+/// A stream's refusal in POSIX's word: `send`'s, `recv`'s, and `read`'s and
+/// `write`'s of a stream's descriptor.
+pub(crate) fn of_stream(refused: toyos::net::stream::Refused) -> i32 {
+    use toyos::net::stream::Refused;
+    match refused {
+        Refused::NotThisProcess(_) => EBADF,
+        Refused::WouldBlock => EAGAIN,
+        Refused::TimedOut | Refused::ConnectionTimedOut => ETIMEDOUT,
+        Refused::Reset => ECONNRESET,
+        Refused::Unreachable => EHOSTUNREACH,
+        Refused::AddressGone => EADDRNOTAVAIL,
+        Refused::Aborted => ECONNABORTED,
+        Refused::Shut => EPIPE,
     }
 }
 

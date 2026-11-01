@@ -58,7 +58,7 @@ rest were not put to him.
 | Diary | `issues/the-diary-computes-no-lateness-and-records-no-slow-system-call.md` |
 | Counters, sizes | this file |
 | Profile | behind the diary's judgement; `issues/a-frozen-toyos-waits-for-a-hand-on-the-power-button.md` |
-| Accounting | `issues/nothing-charges-kernel-memory-to-a-process.md`, `issues/a-processs-memory-is-a-byte-total-that-reads-zero-under-contention.md`, `issues/blocked-time-is-invisible-while-the-park-lasts.md` |
+| Accounting | `issues/a-processs-memory-is-a-byte-total-that-reads-zero-under-contention.md`, `issues/blocked-time-is-invisible-while-the-park-lasts.md` |
 | Inspect | `issues/the-kernel-keeps-nothing-it-enumerates.md` |
 | Post-mortem | step 1 of `issues/logging-records-from-every-producer-and-a-kernel-that-waits-on-nobody.md` |
 | Symbols | `issues/the-kernel-still-parses-what-userland-writes.md` Move 3 |

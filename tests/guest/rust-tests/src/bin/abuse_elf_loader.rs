@@ -45,9 +45,9 @@ const BIG: usize = 3 * 1024 * 1024;
 
 /// Kernel constants this test aims at, by value.
 ///
-/// `USER_VM_BASE` (`kernel/src/loader.rs`) is where every exe image is
-/// rebased to; `ALLOC_FLOOR` (`kernel/src/vma.rs`) is the bottom of the arena
-/// `find_gap` serves every library, TLS block and mmap out of; `KERNEL_HALF`
+/// `USER_VM_BASE` was where every exe image was rebased to and `ALLOC_FLOOR`
+/// the bottom of the arena every library, TLS block and mmap came out of;
+/// both are now addresses the space's placement may hand out. `KERNEL_HALF`
 /// is where the direct map starts.  A segment vaddr is only interesting here
 /// relative to one of the three.
 const USER_VM_BASE: u64 = 0x100_0000_0000;
@@ -257,6 +257,7 @@ fn spawn_argv(path: &str, argv: &str) -> Result<RawHandle, SyscallError> {
             image: 0,
             image_len: 0,
             place: u64::from(toyos_abi::HANDLE_INVALID.0),
+            pager: u64::from(toyos_abi::HANDLE_INVALID.0),
         })
     }
 }
@@ -281,9 +282,7 @@ fn refused(name: &str, outcome: Result<RawHandle, SyscallError>) {
 /// server's volume reads a program into one.
 fn image_object(bytes: &[u8]) -> toyos::shm::SharedMemory {
     let object = toyos::shm::SharedMemory::create(bytes.len().max(1)).expect("a memory object for the image");
-    // SAFETY: the region is at least `bytes.len()` long, mapped here, and this
-    // process's alone; `bytes` is not in it.
-    unsafe { core::ptr::copy_nonoverlapping(bytes.as_ptr(), object.as_ptr(), bytes.len()) };
+    object.bytes().write(0, bytes);
     object
 }
 
@@ -306,9 +305,10 @@ fn spawn_image(path: &str, bytes: &[u8]) -> Result<RawHandle, SyscallError> {
             labels_len: 0,
             cwd_ptr: CWD.as_ptr() as u64,
             cwd_len: CWD.len() as u64,
-            image: toyos::AsHandle::as_handle(&object).0 as u64,
+            image: toyos::AsHandle::as_handle(&object).raw().0 as u64,
             image_len: bytes.len() as u64,
             place: u64::from(toyos_abi::HANDLE_INVALID.0),
+            pager: u64::from(toyos_abi::HANDLE_INVALID.0),
         })
     }
 }

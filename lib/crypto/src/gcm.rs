@@ -1,7 +1,8 @@
 //! SP 800-38D GCM, restricted to the 96-bit nonces TLS uses. GHASH is a fixed
 //! 128-step portable multiply or a CLMUL path, without data-indexed tables.
-//! Content does not affect addresses or branches. Authentication precedes
-//! plaintext release.
+//! Content does not affect addresses or branches. Opening decrypts as it
+//! authenticates, so a refusal zeroes the buffer: no unauthenticated
+//! plaintext leaves.
 
 use crate::{Error, aes::Aes, secret::Secret};
 
@@ -20,7 +21,7 @@ pub(crate) struct Gcm {
     aes: Aes,
     h: Secret<16>,
     /// H's powers for the aggregated instruction path, when it is admitted.
-    powers: Secret<16, u128>,
+    powers: Secret<48, u128>,
     aggregated: bool,
 }
 impl Gcm {
@@ -30,7 +31,7 @@ impl Gcm {
         Self {
             aes: Aes::storage(key_len),
             h: Secret([0; 16]),
-            powers: Secret([0; 16]),
+            powers: Secret([0; 48]),
             aggregated: false,
         }
     }
@@ -50,7 +51,7 @@ impl Gcm {
     fn new(aes: Aes) -> Self {
         let mut h = Secret([0; 16]);
         aes.encrypt(&mut h.0);
-        let mut powers = Secret([0; 16]);
+        let mut powers = Secret([0; 48]);
         let aggregated = crate::arch::ghash_powers(&h.0, &mut powers.0);
         Self { aes, h, powers, aggregated }
     }
@@ -144,25 +145,37 @@ impl Gcm {
         data: &mut [u8],
     ) -> Result<[u8; 16], Error> {
         Self::check(aad.len(), data.len())?;
-        if self.aggregated {
-            let keys = &self.aes.keys.0;
-            if let Some(tag) = crate::arch::gcm_short(keys, self.aes.rounds, &self.powers.0, nonce, aad, data, None) {
-                return Ok(tag);
-            }
-        }
-        if !self.aggregated || data.len() < 128 {
+        if !self.aggregated {
             self.xor(nonce, 2, data);
             return Ok(self.tag(nonce, self.digest(aad, data)).0);
         }
+        let keys = &self.aes.keys.0;
+        if let Some(tag) = crate::arch::gcm_short(keys, self.aes.rounds, &self.powers.0, nonce, aad, data, None) {
+            return Ok(tag);
+        }
+        Ok(self.tag(nonce, self.crypt(nonce, aad, data, false)).0)
+    }
+    /// CTR from counter 2 and GHASH over the AAD, the ciphertext and the
+    /// lengths, stitched where an instruction path admits it: the
+    /// ciphertext it writes when sealing, the ciphertext it reads when
+    /// `open`.
+    fn crypt(&self, nonce: &[u8; 12], aad: &[u8], data: &mut [u8], open: bool) -> Secret<16> {
         let mut state = Secret([0u8; 16]);
         self.hash(&mut state.0, aad);
-        let done = crate::arch::gcm_seal(&self.aes.keys.0, self.aes.rounds, &self.powers.0, nonce, &mut state.0, data);
+        let keys = &self.aes.keys.0;
+        let done = crate::arch::gcm_crypt(keys, self.aes.rounds, &self.powers.0, nonce, &mut state.0, data, open);
         let rest = &mut data[done..];
         // GCM bounded the length, so the block count fits the counter.
-        self.xor(nonce, (done / 16) as u32 + 2, rest);
-        self.hash(&mut state.0, rest);
+        let first = (done / 16) as u32 + 2;
+        if open {
+            self.hash(&mut state.0, rest);
+            self.xor(nonce, first, rest);
+        } else {
+            self.xor(nonce, first, rest);
+            self.hash(&mut state.0, rest);
+        }
         self.hash_blocks(&mut state.0, &[Self::lengths(aad.len(), data.len())]);
-        Ok(self.tag(nonce, state).0)
+        state
     }
     pub(crate) fn open(
         &self,
@@ -172,24 +185,32 @@ impl Gcm {
         tag: &[u8],
     ) -> Result<(), Error> {
         Self::check(aad.len(), data.len())?;
-        if self.aggregated {
+        let authentic = if !self.aggregated {
+            let authentic = crate::ct::equal(&self.tag(nonce, self.digest(aad, data)).0, tag);
+            if authentic {
+                self.xor(nonce, 2, data);
+            }
+            authentic
+        } else {
             let mut stream = Secret([[0u8; 16]; 14]);
             let keys = &self.aes.keys.0;
-            if let Some(expected) =
-                crate::arch::gcm_short(keys, self.aes.rounds, &self.powers.0, nonce, aad, data, Some(&mut stream.0))
-            {
-                if !crate::ct::equal(&Secret(expected).0, tag) {
-                    return Err(Error::Authentication);
+            match crate::arch::gcm_short(keys, self.aes.rounds, &self.powers.0, nonce, aad, data, Some(&mut stream.0)) {
+                Some(expected) => {
+                    let authentic = crate::ct::equal(&Secret(expected).0, tag);
+                    if authentic {
+                        crate::block::xor(data, stream.0.as_flattened());
+                    }
+                    authentic
                 }
-                crate::block::xor(data, stream.0.as_flattened());
-                return Ok(());
+                None => crate::ct::equal(&self.tag(nonce, self.crypt(nonce, aad, data, true)).0, tag),
             }
-        }
-        let expected = self.tag(nonce, self.digest(aad, data));
-        if !crate::ct::equal(&expected.0, tag) {
+        };
+        if !authentic {
+            // The buffer may hold unauthenticated plaintext. `wipe`, not a
+            // fill: on ToyOS a fill is a `memset` call.
+            crate::secret::wipe(data);
             return Err(Error::Authentication);
         }
-        self.xor(nonce, 2, data);
         Ok(())
     }
 }
@@ -207,26 +228,30 @@ mod tests {
         let gcm = Gcm::aes128(&[7; 16]);
         std::println!("GHASH aggregated: {}", gcm.aggregated);
         let h = u128::from_be_bytes(gcm.h.0);
+        // Miri interprets every bit operation: a spread of each, not all.
+        let stride = if cfg!(miri) { 37 } else { 1 };
         // Every basis product, through the one-block path.
-        for i in 0..128 {
+        for i in (0..128).step_by(stride) {
             let mut state = (1u128 << i).to_be_bytes();
             gcm.hash_blocks(&mut state, &[[0; 16]]);
             assert_eq!(u128::from_be_bytes(state), multiply(1 << i, h), "x^{i}");
         }
-        // Every count across the aggregated, batched and tail paths.
-        let blocks: [[u8; 16]; 41] = core::array::from_fn(|i| {
+        // Every count across the aggregated, batched and tail paths: up to
+        // seven 16-block steps, so every way three to a reduction divides
+        // them, and a tail.
+        let blocks: [[u8; 16]; 128] = core::array::from_fn(|i| {
             (!h.wrapping_mul(i as u128 + 1)).rotate_left(i as u32).to_be_bytes()
         });
-        for n in 0..=blocks.len() {
+        for n in (0..=blocks.len()).step_by(if cfg!(miri) { 9 } else { 1 }) {
             let start = h.rotate_left(n as u32);
             let mut state = start.to_be_bytes();
             gcm.hash_blocks(&mut state, &blocks[..n]);
             assert_eq!(u128::from_be_bytes(state), portable(h, start, &blocks[..n]), "{n} blocks");
         }
-        // Every bit of every block in a batch meets its own power.
-        for lane in 0..8 {
-            for bit in 0..128 {
-                let mut basis = [[0; 16]; 8];
+        // Every bit of every block in a reduction's 48 meets its own power.
+        for lane in (0..48).step_by(if cfg!(miri) { 23 } else { 1 }) {
+            for bit in (0..128).step_by(stride) {
+                let mut basis = [[0; 16]; 48];
                 basis[lane][bit / 8] = 1 << (bit % 8);
                 let mut state = [0; 16];
                 gcm.hash_blocks(&mut state, &basis);
@@ -245,7 +270,24 @@ mod tests {
                 Gcm::aes256(key.try_into().unwrap())
             };
             let nonce = [0xfe; 12];
-            for n in [0usize, 1, 15, 16, 17, 48, 49, 64, 65, 96, 97, 112, 113, 127, 128, 129, 192, 223, 224, 225, 255, 256, 257, 383, 384, 511, 512, 513, 1024, 1040] {
+            // Miri interprets each AES round: an empty message, a tail, and a
+            // batch with a tail. Elsewhere, every batch and step count to
+            // seven steps of 256 bytes with tails, and past the counter's
+            // first carry out of its low byte, at block 254.
+            let lengths: std::vec::Vec<usize> = if cfg!(miri) {
+                std::vec![0, 17, 113]
+            } else {
+                let mut lengths = std::vec![0, 1, 15, 16, 17, 48, 49, 64, 65, 96, 97, 112, 113, 127, 128, 129, 192, 223, 224, 225];
+                for steps in 1..=7 {
+                    for tail in [0, 1, 16, 17, 128, 129, 255] {
+                        lengths.push(256 * steps + tail - 1);
+                        lengths.push(256 * steps + tail);
+                    }
+                }
+                lengths.extend([4063, 4064, 4065, 4096 + 255, 16384 + 17]);
+                lengths
+            };
+            for n in lengths {
                 let input: std::vec::Vec<u8> = (0..n).map(|i| (i * 31 + 7) as u8).collect();
                 let mut sealed = input.clone();
                 let tag = gcm.seal(&nonce, b"aad", &mut sealed).unwrap();
@@ -279,6 +321,12 @@ mod tests {
                     *s ^= m;
                 }
                 assert_eq!(tag, state, "tag over {n} bytes");
+                // A forged tag leaves no plaintext, however far the open got.
+                let mut forged = tag;
+                forged[n % 16] ^= 1;
+                let mut refused = sealed.clone();
+                assert_eq!(gcm.open(&nonce, b"aad", &mut refused, &forged), Err(Error::Authentication));
+                assert!(refused.iter().all(|&b| b == 0), "a refusal of {n} bytes left data");
                 gcm.open(&nonce, b"aad", &mut sealed, &tag).unwrap();
                 assert_eq!(sealed, input);
             }

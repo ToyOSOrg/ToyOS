@@ -24,7 +24,6 @@
 //!   whose mapping is the scanout, so it is the one that pays for a read.
 
 use std::io::{Read, Write};
-use std::os::toyos::io::AsRawHandle;
 use std::os::toyos::process;
 use std::os::toyos::process::CommandExt;
 use std::process::{Child, ChildStderr, ChildStdin, ChildStdout, Command};
@@ -32,7 +31,6 @@ use std::process::{Child, ChildStderr, ChildStdin, ChildStdout, Command};
 use terminal::Console;
 use toyos::ipc::{Connection, FrameRx, RxStep};
 use toyos::poller::{Poller, READABLE};
-use toyos::shm::SharedMemory;
 use toyos::endow;
 use toyos::port::{self, Connector};
 use toyos::surface::{self, Delivery, Host, Notice};
@@ -173,11 +171,10 @@ fn main() {
         eprintln!("console: no framebuffer, exiting");
         return;
     };
-    let info = fb_dev.info().expect("console: framebuffer info");
-    let shm = SharedMemory::adopt(info.scanout, info.stride as usize * info.height as usize * 4)
-        .expect("console: the scanout buffer the framebuffer claim just handed over");
+    let scanout = fb_dev.open().expect("console: the framebuffer claim's description and scanout");
+    let info = *scanout.info();
     let screen = Screen::new(
-        shm.as_ptr(),
+        scanout,
         info.width as usize,
         info.height as usize,
         info.stride as usize,
@@ -234,11 +231,11 @@ fn main() {
     // as it wrote it, for a line of the log to be drawn above.
     let mut partial: Vec<u8> = Vec::new();
     loop {
-        poller.watch_raw(toyos::RawHandle(shell.stdout.as_raw_handle()), READABLE, TOKEN_STDOUT);
-        poller.watch_raw(toyos::RawHandle(shell.stderr.as_raw_handle()), READABLE, TOKEN_STDERR);
-        poller.watch_raw(host.acceptor_handle(), READABLE, TOKEN_LISTEN);
+        poller.watch(&shell.stdout, READABLE, TOKEN_STDOUT);
+        poller.watch(&shell.stderr, READABLE, TOKEN_STDERR);
+        poller.watch(&host.acceptor_handle(), READABLE, TOKEN_LISTEN);
         for client in host.client_handles() {
-            poller.watch_raw(client, READABLE, TOKEN_CLIENT);
+            poller.watch(&client, READABLE, TOKEN_CLIENT);
         }
         if let Ok(log) = &log {
             poller.watch(&log.pipe, READABLE, TOKEN_LOG);
@@ -325,6 +322,8 @@ fn main() {
                 Notice::Dropped { client, why } => {
                     eprintln!("console: dropping client {client} — {why}")
                 }
+                // What Ctrl+C reaches; nothing to say about it.
+                Notice::Foreground { .. } => {}
             }
         }
 
@@ -406,6 +405,11 @@ fn main() {
                 }
                 usage => {
                     let text = translator.press(usage, window::KeyEvent::from(event).mods());
+                    // Ctrl+C is the foreground line's interrupt, and its
+                    // byte only when no line is held.
+                    if text.as_bytes() == b"\x03" && host.interrupt() {
+                        continue;
+                    }
                     if !text.is_empty() {
                         shell.stdin.write_all(text.as_bytes()).ok();
                     }
@@ -490,7 +494,8 @@ impl Shell {
             .duplicate()
             .expect("console: the kernel refused a duplicate of its own surface connector");
         let mut child = Command::new("/system/bin/shell")
-            .provide(surface::SERVICE, surface_copy.into_raw().0)
+            .independent()
+            .provide(surface::SERVICE, surface_copy.into())
             .stdin(process::tty_piped())
             .stdout(process::tty_piped())
             .stderr(process::tty_piped())

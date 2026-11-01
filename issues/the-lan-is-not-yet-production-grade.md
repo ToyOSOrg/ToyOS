@@ -48,27 +48,43 @@ why, and the boot still leases.
 - **Every received frame is hostile.** The receive path and every parser above
   it are fuzzed; a malformed frame ends netd at worst, never the kernel.
 - **Error counters** (CRC, missed, no-buffer) are read and asserted zero under load.
+- **No register is left to its reset value, but `TIDV` and the receive
+  addresses past the first, deliberately.** Done for these registers (pull
+  request #1078). The T14's reset does not give
+  82574 §10.2.6.1's `TCTL`, which the bring-up now writes whole (pull
+  request #1075). It now also sets `TARC0`'s `ENABLE` (bit 10), which
+  §10.2.6.9 says "should always be set", as one bit, since the PCH MAC's
+  other `TARC` bits are unpublished; and writes `RXCSUM` (§10.2.5.15),
+  `MRQC` (§10.2.5.25) and `RFCTL` (§10.2.5.16) to their reset values but
+  `RXCSUM`'s two checksum offloads. `TIDV` is not written: §10.2.6.10 allows
+  no 0, and it delays only a descriptor with `IDE` set, which the driver
+  sets on none. The receive addresses past the first are left alone, the
+  orchestrator's decision: the driver programs entry 0 alone. On the 82574
+  a master reset clears `AV` in entries 0-14 and "Entry 15 is reserved for
+  manageability firmware usage" (§10.2.5.23); on the I219 "up to eleven"
+  shared addresses "can be allocated to manageability" (612523
+  §7.4.2.3.1), at offsets no PCH document publishes, so their valid bits
+  are read at the 82574's. On the T14, out of the reset ([evidence
+  `800e35c69/`](https://github.com/ToyOSOrg/evidence/tree/a911b388eac3990bde439b95091b41a00335748c/r1/800e35c69)): `TXDCTL` `0x00000000`, `TARC0` `0x00000403`,
+  `RXCSUM` `0x00000300`, `MRQC` and `RFCTL` `0x00000000`, each a value the
+  82574 documents, and no receive address past the first valid.
 
 **Exit**: 1000 full, line-rate TCP within a stated margin of Ubuntu's, link
 survives unplug and replug, the handback is tested, the fuzzers run in CI.
 
 ## 3. One driver per device, one stack
 
-netd holds every NIC driver and the stack in one process, and `system.toml`
-names the card per machine (`devices = ["pci:1af4:1041"]`). Neither scales to
-all modern hardware: a bug in one driver takes every connection with it, a
-driver cannot restart without the stack's state, and a machine nobody has seen
-has no row.
+Built as P4 of `issues/there-is-no-wifi.md`, which holds what of its exit the
+benches still owe.
 
-- One driver process per network function, claiming exactly that function.
-- netd is the stack alone, and meets every driver through one narrow interface:
-  frames over shared-memory rings, link state, speed, MAC address, MTU, offloads.
-- init binds drivers to hardware from a declared match table by vendor, device
-  and class, instead of a row naming the card.
-
-The drivers already live in their own crates (`toyos-i219`, the virtio driver),
-so this is a move of hosts, not a rewrite. It lands before a second real NIC
-family is added, which is when the monolith starts to cost.
+- One driver process per network function, claiming exactly that function:
+  each driver a `drives` row (`system/i219`, `system/virtio-net`).
+- netstack is the stack alone, and meets every driver through one narrow
+  interface (`toyos-link`): frames over a shared region's rings, and the link
+  state, speed and MAC address. No MTU or offload is in it: the stack sends
+  frames of 1,514 bytes at most, and no driver offers an offload.
+- The supervisor binds drivers to hardware from the `drives` rows' match
+  table by vendor, device and class, instead of a row naming the card.
 
 **Exit**: killing a driver process restarts it with the stack's connections
 intact, and a machine with an unlisted but matching NIC comes up without a

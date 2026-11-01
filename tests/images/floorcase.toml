@@ -1,0 +1,84 @@
+# The boot `memory_floor` runs alone: one ordinary job holds every frame it
+# may, and the control paths keep working: ps2server and test-runner on their
+# floors, which no other job's allocation can take. The supervisor's floor
+# mirrors the shipped images' shape at a smaller size; the test claims nothing
+# for it.
+#
+# test-runner stands in for the stop UI, a system holder with a floor: its
+# job kills the greedy job. `inputsink` stands in for the owner of input, and
+# `starveling` is the ordinary service the exhaustion ends, which the
+# supervisor starts again once the memory is given back. Neither has a floor.
+
+[boot]
+start = ["logkeeper", "acpiserver", "diskserver", "fileserver", "ps2server", "inputsink", "starveling", "test-runner"]
+
+[supervisor]
+memory-floor-mib = 64
+
+# `every_boot_config_runs_logkeeper` is what refuses a boot config without it.
+# Its floor is this test's, not `images/system.toml`'s: the job reads the
+# supervisor's refusal off the log while every frame is held, so the log has
+# to keep being handed over.
+[programs.logkeeper]
+service = true
+syscap = ["logread"]
+serves = ["log"]
+memory-floor-mib = 32
+
+# The machine's ACPI fixed hardware, as `images/system.toml` serves it: the
+# boot's last job hands the machine back to firmware through it.
+[programs.acpiserver]
+service = true
+devices = ["acpi"]
+receives = ["power"]
+
+# The i8042, an input server on its floor as `images/system.toml`'s is.
+[programs.ps2server]
+restart = true
+receives = ["input"]
+devices = ["isa:0060,0064:1,12"]
+memory-floor-mib = 24
+
+[programs.inputsink]
+service = true
+serves = ["input", "keys"]
+
+[programs.starveling]
+service = true
+restart = true
+serves = ["starved"]
+
+# `dup` and `device` as every test estate's; `jobs` because the job starts its
+# greedy job as an ordinary job of its own; `power` for the stop it asks and
+# the boot's last job; `log` for the supervisor's refusal.
+[programs.test-runner]
+receives = ["power", "keys", "starved", "log"]
+syscap = ["device", "dup", "power", "jobs"]
+memory-floor-mib = 64
+
+[programs.toybox]
+
+[symlinks]
+"bin/reboot" = "/system/bin/toybox"
+
+[programs.diskserver]
+service = true
+restart = true
+serves = ["block", "disk"]
+
+[programs.nvme]
+drives = ["pci:01:08:02"]
+receives = ["disk"]
+
+# The USB driver: QEMU's `nec-usb-xhci`, and the controller firmware booted
+# through where that is an xHCI, which on a bench booted off its NVMe is none.
+# No floor: it drives disks too, so it serves ordinary work.
+[programs.usbd]
+drives = ["pci:0c:03:30/1033:0194", "pci:0c:03:30@boot"]
+receives = ["disk"]
+
+[programs.fileserver]
+restart = true
+pager = true
+roles = ["data", "log", "boot"]
+receives = ["block"]

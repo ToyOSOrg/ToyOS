@@ -22,9 +22,8 @@
 //! the package to what it installed.
 //!
 //! Then it grants the package a folder of the home, `/home/toy/Games` holding
-//! a ROM, through `/system/bin/grants`: refused in this job's own session,
-//! which is the machine's, and refused `Apps/appview` by name, from the login
-//! session a shell opens. Granted it there, the package run as `game` browses
+//! a ROM, through `/system/bin/grants`: refused `Apps/appview` by name, from
+//! the login session test-runner, its login authority, opened for its jobs. Granted it there, the package run as `game` browses
 //! its working directory with gbae's own `list_directory` and saves beside
 //! the ROM as gbae does: it starts in the folder, lists the ROM and writes
 //! `test.sav`. The same package with one byte more is another binary and
@@ -33,9 +32,10 @@
 
 use std::fs;
 use std::io::ErrorKind;
+use std::os::toyos::process::CommandExt;
 use std::process::Command;
 
-use toyos::fs::{Dir, Error, Refused, O_APPEND, O_CREATE, O_CREATE_NEW, O_READ, O_TRUNCATE, O_WRITE};
+use toyos::fs::{Base, Dir, Error, Refused, O_APPEND, O_CREATE, O_CREATE_NEW, O_READ, O_TRUNCATE, O_WRITE};
 
 const SELF: &str = "/system/bin/test_rs_app_view";
 const PACKAGE: &str = "/apps/appview";
@@ -92,7 +92,7 @@ fn job() {
     let mut red = Vec::new();
 
     // Refused, and the supervisor says why (the metal row's judge reads it).
-    match Command::new(ROW_PROGRAM).arg(APP).output() {
+    match Command::new(ROW_PROGRAM).independent().arg(APP).output() {
         Err(e) => println!("  a package named after the shell's row: refused ({e})"),
         Ok(ran) => red.push(format!("a package named after the shell's row ran: {ran:?}")),
     }
@@ -100,7 +100,7 @@ fn job() {
     match fs::write(HOME, b"no folder") {
         Err(e) => red.push(format!("no file could be planted where the app's folder goes: {e}")),
         Ok(()) => {
-            match Command::new(PROGRAM).arg(APP).output() {
+            match Command::new(PROGRAM).independent().arg(APP).output() {
                 Err(e) => println!("  a package whose folder is a file: refused ({e})"),
                 Ok(ran) => red.push(format!("a package whose folder is a file ran: {ran:?}")),
             }
@@ -108,7 +108,7 @@ fn job() {
         }
     }
 
-    let ran = Command::new(PROGRAM).arg(APP).output().expect("launch the package through the launcher");
+    let ran = Command::new(PROGRAM).independent().arg(APP).output().expect("launch the package through the launcher");
     print!("{}", String::from_utf8_lossy(&ran.stdout));
     print!("{}", String::from_utf8_lossy(&ran.stderr));
     if ran.status.code() != Some(0) {
@@ -173,8 +173,8 @@ fn app() {
             if dir.writable() {
                 red.push(format!("fs:{PACKAGE} says it is writable"));
             }
-            match dir.open("manifest.toml", O_READ) {
-                Ok(opened) => dir.close(opened.fid, opened.generation),
+            match dir.open(Base::Root, "manifest.toml", O_READ) {
+                Ok(opened) => dir.close(opened.fid),
                 Err(e) => red.push(format!("an open to read its manifest was refused: {e:?}")),
             }
             let denied = Refused::Error(Error::ReadOnly);
@@ -187,18 +187,18 @@ fn app() {
                 (O_READ | O_APPEND, "an open to append"),
                 (O_READ | O_TRUNCATE, "an open to truncate"),
             ] {
-                each(what, dir.open("manifest.toml", flags).map(|o| dir.close(o.fid, o.generation)));
+                each(what, dir.open(Base::Root, "manifest.toml", flags).map(|o| dir.close(o.fid)));
             }
-            each("an open to create", dir.open("made", O_WRITE | O_CREATE).map(|o| dir.close(o.fid, o.generation)));
+            each("an open to create", dir.open(Base::Root, "made", O_WRITE | O_CREATE).map(|o| dir.close(o.fid)));
             each(
                 "an open to create anew",
-                dir.open("made", O_WRITE | O_CREATE_NEW).map(|o| dir.close(o.fid, o.generation)),
+                dir.open(Base::Root, "made", O_WRITE | O_CREATE_NEW).map(|o| dir.close(o.fid)),
             );
-            each("mkdir", dir.mkdir("made"));
-            each("rmdir", dir.rmdir("sub"));
-            each("unlink", dir.unlink("manifest.toml"));
-            each("rename", dir.rename("manifest.toml", "moved"));
-            each("symlink", dir.symlink("manifest.toml", "link").map_err(Refused::Error));
+            each("mkdir", dir.mkdir(Base::Root, "made"));
+            each("rmdir", dir.unlink(Base::Root, "sub", true));
+            each("unlink", dir.unlink(Base::Root, "manifest.toml", false));
+            each("rename", dir.rename((Base::Root, "manifest.toml"), (Base::Root, "moved")));
+            each("symlink", dir.symlink("manifest.toml", (Base::Root, "link")));
         }
     }
     match Dir::connect(names, &format!("fs:{HOME}")) {
@@ -250,16 +250,16 @@ fn app() {
     println!("  every arm held");
 }
 
-/// `line` run by a shell this job launches, whose `login` row opens a login
-/// session for what it launches: the session `grants` is answered in.
+/// `line` run by a shell this job launches in test-runner's login session,
+/// the session `grants` is answered in.
 fn in_login(line: &str) -> std::process::Output {
-    Command::new("/system/bin/shell").args(["-c", line]).current_dir("/").output().expect("launch a shell")
+    Command::new("/system/bin/shell").independent().args(["-c", line]).current_dir("/").output().expect("launch a shell")
 }
 
 /// What the package saw as `game`: its working directory, the ROMs gbae's
 /// menu lists there, and whether its save beside the first was written.
 fn played(red: &mut Vec<String>, when: &str) -> Option<String> {
-    let ran = Command::new(PROGRAM).arg(GAME).current_dir("/").output().expect("launch the package through the launcher");
+    let ran = Command::new(PROGRAM).independent().arg(GAME).current_dir("/").output().expect("launch the package through the launcher");
     let out = String::from_utf8_lossy(&ran.stdout).into_owned();
     print!("{out}");
     match out.lines().find_map(|l| l.strip_prefix(SAW)) {
@@ -272,29 +272,21 @@ fn played(red: &mut Vec<String>, when: &str) -> Option<String> {
 }
 
 fn granted(red: &mut Vec<String>) {
-    let _ = in_login("/system/bin/grants revoke appview");
+    let _ = in_login("launch /system/bin/grants revoke appview");
     let _ = fs::remove_dir_all(GAMES);
     fs::create_dir_all(GAMES).expect("make the folder the package is granted");
     fs::write(ROM, b"a ROM's bytes").expect("put a ROM in it");
 
-    match Command::new("/system/bin/grants").args(["add", "appview", GAMES]).output() {
-        Ok(out) if out.status.code() == Some(1)
-            && String::from_utf8_lossy(&out.stdout).contains("only a login session may ask for grants") =>
-        {
-            println!("  grants in the machine's session: refused")
-        }
-        other => red.push(format!("grants in the machine's session was answered {other:?}")),
-    }
-    let apps = in_login(&format!("/system/bin/grants add appview {HOME}"));
+    let apps = in_login(&format!("launch /system/bin/grants add appview {HOME}"));
     match String::from_utf8_lossy(&apps.stdout) {
         said if said.contains("where every app keeps its own folder") => println!("  {HOME} as a grant: refused"),
         _ => red.push(format!("{HOME} as a grant was answered {apps:?}")),
     }
-    let added = in_login(&format!("/system/bin/grants add appview {GAMES}"));
+    let added = in_login(&format!("launch /system/bin/grants add appview {GAMES}"));
     if !String::from_utf8_lossy(&added.stdout).contains("appview is granted /home/toy/Games read-write") {
         red.push(format!("the grant was answered {added:?}"));
     }
-    let listed = in_login("/system/bin/grants list");
+    let listed = in_login("launch /system/bin/grants list");
     if !String::from_utf8_lossy(&listed.stdout).contains("appview read-write /home/toy/Games\n") {
         red.push(format!("grants list answered {listed:?}"));
     }
@@ -329,7 +321,7 @@ fn granted(red: &mut Vec<String>) {
     }
     let _ = fs::remove_file(SAVE);
 
-    let revoked = in_login("/system/bin/grants revoke appview");
+    let revoked = in_login("launch /system/bin/grants revoke appview");
     if !String::from_utf8_lossy(&revoked.stdout).contains("appview's grant is revoked") {
         red.push(format!("the revoke was answered {revoked:?}"));
     }

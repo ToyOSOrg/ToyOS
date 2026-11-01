@@ -349,7 +349,7 @@ pub fn interrupts(rsdp_addr: u64) -> Platform {
 /// what the counter counts at; and the wall clock the loader handed over.
 pub fn clock(args: &KernelArgs) {
     let hz = super::cpu::stated_counter_hz().expect("clock: CNTFRQ_EL0 states no rate for the generic timer");
-    crate::clock::set_counter(super::cpu::counter(), 1_000_000_000_000_000 / hz);
+    crate::clock::set_counter(super::cpu::counter(), toyos_abi::clock::Line::mult_of_hz(hz));
     log!("clock: the generic timer counts at {hz} Hz");
     crate::clock::init_wall(super::rtc::read(args));
 }

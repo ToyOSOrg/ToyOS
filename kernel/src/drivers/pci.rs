@@ -10,6 +10,7 @@ use crate::log;
 const VENDOR_ID: u64 = 0x00;
 const DEVICE_ID: u64 = 0x02;
 const COMMAND: u64 = 0x04;
+const REVISION_ID: u64 = 0x08;
 /// `COMMAND` bit 2, PCI 3.0 §6.2.2: without it the function issues no transaction of its own.
 const BUS_MASTER: u16 = 0x04;
 /// `COMMAND` bit 1, PCI 3.0 §6.2.2: without it the function decodes none of its BARs.
@@ -148,6 +149,10 @@ impl PciDevice {
 
     pub fn device_id(&self) -> u16 {
         self.mmio.read_u16(DEVICE_ID)
+    }
+
+    pub fn revision_id(&self) -> u8 {
+        self.mmio.read_u8(REVISION_ID)
     }
 
     pub fn read_config_u8(&self, offset: u64) -> u8 {

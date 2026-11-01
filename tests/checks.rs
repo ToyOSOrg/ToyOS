@@ -575,6 +575,15 @@ mod checks {
         Ok(())
     }
 
+    /// A slewed step passes the clock's rows and a demotion fails them.
+    #[test]
+    fn a_demoted_clock_fails_its_rows() {
+        let slewed = "[ 20.778 cpu12 kernel] clock: TSC STEP: the TSC stepped 1695132 ns forward against the HPET\n";
+        assert_eq!(clock_kept_its_counter(slewed), Ok(()));
+        let demoted = format!("{slewed}[ 33.252 cpu1 kernel] clock: DEMOTED: the TSC stepped 10000110 ns\n");
+        assert!(clock_kept_its_counter(&demoted).is_err());
+    }
+
     /// [`irq_census`] over two censuses, X's from cpu2 and Y's from cpu3, whose
     /// lines are in no read order: a CPU's census is the largest count each
     /// source reaches on any of its lines, and the largest issuer total bounds
@@ -585,7 +594,7 @@ mod checks {
             let userdev = if cpu == 0 { 40 } else { 0 };
             format!(
                 "[ {at} cpu{on} kernel] irq: cpu{cpu} timer=100 kick={kick} userdev={userdev} \
-                 dmafault=0 tlb={tlb} nmi=0 spurious=0 unclaimed=0\n"
+                 dmafault=0 rtc=0 tlb={tlb} nmi=0 spurious=0 unclaimed=0\n"
             )
         };
         let issued = |at: &str, on: u32, total: u64| {
@@ -995,6 +1004,11 @@ mod checks {
     }
 
     #[test]
+    fn metal_bench_disk_judge_admits_data_and_the_loaders_volumes_alone() {
+        metal_checks::the_bench_disk_judge_admits_data_and_the_loaders_volumes_alone();
+    }
+
+    #[test]
     fn metal_bench_reaches_the_loop_as_its_host() {
         metal_checks::the_bench_reaches_the_loop_as_its_host();
     }
@@ -1099,7 +1113,7 @@ mod checks {
         assert!(judge(&[&readback("jobcase", &done(stopped), jobcase)]).is_err());
 
         // What the seal itself writes of the machine, above the ring's tail.
-        let census = "| irq: cpu0 timer=9 kick=2 userdev=1729 dmafault=0 tlb=0 \
+        let census = "| irq: cpu0 timer=9 kick=2 userdev=1729 dmafault=0 rtc=0 tlb=0 \
                       nmi=0 spurious=0 unclaimed=0\n\
                       | tlb: shootdowns=4 wait=12us max=3us dlopen=0 pcid=0 mmio=0 unmap=4 pipe=0 staged=0 \
                       bench=0\n\
@@ -1121,7 +1135,7 @@ mod checks {
         let wedged = |tail: &str| sealed(census, tail);
         let kernel = "[2026-09-29 10:33:28  0.000 cpu0 kernel] panic console: armed 1920x1080 \
                       stride=1920 format=1 at 0x4000000000, write-combining\n";
-        let staged = "| [ 1.509 cpu1 kernel] wedge: staged, and only the boot deadline ends this machine: \
+        let staged = "| [ 1.509 cpu1 kernel] wedge: staged, and only a bound this machine runs under ends it: \
                       every CPU stops taking scheduler passes from here\n";
         let awake = |cpu: u32| format!("| [ 1.509 cpu{cpu} kernel] wedge: cpu{cpu} arrived with interrupts on\n");
         let deaf = "| [ 1.509 cpu1 kernel] wedge: cpu1 arrived with interrupts off, through the syscall \
@@ -1155,10 +1169,10 @@ mod checks {
         let unnamed = format!("{staged}{}{}|   cpu0 pc=0xffff80006051b0b2  {spin}\n", awake(1), awake(0));
         assert!(judge(&[&readback("deadlinewedge", &wedged(&unnamed), kernel)]).is_err());
 
-        // The stick load's boot: its deadline ended it while the job's lines
+        // The disk load's boot: its deadline ended it while the job's lines
         // were reaching /log; one whose job never wrote, or that handed the
         // machine back, is no reset under load.
-        let judge = metal_judge("stick_survives_a_reset_under_load");
+        let judge = metal_judge("the_disk_survives_a_reset_under_load");
         let line = |n: u32| format!("[2026-09-29 10:33:40 20.100 test-runner pid=12] stick_load: line {n} {}\n", "x".repeat(840));
         let wrote = format!("{kernel}{}", (0..1200).map(line).collect::<String>());
         let short = format!("{kernel}{}", (0..10).map(line).collect::<String>());

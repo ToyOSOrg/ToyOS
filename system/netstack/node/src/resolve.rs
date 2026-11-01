@@ -207,7 +207,7 @@ impl Resolver {
         if let Some(kept) = stack.answers().answer(view, &name, millis(now)) {
             return Ok(Resolving::Kept(kept.map_err(Ended::Failed)));
         }
-        let resolvers = stack.lease().map(|lease| lease.dns.clone()).unwrap_or_default();
+        let resolvers = stack.asked_lease().map(|lease| lease.dns.clone()).unwrap_or_default();
         if resolvers.is_empty() {
             return Err(NotStarted::NotConnected);
         }
@@ -242,7 +242,7 @@ impl Resolver {
         let ms = millis(now);
         let mut queued = false;
         lookups.retain_mut(|asking| {
-            let named = stack.lease().is_some_and(|lease| lease.dns == asking.resolvers);
+            let named = stack.asked_lease().is_some_and(|lease| lease.dns == asking.resolvers);
             let mut done = if named { None } else { Some(Err(Ended::LeaseChanged)) };
             while done.is_none() {
                 let Some((query, heard)) = waiting(&asking.queries, stack, reply.as_mut_slice()) else { break };

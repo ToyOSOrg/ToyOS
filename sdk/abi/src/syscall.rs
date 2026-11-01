@@ -48,6 +48,8 @@ pub const SYSINFO_HEADER_SIZE: usize = 48;
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub struct SysinfoHeader {
     pub memory_total: u64,
+    /// Bytes in use or promised to commitments not yet touched: what no
+    /// new commitment can have.
     pub memory_used: u64,
     pub cpus: u32,
     /// Live threads in the roster this same call would answer with
@@ -94,14 +96,13 @@ pub const SYS_FUTEX_WAKE: u64 = 59;
 pub const SYS_FTRUNCATE: u64 = 60;
 pub const SYS_STACK_INFO: u64 = 61;
 pub const SYS_CPU_COUNT: u64 = 62;
-pub const SYS_MMAP: u64 = 63;
-pub const SYS_MUNMAP: u64 = 64;
+pub const SYS_VM_RESERVE: u64 = 63;
+pub const SYS_VM_RELEASE: u64 = 64;
 pub const SYS_READ_NONBLOCK: u64 = 66;
 pub const SYS_WRITE_NONBLOCK: u64 = 67;
 pub const SYS_EXIT: u64 = 72;
 pub const SYS_GET_ENV: u64 = 73;
 pub const SYS_CLOCK_EPOCH: u64 = 75;
-pub const SYS_PIPE_MAP: u64 = 77;
 pub const SYS_SYMLINK: u64 = 81;
 pub const SYS_READLINK: u64 = 82;
 /// Accept a queued connection from an [`Acceptor`] handle.
@@ -163,18 +164,27 @@ pub const SYS_NAMESPACE_BUILD: u64 = 101;
 /// no other place to ask, and a name it was not given resolves to nothing.
 pub const SYS_NAMESPACE_OPEN: u64 = 102;
 
-/// Take the batch of handles at the reader's place in the connection's bytes.
-/// See [`handle_recv`].
-pub const SYS_HANDLE_RECV: u64 = 104;
-/// Make a shared-memory region, sized up to whole [`SHM_PAGE`]s.
+/// Make a shared-memory region, sized up to whole [`PAGE_SIZE`]s.
 /// See [`shm_create`].
 pub const SYS_SHM_CREATE: u64 = 105;
-/// Map a region into the caller. Idempotent: a second call answers the first
-/// call's address. See [`shm_map`].
+/// Map a region into the caller. See [`shm_map`].
 pub const SYS_SHM_MAP: u64 = 106;
 
-/// What [`SYS_SHM_CREATE`] rounds a length up to a whole number of.
-pub const SHM_PAGE: usize = 2 << 20;
+/// The page every mapping is made of, and what [`SYS_SHM_CREATE`] rounds a
+/// length up to a whole number of.
+pub const PAGE_SIZE: usize = 4096;
+
+/// [`shm_create_flags`]: memory a device can be lent, in whole
+/// [`SHM_DEVICE_PAGE`]s of one physical run, as a device's domain maps it.
+pub const SHM_DEVICE: u64 = 1;
+
+/// [`shm_create_for`]: the region is counted to the job the call's third
+/// argument names, a handle carrying `WRITE`, rather than the caller's: the
+/// authority to place a child in a job is the authority to make memory for it.
+pub const SHM_FOR_JOB: u64 = 1 << 1;
+
+/// What a [`SHM_DEVICE`] region is a whole number of.
+pub const SHM_DEVICE_PAGE: u64 = 2 * 1024 * 1024;
 
 /// Wait for the process a handle names and take how it ended, an [`End`]'s
 /// word, gated by [`Rights::WAIT`]. See [`process_wait`].
@@ -283,8 +293,8 @@ pub const SYS_NULL: u64 = 130;
 pub const SYS_DEVICE_DMA_LIMIT: u64 = 131;
 /// Let a claimed PCI function master the bus. See [`device_dma_start`].
 pub const SYS_DEVICE_DMA_START: u64 = 132;
-/// Write a message's bytes to a connection and move the handles it carries,
-/// together or not at all. See [`message_send`].
+/// Queue a whole message on a connection, its bytes and the handles it
+/// carries, or nothing of it. See [`message_send`].
 pub const SYS_MESSAGE_SEND: u64 = 133;
 /// A handle to the job the caller runs in. See [`job_own`].
 pub const SYS_JOB_OWN: u64 = 134;
@@ -294,16 +304,73 @@ pub const SYS_JOB_OWN: u64 = 134;
 ///
 /// [`Rights::MANAGE`]: crate::handle::Rights::MANAGE
 pub const SYS_PROCESS_QUIT: u64 = 135;
+/// Whether [`SYS_SHUTDOWN`] or [`SYS_REBOOT`] would stop this machine, asked
+/// on the same right and stopping nothing. See [`machine_stops`].
+pub const SYS_MACHINE_STOPS: u64 = 136;
+/// Where firmware loaded this boot from, as the loader handed it. Gated by
+/// [`Rights::INVENTORY`] on a `SysCap`. See [`boot_sources`].
+///
+/// [`Rights::INVENTORY`]: crate::handle::Rights::INVENTORY
+pub const SYS_BOOT_SOURCES: u64 = 137;
+/// Read a kernel file at an offset, leaving its handle's offset where it is.
+/// See [`pread`].
+pub const SYS_PREAD: u64 = 138;
+/// Write a kernel file at an offset, whether or not its handle appends, and
+/// leaving the handle's offset where it is. See [`pwrite`].
+pub const SYS_PWRITE: u64 = 139;
+pub const SYS_VM_PROTECT: u64 = 140;
+pub const SYS_VM_DISCARD: u64 = 141;
+pub const SYS_VM_DECOMMIT: u64 = 142;
+/// A memory object over part of another's pages. See [`shm_sub`].
+pub const SYS_SHM_SUB: u64 = 143;
+/// Hold memory back for a job however short every other runs, gated by
+/// [`Rights::FLOOR`] on a `SysCap`. See [`job_floor`].
+///
+/// [`Rights::FLOOR`]: crate::handle::Rights::FLOOR
+pub const SYS_JOB_FLOOR: u64 = 144;
+/// What a job's account holds. See [`account_info`].
+pub const SYS_ACCOUNT_INFO: u64 = 145;
+/// Resize a run of committed private memory, in place or moved. See [`vm_remap`].
+pub const SYS_VM_REMAP: u64 = 146;
+/// Hold every idle CPU to waking within a bound, gated by
+/// [`Rights::WAKE_LATENCY`] on a `SysCap`. See [`wake_latency_hold`].
+///
+/// [`Rights::WAKE_LATENCY`]: crate::handle::Rights::WAKE_LATENCY
+pub const SYS_WAKE_LATENCY_HOLD: u64 = 147;
+/// A fresh event's two sides. See [`event_create`].
+pub const SYS_EVENT_CREATE: u64 = 148;
+/// Raise an event, on its signal side's `WRITE`. See [`event_signal`].
+pub const SYS_EVENT_SIGNAL: u64 = 149;
+/// Take an event's pending signal, on its wait side's `READ`. See [`event_take`].
+pub const SYS_EVENT_TAKE: u64 = 150;
+/// Park on one handle's one condition, with a timeout. See [`handle_wait`].
+pub const SYS_HANDLE_WAIT: u64 = 151;
+/// The clock now, read by the kernel. See [`clock_now`].
+pub const SYS_CLOCK_NOW: u64 = 152;
+/// Make this process's one pager object. See [`pager_create`].
+pub const SYS_PAGER_CREATE: u64 = 153;
+/// A paged object a pager supplies. See [`paged_create`].
+pub const SYS_PAGED_CREATE: u64 = 154;
+/// A holder handle on a paged object. See [`paged_holder`].
+pub const SYS_PAGED_HOLDER: u64 = 155;
+/// Read a paged object. See [`paged_read`].
+pub const SYS_PAGED_READ: u64 = 156;
+/// An owner's call on its paged object. See [`PagedOp`].
+pub const SYS_PAGED_OP: u64 = 157;
+/// What a pager's objects ask of it. See [`paged_notices`].
+pub const SYS_PAGED_NOTICES: u64 = 158;
+/// Take a connection's next whole message. See [`message_recv`].
+pub const SYS_MESSAGE_RECV: u64 = 159;
 
 /// Mint a handle to the device set ([`crate::devset`]), which carries `READ`
 /// and `WAIT` and neither `DUP` nor `TRANSFER`. Gated by
 /// [`Rights::DEVICE`] on a `SysCap`. See [`device_set`].
 ///
 /// [`Rights::DEVICE`]: crate::handle::Rights::DEVICE
-pub const SYS_DEVICE_SET: u64 = 139;
+pub const SYS_DEVICE_SET: u64 = 163;
 
 /// The device set's snapshot, read whole. See [`device_set_read`].
-pub const SYS_DEVICE_SET_READ: u64 = 140;
+pub const SYS_DEVICE_SET_READ: u64 = 164;
 
 /// Bins in the per-process syscall profile — one for every number this ABI
 /// issues, and one at the end for every number it does not.
@@ -311,7 +378,7 @@ pub const SYS_DEVICE_SET_READ: u64 = 140;
 /// **The profile's parts sum to its total, and that is the whole requirement.**
 /// A bin array narrower than the ABI reaches drops calls out of the line while
 /// the total goes on counting them.
-pub const SYSCALL_PROFILE_BINS: usize = 142;
+pub const SYSCALL_PROFILE_BINS: usize = 166;
 
 /// Where a number this ABI does not issue is counted. Merging is a degradation
 /// a reader can see in the line; dropping is one nobody can.
@@ -320,6 +387,9 @@ pub const SYSCALL_PROFILE_OTHER: usize = SYSCALL_PROFILE_BINS - 1;
 const _: () = assert!(SYS_DEVICE_SET_READ < SYSCALL_PROFILE_OTHER as u64);
 
 pub const WNOHANG: u64 = 1;
+/// Every bit `SYS_PROCESS_WAIT`'s flag word defines; a wait carrying another
+/// is refused `InvalidArgument`.
+pub const PROCESS_WAIT_FLAGS_KNOWN: u64 = WNOHANG;
 
 crate::user_safe! {
     /// Arguments for the `SYS_SPAWN` syscall, passed as a single pointer.
@@ -358,15 +428,15 @@ crate::user_safe! {
         /// statement**: the kernel never substitutes the caller's own.
         pub cwd_ptr: u64,
         pub cwd_len: u64,
-        /// The program's bytes, in a shared memory object the caller made and
-        /// read the program into: `image` is a handle to it carrying `MAP`, and
-        /// `image_len` how many of its first bytes the program is — or 0, for a
-        /// program the kernel opens at `path` itself. `PermissionDenied` for a
-        /// handle without `MAP`; `InvalidArgument` for a length the object does not
-        /// hold, or an object that is no memory the kernel allocated. The object
-        /// stays the caller's: what the kernel reads of it, and when, is
-        /// `kernel/src/file_backing.rs`'s (`SharedImage`). `path` is then opened by
-        /// nobody.
+        /// The program's bytes, in a memory object the caller holds — its file
+        /// server's for the file, or one the caller read the program into:
+        /// `image` is a handle to it carrying `MAP`, and `image_len` how many of
+        /// its first bytes the program is — or 0, for a program the kernel opens
+        /// at `path` itself. `PermissionDenied` for a handle without `MAP`;
+        /// `InvalidArgument` for a length the object does not hold, or a device's
+        /// window. The object stays the caller's: what the kernel reads of it,
+        /// and when, is `kernel/src/file_backing.rs`'s (`SharedImage`). `path` is
+        /// then opened by nobody.
         pub image: u64,
         pub image_len: u64,
         /// The process the child is placed under, whose end takes it down: a
@@ -375,10 +445,17 @@ crate::user_safe! {
         /// `PermissionDenied` for a handle without `WRITE` and `InvalidArgument`
         /// for one to no process, since a place is a handle a peer sent;
         /// `Gone` for a process being torn down, and `ResourceExhausted` for a
-        /// child more than `kernel::proclife::MAX_DEPTH` below the supervisor.
+        /// child more than `toyos_proclife::MAX_DEPTH` below the supervisor.
         ///
         /// [`Rights::WRITE`]: crate::handle::Rights::WRITE
         pub place: u64,
+        /// A `SysCap` handle carrying [`Rights::PAGER`], which starts the
+        /// child as a pager for its life, or [`HANDLE_INVALID`] for none.
+        /// `PermissionDenied` for a handle without the right. The handle stays
+        /// the caller's.
+        ///
+        /// [`Rights::PAGER`]: crate::handle::Rights::PAGER
+        pub pager: u64,
     }
 }
 
@@ -391,9 +468,9 @@ crate::user_safe! {
         /// already loaded and runs no initialiser again. Nothing opens it.
         pub name_ptr: u64,
         pub name_len: u64,
-        /// The library's bytes, in a shared memory object the caller read them
-        /// into, as [`SpawnArgs::image`] names a program's: a handle carrying
-        /// `MAP`, and how many of its first bytes the library is.
+        /// The library's bytes, in a memory object as [`SpawnArgs::image`] names a
+        /// program's: a handle carrying `MAP`, and how many of its first bytes
+        /// the library is.
         pub image: u64,
         pub image_len: u64,
         /// Where the kernel writes the module's `[.init_array address, count]`,
@@ -524,9 +601,6 @@ pub enum SyscallError {
     /// the same rule the storage layer already obeys applies here: a dead peer
     /// must not be indistinguishable from a handle that was never there.
     Gone = 10,
-    /// A read of a connection reached a batch of handles the peer sent with
-    /// the bytes before it: take the batch ([`handle_recv`]) before reading on.
-    HandlesPending = 11,
 }
 
 impl SyscallError {
@@ -551,7 +625,6 @@ impl SyscallError {
             8 => Some(Self::NotSupported),
             9 => Some(Self::Io),
             10 => Some(Self::Gone),
-            11 => Some(Self::HandlesPending),
             _ => Some(Self::Unknown),
         }
     }
@@ -571,7 +644,6 @@ impl core::fmt::Display for SyscallError {
             Self::NotSupported => f.write_str("not supported"),
             Self::Io => f.write_str("the device did not complete the transfer"),
             Self::Gone => f.write_str("the other end is gone"),
-            Self::HandlesPending => f.write_str("handles the peer sent wait at this point of the stream"),
         }
     }
 }
@@ -667,6 +739,10 @@ impl OpenFlags {
     /// there, a link or a directory included, decided in the one call that
     /// creates it.
     pub const EXCLUSIVE: Self = Self(32);
+    /// Every bit defined above. An open carrying another is refused
+    /// `InvalidArgument` before its path is resolved.
+    pub const KNOWN: Self =
+        Self(Self::READ.0 | Self::WRITE.0 | Self::CREATE.0 | Self::TRUNCATE.0 | Self::APPEND.0 | Self::EXCLUSIVE.0);
 
     pub const fn contains(self, flag: Self) -> bool { self.0 & flag.0 != 0 }
 }
@@ -680,45 +756,48 @@ impl core::ops::BitOrAssign for OpenFlags {
     fn bitor_assign(&mut self, rhs: Self) { self.0 |= rhs.0; }
 }
 
-/// Memory protection flags for [`mmap`].
-///
-/// The kernel maps 2 MiB pages and has no `mprotect`, so what a mapping is
-/// created with is what it stays. `NONE` reserves the address range and maps
-/// nothing at all: any access to it faults, which is the guard page a libc
-/// asks for. Anything without `WRITE` is mapped read-only, and a store to it
-/// is a protection violation that kills the process.
+/// What pages of a process's own memory may be used for. No value is both
+/// writable and executable. `None` pages fault on any access.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct MmapProt(pub u64);
-
-impl MmapProt {
-    pub const NONE: Self = Self(0);
-    pub const READ: Self = Self(1);
-    pub const WRITE: Self = Self(2);
-
-    pub const fn contains(self, flag: Self) -> bool { self.0 & flag.0 != 0 }
+#[repr(u64)]
+pub enum VmProt {
+    None = 0,
+    Read = 1,
+    ReadWrite = 2,
+    ReadExec = 3,
 }
 
-impl core::ops::BitOr for MmapProt {
-    type Output = Self;
-    fn bitor(self, rhs: Self) -> Self { Self(self.0 | rhs.0) }
+impl VmProt {
+    /// The protection a syscall argument names, `None` for a word that names none.
+    pub const fn from_u64(word: u64) -> Option<Self> {
+        Some(match word {
+            0 => Self::None,
+            1 => Self::Read,
+            2 => Self::ReadWrite,
+            3 => Self::ReadExec,
+            _ => return None,
+        })
+    }
 }
 
-/// Memory mapping flags for [`mmap`].
+/// Where [`vm_reserve`] places a range.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct MmapFlags(pub u64);
-
-impl MmapFlags {
-    pub const ANONYMOUS: Self = Self(1);
-    pub const PRIVATE: Self = Self(2);
-    pub const FIXED: Self = Self(4);
-
-    pub const fn contains(self, flag: Self) -> bool { self.0 & flag.0 != 0 }
+pub enum VmAt {
+    /// Wherever the space has room, at a multiple of `align`: a power of two,
+    /// and a page at least.
+    Anywhere { align: usize },
+    /// Exactly there, on a page, in place of whatever those pages held.
+    Fixed(*mut u8),
 }
 
-impl core::ops::BitOr for MmapFlags {
-    type Output = Self;
-    fn bitor(self, rhs: Self) -> Self { Self(self.0 | rhs.0) }
+impl VmAt {
+    /// Anywhere, on a page.
+    pub const ANYWHERE: Self = Self::Anywhere { align: PAGE_SIZE };
 }
+
+/// `VmAt`'s two kinds as the syscall's fourth argument.
+pub const VM_AT_ANYWHERE: u64 = 0;
+pub const VM_AT_FIXED: u64 = 1;
 
 /// Result of [`pipe`]: the read and write ends.
 #[derive(Debug, Clone, Copy)]
@@ -812,6 +891,18 @@ pub fn read(handle: RawHandle, buf: &mut [u8]) -> Result<usize, SyscallError> {
     check(syscall(SYS_READ, handle.0 as u64, buf.as_mut_ptr() as u64, buf.len() as u64, 0)).map(|n| n as usize)
 }
 
+/// Read a file at `offset`: how many bytes, 0 at or past its end. Any handle
+/// but a file's is [`SyscallError::NotSupported`].
+pub fn pread(handle: RawHandle, buf: &mut [u8], offset: u64) -> Result<usize, SyscallError> {
+    check(syscall(SYS_PREAD, handle.0 as u64, buf.as_mut_ptr() as u64, buf.len() as u64, offset)).map(|n| n as usize)
+}
+
+/// Write a file at `offset`: how many bytes. Any handle but a file's is
+/// [`SyscallError::NotSupported`].
+pub fn pwrite(handle: RawHandle, buf: &[u8], offset: u64) -> Result<usize, SyscallError> {
+    check(syscall(SYS_PWRITE, handle.0 as u64, buf.as_ptr() as u64, buf.len() as u64, offset)).map(|n| n as usize)
+}
+
 /// Exit the current thread only. Does not return.
 /// Use `exit()` to exit the entire process (all threads).
 pub fn thread_exit(code: i32) -> ! {
@@ -874,6 +965,10 @@ pub mod debug_action {
     /// whichever comes first.
     pub const TLB_ACK_DELAY_ARM: u64 = 12;
     pub const TLB_ACK_DELAY_DISARM: u64 = 13;
+    /// How many changes to the caller's own address space have reached
+    /// another CPU by interrupt: what a change no other CPU runs the space on
+    /// must leave as it was.
+    pub const SPACE_REACHED: u64 = 29;
     /// How many kernel objects of one kind are alive right now. The argument is
     /// an [`ObjectKind`](crate::handle::ObjectKind) word.
     ///
@@ -970,9 +1065,9 @@ pub mod debug_action {
 
 /// Create a pipe. Returns the read and write ends.
 ///
-/// **Fallible, because `sys_pipe` is.** It answers `ResourceExhausted` on three
-/// paths — no pipe pages, and either handle install hitting the table cap — and
-/// a wrapper that cannot say so hands the caller a pair of handles that are an
+/// **Fallible, because `sys_pipe` is.** It answers `ResourceExhausted` where
+/// the pipe's heap cannot be charged or either handle install hits the table
+/// cap, and a wrapper that cannot say so hands the caller a pair of handles that are an
 /// error word cut in half.
 ///
 /// A packed pair can never be mistaken for an error word: no handle is ever
@@ -985,6 +1080,44 @@ pub fn pipe() -> Result<PipeEnds, SyscallError> {
         read: RawHandle((raw >> 32) as u32),
         write: RawHandle((raw & 0xFFFF_FFFF) as u32),
     })
+}
+
+/// An event's two sides: [`signal`](Self::signal) carries `WRITE|DUP|TRANSFER`,
+/// [`wait`](Self::wait) `READ|WAIT|DUP|TRANSFER`.
+pub struct EventEnds {
+    pub signal: RawHandle,
+    pub wait: RawHandle,
+}
+
+/// A fresh event: one coalescing pending signal, raised by its signal side
+/// and taken by its wait side. Packed as [`pipe`] is.
+pub fn event_create() -> Result<EventEnds, SyscallError> {
+    let raw = check(syscall(SYS_EVENT_CREATE, 0, 0, 0, 0))?;
+    Ok(EventEnds { signal: RawHandle((raw >> 32) as u32), wait: RawHandle((raw & 0xFFFF_FFFF) as u32) })
+}
+
+/// Raise the event; signals before a take are one. Never blocks and
+/// allocates nothing. `Gone` once the wait side's last handle has gone.
+pub fn event_signal(signal: RawHandle) -> Result<(), SyscallError> {
+    check(syscall(SYS_EVENT_SIGNAL, signal.0 as u64, 0, 0, 0)).map(drop)
+}
+
+/// Take the pending signal. `WouldBlock` with none pending; `Gone` with none
+/// pending and the signal side's last handle gone, which is never a signal.
+/// A wait side is readable while either holds, and a readable watch takes
+/// nothing.
+pub fn event_take(wait: RawHandle) -> Result<(), SyscallError> {
+    check(syscall(SYS_EVENT_TAKE, wait.0 as u64, 0, 0, 0)).map(drop)
+}
+
+/// Park until `handle` answers the one condition `interest` names
+/// ([`READABLE`](crate::inbox::READABLE), [`WRITABLE`](crate::inbox::WRITABLE)
+/// or [`OTHER_END_GONE`](crate::inbox::OTHER_END_GONE)), as an inbox watch
+/// would, or `timeout_nanos` passes; `u64::MAX` waits for good. Answers the
+/// condition's bit, or `0` at the timeout. Needs `WAIT`; an object with no
+/// such condition, or a device claim, is `NotSupported`.
+pub fn handle_wait(handle: RawHandle, interest: u32, timeout_nanos: u64) -> Result<u32, SyscallError> {
+    check(syscall(SYS_HANDLE_WAIT, handle.0 as u64, interest as u64, timeout_nanos, 0)).map(|bit| bit as u32)
 }
 
 /// Read the inherited environment variables into `buf`.
@@ -1004,7 +1137,9 @@ pub fn get_env(buf: &mut [u8]) -> usize {
 /// would have freed.
 ///
 /// # Safety
-/// The raw pointer fields in `SpawnArgs` must point to valid memory.
+/// The raw pointer fields in `SpawnArgs` must point to valid memory, and every
+/// handle its endowment names is the caller's to give away: a spawn moves them
+/// ([`crate::handle`]).
 pub unsafe fn spawn(args: &SpawnArgs) -> Result<RawHandle, SyscallError> {
     check(syscall(SYS_SPAWN, args as *const SpawnArgs as u64, 0, 0, 0))
         .map(|h| RawHandle(h as u32))
@@ -1131,13 +1266,25 @@ pub const MAX_PATH: usize = 4096;
 /// libc's `PIPE_BUF` (`sdk/libc/include/limits.h`).
 pub const MAX_WHOLE_PIPE_WRITE: usize = 4096;
 
+/// The most a pipe holds unread: a write past it waits for its reader. The
+/// kernel takes memory for what a pipe holds as it fills and gives it back as
+/// it drains, so this is a bound, not what a pipe costs. A pipe that has held
+/// a byte keeps what an empty one needs: a write of at most
+/// [`MAX_WHOLE_PIPE_WRITE`] bytes into it while it is empty is never refused
+/// for memory.
+pub const PIPE_CAPACITY: usize = 2 << 20;
+
 /// Open a file.
 pub fn open(path: &[u8], flags: OpenFlags) -> Result<RawHandle, SyscallError> {
     check(syscall(SYS_OPEN, path.as_ptr() as u64, path.len() as u64, flags.0, 0)).map(|v| RawHandle(v as u32))
 }
 
 /// Close a handle.
-pub fn close(handle: RawHandle) {
+///
+/// # Safety
+/// `handle` is this process's and nothing else answers for it: no owner
+/// closes or uses it again ([`crate::handle`]).
+pub unsafe fn close(handle: RawHandle) {
     syscall(SYS_CLOSE, handle.0 as u64, 0, 0, 0);
 }
 
@@ -1292,6 +1439,39 @@ pub fn reboot(syscap: RawHandle) -> SyscallError {
             return e;
         }
     }
+}
+
+/// The clock now as a log line's time, nanoseconds since the counter's zero,
+/// read by the kernel: what [`crate::clock::stamp_ns`] answers where the page
+/// is demoted. Needs no handle; it fails for nobody.
+pub fn clock_now() -> u64 {
+    syscall(SYS_CLOCK_NOW, 0, 0, 0, 0)
+}
+
+/// Which stop [`machine_stops`] asks about.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[repr(u64)]
+pub enum MachineStop {
+    Shutdown = 0,
+    Reboot = 1,
+}
+
+impl MachineStop {
+    pub fn from_u64(word: u64) -> Option<Self> {
+        match word {
+            0 => Some(Self::Shutdown),
+            1 => Some(Self::Reboot),
+            _ => None,
+        }
+    }
+}
+
+/// `Ok` where [`shutdown`] or [`reboot`], as `stop` names, would stop this
+/// machine; the refusal it would answer before stopping anything where not,
+/// [`SyscallError::NotSupported`] for a machine without it. Lets a caller
+/// refuse a stop before it ends what the stop would have ended.
+pub fn machine_stops(syscap: RawHandle, stop: MachineStop) -> Result<(), SyscallError> {
+    check_unit(syscall(SYS_MACHINE_STOPS, syscap.0 as u64, stop as u64, 0, 0))
 }
 
 /// The device classes, their wire numbers, and the name a `system.toml`
@@ -1662,6 +1842,43 @@ pub fn job_create(syscap: RawHandle) -> Result<RawHandle, SyscallError> {
     check(syscall(SYS_JOB_CREATE, syscap.0 as u64, 0, 0, 0)).map(|v| RawHandle(v as u32))
 }
 
+/// Hold `bytes` back for the job `job` names, which only it may then take
+/// however short every other job runs, presenting a `SysCap` handle that
+/// carries [`Rights::FLOOR`] and the job's handle with `WRITE`. The floor
+/// lasts while that job handle's object does, and goes with its last
+/// handle. `ResourceExhausted` where what is free now cannot hold it, and
+/// `AlreadyExists` where another handle's object already holds one for the
+/// job.
+///
+/// [`Rights::FLOOR`]: crate::handle::Rights::FLOOR
+pub fn job_floor(syscap: RawHandle, job: RawHandle, bytes: u64) -> Result<(), SyscallError> {
+    check_unit(syscall(SYS_JOB_FLOOR, syscap.0 as u64, job.0 as u64, bytes, 0))
+}
+
+/// Hold every idle CPU to waking within `bound_ns` for as long as the
+/// returned handle lives: from when this returns no CPU enters a state slower
+/// to leave than the least bound held, and each CPU waiting in one has been
+/// sent a wake, which pays that state's exit once. Needs
+/// [`Rights::WAKE_LATENCY`]; a bound of 0 is refused
+/// [`SyscallError::InvalidArgument`].
+///
+/// [`Rights::WAKE_LATENCY`]: crate::handle::Rights::WAKE_LATENCY
+pub fn wake_latency_hold(syscap: RawHandle, bound_ns: u64) -> Result<RawHandle, SyscallError> {
+    check(syscall(SYS_WAKE_LATENCY_HOLD, syscap.0 as u64, bound_ns, 0, 0)).map(|raw| RawHandle(raw as u32))
+}
+
+/// What the account of the job `job` names holds, its handle carrying
+/// `READ`.
+pub fn account_info(job: RawHandle, info: &mut AccountInfo) -> Result<(), SyscallError> {
+    check_unit(syscall(
+        SYS_ACCOUNT_INFO,
+        job.0 as u64,
+        info as *mut AccountInfo as u64,
+        core::mem::size_of::<AccountInfo>() as u64,
+        0,
+    ))
+}
+
 /// A handle to the job the caller runs in, carrying `WRITE`, `DUP` and
 /// `TRANSFER`: what a launch carries for its program to join the caller's job.
 /// Asks no right: it names only what the caller is already in.
@@ -1880,21 +2097,34 @@ pub fn accept(acceptor: RawHandle) -> Result<RawHandle, SyscallError> {
     check(syscall(SYS_ACCEPT, acceptor.0 as u64, 0, 0, 0)).map(|v| RawHandle(v as u32))
 }
 
+/// [`accept`]'s flag: answer `WouldBlock` rather than wait when none is queued.
+pub const ACCEPT_NONBLOCK: u64 = 1;
+
+/// [`accept`] of a connection already queued; `WouldBlock` when none is.
+pub fn accept_nonblock(acceptor: RawHandle) -> Result<RawHandle, SyscallError> {
+    check(syscall(SYS_ACCEPT, acceptor.0 as u64, ACCEPT_NONBLOCK, 0, 0)).map(|v| RawHandle(v as u32))
+}
+
 /// Handles one [`message_send`] may carry.
 ///
 /// Policy on the primitive: a caller asking for one more is refused by name
 /// and never truncated to fit.
 pub const MAX_TRANSFER_HANDLES: usize = 8;
 
-/// Batches one direction of a connection may hold unreceived.
-pub const MAX_QUEUED_BATCHES: usize = 16;
+/// Messages one direction of a connection may hold unreceived.
+pub const MAX_QUEUED_MESSAGES: usize = 256;
 
-/// The most bytes one [`message_send`] writes. Policy on the primitive: the
-/// bytes are copied whole under the connection's locks, so the copy is
-/// bounded, and every frame a protocol here sends is far smaller.
+/// Handles one direction of a connection may hold unreceived, across its
+/// messages.
+pub const MAX_QUEUED_HANDLES: usize = 64;
+
+/// The most bytes one message carries. Policy on the primitive: the bytes are
+/// copied whole under the connection's lock, so the copy is bounded, and bulk
+/// data travels in shared memory.
 pub const MAX_MESSAGE_LEN: usize = 16 * 1024;
 
-/// [`message_send`] answers `WouldBlock` rather than waiting for room.
+/// [`message_send`] or [`message_recv`] answers `WouldBlock` rather than
+/// waiting.
 pub const MESSAGE_NONBLOCK: u64 = 1;
 
 crate::user_safe! {
@@ -1910,74 +2140,174 @@ crate::user_safe! {
     }
 }
 
-/// Write `bytes` to `conn` and move `handles` to its peer, as one message.
+impl MessageSend {
+    fn new(bytes: &[u8], handles: &[RawHandle], nonblock: bool) -> Self {
+        Self {
+            bytes: bytes.as_ptr() as u64,
+            len: bytes.len() as u64,
+            handles: handles.as_ptr() as u64,
+            count: handles.len() as u64,
+            flags: if nonblock { MESSAGE_NONBLOCK } else { 0 },
+        }
+    }
+}
+
+/// Queue `bytes` and `handles` on `conn` as one message for its peer.
 ///
-/// **All or nothing, and in order.** The bytes go into the connection's
-/// stream whole, and the handles are queued at the byte just past them: the
-/// peer reads the bytes, then takes the batch ([`handle_recv`]), and no read
-/// of its crosses the batch before it is taken. Nothing is written and no
-/// handle moves on a refusal:
+/// **All or nothing, and in order.** The peer takes each message whole, its
+/// bytes and exactly its handles, in the order they were sent
+/// ([`message_recv`]). Nothing is queued and no handle moves on a refusal:
 /// - every handle must carry [`Rights::TRANSFER`], and so must `conn` when
 ///   there are any; `conn` itself and a handle named twice are refused;
-/// - handles need bytes (`InvalidArgument`), and past [`MAX_MESSAGE_LEN`]
-///   bytes or [`MAX_TRANSFER_HANDLES`] handles is `InvalidArgument`;
-/// - a peer already holding [`MAX_QUEUED_BATCHES`] is `ResourceExhausted`, and
-///   a peer that is gone is `Gone`;
-/// - a stream without room for the whole message waits for it, or with
-///   `nonblock` answers `WouldBlock`.
+/// - past [`MAX_MESSAGE_LEN`] bytes or [`MAX_TRANSFER_HANDLES`] handles is
+///   `InvalidArgument`;
+/// - a peer that is gone is `Gone`, and memory for the bytes the machine
+///   does not have is `ResourceExhausted`;
+/// - without room for the whole message beside the peer's unreceived ones
+///   (at most [`MAX_QUEUED_MESSAGES`], [`MAX_QUEUED_HANDLES`] and
+///   [`PIPE_CAPACITY`] bytes) it waits for room, or with `nonblock` answers
+///   `WouldBlock`. `conn` polls writable once the largest message fits.
 ///
 /// [`Rights::TRANSFER`]: crate::handle::Rights::TRANSFER
-pub fn message_send(conn: RawHandle, bytes: &[u8], handles: &[RawHandle], nonblock: bool) -> Result<(), SyscallError> {
-    let args = MessageSend {
-        bytes: bytes.as_ptr() as u64,
-        len: bytes.len() as u64,
-        handles: handles.as_ptr() as u64,
-        count: handles.len() as u64,
-        flags: if nonblock { MESSAGE_NONBLOCK } else { 0 },
-    };
+///
+/// # Safety
+/// Each of `handles` is the caller's to give away: a sent handle leaves this
+/// process, so nothing may answer for it afterwards ([`crate::handle`]).
+pub unsafe fn message_send(conn: RawHandle, bytes: &[u8], handles: &[RawHandle], nonblock: bool) -> Result<(), SyscallError> {
+    let args = MessageSend::new(bytes, handles, nonblock);
     check_unit(syscall(SYS_MESSAGE_SEND, conn.0 as u64, &args as *const MessageSend as u64, 0, 0))
 }
 
-/// Take the batch the peer sent at this reader's place in the connection's
-/// bytes, into `out`. Answers how many it wrote.
-///
-/// Never blocks: zero means no batch sits here, which for a reader that has
-/// just read a message carrying handles is a peer that broke its protocol. A
-/// batch larger than `out` is `InvalidArgument` and stays queued — `out`
-/// should be [`MAX_TRANSFER_HANDLES`] long.
-pub fn handle_recv(conn: RawHandle, out: &mut [RawHandle]) -> Result<usize, SyscallError> {
-    check(syscall(
-        SYS_HANDLE_RECV,
-        conn.0 as u64,
-        out.as_mut_ptr() as u64,
-        out.len() as u64,
-        0,
-    ))
-    .map(|n| n as usize)
+crate::user_safe! {
+    /// Arguments for `SYS_MESSAGE_RECV`, passed as a single pointer: where
+    /// the message's bytes go, its first `head_len` to `head` and the rest to
+    /// `bytes`, and where its handles go.
+    #[derive(Clone, Copy)]
+    pub struct MessageRecv {
+        pub head: u64,
+        pub head_len: u64,
+        pub bytes: u64,
+        pub len: u64,
+        pub handles: u64,
+        pub cap: u64,
+        /// [`MESSAGE_NONBLOCK`] or none; any other bit is `InvalidArgument`.
+        pub flags: u64,
+    }
 }
 
-/// Make a shared-memory region and answer a handle to it.
+impl MessageRecv {
+    fn new(head: &mut [u8], bytes: &mut [u8], handles: &mut [RawHandle], nonblock: bool) -> Self {
+        Self {
+            head: head.as_mut_ptr() as u64,
+            head_len: head.len() as u64,
+            bytes: bytes.as_mut_ptr() as u64,
+            len: bytes.len() as u64,
+            handles: handles.as_mut_ptr() as u64,
+            cap: handles.len() as u64,
+            flags: if nonblock { MESSAGE_NONBLOCK } else { 0 },
+        }
+    }
+}
+
+/// A message taken: how many bytes and handles it carried.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub struct Received {
+    pub len: usize,
+    pub handles: usize,
+}
+
+impl Received {
+    /// The answer's word: the length low, the handle count above it.
+    fn decode(word: u64) -> Self {
+        Self { len: (word & 0xFFFF_FFFF) as usize, handles: (word >> 32) as usize }
+    }
+
+    /// The word the kernel answers.
+    pub const fn encode(len: usize, handles: usize) -> u64 {
+        len as u64 | (handles as u64) << 32
+    }
+}
+
+const _: () = assert!(Received::encode(MAX_MESSAGE_LEN, MAX_TRANSFER_HANDLES) < u64::MAX - 255);
+
+/// Take `conn`'s next message whole: its first bytes into `head`, the rest
+/// into `bytes`, and its handles, each installed in this process's table,
+/// into `handles`. Two places, so a protocol's own header and the payload
+/// behind it each land where the caller keeps them, with no copy between.
 ///
-/// Fallible: a size the kernel cannot express in whole 2 MiB pages is
+/// Waits for one unless `nonblock`, which answers `WouldBlock`. Once the peer
+/// has gone and nothing is queued, `Gone`. **A message is never cut**: one
+/// larger than `head` and `bytes` together, or carrying more handles than
+/// `handles` holds, is `InvalidArgument`, and a table without room for its
+/// handles `ResourceExhausted`, both leaving it queued. A protocol bounds its
+/// own messages, so either is the peer breaking it.
+pub fn message_recv(
+    conn: RawHandle,
+    head: &mut [u8],
+    bytes: &mut [u8],
+    handles: &mut [RawHandle],
+    nonblock: bool,
+) -> Result<Received, SyscallError> {
+    let args = MessageRecv::new(head, bytes, handles, nonblock);
+    check(syscall(SYS_MESSAGE_RECV, conn.0 as u64, &args as *const MessageRecv as u64, 0, 0)).map(Received::decode)
+}
+
+/// Make a shared-memory region of zeroed memory and answer a handle to it.
+///
+/// Fallible: a size the kernel cannot express in whole pages is
 /// `InvalidArgument` and memory it does not have is `ResourceExhausted`. A
 /// daemon reaches both through a client's request, so neither may be an
 /// assertion here.
 pub fn shm_create(size: usize) -> Result<RawHandle, SyscallError> {
-    check(syscall(SYS_SHM_CREATE, size as u64, 0, 0, 0)).map(|v| RawHandle(v as u32))
+    shm_create_flags(size, 0)
 }
 
-/// Map the region `shm` names into this process. Needs [`Rights::MAP`].
+/// [`shm_create`], with [`SHM_DEVICE`] for memory a device is lent.
+pub fn shm_create_flags(size: usize, flags: u64) -> Result<RawHandle, SyscallError> {
+    check(syscall(SYS_SHM_CREATE, size as u64, flags, 0, 0)).map(|v| RawHandle(v as u32))
+}
+
+/// [`shm_create`], counted to the job `job` names (carrying `WRITE`) rather
+/// than the caller's: memory a launcher lays out for a child it starts in
+/// that job, such as its log ring.
+pub fn shm_create_for(job: RawHandle, size: usize) -> Result<RawHandle, SyscallError> {
+    check(syscall(SYS_SHM_CREATE, size as u64, SHM_FOR_JOB, job.0 as u64, 0)).map(|v| RawHandle(v as u32))
+}
+
+/// Map the region `shm` names into this process as `prot` says, and answer
+/// where: [`VmProt::Read`] needs [`Rights::MAP`], [`VmProt::ReadWrite`] needs
+/// [`Rights::WRITE`] beside it, and any other protection is `InvalidArgument`.
+/// A read-only mapping never becomes writable ([`vm_protect`]).
 ///
-/// Idempotent: a second call answers the first call's address. [`SyscallError::Gone`]
-/// when the region's last handle was closed under the call: nothing is mapped.
+/// Each call is a mapping of its own, which holds the region until it is taken
+/// away ([`munmap`]) or the process ends: closing a handle takes no mapping
+/// away, but for a device's window, which goes from every process with its
+/// last handle. [`SyscallError::Gone`] for such a window whose last handle was
+/// closed under the call: nothing is mapped.
+///
+/// [`Rights::MAP`]: crate::handle::Rights::MAP
+/// [`Rights::WRITE`]: crate::handle::Rights::WRITE
+///
+/// # Safety
+/// Caller must manage the returned pointer.
+pub unsafe fn shm_map(shm: RawHandle, prot: VmProt) -> Result<*mut u8, SyscallError> {
+    check(syscall(SYS_SHM_MAP, shm.0 as u64, prot as u64, 0, 0))
+        .map(|addr| core::ptr::with_exposed_provenance_mut(addr as usize))
+}
+
+/// A memory object over `len` bytes of the one `shm` names, from `offset`: the
+/// same pages, not a copy, so it is written by nobody when the original is
+/// written by nobody. The new handle carries `shm`'s rights. Needs
+/// [`Rights::MAP`]. `InvalidArgument` for an `offset` that is no whole number
+/// of [`PAGE_SIZE`]s, no bytes, a range past the object's bytes, or a device's
+/// window.
 ///
 /// [`Rights::MAP`]: crate::handle::Rights::MAP
 ///
 /// # Safety
-/// Caller must manage the returned pointer.
-pub unsafe fn shm_map(shm: RawHandle) -> Result<*mut u8, SyscallError> {
-    check(syscall(SYS_SHM_MAP, shm.0 as u64, 0, 0, 0))
-        .map(|addr| core::ptr::with_exposed_provenance_mut(addr as usize))
+/// As [`dup`]'s: the new handle reaches `shm`'s pages with its rights.
+pub unsafe fn shm_sub(shm: RawHandle, offset: u64, len: u64) -> Result<RawHandle, SyscallError> {
+    check(syscall(SYS_SHM_SUB, shm.0 as u64, offset, len, 0)).map(|v| RawHandle(v as u32))
 }
 
 /// The machine's [header](SYSINFO_HEADER_SIZE), then as much of the process
@@ -2027,6 +2357,17 @@ pub fn device_inventory(
         0,
     ))
     .map(|n| n as usize)
+}
+
+/// The [`crate::boot::BootSources`] the loader handed the kernel, unchanged.
+///
+/// `syscap` must carry [`crate::handle::Rights::INVENTORY`]: a capability
+/// without it is refused with a word, and a handle the caller does not hold
+/// ends it.
+pub fn boot_sources(syscap: RawHandle) -> Result<crate::boot::BootSources, SyscallError> {
+    let mut sources = crate::boot::BootSources::NONE;
+    check_unit(syscall(SYS_BOOT_SOURCES, syscap.0 as u64, core::ptr::from_mut(&mut sources) as u64, 0, 0))
+        .map(|()| sources)
 }
 
 /// A handle to the device set ([`crate::devset`]); `syscap` must carry
@@ -2121,6 +2462,14 @@ pub fn acpi_s5(claim: RawHandle, slp_typ_a: u64) -> Result<(), SyscallError> {
     check_unit(syscall(SYS_ACPI, claim.0 as u64, crate::acpi::op::S5, slp_typ_a, 0))
 }
 
+/// Declare one processor's idle states ([`crate::acpi::op::IDLE`]).
+/// `InvalidArgument` is a declaration the kernel will not enter on that
+/// processor, `NotFound` a UID that names no CPU it runs, and its log line
+/// says which; nothing of a refused one is kept.
+pub fn acpi_idle(claim: RawHandle, declaration: &crate::acpi::IdleDeclaration) -> Result<(), SyscallError> {
+    check_unit(syscall(SYS_ACPI, claim.0 as u64, crate::acpi::op::IDLE, declaration as *const crate::acpi::IdleDeclaration as u64, 0))
+}
+
 /// Declare the PCI root bridges ([`crate::acpi::op::DECLARE`]).
 /// `Ok` is the declaration held; [`SyscallError::InvalidArgument`] one the
 /// kernel refused, said in its log by name and leaving every PCI claim refused;
@@ -2145,7 +2494,11 @@ pub fn nanosleep(nanos: u64) {
 pub const RIGHTS_UNCHANGED: u64 = u64::MAX;
 
 /// A second handle to the same object, carrying what the first carries.
-pub fn dup(handle: RawHandle) -> Result<RawHandle, SyscallError> {
+///
+/// # Safety
+/// `handle` is live in this process for the call, and nothing that answers
+/// for it relies on being the object's only holder ([`crate::handle`]).
+pub unsafe fn dup(handle: RawHandle) -> Result<RawHandle, SyscallError> {
     check(syscall(SYS_HANDLE_DUP, handle.0 as u64, RIGHTS_UNCHANGED, 0, 0))
         .map(|v| RawHandle(v as u32))
 }
@@ -2156,7 +2509,10 @@ pub fn dup(handle: RawHandle) -> Result<RawHandle, SyscallError> {
 /// shrink, and asking to widen is a bug in the asker rather than a request to
 /// be quietly cut down to size. This is how the supervisor hands a program an `RT`-only
 /// `SysCap` while keeping the full one.
-pub fn dup_narrowed(handle: RawHandle, rights: Rights) -> Result<RawHandle, SyscallError> {
+///
+/// # Safety
+/// As [`dup`]'s.
+pub unsafe fn dup_narrowed(handle: RawHandle, rights: Rights) -> Result<RawHandle, SyscallError> {
     check(syscall(SYS_HANDLE_DUP, handle.0 as u64, rights.bits() as u64, 0, 0))
         .map(|v| RawHandle(v as u32))
 }
@@ -2292,57 +2648,88 @@ pub fn cpu_count() -> u32 {
     syscall(SYS_CPU_COUNT, 0, 0, 0, 0) as u32
 }
 
-/// Regions one address space holds — every mapping, ELF segment, stack, TLS
-/// block and library image; a placement past it is `ResourceExhausted`.
-pub const MAX_REGIONS: usize = 32_768;
-
-/// Map anonymous memory. Returns pointer on success, null on failure.
-///
-/// If `addr` is null, the kernel chooses the address — and so it does for
-/// `MmapFlags::FIXED` with a null `addr`, which asks for a placement and names
-/// none. With `FIXED` and a non-null `addr` the mapping is placed at exactly
-/// that address, which must be 2 MiB-aligned and must name a range lying whole
-/// inside the region the kernel's own placement search allocates from.
-///
-/// **A placed mapping answers for the range it names**, because it takes the
-/// question `find_gap` answers by construction for every other mapping:
-///
-/// - Over free space it maps, and the call answers `addr`.
-/// - Over exactly one whole mapping this process's own `mmap` made — the same
-///   address and the same `size`, to the byte — it replaces it, and the address
-///   keeps its meaning while changing what it names. The old range leaves the
-///   address space and the process's mapping list before the new one enters
-///   either, its pages go back to the allocator, and the shootdown a sibling
-///   thread's stale translation owes is done before the call returns.
-/// - Anything else is refused with `InvalidArgument` having created, replaced
-///   or unmapped nothing: part of a region, several regions, a region that
-///   merely starts at `addr`, and any whole range this process's `mmap` did
-///   not make — an ELF segment, a library image, a stack, a shared window.
-///
-/// POSIX unmaps whatever is in the way and says nothing. This address crossed
-/// the trust boundary like any other syscall argument, and a kernel that
-/// silently took a range it was not offered would be taking it from the loader.
+/// `len` bytes of private memory, rounded up to whole [`PAGE_SIZE`]s, placed
+/// as `at` says. Any `prot` but `None` commits the pages: they read as zeros
+/// and are populated as they are touched. `None` reserves them, and
+/// [`vm_protect`] commits them later.
 ///
 /// # Safety
-/// Caller is responsible for managing the returned memory region.
-pub unsafe fn mmap(addr: *mut u8, size: usize, prot: MmapProt, flags: MmapFlags) -> *mut u8 {
-    let result = syscall(SYS_MMAP, addr as u64, size as u64, prot.0, flags.0);
-    if SyscallError::from_u64(result).is_some() { core::ptr::null_mut() } else {
-        core::ptr::with_exposed_provenance_mut(result as usize)
-    }
+/// A `Fixed` range replaces whatever those pages held, so nothing may still
+/// reach that.
+pub unsafe fn vm_reserve(len: usize, prot: VmProt, at: VmAt) -> Result<*mut u8, SyscallError> {
+    let (place, kind) = match at {
+        VmAt::Anywhere { align } => (align as u64, VM_AT_ANYWHERE),
+        VmAt::Fixed(addr) => (addr as u64, VM_AT_FIXED),
+    };
+    check(syscall(SYS_VM_RESERVE, len as u64, prot as u64, place, kind))
+        .map(|addr| core::ptr::with_exposed_provenance_mut(addr as usize))
 }
 
-/// Unmap the whole mapping `mmap` returned at `addr`.
-///
-/// `size` is the `size` that `mmap` was passed, to the byte. No mapping
-/// starting at `addr` is `NotFound`; any other `size` — a prefix, more than
-/// the mapping, zero, a length that only rounds to the same pages — is
-/// `InvalidArgument` and unmaps nothing. A mapping has no part to give back.
+/// Ranges one address space holds, each a run of pages with one kind and
+/// protection: a call that could pass it is `ResourceExhausted`.
+pub const MAX_RANGES: usize = 32_768;
+
+/// Take away every page of `[addr, addr + len)`, as POSIX's `munmap` does: any
+/// run of whole pages, across ranges and the holes between them. `addr` off a
+/// page, or a `len` of zero, is `InvalidArgument` and takes nothing; so does a
+/// space holding nearly [`MAX_RANGES`], `ResourceExhausted`, since cutting a
+/// range in two adds one.
 ///
 /// # Safety
-/// Nothing reaches the mapping at `addr` after this answers `Ok`.
-pub unsafe fn munmap(addr: *mut u8, size: usize) -> Result<(), SyscallError> {
-    check_unit(syscall(SYS_MUNMAP, addr as u64, size as u64, 0, 0))
+/// Nothing reaches those pages after this answers `Ok`.
+pub unsafe fn vm_release(addr: *mut u8, len: usize) -> Result<(), SyscallError> {
+    check_unit(syscall(SYS_VM_RELEASE, addr as u64, len as u64, 0, 0))
+}
+
+/// Give every page of `[addr, addr + len)` the protection `prot`, as POSIX's
+/// `mprotect` does. A reserved private page becomes committed unless `prot` is
+/// `None`; a committed one keeps its contents and its commitment whatever
+/// `prot` is. A page of a shared object takes no protection past what it was
+/// mapped with. Every page must be held (`BadAddress` otherwise), and either
+/// every page changes or none does.
+///
+/// # Safety
+/// No live reference into the range relies on an access `prot` takes away.
+pub unsafe fn vm_protect(addr: *mut u8, len: usize, prot: VmProt) -> Result<(), SyscallError> {
+    check_unit(syscall(SYS_VM_PROTECT, addr as u64, len as u64, prot as u64, 0))
+}
+
+/// Free the frames behind every page of `[addr, addr + len)` and keep the
+/// pages committed: the next touch of a private page reads zeros, as Linux's
+/// `MADV_DONTNEED` makes it. Every page must be held.
+///
+/// # Safety
+/// Nothing relies on the private pages' contents.
+pub unsafe fn vm_discard(addr: *mut u8, len: usize) -> Result<(), SyscallError> {
+    check_unit(syscall(SYS_VM_DISCARD, addr as u64, len as u64, 0, 0))
+}
+
+/// Free the frames and the commitment of every page of `[addr, addr + len)`,
+/// which must all be private memory: they are reserved again, faulting on any
+/// access until [`vm_protect`] commits them.
+///
+/// # Safety
+/// Nothing reaches those pages meanwhile.
+pub unsafe fn vm_decommit(addr: *mut u8, len: usize) -> Result<(), SyscallError> {
+    check_unit(syscall(SYS_VM_DECOMMIT, addr as u64, len as u64, 0, 0))
+}
+
+/// Resize `[addr, addr + old_len)`, committed private memory of one
+/// protection that is not executable, to `new_len` bytes, both rounded up to
+/// whole pages: its pages keep their contents and a grown tail reads as
+/// zeros. It grows in place where the pages after it are free; otherwise, if
+/// `may_move`, its pages move to a new place, unmapped at the old, with
+/// nothing copied. A shrink gives back the tail in place.
+/// Answers where the range is now. Refused, it is left as it was:
+/// `BadAddress` for a page no range holds, `InvalidArgument` for any other
+/// memory or a zero length, and `ResourceExhausted` where it has no room.
+///
+/// # Safety
+/// Nothing reaches the old pages after this answers a new place, nor past
+/// `new_len` after a shrink.
+pub unsafe fn vm_remap(addr: *mut u8, old_len: usize, new_len: usize, may_move: bool) -> Result<*mut u8, SyscallError> {
+    check(syscall(SYS_VM_REMAP, addr as u64, old_len as u64, new_len as u64, may_move as u64))
+        .map(|at| core::ptr::with_exposed_provenance_mut(at as usize))
 }
 
 /// Non-blocking read. Returns bytes read, or `Err(WouldBlock)` if no data available.
@@ -2358,14 +2745,6 @@ pub fn write_nonblock(handle: RawHandle, buf: &[u8]) -> Result<usize, SyscallErr
     check(syscall(SYS_WRITE_NONBLOCK, handle.0 as u64, buf.as_ptr() as u64, buf.len() as u64, 0)).map(|n| n as usize)
 }
 
-/// Map a pipe's shared-memory ring buffer into this process's address space.
-/// Returns a pointer to the `RingHeader` at the start of the mapped region.
-///
-/// The mapping is writable, and the header is a publication: writing it tells
-/// the kernel nothing. Reads and writes still go through `SYS_READ`/`SYS_WRITE`.
-pub fn pipe_map(handle: RawHandle) -> Result<*mut u8, SyscallError> {
-    check(syscall(SYS_PIPE_MAP, handle.0 as u64, 0, 0, 0)).map(|v| v as *mut u8)
-}
 
 /// Map one memory BAR of a claimed PCI function, as an object `SYS_SHM_MAP`
 /// maps read/write and uncacheable.
@@ -2429,7 +2808,8 @@ pub fn device_dma_start(claim: RawHandle) -> Result<(), SyscallError> {
 
 /// Put the region `shm` names into the address space of the function `claim`
 /// holds, and answer where the function reaches it: the region's whole length,
-/// read and write, and nothing on either side of it.
+/// read and write, and nothing on either side of it. `shm` must carry
+/// [`Rights::WRITE`](crate::handle::Rights::WRITE), as a writable mapping does.
 ///
 /// For a driver serving a client out of the client's own memory — the client
 /// sends the region, and the device moves data straight into it. The region
@@ -2441,7 +2821,12 @@ pub fn device_dma_start(claim: RawHandle) -> Result<(), SyscallError> {
 /// mapped for this claim; `ResourceExhausted` with no run of the region's
 /// length left in the claim's [`LEND_WINDOW`](crate::pci::LEND_WINDOW), and
 /// `InvalidArgument` before the claim's [`device_dma_limit`] is stated.
-pub fn device_dma_map(claim: RawHandle, shm: RawHandle) -> Result<DmaMapping, SyscallError> {
+///
+/// # Safety
+/// `shm` is live in this process for the call, and nothing that answers for
+/// it relies on the region being written only through this process's own
+/// mapping ([`crate::handle`]).
+pub unsafe fn device_dma_map(claim: RawHandle, shm: RawHandle) -> Result<DmaMapping, SyscallError> {
     let mut mapping = DmaMapping { device_addr: 0, bytes: 0 };
     check_unit(syscall(
         SYS_DEVICE_DMA_MAP,
@@ -2586,6 +2971,29 @@ pub fn modules(answer: &[u8]) -> impl Iterator<Item = (ModuleInfo, &[u8])> {
 }
 
 crate::user_safe! {
+    /// A job's account, as [`SYS_ACCOUNT_INFO`] answers it, in bytes. A
+    /// job's memory stays counted to it while an object it made lives, so
+    /// an account outlives the processes that ran in it.
+    #[derive(Clone, Copy, Default, Debug, PartialEq, Eq)]
+    pub struct AccountInfo {
+        /// Held back for it however short every other job runs.
+        pub floor: u64,
+        /// Private and object memory its processes committed.
+        pub committed: u64,
+        /// Kernel memory it caused: heap its objects keep, its page tables,
+        /// pipes' bytes, and runs such as memory a device is lent.
+        pub kernel: u64,
+        /// The most of the two it held at once.
+        pub peak: u64,
+        /// What it would have held had its last refused request been
+        /// granted; zero if none was.
+        pub wanted: u64,
+        /// How many of its requests were refused for memory.
+        pub refusals: u64,
+    }
+}
+
+crate::user_safe! {
     /// Per-process accounting statistics, as [`SYS_PROCESS_STATS`] answers them.
     #[derive(Clone, Copy, Default)]
     pub struct ProcessStats {
@@ -2593,21 +3001,22 @@ crate::user_safe! {
         pub cpu_ns: u64,
         pub syscall_total: u64,
         pub syscall_total_ns: u64,
-        pub fault_demand_count: u32,
-        pub fault_zero_count: u32,
+        /// Faults served, and the time they took.
+        pub faults: u64,
         pub fault_ns: u64,
-        pub io_read_ops: u32,
         /// The process's own pid. Not authority — no syscall takes a pid — but it
         /// is the name a diagnostic prints, and this is where a holder of a handle
         /// reads it.
         pub pid: u32,
-        pub io_read_bytes: u64,
+        pub _pad: u32,
         pub blocked_io_ns: u64,
         pub blocked_futex_ns: u64,
         pub blocked_pipe_ns: u64,
         pub blocked_ipc_ns: u64,
         pub blocked_other_ns: u64,
         pub runqueue_wait_ns: u64,
+        /// The most private memory it held at once, in bytes, and the ranges
+        /// it has made.
         pub peak_memory: u64,
         pub alloc_count: u64,
     }
@@ -2861,4 +3270,144 @@ mod tests {
     fn a_short_dirent_is_a_broken_kernel() {
         read_listing(&[1, b'x', 0, 0, 0]);
     }
+}
+
+
+// ---------------------------------------------------------------------------
+// Paged objects: memory a pager supplies, read by its holders through the kernel.
+// ---------------------------------------------------------------------------
+
+/// The most pages one write-back range covers.
+pub const PAGED_RANGE_PAGES: u64 = 512;
+
+/// What a pager asks of one of its objects through [`SYS_PAGED_OP`], each
+/// with a [`PagedArgs`] naming the object by the id [`paged_create`] answered.
+#[repr(u64)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum PagedOp {
+    /// Copy `len` bytes from `buf` into fresh pages at `offset`, a whole page
+    /// in: clean, or dirty with [`PAGED_DIRTY`], which also grows the size to
+    /// the end of the bytes. A page already present is left as it is.
+    /// Answers the pages installed; `ResourceExhausted` where no page could
+    /// be had, `WouldBlock` at the dirty ceiling, `InvalidArgument` for a
+    /// clean page past the size or a dirty one past its end.
+    Supply = 0,
+    /// Copy `len` bytes from `buf` into the present pages at `offset`, dirty,
+    /// growing the size to their end as each page's bytes land. Answers the
+    /// bytes written, stopping at the first absent page; `NotFound` when the
+    /// first is absent, `WouldBlock` at the dirty ceiling.
+    Write = 1,
+    /// Remove the clean pages of `len` pages from page `offset` that no
+    /// write-back or write holds. Answers how many went.
+    Withdraw = 2,
+    /// Mark `len` pages from page `offset` failed: each read of one answers
+    /// `Io` until it is supplied again.
+    Fail = 3,
+    /// Set the size to `offset`. A shrink drops every page past it, dirty or
+    /// not, and zeroes the last page's tail; the new range of a growth reads
+    /// as the pager supplies it.
+    Resize = 4,
+    /// Begin writing back `len` pages from page `offset`, at most
+    /// [`PAGED_RANGE_PAGES`]: each dirty page is cleaned and held until the
+    /// end. `buf` receives a 64-byte bitmap of the pages begun.
+    WritebackBegin = 5,
+    /// End exactly a range begun, written to the device or not
+    /// ([`PAGED_WRITTEN`]): `buf` receives a 64-byte bitmap of the pages
+    /// still dirty, dirtied again since the begin or not written.
+    WritebackEnd = 6,
+    /// Read `len` bytes at `offset` into `buf`, never waiting: `WouldBlock`
+    /// where the first page is absent, a short count where a later one is.
+    Read = 7,
+    /// Let the object go: its pages go, its holders answer `Gone`, and its id
+    /// names another object once its last holder has gone.
+    Release = 8,
+}
+
+/// [`PagedOp::Supply`]'s pages are dirty.
+pub const PAGED_DIRTY: u64 = 1;
+/// [`PagedOp::WritebackEnd`]'s range reached the device.
+pub const PAGED_WRITTEN: u64 = 1;
+
+crate::user_safe! {
+    /// [`SYS_PAGED_OP`]'s arguments: what each word means is its
+    /// [`PagedOp`]'s. A byte range — a read's, a supply's, a write's — and a
+    /// size end at or below the last page a `u64` can end, or the call is
+    /// refused `InvalidArgument`; a page range — a withdrawal's, a failure's,
+    /// a write-back's — is clipped to the object.
+    #[derive(Clone, Copy, Default, Debug)]
+    pub struct PagedArgs {
+        pub object: u64,
+        pub offset: u64,
+        pub len: u64,
+        pub buf: u64,
+        pub flags: u64,
+    }
+}
+
+crate::user_safe! {
+    /// One thing a pager's object asks of it ([`paged_notices`]): the
+    /// object by its id, and either pages a reader waits for or that its last
+    /// holder went.
+    #[derive(Clone, Copy, Default, Debug, PartialEq, Eq)]
+    pub struct PagedNotice {
+        pub object: u64,
+        pub kind: u64,
+        /// [`NOTICE_REQUESTED`]'s first page and how many.
+        pub first: u64,
+        pub count: u64,
+    }
+}
+
+/// A reader waits for pages of the object.
+pub const NOTICE_REQUESTED: u64 = 1;
+/// The object's last holder handle went: it may be released.
+pub const NOTICE_NO_HOLDERS: u64 = 2;
+
+/// Make this process's one pager, whose objects' pages are at most
+/// `capacity`, `dirty` of them dirty at once, and which serves at most
+/// `objects` objects. A reader waiting past `report_ns` (bounded by the
+/// kernel) is reported overdue and waits on. Committed at once, and charged
+/// with the pager: `dirty` pages and the headroom a read's pages need, and
+/// the index and object table, which a capacity the job cannot hold is
+/// refused for (`ResourceExhausted`). `PermissionDenied` for a process not
+/// started as a pager, `AlreadyExists` for a second.
+pub fn pager_create(capacity: u64, dirty: u64, objects: u64, report_ns: u64) -> Result<RawHandle, SyscallError> {
+    check(syscall(SYS_PAGER_CREATE, capacity, dirty, objects, report_ns)).map(|raw| RawHandle(raw as u32))
+}
+
+/// A paged object of `size` bytes, its pages absent: its id, which `pager`'s
+/// calls and notices name it by. `ResourceExhausted` where the pager serves
+/// as many objects as it was made for.
+pub fn paged_create(pager: RawHandle, size: u64) -> Result<u64, SyscallError> {
+    check(syscall(SYS_PAGED_CREATE, pager.0 as u64, size, 0, 0))
+}
+
+/// A holder handle on `pager`'s object `object`, carrying `READ`, which may
+/// be narrowed, duplicated and sent.
+pub fn paged_holder(pager: RawHandle, object: u64) -> Result<RawHandle, SyscallError> {
+    check(syscall(SYS_PAGED_HOLDER, pager.0 as u64, object, 0, 0)).map(|raw| RawHandle(raw as u32))
+}
+
+/// A holder's read of at most `out.len()` bytes at `offset`, up to the size;
+/// 0 at or past it. It waits for every absent page until its pager supplies
+/// or fails it, the object shrinks or is released, or the pager ends: `Io`
+/// for a failed page before any byte was read (a short count after some),
+/// `Gone` once the object or the pager ended. A pager's process is refused,
+/// `PermissionDenied`, as is a holder without `READ`; any other kind of
+/// handle, `InvalidArgument`, so a peer's claim that a handle is a holder
+/// can be checked.
+pub fn paged_read(holder: RawHandle, out: &mut [u8], offset: u64) -> Result<usize, SyscallError> {
+    check(syscall(SYS_PAGED_READ, holder.0 as u64, out.as_mut_ptr() as u64, out.len() as u64, offset)).map(|n| n as usize)
+}
+
+/// One [`PagedOp`] on one of `pager`'s objects.
+pub fn paged_op(pager: RawHandle, op: PagedOp, args: &PagedArgs) -> Result<u64, SyscallError> {
+    check(syscall(SYS_PAGED_OP, pager.0 as u64, op as u64, args as *const PagedArgs as u64, 0))
+}
+
+/// What `pager`'s objects ask of it, into `out`: how many it filled. Each is
+/// answered once; what does not fit waits for the next call, and the pager
+/// reads ready while any does.
+pub fn paged_notices(pager: RawHandle, out: &mut [PagedNotice]) -> Result<usize, SyscallError> {
+    check(syscall(SYS_PAGED_NOTICES, pager.0 as u64, out.as_mut_ptr() as u64, out.len() as u64, 0)).map(|n| n as usize)
 }

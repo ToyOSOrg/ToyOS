@@ -14,17 +14,17 @@
 //! machine's CPUs.
 //!
 //! Each system runs it once with all three workloads in this program's own
-//! group, and once with a group per workload. On ToyOS the group is the Job
-//! object its threads share CPU time under: `onejob` leaves the three in this
-//! program's, and `perjob` starts each workload in a Job of its own
-//! (`SysCap::new_job`, which needs `Rights::JOBS`). On Linux `flat` leaves
-//! them in this process's session and cgroup, where the fair unit is the
-//! thread; `session` gives each a session of its own, whose autogroup is the
-//! unit where autogroup applies; and `scope` puts each in a transient
-//! `systemd-run --user --scope` with equal `CPUWeight`, whose cgroup is the
-//! unit where the user's manager has the `cpu` controller. A `units` line says
-//! which unit applied: `3xcgroup` is a cgroup per workload, `1xcgroup` one
-//! cgroup for all three.
+//! group, `shared`, and once with a group per workload, `apart`; a line per
+//! job, `fair.<grouping>.<job>`. On ToyOS the group is the Job object its
+//! threads share CPU time under, and `apart` starts each workload in a Job of
+//! its own (`SysCap::new_job`, which needs `Rights::JOBS`). On Linux `shared`
+//! leaves them in this process's session and cgroup, where the fair unit is
+//! the thread, and `apart` puts each in a transient `systemd-run --user
+//! --scope` with equal `CPUWeight`, whose cgroup is the unit where the user's
+//! manager has the `cpu` controller; Linux also runs `session`, a session
+//! each, whose autogroup is the unit where autogroup applies. A `units` line
+//! says which unit applied: `3xcgroup` is a cgroup per workload, `1xcgroup`
+//! one cgroup for all three.
 
 use std::process::{Command, Stdio};
 use std::thread;
@@ -196,8 +196,8 @@ fn units(_: Grouping, keys: &[String]) -> String {
 #[cfg(target_os = "toyos")]
 fn units(grouping: Grouping, _: &[String]) -> String {
     match grouping {
-        Grouping::Plain => "1xjob",
-        Grouping::Job => "3xjob",
+        Grouping::Shared => "1xjob",
+        Grouping::Apart => "3xjob",
     }
     .into()
 }
@@ -213,48 +213,35 @@ fn stop(children: impl IntoIterator<Item = (&'static str, std::process::Child)>)
 /// How the coordinator starts each job.
 #[derive(Clone, Copy)]
 pub enum Grouping {
-    /// Every job in this program's group: ToyOS's `onejob`, Linux's `flat`.
-    Plain,
-    /// Each workload in a ToyOS Job of its own.
-    #[cfg(target_os = "toyos")]
-    Job,
+    /// Every job in this program's group.
+    Shared,
+    /// Each workload in a group of its own: a ToyOS Job, a Linux scope's cgroup.
+    Apart,
+    /// Each workload in a Linux session, whose autogroup is the unit.
     #[cfg(target_os = "linux")]
     Session,
-    #[cfg(target_os = "linux")]
-    Scope,
 }
 
 impl Grouping {
     fn name(self) -> &'static str {
         match self {
-            #[cfg(target_os = "toyos")]
-            Grouping::Plain => "onejob",
-            #[cfg(target_os = "toyos")]
-            Grouping::Job => "perjob",
-            #[cfg(target_os = "linux")]
-            Grouping::Plain => "flat",
+            Grouping::Shared => "shared",
+            Grouping::Apart => "apart",
             #[cfg(target_os = "linux")]
             Grouping::Session => "session",
-            #[cfg(target_os = "linux")]
-            Grouping::Scope => "scope",
         }
     }
 
     fn command(self, exe: &std::path::Path) -> Result<Command, String> {
         match self {
-            Grouping::Plain => Ok(Command::new(exe)),
+            Grouping::Shared => Ok(Command::new(exe)),
             #[cfg(target_os = "toyos")]
-            Grouping::Job => {
+            Grouping::Apart => {
                 use std::os::toyos::process::CommandExt;
-                use toyos::syscap::SysCap;
-                static CAP: std::sync::OnceLock<Option<SysCap>> = std::sync::OnceLock::new();
-                let cap = CAP
-                    .get_or_init(|| toyos::endow::Endowments::get().take(toyos::endow::SYSCAP_LABEL))
-                    .as_ref()
-                    .ok_or("no capability was endowed, so no job can be made")?;
+                let cap = crate::sys::syscap().ok_or("no capability was endowed, so no job can be made")?;
                 let job = cap.new_job().map_err(|e| format!("a new job was refused: {e:?}"))?;
                 let mut command = Command::new(exe);
-                command.endow(toyos::job::JOB_LABEL, job.into_raw().0);
+                command.endow(toyos::job::JOB_LABEL, job.into());
                 Ok(command)
             }
             #[cfg(target_os = "linux")]
@@ -272,7 +259,7 @@ impl Grouping {
                 Ok(command)
             }
             #[cfg(target_os = "linux")]
-            Grouping::Scope => {
+            Grouping::Apart => {
                 let mut command = Command::new("systemd-run");
                 command.args(["--user", "--scope", "--quiet", "--collect", "-p", "CPUWeight=100", "--"]).arg(exe);
                 Ok(command)
@@ -353,11 +340,11 @@ pub fn contend(grouping: Grouping) {
         let mut permille: Vec<u64> = counts.iter().zip(&totals).map(|(c, t)| c * 1000 / t).collect();
         permille.sort_unstable();
         let cpus_milli = permille[permille.len() / 2] * cpus;
-        let mut extra = vec![("job", kind.to_string()), ("cpus_milli_p50", cpus_milli.to_string())];
+        let mut extra = vec![("cpus_milli_p50", cpus_milli.to_string())];
         if *kind == "helpers" {
             extra.push(("helpers_spawned", helpers.clone()));
         }
-        result(&bench, "permille", &mut permille, &extra);
+        result(&format!("{bench}.{kind}"), "permille", &mut permille, &extra);
     }
     let mut rate: Vec<u64> = totals.iter().map(|t| t * 1_000_000_000 / windows.width).collect();
     result(&format!("{bench}.total"), "chunks/s", &mut rate, &[]);
@@ -365,10 +352,10 @@ pub fn contend(grouping: Grouping) {
 
 #[cfg(target_os = "linux")]
 pub fn groupings() -> [Grouping; 3] {
-    [Grouping::Plain, Grouping::Session, Grouping::Scope]
+    [Grouping::Shared, Grouping::Apart, Grouping::Session]
 }
 
 #[cfg(target_os = "toyos")]
 pub fn groupings() -> [Grouping; 2] {
-    [Grouping::Plain, Grouping::Job]
+    [Grouping::Shared, Grouping::Apart]
 }

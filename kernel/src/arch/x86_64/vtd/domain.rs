@@ -21,6 +21,7 @@ use alloc::vec::Vec;
 use crate::iommu::domains::{self, Domains};
 use crate::iommu::{AddressWidth, DomainId, IommuError, Iova, Limit, StreamId};
 use crate::sync::Lock;
+use kernel::rmrr::Verdict as Reserved;
 
 use super::table::{self, Space};
 use super::{TABLES, UNITS};
@@ -39,6 +40,9 @@ struct Vtd {
     agreement: Agreement,
     domains: Domains<Space>,
 }
+
+/// Every function the RMRRs name, with its verdict, before any domain is made.
+static RESERVED: Lock<Vec<(StreamId, Reserved)>> = Lock::new(Vec::new());
 
 static DOMAINS: Lock<Vtd> =
     Lock::new(Vtd { agreement: Agreement::None, domains: Domains::new(table::KERNEL_DOMAIN + 1) });
@@ -73,6 +77,53 @@ pub fn create(room: u64, windows: Option<&[toyos_abi::acpi::RootBridgeWindow]>) 
     let space = Space { root: TABLES.lock().alloc(), width };
     let what = alloc::format!("root={:#x} aw={} mgaw={mgaw}", space.root.phys(), width.bits());
     Ok(held.domains.add(next, space, what))
+}
+
+pub fn reserve(stream: StreamId, reserved: Reserved) {
+    RESERVED.lock().push((stream, reserved));
+}
+
+/// Why no claim may have `stream`, if an RMRR refuses it.
+pub fn unclaimable(stream: StreamId) -> Option<&'static str> {
+    RESERVED.lock().iter().find_map(|(named, reserved)| match reserved {
+        Reserved::Refused(why) if *named == stream => Some(*why),
+        _ => None,
+    })
+}
+
+/// Map every RMRR kept for `stream` at its own address in `id`, which
+/// `stream` attaches to next: firmware requires each stay identity-mapped for
+/// the devices in its scope (VT-d Rev. 4.0 §8.4), and on the T14 the iGPU's
+/// scan-out reads the firmware's framebuffer there. `kernel::rmrr` merged
+/// them, so each address is placed once, in the leaves `kernel::rmrr::leaves`
+/// names; no domain's window hands out the 2 MiB leaves a range touches
+/// ([`avoid`]), so nothing granted or lent is ever placed beside them.
+pub fn keep_reserved(id: DomainId, stream: StreamId) {
+    let kept: Vec<(u64, u64)> = RESERVED
+        .lock()
+        .iter()
+        .filter(|(named, _)| *named == stream)
+        .flat_map(|(_, reserved)| match reserved {
+            Reserved::Kept(ranges) => ranges.clone(),
+            Reserved::Refused(_) => Vec::new(),
+        })
+        .collect();
+    for (start, end) in kept {
+        let held = DOMAINS.lock();
+        let space = held.domains.reserved_space(id, start, end);
+        let mut units = UNITS.lock();
+        let mut tables = TABLES.lock();
+        for leaf in kernel::rmrr::leaves(start, end) {
+            match leaf {
+                kernel::rmrr::Leaf::Large(at) => table::put(&mut tables, space, at, at),
+                kernel::rmrr::Leaf::Page(at) => table::put_4k(&mut tables, space, at, at),
+            }
+        }
+        for unit in units.iter_mut() {
+            unit.invalidate_domain(id.raw());
+        }
+        log!("iommu: domain{} keeps {stream}'s reserved {start:#x}..{end:#x} at its own address", id.raw());
+    }
 }
 
 pub fn map(id: DomainId, phys: u64, bytes: u64, limit: Limit) -> Result<Iova, IommuError> {

@@ -248,7 +248,7 @@ pub fn ms(i: Instant) -> u64 {
 pub fn framed(t: &Transmission) -> Vec<u8> {
     use toyos_net_ip::{Ip, Sent, FRAME};
     let mut ip = Ip::new(Instant::from_nanos(0), [0x5a; 16]);
-    let if0 = ip.add_interface(Instant::from_nanos(0), IndividualMac::new(MAC_A).unwrap());
+    let if0 = ip.add_interface(Instant::from_nanos(0), IndividualMac::new(MAC_A).unwrap(), toyos_net_ip::Rank(0));
     ip.link_up(Instant::from_nanos(0), if0).unwrap();
     ip.add_address(Instant::from_nanos(0), if0, A, 24).unwrap();
     let setup = |ip: &mut Ip, until: Instant| {
@@ -274,12 +274,12 @@ pub fn framed(t: &Transmission) -> Vec<u8> {
     let socket = udp.bind(&ip, Ipv4Addr::UNSPECIFIED, toyos_net_wire::Port::new(68), || 0).unwrap();
     udp.set_acquisition(socket).unwrap();
     udp.set_broadcast(socket, true).unwrap();
-    udp.send_from(&mut ip, socket, t.source, t.destination, 67, &t.payload).unwrap();
+    udp.send_from(&mut ip, socket, toyos_net_udp::Origin { iface: if0, source: t.source }, t.destination, 67, &t.payload).unwrap();
     let mut frame = Vec::new();
     let sent = udp.serve(toyos_net_udp::Sender::Socket(socket), |out| {
         let mut buf = [0u8; FRAME];
-        match ip.send_udp(now, out, &mut buf) {
-            Ok(Sent::Frame(n)) => frame = buf[..n].to_vec(),
+        match ip.send_udp(now, &usize::MAX, out, &mut buf) {
+            Ok(Sent::Frame { len: n, .. }) => frame = buf[..n].to_vec(),
             other => panic!("{other:?}"),
         }
         toyos_net_udp::Offer::Taken

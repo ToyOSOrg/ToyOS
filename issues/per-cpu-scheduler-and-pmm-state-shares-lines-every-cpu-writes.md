@@ -9,12 +9,10 @@ opened: 2026-10-12
 Three structures put what each CPU writes, on its hot path, on a line or a lock
 every other CPU writes too:
 
-- **The PMM lock, per user copy.** Every user-copy window pins the frames it
-  covers and unpins them after (`kernel/src/user_ptr.rs:301-309`), and each
-  is a pass over the one global `BITMAP` lock
-  (`kernel/src/mm/pmm.rs:98`, `pin_range` and `unpin_range` at `:249-279`):
-  two acquisitions of the machine's one frame-allocator lock per copied run,
-  on every syscall that copies.
+- **The frame allocator's one lock.** Pins take no lock (`kernel::frames::Pins`),
+  but every frame allocated or freed takes the machine's one `FRAMES` lock
+  (`kernel/src/mm/pmm.rs`): each 4 KiB page a fault or a copy populates,
+  each frame a release frees, from every CPU.
 - **`CpuHandle`.** Unpadded (`kernel/pure/sched/cpu.rs:2136-2175`) in one
   boxed slice (`cpu.rs:2290`), 32 bytes by its fields without `sched-check`,
   so two CPUs' handles share a line. Each pass stores its own `load`, `surplus` and `last_pass`
@@ -46,7 +44,7 @@ AMD documents: 8 quadwords by CPUID.01H:EBX[15:8] (PPR 55922 rev. 3.06,
 `CPUID_Fn00000001_EBX[15:8]`), and 64 bytes (Software Optimization Guide for
 AMD Family 17h Processors, 55723 rev. 3.00, §2.6.1).
 
-Nothing in the run attributes a miss to the `BITMAP` lock, `IN_PASS`,
+Nothing in the run attributes a miss to the frame allocator's lock, `IN_PASS`,
 `CpuHandle` or `Frontier`, and the AMD bench was not read. The next
 measurement attributes the HITM count to the lines it lands on, on both
 benches.

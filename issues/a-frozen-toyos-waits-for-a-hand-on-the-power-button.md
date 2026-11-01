@@ -7,7 +7,7 @@ opened: 2026-09-30
 # A frozen ToyOS waits for a hand on the power button
 
 No shipped image arms a hardware watchdog or the hard-lockup detector: the
-kernel arms the chipset's TCO only on the `watchdog` parameter
+kernel arms the chipset's watchdog only on the `watchdog` parameter
 (`arch::watchdog::init`), feeds it from the scheduler pass
 (`kernel/src/sched/driver.rs:512`), and arms the detector only through
 `boot-deadline=` (`kernel/src/deadline.rs:168-183`).
@@ -64,7 +64,8 @@ fails to build. `Armed`'s `(0, _)` arm, which nothing reaches, is gone.
 **Then, once loader stage 7 has taken Ubuntu**, whose `iTCO_wdt_probe` clears
 `SECOND_TO_STS` (Linux 6.12, `drivers/watchdog/iTCO_wdt.c:545-560`), out of the
 loop: **the reading**, `watchdog_resets`' metal row in
-`issues/the-guest-suite-runs-only-what-no-cheaper-tier-reaches.md`. The
+`issues/the-guest-suite-runs-only-what-no-cheaper-tier-reaches.md`, which
+judges the AMD bench's FCH and has no TCO judge yet. The
 owner's ruling (2026-10-03): one T14 boot may stop feeding the chipset's
 watchdog on purpose, "only if its quick i dont want tests doing nothing for a
 long time". So the row's wait is bounded by the watchdog's own bound and fails

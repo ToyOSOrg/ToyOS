@@ -163,8 +163,8 @@ impl Arch {
     /// TCG guest that withholds one is a feature this tree stops exercising.
     pub const fn cpu(self, accel: Accel) -> &'static str {
         match (self, accel.is_hardware()) {
-            (Arch::X86_64, true) => "host,+rdrand,+smap,+fsgsbase,+x2apic,+smep,+ssse3,+sse4.1,+sse4.2,+xsave,+xsaveopt,+avx,+avx2",
-            (Arch::X86_64, false) => "qemu64,+rdrand,+smap,+fsgsbase,+x2apic,+smep,+ssse3,+sse4.1,+sse4.2,+xsave,+xsaveopt,+avx,+avx2",
+            (Arch::X86_64, true) => "host,+invtsc,+rdrand,+smap,+fsgsbase,+x2apic,+smep,+ssse3,+sse4.1,+sse4.2,+xsave,+xsaveopt,+avx,+avx2",
+            (Arch::X86_64, false) => "qemu64,+rdrand,+rdtscp,+smap,+fsgsbase,+x2apic,+smep,+ssse3,+sse4.1,+sse4.2,+xsave,+xsaveopt,+avx,+avx2",
             (Arch::Aarch64, true) => "host",
             (Arch::Aarch64, false) => "max",
         }

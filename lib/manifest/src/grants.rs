@@ -30,6 +30,8 @@
 
 use std::fmt;
 
+use toyos::launch::is_canonical;
+
 use crate::package::{self, DIGEST_LEN};
 use crate::{session_home, MAX_PROGRAM_NAME};
 
@@ -120,7 +122,7 @@ pub enum Answer {
 /// one it may be.
 pub fn folder(path: &str) -> Result<(), String> {
     let home = session_home();
-    if path.contains(char::is_control) || !package::is_canonical(path) {
+    if path.contains(char::is_control) || !is_canonical(path) {
         return Err(format!("{path:?} is not a canonical path"));
     }
     if path == home {
@@ -183,7 +185,7 @@ pub fn decide(stored: Option<&Entry>, binary: &str, ceiling: Option<Access>, at_
 /// own where it lies inside the folder, and the folder's root otherwise.
 pub fn cwd(folder: &str, caller: &str) -> String {
     let inside = caller == folder || caller.strip_prefix(folder).is_some_and(|rest| rest.starts_with('/'));
-    match inside && package::is_canonical(caller) {
+    match inside && is_canonical(caller) {
         true => caller.to_string(),
         false => folder.to_string(),
     }

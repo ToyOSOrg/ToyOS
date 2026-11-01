@@ -1,5 +1,6 @@
 /* What libc refuses: each call answers failure in its own POSIX form, errno
-   says why, and nothing is done: ENOSYS where ToyOS lacks the function, ECHILD
+   says why, and nothing is done: ENOSYS where ToyOS lacks the function,
+   ENOTSUP where the kernel's /tmp keeps no second name or set time, ECHILD
    for a wait with no child to wait for, and the errno POSIX names for a
    lock, a limit or a mapping it cannot take, or memory it cannot give. */
 #include <errno.h>
@@ -82,7 +83,8 @@ int main(void) {
     said("getrlimit", getrlimit(RLIMIT_STACK, &limit));
     said("setrlimit", setrlimit(RLIMIT_CORE, &limit));
     said("msync", msync(page, 4096, MS_SYNC));
-    said("mprotect", mprotect(page, 4096, PROT_READ));
+    said("mprotect executable", mprotect(page, 4096, PROT_READ | PROT_EXEC));
+    said("mprotect off a page", mprotect(page + 1, 4096, PROT_READ));
     said("utimes", utimes(FILE_PATH, NULL));
     int status = 0;
     said("wait", wait(&status));
@@ -134,9 +136,8 @@ int main(void) {
     said("mmap executable", mmap(NULL, 4096, PROT_READ | PROT_EXEC, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0) == MAP_FAILED ? -1 : 0);
     said("mmap nothing", mmap(NULL, 0, PROT_READ, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0) == MAP_FAILED ? -1 : 0);
 
-    /* munmap: a whole mapping, by any length that ends in its last page, or
-       nothing. Of two pages the first alone is refused and the second keeps
-       its byte, as do the second alone, no bytes, and a byte past both. */
+    /* munmap: any run of whole pages, as POSIX unmaps them, and a fixed
+       mapping of the first of two pages replaces that page alone. */
     char *pair = mmap(NULL, 8192, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
     if (pair == MAP_FAILED) {
         printf("could not map two pages\n");
@@ -144,17 +145,14 @@ int main(void) {
     }
     pair[0] = 'f';
     pair[4096] = 's';
-    /* Nor does a fixed mapping of the first page replace the second. */
     said("mmap the first of two pages fixed",
          mmap(pair, 4096, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS | MAP_FIXED, -1, 0) == MAP_FAILED ? -1 : 0);
-    printf("pages after it: %c %c\n", pair[0], pair[4096]);
+    printf("pages after it: %c %c\n", pair[0] ? pair[0] : '0', pair[4096]);
     said("munmap the first of two pages", munmap(pair, 4096));
-    printf("pages after it: %c %c\n", pair[0], pair[4096]);
-    said("munmap the second of two pages", munmap(pair + 4096, 4096));
+    printf("the second page after it: %c\n", pair[4096]);
     said("munmap no bytes", munmap(pair, 0));
-    said("munmap a byte past two pages", munmap(pair, 8193));
-    printf("pages after them: %c %c\n", pair[0], pair[4096]);
-    said("munmap two pages by a length into the second", munmap(pair, 4097));
+    said("munmap off a page", munmap(pair + 1, 4096));
+    said("munmap the second of two pages", munmap(pair + 4096, 4096));
     said("munmap them again", munmap(pair, 8192));
     /* A length off a page maps the pages it reaches into, and is unmapped by
        that length or by those pages'. */
@@ -182,8 +180,8 @@ int main(void) {
     said("sysconf 12345", sysconf(12345));
 
     /* posix_madvise takes every advice and answers an error number; madvise
-       takes its hints and refuses MADV_DONTNEED's discard, which would have
-       zeroed the page. */
+       takes its hints, and MADV_DONTNEED discards the page, which then reads
+       zeros. */
     page[0] = 'x';
     printf("posix_madvise WILLNEED: %d\n", posix_madvise(page, 4096, POSIX_MADV_WILLNEED));
     printf("posix_madvise 99: %s\n", errno_name(posix_madvise(page, 4096, 99)));
@@ -191,7 +189,7 @@ int main(void) {
     said("madvise DONTNEED", madvise(page, 4096, MADV_DONTNEED));
     said("madvise off a page", madvise(page + 1, 4096, MADV_WILLNEED));
     said("madvise 99", madvise(page, 4096, 99));
-    printf("page after madvise: %c\n", page[0]);
+    printf("page after madvise: %s\n", page[0] == 0 ? "zeros" : "its old bytes");
 
     /* Nothing refused was done: the file has its one byte, its mode through
        its name and its descriptor, and no second name; the page is still

@@ -7,10 +7,14 @@ license = "MIT OR Apache-2.0"
 
 [dependencies]
 toyos-abi = { path = "../../../sdk/abi" }
-toyos = { path = "../../../sdk/toyos" }
+toyos = { path = "../../../sdk/toyos", features = ["std"] }
 toyos-window = { path = "../../../sdk/window" }
 toyos-tco = { path = "../../../lib/tco" }
 toyos-inspect = { path = "../../../lib/inspect" }
+# The reader's question to netstack, for `link_failover`'s per-link counts.
+inspect = { path = "../../../system/inspect" }
+# A login session opened by a job, for `app_view`'s grants.
+toyos-session = { path = "../../../lib/session" }
 # The log as logkeeper serves it, and the asking for it, for `counters_metal`'s
 # wait on the log being quiet.
 toyos-logstream = { path = "../../../lib/logstream" }
@@ -21,12 +25,15 @@ acpiserver-api = { path = "../../../lib/acpiserver-api" }
 toyos-trace = { path = "../../../lib/trace" }
 # The I219's driver, the claim's register window and grant, and the kernel's
 # capability walk, for `i219_msi`'s judgement of its interrupts on the T14.
-toyos-i219 = { path = "../../../system/netstack/i219" }
+toyos-i219 = { path = "../../../system/i219/driver" }
 toyos-device-memory = { path = "../../../lib/device-memory" }
 toyos-pci-claim = { path = "../../../lib/pci-claim" }
 toyos-pci = { path = "../../../kernel/pci" }
 libloading = { git = "https://github.com/ToyOSOrg/rust_libloading", branch = "toyos-sdk-0.12" }
 cpal = { git = "https://github.com/ToyOSOrg/cpal", branch = "toyos-0.18.0" }
+# Its ToyOS selector and waker, which no program in the image builds, for
+# `mio_waker_coalesces`.
+mio = { git = "https://github.com/ToyOSOrg/mio", branch = "toyos", features = ["os-poll"] }
 memmap2 = "0.9"
 # `ring`'s primitives, for `ring_kat`'s known answers and as `crypto_parity`'s
 # reference.

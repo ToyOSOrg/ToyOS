@@ -15,8 +15,9 @@
 //!
 //! **A datagram waits for its next hop where it was accepted.** One the caller answers
 //! [`Offer::Waits`] stays in its sender's queue, under that queue's bound, and is passed over
-//! until [`Udp::wake`] names the hop: the sender's datagrams to other hops leave meanwhile, and
-//! those to one hop leave in the order they were accepted. One whose hop [`Udp::fail`] names is
+//! until [`Udp::wake`] names the hop on its interface: the sender's datagrams to other hops leave
+//! meanwhile, and those to one hop leave in the order they were accepted. One whose hop on its
+//! interface [`Udp::fail`] names is
 //! dropped, counted, and reported to a connected socket; nothing is kept for another try.
 //!
 //! **Refusals are values.** Every refusal is a named [`Counter`] and the [`Error`] the call
@@ -42,7 +43,7 @@ use alloc::collections::{BTreeMap, VecDeque};
 use alloc::vec::Vec;
 use core::net::Ipv4Addr;
 
-use toyos_net_ip::{Arrival, Cast, ErrorClass, Flow, Ip, Source, Transport, TransportError, UdpOut};
+use toyos_net_ip::{Arrival, Cast, ErrorClass, Flow, IfIndex, Ip, Source, Transport, TransportError, UdpOut};
 use toyos_net_wire::addr::is_martian;
 use toyos_net_wire::ethernet::MacClass;
 use toyos_net_wire::ipv4::Ttl;
@@ -158,6 +159,8 @@ pub struct Received {
     pub destination: Ipv4Addr,
     pub ttl: u8,
     pub link_broadcast: bool,
+    /// The interface it arrived by.
+    pub iface: IfIndex,
     pub at: Instant,
 }
 
@@ -189,7 +192,16 @@ struct Stored {
     destination: Ipv4Addr,
     ttl: u8,
     link_broadcast: bool,
+    iface: IfIndex,
     at: Instant,
+}
+
+/// Where the acquisition socket's datagram is from: the source it names, and the interface whose
+/// address it acquires, which alone it leaves by.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Origin {
+    pub iface: IfIndex,
+    pub source: Ipv4Addr,
 }
 
 /// A datagram accepted for sending, with the addressing it was accepted with.
@@ -205,8 +217,11 @@ struct Queued {
     /// leaves is decided by this, not by what the socket holds then.
     broadcast: bool,
     payload: Vec<u8>,
-    /// The next hop whose link address it waits for: not offered until [`Udp::wake`] names it.
-    waits: Option<Ipv4Addr>,
+    /// The interface the send named, which alone it may leave by.
+    iface: Option<IfIndex>,
+    /// The next hop, and its interface, whose link address it waits for, or the hop of a link
+    /// with no room: not offered until [`Udp::wake`] names both.
+    waits: Option<(IfIndex, Ipv4Addr)>,
 }
 
 impl Queued {
@@ -216,6 +231,7 @@ impl Queued {
             destination: self.destination,
             ttl: self.ttl,
             broadcast: self.broadcast,
+            iface: self.iface,
             datagram: UdpBuilder { source: self.source_port, destination: self.port, data: &self.payload },
         }
     }
@@ -263,9 +279,10 @@ pub enum Sender {
 pub enum Offer {
     /// It left [udp]: in a frame, or refused by [ip], which counted it and told its flow.
     Taken,
-    /// The link address of this next hop is being asked for: the datagram stays with its sender
-    /// until [`Udp::wake`] or [`Udp::fail`] names the hop.
-    Waits(Ipv4Addr),
+    /// The link address of this next hop on this interface is being asked for, or the interface
+    /// has no room: the datagram stays with its sender until [`Udp::wake`] or [`Udp::fail`] names
+    /// the hop on its interface.
+    Waits { iface: IfIndex, hop: Ipv4Addr },
 }
 
 /// What [`Udp::serve`] handed the caller.
@@ -428,6 +445,17 @@ impl Udp {
         self.socket(id).map(|s| s.broadcast = permitted)
     }
 
+    /// Whether [`Self::set_broadcast`] last permitted it.
+    pub fn broadcast(&mut self, id: SocketId) -> Result<bool, Error> {
+        self.socket(id).map(|s| s.broadcast)
+    }
+
+    /// Whether a [`Self::recv`] has something to answer: a datagram, or the socket's pending
+    /// error.
+    pub fn readable(&mut self, id: SocketId) -> Result<bool, Error> {
+        self.socket(id).map(|s| !s.rx.is_empty() || s.pending.is_some())
+    }
+
     pub fn set_ttl(&mut self, id: SocketId, unicast: Ttl, multicast: Ttl) -> Result<(), Error> {
         self.socket(id).map(|s| {
             s.ttl = unicast;
@@ -492,14 +520,14 @@ impl Udp {
 
     /// Queues `payload` for `destination:port`. Accepted means queued, not sent.
     pub fn send_to(&mut self, ip: &mut Ip, id: SocketId, destination: Ipv4Addr, port: u16, payload: &[u8]) -> Result<(), Error> {
-        self.submit(ip, id, None, destination, port, payload)
+        self.submit(ip, id, (None, None), destination, port, payload)
     }
 
     /// Queues `payload` for the connected peer.
     pub fn send(&mut self, ip: &mut Ip, id: SocketId, payload: &[u8]) -> Result<(), Error> {
         let socket = self.socket(id)?;
         match socket.binding {
-            Binding::Connected { peer, peer_port, .. } => self.submit(ip, id, None, peer, peer_port.get(), payload),
+            Binding::Connected { peer, peer_port, .. } => self.submit(ip, id, (None, None), peer, peer_port.get(), payload),
             Binding::Any | Binding::Specific(_) => {
                 self.count(Counter::NotConnected);
                 Err(Error::Refused(Counter::NotConnected))
@@ -509,11 +537,19 @@ impl Udp {
 
     /// The acquisition socket's send, naming its source: 0.0.0.0 to the limited broadcast, or an
     /// assigned address.
-    pub fn send_from(&mut self, ip: &mut Ip, id: SocketId, source: Ipv4Addr, destination: Ipv4Addr, port: u16, payload: &[u8]) -> Result<(), Error> {
-        self.submit(ip, id, Some(source), destination, port, payload)
+    pub fn send_from(&mut self, ip: &mut Ip, id: SocketId, origin: Origin, destination: Ipv4Addr, port: u16, payload: &[u8]) -> Result<(), Error> {
+        self.submit(ip, id, (Some(origin.source), Some(origin.iface)), destination, port, payload)
     }
 
-    fn submit(&mut self, ip: &mut Ip, id: SocketId, named: Option<Ipv4Addr>, destination: Ipv4Addr, port: u16, payload: &[u8]) -> Result<(), Error> {
+    /// A datagram that leaves by `iface` alone, from the address the socket's binding and that
+    /// interface give it: one host's datagram to a group on each of its links.
+    pub fn send_via(&mut self, ip: &mut Ip, id: SocketId, iface: IfIndex, destination: Ipv4Addr, port: u16, payload: &[u8]) -> Result<(), Error> {
+        self.submit(ip, id, (None, Some(iface)), destination, port, payload)
+    }
+
+    /// `from` is the source a send names and the interface it names, either absent.
+    fn submit(&mut self, ip: &mut Ip, id: SocketId, from: (Option<Ipv4Addr>, Option<IfIndex>), destination: Ipv4Addr, port: u16, payload: &[u8]) -> Result<(), Error> {
+        let (named, iface) = from;
         let socket = self.socket(id)?;
         if let Some(error) = socket.pending.take() {
             return Err(Error::Failed(error));
@@ -561,7 +597,7 @@ impl Udp {
             }
             (None, Binding::Any) => (Ipv4Addr::UNSPECIFIED, Source::Any),
         };
-        let source = match ip.route(destination, lookup, None) {
+        let source = match ip.route(destination, lookup, iface) {
             Ok(route) if lookup == Source::Any => route.source,
             Ok(_) => source,
             Err(refusal) => return self.refuse(route_refusal(refusal), me, peer),
@@ -571,7 +607,7 @@ impl Udp {
             return self.refuse(Counter::TxQueueFull, me, peer);
         }
         let ttl = if destination.is_multicast() { multicast_ttl } else { ttl };
-        socket.tx.push_back(Queued { source, source_port: local_port, destination, port, ttl, broadcast: broadcast_permitted, payload: payload.to_vec(), waits: None });
+        socket.tx.push_back(Queued { source, source_port: local_port, destination, port, ttl, broadcast: broadcast_permitted, payload: payload.to_vec(), iface, waits: None });
         if !core::mem::replace(&mut socket.offered, true) {
             self.eligible.push(Sender::Socket(id));
         }
@@ -600,6 +636,7 @@ impl Udp {
             destination: d.destination,
             ttl: d.ttl,
             link_broadcast: d.link_broadcast,
+            iface: d.iface,
             at: d.at,
         }))
     }
@@ -678,6 +715,7 @@ impl Udp {
             destination,
             ttl: arrival.packet.ttl(),
             link_broadcast: arrival.link == MacClass::Broadcast,
+            iface: arrival.iface,
             at: now,
         });
         self.count(Counter::RxDelivered);
@@ -759,7 +797,7 @@ impl Udp {
                     taken = Some(at);
                     break;
                 }
-                Offer::Waits(next_hop) => queued.waits = Some(next_hop),
+                Offer::Waits { iface, hop } => queued.waits = Some((iface, hop)),
             }
         }
         let taken = taken.and_then(|at| queue.remove(at)).is_some();
@@ -773,14 +811,15 @@ impl Udp {
         }
     }
 
-    /// [ip] gave `next_hop` up: every datagram that waited for it is dropped and counted, and
-    /// the connected socket it left from is told.
-    pub fn fail(&mut self, next_hop: Ipv4Addr) {
+    /// [ip] gave `next_hop` on `iface` up: every datagram that waited for it there is dropped
+    /// and counted, and the connected socket it left from is told. One waiting on the same
+    /// address on another link stays.
+    pub fn fail(&mut self, iface: IfIndex, next_hop: Ipv4Addr) {
         let mut lost = Vec::new();
         let queues = self.slots.iter_mut().filter_map(|slot| slot.socket.as_mut()).map(|socket| &mut socket.tx).chain([&mut self.closed]);
         for queue in queues {
             queue.retain(|queued| {
-                let waited = queued.waits == Some(next_hop);
+                let waited = queued.waits == Some((iface, next_hop));
                 if waited {
                     lost.push(queued.flow());
                 }
@@ -793,9 +832,10 @@ impl Udp {
         }
     }
 
-    /// `next_hop`'s link address is known: the datagrams that wait for it are offered again.
-    pub fn wake(&mut self, next_hop: Ipv4Addr) {
-        self.rouse(|waits| waits == next_hop);
+    /// `next_hop`'s link address on `iface` is known, or `iface` has room: the datagrams that
+    /// wait for it there are offered again.
+    pub fn wake(&mut self, iface: IfIndex, next_hop: Ipv4Addr) {
+        self.rouse(|waits| waits == (iface, next_hop));
     }
 
     /// The routes changed: every waiting datagram's next hop is asked for again.
@@ -804,7 +844,7 @@ impl Udp {
     }
 
     /// Ends the wait of every datagram whose next hop `woken` names, and offers its sender.
-    fn rouse(&mut self, woken: impl Fn(Ipv4Addr) -> bool) {
+    fn rouse(&mut self, woken: impl Fn((IfIndex, Ipv4Addr)) -> bool) {
         let Self { slots, closed, closed_offered, eligible, .. } = self;
         let mut rouse = |queue: &mut VecDeque<Queued>, offered: &mut bool, sender: Sender| {
             let mut any = false;

@@ -70,15 +70,22 @@ enum Phase {
 }
 
 impl Drives {
-    /// What to do about the functions `records` lists, which `rows` match.
-    /// `records` is the whole set: an arrival it does not list has left.
-    pub fn decide<'m>(&mut self, rows: &[(&'m Program, PciMatch)], records: &[Pci], now: Instant) -> Vec<Act<'m>> {
+    /// What to do about the functions `records` lists, which `rows` match on
+    /// a machine whose boot controller is `boot`. `records` is the whole set:
+    /// an arrival it does not list has left.
+    pub fn decide<'m>(
+        &mut self,
+        rows: &[(&'m Program, PciMatch)],
+        records: &[Pci],
+        boot: Option<PciAddr>,
+        now: Instant,
+    ) -> Vec<Act<'m>> {
         self.functions.retain(|arrival, phase| {
             matches!(phase, Phase::Running) || records.iter().any(|pci| pci.arrival == *arrival)
         });
         let mut acts = Vec::new();
         for pci in records.iter().filter(|pci| pci.driven != Driven::Kernel) {
-            let Some(&(row, entry)) = rows.iter().find(|(_, matcher)| matcher.matches(pci)) else { continue };
+            let Some(&(row, entry)) = rows.iter().find(|(_, matcher)| matcher.matches(pci, boot)) else { continue };
             let phase = self.functions.entry(pci.arrival).or_default();
             if let Phase::Held(seen) = phase {
                 match seen {
@@ -179,12 +186,12 @@ mod tests {
         nic.vendor = 0x1af4;
         let machine = [edu(3, Driven::Free), edu(4, Driven::Free), edu(5, Driven::Kernel), edu(6, Driven::Claimed), nic];
         let mut drives = Drives::default();
-        let acts = drives.decide(&rows, &machine, now);
+        let acts = drives.decide(&rows, &machine, None, now);
         assert_eq!(started(&acts), [3, 4]);
         assert!(matches!(acts[0], Act::Start { row: r, entry, .. } if r.name == "holder" && entry == EDU));
-        assert!(drives.decide(&rows, &machine, now).is_empty());
+        assert!(drives.decide(&rows, &machine, None, now).is_empty());
         // Read again once each process holds its function.
-        assert!(drives.decide(&rows, &[edu(3, Driven::Claimed), edu(4, Driven::Claimed)], now).is_empty());
+        assert!(drives.decide(&rows, &[edu(3, Driven::Claimed), edu(4, Driven::Claimed)], None, now).is_empty());
     }
 
     /// **A refused start is not asked for again until its record changes**:
@@ -195,14 +202,14 @@ mod tests {
         let rows = [(&row, EDU)];
         let machine = [edu(3, Driven::Free)];
         let mut drives = Drives::default();
-        assert_eq!(started(&drives.decide(&rows, &machine, now)), [3]);
+        assert_eq!(started(&drives.decide(&rows, &machine, None, now)), [3]);
         drives.refused(Arrival(3));
         for round in 0..2 * RESTARTS {
-            assert!(drives.decide(&rows, &machine, now).is_empty(), "round {round} started it again");
+            assert!(drives.decide(&rows, &machine, None, now).is_empty(), "round {round} started it again");
         }
         // Another holder took it and gave it back: a change.
-        drives.decide(&rows, &[edu(3, Driven::Claimed)], now);
-        assert_eq!(started(&drives.decide(&rows, &machine, now)), [3]);
+        drives.decide(&rows, &[edu(3, Driven::Claimed)], None, now);
+        assert_eq!(started(&drives.decide(&rows, &machine, None, now)), [3]);
     }
 
     /// Every start after a function's first spends its budget, and a function
@@ -216,7 +223,7 @@ mod tests {
         let mut starts = 0;
         let mut given_up = 0;
         for _ in 0..4 * RESTARTS {
-            for act in drives.decide(&rows, &free, now) {
+            for act in drives.decide(&rows, &free, None, now) {
                 match act {
                     Act::Start { .. } => {
                         starts += 1;
@@ -228,10 +235,10 @@ mod tests {
                     }
                 }
             }
-            drives.decide(&rows, &taken, now);
+            drives.decide(&rows, &taken, None, now);
         }
         assert_eq!((starts, given_up), (RESTARTS + 1, 1));
-        assert!(drives.decide(&rows, &free, now + 2 * WINDOW).is_empty());
+        assert!(drives.decide(&rows, &free, None, now + 2 * WINDOW).is_empty());
     }
 
     /// An end owed a restart starts another at once, on the budget; one owed
@@ -242,11 +249,11 @@ mod tests {
         let rows = [(&row, EDU)];
         let machine = [edu(3, Driven::Free), edu(4, Driven::Free)];
         let mut drives = Drives::default();
-        assert_eq!(started(&drives.decide(&rows, &machine, now)), [3, 4]);
+        assert_eq!(started(&drives.decide(&rows, &machine, None, now)), [3, 4]);
         drives.ended(Arrival(3), true);
         drives.ended(Arrival(4), false);
-        assert_eq!(started(&drives.decide(&rows, &machine, now)), [3]);
-        assert!(drives.decide(&rows, &machine, now).is_empty());
+        assert_eq!(started(&drives.decide(&rows, &machine, None, now)), [3]);
+        assert!(drives.decide(&rows, &machine, None, now).is_empty());
     }
 
     /// `edu(arrival, ..)` at the address of another arrival: the same device
@@ -263,18 +270,18 @@ mod tests {
         let (row, now) = (row(), Instant::now());
         let rows = [(&row, EDU)];
         let mut drives = Drives::default();
-        assert!(drives.decide(&rows, &[], now).is_empty());
+        assert!(drives.decide(&rows, &[], None, now).is_empty());
         let first = at(edu(7, Driven::Free), 0);
-        assert_eq!(started(&drives.decide(&rows, &[first], now)), [7]);
+        assert_eq!(started(&drives.decide(&rows, &[first], None, now)), [7]);
         // Gone from the set while its process still runs: nothing is started.
-        assert!(drives.decide(&rows, &[], now).is_empty());
+        assert!(drives.decide(&rows, &[], None, now).is_empty());
         // Its process ends on `Gone` with a crash its row would restart.
         drives.ended(Arrival(7), true);
-        assert!(drives.decide(&rows, &[], now).is_empty());
+        assert!(drives.decide(&rows, &[], None, now).is_empty());
         assert!(!drives.functions.contains_key(&Arrival(7)), "a departed arrival is forgotten");
         // The device back at the same address, after its budget's window.
         let back = at(edu(8, Driven::Free), 0);
-        assert_eq!(started(&drives.decide(&rows, &[back], now + WINDOW + WINDOW)), [8]);
+        assert_eq!(started(&drives.decide(&rows, &[back], None, now + WINDOW + WINDOW)), [8]);
     }
 
     /// A function that leaves between the decision to start on it and the
@@ -285,14 +292,14 @@ mod tests {
         let (row, now) = (row(), Instant::now());
         let rows = [(&row, EDU)];
         let mut drives = Drives::default();
-        assert_eq!(started(&drives.decide(&rows, &[edu(3, Driven::Free)], now)), [3]);
+        assert_eq!(started(&drives.decide(&rows, &[edu(3, Driven::Free)], None, now)), [3]);
         // The set changed before the start was performed: it is still the
         // supervisor's to answer for.
-        assert!(drives.decide(&rows, &[], now).is_empty());
+        assert!(drives.decide(&rows, &[], None, now).is_empty());
         // Its claim answered `Gone`.
         drives.refused(Arrival(3));
         for _ in 0..3 {
-            assert!(drives.decide(&rows, &[], now).is_empty());
+            assert!(drives.decide(&rows, &[], None, now).is_empty());
         }
         assert!(drives.functions.is_empty());
     }
@@ -308,24 +315,24 @@ mod tests {
         let mut starts = 0;
         let mut arrival = 10;
         for _ in 0..=RESTARTS {
-            let acts = drives.decide(&rows, &[at(edu(arrival, Driven::Free), 0)], now);
+            let acts = drives.decide(&rows, &[at(edu(arrival, Driven::Free), 0)], None, now);
             assert_eq!(started(&acts), [arrival], "arrival {arrival} at the same address");
             starts += 1;
-            drives.decide(&rows, &[], now);
+            drives.decide(&rows, &[], None, now);
             drives.ended(Arrival(arrival), false);
             arrival += 1;
         }
-        let acts = drives.decide(&rows, &[at(edu(arrival, Driven::Free), 0)], now);
+        let acts = drives.decide(&rows, &[at(edu(arrival, Driven::Free), 0)], None, now);
         assert!(matches!(acts[..], [Act::GiveUp { function, .. }] if function.arrival == Arrival(arrival)), "{acts:?}");
         assert_eq!(starts, RESTARTS + 1);
         // Given up on is this arrival's: it is never started again.
-        assert!(drives.decide(&rows, &[at(edu(arrival, Driven::Free), 0)], now + 2 * WINDOW).is_empty());
+        assert!(drives.decide(&rows, &[at(edu(arrival, Driven::Free), 0)], None, now + 2 * WINDOW).is_empty());
         // Another address has a budget of its own.
-        assert_eq!(started(&drives.decide(&rows, &[at(edu(arrival + 1, Driven::Free), 1)], now)), [arrival + 1]);
+        assert_eq!(started(&drives.decide(&rows, &[at(edu(arrival + 1, Driven::Free), 1)], None, now)), [arrival + 1]);
         // And the next arrival at the first address, after the window, starts.
-        drives.decide(&rows, &[], now);
+        drives.decide(&rows, &[], None, now);
         let later = at(edu(arrival + 2, Driven::Free), 0);
-        assert_eq!(started(&drives.decide(&rows, &[later], now + 2 * WINDOW)), [arrival + 2]);
+        assert_eq!(started(&drives.decide(&rows, &[later], None, now + 2 * WINDOW)), [arrival + 2]);
     }
 
     #[test]

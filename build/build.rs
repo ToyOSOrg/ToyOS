@@ -119,6 +119,17 @@ struct SystemConfig {
     /// them, because a package directory is writable.
     #[serde(default)]
     apps: AppsConfig,
+    /// The supervisor's own row, which no `[programs]` key is.
+    #[serde(default)]
+    supervisor: SupervisorConfig,
+}
+
+/// **Unknown fields refused**, as a row's are.
+#[derive(Deserialize, Default)]
+#[serde(default, rename_all = "kebab-case", deny_unknown_fields)]
+struct SupervisorConfig {
+    /// Its job's floor, in MiB (`toyos_manifest::Manifest::supervisor_floor`).
+    memory_floor_mib: u64,
 }
 
 #[derive(Deserialize, Default)]
@@ -182,19 +193,31 @@ struct ProgramConfig {
     syscap: Vec<String>,
     /// The idle slot (`toyos_manifest::Program::slots`).
     slots: bool,
+    /// Disk authorizations minted at its start (`toyos_manifest::authorize`).
+    authorize: Vec<String>,
     /// A system service: the supervisor starts it with `HOME` at its own `/state/<name>`
     /// and makes that directory, where every other row gets the session's.
     service: bool,
+    /// It keeps machine state of its own: the supervisor makes `/state/<name>`
+    /// and puts it in its view beside the session's `HOME`. A service's is
+    /// implied. No row's view holds another's (`toyos_manifest::Program::view`).
+    state: bool,
     /// The file-server roles this binary serves, one process each
     /// (`toyos_manifest::Program::roles`).
     roles: Vec<String>,
     /// The supervisor starts it again when it ends (`toyos_manifest::Program::restart`).
     restart: bool,
+    /// Started as a pager (`toyos_manifest::Program::pager`): the file server's row.
+    pager: bool,
     /// The rows it may start through the launcher (`toyos_manifest::Program::starts`).
     starts: Vec<String>,
-    /// A launch it makes from the machine's session opens a login session
+    /// A login authority, for which the supervisor opens login sessions
     /// (`toyos_manifest::Program::login`).
     login: bool,
+    /// Its job's floor, in MiB: memory held back for it however short every
+    /// other job runs (`toyos_manifest::Program::memory_floor`). A control
+    /// path's alone, and reviewed as the privilege it is.
+    memory_floor_mib: u64,
 }
 
 /// The directories a program's crate sits directly under, by who uses it:
@@ -638,17 +661,18 @@ impl Userland {
 /// rather than a constant here and a string in the supervisor.
 ///
 /// Not `launcher`: a row holds it by its `starts`, badged with its row, and no
-/// row receives it.
-const SUPERVISOR_SERVED: &[&str] = &[toyos_swap::PORT, "power", toyos_manifest::grants::PORT];
+/// row receives it. Nor `login`: a `login` row holds it, badged with its key.
+const SUPERVISOR_SERVED: &[&str] = &[toyos_swap::PORT, "power", toyos_manifest::grants::PORT, toyos_session::ADMIN_PORT];
 
 /// The ports that named rows alone may receive, each with those rows: the
 /// swap port, whose holder replaces any service's binary, the grants port,
 /// whose holder writes which folder of the home a package sees, the prompt
 /// port, whose holder draws above every window and has every key while it
 /// does, the input port, whose holders type into the focused window, the
-/// clipboard port, whose holder is sent every copy made in the session, and
-/// the display port, whose holder sets the mode and the scale every window is
-/// drawn at.
+/// clipboard port, whose holder is sent every copy made in the session, the
+/// display port, whose holder sets the mode and the scale every window is
+/// drawn at, and the session-admin port, whose holder signs its user's
+/// sessions out.
 const HELD_ALONE: &[(&str, &[&str])] = &[
     (toyos_swap::PORT, &[toyos_swap::HOLDER]),
     (toyos_manifest::grants::PORT, &[toyos_manifest::grants::HOLDER]),
@@ -656,6 +680,7 @@ const HELD_ALONE: &[(&str, &[&str])] = &[
     (toyos_input::wire::PORT, toyos_input::wire::HOLDERS),
     (toyos_manifest::clipboard::PORT, &[toyos_manifest::clipboard::HOLDER]),
     (toyos_manifest::display::PORT, &[toyos_manifest::display::HOLDER]),
+    (toyos_session::ADMIN_PORT, &[toyos_session::ADMIN_HOLDER]),
 ];
 
 /// Rows, as a refusal names them.
@@ -696,6 +721,22 @@ fn held_by_their_holders_alone(config: &SystemConfig) -> Result<(), String> {
         if program.slots && config.boot.start.contains(name) {
             return Err(format!("`{name}` asks for `slots` and is in `[boot] start`, and the slots are granted to a launch alone"));
         }
+        // A row any login could start would hand every login what it holds,
+        // and so would a login authority, whose namespace reaches every
+        // program a login runs directly: an authorization that changes a
+        // disk is the image's to grant, to a row that is neither.
+        for word in &program.authorize {
+            let Some(authorization) = toyos_manifest::authorize::Authorization::parse(word) else {
+                return Err(format!("`{name}` asks to be authorized for `{word}`, which is no disk authorization"));
+            };
+            let starters: Vec<&String> = config.programs.iter().filter(|(_, p)| p.starts.contains(name)).map(|(n, _)| n).collect();
+            if authorization.changes() && !starters.is_empty() {
+                return Err(format!("`{name}` is authorized for `{word}`, which changes a disk, and {starters:?} may start it"));
+            }
+            if authorization.changes() && program.login {
+                return Err(format!("`{name}` is authorized for `{word}`, which changes a disk, and is a login authority"));
+            }
+        }
     }
     for (port, holders) in HELD_ALONE {
         if config.apps.receives.iter().any(|r| r == port) {
@@ -706,6 +747,19 @@ fn held_by_their_holders_alone(config: &SystemConfig) -> Result<(), String> {
         return Err(format!("`[apps] receives` names `{}`, which only the supervisor may hold", consent::PORT));
     }
     apps_folder(config).map(drop)
+}
+
+/// A row serving a file-server role is a pager: its server makes the paged
+/// objects its files are read through, and panics started as none.
+///
+/// **Checked on every manifest rendered**, so a config whose row lacks it
+/// is refused by name at the build rather than met as a boot of servers
+/// that end at their start.
+fn file_servers_are_pagers(config: &SystemConfig) -> Result<(), String> {
+    match config.programs.iter().find(|(_, row)| !row.roles.is_empty() && !row.pager) {
+        Some((name, _)) => Err(format!("`{name}` serves file-server roles and is no `pager`")),
+        None => Ok(()),
+    }
 }
 
 /// What a row may start through the launcher, and which rows open a login
@@ -767,13 +821,38 @@ fn receives_reach_a_running_server(config: &SystemConfig) -> Result<(), String> 
     }
 }
 
+/// An image with a `login` row declares the session owner's row, which the
+/// supervisor starts for each session it opens, and starts it nowhere else:
+/// not at boot, and not through a launch.
+fn logins_have_their_owner(config: &SystemConfig) -> Result<(), String> {
+    let owner = toyos_session::OWNER;
+    if let Some((name, _)) = config.programs.iter().find(|(_, row)| row.login) {
+        if !config.programs.contains_key(owner) {
+            return Err(format!("`{name}` is a `login` row, and no `{owner}` row owns its sessions"));
+        }
+    }
+    if config.boot.start.iter().any(|key| key == owner) {
+        return Err(format!("`{owner}` is in `[boot] start`, and the supervisor starts it for a session alone"));
+    }
+    match config.programs.iter().find(|(_, row)| row.starts.iter().any(|key| key == owner)) {
+        Some((name, _)) => Err(format!("`{name}` starts `{owner}`, which the supervisor starts for a session alone")),
+        None => Ok(()),
+    }
+}
+
 /// The resolved config as the records the supervisor reads.
 ///
 /// The format, the renderer and the parser are `lib/manifest/`, whose
 /// round-trip test is what makes "what the build writes is what the supervisor reads" a
 /// fact rather than two hand-matched implementations.
 fn render_manifest(config: &SystemConfig) -> Vec<u8> {
-    for gate in [held_by_their_holders_alone, starts_name_what_a_launch_can_start, receives_reach_a_running_server] {
+    for gate in [
+        held_by_their_holders_alone,
+        starts_name_what_a_launch_can_start,
+        file_servers_are_pagers,
+        receives_reach_a_running_server,
+        logins_have_their_owner,
+    ] {
         if let Err(why) = gate(config) {
             panic!("the image config cannot be rendered as a manifest: {why}");
         }
@@ -799,12 +878,16 @@ fn render_manifest(config: &SystemConfig) -> Vec<u8> {
                     drives: cfg.drives.clone(),
                     syscap: cfg.syscap.clone(),
                     slots: cfg.slots,
+                    authorize: cfg.authorize.clone(),
                     service: cfg.service,
+                    state: cfg.state,
                     roles: cfg.roles.clone(),
                     restart: cfg.restart,
+                    pager: cfg.pager,
                     starts: cfg.starts.clone(),
                     login: cfg.login,
                     folder: None,
+                    memory_floor: mib(cfg.memory_floor_mib),
                 }
             })
             .collect(),
@@ -812,9 +895,15 @@ fn render_manifest(config: &SystemConfig) -> Vec<u8> {
         apps: config.apps.receives.clone(),
         folder: apps_folder(config).expect("the gate above read it"),
         start: config.boot.start.clone(),
+        supervisor_floor: mib(config.supervisor.memory_floor_mib),
     };
     toyos_manifest::render(&manifest)
         .unwrap_or_else(|e| panic!("the image config cannot be rendered as a manifest: {e:?}"))
+}
+
+/// `mib` MiB in bytes; a floor past every machine is a broken config.
+fn mib(mib: u64) -> u64 {
+    mib.checked_mul(1 << 20).unwrap_or_else(|| panic!("a memory floor of {mib} MiB is past every machine"))
 }
 
 /// Which build `root`'s tree makes for `arch` against the sysroot whose key
@@ -871,6 +960,15 @@ pub const MICROCODE_LICENCES: [(&str, &[u8]); 2] = [
     ("share/licenses/Intel-microcode-license.txt", include_bytes!("../licenses/Intel-microcode-license.txt")),
 ];
 
+/// The program that embeds Intel's display firmware, where on ROOT that
+/// firmware's licence is, and its text: the licence asks that a
+/// redistribution carry it.
+pub const DISPLAY_FIRMWARE_LICENCE: (&str, &str, &[u8]) = (
+    "tgl-display",
+    "share/licenses/Intel-i915-firmware-license.txt",
+    include_bytes!("../licenses/Intel-i915-firmware-license.txt"),
+);
+
 /// The Mozilla root program's authorities as `webpki-root-certs` publishes
 /// them, each certificate a PEM block in the published order.
 pub fn trust_roots() -> Vec<u8> {
@@ -910,6 +1008,10 @@ fn build_and_assemble(
     }
 
     root_files.push((TRUST_ROOTS.to_string(), trust_roots()));
+    let (embedder, path, text) = DISPLAY_FIRMWARE_LICENCE;
+    if programs.contains(embedder) {
+        root_files.push((path.to_string(), text.to_vec()));
+    }
     root_files.push((TRUST_ROOTS_LICENCE.0.to_string(), TRUST_ROOTS_LICENCE.1.to_vec()));
     match arch {
         Arch::X86_64 => {
@@ -2769,7 +2871,9 @@ mod tests {
     /// negative gates select at run time, `toyos-crypto`'s `portable`, `wpa2`
     /// and `rustls-provider`, which `--ci host` tests as forms of its own, and
     /// of the guest libraries, `toyos-font`'s `ttf`, its TrueType rendering,
-    /// and `toyos-pci-claim`'s `host-grant`, which netstack's host tests build.
+    /// `toyos-pci-claim`'s `host-grant`, which netstack's host tests build, and
+    /// `toyos-blockdev`'s `model`, the crash model a filesystem's tests check
+    /// its writes against, which the crate's own tests build regardless.
     const NOT_A_CONTROL: &[&str] = &[
         "core",
         "default",
@@ -2778,6 +2882,7 @@ mod tests {
         "flaws",
         "host-grant",
         "loom",
+        "model",
         "portable",
         "rustc-dep-of-std",
         "rustls-provider",
@@ -2909,6 +3014,36 @@ mod tests {
             implied.is_empty(),
             "`test-actuators` implies {implied:?}, so it is several kernel builds again"
         );
+    }
+
+    /// No image this repository ships authorizes a change to a disk: that is
+    /// a test image's, for the one boot that makes it.
+    #[test]
+    fn no_shipped_boot_config_authorizes_a_disk_change() {
+        let root = Path::new(env!("CARGO_MANIFEST_DIR"));
+        for boot in [Boot::shipped(root), Boot::diag(root), Boot::console(root)] {
+            let config = parse_config(&boot.config);
+            for (name, program) in &config.programs {
+                let changes = program.authorize.iter().filter_map(|w| toyos_manifest::authorize::Authorization::parse(w)).any(|a| a.changes());
+                assert!(!changes, "{} authorizes `{name}` to change a disk: {:?}", boot.config.display(), program.authorize);
+            }
+        }
+    }
+
+    /// An authorization that changes a disk goes to a row only the boot
+    /// starts, never one a login can launch; reading the tables may go to
+    /// either; and a word that names nothing is refused.
+    #[test]
+    fn a_disk_changing_authorization_goes_to_no_row_a_login_can_start() {
+        let gate = |text: &str| held_by_their_holders_alone(&toml::from_str(text).unwrap());
+        assert!(gate("[programs.runner]\nauthorize = [\"designate:data\"]\n").is_ok());
+        assert!(gate("[programs.disks]\nauthorize = [\"tables\"]\n[programs.shell]\nstarts = [\"disks\"]\n").is_ok());
+        let launched = gate("[programs.disks]\nauthorize = [\"designate:data\"]\n[programs.shell]\nstarts = [\"disks\"]\n");
+        assert!(launched.unwrap_err().contains("may start it"));
+        let login = gate("[boot]\nstart = [\"sshserver\"]\n[programs.sshserver]\nlogin = true\nauthorize = [\"designate:data\"]\n");
+        assert!(login.unwrap_err().contains("is a login authority"));
+        assert!(gate("[programs.sshserver]\nlogin = true\nauthorize = [\"tables\"]\n").is_ok(), "reading the tables is no change");
+        assert!(gate("[programs.disks]\nauthorize = [\"format:everything\"]\n").unwrap_err().contains("no disk authorization"));
     }
 
     /// No image this repository ships starts sshserver.
@@ -3193,13 +3328,17 @@ mod tests {
         "tests/images/acpicase.toml",
         "tests/images/benchcase.toml",
         "tests/images/clipboardcase.toml",
+        "tests/images/designatecase.toml",
         "tests/images/drivescase.toml",
         "tests/images/hostedclangcase.toml",
         "tests/images/hotplugcase.toml",
         "tests/images/jobcase.toml",
         "tests/images/latencycase.toml",
         "tests/images/launchcase.toml",
+        "tests/images/floorcase.toml",
         "tests/images/libccase.toml",
+        "tests/images/linkcase.toml",
+        "tests/images/sessioncase.toml",
         "tests/images/metalcase.toml",
         "tests/images/metaldevicecase.toml",
         "tests/images/netcase.toml",
@@ -3254,6 +3393,22 @@ mod tests {
                 other => panic!("{text:?}: {other:?}, not {said:?}"),
             }
         }
+    }
+
+    /// Every committed config with a `login` row declares the session owner,
+    /// and none starts it but the supervisor, for a session.
+    #[test]
+    fn a_login_row_has_a_session_owner_only_the_supervisor_starts() {
+        for cfg in ALL_CONFIGS {
+            logins_have_their_owner(&load(cfg)).unwrap_or_else(|e| panic!("{cfg}: {e}"));
+        }
+        let gate = |text: &str| logins_have_their_owner(&toml::from_str(text).unwrap());
+        assert!(gate("[programs.compositor]\nlogin = true\n[programs.session]\n").is_ok());
+        assert!(gate("[programs.compositor]\nlogin = true\n").unwrap_err().contains("no `session` row"));
+        assert!(gate("[boot]\nstart = [\"session\"]\n[programs.session]\n").is_err());
+        assert!(gate("[programs.shell]\nstarts = [\"session\"]\n[programs.session]\n").is_err());
+        let admin: SystemConfig = toml::from_str("[programs.toybox]\nreceives = [\"session-admin\"]\n").unwrap();
+        assert!(held_by_their_holders_alone(&admin).unwrap_err().contains("only `logout`"));
     }
 
     /// The swap port reaches `swap` and nothing else, and the idle slot
@@ -3349,6 +3504,18 @@ mod tests {
         assert!(toml::from_str::<SystemConfig>("[apps]\nfolders = \"read-write\"\n").is_err());
     }
 
+    /// Every committed config's file-server row is a pager, and one that is
+    /// not is refused.
+    #[test]
+    fn a_file_server_row_is_a_pager() {
+        for cfg in ALL_CONFIGS {
+            file_servers_are_pagers(&load(cfg)).unwrap_or_else(|e| panic!("{cfg}: {e}"));
+        }
+        let gate = |toml: &str| file_servers_are_pagers(&toml::from_str(toml).unwrap());
+        assert!(gate("[programs.fileserver]\nroles = [\"data\"]\npager = true\n").is_ok());
+        assert!(gate("[programs.fileserver]\nroles = [\"data\"]\n").is_err());
+    }
+
     /// Every committed config passes, and each refusal has a config that
     /// takes it and nothing else.
     #[test]
@@ -3361,7 +3528,7 @@ mod tests {
         assert!(gate("[programs.shell]\nstarts = [\"ghost\"]\n").is_err());
         assert!(gate("[programs.shell]\nstarts = [\"apps\"]\n").is_err());
         assert!(gate("[programs.shell]\nstarts = [\"compositor\"]\n[programs.compositor]\nserves = [\"compositor\"]\n").is_err());
-        assert!(gate("[programs.shell]\nstarts = [\"fileserver\"]\n[programs.fileserver]\nroles = [\"data\"]\n").is_err());
+        assert!(gate("[programs.shell]\nstarts = [\"fileserver\"]\n[programs.fileserver]\nroles = [\"data\"]\npager = true\n").is_err());
         assert!(toml::from_str::<SystemConfig>("[programs.shell]\nstart = [\"toybox\"]\n").is_err());
     }
 

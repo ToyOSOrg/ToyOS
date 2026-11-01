@@ -185,33 +185,6 @@ pub fn current(copies: [&[u8; BLOCK]; 2]) -> Result<(Table, usize), Unreadable> 
     }
 }
 
-/// [`current`] of a slot table's partition whose first [`COPIES`] blocks
-/// `fill` reads, whatever reaches the partition.
-pub fn read<E: core::fmt::Debug>(
-    fill: impl FnOnce(&mut [[u8; BLOCK]; COPIES as usize]) -> Result<(), E>,
-) -> Result<(Table, usize), NotRead<E>> {
-    let mut copies = [[0; BLOCK]; COPIES as usize];
-    fill(&mut copies).map_err(NotRead::Read)?;
-    current([&copies[0], &copies[1]]).map_err(NotRead::Unreadable)
-}
-
-/// Why [`read`] has no table.
-#[derive(Debug)]
-pub enum NotRead<E> {
-    /// The blocks would not read, in the reader's word.
-    Read(E),
-    Unreadable(Unreadable),
-}
-
-impl<E: core::fmt::Debug> core::fmt::Display for NotRead<E> {
-    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
-        match self {
-            Self::Read(why) => write!(f, "the slot table would not read: {why:?}"),
-            Self::Unreadable(why) => write!(f, "the slot table's partition holds {why}"),
-        }
-    }
-}
-
 /// What a writer puts where, to make `next` the table: the copy that is not
 /// `current`'s, one sequence past it.
 pub fn next_write(current: (Table, usize), mut next: Table) -> (usize, [u8; BLOCK]) {

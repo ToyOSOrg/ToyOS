@@ -373,7 +373,7 @@ fn sources(root: &Path) -> Result<Sources, String> {
             continue;
         }
         let bytes = fs::read(&file).map_err(|e| format!("read {path}: {e}"))?;
-        sources.insert(path, crate::release::sha256_hex(&bytes));
+        sources.insert(path, crate::sha256_hex(&bytes));
     }
     Ok(sources)
 }

@@ -11,6 +11,15 @@ use crate::AsHandle;
 
 pub use toyos_abi::inbox::{OTHER_END_GONE, READABLE, WRITABLE};
 
+/// Park until `handle` answers the one condition `interest` names
+/// ([`READABLE`], [`WRITABLE`] or [`OTHER_END_GONE`]), or `timeout_nanos`
+/// passes (`u64::MAX`: for good): `true` for the condition, `false` at the
+/// timeout. The answer is the one a poller's watch gets, with no inbox made
+/// for it ([`syscall::handle_wait`]).
+pub fn wait_one(handle: &impl AsHandle, interest: u32, timeout_nanos: u64) -> Result<bool, SyscallError> {
+    syscall::handle_wait(handle.as_handle().raw(), interest, timeout_nanos).map(|bit| bit != 0)
+}
+
 /// The inbox page, and the only thing in this crate that touches it.
 ///
 /// **The kernel is the second writer of every byte below, so no Rust reference
@@ -47,7 +56,7 @@ impl Rings {
     ///
     /// One `read_volatile` of the whole struct rather than a `&RingLayout`.
     /// The kernel writes this before the page is mapped and never again
-    /// (`SharedMemObject::phys_before_mapping` is what enforces the order), so
+    /// (`kernel::inbox::create` writes it before it maps the rings), so
     /// there is no race to lose here — but a rule with an exception "for the
     /// field nobody rewrites" is a rule that has to be re-derived every time
     /// somebody adds a field.
@@ -218,6 +227,12 @@ impl Poller {
     /// caller a ring smaller than the set it just declared, which makes the
     /// loss reachable while looking like a success.
     pub fn new(capacity: u32) -> Self {
+        Self::try_new(capacity).expect("Poller::new: inbox_setup failed")
+    }
+
+    /// [`new`](Self::new), answering the kernel's refusal of the inbox, as a
+    /// memory-exhausted one, instead of panicking.
+    pub fn try_new(capacity: u32) -> Result<Self, SyscallError> {
         assert!(
             (1..=Self::MAX_HANDLES).contains(&capacity),
             "Poller::new: {capacity} handles is outside 1..={}; \
@@ -227,8 +242,7 @@ impl Poller {
         let entries = capacity.next_power_of_two();
         // The inbox owns its page and the kernel maps it: one call, and no
         // second lifetime for a mapping that is only ever this inbox's.
-        let (inbox, base) = unsafe { syscall::inbox_setup(entries) }
-            .expect("Poller::new: inbox_setup failed");
+        let (inbox, base) = unsafe { syscall::inbox_setup(entries) }?;
         // SAFETY: `base` is what `inbox_setup` just answered with — the
         // address of this process's own inbox page, laid out by the kernel
         // before it was mapped and unmapped only when the handle closes, which
@@ -243,7 +257,7 @@ impl Poller {
             rings.submission_ring_size,
             rings.completion_ring_size,
         );
-        Self { inbox, rings, capacity }
+        Ok(Self { inbox, rings, capacity })
     }
 
     /// Watch the given handle for readiness.
@@ -251,13 +265,7 @@ impl Poller {
     /// `flags` are [`READABLE`] / [`WRITABLE`] / [`OTHER_END_GONE`].
     /// `token` is returned in completions to identify which handle is ready.
     pub fn watch(&self, handle: &impl AsHandle, flags: u32, token: u64) {
-        self.watch_raw(handle.as_handle(), flags, token);
-    }
-
-    /// Watch a raw handle for readiness.
-    ///
-    /// Prefer [`watch`](Self::watch) when you have a typed handle.
-    pub fn watch_raw(&self, handle: RawHandle, flags: u32, token: u64) {
+        let handle = handle.as_handle().raw();
         // A panic, because this is first-party code exceeding a bound it
         // declared itself. A mid-batch flush here instead would make
         // completions reachable while the caller is still registering, and
@@ -371,7 +379,8 @@ impl Poller {
 
 impl Drop for Poller {
     fn drop(&mut self) {
-        syscall::close(self.inbox);
+        // SAFETY: the inbox `new` made, which nothing but this answers for.
+        unsafe { syscall::close(self.inbox) };
     }
 }
 

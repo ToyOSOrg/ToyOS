@@ -220,10 +220,10 @@ started. Nothing reaches userland when a device arrives or leaves.
    `input` port is this track's per-device source and `gone` (`toyos-input`
    carries both), and whose sticks are disks offered on `disk` (the ruling
    above). **Done**, its metal rows that judge with a userland load
-   still owed at that step. The test images name each machine's boot
-   controller by id, and the AMD bench's by place (`@03:00.3`, the one
-   `drives` selector a place narrows), so the spares stay free for the claim
-   tests.
+   still owed at that step. The test images name QEMU's boot controller by
+   id and a bench's as `@boot`, the function firmware booted through, so the
+   other controller stays free for the claim tests whichever port holds the
+   stick.
 
 ## Folded here
 

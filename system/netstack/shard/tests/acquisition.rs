@@ -7,7 +7,7 @@ mod common;
 use std::net::Ipv4Addr;
 
 use common::*;
-use toyos_net_shard::{Config, Event, Secrets, Shard};
+use toyos_net_shard::{Config, Event, IfIndex, Origin, Rank, Secrets, Shard};
 use toyos_net_udp::{Counter, Error};
 use toyos_net_wire::arp::Arp;
 use toyos_net_wire::ethernet::{EtherType, Frame, IndividualMac, MacAddr};
@@ -16,7 +16,7 @@ use toyos_net_wire::udp::UdpDatagram;
 use toyos_net_wire::Instant;
 
 /// A's shard an hour into the clock, its link up and no address on it.
-fn unaddressed() -> (Shard, Instant) {
+fn unaddressed() -> (Shard, IfIndex, Instant) {
     let secrets = Secrets {
         ip: [1; 16],
         resets: [2; 16],
@@ -24,21 +24,22 @@ fn unaddressed() -> (Shard, Instant) {
     };
     let now = Instant::from_millis(3_600_000);
     let mac = IndividualMac::new(MAC_A).unwrap();
-    let mut shard = Shard::new(now, Config { mac, receive_buffer: 65_535, send_buffer: 65_535, secrets }).unwrap();
-    shard.link_up(now).unwrap();
-    (shard, now)
+    let mut shard = Shard::new(now, Config { receive_buffer: 65_535, send_buffer: 65_535, secrets }).unwrap();
+    let iface = shard.add_interface(now, mac, Rank(0));
+    shard.link_up(now, iface).unwrap();
+    (shard, iface, now)
 }
 
 fn sent(shard: &mut Shard, now: Instant) -> Vec<Vec<u8>> {
     let mut frames = Vec::new();
-    shard.transmit(now, usize::MAX, |frame| frames.push(frame.to_vec()));
+    shard.transmit(now, usize::MAX, |_, frame| frames.push(frame.to_vec()));
     frames
 }
 
 /// A's address verified, and the time it was.
-fn verified(shard: &mut Shard, mut now: Instant) -> Instant {
-    shard.add_address(now, A, 24).unwrap();
-    while !shard.drain_events().any(|e| e == Event::Verified(A)) {
+fn verified(shard: &mut Shard, iface: IfIndex, mut now: Instant) -> Instant {
+    shard.add_address(now, iface, A, 24).unwrap();
+    while !shard.drain_events().any(|e| matches!(e, Event::Verified { addr: A, .. })) {
         sent(shard, now);
         now = shard.next_deadline().expect("conflict detection is still running");
         shard.fire(now);
@@ -80,9 +81,9 @@ fn who_has(target: Ipv4Addr) -> Vec<u8> {
 
 #[test]
 fn the_acquisition_socket_sends_from_no_address_to_the_limited_broadcast() {
-    let (mut shard, now) = unaddressed();
+    let (mut shard, iface, now) = unaddressed();
     let socket = shard.acquisition().unwrap();
-    shard.send_from(now, socket, Ipv4Addr::UNSPECIFIED, Ipv4Addr::BROADCAST, 67, b"discover").unwrap();
+    shard.send_from(now, socket, Origin { iface, source: Ipv4Addr::UNSPECIFIED }, Ipv4Addr::BROADCAST, 67, b"discover").unwrap();
     let frames = sent(&mut shard, now);
     let [frame] = &frames[..] else { panic!("one frame, not {}", frames.len()) };
     let frame = Frame::parse(frame).unwrap();
@@ -95,9 +96,9 @@ fn the_acquisition_socket_sends_from_no_address_to_the_limited_broadcast() {
 
 #[test]
 fn the_acquisition_socket_hears_a_datagram_to_an_address_not_yet_held() {
-    let (mut shard, now) = unaddressed();
+    let (mut shard, iface, now) = unaddressed();
     let socket = shard.acquisition().unwrap();
-    shard.receive(now, &from_router(MAC_A, A, b"offer"));
+    shard.receive(now, iface, &from_router(MAC_A, A, b"offer"));
     let mut buf = [0u8; 16];
     let received = shard.recv_from(socket, &mut buf).unwrap().expect("the acquisition exception admits it");
     assert_eq!((&buf[..received.len], received.source, received.source_port), (&b"offer"[..], R, Some(port(67))));
@@ -105,30 +106,30 @@ fn the_acquisition_socket_hears_a_datagram_to_an_address_not_yet_held() {
 
 #[test]
 fn only_the_acquisition_socket_names_its_source() {
-    let (mut shard, now) = unaddressed();
-    let now = verified(&mut shard, now);
+    let (mut shard, iface, now) = unaddressed();
+    let now = verified(&mut shard, iface, now);
     sent(&mut shard, now);
     let plain = shard.bind(Ipv4Addr::UNSPECIFIED, Some(port(5000)), || 0).unwrap();
     let acquisition = shard.acquisition().unwrap();
     // A source the acquisition socket may name: an assigned address, to one host.
-    assert_eq!(shard.send_from(now, plain, A, R, 67, b"request"), Err(Error::Refused(Counter::SourceNotPermitted)));
-    assert_eq!(shard.send_from(now, acquisition, A, R, 67, b"request"), Ok(()));
+    assert_eq!(shard.send_from(now, plain, Origin { iface, source: A }, R, 67, b"request"), Err(Error::Refused(Counter::SourceNotPermitted)));
+    assert_eq!(shard.send_from(now, acquisition, Origin { iface, source: A }, R, 67, b"request"), Ok(()));
 }
 
 #[test]
 fn a_second_acquisition_socket_is_refused_its_port() {
-    let (mut shard, _) = unaddressed();
+    let (mut shard, _, _) = unaddressed();
     shard.acquisition().unwrap();
     assert_eq!(shard.acquisition(), Err(Error::Refused(Counter::PortInUse)));
 }
 
 #[test]
 fn a_removed_address_takes_its_gateway_and_answers_nothing() {
-    let (mut shard, now) = unaddressed();
-    let now = verified(&mut shard, now);
-    shard.set_gateways(now, &[R]).unwrap();
+    let (mut shard, iface, now) = unaddressed();
+    let now = verified(&mut shard, iface, now);
+    shard.set_gateways(now, iface, &[R]).unwrap();
     sent(&mut shard, now);
-    shard.receive(now, &who_has(A));
+    shard.receive(now, iface, &who_has(A));
     let answered = sent(&mut shard, now);
     let replies = |frames: &[Vec<u8>]| {
         let arp = |f: &Vec<u8>| Frame::parse(f).ok().filter(|f| f.ether_type() == EtherType::Arp).and_then(|f| Arp::parse(f.body()).ok());
@@ -136,10 +137,10 @@ fn a_removed_address_takes_its_gateway_and_answers_nothing() {
     };
     assert_eq!(replies(&answered), 1, "held, the address answers");
 
-    shard.remove_address(now, A).unwrap();
-    assert_eq!(shard.ip().address(shard.iface(), A), None);
-    assert_eq!(shard.ip().gateways(shard.iface()), Some(&[] as &[Ipv4Addr]));
-    shard.receive(now, &who_has(A));
+    shard.remove_address(now, iface, A).unwrap();
+    assert_eq!(shard.ip().address(iface, A), None);
+    assert_eq!(shard.ip().gateways(iface), Some(&[] as &[Ipv4Addr]));
+    shard.receive(now, iface, &who_has(A));
     assert_eq!(replies(&sent(&mut shard, now)), 0, "removed, it answers nothing");
-    assert_eq!(shard.remove_address(now, A), Err(toyos_net_ip::Counter::AddrUnknown));
+    assert_eq!(shard.remove_address(now, iface, A), Err(toyos_net_ip::Counter::AddrUnknown));
 }

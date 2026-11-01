@@ -32,6 +32,18 @@ pub fn bytes<T: UserSafe>(value: &T) -> &[u8] {
     unsafe { core::slice::from_raw_parts(core::ptr::from_ref(value).cast(), core::mem::size_of::<T>()) }
 }
 
+/// A value whose every byte is zero, which `T: UserSafe` makes one.
+pub fn zeroed<T: UserSafe>() -> T {
+    // SAFETY: every bit pattern is a `T`, all zeros among them.
+    unsafe { core::mem::zeroed() }
+}
+
+/// The bytes of a value, written through: any bytes written are a `T`.
+pub fn bytes_mut<T: UserSafe>(value: &mut T) -> &mut [u8] {
+    // SAFETY: a `&mut T` is writable for `size_of::<T>()` bytes, and every bit pattern is a `T`.
+    unsafe { core::slice::from_raw_parts_mut(core::ptr::from_mut(value).cast(), core::mem::size_of::<T>()) }
+}
+
 /// The size of a field, for a field that is [`UserSafe`].
 #[doc(hidden)]
 pub const fn field<T: UserSafe>() -> usize {

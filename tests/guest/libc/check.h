@@ -44,4 +44,15 @@ static inline int waited(pid_t pid) {
     return status;
 }
 
+/* The next line on `fd`, read a byte at a time, which must be `expected`. */
+static inline void expect_line(int fd, const char *expected) {
+    char line[128];
+    size_t n = 0;
+    char byte;
+    while (n + 1 < sizeof line && read(fd, &byte, 1) == 1 && byte != '\n')
+        line[n++] = byte;
+    line[n] = 0;
+    CHECK(strcmp(line, expected) == 0, "a child said \"%s\", not \"%s\"", line, expected);
+}
+
 #endif

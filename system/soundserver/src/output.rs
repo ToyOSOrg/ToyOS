@@ -16,9 +16,8 @@
 use toyos::ipc::{FrameRx, RxStep};
 use toyos::poller::{Poller, READABLE};
 use toyos::port::Acceptor;
-use toyos::shm::SharedMemory;
+use toyos::shm::{Bytes, SharedMemory};
 use toyos::{AsHandle, Connection};
-use toyos_abi::RawHandle;
 use toyos_sound_output::{
     run, FromDriver, Master, Offer, Played, MSG_ACCEPTED, MSG_MASTER_MUTE, MSG_MASTER_STEP, MSG_PLAYED, MSG_REFUSED,
     MSG_START, MSG_STOP,
@@ -177,7 +176,7 @@ impl Outputs {
                 return;
             }
         };
-        let lent = SharedMemory::create(offer.ring_bytes()).and_then(|ring| Ok((ring.share()?, ring)));
+        let lent = SharedMemory::create_for_device(offer.ring_bytes()).and_then(|ring| Ok((ring.share()?, ring)));
         let (handle, ring) = match lent {
             Ok(lent) => lent,
             Err(why) => {
@@ -376,15 +375,13 @@ impl Backend for DriverBackend {
         Pipeline::Ring
     }
 
-    fn handle(&self) -> RawHandle {
+    fn handle(&self) -> toyos::BorrowedHandle<'_> {
         self.stream.as_handle()
     }
 
-    fn buffer(&self, idx: usize) -> *mut u8 {
+    fn period(&self, idx: usize) -> Bytes<'_> {
         assert!(idx < self.periods, "soundserver: the output has no period {idx}");
-        // SAFETY: the ring is `periods * period_bytes` bytes, mapped for as
-        // long as `self` holds it.
-        unsafe { self.ring.as_ptr().add(idx * self.period_bytes) }
+        self.ring.bytes().sub(idx * self.period_bytes, self.period_bytes)
     }
 
     /// Every report the driver has sent, as one ([`combine`]). One of another
@@ -424,8 +421,7 @@ impl Backend for DriverBackend {
     /// A cyclic engine replays a period nobody refills: zeroed as it frees, a
     /// late soundserver costs silence.
     fn released(&mut self, idx: usize) {
-        // SAFETY: as `buffer`'s, for one period.
-        unsafe { core::ptr::write_bytes(self.buffer(idx), 0, self.period_bytes) };
+        self.period(idx).zero();
     }
 
     fn submit(&mut self, _idx: usize, _bytes: usize) {

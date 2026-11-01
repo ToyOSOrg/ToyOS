@@ -23,9 +23,11 @@ A path on the kernel's own mounts, ROOT and `/tmp`, is resolved by
   which libc's `open` answers `EINVAL`; POSIX's answer is `ELOOP`, which libc's
   `realpath` gives.
 
-A file server resolves its own paths POSIX's way, with a bound of its own
+A file server resolves what it is handed POSIX's way, with a bound of its own
 (`system/fileserver/src/resolve.rs`, `MAX_LINKS`), so the same link reads
-differently on `/tmp` and on a served directory. libc's `realpath`
+differently on `/tmp` and on a served directory. It is handed no `..` of an
+absolute or working-directory path, which the client reads off the text first
+(`issues/a-working-directory-path-reads-its-dot-dot-off-the-text.md`). libc's `realpath`
 (`sdk/libc/src/resolve.rs`, `resolve_path`) resolves the names a file server
 holds POSIX's way and hands the kernel the rest at the first name it holds,
 answering that part by the kernel's rules, so that a program that

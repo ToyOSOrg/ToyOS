@@ -19,7 +19,7 @@ shape is the same in both and it is narrow:
 - soundd finds no device and presents the null sink; `null sink idle` prints.
 - The first client connects. The control thread prints `opening stream`, the
   **mix loop** prints `client 0 connected (id=0)` — so it woke, drained the
-  command pipe and applied the command.
+  command pipe (an event since #1108) and applied the command.
 - Nothing from the mix loop ever again. `stats.report` fires every 2 s while a
   client is present and the connect resets that window, so a single missing
   stats line is proof the loop stopped; boot7's client was a 2 s tone and no
@@ -27,8 +27,8 @@ shape is the same in both and it is narrow:
 - Every later client is stranded: the control thread keeps running (it printed
   `opening stream` for doom 14 s later) and `open_stream` answers, but no
   `client N connected` follows, so the mixer never signals it and it blocks
-  reading its signal pipe forever. That is `tone` never exiting and doom
-  wedging with a black window before its render loop.
+  reading its signal pipe (an event since #1108) forever. That is `tone` never
+  exiting and doom wedging with a black window before its render loop.
 
 **Not reproduced in QEMU.** `tests/desktopaudiocase` was built for this: the
 T14's shape, with the client's three descriptors as pipes to a terminal that is
@@ -41,11 +41,12 @@ with a terminal opened afterwards.
 **Eliminated, each with a run behind it.** CPU count. The cpal client path
 (`null_sink_shipped_client`, adopted from `wt/toyos-hdaprobe` `fa47241`, two
 `/system/bin/tone` in series at 1.16 s and 1.15 s). soundd blocking on a client
-(`signal_clients` uses `write_nonblock`; there is no blocking write in the mix
-loop). The accept path being held by a stuck client (accept and mix are
-separate threads and the control thread ran for 14 s afterwards). A CQ overflow
-(`Poller::wait`'s `dropped` assertion would have killed soundd, and soundd is
-alive). A panic anywhere in soundd, for the same reason.
+(`signal_clients` used `write_nonblock`, and an event's signal never blocks;
+there is no blocking write in the mix loop). The accept path being held by a
+stuck client (accept and mix are separate threads and the control thread ran
+for 14 s afterwards). A CQ overflow (`Poller::wait`'s `dropped` assertion
+would have killed soundd, and soundd is alive). A panic anywhere in soundd, for
+the same reason.
 
 **Eliminated by reading, and recorded so it is not re-derived.** The mix loop
 holds no lock across its wait, and neither `PIPES` nor `IO_URINGS` was held on
@@ -54,8 +55,8 @@ open its stream. The mixer's timeout while streaming is finite (one device
 period), so a park with that deadline is the only way to stop, and the timer
 that ends it is the same one the compositor's frame interval rides. The
 closed `io_uring::cancel_by_source` lost wake is *not* this: the mix loop's only
-registration is on the command pipe, which soundd owns both ends of and nobody
-closes.
+registration is on the command pipe, now an event, which soundd owns both
+sides of and nobody closes.
 
 **What settles it is where soundd's mix thread is parked and on what
 deadline, and nothing in the tree reads the deadline off a running T14.** soundd's mix thread parked with a sane

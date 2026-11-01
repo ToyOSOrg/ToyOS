@@ -50,6 +50,46 @@ pub fn rdtsc() -> u64 {
     (hi as u64) << 32 | lo as u64
 }
 
+/// The TSC read once every earlier instruction has executed and every earlier
+/// load is globally visible, and before any later instruction starts:
+/// `RDTSCP; LFENCE` (SDM Vol. 2B, RDTSCP). The clock's boot refuses a CPU
+/// without RDTSCP ([`has_rdtscp`]).
+#[inline]
+pub fn rdtsc_ordered() -> u64 {
+    let lo: u32;
+    let hi: u32;
+    // SAFETY: reads the time-stamp counter and `IA32_TSC_AUX` into the declared outputs; unprivileged since CR4.TSD is clear.
+    unsafe {
+        asm!("rdtscp", "lfence", out("eax") lo, out("edx") hi, out("ecx") _, options(nostack, preserves_flags));
+    }
+    (hi as u64) << 32 | lo as u64
+}
+
+/// `CPUID.80000001H:EDX[27]`.
+pub fn has_rdtscp() -> bool {
+    cpuid(0x8000_0000, 0).0 >= 0x8000_0001 && cpuid(0x8000_0001, 0).3 & 1 << 27 != 0
+}
+
+/// `CPUID.80000007H:EDX[8]`, the invariant TSC: one rate in every P-, C- and
+/// T-state (SDM Vol. 3B, "Invariant TSC"; AMD's PPRs, `TscInvariant`).
+pub fn invariant_tsc() -> bool {
+    cpuid(0x8000_0000, 0).0 >= 0x8000_0007 && cpuid(0x8000_0007, 0).3 & 1 << 8 != 0
+}
+
+/// `CPUID.01H:ECX[31]`, which a hypervisor sets for its guest (APM Vol. 3,
+/// 24594 rev 3.36, §E.3.2).
+pub fn under_hypervisor() -> bool {
+    cpuid(1, 0).2 & 1 << 31 != 0
+}
+
+/// `CPUID.07H:EBX[1]`: `IA32_TSC_ADJUST`, to which every write to the TSC
+/// since reset is added (SDM Vol. 3B, "Time-Stamp Counter Adjustment").
+pub fn has_tsc_adjust() -> bool {
+    leaf_7().1 & 1 << 1 != 0
+}
+
+pub const IA32_TSC_ADJUST: u32 = 0x3b;
+
 /// `CPUID.01H:ECX[30]`; without it `RDRAND` is `#UD`, so [`rdrand`] may not be
 /// reached at all.
 #[inline]
@@ -448,6 +488,12 @@ pub fn counter() -> u64 {
     rdtsc()
 }
 
+/// [`counter`] ordered after every earlier instruction and before every later
+/// one: the read the clock takes inside its line's read section.
+pub fn counter_ordered() -> u64 {
+    rdtsc_ordered()
+}
+
 /// This function's caller's frame pointer: `rbp`, which `-Cforce-frame-pointers=yes` makes one.
 #[inline(always)]
 pub fn frame_pointer() -> u64 {
@@ -457,17 +503,10 @@ pub fn frame_pointer() -> u64 {
     rbp
 }
 
-/// The TSC's frequency in hertz as CPUID *states* it, for the one caller that
-/// may run before the clock is calibrated — the panic path, which has to bound a wait on a
-/// machine that never reached the HPET. Nothing calibrates against it and no
-/// third source is guessed at: a CPU that states neither leaf answers `None`
-/// and its caller says so rather than inventing a rate.
+/// The TSC's frequency in hertz as CPUID leaf 15H states it, or `None` on a
+/// part that states none (`toyos_tsc::stated_hz`).
 pub fn stated_counter_hz() -> Option<u64> {
-    let max_leaf = cpuid(0, 0).0;
-    toyos_tsc::stated_hz(
-        (max_leaf >= 0x15).then(|| cpuid(0x15, 0)),
-        (max_leaf >= 0x16).then(|| cpuid(0x16, 0)),
-    )
+    toyos_tsc::stated_hz((cpuid(0, 0).0 >= 0x15).then(|| cpuid(0x15, 0)))
 }
 
 

@@ -1,0 +1,11 @@
+[package]
+name = "inputsink"
+description = "Test-only: an owner of input with no screen, relaying each key a source sends it to the one test that watches, so a test can hold that input reached its owner."
+version = "0.1.0"
+edition = "2021"
+license = "MIT OR Apache-2.0"
+
+[dependencies]
+toyos-abi = { path = "../../../sdk/abi" }
+toyos = { path = "../../../sdk/toyos" }
+toyos-input = { path = "../../../lib/input" }

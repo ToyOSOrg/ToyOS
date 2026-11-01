@@ -9,6 +9,8 @@ use alloc::vec::Vec;
 
 use toyos_abi::syscall::{MAX_NAMESPACE_ENTRIES, MAX_SERVICE_NAME};
 
+use crate::mm::charge::{self, Exhausted};
+
 use super::port::Connector;
 use super::{KObjectVariant, ObjectCore};
 
@@ -24,6 +26,7 @@ pub enum BuildError {
     TooMany,
     /// Two entries share a name.
     Duplicate,
+    Exhausted,
 }
 
 impl Namespace {
@@ -39,10 +42,10 @@ impl Namespace {
         if entries.windows(2).any(|w| w[0].0 == w[1].0) {
             return Err(BuildError::Duplicate);
         }
-        Ok(Arc::new(Self {
-            core: Self::new_core(),
-            entries: entries.into_boxed_slice(),
-        }))
+        let names: usize = entries.iter().map(|(name, _)| charge::heap(core::alloc::Layout::for_value::<str>(name))).sum();
+        let core = Self::new_core(charge::array::<(Box<str>, Arc<Connector>)>(entries.len()) + names)
+            .map_err(|Exhausted| BuildError::Exhausted)?;
+        Ok(Arc::new(Self { core, entries: entries.into_boxed_slice() }))
     }
 
     pub fn lookup(&self, name: &str) -> Option<&Arc<Connector>> {

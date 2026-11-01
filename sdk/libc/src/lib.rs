@@ -4,11 +4,12 @@
 
 extern crate alloc;
 
-mod alarm;
 mod alarmreq;
+mod signal;
 mod sigreq;
 mod errtext;
 mod arch;
+mod atreq;
 mod conversion;
 mod ctype;
 mod dgramreq;
@@ -46,6 +47,9 @@ mod time;
 mod uname;
 mod utf8;
 mod wchar;
+
+#[cfg(not(feature = "std-runtime"))]
+mod mapped;
 
 // C runtime: the entry `arch::_start` calls, panic handler, and global allocator.
 // Only for pure C programs (no Rust std). When linked into a Rust program
@@ -142,36 +146,36 @@ mod runtime {
         toyos_abi::syscall::exit(134)
     }
 
-    struct MmapAllocator;
+    /// dlmalloc's memory: the process's own private pages, committed whole and
+    /// populated as they are touched, and given back in part when it trims.
+    struct VmAllocator;
 
-    unsafe impl dlmalloc::Allocator for MmapAllocator {
+    unsafe impl dlmalloc::Allocator for VmAllocator {
         fn alloc(&self, size: usize) -> (*mut u8, usize, u32) {
-            use toyos_abi::syscall::{MmapProt, MmapFlags};
-            let ptr = unsafe {
-                toyos_abi::syscall::mmap(
-                    core::ptr::null_mut(),
-                    size,
-                    MmapProt::READ | MmapProt::WRITE,
-                    MmapFlags::ANONYMOUS,
-                )
-            };
-            if ptr.is_null() { (core::ptr::null_mut(), 0, 0) } else { (ptr, size, 0) }
+            use toyos_abi::syscall::{self, VmAt, VmProt};
+            // SAFETY: placed anywhere, so it replaces nothing.
+            match unsafe { syscall::vm_reserve(size, VmProt::ReadWrite, VmAt::ANYWHERE) } {
+                Ok(ptr) => (ptr, size, 0),
+                Err(_) => (core::ptr::null_mut(), 0, 0),
+            }
         }
 
         fn remap(&self, _ptr: *mut u8, _old: usize, _new: usize, _can_move: bool) -> *mut u8 {
             core::ptr::null_mut()
         }
 
-        fn free_part(&self, _ptr: *mut u8, _old: usize, _new: usize) -> bool {
-            false
+        fn free_part(&self, ptr: *mut u8, old: usize, new: usize) -> bool {
+            // SAFETY: dlmalloc gives up the tail of a segment it no longer uses.
+            unsafe { toyos_abi::syscall::vm_release(ptr.wrapping_add(new), old - new).is_ok() }
         }
 
         fn free(&self, ptr: *mut u8, size: usize) -> bool {
-            unsafe { toyos_abi::syscall::munmap(ptr, size).is_ok() }
+            // SAFETY: dlmalloc gives up a whole segment it no longer uses.
+            unsafe { toyos_abi::syscall::vm_release(ptr, size).is_ok() }
         }
 
         fn can_release_part(&self, _flags: u32) -> bool {
-            false
+            true
         }
 
         fn allocates_zeros(&self) -> bool {
@@ -179,28 +183,43 @@ mod runtime {
         }
 
         fn page_size(&self) -> usize {
-            0x1000
+            toyos_abi::syscall::PAGE_SIZE
         }
     }
 
     /// A contended allocation sleeps on the lock's futex rather than spinning.
-    static DLMALLOC: toyos::sync::Lock<dlmalloc::Dlmalloc<MmapAllocator>> =
-        toyos::sync::Lock::new(dlmalloc::Dlmalloc::new_with_allocator(MmapAllocator));
+    static DLMALLOC: toyos::sync::Lock<dlmalloc::Dlmalloc<VmAllocator>> =
+        toyos::sync::Lock::new(dlmalloc::Dlmalloc::new_with_allocator(VmAllocator));
 
     pub(crate) struct LibcAllocator;
 
     #[global_allocator]
     pub(crate) static ALLOCATOR: LibcAllocator = LibcAllocator;
 
+    use super::mapped;
+
     unsafe impl core::alloc::GlobalAlloc for LibcAllocator {
         unsafe fn alloc(&self, layout: core::alloc::Layout) -> *mut u8 {
+            if mapped::holds(layout) {
+                return mapped::alloc(layout);
+            }
             unsafe { DLMALLOC.lock().malloc(layout.size(), layout.align()) }
         }
+        unsafe fn alloc_zeroed(&self, layout: core::alloc::Layout) -> *mut u8 {
+            if mapped::holds(layout) {
+                return mapped::alloc(layout);
+            }
+            unsafe { DLMALLOC.lock().calloc(layout.size(), layout.align()) }
+        }
         unsafe fn dealloc(&self, ptr: *mut u8, layout: core::alloc::Layout) {
+            if mapped::holds(layout) {
+                return unsafe { mapped::dealloc(ptr, layout) };
+            }
             unsafe { DLMALLOC.lock().free(ptr, layout.size(), layout.align()) }
         }
         unsafe fn realloc(&self, ptr: *mut u8, layout: core::alloc::Layout, new_size: usize) -> *mut u8 {
-            unsafe { DLMALLOC.lock().realloc(ptr, layout.size(), layout.align(), new_size) }
+            let small = || unsafe { DLMALLOC.lock().realloc(ptr, layout.size(), layout.align(), new_size) };
+            unsafe { mapped::realloc(self, ptr, layout, new_size, small) }
         }
     }
 }

@@ -1,11 +1,13 @@
-//! One shard of ToyOS's stack: `toyos-net-ip`, `toyos-net-tcp` and `toyos-net-udp` over one
-//! interface. Frames come in through [`Shard::receive`] and leave only when the device pulls them
-//! with [`Shard::transmit`]; the caller hands in the time and the secrets, and nothing here reads
-//! a clock, draws randomness or does I/O.
+//! One shard of ToyOS's stack: `toyos-net-ip`, `toyos-net-tcp` and `toyos-net-udp` over every
+//! interface the caller adds ([`Shard::add_interface`]), one per link. Frames come in through
+//! [`Shard::receive`] and leave only when the links pull them with [`Shard::transmit`]; the
+//! caller hands in the time and the secrets, and nothing here reads a clock, draws randomness or
+//! does I/O.
 //!
-//! **Egress.** Each frame of credit goes to [ip]'s own frames first — ARP, IGMP, ICMP and the
-//! datagrams resolution released — then to what [tcp] owes outside a connection,
-//! and otherwise to the round: a deficit round-robin in bytes over every TCP connection and UDP
+//! **Egress.** One opportunity serves every link with room, each frame handed out with the
+//! interface it leaves by and spending that link's credit. A frame of credit goes to [ip]'s own
+//! frames first — ARP, IGMP, ICMP and the datagrams resolution released — then to what [tcp]
+//! owes outside a connection, and otherwise to the round: a deficit round-robin in bytes over every TCP connection and UDP
 //! sender with something to send, in the order each became eligible (RFC 8290 §3, without its new-flows list). A flow
 //! waiting for its next hop leaves the round, and rejoins at its tail when woken. A TCP segment is
 //! built only once its next hop's link address is known, and committed only once its frame is
@@ -15,9 +17,11 @@
 //! refused, that the table has room: a waiting flow costs one question per such change. A UDP
 //! datagram [ip] does not take, its next hop unresolved, stays in its sender's queue in [udp],
 //! spending nothing and charged nothing, while the sender's datagrams to other next hops leave:
-//! it is handed to [ip] again when [ip] reports that hop resolved or the routes changed, and
-//! dropped by [udp] when [ip] reports the hop failed. One [ip] refuses, for want of a route or
-//! for a next hop it holds failed or has no room for, is [ip]'s to count and report.
+//! it is handed to [ip] again when [ip] reports the hop on its interface resolved or the routes
+//! changed, and dropped by [udp] when [ip] reports the hop on its interface failed. One [ip] refuses, for want of a route or
+//! for a next hop it holds failed or has no room for, is [ip]'s to count and report. A flow
+//! whose route leaves by a link with no room waits on that link as on a next hop, and asks again
+//! at the next opportunity that link has room in.
 //!
 //! **Refusals.** Each crate's refusals of legacy or insecure input pass through that crate's
 //! `RefusalLog` here: at most one [`Event::Refused`] per rule in any 10 s, carrying how many
@@ -47,7 +51,7 @@ use alloc::collections::{BTreeMap, BTreeSet, VecDeque};
 use alloc::vec::Vec;
 use core::net::Ipv4Addr;
 
-use toyos_net_ip::{Advice, Delivery, ErrorKind, IfIndex, Ip, Limiter, NextHop, Nud, Resolution, Sent, Source, Transport, TransportError, FRAME};
+use toyos_net_ip::{Advice, Delivery, ErrorKind, Ip, Limiter, NextHop, Nud, Resolution, Sent, Source, Transport, TransportError, FRAME};
 use toyos_net_tcp::{ConnId, Endpoint, Hop, IcmpError, IcmpKind, Lent, ListenerId, Outgoing, Received, Seq, Served, Status, Tcp, Tuple};
 use toyos_net_udp::{Offer, Sender, SocketId, Udp, Verdict};
 use toyos_net_udp::Served as UdpServed;
@@ -55,6 +59,9 @@ use toyos_net_wire::ethernet::{FrameBuilder, IndividualMac, MacAddr};
 use toyos_net_wire::ipv4::{Ipv4Builder, Ipv4Source, MulticastAddr, TrafficClass, Ttl};
 use toyos_net_wire::siphash::Key;
 use toyos_net_wire::{Instant, Port};
+
+pub use toyos_net_ip::{Credit, IfIndex, Rank};
+pub use toyos_net_udp::Origin;
 
 /// Independent 128-bit keys from the system's randomness: one leaked value predicts no other.
 #[derive(Clone, Debug)]
@@ -67,7 +74,6 @@ pub struct Secrets {
 
 #[derive(Clone, Debug)]
 pub struct Config {
-    pub mac: IndividualMac,
     pub receive_buffer: u32,
     pub send_buffer: u32,
     pub secrets: Secrets,
@@ -86,10 +92,11 @@ pub enum Refusal {
 pub enum Event {
     /// A line for the log, and how many refusals of its rule it stands for beyond itself.
     Refused { refusal: Refusal, suppressed: u64 },
-    Verified(Ipv4Addr),
-    Conflict { addr: Ipv4Addr, mac: MacAddr },
-    Lost { addr: Ipv4Addr, mac: MacAddr },
-    NotVerified(Ipv4Addr),
+    Verified { iface: IfIndex, addr: Ipv4Addr },
+    Conflict { iface: IfIndex, addr: Ipv4Addr, mac: MacAddr },
+    /// Lost to another host after one defence and removed; every TCP connection from it ended.
+    Lost { iface: IfIndex, addr: Ipv4Addr, mac: MacAddr },
+    NotVerified { iface: IfIndex, addr: Ipv4Addr },
 }
 
 /// Why an active open was refused.
@@ -118,15 +125,20 @@ const TCP_MTU: u16 = {
     u16::from_le_bytes([low, high])
 };
 
-/// What a waiting flow waits on: its next hop's entry, or room in a full neighbour table.
+/// What a waiting flow waits on: its next hop's entry, room in a full neighbour table, or room
+/// on the link its route leaves by.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
 enum Wait {
-    Hop(Ipv4Addr),
+    Hop(IfIndex, Ipv4Addr),
     Room,
+    Link(IfIndex),
 }
 
 /// A TCP segment's way out, as the hop question answered it.
 struct Via {
+    iface: IfIndex,
+    /// `iface`'s own link address.
+    source: IndividualMac,
     next_hop: Ipv4Addr,
     mac: MacAddr,
 }
@@ -171,8 +183,8 @@ struct Log {
 
 pub struct Shard {
     ip: Ip,
-    iface: IfIndex,
-    mac: IndividualMac,
+    /// Every interface added, in the order it was.
+    ifaces: Vec<IfIndex>,
     tcp: Tcp,
     udp: Udp,
     resets: Limiter,
@@ -184,17 +196,17 @@ pub struct Shard {
     turn: bool,
     frame: Box<[u8; FRAME]>,
     /// The remote addresses of the TCP flows each wait holds, each until [ip] reports a change
-    /// for it; a flow with no route waits on the routes.
+    /// for it, and under a link's wait the next hops of the UDP datagrams too; a flow with no
+    /// route waits on the routes.
     waiting: BTreeMap<Wait, BTreeSet<Ipv4Addr>>,
     /// [ip]'s routing generation when the waiting flows last asked.
     routes: u64,
 }
 
 impl Shard {
-    /// One interface, link down and with no address: the shell configures it.
+    /// No interface: the shell adds one per link.
     pub fn new(now: Instant, config: Config) -> Result<Self, toyos_net_tcp::ConfigError> {
-        let mut ip = Ip::new(now, config.secrets.ip);
-        let iface = ip.add_interface(now, config.mac);
+        let ip = Ip::new(now, config.secrets.ip);
         let tcp = Tcp::new(toyos_net_tcp::Config {
             mtu: TCP_MTU,
             receive_buffer: config.receive_buffer,
@@ -204,8 +216,7 @@ impl Shard {
         Ok(Self {
             routes: ip.generation(),
             ip,
-            iface,
-            mac: config.mac,
+            ifaces: Vec::new(),
             tcp,
             udp: Udp::new(),
             resets: Limiter::new(config.secrets.resets),
@@ -222,9 +233,11 @@ impl Shard {
         &self.ip
     }
 
-    /// The interface the shard's [`Ip`] names.
-    pub fn iface(&self) -> IfIndex {
-        self.iface
+    /// A link's interface, down and with no address: the shell configures it.
+    pub fn add_interface(&mut self, now: Instant, mac: IndividualMac, rank: Rank) -> IfIndex {
+        let iface = self.ip.add_interface(now, mac, rank);
+        self.ifaces.push(iface);
+        iface
     }
 
     pub fn tcp_counters(&self) -> &toyos_net_tcp::Counters {
@@ -242,9 +255,9 @@ impl Shard {
 
     // ---- the device ----
 
-    /// A frame the device received.
-    pub fn receive(&mut self, now: Instant, frame: &[u8]) {
-        match self.ip.receive(now, self.iface, frame) {
+    /// A frame `iface`'s link received.
+    pub fn receive(&mut self, now: Instant, iface: IfIndex, frame: &[u8]) {
+        match self.ip.receive(now, iface, frame) {
             Some(Delivery::Tcp(arrival, segment)) => {
                 let resets = &mut self.resets;
                 let (from, to) = (arrival.packet.source(), arrival.packet.destination());
@@ -264,20 +277,37 @@ impl Shard {
         self.settle(now);
     }
 
-    /// A transmit opportunity with room for `credit` frames, each handed to `sink` as it is built.
-    /// Returns how many left.
-    pub fn transmit(&mut self, now: Instant, credit: usize, mut sink: impl FnMut(&[u8])) -> usize {
+    /// A transmit opportunity with `credit`'s room on each link, each frame handed to `sink` as
+    /// it is built, with the interface it leaves by. Returns how many left.
+    pub fn transmit(&mut self, now: Instant, mut credit: impl Credit, mut sink: impl FnMut(IfIndex, &[u8])) -> usize {
+        let credit = &mut credit;
+        let room: Vec<IfIndex> = self.ifaces.iter().copied().filter(|&iface| credit.room(iface)).collect();
+        for iface in room {
+            for hop in self.waiting.remove(&Wait::Link(iface)).into_iter().flatten() {
+                self.tcp.wake(hop);
+                self.udp.wake(iface, hop);
+            }
+        }
+        self.settle(now);
         let mut spent = 0usize;
-        while spent < credit {
-            let sent = self.ip.transmit(now, 1, |_, frame| sink(frame)) > 0
-                || self.tcp_frame(now, &mut sink, |tcp, hop, out| tcp.transmit_owed(now, 1, hop, out)).1.is_some()
-                || self.round_frame(now, &mut sink)
-                // A flow that waits has queued the request it waits on.
-                || self.ip.transmit(now, 1, |_, frame| sink(frame)) > 0;
-            if !sent {
+        while self.ifaces.iter().any(|&iface| credit.room(iface)) {
+            let own = self.ip.transmit(now, &mut *credit, &mut sink);
+            spent = spent.saturating_add(own);
+            let sent = own > 0
+                || self.tcp_frame(now, credit, &mut sink, |tcp, hop, out| tcp.transmit_owed(now, 1, hop, out)).1.is_some()
+                || self.round_frame(now, credit, &mut sink);
+            if sent && own == 0 {
+                spent = spent.saturating_add(1);
+            }
+            if sent {
+                continue;
+            }
+            // A flow that waits has queued the request it waits on.
+            let requests = self.ip.transmit(now, &mut *credit, &mut sink);
+            spent = spent.saturating_add(requests);
+            if requests == 0 {
                 break;
             }
-            spent = spent.saturating_add(1);
         }
         self.settle(now);
         spent
@@ -288,7 +318,7 @@ impl Shard {
     /// deficit is above 0, each frame's length charged as it leaves, and then goes to the tail
     /// keeping its deficit. A flow with nothing left leaves the round, its deficit with it: a UDP
     /// sender as its last datagram is handed out, a TCP connection once served with nothing due.
-    fn round_frame(&mut self, now: Instant, sink: &mut impl FnMut(&[u8])) -> bool {
+    fn round_frame(&mut self, now: Instant, credit: &mut impl Credit, sink: &mut impl FnMut(IfIndex, &[u8])) -> bool {
         loop {
             let Some(head) = self.round.front_mut() else { return false };
             if !core::mem::replace(&mut self.turn, true) {
@@ -296,12 +326,12 @@ impl Shard {
             }
             let flow = head.flow;
             let Outcome { frame, leaves } = match flow {
-                Flow::Tcp(id) => match self.tcp_frame(now, sink, |tcp, hop, out| tcp.serve(now, id, hop, out)) {
+                Flow::Tcp(id) => match self.tcp_frame(now, credit, sink, |tcp, hop, out| tcp.serve(now, id, hop, out)) {
                     (Served::Sent, Some(len)) => Outcome { frame: Some(len), leaves: false },
                     (Served::Done, None) => Outcome { frame: None, leaves: true },
                     (Served::Sent, None) | (Served::Done, Some(_)) => unreachable!("[tcp] answers Sent exactly when the sink framed a segment"),
                 },
-                Flow::Udp(sender) => self.udp_frame(now, sender, sink),
+                Flow::Udp(sender) => self.udp_frame(now, sender, credit, sink),
             };
             if let (Some(len), Some(head)) = (frame, self.round.front_mut()) {
                 head.deficit = head.deficit.saturating_sub(len);
@@ -325,18 +355,20 @@ impl Shard {
     fn tcp_frame<R>(
         &mut self,
         now: Instant,
-        sink: &mut impl FnMut(&[u8]),
+        credit: &mut impl Credit,
+        sink: &mut impl FnMut(IfIndex, &[u8]),
         send: impl FnOnce(&mut Tcp, &mut dyn FnMut(&Tuple) -> Hop<Via>, &mut dyn FnMut(&Outgoing<'_>, Via)) -> R,
     ) -> (R, Option<i32>) {
-        let Self { ip, iface, mac, tcp, frame, waiting, .. } = self;
-        let iface = *iface;
+        let Self { ip, tcp, frame, waiting, .. } = self;
         let mut built = None;
-        let done = send(tcp, &mut |tuple| hop(ip, now, iface, tuple, waiting), &mut |out, via| {
-            let Some(bytes) = tcp_datagram(out, *mac, via.mac, frame) else { unreachable!("TCP's MTU, [tcp]'s bounds and [ip]'s addresses fit every segment in a frame") };
-            sink(bytes);
-            built = Some((via.next_hop, out.source, charge(bytes)));
+        let room = &*credit;
+        let done = send(tcp, &mut |tuple| hop(ip, now, room, tuple, waiting), &mut |out, via| {
+            let Some(bytes) = tcp_datagram(out, via.source, via.mac, frame) else { unreachable!("TCP's MTU, [tcp]'s bounds and [ip]'s addresses fit every segment in a frame") };
+            sink(via.iface, bytes);
+            built = Some((via.iface, via.next_hop, out.source, charge(bytes)));
         });
-        let Some((next_hop, source, len)) = built else { return (done, None) };
+        let Some((iface, next_hop, source, len)) = built else { return (done, None) };
+        credit.spend(iface);
         // The send the neighbour machine counts: STALE moves to DELAY (RFC 4861 §7.3.3).
         ip.resolve(now, iface, next_hop, source);
         (done, Some(len))
@@ -344,22 +376,30 @@ impl Shard {
 
     /// One datagram of `sender`'s, framed by [ip]: the oldest whose next hop's link address is
     /// known, or that needs none. One [ip] refuses as it leaves makes no frame.
-    fn udp_frame(&mut self, now: Instant, sender: Sender, sink: &mut impl FnMut(&[u8])) -> Outcome {
-        let Self { ip, udp, frame, .. } = self;
+    fn udp_frame(&mut self, now: Instant, sender: Sender, credit: &mut impl Credit, sink: &mut impl FnMut(IfIndex, &[u8])) -> Outcome {
+        let Self { ip, udp, frame, waiting, .. } = self;
         let mut sent = None;
-        let served = udp.serve(sender, |out| match ip.send_udp(now, out, frame) {
-            Ok(Sent::Frame(len)) => {
+        let room = &*credit;
+        let served = udp.serve(sender, |out| match ip.send_udp(now, room, out, frame) {
+            Ok(Sent::Frame { len, iface }) => {
                 sent = frame.get(..len).map(|bytes| {
-                    sink(bytes);
-                    charge(bytes)
+                    sink(iface, bytes);
+                    (iface, charge(bytes))
                 });
                 Offer::Taken
             }
-            Ok(Sent::Pending(next_hop)) => Offer::Waits(next_hop),
+            Ok(Sent::Pending { iface, next_hop }) => Offer::Waits { iface, hop: next_hop },
+            Ok(Sent::NoRoom { iface, hop }) => {
+                waiting.entry(Wait::Link(iface)).or_default().insert(hop);
+                Offer::Waits { iface, hop }
+            }
             // Counted by [ip], which tells the datagram's flow.
             Err(_) => Offer::Taken,
         });
-        Outcome { frame: sent, leaves: served != UdpServed::More }
+        if let Some((iface, _)) = sent {
+            credit.spend(iface);
+        }
+        Outcome { frame: sent.map(|(_, len)| len), leaves: served != UdpServed::More }
     }
 
     pub fn next_deadline(&self) -> Option<Instant> {
@@ -385,8 +425,8 @@ impl Shard {
                         events.push(Event::Refused { refusal: Refusal::Tcp(r), suppressed });
                     }
                 }
-                toyos_net_tcp::Event::Reachable(peer) => ip.advise(now, peer, Advice::Confirmed),
-                toyos_net_tcp::Event::Reverify(peer) => ip.advise(now, peer, Advice::Reverify),
+                toyos_net_tcp::Event::Reachable { local, remote } => ip.advise(now, remote, Source::Bound(local), Advice::Confirmed),
+                toyos_net_tcp::Event::Reverify { local, remote } => ip.advise(now, remote, Source::Bound(local), Advice::Reverify),
             }
         }
         for event in ip.drain_events() {
@@ -397,21 +437,24 @@ impl Shard {
                     }
                 }
                 toyos_net_ip::Event::Unreachable(flow) => udp.unreachable(&flow),
-                toyos_net_ip::Event::Resolved { next_hop, .. } => {
-                    wake(tcp, waiting, Wait::Hop(next_hop));
-                    udp.wake(next_hop);
+                toyos_net_ip::Event::Resolved { iface, next_hop } => {
+                    wake(tcp, waiting, Wait::Hop(iface, next_hop));
+                    udp.wake(iface, next_hop);
                 }
-                toyos_net_ip::Event::Failed { next_hop, .. } => {
-                    wake(tcp, waiting, Wait::Hop(next_hop));
-                    udp.fail(next_hop);
+                toyos_net_ip::Event::Failed { iface, next_hop } => {
+                    wake(tcp, waiting, Wait::Hop(iface, next_hop));
+                    udp.fail(iface, next_hop);
                 }
                 // No datagram waits on a failed next hop: the failure dropped them.
-                toyos_net_ip::Event::Cleared { next_hop, .. } => wake(tcp, waiting, Wait::Hop(next_hop)),
+                toyos_net_ip::Event::Cleared { iface, next_hop } => wake(tcp, waiting, Wait::Hop(iface, next_hop)),
                 toyos_net_ip::Event::Room { .. } => wake(tcp, waiting, Wait::Room),
-                toyos_net_ip::Event::Verified { addr, .. } => events.push(Event::Verified(addr)),
-                toyos_net_ip::Event::Conflict { addr, mac, .. } => events.push(Event::Conflict { addr, mac }),
-                toyos_net_ip::Event::Lost { addr, mac, .. } => events.push(Event::Lost { addr, mac }),
-                toyos_net_ip::Event::NotVerified { addr, .. } => events.push(Event::NotVerified(addr)),
+                toyos_net_ip::Event::Verified { iface, addr } => events.push(Event::Verified { iface, addr }),
+                toyos_net_ip::Event::Conflict { iface, addr, mac } => events.push(Event::Conflict { iface, addr, mac }),
+                toyos_net_ip::Event::Lost { iface, addr, mac } => {
+                    tcp.lose_address(addr);
+                    events.push(Event::Lost { iface, addr, mac });
+                }
+                toyos_net_ip::Event::NotVerified { iface, addr } => events.push(Event::NotVerified { iface, addr }),
             }
         }
         for r in udp.drain_refusals() {
@@ -440,44 +483,47 @@ impl Shard {
 
     // ---- configuration, the shell's ----
 
-    pub fn link_up(&mut self, now: Instant) -> Result<(), toyos_net_ip::Counter> {
-        let up = self.ip.link_up(now, self.iface);
+    pub fn link_up(&mut self, now: Instant, iface: IfIndex) -> Result<(), toyos_net_ip::Counter> {
+        let up = self.ip.link_up(now, iface);
         self.settle(now);
         up
     }
 
-    pub fn link_down(&mut self, now: Instant) -> Result<(), toyos_net_ip::Counter> {
-        let down = self.ip.link_down(now, self.iface);
+    pub fn link_down(&mut self, now: Instant, iface: IfIndex) -> Result<(), toyos_net_ip::Counter> {
+        let down = self.ip.link_down(now, iface);
         self.settle(now);
         down
     }
 
     /// Added tentative: conflict detection runs before it is used ([`Event::Verified`]).
-    pub fn add_address(&mut self, now: Instant, addr: Ipv4Addr, prefix_len: u8) -> Result<(), toyos_net_ip::Counter> {
-        let added = self.ip.add_address(now, self.iface, addr, prefix_len);
+    pub fn add_address(&mut self, now: Instant, iface: IfIndex, addr: Ipv4Addr, prefix_len: u8) -> Result<(), toyos_net_ip::Counter> {
+        let added = self.ip.add_address(now, iface, addr, prefix_len);
         self.settle(now);
         added
     }
 
-    pub fn set_gateways(&mut self, now: Instant, gateways: &[Ipv4Addr]) -> Result<(), toyos_net_ip::Counter> {
-        let set = self.ip.set_gateways(now, self.iface, gateways);
+    pub fn set_gateways(&mut self, now: Instant, iface: IfIndex, gateways: &[Ipv4Addr]) -> Result<(), toyos_net_ip::Counter> {
+        let set = self.ip.set_gateways(now, iface, gateways);
         self.settle(now);
         set
     }
 
     /// Takes one of the interface's addresses away; [ip] withdraws the gateways no usable prefix
-    /// holds any more.
-    pub fn remove_address(&mut self, now: Instant, addr: Ipv4Addr) -> Result<(), toyos_net_ip::Counter> {
-        let removed = self.ip.remove_address(now, self.iface, addr);
+    /// holds any more, and every TCP connection from it ends (`Failure::AddressGone`).
+    pub fn remove_address(&mut self, now: Instant, iface: IfIndex, addr: Ipv4Addr) -> Result<(), toyos_net_ip::Counter> {
+        let removed = self.ip.remove_address(now, iface, addr);
+        if removed.is_ok() {
+            self.tcp.lose_address(addr);
+        }
         self.settle(now);
         removed
     }
 
-    /// Joins `group` on the interface: frames to its link address are taken from here on, and
-    /// [ip] reports the membership whenever the link can carry the report. Nothing to settle:
-    /// a join makes no flow eligible and no event.
-    pub fn join(&mut self, now: Instant, group: MulticastAddr) -> Result<(), toyos_net_ip::Counter> {
-        self.ip.join(now, self.iface, group)
+    /// Joins `group` on `iface`: frames to its link address are taken from here on, and [ip]
+    /// reports the membership whenever the link can carry the report. Nothing to settle: a join
+    /// makes no flow eligible and no event.
+    pub fn join(&mut self, now: Instant, iface: IfIndex, group: MulticastAddr) -> Result<(), toyos_net_ip::Counter> {
+        self.ip.join(now, iface, group)
     }
 
     // ---- TCP ----
@@ -623,6 +669,31 @@ impl Shard {
         self.udp.recv(id, out)
     }
 
+    /// [`Udp::readable`](toyos_net_udp::Udp::readable).
+    pub fn udp_readable(&mut self, id: SocketId) -> Result<bool, toyos_net_udp::Error> {
+        self.udp.readable(id)
+    }
+
+    /// The peer a connected socket's datagrams go to and come from.
+    pub fn udp_peer(&mut self, id: SocketId) -> Result<Option<(Ipv4Addr, Port)>, toyos_net_udp::Error> {
+        self.udp.binding(id).map(|(binding, _)| match binding {
+            toyos_net_udp::Binding::Connected { peer, peer_port, .. } => Some((peer, peer_port)),
+            toyos_net_udp::Binding::Any | toyos_net_udp::Binding::Specific(_) => None,
+        })
+    }
+
+    /// Queues a datagram for a connected socket's peer; accepted means queued, not sent.
+    pub fn udp_send(&mut self, now: Instant, id: SocketId, payload: &[u8]) -> Result<(), toyos_net_udp::Error> {
+        let queued = self.udp.send(&mut self.ip, id, payload);
+        self.settle(now);
+        queued
+    }
+
+    /// [`Udp::broadcast`](toyos_net_udp::Udp::broadcast).
+    pub fn udp_broadcast(&mut self, id: SocketId) -> Result<bool, toyos_net_udp::Error> {
+        self.udp.broadcast(id)
+    }
+
     /// The port a socket holds.
     pub fn udp_port(&mut self, id: SocketId) -> Result<Port, toyos_net_udp::Error> {
         self.udp.binding(id).map(|(_, port)| port)
@@ -655,10 +726,17 @@ impl Shard {
         Ok(id)
     }
 
-    /// The acquisition socket's send, naming its source: 0.0.0.0 to the limited broadcast, or an
-    /// assigned address.
-    pub fn send_from(&mut self, now: Instant, id: SocketId, source: Ipv4Addr, destination: Ipv4Addr, port: u16, payload: &[u8]) -> Result<(), toyos_net_udp::Error> {
-        let queued = self.udp.send_from(&mut self.ip, id, source, destination, port, payload);
+    /// [`Udp::send_via`](toyos_net_udp::Udp::send_via): a datagram that leaves by `iface` alone.
+    pub fn send_via(&mut self, now: Instant, id: SocketId, iface: IfIndex, destination: Ipv4Addr, port: u16, payload: &[u8]) -> Result<(), toyos_net_udp::Error> {
+        let queued = self.udp.send_via(&mut self.ip, id, iface, destination, port, payload);
+        self.settle(now);
+        queued
+    }
+
+    /// The acquisition socket's send, naming its source, 0.0.0.0 to the limited broadcast or an
+    /// assigned address, and the interface whose address it acquires.
+    pub fn send_from(&mut self, now: Instant, id: SocketId, origin: Origin, destination: Ipv4Addr, port: u16, payload: &[u8]) -> Result<(), toyos_net_udp::Error> {
+        let queued = self.udp.send_from(&mut self.ip, id, origin, destination, port, payload);
         self.settle(now);
         queued
     }
@@ -668,19 +746,25 @@ impl Shard {
 /// move: only a next hop with no entry is resolved, which queues its request.
 /// No route is a local destination unreachable (RFC 1122 §3.3.1.1). A flow told to wait is
 /// recorded under what it waits on; one with no route waits on the routes.
-fn hop(ip: &mut Ip, now: Instant, iface: IfIndex, tuple: &Tuple, waiting: &mut BTreeMap<Wait, BTreeSet<Ipv4Addr>>) -> Hop<Via> {
+fn hop(ip: &mut Ip, now: Instant, credit: &impl Credit, tuple: &Tuple, waiting: &mut BTreeMap<Wait, BTreeSet<Ipv4Addr>>) -> Hop<Via> {
     let remote = tuple.remote.addr;
-    let Ok(route) = ip.route(remote, Source::Bound(tuple.local.addr), Some(iface)) else { return Hop::Unreachable };
+    let Ok(route) = ip.route(remote, Source::Bound(tuple.local.addr), None) else { return Hop::Unreachable };
     let NextHop::Neighbour(next_hop) = route.next_hop else { return Hop::Unreachable };
+    let iface = route.iface;
+    let Some(source) = ip.mac(iface) else { unreachable!("a route names an interface [ip] holds") };
+    if !credit.room(iface) {
+        waiting.entry(Wait::Link(iface)).or_default().insert(remote);
+        return Hop::Pending;
+    }
     let (answer, wait) = match ip.neighbour(iface, next_hop) {
         Some(entry) => match entry.mac() {
-            Some(mac) => (Hop::Ready(Via { next_hop, mac }), None),
-            None if matches!(entry, Nud::Failed) => (Hop::Unreachable, Some(Wait::Hop(next_hop))),
-            None => (Hop::Pending, Some(Wait::Hop(next_hop))),
+            Some(mac) => (Hop::Ready(Via { iface, source, next_hop, mac }), None),
+            None if matches!(entry, Nud::Failed) => (Hop::Unreachable, Some(Wait::Hop(iface, next_hop))),
+            None => (Hop::Pending, Some(Wait::Hop(iface, next_hop))),
         },
         None => match ip.resolve(now, iface, next_hop, route.source) {
-            Resolution::Resolved(mac) => (Hop::Ready(Via { next_hop, mac }), None),
-            Resolution::Pending => (Hop::Pending, Some(Wait::Hop(next_hop))),
+            Resolution::Resolved(mac) => (Hop::Ready(Via { iface, source, next_hop, mac }), None),
+            Resolution::Pending => (Hop::Pending, Some(Wait::Hop(iface, next_hop))),
             Resolution::Failed => (Hop::Unreachable, Some(Wait::Room)),
         },
     };
@@ -751,11 +835,12 @@ mod tests {
         };
         let mac = IndividualMac::new(MacAddr([2, 0, 0, 0, 0, 0x0a])).unwrap();
         let mut now = Instant::from_millis(3_600_000);
-        let mut shard = Shard::new(now, Config { mac, receive_buffer: 65_535, send_buffer: 65_535, secrets }).unwrap();
-        shard.link_up(now).unwrap();
-        shard.add_address(now, A, 24).unwrap();
-        while !shard.drain_events().any(|e| e == Event::Verified(A)) {
-            shard.transmit(now, usize::MAX, |_| {});
+        let mut shard = Shard::new(now, Config { receive_buffer: 65_535, send_buffer: 65_535, secrets }).unwrap();
+        let iface = shard.add_interface(now, mac, Rank(0));
+        shard.link_up(now, iface).unwrap();
+        shard.add_address(now, iface, A, 24).unwrap();
+        while !shard.drain_events().any(|e| matches!(e, Event::Verified { addr: A, .. })) {
+            shard.transmit(now, usize::MAX, |_, _| {});
             now = shard.next_deadline().expect("conflict detection is still running");
             shard.fire(now);
         }
@@ -784,13 +869,13 @@ mod tests {
         const C: Ipv4Addr = Ipv4Addr::new(192, 0, 2, 3);
         const D: Ipv4Addr = Ipv4Addr::new(192, 0, 2, 4);
         let (mut shard, now) = verified();
-        shard.transmit(now, usize::MAX, |_| {});
+        shard.transmit(now, usize::MAX, |_, _| {});
         let port = |n| Port::new(n).unwrap();
         let (to_c, to_d) = (shard.bind(Ipv4Addr::UNSPECIFIED, Some(port(5000)), || 0).unwrap(), shard.bind(Ipv4Addr::UNSPECIFIED, Some(port(5001)), || 0).unwrap());
         shard.send_to(now, to_c, C, 9, b"c").unwrap();
         shard.send_to(now, to_d, D, 9, b"d").unwrap();
         assert_eq!(shard.round.len(), 2);
-        assert_eq!(shard.transmit(now, usize::MAX, |_| {}), 2, "a request for each");
+        assert_eq!(shard.transmit(now, usize::MAX, |_, _| {}), 2, "a request for each");
         assert!(shard.round.is_empty(), "what waits is not served");
 
         let mut reply = [[2, 0, 0, 0, 0, 0x0a], [2, 0, 0, 0, 0, 0x0c]].concat();
@@ -798,7 +883,7 @@ mod tests {
         reply.extend_from_slice(&C.octets());
         reply.extend_from_slice(&[2, 0, 0, 0, 0, 0x0a]);
         reply.extend_from_slice(&A.octets());
-        shard.receive(now, &reply);
+        shard.receive(now, shard.ifaces[0], &reply);
         assert_eq!(shard.round.iter().map(|m| m.flow).collect::<Vec<_>>(), [Flow::Udp(Sender::Socket(to_c))]);
     }
 

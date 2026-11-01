@@ -10,6 +10,7 @@ use toyos_abi::usersafe::bytes;
 use toyos_abi::FramebufferInfo;
 
 use crate::device::{Claim, DeviceType};
+use crate::mm::charge::Exhausted;
 
 use super::handle::{HandleEntry, HandleTable};
 use super::shm::SharedMemObject;
@@ -28,8 +29,8 @@ pub enum DeviceInfo {
     Acpi(toyos_abi::acpi::AcpiInfo),
 }
 
-// MAP is required; DUP and TRANSFER let a daemon hand the buffer to another process.
-const BUFFER_RIGHTS: Rights = Rights::MAP.union(Rights::DUP).union(Rights::TRANSFER);
+// MAP and WRITE draw into it; DUP and TRANSFER let a daemon hand the buffer to another process.
+const BUFFER_RIGHTS: Rights = Rights::MAP.union(Rights::WRITE).union(Rights::DUP).union(Rights::TRANSFER);
 
 fn install_buffer(table: &mut HandleTable, buffer: &Arc<SharedMemObject>) -> Result<RawHandle, SyscallError> {
     table
@@ -74,14 +75,15 @@ struct Described {
 }
 
 impl DeviceClaim {
-    pub fn new(class: DeviceType, info: DeviceInfo, claim: Claim) -> Arc<Self> {
-        Arc::new(Self {
-            core: Self::new_core(),
+    /// Refused, `claim` drops and the device is let go.
+    pub fn new(class: DeviceType, info: DeviceInfo, claim: Claim) -> Result<Arc<Self>, Exhausted> {
+        Ok(Arc::new(Self {
+            core: Self::new_core(0)?,
             class,
             info_read: AtomicBool::new(false),
             described: crate::sync::Lock::new(Described { info, bytes: None }),
             reference: Held::new(claim),
-        })
+        }))
     }
 
     pub fn class(&self) -> DeviceType {
@@ -158,11 +160,12 @@ pub struct ConsoleObject {
 }
 
 impl ConsoleObject {
-    pub fn new() -> Arc<Self> {
-        Arc::new(Self {
-            core: Self::new_core(),
+    /// A console of its own for a holder in `job`, charged to it.
+    pub fn new(job: &Arc<kernel::sched::job::Job>) -> Result<Arc<Self>, Exhausted> {
+        Ok(Arc::new(Self {
+            core: Self::new_core_for(job, 0)?,
             line: crate::sync::Lock::new(crate::drivers::serial::ConsoleLine::new()),
-        })
+        }))
     }
 
     /// Take a userland write, queueing every whole line it completes that the

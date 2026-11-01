@@ -19,7 +19,7 @@ const LINE_BYTES: usize = 64;
 
 const SL_READ: u64 = 1 << 0;
 const SL_WRITE: u64 = 1 << 1;
-/// Bit 7 at a page-directory level: a 2 MiB leaf rather than a pointer to the next level — the kernel's only leaf size.
+/// Bit 7 at a page-directory level: a 2 MiB leaf rather than a pointer to the next level.
 const SL_LARGE: u64 = 1 << 7;
 
 /// Root, context and second-level entries share this pointer field, bounded by x86-64's 52-bit physical ceiling.
@@ -44,6 +44,14 @@ pub struct Tables {
 impl Tables {
     pub const fn new() -> Self {
         Self { pages: Vec::new(), used: PAGE_2M as usize }
+    }
+
+    /// Every 2 MiB page tables have been carved from, `[start, end)` physical.
+    pub fn pages(&self) -> impl Iterator<Item = (u64, u64)> + '_ {
+        self.pages.iter().map(|page| {
+            let start = page.direct_map().phys();
+            (start, start + PAGE_2M)
+        })
     }
 
     /// Returns one zeroed 4 KiB table, usable as a root, context, second-level, or invalidation-queue table.
@@ -226,6 +234,27 @@ const _: () = {
 /// The 2 MiB leaf at `at` in `space` reads and writes `phys`.
 pub fn put(tables: &mut Tables, space: Space, at: u64, phys: u64) {
     map_2m(tables, space.root, levels(space.width), Iova::translated(at), phys, LEAF_PERM);
+}
+
+/// The 4 KiB page at `at` in `space` reads and writes `phys`, through a page
+/// table its 2 MiB entry points to (VT-d Rev. 4.0 §9.8: `PS` clear at the
+/// page-directory level names a page table). Only for a range firmware
+/// reserved, which no 2 MiB leaf of a grant ever shares and nothing takes back.
+pub fn put_4k(tables: &mut Tables, space: Space, at: u64, phys: u64) {
+    let directory = descend(tables, space.root, levels(space.width), Iova::translated(at));
+    let index = ((at >> 21) & 0x1FF) as usize;
+    let entry = directory.read(index);
+    assert!(entry & SL_LARGE == 0 || entry & (SL_READ | SL_WRITE) == 0, "iommu: {at:#x} is inside a live 2 MiB leaf");
+    let table = if entry & (SL_READ | SL_WRITE) != 0 {
+        Table { phys: entry & ADDR_MASK }
+    } else {
+        let next = tables.alloc();
+        directory.write(index, next.phys | SL_READ | SL_WRITE);
+        next
+    };
+    let leaf = ((at >> 12) & 0x1FF) as usize;
+    assert!(table.read(leaf) & (SL_READ | SL_WRITE) == 0, "iommu: {at:#x} was still mapped when a new page was written there");
+    table.write(leaf, (phys & ADDR_MASK) | LEAF_PERM);
 }
 
 /// Clears the leaf at `at`; `false` where none is mapped. The caller

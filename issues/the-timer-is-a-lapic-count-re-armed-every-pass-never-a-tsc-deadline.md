@@ -10,9 +10,9 @@ Every scheduler pass ends by handing its timer an absolute deadline
 (`kernel/pure/sched/cpu.rs:1912-1918`), and the kernel turns it back into a
 span from now (`kernel/src/hw.rs:47-51`) that `apic::arm_one_shot` converts to
 LAPIC ticks by the boot's calibration against the TSC-derived clock
-(`kernel/src/arch/x86_64/apic.rs:307-336`) and writes as three APIC register
-writes, `TIMER_DIVIDE`, `LVT_TIMER` and `TIMER_INIT` (`apic.rs:355-368`):
-MMIO stores under xAPIC, `wrmsr` under x2APIC (`apic.rs:49-64`), which the
+(`kernel/src/arch/x86_64/apic.rs`) and writes into `TIMER_INIT`, one APIC
+register write since #1061 set the divide and the LVT once per CPU: an MMIO
+store under xAPIC, a `wrmsr` under x2APIC, which the
 T14 runs (`apic=X2apic`,
 https://github.com/ToyOSOrg/ToyOS/pull/861#issuecomment-6113257693). A timer fire from Ring 3 writes
 `TIMER_INIT` once more before its handler runs
@@ -35,7 +35,9 @@ TSC, TSC-deadline or APIC-timer erratum (631123-034, the UP3 line, CPUID
 000806C1h). Nothing but speed is its purpose: a deadline removes no path,
 since a CPU without one keeps the count.
 
-**Measured** (`wt/toyos-scout-tlb` at `d4c2f8ebe`, `main`'s `177e72a9e` plus
+**Measured before #1061**, when the arm was three register writes and a u128
+multiply and divide, so these re-arm figures are the old code's and a twin
+compares against the arm read again (`wt/toyos-scout-tlb` at `d4c2f8ebe`, `main`'s `177e72a9e` plus
 the scout; https://github.com/ToyOSOrg/ToyOS/pull/866#issuecomment-6119443198),
 p50 in TSC ticks per direction of a user ping-pong between CPUs 4 and 5:
 
@@ -51,8 +53,8 @@ which a pass with no idle wake runs too, and 27.8 % and 31.3 % of the switch
 it sits in; the
 re-arm and the stop together are 5.5 % and 5.6 % of an idle wake (derived).
 The scout's re-arm opens at `arm_one_shot`'s first statement, after
-`set_timer`'s `now()` (`kernel/src/hw.rs:50`), an `rdtsc` and a u128 multiply
-and divide (`kernel/pure/clock.rs:10-11`): the count reads the clock to turn
+`set_timer`'s `now()` (`kernel/src/hw.rs:50`), an `rdtsc` and the tick
+conversion: the count reads the clock to turn
 the deadline into a span, and a deadline written as an absolute
 `IA32_TSC_DEADLINE` value reads none. Of what the segment times, each figure
 is an upper bound on what deadline mode saves, which still writes once to arm
@@ -61,7 +63,7 @@ and once to stop; on the AMD bench both sit at its TSC's floor.
 **Next: a TSC-deadline twin on the T14**, `main` plus the scout with the
 one-shot armed and stopped through `IA32_TSC_DEADLINE`, beside `main` plus
 the scout in the same session. Each arm reads the 1 ms timer lateness of
-`issues/no-program-measures-toyos-against-linux-on-one-machine.md` and the
+`issues/no-published-run-compares-toyos-with-linux-on-one-machine.md` and the
 split above, its re-arm segment opening at `set_timer` (`kernel/src/hw.rs:49`)
 in both. Each arm runs 11 times; a run's figure is the median lateness of
 its 1 ms timers, and an arm's is the median of its 11 with their spread,

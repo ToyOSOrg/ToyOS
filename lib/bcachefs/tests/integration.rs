@@ -21,7 +21,7 @@ fn create_single_small_file() {
     let files = mounted.list(usize::MAX, &|_| true).expect("list failed");
     assert_eq!(files.len(), 1);
     assert_eq!(files[0].0, "hello.txt");
-    assert_eq!(files[0].1, 13);
+    assert_eq!(files[0].1, bcachefs::Recorded { symlink: false, size: 13, mtime: 42 });
 
     let data = mounted.read_file("hello.txt").expect("read failed");
     assert_eq!(data, b"Hello, world!");
@@ -134,7 +134,7 @@ fn empty_file() {
     let files = mounted.list(usize::MAX, &|_| true).expect("list");
     assert_eq!(files.len(), 1);
     assert_eq!(files[0].0, "empty");
-    assert_eq!(files[0].1, 0);
+    assert_eq!(files[0].1.size, 0);
 
     let data = mounted.read_file("empty").expect("read empty");
     assert!(data.is_empty());
@@ -577,14 +577,25 @@ fn format_mount_unmount_create_mount_roundtrip() {
 
 // --- Values sized by userland: the extent list lives inline in a btree node ---
 
-/// The path the kernel's flush takes: one `resolve_or_alloc_block` per dirty
-/// page, in ascending order, then one `update_metadata` for the whole file.
+/// A file grown a page at a time, in ascending order.
 fn write_pages(fs: &mut Mounted<VecBlockIO, ReadWrite>, pages: u32) -> Vec<bcachefs::Extent> {
     let mut extents = Vec::new();
     for page in 0..pages {
-        fs.resolve_or_alloc_block(&mut extents, page).expect("allocate a block for the page");
+        fs.allocate(&mut extents, page..=page, 1).expect("allocate a block for the page");
     }
     extents
+}
+
+/// The block holding `page`, which `extents` reach.
+fn block_of(extents: &[Extent], page: u32) -> u64 {
+    let mut cursor = 0;
+    for e in extents {
+        if page < cursor + e.block_count {
+            return e.start_block + u64::from(page - cursor);
+        }
+        cursor += e.block_count;
+    }
+    panic!("page {page} is past {extents:?}")
 }
 
 #[test]
@@ -852,7 +863,7 @@ fn one_block_holes(blocks: u64) -> (Mounted<VecBlockIO, ReadWrite>, Vec<u64>) {
     let mut fs = Formatted::format(VecBlockIO::new(blocks)).expect("format").mount();
     let mut run = Vec::new();
     let mut page = 0;
-    while fs.resolve_or_alloc_block(&mut run, page).is_ok() {
+    while fs.allocate(&mut run, page..=page, 1).is_ok() {
         page += 1;
     }
     let taken: Vec<u64> = run.iter().flat_map(|e| e.start_block..e.start_block + e.block_count as u64).collect();
@@ -861,7 +872,7 @@ fn one_block_holes(blocks: u64) -> (Mounted<VecBlockIO, ReadWrite>, Vec<u64>) {
         taken.iter().step_by(2).map(|&b| Extent { start_block: b, block_count: 1, _reserved: 0 }).collect();
     fs.free_extents(&holes).expect("give every other block back");
     let mut tail = vec![Extent { start_block: *taken.last().unwrap(), block_count: 1, _reserved: 0 }];
-    fs.resolve_or_alloc_block(&mut tail, NODE_RESERVE).expect("the run left for nodes");
+    fs.allocate(&mut tail, NODE_RESERVE..=NODE_RESERVE, 1).expect("the run left for nodes");
 
     let sb = bcachefs::Superblock::read(fs.io()).expect("the superblock");
     let mut bitmap = bcachefs::BlockBuf::zeroed();
@@ -880,7 +891,8 @@ fn a_sparse_write_resolves_inside_the_blocks_it_reserved() {
     // longer than one. `alloc_contiguous` says so in its second return value;
     // this caller used to read it as "all four, starting here".
     let mut extents = Vec::new();
-    let block = fs.resolve_or_alloc_block(&mut extents, 3).expect("allocate page 3");
+    fs.allocate(&mut extents, 3..=3, 1).expect("allocate page 3");
+    let block = block_of(&extents, 3);
 
     let reserved: Vec<u64> = extents
         .iter()
@@ -898,13 +910,13 @@ fn every_page_of_a_fragmented_file_owns_a_distinct_block() {
     let (mut fs, _) = one_block_holes(64);
 
     let mut extents = Vec::new();
-    fs.resolve_or_alloc_block(&mut extents, 5).expect("allocate through page 5");
+    fs.allocate(&mut extents, 5..=5, 1).expect("allocate through page 5");
     let covered: u32 = extents.iter().map(|e| e.block_count).sum();
     assert_eq!(covered, 6, "six pages need six blocks, got {extents:?}");
 
     let mut seen: Vec<u64> = Vec::new();
     for page in 0..=5 {
-        let block = fs.resolve_or_alloc_block(&mut extents, page).expect("resolve");
+        let block = block_of(&extents, page);
         assert!(!seen.contains(&block), "page {page} shares block {block} with an earlier page");
         seen.push(block);
     }
@@ -1080,7 +1092,7 @@ fn a_file_grown_past_what_the_volume_spares_leaves_the_reserve() {
     let mut fs = mkfs.mount();
     let (mut extents, _) = fs.file_extents("f00").expect("file_extents").expect("f00 is on the volume");
 
-    let grown = fs.resolve_or_alloc_block(&mut extents, 128);
+    let grown = fs.allocate(&mut extents, 128..=128, 1);
     assert!(matches!(grown, Err(FsError::NoSpace { .. })), "a page past every block of the volume: {grown:?}");
     assert_eq!(extents.len(), 1, "the run is not contiguous with the file, so this proves nothing: {extents:?}");
     let blocks = extents[0].block_count as u64;

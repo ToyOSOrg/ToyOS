@@ -13,17 +13,17 @@
 //! out of the allocator and charged to no process, for the machine's life.
 //!
 //! [`objects`] makes each one a [`SharedMemObject`] over its pages
-//! ([`Memory::Boot`]), which every mapping maps read-only, so no holder writes
-//! it whatever rights its handle carries.
+//! ([`SharedMemObject::boot`]), whose handles never carry `WRITE`
+//! (`ops::initial_rights`, and every part of one inherits its source's
+//! rights), so every mapping of it is read-only; `sys_shm_map` asserts it.
 
 use alloc::sync::Arc;
 
 use toyos_abi::boot::{BootImage, KernelArgs, MemoryMapEntry};
 use toyos_rootimage::handoff::{held, Descriptor};
 
-use crate::mm::policy::CachePolicy;
-use crate::mm::{DirectMap, Region, PAGE_SIZE};
-use crate::object::shm::{Memory, SharedMemObject};
+use crate::mm::{Region, PAGE_SIZE};
+use crate::object::shm::SharedMemObject;
 
 /// The three images, as the loader handed them and [`init`] judged them.
 #[derive(Clone, Copy)]
@@ -81,15 +81,7 @@ pub struct Objects {
 /// One object over each image, once `mm::init` has run, for the supervisor's
 /// spawn.
 pub fn objects(handed: Handed) -> Objects {
-    let object = |image: BootImage| {
-        let region = pages(image);
-        SharedMemObject::over(crate::object::shm::Region {
-            phys: DirectMap::from_phys(region.start),
-            size: region.end - region.start,
-            cache: CachePolicy::Normal,
-            memory: Memory::Boot { len: image.len },
-        })
-    };
+    let object = |image: BootImage| SharedMemObject::boot(image.addr, image.len).expect("boot: no heap for a boot image's object");
     for (what, image) in named(&handed) {
         log!("boot: {what} image {:#x}+{:#x}, kept read-only for the machine's life", image.addr, image.len);
     }

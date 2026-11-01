@@ -7,10 +7,11 @@ use core::mem;
 
 use alloc::vec;
 use alloc::alloc::Layout;
+use toyos_devicepath::HardDrive;
 use toyos_elf::section::SectionTable;
 use toyos_elf::{rela, ImageOffset, Op, RelaTable, SymTab};
 use efi::{
-    cstr16, CStr16, DevicePath, EdidActive, Gop, Handle, HardDrive, LoadedImage, MemoryDescriptor, Mode, PixelFormat, ResetType,
+    cstr16, CStr16, DevicePath, EdidActive, Gop, Handle, LoadedImage, MemoryDescriptor, Mode, PixelFormat, ResetType,
     SimpleFileSystem, Status, SystemTable, ACPI2_GUID, PAGE_SIZE,
 };
 use toyos_abi::boot::{KernelArgs, MemoryMapEntry, EDID_BLOCK};
@@ -30,6 +31,7 @@ macro_rules! println {
 mod arch;
 mod attempt;
 mod blackbox;
+mod bootsource;
 mod bootnext;
 mod efi;
 mod floor;
@@ -166,19 +168,26 @@ fn boot_partition(handle: Handle, system_table: &SystemTable) -> Option<BootPart
     let bs = system_table.boot_services();
     let image = bs.exclusive::<LoadedImage>(handle).ok()?;
     let device = image.device()?;
-    let path = bs.exclusive::<DevicePath>(device).ok()?;
+    let firmware = bs.exclusive::<DevicePath>(device).ok()?;
+    let path = match firmware.path() {
+        Ok(path) => path,
+        Err(why) => {
+            println!("Boot partition: the boot device's path is not read ({why}), so it is ignored");
+            return None;
+        }
+    };
 
     // Exactly one, not the last one. A path with two HARDDRIVE nodes describes
     // a partition inside a partition, and picking either is guessing which of
     // the two the kernel's block device will be looking at.
-    let mut nodes = path.nodes().filter(|node| (node[0], node[1]) == HardDrive::TYPE);
+    let mut nodes = path.nodes().filter(|node| node.kind() == HardDrive::TYPE);
     let node = nodes.next()?;
     if nodes.next().is_some() {
         println!("Boot partition: the device path has more than one HARDDRIVE node, so it is ignored");
         return None;
     }
 
-    let hd = HardDrive::parse(node)?;
+    let hd = HardDrive::parse(node.bytes())?;
     if hd.format != HardDrive::GPT {
         println!("Boot partition: firmware says this is not a GPT partition, so it is ignored");
         return None;
@@ -550,6 +559,8 @@ fn start_kernel(kernel: LoadedKernel, kernel_elf_bytes: vec::Vec<u8>, cmdline: v
         }
     }
 
+    let boot_sources = bootsource::sources(&system_table, &slot_volume_guid);
+
     // Allocated before exiting boot services, which takes the allocator away.
     let pt_layout = Layout::new::<[Table; MAX_PAGES]>();
     // SAFETY: `pt_layout` has non-zero size.
@@ -681,6 +692,7 @@ fn start_kernel(kernel: LoadedKernel, kernel_elf_bytes: vec::Vec<u8>, cmdline: v
         slot_volume_guid,
         supervisor_image,
         fileserver_image,
+        boot_sources,
     };
     if let Some(edid) = gop.as_ref().and_then(|g| g.edid) {
         kernel_args.gop_edid = edid;
@@ -783,6 +795,15 @@ fn main(handle: Handle, system_table: SystemTable) -> Status {
     // so the answer is on the stick and not only on the screen.
     let firmware_watchdog =
         system_table.boot_services().set_watchdog_timer(FIRMWARE_WATCHDOG_SECS, WATCHDOG_CODE);
+    // Before anything that can panic: a panic resets the machine where the
+    // reset boots its default entry and not this loader, so a bench whose
+    // `BootNext` bought this boot falls back to its own system with no hand,
+    // and powers it off where this loader is the default, which a reset would
+    // only start again.
+    let panic_resets = bootnext::default_is_another(&system_table);
+    if panic_resets {
+        efi::reset_on_panic();
+    }
     // Before the first line, so the screen holds this loader's lines and none
     // of the firmware's: its logo and its boot manager's text. ClearScreen
     // (UEFI 2.11 §12.4.8) is the console's own clear, which also homes the
@@ -850,6 +871,13 @@ fn main(handle: Handle, system_table: SystemTable) -> Status {
     if let Err(e) = cleared {
         println!("Screen: firmware's console would not clear ({e}), so its own lines stay above these");
     }
+    println!(
+        "Panic: a panic in this loader {}",
+        match panic_resets {
+            true => "resets the machine, whose default boot is another entry than this one",
+            false => "powers the machine off, since its default boot is this loader or the firmware does not say",
+        }
+    );
     if let Some(line) = claim_refused {
         println!("{line}");
     }
@@ -886,6 +914,18 @@ fn main(handle: Handle, system_table: SystemTable) -> Status {
             Err(why) => println!("Anti-rollback floor: not raised, because the proven image is not verified: {why}"),
         }
     }
+    // Find ACPI 2.0 RSDP from UEFI configuration table
+    let rsdp_addr = system_table
+        .config_table()
+        .iter()
+        .find(|entry| entry.guid == ACPI2_GUID)
+        .map(|entry| entry.address as u64)
+        .expect("ACPI 2.0 RSDP not found in UEFI config table");
+    // On every pass, before either end of the chain: the last reset's cause is
+    // the report this pass may be making, and a count the last boot left
+    // running on an FCH would end this pass or the boot it hands to.
+    let chipset = watchdog::locate(&system_table, rsdp_addr);
+    watchdog::survey(&chipset);
     if retry {
         // **The hang, and the only bound there is on one.** The last boot of
         // this image was handed the machine and never reported — no panic, no
@@ -921,13 +961,6 @@ fn main(handle: Handle, system_table: SystemTable) -> Status {
         ),
     }
 
-    // Find ACPI 2.0 RSDP from UEFI configuration table
-    let rsdp_addr = system_table
-        .config_table()
-        .iter()
-        .find(|entry| entry.guid == ACPI2_GUID)
-        .map(|entry| entry.address as u64)
-        .expect("ACPI 2.0 RSDP not found in UEFI config table");
     println!("RSDP address: {:#x}", rsdp_addr);
 
     let boot_part = boot_partition(handle, &system_table);
@@ -1008,7 +1041,7 @@ fn main(handle: Handle, system_table: SystemTable) -> Status {
     // The last act before the jump, so the smallest possible span of this loader
     // is inside the bound: everything above it can still be reported, and a hang
     // between here and the kernel's own arm is what the bound is for.
-    watchdog::arm(&system_table, rsdp_addr, params);
+    watchdog::arm(&chipset, params);
 
     println!("Starting kernel...");
     start_kernel(loaded_kernel, kernel_bytes, cmdline, rsdp_addr, gop, boot_part, log_guid, Handed { root: chosen.root, supervisor: chosen.supervisor, fileserver: chosen.fileserver }, chosen.volume, microcode, entry_counter, wall_clock, system_table);

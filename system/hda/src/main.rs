@@ -439,29 +439,22 @@ const OFFER_ANSWER: Duration = Duration::from_secs(30);
 fn offered(control: &Connection, offer: &Offer) -> Result<OwnedHandle, Refusal> {
     let refused = |why: String| Refusal::Soundserver(why);
     control.send_bytes(MSG_OFFER, &offer.encode()).map_err(|why| refused(format!("the offer was refused ({why:?})")))?;
-    let poller = Poller::new(1);
-    poller.watch(control, READABLE, TOKEN_CONTROL);
-    let mut answered = false;
-    poller.wait(1, OFFER_ANSWER.as_nanos() as u64, |_| answered = true);
+    let answered = toyos::poller::wait_one(control, READABLE, OFFER_ANSWER.as_nanos() as u64)
+        .map_err(|why| refused(format!("its answer could not be waited for ({why:?})")))?;
     if !answered {
         return Err(refused(format!("it did not answer the offer within {OFFER_ANSWER:?}")));
     }
-    let header = control.recv_header().map_err(|why| refused(format!("no answer to the offer ({why:?})")))?;
-    let mut payload = [0u8; MAX_REQUEST];
-    let n = control
-        .recv_bytes(&header, &mut payload)
-        .map_err(|why| refused(format!("an answer of {} bytes ({why:?})", header.len())))?;
-    match ToDriver::decode(header.msg_type, &payload[..n]) {
+    let mut rx = FrameRx::<MAX_REQUEST>::new();
+    let frame = rx.recv(control).map_err(|why| refused(format!("no answer to the offer ({why:?})")))?;
+    match ToDriver::decode(frame.msg_type, rx.payload(frame.payload_len)) {
         Some(ToDriver::Accepted) => {
-            let [ring] = control
-                .recv_handles_exact::<{ output::ACCEPTED_HANDLES }>(&header)
+            let [ring] = rx
+                .take_handles::<{ output::ACCEPTED_HANDLES }>()
                 .ok_or_else(|| refused("its acceptance carried no ring".into()))?;
-            // SAFETY: the kernel moved this handle into this table with the
-            // frame that names it, and nothing else answers for it.
-            Ok(unsafe { OwnedHandle::from_raw(ring) })
+            Ok(ring)
         }
         Some(ToDriver::Refused) => Err(Refusal::Declined),
-        _ => Err(refused(format!("it answered the offer with frame {}", header.msg_type))),
+        _ => Err(refused(format!("it answered the offer with frame {}", frame.msg_type))),
     }
 }
 

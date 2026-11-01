@@ -4,6 +4,7 @@
 use alloc::sync::Arc;
 
 use crate::inbox::{Inbox, InboxRef};
+use crate::mm::charge::Exhausted;
 
 use super::{Held, KObjectVariant, ObjectCore, ZeroHandles};
 
@@ -14,11 +15,11 @@ pub struct InboxObject {
 }
 
 impl InboxObject {
-    pub fn new(ring: InboxRef) -> Arc<Self> {
-        Arc::new(Self {
-            core: Self::new_core(),
+    pub fn new(ring: InboxRef) -> Result<Arc<Self>, Exhausted> {
+        Ok(Arc::new(Self {
+            core: Self::new_core(0)?,
             reference: Held::new(ring),
-        })
+        }))
     }
 
     /// The ring, for as long as a handle names it.

@@ -2,11 +2,11 @@
 //!
 //! This binary is the stream's server: it describes its device and answers the
 //! open as soundserver does, and
-//! then holds the signal pipe open without writing it until the client's
+//! then holds the stream's signal without raising it until the client's
 //! `Drop` has come back — a soundserver whose mix loop has stopped. Its child, the
 //! same binary with `client`, reaches it as `soundserver`, builds a stream through
 //! cpal and drops it unplayed. The stream thread sends the close and waits on
-//! the pipe; `Drop` has to come back with the refusal by name through the error
+//! the signal; `Drop` has to come back with the refusal by name through the error
 //! callback rather than wait for good. One signal then has to end the stream
 //! thread while its process lives, so the stream's connection closes as it
 //! would for soundserver.
@@ -71,7 +71,7 @@ fn serve() {
         .expect("a namespace naming this binary soundserver");
     let mut child = Command::new(SELF)
         .arg("client")
-        .endow(SVC_LABEL, names.into_raw().0)
+        .endow(SVC_LABEL, names.into())
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .spawn()
@@ -81,11 +81,12 @@ fn serve() {
     // it, and the stream is the connection whose first frame is an open.
     let conn = loop {
         let conn = acceptor.accept().expect("the client's connection");
-        let header = conn.recv_header().expect("the client's first frame");
-        match header.msg_type {
+        let mut rx = toyos::ipc::FrameRx::<{ toyos::ipc::MAX_FRAME_LEN as usize }>::new();
+        let frame = rx.recv(&conn).expect("the client's first frame");
+        match frame.msg_type {
             MSG_DEVICE_DESCRIBE => conn.send(MSG_DEVICE_DESCRIBED, &DEVICE).expect("the description"),
             MSG_STREAM_OPEN => {
-                let _: StreamOpenRequest = conn.recv_payload(&header).expect("the client's open");
+                let _: StreamOpenRequest = toyos::ipc::decode_payload(rx.payload(frame.payload_len)).expect("the client's open");
                 break conn;
             }
             other => panic!("the client's first frame is message {other}, neither a describe nor an open"),
@@ -95,14 +96,15 @@ fn serve() {
         AudioSlotHeader::SIZE + OPENED.slot_count as usize * OPENED.client_period_bytes as usize,
     )
     .expect("a ring");
-    let (signal_read, signal_write) = toyos::pipe_pair().expect("a signal pipe");
-    conn.send_with(MSG_STREAM_OPENED, &OPENED, [ring.share().expect("the ring to share"), signal_read.into()])
+    let (signal, signal_bell) = toyos::wake::pair().expect("a signal event");
+    conn.send_with(MSG_STREAM_OPENED, &OPENED, [ring.share().expect("the ring to share"), signal_bell.into()])
         .expect("the open answered with its handles");
 
-    let close = conn.recv_header().expect("the client's close");
+    let mut rx = toyos::ipc::FrameRx::<{ toyos::ipc::MAX_FRAME_LEN as usize }>::new();
+    let close = rx.recv(&conn).expect("the client's close");
     assert_eq!(close.msg_type, MSG_STREAM_CLOSE, "the dropped stream did not close");
 
-    // The write end is held until the client has gone, so nothing but its
+    // The signal side is held until the client has gone, so nothing but its
     // own deadline can end its wait. The client says the refusal once `Drop`
     // has returned with it.
     let mut said = String::new();
@@ -112,22 +114,22 @@ fn serve() {
     assert!(said.starts_with("client: "), "the client said {said:?} before its drop came back");
     print!("{said}");
 
-    signal_write.write(&[1]).expect("a signal to the stream thread");
-    match conn.recv_header() {
+    signal.ring().expect("a signal to the stream thread");
+    match rx.recv(&conn) {
         Err(IpcError::Disconnected) => {}
         other => panic!(
             "the stream's connection gave {:?} after its close, not its end",
-            other.map(|h| h.msg_type)
+            other.map(|f| f.msg_type)
         ),
     }
     // The client exits once its stdin closes, so the connection's end above
     // was the stream thread's.
     drop(child.stdin.take());
     let status = child.wait().expect("wait for the client");
-    drop(signal_write);
+    drop(signal);
     assert!(status.success(), "the client exited {status:?}");
     println!(
-        "cpal's drop came back while its server held the signal pipe, and the next signal \
+        "cpal's drop came back while its server held the signal, and the next signal \
          ended its stream thread"
     );
 }

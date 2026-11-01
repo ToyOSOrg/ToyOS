@@ -55,19 +55,27 @@ pub(super) fn sys_spawn(
     parent: process::Parent,
 ) -> u64 {
     // Nothing to clean up: spawn's frame owns the child's resources on error.
-    match process::spawn(path, args, |own| pending.commit(own), cwd, env, image, parent) {
+    match process::spawn(path, args, pending, cwd, env, image, parent) {
         Ok((_, handle)) => u64::from(handle.0),
         Err(e) => e.refuse(),
     }
+}
+
+/// `SpawnArgs::pager`: none, or a `SysCap` carrying [`Rights::PAGER`].
+pub(super) fn spawn_pager(pager: u64) -> Result<bool, u64> {
+    if pager == u64::from(toyos_abi::HANDLE_INVALID.0) {
+        return Ok(false);
+    }
+    let raw = u32::try_from(pager).map_err(|_| SyscallError::InvalidArgument.to_u64())?;
+    demand_syscap(RawHandle(raw), Rights::PAGER).map(|_| true).map_err(|refused| refused.refuse())
 }
 
 /// Take how a process ended, blocking until it has; repeatable across waiters, and `WNOHANG` skips the block.
 pub(super) fn sys_process_wait(h: RawHandle, flags: u64) -> u64 {
     // First, so the answer is the bit and not the handle's own refusal — which
     // for an unheld handle is the kill policy, so a call carrying both returns
-    // instead of ending the caller. `WNOHANG` is the whole of this word,
-    // hand-copied and unchecked (`syscall/vm.rs`'s `MMAP_PROT_KNOWN`).
-    if flags & !WNOHANG != 0 {
+    // instead of ending the caller.
+    if flags & !PROCESS_WAIT_FLAGS_KNOWN != 0 {
         return SyscallError::InvalidArgument.to_u64();
     }
     let object = match process::with_process_data(|data| {
@@ -126,12 +134,34 @@ pub(super) fn sys_rt_enter(syscap: RawHandle) -> u64 {
     0
 }
 
+/// Hold every idle CPU to waking within `bound_ns`, gated on a `SysCap`
+/// carrying [`Rights::WAKE_LATENCY`], and install the hold's handle.
+pub(super) fn sys_wake_latency_hold(syscap: RawHandle, bound_ns: u64) -> u64 {
+    if let Err(e) = demand_syscap(syscap, Rights::WAKE_LATENCY) {
+        return e.refuse();
+    }
+    if bound_ns == 0 {
+        return SyscallError::InvalidArgument.to_u64();
+    }
+    let object = match crate::object::wake_latency::WakeLatencyObject::new(bound_ns) {
+        Ok(object) => crate::object::KObjectRef::WakeLatency(object),
+        Err(e) => return SyscallError::from(e).to_u64(),
+    };
+    match process::with_process_data(|data| crate::object::ops::install(&mut data.handles, object)) {
+        Ok(h) => u64::from(h.0),
+        Err(e) => e.to_u64(),
+    }
+}
+
 /// Make a new job, gated on a `SysCap` carrying [`Rights::JOBS`], and install a handle to it.
 pub(super) fn sys_job_create(syscap: RawHandle) -> u64 {
     if let Err(e) = demand_syscap(syscap, Rights::JOBS) {
         return e.refuse();
     }
-    let object = crate::object::KObjectRef::Job(crate::object::job::JobObject::new(crate::object::job::new_job()));
+    let object = match crate::object::job::JobObject::new(crate::object::job::new_job()) {
+        Ok(object) => crate::object::KObjectRef::Job(object),
+        Err(e) => return SyscallError::from(e).to_u64(),
+    };
     match process::with_process_data(|data| crate::object::ops::install(&mut data.handles, object)) {
         Ok(h) => u64::from(h.0),
         Err(e) => e.to_u64(),
@@ -141,7 +171,7 @@ pub(super) fn sys_job_create(syscap: RawHandle) -> u64 {
 /// Install a handle to the job the caller runs in.
 pub(super) fn sys_job_own() -> u64 {
     let installed = process::with_process_data(|data| {
-        let object = crate::object::KObjectRef::Job(crate::object::job::JobObject::new(data.job.clone()));
+        let object = crate::object::KObjectRef::Job(crate::object::job::JobObject::new(data.job.clone())?);
         crate::object::ops::install(&mut data.handles, object)
     });
     match installed {
@@ -191,7 +221,7 @@ pub(super) fn sys_thread_join(tid: u64) -> u64 {
     // None means never existed or already collected; the predicate below answers both.
     let target = process::thread_sched(caller, tid);
     let parkable = crate::scheduler::Parkable::at_entry();
-    let join = kernel::proclife::join::Join::default();
+    let join = toyos_proclife::join::Join::default();
     let ask = || process::ask_join(&join, tid, caller);
     loop {
         // Both refusals are one answer here; `JoinRefused` keeps them apart because they aren't the same fact.
@@ -253,6 +283,34 @@ pub(super) fn sys_process_stats(
         return SyscallError::NotFound.to_u64();
     };
     match ctx.copy_out(out, &stats) {
+        Ok(()) => 0,
+        Err(e) => e.to_u64(),
+    }
+}
+
+/// Hold memory back for the job a handle names, gated on a `SysCap` carrying
+/// [`Rights::FLOOR`] and the job handle's `WRITE`.
+pub(super) fn sys_job_floor(syscap: RawHandle, job: RawHandle, bytes: u64) -> u64 {
+    if let Err(e) = demand_syscap(syscap, Rights::FLOOR) {
+        return e.refuse();
+    }
+    let object = match process::with_process_data(|data| data.handles.get::<crate::object::job::JobObject>(job, Rights::WRITE)) {
+        Ok(object) => object,
+        Err(e) => return e.refuse(),
+    };
+    match object.set_floor(bytes) {
+        Ok(()) => 0,
+        Err(e) => e.to_u64(),
+    }
+}
+
+/// Copy out what the account of the job a handle names holds, gated on its `READ`.
+pub(super) fn sys_account_info(ctx: &crate::user_ptr::SyscallContext, job: RawHandle, out: UserAddr) -> u64 {
+    let object = match process::with_process_data(|data| data.handles.get::<crate::object::job::JobObject>(job, Rights::READ)) {
+        Ok(object) => object,
+        Err(e) => return e.refuse(),
+    };
+    match ctx.copy_out(out, &object.account()) {
         Ok(()) => 0,
         Err(e) => e.to_u64(),
     }

@@ -5,7 +5,7 @@
 //! user frame off the task's own record ([`record_user_frame`]), never off
 //! this table.
 //!
-//! `kernel::proclife` decides lifecycle transitions; this file only performs them.
+//! `toyos_proclife` decides lifecycle transitions; this file only performs them.
 //!
 //! **What a process writes into the log is two records**: one where its spawn
 //! lands (`crate::loader`) and one where it ends, `exit: <name> pid=N
@@ -30,44 +30,33 @@ use alloc::sync::Arc;
 use alloc::vec::Vec;
 use core::ptr::NonNull;
 use crate::arch::percpu;
-use crate::mm::policy::{CachePolicy, Prot, WindowProt};
-use crate::mm::{PAGE_2M, PAGE_BYTES};
+use crate::mm::charge::{self, Charge, Exhausted};
 use crate::object::{ops, HandleTable};
 use crate::sync::Lock;
 use crate::sched::payload::ThreadSched;
 use crate::time::{Deadline, Duration};
 use crate::{elf, pipe, scheduler};
+use crate::object::shm::SharedMemObject;
 use crate::UserAddr;
 use crate::loader::{alloc_kernel_stack, Start, TlsBlock};
 
 pub use toyos_abi::{Pid, Tid};
 pub use crate::scheduler::TaskId;
 use toyos_abi::end::{End, Fault};
-use toyos_abi::syscall::{EndowEntry, SyscallError, MAX_LIBRARIES, MAX_REGIONS};
+use toyos_abi::syscall::{EndowEntry, SyscallError, MAX_LIBRARIES};
 
 /// The lifecycle's decisions; this file only performs them.
-pub use kernel::proclife::{ThreadLocation, Watch};
-use kernel::proclife::quit::{self, Notice, Reason};
-use kernel::proclife::{join, reap, spawn as proclife_spawn, teardown as proclife, tree, Lifecycle, Node, Processes};
+pub use toyos_proclife::{ThreadLocation, Watch};
+use toyos_proclife::quit::{self, Notice, Reason};
+use toyos_proclife::{join, reap, spawn as proclife_spawn, teardown as proclife, tree, Lifecycle, Node, Processes};
 
 /// One `EndowEntry` on the wire; `loader::start` and [`Endowments::encode`] both index by it.
 pub const ENDOW_ENTRY_LEN: usize = core::mem::size_of::<EndowEntry>();
 
 pub use crate::loader::{build_child_handles, spawn, spawn_supervisor};
 
-/// Page tables shared between a process and all its threads.
-pub type PageTables = Arc<Lock<crate::mm::paging::AddressSpace>>;
-
-/// Allocate a virtual region and map physical memory into it, or `None` if out of address space.
-pub fn vma_map(
-    pt: &Lock<crate::mm::paging::AddressSpace>,
-    phys: u64,
-    size: u64,
-    prot: Prot,
-) -> Option<(UserAddr, u64)> {
-    pt.lock().alloc_and_map(phys, size, prot, CachePolicy::Normal)
-}
-
+/// A process's space, which every thread of it runs in.
+pub use crate::mm::space::PageTables;
 
 /// Move-only wrapper around a heap allocation, freed on drop; not for user-mapped pages.
 pub struct OwnedAlloc {
@@ -111,198 +100,22 @@ impl Drop for OwnedAlloc {
 unsafe impl Send for OwnedAlloc {}
 
 
-/// Contiguous 2MB-aligned physical pages from PMM, zeroed on allocation, freed on drop.
-pub struct PageAlloc(Vec<crate::mm::pmm::PhysPage>);
-
-impl PageAlloc {
-    /// Allocate `size` bytes as contiguous 2MB pages.
-    pub fn new(size: usize) -> Option<Self> {
-        let count = size.div_ceil(PAGE_2M as usize);
-        Some(Self(crate::mm::pmm::alloc_contiguous(count)?))
-    }
-
-    /// Kernel pointer to the start of the allocation (via direct map).
-    pub fn ptr(&self) -> *mut u8 {
-        self.0[0].direct_map().as_mut_ptr()
-    }
-
-    /// This allocation as a bounds-checked window; a `&mut [u8]` here would carry `noalias`/`dereferenceable` into LLVM over pages that become a user mapping.
-    pub fn window(&self) -> crate::mm::KernelSlice {
-        crate::mm::KernelSlice::whole(self)
-    }
-
-    /// Total size in bytes (always a multiple of 2MB).
-    pub fn size(&self) -> usize {
-        self.0.len() * PAGE_2M as usize
-    }
-
-    /// Physical address of the start.
-    pub fn phys(&self) -> u64 {
-        self.0[0].direct_map().phys()
-    }
+/// An object the kernel mapped into a process for it and takes back itself: a
+/// thread's TLS block, a `dlopen`ed module's block for one thread, an inbox's
+/// rings. The kernel writes what it owes the process into the object.
+pub struct KernelMapping {
+    pub object: Arc<SharedMemObject>,
+    pub at: UserAddr,
 }
 
-// SAFETY: `ptr()`/`size()` come from the same `Vec<PhysPage>` this type owns; pages return to the PMM when that `Vec` drops, which is when `self` does.
-unsafe impl crate::mm::Allocation for PageAlloc {
-    fn ptr(&self) -> *mut u8 { PageAlloc::ptr(self) }
-    fn size(&self) -> usize { PageAlloc::size(self) }
-}
-
-
-/// Frames no user mapping reaches yet.
-///
-/// The kernel builds what a process will see in these while they are its
-/// alone, and [`publish`](Self::publish) is the only way to map them: it
-/// consumes this, and runs the caller's last fix-up — the one that needs the
-/// address the frames will have — under the address-space lock that then maps
-/// them.
-pub struct Unpublished(PageAlloc);
-
-impl Unpublished {
-    pub fn new(frames: PageAlloc) -> Self {
-        Self(frames)
+impl KernelMapping {
+    /// Take the mapping out of `space`, unless the process replaced it.
+    pub fn release(&self, space: &PageTables) {
+        space.release_object(self.at, self.object.size(), &self.object);
     }
-
-    /// Kernel pointer to the start, via the direct map; the frames are this
-    /// value's alone, so writes through it race nothing.
-    pub fn ptr(&self) -> *mut u8 {
-        self.0.ptr()
-    }
-
-    pub fn phys(&self) -> u64 {
-        self.0.phys()
-    }
-
-    /// Choose an address in `pt`, hand it to `fix`, then map the frames there
-    /// at `prot` — all under one hold of `pt`'s lock, so no thread of the
-    /// process can reach the frames before `fix` returns. `None`, with the
-    /// frames freed, when `pt` has no room.
-    pub fn publish(self, pt: &PageTables, prot: Prot, fix: impl FnOnce(&Self, UserAddr)) -> Option<MappedPages> {
-        let size = self.0.size() as u64;
-        let phys = self.0.phys();
-        // `alloc_and_map` fuses the reserve and the map with no seam for `fix`,
-        // whose whole point is to run between them under one lock.
-        assert!(phys & (PAGE_2M - 1) == 0, "publish: phys {phys:#x} not 2MB-aligned");
-        let mut space = pt.lock();
-        let at = space.alloc_region(size, crate::vma::RegionKind::Mapped)?;
-        fix(&self, at);
-        space.map_range(at, phys, size, prot, CachePolicy::Normal);
-        drop(space);
-        Some(MappedPages::new(at, self.0))
-    }
-}
-
-/// Pages handed to userland through [`vma_map`], paired with the mapping address so the two are unmapped together; dropping without unmapping is sound only when the address space itself is being destroyed.
-pub struct MappedPages {
-    vaddr: UserAddr,
-    pages: PageAlloc,
-}
-
-impl MappedPages {
-    pub fn new(vaddr: UserAddr, pages: PageAlloc) -> Self {
-        Self { vaddr, pages }
-    }
-
-    pub fn vaddr(&self) -> UserAddr { self.vaddr }
-
-    /// Kernel pointer to the start, via the direct map.
-    pub fn ptr(&self) -> *mut u8 { self.pages.ptr() }
-
-    pub fn size(&self) -> usize { self.pages.size() }
-
-    /// Take the mapping out of `addr_space`; the pages stay reachable from other CPUs until the returned wrapper drops (`invlpg` reaches only this CPU).
-    fn unmap_from(
-        self,
-        addr_space: &mut crate::mm::paging::AddressSpace,
-    ) -> crate::mm::Unmapped<(PageAlloc, Option<crate::mm::paging::Detached>)> {
-        let detached = addr_space.free_and_unmap(self.vaddr);
-        crate::mm::Unmapped::new((self.pages, detached))
-    }
-
-    pub fn release(self, pt: &PageTables) {
-        // Two statements: the shootdown in drop must not run under the address-space lock, which a sibling's page fault spins on.
-        let pages = self.unmap_from(&mut pt.lock());
-        drop(pages);
-    }
-}
-
-/// Release every user mapping an exiting thread owns (its TLS block, and any dlopen'd modules it touched), so none is left as a live writable window onto memory the PMM has already reissued; not called by process teardown, which has no address space left to unmap from.
-#[must_use]
-fn release_thread_mappings(
-    data: &mut ProcessData,
-    tls: Option<MappedPages>,
-    pt: &PageTables,
-    tid: Tid,
-) -> Vec<crate::mm::Unmapped<(PageAlloc, Option<crate::mm::paging::Detached>)>> {
-    let keys: Vec<(Tid, u64)> = data.elf.dynamic_tls_blocks.keys()
-        .filter(|&&(t, _)| t == tid)
-        .copied()
-        .collect();
-    let mut pages = Vec::with_capacity(keys.len() + 1);
-    {
-        let mut addr_space = pt.lock();
-        pages.extend(tls.map(|t| t.unmap_from(&mut addr_space)));
-        for key in keys {
-            let block = data.elf.dynamic_tls_blocks.remove(&key).unwrap();
-            pages.push(block.unmap_from(&mut addr_space));
-            data.free_count += 1;
-        }
-    }
-    pages
 }
 
 pub const KERNEL_STACK_SIZE: usize = 128 * 1024;
-
-/// Type-safe user stack: couples the user-visible virtual address with the kernel window onto the same pages.
-pub struct UserStack {
-    vaddr: UserAddr,
-    window: crate::mm::KernelSlice,
-}
-
-impl UserStack {
-    pub fn new(vaddr: UserAddr, window: crate::mm::KernelSlice) -> Self {
-        Self { vaddr, window }
-    }
-
-    /// User-visible virtual address of the stack top (highest address).
-    pub fn top(&self) -> u64 { self.vaddr.raw() + self.size() }
-
-    /// User-visible virtual base address.
-    pub fn base(&self) -> UserAddr { self.vaddr }
-
-    pub fn size(&self) -> u64 { self.window.size() as u64 }
-
-    /// Copy `src` onto this stack at user address `user_addr`; bounds-checked against the whole write, not just `user_addr`.
-    /// Panics rather than refuses — both arguments are the kernel's own arithmetic, never boundary-crossed input.
-    fn write_at(&self, user_addr: u64, src: &[u8]) {
-        let offset = user_addr.checked_sub(self.vaddr.raw())
-            .expect("UserStack: address below stack base");
-        // SAFETY: `copy_from` bounds `offset + src.len()` against the stack's own allocation; the destination is kernel-only until `loader::start` hands the address space to Ring 3, so nothing else can be reading it.
-        unsafe { self.window.copy_from(offset as usize, src) };
-    }
-
-    /// Write argc, argv pointers, and string data onto this stack; returns the new user-visible stack pointer.
-    pub fn write_argv(&self, args: &[&str]) -> u64 {
-        let mut sp = self.top();
-        let mut argv_ptrs: Vec<u64> = Vec::with_capacity(args.len());
-        for arg in args.iter().rev() {
-            sp -= (arg.len() + 1) as u64;
-            self.write_at(sp, arg.as_bytes());
-            self.write_at(sp + arg.len() as u64, &[0u8]);
-            argv_ptrs.push(sp);
-        }
-        argv_ptrs.reverse();
-        let metadata_qwords = args.len() + 2;
-        sp = (sp - metadata_qwords as u64 * 8) & !15;
-        self.write_at(sp, &(args.len() as u64).to_ne_bytes());
-        for (i, ptr) in argv_ptrs.iter().enumerate() {
-            self.write_at(sp + (1 + i as u64) * 8, &ptr.to_ne_bytes());
-        }
-        self.write_at(sp + (1 + args.len() as u64) * 8, &0u64.to_ne_bytes());
-        sp
-    }
-}
-
 
 /// How much of a process or thread name the table keeps, fixed by the `SYS_SYSINFO` record's name field.
 pub const THREAD_NAME_LEN: usize = 28;
@@ -332,7 +145,6 @@ impl ThreadEntry {
         let len = name.len().min(THREAD_NAME_LEN);
         self.name[..len].copy_from_slice(&name[..len]);
     }
-    pub fn thread_data(&self) -> &Arc<Lock<ThreadData>> { &self.thread_data }
 }
 
 /// A process and all its threads. Removing a ProcessEntry removes all threads.
@@ -348,7 +160,7 @@ pub struct ProcessEntry {
     threads: crate::id_map::IdMap<Tid, ThreadEntry>,
     /// Set once, with the end, by the exit or kill that claims teardown; checked by `spawn_thread` so no thread appears after the retire set.
     teardown_end: Option<End>,
-    /// Its parent, children and depth, answered by no syscall; `kernel::proclife::tree` reads and writes it.
+    /// Its parent, children and depth, answered by no syscall; `toyos_proclife::tree` reads and writes it.
     node: Node,
     /// The exit its teardown made, kept until every end below it is published.
     exit: Option<crate::object::process::Exit>,
@@ -399,7 +211,7 @@ impl ProcessEntry {
     pub fn tearing_down(&self) -> bool { self.teardown_end.is_some() }
 }
 
-/// The lifecycle face of an entry: only the fields `kernel::proclife` decides against, and nothing else this type carries.
+/// The lifecycle face of an entry: only the fields `toyos_proclife` decides against, and nothing else this type carries.
 impl Lifecycle for ProcessEntry {
     fn main_tid(&self) -> Tid { self.main_tid }
     fn teardown_end(&self) -> Option<End> { self.teardown_end }
@@ -445,56 +257,11 @@ impl Processes for ProcessTable {
             f(pid);
         }
     }
-    fn pids(&mut self) -> &mut kernel::proclife::Pids {
+    fn pids(&mut self) -> &mut toyos_proclife::Pids {
         &mut self.pids
     }
 }
 
-
-/// Record of a single demand-paged fault, stored in a ring buffer for crash diagnostics.
-#[derive(Clone, Copy)]
-pub struct PageFaultRecord {
-    pub fault_addr: u64,
-    pub page_elf_offset: u64,
-    pub block_idx: u32,
-    // bit 0 writable, 2 anonymous, 3 beyond_extent, 4 executable; 0 and 4 come from one `Prot` and are never both set (W^X).
-    pub flags: u16,
-    pub duration_us: u16, // microseconds spent handling this fault
-}
-
-/// Fixed-size ring buffer of recent page fault events for crash diagnostics.
-pub struct PageFaultTrace {
-    entries: [PageFaultRecord; 32],
-    write_pos: usize,
-    total: u64,
-}
-
-impl PageFaultTrace {
-    pub fn new() -> Self {
-        Self {
-            entries: [PageFaultRecord {
-                fault_addr: 0, page_elf_offset: 0, block_idx: 0, flags: 0, duration_us: 0,
-            }; 32],
-            write_pos: 0,
-            total: 0,
-        }
-    }
-
-    pub fn record(&mut self, rec: PageFaultRecord) {
-        self.entries[self.write_pos] = rec;
-        self.write_pos = (self.write_pos + 1) % 32;
-        self.total += 1;
-    }
-
-    /// Iterate entries in chronological order (oldest first).
-    pub fn iter_chronological(&self) -> impl Iterator<Item = &PageFaultRecord> {
-        let count = self.total.min(32) as usize;
-        let start = if self.total >= 32 { self.write_pos } else { 0 };
-        (0..count).map(move |i| &self.entries[(start + i) % 32])
-    }
-
-    pub fn total(&self) -> u64 { self.total }
-}
 
 /// ELF loading artifacts and TLS state.
 pub struct ElfInfo {
@@ -504,8 +271,9 @@ pub struct ElfInfo {
     pub tls: toyos_elf::tls::Static,
     /// Next module ID to assign on dlopen (1-based, exe=1).
     pub next_tls_module_id: u64,
-    /// Dynamically allocated TLS blocks for dlopen'd modules, keyed by (Tid, module_id).
-    pub dynamic_tls_blocks: alloc::collections::BTreeMap<(Tid, u64), MappedPages>,
+    /// Dynamically allocated TLS blocks for dlopen'd modules, keyed by
+    /// (Tid, module_id), each with the charge of its place here.
+    pub dynamic_tls_blocks: alloc::collections::BTreeMap<(Tid, u64), (KernelMapping, Charge)>,
     /// Dynamically loaded shared libraries (indexed by dlopen handle).
     pub loaded_libs: Vec<elf::LoadedLib>,
     pub elf_base: UserAddr,
@@ -551,19 +319,8 @@ pub struct ProcessData {
 
     pub elf: ElfInfo,
 
-    pub mmap_regions: Vec<MmapRegion>,
-    /// Live `SYS_PIPE_MAP` windows. See [`PipeMap`].
-    pub pipe_maps: Vec<PipeMap>,
-    /// 2MB allocations for demand-paged pages. Freed on process exit.
-    pub demand_pages: Vec<PageAlloc>,
-    /// Ring buffer of recent page faults for crash diagnostics.
-    pub fault_trace: PageFaultTrace,
-    /// Peak memory usage in bytes (high-water mark)
-    pub peak_memory: u64,
-    /// Total allocations (demand pages + mmap + TLS blocks)
-    pub alloc_count: u64,
-    /// Total frees (munmap)
-    pub free_count: u64,
+    /// The space every thread of it runs in.
+    pub space: PageTables,
     /// Executable path (for SYS_QUERY_MODULES).
     pub exe_path: String,
 
@@ -574,6 +331,53 @@ pub struct ProcessData {
     /// The job its threads, and its children unless a spawn names another,
     /// run in.
     pub job: Arc<kernel::sched::job::Job>,
+    /// What [`ProcessData::charge`] charged, and its executable's TLS beside.
+    pub charge: Charge,
+    /// Whether it was started as a pager, which no call changes, and whether
+    /// it made its one pager object.
+    pub pager: PagerRole,
+}
+
+/// A process's part in paged objects (`object::paged`): set at its spawn.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum PagerRole {
+    None,
+    /// Started as a pager; it has not made its pager object.
+    May,
+    /// It made it.
+    Made,
+}
+
+impl PagerRole {
+    pub fn is_pager(self) -> bool {
+        self != PagerRole::None
+    }
+}
+
+impl ProcessData {
+    /// The heap a process of the program at `path` takes beside what is
+    /// charged on its own — its handles, threads, ranges and objects: its
+    /// records, its place in the process table and among its parent's
+    /// children, its strings at their bound, and its endowments at theirs.
+    pub fn charge(job: &Arc<kernel::sched::job::Job>, path: &str, env: &[u8]) -> Result<Charge, Exhausted> {
+        // The process table doubles, and its control byte beside each.
+        let entry = 2 * (core::mem::size_of::<(Pid, ProcessEntry)>() + 1);
+        // A thread table of one thread is a whole leaf.
+        let threads = charge::heap(Layout::array::<(Tid, ThreadEntry)>(11).expect("process: a leaf's layout"));
+        let records = charge::arc::<Lock<ProcessData>>()
+            + charge::arc::<UserImage>()
+            + charge::arc::<crate::mm::space::Space>()
+            + charge::arc::<crate::mm::space::Usage>()
+            + entry
+            + threads
+            + 2 * core::mem::size_of::<Pid>();
+        let strings = 2 * charge::array::<u8>(path.len())
+            + charge::array::<u8>(toyos_abi::syscall::MAX_PATH)
+            + charge::array::<u8>(env.len());
+        let endowments = charge::array::<EndowEntry>(toyos_abi::syscall::MAX_ENDOWMENTS)
+            + charge::array::<u8>(toyos_abi::syscall::MAX_LABELS_LEN);
+        Charge::new(job, records + strings + endowments)
+    }
 }
 
 /// The labels a parent put on the handles it endowed — names, not authority: the handle is in the table whether or not the child ever asks.
@@ -614,11 +418,6 @@ impl Endowments {
 /// Per-process accounting counters. Accumulated from all threads on exit.
 #[derive(Default)]
 pub struct ProcessAccounting {
-    pub fault_demand_count: u32,
-    pub fault_zero_count: u32,
-    pub fault_ns: u64,
-    pub io_read_ops: u32,
-    pub io_read_bytes: u64,
     pub blocked_io_ns: u64,
     pub blocked_futex_ns: u64,
     pub blocked_pipe_ns: u64,
@@ -629,61 +428,10 @@ pub struct ProcessAccounting {
 
 /// Per-thread data, unique to each thread via `Arc<Lock<ThreadData>>`.
 pub struct ThreadData {
-    pub tls_pages: Option<MappedPages>,
-    /// Main thread's user stack; freed only with its address space, so it needs no address here.
-    pub stack_pages: Option<PageAlloc>,
+    pub tls: Option<KernelMapping>,
     pub user_stack_base: UserAddr,
     pub user_stack_size: u64,
-    /// Syscall counts per syscall number (for profiling)
-    pub syscall_counts: [u32; toyos_abi::syscall::SYSCALL_PROFILE_BINS],
-    pub syscall_total: u64,
-    /// Wall-clock nanoseconds spent in syscall dispatch (includes preemption time)
-    pub syscall_total_ns: u64,
 }
-
-/// One process's window onto a pipe's ring page (`SYS_PIPE_MAP`); recorded so it can be revoked before the page outlives the process's handle to it.
-pub struct PipeMap {
-    pub pipe: pipe::PipeId,
-    pub addr: UserAddr,
-}
-
-/// Take back every window onto `pipe`; called when the process's last handle to it goes.
-pub fn revoke_pipe_maps(maps: &mut Vec<PipeMap>, pt: &PageTables, pipe: pipe::PipeId) {
-    if !maps.iter().any(|m| m.pipe == pipe) {
-        return;
-    }
-    let mut detached = Vec::new();
-    {
-        let mut addr_space = pt.lock();
-        maps.retain(|m| {
-            if m.pipe != pipe {
-                return true;
-            }
-            detached.extend(addr_space.free_and_unmap(m.addr));
-            false
-        });
-    }
-    // Outside the block: it waits, and a sibling can be spinning on this lock.
-    crate::arch::tlb::shootdown(crate::invalidation::Origin::Pipe, crate::invalidation::Half::User);
-    drop(detached);
-}
-
-/// One live `mmap` and its physical pages; the range's registration in the address space's `regions` is separate (placement search, `munmap`).
-pub struct MmapRegion {
-    pub addr: UserAddr,
-    pub size: usize,
-    /// The length its `mmap` was asked for, which is the one `munmap` and a `FIXED` replacement name it by.
-    pub len: u64,
-    /// `None` for a `MmapProt::NONE` mapping: the range is reserved, but no physical page backs an access whose whole purpose is to fault.
-    pub _pages: Option<PageAlloc>,
-}
-
-// One region per record, and a power of two: the ledger's doubling stops at it, inside one heap allocation.
-const _: () = assert!(
-    MAX_REGIONS.is_power_of_two()
-        && MAX_REGIONS * core::mem::size_of::<MmapRegion>() <= crate::mm::MAX_HEAP_ALLOC
-);
-
 
 /// Zero-sized proof of running on the per-CPU idle stack; required by `collect_orphan_zombies` so it never drops the thread entry it runs on.
 #[derive(Clone, Copy)]
@@ -699,12 +447,12 @@ impl IdleProof {
 /// Every process by pid, and the pids not yet issued.
 pub struct ProcessTable {
     entries: crate::hasher::HashMap<Pid, ProcessEntry>,
-    pids: kernel::proclife::Pids,
+    pids: toyos_proclife::Pids,
 }
 
 impl ProcessTable {
     fn new() -> Self {
-        Self { entries: crate::hasher::HashMap::default(), pids: kernel::proclife::Pids::default() }
+        Self { entries: crate::hasher::HashMap::default(), pids: toyos_proclife::Pids::default() }
     }
 
     pub fn get(&self, pid: Pid) -> Option<&ProcessEntry> {
@@ -745,23 +493,17 @@ pub fn stats_of(
     }
     let pid = object.pid();
     // The other two locks are taken after this one is dropped, so no ordering edge.
-    let (data_arc, cpu_ns, threads) = {
+    let (data_arc, cpu_ns, syscall_total, syscall_total_ns) = {
         let guard = PROCESS_TABLE.lock();
         let proc = guard.as_ref()?.get(pid)?;
-        let mut cpu_ns = 0;
-        let mut threads = Vec::new();
-        for (_, thread) in proc.threads().iter() {
-            cpu_ns += thread.sched().map_or(0, scheduler::task_cpu_ns);
-            threads.push(Arc::clone(thread.thread_data()));
+        let (mut cpu_ns, mut syscall_total, mut syscall_total_ns) = (0, 0, 0);
+        for sched in proc.threads().iter().filter_map(|(_, thread)| thread.sched()) {
+            cpu_ns += scheduler::task_cpu_ns(sched);
+            syscall_total += sched.handle.syscalls().calls();
+            syscall_total_ns += sched.handle.syscalls().ns();
         }
-        (Arc::clone(proc.process_data()), cpu_ns, threads)
+        (Arc::clone(proc.process_data()), cpu_ns, syscall_total, syscall_total_ns)
     };
-    let (mut syscall_total, mut syscall_total_ns) = (0, 0);
-    for tdata in threads {
-        let tdata = tdata.lock();
-        syscall_total += tdata.syscall_total;
-        syscall_total_ns += tdata.syscall_total_ns;
-    }
     let data = data_arc.lock();
     Some(stats_from(&data, pid, cpu_ns, syscall_total, syscall_total_ns))
 }
@@ -858,7 +600,7 @@ impl Admission {
             tree::Admit::Gone => Err(SyscallError::Gone),
             tree::Admit::TooDeep { depth } => {
                 log!("spawn: refused under pid {} at depth {depth}, more than {} below the supervisor",
-                    place.expect("spawn: the supervisor is admitted at depth 0"), kernel::proclife::MAX_DEPTH);
+                    place.expect("spawn: the supervisor is admitted at depth 0"), toyos_proclife::MAX_DEPTH);
                 Err(SyscallError::ResourceExhausted)
             }
             tree::Admit::NoPid => {
@@ -937,16 +679,11 @@ pub fn spawn_thread(
     // block's address is chosen from, so every pointer in it is final before
     // the mapping exists.
     let block = TlsBlock::build(&tls_modules, tls)?;
-    let (tls_alloc, thread_pointer, tp_offset) = {
-        let parent_data = process_data_arc.lock();
-        // VA exhaustion is a resource failure the process caused, not a kernel bug; the block drops on the way out, returning its pages.
-        let published = block.publish(&parent_addr_space)?;
-        drop(parent_data);
-        published
-    };
-    let tls_alloc_tcb = tls_alloc.ptr().wrapping_add(tp_offset);
+    // Placement or memory refused is a resource failure the process caused,
+    // not a kernel bug.
+    let (tls_alloc, thread_pointer, tp_offset) = block.publish(&parent_addr_space)?;
 
-    let (ks_alloc, ks_sp) = match alloc_kernel_stack(Start::Thread { entry, sp: stack_ptr, arg }) {
+    let (ks_alloc, ks_sp) = match alloc_kernel_stack(&job, Start::Thread { entry, sp: stack_ptr, arg }) {
         Some(ks) => ks,
         None => {
             tls_alloc.release(&parent_addr_space);
@@ -967,14 +704,11 @@ pub fn spawn_thread(
         tls_alloc.release(&parent_addr_space);
         return None;
     }
+    let tcb = Arc::clone(&tls_alloc.object);
     let thread_data = Arc::new(Lock::new(ThreadData {
-        tls_pages: Some(tls_alloc),
-        stack_pages: None,
+        tls: Some(tls_alloc),
         user_stack_base: UserAddr::new(stack_base),
         user_stack_size: if stack_base > 0 { stack_ptr - stack_base } else { 0 },
-        syscall_counts: [0; toyos_abi::syscall::SYSCALL_PROFILE_BINS],
-        syscall_total: 0,
-        syscall_total_ns: 0,
     }));
     let proc = table.get_mut(parent_process)
         .expect("spawn_thread: the entry the insert admission just answered for");
@@ -983,15 +717,7 @@ pub fn spawn_thread(
     let tid = proc.threads.insert(ThreadEntry::new(thread_data));
     // Before the thread's first instruction, which is the enqueue below: the
     // thread reads its own id here without a syscall (`toyos_abi::TCB_TID`).
-    // SAFETY: `tp_offset` is this thread's TCB inside the TLS block the table
-    // now owns, which no thread has run on yet; a 4-byte volatile store inside
-    // the TCB the builder reserved, and a store is all the kernel does there.
-    unsafe {
-        core::ptr::write_volatile(
-            tls_alloc_tcb.add(toyos_abi::TCB_TID).cast::<u32>(),
-            tid.raw(),
-        );
-    }
+    tcb.write((tp_offset + toyos_abi::TCB_TID) as u64, &tid.raw().to_ne_bytes());
 
     // Enqueue while still holding the table lock: this thread is fully visible to the scheduler before any retire sweep can start.
     let (sched, _dst) = scheduler::enqueue_new(
@@ -1043,17 +769,16 @@ impl core::fmt::Display for Consumed {
 /// Says nothing of the machine: a reading of every CPU is `crate::census`'s, never one process's end.
 fn teardown_resources(
     process_data_arc: &Arc<Lock<ProcessData>>,
-    thread_data_arc: &Arc<Lock<ThreadData>>,
+    main_thread: &(Arc<Lock<ThreadData>>, Option<ThreadSched>),
     pid: Pid,
 ) -> Consumed {
+    let (thread_data_arc, sched) = main_thread;
+    let syscalls = sched.as_ref().map(|sched| sched.handle.syscalls());
+    let syscall_total = syscalls.map_or(0, |s| s.calls());
+    let syscall_total_ns = syscalls.map_or(0, |s| s.ns());
+    let syscall_counts = syscalls.map_or([0; toyos_abi::syscall::SYSCALL_PROFILE_BINS], |s| s.by_number());
     // Never hold ThreadData + ProcessData at once.
-    let (syscall_total, syscall_total_ns, syscall_counts) = {
-        let mut tdata = thread_data_arc.lock();
-        let stats = (tdata.syscall_total, tdata.syscall_total_ns, tdata.syscall_counts);
-        tdata.tls_pages.take();
-        tdata.stack_pages.take();
-        stats
-    };
+    thread_data_arc.lock().tls.take();
 
     // Before the teardown below: a report spans its process up to here, and the next one this teardown.
     #[cfg(feature = "mask-windows")]
@@ -1065,14 +790,12 @@ fn teardown_resources(
     crate::isa::process_ends(pid);
     data.elf.elf_alloc.take();
     data.elf.loaded_libs.clear();
-    data.mmap_regions.clear();
-    data.pipe_maps.clear();
-    data.demand_pages.clear();
 
+    let usage = data.space.usage();
     Consumed {
-        peak_memory: data.peak_memory,
-        alloc_count: data.alloc_count,
-        free_count: data.free_count,
+        peak_memory: usage.peak_bytes(),
+        alloc_count: usage.ranges_made(),
+        free_count: usage.ranges_taken(),
         syscall_total,
         syscall_total_ns,
         syscall_counts,
@@ -1092,7 +815,7 @@ fn teardown_bookkeeping(table: &mut ProcessTable, process_pid: Pid, end: End, co
     cpu_ns
 }
 
-/// Publish `first`, then every parent each publication lets go, child before parent: at most `kernel::proclife::MAX_DEPTH` + 1 publications, each with the table lock given up.
+/// Publish `first`, then every parent each publication lets go, child before parent: at most `toyos_proclife::MAX_DEPTH` + 1 publications, each with the table lock given up.
 /// Once published an entry is reapable, so only its parent's entry is read after.
 fn publish_climb(first: Option<tree::Publish>) {
     let mut ready = first;
@@ -1128,20 +851,18 @@ pub fn stats_from(
         cpu_ns,
         syscall_total,
         syscall_total_ns,
-        fault_demand_count: acct.fault_demand_count,
-        fault_zero_count: acct.fault_zero_count,
-        fault_ns: acct.fault_ns,
-        io_read_ops: acct.io_read_ops,
+        faults: data.space.usage().faults(),
+        fault_ns: data.space.usage().fault_ns(),
         pid: pid.raw(),
-        io_read_bytes: acct.io_read_bytes,
+        _pad: 0,
         blocked_io_ns: acct.blocked_io_ns,
         blocked_futex_ns: acct.blocked_futex_ns,
         blocked_pipe_ns: acct.blocked_pipe_ns,
         blocked_ipc_ns: acct.blocked_ipc_ns,
         blocked_other_ns: acct.blocked_other_ns,
         runqueue_wait_ns: acct.runqueue_wait_ns,
-        peak_memory: data.peak_memory,
-        alloc_count: data.alloc_count,
+        peak_memory: data.space.usage().peak_bytes(),
+        alloc_count: data.space.usage().ranges_made(),
     }
 }
 
@@ -1150,13 +871,14 @@ pub fn stats_from(
 /// Waits on nothing: it runs on a killed thread whose one cancel may be spent, and at the exit boundary's preempt depth, where a park asserts.
 /// The section that marks it also lets the teardown's own hold on the publication go: the exit is published here when nothing below it is left, and otherwise by the last end below it.
 fn teardown(pid: Pid, tid: Tid, end: End, mark: i32, process_data: &Arc<Lock<ProcessData>>) {
-    let main_thread_data = {
+    let main_thread = {
         let guard = PROCESS_TABLE.lock();
         let proc = guard.as_ref().unwrap().get(pid).expect("teardown: the process its last thread is in");
-        Arc::clone(&proc.threads.get(proc.main_tid).expect("teardown: a claimed process gives up no thread").thread_data)
+        let main = proc.threads.get(proc.main_tid).expect("teardown: a claimed process gives up no thread");
+        (Arc::clone(&main.thread_data), main.sched().cloned())
     };
     let releases = crate::object::Releases::open();
-    let consumed = teardown_resources(process_data, &main_thread_data, pid);
+    let consumed = teardown_resources(process_data, &main_thread, pid);
     let released = releases.run();
     let cpu_ns = {
         let mut guard = PROCESS_TABLE.lock();
@@ -1275,18 +997,17 @@ fn release_thread(tid: Tid) {
     let addr_space = current_address_space();
     crate::mm::paging::activate_kernel();
 
-    let tls = {
-        let tdata_arc = current_data();
-        let mut tdata = tdata_arc.lock();
-        tdata.tls_pages.take()
-    };
-    let released = {
+    let tls = current_data().lock().tls.take();
+    let blocks: Vec<KernelMapping> = {
         let owner_arc = process_data();
-        let mut owner_data = owner_arc.lock();
-        release_thread_mappings(&mut owner_data, tls, &addr_space, tid)
+        let mut owner = owner_arc.lock();
+        let keys: Vec<(Tid, u64)> = owner.elf.dynamic_tls_blocks.keys().filter(|&&(t, _)| t == tid).copied().collect();
+        keys.iter().filter_map(|key| owner.elf.dynamic_tls_blocks.remove(key)).map(|(block, _charge)| block).collect()
     };
-    // After the block: dropping waits for every other CPU, and the page-fault handler takes this same lock.
-    drop(released);
+    // With no process lock held: a release takes the space's.
+    for block in tls.iter().chain(&blocks) {
+        block.release(&addr_space);
+    }
 }
 
 /// A thread's scheduler record, cloned out of the table so wake/retire never hold the table lock while they post.
@@ -1296,8 +1017,8 @@ pub fn thread_sched(pid: Pid, tid: Tid) -> Option<ThreadSched> {
     table.get(pid)?.threads.get(tid)?.sched().cloned()
 }
 
-/// The physical address of a futex word, demand-paged in like any other user access. Alignment matters: the scheduler dereferences this directly on every wake check, so an unaligned word could straddle into the next physical page.
-/// Not a lease: nothing pins the frame, and a sibling's `munmap` can free it under a parked wait. Made safe by `AddressSpace::unmap` ending orphaned waits, and `scheduler::futex_wait` re-deriving the translation on every check.
+/// The physical address of a futex word, its page populated like any other user access. Alignment matters: the scheduler dereferences this directly on every wake check, so an unaligned word could straddle into the next physical page.
+/// Not a lease: nothing pins the frame, and a sibling's `munmap` can free it under a parked wait. Made safe by an unmap ending the waits on the frames it frees (`sched::futex::revoke_frames`), and `scheduler::futex_wait` re-deriving the translation on every check.
 fn futex_word(addr: UserAddr) -> Option<crate::mm::DirectMap> {
     if !addr.raw().is_multiple_of(4) {
         return None;
@@ -1336,13 +1057,13 @@ pub fn futex_wake(addr: UserAddr, count: u64) -> u64 {
 }
 
 /// Wake processes blocked on reading from a pipe that now has data.
-pub fn wake_pipe_readers(pipe_id: pipe::PipeId) {
-    scheduler::wake_pipe_readers(pipe_id);
+pub fn wake_pipe_readers(pipe: &pipe::PipeRef) {
+    scheduler::wake_pipe_readers(pipe);
 }
 
 /// Wake processes blocked on writing to a pipe that now has space.
-pub fn wake_pipe_writers(pipe_id: pipe::PipeId) {
-    scheduler::wake_pipe_writers(pipe_id);
+pub fn wake_pipe_writers(pipe: &pipe::PipeRef) {
+    scheduler::wake_pipe_writers(pipe);
 }
 
 /// Ask `join` once more; an unsettled one collects under the table lock, which is what makes validating the parent-thread relationship and collecting the zombie one act.
@@ -1350,239 +1071,43 @@ pub fn ask_join(join: &join::Join, tid: Tid, parent_pid: Pid) -> Option<Result<i
     join.ask(|| join::collect_zombie(PROCESS_TABLE.lock().as_mut().unwrap(), parent_pid, tid))
 }
 
-/// Handle a page fault at `fault_addr` by looking up the current process's VMAs. Returns whether the fault was resolved.
-/// A 2 MiB window may be filled by several racing threads; only the one that wins [`AddressSpace::map_window_if_absent`]'s critical section installs it, and a loser drops its frame but is still charged for it — `fault_demand_count + fault_zero_count` exceeds `alloc_count` by exactly the fills thrown away.
-pub fn handle_page_fault(fault_addr: u64, _error_code: u64) -> bool {
-    let t0 = crate::clock::nanos_since_boot();
-    let tid = current_tid();
-    if tid == Tid::MAX {
-        return false;
+/// Serve a fault at `fault_addr` for `access` in the running thread's space:
+/// whether its page was populated, or already held a leaf allowing the access.
+/// Takes the space's lock and nothing else.
+pub fn handle_page_fault(fault_addr: u64, access: kernel::vm::Access) -> bool {
+    let Some(space) = scheduler::current_address_space() else { return false };
+    let began = crate::clock::nanos_since_boot();
+    let served = space.lock().fault(fault_addr, access);
+    if served {
+        space.usage().faulted(crate::clock::nanos_since_boot().saturating_sub(began));
     }
-    let (data_arc, addr_space) = {
-        let Some(addr_space) = scheduler::current_address_space() else { return false };
-        let guard = PROCESS_TABLE.lock();
-        let Some(table) = guard.as_ref() else { return false };
-        let pid = current_process();
-        let Some(proc) = table.get(pid) else { return false };
-        let data = Arc::clone(&proc.process_data);
-        (data, addr_space)
-    };
-
-    let page_2m = PAGE_2M;
-    let region_start = fault_addr & !(page_2m - 1);
-    let region_end_full = region_start.saturating_add(page_2m);
-
-    // Snapshot region info (brief address-space lock) so the fill below can run without holding it.
-    struct RegionSnap {
-        start: u64,
-        end: u64,
-        prot: Prot,
-        kind: RegionSnapKind,
-    }
-    enum RegionSnapKind {
-        Anonymous,
-        FileBacked { backing: Arc<dyn crate::file_backing::FileBacking>, file_offset: u64, file_size: u64 },
-    }
-
-    let (window_prot, regions) = {
-        let as_guard = addr_space.lock();
-
-        match as_guard.find_region(UserAddr::new(fault_addr)) {
-            None => return false,
-            // A `Mapped` region's pages exist from creation, so a fault inside one (a `MmapProt::NONE` reservation) must refuse, not fill.
-            // Tested on the faulting address, not the overlap set below: a shared window still contributes zeros to a demand-paged one.
-            Some((_, region)) if matches!(region.kind, crate::vma::RegionKind::Mapped) => {
-                return false;
-            }
-            Some(_) => {}
-        }
-
-        // Fast answer, not the decision: the lock drops before the fill, so a racing sibling can see the same "not mapped".
-        // `map_window_if_absent` re-checks inside the install's critical section; this just skips a fill for the common already-filled case.
-        if as_guard.translate(UserAddr::new(region_start)).is_some() {
-            return true;
-        }
-
-        // Per-4-KiB protection, not one verdict for all 512: `PT_LOAD` segments align to 4 KiB, so a window can hold both `.text` and `.data`, and OR-ing their flags would make it writable and executable at once; padding past the image gets the least of the three.
-        let mut window_prot = WindowProt::uniform(Prot::Read);
-        let mut snaps = Vec::new();
-        for (&start_addr, region) in as_guard.overlapping_regions(UserAddr::new(region_start), UserAddr::new(region_end_full)) {
-            let (snap_kind, prot) = match &region.kind {
-                crate::vma::RegionKind::Anonymous { prot } => (RegionSnapKind::Anonymous, *prot),
-                crate::vma::RegionKind::FileBacked { backing, file_offset, file_size, prot } => (
-                    RegionSnapKind::FileBacked {
-                        backing: Arc::clone(backing),
-                        file_offset: *file_offset,
-                        file_size: *file_size,
-                    },
-                    *prot,
-                ),
-                // Already mapped eagerly; contributes zeros and the least protection.
-                crate::vma::RegionKind::Mapped => (RegionSnapKind::Anonymous, Prot::Read),
-            };
-            let start = start_addr.raw();
-            let end = start + region.size;
-            let mut page = region_start.max(start) & !0xFFF;
-            while page < region_end_full.min(end) {
-                window_prot.set(page - region_start, prot);
-                page += 4096;
-            }
-            snaps.push(RegionSnap { start, end, prot, kind: snap_kind });
-        }
-        (window_prot, snaps)
-    };
-
-    let mut data = data_arc.lock();
-
-    let elf_base = data.elf.elf_base.raw();
-
-    let page_alloc = match PageAlloc::new(page_2m as usize) {
-        Some(a) => a,
-        None => return false,
-    };
-    // A bounds-checked window, not a bare `*mut u8`: the fill below is the kernel's own arithmetic, unchecked until something bounds it.
-    let page = page_alloc.window();
-
-    // Multiple segments (e.g. .text/.rodata) can share a 2MB range.
-    let mut io_reads: u32 = 0;
-    for region in &regions {
-        match &region.kind {
-            RegionSnapKind::Anonymous => {
-                // Already zeroed by PageAlloc::new
-            }
-            RegionSnapKind::FileBacked { backing, file_offset, file_size } => {
-                let fill_start = region_start.max(region.start);
-                let fill_end = region_end_full.min(region.end);
-                let mut vaddr = fill_start & !0xFFF;
-
-                while vaddr < fill_end {
-                    let vma_offset = vaddr - region.start;
-                    let page_offset = (vaddr - region_start) as usize;
-
-                    if vma_offset < *file_size {
-                        let byte_offset = vma_offset + file_offset;
-                        let mut page_buf = [0u8; PAGE_BYTES];
-                        // Unhandled, not zero-filled: zeros here would be instructions/constants the program never had; `page_alloc` is a local, so returning drops it.
-                        if backing.read_page(byte_offset, &mut page_buf).is_err() {
-                            log!("fault: {:#x} is backed by a file byte {byte_offset} that the \
-                                 device would not read; leaving the fault unhandled",
-                                fault_addr);
-                            return false;
-                        }
-                        io_reads += 1;
-                        let valid = if vma_offset + 4096 <= *file_size { 4096 } else { (*file_size - vma_offset) as usize };
-                        // SAFETY: `copy_from` bounds `page_offset + valid` against `page_alloc`'s own size; the frame is unmapped in any address space until `map_window` below, so nothing else can read it, and `page_buf` is this loop's own stack array.
-                        unsafe { page.copy_from(page_offset, &page_buf[..valid]) };
-                    }
-                    vaddr += 4096;
-                }
-            }
-        }
-    }
-
-    // No invalidation: the fault means the PDE was absent, so nothing is cached from it (`map_window` derives that from the entry it replaces).
-    // Claimed under the install lock, not the decide-to-fill one: a racing sibling can reach here too and lose the install race; the loser's fill is thrown away rather than both being installed, since no shootdown is issued from a fault.
-    let installed = addr_space.lock().map_window_if_absent(
-        UserAddr::new(region_start),
-        page_alloc.phys(),
-        &window_prot,
-    );
-
-    if installed {
-        data.demand_pages.push(page_alloc);
-
-        data.alloc_count += 1;
-        let current_mem = data.demand_pages.len() as u64 * PAGE_2M;
-        if current_mem > data.peak_memory {
-            data.peak_memory = current_mem;
-        }
-    } else {
-        // Wasted fill: dropped now, since nothing but this local knows it exists.
-        drop(page_alloc);
-    }
-
-    // Charged whether or not the fill was kept, so a losing race doesn't vanish from accounting — the gap vs `alloc_count` is the only reading of how often this races.
-    let fault_elapsed = crate::clock::nanos_since_boot() - t0;
-    data.accounting.fault_ns += fault_elapsed;
-    if io_reads > 0 {
-        data.accounting.fault_demand_count += 1;
-        data.accounting.io_read_ops += io_reads;
-        data.accounting.io_read_bytes += io_reads as u64 * 4096;
-    } else {
-        data.accounting.fault_zero_count += 1;
-    }
-
-    // The faulting page's own protection, not the window's: a window can hold code and data pages together.
-    let fault_prot = regions
-        .iter()
-        .find(|r| fault_addr >= r.start && fault_addr < r.end)
-        .map_or(Prot::Read, |r| r.prot);
-    let elapsed_us = (fault_elapsed / 1000).min(u16::MAX as u64) as u16;
-    data.fault_trace.record(PageFaultRecord {
-        fault_addr,
-        page_elf_offset: region_start.wrapping_sub(elf_base),
-        block_idx: (region_start / PAGE_2M) as u32,
-        flags: match fault_prot {
-            Prot::Read => 0,
-            Prot::ReadWrite => 1,
-            Prot::ReadExec => 16,
-        },
-        duration_us: elapsed_us,
-    });
-
-    true
+    served
 }
 
-/// Dump the page fault trace and memory around `fault_addr` for the current process; called from the exception handler on user-mode crashes.
+/// Dump memory around `fault_addr` and the instruction pointer for the
+/// current process; called from the exception handler on user-mode crashes.
 pub fn dump_crash_diagnostics(fault_addr: u64, rip: u64) {
-    let Some(pid) = percpu::current_pid() else { return };
-
-    let data_arc = {
-        let Some(guard) = PROCESS_TABLE.try_lock() else {
-            log!("  [crash diagnostics: PROCESS_TABLE locked, skipping]");
-            return;
-        };
-        let Some(table) = guard.as_ref() else { return };
-        match table.get(pid) {
-            Some(proc) => Arc::clone(&proc.process_data),
-            None => return,
-        }
-    };
-    let Some(data) = data_arc.try_lock() else {
-        log!("  [crash diagnostics: ProcessData locked, skipping]");
+    let Some(space) = scheduler::current_address_space() else { return };
+    let Some(guard) = space.try_lock() else {
+        log!("  [crash diagnostics: the address space is locked, skipping]");
         return;
     };
 
-    let trace = &data.fault_trace;
-    let count = trace.total().min(32);
-    if count > 0 {
-        log!("  Page fault trace ({} total, last {}):", trace.total(), count);
-        for rec in trace.iter_chronological() {
-            if rec.fault_addr == 0 { continue; }
-            let mut flag_str = [b' '; 5];
-            if rec.flags & 1 != 0 { flag_str[0] = b'W'; } // writable
-            if rec.flags & 4 != 0 { flag_str[2] = b'A'; } // anonymous
-            if rec.flags & 8 != 0 { flag_str[3] = b'Z'; } // beyond extent (zero)
-            // Never beside `W` (one `Prot`'s variants); both set means lost W^X.
-            if rec.flags & 16 != 0 { flag_str[4] = b'X'; } // executable
-            let flags = core::str::from_utf8(&flag_str).unwrap_or("????");
-            log!("    fault={:#x} elf_off={:#x} blk={} {}us [{}]",
-                rec.fault_addr, rec.page_elf_offset, rec.block_idx, rec.duration_us, flags);
-        }
-    }
-
-    let Some(addr_space) = scheduler::current_address_space() else { return };
-
     // Reads via the direct map (no USER bit) to avoid SMAP faults.
     let read_user = |virt: u64| -> Option<u64> {
-        if !virt.is_multiple_of(8) { return None; }
-        let phys = addr_space.lock().translate(UserAddr::new(virt))?;
-        // SAFETY: `translate` answered `Some`, so `phys` is `virt`'s current direct-map address; the `virt % 8` guard keeps the `u64` within the one 2 MiB page the translation answered for. `read_volatile`: this is a crash report, and two folded reads would print a value never fetched.
-        Some(unsafe { phys.as_ptr::<u64>().read_volatile() })
+        if !virt.is_multiple_of(8) || !toyos_userbound::is_user_addr(virt) {
+            return None;
+        }
+        let (phys, _) = guard.get(virt)?;
+        // SAFETY: `get` answered a present leaf's frame, so `phys` is mapped
+        // in the direct map; `virt % 8 == 0` keeps the `u64` inside its page.
+        // `read_volatile`: this is a crash report, and two folded reads would
+        // print a value never fetched.
+        Some(unsafe { crate::mm::DirectMap::from_phys(phys).as_ptr::<u64>().read_volatile() })
     };
 
     let dump_region = |label: &str, addr: u64| {
-        if read_user(addr).is_none() { return; }
+        if read_user(addr & !0x7).is_none() { return; }
         let start = (addr & !0x7).saturating_sub(32);
         log!("  Memory around {} ({:#x}):", label, addr);
         for i in 0..8u64 {

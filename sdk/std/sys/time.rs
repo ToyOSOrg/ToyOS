@@ -55,4 +55,10 @@ impl SystemTime {
     pub(crate) fn from_nanos(nanos: u64) -> SystemTime {
         SystemTime(Duration::from_nanos(nanos))
     }
+
+    /// Nanoseconds since the Unix epoch, as a file's time is kept: `None`
+    /// past what a `u64` counts, the year 2554.
+    pub(crate) fn nanos(&self) -> Option<u64> {
+        u64::try_from(self.0.as_nanos()).ok()
+    }
 }

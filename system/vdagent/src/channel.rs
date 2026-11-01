@@ -277,7 +277,9 @@ impl Channel {
             // SAFETY: the window is inside the grant, which lives as long as
             // `self`; the device has finished with this buffer — its used
             // element said so, and `written` is at most the buffer's length —
-            // and it is not posted again until `each` has returned.
+            // and it is not posted again until `each` has returned. virtio is
+            // the hypervisor's, inside the trusted base, so its protocol is
+            // believed; an external or hot-plug device's driver must copy instead.
             each(unsafe { std::slice::from_raw_parts(window.as_ptr() as *const u8, written as usize) });
             self.post_port(head);
         }
@@ -308,7 +310,9 @@ impl Channel {
         let window = self.grant.window().sub(OFF_PORT_TX, LARGEST_TRANSMIT);
         // SAFETY: the window is inside the grant, which lives as long as
         // `self`; the device is not reading it, because no transmit is in
-        // flight and the buffer is published only after `fill` returns.
+        // flight and the buffer is published only after `fill` returns. virtio
+        // is the hypervisor's, inside the trusted base, so its protocol is
+        // believed; an external or hot-plug device's driver must copy instead.
         let len = fill(unsafe { std::slice::from_raw_parts_mut(window.as_ptr(), LARGEST_TRANSMIT) });
         if len == 0 {
             return;

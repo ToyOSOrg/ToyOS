@@ -1,10 +1,12 @@
 //! `osbench`: the same system workloads, built from one source for ToyOS
 //! and for Linux, so one machine's two systems can be compared.
 //!
-//! `osbench <group>` runs a group, or `all` of them in [`GROUPS`]' order. A
-//! ToyOS job list passes no arguments, so there the group is the name the
-//! program was started under, `osbench_<group>`. Every other command is one
-//! this program gives its own children.
+//! `osbench <group>` runs a group, or `all` of them in [`GROUPS`]' order, each
+//! in a process of its own as a ToyOS job list runs them; the groups in
+//! [`BY_NAME`] need another party and run only by name. A ToyOS job list
+//! passes no arguments, so there the group is the name the program was started
+//! under, `osbench_<group>`. Every other command is one this program gives its
+//! own children.
 //!
 //! Every result is one line of `key=value` words (`report`): a distribution
 //! with its sample count, minimum, p50, p90, p99, p99.9, maximum and mean,
@@ -15,36 +17,33 @@
 //! (`unsupported`), not a failure.
 //!
 //! Where a facility differs the code does too, in `sys` and said at the
-//! benchmark: native IPC, persistent storage's medium, the tail group's
-//! diagnostics. Everything else is the same source on both.
+//! benchmark: native IPC, the directories each filesystem is reached at, the
+//! tail group's diagnostics. Everything else is the same source on both.
 //!
-//! The Linux build is static (`x86_64-unknown-linux-musl`, linked by the
-//! toolchain's own LLD per `.cargo/config.toml`), so a bench runs it without a
-//! toolchain:
-//!
-//! ```text
-//! rustup target add --toolchain nightly-2026-07-22 x86_64-unknown-linux-musl
-//! cargo +nightly-2026-07-22 build -p osbench --target x86_64-unknown-linux-musl --profile toyos
-//! ```
-//!
-//! That nightly is the build's stage-0 compiler (`build/sysroot.rs`'s
-//! `STAGE0_CARGO`, which this follows), the upstream one nearest ToyOS's own.
-//! With the `toyos` profile every guest binary is built with, osbench's own
-//! code is generated alike for both; std's platform layer and the C library
-//! beneath it (musl's on Linux) are each system's own.
+//! On Linux `nvme` and `energy` read what only root may (the raw namespace,
+//! the model-specific registers) and say so unprivileged. `README.md` is how
+//! the Linux half is built and how a comparison is run.
 
 mod arch;
+mod around;
 mod boot;
 mod clock;
+mod crunch;
+mod energy;
 mod fair;
 mod files;
+mod identity;
+mod internet;
 mod ipc;
+mod lan;
 mod measure;
 mod mem;
 mod net;
+mod nvme;
 mod pingpong;
 mod place;
 mod procs;
+mod ran;
 mod report;
 mod storage;
 mod sys;
@@ -90,8 +89,9 @@ fn system() {
     system::null_syscall();
     system::thread_spawn();
     system::process_spawn();
-    system::pipe_throughput(64);
-    system::pipe_throughput(64 * 1024);
+    for size in [64, 256, 1024, 4096, 16 * 1024, 64 * 1024] {
+        system::pipe_throughput(size);
+    }
     system::anon_memory();
     system::map_unmap_small();
     system::bandwidth();
@@ -99,7 +99,7 @@ fn system() {
 
 fn sched() {
     system::chunk_rate();
-    wake::periodic("wake.periodic.idle");
+    wake::periodic("wake.periodic.idle", wake::PERIOD);
     wake::periodic_loaded("wake.periodic.loaded");
     #[cfg(target_os = "linux")]
     {
@@ -107,7 +107,7 @@ fn sched() {
         // by default; these show the wake without it. ToyOS has none.
         let slack = sys::timer_slack_ns();
         sys::set_timer_slack_ns(1);
-        wake::periodic("wake.periodic.idle.slack1ns");
+        wake::periodic("wake.periodic.idle.slack1ns", wake::PERIOD);
         wake::periodic_loaded("wake.periodic.loaded.slack1ns");
         sys::set_timer_slack_ns(slack);
     }
@@ -127,16 +127,17 @@ fn fair() {
 }
 
 fn files() {
-    for target in files::memory_targets() {
-        files::suite(&target);
-    }
+    files::suite(&files::memory());
 }
 
-/// Every group, in the order `all` and the ToyOS job list run them: `boot`
-/// first, since it reads how long the boot took to reach it, and `persist`
-/// last, since it writes the volume a ToyOS boot's log is on.
-const GROUPS: [(&str, fn()); 13] = [
+/// Every group the machine alone runs, in the order `all` and the ToyOS job
+/// list run them: `boot` first, since it reads how long the boot took to
+/// reach it; and `crunch`, which heats it, last: ToyOS reads no temperature
+/// to cool down by, so a group after it would start at a clock its Linux run
+/// does not.
+const GROUPS: [(&str, fn()); 16] = [
     ("boot", boot::suite),
+    ("identity", identity::suite),
     ("system", system),
     ("sched", sched),
     ("fair", fair),
@@ -148,18 +149,44 @@ const GROUPS: [(&str, fn()); 13] = [
     ("time", time::suite),
     ("work", work::suite),
     ("tail", tail::suite),
+    ("nvme", nvme::suite),
     ("persist", storage::suite),
+    ("crunch", crunch::suite),
 ];
+
+/// The groups that run only by name: `lan` needs the `osbench-peer` on the
+/// other bench, `internet` the public internet, and `energy` a machine
+/// running nothing else, in a ToyOS boot of its own and as root on Linux.
+const BY_NAME: [(&str, fn()); 3] = [("lan", lan::suite), ("internet", internet::suite), ("energy", energy::suite)];
 
 /// A group between its first and last lines, after the machine's conditions
 /// and the clock its CPU starts at.
 fn group(name: &str, run: fn()) {
     report::group(name, "start");
     conditions();
-    clock::distribution();
+    around::ran_during(&format!("{name}.cpu.clock"), clock::distribution);
     let t = Instant::now();
     run();
     report::group(name, &format!("done secs={}", t.elapsed().as_secs()));
+}
+
+/// Every group in [`GROUPS`], each a child of its own, so no group runs in a
+/// process an earlier one shaped: exits 1 if any did not measure.
+fn all() {
+    let exe = std::env::current_exe().expect("a path to this program");
+    let mut failed = Vec::new();
+    for (name, _) in GROUPS {
+        let status = std::process::Command::new(&exe).arg(name).status();
+        match status {
+            Ok(status) if status.success() => {}
+            Ok(status) => failed.push(format!("{name} ({status})")),
+            Err(e) => failed.push(format!("{name} (would not start: {e})")),
+        }
+    }
+    if !failed.is_empty() {
+        eprintln!("osbench: groups that did not measure: {}", failed.join(", "));
+        std::process::exit(1);
+    }
 }
 
 fn main() {
@@ -171,17 +198,17 @@ fn main() {
     };
     let rest = args.get(2..).unwrap_or_default();
     match command {
-        "all" => GROUPS.iter().for_each(|(name, run)| group(name, *run)),
+        "all" => return all(),
         "nop" => return,
         "spin" => return wake::spin(),
         "fair-job" => return fair::job(rest),
         "fair-helper" => return fair::helper(rest),
         "ipc-serve" => return ipc::serve(),
         "cc" => return work::cc(rest),
-        named => match GROUPS.iter().find(|(name, _)| *name == named) {
+        named => match GROUPS.iter().chain(&BY_NAME).find(|(name, _)| *name == named) {
             Some((name, run)) => group(name, *run),
             None => {
-                let names: Vec<&str> = GROUPS.iter().map(|(name, _)| *name).collect();
+                let names: Vec<&str> = GROUPS.iter().chain(&BY_NAME).map(|(name, _)| *name).collect();
                 eprintln!("osbench: no command {named:?}; the groups are {} and all", names.join(", "));
                 std::process::exit(2);
             }

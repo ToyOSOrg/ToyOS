@@ -49,7 +49,9 @@ pub(super) fn sys_stat(path: &str, follow: bool) -> Result<ops::Stat, SyscallErr
 /// Returns the length needed; writes the listing only when it fits (`n <= out.len()`).
 pub(super) fn sys_readdir(path: &str, out: &mut UserBytesMut) -> u64 {
     let cwd = process::with_process_data(|d| d.cwd.clone());
-    let entries = match vfs::lock().list(&cwd, path) {
+    // Held until the listing is let go, as this call returns.
+    let mut listing = crate::mm::charge::Charge::none(&crate::mm::charge::current());
+    let entries = match vfs::lock().list(&cwd, path, &mut listing) {
         Ok(e) => e,
         Err(e) => return e.to_u64(),
     };

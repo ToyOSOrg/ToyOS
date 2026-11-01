@@ -14,11 +14,8 @@ pub(crate) const MAP_ANONYMOUS: i32 = 0x20;
 pub(crate) const PAGE: usize = 4096;
 
 /// `len` as the whole pages it reaches into, which is what POSIX maps and
-/// unmaps for it. `mmap` asks the kernel for this length and `munmap` names
-/// the mapping by it, the kernel taking only the length it was asked for: so
-/// a `len` that ends in a mapping's last page names all of it, and one that
-/// ends short of that page names a part and is refused. `None` for no bytes,
-/// and for a length whose pages a `usize` cannot count.
+/// unmaps for it. `None` for no bytes, and for a length whose pages a `usize`
+/// cannot count.
 pub(crate) fn whole_pages(len: usize) -> Option<usize> {
     len.checked_next_multiple_of(PAGE).filter(|&bytes| bytes != 0)
 }
@@ -65,21 +62,48 @@ pub(crate) fn is_advice(advice: i32) -> bool {
 /// file or as zeros.
 const MADV_DONTNEED: i32 = 4;
 
-/// Why `madvise` refuses `advice` at `addr`.
+/// What Linux's `madvise` does with one of its advice values.
 #[derive(Debug, PartialEq, Eq)]
-pub(crate) enum AdviceRefusal {
-    /// An address off a page, or advice other than the five `posix_madvise`
-    /// shares with it: `EINVAL`.
-    Invalid,
-    /// `MADV_DONTNEED`'s discard, which nothing here can do: `ENOSYS`.
+pub(crate) enum Advice {
+    /// A hint, which its man page, `madvise(2)`, lets a kernel ignore.
+    Hint,
+    /// `MADV_DONTNEED`: the range's pages are discarded.
     Discard,
 }
 
-/// Why Linux's `madvise` of `advice` at `addr` is refused, if it is. Its four
-/// hints are taken, as its man page, `madvise(2)`, lets a kernel ignore each.
-pub(crate) fn madvise_refusal(addr: usize, advice: i32) -> Option<AdviceRefusal> {
+/// What `madvise` of `advice` at `addr` does; `None` (`EINVAL`) for an
+/// address off a page, or advice other than the five `posix_madvise` shares
+/// with it.
+pub(crate) fn madvise(addr: usize, advice: i32) -> Option<Advice> {
     if !addr.is_multiple_of(PAGE) || !is_advice(advice) {
-        return Some(AdviceRefusal::Invalid);
+        return None;
     }
-    (advice == MADV_DONTNEED).then_some(AdviceRefusal::Discard)
+    Some(if advice == MADV_DONTNEED { Advice::Discard } else { Advice::Hint })
+}
+
+/// What a `PROT_*` word asks of pages.
+#[derive(Debug, PartialEq, Eq)]
+pub(crate) enum Access {
+    None,
+    Read,
+    /// Writing, which on every machine ToyOS runs on brings reading with it.
+    ReadWrite,
+    /// Executing, which no call maps yet: `ENOTSUP`.
+    Exec,
+}
+
+/// What `prot` asks; `None` (`EINVAL`) for a bit `PROT_*` does not define.
+pub(crate) fn access(prot: i32) -> Option<Access> {
+    if prot & !(PROT_READ | PROT_WRITE | PROT_EXEC) != 0 {
+        return None;
+    }
+    Some(if prot & PROT_EXEC != 0 {
+        Access::Exec
+    } else if prot & PROT_WRITE != 0 {
+        Access::ReadWrite
+    } else if prot & PROT_READ != 0 {
+        Access::Read
+    } else {
+        Access::None
+    })
 }

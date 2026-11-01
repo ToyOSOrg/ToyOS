@@ -9,13 +9,16 @@
 //! region it sent — and the driver answers it and serves the session, so a
 //! block never passes through here.
 //!
-//! **A connection reaches what its grant says** ([`wire::Grant`]): the badge
-//! the supervisor minted its connector with, which the kernel stamps on it and
-//! answers this acceptor alone. A listing names the partitions the grant
-//! admits, an open of any other is refused `NotGranted` whether or not a disk
-//! carries it, a connection with no grant reaches nothing, and a session whose
-//! grant does not write is handed over as one, whose driver answers every
-//! write `ReadOnly`.
+//! **A connection reaches what its badge says** ([`wire::Badge`]), minted by
+//! the supervisor, which the kernel stamps on it and answers this acceptor
+//! alone. A partitions grant lists and opens what it admits, and an open of
+//! any other is refused `NotGranted` whether or not a disk carries it; a
+//! session whose grant does not write is handed over as one, whose driver
+//! answers every write `ReadOnly`. A tables badge lists every partition and
+//! has a disk described by its driver, and opens nothing. A designation badge
+//! does one thing: the machine's one DATA partition, resolved when it is
+//! asked, is designated by the driver of its disk, told whether the running
+//! system is on it (`--active`). A connection with no badge reaches nothing.
 //!
 //! **A driver is who the supervisor says it is**: the badge it minted the
 //! driver's `disk` connector with. It starts the disk drivers before this
@@ -44,7 +47,7 @@ use toyos::poller::{Poller, READABLE};
 use toyos::{AsHandle, OwnedHandle};
 use toyos_abi::syscall::{SyscallError, MAX_BADGE};
 use toyos_blockring::disk::{self, Offer, Part, Settled};
-use toyos_blockring::wire::{self, Grant, Listed, Refusal};
+use toyos_blockring::wire::{self, Badge, Grant, Listed, Refusal};
 use toyos_blockring::PORT;
 use toyos_blockserve::guid_text;
 
@@ -67,6 +70,11 @@ const MAX_DRIVERS: usize = 16;
 /// on.
 const DRIVER: &str = "--driver";
 const UNDRIVEN: &str = "--undriven";
+/// Argv: a partition the running system is on, by unique GUID, which no
+/// designation changes; or that which they are is unknown, and every
+/// partition is taken for one.
+const ACTIVE: &str = "--active";
+const ACTIVE_UNKNOWN: &str = "--active-unknown";
 
 const TOKEN_ACCEPT: u64 = 0;
 const TOKEN_DRIVERS: u64 = 1;
@@ -92,16 +100,19 @@ enum Fate {
 /// A disk driver as the supervisor named it: the badge it minted the
 /// driver's `disk` connector with, which the kernel stamps on the connection
 /// and the driver cannot choose. What a driver calls itself is for the lines.
-type Badge = u32;
+type DriverBadge = u32;
 
 /// Everything the drivers said, and what the supervisor said of them.
 #[derive(Default)]
 struct Known {
     /// The disk drivers the supervisor started before this service.
-    expected: Vec<Badge>,
+    expected: Vec<DriverBadge>,
     undriven: Vec<String>,
-    fates: BTreeMap<Badge, Fate>,
+    fates: BTreeMap<DriverBadge, Fate>,
     offered: Vec<Offered>,
+    /// The partitions the running system is on, or `None` where the
+    /// supervisor could not say.
+    active: Option<Vec<[u8; 16]>>,
 }
 
 impl Known {
@@ -116,7 +127,7 @@ impl Known {
     /// it settles again (`true`, so the bound counts from now). One that never
     /// settled is unusable at once: its end is its last word, and every
     /// question waiting on it is answered now rather than at the bound.
-    fn ended(&mut self, badge: Badge) -> bool {
+    fn ended(&mut self, badge: DriverBadge) -> bool {
         match self.fates.insert(badge, Fate::Ended) {
             Some(_) => true,
             None => {
@@ -128,7 +139,7 @@ impl Known {
 
     /// The drivers whose controllers' partitions cannot be said absent: those
     /// expected and never heard, and those unusable or ended.
-    fn unsettled(&self) -> Vec<Badge> {
+    fn unsettled(&self) -> Vec<DriverBadge> {
         let silent = self.expected.iter().filter(|d| !self.fates.contains_key(d)).copied();
         silent.chain(self.fates.iter().filter(|(_, f)| **f != Fate::Offered).map(|(d, _)| *d)).collect()
     }
@@ -144,18 +155,20 @@ impl Known {
         }
     }
 
-    /// What a listing through `grant` answers, or `None` while it waits:
-    /// every partition offered that it admits. **The grant is asked first**,
+    /// What a listing through `badge` answers, or `None` while it waits:
+    /// every partition offered that it lists. **The badge is asked first**,
     /// so a connection with none learns nothing.
-    fn listing(&self, grant: Option<Grant>, expired: bool) -> Option<Result<Vec<Listed>, Refusal>> {
-        let Some(grant) = grant else { return Some(Err(Refusal::NotGranted)) };
+    fn listing(&self, badge: Option<Badge>, expired: bool) -> Option<Result<Vec<Listed>, Refusal>> {
+        let Some(badge) = badge.filter(|b| *b != Badge::DesignateData) else {
+            return Some(Err(Refusal::NotGranted));
+        };
         if !self.settled() && !expired {
             return None;
         }
         let listed: Vec<Listed> = self
             .offered
             .iter()
-            .filter(|o| grant.admits(o.part.unique, o.part.kind))
+            .filter(|o| badge.lists(o.part.unique, o.part.kind))
             .map(|o| Listed { disk: o.disk, unique: o.part.unique, kind: o.part.kind })
             .collect();
         Some(match self.absent() {
@@ -193,6 +206,45 @@ impl Known {
     }
 }
 
+impl Known {
+    /// Where a description of disk `disk` through `badge` is answered, or its
+    /// refusal, or `None` while it waits: only a [`Badge::Tables`] reaches
+    /// one.
+    fn describe(&self, disk: u32, badge: Option<Badge>, expired: bool) -> Option<Result<u32, Refusal>> {
+        if badge != Some(Badge::Tables) {
+            return Some(Err(Refusal::NotGranted));
+        }
+        if !self.settled() && !expired {
+            return None;
+        }
+        Some(if self.offered.iter().any(|o| o.disk == disk) { Ok(disk) } else { Err(self.absent()) })
+    }
+
+    /// Where the designation `badge` asks for is carried out — the one DATA
+    /// partition offered, resolved now — and whether the running system is on
+    /// it; or its refusal, or `None` while it waits. Two DATA partitions are
+    /// never guessed between, and a GUID two disks carry is refused on both,
+    /// as an open of it is.
+    fn designation(&self, badge: Option<Badge>, expired: bool) -> Option<Result<(Offered, bool), Refusal>> {
+        if badge != Some(Badge::DesignateData) {
+            return Some(Err(Refusal::NotGranted));
+        }
+        if !self.settled() && !expired {
+            return None;
+        }
+        let data: Vec<&Offered> = self.offered.iter().filter(|o| o.part.kind == toyos_gpt::Guid::TOYOS_DATA.0).collect();
+        let Some(one) = data.first().filter(|_| data.len() == 1) else {
+            return Some(Err(if data.is_empty() { self.absent() } else { Refusal::Unusable }));
+        };
+        let unique = one.part.unique;
+        let carrying = self.offered.iter().filter(|o| o.part.unique == unique).count();
+        Some(match (carrying, one.part.blocks) {
+            (1, Some(_)) => Ok((**one, self.active.as_ref().is_none_or(|a| a.contains(&unique)))),
+            _ => Err(Refusal::Unusable),
+        })
+    }
+}
+
 /// A connection that has not asked anything yet.
 struct Pending {
     conn: Connection,
@@ -204,18 +256,20 @@ struct Pending {
 enum Ask {
     List,
     Open { guid: [u8; 16], region: OwnedHandle },
+    Describe { disk: u32 },
+    Designate { commit: bool },
 }
 
 /// A client whose question waits for the drivers.
 struct Waiting {
     conn: Connection,
-    grant: Option<Grant>,
+    badge: Option<Badge>,
     ask: Ask,
 }
 
 /// One disk driver's connection.
 struct Driver {
-    badge: Badge,
+    badge: DriverBadge,
     conn: Connection,
     rx: ipc::FrameRx<{ 4 + disk::MAX_PARTS * Part::BYTES }>,
     label: Option<String>,
@@ -240,10 +294,23 @@ fn main() {
     let args: Vec<String> = std::env::args().collect();
     let mut known = Known::default();
     let mut at = 1;
+    known.active = Some(Vec::new());
     while at < args.len() {
+        if args[at] == ACTIVE_UNKNOWN {
+            println!("diskserver: which partitions the running system is on is unknown; every designation is refused");
+            known.active = None;
+            at += 1;
+            continue;
+        }
         let value = args.get(at + 1).unwrap_or_else(|| panic!("diskserver: {} takes a value", args[at]));
         match args[at].as_str() {
             DRIVER => known.expected.push(value.parse().unwrap_or_else(|_| panic!("diskserver: {DRIVER} {value}"))),
+            ACTIVE => {
+                let guid = toyos_gpt::Guid::parse(value).unwrap_or_else(|| panic!("diskserver: {ACTIVE} {value}"));
+                if let Some(active) = &mut known.active {
+                    active.push(guid.0);
+                }
+            }
             UNDRIVEN => {
                 println!("diskserver: {value} is on this machine and no driver of it started; what it carries is refused");
                 known.undriven.push(value.clone());
@@ -280,7 +347,7 @@ impl Service {
                 poller.watch(drivers, READABLE, TOKEN_DRIVERS);
             }
             for p in &pending {
-                poller.watch(&p.conn, READABLE, TOKEN_PENDING + u64::from(p.conn.as_handle().0));
+                poller.watch(&p.conn, READABLE, TOKEN_PENDING + u64::from(p.conn.as_handle().raw().0));
             }
             for (id, d) in &self.drivers {
                 poller.watch(&d.conn, READABLE, TOKEN_DRIVER + id);
@@ -331,7 +398,7 @@ impl Service {
             }
             let mut i = 0;
             while i < pending.len() {
-                let token = TOKEN_PENDING + u64::from(pending[i].conn.as_handle().0);
+                let token = TOKEN_PENDING + u64::from(pending[i].conn.as_handle().raw().0);
                 if !ready.contains(&token) {
                     i += 1;
                     continue;
@@ -457,24 +524,27 @@ impl Service {
         }
     }
 
-    /// One client's first frame: a listing, or an open.
+    /// One client's first frame: a listing, an open, a description or a
+    /// designation.
     fn asked(&mut self, clients: &toyos::port::Acceptor, mut p: Pending, msg_type: u32, payload_len: usize) {
-        let grant = grant(clients, &p.conn);
-        if msg_type == wire::MSG_LIST && payload_len == 0 {
-            return self.waiting.push(Waiting { conn: p.conn, grant, ask: Ask::List });
+        let badge = badge(clients, &p.conn);
+        let payload = p.rx.payload(payload_len);
+        let ask = match (msg_type, payload) {
+            (wire::MSG_LIST, []) => Some(Ask::List),
+            (wire::MSG_DESCRIBE, _) => disk::disk(payload).map(|disk| Ask::Describe { disk }),
+            (wire::MSG_DESIGNATE, [0]) => Some(Ask::Designate { commit: false }),
+            (wire::MSG_DESIGNATE, [1]) => Some(Ask::Designate { commit: true }),
+            _ => None,
+        };
+        if let Some(ask) = ask {
+            return self.waiting.push(Waiting { conn: p.conn, badge, ask });
         }
         let guid = wire::guid(p.rx.payload(payload_len));
         let handles = p.rx.take_handles::<1>();
         let (Some(guid), Some([region]), wire::MSG_OPEN) = (guid, handles, msg_type) else {
-            if let Some([region]) = handles {
-                toyos_abi::syscall::close(region);
-            }
             return refuse(&p.conn, Refusal::Malformed);
         };
-        // SAFETY: the handle arrived with this frame and nothing else in this
-        // process names it.
-        let region = unsafe { OwnedHandle::from_raw(region) };
-        self.waiting.push(Waiting { conn: p.conn, grant, ask: Ask::Open { guid, region } });
+        self.waiting.push(Waiting { conn: p.conn, badge, ask: Ask::Open { guid, region } });
     }
 
     /// Answer every waiting question the drivers have now answered, or whose
@@ -484,14 +554,14 @@ impl Service {
         for w in waiting {
             let expired = now >= self.awaited_since + DRIVER_BOUND;
             match w.ask {
-                Ask::List => match self.known.listing(w.grant, expired) {
+                Ask::List => match self.known.listing(w.badge, expired) {
                     None => self.waiting.push(w),
                     Some(answer) => {
                         self.waited(expired, "a listing");
                         list(&w.conn, answer);
                     }
                 },
-                Ask::Open { guid, region } => match self.known.open(guid, w.grant, expired) {
+                Ask::Open { guid, region } => match self.known.open(guid, partitions(w.badge), expired) {
                     None => self.waiting.push(Waiting { ask: Ask::Open { guid, region }, ..w }),
                     Some(Err(why)) => {
                         self.waited(expired, "an open");
@@ -499,8 +569,26 @@ impl Service {
                         refuse(&w.conn, why);
                     }
                     Some(Ok(offered)) => {
-                        let writes = w.grant.expect("admitted through a grant").writes;
+                        let writes = partitions(w.badge).expect("admitted through a grant").writes;
                         self.hand_over(offered, guid, writes, w.conn, region);
+                    }
+                },
+                Ask::Describe { disk } => match self.known.describe(disk, w.badge, expired) {
+                    None => self.waiting.push(Waiting { ask: Ask::Describe { disk }, ..w }),
+                    Some(Err(why)) => refuse(&w.conn, why),
+                    Some(Ok(ours)) => self.hand_work(ours, disk::MSG_DESCRIBE, |theirs| theirs.to_le_bytes().to_vec(), w.conn),
+                },
+                Ask::Designate { commit } => match self.known.designation(w.badge, expired) {
+                    None => self.waiting.push(Waiting { ask: Ask::Designate { commit }, ..w }),
+                    Some(Err(why)) => {
+                        println!("diskserver: a designation refused: {why:?}");
+                        refuse(&w.conn, why);
+                    }
+                    Some(Ok((offered, active))) => {
+                        let unique = offered.part.unique;
+                        let order = |disk| disk::Designation { disk, unique, active, commit }.encode().to_vec();
+                        println!("diskserver: designation of {} handed to disk {}'s driver", guid_text(unique), offered.disk);
+                        self.hand_work(offered.disk, disk::MSG_DESIGNATE, order, w.conn);
                     }
                 },
             }
@@ -536,6 +624,30 @@ impl Service {
     }
 }
 
+impl Service {
+    /// Hand `conn` to the driver of disk `ours`, with the frame `payload`
+    /// makes of that driver's own number for the disk: the driver answers it.
+    fn hand_work(&mut self, ours: u32, msg_type: u32, payload: impl Fn(u32) -> Vec<u8>, conn: Connection) {
+        let Some((&id, d)) = self.drivers.iter().find(|(_, d)| d.disks.values().any(|&o| o == ours)) else {
+            unreachable!("diskserver: disk {ours} is offered and no driver has it")
+        };
+        let theirs = *d.disks.iter().find(|(_, o)| **o == ours).expect("just found").0;
+        match d.conn.try_send_bytes_with(msg_type, &payload(theirs), [conn.into_owned()]) {
+            Ok(()) => {}
+            Err(ipc::TrySendError::Full) => self.drop_driver(id, "it would not take a client's work"),
+            Err(why) => println!("diskserver: the kernel would not move a client to disk driver {}: {why:?}", d.badge),
+        }
+    }
+}
+
+/// The partitions grant a badge carries, if it is one.
+fn partitions(badge: Option<Badge>) -> Option<Grant> {
+    match badge {
+        Some(Badge::Partitions(grant)) => Some(grant),
+        _ => None,
+    }
+}
+
 fn refuse(conn: &Connection, why: Refusal) {
     let _ = conn.try_send_bytes(wire::MSG_REFUSED, &why.encode());
 }
@@ -556,7 +668,7 @@ fn list(conn: &Connection, answer: Result<Vec<Listed>, Refusal>) {
 
 /// Who the driver on `conn`, accepted from `acceptor`, is: the badge the
 /// supervisor minted its connector with.
-fn driver_badge(acceptor: &toyos::port::Acceptor, conn: &Connection) -> Option<Badge> {
+fn driver_badge(acceptor: &toyos::port::Acceptor, conn: &Connection) -> Option<DriverBadge> {
     let mut badge = [0u8; MAX_BADGE];
     match acceptor.badge(conn, &mut badge) {
         Ok(bytes) => disk::identity(bytes),
@@ -565,12 +677,12 @@ fn driver_badge(acceptor: &toyos::port::Acceptor, conn: &Connection) -> Option<B
     }
 }
 
-/// The grant `conn`, accepted from `acceptor`, was minted with; `None` for a
+/// The badge `conn`, accepted from `acceptor`, was minted with; `None` for a
 /// connection through an unbadged connector or with bytes no minter stamps.
-fn grant(acceptor: &toyos::port::Acceptor, conn: &Connection) -> Option<Grant> {
+fn badge(acceptor: &toyos::port::Acceptor, conn: &Connection) -> Option<Badge> {
     let mut badge = [0u8; MAX_BADGE];
     match acceptor.badge(conn, &mut badge) {
-        Ok(bytes) => Grant::decode(bytes),
+        Ok(bytes) => Badge::decode(bytes),
         Err(SyscallError::NotFound) => None,
         Err(why) => panic!("diskserver: its own acceptor would not say a connection's badge: {why:?}"),
     }
@@ -587,11 +699,11 @@ mod tests {
     const ROOT: [u8; 16] = [4; 16];
     const LOG_KIND: [u8; 16] = [0x10; 16];
     const BOOT_KIND: [u8; 16] = [0x20; 16];
-    const DATA_KIND: [u8; 16] = [0x30; 16];
+    const DATA_KIND: [u8; 16] = toyos_gpt::Guid::TOYOS_DATA.0;
     const ROOT_KIND: [u8; 16] = [0x40; 16];
     /// Two drivers, by the badges the supervisor minted them.
-    const STICK: Badge = 7;
-    const NVME: Badge = 9;
+    const STICK: DriverBadge = 7;
+    const NVME: DriverBadge = 9;
 
     fn unique(guid: [u8; 16]) -> Option<Grant> {
         Some(Grant { scope: Scope::Unique(guid), writes: true })
@@ -605,7 +717,7 @@ mod tests {
         Part { unique, kind, blocks: Some(100) }
     }
 
-    fn known(expected: &[Badge]) -> Known {
+    fn known(expected: &[DriverBadge]) -> Known {
         Known { expected: expected.to_vec(), ..Known::default() }
     }
 
@@ -647,9 +759,9 @@ mod tests {
         let uniques = |answer: Option<Result<Vec<Listed>, Refusal>>| {
             answer.expect("answered").map(|all| all.iter().map(|l| (l.disk, l.unique)).collect::<Vec<_>>())
         };
-        assert_eq!(uniques(known.listing(unique(BOOT), false)), Ok(vec![(0, BOOT)]));
-        assert_eq!(uniques(known.listing(data(), false)), Ok(vec![(1, DATA)]));
-        assert_eq!(uniques(known.listing(unique([9; 16]), false)), Ok(vec![]));
+        assert_eq!(uniques(known.listing(unique(BOOT).map(Badge::Partitions), false)), Ok(vec![(0, BOOT)]));
+        assert_eq!(uniques(known.listing(data().map(Badge::Partitions), false)), Ok(vec![(1, DATA)]));
+        assert_eq!(uniques(known.listing(unique([9; 16]).map(Badge::Partitions), false)), Ok(vec![]));
         assert_eq!(known.listing(None, false), Some(Err(Refusal::NotGranted)));
     }
 
@@ -662,19 +774,19 @@ mod tests {
         let mut known = known(&[STICK, NVME]);
         known.fates.insert(NVME, Fate::Offered);
         known.offered.push(Offered { disk: 0, part: part(DATA, DATA_KIND) });
-        assert_eq!(known.listing(data(), false), None, "the stick's driver has not settled");
+        assert_eq!(known.listing(data().map(Badge::Partitions), false), None, "the stick's driver has not settled");
         assert_eq!(known.open(LOG, unique(LOG), false), None);
         assert_eq!(known.open(DATA, data(), false), None, "offered, and another disk may carry it too");
         assert_eq!(known.open(DATA, None, false), Some(Err(Refusal::NotGranted)), "no grant waits for nothing");
         assert_eq!(known.open(LOG, unique(LOG), true), Some(Err(Refusal::Unusable)), "the bound passed, a driver silent");
         assert!(known.open(DATA, data(), true).is_some_and(|r| r.is_ok()));
-        assert!(known.listing(data(), true).is_some_and(|r| r.is_ok_and(|l| l.len() == 1)));
+        assert!(known.listing(data().map(Badge::Partitions), true).is_some_and(|r| r.is_ok_and(|l| l.len() == 1)));
         let log = Some(Grant { scope: Scope::Kind(LOG_KIND), writes: true });
-        assert_eq!(known.listing(log, true), Some(Err(Refusal::Unusable)), "nothing listed, a driver silent");
+        assert_eq!(known.listing(log.map(Badge::Partitions), true), Some(Err(Refusal::Unusable)), "nothing listed, a driver silent");
 
         known.fates.insert(STICK, Fate::Offered);
         assert_eq!(known.open(LOG, unique(LOG), false), Some(Err(Refusal::NotFound)), "every driver said");
-        assert_eq!(known.listing(log, false), Some(Ok(vec![])));
+        assert_eq!(known.listing(log.map(Badge::Partitions), false), Some(Ok(vec![])));
     }
 
     /// A GUID the first driver offers is not routed while another may offer
@@ -702,7 +814,7 @@ mod tests {
         known.offered.retain(|o| o.disk != 1);
         assert_eq!(known.open(DATA, data(), false), None, "a type grant waits for the offer");
         assert_eq!(known.open(DATA, unique(DATA), false), None);
-        assert_eq!(known.listing(data(), false), None);
+        assert_eq!(known.listing(data().map(Badge::Partitions), false), None);
         known.fates.insert(NVME, Fate::Offered);
         known.offered.push(Offered { disk: 2, part: part(DATA, DATA_KIND) });
         assert_eq!(known.open(DATA, data(), false), Some(Ok(Offered { disk: 2, part: part(DATA, DATA_KIND) })));
@@ -746,13 +858,13 @@ mod tests {
     fn an_unusable_or_undriven_controller_is_refused_and_an_absent_one_lists_nothing() {
         let mut unusable = known(&[NVME]);
         unusable.fates.insert(NVME, Fate::Unusable);
-        assert_eq!(unusable.listing(data(), false), Some(Err(Refusal::Unusable)));
+        assert_eq!(unusable.listing(data().map(Badge::Partitions), false), Some(Err(Refusal::Unusable)));
         assert_eq!(unusable.open(DATA, unique(DATA), false), Some(Err(Refusal::Unusable)));
         let undriven = Known { undriven: vec!["pci:01:08:02 at PCI 00:02.0".into()], ..Known::default() };
-        assert_eq!(undriven.listing(data(), false), Some(Err(Refusal::ClaimRefused)));
+        assert_eq!(undriven.listing(data().map(Badge::Partitions), false), Some(Err(Refusal::ClaimRefused)));
         assert_eq!(undriven.open(DATA, unique(DATA), false), Some(Err(Refusal::ClaimRefused)));
         let absent = Known::default();
-        assert_eq!(absent.listing(data(), false), Some(Ok(vec![])));
+        assert_eq!(absent.listing(data().map(Badge::Partitions), false), Some(Ok(vec![])));
         assert_eq!(absent.open(DATA, unique(DATA), false), Some(Err(Refusal::NotFound)));
     }
 
@@ -765,5 +877,47 @@ mod tests {
         known.offered.push(Offered { disk: 1, part: Part { unique: [7; 16], kind: LOG_KIND, blocks: None } });
         assert_eq!(known.open(LOG, unique(LOG), false), Some(Err(Refusal::Unusable)));
         assert_eq!(known.open([7; 16], unique([7; 16]), false), Some(Err(Refusal::Unusable)));
+    }
+
+    /// A description reaches a disk only through a tables badge, and names
+    /// one the service has. A designation reaches only the machine's one DATA
+    /// partition, resolved when it is asked, said active when the running
+    /// system is on it, and is refused when two DATA partitions or two disks
+    /// carrying its GUID leave it no one partition; nothing a partitions grant
+    /// or a tables badge carries designates anything.
+    #[test]
+    fn only_its_own_badge_describes_or_designates() {
+        let mut known = two_disks();
+        known.active = Some(vec![LOG]);
+        assert_eq!(known.describe(1, Some(Badge::Tables), false), Some(Ok(1)));
+        assert_eq!(known.describe(7, Some(Badge::Tables), false), Some(Err(Refusal::NotFound)));
+        for other in [None, data().map(Badge::Partitions), Some(Badge::DesignateData)] {
+            assert_eq!(known.describe(1, other, false), Some(Err(Refusal::NotGranted)), "{other:?}");
+        }
+        let designate = Some(Badge::DesignateData);
+        let data_disk = Offered { disk: 1, part: part(DATA, DATA_KIND) };
+        assert_eq!(known.designation(designate, false), Some(Ok((data_disk, false))));
+        for other in [None, data().map(Badge::Partitions), Some(Badge::Tables)] {
+            assert_eq!(known.designation(other, false), Some(Err(Refusal::NotGranted)), "{other:?}");
+        }
+        assert_eq!(known.listing(designate, false), Some(Err(Refusal::NotGranted)), "a designation lists nothing");
+        assert_eq!(known.listing(Some(Badge::Tables), false).map(|r| r.map(|l| l.len())), Some(Ok(4)));
+
+        known.active = Some(vec![DATA]);
+        assert_eq!(known.designation(designate, false), Some(Ok((data_disk, true))), "the running system's DATA");
+        known.active = None;
+        assert_eq!(known.designation(designate, false), Some(Ok((data_disk, true))), "nothing known is active");
+
+        let mut cloned = two_disks();
+        cloned.active = Some(Vec::new());
+        cloned.offered.push(Offered { disk: 0, part: part([7; 16], LOG_KIND) });
+        cloned.offered[0].part.unique = DATA;
+        assert_eq!(cloned.designation(designate, false), Some(Err(Refusal::Unusable)), "its GUID on two disks");
+        let mut two = two_disks();
+        two.offered.push(Offered { disk: 0, part: part([8; 16], DATA_KIND) });
+        assert_eq!(two.designation(designate, false), Some(Err(Refusal::Unusable)), "two DATA partitions");
+        let mut none = two_disks();
+        none.offered.retain(|o| o.part.kind != DATA_KIND);
+        assert_eq!(none.designation(designate, false), Some(Err(Refusal::NotFound)));
     }
 }

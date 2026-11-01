@@ -375,7 +375,7 @@ mod tests {
     /// point answers differently reds here rather than naming a different ROOT.
     #[test]
     fn the_wallpaper_is_the_same_on_every_host() {
-        let digest: String = toyos_sha2_hw::sha256_digest(rgb()).iter().map(|b| format!("{b:02x}")).collect();
+        let digest = crate::sha256_hex(&rgb());
         assert_eq!(digest, "675f4fbc92985dc5e60b899fd869fa8e574b1147e2b1c9b42808a72bcfff1d91");
     }
 

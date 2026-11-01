@@ -1,18 +1,18 @@
-//! Each metal bench's record: the boot stick its loop may write, and every
-//! number the metal suite measures there, judged only against the record of
-//! the machine that measured it.
+//! Each metal bench's record: that the machine is a bench the loop may write,
+//! and every number the metal suite measures there, judged only against the
+//! record of the machine that measured it.
 //!
 //! One file per machine under [`dir`], named for its SMBIOS vendor and product:
 //! `metal/` in the host's store, outside every checkout, so every worktree on
 //! the host reads one record and none commits it.
-//! `toyos-metal --install-sudoers` writes it once, with the stick and no
-//! number, and the loop refuses a machine that has none. A name the record
+//! `toyos-metal --record` writes it once, with no number, and the loop
+//! refuses a machine that has none. A name the record
 //! lacks is added by a run and not judged, and only where its owner passed, the
 //! boot or the row that measured it; a recorded value is never moved by a run,
 //! so a slow run cannot become the baseline the next is judged by. A run under
 //! a BIOS other than the record's is judged against it, fails naming both, and
 //! records nothing. Deleting a row is how a number is re-recorded, and deleting
-//! the file is how a machine is, firmware, stick and all.
+//! the file is how a machine is, firmware and all.
 //!
 //! [`ceiling`] is the one rule.
 
@@ -87,34 +87,22 @@ fn file(vendor: &str, product: &str) -> String {
     format!("{}.toml", slug.trim_end_matches('-'))
 }
 
-/// The one disk the loop may write on a machine, as its
-/// `/sys/class/block/<disk>` answered when the machine was recorded.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct Stick {
-    pub sectors: u64,
-    pub vendor: String,
-    pub model: String,
-}
-
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Record {
     pub vendor: String,
     pub product: String,
     pub bios: String,
-    pub stick: Stick,
     pub measured: BTreeMap<String, u64>,
 }
 
 impl Record {
-    /// `machine` with `stick`, before any run has measured it.
-    pub fn new(machine: &Machine, stick: Stick) -> Self {
+    /// `machine`, before any run has measured it.
+    pub fn new(machine: &Machine) -> Self {
         Self {
             vendor: machine.vendor.clone(),
             product: machine.product.clone(),
             bios: machine.bios.clone(),
-            stick,
             measured: BTreeMap::new(),
         }
     }
@@ -282,8 +270,7 @@ mod tests {
     }
 
     fn fresh(machine: &Machine) -> Record {
-        let stick = Stick { sectors: 60_062_500, vendor: "SanDisk".to_string(), model: "Ultra".to_string() };
-        Record::new(machine, stick)
+        Record::new(machine)
     }
 
     fn recorded(machine: &Machine, pairs: &[(&str, u64)]) -> Record {

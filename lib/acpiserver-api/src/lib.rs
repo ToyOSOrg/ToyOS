@@ -14,6 +14,11 @@ pub const QUERIES_COUNTED: &str = "embedded controller queries taken: ";
 pub const CONTROLLER_SERVED: &str = "acpiserver: embedded controller on GPE ";
 pub const CONTROLLER_NONE: &str = "acpiserver: embedded controller none: ";
 
+/// The server's census of the processors' idle states, written once their
+/// `_CST`s are handed to the kernel: how many declarations it kept, the
+/// states each held, and what it withheld.
+pub const IDLE_CENSUS: &str = "acpiserver: the processors' idle states: ";
+
 /// The server's census of the batteries and adapters it found, written once
 /// at the end of its start where a battery is present, after their first
 /// reading.

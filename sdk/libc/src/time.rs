@@ -230,26 +230,54 @@ pub unsafe extern "C" fn difftime(time1: time_t, time0: time_t) -> f64 {
     (time1 - time0) as f64
 }
 
-#[no_mangle]
-pub unsafe extern "C" fn nanosleep(req: *const Timespec, _rem: *mut Timespec) -> i32 {
-    if req.is_null() { return -1; }
-    let nanos = unsafe {
-        (*req).tv_sec as u64 * 1_000_000_000 + (*req).tv_nsec as u64
-    };
-    toyos_abi::syscall::nanosleep(nanos);
-    0
+/// The nanoseconds `ts` spans, or `None` for one POSIX calls invalid: a
+/// negative second or a nanosecond count past a second.
+pub(crate) fn nanos_of(ts: &Timespec) -> Option<u64> {
+    let secs = u64::try_from(ts.tv_sec).ok()?;
+    let nanos = u64::try_from(ts.tv_nsec).ok().filter(|&n| n < NANOS_PER_SEC)?;
+    Some(secs.saturating_mul(NANOS_PER_SEC).saturating_add(nanos))
 }
 
+const NANOS_PER_SEC: u64 = 1_000_000_000;
+
+/// A handler that interrupts it ends it with `EINTR` and the time left in
+/// `rem`, whatever its flags.
+#[no_mangle]
+pub unsafe extern "C" fn nanosleep(req: *const Timespec, rem: *mut Timespec) -> i32 {
+    let Some(nanos) = unsafe { req.as_ref() }.and_then(nanos_of) else {
+        crate::errno::set(crate::errcode::EINVAL);
+        return -1;
+    };
+    match crate::signal::sleep(nanos) {
+        Ok(()) => 0,
+        Err(left) => {
+            if let Some(rem) = unsafe { rem.as_mut() } {
+                *rem = Timespec { tv_sec: (left / NANOS_PER_SEC) as time_t, tv_nsec: (left % NANOS_PER_SEC) as i64 };
+            }
+            crate::errno::set(crate::errcode::EINTR);
+            -1
+        }
+    }
+}
+
+/// The seconds left, rounded up, when a handler interrupted it.
 #[no_mangle]
 pub unsafe extern "C" fn sleep(seconds: u32) -> u32 {
-    toyos_abi::syscall::nanosleep(seconds as u64 * 1_000_000_000);
-    0
+    match crate::signal::sleep(u64::from(seconds) * NANOS_PER_SEC) {
+        Ok(()) => 0,
+        Err(left) => left.div_ceil(NANOS_PER_SEC) as u32,
+    }
 }
 
 #[no_mangle]
 pub unsafe extern "C" fn usleep(usec: u32) -> i32 {
-    toyos_abi::syscall::nanosleep(usec as u64 * 1000);
-    0
+    match crate::signal::sleep(u64::from(usec) * 1000) {
+        Ok(()) => 0,
+        Err(_) => {
+            crate::errno::set(crate::errcode::EINTR);
+            -1
+        }
+    }
 }
 
 #[no_mangle]

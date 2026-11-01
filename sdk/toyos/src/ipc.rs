@@ -1,17 +1,13 @@
-//! Framed IPC over connections (bidirectional pipe pairs).
+//! Framed IPC over connections.
 //!
-//! Wire format: `[u32 msg_type][u32 len][u32 handles][len bytes payload]`.
-//!
-//! **A frame and the handles it announces travel as one message**
-//! (`SYS_MESSAGE_SEND`): the kernel writes the frame whole and pins its batch
-//! at the byte just past it, so the receiver reads the frame and takes exactly
-//! the batch it announces, there. A read that reaches a batch no frame
-//! announced is answered `HandlesPending`, which is the peer breaking the
-//! protocol; the connection is dropped and the batch goes with it.
+//! A frame is `[u32 msg_type][payload]` and the handles it carries, sent as
+//! one kernel message (`SYS_MESSAGE_SEND`) and taken whole
+//! (`SYS_MESSAGE_RECV`): a receiver never sees part of a frame, and a
+//! frame's handles arrive with it and with no other.
 
 use toyos_abi::RawHandle;
-use toyos_abi::syscall::{self, SyscallError};
-use crate::{AsHandle, OwnedHandle};
+use toyos_abi::syscall::{self, Received, SyscallError};
+use crate::{AsHandle, BorrowedHandle, OwnedHandle};
 
 /// A type that may cross an IPC boundary as a payload.
 ///
@@ -20,7 +16,7 @@ use crate::{AsHandle, OwnedHandle};
 /// pointers, and have no invalid bit patterns. All three are load-bearing:
 /// [`send`] publishes `size_of::<T>()` bytes of the sender's memory to a peer,
 /// so a padding byte no field owns is whatever the sender's stack held; and
-/// [`recv_payload`] reinterprets bytes a *peer* chose, so a `bool`, a
+/// [`decode_payload`] reinterprets bytes a *peer* chose, so a `bool`, a
 /// fieldless enum or a `NonZeroU32` would be UB the moment it arrives.
 ///
 /// Declare payload structs with [`ipc_payload!`], which proves the first two
@@ -85,85 +81,29 @@ macro_rules! ipc_payload {
 /// clipboard set and the compositor's paste both switch to shared memory
 /// instead. 8192 is one doubling of headroom, so a protocol can grow its
 /// largest inline message without the SDK becoming the thing that refuses it.
-///
-/// What the bound buys is a refusal in O(1). A peer's `len` sizes a
-/// [`recv_bytes`] tail-skip, so `len = u32::MAX` obliges the reader to consume
-/// every byte that peer will ever send before it returns to its event loop.
-/// Bounded, that frame is an error at the header and the peer can be dropped.
+/// It sizes the buffer every send frames in, and the receive buffer of every
+/// protocol that takes frames up to it.
 pub const MAX_FRAME_LEN: u32 = 8192;
 
-/// A frame header. `len` and `handles` are private because they carry
-/// invariants a peer does not: every `IpcHeader` in existence has a length
-/// within [`MAX_FRAME_LEN`] and a count within
-/// [`MAX_TRANSFER_HANDLES`](syscall::MAX_TRANSFER_HANDLES), because
-/// [`IpcHeader::from_wire`] is the only way to make one out of bytes somebody
-/// else chose.
-#[derive(Clone, Copy)]
-pub struct IpcHeader {
-    pub msg_type: u32,
-    len: u32,
-    handles: u32,
+/// The message type's bytes in front of every payload.
+const TYPE_LEN: usize = 4;
+
+const _: () = assert!(TYPE_LEN + MAX_FRAME_LEN as usize <= syscall::MAX_MESSAGE_LEN);
+
+/// A frame as a send lays it out for the kernel: the message type, then
+/// its payload. Bytes only, so no padding.
+#[repr(C)]
+struct Wire<P> {
+    msg_type: [u8; TYPE_LEN],
+    payload: P,
 }
-
-impl IpcHeader {
-    pub const WIRE_SIZE: usize = 12;
-
-    /// Build a header from words that have not been trusted yet.
-    pub fn from_wire(msg_type: u32, len: u32, handles: u32) -> Result<Self, IpcError> {
-        if len > MAX_FRAME_LEN || handles as usize > syscall::MAX_TRANSFER_HANDLES {
-            return Err(IpcError::Malformed);
-        }
-        Ok(Self { msg_type, len, handles })
-    }
-
-    fn decode(bytes: &[u8; Self::WIRE_SIZE]) -> Result<Self, IpcError> {
-        let word = |at: usize| u32::from_ne_bytes(bytes[at..at + 4].try_into().expect("four bytes"));
-        Self::from_wire(word(0), word(4), word(8))
-    }
-
-    pub fn len(&self) -> u32 {
-        self.len
-    }
-
-    pub fn is_empty(&self) -> bool {
-        self.len == 0
-    }
-
-    /// How many handles travel with this frame.
-    pub fn handles(&self) -> usize {
-        self.handles as usize
-    }
-
-    fn to_wire(self) -> [u8; Self::WIRE_SIZE] {
-        let mut bytes = [0u8; Self::WIRE_SIZE];
-        bytes[..4].copy_from_slice(&self.msg_type.to_ne_bytes());
-        bytes[4..8].copy_from_slice(&self.len.to_ne_bytes());
-        bytes[8..].copy_from_slice(&self.handles.to_ne_bytes());
-        bytes
-    }
-
-    /// The same header, built from a length and count this endpoint chose itself.
-    fn frame(msg_type: u32, len: usize, handles: usize) -> Result<Self, IpcError> {
-        if len > MAX_FRAME_LEN as usize || handles > syscall::MAX_TRANSFER_HANDLES {
-            return Err(IpcError::TooLarge);
-        }
-        Ok(Self { msg_type, len: len as u32, handles: handles as u32 })
-    }
-}
-
-const _: () = assert!(IpcHeader::WIRE_SIZE + MAX_FRAME_LEN as usize <= syscall::MAX_MESSAGE_LEN);
-
-/// A payload of at most this many bytes, such as a signal or a small typed
-/// payload sent per input event, is framed in a buffer this size rather than
-/// one of [`MAX_FRAME_LEN`], which would be zeroed on every send.
-const SMALL_PAYLOAD: usize = 64;
 
 #[derive(Debug)]
 pub enum IpcError {
     Disconnected,
-    /// The peer's frame does not describe a message this endpoint can read:
-    /// a length past [`MAX_FRAME_LEN`], or one other than the payload the
-    /// caller asked for.
+    /// The peer's frame is not one this endpoint can read: larger than the
+    /// receiver holds, too short for a message type, or another payload than
+    /// the caller asked for.
     Malformed,
     /// This endpoint will not frame a payload that large. Distinct from
     /// [`IpcError::Malformed`] because the two blame different sides.
@@ -174,9 +114,9 @@ pub enum IpcError {
 /// Why a whole frame could not be handed over without blocking.
 #[derive(Debug)]
 pub enum TrySendError {
-    /// The peer's stream has no room for the whole frame now. **Nothing was
-    /// sent**: a frame goes in whole or not at all. A peer that cannot take
-    /// one frame has a stream of unread messages behind it, and is dropped.
+    /// The peer has no room for the whole frame now. **Nothing was sent**: a
+    /// frame goes in whole or not at all. A peer that cannot take one frame
+    /// has a queue of unread messages behind it, and is dropped.
     Full,
     /// This endpoint will not frame a payload that large.
     TooLarge,
@@ -189,15 +129,15 @@ pub enum TrySendError {
 pub struct Connection(pub(crate) OwnedHandle);
 
 impl AsHandle for Connection {
-    fn as_handle(&self) -> RawHandle { self.0.raw() }
+    fn as_handle(&self) -> BorrowedHandle<'_> { self.0.as_handle() }
 }
 
 impl Connection {
     /// A connection end a peer sent, consumed. Its type is the sender's
     /// word: the kernel refuses each connection call on a handle of another
     /// type, so trust the sender only as far as its protocol says.
-    pub fn received(raw: RawHandle) -> Self {
-        Self(OwnedHandle(raw))
+    pub fn received(handle: OwnedHandle) -> Self {
+        Self(handle)
     }
 
     /// This end as a handle, to send it on in a frame ([`Self::send_with`]).
@@ -205,28 +145,33 @@ impl Connection {
         self.0
     }
 
+    /// Give up ownership, for an end about to be endowed.
+    pub fn into_raw(self) -> RawHandle {
+        self.0.into_raw()
+    }
+
     pub fn send<T: IpcPayload>(&self, msg_type: u32, payload: &T) -> Result<(), IpcError> {
-        send(self.0.raw(), msg_type, payload)
+        send(self.as_handle(), msg_type, payload)
     }
 
     pub fn signal(&self, msg_type: u32) -> Result<(), IpcError> {
-        signal(self.0.raw(), msg_type)
+        signal(self.as_handle(), msg_type)
     }
 
     pub fn send_bytes(&self, msg_type: u32, data: &[u8]) -> Result<(), IpcError> {
-        send_bytes(self.0.raw(), msg_type, data)
+        send_bytes(self.as_handle(), msg_type, data)
     }
 
     pub fn try_send<T: IpcPayload>(&self, msg_type: u32, payload: &T) -> Result<(), TrySendError> {
-        try_send(self.0.raw(), msg_type, payload)
+        try_send(self.as_handle(), msg_type, payload)
     }
 
     pub fn try_signal(&self, msg_type: u32) -> Result<(), TrySendError> {
-        try_signal(self.0.raw(), msg_type)
+        try_signal(self.as_handle(), msg_type)
     }
 
     pub fn try_send_bytes(&self, msg_type: u32, data: &[u8]) -> Result<(), TrySendError> {
-        try_send_bytes(self.0.raw(), msg_type, data)
+        try_send_bytes(self.as_handle(), msg_type, data)
     }
 
     /// A frame and the handles it carries, as one message.
@@ -241,7 +186,7 @@ impl Connection {
         payload: &T,
         handles: impl IntoIterator<Item = OwnedHandle>,
     ) -> Result<(), IpcError> {
-        message(self.0.raw(), msg_type, as_bytes(payload), handles, false).map_err(blocking)
+        message(self.as_handle(), msg_type, as_bytes(payload), handles, false).map_err(blocking)
     }
 
     /// [`send_with`](Self::send_with) for a byte payload.
@@ -251,12 +196,12 @@ impl Connection {
         data: &[u8],
         handles: impl IntoIterator<Item = OwnedHandle>,
     ) -> Result<(), IpcError> {
-        message(self.0.raw(), msg_type, data, handles, false).map_err(blocking)
+        message(self.as_handle(), msg_type, data, handles, false).map_err(blocking)
     }
 
-    /// [`send_with`](Self::send_with) for a bare header.
+    /// [`send_with`](Self::send_with) for a bare message type.
     pub fn signal_with(&self, msg_type: u32, handles: impl IntoIterator<Item = OwnedHandle>) -> Result<(), IpcError> {
-        message(self.0.raw(), msg_type, &[], handles, false).map_err(blocking)
+        message(self.as_handle(), msg_type, &[], handles, false).map_err(blocking)
     }
 
     /// [`send_with`](Self::send_with) without blocking: nothing is sent and
@@ -267,7 +212,7 @@ impl Connection {
         payload: &T,
         handles: impl IntoIterator<Item = OwnedHandle>,
     ) -> Result<(), TrySendError> {
-        message(self.0.raw(), msg_type, as_bytes(payload), handles, true).map_err(nonblocking)
+        message(self.as_handle(), msg_type, as_bytes(payload), handles, true).map_err(nonblocking)
     }
 
     /// [`try_send_with`](Self::try_send_with) for a byte payload.
@@ -277,105 +222,67 @@ impl Connection {
         data: &[u8],
         handles: impl IntoIterator<Item = OwnedHandle>,
     ) -> Result<(), TrySendError> {
-        message(self.0.raw(), msg_type, data, handles, true).map_err(nonblocking)
+        message(self.as_handle(), msg_type, data, handles, true).map_err(nonblocking)
     }
 
-    /// [`try_send_with`](Self::try_send_with) for a bare header.
+    /// [`try_send_with`](Self::try_send_with) for a bare message type.
     pub fn try_signal_with(
         &self,
         msg_type: u32,
         handles: impl IntoIterator<Item = OwnedHandle>,
     ) -> Result<(), TrySendError> {
-        message(self.0.raw(), msg_type, &[], handles, true).map_err(nonblocking)
+        message(self.as_handle(), msg_type, &[], handles, true).map_err(nonblocking)
     }
 
-    pub fn recv_header(&self) -> Result<IpcHeader, IpcError> {
-        recv_header(self.0.raw())
-    }
-
-    pub fn recv_payload<T: IpcPayload>(&self, header: &IpcHeader) -> Result<T, IpcError> {
-        recv_payload(self.0.raw(), header)
-    }
-
-    pub fn recv<T: IpcPayload>(&self) -> Result<(u32, T), IpcError> {
-        recv(self.0.raw())
-    }
-
-    /// The handles `header`'s frame announced, read after its payload: exactly
-    /// that many, or [`IpcError::Malformed`] with whatever arrived closed. The
-    /// kernel pins a frame's batch just past its bytes, so they are there.
-    pub fn recv_handles(
-        &self,
-        header: &IpcHeader,
-        out: &mut [RawHandle; syscall::MAX_TRANSFER_HANDLES],
-    ) -> Result<usize, IpcError> {
-        recv_handles(self.0.raw(), header, out)
-    }
-
-    /// The `N` handles a frame of this message type carries.
-    ///
-    /// `None` for any other count, with whatever did arrive closed rather than
-    /// leaked: a frame announcing another number speaks a protocol this
-    /// endpoint does not.
-    pub fn recv_handles_exact<const N: usize>(&self, header: &IpcHeader) -> Option<[RawHandle; N]> {
-        const { assert!(N <= syscall::MAX_TRANSFER_HANDLES) };
-        let mut batch = [toyos_abi::HANDLE_INVALID; syscall::MAX_TRANSFER_HANDLES];
-        let n = self.recv_handles(header, &mut batch).ok()?;
-        if n != N {
-            close_all(&batch[..n]);
-            return None;
-        }
-        Some(core::array::from_fn(|i| batch[i]))
-    }
-
-    pub fn recv_bytes(&self, header: &IpcHeader, buf: &mut [u8]) -> Result<usize, IpcError> {
-        recv_bytes(self.0.raw(), header, buf)
-    }
-
-    pub fn read_nonblock(&self, buf: &mut [u8]) -> Result<usize, SyscallError> {
-        self.0.read_nonblock(buf)
-    }
-
-    /// Raw bytes, for a connection a protocol has made a doorbell: never a
-    /// frame, which [`send`](Self::send) and its kin write whole.
-    pub fn write_nonblock(&self, buf: &[u8]) -> Result<usize, SyscallError> {
-        self.0.write_nonblock(buf)
+    /// Wait for the next frame and take its payload straight into
+    /// `payload`, with the handles it carried. For a caller that keeps the
+    /// payload in its own buffer: a [`FrameRx`] would be one more copy. A
+    /// payload longer than `payload` is [`IpcError::Malformed`] and stays
+    /// queued; otherwise it fails as [`FrameRx::recv`] does.
+    pub fn recv_into(&self, payload: &mut [u8]) -> Result<(Frame, Batch), IpcError> {
+        let mut msg_type = [0; TYPE_LEN];
+        receive(self.as_handle(), &mut msg_type, payload, false).map_err(Refused::blocking)
     }
 }
 
-// Free functions — used by consumers that hold raw handles (compositor, netstack).
-// Will become pub(crate) once all callers migrate to Connection methods.
+// Free functions, for a connection a caller holds by something other than a
+// `Connection`.
 
-pub fn send<T: IpcPayload>(handle: RawHandle, msg_type: u32, payload: &T) -> Result<(), IpcError> {
-    message(handle, msg_type, as_bytes(payload), none(), false).map_err(blocking)
+pub fn send<T: IpcPayload>(conn: BorrowedHandle<'_>, msg_type: u32, payload: &T) -> Result<(), IpcError> {
+    message(conn, msg_type, as_bytes(payload), none(), false).map_err(blocking)
 }
 
-pub fn signal(handle: RawHandle, msg_type: u32) -> Result<(), IpcError> {
-    message(handle, msg_type, &[], none(), false).map_err(blocking)
+pub fn signal(conn: BorrowedHandle<'_>, msg_type: u32) -> Result<(), IpcError> {
+    message(conn, msg_type, &[], none(), false).map_err(blocking)
 }
 
-pub fn send_bytes(handle: RawHandle, msg_type: u32, data: &[u8]) -> Result<(), IpcError> {
-    message(handle, msg_type, data, none(), false).map_err(blocking)
+pub fn send_bytes(conn: BorrowedHandle<'_>, msg_type: u32, data: &[u8]) -> Result<(), IpcError> {
+    message(conn, msg_type, data, none(), false).map_err(blocking)
+}
+
+/// [`Connection::signal_with`] on a raw handle.
+pub(crate) fn signal_with(conn: BorrowedHandle<'_>, msg_type: u32, handles: impl IntoIterator<Item = OwnedHandle>) -> Result<(), IpcError> {
+    message(conn, msg_type, &[], handles, false).map_err(blocking)
 }
 
 /// Send a framed payload without ever blocking, or refuse the whole frame.
 ///
 /// A server writing to a client it does not trust to read cannot use [`send`]:
-/// a blocking send parks in the kernel until the peer drains, which is a
-/// client deciding when the server runs again. This is the same frame, and the
-/// peer's backlog is an answer rather than a wait.
-pub fn try_send<T: IpcPayload>(handle: RawHandle, msg_type: u32, payload: &T) -> Result<(), TrySendError> {
-    message(handle, msg_type, as_bytes(payload), none(), true).map_err(nonblocking)
+/// a blocking send parks in the kernel until the peer takes its messages,
+/// which is a client deciding when the server runs again. This is the same
+/// frame, and the peer's backlog is an answer rather than a wait.
+pub fn try_send<T: IpcPayload>(conn: BorrowedHandle<'_>, msg_type: u32, payload: &T) -> Result<(), TrySendError> {
+    message(conn, msg_type, as_bytes(payload), none(), true).map_err(nonblocking)
 }
 
 /// [`signal`] without blocking.
-pub fn try_signal(handle: RawHandle, msg_type: u32) -> Result<(), TrySendError> {
-    message(handle, msg_type, &[], none(), true).map_err(nonblocking)
+pub fn try_signal(conn: BorrowedHandle<'_>, msg_type: u32) -> Result<(), TrySendError> {
+    message(conn, msg_type, &[], none(), true).map_err(nonblocking)
 }
 
 /// [`send_bytes`] without blocking.
-pub fn try_send_bytes(handle: RawHandle, msg_type: u32, data: &[u8]) -> Result<(), TrySendError> {
-    message(handle, msg_type, data, none(), true).map_err(nonblocking)
+pub fn try_send_bytes(conn: BorrowedHandle<'_>, msg_type: u32, data: &[u8]) -> Result<(), TrySendError> {
+    message(conn, msg_type, data, none(), true).map_err(nonblocking)
 }
 
 fn none() -> core::iter::Empty<OwnedHandle> {
@@ -403,38 +310,49 @@ fn nonblocking(e: Unsent) -> TrySendError {
     }
 }
 
-/// The one way a frame leaves this endpoint: its header and `payload` in one
+/// `msg_type` and `payload` laid out in `frame`, answering the bytes the
+/// kernel sends, or `None` for a payload past [`MAX_FRAME_LEN`]. Only those
+/// bytes are written: nothing else of the buffer is read.
+fn framed<'a>(
+    frame: &'a mut core::mem::MaybeUninit<Wire<[u8; MAX_FRAME_LEN as usize]>>,
+    msg_type: u32,
+    payload: &[u8],
+) -> Option<&'a [u8]> {
+    if payload.len() > MAX_FRAME_LEN as usize {
+        return None;
+    }
+    let base = frame.as_mut_ptr() as *mut u8;
+    // SAFETY: the buffer holds `TYPE_LEN + MAX_FRAME_LEN` bytes, the payload
+    // fits behind the type, and the slice covers only the bytes written here.
+    unsafe {
+        core::ptr::copy_nonoverlapping(msg_type.to_ne_bytes().as_ptr(), base, TYPE_LEN);
+        core::ptr::copy_nonoverlapping(payload.as_ptr(), base.add(TYPE_LEN), payload.len());
+        Some(core::slice::from_raw_parts(base, TYPE_LEN + payload.len()))
+    }
+}
+
+/// The one way a frame leaves this endpoint: its type and `payload` in one
 /// buffer, and `handles`, handed to the kernel as one message. Every handle is
 /// consumed whatever the answer.
 fn message<H: AsHandle>(
-    handle: RawHandle,
+    conn: BorrowedHandle<'_>,
     msg_type: u32,
     payload: &[u8],
     handles: impl IntoIterator<Item = H>,
     nonblock: bool,
 ) -> Result<(), Unsent> {
-    let mut too_large = false;
-    let sent = move_batch(handles, |batch| {
-        let Ok(header) = IpcHeader::frame(msg_type, payload.len(), batch.len()) else {
-            too_large = true;
-            return Err(SyscallError::InvalidArgument);
-        };
-        let send = |frame: &mut [u8]| {
-            let end = IpcHeader::WIRE_SIZE + payload.len();
-            frame[..IpcHeader::WIRE_SIZE].copy_from_slice(&header.to_wire());
-            frame[IpcHeader::WIRE_SIZE..end].copy_from_slice(payload);
-            syscall::message_send(handle, &frame[..end], batch, nonblock)
-        };
-        match payload.len() <= SMALL_PAYLOAD {
-            true => send(&mut [0u8; IpcHeader::WIRE_SIZE + SMALL_PAYLOAD]),
-            false => send(&mut [0u8; IpcHeader::WIRE_SIZE + MAX_FRAME_LEN as usize]),
-        }
-    });
-    match sent {
-        Ok(()) => Ok(()),
-        Err(_) if too_large => Err(Unsent::TooLarge),
-        Err(e) => Err(Unsent::Kernel(e)),
-    }
+    let mut frame = core::mem::MaybeUninit::uninit();
+    let Some(bytes) = framed(&mut frame, msg_type, payload) else {
+        // Consumed all the same.
+        handles.into_iter().for_each(drop);
+        return Err(Unsent::TooLarge);
+    };
+    move_batch(handles, |batch| {
+        // SAFETY: `move_batch` hands over only handles it was given to
+        // consume, and forgets them once they are sent.
+        unsafe { syscall::message_send(conn.raw(), bytes, batch, nonblock) }
+    })
+    .map_err(Unsent::Kernel)
 }
 
 /// Hand `handles` to `send` as one batch, consuming every one: what `send`
@@ -451,7 +369,7 @@ fn move_batch<H: AsHandle>(
     }
     let mut raw = [toyos_abi::HANDLE_INVALID; syscall::MAX_TRANSFER_HANDLES];
     for (out, handle) in raw.iter_mut().zip(batch.iter().flatten()) {
-        *out = handle.as_handle();
+        *out = handle.as_handle().raw();
     }
     send(&raw[..count])?;
     #[expect(clippy::disallowed_methods, reason = "taken: the numbers are no longer this process's to close")]
@@ -459,146 +377,61 @@ fn move_batch<H: AsHandle>(
     Ok(())
 }
 
-pub fn recv_header(handle: RawHandle) -> Result<IpcHeader, IpcError> {
-    let mut bytes = [0u8; IpcHeader::WIRE_SIZE];
-    read_exact(handle, &mut bytes)?;
-    IpcHeader::decode(&bytes)
-}
-
-/// The frame's payload as one `T`. A payload of any other length is read
-/// past, so the connection stays framed, and refused [`IpcError::Malformed`].
-pub fn recv_payload<T: IpcPayload>(handle: RawHandle, header: &IpcHeader) -> Result<T, IpcError> {
-    if let Err(e) = exactly::<T>(header.len as usize) {
-        skip(handle, header.len as usize)?;
-        return Err(e);
-    }
-    let mut val = core::mem::MaybeUninit::<T>::uninit();
-    // SAFETY: the slice covers exactly the `T` being filled, and `IpcPayload`
-    // promises every bit pattern `read_exact` can write is a valid `T`.
-    read_exact(handle, unsafe {
-        core::slice::from_raw_parts_mut(val.as_mut_ptr() as *mut u8, core::mem::size_of::<T>())
-    })?;
-    Ok(unsafe { val.assume_init() })
-}
-
-/// Receive header + typed payload in one call, for a frame that carries no
-/// handles: one that does is [`IpcError::Malformed`], its batch closed.
-pub fn recv<T: IpcPayload>(handle: RawHandle) -> Result<(u32, T), IpcError> {
-    let header = recv_header(handle)?;
-    let payload = recv_payload(handle, &header)?;
-    if header.handles() != 0 {
-        let mut stray = [toyos_abi::HANDLE_INVALID; syscall::MAX_TRANSFER_HANDLES];
-        let _ = recv_handles(handle, &header, &mut stray).map(|n| close_all(&stray[..n]));
-        return Err(IpcError::Malformed);
-    }
-    Ok((header.msg_type, payload))
-}
-
-/// Receive raw bytes. Returns the number of valid bytes read.
-pub fn recv_bytes(handle: RawHandle, header: &IpcHeader, buf: &mut [u8]) -> Result<usize, IpcError> {
-    let count = (header.len as usize).min(buf.len());
-    if count > 0 {
-        read_exact(handle, &mut buf[..count])?;
-    }
-    skip(handle, header.len as usize - count)?;
-    Ok(count)
-}
-
-/// The batch `header` announced, taken where the kernel pinned it: exactly
-/// [`IpcHeader::handles`] of them, or [`IpcError::Malformed`] with any that
-/// arrived closed.
-pub fn recv_handles(
-    handle: RawHandle,
-    header: &IpcHeader,
-    out: &mut [RawHandle; syscall::MAX_TRANSFER_HANDLES],
-) -> Result<usize, IpcError> {
-    let want = header.handles();
-    if want == 0 {
-        return Ok(0);
-    }
-    let n = syscall::handle_recv(handle, out).map_err(IpcError::Syscall)?;
-    if n != want {
-        close_all(&out[..n]);
-        return Err(IpcError::Malformed);
-    }
-    Ok(n)
-}
-
-fn close_all(handles: &[RawHandle]) {
-    for h in handles {
-        syscall::close(*h);
-    }
-}
-
-/// The memory twin of [`recv_payload`], for a reader that already holds the
-/// bytes.
-///
-/// Buffering a whole frame before acting on it is what lets a server stay
-/// non-blocking against a peer that stops mid-message, and a buffered payload
-/// has no handle left to read it from.
+/// One payload as a `T`, for a reader holding a frame's bytes
+/// ([`FrameRx::payload`]): exactly one `T`, or [`IpcError::Malformed`].
 pub fn decode_payload<T: IpcPayload>(bytes: &[u8]) -> Result<T, IpcError> {
-    exactly::<T>(bytes.len())?;
-    let mut val = core::mem::MaybeUninit::<T>::uninit();
-    // SAFETY: the copy fills exactly the `T` being built from a source that
-    // long, and `IpcPayload` promises every bit pattern is a valid `T` — the
-    // same contract `recv_payload` reads on.
-    unsafe {
-        core::ptr::copy_nonoverlapping(bytes.as_ptr(), val.as_mut_ptr() as *mut u8, bytes.len());
-        Ok(val.assume_init())
+    if bytes.len() != core::mem::size_of::<T>() {
+        return Err(IpcError::Malformed);
     }
-}
-
-/// A typed payload is exactly one `T`: a shorter one is not a `T`, and the
-/// bytes past a longer one are no protocol's.
-fn exactly<T: IpcPayload>(len: usize) -> Result<(), IpcError> {
-    if len == core::mem::size_of::<T>() { Ok(()) } else { Err(IpcError::Malformed) }
+    // SAFETY: the source is exactly one `T` long, and `IpcPayload` promises
+    // every bit pattern is a valid `T`.
+    Ok(unsafe { core::ptr::read_unaligned(bytes.as_ptr() as *const T) })
 }
 
 /// What one [`FrameRx::pump`] found.
 #[derive(Clone, Copy, Debug)]
 pub enum RxStep {
-    /// The handle has nothing more right now.
+    /// The connection has nothing more right now.
     Idle,
-    /// A whole frame is buffered; its payload is [`FrameRx::payload`] and its
+    /// A whole frame was taken; its payload is [`FrameRx::payload`] and its
     /// `handles` are [`FrameRx::take_handles`]'s.
     Frame { msg_type: u32, payload_len: usize, handles: usize },
     /// The peer hung up, or its handle is gone.
     Eof,
-    /// The peer broke framing: a length past [`MAX_FRAME_LEN`] or the
-    /// receiver's `MAX`, a count past the bound, a batch other than its frame
-    /// announced, or one no frame announced. Nothing after it can be located,
-    /// so there is nothing to resynchronise to.
+    /// A frame this receiver cannot take: too short for a message type, or
+    /// larger than its `MAX` or carrying handles this process's table has no
+    /// room for, either of which stays queued in front of every later frame.
+    /// The peer is dropped.
     Malformed,
 }
 
-/// One peer's inbound framing, over non-blocking reads only.
-///
-/// **A server never reads a client with a blocking read.** That is the whole
-/// point of this type: [`recv_header`] and [`recv_payload`] park the caller
-/// until the peer sends the bytes it promised, which hands a client the
-/// decision of when the server runs again. Here a peer that stops halfway
-/// through a frame costs a buffer instead of the event loop.
-///
-/// `MAX` is the widest payload the caller's protocol carries. A frame
-/// declaring more is [`RxStep::Malformed`] at its header, so a peer cannot
-/// make the server hold what it will not look at, and no frame arrives cut
-/// short. A protocol whose messages are all bare headers takes `MAX = 0`.
-///
-/// **A frame's handles come with it.** They are taken when the frame is, and
-/// what the caller does not take with [`take_handles`](Self::take_handles) is
-/// closed before the next frame is read or when this is dropped.
-pub struct FrameRx<const MAX: usize> {
-    header: [u8; IpcHeader::WIRE_SIZE],
-    buf: [u8; MAX],
-    len: usize,
-    state: RxState,
-    held: [RawHandle; syscall::MAX_TRANSFER_HANDLES],
-    held_len: usize,
+/// A frame [`FrameRx::recv`] took.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Frame {
+    pub msg_type: u32,
+    pub payload_len: usize,
+    pub handles: usize,
 }
 
-enum RxState {
-    Header,
-    Payload { msg_type: u32, len: usize, handles: usize },
+/// One peer's inbound frames: a buffer for the widest payload the caller's
+/// protocol carries, `MAX`, and the handles the last frame brought.
+///
+/// **A server never reads a client with a blocking receive** — that hands a
+/// client the decision of when the server runs again — so it [`pump`]s,
+/// which never blocks. A client waiting on its server's answer [`recv`]s.
+/// A frame wider than `MAX` is refused whole and never cut short. A protocol
+/// whose messages are all bare types takes `MAX = 0`.
+///
+/// **A frame's handles come with it.** What the caller does not take with
+/// [`take_handles`](Self::take_handles) is closed before the next frame is
+/// taken or when this is dropped.
+///
+/// [`pump`]: Self::pump
+/// [`recv`]: Self::recv
+pub struct FrameRx<const MAX: usize> {
+    msg_type: [u8; TYPE_LEN],
+    payload: [u8; MAX],
+    held: Batch,
 }
 
 impl<const MAX: usize> Default for FrameRx<MAX> {
@@ -607,187 +440,160 @@ impl<const MAX: usize> Default for FrameRx<MAX> {
     }
 }
 
-impl<const MAX: usize> Drop for FrameRx<MAX> {
-    fn drop(&mut self) {
-        self.release();
+/// Why a receive took no frame.
+enum Refused {
+    Malformed,
+    Kernel(SyscallError),
+}
+
+impl Refused {
+    fn blocking(self) -> IpcError {
+        match self {
+            // A frame larger than the receiver holds, or with more handles,
+            // is the peer's: it stays queued, as `step` says.
+            Refused::Malformed | Refused::Kernel(SyscallError::InvalidArgument) => IpcError::Malformed,
+            Refused::Kernel(SyscallError::Gone) => IpcError::Disconnected,
+            // The rest are this side's, a table without room for the frame's
+            // handles (`ResourceExhausted`) among them.
+            Refused::Kernel(e) => IpcError::Syscall(e),
+        }
     }
 }
 
 impl<const MAX: usize> FrameRx<MAX> {
     pub const fn new() -> Self {
-        Self {
-            header: [0; IpcHeader::WIRE_SIZE],
-            buf: [0; MAX],
-            len: 0,
-            state: RxState::Header,
-            held: [toyos_abi::HANDLE_INVALID; syscall::MAX_TRANSFER_HANDLES],
-            held_len: 0,
-        }
+        Self { msg_type: [0; TYPE_LEN], payload: [0; MAX], held: Batch::EMPTY }
     }
 
     /// The payload of the frame the last [`RxStep::Frame`] announced.
     pub fn payload(&self, len: usize) -> &[u8] {
-        &self.buf[..len]
+        &self.payload[..len]
     }
 
     /// The handles the last frame carried, now the caller's to claim.
     pub fn take_batch(&mut self) -> Batch {
-        let batch = Batch { handles: self.held, len: self.held_len };
-        self.held_len = 0;
-        batch
+        core::mem::replace(&mut self.held, Batch::EMPTY)
     }
 
     /// The `N` handles the last frame carried, now the caller's; `None`, with
     /// them closed, when it carried another number.
-    pub fn take_handles<const N: usize>(&mut self) -> Option<[RawHandle; N]> {
+    pub fn take_handles<const N: usize>(&mut self) -> Option<[OwnedHandle; N]> {
         self.take_batch().exact::<N>()
     }
 
-    fn release(&mut self) {
-        close_all(&self.held[..self.held_len]);
-        self.held_len = 0;
+    /// Take the next frame if one is queued, never waiting: at most one per
+    /// call, so a peer that always has another ready cannot keep a server's
+    /// other peers from being served.
+    pub fn pump(&mut self, conn: &impl AsHandle) -> RxStep {
+        step(self.take(conn.as_handle(), true))
     }
 
-    /// Read what is there, and report the first thing that happened.
-    ///
-    /// At most one frame per call: the caller has other peers to serve, and a
-    /// peer that always has another frame ready must not be able to keep the
-    /// rest from being served.
-    pub fn pump(&mut self, conn: &Connection) -> RxStep {
-        self.release();
-        loop {
-            match self.state {
-                RxState::Header => {
-                    match fill(conn, &mut self.header, &mut self.len) {
-                        Fill::Idle => return RxStep::Idle,
-                        Fill::Eof => return RxStep::Eof,
-                        Fill::Malformed => return RxStep::Malformed,
-                        Fill::Filled => {}
-                    }
-                    let Some((msg_type, len, handles)) = Self::announced(&self.header) else {
-                        return RxStep::Malformed;
-                    };
-                    self.len = 0;
-                    self.state = RxState::Payload { msg_type, len, handles };
-                }
-                RxState::Payload { msg_type, len, handles } => {
-                    match fill(conn, &mut self.buf[..len], &mut self.len) {
-                        Fill::Idle => return RxStep::Idle,
-                        Fill::Eof => return RxStep::Eof,
-                        Fill::Malformed => return RxStep::Malformed,
-                        Fill::Filled => {}
-                    }
-                    self.len = 0;
-                    self.state = RxState::Header;
-                    if handles > 0 {
-                        // Pinned just past the bytes now read, so it is there or never sent.
-                        let n = syscall::handle_recv(conn.as_handle(), &mut self.held).unwrap_or(0);
-                        self.held_len = n;
-                        if n != handles {
-                            return RxStep::Malformed;
-                        }
-                    }
-                    return RxStep::Frame { msg_type, payload_len: len, handles };
-                }
-            }
-        }
+    /// Wait for the next frame: [`IpcError::Disconnected`] once the peer has
+    /// gone with nothing left, and [`IpcError::Malformed`] for one this
+    /// receiver cannot take, which stays queued.
+    pub fn recv(&mut self, conn: &impl AsHandle) -> Result<Frame, IpcError> {
+        self.take(conn.as_handle(), false).map_err(Refused::blocking)
     }
 
-    /// The message type, payload length and handle count `header` announces,
-    /// or `None` for a frame this receiver cannot hold whole.
-    fn announced(header: &[u8; IpcHeader::WIRE_SIZE]) -> Option<(u32, usize, usize)> {
-        let header = IpcHeader::decode(header).ok()?;
-        let len = header.len() as usize;
-        (len <= MAX).then_some((header.msg_type, len, header.handles()))
+    fn take(&mut self, conn: BorrowedHandle<'_>, nonblock: bool) -> Result<Frame, Refused> {
+        self.held = Batch::EMPTY;
+        let (frame, batch) = receive(conn, &mut self.msg_type, &mut self.payload, nonblock)?;
+        self.held = batch;
+        Ok(frame)
     }
 }
 
-/// The handles one frame carried, owned: what nobody claims is closed when
-/// this drops.
+/// One frame off `conn`: its type into `msg_type` and its payload into
+/// `payload`, straight from the kernel, and the handles it carried.
+fn receive(
+    conn: BorrowedHandle<'_>,
+    msg_type: &mut [u8; TYPE_LEN],
+    payload: &mut [u8],
+    nonblock: bool,
+) -> Result<(Frame, Batch), Refused> {
+    let mut handles = [toyos_abi::HANDLE_INVALID; syscall::MAX_TRANSFER_HANDLES];
+    let got = syscall::message_recv(conn.raw(), msg_type, payload, &mut handles, nonblock);
+    taken(got, *msg_type, handles)
+}
+
+/// A receive's answer, the handles it installed now the caller's.
+fn taken(
+    got: Result<Received, SyscallError>,
+    msg_type: [u8; TYPE_LEN],
+    handles: [RawHandle; syscall::MAX_TRANSFER_HANDLES],
+) -> Result<(Frame, Batch), Refused> {
+    let got = got.map_err(Refused::Kernel)?;
+    // The kernel installed each number in this process's table for this
+    // call, so this batch is the only thing that answers for them: dropped
+    // with a malformed frame, it closes them.
+    let batch = Batch { handles, next: 0, len: got.handles };
+    let payload_len = got.len.checked_sub(TYPE_LEN).ok_or(Refused::Malformed)?;
+    Ok((Frame { msg_type: u32::from_ne_bytes(msg_type), payload_len, handles: got.handles }, batch))
+}
+
+/// What a non-blocking receive's answer is to a server.
+fn step(taken: Result<Frame, Refused>) -> RxStep {
+    match taken {
+        Ok(Frame { msg_type, payload_len, handles }) => RxStep::Frame { msg_type, payload_len, handles },
+        Err(Refused::Kernel(SyscallError::WouldBlock)) => RxStep::Idle,
+        Err(Refused::Malformed | Refused::Kernel(SyscallError::InvalidArgument | SyscallError::ResourceExhausted)) => {
+            RxStep::Malformed
+        }
+        // The handle itself is gone, which is the same hang-up seen from
+        // the other side of the same race.
+        Err(Refused::Kernel(_)) => RxStep::Eof,
+    }
+}
+
+/// The handles one frame carried, owned, handed out one at a time: what
+/// nobody takes is closed when this drops.
 pub struct Batch {
     handles: [RawHandle; syscall::MAX_TRANSFER_HANDLES],
+    next: usize,
     len: usize,
 }
 
 impl Batch {
-    /// Exactly `N` handles, now the caller's; `None`, with them closed, for
-    /// any other number.
-    pub fn exact<const N: usize>(mut self) -> Option<[RawHandle; N]> {
-        const { assert!(N <= syscall::MAX_TRANSFER_HANDLES) };
-        if self.len != N {
-            return None;
-        }
-        self.len = 0;
-        Some(core::array::from_fn(|i| self.handles[i]))
+    const EMPTY: Batch = Batch { handles: [toyos_abi::HANDLE_INVALID; syscall::MAX_TRANSFER_HANDLES], next: 0, len: 0 };
+
+    /// The handles not yet taken.
+    pub fn len(&self) -> usize {
+        self.len - self.next
     }
 
-    /// Every handle, as numbers now the caller's to own and close.
-    pub fn into_raw(mut self) -> ([RawHandle; syscall::MAX_TRANSFER_HANDLES], usize) {
-        let len = core::mem::take(&mut self.len);
-        (self.handles, len)
+    pub fn is_empty(&self) -> bool {
+        self.len() == 0
+    }
+
+    /// Exactly `N` handles; `None`, with them closed, for any other number.
+    pub fn exact<const N: usize>(mut self) -> Option<[OwnedHandle; N]> {
+        const { assert!(N <= syscall::MAX_TRANSFER_HANDLES) };
+        if self.len() != N {
+            return None;
+        }
+        Some(core::array::from_fn(|_| self.next().expect("counted above")))
+    }
+}
+
+impl Iterator for Batch {
+    type Item = OwnedHandle;
+
+    fn next(&mut self) -> Option<OwnedHandle> {
+        let raw = *self.handles[..self.len].get(self.next)?;
+        self.next += 1;
+        Some(OwnedHandle(raw))
     }
 }
 
 impl Drop for Batch {
     fn drop(&mut self) {
-        close_all(&self.handles[..self.len]);
+        self.by_ref().for_each(drop);
     }
 }
 
-enum Fill {
-    Filled,
-    Idle,
-    Eof,
-    /// A batch no frame announced sits where the next byte would be.
-    Malformed,
-}
-
-/// Fill `buf` from `*len` onwards without blocking, carrying `*len` forward so
-/// the next call resumes where this one stopped.
-fn fill(conn: &Connection, buf: &mut [u8], len: &mut usize) -> Fill {
-    while *len < buf.len() {
-        match conn.read_nonblock(&mut buf[*len..]) {
-            Ok(0) => return Fill::Eof,
-            Ok(n) => *len += n,
-            Err(SyscallError::WouldBlock) => return Fill::Idle,
-            Err(SyscallError::HandlesPending) => return Fill::Malformed,
-            // The handle itself is gone, which is the same hang-up seen from the
-            // other side of the same race.
-            Err(_) => return Fill::Eof,
-        }
-    }
-    Fill::Filled
-}
-
-fn as_bytes<T: IpcPayload>(val: &T) -> &[u8] {
+/// A payload's bytes, as a frame carries them.
+pub(crate) fn as_bytes<T: IpcPayload>(val: &T) -> &[u8] {
     unsafe { core::slice::from_raw_parts(val as *const T as *const u8, core::mem::size_of::<T>()) }
-}
-
-fn skip(handle: RawHandle, mut remaining: usize) -> Result<(), IpcError> {
-    let mut buf = [0u8; 128];
-    while remaining > 0 {
-        let chunk = remaining.min(buf.len());
-        read_exact(handle, &mut buf[..chunk])?;
-        remaining -= chunk;
-    }
-    Ok(())
-}
-
-/// Fill `buf` with blocking reads. A batch no frame announced where the next
-/// byte would be is the peer breaking framing.
-fn read_exact(handle: RawHandle, buf: &mut [u8]) -> Result<(), IpcError> {
-    let mut offset = 0;
-    while offset < buf.len() {
-        let n = syscall::read(handle, &mut buf[offset..]).map_err(|e| match e {
-            SyscallError::HandlesPending => IpcError::Malformed,
-            e => IpcError::Syscall(e),
-        })?;
-        if n == 0 {
-            return Err(IpcError::Disconnected);
-        }
-        offset += n;
-    }
-    Ok(())
 }
 
 #[cfg(test)]
@@ -804,7 +610,8 @@ mod tests {
     }
 
     impl AsHandle for Probe {
-        fn as_handle(&self) -> RawHandle { self.raw }
+        // SAFETY: a number no syscall is made on: these tests' sends are closures.
+        fn as_handle(&self) -> BorrowedHandle<'_> { unsafe { BorrowedHandle::borrow_raw(self.raw) } }
     }
 
     impl Drop for Probe {
@@ -829,36 +636,85 @@ mod tests {
         assert!(matches!(decode_payload::<[u32; 2]>(&[]), Err(IpcError::Malformed)));
     }
 
-    fn header(len: u32, handles: u32) -> [u8; IpcHeader::WIRE_SIZE] {
-        let mut bytes = [0u8; IpcHeader::WIRE_SIZE];
-        bytes[..4].copy_from_slice(&7u32.to_ne_bytes());
-        bytes[4..8].copy_from_slice(&len.to_ne_bytes());
-        bytes[8..].copy_from_slice(&handles.to_ne_bytes());
-        bytes
+    /// A frame is its type's four bytes and then its payload, and nothing
+    /// else of the buffer goes to the kernel.
+    #[test]
+    fn a_frame_is_its_type_then_exactly_its_payload() {
+        let mut frame = core::mem::MaybeUninit::uninit();
+        let bytes = framed(&mut frame, 0x0102_0304, &[9, 8, 7]).unwrap();
+        let mut want = 0x0102_0304u32.to_ne_bytes().to_vec();
+        want.extend([9, 8, 7]);
+        assert_eq!(bytes, &want[..]);
+        let mut frame = core::mem::MaybeUninit::uninit();
+        assert_eq!(framed(&mut frame, 5, &[]).unwrap(), &5u32.to_ne_bytes());
     }
 
-    /// A frame is held whole up to the receiver's `MAX` and refused at its
-    /// header past it, never cut down to what fits.
+    /// The largest payload is framed, and one byte more is refused before
+    /// the kernel is asked.
     #[test]
-    fn a_frame_past_the_receivers_max_is_refused_at_its_header() {
-        assert_eq!(FrameRx::<8>::announced(&header(0, 0)), Some((7, 0, 0)));
-        assert_eq!(FrameRx::<8>::announced(&header(8, 0)), Some((7, 8, 0)));
-        assert_eq!(FrameRx::<8>::announced(&header(9, 0)), None);
-        assert_eq!(FrameRx::<0>::announced(&header(1, 0)), None);
-        assert_eq!(FrameRx::<{ MAX_FRAME_LEN as usize + 1 }>::announced(&header(MAX_FRAME_LEN + 1, 0)), None);
+    fn a_payload_past_the_frame_bound_is_refused() {
+        let most = vec![0u8; MAX_FRAME_LEN as usize];
+        let mut frame = core::mem::MaybeUninit::uninit();
+        assert_eq!(framed(&mut frame, 1, &most).map(<[u8]>::len), Some(TYPE_LEN + most.len()));
+        let over = vec![0u8; MAX_FRAME_LEN as usize + 1];
+        let mut frame = core::mem::MaybeUninit::uninit();
+        assert!(framed(&mut frame, 1, &over).is_none());
     }
 
-    /// A frame announces at most the batch one message can carry: one more
-    /// is refused at its header, as the kernel would refuse the send.
+    /// A refused frame consumes its handles all the same.
     #[test]
-    fn a_frame_announcing_more_handles_than_a_message_carries_is_refused() {
-        let most = syscall::MAX_TRANSFER_HANDLES as u32;
-        assert_eq!(FrameRx::<8>::announced(&header(4, most)), Some((7, 4, most as usize)));
-        assert_eq!(FrameRx::<8>::announced(&header(4, most + 1)), None);
-        assert!(matches!(IpcHeader::frame(7, 0, most as usize + 1), Err(IpcError::TooLarge)));
-        let built = IpcHeader::frame(7, 3, 2).unwrap().to_wire();
-        let back = IpcHeader::decode(&built).unwrap();
-        assert_eq!((back.msg_type, back.len(), back.handles()), (7, 3, 2));
+    fn a_payload_too_large_closes_its_handles() {
+        let closed = Rc::default();
+        let over = vec![0u8; MAX_FRAME_LEN as usize + 1];
+        // SAFETY: a number no syscall is made on: the frame is refused first.
+        let conn = unsafe { BorrowedHandle::borrow_raw(RawHandle(77)) };
+        assert!(matches!(message(conn, 1, &over, probes(2, &closed), false), Err(Unsent::TooLarge)));
+        assert_eq!(*closed.borrow(), [1, 2]);
+    }
+
+    /// A message is its type and then its payload: one too short for a type
+    /// is no frame, and the type is read from the front.
+    #[test]
+    fn a_message_shorter_than_a_type_is_malformed() {
+        let none = [toyos_abi::HANDLE_INVALID; syscall::MAX_TRANSFER_HANDLES];
+        let seven = 7u32.to_ne_bytes();
+        assert!(matches!(taken(Ok(Received { len: TYPE_LEN - 1, handles: 0 }), seven, none), Err(Refused::Malformed)));
+        let (frame, _) = taken(Ok(Received { len: TYPE_LEN, handles: 0 }), seven, none).ok().unwrap();
+        assert_eq!(frame, Frame { msg_type: 7, payload_len: 0, handles: 0 });
+        let (frame, _) = taken(Ok(Received { len: TYPE_LEN + 8, handles: 0 }), seven, none).ok().unwrap();
+        assert_eq!(frame.payload_len, 8);
+    }
+
+    /// The kernel's refusals reach a server as the step it acts on.
+    #[test]
+    fn a_receive_refused_is_the_step_a_server_acts_on() {
+        let none = [toyos_abi::HANDLE_INVALID; syscall::MAX_TRANSFER_HANDLES];
+        for (e, idle, eof) in [
+            (SyscallError::WouldBlock, true, false),
+            (SyscallError::Gone, false, true),
+            (SyscallError::InvalidArgument, false, false),
+            (SyscallError::ResourceExhausted, false, false),
+        ] {
+            let step = step(taken(Err(e), [0; TYPE_LEN], none).map(|(frame, _)| frame));
+            assert_eq!(matches!(step, RxStep::Idle), idle, "{e:?} answered {step:?}");
+            assert_eq!(matches!(step, RxStep::Eof), eof, "{e:?} answered {step:?}");
+        }
+    }
+
+    /// The same refusals reach a waiting client as the error it acts on: a
+    /// frame too large for it is the peer's protocol broken, never a
+    /// kernel fault.
+    #[test]
+    fn a_receive_refused_is_the_error_a_client_acts_on() {
+        let none = [toyos_abi::HANDLE_INVALID; syscall::MAX_TRANSFER_HANDLES];
+        let blocking = |got| taken(got, [0; TYPE_LEN], none).map(|(frame, _)| frame).map_err(Refused::blocking);
+        assert!(matches!(blocking(Err(SyscallError::InvalidArgument)), Err(IpcError::Malformed)));
+        assert!(matches!(blocking(Ok(Received { len: TYPE_LEN - 1, handles: 0 })), Err(IpcError::Malformed)));
+        assert!(matches!(blocking(Err(SyscallError::Gone)), Err(IpcError::Disconnected)));
+        assert!(matches!(
+            blocking(Err(SyscallError::ResourceExhausted)),
+            Err(IpcError::Syscall(SyscallError::ResourceExhausted))
+        ));
     }
 
     /// The kernel's refusal leaves every handle at its own number, and the

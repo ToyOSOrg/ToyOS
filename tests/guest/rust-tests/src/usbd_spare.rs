@@ -1,6 +1,6 @@
 //! `usbd_spare`'s arms, one binary each for a metal job and all of them
-//! behind one for QEMU. The xHCI controller no `drives` row of the image
-//! names, claimed by this job and driven by `/system/bin/usbd`, which it
+//! behind one for QEMU. The xHCI controller the image's `drives` rows leave,
+//! claimed by this job and driven by `/system/bin/usbd`, which it
 //! starts itself so it can end it: this job holds the claim, the port usbd
 //! answers `inspect` on, and usbd's process.
 //!
@@ -46,11 +46,12 @@ pub fn cap() -> SysCap {
     Endowments::get().take(SYSCAP_LABEL).expect("test-runner endows a device-minting capability")
 }
 
-/// The controllers a boot of this job leaves to a claim: QEMU's `qemu-xhci`
-/// on the guest profiles, the T14's Type-C controller, and the AMD bench's
-/// xHCI, whose id its other controller shares (`claim` takes the one the
-/// kernel left). A machine has one of them.
-const SPARES: [PciId; 3] = [
+/// The controllers a boot of this job can leave to a claim: QEMU's
+/// `qemu-xhci` on the guest profiles, either of the T14's two and the AMD
+/// bench's, whose two controllers share an id. `claim` takes the first of them
+/// nobody holds.
+const SPARES: [PciId; 4] = [
+    PciId { vendor: 0x8086, device: 0xa0ed },
     PciId { vendor: 0x1b36, device: 0x000d },
     PciId { vendor: 0x8086, device: 0x9a13 },
     PciId { vendor: 0x1022, device: 0x1639 },
@@ -72,7 +73,7 @@ const PAST_THE_GRANT: u64 = 1 << 30;
 /// card the kernel does not drive, or, on a kernel that drives every one,
 /// the only one there is.
 fn claim(cap: &SysCap) -> (PciId, Result<PciDev, SyscallError>) {
-    let pci = spare::of(cap, &SPARES).expect("usbd_spare: no one spare controller on this machine");
+    let pci = spare::of(cap, &SPARES).expect("usbd_spare: no spare controller on this machine");
     (PciId { vendor: pci.vendor, device: pci.device }, cap.claim_function(pci.arrival))
 }
 
@@ -92,13 +93,11 @@ impl Usbd {
     fn start(id: PciId, dev: PciDev) -> Self {
         let (acceptor, conn) = toyos::port::create().expect("usbd_spare: a port");
         let mut child = Command::new(USBD)
-            .endow(&format!("{DEV_PREFIX}{}", spelled(id)), toyos::AsHandle::as_handle(&dev).0)
-            .endow(&format!("{SERVE_PREFIX}{}", USB.port), acceptor.into_raw().0)
+            .endow(&format!("{DEV_PREFIX}{}", spelled(id)), dev.into())
+            .endow(&format!("{SERVE_PREFIX}{}", USB.port), acceptor.into())
             .stdout(Stdio::piped())
             .spawn()
             .expect("usbd_spare: spawn usbd");
-        // Moved: the spawn holds them now.
-        std::mem::forget(dev);
         let out = BufReader::new(child.stdout.take().expect("usbd's piped stdout"));
         let (tx, said) = mpsc::channel();
         std::thread::spawn(move || {
@@ -144,11 +143,10 @@ impl Usbd {
         let ns = toyos::namespace::build().add(USB.port, &self.conn).finish().expect("usbd_spare: a namespace");
         let conn: Connection = ns.open(USB.port).expect("usbd_spare: a connection to usbd");
         conn.signal(MSG_INSPECT).expect("usbd_spare: the request");
-        let header = conn.recv_header().expect("usbd_spare: usbd's answer");
-        assert_eq!(header.msg_type, MSG_SNAPSHOT, "usbd_spare: usbd answered something that is not a snapshot");
-        let mut buf = vec![0u8; header.len() as usize];
-        let n = conn.recv_bytes(&header, &mut buf).expect("usbd_spare: the snapshot's bytes");
-        let snapshot = toyos_inspect::decode(&buf[..n], USB).expect("usbd_spare: a snapshot for `usb`");
+        let mut rx = Box::new(toyos::ipc::FrameRx::<{ toyos::ipc::MAX_FRAME_LEN as usize }>::new());
+        let frame = rx.recv(&conn).expect("usbd_spare: usbd's answer");
+        assert_eq!(frame.msg_type, MSG_SNAPSHOT, "usbd_spare: usbd answered something that is not a snapshot");
+        let snapshot = toyos_inspect::decode(rx.payload(frame.payload_len), USB).expect("usbd_spare: a snapshot for `usb`");
         for (path, value) in &snapshot {
             println!("usbd_spare: {when}: {}", toyos_inspect::line(path, value));
         }
@@ -239,8 +237,8 @@ pub fn fault(cap: &SysCap) {
 const BOOT: [PciId; 1] = [PciId { vendor: 0x1033, device: 0x0194 }];
 
 pub fn refused(cap: &SysCap) {
-    let boot = spare::one(cap, &BOOT, toyos_abi::inventory::Driven::Claimed)
-        .expect("usbd_spare: no boot controller a process holds");
+    let held: Vec<_> = spare::all(cap, &BOOT).into_iter().filter(|pci| pci.driven == toyos_abi::inventory::Driven::Claimed).collect();
+    let [boot] = held[..] else { panic!("usbd_spare: not one boot controller a process holds: {} are", held.len()) };
     let id = PciId { vendor: boot.vendor, device: boot.device };
     match cap.claim_function::<PciDev>(boot.arrival) {
         Err(SyscallError::AlreadyExists) => println!("usbd_spare: the claim on {} was refused: AlreadyExists", spelled(id)),

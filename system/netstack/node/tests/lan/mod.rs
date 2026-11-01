@@ -117,6 +117,7 @@ pub fn udp(to: [u8; 6], from: [u8; 6], source: (Ipv4Addr, u16), destination: (Ip
 
 pub struct Lan {
     pub node: Node,
+    pub link: toyos_net_node::IfIndex,
     pub now: Instant,
     /// Every frame the node emitted, in order, with the time it left.
     pub sent: Vec<(Instant, Seen)>,
@@ -134,14 +135,14 @@ fn draw(draws: &mut u32) -> impl FnMut() -> u32 + '_ {
 impl Lan {
     /// `common`'s node, an hour into the clock, its link down.
     pub fn new() -> Self {
-        let Wire { node, now, .. } = Wire::new();
-        Self { node, now, sent: Vec::new(), draws: 0x6b00_0000 }
+        let Wire { node, link, now, .. } = Wire::new();
+        Self { node, link, now, sent: Vec::new(), draws: 0x6b00_0000 }
     }
 
     /// One transmit opportunity with all the credit the node wants. Returns how many frames left.
     pub fn opportunity(&mut self) -> usize {
         let (sent, now) = (&mut self.sent, self.now);
-        self.node.transmit(now, usize::MAX, |frame| sent.push((now, outside(frame))), draw(&mut self.draws))
+        self.node.transmit(now, usize::MAX, |_, frame| sent.push((now, outside(frame))), draw(&mut self.draws))
     }
 
     /// Opportunities until the node sends nothing more, the router and B answering each ARP
@@ -161,18 +162,18 @@ impl Lan {
                 .collect();
             for target in asked {
                 let mac = if target == R { MAC_R } else { MAC_B };
-                self.node.receive(self.now, BUDGET, batch(&[&arp(MAC, false, mac, target, A)]), draw(&mut self.draws));
+                self.node.receive(self.now, self.link, BUDGET, batch(&[&arp(MAC, false, mac, target, A)]), draw(&mut self.draws));
             }
         }
     }
 
     pub fn deliver(&mut self, frame: &[u8]) {
-        self.node.receive(self.now, BUDGET, batch(&[frame]), draw(&mut self.draws));
+        self.node.receive(self.now, self.link, BUDGET, batch(&[frame]), draw(&mut self.draws));
         self.pump();
     }
 
     pub fn link(&mut self, up: bool) {
-        self.node.link(self.now, up, draw(&mut self.draws));
+        self.node.link(self.now, self.link, up, draw(&mut self.draws));
         self.pump();
     }
 
@@ -208,13 +209,13 @@ impl Lan {
         let id = xid(&discover);
         self.deliver(&from_server(MAC, A, &message_of(OFFER, id, terms)));
         self.deliver(&from_server(BROADCAST, Ipv4Addr::BROADCAST, &message_of(ACK, id, terms)));
-        assert_eq!(self.node.lease(), None, "acknowledged is not held");
+        assert_eq!(self.node.lease(self.link), None, "acknowledged is not held");
     }
 
     /// [`Self::acknowledge`], and conflict detection run to its end: the lease is held.
     pub fn lease_on(&mut self, terms: &[(u8, Vec<u8>)]) {
         self.acknowledge(terms);
-        assert!(self.run_until(Duration::from_secs(10), |lan| lan.node.lease().is_some()), "the lease is held");
+        assert!(self.run_until(Duration::from_secs(10), |lan| lan.node.lease(lan.link).is_some()), "the lease is held");
     }
 
     /// A lease of `A`/24 for `seconds`, through the router.
@@ -249,4 +250,30 @@ impl Lan {
     pub fn counted(&self, counter: toyos_net_udp::Counter) -> u64 {
         self.node.shard().udp_counters().get(counter)
     }
+}
+
+/// RFC 792's destination unreachable from `reporter` at `mac`: type 3 and `code`, the checksum,
+/// four unused octets, then the internet header and the first 64 bits of the datagram it is
+/// about. That datagram is spelled here as RFC 791 and RFC 768 lay out one from `source` to
+/// `destination` carrying `length` octets: no options, DF, TTL 64, protocol 17.
+pub fn unreachable(code: u8, (reporter, mac): (Ipv4Addr, [u8; 6]), source: (Ipv4Addr, u16), destination: (Ipv4Addr, u16), length: usize) -> Vec<u8> {
+    let datagram = u16::try_from(8 + length).unwrap().to_be_bytes();
+    let total = u16::try_from(20 + 8 + length).unwrap().to_be_bytes();
+    let mut quoted = vec![0x45, 0, total[0], total[1], 0, 0, 0x40, 0, 64, 17, 0, 0];
+    quoted.extend_from_slice(&source.0.octets());
+    quoted.extend_from_slice(&destination.0.octets());
+    let check = sum(&quoted);
+    quoted[10..12].copy_from_slice(&check.to_be_bytes());
+    quoted.extend_from_slice(&[&source.1.to_be_bytes()[..], &destination.1.to_be_bytes(), &datagram, &[0, 0]].concat());
+    let mut icmp = vec![3, code, 0, 0, 0, 0, 0, 0];
+    icmp.extend_from_slice(&quoted);
+    let check = sum(&icmp);
+    icmp[2..4].copy_from_slice(&check.to_be_bytes());
+    let total = u16::try_from(20 + icmp.len()).unwrap().to_be_bytes();
+    let mut ip = vec![0x45, 0, total[0], total[1], 0, 0, 0x40, 0, 64, 1, 0, 0];
+    ip.extend_from_slice(&reporter.octets());
+    ip.extend_from_slice(&source.0.octets());
+    let check = sum(&ip);
+    ip[10..12].copy_from_slice(&check.to_be_bytes());
+    [&MAC[..], &mac, &[0x08, 0x00], &ip, &icmp].concat()
 }

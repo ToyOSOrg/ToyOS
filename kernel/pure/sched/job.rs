@@ -6,7 +6,11 @@
 //! The job counts its runnable ordinary threads on every CPU; each CPU reads
 //! the count when it decides, so a change on one CPU reaches the job's groups
 //! elsewhere at their own CPUs' next decisions.
+//!
+//! **A job is also the account its memory is counted to** ([`Ledger`]):
+//! every page its threads commit, and the kernel memory its objects keep.
 
+use crate::frames::Ledger;
 use crate::sched::sync::{AtomicU32, Ordering};
 
 /// Monotonic and never reused: a run queue keys the job's group by it.
@@ -20,11 +24,29 @@ pub struct Job {
     key: JobKey,
     /// Runnable ordinary threads of this job, on every CPU.
     runnable: AtomicU32,
+    memory: Ledger,
+}
+
+/// Every charge, page and run of a job holds it, so the last of it going
+/// is its account at nothing: anything left is a give-back that missed it.
+impl Drop for Job {
+    fn drop(&mut self) {
+        let usage = self.memory.usage();
+        assert!(
+            self.memory.is_empty() && usage.floor == 0 && usage.entitled == 0,
+            "job {:?} ended holding {usage:?}",
+            self.key
+        );
+    }
 }
 
 impl Job {
     pub fn new(key: JobKey) -> Self {
-        Self { key, runnable: AtomicU32::new(0) }
+        Self { key, runnable: AtomicU32::new(0), memory: Ledger::new() }
+    }
+
+    pub fn memory(&self) -> &Ledger {
+        &self.memory
     }
 
     pub fn key(&self) -> JobKey {

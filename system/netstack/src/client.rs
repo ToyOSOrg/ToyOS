@@ -1,7 +1,7 @@
 use std::time::{Duration, Instant};
 
 use toyos::AsHandle;
-use toyos::ipc::{self, Connection, IpcPayload};
+use toyos::ipc::{self, Connection};
 use toyos::net::{ErrorResponse, MAX_REQUEST, RespType};
 use toyos::say;
 
@@ -21,16 +21,8 @@ pub struct Client {
 }
 
 impl Client {
-    pub fn result<T: IpcPayload>(&self, payload: &T) {
-        self.answered(self.conn.try_send(RESP_RESULT, payload));
-    }
-
     pub fn result_bytes(&self, data: &[u8]) {
         self.answered(self.conn.try_send_bytes(RESP_RESULT, data));
-    }
-
-    pub fn done(&self) {
-        self.answered(self.conn.try_signal(RESP_RESULT));
     }
 
     pub fn error(&self, code: u32) {
@@ -45,18 +37,17 @@ impl Client {
     /// carries one request, so hanging up is the one thing it may say while
     /// it waits; a client that says more is dropped by name.
     pub fn gone(&self) -> bool {
-        let mut byte = [0u8; 1];
-        match self.conn.read_nonblock(&mut byte) {
-            Err(toyos_abi::syscall::SyscallError::WouldBlock) => false,
-            Ok(0) | Err(_) => true,
-            Ok(_) => {
-                say!("netstack: dropping client {} — it spoke again before its answer", self.conn.as_handle().0);
+        match ipc::FrameRx::<0>::new().pump(&self.conn) {
+            ipc::RxStep::Idle => false,
+            ipc::RxStep::Eof => true,
+            ipc::RxStep::Frame { .. } | ipc::RxStep::Malformed => {
+                say!("netstack: dropping client {} — it spoke again before its answer", self.conn.as_handle().raw().0);
                 true
             }
         }
     }
 
-    /// **The answer goes out in one non-blocking write, and a refusal is not
+    /// **The answer goes out in one non-blocking send, and a refusal is not
     /// retried.** `ipc::send` parks in `SYS_MESSAGE_SEND` until the client
     /// drains, which is a client deciding when the network stack runs again.
     /// The connection closes either way.
@@ -66,12 +57,12 @@ impl Client {
         if let Err(e) = sent {
             let why = match e {
                 ipc::TrySendError::Full => {
-                    "its pipe will not take the answer and it is not reading"
+                    "its connection has no room for the answer and it is not reading"
                 }
                 ipc::TrySendError::TooLarge => "the answer netstack built is larger than a frame",
                 ipc::TrySendError::Syscall(_) => "its connection is gone",
             };
-            say!("netstack: dropping client {} — {why}", self.conn.as_handle().0);
+            say!("netstack: dropping client {} — {why}", self.conn.as_handle().raw().0);
         }
     }
 }
@@ -92,12 +83,8 @@ pub const MAX_PENDING_CONNS: u32 = 32;
 /// bounds is the one that never sends it.
 pub const HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(2);
 
-/// One client's inbound framing.
-///
-/// **netstack never reads a client with a blocking read.** That is the whole point
-/// of [`ipc::FrameRx`]: `ipc::recv_header` and `ipc::recv_payload` park the
-/// caller until the peer sends the bytes it promised. Here a peer that stops halfway
-/// through a frame costs a buffer and a deadline instead of the event loop.
+/// One client's inbound frames, taken without waiting
+/// ([`ipc::FrameRx::pump`]): netstack never waits on a client.
 pub type ClientRx = ipc::FrameRx<MAX_REQUEST>;
 
 /// A connection that has been accepted and has not yet said what it wants.

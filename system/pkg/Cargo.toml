@@ -15,8 +15,7 @@ doctest = false
 # The room `/apps`'s volume has, which only its file server answers.
 toyos = { path = "../../sdk/toyos" }
 toyos-manifest = { path = "../../lib/manifest" }
-toyos-sha2 = { path = "../../lib/sha2" }
-toyos-sha2-hw = { path = "../../lib/sha2-hw" }
+toyos-crypto = { path = "../../lib/crypto" }
 flate2 = { version = "1", default-features = false, features = ["rust_backend"] }
 
 [dev-dependencies]

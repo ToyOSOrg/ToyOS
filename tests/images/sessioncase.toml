@@ -1,0 +1,61 @@
+# The boot `session_lifecycle` runs on: login sessions, the desktop's opened
+# for the compositor, the screen's row, as it starts, and others opened by
+# test-runner as their login authority and handed to its job.
+#
+# The desktop's: the compositor's Ctrl+N starts a terminal in it, whose shell
+# detaches `hangupholder`, typed through ps2server, and Ctrl+Alt+Q signs it
+# out, which Escape cancels and Enter forces.
+#
+# test-runner's row is `login`, so its job opens sessions with its `login`
+# connector, and lists what a session's launcher starts: `hangupholder`, the
+# app that ignores a hang-up, which the job detaches with its stdout a pipe,
+# to hear that it listens; and `logout`, the one row receiving
+# `session-admin`. `session` owns each session opened.
+# test-runner receives `power` for `session_lifecycle`'s closing reboot, which
+# waits for the sessions until the job forces it.
+
+assets = ["assets"]
+
+[boot]
+start = ["logkeeper", "compositor", "ps2server", "test-runner"]
+
+[programs.logkeeper]
+service = true
+syscap = ["logread"]
+
+# `roster`, which the job reads to find the holder it detached and see it end
+# when forced; `dup`, because test-runner hands each job its capability.
+[programs.test-runner]
+syscap = ["dup", "roster"]
+receives = ["power"]
+starts = ["hangupholder", "logout"]
+login = true
+
+[programs.compositor]
+service = true
+serves = ["compositor", "prompt", "clipboard", "input", "display", "display-output"]
+devices = ["framebuffer"]
+starts = ["terminal"]
+syscap = ["jobs"]
+login = true
+
+[programs.ps2server]
+restart = true
+receives = ["input"]
+devices = ["isa:0060,0064:1,12"]
+
+[programs.terminal]
+provides = ["surface"]
+receives = ["compositor"]
+starts = ["shell"]
+
+[programs.shell]
+receives = ["surface"]
+starts = ["hangupholder"]
+
+[programs.hangupholder]
+
+[programs.session]
+
+[programs.logout]
+receives = ["session-admin"]

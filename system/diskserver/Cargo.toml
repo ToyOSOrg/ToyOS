@@ -21,8 +21,10 @@ toyos = { path = "../../sdk/toyos" }
 toyos-blockring = { path = "../../lib/blockring" }
 # The session region, which a client maps as its driver does.
 toyos-blockserve = { path = "../../lib/blockserve" }
-# The trait every partition is read and written through.
-toyos-disk = { path = "../../lib/disk" }
+# The device a served partition is.
+toyos-blockdev = { path = "../../lib/blockdev" }
+# The `--active` partitions, named as GUID text.
+toyos-gpt = { path = "../../lib/gpt" }
 
 [package.metadata.toyos.host]
 exempt.owns = "the block service between ToyOS disk drivers and their clients"

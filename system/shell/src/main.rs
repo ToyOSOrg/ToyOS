@@ -3,10 +3,12 @@ use std::fs::{self, File, OpenOptions};
 use std::io::{self, Read, Write};
 use std::path::Path;
 use std::os::toyos::process::{CommandExt, ExitStatusExt};
-use std::process::{Command, ExitStatus, Stdio};
-use std::sync::OnceLock;
+use std::process::{Child, Command, ExitStatus, Stdio};
+use std::sync::{Mutex, OnceLock};
 
 use toyos::port::Connector;
+use toyos::quit::Reason;
+use toyos::surface::Foreground;
 
 /// This program's own folder, whose `State` keeps the history: `$HOME` itself
 /// once the supervisor makes that folder the shell's `HOME`, and `$HOME/Apps/shell`
@@ -16,13 +18,109 @@ const HISTORY_MAX: usize = 200;
 
 static mut LAST_STATUS: i32 = 0;
 
+/// What a quit asked of this shell. **A shell relays nothing**: a quit of it
+/// reaches what it runs as well, so an interrupt it reads is only noted, and a
+/// hang-up or a terminate ends it once the line it waits for has ended.
+struct Asked {
+    /// Whether it waits for a line now.
+    waiting: bool,
+    /// An interrupt read while it waited.
+    interrupted: bool,
+    /// A hang-up or a terminate read while it waited.
+    ended_by: Option<Reason>,
+}
+
+static ASKED: Mutex<Asked> = Mutex::new(Asked { waiting: false, interrupted: false, ended_by: None });
+
+/// The line it waits for, handed to the surface above it for Ctrl+C.
+static FOREGROUND: Mutex<Option<Foreground>> = Mutex::new(None);
+
+/// Whether it runs one `-c` command and ends, which an interrupt of its line
+/// ends once the line has.
+static mut ONE_COMMAND: bool = false;
+
+/// The exit code a quit's reason ends it with: 128 plus the signal's number,
+/// as a shell reads one.
+fn code_of(reason: Reason) -> i32 {
+    128 + match reason {
+        Reason::Interrupt => 2,
+        Reason::HangUp => 1,
+        Reason::Terminate => 15,
+    }
+}
+
+/// Listen to this shell's notice, before anything is spawned, on a thread of
+/// its own.
+fn listen() {
+    let Some(notice) = toyos::quit::notice() else { return };
+    if notice.listen().is_err() {
+        return;
+    }
+    std::thread::spawn(move || {
+        while let Ok(reason) = notice.read() {
+            let mut asked = ASKED.lock().unwrap();
+            match reason {
+                Reason::Interrupt => asked.interrupted |= asked.waiting,
+                _ if !asked.waiting => std::process::exit(code_of(reason)),
+                _ => asked.ended_by = Some(reason),
+            }
+        }
+    });
+}
+
+/// It waits for `line` from now: an interactive shell hands it to the
+/// surface. A `-c` shell is itself a process of the line that started it, so
+/// a quit of that line reaches what it runs already, and it hands nothing.
+///
+/// A `-c` shell interrupted before its line was whole ends that line itself:
+/// a child spawned after the quit read its tree was not asked.
+fn waiting_for(line: &[&Child]) {
+    if unsafe { ONE_COMMAND } {
+        if ASKED.lock().unwrap().interrupted {
+            for child in line {
+                // `Ok` for one already ended; a spawn's handle carries `MANAGE`.
+                let quit = toyos_abi::syscall::process_quit(toyos::AsHandle::as_handle(child).raw(), Reason::Interrupt);
+                quit.expect("shell: a child's handle refused the quit its spawn gave it");
+            }
+        }
+        return;
+    }
+    let handles: Vec<toyos::BorrowedHandle<'_>> = line.iter().map(toyos::AsHandle::as_handle).collect();
+    FOREGROUND.lock().unwrap().get_or_insert_with(Foreground::default).set(&handles);
+    let mut asked = ASKED.lock().unwrap();
+    asked.waiting = true;
+    asked.interrupted = false;
+}
+
+/// The line it waited for has ended: the surface is told, and a quit read
+/// meanwhile ends the shell, a hang-up or a terminate always and an interrupt
+/// in `-c`, with `status` for the last.
+fn waited(status: i32) {
+    if let Some(foreground) = FOREGROUND.lock().unwrap().as_mut() {
+        foreground.clear();
+    }
+    let mut asked = ASKED.lock().unwrap();
+    asked.waiting = unsafe { ONE_COMMAND };
+    if let Some(reason) = asked.ended_by {
+        std::process::exit(code_of(reason));
+    }
+    if core::mem::take(&mut asked.interrupted) && unsafe { ONE_COMMAND } {
+        std::process::exit(status);
+    }
+}
+
 fn main() {
     if env::var_os("PATH").is_none() {
         env::set_var("PATH", "/system/bin");
     }
+    listen();
 
     let args: Vec<String> = env::args().collect();
     if args.len() >= 3 && args[1] == "-c" {
+        unsafe { ONE_COMMAND = true };
+        // Its command is its line from the start: an interrupt is noted
+        // whenever it comes, and ends the shell once what runs has.
+        ASKED.lock().unwrap().waiting = true;
         let input = args[2..].join(" ");
         execute_line(&input);
         std::process::exit(unsafe { LAST_STATUS });
@@ -544,8 +642,7 @@ fn execute_pipeline(pipeline: &[SimpleCommand]) -> bool {
     for (i, cmd) in pipeline.iter().enumerate() {
         let is_first = i == 0;
         let is_last = i == pipeline.len() - 1;
-        let Some(mut command) = build_command(cmd) else {
-            println!("{}: not found", cmd.args[0]);
+        let Ok(mut command) = build_command(cmd) else {
             return false;
         };
 
@@ -583,13 +680,14 @@ fn execute_pipeline(pipeline: &[SimpleCommand]) -> bool {
                 }
                 children.push(child);
             }
-            Err(_) => {
-                println!("{}: not found", cmd.args[0]);
+            Err(e) => {
+                unstarted(cmd, &e);
                 return false;
             }
         }
     }
 
+    waiting_for(&children.iter().collect::<Vec<_>>());
     let mut ok = true;
     for mut child in children {
         if let Ok(status) = child.wait() {
@@ -597,6 +695,7 @@ fn execute_pipeline(pipeline: &[SimpleCommand]) -> bool {
             set_status(&status);
         }
     }
+    waited(unsafe { LAST_STATUS });
     ok
 }
 
@@ -633,10 +732,12 @@ fn execute_simple(cmd: &SimpleCommand, piped_stdin: Option<std::process::ChildSt
         _ => {}
     }
 
-    let Some(mut command) = build_command(cmd) else {
-        println!("{}: not found", cmd.args[0]);
-        set_status_code(127);
-        return false;
+    let mut command = match build_command(cmd) {
+        Ok(command) => command,
+        Err(code) => {
+            set_status_code(code);
+            return false;
+        }
     };
 
     if let Some(stdin) = piped_stdin {
@@ -659,34 +760,47 @@ fn execute_simple(cmd: &SimpleCommand, piped_stdin: Option<std::process::ChildSt
         // Spawn, write heredoc to stdin, then wait
         match command.spawn() {
             Ok(mut child) => {
+                waiting_for(&[&child]);
                 if let Some(mut stdin) = child.stdin.take() {
                     let _ = stdin.write_all(data.as_bytes());
                     drop(stdin);
                 }
-                match child.wait() {
-                    Ok(status) => { set_status(&status); return status.success(); }
-                    Err(_) => { set_status_code(1); return false; }
-                }
+                let ok = match child.wait() {
+                    Ok(status) => { set_status(&status); status.success() }
+                    Err(_) => { set_status_code(1); false }
+                };
+                waited(unsafe { LAST_STATUS });
+                return ok;
             }
-            Err(_) => {
-                println!("{}: not found", cmd.args[0]);
+            Err(e) => {
+                unstarted(cmd, &e);
                 set_status_code(127);
                 return false;
             }
         }
     }
 
-    match command.status() {
+    let mut child = match command.spawn() {
+        Ok(child) => child,
+        Err(e) => {
+            unstarted(cmd, &e);
+            set_status_code(127);
+            return false;
+        }
+    };
+    waiting_for(&[&child]);
+    let ok = match child.wait() {
         Ok(status) => {
             set_status(&status);
             status.success()
         }
         Err(_) => {
-            println!("{}: not found", cmd.args[0]);
-            set_status_code(127);
+            set_status_code(1);
             false
         }
-    }
+    };
+    waited(unsafe { LAST_STATUS });
+    ok
 }
 
 /// The connectors whoever started this shell transferred to it.
@@ -707,19 +821,22 @@ fn provided() -> &'static [(&'static str, Connector)] {
     })
 }
 
-/// `detach <program> [args...]`: start it with the supervisor as its parent — the one way
-/// for a program to outlive this shell — and do not wait for it. Nothing this
-/// shell was provided goes with it: that belongs to the session it outlives.
+/// `detach <program> [args...]`: launch it under the launcher's owner, so it
+/// outlives this shell, and do not wait for it. Nothing this shell was
+/// provided goes with it: that belongs to the session it outlives.
 fn detach(cmd: &SimpleCommand) -> bool {
     let Some(program) = cmd.args.get(1) else {
         println!("detach: which program?");
         set_status_code(2);
         return false;
     };
-    let cwd =
-        env::current_dir().map(|p| p.display().to_string()).unwrap_or_else(|_| String::from("/"));
-    let mut command = Command::new(toyos_manifest::package::launch_path(program, &cwd));
-    command.args(&cmd.args[2..]).under_supervisor();
+    if toyos::endow::launcher().is_none() {
+        println!("detach: this shell holds no launcher");
+        set_status_code(126);
+        return false;
+    }
+    let mut command = Command::new(program);
+    command.args(&cmd.args[2..]).independent().detached();
     apply_redirect(&mut command, cmd);
     match command.spawn() {
         Ok(_) => {
@@ -734,22 +851,47 @@ fn detach(cmd: &SimpleCommand) -> bool {
     }
 }
 
-fn build_command(cmd: &SimpleCommand) -> Option<Command> {
-    if cmd.args.is_empty() { return None; }
-    // The launcher refuses a path it would have to normalize, and the shell is
-    // the half that knows the cwd.
+/// The program a simple command starts: a helper, which inherits this shell's
+/// namespace and so the surface it was provided; or after `launch`, an
+/// independent launch of the program's own row, provided what this shell was.
+/// The status, said, for a `launch` this shell cannot make, as `detach`'s.
+fn build_command(cmd: &SimpleCommand) -> Result<Command, i32> {
+    let launched = cmd.args.first().is_some_and(|word| word == LAUNCH);
+    let args = &cmd.args[usize::from(launched)..];
+    let Some(program) = args.first() else {
+        println!("launch: which program?");
+        return Err(2);
+    };
+    if launched && toyos::endow::launcher().is_none() {
+        println!("launch: this shell holds no launcher");
+        return Err(126);
+    }
     let cwd =
         env::current_dir().map(|p| p.display().to_string()).unwrap_or_else(|_| String::from("/"));
-    let mut command =
-        Command::new(toyos_manifest::package::launch_path(&cmd.args[0], &cwd));
-    command.args(&cmd.args[1..]);
-    for (name, connector) in provided() {
-        // A duplicate per child: this shell keeps its own for the next one.
-        if let Ok(handed) = connector.duplicate() {
-            command.provide(name, handed.into_raw().0);
+    let mut command = Command::new(toyos::launch::program_path(program, &cwd));
+    command.args(&args[1..]);
+    if launched {
+        command.independent();
+        for (name, connector) in provided() {
+            // A duplicate per child: this shell keeps its own for the next one.
+            if let Ok(handed) = connector.duplicate() {
+                command.provide(name, handed.into());
+            }
         }
     }
-    Some(command)
+    Ok(command)
+}
+
+/// The word that makes a simple command an independent launch.
+const LAUNCH: &str = "launch";
+
+/// Say why `cmd` did not start: a helper's program is not found, and a
+/// launch's refusal is the launcher's to explain.
+fn unstarted(cmd: &SimpleCommand, e: &std::io::Error) {
+    match cmd.args.first().is_some_and(|word| word == LAUNCH) {
+        true => println!("launch: {}: {e}", cmd.args.get(1).map_or("", String::as_str)),
+        false => println!("{}: not found", cmd.args[0]),
+    }
 }
 
 fn apply_redirect(command: &mut Command, cmd: &SimpleCommand) {
@@ -816,8 +958,9 @@ fn set_status_code(code: i32) {
 }
 
 fn print_help() {
-    println!("Builtins: cd, clear, detach, exit, export, help");
-    println!("detach <program>: start it under the supervisor, so it outlives this shell");
+    println!("Builtins: cd, clear, detach, exit, export, help, launch");
+    println!("launch <program>: start it as itself, with its own row's authority");
+    println!("detach <program>: launch it so it outlives this shell");
     println!("Operators: | (pipe), && (and), || (or), ; (sequence)");
     println!("Redirects: > (truncate), >> (append)");
     println!("Variables: $VAR, ${{VAR}}, $? (exit status)");
@@ -905,6 +1048,12 @@ fn readline(history: &mut Vec<String>) -> Option<String> {
             '\r' => {
                 term_echo(b"\n");
                 return Some(line);
+            }
+            // Ctrl+C with no line to interrupt: the surface passes it on, and
+            // what is typed so far goes.
+            '\x03' => {
+                term_echo(b"^C\n");
+                return Some(String::new());
             }
             '\x08' | '\x7F' => {
                 if cursor > 0 {
@@ -1037,7 +1186,7 @@ fn replace_line(line: &mut String, cursor: &mut usize, new_content: &str) {
     *cursor = new_chars;
 }
 
-const BUILTINS: &[&str] = &["cd", "clear", "exit", "export", "help", "true", "false"];
+const BUILTINS: &[&str] = &["cd", "clear", "detach", "exit", "export", "help", "launch", "true", "false"];
 
 fn handle_tab(line: &mut String, cursor: &mut usize) {
     // Find the word being completed

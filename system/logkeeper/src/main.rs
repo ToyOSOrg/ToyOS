@@ -87,7 +87,8 @@ use toyos::poller::{Poller, READABLE, WRITABLE};
 use toyos::port::Acceptor;
 use toyos::say;
 use toyos::syscap::SysCap;
-use toyos::{Console, Pipe};
+use toyos::wake::Bell;
+use toyos::Console;
 use toyos_abi::syscall::SyscallError;
 use toyos_logstream::{
     ProgramLine, Registration, Tag, CONSOLE, FLUSH, FLUSHED, LOG_OPENED, MAX_TAG, ORIGINS, REGISTER, RESUME,
@@ -323,10 +324,7 @@ impl Log {
                     let Some([ring, alive]) = self.supervisor_rx.take_handles::<2>() else {
                         panic!("logkeeper: the supervisor registered {name:?} with no ring");
                     };
-                    // SAFETY: the kernel moved this handle into this table with
-                    // the frame that names it, and nothing else answers for it.
-                    let alive = unsafe { Pipe::from_raw(alive) };
-                    self.take(registration.tag, registration.pid, ring, alive);
+                    self.take(registration.tag, registration.pid, ring, Bell::from(alive));
                 }
                 // **The flush runs before the next frame is read**: the supervisor sends
                 // RESUME when the stop it flushed for was refused, which can be
@@ -341,13 +339,12 @@ impl Log {
     }
 
     /// A ring the supervisor registered, read from the next round on.
-    fn take(&mut self, tag: Tag<'_>, pid: u32, ring: toyos::RawHandle, alive: Pipe) {
+    fn take(&mut self, tag: Tag<'_>, pid: u32, ring: toyos::OwnedHandle, alive: Bell) {
         if self.origins.len() >= MAX_ORIGINS {
             toyos::warn!(
                 "logkeeper: refusing {}'s ring: {MAX_ORIGINS} programs' rings are already read",
                 tag.as_str()
             );
-            toyos_abi::syscall::close(ring);
             return;
         }
         match Origin::open(tag, pid, ring, alive) {
@@ -405,19 +402,16 @@ impl Log {
         let oldest = read.iter().map(|said| said.at_ns).min();
 
         // A program's end, after its reads: what its writers left is swept
-        // whole. A byte on a pipe nothing writes is the program's own doing
-        // and not its end.
+        // whole. A ring of a bell nothing rings is the program's own doing and
+        // not its end.
         ended.sort_unstable();
         ended.dedup();
         let mut gone: Vec<usize> = Vec::new();
         let count = self.origins.len();
         for &i in ended.iter().filter(|&&i| i < count) {
             let origin = &mut self.origins[i];
-            let mut probe = [0u8; 1];
-            match origin.alive.read_nonblock(&mut probe) {
-                Ok(0) => {}
-                Ok(_) | Err(SyscallError::WouldBlock) => continue,
-                Err(e) => panic!("logkeeper: {}'s end refused a read: {e:?}", origin.tag),
+            if origin.alive.try_take().is_ok() {
+                continue;
             }
             let (abandoned, ahead) = origin.sweep(i, &mut read);
             if ahead > 0 {

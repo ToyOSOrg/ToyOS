@@ -11,35 +11,9 @@
 use std::collections::BTreeMap;
 use std::path::PathBuf;
 
-use bcachefs::{Mounted, VecBlockIO};
-use toyos_fat32::{BlockAccess, Fat32, IoError};
-
-/// A partition, in memory, byte-addressed. Read-only: this reports.
-struct Volume(Vec<u8>);
-
-impl BlockAccess for Volume {
-    fn capacity(&self) -> u64 {
-        self.0.len() as u64
-    }
-
-    fn read_at(&mut self, offset: u64, buf: &mut [u8]) -> Result<(), IoError> {
-        let start = usize::try_from(offset).map_err(|_| IoError::Device)?;
-        let end = start.checked_add(buf.len()).ok_or(IoError::Device)?;
-        if end > self.0.len() {
-            return Err(IoError::Device);
-        }
-        buf.copy_from_slice(&self.0[start..end]);
-        Ok(())
-    }
-
-    fn write_at(&mut self, _offset: u64, _buf: &[u8]) -> Result<(), IoError> {
-        Err(IoError::Device)
-    }
-
-    fn flush(&mut self) -> Result<(), IoError> {
-        Ok(())
-    }
-}
+use bcachefs::engine::{DirentType, Volume};
+use toyos_blockdev::{block_on_ready, Bytes, ReadOnlyBytes, BLOCK};
+use toyos_fat32::Fat32;
 
 /// GPT geometry, as `build/image.rs` writes it.
 const LBA: usize = 512;
@@ -74,9 +48,15 @@ fn main() {
             (last - first + 1) * LBA as u64
         );
 
-        let bytes = disk[first as usize * LBA..(last as usize + 1) * LBA].to_vec();
-        if let Ok(mut fs) = Fat32::mount(Volume(bytes.clone())) {
-            match fs.walk("", 64) {
+        let mut bytes = disk[first as usize * LBA..(last as usize + 1) * LBA].to_vec();
+        let walked = bytes.len().is_multiple_of(BLOCK).then(|| {
+            block_on_ready(async {
+                let mut fs = Fat32::mount(Bytes::new(&mut bytes[..])).await.ok()?;
+                Some(fs.walk("", 64).await)
+            })
+        });
+        if let Some(Some(walked)) = walked {
+            match walked {
                 Ok(entries) => {
                     for (file, size) in &entries {
                         println!("      {file:40} {size}");
@@ -86,10 +66,10 @@ fn main() {
             }
             continue;
         }
-        let volume_bytes = bytes.len() as u64;
-        match Mounted::<_, bcachefs::ReadOnly>::open(VecBlockIO::from_vec(bytes)) {
-            Ok(fs) => report_root(fs, volume_bytes),
-            Err(_) => println!("      neither a FAT32 nor a bcachefs volume"),
+        let opened = ReadOnlyBytes::new(&bytes).map(|dev| block_on_ready(Volume::open(dev)));
+        match opened {
+            Some(Ok(root)) => report_root(&root, bytes.len() as u64),
+            _ => println!("      neither a FAT32 nor a bcachefs volume"),
         }
     }
 }
@@ -105,9 +85,17 @@ fn group_of(name: &str) -> &'static str {
     }
 }
 
-fn report_root(fs: Mounted<VecBlockIO, bcachefs::ReadOnly>, volume_bytes: u64) {
-
-    let entries = fs.list(usize::MAX, &|_| true).expect("list ROOT");
+fn report_root(root: &Volume<ReadOnlyBytes<'_>>, volume_bytes: u64) {
+    let entries: Vec<(String, u64)> = block_on_ready(async {
+        let mut out = Vec::new();
+        for (path, entry) in root.names().await.expect("list ROOT") {
+            if entry.kind != DirentType::Directory {
+                let size = root.inode(entry.ino).await.expect("an inode ROOT lists").size;
+                out.push((String::from_utf8_lossy(&path).into_owned(), size));
+            }
+        }
+        out
+    });
 
     let mut groups: BTreeMap<&str, (usize, u64)> = BTreeMap::new();
     let mut content = 0u64;

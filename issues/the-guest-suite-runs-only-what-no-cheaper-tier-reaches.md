@@ -68,7 +68,8 @@ console's renderer. Exit: as stage A.
   `nested_fault_is_recursive`: a fault inside the report names the first.
 - metal `pre_idle_wedge_speaks`: a boot stopped in phase 3 says where.
 - metal `panic_halts_the_others_first`: no other CPU's record follows the fatal line.
-- metal `watchdog_resets`: the TCO ends the machine.
+- metal `watchdog_resets`: the chipset's watchdog ends the machine. Judged on the AMD bench's FCH;
+  the T14's TCO has never reset it (`issues/an-armed-tco-has-never-reset-the-t14.md`).
 - metal `quiesce_refuses_a_second_shutdown`: the machine has one shutdown, and a second caller is
   refused while the first holds it.
 - host `screen_early_panel`: the panel repaints after each committed record.
@@ -135,10 +136,12 @@ The kernel drives no USB; usbd does (the small-kernel track's step 10). Host:
 and `toyos-usbhid`'s and `toyos-scsi`'s decoders. Metal: the usbd rows.
 Exit: as stage A, with what is still owed:
 
-- metal: the rewritten `usbload` row, a stick written continuously through
-  usbd and the machine reset under it by the boot deadline, judged on
-  `boot.usbload.stick_secs` (#901 section 9).
-- metal: `tone_beside_a_stick_write`
+- metal: a stick written continuously through usbd and the machine reset
+  under it by the boot deadline (#901 section 9), which no bench row writes
+  since the benches boot off their NVMe
+  (`issues/no-bench-row-drives-usb-storage-since-the-benches-boot-off-nvme.md`).
+- metal: a tone beside a stick write, which no bench row makes since the
+  benches boot off their NVMe (`tone_beside_a_log_write` writes the NVMe)
   (`issues/a-megabyte-written-to-the-stick-starves-a-tone-beside-it.md`).
 - metal `late_storage_connect`: a disk that connects after bring-up is
   served, and `/boot` and `/log` mount off it — on the stub, a device plugged
@@ -199,10 +202,8 @@ Host: `toyos-net-tcp`, `toyos-dns`, `toyos-mdns`, `toyos-swap`, `toyos-inspect`,
 - metal `sshd_exec`, the arms `lan_talk`'s one command did not reach, each a step of that row's
   exchange red when its arm in `userland/sshd/src/main.rs` is reverted; the row and its exchange
   are deleted, and this waits on `issues/the-host-cannot-reach-the-t14-while-it-runs-toyos.md`:
-  - a program that is not there ends 127, `cannot run /system/bin/<name>` on stderr and nothing
-    on stdout;
-  - an unquotable line ends 127 before anything runs; `command::split`'s own tests already hold
-    the refusal it names;
+  - a program that is not there ends 127, the shell saying `<name>: not found`;
+  - an unquotable line is the shell's to refuse, its `-c` line read as the shell reads any;
   - stdout and stderr stay apart: `cat` of a file and of a missing path;
   - the channel's input is the program's stdin;
   - an `env` request is answered with a failure, never left unanswered;

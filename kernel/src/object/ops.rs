@@ -5,17 +5,14 @@
 //! caller has already resolved the handle with the rights the call needs.
 
 use alloc::sync::Arc;
-use alloc::vec::Vec;
 
 use toyos_abi::handle::{RawHandle, Rights};
 use toyos_abi::syscall::{FileType, OpenFlags, SeekFrom, SyscallError, MAX_WHOLE_PIPE_WRITE};
-use kernel::sched::task::WaitClass;
 
 use crate::drivers::serial;
 use crate::file_cache;
-use crate::pipe::{self, PipeId};
-use kernel::pipe::{End, Landing};
-use crate::process::PipeMap;
+use crate::pipe::{self, PipeRef};
+use kernel::pipe::End;
 use crate::user_ptr::{UserBytes, UserBytesMut};
 use crate::inbox::PollEntry;
 use crate::watch::Watch;
@@ -24,15 +21,14 @@ use crate::device as device_registry;
 use super::device::DeviceClaim;
 use super::file::{FileObject, OpenFileState};
 use super::handle::{HandleEntry, HandleTable};
-use super::KObjectRef;
+use super::{KObjectRef, KObjectVariant};
 
 /// What a freshly created object's one handle carries.
 pub fn initial_rights(object: &KObjectRef) -> Rights {
     const BASE: Rights = Rights::DUP.union(Rights::TRANSFER).union(Rights::WAIT);
     match object {
-        // `MAP` is `SYS_PIPE_MAP`: either end may window the pipe's ring page.
-        KObjectRef::PipeRead(_) => BASE.union(Rights::READ).union(Rights::MAP),
-        KObjectRef::PipeWrite(_) => BASE.union(Rights::WRITE).union(Rights::MAP),
+        KObjectRef::PipeRead(_) => BASE.union(Rights::READ),
+        KObjectRef::PipeWrite(_) => BASE.union(Rights::WRITE),
         KObjectRef::Connection(_) => {
             BASE.union(Rights::READ).union(Rights::WRITE).union(Rights::MAP)
         }
@@ -48,9 +44,11 @@ pub fn initial_rights(object: &KObjectRef) -> Rights {
         }
         // Every `SysCap` bit is authority the supervisor decides per program: no default, the creator states it.
         KObjectRef::SysCap(_) => Rights::NONE,
-        // `MAP` is the whole of it: a region is examined through the memory, not the handle.
-        KObjectRef::SharedMem(_) => {
-            Rights::DUP.union(Rights::TRANSFER).union(Rights::MAP)
+        // A region is examined through the memory, not the handle: `MAP` maps it
+        // readable and `WRITE` writable, which memory nobody writes never carries.
+        KObjectRef::SharedMem(m) => {
+            let read = Rights::DUP.union(Rights::TRANSFER).union(Rights::MAP);
+            if m.immutable().is_some() { read } else { read.union(Rights::WRITE) }
         }
         // A connector has no read/write path: put it in a namespace, or give the namespace away.
         KObjectRef::Connector(_) => Rights::DUP.union(Rights::TRANSFER),
@@ -61,6 +59,11 @@ pub fn initial_rights(object: &KObjectRef) -> Rights {
         KObjectRef::Null(_) => super::null::NullObject::RIGHTS,
         KObjectRef::Job(_) => super::job::JobObject::RIGHTS,
         KObjectRef::Notice(_) => super::notice::NoticeObject::RIGHTS,
+        KObjectRef::WakeLatency(_) => super::wake_latency::WakeLatencyObject::RIGHTS,
+        KObjectRef::EventSignal(_) => Rights::DUP.union(Rights::TRANSFER).union(Rights::WRITE),
+        KObjectRef::EventWait(_) => BASE.union(Rights::READ),
+        KObjectRef::Pager(_) => super::paged::PagerObject::RIGHTS,
+        KObjectRef::Paged(_) => super::paged::PagedHolderObject::RIGHTS,
         // Neither `DUP` nor `TRANSFER`: the set is its minter's alone.
         KObjectRef::DeviceSet(_) => Rights::READ.union(Rights::WAIT),
     }
@@ -74,21 +77,10 @@ pub fn install(table: &mut HandleTable, object: KObjectRef) -> Result<RawHandle,
         .map_err(|_| SyscallError::ResourceExhausted)
 }
 
-/// Every bit `OpenFlags` defines; `READ` is among them although nothing asks for
-/// it, because the word is validated in both directions or in neither.
-/// Hand-copied from `toyos-abi` and unchecked, for the reason
-/// `syscall/vm.rs`'s `MMAP_PROT_KNOWN` gives for all four of these masks.
-const OPEN_FLAGS_KNOWN: u64 = OpenFlags::READ.0
-    | OpenFlags::WRITE.0
-    | OpenFlags::CREATE.0
-    | OpenFlags::TRUNCATE.0
-    | OpenFlags::APPEND.0
-    | OpenFlags::EXCLUSIVE.0;
-
 /// A file opened at absolute `path`, installed in `table`.
 pub fn open(table: &mut HandleTable, path: &str, flags: OpenFlags) -> u64 {
     // First, so the answer is the bit and not the path's own refusal.
-    if flags.0 & !OPEN_FLAGS_KNOWN != 0 {
+    if flags.0 & !OpenFlags::KNOWN.0 != 0 {
         return SyscallError::InvalidArgument.to_u64();
     }
     let writable = flags.contains(OpenFlags::WRITE);
@@ -100,6 +92,11 @@ pub fn open(table: &mut HandleTable, path: &str, flags: OpenFlags) -> u64 {
         return SyscallError::InvalidArgument.to_u64();
     }
     let modifies = writable || create || truncate || append;
+    // Charged before the file is opened or made, so a refusal makes nothing.
+    let core = match FileObject::new_core(0) {
+        Ok(core) => core,
+        Err(e) => return SyscallError::from(e).to_u64(),
+    };
 
     let opened = {
         let mut vfs = crate::vfs::lock();
@@ -170,12 +167,7 @@ pub fn open(table: &mut HandleTable, path: &str, flags: OpenFlags) -> u64 {
         Ok(v) => v,
         Err(e) => return e.to_u64(),
     };
-    let object = KObjectRef::File(FileObject::new(OpenFileState {
-        file_id,
-        volume,
-        position,
-        mtime,
-    }));
+    let object = KObjectRef::File(FileObject::new(core, OpenFileState { file_id, volume, position, mtime }));
     // `writable` is a right, not a field: a read-only write fails for lacking `WRITE`.
     let mut rights = initial_rights(&object);
     if !writable {
@@ -189,27 +181,12 @@ pub fn open(table: &mut HandleTable, path: &str, flags: OpenFlags) -> u64 {
 
 /// Release one handle.
 ///
-/// What the object holds is released by its own zero-handle hook; `close` releases only the two things that are the process's, not the object's (pipe-map windows, polls on a watch it ends).
-pub fn close(
-    table: &mut HandleTable,
-    h: RawHandle,
-    pipe_maps: &mut Vec<PipeMap>,
-) -> Result<(), super::HandleError> {
+/// What the object holds is released by its own zero-handle hook; `close` releases only what is the process's, not the object's: polls on a watch it ends.
+pub fn close(table: &mut HandleTable, h: RawHandle) -> Result<(), super::HandleError> {
     let entry = table.remove(h)?;
     let object = entry.object().clone();
     // The decrement, and any deferred hook it enqueues, run with the table's borrow already released.
     drop(entry);
-    // A map's warrant is the handle: past the last one naming this pipe, revoke its windows.
-    for id in [pipe_id_read(&object), pipe_id_write(&object)].into_iter().flatten() {
-        let still_held = table.iter().any(|(_, e)| {
-            pipe_id_read(e.object()) == Some(id) || pipe_id_write(e.object()) == Some(id)
-        });
-        if !still_held {
-            if let Some(pt) = crate::scheduler::current_address_space() {
-                crate::process::revoke_pipe_maps(pipe_maps, &pt, id);
-            }
-        }
-    }
     // Only a watch this handle's object ends is answered: one it shares cannot cancel another's poll.
     if close_ends_polls(&object) {
         for watch in [read_watch(&object), write_watch(&object), pipe_end_watch(&object)].into_iter().flatten() {
@@ -220,48 +197,45 @@ pub fn close(
 }
 
 
-/// Release every handle a process holds; runs on the kill path too, which does not unwind.
-///
-/// `close_all` takes no `pipe_maps` argument: its only caller is process teardown, which destroys the whole address space the windows are in.
+/// Release every handle a process holds; runs on the kill path too, which
+/// does not unwind, and allocates nothing.
 pub fn close_all(table: &mut HandleTable) {
-    for entry in table.drain() {
-        drop(entry);
-    }
+    let job = Arc::clone(table.job());
+    drop(core::mem::replace(table, HandleTable::new(&job)));
 }
 
-pub fn pipe_id_read(object: &KObjectRef) -> Option<PipeId> {
-    pipe_read(object).map(|(id, _)| id)
+/// The pipe a read of `object` took from, held past the handle table's lock
+/// to wake its writers.
+pub fn read_pipe(object: &KObjectRef) -> Option<PipeRef> {
+    pipe_read(object).cloned()
 }
 
-pub fn pipe_id_write(object: &KObjectRef) -> Option<PipeId> {
-    pipe_write(object).map(|(id, _, _)| id)
+/// The pipe a write to `object` filled, held the same way to wake its readers.
+pub fn written_pipe(object: &KObjectRef) -> Option<PipeRef> {
+    pipe_write(object).cloned()
 }
 
-/// The pipe a blocking read of `object` parks on, and the class its wait is
-/// charged to: a connection's is its peer's answer, which is IPC.
-pub fn pipe_read(object: &KObjectRef) -> Option<(PipeId, WaitClass)> {
+/// The pipe a blocking read of `object` parks on.
+pub fn pipe_read(object: &KObjectRef) -> Option<&PipeRef> {
     match object {
-        KObjectRef::PipeRead(r) => Some((r.id(), WaitClass::Pipe)),
-        KObjectRef::Connection(c) => Some((c.rx(), WaitClass::Ipc)),
-        KObjectRef::PipeWrite(_) | KObjectRef::File(_) | KObjectRef::Device(_)
+        KObjectRef::PipeRead(r) => Some(r.pipe()),
+        KObjectRef::Connection(_) | KObjectRef::PipeWrite(_) | KObjectRef::File(_) | KObjectRef::Device(_)
         | KObjectRef::Console(_) | KObjectRef::Acceptor(_) | KObjectRef::Inbox(_)
         | KObjectRef::SysCap(_)
-        | KObjectRef::Connector(_) | KObjectRef::Namespace(_)
+        | KObjectRef::Connector(_) | KObjectRef::WakeLatency(_) | KObjectRef::EventSignal(_) | KObjectRef::EventWait(_) | KObjectRef::Pager(_) | KObjectRef::Paged(_) | KObjectRef::Namespace(_)
         | KObjectRef::SharedMem(_) | KObjectRef::Process(_) | KObjectRef::Job(_) | KObjectRef::Null(_)
         | KObjectRef::Notice(_) | KObjectRef::DeviceSet(_) => None,
     }
 }
 
-/// [`pipe_read`]'s answer for a blocking write, and how a write lands in
-/// that pipe.
-pub fn pipe_write(object: &KObjectRef) -> Option<(PipeId, WaitClass, Landing)> {
+/// [`pipe_read`]'s answer for a blocking write.
+pub fn pipe_write(object: &KObjectRef) -> Option<&PipeRef> {
     match object {
-        KObjectRef::PipeWrite(w) => Some((w.id(), WaitClass::Pipe, Landing::Pipe)),
-        KObjectRef::Connection(c) => Some((c.tx(), WaitClass::Ipc, Landing::Partial)),
-        KObjectRef::PipeRead(_) | KObjectRef::File(_) | KObjectRef::Device(_)
+        KObjectRef::PipeWrite(w) => Some(w.pipe()),
+        KObjectRef::Connection(_) | KObjectRef::PipeRead(_) | KObjectRef::File(_) | KObjectRef::Device(_)
         | KObjectRef::Console(_) | KObjectRef::Acceptor(_) | KObjectRef::Inbox(_)
         | KObjectRef::SysCap(_)
-        | KObjectRef::Connector(_) | KObjectRef::Namespace(_)
+        | KObjectRef::Connector(_) | KObjectRef::WakeLatency(_) | KObjectRef::EventSignal(_) | KObjectRef::EventWait(_) | KObjectRef::Pager(_) | KObjectRef::Paged(_) | KObjectRef::Namespace(_)
         | KObjectRef::SharedMem(_) | KObjectRef::Process(_) | KObjectRef::Job(_) | KObjectRef::Null(_)
         | KObjectRef::Notice(_) | KObjectRef::DeviceSet(_) => None,
     }
@@ -271,9 +245,9 @@ pub fn pipe_write(object: &KObjectRef) -> Option<(PipeId, WaitClass, Landing)> {
 /// share of one that goes with its object.
 pub enum WatchRef {
     Static(&'static Watch),
-    /// A static watch an interrupt handler posts: the device set's, which a
-    /// hot-plug slot's handler posts.
-    Irq(&'static crate::watch::IrqWatch),
+    /// A static watch posted where nothing may be freed, as `pmm::returned`
+    /// and the device set, which a hot-plug slot's handler posts, are.
+    InPlace(&'static crate::watch::IrqWatch),
     Shared(Arc<Watch>),
     /// The watch of the function or row a claim holds: named by the claim,
     /// and reached only with what the claim lends.
@@ -284,7 +258,7 @@ impl WatchRef {
     pub(crate) fn add_poll(&self, entry: PollEntry) {
         match self {
             Self::Static(watch) => watch.add_poll(entry),
-            Self::Irq(watch) => watch.add_poll(entry),
+            Self::InPlace(watch) => watch.add_poll(entry),
             Self::Shared(watch) => watch.add_poll(entry),
             Self::Claim(claim) => claim.add_poll(entry),
         }
@@ -293,7 +267,7 @@ impl WatchRef {
     pub fn cancel_polls(&self) {
         match self {
             Self::Static(watch) => watch.cancel_polls(),
-            Self::Irq(watch) => watch.cancel_polls(),
+            Self::InPlace(watch) => watch.cancel_polls(),
             Self::Shared(watch) => watch.cancel_polls(),
             // Its release answers them, and its close ends none (`close_ends_polls`).
             Self::Claim(_) => unreachable!("a claim's polls are cancelled by its release alone"),
@@ -305,12 +279,15 @@ impl WatchRef {
 /// readiness of that direction exists.
 pub fn read_watch(object: &KObjectRef) -> Option<WatchRef> {
     match object {
-        KObjectRef::PipeRead(r) => pipe::read_watch(r.id()).map(WatchRef::Shared),
-        KObjectRef::Connection(c) => pipe::read_watch(c.rx()).map(WatchRef::Shared),
+        KObjectRef::PipeRead(r) => Some(WatchRef::Shared(r.pipe().read_watch().clone())),
+        KObjectRef::Connection(c) => Some(WatchRef::Shared(c.rx().read_watch().clone())),
         KObjectRef::Acceptor(a) => Some(WatchRef::Shared(a.watch().clone())),
         KObjectRef::Process(p) => Some(WatchRef::Shared(p.watch().clone())),
-        KObjectRef::DeviceSet(_) => Some(WatchRef::Irq(&crate::pcidev::SET_WATCH)),
+        KObjectRef::DeviceSet(_) => Some(WatchRef::InPlace(&crate::pcidev::SET_WATCH)),
         KObjectRef::Notice(n) => Some(WatchRef::Shared(n.watch().clone())),
+        KObjectRef::EventWait(e) => Some(WatchRef::Shared(e.watch().clone())),
+        KObjectRef::Pager(p) => Some(WatchRef::Shared(p.watch().clone())),
+        KObjectRef::Job(_) => Some(WatchRef::InPlace(crate::mm::pmm::returned())),
         // Nothing posts for a serial byte, so a console's readable poll has
         // no source (`issues/a-console-watch-waits-on-the-keyboard-not-the-serial-line.md`).
         KObjectRef::Console(_) => None,
@@ -323,18 +300,18 @@ pub fn read_watch(object: &KObjectRef) -> Option<WatchRef> {
         // Named unconditionally: the watch alone cannot enforce rights.
         KObjectRef::SysCap(_) => Some(WatchRef::Static(&crate::log::user::WATCH)),
         KObjectRef::PipeWrite(_) | KObjectRef::File(_) | KObjectRef::Inbox(_)
-        | KObjectRef::Connector(_) | KObjectRef::Namespace(_)
-        | KObjectRef::SharedMem(_) | KObjectRef::Null(_) | KObjectRef::Job(_) => None,
+        | KObjectRef::Connector(_) | KObjectRef::WakeLatency(_) | KObjectRef::EventSignal(_) | KObjectRef::Paged(_) | KObjectRef::Namespace(_)
+        | KObjectRef::SharedMem(_) | KObjectRef::Null(_) => None,
     }
 }
 
 /// A readable poll is registered on this object: its process listens to a
-/// notice from now on (`kernel::proclife::quit`).
+/// notice from now on (`toyos_proclife::quit`).
 pub fn watched_readable(object: &KObjectRef) {
     match object {
         KObjectRef::Notice(n) => n.listen(),
         KObjectRef::PipeRead(_) | KObjectRef::PipeWrite(_) | KObjectRef::Connection(_) | KObjectRef::Device(_)
-        | KObjectRef::Acceptor(_) | KObjectRef::Inbox(_) | KObjectRef::SharedMem(_) | KObjectRef::Connector(_)
+        | KObjectRef::Acceptor(_) | KObjectRef::Inbox(_) | KObjectRef::SharedMem(_) | KObjectRef::Connector(_) | KObjectRef::WakeLatency(_) | KObjectRef::EventSignal(_) | KObjectRef::EventWait(_) | KObjectRef::Pager(_) | KObjectRef::Paged(_)
         | KObjectRef::Namespace(_) | KObjectRef::File(_) | KObjectRef::Console(_) | KObjectRef::SysCap(_)
         | KObjectRef::Process(_) | KObjectRef::Null(_) | KObjectRef::Job(_) | KObjectRef::DeviceSet(_) => {}
     }
@@ -343,13 +320,13 @@ pub fn watched_readable(object: &KObjectRef) {
 /// The watch a writable poll on this object registers on.
 pub fn write_watch(object: &KObjectRef) -> Option<WatchRef> {
     match object {
-        KObjectRef::PipeWrite(w) => pipe::write_watch(w.id()).map(WatchRef::Shared),
-        KObjectRef::Connection(c) => pipe::write_watch(c.tx()).map(WatchRef::Shared),
+        KObjectRef::PipeWrite(w) => Some(WatchRef::Shared(w.pipe().write_watch().clone())),
+        KObjectRef::Connection(c) => Some(WatchRef::Shared(c.tx().write_watch().clone())),
         KObjectRef::Console(_) => Some(WatchRef::Static(&crate::log::console::SPACE)),
         KObjectRef::PipeRead(_) | KObjectRef::File(_) | KObjectRef::Device(_)
         | KObjectRef::Acceptor(_) | KObjectRef::Inbox(_)
         | KObjectRef::SysCap(_)
-        | KObjectRef::Connector(_) | KObjectRef::Namespace(_)
+        | KObjectRef::Connector(_) | KObjectRef::WakeLatency(_) | KObjectRef::EventSignal(_) | KObjectRef::EventWait(_) | KObjectRef::Pager(_) | KObjectRef::Paged(_) | KObjectRef::Namespace(_)
         | KObjectRef::SharedMem(_) | KObjectRef::Process(_) | KObjectRef::Job(_) | KObjectRef::Null(_)
         | KObjectRef::Notice(_) | KObjectRef::DeviceSet(_) => None,
     }
@@ -359,12 +336,12 @@ pub fn write_watch(object: &KObjectRef) -> Option<WatchRef> {
 /// it lets go; `None` for an object that is no pipe end.
 pub fn pipe_end_watch(object: &KObjectRef) -> Option<WatchRef> {
     match object {
-        KObjectRef::PipeRead(r) => pipe::left_watch(r.id(), End::Read).map(WatchRef::Shared),
-        KObjectRef::PipeWrite(w) => pipe::left_watch(w.id(), End::Write).map(WatchRef::Shared),
+        KObjectRef::PipeRead(r) => Some(WatchRef::Shared(r.pipe().left_watch(End::Read).clone())),
+        KObjectRef::PipeWrite(w) => Some(WatchRef::Shared(w.pipe().left_watch(End::Write).clone())),
         KObjectRef::Connection(_) | KObjectRef::Acceptor(_) | KObjectRef::Process(_) | KObjectRef::Job(_)
         | KObjectRef::Notice(_)
         | KObjectRef::Console(_) | KObjectRef::Device(_) | KObjectRef::SysCap(_)
-        | KObjectRef::File(_) | KObjectRef::Inbox(_) | KObjectRef::Connector(_)
+        | KObjectRef::File(_) | KObjectRef::Inbox(_) | KObjectRef::Connector(_) | KObjectRef::WakeLatency(_) | KObjectRef::EventSignal(_) | KObjectRef::EventWait(_) | KObjectRef::Pager(_) | KObjectRef::Paged(_)
         | KObjectRef::Namespace(_) | KObjectRef::SharedMem(_) | KObjectRef::Null(_) | KObjectRef::DeviceSet(_) => None,
     }
 }
@@ -373,12 +350,12 @@ pub fn pipe_end_watch(object: &KObjectRef) -> Option<WatchRef> {
 /// object that is no pipe end.
 pub fn other_end_gone(object: &KObjectRef) -> bool {
     match object {
-        KObjectRef::PipeRead(r) => pipe::other_end_gone(r.id(), End::Read),
-        KObjectRef::PipeWrite(w) => pipe::other_end_gone(w.id(), End::Write),
+        KObjectRef::PipeRead(r) => r.pipe().other_end_gone(End::Read),
+        KObjectRef::PipeWrite(w) => w.pipe().other_end_gone(End::Write),
         KObjectRef::Connection(_) | KObjectRef::Acceptor(_) | KObjectRef::Process(_) | KObjectRef::Job(_)
         | KObjectRef::Notice(_)
         | KObjectRef::Console(_) | KObjectRef::Device(_) | KObjectRef::SysCap(_)
-        | KObjectRef::File(_) | KObjectRef::Inbox(_) | KObjectRef::Connector(_)
+        | KObjectRef::File(_) | KObjectRef::Inbox(_) | KObjectRef::Connector(_) | KObjectRef::WakeLatency(_) | KObjectRef::EventSignal(_) | KObjectRef::EventWait(_) | KObjectRef::Pager(_) | KObjectRef::Paged(_)
         | KObjectRef::Namespace(_) | KObjectRef::SharedMem(_) | KObjectRef::Null(_) | KObjectRef::DeviceSet(_) => false,
     }
 }
@@ -405,47 +382,95 @@ fn close_ends_polls(object: &KObjectRef) -> bool {
         },
         KObjectRef::PipeRead(_) | KObjectRef::PipeWrite(_) | KObjectRef::Connection(_)
         | KObjectRef::Acceptor(_) | KObjectRef::File(_) | KObjectRef::Inbox(_)
-        | KObjectRef::Connector(_) | KObjectRef::Namespace(_)
+        | KObjectRef::Connector(_) | KObjectRef::WakeLatency(_) | KObjectRef::EventSignal(_) | KObjectRef::EventWait(_) | KObjectRef::Pager(_) | KObjectRef::Paged(_) | KObjectRef::Namespace(_)
         | KObjectRef::SharedMem(_) | KObjectRef::Null(_) | KObjectRef::Notice(_) => true,
+    }
+}
+
+/// What a file's page that could not be read or kept answers its call.
+fn block_refusal(e: crate::file_backing::BlockError) -> SyscallError {
+    match e {
+        crate::file_backing::BlockError::Device => SyscallError::Io,
+        crate::file_backing::BlockError::Exhausted => SyscallError::ResourceExhausted,
     }
 }
 
 fn read_file(file: &FileObject, buf: &mut UserBytesMut) -> Option<u64> {
     file.with(|state| {
-        let size = file_cache::size(state.file_id) as usize;
-        let available = size.saturating_sub(state.position);
-        let count = buf.len().min(available);
-        if count == 0 {
-            return Some(0);
-        }
-        let mut read = 0;
-        let mut refused = false;
-        while read < count {
-            let abs_pos = state.position + read;
-            let page_idx = (abs_pos / 4096) as u32;
-            let offset_in_page = abs_pos % 4096;
-            let remaining_in_page = 4096 - offset_in_page;
-            let to_read = remaining_in_page.min(count - read);
-            // A refused page is not a page of zeros: stop short rather than fake a hole under a success.
-            if file_cache::read_page(
-                state.file_id,
-                page_idx,
-                offset_in_page,
-                &mut buf.sub(read, to_read),
-            )
-            .is_err()
-            {
-                refused = true;
-                break;
-            }
-            read += to_read;
-        }
-        if read == 0 && refused {
-            return Some(SyscallError::Io.to_u64());
-        }
+        let (answer, read) = read_file_at(state.file_id, state.position, buf);
         state.position += read;
-        Some(read as u64)
+        Some(answer)
     })
+}
+
+/// Read file `file_id` at `position` into `buf`: the syscall's answer, and how
+/// many bytes it read.
+fn read_file_at(file_id: file_cache::FileId, position: usize, buf: &mut UserBytesMut) -> (u64, usize) {
+    let size = file_cache::size(file_id) as usize;
+    let count = buf.len().min(size.saturating_sub(position));
+    let mut read = 0;
+    let mut refused = None;
+    while read < count {
+        let abs_pos = position + read;
+        let page_idx = (abs_pos / 4096) as u32;
+        let offset_in_page = abs_pos % 4096;
+        let to_read = (4096 - offset_in_page).min(count - read);
+        // A refused page is not a page of zeros: stop short rather than fake a hole under a success.
+        if let Err(e) = file_cache::read_page(file_id, page_idx, offset_in_page, &mut buf.sub(read, to_read)) {
+            refused = Some(e);
+            break;
+        }
+        read += to_read;
+    }
+    if let (0, Some(e)) = (read, refused) {
+        return (block_refusal(e).to_u64(), 0);
+    }
+    (read as u64, read)
+}
+
+/// Write `buf` to file `file_id` at `position`, stamping it: the syscall's
+/// answer, and how many bytes it wrote.
+fn write_file_at(state: &mut OpenFileState, position: usize, buf: &UserBytes) -> (u64, usize) {
+    // Refused, never wrapped: past this the `u32` page index would alias a low page.
+    if (position as u64).saturating_add(buf.len() as u64) > file_cache::MAX_FILE_SIZE {
+        return (SyscallError::InvalidArgument.to_u64(), 0);
+    }
+    let mut written = 0;
+    let mut refused = None;
+    while written < buf.len() {
+        let abs_pos = position + written;
+        let page_idx = (abs_pos / 4096) as u32;
+        let offset_in_page = abs_pos % 4096;
+        let to_write = (4096 - offset_in_page).min(buf.len() - written);
+        // A page that cannot be re-read off the device is refused, not merged into zeros.
+        if let Err(e) = file_cache::write_page(state.file_id, page_idx, offset_in_page, &buf.sub(written, to_write)) {
+            refused = Some(e);
+            break;
+        }
+        written += to_write;
+    }
+    if let (0, Some(e)) = (written, refused) {
+        return (block_refusal(e).to_u64(), 0);
+    }
+    state.mtime = crate::clock::mtime_now();
+    file_cache::touch(state.file_id, state.mtime);
+    (written as u64, written)
+}
+
+/// Read a file at `offset`, leaving its position: any other object is
+/// refused `NotSupported`, as a pipe has no offset to read at.
+pub fn pread(object: &KObjectRef, offset: u64, buf: &mut UserBytesMut) -> u64 {
+    let KObjectRef::File(file) = object else { return SyscallError::NotSupported.to_u64() };
+    let Ok(position) = usize::try_from(offset) else { return 0 };
+    file.with(|state| read_file_at(state.file_id, position, buf).0)
+}
+
+/// Write a file at `offset`, leaving its position: any other object is
+/// refused `NotSupported`.
+pub fn pwrite(object: &KObjectRef, offset: u64, buf: &UserBytes) -> u64 {
+    let KObjectRef::File(file) = object else { return SyscallError::NotSupported.to_u64() };
+    let Ok(position) = usize::try_from(offset) else { return SyscallError::InvalidArgument.to_u64() };
+    file.with(|state| write_file_at(state, position, buf).0)
 }
 
 /// Read a device claim; takes `table` because describing a device installs handles into it.
@@ -527,13 +552,7 @@ fn record_bytes(record: &toyos_abi::pci::DeviceIrqRecord) -> &[u8] {
 pub fn try_read(object: &KObjectRef, buf: &mut UserBytesMut) -> Option<u64> {
     match object {
         KObjectRef::File(f) => read_file(f, buf),
-        KObjectRef::PipeRead(r) => pipe::try_read(r.id(), buf).map(|n| n as u64),
-        // A batch pinned where the reader is answers the read, so no byte
-        // after it is read until the batch is taken.
-        KObjectRef::Connection(c) => c.read(buf).map(|read| match read {
-            Ok(n) => n as u64,
-            Err(crate::pipe::AtBatch) => SyscallError::HandlesPending.to_u64(),
-        }),
+        KObjectRef::PipeRead(r) => r.pipe().try_read(buf).map(|n| n as u64),
         KObjectRef::Device(_) => unreachable!("a device claim is read by `read_device`"),
         KObjectRef::Console(_) => {
             let mut count = 0usize;
@@ -562,20 +581,21 @@ pub fn try_read(object: &KObjectRef, buf: &mut UserBytesMut) -> Option<u64> {
             buf.write_at(0, &[reason.to_byte()]);
             1
         }),
-        KObjectRef::PipeWrite(_) | KObjectRef::Acceptor(_) | KObjectRef::Inbox(_)
+        // A connection carries whole messages, which `SYS_MESSAGE_RECV` takes.
+        KObjectRef::Connection(_) | KObjectRef::PipeWrite(_) | KObjectRef::Acceptor(_) | KObjectRef::Inbox(_)
         | KObjectRef::SysCap(_)
-        | KObjectRef::Connector(_) | KObjectRef::Namespace(_)
+        | KObjectRef::Connector(_) | KObjectRef::WakeLatency(_) | KObjectRef::EventSignal(_) | KObjectRef::EventWait(_) | KObjectRef::Pager(_) | KObjectRef::Paged(_) | KObjectRef::Namespace(_)
         | KObjectRef::SharedMem(_) | KObjectRef::Process(_) | KObjectRef::Job(_) | KObjectRef::DeviceSet(_) => Some(SyscallError::PermissionDenied.to_u64()),
     }
 }
 
 fn write_pipe(object: &KObjectRef, buf: &UserBytes) -> Option<u64> {
-    let (id, _, landing) = pipe_write(object).expect("a pipe's write end writes its pipe");
-    match pipe::write(id, buf, landing) {
+    let pipe = pipe_write(object).expect("a pipe's write end writes its pipe");
+    match pipe.write(buf) {
         // The reader is gone, not absent: `NotFound` means the name is not there and nothing else may say so.
         pipe::PipeWrite::BrokenPipe => Some(SyscallError::Gone.to_u64()),
         pipe::PipeWrite::NoMemory => Some(SyscallError::ResourceExhausted.to_u64()),
-        pipe::PipeWrite::Wrote { n, .. } => Some(n as u64),
+        pipe::PipeWrite::Wrote(n) => Some(n as u64),
         pipe::PipeWrite::NoRoom => None,
     }
 }
@@ -583,49 +603,20 @@ fn write_pipe(object: &KObjectRef, buf: &UserBytes) -> Option<u64> {
 pub fn try_write(object: &KObjectRef, buf: &UserBytes) -> Option<u64> {
     match object {
         KObjectRef::File(f) => f.with(|state| {
-            // Refused, never wrapped: past this the `u32` page index would alias a low page.
-            if (state.position as u64).saturating_add(buf.len() as u64) > file_cache::MAX_FILE_SIZE {
-                return Some(SyscallError::InvalidArgument.to_u64());
-            }
-            let mut written = 0;
-            let mut refused = false;
-            while written < buf.len() {
-                let abs_pos = state.position + written;
-                let page_idx = (abs_pos / 4096) as u32;
-                let offset_in_page = abs_pos % 4096;
-                let remaining_in_page = 4096 - offset_in_page;
-                let to_write = remaining_in_page.min(buf.len() - written);
-                // A page that cannot be re-read off the device is refused, not merged into zeros.
-                if file_cache::write_page(
-                    state.file_id,
-                    page_idx,
-                    offset_in_page,
-                    &buf.sub(written, to_write),
-                )
-                .is_err()
-                {
-                    refused = true;
-                    break;
-                }
-                written += to_write;
-            }
-            if written == 0 && refused {
-                return Some(SyscallError::Io.to_u64());
-            }
+            let (answer, written) = write_file_at(state, state.position, buf);
             state.position += written;
-            state.mtime = crate::clock::mtime_now();
-            file_cache::touch(state.file_id, state.mtime);
-            Some(written as u64)
+            Some(answer)
         }),
-        KObjectRef::PipeWrite(_) | KObjectRef::Connection(_) => write_pipe(object, buf),
+        KObjectRef::PipeWrite(_) => write_pipe(object, buf),
         // The whole lines `klogd`'s queue has room for, and a trailing partial one:
         // a short count is a writer ahead of the console, told so.
         KObjectRef::Console(c) => Some(c.write(buf) as u64),
         KObjectRef::Device(d) => Some(write_device(d, buf)),
         KObjectRef::Null(_) => Some(buf.len() as u64),
-        KObjectRef::PipeRead(_) | KObjectRef::Acceptor(_)
+        // A connection carries whole messages, which `SYS_MESSAGE_SEND` sends.
+        KObjectRef::Connection(_) | KObjectRef::PipeRead(_) | KObjectRef::Acceptor(_)
         | KObjectRef::Inbox(_) | KObjectRef::SharedMem(_) | KObjectRef::SysCap(_)
-        | KObjectRef::Connector(_) | KObjectRef::Namespace(_)
+        | KObjectRef::Connector(_) | KObjectRef::WakeLatency(_) | KObjectRef::EventSignal(_) | KObjectRef::EventWait(_) | KObjectRef::Pager(_) | KObjectRef::Paged(_) | KObjectRef::Namespace(_)
         | KObjectRef::Process(_) | KObjectRef::Job(_) | KObjectRef::Notice(_) | KObjectRef::DeviceSet(_) => {
             Some(SyscallError::PermissionDenied.to_u64())
         }
@@ -687,10 +678,12 @@ pub fn fstat(object: &KObjectRef) -> Stat {
         KObjectRef::Acceptor(_) => plain(FileType::Pipe),
         KObjectRef::SharedMem(m) => Stat {
             // The verdict `pcidev::dma_map` lends a device by: a receiver judges a peer's region on it before mapping.
-            file_type: match (m.ram(), m.immutable()) {
-                (Some(_), _) => FileType::SharedMemory,
-                (None, Some(_)) => FileType::ImmutableMemory,
-                (None, None) => FileType::DeviceMemory,
+            file_type: if m.is_ram() {
+                FileType::SharedMemory
+            } else if m.immutable().is_some() {
+                FileType::ImmutableMemory
+            } else {
+                FileType::DeviceMemory
             } as u64,
             size: m.immutable().unwrap_or(m.size()),
             mtime: 0,
@@ -698,7 +691,7 @@ pub fn fstat(object: &KObjectRef) -> Stat {
             node: 0,
         },
         KObjectRef::Inbox(_) | KObjectRef::SysCap(_)
-        | KObjectRef::Connector(_) | KObjectRef::Namespace(_)
+        | KObjectRef::Connector(_) | KObjectRef::WakeLatency(_) | KObjectRef::EventSignal(_) | KObjectRef::EventWait(_) | KObjectRef::Pager(_) | KObjectRef::Paged(_) | KObjectRef::Namespace(_)
         | KObjectRef::Process(_) | KObjectRef::Job(_) | KObjectRef::Notice(_) | KObjectRef::DeviceSet(_) => plain(FileType::Unknown),
         KObjectRef::Device(d) => plain(match d.class() {
             device_registry::DeviceType::Framebuffer => FileType::Framebuffer,
@@ -727,7 +720,9 @@ pub fn ftruncate(object: &KObjectRef, size: u64) -> u64 {
     }
     // The seek pointer is not touched (POSIX ftruncate): a shrink leaves it past EOF.
     file.with(|state| {
-        file_cache::set_size(state.file_id, size);
+        if let Err(e) = file_cache::set_size(state.file_id, size) {
+            return SyscallError::from(e).to_u64();
+        }
         state.mtime = crate::clock::mtime_now();
         file_cache::touch(state.file_id, state.mtime);
         0
@@ -736,14 +731,16 @@ pub fn ftruncate(object: &KObjectRef, size: u64) -> u64 {
 
 pub fn has_data(object: &KObjectRef) -> bool {
     match object {
-        KObjectRef::PipeRead(r) => pipe::has_data(r.id()),
-        KObjectRef::Connection(c) => c.has_data(),
+        KObjectRef::PipeRead(r) => r.pipe().has_data(),
+        KObjectRef::Connection(c) => c.rx().readable(),
         KObjectRef::Console(_) => serial::has_data(),
         KObjectRef::Acceptor(a) => a.has_pending(),
         KObjectRef::Process(p) => p.finished(),
         KObjectRef::DeviceSet(set) => set.changed(),
-        KObjectRef::Job(_) => false,
+        KObjectRef::Job(j) => j.ready(),
         KObjectRef::Notice(n) => n.readable(),
+        KObjectRef::EventWait(e) => e.ready(),
+        KObjectRef::Pager(p) => p.has_notices(),
         KObjectRef::File(_) | KObjectRef::Null(_) => true,
         KObjectRef::Device(d) => match d.class() {
             // A claim its last handle has let go has nothing to read: a poll
@@ -757,7 +754,7 @@ pub fn has_data(object: &KObjectRef) -> bool {
             device_registry::DeviceType::Framebuffer => true,
         },
         KObjectRef::PipeWrite(_) | KObjectRef::Inbox(_) | KObjectRef::SysCap(_)
-        | KObjectRef::Connector(_) | KObjectRef::Namespace(_)
+        | KObjectRef::Connector(_) | KObjectRef::WakeLatency(_) | KObjectRef::EventSignal(_) | KObjectRef::Paged(_) | KObjectRef::Namespace(_)
         | KObjectRef::SharedMem(_) => false,
     }
 }
@@ -770,7 +767,7 @@ pub fn read_posts_are_readiness(object: &KObjectRef) -> bool {
         KObjectRef::SysCap(_) => true,
         KObjectRef::Console(_) | KObjectRef::PipeRead(_) | KObjectRef::PipeWrite(_) | KObjectRef::Connection(_)
         | KObjectRef::Acceptor(_) | KObjectRef::File(_) | KObjectRef::Device(_)
-        | KObjectRef::Inbox(_) | KObjectRef::Connector(_) | KObjectRef::Namespace(_)
+        | KObjectRef::Inbox(_) | KObjectRef::Connector(_) | KObjectRef::WakeLatency(_) | KObjectRef::EventSignal(_) | KObjectRef::EventWait(_) | KObjectRef::Pager(_) | KObjectRef::Paged(_) | KObjectRef::Namespace(_)
         | KObjectRef::SharedMem(_) | KObjectRef::Process(_) | KObjectRef::Job(_) | KObjectRef::Null(_)
         | KObjectRef::Notice(_) | KObjectRef::DeviceSet(_) => false,
     }
@@ -780,13 +777,13 @@ pub fn has_space(object: &KObjectRef) -> bool {
     match object {
         // Writable is room for any write that lands whole, so a non-blocking
         // one refused, retried on readiness, lands.
-        KObjectRef::PipeWrite(w) => pipe::has_space(w.id(), MAX_WHOLE_PIPE_WRITE),
-        KObjectRef::Connection(c) => pipe::has_space(c.tx(), 1),
+        KObjectRef::PipeWrite(w) => w.pipe().has_space(MAX_WHOLE_PIPE_WRITE),
+        KObjectRef::Connection(c) => c.tx().writable(),
         KObjectRef::File(_) | KObjectRef::Null(_) => true,
         KObjectRef::Console(_) => crate::log::console::has_room(),
         KObjectRef::PipeRead(_) | KObjectRef::Device(_) | KObjectRef::Acceptor(_)
         | KObjectRef::Inbox(_) | KObjectRef::SysCap(_)
-        | KObjectRef::Connector(_) | KObjectRef::Namespace(_)
+        | KObjectRef::Connector(_) | KObjectRef::WakeLatency(_) | KObjectRef::EventSignal(_) | KObjectRef::EventWait(_) | KObjectRef::Pager(_) | KObjectRef::Paged(_) | KObjectRef::Namespace(_)
         | KObjectRef::SharedMem(_) | KObjectRef::Process(_) | KObjectRef::Job(_) | KObjectRef::Notice(_) | KObjectRef::DeviceSet(_) => false,
     }
 }
@@ -805,7 +802,7 @@ pub fn mark_tty(object: &KObjectRef) -> u64 {
         KObjectRef::Connection(_) | KObjectRef::File(_) | KObjectRef::Device(_)
         | KObjectRef::Console(_) | KObjectRef::Acceptor(_) | KObjectRef::Inbox(_)
         | KObjectRef::SysCap(_) | KObjectRef::SharedMem(_)
-        | KObjectRef::Connector(_) | KObjectRef::Namespace(_)
+        | KObjectRef::Connector(_) | KObjectRef::WakeLatency(_) | KObjectRef::EventSignal(_) | KObjectRef::EventWait(_) | KObjectRef::Pager(_) | KObjectRef::Paged(_) | KObjectRef::Namespace(_)
         | KObjectRef::Process(_) | KObjectRef::Job(_) | KObjectRef::Null(_) | KObjectRef::Notice(_) | KObjectRef::DeviceSet(_) => {
             SyscallError::InvalidArgument.to_u64()
         }

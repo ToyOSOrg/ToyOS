@@ -22,7 +22,7 @@ use toyos::PciDev;
 use toyos_abi::syscall::{SyscallError, DEV_PREFIX};
 use toyos_blockring::disk::Settled;
 use toyos_blockring::BLOCK_BYTES;
-use toyos_blockserve::link::Link;
+use toyos_blockserve::link::{Handed, Link};
 use toyos_blockserve::sessions::MAX_SESSIONS;
 use toyos_blockserve::{Device, Sessions};
 
@@ -47,8 +47,10 @@ const TOKEN_LINK: u64 = 1;
 const TOKEN_STOP: u64 = 2;
 const TOKEN_SESSION: u64 = 0x1_0000;
 
-/// The controller as `toyos_gpt` reads it: its own sectors, served a 4 KiB
-/// block at a time, and floored to whole blocks.
+/// The controller as `toyos_gpt` reads it: every sector of the namespace,
+/// a 4 KiB block at a time where the block is whole and one sector at a time
+/// past the last whole block, where the backup table is on a namespace whose
+/// count is not whole blocks.
 struct Sectors<'a> {
     ctrl: &'a mut Controller,
     block: Vec<u8>,
@@ -59,20 +61,19 @@ impl toyos_gpt::Sectors for Sectors<'_> {
         self.ctrl.lba_bytes
     }
     fn lba_count(&self) -> u64 {
-        let per = BLOCK_BYTES as u64 / self.ctrl.lba_bytes as u64;
-        self.ctrl.sectors / per * per
-    }
-    fn lba_count_granularity(&self) -> core::num::NonZeroU64 {
-        core::num::NonZeroU64::new(BLOCK_BYTES as u64 / self.ctrl.lba_bytes as u64).expect("at least one")
+        self.ctrl.sectors
     }
     fn read_lba(&mut self, lba: u64, buf: &mut [u8]) -> bool {
-        let lba_bytes = self.ctrl.lba_bytes as u64;
-        let at = lba * lba_bytes;
-        if !self.ctrl.read_block(at / BLOCK_BYTES as u64, &mut self.block) {
+        let per = BLOCK_BYTES as u64 / self.ctrl.lba_bytes as u64;
+        let first = lba / per * per;
+        if first + per > self.ctrl.sectors {
+            return self.ctrl.read_sectors(lba, buf);
+        }
+        if !self.ctrl.read_sectors(first, &mut self.block) {
             return false;
         }
-        let off = (at % BLOCK_BYTES as u64) as usize;
-        buf.copy_from_slice(&self.block[off..off + lba_bytes as usize]);
+        let off = ((lba - first) * self.ctrl.lba_bytes as u64) as usize;
+        buf.copy_from_slice(&self.block[off..off + self.ctrl.lba_bytes as usize]);
         true
     }
 }
@@ -91,7 +92,7 @@ impl Device for Controller {
         }
         self.vwc
     }
-    fn dma_map(&mut self, region: toyos::RawHandle) -> Result<u64, SyscallError> {
+    fn dma_map(&mut self, region: toyos::BorrowedHandle<'_>) -> Result<u64, SyscallError> {
         self.claim().dma_map(region).map(|m| m.device_addr)
     }
     fn dma_unmap(&mut self, device_addr: u64) -> Result<(), SyscallError> {
@@ -113,7 +114,7 @@ fn main() {
     let dev = claim();
     let info = dev.describe().unwrap_or_else(|why| panic!("nvme: the claim would not describe itself: {why:?}"));
     let name = format!("nvme {:02x}:{:02x}.{}", info.bus, info.dev, info.func);
-    let stop = Endowments::get().take::<toyos::Pipe>(toyos_quiesce::DRIVER_STOP);
+    let stop = Endowments::get().take::<toyos::wake::Bell>(toyos_quiesce::DRIVER_STOP);
     let mut link = Link::new(name.clone())
         .unwrap_or_else(|| panic!("{name}: started with no `{}` port: a disk driver's row receives it", toyos_blockring::disk::PORT));
     let mut ctrl = match Controller::open(dev, &info) {
@@ -133,8 +134,7 @@ fn main() {
         ctrl.sectors
     );
     let read = toyos_blockserve::table::read(&mut Sectors { ctrl: &mut ctrl, block: vec![0u8; BLOCK_BYTES] });
-    let parts = toyos_blockserve::table::say(&name, read);
-    let mut disk = Sessions::new(name.clone(), parts);
+    let mut disk = Sessions::new(name.clone(), read);
     link.offer(DISK, disk.offered());
     link.settle(Settled::Offered);
     serve(&name, &mut ctrl, &mut disk, &mut link, stop.as_ref())
@@ -142,7 +142,7 @@ fn main() {
 
 /// A driver whose controller cannot be used: it keeps its link, so the
 /// service goes on saying so, and opens nothing.
-fn idle(link: &mut Link, stop: Option<&toyos::Pipe>) -> ! {
+fn idle(link: &mut Link, stop: Option<&toyos::wake::Bell>) -> ! {
     let poller = Poller::new(2);
     loop {
         link.watch(&poller, TOKEN_LINK);
@@ -154,14 +154,11 @@ fn idle(link: &mut Link, stop: Option<&toyos::Pipe>) -> ! {
         if stopping {
             std::process::exit(0);
         }
-        for handed in link.take() {
-            toyos_abi::syscall::close(handed.region);
-            drop(handed.conn);
-        }
+        drop(link.take());
     }
 }
 
-fn serve(name: &str, ctrl: &mut Controller, disk: &mut Sessions, link: &mut Link, stop: Option<&toyos::Pipe>) -> ! {
+fn serve(name: &str, ctrl: &mut Controller, disk: &mut Sessions, link: &mut Link, stop: Option<&toyos::wake::Bell>) -> ! {
     let poller = Poller::new(3 + MAX_SESSIONS as u32);
     let mut ready: Vec<u64> = Vec::new();
     let mut done: Vec<Done> = Vec::new();
@@ -199,12 +196,20 @@ fn serve(name: &str, ctrl: &mut Controller, disk: &mut Sessions, link: &mut Link
         }
 
         for handed in link.take() {
-            if handed.session.disk != DISK {
-                println!("{name}: the block service handed a session on disk {}, which this driver never offered", handed.session.disk);
-                toyos_abi::syscall::close(handed.region);
+            let on = match &handed {
+                Handed::Session { session, .. } => session.disk,
+                Handed::Describe { disk, .. } => *disk,
+                Handed::Designate { order, .. } => order.disk,
+            };
+            if on != DISK {
+                println!("{name}: the block service handed work on disk {on}, which this driver never offered");
                 continue;
             }
-            disk.open(ctrl, handed.conn, handed.region, handed.session.unique, handed.session.writes);
+            match handed {
+                Handed::Session { session, conn, region } => disk.open(ctrl, conn, region, session.unique, session.writes),
+                Handed::Describe { conn, .. } => disk.describe(conn),
+                Handed::Designate { order, conn } => disk.designate(ctrl, conn, order),
+            }
         }
         for id in disk.ids() {
             if ready.contains(&(TOKEN_SESSION + id)) {

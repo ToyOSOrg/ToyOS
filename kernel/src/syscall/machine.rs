@@ -166,14 +166,42 @@ pub(super) fn sys_shutdown(syscap: RawHandle) -> u64 {
     if let Err(e) = demand_syscap(syscap, Rights::POWER) {
         return e.refuse();
     }
-    if let Some(why) = power::shutdown_refused() {
-        log!("shutdown: {why} — refused");
-        return SyscallError::NotSupported.to_u64();
+    if let Some(refused) = shutdown_refused() {
+        return refused.to_u64();
     }
     match quiesce("Shutting down.") {
         Ok((stopping, wire)) => power::shutdown(stopping, wire),
         Err(e) => e.to_u64(),
     }
+}
+
+/// Whether `sys_shutdown` or `sys_reboot` would stop the machine, on their right: their refusal before anything is torn down, or `0`.
+pub(super) fn sys_machine_stops(syscap: RawHandle, stop: u64) -> u64 {
+    if let Err(e) = demand_syscap(syscap, Rights::POWER) {
+        return e.refuse();
+    }
+    let refused = match MachineStop::from_u64(stop) {
+        Some(MachineStop::Shutdown) => shutdown_refused(),
+        Some(MachineStop::Reboot) => reboot_refused(),
+        None => return SyscallError::InvalidArgument.to_u64(),
+    };
+    refused.map_or(0, SyscallError::to_u64)
+}
+
+/// The power-off's refusal before anything is torn down, said, where this machine has none.
+fn shutdown_refused() -> Option<SyscallError> {
+    let why = power::shutdown_refused()?;
+    log!("shutdown: {why} — refused");
+    Some(SyscallError::NotSupported)
+}
+
+/// The reset's refusal before anything is torn down, said, where this machine has none.
+fn reboot_refused() -> Option<SyscallError> {
+    if power::can_reboot() {
+        return None;
+    }
+    log!("reboot: this machine has no reset this kernel performs — refused");
+    Some(SyscallError::NotSupported)
 }
 
 /// Returns the machine to firmware; requires a `SysCap` carrying [`Rights::POWER`]. Returns only when refused.
@@ -182,9 +210,8 @@ pub(super) fn sys_reboot(syscap: RawHandle) -> u64 {
     if let Err(e) = demand_syscap(syscap, Rights::POWER) {
         return e.refuse();
     }
-    if !power::can_reboot() {
-        log!("reboot: this machine has no reset this kernel performs — refused");
-        return SyscallError::NotSupported.to_u64();
+    if let Some(refused) = reboot_refused() {
+        return refused.to_u64();
     }
     match quiesce("Rebooting.") {
         Ok((_, wire)) => power::reboot(wire),
@@ -287,15 +314,9 @@ pub(super) fn sys_sysinfo(syscap: RawHandle, out: &mut UserBytesMut) -> u64 {
         };
         let is_thread: u8 = if tid != proc.main_tid() { 1 } else { 0 };
 
-        let memory = if let Some(data) = proc.process_data().try_lock() {
-            let demand = data.demand_pages.iter().map(|p| p.size() as u64).sum::<u64>();
-            let mmap = data.mmap_regions.iter().filter_map(|r| r._pages.as_ref()).map(|p| p.size() as u64).sum::<u64>();
-            let tls = data.elf.dynamic_tls_blocks.values().map(|p| p.size() as u64).sum::<u64>();
-            let libs: u64 = data.elf.loaded_libs.iter().map(|l| l.memory.size() as u64).sum();
-            demand + mmap + tls + libs
-        } else {
-            0
-        };
+        // Its private memory populated now; a `try_lock`, since the roster is
+        // read with the process table held.
+        let memory = proc.process_data().try_lock().map_or(0, |data| data.space.usage().resident_bytes());
         let cpu_ns = thread.sched().map_or(0, crate::scheduler::task_cpu_ns);
         let pid = proc.pid();
 
@@ -330,6 +351,16 @@ pub(super) fn sys_counters(syscap: RawHandle, out: &mut UserBytesMut) -> u64 {
         Ok(records) => records as u64,
         Err(e) => e.to_u64(),
     }
+}
+
+/// The sources the loader handed, into `out`: requires a `SysCap` carrying
+/// `Rights::INVENTORY`.
+pub(super) fn sys_boot_sources(syscap: RawHandle, out: &mut UserBytesMut) -> u64 {
+    if let Err(e) = demand_syscap(syscap, Rights::INVENTORY) {
+        return e.refuse();
+    }
+    out.write_at(0, toyos_abi::usersafe::bytes(&crate::loaded::sources()));
+    0
 }
 
 /// The most records one `SYS_DEVICE_INVENTORY` buffer may be declared to hold,

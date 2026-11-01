@@ -167,13 +167,16 @@ impl Kicker for Kicks {
     }
 }
 
-/// Loom explores every interleaving of the modelled threads; the preemption
-/// bound keeps the state space of the three-thread models in the seconds
-/// range. Every case here is small enough that the bound is not the limiting
-/// factor — the primitives' critical sections are a handful of atomics — but
-/// it is stated explicitly rather than left to loom's default.
+/// Loom explores every interleaving of the modelled threads with at most
+/// three preemptions, which keeps the three-thread models in the seconds
+/// range; it is stated explicitly rather than left to loom's default.
 pub fn model(f: impl Fn() + Sync + Send + 'static) {
+    model_bounded(3, f);
+}
+
+/// [`model`] with at most `preemptions`, for a model of more threads.
+pub fn model_bounded(preemptions: usize, f: impl Fn() + Sync + Send + 'static) {
     let mut builder = loom::model::Builder::new();
-    builder.preemption_bound = Some(3);
+    builder.preemption_bound = Some(preemptions);
     builder.check(f);
 }

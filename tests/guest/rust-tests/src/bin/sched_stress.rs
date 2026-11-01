@@ -2,7 +2,6 @@ use std::sync::Arc;
 use std::thread;
 use std::time::Duration;
 
-use toyos_abi::syscall;
 use toyos::poller::{Poller, READABLE};
 use toyos::{namespace, port};
 
@@ -24,18 +23,15 @@ fn test_acceptor_isolation_io_uring() {
 
     // Port a's poll, waited on with no deadline: its connection is the event.
     let a = thread::spawn(move || {
-        let handle = acc_a.into_raw();
         let poller = Poller::new(1);
-        poller.watch_raw(handle, READABLE, 0);
+        poller.watch(&acc_a, READABLE, 0);
         poller.wait(1, u64::MAX, |_| ());
-        syscall::close(handle);
     });
 
     // Port b's, registered before the connection and asked only after a's poll
     // completed: the order, not a window, is what makes its silence a verdict.
-    let b = acc_b.into_raw();
     let b_poller = Poller::new(1);
-    b_poller.watch_raw(b, READABLE, 0);
+    b_poller.watch(&acc_b, READABLE, 0);
 
     // Open a connection through port A's connector only.
     let ns = namespace::build().add("a", &con_a).finish().expect("a namespace naming port a");
@@ -45,7 +41,7 @@ fn test_acceptor_isolation_io_uring() {
     a.join().expect("port a's watcher panicked");
     let mut b_poll_ready = false;
     b_poller.wait(0, 0, |_| b_poll_ready = true);
-    syscall::close(b);
+    drop(acc_b);
 
     assert!(!b_poll_ready, "port b's poll completed spuriously — acceptor isolation broken!");
 
@@ -61,12 +57,9 @@ fn test_connect_storm() {
     );
 
     let server = thread::spawn(move || {
-        let handle = acceptor.into_raw();
         for _ in 0..num_clients {
-            let conn = syscall::accept(handle).expect("accept failed");
-            syscall::close(conn);
+            drop(acceptor.accept().expect("accept failed"));
         }
-        syscall::close(handle);
     });
 
     thread::sleep(Duration::from_millis(50));

@@ -7,13 +7,15 @@
 //! its own handle kills itself, and ends killed rather than exiting.
 
 use std::io::{Read, Write};
-use std::os::toyos::process::{ChildExt, CommandExt};
+use std::os::toyos::io::AsRawHandle;
+use std::os::toyos::process::CommandExt;
 use std::process::{Child, Command, Stdio};
 use std::sync::atomic::{AtomicU32, Ordering};
 
 use toyos::ipc::Connection;
 use toyos::process::Process;
 use toyos::shm::SharedMemory;
+use toyos::endow::FromHandle;
 use toyos::{endow, namespace, port, OwnedHandle};
 use toyos_abi::syscall::{self, SVC_LABEL};
 use toyos_abi::RawHandle;
@@ -84,7 +86,7 @@ fn killer_child() -> (Connection, Child) {
         .expect("a namespace carrying one connector");
     let child = Command::new(SELF_PATH)
         .arg("killer")
-        .endow(SVC_LABEL, ns.into_raw().0)
+        .endow(SVC_LABEL, ns.into())
         .stdout(Stdio::piped())
         .spawn()
         .expect("spawn a killer");
@@ -118,12 +120,12 @@ fn word(go: &SharedMemory) -> &AtomicU32 {
 fn killer() -> ! {
     let ns = endow::namespace().expect("the parent endowed a namespace");
     let conn = ns.open(SERVICE).expect("connect through the endowed connector");
-    let header = conn.recv_header().expect("the arming frame");
-    assert_eq!(header.msg_type, ARM, "an unexpected frame");
-    let [word_handle, victim] = conn.recv_handles_exact::<2>(&header).expect("the word and the victim");
+    let mut rx = toyos::ipc::FrameRx::<{ toyos::ipc::MAX_FRAME_LEN as usize }>::new();
+    let frame = rx.recv(&conn).expect("the arming frame");
+    assert_eq!(frame.msg_type, ARM, "an unexpected frame");
+    let [word_handle, victim] = rx.take_handles::<2>().expect("the word and the victim");
     let go = SharedMemory::lent(word_handle, WORD_BYTES).expect("map the word");
-    // SAFETY: the parent sent one handle to the victim, which nothing else here owns.
-    let victim = unsafe { Process::from_raw(victim) };
+    let victim = Process::from_handle(victim);
 
     let mut out = std::io::stdout();
     out.write_all(b"armed\n").expect("say armed");

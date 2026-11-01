@@ -7,7 +7,7 @@ opened: 2026-09-28
 # A client waits on the compositor's answer with no bound
 
 `window::clipboard_set` (`sdk/window/src/lib.rs`) blocks in
-`recv_header` for `MSG_COPY_REGION` on a copy past `MAX_INLINE_PAYLOAD`, and
+`FrameRx::recv` for `MSG_COPY_REGION` on a copy past `MAX_INLINE_PAYLOAD`, and
 `Window::create` blocks the same way for `MSG_WINDOW_CREATED`. Neither wait has
 a deadline, so a compositor that is alive and not answering wedges every
 terminal or editor that copies, and every program that asks for a window.

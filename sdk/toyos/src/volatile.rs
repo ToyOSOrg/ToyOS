@@ -4,7 +4,8 @@
 //!
 //! **Every driver in userland reaches such memory through this and nothing
 //! else**: a second window with a weaker bound is the one reached on the boot
-//! nobody watched.
+//! nobody watched. Bytes only peers write are copied through
+//! [`crate::shm::Bytes`].
 //!
 //! Volatile because every one of them races this process: a plain read of a
 //! completion's phase bit can be hoisted out of the loop that waits on it, a

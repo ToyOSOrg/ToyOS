@@ -1,6 +1,7 @@
 //! x86-64 instruction paths, admitted by CPUID and, for AVX state, XCR0.
-//! UEFI preserves every used register inside each assembly block and takes
-//! only AES and CLMUL. Ordinary hosts use Rust intrinsics and the ABI.
+//! UEFI takes AES, CLMUL and SHA, whose assembly blocks preserve every vector
+//! register they use, and the general-register 2^255 - 19 kernels. Ordinary
+//! hosts use Rust intrinsics and the ABI.
 //! Unaligned loads admit byte-aligned keys and buffers.
 
 #[cfg(target_os = "uefi")]
@@ -15,12 +16,19 @@ use super::Powers;
 mod aesni;
 #[cfg(not(target_os = "uefi"))]
 mod chacha;
+mod f25519;
+#[cfg(not(target_os = "uefi"))]
+mod montgomery;
+#[cfg(not(target_os = "uefi"))]
+mod p256;
 #[cfg(not(target_os = "uefi"))]
 mod poly1305;
 #[cfg(not(target_os = "uefi"))]
 mod sha;
 #[cfg(not(target_os = "uefi"))]
 mod vaes512;
+#[cfg(any(target_os = "uefi", test))]
+mod sha_saving;
 
 /// What CPUID and XCR0 admit, read once per process. The module contract
 /// makes features uniform across the CPUs a process runs on.
@@ -40,6 +48,7 @@ impl Features {
     const VPCLMUL: u32 = 1 << 8;
     const AVX512VL: u32 = 1 << 9;
     const AVX512BW: u32 = 1 << 10;
+    const ADX: u32 = 1 << 11;
 
     fn has(self, bits: u32) -> bool {
         self.0 & bits == bits
@@ -64,8 +73,11 @@ impl Features {
     pub(super) fn bmi2(self) -> bool {
         self.has(Self::BMI2)
     }
+    /// MULX and ADCX/ADOX.
+    pub(super) fn bmi2_adx(self) -> bool {
+        self.has(Self::BMI2 | Self::ADX)
+    }
     /// SHA-NI with the SSSE3 and SSE4.1 shuffles its message schedule takes.
-    #[cfg(not(target_os = "uefi"))]
     pub(super) fn sha(self) -> bool {
         self.has(Self::SHA | Self::SSSE3 | Self::SSE41)
     }
@@ -86,23 +98,28 @@ impl Features {
 
     /// Intel SDM Vol. 2A, CPUID: leaf 1 ECX bits 1 (PCLMULQDQ), 9 (SSSE3),
     /// 19 (SSE4.1), 25 (AES), 27 (OSXSAVE) and 28 (AVX); leaf 7 sub-leaf 0
-    /// EBX bits 5 (AVX2), 8 (BMI2), 16 (AVX512F), 29 (SHA), 30 (AVX512BW)
+    /// EBX bits 5 (AVX2), 8 (BMI2), 16 (AVX512F), 19 (ADX), 29 (SHA), 30 (AVX512BW)
     /// and 31 (AVX512VL), ECX bits 9 (VAES) and 10 (VPCLMULQDQ). Vol. 1
     /// §13.3: AVX needs XCR0's SSE and AVX state (bits 1 and 2) enabled by
     /// the OS, AVX-512 its opmask, ZMM_Hi256 and Hi16_ZMM state (bits 5 to 7)
     /// too.
     #[allow(unused_unsafe, reason = "CPUID is unsafe on the supported Rust 1.89")]
     fn read() -> Self {
-        // Leaf 0 and leaf 1 exist on every x86-64 CPU; leaf 7 where leaf 0
-        // says so; XGETBV where OSXSAVE says so.
+        // SAFETY: leaf 0 and leaf 1 exist on every x86-64 CPU.
         let (leaf1, max) = unsafe { (__cpuid(1).ecx, __cpuid(0).eax) };
         let (leaf7b, leaf7c) = if max >= 7 {
+            // SAFETY: leaf 0 says leaf 7 exists.
             let leaf7 = unsafe { __cpuid_count(7, 0) };
             (leaf7.ebx, leaf7.ecx)
         } else {
             (0, 0)
         };
-        let xcr0 = if leaf1 & (3 << 27) == 3 << 27 { unsafe { _xgetbv(0) } } else { 0 };
+        let xcr0 = if leaf1 & (3 << 27) == 3 << 27 {
+            // SAFETY: OSXSAVE says XGETBV is enabled.
+            unsafe { _xgetbv(0) }
+        } else {
+            0
+        };
         Self::decode(leaf1, leaf7b, leaf7c, xcr0)
     }
 
@@ -116,6 +133,7 @@ impl Features {
             | bit(leaf1, 9, Self::SSSE3)
             | bit(leaf1, 19, Self::SSE41)
             | bit(leaf7b, 8, Self::BMI2)
+            | bit(leaf7b, 19, Self::ADX)
             | bit(leaf7b, 29, Self::SHA);
         if ymm {
             bits |= bit(leaf7b, 5, Self::AVX2) | bit(leaf7c, 9, Self::VAES) | bit(leaf7c, 10, Self::VPCLMUL);
@@ -127,19 +145,84 @@ impl Features {
     }
 }
 
+/// The cache publishes only this public word, not any other memory.
+static FEATURES: AtomicU32 = AtomicU32::new(0);
+
+/// Inline: every instruction path asks, several times per message.
+#[inline(always)]
 pub(super) fn features() -> Features {
     if cfg!(feature = "portable") {
         return Features(Features::READ);
     }
-    // The cache publishes only this public word, not any other memory.
-    static FEATURES: AtomicU32 = AtomicU32::new(0);
     let cached = FEATURES.load(Ordering::Relaxed);
     if cached & Features::READ != 0 {
         return Features(cached);
     }
+    first_features()
+}
+
+#[cold]
+#[inline(never)]
+fn first_features() -> Features {
     let read = Features::read();
     FEATURES.store(read.0, Ordering::Relaxed);
     read
+}
+
+/// RSA's Montgomery multiplication on BMI2 and ADX, when the CPU has them:
+/// out and the returned top word are the unreduced result, below 2m.
+#[cfg(not(target_os = "uefi"))]
+pub(super) fn rsa_mul(a: &[u64], b: &[u64], m: &[u64], n0: u64, n: usize, out: &mut [u64]) -> Option<u64> {
+    if !features().bmi2_adx() {
+        return None;
+    }
+    assert!(n.is_multiple_of(4) && n <= 64 && a.len() >= n && b.len() >= n && m.len() >= n && out.len() >= n);
+    // CPUID admitted BMI2 and ADX, and the lengths are checked above.
+    Some(unsafe { montgomery::mul(a, b, m, n0, n, out) })
+}
+
+/// P-256 field multiplication by `p256::mul` where BMI2 and ADX are
+/// admitted.
+#[cfg(not(target_os = "uefi"))]
+#[inline]
+pub(super) fn p256_mul(a: &[u64; 4], b: &[u64; 4]) -> Option<[u64; 4]> {
+    if !features().bmi2_adx() {
+        return None;
+    }
+    // CPUID admitted BMI2 and ADX.
+    Some(unsafe { p256::mul(a, b) })
+}
+
+/// P-256 field squaring by `p256::square`, as [`p256_mul`].
+#[cfg(not(target_os = "uefi"))]
+#[inline]
+pub(super) fn p256_square(a: &[u64; 4]) -> Option<[u64; 4]> {
+    if !features().bmi2_adx() {
+        return None;
+    }
+    // CPUID admitted BMI2 and ADX.
+    Some(unsafe { p256::square(a) })
+}
+
+/// 2^255 - 19 multiplication by `f25519::mul` where BMI2 and ADX are
+/// admitted.
+#[inline]
+pub(super) fn f25519_mul(a: &[u64; 4], b: &[u64; 4]) -> Option<[u64; 4]> {
+    if !features().bmi2_adx() {
+        return None;
+    }
+    // SAFETY: CPUID admitted BMI2 and ADX.
+    Some(unsafe { f25519::mul(a, b) })
+}
+
+/// 2^255 - 19 squaring by `f25519::square`, as [`f25519_mul`].
+#[inline]
+pub(super) fn f25519_square(a: &[u64; 4]) -> Option<[u64; 4]> {
+    if !features().bmi2_adx() {
+        return None;
+    }
+    // SAFETY: CPUID admitted BMI2 and ADX.
+    Some(unsafe { f25519::square(a) })
 }
 
 /// A vector from 16 bytes by value. With no pointer there is no copy
@@ -187,7 +270,7 @@ pub(super) fn ghash_multiply(a: u128, b: u128) -> Option<u128> {
     let b = crate::secret::Secret(b.reverse_bits().to_le_bytes());
     let mut products = crate::secret::Secret([0u8; 48]);
     let mut saved = crate::secret::Secret([0u8; 80]);
-    // CPUID admitted CLMUL. All five used registers are restored; each memory
+    // SAFETY: CPUID admitted CLMUL. All five used registers are restored; each memory
     // operand refers to a distinct live array of the required size.
     unsafe {
         asm!(
@@ -226,7 +309,7 @@ pub(super) fn aes_encrypt(keys: &[u8; 240], rounds: usize, block: &mut [u8; 16])
         return false;
     }
     let mut saved = crate::secret::Secret([0u8; 32]);
-    // CPUID admitted AES. The schedule contains every round, `block` and
+    // SAFETY: CPUID admitted AES. The schedule contains every round, `block` and
     // `saved` are exclusive, and both XMM registers are restored before return.
     unsafe {
         asm!(
@@ -243,6 +326,16 @@ pub(super) fn aes_encrypt(keys: &[u8; 240], rounds: usize, block: &mut [u8; 16])
     true
 }
 
+#[cfg(target_os = "uefi")]
+pub(super) fn sha256_blocks(state: &mut [u32; 8], blocks: &[[u8; 64]]) -> bool {
+    if !features().sha() {
+        return false;
+    }
+    // SAFETY: CPUID admitted SHA and SSSE3.
+    unsafe { sha_saving::sha256(state, blocks) }
+    true
+}
+
 #[cfg(not(target_os = "uefi"))]
 pub(super) use hosted::*;
 
@@ -250,6 +343,7 @@ pub(super) use hosted::*;
 mod hosted {
     //! Each function checks its own admission and reports whether it ran.
     use super::{Powers, aesni, chacha, features, poly1305, sha, vaes512};
+    use crate::poly1305::Poly1305;
 
     pub(in crate::arch) fn aes_expand(key: &[u8], keys: &mut [u8; 240]) -> bool {
         if !features().aes() {
@@ -270,11 +364,16 @@ mod hosted {
     }
 
     pub(in crate::arch) fn ghash_powers(h: &[u8; 16], powers: &mut Powers) -> bool {
-        if !features().aes_clmul() {
+        let features = features();
+        if features.vaes512() {
+            // 512-bit VPCLMULQDQ under ZMM state is admitted.
+            unsafe { vaes512::powers(h, powers) }
+        } else if features.aes_clmul() {
+            // CLMUL and SSSE3 are admitted.
+            unsafe { aesni::powers(h, powers) }
+        } else {
             return false;
         }
-        // CLMUL and SSSE3 are admitted.
-        unsafe { aesni::powers(h, powers) }
         true
     }
 
@@ -302,36 +401,32 @@ mod hosted {
         counter: u32,
         data: &mut [u8],
     ) -> bool {
-        let features = features();
-        if data.len() >= 512 && features.vaes512() {
-            // 512-bit VAES under ZMM state is admitted.
-            unsafe { vaes512::ctr(keys, rounds, nonce, counter, data) }
-        } else if features.aes_clmul() {
-            // AES and SSSE3 are admitted.
-            unsafe { aesni::ctr(keys, rounds, nonce, counter, data) }
-        } else {
+        if !features().aes_clmul() {
             return false;
         }
+        // AES and SSSE3 are admitted.
+        unsafe { aesni::ctr(keys, rounds, nonce, counter, data) }
         true
     }
 
-    /// Encrypts and hashes whole 128-byte batches from counter 2 on, and
-    /// returns the bytes it did; `powers` came from [`ghash_powers`].
-    pub(in crate::arch) fn gcm_seal(
+    /// CTR and GHASH over whole batches from counter 2 on, in one pass;
+    /// returns the bytes it did. `powers` came from [`ghash_powers`].
+    pub(in crate::arch) fn gcm_crypt(
         keys: &[u8; 240],
         rounds: usize,
         powers: &Powers,
         nonce: &[u8; 12],
         state: &mut [u8; 16],
         data: &mut [u8],
+        open: bool,
     ) -> usize {
         let features = features();
-        if features.vaes512() {
+        if data.len() >= 256 && features.vaes512() {
             // 512-bit VAES and VPCLMULQDQ under ZMM state are admitted.
-            unsafe { vaes512::seal(keys, rounds, powers, nonce, state, data) }
+            unsafe { vaes512::crypt(keys, rounds, powers, nonce, state, data, open) }
         } else if features.aes_clmul() {
             // AES, CLMUL and SSSE3 are admitted.
-            unsafe { aesni::seal(keys, rounds, powers, nonce, state, data) }
+            unsafe { aesni::crypt(keys, rounds, powers, nonce, state, data, open) }
         } else {
             0
         }
@@ -354,36 +449,42 @@ mod hosted {
         Some(unsafe { aesni::short(keys, rounds, powers, nonce, aad, data, stream) })
     }
 
-    pub(in crate::arch) fn chacha_seal(
+    pub(in crate::arch) fn chacha20_poly1305(
         key: &[u8; 32],
         counter: u64,
         nonce: &[u8; 8],
+        prefix: &[u8],
         data: &mut [u8],
-        r: &[u64; 3],
-        h: &mut [u64; 3],
-    ) -> usize {
-        if !features().avx2() {
-            return 0;
+        seal: bool,
+        pad: bool,
+    ) -> Option<Poly1305> {
+        // Block 0 alone is quicker in scalar code. With AVX-512VL's rounds the
+        // vector Poly1305 after them is faster than the stitch, as the T14
+        // measures it.
+        if data.is_empty() || !features().avx2() || !features().bmi2() || features().avx512vl() {
+            return None;
         }
-        // With AVX-512VL's rounds the caller's vector Poly1305 after them is
-        // faster than the stitch, as the T14 measures it.
-        if features().avx512vl() {
-            return 0;
-        }
-        // AVX2 under YMM state is admitted; the caller bounded the counter.
-        unsafe { chacha::seal(key, counter, nonce, data, r, h) }
+        // AVX2 and BMI2 under YMM state are admitted; the caller bounded the
+        // counter.
+        Some(unsafe { chacha::avx2::chacha20_poly1305(key, counter, nonce, prefix, data, seal, pad) })
     }
 
-    pub(in crate::arch) fn chacha_blocks(states: &[[u32; 16]; 4], n: usize, out: &mut [u8; 256]) -> bool {
+    pub(in crate::arch) fn chacha_blocks(
+        keys: [&[u8; 32]; 4],
+        counters: [u64; 4],
+        nonce: &[u8; 8],
+        n: usize,
+        out: &mut [u8; 256],
+    ) -> bool {
         if !features().avx2() {
             return false;
         }
         if features().avx512vl() {
             // AVX-512VL under ZMM state is admitted.
-            unsafe { chacha::avx512::blocks(states, n, out) }
+            unsafe { chacha::avx512::blocks(keys, counters, nonce, n, out) }
         } else {
             // AVX2 under YMM state is admitted.
-            unsafe { chacha::avx2::blocks(states, n, out) }
+            unsafe { chacha::avx2::blocks(keys, counters, nonce, n, out) }
         }
         true
     }
@@ -456,11 +557,34 @@ mod tests {
         for (bit, feature) in [(1, Features::CLMUL), (9, Features::SSSE3), (19, Features::SSE41), (25, Features::AES)] {
             assert_eq!(Features::decode(!(1 << bit), !0, !0, 0xe7).0 & feature, 0, "leaf 1 bit {bit}");
         }
-        for (bit, feature) in [(5, Features::AVX2), (8, Features::BMI2), (29, Features::SHA)] {
+        for (bit, feature) in [(5, Features::AVX2), (8, Features::BMI2), (19, Features::ADX), (29, Features::SHA)] {
             assert_eq!(Features::decode(!0, !(1 << bit), !0, 0xe7).0 & feature, 0, "leaf 7 EBX bit {bit}");
         }
         for (bit, feature) in [(9, Features::VAES), (10, Features::VPCLMUL)] {
             assert_eq!(Features::decode(!0, !0, !(1 << bit), 0xe7).0 & feature, 0, "leaf 7 ECX bit {bit}");
+        }
+    }
+
+    /// The loader's block, which only UEFI dispatches to, against the portable
+    /// rounds. A host without the instructions cannot test it, and says so
+    /// rather than passing.
+    #[test]
+    fn the_register_saving_sha256_block_matches_the_portable_rounds() {
+        assert!(
+            features().sha() || cfg!(feature = "portable"),
+            "this host's CPU has no SHA extensions, so nothing here can test the register-saving block"
+        );
+        if !features().sha() {
+            return;
+        }
+        let bytes: std::vec::Vec<u8> = (0..64 * 9).map(|i: usize| (i * 151 + i / 7) as u8).collect();
+        for n in 0..=9 {
+            let (blocks, _) = bytes[..64 * n].as_chunks::<64>();
+            let (mut saving, mut portable) = ([0x89ab_cdefu32; 8], [0x89ab_cdefu32; 8]);
+            // CPUID admitted SHA and SSSE3.
+            unsafe { sha_saving::sha256(&mut saving, blocks) };
+            crate::hash::sha256_rounds(&mut portable, blocks);
+            assert_eq!(saving, portable, "{n} blocks");
         }
     }
 
@@ -472,6 +596,10 @@ mod tests {
         assert_eq!(f.clmul(), on && std::is_x86_feature_detected!("pclmulqdq"));
         assert_eq!(f.avx2(), on && std::is_x86_feature_detected!("avx2"));
         assert_eq!(f.bmi2(), on && std::is_x86_feature_detected!("bmi2"));
+        assert_eq!(
+            f.bmi2_adx(),
+            on && std::is_x86_feature_detected!("bmi2") && std::is_x86_feature_detected!("adx")
+        );
         assert_eq!(
             f.sha(),
             on && std::is_x86_feature_detected!("sha")

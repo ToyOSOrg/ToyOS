@@ -1,0 +1,20 @@
+[package]
+name = "virtio-net"
+description = "The virtio network driver: one process per virtio-net function the kernel does not drive, holding its claim and carrying its frames to netstack over a link."
+edition = "2024"
+license = "MIT OR Apache-2.0"
+
+[dependencies]
+toyos-abi = { path = "../../sdk/abi" }
+toyos = { path = "../../sdk/toyos" }
+toyos-device-memory = { path = "../../lib/device-memory" }
+toyos-link = { path = "../../lib/link" }
+toyos-manifest = { path = "../../lib/manifest" }
+toyos-pci-claim = { path = "../../lib/pci-claim" }
+toyos-virtio = { path = "../../lib/virtio" }
+
+[dev-dependencies]
+toyos-pci-claim = { path = "../../lib/pci-claim", features = ["host-grant"] }
+
+[package.metadata.toyos.host]
+exempt.owns = "one virtio-net function, claimed from the kernel, and its link to netstack"

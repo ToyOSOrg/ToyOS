@@ -1,5 +1,6 @@
 use alloc::sync::Arc;
 
+use crate::mm::space::CopySource;
 use crate::object::shm::SharedMemObject;
 use toyos_abi::syscall::SyscallError;
 
@@ -11,6 +12,8 @@ const BLOCK_SIZE: usize = crate::mm::PAGE_SIZE as usize;
 pub enum BlockError {
     /// The backing itself failed the read.
     Device,
+    /// No memory to keep the page in: the kernel holds back what is left.
+    Exhausted,
 }
 
 pub type BlockResult = Result<(), BlockError>;
@@ -24,20 +27,25 @@ pub trait FileBacking: Send + Sync {
 
     /// Total file size in bytes.
     fn file_size(&self) -> u64;
+
+    /// The file's bytes as a spawn's segments copy them, each page at its
+    /// first touch: `NotFound` once the file is gone, `ResourceExhausted`
+    /// where what keeps them cannot be charged.
+    fn source(&self) -> Result<Arc<dyn CopySource>, SyscallError>;
 }
 
-/// An executable in a shared memory object handed over by handle: one a
-/// caller read into an object of its own, which is what every program a file
-/// server holds is spawned and paged from, since no file server's volume is
-/// the kernel's; or a boot image the loader verified.
+/// An executable in a shared memory object handed over by handle, since no
+/// file server's volume is the kernel's: a file server's object for the file
+/// (for ROOT, part of the boot image), or one a caller read into an object of
+/// its own; or a boot image the loader verified.
 ///
 /// **Nothing is copied at the call, and every page is copied once when it is
-/// read.** The object is the caller's memory, charged to it and alive while
-/// any process pages from it; its bytes stay the caller's to change. So each
-/// read takes one copy of the page into the reader's own buffer and what the
-/// loader keeps is that copy: a change after the hand-off reaches only pages
-/// not yet read, which is the caller changing its own child's program, and
-/// never a value the kernel checked and then read again.
+/// read.** The object is alive while any process pages from it, and a
+/// writable one's bytes stay its holders' to change. So each read takes one
+/// copy of the page into the reader's own buffer and what the loader keeps is
+/// that copy: a change after the hand-off reaches only pages not yet read,
+/// which is the caller changing its own child's program, and never a value
+/// the kernel checked and then read again.
 pub struct SharedImage {
     object: Arc<SharedMemObject>,
     size: u64,
@@ -62,22 +70,16 @@ impl FileBacking for SharedImage {
             return Ok(());
         }
         let valid = BLOCK_SIZE.min((self.size - file_offset) as usize);
-        // SAFETY: `over` held `size` inside the object, which is one physically
-        // contiguous run of ordinary memory (`is_ordinary`: pages the kernel
-        // allocated, or a boot image it keeps for the machine's life) alive
-        // while `object` lives, so `file_offset + valid <= size` bytes from its
-        // direct-map address are mapped; `buf` is the reader's own and never
-        // the object.
-        // No reference is formed over the object's bytes, which its holders
-        // may be writing: this is the one fetch of each.
-        unsafe {
-            let from = self.object.phys().as_ptr::<u8>().add(file_offset as usize);
-            core::ptr::copy_nonoverlapping(from, buf.as_mut_ptr(), valid);
-        }
+        // The one fetch of each byte: its holders may be writing it.
+        self.object.read(file_offset, &mut buf[..valid]);
         Ok(())
     }
 
     fn file_size(&self) -> u64 {
         self.size
+    }
+
+    fn source(&self) -> Result<Arc<dyn CopySource>, SyscallError> {
+        Ok(self.object.clone())
     }
 }

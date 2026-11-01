@@ -117,11 +117,11 @@ impl Ip {
         self.ifaces.get(iface.0).map(|i| i.igmp.mode())
     }
 
-    /// A transport's advice about its peer `remote`; it lands on the next hop's entry, the
-    /// gateway's for an off-link peer.
-    pub fn advise(&mut self, now: Instant, remote: Ipv4Addr, advice: Advice) {
+    /// A transport's advice about its peer `remote`, whose flow is from `source`; it lands on
+    /// the next hop's entry on the flow's own link, the gateway's for an off-link peer.
+    pub fn advise(&mut self, now: Instant, remote: Ipv4Addr, source: Source, advice: Advice) {
         let now = self.clock(now);
-        let Ok(route) = route::lookup(&self.ifaces, remote, Source::Any, None) else { return };
+        let Ok(route) = route::lookup(&self.ifaces, &self.order, remote, source, None) else { return };
         let NextHop::Neighbour(next_hop) = route.next_hop else { return };
         let Some((i, mut cx)) = self.split(now, route.iface) else { return };
         nud::advise(i, &mut cx, next_hop, advice == Advice::Confirmed);

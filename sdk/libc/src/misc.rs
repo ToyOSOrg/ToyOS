@@ -2,11 +2,11 @@
 
 use alloc::vec::Vec;
 use core::ptr;
-use core::sync::atomic::{AtomicU32, AtomicU8, Ordering};
+use core::sync::atomic::{AtomicU32, Ordering};
 
 use toyos_abi::syscall;
 
-use crate::alarmreq::SIGALRM;
+use crate::sigreq::SigAction;
 use crate::errcode::ENOSYS;
 use crate::strtonum;
 
@@ -119,51 +119,21 @@ pub unsafe extern "C" fn abort() -> ! {
     syscall::exit(134) // SIGABRT
 }
 
-// Signals. libc delivers none to a handler (`sigreq`); what it keeps is a
-// disposition already true, and `SIGALRM`'s decides what a due `alarm` does.
+// Signals: what is kept and where each goes is `sigreq`'s, the deliveries
+// `signal`'s.
 
-/// `signal.h`'s `struct sigaction`.
-#[repr(C)]
-#[derive(Clone, Copy)]
-pub struct SigAction {
-    pub(crate) handler: usize,
-    flags: u64,
-    restorer: usize,
-    mask: u64,
+/// The default action's end: out with `code`, without `atexit` or `fflush`.
+pub(crate) fn end(code: i32) -> ! {
+    unsafe { _exit(code) }
 }
 
-impl SigAction {
-    /// The action of `handler` alone, as `signal` makes one.
-    pub(crate) const fn of(handler: usize) -> Self {
-        Self { handler, flags: 0, restorer: 0, mask: 0 }
-    }
-}
-
-/// Each signal's kept disposition but `SIGALRM`'s: 0 the default, 1 ignored.
-static KEPT: [AtomicU8; crate::sigreq::SIGNALS] = [const { AtomicU8::new(0) }; crate::sigreq::SIGNALS];
-
-/// Set `signum`'s disposition to `new` if it is given, answering the one it
-/// replaces, or the `errno` it is refused with.
-fn disposition(signum: i32, new: Option<SigAction>) -> Result<SigAction, i32> {
-    use crate::sigreq::{index, set, Kept};
-    let slot = &KEPT[index(signum)?];
-    let kept = new.map(|new| set(signum, new.handler)).transpose()?;
-    if signum == SIGALRM {
-        // Kept whole, flags and mask with it, as `alarm` reads it.
-        return Ok(crate::alarm::act(new));
-    }
-    let old = match kept {
-        Some(kept) => slot.swap((kept == Kept::Ignore) as u8, Ordering::Relaxed),
-        None => slot.load(Ordering::Relaxed),
-    };
-    Ok(SigAction::of(if old == 1 { Kept::Ignore.handler() } else { Kept::Default.handler() }))
-}
-
-/// A disposition by its address: `SIG_DFL` and `SIG_IGN` are no functions,
-/// and a function is refused, as `sigaction` refuses it.
+/// A handler by its address: `SIG_DFL` and `SIG_IGN` are no functions. A
+/// handler `signal` keeps restarts what it interrupts, as BSD's and glibc's
+/// do.
 #[no_mangle]
 pub unsafe extern "C" fn signal(signum: i32, handler: *const u8) -> *const u8 {
-    match disposition(signum, Some(SigAction::of(handler as usize))) {
+    let action = SigAction { flags: crate::sigreq::SA_RESTART, ..SigAction::of(handler as usize) };
+    match crate::signal::act(signum, Some(action)) {
         Ok(old) => old.handler as *const u8,
         Err(errno) => {
             crate::errno::set(errno);
@@ -174,7 +144,7 @@ pub unsafe extern "C" fn signal(signum: i32, handler: *const u8) -> *const u8 {
 
 #[no_mangle]
 pub unsafe extern "C" fn sigaction(signum: i32, act: *const SigAction, oldact: *mut SigAction) -> i32 {
-    match disposition(signum, unsafe { act.as_ref() }.copied()) {
+    match crate::signal::act(signum, unsafe { act.as_ref() }.copied()) {
         Ok(old) => {
             if let Some(oldact) = unsafe { oldact.as_mut() } {
                 *oldact = old;
@@ -201,6 +171,13 @@ pub unsafe extern "C" fn sigprocmask(how: i32, set: *const u64, oldset: *mut u64
     }
 }
 
+/// What is pending: raised while every thread blocks it.
+#[no_mangle]
+pub unsafe extern "C" fn sigpending(set: *mut u64) -> i32 {
+    unsafe { *set = crate::signal::pending() };
+    0
+}
+
 #[no_mangle]
 pub unsafe extern "C" fn sigemptyset(set: *mut u64) -> i32 {
     unsafe { *set = 0 };
@@ -213,9 +190,9 @@ pub unsafe extern "C" fn sigfillset(set: *mut u64) -> i32 {
     0
 }
 
-#[no_mangle]
-pub unsafe extern "C" fn sigaddset(set: *mut u64, signo: i32) -> i32 {
-    match crate::sigmask::with(unsafe { *set }, signo) {
+/// `set` changed by `change`, or `-1` and `EINVAL` for a number no signal has.
+unsafe fn change_set(set: *mut u64, change: Option<u64>) -> i32 {
+    match change {
         Some(next) => {
             unsafe { *set = next };
             0
@@ -227,28 +204,43 @@ pub unsafe extern "C" fn sigaddset(set: *mut u64, signo: i32) -> i32 {
     }
 }
 
-/// What the signal's disposition does, as no handler is ever installed
-/// (`sigreq::raised`): nothing for one ignored, the process ended for a
-/// default that ends it, and a refusal otherwise.
+#[no_mangle]
+pub unsafe extern "C" fn sigaddset(set: *mut u64, signo: i32) -> i32 {
+    unsafe { change_set(set, crate::sigmask::with(*set, signo)) }
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn sigdelset(set: *mut u64, signo: i32) -> i32 {
+    unsafe { change_set(set, crate::sigmask::without(*set, signo)) }
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn sigismember(set: *const u64, signo: i32) -> i32 {
+    match crate::sigmask::with(0, signo) {
+        Some(bit) => i32::from(unsafe { *set } & bit != 0),
+        None => {
+            crate::errno::set(crate::errcode::EINVAL);
+            -1
+        }
+    }
+}
+
+/// Raise `sig` in the calling thread: its handler or its default action runs
+/// before this returns, unless the thread blocks it (`sigreq::raised`).
 #[no_mangle]
 pub unsafe extern "C" fn raise(sig: i32) -> i32 {
-    use crate::sigreq::{raised, Kept, Raised};
-    let kept = match disposition(sig, None) {
-        Ok(now) if now.handler == crate::alarmreq::SIG_IGN => Kept::Ignore,
-        Ok(_) => Kept::Default,
+    match crate::signal::raise(sig) {
+        Ok(()) => 0,
         Err(errno) => {
-            crate::errno::set(errno);
-            return -1;
-        }
-    };
-    match raised(sig, kept, crate::pthread::mask()) {
-        Raised::Nothing => 0,
-        Raised::End(code) => _exit(code),
-        Raised::Refused(errno) => {
             crate::errno::set(errno);
             -1
         }
     }
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn alarm(seconds: u32) -> u32 {
+    crate::signal::alarm(seconds)
 }
 
 // sysconf

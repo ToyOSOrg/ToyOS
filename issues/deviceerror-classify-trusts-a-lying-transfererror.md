@@ -56,8 +56,7 @@ and by the same rule would refuse `kernel/src/file_backing.rs`'s `impl` for
 the kernel's `BlockError`, the fileserver's for its `Attempted`
 (`system/fileserver/src/cache.rs`), the loader's `Outside`
 (`loader/src/microcode.rs`) and the crate's own test devices
-(`lib/bcachefs/tests/crash.rs`, `lib/bcachefs/tests/integration.rs`,
-`lib/bcachefs/tests/upstream_fixture.rs`).
+(`lib/bcachefs/tests/crash.rs`, `lib/bcachefs/tests/integration.rs`).
 Implementing `TransferError` from outside is what the trait is *for*: a
 foreign block device is the only authority on whether its own transfer was
 attempted. Making `classify` crate-private has the identical problem, because

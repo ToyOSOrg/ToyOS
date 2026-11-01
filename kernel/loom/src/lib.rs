@@ -171,6 +171,9 @@ pub mod cpu_slice;
 #[path = "../../src/shootdown.rs"]
 pub mod shootdown;
 
+#[path = "../../src/tlb_tags.rs"]
+pub mod tlb_tags;
+
 /// The CPU roster and the release/answer word, driven by `tests/smp_bringup.rs`;
 /// under `loom` alone, as is the [`arch::cpu`] shim it names.
 #[cfg(feature = "loom")]
@@ -404,6 +407,12 @@ pub mod capture_access;
 #[path = "../../../sdk/toyos/src/log/ring.rs"]
 pub mod log_ring;
 
+/// The clock page's latch, which the kernel replaces the clock's line through
+/// while every process and the kernel's own NMIs read it: not the kernel's
+/// file but the ABI's, driven by `tests/clock_latch.rs`.
+#[path = "../../../sdk/abi/src/clock/latch.rs"]
+pub mod clock_latch;
+
 /// The seqlock the panic console's descriptor and each CPU's counters are
 /// published through, driven by `tests/panic_console_publish.rs` and
 /// `tests/counters_round.rs`.
@@ -415,6 +424,11 @@ pub mod seqlock;
 #[cfg(feature = "loom")]
 #[path = "../../src/drivers/serial_lock.rs"]
 pub mod serial_lock;
+
+/// What the job a scheduler task holds counts its memory in.
+#[cfg(feature = "loom")]
+#[path = "../../pure/frames.rs"]
+pub mod frames;
 
 /// The scheduler core, `kernel/pure/sched/`, driven by `tests/loom_*.rs` over
 /// [`sched_model`]'s scaffolding.

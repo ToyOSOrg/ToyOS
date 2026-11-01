@@ -26,7 +26,7 @@
 //!   than [`MAX_ATTEMPTS`], which is the fewest that can make the client give
 //!   a write or a flush up ([`Law::Durable`]).
 
-use alloc::collections::{BTreeMap, VecDeque};
+use alloc::collections::{BTreeMap, BTreeSet, VecDeque};
 use alloc::format;
 use alloc::string::String;
 use alloc::vec::Vec;
@@ -37,12 +37,16 @@ use std::collections::HashSet;
 use toyos_blockhold::Holds;
 use toyos::transport::{Consumer, Place, Producer, Violation, Word};
 
-use crate::client::{Client, Outcome, Ticket, MAX_ATTEMPTS};
+use crate::client::{Ask, Client, Outcome, Placing, Ticket, MAX_ATTEMPTS};
 use crate::entry::{Completion, Op, Request};
 use crate::layout::{ARENA, CQE_WORDS, SQE_WORDS};
 use crate::server::{ServerSession, Taken};
 
 const BLOCKS: usize = 2;
+
+/// The blocks the client keeps before its caller's writes wait for its own
+/// flush: one, so every script reaches it.
+const LIMIT: u64 = 1;
 
 /// How many of each failure one run may meet.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
@@ -84,6 +88,8 @@ pub enum Step {
 pub enum Law {
     Answers,
     Durable,
+    /// A caller's write first goes out while the client keeps its limit.
+    Kept,
 }
 
 /// One word of the session page. The model runs on one thread, so every order
@@ -100,6 +106,15 @@ impl Word for Shared {
     }
     fn swap(&self, value: u32, _: Ordering) -> u32 {
         self.0.replace(value)
+    }
+    fn compare_exchange(&self, current: u32, new: u32, _: Ordering, _: Ordering) -> Result<u32, u32> {
+        let was = self.0.get();
+        if was == current {
+            self.0.set(new);
+            Ok(was)
+        } else {
+            Err(was)
+        }
     }
 }
 
@@ -200,7 +215,11 @@ struct Server {
 
 #[derive(Clone)]
 struct World {
-    client: Client<{ DEPTH as usize }>,
+    client: Client<Ticket, { DEPTH as usize }>,
+    /// The writes that have gone out at least once.
+    sent: BTreeSet<Ticket>,
+    /// The blocks the client keeps before its caller's writes wait.
+    limit: u64,
     next: usize,
     /// Every answer each ticket has had.
     answers: BTreeMap<Ticket, Vec<Outcome>>,
@@ -248,14 +267,16 @@ pub fn explore(script: &[Step], failures: Failures) -> Explored {
         may_give_up: failures.total() > MAX_ATTEMPTS,
         path: Vec::new(),
     };
-    dfs(&mut run, start(failures));
+    dfs(&mut run, start(failures, LIMIT));
     Explored { broken: run.broken, ends: run.ends, given_up: run.given_up, filled: run.filled }
 }
 
 /// The client connected to a fresh server, with nothing asked yet.
-fn start(failures: Failures) -> World {
+fn start(failures: Failures, limit: u64) -> World {
     let mut world = World {
-        client: Client::new(),
+        client: Client::new(limit),
+        limit,
+        sent: BTreeSet::new(),
         next: 0,
         answers: BTreeMap::new(),
         acked_before: BTreeMap::new(),
@@ -269,23 +290,38 @@ fn start(failures: Failures) -> World {
         media: [0; BLOCKS],
         left: failures,
     };
-    connect(&mut world);
+    connect(&mut world).expect("nothing is asked yet");
     world
 }
 
-fn connect(world: &mut World) {
+fn connect(world: &mut World) -> Result<(), (Law, String)> {
     let mut holds = Holds::new();
     holds.hold(0, BLOCKS as u64, 1).expect("a fresh server holds nothing");
     world.server = Some(Server { session: ServerSession::new(0, BLOCKS as u64, true), holds });
     world.alive = true;
     world.losses = 0;
     world.client.session_started();
-    pump(world);
+    pump(world)
 }
 
 /// Every request the client will send goes onto the ring.
-fn pump(world: &mut World) {
-    while let Some(request) = world.client.next_request() {
+fn pump(world: &mut World) -> Result<(), (Law, String)> {
+    // A transfer's arena block is its ticket, a write's from its payload, which
+    // is its ticket, so the device knows a write's value by the block it
+    // carries, and a write issued again with another's payload is found.
+    let place = |p: Placing<'_, Ticket>| match p {
+        Placing::Read { ticket, blocks } => ARENA.run(ticket as u32, blocks),
+        Placing::Write { payload, blocks } => ARENA.run(*payload as u32, blocks),
+    };
+    loop {
+        let kept = world.client.kept();
+        let Some(request) = world.client.next_request(place) else { return Ok(()) };
+        if let Op::Write { run, .. } = request.op {
+            let ticket = Ticket::from(run.first());
+            if world.sent.insert(ticket) && kept >= world.limit {
+                return Err((Law::Kept, format!("write {ticket} went out with {kept} blocks kept")));
+            }
+        }
         world.queues.send(request);
     }
 }
@@ -372,8 +408,7 @@ fn settle(script: &[Step], world: &mut World) -> Result<(), (Law, String)> {
             durable(script, world, ticket).map_err(|why| (Law::Durable, why))?;
         }
     }
-    pump(world);
-    Ok(())
+    pump(world)
 }
 
 /// What the flush `ticket`, just answered durable, promised is on the medium.
@@ -451,8 +486,9 @@ fn key(world: &World) -> String {
     });
     let posted: Vec<u32> = world.posted.iter().map(|&t| names.of(t)).collect();
     format!(
-        "{:?} {wire:?} {sq:?} {device:?} {cq:?} {server:?} {posted:?} {} {:?} {:?} {} {} {:?} {:?} {:?}",
+        "{:?} {:?} {wire:?} {sq:?} {device:?} {cq:?} {server:?} {posted:?} {} {:?} {:?} {} {} {:?} {:?} {:?}",
         world.client,
+        world.sent,
         world.next,
         world.answers,
         world.acked_before,
@@ -509,8 +545,7 @@ fn next(script: &[Step], world: &World) -> Vec<(String, After)> {
             let mut w = world.clone();
             match script[world.next] {
                 Step::Write { block, .. } => {
-                    let run = ARENA.run(ticket as u32, 1).expect("a script's ticket is an arena block");
-                    w.client.submit(ticket, Op::Write { run, lba: block });
+                    w.client.submit(ticket, Ask::Write { lba: block, blocks: 1, payload: ticket });
                 }
                 Step::Flush => {
                     let acked = w
@@ -520,7 +555,7 @@ fn next(script: &[Step], world: &World) -> Vec<(String, After)> {
                         .map(|(t, _)| *t)
                         .collect();
                     w.acked_before.insert(ticket, acked);
-                    w.client.submit(ticket, Op::Flush);
+                    w.client.submit(ticket, Ask::Flush);
                 }
             }
             w.next += 1;
@@ -643,8 +678,8 @@ fn next(script: &[Step], world: &World) -> Vec<(String, After)> {
     // It reconnects to the server started in its place.
     if !world.alive && !world.client.up() {
         let mut w = world.clone();
-        connect(&mut w);
-        after("reconnect".into(), Ok(w));
+        let connected = connect(&mut w).map(|()| w);
+        after("reconnect".into(), connected);
     }
 
     next
@@ -738,6 +773,17 @@ mod tests {
         }
     }
 
+    /// No caller's write goes out while the client keeps its limit: it waits
+    /// for the client's own flush, under every failure the bounds allow.
+    #[test]
+    fn no_write_goes_out_while_the_client_keeps_its_limit() {
+        for (script, failures) in every_bound() {
+            if let Some((Law::Kept, why)) = verdict(script, failures).broken {
+                panic!("{failures:?}: {why}");
+            }
+        }
+    }
+
     /// The model is not vacuous: with no failure at all, a run ends with both
     /// flushes durable and the medium holding the script's last values; each
     /// ring holds its depth, and wraps, because one session carries more than
@@ -779,7 +825,7 @@ mod tests {
     /// refuses as the server breaking the protocol.
     #[test]
     fn a_used_page_reads_fresh_once_a_servers_ends_are_made_over_it() {
-        let world = walk(start(at_most(0, 1, 0)), &["ask", "take", "done", "read", "crash"]);
+        let world = walk(start(at_most(0, 1, 0), u64::MAX), &["ask", "take", "done", "read", "crash"]);
         let page = &world.queues.page;
         let mut client = world.client.clone();
         client.session_ended();
@@ -801,7 +847,7 @@ mod tests {
     /// alike: with W3 taken and the device reset, they are still named alike.
     #[test]
     fn states_named_alike_act_alike() {
-        let fresh = start(at_most(1, 0, 0));
+        let fresh = start(at_most(1, 0, 0), u64::MAX);
         let answered_first =
             walk(fresh.clone(), &["ask", "take", "done", "read", "ask", "take", "done", "read", "ask", "take"]);
         let together = walk(fresh, &["ask", "ask", "take", "done", "read", "take", "done", "read", "ask", "take"]);

@@ -6,13 +6,13 @@ opened: 2026-10-03
 
 # A TLS block is zeroed twice with preemption off
 
-`kernel/src/loader/tls.rs`'s `build_combined` takes its frames from
-`PageAlloc::new`, which is `pmm::alloc_contiguous`, which zeroes every 2 MiB
-frame it hands out; then it zeroes the whole block again with `write_bytes`.
+`kernel/src/loader/tls.rs` lays a block out in a zeroed heap buffer, then
+copies it into an object whose frames `pmm::alloc_frame` zeroed
+(`SharedMemObject::create`): every byte of the block is written three times.
 Every `SYS_THREAD_SPAWN` (`process::spawn_thread`) and every `SYS_SPAWN`
 (`loader`) builds one, and a syscall runs with preemption off from entry to
-exit (`issues/syscall-preemption-is-incidental.md`), so each spawn pays
-two writes of the block, at least 2 MiB each, in one preemption-off window.
+exit (`issues/syscall-preemption-is-incidental.md`). The block is whole pages
+of its layout, a page for most programs, not the 2 MiB it once was.
 
 By reading, not measured.
 

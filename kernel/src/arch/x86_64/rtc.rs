@@ -7,6 +7,7 @@ use core::fmt;
 
 use crate::arch::cpu;
 use crate::clock;
+use crate::log;
 use crate::time::{Bound, Duration};
 use toyos_wallclock::Civil;
 
@@ -208,4 +209,65 @@ fn port_read(reg: u8) -> u8 {
 /// downstream reads whatever this returns.
 fn cmos_read(reg: u8) -> u8 {
     port_read(reg)
+}
+
+const STATUS_C: u8 = 0x0C;
+/// Register B bit 4: raise IRQ8 as each update cycle ends.
+const UPDATE_ENDED_INTERRUPT: u8 = 1 << 4;
+/// Register C bit 4: an update cycle has ended since register C was last read.
+const UPDATE_ENDED: u8 = 1 << 4;
+/// ISA IRQ 8, which the RTC raises until register C is read (MC146818).
+const RTC_IRQ: u8 = 8;
+
+/// The latest update-ended edge: how many the handler has seen, and the TSC
+/// as it took the last. Published by IRQ8's handler on the one CPU it is routed to.
+static EDGE: crate::seqlock::Published<2> = crate::seqlock::Published::new();
+
+/// Raise IRQ8 at the end of each update cycle, once a second off the RTC's own
+/// 32.768 kHz crystal, and take the TSC as each arrives: a reference outside
+/// the chipset's 14.318 MHz domain, which the HPET and the ACPI PM timer share.
+/// Called after the boot's [`read`], the only other CMOS access, so the index
+/// port is the handler's alone from here.
+pub fn arm_update_edges() -> Result<(), alloc::string::String> {
+    let line = super::ioapic::gsi_for_isa_irq(RTC_IRQ).ok_or("no I/O APIC carries IRQ8")?;
+    super::ioapic::route(line.gsi, super::idt::RTC_VECTOR, super::apic::MSG_DEST, line.trigger, line.polarity)
+        .map_err(|why| alloc::format!("{why:?}"))?;
+    let b = cmos_read(STATUS_B);
+    port_write(STATUS_B, b | UPDATE_ENDED_INTERRUPT);
+    let _ = cmos_read(STATUS_C);
+    super::ioapic::set_masked(line.gsi, false).map_err(|why| alloc::format!("{why:?}"))?;
+    // An update that ended while the pin was masked holds IRQ8 high with no
+    // edge the pin saw; reading C again lowers it, so the next update's edge
+    // arrives. Should the handler run first, it reads the same register.
+    let _ = cmos_read(STATUS_C);
+    log!(
+        "clock: the RTC's update-ended interrupt on gsi {} {} times the TSC against its 32.768 kHz crystal",
+        line.gsi.0,
+        super::ioapic::describe(line.trigger, line.polarity),
+    );
+    Ok(())
+}
+
+/// IRQ8's handler: the TSC first, then register C, whose read lets the RTC
+/// raise the next.
+pub fn update_ended() {
+    let at = cpu::rdtsc_ordered();
+    if cmos_read(STATUS_C) & UPDATE_ENDED != 0 {
+        let seen = EDGE.snapshot().map_or(0, |[seen, _]| seen);
+        EDGE.publish([seen + 1, at]);
+    }
+}
+
+/// The edges seen and the TSC at the last, or `None` before the first.
+pub fn last_edge() -> Option<(u64, u64)> {
+    EDGE.snapshot().filter(|&[seen, _]| seen > 0).map(|[seen, at]| (seen, at))
+}
+
+fn port_write(reg: u8, value: u8) {
+    // SAFETY: as `port_read`'s: `reg` is this module's constant, below 0x80,
+    // and the byte only enables the update-ended interrupt.
+    unsafe {
+        cpu::outb(CMOS_ADDR, reg);
+        cpu::outb(CMOS_DATA, value);
+    }
 }

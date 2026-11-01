@@ -29,7 +29,6 @@ pub mod inventory;
 pub mod log;
 pub mod pci;
 pub mod quit;
-pub mod ring;
 pub mod syscall;
 pub mod trace;
 pub mod usersafe;
@@ -126,4 +125,14 @@ pub mod tcb {
     const _: () = assert!(AARCH64_BYTES == 16, "AArch64's psABI TCB is two words");
 }
 
-pub use arch::{current_tid, ioport, processor_is_intel, TCB_TID};
+pub use arch::{current_tid, ioport, processor_id, TCB_TID};
+
+/// An x86 processor's CPUID identity (Intel SDM Vol. 2A, "CPUID"; AMD APM
+/// Vol. 3, CPUID Fn0000_0000 and Fn0000_0001_EAX).
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub struct ProcessorId {
+    /// Leaf 0's vendor string: its EBX, EDX and ECX bytes, in that order.
+    pub vendor: [u8; 12],
+    /// Leaf 1's EAX: the family, model and stepping signature.
+    pub signature: u32,
+}

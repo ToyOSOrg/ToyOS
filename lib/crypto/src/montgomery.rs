@@ -1,14 +1,16 @@
 //! Montgomery arithmetic modulo the NIST curves' primes and orders, N = 4 or 6
 //! words. Each modulus is a type, so a residue modulo one cannot meet a residue
-//! modulo another. Every operation on a residue has a fixed schedule and a
-//! masked final subtraction; inversion's exponent is public. Residues are
-//! `Copy` intermediates, not erased (`secret`'s contract).
+//! modulo another. Every operation on a residue has a fixed schedule: masked
+//! final subtractions, and inversion by a fixed count of divsteps. Residues
+//! are `Copy` intermediates, not erased (`secret`'s contract).
 #![allow(
     clippy::needless_range_loop,
     reason = "carry chains index parallel fixed-size arrays; iterator adaptors stay out of line in the shipped profile"
 )]
 use crate::ct;
 use core::marker::PhantomData;
+
+mod divsteps;
 
 /// An odd modulus p with 2^(64N-1) < p < 2^(64N), and its Montgomery
 /// constants for R = 2^(64N), evaluated at compile time.
@@ -51,7 +53,7 @@ impl<M: Modulus<N>, const N: usize> Clone for Residue<M, N> {
     }
 }
 impl<M: Modulus<N>, const N: usize> Copy for Residue<M, N> {}
-// Words and a zero-sized marker: zero is a valid residue.
+// SAFETY: words and a zero-sized marker, and zero is a valid residue.
 unsafe impl<M: Modulus<N>, const N: usize> crate::secret::Zeroable for Residue<M, N> {}
 
 impl<M: Modulus<N>, const N: usize> Residue<M, N> {
@@ -86,7 +88,16 @@ impl<M: Modulus<N>, const N: usize> Residue<M, N> {
         let one = Self(one(), PhantomData);
         self.mul(&one).0
     }
+    /// P-256's operations inline into the point formulas; its portable
+    /// multiplication and squaring stay out of line.
+    #[inline(always)]
     pub(crate) fn add(&self, b: &Self) -> Self {
+        if let Form::P256 = M::FORM {
+            return Self(p256::add(&self.0, &b.0), PhantomData);
+        }
+        self.add_generic(b)
+    }
+    fn add_generic(&self, b: &Self) -> Self {
         let mut v = [0; N];
         let mut carry = false;
         for i in 0..N {
@@ -94,10 +105,18 @@ impl<M: Modulus<N>, const N: usize> Residue<M, N> {
         }
         Self(reduce(&v, u64::from(carry), &M::P), PhantomData)
     }
+    #[inline(always)]
     pub(crate) fn double(&self) -> Self {
         self.add(self)
     }
+    #[inline(always)]
     pub(crate) fn sub(&self, b: &Self) -> Self {
+        if let Form::P256 = M::FORM {
+            return Self(p256::sub(&self.0, &b.0), PhantomData);
+        }
+        self.sub_generic(b)
+    }
+    fn sub_generic(&self, b: &Self) -> Self {
         let mut v = [0; N];
         let mut borrow = false;
         for i in 0..N {
@@ -113,12 +132,64 @@ impl<M: Modulus<N>, const N: usize> Residue<M, N> {
     /// self * b / R mod p, word by word with each product row followed by its
     /// reduction step (CIOS; Koc, Acar and Kaliski, "Analyzing and comparing
     /// Montgomery multiplication algorithms", IEEE Micro 1996).
+    #[inline(always)]
     pub(crate) fn mul(&self, b: &Self) -> Self {
+        if let Form::P256 = M::FORM {
+            return Self(p256::mul(&self.0, &b.0), PhantomData);
+        }
+        self.mul_generic(b)
+    }
+    fn mul_generic(&self, b: &Self) -> Self {
         let (t, high) = product::<M, N>(&self.0, &b.0);
         Self(reduce(&t, high, &M::P), PhantomData)
     }
+    /// self^2 / R mod p: the N(N - 1)/2 cross products once, doubled, the N
+    /// squares added, then N reduction steps over the 2N-word square.
+    #[inline(always)]
     pub(crate) fn square(&self) -> Self {
-        self.mul(self)
+        if let Form::P256 = M::FORM {
+            return Self(p256::square(&self.0), PhantomData);
+        }
+        self.square_generic()
+    }
+    fn square_generic(&self) -> Self {
+        let (t, high) = redc::<M, N>(&mut square_wide(&self.0));
+        Self(reduce(&t, high, &M::P), PhantomData)
+    }
+    /// The `const` forms of [`Self::mul`], [`Self::add`] and [`Self::sub`],
+    /// for tables built at compile time and for tests: not for secrets. They
+    /// lack the register barrier, and `minus` branches on its borrow.
+    pub(crate) const fn times(&self, b: &Self) -> Self {
+        let (t, high) = product::<M, N>(&self.0, &b.0);
+        Self(reduce_const(&t, high, &M::P), PhantomData)
+    }
+    pub(crate) const fn plus(&self, b: &Self) -> Self {
+        let mut v = [0; N];
+        let mut carry = false;
+        let mut i = 0;
+        while i < N {
+            (v[i], carry) = carrying_add(self.0[i], b.0[i], carry);
+            i += 1;
+        }
+        Self(reduce_const(&v, carry as u64, &M::P), PhantomData)
+    }
+    pub(crate) const fn minus(&self, b: &Self) -> Self {
+        let mut v = [0; N];
+        let mut borrow = false;
+        let mut i = 0;
+        while i < N {
+            (v[i], borrow) = borrowing_sub(self.0[i], b.0[i], borrow);
+            i += 1;
+        }
+        if borrow {
+            let mut carry = false;
+            let mut i = 0;
+            while i < N {
+                (v[i], carry) = carrying_add(v[i], M::P[i], carry);
+                i += 1;
+            }
+        }
+        Self(v, PhantomData)
     }
     /// One when self is zero, otherwise zero.
     pub(crate) fn is_zero(&self) -> u64 {
@@ -143,23 +214,227 @@ impl<M: Modulus<N>, const N: usize> Residue<M, N> {
         }
         Self(v, PhantomData)
     }
-    /// self^(p-2), the inverse of a nonzero residue, by square-and-multiply
-    /// over the public exponent.
-    pub(crate) fn invert(&self) -> Self {
-        let mut e = M::P;
-        let mut borrow = false;
-        (e[0], borrow) = borrowing_sub(e[0], 2, borrow);
-        for word in &mut e[1..] {
-            (*word, borrow) = borrowing_sub(*word, 0, borrow);
+    /// self^(p - 2) by 4-bit windows, the inverse of a nonzero residue: the
+    /// `const` form of [`Self::invert`], for compile time and tests, as
+    /// [`Self::times`].
+    pub(crate) const fn inverted(&self) -> Self {
+        let e = exponent::<M, N>();
+        let mut powers = [Self::one(); 16];
+        let mut j = 1;
+        while j < 16 {
+            powers[j] = powers[j - 1].times(self);
+            j += 1;
         }
         let mut r = Self::one();
-        for i in (0..N * 64).rev() {
-            r = r.square();
-            if (e[i / 64] >> (i % 64)) & 1 == 1 {
-                r = r.mul(self);
+        let mut nibble = N * 16;
+        while nibble > 0 {
+            nibble -= 1;
+            let mut k = 0;
+            while k < 4 {
+                r = r.times(&r);
+                k += 1;
+            }
+            let digit = (e[nibble / 16] >> (4 * (nibble % 16))) & 15;
+            if digit != 0 {
+                r = r.times(&powers[digit as usize]);
             }
         }
         r
+    }
+    /// The inverse of a nonzero residue, and zero for zero, by divsteps; the
+    /// time does not depend on the residue.
+    pub(crate) fn invert(&self) -> Self {
+        // (x R)^-1 R^2 = x^-1 R.
+        Self(divsteps::invert::<M, N>(&self.0, &M::R2), PhantomData)
+    }
+}
+
+/// p - 2 for M's p.
+const fn exponent<M: Modulus<N>, const N: usize>() -> [u64; N] {
+    let mut e = M::P;
+    let mut borrow;
+    (e[0], borrow) = borrowing_sub(e[0], 2, false);
+    let mut i = 1;
+    while i < N {
+        (e[i], borrow) = borrowing_sub(e[i], 0, borrow);
+        i += 1;
+    }
+    e
+}
+
+/// P-256's field arithmetic written out word by word: the shipped profile
+/// does not unroll the generic loops, and P-256 is the hot curve. Every step
+/// is the generic one's (`product`, `square_wide`, `redc`, `reduce`).
+/// Multiplication and squaring take the instruction paths where the CPU has
+/// them (`arch::p256_mul`, `arch::p256_square`).
+mod p256 {
+    use super::{Form, Modulus, ct, mac};
+    use crate::nist::P256Field;
+
+    const P: [u64; 4] = <P256Field as Modulus<4>>::P;
+    const _: () = assert!(matches!(<P256Field as Modulus<4>>::FORM, Form::P256));
+
+    #[inline(always)]
+    fn adc(a: u64, b: u64, carry: u64) -> (u64, u64) {
+        let (s, c1) = a.overflowing_add(b);
+        let (s, c2) = s.overflowing_add(carry);
+        (s, (c1 | c2) as u64)
+    }
+
+    #[inline(always)]
+    fn sbb(a: u64, b: u64, borrow: u64) -> (u64, u64) {
+        let (d, b1) = a.overflowing_sub(b);
+        let (d, b2) = d.overflowing_sub(borrow);
+        (d, (b1 | b2) as u64)
+    }
+
+    /// The four words as a residue's array, whose N is four here; indexing
+    /// rather than a slice copy keeps the words in registers.
+    #[inline(always)]
+    fn words<const N: usize>(w: [u64; 4]) -> [u64; N] {
+        let mut out = [0; N];
+        out[0] = w[0];
+        out[1] = w[1];
+        out[2] = w[2];
+        out[3] = w[3];
+        out
+    }
+
+    /// A residue's array as four words, which N is here.
+    #[inline(always)]
+    fn four<const N: usize>(a: &[u64; N]) -> &[u64; 4] {
+        a.as_slice().try_into().expect("P-256 residues are four words")
+    }
+
+    /// v mod p for v + high 2^256 < 2p, p subtracted under a mask.
+    #[inline(always)]
+    fn reduce<const N: usize>(v: [u64; 4], high: u64) -> [u64; N] {
+        let (d0, b) = sbb(v[0], P[0], 0);
+        let (d1, b) = sbb(v[1], P[1], b);
+        let (d2, b) = sbb(v[2], P[2], b);
+        let (d3, b) = sbb(v[3], P[3], b);
+        let m = ct::mask(ct::nonzero(high) | (1 ^ b));
+        words([(v[0] & !m) | (d0 & m), (v[1] & !m) | (d1 & m), (v[2] & !m) | (d2 & m), (v[3] & !m) | (d3 & m)])
+    }
+
+    #[inline(always)]
+    pub(super) fn add<const N: usize>(a: &[u64; N], b: &[u64; N]) -> [u64; N] {
+        let (v0, c) = adc(a[0], b[0], 0);
+        let (v1, c) = adc(a[1], b[1], c);
+        let (v2, c) = adc(a[2], b[2], c);
+        let (v3, c) = adc(a[3], b[3], c);
+        reduce([v0, v1, v2, v3], c)
+    }
+
+    #[inline(always)]
+    pub(super) fn sub<const N: usize>(a: &[u64; N], b: &[u64; N]) -> [u64; N] {
+        let (v0, w) = sbb(a[0], b[0], 0);
+        let (v1, w) = sbb(a[1], b[1], w);
+        let (v2, w) = sbb(a[2], b[2], w);
+        let (v3, w) = sbb(a[3], b[3], w);
+        let m = ct::mask(w);
+        let (r0, c) = adc(v0, P[0] & m, 0);
+        let (r1, c) = adc(v1, P[1] & m, c);
+        let (r2, c) = adc(v2, P[2] & m, c);
+        let (r3, _) = adc(v3, P[3] & m, c);
+        words([r0, r1, r2, r3])
+    }
+
+    #[inline(always)]
+    pub(super) fn mul<const N: usize>(a: &[u64; N], b: &[u64; N]) -> [u64; N] {
+        match crate::arch::p256_mul(four(a), four(b)) {
+            Some(v) => words(v),
+            None => mul_portable(a, b),
+        }
+    }
+
+    /// CIOS with P-256's reduction step, as `product`.
+    #[inline(never)]
+    fn mul_portable<const N: usize>(a: &[u64; N], b: &[u64; N]) -> [u64; N] {
+        let (mut t0, mut t1, mut t2, mut t3, mut high) = (0u64, 0u64, 0u64, 0u64, 0u64);
+        macro_rules! row {
+            ($ai:expr) => {{
+                let ai = $ai;
+                let (x0, c) = mac(t0, ai, b[0], 0);
+                let (x1, c) = mac(t1, ai, b[1], c);
+                let (x2, c) = mac(t2, ai, b[2], c);
+                let (x3, c) = mac(t3, ai, b[3], c);
+                let (top, overflow) = adc(high, c, 0);
+                // q = x0; x0 + q (2^64 - 1) + q (2^32 - 1) 2^64 leaves q 2^32
+                // at word one, and q p3 lands at word three.
+                let (y0, c) = adc(x1, x0 << 32, 0);
+                let (y1, c) = adc(x2, x0 >> 32, c);
+                let (y2, c) = mac(x3, x0, P[3], c);
+                let (y3, carry) = adc(top, c, 0);
+                (t0, t1, t2, t3, high) = (y0, y1, y2, y3, overflow | carry);
+            }};
+        }
+        row!(a[0]);
+        row!(a[1]);
+        row!(a[2]);
+        row!(a[3]);
+        reduce([t0, t1, t2, t3], high)
+    }
+
+    #[inline(always)]
+    pub(super) fn square<const N: usize>(a: &[u64; N]) -> [u64; N] {
+        match crate::arch::p256_square(four(a)) {
+            Some(v) => words(v),
+            None => square_portable(a),
+        }
+    }
+
+    /// The cross products once, doubled, the squares added, then four
+    /// reduction steps, as `square_wide` and `redc`.
+    #[inline(never)]
+    fn square_portable<const N: usize>(a: &[u64; N]) -> [u64; N] {
+        let (t1, c) = mac(0, a[0], a[1], 0);
+        let (t2, c) = mac(0, a[0], a[2], c);
+        let (t3, t4) = mac(0, a[0], a[3], c);
+        let (t3, c) = mac(t3, a[1], a[2], 0);
+        let (t4, t5) = mac(t4, a[1], a[3], c);
+        let (t5, t6) = mac(t5, a[2], a[3], 0);
+        let t7 = t6 >> 63;
+        let (t6, t5, t4, t3, t2, t1) =
+            (t6 << 1 | t5 >> 63, t5 << 1 | t4 >> 63, t4 << 1 | t3 >> 63, t3 << 1 | t2 >> 63, t2 << 1 | t1 >> 63, t1 << 1);
+        let (t0, hi) = mac(0, a[0], a[0], 0);
+        let (t1, c) = adc(t1, hi, 0);
+        let (lo, hi) = mac(0, a[1], a[1], 0);
+        let (t2, c) = adc(t2, lo, c);
+        let (t3, c) = adc(t3, hi, c);
+        let (lo, hi) = mac(0, a[2], a[2], 0);
+        let (t4, c) = adc(t4, lo, c);
+        let (t5, c) = adc(t5, hi, c);
+        let (lo, hi) = mac(0, a[3], a[3], 0);
+        let (t6, c) = adc(t6, lo, c);
+        let (t7, _) = adc(t7, hi, c);
+        let mut t = [t0, t1, t2, t3, t4, t5, t6, t7];
+        let mut extra = 0u64;
+        macro_rules! step {
+            ($i:literal) => {{
+                let q = t[$i];
+                let (v, c) = adc(t[$i + 1], q << 32, 0);
+                t[$i + 1] = v;
+                let (v, c) = adc(t[$i + 2], q >> 32, c);
+                t[$i + 2] = v;
+                let (lo, hi) = mac(0, q, P[3], 0);
+                let (v, c) = adc(t[$i + 3], lo, c);
+                t[$i + 3] = v;
+                let (v, mut c) = adc(t[$i + 4], hi, c);
+                t[$i + 4] = v;
+                let mut k = $i + 5;
+                while k < 8 {
+                    (t[k], c) = adc(t[k], c, 0);
+                    k += 1;
+                }
+                extra |= c;
+            }};
+        }
+        step!(0);
+        step!(1);
+        step!(2);
+        step!(3);
+        reduce([t[4], t[5], t[6], t[7]], extra)
     }
 }
 
@@ -233,6 +508,123 @@ const fn product<M: Modulus<N>, const N: usize>(a: &[u64; N], b: &[u64; N]) -> (
     (t, high)
 }
 
+/// The 2N-word square of a, in a buffer sized for N <= 6.
+#[inline(always)]
+const fn square_wide<const N: usize>(a: &[u64; N]) -> [u64; 12] {
+    let mut t = [0u64; 12];
+    let mut i = 0;
+    while i < N {
+        let mut c = 0;
+        let mut j = i + 1;
+        while j < N {
+            (t[i + j], c) = mac(t[i + j], a[i], a[j], c);
+            j += 1;
+        }
+        t[i + N] = c;
+        i += 1;
+    }
+    // The cross products sum below 2^(128N - 1), so doubling loses no bit.
+    let mut top = 0;
+    let mut i = 0;
+    while i < 2 * N {
+        let next = t[i] >> 63;
+        t[i] = t[i] << 1 | top;
+        top = next;
+        i += 1;
+    }
+    let mut c = 0u64;
+    let mut i = 0;
+    while i < N {
+        let (lo, hi) = mac(0, a[i], a[i], 0);
+        let v = (t[2 * i] as u128).wrapping_add(lo as u128).wrapping_add(c as u128);
+        t[2 * i] = v as u64;
+        let v = (t[2 * i + 1] as u128).wrapping_add(hi as u128).wrapping_add(v >> 64);
+        t[2 * i + 1] = v as u64;
+        c = (v >> 64) as u64;
+        i += 1;
+    }
+    t
+}
+
+/// t / R mod 2p for a 2N-word t < p^2: N reduction steps, each adding the
+/// multiple of p that clears the lowest remaining word, then the top N words
+/// and a top bit.
+#[inline(always)]
+const fn redc<M: Modulus<N>, const N: usize>(t: &mut [u64; 12]) -> ([u64; N], u64) {
+    // The total stays below 2^(128N + 1), so at most one step carries out of
+    // the top word.
+    let mut extra = 0u64;
+    let mut i = 0;
+    while i < N {
+        let mut c: u64;
+        let mut k;
+        match M::FORM {
+            Form::Generic => {
+                let q = t[i].wrapping_mul(M::N0);
+                c = 0;
+                let mut j = 0;
+                while j < N {
+                    (t[i + j], c) = mac(t[i + j], q, M::P[j], c);
+                    j += 1;
+                }
+                k = i + N;
+            }
+            Form::P256 => {
+                // t_i + q (2^64 - 1) = q 2^64 with q = t_i, and with q (2^32 - 1)
+                // at the next word that is q 2^32 there; q p3 lands two words up.
+                let q = t[i];
+                t[i] = 0;
+                let v = (t[i + 1] as u128).wrapping_add((q << 32) as u128);
+                t[i + 1] = v as u64;
+                let v = (t[i + 2] as u128).wrapping_add((q >> 32) as u128).wrapping_add(v >> 64);
+                t[i + 2] = v as u64;
+                let (lo, hi) = mac(0, q, M::P[3], 0);
+                let v = (t[i + 3] as u128).wrapping_add(lo as u128).wrapping_add(v >> 64);
+                t[i + 3] = v as u64;
+                let v = (t[i + 4] as u128).wrapping_add(hi as u128).wrapping_add(v >> 64);
+                t[i + 4] = v as u64;
+                c = (v >> 64) as u64;
+                k = i + 5;
+            }
+        }
+        while k < 2 * N {
+            let (sum, carry) = t[k].overflowing_add(c);
+            t[k] = sum;
+            c = carry as u64;
+            k += 1;
+        }
+        extra |= c;
+        i += 1;
+    }
+    let mut out = [0; N];
+    let mut j = 0;
+    while j < N {
+        out[j] = t[N + j];
+        j += 1;
+    }
+    (out, extra)
+}
+
+/// [`reduce`] for constants: the same arithmetic, without the register
+/// barrier.
+const fn reduce_const<const N: usize>(v: &[u64; N], high: u64, p: &[u64; N]) -> [u64; N] {
+    let mut d = [0; N];
+    let mut borrow = false;
+    let mut i = 0;
+    while i < N {
+        (d[i], borrow) = borrowing_sub(v[i], p[i], borrow);
+        i += 1;
+    }
+    let take = 0u64.wrapping_sub((high != 0 || !borrow) as u64);
+    let mut out = [0; N];
+    let mut i = 0;
+    while i < N {
+        out[i] = (v[i] & !take) | (d[i] & take);
+        i += 1;
+    }
+    out
+}
+
 /// v mod p for v + high * 2^(64N) < 2p: p subtracted under a mask.
 fn reduce<const N: usize>(v: &[u64; N], high: u64, p: &[u64; N]) -> [u64; N] {
     let mut d = [0; N];
@@ -259,16 +651,16 @@ pub(crate) const fn mac(t: u64, a: u64, b: u64, c: u64) -> (u64, u64) {
 }
 
 #[inline(always)]
-fn carrying_add(a: u64, b: u64, carry: bool) -> (u64, bool) {
+const fn carrying_add(a: u64, b: u64, carry: bool) -> (u64, bool) {
     let (s, c1) = a.overflowing_add(b);
-    let (s, c2) = s.overflowing_add(u64::from(carry));
+    let (s, c2) = s.overflowing_add(carry as u64);
     (s, c1 | c2)
 }
 
 #[inline(always)]
-fn borrowing_sub(a: u64, b: u64, borrow: bool) -> (u64, bool) {
+const fn borrowing_sub(a: u64, b: u64, borrow: bool) -> (u64, bool) {
     let (d, b1) = a.overflowing_sub(b);
-    let (d, b2) = d.overflowing_sub(u64::from(borrow));
+    let (d, b2) = d.overflowing_sub(borrow as u64);
     (d, b1 | b2)
 }
 
@@ -321,3 +713,4 @@ const fn shift_mod<const N: usize>(x: &[u64; N], p: &[u64; N], k: usize) -> [u64
     }
     x
 }
+

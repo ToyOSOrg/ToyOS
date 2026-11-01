@@ -33,7 +33,7 @@ fn outstanding() -> (Net, usize, ConnId, Vec<u8>) {
 
 fn inject(net: &mut Net, node: usize, frame: &[u8]) {
     let now = net.now();
-    net.nodes[node].shard.receive(now, frame);
+    net.nodes[node].receive(now, frame);
 }
 
 #[test]

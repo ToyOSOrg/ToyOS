@@ -36,11 +36,10 @@ p384 = { version = "0.13.1", features = ["ecdh"] }
 ml-kem = "0.3.0-rc.2"
 chacha20 = "0.9.1"
 poly1305 = "0.8.0"
+scrypt = { version = "0.12.0-rc.10", default-features = false }
 serde_json = "1.0.149"
-# Machine-checked field arithmetic, the oracle of Poly1305's.
-fiat-crypto = "0.3"
-# The integers `test_arithmetic` holds the field, scalar and Montgomery
-# arithmetic against.
+# The integers the crate's arithmetic and its Ed25519 verdicts are held
+# against.
 num-bigint = "0.4"
 
 [lints.rust]

@@ -54,7 +54,7 @@ fn named() -> Lan {
 /// What the node logged of its name since the last call, in order.
 fn said(lan: &mut Lan) -> Vec<Event> {
     let name = |event| match event {
-        toyos_net_node::Event::Name(event) => Some(event),
+        toyos_net_node::Event::Name { event, .. } => Some(event),
         _ => None,
     };
     lan.node.drain_events().filter_map(name).collect()
@@ -256,7 +256,7 @@ fn a_held_lease_is_probed_for_three_times_and_its_name_announced_only_then() {
     let mut lan = named();
     lan.acknowledge(&terms(3_600, Some(R)));
     assert!(lan.datagrams().is_empty(), "an address under probe has no name yet");
-    assert!(lan.run_until(Duration::from_secs(10), |lan| lan.node.lease().is_some()), "the lease is held");
+    assert!(lan.run_until(Duration::from_secs(10), |lan| lan.node.lease(lan.link).is_some()), "the lease is held");
     let held = lan.now;
     assert_eq!(said(&mut lan), [], "the name is not this machine's yet");
     let asked = to_group(MAC_B, (B, 53_000), &ours(7, CLASS_IN));
@@ -301,7 +301,7 @@ fn the_first_probe_follows_the_delay_the_callers_draw_gives() {
     lan.fire(quiet);
     lan.link(false);
     let back = lan.now;
-    lan.node.link(back, true, || 1_000);
+    lan.node.link(back, lan.link, true, || 1_000);
     lan.pump();
     assert_eq!(lan.datagrams().len(), 5, "nothing before the delay is over");
     until(&mut lan, 6, SECOND);
@@ -325,7 +325,7 @@ fn a_held_name_is_probed_for_again_when_the_link_returns_and_announced_only_then
 
     lan.link(true);
     let back = lan.now;
-    assert!(lan.node.lease().is_some(), "the lease outlived the link");
+    assert!(lan.node.lease(lan.link).is_some(), "the lease outlived the link");
     until(&mut lan, from + 1, SECOND);
     lan.deliver(&to_group(MAC_B, (B, 53_000), &ours(7, CLASS_IN)));
     assert_eq!(since(&lan, from), [multicast(probe())], "probed for, and answered to nobody under the probe");
@@ -612,12 +612,12 @@ fn the_name_is_answered_only_while_its_lease_is_held() {
     lan.deliver(&asked);
     assert!(lan.datagrams().is_empty(), "under probe");
 
-    assert!(lan.run_until(Duration::from_secs(10), |lan| lan.node.lease().is_some()), "the lease is held");
+    assert!(lan.run_until(Duration::from_secs(10), |lan| lan.node.lease(lan.link).is_some()), "the lease is held");
     until(&mut lan, 5, Duration::from_secs(3));
     lan.deliver(&asked);
     assert_eq!(since(&lan, 5), [unicast(53_000, legacy_response(7))], "held, and its name claimed");
 
-    assert!(lan.run_until(Duration::from_secs(700), |lan| lan.node.lease().is_none()), "the lease runs out");
+    assert!(lan.run_until(Duration::from_secs(700), |lan| lan.node.lease(lan.link).is_none()), "the lease runs out");
     let from = lan.datagrams().len();
     lan.deliver(&asked);
     assert!(since(&lan, from).is_empty(), "gone");
@@ -671,12 +671,12 @@ fn no_cut_of_a_query_is_answered() {
 fn the_names_port_is_held_by_one_socket() {
     let mdns = Port::new(MDNS);
     let mut lan = named();
-    assert_eq!(lan.node.udp_bind(Ipv4Addr::UNSPECIFIED, mdns, || 0).map(|(_, port)| port), Err(Refused::AddrInUse));
+    assert_eq!(lan.node.udp_bind(Ipv4Addr::UNSPECIFIED, mdns, common::unread(), || 0).map(|(_, port)| port), Err(Refused::AddrInUse));
     let again = lan.node.answer_as(lan.now, Host::new("toyos").unwrap(), undrawn);
     assert_eq!(again, Err(toyos_net_udp::Error::Refused(toyos_net_udp::Counter::PortInUse)));
 
     let mut taken = Lan::new();
-    taken.node.udp_bind(Ipv4Addr::UNSPECIFIED, mdns, || 0).unwrap();
+    taken.node.udp_bind(Ipv4Addr::UNSPECIFIED, mdns, common::unread(), || 0).unwrap();
     let refused = taken.node.answer_as(taken.now, Host::new("toyos").unwrap(), undrawn);
     assert_eq!(refused, Err(toyos_net_udp::Error::Refused(toyos_net_udp::Counter::PortInUse)));
     taken.lease(3_600);

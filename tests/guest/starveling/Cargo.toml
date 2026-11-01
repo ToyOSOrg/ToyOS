@@ -1,0 +1,10 @@
+[package]
+name = "starveling"
+description = "Test-only: a service that ends when it is refused memory and serves again once started, so a test can hold that a restart refused for memory is retried when memory comes back."
+version = "0.1.0"
+edition = "2021"
+license = "MIT OR Apache-2.0"
+
+[dependencies]
+toyos-abi = { path = "../../../sdk/abi" }
+toyos = { path = "../../../sdk/toyos" }

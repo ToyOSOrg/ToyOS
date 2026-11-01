@@ -964,6 +964,12 @@ pub struct TaskBuilder<X: SchedPayload> {
 }
 
 impl<X: SchedPayload> TaskBuilder<X> {
+    /// The two allocations [`build`](Self::build) makes, for a caller that
+    /// charges them first: the task's record and its shared state.
+    pub fn allocations() -> [core::alloc::Layout; 2] {
+        [core::alloc::Layout::new::<TaskInner<X>>(), core::alloc::Layout::new::<(usize, usize, TaskShared<Msg<X>>)>()]
+    }
+
     pub fn build(self, dst: CpuId, now: Nanos) -> TransitTask<X> {
         let shared = Arc::new(TaskShared::new(self.key, TaskState::InTransit(dst)));
         TransitTask(Task(Box::new(TaskInner {

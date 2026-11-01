@@ -103,17 +103,13 @@ impl Watch {
         })
     }
 
-    /// End every wait whose token lies in `[from, from + len)`, taken out
+    /// End every wait whose token `ended` answers `true` for, taken out
     /// before woken so a later post for a reused token cannot reach it; answer
     /// how many.
-    pub fn revoke_range(&self, from: u64, len: u64) -> usize {
+    pub fn revoke(&self, ended: impl Fn(u64) -> bool) -> usize {
         preempt_off(|p| {
             let env = Poster { cpus: cpus(), kicker: &HW, preempt: p };
-            self.0.revoke(
-                |token| token >= from && token - from < len,
-                WakeCause::new(WakeReason::Woken),
-                &env,
-            )
+            self.0.revoke(ended, WakeCause::new(WakeReason::Woken), &env)
         })
     }
 }

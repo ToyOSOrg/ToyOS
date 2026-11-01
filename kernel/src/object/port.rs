@@ -12,22 +12,21 @@ use alloc::collections::VecDeque;
 use alloc::sync::Arc;
 use core::sync::atomic::{AtomicU64, Ordering};
 
-use crate::pipe::{PipeReader, PipeWriter};
+use crate::mm::charge::{self, Exhausted};
+use crate::message::{Receiver, Sender};
 use crate::sync::Lock;
 use crate::watch::Watch;
 
-use super::service::HandleQueue;
 use super::{KObjectVariant, ObjectCore, ZeroHandles};
 
 /// Unaccepted connections one port may hold; past it, connect returns `ResourceExhausted`.
 pub const MAX_PENDING_CONNECTIONS: usize = 32;
 
-/// A connection nobody has accepted yet: owns the server's pipe ends and handle queues.
+/// A connection nobody has accepted yet: owns the server's ends of its two
+/// directions.
 pub struct PendingConnection {
-    pub rx: PipeReader,
-    pub tx: PipeWriter,
-    pub inbox: Arc<HandleQueue>,
-    pub outbox: Arc<HandleQueue>,
+    pub rx: Receiver,
+    pub tx: Sender,
     /// [`Connector::stamp`] of the connector the client connected through.
     pub stamp: Stamp,
 }
@@ -38,6 +37,15 @@ pub struct Stamp {
     /// The port's never-repeating id, which the acceptor asking for the badge must match.
     pub port: u64,
     pub badge: Option<Arc<[u8]>>,
+}
+
+/// The heap a badge takes, which each holder of a stamp of it is charged
+/// besides the connector it was minted on: the badge goes only with the last.
+fn badge_heap(badge: &Arc<[u8]>) -> usize {
+    let (inner, _) = core::alloc::Layout::new::<[usize; 2]>()
+        .extend(core::alloc::Layout::for_value::<[u8]>(badge))
+        .expect("port: a badge's layout");
+    charge::heap(inner.pad_to_align())
 }
 
 /// Never repeats, so a stamp outlives its port without ever naming another one.
@@ -79,16 +87,23 @@ pub enum PushError {
     QueueFull,
 }
 
-pub fn create() -> (Arc<Acceptor>, Arc<Connector>) {
+/// A port's two ends. The acceptor is charged what they share, its queue at
+/// its bound included, and each connector itself.
+pub fn create() -> Result<(Arc<Acceptor>, Arc<Connector>), Exhausted> {
+    let shared = charge::arc::<PortShared>()
+        + charge::arc::<Watch>()
+        + charge::array::<PendingConnection>(MAX_PENDING_CONNECTIONS.next_power_of_two());
+    let acceptor = Acceptor::new_core(shared)?;
+    let connector = Connector::new_core(0)?;
     let shared = Arc::new(PortShared {
         id: NEXT_PORT.fetch_add(1, Ordering::Relaxed),
         queue: Lock::new(PortQueue { closed: false, pending: VecDeque::new() }),
         watch: Arc::new(Watch::new()),
     });
-    (
-        Arc::new(Acceptor { core: Acceptor::new_core(), shared: shared.clone() }),
-        Arc::new(Connector { core: Connector::new_core(), shared, badge: None }),
-    )
+    Ok((
+        Arc::new(Acceptor { core: acceptor, shared: shared.clone() }),
+        Arc::new(Connector { core: connector, shared, badge: None }),
+    ))
 }
 
 impl PortShared {
@@ -127,9 +142,11 @@ impl Acceptor {
         self.shared.id
     }
 
-    /// A connector to this port whose every connection is stamped with `badge`.
-    pub fn mint(&self, badge: Arc<[u8]>) -> Arc<Connector> {
-        Arc::new(Connector { core: Connector::new_core(), shared: self.shared.clone(), badge: Some(badge) })
+    /// A connector to this port whose every connection is stamped with
+    /// `badge`, charged for it.
+    pub fn mint(&self, badge: Arc<[u8]>) -> Result<Arc<Connector>, Exhausted> {
+        let core = Connector::new_core(badge_heap(&badge))?;
+        Ok(Arc::new(Connector { core, shared: self.shared.clone(), badge: Some(badge) }))
     }
 }
 
@@ -168,17 +185,13 @@ impl Connector {
 impl ZeroHandles for Acceptor {
     fn on_zero_handles(&self) {
         // `queued` drops only after the guard releases, since dropping a
-        // handle can re-enter another object's hook.
+        // handle can re-enter another object's hook. Its receivers go with
+        // it, so a client's send on a connection nobody accepted is `Gone`.
         let queued = {
             let mut queue = self.shared.queue.lock();
             queue.closed = true;
             core::mem::take(&mut queue.pending)
         };
-        // Nobody will ever hold this inbox's read end, so a queued
-        // `SYS_MESSAGE_SEND` on it must say `Gone`, not queue.
-        for connection in &queued {
-            connection.inbox.close_now();
-        }
         drop(queued);
         // A poll on the port is answered as gone, not as ready: nothing will ever queue again.
         self.shared.watch.cancel_polls();

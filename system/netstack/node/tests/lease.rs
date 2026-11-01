@@ -14,7 +14,7 @@ use std::time::Duration;
 use common::*;
 use etherparse::{PacketBuilder, TcpOptionElement};
 use toyos_net_ip::AddrState;
-use toyos_net_node::{Counter, Event, ListenRefused, Wake, WriteRefusal};
+use toyos_net_node::{Bell, Counter, Event, ListenRefused};
 use toyos_net_shard::Refusal;
 use toyos_net_wire::{Instant, Port};
 
@@ -56,15 +56,15 @@ fn the_lease_end_to_end() {
 
     let acknowledged = wire.sent.len();
     wire.deliver(&from_server(BROADCAST, Ipv4Addr::BROADCAST, &message_of(ACK, id, &terms)));
-    assert_eq!((wire.node.lease(), wire.address(A)), (None, Some(AddrState::Tentative)));
+    assert_eq!((wire.node.lease(wire.link), wire.address(A)), (None, Some(AddrState::Tentative)));
 
-    assert!(wire.run_until(Duration::from_secs(10), |wire| wire.node.lease().is_some()), "the lease is held");
+    assert!(wire.run_until(Duration::from_secs(10), |wire| wire.node.lease(wire.link).is_some()), "the lease is held");
     let detection = &wire.sent[acknowledged..];
     assert_eq!(detection.len(), 4, "three probes and an announcement: {detection:?}");
     assert!(detection[..3].iter().all(|frame| frame.is_probe(A)), "{detection:?}");
     assert!(detection[3].is_announcement(A), "{detection:?}");
 
-    let lease = wire.node.lease().unwrap();
+    let lease = wire.node.lease(wire.link).unwrap();
     assert_eq!((lease.address, lease.prefix_len, lease.router, lease.dns.as_slice(), lease.server), (A, 24, Some(R), &[DNS][..], R));
     assert_eq!(wire.address(A), Some(AddrState::Announcing));
     assert_eq!(wire.gateways(), [R]);
@@ -81,9 +81,9 @@ fn the_lease_end_to_end() {
 #[test]
 fn no_frame_is_from_the_address_before_it_is_verified() {
     let mut wire = Wire::acknowledged(&terms(HOUR, Some(R)));
-    assert_eq!(wire.node.lease(), None, "acknowledged is not held");
+    assert_eq!(wire.node.lease(wire.link), None, "acknowledged is not held");
     for _ in 0..16 {
-        if wire.node.lease().is_some() {
+        if wire.node.lease(wire.link).is_some() {
             break;
         }
         assert_eq!(wire.address(A), Some(AddrState::Tentative));
@@ -92,7 +92,7 @@ fn no_frame_is_from_the_address_before_it_is_verified() {
         let at = wire.node.next_deadline().expect("conflict detection is running");
         wire.fire(at);
     }
-    assert!(wire.node.lease().is_some(), "held within sixteen deadlines");
+    assert!(wire.node.lease(wire.link).is_some(), "held within sixteen deadlines");
     let probes = wire.sent.iter().filter(|frame| frame.is_probe(A)).count();
     assert_eq!(probes, 3, "held only once the third probe has left");
     assert!(wire.sent.iter().all(|frame| frame.source() != Some(A)), "{:?}", wire.sent);
@@ -101,10 +101,10 @@ fn no_frame_is_from_the_address_before_it_is_verified() {
 #[test]
 fn expiry_takes_address_route_and_resolvers_in_one_step() {
     let mut wire = Wire::leased(&terms(600, Some(R)));
-    assert_eq!((wire.address(A).is_some(), wire.gateways(), wire.node.lease().map(|lease| lease.dns.clone())), (true, vec![R], Some(vec![DNS])));
+    assert_eq!((wire.address(A).is_some(), wire.gateways(), wire.node.lease(wire.link).map(|lease| lease.dns.clone())), (true, vec![R], Some(vec![DNS])));
     let held = wire.sent.len();
 
-    assert!(wire.run_until(Duration::from_secs(700), |wire| wire.node.lease().is_none()), "the lease runs out");
+    assert!(wire.run_until(Duration::from_secs(700), |wire| wire.node.lease(wire.link).is_none()), "the lease runs out");
     assert_eq!(wire.now, after(600), "at its expiry");
     assert_eq!((wire.address(A), wire.gateways()), (None, vec![]));
     let renewal = wire.sent[held..].iter().find(|frame| frame.dhcp().is_some()).expect("a renewal");
@@ -136,13 +136,13 @@ fn a_renewal_for_a_server_nobody_answers_for_waits_and_is_dropped_and_the_client
     assert!(wire.run_until(Duration::from_secs(10), |wire| dropped(wire) == 1), "the renewal is dropped");
     assert_eq!((wire.now, asks(&wire)), (renewed.after(Duration::from_secs(3)), 3), "when [ip] gave the server up");
     assert!(wire.sent[held..].iter().all(|seen| seen.dhcp().is_none()), "no renewal left");
-    assert!(wire.node.lease().is_some(), "the lease is held, and nothing reached the client");
+    assert!(wire.node.lease(wire.link).is_some(), "the lease is held, and nothing reached the client");
 
     assert!(wire.run_until(Duration::from_secs(400), |wire| wire.sent[held..].iter().any(|seen| seen.dhcp().is_some())), "the client asks on");
     assert!(dropped(&wire) > 1, "a renewal again first, on the client's clock");
     let Some(Seen::Dhcp { to, source, destination, message }) = wire.sent.last() else { panic!("{:?}", wire.sent.last()) };
     assert_eq!((*to, *source, *destination, option(message, 53)), (BROADCAST, A, Ipv4Addr::BROADCAST, Some(&[REQUEST][..])), "the rebinding request");
-    assert!(wire.node.lease().is_some());
+    assert!(wire.node.lease(wire.link).is_some());
 }
 
 #[test]
@@ -150,10 +150,10 @@ fn a_nak_takes_address_route_and_resolvers_in_one_step() {
     let mut wire = Wire::leased(&terms(600, Some(R)));
     let id = renewing(&mut wire);
     wire.deliver(&from_server(BROADCAST, Ipv4Addr::BROADCAST, &message(NAK, id, Ipv4Addr::UNSPECIFIED, &[(54, R.octets().to_vec())])));
-    assert_eq!((wire.node.lease(), wire.address(A), wire.gateways()), (None, None, vec![]));
+    assert_eq!((wire.node.lease(wire.link), wire.address(A), wire.gateways()), (None, None, vec![]));
     assert!(matches!(wire.sent.last(), Some(Seen::Dhcp { source, .. }) if source.is_unspecified()), "{:?}", wire.sent.last());
     assert_ne!(xid(wire.last(DISCOVER)), id, "a new exchange");
-    let refused = Event::Dhcp { refusal: toyos_dhcp::Refusal { rule: toyos_dhcp::Counter::Nak, peer: toyos_dhcp::Peer::From(R) }, suppressed: 0 };
+    let refused = Event::Dhcp { link: wire.link, refusal: toyos_dhcp::Refusal { rule: toyos_dhcp::Counter::Nak, peer: toyos_dhcp::Peer::From(R) }, suppressed: 0 };
     assert!(wire.node.drain_events().any(|event| event == refused));
     assert!(!wire.answers_arp_for(A));
 }
@@ -164,7 +164,7 @@ fn a_renewal_without_a_router_takes_the_route_and_keeps_the_address() {
     let id = renewing(&mut wire);
     let renewed = wire.now;
     wire.deliver(&from_server(MAC, A, &message_of(ACK, id, &terms(600, None))));
-    let lease = wire.node.lease().expect("still held");
+    let lease = wire.node.lease(wire.link).expect("still held");
     assert_eq!((lease.address, lease.router, lease.timers.map(|timers| timers.expiry)), (A, None, Some(renewed.after(Duration::from_secs(600)))));
     assert_eq!((wire.address(A), wire.gateways()), (Some(AddrState::Assigned), vec![]));
     assert_eq!(wire.node.counters().get(Counter::RouterRefused), 0);
@@ -178,10 +178,10 @@ fn a_renewed_prefix_reaches_ip_before_its_router() {
     let (wider, beyond) = (Ipv4Addr::new(255, 255, 254, 0), Ipv4Addr::new(192, 0, 3, 254));
     let terms = [(54, R.octets().to_vec()), (51, 600u32.to_be_bytes().to_vec()), (1, wider.octets().to_vec()), (3, beyond.octets().to_vec()), (6, DNS.octets().to_vec())];
     wire.deliver(&from_server(MAC, A, &message_of(ACK, id, &terms)));
-    let lease = wire.node.lease().expect("still held");
+    let lease = wire.node.lease(wire.link).expect("still held");
     assert_eq!((lease.prefix_len, lease.router), (23, Some(beyond)));
     let shard = wire.node.shard();
-    assert_eq!(shard.ip().prefix_len(shard.iface(), A), Some(23));
+    assert_eq!(shard.ip().prefix_len(wire.link, A), Some(23));
     assert_eq!(wire.gateways(), [beyond]);
     assert_eq!(wire.node.counters().get(Counter::RouterRefused), 0);
 }
@@ -194,7 +194,7 @@ fn a_lease_that_runs_out_under_the_probe_leaves_no_address() {
     assert!(wire.run_until(Duration::from_secs(10), |wire| wire.dhcp().len() == 3), "the client starts over");
     wire.last(DISCOVER);
     assert_eq!(wire.sent.iter().filter(|frame| frame.is_probe(A)).count(), 3, "detection ran to its end");
-    assert_eq!((wire.node.lease(), wire.address(A), wire.gateways()), (None, None, vec![]));
+    assert_eq!((wire.node.lease(wire.link), wire.address(A), wire.gateways()), (None, None, vec![]));
     assert!(!wire.answers_arp_for(A));
 }
 
@@ -207,19 +207,19 @@ fn a_second_conflict_takes_a_held_lease_and_declines_it() {
     let from = wire.sent.len();
     wire.deliver(&conflict);
     assert_eq!(wire.sent[from..].iter().filter(|frame| frame.is_announcement(A)).count(), 1, "defended once: {:?}", &wire.sent[from..]);
-    assert_eq!((wire.node.lease().map(|lease| lease.address), wire.gateways()), (Some(A), vec![R]));
+    assert_eq!((wire.node.lease(wire.link).map(|lease| lease.address), wire.gateways()), (Some(A), vec![R]));
 
     // Inside [ip]'s defend interval (RFC 5227 §2.4 (b)).
     wire.fire(after(105));
     wire.deliver(&conflict);
-    assert_eq!((wire.node.lease(), wire.address(A), wire.gateways()), (None, None, vec![]));
+    assert_eq!((wire.node.lease(wire.link), wire.address(A), wire.gateways()), (None, None, vec![]));
     let decline = wire.last(DECLINE);
     assert_eq!((option(decline, 50), option(decline, 54)), (Some(&A.octets()[..]), Some(&R.octets()[..])));
     assert!(!wire.answers_arp_for(A));
 }
 
-/// What a listener's owner saw of its wake pipe: the wakes written, and whether the node dropped
-/// its end, at which the owner reads the end.
+/// What a listener's holder saw of its bell: the rings, and whether the node dropped it, which
+/// is the listener's end.
 #[derive(Default)]
 struct Told {
     wakes: Cell<usize>,
@@ -228,10 +228,9 @@ struct Told {
 
 struct Owner(Rc<Told>);
 
-impl Wake for Owner {
-    fn wake(&mut self) -> Result<(), WriteRefusal> {
+impl Bell for Owner {
+    fn ring(&mut self) {
         self.0.wakes.set(self.0.wakes.get() + 1);
-        Ok(())
     }
 }
 
@@ -285,7 +284,7 @@ fn losses() -> [(&'static str, Loss); 3] {
         wire.deliver(&from_server(BROADCAST, Ipv4Addr::BROADCAST, &message(NAK, id, Ipv4Addr::UNSPECIFIED, &[(54, R.octets().to_vec())])));
     }
     fn expiry(wire: &mut Wire) {
-        assert!(wire.run_until(Duration::from_secs(700), |wire| wire.node.lease().is_none()), "the lease runs out");
+        assert!(wire.run_until(Duration::from_secs(700), |wire| wire.node.lease(wire.link).is_none()), "the lease runs out");
     }
     fn conflict(wire: &mut Wire) {
         let conflict = arp(BROADCAST, false, MAC_B, A, A);
@@ -310,7 +309,7 @@ fn a_listener_stands_while_its_address_is_lost_and_answers_when_it_is_back() {
         let named = listen(&mut wire, A, 22).expect("the held address");
         let any = listen(&mut wire, Ipv4Addr::UNSPECIFIED, 23).expect("every address");
         let stand = |wire: &mut Wire, when: &str| {
-            assert_eq!((wire.node.listeners(), wire.node.held(), wire.node.drain_ended_listeners().count()), (2, 2, 0), "{how}, {when}");
+            assert_eq!((wire.node.listeners(), wire.node.held()), (2, 2), "{how}, {when}");
             assert_eq!((named.dropped.get(), any.dropped.get(), named.wakes.get(), any.wakes.get()), (false, false, 0, 0), "{how}, {when}");
         };
 
@@ -321,11 +320,11 @@ fn a_listener_stands_while_its_address_is_lost_and_answers_when_it_is_back() {
         wire.link(true);
         let id = xid(wire.last(REQUEST));
         wire.deliver(&from_server(BROADCAST, Ipv4Addr::BROADCAST, &message_of(ACK, id, &terms(600, Some(R)))));
-        assert_eq!(wire.node.lease().map(|lease| lease.address), Some(A), "{how}");
+        assert_eq!(wire.node.lease(wire.link).map(|lease| lease.address), Some(A), "{how}");
         stand(&mut wire, "renewed, and the link back");
 
         lose(&mut wire);
-        assert_eq!((wire.node.lease(), wire.address(A)), (None, None), "{how}");
+        assert_eq!((wire.node.lease(wire.link), wire.address(A)), (None, None), "{how}");
         stand(&mut wire, "the address lost");
         assert_eq!(syn(&mut wire, 22), [], "{how}: a SYN to an address the machine does not hold");
         stand(&mut wire, "a SYN to the lost address");
@@ -335,7 +334,7 @@ fn a_listener_stands_while_its_address_is_lost_and_answers_when_it_is_back() {
         let id = xid(wire.last(DISCOVER));
         wire.deliver(&from_server(MAC, A, &message_of(OFFER, id, &terms(600, Some(R)))));
         wire.deliver(&from_server(BROADCAST, Ipv4Addr::BROADCAST, &message_of(ACK, id, &terms(600, Some(R)))));
-        assert!(wire.run_until(Duration::from_secs(10), |wire| wire.node.lease().is_some()), "{how}: the address is held again");
+        assert!(wire.run_until(Duration::from_secs(10), |wire| wire.node.lease(wire.link).is_some()), "{how}: the address is held again");
         stand(&mut wire, "the address back");
 
         let answer = syn(&mut wire, 22);
@@ -350,7 +349,7 @@ fn a_listener_stands_while_its_address_is_lost_and_answers_when_it_is_back() {
 fn a_router_ip_refuses_is_no_router() {
     let edge = Ipv4Addr::new(192, 0, 2, 255);
     let wire = Wire::leased(&terms(HOUR, Some(edge)));
-    assert_eq!(wire.node.lease().map(|lease| lease.router), Some(None));
+    assert_eq!(wire.node.lease(wire.link).map(|lease| lease.router), Some(None));
     assert!(wire.gateways().is_empty());
     assert_eq!(wire.node.counters().get(Counter::RouterRefused), 1);
 }
@@ -367,7 +366,7 @@ fn a_conflict_under_the_probe_declines_and_holds_nothing() {
     let Some(Seen::Dhcp { to, source, destination, message }) = wire.sent.last() else { panic!("{:?}", wire.sent.last()) };
     assert_eq!((*to, *source, *destination), (BROADCAST, Ipv4Addr::UNSPECIFIED, Ipv4Addr::BROADCAST));
     assert_eq!((option(message, 53), option(message, 50), option(message, 54)), (Some(&[DECLINE][..]), Some(&A.octets()[..]), Some(&R.octets()[..])));
-    assert_eq!((wire.node.lease(), wire.address(A)), (None, None));
+    assert_eq!((wire.node.lease(wire.link), wire.address(A)), (None, None));
     let events: Vec<Event> = wire.node.drain_events().collect();
     let stack = |event: &Event| matches!(event, Event::Stack { refusal: Refusal::Ip(refusal), .. } if refusal.rule == toyos_net_ip::Counter::AcdConflict);
     let dhcp = |event: &Event| matches!(event, Event::Dhcp { refusal, .. } if refusal.rule == toyos_dhcp::Counter::Declined);
@@ -375,7 +374,7 @@ fn a_conflict_under_the_probe_declines_and_holds_nothing() {
 
     assert!(wire.run_until(Duration::from_secs(11), |wire| wire.dhcp().last().is_some_and(|(kind, _)| *kind == DISCOVER)), "discovery starts over");
     assert_eq!(wire.now, conflict.after(toyos_dhcp::limits::DECLINE_BACKOFF));
-    assert_eq!(wire.node.lease(), None);
+    assert_eq!(wire.node.lease(wire.link), None);
 }
 
 #[test]
@@ -383,18 +382,18 @@ fn a_link_that_returns_keeps_a_held_lease_and_announces_it() {
     let mut wire = Wire::leased(&terms(HOUR, Some(R)));
     wire.fire(after(100));
     wire.link(false);
-    assert_eq!((wire.node.lease().map(|lease| lease.address), wire.address(A).is_some(), wire.gateways()), (Some(A), true, vec![R]));
+    assert_eq!((wire.node.lease(wire.link).map(|lease| lease.address), wire.address(A).is_some(), wire.gateways()), (Some(A), true, vec![R]));
 
     let down = wire.sent.len();
     wire.link(true);
-    assert_eq!(wire.node.lease().map(|lease| lease.address), Some(A));
+    assert_eq!(wire.node.lease(wire.link).map(|lease| lease.address), Some(A));
     assert!(wire.sent[down..].iter().any(|frame| frame.is_announcement(A)), "{:?}", &wire.sent[down..]);
     let request = wire.last(REQUEST);
     assert_eq!((ciaddr(request), option(request, 50), option(request, 54)), (Ipv4Addr::UNSPECIFIED, Some(&A.octets()[..]), None));
 
     let id = xid(request);
     wire.deliver(&from_server(BROADCAST, Ipv4Addr::BROADCAST, &message_of(ACK, id, &terms(HOUR, Some(R)))));
-    let expiry = wire.node.lease().and_then(|lease| lease.timers).map(|timers| timers.expiry);
+    let expiry = wire.node.lease(wire.link).and_then(|lease| lease.timers).map(|timers| timers.expiry);
     assert_eq!(expiry, Some(after(100 + u64::from(HOUR))), "the lease runs from the request the server acknowledged");
     assert_eq!(wire.gateways(), [R]);
 }
@@ -416,7 +415,7 @@ fn a_probe_the_link_drops_under_is_abandoned() {
     let mut wire = Wire::acknowledged(&terms(HOUR, Some(R)));
     let sent = wire.sent.len();
     wire.link(false);
-    assert_eq!((wire.node.lease(), wire.address(A)), (None, None));
+    assert_eq!((wire.node.lease(wire.link), wire.address(A)), (None, None));
     assert_eq!((wire.sent.len(), wire.node.counters().get(Counter::DhcpUnsent)), (sent, 1), "its DISCOVER has no link to leave by");
     wire.link(true);
     wire.last(DISCOVER);
@@ -469,7 +468,7 @@ fn a_reply_without_the_cookie_is_refused_by_name() {
     bootp[236..240].fill(0);
     wire.deliver(&from_server(MAC, A, &bootp));
     wire.last(DISCOVER);
-    let refused = Event::Dhcp { refusal: toyos_dhcp::Refusal { rule: toyos_dhcp::Counter::BootpReply, peer: toyos_dhcp::Peer::From(R) }, suppressed: 0 };
+    let refused = Event::Dhcp { link: wire.link, refusal: toyos_dhcp::Refusal { rule: toyos_dhcp::Counter::BootpReply, peer: toyos_dhcp::Peer::From(R) }, suppressed: 0 };
     assert!(wire.node.drain_events().any(|event| event == refused));
     assert_eq!(wire.node.drain_events().count(), 0, "drained");
 }
@@ -487,11 +486,11 @@ fn a_hundred_refused_replies_are_one_line_and_a_count() {
     for _ in 0..100 {
         wire.deliver(&from_server(MAC, A, &bootp));
     }
-    assert_eq!(wire.node.drain_events().collect::<Vec<_>>(), [Event::Dhcp { refusal, suppressed: 0 }]);
+    assert_eq!(wire.node.drain_events().collect::<Vec<_>>(), [Event::Dhcp { link: wire.link, refusal, suppressed: 0 }]);
 
     wire.now = wire.now.after(toyos_net_wire::REFUSAL_LOG_INTERVAL);
     wire.deliver(&from_server(MAC, A, &bootp));
-    assert_eq!(wire.node.drain_events().collect::<Vec<_>>(), [Event::Dhcp { refusal, suppressed: 99 }]);
+    assert_eq!(wire.node.drain_events().collect::<Vec<_>>(), [Event::Dhcp { link: wire.link, refusal, suppressed: 99 }]);
 }
 
 /// The node waiting for the ACK of its REQUEST, and that ACK's frame.
@@ -527,9 +526,9 @@ fn no_flipped_bit_of_the_ack_yields_another_lease() {
             // A flip the frame's checksums do not cover is in its link addresses, which name no
             // lease: taken or refused, the lease is the server's or none.
             let taken = wire.address(A).is_some();
-            assert_eq!(wire.run_until(Duration::from_secs(10), |wire| wire.node.lease().is_some()), taken, "byte {index} bit {bit}");
+            assert_eq!(wire.run_until(Duration::from_secs(10), |wire| wire.node.lease(wire.link).is_some()), taken, "byte {index} bit {bit}");
             let offered = |lease: &toyos_dhcp::Lease| (lease.address, lease.prefix_len, lease.router, lease.dns.clone()) == (A, 24, Some(R), vec![DNS]);
-            assert!(wire.node.lease().is_none_or(offered), "byte {index} bit {bit}: {:?}", wire.node.lease());
+            assert!(wire.node.lease(wire.link).is_none_or(offered), "byte {index} bit {bit}: {:?}", wire.node.lease(wire.link));
         }
     }
 }

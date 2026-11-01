@@ -1,6 +1,5 @@
-//! The `/home` filesystem. [`upstream`] implements the real bcachefs on-disk
-//! format, read side; the modules beside it are the interim ToyOS format the
-//! kernel still links.
+//! bcachefs. [`engine`] implements its on-disk format; the modules beside it
+//! are the interim ToyOS format DATA's file server still uses.
 //!
 //! **Every number this crate parses came off a disk it does not own, and a
 //! CRC is not authentication — whoever writes the image writes the CRC.** Each
@@ -21,13 +20,14 @@ mod superblock;
 mod alloc_bitmap;
 mod btree;
 mod fs;
-pub mod upstream;
+#[warn(dead_code)]
+pub mod engine;
 
 pub use block_io::{BlockIO, BlockBuf, BlockNum, DeviceError, TransferError};
 #[cfg(feature = "std")]
 pub use block_io::VecBlockIO;
-pub use fs::{file_entry_fits, Formatted, Mounted, ReadOnly, ReadWrite, FsError, Extent};
-pub use superblock::{DESIGNATION_BLOCKS_OFFSET, DESIGNATION_MAGIC, FsUuid, Superblock};
+pub use fs::{file_entry_fits, Formatted, Mounted, ReadOnly, ReadWrite, Recorded, FsError, Extent};
+pub use superblock::{carries_volume, designated, designation, FsUuid, Superblock};
 
 /// Records the largest single allocation each test thread makes, so a test can
 /// assert what parsing a crafted block asks the allocator for.

@@ -17,9 +17,6 @@ struct Env {
     strings: Vec<*mut u8>,
     /// `strings` and a null, which `environ` points at.
     array: Vec<*mut u8>,
-    /// The `HOME` entry this process started with, `KEY=VALUE` without the
-    /// `NUL`, which no child spawned here is handed (`toyos::spawn::direct_env`).
-    home: Option<Box<[u8]>>,
 }
 
 // SAFETY: the pointers are this module's own strings, read and changed under the lock.
@@ -63,9 +60,7 @@ impl Env {
             block.resize(need, 0);
         }
         let strings: Vec<*mut u8> = block.split(|&b| b == 0).filter(|e| !e.is_empty()).map(leak).collect();
-        // SAFETY: every one is a string just made.
-        let home = strings.iter().map(|&s| unsafe { entry(s) }).find(|e| is(e, b"HOME")).map(Box::from);
-        let mut env = Env { strings, array: Vec::new(), home };
+        let mut env = Env { strings, array: Vec::new() };
         env.publish();
         env
     }
@@ -167,13 +162,6 @@ pub(crate) fn blob() -> Vec<u8> {
         }
         out
     })
-}
-
-/// Whether the blob `env` names its `HOME`: a `HOME` other than the one this
-/// process started with, or none where it started with one.
-pub(crate) fn names_home(env: &[u8]) -> bool {
-    let home = env.split(|&b| b == 0).find(|e| is(e, b"HOME"));
-    with(|this| home != this.home.as_deref())
 }
 
 /// The first file named `name` under a directory of `PATH`, with its `NUL`:

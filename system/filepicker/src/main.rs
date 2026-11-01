@@ -564,7 +564,7 @@ fn main() {
         poller.watch(&acceptor, READABLE, TOKEN_ACCEPTOR);
         poller.watch(&questions, READABLE, TOKEN_CONSENT_ACCEPTOR);
         for p in &pending {
-            poller.watch(&p.conn, READABLE, TOKEN_PENDING_BASE + p.conn.as_handle().0 as u64);
+            poller.watch(&p.conn, READABLE, TOKEN_PENDING_BASE + p.conn.as_handle().raw().0 as u64);
         }
         // A client that says nothing wakes nothing, so the wait is what is left
         // of the oldest deadline rather than a fresh one.
@@ -581,7 +581,7 @@ fn main() {
         for p in pending.iter().filter(|p| now.duration_since(p.since) >= HANDSHAKE_TIMEOUT) {
             eprintln!(
                 "filepicker: dropping client {} — it never finished its request",
-                p.conn.as_handle().0
+                p.conn.as_handle().raw().0
             );
         }
         pending.retain(|p| now.duration_since(p.since) < HANDSHAKE_TIMEOUT);
@@ -597,7 +597,7 @@ fn main() {
                 Ok(conn) if pending.len() >= MAX_PENDING_REQUESTS => eprintln!(
                     "filepicker: refusing client {} — {MAX_PENDING_REQUESTS} connections are \
                      already waiting to say what they want",
-                    conn.as_handle().0
+                    conn.as_handle().raw().0
                 ),
                 Ok(conn) => pending.push(Pending { conn, rx: RequestRx::new(), since: Instant::now(), consent: question }),
             }
@@ -607,7 +607,7 @@ fn main() {
         // so leaving `i` alone visits each connection exactly once.
         let mut i = 0;
         while i < pending.len() {
-            let handle = pending[i].conn.as_handle();
+            let handle = pending[i].conn.as_handle().raw();
             if !ready.contains(&(TOKEN_PENDING_BASE + handle.0 as u64)) {
                 i += 1;
                 continue;

@@ -34,7 +34,7 @@ use toyos_abi::acpi::{Osc, RootBridgeWindow, MAX_BRIDGES, MAX_WINDOWS};
 use toyos_aml::{Kind, Value};
 
 use crate::aml::{kind, Aml};
-use crate::host::{Declared, Kernel, Stopping, OWN};
+use crate::host::{Kernel, RootsDeclared, Stopping, OWN};
 use crate::init::{evaluate, host_bridge, Census, Names, PRESENT};
 
 /// One PCI root bridge, as it is declared.
@@ -157,10 +157,10 @@ pub fn declare<K: Kernel>(kernel: &K, read: Result<Vec<Root>, String>) -> Result
     let listed: Vec<String> =
         roots.iter().flat_map(|root| &root.windows).map(|w| format!("mem {:#x}..{:#x}", w.base, w.end())).collect();
     match kernel.declare(&roots)? {
-        Declared::Held => println!("acpiserver: the root bridges' memory declared: {}", listed.join(", ")),
-        Declared::Refused if roots.is_empty() => {}
-        Declared::Refused => println!("acpiserver: the kernel refused the root bridges' memory as declared ({}); its log says why", listed.join(", ")),
-        Declared::Late => println!("acpiserver: the kernel already holds an answer for the root bridges' memory, so nothing is declared"),
+        RootsDeclared::Held => println!("acpiserver: the root bridges' memory declared: {}", listed.join(", ")),
+        RootsDeclared::Refused if roots.is_empty() => {}
+        RootsDeclared::Refused => println!("acpiserver: the kernel refused the root bridges' memory as declared ({}); its log says why", listed.join(", ")),
+        RootsDeclared::Late => println!("acpiserver: the kernel already holds an answer for the root bridges' memory, so nothing is declared"),
     }
     Ok(())
 }
@@ -525,6 +525,6 @@ mod tests {
 
         let kernel = Scripted::default();
         declare(&kernel, Err("the namespace names no PCI host bridge".into())).expect("not stopping");
-        assert_eq!(*kernel.declared.borrow(), Some(Vec::new()));
+        assert_eq!(*kernel.roots.borrow(), Some(Vec::new()));
     }
 }

@@ -11,6 +11,16 @@
 # day delete it.
 assets = ["assets"]
 
+# **Floors are the machine's protected capacity**: memory held back for a
+# control path's job however short every other job runs. Only a job that does
+# no ordinary client work gets one: the supervisor and ps2server. A floor
+# covers what the job holds as it runs, its 8 MiB main stack's commitment
+# among it, and the headroom it needs to keep answering. usbd has none, since
+# it drives disks too, so a USB keyboard is not protected
+# (`issues/no-physical-memory-fairness.md`).
+[supervisor]
+memory-floor-mib = 96
+
 # What the supervisor starts at boot. Program keys, not paths, and the order means
 # nothing: every port exists before any server runs.
 [boot]
@@ -39,11 +49,13 @@ folder = "read-write"
 
 # `service = true` makes a row a system service: the supervisor starts it with `HOME` at
 # its own `/state/<name>` and makes that directory first. Every other row runs
-# with the session user's home.
+# with the session user's home, and `state = true` gives it a `/state/<name>`
+# beside it. No row's view holds any other part of `/state`.
 [programs]
-# The installer. It holds nothing: it writes under `/apps` because `/apps` is
-# writable to it, and a row that gave it more would make that untrue.
-pkg = {}
+# The installer. It writes under `/apps` because `/apps` is writable to it.
+# `/state/pkg` is where the machine's copy of the repository metadata it last
+# accepted belongs (`toyos_update::repo::Holder::Machine`).
+pkg = { state = true }
 
 # **Every image that carries a `TOYOS-LOG` partition runs this**, and every
 # image does. The kernel keeps the record ring and the console and writes no
@@ -71,22 +83,25 @@ devices = ["acpi"]
 receives = ["power"]
 
 # `starts` is what the desktop's taskbar and launcher start. `login = true`
-# makes the local desktop a login session, so `swap` and `update` run from its
-# shell. `prompt` is the layer above every window, which `filepicker` alone
-# reaches: serving it makes the sessions its launches open the screen's, whose
-# packages may ask the person at it for a folder. `clipboard` is sent every copy
+# makes it the desktop's login authority: the supervisor opens the desktop
+# session as it starts it, and its launches are that session's, so `swap` and
+# `update` run from its shell. `prompt` is the layer above every window, which
+# `filepicker` alone reaches: serving it makes the session opened for it the
+# screen's, whose packages may ask the person at it for a folder. `clipboard` is sent every copy
 # made in the session, and `vdagent` alone receives it. `input` is where a source
 # of keys and pointer reports reaches the owner of input, which it is.
 # `display` sets the mode and the scale, and `toybox` alone receives it, for
 # `screen`. `volume` is soundserver's master level and mute, which the volume
 # keys set and no other row receives. The display is a virtio-gpu function the
 # compositor drives, where the machine has one, and the firmware's framebuffer
-# otherwise. `jobs` makes each program it starts a job of its own, with its own
-# share of the CPU.
+# otherwise; `display-output` is where a display driver offers the output it
+# scans out and is told each frame composed into it. `jobs` makes each
+# program it starts a job of its own, with its own share of the CPU. `power` is
+# its stop view's: Esc cancels the machine's stop, Enter forces it.
 [programs.compositor]
 service = true
-serves = ["compositor", "prompt", "clipboard", "input", "display"]
-receives = ["soundserver", "filepicker", "volume"]
+serves = ["compositor", "prompt", "clipboard", "input", "display", "display-output"]
+receives = ["soundserver", "filepicker", "volume", "power"]
 devices = ["pci:03:80:00/1af4:1050", "framebuffer"]
 starts = ["terminal", "files", "/apps"]
 syscap = ["jobs"]
@@ -101,12 +116,15 @@ login = true
 restart = true
 receives = ["input"]
 devices = ["isa:0060,0064:1,12"]
+memory-floor-mib = 24
 
+# `wake-latency` holds every idle CPU to waking within half a period while a
+# stream plays, so a CPU in a deep state does not make the mix late.
 [programs.soundserver]
 service = true
 serves = ["soundserver", "volume", "sound-output"]
 devices = ["pci:04:01:00/1af4:1059"]
-syscap = ["rt"]
+syscap = ["rt", "wake-latency"]
 
 # The Intel HD Audio driver: one process per HDA function the kernel does not
 # drive, each walking its own controller's codecs and offering soundserver the
@@ -117,14 +135,38 @@ drives = ["pci:04:03:*"]
 receives = ["sound-output"]
 syscap = ["rt"]
 
-# netstack holds the NIC's PCI function and drives it: the virtqueues, the register
-# window and the interrupt are its own, and the kernel keeps only the claim.
-# Named by class, vendor and device rather than by slot, so one row finds the card
-# wherever firmware put it.
+# The Tiger Lake display driver: the T14's iGPU, held for the boot. It keeps
+# the firmware's mode and surface, which the compositor draws on through the
+# kernel's framebuffer claim, programs the display engine's power and answers
+# the compositor's presents on `display-output`. Not started again: the
+# claim's release resets the function, which ends the firmware's scan-out
+# (`issues/each-gpu-drives-its-displays-from-a-userland-driver.md`).
+[programs.tgl-display]
+drives = ["pci:03:00:00/8086:9a49"]
+receives = ["display-output"]
+
+# The network stack, over every link a NIC driver brings on `link`; it claims
+# no device. It serves from the start, links or none.
 [programs.netstack]
 service = true
-serves = ["netstack"]
-devices = ["pci:02:00:00/1af4:1041"]
+serves = ["netstack", "link"]
+
+# The NIC drivers: one process per function a row's parts match, by class,
+# vendor and device rather than by slot, holding that function alone and
+# bringing its link to netstack, which keeps every connection across a
+# link's end. virtio's is started again when it ends other than by exit 0.
+[programs.virtio-net]
+drives = ["pci:02:00:00/1af4:1041"]
+receives = ["link"]
+restart = true
+
+# The I219, the T14's onboard NIC, and the 82574, which QEMU's `e1000e` models.
+# Not started again: its start resets the part, and over a ring a link change
+# left it that reset is not known to be safe
+# (`issues/no-machine-has-read-an-intel-nic-across-a-link-change.md`).
+[programs.i219]
+drives = ["pci:02:00:00/8086:15fc", "pci:02:00:00/8086:10d3"]
+receives = ["link"]
 
 # The shared clipboard with QEMU's host: one process per virtio-serial
 # function the kernel does not drive (the kernel's console is `1af4:1043` too),
@@ -135,14 +177,30 @@ devices = ["pci:02:00:00/1af4:1041"]
 drives = ["pci:07:80:00/1af4:1043"]
 receives = ["clipboard"]
 
-# Every launch it makes is in a login session, the one `update` and `swap`
-# below start in: one it opens when it runs in the machine's session, and the
-# one it was launched in otherwise, as when a desktop shell starts it.
+# A login authority: each authenticated connection opens a login session, and
+# its shell, and a command as `shell -c`, is launched in it, the one `update`
+# and `swap` below start in.
 [programs.sshserver]
 service = true
 receives = ["netstack"]
-starts = ["toybox", "shell", "terminal", "doom", "snake", "calc", "editor", "paint", "files", "host", "inspect", "pkg", "sshserver", "swap", "toyfetch", "update", "grants", "/apps"]
+starts = ["shell"]
 login = true
+
+# A login session's owner: the supervisor starts one for each session it
+# opens, and it parents that session's detached apps and signs it out.
+[programs.session]
+
+# Its user's login sessions, listed or signed out: the one row the build lets
+# receive `session-admin`. `launch logout 3 --force` ends session 3.
+[programs.logout]
+receives = ["session-admin"]
+
+# The machine's disks and their tables, read: `launch disks`. Nothing here
+# lets it change a disk; an authorization that does (`designate:data`) is the
+# build's to refuse any row a login can start (`build/build.rs`), until the
+# administrative authorization every system change will share exists.
+[programs.disks]
+authorize = ["tables"]
 
 # `swap` is the authority to replace a running service's binary; the build
 # refuses it to any other program (`build/build.rs`). `ssh <machine> swap netstack
@@ -201,7 +259,7 @@ starts = ["shell"]
 
 [programs.shell]
 receives = ["surface"]
-starts = ["toybox", "shell", "terminal", "doom", "snake", "calc", "editor", "paint", "files", "host", "inspect", "pkg", "sshserver", "swap", "toyfetch", "update", "grants", "/apps"]
+starts = ["toybox", "shell", "terminal", "doom", "snake", "calc", "editor", "paint", "files", "host", "inspect", "pkg", "sshserver", "swap", "toyfetch", "update", "grants", "logout", "disks", "/apps"]
 
 [programs.doom]
 receives = ["compositor", "soundserver"]
@@ -273,11 +331,11 @@ service = true
 restart = true
 serves = ["block", "disk"]
 
-# The NVMe driver: one process per such controller, reading its own table and
-# offering its disk to the block service. QEMU's controller alone, so a metal
-# boot leaves the bench's own NVMe disk to its firmware.
+# The NVMe driver: one process per NVMe controller, whatever its maker, reading
+# its own table and offering its disk to the block service. Another system's
+# partitions on that disk are reached by no grant (`toyos_supervisor::storage`).
 [programs.nvme]
-drives = ["pci:01:08:02/1b36:0010"]
+drives = ["pci:01:08:02"]
 receives = ["disk"]
 
 # The USB driver: one process per xHCI controller, its sticks offered to the
@@ -289,8 +347,10 @@ receives = ["disk", "input"]
 
 # The file servers: DATA, the log and the boot volume, one process
 # each, serving every program the directories of its role. Started again when
-# one ends, on the same ports.
+# one ends, on the same ports. A pager: its readers wait on the pages it
+# supplies, which only a row of this file may make a program do.
 [programs.fileserver]
 restart = true
+pager = true
 roles = ["data", "log", "boot"]
 receives = ["block"]

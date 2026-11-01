@@ -1,9 +1,0 @@
-[package]
-name = "toyos-disk"
-description = "A partition as its reader and writer holds it, in whole 4 KiB blocks, whoever serves it: the trait, pure."
-version = "0.1.0"
-edition = "2021"
-license = "MIT OR Apache-2.0"
-
-[lib]
-doctest = false

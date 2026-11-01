@@ -83,7 +83,7 @@ struct Holder(Device);
 
 impl Holder {
     fn handle(&self) -> RawHandle {
-        self.0.as_handle()
+        self.0.as_handle().raw()
     }
 
     fn ask(&self, mut access: Access) -> (Result<u64, Refused>, u8) {
@@ -144,15 +144,15 @@ fn probe() {
 
     // No server ran on this boot, and nothing has held the claim.
     assert_eq!(
-        toyos::power::stop(toyos::power::Stop::Shutdown),
-        toyos::power::Refused::Kernel(SyscallError::NotSupported),
+        power_off().err(),
+        Some(toyos::power::Refused::Unsupported),
         "acpi: a power-off with no sleep type supplied"
     );
 
     // A holder that dies with the lock: the kernel gives it back with the claim.
     let kept = Command::new(SELF_PATH)
         .arg("keeper")
-        .endow(CLAIM_LABEL, claim(&cap).into_raw().0)
+        .endow(CLAIM_LABEL, claim(&cap).into())
         .stdout(Stdio::piped())
         .output()
         .expect("acpi: spawn the keeper");
@@ -195,8 +195,15 @@ fn probe() {
 
     assert_eq!(syscall::acpi_lock_take(holder.handle()), Ok(true), "acpi: the lock, for the power-off to find");
     println!("{HELD_INTO_THE_STOP}");
-    let refused = toyos::power::stop(toyos::power::Stop::Shutdown);
+    let refused = power_off();
     panic!("acpi: the power-off was refused: {refused:?}");
+}
+
+/// The power-off, as test-runner's jobs ask it: waiting for no session.
+/// Comes back only where the machine did not stop.
+fn power_off() -> Result<toyos::power::Update, toyos::power::Refused> {
+    use toyos::power::{stop, Mode, Pending, Stop};
+    stop(Stop::Shutdown, Mode::Terminate).map(Pending::outcome)
 }
 
 /// What [`memory`] says of the addresses firmware's map does not list.
@@ -352,35 +359,21 @@ const STORM: usize = 10_000;
 /// processor.
 const STARTS: usize = 64;
 
-/// What the boot processor counts of the kernel's writes to `SMI_CMD`, read
-/// in a round of the counters issued after the last one read here returned: a
-/// read within the kernel's joining window of a round answers with that
-/// round, which may be older than what the caller just did, so this reads
-/// until the boot processor's stamp is one it has not seen. Nothing else on
-/// this boot reads the counters, so a round not seen is one this asked for.
-struct Counted<'a> {
-    cap: &'a SysCap,
-    seen: Option<u64>,
-}
-
-impl Counted<'_> {
-    fn firmware_calls(&mut self) -> u64 {
-        loop {
-            let mut raw = vec![RawRecord::EMPTY; syscall::cpu_count() as usize];
-            let n = self.cap.counters(&mut raw).expect("acpi: the estate's capability reads the counters");
-            let records: Vec<Record> = raw[..n].iter().map(|r| Record::decode(r).expect("acpi: a record that decodes")).collect();
-            let stamp = records[0].get(Counter::Stamp);
-            if records.iter().any(|r| r.stale) || stamp == self.seen {
-                std::thread::yield_now();
-                continue;
-            }
-            self.seen = stamp;
-            // No other CPU holds the counter: none writes the port.
-            for r in &records[1..] {
-                assert_eq!(r.get(Counter::FirmwareCalls), None, "acpi: cpu{} counts firmware calls, and makes none", r.cpu);
-            }
-            return records[0].get(Counter::FirmwareCalls).expect("acpi: the boot processor counts its writes to SMI_CMD");
+/// What the boot processor counts of the kernel's writes to `SMI_CMD`, in a
+/// round every CPU answered: every answer is taken after its read was called.
+fn firmware_calls(cap: &SysCap) -> u64 {
+    loop {
+        let mut raw = vec![RawRecord::EMPTY; syscall::cpu_count() as usize];
+        let n = cap.counters(&mut raw).expect("acpi: the estate's capability reads the counters");
+        let records: Vec<Record> = raw[..n].iter().map(|r| Record::decode(r).expect("acpi: a record that decodes")).collect();
+        if records.iter().any(|r| r.stale) {
+            continue;
         }
+        // No other CPU holds the counter: none writes the port.
+        for r in &records[1..] {
+            assert_eq!(r.get(Counter::FirmwareCalls), None, "acpi: cpu{} counts firmware calls, and makes none", r.cpu);
+        }
+        return records[0].get(Counter::FirmwareCalls).expect("acpi: the boot processor counts its writes to SMI_CMD");
     }
 }
 
@@ -434,7 +427,6 @@ fn firmware(holder: &Holder, info: &AcpiInfo, cap: &SysCap) {
     let sci_en = || holder.read(Space::SystemIo, control, Width::Word).expect("acpi: PM1a_CNT reads") & 1;
     let last_written = || holder.read(Space::SystemIo, smi_cmd, Width::Byte).expect("acpi: SMI_CMD reads");
     let write = |at: u64, width: Width, value: u64| holder.write(Space::SystemIo, at, width, value);
-    let mut counted = Counted { cap, seen: None };
     let hex = |bytes: &[u64]| bytes.iter().map(|byte| format!("{byte:#04x}")).collect::<Vec<_>>().join(", ");
     // Whether this chipset interrupts its firmware on a write to the port:
     // the ICH9's `SMI_EN` at PMBASE + 30h, `APMC_EN` its bit 5, PMBASE being
@@ -443,7 +435,7 @@ fn firmware(holder: &Holder, info: &AcpiInfo, cap: &SysCap) {
 
     // The kernel's own commands: refused, and the chipset saw neither, which
     // leaves ACPI mode on the second.
-    let before = (counted.firmware_calls(), last_written());
+    let before = (firmware_calls(cap), last_written());
     assert!(named.iter().all(|&byte| byte != 0 && !CROSSED.contains(&byte) && !STORMED.contains(&byte)), "acpi: this FADT names {}", hex(&named));
     for kept in named {
         assert_eq!(write(smi_cmd, Width::Byte, kept), Err(Refused::KernelCommand), "acpi: {kept:#04x}, which the FADT names, was written to SMI_CMD");
@@ -453,12 +445,12 @@ fn firmware(holder: &Holder, info: &AcpiInfo, cap: &SysCap) {
     for (at, width) in [(smi_cmd, Width::Word), (smi_cmd, Width::DWord), (smi_cmd - 1, Width::Word), (smi_cmd - 3, Width::DWord)] {
         assert_eq!(write(at, width, CROSSED[0]), Err(Refused::CommandSpan), "acpi: a {width:?} at {at:#x}");
     }
-    assert_eq!((counted.firmware_calls(), last_written()), before, "acpi: a refused command was written or counted");
+    assert_eq!((firmware_calls(cap), last_written()), before, "acpi: a refused command was written or counted");
 
     // A call: the chipset has the byte, and the boot processor counted one write.
     let mut asked_from = vec![call_off_the_boot_processor(holder, smi_cmd, CROSSED[0])];
     assert_eq!(last_written(), CROSSED[0], "acpi: SMI_CMD does not hold the byte the kernel was asked to write");
-    assert_eq!(counted.firmware_calls(), before.0 + 1, "acpi: one firmware call");
+    assert_eq!(firmware_calls(cap), before.0 + 1, "acpi: one firmware call");
     for value in &CROSSED[1..] {
         asked_from.push(call_off_the_boot_processor(holder, smi_cmd, *value));
         assert_eq!(last_written(), *value);
@@ -482,7 +474,7 @@ fn firmware(holder: &Holder, info: &AcpiInfo, cap: &SysCap) {
     });
     let refused_at = stormed.unwrap_or_else(|| panic!("acpi: {STORM} firmware calls in a row were made, and none refused"));
     assert_ne!(last_written(), STORMED[refused_at % 2], "acpi: a call refused CommandRate reached SMI_CMD");
-    assert_eq!(counted.firmware_calls(), before.0 + made as u64, "acpi: the boot processor counted another number of writes than were made");
+    assert_eq!(firmware_calls(cap), before.0 + made as u64, "acpi: the boot processor counted another number of writes than were made");
     println!(
         "acpi: firmware calls of {} were asked from the CPUs of x2APIC id {asked_from:?}; this chipset's SMI_EN reads {smi_en:#010x}, APMC_EN {}",
         hex(&CROSSED),
@@ -627,9 +619,9 @@ const KEPT: &str = "keeper: holding the Global Lock, and leaving with it";
 fn keeper() {
     let claim: Device = Endowments::get().take(CLAIM_LABEL).expect("acpi: the keeper is endowed the claim");
     bind(&claim);
-    assert_eq!(syscall::acpi_s5(claim.as_handle(), NO_SLEEP_OF_Q35S), Ok(()), "keeper: a sleep type");
-    assert_eq!(syscall::acpi_s5(claim.as_handle(), Q35_SLP_TYP_A), Err(SyscallError::AlreadyExists), "keeper: a second sleep type");
-    assert_eq!(syscall::acpi_lock_take(claim.as_handle()), Ok(true), "keeper: the lock");
+    assert_eq!(syscall::acpi_s5(claim.as_handle().raw(), NO_SLEEP_OF_Q35S), Ok(()), "keeper: a sleep type");
+    assert_eq!(syscall::acpi_s5(claim.as_handle().raw(), Q35_SLP_TYP_A), Err(SyscallError::AlreadyExists), "keeper: a second sleep type");
+    assert_eq!(syscall::acpi_lock_take(claim.as_handle().raw()), Ok(true), "keeper: the lock");
     println!("{KEPT}");
 }
 
@@ -639,7 +631,7 @@ const SUPPLIED: &str = "supplier: this guest's own sleep type supplied, and leav
 fn supplier() {
     let claim: Device = Endowments::get().take(CLAIM_LABEL).expect("acpi: the supplier is endowed the claim");
     bind(&claim);
-    assert_eq!(syscall::acpi_s5(claim.as_handle(), Q35_SLP_TYP_A), Ok(()), "supplier: this guest's sleep type");
+    assert_eq!(syscall::acpi_s5(claim.as_handle().raw(), Q35_SLP_TYP_A), Ok(()), "supplier: this guest's sleep type");
     println!("{SUPPLIED}");
 }
 
@@ -650,7 +642,7 @@ fn outlived() {
     let cap: SysCap = Endowments::get().take(SYSCAP_LABEL).expect("test-runner endows a device-minting capability");
     let left = Command::new(SELF_PATH)
         .arg("supplier")
-        .endow(CLAIM_LABEL, claim(&cap).into_raw().0)
+        .endow(CLAIM_LABEL, claim(&cap).into())
         .stdout(Stdio::piped())
         .output()
         .expect("acpi: spawn the supplier");
@@ -661,7 +653,7 @@ fn outlived() {
     // returned before the power-off is asked for.
     drop(claim(&cap));
     println!("{ASKED_WITH_NO_HOLDER}");
-    let refused = toyos::power::stop(toyos::power::Stop::Shutdown);
+    let refused = power_off();
     panic!("acpi: the power-off was refused: {refused:?}");
 }
 
@@ -679,7 +671,7 @@ const PRESS_SERVED: &str = "acpi: the press came as one SCI with its status latc
 /// The claim's interrupts since its last read, or `None` for none.
 fn sci(claim: &Device) -> Option<u64> {
     let mut record = [0u8; toyos_abi::pci::DeviceIrqRecord::SIZE];
-    match syscall::read_nonblock(claim.as_handle(), &mut record) {
+    match syscall::read_nonblock(claim.as_handle().raw(), &mut record) {
         Ok(n) => {
             assert_eq!(n, record.len(), "acpi: an interrupt record of {n} bytes");
             Some(u64::from(u32::from_ne_bytes(record[..4].try_into().expect("a count's four bytes"))))
@@ -704,7 +696,7 @@ fn press() {
         out8(info.gpe0.port + i, 0xFF);
     }
     out16(enable, PWRBTN);
-    syscall::write(claim.as_handle(), &ACK.to_ne_bytes()).expect("acpi: the claim's acknowledgement");
+    syscall::write(claim.as_handle().raw(), &ACK.to_ne_bytes()).expect("acpi: the claim's acknowledgement");
     assert_eq!(sci(&claim), None, "acpi: an SCI before the press, with every event but the button off");
     println!("{PRESS_ARMED}");
 
@@ -719,6 +711,6 @@ fn press() {
     assert_eq!(sci(&claim), None, "acpi: a second SCI while the press was unserved");
     out16(status, PWRBTN);
     assert_eq!(in16(status) & PWRBTN, 0, "acpi: PWRBTN_STS stayed set after its clear");
-    syscall::write(claim.as_handle(), &ACK.to_ne_bytes()).expect("acpi: the claim's acknowledgement");
+    syscall::write(claim.as_handle().raw(), &ACK.to_ne_bytes()).expect("acpi: the claim's acknowledgement");
     println!("{PRESS_SERVED}");
 }

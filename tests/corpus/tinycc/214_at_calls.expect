@@ -1,0 +1,57 @@
+mkdir makes the directory: yes
+open O_DIRECTORY opens a directory: yes
+fstat of it is a directory: yes
+read of it is EISDIR: yes
+open O_DIRECTORY of a file is ENOTDIR: yes
+mkdirat makes a directory in it: yes
+openat opens it: yes
+openat makes a file from it: yes
+fstatat finds the file from the parent: yes
+the file has one name: yes
+fstatat with AT_EMPTY_PATH is the descriptor's own: yes
+fstatat of the empty path without it is ENOENT: yes
+a path from a descriptor that is no directory is ENOTDIR: yes
+fstatat of a bad descriptor is EBADF: yes
+an absolute path ignores the descriptor: yes
+a `..` from the directory climbs to its parent: yes
+a `..` above the directory's root is EACCES: yes
+an empty path from a descriptor is ENOENT: yes
+the directory is still there: yes
+open of the empty path is ENOENT: yes
+symlinkat makes a link from the descriptor: yes
+readlinkat reads it: yes
+fstatat follows it: yes
+fstatat AT_SYMLINK_NOFOLLOW is the link: yes
+unlinkat of a directory without AT_REMOVEDIR is refused: yes
+renameat moves the file to the parent: yes
+the file is in the parent's listing: yes
+renameat moves the directory: yes
+its descriptor follows it: yes
+unlinkat AT_REMOVEDIR of a full directory is ENOTEMPTY: yes
+unlinkat AT_REMOVEDIR removes an empty one: yes
+unlinkat removes the link: yes
+dirfd answers the stream's descriptor: yes
+link is ENOTSUP: yes
+linkat is ENOTSUP: yes
+O_TMPFILE is ENOTSUP: yes
+O_TMPFILE to read alone is EINVAL: yes
+utimensat sets the modification time: yes
+stat reads it back to the nanosecond: yes
+futimens sets it through a descriptor: yes
+fstat reads that back: yes
+UTIME_NOW sets it to now: yes
+a tv_nsec past a second is EINVAL: yes
+an access time the volume keeps none of is ENOTSUP: yes
+O_DIRECTORY of a /tmp file is ENOTDIR: yes
+O_DIRECTORY of /tmp to write is EISDIR: yes
+opendir of a /tmp file is ENOTDIR: yes
+utimes of the kernel's /tmp is ENOTSUP: yes
+pread beside a read on /home: yes
+pread beside a read on /tmp: yes
+pwrite at its offset on /home: yes
+pwrite at its offset on /tmp: yes
+pwrite beside a write on /home: yes
+pwrite beside a write on /tmp: yes
+pread of a negative offset is EINVAL: yes
+rmdir removes the moved directory: yes
+rmdir removes the directory: yes

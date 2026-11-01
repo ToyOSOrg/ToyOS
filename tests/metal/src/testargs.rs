@@ -15,8 +15,8 @@ declare_flags!(pub SUITE = {
     pub NOCAPTURE = "--nocapture", None;
     pub JOBS = "--jobs", Next;
     pub JOBS_SHORT = "-j", Next;
-    /// The metal profile: the registrations that run on the T14, batched into
-    /// images and judged off the log the stick came back with.
+    /// The metal profile: the registrations that run on a bench, batched into
+    /// images and judged off the log each boot left on the bench's disk.
     pub METAL = "--metal", None;
     /// Where those images and their readbacks live. **Naming it means the
     /// machine is not touched**: the run builds the images and writes down what

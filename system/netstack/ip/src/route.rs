@@ -2,7 +2,8 @@
 //! on-link gateways per interface; longest prefix first, then 169.254/16 on the link itself (RFC
 //! 3927 §2.6.2), then the active gateway, and no forwarding. A lookup considers only interfaces
 //! that are up, and with a bound source only the interface holding it (RFC 1122 §3.3.4.2, the
-//! strong model).
+//! strong model). Between interfaces that tie, the one of lower [`crate::Rank`] wins, and among
+//! equal ranks the one added first.
 
 use core::net::Ipv4Addr;
 
@@ -40,7 +41,8 @@ pub enum Source {
     Unspecified,
 }
 
-pub(crate) fn lookup(ifaces: &[Interface], destination: Ipv4Addr, source: Source, bound: Option<IfIndex>) -> Result<Route, Counter> {
+/// `order` is every interface's index, by rank and then arrival.
+pub(crate) fn lookup(ifaces: &[Interface], order: &[usize], destination: Ipv4Addr, source: Source, bound: Option<IfIndex>) -> Result<Route, Counter> {
     let eligible = |index: usize, i: &Interface| {
         i.up
             && bound.is_none_or(|b| b.0 == index)
@@ -49,7 +51,7 @@ pub(crate) fn lookup(ifaces: &[Interface], destination: Ipv4Addr, source: Source
                 Source::Any | Source::Unspecified => true,
             }
     };
-    let candidates = || ifaces.iter().enumerate().filter(|&(n, i)| eligible(n, i));
+    let candidates = || order.iter().filter_map(|&n| ifaces.get(n).map(|i| (n, i))).filter(|&(n, i)| eligible(n, i));
     let pick_source = |i: &Interface, toward: Ipv4Addr| match source {
         Source::Bound(addr) => Ok(addr),
         Source::Unspecified => Err(Counter::RouteNoSourceAddress),
@@ -141,7 +143,7 @@ pub(crate) fn withdraw_off_link(i: &mut Interface, cx: &mut Cx<'_>) {
 impl Ip {
     /// Where a datagram to `destination` goes, or the refusal a transport reports.
     pub fn route(&mut self, destination: Ipv4Addr, source: Source, iface: Option<IfIndex>) -> Result<Route, Counter> {
-        lookup(&self.ifaces, destination, source, iface).inspect_err(|&refusal| self.log.count(refusal))
+        lookup(&self.ifaces, &self.order, destination, source, iface).inspect_err(|&refusal| self.log.count(refusal))
     }
 
     /// Installs the interface's gateways, in order of preference (RFC 2132 §3.5). A list with any

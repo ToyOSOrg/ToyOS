@@ -180,6 +180,11 @@ pub struct CounterFacts {
     pub cpuid_1_ecx: u32,
     /// 0 unless CPUID.0 reaches leaf 6.
     pub cpuid_6_ecx: u32,
+    /// 0 unless CPUID.8000_0000H reaches leaf 8000_0007H.
+    pub cpuid_8000_0007_edx: u32,
+    /// The CPU reads its package's counters: the boot processor, so a
+    /// machine's package counters are one CPU's.
+    pub reads_package: bool,
 }
 
 /// The counters a CPU has: a counter it lacks is `#GP` to read, and the
@@ -190,18 +195,94 @@ pub struct Counters {
     pub aperf_mperf: bool,
     /// `MSR_SMI_COUNT` (34H).
     pub smi: bool,
+    /// `MSR_CORE_C6_RESIDENCY` and `MSR_CORE_C7_RESIDENCY` (3FDH, 3FEH).
+    pub core_residency: bool,
+    /// The package's energy counter and its units, by whose registers.
+    pub package_energy: Option<Rapl>,
+    /// `MSR_PKG_C2_RESIDENCY`, `_C3_`, `_C6_` and `_C7_` (60DH, 3F8H, 3F9H,
+    /// 3FAH).
+    pub package_residency: bool,
+    /// AMD's `CORE_ENERGY_STAT` (C001_029AH).
+    pub core_energy: bool,
 }
+
+/// Whose registers carry a package's energy and its units, each counting
+/// `1/2^ESU` J, ESU bits 12:8 of the unit register, in bits 31:0 of the
+/// energy register.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Rapl {
+    /// `MSR_RAPL_POWER_UNIT` (606H) and `MSR_PKG_ENERGY_STATUS` (611H): SDM
+    /// Vol. 3B §17.10.1 and §17.10.3, Table 2-20.
+    Intel,
+    /// `RAPL_PWR_UNIT` (C001_0299H) and `PKG_ENERGY_STAT` (C001_029BH): PPR
+    /// 55922, as 55772 and OSRR 56255 give them for Family 17h's other models.
+    Amd,
+}
+
+/// `CPUID_Fn80000007_EDX[RAPL]`, "Running average power limit" (PPR 55922).
+const CPUID_8000_0007_EDX_RAPL: u32 = 1 << 14;
 
 pub fn counters(facts: &CounterFacts) -> Counters {
     let documented = matches!(facts.vendor, Vendor::Intel | Vendor::Amd);
+    let id = Ident::new(facts.vendor, facts.signature);
+    // ToyOS's rule for every model-specific counter: under a hypervisor the
+    // register is its emulation, not the hardware's count it is read for.
+    let hardware = facts.cpuid_1_ecx & CPUID_1_ECX_HYPERVISOR == 0;
+    let table_2_20 = hardware && in_table_2_20(&id);
+    let amd_rapl = hardware && amd_rapl(&id, facts.cpuid_8000_0007_edx);
+    let package_energy = if table_2_20 {
+        Some(Rapl::Intel)
+    } else if amd_rapl {
+        Some(Rapl::Amd)
+    } else {
+        None
+    };
     Counters {
         // SDM Vol. 1 CPUID.06H:ECX[0]; PPR 55922 `CPUID_Fn00000006_ECX[EffFreq]`.
         aperf_mperf: documented && facts.cpuid_6_ecx & CPUID_6_ECX_APERFMPERF != 0,
-        // ToyOS's rule: under a hypervisor 34H is its emulation, not the
-        // firmware's count it is read for.
-        smi: counts_smis(&Ident::new(facts.vendor, facts.signature))
-            && facts.cpuid_1_ecx & CPUID_1_ECX_HYPERVISOR == 0,
+        smi: hardware && counts_smis(&id),
+        core_residency: table_2_20,
+        package_energy: package_energy.filter(|_| facts.reads_package),
+        // Table 2-42 restates 3F8H for 06_66H without a rate.
+        package_residency: table_2_20 && id.model != 0x66 && facts.reads_package,
+        core_energy: amd_rapl,
     }
+}
+
+/// Family 17h's PPRs in hand (55922 for Model 60h, 55772 for Model 20h,
+/// OSRR 56255 for Models 00h-2Fh) each enumerate RAPL by
+/// [`CPUID_8000_0007_EDX_RAPL`] and define C001_0299H, C001_029AH and
+/// C001_029BH alike: 32-bit energy counters in `1/2^ESU` J. PPR 55901, for
+/// Family 19h Model 11h, makes the core's counter 64 bits wide and the
+/// package's an L3 complex's, so no other family is read by this rule.
+fn amd_rapl(id: &Ident, cpuid_8000_0007_edx: u32) -> bool {
+    id.vendor == Vendor::Amd && id.family == 0x17 && cpuid_8000_0007_edx & CPUID_8000_0007_EDX_RAPL != 0
+}
+
+/// The family 6 DisplayModels SDM Vol. 4 (325462-093) names as supporting
+/// Table 2-20, each in its section's opening (§2.11-§2.16 and §2.17). Table
+/// 2-20 defines `MSR_CORE_C6_RESIDENCY` and `_C7_` (3FDH, 3FEH) and
+/// `MSR_PKG_C2_RESIDENCY`, `_C3_`, `_C6_` and `_C7_` (60DH, 3F8H, 3F9H,
+/// 3FAH) as counting at the TSC's rate, the unit [`Counter::CoreC6`] and
+/// [`Counter::PackageC2`] promise, and `MSR_RAPL_POWER_UNIT` (606H) and
+/// `MSR_PKG_ENERGY_STATUS` (611H) by §17.10. Of the tables that supersede it
+/// for these models, Table 2-57 counts 3FDH and 3FEH in units of the P1
+/// clock and gives 3F9H and 3FAH no rate, so 06_AFH is left out, its energy
+/// with them; Table 2-42 gives 06_66H's 3F8H no rate; and Tables 2-30, 2-32,
+/// 2-36 and 2-50 restate 606H's energy unit as §17.10.1 gives it. Table 2-8,
+/// which gives 606H another unit, is no listed model's. AMD documents no
+/// residency counter in the PPRs in hand.
+///
+/// [`Counter::CoreC6`]: toyos_abi::counters::Counter::CoreC6
+/// [`Counter::PackageC2`]: toyos_abi::counters::Counter::PackageC2
+const TABLE_2_20_MODELS: [u32; 36] = [
+    0x2a, 0x2d, 0x3a, 0x3e, 0x3c, 0x45, 0x46, 0x3f, 0x3d, 0x47, 0x4f, 0x56,
+    0x4e, 0x5e, 0x55, 0x8e, 0x9e, 0x66, 0xa5, 0xa6, 0x7e, 0x8c, 0x8d, 0x6a,
+    0x6c, 0x97, 0x9a, 0xba, 0xb7, 0xbf, 0x8f, 0xcf, 0xaa, 0xad, 0xae, 0xbd,
+];
+
+fn in_table_2_20(id: &Ident) -> bool {
+    id.vendor == Vendor::Intel && id.family == 6 && TABLE_2_20_MODELS.contains(&id.model)
 }
 
 /// The Intel family 6 DisplayModels a section of SDM Vol. 4 names as
@@ -341,33 +422,111 @@ mod tests {
     const T14_SIGNATURE: u32 = 0x0008_06c1;
 
     fn intel(signature: u32) -> CounterFacts {
-        CounterFacts { vendor: Vendor::Intel, signature, cpuid_1_ecx: 0, cpuid_6_ecx: CPUID_6_ECX_APERFMPERF }
+        CounterFacts {
+            vendor: Vendor::Intel,
+            signature,
+            cpuid_1_ecx: 0,
+            cpuid_6_ecx: CPUID_6_ECX_APERFMPERF,
+            cpuid_8000_0007_edx: 1 << 8,
+            reads_package: true,
+        }
     }
+
+    const NONE: Counters = Counters {
+        aperf_mperf: false,
+        smi: false,
+        core_residency: false,
+        package_energy: None,
+        package_residency: false,
+        core_energy: false,
+    };
 
     /// 06_8CH, which §2.17 names as supporting Table 2-20.
     #[test]
-    fn the_t14_counts_smis_and_has_aperf_and_mperf() {
-        assert_eq!(counters(&intel(T14_SIGNATURE)), Counters { aperf_mperf: true, smi: true });
+    fn the_t14_counts_smis_residency_and_its_packages_energy() {
+        let all = Counters {
+            aperf_mperf: true,
+            smi: true,
+            core_residency: true,
+            package_energy: Some(Rapl::Intel),
+            package_residency: true,
+            core_energy: false,
+        };
+        assert_eq!(counters(&intel(T14_SIGNATURE)), all);
+        let ap = CounterFacts { reads_package: false, ..intel(T14_SIGNATURE) };
+        assert_eq!(counters(&ap), Counters { package_energy: None, package_residency: false, ..all });
     }
 
-    /// The AMD bench, Family 17h Model 60h: PPR 55922 gives it `EffFreq` and
-    /// no `MSR0000_0034`.
+    /// 06_AFH: Table 2-57 counts its core residency at P1, not the TSC.
     #[test]
-    fn the_amd_bench_has_aperf_and_mperf_and_no_smi_count() {
-        let renoir = CounterFacts { vendor: Vendor::Amd, signature: 0x0086_0f01, cpuid_1_ecx: 0, cpuid_6_ecx: 1 };
-        assert_eq!(counters(&renoir), Counters { aperf_mperf: true, smi: false });
+    fn sierra_forest_counts_no_residency_and_no_energy() {
+        let c = counters(&intel(0x000a_06f0));
+        assert!(!c.core_residency && !c.package_residency && c.package_energy.is_none());
+        assert!(c.smi, "its 34H stands");
+    }
+
+    /// 06_66H: Table 2-42 gives its 3F8H no rate, and supersedes nothing else
+    /// the rule reads.
+    #[test]
+    fn cannon_lake_counts_no_package_residency_and_the_rest() {
+        let c = counters(&intel(model(0x66)));
+        assert!(c.core_residency && c.package_energy == Some(Rapl::Intel) && !c.package_residency);
+    }
+
+    /// The AMD bench, Family 17h Model 60h: PPR 55922 gives it `EffFreq`,
+    /// `CPUID_Fn80000007_EDX[RAPL]` and no `MSR0000_0034`; without the RAPL
+    /// bit it has no energy counter.
+    #[test]
+    fn the_amd_bench_has_aperf_and_mperf_its_energy_and_no_smi_count() {
+        let renoir = CounterFacts {
+            vendor: Vendor::Amd,
+            signature: 0x0086_0f01,
+            cpuid_1_ecx: 0,
+            cpuid_6_ecx: 1,
+            cpuid_8000_0007_edx: 0x6799,
+            reads_package: true,
+        };
+        let all = Counters { aperf_mperf: true, package_energy: Some(Rapl::Amd), core_energy: true, ..NONE };
+        assert_eq!(counters(&renoir), all);
+        assert_eq!(counters(&CounterFacts { reads_package: false, ..renoir }), Counters { package_energy: None, ..all });
+        assert_eq!(counters(&CounterFacts { cpuid_8000_0007_edx: 0x2799, ..renoir }), Counters { aperf_mperf: true, ..NONE });
+    }
+
+    /// PPR 55901 changes the registers' widths and scope for Family 19h.
+    #[test]
+    fn only_amd_family_17h_reads_rapl() {
+        let zen4 = CounterFacts {
+            vendor: Vendor::Amd,
+            signature: 0x00a1_0f11,
+            cpuid_1_ecx: 0,
+            cpuid_6_ecx: 1,
+            cpuid_8000_0007_edx: 0x6799,
+            reads_package: true,
+        };
+        assert_eq!(counters(&zen4), Counters { aperf_mperf: true, ..NONE });
+        let hygon = CounterFacts { vendor: Vendor::Other(*b"HygonGenuine"), signature: 0x0090_0f01, ..zen4 };
+        assert_eq!(counters(&hygon), NONE);
     }
 
     #[test]
     fn a_vendor_neither_intel_nor_amd_has_neither() {
         let other = CounterFacts { vendor: Vendor::Other(*b"CentaurHauls"), ..intel(T14_SIGNATURE) };
-        assert_eq!(counters(&other), Counters { aperf_mperf: false, smi: false });
+        assert_eq!(counters(&other), NONE);
     }
 
     #[test]
-    fn a_guest_counts_no_smis() {
+    fn a_guest_counts_nothing_model_specific() {
         let guest = CounterFacts { cpuid_1_ecx: CPUID_1_ECX_HYPERVISOR, ..intel(T14_SIGNATURE) };
-        assert_eq!(counters(&guest), Counters { aperf_mperf: true, smi: false });
+        assert_eq!(counters(&guest), Counters { aperf_mperf: true, ..NONE });
+        let amd = CounterFacts {
+            vendor: Vendor::Amd,
+            signature: 0x0086_0f01,
+            cpuid_1_ecx: CPUID_1_ECX_HYPERVISOR,
+            cpuid_6_ecx: 1,
+            cpuid_8000_0007_edx: 0x6799,
+            reads_package: true,
+        };
+        assert_eq!(counters(&amd), Counters { aperf_mperf: true, ..NONE });
     }
 
     /// Family 6 signatures with the given DisplayModel, stepping 1.

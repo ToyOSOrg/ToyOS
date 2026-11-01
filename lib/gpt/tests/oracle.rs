@@ -18,7 +18,6 @@ const SHAPE: Shape<'static> = Shape {
     // `gpt` reads 128-byte entries whatever the header says.
     entry_sizes: &[128],
     backup: false,
-    floored: false,
 };
 
 const VALID: u64 = 2_000;

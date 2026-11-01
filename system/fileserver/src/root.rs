@@ -3,120 +3,98 @@
 //! (`toyos_abi::syscall::ROOT_IMAGE_LABEL`). No disk and no cache: the bytes
 //! are already in memory, and nobody writes them.
 //!
-//! **ROOT crossed the loader's hash and nothing else.** Every block the format
-//! names is bounds-checked against the bytes ([`Bytes`]), and every refusal of
-//! the format is a client's `Io`, never a panic of this server.
+//! **ROOT crossed the loader's hash and nothing else.** The engine's reader
+//! checks every block it is pointed at against the bytes and every checksum
+//! against what it covers, and every refusal of the format is a client's
+//! `Io`, never a panic of this server.
 //!
-//! Every name is indexed at mount, as DATA's are ([`crate::data`]): ROOT is
-//! written once by the build and never changes, so a directory is a prefix of
-//! names and nothing more.
+//! Every name is indexed at mount: ROOT is written once by the build and
+//! never changes. A node's identity is its inode number.
+//!
+//! **A file whose bytes lie in ROOT as they read is handed out in place**
+//! ([`Volume::in_place`]), its extents verified at its first ask: a spawn
+//! pages a program from ROOT's own pages and copies nothing here.
 
 use std::collections::BTreeMap;
 
-use bcachefs::{BlockBuf, BlockIO, BlockNum, DeviceError, Extent, Mounted, ReadOnly, TransferError};
+use bcachefs::engine::{self, DirentType};
 use toyos::fs::Error;
+use toyos_blockdev::{block_on_ready, ReadOnlyBytes, BLOCK};
 
-use crate::data::{block_for, mapped};
-use crate::volume::{join, Identities, Kind, Meta, Node, OpenHow, Out, Volume};
+use crate::volume::{join, Kind, Listed, Meta, Node, OpenHow, Out, Reserved, Volume};
 
-/// The longest symlink target read back: the wire's path bound.
-const MAX_LINK: u64 = toyos::fs::MAX_PATH as u64;
+/// The longest read asked of the reader at once, so a large client window
+/// costs this much memory and no more.
+const READ_CHUNK: usize = 256 << 10;
 
-/// ROOT's unit, which is the format's block.
-const BLOCK: usize = 4096;
-
-/// ROOT's bytes, as the format reads them: whole blocks of them, and none past.
-pub struct Bytes(&'static [u8]);
-
-impl Bytes {
-    /// Block `block`, or `None` past the bytes.
-    fn block(&self, block: u64) -> Option<&[u8]> {
-        let at = usize::try_from(block).ok()?.checked_mul(BLOCK)?;
-        self.0.get(at..at.checked_add(BLOCK)?)
-    }
-}
-
-/// A block outside the bytes, or a write to them.
-struct Refused;
-
-impl TransferError for Refused {
-    fn refused_before_attempt(&self) -> bool {
-        false
-    }
-}
-
-impl BlockIO for Bytes {
-    fn read_block(&self, block: BlockNum, buf: &mut BlockBuf) -> Result<(), DeviceError> {
-        buf.0.copy_from_slice(self.block(block.raw()).ok_or(DeviceError::classify(&Refused))?);
-        Ok(())
-    }
-
-    /// A `ReadOnly` mount has no path here.
-    fn write_block(&self, _: BlockNum, _: &BlockBuf) -> Result<(), DeviceError> {
-        Err(DeviceError::classify(&Refused))
-    }
-
-    fn block_count(&self) -> u64 {
-        (self.0.len() / BLOCK) as u64
-    }
-}
+// A block of ROOT is a page of the memory it is in.
+const _: () = assert!(BLOCK == toyos_abi::syscall::PAGE_SIZE);
 
 /// One file open, while any client holds it.
 struct Open {
-    extents: Vec<Extent>,
-    size: u64,
-    mtime: u64,
+    ino: u64,
+    meta: Meta,
     holders: u32,
 }
 
 pub struct RootVolume {
-    fs: Mounted<Bytes, ReadOnly>,
-    names: BTreeMap<String, Kind>,
+    fs: engine::Volume<ReadOnlyBytes<'static>>,
+    blocks: usize,
+    /// Every path, `""` the root directory, with its inode and kind.
+    names: BTreeMap<String, (u64, Kind)>,
     open: BTreeMap<Node, Open>,
     by_path: BTreeMap<String, Node>,
     next: Node,
-    ids: Identities<String>,
+    /// What [`Volume::in_place`] verified, by inode: ROOT never changes.
+    in_place: BTreeMap<u64, Option<(u64, u64)>>,
 }
 
 impl RootVolume {
     /// The volume `bytes` hold, every name indexed; why not, by the format's word.
     pub fn mount(bytes: &'static [u8]) -> Result<Self, String> {
-        let fs = Mounted::<_, ReadOnly>::open(Bytes(bytes)).map_err(|e| format!("ROOT does not mount: {e:?}"))?;
-        let listed = fs.list(usize::MAX, &|_| true).map_err(|e| format!("ROOT would not list: {e:?}"))?;
-        let mut names = BTreeMap::new();
-        for (name, _) in listed {
-            let kind = match name.strip_suffix('/') {
-                Some(dir) => {
-                    names.insert(dir.to_string(), Kind::Dir);
-                    continue;
-                }
-                None if fs.is_symlink(&name).map_err(|e| format!("ROOT: {name}: {e:?}"))? => Kind::Symlink,
-                None => Kind::File,
+        let dev = ReadOnlyBytes::new(bytes).ok_or_else(|| format!("ROOT is {} bytes, no whole {BLOCK}-byte blocks", bytes.len()))?;
+        let fs = block_on_ready(engine::Volume::open(dev)).map_err(|e| format!("ROOT does not mount: {e:?}"))?;
+        let listed = block_on_ready(fs.names()).map_err(|e| format!("ROOT would not list: {e:?}"))?;
+        let mut names = BTreeMap::from([(String::new(), (fs.root(), Kind::Dir))]);
+        for (path, entry) in listed {
+            let path = String::from_utf8(path).map_err(|e| format!("ROOT names a path that is not UTF-8: {:?}", e.as_bytes()))?;
+            let kind = match entry.kind {
+                DirentType::Directory => Kind::Dir,
+                DirentType::Regular => Kind::File,
+                DirentType::Symlink => Kind::Symlink,
+                other => return Err(format!("ROOT: {path} is a {other:?}, which ROOT never holds")),
             };
-            names.insert(name, kind);
+            names.insert(path, (entry.ino, kind));
         }
-        Ok(Self { fs, names, open: BTreeMap::new(), by_path: BTreeMap::new(), next: 1, ids: Identities::new() })
+        Ok(Self { fs, blocks: bytes.len() / BLOCK, names, open: BTreeMap::new(), by_path: BTreeMap::new(), next: 1, in_place: BTreeMap::new() })
     }
 
     /// The filesystem's name, which the build derives from every file ROOT carries.
     pub fn uuid(&self) -> String {
-        self.fs.uuid().to_string()
+        self.fs.superblock().user_uuid().iter().map(|b| format!("{b:02x}")).collect()
     }
 
-    fn has_children(&self, dir: &str) -> bool {
-        let prefix = format!("{dir}/");
-        self.names.range(prefix.clone()..).next().is_some_and(|(name, _)| name.starts_with(&prefix))
-    }
-
-    fn is_dir(&self, path: &str) -> bool {
-        path.is_empty()
-            || self.names.get(path) == Some(&Kind::Dir)
-            || (!self.names.contains_key(path) && self.has_children(path))
+    fn meta(&self, path: &str, ino: u64, kind: Kind) -> Result<Meta, Error> {
+        let inode = mapped("a lookup", path, block_on_ready(self.fs.inode(ino)))?;
+        let size = if kind == Kind::Dir { 0 } else { inode.size };
+        Ok(Meta { kind, size, mtime: inode.mtime.max(0) as u64 })
     }
 
     fn entry(&self, node: Node) -> Result<&Open, Error> {
         self.open.get(&node).ok_or(Error::Stale)
     }
+}
+
+/// Logs the format's own account, answers the word a client can act on.
+fn mapped<T>(what: &str, path: &str, r: Result<T, engine::Error>) -> Result<T, Error> {
+    r.map_err(|e| {
+        println!("fileserver: {what} of '{path}' on ROOT failed: {e:?}");
+        match e {
+            engine::Error::NotFound => Error::NotFound,
+            engine::Error::NotDirectory => Error::NotADirectory,
+            _ => Error::Io,
+        }
+    })
 }
 
 impl Volume for RootVolume {
@@ -125,74 +103,61 @@ impl Volume for RootVolume {
     }
 
     fn lstat(&mut self, path: &str) -> Result<Meta, Error> {
-        match self.names.get(path).copied() {
-            Some(Kind::Dir) => Ok(Meta { kind: Kind::Dir, size: 0, mtime: 0 }),
-            Some(kind) => {
-                let (_, size) = mapped("a lookup", path, self.fs.file_extents(path))?.ok_or(Error::NotFound)?;
-                let mtime = mapped("a lookup", path, self.fs.file_mtime(path))?.ok_or(Error::NotFound)?;
-                Ok(Meta { kind, size, mtime })
+        let &(ino, kind) = self.names.get(path).ok_or(Error::NotFound)?;
+        self.meta(path, ino, kind)
+    }
+
+    fn read_link(&mut self, path: &str) -> Result<String, Error> {
+        match self.names.get(path) {
+            Some(&(ino, Kind::Symlink)) => {
+                let target = mapped("readlink", path, block_on_ready(self.fs.readlink(ino)))?;
+                String::from_utf8(target).map_err(|_| Error::Io)
             }
-            None if self.is_dir(path) => Ok(Meta { kind: Kind::Dir, size: 0, mtime: 0 }),
+            Some(_) => Err(Error::NotALink),
             None => Err(Error::NotFound),
         }
     }
 
-    fn read_link(&mut self, path: &str) -> Result<String, Error> {
-        if self.names.get(path) != Some(&Kind::Symlink) {
-            return Err(if self.names.contains_key(path) || self.is_dir(path) { Error::NotALink } else { Error::NotFound });
-        }
-        mapped("readlink", path, self.fs.read_link(path, MAX_LINK))?.ok_or(Error::Io)
-    }
-
-    fn list(&mut self, dir: &str) -> Result<Vec<(String, Meta)>, Error> {
-        if !self.is_dir(dir) {
-            return Err(if self.names.contains_key(dir) { Error::NotADirectory } else { Error::NotFound });
+    fn list(&mut self, dir: &str) -> Result<Vec<Listed>, Error> {
+        match self.names.get(dir) {
+            Some((_, Kind::Dir)) => {}
+            Some(_) => return Err(Error::NotADirectory),
+            None => return Err(Error::NotFound),
         }
         let prefix = if dir.is_empty() { String::new() } else { format!("{dir}/") };
-        let mut children: BTreeMap<String, Kind> = BTreeMap::new();
-        for (name, kind) in self.names.range(prefix.clone()..) {
-            let Some(rest) = name.strip_prefix(&prefix) else { break };
-            match rest.split_once('/') {
-                Some((child, _)) => {
-                    children.insert(child.to_string(), Kind::Dir);
-                }
-                None => {
-                    children.entry(rest.to_string()).or_insert(*kind);
-                }
-            }
-        }
-        let mut out = Vec::with_capacity(children.len());
-        for (name, kind) in children {
-            let meta = match kind {
-                Kind::Dir => Meta { kind, size: 0, mtime: 0 },
-                _ => self.lstat(&join(dir, &name))?,
-            };
-            out.push((name, meta));
-        }
-        Ok(out)
+        let children: Vec<(String, u64, Kind)> = self
+            .names
+            .range(prefix.clone()..)
+            .take_while(|(name, _)| name.starts_with(&prefix))
+            .filter_map(|(name, &(ino, kind))| {
+                let rest = &name[prefix.len()..];
+                (!rest.is_empty() && !rest.contains('/')).then(|| (rest.to_string(), ino, kind))
+            })
+            .collect();
+        children
+            .into_iter()
+            .map(|(name, ino, kind)| Ok(Listed { meta: self.meta(&join(dir, &name), ino, kind)?, name, identity: ino }))
+            .collect()
     }
 
     fn open(&mut self, path: &str, how: OpenHow) -> Result<Node, Error> {
-        if self.is_dir(path) {
-            return Err(Error::IsADirectory);
-        }
-        match self.names.get(path) {
+        let ino = match self.names.get(path).copied() {
+            Some((_, Kind::Dir)) => return Err(Error::IsADirectory),
             Some(_) if how.create_new => return Err(Error::AlreadyExists),
             None if how.create || how.create_new => return Err(Error::ReadOnly),
             None => return Err(Error::NotFound),
             // A link the resolver did not follow is one with nothing behind it.
-            Some(Kind::Symlink | Kind::Dir) => return Err(Error::NotFound),
-            Some(Kind::File) if how.truncate => return Err(Error::ReadOnly),
-            Some(Kind::File) => {}
-        }
+            Some((_, Kind::Symlink)) => return Err(Error::NotFound),
+            Some((_, Kind::File)) if how.truncate => return Err(Error::ReadOnly),
+            Some((ino, Kind::File)) => ino,
+        };
         let node = match self.by_path.get(path).copied() {
             Some(node) => node,
             None => {
-                let (extents, size) = mapped("open", path, self.fs.file_extents(path))?.ok_or(Error::NotFound)?;
-                let mtime = mapped("open", path, self.fs.file_mtime(path))?.ok_or(Error::NotFound)?;
+                let meta = self.meta(path, ino, Kind::File)?;
                 let node = self.next;
                 self.next += 1;
-                self.open.insert(node, Open { extents, size, mtime, holders: 0 });
+                self.open.insert(node, Open { ino, meta, holders: 0 });
                 self.by_path.insert(path.to_string(), node);
                 node
             }
@@ -212,49 +177,52 @@ impl Volume for RootVolume {
     }
 
     fn node_meta(&mut self, node: Node) -> Result<Meta, Error> {
-        let open = self.entry(node)?;
-        Ok(Meta { kind: Kind::File, size: open.size, mtime: open.mtime })
+        Ok(self.entry(node)?.meta)
     }
 
     fn identity(&mut self, path: &str) -> Result<u64, Error> {
-        if !self.names.contains_key(path) && !self.is_dir(path) {
-            return Err(Error::NotFound);
-        }
-        Ok(self.ids.of(path.to_string()))
+        self.names.get(path).map(|&(ino, _)| ino).ok_or(Error::NotFound)
     }
 
     fn read(&mut self, node: Node, offset: u64, out: &mut dyn Out) -> Result<usize, Error> {
-        let open = self.entry(node)?;
-        if offset >= open.size {
-            return Ok(0);
-        }
-        let n = out.len().min((open.size - offset) as usize);
+        let ino = self.entry(node)?.ino;
+        let mut buf = vec![0u8; out.len().min(READ_CHUNK)];
         let mut done = 0;
-        while done < n {
-            let at = offset + done as u64;
-            let within = (at % BLOCK as u64) as usize;
-            let take = (BLOCK - within).min(n - done);
-            match block_for(&open.extents, at / BLOCK as u64) {
-                Some(block) => {
-                    let Some(bytes) = self.fs.io().block(block) else {
-                        println!("fileserver: a file on ROOT names block {block}, past ROOT's end");
-                        return Err(Error::Io);
-                    };
-                    out.put(done, &bytes[within..within + take]);
-                }
-                // Past the extents: a hole, whose bytes are zeros.
-                None => out.zero(done, take),
+        while done < out.len() {
+            let want = (out.len() - done).min(buf.len());
+            let n = mapped("a read", "an open file", block_on_ready(self.fs.read(ino, offset + done as u64, &mut buf[..want])))?;
+            out.put(done, &buf[..n]);
+            done += n;
+            if n < want {
+                break;
             }
-            done += take;
         }
-        Ok(n)
+        Ok(done)
     }
 
-    fn write(&mut self, _: Node, _: u64, _: &[u8]) -> Result<(), Error> {
+    fn in_place(&mut self, node: Node) -> Result<Option<(u64, u64)>, Error> {
+        let ino = self.entry(node)?.ino;
+        if let Some(&run) = self.in_place.get(&ino) {
+            return Ok(run);
+        }
+        let run = mapped("a verify", "an open file", block_on_ready(self.fs.in_place(ino)))?;
+        self.in_place.insert(ino, run);
+        Ok(run)
+    }
+
+    fn reserve(&mut self, _: Node, _: u64, _: u64) -> Result<Reserved, Error> {
+        Err(Error::ReadOnly)
+    }
+
+    fn write_back(&mut self, _: Node, _: u64, _: &[u8]) -> Result<(), Error> {
         Err(Error::ReadOnly)
     }
 
     fn truncate(&mut self, _: Node, _: u64) -> Result<(), Error> {
+        Err(Error::ReadOnly)
+    }
+
+    fn set_mtime(&mut self, _: Node, _: u64) -> Result<(), Error> {
         Err(Error::ReadOnly)
     }
 
@@ -288,25 +256,63 @@ impl Volume for RootVolume {
     }
 
     fn describe(&self) -> String {
-        format!("{}{}, {} blocks read-only from memory", toyos_osrelease::ROOT_SAID, self.uuid(), self.fs.io().block_count())
+        format!("{}{}, {} blocks read-only from memory", toyos_osrelease::ROOT_SAID, self.uuid(), self.blocks)
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::volume::Writes;
     use crate::volume::Buf;
+    use bcachefs::engine::{Meta as Owner, Options, Tree};
 
-    /// A ROOT the format writes, as the build writes one: two files, one of
-    /// them several blocks, a symlink and a nested directory.
-    fn root() -> RootVolume {
-        let mut fs = bcachefs::Formatted::format(bcachefs::VecBlockIO::new(256)).expect("format");
-        fs.create("etc/system.manifest", b"program shell /system/bin/shell\n", 7).unwrap();
-        fs.create("bin/toybox", &big(), 9).unwrap();
-        fs.create_symlink("bin/ls", "/system/bin/toybox", 0).unwrap();
-        fs.create("share/fonts/a.font", b"font", 0).unwrap();
-        let bytes = fs.into_io().expect("write").into_vec();
+    /// Draws for mkfs: a fixed stream, since nothing here judges the seeds.
+    struct Fixed(u8);
+
+    impl toyos_crypto::Random for Fixed {
+        fn fill(&mut self, out: &mut [u8]) -> Result<(), toyos_crypto::Error> {
+            for b in out {
+                self.0 = self.0.wrapping_mul(13).wrapping_add(7);
+                *b = self.0;
+            }
+            Ok(())
+        }
+    }
+
+    const MTIME: u64 = 1_761_177_600_000_000_000;
+    const FILE: Owner = Owner { perm: 0o644, uid: 0, gid: 0 };
+    const DIR: Owner = Owner { perm: 0o755, uid: 0, gid: 0 };
+
+    fn image(tree: &Tree) -> Vec<u8> {
+        let dev = toyos_blockdev::Bytes::new(vec![0u8; 8 << 20]);
+        let options = Options { label: b"ROOT", time: MTIME, encryption: None };
+        block_on_ready(engine::mkfs(&dev, &options, tree, &mut Fixed(1))).expect("mkfs");
+        dev.into_inner()
+    }
+
+    fn mount(bytes: Vec<u8>) -> RootVolume {
         RootVolume::mount(Box::leak(bytes.into_boxed_slice())).expect("mount")
+    }
+
+    /// A ROOT the engine writes, as the build writes one: two files, one of
+    /// them several blocks, a symlink and a nested directory.
+    fn root_image() -> Vec<u8> {
+        let toybox = big();
+        let mut tree = Tree::new();
+        let bin = tree.dir(Tree::ROOT, b"bin", DIR).unwrap();
+        tree.symlink(bin, b"ls", b"/system/bin/toybox", FILE).unwrap();
+        tree.file(bin, b"toybox", &toybox, FILE).unwrap();
+        let etc = tree.dir(Tree::ROOT, b"etc", DIR).unwrap();
+        tree.file(etc, b"system.manifest", b"program shell /system/bin/shell\n", FILE).unwrap();
+        let share = tree.dir(Tree::ROOT, b"share", DIR).unwrap();
+        let fonts = tree.dir(share, b"fonts", DIR).unwrap();
+        tree.file(fonts, b"a.font", b"font", FILE).unwrap();
+        image(&tree)
+    }
+
+    fn root() -> RootVolume {
+        mount(root_image())
     }
 
     fn big() -> Vec<u8> {
@@ -334,16 +340,40 @@ mod tests {
         let mut part = [0u8; 10];
         assert_eq!(v.read(node, BLOCK as u64 - 3, &mut Buf(&mut part)).unwrap(), 10);
         assert_eq!(part[..], big()[BLOCK - 3..BLOCK + 7]);
-        assert_eq!(v.lstat("bin/toybox").unwrap().mtime, 9);
+        assert_eq!(v.lstat("bin/toybox").unwrap().mtime, MTIME);
         assert_eq!(v.read_link("bin/ls").unwrap(), "/system/bin/toybox");
         assert_eq!(v.read_link("bin/toybox"), Err(Error::NotALink));
-        let listed: Vec<(String, Kind)> = v.list("").unwrap().into_iter().map(|(n, m)| (n, m.kind)).collect();
+        let listed: Vec<(String, Kind)> = v.list("").unwrap().into_iter().map(|e| (e.name, e.meta.kind)).collect();
         assert_eq!(listed, [("bin".into(), Kind::Dir), ("etc".into(), Kind::Dir), ("share".into(), Kind::Dir)]);
-        let bin: Vec<String> = v.list("bin").unwrap().into_iter().map(|(n, _)| n).collect();
+        let bin: Vec<String> = v.list("bin").unwrap().into_iter().map(|e| e.name).collect();
         assert_eq!(bin, ["ls", "toybox"]);
         assert_eq!(v.lstat("share/fonts").unwrap().kind, Kind::Dir);
         assert_eq!(v.lstat("nothing"), Err(Error::NotFound));
+        assert_eq!(v.list("bin/toybox").err(), Some(Error::NotADirectory));
         assert!(v.describe().starts_with(toyos_osrelease::ROOT_SAID));
+    }
+
+    /// A read longer than one chunk of the reader comes back whole.
+    #[test]
+    fn a_read_past_one_chunk_is_whole() {
+        let data: Vec<u8> = (0..READ_CHUNK * 2 + 4097).map(|i| (i % 253) as u8).collect();
+        let mut tree = Tree::new();
+        tree.file(Tree::ROOT, b"f", &data, FILE).unwrap();
+        let mut v = mount(image(&tree));
+        assert!(read_all(&mut v, "f") == data);
+    }
+
+    /// A listing names each entry, directory, file and link, by the identity
+    /// a stat of its path answers.
+    #[test]
+    fn a_listing_names_each_entry_by_its_identity() {
+        let mut v = root();
+        for dir in ["", "bin", "share"] {
+            for e in v.list(dir).unwrap() {
+                let path = join(dir, &e.name);
+                assert_eq!(Ok(e.identity), v.identity(&path), "{path}");
+            }
+        }
     }
 
     /// Every request that would change ROOT is refused read-only, and an open
@@ -367,17 +397,39 @@ mod tests {
         assert_eq!(read_all(&mut v, "bin/toybox"), big(), "a refused write changed nothing");
     }
 
-    /// Bytes that are no volume, and a block past them, are refusals and never
-    /// a panic of this server.
+    /// Bytes that are no volume, or no whole blocks, are refusals and never a
+    /// panic of this server; so is a file whose data a damaged image changed.
     #[test]
-    fn bytes_that_are_no_volume_or_too_few_are_refused() {
+    fn bytes_that_are_no_volume_are_refused_and_a_damaged_extent_is_io() {
         assert!(RootVolume::mount(Box::leak(vec![0u8; 8 * BLOCK].into_boxed_slice())).is_err());
-        let bytes = Bytes(Box::leak(vec![1u8; 2 * BLOCK].into_boxed_slice()));
-        let mut buf = BlockBuf::zeroed();
-        assert!(bytes.read_block(BlockNum::new(1), &mut buf).is_ok());
-        assert!(bytes.read_block(BlockNum::new(2), &mut buf).is_err());
-        assert!(bytes.read_block(BlockNum::new(u64::MAX), &mut buf).is_err());
-        assert!(bytes.write_block(BlockNum::new(0), &buf).is_err());
+        assert!(RootVolume::mount(Box::leak(vec![0u8; 8 * BLOCK + 512].into_boxed_slice())).is_err());
+        let mut bytes = root_image();
+        let at = bytes.windows(16).position(|w| w == &big()[..16]).expect("the file's bytes are on ROOT");
+        bytes[at] ^= 1;
+        let mut v = mount(bytes);
+        let node = v.open("bin/toybox", READ).unwrap();
+        let mut out = [0u8; 8];
+        assert_eq!(v.read(node, 0, &mut Buf(&mut out)), Err(Error::Io));
+    }
+
+    /// A program is handed out where its bytes are in ROOT, and a damaged one
+    /// is `Io` there as its read is.
+    #[test]
+    fn a_file_is_in_place_where_root_holds_its_bytes_and_a_damaged_one_is_io() {
+        let bytes = root_image();
+        let mut v = mount(bytes.clone());
+        let node = v.open("bin/toybox", READ).unwrap();
+        let (at, len) = v.in_place(node).unwrap().expect("one run");
+        assert_eq!(bytes[at as usize..(at + len) as usize], big()[..]);
+        assert_eq!(v.in_place(node), Ok(Some((at, len))), "asked again");
+
+        let mut damaged = bytes;
+        damaged[at as usize] ^= 1;
+        let mut v = mount(damaged);
+        let node = v.open("bin/toybox", READ).unwrap();
+        assert_eq!(v.in_place(node), Err(Error::Io));
+        v.close(node).unwrap();
+        assert_eq!(v.in_place(node), Err(Error::Stale), "a closed node");
     }
 
     /// A node closed by its last holder is gone; a second open is a fresh one.

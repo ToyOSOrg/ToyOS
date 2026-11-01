@@ -32,11 +32,13 @@ use crate::userlandhost::{Host, Os, Program};
 use crate::{flags, release, sdkversion};
 
 const USAGE: &str = "cargo run -- --ci <job>, where <job> is one of:
-  host              every host test: the build system, the harness's own checks,
+  host [<part>]     every host test: the build system, the harness's own checks,
                     the workspace's host members, the licences of what ships,
-                    clippy, the model controls, userland and the SDK (ci.yml, nightly);
-                    for a merge group that changes documentation alone, the
-                    build system's tests and the licences, which read it
+                    clippy, the models and their controls, userland and the SDK
+                    (nightly); for a merge group that changes documentation
+                    alone, the build system's tests and the licences, which read
+                    it. A part, one of tests, lint, models or userland, is its
+                    share of those, and each is a job of ci.yml
   scope             whether a merge group changes anything but documentation,
                     told to the jobs that build (ci.yml)
   seal              `host` from a cold tree, then that tree sealed as the host
@@ -53,7 +55,8 @@ const USAGE: &str = "cargo run -- --ci <job>, where <job> is one of:
 
 #[derive(Debug, PartialEq, Eq)]
 enum Job {
-    Host,
+    /// Every [`Part`], or the one named.
+    Host(Option<Part>),
     Seal,
     Stored,
     Scope,
@@ -65,9 +68,36 @@ enum Job {
     Publish,
 }
 
+/// A share of [`host`]'s steps: `ci.yml` runs each as a job of its own, in
+/// parallel, and its `host` is green when all of them are.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Part {
+    /// The build system's and the harness's own tests, the workspace's host
+    /// members but the kernel's models, [`CRYPTO`] in each of [`CRYPTO_FORMS`]
+    /// and the kernel's library.
+    Tests,
+    /// The licences of what ships, and clippy with warnings denied.
+    Lint,
+    /// The kernel's models and every model's negative control ([`CONTROLS`]).
+    Models,
+    /// Every userland crate with a host test, the apps for each host, and the
+    /// libraries built for a guest.
+    Userland,
+}
+
 fn parse(words: &[String]) -> Result<Job, String> {
+    if words.first().map(String::as_str) == Some("host") && words.len() == 2 {
+        let part = match words[1].as_str() {
+            "tests" => Part::Tests,
+            "lint" => Part::Lint,
+            "models" => Part::Models,
+            "userland" => Part::Userland,
+            other => return Err(format!("`host` has no part called {other:?}")),
+        };
+        return Ok(Job::Host(Some(part)));
+    }
     let job = match words.first().map(String::as_str) {
-        Some("host") => Job::Host,
+        Some("host") => Job::Host(None),
         Some("seal") => Job::Seal,
         Some("stored") => Job::Stored,
         Some("scope") => Job::Scope,
@@ -93,7 +123,7 @@ pub fn dispatch(root: &Path, args: &[String]) {
     });
     forget_own_package();
     let steps = match &job {
-        Job::Host => host(root, scope(root)),
+        Job::Host(part) => host(root, scope(root), *part),
         Job::Seal => seal(root),
         Job::Stored => vec![step("the host cache's entry, as stored", cicache::stored)],
         Job::Scope => vec![step("the change's scope", || tell_scope(scope(root)))],
@@ -449,7 +479,11 @@ pub(crate) const KERNEL_DIR: &str = "kernel";
 pub(crate) const SDK_DIR: &str = "sdk/toyos";
 const KERNEL_LOOM: &str = "kernel-loom";
 const KERNEL_SIM: &str = "kernel-sim";
+/// The kernel's models, which [`Part::Models`] tests beside their controls.
+const MODELS: [&str; 2] = [KERNEL_LOOM, KERNEL_SIM];
 const BLOCKRING: &str = "toyos-blockring";
+const LINK: &str = "toyos-link";
+const PROCLIFE: &str = "toyos-proclife";
 /// The SDK package, whose `transport` module carries its own controls.
 const SDK: &str = "toyos";
 
@@ -500,6 +534,10 @@ pub(crate) const CONTROLS: &[Control] = &[
     red(KERNEL_LOOM, "seqlock-writer-fence-off", Some("panic_console_publish"), &[
         Fails("a_snapshot_is_one_publication_whole"),
     ]),
+    red(KERNEL_LOOM, "clock-latch-fence-off", Some("clock_latch"), &[
+        Fails("a_read_is_one_line_whole"),
+        Fails("a_later_read_is_never_an_older_line"),
+    ]),
     red(KERNEL_LOOM, "serial-try-lock-then-some", Some("serial_lock"), &[
         Fails("a_lost_try_lock_leaves_the_lock_held"),
         Fails("two_writers_never_overlap"),
@@ -510,6 +548,9 @@ pub(crate) const CONTROLS: &[Control] = &[
     red(KERNEL_LOOM, "shootdown-serve-relaxed", Some("tlb_shootdown"), &[
         Fails("an_acknowledged_flush_postdates_the_page_table_write"),
         Fails("one_serve_answers_two_concurrent_shootdowns"),
+    ]),
+    red(KERNEL_LOOM, "tlb-tags-enter-relaxed", Some("tlb_tags"), &[
+        Fails("a_change_reaches_a_runner_or_the_entering_cpu_flushes"),
     ]),
     red(KERNEL_LOOM, "shootdown-served-relaxed", Some("counters_round"), &[
         Fails("a_cpu_read_as_answered_is_read_with_its_answer"),
@@ -637,69 +678,69 @@ pub(crate) const CONTROLS: &[Control] = &[
         Fails("iova::tests::every_grant_is_the_lowest_allowed_run_below_its_limit"),
         Fails("iova::tests::the_amd_benchs_layout"),
     ]),
-    red(KERNEL, "mutate-spawn-skips-the-insert-recheck", None, &[
-        Fails("proclife::interleave::tests::a_published_exit_leaves_no_unretired_thread"),
-        Fails("proclife::interleave::tests::a_kill_racing_a_spawn_leaves_no_unretired_thread"),
+    red(PROCLIFE, "mutate-spawn-skips-the-insert-recheck", None, &[
+        Fails("interleave::tests::a_published_exit_leaves_no_unretired_thread"),
+        Fails("interleave::tests::a_kill_racing_a_spawn_leaves_no_unretired_thread"),
     ]),
-    red(KERNEL, "mutate-claim-teardown-always-wins", None, &[
-        Fails("proclife::interleave::tests::an_exit_and_a_kill_never_both_tear_a_process_down"),
+    red(PROCLIFE, "mutate-claim-teardown-always-wins", None, &[
+        Fails("interleave::tests::an_exit_and_a_kill_never_both_tear_a_process_down"),
     ]),
-    red(KERNEL, "mutate-kill-waits-for-its-victims", None, &[
-        Fails("proclife::interleave::tests::two_processes_killing_each_other_both_end"),
-        Fails("proclife::interleave::tests::a_kill_chain_of_three_ends"),
+    red(PROCLIFE, "mutate-kill-waits-for-its-victims", None, &[
+        Fails("interleave::tests::two_processes_killing_each_other_both_end"),
+        Fails("interleave::tests::a_kill_chain_of_three_ends"),
     ]),
-    red(KERNEL, "mutate-first-out-tears-down", None, &[
-        Fails("proclife::interleave::tests::an_exit_and_a_kill_never_both_tear_a_process_down"),
+    red(PROCLIFE, "mutate-first-out-tears-down", None, &[
+        Fails("interleave::tests::an_exit_and_a_kill_never_both_tear_a_process_down"),
     ]),
-    red(KERNEL, "mutate-join-collects-in-a-teardown", None, &[
-        Fails("proclife::interleave::tests::a_join_racing_the_kill_that_takes_its_target"),
+    red(PROCLIFE, "mutate-join-collects-in-a-teardown", None, &[
+        Fails("interleave::tests::a_join_racing_the_kill_that_takes_its_target"),
     ]),
-    red(KERNEL, "mutate-last-out-leaves-before-its-teardown", None, &[
-        Fails("proclife::interleave::tests::the_last_one_out_is_in_its_process_until_its_teardown_is_done"),
-        Fails("proclife::teardown::tests::only_the_thread_that_empties_a_claimed_process_tears_it_down"),
+    red(PROCLIFE, "mutate-last-out-leaves-before-its-teardown", None, &[
+        Fails("interleave::tests::the_last_one_out_is_in_its_process_until_its_teardown_is_done"),
+        Fails("teardown::tests::only_the_thread_that_empties_a_claimed_process_tears_it_down"),
     ]),
-    red(KERNEL, "mutate-place-skips-the-insert-recheck", None, &[
-        Fails("proclife::interleave::tests::a_spawn_racing_its_places_kill_leaves_nothing_under_it_and_publishes_it"),
+    red(PROCLIFE, "mutate-place-skips-the-insert-recheck", None, &[
+        Fails("interleave::tests::a_spawn_racing_its_places_kill_leaves_nothing_under_it_and_publishes_it"),
     ]),
-    red(KERNEL, "mutate-refused-spawn-keeps-the-count", None, &[
-        Fails("proclife::interleave::tests::a_spawn_racing_its_places_kill_leaves_nothing_under_it_and_publishes_it"),
+    red(PROCLIFE, "mutate-refused-spawn-keeps-the-count", None, &[
+        Fails("interleave::tests::a_spawn_racing_its_places_kill_leaves_nothing_under_it_and_publishes_it"),
     ]),
-    red(KERNEL, "mutate-landed-child-retires-nothing", None, &[
-        Fails("proclife::interleave::tests::a_spawn_racing_its_places_kill_leaves_nothing_under_it_and_publishes_it"),
-        Fails("proclife::tree::tests::a_child_landed_under_a_place_claimed_since_its_admission_is_claimed_with_it"),
+    red(PROCLIFE, "mutate-landed-child-retires-nothing", None, &[
+        Fails("interleave::tests::a_spawn_racing_its_places_kill_leaves_nothing_under_it_and_publishes_it"),
+        Fails("tree::tests::a_child_landed_under_a_place_claimed_since_its_admission_is_claimed_with_it"),
     ]),
-    red(KERNEL, "mutate-publish-before-the-children", None, &[
-        Fails("proclife::interleave::tests::an_exit_publishes_after_every_end_below_it"),
+    red(PROCLIFE, "mutate-publish-before-the-children", None, &[
+        Fails("interleave::tests::an_exit_publishes_after_every_end_below_it"),
     ]),
-    red(KERNEL, "mutate-walk-in-one-hold", None, &[
-        Fails("proclife::interleave::tests::a_spawn_under_an_unrelated_process_lands_between_two_claims_of_one_walk"),
+    red(PROCLIFE, "mutate-walk-in-one-hold", None, &[
+        Fails("interleave::tests::a_spawn_under_an_unrelated_process_lands_between_two_claims_of_one_walk"),
     ]),
-    red(KERNEL, "mutate-spawner-handle-after-the-landing", None, &[
-        Fails("proclife::interleave::tests::a_spawn_racing_its_places_kill_leaves_nothing_under_it_and_publishes_it"),
-        Fails("proclife::interleave::tests::a_spawn_racing_the_kill_of_its_own_spawner"),
+    red(PROCLIFE, "mutate-spawner-handle-after-the-landing", None, &[
+        Fails("interleave::tests::a_spawn_racing_its_places_kill_leaves_nothing_under_it_and_publishes_it"),
+        Fails("interleave::tests::a_spawn_racing_the_kill_of_its_own_spawner"),
     ]),
-    red(KERNEL, "mutate-spawner-handle-before-the-childs-own", None, &[
-        Fails("proclife::interleave::tests::a_sibling_closing_a_spawns_handle_before_the_spawn_returns"),
+    red(PROCLIFE, "mutate-spawner-handle-before-the-childs-own", None, &[
+        Fails("interleave::tests::a_sibling_closing_a_spawns_handle_before_the_spawn_returns"),
     ]),
-    red(KERNEL, "mutate-quit-checks-and-kills-in-two-acts", None, &[
-        Fails("proclife::interleave::tests::a_notices_read_racing_a_second_quit_kills_only_where_the_read_comes_second"),
+    red(PROCLIFE, "mutate-quit-checks-and-kills-in-two-acts", None, &[
+        Fails("interleave::tests::a_notices_read_racing_a_second_quit_kills_only_where_the_read_comes_second"),
     ]),
-    red(KERNEL, "mutate-quit-spawn-starts-unasked", None, &[
-        Fails("proclife::interleave::tests::a_spawn_racing_a_quit_on_its_place_asks_each_child_once"),
-        Fails("proclife::quit::tests::a_child_starts_holding_its_parents_unread_reason_and_never_listened"),
+    red(PROCLIFE, "mutate-quit-spawn-starts-unasked", None, &[
+        Fails("interleave::tests::a_spawn_racing_a_quit_on_its_place_asks_each_child_once"),
+        Fails("quit::tests::a_child_starts_holding_its_parents_unread_reason_and_never_listened"),
     ]),
-    red(KERNEL, "mutate-quit-reads-children-late", None, &[
-        Fails("proclife::interleave::tests::a_spawn_racing_a_quit_on_its_place_asks_each_child_once"),
+    red(PROCLIFE, "mutate-quit-reads-children-late", None, &[
+        Fails("interleave::tests::a_spawn_racing_a_quit_on_its_place_asks_each_child_once"),
     ]),
-    red(KERNEL, "mutate-quit-asks-below-a-kill", None, &[
-        Fails("proclife::interleave::tests::a_quit_of_a_process_that_never_listened_asks_nothing_below_it"),
+    red(PROCLIFE, "mutate-quit-asks-below-a-kill", None, &[
+        Fails("interleave::tests::a_quit_of_a_process_that_never_listened_asks_nothing_below_it"),
     ]),
-    red(KERNEL, "mutate-quit-notifies-a-deaf-process", None, &[
-        Fails("proclife::interleave::tests::a_quit_of_a_process_that_never_listened_asks_nothing_below_it"),
-        Fails("proclife::quit::tests::a_listener_is_asked_and_one_that_never_listened_is_killed"),
+    red(PROCLIFE, "mutate-quit-notifies-a-deaf-process", None, &[
+        Fails("interleave::tests::a_quit_of_a_process_that_never_listened_asks_nothing_below_it"),
+        Fails("quit::tests::a_listener_is_asked_and_one_that_never_listened_is_killed"),
     ]),
-    red(KERNEL, "mutate-quit-reaches-the-named-process-alone", None, &[
-        Fails("proclife::interleave::tests::a_quit_reaches_every_process_below_its_target"),
+    red(PROCLIFE, "mutate-quit-reaches-the-named-process-alone", None, &[
+        Fails("interleave::tests::a_quit_reaches_every_process_below_its_target"),
     ]),
     red(KERNEL_SIM, "placement-ignores-staleness", Some("policy"), &[
         Fails("a_stopped_cpu_stops_taking_work"),
@@ -716,6 +757,8 @@ pub(crate) const CONTROLS: &[Control] = &[
     red(BLOCKRING, "mutate-no-reissue-after-loss", None, &[
         Fails("model::tests::what_a_flush_calls_durable_is_on_the_medium"),
     ]),
+    // The link's one: a full ring's want swapped `Relaxed`, a wake lost.
+    red(LINK, "mutate-want-relaxed", Some("ends_loom"), &[Fails("a_full_ring_is_never_left_asleep_on_room_it_has")]),
     red(SDK, "transport-publish-relaxed", Some("transport_loom"), &[
         Fails("a_published_entry_is_read_whole"),
         Fails("a_published_byte_is_read_as_written"),
@@ -761,6 +804,30 @@ pub(crate) const CONTROLS: &[Control] = &[
         Fails("a_source_registered_over_a_full_ring_after_a_reset_gets_its_first_event"),
         Fails("a_source_registered_over_a_full_ring_as_a_reset_arrives_gets_its_first_event"),
     ]),
+    // An end with two holders: a gate's waiter asleep after the release or
+    // the owner's departure, a copy unordered after a dead owner's, a write
+    // past another holder's shutdown, a byte read twice, and a look without
+    // the gate believed.
+    red(SDK, "transport-gate-no-want", Some("transport_loom"), &[Fails(
+        "a_holder_waiting_for_the_gate_is_woken_by_its_release",
+    )]),
+    red(SDK, "transport-contended-no-arm", Some("transport_loom"), &[Fails(
+        "a_holder_waiting_for_the_gate_is_woken_by_its_release",
+    )]),
+    red(SDK, "transport-want-before-arm", Some("transport_loom"), &[Fails(
+        "a_holder_waiting_for_the_gate_is_woken_by_its_release",
+    )]),
+    red(SDK, "transport-departure-no-pass", Some("transport_loom"), &[Fails(
+        "a_holder_waiting_for_the_gate_is_woken_by_its_owners_departure",
+    )]),
+    red(SDK, "transport-departure-relaxed", Some("transport_loom"), &[Fails(
+        "a_holder_waiting_for_the_gate_is_woken_by_its_owners_departure",
+    )]),
+    red(SDK, "transport-shut-local", Some("transport_loom"), &[Fails(
+        "a_write_after_another_holders_shutdown_answers_shut",
+    )]),
+    red(SDK, "transport-no-resume", Some("transport_loom"), &[Fails("two_holders_read_each_byte_once")]),
+    red(SDK, "transport-ungated-violation", Some("transport_loom"), &[Fails("looks_without_the_gate_lose_no_wake")]),
     red(SDK, "transport-end-keeps-inflight", None, &[Fails(
         "transport::inflight::tests::an_end_answers_every_tag_once_and_a_late_completion_nothing",
     )]),
@@ -808,13 +875,14 @@ fn run_control(root: &Path, control: &Control) -> Result<String, String> {
     judge_control(control, status.success(), &log)
 }
 
-/// Every test that runs on the host and boots no guest. The build system's own
-/// tests, every host member of the workspace ([`crate::hostws`]), [`CRYPTO`] in
-/// each of [`CRYPTO_FORMS`], the kernel's library, clippy with warnings denied,
-/// the concurrency models' negative controls, every userland crate with a host test ([`crate::userlandhost`],
-/// which also reds on a userland test none of them runs), every app the images
-/// ship for each host ([`apps_for`]), and the libraries built for a guest
-/// ([`crate::hostws::guest_libraries`]).
+/// Every test that runs on the host and boots no guest, or `part`'s share of
+/// them ([`Part`]). The build system's own tests, every host member of the
+/// workspace ([`crate::hostws`]), [`CRYPTO`] in each of [`CRYPTO_FORMS`], the
+/// kernel's library, clippy with warnings denied, the kernel's models and every
+/// model's negative control, every userland crate with a host test
+/// ([`crate::userlandhost`], which also reds on a userland test none of them
+/// runs), every app the images ship for each host ([`apps_for`]), and the
+/// libraries built for a guest ([`crate::hostws::guest_libraries`]).
 ///
 /// **Every step runs against a `$TMPDIR` of this job's own, and the last step
 /// reds on anything left in it** but the lock `toyos_tmpdir` keeps there: a test
@@ -834,7 +902,8 @@ fn run_control(root: &Path, control: &Control) -> Result<String, String> {
 /// tracked-file gates, the issues the manifests (`userlandhost::programs`, also
 /// read by the apps step) and the licence exceptions cite, and the ledger's
 /// tracked tree. A check that comes to read Markdown elsewhere belongs there too.
-fn host(root: &Path, scope: Result<(Scope, String), String>) -> Vec<Step> {
+fn host(root: &Path, scope: Result<(Scope, String), String>, part: Option<Part>) -> Vec<Step> {
+    let runs = |p: Part| part.is_none_or(|only| only == p);
     let mut docs_only = false;
     let mut steps = vec![step("the change's scope", || {
         let (scope, said) = scope?;
@@ -865,100 +934,121 @@ fn host(root: &Path, scope: Result<(Scope, String), String>) -> Vec<Step> {
     let build_system = || step("the build system", || cargo(root, &["test", "--lib"]));
     let licences = || step("the licences of what ships", || crate::licence::judge(root));
     if docs_only {
-        steps.extend([build_system(), licences()]);
-        steps.push(step("nothing left in $TMPDIR or /tmp", || left_behind(&tmp, short, &before)));
+        if runs(Part::Tests) {
+            steps.push(build_system());
+        }
+        if runs(Part::Lint) {
+            steps.push(licences());
+        }
+        let owed = runs(Part::Tests);
+        steps.push(step("nothing left in $TMPDIR or /tmp", || left_behind(&tmp, short, &before, owed)));
         return steps;
     }
-    steps.extend([
-        build_system(),
-        step("the harness's own checks", || cargo(root, &["test", "--test", "toyos-checks"])),
-        step("the workspace's host members", || {
-            let guests = crate::hostws::guest_packages(root);
-            let mut args = vec!["test", "--workspace", "--exclude", "toyos-build", "--exclude", CRYPTO];
-            args.extend(guests.iter().flat_map(|guest| ["--exclude", guest.as_str()]));
-            cargo(root, &args)
-        }),
-    ]);
-    for (form, features) in CRYPTO_FORMS {
-        steps.push(step(&format!("{CRYPTO}, {form}"), || {
-            cargo(root, &[&["test", "-p", CRYPTO][..], features].concat())
+    if runs(Part::Tests) {
+        steps.extend([
+            build_system(),
+            step("the harness's own checks", || cargo(root, &["test", "--test", "toyos-checks"])),
+            step("the workspace's host members", || {
+                let guests = crate::hostws::guest_packages(root);
+                let mut args = vec!["test", "--workspace", "--exclude", "toyos-build", "--exclude", CRYPTO];
+                args.extend(MODELS.iter().flat_map(|model| ["--exclude", model]));
+                args.extend(guests.iter().flat_map(|guest| ["--exclude", guest.as_str()]));
+                cargo(root, &args)
+            }),
+        ]);
+        for (form, features) in CRYPTO_FORMS {
+            steps.push(step(&format!("{CRYPTO}, {form}"), || {
+                cargo(root, &[&["test", "-p", CRYPTO][..], features].concat())
+            }));
+        }
+        steps.push(step("the kernel's library", || {
+            cargo(root, &["test", "-p", KERNEL, "--lib", "--features", "sched-check"])
         }));
     }
-    steps.extend([
-        step("the kernel's library", || {
-            cargo(root, &["test", "-p", KERNEL, "--lib", "--features", "sched-check"])
-        }),
-        licences(),
-    ]);
-    steps.push(step("clippy and its targets", || {
-        for args in [
-            vec!["component", "add", "clippy"],
-            [&["target", "add"][..], &crate::clippy::TARGETS].concat(),
-        ] {
-            let status = Command::new("rustup").args(&args).status().map_err(|e| e.to_string())?;
-            if !status.success() {
-                return Err(format!("rustup {} exited {status}", args.join(" ")));
+    if runs(Part::Lint) {
+        steps.push(licences());
+        steps.push(step("clippy and its targets", || {
+            for args in [
+                vec!["component", "add", "clippy"],
+                [&["target", "add"][..], &crate::clippy::TARGETS].concat(),
+            ] {
+                let status = Command::new("rustup").args(&args).status().map_err(|e| e.to_string())?;
+                if !status.success() {
+                    return Err(format!("rustup {} exited {status}", args.join(" ")));
+                }
+            }
+            Ok("installed".into())
+        }));
+        steps.push(step("clippy, warnings denied", || {
+            let (failed, _) = crate::clippy::run(root);
+            if failed.is_empty() {
+                Ok("clean".into())
+            } else {
+                Err(failed.join("; "))
+            }
+        }));
+    }
+    if runs(Part::Models) {
+        steps.push(step("the kernel's models", || {
+            let mut args = vec!["test"];
+            args.extend(MODELS.iter().flat_map(|model| ["-p", model]));
+            cargo(root, &args)
+        }));
+        steps.push(step("kernel-loom without loom", || {
+            cargo(root, &[
+                "test",
+                "-p",
+                KERNEL_LOOM,
+                "--no-default-features",
+                "--test",
+                "log_zeroed_init",
+                "--test",
+                "log_body_words",
+                "--test",
+                "log_cursor",
+                "--test",
+                "cpu_slice",
+            ])
+        }));
+        for control in CONTROLS {
+            steps.push(step(&format!("control `{}`", control.feature), || run_control(root, control)));
+        }
+    }
+    if runs(Part::Userland) {
+        for program_root in crate::build::PROGRAM_ROOTS {
+            match crate::userlandhost::survey(&root.join(program_root)) {
+                Ok(survey) => {
+                    for name in survey.gated {
+                        let manifest = format!("{program_root}/{name}/Cargo.toml");
+                        steps.push(step(&format!("{program_root}/{name}"), || {
+                            cargo(root, &["test", "--manifest-path", &manifest])
+                        }));
+                    }
+                }
+                Err(why) => steps.push(Step { label: format!("the host crates under {program_root}/"), verdict: Err(why) }),
             }
         }
-        Ok("installed".into())
-    }));
-    steps.push(step("clippy, warnings denied", || {
-        let (failed, _) = crate::clippy::run(root);
-        if failed.is_empty() {
-            Ok("clean".into())
-        } else {
-            Err(failed.join("; "))
-        }
-    }));
-    steps.push(step("kernel-loom without loom", || {
-        cargo(root, &[
-            "test",
-            "-p",
-            KERNEL_LOOM,
-            "--no-default-features",
-            "--test",
-            "log_zeroed_init",
-            "--test",
-            "log_body_words",
-            "--test",
-            "log_cursor",
-            "--test",
-            "cpu_slice",
-        ])
-    }));
-    for control in CONTROLS {
-        steps.push(step(&format!("control `{}`", control.feature), || run_control(root, control)));
-    }
-    for program_root in crate::build::PROGRAM_ROOTS {
-        match crate::userlandhost::survey(&root.join(program_root)) {
-            Ok(survey) => {
-                for name in survey.gated {
-                    let manifest = format!("{program_root}/{name}/Cargo.toml");
-                    steps.push(step(&format!("{program_root}/{name}"), || {
-                        cargo(root, &["test", "--manifest-path", &manifest])
+        match crate::userlandhost::programs(root) {
+            Ok(programs) => {
+                for os in Os::ALL {
+                    steps.push(step(&format!("the apps for {}", os.name()), || {
+                        apps_for(root, &programs, os, &host_triple)
                     }));
                 }
             }
-            Err(why) => steps.push(Step { label: format!("the host crates under {program_root}/"), verdict: Err(why) }),
+            Err(why) => steps.push(Step { label: "the apps".into(), verdict: Err(why) }),
         }
+        steps.push(step("the libraries built for a guest", || {
+            let libraries = crate::hostws::guest_libraries(root);
+            let mut args = vec!["test"];
+            args.extend(libraries.iter().flat_map(|library| ["-p", library.as_str()]));
+            cargo(root, &args)
+        }));
     }
-    match crate::userlandhost::programs(root) {
-        Ok(programs) => {
-            for os in Os::ALL {
-                steps.push(step(&format!("the apps for {}", os.name()), || {
-                    apps_for(root, &programs, os, &host_triple)
-                }));
-            }
-        }
-        Err(why) => steps.push(Step { label: "the apps".into(), verdict: Err(why) }),
-    }
-    steps.push(step("the libraries built for a guest", || {
-        let libraries = crate::hostws::guest_libraries(root);
-        let mut args = vec!["test"];
-        args.extend(libraries.iter().flat_map(|library| ["-p", library.as_str()]));
-        cargo(root, &args)
-    }));
-    steps.push(step("nothing left in $TMPDIR or /tmp", || left_behind(&tmp, short, &before)));
+    // The build system's tests and userland's make a `toyos_tmpdir::TempDir`;
+    // the lint and models parts make none, so they are owed no lock.
+    let owed = runs(Part::Tests) || runs(Part::Userland);
+    steps.push(step("nothing left in $TMPDIR or /tmp", || left_behind(&tmp, short, &before, owed)));
     steps
 }
 
@@ -971,7 +1061,7 @@ fn seal(root: &Path) -> Vec<Step> {
         Ok(said)
     })];
     let Some(cold) = cold else { return steps };
-    steps.extend(host(root, Ok((Scope::Everything, "the cache's entry is every step's".into()))));
+    steps.extend(host(root, Ok((Scope::Everything, "the cache's entry is every step's".into())), None));
     steps.push(step("the tree, sealed as the host cache's entry", || cicache::seal(root, &cold)));
     steps
 }
@@ -1060,18 +1150,18 @@ fn attempted(programs: &[Program], os: Os) -> (Vec<&Program>, Vec<&str>) {
 /// What `tmp` holds but the lock `toyos_tmpdir` keeps in it, and every root
 /// under `short` whose process is gone that `before` does not name.
 ///
-/// Refuses if `tmp` holds no [`toyos_tmpdir::GLOBAL`] at all: every step above
-/// makes at least one `toyos_tmpdir::TempDir`, which always writes that lock
-/// file first, so its absence means this `$TMPDIR` never saw the steps at
+/// With `owed`, refuses if `tmp` holds no [`toyos_tmpdir::GLOBAL`]: the caller
+/// ran a step that makes a `toyos_tmpdir::TempDir`, which always writes that
+/// lock file first, so its absence means this `$TMPDIR` never saw the steps at
 /// all — the guard reading an empty directory it was never given, rather than
 /// one every test actually cleaned.
-fn left_behind(tmp: &Path, short: &Path, before: &[PathBuf]) -> Result<String, String> {
+fn left_behind(tmp: &Path, short: &Path, before: &[PathBuf], owed: bool) -> Result<String, String> {
     let mut left: Vec<String> = std::fs::read_dir(tmp)
         .map_err(|e| format!("read {}: {e}", tmp.display()))?
         .map(|e| e.map(|e| e.file_name().to_string_lossy().into_owned()))
         .collect::<Result<_, _>>()
         .map_err(|e| format!("read {}: {e}", tmp.display()))?;
-    if !left.iter().any(|name| name == toyos_tmpdir::GLOBAL) {
+    if owed && !left.iter().any(|name| name == toyos_tmpdir::GLOBAL) {
         return Err(format!(
             "{} holds no {}: every step above makes a `toyos_tmpdir::TempDir`, so its absence \
              means this $TMPDIR was never the one the steps actually wrote to",
@@ -1242,7 +1332,7 @@ fn guest(root: &Path, suite: &[String]) -> Vec<Step> {
     }
     // Unconditional: whatever stopped earlier, this $TMPDIR is still this
     // process's own to judge, and a leak past a failing suite is still a leak.
-    steps.push(step("nothing left in $TMPDIR or /tmp", || left_behind(&tmp, short, &before)));
+    steps.push(step("nothing left in $TMPDIR or /tmp", || left_behind(&tmp, short, &before, true)));
     steps
 }
 
@@ -1427,8 +1517,12 @@ mod tests {
         let tmp = toyos_tmpdir::TempDir::new("left-behind-blind");
         let short = toyos_tmpdir::TempDir::new("left-behind-blind-short");
         let refusal =
-            left_behind(&tmp, &short, &[]).expect_err("an untouched $TMPDIR is a red, not a pass");
+            left_behind(&tmp, &short, &[], true).expect_err("an untouched $TMPDIR is a red, not a pass");
         assert!(refusal.contains(toyos_tmpdir::GLOBAL), "{refusal}");
+        assert!(left_behind(&tmp, &short, &[], false).is_ok(), "no step owed the lock");
+        std::fs::create_dir(tmp.join("stale-1-current")).unwrap();
+        let refusal = left_behind(&tmp, &short, &[], false).expect_err("a leftover is a red owed or not");
+        assert!(refusal.contains("stale-1-current"), "{refusal}");
     }
 
     /// The lock is the one thing a `$TMPDIR` keeps; anything else is named.
@@ -1437,9 +1531,9 @@ mod tests {
         let tmp = toyos_tmpdir::TempDir::new("left-behind");
         let short = toyos_tmpdir::TempDir::new("left-behind-short");
         std::fs::write(tmp.join(toyos_tmpdir::GLOBAL), b"").unwrap();
-        assert!(left_behind(&tmp, &short, &[]).is_ok());
+        assert!(left_behind(&tmp, &short, &[], true).is_ok());
         std::fs::create_dir(tmp.join("stale-1-current")).unwrap();
-        let refusal = left_behind(&tmp, &short, &[]).expect_err("a directory left behind is a red");
+        let refusal = left_behind(&tmp, &short, &[], true).expect_err("a directory left behind is a red");
         assert!(refusal.contains("stale-1-current"), "{refusal}");
     }
 
@@ -1453,10 +1547,10 @@ mod tests {
         let earlier = format!("{}1-0", toyos_tmpdir::ROOT_PREFIX);
         std::fs::create_dir(short.join(&earlier)).unwrap();
         let before = toyos_tmpdir::gone_roots(&short);
-        assert!(left_behind(&tmp, &short, &before).is_ok());
+        assert!(left_behind(&tmp, &short, &before, true).is_ok());
         let died = format!("{}2-0", toyos_tmpdir::ROOT_PREFIX);
         std::fs::create_dir(short.join(&died)).unwrap();
-        let refusal = left_behind(&tmp, &short, &before).expect_err("a dead step's root is a red");
+        let refusal = left_behind(&tmp, &short, &before, true).expect_err("a dead step's root is a red");
         assert!(refusal.contains(&died) && !refusal.contains(&earlier), "{refusal}");
     }
 
@@ -1699,7 +1793,8 @@ mod tests {
 
     #[test]
     fn a_job_is_named_and_takes_nothing_after_it() {
-        assert_eq!(parse(&words("host")), Ok(Job::Host));
+        assert_eq!(parse(&words("host")), Ok(Job::Host(None)));
+        assert_eq!(parse(&words("host models")), Ok(Job::Host(Some(Part::Models))));
         assert_eq!(parse(&words("seal")), Ok(Job::Seal));
         assert_eq!(parse(&words("stored")), Ok(Job::Stored));
         assert_eq!(parse(&words("scope")), Ok(Job::Scope));

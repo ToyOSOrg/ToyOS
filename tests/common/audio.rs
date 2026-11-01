@@ -1,4 +1,4 @@
-//! soundserver judged off the log the T14's stick came back with. Audio is judged on
+//! soundserver judged off the log a bench's boot left on its disk. Audio is judged on
 //! metal and nowhere else: no QEMU guest test plays it.
 
 use super::serial::Serial;
@@ -54,25 +54,46 @@ fn is_soundserver_stats(text: &str, at: usize) -> bool {
     text[line_start..at].contains("soundserver: wakes=")
 }
 
-/// soundserver played to an output driver's device before `job` ran, so the
-/// job's stream did not play to the null sink.
+/// soundserver played to an output driver's device before `job` opened its
+/// stream, so the stream did not play to the null sink. The stream's
+/// opening and not the job's spawn: a job may wait for something before it
+/// plays.
 fn on_an_output(log: &str, job: &str) -> Result<(), String> {
     let playing = log
         .find(PLAYING)
         .ok_or_else(|| format!("soundserver never said `{PLAYING}`: no output was offered, and it stayed the null sink"))?;
     let head = format!("spawn: /system/bin/{job} ");
     let spawned = log.find(&head).ok_or_else(|| format!("no `{head}` record: {job} never ran"))?;
-    if playing > spawned {
-        return Err(format!("soundserver played to an output only after {job} spawned, so its stream played to the null sink"));
+    let mut at = spawned;
+    let opened = log[spawned..]
+        .split_inclusive('\n')
+        .find_map(|line| {
+            let here = at;
+            at += line.len();
+            (line.contains(CLIENT) && line.contains(CONNECTED)).then_some(here)
+        })
+        .ok_or_else(|| format!("soundserver never said a client connected after {job} spawned: it opened no stream"))?;
+    if playing > opened {
+        return Err(format!("soundserver played to an output only after {job} opened its stream, so it played to the null sink"));
     }
     Ok(())
 }
 
+/// What soundserver says as a client's stream connects:
+/// `soundserver: client 0 connected (id=0)`.
+const CLIENT: &str = "soundserver: client ";
+const CONNECTED: &str = " connected (id=";
+
 /// The tone client played to its end through the HDA controller an `hda`
 /// driver drives, played to before it ran, and no period of it went unfilled.
 pub fn tone_on_metal(log: &Serial) -> Result<(), String> {
-    on_an_output(log.text(), "test_rs_audio_tone")?;
-    let window = job_window(log.text(), "test_rs_audio_tone")?;
+    tone_played(log, "test_rs_audio_tone")
+}
+
+/// `job`'s tone played to an output whole, every period its own.
+pub fn tone_played(log: &Serial, job: &str) -> Result<(), String> {
+    on_an_output(log.text(), job)?;
+    let window = job_window(log.text(), job)?;
     let underruns = sum_field(window, "underruns");
     if underruns != 0 {
         return Err(format!(
@@ -83,20 +104,20 @@ pub fn tone_on_metal(log: &Serial) -> Result<(), String> {
     Ok(())
 }
 
-/// The job that plays `hda_tone`'s tone while it writes the stick.
-pub const TONE_BESIDE_STICK_WRITE: &str = "test_rs_tone_beside_stick_write";
+/// The job that plays `hda_tone`'s tone while it writes the log disk.
+pub const TONE_BESIDE_LOG_WRITE: &str = "test_rs_tone_beside_log_write";
 
 /// That job's tone played to its end through the HDA controller with no
 /// period left to soundserver, while at least a mebibyte of its lines reached
-/// the stick: counted in the file read back off it, not in what the job says.
-pub fn tone_beside_a_stick_write(log: &Serial) -> Result<(), String> {
-    on_an_output(log.text(), TONE_BESIDE_STICK_WRITE)?;
-    let window = job_window(log.text(), TONE_BESIDE_STICK_WRITE)?;
-    let reached = super::metal::bytes_of_lines(window, "tone_beside_stick_write: line ");
+/// the log disk: counted in the file read back off it, not in what the job says.
+pub fn tone_beside_a_log_write(log: &Serial) -> Result<(), String> {
+    on_an_output(log.text(), TONE_BESIDE_LOG_WRITE)?;
+    let window = job_window(log.text(), TONE_BESIDE_LOG_WRITE)?;
+    let reached = super::metal::bytes_of_lines(window, "tone_beside_log_write: line ");
     if reached < 1 << 20 {
-        return Err(format!("{reached} bytes of the job's lines reached the stick beside the tone, under a mebibyte"));
+        return Err(format!("{reached} bytes of the job's lines reached the disk beside the tone, under a mebibyte"));
     }
-    let wrote = format!("{} KiB of lines reached the stick beside the tone", reached >> 10);
+    let wrote = format!("{} KiB of lines reached the disk beside the tone", reached >> 10);
     let underruns = sum_field(window, "underruns");
     if underruns != 0 {
         return Err(format!(

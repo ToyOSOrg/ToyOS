@@ -66,6 +66,7 @@ int ungetc(int c, FILE *stream);
 
 int remove(const char *path);
 int rename(const char *oldpath, const char *newpath);
+int renameat(int olddirfd, const char *oldpath, int newdirfd, const char *newpath);
 FILE *tmpfile(void);
 
 void perror(const char *s);

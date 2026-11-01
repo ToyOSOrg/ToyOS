@@ -141,6 +141,113 @@ pub struct KernelArgs {
     /// descriptor or overlapping another region the loader handed.
     pub supervisor_image: BootImage,
     pub fileserver_image: BootImage,
+    /// Where firmware loaded this boot from, as the loader read it before
+    /// boot services ended. The kernel keeps it unchanged and answers it
+    /// through [`crate::syscall::SYS_BOOT_SOURCES`]; it reads no topology or
+    /// partition out of it.
+    pub boot_sources: BootSources,
+}
+
+crate::user_safe! {
+    /// The devices this boot's bytes came off. **Provenance, not authority**:
+    /// they say where the loader read, never that a device found there is the
+    /// one it read or may be trusted; what was read is held to the slot's
+    /// signature regardless.
+    #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+    pub struct BootSources {
+        /// The partition firmware loaded the loader from, the ESP
+        /// ([`crate::inventory::Role::Boot`]). ROOT is read off this
+        /// partition's disk.
+        pub loader: BootSource,
+        /// The booted slot's volume ([`crate::inventory::Role::Slot`]): the
+        /// signed header, the kernel, its parameter and the two programs.
+        pub slot: BootSource,
+    }
+}
+
+crate::user_safe! {
+    /// One device a boot read: firmware's device path for its handle, and the
+    /// PCI function the path runs through last.
+    #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+    pub struct BootSource {
+        /// [`Self::path_len`] bytes of firmware's device path (UEFI 2.10 §10),
+        /// End node included, and zeroes after; none where firmware named no
+        /// path or one the loader refused as malformed or longer than this.
+        pub path: [u8; DEVICE_PATH_BYTES],
+        pub path_len: u16,
+        /// The function whose PCI I/O handle's path is the longest proper
+        /// prefix of [`Self::path`], where `GetLocation()` (§14.4.13) placed
+        /// it: the PCI hops of a path name no bus, and firmware numbered the
+        /// buses the kernel enumerates.
+        pub controller: Controller,
+        pub reserved: [u8; 6],
+    }
+}
+
+/// The most bytes of a [`BootSource`]'s path.
+pub const DEVICE_PATH_BYTES: usize = 512;
+
+crate::user_safe! {
+    /// [`BootSource::controller`]: `present` is 1 where the other fields name
+    /// a function, and 0 where they are zero and name none.
+    #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+    pub struct Controller {
+        pub present: u8,
+        pub bus: u8,
+        pub dev: u8,
+        pub func: u8,
+        pub segment: u16,
+        pub reserved: [u8; 2],
+    }
+}
+
+impl BootSources {
+    pub const NONE: Self = Self { loader: BootSource::NONE, slot: BootSource::NONE };
+}
+
+impl BootSource {
+    pub const NONE: Self =
+        Self { path: [0; DEVICE_PATH_BYTES], path_len: 0, controller: Controller::NONE, reserved: [0; 6] };
+
+    /// The path's bytes, or `None` where there is none.
+    pub fn path(&self) -> Result<Option<&[u8]>, Unwritten> {
+        let len = usize::from(self.path_len);
+        match self.path.get(..len) {
+            None => Err(Unwritten::PathLen(self.path_len)),
+            Some(path) => Ok((len > 0).then_some(path)),
+        }
+    }
+}
+
+impl Controller {
+    pub const NONE: Self = Self { present: 0, bus: 0, dev: 0, func: 0, segment: 0, reserved: [0; 2] };
+
+    pub fn at(&self) -> Result<Option<crate::inventory::PciAddr>, Unwritten> {
+        match self.present {
+            0 => Ok(None),
+            1 => Ok(Some(crate::inventory::PciAddr { segment: self.segment, bus: self.bus, dev: self.dev, func: self.func })),
+            other => Err(Unwritten::Present(other)),
+        }
+    }
+}
+
+/// A [`BootSource`] field holding what no loader writes: the kernel refuses
+/// such a handoff, and a reader refuses such an answer.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Unwritten {
+    /// A path length past [`DEVICE_PATH_BYTES`].
+    PathLen(u16),
+    /// A controller's `present` neither 0 nor 1.
+    Present(u8),
+}
+
+impl core::fmt::Display for Unwritten {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        match self {
+            Self::PathLen(len) => write!(f, "its path is {len} bytes, past {DEVICE_PATH_BYTES}"),
+            Self::Present(present) => write!(f, "its controller's present is {present}"),
+        }
+    }
 }
 
 /// One payload the loader hands the kernel: `len` bytes at the physical
@@ -222,7 +329,9 @@ const _: () = {
     assert!(offset_of!(KernelArgs, slot_volume_guid) == 456);
     assert!(offset_of!(KernelArgs, supervisor_image) == 472);
     assert!(offset_of!(KernelArgs, fileserver_image) == 488);
-    assert!(size_of::<KernelArgs>() == 504);
+    assert!(offset_of!(KernelArgs, boot_sources) == 504);
+    assert!(size_of::<KernelArgs>() == 1560);
+    assert!(size_of::<BootSource>() == 528);
     assert!(size_of::<BootImage>() == 16);
     assert!(LAYOUT as i32 > 1440 || (LAYOUT as i32) < -1440);
     assert!(align_of::<KernelArgs>() == 8);
@@ -234,4 +343,74 @@ pub struct MemoryMapEntry {
     pub uefi_type: u32,
     pub start: u64,
     pub end: u64,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    const ZEROED: KernelArgs = KernelArgs {
+        memory_map_addr: 0,
+        memory_map_size: 0,
+        kernel_memory_addr: 0,
+        kernel_memory_size: 0,
+        kernel_stack_addr: 0,
+        kernel_stack_size: 0,
+        rsdp_addr: 0,
+        kernel_elf_addr: 0,
+        kernel_elf_size: 0,
+        gop_framebuffer: 0,
+        gop_framebuffer_size: 0,
+        gop_width: 0,
+        gop_height: 0,
+        gop_stride: 0,
+        gop_pixel_format: 0,
+        boot_pml4_addr: 0,
+        boot_partition_start_lba: 0,
+        boot_partition_blocks: 0,
+        boot_partition_guid: [0; 16],
+        boot_partition_present: 0,
+        log_partition_guid: [0; 16],
+        layout: LAYOUT,
+        cmdline_addr: 0,
+        cmdline_len: 0,
+        root_image: BootImage { addr: 0, len: 0 },
+        root_partition_guid: [0; 16],
+        loader_entry_counter: 0,
+        loader_handoff_counter: 0,
+        root_read_ticks: 0,
+        loader_seed: [0; SEED_LEN],
+        loader_seed_len: 0,
+        wall_clock_secs: 0,
+        wall_clock_counter: 0,
+        wall_clock_known: 0,
+        gop_edid: [0; EDID_BLOCK],
+        gop_edid_len: 0,
+        microcode_addr: 0,
+        microcode_len: 0,
+        slot_volume_guid: [0; 16],
+        supervisor_image: BootImage { addr: 0, len: 0 },
+        fileserver_image: BootImage { addr: 0, len: 0 },
+        boot_sources: BootSources::NONE,
+    };
+
+    #[test]
+    fn a_boot_source_names_a_path_and_a_place_only_where_it_carries_them() {
+        assert_eq!(ZEROED.boot_sources.loader.path(), Ok(None));
+        assert_eq!(ZEROED.boot_sources.slot.controller.at(), Ok(None));
+        let mut source = BootSource { path_len: 4, ..BootSource::NONE };
+        source.path[..4].copy_from_slice(&[0x7f, 0xff, 4, 0]);
+        source.controller = Controller { present: 1, bus: 3, dev: 0, func: 4, ..Controller::NONE };
+        assert_eq!(source.path(), Ok(Some(&[0x7f, 0xff, 4, 0][..])));
+        assert_eq!(source.controller.at(), Ok(Some(crate::inventory::PciAddr { segment: 0, bus: 3, dev: 0, func: 4 })));
+    }
+
+    #[test]
+    fn a_field_no_loader_writes_is_refused_and_not_read() {
+        let full = BootSource { path_len: DEVICE_PATH_BYTES as u16, ..BootSource::NONE };
+        assert_eq!(full.path().map(|p| p.map(<[u8]>::len)), Ok(Some(DEVICE_PATH_BYTES)));
+        assert_eq!(BootSource { path_len: 513, ..BootSource::NONE }.path(), Err(Unwritten::PathLen(513)));
+        assert_eq!(BootSource { path_len: u16::MAX, ..BootSource::NONE }.path(), Err(Unwritten::PathLen(u16::MAX)));
+        assert_eq!(Controller { present: 2, ..Controller::NONE }.at(), Err(Unwritten::Present(2)));
+    }
 }

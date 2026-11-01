@@ -182,6 +182,9 @@ log-ring-publish-relaxed = []
 # room that is not there.
 log-ring-tail-relaxed = []
 log-ring-loads-swapped = []
+# The negative control of `tests/tlb_tags.rs`: `Tags::enter` with its pairing
+# relaxed, which must red the model.
+tlb-tags-enter-relaxed = []
 
 # The negative control for the panic console's published descriptor. It drops
 # the publisher's `Release` fence between its odd mark and its words, so a
@@ -194,6 +197,16 @@ log-ring-loads-swapped = []
 # Never on by default and never reachable from a kernel build, which declares
 # the same name only so `cfg` checking knows it.
 seqlock-writer-fence-off = []
+# The negative control for the clock page's latch. It drops the fence between
+# the writer's move of readers to the other copy and its rewrite of the one
+# they left (`sdk/abi/src/clock/latch.rs`), and `clock_latch.rs` must red:
+#
+#   cargo test --manifest-path kernel/loom/Cargo.toml --features clock-latch-fence-off \
+#     --test clock_latch
+#
+# Never on by default; `toyos-abi` declares the same name only so `cfg`
+# checking knows it.
+clock-latch-fence-off = []
 
 # The negative control for the console backend's lock. It builds
 # `serial_lock.rs`'s `try_lock` with `then_some`, whose argument is built on a

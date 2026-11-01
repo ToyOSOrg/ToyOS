@@ -6,8 +6,10 @@ opened: 2026-10-12
 
 # Idle is `hlt`, so every wake of an idle CPU is an IPI
 
-An idle CPU waits in `sti; hlt` (`kernel/src/arch/x86_64/hw.rs:21`), so the
-only thing that ends its wait is an interrupt: a wake posted to it rings its
+An idle CPU waits in `sti; hlt` (`kernel/src/arch/x86_64/hw.rs`) or in a
+deep state its firmware declared, an `MWAIT` on a line nothing writes or a
+trapped port read (`kernel/src/arch/x86_64/idle.rs`), so the only thing that
+ends its wait is an interrupt: a wake posted to it rings its
 doorbell (`kernel/pure/sched/mailbox.rs:474-490`) and then sends a kick IPI
 (`kernel/src/arch/x86_64/apic.rs:256-260`), whose entry and handler run on the
 woken CPU before its `hlt` returns (`kernel/src/arch/x86_64/idt/kick.rs:3-9`).
@@ -26,8 +28,9 @@ unless firmware disables them, gives the monitor line as 64 bytes, and has
 MWAIT support one C1 sub-state (PPR 55922 rev. 3.06, `CPUID_Fn00000001_ECX`
 bit 3, `CPUID_Fn00000005`). So the stage is backed on Intel by §11.10.4 and
 §11.10.6.4, and is Intel's alone: the AMD bench keeps `hlt` and the kick, and
-whether it takes the doorbell is the orchestrator's to decide once that bench's
-`_CST` is read. A 2020+ Intel CPU whose specification update names an erratum
+whether it takes the doorbell is the orchestrator's to decide; that bench's
+`_CST` reads C1 as MWAIT and its deeper states as port reads, which no store
+ends. A 2020+ Intel CPU whose specification update names an erratum
 by which a store may not wake MWAIT keeps the kick. The T14's lists no MONITOR
 or MWAIT erratum (631123-034); Intel's Core Ultra 200V specification update is
 unread. Whether the T14 and the AMD bench enumerate MONITOR/MWAIT is ToyOS's

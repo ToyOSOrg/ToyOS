@@ -272,11 +272,37 @@ lib/bcachefs/tests/fixtures/ — volumes upstream's tools wrote
     144,978 bytes gzip -9, of a 33,554,432-byte raw volume
     sha256 7be2c99db0e68c784ea59ef394454a084fa57868b14027528ab6b8b21031840e
     raw    021c816a064fc2fca2402c8b2a87a9e6124e0b2f4a32779ef14654e908bcacff
+
+    lib/bcachefs/tests/fixtures/encrypted.img.gz
+    716,785 bytes gzip -9n, of a 33,554,432-byte raw volume
+    sha256 2a32529edf3e30de75d02cdc4ad0b2060552555b012e9647dc24702c0ee7f82d
+    raw    a640704b34cadfc6544f096a36c74bd60b047a079fb20fd96c622f9bcd81a72e
+
+    lib/bcachefs/tests/fixtures/encrypted-wide-macs.img.gz
+    774,007 bytes gzip -9n, of a 33,554,432-byte raw volume
+    sha256 fd137a545190906ded0269eeec3e32835ffe3585d3e4c2cebe84d234a96b1b1f
+    raw    52638d7b3c31abb202e6b12c5ccb5a58fe95bee412bada3d7fc3756705cdcace
+
+    lib/bcachefs/tests/fixtures/links.img.gz
+    358,434 bytes gzip -9n, of a 33,554,432-byte raw volume
+    sha256 e2a3ed35d27023693192c35e833e405a240aa6feccde9412e8f5a9e881a47999
+    raw    330587c6be9b8c61067e31020838b0dc0b005398200a8458a98da38602793074
+
+    lib/bcachefs/tests/fixtures/unclean.img.gz
+    129,177 bytes gzip -9n, of a 33,554,432-byte raw volume
+    sha256 2393f9e1aafcbecdbea55d851acc88e711033df7cf9a1814e49cda0f31274adb
+    raw    26fa074b6d7e0b24607c5445f5d6bb71b0a2170fa8fb31459dc5b60464bded19
+
+    lib/bcachefs/tests/fixtures/unclean-32k-nodes.img.gz
+    139,436 bytes gzip -9n, of a 67,108,864-byte raw volume
+    sha256 d4bd7ecb9dae1d0d8d3ffbdab2b3d4c4d4a79688e9c0cd545c4a98c5dd0e4e2d
+    raw    5b468241fb8b316b7a5862234bdb6eb3232666458d6732a771daa23af3bd7a5e
+
     SPDX-License-Identifier: MIT OR Apache-2.0
 
-`lib/bcachefs/src/upstream` implements upstream's on-disk format, and the only
-honest judge of a format reader is bytes the format's own implementation wrote.
-This fixture is those bytes. It was produced by `bcachefs-tools` v1.39.4 running
+`lib/bcachefs/src/engine` reads upstream's on-disk format, and the only honest
+judge of a format reader is bytes the format's own implementation wrote. This
+fixture is those bytes. It was produced by `bcachefs-tools` v1.39.4 running
 in a QEMU guest booted from the Arch Linux 2026.09.01 install medium, as a
 development instrument: neither the tools nor that medium is a dependency of
 this repository, nothing fetches either, and the suite reads only what is
@@ -295,7 +321,7 @@ The commands, in the guest, against a 32 MiB raw disk on `/dev/vdc`:
     bcachefs fsck -y /dev/vdc
 
 `--block_size=4096` is explicit because `bcachefs format` picks a smaller block
-for a small device, and 4096 is the only block size this crate reads. 32 MiB is
+for a small device, and ToyOS's block devices have 4096-byte blocks. 32 MiB is
 the smallest volume that formats, fills and passes fsck at that block size: 16
 and 24 MiB both fail during format, and 8 and 12 MiB fail even at the default
 block size. `bcachefs show-super` on the result:
@@ -330,6 +356,91 @@ the tool, not the bytes a user's own data becomes when the tool writes it: the
 layout is a published on-disk format, not a copyrightable work of the program,
 and the file contents are ours. The tool is not distributed with this repository
 in any form.
+
+`encrypted.img.gz` and `encrypted-wide-macs.img.gz` are encrypted volumes
+upstream's tools wrote, which the engine unlocks and reads: ChaCha20/Poly1305
+with 80-bit data MACs, and with the 128-bit ones that `--wide_macs` sets. They were produced by `bcachefs-tools` v1.39.4 (commit
+d997ad76e906), built from its tag, in a QEMU guest booted from the Ubuntu
+26.04.1 arm64 cloud image, as a development instrument on the same terms as
+above. The commands, against a raw image file, the second time with
+`--wide_macs` and the label `toyosencw`:
+
+    truncate -s 32M enc.img
+    printf '%s\n' 'toyos-test-passphrase' > pass
+    bcachefs format --block_size=4096 --encrypted --passphrase_file pass --fs_label=toyosenc enc.img
+    bcachefs unlock -k session -f pass enc.img      # in a fresh session keyring
+    bcachefs fusemount enc.img /mnt/t
+    printf hello-toyos > /mnt/t/a.txt; seq 1 40000 > /mnt/t/seq.txt; sync
+    fusermount3 -u /mnt/t
+    bcachefs fsck -n -K enc.img                     # exit 0
+    gzip -9n < enc.img > enc.img.gz
+
+The passphrase is a published test value. The files are an eleven-byte string,
+the output of `seq` and an empty `lost+found`; the UUIDs, hash seeds and keys
+inside are generated values; the member's device name is the image file's
+basename, and no model or serial is recorded. Timestamps are 2026-10-22, the
+guest's clock. The same reasoning as for `crc32c.img.gz` makes the bytes this
+project's own.
+
+`links.img.gz` is a volume upstream's tools populated with hard links and a
+multi-level tree, against which the engine's derivation of link counts,
+allocation, backpointers and accounting is compared. It was produced by the
+same tools in the same guest, on the same terms. The commands, against a raw
+image file:
+
+    truncate -s 32M links.img
+    bcachefs format --block_size=4096 --fs_label=toyoslinks links.img
+    bcachefs fusemount links.img /mnt/t
+    cd /mnt/t
+    mkdir -p a/b/c/d/e empty
+    printf hello-toyos > a/hello.txt
+    ln a/hello.txt a/b/hello-link
+    ln a/hello.txt a/b/c/d/e/hello-deep
+    seq 1 40000 > a/b/seq.txt
+    ln a/b/seq.txt seq-again
+    ln -s ../hello.txt a/b/link
+    : > a/b/c/empty-file
+    mkdir many; for i in $(seq 1 600); do echo $i > many/f$i; done
+    ln many/f1 many/f1-twin
+    sync; cd /
+    fusermount3 -u /mnt/t        # then wait until the FUSE daemon exits,
+                                 # which writes the clean superblock
+    bcachefs fsck -n -K links.img < /dev/null    # exit 0
+    gzip -9n < links.img > links.img.gz
+
+The files are an eleven-byte string, the output of `seq`, an empty file and
+directory, a symlink, the numbers 1 to 600 and an empty `lost+found`; the
+UUIDs and hash seeds inside are generated values; the member's device name is
+the image file's basename, and no model or serial is recorded. Timestamps are
+2026-10-23, the guest's clock. The same reasoning as for `crc32c.img.gz` makes
+the bytes this project's own.
+
+`unclean.img.gz` is a volume upstream's tools left mid-write, which the
+engine reads by replaying its journal. It was produced by the same tools, in
+the guest that made the encrypted fixtures, on the same terms. The commands,
+against a raw image file:
+
+    truncate -s 32M dirty.img
+    bcachefs format --block_size=4096 dirty.img
+    bcachefs fusemount dirty.img /mnt/t
+    for i in $(seq 1 200); do echo $i > /mnt/t/f$i; done; sync
+    kill -STOP <the FUSE daemon>     # stopped, so the copy is atomic
+    cp --sparse=always dirty.img dirty-crash.img
+    kill -CONT <the FUSE daemon>
+    bcachefs fsck -n -K dirty-crash.img          # exit 0: replays 61-62
+    gzip -9n < dirty-crash.img > dirty-crash.img.gz
+
+The files are the numbers 1 to 200 and an empty `lost+found`; the UUIDs and
+hash seeds inside are generated values; the member's device name is the image
+file's basename, and no model or serial is recorded. Timestamps are
+2026-10-22, the guest's clock. The same reasoning as for `crc32c.img.gz` makes
+the bytes this project's own.
+
+`unclean-32k-nodes.img.gz` is the same, made by the same commands but on a
+64 MiB image, so its btree nodes are 32 KiB: the engine writes no volume of
+smaller nodes. It was made by the same tools in the judge's Ubuntu guest, on
+the same terms; its `fsck -n -K` exits 0, replaying 18-18 past unflushed
+entries 19-22. Timestamps are 2026-10-24, the guest's clock.
 
 
 lib/fat32/tests/fixtures/ — volumes macOS's FAT tools wrote
@@ -420,20 +531,49 @@ a work of theirs. Two things the tools wrote are not:
 lib/crypto/tests/data/*_test.json — Wycheproof test vectors, Apache-2.0
 -----------------------------------------------------------------------
 
-    aes_gcm_test.json                      sha256 985e5ecc172e181eaf49e89508b9470dcf478002eb7e8559c707eb42dc97dfe7
-    chacha20_poly1305_test.json            sha256 fe61d25f90e1bde4461d00eafe61049e5f29bd999f36b766df9cda90906ad53d
-    ecdsa_secp256r1_sha256_test.json       sha256 182db4f3e230f6f9fa9f800d2a614dede30284b8e8438bbfe1171905402e9332
-    ecdsa_secp384r1_sha384_test.json       sha256 8a5b3ae1760975143414811f13588c24d951d9d8c904195087ba327591dfe9cc
-    ed25519_test.json                      sha256 752d2ea7d7c6cf4736381b6cbacb61f8182b126ab7cd9b058f00c50084975536
-    hkdf_sha256_test.json                  sha256 bb2b462a38b251cb52a2aede706d6d4b62b26864f4e80c95497507ddb07c5f1e
-    hkdf_sha384_test.json                  sha256 69ff6ea3657bb9c1b8cdffbbb4e7832353d08fd15c0d9997b03f7a6b180e3678
-    hkdf_sha512_test.json                  sha256 bb9a21f4e86041caf5d7792b030349f8ff289087f195b2fbc0fc0afc39deca6f
-    hmac_sha256_test.json                  sha256 2d201cfa61d1bf95e6f5d07d96634b4a348b31e8eaa277ad7c8d09677b7a743f
-    hmac_sha384_test.json                  sha256 28b9776e979dd755d852ca471043ea6cedce8b15f7a28abdf6ea9efd982b43c0
-    hmac_sha512_test.json                  sha256 b6c90477bdb4a6fc8ee3d1f7b2c0b69a8dfffab34718abaa6cabd71cc2ba1207
-    rsa_pss_2048_sha256_mgf1_32_test.json  sha256 7f6efafc160f4816b96cbf1c12188a31051d7e3f001e27505d9edb5f2a0e325c
-    rsa_signature_2048_sha256_test.json    sha256 94a917b01ff50fb874cfc05bf29b4af44868d944a6558201cf18380da93fb393
-    x25519_test.json                       sha256 35c3f5231cf25cc640b524d403461deee9e49441d5d915a3a25b2c8ff5adbe7d
+    aes_gcm_test.json                          sha256 985e5ecc172e181eaf49e89508b9470dcf478002eb7e8559c707eb42dc97dfe7
+    aes_gmac_test.json                         sha256 e2f98488d4d3a38ec5f72b5cf75b85ed393d6763a4c1828c090c81a79534aab6
+    aes_wrap_test.json                         sha256 2fdb3661fd8823d1ec50e03886b24066415018975677dff83d83e77f5a51562d
+    chacha20_poly1305_test.json                sha256 fe61d25f90e1bde4461d00eafe61049e5f29bd999f36b766df9cda90906ad53d
+    ecdh_secp256r1_ecpoint_test.json           sha256 648f16d077caf2400d02331ca51f44744c72c799830c8d0595d0b18b6dd9f886
+    ecdh_secp384r1_ecpoint_test.json           sha256 ffa7835fe1de359dff762c8f1272b98acebd5578e2f855d969051ff956c6dca3
+    ecdsa_secp256r1_sha256_test.json           sha256 182db4f3e230f6f9fa9f800d2a614dede30284b8e8438bbfe1171905402e9332
+    ecdsa_secp256r1_sha512_test.json           sha256 8e940baad7c6172c58c8f354b10366d307be43a3cb82a5880cb46686c3e8f858
+    ecdsa_secp384r1_sha256_test.json           sha256 660c948e5433279ecdf966e8a1386b69ecec618efc1ff00269e85aa9dc84f0a6
+    ecdsa_secp384r1_sha384_test.json           sha256 8a5b3ae1760975143414811f13588c24d951d9d8c904195087ba327591dfe9cc
+    ecdsa_secp384r1_sha512_test.json           sha256 f44bae32e419fc75c5b5af751cff4e35145cfbcc24944e378d5f30889d310513
+    ed25519_test.json                          sha256 752d2ea7d7c6cf4736381b6cbacb61f8182b126ab7cd9b058f00c50084975536
+    hkdf_sha256_test.json                      sha256 bb2b462a38b251cb52a2aede706d6d4b62b26864f4e80c95497507ddb07c5f1e
+    hkdf_sha384_test.json                      sha256 69ff6ea3657bb9c1b8cdffbbb4e7832353d08fd15c0d9997b03f7a6b180e3678
+    hkdf_sha512_test.json                      sha256 bb9a21f4e86041caf5d7792b030349f8ff289087f195b2fbc0fc0afc39deca6f
+    hmac_sha1_test.json                        sha256 b521c6180a862247986392d3cb49b511fc7fe790e75bee236f84e36ca290c7c0
+    hmac_sha256_test.json                      sha256 2d201cfa61d1bf95e6f5d07d96634b4a348b31e8eaa277ad7c8d09677b7a743f
+    hmac_sha384_test.json                      sha256 28b9776e979dd755d852ca471043ea6cedce8b15f7a28abdf6ea9efd982b43c0
+    hmac_sha512_test.json                      sha256 b6c90477bdb4a6fc8ee3d1f7b2c0b69a8dfffab34718abaa6cabd71cc2ba1207
+    mlkem_768_encaps_test.json                 sha256 9d4381f94c40853bba430245b94968b7390d9175aacd9f1ae4e250a71c78b713
+    mlkem_768_keygen_seed_test.json            sha256 fde5abe284396f4cb3c4610b90d680f0b57782e94c3365c97aee59e24881ebe4
+    mlkem_768_test.json                        sha256 c59c067ae794c343df575dd90f6f7458f51881b11a22d6e9d8677c8d9ee21e90
+    pbkdf2_hmacsha1_test.json                  sha256 5ef5307e119bd118da50ad276426ed3baade2d093e93b643a1d70be0bf0b861a
+    rsa_pss_2048_sha256_mgf1_0_test.json       sha256 b22a8d9a2e7e47f681d0ff1d1a55455daaf325d989c64ad005f848bd50b9b4c0
+    rsa_pss_2048_sha256_mgf1_32_test.json      sha256 7f6efafc160f4816b96cbf1c12188a31051d7e3f001e27505d9edb5f2a0e325c
+    rsa_pss_2048_sha256_mgf1sha1_20_test.json  sha256 8099d28e300c86cf1cac2ab09cd777186b5ecc0f555d7c178c665b4ff3c08307
+    rsa_pss_2048_sha384_mgf1_48_test.json      sha256 66d464778b0b2f683a1d1a20e94f77e9472b8cc393b45f423fa08a48e677063c
+    rsa_pss_3072_sha256_mgf1_32_test.json      sha256 cca48433e6d1accb57f65b3396c4f4dd93c776467101c3f0948e74c283fd4749
+    rsa_pss_4096_sha256_mgf1_32_test.json      sha256 e627cbf5139a01e0a446c4fe15911f6268224fdd3ef4a1eb714b3942b5686410
+    rsa_pss_4096_sha384_mgf1_48_test.json      sha256 d632649a7630f7c267eda576714ca11cf0ff068d6622f576b8701f923c112577
+    rsa_pss_4096_sha512_mgf1_32_test.json      sha256 af1e1c1c593edf91be3e9880927231d57f9df082f2d8caec2a61d9874ade101f
+    rsa_pss_4096_sha512_mgf1_64_test.json      sha256 c93ceaa56a190c9fd4707441c5c6a75839f108202d88aec891697f9623042547
+    rsa_pss_misc_test.json                     sha256 1fac515f67fea8ccbf44ea08fde2de00cd76169f774a54ce2994c9963c31e84f
+    rsa_signature_2048_sha256_test.json        sha256 94a917b01ff50fb874cfc05bf29b4af44868d944a6558201cf18380da93fb393
+    rsa_signature_2048_sha384_test.json        sha256 c571c105d261c0ff588a2888a529f152563fb3b77894b7620d4e4f8f934f2c1d
+    rsa_signature_2048_sha512_test.json        sha256 16ea24b039905d054bdb6004f5fd179374e150b7b6d73a7ba654b6d00eab12ef
+    rsa_signature_3072_sha256_test.json        sha256 0f5f18cabfaad3e2792e82f7e9882f8999049b456714de924b8a5e202f61ca43
+    rsa_signature_3072_sha384_test.json        sha256 73499ee649d8fb703b3f0f455fa36f7682fde677c590a736958ebce05ab27dae
+    rsa_signature_3072_sha512_test.json        sha256 09aa3336fdb7be216180ce944ca7b2a052e1de38c210435c19506327d4a36ebd
+    rsa_signature_4096_sha256_test.json        sha256 957aca128e30bd02c8982f8ca482d6521d16683f4bbc3f193cdfd4c8f04bc667
+    rsa_signature_4096_sha384_test.json        sha256 bc26f16b9fc9a90628864d3d1111ef48a4bd00b9d4870bfab88ff326e309e073
+    rsa_signature_4096_sha512_test.json        sha256 9d6e67b1eb0d7040db411835238efd20e9302399a258bdff82de3f38e0f2855a
+    x25519_test.json                           sha256 35c3f5231cf25cc640b524d403461deee9e49441d5d915a3a25b2c8ff5adbe7d
     Upstream: https://github.com/C2SP/wycheproof, `testvectors_v1/` at
     commit 7a325932231bd7a724c791c8b0d65ea4d6d2f435, byte for byte
     Licence text: lib/crypto/tests/data/wycheproof-LICENSE (upstream's `LICENSE`,
@@ -441,25 +581,50 @@ lib/crypto/tests/data/*_test.json — Wycheproof test vectors, Apache-2.0
     SPDX-License-Identifier: Apache-2.0
 
 `toyos-crypto`'s host tests read them (`lib/crypto/tests/wycheproof.rs`); no
-image carries them.
+image carries them. These are every file of that directory for an interface the
+crate offers.
 
 
-lib/crypto/tests/data/nist-mlkem-*.json — NIST ACVP ML-KEM vectors, NIST-Software
----------------------------------------------------------------------------------
+lib/crypto/tests/data/ed25519_speccheck_cases.json — "Taming the many EdDSAs" cases, Apache-2.0
+-----------------------------------------------------------------------------------------------
 
+    ed25519_speccheck_cases.json  sha256 08e47a36d9aead288664930505584f353fff113ab854f2800db1e4f5b3540450
+    Upstream: https://github.com/novifinancial/ed25519-speccheck, `cases.json`
+    at commit 65519336fda78a3d016e947df6d82848aca0c9da, byte for byte
+    Licence text: lib/crypto/tests/data/speccheck-LICENSE (upstream's `LICENSE`,
+    sha256 c71d239df91726fc519c6eb72d318ec65820627232b2f796219e87dcf35d0ab4)
+    SPDX-License-Identifier: Apache-2.0
+
+The twelve edge cases of Chalkias, Garillot, Kondi and Nikolaenko, "Taming the
+many EdDSAs" (2020): small-order and non-canonical keys and points, and S
+past the group order. `toyos-crypto`'s host tests read them
+(`lib/crypto/tests/ed25519_verdicts.rs`); no image carries them.
+
+
+tests/acvp/nist-*.json — NIST ACVP HMAC and ML-KEM vectors, NIST-Software
+-------------------------------------------------------------------------
+
+    nist-hmac-sha1.json         sha256 6e96eb5f53065219c437a99fedec7299c916c76e170d6b74507dc5409ed9cd6b
+      HMAC-SHA-1-2.0/internalProjection.json
+    nist-hmac-sha256.json       sha256 a9d0734b93aee71bc6f30b47daab782fd96b39688afe4fbddb009e99402ec989
+      HMAC-SHA2-256-2.0/internalProjection.json
+    nist-hmac-sha384.json       sha256 0ffa9332b9430ae94cfac0f23b3843293903fa34a3ac9c11a8af2bfdf7276ed3
+      HMAC-SHA2-384-2.0/internalProjection.json
+    nist-hmac-sha512.json       sha256 ea6e03f012d5237b95421b7d50c504f8ab010c4f7f18cd46fe61d8912d3442a0
+      HMAC-SHA2-512-2.0/internalProjection.json
     nist-mlkem-encapdecap.json  sha256 5e88fbd351dc2915b2ab399f5dffd269e1cdbdd0186103ab0e90b374cf592187
       ML-KEM-encapDecap-FIPS203-tr1/internalProjection.json
     nist-mlkem-keygen.json      sha256 d7a62a2c3476957f56dd8d24f9004ea6776ccfe995ffe71a65bb9506dc9c7b1b
       ML-KEM-keyGen-FIPS203/internalProjection.json
     Upstream: https://github.com/usnistgov/ACVP-Server, `gen-val/json-files/`
     at commit 975de31eb83d87039ec88934fdc47d8c312b892d, byte for byte
-    Licence text: lib/crypto/tests/data/nist-LICENSE (the `License` section of upstream's
+    Licence text: tests/acvp/nist-LICENSE (the `License` section of upstream's
     `README.md` at that commit, sha256
     8e6833bd6bd35dadd415147ba53a8eca4c3d31c53cb589e97abba6a4efd5b953)
     SPDX-License-Identifier: NIST-Software
 
-`toyos-crypto`'s host tests read them (`lib/crypto/tests/wycheproof.rs`); no
-image carries them. The notice asks that copies keep it intact and acknowledge
+`toyos-crypto`'s host tests read them (`lib/crypto/tests/nist.rs`); no image
+carries them. The notice asks that copies keep it intact and acknowledge
 NIST as the source, which this section and the file beside the vectors do.
 
 
@@ -497,6 +662,44 @@ protected and with HT Control. The four named `oobr` are hostile inputs tcpdump
 recorded for its own over-reads. Nothing in this repository fetches
 them, and no test reads tcpdump's dissection of them.
 
+
+system/wlan/handshake/tests/fixtures/ — handshakes wpa_supplicant recorded
+--------------------------------------------------------------------------
+
+    psk.pcap     1,289 bytes
+      sha256 ae7b93c03d1e5a236fc3c4537c7550021367095a2a8a020ab66f59edba7de6bc
+    pmf.pcap     1,333 bytes
+      sha256 c6e7ede7c923975dc260e84efdfd5825e2ab4e09dc1ad1a723a3bd3255e7152b
+    SPDX-License-Identifier: MIT OR Apache-2.0
+
+`toyos-wlan-handshake`'s `tests/capture.rs` replays these. Each holds six frames
+of one recorded join, unmodified: the access point's Probe Response, the
+station's Association Request and the four EAPOL-Key frames. They are six
+records of a radiotap capture of every frame on the medium (tcpdump on `hwsim0`),
+copied with their pcap header and nothing else.
+
+The join was between two wpa_supplicant v2.10 processes, Ubuntu 24.04's
+package. One was an access point (`mode=2`), and both ran over two
+`mac80211_hwsim` radios on a Linux bench on 2026-11-01. The settings were
+SSID `toyos-w2a`, passphrase `ThisIsAPassword`, RSN, WPA-PSK and CCMP, with
+`eapol_version=2`. `ieee80211w` was 0 for `psk.pcap` and 2 for `pmf.pcap`.
+The addresses are locally administered ones that the capture script set
+(02:00:00:00:a0:01 and 02:00:00:00:b0:02). The nonces and keys are those runs'
+random values, for a network that exists nowhere else. The script and both
+sides' logs are on `ToyOSOrg/evidence`, branch `pr-1130`.
+
+`rekey-psk.txt` and `rekey-pmf.txt` come from a second run of the same setup.
+That run added one change: the station's `wpa_ptk_rekey=6`, so twice per run it
+asked for a new 4-way handshake. Each file is text that
+`tools/rekeyfixture.py` on the evidence branch wrote. It holds the addresses
+and the RSNEs from that run's Probe Response and Association Request, then every
+EAPOL-Key frame and key that the station's `-dd -K` log printed, in order. On
+air the rekeys are CCMP-protected, so the log is the record of their bytes.
+
+wpa_supplicant is BSD-3-Clause. That licence covers the program, not the frames
+it sent over a simulated medium for this repository's own test network. Those
+frames are protocol messages computed from our settings and the run's random
+values, so the bytes are this project's own.
 
 build/microcode/intel-ucode/* — Intel microcode, redistributable unmodified
 ---------------------------------------------------------------------------
@@ -551,8 +754,69 @@ derived from it; no reverse engineering, decompilation or disassembly; and
 export law is observed.
 
 
-tests/cavp/ — NIST's SHA-2 test vectors, CAVP SHAVS
-----------------------------------------------------
+system/ax2xx/firmware/* — Intel Wi-Fi firmware, redistributable unmodified
+--------------------------------------------------------------------------
+
+    iwlwifi-cc-a0-77.ucode        1,368,100 bytes, the AX200's firmware,
+                                  API 77
+      sha256 1866a58a1daee56b120362122d5f7548b443b53d33f2558a7e4407d58fd27dab
+    iwlwifi-ty-a0-gf-a0-89.ucode  1,679,080 bytes, the AX210's firmware,
+                                  API 89
+      sha256 792478ef7752595525379a5068e2d47e310a2c344636b7df866c54746ced1dc0
+    iwlwifi-ty-a0-gf-a0.pnvm      55,020 bytes, the AX210's platform NVM
+      sha256 9697e327f8171454b3c19b1ec9449753d5b934d4e91722f469616818a6d477b0
+    Upstream: https://git.kernel.org/pub/scm/linux/kernel/git/firmware/linux-firmware.git,
+    `intel/iwlwifi/` at commit b9df1a1aa45bc4fb2be9de2413203fd626233b9c,
+    byte for byte
+    Copyright: Intel Corporation
+    Licence text: licenses/Intel-iwlwifi-firmware-license.txt (upstream's
+    `LICENSES/LICENCE.iwlwifi_firmware` at that commit,
+    sha256 16d5040c7cf851fc693b7542e20870935b99802533ea1bfd231c377a2305e5c5)
+    SPDX-License-Identifier: LicenseRef-Intel-iwlwifi-Firmware
+
+Each radio's newest linux-firmware build at that commit, which the `ax2xx`
+driver will hand its card from W5; `toyos-ax2xx`'s host tests decode their
+containers. No image carries them yet.
+The licence permits redistribution in binary form, without modification, on
+three conditions: the copyright notice and the disclaimer are reproduced with
+the distribution, which an image carrying these files must do beside them;
+Intel's name endorses nothing derived from them; and no reverse engineering,
+decompilation or disassembly, so of each file only the container a loader
+parses is read. Whether the cards verify these files is unconfirmed:
+issues/nothing-shows-the-ax200-or-ax210-verifies-its-firmware.md.
+
+
+system/tgl-display/firmware/* — Intel display firmware, redistributable unmodified
+-----------------------------------------------------------------------------------
+
+    tgl_dmc_ver2_12.bin  19,760 bytes, Tiger Lake's Display Micro-Controller
+                         package, version 2.12
+      sha256 3c013ef0ad96ba73aee8e5bd04a8e27cc9b1c6e9183b1a83ce124485f325afca
+    Upstream: https://git.kernel.org/pub/scm/linux/kernel/git/firmware/linux-firmware.git,
+    `i915/` at tag 20261019 (commit a2dcb924f0897368b0b4f305cbf9808cdda90ce0),
+    byte for byte
+    Copyright: Intel Corporation
+    Licence text: licenses/Intel-i915-firmware-license.txt (upstream's
+    `LICENSES/LICENSE.i915` at that commit, which WHENCE names
+    LicenseRef-LICENSE.i915,
+    sha256 8542aeabf2761935122d693561e16766ce1bcc2b0d003204f9040b7d6d929f2e)
+    SPDX-License-Identifier: LicenseRef-Intel-i915-Firmware
+
+The newest Tiger Lake build at that tag. `toyos-tgl-display` embeds it, and
+the `tgl-display` driver loads its main program into the display engine's
+program storage through its own registers. An image building `tgl-display`
+carries the licence as /system/share/licenses/Intel-i915-firmware-license.txt.
+The licence permits redistribution in binary form, without modification, on
+three conditions: the copyright notice and the disclaimer are reproduced with
+the distribution; Intel's name endorses nothing derived from it; and no
+reverse engineering, decompilation or disassembly, so of the file only the
+headers Vol 12 "DMC Firmware Package" lays out are read. Its patent licence
+covers use alone or with an operating system under an OSI-approved licence.
+Whether the display engine verifies the program is unknown:
+issues/nothing-shows-the-tiger-lake-display-engine-verifies-its-dmc-program.md.
+
+tests/cavp/SHA*.rsp — NIST's SHA-2 test vectors, CAVP SHAVS
+------------------------------------------------------------
 
     SHA256ShortMsg.rsp     10,299 bytes
       sha256 75e1cb83994638481808e225b9eb0c1ebd0c232d952ac42b61abce6363be283c
@@ -560,6 +824,12 @@ tests/cavp/ — NIST's SHA-2 test vectors, CAVP SHAVS
       sha256 6fac36f37360bcf74ffcf4465c18e30d6d5a04cc90885b901fc3130c16060974
     SHA256Monte.rsp         8,751 bytes
       sha256 29ea30c6bb4b84e425fb8c1d731c6bb852dac935825f2bd1143e5d3c4f10bfb9
+    SHA384ShortMsg.rsp     32,672 bytes
+      sha256 7ea7bcf00fadc20949fae63703e40681ddf288fea808471cb3cbc95f3ec16811
+    SHA384LongMsg.rsp   1,683,749 bytes
+      sha256 536171765a4278c000ac3c9913edb2eed0ca7ccd5a10b72ed79fdfe7901a6d6a
+    SHA384Monte.rsp        11,983 bytes
+      sha256 4270099431ff52ee1686dc472351e681c26c507433df8f107c7de203b771424e
     SHA512ShortMsg.rsp     36,800 bytes
       sha256 e53a36c03609e5a3e3cc4b6e117a499db7864c23ec825c6cec99503a45f40764
     SHA512LongMsg.rsp   1,687,845 bytes
@@ -574,10 +844,49 @@ tests/cavp/ — NIST's SHA-2 test vectors, CAVP SHAVS
 
 The response files NIST's Cryptographic Algorithm Validation Program publishes
 for the SHA Validation System: messages and the digests FIPS 180-4 gives them,
-the external oracle `toyos-sha2`'s and `toyos-sha2-hw`'s tests hold them to. A
-work of the United States government, not under copyright in the United States
-(17 U.S.C. §105). Test input only: nothing built from this repository carries
-them, and no shipped package's directory holds them.
+the external oracle `toyos-crypto`'s tests hold them to. A work of the United
+States government, not under copyright in the United States (17 U.S.C. §105). Test input only: nothing built from this
+repository carries them, and no shipped package's directory holds them.
 
-Of the archive, only SHA-256's and SHA-512's files, the two hashes the crate
-has.
+Of the archive, only SHA-256's, SHA-384's and SHA-512's files, the hashes
+these crates have.
+
+
+tests/cavp/gcm/ — NIST's AES-GCM test vectors, CAVP GCMVS
+---------------------------------------------------------
+
+    gcmEncryptExtIV128.rsp  2,930,939 bytes
+      sha256 30156236f768b0d81e58a3e5bd3bd79ce294cf9ef0ba0a84cf7b869c89ebd9fd
+    gcmEncryptExtIV256.rsp  3,182,939 bytes
+      sha256 4448b4998c3f58cd9f5542ddf7c573189a721ff3d3ac24cd5177bb4910a787f8
+    Upstream: https://csrc.nist.gov/CSRC/media/Projects/Cryptographic-Algorithm-Validation-Program/documents/mac/
+    gcmtestvectors.zip (sha256
+    f9fc479e134cde2980b3bb7cddbcb567b2cd96fd753835243ed067699f26a023), each
+    file byte for byte
+    SPDX-License-Identifier: NIST-PD
+
+The encryption response files of the Galois/Counter Mode Validation System
+(SP 800-38D): keys, IVs, plaintexts, AAD, ciphertexts and tags. `toyos-crypto`'s tests hold its AES-GCM to them (`lib/crypto/tests/nist.rs`).
+A work of the United States government, not under copyright in the United States
+(17 U.S.C. §105). Test input only. Of the archive, AES-128's and AES-256's
+encryption files: the key sizes the crate has, and refusals Wycheproof and the
+differential already hold.
+
+
+tests/cavp/ecdsa/ — NIST's ECDSA test vectors, CAVP ECDSA2VS
+------------------------------------------------------------
+
+    SigVer.rsp    730,106 bytes
+      sha256 e9841c3d12e323042751460d0b8ef4bc59c2640105ec7da4852775f80ab10191
+    PKV.rsp        38,511 bytes
+      sha256 1d33551c1a199b1fc2b0e4075cdfd52d4830503ef37e6b16f04ce617d524f3f1
+    Upstream: https://csrc.nist.gov/CSRC/media/Projects/Cryptographic-Algorithm-Validation-Program/documents/dss/
+    186-4ecdsatestvectors.zip (sha256
+    fe47cc92b4cee418236125c9ffbcd9bb01c8c34e74a4ba195d954bcb72824752), its
+    `186-4ecdsatestvectors/SigVer.rsp` and `PKV.rsp` byte for byte
+    SPDX-License-Identifier: NIST-PD
+
+FIPS 186-4's signature verification and public-key validation response files.
+`toyos-crypto`'s tests hold its ECDSA verification and SEC 1 decoding to them
+(`lib/crypto/tests/nist.rs`). A work of the United States government, not under
+copyright in the United States (17 U.S.C. §105). Test input only.

@@ -1,18 +1,13 @@
 [package]
 name = "netstack"
-description = "The network server: one Ethernet device claimed from the kernel, ToyOS's own stack over it (toyos-net-node), its DHCP lease, resolver and mDNS name, served to programs over IPC."
+description = "The network server: ToyOS's own stack (toyos-net-node) over the link a NIC driver brings, its DHCP lease, resolver and mDNS name, served to programs over IPC."
 edition = "2024"
 license = "MIT OR Apache-2.0"
 
 [dependencies]
 toyos-abi = { path = "../../sdk/abi" }
-# The matcher its claim is endowed under, spelled as the manifest spells it.
-toyos-manifest = { path = "../../lib/manifest" }
 toyos = { path = "../../sdk/toyos" }
-toyos-device-memory = { path = "../../lib/device-memory" }
-toyos-i219 = { path = "i219" }
-toyos-virtio = { path = "../../lib/virtio" }
-toyos-pci-claim = { path = "../../lib/pci-claim" }
+toyos-link = { path = "../../lib/link" }
 toyos-tco = { path = "../../lib/tco" }
 toyos-mdns = { path = "mdns" }
 toyos-dns = { path = "dns" }
@@ -25,8 +20,5 @@ toyos-net-tcp = { path = "shard/tcp" }
 toyos-net-udp = { path = "udp" }
 toyos-net-wire = { path = "wire" }
 
-[dev-dependencies]
-toyos-pci-claim = { path = "../../lib/pci-claim", features = ["host-grant"] }
-
 [package.metadata.toyos.host]
-exempt.owns = "the NIC ToyOS claims for it"
+exempt.manages = "the machine's network stack, over the links ToyOS's NIC drivers bring"

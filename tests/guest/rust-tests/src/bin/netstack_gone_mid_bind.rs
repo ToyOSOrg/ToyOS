@@ -4,10 +4,10 @@
 //! `/system/bin/sshserver` has one clean exit for a machine with no network and it is keyed
 //! on an error kind: `ErrorKind::NotConnected`, which is what
 //! `NetError::NetstackNotFound` becomes. Anything else panics, by design — a
-//! machine that *has* a NIC and cannot bind must be loud. On a NIC-less machine
-//! netstack prints its line and exits, and whether sshserver took the quiet arm or put a
-//! tokio backtrace across the boot depended on which side of netstack's teardown
-//! its bind landed.
+//! machine that *has* a NIC and cannot bind must be loud. netstack that exits, as it
+//! once did on a NIC-less machine, can do so under a bind, and whether sshserver took
+//! the quiet arm or put a tokio backtrace across the boot depended on which side of
+//! netstack's teardown its bind landed.
 //!
 //! **The race is not staged here. The sequence is.** What made the defect hard
 //! to see is that it is a handful of instructions wide in a real boot; what
@@ -24,23 +24,25 @@
 //!    well as through the SDK, because `ErrorKind::NotConnected` is the literal
 //!    thing `/system/bin/sshserver` matches on.
 //! 2. **Gone between the connect and the request.** The client is connected
-//!    and queued when the port closes. `tcp_bind` hands netstack a pipe end in
-//!    its request's frame, and `SYS_MESSAGE_SEND` refuses the whole message with
-//!    `SyscallError::Gone`. The refused send consumed the pipe end and closed
-//!    it, so the pipe's read end, still the child's, reads end of file: the
-//!    kernel left the end at its own number and the SDK closed it.
-//! 3. **The same, for a request that carries no handles**, which the same send
-//!    refuses with the same `SyscallError::Gone`.
+//!    and queued when the port closes. A stream's connect hands netstack a
+//!    handle in its request's frame, here a pipe end in its region's place, and
+//!    `SYS_MESSAGE_SEND` refuses the whole message with `SyscallError::Gone`.
+//!    The refused send consumed the pipe end and closed it, so the pipe's read
+//!    end, still the child's, reads end of file: the kernel left the end at its
+//!    own number and the SDK closed it.
+//! 3. **The same, for a request that carries no handles**, a listen, which the
+//!    same send refuses with the same `SyscallError::Gone`.
 //!
 //! Arms 2 and 3 are the ones that produced the panic. They are red on a tree
 //! where `toyos::net::hangup` maps anything but `IpcError::Disconnected` to
 //! `NetError::Io`, which is `ErrorKind::Other`, which is sshserver's `panic!`.
 //!
 //! **Nothing here waits.** The child's ordering edge is a *second* connection
-//! to the same port, read with a blocking read: `Acceptor::on_zero_handles`
-//! closes every queued connection's inbox and only then drops the connections,
-//! so a read that answers `0` on one of them proves the other one's outbox is
-//! already closed. The hook is deferred to a drain site
+//! to the same port, taken with a blocking receive: `Acceptor::on_zero_handles`
+//! drops the queued connections in the order they were made, each one's
+//! receiving end before its sending end, so a receive that answers `Gone` on
+//! the second proves the first can no longer be sent to. The hook is deferred
+//! to a drain site
 //! (`kernel/src/object/mod.rs`'s `ZERO_QUEUE`), so a sleep would be a guess and
 //! this is not one.
 
@@ -50,11 +52,9 @@ use std::os::toyos::process::CommandExt;
 use std::process::{Child, ChildStdout, Command, Stdio};
 
 use toyos::endow::EndowError;
-use toyos::net::{
-    MsgType, NetError, NetstackConn, SocketCloseRequest, TcpBindPipedRequest, TcpBindResponse, TcpOptions,
-};
+use toyos::net::{BoundResponse, MsgType, NetError, NetstackConn, TcpConnectRequest, TcpListenRequest, TcpOptions};
 use toyos::{namespace, port, AsHandle};
-use toyos_abi::syscall::{self, SVC_LABEL};
+use toyos_abi::syscall::{self, SyscallError, SVC_LABEL};
 
 const SELF_PATH: &str = "/system/bin/test_rs_netstack_gone_mid_bind";
 
@@ -68,8 +68,8 @@ const SSH_PORT: u16 = 22;
 fn main() {
     match std::env::args().nth(1).as_deref() {
         Some("already-gone") => already_gone(),
-        Some("bind") => mid_flight(Request::Bind),
-        Some("close") => mid_flight(Request::Close),
+        Some("handle") => mid_flight(Request::Handle),
+        Some("bare") => mid_flight(Request::Bare),
         Some(other) => panic!("unknown role {other:?}"),
         None => test(),
     }
@@ -77,8 +77,8 @@ fn main() {
 
 fn test() {
     arm_already_gone();
-    arm_mid_flight("bind", "the handle transfer");
-    arm_mid_flight("close", "the frame write");
+    arm_mid_flight("handle", "the handle transfer");
+    arm_mid_flight("bare", "the frame write");
     println!("a netstack that leaves mid-bind is a netstack that is not there, at all three syscalls");
 }
 
@@ -125,7 +125,7 @@ fn spawn(connector: &port::Connector, role: &str) -> (Child, BufReader<ChildStdo
     let ns = namespace::build().add(SERVICE, connector).finish().expect("a namespace");
     let mut child = Command::new(SELF_PATH)
         .arg(role)
-        .endow(SVC_LABEL, ns.into_raw().0)
+        .endow(SVC_LABEL, ns.into())
         .stdout(Stdio::piped())
         .spawn()
         .unwrap_or_else(|e| panic!("spawn {role}: {e}"));
@@ -174,10 +174,11 @@ fn already_gone() -> ! {
 
 /// Which syscall the child's request is refused at.
 enum Request {
-    /// Carries a pipe end, which a refused send closes — `tcp_bind`'s own shape.
-    Bind,
-    /// Carries none.
-    Close,
+    /// Carries a pipe end, which a refused send closes — a connect's own
+    /// shape, whose handle is its region.
+    Handle,
+    /// Carries none — a listen's.
+    Bare,
 }
 
 /// The child of arms 2 and 3.
@@ -190,20 +191,20 @@ fn mid_flight(request: Request) -> ! {
     say("connected");
 
     let mut byte = [0u8; 1];
-    let n = syscall::read(watch.as_handle(), &mut byte).expect("read the watch connection");
-    assert_eq!(n, 0, "the watch connection carried {n} byte(s); nobody ever wrote to it");
+    let taken = syscall::message_recv(watch.as_handle().raw(), &mut [], &mut byte, &mut [], false);
+    assert_eq!(taken, Err(SyscallError::Gone), "the watch connection carried a message; nobody ever sent one");
 
     let err = match request {
-        Request::Bind => {
-            let (notify, netstack_notify) = toyos::pipe_pair().expect("the notify pipe");
+        Request::Handle => {
+            let (notify, netstack_notify) = toyos::pipe_pair().expect("the pipe");
             let err = netstack
                 .request_with_handles(
                     [netstack_notify.into()],
-                    MsgType::TcpBindPiped,
-                    &TcpBindPipedRequest { addr: [0, 0, 0, 0], port: SSH_PORT, _pad: 0, options: TcpOptions::new(false) },
+                    MsgType::TcpConnect,
+                    &TcpConnectRequest { addr: [192, 0, 2, 2], port: SSH_PORT, _pad: 0, timeout_ms: 0 },
                 )
-                .and_then(|pending| pending.response::<TcpBindResponse>().map(|_| ()))
-                .expect_err("a bind into a port whose acceptor is gone was answered");
+                .and_then(|pending| pending.status())
+                .expect_err("a request into a port whose acceptor is gone was answered");
             // The refused send's write end was the pipe's only writer; a
             // writer still open refuses this read at once rather than blocking.
             assert_eq!(
@@ -213,10 +214,10 @@ fn mid_flight(request: Request) -> ! {
             );
             err
         }
-        Request::Close => netstack
-            .request(MsgType::TcpClose, &SocketCloseRequest { socket_id: 0 })
-            .and_then(|pending| pending.status())
-            .expect_err("a request into a port whose acceptor is gone was answered"),
+        Request::Bare => netstack
+            .request(MsgType::TcpListen, &TcpListenRequest { addr: [0, 0, 0, 0], port: SSH_PORT, _pad: 0, options: TcpOptions::new(false) })
+            .and_then(|pending| pending.response::<BoundResponse>().map(|_| ()))
+            .expect_err("a listen into a port whose acceptor is gone was answered"),
     };
 
     assert_eq!(

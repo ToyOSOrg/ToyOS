@@ -49,9 +49,10 @@
 //! is run as its method ([`run_query`]): a Notify of a press is a press.
 //! Elsewhere no query's method runs.
 //!
-//! **Then `_OSC` is negotiated** ([`osc`]): `\_SB._OSC`, and each
-//! processor's on an Intel processor, query then commit, claiming what ToyOS
-//! honours; whatever a table they loaded added is initialised in turn.
+//! **Then `_OSC` is negotiated** ([`osc`]): `\_SB._OSC` query then commit,
+//! and each processor's on an Intel processor committed, claiming what ToyOS
+//! honours; whatever a table they loaded added is initialised in turn. Then
+//! each processor's idle states are handed to the kernel ([`cst`]).
 //!
 //! **Each SCI** is read off both blocks ([`sci::events`]): a press stops the
 //! machine through the supervisor, or is said and dropped on a machine with
@@ -76,6 +77,8 @@
 mod aml;
 mod apertures;
 mod battery;
+mod cpu;
+mod cst;
 mod devices;
 mod ec;
 mod gpe;
@@ -86,16 +89,16 @@ mod osc;
 mod sci;
 mod tables;
 
-use std::cell::Cell;
+use std::cell::{Cell, RefCell};
 use std::collections::{BTreeMap, VecDeque};
 use std::time::{Duration, Instant};
 
 use toyos::endow;
 use toyos::ioport::{in16, in8, out16, out8};
 use toyos::poller::{Poller, READABLE};
-use toyos::power::{self, Stop};
+use toyos::power::{self, Mode, Refused, Stop};
 use toyos::AcpiDev;
-use toyos_abi::acpi::{Access, AcpiInfo, Apertures, Block, FIXED_POWER_BUTTON, HARDWARE_REDUCED};
+use toyos_abi::acpi::{Access, AcpiInfo, Apertures, Block, IdleDeclaration, FIXED_POWER_BUTTON, HARDWARE_REDUCED};
 use toyos_abi::syscall::{DeviceType, SyscallError};
 
 use acpiserver_api::{CONTROLLER_NONE, CONTROLLER_SERVED};
@@ -103,7 +106,7 @@ use aml::Aml;
 use battery::Power;
 use devices::{Ec, Queried};
 use ec::Transaction;
-use host::{port_in, Answer, Declared, Handed, Kernel, Stopping, Take, Unmade, OWN};
+use host::{port_in, Answer, Declared, Handed, Kernel, RootsDeclared, Stopping, Take, Unmade, OWN};
 use init::{Census, Names};
 use sci::{Bits, Event, Fixed, Served, Unserved, Unstopped, PM1_STATUS, PWRBTN};
 
@@ -133,13 +136,14 @@ struct Server<'a, K, P> {
     empty: u32,
     /// The kernel was handed `\_S5`'s sleep type: a press powers the machine off.
     power_off: bool,
+    /// A press asked a stop, which another press forces.
+    stop_asked: bool,
     /// What the namespace's initialisation ran.
     census: Census,
     /// What `_OSC` answered.
     negotiated: osc::Negotiated,
-    /// The processor is Intel's, whose `_OSC` interface a processor object
-    /// speaks ([`toyos_abi::processor_is_intel`]).
-    intel: bool,
+    /// The processor's vendor and family.
+    cpu: cpu::Cpu,
     /// The batteries and adapters the namespace names, which a Notify of an
     /// information change reads again.
     sources: (Vec<String>, Vec<String>),
@@ -147,6 +151,8 @@ struct Server<'a, K, P> {
     gpe_runs: BTreeMap<u16, u64>,
     /// Each Notify delivered, by object and value.
     delivered: ledger::Ledger,
+    /// The processors whose `_CST` is read, which their Notify 0x81 reads again.
+    idle: Vec<cst::Processor>,
 }
 
 fn main() {
@@ -155,7 +161,7 @@ fn main() {
         return;
     };
     let info = dev.describe().expect("acpiserver: the claim's first read is its description");
-    let claim = Claim { dev: &dev, info, poller: Poller::new(1), watching: Cell::new(false) };
+    let claim = Claim { dev: &dev, info, poller: Poller::new(1), watching: Cell::new(false), stop: RefCell::new(None) };
     let mut internal = false;
     for arg in std::env::args().skip(1) {
         assert!(arg == apertures::PORTS_INTERNAL, "acpiserver: {arg:?} is no argument this server takes");
@@ -171,6 +177,7 @@ fn main() {
     let (batteries, adapters) = server.arm_controller(names.as_ref());
     if let Some(names) = server.negotiate(names) {
         println!("{}", server.census.line());
+        server.declare_idle(&names);
         server.arm_gpes(&names);
     }
     server.sources = (batteries.clone(), adapters.clone());
@@ -220,6 +227,8 @@ struct Claim<'a> {
     /// A watch answers once: one still registered from a wait that timed out
     /// is not registered again.
     watching: Cell<bool>,
+    /// The stop the last press asked, which a terminate forces and no other.
+    stop: RefCell<Option<power::Pending>>,
 }
 
 impl Claim<'_> {
@@ -280,15 +289,23 @@ impl Kernel for Claim<'_> {
         self.info.flags & HARDWARE_REDUCED != 0
     }
 
-    fn declare(&self, roots: &[apertures::Root]) -> Result<Declared, Stopping> {
+    fn declare(&self, roots: &[apertures::Root]) -> Result<RootsDeclared, Stopping> {
         let mut declared = Apertures::default();
         for root in roots {
             declared.push(root.segment, root.buses, &root.windows, root.osc, root.committed).expect("acpiserver: the roots were read into a declaration's room");
         }
         match self.dev.declare(&declared) {
+            Err(SyscallError::InvalidArgument) => Ok(RootsDeclared::Refused),
+            Err(SyscallError::AlreadyExists) => Ok(RootsDeclared::Late),
+            answer => Self::answered("the root bridges' memory", answer).map(|()| RootsDeclared::Held),
+        }
+    }
+
+    fn idle(&self, declaration: &IdleDeclaration) -> Result<Declared, Stopping> {
+        match self.dev.idle(declaration) {
+            Err(SyscallError::NotFound) => Ok(Declared::NoCpu),
             Err(SyscallError::InvalidArgument) => Ok(Declared::Refused),
-            Err(SyscallError::AlreadyExists) => Ok(Declared::Late),
-            answer => Self::answered("the root bridges' memory", answer).map(|()| Declared::Held),
+            answer => Self::answered("a processor's idle states", answer).map(|()| Declared::Kept),
         }
     }
 
@@ -304,8 +321,14 @@ impl Kernel for Claim<'_> {
         self.dev.ack().expect("acpiserver: the claim's acknowledgement");
     }
 
-    fn power_off(&self) -> power::Refused {
-        power::stop(Stop::Shutdown)
+    fn power_off(&self) -> Result<(), power::Refused> {
+        let pending = power::stop(Stop::Shutdown, Mode::Wait)?;
+        *self.stop.borrow_mut() = Some(pending);
+        Ok(())
+    }
+
+    fn terminate(&self) -> Result<(), power::Refused> {
+        self.stop.borrow().as_ref().map_or(Err(Refused::NoStopPending), power::Pending::terminate)
     }
 }
 
@@ -375,9 +398,11 @@ impl<'a, K: Kernel, P: Ports> Server<'a, K, P> {
             scis: 0,
             empty: 0,
             power_off: false,
+            stop_asked: false,
             census: Census::default(),
             negotiated: osc::Negotiated::default(),
-            intel: toyos_abi::processor_is_intel(),
+            idle: Vec::new(),
+            cpu: cpu::Cpu::here(),
             sources: (Vec::new(), Vec::new()),
             gpe_runs: BTreeMap::new(),
             delivered: ledger::Ledger::default(),
@@ -477,7 +502,7 @@ impl<'a, K: Kernel, P: Ports> Server<'a, K, P> {
     fn negotiate(&mut self, names: Option<Names>) -> Option<Names> {
         let (names, aml) = (names?, self.aml.as_mut()?);
         let before = aml.interpreter.defined();
-        self.negotiated = osc::negotiate_all(aml, &names, self.intel);
+        self.negotiated = osc::negotiate_all(aml, &names, self.cpu.vendor == cpu::Vendor::Intel);
         let names = self.settle(before, names)?;
         let aml = self.aml.as_ref()?;
         println!(
@@ -491,6 +516,29 @@ impl<'a, K: Kernel, P: Ports> Server<'a, K, P> {
             toyos_aml::MAX_RUNNING
         );
         Some(names)
+    }
+
+    /// Hand the kernel each processor's idle states ([`cst`]), once `_OSC`
+    /// has said what ToyOS does and the blocks it loaded stand.
+    fn declare_idle(&mut self, names: &Names) {
+        let Some(aml) = &mut self.aml else { return };
+        self.idle = cst::processors(aml, names);
+        let mut census = cst::Census::default();
+        for processor in &self.idle {
+            if cst::declare(aml, self.kernel, processor, self.cpu, &mut census).is_err() {
+                return;
+            }
+        }
+        println!("{}", census.line());
+    }
+
+    /// `object`'s idle states read again and handed over, on its Notify 0x81.
+    fn redeclare_idle(&mut self, object: &str) {
+        let (Some(aml), Some(processor)) = (&mut self.aml, self.idle.iter().find(|p| p.path == object)) else { return };
+        let mut census = cst::Census::default();
+        if cst::declare(aml, self.kernel, processor, self.cpu, &mut census).is_ok() {
+            println!("{OWN}{object}'s idle states read again: {}", census.line());
+        }
     }
 
     /// Find the controller, and the buttons where they are control method
@@ -702,14 +750,16 @@ impl<'a, K: Kernel, P: Ports> Server<'a, K, P> {
     /// status change (0x80) reads the power sources again, and a battery's
     /// information change (0x81) finds them again; `\_SB`'s or a negotiated
     /// processor's 0x08 negotiates its `_OSC` again with the same claim
-    /// (§6.2.11); a processor's performance, idle or throttling change
-    /// (0x80, 0x81, 0x82, §8.4) is counted, since nothing reads those states
-    /// yet; anything else is served by nothing and counted.
+    /// (§6.2.11); a processor's idle change (0x81, §8.4.1.1) reads its
+    /// `_CST` again; its performance or throttling change (0x80, 0x82) is
+    /// counted, since nothing reads those states; anything else is served by
+    /// nothing and counted.
     fn deliver(&mut self, notified: std::collections::BTreeSet<(String, u64)>) {
         let (mut status, mut info) = (false, false);
         for (object, value) in notified {
             let source = self.sources.0.contains(&object) || self.sources.1.contains(&object);
             let processor = self.negotiated.processors.iter().any(|(path, _)| *path == object);
+            let idles = self.idle.iter().any(|p| p.path == object);
             let served = match value {
                 0x80 if source => {
                     status = true;
@@ -723,7 +773,11 @@ impl<'a, K: Kernel, P: Ports> Server<'a, K, P> {
                     self.renegotiate(&object);
                     "its _OSC negotiated again"
                 }
-                0x80..=0x82 if processor => "counted: nothing reads the processors' performance, idle or throttling states",
+                0x81 if idles => {
+                    self.redeclare_idle(&object);
+                    "its idle states read again"
+                }
+                0x80 | 0x82 if processor || idles => "counted: nothing reads the processors' performance or throttling states",
                 _ => "served by nothing",
             };
             if self.delivered.see(&format!("{object} {value:#x}")) {
@@ -741,24 +795,44 @@ impl<'a, K: Kernel, P: Ports> Server<'a, K, P> {
     /// `object`'s `_OSC` negotiated again with its claim.
     fn renegotiate(&mut self, object: &str) {
         let Some(aml) = &mut self.aml else { return };
-        let claim = if object == "\\_SB_" { &osc::PLATFORM } else { &osc::PROCESSOR };
         let before = aml.interpreter.defined();
-        match osc::negotiate(aml, &format!("{object}._OSC"), claim) {
-            Ok(answered) => println!("{OWN}{object}._OSC negotiated again: {answered:x?}"),
-            Err(why) => println!("{OWN}{object}._OSC was refused again: {why}"),
+        let path = format!("{object}._OSC");
+        let answered = if object == "\\_SB_" {
+            osc::negotiate(aml, &path, &osc::PLATFORM).map(|answered| format!("{answered:x?}"))
+        } else {
+            osc::commit(aml, &path, &osc::PROCESSOR).map(|committed| format!("{committed:x?}"))
+        };
+        match answered {
+            Ok(answered) => println!("{OWN}{path} negotiated again: {answered}"),
+            Err(why) => println!("{OWN}{path} was refused again: {why}"),
         }
         if let Ok(names) = Names::read(&aml.interpreter) {
             self.settle(before, names);
         }
     }
 
-    /// A press: the machine stops, and this comes back only where it has no
-    /// power-off, which the load said and this says again.
+    /// A press: the supervisor asked to power off once the sessions have
+    /// ended, which is answered at once so the next press is served; a press
+    /// while that stop is pending forces it, and no other. A stop that ended
+    /// without the machine, cancelled or refused, leaves the next press
+    /// asking again.
     fn press(&mut self) {
+        if self.stop_asked {
+            println!("acpiserver: the power button was pressed again, on SCI {}; forcing the stop", self.scis);
+            match self.kernel.terminate() {
+                Ok(()) => return,
+                Err(Refused::NoStopPending) => self.stop_asked = false,
+                Err(refused) => panic!("acpiserver: the stop's terminate was refused: {refused:?}"),
+            }
+        }
         println!("acpiserver: the power button was pressed, on SCI {} of this boot; asking the supervisor to power off", self.scis);
-        let refused = self.kernel.power_off();
+        let Err(refused) = self.kernel.power_off() else {
+            self.stop_asked = true;
+            return;
+        };
         match sci::unstopped(refused, self.power_off) {
             Unstopped::Dropped => toyos::error!("acpiserver: the press is dropped: {}", aml::NO_S5_HANDED.trim_start_matches("acpiserver: ")),
+            Unstopped::Another(stop) => toyos::error!("acpiserver: the press is dropped: a {stop:?} is pending"),
             Unstopped::Defect => panic!("acpiserver: the power-off was refused: {refused:?}"),
         }
     }
@@ -1127,20 +1201,23 @@ mod tests {
         kernel
     }
 
-    /// §6.2.11: `\_SB._OSC` and, on an Intel processor, each processor's are
-    /// queried with what ToyOS claims, nothing, and committed with what the
-    /// query granted of it, nothing, though the firmware offered a bit;
-    /// the block the processor's commit loads from reserved memory loads, and
-    /// its device's `_INI` runs. On another vendor's processor its `_OSC` is
+    /// §6.2.11: `\_SB._OSC` is queried with what ToyOS claims, nothing, and
+    /// committed with what the query granted of it, nothing, though the
+    /// firmware offered a bit; on an Intel processor, each processor's is
+    /// committed with ToyOS's claim and never queried (302223-007 §2.1). The
+    /// block the processor's commit loads from reserved memory loads, and its
+    /// device's `_INI` runs. On another vendor's processor its `_OSC` is
     /// not evaluated, and a block in ACPI reclaim memory, which Table 15.6
     /// calls neither reserved nor NVS, is refused and keeps nothing.
     #[test]
     fn osc_commits_only_what_toyos_claims_and_what_its_load_adds_is_initialised() {
-        for (intel, block_type, loaded) in [(true, 0, true), (false, 0, false), (true, 9, false)] {
+        let (on_intel, on_amd) = (cpu::Cpu { vendor: cpu::Vendor::Intel, family: 6 }, cpu::Cpu { vendor: cpu::Vendor::Amd, family: 0x17 });
+        for (cpu, block_type, loaded) in [(on_intel, 0, true), (on_amd, 0, false), (on_intel, 9, false)] {
+            let intel = cpu == on_intel;
             let kernel = osc_machine(block_type);
             let info = AcpiInfo { rsdp: CRAFTED_RSDP, pm1_event: Block::NONE, gpe0: GPE0, flags: FIXED_POWER_BUTTON, reserved: [0; 3] };
             let mut server = Server::new(&kernel, Bytes::default(), info);
-            server.intel = intel;
+            server.cpu = cpu;
             server.aml = load(&kernel, CRAFTED_RSDP).1;
             let names = server.initialise();
             server.arm_controller(names.as_ref());
@@ -1153,13 +1230,46 @@ mod tests {
             let platform: Vec<u64> = ["\\PUU", "\\PQ1", "\\PQ2", "\\PC1", "\\PC2"].map(&mut read).to_vec();
             assert_eq!(platform, [1, 1, 0, 0, 0], "the platform's UUID, the query flag and nothing claimed, then the commit of nothing");
             let processor: Vec<u64> = ["\\CUU", "\\CQ1", "\\CQ2", "\\CC1", "\\CC2"].map(&mut read).to_vec();
-            assert_eq!(processor, if intel { [1, 1, 0, 0, 0] } else { [0; 5] }, "intel {intel}");
+            let claimed = u64::from(osc::PROCESSOR.capabilities);
+            assert_eq!(processor, if intel { [1, 0, 0, 0, claimed] } else { [0; 5] }, "intel {intel}");
             assert_eq!(read("\\NEWI"), if loaded { 0x77 } else { 0 }, "intel {intel}, block in type {block_type}");
             assert_eq!((aml.host.loaded, aml.host.loads_refused), (u64::from(loaded), u64::from(intel && !loaded)));
             let answered = osc::Answered { query: 0x10, offered: 0, commit: Some((0, 0)) };
             assert_eq!(server.negotiated.platform, Some(Ok(answered)));
             assert_eq!(server.negotiated.processors.len(), usize::from(intel));
             assert_eq!(server.census.ini, u64::from(loaded), "the loaded device's _INI");
+        }
+    }
+
+    /// Each processor's `_CST` reaches the kernel by the UID the MADT names
+    /// it by, a `Processor` object's ProcID, holding the states deeper than
+    /// C1 as `_CST` names them: the T14's, as its firmware answers ToyOS's
+    /// processor `_OSC`.
+    #[test]
+    fn each_processors_cst_is_handed_to_the_kernel_by_its_uid() {
+        use crate::common::{buffer, cat, def_name, int, name, package, pkg};
+        use toyos_abi::acpi::IdleEntry;
+        let register = |hint: u64| {
+            let mut descriptor = vec![0x82, 12, 0, 0x7F, 1, 2, 1];
+            descriptor.extend(hint.to_le_bytes());
+            descriptor.extend([0x79, 0x00]);
+            buffer(&int(descriptor.len() as u64), &descriptor)
+        };
+        let state = |hint, kind, latency| package(&[register(hint), int(kind), int(latency), int(0)]);
+        let cst = def_name("_CST", &package(&[int(3), state(0x00, 1, 1), state(0x31, 2, 253), state(0x60, 3, 1048)]));
+        let processor = |path: &str, id: u8| cat(&[&[0x5B, 0x83], &pkg(&cat(&[&name(path), &[id], &0u32.to_le_bytes(), &[0x00], &cst]))]);
+        let kernel = crafted(&sealed(b"DSDT", &cat(&[&processor("\\_PR.CPU0", 2), &processor("\\_PR.CPU1", 5)])), &[]);
+        let info = AcpiInfo { rsdp: CRAFTED_RSDP, pm1_event: Block::NONE, gpe0: GPE0, flags: FIXED_POWER_BUTTON, reserved: [0; 3] };
+        let mut server = Server::new(&kernel, Bytes::default(), info);
+        server.cpu = cpu::Cpu { vendor: cpu::Vendor::Intel, family: 6 };
+        server.aml = load(&kernel, CRAFTED_RSDP).1;
+        let names = server.initialise().expect("the namespace stands");
+        server.declare_idle(&names);
+        let declared = kernel.declared.borrow();
+        assert_eq!(declared.iter().map(|d| d.processor_uid).collect::<Vec<_>>(), [2, 5]);
+        for d in declared.iter() {
+            let states: Vec<(u8, u64, u32)> = d.states[..d.count as usize].iter().map(|s| (s.entry, s.address, s.latency_us)).collect();
+            assert_eq!(states, [(IdleEntry::Mwait as u8, 0x31, 253), (IdleEntry::Mwait as u8, 0x60, 1048)]);
         }
     }
 
@@ -1328,6 +1438,35 @@ mod tests {
         let why = stopped.err().map(|payload| payload.downcast_ref::<String>().cloned().unwrap_or_default());
         assert_eq!(why.as_deref(), Some(POWERED_OFF), "the press did not power the machine off first");
         assert_eq!(*kernel.takes.borrow(), [Take::Pending], "the _INI took the Global Lock before the press was served");
+    }
+
+    /// A press asks a stop that waits for the sessions and is answered at
+    /// once, so the next press is served: it forces that stop. A stop that
+    /// ended without stopping the machine leaves the press after asking
+    /// again, and a stop of another kind pending since is not forced.
+    #[test]
+    fn a_press_while_the_stop_waits_forces_it() {
+        use crate::host::tests::Stop::{PowerOff, Terminate};
+        let kernel = Scripted { stops: RefCell::new([Ok(()), Ok(()), Err(Refused::NoStopPending), Ok(())].into()), ..crafted(&[], &[]) };
+        let info = AcpiInfo { rsdp: CRAFTED_RSDP, pm1_event: Block::NONE, gpe0: GPE0, flags: FIXED_POWER_BUTTON, reserved: [0; 3] };
+        let mut server = Server::new(&kernel, Bytes::default(), info);
+        server.press();
+        assert_eq!(*kernel.stopped.borrow(), [PowerOff]);
+        server.press();
+        assert_eq!(*kernel.stopped.borrow(), [PowerOff, Terminate], "a second press did not force the stop");
+        server.press();
+        assert_eq!(*kernel.stopped.borrow(), [PowerOff, Terminate, Terminate, PowerOff], "a press after the stop ended did not ask again");
+
+        // Cancelled, then a reboot asked by someone else: the press after is
+        // refused its terminate, asks its own stop, is refused that, and
+        // forces nothing at any press.
+        let reboot = Err(Refused::AnotherStopPending(power::Stop::Reboot));
+        let kernel = Scripted { stops: RefCell::new([Ok(()), Err(Refused::NoStopPending), reboot, reboot].into()), ..crafted(&[], &[]) };
+        let mut server = Server::new(&kernel, Bytes::default(), info);
+        for _ in 0..3 {
+            server.press();
+        }
+        assert_eq!(*kernel.stopped.borrow(), [PowerOff, Terminate, PowerOff, PowerOff], "a press forced a stop it never asked");
     }
 
     /// §6.2.11.1.3: a commit sends what the query offered of the claim, and a

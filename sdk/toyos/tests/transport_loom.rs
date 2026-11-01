@@ -10,6 +10,10 @@
 //!   reader and a writer asleep at once, a poll beside a blocking call of one
 //!   direction, and a source registered while its direction is ready. Each
 //!   case names the controls that red it.
+//! - **An end with two holders**: whole calls in gate order, bytes
+//!   read once, a gate's waiter woken by the release or the owner's
+//!   departure, a shutdown no holder writes past, and looks without the gate
+//!   that lose no wake, with one holder killed at every point of its call.
 //!
 //!   cargo test -p toyos --features <control> --test transport_loom
 
@@ -34,6 +38,9 @@ impl Word for Shared {
     }
     fn swap(&self, value: u32, order: Ordering) -> u32 {
         self.0.swap(value, order)
+    }
+    fn compare_exchange(&self, current: u32, new: u32, success: Ordering, failure: Ordering) -> Result<u32, u32> {
+        self.0.compare_exchange(current, new, success, failure)
     }
 }
 
@@ -279,38 +286,50 @@ fn a_producer_that_looked_again_is_rung_for_room_it_missed() {
 
 // ---- a session: the client's sequences and the server's rings ----
 //
-// The models below drive `session`'s own code: the client's `read`, `write`,
-// `watch`, `unwatch` and `register` and the server's `publish`, `release`,
-// `finish`, `fail` and `rung`. A doorbell is a kernel pipe as the client waits
-// on it: a ring writes a byte and posts its watch, a blocking wait and a drain
-// take every byte there, and a watch is answered at once if the pipe holds a
-// byte when it is registered, and otherwise by whether it holds one when its
-// submitter looks after a post, armed again if it does not
-// (`kernel/src/inbox/polls.rs`, `deliver`). loom fails a run that ends with a
-// thread waiting. Shared by `Rc`, as the stream models above are.
+// The models below drive `session`'s own code: a holder's `read`, `write`,
+// `shutdown`, `watch`, `unwatch` and `register` and the server's `publish`,
+// `release`, `finish`, `fail`, `rung` and `departed`. A doorbell is a kernel
+// pipe as a holder waits on it: a ring writes a byte and posts its watch, a
+// blocking wait and a drain take every byte there, and a watch is answered at
+// once if the pipe holds a byte when it is registered, and otherwise by
+// whether it holds one when its submitter looks after a post, armed again if
+// it does not (`kernel/src/inbox/polls.rs`, `deliver`). The server rings
+// every holder's doorbell a ring names, and is told a holder left only after
+// that holder's last effect, as the kernel closes a process's handles once its
+// last thread is out. loom fails a run that ends with a thread waiting.
+// Shared by `Rc`, as the stream models above are.
+
+use std::panic::{catch_unwind, resume_unwind, AssertUnwindSafe};
 
 use loom::sync::atomic::AtomicBool;
 use loom::sync::{Condvar, Mutex};
 use toyos::transport::session::{
-    self, Bells, Doorbell, Layout, Lock, Mode, Polled, Receiving, Refused, Rings, Sending, Server, Took, Waited, Way,
+    self, Bells, Doorbell, Holder, HungUp, Layout, Lock, Mode, Polled, Receiving, Refused, Rings, Sending, Server, Took,
+    Waited, Way,
 };
 
 /// Every session model explores its interleavings with at most this many
-/// preemptions unless `LOOM_MAX_PREEMPTIONS` names another bound, as the
-/// kernel's own models bound theirs.
-const PREEMPTIONS: usize = 5;
+/// preemptions unless `LOOM_MAX_PREEMPTIONS` names another bound: each
+/// mutation of `build/ci.rs`'s controls is red at two, and a holder's death
+/// is a stop of its own that takes no preemption.
+const PREEMPTIONS: usize = 3;
 
 fn bounded(model: impl Fn() + Sync + Send + 'static) {
+    bounded_by(PREEMPTIONS, model);
+}
+
+/// [`bounded`] at `preemptions`.
+fn bounded_by(preemptions: usize, model: impl Fn() + Sync + Send + 'static) {
     let mut builder = loom::model::Builder::new();
     if builder.preemption_bound.is_none() {
-        builder.preemption_bound = Some(PREEMPTIONS);
+        builder.preemption_bound = Some(preemptions);
     }
     builder.check(model);
 }
 
 const BYTES: u32 = 2;
-const SESSION_WORDS: usize = 10;
-const SESSION: Layout<BYTES, BYTES, SESSION_WORDS> = Layout::new::<8, 9>(
+const SESSION_WORDS: usize = 14;
+const SESSION: Layout<BYTES, BYTES, SESSION_WORDS> = Layout::new::<8, 9, 10, 11, 12, 13>(
     stream::Place::new::<0, 1, 2, 3, 0>(),
     stream::Place::new::<4, 5, 6, 7, { BYTES as usize }>(),
 );
@@ -319,8 +338,9 @@ const RESET: u32 = 2;
 
 type Rx = Receiving<BYTES, SESSION_WORDS>;
 type Tx = Sending<BYTES, SESSION_WORDS>;
+type End = Server<BYTES, BYTES, SESSION_WORDS>;
 
-/// A one-byte doorbell pipe.
+/// A doorbell that coalesces, as an event does.
 struct Pipe {
     level: Mutex<Level>,
     posted: Condvar,
@@ -329,11 +349,13 @@ struct Pipe {
 struct Level {
     bytes: u32,
     posts: u32,
+    /// A holder rang, since the server last took it: the server's pipe alone.
+    rang: bool,
 }
 
 impl Pipe {
     fn new() -> Self {
-        Self { level: Mutex::new(Level { bytes: 0, posts: 0 }), posted: Condvar::new() }
+        Self { level: Mutex::new(Level { bytes: 0, posts: 0, rang: false }), posted: Condvar::new() }
     }
 
     /// `SYS_WRITE` of one byte: the watch's post wakes every waiter.
@@ -342,6 +364,25 @@ impl Pipe {
         level.bytes += 1;
         level.posts += 1;
         self.posted.notify_all();
+    }
+
+    /// A holder's ring of the server, as its rung bell is, so the server that
+    /// takes it looks at the words after the holder wrote them.
+    fn ring_as_holder(&self) {
+        self.level.lock().unwrap().rang = true;
+        self.ring();
+    }
+
+    /// [`Self::wait`], and whether a holder rang since the last: a departure
+    /// alone asks no ring back of the server, as netstack's pass rings back
+    /// only a stream whose client rang.
+    fn wait_rang(&self) -> bool {
+        let mut level = self.level.lock().unwrap();
+        while level.bytes == 0 {
+            level = self.posted.wait(level).unwrap();
+        }
+        level.bytes = 0;
+        std::mem::take(&mut level.rang)
     }
 
     /// A nonblocking `SYS_READ` of every byte there: whether there was one.
@@ -393,129 +434,294 @@ impl<T> Lock<T> for Held<T> {
     }
 }
 
-/// One session: its words and bytes, the client's two halves, the client's two
-/// doorbells and the server's one.
+/// One holder's halves and its two doorbells.
+struct Holding {
+    rx: Held<Rx>,
+    tx: Held<Tx>,
+    receive: Pipe,
+    send: Pipe,
+}
+
+impl Holding {
+    fn new((rx, tx): (Rx, Tx)) -> Self {
+        Self { rx: Held(Mutex::new(rx)), tx: Held(Mutex::new(tx)), receive: Pipe::new(), send: Pipe::new() }
+    }
+
+    fn pipe(&self, bell: Doorbell) -> &Pipe {
+        match bell {
+            Doorbell::Receive => &self.receive,
+            Doorbell::Send => &self.send,
+        }
+    }
+}
+
+/// One session: its words and bytes, its holders and the server's doorbell.
 struct Session {
     page: [Shared; SESSION_WORDS],
     bytes: [Cell<u32>; 2 * BYTES as usize],
-    rx: Held<Rx>,
-    tx: Held<Tx>,
-    connection: Pipe,
-    bell: Pipe,
+    holders: Vec<Holding>,
     server: Pipe,
-    /// The client is done: the server's loop ends at its next ring.
+    /// A bit for each holder that left, as the kernel tells the server of a
+    /// hang-up.
+    left: AtomicU32,
+    /// The test is done: the server's loop ends at its next ring.
     quit: AtomicBool,
 }
 
-/// The client's doorbells, which never hang up and take no deadline.
-impl Bells for Session {
+/// When a holder dies: after `left` more effects another thread can see, a
+/// word written, a byte copied in or a ring, it makes none, as a process the
+/// kernel ended makes none. The effect it does not make unwinds its call,
+/// through code whose effects are all void.
+struct Fate {
+    left: std::cell::Cell<u32>,
+    dead: std::cell::Cell<bool>,
+}
+
+/// What a dead holder's call unwinds with.
+struct Died;
+
+impl Fate {
+    fn after(effects: Option<u32>) -> Self {
+        Self { left: std::cell::Cell::new(effects.unwrap_or(u32::MAX)), dead: std::cell::Cell::new(false) }
+    }
+
+    /// Whether the effect about to be made is made.
+    fn lives(&self) -> bool {
+        if self.dead.get() {
+            return false;
+        }
+        let Some(left) = self.left.get().checked_sub(1) else {
+            self.dead.set(true);
+            resume_unwind(Box::new(Died));
+        };
+        self.left.set(left);
+        true
+    }
+}
+
+fn lives(fate: Option<&Fate>) -> bool {
+    fate.is_none_or(Fate::lives)
+}
+
+/// A word as a holder that may die writes it.
+struct Mortal<'a> {
+    word: &'a Shared,
+    fate: &'a Fate,
+}
+
+impl Word for Mortal<'_> {
+    fn load(&self, order: Ordering) -> u32 {
+        self.word.load(order)
+    }
+    fn store(&self, value: u32, order: Ordering) {
+        if self.fate.lives() {
+            self.word.store(value, order);
+        }
+    }
+    fn swap(&self, value: u32, order: Ordering) -> u32 {
+        if self.fate.lives() { self.word.swap(value, order) } else { 0 }
+    }
+    fn compare_exchange(&self, current: u32, new: u32, success: Ordering, failure: Ordering) -> Result<u32, u32> {
+        if self.fate.lives() { self.word.compare_exchange(current, new, success, failure) } else { Ok(current) }
+    }
+}
+
+/// A holder's doorbells and its ring of the server, and its fate where it may
+/// die.
+struct By<'a> {
+    s: &'a Session,
+    at: usize,
+    fate: Option<&'a Fate>,
+}
+
+/// A holder's doorbells, which never hang up and take no deadline.
+impl Bells for By<'_> {
     type Until = ();
 
     fn drain(&self, bell: Doorbell) -> Took {
-        if self.pipe(bell).drain() { Took::Rung } else { Took::Nothing }
+        if self.s.holders[self.at].pipe(bell).drain() { Took::Rung } else { Took::Nothing }
     }
 
     fn wait(&self, bell: Doorbell, _: Option<()>) -> Waited {
-        self.pipe(bell).wait();
+        self.s.holders[self.at].pipe(bell).wait();
         Waited::Rung
     }
 
-    fn ring(&self) {
-        self.server.ring();
+    fn wait_gate(&self, bell: Doorbell, until: Option<()>, _: u16) -> Waited {
+        self.wait(bell, until)
+    }
+
+    fn ring(&self) -> Result<(), HungUp> {
+        if lives(self.fate) {
+            self.s.server.ring_as_holder();
+        }
+        Ok(())
     }
 }
 
 impl Session {
-    fn new() -> (Rc<Self>, Server<BYTES, BYTES, SESSION_WORDS>) {
+    /// A session whose end has `holders` holders, and its server end.
+    fn new(holders: u16) -> (Rc<Self>, End) {
         let page: [Shared; SESSION_WORDS] = core::array::from_fn(|_| Shared(AtomicU32::new(0)));
-        let (rx, tx) = session::client(&page, SESSION);
+        let mut all = vec![Holding::new(session::client(&page, SESSION))];
+        all.extend((2..=holders).map(|n| Holding::new(session::holder(SESSION, Holder::new(n).unwrap()))));
         let server = Server::new(&page, SESSION);
         let s = Session {
             page,
             bytes: core::array::from_fn(|_| Cell::new(0)),
-            rx: Held(Mutex::new(rx)),
-            tx: Held(Mutex::new(tx)),
-            connection: Pipe::new(),
-            bell: Pipe::new(),
+            holders: all,
             server: Pipe::new(),
+            left: AtomicU32::new(0),
             quit: AtomicBool::new(false),
         };
         (Rc::new(s), server)
     }
 
-    fn pipe(&self, bell: Doorbell) -> &Pipe {
-        match bell {
-            Doorbell::Connection => &self.connection,
-            Doorbell::Bell => &self.bell,
-        }
+    /// Holder `at`'s doorbells.
+    fn by(&self, at: usize) -> By<'_> {
+        By { s: self, at, fate: None }
     }
 
-    /// The server's rings.
+    /// The first holder's doorbell for `way`.
+    fn pipe(&self, way: Way) -> &Pipe {
+        self.holders[0].pipe(session::doorbell(way))
+    }
+
+    /// The server's rings, of every holder.
     fn rings(&self, rings: Rings) {
-        if rings.connection {
-            self.connection.ring();
-        }
-        if rings.bell {
-            self.bell.ring();
+        for holding in &self.holders {
+            if rings.receive {
+                holding.receive.ring();
+            }
+            if rings.send {
+                holding.send.ring();
+            }
         }
     }
 
-    /// The client reads one byte, waiting or not.
+    /// A holder reads at most `max` bytes over `page`: the bytes it read.
+    fn read_by<W: Word>(&self, page: &[W; SESSION_WORDS], by: &By, mode: Mode<()>, max: u32) -> Result<Vec<u32>, Refused> {
+        let mut read = Vec::new();
+        session::read(page, &self.holders[by.at].rx, by, mode, max, |span, _| {
+            read.extend((span.offset..span.offset + span.len).map(|at| self.bytes[at].get()));
+        })?;
+        Ok(read)
+    }
+
+    /// A holder writes `byte` over `page`, once at most.
+    fn write_by<W: Word>(&self, page: &[W; SESSION_WORDS], by: &By, mode: Mode<()>, byte: u32) -> Result<u32, Refused> {
+        session::write(page, &self.holders[by.at].tx, by, mode, 1, |span, _| {
+            for at in span.offset..span.offset + span.len {
+                if lives(by.fate) {
+                    self.bytes[at].set(byte);
+                }
+            }
+        })
+    }
+
+    /// The first holder reads one byte, waiting or not.
     fn read(&self, mode: Mode<()>) -> Result<u32, Refused> {
-        session::read(&self.page, &self.rx, self, mode, 1, |span, _| {
-            for at in span.offset..span.offset + span.len {
-                self.bytes[at].get();
-            }
-        })
+        self.read_by(&self.page, &self.by(0), mode, 1).map(|read| read.len() as u32)
     }
 
-    /// The client writes one byte, waiting or not.
+    /// The first holder writes one byte, waiting or not.
     fn write(&self, mode: Mode<()>) -> Result<u32, Refused> {
-        session::write(&self.page, &self.tx, self, mode, 1, |span, _| {
-            for at in span.offset..span.offset + span.len {
-                self.bytes[at].set(0x5A);
-            }
-        })
+        self.write_by(&self.page, &self.by(0), mode, 0x5A)
     }
 
-    /// The client fills its send ring, before the server's thread runs.
+    /// The first holder fills its send ring, before the server's thread runs.
     fn fill(&self) {
         for _ in 0..BYTES {
             assert_eq!(self.write(Mode::Nonblocking), Ok(1));
         }
     }
 
-    /// The server publishes `n` bytes into an empty receive ring, which it
-    /// copies into first.
-    fn publish(&self, server: &mut Server<BYTES, BYTES, SESSION_WORDS>, n: u32) {
-        for at in 0..n as usize {
-            self.bytes[at].set(0xA5);
+    /// The server publishes `bytes` into the receive ring from its tail at
+    /// `from`, which it copies in first.
+    fn publish_at(&self, server: &mut End, from: u32, bytes: &[u32]) {
+        for (n, byte) in (from..).zip(bytes) {
+            self.bytes[(n % BYTES) as usize].set(*byte);
         }
-        self.rings(server.publish(&self.page, n).expect("the client keeps the protocol"));
+        self.rings(server.publish(&self.page, bytes.len() as u32).expect("the client keeps the protocol"));
+    }
+
+    /// The server publishes `n` bytes into an empty receive ring.
+    fn publish(&self, server: &mut End, n: u32) {
+        self.publish_at(server, 0, &vec![0xA5; n as usize]);
     }
 
     /// The server takes back `n` bytes of the send ring.
-    fn release(&self, server: &mut Server<BYTES, BYTES, SESSION_WORDS>, n: u32) {
+    fn release(&self, server: &mut End, n: u32) {
         assert_eq!(server.sent(&self.page), Ok(BYTES), "the client filled its send ring");
         self.rings(server.release(&self.page, n).expect("the client keeps the protocol"));
     }
 
-    /// The server's loop: each ring of the client's answered by
-    /// [`Server::rung`], until the client is done.
-    fn serve(&self, mut server: Server<BYTES, BYTES, SESSION_WORDS>) {
+    /// The server's loop: each holder's departure answered by
+    /// [`Server::departed`] and each ring by [`Server::rung`], until the
+    /// test is done.
+    fn serve(&self, server: &mut End) {
+        let mut departed = 0u32;
         loop {
-            self.server.wait();
-            self.rings(server.rung(&self.page).expect("the client keeps the protocol"));
+            let rang = self.server.wait_rang();
+            let left = self.left.load(Ordering::Acquire);
+            for at in 0..self.holders.len() {
+                let bit = 1 << at;
+                if left & bit != 0 && departed & bit == 0 {
+                    departed |= bit;
+                    let holder = Holder::new(at as u16 + 1).unwrap();
+                    self.rings(server.departed(&self.page, holder).expect("the client keeps the protocol"));
+                }
+            }
+            self.answer_rings(server, rang);
             if self.quit.load(Ordering::Acquire) {
                 return;
             }
         }
     }
 
-    /// The client is done, and says so to the server's loop.
+    /// [`Server::rung`]'s rings, where a holder `rang`.
+    fn answer_rings(&self, server: &mut End, rang: bool) {
+        if rang {
+            self.rings(server.rung(&self.page).expect("the client keeps the protocol"));
+        }
+    }
+
+    /// Holder `at` left: its hang-up, which the kernel gives the server once
+    /// the holder's last thread is out.
+    fn leave(&self, at: usize) {
+        self.left.fetch_or(1 << at, Ordering::Release);
+        self.server.ring();
+    }
+
+    /// The test is done, and says so to the server's loop.
     fn done(&self) {
         self.quit.store(true, Ordering::Release);
         self.server.ring();
+    }
+
+    /// Runs `call` as holder `at` over a page it writes as a mortal, dying
+    /// after `effects` of its effects where given, then hangs it up: what the
+    /// call answered, or `None` where the holder died first.
+    fn as_holder<R>(&self, at: usize, effects: Option<u32>, call: impl FnOnce(&[Mortal; SESSION_WORDS], &By) -> R) -> Option<R> {
+        let fate = Fate::after(effects);
+        let page: [Mortal; SESSION_WORDS] = core::array::from_fn(|n| Mortal { word: &self.page[n], fate: &fate });
+        let by = By { s: self, at, fate: Some(&fate) };
+        let answer = catch_unwind(AssertUnwindSafe(|| call(&page, &by)));
+        self.leave(at);
+        match answer {
+            Ok(answer) => Some(answer),
+            Err(died) if died.is::<Died>() => {
+                DIED.set(true);
+                None
+            }
+            Err(other) => resume_unwind(other),
+        }
+    }
+
+    /// The bytes of the send ring the server holds, in stream order.
+    fn sent(&self, server: &mut End) -> Vec<u32> {
+        let sent = server.sent(&self.page).expect("the holders keep the protocol");
+        (0..sent).map(|n| self.bytes[(BYTES + n % BYTES) as usize].get()).collect()
     }
 }
 
@@ -533,7 +739,7 @@ enum First {
 /// writer the reader's.
 fn two_sleepers(first: First) {
     bounded(move || {
-        let (s, mut server) = Session::new();
+        let (s, mut server) = Session::new(1);
         s.fill();
         let net = {
             let s = Rc::clone(&s);
@@ -587,7 +793,7 @@ enum Left {
 /// over.
 fn same_direction(left: Left) {
     bounded(move || {
-        let (s, mut server) = Session::new();
+        let (s, mut server) = Session::new(1);
         if left == Left::Room {
             s.fill();
         }
@@ -599,7 +805,7 @@ fn same_direction(left: Left) {
                     Left::End => s.rings(server.finish(&s.page)),
                     Left::Room => s.release(&mut server, 2),
                 }
-                s.serve(server);
+                s.serve(&mut server);
             })
         };
         let blocking = {
@@ -610,21 +816,22 @@ fn same_direction(left: Left) {
                 assert_eq!(answer, Ok(owed));
             })
         };
+        let (holding, by) = (&s.holders[0], s.by(0));
         loop {
             let polled = if left == Left::Room {
-                session::watch::<_, _, _, Tx, SESSION_WORDS>(&s.page, &s.tx, &*s)
+                session::watch::<_, _, _, Tx, SESSION_WORDS>(&s.page, &holding.tx, &by)
             } else {
-                session::watch::<_, _, _, Rx, SESSION_WORDS>(&s.page, &s.rx, &*s)
+                session::watch::<_, _, _, Rx, SESSION_WORDS>(&s.page, &holding.rx, &by)
             };
-            let Polled::Watching(watching) = polled.expect("the server keeps the protocol") else { break };
+            let Polled::Watching(watching) = polled else { break };
             let way = if left == Left::Room { Way::Send } else { Way::Receive };
-            s.pipe(session::doorbell(way)).watch();
+            s.pipe(way).watch();
             let ready = if left == Left::Room {
-                session::unwatch::<_, _, _, Tx, SESSION_WORDS>(&s.page, &s.tx, &*s, watching)
+                session::unwatch::<_, _, _, Tx, SESSION_WORDS>(&s.page, &holding.tx, &by, watching)
             } else {
-                session::unwatch::<_, _, _, Rx, SESSION_WORDS>(&s.page, &s.rx, &*s, watching)
+                session::unwatch::<_, _, _, Rx, SESSION_WORDS>(&s.page, &holding.rx, &by, watching)
             };
-            if ready.expect("the server keeps the protocol") {
+            if ready {
                 break;
             }
         }
@@ -673,11 +880,11 @@ enum Ready {
 /// readiness to the arm's look or the ring back.
 fn registered(ready: Ready, racing: bool) {
     bounded(move || {
-        let (s, mut server) = Session::new();
+        let (s, mut server) = Session::new(1);
         if ready == Ready::Reset || (ready == Ready::Room && racing) {
             s.fill();
         }
-        let make_ready = move |s: &Session, server: &mut Server<BYTES, BYTES, SESSION_WORDS>| match ready {
+        let make_ready = move |s: &Session, server: &mut End| match ready {
             Ready::Bytes => s.publish(server, 1),
             Ready::End => s.rings(server.finish(&s.page)),
             Ready::Room => s.release(server, 1),
@@ -692,19 +899,19 @@ fn registered(ready: Ready, racing: bool) {
                 if racing {
                     make_ready(&s, &mut server);
                 }
-                s.serve(server);
+                s.serve(&mut server);
             })
         };
         let send = matches!(ready, Ready::Room | Ready::Reset);
-        let registered = if send {
-            session::register(&s.page, None::<&Held<Rx>>, Some(&s.tx), &*s)
+        let (holding, by) = (&s.holders[0], s.by(0));
+        if send {
+            session::register(&s.page, None::<&Held<Rx>>, Some(&holding.tx), &by);
         } else {
-            session::register(&s.page, Some(&s.rx), None::<&Held<Tx>>, &*s)
-        };
-        registered.expect("the server keeps the protocol");
+            session::register(&s.page, Some(&holding.rx), None::<&Held<Tx>>, &by);
+        }
         let way = if send { Way::Send } else { Way::Receive };
         loop {
-            s.pipe(session::doorbell(way)).watch();
+            s.pipe(way).watch();
             let answer = if send { s.write(Mode::Nonblocking) } else { s.read(Mode::Nonblocking) };
             match answer {
                 Err(Refused::WouldBlock) => {}
@@ -755,4 +962,283 @@ fn a_source_registered_over_a_full_ring_after_a_reset_gets_its_first_event() {
 #[test]
 fn a_source_registered_over_a_full_ring_as_a_reset_arrives_gets_its_first_event() {
     registered(Ready::Reset, true);
+}
+
+// ---- an end with two holders ----
+//
+// The second holder may be killed: it lives for a count of its effects, from
+// none up to the first count no execution of the model kills it at, so every
+// model below meets it dead at every point of its call, with a gate held or
+// not, and its departure is answered whenever the server's loop reads it.
+
+thread_local! {
+    /// Whether a holder died in any execution of the model since the last
+    /// [`whenever_it_dies`] count: loom runs every execution of a model, its
+    /// threads too, on the test's own thread.
+    static DIED: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+
+/// `model` with its holder killed after each count of its effects in turn,
+/// until a count at which no execution killed it.
+fn whenever_it_dies(model: impl Fn(Option<u32>)) {
+    for effects in 0.. {
+        DIED.set(false);
+        model(Some(effects));
+        if !DIED.get() {
+            return;
+        }
+    }
+}
+
+/// Two holders write a byte each, the second killed after `dies` of its
+/// effects or never: the server holds whole calls in the order the gate
+/// passed, the dead holder's byte only where it published it, and the
+/// survivor's call returns. `transport-departure-no-pass` leaves the survivor
+/// asleep for a gate the dead holder held; `transport-departure-relaxed` lets
+/// the survivor copy into the byte the dead holder copied into, unordered.
+/// Where both live, the one that found the gate the other's waits:
+/// `transport-gate-no-want`, `transport-contended-no-arm` and
+/// `transport-want-before-arm` leave it asleep after the owner let go.
+fn two_writers(dies: Option<u32>) {
+    bounded(move || {
+        let (s, mut server) = Session::new(2);
+        let net = {
+            let s = Rc::clone(&s);
+            loom::thread::spawn(move || {
+                s.serve(&mut server);
+                server
+            })
+        };
+        let mortal = {
+            let s = Rc::clone(&s);
+            loom::thread::spawn(move || s.as_holder(1, dies, |page, by| s.write_by(page, by, Mode::Blocking(None), 0xB)))
+        };
+        assert_eq!(s.write_by(&s.page, &s.by(0), Mode::Blocking(None), 0xA), Ok(1), "the survivor's write");
+        let mortal = mortal.join().unwrap();
+        s.done();
+        let mut server = net.join().unwrap();
+        let sent = s.sent(&mut server);
+        match mortal {
+            Some(answer) => {
+                assert_eq!(answer, Ok(1), "the second holder's write");
+                assert!(sent == [0xA, 0xB] || sent == [0xB, 0xA], "the server holds {sent:x?}");
+            }
+            None => assert!(sent == [0xA] || sent == [0xA, 0xB] || sent == [0xB, 0xA], "the server holds {sent:x?}"),
+        }
+    });
+}
+
+#[test]
+fn two_holders_write_whole_calls_in_gate_order_whenever_one_dies() {
+    whenever_it_dies(two_writers);
+}
+
+/// A holder that finds the gate another's is woken by the owner's
+/// release.
+#[test]
+fn a_holder_waiting_for_the_gate_is_woken_by_its_release() {
+    two_writers(None);
+}
+
+/// The owner dies after its copy into the byte, with the gate held: the
+/// waiter is rung by the departure, and its copy follows the dead holder's.
+#[test]
+fn a_holder_waiting_for_the_gate_is_woken_by_its_owners_departure() {
+    two_writers(Some(2));
+}
+
+/// Two holders read two bytes and the orderly end, the second killed
+/// after `dies` of its effects or never: every byte is read once and in
+/// order, the survivor reads exactly what the dead holder did not release,
+/// and its reads return. `transport-departure-no-pass` leaves the survivor
+/// asleep for a gate the dead holder held; `transport-no-resume` has a holder
+/// read again what the other released.
+fn two_readers(dies: Option<u32>) {
+    bounded(move || {
+        let (s, mut server) = Session::new(2);
+        s.publish_at(&mut server, 0, &[0xA, 0xB]);
+        s.rings(server.finish(&s.page));
+        let net = {
+            let s = Rc::clone(&s);
+            loom::thread::spawn(move || s.serve(&mut server))
+        };
+        let mortal = {
+            let s = Rc::clone(&s);
+            loom::thread::spawn(move || s.as_holder(1, dies, |page, by| s.read_by(page, by, Mode::Blocking(None), 1)))
+        };
+        let mut survivor = Vec::new();
+        loop {
+            match s.read_by(&s.page, &s.by(0), Mode::Blocking(None), 2) {
+                Ok(read) if read.is_empty() => break,
+                Ok(read) => survivor.extend(read),
+                Err(refused) => panic!("the survivor's read answered {refused:?}"),
+            }
+        }
+        let mortal = mortal.join().unwrap();
+        s.done();
+        net.join().unwrap();
+        match mortal {
+            Some(Ok(took)) => assert_eq!([took, survivor].concat(), [0xA, 0xB], "each byte once, in order"),
+            Some(Err(refused)) => panic!("the second holder's read answered {refused:?}"),
+            None => assert!(survivor == [0xA, 0xB] || survivor == [0xB], "the survivor read {survivor:x?}"),
+        }
+    });
+}
+
+#[test]
+fn two_holders_read_each_byte_once_whenever_one_dies() {
+    whenever_it_dies(two_readers);
+}
+
+#[test]
+fn two_holders_read_each_byte_once() {
+    two_readers(None);
+}
+
+/// One holder shuts the sending half down and, once it returned, another
+/// writes: the write answers `Shut` and the server holds nothing.
+/// `transport-shut-local` has the second holder write past the first's
+/// shutdown.
+#[test]
+fn a_write_after_another_holders_shutdown_answers_shut() {
+    bounded(|| {
+        let (s, mut server) = Session::new(2);
+        let net = {
+            let s = Rc::clone(&s);
+            loom::thread::spawn(move || {
+                s.serve(&mut server);
+                server
+            })
+        };
+        let shut = Rc::new(AtomicBool::new(false));
+        let shutting = {
+            let (s, shut) = (Rc::clone(&s), Rc::clone(&shut));
+            loom::thread::spawn(move || {
+                session::shutdown(&s.page, &s.holders[0].tx, &s.by(0));
+                shut.store(true, Ordering::Release);
+            })
+        };
+        while !shut.load(Ordering::Acquire) {
+            loom::thread::yield_now();
+        }
+        assert_eq!(s.write_by(&s.page, &s.by(1), Mode::Blocking(None), 0xB), Err(Refused::Shut));
+        shutting.join().unwrap();
+        s.done();
+        let mut server = net.join().unwrap();
+        assert!(server.shut(&s.page));
+        assert_eq!(s.sent(&mut server), [], "a byte past the shutdown");
+    });
+}
+
+/// One holder shuts the sending half down while another, killed
+/// after `dies` of its effects or never, writes: the shutdown returns, and no
+/// byte is published after the `end` the server saw. A shutdown under the
+/// writer's gate is the writer's to store, or its departure's.
+fn shutdown_racing_a_write(dies: Option<u32>) {
+    bounded(move || {
+        let (s, mut server) = Session::new(2);
+        let net = {
+            let s = Rc::clone(&s);
+            loom::thread::spawn(move || {
+                let mut at_the_end = None;
+                let mut departed = 0u32;
+                loop {
+                    let rang = s.server.wait_rang();
+                    let left = s.left.load(Ordering::Acquire);
+                    if left & 2 != 0 && departed == 0 {
+                        departed = 2;
+                        s.rings(server.departed(&s.page, Holder::new(2).unwrap()).expect("the client keeps the protocol"));
+                    }
+                    if server.shut(&s.page) {
+                        let sent = server.sent(&s.page).expect("the client keeps the protocol");
+                        assert_eq!(*at_the_end.get_or_insert(sent), sent, "a byte published past the end");
+                    }
+                    s.answer_rings(&mut server, rang);
+                    if s.quit.load(Ordering::Acquire) {
+                        return (server, at_the_end);
+                    }
+                }
+            })
+        };
+        let mortal = {
+            let s = Rc::clone(&s);
+            loom::thread::spawn(move || s.as_holder(1, dies, |page, by| s.write_by(page, by, Mode::Blocking(None), 0xB)))
+        };
+        session::shutdown(&s.page, &s.holders[0].tx, &s.by(0));
+        let mortal = mortal.join().unwrap();
+        s.done();
+        let (mut server, at_the_end) = net.join().unwrap();
+        assert!(server.shut(&s.page), "the shutdown returned before its `end` was stored");
+        let sent = s.sent(&mut server);
+        if let Some(at_the_end) = at_the_end {
+            assert_eq!(sent.len() as u32, at_the_end, "a byte published past the end");
+        }
+        match mortal {
+            Some(Ok(1)) => assert_eq!(sent, [0xB]),
+            Some(Err(Refused::Shut)) => assert_eq!(sent, []),
+            Some(other) => panic!("the write answered {other:?}"),
+            None => assert!(sent.is_empty() || sent == [0xB]),
+        }
+    });
+}
+
+#[test]
+fn a_shutdown_racing_a_write_is_never_written_past() {
+    shutdown_racing_a_write(None);
+}
+
+#[test]
+fn a_shutdown_racing_a_write_is_never_written_past_whenever_the_writer_dies() {
+    whenever_it_dies(shutdown_racing_a_write);
+}
+
+/// Two holders read until the end while the server fills the ring, takes
+/// a byte of room back and publishes a third: a look without the gate, over a
+/// cursor the other holder moved, can see that third byte past a head from
+/// before the room was released, which overstates and loses no wake, and
+/// every byte is read once. `transport-ungated-violation` ends a read over
+/// such a look. The stale head is a load loom answers with an older store,
+/// which takes no preemption: its control is red at none, so its bound is one.
+#[test]
+fn looks_without_the_gate_lose_no_wake() {
+    bounded_by(1, || {
+        let (s, mut server) = Session::new(2);
+        s.publish_at(&mut server, 0, &[0xA, 0xB]);
+        let net = {
+            let s = Rc::clone(&s);
+            loom::thread::spawn(move || {
+                // Every ring taken here is answered, as a server answers each:
+                // a release a waiting holder asked for rings it through `rung`.
+                while server.want_room(&s.page).expect("the client keeps the protocol") == 0 {
+                    let rang = s.server.wait_rang();
+                    s.answer_rings(&mut server, rang);
+                }
+                s.publish_at(&mut server, 2, &[0xC]);
+                s.rings(server.finish(&s.page));
+                s.serve(&mut server);
+            })
+        };
+        let reader = |at: usize| {
+            let s = Rc::clone(&s);
+            move || {
+                let mut read = Vec::new();
+                loop {
+                    match s.read_by(&s.page, &s.by(at), Mode::Blocking(None), 1) {
+                        Ok(bytes) if bytes.is_empty() => return read,
+                        Ok(bytes) => read.extend(bytes),
+                        Err(refused) => panic!("holder {at}'s read answered {refused:?}"),
+                    }
+                }
+            }
+        };
+        let other = loom::thread::spawn(reader(1));
+        let mine = reader(0)();
+        let other = other.join().unwrap();
+        s.done();
+        net.join().unwrap();
+        let mut all = [mine.clone(), other.clone()].concat();
+        all.sort();
+        assert_eq!(all, [0xA, 0xB, 0xC], "{mine:x?} and {other:x?}");
+        assert!(mine.is_sorted() && other.is_sorted(), "{mine:x?} and {other:x?} out of order");
+    });
 }

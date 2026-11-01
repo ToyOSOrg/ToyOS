@@ -109,8 +109,8 @@ and the ACPI read-out in `s1-r2/`
   without `ECAP.EIM`: `kernel/src/arch/x86_64/vtd/mod.rs`) rests on `CFIS=0`
   alone.
 
-**S2, the link hop's cost on the T14.** A scout, never landing: two
-processes over `toyos::transport`, one entry per 1,514-byte frame, batches of
+**S2, the link hop's cost on the T14: done, reported under P4.** A scout,
+never landing: two processes over `toyos::transport`, one entry per 1,514-byte frame, batches of
 1, 8 and 32, both directions, each side copying each frame once. Owner: the
 orchestrator. Depends on: nothing. Exit: cycles per frame and frames a
 second on one CPU, reported in P4's design round. Beside them stands the
@@ -141,12 +141,17 @@ function decodes in (`toyos_pci::pages`); nothing moves a BAR, and
 `msix-exclusive-bar=on` is gone, so the NVMe guests drive QEMU's default
 controller through its table in BAR 0.
 - **Exit, owed on the benches:**
-  - on the T14, `msix_table_read_in_place` reading the AX210's and the
-    NVMe's armed MSI-X entries back through their holders' mappings at
-    BAR 0 + 0x2000, and `claim_reuses_its_remapping_entry` unchanged;
+  - on the T14, `msix_table_read_in_place` reading the AX210's armed MSI-X
+    entry back through its holder's mapping at BAR 0 + 0x2000, and
+    `claim_reuses_its_remapping_entry` unchanged; the NVMe's table, also at
+    BAR 0 + 0x2000, is the nvme driver's in every image (#1031), so no test
+    claims it;
   - the T14's NVMe driven through that table: an Identify Controller admin
     command whose completion arrives through the in-place MSI-X entry, which
-    touches none of the other system's data; no row does it yet;
+    touches none of the other system's data. Every image's nvme driver now
+    brings it up, but no row judges that a completion arrived by interrupt:
+    `admin_command` reaps again after each bounded wait, so a lost interrupt
+    only slows it;
   - on the AMD bench, `amdvi_usbd_drives_its_own_entry`: `03:00.4`
     (which no test image's usbd row names, its MSI-X table in BAR 0, its only BAR, behind
     `00:08.1`, whose `0xd0000000..0xd0500000` bus 3 fills) claimed in place
@@ -187,16 +192,45 @@ stage 3 of `issues/the-lan-is-not-yet-production-grade.md`, whole.
   - the network suite unchanged under QEMU;
   - a T14 row reading the I219 working, with nothing regressed;
   - S2 rerun and reported.
+- **Built:** `toyos-link` (`lib/link`), and the I219 and virtio drivers as
+  `drives` rows of their own (`system/i219`, `system/virtio-net`), which the
+  supervisor's match table already binds; netstack claims no device and
+  refuses a link of another address by name. A link whose driver wrote what
+  no driver writes ends, and that address's next hello is refused
+  `Faulted`, on which the driver ends: the supervisor's restart budget (3 in
+  10 s) bounds a driver that keeps doing it. virtio's row restarts; the I219's
+  does not, until
+  `issues/no-machine-has-read-an-intel-nic-across-a-link-change.md` reads its
+  reset over a live ring. In a guest:
+  `a_link_ends_under_a_held_stream_and_comes_back` (a driver killed and
+  started again by its job, the stream intact; the supervisor's restart of a
+  `drives` row is the lifecycle crate's host tests'), and
+  `netstack_holders_exported_to_children` on virtio and on QEMU's `e1000e`.
+- **Read on the T14:** `i219_carries_netstacks_link` and
+  `i219_leaves_ulp_unarmed` passed on one boot at 8bdf49156
+  (https://github.com/ToyOSOrg/evidence/blob/4d818727fb372e181c402149aeb2779808fa2ef2/p4-r1/metal-t14-judge.log).
+- **S2, reported:** on the T14, the hop costs one CPU about 3,300 TSC
+  cycles a frame with a doorbell per frame, 920 per batch of 8 and 620 per
+  batch of 32, both directions alike: about 740,000, 2.6 million and 3.9
+  million frames a second of one CPU at 2.42 GHz, against the 200,163 a
+  second each way full rate needs
+  (https://github.com/ToyOSOrg/evidence/blob/4a8d02243d626df929fe05365e991873574e0dc2/s2/README.md).
 
-**P5, netstack over several links.** Owner: the orchestrator; its defect is
-`issues/netstack-drives-one-card.md`. Depends on: P4.
+**P5, netstack over several links: built.** Owner: the orchestrator.
+Depends on: P4.
 - **Exit:**
   - host tests of rank (wired before wireless, then arrival), failover and
     return, resolvers, mDNS per link, and a flow bound to a lost address;
   - a guest with two virtio NICs, in which the first's link is set off over
     QMP and traffic leaves on the second;
-  - `issues/netstack-drives-one-card.md` closed, and the NIC taken out of
-    the virtio bullet of `issues/first-match-selection-that-remains.md`.
+  - its defect closed, and the NIC taken out of the virtio bullet of
+    `issues/first-match-selection-that-remains.md`.
+- **What it is.** One stack over every link a driver brings, up to eight:
+  each an interface of `ip`'s with a rank (a hello says Wired or Wireless),
+  its own lease, DHCP client and mDNS responder under one host name; lookups
+  ask the resolvers of the first link up holding a lease. A connection whose
+  address goes ends `AddressGone`; one whose link only goes down keeps it.
+  netstack serves from the start, so `LINK_BOUND` and `OneLink` are gone.
 - Its T14 row, both links leasing with the wired one the default route, is
   W6's: it needs a radio.
 
@@ -228,18 +262,23 @@ Depends on: nothing; W6 waits on it.
   - the elements: SSID, rates, DS, TIM, country, RSN, RSNXE, HT, VHT, HE,
     extended capabilities and WMM;
   - A-MSDU;
-  - 802.11 to Ethernet and back (RFC 1042, bridge-tunnel);
+  - 802.11 to Ethernet and back (RFC 1042);
   - the reorder window.
 - **Exit:** host tests of every refusal and hostile length, a malformed
   country element among them; a seeded structured fuzz of a fixed count, as
-  `build/ssh/tests/fuzz.rs`; and a third-party capture corpus from outside the
+  `lib/ssh/tests/fuzz.rs`; and a third-party capture corpus from outside the
   references, beside the crate, with provenance, terms and `NOTICE` rows,
   pinned by hash.
 - **Landed** in #924 and #930; the exit is met, the readings checked
   against the text (#924, issuecomment-6173453493).
-- **Owed:** the bridge-tunnel OUI 00-00-F8 and its EtherTypes 0x80F3 and
-  0x8137 checked against ISO/IEC TR 11802-5:1997. Owner: the orchestrator.
-  Exit: checked, and fixed in `lib/ieee80211/src/data.rs` if contradicted.
+- **No bridge-tunnel.** Every MSDU is sent under RFC 1042's header, and one
+  under any other OUI is refused `UnknownOui`, the bridge-tunnel one
+  included: a departure from §5.1.4's recommendation of ISO/IEC TR
+  11802-5:1997's translation. What the selective translation table holds
+  stays unchecked (#924, issuecomment-6173453493, row 62) and nothing
+  depends on it. The decision rests instead on ToyOS's own EtherTypes
+  arriving under RFC 1042, which the capture corpus shows for IPv4 and ARP;
+  it holds no IPv6 or EAPOL frame.
 
 **W2, the handshakes, in `wlan`**, sans-IO: the 4-way and group-key
 handshakes, SAE by hash-to-element, PMF's keys, and the Transition Disable
@@ -256,8 +295,29 @@ W1, P6.
   - an SAE Confirm that does not verify;
   - an SAE Commit with an invalid scalar or element;
   - a PSK handshake for a network marked by Transition Disable.
+- **W2a, WPA2-Personal: built** (`system/wlan/handshake`,
+  `toyos-wlan-handshake`), on `lib/crypto`'s `ct::equal` and `Secret`. The 4-way and group key
+  handshakes under AKM 2 with CCMP-128, the IGTK under BIP-CMAC-128 when
+  PMF is negotiated. The first six refusals above are host tests against an
+  authenticator in the tests that shares no crypto code with the crate;
+  Annex J's PRF and pass-phrase vectors, and RFC 6070's one case a
+  pass-phrase and SSID can be, are `lib/crypto`'s.
+  - **The captured handshake** is two of wpa_supplicant v2.10's, one an
+    access point, over `mac80211_hwsim`: plain PSK and PMF required. Messages
+    2 and 4 are answered byte for byte, and the keys are the station's own.
+    So are two PTK rekeys per run, which the station asked for. As the
+    station did, they reinstall no group key.
+  - **No group key handshake is recorded.** v2.10's access point parsed
+    `group_rekey` and never rekeyed, and its `wpa_cli` has no `REKEY_GTK`.
+    Group message 1 is tested only against the tests' authenticator, and is
+    first met for real in W6's T14 rows.
+  - Its readings of the text are
+    `issues/the-wlan-handshakes-readings-of-802-11-are-unchecked-against-its-text.md`.
+  - **W2b waits for P6:** SAE, AES-CMAC, AKM 6 (PSK-SHA256), and the
+    Transition Disable KDE with its PSK refusal. RFCs 4493 and 9380 are its
+    vectors.
 
-**W3, the firmware.** Depends on: the specification's first revision.
+**W3, the firmware: done.** Depends on: the specification, revision 2.
 - **Scope:**
   - the firmware containers;
   - commands and notifications typed per declared version;
@@ -265,15 +325,33 @@ W1, P6.
   - each part's newest linux-firmware build at the pin: one file for the
     AX200, two for the AX210, committed unmodified in
     `system/ax2xx/firmware/` with `NOTICE` and `COMMITTED_FILES` rows.
-- **A file ships only once the specification shows, from a vendor
-  statement, that its part verifies it**; one nothing shows verified waits
-  for the owner.
+- **Each part's newest build ships unmodified, pinned by hash, whether or
+  not a vendor statement shows its part verifies it**: the owner's ruling.
+  That nothing shows it is
+  `issues/nothing-shows-the-ax200-or-ax210-verifies-its-firmware.md`.
 - **Its licence forbids reverse engineering**, so of a file, only the
   container a loader parses is read.
 - **Exit:** host tests that the pinned files decode; that every command
   sent is declared at a typed version; that sizes match those the
   specification asserts; and that recorded bench traces, addresses
   scrubbed, are answered.
+- **Done** (`system/ax2xx/driver`, `toyos-ax2xx`). The first three exits
+  are host tests. The fourth is `tests/traces.rs`, over the AX200's two
+  recorded runs (§15): Run13 through a passive scan, Run11 through a
+  refused command.
+  - Each device payload's decisions are the same with every unrecorded bit
+    complemented.
+  - From those decisions and the file, Run13's commands 0 to 11 and its
+    scan request, and Run11's 0 to 8, are built byte for byte.
+  - Not built: commands 12 to 14, which are the demo's (§15.3), and the
+    scan request's probe template and segments, which are the caller's and
+    are taken from the run.
+  - Run11's error tables name the refused command and both its lengths.
+  - A version lookup takes a message's first entry and reads 99 as no
+    entry (§6.5).
+- **No AX210 trace exists**: no run drove one (§15.1). The AX210's own paths,
+  its alive SKU and platform NVM among them, are first checked by W5's T14
+  rows.
 
 **W4, `wlan`, `radio`, `wifi` and the settings program.** Depends on: W1,
 W2.

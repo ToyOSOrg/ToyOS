@@ -41,6 +41,11 @@
 //! no fixed hardware: its claim names no block and raises no SCI, and its
 //! holder reaches the tables, firmware's memory and configuration space
 //! through [`Access`] alone.
+//!
+//! **So are the idle states deeper than C1, per processor** ([`op::IDLE`]):
+//! what `_CST` names is in the AML too. The holder hands over only states the
+//! kernel may enter as they are ([`IdleDeclaration`]); until it has, every CPU
+//! waits in C1.
 
 crate::user_safe! {
     /// A run of ports a register block occupies; `len` 0 is no block.
@@ -104,10 +109,15 @@ pub mod op {
     /// control to power the machine off. Once under a claim, and kept until
     /// the next claim's holder supplies its own.
     pub const S5: u64 = 3;
+    /// Declare one processor's idle states deeper than C1, an
+    /// [`IdleDeclaration`](super::IdleDeclaration) at the call's third word.
+    /// Each replaces what was declared for that processor before, by this
+    /// holder or an earlier one.
+    pub const IDLE: u64 = 4;
     /// Declare the PCI root bridges, their memory and their `_OSC`: an
     /// [`Apertures`](super::Apertures), in through the caller's struct. Once
     /// a boot, from the claim's holder.
-    pub const DECLARE: u64 = 4;
+    pub const DECLARE: u64 = 5;
 
     pub const TAKEN: u64 = 0;
     pub const PENDING: u64 = 1;
@@ -503,6 +513,59 @@ impl Apertures {
         let first = bridge.first_window as usize;
         let end = first.checked_add(bridge.window_count as usize)?;
         self.windows.get(..self.window_count as usize)?.get(first..end)
+    }
+}
+
+/// The most states an [`IdleDeclaration`] holds.
+pub const IDLE_STATES: usize = 8;
+
+/// How a CPU enters an [`IdleState`].
+#[repr(u8)]
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum IdleEntry {
+    /// `MWAIT` with [`IdleState::address`] as its hint (Intel 302223-007
+    /// Table 4, the native C-state instruction).
+    Mwait = 1,
+    /// A byte read of the port [`IdleState::address`] names.
+    Port = 2,
+}
+
+impl IdleEntry {
+    pub const fn from_raw(raw: u8) -> Option<Self> {
+        match raw {
+            1 => Some(Self::Mwait),
+            2 => Some(Self::Port),
+            _ => None,
+        }
+    }
+}
+
+crate::user_safe! {
+    /// One idle state a CPU may enter as it is: no cache flush, bus-master
+    /// check or coordination with another CPU is owed around it.
+    #[derive(Clone, Copy, PartialEq, Eq, Debug)]
+    pub struct IdleState {
+        /// The hint or the port, as [`Self::entry`] reads it.
+        pub address: u64,
+        /// The worst case from a wake to running again, in microseconds.
+        pub latency_us: u32,
+        /// The shortest idle period worth entering it for, in microseconds.
+        pub residency_us: u32,
+        /// An [`IdleEntry`].
+        pub entry: u8,
+        pub reserved: [u8; 7],
+    }
+}
+
+crate::user_safe! {
+    /// One processor's states, shallowest first: the processor named by its
+    /// ACPI Processor UID, as the MADT names it (ACPI 6.5 §5.2.12.2).
+    #[derive(Clone, Copy, PartialEq, Eq, Debug)]
+    pub struct IdleDeclaration {
+        pub processor_uid: u32,
+        /// How many of [`Self::states`] are declared; 0 leaves the processor in C1.
+        pub count: u32,
+        pub states: [IdleState; IDLE_STATES],
     }
 }
 

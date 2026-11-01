@@ -34,9 +34,8 @@ use toyos::endow::{Endowments, SYSCAP_LABEL};
 use toyos::ipc::Connection;
 use toyos::poller::{Poller, OTHER_END_GONE, READABLE};
 use toyos::syscap::SysCap;
-use toyos::{namespace, pipe_pair, port, AsHandle, OwnedHandle, Pipe};
+use toyos::{namespace, pipe_pair, port, AsHandle, BorrowedHandle, OwnedHandle, Pipe};
 use toyos_abi::syscall::{self, OpenFlags, SyscallError};
-use toyos_abi::RawHandle;
 
 #[path = "../roster.rs"]
 mod roster;
@@ -79,8 +78,10 @@ fn test() {
     refused(client.as_handle(), "a connection");
     let own = image::in_tmp(SELF_PATH);
     let file = syscall::open(own.as_bytes(), OpenFlags::READ).expect("this binary's own file");
-    refused(file, "a file");
-    syscall::close(file);
+    // SAFETY: the kernel installed the handle for this call and no other.
+    let file = unsafe { OwnedHandle::from_raw(file) };
+    refused(file.as_handle(), "a file");
+    drop(file);
     println!("  a connection and a file were refused the question");
 
     for own in [End::Read, End::Write] {
@@ -95,25 +96,26 @@ fn test() {
     println!("  an end closed by its own holder answered its watch with NotFound");
 
     let (reader, writer) = pipe("");
-    let second = syscall::dup(writer.as_handle()).expect("a second handle to the write end");
+    let second = writer.as_handle().try_clone_to_owned().expect("a second handle to the write end");
     drop(writer);
     held(&reader, "a duplicate of its handle is held");
-    syscall::close(second);
+    drop(second);
     assert_eq!(at_last(&reader), Ok(OTHER_END_GONE), "the write end's last handle closed");
 
     let (reader, writer) = pipe("");
     client.signal_with(1, [OwnedHandle::from(writer)]).expect("the write end into the connection's queue");
     held(&reader, "its handle sits unreceived in a connection's queue");
-    let header = server.recv_header().expect("the frame that carried it");
-    let [received] = server.recv_handles_exact::<1>(&header).expect("the handle the queue held");
+    let mut rx = toyos::ipc::FrameRx::<{ toyos::ipc::MAX_FRAME_LEN as usize }>::new();
+    rx.recv(&server).expect("the frame that carried it");
+    let [received] = rx.take_handles::<1>().expect("the handle the queue held");
     held(&reader, "its handle was received");
-    syscall::close(received);
+    drop(received);
     assert_eq!(at_last(&reader), Ok(OTHER_END_GONE), "the received handle closed");
 
     let (reader, writer) = pipe("");
     let mut child = Command::new(SELF_PATH)
         .arg("hold")
-        .endow(HELD_LABEL, writer.into_raw().0)
+        .endow(HELD_LABEL, writer.into())
         .stdin(Stdio::piped())
         .spawn()
         .expect("spawn the holder");
@@ -145,7 +147,7 @@ fn closed_own(end: Pipe) -> Vec<(u64, Result<u32, SyscallError>)> {
     // A non-blocking enter, so the watch is the kernel's before the close.
     poller.wait_answers(0, 0, |token, said| answers.push((token, said)));
     assert!(answers.is_empty(), "an end was told its other end is gone while it is held: {answers:?}");
-    syscall::close(end.into_raw());
+    drop(end);
     poller.wait_answers(1, CLOSE_ANSWERED_NANOS, |token, said| answers.push((token, said)));
     answers
 }
@@ -170,9 +172,9 @@ fn connection() -> (Connection, Connection) {
 
 /// What one watch of `flags` on `handle` is answered by a submit that waits
 /// until `min_complete` answers are in: `None` while the kernel keeps it armed.
-fn watched(handle: RawHandle, flags: u32, min_complete: u32, timeout: u64) -> Option<Result<u32, SyscallError>> {
+fn watched(handle: BorrowedHandle<'_>, flags: u32, min_complete: u32, timeout: u64) -> Option<Result<u32, SyscallError>> {
     let poller = Poller::new(1);
-    poller.watch_raw(handle, flags, TOKEN);
+    poller.watch(&handle, flags, TOKEN);
     let mut answer: Option<Result<u32, SyscallError>> = None;
     poller.wait_answers(min_complete, timeout, |token, said| {
         assert_eq!(token, TOKEN, "an answer under a token nobody gave");
@@ -198,7 +200,7 @@ fn at_last(end: &Pipe) -> Result<u32, SyscallError> {
 
 /// `handle` names no pipe end, so a watch that asks for its other end is
 /// refused, alone and beside a condition the handle does answer.
-fn refused(handle: RawHandle, what: &str) {
+fn refused(handle: BorrowedHandle<'_>, what: &str) {
     for flags in [OTHER_END_GONE, READABLE | OTHER_END_GONE] {
         assert_eq!(
             watched(handle, flags, 0, 0),

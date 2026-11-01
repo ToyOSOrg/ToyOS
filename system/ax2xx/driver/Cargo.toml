@@ -1,0 +1,15 @@
+# A member of the host workspace (root `Cargo.toml`): pure, and its tests run
+# on the host. What the `ax2xx` driver reads out of an Intel AX200's or
+# AX210's firmware files, and the messages it exchanges with that firmware,
+# typed at the versions each file declares.
+
+[package]
+name = "toyos-ax2xx"
+description = "The Intel AX200 and AX210 radios' firmware files, decoded, and the firmware's commands and notifications, typed at each file's declared versions (pure, no_std with alloc, forbid(unsafe_code))."
+version = "0.1.0"
+edition = "2024"
+license = "MIT OR Apache-2.0"
+publish = false
+
+[lints.rust]
+warnings = "deny"

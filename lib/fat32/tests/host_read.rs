@@ -5,7 +5,7 @@
 
 mod common;
 
-use common::{pattern, read_all, sorted_walk, walk_expectation, Image};
+use common::{now, pattern, read_all, sorted_walk, walk_expectation, Image};
 use toyos_fat32::{Error, Fat32};
 
 /// One cluster on the 512-byte-cluster image, so the sizes below are stated in
@@ -38,7 +38,7 @@ fn populated() -> Fixture {
 #[test]
 fn walk_sees_exactly_what_the_host_wrote() {
     let fx = populated();
-    let mut fs = Fat32::mount(fx.image.device()).expect("mount");
+    let mut fs = now(Fat32::mount(fx.image.device())).expect("mount");
 
     assert_eq!(sorted_walk(&mut fs), walk_expectation(&fx.files));
 }
@@ -48,8 +48,8 @@ fn walk_sees_exactly_what_the_host_wrote() {
 #[test]
 fn lowercase_short_names_survive() {
     let fx = populated();
-    let mut fs = Fat32::mount(fx.image.device()).expect("mount");
-    let names: Vec<String> = fs.read_dir("", 64).expect("read_dir").into_iter().map(|e| e.name).collect();
+    let mut fs = now(Fat32::mount(fx.image.device())).expect("mount");
+    let names: Vec<String> = now(fs.read_dir("", 64)).expect("read_dir").into_iter().map(|e| e.name).collect();
     assert!(names.contains(&String::from("hello.txt")), "{names:?}");
     assert!(names.contains(&String::from("UPPER.TXT")), "{names:?}");
 }
@@ -57,20 +57,20 @@ fn lowercase_short_names_survive() {
 #[test]
 fn every_file_reads_back_byte_for_byte() {
     let fx = populated();
-    let mut fs = Fat32::mount(fx.image.device()).expect("mount");
+    let mut fs = now(Fat32::mount(fx.image.device())).expect("mount");
     for (name, data) in &fx.files {
         assert_eq!(&read_all(&mut fs, name), data, "contents of {name}");
-        assert_eq!(fs.metadata(name).expect("metadata").len, data.len() as u64, "size of {name}");
+        assert_eq!(now(fs.metadata(name)).expect("metadata").len, data.len() as u64, "size of {name}");
     }
 }
 
 #[test]
 fn reads_land_correctly_at_every_offset_and_length() {
     let fx = populated();
-    let mut fs = Fat32::mount(fx.image.device()).expect("mount");
+    let mut fs = now(Fat32::mount(fx.image.device())).expect("mount");
     let name = "sub/nested/deep.bin";
     let truth = &fx.files.iter().find(|(n, _)| n == name).expect("fixture").1;
-    let mut f = fs.open(name).expect("open");
+    let mut f = now(fs.open(name)).expect("open");
 
     // Offsets and lengths chosen around the cluster boundary, which is where
     // a read that computes its run wrong stops being wrong by a whole cluster
@@ -78,7 +78,7 @@ fn reads_land_correctly_at_every_offset_and_length() {
     for &offset in &[0u64, 1, 511, 512, 513, 1023, 1024, 65_536, 300 * 1024 - 1] {
         for &len in &[1usize, 7, 511, 512, 513, 4096, 100_000] {
             let mut buf = vec![0u8; len];
-            let n = fs.read(&mut f, offset, &mut buf).expect("read");
+            let n = now(fs.read(&mut f, offset, &mut buf)).expect("read");
             let want = &truth[(offset as usize).min(truth.len())..]
                 [..n.min(truth.len() - (offset as usize).min(truth.len()))];
             assert_eq!(&buf[..n], want, "offset {offset} len {len}");
@@ -91,18 +91,18 @@ fn reads_land_correctly_at_every_offset_and_length() {
 #[test]
 fn subdirectories_list_independently() {
     let fx = populated();
-    let mut fs = Fat32::mount(fx.image.device()).expect("mount");
+    let mut fs = now(Fat32::mount(fx.image.device())).expect("mount");
 
-    let mut top: Vec<String> = fs.read_dir("sub", 64).expect("read_dir").into_iter().map(|e| e.name).collect();
+    let mut top: Vec<String> = now(fs.read_dir("sub", 64)).expect("read_dir").into_iter().map(|e| e.name).collect();
     top.sort();
     assert_eq!(top, vec![String::from("nested"), String::from("one.txt")]);
 
-    let nested = fs.read_dir("sub/nested", 64).expect("read_dir");
+    let nested = now(fs.read_dir("sub/nested", 64)).expect("read_dir");
     assert_eq!(nested.len(), 2);
     assert!(nested.iter().any(|e| e.name == "deep.bin" && e.len == 300 * 1024));
 
-    assert!(fs.metadata("sub").expect("metadata").is_dir);
-    assert!(!fs.metadata("sub/one.txt").expect("metadata").is_dir);
+    assert!(now(fs.metadata("sub")).expect("metadata").is_dir);
+    assert!(!now(fs.metadata("sub/one.txt")).expect("metadata").is_dir);
 }
 
 /// The volume label lives in the root directory as an entry with a name field
@@ -110,21 +110,21 @@ fn subdirectories_list_independently() {
 #[test]
 fn the_volume_label_is_not_a_file() {
     let fx = populated();
-    let mut fs = Fat32::mount(fx.image.device()).expect("mount");
-    let names: Vec<String> = fs.read_dir("", 64).expect("read_dir").into_iter().map(|e| e.name).collect();
+    let mut fs = now(Fat32::mount(fx.image.device())).expect("mount");
+    let names: Vec<String> = now(fs.read_dir("", 64)).expect("read_dir").into_iter().map(|e| e.name).collect();
     assert!(!names.iter().any(|n| n.starts_with("TF")), "label leaked into the listing: {names:?}");
 }
 
 #[test]
 fn missing_paths_are_not_found_rather_than_anything_else() {
     let fx = populated();
-    let mut fs = Fat32::mount(fx.image.device()).expect("mount");
-    assert_eq!(fs.open("nope.txt").unwrap_err(), Error::NotFound);
-    assert_eq!(fs.open("sub/nope.txt").unwrap_err(), Error::NotFound);
-    assert_eq!(fs.metadata("sub/one.txt/deeper").unwrap_err(), Error::NotADirectory);
-    assert_eq!(fs.open("sub").unwrap_err(), Error::IsADirectory);
-    assert!(!fs.exists("nope.txt").expect("exists"));
-    assert!(fs.exists("sub/one.txt").expect("exists"));
+    let mut fs = now(Fat32::mount(fx.image.device())).expect("mount");
+    assert_eq!(now(fs.open("nope.txt")).unwrap_err(), Error::NotFound);
+    assert_eq!(now(fs.open("sub/nope.txt")).unwrap_err(), Error::NotFound);
+    assert_eq!(now(fs.metadata("sub/one.txt/deeper")).unwrap_err(), Error::NotADirectory);
+    assert_eq!(now(fs.open("sub")).unwrap_err(), Error::IsADirectory);
+    assert!(!now(fs.exists("nope.txt")).expect("exists"));
+    assert!(now(fs.exists("sub/one.txt")).expect("exists"));
 }
 
 /// Names are matched case-insensitively, which is what firmware does when it
@@ -132,21 +132,21 @@ fn missing_paths_are_not_found_rather_than_anything_else() {
 #[test]
 fn lookup_ignores_case() {
     let fx = populated();
-    let mut fs = Fat32::mount(fx.image.device()).expect("mount");
-    assert!(fs.exists("HELLO.TXT").expect("exists"));
-    assert!(fs.exists("upper.txt").expect("exists"));
-    assert!(fs.exists("SUB/NESTED/DEEP.BIN").expect("exists"));
-    assert!(fs.exists("a VERY long file name that needs several LFN entries.TXT").expect("exists"));
+    let mut fs = now(Fat32::mount(fx.image.device())).expect("mount");
+    assert!(now(fs.exists("HELLO.TXT")).expect("exists"));
+    assert!(now(fs.exists("upper.txt")).expect("exists"));
+    assert!(now(fs.exists("SUB/NESTED/DEEP.BIN")).expect("exists"));
+    assert!(now(fs.exists("a VERY long file name that needs several LFN entries.TXT")).expect("exists"));
 }
 
 #[test]
 fn extents_cover_the_file_and_point_at_its_bytes() {
     let fx = populated();
-    let mut fs = Fat32::mount(fx.image.device()).expect("mount");
+    let mut fs = now(Fat32::mount(fx.image.device())).expect("mount");
     let name = "sub/nested/deep.bin";
     let truth = &fx.files.iter().find(|(n, _)| n == name).expect("fixture").1;
 
-    let extents = fs.extents(name, 4096).expect("extents");
+    let extents = now(fs.extents(name, 4096)).expect("extents");
     assert_eq!(extents.iter().map(|e| e.len).sum::<u64>(), truth.len() as u64);
     // macOS lays a fresh file down contiguously, so this is one extent. That
     // is worth recording: the coalescing is doing something, not returning a
@@ -158,14 +158,13 @@ fn extents_cover_the_file_and_point_at_its_bytes() {
     let mut assembled = Vec::new();
     for e in &extents {
         let mut buf = vec![0u8; e.len as usize];
-        use toyos_fat32::BlockAccess;
-        fs.device().read_at(e.offset, &mut buf).expect("device read");
+        common::read_at(fs.device(), e.offset, &mut buf);
         assembled.extend_from_slice(&buf);
     }
     assert_eq!(&assembled, truth);
 
-    assert_eq!(fs.extents(name, 0).unwrap_err(), Error::LimitExceeded);
-    assert!(fs.extents("empty.bin", 4096).expect("extents").is_empty());
+    assert_eq!(now(fs.extents(name, 0)).unwrap_err(), Error::LimitExceeded);
+    assert!(now(fs.extents("empty.bin", 4096)).expect("extents").is_empty());
 }
 
 /// A 4 KiB cluster volume is a different code path only in arithmetic, which
@@ -180,7 +179,7 @@ fn a_four_kib_cluster_volume_reads_the_same() {
     // 65_525 clusters of 4 KiB is the floor for FAT32, so this volume cannot
     // be smaller. It is sparse, so it costs what is written to it.
     let image = Image::fixture("read-4k");
-    let mut fs = Fat32::mount(image.device()).expect("mount");
+    let mut fs = now(Fat32::mount(image.device())).expect("mount");
     assert_eq!(fs.geometry().bytes_per_cluster(), 4096);
     for (name, data) in &files {
         assert_eq!(&read_all(&mut fs, name), data, "{name}");

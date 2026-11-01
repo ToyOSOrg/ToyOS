@@ -14,11 +14,14 @@ extern "C" {
 
 ssize_t read(int fd, void *buf, size_t count);
 ssize_t write(int fd, const void *buf, size_t count);
+ssize_t pread(int fd, void *buf, size_t count, off_t offset);
+ssize_t pwrite(int fd, const void *buf, size_t count, off_t offset);
 int close(int fd);
 off_t lseek(int fd, off_t offset, int whence);
 int dup(int oldfd);
 int dup2(int oldfd, int newfd);
 int unlink(const char *path);
+int unlinkat(int dirfd, const char *path, int flags);
 int rmdir(const char *path);
 char *getcwd(char *buf, size_t size);
 int chdir(const char *path);
@@ -26,6 +29,7 @@ int access(const char *path, int mode);
 unsigned int sleep(unsigned int seconds);
 unsigned int alarm(unsigned int seconds);
 int usleep(unsigned int usec);
+int pause(void);
 int isatty(int fd);
 int execvp(const char *file, char *const argv[]);
 int execv(const char *path, char *const argv[]);
@@ -38,8 +42,11 @@ int ftruncate(int fd, off_t length);
 int truncate(const char *path, off_t length);
 long pathconf(const char *path, int name);
 ssize_t readlink(const char *path, char *buf, size_t size);
+ssize_t readlinkat(int dirfd, const char *path, char *buf, size_t size);
 int symlink(const char *target, const char *linkpath);
+int symlinkat(const char *target, int dirfd, const char *linkpath);
 int link(const char *existing, const char *newpath);
+int linkat(int fromdirfd, const char *existing, int todirfd, const char *newpath, int flags);
 int fchown(int fd, uid_t owner, gid_t group);
 int gethostname(char *name, size_t len);
 

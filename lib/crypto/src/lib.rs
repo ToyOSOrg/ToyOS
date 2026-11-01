@@ -1,4 +1,5 @@
-//! Cryptographic primitives for TLS, SSH, boot verification and WPA2.
+//! Cryptographic primitives for TLS, SSH, boot verification, passphrase-derived
+//! keys and WPA2.
 //!
 //! The core has no allocator, entropy source, runtime dependency or host build
 //! tool. Inputs crossing an encoding boundary return [`Error`]; fixed-size
@@ -24,8 +25,8 @@ pub mod aead;
 mod aes;
 mod arch;
 mod block;
-mod chacha;
-mod ct;
+pub mod chacha;
+pub mod ct;
 pub mod ecc;
 pub mod ed25519;
 mod field25519;
@@ -38,12 +39,15 @@ pub mod mlkem;
 mod montgomery;
 mod naf;
 mod nist;
-mod poly1305;
+pub mod poly1305;
 pub mod rsa;
 #[cfg(feature = "rustls-provider")]
 pub mod rustls_provider;
 mod scalar25519;
+pub mod scrypt;
 mod secret;
+pub use secret::{Secret, Zeroable};
+pub mod siphash;
 pub mod ssh;
 #[cfg(feature = "wpa2")]
 pub mod wpa2;
@@ -63,6 +67,7 @@ pub enum Error {
     InvalidSignature,
     CounterExhausted,
     Entropy,
+    InvalidParameters,
 }
 
 /// Fills an entire destination from the caller's cryptographically secure source.

@@ -73,7 +73,7 @@ impl Process {
     /// A second handle carrying **less** — how a supervisor hands on the right
     /// to wait without the right to kill.
     pub fn narrowed(&self, rights: Rights) -> Result<Self, SyscallError> {
-        syscall::dup_narrowed(self.0.raw(), rights).map(|h| Self(OwnedHandle(h)))
+        self.0.as_handle().try_clone_narrowed(rights).map(Self)
     }
 
     /// Give up ownership, for a handle about to be endowed or sent.
@@ -90,14 +90,14 @@ impl Process {
 }
 
 impl AsHandle for Process {
-    fn as_handle(&self) -> RawHandle {
-        self.0.raw()
+    fn as_handle(&self) -> crate::BorrowedHandle<'_> {
+        self.0.as_handle()
     }
 }
 
 impl FromHandle for Process {
-    unsafe fn from_handle(raw: RawHandle) -> Self {
-        Self(OwnedHandle(raw))
+    fn from_handle(handle: OwnedHandle) -> Self {
+        Self(handle)
     }
 }
 
@@ -110,10 +110,12 @@ pub struct Image {
 }
 
 enum Object {
-    /// Read into memory of this process's own.
+    /// Read into a region of this process's own, which this mapping alone
+    /// writes: its handle leaves only for a spawn, whose kernel copies each
+    /// page and writes none.
     Read(SharedMemory),
-    /// A boot image the kernel handed over.
-    Boot(Immutable),
+    /// A region nobody writes: a boot image, or a file its server holds so.
+    Immutable(Immutable),
 }
 
 /// Why [`Image::read`] made no image.
@@ -131,7 +133,15 @@ pub enum ImageRefused<E> {
 
 impl Image {
     /// `len` bytes, from `read` asked until it has given them all.
-    pub fn read<E>(
+    pub fn read<E>(len: u64, read: impl FnMut(&mut [u8]) -> Result<usize, E>) -> Result<Self, ImageRefused<E>> {
+        Self::read_for(None, len, read)
+    }
+
+    /// [`read`](Self::read), counted to the job `job` is a handle to, rather
+    /// than this process's: the program of a child started in it, which
+    /// keeps the image for as long as it runs.
+    pub fn read_for<E>(
+        job: Option<crate::BorrowedHandle<'_>>,
         len: u64,
         mut read: impl FnMut(&mut [u8]) -> Result<usize, E>,
     ) -> Result<Self, ImageRefused<E>> {
@@ -139,8 +149,14 @@ impl Image {
         if size == 0 {
             return Err(ImageRefused::Empty);
         }
-        let mut object = SharedMemory::create(size).map_err(ImageRefused::Memory)?;
-        let bytes = object.as_mut_slice();
+        let created = match job {
+            Some(job) => SharedMemory::create_for(job, size),
+            None => SharedMemory::create(size),
+        };
+        let object = created.map_err(ImageRefused::Memory)?;
+        // SAFETY: `size` bytes of a fresh mapping no handle has left this
+        // process for, borrowed while `object` lives here.
+        let bytes = unsafe { core::slice::from_raw_parts_mut(object.as_ptr(), size) };
         let mut done = 0;
         while done < size {
             match read(&mut bytes[done..]).map_err(ImageRefused::Read)? {
@@ -151,17 +167,19 @@ impl Image {
         Ok(Self { object: Object::Read(object), len })
     }
 
-    /// The program a boot image is, whole.
-    pub fn boot(image: Immutable) -> Self {
+    /// The program a region nobody writes is, whole.
+    pub fn immutable(image: Immutable) -> Self {
         let len = image.as_slice().len() as u64;
-        Self { object: Object::Boot(image), len }
+        Self { object: Object::Immutable(image), len }
     }
 
     /// The program's bytes, as they were read.
     pub fn bytes(&self) -> &[u8] {
         let bytes = match &self.object {
-            Object::Read(object) => object.as_slice(),
-            Object::Boot(image) => image.as_slice(),
+            // SAFETY: the mapping is `object.len()` bytes and lives as long as
+            // `self`, and nothing writes them once read (`Object::Read`).
+            Object::Read(object) => unsafe { core::slice::from_raw_parts(object.as_ptr(), object.len()) },
+            Object::Immutable(image) => image.as_slice(),
         };
         &bytes[..self.len as usize]
     }
@@ -171,9 +189,9 @@ impl Image {
     pub fn spawn_words(&self) -> (u64, u64) {
         let handle = match &self.object {
             Object::Read(object) => object.as_handle(),
-            Object::Boot(image) => image.as_handle(),
+            Object::Immutable(image) => image.as_handle(),
         };
-        (u64::from(handle.0), self.len)
+        (u64::from(handle.raw().0), self.len)
     }
 }
 

@@ -1,0 +1,50 @@
+# The boot that designates a bench's DATA partition from inside ToyOS: its
+# runner, the one row authorized to (`authorize = ["designate:data"]`), runs
+# `disks designate data --commit` once (`tests/toyos.rs`'s
+# `bench_data_designated` row). Its own image, so the authorization reaches no
+# boot but the one that is for it; no row here starts another, so no login
+# holds it.
+[boot]
+start = ["logkeeper", "diskserver", "fileserver", "acpiserver", "test-runner"]
+
+[programs.logkeeper]
+service = true
+syscap = ["logread"]
+serves = ["log"]
+
+[programs.acpiserver]
+service = true
+devices = ["acpi"]
+receives = ["power"]
+
+# `power` for the reboot that ends the list. Its jobs inherit its namespace,
+# the authorization among it.
+[programs.test-runner]
+receives = ["power"]
+authorize = ["designate:data"]
+
+[programs.disks]
+
+[programs.toybox]
+
+[symlinks]
+"bin/reboot" = "/system/bin/toybox"
+
+[programs.diskserver]
+service = true
+restart = true
+serves = ["block", "disk"]
+
+[programs.nvme]
+drives = ["pci:01:08:02"]
+receives = ["disk"]
+
+[programs.usbd]
+drives = ["pci:0c:03:30/1033:0194", "pci:0c:03:30@boot"]
+receives = ["disk"]
+
+[programs.fileserver]
+restart = true
+pager = true
+roles = ["data", "log", "boot"]
+receives = ["block"]

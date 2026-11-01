@@ -1,12 +1,23 @@
 //! `_OSC` negotiated (ACPI 6.5 §6.2.11; Intel 302223-007 §2.2): `\_SB._OSC`
-//! under the platform-wide UUID (§6.2.11.2), then, on an Intel processor,
-//! each processor's `_OSC` under Intel's, each a query with the Query flag
-//! and then a commit of what the query granted (§6.2.11.1.1, §6.2.11.1.3);
-//! and each PCI root bridge's under the PCI host bridge UUID, a query and,
-//! where it offers native PCI Express hot-plug with the capability structure,
-//! the commit of both, which the kernel's hot-plug slots act on
-//! ([`negotiate_root`], PCI Firmware Specification 3.3 §4.5), by
-//! `crate::apertures`.
+//! under the platform-wide UUID (§6.2.11.2), a query with the Query flag and
+//! then a commit of what the query granted (§6.2.11.1.1, §6.2.11.1.3); then,
+//! on an Intel processor, each processor's `_OSC` under Intel's, committed
+//! with what ToyOS claims and no query first; and each PCI root bridge's
+//! under the PCI host bridge UUID, a query and, where it offers native PCI
+//! Express hot-plug with the capability structure, the commit of both, which
+//! the kernel's hot-plug slots act on ([`negotiate_root`], PCI Firmware
+//! Specification 3.3 §4.5), by `crate::apertures`.
+//!
+//! **A processor's bits are statements, not requests for control**: each of
+//! 302223-007 Table 1 says what OSPM "is capable of", and "ACPI firmware will
+//! interpret and record the set bits" (§2.1). ACPI 6.5 §6.2.11.1.1 "strongly
+//! recommends" the query, for negotiating control; it does not require it,
+//! and what the firmware does with a statement is in the objects it then
+//! returns (`_CST` among them, [`crate::cst`]). A query some firmware answers
+//! with the same bit whatever was asked, nothing included, would otherwise
+//! decide what ToyOS says it does. So a processor commit that fails, is
+//! refused or masks bits gates nothing: `_CST` is read either way, and each
+//! state it returns is checked on its own terms.
 //!
 //! **What ToyOS claims is one declaration a UUID** ([`PLATFORM`],
 //! [`PROCESSOR`]), each bit set only where ToyOS does what the bit promises,
@@ -69,11 +80,14 @@ pub struct Claim {
 pub const PLATFORM: Claim = Claim { uuid: uuid(b"0811B06E-4A27-44F9-8D60-3CBBC22E7B48"), capabilities: 0 };
 
 /// A processor's capabilities on Intel (302223-007 Table 1) ToyOS honours:
-/// none. Bit 0: the kernel enables HWP itself
+/// bit 4, each processor entering its C2 and C3 states independently, and
+/// bit 9, native C-state instructions (`MWAIT`) for them
+/// (`kernel/src/idle.rs`). Not bit 0: the kernel enables HWP itself
 /// (`kernel/src/arch/x86_64/control_regs.rs`), and writes no `IA32_PERF_CTL`
-/// through `_PCT`. Bit 12: the kernel takes no HWP interrupt. Bits 8 and 9:
-/// the kernel enters no `MWAIT` state but C1's, and reads no `_CST`.
-pub const PROCESSOR: Claim = Claim { uuid: uuid(b"4077A616-290C-47BE-9EBD-D87058713953"), capabilities: 0 };
+/// through `_PCT`. Not bit 6: no C-state is coordinated in software through
+/// `_CSD`. Not bit 8: C1 is `hlt`. Not bit 12: the kernel takes no HWP
+/// interrupt.
+pub const PROCESSOR: Claim = Claim { uuid: uuid(b"4077A616-290C-47BE-9EBD-D87058713953"), capabilities: 1 << 4 | 1 << 9 };
 
 /// The first DWORD's bits (§6.2.11): passed, the Query flag; answered, the
 /// status.
@@ -135,6 +149,20 @@ fn evaluate<K: Kernel, const N: usize>(aml: &mut Aml<'_, K>, path: &str, uuid: &
     }
 }
 
+/// What a processor's commit answered: its status, and what it acknowledged
+/// of what was claimed.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub struct Committed {
+    pub status: u32,
+    pub granted: u32,
+}
+
+/// `path`'s `_OSC` committed with `claim` whole, no query first.
+pub fn commit<K: Kernel>(aml: &mut Aml<'_, K>, path: &str, claim: &Claim) -> Result<Committed, String> {
+    let [status, granted] = evaluate(aml, path, &claim.uuid, 0, claim.capabilities)?;
+    Ok(Committed { status, granted: granted & claim.capabilities })
+}
+
 /// `path`'s `_OSC` negotiated under `claim`: the query, and the commit of
 /// what it granted that `claim` asked for.
 pub fn negotiate<K: Kernel>(aml: &mut Aml<'_, K>, path: &str, claim: &Claim) -> Result<Answered, String> {
@@ -191,11 +219,11 @@ pub fn negotiate_root<K: Kernel>(aml: &mut Aml<'_, K>, path: &str, commit: bool)
 pub struct Negotiated {
     pub platform: Option<Result<Answered, String>>,
     /// Each processor's, in walk order.
-    pub processors: Vec<(String, Result<Answered, String>)>,
+    pub processors: Vec<(String, Result<Committed, String>)>,
 }
 
-/// `\_SB._OSC`, then each processor's `_OSC` where the processor is Intel's
-/// (`intel`): every
+/// `\_SB._OSC`, then each processor's `_OSC` committed where the processor is
+/// Intel's (`intel`): every
 /// `Processor` object and every `ACPI0007` device (ACPI 6.5 §8.4) that names
 /// one, in the namespace's order.
 pub fn negotiate_all<K: Kernel>(aml: &mut Aml<'_, K>, names: &Names, intel: bool) -> Negotiated {
@@ -212,7 +240,7 @@ pub fn negotiate_all<K: Kernel>(aml: &mut Aml<'_, K>, names: &Names, intel: bool
         .objects
         .iter()
         .filter(|named| match named.kind {
-            toyos_aml::Kind::Processor => true,
+            toyos_aml::Kind::Processor { .. } => true,
             toyos_aml::Kind::Device => processor_device(aml, names, &named.path),
             _ => false,
         })
@@ -228,9 +256,9 @@ pub fn negotiate_all<K: Kernel>(aml: &mut Aml<'_, K>, names: &Names, intel: bool
     }
     for processor in processors {
         let path = format!("{processor}._OSC");
-        let answered = negotiate(aml, &path, &PROCESSOR);
+        let answered = commit(aml, &path, &PROCESSOR);
         match &answered {
-            Ok(answered) => println!("{OWN}{path} negotiated: {}", answered.said(PROCESSOR.capabilities)),
+            Ok(c) => println!("{OWN}{path} committed {:#x}: it answered {} and acknowledged {:#x}", PROCESSOR.capabilities, status(c.status), c.granted),
             Err(why) => println!("{OWN}{path} was refused: {why}"),
         }
         negotiated.processors.push((processor, answered));
@@ -239,9 +267,9 @@ pub fn negotiate_all<K: Kernel>(aml: &mut Aml<'_, K>, names: &Names, intel: bool
         }
     }
     let refused = negotiated.processors.iter().filter(|(_, answered)| answered.is_err()).count();
-    let granted = negotiated.processors.iter().filter_map(|(_, answered)| answered.as_ref().ok()?.commit).fold(0, |all, (_, granted)| all | granted);
+    let granted = negotiated.processors.iter().filter_map(|(_, answered)| answered.as_ref().ok()).fold(0, |all, c| all | c.granted);
     println!(
-        "acpiserver: the processors' _OSC negotiated, Intel's: {} evaluated, query then commit, {refused} refused; granted {granted:#x} of {:#x}",
+        "acpiserver: the processors' _OSC committed, Intel's: {} evaluated, {refused} refused; acknowledged {granted:#x} of {:#x}",
         negotiated.processors.len(),
         PROCESSOR.capabilities
     );
@@ -250,7 +278,7 @@ pub fn negotiate_all<K: Kernel>(aml: &mut Aml<'_, K>, names: &Names, intel: bool
 
 /// Whether the device at `path` is a processor by its `_HID` (§8.4):
 /// ACPI0007.
-fn processor_device<K: Kernel>(aml: &mut Aml<'_, K>, names: &Names, path: &str) -> bool {
+pub fn processor_device<K: Kernel>(aml: &mut Aml<'_, K>, names: &Names, path: &str) -> bool {
     let hid = format!("{path}._HID");
     names.paths.contains(&hid) && aml.interpreter.evaluate(&mut aml.host, &hid, &[]).ok().as_ref().and_then(crate::devices::id).as_deref() == Some("ACPI0007")
 }

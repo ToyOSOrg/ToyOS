@@ -12,8 +12,8 @@ use std::net::Ipv4Addr;
 use std::time::Duration;
 
 use common::{from_server, message_of, terms, xid, A, ACK, BROADCAST, DNS, MAC, MAC_B, MAC_R, R};
-use lan::{udp, Lan, Seen, Udp, B, OFF_LINK};
-use toyos_net_node::{Datagram, Event, Refused};
+use lan::{udp, unreachable, Lan, Seen, Udp, B, OFF_LINK};
+use toyos_net_node::{Datagram, Event, ExportRefused, HolderId, Refused};
 use toyos_net_shard::Refusal;
 use toyos_net_udp::Counter;
 use toyos_net_wire::Port;
@@ -37,13 +37,13 @@ fn undrawn() -> u32 {
 fn a_socket_holds_the_port_it_named_or_the_one_its_draw_picked() {
     let mut lan = Lan::new();
     lan.lease(3_600);
-    let (named, held) = lan.node.udp_bind(ANY, port(4_000), undrawn).unwrap();
+    let (named, held) = lan.node.udp_bind(ANY, port(4_000), common::unread(), undrawn).unwrap();
     assert_eq!(held.get(), 4_000);
-    let (first, drawn) = lan.node.udp_bind(ANY, None, || 5).unwrap();
+    let (first, drawn) = lan.node.udp_bind(ANY, None, common::unread(), || 5).unwrap();
     assert_eq!(drawn.get(), 49_152 + 5);
-    let (second, next) = lan.node.udp_bind(ANY, None, || 5).unwrap();
+    let (second, next) = lan.node.udp_bind(ANY, None, common::unread(), || 5).unwrap();
     assert_eq!(next.get(), 49_152 + 6, "the port after a taken one");
-    let (_, wrapped) = lan.node.udp_bind(ANY, None, || 16_384 + 7).unwrap();
+    let (_, wrapped) = lan.node.udp_bind(ANY, None, common::unread(), || 16_384 + 7).unwrap();
     assert_eq!(wrapped.get(), 49_152 + 7, "a draw past the range is an offset into it");
 
     for id in [named, first, second] {
@@ -61,7 +61,7 @@ fn a_socket_holds_the_port_it_named_or_the_one_its_draw_picked() {
 fn a_datagram_leaves_as_the_call_named_it() {
     let mut lan = Lan::new();
     lan.lease(3_600);
-    let (id, _) = lan.node.udp_bind(ANY, port(4_000), undrawn).unwrap();
+    let (id, _) = lan.node.udp_bind(ANY, port(4_000), common::unread(), undrawn).unwrap();
     lan.node.udp_send_to(lan.now, id, B, 7, b"to the link").unwrap();
     lan.node.udp_send_to(lan.now, id, OFF_LINK, 9, b"past it").unwrap();
     assert!(lan.datagrams().is_empty(), "accepted is queued, not sent");
@@ -79,19 +79,19 @@ fn a_datagram_leaves_as_the_call_named_it() {
 fn a_datagram_for_a_bound_port_is_handed_over_with_where_it_came_from() {
     let mut lan = Lan::new();
     lan.lease(3_600);
-    let (id, _) = lan.node.udp_bind(ANY, port(4_000), undrawn).unwrap();
+    let (id, _) = lan.node.udp_bind(ANY, port(4_000), common::unread(), undrawn).unwrap();
     let mut out = [0u8; 64];
-    assert_eq!(lan.node.udp_recv_from(id, &mut out), Ok(None));
+    assert_eq!(lan.node.udp_recv_from(id, HolderId::FIRST, &mut out), Ok(None));
 
     lan.deliver(&udp(MAC, MAC_B, (B, 9_999), (A, 4_000), b"ping"));
     lan.deliver(&udp(MAC, MAC_R, (OFF_LINK, 0), (A, 4_000), b"unanswerable"));
     lan.deliver(&udp(MAC, MAC_B, (B, 9_999), (A, 4_001), b"nobody's"));
 
-    assert_eq!(lan.node.udp_recv_from(id, &mut out), Ok(Some(Datagram { len: 4, source: B, source_port: port(9_999) })));
+    assert_eq!(lan.node.udp_recv_from(id, HolderId::FIRST, &mut out), Ok(Some(Datagram { len: 4, source: B, source_port: port(9_999) })));
     assert_eq!(&out[..4], b"ping");
-    assert_eq!(lan.node.udp_recv_from(id, &mut out), Ok(Some(Datagram { len: 12, source: OFF_LINK, source_port: None })));
+    assert_eq!(lan.node.udp_recv_from(id, HolderId::FIRST, &mut out), Ok(Some(Datagram { len: 12, source: OFF_LINK, source_port: None })));
     assert_eq!(&out[..12], b"unanswerable");
-    assert_eq!(lan.node.udp_recv_from(id, &mut out), Ok(None), "port 4001's datagram is nobody's");
+    assert_eq!(lan.node.udp_recv_from(id, HolderId::FIRST, &mut out), Ok(None), "port 4001's datagram is nobody's");
     let unreachable: Vec<&Seen> = lan.sent.iter().map(|(_, seen)| seen).filter(|seen| matches!(seen, Seen::PortUnreachable { .. })).collect();
     assert_eq!(unreachable, [&Seen::PortUnreachable { to: B }]);
     assert_eq!(lan.counted(Counter::RxNoSocket), 1);
@@ -109,16 +109,16 @@ fn refused_send(lan: &mut Lan, id: toyos_net_node::DatagramId, to: Ipv4Addr, por
 #[test]
 fn each_refusal_is_answered_in_the_pipes_word_for_it() {
     let mut lan = Lan::new();
-    let (any, _) = lan.node.udp_bind(ANY, port(4_000), undrawn).unwrap();
+    let (any, _) = lan.node.udp_bind(ANY, port(4_000), common::unread(), undrawn).unwrap();
     refused_send(&mut lan, any, B, 7, b"early", Refused::NotConnected, Counter::NoSourceAddress);
-    assert_eq!(lan.node.udp_bind(A, port(4_001), undrawn), Err(Refused::InvalidInput), "an address not yet held");
+    assert_eq!(lan.node.udp_bind(A, port(4_001), common::unread(), undrawn), Err(Refused::InvalidInput), "an address not yet held");
     assert_eq!(lan.counted(Counter::BindAddressNotLocal), 1);
 
     lan.lease(600);
-    assert_eq!(lan.node.udp_bind(ANY, port(4_000), undrawn), Err(Refused::AddrInUse));
-    assert_eq!(lan.node.udp_bind(ANY, port(68), undrawn), Err(Refused::AddrInUse), "the DHCP client's port");
+    assert_eq!(lan.node.udp_bind(ANY, port(4_000), common::unread(), undrawn), Err(Refused::AddrInUse));
+    assert_eq!(lan.node.udp_bind(ANY, port(68), common::unread(), undrawn), Err(Refused::AddrInUse), "the DHCP client's port");
     assert_eq!(lan.counted(Counter::PortInUse), 2);
-    let (held, _) = lan.node.udp_bind(A, port(4_001), undrawn).unwrap();
+    let (held, _) = lan.node.udp_bind(A, port(4_001), common::unread(), undrawn).unwrap();
 
     let invalid: [(Ipv4Addr, u16, &[u8], Counter); 6] = [
         (B, 0, b"x", Counter::SendPortZero),
@@ -144,13 +144,13 @@ fn each_refusal_is_answered_in_the_pipes_word_for_it() {
     lan.pump();
     lan.node.udp_send_to(lan.now, any, B, 7, b"later").expect("the same call, once the queue has left");
 
-    assert!(lan.run_until(Duration::from_secs(700), |lan| lan.node.lease().is_none()), "the lease runs out");
+    assert!(lan.run_until(Duration::from_secs(700), |lan| lan.node.lease(lan.link).is_none()), "the lease runs out");
     refused_send(&mut lan, any, B, 7, b"late", Refused::NotConnected, Counter::NoSourceAddress);
     refused_send(&mut lan, held, B, 7, b"late", Refused::NotConnected, Counter::SourceAddressNotAssigned);
 
     let mut routerless = Lan::new();
     routerless.lease_on(&terms(3_600, None));
-    let (id, _) = routerless.node.udp_bind(ANY, port(4_000), undrawn).unwrap();
+    let (id, _) = routerless.node.udp_bind(ANY, port(4_000), common::unread(), undrawn).unwrap();
     refused_send(&mut routerless, id, OFF_LINK, 7, b"x", Refused::NotConnected, Counter::NoRoute);
 }
 
@@ -163,8 +163,8 @@ fn each_refusal_is_answered_in_the_pipes_word_for_it() {
 fn a_broadcast_needs_its_permission() {
     let mut lan = Lan::new();
     lan.lease(3_600);
-    let (id, _) = lan.node.udp_bind(ANY, port(5_000), undrawn).unwrap();
-    let (other, _) = lan.node.udp_bind(ANY, port(5_002), undrawn).unwrap();
+    let (id, _) = lan.node.udp_bind(ANY, port(5_000), common::unread(), undrawn).unwrap();
+    let (other, _) = lan.node.udp_bind(ANY, port(5_002), common::unread(), undrawn).unwrap();
     let frames = lan.sent.len();
     for to in [Ipv4Addr::BROADCAST, SUBNET_BROADCAST] {
         refused_send(&mut lan, id, to, 5_001, b"hi", Refused::PermissionDenied, Counter::BroadcastNotPermitted);
@@ -191,7 +191,8 @@ fn a_broadcast_needs_its_permission() {
     let destinations: Vec<Ipv4Addr> = lan.datagrams().iter().map(|(_, udp)| udp.destination).collect();
     assert_eq!(destinations, [Ipv4Addr::BROADCAST, SUBNET_BROADCAST, B], "and no broadcast since the permission went");
 
-    lan.node.udp_close(lan.now, id).unwrap();
+    assert_eq!(lan.node.udp_broadcast(id), Ok(false), "as it was taken back");
+    lan.node.datagram_departed(lan.now, id, HolderId::FIRST);
     assert_eq!(lan.node.udp_set_broadcast(id, true), Err(Refused::NotConnected), "a closed socket is given nothing");
 }
 
@@ -206,7 +207,7 @@ fn a_datagram_accepted_for_a_host_is_no_broadcast_after_the_server_renews_a_narr
     let edge = Ipv4Addr::new(192, 0, 2, 127);
     let mut lan = Lan::new();
     lan.lease(600);
-    let (id, _) = lan.node.udp_bind(ANY, port(5_000), undrawn).unwrap();
+    let (id, _) = lan.node.udp_bind(ANY, port(5_000), common::unread(), undrawn).unwrap();
     let requests = |lan: &Lan| lan.udp().into_iter().filter(|udp| udp.port == 67).count();
     let sent = requests(&lan);
     assert!(lan.run_until(Duration::from_secs(400), |lan| requests(lan) > sent), "the renewal leaves");
@@ -217,13 +218,13 @@ fn a_datagram_accepted_for_a_host_is_no_broadcast_after_the_server_renews_a_narr
     lan.node.udp_send_to(lan.now, id, edge, 5_001, b"hi").expect("one host of the /24");
     let narrower = [(54, R.octets().to_vec()), (51, 600u32.to_be_bytes().to_vec()), (1, vec![255, 255, 255, 128]), (6, DNS.octets().to_vec())];
     lan.deliver(&from_server(MAC, A, &message_of(ACK, renewal, &narrower)));
-    assert_eq!(lan.node.lease().map(|lease| lease.prefix_len), Some(25), "the server's prefix is the lease's");
+    assert_eq!(lan.node.lease(lan.link).map(|lease| lease.prefix_len), Some(25), "the server's prefix is the lease's");
     assert_eq!(lan.sent[frames..], [], "nothing left for it: no broadcast, and no request for a link address");
 
     let rule = toyos_net_ip::Counter::IpBroadcastNotPermitted;
     let shard = lan.node.shard();
     assert_eq!(shard.ip().counters().get(rule), 1);
-    let refusal = toyos_net_ip::Refusal { rule, iface: shard.iface(), peer: toyos_net_ip::Peer::Ip(edge) };
+    let refusal = toyos_net_ip::Refusal { rule, iface: lan.link, peer: toyos_net_ip::Peer::Ip(edge) };
     let logged: Vec<Event> = lan.node.drain_events().collect();
     assert_eq!(logged, [Event::Stack { refusal: Refusal::Ip(refusal), suppressed: 0 }]);
 }
@@ -241,7 +242,7 @@ fn line(rule: Counter, peer: (Ipv4Addr, u16), suppressed: u64) -> Event {
 fn a_refusal_is_logged_by_the_call_that_met_it() {
     let mut lan = Lan::new();
     lan.lease(3_600);
-    let (id, _) = lan.node.udp_bind(ANY, port(4_000), undrawn).unwrap();
+    let (id, _) = lan.node.udp_bind(ANY, port(4_000), common::unread(), undrawn).unwrap();
     assert_eq!(lan.node.drain_events().count(), 0, "nothing is owed the log before the send");
 
     assert_eq!(lan.node.udp_send_to(lan.now, id, Ipv4Addr::BROADCAST, 7, b"x"), Err(Refused::PermissionDenied));
@@ -263,20 +264,137 @@ fn a_refusal_is_logged_by_the_call_that_met_it() {
     assert_eq!(logged, [line(Counter::BroadcastNotPermitted, (Ipv4Addr::BROADCAST, 9), 1)]);
 }
 
+// RFC 768 has no connection; POSIX's `connect` on a datagram socket names the one peer it sends
+// to and receives from. The peer is the socket's, so every holder's: a holder that did not
+// connect sends there and reads it back, and a datagram from anyone else is no holder's.
+#[test]
+fn a_connected_sockets_peer_is_every_holders() {
+    let mut lan = Lan::new();
+    lan.lease(3_600);
+    let (id, _) = lan.node.udp_bind(ANY, port(4_000), common::unread(), undrawn).unwrap();
+    let (second, _) = lan.node.export_datagram(id, common::unread()).unwrap();
+    assert_eq!((lan.node.udp_peer(id), lan.node.udp_send(lan.now, id, b"x")), (Ok(None), Err(Refused::NotConnected)));
+    assert_eq!(lan.node.udp_connect(lan.now, id, B, 0), Err(Refused::InvalidInput), "port 0");
+    lan.node.udp_connect(lan.now, id, B, 7).expect("one host of the link");
+    assert_eq!(lan.node.udp_peer(id), Ok(Some((B, Port::new(7).unwrap()))));
+    lan.node.udp_send(lan.now, id, b"to the peer").expect("a connected socket's send");
+    lan.pump();
+    let last = lan.datagrams().last().map(|(_, udp)| (udp.destination, udp.port, udp.payload.clone()));
+    assert_eq!(last, Some((B, 7, b"to the peer".to_vec())));
+
+    lan.deliver(&udp(MAC, MAC_R, (OFF_LINK, 7), (A, 4_000), b"a stranger"));
+    lan.deliver(&udp(MAC, MAC_B, (B, 7), (A, 4_000), b"the peer"));
+    let mut out = [0u8; 64];
+    let got = lan.node.udp_recv_from(id, second, &mut out).unwrap().unwrap();
+    assert_eq!((&out[..got.len], got.source), (&b"the peer"[..], B), "the holder that did not connect reads the peer");
+    assert_eq!(lan.node.udp_recv_from(id, HolderId::FIRST, &mut out), Ok(None), "the stranger's is nobody's");
+}
+
+// RFC 1122 §4.1.3.3: an ICMP port unreachable about a connected socket's datagram is reported
+// to its user; POSIX's next call answers it once. A datagram from the peer that waits behind it
+// is still the socket's, and the holder that took the error is rung again for it.
+#[test]
+fn a_pending_error_is_answered_once_and_the_datagram_behind_it_rings_again() {
+    const PORT_UNREACHABLE: u8 = 3;
+    let mut lan = Lan::new();
+    lan.lease(3_600);
+    let (first, first_rings) = common::bell();
+    let (id, _) = lan.node.udp_bind(ANY, port(4_000), first, undrawn).unwrap();
+    let (second_bell, second_rings) = common::bell();
+    let (second, _) = lan.node.export_datagram(id, second_bell).unwrap();
+    lan.node.udp_connect(lan.now, id, B, 7).unwrap();
+    lan.node.udp_send(lan.now, id, b"ping").unwrap();
+    lan.pump();
+    lan.deliver(&udp(MAC, MAC_B, (B, 7), (A, 4_000), b"pong"));
+    lan.deliver(&unreachable(PORT_UNREACHABLE, (B, MAC_B), (A, 4_000), (B, 7), 4));
+    assert_eq!((first_rings.get(), second_rings.get()), (1, 1), "both told");
+
+    let mut out = [0u8; 64];
+    assert_eq!(lan.node.udp_recv_from(id, HolderId::FIRST, &mut out), Err(Refused::ConnectionRefused));
+    assert_eq!(first_rings.get(), 2, "the holder that took the error is rung for the datagram behind it");
+    let got = lan.node.udp_recv_from(id, second, &mut out).unwrap().unwrap();
+    assert_eq!(&out[..got.len], b"pong", "the error was answered once, and the datagram is still the socket's");
+}
+
+// A holder made while a datagram waits is rung at once: nothing promises a pass before its
+// first look.
+#[test]
+fn a_holder_made_while_a_datagram_waits_is_rung_at_once() {
+    let mut lan = Lan::new();
+    lan.lease(3_600);
+    let (id, _) = lan.node.udp_bind(ANY, port(4_000), common::unread(), undrawn).unwrap();
+    lan.deliver(&udp(MAC, MAC_B, (B, 9_999), (A, 4_000), b"waiting"));
+    let (bell, rings) = common::bell();
+    lan.node.export_datagram(id, bell).unwrap();
+    assert_eq!(rings.get(), 1);
+}
+
+// A socket's holders take from one queue: each datagram is handed whole to the one holder whose
+// receive takes it, each holder is rung once a look while one waits, and a holder that left
+// receives nothing. The socket and its port stand until the last holder leaves.
+#[test]
+fn every_holder_receives_from_one_queue_each_datagram_once_and_whole() {
+    let mut lan = Lan::new();
+    lan.lease(3_600);
+    let (first_bell, first_rings) = common::bell();
+    let (id, _) = lan.node.udp_bind(ANY, port(4_000), first_bell, undrawn).unwrap();
+    let (second_bell, second_rings) = common::bell();
+    let (second, at) = lan.node.export_datagram(id, second_bell).expect("a place for a holder");
+    assert_eq!(at.get(), 4_000, "a holder is told the socket's port");
+    let rings = || (first_rings.get(), second_rings.get());
+    assert_eq!(rings(), (0, 0), "nothing waits");
+
+    lan.deliver(&udp(MAC, MAC_B, (B, 9_999), (A, 4_000), b"one"));
+    lan.deliver(&udp(MAC, MAC_B, (B, 9_999), (A, 4_000), b"two, longer"));
+    assert_eq!(rings(), (1, 1), "each holder is told once while datagrams wait");
+
+    let mut out = [0u8; 64];
+    let got = lan.node.udp_recv_from(id, second, &mut out).unwrap().unwrap();
+    assert_eq!(&out[..got.len], b"one");
+    assert_eq!(rings(), (1, 2), "the holder that looked is told what is left");
+    let got = lan.node.udp_recv_from(id, HolderId::FIRST, &mut out).unwrap().unwrap();
+    assert_eq!(&out[..got.len], b"two, longer", "the next datagram, whole, to the other holder");
+    assert_eq!(lan.node.udp_recv_from(id, second, &mut out), Ok(None), "each datagram went once");
+    assert_eq!(rings(), (1, 2), "nothing left, no ring");
+    lan.deliver(&udp(MAC, MAC_B, (B, 9_999), (A, 4_000), b"three"));
+    assert_eq!(rings(), (2, 3), "both looked since, the one that found nothing too, and both are told");
+
+    lan.node.datagram_departed(lan.now, id, second);
+    assert_eq!(lan.node.udp_recv_from(id, second, &mut out), Err(Refused::NotConnected), "a holder that left takes nothing");
+    assert_eq!(lan.node.udp_bind(ANY, port(4_000), common::unread(), undrawn), Err(Refused::AddrInUse), "the first holder still holds the port");
+    lan.node.datagram_departed(lan.now, id, HolderId::FIRST);
+    assert_eq!(lan.node.export_datagram(id, common::unread()).err(), Some(ExportRefused::Gone));
+    lan.node.udp_bind(ANY, port(4_000), common::unread(), undrawn).expect("the last holder's leaving freed the port");
+}
+
+// A holder past a socket's first takes a place, and its leaving gives it back.
+#[test]
+fn a_datagram_sockets_holder_past_its_first_takes_a_place() {
+    let mut lan = Lan::new();
+    lan.lease(3_600);
+    lan.node.set_places(2);
+    let (id, _) = lan.node.udp_bind(ANY, port(4_000), common::unread(), undrawn).unwrap();
+    let (second, _) = lan.node.export_datagram(id, common::unread()).expect("a second place");
+    assert_eq!(lan.node.held(), 2);
+    assert_eq!(lan.node.export_datagram(id, common::unread()).err(), Some(ExportRefused::Full));
+    lan.node.datagram_departed(lan.now, id, second);
+    assert_eq!(lan.node.held(), 1);
+}
+
 // A closed socket's port is free at once, and what it had accepted still leaves: in the first
 // opportunity after the close, not one later.
 #[test]
 fn a_closed_socket_frees_its_port_and_what_it_accepted_still_leaves() {
     let mut lan = Lan::new();
     lan.lease(3_600);
-    let (id, _) = lan.node.udp_bind(ANY, port(4_000), undrawn).unwrap();
+    let (id, _) = lan.node.udp_bind(ANY, port(4_000), common::unread(), undrawn).unwrap();
     lan.node.udp_send_to(lan.now, id, B, 7, b"first").unwrap();
     lan.pump();
     assert_eq!(lan.datagrams().len(), 1, "B's link address is known from here");
 
     lan.node.udp_send_to(lan.now, id, B, 7, b"second").unwrap();
     lan.node.udp_send_to(lan.now, id, B, 7, b"third").unwrap();
-    assert_eq!(lan.node.udp_close(lan.now, id), Ok(()));
+    lan.node.datagram_departed(lan.now, id, HolderId::FIRST);
     lan.opportunity();
     let payloads: Vec<&[u8]> = lan.datagrams().iter().map(|(_, udp)| udp.payload.as_slice()).collect();
     assert_eq!(payloads, [&b"first"[..], &b"second"[..], &b"third"[..]]);
@@ -284,14 +402,14 @@ fn a_closed_socket_frees_its_port_and_what_it_accepted_still_leaves() {
 
     let mut out = [0u8; 8];
     assert_eq!(lan.node.udp_send_to(lan.now, id, B, 7, b"after"), Err(Refused::NotConnected));
-    assert_eq!(lan.node.udp_recv_from(id, &mut out), Err(Refused::NotConnected));
-    assert_eq!(lan.node.udp_close(lan.now, id), Err(Refused::NotConnected));
-    let (again, held) = lan.node.udp_bind(ANY, port(4_000), undrawn).expect("the port is free");
+    assert_eq!(lan.node.udp_recv_from(id, HolderId::FIRST, &mut out), Err(Refused::NotConnected));
+    lan.node.datagram_departed(lan.now, id, HolderId::FIRST);
+    let (again, held) = lan.node.udp_bind(ANY, port(4_000), common::unread(), undrawn).expect("the port is free");
     assert_eq!(held.get(), 4_000);
     assert_ne!(again, id, "a closed socket's id names no later socket");
     lan.deliver(&udp(MAC, MAC_B, (B, 9_999), (A, 4_000), b"ping"));
-    assert_eq!(lan.node.udp_recv_from(id, &mut out), Err(Refused::NotConnected));
-    assert_eq!(lan.node.udp_recv_from(again, &mut out).map(|got| got.map(|datagram| datagram.len)), Ok(Some(4)));
+    assert_eq!(lan.node.udp_recv_from(id, HolderId::FIRST, &mut out), Err(Refused::NotConnected));
+    assert_eq!(lan.node.udp_recv_from(again, HolderId::FIRST, &mut out).map(|got| got.map(|datagram| datagram.len)), Ok(Some(4)));
 }
 
 // RFC 1122 §2.3.2.1 and RFC 4861 §7.2.2 have address resolution give up after its requests. A
@@ -304,7 +422,7 @@ fn a_clients_datagram_for_a_host_nobody_answers_for_is_dropped_and_the_client_is
     const NOBODY: Ipv4Addr = Ipv4Addr::new(192, 0, 2, 9);
     let mut lan = Lan::new();
     lan.lease(3_600);
-    let (id, _) = lan.node.udp_bind(ANY, port(4_000), undrawn).unwrap();
+    let (id, _) = lan.node.udp_bind(ANY, port(4_000), common::unread(), undrawn).unwrap();
     lan.node.udp_send_to(lan.now, id, NOBODY, 7, b"anyone").unwrap();
     lan.node.udp_send_to(lan.now, id, B, 7, b"b").unwrap();
     lan.pump();
@@ -315,6 +433,6 @@ fn a_clients_datagram_for_a_host_nobody_answers_for_is_dropped_and_the_client_is
     assert!(lan.run_until(Duration::from_secs(10), |lan| lan.counted(Counter::TxUnreachable) == 1), "the datagram is dropped");
     assert_eq!(lan.now, sent.after(Duration::from_secs(3)), "when [ip] gave the host up");
     assert_eq!(lan.datagrams().len(), 1);
-    assert_eq!(lan.node.udp_recv_from(id, &mut [0u8; 8]), Ok(None));
+    assert_eq!(lan.node.udp_recv_from(id, HolderId::FIRST, &mut [0u8; 8]), Ok(None));
     assert_eq!(lan.node.udp_send_to(lan.now, id, B, 7, b"again"), Ok(()));
 }

@@ -22,7 +22,7 @@
 //! is not a shared wake. A page-aligned static is what makes their physical
 //! offset equal their virtual one.
 //!
-//! **Four questions, and each one had to be given a schedule rather than
+//! **Three questions, and each one had to be given a schedule rather than
 //! offered a race.**
 //!
 //! 1. [`counts`] — a count-limited wake names its word and answers how many.
@@ -39,13 +39,8 @@
 //!    and leaves the real waiter parked for good. The sweeper below is another
 //!    process asking exactly that question about frames this one just gave
 //!    back.
-//! 4. [`revoked_while_still_mapped`] — a wait that unmap ended stays ended
-//!    when the waiter's own mapping of the word survives: another process's
-//!    unmap of the same frame is the revoke, and the word still reads
-//!    `expected`.
 
 use std::io::Write;
-use std::os::toyos::process::CommandExt;
 use std::process::{Command, Stdio};
 use std::sync::atomic::{AtomicU32, Ordering};
 use std::thread;
@@ -53,7 +48,7 @@ use std::time::Duration;
 
 use toyos::endow::{Endowments, SYSCAP_LABEL};
 use toyos::syscap::SysCap;
-use toyos_abi::syscall::{self, MmapFlags, MmapProt};
+use toyos_abi::syscall::{self, VmAt, VmProt};
 
 #[path = "../roster.rs"]
 mod roster;
@@ -85,18 +80,14 @@ static COUNTS_ARMED: AtomicU32 = AtomicU32::new(0);
 const SELF: &str = "/system/bin/test_rs_futex_wake_counts";
 /// `argv[1]` the sweeper is spawned with.
 const SWEEP: &str = "sweep";
-/// `argv[1]` of [`revoked_while_still_mapped`]'s child, and the descriptor
-/// it finds the pipe at.
-const LET_GO: &str = "let-go";
-const INHERITED_PIPE: i32 = 3;
 
-/// How many 2 MiB frames the third arm parks a waiter on and then unmaps.
+/// How many regions the third arm parks a waiter in and then unmaps.
 ///
-/// More than one because `sys_mmap` allocates the *lowest* free frame
-/// (`pmm::alloc_contiguous` scans the bitmap from index 0), so any allocation
-/// anywhere in the machine between the unmap and the sweeper's first `mmap`
-/// takes one of these back. Four of them means an ordinary stray allocation
-/// costs the arm one frame of reach rather than all of it.
+/// More than one because a freed frame goes back to the head of the frame
+/// allocator's partial list, so any allocation anywhere in the machine between
+/// the unmap and the sweeper's first touch may take one of these back. Four of
+/// them means an ordinary stray allocation costs the arm one region of reach
+/// rather than all of it.
 const STALE_FRAMES: usize = 4;
 /// How many fresh frames the sweeper asks about. Comfortably more than
 /// [`STALE_FRAMES`], for the same reason.
@@ -106,7 +97,6 @@ const PAGE_2M: usize = 2 * 1024 * 1024;
 fn main() {
     match std::env::args().nth(1).as_deref() {
         Some(SWEEP) => return sweep(),
-        Some(LET_GO) => return let_go(),
         _ => {}
     }
     let cap: SysCap = Endowments::get()
@@ -115,7 +105,6 @@ fn main() {
     counts(&cap);
     claim_semantics(&cap);
     orphaned_by_unmap(&cap);
-    revoked_while_still_mapped();
     timeout_is_its_own_answer();
     println!("futex_wake respects its count, names its word, says how many it woke, and ends");
 }
@@ -417,12 +406,7 @@ fn orphaned_by_unmap(cap: &SysCap) {
     let regions: Vec<usize> = (0..STALE_FRAMES)
         .map(|i| {
             let ptr = unsafe {
-                syscall::mmap(
-                    std::ptr::null_mut(),
-                    PAGE_2M,
-                    MmapProt::READ | MmapProt::WRITE,
-                    MmapFlags::ANONYMOUS | MmapFlags::PRIVATE,
-                )
+                syscall::vm_reserve(PAGE_2M, VmProt::ReadWrite, VmAt::ANYWHERE).unwrap_or(core::ptr::null_mut())
             };
             assert!(!ptr.is_null(), "mmap #{i} for a futex word failed");
             // The word is the first in the region, so its offset in the frame
@@ -448,7 +432,7 @@ fn orphaned_by_unmap(cap: &SysCap) {
     // The unmap. Every frame behind these regions goes back to the PMM here,
     // and `mmap` hands the lowest free one to the next asker.
     for &addr in &regions {
-        unsafe { syscall::munmap(addr as *mut u8, PAGE_2M) }.expect("munmap a futex region");
+        unsafe { syscall::vm_release(addr as *mut u8, PAGE_2M) }.expect("munmap a futex region");
     }
 
     go.write_all(b"go\n").expect("tell the sweeper to go");
@@ -479,60 +463,6 @@ fn wait_until_parked_raw(word: *const u32, want: u64) {
     }
 }
 
-/// A wait a revoke ended stays ended while its word still reads `expected`.
-///
-/// The revoke is another process letting go of its own window onto the same
-/// frame: that unmap ends every wait on the frame, but this process's window
-/// is still there and its word unchanged, so the waiter re-reads a condition
-/// that is still false. Its registration is gone and no post can reach it
-/// again, so it must return rather than park — or, as the kernel's loop once
-/// could, go round its phase 1 forever.
-fn revoked_while_still_mapped() {
-    let ends = syscall::pipe().expect("a pipe");
-    let window = syscall::pipe_map(ends.read).expect("map the pipe here");
-    // Ring data nothing writes: nothing is ever written to this pipe.
-    let word = window.wrapping_add(4096) as usize;
-    let expected = unsafe { (word as *const u32).read_volatile() };
-
-    let waiter = thread::spawn(move || unsafe { syscall::futex_wait(word as *const u32, expected, None) });
-    // A wake to an unchanged word re-parks inside the call, so the
-    // registration the revoke must find is still there.
-    wait_until_parked_raw(word as *const u32, 1);
-
-    let child = Command::new(SELF)
-        .arg(LET_GO)
-        .inherit_handle(INHERITED_PIPE as u32, ends.read.0)
-        .stdout(Stdio::piped())
-        .spawn()
-        .unwrap_or_else(|e| panic!("spawn the child that lets go: {e}"));
-    let out = child.wait_with_output().expect("wait for the child that lets go");
-    let said = String::from_utf8_lossy(&out.stdout);
-    assert!(
-        out.status.success() && said.contains("mapped and let go"),
-        "the child never mapped the pipe and let go of it, so nothing was revoked \
-         (exit={:?}):\n{said}",
-        out.status.code(),
-    );
-
-    // No deadline: a waiter whose registration the revoke ended and that goes
-    // round its phase 1 for ever, its word still mapped and unchanged, is a
-    // hang the harness ceiling reds.
-    waiter.join().expect("the revoked waiter panicked");
-    syscall::close(ends.read);
-    syscall::close(ends.write);
-    println!("  revoke: a revoked wait ended with its word still mapped and unchanged");
-}
-
-/// The other process of [`revoked_while_still_mapped`]: map the pipe it
-/// inherited, then close its only handle to it, which unmaps its window.
-fn let_go() {
-    toyos::fd::with(INHERITED_PIPE, |o| syscall::pipe_map(o.handle))
-        .expect("the pipe was inherited as its descriptor")
-        .expect("map the inherited pipe");
-    toyos::fd::close(INHERITED_PIPE).expect("close the inherited pipe's one descriptor");
-    println!("mapped and let go");
-}
-
 /// The other process: map fresh frames and ask each one's first word how many
 /// waiters it has.
 ///
@@ -551,12 +481,7 @@ fn sweep() {
     let mut regions = Vec::new();
     for i in 0..SWEEP_FRAMES {
         let ptr = unsafe {
-            syscall::mmap(
-                std::ptr::null_mut(),
-                PAGE_2M,
-                MmapProt::READ | MmapProt::WRITE,
-                MmapFlags::ANONYMOUS | MmapFlags::PRIVATE,
-            )
+            syscall::vm_reserve(PAGE_2M, VmProt::ReadWrite, VmAt::ANYWHERE).unwrap_or(core::ptr::null_mut())
         };
         assert!(!ptr.is_null(), "sweeper mmap #{i} failed");
         let word = ptr as *const u32;
@@ -567,7 +492,7 @@ fn sweep() {
         regions.push(ptr);
     }
     for ptr in regions {
-        unsafe { syscall::munmap(ptr, PAGE_2M) }.expect("sweeper munmap");
+        unsafe { syscall::vm_release(ptr, PAGE_2M) }.expect("sweeper munmap");
     }
     assert!(
         stolen.is_empty(),

@@ -18,7 +18,6 @@ pub use reloc::{
 };
 
 use crate::mm::{align_2m_checked, KernelSlice, MAX_HEAP_ALLOC, PAGE_2M, PAGE_BYTES};
-use crate::process::PageAlloc;
 use crate::UserAddr;
 use toyos_elf::dynamic::{Dynamic, InitArray};
 use toyos_elf::section::{SectionTable, SHT_DYNSYM};
@@ -44,6 +43,48 @@ pub fn parse_layout(data: &[u8]) -> Result<Layout, &'static str> {
     Ok(layout)
 }
 
+/// A module's memory: one run of 2 MiB pages the kernel lays an image out in,
+/// addressed as one slice, and mapped as the object it is.
+pub struct Run(alloc::sync::Arc<crate::object::shm::SharedMemObject>);
+
+impl Run {
+    /// `size` bytes of zeroed memory in one run.
+    pub fn new(size: usize) -> Option<Self> {
+        crate::object::shm::SharedMemObject::create_run(&crate::mm::charge::current(), size as u64).ok().map(Self)
+    }
+
+    pub fn ptr(&self) -> *mut u8 {
+        crate::DirectMap::from_phys(self.phys()).as_mut_ptr()
+    }
+
+    pub fn phys(&self) -> u64 {
+        self.0.run().expect("elf: a module's memory is a run").0
+    }
+
+    pub fn size(&self) -> usize {
+        self.0.size() as usize
+    }
+
+    /// This allocation as a bounds-checked window; a `&mut [u8]` here would carry `noalias`/`dereferenceable` into LLVM over pages that become a user mapping.
+    pub fn window(&self) -> KernelSlice {
+        KernelSlice::whole(self)
+    }
+
+    pub fn object(&self) -> &alloc::sync::Arc<crate::object::shm::SharedMemObject> {
+        &self.0
+    }
+}
+
+// SAFETY: `ptr()`/`size()` are the run the object owns for as long as `self` holds it.
+unsafe impl crate::mm::Allocation for Run {
+    fn ptr(&self) -> *mut u8 {
+        Run::ptr(self)
+    }
+    fn size(&self) -> usize {
+        Run::size(self)
+    }
+}
+
 /// One TLS module's placement within a thread's combined TLS block.
 #[derive(Clone)]
 pub struct TlsModule {
@@ -66,8 +107,8 @@ pub struct TlsModuleInfo<'a> {
 }
 
 pub struct LoadedLib {
-    /// The one allocation the module's image is loaded into, this process's own.
-    pub memory: PageAlloc,
+    /// The one run the module's image is loaded into, this process's own.
+    pub memory: Run,
     pub user_base: UserAddr,
     /// Bounds-checked view of the whole loaded image.
     pub image: KernelSlice,
@@ -100,8 +141,8 @@ impl LoadedLib {
     /// Protection for the page at `offset`: exec below the writable window,
     /// write inside it, read-only above — over-permissive, never under, for
     /// an unusual segment layout.
-    fn page_prot(&self, offset: u64) -> crate::mm::policy::Prot {
-        use crate::mm::policy::Prot;
+    fn page_prot(&self, offset: u64) -> kernel::vm::Prot {
+        use kernel::vm::Prot;
         if offset < self.rw_lo {
             Prot::ReadExec
         } else if offset < self.rw_hi {
@@ -111,29 +152,22 @@ impl LoadedLib {
         }
     }
 
-    /// Give this module a virtual address in `pt` and map its pages there.
-    /// Maps each window once, at its final protection — mapping the whole
-    /// image writable first would leave `.text` writable.
-    pub fn map_into(&self, pt: &crate::process::PageTables) -> Option<UserAddr> {
-        use crate::mm::policy::WindowProt;
-
-        let (image_phys, image_size) = (crate::DirectMap::phys_of(self.memory.ptr()), self.memory.size() as u64);
-
-        let base = pt
-            .lock()
-            .alloc_region(image_size, crate::vma::RegionKind::Mapped)?;
-
-        let mut offset = 0;
-        while offset < image_size {
-            let phys = image_phys + offset;
-            let mut prot = WindowProt::uniform(crate::mm::policy::Prot::Read);
-            let mut page = 0;
-            while page < PAGE_2M {
-                prot.set(page, self.page_prot(offset + page));
-                page += 4096;
+    /// Give this module a virtual address in `space` and map its pages there,
+    /// each run of pages at its final protection — mapping the whole image
+    /// writable first would leave `.text` writable. `None` where the space has
+    /// no room.
+    pub fn map_into(&self, space: &crate::process::PageTables) -> Option<UserAddr> {
+        use crate::mm::space::At;
+        let (image, size) = (self.memory.object(), self.memory.size() as u64);
+        let mut space = space.lock();
+        let base = space.reserve(size, At::ANYWHERE, kernel::vm::Prot::None).ok()?;
+        let ceil = |x: u64| x.next_multiple_of(crate::mm::PAGE_SIZE).min(size);
+        let cuts = [0, ceil(self.rw_lo), ceil(self.rw_hi), size];
+        for cut in cuts.windows(2) {
+            let (from, to) = (cut[0], cut[1]);
+            if from < to {
+                space.map(image.clone(), from, to - from, self.page_prot(from), At::Fixed(base + from)).ok()?;
             }
-            pt.lock().map_window(UserAddr::new(base.raw() + offset), phys, &prot);
-            offset += PAGE_2M;
         }
         Some(base)
     }
@@ -326,7 +360,7 @@ pub fn load_shared_lib(backing: &dyn crate::file_backing::FileBacking) -> Result
     };
 
     let alloc =
-        PageAlloc::new(load_size).ok_or("dlopen: allocation failed")?;
+        Run::new(load_size).ok_or("dlopen: allocation failed")?;
     // Every offset below is bounded against what the PMM actually returned, not `load_size`.
     let image = alloc.window();
 

@@ -36,6 +36,6 @@ only where it agrees with a separate stress of the real copy path.
 
 `build/sourcegate.rs`'s `no_slice_or_exclusive_reference_is_built_over_a_mapped_page`
 is the precedent for preferring a compile-or-gate answer here: it closed the
-boundary's version of this question over `sdk/abi/src/ring.rs` and
-`kernel/src/user_ptr.rs`, and the defect record it closed is already deleted
+boundary's version of this question over `kernel/src/user_ptr.rs` and the
+pipe ring the kernel then kept, and the defect record it closed is already deleted
 from this tracker.

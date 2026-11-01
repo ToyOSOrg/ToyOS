@@ -14,24 +14,26 @@ license = "MIT OR Apache-2.0"
 publish = false
 
 [features]
-# Signing, for the host that holds the key. Off in the loader and the updater,
-# so no binary on the machine carries a path that makes a signature.
-sign = []
+# Signing and deriving a seed's public key, for the host that holds the key.
+# Off in the loader and the updater, so no binary on the machine carries a
+# path that makes a signature.
+sign = ["toyos-crypto/sign"]
 
 [dependencies]
-# **The one verifier, and why this one.** `ed25519-dalek` is the Ed25519 the
-# Rust ecosystem ships (RustCrypto's `ssh-key` and `russh`, which this tree's
-# sshserver already runs, verify with it), it is `no_std` without `alloc`, and it
-# is already resolved in the userland lockfile at this version. No default
-# features: no `std`, no precomputed tables (a verify is one per boot), no
-# `zeroize` (the machine holds no secret key). Verified with `verify_strict`,
-# which refuses the small-order and non-canonical encodings RFC 8032 §5.1.7
-# leaves to the implementation.
-ed25519-dalek = { version = "2.2", default-features = false }
-# SHA-512 over the signed header, as SSHSIG names it.
-toyos-sha2 = { path = "../sha2" }
-# SHA-256 over the sections and a package archive, on the CPU's SHA
-# instructions where it has them.
-toyos-sha2-hw = { path = "../sha2-hw" }
+# Ed25519 verification (RFC 8032, small-order keys and non-canonical
+# encodings refused), SHA-512 over the signed header as SSHSIG names it, and
+# SHA-256 over the sections and a package archive. `no_std`.
+toyos-crypto = { path = "../crypto" }
 # The calendar a repository document's `expires` is written in, the tree's one.
 toyos-wallclock = { path = "../wallclock" }
+
+# The other verifiers the image signature is held against: RustCrypto's
+# `verify_strict` and ring's.
+[[test]]
+name = "ed25519_oracles"
+required-features = ["sign"]
+
+[dev-dependencies]
+toyos-crypto = { path = "../crypto", features = ["sign"] }
+ed25519-dalek = "2.2"
+ring = "0.17.14"

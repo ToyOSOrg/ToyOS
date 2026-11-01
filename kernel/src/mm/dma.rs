@@ -181,7 +181,7 @@ impl DmaPool {
     /// untranslated device, where the pages lie above it.
     pub fn alloc_in(size: usize, space: DeviceSpace, limit: Limit) -> Result<Self, IommuError> {
         let pages_2m = size.div_ceil(super::PAGE_2M as usize);
-        let pages = super::pmm::alloc_contiguous(pages_2m)
+        let pages = super::pmm::alloc_contiguous_for_kernel(pages_2m)
             .expect("DmaPool: out of physical memory");
         let base = pages[0].direct_map();
         let size = pages_2m * super::PAGE_2M as usize;

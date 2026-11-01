@@ -8,43 +8,50 @@ use core::sync::atomic::{AtomicU64, Ordering};
 
 use crate::arch::percpu;
 
-/// One variant per interrupt source this kernel counts; order matches `arch::idt`'s vector table.
-/// Adding a device vector means adding a variant here and one `irq_took!` at its handler.
-/// A variant nothing counts does not compile: `irq_took!` is the only reference, so `-D dead-code` refuses an unconstructed one.
-#[derive(Clone, Copy, PartialEq, Eq, Debug)]
-#[repr(usize)]
-pub enum Source {
-    /// Vector 0x20, this CPU's LAPIC one-shot: an expiry and nothing else.
-    Timer,
-    /// Vector 0xFC, `irqchip::kick_cpu`'s IPI.
-    Kick,
-    /// Vectors 0x28-0x2C: the MSI-X of a PCI function a process drives, and
-    /// the lines of an ISA function one does. One count for all five: which
-    /// claim an interrupt belonged to is the claim's own record, and the census
-    /// is about this machine's interrupt routing.
-    UserDev,
-    /// Vector 0x25, the remapping unit's fault event.
-    DmaFault,
-    /// Vector 0xFE, the TLB shootdown IPI.
-    Tlb,
-    /// Vector 0x02, which `crate::hardlockup` samples a CPU with.
-    Nmi,
-    /// Vector 0xFF, the local APIC's spurious vector.
-    /// A non-zero count on a machine that staged nothing is an interrupt-routing defect.
-    Spurious,
-    /// Every vector no `idt_vectors!` row claims — `arch::trap::unclaimed`.
-    /// A non-zero count a boot staged nothing for is a routing defect the gate kept off `#DF`.
-    Unclaimed,
+/// The census's sources: these, and between the device vectors and the IPIs,
+/// those the architecture names (`arch::census_sources!`).
+macro_rules! sources {
+    ($($(#[$meta:meta])* $arch:ident => $name:literal,)*) => {
+        /// One variant per interrupt source this kernel counts; order matches `arch::idt`'s vector table.
+        /// Adding a device vector means adding a variant here, or the architecture's, and one `irq_took!` at its handler.
+        /// A variant nothing counts does not compile: `irq_took!` is the only reference, so `-D dead-code` refuses an unconstructed one.
+        #[derive(Clone, Copy, PartialEq, Eq, Debug)]
+        #[repr(usize)]
+        pub enum Source {
+            /// Vector 0x20, this CPU's LAPIC one-shot: an expiry and nothing else.
+            Timer,
+            /// Vector 0xFC, `irqchip::kick_cpu`'s IPI.
+            Kick,
+            /// Vectors 0x28-0x2C: the MSI-X of a PCI function a process drives, and
+            /// the lines of an ISA function one does. One count for all five: which
+            /// claim an interrupt belonged to is the claim's own record, and the census
+            /// is about this machine's interrupt routing.
+            UserDev,
+            /// Vector 0x25, the remapping unit's fault event.
+            DmaFault,
+            $($(#[$meta])* $arch,)*
+            /// Vector 0xFE, the TLB shootdown IPI.
+            Tlb,
+            /// Vector 0x02, which `crate::hardlockup` samples a CPU with.
+            Nmi,
+            /// Vector 0xFF, the local APIC's spurious vector.
+            /// A non-zero count on a machine that staged nothing is an interrupt-routing defect.
+            Spurious,
+            /// Every vector no `idt_vectors!` row claims — `arch::trap::unclaimed`.
+            /// A non-zero count a boot staged nothing for is a routing defect the gate kept off `#DF`.
+            Unclaimed,
+        }
+
+        impl Source {
+            /// Order `tests/toyos.rs`'s `irq_census_conservation` parses back; must match variant order.
+            pub const NAMES: &'static [&'static str] =
+                &["timer", "kick", "userdev", "dmafault", $($name,)* "tlb", "nmi", "spurious", "unclaimed"];
+            pub const COUNT: usize = Self::NAMES.len();
+        }
+    };
 }
 
-impl Source {
-    pub const COUNT: usize = 8;
-
-    /// Order `tests/toyos.rs`'s `irq_census_conservation` parses back; must match variant order.
-    pub const NAMES: [&'static str; Self::COUNT] = [
-        "timer", "kick", "userdev", "dmafault", "tlb", "nmi", "spurious", "unclaimed",
-    ];
-}
+crate::arch::census_sources!(sources);
 
 /// Every source's count summed, bar the NMI's.
 fn sum_bar_nmi(counts: &[u64; Source::COUNT]) -> u64 {

@@ -7,8 +7,8 @@ use crate::fs::FsError;
 pub const MAGIC: [u8; 4] = *b"BCFS";
 pub const VERSION: u32 = 2;
 
-/// The designation stamp: the *only* thing that authorises ToyOS to destroy
-/// what is on a block device.
+/// The designation stamp: the only thing that authorises a file server to
+/// format a partition that holds no volume of this format.
 ///
 /// Not a bcachefs concept, and it lives here anyway, because it occupies the
 /// same block as the superblock and the one invariant that matters is that
@@ -17,16 +17,35 @@ pub const VERSION: u32 = 2;
 ///
 /// Bytes 0..16 are this magic and bytes 16..24 the little-endian block count
 /// of the device the stamp designates, so a stamped image copied onto a
-/// different disk designates nothing. The rest of the block is ignored.
-///
-/// Reading it is safe on any disk; writing it is the act of designation, and
-/// it destroys whatever partition table was there. That is the point: there
-/// is no way to designate a disk by accident, and no way to do it without
-/// having already decided to lose its contents.
-pub const DESIGNATION_MAGIC: [u8; 16] = *b"TOYOS-FORMAT-ME\0";
+/// different disk designates nothing. The rest of the block is zero when
+/// written and ignored when read.
+const DESIGNATION_MAGIC: [u8; 16] = *b"TOYOS-FORMAT-ME\0";
 
-/// Bytes 16..24 of a designation stamp.
-pub const DESIGNATION_BLOCKS_OFFSET: usize = 16;
+const DESIGNATION_BLOCKS_OFFSET: usize = 16;
+
+/// Block 0 of a device of `blocks` blocks that designates it, whole.
+pub fn designation(blocks: u64) -> [u8; BLOCK_SIZE] {
+    let mut block = [0u8; BLOCK_SIZE];
+    block[..DESIGNATION_MAGIC.len()].copy_from_slice(&DESIGNATION_MAGIC);
+    block[DESIGNATION_BLOCKS_OFFSET..DESIGNATION_BLOCKS_OFFSET + 8].copy_from_slice(&blocks.to_le_bytes());
+    block
+}
+
+/// Whether `block0` begins as a volume of this format's does, whatever state
+/// the rest of the volume is in.
+pub fn carries_volume(block0: &[u8]) -> bool {
+    block0.get(..MAGIC.len()) == Some(&MAGIC)
+}
+
+/// The block count a stamp at the front of `block0` names, or `None` where
+/// `block0` carries none.
+pub fn designated(block0: &[u8]) -> Option<u64> {
+    if block0.get(..DESIGNATION_MAGIC.len())? != DESIGNATION_MAGIC {
+        return None;
+    }
+    let count = block0.get(DESIGNATION_BLOCKS_OFFSET..DESIGNATION_BLOCKS_OFFSET + 8)?;
+    Some(u64::from_le_bytes(count.try_into().ok()?))
+}
 
 const _: () = assert!(
     DESIGNATION_MAGIC[0] != MAGIC[0]
@@ -79,7 +98,7 @@ impl fmt::Display for FsUuid {
 }
 
 /// On-disk superblock layout. Stored at block 0 and backed up at the last block.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Superblock {
     pub block_count: u64,
     pub root_node: BlockNum,
@@ -97,6 +116,13 @@ pub struct Superblock {
 
 impl Superblock {
     pub(crate) const CRC_START: usize = 12; // CRC covers bytes [12..4096]
+
+    /// Whether `self` names the same commit as `other`, which the medium
+    /// holds. The allocation cursor is not compared: it is only where a scan
+    /// begins, and a commit's own frees move it after its superblock lands.
+    pub fn same_commit(&self, other: &Self) -> bool {
+        *self == Self { next_alloc: self.next_alloc, ..other.clone() }
+    }
 
     pub fn is_clean(&self) -> bool {
         self.flags & 1 != 0
@@ -297,4 +323,24 @@ fn write_u32(buf: &mut [u8], off: usize, val: u32) {
 
 fn write_u64(buf: &mut [u8], off: usize, val: u64) {
     buf[off..off + 8].copy_from_slice(&val.to_le_bytes());
+}
+
+#[cfg(test)]
+mod designation_tests {
+    use super::*;
+
+    /// A stamp names the count it was made for, and a block that does not
+    /// begin with the magic names nothing, a superblock's first among them.
+    #[test]
+    fn a_stamp_names_its_block_count_and_nothing_else_is_one() {
+        for blocks in [1, 43_000_000, u64::MAX] {
+            assert_eq!(designated(&designation(blocks)), Some(blocks));
+        }
+        let mut superblock = [0u8; BLOCK_SIZE];
+        superblock[..4].copy_from_slice(&MAGIC);
+        assert_eq!(designated(&superblock), None);
+        assert_eq!(designated(&[0u8; BLOCK_SIZE]), None);
+        assert_eq!(designated(&designation(7)[..20]), None, "a block too short for its count");
+        assert!(designation(7)[24..].iter().all(|b| *b == 0), "the rest of the stamp's block is zero");
+    }
 }

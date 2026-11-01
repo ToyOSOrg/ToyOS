@@ -698,6 +698,12 @@ pub enum Profile {
     /// `iommu_platform=on`, so behind the unit on paper and bypassing it in
     /// fact: the function a claim must never be handed.
     HeadlessNicUntranslated,
+    /// [`Profile::Headless`] with an `e1000e`, QEMU's 82574L, where its virtio
+    /// NIC was: a NIC the image's rows name no machine for.
+    HeadlessE1000e,
+    /// [`Profile::Headless`] with two virtio NICs, each on a user network of
+    /// its own: [`TWO_NICS`].
+    HeadlessTwoNics,
     /// [`Profile::Headless`] with the kernel's virtio console created without
     /// `iommu_platform=on`: a device the kernel itself must tell physical
     /// addresses.
@@ -726,6 +732,11 @@ pub enum Profile {
     /// QMP sends goes to ([`Shape::usb`]): it reaches the owner of input
     /// through usbd.
     MetalUsbKeyboard,
+    /// [`Profile::Metal`] whose NVMe disk is another system's, laid out as a
+    /// bench's internal disk is before ToyOS is installed on it
+    /// ([`super::hostdisk`]), on QEMU's controller under Intel's id
+    /// (`use-intel-id=on`, `8086:5845`) rather than its own.
+    MetalBesideAHostDisk,
     /// [`Profile::Metal`] on a CPU whose CPUID offers no x2APIC, emulated
     /// whatever the host, so its local APICs run in xAPIC mode: the machine
     /// an AMD laptop without x2APIC is.
@@ -804,12 +815,15 @@ impl Profile {
             | Self::HeadlessUsbSpare
             | Self::HeadlessNicBehindPort
             | Self::HeadlessNicUntranslated
+            | Self::HeadlessE1000e
+            | Self::HeadlessTwoNics
             | Self::HeadlessConsoleUntranslated
             | Self::HeadlessTwoEdu
             | Self::HeadlessHotplugPort
             | Self::Metal
             | Self::MetalTwoHda
             | Self::MetalUsbKeyboard
+            | Self::MetalBesideAHostDisk
             | Self::MetalNoX2apic
             | Self::MetalAmdVi
             | Self::MetalAmdViTestdev
@@ -930,7 +944,17 @@ enum Nic {
     BehindPort,
     /// The virtio NIC without `iommu_platform=on`, whatever unit the machine has.
     Untranslated,
+    /// QEMU's `e1000e`, which the unit decodes as it does every function
+    /// that is not virtio.
+    E1000e,
+    /// Two virtio NICs: [`TWO_NICS`].
+    VirtioPair,
 }
+
+/// [`Profile::HeadlessTwoNics`]'s NICs, in the order QEMU creates them: each
+/// device's id, which QMP's `set_link` names, and its user network, which
+/// QEMU's host is `.2` of. The first is QEMU's default network.
+pub const TWO_NICS: [(&str, &str); 2] = [("nic0", "10.0.2.0/24"), ("nic1", "10.0.3.0/24")];
 
 /// Everything a profile decides about the machine, in one table. A new
 /// variant answers every question here or does not compile — which `self !=
@@ -1022,14 +1046,24 @@ enum Probes {
 /// backing file is sparse either way.
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum Storage {
-    /// The image on a USB stick on the first xHCI, which the kernel drives,
-    /// and DATA on an NVMe disk of its own of this many bytes; zero is a
-    /// machine with no NVMe controller.
-    Stick { nvme_bytes: u64 },
+    /// The image on a USB stick on the first xHCI, and beside it what one
+    /// NVMe controller carries.
+    Stick { beside: Beside },
     /// One NVMe disk and no stick: DATA, of this many bytes, and the image
     /// installed after it (`toyos_build::image::install`). The firmware boots
     /// it, and after the loader every partition of it is the block service's.
     Disk { data_bytes: u64 },
+}
+
+/// The NVMe disk beside a boot stick.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Beside {
+    /// No NVMe controller.
+    Nothing,
+    /// A blank disk of this many bytes, for DATA.
+    Blank(u64),
+    /// [`super::hostdisk`]'s, on a controller under Intel's id.
+    HostDisk,
 }
 
 impl Storage {
@@ -1071,7 +1105,7 @@ impl Profile {
                 xhci: &[XHCI_DEFAULT],
                 usb: &[],
                 blockdevs: &[],
-                storage: Storage::Stick { nvme_bytes: 0 },
+                storage: Storage::Stick { beside: Beside::Nothing },
                 iommu: None,
                 probes: Probes::Absent,
                 rng: true,
@@ -1107,7 +1141,7 @@ impl Profile {
                 xhci: &[XHCI_DEFAULT],
                 usb: &[],
                 blockdevs: &[],
-                storage: Storage::Stick { nvme_bytes: NVME_SMALL },
+                storage: Storage::Stick { beside: Beside::Blank(NVME_SMALL) },
                 iommu: Some(Unit::Vtd(IOMMU_DEFAULT)),
                 probes: Probes::Absent,
                 rng: false,
@@ -1118,6 +1152,7 @@ impl Profile {
             Self::MetalNoX2apic => Self::Metal.shape(),
             Self::MetalTwoHda => Shape { hda: true, ..Self::Metal.shape() },
             Self::MetalUsbKeyboard => Shape { usb: &["usb-kbd,bus=xhci.0"], ..Self::Metal.shape() },
+            Self::MetalBesideAHostDisk => Shape { storage: Storage::Stick { beside: Beside::HostDisk }, ..Self::Metal.shape() },
             Self::MetalAmdVi => Shape { iommu: Some(Unit::AmdVi { intremap: false }), ..Self::Metal.shape() },
             Self::HeadlessUsbSpareAmdVi => {
                 Shape { iommu: Some(Unit::AmdVi { intremap: true }), ..Self::HeadlessUsbSpare.shape() }
@@ -1131,6 +1166,8 @@ impl Profile {
             Self::HeadlessVirtioGpu => Shape { virtio_gpu: true, ..Self::Headless.shape() },
             Self::HeadlessNicBehindPort => Shape { nic: Nic::BehindPort, ..Self::Headless.shape() },
             Self::HeadlessNicUntranslated => Shape { nic: Nic::Untranslated, ..Self::Headless.shape() },
+            Self::HeadlessE1000e => Shape { nic: Nic::E1000e, ..Self::Headless.shape() },
+            Self::HeadlessTwoNics => Shape { nic: Nic::VirtioPair, ..Self::Headless.shape() },
             Self::HeadlessConsoleUntranslated => Shape { console_bypasses: true, ..Self::Headless.shape() },
             Self::HeadlessTwoEdu => Shape { probes: Probes::Edus, ..Self::Headless.shape() },
             Self::HeadlessHotplugPort => Shape { probes: Probes::HotplugPort, ..Self::Headless.shape() },
@@ -1203,6 +1240,10 @@ pub struct BootOptions {
     /// A slot file (`toyos_update::slots::*_FILE`) bent in the marked slot,
     /// with the other slot carrying the image whole ([`super::slots`]).
     pub bent: Option<&'static str>,
+    /// A TCP port of the host's loopback, `.0`, that QEMU's user network
+    /// forwards to the guest's port `.1`: what a peer on the host connects to a
+    /// guest's listener through. Only a profile with a NIC may set it.
+    pub forward: Option<(u16, u16)>,
 }
 
 impl BootOptions {
@@ -1244,6 +1285,7 @@ impl Default for BootOptions {
             psci_trace: None,
             rtc_base: None,
             bent: None,
+            forward: None,
         }
     }
 }
@@ -1273,7 +1315,7 @@ pub struct QemuInstance {
     rx: Receiver<String>,
     _reader_thread: thread::JoinHandle<String>,
     /// Held for the claim: one live guest per NVMe image.
-    _nvme: NvmeClaim,
+    nvme: NvmeClaim,
     sockets: Sockets,
     screendump: PathBuf,
     /// The image this boot built for itself.
@@ -1517,23 +1559,24 @@ impl QemuInstance {
         // One live guest per image, claimed here rather than discovered from
         // QEMU's stderr after the second process has already exited — see
         // [`NvmeClaim`] — and claimed before the remaking, which truncates.
-        let nvme_bytes = match storage {
-            Storage::Stick { nvme_bytes } => nvme_bytes,
-            Storage::Disk { .. } => 0,
+        let beside = match storage {
+            Storage::Stick { beside } => beside,
+            Storage::Disk { .. } => Beside::Nothing,
         };
-        let nvme_image = if nvme_bytes == 0 {
+        let nvme = match beside {
             // A profile with no NVMe disk beside its image gets no backing
             // file either; the path is never passed to QEMU.
-            test_dir.join("no-nvme")
-        } else {
-            test_dir.join(format!("test-nvme-{nvme_bytes}.img"))
-        };
-        let nvme = if nvme_bytes == 0 {
-            NvmeClaim::unattached(&nvme_image)
-        } else {
-            let claim = NvmeClaim::take(&nvme_image).unwrap_or_else(|why| panic!("[qemu] {why}"));
-            toyos_build::build::create_sparse(claim.path(), nvme_bytes);
-            claim
+            Beside::Nothing => NvmeClaim::unattached(&test_dir.join("no-nvme")),
+            Beside::Blank(bytes) => {
+                let claim = NvmeClaim::take(&test_dir.join(format!("test-nvme-{bytes}.img"))).unwrap_or_else(|why| panic!("[qemu] {why}"));
+                toyos_build::build::create_sparse(claim.path(), bytes);
+                claim
+            }
+            Beside::HostDisk => {
+                let claim = NvmeClaim::take(&test_dir.join("host-disk.img")).unwrap_or_else(|why| panic!("[qemu] {why}"));
+                fs::write(claim.path(), super::hostdisk::bytes()).expect("[qemu] the host disk's file");
+                claim
+            }
         };
 
         let sockets = Sockets::new(&options);
@@ -1710,6 +1753,11 @@ impl QemuInstance {
     /// What the guest wrote to it is whole once [`Self::await_exit`] answers.
     pub fn boot_image(&self) -> &Path {
         &self.boot_image
+    }
+
+    /// The file the NVMe disk beside a stick is.
+    pub fn nvme_image(&self) -> &Path {
+        self.nvme.path()
     }
 
     pub fn stdin_mut(&mut self) -> &mut BufWriter<ChildStdin> {
@@ -2194,6 +2242,21 @@ fn shutdown_reason(bytes: &[u8]) -> Option<String> {
     Some(value.to_string())
 }
 
+/// An open QMP connection for a NIC's link: the carrier its guest driver
+/// reads.
+pub struct QmpLink(Qmp);
+
+impl QmpLink {
+    pub fn open(socket: &Path) -> Self {
+        Self(Qmp::connect(socket))
+    }
+
+    /// The NIC `id`'s link up or down, as its driver will read it.
+    pub fn set(&mut self, id: &str, up: bool) {
+        self.0.execute(&format!("{{\"execute\":\"set_link\",\"arguments\":{{\"name\":\"{id}\",\"up\":{up}}}}}"));
+    }
+}
+
 /// An open QMP connection to QEMU's human monitor, for the questions QMP has
 /// no command of its own for.
 pub struct QmpMonitor(Qmp);
@@ -2450,17 +2513,17 @@ fn qemu_command(
     // Its MSI-X table in BAR 0, QEMU's default, which the nvme driver's claim maps
     // with the registers. One controller and one namespace whichever disk it
     // is: the nvme driver reads namespace 1 of the controller it drives.
-    let namespace = match shape.storage {
-        Storage::Stick { nvme_bytes: 0 } => None,
-        Storage::Stick { .. } => {
+    let (namespace, vendor_id_option) = match shape.storage {
+        Storage::Stick { beside: Beside::Nothing } => (None, ""),
+        Storage::Stick { beside } => {
             qemu.arg("-drive").arg(format!("if=none,id=nvme0,format=raw,file={}", nvme_image.display()));
-            Some("drive=nvme0")
+            (Some("drive=nvme0"), if beside == Beside::HostDisk { ",use-intel-id=on" } else { "" })
         }
-        Storage::Disk { .. } => Some("drive=disk,bootindex=0"),
+        Storage::Disk { .. } => (Some("drive=disk,bootindex=0"), ""),
     };
     if let Some(namespace) = namespace {
         qemu.arg("-device")
-            .arg("nvme,serial=deadbeef,id=nvme0ctl")
+            .arg(format!("nvme,serial=deadbeef,id=nvme0ctl{vendor_id_option}"))
             .arg("-device")
             .arg(format!("nvme-ns,{namespace},bus=nvme0ctl,logical_block_size=512,physical_block_size=512"));
     }
@@ -2519,19 +2582,37 @@ fn qemu_command(
     // The NIC before the virtio block, so a profile that has one and not the
     // other still creates it after the unit and before everything else.
     // `iommu_platform` is virtio's own way of asking to be decoded.
+    assert!(options.forward.is_none() || shape.nic != Nic::Absent, "a forwarded port needs a profile with a NIC");
+    let netdev = match options.forward {
+        Some((host, guest)) => format!("user,id=net0,hostfwd=tcp:127.0.0.1:{host}-:{guest}"),
+        None => "user,id=net0".to_string(),
+    };
     match shape.nic {
         Nic::Absent => {}
         Nic::Virtio => {
-            qemu.arg("-netdev").arg("user,id=net0").arg("-device").arg(format!(
+            qemu.arg("-netdev").arg(&netdev).arg("-device").arg(format!(
                 "virtio-net-pci-non-transitional,netdev=net0{platform}"
             ));
         }
         Nic::Untranslated => {
-            qemu.arg("-netdev").arg("user,id=net0").arg("-device").arg("virtio-net-pci-non-transitional,netdev=net0");
+            qemu.arg("-netdev").arg(&netdev).arg("-device").arg("virtio-net-pci-non-transitional,netdev=net0");
+        }
+        // No option ROM: firmware has no use for the NIC.
+        Nic::E1000e => {
+            qemu.arg("-netdev").arg(&netdev).arg("-device").arg("e1000e,netdev=net0,romfile=");
+        }
+        Nic::VirtioPair => {
+            for (n, (id, net)) in TWO_NICS.iter().enumerate() {
+                let netdev = if n == 0 { netdev.clone() } else { format!("user,id=net{n},net={net}") };
+                qemu.arg("-netdev").arg(&netdev).arg("-device").arg(format!(
+                    "virtio-net-pci-non-transitional,netdev=net{n},id={id},mac=52:54:00:12:34:5{}{platform}",
+                    6 + n
+                ));
+            }
         }
         Nic::BehindPort => {
             qemu.arg("-device").arg("pcie-root-port,id=nicport,chassis=9");
-            qemu.arg("-netdev").arg("user,id=net0").arg("-device").arg(format!(
+            qemu.arg("-netdev").arg(&netdev).arg("-device").arg(format!(
                 "virtio-net-pci-non-transitional,netdev=net0,bus=nicport{platform}"
             ));
         }
@@ -2738,7 +2819,7 @@ fn spawn_and_wait_ready(mut qemu: Command, options: BootOptions, files: Files) -
         stdin,
         rx,
         _reader_thread: reader_thread,
-        _nvme: nvme,
+        nvme,
         sockets,
         screendump,
         boot_image,
@@ -2798,10 +2879,14 @@ fn wait_for_ready(
             // With what it did say. A timeout that discards the console is the
             // one failure in this harness that arrives with no evidence at all,
             // and "the guest printed nothing" and "the guest printed sixty
-            // lines and then stopped" are different machines.
+            // lines and then stopped" are different machines. The 16550's
+            // too: a kernel that dies before virtio-console arrives said why
+            // only there.
+            let uart = fs::read_to_string(uart_log).unwrap_or_default();
             panic!(
-                "[qemu] Boot timed out waiting for {ready}; the console carried:\n{}",
-                if seen.is_empty() { "nothing at all".to_string() } else { seen.clone() }
+                "[qemu] Boot timed out waiting for {ready}; the console carried:\n{}\nuart:\n{}",
+                if seen.is_empty() { "nothing at all" } else { &seen },
+                if uart.is_empty() { "nothing at all" } else { &uart },
             );
         }
         match rx.recv_timeout(Duration::from_secs(1)) {

@@ -6,7 +6,7 @@ edition = "2021"
 license = "MIT OR Apache-2.0"
 
 [dependencies]
-toyos = { path = "../../sdk/toyos" }
+toyos = { path = "../../sdk/toyos", features = ["std"] }
 toyos-abi = { path = "../../sdk/abi" }
 toyos-manifest = { path = "../../lib/manifest" }
 # Its lifecycle decisions: what an end owes, which claims a start mints, and
@@ -16,6 +16,8 @@ toyos-osrelease = { path = "../../sdk/osrelease" }
 toyos-wallclock = { path = "../../lib/wallclock" }
 toyos-logstream = { path = "../../lib/logstream" }
 toyos-swap = { path = "../../lib/swap" }
+# The login session protocols: opening one, its owner's link and `logout`'s.
+toyos-session = { path = "../../lib/session" }
 # The slot table and which slot is idle, for the one row that asks for it.
 toyos-update = { path = "../../lib/update" }
 # The partition types that name the running ROOT and the slot table.
@@ -25,6 +27,7 @@ toyos-gpt = { path = "../../lib/gpt" }
 toyos-blockring = { path = "../../lib/blockring" }
 # The slot table, read through a session where the block service serves it.
 diskserver = { path = "../diskserver" }
+toyos-blockdev = { path = "../../lib/blockdev" }
 # Whether a virtio function offers `VIRTIO_F_ACCESS_PLATFORM`, read through
 # its claim before the claim moves to its holder.
 toyos-pci-claim = { path = "../../lib/pci-claim" }

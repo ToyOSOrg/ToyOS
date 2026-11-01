@@ -1,10 +1,11 @@
 //! Places: the one bound on the streams, listeners and datagram sockets clients make the node
 //! hold. A stream holds a place from its connect or its accept until the node lets it go, a
-//! listener from its listen until it is closed, a datagram socket from its bind until it is
-//! closed, and a connection the node closed holds the place its stream had until [tcp] has
-//! finished it, because its buffers are still the region its client lent and its peer decides
-//! for how long, within [tcp]'s bounds on a connection nobody holds. With no place left a
-//! connect, a listen, an accept and a bind are refused with nothing made.
+//! listener from its listen and a datagram socket from its bind until its last holder leaves,
+//! each holder past a socket's first a place of its own, and a connection the node closed holds
+//! the place its stream had until [tcp] has finished it, because its buffers are still the region
+//! its client lent and its peer decides for how long, within [tcp]'s bounds on a connection
+//! nobody holds. With no place left a connect, a listen, an accept, a bind and an export are
+//! refused with nothing made.
 //!
 //! **The node's own sockets stand outside the places.** The responder's socket for the
 //! machine's name and the socket of each query `resolve` has out are bound past
@@ -12,8 +13,11 @@
 //! bound refuse no lookup and no answer for the name. A lookup is a client's too, and its bound
 //! is `resolve`'s own: `toyos_dns::MAX_LOOKUPS` lookups, each with the queries of its rounds.
 //!
-//! The number is the shell's: each stream is its client's region, connection and bell kept
-//! alive and its connection watched, each listener its wake pipe. A new node has none.
+//! The number is the shell's: each stream is its client's region and its first holder's
+//! connection and two bells kept alive and its connection watched, each holder past the first
+//! its own connection and bells, and each holder of a listener or a datagram socket its
+//! connection and one bell, each priced as a place and one watch.
+//! A new node has none.
 //!
 //! **A place is not one size.** A stream or a connection [tcp] finishes is its client's region,
 //! and a datagram socket [udp]'s two queues of `limits::RX_DATAGRAMS` and `limits::TX_DATAGRAMS`
@@ -26,21 +30,24 @@
 //! alone, so any peer of any listener could then refuse every client its connect, listen and
 //! bind, where now it can fill only the queue of the listener it reaches.
 
-use toyos_net_wire::Instant;
-
 use crate::Node;
 
 impl Node {
     /// How many places the node has from here on. Nothing held is let go for a smaller number.
-    pub fn set_places(&mut self, now: Instant, places: usize) {
+    pub fn set_places(&mut self, places: usize) {
         self.places = places;
-        self.wake_owners(now);
+        self.tell_holders();
     }
 
-    /// The places taken: streams, listeners, datagram sockets, and connections [tcp] is
-    /// finishing alone.
+    /// The places taken: streams, listeners and datagram sockets and their holders past each
+    /// first, and connections [tcp] is finishing alone.
     pub fn held(&self) -> usize {
-        self.streams().saturating_add(self.listeners()).saturating_add(self.sockets).saturating_add(self.stack.tcp_orphans())
+        self.streams()
+            .saturating_add(self.streams.more_holders())
+            .saturating_add(self.listeners())
+            .saturating_add(self.listeners.more_holders())
+            .saturating_add(self.datagram_places())
+            .saturating_add(self.stack.tcp_orphans())
     }
 
     pub(crate) fn room(&self) -> usize {

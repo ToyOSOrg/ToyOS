@@ -1,5 +1,6 @@
-//! The metal profile: which registrations run on the T14, how they batch into
-//! images, and what each one's verdict is over the log the stick came back with.
+//! The metal profile: which registrations run on a bench, how they batch into
+//! images, and what each one's verdict is over the log each boot left on the
+//! bench's internal disk.
 //!
 //! **A registration's metal declaration is a separate table**, so a test that
 //! runs only under QEMU simply has no row. What a row says is: the boots this
@@ -34,19 +35,19 @@ pub struct Arm {
     /// config and parameters, and [`batches`] refuses a pair that does not.
     ///
     /// Named rather than derived from (config, parameters), because sharing is
-    /// not always safe and only the author knows: `mkdir_cap` fills the
-    /// machine-wide directory cap and leaves it there, so `readdir_bound`'s own
-    /// `create_dir` on that boot is refused with `OutOfMemory` and it panics. A
-    /// test that must not share names its own; it costs a minute and it says so.
+    /// not always safe and only the author knows: `readdir_bound` fills `/tmp`
+    /// to the VFS listing limit, so every later listing of `/tmp` on its boot
+    /// is refused. A test that must not share names its own; it costs a minute
+    /// and it says so.
     pub boot: &'static str,
     /// The image config, relative to the repository root.
     pub config: &'static str,
     /// What the image is armed with. Every name here is judged by the
     /// pre-flash gate (`toyos_metal::FLASHABLE`) before it is written.
     pub params: &'static [&'static str],
-    /// Binary names and runner builtins this test needs in the job list, in the
-    /// order it needs them. `reboot` is appended to every list by the
-    /// derivation and is never written here.
+    /// The jobs this test needs in the job list, in the order it needs them:
+    /// each a binary name or runner builtin and its arguments. `reboot` is
+    /// appended to every list by the derivation and is never written here.
     pub jobs: &'static [&'static str],
     /// The kernel build this boot needs, empty for the one an image ships.
     ///
@@ -70,6 +71,10 @@ pub struct Arm {
     /// image whole (`super::slots`): a boot whose subject is the loader's
     /// refusal and fallback. `None` for the one-slot image every other boot is.
     pub bent: Option<&'static str>,
+    /// A pass takes this arm's row only by the row's whole name or this
+    /// arm's boot, never unfiltered or by part of a name ([`select`]): a boot
+    /// a bench gives hours to evidence no suite pass asks for.
+    pub named_only: bool,
 }
 
 /// The ordinary arm: one boot, and the fields a caller must still say.
@@ -83,7 +88,7 @@ pub const fn once(
     params: &'static [&'static str],
     jobs: &'static [&'static str],
 ) -> Arm {
-    Arm { boot, config, params, jobs, features: &[], last: None, adds_ms: 0, bent: None }
+    Arm { boot, config, params, jobs, features: &[], last: None, adds_ms: 0, bent: None, named_only: false }
 }
 
 /// One boot carrying members that are **discovered rather than registered**.
@@ -137,8 +142,8 @@ impl SharedBoot {
 
     /// This boot with the members `named` and none else, or `None` where that
     /// is none of them. **It carries only the files and links its own members
-    /// name**: the C corpus stages a binary and an expectation per case, and a
-    /// stick is written over `ssh`.
+    /// name**: the C corpus stages a binary and an expectation per case, and an
+    /// image is written over `ssh`.
     fn keeping(&self, named: impl Fn(&str) -> bool) -> Option<SharedBoot> {
         let members: Vec<Member> = self.members.iter().filter(|member| named(&member.job)).cloned().collect();
         let mine = |path: &str| {
@@ -158,7 +163,9 @@ pub type Taken = (Vec<(&'static str, &'static Metal)>, Vec<SharedBoot>);
 /// What a run's words take of the profile: every row and shared member a
 /// `names` word is part of, and every boot a `boots` word names, whole — all
 /// its shared members, and every row with an arm on it, which brings that
-/// row's other boots. No word at all takes everything.
+/// row's other boots. No word at all takes everything but the rows with a
+/// [`Arm::named_only`] arm, which a `names` word takes only by being the
+/// row's whole name, and a `boots` word by naming its boot.
 ///
 /// **A word that takes nothing is refused**: it would be dropped in silence.
 pub fn select(
@@ -172,10 +179,13 @@ pub fn select(
         job.strip_prefix("test_rs_").unwrap_or(job)
     }
     let all = names.is_empty() && boots.is_empty();
+    let named_only = |decl: &Metal| decl.arms.iter().any(|arm| arm.named_only);
+    let takes = |word: &str, (row, decl): &(&str, Metal)| if named_only(decl) { word == *row } else { row.contains(word) };
     let jobs = || shared.iter().flat_map(|boot| &boot.members).map(|member| bare(&member.job));
-    if let Some(dead) = names.iter().find(|word| {
-        !rows.iter().any(|(name, _)| name.contains(**word)) && !jobs().any(|job| job.contains(**word))
-    }) {
+    if let Some(dead) = names
+        .iter()
+        .find(|word| !rows.iter().any(|row| takes(word, row)) && !jobs().any(|job| job.contains(**word)))
+    {
         return Err(format!("{dead:?} is part of no metal registration's name and no shared member's"));
     }
     let arms = || rows.iter().flat_map(|(_, decl)| decl.arms).map(|arm| arm.boot);
@@ -189,9 +199,10 @@ pub fn select(
         .iter()
         .filter_map(|boot| boot.keeping(|job| boots.contains(&boot.boot.as_str()) || named(bare(job))))
         .collect();
+    let row_named = |name: &str, decl: &Metal| if named_only(decl) { names.contains(&name) } else { named(name) };
     let rows = rows
         .iter()
-        .filter(|(name, decl)| named(name) || decl.arms.iter().any(|arm| boots.contains(&arm.boot)))
+        .filter(|(name, decl)| row_named(name, decl) || decl.arms.iter().any(|arm| boots.contains(&arm.boot)))
         .map(|(name, decl)| (*name, decl))
         .collect();
     Ok((rows, taken))
@@ -204,7 +215,7 @@ pub struct Metal {
     pub judge: fn(&[&Readback]) -> Result<(), String>,
 }
 
-/// What one boot left on the stick, and what the host clock saw of it.
+/// What one boot left on the bench's disk, and what the host clock saw of it.
 pub struct Readback {
     pub label: String,
     loader: String,
@@ -216,8 +227,6 @@ pub struct Readback {
     pub boot_ms: Option<u64>,
     /// What the machine spent getting back to Ubuntu's ssh server.
     pub back_secs: u64,
-    /// How long after that the boot stick's own partition was there again.
-    pub stick_secs: u64,
     /// The machine the loop read before the flash.
     pub machine: Result<Machine, String>,
     /// Where the loop's wall time went.
@@ -234,8 +243,6 @@ impl Readback {
         let kernel = bootlog::kernel_records(&log);
         let back_secs = toyos_metal::back_secs(boot)
             .ok_or_else(|| format!("{label}'s boot file names no `back_secs`: {boot:?}"))?;
-        let stick_secs = toyos_metal::stick_secs(boot)
-            .ok_or_else(|| format!("{label}'s boot file names no `stick_secs`: {boot:?}"))?;
         let phases = toyos_metal::phases(boot)
             .map_err(|why| format!("{label}'s boot file {why}: {boot:?}"))?;
         Ok(Readback {
@@ -245,7 +252,6 @@ impl Readback {
             kernel,
             log,
             back_secs,
-            stick_secs,
             machine: toyos_metal::machine(boot)
                 .map_err(|why| format!("{label}'s boot file {why}")),
             phases,
@@ -306,7 +312,7 @@ impl Readback {
     /// goes on the black-box page under the boot's `DONE` seal and comes back
     /// in the next loader pass, and this reads it there — for every boot,
     /// because the suite's whole verdict is read out of those two files.
-    pub fn log_reached_the_stick(&self) -> Result<(), String> {
+    pub fn log_is_whole_to_its_stop(&self) -> Result<(), String> {
         let after = self.after_the_reset()?;
         let text = after.text();
         // A boot its own deadline or the lockup detector ended never finished
@@ -418,8 +424,8 @@ impl Readback {
     /// **The name is the file's, truncated the way the kernel truncates it.**
     /// `ProcessEntry`'s name is `THREAD_NAME_LEN` bytes and the loader fills it
     /// from the path's last component, so a binary whose name is longer than
-    /// that is recorded under a prefix: the staged `munmap_reissues_read_window`
-    /// ends `…_reissues_rea` on the wire, and a predicate looking for the whole
+    /// that is recorded under a prefix: the staged `lent_device_memory_refused`
+    /// ends `…_device_memory_` on the wire, and a predicate looking for the whole
     /// name would find nothing on a perfectly good boot.
     ///
     /// **And the name alone does not identify one process.** A guest binary that
@@ -556,13 +562,13 @@ fn within_one_period(late_ms: i64, period_ns: u64) -> Result<(), String> {
 
 /// One image, and every test that rides it.
 /// The bytes of every line of `text` that carries `marker`, newline included:
-/// what of a load's lines a file read back off the stick holds.
+/// what of a load's lines a file read back off the log volume holds.
 pub fn bytes_of_lines(text: &str, marker: &str) -> usize {
     text.lines().filter(|l| l.contains(marker)).map(|l| l.len() + 1).sum()
 }
 
-/// The job that writes the boot stick for ever (`stick_load.rs`), so its boot
-/// is reset by its own deadline with a write in flight.
+/// The job that writes the boot's log disk for ever (`stick_load.rs`), so its
+/// boot is reset by its own deadline with a write in flight.
 pub const STICK_LOAD_JOB: &str = "test_rs_stick_load";
 
 /// That boot's deadline: past both benches' `Boot: complete` (12 s on the
@@ -601,9 +607,9 @@ impl Batch {
     /// The bound the kernel gives this whole boot, in milliseconds.
     ///
     /// **A boot carrying [`STICK_LOAD_JOB`] is ended by it on purpose**, with
-    /// the job still writing the stick: [`STICK_LOAD_DEADLINE_MS`], below the
-    /// list's own bound, so the kernel's reset path, which touches no USB
-    /// register, lands before the runner would hand the machine back.
+    /// the job still writing the disk: [`STICK_LOAD_DEADLINE_MS`], below the
+    /// list's own bound, so the kernel's reset lands before the runner would
+    /// hand the machine back.
     pub fn deadline_ms(&self) -> u64 {
         if self.jobs.iter().any(|job| job == STICK_LOAD_JOB) {
             assert!(STICK_LOAD_DEADLINE_MS < self.bound_ms(), "the load's deadline is past its runner's bound");
@@ -775,8 +781,8 @@ fn build(
     let config = home.join(format!("system-{:016x}.toml", fingerprint(&derived)));
     std::fs::write(&config, &derived).map_err(|e| format!("{}: {e}", config.display()))?;
 
-    // Only what this batch's jobs name: a stick is written over `ssh`, so an
-    // image carrying two hundred binaries it never runs is a minute of flash.
+    // Only what this batch's jobs name: an image is written over `ssh`, so one
+    // carrying two hundred binaries it never runs is a minute of flash.
     let mut extra: Vec<(String, Vec<u8>)> = Vec::new();
     for job in &batch.jobs {
         let Some(name) = job.strip_prefix("test_rs_") else { continue };
@@ -795,7 +801,7 @@ fn build(
     // looking for a child nothing had staged.
     //
     // **Which binary, though, is read rather than assumed.** Staging all of them
-    // on every image cost 150 MB a boot, and a stick is written over `ssh`. A
+    // on every image cost 150 MB a boot, and an image is written over `ssh`. A
     // driver reaches a binary as the literal `test_rs_<name>` — the same
     // spelling `suite_split` reads the harness for — so the text a boot could
     // possibly name it in is its job list, its symlink targets, and the source
@@ -1173,11 +1179,9 @@ pub fn judge_readbacks(
         };
         let ms = back.boot_ms.map_or_else(|| "-".to_string(), |ms| ms.to_string());
         eprintln!(
-            "  {label}: Boot: complete {ms} ms, a log of {} bytes, back in {} s, the stick enumerated {} s \
-             after that",
+            "  {label}: Boot: complete {ms} ms, a log of {} bytes, back in {} s",
             back.log.len(),
-            back.back_secs,
-            back.stick_secs
+            back.back_secs
         );
         eprintln!("    phases: {}", back.phases);
         let panel = back.panel();
@@ -1188,9 +1192,10 @@ pub fn judge_readbacks(
             );
         }
         let mut findings: Vec<String> = Vec::new();
-        // The census crosses only on the page, and a page the pass after the
-        // reset cleared as another image's carries none.
-        let owes_a_panel = bootlog::foreign_done(&back.loader).is_err();
+        // The census crosses only on the page, and neither a page the pass
+        // after the reset cleared as another image's nor one no kernel sealed
+        // carries one.
+        let owes_a_panel = bootlog::foreign_done(&back.loader).is_err() && !bootlog::sealed_nothing(&back.loader);
         for (field, value, owed) in [
             ("complete_ms", back.boot_ms, true),
             ("panel_max_us", panel.map(|panel| panel.max_micros), owes_a_panel),
@@ -1204,10 +1209,10 @@ pub fn judge_readbacks(
             }
         }
         // **Every boot, and before any verdict is read out of its log.** A
-        // test's judge reads the file the stick came back with, so a file that
+        // test's judge reads the file the boot left on the disk, so a file that
         // stops before the boot does turns a machine fact into a missing line —
         // and the missing line is what a reader would have to guess about.
-        findings.extend(back.log_reached_the_stick().err());
+        findings.extend(back.log_is_whole_to_its_stop().err());
         findings.extend(back.stop_completed().err());
         findings.extend(back.deadline_on_time().err());
         findings.extend(back.lockup_on_time().err());

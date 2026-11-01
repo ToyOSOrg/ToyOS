@@ -3,8 +3,11 @@
 //! caller must not import the same key into independent sealing owners.
 //!
 //! Nonces are `iv XOR (0^32 || sequence_be64)`. Public lengths select buffering;
-//! contents and keys do not select branches or addresses. Opening authenticates
-//! ciphertext before modifying it; refusal leaves the ciphertext unchanged.
+//! contents and keys do not select branches or addresses. A refusal releases no
+//! plaintext: AES-GCM and ChaCha20-Poly1305 may decrypt as they authenticate,
+//! and either zeroes a refused buffer. The buffer holds unauthenticated
+//! plaintext during `open`, so it must be the caller's alone: not memory
+//! another process maps.
 
 use crate::{Error, chacha, poly1305::Poly1305, secret::Secret};
 
@@ -177,17 +180,14 @@ fn chacha_finish(mut mac: Poly1305, aad: usize, ciphertext: usize) -> Secret<16>
     Secret(mac.finish())
 }
 /// Blocks 0 to 3 for 1 to 192 bytes of data, computed together: the
-/// Poly1305 key, then the data's keystream. An empty message takes block 0
-/// alone, whose latency is lower.
+/// Poly1305 key, then the data's keystream. It runs ahead of the one-pass
+/// path, which costs more for so few blocks on the AMD bench. An empty
+/// message takes block 0 alone, whose latency is lower.
 fn short(length: usize) -> bool {
     (1..=192).contains(&length)
 }
 fn chacha_short(key: &[u8; 32], nonce: &[u8; 12], length: usize, stream: &mut [u8; 256]) {
-    let mut states = Secret([[0u32; 16]; 4]);
-    for (counter, state) in states.0.iter_mut().enumerate() {
-        chacha::fill_state(state, key, nonce, counter as u32);
-    }
-    chacha::blocks(&states.0, 1 + length.div_ceil(64), stream);
+    chacha::ietf_blocks(key, nonce, 0, 1 + length.div_ceil(64), stream);
 }
 fn chacha_seal(
     key: &[u8; 32],
@@ -196,16 +196,21 @@ fn chacha_seal(
     data: &mut [u8],
 ) -> Result<[u8; 16], Error> {
     check_chacha_length(data.len())?;
-    if short(data.len()) {
+    let mac = if short(data.len()) {
         let mut stream = Secret([0u8; 256]);
         chacha_short(key, nonce, data.len(), &mut stream.0);
         crate::block::xor(data, &stream.0[64..]);
         let mut mac = chacha_mac(stream.0[..32].try_into().unwrap(), aad);
         mac.update_padded(data);
-        return Ok(chacha_finish(mac, aad.len(), data.len()).0);
-    }
-    let mut mac = chacha_mac(chacha::block(key, nonce, 0).0[..32].try_into().unwrap(), aad);
-    chacha::seal(key, nonce, 1, data, &mut mac)?;
+        mac
+    } else if let Some(mac) = chacha::aead(key, nonce, aad, data, true) {
+        mac
+    } else {
+        let mut mac = chacha_mac(chacha::block(key, nonce, 0).0[..32].try_into().unwrap(), aad);
+        chacha::xor(key, nonce, 1, data)?;
+        mac.update_padded(data);
+        mac
+    };
     Ok(chacha_finish(mac, aad.len(), data.len()).0)
 }
 fn chacha_open(
@@ -216,26 +221,65 @@ fn chacha_open(
     tag: &[u8],
 ) -> Result<(), Error> {
     check_chacha_length(data.len())?;
-    let verify = |mac_key: &[u8], data: &[u8]| {
-        let mut mac = chacha_mac(mac_key.try_into().unwrap(), aad);
-        mac.update_padded(data);
-        let expected = chacha_finish(mac, aad.len(), data.len());
-        if crate::ct::equal(&expected.0, tag) { Ok(()) } else { Err(Error::Authentication) }
-    };
-    if short(data.len()) {
+    let authentic = |mac: Poly1305, length: usize| crate::ct::equal(&chacha_finish(mac, aad.len(), length).0, tag);
+    // Without the one-pass path, the MAC comes first and only an authentic
+    // record is decrypted.
+    let opened = if short(data.len()) {
         let mut stream = Secret([0u8; 256]);
         chacha_short(key, nonce, data.len(), &mut stream.0);
-        verify(&stream.0[..32], data)?;
-        crate::block::xor(data, &stream.0[64..]);
-        return Ok(());
+        let mut mac = chacha_mac(stream.0[..32].try_into().unwrap(), aad);
+        mac.update_padded(data);
+        let opened = authentic(mac, data.len());
+        if opened {
+            crate::block::xor(data, &stream.0[64..]);
+        }
+        opened
+    } else if let Some(mac) = chacha::aead(key, nonce, aad, data, false) {
+        authentic(mac, data.len())
+    } else {
+        let mut mac = chacha_mac(chacha::block(key, nonce, 0).0[..32].try_into().unwrap(), aad);
+        mac.update_padded(data);
+        let opened = authentic(mac, data.len());
+        if opened {
+            chacha::xor(key, nonce, 1, data)?;
+        }
+        opened
+    };
+    if !opened {
+        crate::secret::wipe(data);
+        return Err(Error::Authentication);
     }
-    verify(&chacha::block(key, nonce, 0).0[..32], data)?;
-    chacha::xor(key, nonce, 1, data)
+    Ok(())
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A forged record's open returns zeros in place of its plaintext, at
+    /// every length the paths divide at: past 192 bytes an AVX2 host decrypts
+    /// as it authenticates, so the zeros are all that stands between the
+    /// caller and the keystream.
+    #[test]
+    fn a_forged_chacha_record_opens_to_zeros() {
+        let key = [0x17; 32];
+        for len in [1, 63, 64, 65, 192, 193, 447, 448, 449, 575, 576, 577, 1024, 1088, 4096, 16385] {
+            let plain: std::vec::Vec<u8> = (0..len).map(|i| (i * 13 + 1) as u8).collect();
+            let mut sealed = plain.clone();
+            let (nonce, tag) = SealingKey::chacha20_poly1305(key, [9; 12]).seal(b"aad", &mut sealed).unwrap();
+            let opener = OpeningKey::chacha20_poly1305(key);
+            let mut forgeries: [_; 3] = core::array::from_fn(|_| (sealed.clone(), tag, &b"aad"[..]));
+            forgeries[0].0[len / 2] ^= 0x80;
+            forgeries[1].1[15] ^= 1;
+            forgeries[2].2 = b"aae";
+            for (i, (mut record, tag, aad)) in forgeries.into_iter().enumerate() {
+                assert_eq!(opener.open(&nonce, aad, &mut record, &tag), Err(Error::Authentication), "{len} bytes, forgery {i}");
+                assert!(record.iter().all(|&b| b == 0), "{len} bytes, forgery {i}: the refusal left more than zeros");
+            }
+            opener.open(&nonce, b"aad", &mut sealed, &tag).unwrap();
+            assert_eq!(sealed, plain, "{len} bytes");
+        }
+    }
     #[test]
     fn nonce_sequence_exhaustion_is_terminal() {
         let mut key = SealingKey::chacha20_poly1305([0; 32], [0; 12]);

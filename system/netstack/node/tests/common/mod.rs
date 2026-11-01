@@ -11,12 +11,14 @@
 
 pub mod client;
 
+use std::cell::Cell;
 use std::net::Ipv4Addr;
+use std::rc::Rc;
 use std::time::Duration;
 
 use etherparse::{ArpOperation, Icmpv4Type, LinkSlice, NetSlice, SlicedPacket, TransportSlice};
 use toyos_dhcp::HostName;
-use toyos_net_node::Node;
+use toyos_net_node::{Bell, IfIndex, Node, Rank};
 use toyos_net_shard::{Config, Secrets};
 use toyos_net_wire::ethernet::{IndividualMac, MacAddr};
 use toyos_net_wire::Instant;
@@ -30,6 +32,26 @@ pub const ELSEWHERE: Ipv4Addr = Ipv4Addr::new(192, 0, 2, 7);
 pub const R: Ipv4Addr = Ipv4Addr::new(192, 0, 2, 254);
 pub const DNS: Ipv4Addr = Ipv4Addr::new(192, 0, 2, 53);
 pub const MASK: Ipv4Addr = Ipv4Addr::new(255, 255, 255, 0);
+
+/// A holder's bell: the rings it took, which the test reads by the count it holds.
+pub struct Rings(pub Rc<Cell<usize>>);
+
+impl Bell for Rings {
+    fn ring(&mut self) {
+        self.0.set(self.0.get() + 1);
+    }
+}
+
+/// A bell, and its count of rings.
+pub fn bell() -> (Box<dyn Bell>, Rc<Cell<usize>>) {
+    let rings = Rc::new(Cell::new(0));
+    (Box::new(Rings(rings.clone())), rings)
+}
+
+/// A bell whose rings nobody reads.
+pub fn unread() -> Box<dyn Bell> {
+    bell().0
+}
 
 /// The places `Wire`'s node has for streams and listeners.
 pub const PLACES: usize = 32;
@@ -307,6 +329,8 @@ pub fn batch<'a>(frames: &'a [&'a [u8]]) -> impl FnMut(&mut Sink<'_>) -> bool + 
 
 pub struct Wire {
     pub node: Node,
+    /// The node's one link.
+    pub link: IfIndex,
     mac: [u8; 6],
     pub now: Instant,
     /// Every frame the node emitted, in order.
@@ -336,11 +360,12 @@ impl Wire {
             tcp: toyos_net_tcp::Secrets { isn: [3; 16], timestamp: [4; 16], port_offset: [5; 16], port_index: [6; 16], port_table: [0; 16] },
         };
         let now = Instant::from_millis(3_600_000);
-        let config = Config { mac: IndividualMac::new(MacAddr(mac)).unwrap(), receive_buffer: 65_535, send_buffer: 65_535, secrets };
+        let config = Config { receive_buffer: 65_535, send_buffer: 65_535, secrets };
         let mut draws = 0x5a00_0000;
-        let mut node = Node::new(now, config, HostName::new("toyos"), draw(&mut draws)).unwrap();
-        node.set_places(now, PLACES);
-        Self { node, mac, now, sent: Vec::new(), draws }
+        let mut node = Node::new(now, config, HostName::new("toyos")).unwrap();
+        let link = node.add_link(now, IndividualMac::new(MacAddr(mac)).unwrap(), Rank(0), draw(&mut draws));
+        node.set_places(PLACES);
+        Self { node, link, mac, now, sent: Vec::new(), draws }
     }
 
     /// Offers the node all the credit it wants until it sends nothing more, the router answering
@@ -349,13 +374,13 @@ impl Wire {
         loop {
             let from = self.sent.len();
             let (sent, mac) = (&mut self.sent, self.mac);
-            self.node.transmit(self.now, usize::MAX, |frame| sent.push(outside(frame, mac)), draw(&mut self.draws));
+            self.node.transmit(self.now, usize::MAX, |_, frame| sent.push(outside(frame, mac)), draw(&mut self.draws));
             if self.sent.len() == from {
                 return;
             }
             let asked = self.sent[from..].iter().filter(|seen| matches!(seen, Seen::Arp { request: true, sender, target, .. } if *target == R && *sender == A)).count();
             for _ in 0..asked {
-                self.node.receive(self.now, BUDGET, batch(&[&arp(MAC, false, MAC_R, R, A)]), draw(&mut self.draws));
+                self.node.receive(self.now, self.link, BUDGET, batch(&[&arp(MAC, false, MAC_R, R, A)]), draw(&mut self.draws));
             }
         }
     }
@@ -366,12 +391,12 @@ impl Wire {
     }
 
     pub fn deliver(&mut self, frame: &[u8]) {
-        self.node.receive(self.now, BUDGET, batch(&[frame]), draw(&mut self.draws));
+        self.node.receive(self.now, self.link, BUDGET, batch(&[frame]), draw(&mut self.draws));
         self.pump();
     }
 
     pub fn link(&mut self, up: bool) {
-        self.node.link(self.now, up, draw(&mut self.draws));
+        self.node.link(self.now, self.link, up, draw(&mut self.draws));
         self.pump();
     }
 
@@ -412,13 +437,11 @@ impl Wire {
 
     /// The interface's address `address`, in [ip]'s words.
     pub fn address(&self, address: Ipv4Addr) -> Option<toyos_net_ip::AddrState> {
-        let shard = self.node.shard();
-        shard.ip().address(shard.iface(), address)
+        self.node.shard().ip().address(self.link, address)
     }
 
     pub fn gateways(&self) -> Vec<Ipv4Addr> {
-        let shard = self.node.shard();
-        shard.ip().gateways(shard.iface()).expect("the interface").to_vec()
+        self.node.shard().ip().gateways(self.link).expect("the interface").to_vec()
     }
 
     /// Whether the node answers an ARP request for `address` from the router.
@@ -443,7 +466,7 @@ impl Wire {
     /// [`Self::acknowledged`], and conflict detection run to its end: the lease is held.
     pub fn leased(terms: &[(u8, Vec<u8>)]) -> Self {
         let mut wire = Self::acknowledged(terms);
-        assert!(wire.run_until(Duration::from_secs(10), |wire| wire.node.lease().is_some()), "the lease is held");
+        assert!(wire.run_until(Duration::from_secs(10), |wire| wire.node.lease(wire.link).is_some()), "the lease is held");
         wire
     }
 }

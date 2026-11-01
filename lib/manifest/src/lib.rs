@@ -23,15 +23,20 @@
 //! drive <matcher>           one process of it per PCI function the matcher names
 //! syscap <right>            a right on the SysCap dup the supervisor endows
 //! slots                     the idle slot's partitions and the slot table
+//! authorize <word>          a disk authorization the supervisor mints at its start ([`authorize`])
 //! service                   a system service: its `HOME` is `/state/<name>`, not the session's
+//! state                     it keeps machine state of its own in `/state/<name>`
 //! role <role>               a file server for `<role>`: one process of it per role
 //! restart                   the supervisor starts it again when it ends
+//! pager                     started as a pager: it may make the paged objects its files are read through
+//! memory-floor <bytes>      memory held back for its job however short every other runs
+//! supervisor-floor <bytes>  the same for the supervisor's own job
 //! supervisor-serve <name>   a name the supervisor serves itself
 //! start <name>              the supervisor starts this program at boot
 //! app-receive <name>        a connector every program launched from /apps holds
 //! app-folder <access>       the most of a folder of the home a package may be granted
 //! starts <key>              a row this program may start through the launcher, or `/apps`
-//! login                     a launch it makes from the machine's session opens a login session
+//! login                     a login authority: the supervisor opens login sessions for it
 //! ```
 //!
 //! [`device`] is what a `devices` or `drives` entry names. [`package`] is the
@@ -41,6 +46,7 @@
 //! package is granted, [`consent`] how the person at the screen is asked,
 //! [`clipboard`] who watches the clipboard and [`display`] who sets the display.
 
+pub mod authorize;
 pub mod clipboard;
 pub mod consent;
 pub mod device;
@@ -91,8 +97,8 @@ pub fn row_named(name: &str) -> String {
 /// data, cache and state. English on disk, as every home folder is.
 pub const APP_FOLDERS: [&str; 4] = ["Config", "Data", "Cache", "State"];
 
-/// Where each system service keeps its own persistent data, one directory per
-/// program key.
+/// Where machine state lives, one directory per program key that keeps any
+/// ([`Program::state_dir`]); a row's view holds its own and no other.
 pub const STATE: &str = "/state";
 
 /// One directory a file-server role serves.
@@ -143,8 +149,8 @@ pub struct View {
     pub write: bool,
 }
 
-/// Every directory every role serves, each read-write but `/system`: the view
-/// of a program no narrower one is declared for.
+/// Every directory every role serves, each read-write but `/system`: the
+/// supervisor's own view.
 pub fn whole_tree() -> Vec<View> {
     ROLES
         .iter()
@@ -228,6 +234,10 @@ const SYSCAP_RIGHTS: &[(&str, Rights)] = &[
     // a launcher's. Every other child joins its parent's job, so this is what
     // lets a program gain aggregate CPU by starting many.
     ("jobs", Rights::JOBS),
+    // Hold every idle CPU to waking within a bound: what an audio or other
+    // deadline-bound service holds while it has a deadline, paid for in the
+    // whole machine's power.
+    ("wake-latency", Rights::WAKE_LATENCY),
 ];
 
 /// The whole right set a program's `syscap` list asks for.
@@ -309,10 +319,18 @@ pub struct Program {
     /// runs is never among them. One program holds it — `build/build.rs` gates
     /// which.
     pub slots: bool,
+    /// Disk authorizations the supervisor mints at its start, by
+    /// [`authorize::Authorization::word`]: the signed image's word alone, and
+    /// `build/build.rs` gates which rows.
+    pub authorize: Vec<String>,
     /// A system service: its `HOME` is its own [`STATE`] directory rather
     /// than the session user's home, so what it keeps is machine state and no
-    /// user's.
+    /// user's. It keeps state ([`Self::state_dir`]) whether or not
+    /// [`Self::state`] says so.
     pub service: bool,
+    /// It keeps machine state of its own in [`STATE`]`/<name>` beside the
+    /// session's `HOME`: pkg's accepted repository metadata, say.
+    pub state: bool,
     /// The file-server roles this row serves, one process each: the supervisor starts
     /// the binary once per role, with the role as its argument and the
     /// acceptor of the role's port ([`role_dirs`] are the grants on it).
@@ -320,6 +338,10 @@ pub struct Program {
     /// The supervisor starts it again when it ends other than by exit 0, on the
     /// same ports or function, within the supervisor's restart budget.
     pub restart: bool,
+    /// Started as a pager (`toyos_abi::handle::Rights::PAGER`): it may make
+    /// the paged objects its readers wait on. The signed image's row alone
+    /// confers it; no [`syscap_rights`] name and no package row reaches it.
+    pub pager: bool,
     /// The folder of the session's home a package's launch was granted
     /// ([`grants::decide`]): set by the supervisor on the row it synthesizes
     /// for that launch, and never on a declared row.
@@ -328,9 +350,15 @@ pub struct Program {
     /// and [`launch::APPS`] for any installed package. Non-empty is what
     /// endows it a launcher at all.
     pub starts: Vec<String>,
-    /// A launch it makes from the machine's session opens a login session
+    /// A login authority: the supervisor opens login sessions for it, the
+    /// screen's row's at its start and any on `toyos_session::LOGIN_PORT`.
     /// ([`launch`]).
     pub login: bool,
+    /// Bytes held back for its job however short every other job runs: the
+    /// protected capacity of a control path the machine has to keep
+    /// answering under exhaustion, and zero for every other row. Only the
+    /// signed image declares one; an installed package's row never has one.
+    pub memory_floor: u64,
 }
 
 impl Program {
@@ -346,11 +374,17 @@ impl Program {
         package::package_of(self.source.path()?)
     }
 
+    /// Its own directory of machine state, which its view holds and no other
+    /// row's does: a service's, or a row's that declares [`Self::state`].
+    pub fn state_dir(&self) -> Option<String> {
+        (self.service || self.state).then(|| format!("{STATE}/{}", self.name))
+    }
+
     /// The `HOME` the supervisor starts this row with. A location grants nothing: what
     /// the program can reach is its view's business, never this string's.
     pub fn home(&self) -> String {
         match (self.service, self.package()) {
-            (true, _) => format!("{STATE}/{}", self.name),
+            (true, _) => self.state_dir().expect("a service keeps state"),
             (false, Some(name)) => app_home(name),
             (false, None) => session_home(),
         }
@@ -361,8 +395,10 @@ impl Program {
     /// home read-write and the folder its launch was granted, and nothing else
     /// any role serves**: no other package, no other part of the home, no
     /// `/config`, `/state`, `/log` or `/boot`.
-    /// Every other row sees the whole tree, until each declares its own
-    /// (`issues/every-program-sees-only-the-files-it-was-given.md`, stage 2).
+    /// **Every other row sees the whole tree but [`STATE`], and of that only its
+    /// own [`Self::state_dir`]**: no row's view holds another row's, the
+    /// supervisor's included. The rest stays whole until each row
+    /// declares its own view (`issues/every-program-sees-only-the-files-it-was-given.md`, stage 2).
     pub fn view(&self) -> Vec<View> {
         match self.package() {
             Some(name) => {
@@ -372,7 +408,11 @@ impl Program {
                     .chain(granted)
                     .collect()
             }
-            None => whole_tree(),
+            None => whole_tree()
+                .into_iter()
+                .filter(|view| view.dir != STATE)
+                .chain(self.state_dir().map(|dir| data_dir(dir, true)))
+                .collect(),
         }
     }
 }
@@ -398,6 +438,8 @@ pub struct Manifest {
     /// Program names, in the order `[boot] start` gave them — which orders
     /// nothing, because every port exists before any server runs.
     pub start: Vec<String>,
+    /// [`Program::memory_floor`] for the supervisor's own job.
+    pub supervisor_floor: u64,
 }
 
 impl Manifest {
@@ -455,6 +497,8 @@ pub enum RenderError {
     ServesWithoutService(String),
     /// A `roles` entry naming no file-server role.
     NoSuchRole { program: String, role: String },
+    /// An `authorize` entry naming no [`authorize::Authorization`].
+    NoSuchAuthorization { program: String, word: String },
     /// A `devices` entry that names no device, or a `drives` entry that is
     /// no PCI matcher.
     NoSuchDevice { program: String, entry: String },
@@ -514,8 +558,17 @@ pub fn render(manifest: &Manifest) -> Result<Vec<u8>, RenderError> {
         if program.slots {
             out.push_str("slots\n");
         }
+        for word in &program.authorize {
+            if authorize::Authorization::parse(word).is_none() {
+                return Err(RenderError::NoSuchAuthorization { program: program.name.clone(), word: word.clone() });
+            }
+            out.push_str(&format!("authorize {word}\n"));
+        }
         if program.service {
             out.push_str("service\n");
+        }
+        if program.state {
+            out.push_str("state\n");
         }
         for role in &program.roles {
             if role_dirs(role).is_none() {
@@ -526,6 +579,9 @@ pub fn render(manifest: &Manifest) -> Result<Vec<u8>, RenderError> {
         if program.restart {
             out.push_str("restart\n");
         }
+        if program.pager {
+            out.push_str("pager\n");
+        }
         for key in &program.starts {
             check(&program.name, "starts", key)?;
             out.push_str(&format!("starts {key}\n"));
@@ -533,6 +589,12 @@ pub fn render(manifest: &Manifest) -> Result<Vec<u8>, RenderError> {
         if program.login {
             out.push_str("login\n");
         }
+        if program.memory_floor > 0 {
+            out.push_str(&format!("memory-floor {}\n", program.memory_floor));
+        }
+    }
+    if manifest.supervisor_floor > 0 {
+        out.push_str(&format!("supervisor-floor {}\n", manifest.supervisor_floor));
     }
     for name in &manifest.supervisor_serves {
         check("supervisor", "supervisor_serves", name)?;
@@ -553,9 +615,11 @@ pub fn render(manifest: &Manifest) -> Result<Vec<u8>, RenderError> {
 }
 
 /// Every entry names a device, a `drives` row is one process per function and
-/// nothing else, and no device can answer two entries.
+/// nothing else, and no device can answer two entries — but two different
+/// `drives` entries of one row, which start one process on a function either
+/// way, under the first that matches it.
 fn claims_apart(manifest: &Manifest) -> Result<(), RenderError> {
-    let mut seen: Vec<(&str, &str, device::Entry)> = Vec::new();
+    let mut seen: Vec<(&str, &str, device::Entry, bool)> = Vec::new();
     for program in &manifest.programs {
         let refused = |entry: &String| RenderError::NoSuchDevice { program: program.name.clone(), entry: entry.clone() };
         if !program.drives.is_empty() {
@@ -570,20 +634,26 @@ fn claims_apart(manifest: &Manifest) -> Result<(), RenderError> {
                 return Err(RenderError::Drives { program: program.name.clone(), also });
             }
         }
-        let devices = program.devices.iter().map(|e| device::Entry::parse(e).ok_or_else(|| refused(e)).map(|p| (e, p)));
+        let devices =
+            program.devices.iter().map(|e| device::Entry::parse(e).ok_or_else(|| refused(e)).map(|p| (e, p, false)));
         let drives = program.drives.iter().map(|e| match device::Entry::parse(e) {
-            Some(parsed @ device::Entry::Pci(_)) => Ok((e, parsed)),
+            Some(parsed @ device::Entry::Pci(_)) => Ok((e, parsed, true)),
             _ => Err(refused(e)),
         });
         for entry in devices.chain(drives) {
-            let (text, parsed) = entry?;
-            if let Some((row, other, _)) = seen.iter().find(|(_, _, earlier)| earlier.overlaps(&parsed)) {
+            let (text, parsed, driven) = entry?;
+            let apart = |row: &str, other: &str, earlier_driven: bool| {
+                driven && earlier_driven && row == program.name && other != text.as_str()
+            };
+            if let Some((row, other, ..)) =
+                seen.iter().find(|(row, other, earlier, was)| earlier.overlaps(&parsed) && !apart(row, other, *was))
+            {
                 return Err(RenderError::Overlap {
                     first: (row.to_string(), other.to_string()),
                     second: (program.name.clone(), text.clone()),
                 });
             }
-            seen.push((&program.name, text, parsed));
+            seen.push((&program.name, text, parsed, driven));
         }
     }
     Ok(())
@@ -613,6 +683,11 @@ fn reject_newline(program: &str, field: &'static str, value: &str) -> Result<(),
         });
     }
     Ok(())
+}
+
+/// A record's byte count, which only [`render`] writes.
+fn bytes(line: &str, rest: &str) -> u64 {
+    rest.parse().unwrap_or_else(|_| panic!("manifest: a byte count that is none: {line}"))
 }
 
 /// Read back what [`render`] wrote.
@@ -657,6 +732,7 @@ pub fn parse(text: &str) -> Manifest {
                 assert!(manifest.folder.replace(access).is_none(), "manifest: `app-folder` twice");
             }
             "start" => manifest.start.push(rest.to_string()),
+            "supervisor-floor" => manifest.supervisor_floor = bytes(line, rest),
             "" => {}
             _ => {
                 let program = manifest
@@ -672,11 +748,15 @@ pub fn parse(text: &str) -> Manifest {
                     "drive" => program.drives.push(rest.to_string()),
                     "syscap" => program.syscap.push(rest.to_string()),
                     "slots" if rest.is_empty() => program.slots = true,
+                    "authorize" if authorize::Authorization::parse(rest).is_some() => program.authorize.push(rest.to_string()),
                     "service" => program.service = true,
+                    "state" if rest.is_empty() => program.state = true,
                     "role" => program.roles.push(rest.to_string()),
                     "restart" if rest.is_empty() => program.restart = true,
+                    "pager" if rest.is_empty() => program.pager = true,
                     "starts" => program.starts.push(rest.to_string()),
                     "login" if rest.is_empty() => program.login = true,
+                    "memory-floor" => program.memory_floor = bytes(line, rest),
                     other => panic!("manifest: unknown record `{other}`"),
                 }
             }
@@ -716,6 +796,8 @@ mod tests {
                     name: "update".into(),
                     source: Source::Path("/system/bin/update".into()),
                     slots: true,
+                    state: true,
+                    authorize: vec!["tables".into(), "designate:data".into()],
                     ..Program::default()
                 },
                 Program {
@@ -724,6 +806,7 @@ mod tests {
                     receives: vec!["block".into()],
                     roles: vec!["data".into(), "log".into()],
                     restart: true,
+                    pager: true,
                     ..Program::default()
                 },
                 Program {
@@ -731,6 +814,7 @@ mod tests {
                     source: Source::Path("/system/bin/vdagent".into()),
                     receives: vec!["clipboard".into()],
                     drives: vec!["pci:07:80:00/1af4:1043".into()],
+                    memory_floor: 16 << 20,
                     ..Program::default()
                 },
                 Program {
@@ -746,6 +830,7 @@ mod tests {
             apps: vec!["compositor".into(), "soundserver".into()],
             folder: Some(grants::Access::ReadWrite),
             start: vec!["compositor".into(), "soundserver".into()],
+            supervisor_floor: 48 << 20,
         }
     }
 
@@ -759,6 +844,8 @@ mod tests {
         assert!(row.syscap.is_empty());
         assert!(row.serves.is_empty());
         assert!(row.provides.is_empty());
+        assert_eq!(row.memory_floor, 0, "a package's row held memory back");
+        assert!(!row.pager, "a package's row is a pager");
         assert_eq!(row.source.path(), Some("/apps/gbae/gbae"));
     }
 
@@ -874,25 +961,39 @@ mod tests {
         }
     }
 
-    /// Every row the image declares sees the whole tree read-write but
-    /// `/system`, the installer and the shell included: neither has authority
-    /// over `/apps` the other lacks, and nobody writes the signed image.
+    /// **Every row the image declares sees the whole tree read-write but
+    /// `/system` and `/state`, and of `/state` only its own directory**: a
+    /// service's and a row's that declares state, none for any other. The
+    /// installer and the shell are alike: neither has authority over `/apps`
+    /// the other lacks, nobody writes the signed image, and nobody reads or
+    /// rewrites another program's machine state, the supervisor's included.
     #[test]
-    fn every_declared_row_sees_the_whole_tree_read_write() {
-        let m = parse("program pkg /system/bin/pkg\nprogram shell /system/bin/shell\n");
-        let whole: Vec<_> = std::iter::once(system())
-            .chain(
-                ["/apps", "/config", "/home", "/state", "/log", "/boot"]
-                    .iter()
-                    .zip(["apps", "config", "home", "state", "", ""])
-                    .zip(["data", "data", "data", "data", "log", "boot"])
-                    .map(|((dir, root), role)| (role, dir.to_string(), root.to_string(), true)),
-            )
-            .collect();
+    fn a_declared_row_sees_the_whole_tree_but_state_and_of_state_its_own() {
+        let m = parse("program pkg /system/bin/pkg\nstate\nprogram shell /system/bin/shell\n");
+        let whole_but_state = |own: Option<&str>| -> Vec<_> {
+            std::iter::once(system())
+                .chain(
+                    ["/apps", "/config", "/home", "/log", "/boot"]
+                        .iter()
+                        .zip(["apps", "config", "home", "", ""])
+                        .zip(["data", "data", "data", "log", "boot"])
+                        .map(|((dir, root), role)| (role, dir.to_string(), root.to_string(), true)),
+                )
+                .chain(own.map(|name| ("data", format!("/state/{name}"), format!("state/{name}"), true)))
+                .collect()
+        };
         let s = sample();
-        for row in [m.program("pkg").unwrap(), m.program("shell").unwrap(), s.program("compositor").unwrap()] {
-            assert_eq!(views(row), whole, "{}", row.name);
+        for (row, own) in [
+            (m.program("shell").unwrap(), None),
+            (m.program("pkg").unwrap(), Some("pkg")),
+            (s.program("compositor").unwrap(), Some("compositor")),
+        ] {
+            assert_eq!(views(row), whole_but_state(own), "{}", row.name);
         }
+        // A row that keeps state keeps its session `HOME`; a service's is its state.
+        assert_eq!(m.program("pkg").unwrap().home(), session_home());
+        assert_eq!(s.program("compositor").unwrap().home(), "/state/compositor");
+        assert_eq!(m.program("shell").unwrap().state_dir(), None);
     }
 
     #[test]
@@ -980,6 +1081,19 @@ mod tests {
         assert!(syscap_rights(&["sysinfo".into()]).is_err());
     }
 
+    /// **No `syscap` name confers the pager right**: a row's `pager` is the
+    /// only way to it, so a manifest's right list cannot start a pager.
+    #[test]
+    fn no_syscap_name_is_the_pager_right() {
+        for (name, _) in SYSCAP_RIGHTS {
+            let rights = syscap_rights(&[(*name).to_string()]).unwrap();
+            assert!(!rights.contains(Rights::PAGER), "`{name}` carries PAGER");
+        }
+        let every: Vec<String> = SYSCAP_RIGHTS.iter().map(|(n, _)| (*n).to_string()).collect();
+        assert!(!syscap_rights(&every).unwrap().contains(Rights::PAGER));
+        assert!(syscap_rights(&["pager".into()]).is_err());
+    }
+
     /// A file server's roles reach the supervisor as records, and a name that is no
     /// role is refused where it is written: the supervisor would start a server for
     /// directories nobody named.
@@ -989,6 +1103,7 @@ mod tests {
         let fileserver = m.program("fileserver").unwrap();
         assert_eq!(fileserver.roles, ["data", "log"]);
         assert!(fileserver.restart);
+        assert!(fileserver.pager);
         let dirs = |role| role_dirs(role).map(|dirs| dirs.iter().map(|d| (d.dir, d.root)).collect::<Vec<_>>());
         assert_eq!(
             dirs("data"),
@@ -1031,17 +1146,18 @@ mod tests {
     }
 
     /// **Two entries one device can answer are refused where the image is
-    /// built, naming both**: across rows and within one, a `devices` entry
-    /// and a `drives` matcher alike, and a fixed name written twice.
+    /// built, naming both**: across rows, within one row's `devices`, and an
+    /// entry written twice. Two different `drives` entries of one row are not:
+    /// the row starts one process on the function under the first.
     #[test]
     fn two_entries_one_device_can_answer_are_refused_by_name() {
         let cases: [(&[Row<'_>], _, _); 6] = [
+            (&[("a", &[], &["pci:ff:00:00", "pci:ff:00:00"])], ("a", "pci:ff:00:00"), ("a", "pci:ff:00:00")),
             (&[("a", &["framebuffer"], &[]), ("b", &["framebuffer"], &[])], ("a", "framebuffer"), ("b", "framebuffer")),
             (&[("a", &["isa:0060,0064:1,12"], &[]), ("b", &["isa:0060,0064:1,12"], &[])], ("a", "isa:0060,0064:1,12"), ("b", "isa:0060,0064:1,12")),
             (&[("a", &["pci:01:08:02/1b36:0010"], &[]), ("b", &[], &["pci:01:08:02"])], ("a", "pci:01:08:02/1b36:0010"), ("b", "pci:01:08:02")),
             (&[("a", &[], &["pci:0c:03:30"]), ("b", &[], &["pci:0c:03:30/1b36:000d"])], ("a", "pci:0c:03:30"), ("b", "pci:0c:03:30/1b36:000d")),
             (&[("a", &["pci:02:00:00", "pci:02:00:00/1af4:1041"], &[])], ("a", "pci:02:00:00"), ("a", "pci:02:00:00/1af4:1041")),
-            (&[("a", &[], &["pci:ff:00:00", "pci:ff:00:00"])], ("a", "pci:ff:00:00"), ("a", "pci:ff:00:00")),
         ];
         for (rows, first, second) in cases {
             assert_eq!(render(&with_rows(rows)), overlap(first, second), "{rows:?}");
@@ -1052,6 +1168,8 @@ mod tests {
             ("c", &[], &["pci:0c:03:30"]),
         ]);
         assert!(render(&apart).is_ok());
+        let one_row = with_rows(&[("usbd", &[], &["pci:0c:03:30/1033:0194", "pci:0c:03:30@boot"])]);
+        assert!(render(&one_row).is_ok());
     }
 
     #[test]

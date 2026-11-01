@@ -3,13 +3,15 @@
 //! each transmit opportunity builds.
 
 use alloc::boxed::Box;
+use alloc::collections::VecDeque;
 use core::num::NonZeroU16;
 use core::time::Duration;
 
 use toyos_net_wire::tcp::{SackBlock, SynOptions, TcpFlags, TcpOptions, TcpSegment, Timestamps};
 
-use crate::cc::Cc;
+use crate::cc::{self, Cc, SlowStart};
 use crate::counters::{Counter, Log};
+use crate::pace::Pacer;
 use crate::ring::{Lent, Ring};
 use crate::rtt::{Rtt, RTO_AFTER_HANDSHAKE_LOSS, RTO_MAX};
 use crate::rx::{Placed, Rx};
@@ -348,7 +350,16 @@ pub struct Sync {
     pub rtx_timer: Option<Instant>,
     rto_pending: bool,
     timeout_rtx: bool,
-    timing: Option<(Seq, Instant)>,
+    /// When the new data in flight left, while none of it has been resent since (RFC 6298 §3,
+    /// Karn): the samples an ACK gives at the clock's own resolution (RFC 8985 §6.1). Every send
+    /// is timed. A send at the same instant as the last joins its run, and so does one shorter than
+    /// SMSS after a run shorter than SMSS until an ACK lands in the run, so a burst after a short
+    /// header starts its own run and its ACKs are each timed. The record holds at most two runs
+    /// for each SMSS in flight and two more. An ACK of a whole run is timed from its last send, and
+    /// one partway into a run that left at one instant from that instant. In a run of several
+    /// instants, the first ACK partway is timed from its first send, which overstates it by less
+    /// than the joins took before that ACK ended them; a later partway ACK is not timed.
+    departures: VecDeque<Departure>,
     /// RFC 8985 §7: when the loss probe is due, whether it is, the probe in flight (SND.NXT once
     /// it left and whether it was a retransmission), and whether an RTT sample came since the last.
     probe_at: Option<Instant>,
@@ -358,6 +369,9 @@ pub struct Sync {
     persist: Option<Persist>,
     sws: Option<Instant>,
     sws_fired: bool,
+    pacer: Pacer,
+    /// When the pacer releases the new data it last held.
+    paced: Option<Instant>,
     last_data_sent: Option<Instant>,
     progress_since: Option<Instant>,
     acked_since: Option<Instant>,
@@ -371,6 +385,50 @@ pub struct Sync {
     last_unsolicited: Option<Instant>,
     urgent_logged: bool,
     pub delivery_problem: bool,
+    /// What has held new data back since when; `None` while the connection sends.
+    held_by: Option<(SendLimit, Instant)>,
+    /// Why [`Self::new_data`] last sent nothing.
+    declined: SendLimit,
+    /// Which window held a retransmission back in this transmit opportunity.
+    retransmission_held: Option<SendLimit>,
+}
+
+/// What a sender's new data waits on: RFC 4898 §4's `tcpEStatsPerfSndLimTime{Snd,Rwin,Cwnd}`, and
+/// the pacer.
+/// Unlike the RFC, which divides all of a connection's time among its three, a span here runs from
+/// a transmit opportunity that left new data unsent to the next one that sends some: time spent
+/// sending, or waiting for the caller's next opportunity, is charged to none.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum SendLimit {
+    /// The sender itself: nothing unsent, or Nagle holding less than a segment.
+    User,
+    /// The peer's receive window.
+    Window,
+    /// The congestion window, or loss recovery's pipe.
+    Congestion,
+    /// The pacer, with room in both windows.
+    Pacing,
+}
+
+impl SendLimit {
+    fn counter(self) -> Counter {
+        match self {
+            Self::User => Counter::SendLimitedByUserNanos,
+            Self::Window => Counter::SendLimitedByWindowNanos,
+            Self::Congestion => Counter::SendLimitedByCongestionNanos,
+            Self::Pacing => Counter::SendLimitedByPacingNanos,
+        }
+    }
+}
+
+/// `[start, end)` of new data, sent from `first` to `last`; `sampled` once an ACK landed in it.
+#[derive(Clone, Copy, Debug)]
+struct Departure {
+    start: Seq,
+    end: Seq,
+    first: Instant,
+    last: Instant,
+    sampled: bool,
 }
 
 fn us32(n: usize) -> u32 {
@@ -419,7 +477,7 @@ impl Sync {
             rtx_timer: None,
             rto_pending: false,
             timeout_rtx: false,
-            timing: None,
+            departures: VecDeque::new(),
             probe_at: None,
             probe_due: false,
             probe: None,
@@ -427,6 +485,8 @@ impl Sync {
             persist: None,
             sws: None,
             sws_fired: false,
+            pacer: Pacer::default(),
+            paced: None,
             last_data_sent: None,
             progress_since: None,
             acked_since: None,
@@ -439,6 +499,9 @@ impl Sync {
             last_unsolicited: None,
             urgent_logged: false,
             delivery_problem: false,
+            held_by: None,
+            declined: SendLimit::User,
+            retransmission_held: None,
         };
         sync.refresh(now);
         sync
@@ -465,6 +528,12 @@ impl Sync {
             Recovery::Sack { high_rxt, rescue, .. } => Some((high_rxt, rescue)),
             Recovery::None | Recovery::Fast { .. } => None,
         }
+    }
+
+    /// What cwnd is measured against: RFC 6675's pipe while SACK reports duplicates, the flight
+    /// otherwise.
+    fn in_flight(&self) -> u32 {
+        if self.sack_ok && self.dupacks > 0 { self.pipe() } else { self.tx.flight() }
     }
 
     /// RFC 6675's SetPipe, HighRxt at SND.UNA outside SACK recovery.
@@ -705,12 +774,12 @@ impl Sync {
         self.tx.trim_scoreboard();
         self.rtx_next = self.rtx_next.map(|p| p.later(ack)).filter(|p| p.before(self.tx.nxt));
         self.urgent = self.urgent.filter(|u| u.at_or_after(ack));
-        self.sample(seg, ack, flight, ctx);
+        let rtt = self.sample(seg, ack, flight, ctx);
         self.progress_since = Some(now);
         self.acked_since = Some(now);
         self.stalled = 0;
         self.orphan_progress(now);
-        ctx.log.event(Event::Reachable(ctx.tuple.remote.addr));
+        ctx.log.event(Event::Reachable { local: ctx.tuple.local.addr, remote: ctx.tuple.remote.addr });
         let smss = self.smss();
         match self.recovery {
             Recovery::Fast { .. } if ack.sub(1).at_or_after(self.recover) => {
@@ -731,7 +800,25 @@ impl Sync {
                 self.cc.end_recovery();
             }
             Recovery::Sack { .. } => {}
-            Recovery::None => self.cc.on_ack(now, bytes, self.rtt.srtt()),
+            Recovery::None => {
+                ctx.log.count(if self.cc.limited { Counter::AcksCwndLimited } else { Counter::AcksNotLimited });
+                let before = self.cc.cwnd;
+                match self.cc.on_ack(&cc::Ack { now, bytes, una: ack, nxt: self.tx.nxt, rtt, srtt: self.rtt.srtt() }) {
+                    Some(SlowStart::Conservative { first }) => {
+                        ctx.log.count(Counter::HyStartCss);
+                        if first {
+                            ctx.log.count(Counter::HyStartCssEntryRounds);
+                        }
+                    }
+                    Some(SlowStart::Ended) => {
+                        ctx.log.count(Counter::HyStartExits);
+                        ctx.log.add(Counter::HyStartExitCwndBytes, u64::from(self.cc.cwnd));
+                    }
+                    Some(SlowStart::Resumed) => ctx.log.count(Counter::HyStartResumed),
+                    None => {}
+                }
+                ctx.log.add(Counter::CwndGrownBytes, u64::from(self.cc.cwnd.saturating_sub(before)));
+            }
         }
         self.dupacks = 0;
         self.lt_budget = 0;
@@ -774,28 +861,45 @@ impl Sync {
         }
     }
 
-    fn sample(&mut self, seg: &In<'_>, ack: Seq, flight: u32, ctx: &mut Ctx<'_>) {
+    /// The ACK's RTT sample: from the departure of the newest segment it newly acknowledges, else,
+    /// for data a resend or an expiry took out of the record, from the timestamp it echoes, which
+    /// also times a retransmission (RFC 7323 §4.1). Every ACK of new data is a sample, so each is
+    /// weighted by RFC 7323 Appendix G's ExpectedSamples.
+    fn sample(&mut self, seg: &In<'_>, ack: Seq, flight: u32, ctx: &mut Ctx<'_>) -> Option<Duration> {
         let now = ctx.now;
-        match self.ts {
-            Some(ts) => {
-                let Some(t) = seg.options.timestamps() else { return };
-                match ts.echo_rtt(t.echo, now) {
-                    Some(rtt) => {
-                        let expected = flight.div_ceil(self.smss().saturating_mul(2).max(1)).max(1);
-                        self.rtt.sample(rtt, expected);
-                        self.sampled = true;
-                    }
-                    None => ctx.log.count(Counter::TsEcrInvalid),
-                }
+        let echoed = self.ts.zip(seg.options.timestamps()).and_then(|(ts, t)| {
+            let rtt = ts.echo_rtt(t.echo, now);
+            if rtt.is_none() {
+                ctx.log.count(Counter::TsEcrInvalid);
             }
-            None => {
-                if let Some((_, at)) = self.timing.filter(|&(end, _)| ack.at_or_after(end)) {
-                    self.timing = None;
-                    self.rtt.sample(now.since(at), 1);
-                    self.sampled = true;
+            rtt
+        });
+        let mut departed = None;
+        while let Some(run) = self.departures.front_mut().filter(|run| ack.after(run.start)) {
+            if ack.before(run.end) {
+                if core::mem::replace(&mut run.sampled, true) && run.first != run.last {
+                    return None;
                 }
+                departed = Some(run.first);
+                break;
             }
+            departed = Some(run.last);
+            self.departures.pop_front();
         }
+        let rtt = match (departed, echoed) {
+            (Some(at), _) => {
+                ctx.log.count(Counter::RttFromDeparture);
+                now.since(at)
+            }
+            (None, Some(rtt)) => {
+                ctx.log.count(Counter::RttFromEcho);
+                rtt
+            }
+            (None, None) => return None,
+        };
+        self.rtt.sample(rtt, flight.div_ceil(self.smss().saturating_mul(2).max(1)).max(1));
+        self.sampled = true;
+        Some(rtt)
     }
 
     /// A duplicate acknowledgment: RFC 5681 §2's without SACK, RFC 6675 §2's with it.
@@ -1033,6 +1137,7 @@ impl Sync {
             self.persist.filter(|p| !p.due).map(|p| p.at),
             self.keepalive_at(ctx),
             self.sws.filter(|_| !self.sws_fired),
+            self.paced,
             self.rx.delayed,
             self.give_up_at(ctx),
             self.orphan_since.map(|at| at.after(limits::ORPHAN_IDLE)),
@@ -1075,6 +1180,9 @@ impl Sync {
             self.sws = None;
             self.sws_fired = true;
         }
+        if self.paced.is_some_and(|at| at <= now) {
+            self.paced = None;
+        }
         self.rx.delayed_due(now);
         Tick::Keep
     }
@@ -1084,12 +1192,18 @@ impl Sync {
     fn expire(&mut self, ctx: &mut Ctx<'_>) {
         self.rtx_timer = None;
         ctx.log.count(Counter::Rto);
+        // RFC 4898 §4, `tcpEStatsPerfSndLimTimeCwnd`: a wait that ends in a timeout is congestion's.
+        if let Some((limit, _)) = self.held_by.as_mut() {
+            *limit = SendLimit::Congestion;
+        }
         if self.rto_pending {
             ctx.log.count(Counter::RtoUnsent);
         }
         self.rto_pending = true;
         self.rtt.back_off();
-        self.timing = None;
+        // RFC 6298 §5: after a back-off, a new RTT measurement "can only happen when new data has
+        // been sent and acknowledged", so the backed-off RTO stands until then.
+        self.departures.clear();
         (self.probe_at, self.probe_due, self.probe) = (None, false, None);
         let repeat = core::mem::replace(&mut self.timeout_rtx, true);
         self.cc.on_timeout(self.tx.flight(), repeat);
@@ -1111,14 +1225,51 @@ impl Sync {
         self.stalled = self.stalled.saturating_add(1);
         if self.stalled == 3 {
             self.delivery_problem = true;
-            ctx.log.event(Event::Reverify(ctx.tuple.remote.addr));
+            ctx.log.event(Event::Reverify { local: ctx.tuple.local.addr, remote: ctx.tuple.remote.addr });
         }
     }
 
     // ---- transmit ----
 
     /// Hands off the next segment this opportunity owes, after SYNs and resets: `true` if one left.
+    /// The time new data waits on the user, the peer's window or congestion is counted by which.
     pub fn next_segment<T>(&mut self, ctx: &mut Ctx<'_>, exit: &mut dyn Exit<T>) -> Result<bool, NotReady> {
+        let before = self.tx.nxt;
+        self.retransmission_held = None;
+        let sent = self.owed_segment(ctx, exit)?;
+        let now = ctx.now;
+        let held = if sent && self.tx.nxt.after(before) {
+            None
+        } else if sent {
+            return Ok(true);
+        } else if let Some(limit) = self.retransmission_held {
+            Some(limit)
+        } else {
+            Some(self.declined)
+        };
+        // A pacing hold leaves the window as the last send found it (`hand_off`).
+        if let Some(limit) = held.filter(|&limit| limit != SendLimit::Pacing) {
+            self.cc.limited = limit == SendLimit::Congestion;
+        }
+        let was = self.held_by.map(|(limit, _)| limit);
+        if let Some((limit, since)) = self.held_by.filter(|_| held != was) {
+            ctx.log.add(limit.counter(), u64::try_from(now.since(since).as_nanos()).unwrap_or(u64::MAX));
+        }
+        if held != was {
+            self.held_by = held.map(|limit| (limit, now));
+            if held == Some(SendLimit::Congestion) {
+                // What the window and the round trip were as cwnd stopped the sender: their means
+                // say whether a small window or a long round trip set the rate.
+                ctx.log.count(Counter::CongestionStops);
+                ctx.log.add(Counter::CongestionStopsCwndBytes, u64::from(self.cwnd()));
+                let srtt = self.rtt.srtt().map_or(0, |d| u64::try_from(d.as_micros()).unwrap_or(u64::MAX));
+                ctx.log.add(Counter::CongestionStopsSrttMicros, srtt);
+            }
+        }
+        Ok(sent)
+    }
+
+    fn owed_segment<T>(&mut self, ctx: &mut Ctx<'_>, exit: &mut dyn Exit<T>) -> Result<bool, NotReady> {
         if self.rx.dup_owed > 0 {
             self.emit_ack(ctx, exit, self.tx.nxt)?;
             self.rx.dup_owed = self.rx.dup_owed.saturating_sub(1);
@@ -1195,18 +1346,36 @@ impl Sync {
             self.tx.nxt = end;
         }
         if len > 0 {
+            self.pacer.spend(now, len, &self.cc, self.rtt.srtt());
             self.last_data_sent = Some(now);
             self.sws = None;
             self.sws_fired = false;
+            // Until the next stop says otherwise: an opportunity that ends on the caller's credit
+            // ends here. Below cwnd, RFC 9438 §5.8 calls the flow application limited; at half of
+            // cwnd in flight it grows anyway, as RFC 7661 §4.3's validated window, which §4.6
+            // admits. cwnd then stays within twice the flight, and a loss sets ssthresh from the
+            // flight (§4.6).
+            self.cc.limited = self.in_flight() >= self.cwnd() / 2;
+        }
+        let data_end = start.add(len);
+        if data_end.after(old) {
+            ctx.log.add(Counter::SentBytes, u64::from(data_end.since(old.later(start))));
         }
         if resent {
             ctx.log.add(Counter::RetransmitBytes, u64::from(old.earlier(end).since(start)));
-            self.timing = None;
+            // The ACK that repairs a hole also covers what was sent before it, held behind the hole.
+            self.departures.clear();
             if start == self.tx.una {
                 self.rto_pending = false;
             }
-        } else if end.after(old) && self.timing.is_none() && self.ts.is_none() {
-            self.timing = Some((end, now));
+        } else if end.after(old) {
+            let smss = self.smss();
+            match self.departures.back_mut() {
+                Some(run) if run.end == start && (run.last == now || (!run.sampled && run.end.since(run.start) < smss && len < smss)) => {
+                    (run.end, run.last) = (end, now);
+                }
+                _ => self.departures.push_back(Departure { start, end, first: now, last: now, sampled: false }),
+            }
         }
         self.arm(now);
         if len > 0 && !resent {
@@ -1265,7 +1434,8 @@ impl Sync {
         let len = if pos.before(stop) { stop.since(pos) } else { 0 };
         let fin = self.fin_fits(pos.add(len)) && (len > 0 || fin_resend);
         if len == 0 && !fin {
-            self.cc.limited = true;
+            self.retransmission_held =
+                Some(if self.cwnd() <= self.tx.window() { SendLimit::Congestion } else { SendLimit::Window });
             return Ok(false);
         }
         self.emit(ctx, exit, pos, len, fin, blocks)?;
@@ -1331,14 +1501,21 @@ impl Sync {
     /// New data and the FIN (RFC 9293 §3.7.4 Nagle, §3.8.6.2.1 sender silly-window avoidance),
     /// within SND.UNA + min(cwnd, SND.WND) (RFC 5681 §2).
     fn new_data<T>(&mut self, ctx: &mut Ctx<'_>, exit: &mut dyn Exit<T>) -> Result<bool, NotReady> {
-        if self.persist.is_some() || matches!(self.recovery, Recovery::Sack { .. }) || self.tx.window() == 0 {
+        self.paced = None;
+        let unsent = self.tx.unsent();
+        if unsent == 0 && !self.tx.fin_unsent() {
+            self.declined = SendLimit::User;
+            return Ok(false);
+        }
+        if self.persist.is_some() || self.tx.window() == 0 {
+            self.declined = SendLimit::Window;
+            return Ok(false);
+        }
+        if matches!(self.recovery, Recovery::Sack { .. }) {
+            self.declined = SendLimit::Congestion;
             return Ok(false);
         }
         let now = ctx.now;
-        let unsent = self.tx.unsent();
-        if unsent == 0 && !self.tx.fin_unsent() {
-            return Ok(false);
-        }
         if unsent > 0 && self.last_data_sent.is_some_and(|at| now.since(at) > self.rtt.rto()) && self.tx.flight() == 0 {
             self.cc.restart_after_idle();
         }
@@ -1346,7 +1523,7 @@ impl Sync {
         let blocks = self.blocks();
         let mss = signed(self.room(&blocks));
         let w_rcv = self.tx.usable();
-        let in_flight = if self.sack_ok && self.dupacks > 0 { self.pipe() } else { self.tx.flight() };
+        let in_flight = self.in_flight();
         let cwnd = signed(self.cwnd());
         let mut w_cc = cwnd.saturating_sub(signed(in_flight));
         let limited_transmit = self.recovery == Recovery::None && if self.sack_ok { self.dupacks > 0 } else { self.lt_budget > 0 };
@@ -1357,6 +1534,7 @@ impl Sync {
         let start = self.tx.nxt;
         if d == 0 {
             if w_rcv < 1 {
+                self.declined = SendLimit::Window;
                 return Ok(false);
             }
             self.emit(ctx, exit, start, 0, true, blocks)?;
@@ -1365,20 +1543,31 @@ impl Sync {
         let nagle = ctx.options.nodelay || self.tx.flight() == 0;
         let half = signed(self.tx.max_wnd / 2);
         let usable = d.min(w_rcv).min(w_cc).min(mss);
-        let rules = |w_rcv: i64| {
+        let rules = |w_rcv: i64, w_cc: i64| {
             d.min(w_rcv).min(w_cc) >= mss || (nagle && d <= w_rcv.min(w_cc)) || (nagle && d.min(w_rcv) >= half && w_cc > 0)
         };
-        let go = usable > 0 && (rules(w_rcv) || self.sws_fired || self.tx.fin.is_some());
-        if w_cc < d.min(w_rcv).min(mss) {
-            self.cc.limited = true;
-        }
+        let go = usable > 0 && (rules(w_rcv, w_cc) || self.sws_fired || self.tx.fin.is_some());
         if !go {
-            if w_rcv > 0 && rules(i64::MAX) && self.sws.is_none() && !self.sws_fired {
+            // Whichever window alone stands in the way; where both do, the smaller; where neither
+            // does, the sender's own Nagle hold.
+            self.declined = match (rules(w_rcv, i64::MAX), rules(i64::MAX, w_cc)) {
+                (true, false) => SendLimit::Congestion,
+                (false, true) => SendLimit::Window,
+                _ if !rules(i64::MAX, i64::MAX) => SendLimit::User,
+                _ if w_cc <= w_rcv => SendLimit::Congestion,
+                _ => SendLimit::Window,
+            };
+            if w_rcv > 0 && rules(i64::MAX, w_cc) && self.sws.is_none() && !self.sws_fired {
                 self.sws = Some(now.after(limits::SWS_OVERRIDE));
             }
             return Ok(false);
         }
         let len = u32::try_from(usable).unwrap_or(0);
+        if let Some(at) = self.pacer.hold(now, len, &self.cc, self.rtt.srtt()) {
+            self.declined = SendLimit::Pacing;
+            self.paced = Some(at);
+            return Ok(false);
+        }
         let beyond_cwnd = limited_transmit && signed(len) > cwnd.saturating_sub(signed(self.tx.flight()));
         let fin = self.fin_fits(start.add(len)) && signed(len) < w_rcv;
         self.emit(ctx, exit, start, len, fin, blocks)?;

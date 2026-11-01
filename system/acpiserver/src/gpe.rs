@@ -47,7 +47,7 @@ pub fn runtime<K: Kernel>(aml: &mut Aml<'_, K>, names: &Names, gpe0: Block, ec_g
         }
     }
     let mut wake = BTreeSet::new();
-    for named in names.objects.iter().filter(|named| matches!(named.kind, Kind::Device | Kind::Processor | Kind::ThermalZone | Kind::PowerResource)) {
+    for named in names.objects.iter().filter(|named| matches!(named.kind, Kind::Device | Kind::Processor { .. } | Kind::ThermalZone | Kind::PowerResource)) {
         let prw = format!("{}._PRW", named.path);
         if !names.paths.contains(&prw) {
             continue;

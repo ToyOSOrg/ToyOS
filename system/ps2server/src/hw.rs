@@ -38,7 +38,7 @@ impl Records for Hw {
     /// The claim's record, if it holds one.
     fn take(&mut self) -> Option<Irq> {
         let mut record = [0u8; DeviceIrqRecord::SIZE];
-        match syscall::read_nonblock(self.claim.as_handle(), &mut record) {
+        match syscall::read_nonblock(self.claim.as_handle().raw(), &mut record) {
             Ok(n) => {
                 assert_eq!(n, DeviceIrqRecord::SIZE, "ps2server: a record of {n} bytes");
                 let first = record[8..16].try_into().expect("a record's first time is eight bytes");

@@ -22,8 +22,8 @@ use super::handles::with_object_ref;
 
 /// What `sys_write` does when the object took nothing.
 enum WriteBlock {
-    /// The pipe, the class of the wait, and the room the write waits for.
-    Pipe(pipe::PipeId, WaitClass, usize),
+    /// The pipe, and the room the write waits for.
+    Pipe(pipe::PipeRef, usize),
     Refused(u64),
     /// Carried out of the process's lock: `HandleError::refuse` may take the
     /// process down and cannot run under a guard.
@@ -32,7 +32,7 @@ enum WriteBlock {
 
 /// What `sys_read` parks on when the handle has nothing to give.
 enum ReadBlock {
-    Pipe(alloc::sync::Arc<crate::watch::Watch>, pipe::PipeId, WaitClass),
+    Pipe(pipe::PipeRef),
     /// A notice with no reason in it, until a quit puts one there.
     Notice(alloc::sync::Arc<crate::object::notice::NoticeObject>),
     /// A console, which reads the serial line and nothing else: nothing posts
@@ -53,36 +53,26 @@ pub(super) fn sys_write(h: RawHandle, buf: &UserBytes) -> u64 {
                 Err(e) => return Err(WriteBlock::BadHandle(e)),
             };
             match ops::try_write(object, buf) {
-                Some(n) => Ok((n, ops::pipe_id_write(object))),
+                Some(n) => Ok((n, ops::written_pipe(object))),
                 None => Err(match ops::pipe_write(object) {
-                    Some((id, class, landing)) => WriteBlock::Pipe(id, class, landing.room(buf.len())),
+                    Some(pipe) => WriteBlock::Pipe(pipe.clone(), kernel::pipe::room(buf.len())),
                     None => WriteBlock::Refused(SyscallError::NotFound.to_u64()),
                 }),
             }
         });
         match action {
-            Ok((n, pipe_id)) => {
-                if let Some(id) = pipe_id { process::wake_pipe_readers(id); }
+            Ok((n, pipe)) => {
+                if let Some(pipe) = pipe { process::wake_pipe_readers(&pipe); }
                 return n;
             }
-            Err(WriteBlock::Pipe(id, class, room)) => match pipe::write_watch(id) {
-                Some(end) => {
-                    let parkable = crate::scheduler::Parkable::at_entry();
-                    if watch::wait_until(
-                        &parkable,
-                        &end,
-                        0,
-                        class,
-                        Deadline::never(),
-                        || pipe::has_space(id, room),
-                    )
+            Err(WriteBlock::Pipe(pipe, room)) => {
+                let parkable = crate::scheduler::Parkable::at_entry();
+                if watch::wait_until(&parkable, pipe.write_watch(), 0, WaitClass::Pipe, Deadline::never(), || pipe.has_space(room))
                     .is_err()
-                    {
-                        return cancelled();
-                    }
+                {
+                    return cancelled();
                 }
-                None => return SyscallError::NotFound.to_u64(),
-            },
+            }
             Err(WriteBlock::Refused(word)) => return word,
             Err(WriteBlock::BadHandle(e)) => return e.refuse(),
         }
@@ -101,9 +91,7 @@ fn read_block(object: &KObjectRef) -> ReadBlock {
             );
             ReadBlock::Console(Deadline::at(crate::clock::now() + CONSOLE_REPOLL.duration()))
         }
-        _ => match ops::pipe_read(object).and_then(|(id, class)| {
-            pipe::read_watch(id).map(|end| ReadBlock::Pipe(end, id, class))
-        }) {
+        _ => match ops::pipe_read(object).map(|pipe| ReadBlock::Pipe(pipe.clone())) {
             Some(block) => block,
             None => ReadBlock::Refused(SyscallError::NotFound.to_u64()),
         },
@@ -132,26 +120,19 @@ pub(super) fn sys_read(h: RawHandle, buf: &mut UserBytesMut) -> u64 {
                 };
             }
             match ops::try_read(object, buf) {
-                Some(n) => Ok((n, ops::pipe_id_read(object))),
+                Some(n) => Ok((n, ops::read_pipe(object))),
                 None => Err(read_block(object)),
             }
         });
         match action {
-            Ok((n, pipe_id)) => {
-                if let Some(id) = pipe_id { process::wake_pipe_writers(id); }
+            Ok((n, pipe)) => {
+                if let Some(pipe) = pipe { process::wake_pipe_writers(&pipe); }
                 return n;
             }
-            Err(ReadBlock::Pipe(end, id, class)) => {
+            Err(ReadBlock::Pipe(pipe)) => {
                 let parkable = crate::scheduler::Parkable::at_entry();
-                if watch::wait_until(
-                    &parkable,
-                    &end,
-                    0,
-                    class,
-                    Deadline::never(),
-                    || pipe::has_data(id),
-                )
-                .is_err()
+                if watch::wait_until(&parkable, pipe.read_watch(), 0, WaitClass::Pipe, Deadline::never(), || pipe.has_data())
+                    .is_err()
                 {
                     return cancelled();
                 }
@@ -205,30 +186,30 @@ pub(super) fn sys_read_nonblock(h: RawHandle, buf: &mut UserBytesMut) -> u64 {
                 .handles
                 .get::<crate::object::device::DeviceClaim>(h, Rights::READ)
                 .expect("a Device resolved a moment ago under this same hold");
-            return Ok((ops::read_device(&claim, &mut data.handles, buf), None));
+            return Ok(ops::read_device(&claim, &mut data.handles, buf).map(|n| (n, None)));
         }
-        Ok((ops::try_read(object, buf), ops::pipe_id_read(object)))
+        Ok(ops::try_read(object, buf).map(|n| (n, ops::read_pipe(object))))
     });
     match result {
-        Ok((Some(n), wake)) => {
-            if let Some(id) = wake { process::wake_pipe_writers(id); }
+        Ok(Some((n, wake))) => {
+            if let Some(pipe) = wake { process::wake_pipe_writers(&pipe); }
             n
         }
-        Ok((None, _)) => SyscallError::WouldBlock.to_u64(),
+        Ok(None) => SyscallError::WouldBlock.to_u64(),
         Err(e) => e.refuse(),
     }
 }
 
 pub(super) fn sys_write_nonblock(h: RawHandle, buf: &UserBytes) -> u64 {
     let result = with_object_ref(h, Rights::WRITE, |object| {
-        (ops::try_write(object, buf), ops::pipe_id_write(object))
+        ops::try_write(object, buf).map(|n| (n, ops::written_pipe(object)))
     });
     match result {
-        Ok((Some(n), wake)) => {
-            if let Some(id) = wake { process::wake_pipe_readers(id); }
+        Ok(Some((n, wake))) => {
+            if let Some(pipe) = wake { process::wake_pipe_readers(&pipe); }
             n
         }
-        Ok((None, _)) => SyscallError::WouldBlock.to_u64(),
+        Ok(None) => SyscallError::WouldBlock.to_u64(),
         Err(e) => e.refuse(),
     }
 }
@@ -239,7 +220,10 @@ pub(super) fn sys_null(want: u64) -> u64 {
         Some(rights) if NullObject::RIGHTS.contains(rights) => rights,
         _ => return SyscallError::InvalidArgument.to_u64(),
     };
-    let object = KObjectRef::Null(NullObject::new());
+    let object = match NullObject::new() {
+        Ok(object) => KObjectRef::Null(object),
+        Err(e) => return SyscallError::from(e).to_u64(),
+    };
     let entry = crate::object::HandleEntry::new(object, rights);
     match process::with_process_data(|data| data.handles.install(entry)) {
         Ok(h) => h.0 as u64,

@@ -1,31 +1,30 @@
-//! A translation answers for one 2 MiB page. The typed syscall arguments are
-//! read and written through exactly one of them, and ten of the twelve
-//! `UserSafe` types are longer than their alignment — so a value placed near
-//! the end of a page had its tail read or written *past the physical page*, in
-//! whatever the PMM had handed out next.
+//! A typed syscall argument that crosses a page boundary is read and written
+//! whole. The two pages of a mapping are two frames wherever the allocator put
+//! them, so a value placed across the boundary is a copy cut at the seam: one
+//! translated as a single run would read or write its tail in whatever frame
+//! the allocator handed out after the first, and one refused would refuse a
+//! value its own process may store.
 //!
 //! Two are reachable from userland: `fstat`'s `Stat`, a kernel write, and
 //! `spawn`'s `SpawnArgs`, a kernel read whose `argv_ptr` and `argv_len` the
 //! kernel then acts on.
 //!
-//! **The verdict is not the assertion.** The canary is the bytes on the far
-//! side of the boundary: this process owns both pages, and mmap gives it
-//! them contiguously, so the bytes the kernel would have written past the end
-//! of the first physical page are bytes this process can read back.
+//! **The verdict is the bytes**: each straddling value is read back field by
+//! field on both sides of the boundary, and a straddling `SpawnArgs` spawns.
 
 #[path = "../image.rs"]
 mod image;
 
 use toyos_abi::RawHandle;
 use toyos_abi::syscall::{
-    self, MmapFlags, MmapProt, OpenFlags, ProcessStats, SpawnArgs, Stat, SyscallError, SYS_FSTAT,
+    self, VmAt, VmProt, OpenFlags, ProcessStats, SpawnArgs, Stat, SyscallError, SYS_FSTAT,
     SYS_PROCESS_STATS,
 };
 
 /// Where the child starts: `SpawnArgs` names a working directory or the spawn is refused.
 const CWD: &str = "/";
 
-const PAGE_2M: u64 = 2 * 1024 * 1024;
+const PAGE: u64 = 4096;
 const STAT_LEN: usize = core::mem::size_of::<Stat>();
 const CANARY: u8 = 0xA5;
 
@@ -59,61 +58,35 @@ fn err(ret: u64) -> Option<SyscallError> {
 
 fn main() {
     let region = unsafe {
-        syscall::mmap(
-            core::ptr::null_mut(),
-            2 * PAGE_2M as usize,
-            MmapProt::READ | MmapProt::WRITE,
-            MmapFlags::ANONYMOUS | MmapFlags::PRIVATE,
-        )
+        syscall::vm_reserve(2 * PAGE as usize, VmProt::ReadWrite, VmAt::ANYWHERE).unwrap_or(core::ptr::null_mut())
     };
     assert!(!region.is_null(), "mmap failed");
     let base = region as u64;
-    let boundary = base + PAGE_2M;
-    assert_eq!(base % PAGE_2M, 0, "mmap did not return a 2 MiB-aligned region");
+    let boundary = base + PAGE;
 
     let own = image::in_tmp("/system/bin/test_rs_abuse_page_straddle");
     let handle = syscall::open(own.as_bytes(), OpenFlags::READ).expect("open self");
-
-    // 1. A `Stat` eight bytes below the boundary: eight bytes of it are in this
-    //    page and the rest are not.
-    let straddling = boundary - 8;
     let poison = |addr: u64, len: usize| {
         for i in 0..len {
             unsafe { (addr as *mut u8).add(i).write_volatile(CANARY) };
         }
     };
-    let intact = |addr: u64, len: usize| {
-        (0..len).all(|i| unsafe { (addr as *const u8).add(i).read_volatile() } == CANARY)
-    };
 
+    // 1. A `Stat` eight bytes below the boundary, against one wholly inside the
+    //    first page: the kernel answers both alike.
+    let fitting = boundary - 2 * STAT_LEN as u64;
+    assert!(err(fstat_raw(handle, fitting)).is_none(), "fstat refused a Stat inside one page");
+    let want = unsafe { (fitting as *const [u8; STAT_LEN]).read_volatile() };
+    let straddling = boundary - 8;
     poison(straddling, STAT_LEN);
     let ret = fstat_raw(handle, straddling);
-    // The memory before the verdict: an error return the kernel produced after
-    // making the write is the failure this gate exists to catch, and asserting
-    // the verdict first would stop the run before anyone looked.
-    assert!(
-        intact(boundary, STAT_LEN - 8),
-        "fstat wrote {} bytes past the end of the physical page it translated",
-        STAT_LEN - 8,
-    );
-    assert!(intact(straddling, 8), "fstat wrote the near half of a Stat it refused");
-    assert_eq!(err(ret), Some(SyscallError::BadAddress), "fstat took a straddling Stat");
+    assert!(err(ret).is_none(), "fstat refused a Stat across a page boundary: {ret:#x}");
+    let got = unsafe { (straddling as *const [u8; STAT_LEN]).read_volatile() };
+    assert_eq!(got, want, "fstat wrote a different Stat across the boundary than inside one page");
+    // SAFETY: no type holds this number.
+    unsafe { syscall::close(handle) };
 
-    // 2. The same call one byte-count lower, where the whole value fits: the
-    //    refusal above is about the boundary and nothing else.
-    let fitting = boundary - STAT_LEN as u64;
-    poison(fitting, STAT_LEN);
-    let ret = fstat_raw(handle, fitting);
-    assert!(err(ret).is_none(), "fstat refused a Stat that ends at the boundary: {ret:#x}");
-    let size = unsafe { ((fitting as usize + core::mem::offset_of!(Stat, size)) as *const u64).read_volatile() };
-    assert!(size > 0, "fstat wrote a Stat with no size in it");
-    syscall::close(handle);
-
-    // 3. `SpawnArgs` straddling. Every byte of it is this process's own and
-    //    says the same thing on both sides of the boundary, so a kernel that
-    //    reads it out of one translation gets a *correct* argv — and spawns.
-    //    That is the observation: a child means the kernel acted on bytes
-    //    it never validated.
+    // 2. `SpawnArgs` straddling, read whole: the child it names starts.
     let argv = b"/system/bin/echo\0straddle\0";
     let echo = image::image_of("/system/bin/echo");
     let (image, image_len) = echo.spawn_words();
@@ -136,47 +109,22 @@ fn main() {
         image,
         image_len,
         place: u64::from(toyos_abi::HANDLE_INVALID.0),
+        pager: u64::from(toyos_abi::HANDLE_INVALID.0),
     };
     let placed = (boundary - 8) as *mut SpawnArgs;
     unsafe { placed.write_volatile(args) };
-    let err_ = unsafe { syscall::spawn(&*placed) }
-        .map(|h| panic!("spawn read a straddling SpawnArgs and started {h:?}"))
-        .unwrap_err();
-    assert_eq!(err_, SyscallError::BadAddress, "wrong error for a straddling SpawnArgs");
+    let child = unsafe { syscall::spawn(&*placed) }.expect("spawn from a SpawnArgs across a page boundary");
+    syscall::process_wait(child).expect("wait for the child");
 
-    // 4. And spawn still works from a `SpawnArgs` that fits, so the refusal is
-    //    the boundary and not the argument.
-    let fitting = (boundary - core::mem::size_of::<SpawnArgs>() as u64) as *mut SpawnArgs;
-    unsafe { fitting.write_volatile(args) };
-    let child = unsafe { syscall::spawn(&*fitting) }.expect("spawn a SpawnArgs that fits");
-    syscall::process_wait(child).expect("wait for the child that fits");
-
-    // 5. `ProcessStats`, which the kernel fills, and the child waited for above still
-    //    answers for one — the numbers are the object's and the handle outlives
-    //    the process.
+    // 3. `ProcessStats`, which the kernel fills, across the boundary.
     let stats_len = core::mem::size_of::<ProcessStats>();
     let straddling = boundary - 8;
     poison(straddling, stats_len);
     let ret = raw(SYS_PROCESS_STATS, child.0 as u64, straddling, stats_len as u64);
-    assert!(
-        intact(boundary, stats_len - 8),
-        "process_stats wrote {} bytes past the end of the physical page it translated",
-        stats_len - 8,
-    );
-    assert_eq!(
-        err(ret),
-        Some(SyscallError::BadAddress),
-        "process_stats took a straddling ProcessStats",
-    );
+    assert!(err(ret).is_none(), "process_stats refused a ProcessStats across a page boundary: {ret:#x}");
+    let stats = unsafe { (straddling as *const ProcessStats).read_unaligned() };
+    assert!(stats.wall_ns > 0 && stats.pid != 0, "process_stats wrote a snapshot with no wall time or pid in it");
 
-    let ret = raw(SYS_PROCESS_STATS, child.0 as u64, base, stats_len as u64);
-    assert!(
-        err(ret).is_none(),
-        "process_stats refused a ProcessStats that fits: {ret:#x}",
-    );
-    let wall_ns = unsafe { ((base as usize + core::mem::offset_of!(ProcessStats, wall_ns)) as *const u64).read_volatile() };
-    assert!(wall_ns > 0, "process_stats wrote a snapshot with no wall time in it");
-
-    unsafe { syscall::munmap(region, 2 * PAGE_2M as usize) }.expect("munmap");
-    println!("a typed syscall argument may not cross the page its translation answers for");
+    unsafe { syscall::vm_release(region, 2 * PAGE as usize) }.expect("munmap");
+    println!("a typed syscall argument across a page boundary is read and written whole");
 }

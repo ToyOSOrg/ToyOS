@@ -25,7 +25,7 @@ const MAC_D: MacAddr = MacAddr([0x02, 0, 0, 0, 0, 0x0d]);
 fn opportunity(net: &mut Net, node: usize, credit: usize) -> Vec<String> {
     let now = net.now();
     let mut out = Vec::new();
-    net.nodes[node].shard.transmit(now, credit, |frame| out.push(name(frame)));
+    net.nodes[node].shard.transmit(now, credit, |_, frame| out.push(name(frame)));
     out
 }
 
@@ -93,7 +93,7 @@ fn s_pl_013_shard_a_connect_with_no_route_fails_at_once() {
     let (mut net, a, _) = segment();
     let now = net.now();
     let id = net.nodes[a].shard.connect(now, Some(port(49152)), ep(B, 80)).unwrap();
-    net.nodes[a].shard.link_down(now).unwrap();
+    net.nodes[a].link_down(now).unwrap();
     net.advance(Duration::from_secs(5));
     assert_eq!(net.nodes[a].shard.status(id).unwrap().failure, Some(HOST_UNREACHABLE));
     let counters = net.nodes[a].shard.tcp_counters();
@@ -109,9 +109,9 @@ fn routes_refused(net: &Net, node: usize) -> u64 {
 /// A forgets every neighbour: a link down and up again.
 fn forget(net: &mut Net, node: usize) {
     let now = net.now();
-    net.nodes[node].shard.link_down(now).unwrap();
-    net.nodes[node].shard.link_up(now).unwrap();
-    let iface = net.nodes[node].shard.iface();
+    net.nodes[node].link_down(now).unwrap();
+    net.nodes[node].link_up(now).unwrap();
+    let iface = net.nodes[node].iface;
     assert!(net.nodes[node].shard.ip().neighbour(iface, B).is_none());
 }
 
@@ -178,7 +178,7 @@ fn s_pl_014_shard_an_established_flow_with_no_route_records_host_unreachable() {
     let (mut net, a, b) = segment();
     let (to_b, from_a) = established(&mut net, a, b);
     let now = net.now();
-    net.nodes[a].shard.link_down(now).unwrap();
+    net.nodes[a].link_down(now).unwrap();
     net.nodes[a].shard.send(now, to_b, &[0x55; 100]).unwrap();
     net.advance(Duration::from_secs(10));
     let status = net.nodes[a].shard.status(to_b).unwrap();
@@ -187,7 +187,7 @@ fn s_pl_014_shard_an_established_flow_with_no_route_records_host_unreachable() {
 
     // A route again: the flow asks, and its segment leaves; B's acknowledgment clears the error.
     let now = net.now();
-    net.nodes[a].shard.link_up(now).unwrap();
+    net.nodes[a].link_up(now).unwrap();
     net.advance(Duration::from_secs(1));
     assert_eq!(net.nodes[a].shard.status(to_b).unwrap().soft_error, None);
     let now = net.now();
@@ -200,7 +200,7 @@ fn s_pl_014_shard_an_established_flow_with_no_route_records_host_unreachable() {
 fn b_failed_d_ready() -> (Net, usize, toyos_net_tcp::ConnId, toyos_net_tcp::ConnId) {
     let (mut net, a, b) = segment();
     let d = net.add_node(MAC_D, D, 24);
-    assert!(net.run_until(Duration::from_secs(1), |net| net.nodes[d].events.contains(&toyos_net_shard::Event::Verified(D))));
+    assert!(net.run_until(Duration::from_secs(1), |net| net.nodes[d].verified(D)));
     net.advance(toyos_net_ip::limits::acd::ANNOUNCE_INTERVAL * 2);
     let (to_b, _) = established(&mut net, a, b);
     let (to_d, _) = connected(&mut net, a, 49153, d, D);
@@ -211,7 +211,7 @@ fn b_failed_d_ready() -> (Net, usize, toyos_net_tcp::ConnId, toyos_net_tcp::Conn
     net.nodes[a].shard.send_to(now, socket, B, 9, b"x").unwrap();
     net.nodes[a].shard.send_to(now, socket, D, 9, b"x").unwrap();
     net.advance(Duration::from_secs(4));
-    let iface = net.nodes[a].shard.iface();
+    let iface = net.nodes[a].iface;
     assert!(matches!(net.nodes[a].shard.ip().neighbour(iface, B), Some(Nud::Failed)));
     assert!(net.nodes[a].shard.ip().neighbour(iface, D).is_some_and(|n| n.mac().is_some()));
     (net, a, to_b, to_d)
@@ -237,7 +237,7 @@ fn s_pl_015_shard_a_reset_with_no_route_is_dropped() {
     let (mut net, a, b) = segment();
     let (to_b, _) = established(&mut net, a, b);
     let now = net.now();
-    net.nodes[a].shard.link_down(now).unwrap();
+    net.nodes[a].link_down(now).unwrap();
     let start = net.wire().len();
     net.nodes[a].shard.abort(now, to_b).unwrap();
     net.advance(Duration::from_secs(5));
@@ -252,7 +252,7 @@ fn s_hs_034_shard_a_child_whose_peer_never_answers_gives_up() {
     let start = net.wire().len();
     let now = net.now();
     net.link(b, a).dark = Some((now, now.after(Duration::from_secs(3_600))));
-    net.nodes[a].shard.receive(now, &from_b(&segment_bytes((B, 40_000), (A, 80), 5_000, 0x02)));
+    net.nodes[a].receive(now, &from_b(&segment_bytes((B, 40_000), (A, 80), 5_000, 0x02)));
     let given_up = |net: &Net| net.nodes[a].shard.tcp_counters().get(Counter::SynAckGiveUp);
     net.advance(Duration::from_millis(59_999));
     assert_eq!(given_up(&net), 0);
@@ -327,19 +327,19 @@ fn stale_peer() -> (Net, usize, toyos_net_tcp::ConnId) {
     let (to_b, _) = established(&mut net, a, b);
     forget(&mut net, a);
     let now = net.now();
-    net.nodes[b].shard.link_down(now).unwrap();
-    net.nodes[b].shard.link_up(now).unwrap();
+    net.nodes[b].link_down(now).unwrap();
+    net.nodes[b].link_up(now).unwrap();
     net.nodes[a].shard.bind(A, Some(port(9)), || 0).unwrap();
     let socket = net.nodes[b].shard.bind(B, None, || 0).unwrap();
     net.nodes[b].shard.send_to(now, socket, A, 9, b"x").unwrap();
     net.advance(Duration::from_millis(1));
-    let iface = net.nodes[a].shard.iface();
+    let iface = net.nodes[a].iface;
     assert!(matches!(net.nodes[a].shard.ip().neighbour(iface, B), Some(Nud::Stale(_))));
     (net, a, to_b)
 }
 
 fn state_of_b(net: &Net, a: usize) -> Option<&Nud> {
-    net.nodes[a].shard.ip().neighbour(net.nodes[a].shard.iface(), B)
+    net.nodes[a].shard.ip().neighbour(net.nodes[a].iface, B)
 }
 
 #[test]
@@ -367,10 +367,10 @@ fn s_ip_nud_009_shard_an_acknowledgment_ends_delay() {
 fn s_ip_nud_020_shard_a_stalled_connect_reverifies_the_gateway() {
     let (mut net, a, _) = segment();
     let r = net.add_node(MAC_R, R, 24);
-    assert!(net.run_until(Duration::from_secs(1), |net| net.nodes[r].events.contains(&toyos_net_shard::Event::Verified(R))));
+    assert!(net.run_until(Duration::from_secs(1), |net| net.nodes[r].verified(R)));
     net.advance(toyos_net_ip::limits::acd::ANNOUNCE_INTERVAL * 2);
     let now = net.now();
-    net.nodes[a].shard.set_gateways(now, &[R]).unwrap();
+    net.nodes[a].set_gateways(now, &[R]).unwrap();
     let start = net.wire().len();
     net.nodes[a].shard.connect(now, Some(port(49152)), ep(std::net::Ipv4Addr::new(198, 51, 100, 7), 80)).unwrap();
     assert!(net.run_until(Duration::from_secs(1), |net| sent(net, a, start).iter().any(|f| f.contains("SYN"))));
@@ -380,7 +380,7 @@ fn s_ip_nud_020_shard_a_stalled_connect_reverifies_the_gateway() {
     assert!(!sent(&net, a, start).contains(&"ARP poll 192.0.2.254".to_string()), "{}", dump(&net, start));
     net.advance(Duration::from_millis(1));
     assert!(sent(&net, a, start).contains(&"ARP poll 192.0.2.254".to_string()), "{}", dump(&net, start));
-    let iface = net.nodes[a].shard.iface();
+    let iface = net.nodes[a].iface;
     assert!(net.nodes[a].shard.ip().neighbour(iface, std::net::Ipv4Addr::new(198, 51, 100, 7)).is_none());
 }
 
@@ -389,7 +389,7 @@ fn s_ip_nud_022_shard_a_flow_refused_by_a_full_table_asks_again_once_an_entry_ma
     let mut net = Net::new(Instant::from_millis(3_600_000));
     let a = net.add_node(MAC_A, A, 22);
     let b = net.add_node(MAC_B, B, 22);
-    let verified = |net: &mut Net, n: usize, addr| net.nodes[n].events.contains(&toyos_net_shard::Event::Verified(addr));
+    let verified = |net: &mut Net, n: usize, addr| net.nodes[n].verified(addr);
     assert!(net.run_until(Duration::from_secs(1), |net| verified(net, a, A) && verified(net, b, B)));
     net.advance(toyos_net_ip::limits::acd::ANNOUNCE_INTERVAL * 2);
     let (to_b, from_a) = established(&mut net, a, b);
@@ -426,14 +426,14 @@ fn s_ip_nud_024_shard_a_segments_request_prefers_its_source() {
     let (mut net, a, _) = segment();
     let (second, peer) = (Ipv4Addr::new(198, 51, 100, 1), Ipv4Addr::new(198, 51, 100, 9));
     let now = net.now();
-    net.nodes[a].shard.add_address(now, second, 24).unwrap();
-    assert!(net.run_until(Duration::from_secs(1), |net| net.nodes[a].events.contains(&toyos_net_shard::Event::Verified(second))));
+    net.nodes[a].add_address(now, second, 24).unwrap();
+    assert!(net.run_until(Duration::from_secs(1), |net| net.nodes[a].verified(second)));
     net.nodes[a].shard.listen(A, Some(port(80)), || 0).unwrap();
     let start = net.wire().len();
     let mut syn = from_b(&segment_bytes((peer, 40_000), (A, 80), 5_000, 0x02));
     syn[6..12].copy_from_slice(&[0x02, 0, 0, 0, 0, 0x99]);
     let now = net.now();
-    net.nodes[a].shard.receive(now, &syn);
+    net.nodes[a].receive(now, &syn);
     net.advance(Duration::from_millis(1));
     let request = net.wire()[start..].iter().find(|c| c.from == a && name(&c.frame) == format!("ARP request {peer}")).expect("a request");
     let frame = toyos_net_wire::ethernet::Frame::parse(&request.frame).unwrap();

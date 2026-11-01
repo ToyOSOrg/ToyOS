@@ -33,6 +33,12 @@ impl Stack {
         held(self.shard.tuple(id)).local.port
     }
 
+    /// The connection's peer and its local port.
+    pub(crate) fn tcp_endpoints(&mut self, id: ConnId) -> (Endpoint, Port) {
+        let tuple = held(self.shard.tuple(id));
+        (tuple.remote, tuple.local.port)
+    }
+
     /// [`toyos_net_tcp::Tcp::lend`].
     pub(crate) fn tcp_lend(&mut self, id: ConnId, rx: Box<dyn Lent>, tx: Box<dyn Lent>) -> Result<(), Error> {
         self.shard.lend(id, rx, tx)

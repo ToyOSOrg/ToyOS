@@ -29,8 +29,7 @@ pub fn counter_hz() -> Option<u64> {
         let r = __cpuid(at);
         (r.eax, r.ebx, r.ecx, r.edx)
     };
-    let max = leaf(0).0;
-    toyos_tsc::stated_hz((max >= 0x15).then(|| leaf(0x15)), (max >= 0x16).then(|| leaf(0x16)))
+    toyos_tsc::stated_hz((leaf(0).0 >= 0x15).then(|| leaf(0x15)))
 }
 
 /// This CPU as its vendor's microcode names it, or why it loads none.

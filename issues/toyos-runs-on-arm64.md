@@ -433,6 +433,6 @@ Linux guest. The timing is one measurement, taken by hand and not automated
   interrupt arrival) are the arch seam for drivers, and ARM is the second
   implementation that makes them real boundaries.
 - **Page size**
-  (`issues/process-memory-is-2-mib-pages-and-that-caps-the-process-count.md`):
+  (`issues/process-memory-in-4-kib-pages-still-copies-each-programs-text.md`):
   2 MiB L2 blocks map identically on both arches, so no change is forced by
   this track.

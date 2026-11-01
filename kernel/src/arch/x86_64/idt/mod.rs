@@ -1,6 +1,7 @@
 pub(crate) mod exceptions;
 mod device_irq;
 mod dma_fault;
+mod rtc;
 mod isa;
 mod kick;
 mod nmi;
@@ -35,6 +36,9 @@ pub const ISA_VECTORS: [u8; crate::isa::MAX_ROWS] = [Vector::Isa0 as u8, Vector:
 
 /// The vector an IOMMU writes into its own `FEDATA`.
 pub const DMA_FAULT_VECTOR: u8 = Vector::DmaFault as u8;
+
+/// The vector the RTC's IRQ8 is routed to.
+pub const RTC_VECTOR: u8 = Vector::Rtc as u8;
 
 const PF_PRESENT: u64 = 1 << 0;
 const PF_WRITE: u64 = 1 << 1;
@@ -242,6 +246,7 @@ idt_vectors! {
         Nmi          = 0x02, nmi::nmi_entry, ist 2;
         Timer        = 0x20, timer::timer_entry;
         DmaFault     = 0x25, dma_fault::dma_fault_entry;
+        Rtc          = 0x26, rtc::rtc_entry;
         Isa0         = 0x2C, isa::isa0_entry;
         Isa1         = 0x2D, isa::isa1_entry;
         Kick         = 0xFC, kick::kick_entry;
@@ -335,10 +340,13 @@ extern "sysv64" fn trap_dispatch(frame: *mut TrapFrame) {
     // is a double and then a triple fault, and a triple fault is a reset that
     // wrote nothing; the registers are what this entry can say without risking
     // that, and the report overwrites them if the machine gets that far. Every
-    // vector, the page fault included: a diagnostic that skips the commonest
-    // fault class is one that misses the answer, and a returning fault's record
-    // is simply overwritten by the next.
-    crate::blackbox::record_fault(&fault_of(frame));
+    // vector seals but a Ring 3 page fault, which every first touch of a page
+    // takes: it is served or ends its process through the crash path, which
+    // reports, and a fault inside its handler is a Ring 0 fault and seals.
+    let user_page_fault = Vector::from_raw(frame.vector) == Vector::PageFault && toyos_userbound::Ring::of_cs(frame.cs).is_user();
+    if !user_page_fault {
+        crate::blackbox::record_fault(&fault_of(frame));
+    }
     match Vector::from_raw(frame.vector) {
         Vector::DoubleFault => exceptions::double_fault_handler(frame),
         Vector::MachineCheck => exceptions::machine_check_handler(frame),

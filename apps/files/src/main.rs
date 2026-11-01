@@ -56,7 +56,7 @@ impl Metrics {
 }
 
 /// A surface an icon's mask is blended onto.
-struct Canvas<'a>(&'a Framebuffer);
+struct Canvas<'a>(&'a Framebuffer<'a>);
 
 impl toyos_icon::Canvas for Canvas<'_> {
     fn size(&self) -> (usize, usize) {
@@ -130,7 +130,7 @@ fn format_size(bytes: u64) -> String {
 
 struct FileBrowser {
     window: Window,
-    fb: Framebuffer,
+    fb: Framebuffer<'static>,
     shapes: Shapes,
     drawn: Drawn,
     entries: Vec<Entry>,

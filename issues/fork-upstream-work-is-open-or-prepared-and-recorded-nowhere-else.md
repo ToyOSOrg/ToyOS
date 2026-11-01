@@ -6,14 +6,10 @@ opened: 2026-09-29
 
 # Open and prepared upstream pull requests for the forks
 
-- **russh** — Eugeny/russh#782 is open (2026-09-26) and is the `rustcrypto`
-  cipher backend alone, on the fork's `rustcrypto-backend` branch. The consumed
-  `toyos` branch, on v0.60.0, carries a different cipher backend: it is not that
-  PR's code. The PR sits on upstream main past v0.63.3 and is rewritten for
-  `aes-gcm` 0.11, `chacha20` 0.10 and `poly1305` 0.9 in a new `cipher::rustcrypto`
-  module. After a move onto a release that carries it, what is left for ToyOS is
-  the `cryptovec` mlock no-ops and `known_hosts_path`, both behind
-  `target_os = "toyos"`.
+- **russh** — Eugeny/russh#782 is open (2026-09-26): the `rustcrypto` cipher
+  backend alone, on the fork's `rustcrypto-backend` branch. Nothing in the tree
+  consumes the fork since `system/sshserver` moved to `toyos-ssh`
+  (`issues/the-ssh-server-is-toyos-own-and-russh-is-gone.md`, stage 2).
 - **wgpu** — prepared, not opened: branch `instance-no-backend-target` on
   `ToyOSOrg/wgpu`, compared against `gfx-rs/wgpu` `trunk`. `Instance::new` gets
   the instance instead of the panic on any target wgpu has no backend for; it

@@ -1,0 +1,17 @@
+[package]
+name = "i219"
+description = "The Intel I219 and 82574 network driver: one process per such function the kernel does not drive, holding its claim and carrying its frames to netstack over a link."
+edition = "2024"
+license = "MIT OR Apache-2.0"
+
+[dependencies]
+toyos-abi = { path = "../../sdk/abi" }
+toyos = { path = "../../sdk/toyos" }
+toyos-device-memory = { path = "../../lib/device-memory" }
+toyos-i219 = { path = "driver" }
+toyos-link = { path = "../../lib/link" }
+toyos-manifest = { path = "../../lib/manifest" }
+toyos-pci-claim = { path = "../../lib/pci-claim" }
+
+[package.metadata.toyos.host]
+exempt.owns = "one Intel I219 or 82574 function, claimed from the kernel, and its link to netstack"

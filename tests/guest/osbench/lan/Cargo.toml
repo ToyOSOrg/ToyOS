@@ -1,0 +1,21 @@
+[package]
+name = "osbench-lan"
+description = "osbench's LAN measurement, both ends: a bench finds its peer by broadcast and times TCP to it; the peer, `osbench-peer`, on the other bench's Linux, echoes, sinks and sources for it."
+version = "0.1.0"
+edition = "2021"
+license = "MIT OR Apache-2.0"
+publish = false
+
+# A package of its own because osbench builds for ToyOS and Linux alone, and
+# a host tests this part of it.
+
+[lib]
+doctest = false
+
+[[bin]]
+name = "osbench-peer"
+path = "src/main.rs"
+
+# The interface holding an address, which `link` describes from sysfs.
+[target.'cfg(target_os = "linux")'.dependencies]
+libc = "0.2"

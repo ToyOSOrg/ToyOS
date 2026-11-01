@@ -50,6 +50,6 @@ fn alloc_slot() -> u64 {
 /// A fresh idle stack over its unmapped guard page: its top.
 pub fn alloc() -> u64 {
     let base = alloc_slot();
-    crate::mm::paging::kernel().lock().guard_4k(DirectMap::phys_of(base as *const u8));
+    crate::mm::paging::guard_4k(DirectMap::phys_of(base as *const u8));
     base + SLOT as u64
 }

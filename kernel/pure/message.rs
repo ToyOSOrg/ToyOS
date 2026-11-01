@@ -1,114 +1,117 @@
-//! Where each batch of handles a connection carries sits in its byte stream.
+//! One direction of a connection: whole messages in the order they were sent,
+//! each its length and the handles it carries.
 //!
-//! A message is bytes and the handles they announce, sent together: the bytes
-//! go into the stream whole, and the batch is pinned at the byte just past
-//! them. The reader's reads never cross a pinned batch it has not taken, and
-//! it takes a batch only where it is pinned. So a batch is never received
-//! without its bytes, nor its bytes read past without the batch noticed.
-//!
-//! Positions count every byte the stream ever carried, never wrapping: a
-//! `u64` of bytes outlives any connection.
+//! A message is queued whole or refused, and taken whole or left queued, so a
+//! reader never sees part of one and its handles never come apart from its
+//! bytes. The bytes live beside this queue in the same order; it counts them
+//! only to say where a message ends.
 
 #![forbid(unsafe_code)]
 
 use alloc::collections::VecDeque;
 
-/// What a read at the reader's position may take now.
+use toyos_abi::syscall::{MAX_MESSAGE_LEN, MAX_QUEUED_HANDLES, MAX_QUEUED_MESSAGES, MAX_TRANSFER_HANDLES};
+
+/// The message at the front of a queue.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
-pub enum Window {
-    /// Up to this many bytes; zero is nothing to read yet.
-    Bytes(usize),
-    /// A batch is pinned exactly here, and the read must take it first.
-    AtBatch,
+pub struct Head {
+    pub len: usize,
+    pub handles: usize,
 }
 
-/// Why a message is refused before its bytes are written. Nothing of it is
-/// written or moved; room in the stream and the reader are the stream's to answer.
+/// Why the front message stays queued.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
-pub enum Refused {
-    /// Handles with no bytes announcing them.
-    Empty,
-    /// The reader holds as many batches as it may.
-    QueueFull,
+pub enum Untaken {
+    /// The reader's byte or handle buffer cannot hold it whole.
+    TooSmall,
+    /// The reader has no room in its table for the handles it carries.
+    NoRoom,
 }
 
-/// The batches a reader has not taken, each at the stream position it
-/// follows, in the order they were sent.
-pub struct Batches<B> {
-    pinned: VecDeque<(u64, B)>,
+/// The messages a reader has not taken, and their handles, at most
+/// [`MAX_QUEUED_MESSAGES`] and [`MAX_QUEUED_HANDLES`].
+pub struct Queue<H> {
+    messages: VecDeque<Head>,
+    handles: VecDeque<H>,
 }
 
-impl<B> Default for Batches<B> {
+impl<H> Default for Queue<H> {
     fn default() -> Self {
         Self::new()
     }
 }
 
-impl<B> Batches<B> {
+impl<H> Queue<H> {
     pub const fn new() -> Self {
-        Self { pinned: VecDeque::new() }
+        Self { messages: VecDeque::new(), handles: VecDeque::new() }
     }
 
     pub fn len(&self) -> usize {
-        self.pinned.len()
+        self.messages.len()
     }
 
     pub fn is_empty(&self) -> bool {
-        self.pinned.is_empty()
+        self.messages.is_empty()
     }
 
-    /// Whether a message of `len` bytes, carrying a batch or not, may be
-    /// pinned here, `cap` batches at most.
-    pub fn admit(&self, len: usize, carries: bool, cap: usize) -> Result<(), Refused> {
-        if carries && len == 0 {
-            return Err(Refused::Empty);
-        }
-        if carries && self.pinned.len() >= cap {
-            return Err(Refused::QueueFull);
-        }
-        Ok(())
+    pub fn head(&self) -> Option<Head> {
+        self.messages.front().copied()
     }
 
-    /// Pin `batch` at `at`, the position just past the bytes that announce it.
+    /// Whether a message of `len` bytes carrying `handles` fits now, beside
+    /// `space` bytes of room in the bytes it is written to.
+    pub fn fits(&self, space: usize, len: usize, handles: usize) -> bool {
+        len <= space
+            && self.messages.len() < MAX_QUEUED_MESSAGES
+            && self.handles.len() + handles <= MAX_QUEUED_HANDLES
+    }
+
+    /// Whether the largest message one send may make fits now: what a
+    /// writable connection promises.
+    pub fn fits_any(&self, space: usize) -> bool {
+        self.fits(space, MAX_MESSAGE_LEN, MAX_TRANSFER_HANDLES)
+    }
+
+    /// Queue a message whose bytes are written.
     ///
     /// # Panics
-    /// When `at` is before the last batch's position: positions only grow, so
-    /// that is a caller that wrote out of order.
-    pub fn pin(&mut self, at: u64, batch: B) {
-        if let Some((last, _)) = self.pinned.back() {
-            assert!(*last <= at, "message: a batch pinned at {at} after one at {last}");
+    /// When it does not fit by count: [`Self::fits`] is asked under the same
+    /// hold, before its bytes are written.
+    pub fn push(&mut self, len: usize, handles: impl ExactSizeIterator<Item = H>) {
+        let count = handles.len();
+        assert!(
+            self.messages.len() < MAX_QUEUED_MESSAGES && self.handles.len() + count <= MAX_QUEUED_HANDLES,
+            "message: a message queued past the queue's bounds"
+        );
+        self.handles.extend(handles);
+        self.messages.push_back(Head { len, handles: count });
+    }
+
+    /// Take the front message into a reader holding `buf` bytes and `cap`
+    /// handles, whose table `room` says can take its handles, which come
+    /// back in order. Its bytes are the caller's to copy out before this
+    /// hold ends.
+    pub fn pop(
+        &mut self,
+        buf: usize,
+        cap: usize,
+        room: impl FnOnce(usize) -> bool,
+    ) -> Option<Result<(Head, impl Iterator<Item = H> + '_), Untaken>> {
+        let head = self.head()?;
+        if head.len > buf || head.handles > cap {
+            return Some(Err(Untaken::TooSmall));
         }
-        self.pinned.push_back((at, batch));
-    }
-
-    /// What a read at `read` may take of the `available` bytes the stream holds.
-    pub fn window(&self, read: u64, available: usize) -> Window {
-        match self.pinned.front() {
-            Some((at, _)) if *at == read => Window::AtBatch,
-            Some((at, _)) => {
-                let before = at.checked_sub(read).expect("message: the reader read past a pinned batch");
-                Window::Bytes(available.min(usize::try_from(before).unwrap_or(usize::MAX)))
-            }
-            None => Window::Bytes(available),
+        if head.handles > 0 && !room(head.handles) {
+            return Some(Err(Untaken::NoRoom));
         }
+        self.messages.pop_front();
+        Some(Ok((head, self.handles.drain(..head.handles))))
     }
 
-    /// The batch pinned at `read`, if any, without taking it.
-    pub fn at(&self, read: u64) -> Option<&B> {
-        self.pinned.front().filter(|(at, _)| *at == read).map(|(_, b)| b)
-    }
-
-    /// Take the batch pinned at `read`; none elsewhere.
-    pub fn take(&mut self, read: u64) -> Option<B> {
-        match self.pinned.front() {
-            Some((at, _)) if *at == read => self.pinned.pop_front().map(|(_, b)| b),
-            _ => None,
-        }
-    }
-
-    /// Every batch still pinned, for its end's release.
-    pub fn drain(&mut self) -> impl Iterator<Item = B> + '_ {
-        self.pinned.drain(..).map(|(_, b)| b)
+    /// Every handle still queued, for the reader's end, with the messages.
+    pub fn clear(&mut self) -> VecDeque<H> {
+        self.messages.clear();
+        core::mem::take(&mut self.handles)
     }
 }
 
@@ -117,76 +120,115 @@ mod tests {
     use super::*;
     use alloc::vec::Vec;
 
-    /// A stream and its batches as the kernel holds them: the bytes are
-    /// numbered by their position, so a read says exactly which it took.
-    struct Stream {
-        batches: Batches<u32>,
+    /// A message as taken: its bytes, numbered by the order they were sent,
+    /// and its handles.
+    type Message = (Vec<u64>, Vec<u32>);
+
+    /// A direction as the kernel holds it: the bytes numbered by the order
+    /// they were sent, in a store of `room` bytes.
+    struct Direction {
+        queue: Queue<u32>,
         bytes: VecDeque<u64>,
-        written: u64,
-        read: u64,
-        ring: usize,
+        next_byte: u64,
+        room: usize,
     }
 
-    impl Stream {
-        fn new(ring: usize) -> Self {
-            Self { batches: Batches::new(), bytes: VecDeque::new(), written: 0, read: 0, ring }
+    impl Direction {
+        fn new(room: usize) -> Self {
+            Self { queue: Queue::new(), bytes: VecDeque::new(), next_byte: 0, room }
         }
 
-        /// One send, whole or not at all, as the kernel makes it under the
-        /// queue lock and then the pipe lock; `None` is a stream without room.
-        fn send(&mut self, len: usize, batch: Option<u32>) -> Option<Result<(), Refused>> {
-            if let Err(refused) = self.batches.admit(len, batch.is_some(), 4) {
-                return Some(Err(refused));
-            }
-            if len > self.ring - self.bytes.len() {
-                return None;
+        fn send(&mut self, len: usize, handles: &[u32]) -> bool {
+            if !self.queue.fits(self.room - self.bytes.len(), len, handles.len()) {
+                return false;
             }
             for _ in 0..len {
-                self.bytes.push_back(self.written);
-                self.written += 1;
+                self.bytes.push_back(self.next_byte);
+                self.next_byte += 1;
             }
-            if let Some(b) = batch {
-                self.batches.pin(self.written, b);
-            }
-            Some(Ok(()))
+            self.queue.push(len, handles.iter().copied());
+            true
         }
 
-        fn read(&mut self, want: usize) -> Result<Vec<u64>, Window> {
-            match self.batches.window(self.read, self.bytes.len()) {
-                Window::AtBatch => Err(Window::AtBatch),
-                Window::Bytes(n) => {
-                    let got: Vec<u64> = self.bytes.drain(..n.min(want)).collect();
-                    self.read += got.len() as u64;
-                    Ok(got)
-                }
-            }
+        fn recv(&mut self, buf: usize, cap: usize, room: bool) -> Option<Result<Message, Untaken>> {
+            let (head, got) = match self.queue.pop(buf, cap, |_| room)? {
+                Ok((head, handles)) => (head, handles.collect()),
+                Err(untaken) => return Some(Err(untaken)),
+            };
+            Some(Ok((self.bytes.drain(..head.len).collect(), got)))
         }
     }
 
     #[test]
-    fn a_batch_is_taken_only_where_its_bytes_end_and_no_read_crosses_it() {
-        let mut s = Stream::new(64);
-        s.send(5, Some(7)).unwrap().unwrap();
-        s.send(3, None).unwrap().unwrap();
-        assert_eq!(s.batches.take(s.read), None, "a batch taken before its bytes were read");
-        assert_eq!(s.read(100).unwrap(), [0, 1, 2, 3, 4], "a read crossed the batch");
-        assert_eq!(s.read(100), Err(Window::AtBatch), "a read went on past an untaken batch");
-        assert_eq!(s.batches.take(s.read), Some(7));
-        assert_eq!(s.read(100).unwrap(), [5, 6, 7]);
+    fn a_message_is_taken_whole_with_its_own_handles() {
+        let mut d = Direction::new(64);
+        assert!(d.send(3, &[7, 8]));
+        assert!(d.send(2, &[]));
+        assert!(d.send(1, &[9]));
+        assert_eq!(d.recv(64, 8, true), Some(Ok((alloc::vec![0, 1, 2], alloc::vec![7, 8]))));
+        assert_eq!(d.recv(64, 8, true), Some(Ok((alloc::vec![3, 4], alloc::vec![]))));
+        assert_eq!(d.recv(64, 8, true), Some(Ok((alloc::vec![5], alloc::vec![9]))));
+        assert_eq!(d.recv(64, 8, true), None);
     }
 
-    /// A refusal writes no byte and pins no batch.
+    /// A reader that cannot hold the front message whole takes nothing of it,
+    /// and takes it whole once it can.
     #[test]
-    fn a_refused_send_leaves_nothing_behind() {
-        let mut s = Stream::new(8);
-        assert_eq!(s.send(0, Some(1)), Some(Err(Refused::Empty)));
-        assert_eq!((s.bytes.len(), s.batches.len()), (0, 0));
-        for b in 0..4 {
-            s.send(1, Some(b)).unwrap().unwrap();
+    fn a_message_too_large_for_the_reader_stays_queued_whole() {
+        let mut d = Direction::new(64);
+        assert!(d.send(4, &[1, 2]));
+        assert_eq!(d.recv(3, 8, true), Some(Err(Untaken::TooSmall)), "a buffer a byte short");
+        assert_eq!(d.recv(4, 1, true), Some(Err(Untaken::TooSmall)), "a handle buffer one short");
+        assert_eq!(d.recv(4, 2, false), Some(Err(Untaken::NoRoom)), "a table with no room");
+        assert_eq!(d.recv(4, 2, true), Some(Ok((alloc::vec![0, 1, 2, 3], alloc::vec![1, 2]))));
+    }
+
+    /// The table's room is asked only for a message that carries handles.
+    #[test]
+    fn a_message_without_handles_asks_no_room() {
+        let mut d = Direction::new(8);
+        assert!(d.send(1, &[]));
+        assert_eq!(d.recv(8, 0, false), Some(Ok((alloc::vec![0], alloc::vec![]))));
+    }
+
+    /// Each bound refuses the message that would cross it and nothing before.
+    #[test]
+    fn each_bound_refuses_the_message_past_it() {
+        let mut d = Direction::new(MAX_QUEUED_MESSAGES * 2);
+        for _ in 0..MAX_QUEUED_MESSAGES {
+            assert!(d.send(1, &[]));
         }
-        assert_eq!(s.send(1, Some(9)), Some(Err(Refused::QueueFull)));
-        assert_eq!((s.bytes.len(), s.batches.len()), (4, 4));
-        assert_eq!(s.send(1, None), Some(Ok(())), "a message with no handles waits on no queue");
+        assert!(!d.send(1, &[]), "one message past the count bound was queued");
+
+        let mut d = Direction::new(1 << 20);
+        let full = [0u32; MAX_TRANSFER_HANDLES];
+        for _ in 0..MAX_QUEUED_HANDLES / MAX_TRANSFER_HANDLES {
+            assert!(d.send(1, &full));
+        }
+        assert!(!d.send(1, &[1]), "one handle past the handle bound was queued");
+        assert!(d.send(1, &[]), "a message with no handles waits on no handle room");
+
+        let mut d = Direction::new(10);
+        assert!(d.send(10, &[]));
+        assert!(!d.send(1, &[]), "a byte past the store was queued");
+    }
+
+    /// Writable promises room for the largest message one send may make.
+    #[test]
+    fn fits_any_is_room_for_the_largest_send() {
+        let q: Queue<u32> = Queue::new();
+        assert!(q.fits_any(MAX_MESSAGE_LEN));
+        assert!(!q.fits_any(MAX_MESSAGE_LEN - 1));
+        let mut q: Queue<u32> = Queue::new();
+        q.push(1, core::iter::repeat_n(0, MAX_QUEUED_HANDLES - MAX_TRANSFER_HANDLES + 1));
+        assert!(!q.fits_any(usize::MAX), "room for fewer than a send's handles is not writable");
+    }
+
+    #[test]
+    #[should_panic(expected = "past the queue's bounds")]
+    fn a_push_past_the_bounds_is_a_caller_bug() {
+        let mut q = Queue::new();
+        q.push(1, core::iter::repeat_n(0u32, MAX_QUEUED_HANDLES + 1));
     }
 
     /// xorshift64*: one seed is one run.
@@ -205,60 +247,42 @@ mod tests {
         }
     }
 
-    /// Random sends and reads of random sizes against the order they were
-    /// sent: every batch reaches the reader exactly after the last byte of its
-    /// own message and before any byte of the next, and every byte arrives
-    /// once, in order.
+    /// Random sends and receives of random sizes against the order they were
+    /// sent: every message arrives once, whole, in order, with exactly its own
+    /// handles, and a refused receive takes nothing.
     #[test]
-    fn every_batch_arrives_between_its_own_bytes_and_the_next_messages() {
+    fn every_message_arrives_once_whole_in_order_with_its_handles() {
         let mut rng = Rng(0x9E37_79B9_7F4A_7C15);
-        let mut s = Stream::new(256);
-        // What the reader must meet: per message, its bytes then its batch.
-        let mut sent: VecDeque<(u64, Option<u32>)> = VecDeque::new();
-        let mut next_byte = 0u64;
+        let mut d = Direction::new(512);
+        let mut sent: VecDeque<(Vec<u64>, Vec<u32>)> = VecDeque::new();
+        let mut next_handle = 0u32;
         let mut taken = 0;
-        for op in 0..20_000u32 {
+        for _ in 0..50_000u32 {
             if rng.below(2) == 0 {
-                let len = 1 + rng.below(40) as usize;
-                let batch = (rng.below(3) == 0).then_some(op);
-                if s.send(len, batch) == Some(Ok(())) {
-                    sent.push_back((s.written, batch));
+                let len = rng.below(48) as usize;
+                let count = if rng.below(3) == 0 { 1 + rng.below(MAX_TRANSFER_HANDLES as u64) as usize } else { 0 };
+                let handles: Vec<u32> = (next_handle..next_handle + count as u32).collect();
+                let first = d.next_byte;
+                if d.send(len, &handles) {
+                    next_handle += count as u32;
+                    sent.push_back(((first..first + len as u64).collect(), handles));
                 }
             } else {
-                match s.read(1 + rng.below(50) as usize) {
-                    Ok(got) => {
-                        for byte in got {
-                            assert_eq!(byte, next_byte, "a byte out of order");
-                            next_byte += 1;
-                            // A message ending before this byte with a batch must have been taken.
-                            while sent.front().is_some_and(|(end, batch)| *end <= byte && batch.is_none()) {
-                                sent.pop_front();
-                            }
-                            assert!(
-                                !sent.front().is_some_and(|(end, b)| *end <= byte && b.is_some()),
-                                "byte {byte} was read past a batch pinned at {}",
-                                sent.front().unwrap().0
-                            );
-                        }
-                    }
-                    Err(Window::AtBatch) => {
-                        let (end, batch) = sent.pop_front().expect("a batch the model never sent");
-                        assert_eq!(end, s.read, "a batch met away from the end of its bytes");
-                        assert_eq!(s.batches.take(s.read), batch, "the batch taken is not its message's");
+                let buf = rng.below(56) as usize;
+                let cap = rng.below(MAX_TRANSFER_HANDLES as u64 + 1) as usize;
+                let room = rng.below(4) != 0;
+                let before = (d.queue.len(), d.bytes.len());
+                match d.recv(buf, cap, room) {
+                    None => assert!(sent.is_empty(), "a queued message was not offered"),
+                    Some(Ok(got)) => {
+                        assert!(got.0.len() <= buf && got.1.len() <= cap, "a message taken into a reader too small for it");
+                        assert_eq!(Some(got), sent.pop_front(), "a message out of order, cut or with another's handles");
                         taken += 1;
                     }
-                    Err(Window::Bytes(_)) => unreachable!(),
+                    Some(Err(_)) => assert_eq!((d.queue.len(), d.bytes.len()), before, "a refused receive took something"),
                 }
             }
         }
-        assert!(taken > 1000, "the run took only {taken} batches");
-    }
-
-    #[test]
-    #[should_panic(expected = "pinned at 3 after one at 5")]
-    fn a_batch_pinned_before_the_last_is_a_caller_bug() {
-        let mut b = Batches::new();
-        b.pin(5, 1);
-        b.pin(3, 2);
+        assert!(taken > 5_000, "the run took only {taken} messages");
     }
 }

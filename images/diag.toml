@@ -32,4 +32,5 @@ args = ["pwd"]
 # DATA's block service would be one.
 [programs.fileserver]
 restart = true
+pager = true
 roles = ["log"]

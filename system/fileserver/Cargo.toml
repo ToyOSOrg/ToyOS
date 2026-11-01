@@ -24,11 +24,14 @@ toyos-gpt = { path = "../../lib/gpt" }
 toyos-fat32 = { path = "../../lib/fat32" }
 bcachefs = { path = "../../lib/bcachefs" }
 diskserver = { path = "../diskserver" }
+toyos-blockdev = { path = "../../lib/blockdev" }
 
 [dev-dependencies]
 # The volumes the FAT role leaves, judged by the checker that shares no code
 # with the driver it wrote them with.
 toyos-fat32-check = { path = "../../lib/fat32/check" }
+# The draws a test ROOT's mkfs takes.
+toyos-crypto = { path = "../../lib/crypto" }
 
 [package.metadata.toyos.host]
 exempt.owns = "ToyOS's storage roles, served from the partitions ToyOS claims for it"

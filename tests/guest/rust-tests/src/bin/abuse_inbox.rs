@@ -12,7 +12,7 @@ use core::sync::atomic::Ordering;
 use toyos::AsHandle;
 use toyos_abi::inbox::{
     Completion, RingHeader, Submission, COMPLETION_RING_OFF, OP_NOP, OP_WATCH, READABLE,
-    SUBMISSIONS_OFF, SUBMISSION_RING_OFF, WRITABLE,
+    SUBMISSIONS_OFF, SUBMISSION_RING_OFF, WATCH_FLAGS_KNOWN, WRITABLE,
 };
 use toyos_abi::syscall::{self, SyscallError};
 
@@ -36,7 +36,7 @@ fn watch_reports_only_the_readiness_that_fired() {
     };
     *submission = Submission::default();
     submission.op = OP_WATCH;
-    submission.handle = read.as_handle();
+    submission.handle = read.as_handle().raw();
     submission.op_flags = READABLE | WRITABLE;
     submission.token = 0x5EED;
     ring.tail.store(head.wrapping_add(1), Ordering::Release);
@@ -62,7 +62,8 @@ fn watch_reports_only_the_readiness_that_fired() {
         completion.result,
     );
 
-    syscall::close(inbox);
+    // SAFETY: no type holds this number.
+    unsafe { syscall::close(inbox) };
     println!("watch result: a two-direction watch reports the direction that fired");
 }
 
@@ -97,17 +98,18 @@ fn one_submission(op: u8, flags: u8, op_flags: u32, handle: toyos_abi::RawHandle
     };
     assert_eq!(completion.token, 0x5EED, "the completion is for another submission");
     let result = completion.result;
-    syscall::close(inbox);
+    // SAFETY: no type holds this number.
+    unsafe { syscall::close(inbox) };
     result
 }
 
 /// Two words of a submission the kernel used to keep whole and answer in part:
-/// an `op_flags` interest outside `READABLE|WRITABLE` was registered for neither
+/// an `op_flags` interest outside `WATCH_FLAGS_KNOWN` was registered for neither
 /// direction, and `Submission::flags` is read by nothing at all. Each is paired
 /// with the same submission without the bit, so the refusal is the bit.
 fn a_submission_word_outside_what_the_abi_defines_is_refused() {
-    const UNDEFINED_INTEREST: u32 = 2;
-    const _: () = assert!(UNDEFINED_INTEREST & (READABLE | WRITABLE) == 0);
+    // The lowest bit the ABI does not define.
+    const UNDEFINED_INTEREST: u32 = 1 << WATCH_FLAGS_KNOWN.trailing_ones();
     let invalid = -(SyscallError::InvalidArgument as i32);
 
     let (read, write) = toyos::pipe_pair().expect("a pipe of our own");
@@ -115,12 +117,12 @@ fn a_submission_word_outside_what_the_abi_defines_is_refused() {
     let handle = read.as_handle();
 
     assert_eq!(
-        one_submission(OP_WATCH, 0, READABLE | UNDEFINED_INTEREST, handle),
+        one_submission(OP_WATCH, 0, READABLE | UNDEFINED_INTEREST, handle.raw()),
         invalid,
         "a watch asking for an interest this ABI does not define was registered",
     );
     assert_eq!(
-        one_submission(OP_WATCH, 0, READABLE, handle),
+        one_submission(OP_WATCH, 0, READABLE, handle.raw()),
         READABLE as i32,
         "the same watch without the bit did not report the readiness that fired",
     );
@@ -177,7 +179,8 @@ fn main() {
     let completions = syscall::inbox_submit(inbox, 1, 1, 0).expect("honest NOP submission");
     assert_eq!(completions, 1, "NOP did not complete after the rejected batches");
 
-    syscall::close(inbox);
+    // SAFETY: no type holds this number.
+    unsafe { syscall::close(inbox) };
     println!("submission ring header abuse rejected, inbox still usable");
 
     watch_reports_only_the_readiness_that_fired();

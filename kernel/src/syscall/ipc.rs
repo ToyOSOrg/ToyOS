@@ -10,33 +10,38 @@
 use alloc::vec::Vec;
 
 use crate::watch;
-use crate::mm::policy::Prot;
 use crate::object::{ops, port, KObjectRef};
-use crate::object::service::SendRefused;
+use crate::message::{SendRefused, Taken};
+use crate::object::service::ConnectionEnd;
 use crate::time::Deadline;
 use crate::user_ptr::SyscallContext;
 use crate::UserAddr;
-use crate::{pipe, process};
+use crate::{message, pipe, process};
 
 use toyos_abi::handle::{RawHandle, Rights};
 use toyos_abi::syscall::*;
 use kernel::sched::task::WaitClass;
+use kernel::vm::Prot;
 
 use super::{cancelled, HANDLE_LEN};
 use super::handles::handle_result;
 
 pub(super) fn sys_pipe() -> u64 {
-    let (reader, writer) = pipe::create();
-    let read_end = KObjectRef::PipeRead(crate::object::pipe::PipeReadEnd::new(reader));
-    let write_end = KObjectRef::PipeWrite(crate::object::pipe::PipeWriteEnd::new(writer));
-    install_pair(read_end, write_end)
+    let ends = pipe::create().and_then(|(reader, writer)| {
+        let read_end = KObjectRef::PipeRead(crate::object::pipe::PipeReadEnd::new(reader)?);
+        Ok((read_end, KObjectRef::PipeWrite(crate::object::pipe::PipeWriteEnd::new(writer)?)))
+    });
+    match ends {
+        Ok((read_end, write_end)) => install_pair(read_end, write_end),
+        Err(e) => SyscallError::from(e).to_u64(),
+    }
 }
 
 /// Install two objects or neither; the two handles come back packed into one word, which cannot be read as an error.
-fn install_pair(first: KObjectRef, second: KObjectRef) -> u64 {
+pub(super) fn install_pair(first: KObjectRef, second: KObjectRef) -> u64 {
     let installed = process::with_process_data(|data| {
         // Room for both before either: a refused pair installs nothing, so nothing is taken back.
-        if !data.handles.has_room(2) {
+        if !data.handles.make_room(2) {
             return Err((first, second));
         }
         let mut install =
@@ -52,43 +57,12 @@ fn install_pair(first: KObjectRef, second: KObjectRef) -> u64 {
     }
 }
 
-/// Map a pipe's ring page into the caller, tracked against the pipe so
-/// closing its last descriptor unmaps it.
-pub(super) fn sys_pipe_map(h: RawHandle) -> u64 {
-    let mapped = process::with_process_data(|data| {
-        let pipe_id = match data.handles.get_ref(h, Rights::MAP) {
-            Ok(object) => ops::pipe_id_read(object).or_else(|| ops::pipe_id_write(object)),
-            Err(e) => return Err(e),
-        };
-        let Some(pipe_id) = pipe_id else {
-            return Ok(SyscallError::InvalidArgument.to_u64());
-        };
-        // A second call returns the existing window, keeping pipe_maps bounded by the handle table.
-        if let Some(existing) = data.pipe_maps.iter().find(|m| m.pipe == pipe_id) {
-            return Ok(existing.addr.raw());
-        }
-        let Some(phys) = pipe::map_page(pipe_id) else {
-            return Ok(SyscallError::ResourceExhausted.to_u64());
-        };
-        let pt = crate::scheduler::current_address_space()
-            .expect("sys_pipe_map: no address space");
-        let Some((vaddr, _aligned)) = process::vma_map(&pt, phys.phys(), pipe::PIPE_SIZE as u64, Prot::ReadWrite) else {
-            return Ok(SyscallError::ResourceExhausted.to_u64());
-        };
-        data.pipe_maps.push(process::PipeMap { pipe: pipe_id, addr: vaddr });
-
-        Ok(vaddr.raw())
-    });
-    match mapped {
-        Ok(word) => word,
-        Err(e) => e.refuse(),
-    }
-}
-
 /// Make a port and install both ends; needs no right and grants none, since a port with no clients is not authority.
 pub(super) fn sys_port_create() -> u64 {
-    let (acceptor, connector) = port::create();
-    install_pair(KObjectRef::Acceptor(acceptor), KObjectRef::Connector(connector))
+    match port::create() {
+        Ok((acceptor, connector)) => install_pair(KObjectRef::Acceptor(acceptor), KObjectRef::Connector(connector)),
+        Err(e) => SyscallError::from(e).to_u64(),
+    }
 }
 
 /// Build a namespace from a base's kept names plus new bindings; a refusal leaves the caller's table unchanged (every name resolved and connector checked first).
@@ -195,6 +169,9 @@ pub(super) fn sys_namespace_build(ctx: &SyscallContext, args: &NamespaceBuild) -
         Err(crate::object::namespace::BuildError::Duplicate) => {
             return SyscallError::AlreadyExists.to_u64()
         }
+        Err(crate::object::namespace::BuildError::Exhausted) => {
+            return SyscallError::ResourceExhausted.to_u64()
+        }
     };
     process::with_process_data(|data| {
         handle_result(ops::install(&mut data.handles, KObjectRef::Namespace(namespace)))
@@ -221,27 +198,21 @@ fn connect_through(connector: &port::Connector) -> u64 {
     if connector.closed() {
         return SyscallError::Gone.to_u64();
     }
-    let (cs_reader, cs_writer) = pipe::create(); // client → server
-    let (sc_reader, sc_writer) = pipe::create(); // server → client
-    // Cross-wired here only: the server's end is built from the same two queues when it accepts.
-    let (to_server, to_client) = crate::object::service::ConnectionEnd::pair_queues();
-
-    let object = KObjectRef::Connection(crate::object::service::ConnectionEnd::new(
-        sc_reader,          // client reads from server→client
-        cs_writer,          // client writes to client→server
-        to_client.clone(),  // and receives what the server sent
-        to_server.clone(),
-    ));
-    let pending = port::PendingConnection {
-        rx: cs_reader, // server reads from client→server
-        tx: sc_writer, // server writes to server→client
-        inbox: to_server,
-        outbox: to_client,
-        stamp: connector.stamp(),
+    let made = (|| {
+        let (to_server_rx, to_server_tx) = message::create()?;
+        let (to_client_rx, to_client_tx) = message::create()?;
+        // Cross-wired here only: the server's end is built from the pending half when it accepts.
+        let object = KObjectRef::Connection(ConnectionEnd::new(to_client_rx, to_server_tx)?);
+        let pending = port::PendingConnection { rx: to_server_rx, tx: to_client_tx, stamp: connector.stamp() };
+        Ok::<_, crate::mm::charge::Exhausted>((object, pending))
+    })();
+    let (object, pending) = match made {
+        Ok(made) => made,
+        Err(e) => return SyscallError::from(e).to_u64(),
     };
     // One hold from the room to the install: the port can still refuse, and the client's end is in the table only once it has not.
     let installed = process::with_process_data(|data| {
-        if !data.handles.has_room(1) {
+        if !data.handles.make_room(1) {
             return Err((SyscallError::ResourceExhausted, object, pending));
         }
         match connector.push(pending) {
@@ -254,7 +225,7 @@ fn connect_through(connector: &port::Connector) -> u64 {
     });
     let h = match installed {
         Ok(h) => h,
-        // Both halves of a refused connection drop here, with the hold given up: their pipes go with them.
+        // Both halves of a refused connection drop here, with the hold given up: their queues go with them.
         Err((e, _client, _server)) => return e.to_u64(),
     };
     // The port's one watch carries both: the server blocked in `accept` and every ring polling it.
@@ -262,7 +233,12 @@ fn connect_through(connector: &port::Connector) -> u64 {
     h.0 as u64
 }
 
-pub(super) fn sys_accept(h: RawHandle) -> u64 {
+pub(super) fn sys_accept(h: RawHandle, flags: u64) -> u64 {
+    let waits = match flags {
+        0 => true,
+        ACCEPT_NONBLOCK => false,
+        _ => return SyscallError::InvalidArgument.to_u64(),
+    };
     let acceptor = match process::with_process_data(|data| {
         data.handles.get::<port::Acceptor>(h, Rights::READ)
     }) {
@@ -271,9 +247,14 @@ pub(super) fn sys_accept(h: RawHandle) -> u64 {
     };
 
     loop {
+        // Charged before a connection is taken, so a refusal leaves it queued.
+        let core = match ConnectionEnd::accept_core() {
+            Ok(core) => core,
+            Err(e) => return SyscallError::from(e).to_u64(),
+        };
         if let Some(conn) = acceptor.pop() {
-            // PipeReader/PipeWriter move from queue into connection: ownership transfers, no refcount change.
-            let object = KObjectRef::Connection(crate::object::service::ConnectionEnd::accepted(conn));
+            // The ends move from the port's queue into the connection: ownership transfers, no count changes.
+            let object = KObjectRef::Connection(ConnectionEnd::accepted(core, conn));
             let installed = process::with_process_data(|data| {
                 ops::install(&mut data.handles, object)
             });
@@ -282,6 +263,9 @@ pub(super) fn sys_accept(h: RawHandle) -> u64 {
         // A closed acceptor will never queue again, so returning here is the only alternative to parking forever.
         if acceptor.closed() {
             return SyscallError::Gone.to_u64();
+        }
+        if !waits {
+            return SyscallError::WouldBlock.to_u64();
         }
         let parkable = crate::scheduler::Parkable::at_entry();
         if watch::wait_until(
@@ -307,7 +291,10 @@ pub(super) fn sys_port_mint(h: RawHandle, badge: &[u8]) -> u64 {
         Ok(a) => a,
         Err(e) => return e.refuse(),
     };
-    let connector = KObjectRef::Connector(acceptor.mint(alloc::sync::Arc::from(badge)));
+    let connector = match acceptor.mint(alloc::sync::Arc::from(badge)) {
+        Ok(connector) => KObjectRef::Connector(connector),
+        Err(e) => return SyscallError::from(e).to_u64(),
+    };
     process::with_process_data(|data| handle_result(ops::install(&mut data.handles, connector)))
 }
 
@@ -321,7 +308,7 @@ pub(super) fn sys_port_badge(
 ) -> u64 {
     let found = process::with_process_data(|data| {
         let acceptor = data.handles.get::<port::Acceptor>(acceptor_h, Rights::READ)?;
-        let conn = data.handles.get::<crate::object::service::ConnectionEnd>(conn_h, Rights::READ)?;
+        let conn = data.handles.get::<ConnectionEnd>(conn_h, Rights::READ)?;
         Ok::<_, crate::object::HandleError>((acceptor.port_id(), conn.stamp().cloned()))
     });
     let (port, stamp) = match found {
@@ -337,55 +324,129 @@ pub(super) fn sys_port_badge(
     badge.len() as u64
 }
 
-/// Make a shared region and hand back the one handle to it, carrying MAP, DUP and TRANSFER — naming it is what authorizes mapping it.
-pub(super) fn sys_shm_create(size: u64) -> u64 {
-    let object = match crate::object::shm::SharedMemObject::create(size) {
+/// Make a shared region and hand back the one handle to it, carrying MAP, WRITE, DUP and TRANSFER — naming it is what authorizes mapping it.
+/// `SHM_DEVICE` asks for memory a device can be lent, and `SHM_FOR_JOB`
+/// counts it to the job `job` names rather than the caller's; any other
+/// bit is refused.
+pub(super) fn sys_shm_create(size: u64, flags: u64, job: RawHandle) -> u64 {
+    let charged = match flags & SHM_FOR_JOB {
+        0 => crate::mm::charge::current(),
+        _ => match process::with_process_data(|data| data.handles.get::<crate::object::job::JobObject>(job, Rights::WRITE)) {
+            Ok(object) => alloc::sync::Arc::clone(object.job()),
+            Err(e) => return e.refuse(),
+        },
+    };
+    let created = match flags & !SHM_FOR_JOB {
+        0 => crate::object::shm::SharedMemObject::create(&charged, size),
+        SHM_DEVICE => crate::object::shm::SharedMemObject::create_run(&charged, size),
+        _ => return SyscallError::InvalidArgument.to_u64(),
+    };
+    let object = match created {
         Ok(shm) => KObjectRef::SharedMem(shm),
         Err(e) => return e.to_u64(),
     };
     process::with_process_data(|data| handle_result(ops::install(&mut data.handles, object)))
 }
 
-pub(super) fn sys_shm_map(h: RawHandle) -> u64 {
+/// `toyos_abi::syscall::shm_sub`: the new object's handle carries `h`'s rights.
+pub(super) fn sys_shm_sub(h: RawHandle, offset: u64, len: u64) -> u64 {
+    // A refusal is made with nothing held: a bad handle's ends the process.
+    let held = process::with_process_data(|data| {
+        let whole = data.handles.get::<crate::object::shm::SharedMemObject>(h, Rights::MAP)?;
+        Ok::<_, crate::object::handle::HandleError>((whole, data.handles.rights_of(h)?))
+    });
+    let (whole, rights) = match held {
+        Ok(held) => held,
+        Err(e) => return e.refuse(),
+    };
+    let sub = match crate::object::shm::SharedMemObject::sub(&whole, offset, len) {
+        Ok(sub) => sub,
+        Err(e) => return e.to_u64(),
+    };
+    let entry = crate::object::handle::HandleEntry::new(KObjectRef::SharedMem(sub), rights);
+    process::with_process_data(|data| {
+        handle_result(data.handles.install(entry).map_err(|_| SyscallError::ResourceExhausted))
+    })
+}
+
+/// `toyos_abi::syscall::shm_map`: readable on `MAP`, writable on `MAP` and `WRITE`.
+pub(super) fn sys_shm_map(h: RawHandle, prot: u64) -> u64 {
+    let (prot, need) = match VmProt::from_u64(prot) {
+        Some(VmProt::Read) => (Prot::Read, Rights::MAP),
+        Some(VmProt::ReadWrite) => (Prot::ReadWrite, Rights::MAP.union(Rights::WRITE)),
+        Some(VmProt::None | VmProt::ReadExec) | None => return SyscallError::InvalidArgument.to_u64(),
+    };
     let shm = match process::with_process_data(|data| {
-        data.handles.get::<crate::object::shm::SharedMemObject>(h, Rights::MAP)
+        data.handles.get::<crate::object::shm::SharedMemObject>(h, need)
     }) {
         Ok(shm) => shm,
         Err(e) => return e.refuse(),
     };
+    assert!(
+        matches!(prot, Prot::Read) || shm.immutable().is_none(),
+        "shm: a handle to memory nobody writes carries WRITE"
+    );
     let pt = process::current_address_space();
-    match shm.map_into(process::current_process(), &pt) {
-        Ok(vaddr) => vaddr,
-        Err(e) => e.to_u64(),
+    let len = shm.size();
+    let mapped = pt.lock().map(alloc::sync::Arc::clone(&shm), 0, len, prot, crate::mm::space::At::ANYWHERE);
+    let at = match mapped {
+        Ok(at) => at,
+        Err(e) => return e.to_u64(),
+    };
+    // A device's window is taken back with its last handle, so it says
+    // where it is mapped; one whose last handle went meanwhile is refused.
+    if let Err(e) = shm.mapped_at(&pt, at, len) {
+        pt.lock().release_object(at, len, &shm);
+        return e.to_u64();
     }
+    at.raw()
 }
 
-/// Write a message's bytes to a connection and move its handles to the peer,
+/// A send's arguments as the dispatch bounded them.
+pub(super) struct Outgoing<'a> {
+    pub bytes: crate::user_ptr::UserBytes<'a>,
+    pub handles: crate::user_ptr::UserBytes<'a>,
+    pub count: usize,
+}
+
+/// A receive's buffers as the dispatch bounded them.
+pub(super) struct Incoming<'a> {
+    /// Where the message's first bytes go, before [`Self::bytes`].
+    pub head: crate::user_ptr::UserBytesMut<'a>,
+    pub bytes: crate::user_ptr::UserBytesMut<'a>,
+    pub handles: crate::user_ptr::UserBytesMut<'a>,
+    pub cap: usize,
+}
+
+/// Queue a whole message on a connection and move its handles to the peer,
 /// together or not at all ([`toyos_abi::syscall::message_send`]). Rights,
-/// `TRANSFER` included, travel unchanged. Waits for room in the stream unless
-/// `nonblock`; the copy is the caller's, bounded by `MAX_MESSAGE_LEN`.
-pub(super) fn sys_message_send(
-    conn_h: RawHandle,
-    bytes: &crate::user_ptr::UserBytes,
-    handles: &crate::user_ptr::UserBytes,
-    count: usize,
-    nonblock: bool,
-) -> u64 {
+/// `TRANSFER` included, travel unchanged. Waits for room unless `nonblock`.
+pub(super) fn sys_message_send(conn_h: RawHandle, out: &Outgoing<'_>, nonblock: bool) -> u64 {
+    send(conn_h, out, nonblock).map_or_else(|word| word, |()| 0)
+}
+
+/// Take a connection's next whole message ([`toyos_abi::syscall::message_recv`]).
+pub(super) fn sys_message_recv(conn_h: RawHandle, into: &mut Incoming<'_>, nonblock: bool) -> u64 {
+    recv(conn_h, into, nonblock)
+}
+
+/// [`sys_message_send`]'s work, or the word its refusal answers.
+fn send(conn_h: RawHandle, out: &Outgoing<'_>, nonblock: bool) -> Result<(), u64> {
     let mut wanted = [RawHandle(0); MAX_TRANSFER_HANDLES];
-    for (i, slot) in wanted.iter_mut().enumerate().take(count) {
+    for (i, slot) in wanted.iter_mut().enumerate().take(out.count) {
         let mut raw = [0u8; HANDLE_LEN];
-        handles.read_at(i * HANDLE_LEN, &mut raw);
+        out.handles.read_at(i * HANDLE_LEN, &mut raw);
         *slot = RawHandle(u32::from_ne_bytes(raw));
     }
-    let wanted = &wanted[..count];
+    let wanted = &wanted[..out.count];
     // `TRANSFER` on the connection only when it carries handles: bytes alone
     // are a write, which `WRITE` already allows.
-    let need = if count == 0 { Rights::WRITE } else { Rights::WRITE.union(Rights::TRANSFER) };
+    let need = if out.count == 0 { Rights::WRITE } else { Rights::WRITE.union(Rights::TRANSFER) };
 
     loop {
         let sent = process::with_process_data(|data| {
-            let conn = data.handles.get::<crate::object::service::ConnectionEnd>(conn_h, need)?;
-            // Every handle is checked before anything is written or moved.
+            let conn = data.handles.get::<ConnectionEnd>(conn_h, need)?;
+            // Every handle is checked before anything is queued or moved.
             for (i, h) in wanted.iter().enumerate() {
                 if *h == conn_h || wanted[..i].contains(h) {
                     return Err(SyscallError::InvalidArgument.into());
@@ -396,56 +457,65 @@ pub(super) fn sys_message_send(
                 }
             }
             // A refusal restores every handle at its own number, so it is invisible.
-            let moved = data.handles.transfer(wanted, |batch| conn.send(bytes, batch));
-            Ok::<_, crate::object::Refusal>((conn.tx(), moved))
+            let tx = conn.tx().clone();
+            let moved = data.handles.transfer(wanted, |batch| tx.send(&out.bytes, batch));
+            Ok::<_, crate::object::Refusal>((tx, moved))
         });
         let tx = match sent {
             Ok((tx, Ok(()))) => {
-                process::wake_pipe_readers(tx);
-                return 0;
+                crate::scheduler::post_lending(tx.read_watch(), || tx.set_rt_boost_pending());
+                return Ok(());
             }
             Ok((tx, Err(SendRefused::NoRoom))) if !nonblock => tx,
-            Ok((_, Err(SendRefused::NoRoom))) => return SyscallError::WouldBlock.to_u64(),
-            Ok((_, Err(SendRefused::Error(e)))) => return e.to_u64(),
+            Ok((_, Err(SendRefused::NoRoom))) => return Err(SyscallError::WouldBlock.to_u64()),
+            Ok((_, Err(SendRefused::Gone))) => return Err(SyscallError::Gone.to_u64()),
+            Ok((_, Err(SendRefused::NoMemory))) => return Err(SyscallError::ResourceExhausted.to_u64()),
+            Err(e) => return Err(e.refuse()),
+        };
+        // Outside every lock: room appears as the receiver takes messages, and each receive posts this watch.
+        let (len, count) = (out.bytes.len(), out.count);
+        if watch::wait_until(&crate::scheduler::Parkable::at_entry(), tx.write_watch(), 0, WaitClass::Ipc, Deadline::never(), || {
+            tx.fits(len, count)
+        })
+        .is_err()
+        {
+            return Err(cancelled());
+        }
+    }
+}
+
+fn recv(conn_h: RawHandle, into: &mut Incoming<'_>, nonblock: bool) -> u64 {
+    loop {
+        let taken = process::with_process_data(|data| {
+            let conn = data.handles.get::<ConnectionEnd>(conn_h, Rights::READ)?;
+            let rx = conn.rx().clone();
+            let taken = rx.recv(&mut into.head, &mut into.bytes, into.cap, &mut data.handles);
+            Ok::<_, crate::object::Refusal>((rx, taken))
+        });
+        let rx = match taken {
+            Ok((rx, Taken::Message(head, installed))) => {
+                for (i, h) in installed[..head.handles].iter().enumerate() {
+                    into.handles.write_at(i * HANDLE_LEN, &h.0.to_ne_bytes());
+                }
+                // Room for the sender.
+                rx.write_watch().post();
+                return toyos_abi::syscall::Received::encode(head.len, head.handles);
+            }
+            Ok((_, Taken::Gone)) => return SyscallError::Gone.to_u64(),
+            Ok((_, Taken::Untaken(kernel::message::Untaken::TooSmall))) => return SyscallError::InvalidArgument.to_u64(),
+            Ok((_, Taken::Untaken(kernel::message::Untaken::NoRoom))) => return SyscallError::ResourceExhausted.to_u64(),
+            Ok((_, Taken::Empty)) if nonblock => return SyscallError::WouldBlock.to_u64(),
+            Ok((rx, Taken::Empty)) => rx,
+            // Refused outside this hold: ending the caller takes the same non-reentrant lock.
             Err(e) => return e.refuse(),
         };
-        // Outside every lock: room appears as the reader drains, and its read posts this watch.
-        let Some(watch) = pipe::write_watch(tx) else { return SyscallError::Gone.to_u64() };
-        let len = bytes.len();
-        if watch::wait_until(&crate::scheduler::Parkable::at_entry(), &watch, 0, WaitClass::Ipc, Deadline::never(), || {
-            pipe::has_space(tx, len)
+        if watch::wait_until(&crate::scheduler::Parkable::at_entry(), rx.read_watch(), 0, WaitClass::Ipc, Deadline::never(), || {
+            rx.readable()
         })
         .is_err()
         {
             return cancelled();
         }
-    }
-}
-
-/// Take the batch pinned at the reader's place in the stream. Never blocks;
-/// zero means no batch sits here.
-pub(super) fn sys_handle_recv(
-    conn_h: RawHandle,
-    out: &mut crate::user_ptr::UserBytesMut,
-    cap: usize,
-) -> u64 {
-    let taken = process::with_process_data(|data| {
-        let conn = data
-            .handles
-            .get::<crate::object::service::ConnectionEnd>(conn_h, Rights::READ)?;
-        // Width and room are measured before the batch is taken: refusing after taking would drop handles nobody could ask for again.
-        let Some(batch) = conn.recv(cap, |width| data.handles.has_room(width))? else { return Ok(0) };
-        let count = batch.len();
-        for (i, entry) in batch.into_iter().enumerate() {
-            let h = data.handles.install(entry).expect("room was asked for first");
-            out.write_at(i * HANDLE_LEN, &h.0.to_ne_bytes());
-        }
-        Ok::<_, crate::object::Refusal>(count as u64)
-    });
-    // Refused outside this hold: ending the caller takes the same non-reentrant lock.
-    match taken {
-        Ok(n) => n,
-        Err(e) => e.refuse(),
     }
 }
 
@@ -456,7 +526,10 @@ pub(super) fn sys_inbox_setup(depth: u32, out: &mut crate::user_ptr::UserBytesMu
         Err(e) => return e.to_u64(),
     };
     // A refused install drops the reference, which tears the inbox down again.
-    let object = KObjectRef::Inbox(crate::object::inbox::InboxObject::new(inbox));
+    let object = match crate::object::inbox::InboxObject::new(inbox) {
+        Ok(object) => KObjectRef::Inbox(object),
+        Err(e) => return SyscallError::from(e).to_u64(),
+    };
     let installed = process::with_process_data(|data| ops::install(&mut data.handles, object));
     let handle = match installed {
         Ok(h) => h,

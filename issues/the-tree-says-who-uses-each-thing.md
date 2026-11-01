@@ -165,18 +165,18 @@ Where this differs from the tree the owner adopted:
 - `sdk/std/` is std's ToyOS backend, which left the `rust` fork after the
   design (the owner: "MOVE IT"); the fork's `library/std`, outside this
   repository, compiles it by `#[path]` (rule step 3).
-- `toyos-i219` is `system/netstack/i219`: the harness stopped using it in
-  93719bc03, after the design, which leaves netstack its one user (rule
-  step 4).
+- `toyos-i219` is `system/i219/driver`: the harness stopped using it in
+  93719bc03, after the design, which leaves the `i219` driver program its
+  one user (rule step 4).
 - `toyos-pci-claim`, `acpiserver-api` and `logkeeper-api` are in `lib/`:
   each has two users (rule step 5).
-- `toyos-ssh` is `build/ssh`: its one user is `build/signing.rs`, and
-  sshserver serves on russh (rule step 4).
+- `toyos-ssh` is `lib/ssh`: `build/signing.rs` and `system/sshserver` use it
+  (rule step 5).
 - `tests/metal/` is the metal loop. A machine's records are in the host's
   store since #852, so there is no `tests/machines/t14/` and no descriptor.
-- `tests/cavp/` stays: `lib/sha2`'s SHAVS driver reads it and `lib/sha2-hw`'s
-  tests include that driver. The orchestrator ruled it shared test data,
-  which inside `lib/sha2` the licence gate would count as shipping.
+- `tests/cavp/` stays: `toyos-crypto`'s `tests/nist.rs` reads it. It was
+  ruled shared test data, which inside a crate's directory the licence gate
+  would count as shipping.
 - There is no `tests/judges/ssh/`: no SSH judge is in the tree.
 
 ## Stages

@@ -349,8 +349,10 @@ pub enum Kind {
     /// In this address space (Table 5.182).
     OperationRegion { space: u8 },
     PowerResource,
-    /// The Processor object ACPI 6.4 deprecated (ACPI 6.3A §19.6.108).
-    Processor,
+    /// The Processor object ACPI 6.4 deprecated (ACPI 6.3A §19.6.108). `id`
+    /// is its ProcID, which the MADT's ACPI Processor UID names it by (ACPI
+    /// 6.5 §5.2.12.2).
+    Processor { id: u8 },
     ThermalZone,
     BufferField,
     /// `\_SB` and the other scopes of §5.3.1: descended, and no device.
@@ -404,7 +406,7 @@ impl Iterator for Walk<'_> {
             Object::Ref(_) | Object::Lazy(_) => Kind::Reference,
             Object::Scope => Kind::Scope,
             Object::Device => Kind::Device,
-            Object::Processor => Kind::Processor,
+            Object::Processor(id) => Kind::Processor { id: *id },
             Object::ThermalZone => Kind::ThermalZone,
             Object::PowerResource => Kind::PowerResource,
             Object::Method(_) => Kind::Method,

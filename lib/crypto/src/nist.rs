@@ -1,10 +1,12 @@
-//! SEC 1 NIST P-256/P-384 arithmetic. Secret scalar multiplication (ECDH
-//! and key generation) runs Booth's signed 5-bit windows on a fixed schedule
-//! with masked table reads and complete masked handling of exceptional
-//! additions. SEC 1 decoding, DER decoding, ECDSA verification and
-//! key-validity refusals depend on public data; verification multiplies in
-//! variable time, through `PublicScalar` only. Only uncompressed SEC 1
-//! points are accepted.
+//! SEC 1 NIST P-256/P-384 arithmetic. Secret scalar multiplication (ECDH and
+//! key generation) runs Booth's signed 5-bit windows on a fixed schedule:
+//! P-256's base point through a compile-time comb, other points through a
+//! per-call table and doublings. Table reads scan every entry under masks,
+//! and the scalar is first moved to an odd representative k + j n, so the
+//! running point is never the identity. SEC 1 decoding, DER decoding, ECDSA
+//! verification and key-validity refusals depend on public data;
+//! verification multiplies in variable time, through `PublicScalar` only.
+//! Only uncompressed SEC 1 points are accepted.
 #![allow(
     clippy::needless_range_loop,
     reason = "masked selects index parallel fixed-size arrays, as `montgomery` does"
@@ -18,12 +20,23 @@ use crate::{
 
 /// A short Weierstrass curve y^2 = x^3 - 3x + b of prime order and cofactor
 /// one, with its constants in Montgomery form at compile time.
-pub(crate) trait Curve<const N: usize>: 'static {
+pub(crate) trait Curve<const N: usize>: Sized + 'static {
     type Field: Modulus<N>;
     type Order: Modulus<N>;
     const B: [u64; N];
     const GX: [u64; N];
     const GY: [u64; N];
+    /// m of the representative k + j n, j the one of m and m + 1 that makes
+    /// it odd, that secret multiplication runs on: the smallest m for which
+    /// every such representative sets a bit of the top Booth window, so the
+    /// first window's digit is nonzero.
+    const OFFSET: u64;
+    /// G, 3G, ..., 63G, for verification's width-7 recoding of u1.
+    fn odd_multiples_of_g() -> &'static [Affine<Self, N>; 32];
+    /// scalar G, on a fixed schedule.
+    fn base_mul(scalar: &Scalar<Self, N>) -> Point<Self, N> {
+        Point::base().mul(scalar)
+    }
 }
 type Coord<C, const N: usize> = Residue<<C as Curve<N>>::Field, N>;
 type ModN<C, const N: usize> = Residue<<C as Curve<N>>::Order, N>;
@@ -76,21 +89,44 @@ impl<C: Curve<N>, const N: usize> Scalar<C, N> {
         }
         Ok(scalar)
     }
-    /// Booth digit i in [-16, 16]: with u the six bits 5i - 1 ..= 5i + 4
-    /// (bit -1 and bits past the top are zero), d = (u + 1) / 2 - 32 u_5, so
-    /// that the scalar is the sum of d_i 2^(5i). The index is public; the
-    /// arithmetic does not branch.
-    fn booth(&self, i: usize) -> i8 {
-        let bits = |from: usize| -> u64 {
-            // The six bits from `from`, a public position.
-            let (word, shift) = (from / 64, from % 64);
-            let low = if word < N { self.0[word] >> shift } else { 0 };
-            let high = if shift > 58 && word + 1 < N { self.0[word + 1] << (64 - shift) } else { 0 };
-            (low | high) & 63
-        };
-        let u = if i == 0 { bits(0) << 1 & 63 } else { bits(5 * i - 1) };
-        (((u + 1) >> 1) as i8).wrapping_sub(((u >> 5) << 5) as i8)
+    /// k + j n for the one j of m = `C::OFFSET` and m + 1 that makes it odd:
+    /// an integer with the same multiple of every point, below 2^(64N + 2), in
+    /// N + 1 of the buffer's words. Erased when dropped.
+    fn representative(&self) -> Workspace<[u64; 7]> {
+        let multiplier = C::OFFSET.wrapping_add((C::OFFSET ^ self.0[0] ^ 1) & 1);
+        let mut k = Workspace([0u64; 7]);
+        let mut carry = 0u64;
+        for i in 0..N {
+            let (lo, hi) = montgomery::mac(self.0[i], C::Order::P[i], multiplier, carry);
+            k.0[i] = lo;
+            carry = hi;
+        }
+        k.0[N] = carry;
+        k
     }
+}
+
+/// Booth digit i of a W-word integer, in [-16, 16]: with u the six bits
+/// 5i - 1 ..= 5i + 4 (bit -1 and bits past the top are zero),
+/// d = (u + 1) / 2 - 32 u_5, so that the integer is the sum of d_i 2^(5i)
+/// while its bit 5i + 4 of the top window is clear. The index is public; the
+/// arithmetic does not branch.
+fn booth<const W: usize>(words: &[u64; W], i: usize) -> i8 {
+    let bits = |from: usize| -> u64 {
+        let (word, shift) = (from / 64, from % 64);
+        let low = if word < W { words[word] >> shift } else { 0 };
+        let high = if shift > 58 && word + 1 < W { words[word + 1] << (64 - shift) } else { 0 };
+        (low | high) & 63
+    };
+    let u = if i == 0 { bits(0) << 1 & 63 } else { bits(5 * i - 1) };
+    ((u.wrapping_add(1) >> 1) as i8).wrapping_sub(((u >> 5) << 5) as i8)
+}
+
+/// |d| and the sign bit of a Booth digit, by arithmetic.
+fn magnitude(d: i8) -> (u64, u64) {
+    let negative = u64::from((d as u8) >> 7);
+    let magnitude = ((d ^ 0i8.wrapping_sub(negative as i8)).wrapping_add(negative as i8)) as u64;
+    (magnitude, negative)
 }
 
 /// A public scalar below n, for variable-time verification only; a secret
@@ -106,11 +142,188 @@ impl<const N: usize> PublicScalar<N> {
     }
 }
 
-/// The windows of [`Point::mul`]: 5-bit Booth windows over 64N bits, plus
-/// the one that absorbs the top window's carry.
+/// The 5-bit Booth windows of a representative below 2^(64N + 2), whose top
+/// window keeps its bit 5i + 4 clear.
 const fn windows(n: usize) -> usize {
-    (64 * n) / 5 + 1
+    (64 * n + 2) / 5 + 1
 }
+
+/// An affine point (x, y), a table entry.
+pub(crate) struct Affine<C: Curve<N>, const N: usize> {
+    x: Coord<C, N>,
+    y: Coord<C, N>,
+}
+impl<C: Curve<N>, const N: usize> Clone for Affine<C, N> {
+    fn clone(&self) -> Self {
+        *self
+    }
+}
+impl<C: Curve<N>, const N: usize> Copy for Affine<C, N> {}
+
+impl<C: Curve<N>, const N: usize> Affine<C, N> {
+    /// row[|d| - 1], with y negated by mask when d < 0, reading every entry.
+    /// For d = 0 it is row[0], which the caller discards by mask: no entry
+    /// is the identity, so no arithmetic runs on it.
+    fn lookup(row: &[Self; 16], d: i8) -> Self {
+        let (magnitude, negative) = magnitude(d);
+        let mut chosen = row[0];
+        // Indexing, not an iterator adaptor, which the shipped profile keeps
+        // out of line.
+        for j in 1..16 {
+            let take = 1 ^ crate::ct::nonzero(magnitude ^ (j as u64 + 1));
+            chosen.x = Residue::select(&chosen.x, &row[j].x, take);
+            chosen.y = Residue::select(&chosen.y, &row[j].y, take);
+        }
+        chosen.y = Residue::select(&chosen.y, &Residue::zero().sub(&chosen.y), negative);
+        chosen
+    }
+    fn point(&self) -> Point<C, N> {
+        Point {
+            x: self.x,
+            y: self.y,
+            z: Residue::one(),
+        }
+    }
+}
+
+/// Compile-time point arithmetic, in Jacobian (X, Y, Z), for building
+/// tables. None of its inputs is the identity, and no addition's operands
+/// are equal or opposite.
+struct Build<C: Curve<N>, const N: usize>(core::marker::PhantomData<C>);
+
+impl<C: Curve<N>, const N: usize> Build<C, N> {
+    const G: [Coord<C, N>; 3] = [
+        Residue::from_montgomery(C::GX),
+        Residue::from_montgomery(C::GY),
+        Residue::one(),
+    ];
+    /// dbl-2001-b for a = -3, as [`Point::double`].
+    const fn double(p: &[Coord<C, N>; 3]) -> [Coord<C, N>; 3] {
+        let [x, y, z] = p;
+        let delta = z.times(z);
+        let gamma = y.times(y);
+        let beta = x.times(&gamma);
+        let t = x.minus(&delta).times(&x.plus(&delta));
+        let alpha = t.plus(&t).plus(&t);
+        let beta4 = beta.plus(&beta).plus(&beta.plus(&beta));
+        let x3 = alpha.times(&alpha).minus(&beta4.plus(&beta4));
+        let z3 = y.plus(z).times(&y.plus(z)).minus(&gamma).minus(&delta);
+        let gamma2 = gamma.times(&gamma);
+        let gamma8 = gamma2.plus(&gamma2).plus(&gamma2.plus(&gamma2));
+        let y3 = alpha.times(&beta4.minus(&x3)).minus(&gamma8.plus(&gamma8));
+        [x3, y3, z3]
+    }
+    /// The Jacobian addition of [`Point::add_incomplete`].
+    const fn add(p: &[Coord<C, N>; 3], q: &[Coord<C, N>; 3]) -> [Coord<C, N>; 3] {
+        let (z1, z2) = (p[2].times(&p[2]), q[2].times(&q[2]));
+        let (u1, u2) = (p[0].times(&z2), q[0].times(&z1));
+        let s1 = p[1].times(&q[2].times(&z2));
+        let s2 = q[1].times(&p[2].times(&z1));
+        let h = u2.minus(&u1);
+        let r = s2.minus(&s1);
+        let h2 = h.times(&h);
+        let h3 = h.times(&h2);
+        let u = u1.times(&h2);
+        let x = r.times(&r).minus(&h3).minus(&u.plus(&u));
+        let y = r.times(&u.minus(&x)).minus(&s1.times(&h3));
+        let z = h.times(&p[2].times(&q[2]));
+        [x, y, z]
+    }
+    /// Jacobian points in affine form, with one inversion for all of them
+    /// (Montgomery's simultaneous-inversion trick).
+    const fn normalize<const K: usize>(points: &[[Coord<C, N>; 3]; K]) -> [Affine<C, N>; K] {
+        let mut prefix = [Residue::one(); K];
+        prefix[0] = points[0][2];
+        let mut i = 1;
+        while i < K {
+            prefix[i] = prefix[i - 1].times(&points[i][2]);
+            i += 1;
+        }
+        let mut inverse = prefix[K - 1].inverted();
+        let mut out = [Affine {
+            x: Residue::zero(),
+            y: Residue::zero(),
+        }; K];
+        let mut i = K;
+        while i > 0 {
+            i -= 1;
+            let z_inverse = if i == 0 { inverse } else { inverse.times(&prefix[i - 1]) };
+            inverse = inverse.times(&points[i][2]);
+            let z2 = z_inverse.times(&z_inverse);
+            out[i] = Affine {
+                x: points[i][0].times(&z2),
+                y: points[i][1].times(&z2.times(&z_inverse)),
+            };
+        }
+        out
+    }
+    /// G, 3G, ..., (2K - 1)G.
+    const fn odd_multiples<const K: usize>() -> [Affine<C, N>; K] {
+        let twice = Self::double(&Self::G);
+        let mut points = [Self::G; K];
+        let mut i = 1;
+        while i < K {
+            points[i] = Self::add(&points[i - 1], &twice);
+            i += 1;
+        }
+        Self::normalize(&points)
+    }
+    /// Row i holds j 2^(5i) G for j = 1..=16.
+    const fn comb<const R: usize>() -> [[Affine<C, N>; 16]; R] {
+        let mut points = [[Self::G; 16]; R];
+        let mut base = Self::G;
+        let mut i = 0;
+        while i < R {
+            points[i][0] = base;
+            points[i][1] = Self::double(&base);
+            let mut j = 2;
+            while j < 16 {
+                points[i][j] = Self::add(&points[i][j - 1], &base);
+                j += 1;
+            }
+            let mut k = 0;
+            while k < 5 {
+                base = Self::double(&base);
+                k += 1;
+            }
+            i += 1;
+        }
+        // One simultaneous inversion for every entry, in row order.
+        let mut prefix = [[Residue::one(); 16]; R];
+        let mut running = Residue::one();
+        let mut i = 0;
+        while i < 16 * R {
+            running = running.times(&points[i / 16][i % 16][2]);
+            prefix[i / 16][i % 16] = running;
+            i += 1;
+        }
+        let mut inverse = running.inverted();
+        let mut out = [[Affine {
+            x: Residue::zero(),
+            y: Residue::zero(),
+        }; 16]; R];
+        let mut i = 16 * R;
+        while i > 0 {
+            i -= 1;
+            let p = &points[i / 16][i % 16];
+            let z_inverse = if i == 0 { inverse } else { inverse.times(&prefix[(i - 1) / 16][(i - 1) % 16]) };
+            inverse = inverse.times(&p[2]);
+            let z2 = z_inverse.times(&z_inverse);
+            out[i / 16][i % 16] = Affine {
+                x: p[0].times(&z2),
+                y: p[1].times(&z2.times(&z_inverse)),
+            };
+        }
+        out
+    }
+}
+
+/// P-256's comb: j 2^(5i) G for j = 1..=16 in 52 rows (52 KiB).
+// Building it runs some ten thousand field multiplications at compile time.
+#[allow(long_running_const_eval)]
+static P256_COMB: [[Affine<P256, 4>; 16]; windows(4)] = Build::<P256, 4>::comb();
+static P256_G_ODD: [Affine<P256, 4>; 32] = Build::<P256, 4>::odd_multiples();
+static P384_G_ODD: [Affine<P384, 6>; 32] = Build::<P384, 6>::odd_multiples();
 
 /// The odd multiples P, 3P, ..., 15P of a public point, for verification.
 type OddMultiples<C, const N: usize> = [Point<C, N>; 8];
@@ -128,7 +341,7 @@ impl<C: Curve<N>, const N: usize> Clone for Point<C, N> {
     }
 }
 impl<C: Curve<N>, const N: usize> Copy for Point<C, N> {}
-// Three residues: zero is a valid point representation.
+// SAFETY: three residues, and zero is a valid point representation.
 unsafe impl<C: Curve<N>, const N: usize> crate::secret::Zeroable for Point<C, N> {}
 impl<C: Curve<N>, const N: usize> Point<C, N> {
     fn identity() -> Self {
@@ -168,7 +381,48 @@ impl<C: Curve<N>, const N: usize> Point<C, N> {
         let y = alpha.mul(&beta4.sub(&x)).sub(&gamma2.double().double());
         Self { x, y, z }
     }
-    fn add(&self, q: &Self) -> Self {
+    /// scalar * self on a fixed schedule, for a point of prime order n:
+    /// Booth's signed 5-bit windows of the odd representative k' over the
+    /// public multiples P, 2P, ..., 16P, each window five doublings and one
+    /// addition of a masked table read. self is public; neither branches nor
+    /// addresses depend on the scalar.
+    ///
+    /// Exceptional additions. Before the addition of window i the running
+    /// point is 32 T P, for T the value of the digits above i, and
+    /// k' = 2^(5i + 5) T + S with |S| <= 2^(5i + 4). As k' > 2^(5 top - 1)
+    /// (`Curve::OFFSET`), T >= 1 for every i < top; and as k' < 4n, for i >= 1
+    /// 32 T <= k' / 2^(5i) + 16 < 4n / 32 + 16. So 0 < 32 T -+ d < n for
+    /// every |d| <= 16: the running point is not the identity and neither
+    /// equals nor opposes dP, the addend or the discarded table[0]. At i = 0,
+    /// 32 T = k' - d0 is a nonzero multiple of 32 below 4n + 16, and n is odd,
+    /// so it is not a multiple of n: the running point is not the identity.
+    /// That last addition can double, and does so by mask; it cannot cancel,
+    /// since k' is not 0 mod n.
+    pub(crate) fn mul(&self, scalar: &Scalar<C, N>) -> Self {
+        let mut table = [*self; 16];
+        table[1] = self.double();
+        for j in 2..16 {
+            table[j] = table[j - 1].add_public(self);
+        }
+        let k = scalar.representative();
+        let top = windows(N) - 1;
+        let mut r = Self::lookup(&table, booth(&k.0, top));
+        for i in (0..top).rev() {
+            for _ in 0..5 {
+                r = r.double();
+            }
+            let d = booth(&k.0, i);
+            let (mut sum, equal) = r.add_incomplete(&Self::lookup(&table, d));
+            if i == 0 {
+                sum = Self::select(&sum, &r.double(), equal);
+            }
+            r = Self::select(&r, &sum, crate::ct::nonzero(d as u8 as u64));
+        }
+        r
+    }
+    /// self + q for points that are not the identity, 12M + 4S, and one when
+    /// they are equal (h = r = 0), where the formula fails.
+    fn add_incomplete(&self, q: &Self) -> (Self, u64) {
         let z1 = self.z.square();
         let z2 = q.z.square();
         let u1 = self.x.mul(&z2);
@@ -183,43 +437,74 @@ impl<C: Curve<N>, const N: usize> Point<C, N> {
         let x = r.square().sub(&h3).sub(&u.double());
         let y = r.mul(&u.sub(&x)).sub(&s1.mul(&h3));
         let z = h.mul(&self.z.mul(&q.z));
-        let out = Self { x, y, z };
-        let out = Self::select(&out, &self.double(), h.is_zero() & r.is_zero());
-        let out = Self::select(&out, self, q.z.is_zero());
-        Self::select(&out, q, self.z.is_zero())
+        (Self { x, y, z }, h.is_zero() & r.is_zero())
     }
-    /// scalar * self on a fixed schedule: Booth's signed 5-bit windows over
-    /// the multiples P, 2P, ..., 16P, each window five doublings and one
-    /// complete addition of a masked table read. self is public; neither
-    /// branches nor addresses depend on the scalar.
-    pub(crate) fn mul(&self, scalar: &Scalar<C, N>) -> Self {
-        let mut table = [*self; 16];
-        table[1] = self.double();
-        for j in 2..16 {
-            table[j] = table[j - 1].add(self);
-        }
-        let top = windows(N) - 1;
-        let mut r = Self::lookup(&table, scalar.booth(top));
-        for i in (0..top).rev() {
-            for _ in 0..5 {
-                r = r.double();
-            }
-            r = r.add(&Self::lookup(&table, scalar.booth(i)));
-        }
-        r
-    }
-    /// d P from table[j] = (j + 1) P, for d in [-16, 16], reading every
-    /// entry: the identity for zero, and Y negated by mask for d < 0.
+    /// table[|d| - 1] for table[j] = (j + 1) P, with Y negated by mask for
+    /// d < 0, reading every entry. For d = 0 it is table[0], which the caller
+    /// discards by mask.
     fn lookup(table: &[Self; 16], d: i8) -> Self {
-        let negative = u64::from((d as u8) >> 7);
-        let magnitude = ((d ^ 0i8.wrapping_sub(negative as i8)).wrapping_add(negative as i8)) as u64;
-        let mut chosen = Self::identity();
-        for (j, entry) in table.iter().enumerate() {
-            chosen = Self::select(&chosen, entry, 1 ^ crate::ct::nonzero(magnitude ^ (j as u64 + 1)));
+        let (magnitude, negative) = magnitude(d);
+        let mut chosen = table[0];
+        for j in 1..16 {
+            chosen = Self::select(&chosen, &table[j], 1 ^ crate::ct::nonzero(magnitude ^ (j as u64 + 1)));
         }
         let negated = Residue::zero().sub(&chosen.y);
         chosen.y = Residue::select(&chosen.y, &negated, negative);
         chosen
+    }
+    /// self + q for an affine q, 8M + 3S, and one when the operands are
+    /// equal (h = r = 0), where the formula fails. self is not the identity.
+    fn add_affine(&self, q: &Affine<C, N>) -> (Self, u64) {
+        let z1 = self.z.square();
+        let u2 = q.x.mul(&z1);
+        let s2 = q.y.mul(&self.z.mul(&z1));
+        let h = u2.sub(&self.x);
+        let r = s2.sub(&self.y);
+        let h2 = h.square();
+        let h3 = h.mul(&h2);
+        let u = self.x.mul(&h2);
+        let x = r.square().sub(&h3).sub(&u.double());
+        let y = r.mul(&u.sub(&x)).sub(&self.y.mul(&h3));
+        let z = h.mul(&self.z);
+        (Self { x, y, z }, h.is_zero() & r.is_zero())
+    }
+    /// scalar G by a comb, with no doublings: the odd representative's Booth
+    /// digit i selects from row i, j 2^(5i) G, and one mixed addition adds
+    /// it.
+    ///
+    /// Exceptional additions. Before window i >= 1 the running point is
+    /// S_i G for the odd S_i = k' mod 2^(5i) - b 2^(5i), b = bit 5i - 1 of
+    /// the representative k', so 0 < |S_i| <= 2^(5i - 1): never the identity.
+    /// It equals or opposes the addend d 2^(5i) G only if
+    /// S_i -+ d 2^(5i) = 0 mod n, while S_i is odd and d 2^(5i) even, so
+    /// 0 < |S_i -+ d 2^(5i)| <= 16.5 2^(5i), which is below n for i < R - 1. At the top window S + d 2^(5i) = k' is
+    /// not 0 mod n, but S = d 2^(5i) can hold, for k = 2^256 d mod n; that one
+    /// addition doubles by mask instead. A zero digit's addition is
+    /// discarded by mask.
+    fn comb_mul<const R: usize>(table: &[[Affine<C, N>; 16]; R], scalar: &Scalar<C, N>) -> Self {
+        let k = scalar.representative();
+        // k' is odd, so digit 0 is nonzero.
+        let mut r = Affine::lookup(&table[0], booth(&k.0, 0)).point();
+        for i in 1..R {
+            let d = booth(&k.0, i);
+            let (mut sum, equal) = r.add_affine(&Affine::lookup(&table[i], d));
+            if i == R - 1 {
+                sum = Self::select(&sum, &r.double(), equal);
+            }
+            r = Self::select(&r, &sum, crate::ct::nonzero(d as u8 as u64));
+        }
+        r
+    }
+    /// self + q for a public affine q, branching on the values.
+    fn add_affine_public(&self, q: &Affine<C, N>) -> Self {
+        if self.z.is_zero() == 1 {
+            return q.point();
+        }
+        let (sum, equal) = self.add_affine(q);
+        if sum.z.is_zero() == 1 {
+            return if equal == 1 { self.double() } else { Self::identity() };
+        }
+        sum
     }
     /// self + q for public points, branching on their values: no masked
     /// doubling or selects.
@@ -230,24 +515,11 @@ impl<C: Curve<N>, const N: usize> Point<C, N> {
         if q.z.is_zero() == 1 {
             return *self;
         }
-        let z1 = self.z.square();
-        let z2 = q.z.square();
-        let u1 = self.x.mul(&z2);
-        let u2 = q.x.mul(&z1);
-        let s1 = self.y.mul(&q.z.mul(&z2));
-        let s2 = q.y.mul(&self.z.mul(&z1));
-        let h = u2.sub(&u1);
-        let r = s2.sub(&s1);
-        if h.is_zero() == 1 {
-            return if r.is_zero() == 1 { self.double() } else { Self::identity() };
+        let (sum, equal) = self.add_incomplete(q);
+        if sum.z.is_zero() == 1 {
+            return if equal == 1 { self.double() } else { Self::identity() };
         }
-        let h2 = h.square();
-        let h3 = h.mul(&h2);
-        let u = u1.mul(&h2);
-        let x = r.square().sub(&h3).sub(&u.double());
-        let y = r.mul(&u.sub(&x)).sub(&s1.mul(&h3));
-        let z = h.mul(&self.z.mul(&q.z));
-        Self { x, y, z }
+        sum
     }
     fn neg(&self) -> Self {
         Self {
@@ -267,20 +539,29 @@ impl<C: Curve<N>, const N: usize> Point<C, N> {
     /// u1 G + u2 self in one doubling chain over both scalars' width-5 NAFs
     /// (Straus's method), in variable time: every input is public.
     fn joint(&self, u1: &PublicScalar<N>, u2: &PublicScalar<N>) -> Self {
-        let (g, q) = (Self::base().odd_multiples(), self.odd_multiples());
-        let (d1, d2) = (u1.naf(5), u2.naf(5));
+        let (g, q) = (C::odd_multiples_of_g(), self.odd_multiples());
+        let (d1, d2) = (u1.naf(7), u2.naf(5));
         let Some(top) = (0..64 * N + 1).rev().find(|&i| d1[i] != 0 || d2[i] != 0) else {
             return Self::identity();
         };
         let mut r = Self::identity();
         for i in (0..=top).rev() {
             r = r.double();
-            for (d, table) in [(d1[i], &g), (d2[i], &q)] {
-                if d > 0 {
-                    r = r.add_public(&table[d as usize / 2]);
-                } else if d < 0 {
-                    r = r.add_public(&table[(-d) as usize / 2].neg());
-                }
+            let d = d1[i];
+            if d > 0 {
+                r = r.add_affine_public(&g[d as usize / 2]);
+            } else if d < 0 {
+                let entry = g[(-d) as usize / 2];
+                r = r.add_affine_public(&Affine {
+                    x: entry.x,
+                    y: Residue::zero().sub(&entry.y),
+                });
+            }
+            let d = d2[i];
+            if d > 0 {
+                r = r.add_public(&q[d as usize / 2]);
+            } else if d < 0 {
+                r = r.add_public(&q[(-d) as usize / 2].neg());
             }
         }
         r
@@ -471,6 +752,14 @@ pub(crate) struct P256;
 impl Curve<4> for P256 {
     type Field = P256Field;
     type Order = P256Order;
+    // k + n >= n > 2^255 sets bit 254 or 255 of window 51 (bits 254..=259).
+    const OFFSET: u64 = 1;
+    fn odd_multiples_of_g() -> &'static [Affine<Self, 4>; 32] {
+        &P256_G_ODD
+    }
+    fn base_mul(scalar: &Scalar<Self, 4>) -> Point<Self, 4> {
+        Point::comb_mul(&P256_COMB, scalar)
+    }
     const B: [u64; 4] = montgomery::encode(
         &[0x3bce3c3e27d2604b, 0x651d06b0cc53b0f6, 0xb3ebbd55769886bc, 0x5ac635d8aa3a93e7],
         &P256Field::P,
@@ -490,6 +779,12 @@ pub(crate) struct P384;
 impl Curve<6> for P384 {
     type Field = P384Field;
     type Order = P384Order;
+    // k + 2n >= 2n > 2^384 sets bit 384 or 385 of window 77 (bits 384..=389);
+    // k + n need not.
+    const OFFSET: u64 = 2;
+    fn odd_multiples_of_g() -> &'static [Affine<Self, 6>; 32] {
+        &P384_G_ODD
+    }
     const B: [u64; 6] = montgomery::encode(
         &[
             0x2a85c8edd3ec2aef,
@@ -572,22 +867,31 @@ mod tests {
         )
     }
 
-    /// Booth digits lie in [-16, 16] and recompose the scalar, for both word
-    /// counts and at the patterns that give digits of +16 and -16.
+    /// The representative is odd, congruent to k and sets the top window;
+    /// its Booth digits lie in [-16, 16] and recompose it, with +16 and -16
+    /// both reached.
     fn check_booth<C: Curve<N>, const N: usize>() {
         use num_bigint::BigInt;
+        let n = integer(&C::Order::P);
         let mut extremes = [false; 2];
         for k in scalars(&C::Order::P) {
+            let k = ModN::<C, N>::from_wide(&k).integer();
             let scalar = Scalar::<C, N>(k, core::marker::PhantomData);
+            let words = scalar.representative();
+            let representative = integer(&words.0);
+            assert_eq!(&representative % 2u8, BigInt::from(1));
+            assert_eq!(&representative % &n, integer(&k));
+            assert!(representative < BigInt::from(1) << (64 * N + 2));
             let mut sum = BigInt::from(0);
             for i in 0..windows(N) {
-                let d = scalar.booth(i);
+                let d = booth(&words.0, i);
                 assert!((-16..=16).contains(&d));
                 extremes[0] |= d == 16;
                 extremes[1] |= d == -16;
                 sum += BigInt::from(d) << (5 * i);
             }
-            assert_eq!(sum, integer(&k));
+            assert_eq!(sum, representative);
+            assert_ne!(booth(&words.0, windows(N) - 1), 0);
         }
         assert_eq!(extremes, [true, true]);
     }
@@ -649,6 +953,100 @@ mod tests {
     fn public_sums_of_equal_and_opposite_points() {
         check_exceptional_sums::<P256, 4>();
         check_exceptional_sums::<P384, 6>();
+    }
+
+    fn affine_of<C: Curve<N>, const N: usize>(p: &Point<C, N>) -> ([u64; N], [u64; N]) {
+        let (mut x, mut y) = ([0; N], [0; N]);
+        p.affine(&mut x, &mut y).unwrap();
+        (x, y)
+    }
+
+    /// k G by the public path, for k below n.
+    fn reference<C: Curve<N>, const N: usize>(k: &num_bigint::BigInt) -> ([u64; N], [u64; N]) {
+        let (_, bytes) = k.to_bytes_le();
+        let mut words = [0u64; N];
+        for (i, chunk) in bytes.chunks(8).enumerate() {
+            let mut b = [0u8; 8];
+            b[..chunk.len()].copy_from_slice(chunk);
+            words[i] = u64::from_le_bytes(b);
+        }
+        affine_of(&Point::<C, N>::identity().joint(&PublicScalar(words), &PublicScalar([0; N])))
+    }
+
+    /// Every comb entry is j 2^(5i) G, and the odd-multiple tables (2j + 1) G.
+    #[test]
+    fn static_tables_hold_their_multiples() {
+        use num_bigint::BigInt;
+        let n = integer(&P256Order::P);
+        for (i, row) in P256_COMB.iter().enumerate() {
+            for (j, entry) in row.iter().enumerate() {
+                let k = (BigInt::from(j + 1) << (5 * i)) % &n;
+                assert_eq!(affine_of(&entry.point()), reference::<P256, 4>(&k), "row {i}, entry {j}");
+            }
+        }
+        for (j, entry) in P256_G_ODD.iter().enumerate() {
+            assert_eq!(affine_of(&entry.point()), reference::<P256, 4>(&BigInt::from(2 * j + 1)));
+        }
+        for (j, entry) in P384_G_ODD.iter().enumerate() {
+            assert_eq!(affine_of(&entry.point()), reference::<P384, 6>(&BigInt::from(2 * j + 1)));
+        }
+    }
+
+    /// The comb equals the public path for every test scalar and for the
+    /// ones k = 2^256 d mod n for d = 1..=4, among them those whose top
+    /// addition doubles.
+    #[test]
+    fn the_comb_matches_the_public_path() {
+        use num_bigint::BigInt;
+        let n = integer(&P256Order::P);
+        let mut ks: std::vec::Vec<BigInt> =
+            scalars(&P256Order::P).iter().map(|k| integer(k) % &n).filter(|k| *k != BigInt::from(0)).collect();
+        for d in 1..=4u8 {
+            ks.push((BigInt::from(d) << 256) % &n);
+        }
+        for k in ks {
+            let (_, bytes) = k.to_bytes_le();
+            let mut words = [0u64; 4];
+            for (i, chunk) in bytes.chunks(8).enumerate() {
+                let mut b = [0u8; 8];
+                b[..chunk.len()].copy_from_slice(chunk);
+                words[i] = u64::from_le_bytes(b);
+            }
+            let comb = P256::base_mul(&Scalar(words, core::marker::PhantomData));
+            assert_eq!(affine_of(&comb), reference::<P256, 4>(&k), "k = {k:x}");
+        }
+    }
+
+    /// The scalars k = 2d mod n whose representative's first digit is d,
+    /// for which the last addition of [`Point::mul`] doubles: at least one
+    /// exists per curve, and each multiplies as the public path does.
+    fn check_last_addition_doubles<C: Curve<N>, const N: usize>() {
+        use num_bigint::BigInt;
+        let n = integer(&C::Order::P);
+        let mut found = 0;
+        for d in (-16i32..=16).filter(|&d| d != 0) {
+            let k = ((BigInt::from(2 * d) % &n) + &n) % &n;
+            let (_, bytes) = k.to_bytes_le();
+            let mut words = [0u64; N];
+            for (i, chunk) in bytes.chunks(8).enumerate() {
+                let mut b = [0u8; 8];
+                b[..chunk.len()].copy_from_slice(chunk);
+                words[i] = u64::from_le_bytes(b);
+            }
+            let scalar = Scalar::<C, N>(words, core::marker::PhantomData);
+            if i32::from(booth(&scalar.representative().0, 0)) != d {
+                continue;
+            }
+            found += 1;
+            assert_eq!(affine_of(&Point::<C, N>::base().mul(&scalar)), reference::<C, N>(&k), "d = {d}");
+        }
+        assert!(found > 0);
+    }
+
+    #[test]
+    fn the_last_addition_doubles_where_it_must() {
+        check_last_addition_doubles::<P256, 4>();
+        check_last_addition_doubles::<P384, 6>();
     }
 
     #[test]

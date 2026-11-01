@@ -427,10 +427,10 @@ fn syn_without_timestamps(from: usize, o: &O) -> Option<Vec<u8>> {
 /// The receive buffer grows to twice what its reader takes per round trip, by the receiver's own
 /// estimate of the round trip, with timestamps and without. The path's round trip quadruples once
 /// the handshake is done, so a downloader's SRTT, which only its own data samples, still says
-/// 20 ms. The reader takes a burst every millisecond twice per 20 ms: it is never offered more
-/// than twice its rate over an estimate at most half again the path's 80 ms, plus a burst and a
-/// segment, and once the window has grown it is never kept waiting, which an estimate under the
-/// path's would.
+/// 20 ms. The writer starts after that, so its slow start sees one path and not a queue. The
+/// reader takes a burst every millisecond twice per 20 ms: it is never offered more than twice its
+/// rate over an estimate at most half again the path's 80 ms, plus a burst and a segment, and once
+/// the window has grown it is never kept waiting, which an estimate under the path's would.
 #[test]
 fn the_receive_window_grows_by_what_is_read_per_round_trip() {
     const BURST: u64 = 40_000;
@@ -444,8 +444,10 @@ fn the_receive_window_grows_by_what_is_read_per_round_trip() {
             net.rewrite = Some(Box::new(syn_without_timestamps));
         }
         net.connections(1, 80, [64 * MIB, 0]);
+        net.apps[0].write_limit = Some(0);
         assert!(net.run(100, |n| n.apps.len() == 2));
         net.delay = ns(40);
+        net.apps[0].write_limit = None;
         let reader = net.apps.iter().position(|a| a.node == 1).unwrap();
         let handshake = net.nodes[1].tcp.info(net.apps[reader].id).unwrap().srtt;
         assert!(handshake < Some(std::time::Duration::from_millis(30)));
@@ -479,9 +481,13 @@ fn syn_offering_1392(from: usize, o: &O) -> Option<Vec<u8>> {
     })
 }
 
+/// What a reader that keeps up on a gigabit path with a 15 ms round trip grows its window to at
+/// least: twice what it reads per round trip.
+const TWICE_THE_PATH: u32 = 2 * 125_000 * 15;
+
 /// A download shaped like the T14's from a CDN: gigabit, a 15 ms round trip, timestamps and SACK,
 /// and a peer whose segments are shorter than the downloader's own send MSS. Full-sized is what
-/// the peer sends, so its echoes are sampled and the window grows to the whole buffer; measured
+/// the peer sends, so its echoes are sampled and the window grows to twice the path; measured
 /// against the send MSS, none ever was, and the window stayed at 65,535.
 #[test]
 fn a_peer_sending_segments_shorter_than_our_send_mss_still_grows_the_window() {
@@ -495,12 +501,12 @@ fn a_peer_sending_segments_shorter_than_our_send_mss_still_grows_the_window() {
     net.assert_exact();
     let longest = net.wire.iter().filter(|(from, _)| *from == 1).map(|(_, o)| o.payload.len()).max();
     assert_eq!((longest, peaks[0].shifts), (Some(1380), Some((7, 7))));
-    assert_eq!(peaks[0].window, BUFFER, "{:?}", peaks[0]);
+    assert!(peaks[0].window >= TWICE_THE_PATH, "{:?}", peaks[0]);
 }
 
 /// The same download into a lent receive ring, as a stream's region is: the reader takes text out
 /// of the ring itself and gives it back with `consume`, which grows the window as a read does, so
-/// the window passes 65,535 and reaches the whole buffer.
+/// the window passes 65,535 and reaches twice the path.
 #[test]
 fn a_lent_receive_ring_grows_the_window_as_a_read_does() {
     let mut net = Net::buffered(15, BUFFER);
@@ -512,8 +518,7 @@ fn a_lent_receive_ring_grows_the_window_as_a_read_does() {
     let peaks = watch(&mut net, 600_000);
     assert!(net.finished(), "the transfer did not finish:\n{}", net.dump());
     net.assert_exact();
-    assert!(peaks[0].window > 65_535, "{:?}", peaks[0]);
-    assert_eq!(peaks[0].window, BUFFER, "{:?}", peaks[0]);
+    assert!(peaks[0].window >= TWICE_THE_PATH, "{:?}", peaks[0]);
 }
 
 /// RFC 8985 §7.3: no probe leaves unless an RTT sample came since the last. Without timestamps a

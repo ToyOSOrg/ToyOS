@@ -5,8 +5,8 @@
 //! no serial port has nothing at the other end to type a job — so the
 //! stdin path every config in `tests/images/` but `jobcase.toml` leaves the runner on parks
 //! forever, and the loop refuses after `metal::return_secs`. What ends a boot
-//! is `[programs.test-runner] args`: the list's bound, one binary name per
-//! job, then `reboot`.
+//! is `[programs.test-runner] args`: the list's bound, one job per argument
+//! — a binary name and its arguments — then `reboot`.
 //!
 //! So a metal image is a committed boot config with that one field derived onto
 //! it. The derivation is here, pure, because what it changes about the config
@@ -119,7 +119,7 @@ pub fn derive(
     symlinks.insert(REBOOT_LINK.to_string(), Value::String(TOYBOX_PATH.to_string()));
     // A boot whose jobs are reached through names of their own — the C corpus's
     // one comparator, staged once and symlinked once per case, so the kernel
-    // records each run under the case's name and a stick says which one failed.
+    // records each run under the case's name and the log says which one failed.
     for (from, to) in extra_links {
         symlinks.insert(from.clone(), Value::String(to.clone()));
     }
@@ -145,6 +145,7 @@ mod tests {
         "tests/images/metalcase.toml",
         "tests/images/latencycase.toml",
         "tests/images/acpicase.toml",
+        "tests/images/designatecase.toml",
     ];
 
     fn derived(config: &str, jobs: &[&str]) -> String {
@@ -159,12 +160,12 @@ mod tests {
     #[test]
     fn every_derived_config_ends_its_own_boot() {
         for config in CONFIGS {
-            let out = derived(config, &["test_rs_mkdir_cap"]);
+            let out = derived(config, &["test_rs_readdir_bound"]);
             let parsed: Value = toml::from_str(&out).expect("the derived config parses");
             let runner = &parsed["programs"][RUNNER];
             let args: Vec<&str> =
                 runner["args"].as_array().unwrap().iter().map(|v| v.as_str().unwrap()).collect();
-            assert_eq!(args, ["--bound-ms=133100", "test_rs_mkdir_cap", REBOOT], "{config}");
+            assert_eq!(args, ["--bound-ms=133100", "test_rs_readdir_bound", REBOOT], "{config}");
             let receives: Vec<&str> = runner["receives"]
                 .as_array()
                 .unwrap()

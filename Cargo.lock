@@ -30,17 +30,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "d122413f284cf2d62fb1b7db97e02edb8cda96d769b16e443a4f6195e35662b0"
 dependencies = [
  "crypto-common 0.1.7",
- "generic-array 0.14.7",
-]
-
-[[package]]
-name = "aead"
-version = "0.6.0-rc.10"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "6b657e772794c6b04730ea897b66a058ccd866c16d1967da05eeeecec39043fe"
-dependencies = [
- "crypto-common 0.2.1",
- "inout 0.2.2",
+ "generic-array",
 ]
 
 [[package]]
@@ -55,41 +45,16 @@ dependencies = [
 ]
 
 [[package]]
-name = "aes"
-version = "0.9.0-rc.4"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "04097e08a47d9ad181c2e1f4a5fabc9ae06ce8839a333ba9a949bcb0d31fd2a3"
-dependencies = [
- "cipher 0.5.1",
- "cpubits",
- "cpufeatures 0.2.17",
-]
-
-[[package]]
 name = "aes-gcm"
 version = "0.10.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "831010a0f742e1209b3bcea8fab6a8e149051ba6099432c8cb2cc117dec3ead1"
 dependencies = [
- "aead 0.5.2",
- "aes 0.8.4",
+ "aead",
+ "aes",
  "cipher 0.4.4",
- "ctr 0.9.2",
- "ghash 0.5.1",
- "subtle",
-]
-
-[[package]]
-name = "aes-gcm"
-version = "0.11.0-rc.3"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "e22c0c90bbe8d4f77c3ca9ddabe41a1f8382d6fc1f7cea89459d0f320371f972"
-dependencies = [
- "aead 0.6.0-rc.10",
- "aes 0.9.0-rc.4",
- "cipher 0.5.1",
- "ctr 0.10.0-rc.4",
- "ghash 0.6.0",
+ "ctr",
+ "ghash",
  "subtle",
 ]
 
@@ -186,18 +151,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "7f202df86484c868dbad7eaa557ef785d5c66295e41b460ef922eca0723b842c"
 
 [[package]]
-name = "argon2"
-version = "0.5.3"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "3c3610892ee6e0cbce8ae2700349fcf8f98adb0dbfbee85aec3c9179d29cc072"
-dependencies = [
- "base64ct",
- "blake2",
- "cpufeatures 0.2.17",
- "password-hash",
-]
-
-[[package]]
 name = "arrayvec"
 version = "0.7.8"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -222,12 +175,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "4c7f02d4ea65f2c1853089ffd8d2787bdbc63de2f0d29dedbcf8ccdfa0ccd4cf"
 
 [[package]]
-name = "base16ct"
-version = "1.0.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "fd307490d624467aa6f74b0eabb77633d1f758a7b25f12bceb0b22e08d9726f6"
-
-[[package]]
 name = "base64"
 version = "0.23.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -244,17 +191,8 @@ name = "bcachefs"
 version = "0.1.0"
 dependencies = [
  "flate2",
-]
-
-[[package]]
-name = "bcrypt-pbkdf"
-version = "0.10.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "6aeac2e1fe888769f34f05ac343bbef98b14d1ffb292ab69d4608b3abc86f2a2"
-dependencies = [
- "blowfish",
- "pbkdf2 0.12.2",
- "sha2 0.10.9",
+ "toyos-blockdev",
+ "toyos-crypto",
 ]
 
 [[package]]
@@ -270,21 +208,12 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "843867be96c8daad0d758b57df9392b6d8d271134fce549de6ce169ff98a92af"
 
 [[package]]
-name = "blake2"
-version = "0.10.6"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "46502ad458c9a52b69d4d4d32775c788b7a1b85e8bc9d482d92250fc0e3f8efe"
-dependencies = [
- "digest 0.10.7",
-]
-
-[[package]]
 name = "block-buffer"
 version = "0.10.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "3078c7629b62d3f0439517fa394996acacc5cbc91c5a20d8c658e77abd503a71"
 dependencies = [
- "generic-array 0.14.7",
+ "generic-array",
 ]
 
 [[package]]
@@ -292,24 +221,6 @@ name = "block-buffer"
 version = "0.12.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "cdd35008169921d80bc60d3d0ab416eecb028c4cd653352907921d95084790be"
-dependencies = [
- "hybrid-array",
-]
-
-[[package]]
-name = "block-padding"
-version = "0.3.3"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "a8894febbff9f758034a5b8e12d87918f56dfc64a8e1fe757d65e29041538d93"
-dependencies = [
- "generic-array 0.14.7",
-]
-
-[[package]]
-name = "block-padding"
-version = "0.4.2"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "710f1dd022ef4e93f8a438b4ba958de7f64308434fa6a87104481645cc30068b"
 dependencies = [
  "hybrid-array",
 ]
@@ -333,25 +244,15 @@ dependencies = [
 ]
 
 [[package]]
-name = "blowfish"
-version = "0.9.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "e412e2cd0f2b2d93e02543ceae7917b3c70331573df19ee046bcbc35e45e87d7"
-dependencies = [
- "byteorder",
- "cipher 0.4.4",
-]
-
-[[package]]
 name = "bootloader"
 version = "0.1.0"
 dependencies = [
  "bcachefs",
- "sha2 0.10.9",
  "toyos-abi",
  "toyos-acpi",
  "toyos-blackbox",
  "toyos-bootmap",
+ "toyos-devicepath",
  "toyos-elf",
  "toyos-gpt",
  "toyos-microcode",
@@ -433,24 +334,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "cbc"
-version = "0.1.2"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "26b52a9543ae338f279b96b0b9fed9c8093744685043739079ce85cd58f289a6"
-dependencies = [
- "cipher 0.4.4",
-]
-
-[[package]]
-name = "cbc"
-version = "0.2.0-rc.4"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "ab1412b9ae2463ede01f1e591412dfbcfeacecf40e8c4c3e0655814c19065c38"
-dependencies = [
- "cipher 0.5.1",
-]
-
-[[package]]
 name = "cc"
 version = "1.2.56"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -492,24 +375,13 @@ dependencies = [
 ]
 
 [[package]]
-name = "chacha20"
-version = "0.10.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "6f8d983286843e49675a4b7a2d174efe136dc93a18d69130dd18198a6c167601"
-dependencies = [
- "cfg-if",
- "cpufeatures 0.3.0",
- "rand_core 0.10.0",
-]
-
-[[package]]
 name = "chacha20poly1305"
 version = "0.10.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "10cd79432192d1c0f4e1a0fef9527696cc039165d729fb41b3f4f4f354c2dc35"
 dependencies = [
- "aead 0.5.2",
- "chacha20 0.9.1",
+ "aead",
+ "chacha20",
  "cipher 0.4.4",
  "poly1305",
  "zeroize",
@@ -573,6 +445,7 @@ dependencies = [
  "toyos",
  "toyos-abi",
  "toyos-desktop",
+ "toyos-display-output",
  "toyos-edid",
  "toyos-font",
  "toyos-icon",
@@ -580,6 +453,7 @@ dependencies = [
  "toyos-inspect",
  "toyos-manifest",
  "toyos-pci-claim",
+ "toyos-session",
  "toyos-virtio",
  "toyos-virtio-gpu",
  "toyos-wallclock",
@@ -614,12 +488,6 @@ name = "const-oid"
 version = "0.9.6"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "c2459377285ad874054d797f3ccebf984978aa39129f6eafde5cdc8315b612f8"
-
-[[package]]
-name = "const-oid"
-version = "0.10.2"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "a6ef517f0926dd24a1582492c791b6a4818a4d94e789a334894aa15b0d12f55c"
 
 [[package]]
 name = "core-foundation"
@@ -707,12 +575,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "cpubits"
-version = "0.1.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "5ef0c543070d296ea414df2dd7625d1b24866ce206709d8a4a424f28377f5861"
-
-[[package]]
 name = "cpufeatures"
 version = "0.2.17"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -766,25 +628,8 @@ version = "0.5.5"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "0dc92fb57ca44df6db8059111ab3af99a63d5d0f8375d9972e319a379c6bab76"
 dependencies = [
- "generic-array 0.14.7",
+ "generic-array",
  "rand_core 0.6.4",
- "subtle",
- "zeroize",
-]
-
-[[package]]
-name = "crypto-bigint"
-version = "0.7.3"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "42a0d26b245348befa0c121944541476763dcc46ede886c88f9d12e1697d27c3"
-dependencies = [
- "cpubits",
- "ctutils",
- "getrandom 0.4.2",
- "hybrid-array",
- "num-traits",
- "rand_core 0.10.0",
- "serdect",
  "subtle",
  "zeroize",
 ]
@@ -795,7 +640,7 @@ version = "0.1.7"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "78c8292055d1c1df0cce5d180393dc8cce0abec0a7102adb6c7b1eef6016d60a"
 dependencies = [
- "generic-array 0.14.7",
+ "generic-array",
  "rand_core 0.6.4",
  "typenum",
 ]
@@ -806,19 +651,7 @@ version = "0.2.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "77727bb15fa921304124b128af125e7e3b968275d1b108b379190264f4423710"
 dependencies = [
- "getrandom 0.4.2",
  "hybrid-array",
- "rand_core 0.10.0",
-]
-
-[[package]]
-name = "crypto-primes"
-version = "0.7.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "21f41f23de7d24cdbda7f0c4d9c0351f99a4ceb258ef30e5c1927af8987ffe5a"
-dependencies = [
- "crypto-bigint 0.7.3",
- "libm",
  "rand_core 0.10.0",
 ]
 
@@ -832,22 +665,12 @@ dependencies = [
 ]
 
 [[package]]
-name = "ctr"
-version = "0.10.0-rc.4"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "fee683dd898fbd052617b4514bc31f98bc32081a83b69ec46adef3b1ef4ae36f"
-dependencies = [
- "cipher 0.5.1",
-]
-
-[[package]]
 name = "ctutils"
 version = "0.4.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "7d5515a3834141de9eafb9717ad39eea8247b5674e6066c404e8c4b365d2a29e"
 dependencies = [
  "cmov",
- "subtle",
 ]
 
 [[package]]
@@ -866,23 +689,7 @@ dependencies = [
  "cpufeatures 0.2.17",
  "curve25519-dalek-derive",
  "digest 0.10.7",
- "fiat-crypto 0.2.9",
- "rustc_version",
- "subtle",
- "zeroize",
-]
-
-[[package]]
-name = "curve25519-dalek"
-version = "5.0.0-pre.6"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "335f1947f241137a14106b6f5acc5918a5ede29c9d71d3f2cb1678d5075d9fc3"
-dependencies = [
- "cfg-if",
- "cpufeatures 0.2.17",
- "curve25519-dalek-derive",
- "digest 0.11.1",
- "fiat-crypto 0.3.0",
+ "fiat-crypto",
  "rustc_version",
  "subtle",
  "zeroize",
@@ -906,41 +713,13 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "0c87e182de0887fd5361989c677c4e8f5000cd9491d6d563161a8f3a5519fc7f"
 
 [[package]]
-name = "data-encoding"
-version = "2.10.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "d7a1e2f27636f116493b8b860f5546edb47c8d8f8ea73e1d2a20be88e28d1fea"
-
-[[package]]
-name = "delegate"
-version = "0.13.5"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "780eb241654bf097afb00fc5f054a09b687dad862e485fdcf8399bb056565370"
-dependencies = [
- "proc-macro2",
- "quote",
- "syn 2.0.117",
-]
-
-[[package]]
 name = "der"
 version = "0.7.10"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "e7c1832837b905bbfb5101e07cc24c8deddf52f93225eee6ead5f4d63d53ddcb"
 dependencies = [
- "const-oid 0.9.6",
- "pem-rfc7468 0.7.0",
- "zeroize",
-]
-
-[[package]]
-name = "der"
-version = "0.8.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "71fd89660b2dc699704064e59e9dba0147b903e85319429e131620d022be411b"
-dependencies = [
- "const-oid 0.10.2",
- "pem-rfc7468 1.0.0",
+ "const-oid",
+ "pem-rfc7468",
  "zeroize",
 ]
 
@@ -968,7 +747,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "9ed9a281f7bc9b7576e61468ba615a66a5c8cfdff42420a70aa82701a3b1e292"
 dependencies = [
  "block-buffer 0.10.4",
- "const-oid 0.9.6",
+ "const-oid",
  "crypto-common 0.1.7",
  "subtle",
 ]
@@ -980,9 +759,19 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "285743a676ccb6b3e116bc14cc69319b957867930ae9c4822f8e0f54509d7243"
 dependencies = [
  "block-buffer 0.12.0",
- "const-oid 0.10.2",
  "crypto-common 0.2.1",
  "ctutils",
+]
+
+[[package]]
+name = "disks"
+version = "0.1.0"
+dependencies = [
+ "diskserver",
+ "toyos",
+ "toyos-blockring",
+ "toyos-gpt",
+ "toyos-manifest",
 ]
 
 [[package]]
@@ -991,9 +780,10 @@ version = "0.0.0"
 dependencies = [
  "toyos",
  "toyos-abi",
+ "toyos-blockdev",
  "toyos-blockring",
  "toyos-blockserve",
- "toyos-disk",
+ "toyos-gpt",
 ]
 
 [[package]]
@@ -1039,9 +829,12 @@ dependencies = [
  "cc",
  "cpal",
  "flate2",
+ "getrandom 0.3.4",
+ "rustls",
  "rustysynth",
  "softbuffer",
  "tar",
+ "toyos-crypto",
  "ureq",
  "winit",
 ]
@@ -1055,7 +848,7 @@ checksum = "75b325c5dbd37f80359721ad39aca5a29fb04c89279657cffdda8736d0c0b9d2"
 [[package]]
 name = "dpi"
 version = "0.1.1"
-source = "git+https://github.com/ToyOSOrg/winit?branch=toyos-0.30.13#48c7022a44c7416107648d4cf8be4fdd042d0722"
+source = "git+https://github.com/ToyOSOrg/winit?branch=toyos-0.30.13#0121752b7c48bc640e221e3cebedefea3796609a"
 
 [[package]]
 name = "ecdsa"
@@ -1063,27 +856,12 @@ version = "0.16.9"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "ee27f32b5c5292967d2d4a9d7f1e0b0aed2c15daded5a60300e4abb9d8020bca"
 dependencies = [
- "der 0.7.10",
+ "der",
  "digest 0.10.7",
- "elliptic-curve 0.13.8",
- "rfc6979 0.4.0",
- "signature 2.2.0",
- "spki 0.7.3",
-]
-
-[[package]]
-name = "ecdsa"
-version = "0.17.0-rc.16"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "91bbdd377139884fafcad8dc43a760a3e1e681aa26db910257fa6535b70e1829"
-dependencies = [
- "der 0.8.0",
- "digest 0.11.1",
- "elliptic-curve 0.14.0-rc.29",
- "rfc6979 0.5.0-rc.5",
- "signature 3.0.0-rc.10",
- "spki 0.8.0-rc.4",
- "zeroize",
+ "elliptic-curve",
+ "rfc6979",
+ "signature",
+ "spki",
 ]
 
 [[package]]
@@ -1092,18 +870,8 @@ version = "2.2.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "115531babc129696a58c64a4fef0a8bf9e9698629fb97e9e40767d235cfbcd53"
 dependencies = [
- "pkcs8 0.10.2",
- "signature 2.2.0",
-]
-
-[[package]]
-name = "ed25519"
-version = "3.0.0-rc.4"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "c6e914c7c52decb085cea910552e24c63ac019e3ab8bf001ff736da9a9d9d890"
-dependencies = [
- "pkcs8 0.11.0-rc.11",
- "signature 3.0.0-rc.10",
+ "pkcs8",
+ "signature",
 ]
 
 [[package]]
@@ -1112,26 +880,10 @@ version = "2.2.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "70e796c081cee67dc755e1a36a0a172b897fab85fc3f6bc48307991f64e4eca9"
 dependencies = [
- "curve25519-dalek 4.1.3",
- "ed25519 2.2.3",
+ "curve25519-dalek",
+ "ed25519",
  "serde",
  "sha2 0.10.9",
- "subtle",
- "zeroize",
-]
-
-[[package]]
-name = "ed25519-dalek"
-version = "3.0.0-pre.6"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "053618a4c3d3bc24f188aa660ae75a46eeab74ef07fb415c61431e5e7cd4749b"
-dependencies = [
- "curve25519-dalek 5.0.0-pre.6",
- "ed25519 3.0.0-rc.4",
- "rand_core 0.10.0",
- "serde",
- "sha2 0.11.0-rc.5",
- "signature 3.0.0-rc.10",
  "subtle",
  "zeroize",
 ]
@@ -1151,54 +903,19 @@ version = "0.13.8"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "b5e6043086bf7973472e0c7dff2142ea0b680d30e18d9cc40f267efbf222bd47"
 dependencies = [
- "base16ct 0.2.0",
- "crypto-bigint 0.5.5",
+ "base16ct",
+ "crypto-bigint",
  "digest 0.10.7",
  "ff",
- "generic-array 0.14.7",
+ "generic-array",
  "group",
- "hkdf 0.12.4",
- "pem-rfc7468 0.7.0",
- "pkcs8 0.10.2",
+ "hkdf",
+ "pem-rfc7468",
+ "pkcs8",
  "rand_core 0.6.4",
- "sec1 0.7.3",
+ "sec1",
  "subtle",
  "zeroize",
-]
-
-[[package]]
-name = "elliptic-curve"
-version = "0.14.0-rc.29"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "e84043d573efd4ac9d2d125817979a379204bf7e328b25a4a30487e8d100e618"
-dependencies = [
- "base16ct 1.0.0",
- "crypto-bigint 0.7.3",
- "crypto-common 0.2.1",
- "digest 0.11.1",
- "hkdf 0.13.0-rc.5",
- "hybrid-array",
- "once_cell",
- "pem-rfc7468 1.0.0",
- "pkcs8 0.11.0-rc.11",
- "rand_core 0.10.0",
- "rustcrypto-ff",
- "rustcrypto-group",
- "sec1 0.8.1",
- "subtle",
- "zeroize",
-]
-
-[[package]]
-name = "enum_dispatch"
-version = "0.3.13"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "aa18ce2bc66555b3218614519ac839ddb759a7d6720732f979ef8d13be147ecd"
-dependencies = [
- "once_cell",
- "proc-macro2",
- "quote",
- "syn 2.0.117",
 ]
 
 [[package]]
@@ -1261,12 +978,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "28dea519a9695b9977216879a3ebfddf92f1c08c05d984f8996aecd6ecdc811d"
 
 [[package]]
-name = "fiat-crypto"
-version = "0.3.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "64cd1e32ddd350061ae6edb1b082d7c54915b5c672c389143b9a63403a109f24"
-
-[[package]]
 name = "filepicker"
 version = "0.1.0"
 dependencies = [
@@ -1301,7 +1012,9 @@ dependencies = [
  "diskserver",
  "toyos",
  "toyos-abi",
+ "toyos-blockdev",
  "toyos-blockring",
+ "toyos-crypto",
  "toyos-fat32",
  "toyos-fat32-check",
  "toyos-gpt",
@@ -1333,7 +1046,6 @@ checksum = "6e634e2e0ebac1ee034020da1ca582e17ffe4e0f5e985823721e168928136dcb"
 dependencies = [
  "crc32fast",
  "miniz_oxide",
- "zlib-rs",
 ]
 
 [[package]]
@@ -1380,69 +1092,10 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "aa9a19cbb55df58761df49b23516a86d432839add4af60fc256da840f66ed35b"
 
 [[package]]
-name = "futures"
-version = "0.3.32"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "8b147ee9d1f6d097cef9ce628cd2ee62288d963e16fb287bd9286455b241382d"
-dependencies = [
- "futures-channel",
- "futures-core",
- "futures-executor",
- "futures-io",
- "futures-sink",
- "futures-task",
- "futures-util",
-]
-
-[[package]]
-name = "futures-channel"
-version = "0.3.32"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "07bbe89c50d7a535e539b8c17bc0b49bdb77747034daa8087407d655f3f7cc1d"
-dependencies = [
- "futures-core",
- "futures-sink",
-]
-
-[[package]]
 name = "futures-core"
 version = "0.3.32"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "7e3450815272ef58cec6d564423f6e755e25379b217b0bc688e295ba24df6b1d"
-
-[[package]]
-name = "futures-executor"
-version = "0.3.32"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "baf29c38818342a3b26b5b923639e7b1f4a61fc5e76102d4b1981c6dc7a7579d"
-dependencies = [
- "futures-core",
- "futures-task",
- "futures-util",
-]
-
-[[package]]
-name = "futures-io"
-version = "0.3.32"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "cecba35d7ad927e23624b22ad55235f2239cfa44fd10428eecbeba6d6a717718"
-
-[[package]]
-name = "futures-macro"
-version = "0.3.32"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "e835b70203e41293343137df5c0664546da5745f82ec9b84d40be8336958447b"
-dependencies = [
- "proc-macro2",
- "quote",
- "syn 2.0.117",
-]
-
-[[package]]
-name = "futures-sink"
-version = "0.3.32"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "c39754e157331b013978ec91992bde1ac089843443c49cbc7f46150b0fad0893"
 
 [[package]]
 name = "futures-task"
@@ -1456,13 +1109,8 @@ version = "0.3.32"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "389ca41296e6190b48053de0321d02a77f32f8a5d2461dd38762c0593805c6d6"
 dependencies = [
- "futures-channel",
  "futures-core",
- "futures-io",
- "futures-macro",
- "futures-sink",
  "futures-task",
- "memchr",
  "pin-project-lite",
  "slab",
 ]
@@ -1494,27 +1142,14 @@ dependencies = [
 ]
 
 [[package]]
-name = "generic-array"
-version = "1.3.5"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "eaf57c49a95fd1fe24b90b3033bee6dc7e8f1288d51494cb44e627c295e38542"
-dependencies = [
- "generic-array 0.14.7",
- "rustversion",
- "typenum",
-]
-
-[[package]]
 name = "getrandom"
 version = "0.2.17"
 source = "git+https://github.com/ToyOSOrg/getrandom?branch=toyos-0.2-sdk-0.12#2092d1ccd2833f00559ed27850c576ab37fe9347"
 dependencies = [
  "cfg-if",
- "js-sys",
  "libc",
  "toyos-abi",
  "wasi",
- "wasm-bindgen",
 ]
 
 [[package]]
@@ -1537,7 +1172,6 @@ dependencies = [
  "cfg-if",
  "libc",
  "r-efi 6.0.0",
- "rand_core 0.10.0",
  "toyos-abi",
  "wasip2",
  "wasip3",
@@ -1550,16 +1184,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "f0d8a4362ccb29cb0b265253fb0a2728f592895ee6854fd9bc13f2ffda266ff1"
 dependencies = [
  "opaque-debug",
- "polyval 0.6.2",
-]
-
-[[package]]
-name = "ghash"
-version = "0.6.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "2eecf2d5dc9b66b732b97707a0210906b1d30523eb773193ab777c0c84b3e8d5"
-dependencies = [
- "polyval 0.7.1",
+ "polyval",
 ]
 
 [[package]]
@@ -1591,6 +1216,13 @@ dependencies = [
  "ff",
  "rand_core 0.6.4",
  "subtle",
+]
+
+[[package]]
+name = "hangupholder"
+version = "0.1.0"
+dependencies = [
+ "toyos",
 ]
 
 [[package]]
@@ -1635,33 +1267,12 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "e17592d60ebacc7d5e169f4663c5f84f9161cc90328abcfe8456f41e4dfcb284"
 
 [[package]]
-name = "hex"
-version = "0.4.3"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "7f24254aa9a54b5c858eaee2f5bccdb46aaf0e486a595ed5fd8f86ba55232a70"
-
-[[package]]
-name = "hex-literal"
-version = "1.1.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "e712f64ec3850b98572bffac52e2c6f282b29fe6c5fa6d42334b30be438d95c1"
-
-[[package]]
 name = "hkdf"
 version = "0.12.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "7b5f8eb2ad728638ea2c7d47a21db23b7b58a72ed6a38256b8a1849f15fbbdf7"
 dependencies = [
  "hmac 0.12.1",
-]
-
-[[package]]
-name = "hkdf"
-version = "0.13.0-rc.5"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "cbb55385998ae66b8d2d5143c05c94b9025ab863966f0c94ce7a5fde30105092"
-dependencies = [
- "hmac 0.13.0-rc.5",
 ]
 
 [[package]]
@@ -1709,9 +1320,20 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "8655f91cd07f2b9d0c24137bd650fe69617773435ee5ec83022377777ce65ef1"
 dependencies = [
  "ctutils",
- "subtle",
  "typenum",
- "zeroize",
+]
+
+[[package]]
+name = "i219"
+version = "0.0.0"
+dependencies = [
+ "toyos",
+ "toyos-abi",
+ "toyos-device-memory",
+ "toyos-i219",
+ "toyos-link",
+ "toyos-manifest",
+ "toyos-pci-claim",
 ]
 
 [[package]]
@@ -1771,8 +1393,7 @@ version = "0.1.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "879f10e63c20629ecabbb64a8010319738c66a5cd0c29b02d63d272b03751d01"
 dependencies = [
- "block-padding 0.3.3",
- "generic-array 0.14.7",
+ "generic-array",
 ]
 
 [[package]]
@@ -1781,8 +1402,16 @@ version = "0.2.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "4250ce6452e92010fdf7268ccc5d14faa80bb12fc741938534c58f16804e03c7"
 dependencies = [
- "block-padding 0.4.2",
  "hybrid-array",
+]
+
+[[package]]
+name = "inputsink"
+version = "0.1.0"
+dependencies = [
+ "toyos",
+ "toyos-abi",
+ "toyos-input",
 ]
 
 [[package]]
@@ -1792,47 +1421,6 @@ dependencies = [
  "toyos",
  "toyos-abi",
  "toyos-inspect",
-]
-
-[[package]]
-name = "internal-russh-forked-ssh-key"
-version = "0.6.18+upstream-0.6.7"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "25f8a978272e3cbdf4768f7363eb1c8e1e6ba63c52a3ed05e29e222da4aec7cb"
-dependencies = [
- "argon2",
- "bcrypt-pbkdf",
- "crypto-bigint 0.7.3",
- "ecdsa 0.17.0-rc.16",
- "ed25519-dalek 3.0.0-pre.6",
- "hex",
- "hmac 0.13.0-rc.5",
- "num-bigint-dig",
- "p256 0.14.0-rc.8",
- "p384 0.14.0-rc.8",
- "p521",
- "rand_core 0.10.0",
- "rsa",
- "sec1 0.8.1",
- "sha1 0.11.0-rc.5",
- "sha2 0.11.0-rc.5",
- "signature 3.0.0-rc.10",
- "ssh-cipher",
- "ssh-encoding",
- "subtle",
- "zeroize",
-]
-
-[[package]]
-name = "internal-russh-num-bigint"
-version = "0.5.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "ae8e22120c32fb4d19ec55fba35015f57095cd95a2e3b732e44457f5915b2ee8"
-dependencies = [
- "num-integer",
- "num-traits",
- "rand 0.10.0",
- "rand_core 0.10.0",
 ]
 
 [[package]]
@@ -1963,6 +1551,7 @@ dependencies = [
  "toyos-amdvi",
  "toyos-blackbox",
  "toyos-bootmap",
+ "toyos-devicepath",
  "toyos-dma",
  "toyos-elf",
  "toyos-gicv3",
@@ -1970,6 +1559,7 @@ dependencies = [
  "toyos-microcode",
  "toyos-pci",
  "toyos-phys",
+ "toyos-proclife",
  "toyos-quiesce",
  "toyos-random",
  "toyos-rootimage",
@@ -2009,9 +1599,6 @@ name = "lazy_static"
 version = "1.5.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "bbd2bcb4c963f2ddae06a2efc7e9f3591312473c50c6685e1f298068316e66fe"
-dependencies = [
- "spin",
-]
 
 [[package]]
 name = "leb128fmt"
@@ -2092,6 +1679,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "logout"
+version = "0.1.0"
+dependencies = [
+ "toyos",
+ "toyos-session",
+]
+
+[[package]]
 name = "loom"
 version = "0.7.2"
 source = "git+https://github.com/ToyOSOrg/loom?branch=toyos#dfe3797296a16f0741b9b23364bf016164a39534"
@@ -2117,12 +1712,6 @@ checksum = "d1525a2a28c7f4fa0fc98bb91ae755d1e2d1505079e05539e35bc876b5d65ae9"
 dependencies = [
  "regex-automata",
 ]
-
-[[package]]
-name = "md5"
-version = "0.7.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "490cc448043f947bae3cbee9c203358d62dbee0db12107a74be5c30ccfd09771"
 
 [[package]]
 name = "memchr"
@@ -2161,7 +1750,7 @@ dependencies = [
 [[package]]
 name = "mio"
 version = "1.2.0"
-source = "git+https://github.com/ToyOSOrg/mio?branch=toyos#9f34d36c2eb0f747bbe79be613bf5ee943a5c50d"
+source = "git+https://github.com/ToyOSOrg/mio?branch=toyos#fe42def7bec9a1f01bfff764256fcdce77e7f7e1"
 dependencies = [
  "libc",
  "toyos-abi",
@@ -2229,12 +1818,10 @@ version = "0.0.0"
 dependencies = [
  "toyos",
  "toyos-abi",
- "toyos-device-memory",
  "toyos-dhcp",
  "toyos-dns",
- "toyos-i219",
  "toyos-inspect",
- "toyos-manifest",
+ "toyos-link",
  "toyos-mdns",
  "toyos-net-ip",
  "toyos-net-node",
@@ -2242,21 +1829,7 @@ dependencies = [
  "toyos-net-tcp",
  "toyos-net-udp",
  "toyos-net-wire",
- "toyos-pci-claim",
  "toyos-tco",
- "toyos-virtio",
-]
-
-[[package]]
-name = "nix"
-version = "0.31.2"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "5d6d0705320c1e6ba1d912b5e37cf18071b6c2e9b7fa8215a1e8a7651966f5d3"
-dependencies = [
- "bitflags 2.11.0",
- "cfg-if",
- "cfg_aliases",
- "libc",
 ]
 
 [[package]]
@@ -2288,22 +1861,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "num-bigint-dig"
-version = "0.8.6"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "e661dda6640fad38e827a6d4a310ff4763082116fe217f279885c97f511bb0b7"
-dependencies = [
- "lazy_static",
- "libm",
- "num-integer",
- "num-iter",
- "num-traits",
- "rand 0.8.5",
- "serde",
- "smallvec",
-]
-
-[[package]]
 name = "num-conv"
 version = "0.2.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2326,17 +1883,6 @@ version = "0.1.46"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "7969661fd2958a5cb096e56c8e1ad0444ac2bbcd0061bd28660485a44879858f"
 dependencies = [
- "num-traits",
-]
-
-[[package]]
-name = "num-iter"
-version = "0.1.45"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "1429034a0490724d0075ebb2bc9e875d6503c3cf69e235a8941aa757d83ef5bf"
-dependencies = [
- "autocfg",
- "num-integer",
  "num-traits",
 ]
 
@@ -2751,12 +2297,36 @@ dependencies = [
 name = "osbench"
 version = "0.1.0"
 dependencies = [
+ "getrandom 0.3.4",
+ "inspect",
  "libc",
  "miniz_oxide",
+ "osbench-lan",
+ "osbench-rules",
+ "rustls",
+ "syn 2.0.117",
  "toyos",
  "toyos-abi",
+ "toyos-crypto",
+ "toyos-inspect",
  "toyos-trace",
+ "ureq",
 ]
+
+[[package]]
+name = "osbench-compare"
+version = "0.1.0"
+
+[[package]]
+name = "osbench-lan"
+version = "0.1.0"
+dependencies = [
+ "libc",
+]
+
+[[package]]
+name = "osbench-rules"
+version = "0.1.0"
 
 [[package]]
 name = "p256"
@@ -2764,23 +2334,10 @@ version = "0.13.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "c9863ad85fa8f4460f9c48cb909d38a0d689dba1f6f6988a5e3e0d31071bcd4b"
 dependencies = [
- "ecdsa 0.16.9",
- "elliptic-curve 0.13.8",
- "primeorder 0.13.6",
+ "ecdsa",
+ "elliptic-curve",
+ "primeorder",
  "sha2 0.10.9",
-]
-
-[[package]]
-name = "p256"
-version = "0.14.0-rc.8"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "44f0a10fe314869359cb2901342b045f4e5a962ef9febc006f03d2a8c848fe4c"
-dependencies = [
- "ecdsa 0.17.0-rc.16",
- "elliptic-curve 0.14.0-rc.29",
- "primefield",
- "primeorder 0.14.0-rc.8",
- "sha2 0.11.0-rc.5",
 ]
 
 [[package]]
@@ -2789,56 +2346,18 @@ version = "0.13.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "fe42f1670a52a47d448f14b6a5c61dd78fce51856e68edaa38f7ae3a46b8d6b6"
 dependencies = [
- "ecdsa 0.16.9",
- "elliptic-curve 0.13.8",
- "primeorder 0.13.6",
+ "ecdsa",
+ "elliptic-curve",
+ "primeorder",
  "sha2 0.10.9",
 ]
 
 [[package]]
-name = "p384"
-version = "0.14.0-rc.8"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "b079e66810c55ab3d6ba424e056dc4aefcdb8046c8c3f3816142edbdd7af7721"
+name = "pagerprobe"
+version = "0.1.0"
 dependencies = [
- "ecdsa 0.17.0-rc.16",
- "elliptic-curve 0.14.0-rc.29",
- "fiat-crypto 0.3.0",
- "primefield",
- "primeorder 0.14.0-rc.8",
- "sha2 0.11.0-rc.5",
-]
-
-[[package]]
-name = "p521"
-version = "0.14.0-rc.8"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "9eecc34c4c6e6596d5271fecf90ac4f16593fa198e77282214d0c22736aa9266"
-dependencies = [
- "base16ct 1.0.0",
- "ecdsa 0.17.0-rc.16",
- "elliptic-curve 0.14.0-rc.29",
- "primefield",
- "primeorder 0.14.0-rc.8",
- "sha2 0.11.0-rc.5",
-]
-
-[[package]]
-name = "pageant"
-version = "0.2.0"
-source = "git+https://github.com/ToyOSOrg/russh?branch=toyos#389804d3b9908250282746c934c58c059b88fb7e"
-dependencies = [
- "byteorder",
- "bytes",
- "delegate",
- "futures",
- "log",
- "rand 0.10.0",
- "sha2 0.10.9",
- "thiserror 2.0.18",
- "tokio",
- "windows",
- "windows-strings",
+ "toyos",
+ "toyos-abi",
 ]
 
 [[package]]
@@ -2848,27 +2367,6 @@ dependencies = [
  "filepicker-api",
  "toyos-font",
  "toyos-window",
-]
-
-[[package]]
-name = "password-hash"
-version = "0.5.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "346f04948ba92c43e8469c1ee6736c7563d71012b17d40745260fe106aac2166"
-dependencies = [
- "base64ct",
- "rand_core 0.6.4",
- "subtle",
-]
-
-[[package]]
-name = "pbkdf2"
-version = "0.12.2"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "f8ed6a7761f76e3b9f92dfb0a60a6a6477c61024b775147ff0973a02653abaf2"
-dependencies = [
- "digest 0.10.7",
- "hmac 0.12.1",
 ]
 
 [[package]]
@@ -2920,15 +2418,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "pem-rfc7468"
-version = "1.0.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "a6305423e0e7738146434843d1694d621cce767262b2a86910beab705e4493d9"
-dependencies = [
- "base64ct",
-]
-
-[[package]]
 name = "percent-encoding"
 version = "2.3.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2961,52 +2450,13 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "a89322df9ebe1c1578d689c92318e070967d1042b512afbe49518723f4e6d5cd"
 
 [[package]]
-name = "pkcs1"
-version = "0.8.0-rc.4"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "986d2e952779af96ea048f160fd9194e1751b4faea78bcf3ceb456efe008088e"
-dependencies = [
- "der 0.8.0",
- "spki 0.8.0-rc.4",
-]
-
-[[package]]
-name = "pkcs5"
-version = "0.8.0-rc.13"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "c5a777c6e26664bc9504b3ce3f6133f8f20d9071f130a4f9fcbd3186959d8dd6"
-dependencies = [
- "aes 0.9.0-rc.4",
- "aes-gcm 0.11.0-rc.3",
- "cbc 0.2.0-rc.4",
- "der 0.8.0",
- "pbkdf2 0.13.0-rc.9",
- "rand_core 0.10.0",
- "scrypt",
- "sha2 0.11.0-rc.5",
- "spki 0.8.0-rc.4",
-]
-
-[[package]]
 name = "pkcs8"
 version = "0.10.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "f950b2377845cebe5cf8b5165cb3cc1a5e0fa5cfa3e1f7f55707d8fd82e0a7b7"
 dependencies = [
- "der 0.7.10",
- "spki 0.7.3",
-]
-
-[[package]]
-name = "pkcs8"
-version = "0.11.0-rc.11"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "12922b6296c06eb741b02d7b5161e3aaa22864af38dfa025a1a3ba3f68c84577"
-dependencies = [
- "der 0.8.0",
- "pkcs5",
- "rand_core 0.10.0",
- "spki 0.8.0-rc.4",
+ "der",
+ "spki",
 ]
 
 [[package]]
@@ -3016,9 +2466,8 @@ dependencies = [
  "flate2",
  "tar",
  "toyos",
+ "toyos-crypto",
  "toyos-manifest",
- "toyos-sha2",
- "toyos-sha2-hw",
  "toyos-tmpdir",
 ]
 
@@ -3056,7 +2505,7 @@ checksum = "8159bd90725d2df49889a078b54f4f79e87f1f8a8444194cdca81d38f5393abf"
 dependencies = [
  "cpufeatures 0.2.17",
  "opaque-debug",
- "universal-hash 0.5.1",
+ "universal-hash",
 ]
 
 [[package]]
@@ -3068,18 +2517,7 @@ dependencies = [
  "cfg-if",
  "cpufeatures 0.2.17",
  "opaque-debug",
- "universal-hash 0.5.1",
-]
-
-[[package]]
-name = "polyval"
-version = "0.7.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "7dfc63250416fea14f5749b90725916a6c903f599d51cb635aa7a52bfd03eede"
-dependencies = [
- "cpubits",
- "cpufeatures 0.3.0",
- "universal-hash 0.6.1",
+ "universal-hash",
 ]
 
 [[package]]
@@ -3108,35 +2546,12 @@ dependencies = [
 ]
 
 [[package]]
-name = "primefield"
-version = "0.14.0-rc.8"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "c6543f5eec854fbf74ba5ef651fbdc9408919b47c3e1526623687135c16d12e9"
-dependencies = [
- "crypto-bigint 0.7.3",
- "crypto-common 0.2.1",
- "rand_core 0.10.0",
- "rustcrypto-ff",
- "subtle",
- "zeroize",
-]
-
-[[package]]
 name = "primeorder"
 version = "0.13.6"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "353e1ca18966c16d9deb1c69278edbc5f194139612772bd9537af60ac231e1e6"
 dependencies = [
- "elliptic-curve 0.13.8",
-]
-
-[[package]]
-name = "primeorder"
-version = "0.14.0-rc.8"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "569d9ad6ef822bb0322c7e7d84e5e286244050bd5246cac4c013535ae91c2c90"
-dependencies = [
- "elliptic-curve 0.14.0-rc.29",
+ "elliptic-curve",
 ]
 
 [[package]]
@@ -3216,17 +2631,6 @@ checksum = "b9ef1d0d795eb7d84685bca4f72f3649f064e6641543d3a8c415898726a57b41"
 dependencies = [
  "rand_chacha 0.9.0",
  "rand_core 0.9.5",
-]
-
-[[package]]
-name = "rand"
-version = "0.10.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "bc266eb313df6c5c09c1c7b1fbe2510961e5bcd3add930c1e31f7ed9da0feff8"
-dependencies = [
- "chacha20 0.10.0",
- "getrandom 0.4.2",
- "rand_core 0.10.0",
 ]
 
 [[package]]
@@ -3345,16 +2749,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "rfc6979"
-version = "0.5.0-rc.5"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "23a3127ee32baec36af75b4107082d9bd823501ec14a4e016be4b6b37faa74ae"
-dependencies = [
- "hmac 0.13.0-rc.5",
- "subtle",
-]
-
-[[package]]
 name = "ring"
 version = "0.17.14"
 source = "git+https://github.com/ToyOSOrg/ring?branch=toyos-0.17.14#34818c4599e7d6233cf42e80de5cd309190e523c"
@@ -3368,25 +2762,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "rsa"
-version = "0.10.0-rc.17"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "87ed3e93fc7e473e464b9726f4759659e72bc8665e4b8ea227547024f416d905"
-dependencies = [
- "const-oid 0.10.2",
- "crypto-bigint 0.7.3",
- "crypto-primes",
- "digest 0.11.1",
- "pkcs1",
- "pkcs8 0.11.0-rc.11",
- "rand_core 0.10.0",
- "sha2 0.11.0-rc.5",
- "signature 3.0.0-rc.10",
- "spki 0.8.0-rc.4",
- "zeroize",
-]
-
-[[package]]
 name = "rubato"
 version = "0.16.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -3394,95 +2769,6 @@ checksum = "5258099699851cfd0082aeb645feb9c084d9a5e1f1b8d5372086b989fc5e56a1"
 dependencies = [
  "num-integer",
  "num-traits",
-]
-
-[[package]]
-name = "russh"
-version = "0.60.0"
-source = "git+https://github.com/ToyOSOrg/russh?branch=toyos#389804d3b9908250282746c934c58c059b88fb7e"
-dependencies = [
- "aes 0.8.4",
- "aes-gcm 0.10.3",
- "bitflags 2.11.0",
- "block-padding 0.3.3",
- "byteorder",
- "bytes",
- "cbc 0.1.2",
- "chacha20 0.9.1",
- "cipher 0.5.1",
- "crypto-bigint 0.7.3",
- "ctr 0.9.2",
- "curve25519-dalek 5.0.0-pre.6",
- "data-encoding",
- "delegate",
- "der 0.8.0",
- "digest 0.10.7",
- "ecdsa 0.17.0-rc.16",
- "ed25519-dalek 3.0.0-pre.6",
- "elliptic-curve 0.14.0-rc.29",
- "enum_dispatch",
- "flate2",
- "futures",
- "generic-array 1.3.5",
- "getrandom 0.2.17",
- "hex-literal",
- "hmac 0.12.1",
- "inout 0.1.4",
- "internal-russh-forked-ssh-key",
- "internal-russh-num-bigint",
- "log",
- "md5",
- "ml-kem",
- "module-lattice",
- "p256 0.14.0-rc.8",
- "p384 0.14.0-rc.8",
- "p521",
- "pageant",
- "pbkdf2 0.12.2",
- "pkcs1",
- "pkcs5",
- "pkcs8 0.11.0-rc.11",
- "poly1305",
- "polyval 0.7.1",
- "rand 0.10.0",
- "rand_core 0.10.0",
- "rsa",
- "russh-cryptovec",
- "russh-util",
- "sec1 0.8.1",
- "sha1 0.10.6",
- "sha2 0.10.9",
- "signature 3.0.0-rc.10",
- "spki 0.8.0-rc.4",
- "ssh-encoding",
- "subtle",
- "thiserror 2.0.18",
- "tokio",
- "typenum",
- "universal-hash 0.6.1",
- "zeroize",
-]
-
-[[package]]
-name = "russh-cryptovec"
-version = "0.59.0"
-source = "git+https://github.com/ToyOSOrg/russh?branch=toyos#389804d3b9908250282746c934c58c059b88fb7e"
-dependencies = [
- "log",
- "nix",
- "ssh-encoding",
- "windows-sys 0.61.2",
-]
-
-[[package]]
-name = "russh-util"
-version = "0.52.0"
-source = "git+https://github.com/ToyOSOrg/russh?branch=toyos#389804d3b9908250282746c934c58c059b88fb7e"
-dependencies = [
- "chrono",
- "tokio",
- "wasm-bindgen",
- "wasm-bindgen-futures",
 ]
 
 [[package]]
@@ -3510,27 +2796,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "cfcb3a22ef46e85b45de6ee7e79d063319ebb6594faafcf1c225ea92ab6e9b92"
 dependencies = [
  "semver",
-]
-
-[[package]]
-name = "rustcrypto-ff"
-version = "0.14.0-rc.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "fd2a8adb347447693cd2ba0d218c4b66c62da9b0a5672b17b981e4291ec65ff6"
-dependencies = [
- "rand_core 0.10.0",
- "subtle",
-]
-
-[[package]]
-name = "rustcrypto-group"
-version = "0.14.0-rc.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "369f9b61aa45933c062c9f6b5c3c50ab710687eca83dd3802653b140b43f85ed"
-dependencies = [
- "rand_core 0.10.0",
- "rustcrypto-ff",
- "subtle",
 ]
 
 [[package]]
@@ -3638,7 +2903,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "e03ed5b54ed5fcc8e016cd94301416bc2c01c05c87a6742b97468337c8804598"
 dependencies = [
  "cfg-if",
- "pbkdf2 0.13.0-rc.9",
+ "pbkdf2",
  "salsa20",
  "sha2 0.11.0-rc.5",
 ]
@@ -3649,24 +2914,10 @@ version = "0.7.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "d3e97a565f76233a6003f9f5c54be1d9c5bdfa3eccfb189469f11ec4901c47dc"
 dependencies = [
- "base16ct 0.2.0",
- "der 0.7.10",
- "generic-array 0.14.7",
- "pkcs8 0.10.2",
- "subtle",
- "zeroize",
-]
-
-[[package]]
-name = "sec1"
-version = "0.8.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "d56d437c2f19203ce5f7122e507831de96f3d2d4d3be5af44a0b0a09d8a80e4d"
-dependencies = [
- "base16ct 1.0.0",
- "ctutils",
- "der 0.8.0",
- "hybrid-array",
+ "base16ct",
+ "der",
+ "generic-array",
+ "pkcs8",
  "subtle",
  "zeroize",
 ]
@@ -3730,35 +2981,12 @@ dependencies = [
 ]
 
 [[package]]
-name = "serdect"
-version = "0.4.2"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "9af4a3e75ebd5599b30d4de5768e00b5095d518a79fefc3ecbaf77e665d1ec06"
+name = "session"
+version = "0.1.0"
 dependencies = [
- "base16ct 1.0.0",
- "serde",
-]
-
-[[package]]
-name = "sha1"
-version = "0.10.6"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "e3bf829a2d51ab4a5ddf1352d8470c140cadc8301b2ae1789db023f01cedd6ba"
-dependencies = [
- "cfg-if",
- "cpufeatures 0.2.17",
- "digest 0.10.7",
-]
-
-[[package]]
-name = "sha1"
-version = "0.11.0-rc.5"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "3b167252f3c126be0d8926639c4c4706950f01445900c4b3db0fd7e89fcb750a"
-dependencies = [
- "cfg-if",
- "cpufeatures 0.2.17",
- "digest 0.11.1",
+ "toyos",
+ "toyos-abi",
+ "toyos-session",
 ]
 
 [[package]]
@@ -3807,7 +3035,7 @@ name = "shell"
 version = "0.1.0"
 dependencies = [
  "toyos",
- "toyos-manifest",
+ "toyos-abi",
 ]
 
 [[package]]
@@ -3824,16 +3052,6 @@ checksum = "77549399552de45a898a580c1b41d445bf730df867cc44e6c0233bbc4b8329de"
 dependencies = [
  "digest 0.10.7",
  "rand_core 0.6.4",
-]
-
-[[package]]
-name = "signature"
-version = "3.0.0-rc.10"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "7f1880df446116126965eeec169136b2e0251dba37c6223bcc819569550edea3"
-dependencies = [
- "digest 0.11.1",
- "rand_core 0.10.0",
 ]
 
 [[package]]
@@ -3971,68 +3189,34 @@ dependencies = [
 ]
 
 [[package]]
-name = "spin"
-version = "0.9.8"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "6980e8d7511241f8acf4aebddbb1ff938df5eebe98691418c4468d0b72a96a67"
-
-[[package]]
 name = "spki"
 version = "0.7.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "d91ed6c858b01f942cd56b37a94b3e0a1798290327d1236e4d9cf4eaca44d29d"
 dependencies = [
  "base64ct",
- "der 0.7.10",
-]
-
-[[package]]
-name = "spki"
-version = "0.8.0-rc.4"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "8baeff88f34ed0691978ec34440140e1572b68c7dd4a495fd14a3dc1944daa80"
-dependencies = [
- "base64ct",
- "der 0.8.0",
-]
-
-[[package]]
-name = "ssh-cipher"
-version = "0.2.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "caac132742f0d33c3af65bfcde7f6aa8f62f0e991d80db99149eb9d44708784f"
-dependencies = [
- "aes 0.8.4",
- "aes-gcm 0.10.3",
- "cbc 0.1.2",
- "chacha20 0.9.1",
- "cipher 0.4.4",
- "ctr 0.9.2",
- "poly1305",
- "ssh-encoding",
- "subtle",
-]
-
-[[package]]
-name = "ssh-encoding"
-version = "0.2.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "eb9242b9ef4108a78e8cd1a2c98e193ef372437f8c22be363075233321dd4a15"
-dependencies = [
- "base64ct",
- "bytes",
- "pem-rfc7468 0.7.0",
- "sha2 0.10.9",
+ "der",
 ]
 
 [[package]]
 name = "sshserver"
 version = "0.0.0"
 dependencies = [
- "rand 0.10.0",
- "russh",
- "tokio",
+ "getrandom 0.3.4",
+ "toyos",
+ "toyos-abi",
+ "toyos-crypto",
+ "toyos-session",
+ "toyos-ssh",
  "toyos-tmpdir",
+]
+
+[[package]]
+name = "starveling"
+version = "0.1.0"
+dependencies = [
+ "toyos",
+ "toyos-abi",
 ]
 
 [[package]]
@@ -4048,6 +3232,7 @@ dependencies = [
  "diskserver",
  "toyos",
  "toyos-abi",
+ "toyos-blockdev",
  "toyos-blockring",
  "toyos-gpt",
  "toyos-logstream",
@@ -4055,6 +3240,7 @@ dependencies = [
  "toyos-osrelease",
  "toyos-pci-claim",
  "toyos-quiesce",
+ "toyos-session",
  "toyos-supervisor",
  "toyos-swap",
  "toyos-update",
@@ -4141,6 +3327,7 @@ name = "terminal"
 version = "0.1.0"
 dependencies = [
  "toyos",
+ "toyos-abi",
  "toyos-font",
  "toyos-window",
 ]
@@ -4151,7 +3338,21 @@ version = "0.1.0"
 dependencies = [
  "toyos",
  "toyos-abi",
+ "toyos-session",
  "toyos-tco",
+]
+
+[[package]]
+name = "tgl-display"
+version = "0.0.0"
+dependencies = [
+ "toyos",
+ "toyos-abi",
+ "toyos-device-memory",
+ "toyos-display-output",
+ "toyos-manifest",
+ "toyos-pci-claim",
+ "toyos-tgl-display",
 ]
 
 [[package]]
@@ -4221,31 +3422,6 @@ name = "time-core"
 version = "0.1.9"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "9e1c906769ad99c88eaa54e728060edef082f8e358ff32030cb7c7d315e81109"
-
-[[package]]
-name = "tokio"
-version = "1.51.1"
-source = "git+https://github.com/ToyOSOrg/tokio?branch=toyos#902fb97416c387396f962955f1b64dac20e855ec"
-dependencies = [
- "bytes",
- "libc",
- "mio",
- "pin-project-lite",
- "socket2",
- "tokio-macros",
- "windows-sys 0.61.2",
-]
-
-[[package]]
-name = "tokio-macros"
-version = "2.7.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "385a6cb71ab9ab790c5fe8d67f1645e6c450a7ce006a33de03daa956cf70a496"
-dependencies = [
- "proc-macro2",
- "quote",
- "syn 2.0.117",
-]
 
 [[package]]
 name = "toml"
@@ -4385,7 +3561,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "toyos-ax2xx"
+version = "0.1.0"
+
+[[package]]
 name = "toyos-blackbox"
+version = "0.1.0"
+
+[[package]]
+name = "toyos-blockdev"
 version = "0.1.0"
 
 [[package]]
@@ -4404,6 +3588,7 @@ dependencies = [
 name = "toyos-blockserve"
 version = "0.1.0"
 dependencies = [
+ "bcachefs",
  "toyos",
  "toyos-abi",
  "toyos-blockhold",
@@ -4427,18 +3612,21 @@ dependencies = [
  "fatfs",
  "flate2",
  "getrandom 0.3.4",
- "gpt",
  "iced-x86",
  "kernel",
  "libc",
  "libm",
+ "osbench-rules",
  "pem",
+ "rustls",
  "serde",
  "serde_json",
  "tar",
  "toml",
  "toyos-abi",
  "toyos-blackbox",
+ "toyos-blockdev",
+ "toyos-crypto",
  "toyos-elf",
  "toyos-fat32",
  "toyos-fat32-check",
@@ -4454,7 +3642,7 @@ dependencies = [
  "toyos-osrelease",
  "toyos-parity",
  "toyos-quiesce",
- "toyos-sha2-hw",
+ "toyos-session",
  "toyos-ssh",
  "toyos-swap",
  "toyos-symbols",
@@ -4472,19 +3660,19 @@ dependencies = [
 name = "toyos-crypto"
 version = "0.1.0"
 dependencies = [
- "aes-gcm 0.10.3",
- "chacha20 0.9.1",
+ "aes-gcm",
+ "chacha20",
  "chacha20poly1305",
- "ed25519-dalek 2.2.0",
- "fiat-crypto 0.3.0",
+ "ed25519-dalek",
  "ml-kem",
  "num-bigint",
- "p256 0.13.2",
- "p384 0.13.1",
+ "p256",
+ "p384",
  "poly1305",
  "rcgen",
  "ring",
  "rustls",
+ "scrypt",
  "serde_json",
  "sha2 0.10.9",
  "x25519-dalek",
@@ -4505,6 +3693,13 @@ name = "toyos-device-memory"
 version = "0.1.0"
 
 [[package]]
+name = "toyos-devicepath"
+version = "0.1.0"
+dependencies = [
+ "toyos-gpt",
+]
+
+[[package]]
 name = "toyos-dhcp"
 version = "0.1.0"
 dependencies = [
@@ -4514,7 +3709,7 @@ dependencies = [
 ]
 
 [[package]]
-name = "toyos-disk"
+name = "toyos-display-output"
 version = "0.1.0"
 
 [[package]]
@@ -4545,6 +3740,7 @@ name = "toyos-fat32"
 version = "0.1.0"
 dependencies = [
  "fatfs",
+ "toyos-blockdev",
  "toyos-fat32-check",
  "toyos-tmpdir",
  "toyos-wallclock",
@@ -4594,7 +3790,7 @@ name = "toyos-icon"
 version = "0.1.0"
 dependencies = [
  "libm",
- "toyos-sha2-hw",
+ "toyos-crypto",
 ]
 
 [[package]]
@@ -4637,6 +3833,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "toyos-link"
+version = "0.1.0"
+dependencies = [
+ "loom",
+ "toyos",
+ "toyos-abi",
+]
+
+[[package]]
 name = "toyos-logstream"
 version = "0.1.0"
 dependencies = [
@@ -4647,6 +3852,7 @@ dependencies = [
 name = "toyos-manifest"
 version = "0.1.0"
 dependencies = [
+ "toyos",
  "toyos-abi",
 ]
 
@@ -4669,6 +3875,7 @@ dependencies = [
  "toyos-quiesce",
  "toyos-tco",
  "toyos-tmpdir",
+ "toyos-update",
 ]
 
 [[package]]
@@ -4728,6 +3935,7 @@ version = "0.1.0"
 dependencies = [
  "etherparse",
  "pcap-file",
+ "toyos-net-ip",
  "toyos-net-shard",
  "toyos-net-tcp",
  "toyos-net-wire",
@@ -4744,6 +3952,9 @@ dependencies = [
 [[package]]
 name = "toyos-net-wire"
 version = "0.1.0"
+dependencies = [
+ "toyos-crypto",
+]
 
 [[package]]
 name = "toyos-osrelease"
@@ -4773,6 +3984,13 @@ dependencies = [
 [[package]]
 name = "toyos-phys"
 version = "0.1.0"
+
+[[package]]
+name = "toyos-proclife"
+version = "0.1.0"
+dependencies = [
+ "toyos-abi",
+]
 
 [[package]]
 name = "toyos-ps2"
@@ -4812,17 +4030,10 @@ name = "toyos-scsi"
 version = "0.1.0"
 
 [[package]]
-name = "toyos-sha2"
+name = "toyos-session"
 version = "0.1.0"
 dependencies = [
- "sha2 0.10.9",
-]
-
-[[package]]
-name = "toyos-sha2-hw"
-version = "0.1.0"
-dependencies = [
- "toyos-sha2",
+ "toyos",
 ]
 
 [[package]]
@@ -4852,7 +4063,11 @@ dependencies = [
 name = "toyos-supervisor"
 version = "0.1.0"
 dependencies = [
+ "toyos",
  "toyos-abi",
+ "toyos-blockring",
+ "toyos-devicepath",
+ "toyos-gpt",
  "toyos-manifest",
 ]
 
@@ -4860,8 +4075,8 @@ dependencies = [
 name = "toyos-swap"
 version = "0.1.0"
 dependencies = [
+ "toyos-crypto",
  "toyos-manifest",
- "toyos-sha2-hw",
 ]
 
 [[package]]
@@ -4878,6 +4093,13 @@ dependencies = [
 [[package]]
 name = "toyos-tco"
 version = "0.1.0"
+
+[[package]]
+name = "toyos-tgl-display"
+version = "0.1.0"
+dependencies = [
+ "toyos-device-memory",
+]
 
 [[package]]
 name = "toyos-tmpdir"
@@ -4898,9 +4120,9 @@ version = "0.1.0"
 name = "toyos-update"
 version = "0.1.0"
 dependencies = [
- "ed25519-dalek 2.2.0",
- "toyos-sha2",
- "toyos-sha2-hw",
+ "ed25519-dalek",
+ "ring",
+ "toyos-crypto",
  "toyos-wallclock",
 ]
 
@@ -4969,6 +4191,16 @@ dependencies = [
  "toyos-abi",
  "toyos-font",
  "toyos-keymap",
+]
+
+[[package]]
+name = "toyos-wlan-handshake"
+version = "0.1.0"
+dependencies = [
+ "aes",
+ "ring",
+ "toyos-crypto",
+ "toyos-ieee80211",
 ]
 
 [[package]]
@@ -5083,16 +4315,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "universal-hash"
-version = "0.6.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "f4987bdc12753382e0bec4a65c50738ffaabc998b9cdd1f952fb5f39b0048a96"
-dependencies = [
- "crypto-common 0.2.1",
- "ctutils",
-]
-
-[[package]]
 name = "untrusted"
 version = "0.9.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -5104,9 +4326,9 @@ version = "0.1.0"
 dependencies = [
  "diskserver",
  "toyos",
- "toyos-disk",
+ "toyos-blockdev",
+ "toyos-crypto",
  "toyos-fat32",
- "toyos-sha2-hw",
  "toyos-update",
 ]
 
@@ -5114,10 +4336,10 @@ dependencies = [
 name = "update-copies"
 version = "0.1.0"
 dependencies = [
- "toyos-disk",
+ "toyos-blockdev",
+ "toyos-crypto",
  "toyos-fat32",
  "toyos-fat32-check",
- "toyos-sha2-hw",
  "toyos-update",
 ]
 
@@ -5207,6 +4429,19 @@ name = "version_check"
 version = "0.9.5"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "0b928f33d975fc6ad9f86c8f283853ad26bdd5b10b7f1542aa2fa15e2289105a"
+
+[[package]]
+name = "virtio-net"
+version = "0.0.0"
+dependencies = [
+ "toyos",
+ "toyos-abi",
+ "toyos-device-memory",
+ "toyos-link",
+ "toyos-manifest",
+ "toyos-pci-claim",
+ "toyos-virtio",
+]
 
 [[package]]
 name = "walkdir"
@@ -5774,7 +5009,7 @@ checksum = "589f6da84c646204747d1270a2a5661ea66ed1cced2631d546fdfb155959f9ec"
 [[package]]
 name = "winit"
 version = "0.30.13"
-source = "git+https://github.com/ToyOSOrg/winit?branch=toyos-0.30.13#48c7022a44c7416107648d4cf8be4fdd042d0722"
+source = "git+https://github.com/ToyOSOrg/winit?branch=toyos-0.30.13#0121752b7c48bc640e221e3cebedefea3796609a"
 dependencies = [
  "ahash",
  "android-activity",
@@ -5921,7 +5156,7 @@ version = "2.0.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "c7e468321c81fb07fa7f4c636c3972b9100f0346e5b6a9f2bd0603a52f7ed277"
 dependencies = [
- "curve25519-dalek 4.1.3",
+ "curve25519-dalek",
  "rand_core 0.6.4",
  "serde",
  "zeroize",
@@ -6010,12 +5245,6 @@ dependencies = [
  "quote",
  "syn 2.0.117",
 ]
-
-[[package]]
-name = "zlib-rs"
-version = "0.6.8"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "b268e58e7c693d7c271f93ffc4ba3b380412554231c85bf61ca7af91042a4112"
 
 [[package]]
 name = "zmij"

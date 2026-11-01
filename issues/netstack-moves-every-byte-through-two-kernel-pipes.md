@@ -9,8 +9,8 @@ opened: 2026-10-11
 A received byte is copied three times between the card's buffer and the
 application's: netstack writes it into its connection's heap ring
 (`system/netstack/shard/tcp/src/ring.rs`), then into the client's pipe with a
-`SYS_WRITE` whose copy runs under the one global `PIPES` lock with preemption
-off (`kernel/src/pipe.rs`, `issues/the-global-pipe-lock-spans-a-user-copy.md`),
+`SYS_WRITE` whose copy runs under that pipe's lock with preemption off
+(`kernel/src/pipe.rs`, `issues/a-pipes-lock-spans-a-user-copy-and-its-first-allocation.md`),
 and the client's `SYS_READ` copies it out under the same lock. A sent byte is
 copied into the pipe, out of it into netstack's stack chunk, into the
 connection's send ring, and into the frame. Both buffers hold the same bytes: a
@@ -56,10 +56,11 @@ The design and its roast are PR #863's body.
   in loom.
 - Stage 3, done (PR #905): a TCP stream, connected or accepted, is one
   region whose two rings are [tcp]'s buffers and the connection it was opened
-  on, which then carries only doorbells and the hang-up; std, libc, mio and
+  on, which then carries only exports; its doorbells and its holders' leaving
+  are events; std, libc, mio and
   socket2 reach it through `toyos::net::stream`, and `SYS_CONNECTION_JOIN` is
-  gone. A stream's handle cannot move to another process
-  (`issues/a-stream-cannot-move-between-processes.md`). A sent byte is copied
+  gone. A stream is shared with a child as a holder of its own; other
+  sockets are not yet (`issues/a-socket-libc-or-socket2-has-not-bound-is-not-shared-with-a-child.md`). A sent byte is copied
   twice by netstack, out of the lent send ring into a scratch buffer and from
   it into the frame, since the frame builder takes one slice; a builder that
   copies each span of the ring into the frame itself would remove the first.
@@ -69,13 +70,15 @@ The design and its roast are PR #863's body.
   0.00015) against 2.0029, the pipe lock held 0.179 ms against 0.587 and spun
   0.092 against 0.108, C0 7.735 ms against 7.770, 812.7 Mb/s against 824.1
   (https://github.com/ToyOSOrg/evidence/tree/7cc1bda0dcb038084de60d65c64f30a3956a13a3/round3).
-- Stage 4: a listener's connection carries its wakes in place of its pipe, a
-  datagram socket is a region as a stream is, and the pipe ABI's messages and
-  `toyos::net`'s pipe handles go. netstack copies each datagram record's
+- Stage 4: a datagram socket is a region as a stream is. A listener and a
+  datagram socket are already their holders' connections and bells
+  (`toyos::net::socket`), each datagram one frame on its holder's
+  connection, and the pipe ABI's messages and `toyos::net`'s pipe handles are
+  gone; a datagram is still copied through the connection. netstack copies each datagram record's
   `len`, `port` and `addr` out of the region once and judges the copy: a
   `len` past the bytes the record holds ends that socket alone. `toyos::net`'s `send_to` refuses
   what a sender can judge and writes no record: a payload past
-  `toyos_abi::net::UDP_MAX_PAYLOAD`, as POSIX's `sendto` fails
+  `toyos::net::socket::MAX_DATAGRAM`, as POSIX's `sendto` fails
   `[EMSGSIZE]`; port 0; an unspecified address. That bound is the one
   declaration: [udp]'s `limits::MAX_PAYLOAD` goes, and [udp], the node's
   `name.rs` and `resolve.rs`, netstack's `serve.rs` and [udp]'s

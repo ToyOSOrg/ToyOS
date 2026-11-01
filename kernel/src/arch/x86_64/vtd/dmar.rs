@@ -22,7 +22,8 @@ const FLAGS: usize = 37;
 pub const FLAG_INTR_REMAP: u8 = 1 << 0;
 /// Flags bit 1: firmware asks the OS not to enable x2APIC mode.
 pub const FLAG_X2APIC_OPT_OUT: u8 = 1 << 1;
-/// Flags bit 2: DMA blocked until the OS programs the unit; honoured for free by this kernel's ordering.
+/// Flags bit 2, `DMA_CTRL_PLATFORM_OPT_IN_FLAG` (§8.1): firmware reports that
+/// any DMA the platform initiates at hand-over is restricted to its RMRRs.
 pub const FLAG_DMA_CTRL_OPT_IN: u8 = 1 << 2;
 
 /// A list element whose declared size the list cannot hold; the last item a walk yields.

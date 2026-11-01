@@ -34,7 +34,7 @@ use core::marker::PhantomData;
 use crate::sched::cpu::CpuHandles;
 use crate::sched::hw::{CpuId, Kicker};
 use crate::sched::mailbox::{Kick, PreemptGuard, SchedMsg, Urgency};
-use crate::sched::sync::Arc;
+use crate::sched::sync::{Arc, AtomicU32, Ordering};
 use crate::sched::task::{Gen, Notify, ParkOutcome, Refused, TaskShared, WaitClass, WakeCause};
 
 /// The running task, as the wait path sees it. Only `CpuSched::current_task`
@@ -132,6 +132,50 @@ fn deliver<M: SchedMsg>(
         }
     }
     outcome
+}
+
+/// The kicks one post owes, sent when it is dropped: after the post's list
+/// lock is let go, and once per CPU the post's rings found asleep. A post that
+/// wakes two threads parked on one CPU rings it twice, and the second ring
+/// elides because the first ring's kick is still unsent, so that CPU takes one
+/// IPI and is not woken between the two. A kick to the calling CPU, which is
+/// its own `need_resched`, and a kick past [`DEFERRED`] go at once.
+pub struct Deferred<'k, K: Kicker> {
+    kicker: &'k K,
+    owed: [AtomicU32; DEFERRED],
+    len: AtomicU32,
+}
+
+/// How many CPUs one post holds a kick for.
+pub const DEFERRED: usize = 16;
+
+impl<'k, K: Kicker> Deferred<'k, K> {
+    pub fn new(kicker: &'k K) -> Self {
+        Self { kicker, owed: core::array::from_fn(|_| AtomicU32::new(0)), len: AtomicU32::new(0) }
+    }
+}
+
+impl<K: Kicker> Kicker for Deferred<'_, K> {
+    fn kick(&self, target: CpuId) {
+        let at = self.len.load(Ordering::Relaxed) as usize;
+        if self.kicker.runs_on(target) || at == DEFERRED {
+            return self.kicker.kick(target);
+        }
+        self.owed[at].store(target.0, Ordering::Relaxed);
+        self.len.store(at as u32 + 1, Ordering::Relaxed);
+    }
+
+    fn runs_on(&self, cpu: CpuId) -> bool {
+        self.kicker.runs_on(cpu)
+    }
+}
+
+impl<K: Kicker> Drop for Deferred<'_, K> {
+    fn drop(&mut self) {
+        for owed in &self.owed[..self.len.load(Ordering::Relaxed) as usize] {
+            self.kicker.kick(CpuId(owed.load(Ordering::Relaxed)));
+        }
+    }
 }
 
 /// Registered on its own word, not yet parked. `!Send` (the registration

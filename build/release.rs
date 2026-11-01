@@ -113,19 +113,39 @@ pub(crate) fn named_key(text: &str) -> Option<Key> {
     text.lines().next()?.strip_prefix("toolchain ")?.strip_prefix(TAG).and_then(Key::parse)
 }
 
-pub(crate) fn sha256_hex(bytes: &[u8]) -> String {
-    toyos_sha2_hw::sha256_digest(bytes).iter().map(|b| format!("{b:02x}")).collect()
-}
+use crate::sha256_hex;
 
 fn on_runner() -> bool {
     std::env::var("GITHUB_ACTIONS").is_ok_and(|v| v == "true")
 }
 
-/// The HTTP client of every request the build system makes: rustls on ring
-/// with webpki's roots, as ureq configures it; a status is an answer, not an
+/// The HTTP client of every request the build system makes: rustls on
+/// toyos-crypto's provider with webpki's roots; a status is an answer, not an
 /// error.
 pub(crate) fn agent() -> ureq::Agent {
-    ureq::Agent::config_builder().user_agent(USER_AGENT).http_status_as_error(false).build().new_agent()
+    let tls = ureq::tls::TlsConfig::builder().unversioned_rustls_crypto_provider(tls_provider()).build();
+    ureq::Agent::config_builder().user_agent(USER_AGENT).http_status_as_error(false).tls_config(tls).build().new_agent()
+}
+
+/// The system's random bytes, which the provider's key exchanges draw.
+#[derive(Debug)]
+struct SystemRandom;
+
+impl rustls::crypto::SecureRandom for SystemRandom {
+    fn fill(&self, bytes: &mut [u8]) -> Result<(), rustls::crypto::GetRandomFailed> {
+        getrandom::fill(bytes).map_err(|_| rustls::crypto::GetRandomFailed)
+    }
+}
+
+static TLS: toyos_crypto::rustls_provider::Backend = toyos_crypto::rustls_provider::Backend::new(&SystemRandom);
+
+/// toyos-crypto's provider, exchanging keys on X25519 alone, hybrid or not:
+/// no P-256 or P-384 secret meets a server's input while the T14 measures
+/// those curves leaking (`issues/toyos-crypto-is-in-the-tree-on-par-with-ring-and-secure.md`).
+fn tls_provider() -> std::sync::Arc<rustls::crypto::CryptoProvider> {
+    let mut provider = TLS.provider();
+    provider.kx_groups.retain(|group| matches!(group.name(), rustls::NamedGroup::X25519MLKEM768 | rustls::NamedGroup::X25519));
+    std::sync::Arc::new(provider)
 }
 
 /// Whether this job is main's publisher — [`PUBLISHER`] on main, scheduled or

@@ -19,7 +19,6 @@ pub mod flash;
 pub mod fpgate;
 #[cfg(test)]
 pub mod gitfixture;
-pub mod gptwrite;
 pub mod hostedclang;
 pub mod flags;
 pub mod hostws;
@@ -56,6 +55,21 @@ pub mod wallpaper;
 
 use std::path::{Path, PathBuf};
 use std::process::Command;
+
+/// The SHA-256 every digest the build takes is: `NOTICE`'s record of a
+/// committed file, a store key, a ROOT's name and a release asset's digest.
+pub fn sha256(bytes: &[u8]) -> [u8; 32] {
+    toyos_crypto::hash::Sha256::digest(bytes).expect(SHA256_BOUND)
+}
+
+/// [`sha256`] in lower-case hex, the spelling `NOTICE` and `SHA256SUMS` take.
+pub fn sha256_hex(bytes: &[u8]) -> String {
+    sha256(bytes).iter().map(|b| format!("{b:02x}")).collect()
+}
+
+/// Why a build hash cannot refuse: FIPS 180-4 bounds a message at 2^61 bytes,
+/// which nothing the build reads nears.
+pub const SHA256_BOUND: &str = "a build input is far below SHA-256's 2^61-byte bound";
 
 /// The `.git` directory every worktree of this repository shares.
 ///

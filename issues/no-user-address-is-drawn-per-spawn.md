@@ -6,10 +6,10 @@ opened: 2026-09-29
 
 # No user address is drawn per spawn
 
-Every spawn puts the image at `USER_VM_BASE` (`kernel/src/loader/mod.rs:48`)
-and the stack at `STACK_BASE` (`kernel/src/vma.rs:12`), and allocates
-mappings in one fixed window (`kernel/src/vma.rs:18`), so an address one
-process leaks is the same address in the next. Linux at `Ubuntu-6.8.0-142.142`
+Every spawn places its image, its stack and every mapping after them by one
+deterministic rule, the smallest free range that fits, from the space's
+floor up (`kernel::vm::Inventory::place`, `kernel/src/mm/space.rs`), so an
+address one process leaks is the same address in the next. Linux at `Ubuntu-6.8.0-142.142`
 draws 32 bits for the image and the mmap base (`CONFIG_ARCH_MMAP_RND_BITS`,
 `debian.master/config/annotations:18`) and 22 for the stack.
 

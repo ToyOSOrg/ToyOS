@@ -17,12 +17,21 @@ use toyos::ipc::{Connection, FrameRx, RxStep};
 use toyos::poller::{Poller, READABLE};
 use toyos_blockring::disk::{self, Offer, Part, Settled};
 
-/// A session the service handed over: what to open, the client's connection
-/// and the region it sent.
-pub struct Handed {
-    pub session: disk::Session,
-    pub conn: Connection,
-    pub region: toyos::RawHandle,
+/// What the service handed over, each with the client's connection the
+/// driver answers on.
+pub enum Handed {
+    /// A session to open, over the region the client sent.
+    Session { session: disk::Session, conn: Connection, region: toyos::OwnedHandle },
+    /// A description of one of this driver's disks.
+    Describe { disk: u32, conn: Connection },
+    Designate { order: disk::Designation, conn: Connection },
+}
+
+/// The longest frame the service sends: a session, a designation, or a disk's number.
+const FRAME: usize = max(max(disk::Session::BYTES, disk::Designation::BYTES), 4);
+
+const fn max(a: usize, b: usize) -> usize {
+    if a > b { a } else { b }
 }
 
 /// Fresh connections in a row that may refuse what the driver says before it
@@ -33,7 +42,7 @@ pub struct Link {
     label: String,
     /// `None` once the service's port has closed for good.
     conn: Option<Connection>,
-    rx: FrameRx<{ disk::Session::BYTES }>,
+    rx: FrameRx<{ FRAME }>,
     offers: BTreeMap<u32, Vec<Part>>,
     settled: Option<Settled>,
 }
@@ -134,7 +143,7 @@ impl Link {
         }
     }
 
-    /// Every session the service handed over since the last call. Anything
+    /// Everything the service handed over since the last call. Anything
     /// else it sends is the service breaking the protocol, which ends the
     /// connection.
     pub fn take(&mut self) -> Vec<Handed> {
@@ -151,14 +160,31 @@ impl Link {
                     match (session, handles) {
                         (Some(session), Some([conn, region])) => {
                             let conn = Connection::received(conn);
-                            handed.push(Handed { session, conn, region });
+                            handed.push(Handed::Session { session, conn, region });
                             continue;
                         }
-                        (_, Some(handles)) => {
-                            handles.into_iter().for_each(toyos_abi::syscall::close);
-                            "a session frame this protocol does not make"
-                        }
+                        (_, Some(_)) => "a session frame this protocol does not make",
                         (_, None) => "a session without its two handles",
+                    }
+                }
+                RxStep::Frame { msg_type: msg_type @ (disk::MSG_DESCRIBE | disk::MSG_DESIGNATE), payload_len, .. } => {
+                    let payload = self.rx.payload(payload_len).to_vec();
+                    match self.rx.take_handles::<1>() {
+                        Some([conn]) => {
+                            let conn = Connection::received(conn);
+                            let asked = match msg_type {
+                                disk::MSG_DESCRIBE => disk::disk(&payload).map(|disk| Handed::Describe { disk, conn }),
+                                _ => disk::Designation::decode(&payload).map(|order| Handed::Designate { order, conn }),
+                            };
+                            match asked {
+                                Some(asked) => {
+                                    handed.push(asked);
+                                    continue;
+                                }
+                                None => "a description or designation frame this protocol does not make",
+                            }
+                        }
+                        None => "a description or designation without the client's connection",
                     }
                 }
                 RxStep::Frame { .. } => "a frame this protocol does not make",

@@ -3,7 +3,13 @@ use alloc::collections::btree_map::Entry;
 use alloc::collections::BTreeMap;
 use alloc::sync::Arc;
 
+use alloc::vec::Vec;
+
+use toyos_abi::syscall::SyscallError;
+
 use crate::file_backing::{BlockError, FileBacking};
+use crate::mm::charge::{self, Charge, Exhausted};
+use crate::mm::space::CopySource;
 use crate::sync::Lock;
 use crate::user_ptr::{ByteSource, UserBytesMut};
 
@@ -16,13 +22,54 @@ const PAGE_SIZE: usize = crate::mm::PAGE_SIZE as usize;
 /// this it would wrap and alias a low page — seek, write and truncate refuse it.
 pub const MAX_FILE_SIZE: u64 = (u32::MAX as u64 + 1) * PAGE_SIZE as u64;
 
+/// A page's bytes, shared with each [`Snapshot`] taken while it was the
+/// file's: a write to a shared page writes a copy of it.
+type PageData = Arc<Page>;
+
+/// A page's bytes, charged to whoever made them for as long as anything holds
+/// them: the file, or a snapshot of it a spawn pages from.
+pub struct Page {
+    bytes: Box<[u8; PAGE_SIZE]>,
+    _charge: Charge,
+}
+
+impl core::ops::Deref for Page {
+    type Target = [u8; PAGE_SIZE];
+
+    fn deref(&self) -> &Self::Target {
+        &self.bytes
+    }
+}
+
+impl Page {
+    /// A page of zeros, or `Exhausted`, charged before it is allocated with
+    /// its place in its file.
+    fn blank() -> Result<Self, Exhausted> {
+        let charge = Charge::current(charge::heap(core::alloc::Layout::new::<[u8; PAGE_SIZE]>()) + charge::arc::<Page>() + charge::map_entry::<u32, CachedPage>())?;
+        Ok(Self { bytes: blank_page(), _charge: charge })
+    }
+
+    /// Make `data` this file's own to write, copying it if a snapshot shares
+    /// it; refused, it is left shared and unwritten.
+    fn own(data: &mut PageData) -> Result<&mut [u8; PAGE_SIZE], Exhausted> {
+        if Arc::get_mut(data).is_none() {
+            let mut copy = Self::blank()?;
+            *copy.bytes = ***data;
+            *data = Arc::new(copy);
+        }
+        Ok(&mut Arc::get_mut(data).expect("a page this file holds alone").bytes)
+    }
+}
+
 struct CachedPage {
-    data: Box<[u8; PAGE_SIZE]>,
+    data: PageData,
     /// CLOCK's second-chance bit: set on every hit, cleared when the sweep passes it over.
     referenced: bool,
 }
 
 struct CachedFile {
+    /// Its place in the cache, charged to whoever made it.
+    _charge: Charge,
     pages: BTreeMap<u32, CachedPage>,
     size: u64,
     evictable: bool,
@@ -71,11 +118,13 @@ pub fn init() {
 }
 
 /// Allocate a new FileId. The file cache is the sole allocator.
-pub fn create_file(evictable: bool, mtime: u64) -> FileId {
+pub fn create_file(evictable: bool, mtime: u64) -> Result<FileId, Exhausted> {
+    let charge = Charge::current(charge::map_entry::<FileId, CachedFile>())?;
     let mut cache = FILE_CACHE.lock();
     let id = cache.next_id;
     cache.next_id += 1;
     cache.files.insert(id, CachedFile {
+        _charge: charge,
         pages: BTreeMap::new(),
         size: 0,
         evictable,
@@ -84,7 +133,7 @@ pub fn create_file(evictable: bool, mtime: u64) -> FileId {
         deleted: false,
         mtime,
     });
-    id
+    Ok(id)
 }
 
 /// A number from the count `FileId`s are drawn from, which no file will ever
@@ -186,10 +235,21 @@ pub fn read_page(
     }
     // Cache miss: unlock, fetch from backing, re-lock, insert if still absent.
 
-    let mut fetched = blank_page();
+    let mut fetched = match Page::blank() {
+        Ok(page) => page,
+        // A hole is zeros whether or not a page is kept for it.
+        Err(Exhausted) if backing.is_none() => {
+            buf.fill_zero(0, buf.len());
+            return Ok(());
+        }
+        Err(Exhausted) => {
+            buf.fill_zero(0, buf.len());
+            return Err(BlockError::Exhausted);
+        }
+    };
     if let Some(backing) = &backing {
         // A failed fetch must not become a resident page: a later partial write would merge into cached zeros and flush them over the file.
-        if let Err(e) = backing.read_page(page_idx as u64 * PAGE_SIZE as u64, &mut fetched) {
+        if let Err(e) = backing.read_page(page_idx as u64 * PAGE_SIZE as u64, &mut fetched.bytes) {
             buf.fill_zero(0, buf.len());
             return Err(e);
         }
@@ -217,7 +277,8 @@ pub fn read_page(
 }
 
 /// Write data into a file page; the lock is not held during disk I/O on a cache miss.
-/// `Err` means the page could not be re-read and nothing was written — merging into zeros would destroy 4 KiB of a file that was fine.
+/// `Err` means the page could not be re-read and nothing was written — merging into zeros would destroy 4 KiB of a file that was fine —
+/// or that no memory is left to keep it in.
 pub fn write_page<S: ByteSource + ?Sized>(
     file_id: FileId,
     page_idx: u32,
@@ -231,7 +292,7 @@ pub fn write_page<S: ByteSource + ?Sized>(
         {
             let Some(file) = cache.files.get_mut(&file_id) else { return Ok(()) };
             if file.pages.contains_key(&page_idx) {
-                apply_write(file, page_idx, offset, data);
+                apply_write(file, page_idx, offset, data).map_err(|Exhausted| BlockError::Exhausted)?;
                 backing = None;
             } else {
                 backing = Some(file.backing.clone());
@@ -244,12 +305,12 @@ pub fn write_page<S: ByteSource + ?Sized>(
     }
     let backing = backing.unwrap();
 
-    let mut fetched = blank_page();
+    let mut fetched = Page::blank().map_err(|Exhausted| BlockError::Exhausted)?;
     if let Some(backing) = &backing {
         let page_start = page_idx as u64 * PAGE_SIZE as u64;
         // Past the end there is nothing to preserve, so no fetch and no way for one to fail.
         if page_start < backing.file_size() {
-            backing.read_page(page_start, &mut fetched)?;
+            backing.read_page(page_start, &mut fetched.bytes)?;
         }
     }
 
@@ -263,28 +324,32 @@ pub fn write_page<S: ByteSource + ?Sized>(
             slot.insert(CachedPage::new(fetched));
             added = is_cache as usize;
         }
-        apply_write(file, page_idx, offset, data);
+        // A page this write just made is the file's alone, so this charges nothing.
+        apply_write(file, page_idx, offset, data).map_err(|Exhausted| BlockError::Exhausted)?;
     }
     cache.cached_pages += added;
     evict_if_needed(&mut cache);
     Ok(())
 }
 
+/// Refused, the page is unchanged: a snapshot shares it and no copy can be
+/// charged.
 fn apply_write<S: ByteSource + ?Sized>(
     file: &mut CachedFile,
     page_idx: u32,
     offset: usize,
     data: &S,
-) {
+) -> Result<(), Exhausted> {
     let page = file.pages.get_mut(&page_idx).expect("write_page: page not resident");
     let end = (offset + data.len()).min(PAGE_SIZE);
-    data.read_at(0, &mut page.data[offset..end]);
+    data.read_at(0, &mut Page::own(&mut page.data)?[offset..end]);
     page.referenced = true;
 
     let write_end = page_idx as u64 * PAGE_SIZE as u64 + end as u64;
     if write_end > file.size {
         file.size = write_end;
     }
+    Ok(())
 }
 
 /// Copy a resident page out; `false` leaves `buf` untouched — an absent page is not zeros.
@@ -293,8 +358,56 @@ pub fn copy_page_out(file_id: FileId, page_idx: u32, buf: &mut [u8; PAGE_SIZE]) 
     let Some(page) = cache.files.get(&file_id).and_then(|file| file.pages.get(&page_idx)) else {
         return false;
     };
-    *buf = *page.data;
+    *buf = **page.data;
     true
+}
+
+/// A file's bytes as they were when it was taken, which no later write,
+/// truncation or delete changes: a spawn's program, read without the cache's
+/// lock.
+pub struct Snapshot {
+    size: u64,
+    /// The resident pages by index; an absent one is a hole and reads zeros.
+    pages: Vec<(u32, PageData)>,
+    /// The list, and the snapshot itself.
+    _charge: Charge,
+}
+
+/// `file_id`'s bytes now: `NotFound` for a file the cache no longer holds,
+/// `ResourceExhausted` for one whose list of pages is past one heap
+/// allocation or cannot be charged. Only a file with no backing: an absent
+/// page of one with a backing was evicted, not a hole.
+pub fn snapshot(file_id: FileId) -> Result<Snapshot, SyscallError> {
+    let cache = FILE_CACHE.lock();
+    let file = cache.files.get(&file_id).ok_or(SyscallError::NotFound)?;
+    assert!(file.backing.is_none(), "file cache: a snapshot of file {file_id}, whose absent pages are on its backing");
+    if file.pages.len() > crate::mm::MAX_HEAP_ALLOC / core::mem::size_of::<(u32, PageData)>() {
+        return Err(SyscallError::ResourceExhausted);
+    }
+    let charge = Charge::current(charge::arc::<Snapshot>() + charge::array::<(u32, PageData)>(file.pages.len()))?;
+    let pages = file.pages.iter().map(|(&idx, page)| (idx, Arc::clone(&page.data))).collect();
+    Ok(Snapshot { size: file.size, pages, _charge: charge })
+}
+
+impl CopySource for Snapshot {
+    fn size(&self) -> u64 {
+        self.size
+    }
+
+    fn read(&self, offset: u64, out: &mut [u8]) {
+        assert!(offset.checked_add(out.len() as u64).is_some_and(|end| end <= self.size), "file cache: a snapshot read past its end");
+        let mut done = 0;
+        while done < out.len() {
+            let at = offset + done as u64;
+            let (idx, within) = ((at / PAGE_SIZE as u64) as u32, (at % PAGE_SIZE as u64) as usize);
+            let n = (PAGE_SIZE - within).min(out.len() - done);
+            match self.pages.binary_search_by_key(&idx, |&(i, _)| i) {
+                Ok(i) => out[done..done + n].copy_from_slice(&self.pages[i].1[within..within + n]),
+                Err(_) => out[done..done + n].fill(0),
+            }
+            done += n;
+        }
+    }
 }
 
 /// Get the authoritative file size.
@@ -302,24 +415,15 @@ pub fn size(file_id: FileId) -> u64 {
     FILE_CACHE.lock().files.get(&file_id).map_or(0, |f| f.size)
 }
 
-/// Set file size and drop pages past it.
-pub fn set_size(file_id: FileId, new_size: u64) {
+/// Set file size and drop pages past it. Refused, nothing changes: the page
+/// the new end falls inside is shared with a snapshot, and no copy of it to
+/// zero can be charged.
+pub fn set_size(file_id: FileId, new_size: u64) -> Result<(), Exhausted> {
     let mut cache = FILE_CACHE.lock();
-    set_size_locked(&mut cache, file_id, new_size);
-}
-
-fn set_size_locked(cache: &mut FileCache, file_id: FileId, new_size: u64) {
     let dropped;
     {
-        let Some(file) = cache.files.get_mut(&file_id) else { return };
+        let Some(file) = cache.files.get_mut(&file_id) else { return Ok(()) };
         dropped = if new_size < file.size {
-            let is_cache = file.is_cache();
-            let first_removed = (new_size as usize).div_ceil(PAGE_SIZE) as u32;
-            let removed: alloc::vec::Vec<u32> = file.pages.range(first_removed..)
-                .map(|(&k, _)| k).collect();
-            for k in &removed {
-                file.pages.remove(k);
-            }
             // The page the new end falls inside is kept; zero its bytes past the
             // new end in the one step that sets the size, so a later grow reads
             // the hole as zeros rather than the discarded tail.
@@ -327,16 +431,20 @@ fn set_size_locked(cache: &mut FileCache, file_id: FileId, new_size: u64) {
             if tail != 0 {
                 let straddled = (new_size / PAGE_SIZE as u64) as u32;
                 if let Some(page) = file.pages.get_mut(&straddled) {
-                    page.data[tail..].fill(0);
+                    Page::own(&mut page.data)?[tail..].fill(0);
                 }
             }
-            if is_cache { removed.len() } else { 0 }
+            // Split off whole, so that no list of the pages is allocated.
+            let first_removed = (new_size as usize).div_ceil(PAGE_SIZE) as u32;
+            let removed = file.pages.split_off(&first_removed);
+            if file.is_cache() { removed.len() } else { 0 }
         } else {
             0
         };
         file.size = new_size;
     }
     cache.cached_pages -= dropped;
+    Ok(())
 }
 
 /// Mark a file as deleted (unlink). If no handles hold it, free immediately;
@@ -351,8 +459,8 @@ pub fn mark_deleted(file_id: FileId) {
 }
 
 impl CachedPage {
-    fn new(data: Box<[u8; PAGE_SIZE]>) -> Self {
-        Self { data, referenced: false }
+    fn new(data: Page) -> Self {
+        Self { data: Arc::new(data), referenced: false }
     }
 }
 

@@ -3,12 +3,12 @@
 //! queued behind the stop's caller, and the stop ends with it running.
 //! `machine_shutdown_short_stop` runs it.
 
-use toyos::power::{stop, Stop};
+use toyos::power::{stop, Mode, Pending, Stop};
 
 fn main() {
     std::thread::spawn(|| loop {
         std::hint::spin_loop();
     });
-    let refused = stop(Stop::Shutdown);
+    let refused = stop(Stop::Shutdown, Mode::Terminate).map(Pending::outcome);
     panic!("stop_short: the power-off was refused: {refused:?}");
 }

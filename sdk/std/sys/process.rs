@@ -23,10 +23,19 @@ pub struct Command {
     stdin: Option<Stdio>,
     stdout: Option<Stdio>,
     stderr: Option<Stdio>,
-    extra_fds: Vec<(u32, u32)>,
-    endowments: Vec<(String, u32)>,
-    provided: Vec<(String, u32)>,
-    parent: toyos::spawn::Parent,
+    /// The child's descriptors past its stdio.
+    extra_fds: Vec<(u32, Given)>,
+    /// Taken by the next spawn: moved to its child, or closed if it is refused.
+    endowments: Vec<(String, toyos::OwnedHandle)>,
+    provided: Vec<(String, toyos::OwnedHandle)>,
+    parent: Parent,
+    /// An independent launch, where a plain spawn is a helper.
+    independent: bool,
+    /// A copy of the launcher an independent launch goes through, where it is
+    /// not the endowed one.
+    launcher: Option<io::Result<toyos::OwnedHandle>>,
+    /// A copy of the `SysCap` that starts a helper's child as a pager.
+    pager: Option<io::Result<toyos::OwnedHandle>>,
     /// The program the child runs, when it is not the one `argv[0]` names.
     image_path: Option<OsString>,
     prepared: Option<Prepared>,
@@ -34,9 +43,39 @@ pub struct Command {
     /// it read: kept across a later working directory, so a spawn starts the
     /// bytes the caller saw ([`Command::prepared_image`]).
     image: Option<(OsString, toyos::process::Image)>,
-    /// A boot image this process holds, which the child runs instead of any
-    /// file ([`Command::boot_image`]).
-    boot_image: Option<u32>,
+    /// A copy of a boot image this process holds, which the child runs
+    /// instead of any file ([`Command::boot_image`]): each spawn adopts a
+    /// copy of its own.
+    boot_image: Option<io::Result<toyos::OwnedHandle>>,
+}
+
+/// What the command gives a child for one of its descriptors.
+enum Given {
+    /// A copy of the caller's handle, which each spawn duplicates; one
+    /// refused is each spawn's refusal.
+    Copy(io::Result<(toyos::OwnedHandle, toyos::fd::Kind)>),
+    /// The caller's stream or socket, kept, of which each spawn exports a
+    /// holder for its child alone.
+    Holder(toyos::net::Exporter),
+}
+
+/// Whom a child is placed under: [`toyos::spawn::Parent`], with a place the
+/// command holds a copy of.
+enum Parent {
+    Caller,
+    Place(io::Result<toyos::OwnedHandle>),
+    Detached,
+}
+
+/// The job `endowments` puts the child in.
+fn job_of(endowments: &[(String, toyos::OwnedHandle)]) -> Option<toyos::BorrowedHandle<'_>> {
+    endowments.iter().find(|(label, _)| label == toyos::job::JOB_LABEL).map(|(_, handle)| toyos::AsHandle::as_handle(handle))
+}
+
+/// A copy of a handle the caller lends, owned by the command until it is
+/// dropped or set again.
+fn copy(handle: crate::os::toyos::io::BorrowedHandle<'_>) -> io::Result<toyos::OwnedHandle> {
+    handle.try_clone_to_owned().map(|copy| copy.into_inner())
 }
 
 /// The file reads a spawn needs, made ahead of it ([`Command::prepare`]).
@@ -82,7 +121,10 @@ impl Command {
             extra_fds: Vec::new(),
             endowments: Vec::new(),
             provided: Vec::new(),
-            parent: toyos::spawn::Parent::Caller,
+            parent: Parent::Caller,
+            independent: false,
+            launcher: None,
+            pager: None,
             image_path: None,
             prepared: None,
             image: None,
@@ -106,8 +148,8 @@ impl Command {
     /// Run the immutable region `handle` names, which this process keeps,
     /// rather than any file: `argv[0]` is the program the command names, and
     /// nothing opens it.
-    pub fn boot_image(&mut self, handle: u32) {
-        self.boot_image = Some(handle);
+    pub fn boot_image(&mut self, handle: crate::os::toyos::io::BorrowedHandle<'_>) {
+        self.boot_image = Some(copy(handle));
         self.image_path = None;
         self.prepared = None;
         self.image = None;
@@ -133,7 +175,7 @@ impl Command {
         if !kept {
             self.image = None;
             if self.boot_image.is_none() && crate::sys::fs::is_served(Path::new(&source)) {
-                let image = crate::sys::fs::read_image(Path::new(&source))?;
+                let image = crate::sys::fs::read_image(Path::new(&source), self.endowed_job())?;
                 self.image = Some((source, image));
             }
         }
@@ -187,38 +229,71 @@ impl Command {
         self.cwd.as_ref().map(|cs| Path::new(cs))
     }
 
-    /// Give the child descriptor `child_fd`, naming this process's
-    /// `parent_handle`, which this process keeps: the spawn duplicates it.
-    pub fn inherit_handle(&mut self, child_fd: u32, parent_handle: u32) {
-        self.extra_fds.retain(|&(fd, _)| fd != child_fd);
-        self.extra_fds.push((child_fd, parent_handle));
+    /// Give the child descriptor `child_fd`, naming a copy of
+    /// `parent_handle`, or, for a stream's or a socket's, a holder each spawn
+    /// exports for its child alone.
+    pub fn inherit_handle(&mut self, child_fd: u32, parent_handle: crate::os::toyos::io::BorrowedHandle<'_>) {
+        let given = match toyos::net::Exporter::of(parent_handle.inner()) {
+            Some(kept) => Given::Holder(kept),
+            None => Given::Copy(copy(parent_handle).map(|h| (h, toyos::fd::Kind::Handle))),
+        };
+        self.inherit(child_fd, given);
     }
 
-    /// Give the child `handle` under the name `label`.
-    ///
-    /// The handle is **moved**: after a successful spawn this process no longer
-    /// holds it. A caller that wants to keep one duplicates it first.
-    pub fn endow(&mut self, label: &str, handle: u32) {
-        self.endowments.push((label.to_owned(), handle));
+    /// Give the child descriptor `child_fd` as a copy of the exported end
+    /// `end`, which `toyos::net`'s `export` made: the child takes it up as a
+    /// holder of the stream or the socket.
+    pub fn inherit_exported(&mut self, child_fd: u32, end: crate::os::toyos::io::BorrowedHandle<'_>) {
+        self.inherit(child_fd, Given::Copy(copy(end).map(|h| (h, toyos::fd::Kind::Exported))));
     }
 
-    /// Give the child `connector` under `name`, on top of its manifest row.
-    ///
-    /// Routes the spawn through the launcher, which is the only thing that can
-    /// build a child's authority out of the child's own declaration.
-    pub fn provide(&mut self, name: &str, connector: u32) {
-        self.provided.push((name.to_owned(), connector));
+    fn inherit(&mut self, child_fd: u32, given: Given) {
+        self.extra_fds.retain(|(fd, _)| *fd != child_fd);
+        self.extra_fds.push((child_fd, given));
     }
 
-    /// Place the child under the process `place` names rather than under this
-    /// one.
-    pub fn under(&mut self, place: u32) {
-        self.parent = toyos::spawn::Parent::Place(toyos_abi::RawHandle(place));
+    /// The job the child is endowed to run in, which its program image is
+    /// read for: the child keeps the image as long as it runs.
+    fn endowed_job(&self) -> Option<toyos::BorrowedHandle<'_>> {
+        job_of(&self.endowments)
     }
 
-    /// Ask the supervisor to be the child's parent, through the launcher or not at all.
-    pub fn under_supervisor(&mut self) {
-        self.parent = toyos::spawn::Parent::Supervisor;
+    /// Give the child `handle` under the name `label`, moved by the next spawn.
+    pub fn endow(&mut self, label: &str, handle: crate::os::toyos::io::OwnedHandle) {
+        self.endowments.push((label.to_owned(), handle.into_inner()));
+    }
+
+    /// Give the child `connector` under `name`, on top of its manifest row:
+    /// an independent launch's alone.
+    pub fn provide(&mut self, name: &str, connector: crate::os::toyos::io::OwnedHandle) {
+        self.provided.push((name.to_owned(), connector.into_inner()));
+    }
+
+    /// Place the child under the process a copy of `place` names rather than
+    /// under this one.
+    pub fn under(&mut self, place: crate::os::toyos::io::BorrowedHandle<'_>) {
+        self.parent = Parent::Place(copy(place));
+    }
+
+    /// Start the child as an independent launch, through the launcher.
+    pub fn independent(&mut self) {
+        self.independent = true;
+    }
+
+    /// Launch through the launcher `namespace` holds, which this process keeps.
+    pub fn launcher(&mut self, namespace: crate::os::toyos::io::BorrowedHandle<'_>) {
+        self.launcher = Some(copy(namespace));
+    }
+
+    /// Start the child as a pager, by a copy of `syscap`, which carries
+    /// `Rights::PAGER`.
+    pub fn pager(&mut self, syscap: crate::os::toyos::io::BorrowedHandle<'_>) {
+        self.pager = Some(copy(syscap));
+    }
+
+    /// Place a launched child under the launcher's owner, so it outlives this process.
+    pub fn detached(&mut self) {
+        self.parent = Parent::Detached;
     }
 
     fn resolve_program(&self) -> io::Result<OsString> {
@@ -264,6 +339,10 @@ impl Command {
         default: Stdio,
         _needs_stdin: bool,
     ) -> io::Result<(Process, StdioPipes)> {
+        // Taken first: whatever refuses this spawn closes them, as the
+        // kernel's own refusal does.
+        let endowments = core::mem::take(&mut self.endowments);
+        let provided = core::mem::take(&mut self.provided);
         let prepared = self.prepared.take();
         let image = self.image.take().map(|(_, image)| image);
         let (resolved, cwd, prepared_image) = match prepared {
@@ -286,7 +365,7 @@ impl Command {
 
         // The handles the child's descriptors are, each held here until the
         // spawn has duplicated it into the child.
-        let mut held: Vec<(u32, toyos::OwnedHandle)> = Vec::new();
+        let mut held: Vec<(u32, toyos::OwnedHandle, toyos::fd::Kind)> = Vec::new();
         let mut stdin_pipe: Option<Pipe> = None;
         let mut stdout_pipe: Option<Pipe> = None;
         let mut stderr_pipe: Option<Pipe> = None;
@@ -294,70 +373,107 @@ impl Command {
             [(&mut stdin_pipe, stdin, 0, true), (&mut stdout_pipe, stdout, 1, false), (&mut stderr_pipe, stderr, 2, false)]
         {
             // A descriptor `inherit_handle` names is that handle's.
-            if self.extra_fds.iter().any(|&(child, _)| child == fd) {
+            if self.extra_fds.iter().any(|(child, _)| *child == fd) {
                 continue;
             }
-            if let Some(handle) = Self::child_stdio(pipe, stdio, fd, is_input)? {
-                held.push((fd, handle));
+            if let Some((handle, kind)) = Self::child_stdio(pipe, stdio, fd, is_input)? {
+                held.push((fd, handle, kind));
             }
         }
-        let mut fds: Vec<(u32, toyos_abi::RawHandle)> =
-            held.iter().map(|(fd, h)| (*fd, toyos::AsHandle::as_handle(h))).collect();
-        fds.extend(self.extra_fds.iter().map(|&(fd, h)| (fd, toyos_abi::RawHandle(h))));
+        // A stream's or a socket's holder is this spawn's alone: exported
+        // now, and gone with the spawn.
+        for (fd, given) in &self.extra_fds {
+            match given {
+                Given::Holder(kept) => {
+                    let end = kept.export().map_err(|e| refused(toyos::spawn::Refused::Export(e)))?;
+                    held.push((*fd, end, toyos::fd::Kind::Exported));
+                }
+                Given::Copy(Err(e)) => return Err(io::Error::new(e.kind(), e.to_string())),
+                Given::Copy(Ok(_)) => {}
+            }
+        }
+        let mut fds: Vec<(u32, toyos::BorrowedHandle<'_>, toyos::fd::Kind)> =
+            held.iter().map(|(fd, h, kind)| (*fd, toyos::AsHandle::as_handle(h), *kind)).collect();
+        for (fd, given) in &self.extra_fds {
+            if let Given::Copy(Ok((handle, kind))) = given {
+                fds.push((*fd, toyos::AsHandle::as_handle(handle), *kind));
+            }
+        }
 
         let capture = self.env.capture();
         let env_buf = env_blob(&capture);
-        let endow: Vec<(&str, toyos_abi::RawHandle)> =
-            self.endowments.iter().map(|(label, h)| (label.as_str(), toyos_abi::RawHandle(*h))).collect();
-        let provided: Vec<(&str, toyos_abi::RawHandle)> =
-            self.provided.iter().map(|(name, h)| (name.as_str(), toyos_abi::RawHandle(*h))).collect();
+        // A launch names its program absolute, as the launcher resolves it.
+        let launched = self.independent.then(|| toyos::launch::program_path(program, &cwd));
+        let parent = match &self.parent {
+            Parent::Caller => toyos::spawn::Parent::Caller,
+            Parent::Place(Ok(place)) => toyos::spawn::Parent::Place(toyos::AsHandle::as_handle(place)),
+            Parent::Place(Err(e)) => return Err(io::Error::new(e.kind(), e.to_string())),
+            Parent::Detached => toyos::spawn::Parent::Detached,
+        };
+        let launcher = match &self.launcher {
+            None => None,
+            Some(Ok(launcher)) => Some(toyos::AsHandle::as_handle(launcher)),
+            Some(Err(e)) => return Err(io::Error::new(e.kind(), e.to_string())),
+        };
+        let pager = match &self.pager {
+            None => None,
+            Some(Ok(syscap)) => Some(toyos::AsHandle::as_handle(syscap)),
+            Some(Err(e)) => return Err(io::Error::new(e.kind(), e.to_string())),
+        };
+        let boot_image = match &self.boot_image {
+            None => None,
+            Some(Ok(image)) => Some(image.try_clone().map_err(crate::sys::to_io_error)?),
+            Some(Err(e)) => return Err(io::Error::new(e.kind(), e.to_string())),
+        };
+        let image_held = prepared_image.is_some() || boot_image.is_some();
+        // A helper's program on a file server is taken here as the memory
+        // object its server holds it in, or read into one counted to the job
+        // the child is endowed to run in or else to this process's, which the
+        // kernel pages the child from: it opens only what it serves itself. A
+        // launch runs its row's own program.
+        let source = Path::new(image_path.unwrap_or(program));
+        let image = match (prepared_image, boot_image) {
+            _ if self.independent => None,
+            (Some(image), _) => Some(image),
+            (None, Some(handle)) => {
+                let region = toyos::shm::Immutable::adopt(handle).map_err(|why| match why {
+                    toyos::shm::NotImmutable::Kernel(e) => crate::sys::to_io_error(e),
+                    toyos::shm::NotImmutable::Writable => {
+                        io::const_error!(io::ErrorKind::InvalidInput, "the boot image is no immutable region")
+                    }
+                })?;
+                Some(toyos::process::Image::immutable(region))
+            }
+            (None, None) if crate::sys::fs::is_served(source) => Some(crate::sys::fs::read_image(source, job_of(&endowments))?),
+            (None, None) => None,
+        };
+        let (labels, endowed): (Vec<String>, Vec<toyos::OwnedHandle>) = endowments.into_iter().unzip();
+        let (names, provided): (Vec<String>, Vec<toyos::OwnedHandle>) = provided.into_iter().unzip();
         let request = toyos::spawn::Spawn {
-            program,
+            program: launched.as_deref().unwrap_or(program),
             image: image_path,
+            image_held,
             argv: &argv_buf,
             env: &env_buf,
             cwd: &cwd,
             fds: &fds,
-            endow: &endow,
-            provided: &provided,
-            parent: self.parent,
+            endow: labels.iter().map(String::as_str).zip(endowed).collect(),
+            provided: names.iter().map(String::as_str).zip(provided).collect(),
+            parent,
+            independent: self.independent,
+            launcher,
+            pager,
         };
         let pipes = |stdin, stdout, stderr| StdioPipes { stdin, stdout, stderr };
-        let mut answer = crate::vec![0u8; toyos::ipc::MAX_FRAME_LEN as usize];
-        let home = match request.launch(&mut answer).map_err(refused)? {
-            toyos::spawn::Launched::Started(handle) => {
-                return Ok((Process { handle }, pipes(stdin_pipe, stdout_pipe, stderr_pipe)));
-            }
-            toyos::spawn::Launched::Direct { home } => home,
+        let handle = match request.start().map_err(refused)? {
+            toyos::spawn::Start::Launch(launch) => launch.launch(),
+            toyos::spawn::Start::Helper(helper) => helper.spawn(image.as_ref()),
         };
-        // A caller that named `HOME`, or removed it, decided it.
-        let named = self.env.iter().any(|(key, _)| key == OsStr::new("HOME"));
-        let mut direct_env = Vec::new();
-        toyos::spawn::direct_env(&env_buf, named, home, &mut direct_env);
-        // A program on a file server is read here, into a memory object of
-        // this process's own that the kernel pages the child from: the kernel
-        // opens only what it serves itself.
-        let source = Path::new(image_path.unwrap_or(program));
-        let image = match (prepared_image, self.boot_image) {
-            (Some(image), _) => Some(image),
-            (None, Some(handle)) => {
-                let copy = toyos_abi::syscall::dup(toyos_abi::RawHandle(handle)).map_err(crate::sys::to_io_error)?;
-                // SAFETY: `dup` answered a fresh handle nothing else answers for.
-                let copy = unsafe { toyos::OwnedHandle::from_raw(copy) };
-                let region = toyos::shm::Immutable::adopt(copy).map_err(|why| {
-                    io::Error::new(io::ErrorKind::InvalidInput, format!("the boot image is no immutable region: {why}"))
-                })?;
-                Some(toyos::process::Image::boot(region))
-            }
-            (None, None) if crate::sys::fs::is_served(source) => Some(crate::sys::fs::read_image(source)?),
-            (None, None) => None,
-        };
-        let spawned = request.direct(&direct_env, image.as_ref());
-        // The child keeps the object alive; this process's handle, and with it
-        // its own mapping, goes.
+        // The child keeps the image alive; this process's handle, and with it
+        // its own mapping, goes, and so do the copies its descriptors were made from.
         drop(image);
         drop(held);
-        let handle = spawned.map_err(refused)?;
+        let handle = handle.map_err(refused)?;
         Ok((Process { handle }, pipes(stdin_pipe, stdout_pipe, stderr_pipe)))
     }
 
@@ -369,26 +485,26 @@ impl Command {
         stdio: &Stdio,
         fd: u32,
         is_input: bool,
-    ) -> io::Result<Option<toyos::OwnedHandle>> {
+    ) -> io::Result<Option<(toyos::OwnedHandle, toyos::fd::Kind)>> {
         // What this process's own descriptor names, if it is open: one it
         // closed is closed in the child too.
         let inherit = |from: i32| toyos::fd::copy(from).map_err(refused);
-        // SAFETY: each `dup` answers a fresh handle nothing else answers for.
-        let copy = |pipe: &Pipe| pipe.with_handle(toyos_abi::syscall::dup)?.map(|h| unsafe { toyos::OwnedHandle::from_raw(h) }).map_err(crate::sys::to_io_error);
+        let copy = |pipe: &Pipe| pipe.with_handle(|h| h.try_clone_to_owned())?.map_err(crate::sys::to_io_error);
+        let handle = |handle| Some((handle, toyos::fd::Kind::Handle));
         Ok(match stdio {
             Stdio::Inherit => inherit(fd as i32)?,
             Stdio::MakePipe | Stdio::MakeTtyPipe => {
                 let (r, w) = crate::sys::pipe::pipe()?;
                 if matches!(stdio, Stdio::MakeTtyPipe) {
-                    r.with_handle(toyos_abi::syscall::mark_tty)?;
-                    w.with_handle(toyos_abi::syscall::mark_tty)?;
+                    r.with_handle(|h| toyos_abi::syscall::mark_tty(h.raw()))?;
+                    w.with_handle(|h| toyos_abi::syscall::mark_tty(h.raw()))?;
                 }
                 let (theirs, ours) = if is_input { (r, w) } else { (w, r) };
                 *parent_pipe = Some(ours);
-                Some(copy(&theirs)?)
+                handle(copy(&theirs)?)
             }
-            Stdio::InheritFile(file) => Some(file.as_child_stdio()?),
-            Stdio::InheritPipe(pipe) => Some(copy(pipe)?),
+            Stdio::InheritFile(file) => handle(file.as_child_stdio()?),
+            Stdio::InheritPipe(pipe) => handle(copy(pipe)?),
             Stdio::ParentStdout => inherit(1)?,
             Stdio::ParentStderr => inherit(2)?,
             Stdio::Null => {
@@ -396,7 +512,7 @@ impl Command {
                 let direction = if is_input { Rights::READ } else { Rights::WRITE };
                 let null = toyos::null(direction.union(Rights::DUP).union(Rights::TRANSFER).union(Rights::WAIT))
                     .map_err(crate::sys::to_io_error)?;
-                Some(null)
+                handle(null)
             }
         })
     }
@@ -593,14 +709,12 @@ impl Process {
         self.handle.wait().map(ExitStatus).map_err(|_| io::Error::from(io::ErrorKind::Other))
     }
 
-    /// See `os::toyos::process::ChildExt::as_raw_handle`.
-    pub fn as_raw_handle(&self) -> u32 {
-        toyos::AsHandle::as_handle(&self.handle).0
+    pub fn handle(&self) -> toyos::BorrowedHandle<'_> {
+        toyos::AsHandle::as_handle(&self.handle)
     }
 
-    /// Give up the handle. See `os::toyos::process::ChildExt::into_raw_handle`.
-    pub fn into_raw_handle(self) -> u32 {
-        self.handle.into_raw().0
+    pub fn into_handle(self) -> toyos::OwnedHandle {
+        self.handle.into()
     }
 
     pub fn try_wait(&mut self) -> io::Result<Option<ExitStatus>> {

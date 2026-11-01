@@ -105,7 +105,7 @@ pub const EFI_LOADER_DATA: u32 = 2;
 const EFI_BOOT_SERVICES_CODE: u32 = 3;
 const EFI_BOOT_SERVICES_DATA: u32 = 4;
 const EFI_CONVENTIONAL_MEMORY: u32 = 7;
-const EFI_ACPI_RECLAIM_MEMORY: u32 = 9;
+pub const EFI_ACPI_RECLAIM_MEMORY: u32 = 9;
 const EFI_ACPI_MEMORY_NVS: u32 = 10;
 
 /// Whether a UEFI memory type becomes free RAM the pmm hands out.

@@ -86,7 +86,7 @@ fn server() {
     // The child is spawned holding exactly one connector, and it points here.
     let mut child = Command::new(SELF_PATH)
         .arg("client")
-        .endow(SVC_LABEL, child_ns.into_raw().0)
+        .endow(SVC_LABEL, child_ns.into())
         .stdout(Stdio::inherit())
         .spawn()
         .expect("window_refusal: spawn the client");
@@ -108,10 +108,11 @@ fn server() {
 fn serve_one(acceptor: &Acceptor, reply: Reply) {
     let accepted = acceptor.accept().expect("accept a client");
     let handle = accepted.as_handle();
-    let header = ipc::recv_header(handle).expect("request header");
-    assert_eq!(header.msg_type, window::MSG_CREATE_WINDOW, "client sent the wrong request");
+    let mut rx = ipc::FrameRx::<{ core::mem::size_of::<window::CreateWindowRequest>() }>::new();
+    let frame = rx.recv(&handle).expect("the request");
+    assert_eq!(frame.msg_type, window::MSG_CREATE_WINDOW, "client sent the wrong request");
     let _req: window::CreateWindowRequest =
-        ipc::recv_payload(handle, &header).expect("request payload");
+        ipc::decode_payload(rx.payload(frame.payload_len)).expect("request payload");
     match reply {
         Reply::Refuse(reason) => {
             ipc::send(handle, window::MSG_WINDOW_REFUSED, &window::WindowRefused { reason })

@@ -5,7 +5,8 @@ use alloc::vec;
 use alloc::vec::Vec;
 
 use crate::boot::{Cluster, FsInfo, Geometry};
-use crate::device::BlockAccess;
+use toyos_blockdev::BlockDev;
+use crate::device::Volume as _;
 use crate::dir::{DirScan, RawEntry, ATTR_ARCHIVE, ATTR_DIRECTORY, ATTR_READ_ONLY, MAX_DIR_ENTRIES};
 use crate::error::Error;
 use crate::fat::END_OF_CHAIN;
@@ -28,7 +29,7 @@ const MAX_WALK_DEPTH: usize = 32;
 static ZEROS: [u8; 512] = [0u8; 512];
 
 /// A mounted FAT32 volume.
-pub struct Fat32<D: BlockAccess> {
+pub struct Fat32<D: BlockDev> {
     pub(crate) dev: D,
     pub(crate) geom: Geometry,
     pub(crate) fsinfo: FsInfo,
@@ -161,6 +162,8 @@ pub struct DirEntry {
     pub len: u64,
     pub is_dir: bool,
     pub modified_unix: u64,
+    /// What [`Fat32::entry_offset`] answers for its path.
+    pub entry_offset: u64,
 }
 
 /// A contiguous run of a file's data, as a byte range on the device.
@@ -226,23 +229,23 @@ fn split_parent(path: &str) -> (&str, &str) {
     }
 }
 
-impl<D: BlockAccess> Fat32<D> {
+impl<D: BlockDev> Fat32<D> {
     /// Read and validate the boot sector without taking ownership.
     ///
-    /// The kernel decides what to do with a partition before it mounts it, and
+    /// A server decides what to do with a partition before it mounts it, and
     /// that decision must not require a mount that might already have written
     /// something. Nothing on the mount path writes, so this is a total read —
     /// the crate as a whole writes plenty, which is its headline.
-    pub fn probe(dev: &mut D) -> Result<Geometry, Error> {
+    pub async fn probe(dev: &D) -> Result<Geometry, Error> {
         let mut boot = [0u8; 512];
-        dev.read_at(0, &mut boot)?;
-        Geometry::parse(&boot, dev.capacity())
+        dev.read_at(0, &mut boot).await?;
+        Geometry::parse(&boot, dev.blocks().saturating_mul(toyos_blockdev::BLOCK as u64))
     }
 
-    pub fn mount(mut dev: D) -> Result<Fat32<D>, Error> {
-        let geom = Self::probe(&mut dev)?;
+    pub async fn mount(dev: D) -> Result<Fat32<D>, Error> {
+        let geom = Self::probe(&dev).await?;
         let mut scratch = vec![0u8; geom.bytes_per_sector as usize];
-        let fsinfo = FsInfo::read(&mut dev, &geom, &mut scratch);
+        let fsinfo = FsInfo::read(&dev, &geom, &mut scratch).await;
         Ok(Fat32 {
             dev,
             geom,
@@ -268,13 +271,13 @@ impl<D: BlockAccess> Fat32<D> {
         self.dev
     }
 
-    pub(crate) fn load_sector(&mut self, offset: u64) -> Result<(), Error> {
+    pub(crate) async fn load_sector(&mut self, offset: u64) -> Result<(), Error> {
         if self.scratch_at == Some(offset) {
             return Ok(());
         }
         let bps = self.geom.bytes_per_sector as usize;
         let buf = self.scratch.get_mut(..bps).ok_or(Error::Io)?;
-        self.dev.read_at(offset, buf)?;
+        self.dev.read_at(offset, buf).await?;
         self.scratch_at = Some(offset);
         Ok(())
     }
@@ -289,13 +292,13 @@ impl<D: BlockAccess> Fat32<D> {
 
     // ---------------------------------------------------------------- lookup
 
-    fn find_in_dir(
+    async fn find_in_dir(
         &mut self,
         dir_start: Cluster,
         name: &str,
     ) -> Result<Option<(RawEntry, Loc)>, Error> {
         let mut scan = DirScan::new(dir_start);
-        while let Some(found) = scan.next(self)? {
+        while let Some(found) = scan.next(self).await? {
             if scan.name_eq(&found, name) {
                 let loc = Loc {
                     dir_start,
@@ -334,14 +337,14 @@ impl<D: BlockAccess> Fat32<D> {
         Ok(Node { raw: *raw, first_cluster: first, loc: Some(loc) })
     }
 
-    fn resolve(&mut self, path: &str) -> Result<Node, Error> {
+    async fn resolve(&mut self, path: &str) -> Result<Node, Error> {
         let mut node = self.root_node();
         for comp in components(path) {
             if !node.raw.is_dir() {
                 return Err(Error::NotADirectory);
             }
             let dir_start = node.first_cluster.ok_or(Error::NotADirectory)?;
-            let Some((raw, loc)) = self.find_in_dir(dir_start, comp)? else {
+            let Some((raw, loc)) = self.find_in_dir(dir_start, comp).await? else {
                 return Err(Error::NotFound);
             };
             node = self.node_from_entry(&raw, loc)?;
@@ -349,16 +352,16 @@ impl<D: BlockAccess> Fat32<D> {
         Ok(node)
     }
 
-    fn resolve_dir(&mut self, path: &str) -> Result<Cluster, Error> {
-        let node = self.resolve(path)?;
+    async fn resolve_dir(&mut self, path: &str) -> Result<Cluster, Error> {
+        let node = self.resolve(path).await?;
         if !node.raw.is_dir() {
             return Err(Error::NotADirectory);
         }
         node.first_cluster.ok_or(Error::CorruptDirectory)
     }
 
-    pub fn metadata(&mut self, path: &str) -> Result<Metadata, Error> {
-        let node = self.resolve(path)?;
+    pub async fn metadata(&mut self, path: &str) -> Result<Metadata, Error> {
+        let node = self.resolve(path).await?;
         Ok(Metadata {
             len: if node.raw.is_dir() { 0 } else { node.raw.size() as u64 },
             is_dir: node.raw.is_dir(),
@@ -367,8 +370,8 @@ impl<D: BlockAccess> Fat32<D> {
         })
     }
 
-    pub fn exists(&mut self, path: &str) -> Result<bool, Error> {
-        match self.resolve(path) {
+    pub async fn exists(&mut self, path: &str) -> Result<bool, Error> {
+        match self.resolve(path).await {
             Ok(_) => Ok(true),
             Err(Error::NotFound) | Err(Error::NotADirectory) => Ok(false),
             Err(e) => Err(e),
@@ -378,9 +381,9 @@ impl<D: BlockAccess> Fat32<D> {
     /// Whether two paths name the same directory entry — identity is the entry's
     /// location, so case and 8.3/long variants of one name match. `false` when
     /// `b` is absent.
-    pub fn same_entry(&mut self, a: &str, b: &str) -> Result<bool, Error> {
-        let a_loc = self.resolve(a)?.loc;
-        let b_loc = match self.resolve(b) {
+    pub async fn same_entry(&mut self, a: &str, b: &str) -> Result<bool, Error> {
+        let a_loc = self.resolve(a).await?.loc;
+        let b_loc = match self.resolve(b).await {
             Ok(node) => node.loc,
             Err(Error::NotFound) | Err(Error::NotADirectory) => return Ok(false),
             Err(e) => return Err(e),
@@ -392,8 +395,8 @@ impl<D: BlockAccess> Fat32<D> {
     /// identity, so every spelling of one name answers it and no other entry
     /// shares it while that one exists. 0 for the root, which has no entry and
     /// whose offset no entry can have.
-    pub fn entry_offset(&mut self, path: &str) -> Result<u64, Error> {
-        Ok(self.resolve(path)?.loc.map_or(0, |loc| loc.entry_offset))
+    pub async fn entry_offset(&mut self, path: &str) -> Result<u64, Error> {
+        Ok(self.resolve(path).await?.loc.map_or(0, |loc| loc.entry_offset))
     }
 
     /// Every entry of one directory, refusing above `limit`.
@@ -401,11 +404,11 @@ impl<D: BlockAccess> Fat32<D> {
     /// Refuses rather than truncating: a listing short of the truth is worse
     /// than no listing, because a caller checking that a name is absent gets a
     /// confident wrong answer.
-    pub fn read_dir(&mut self, path: &str, limit: usize) -> Result<Vec<DirEntry>, Error> {
-        let dir_start = self.resolve_dir(path)?;
+    pub async fn read_dir(&mut self, path: &str, limit: usize) -> Result<Vec<DirEntry>, Error> {
+        let dir_start = self.resolve_dir(path).await?;
         let mut out = Vec::new();
         let mut scan = DirScan::new(dir_start);
-        while let Some(loc) = scan.next(self)? {
+        while let Some(loc) = scan.next(self).await? {
             if out.len() == limit {
                 return Err(Error::LimitExceeded);
             }
@@ -414,6 +417,7 @@ impl<D: BlockAccess> Fat32<D> {
                 len: if loc.raw.is_dir() { 0 } else { loc.raw.size() as u64 },
                 is_dir: loc.raw.is_dir(),
                 modified_unix: loc.raw.write_time().to_unix_secs(),
+                entry_offset: loc.offset,
             });
         }
         Ok(out)
@@ -433,7 +437,7 @@ impl<D: BlockAccess> Fat32<D> {
     /// because the tree is on-disk data and a crafted volume can make it a
     /// graph. `limit` bounds files and directories alike; either exceeding it
     /// abandons the whole listing.
-    pub fn walk(&mut self, under: &str, limit: usize) -> Result<Vec<(String, u64)>, Error> {
+    pub async fn walk(&mut self, under: &str, limit: usize) -> Result<Vec<(String, u64)>, Error> {
         let mut out = Vec::new();
         let mut visited = BTreeSet::new();
         let mut queue: Vec<(Cluster, String, usize)> = Vec::new();
@@ -441,7 +445,7 @@ impl<D: BlockAccess> Fat32<D> {
         let (start, start_prefix) = if under.is_empty() {
             (self.geom.root(), String::new())
         } else {
-            let node = self.resolve(under)?;
+            let node = self.resolve(under).await?;
             // Before the cluster is asked for: an empty file's first cluster is
             // `None`, which is what having no data looks like and not a corrupt
             // directory.
@@ -465,7 +469,7 @@ impl<D: BlockAccess> Fat32<D> {
 
         while let Some((cluster, prefix, depth)) = queue.pop() {
             let mut scan = DirScan::new(cluster);
-            while let Some(loc) = scan.next(self)? {
+            while let Some(loc) = scan.next(self).await? {
                 let name = scan.name_string(&loc);
                 let mut path = String::with_capacity(prefix.len() + name.len() + 1);
                 path.push_str(&prefix);
@@ -501,8 +505,8 @@ impl<D: BlockAccess> Fat32<D> {
     /// Open a file. Directories are refused — nothing here reads a directory
     /// as a byte stream, and letting a caller try would hand it 32-byte
     /// entries it has no way to interpret.
-    pub fn open(&mut self, path: &str) -> Result<File, Error> {
-        let node = self.resolve(path)?;
+    pub async fn open(&mut self, path: &str) -> Result<File, Error> {
+        let node = self.resolve(path).await?;
         if node.raw.is_dir() {
             return Err(Error::IsADirectory);
         }
@@ -531,8 +535,8 @@ impl<D: BlockAccess> Fat32<D> {
     ///
     /// The cost is one 32-byte read, and it is almost always the sector
     /// already in `scratch`.
-    fn live_entry(&mut self, f: &File) -> Result<RawEntry, Error> {
-        let raw = self.read_entry_at(f.loc.entry_offset)?;
+    async fn live_entry(&mut self, f: &File) -> Result<RawEntry, Error> {
+        let raw = self.read_entry_at(f.loc.entry_offset).await?;
         if raw.is_free()
             || raw.is_lfn()
             || EntryIdentity::of(&raw) != f.identity
@@ -545,7 +549,7 @@ impl<D: BlockAccess> Fat32<D> {
 
     /// The cluster holding chain index `index`, walking from the handle's last
     /// known position when that is not behind it.
-    fn cluster_at(&mut self, f: &mut File, index: u32) -> Result<Option<Cluster>, Error> {
+    async fn cluster_at(&mut self, f: &mut File, index: u32) -> Result<Option<Cluster>, Error> {
         let Some(first) = f.first_cluster else { return Ok(None) };
         let (from, steps) = match f.hint {
             Some((hint_index, hint_cluster)) if hint_index <= index => {
@@ -553,7 +557,7 @@ impl<D: BlockAccess> Fat32<D> {
             }
             _ => (first, index as u64),
         };
-        let found = self.advance(from, steps)?;
+        let found = self.advance(from, steps).await?;
         if let Some(c) = found {
             f.hint = Some((index, c));
         }
@@ -563,11 +567,11 @@ impl<D: BlockAccess> Fat32<D> {
     /// How many clusters past `index` are physically contiguous with it, up to
     /// `want`. Turns a sequential read of a defragmented file into one device
     /// call per run instead of one per cluster.
-    fn contiguous_run(&mut self, start: Cluster, want: u64) -> Result<(u64, Cluster), Error> {
+    async fn contiguous_run(&mut self, start: Cluster, want: u64) -> Result<(u64, Cluster), Error> {
         let mut run = 1u64;
         let mut last = start;
         while run < want {
-            match self.next_cluster(last)? {
+            match self.next_cluster(last).await? {
                 Some(next) if next.raw() == last.raw() + 1 => {
                     last = next;
                     run += 1;
@@ -578,7 +582,7 @@ impl<D: BlockAccess> Fat32<D> {
         Ok((run, last))
     }
 
-    pub fn read(&mut self, f: &mut File, offset: u64, buf: &mut [u8]) -> Result<usize, Error> {
+    pub async fn read(&mut self, f: &mut File, offset: u64, buf: &mut [u8]) -> Result<usize, Error> {
         if offset >= f.size as u64 {
             return Ok(0);
         }
@@ -590,15 +594,15 @@ impl<D: BlockAccess> Fat32<D> {
             let pos = offset + done as u64;
             let index = (pos / bpc) as u32;
             let within = pos % bpc;
-            let cluster = self.cluster_at(f, index)?.ok_or(Error::CorruptChain)?;
+            let cluster = self.cluster_at(f, index).await?.ok_or(Error::CorruptChain)?;
             let want = (within + (n - done) as u64).div_ceil(bpc);
-            let (run, last) = self.contiguous_run(cluster, want)?;
+            let (run, last) = self.contiguous_run(cluster, want).await?;
             f.hint = Some((index + run as u32 - 1, last));
 
             let chunk = ((run * bpc - within) as usize).min(n - done);
             let dst = buf.get_mut(done..done + chunk).ok_or(Error::Io)?;
             let at = self.geom.cluster_offset(cluster) + within;
-            self.dev.read_at(at, dst)?;
+            self.dev.read_data_at(at, dst).await?;
             done += chunk;
         }
         Ok(n)
@@ -613,7 +617,7 @@ impl<D: BlockAccess> Fat32<D> {
     ///
     /// The repair it leaves is two steps however far it grew: terminate the
     /// chain where it ended, then free what was grown past it.
-    fn ensure_capacity(&mut self, f: &mut File, need: u64) -> Result<(), Error> {
+    async fn ensure_capacity(&mut self, f: &mut File, need: u64) -> Result<(), Error> {
         if need == 0 {
             return Ok(());
         }
@@ -627,7 +631,7 @@ impl<D: BlockAccess> Fat32<D> {
         let first = match f.first_cluster {
             Some(c) => c,
             None => {
-                let c = self.alloc_cluster()?;
+                let c = self.alloc_cluster().await?;
                 self.repair.truncate(mark);
                 self.queue(Repair::Free { start: c, anchor: None });
                 grown = Some((None, c));
@@ -638,10 +642,10 @@ impl<D: BlockAccess> Fat32<D> {
         };
         let (mut index, mut cluster) = f.hint.unwrap_or((0, first));
         while (index as u64) + 1 < want {
-            cluster = match self.next_cluster(cluster)? {
+            cluster = match self.next_cluster(cluster).await? {
                 Some(next) => next,
                 None => {
-                    let new = self.append_cluster(cluster)?;
+                    let new = self.append_cluster(cluster).await?;
                     let (end, head) = *grown.get_or_insert((Some(cluster), new));
                     self.repair.truncate(mark);
                     self.queue(Repair::Free { start: head, anchor: None });
@@ -658,23 +662,23 @@ impl<D: BlockAccess> Fat32<D> {
     }
 
     /// Write bytes into space that is already allocated.
-    fn write_allocated(&mut self, f: &mut File, offset: u64, data: &[u8]) -> Result<(), Error> {
+    async fn write_allocated(&mut self, f: &mut File, offset: u64, data: &[u8]) -> Result<(), Error> {
         let bpc = self.geom.bytes_per_cluster() as u64;
         let mut done = 0usize;
         while done < data.len() {
             let pos = offset + done as u64;
             let index = (pos / bpc) as u32;
             let within = pos % bpc;
-            let cluster = self.cluster_at(f, index)?.ok_or(Error::CorruptChain)?;
+            let cluster = self.cluster_at(f, index).await?.ok_or(Error::CorruptChain)?;
             let want = (within + (data.len() - done) as u64).div_ceil(bpc);
-            let (run, last) = self.contiguous_run(cluster, want)?;
+            let (run, last) = self.contiguous_run(cluster, want).await?;
             f.hint = Some((index + run as u32 - 1, last));
 
             let chunk = ((run * bpc - within) as usize).min(data.len() - done);
             let src = data.get(done..done + chunk).ok_or(Error::Io)?;
             let at = self.geom.cluster_offset(cluster) + within;
             self.invalidate_sector();
-            self.dev.write_at(at, src)?;
+            self.dev.write_data_at(at, src).await?;
             done += chunk;
         }
         Ok(())
@@ -683,11 +687,11 @@ impl<D: BlockAccess> Fat32<D> {
     /// FAT has no holes, so a write past the end has to fill what it skipped.
     /// Newly allocated clusters hold whatever the last file to own them left
     /// behind, and handing that to a reader is a cross-file data leak.
-    fn zero_range(&mut self, f: &mut File, from: u64, to: u64) -> Result<(), Error> {
+    async fn zero_range(&mut self, f: &mut File, from: u64, to: u64) -> Result<(), Error> {
         let mut at = from;
         while at < to {
             let chunk = ((to - at) as usize).min(ZEROS.len());
-            self.write_allocated(f, at, &ZEROS[..chunk])?;
+            self.write_allocated(f, at, &ZEROS[..chunk]).await?;
             at += chunk as u64;
         }
         Ok(())
@@ -712,7 +716,7 @@ impl<D: BlockAccess> Fat32<D> {
     /// Only the handle is updated; the directory entry still holds the old
     /// size until [`Fat32::flush_meta`]. That split is what lets a caller
     /// write a file in pages and pay for one metadata update.
-    pub fn write(&mut self, f: &mut File, offset: u64, data: &[u8]) -> Result<(), Error> {
+    pub async fn write(&mut self, f: &mut File, offset: u64, data: &[u8]) -> Result<(), Error> {
         let end = offset.checked_add(data.len() as u64).ok_or(Error::TooLarge)?;
         if end > MAX_FILE_SIZE {
             return Err(Error::TooLarge);
@@ -721,14 +725,14 @@ impl<D: BlockAccess> Fat32<D> {
             return Ok(());
         }
         let before = *f;
-        self.atomic(|fs| {
-            fs.live_entry(f)?;
-            fs.write_inner(f, offset, data, end, before.size as u64)
-        })
+        self.atomic(async |fs| {
+            fs.live_entry(f).await?;
+            fs.write_inner(f, offset, data, end, before.size as u64).await
+        }).await
         .inspect_err(|_| *f = before)
     }
 
-    fn write_inner(
+    async fn write_inner(
         &mut self,
         f: &mut File,
         offset: u64,
@@ -736,15 +740,49 @@ impl<D: BlockAccess> Fat32<D> {
         end: u64,
         old_size: u64,
     ) -> Result<(), Error> {
-        self.ensure_capacity(f, end)?;
+        self.reserve_inner(f, offset, end, old_size).await?;
+        self.write_allocated(f, offset, data).await
+    }
+
+    async fn reserve_inner(&mut self, f: &mut File, offset: u64, end: u64, old_size: u64) -> Result<(), Error> {
+        self.ensure_capacity(f, end).await?;
         if offset > old_size {
-            self.zero_range(f, old_size, offset)?;
+            self.zero_range(f, old_size, offset).await?;
         }
-        self.write_allocated(f, offset, data)?;
         if end > old_size {
             f.size = end as u32;
         }
         Ok(())
+    }
+
+    /// The first half of a [`Self::write`] of `len` bytes at `offset`: the
+    /// chain covers them, what lies between the old end and `offset` is
+    /// zeroed, and the size reaches their end; their bytes are not written,
+    /// and read as whatever the clusters held until [`Self::write_back`]
+    /// writes them. All or nothing, as a write.
+    pub async fn reserve(&mut self, f: &mut File, offset: u64, len: u64) -> Result<(), Error> {
+        let end = offset.checked_add(len).ok_or(Error::TooLarge)?;
+        if end > MAX_FILE_SIZE {
+            return Err(Error::TooLarge);
+        }
+        if len == 0 {
+            return Ok(());
+        }
+        let before = *f;
+        self.atomic(async |fs| {
+            fs.live_entry(f).await?;
+            fs.reserve_inner(f, offset, end, before.size as u64).await
+        }).await
+        .inspect_err(|_| *f = before)
+    }
+
+    /// `data` at `offset`, inside the file's size, into the clusters it
+    /// already holds: the second half of a [`Self::write`].
+    pub async fn write_back(&mut self, f: &mut File, offset: u64, data: &[u8]) -> Result<(), Error> {
+        match offset.checked_add(data.len() as u64) {
+            Some(end) if end <= f.size as u64 => self.write_allocated(f, offset, data).await,
+            _ => Err(Error::TooLarge),
+        }
     }
 
     /// Set a file's length, allocating and zeroing on growth and releasing
@@ -753,23 +791,23 @@ impl<D: BlockAccess> Fat32<D> {
     /// A growth that fails is undone like a failed [`Self::write`]. A shrink
     /// that fails once it has begun freeing has shrunk: the handle says so,
     /// and the rest of the free is queued (see [`Self::free_chain`]).
-    pub fn set_len(&mut self, f: &mut File, len: u64) -> Result<(), Error> {
+    pub async fn set_len(&mut self, f: &mut File, len: u64) -> Result<(), Error> {
         if len > MAX_FILE_SIZE {
             return Err(Error::TooLarge);
         }
         let before = *f;
-        self.atomic(|fs| {
-            fs.live_entry(f)?;
+        self.atomic(async |fs| {
+            fs.live_entry(f).await?;
             let old = f.size as u64;
             if len > old {
-                fs.ensure_capacity(f, len)?;
-                fs.zero_range(f, old, len)?;
+                fs.ensure_capacity(f, len).await?;
+                fs.zero_range(f, old, len).await?;
                 f.size = len as u32;
             } else if len < old {
-                fs.shrink_chain(f, len)?;
+                fs.shrink_chain(f, len).await?;
             }
             Ok(())
-        })
+        }).await
         .inspect_err(|_| {
             if len > before.size as u64 {
                 *f = before;
@@ -781,7 +819,7 @@ impl<D: BlockAccess> Fat32<D> {
     /// the handle once the repair carries the shrink: a refusal before that
     /// has written nothing, and the handle's old size is what makes the retry
     /// shrink again.
-    fn shrink_chain(&mut self, f: &mut File, len: u64) -> Result<(), Error> {
+    async fn shrink_chain(&mut self, f: &mut File, len: u64) -> Result<(), Error> {
         let bpc = self.geom.bytes_per_cluster() as u64;
         let keep = len.div_ceil(bpc);
         f.hint = None;
@@ -792,17 +830,17 @@ impl<D: BlockAccess> Fat32<D> {
         // Before anything is written: this is the one operation that keeps
         // part of a chain and frees the rest, and a loop between the two
         // halves is how live clusters reach the allocator.
-        self.verify_acyclic(first)?;
+        self.verify_acyclic(first).await?;
         if keep == 0 {
             f.first_cluster = None;
             f.size = len as u32;
-            return self.free_chain(first, None);
+            return self.free_chain(first, None).await;
         }
-        let last = self.advance(first, keep - 1)?.ok_or(Error::CorruptChain)?;
-        let tail = self.next_cluster(last)?;
+        let last = self.advance(first, keep - 1).await?.ok_or(Error::CorruptChain)?;
+        let tail = self.next_cluster(last).await?;
         f.size = len as u32;
         match tail {
-            Some(tail) => self.truncate_chain(last, tail),
+            Some(tail) => self.truncate_chain(last, tail).await,
             None => Ok(()),
         }
     }
@@ -812,16 +850,16 @@ impl<D: BlockAccess> Fat32<D> {
     ///
     /// Refuses if the entry no longer holds the cluster this handle last saw
     /// written there — see [`File`].
-    pub fn flush_meta(&mut self, f: &mut File, time: FatTime) -> Result<(), Error> {
-        self.atomic(|fs| fs.record_meta(f, time))
+    pub async fn flush_meta(&mut self, f: &mut File, time: FatTime) -> Result<(), Error> {
+        self.atomic(async |fs| fs.record_meta(f, time).await).await
     }
 
-    fn record_meta(&mut self, f: &mut File, time: FatTime) -> Result<(), Error> {
-        let mut raw = self.live_entry(f)?;
+    async fn record_meta(&mut self, f: &mut File, time: FatTime) -> Result<(), Error> {
+        let mut raw = self.live_entry(f).await?;
         raw.set_first_cluster(f.first_cluster.map_or(0, Cluster::raw));
         raw.set_size(f.size);
         raw.set_write_time(time);
-        self.write_entry_at(f.loc.entry_offset, &raw)?;
+        self.write_entry_at(f.loc.entry_offset, &raw).await?;
         f.entry_cluster = f.first_cluster;
         f.entry_size = f.size;
         Ok(())
@@ -842,15 +880,15 @@ impl<D: BlockAccess> Fat32<D> {
     /// A caller that does not reach this — a reset, a panic — leaves the
     /// inconsistency, which is the honest limit: FAT has no journal and this
     /// crate does not pretend to one.
-    pub fn reconcile(&mut self, f: &mut File, time: FatTime) -> Result<(), Error> {
-        self.atomic(|fs| {
-            fs.live_entry(f)?;
+    pub async fn reconcile(&mut self, f: &mut File, time: FatTime) -> Result<(), Error> {
+        self.atomic(async |fs| {
+            fs.live_entry(f).await?;
             // Before the entry: an entry naming a size the chain does not cover
             // is a reader walking off the end of a chain, which is worse than
             // the slack this is here to remove.
-            fs.shrink_chain(f, f.size as u64)?;
-            fs.record_meta(f, time)
-        })
+            fs.shrink_chain(f, f.size as u64).await?;
+            fs.record_meta(f, time).await
+        }).await
     }
 
     /// The device byte ranges holding a file's data, coalesced.
@@ -859,8 +897,8 @@ impl<D: BlockAccess> Fat32<D> {
     /// back through this crate. Bounded by `max`: a fragmented file has one
     /// extent per cluster, and how many of those a caller can hold is the
     /// caller's business, not the volume's.
-    pub fn extents(&mut self, path: &str, max: usize) -> Result<Vec<Extent>, Error> {
-        let node = self.resolve(path)?;
+    pub async fn extents(&mut self, path: &str, max: usize) -> Result<Vec<Extent>, Error> {
+        let node = self.resolve(path).await?;
         if node.raw.is_dir() {
             return Err(Error::IsADirectory);
         }
@@ -874,7 +912,7 @@ impl<D: BlockAccess> Fat32<D> {
         let mut cluster = node.first_cluster.ok_or(Error::CorruptDirectory)?;
         while covered < size {
             let want = (size - covered).div_ceil(bpc);
-            let (run, last) = self.contiguous_run(cluster, want)?;
+            let (run, last) = self.contiguous_run(cluster, want).await?;
             let len = (run * bpc).min(size - covered);
             if out.len() == max {
                 return Err(Error::LimitExceeded);
@@ -884,39 +922,39 @@ impl<D: BlockAccess> Fat32<D> {
             if covered >= size {
                 break;
             }
-            cluster = self.next_cluster(last)?.ok_or(Error::CorruptChain)?;
+            cluster = self.next_cluster(last).await?.ok_or(Error::CorruptChain)?;
         }
         Ok(out)
     }
 
     // ------------------------------------------------------------ namespace
 
-    fn parent_of(&mut self, path: &str) -> Result<(Cluster, String), Error> {
+    async fn parent_of(&mut self, path: &str) -> Result<(Cluster, String), Error> {
         let (parent, name) = split_parent(path);
         if name.is_empty() {
             return Err(Error::InvalidName);
         }
-        let dir = self.resolve_dir(parent)?;
+        let dir = self.resolve_dir(parent).await?;
         Ok((dir, String::from(name)))
     }
 
     /// Create an empty file. Fails if anything of that name already exists —
     /// a create that silently opened an existing file would let a caller
     /// believe it owns bytes another writer put there.
-    pub fn create(&mut self, path: &str, time: FatTime) -> Result<File, Error> {
-        self.atomic(|fs| fs.create_file(path, time))
+    pub async fn create(&mut self, path: &str, time: FatTime) -> Result<File, Error> {
+        self.atomic(async |fs| fs.create_file(path, time).await).await
     }
 
-    fn create_file(&mut self, path: &str, time: FatTime) -> Result<File, Error> {
-        let (dir, name) = self.parent_of(path)?;
-        if self.find_in_dir(dir, &name)?.is_some() {
+    async fn create_file(&mut self, path: &str, time: FatTime) -> Result<File, Error> {
+        let (dir, name) = self.parent_of(path).await?;
+        if self.find_in_dir(dir, &name).await?.is_some() {
             return Err(Error::AlreadyExists);
         }
         let mut template = RawEntry::zeroed();
         template.set_attr(ATTR_ARCHIVE);
         template.set_create_time(time);
         template.set_write_time(time);
-        let (loc, written) = self.insert_entry(dir, &name, &template)?;
+        let (loc, written) = self.insert_entry(dir, &name, &template).await?;
         Ok(File {
             loc,
             identity: EntryIdentity::of(&written),
@@ -928,13 +966,13 @@ impl<D: BlockAccess> Fat32<D> {
         })
     }
 
-    pub fn create_dir(&mut self, path: &str, time: FatTime) -> Result<(), Error> {
-        self.atomic(|fs| fs.make_dir(path, time))
+    pub async fn create_dir(&mut self, path: &str, time: FatTime) -> Result<(), Error> {
+        self.atomic(async |fs| fs.make_dir(path, time).await).await
     }
 
-    fn make_dir(&mut self, path: &str, time: FatTime) -> Result<(), Error> {
-        let (dir, name) = self.parent_of(path)?;
-        if self.find_in_dir(dir, &name)?.is_some() {
+    async fn make_dir(&mut self, path: &str, time: FatTime) -> Result<(), Error> {
+        let (dir, name) = self.parent_of(path).await?;
+        if self.find_in_dir(dir, &name).await?.is_some() {
             return Err(Error::AlreadyExists);
         }
         name::validate_component(&name)?;
@@ -942,30 +980,30 @@ impl<D: BlockAccess> Fat32<D> {
         // The cluster is prepared before the entry that names it exists, so a
         // stop here leaks a cluster rather than leaving a directory entry
         // pointing at uninitialised bytes that would read as entries.
-        let cluster = self.alloc_zeroed_cluster()?;
-        self.init_dot_entries(cluster, dir, time)?;
+        let cluster = self.alloc_zeroed_cluster().await?;
+        self.init_dot_entries(cluster, dir, time).await?;
 
         let mut template = RawEntry::zeroed();
         template.set_attr(ATTR_DIRECTORY);
         template.set_first_cluster(cluster.raw());
         template.set_create_time(time);
         template.set_write_time(time);
-        self.insert_entry(dir, &name, &template)?;
+        self.insert_entry(dir, &name, &template).await?;
         Ok(())
     }
 
     /// Create every missing directory along a path.
-    pub fn create_dir_all(&mut self, path: &str, time: FatTime) -> Result<(), Error> {
+    pub async fn create_dir_all(&mut self, path: &str, time: FatTime) -> Result<(), Error> {
         let mut so_far = String::new();
         for comp in components(path) {
             if !so_far.is_empty() {
                 so_far.push('/');
             }
             so_far.push_str(comp);
-            match self.metadata(&so_far) {
+            match self.metadata(&so_far).await {
                 Ok(m) if m.is_dir => continue,
                 Ok(_) => return Err(Error::NotADirectory),
-                Err(Error::NotFound) => self.create_dir(&so_far, time)?,
+                Err(Error::NotFound) => self.create_dir(&so_far, time).await?,
                 Err(e) => return Err(e),
             }
         }
@@ -989,17 +1027,17 @@ impl<D: BlockAccess> Fat32<D> {
     /// corrupt part way through the free is the one `Err` after the erase —
     /// the name is gone, what could not be followed leaks, and that answer is
     /// its only record.
-    pub fn remove(&mut self, path: &str) -> Result<(), Error> {
-        self.atomic(|fs| {
-            let (dir, name) = fs.parent_of(path)?;
-            let Some((raw, loc)) = fs.find_in_dir(dir, &name)? else {
+    pub async fn remove(&mut self, path: &str) -> Result<(), Error> {
+        self.atomic(async |fs| {
+            let (dir, name) = fs.parent_of(path).await?;
+            let Some((raw, loc)) = fs.find_in_dir(dir, &name).await? else {
                 return Err(Error::NotFound);
             };
             if raw.is_dir() {
                 return Err(Error::IsADirectory);
             }
-            fs.erase_committed(loc, fs.geom.cluster(raw.first_cluster()))
-        })
+            fs.erase_committed(loc, fs.geom.cluster(raw.first_cluster())).await
+        }).await
     }
 
     /// Delete an empty directory.
@@ -1007,10 +1045,10 @@ impl<D: BlockAccess> Fat32<D> {
     /// Same order as [`Self::remove`]. A directory entry whose cluster is
     /// outside the volume has no contents to check and none to free, so it is
     /// simply erased — refusing would make it permanent.
-    pub fn remove_dir(&mut self, path: &str) -> Result<(), Error> {
-        self.atomic(|fs| {
-            let (dir, name) = fs.parent_of(path)?;
-            let Some((raw, loc)) = fs.find_in_dir(dir, &name)? else {
+    pub async fn remove_dir(&mut self, path: &str) -> Result<(), Error> {
+        self.atomic(async |fs| {
+            let (dir, name) = fs.parent_of(path).await?;
+            let Some((raw, loc)) = fs.find_in_dir(dir, &name).await? else {
                 return Err(Error::NotFound);
             };
             if !raw.is_dir() {
@@ -1018,18 +1056,18 @@ impl<D: BlockAccess> Fat32<D> {
             }
             let cluster = fs.geom.cluster(raw.first_cluster());
             if let Some(c) = cluster {
-                if !fs.dir_is_empty(c)? {
+                if !fs.dir_is_empty(c).await? {
                     return Err(Error::DirectoryNotEmpty);
                 }
             }
-            fs.erase_committed(loc, cluster)
-        })
+            fs.erase_committed(loc, cluster).await
+        }).await
     }
 
     /// Erase an entry run, then queue the free of the chain it named: undone
     /// up to the last erase, carried forward from it by [`Self::atomic`].
-    fn erase_committed(&mut self, loc: Loc, chain: Option<Cluster>) -> Result<(), Error> {
-        self.erase_entries(loc)?;
+    async fn erase_committed(&mut self, loc: Loc, chain: Option<Cluster>) -> Result<(), Error> {
+        self.erase_entries(loc).await?;
         self.commit();
         if let Some(c) = chain {
             self.queue(Repair::Free { start: c, anchor: None });
@@ -1043,31 +1081,31 @@ impl<D: BlockAccess> Fat32<D> {
     /// replacement atomic, and a rename that deletes the destination first has
     /// a window in which neither name resolves — which is worse than an error
     /// the caller can act on.
-    pub fn rename(&mut self, from: &str, to: &str) -> Result<(), Error> {
-        self.atomic(|fs| fs.move_entry(from, to))
+    pub async fn rename(&mut self, from: &str, to: &str) -> Result<(), Error> {
+        self.atomic(async |fs| fs.move_entry(from, to).await).await
     }
 
-    fn move_entry(&mut self, from: &str, to: &str) -> Result<(), Error> {
-        let node = self.resolve(from)?;
+    async fn move_entry(&mut self, from: &str, to: &str) -> Result<(), Error> {
+        let node = self.resolve(from).await?;
         let loc = node.loc.ok_or(Error::IsADirectory)?;
-        let (new_dir, new_name) = self.parent_of(to)?;
-        if self.find_in_dir(new_dir, &new_name)?.is_some() {
+        let (new_dir, new_name) = self.parent_of(to).await?;
+        if self.find_in_dir(new_dir, &new_name).await?.is_some() {
             return Err(Error::AlreadyExists);
         }
         // Moving a directory into itself would detach the subtree: the entry
         // naming it would live inside the tree it names.
         let moved_dir = if node.raw.is_dir() { node.first_cluster } else { None };
         if let Some(c) = moved_dir {
-            if self.is_ancestor(c, new_dir)? {
+            if self.is_ancestor(c, new_dir).await? {
                 return Err(Error::InvalidName);
             }
         }
 
-        self.insert_entry(new_dir, &new_name, &node.raw)?;
-        self.erase_entries(loc)?;
+        self.insert_entry(new_dir, &new_name, &node.raw).await?;
+        self.erase_entries(loc).await?;
         if let Some(c) = moved_dir {
             if new_dir != loc.dir_start {
-                self.set_dot_dot(c, new_dir)?;
+                self.set_dot_dot(c, new_dir).await?;
             }
         }
         Ok(())
@@ -1078,18 +1116,18 @@ impl<D: BlockAccess> Fat32<D> {
     /// The staged name costs four directory entries, claimed in `to`'s directory
     /// before anything is freed: an overwrite refuses on a full directory or
     /// volume where freeing the destination first would have made its own room.
-    pub fn replace_rename(&mut self, from: &str, to: &str) -> Result<Replaced, ReplaceFailed> {
-        if !self.exists(to)? {
-            self.rename(from, to)?;
+    pub async fn replace_rename(&mut self, from: &str, to: &str) -> Result<Replaced, ReplaceFailed> {
+        if !self.exists(to).await? {
+            self.rename(from, to).await?;
             return Ok(Replaced { temporary: None });
         }
 
-        let temporary = self.replacement_temporary(to)?;
-        self.rename(to, &temporary)?;
-        if let Err(cause) = self.rename(from, to) {
+        let temporary = self.replacement_temporary(to).await?;
+        self.rename(to, &temporary).await?;
+        if let Err(cause) = self.rename(from, to).await {
             // The restore is the only thing that can put `to` back, so discarding
             // its failure leaves a destination nothing can name.
-            return Err(match self.rename(&temporary, to) {
+            return Err(match self.rename(&temporary, to).await {
                 Ok(()) => ReplaceFailed { cause, stranded: None },
                 Err(_) => ReplaceFailed { cause, stranded: Some(temporary) },
             });
@@ -1097,19 +1135,19 @@ impl<D: BlockAccess> Fat32<D> {
         Ok(Replaced { temporary: Some(temporary) })
     }
 
-    pub fn release_replaced(&mut self, replaced: Replaced) -> Result<(), Error> {
+    pub async fn release_replaced(&mut self, replaced: Replaced) -> Result<(), Error> {
         match replaced.temporary {
-            Some(temporary) => self.remove(&temporary),
+            Some(temporary) => self.remove(&temporary).await,
             None => Ok(()),
         }
     }
 
-    fn replacement_temporary(&mut self, path: &str) -> Result<String, Error> {
+    async fn replacement_temporary(&mut self, path: &str) -> Result<String, Error> {
         let (parent, _) = split_parent(path);
         for sequence in 0..=MAX_DIR_ENTRIES {
             let leaf = format!(".toyos-replaced-{sequence:08x}.tmp");
             let candidate = if parent.is_empty() { leaf } else { format!("{parent}/{leaf}") };
-            if !self.exists(&candidate)? {
+            if !self.exists(&candidate).await? {
                 return Ok(candidate);
             }
         }
@@ -1117,7 +1155,7 @@ impl<D: BlockAccess> Fat32<D> {
     }
 
     /// Whether `dir` is `ancestor` or lives beneath it.
-    fn is_ancestor(&mut self, ancestor: Cluster, dir: Cluster) -> Result<bool, Error> {
+    async fn is_ancestor(&mut self, ancestor: Cluster, dir: Cluster) -> Result<bool, Error> {
         let mut queue = vec![ancestor];
         let mut visited = BTreeSet::new();
         visited.insert(ancestor);
@@ -1127,7 +1165,7 @@ impl<D: BlockAccess> Fat32<D> {
                 return Ok(true);
             }
             let mut scan = DirScan::new(cluster);
-            while let Some(loc) = scan.next(self)? {
+            while let Some(loc) = scan.next(self).await? {
                 budget = budget.checked_sub(1).ok_or(Error::LimitExceeded)?;
                 if !loc.raw.is_dir() {
                     continue;
@@ -1150,18 +1188,18 @@ impl<D: BlockAccess> Fat32<D> {
     /// a sync is a caller about to rely on the volume as it stands. A volume
     /// mounted with no count has it taken from the FAT rather than written as
     /// unknown. FSInfo is written before the flush so the flush covers it.
-    pub fn sync(&mut self) -> Result<(), Error> {
-        self.settle()?;
+    pub async fn sync(&mut self) -> Result<(), Error> {
+        self.settle().await?;
         if self.fsinfo.dirty {
             if self.fsinfo.free_count.is_none() {
-                self.fsinfo.free_count = Some(self.count_free()?);
+                self.fsinfo.free_count = Some(self.count_free().await?);
             }
             let Fat32 { dev, geom, fsinfo, scratch, scratch_at, .. } = self;
             *scratch_at = None;
-            fsinfo.write(dev, geom, scratch)?;
+            fsinfo.write(dev, geom, scratch).await?;
             fsinfo.dirty = false;
         }
-        self.dev.flush()?;
+        self.dev.flush().await?;
         Ok(())
     }
 
@@ -1170,12 +1208,12 @@ impl<D: BlockAccess> Fat32<D> {
     /// Uses the FSInfo hint when the volume had one and counts the FAT when it
     /// did not. The count is cached in the hint so the scan happens once, over
     /// a FAT whose refused writes have been re-driven.
-    pub fn free_bytes(&mut self) -> Result<u64, Error> {
+    pub async fn free_bytes(&mut self) -> Result<u64, Error> {
         let free = match self.fsinfo.free_count {
             Some(n) => n,
             None => {
-                self.settle()?;
-                let n = self.count_free()?;
+                self.settle().await?;
+                let n = self.count_free().await?;
                 self.fsinfo.free_count = Some(n);
                 self.fsinfo.dirty = true;
                 n

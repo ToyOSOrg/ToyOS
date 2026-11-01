@@ -51,6 +51,13 @@ pub const MSG_GONE: u32 = 4;
 /// Service to driver: serve this session, a [`Session`]. Handles, in order:
 /// the client's connection, and the region it sent with its open.
 pub const MSG_SESSION: u32 = 5;
+/// Service to driver: describe this disk to the client, a [`disk`]-number
+/// payload. Handles: the client's connection, which the driver answers on.
+pub const MSG_DESCRIBE: u32 = 6;
+/// Service to driver: carry out this designation for the client, a
+/// [`Designation`]. Handles: the client's connection, which the driver
+/// answers on.
+pub const MSG_DESIGNATE: u32 = 7;
 
 pub const MAX_LABEL: usize = 64;
 /// The partitions one offer may name: a GPT's whole entry array at the
@@ -180,6 +187,46 @@ impl Session {
             disk: u32::from_le_bytes(bytes[..4].try_into().ok()?),
             unique: bytes[4..4 + GUID_BYTES].try_into().ok()?,
             writes,
+        })
+    }
+}
+
+/// A designation the service admitted, as [`MSG_DESIGNATE`] carries it: on
+/// the driver's disk `disk`, the partition `unique`; `active` for a partition
+/// the running system is on, which the driver refuses; `commit` to write
+/// rather than judge.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Designation {
+    pub disk: u32,
+    pub unique: [u8; GUID_BYTES],
+    pub active: bool,
+    pub commit: bool,
+}
+
+impl Designation {
+    pub const BYTES: usize = 4 + GUID_BYTES + 2;
+
+    pub fn encode(&self) -> [u8; Self::BYTES] {
+        let mut out = [0u8; Self::BYTES];
+        out[..4].copy_from_slice(&self.disk.to_le_bytes());
+        out[4..20].copy_from_slice(&self.unique);
+        out[20] = u8::from(self.active);
+        out[21] = u8::from(self.commit);
+        out
+    }
+
+    pub fn decode(bytes: &[u8]) -> Option<Self> {
+        let b: &[u8; Self::BYTES] = bytes.try_into().ok()?;
+        let flag = |v: u8| match v {
+            0 => Some(false),
+            1 => Some(true),
+            _ => None,
+        };
+        Some(Self {
+            disk: u32::from_le_bytes(b[..4].try_into().ok()?),
+            unique: b[4..20].try_into().ok()?,
+            active: flag(b[20])?,
+            commit: flag(b[21])?,
         })
     }
 }

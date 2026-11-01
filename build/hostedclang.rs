@@ -189,7 +189,7 @@ fn pack(product: &Path, sysroot: &Path, licence: &Path, version: &str, into: &Pa
     let packed = tar.into_inner().and_then(|gzip| gzip.finish()).and_then(|mut file| file.flush());
     packed.unwrap_or_else(|e| panic!("{}: {e}", archive.display()));
 
-    let digest: String = toyos_sha2_hw::sha256_digest(read(&archive)).iter().map(|b| format!("{b:02x}")).collect();
+    let digest = crate::sha256_hex(&read(&archive));
     let sums = into.join("SHA256SUMS");
     fs::write(&sums, format!("{digest}  {name}\n")).unwrap_or_else(|e| panic!("write {}: {e}", sums.display()));
     Packaged { archive, sums }

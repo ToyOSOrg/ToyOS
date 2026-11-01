@@ -24,9 +24,13 @@ pub fn current_tid() -> Tid {
     Tid(tid)
 }
 
-/// The counter the clock page's two words describe: the time-stamp counter,
+/// The counter the clock page's line describes: the time-stamp counter,
 /// read after every earlier load has completed, so a stamp taken after reading
-/// another writer's record cannot be older than that record's.
+/// another writer's record cannot be older than that record's, and before any
+/// later instruction starts, so a load after it cannot have been answered
+/// before it (SDM Vol. 2B, RDTSC: "If software requires RDTSC to be executed
+/// prior to execution of any subsequent instruction (including any memory
+/// accesses), it can execute the sequence LFENCE immediately after RDTSC").
 #[inline]
 pub fn counter() -> u64 {
     // SAFETY: `lfence` has no operands; `rdtsc` is unprivileged while CR4.TSD
@@ -34,31 +38,17 @@ pub fn counter() -> u64 {
     // every CPU.
     unsafe {
         core::arch::x86_64::_mm_lfence();
-        core::arch::x86_64::_rdtsc()
+        let now = core::arch::x86_64::_rdtsc();
+        core::arch::x86_64::_mm_lfence();
+        now
     }
 }
 
-/// Whether the processor is Intel's, by CPUID leaf 0's vendor string,
-/// `GenuineIntel` in EBX, EDX and ECX (Intel SDM Vol. 2A, "CPUID"): the
-/// vendor whose interface a processor object's `_OSC` speaks under Intel's
-/// UUID (Intel 302223-007 §2.2).
-pub fn processor_is_intel() -> bool {
-    let (ebx, ecx, edx): (u64, u32, u32);
-    // SAFETY: CPUID is unprivileged, and the kernel enables no CPUID
-    // faulting; RBX, which LLVM reserves, is put back as it was.
-    unsafe {
-        core::arch::asm!(
-            "mov {rbx}, rbx",
-            "cpuid",
-            "xchg {rbx}, rbx",
-            rbx = out(reg) ebx,
-            inout("eax") 0u32 => _,
-            inout("ecx") 0u32 => ecx,
-            out("edx") edx,
-            options(nomem, nostack, preserves_flags),
-        );
-    }
-    [ebx as u32, edx, ecx] == [*b"Genu", *b"ineI", *b"ntel"].map(u32::from_le_bytes)
+/// The processor's CPUID identity.
+pub fn processor_id() -> Option<crate::ProcessorId> {
+    let leaf_0 = core::arch::x86_64::__cpuid(0);
+    let vendor = core::array::from_fn(|i| [leaf_0.ebx, leaf_0.edx, leaf_0.ecx][i / 4].to_le_bytes()[i % 4]);
+    Some(crate::ProcessorId { vendor, signature: core::arch::x86_64::__cpuid(1).eax })
 }
 
 /// `in` and `out` from Ring 3: a port this process holds no grant for, which

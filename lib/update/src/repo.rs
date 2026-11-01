@@ -39,7 +39,7 @@ use alloc::string::String;
 use alloc::vec::Vec;
 use core::fmt;
 
-use toyos_sha2::Sha256;
+use toyos_crypto::hash::Sha256;
 
 use crate::sig;
 use crate::{sha256, Digest};
@@ -130,7 +130,7 @@ pub enum Holder {
     /// The image's, under `/system/etc/pkg`: vouched for by the image's
     /// signature.
     Image,
-    /// The machine's, under `/state/pkg`: what this client last accepted.
+    /// The machine's, in pkg's own `/state/pkg`: what this client last accepted.
     Machine,
 }
 
@@ -684,7 +684,7 @@ pub struct Archive {
 
 impl Archive {
     pub fn of(item: &Item) -> Self {
-        Archive { length: item.length, sha256: item.sha256, seen: 0, hash: toyos_sha2_hw::sha256() }
+        Archive { length: item.length, sha256: item.sha256, seen: 0, hash: Sha256::new() }
     }
 
     /// The next bytes, refused where they run past the signed length.
@@ -693,7 +693,7 @@ impl Archive {
         if seen > self.length {
             return Err(Refused::ArchivePast { length: self.length });
         }
-        self.hash.update(chunk);
+        self.hash.update(chunk).expect(crate::SHA_BOUND);
         self.seen = seen;
         Ok(())
     }

@@ -7,18 +7,18 @@
 //! each with a bound and a sleep, each turning "the server is not up yet" into a
 //! duration. A port exists before either end's process does, so there is no
 //! "not yet" to retry — a connection made against an acceptor nobody holds yet
-//! is queued on the port, and the bytes written into it are in the ring waiting
-//! when the server first looks.
+//! is queued on the port, and the message sent on it is waiting when the
+//! server first looks.
 //!
 //! Two arms, and they must answer differently:
 //!
-//! 1. The client connects and writes **before the server exists**. The server is
-//!    started afterwards, and at its very first look — a *non-blocking* read
-//!    taken the instruction after `accept` returns — the client's frame is
-//!    already there. It replies, and the client reads the reply.
+//! 1. The client connects and sends **before the server exists**. The server
+//!    is started afterwards, and at its very first look — a *non-blocking*
+//!    receive taken the instruction after `accept` returns — the client's
+//!    message is already there. It replies, and the client takes the reply.
 //! 2. The same client, and a server that takes the acceptor and exits. The
-//!    client's read answers `0` and its next write is refused. Both are facts
-//!    the kernel states, not conclusions a clock reached.
+//!    client's receive answers `Gone` and its next send is refused. Both are
+//!    facts the kernel states, not conclusions a clock reached.
 //!
 //! **No wall clock is asserted anywhere here, deliberately.** A tree that put a
 //! retry back would not fail an arm slowly, it would *hang* — the client would
@@ -68,7 +68,7 @@ fn served() {
 
     let mut server = Command::new(SELF_PATH)
         .arg("server")
-        .endow(ACCEPTOR_LABEL, acceptor.into_raw().0)
+        .endow(ACCEPTOR_LABEL, acceptor.into())
         .stdout(Stdio::piped())
         .spawn()
         .expect("spawn the server");
@@ -100,18 +100,18 @@ fn left() {
 
     let leaver = Command::new(SELF_PATH)
         .arg("leaver")
-        .endow(ACCEPTOR_LABEL, acceptor.into_raw().0)
+        .endow(ACCEPTOR_LABEL, acceptor.into())
         .status()
         .expect("spawn the leaver");
     assert!(leaver.success(), "the leaver exited nonzero");
 
     let heard = line(&mut from_client);
     assert_eq!(
-        heard, "read 0 then refused",
+        heard, "received gone then refused",
         "a client of a server that left was told something else",
     );
     assert!(client.wait().expect("wait the client").success(), "the client exited nonzero");
-    println!("  left: the client read 0 and its next write was refused");
+    println!("  left: the client's receive answered gone and its next send was refused");
 }
 
 /// Spawn the client and return once its frame is provably in the ring.
@@ -123,7 +123,7 @@ fn start_client(connector: &port::Connector, expect: &str) -> (Child, BufReader<
     let mut client = Command::new(SELF_PATH)
         .arg("client")
         .arg(expect)
-        .endow(SVC_LABEL, ns.into_raw().0)
+        .endow(SVC_LABEL, ns.into())
         .stdout(Stdio::piped())
         .spawn()
         .expect("spawn the client");
@@ -143,29 +143,31 @@ fn say(what: &str) {
     std::io::stdout().flush().expect("flush");
 }
 
+fn send(conn: &impl AsHandle, bytes: &[u8], nonblock: bool) -> Result<(), SyscallError> {
+    // SAFETY: no handles travel.
+    unsafe { syscall::message_send(conn.as_handle().raw(), bytes, &[], nonblock) }
+}
+
 fn client() -> ! {
     let expect = std::env::args().nth(2).expect("the client needs to know what to expect");
     let conn = toyos::endow::service(SERVICE).expect("the client holds a connector");
-    conn.write_nonblock(QUESTION).expect("write into a port nobody has accepted from");
+    send(&conn, QUESTION, true).expect("send into a port nobody has accepted from");
     say("sent");
 
     let mut buf = [0u8; 64];
-    let n = syscall::read(conn.as_handle(), &mut buf).expect("read the connection");
+    let got = syscall::message_recv(conn.as_handle().raw(), &mut [], &mut buf, &mut [], false);
     match expect.as_str() {
         "reply" => {
+            let n = got.expect("the reply").len;
             assert_eq!(&buf[..n], ANSWER, "the reply was not the server's");
             say(&format!("reply: {}", String::from_utf8_lossy(&buf[..n])));
         }
         "gone" => {
-            assert_eq!(n, 0, "a connection whose server left returned {n} bytes");
             // The word this arm was specified for: the peer end has closed, and
             // the client is told so by the kernel without a timer.
-            assert_eq!(
-                conn.write_nonblock(QUESTION),
-                Err(SyscallError::Gone),
-                "a write into a port whose acceptor is gone was taken",
-            );
-            say("read 0 then refused");
+            assert_eq!(got, Err(SyscallError::Gone), "a connection whose server left answered a receive");
+            assert_eq!(send(&conn, QUESTION, true), Err(SyscallError::Gone), "a send into a port whose acceptor is gone was taken");
+            say("received gone then refused");
         }
         other => panic!("unknown expectation {other:?}"),
     }
@@ -176,17 +178,16 @@ fn server() -> ! {
     let acceptor: Acceptor =
         Endowments::get().take(ACCEPTOR_LABEL).expect("the server was endowed an acceptor");
     let conn = acceptor.accept().expect("accept the queued connection");
-    // The instruction after `accept`, and it must not block: the client wrote
-    // before this process existed, so the bytes are in the ring already.
+    // The instruction after `accept`, and it must not wait: the client sent
+    // before this process existed, so the message is queued already.
     let mut buf = [0u8; 64];
-    let n = conn
-        .read_nonblock(&mut buf)
-        .expect("the client's frame was not in the ring at the server's first look");
+    let n = syscall::message_recv(conn.as_handle().raw(), &mut [], &mut buf, &mut [], true)
+        .expect("the client's message was not queued at the server's first look")
+        .len;
     say(&format!("already here: {}", String::from_utf8_lossy(&buf[..n])));
-    conn.write_nonblock(ANSWER).expect("reply");
-    // Held until the client has read the reply, which its own exit reports.
-    let mut wait = [0u8; 1];
-    let _ = syscall::read(conn.as_handle(), &mut wait);
+    send(&conn, ANSWER, false).expect("reply");
+    // Held until the client has taken the reply, which its own exit reports.
+    let _ = syscall::message_recv(conn.as_handle().raw(), &mut [], &mut [], &mut [], false);
     std::process::exit(0);
 }
 

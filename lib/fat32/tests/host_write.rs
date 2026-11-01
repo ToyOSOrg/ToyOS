@@ -13,7 +13,7 @@ use std::collections::BTreeMap;
 use std::fs;
 use std::io::{Cursor, Read};
 
-use common::{pattern, read_all, sorted_walk, walk_expectation, write_new, Image};
+use common::{now, pattern, read_all, sorted_walk, walk_expectation, write_new, Image};
 use toyos_fat32::{Error, Fat32, FatTime};
 
 /// 2024-06-01 12:34:56, so every entry this crate stamps is checkable rather
@@ -82,13 +82,13 @@ fn the_host_accepts_a_volume_we_populated() {
 
     let image = image();
     {
-        let mut fs = Fat32::mount(image.device()).expect("mount");
-        fs.create_dir("dir", stamp()).expect("mkdir dir");
-        fs.create_dir("dir/deeper", stamp()).expect("mkdir deeper");
+        let mut fs = now(Fat32::mount(image.device())).expect("mount");
+        now(fs.create_dir("dir", stamp())).expect("mkdir dir");
+        now(fs.create_dir("dir/deeper", stamp())).expect("mkdir deeper");
         for (name, data) in &files {
             write_new(&mut fs, name, data, stamp());
         }
-        fs.sync().expect("sync");
+        now(fs.sync()).expect("sync");
     }
 
     image.fsck();
@@ -109,9 +109,9 @@ fn the_host_accepts_a_volume_we_populated() {
 fn the_host_sees_the_timestamp_we_stamped() {
     let image = image();
     {
-        let mut fs = Fat32::mount(image.device()).expect("mount");
+        let mut fs = now(Fat32::mount(image.device())).expect("mount");
         write_new(&mut fs, "dated.txt", b"x", stamp());
-        fs.sync().expect("sync");
+        now(fs.sync()).expect("sync");
     }
     image.fsck();
     let host = host(&image);
@@ -135,11 +135,11 @@ fn files_crossing_cluster_boundaries_are_intact() {
     let image = image();
     let lengths = [1usize, 511, 512, 513, 1023, 1024, 1025, 4096, 8191];
     {
-        let mut fs = Fat32::mount(image.device()).expect("mount");
+        let mut fs = now(Fat32::mount(image.device())).expect("mount");
         for len in lengths {
             write_new(&mut fs, &format!("len{len}.bin"), &pattern(len, len as u64), stamp());
         }
-        fs.sync().expect("sync");
+        now(fs.sync()).expect("sync");
     }
     image.fsck();
     let tree = host_tree(&image);
@@ -156,12 +156,12 @@ fn a_directory_grows_into_further_clusters() {
     let image = image();
     let names: Vec<String> = (0..60).map(|i| format!("A Long Enough Name To Need Entries {i:03}.log")).collect();
     {
-        let mut fs = Fat32::mount(image.device()).expect("mount");
-        fs.create_dir("logs", stamp()).expect("mkdir");
+        let mut fs = now(Fat32::mount(image.device())).expect("mount");
+        now(fs.create_dir("logs", stamp())).expect("mkdir");
         for (i, name) in names.iter().enumerate() {
             write_new(&mut fs, &format!("logs/{name}"), &pattern(100, i as u64 + 1), stamp());
         }
-        fs.sync().expect("sync");
+        now(fs.sync()).expect("sync");
     }
     image.fsck();
     let tree = host_tree(&image);
@@ -182,11 +182,11 @@ fn colliding_short_names_stay_unique() {
     let image = image();
     let names: Vec<String> = (0..40).map(|i| format!("boot-{i:04}.log")).collect();
     {
-        let mut fs = Fat32::mount(image.device()).expect("mount");
+        let mut fs = now(Fat32::mount(image.device())).expect("mount");
         for (i, name) in names.iter().enumerate() {
             write_new(&mut fs, name, format!("entry {i}").as_bytes(), stamp());
         }
-        fs.sync().expect("sync");
+        now(fs.sync()).expect("sync");
     }
     image.fsck();
     let tree = host_tree(&image);
@@ -198,7 +198,7 @@ fn colliding_short_names_stay_unique() {
     // `fsck_msdos` did before the checker replaced it. Asked here through the
     // crate's own device as well, because a name this crate generated is what
     // is under test and the failure names the eleven bytes.
-    let mut fs = Fat32::mount(image.device()).expect("remount");
+    let mut fs = now(Fat32::mount(image.device())).expect("remount");
     let root = fs.geometry().root_cluster;
     let mut shorts = common::short_names_in(&mut fs, root);
     assert_eq!(shorts.len(), names.len());
@@ -214,16 +214,16 @@ fn colliding_short_names_stay_unique() {
 fn every_fat_copy_stays_in_step() {
     let image = image();
     {
-        let mut fs = Fat32::mount(image.device()).expect("mount");
+        let mut fs = now(Fat32::mount(image.device())).expect("mount");
         assert_eq!(fs.geometry().num_fats, 2, "the corpus has one FAT, so this proves nothing");
-        fs.create_dir("d", stamp()).expect("mkdir");
+        now(fs.create_dir("d", stamp())).expect("mkdir");
         write_new(&mut fs, "d/allocating.bin", &pattern(200_000, 91), stamp());
         write_new(&mut fs, "d/second.bin", &pattern(30_000, 92), stamp());
-        fs.remove("d/allocating.bin").expect("remove");
-        let mut f = fs.open("d/second.bin").expect("open");
-        fs.set_len(&mut f, 100).expect("truncate");
-        fs.flush_meta(&mut f, stamp()).expect("flush");
-        fs.sync().expect("sync");
+        now(fs.remove("d/allocating.bin")).expect("remove");
+        let mut f = now(fs.open("d/second.bin")).expect("open");
+        now(fs.set_len(&mut f, 100)).expect("truncate");
+        now(fs.flush_meta(&mut f, stamp())).expect("flush");
+        now(fs.sync()).expect("sync");
         image.assert_fats_agree(fs.geometry());
     }
     image.fsck();
@@ -234,17 +234,42 @@ fn appending_extends_the_chain() {
     let image = image();
     let chunk = pattern(700, 21);
     {
-        let mut fs = Fat32::mount(image.device()).expect("mount");
-        let mut f = fs.create("grown.bin", stamp()).expect("create");
+        let mut fs = now(Fat32::mount(image.device())).expect("mount");
+        let mut f = now(fs.create("grown.bin", stamp())).expect("create");
         for i in 0..50 {
-            fs.write(&mut f, i * chunk.len() as u64, &chunk).expect("append");
+            now(fs.write(&mut f, i * chunk.len() as u64, &chunk)).expect("append");
         }
-        fs.flush_meta(&mut f, stamp()).expect("flush");
-        fs.sync().expect("sync");
+        now(fs.flush_meta(&mut f, stamp())).expect("flush");
+        now(fs.sync()).expect("sync");
     }
     image.fsck();
     let want: Vec<u8> = chunk.iter().cycle().take(50 * chunk.len()).copied().collect();
     assert_eq!(host_tree(&image)["grown.bin"], want);
+}
+
+/// A write in two halves: the reserve sizes the file and zeroes the gap
+/// before its offset, the write-back puts its bytes, and a write-back past
+/// the reserved size is refused with nothing written.
+#[test]
+fn a_reserve_then_its_write_back_is_one_write() {
+    let image = image();
+    let data = pattern(3000, 41);
+    {
+        let mut fs = now(Fat32::mount(image.device())).expect("mount");
+        let mut f = now(fs.create("split.bin", stamp())).expect("create");
+        now(fs.write(&mut f, 0, b"head")).expect("write");
+        now(fs.reserve(&mut f, 1000, data.len() as u64)).expect("reserve");
+        assert_eq!(f.len(), 1000 + data.len() as u64);
+        assert_eq!(now(fs.write_back(&mut f, 1001, &data)), Err(Error::TooLarge), "one byte past the size");
+        now(fs.write_back(&mut f, 1000, &data)).expect("write back");
+        now(fs.flush_meta(&mut f, stamp())).expect("flush");
+        now(fs.sync()).expect("sync");
+    }
+    image.fsck();
+    let mut want = b"head".to_vec();
+    want.resize(1000, 0);
+    want.extend_from_slice(&data);
+    assert_eq!(host_tree(&image)["split.bin"], want);
 }
 
 /// Delete a large file, then write another that must land on the clusters the
@@ -254,19 +279,19 @@ fn appending_extends_the_chain() {
 fn deleted_clusters_come_back() {
     let image = image();
     {
-        let mut fs = Fat32::mount(image.device()).expect("mount");
-        let before = fs.free_bytes().expect("free");
+        let mut fs = now(Fat32::mount(image.device())).expect("mount");
+        let before = now(fs.free_bytes()).expect("free");
 
         write_new(&mut fs, "big.bin", &pattern(2_000_000, 31), stamp());
-        let during = fs.free_bytes().expect("free");
+        let during = now(fs.free_bytes()).expect("free");
         assert!(during < before, "{during} not less than {before}");
 
-        fs.remove("big.bin").expect("remove");
-        let after = fs.free_bytes().expect("free");
+        now(fs.remove("big.bin")).expect("remove");
+        let after = now(fs.free_bytes()).expect("free");
         assert_eq!(after, before, "space not returned");
 
         write_new(&mut fs, "second.bin", &pattern(2_000_000, 32), stamp());
-        fs.sync().expect("sync");
+        now(fs.sync()).expect("sync");
     }
     image.fsck();
     let tree = host_tree(&image);
@@ -281,12 +306,12 @@ fn a_full_volume_refuses_cleanly() {
     let image = image();
     let mut written = 0u64;
     {
-        let mut fs = Fat32::mount(image.device()).expect("mount");
+        let mut fs = now(Fat32::mount(image.device())).expect("mount");
         let chunk = pattern(256 * 1024, 41);
         let mut hit_the_wall = false;
         for i in 0..1000 {
             let name = format!("fill{i:04}.bin");
-            let mut f = match fs.create(&name, stamp()) {
+            let mut f = match now(fs.create(&name, stamp())) {
                 Ok(f) => f,
                 Err(Error::NoSpace) => {
                     hit_the_wall = true;
@@ -294,15 +319,15 @@ fn a_full_volume_refuses_cleanly() {
                 }
                 Err(e) => panic!("create {name}: {e}"),
             };
-            match fs.write(&mut f, 0, &chunk) {
+            match now(fs.write(&mut f, 0, &chunk)) {
                 Ok(()) => {
-                    fs.flush_meta(&mut f, stamp()).expect("flush");
+                    now(fs.flush_meta(&mut f, stamp())).expect("flush");
                     written += chunk.len() as u64;
                 }
                 Err(Error::NoSpace) => {
                     // The partial chain is still the file's; recording the
                     // size it actually reached is what keeps the volume sound.
-                    fs.flush_meta(&mut f, stamp()).expect("flush");
+                    now(fs.flush_meta(&mut f, stamp())).expect("flush");
                     hit_the_wall = true;
                     break;
                 }
@@ -311,7 +336,7 @@ fn a_full_volume_refuses_cleanly() {
         }
         assert!(hit_the_wall, "volume never filled after {written} bytes");
         assert!(written > 32 * 1024 * 1024, "only {written} bytes fit in a 64 MiB volume");
-        fs.sync().expect("sync");
+        now(fs.sync()).expect("sync");
     }
     image.fsck();
 }
@@ -320,12 +345,12 @@ fn a_full_volume_refuses_cleanly() {
 fn rename_moves_a_file_between_directories() {
     let image = image();
     {
-        let mut fs = Fat32::mount(image.device()).expect("mount");
-        fs.create_dir("from", stamp()).expect("mkdir");
-        fs.create_dir("to", stamp()).expect("mkdir");
+        let mut fs = now(Fat32::mount(image.device())).expect("mount");
+        now(fs.create_dir("from", stamp())).expect("mkdir");
+        now(fs.create_dir("to", stamp())).expect("mkdir");
         write_new(&mut fs, "from/Original Long Name.txt", b"payload", stamp());
-        fs.rename("from/Original Long Name.txt", "to/Renamed Long Name.txt").expect("rename");
-        fs.sync().expect("sync");
+        now(fs.rename("from/Original Long Name.txt", "to/Renamed Long Name.txt")).expect("rename");
+        now(fs.sync()).expect("sync");
     }
     image.fsck();
     let tree = host_tree(&image);
@@ -340,12 +365,12 @@ fn rename_moves_a_file_between_directories() {
 fn rename_repoints_a_moved_directorys_parent() {
     let image = image();
     {
-        let mut fs = Fat32::mount(image.device()).expect("mount");
-        fs.create_dir_all("a/movable", stamp()).expect("mkdir");
-        fs.create_dir("b", stamp()).expect("mkdir");
+        let mut fs = now(Fat32::mount(image.device())).expect("mount");
+        now(fs.create_dir_all("a/movable", stamp())).expect("mkdir");
+        now(fs.create_dir("b", stamp())).expect("mkdir");
         write_new(&mut fs, "a/movable/file.txt", b"inside", stamp());
-        fs.rename("a/movable", "b/moved").expect("rename");
-        fs.sync().expect("sync");
+        now(fs.rename("a/movable", "b/moved")).expect("rename");
+        now(fs.sync()).expect("sync");
     }
     image.fsck();
     assert_eq!(host_tree(&image)["b/moved/file.txt"], b"inside");
@@ -355,21 +380,21 @@ fn rename_repoints_a_moved_directorys_parent() {
 fn truncation_releases_clusters_and_the_host_agrees() {
     let image = image();
     {
-        let mut fs = Fat32::mount(image.device()).expect("mount");
+        let mut fs = now(Fat32::mount(image.device())).expect("mount");
         write_new(&mut fs, "shrink.bin", &pattern(100_000, 51), stamp());
-        let full = fs.free_bytes().expect("free");
+        let full = now(fs.free_bytes()).expect("free");
 
-        let mut f = fs.open("shrink.bin").expect("open");
-        fs.set_len(&mut f, 1000).expect("truncate");
-        fs.flush_meta(&mut f, stamp()).expect("flush");
-        assert!(fs.free_bytes().expect("free") > full, "truncation freed nothing");
+        let mut f = now(fs.open("shrink.bin")).expect("open");
+        now(fs.set_len(&mut f, 1000)).expect("truncate");
+        now(fs.flush_meta(&mut f, stamp())).expect("flush");
+        assert!(now(fs.free_bytes()).expect("free") > full, "truncation freed nothing");
 
         // Growing again must zero-fill rather than expose whatever the freed
         // clusters still held.
-        let mut g = fs.open("shrink.bin").expect("open");
-        fs.set_len(&mut g, 5000).expect("grow");
-        fs.flush_meta(&mut g, stamp()).expect("flush");
-        fs.sync().expect("sync");
+        let mut g = now(fs.open("shrink.bin")).expect("open");
+        now(fs.set_len(&mut g, 5000)).expect("grow");
+        now(fs.flush_meta(&mut g, stamp())).expect("flush");
+        now(fs.sync()).expect("sync");
     }
     image.fsck();
     let got = &host_tree(&image)["shrink.bin"];
@@ -384,17 +409,17 @@ fn truncation_releases_clusters_and_the_host_agrees() {
 fn sparse_writes_zero_the_gap() {
     let image = image();
     {
-        let mut fs = Fat32::mount(image.device()).expect("mount");
+        let mut fs = now(Fat32::mount(image.device())).expect("mount");
         // Dirty a region first, then free it, so the clusters the sparse write
         // gets are not already zero.
         write_new(&mut fs, "scratch.bin", &pattern(100_000, 61), stamp());
-        fs.remove("scratch.bin").expect("remove");
+        now(fs.remove("scratch.bin")).expect("remove");
 
-        let mut f = fs.create("holes.bin", stamp()).expect("create");
-        fs.write(&mut f, 50_000, b"tail").expect("write far");
-        fs.write(&mut f, 0, b"head").expect("write near");
-        fs.flush_meta(&mut f, stamp()).expect("flush");
-        fs.sync().expect("sync");
+        let mut f = now(fs.create("holes.bin", stamp())).expect("create");
+        now(fs.write(&mut f, 50_000, b"tail")).expect("write far");
+        now(fs.write(&mut f, 0, b"head")).expect("write near");
+        now(fs.flush_meta(&mut f, stamp())).expect("flush");
+        now(fs.sync()).expect("sync");
     }
     image.fsck();
     let got = &host_tree(&image)["holes.bin"];
@@ -408,15 +433,15 @@ fn sparse_writes_zero_the_gap() {
 fn empty_directories_are_removable_and_full_ones_are_not() {
     let image = image();
     {
-        let mut fs = Fat32::mount(image.device()).expect("mount");
-        fs.create_dir("keep", stamp()).expect("mkdir");
-        fs.create_dir("gone", stamp()).expect("mkdir");
+        let mut fs = now(Fat32::mount(image.device())).expect("mount");
+        now(fs.create_dir("keep", stamp())).expect("mkdir");
+        now(fs.create_dir("gone", stamp())).expect("mkdir");
         write_new(&mut fs, "keep/file.txt", b"x", stamp());
-        assert_eq!(fs.remove_dir("keep").unwrap_err(), Error::DirectoryNotEmpty);
-        assert_eq!(fs.remove("keep").unwrap_err(), Error::IsADirectory);
-        assert_eq!(fs.remove_dir("keep/file.txt").unwrap_err(), Error::NotADirectory);
-        fs.remove_dir("gone").expect("rmdir");
-        fs.sync().expect("sync");
+        assert_eq!(now(fs.remove_dir("keep")).unwrap_err(), Error::DirectoryNotEmpty);
+        assert_eq!(now(fs.remove("keep")).unwrap_err(), Error::IsADirectory);
+        assert_eq!(now(fs.remove_dir("keep/file.txt")).unwrap_err(), Error::NotADirectory);
+        now(fs.remove_dir("gone")).expect("rmdir");
+        now(fs.sync()).expect("sync");
     }
     image.fsck();
     let tree = host_tree(&image);
@@ -435,16 +460,16 @@ fn our_own_reader_agrees_with_the_host_on_our_own_volume() {
         ("d/nested name.bin", pattern(1_500, 73)),
     ];
     {
-        let mut fs = Fat32::mount(image.device()).expect("mount");
-        fs.create_dir("d", stamp()).expect("mkdir");
+        let mut fs = now(Fat32::mount(image.device())).expect("mount");
+        now(fs.create_dir("d", stamp())).expect("mkdir");
         for (n, d) in &files {
             write_new(&mut fs, n, d, stamp());
         }
-        fs.sync().expect("sync");
+        now(fs.sync()).expect("sync");
     }
     image.fsck();
 
-    let mut fs = Fat32::mount(image.device()).expect("remount");
+    let mut fs = now(Fat32::mount(image.device())).expect("remount");
     let owned: Vec<(String, Vec<u8>)> =
         files.iter().map(|(n, d)| ((*n).into(), d.clone())).collect();
     assert_eq!(sorted_walk(&mut fs), walk_expectation(&owned));
@@ -464,11 +489,11 @@ fn our_own_reader_agrees_with_the_host_on_our_own_volume() {
 fn creating_an_existing_name_in_another_case_is_refused() {
     let image = image();
     {
-        let mut fs = Fat32::mount(image.device()).expect("mount");
+        let mut fs = now(Fat32::mount(image.device())).expect("mount");
         write_new(&mut fs, "Report.TXT", b"first", stamp());
-        assert_eq!(fs.create("report.txt", stamp()).unwrap_err(), Error::AlreadyExists);
-        assert_eq!(fs.create("REPORT.TXT", stamp()).unwrap_err(), Error::AlreadyExists);
-        fs.sync().expect("sync");
+        assert_eq!(now(fs.create("report.txt", stamp())).unwrap_err(), Error::AlreadyExists);
+        assert_eq!(now(fs.create("REPORT.TXT", stamp())).unwrap_err(), Error::AlreadyExists);
+        now(fs.sync()).expect("sync");
     }
     image.fsck();
     assert_eq!(host_tree(&image).keys().collect::<Vec<_>>(), ["Report.TXT"]);
@@ -480,13 +505,13 @@ fn four_kib_clusters_write_correctly() {
     let image = Image::fixture("blank-4k");
     let big = pattern(300_000, 81);
     {
-        let mut fs = Fat32::mount(image.device()).expect("mount");
+        let mut fs = now(Fat32::mount(image.device())).expect("mount");
         assert_eq!(fs.geometry().bytes_per_cluster(), 4096);
-        fs.create_dir_all("x/y/z", stamp()).expect("mkdir");
+        now(fs.create_dir_all("x/y/z", stamp())).expect("mkdir");
         write_new(&mut fs, "x/y/z/Big File.bin", &big, stamp());
         write_new(&mut fs, "edge4095.bin", &pattern(4095, 82), stamp());
         write_new(&mut fs, "edge4097.bin", &pattern(4097, 83), stamp());
-        fs.sync().expect("sync");
+        now(fs.sync()).expect("sync");
     }
     image.fsck();
     let tree = host_tree(&image);
@@ -502,18 +527,18 @@ fn a_log_file_written_a_line_at_a_time() {
     let image = image();
     let lines: Vec<String> = (0..500).map(|i| format!("[{i:04}] a line of kernel log output\n")).collect();
     {
-        let mut fs = Fat32::mount(image.device()).expect("mount");
-        fs.create_dir("TOYOS", stamp()).expect("mkdir");
-        let mut f = fs.create("TOYOS/boot.log", stamp()).expect("create");
+        let mut fs = now(Fat32::mount(image.device())).expect("mount");
+        now(fs.create_dir("TOYOS", stamp())).expect("mkdir");
+        let mut f = now(fs.create("TOYOS/boot.log", stamp())).expect("create");
         let mut at = 0u64;
         for line in &lines {
-            fs.write(&mut f, at, line.as_bytes()).expect("append line");
+            now(fs.write(&mut f, at, line.as_bytes())).expect("append line");
             at += line.len() as u64;
             // A crash-safe logger flushes metadata as it goes; this is also
             // what makes the entry's size track the data.
-            fs.flush_meta(&mut f, stamp()).expect("flush");
+            now(fs.flush_meta(&mut f, stamp())).expect("flush");
         }
-        fs.sync().expect("sync");
+        now(fs.sync()).expect("sync");
     }
     image.fsck();
     assert_eq!(host_tree(&image)["TOYOS/boot.log"], lines.concat().into_bytes());
@@ -523,15 +548,15 @@ fn a_log_file_written_a_line_at_a_time() {
 #[test]
 fn same_entry_is_case_insensitive_identity() {
     let image = image();
-    let mut fs = Fat32::mount(image.device()).expect("mount");
-    fs.create("Report.TXT", stamp()).expect("create");
-    fs.create("Other.bin", stamp()).expect("create");
+    let mut fs = now(Fat32::mount(image.device())).expect("mount");
+    now(fs.create("Report.TXT", stamp())).expect("create");
+    now(fs.create("Other.bin", stamp())).expect("create");
 
-    assert!(fs.same_entry("Report.TXT", "Report.TXT").expect("exact"));
-    assert!(fs.same_entry("Report.TXT", "report.txt").expect("case only"));
-    assert!(fs.same_entry("REPORT.txt", "Report.TXT").expect("case only, other way"));
-    assert!(!fs.same_entry("Report.TXT", "Other.bin").expect("distinct entries"));
-    assert!(!fs.same_entry("Report.TXT", "absent.bin").expect("destination absent"));
+    assert!(now(fs.same_entry("Report.TXT", "Report.TXT")).expect("exact"));
+    assert!(now(fs.same_entry("Report.TXT", "report.txt")).expect("case only"));
+    assert!(now(fs.same_entry("REPORT.txt", "Report.TXT")).expect("case only, other way"));
+    assert!(!now(fs.same_entry("Report.TXT", "Other.bin")).expect("distinct entries"));
+    assert!(!now(fs.same_entry("Report.TXT", "absent.bin")).expect("destination absent"));
 }
 
 /// What the checker says about the volume as it stands on disk right now.
@@ -556,21 +581,21 @@ fn complaints(image: &Image) -> Vec<String> {
 #[test]
 fn a_chain_that_outran_its_entry_is_reconciled() {
     let image = image();
-    let mut fs = Fat32::mount(image.device()).expect("mount");
-    let mut f = fs.create("BOOT.LOG", stamp()).expect("create");
+    let mut fs = now(Fat32::mount(image.device())).expect("mount");
+    let mut f = now(fs.create("BOOT.LOG", stamp())).expect("create");
 
     let recorded = pattern(345 * 512 - 100, 3);
-    fs.write(&mut f, 0, &recorded).expect("write");
-    fs.flush_meta(&mut f, stamp()).expect("flush_meta");
-    fs.sync().expect("sync");
+    now(fs.write(&mut f, 0, &recorded)).expect("write");
+    now(fs.flush_meta(&mut f, stamp())).expect("flush_meta");
+    now(fs.sync()).expect("sync");
     assert!(!f.needs_reconcile(), "a flushed handle has nothing to reconcile");
     assert!(complaints(&image).is_empty(), "the flushed volume is clean");
 
     // Three clusters more, and no flush behind them: the window a machine that
     // stops here leaves open.
     let more = pattern(3 * 512, 5);
-    fs.write(&mut f, recorded.len() as u64, &more).expect("append");
-    fs.sync().expect("sync");
+    now(fs.write(&mut f, recorded.len() as u64, &more)).expect("append");
+    now(fs.sync()).expect("sync");
     assert!(f.needs_reconcile(), "the chain now covers bytes the entry does not");
     let said = complaints(&image);
     assert!(
@@ -578,8 +603,8 @@ fn a_chain_that_outran_its_entry_is_reconciled() {
         "the checker did not name the size-against-chain shape: {said:?}"
     );
 
-    fs.reconcile(&mut f, stamp()).expect("reconcile");
-    fs.sync().expect("sync");
+    now(fs.reconcile(&mut f, stamp())).expect("reconcile");
+    now(fs.sync()).expect("sync");
     assert!(!f.needs_reconcile());
     drop(fs);
     image.fsck();
@@ -595,20 +620,20 @@ fn a_chain_that_outran_its_entry_is_reconciled() {
 #[test]
 fn a_chain_no_entry_reaches_is_reconciled() {
     let image = image();
-    let mut fs = Fat32::mount(image.device()).expect("mount");
-    let mut f = fs.create("STICK.BIN", stamp()).expect("create");
+    let mut fs = now(Fat32::mount(image.device())).expect("mount");
+    let mut f = now(fs.create("STICK.BIN", stamp())).expect("create");
 
     let data = pattern(4088 * 512, 11);
-    fs.write(&mut f, 0, &data).expect("write");
-    fs.sync().expect("sync");
+    now(fs.write(&mut f, 0, &data)).expect("write");
+    now(fs.sync()).expect("sync");
     let said = complaints(&image);
     assert!(
         said.iter().any(|c| c.contains("no directory entry reaches them")),
         "the checker did not name the orphaned-chain shape: {said:?}"
     );
 
-    fs.reconcile(&mut f, stamp()).expect("reconcile");
-    fs.sync().expect("sync");
+    now(fs.reconcile(&mut f, stamp())).expect("reconcile");
+    now(fs.sync()).expect("sync");
     drop(fs);
     image.fsck();
     assert_eq!(host_tree(&image)["STICK.BIN"], data);

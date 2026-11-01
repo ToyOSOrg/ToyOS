@@ -4,6 +4,8 @@
 //! over behind the unit and refused where no unit is.
 //! `amdvi_firmware_left`: whether an AMD-Vi unit firmware left blocking is
 //! switched off before the boot stick is driven.
+//! `vtd_firmware_left`: whether a VT-d unit firmware left translating, with no
+//! protected memory regions, goes off before it is programmed.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::Path;
@@ -11,8 +13,8 @@ use std::path::Path;
 use super::qemu::{self, is_kernel_line, BootOptions, Profile, QemuInstance};
 use super::serial::Serial;
 
-/// The function `tests/images/netcase.toml`'s netstack claims, as its `devices` row spells it.
-const NETSTACK_CLAIMS: &str = "1af4:1041";
+/// The function `tests/images/netcase.toml`'s virtio-net row drives, as the row spells it.
+const NIC_CLAIMS: &str = "1af4:1041";
 
 /// The boot config that runs `netstack` with a virtio NIC in front of it.
 fn netcase() -> std::path::PathBuf {
@@ -70,10 +72,13 @@ pub fn iommu_virtio_platform() -> Result<(), String> {
         let said: Vec<String> = if behind_unit {
             vec![bar_handed(), msix_armed()]
         } else {
+            // The NIC's driver is a `drives` row, which the supervisor
+            // starts after every service: its refusal is the boot's last.
             vec![
                 not_handed_over(CLAIMED_AT, NOT_REMAPPED),
                 not_handed_over(NVME_AT, NOT_REMAPPED),
                 not_handed_over(SOUND_AT, NOT_REMAPPED),
+                not_handed_to_its_driver(NIC_CLAIMS),
             ]
         };
         let mut text = qemu.boot_log().to_string();
@@ -184,7 +189,7 @@ fn not_handed_over(at: &str, why: &str) -> String {
 /// would fail. The NVMe controller and the virtio-sound function are refused
 /// the same.
 fn no_unit_is_no_claim(log: &Serial) -> Result<(), String> {
-    refused_claim(log, NETSTACK_CLAIMS, NOT_REMAPPED, &[XHCI_AT, NVME_AT, SOUND_AT])?;
+    refused_claim(log, NIC_CLAIMS, NOT_REMAPPED, &[XHCI_AT, NVME_AT, SOUND_AT])?;
     log.must_say(&not_handed_over(XHCI_AT, NOT_REMAPPED))?;
     log.must_say(&format!(
         "supervisor: usbd was not started on PCI {XHCI_AT}: pci:0c:03:30/1033:0194 is on this machine and could not be handed over"
@@ -193,7 +198,7 @@ fn no_unit_is_no_claim(log: &Serial) -> Result<(), String> {
     log.must_say("supervisor: soundserver: pci:04:01:00/1af4:1059 is on this machine and could not be handed over")?;
     log.must_say(&not_handed_over(NVME_AT, NOT_REMAPPED))?;
     log.must_say(&format!(
-        "supervisor: nvme was not started on PCI {NVME_AT}: pci:01:08:02/1b36:0010 is on this machine and could not be handed over"
+        "supervisor: nvme was not started on PCI {NVME_AT}: pci:01:08:02 is on this machine and could not be handed over"
     ))?;
     // And this machine handed *nothing* over, which is more than the claim's
     // own refusal says: with no unit there is no function any process could be
@@ -202,8 +207,8 @@ fn no_unit_is_no_claim(log: &Serial) -> Result<(), String> {
     Ok(())
 }
 
-/// The slot QEMU's `-device` order puts the function netstack claims on, and the
-/// address every judge below is an assertion about.
+/// The slot QEMU's `-device` order puts the function virtio-net drives on, and
+/// the address every judge below is an assertion about.
 ///
 /// **The address is the harness's own and never the guest's.** A judge that
 /// reads the function out of the console and then asserts about *that* asserts
@@ -277,13 +282,17 @@ fn refused_claim(log: &Serial, claims: &str, why: &str, beside: &[&str]) -> Resu
     log.must_not_say(&msi_armed())?;
     log.must_not_say(&bar_handed())?;
     // All the way out to userland, rather than a kernel that logged a refusal
-    // and handed netstack a NIC anyway. The supervisor names what it could not mint in the
-    // config's own spelling, and **with this refusal's own word**: the machine
-    // has the function, so "no such device on this machine" would be false.
-    log.must_say(&format!(
-        "supervisor: netstack: pci:02:00:00/{claims} is on this machine and could not be handed over"
-    ))?;
+    // and handed the NIC's driver its function anyway. The supervisor names
+    // what it could not mint in the config's own spelling, and **with this
+    // refusal's own word**: the machine has the function, so "no such device on
+    // this machine" would be false.
+    log.must_say(&not_handed_to_its_driver(claims))?;
     Ok(())
+}
+
+/// What the supervisor says of the NIC's claim the kernel would not hand over.
+fn not_handed_to_its_driver(claims: &str) -> String {
+    format!("supervisor: virtio-net was not started on PCI {CLAIMED_AT}: pci:02:00:00/{claims} is on this machine and could not be handed over")
 }
 
 
@@ -343,6 +352,31 @@ const XHCI_REFUSED: &str = "pcidev: PCI 00:03.0 NOT HANDED OVER — its interrup
 pub(crate) fn amdvi_left_on(unit: &str) -> [String; 3] {
     ["CmdBufEn", "EventLogEn", "IommuEn"]
         .map(|field| format!("iommu: amdvi {unit} was handed over with {field} on; it goes off"))
+}
+
+/// **A VT-d unit left translating, on a unit with no protected memory
+/// regions, goes off first and is programmed.** QEMU's unit reports
+/// `CAP.PLMR` and `CAP.PHMR` clear, so this is the hand-over without the guard
+/// the T14 takes (`iommu_firmware_left`'s row), logged as such. Under
+/// `iommu-firmware-left` the unit is left queueing, translating and remapping;
+/// each goes off by its own write, the root is set and invalidated through
+/// the queue, and the unit ends translating with the boot stick's DMA behind it.
+pub fn vtd_firmware_left(test_config: &Path) -> Result<(), String> {
+    let options = BootOptions { profile: Profile::Metal, kernel_params: &["iommu-firmware-left"], ..Default::default() };
+    let qemu = QemuInstance::boot_with_options(test_config, &[], &[], options);
+    let log = Serial::boot(&qemu);
+    log.must_be_clean()?;
+    let unguarded = log.must_say("iommu: the hand-over is unguarded: unit0 has no protected memory regions")?;
+    let off = log.must_say("iommu: unit0 was handed over with translation on; it goes off first")?;
+    log.must_say("iommu: unit0 was handed over with queued invalidation on; it goes off first")?;
+    log.must_not_say("iommu: protected memory on for")?;
+    let translating = log.must_say(" translating gsts=")?;
+    if !translating.contains(" tes=y ") {
+        return Err(format!("unit0 was programmed and is not translating: {translating:?}"));
+    }
+    log.must_say("Boot: complete")?;
+    eprintln!("  [vtd-firmware-left] {}; {}; {}", unguarded.trim(), off.trim(), translating.trim());
+    Ok(())
 }
 
 /// **A unit an AMD machine's firmware left on is switched off and
@@ -473,28 +507,38 @@ pub fn amdvi_selftest(test_config: &Path) -> Result<(), String> {
     Ok(())
 }
 
-/// What the supervisor says refusing netcase's NIC to netstack, on a machine
+/// What the supervisor says refusing netcase's NIC to its driver, on a machine
 /// whose virtio NIC was created without `iommu_platform=on`.
-pub const UNTRANSLATED_NIC: &str = "supervisor: netstack: pci:02:00:00/1af4:1041 is a virtio function that offers \
-     no VIRTIO_F_ACCESS_PLATFORM, so no unit translates its DMA (virtio 1.2 §6.1): refused";
+fn untranslated_nic() -> String {
+    format!(
+        "supervisor: virtio-net was not started on PCI {CLAIMED_AT}: pci:02:00:00/1af4:1041 is a virtio function that \
+         offers no VIRTIO_F_ACCESS_PLATFORM, so no unit translates its DMA (virtio 1.2 §6.1): refused"
+    )
+}
 
 /// A virtio NIC that bypasses the unit ([`Profile::HeadlessNicUntranslated`])
-/// is never handed to netstack: the supervisor reads its offer through the
-/// claim, refuses it by name, and netstack runs with no NIC. Only a QEMU
-/// machine can make one: every bench function is behind its unit.
+/// is never handed to its driver: the supervisor reads its offer through the
+/// claim, refuses it by name and starts no NIC driver, and netstack serves
+/// with no link, saying so once its bound on a first lease is out. Only a
+/// QEMU machine can make one: every bench function is behind its unit.
 pub fn a_virtio_function_without_access_platform_is_refused() -> Result<(), String> {
     let options = BootOptions { profile: Profile::HeadlessNicUntranslated, ..Default::default() };
     let mut qemu = QemuInstance::boot_with_options(&netcase(), &[], &[], options);
-    let gone = "netstack: no NIC on this machine";
+    let refused = untranslated_nic();
+    let gone = "netstack: DHCP: no lease as toyos-t14 on any link in";
     let mut text = qemu.boot_log().to_string();
-    qemu::await_guest(&mut qemu, &mut text, "the supervisor's refusal and netstack without a NIC", |t| {
-        t.contains(UNTRANSLATED_NIC) && t.contains(gone)
-    })
-    .map_err(|e| format!("{e}\n{text}"))?;
+    qemu::await_guest(&mut qemu, &mut text, "the supervisor's refusal", |t| t.contains(&refused)).map_err(|e| format!("{e}\n{text}"))?;
+    // A quiet guest, for netstack's bound on its first lease: a ceiling past it.
+    if !text.contains(gone) {
+        text.push_str(&qemu.drain_until(std::time::Duration::from_secs(90), |l| l.contains(gone)));
+    }
+    if !text.contains(gone) {
+        return Err(format!("netstack did not say a machine whose NIC has no driver has no address\n{text}"));
+    }
     let log = Serial::named("boot console", text);
     log.must_be_clean()?;
-    log.must_not_say("netstack: VirtIO: PCI")?;
-    eprintln!("  [iommu] {UNTRANSLATED_NIC}");
+    log.must_not_say("virtio-net: VirtIO: PCI")?;
+    eprintln!("  [iommu] {refused}");
     Ok(())
 }
 

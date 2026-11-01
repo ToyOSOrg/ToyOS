@@ -7,7 +7,7 @@
 
 use std::process::Command;
 
-use toyos_abi::syscall::{self, MmapFlags, MmapProt, SpawnArgs, SyscallError};
+use toyos_abi::syscall::{self, VmAt, VmProt, SpawnArgs, SyscallError};
 
 /// Where the child starts: `SpawnArgs` names a working directory or the spawn is refused.
 const CWD: &str = "/";
@@ -20,12 +20,7 @@ const BLOB: usize = 2 * 1024 * 1024;
 
 fn main() {
     let region = unsafe {
-        syscall::mmap(
-            core::ptr::null_mut(),
-            REGION,
-            MmapProt::READ | MmapProt::WRITE,
-            MmapFlags::ANONYMOUS | MmapFlags::PRIVATE,
-        )
+        syscall::vm_reserve(REGION, VmProt::ReadWrite, VmAt::ANYWHERE).unwrap_or(core::ptr::null_mut())
     };
     assert!(!region.is_null(), "mmap failed");
     for i in 0..BLOB / 2 {
@@ -51,6 +46,7 @@ fn main() {
         image: 0,
         image_len: 0,
         place: u64::from(toyos_abi::HANDLE_INVALID.0),
+        pager: u64::from(toyos_abi::HANDLE_INVALID.0),
     };
 
     let err = unsafe {
@@ -98,6 +94,6 @@ fn main() {
         .expect("spawn /system/bin/echo");
     assert!(status.success(), "/system/bin/echo exited {status:?}");
 
-    unsafe { syscall::munmap(region, REGION) }.expect("munmap");
+    unsafe { syscall::vm_release(region, REGION) }.expect("munmap");
     println!("oversized spawn path/argv/env rejected, spawn still usable");
 }

@@ -1,0 +1,16 @@
+[package]
+name = "disks"
+description = "disks [list | designate data [--commit]]: the machine's disks and their tables, and the designation of its DATA partition, through the block service under the authorizations its row is minted."
+version = "0.1.0"
+edition = "2024"
+license = "MIT OR Apache-2.0"
+
+[dependencies]
+toyos = { path = "../../sdk/toyos" }
+toyos-blockring = { path = "../../lib/blockring" }
+toyos-gpt = { path = "../../lib/gpt" }
+toyos-manifest = { path = "../../lib/manifest" }
+diskserver = { path = "../diskserver" }
+
+[package.metadata.toyos.host]
+exempt.manages = "ToyOS's disks, through its block service's tables and designation badges"

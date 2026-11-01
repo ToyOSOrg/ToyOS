@@ -78,6 +78,15 @@ impl Guid {
         [0xAA, 0x07, 0x6A, 0xF8, 0xBE, 0x6D, 0x51, 0xE2],
     );
 
+    /// `51CC09F9-7442-435B-BC03-0FD8718B0FB5` — a bench's scratch disk, which
+    /// a destructive test may erase: the disk's one partition, and its mark.
+    pub const TOYOS_SCRATCH: Self = Self::from_fields(
+        0x51CC_09F9,
+        0x7442,
+        0x435B,
+        [0xBC, 0x03, 0x0F, 0xD8, 0x71, 0x8B, 0x0F, 0xB5],
+    );
+
     pub const fn from_fields(a: u32, b: u16, c: u16, d: [u8; 8]) -> Self {
         let a = a.to_le_bytes();
         let b = b.to_le_bytes();
@@ -86,6 +95,16 @@ impl Guid {
             a[0], a[1], a[2], a[3], b[0], b[1], c[0], c[1], d[0], d[1], d[2], d[3], d[4], d[5],
             d[6], d[7],
         ])
+    }
+
+    /// A version 4 GUID out of sixteen random bytes, in the on-disk order:
+    /// the version is the high nibble of byte 7, the third field being
+    /// little-endian, and the variant the top two bits of byte 8 (RFC 9562
+    /// §5.4).
+    pub const fn random_v4(mut bytes: [u8; 16]) -> Self {
+        bytes[7] = (bytes[7] & 0x0F) | 0x40;
+        bytes[8] = (bytes[8] & 0x3F) | 0x80;
+        Self(bytes)
     }
 
     pub const fn is_zero(&self) -> bool {

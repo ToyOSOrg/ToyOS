@@ -30,13 +30,13 @@ fn refusals(events: &[Event]) -> Vec<(Refusal, u64)> {
 fn s_ip_mod_001_shard_one_line_per_rule_per_10_s() {
     let (mut net, a, _) = segment();
     let start = net.now();
-    let shard = &mut net.nodes[a].shard;
+    let (shard, iface) = { let node = &mut net.nodes[a]; (&mut node.shard, node.iface) };
     shard.drain_events().for_each(drop);
     let frame = from_b(&hex(V_IP_LSRR));
     for n in 0..100 {
-        shard.receive(start.after(Duration::from_millis(n * 10)), &frame);
+        shard.receive(start.after(Duration::from_millis(n * 10)), iface, &frame);
     }
-    shard.receive(start.after(Duration::from_millis(10_001)), &frame);
+    shard.receive(start.after(Duration::from_millis(10_001)), iface, &frame);
     let lines = refusals(&shard.drain_events().collect::<Vec<_>>());
     let rules: Vec<(toyos_net_ip::Counter, Peer, u64)> = lines
         .iter()
@@ -54,13 +54,13 @@ fn s_ip_mod_001_shard_one_line_per_rule_per_10_s() {
 fn s_mod_005_shard_one_line_per_rule_per_10_s() {
     let (mut net, a, _) = segment();
     let start = net.now();
-    let shard = &mut net.nodes[a].shard;
+    let (shard, iface) = { let node = &mut net.nodes[a]; (&mut node.shard, node.iface) };
     shard.drain_events().for_each(drop);
     let syn_fin = |n: u8| from_b(&segment_bytes((Ipv4Addr::new(192, 0, 2, 10 + n), 1234), (A, 80), 5_000, 0x03));
     for n in 0..50 {
-        shard.receive(start.after(Duration::from_millis(u64::from(n))), &syn_fin(n));
+        shard.receive(start.after(Duration::from_millis(u64::from(n))), iface, &syn_fin(n));
     }
-    shard.receive(start.after(Duration::from_millis(10_000)), &syn_fin(50));
+    shard.receive(start.after(Duration::from_millis(10_000)), iface, &syn_fin(50));
     let lines: Vec<(Ipv4Addr, u16, u64)> = refusals(&shard.drain_events().collect::<Vec<_>>())
         .into_iter()
         .map(|(r, n)| match r {

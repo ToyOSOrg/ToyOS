@@ -351,7 +351,7 @@ pub fn ask(ask: Ask, conn: &Connection, ttf: &[u8]) {
     let poller = Poller::new(2);
     let mut withdrawn = ipc::FrameRx::<0>::new();
     loop {
-        poller.watch_raw(window.handle(), READABLE, WINDOW);
+        poller.watch(&window.handle(), READABLE, WINDOW);
         poller.watch(conn, READABLE, SUPERVISOR);
         let (mut supervisor, mut shown) = (false, false);
         poller.wait(1, u64::MAX, |token| match token {

@@ -12,6 +12,7 @@ use core::sync::atomic::{AtomicBool, Ordering};
 use toyos_abi::end::End;
 use toyos_abi::syscall::ProcessStats;
 
+use crate::mm::charge::{self, Exhausted};
 use crate::process::Pid;
 use crate::watch::Watch;
 use crate::sync::Lock;
@@ -45,14 +46,14 @@ pub struct ProcessObject {
 }
 
 impl ProcessObject {
-    pub fn new(pid: Pid) -> Arc<Self> {
-        Arc::new(Self {
-            core: Self::new_core(),
+    pub fn new(pid: Pid) -> Result<Arc<Self>, Exhausted> {
+        Ok(Arc::new(Self {
+            core: Self::new_core(charge::arc::<Watch>())?,
             pid,
             exit: Lock::new(None),
             finished: AtomicBool::new(false),
             watch: Arc::new(Watch::new()),
-        })
+        }))
     }
 
     pub fn pid(&self) -> Pid {

@@ -18,15 +18,14 @@ pub struct Served {
 pub fn read() -> Result<Served, String> {
     let conn = endow::service(SERVICE).map_err(|e| format!("no `{SERVICE}` service: {e:?}"))?;
     conn.signal(READ).map_err(|e| format!("logkeeper would not take the request: {e:?}"))?;
-    let header = conn.recv_header().map_err(|e| format!("logkeeper did not answer: {e:?}"))?;
-    if header.msg_type != SERVED {
-        return Err(format!("logkeeper answered frame type {}", header.msg_type));
+    let mut rx = toyos::ipc::FrameRx::<8>::new();
+    let frame = rx.recv(&conn).map_err(|e| format!("logkeeper did not answer: {e:?}"))?;
+    if frame.msg_type != SERVED {
+        return Err(format!("logkeeper answered frame type {}", frame.msg_type));
     }
-    let boot_so_far: u64 =
-        conn.recv_payload(&header).map_err(|e| format!("logkeeper's answer is not one `u64`: {e:?}"))?;
-    let [raw] = conn.recv_handles_exact::<1>(&header).ok_or("logkeeper's answer carried no pipe")?;
-    // SAFETY: the kernel moved this handle into this table with the frame
-    // that names it, and nothing else answers for it.
-    let pipe = unsafe { Pipe::from_raw(raw) };
+    let boot_so_far: u64 = toyos::ipc::decode_payload(rx.payload(frame.payload_len))
+        .map_err(|e| format!("logkeeper's answer is not one `u64`: {e:?}"))?;
+    let [pipe] = rx.take_handles::<1>().ok_or("logkeeper's answer carried no pipe")?;
+    let pipe = Pipe::from(pipe);
     Ok(Served { pipe, boot_so_far })
 }

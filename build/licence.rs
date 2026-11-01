@@ -87,10 +87,10 @@ const FONTS_ONLY: &[&str] = &["OFL-1.1"];
 /// CDLA-Permissive-2.0 for the Mozilla roots.
 const DATA_ONLY: &[&str] = &["CDLA-Permissive-2.0"];
 
-/// Allowed for a [`Terms::Firmware`] row, and nowhere else: the owner's
-/// ruling that vendor firmware a device or CPU verifies by its maker's
-/// signature may ship, pinned and unmodified (root `CLAUDE.md`).
-const FIRMWARE_ONLY: &[&str] = &["LicenseRef-AMD-Microcode", "LicenseRef-Intel-Microcode"];
+/// Allowed for a [`Terms::Firmware`] row, and nowhere else: vendor firmware
+/// the owner ruled may ship, pinned and unmodified.
+const FIRMWARE_ONLY: &[&str] =
+    &["LicenseRef-AMD-Microcode", "LicenseRef-Intel-Microcode", "LicenseRef-Intel-iwlwifi-Firmware", "LicenseRef-Intel-i915-Firmware"];
 
 /// What a licence is judged as: [`FONTS_ONLY`] passes only for a font,
 /// [`DATA_ONLY`] only for the trust roots and [`FIRMWARE_ONLY`] only for
@@ -127,8 +127,8 @@ pub enum Terms {
     /// A font's glyphs, or a raster of them, under an SPDX expression: the one
     /// place [`FONTS_ONLY`] passes.
     Font(&'static str),
-    /// Vendor firmware a device or CPU verifies by its maker's signature,
-    /// under an SPDX expression: the one place [`FIRMWARE_ONLY`] passes.
+    /// Vendor firmware shipped pinned and unmodified, under an SPDX
+    /// expression: the one place [`FIRMWARE_ONLY`] passes.
     Firmware(&'static str),
 }
 
@@ -417,12 +417,42 @@ pub const COMMITTED_FILES: &[(&str, &str, &str, Terms)] = &[
         "ours: QEMU `virt`'s own PPTT, captured by the commit that decodes it",
         Terms::Spdx("MIT OR Apache-2.0"),
     ),
-    // A bcachefs volume upstream's own tools wrote, gzipped. The bytes inside
-    // it are this repository's test material; `NOTICE` carries the raw digest,
-    // the commands, and the fsck that called it clean.
+    // bcachefs volumes upstream's own tools wrote, gzipped. The bytes inside
+    // them are this repository's test material; `NOTICE` carries each raw
+    // digest, the commands, and the fsck that called it clean.
     (
         "lib/bcachefs/tests/fixtures/crc32c.img.gz",
         "7be2c99db0e68c784ea59ef394454a084fa57868b14027528ab6b8b21031840e",
+        "NOTICE",
+        Terms::Spdx("MIT OR Apache-2.0"),
+    ),
+    (
+        "lib/bcachefs/tests/fixtures/encrypted.img.gz",
+        "2a32529edf3e30de75d02cdc4ad0b2060552555b012e9647dc24702c0ee7f82d",
+        "NOTICE",
+        Terms::Spdx("MIT OR Apache-2.0"),
+    ),
+    (
+        "lib/bcachefs/tests/fixtures/encrypted-wide-macs.img.gz",
+        "fd137a545190906ded0269eeec3e32835ffe3585d3e4c2cebe84d234a96b1b1f",
+        "NOTICE",
+        Terms::Spdx("MIT OR Apache-2.0"),
+    ),
+    (
+        "lib/bcachefs/tests/fixtures/links.img.gz",
+        "e2a3ed35d27023693192c35e833e405a240aa6feccde9412e8f5a9e881a47999",
+        "NOTICE",
+        Terms::Spdx("MIT OR Apache-2.0"),
+    ),
+    (
+        "lib/bcachefs/tests/fixtures/unclean.img.gz",
+        "2393f9e1aafcbecdbea55d851acc88e711033df7cf9a1814e49cda0f31274adb",
+        "NOTICE",
+        Terms::Spdx("MIT OR Apache-2.0"),
+    ),
+    (
+        "lib/bcachefs/tests/fixtures/unclean-32k-nodes.img.gz",
+        "d4bd7ecb9dae1d0d8d3ffbdab2b3d4c4d4a79688e9c0cd545c4a98c5dd0e4e2d",
         "NOTICE",
         Terms::Spdx("MIT OR Apache-2.0"),
     ),
@@ -465,6 +495,20 @@ pub const COMMITTED_FILES: &[(&str, &str, &str, Terms)] = &[
         "6bef14efca36070830f5a4a2b1dc9b69a0e2627679cc5c9ed542acaa4ece416c",
         "NOTICE",
         Terms::Spdx("(MIT OR Apache-2.0) AND BSD-2-Clause"),
+    ),
+    // Handshakes two wpa_supplicants recorded over mac80211_hwsim, read by
+    // `system/wlan/handshake/tests/capture.rs`; `NOTICE` says how.
+    (
+        "system/wlan/handshake/tests/fixtures/pmf.pcap",
+        "c6e7ede7c923975dc260e84efdfd5825e2ab4e09dc1ad1a723a3bd3255e7152b",
+        "NOTICE",
+        Terms::Spdx("MIT OR Apache-2.0"),
+    ),
+    (
+        "system/wlan/handshake/tests/fixtures/psk.pcap",
+        "ae7b93c03d1e5a236fc3c4537c7550021367095a2a8a020ab66f59edba7de6bc",
+        "NOTICE",
+        Terms::Spdx("MIT OR Apache-2.0"),
     ),
     // Captures from tcpdump's test suite, read hermetically by `lib/ieee80211/tests/corpus.rs`.
     (
@@ -649,8 +693,32 @@ pub const COMMITTED_FILES: &[(&str, &str, &str, Terms)] = &[
         Terms::Spdx("Apache-2.0"),
     ),
     (
+        "lib/crypto/tests/data/aes_gmac_test.json",
+        "e2f98488d4d3a38ec5f72b5cf75b85ed393d6763a4c1828c090c81a79534aab6",
+        "NOTICE",
+        Terms::Spdx("Apache-2.0"),
+    ),
+    (
+        "lib/crypto/tests/data/aes_wrap_test.json",
+        "2fdb3661fd8823d1ec50e03886b24066415018975677dff83d83e77f5a51562d",
+        "NOTICE",
+        Terms::Spdx("Apache-2.0"),
+    ),
+    (
         "lib/crypto/tests/data/chacha20_poly1305_test.json",
         "fe61d25f90e1bde4461d00eafe61049e5f29bd999f36b766df9cda90906ad53d",
+        "NOTICE",
+        Terms::Spdx("Apache-2.0"),
+    ),
+    (
+        "lib/crypto/tests/data/ecdh_secp256r1_ecpoint_test.json",
+        "648f16d077caf2400d02331ca51f44744c72c799830c8d0595d0b18b6dd9f886",
+        "NOTICE",
+        Terms::Spdx("Apache-2.0"),
+    ),
+    (
+        "lib/crypto/tests/data/ecdh_secp384r1_ecpoint_test.json",
+        "ffa7835fe1de359dff762c8f1272b98acebd5578e2f855d969051ff956c6dca3",
         "NOTICE",
         Terms::Spdx("Apache-2.0"),
     ),
@@ -661,8 +729,26 @@ pub const COMMITTED_FILES: &[(&str, &str, &str, Terms)] = &[
         Terms::Spdx("Apache-2.0"),
     ),
     (
+        "lib/crypto/tests/data/ecdsa_secp256r1_sha512_test.json",
+        "8e940baad7c6172c58c8f354b10366d307be43a3cb82a5880cb46686c3e8f858",
+        "NOTICE",
+        Terms::Spdx("Apache-2.0"),
+    ),
+    (
+        "lib/crypto/tests/data/ecdsa_secp384r1_sha256_test.json",
+        "660c948e5433279ecdf966e8a1386b69ecec618efc1ff00269e85aa9dc84f0a6",
+        "NOTICE",
+        Terms::Spdx("Apache-2.0"),
+    ),
+    (
         "lib/crypto/tests/data/ecdsa_secp384r1_sha384_test.json",
         "8a5b3ae1760975143414811f13588c24d951d9d8c904195087ba327591dfe9cc",
+        "NOTICE",
+        Terms::Spdx("Apache-2.0"),
+    ),
+    (
+        "lib/crypto/tests/data/ecdsa_secp384r1_sha512_test.json",
+        "f44bae32e419fc75c5b5af751cff4e35145cfbcc24944e378d5f30889d310513",
         "NOTICE",
         Terms::Spdx("Apache-2.0"),
     ),
@@ -691,6 +777,12 @@ pub const COMMITTED_FILES: &[(&str, &str, &str, Terms)] = &[
         Terms::Spdx("Apache-2.0"),
     ),
     (
+        "lib/crypto/tests/data/hmac_sha1_test.json",
+        "b521c6180a862247986392d3cb49b511fc7fe790e75bee236f84e36ca290c7c0",
+        "NOTICE",
+        Terms::Spdx("Apache-2.0"),
+    ),
+    (
         "lib/crypto/tests/data/hmac_sha256_test.json",
         "2d201cfa61d1bf95e6f5d07d96634b4a348b31e8eaa277ad7c8d09677b7a743f",
         "NOTICE",
@@ -709,8 +801,86 @@ pub const COMMITTED_FILES: &[(&str, &str, &str, Terms)] = &[
         Terms::Spdx("Apache-2.0"),
     ),
     (
+        "lib/crypto/tests/data/mlkem_768_encaps_test.json",
+        "9d4381f94c40853bba430245b94968b7390d9175aacd9f1ae4e250a71c78b713",
+        "NOTICE",
+        Terms::Spdx("Apache-2.0"),
+    ),
+    (
+        "lib/crypto/tests/data/mlkem_768_keygen_seed_test.json",
+        "fde5abe284396f4cb3c4610b90d680f0b57782e94c3365c97aee59e24881ebe4",
+        "NOTICE",
+        Terms::Spdx("Apache-2.0"),
+    ),
+    (
+        "lib/crypto/tests/data/mlkem_768_test.json",
+        "c59c067ae794c343df575dd90f6f7458f51881b11a22d6e9d8677c8d9ee21e90",
+        "NOTICE",
+        Terms::Spdx("Apache-2.0"),
+    ),
+    (
+        "lib/crypto/tests/data/pbkdf2_hmacsha1_test.json",
+        "5ef5307e119bd118da50ad276426ed3baade2d093e93b643a1d70be0bf0b861a",
+        "NOTICE",
+        Terms::Spdx("Apache-2.0"),
+    ),
+    (
+        "lib/crypto/tests/data/rsa_pss_2048_sha256_mgf1_0_test.json",
+        "b22a8d9a2e7e47f681d0ff1d1a55455daaf325d989c64ad005f848bd50b9b4c0",
+        "NOTICE",
+        Terms::Spdx("Apache-2.0"),
+    ),
+    (
         "lib/crypto/tests/data/rsa_pss_2048_sha256_mgf1_32_test.json",
         "7f6efafc160f4816b96cbf1c12188a31051d7e3f001e27505d9edb5f2a0e325c",
+        "NOTICE",
+        Terms::Spdx("Apache-2.0"),
+    ),
+    (
+        "lib/crypto/tests/data/rsa_pss_2048_sha256_mgf1sha1_20_test.json",
+        "8099d28e300c86cf1cac2ab09cd777186b5ecc0f555d7c178c665b4ff3c08307",
+        "NOTICE",
+        Terms::Spdx("Apache-2.0"),
+    ),
+    (
+        "lib/crypto/tests/data/rsa_pss_2048_sha384_mgf1_48_test.json",
+        "66d464778b0b2f683a1d1a20e94f77e9472b8cc393b45f423fa08a48e677063c",
+        "NOTICE",
+        Terms::Spdx("Apache-2.0"),
+    ),
+    (
+        "lib/crypto/tests/data/rsa_pss_3072_sha256_mgf1_32_test.json",
+        "cca48433e6d1accb57f65b3396c4f4dd93c776467101c3f0948e74c283fd4749",
+        "NOTICE",
+        Terms::Spdx("Apache-2.0"),
+    ),
+    (
+        "lib/crypto/tests/data/rsa_pss_4096_sha256_mgf1_32_test.json",
+        "e627cbf5139a01e0a446c4fe15911f6268224fdd3ef4a1eb714b3942b5686410",
+        "NOTICE",
+        Terms::Spdx("Apache-2.0"),
+    ),
+    (
+        "lib/crypto/tests/data/rsa_pss_4096_sha384_mgf1_48_test.json",
+        "d632649a7630f7c267eda576714ca11cf0ff068d6622f576b8701f923c112577",
+        "NOTICE",
+        Terms::Spdx("Apache-2.0"),
+    ),
+    (
+        "lib/crypto/tests/data/rsa_pss_4096_sha512_mgf1_32_test.json",
+        "af1e1c1c593edf91be3e9880927231d57f9df082f2d8caec2a61d9874ade101f",
+        "NOTICE",
+        Terms::Spdx("Apache-2.0"),
+    ),
+    (
+        "lib/crypto/tests/data/rsa_pss_4096_sha512_mgf1_64_test.json",
+        "c93ceaa56a190c9fd4707441c5c6a75839f108202d88aec891697f9623042547",
+        "NOTICE",
+        Terms::Spdx("Apache-2.0"),
+    ),
+    (
+        "lib/crypto/tests/data/rsa_pss_misc_test.json",
+        "1fac515f67fea8ccbf44ea08fde2de00cd76169f774a54ce2994c9963c31e84f",
         "NOTICE",
         Terms::Spdx("Apache-2.0"),
     ),
@@ -721,19 +891,97 @@ pub const COMMITTED_FILES: &[(&str, &str, &str, Terms)] = &[
         Terms::Spdx("Apache-2.0"),
     ),
     (
+        "lib/crypto/tests/data/rsa_signature_2048_sha384_test.json",
+        "c571c105d261c0ff588a2888a529f152563fb3b77894b7620d4e4f8f934f2c1d",
+        "NOTICE",
+        Terms::Spdx("Apache-2.0"),
+    ),
+    (
+        "lib/crypto/tests/data/rsa_signature_2048_sha512_test.json",
+        "16ea24b039905d054bdb6004f5fd179374e150b7b6d73a7ba654b6d00eab12ef",
+        "NOTICE",
+        Terms::Spdx("Apache-2.0"),
+    ),
+    (
+        "lib/crypto/tests/data/rsa_signature_3072_sha256_test.json",
+        "0f5f18cabfaad3e2792e82f7e9882f8999049b456714de924b8a5e202f61ca43",
+        "NOTICE",
+        Terms::Spdx("Apache-2.0"),
+    ),
+    (
+        "lib/crypto/tests/data/rsa_signature_3072_sha384_test.json",
+        "73499ee649d8fb703b3f0f455fa36f7682fde677c590a736958ebce05ab27dae",
+        "NOTICE",
+        Terms::Spdx("Apache-2.0"),
+    ),
+    (
+        "lib/crypto/tests/data/rsa_signature_3072_sha512_test.json",
+        "09aa3336fdb7be216180ce944ca7b2a052e1de38c210435c19506327d4a36ebd",
+        "NOTICE",
+        Terms::Spdx("Apache-2.0"),
+    ),
+    (
+        "lib/crypto/tests/data/rsa_signature_4096_sha256_test.json",
+        "957aca128e30bd02c8982f8ca482d6521d16683f4bbc3f193cdfd4c8f04bc667",
+        "NOTICE",
+        Terms::Spdx("Apache-2.0"),
+    ),
+    (
+        "lib/crypto/tests/data/rsa_signature_4096_sha384_test.json",
+        "bc26f16b9fc9a90628864d3d1111ef48a4bd00b9d4870bfab88ff326e309e073",
+        "NOTICE",
+        Terms::Spdx("Apache-2.0"),
+    ),
+    (
+        "lib/crypto/tests/data/rsa_signature_4096_sha512_test.json",
+        "9d6e67b1eb0d7040db411835238efd20e9302399a258bdff82de3f38e0f2855a",
+        "NOTICE",
+        Terms::Spdx("Apache-2.0"),
+    ),
+    (
         "lib/crypto/tests/data/x25519_test.json",
         "35c3f5231cf25cc640b524d403461deee9e49441d5d915a3a25b2c8ff5adbe7d",
         "NOTICE",
         Terms::Spdx("Apache-2.0"),
     ),
     (
-        "lib/crypto/tests/data/nist-mlkem-encapdecap.json",
+        "lib/crypto/tests/data/ed25519_speccheck_cases.json",
+        "08e47a36d9aead288664930505584f353fff113ab854f2800db1e4f5b3540450",
+        "NOTICE",
+        Terms::Spdx("Apache-2.0"),
+    ),
+    (
+        "tests/acvp/nist-hmac-sha1.json",
+        "6e96eb5f53065219c437a99fedec7299c916c76e170d6b74507dc5409ed9cd6b",
+        "NOTICE",
+        Terms::Spdx("NIST-Software"),
+    ),
+    (
+        "tests/acvp/nist-hmac-sha256.json",
+        "a9d0734b93aee71bc6f30b47daab782fd96b39688afe4fbddb009e99402ec989",
+        "NOTICE",
+        Terms::Spdx("NIST-Software"),
+    ),
+    (
+        "tests/acvp/nist-hmac-sha384.json",
+        "0ffa9332b9430ae94cfac0f23b3843293903fa34a3ac9c11a8af2bfdf7276ed3",
+        "NOTICE",
+        Terms::Spdx("NIST-Software"),
+    ),
+    (
+        "tests/acvp/nist-hmac-sha512.json",
+        "ea6e03f012d5237b95421b7d50c504f8ab010c4f7f18cd46fe61d8912d3442a0",
+        "NOTICE",
+        Terms::Spdx("NIST-Software"),
+    ),
+    (
+        "tests/acvp/nist-mlkem-encapdecap.json",
         "5e88fbd351dc2915b2ab399f5dffd269e1cdbdd0186103ab0e90b374cf592187",
         "NOTICE",
         Terms::Spdx("NIST-Software"),
     ),
     (
-        "lib/crypto/tests/data/nist-mlkem-keygen.json",
+        "tests/acvp/nist-mlkem-keygen.json",
         "d7a62a2c3476957f56dd8d24f9004ea6776ccfe995ffe71a65bb9506dc9c7b1b",
         "NOTICE",
         Terms::Spdx("NIST-Software"),
@@ -789,6 +1037,84 @@ pub const COMMITTED_FILES: &[(&str, &str, &str, Terms)] = &[
         Terms::Spdx("MIT OR Apache-2.0"),
     ),
     (
+        "tests/cavp/SHA256ShortMsg.rsp",
+        "75e1cb83994638481808e225b9eb0c1ebd0c232d952ac42b61abce6363be283c",
+        "NOTICE",
+        Terms::Spdx("NIST-PD"),
+    ),
+    (
+        "tests/cavp/SHA256LongMsg.rsp",
+        "6fac36f37360bcf74ffcf4465c18e30d6d5a04cc90885b901fc3130c16060974",
+        "NOTICE",
+        Terms::Spdx("NIST-PD"),
+    ),
+    (
+        "tests/cavp/SHA256Monte.rsp",
+        "29ea30c6bb4b84e425fb8c1d731c6bb852dac935825f2bd1143e5d3c4f10bfb9",
+        "NOTICE",
+        Terms::Spdx("NIST-PD"),
+    ),
+    (
+        "tests/cavp/SHA384ShortMsg.rsp",
+        "7ea7bcf00fadc20949fae63703e40681ddf288fea808471cb3cbc95f3ec16811",
+        "NOTICE",
+        Terms::Spdx("NIST-PD"),
+    ),
+    (
+        "tests/cavp/SHA384LongMsg.rsp",
+        "536171765a4278c000ac3c9913edb2eed0ca7ccd5a10b72ed79fdfe7901a6d6a",
+        "NOTICE",
+        Terms::Spdx("NIST-PD"),
+    ),
+    (
+        "tests/cavp/SHA384Monte.rsp",
+        "4270099431ff52ee1686dc472351e681c26c507433df8f107c7de203b771424e",
+        "NOTICE",
+        Terms::Spdx("NIST-PD"),
+    ),
+    (
+        "tests/cavp/SHA512ShortMsg.rsp",
+        "e53a36c03609e5a3e3cc4b6e117a499db7864c23ec825c6cec99503a45f40764",
+        "NOTICE",
+        Terms::Spdx("NIST-PD"),
+    ),
+    (
+        "tests/cavp/SHA512LongMsg.rsp",
+        "b1f3f05d5c209777954d49521d7ea1349447c36a0c52849e044bc397a27dd410",
+        "NOTICE",
+        Terms::Spdx("NIST-PD"),
+    ),
+    (
+        "tests/cavp/SHA512Monte.rsp",
+        "8ca78659286c2f01667a98fc7accd32fc171ae7b24ac00f1a8ce6b77770247fa",
+        "NOTICE",
+        Terms::Spdx("NIST-PD"),
+    ),
+    (
+        "tests/cavp/gcm/gcmEncryptExtIV128.rsp",
+        "30156236f768b0d81e58a3e5bd3bd79ce294cf9ef0ba0a84cf7b869c89ebd9fd",
+        "NOTICE",
+        Terms::Spdx("NIST-PD"),
+    ),
+    (
+        "tests/cavp/gcm/gcmEncryptExtIV256.rsp",
+        "4448b4998c3f58cd9f5542ddf7c573189a721ff3d3ac24cd5177bb4910a787f8",
+        "NOTICE",
+        Terms::Spdx("NIST-PD"),
+    ),
+    (
+        "tests/cavp/ecdsa/PKV.rsp",
+        "1d33551c1a199b1fc2b0e4075cdfd52d4830503ef37e6b16f04ce617d524f3f1",
+        "NOTICE",
+        Terms::Spdx("NIST-PD"),
+    ),
+    (
+        "tests/cavp/ecdsa/SigVer.rsp",
+        "e9841c3d12e323042751460d0b8ef4bc59c2640105ec7da4852775f80ab10191",
+        "NOTICE",
+        Terms::Spdx("NIST-PD"),
+    ),
+    (
         "build/microcode/amd-ucode/microcode_amd_fam17h.bin",
         "966e4b796ec689c618868d08f8a37f347b0e7bfce4ae9df793e08471d363b7d0",
         "NOTICE",
@@ -805,6 +1131,30 @@ pub const COMMITTED_FILES: &[(&str, &str, &str, Terms)] = &[
         "4e43bb4d23c3638f8c16967d61e8f6456ae0da2ddd1da82ab579a50715147bb1",
         "NOTICE",
         Terms::Firmware("LicenseRef-Intel-Microcode"),
+    ),
+    (
+        "system/ax2xx/firmware/iwlwifi-cc-a0-77.ucode",
+        "1866a58a1daee56b120362122d5f7548b443b53d33f2558a7e4407d58fd27dab",
+        "NOTICE",
+        Terms::Firmware("LicenseRef-Intel-iwlwifi-Firmware"),
+    ),
+    (
+        "system/ax2xx/firmware/iwlwifi-ty-a0-gf-a0-89.ucode",
+        "792478ef7752595525379a5068e2d47e310a2c344636b7df866c54746ced1dc0",
+        "NOTICE",
+        Terms::Firmware("LicenseRef-Intel-iwlwifi-Firmware"),
+    ),
+    (
+        "system/ax2xx/firmware/iwlwifi-ty-a0-gf-a0.pnvm",
+        "9697e327f8171454b3c19b1ec9449753d5b934d4e91722f469616818a6d477b0",
+        "NOTICE",
+        Terms::Firmware("LicenseRef-Intel-iwlwifi-Firmware"),
+    ),
+    (
+        "system/tgl-display/firmware/tgl_dmc_ver2_12.bin",
+        "3c013ef0ad96ba73aee8e5bd04a8e27cc9b1c6e9183b1a83ce124485f325afca",
+        "NOTICE",
+        Terms::Firmware("LicenseRef-Intel-i915-Firmware"),
     ),
 ];
 

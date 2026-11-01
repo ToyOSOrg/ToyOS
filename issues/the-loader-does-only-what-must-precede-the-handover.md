@@ -335,7 +335,7 @@ Each stage lands on its own, in this order.
    - The tested pass's `loader.log` is kept as `loader-previous.log` by a
      rename (`SetInfo`), not by #539's copy.
    - It runs over the cable that
-     `issues/the-t14-answers-only-through-a-usb-stick.md` owns, and
+     `issues/the-t14-answers-only-through-what-ubuntu-reads-off-its-disk.md` owns, and
      waits on
      `issues/the-t14-hung-after-rebooting-with-its-i219-faulted.md`,
      `issues/a-fatal-event-stands-down-both-bounds-and-may-leave-nothing-to-end-the-machine.md`,
@@ -367,7 +367,6 @@ Each stage lands on its own, in this order.
    job-list mode. After a reset the firmware comes back to the loader because
    ToyOS's entry is first (stage 5).
    - `issues/a-hung-boots-log-partition-is-wiped-by-the-next-runs-flash.md`,
-     `issues/the-sudoers-rendering-has-no-host-side-judge.md`,
      `issues/the-metal-loop-writes-the-readback-volume-into-a-directory-it-has-not-made.md`
      and `issues/the-t14-stopped-answering-ssh-between-two-lan-boots.md`
      close here, each only as far as it is true of what lands.
@@ -392,10 +391,20 @@ Each stage lands on its own, in this order.
      `TCO_RLD` at the arm and at the first feed (the counting read, with no
      stall), `TCO1_STS`, and `no_reboot`, `tco_lock` and `timeout`. That issue's
      exit reads the kernel's log in place of `loader.log`.
-   - Deleted: `loader/src/watchdog.rs`, `arch::pio`, the kernel's
+   - On an FCH the arm needs `PMx000`: the decode, which also gates the
+     timer, and the tick. That PM block shares its page with registers AML
+     uses, and a window `map_mmio` maps is refused the `acpi` claim's holder
+     for the machine's life. How the kernel reaches it and leaves the page to
+     AML is not decided.
+   - `loader/src/watchdog.rs`' `survey` stays: on every pass, the passes
+     that boot no kernel among them, it reads and clears the FCH's
+     `S5ResetStat` and `WatchdogFired` and stops a count the last boot left.
+     It goes to the kernel with stage 9, which removes those passes, and
+     needs the same PM access.
+   - Deleted: `loader/src/watchdog.rs`' arm, `arch::pio`, the kernel's
      on-arrival read with `ARMED_ON_ARRIVAL` and `UNARMED_ON_ARRIVAL`, and
-     `tests/common/power.rs`' `loader_armed`, `armed_on_arrival` and
-     `watchdog_quiet`'s loader half. `watchdog_armed` judges the kernel's
+     `tests/common/power.rs`' `loader_armed` and `watchdog_quiet`'s loader
+     half. `watchdog_armed` judges the kernel's
      read-back, and `loader_watchdog_arms` becomes the kernel's row.
 
    **Exit**: `loader/src` holds no TCO access. On the T14, `watchdog_armed`

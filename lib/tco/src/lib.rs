@@ -1,5 +1,6 @@
-//! Every bound a boot arms and the metal loop waits on, and Intel's TCO
-//! watchdog: its register block, and where a chipset keeps it.
+//! Every bound a boot arms and the metal loop waits on, and the chipset
+//! watchdogs that hold [`BOUND_MS`]: Intel's TCO, here, and AMD's FCH
+//! watchdog, in [`fch`].
 //!
 //! The block's layout is one thing across the generations this kernel targets;
 //! **where its base comes from is not**, so that is a table keyed by PCI id
@@ -18,6 +19,8 @@
 
 #![no_std]
 #![forbid(unsafe_code)]
+
+pub mod fch;
 
 /// Offsets from the block's base port.
 pub const TCO_RLD: u16 = 0x00;
@@ -96,12 +99,13 @@ pub const fn timer_for(bound_ms: u64) -> Option<u16> {
 /// admits: the two differ, and a bound derived for hardware answers to this one.
 pub const TMR_MIN_HARDWARE: u16 = 0x04;
 
-/// The TCO bound, in milliseconds, for the loader **and** the kernel: the
-/// bootloader arms it before it jumps and the kernel keeps feeding that same
-/// timer, so it is the whole machine's bound from the handoff onward and not a
-/// handoff window the kernel widens afterwards. The largest the tick and the
-/// double expiry make exact at or under ten seconds: eight ticks of 600 ms,
-/// twice, fed four times a bound.
+/// The chipset watchdog's bound, in milliseconds, for the loader **and** the
+/// kernel: the bootloader arms it before it jumps and the kernel keeps feeding
+/// that same timer, so it is the whole machine's bound from the handoff onward
+/// and not a handoff window the kernel widens afterwards. The largest the TCO's
+/// tick and double expiry make exact at or under ten seconds: eight ticks of
+/// 600 ms, twice, fed four times a bound. The FCH counts it as 96 ticks of
+/// 100 ms ([`fch::TIMER`]).
 pub const BOUND_MS: u64 = 9_600;
 
 /// The bound the firmware's own watchdog is set to, in milliseconds. It covers
@@ -160,6 +164,14 @@ const _: () = assert!(wedge_bound_ms(JOB_BOUND_MS) > JOB_BOUND_MS);
 /// nobody staged. Its half is the lockup detector's bound, which still outlasts
 /// the lockup probe's own reach to its lock.
 pub const STAGED_BOUND_MS: u64 = 10_000;
+
+/// The bound a boot that stages its wedge under the chipset watchdog carries,
+/// in milliseconds, so that the watchdog ends it and not the deadline: the wedge
+/// has begun by [`STAGED_BOUND_MS`], and [`BOUND_MS`] after the last feed the
+/// watchdog resets the machine. A second [`BOUND_MS`] covers a tick whose
+/// accuracy no vendor states; past it the deadline ends a machine whose
+/// watchdog did not.
+pub const WATCHED_WEDGE_BOUND_MS: u64 = STAGED_BOUND_MS + 2 * BOUND_MS;
 
 /// The bound one *CPU* gets to take no interrupt at all while it is burning
 /// cycles, in milliseconds, before that CPU ends the machine from its own NMI.

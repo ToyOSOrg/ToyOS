@@ -11,11 +11,12 @@
 //! **What a period *is* was decided in `toyos-mixer`** before either loop ran:
 //! this file spends the answers and owns the effects around them.
 
+use std::time::Duration;
+
 use toyos::endow::Endowments;
 use toyos::poller::{Poller, READABLE};
-use toyos::syscap::SysCap;
-use toyos_abi::syscall;
-use toyos_abi::RawHandle;
+use toyos::syscap::{SysCap, WakeLatencyHold};
+use toyos::wake::{Bell, Waker};
 use toyos_sound_output::{run, Run};
 use toyos_mixer::{
     deferral_floor_nanos, period_nanos, quantize_period, scratch_frames, wake_left_idle, Dll,
@@ -73,25 +74,19 @@ fn flush(stats: &mut MixStats, totals: &mut Totals, clients: usize) -> Window {
 /// Signal every client before the wait so priority inheritance can fill their
 /// rings while soundserver blocks, and reap the ones that died doing it.
 ///
-/// A broken pipe here is the client's departure, caught here rather
+/// A ring that answers `Hungup` is the client's departure, caught here rather
 /// than left to the control connection — a client that goes mid-stream would
 /// otherwise stay `is_streaming()` and keep the loop deferring buffers for a
-/// producer that no longer exists. Departure is exactly `Err(Gone)`, the
-/// kernel's broken-pipe error; a full pipe is `Err(WouldBlock)` and means the
-/// client is merely behind on consuming signals, which must leave it untouched
-/// — a paused client stops reading its pipe indefinitely and is alive.
+/// producer that no longer exists. A signal still pending only coalesces: a
+/// paused client stops taking its signals indefinitely and is alive.
 ///
-/// It says nothing on its own: [`Departure::SignalPipeGone`] is the weakest of
+/// It says nothing on its own: [`Departure::SignalGone`] is the weakest of
 /// the four witnesses and the control thread's is on the way, so the word waits
 /// for `retain_active` and the strongest witness by then wins.
 fn signal_clients(streams: &mut [ClientStream], ramp_frames: u32) {
     for stream in streams.iter_mut() {
-        let gone = matches!(
-            syscall::write_nonblock(stream.signal_write, &[1]),
-            Err(syscall::SyscallError::Gone)
-        );
-        if gone {
-            stream.depart(Departure::SignalPipeGone, ramp_frames);
+        if stream.signal.ring().is_err() {
+            stream.depart(Departure::SignalGone, ramp_frames);
         }
     }
 }
@@ -114,11 +109,10 @@ fn apply_commands(
             MixCommand::Detach => return Some(Change::Detach),
             MixCommand::AddClient(client, opened_on) if opened_on != generation => {
                 say!("soundserver: client {} ended: it was opened on an output since gone", client.client_id);
-                syscall::close(client.signal_write);
             }
             MixCommand::AddClient(client, _) => {
                 say!("soundserver: client {} connected (id={})", streams.len(), client.client_id);
-                let _ = syscall::write_nonblock(client.signal_write, &[1]);
+                client.signal.wake();
                 streams.push(*client);
             }
             MixCommand::RemoveClient { client_id, departure } => {
@@ -147,7 +141,6 @@ fn retain_active(streams: &mut Vec<ClientStream>) {
     streams.retain(|s| match s.departure {
         Some(how) if s.gain.is_idle() => {
             say!("soundserver: client {} removed ({how})", s.client_id);
-            syscall::close(s.signal_write);
             false
         }
         _ => true,
@@ -160,12 +153,11 @@ enum Change {
     Detach,
 }
 
-/// Every stream the device loop held ends with it: its signal pipe closes, so
+/// Every stream the device loop held ends with it: its signal side closes, so
 /// its client sees the stream end, and nothing plays it on.
 fn end_streams(streams: &mut Vec<ClientStream>) {
     for stream in streams.drain(..) {
         say!("soundserver: client {} ended with its output", stream.client_id);
-        syscall::close(stream.signal_write);
     }
 }
 
@@ -222,7 +214,7 @@ pub(crate) fn mix_thread(
     backend: &mut dyn Backend,
     cmd_ring: &CommandRing,
     published: &Published,
-    cmd_pipe_read: RawHandle,
+    cmd_bell: &Bell,
     num_buffers: usize,
     device_sample_rate: u32,
     device_channels: u16,
@@ -230,7 +222,7 @@ pub(crate) fn mix_thread(
     device_period_frames: usize,
     ramp_frames: u32,
     generation: u32,
-    ended_write: RawHandle,
+    ended_wake: &Waker,
 ) -> String {
     let device_period_samples = device_period_frames * device_channels as usize;
     let period_nanos = period_nanos(device_period_frames as u64, device_sample_rate as u64);
@@ -303,20 +295,33 @@ pub(crate) fn mix_thread(
     // Until this branch it was gated on the audio claim, which the dispatch's
     // own comment called out as not a privilege at all: whoever won the
     // first-come race for the sound card got the RT band with it. This is the
-    // `RT`-only capability the manifest's `syscap = ["rt"]` row asks the supervisor for,
-    // and soundserver is the only program in the tree that has one. Mixing on
-    // without the band would show up only as glitches, so a refusal is loud.
-    // Once: the band is the thread's, and the loop runs again on each output.
-    static RT: std::sync::Once = std::sync::Once::new();
-    RT.call_once(|| {
-        let rt: SysCap = Endowments::get()
+    // capability the manifest's `syscap = ["rt", "wake-latency"]` row asks the
+    // supervisor for, and soundserver is the only program in the tree that has
+    // one. Mixing on without the band would show up only as glitches, so a
+    // refusal is loud. Once: the band is the thread's, and the loop runs
+    // again on each output.
+    static CAP: std::sync::OnceLock<SysCap> = std::sync::OnceLock::new();
+    let cap = CAP.get_or_init(|| {
+        let cap: SysCap = Endowments::get()
             .take(toyos_abi::syscall::SYSCAP_LABEL)
-            .expect("the manifest declares this program `syscap = [\"rt\"]`");
-        rt.enter_rt().expect("an RT capability refused the band it names");
+            .expect("the manifest declares this program `syscap = [\"rt\", \"wake-latency\"]`");
+        cap.enter_rt().expect("an RT capability refused the band it names");
+        cap
     });
+    // While a stream plays, every idle CPU wakes within half a period, which
+    // leaves the other half for the render and the rest of the wake chain:
+    // the period interrupt may land on one CPU and wake this thread on
+    // another. A policy until the realtime stage's audio workers carry their
+    // own deadline arithmetic; none is held while suspended, so the machine
+    // sleeps deep when nothing plays.
+    let wake_bound = Duration::from_nanos(period_nanos / 2);
+    let mut wake_hold: Option<WakeLatencyHold> = None;
 
     let poller = Poller::new(64);
     let mut mix_f32 = vec![0.0f32; device_period_samples];
+    // The quantized period and its bytes, copied into the device's memory whole.
+    let mut quantized = vec![0i16; device_period_samples];
+    let mut period = vec![0u8; device_period_samples * 2];
     // Sized for the highest client rate accepted at stream open, so the mix
     // path never allocates.
     let max_client_frames = scratch_frames(device_period_frames, device_sample_rate as usize);
@@ -352,8 +357,8 @@ pub(crate) fn mix_thread(
         let (timeout, armed_on) =
             armed(!streams.is_empty(), &dll, period_nanos, toyos_abi::clock::nanos_since_boot() as f64);
 
-        poller.watch_raw(backend.handle(), READABLE, TOKEN_AUDIO);
-        poller.watch_raw(cmd_pipe_read, READABLE, TOKEN_CMD);
+        poller.watch(&backend.handle(), READABLE, TOKEN_AUDIO);
+        poller.watch(&cmd_bell, READABLE, TOKEN_CMD);
 
         let mut cmd_ready = false;
         poller.wait(1, timeout, |token| match token {
@@ -368,8 +373,7 @@ pub(crate) fn mix_thread(
         let started_at_wake = started;
 
         if cmd_ready {
-            let mut drain = [0u8; 64];
-            while matches!(syscall::read_nonblock(cmd_pipe_read, &mut drain), Ok(n) if n == drain.len()) {}
+            cmd_bell.take();
         }
         match apply_commands(cmd_ring, &mut streams, ramp_frames, generation) {
             None => {}
@@ -389,7 +393,7 @@ pub(crate) fn mix_thread(
         let completed = backend.completion();
         if let Some(why) = backend.ended() {
             end_streams(&mut streams);
-            let _ = syscall::write_nonblock(ended_write, &[1]);
+            ended_wake.wake();
             return why.to_string();
         }
         if let Some(rec) = completed {
@@ -598,10 +602,11 @@ pub(crate) fn mix_thread(
                 any_streaming |= stream.is_streaming();
             }
 
-            let dma_buf = unsafe {
-                core::slice::from_raw_parts_mut(backend.buffer(idx) as *mut i16, device_period_samples)
-            };
-            quantize_period(dma_buf, &mix_f32, &mut dither_rng);
+            quantize_period(&mut quantized, &mix_f32, &mut dither_rng);
+            for (bytes, sample) in period.chunks_exact_mut(2).zip(&quantized) {
+                bytes.copy_from_slice(&sample.to_ne_bytes());
+            }
+            backend.period(idx).write(0, &period);
 
             if !started {
                 started = true;
@@ -609,6 +614,7 @@ pub(crate) fn mix_thread(
                 // started: the marker has to precede whatever the backend logs
                 // about starting.
                 say!("soundserver: resumed");
+                wake_hold.replace(cap.hold_wake_latency(wake_bound).expect("the manifest declares this program `wake-latency`"));
             }
             backend.submit(idx, device_period_bytes);
             unplayed += 1;
@@ -659,6 +665,7 @@ pub(crate) fn mix_thread(
             dll.reset();
             backend.stop();
             started = false;
+            drop(wake_hold.take());
             say!("soundserver: suspended");
         }
 
@@ -705,13 +712,13 @@ pub(crate) fn mix_thread(
 /// After mixing one period it throws the samples away.
 ///
 /// Idle discipline: with no streams it holds no timer and takes no
-/// wakes, blocking on the command pipe alone, so an audience of zero costs
+/// wakes, blocking on the command bell alone, so an audience of zero costs
 /// exactly zero CPU. It does not request the RT band — it protects no audible
 /// output, so there is nothing for the band to protect.
 pub(crate) fn null_sink_thread(
     cmd_ring: &CommandRing,
     published: &Published,
-    cmd_pipe_read: RawHandle,
+    cmd_bell: &Bell,
     device: &Device,
     generation: u32,
 ) -> Box<Attached> {
@@ -757,7 +764,7 @@ pub(crate) fn null_sink_thread(
         signal_clients(&mut streams, ramp_frames);
 
         // Idle discipline: no streams → no timer, no wakes. A connect
-        // arrives as a command-pipe byte, the only wake source the null sink
+        // arrives as a ring of the command bell, the only wake source the null sink
         // has. While streaming, wake at the next grid point.
         let timeout = if streams.is_empty() {
             u64::MAX
@@ -765,7 +772,7 @@ pub(crate) fn null_sink_thread(
             next_period_ns.saturating_sub(toyos_abi::clock::nanos_since_boot()).max(1)
         };
 
-        poller.watch_raw(cmd_pipe_read, READABLE, TOKEN_CMD);
+        poller.watch(&cmd_bell, READABLE, TOKEN_CMD);
         let mut cmd_ready = false;
         poller.wait(1, timeout, |token| match token {
             TOKEN_CMD => cmd_ready = true,
@@ -777,8 +784,7 @@ pub(crate) fn null_sink_thread(
         }
 
         if cmd_ready {
-            let mut drain = [0u8; 64];
-            while matches!(syscall::read_nonblock(cmd_pipe_read, &mut drain), Ok(n) if n == drain.len()) {}
+            cmd_bell.take();
         }
         // Nothing is drained past an output to play to: what is behind it is
         // the output's.

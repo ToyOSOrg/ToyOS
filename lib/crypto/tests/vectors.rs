@@ -2,7 +2,8 @@ use toyos_crypto::{
     Error,
     aead::{OpeningKey, SealingKey},
     hash::{Sha256, Sha384, Sha512},
-    kdf::{Hkdf, Hmac},
+    kdf::{Hkdf, Hmac, pbkdf2},
+    scrypt,
 };
 
 fn hex<const N: usize>(text: &str) -> [u8; N] {
@@ -83,7 +84,8 @@ fn rfc8439_aead_and_authenticated_refusal() {
         opener.open(&nonce, &aad, &mut encrypted, &bad),
         Err(Error::Authentication)
     );
-    assert_eq!(encrypted, original);
+    assert_eq!(encrypted, [0; 114], "a refusal zeroes the record");
+    encrypted = original;
     assert_eq!(
         opener.open(&nonce, &aad, &mut encrypted, &tag[..15]),
         Err(Error::Length)
@@ -192,4 +194,105 @@ fn nist_gcm_zero_key_zero_block() {
     let (_, tag) = key.seal(&[], &mut data).unwrap();
     assert_eq!(data, hex("0388dace60b6a392f328c2b971b2fe78"));
     assert_eq!(tag, hex("ab6e47d42cec13bdf53a67b21257bddf"));
+}
+
+/// The RFC's hex, its whitespace dropped.
+fn spaced<const N: usize>(text: &str) -> [u8; N] {
+    hex(&text.split_whitespace().collect::<String>())
+}
+
+/// RFC 7914 §11.
+#[test]
+fn rfc7914_pbkdf2_hmac_sha256() {
+    let mut out = [0; 64];
+    pbkdf2::<Sha256>(b"passwd", b"salt", 1.try_into().unwrap(), &mut out).unwrap();
+    assert_eq!(
+        out,
+        spaced(
+            "55 ac 04 6e 56 e3 08 9f ec 16 91 c2 25 44 b6 05 f9 41 85 21 6d de 04 65 e6 8b 9d 57 c2 0d ac bc
+             49 ca 9c cc f1 79 b6 45 99 16 64 b3 9d 77 ef 31 7c 71 b8 45 b1 e3 0b d5 09 11 20 41 d3 a1 97 83"
+        )
+    );
+    pbkdf2::<Sha256>(b"Password", b"NaCl", 80_000.try_into().unwrap(), &mut out).unwrap();
+    assert_eq!(
+        out,
+        spaced(
+            "4d dc d8 f6 0b 98 be 21 83 0c ee 5e f2 27 01 f9 64 1a 44 18 d0 4c 04 14 ae ff 08 87 6b 34 ab 56
+             a1 d4 25 a1 22 58 33 54 9a db 84 1b 51 c9 b3 17 6a 27 2b de bb a1 d0 78 47 8f 62 b3 97 f3 3c 8d"
+        )
+    );
+    assert_eq!(pbkdf2::<Sha256>(b"", b"", 1.try_into().unwrap(), &mut []), Err(Error::Length));
+}
+
+/// RFC 7914 §12, all four: the last fills `scrypt::MAX_MEMORY`.
+#[test]
+fn rfc7914_scrypt() {
+    /// Passphrase, salt, log2 N, r, p and the derived key.
+    type Case = (&'static [u8], &'static [u8], u8, u32, u32, &'static str);
+    let cases: [Case; 4] = [
+        (b"", b"", 4, 1, 1, "77 d6 57 62 38 65 7b 20 3b 19 ca 42 c1 8a 04 97 f1 6b 48 44 e3 07 4a e8 df df fa 3f ed e2 14 42
+                           fc d0 06 9d ed 09 48 f8 32 6a 75 3a 0f c8 1f 17 e8 d3 e0 fb 2e 0d 36 28 cf 35 e2 0c 38 d1 89 06"),
+        (b"password", b"NaCl", 10, 8, 16, "fd ba be 1c 9d 34 72 00 78 56 e7 19 0d 01 e9 fe 7c 6a d7 cb c8 23 78 30 e7 73 76 63 4b 37 31 62
+                           2e af 30 d9 2e 22 a3 88 6f f1 09 27 9d 98 30 da c7 27 af b9 4a 83 ee 6d 83 60 cb df a2 cc 06 40"),
+        (b"pleaseletmein", b"SodiumChloride", 14, 8, 1, "70 23 bd cb 3a fd 73 48 46 1c 06 cd 81 fd 38 eb fd a8 fb ba 90 4f 8e 3e a9 b5 43 f6 54 5d a1 f2
+                           d5 43 29 55 61 3f 0f cf 62 d4 97 05 24 2a 9a f9 e6 1e 85 dc 0d 65 1e 40 df cf 01 7b 45 57 58 87"),
+        (b"pleaseletmein", b"SodiumChloride", 20, 8, 1, "21 01 cb 9b 6a 51 1a ae ad db be 09 cf 70 f8 81 ec 56 8d 57 4a 2f fd 4d ab e5 ee 98 20 ad aa 47
+                           8e 56 fd 8f 4b a5 d0 9f fa 1c 6d 92 7c 40 f4 c3 37 30 40 49 e8 a9 52 fb cb f4 5c 6f a7 7a 41 a4"),
+    ];
+    for (passphrase, salt, log_n, r, p, expected) in cases {
+        let params = scrypt::Params::new(log_n, r, p, scrypt::Limits { memory: usize::MAX, work: u64::MAX }).unwrap();
+        let mut workspace = vec![0; params.workspace_len()];
+        let mut out = [0; 64];
+        scrypt::derive(passphrase, salt, params, &mut workspace, &mut out).unwrap();
+        assert_eq!(out, spaced::<64>(expected), "N = 2^{log_n}, r = {r}, p = {p}");
+    }
+}
+
+/// IEEE Std 802.11-2020 Annex J: the PRF's four test vectors and the pass-phrase-to-PSK
+/// mapping's two beyond `differential.rs`'s ("password", "IEEE").
+#[cfg(feature = "wpa2")]
+#[test]
+fn ieee80211_annex_j_prf_and_psk() {
+    use toyos_crypto::wpa2;
+    fn prf<const N: usize>(key: &[u8], label: &str, data: &str) -> [u8; N] {
+        let mut out = [0; N];
+        wpa2::prf(key, label.as_bytes(), data.as_bytes(), &mut out).unwrap();
+        out
+    }
+    assert_eq!(
+        prf::<24>(&[0x0b; 20], "prefix", "Hi There"),
+        hex("bcd4c650b30b9684951829e0d75f9d54b862175ed9f00606")
+    );
+    assert_eq!(
+        prf::<32>(b"Jefe", "prefix-2", "what do ya want for nothing?"),
+        hex("47c4908e30c947521ad20be9053450ecbea23d3aa604b77326d8b3825ff7475c")
+    );
+    assert_eq!(
+        prf::<48>(&[0xaa; 80], "prefix-3", "Test Using Larger Than Block-Size Key - Hash Key First"),
+        hex("0ab6c33ccf70d0d736f4b04c8a7373255511abc5073713163bd0b8c9eeb7e1956fa066820a73ddee3f6d3bd407e0682a")
+    );
+    assert_eq!(
+        prf::<64>(&[0x0b; 20], "prefix-4", "Hi There Again"),
+        hex(
+            "248cfbc532ab38ffa483c8a2e40bf170eb542a2e0916d7bf6d97da2c4c5ca877\
+             736c53a65b03fa4b3745ce7613f6ad68e0e4a798b7cf691c96176fd634a59a49"
+        )
+    );
+    assert_eq!(
+        wpa2::derive_pmk(b"ThisIsAPassword", b"ThisIsASSID").unwrap().as_bytes(),
+        &hex("0dc0d6eb90555ed6419756b9a15ec3e3209b63df707dd508d14581f8982721af")
+    );
+    assert_eq!(
+        wpa2::derive_pmk(&[b'a'; 32], &[b'Z'; 32]).unwrap().as_bytes(),
+        &hex("becb93866bb8c3832cb777c2f559807c8c59afcb6eae734885001300a981cc62")
+    );
+}
+
+/// RFC 6070's one PBKDF2-HMAC-SHA1 case at the PMK's 4096 iterations whose password and salt
+/// a pass-phrase and SSID can be: its 20 octets are the PMK's first.
+#[cfg(feature = "wpa2")]
+#[test]
+fn rfc6070_pbkdf2_hmac_sha1_at_4096_iterations() {
+    let pmk = toyos_crypto::wpa2::derive_pmk(b"password", b"salt").unwrap();
+    assert_eq!(pmk.as_bytes()[..20], hex::<20>("4b007901b765489abead49d926f721d065a429c1"));
 }

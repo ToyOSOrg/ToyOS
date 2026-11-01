@@ -16,6 +16,10 @@
 
 assets = ["assets"]
 
+# The controls' floors, as `images/system.toml` gives them.
+[supervisor]
+memory-floor-mib = 96
+
 [boot]
 start = ["logkeeper", "diskserver", "fileserver", "console", "acpiserver", "ps2server"]
 
@@ -64,6 +68,7 @@ starts = ["toybox", "shell"]
 restart = true
 receives = ["input"]
 devices = ["isa:0060,0064:1,12"]
+memory-floor-mib = 24
 
 
 # `power` because `bin/shutdown` below is this binary, and on the machine this
@@ -100,11 +105,11 @@ service = true
 restart = true
 serves = ["block", "disk"]
 
-# The NVMe driver: one process per such controller, reading its own table and
-# offering its disk to the block service. QEMU's controller alone, so a metal
-# boot leaves the bench's own NVMe disk to its firmware.
+# The NVMe driver: one process per NVMe controller, whatever its maker, reading
+# its own table and offering its disk to the block service. Another system's
+# partitions on that disk are reached by no grant (`toyos_supervisor::storage`).
 [programs.nvme]
-drives = ["pci:01:08:02/1b36:0010"]
+drives = ["pci:01:08:02"]
 receives = ["disk"]
 
 # The USB driver: one process per xHCI controller, its sticks offered to the
@@ -119,5 +124,6 @@ receives = ["disk", "input"]
 # one ends, on the same ports.
 [programs.fileserver]
 restart = true
+pager = true
 roles = ["data", "log", "boot"]
 receives = ["block"]

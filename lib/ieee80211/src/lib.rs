@@ -119,8 +119,7 @@ refusals! {
     SubframePadding = Malformed, "an A-MSDU subframe whose padding runs past the MPDU";
     SnapHeaderAsAddress = Malformed, "an A-MSDU whose first destination is an LLC/SNAP header";
     NotSnap = Unsupported, "an MSDU that is not LLC/SNAP";
-    UnknownOui = Unsupported, "an LLC/SNAP header with an OUI other than RFC 1042's or bridge-tunnel's";
-    TranslatedType = Unsupported, "an RFC 1042 header carrying a type the selective translation table sends by bridge-tunnel";
+    UnknownOui = Unsupported, "an LLC/SNAP header with an OUI other than RFC 1042's";
     LengthField = Unsupported, "a Length/Type value below 0x0600, which IEEE Std 802.3-2022 §3.2.6 does not read as a type";
     ExtendedIvClear = Malformed, "a CCMP header without its Ext IV bit";
     // The reordering buffer, §10.25.6.6.

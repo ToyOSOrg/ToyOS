@@ -17,10 +17,8 @@ metal rows.
   and config name, and costs no boot, unless it ends the machine (a panic, a
   wedge, a reset) or judges a boot (the loader, an update, a file read back
   after a reboot). Its registration says which.
-- **One exec channel**, to `test-runner`'s stdin loop, since `sshd` aliases a
-  second channel's input (`issues/sshserver-holds-one-channel-and-does-not-say-so.md`).
-  The harness's ssh client relayed it through `pipe`, once that wrote output
-  as it arrived; the client was built and is deleted, and
+- **One exec channel**, to `test-runner`'s stdin loop. The harness's ssh
+  client relayed it through `pipe`, once that wrote output as it arrived; the client was built and is deleted, and
   `issues/the-host-cannot-reach-the-t14-while-it-runs-toyos.md` records the
   commit that restores it.
 - **A test's window** is what crosses between its markers: the job's output,
@@ -45,7 +43,7 @@ Every stage below has the host drive a T14 that runs ToyOS, so the track is
 blocked on `issues/the-host-cannot-reach-the-t14-while-it-runs-toyos.md`.
 
 **Next: two sessions in place of three boots.** `testcases`, which every
-shipping-kernel member rides, `testcases-mkdir` and `testcases-readdir` share
+shipping-kernel member rides, `testcases-refused` and `testcases-readdir` share
 a config, a parameter line and the shipping kernel. The session image is `tests/images/testcases.toml`
 with the netd, sshd and streaming `logd` of `tests/lantalkcase`, which is
 deleted (`issues/the-host-cannot-reach-the-t14-while-it-runs-toyos.md`),
@@ -57,7 +55,7 @@ A session's bound owes, beside its members, a lease as late as 19.1 s
 (`issues/most-t14-leases-land-one-dhcp-retry-late.md`) and one per-job
 bound. Every judge reads the stick as today but `syscall_cost`, which
 reads the window. `loader_watchdog_arms`' control arm rides a session,
-`mkdir_cap` and `readdir_bound` remove what they made, and `audio_idle_suspend`
+`kernel_objects_refused` and `readdir_bound` remove what they made, and `audio_idle_suspend`
 waits for soundd's `inspect` to read `suspended`
 (`userland/soundd/src/inspect.rs:21-33`), not for a boot no client has reached.
 

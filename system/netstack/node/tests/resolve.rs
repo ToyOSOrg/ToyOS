@@ -13,9 +13,10 @@ mod lan;
 use std::net::Ipv4Addr;
 use std::time::Duration;
 
-use common::{arp, from_server, message, message_of, option, sum, terms, xid, A, ACK, BROADCAST, DISCOVER, DNS, MAC, MAC_B, MAC_R, NAK, OFFER, R, REQUEST};
-use lan::{udp, Lan, Seen, Udp, B};
+use common::{arp, from_server, message, message_of, option, terms, xid, A, ACK, BROADCAST, DISCOVER, DNS, MAC, MAC_B, MAC_R, NAK, OFFER, R, REQUEST};
+use lan::{udp, unreachable, Lan, Seen, Udp, B};
 use toyos_dns::{Failure, Name, MAX_LOOKUPS, ROUNDS, WAIT_MS};
+use toyos_net_node::HolderId;
 use toyos_net_node::{Counter, Ended, LookupId, NotStarted, Refused, Resolved, Resolving};
 use toyos_net_udp::limits::{EPHEMERAL_COUNT, EPHEMERAL_FIRST, TX_DATAGRAMS};
 use toyos_net_udp::Counter as Rule;
@@ -165,32 +166,6 @@ fn gives(query: &[u8], address: [u8; 4]) -> Vec<u8> {
     reply(query, RESPONSE, &[(TYPE_A, address.to_vec())])
 }
 
-/// RFC 792's destination unreachable from `reporter` at `mac`: type 3 and `code`, the checksum,
-/// four unused octets, then the internet header and the first 64 bits of the datagram it is
-/// about. That datagram is spelled here as RFC 791 and RFC 768 lay out one from `source` to
-/// `destination` carrying `length` octets: no options, DF, TTL 64, protocol 17.
-fn unreachable(code: u8, (reporter, mac): (Ipv4Addr, [u8; 6]), source: (Ipv4Addr, u16), destination: (Ipv4Addr, u16), length: usize) -> Vec<u8> {
-    let datagram = u16::try_from(8 + length).unwrap().to_be_bytes();
-    let total = u16::try_from(20 + 8 + length).unwrap().to_be_bytes();
-    let mut quoted = vec![0x45, 0, total[0], total[1], 0, 0, 0x40, 0, 64, 17, 0, 0];
-    quoted.extend_from_slice(&source.0.octets());
-    quoted.extend_from_slice(&destination.0.octets());
-    let check = sum(&quoted);
-    quoted[10..12].copy_from_slice(&check.to_be_bytes());
-    quoted.extend_from_slice(&[&source.1.to_be_bytes()[..], &destination.1.to_be_bytes(), &datagram, &[0, 0]].concat());
-    let mut icmp = vec![3, code, 0, 0, 0, 0, 0, 0];
-    icmp.extend_from_slice(&quoted);
-    let check = sum(&icmp);
-    icmp[2..4].copy_from_slice(&check.to_be_bytes());
-    let total = u16::try_from(20 + icmp.len()).unwrap().to_be_bytes();
-    let mut ip = vec![0x45, 0, total[0], total[1], 0, 0, 0x40, 0, 64, 1, 0, 0];
-    ip.extend_from_slice(&reporter.octets());
-    ip.extend_from_slice(&source.0.octets());
-    let check = sum(&ip);
-    ip[10..12].copy_from_slice(&check.to_be_bytes());
-    [&MAC[..], &mac, &[0x08, 0x00], &ip, &icmp].concat()
-}
-
 /// `code` from `reporter` about `query`, as the node sent it.
 fn reports(code: u8, reporter: (Ipv4Addr, [u8; 6]), query: &Udp) -> Vec<u8> {
     unreachable(code, reporter, (query.source, query.source_port), (query.destination, query.port), query.payload.len())
@@ -250,7 +225,7 @@ impl Net {
     fn leased_for(seconds: u32, servers: &[Ipv4Addr], router: Option<Ipv4Addr>) -> Self {
         let mut lan = Lan::new();
         lan.lease_on(&lease_of(seconds, servers, router));
-        assert_eq!(lan.node.lease().expect("held").dns, servers, "the premise: the lease names these resolvers");
+        assert_eq!(lan.node.lease(lan.link).expect("held").dns, servers, "the premise: the lease names these resolvers");
         // `toyos-dns` keeps whole milliseconds and conflict detection's waits are drawn finer: the
         // origin is the next whole one, so a wait counted from it ends on the millisecond named.
         let whole = u64::try_from(lan.now.since(Instant::from_millis(0)).as_millis()).unwrap() + 1;
@@ -298,9 +273,9 @@ impl Net {
 
     /// Whether a socket holds `port`, by binding it: a port is one socket's.
     fn port_held(&mut self, port: u16) -> bool {
-        match self.lan.node.udp_bind(ANY, Port::new(port), undrawn) {
+        match self.lan.node.udp_bind(ANY, Port::new(port), common::unread(), undrawn) {
             Ok((id, _)) => {
-                self.lan.node.udp_close(self.lan.now, id).unwrap();
+                self.lan.node.datagram_departed(self.lan.now, id, HolderId::FIRST);
                 false
             }
             Err(Refused::AddrInUse) => true,
@@ -766,7 +741,7 @@ fn a_lookup_with_no_resolver_to_ask_is_refused_as_not_connected() {
     let mut lan = Lan::new();
     lan.lease(600);
     lan.node.resolve(lan.now, ONE, name("www.example"), sequence([1, 2])).expect("the premise: a held lease's resolver is asked");
-    assert!(lan.run_until(Duration::from_secs(700), |lan| lan.node.lease().is_none()), "the lease runs out");
+    assert!(lan.run_until(Duration::from_secs(700), |lan| lan.node.lease(lan.link).is_none()), "the lease runs out");
     assert_eq!(lan.node.resolve(lan.now, ONE, name("www.example"), undrawn), Err(NotStarted::NotConnected), "after the lease");
 }
 
@@ -839,11 +814,11 @@ fn a_query_with_no_port_to_leave_from_ends_its_lookup_by_name() {
     let mut net = Net::leased(&[ANSWERS], Some(R));
     let last = u32::from(EPHEMERAL_COUNT) - 1;
     // A client's socket holds a place; a query's holds none.
-    net.lan.node.set_places(net.lan.now, usize::from(EPHEMERAL_COUNT) - 1);
+    net.lan.node.set_places(usize::from(EPHEMERAL_COUNT) - 1);
     for offset in 0..last {
-        net.lan.node.udp_bind(ANY, None, || offset).unwrap();
+        net.lan.node.udp_bind(ANY, None, common::unread(), || offset).unwrap();
     }
-    assert_eq!(net.lan.node.udp_bind(ANY, None, || last), Err(toyos_net_node::Refused::ResourceExhausted), "every place is a client's socket");
+    assert_eq!(net.lan.node.udp_bind(ANY, None, common::unread(), || last), Err(toyos_net_node::Refused::ResourceExhausted), "every place is a client's socket");
     let id = asking(net.lan.node.resolve(net.lan.now, ONE, name("www.example"), sequence([0x8001, last])).expect("the one port left, and a query needs no place"));
     assert_eq!(net.lan.node.resolve(net.lan.now, ONE, name("other.example"), sequence([0x8002, 0])), Err(NotStarted::ResourceExhausted));
     assert_eq!(net.run(id, 10 * WAIT_MS), Some(Err(Ended::NoPort)));
@@ -862,14 +837,14 @@ fn a_query_with_no_port_to_leave_from_ends_its_lookup_by_name() {
 fn a_burst_at_a_resolver_not_yet_resolved_is_on_the_wire_once_the_resolver_answers_arp() {
     let mut net = Net::leased(&[ANSWERS], Some(R));
     let names: Vec<String> = (0..MAX_LOOKUPS).map(|n| format!("n{n}.example")).collect();
-    let ip = |net: &Net| net.lan.node.shard().ip().neighbour(net.lan.node.shard().iface(), ANSWERS).map(toyos_net_ip::Nud::mac);
+    let ip = |net: &Net| net.lan.node.shard().ip().neighbour(net.lan.link, ANSWERS).map(toyos_net_ip::Nud::mac);
     assert_eq!(ip(&net), None, "the premise: [ip] holds no entry for the resolver");
     for asked in &names {
         net.resolve(asked).unwrap();
     }
     assert!(net.queried.is_empty(), "the premise: nothing has left");
     assert_eq!(net.lan.opportunity(), 1, "the request for the resolver, and no query");
-    let held = match net.lan.node.shard().ip().neighbour(net.lan.node.shard().iface(), ANSWERS) {
+    let held = match net.lan.node.shard().ip().neighbour(net.lan.link, ANSWERS) {
         Some(toyos_net_ip::Nud::Incomplete(asking)) => Some(asking.pending.queued()),
         _ => None,
     };
@@ -892,7 +867,7 @@ fn a_clients_datagrams_behind_the_burst_wait_in_their_own_socket_and_take_no_que
     for asked in &names {
         net.resolve(asked).unwrap();
     }
-    let (client, _) = net.lan.node.udp_bind(ANY, None, || 0x3000).unwrap();
+    let (client, _) = net.lan.node.udp_bind(ANY, None, common::unread(), || 0x3000).unwrap();
     let behind: Vec<Vec<u8>> = (0..TX_DATAGRAMS).map(|n| format!("behind the burst {n}").into_bytes()).collect();
     for datagram in &behind {
         net.lan.node.udp_send_to(net.lan.now, client, ANSWERS, 9, datagram).unwrap();
@@ -1034,7 +1009,7 @@ fn the_query_asked_in_a_dropped_querys_place_leaves_in_the_same_opportunity() {
     assert_eq!(net.run(first, 10 * WAIT_MS), Some(Ok(vec![ADDRESS])));
     net.until(3_000);
     let shard = net.lan.node.shard();
-    assert!(matches!(shard.ip().neighbour(shard.iface(), SILENT), Some(toyos_net_ip::Nud::Failed)), "the premise: [ip] gave the first resolver up");
+    assert!(matches!(shard.ip().neighbour(net.lan.link, SILENT), Some(toyos_net_ip::Nud::Failed)), "the premise: [ip] gave the first resolver up");
     let asked = net.queried.len();
 
     let id = net.resolve("other.example").unwrap();
@@ -1077,7 +1052,7 @@ fn lease_of(seconds: u32, servers: &[Ipv4Addr], router: Option<Ipv4Addr>) -> Vec
 #[test]
 fn a_lookup_outlives_a_renewal_that_names_the_same_resolvers() {
     let (mut net, id, renewal) = renewing_under_a_lookup();
-    let expiry = |net: &Net| net.lan.node.lease().and_then(|lease| lease.timers).map(|timers| timers.expiry);
+    let expiry = |net: &Net| net.lan.node.lease(net.lan.link).and_then(|lease| lease.timers).map(|timers| timers.expiry);
     let before = expiry(&net);
     net.lan.deliver(&from_server(MAC, A, &message_of(ACK, renewal, &naming(ANSWERS))));
     assert_ne!(expiry(&net), before, "the premise: the renewal was taken, and the lease runs from it");
@@ -1093,7 +1068,7 @@ fn a_lookup_outlives_a_renewal_that_names_the_same_resolvers() {
 fn a_lookup_ends_when_its_leases_resolvers_change() {
     let (mut net, id, renewal) = renewing_under_a_lookup();
     net.lan.deliver(&from_server(MAC, A, &message_of(ACK, renewal, &naming(SILENT))));
-    assert_eq!(net.lan.node.lease().expect("held").dns, [SILENT], "the premise: the renewed lease names another resolver");
+    assert_eq!(net.lan.node.lease(net.lan.link).expect("held").dns, [SILENT], "the premise: the renewed lease names another resolver");
     assert_eq!(net.lan.node.take_resolved(), [Resolved { id, result: Err(Ended::LeaseChanged) }]);
     let left = net.queried[0].udp.source_port;
     assert!(!net.port_held(left), "port {left} of the ended lookup");
@@ -1104,7 +1079,7 @@ fn a_lookup_ends_when_its_leases_resolvers_change() {
 fn a_lookup_ends_when_its_lease_is_lost() {
     let (mut net, id, renewal) = renewing_under_a_lookup();
     net.lan.deliver(&from_server(common::BROADCAST, Ipv4Addr::BROADCAST, &message(NAK, renewal, Ipv4Addr::UNSPECIFIED, &[(54, R.octets().to_vec())])));
-    assert_eq!(net.lan.node.lease(), None, "the premise: the lease is gone");
+    assert_eq!(net.lan.node.lease(net.lan.link), None, "the premise: the lease is gone");
     assert_eq!(net.lan.node.take_resolved(), [Resolved { id, result: Err(Ended::LeaseChanged) }]);
 }
 
@@ -1191,7 +1166,7 @@ fn a_link_that_goes_down_empties_what_every_view_keeps_though_the_lease_stays() 
     net.until(100_000);
     let requests = net.lan.sent[up..].iter().filter(|(_, seen)| matches!(seen, Seen::Udp(udp) if udp.port == 67)).count();
     assert_eq!(requests, usize::try_from(toyos_dhcp::limits::REQUEST_TRANSMISSIONS).unwrap(), "the premise: every INIT-REBOOT went unanswered");
-    assert_eq!(net.lan.node.lease().map(|lease| lease.dns.clone()), Some(vec![ANSWERS]), "the premise: the lease is in use, its resolver the same");
+    assert_eq!(net.lan.node.lease(net.lan.link).map(|lease| lease.dns.clone()), Some(vec![ANSWERS]), "the premise: the lease is in use, its resolver the same");
     asks_again(&mut net);
 }
 
@@ -1201,14 +1176,14 @@ fn a_link_that_goes_down_empties_what_every_view_keeps_though_the_lease_stays() 
 fn a_lease_lost_and_another_naming_the_same_resolver_empty_what_every_view_keeps() {
     let (mut net, renewal) = renewing();
     net.lan.deliver(&from_server(BROADCAST, Ipv4Addr::BROADCAST, &message(NAK, renewal, Ipv4Addr::UNSPECIFIED, &[(54, R.octets().to_vec())])));
-    assert_eq!(net.lan.node.lease(), None, "the premise: the lease is gone");
+    assert_eq!(net.lan.node.lease(net.lan.link), None, "the premise: the lease is gone");
     let discover = last_dhcp(&net);
     assert_eq!(option(&discover, 53), Some(&[DISCOVER][..]));
     let terms = lease_of(600, &[ANSWERS], Some(R));
     net.lan.deliver(&from_server(MAC, A, &message_of(OFFER, xid(&discover), &terms)));
     net.lan.deliver(&from_server(BROADCAST, Ipv4Addr::BROADCAST, &message_of(ACK, xid(&discover), &terms)));
-    assert!(net.lan.run_until(Duration::from_secs(10), |lan| lan.node.lease().is_some()), "the new lease is held");
-    assert_eq!(net.lan.node.lease().expect("held").dns, [ANSWERS], "the premise: it names the same resolver");
+    assert!(net.lan.run_until(Duration::from_secs(10), |lan| lan.node.lease(lan.link).is_some()), "the new lease is held");
+    assert_eq!(net.lan.node.lease(net.lan.link).expect("held").dns, [ANSWERS], "the premise: it names the same resolver");
     asks_again(&mut net);
 }
 
@@ -1217,7 +1192,7 @@ fn a_lease_lost_and_another_naming_the_same_resolver_empty_what_every_view_keeps
 #[test]
 fn a_renewal_with_the_same_terms_empties_what_every_view_keeps() {
     let (mut net, renewal) = renewing();
-    let expiry = |net: &Net| net.lan.node.lease().and_then(|lease| lease.timers).map(|timers| timers.expiry);
+    let expiry = |net: &Net| net.lan.node.lease(net.lan.link).and_then(|lease| lease.timers).map(|timers| timers.expiry);
     let before = expiry(&net);
     net.lan.deliver(&from_server(MAC, A, &message_of(ACK, renewal, &lease_of(600, &[ANSWERS], Some(R)))));
     assert_ne!(expiry(&net), before, "the premise: the renewal was taken");

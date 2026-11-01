@@ -1,41 +1,41 @@
-//! `toyos-metal` — the loop that flashes ToyOS to a metal bench's stick, boots
-//! it once, and answers with [`toyos_build::bootlog`]'s verdict on what that boot
-//! wrote to the log partition.
+//! `toyos-metal` — the loop that writes a ToyOS image to a metal bench's
+//! internal NVMe ([`internal`]), boots it once through `BootNext`, and answers
+//! with [`toyos_build::bootlog`]'s verdict on what that boot wrote to its log
+//! partition.
 //!
 //! It runs on the development host and reaches the machine over `ssh`: the
-//! T14 unless `--host` names another bench, whose account's home holds the
-//! log's mount point.
-//! [`Target::words`] is the one place a root command line is written — the
-//! installed `/etc/sudoers.d/toyos-metal` and every argv are rendered from it —
-//! so the loop constructs no command outside [`JOBS`] but the one that puts
-//! that rule there, [`install_sudoers`], which the rule does not permit either.
+//! T14 bench unless `--host` names another, whose account's home holds the
+//! log's mount point and which has passwordless sudo. [`Target::argv`] is the
+//! one place a root command line ([`Job`]) is written.
 //!
-//! Two admission checks stand before any write: the image is a whole number of
-//! [`LBA`]-byte sectors carrying `EFI PART` in its final one, and the disk
-//! answers with the stick the machine's record names — the machine read by its
-//! SMBIOS first, and a machine with no record refused. A node is a whole SCSI or
-//! NVMe disk, `/dev/sd<letter>` or `/dev/nvme<n>n<m>`, and nothing else: the
-//! T14 is a playground whose internal NVMe ToyOS may be installed on and a
-//! broken driver may wipe, so it is nameable like the stick.
+//! **The bench's own partitions are never written.** The machine must answer
+//! as a recorded bench by its SMBIOS, the disk must be one
+//! [`internal::recognise`] knows, and every write names one of the partitions
+//! after the bench's four, but for the partition table itself, which `sgdisk`
+//! rewrites whole on every flash with entries 1–4 as they were. The
+//! firmware's order keeps Ubuntu first: ToyOS's entry is never in it, which
+//! every boot checks before and after, so a ToyOS boot that fails or is reset
+//! hands the next boot to Ubuntu.
 //!
 //! Beside the loop: [`testargs`], the suite's command line, which carries the
-//! metal profile's flags; [`image`], the config a metal boot derives;
-//! [`timings`], each bench's record; and [`devices`], what a boot's reset says
-//! about itself.
+//! metal profile's flags; [`image`], the config a metal boot derives; and
+//! [`timings`], each bench's record.
 
 use std::fmt;
-use std::io::Write;
+use std::io::{Read, Seek};
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output, Stdio};
 
 use toyos_build::bootlog;
-use toyos_build::disk::{whole_disk, Node, Unfit};
+use toyos_build::disk::Node;
 use toyos_build::flags::{declare_flags, Flag};
-use toyos_build::image::LBA;
+use toyos_gpt::Guid;
 
-use crate::timings::{Machine, Record, Stick};
+use crate::internal::Owned;
+use crate::timings::{Machine, Record};
 
 pub mod image;
+pub mod internal;
 pub mod testargs;
 pub mod timings;
 
@@ -76,27 +76,32 @@ pub fn return_secs(deadline_ms: u64) -> u64 {
 /// How often the loop asks whether the machine is there.
 const POLL: std::time::Duration = std::time::Duration::from_secs(1);
 
-/// How long the boot stick gets to be there again once Ubuntu is up.
-///
-/// **The bench's own device is the one judge there is of whether a reset left a
-/// USB device its next host can enumerate.** Ten times the three seconds
-/// Ubuntu's whole enumeration — four addressing attempts and a port power cycle
-/// — spends before it gives up, so a stick this wait does not find is one the
-/// host has already finished refusing.
-pub const STICK_SECS: u64 = 30;
-
-/// The absolute paths `which` answered on the machine; sudo matches a path and
-/// not a name, so nothing here is spelled relatively.
+/// Each tool at the path the bench's Ubuntu installs it, so `sudo` runs that
+/// one whatever the account's `PATH`.
+const BLOCKDEV: &str = "/usr/sbin/blockdev";
 const DD: &str = "/usr/bin/dd";
 const EFIBOOTMGR: &str = "/usr/bin/efibootmgr";
 const MOUNT: &str = "/usr/bin/mount";
+const PARTX: &str = "/usr/bin/partx";
+const SGDISK: &str = "/usr/sbin/sgdisk";
 const UMOUNT: &str = "/usr/bin/umount";
 const REBOOT: &str = "/usr/sbin/reboot";
 const TRUE: &str = "/usr/bin/true";
+const UDEVADM: &str = "/usr/bin/udevadm";
 const WIPEFS: &str = "/usr/sbin/wipefs";
 
-/// What the firmware loads off the stick's ESP.
+/// How long udev's queue gets to drain, a failure bound: udevd kills a stuck
+/// event at 180 s (systemd-udevd(8), `--event-timeout`).
+const SETTLE_SECS: u64 = 180;
+
+/// What the firmware loads off the internal ESP.
 const LOADER: &str = r"\EFI\BOOT\BOOTX64.EFI";
+
+/// The internal install's boot entry in the firmware's list.
+const INTERNAL_LABEL: &str = "ToyOS-internal";
+
+/// The entry [`fall_through`] boots once, on the internal ESP, and deletes.
+const UNBOOTABLE_LABEL: &str = "ToyOS-unbootable";
 
 /// The three logind keys that keep a closed-lid machine awake.
 const LID_KEYS: &[&str] =
@@ -123,21 +128,13 @@ pub fn said_refusal(stderr: &str) -> Option<String> {
 /// Every way this loop refuses, by name.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Refusal {
-    /// The node is no whole disk's, or the image no whole disk's image.
-    Disk(Unfit),
-    /// A word that cannot be written into a sudoers rule unambiguously.
-    Word(String),
     /// No `HOME`, so the default key path would be rooted at `/`.
     NoHome,
-    /// The disk did not answer with the identity this loop was given.
+    /// The disk's identity did not read, or is not a removable disk's.
     Identity { field: &'static str, want: String, got: String },
+    /// The disk named to be adopted as scratch is not one this loop erases.
+    Adopt(String),
     File { path: String, why: String },
-    Table(String),
-    /// The table does not hold exactly one partition of a type the loop needs.
-    Partitions { what: &'static str, matched: u32 },
-    /// The table holds neither one nor two ROOTs, which are the slots the
-    /// loader boots.
-    Roots { matched: u32 },
     /// The image is armed with a parameter [`FLASHABLE`] does not clear.
     Armed { name: String },
     /// **The image carries no bound on its own boot.** Every metal image is
@@ -148,26 +145,27 @@ pub enum Refusal {
     NoBound { staged_a_wedge: bool },
     /// **The outside judge's verdict on the volume the boot left.** What
     /// `toyos-fat32-check` said about the log partition read straight off the
-    /// stick — the bytes, not a driver's opinion of them, and not the FAT32
+    /// disk — the bytes, not a driver's opinion of them, and not the FAT32
     /// implementation that wrote them.
     Fat32(String),
-    /// The image puts a partition somewhere the installed rule does not name.
-    PartitionIndex { what: &'static str, want: u32, got: u32 },
     /// What landed on the disk is not what the image says.
     Landed { what: String, want: u64, got: u64 },
     /// `efibootmgr` named no four-hex-digit boot entry.
     BootEntry(String),
-    /// Creating the entry moved the firmware's boot order.
-    BootOrder { before: String, now: String },
+    /// The firmware's boot order moved `during` something this loop did.
+    BootOrder { during: &'static str, before: String, now: String },
+    /// The entry about to be booted once is in the firmware's boot order, so
+    /// a failed ToyOS boot would come back to ToyOS rather than Ubuntu.
+    Ordered { entry: String, order: String },
     Sudo(String),
     /// A lid key that no longer reads `ignore`, which is what keeps the machine up.
     Lid { key: &'static str, got: String },
     Remote { what: String, status: String, stderr: String },
     /// The machine did not go down, or did not come back.
     Silent { what: &'static str, secs: u64 },
-    /// The machine came back and the boot stick did not: the boot before this
-    /// left a USB device its next host cannot enumerate.
-    Stick { node: String, secs: u64 },
+    /// The firmware booted the entry [`fall_through`] made unbootable, or
+    /// kept the `BootNext` naming it.
+    FellThrough(String),
     /// The log the boot left is not a passing boot's.
     Log(bootlog::Unfit),
     /// **The loader reported a record and booted no kernel.** Not the same thing
@@ -178,7 +176,7 @@ pub enum Refusal {
     /// record to report at all.
     ReportedAndBootedNothing { said: String },
     /// **The last boot of this image was handed the machine and hung.** The
-    /// loader counts attempts on the stick, and this pass is the second of an
+    /// loader counts attempts on the log partition, and this pass is the second of an
     /// image whose first never reported — so it booted no kernel and handed the
     /// machine back rather than starting the same hang again. What is owed is a
     /// look at why that kernel stopped, and the boot before this one is where.
@@ -191,23 +189,30 @@ pub enum Refusal {
     /// The machine did not name itself: its SMBIOS answer is not
     /// [`Machine::QUERY`]'s three lines.
     Machine(String),
-    /// The account's home on the machine is no absolute path a rule can name.
+    /// The account's home on the machine is no normal absolute path.
     Home(String),
-    /// The machine has no record, so no stick this loop may write.
+    /// The machine has no record, so it is no bench this loop writes.
     Unrecorded { path: String },
     /// The machine's record is there and does not read.
     Record(String),
+    /// The internal disk is no layout [`internal::recognise`] knows, or its
+    /// install area is not as the last step left it.
+    Layout(String),
+    /// The image is not one an internal install writes.
+    Install(String),
+    /// A GUID the write would give a partition is already another's.
+    Collision(String),
     Usage(String),
 }
 
 impl Refusal {
     /// Whether the machine failed rather than the loop: the boot is the subject
-    /// only once the stick is written and the reboot asked for.
+    /// only once the disk is written and the reboot asked for.
     pub fn about_the_boot(&self) -> bool {
         matches!(
             self,
             Self::Silent { .. }
-                | Self::Stick { .. }
+                | Self::FellThrough(_)
                 | Self::Log(_)
                 | Self::Fat32(_)
                 | Self::ReportedAndBootedNothing { .. }
@@ -220,22 +225,12 @@ impl Refusal {
 impl fmt::Display for Refusal {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            Self::Disk(unfit) => write!(f, "{unfit}"),
-            Self::Word(got) => {
-                write!(f, "{got:?} cannot be written into a sudoers command line unambiguously")
-            }
             Self::NoHome => write!(f, "no HOME, so there is no default key path; pass --key"),
             Self::Identity { field, want, got } => {
                 write!(f, "the disk's {field} reads {got:?} where this loop was given {want:?}")
             }
+            Self::Adopt(why) => write!(f, "nothing was erased: {why}"),
             Self::File { path, why } => write!(f, "{path}: {why}"),
-            Self::Table(why) => write!(f, "the image carries no readable partition table: {why}"),
-            Self::Partitions { what, matched } => {
-                write!(f, "the image carries {matched} {what} partitions and this loop needs one")
-            }
-            Self::Roots { matched } => {
-                write!(f, "the image carries {matched} TOYOS-ROOT partitions and this loop needs one or two")
-            }
             Self::NoBound { staged_a_wedge } => write!(
                 f,
                 "the image carries no `{}<ms>` on its parameter line{}. Every image the \
@@ -253,7 +248,7 @@ impl fmt::Display for Refusal {
             Self::Fat32(said) => write!(
                 f,
                 "the log partition the boot left does not check out: {said}. This is \
-                 `toyos-fat32-check` reading the volume off the stick, so what it names is \
+                 `toyos-fat32-check` reading the volume off the disk, so what it names is \
                  what the kernel wrote and not what a driver read back"
             ),
             Self::Armed { name } => write!(
@@ -262,23 +257,24 @@ impl fmt::Display for Refusal {
                  the machine survives it. Every parameter a flashed image carries needs a row \
                  in `toyos_metal::FLASHABLE`"
             ),
-            Self::PartitionIndex { what, want, got } => write!(
-                f,
-                "the image puts {what} at partition {got} where the installed rule names {want}"
-            ),
             Self::Landed { what, want, got } => {
                 write!(f, "{what} on the disk is {got} where the image says {want}")
             }
             Self::BootEntry(saw) => {
                 write!(f, "efibootmgr named no four-hex-digit boot entry: {saw:?}")
             }
-            Self::BootOrder { before, now } => write!(
+            Self::BootOrder { during, before, now } => write!(
                 f,
-                "creating the boot entry moved BootOrder from {before:?} to {now:?}: this loop \
-                 buys one boot with --bootnext and leaves the order alone"
+                "{during} moved BootOrder from {before:?} to {now:?}: this loop buys one boot with \
+                 --bootnext and leaves the order alone"
+            ),
+            Self::Ordered { entry, order } => write!(
+                f,
+                "Boot{entry} is in BootOrder {order:?}, so a ToyOS boot that fails would come back to \
+                 ToyOS: the firmware put it there, and it is taken out by hand"
             ),
             Self::Sudo(saw) => {
-                write!(f, "`sudo -n` on the machine did not answer: {saw}. Install the rule first")
+                write!(f, "`sudo -n` on the machine did not answer: {saw}. The bench account needs passwordless sudo")
             }
             Self::Lid { key, got } => write!(
                 f,
@@ -294,13 +290,7 @@ impl fmt::Display for Refusal {
                  a boot runs under plus the time coming back costs; why it did not is what the \
                  panel and the log partition say, and neither is readable from here"
             ),
-            Self::Stick { node, secs } => write!(
-                f,
-                "the machine came back and {node} did not, within {secs} s: the boot that just \
-                 ran left this USB device in a state its next host cannot enumerate, and a \
-                 physical replug is what clears one — see `usb 3-1: device descriptor read/64, \
-                 error -71` on the machine's own journal"
-            ),
+            Self::FellThrough(why) => write!(f, "the firmware did not fall through past an unbootable entry: {why}"),
             Self::Log(unfit) => write!(f, "the log partition came back and {unfit}"),
             Self::Wedge { why } => write!(
                 f,
@@ -325,23 +315,48 @@ impl fmt::Display for Refusal {
             Self::Machine(why) => write!(f, "the machine did not say what it is: {why}"),
             Self::Home(got) => write!(
                 f,
-                "the account's home on the machine reads {got:?}, which is no normal absolute path \
-                 a sudoers rule can name"
+                "the account's home on the machine reads {got:?}, which is no normal absolute path"
             ),
             Self::Unrecorded { path } => write!(
                 f,
-                "this machine has no record at {path}, so nothing names the stick this loop may \
-                 write. Record it once, with the boot stick in: `cargo run -p toyos-metal -- \
-                 --install-sudoers <password file> --host <user>@<machine>` writes the record from \
-                 what the machine and the stick answer, and installs the rule"
+                "this machine has no record at {path}, so it is no bench this loop writes. Record \
+                 it once: `cargo run -p toyos-metal -- --record --host <user>@<machine>` writes the \
+                 record from what the machine's SMBIOS answers"
             ),
             Self::Record(why) => write!(f, "the machine's record does not read: {why}"),
+            Self::Layout(why) => write!(f, "the internal disk is not installed on: {why}"),
+            Self::Install(why) => write!(f, "the image is not installed: {why}"),
+            Self::Collision(why) => write!(f, "nothing was written: {why}"),
             Self::Usage(why) => write!(f, "{why}"),
         }
     }
 }
 
-/// What `/sys/class/block/<disk>/` answered, in the order [`Target::identity`]
+/// A whole SCSI disk, `/dev/sd<letter>`: what a USB stick enumerates as, and
+/// the one kind of disk [`adopt_scratch`] erases.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct Sd(u8);
+
+impl Sd {
+    fn parse(path: &str) -> Result<Self, Refusal> {
+        match Node::parse(path) {
+            Ok(Node::Scsi(letter)) => Ok(Self(letter)),
+            _ => Err(Refusal::Usage(format!("{path:?} is no /dev/sd<letter> disk, which is what a scratch disk is"))),
+        }
+    }
+
+    fn node(self) -> Node {
+        Node::Scsi(self.0)
+    }
+
+    /// The read [`Identity::parse`] answers.
+    fn identity(self) -> String {
+        let at = self.node().sysfs();
+        format!("cat {at}/size {at}/device/vendor {at}/device/model {at}/removable")
+    }
+}
+
+/// What `/sys/class/block/<disk>/` answered, in the order [`Sd::identity`]
 /// asks for it.
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct Identity {
@@ -374,158 +389,158 @@ impl Identity {
             removable: removable == "1",
         })
     }
+}
 
-    fn check(&self, want: &Stick) -> Result<(), Refusal> {
-        let no = |field, want: String, got: String| Refusal::Identity { field, want, got };
-        if self.sectors != want.sectors {
-            return Err(no("size", want.sectors.to_string(), self.sectors.to_string()));
+/// Every block device with its partitions' numbers, types, GUIDs and
+/// filesystems, as udev records them, for [`adoptable`].
+const DISKS: &str = "lsblk --noheadings --paths --pairs --output NAME,TYPE,PKNAME,PARTN,PARTTYPE,PARTUUID,FSTYPE";
+
+/// One partition [`DISKS`] listed.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct Listed {
+    index: u32,
+    kind: Option<Guid>,
+    unique: Option<Guid>,
+    /// The filesystem whose signature `blkid` found in it.
+    filesystem: Option<String>,
+}
+
+/// Each `/dev/sd<letter>` disk [`DISKS`] answered, with its partitions.
+fn sd_disks(listing: &str) -> Result<Vec<(Sd, Vec<Listed>)>, Refusal> {
+    let unread = |why: String| Refusal::Remote {
+        what: "listing the disks".to_string(),
+        status: "answered no lsblk listing".to_string(),
+        stderr: why,
+    };
+    let rows: Vec<_> = listing
+        .lines()
+        .filter(|line| !line.trim().is_empty())
+        .map(internal::pairs)
+        .collect::<Result<_, _>>()
+        .map_err(unread)?;
+    let field = |row: &std::collections::BTreeMap<String, String>, key: &str| row.get(key).cloned().unwrap_or_default();
+    let mut disks: Vec<(Sd, Vec<Listed>)> = rows
+        .iter()
+        .filter(|row| field(row, "TYPE") == "disk")
+        .filter_map(|row| Sd::parse(&field(row, "NAME")).ok())
+        .map(|sd| (sd, Vec::new()))
+        .collect();
+    for row in rows.iter().filter(|row| field(row, "TYPE") == "part") {
+        let Some((_, parts)) = disks.iter_mut().find(|(sd, _)| sd.node().whole() == field(row, "PKNAME")) else {
+            continue;
+        };
+        let index = field(row, "PARTN")
+            .parse()
+            .map_err(|_| unread(format!("{} reads PARTN={:?}", field(row, "NAME"), field(row, "PARTN"))))?;
+        parts.push(Listed {
+            index,
+            kind: internal::guid(&field(row, "PARTTYPE")),
+            unique: internal::guid(&field(row, "PARTUUID")),
+            filesystem: Some(field(row, "FSTYPE")).filter(|fs| !fs.is_empty()),
+        });
+    }
+    Ok(disks)
+}
+
+/// What a disk holds, which is what tells a scratch disk from one carrying an
+/// image.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Carrying {
+    /// A ToyOS image's table, as `build/image.rs` writes one: one ESP, one
+    /// TOYOS-LOG, one slot table, and one or two slots.
+    Layout,
+    /// A scratch disk's table, as [`adopt_scratch`] writes it: one partition,
+    /// of [`Guid::TOYOS_SCRATCH`], so no disk holding a ToyOS image is one.
+    /// The mark is the whole of a scratch disk's identity: only adoption
+    /// writes it, and what carries it is erasable by definition.
+    Scratch,
+}
+
+impl Carrying {
+    fn holds(self, parts: &[Listed]) -> bool {
+        let count = |kind: Guid| parts.iter().filter(|p| p.kind == Some(kind)).count();
+        match self {
+            Self::Layout => {
+                count(Guid::EFI_SYSTEM) == 1
+                    && count(Guid::MICROSOFT_BASIC) == 1
+                    && count(Guid::TOYOS_SLOTS) == 1
+                    && (1..=2).contains(&count(Guid::TOYOS_BOOT))
+                    && (1..=2).contains(&count(Guid::TOYOS_ROOT))
+            }
+            Self::Scratch => matches!(parts, [only] if only.kind == Some(Guid::TOYOS_SCRATCH)),
         }
-        if self.vendor != want.vendor {
-            return Err(no("vendor", want.vendor.clone(), self.vendor.clone()));
-        }
-        if self.model != want.model {
-            return Err(no("model", want.model.clone(), self.model.clone()));
-        }
-        if !self.removable {
-            return Err(no("removable", "1".to_string(), "0".to_string()));
-        }
-        Ok(())
     }
 }
 
-/// Whether `disk` is the stick `machine`'s record in `dir` names: the one disk
-/// this loop writes on that machine.
-fn recorded_stick(dir: &Path, machine: &Machine, disk: &Identity) -> Result<Stick, Refusal> {
-    let record = Record::load(dir, machine)
+impl fmt::Display for Carrying {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Layout => write!(f, "a ToyOS image's partition table"),
+            Self::Scratch => write!(f, "a scratch disk's one partition"),
+        }
+    }
+}
+
+/// `machine`'s record in `dir`, refused where it has none.
+fn recorded(dir: &Path, machine: &Machine) -> Result<Record, Refusal> {
+    Record::load(dir, machine)
         .map_err(Refusal::Record)?
-        .ok_or_else(|| Refusal::Unrecorded { path: dir.join(machine.file()).display().to_string() })?;
-    disk.check(&record.stick)?;
-    Ok(record.stick)
+        .ok_or_else(|| Refusal::Unrecorded { path: dir.join(machine.file()).display().to_string() })
 }
 
-/// What a capture left: the machine's record, the stick it names, and whether
-/// this capture wrote it.
-#[derive(Debug, PartialEq, Eq)]
-struct Captured {
-    at: PathBuf,
-    stick: Stick,
-    wrote: bool,
-}
-
-impl Captured {
-    /// The capture's account of itself: the record, and the disk every later
-    /// run on this machine wipes and writes, by its node and its identity.
-    fn said(&self, node: &Node) -> String {
-        let Stick { sectors, vendor, model } = &self.stick;
-        format!(
-            "{} {}: the stick is {}, {sectors} sectors, {vendor} {model}, removable; every run on \
-             this machine wipes and writes that disk",
-            self.at.display(),
-            if self.wrote { "records this machine now" } else { "already recorded this machine" },
-            node.whole(),
-        )
-    }
-}
-
-/// Record `machine` with `disk` as its stick where it has no record, and check
-/// `disk` against the record where it has one. **It never moves a record**: a
-/// machine is re-recorded by deleting its file.
-fn record_machine(dir: &Path, machine: &Machine, disk: &Identity) -> Result<Captured, Refusal> {
+/// Record `machine` in `dir` where it has no record, answering the record's
+/// path and whether this wrote it. **It never moves a record**: a machine is
+/// re-recorded by deleting its file.
+fn record_machine(dir: &Path, machine: &Machine) -> Result<(PathBuf, bool), Refusal> {
     let wrote = match Record::load(dir, machine).map_err(Refusal::Record)? {
         Some(_) => false,
         None => {
-            let stick =
-                Stick { sectors: disk.sectors, vendor: disk.vendor.clone(), model: disk.model.clone() };
-            // Before the write, so a fixed disk is never recorded as a stick.
-            disk.check(&stick)?;
-            Record::new(machine, stick).save(dir).map_err(Refusal::Record)?;
+            Record::new(machine).save(dir).map_err(Refusal::Record)?;
             true
         }
     };
-    let stick = recorded_stick(dir, machine, disk)?;
-    Ok(Captured { at: dir.join(machine.file()), stick, wrote })
+    Ok((dir.join(machine.file()), wrote))
 }
 
-/// Declares every command this loop runs as root and the table the rule is
-/// rendered from out of one list, so a `Job` the rule does not carry cannot be
-/// written down.
-macro_rules! jobs {
-    ($($name:ident),+ $(,)?) => {
-        #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-        enum Job { $($name),+ }
-        const JOBS: &[Job] = &[$(Job::$name),+];
-    };
-}
-
-jobs!(Wipe, Flash, ReadLog, Create, Delete, BootNext, Mount, Umount, Reboot, Probe);
-
-/// One word of a root command line.
+/// Every command this loop runs as root, with what it acts on.
 #[derive(Debug, Clone, PartialEq, Eq)]
-enum Word {
-    Is(String),
-    /// The four hex digits `efibootmgr` numbers a boot entry with: the rule
-    /// masks it, the argv fills it.
-    Hex4,
-}
-
-impl Word {
-    /// A literal this loop will neither shell-quote wrongly nor let sudo read
-    /// as a glob. Whitespace and the metacharacters are refused rather than
-    /// escaped: no command here needs one.
-    fn literal(text: &str) -> Result<Self, Refusal> {
-        let bad = |c: char| {
-            c.is_whitespace() || matches!(c, '*' | '?' | '[' | ']' | '#' | '!' | '"' | '\'')
-        };
-        if text.is_empty() || text.chars().any(bad) {
-            return Err(Refusal::Word(text.to_string()));
-        }
-        Ok(Self::Is(text.to_string()))
-    }
-
-    /// The word as `sudoers(5)` reads it: `,`, `:`, `=` and a `^` escaped once,
-    /// and a backslash four times — the page's "you must escape the backslash
-    /// twice", for the two levels of escaping it names, the sudoers parser's
-    /// and `fnmatch(3)`'s.
-    fn sudoers(&self) -> String {
-        match self {
-            Self::Is(text) => {
-                let mut out = String::new();
-                for c in text.chars() {
-                    match c {
-                        '\\' => out.push_str(r"\\\\"),
-                        ',' | ':' | '=' | '^' => {
-                            out.push('\\');
-                            out.push(c);
-                        }
-                        _ => out.push(c),
-                    }
-                }
-                out
-            }
-            Self::Hex4 => "[0-9A-Fa-f][0-9A-Fa-f][0-9A-Fa-f][0-9A-Fa-f]".to_string(),
-        }
-    }
-}
-
-/// The account name as the rule's *user* field, which [`Word::sudoers`] cannot
-/// render: every character the two escape differently is refused, along with
-/// the four that carry meaning in that field — `,`, `:`, `%` and `+`.
-fn user_word(user: &str) -> Result<Word, Refusal> {
-    if user.contains([',', ':', '%', '+', '\\', '(', ')']) {
-        return Err(Refusal::Word(user.to_string()));
-    }
-    Word::literal(user)
+enum Job {
+    Wipe(Sd),
+    /// The signatures inside one partition, which a wipe of the whole disk
+    /// leaves.
+    WipePartition { sd: Sd, part: u32 },
+    Settle,
+    /// The kernel's table of the disk, read again off the disk.
+    Reread(Sd),
+    /// The log volume's first `bytes` read as bytes rather than as files:
+    /// what `toyos-fat32-check` judges is the volume `logkeeper` wrote, and a
+    /// `mount` has already had a driver's opinion about it.
+    ReadLog { bytes: u64 },
+    /// A boot entry naming `loader` on the internal ESP.
+    Create { label: &'static str, loader: &'static str },
+    Delete(String),
+    BootNext(String),
+    /// One of the install's FAT volumes, read-only, at [`Home::mount`].
+    Mount(Owned),
+    Umount,
+    Reboot,
+    Probe,
+    Partition,
+    AddPartitions,
+    Retag(Vec<(Owned, Guid)>),
+    Write(Owned),
+    Scratch(Sd),
 }
 
 /// One word as the machine's login shell must receive it: `ssh` hands the whole
-/// command to that shell, and what `sudo` matches is the argv the shell made.
+/// command to that shell.
 fn shell_word(word: &str) -> String {
     format!("'{}'", word.replace('\'', "'\\''"))
 }
 
 /// The account's home on the machine, as its login shell answers [`Home::QUERY`]
-/// and never as a convention guesses it: the log is mounted and the rule staged
-/// under it, so no root command creates either and nothing lands in a
+/// and never as a convention guesses it: the log is mounted under it, so no
+/// root command creates the mount point and nothing lands in a
 /// world-writable directory.
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct Home(String);
@@ -533,10 +548,12 @@ struct Home(String);
 impl Home {
     const QUERY: &str = "printf %s \"$HOME\"";
 
-    /// Normal and absolute, and one word a rule can name.
+    /// Normal and absolute.
     fn parse(text: &str) -> Result<Self, Refusal> {
         let refused = || Refusal::Home(text.to_string());
-        Word::literal(text).map_err(|_| refused())?;
+        if text.chars().any(char::is_control) {
+            return Err(refused());
+        }
         let rest = text.strip_prefix('/').ok_or_else(refused)?;
         if rest.split('/').any(|part| matches!(part, "" | "." | "..")) {
             return Err(refused());
@@ -548,11 +565,6 @@ impl Home {
     fn mount(&self) -> String {
         format!("{}/toyos-log", self.0)
     }
-
-    /// Where the rule waits between `visudo -c` and `install`.
-    fn staged(&self) -> String {
-        format!("{}/.toyos-metal.sudoers", self.0)
-    }
 }
 
 /// Where the loop runs and what it may touch.
@@ -561,128 +573,114 @@ struct Target {
     user: String,
     host: String,
     key: PathBuf,
-    node: Node,
-    /// The image's ESP, the partition the firmware is pointed at.
-    esp_part: u32,
-    /// The image's TOYOS-LOG partition, the one channel out of a metal boot.
-    log_part: u32,
-    /// The boot entry's label in the firmware's list.
-    label: String,
+    /// The bench's own NVMe, which an install writes only the [`Owned`]
+    /// partitions of.
+    internal: Node,
 }
 
 impl Target {
-    /// The T14 as the track names it, with the runner key this host holds.
-    fn t14() -> Result<Self, Refusal> {
+    /// The T14 bench, with the runner key this host holds.
+    fn bench_t14() -> Result<Self, Refusal> {
         let home = std::env::var_os("HOME").ok_or(Refusal::NoHome)?;
         Ok(Self {
-            user: "t14".to_string(),
-            host: "t14".to_string(),
+            user: "toyos".to_string(),
+            host: "bench-t14".to_string(),
             key: PathBuf::from(home).join(".ssh/id_ed25519_toyos_runner"),
-            node: Node::Scsi(b'a'),
-            esp_part: 1,
-            log_part: 3,
-            label: "ToyOS".to_string(),
+            internal: Node::Nvme { controller: b'0', namespace: b'1' },
         })
     }
 
-    /// **The one place a root command line is written.** The installed rule and
-    /// every argv are rendered from what this returns.
-    fn words(&self, job: Job, home: &Home) -> Result<Vec<Word>, Refusal> {
-        let node = self.node.whole();
-        let of = format!("of={node}");
-        let read_log = format!("if={}", self.node.partition(self.log_part));
-        let log = self.node.partition(self.log_part);
-        let esp = self.esp_part.to_string();
-        let literal =
-            |words: &[&str]| -> Result<Vec<Word>, Refusal> { words.iter().map(|w| Word::literal(w)).collect() };
-        let masked = |head: &[&str]| -> Result<Vec<Word>, Refusal> {
-            let mut words = literal(head)?;
-            words.push(Word::Hex4);
-            Ok(words)
-        };
+    /// **The one place a root command line is written.**
+    fn argv(&self, job: &Job, home: &Home) -> Vec<String> {
+        let internal = self.internal.whole();
+        let words = |words: &[&str]| words.iter().map(|w| (*w).to_string()).collect::<Vec<_>>();
         match job {
-            Job::Wipe => literal(&[WIPEFS, "--all", &node]),
-            Job::Flash => literal(&[DD, &of, "bs=4M", "conv=fsync"]),
-            // The log partition read whole, as bytes rather than as files: what
-            // `toyos-fat32-check` judges is the volume `logkeeper` wrote, and a
-            // `mount` has already had a driver's opinion about it. Read-only, and
-            // the partition is the only node named, spelled from the disk's.
-            Job::ReadLog => literal(&[DD, &read_log, "bs=4M"]),
+            Job::Wipe(sd) => words(&[WIPEFS, "--all", &sd.node().whole()]),
+            Job::WipePartition { sd, part } => words(&[WIPEFS, "--all", &sd.node().partition(*part)]),
+            // Root's, because only root's settle first waits for udevd to
+            // have handled what is already pending, such as a writer's close
+            // it has yet to turn into an event.
+            Job::Settle => words(&[UDEVADM, "settle", &format!("--timeout={SETTLE_SECS}")]),
+            Job::Reread(sd) => words(&[BLOCKDEV, "--rereadpt", &sd.node().whole()]),
+            // The volume and not the partition, which is larger than any
+            // image's (coreutils' `count_bytes`).
+            Job::ReadLog { bytes } => words(&[
+                DD,
+                &format!("if={}", Owned::Log.node(&self.internal)),
+                "bs=4M",
+                "iflag=count_bytes",
+                &format!("count={bytes}"),
+            ]),
             // `--create-only`, never `--create`: the latter "add[s] to
-            // bootorder" (efibootmgr(8)) at the top, so the boot after the one
-            // `--bootnext` bought picks ToyOS again, and a job list whose one
-            // job is a reboot then loops.
-            Job::Create => literal(&[
+            // bootorder" (efibootmgr(8)) at the top, which would replace
+            // Ubuntu as the machine's default and leave a failed ToyOS boot
+            // nothing to fall back to.
+            Job::Create { label, loader } => words(&[
                 EFIBOOTMGR,
                 "--create-only",
                 "--disk",
-                &node,
+                &internal,
                 "--part",
-                &esp,
+                &Owned::Esp.index().to_string(),
                 "--label",
-                &self.label,
+                label,
                 "--loader",
-                LOADER,
+                loader,
             ]),
-            Job::Delete => masked(&[EFIBOOTMGR, "--delete-bootnum", "--bootnum"]),
-            Job::BootNext => masked(&[EFIBOOTMGR, "--bootnext"]),
-            Job::Mount => literal(&[MOUNT, "-o", "ro", &log, &home.mount()]),
-            Job::Umount => literal(&[UMOUNT, &home.mount()]),
-            Job::Reboot => literal(&[REBOOT]),
-            Job::Probe => literal(&[TRUE]),
-        }
-    }
-
-    /// The rule, one line per job.
-    ///
-    /// **A command written with no arguments permits any arguments**
-    /// (`sudoers(5)`, "Command Arguments"), so a one-word job renders `""`.
-    fn sudoers(&self, home: &Home) -> Result<String, Refusal> {
-        let user = user_word(&self.user)?.sudoers();
-        let mut out =
-            String::from("# toyos-metal: the whole of what the metal loop runs as root.\n");
-        for job in JOBS {
-            let rendered: Vec<String> = self.words(*job, home)?.iter().map(Word::sudoers).collect();
-            let line = match rendered.len() {
-                1 => format!("{} \"\"", rendered[0]),
-                _ => rendered.join(" "),
-            };
-            out.push_str(&format!("{user} ALL=(root) NOPASSWD: {line}\n"));
-        }
-        Ok(out)
-    }
-
-    /// One job's argv, with `fill` substituted for the masked word: a job's mask
-    /// count and its caller must agree, and a `fill` that is not four hex digits
-    /// is a bad reading of `efibootmgr` rather than a bug here.
-    fn argv(&self, job: Job, fill: Option<&str>, home: &Home) -> Result<Vec<String>, Refusal> {
-        let words = self.words(job, home)?;
-        let masked = words.iter().filter(|w| **w == Word::Hex4).count();
-        assert_eq!(masked, usize::from(fill.is_some()), "{job:?} takes {masked} filled word(s)");
-        words
-            .iter()
-            .map(|word| match word {
-                Word::Is(text) => Ok(text.clone()),
-                Word::Hex4 => {
-                    let fill = fill.unwrap_or_default();
-                    let hex = fill.len() == 4 && fill.bytes().all(|b| b.is_ascii_hexdigit());
-                    hex.then(|| fill.to_string())
-                        .ok_or_else(|| Refusal::BootEntry(fill.to_string()))
+            Job::Delete(id) => words(&[EFIBOOTMGR, "--delete-bootnum", "--bootnum", id]),
+            Job::BootNext(id) => words(&[EFIBOOTMGR, "--bootnext", id]),
+            Job::Mount(o) => words(&[MOUNT, "-o", "ro", &o.node(&self.internal), &home.mount()]),
+            Job::Umount => words(&[UMOUNT, &home.mount()]),
+            Job::Reboot => words(&[REBOOT]),
+            Job::Probe => words(&[TRUE]),
+            // Every owned partition in one line, each at the start of the
+            // largest free block as it stands (sgdisk(8), `--new`'s start of
+            // 0), which `internal::recognise` established stays the one after
+            // DATA until the last is made.
+            Job::Partition => {
+                let mut out = words(&[SGDISK]);
+                for o in Owned::ALL {
+                    let n = o.index();
+                    out.push(format!("--new={n}:0:+{}M", o.mib()));
+                    out.push(format!("--typecode={n}:{}", o.kind()));
+                    out.push(format!("--change-name={n}:{}", o.label()));
                 }
-            })
-            .collect()
+                out.push(internal);
+                out
+            }
+            // sgdisk's own re-read of the table is refused on a disk whose
+            // other partitions are mounted, as Ubuntu's are; `partx` adds the
+            // named range alone.
+            Job::AddPartitions => {
+                let range = format!("{}:{}", Owned::ALL[0].index(), Owned::ALL[Owned::ALL.len() - 1].index());
+                words(&[PARTX, "--add", "--nr", &range, &internal])
+            }
+            Job::Retag(named) => {
+                let mut out = words(&[SGDISK]);
+                out.extend(named.iter().map(|(o, guid)| format!("--partition-guid={}:{guid}", o.index())));
+                out.push(internal);
+                out
+            }
+            // A fresh table whose one partition spans the disk (sgdisk(8),
+            // `--new`'s 0 for the first and last sector), marked scratch.
+            Job::Scratch(sd) => words(&[
+                SGDISK,
+                "--clear",
+                "--new=1:0:0",
+                &format!("--typecode=1:{}", Guid::TOYOS_SCRATCH),
+                "--change-name=1:ToyOS-scratch",
+                &sd.node().whole(),
+            ]),
+            // `nocreat`: a node that is not there is refused, rather than
+            // created as a file in `/dev` that every later write lands in.
+            Job::Write(o) => words(&[DD, &format!("of={}", o.node(&self.internal)), "bs=4M", "conv=fsync,nocreat"]),
+        }
     }
 
     /// One job as the machine's login shell must receive it.
-    fn remote(&self, job: Job, fill: Option<&str>, home: &Home) -> Result<String, Refusal> {
-        let words: Vec<String> = self.argv(job, fill, home)?.iter().map(|w| shell_word(w)).collect();
-        Ok(format!("sudo -n {}", words.join(" ")))
-    }
-
-    /// The one read that decides whether anything is written.
-    fn identity(&self) -> String {
-        let at = self.node.sysfs();
-        format!("cat {at}/size {at}/device/vendor {at}/device/model {at}/removable")
+    fn remote(&self, job: &Job, home: &Home) -> String {
+        let words: Vec<String> = self.argv(job, home).iter().map(|w| shell_word(w)).collect();
+        format!("sudo -n {}", words.join(" "))
     }
 
     /// `ssh`'s argv without its own name, so a test reads the whole line.
@@ -702,34 +700,15 @@ impl Target {
     }
 }
 
-/// One partition of the image, in [`LBA`]-byte sectors — the unit `/sys`
-/// reports `start` and `size` for a disk in.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-struct Part {
-    index: u32,
-    start: u64,
-    sectors: u64,
-    guid: toyos_gpt::Guid,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-struct Flashable {
-    path: PathBuf,
-    bytes: u64,
-    esp: Part,
-    log: Part,
-}
-
-/// Every parameter the T14 survives — the boot ends and the machine is what it
-/// was — and nothing else reaches the stick.
+/// Every parameter a bench survives — the boot ends and the machine is what it
+/// was — and nothing else reaches its disk.
 ///
 /// **The metal profile flashes test images**, so an actuator is admissible here
 /// where `build::flashable_params` refuses it for the owner's own flash path.
 /// What is not admissible is an arm that would leave the machine changed where
-/// a flash cannot put it back: firmware state a reboot does not undo is a
-/// machine somebody has to open a lid to repair. The internal NVMe is not such
-/// state — the T14 is a playground, and a disk a broken driver wipes is a disk
-/// the next install writes again.
+/// a flash cannot put it back: firmware state a reboot does not undo, or the
+/// bench's own partitions, which hold the Ubuntu every failed boot falls back
+/// to. The install area is not such state: the next flash writes it again.
 ///
 /// **A deny-list fails open on the next actuator**, so this is the whole
 /// judgement: an image armed with a name that has no row here is refused by
@@ -782,7 +761,7 @@ pub const FLASHABLE: &[&str] = &[
     // level resets at warm and cold reset (55922 §1.4.4.11).
     "microcode-amd-flip",
     // It seals this boot's own record under an identity one bit from this
-    // stick's, so the pass that finds it clears it and boots a kernel. The page
+    // image's, so the pass that finds it clears it and boots a kernel. The page
     // is memory the loader allocated and the machine is what it was after.
     FOREIGN_RECORD_ARM,
     // **The one arm that deliberately stops this machine.** At the shutdown
@@ -821,7 +800,7 @@ pub const LOCKUP_ARM: &str = "hard-lockup-probe";
 pub const WEDGE_ARMS: &[&str] = &[WEDGE_ARM, LOCKUP_ARM];
 
 /// The arm whose boot the pass after it reads as a hang on purpose: its record
-/// is sealed under another stick's identity, so that pass clears it and finds
+/// is sealed under another image's identity, so that pass clears it and finds
 /// an attempt nothing reported, and hands the machine back.
 pub const FOREIGN_RECORD_ARM: &str = "blackbox-foreign-identity";
 
@@ -834,7 +813,7 @@ pub fn stages_a_wedge(armed: &[impl AsRef<str>]) -> bool {
 /// Whether this image is ended by its own boot deadline on purpose: armed to
 /// wedge, or carrying a deadline below the least bound a runner gives its list
 /// ([`toyos_tco::JOB_BOUND_MS`]). The harness gives such a deadline only to a
-/// boot whose load runs until the reset, such as `stick_survives_a_reset_under_load`'s,
+/// boot whose load runs until the reset, such as `the_disk_survives_a_reset_under_load`'s,
 /// so the boot is judged by the record that bound sealed, as a wedge is.
 pub fn ended_by_its_deadline(armed: &[impl AsRef<str>]) -> bool {
     stages_a_wedge(armed)
@@ -847,13 +826,19 @@ pub fn ended_by_its_deadline(armed: &[impl AsRef<str>]) -> bool {
 }
 
 /// The `boot-deadline=` bound an image armed with `armed` carries, whose
-/// runner bounds its list at `list_ms`.
+/// runner bounds its list at `list_ms`. A wedge staged under the chipset
+/// watchdog is the watchdog's to end, so its deadline stands behind it.
 pub fn bound_for(armed: &[impl AsRef<str>], list_ms: u64) -> u64 {
-    if stages_a_wedge(armed) {
-        toyos_tco::STAGED_BOUND_MS
-    } else {
-        toyos_tco::wedge_bound_ms(list_ms)
+    match (stages_a_wedge(armed), watched(armed)) {
+        (true, true) => toyos_tco::WATCHED_WEDGE_BOUND_MS,
+        (true, false) => toyos_tco::STAGED_BOUND_MS,
+        (false, _) => toyos_tco::wedge_bound_ms(list_ms),
     }
+}
+
+/// Whether this image is armed with the chipset watchdog.
+fn watched(armed: &[impl AsRef<str>]) -> bool {
+    armed.iter().any(|name| name.as_ref() == toyos_tco::PARAM)
 }
 
 /// Whether this image is armed so the pass after its reset clears its record
@@ -893,7 +878,7 @@ pub fn judge_arms(armed: &[String]) -> Result<u64, Refusal> {
     // stops making progress without panicking is bounded by nothing else, and a
     // flashed boot with no bound is precisely what this loop exists to prevent —
     // measured twice on the T14, once as a hang after the job list and once as
-    // a `--install-sudoers` that fell through into flashing an ordinary
+    // a capture that fell through into flashing an ordinary
     // `target/bootable.img`, which has no job list and no deadline at all.
     // A bound nothing can read is no bound: the kernel panics on it.
     let Some(Ok(deadline_ms)) = toyos_tco::deadline_in(&armed.join(",")) else {
@@ -903,55 +888,6 @@ pub fn judge_arms(armed: &[String]) -> Result<u64, Refusal> {
         Some(name) => Err(Refusal::Armed { name: name.clone() }),
         None => Ok(deadline_ms),
     }
-}
-
-/// [`whole_disk`]: exactly one ESP and one TOYOS-LOG at the numbers the
-/// installed rule names, one slot table, and one or two ROOTs, the slots the
-/// loader boots.
-fn admit(path: &Path, target: &Target) -> Result<Flashable, Refusal> {
-    let (mut file, bytes) = whole_disk(path).map_err(Refusal::Disk)?;
-    let esp = one_partition(&mut file, toyos_gpt::Guid::EFI_SYSTEM, "ESP")?;
-    let log = one_partition(&mut file, toyos_gpt::Guid::MICROSOFT_BASIC, "TOYOS-LOG")?;
-    one_partition(&mut file, toyos_gpt::Guid::TOYOS_SLOTS, "TOYOS-SLOTS")?;
-    for (what, got, want) in
-        [("the ESP", esp.index, target.esp_part), ("TOYOS-LOG", log.index, target.log_part)]
-    {
-        if got != want {
-            return Err(Refusal::PartitionIndex { what, want, got });
-        }
-    }
-    let roots = toyos_gpt::locate_type(&mut toyos_build::image::FileSectors(&mut file), toyos_gpt::Guid::TOYOS_ROOT, &mut [])
-        .map_err(|e| Refusal::Table(format!("{e:?}")))?
-        .matched;
-    if !(1..=2).contains(&roots) {
-        return Err(Refusal::Roots { matched: roots });
-    }
-    Ok(Flashable { path: path.to_path_buf(), bytes, esp, log })
-}
-
-/// The one partition of type `guid`, numbered as the flashing host's
-/// partition nodes are (`toyos_build::disk`'s `part_name`): the entry index
-/// plus one.
-fn one_partition(
-    file: &mut std::fs::File,
-    guid: toyos_gpt::Guid,
-    what: &'static str,
-) -> Result<Part, Refusal> {
-    let mut out = [None; 2];
-    let scan = toyos_gpt::locate_type(&mut toyos_build::image::FileSectors(file), guid, &mut out)
-        .map_err(|e| Refusal::Table(format!("{e:?}")))?;
-    let part = toyos_build::image::one_partition_of(scan, out[0]).map_err(|e| match e {
-        toyos_build::image::OnePartitionError::Unplaced(unplaced) => {
-            Refusal::Table(format!("the {what} entry is no partition: {unplaced:?}"))
-        }
-        toyos_build::image::OnePartitionError::Matched(matched) => Refusal::Partitions { what, matched },
-    })?;
-    Ok(Part {
-        index: part.index() + 1,
-        start: part.first_lba(),
-        sectors: part.lba_count().get(),
-        guid: part.unique_guid(),
-    })
 }
 
 /// What `dd` said of a copy on its own last line,
@@ -1009,7 +945,7 @@ fn entry_after_create(
 ) -> Result<String, Refusal> {
     let (was, now) = (boot_order(before), boot_order(after));
     if was != now {
-        return Err(Refusal::BootOrder { before: was, now });
+        return Err(Refusal::BootOrder { during: "creating the boot entry", before: was, now });
     }
     entries_labelled(after, label)
         .into_iter()
@@ -1028,6 +964,15 @@ fn boot_order(listing: &str) -> String {
         .unwrap_or_default()
         .trim()
         .to_string()
+}
+
+/// Refused where `entry` is one of `order`'s, out of a listing's `BootOrder:`.
+fn unordered(listing: &str, entry: &str) -> Result<(), Refusal> {
+    let order = boot_order(listing);
+    match order.split(',').any(|id| id.trim().eq_ignore_ascii_case(entry)) {
+        true => Err(Refusal::Ordered { entry: entry.to_string(), order }),
+        false => Ok(()),
+    }
 }
 
 /// systemd's *effective* logind policy, out of `systemd-analyze cat-config`:
@@ -1080,95 +1025,103 @@ impl Driver {
         ssh(&self.target, what, command)
     }
 
-    /// One root command, with `stdin` streamed into it. Announced either way,
+    /// One root command, with `feed` streamed into it. Announced either way,
     /// and run only when this is not a dry run — which is what `None` means.
-    fn as_root(
-        &self,
-        what: &str,
-        job: Job,
-        fill: Option<&str>,
-        stdin: Option<&Path>,
-    ) -> Result<Option<Output>, Refusal> {
-        let line = self.target.remote(job, fill, &self.home)?;
+    fn as_root(&self, what: &str, job: Job, feed: Option<Feed<'_>>) -> Result<Option<Output>, Refusal> {
+        let line = self.target.remote(&job, &self.home);
         println!("  {} {line}", if self.dry_run { "would run:" } else { "run:" });
         if self.dry_run {
             return Ok(None);
         }
         let mut command = Command::new("ssh");
-        command.args(self.target.ssh_argv(&line));
-        match stdin {
-            Some(path) => {
-                let file = std::fs::File::open(path).map_err(|e| Refusal::File {
-                    path: path.display().to_string(),
-                    why: e.to_string(),
-                })?;
-                command.stdin(Stdio::from(file));
-            }
-            None => {
-                command.stdin(Stdio::null());
-            }
-        }
-        let out = command.output().map_err(|e| unstarted(what, &e))?;
+        command.args(self.target.ssh_argv(&line)).stdout(Stdio::piped()).stderr(Stdio::piped());
+        let Some(feed) = feed else {
+            let out = command.stdin(Stdio::null()).output().map_err(|e| unstarted(what, &e))?;
+            return answer(what, out).map(Some);
+        };
+        let unread = |e: std::io::Error| Refusal::File { path: feed.path.display().to_string(), why: e.to_string() };
+        let mut source = std::fs::File::open(feed.path).map_err(unread)?;
+        source.seek(std::io::SeekFrom::Start(feed.at)).map_err(unread)?;
+        let mut child = command.stdin(Stdio::piped()).spawn().map_err(|e| unstarted(what, &e))?;
+        let mut pipe = child.stdin.take().expect("the pipe was just asked for");
+        // A copy that stops early is caught by the byte count `dd` reports,
+        // which every caller compares; the child is waited on either way.
+        let _ = std::io::copy(&mut source.take(feed.len), &mut pipe);
+        drop(pipe);
+        let out = child.wait_with_output().map_err(|e| unstarted(what, &e))?;
         answer(what, out).map(Some)
     }
 
-    /// The loop refuses to run at all until the rule is on the machine.
+    /// The loop refuses to run at all without passwordless sudo on the machine.
     fn require_sudo(&self) -> Result<(), Refusal> {
-        let probe = self.target.remote(Job::Probe, None, &self.home)?;
+        let probe = self.target.remote(&Job::Probe, &self.home);
         self.ssh("sudo -n", &probe).map(|_| ()).map_err(|e| Refusal::Sudo(e.to_string()))
     }
 
-    /// **The write is verified, not assumed**: a short local read ends `ssh`
-    /// and the remote `dd` exits 0 on the prefix it got, so `dd`'s own byte
-    /// count and then the table the kernel re-read are both compared. `wipefs`
-    /// first, because the stick outlives the image and its old backup GPT would
-    /// otherwise leave the firmware two tables.
-    ///
-    /// `None` is a dry run, which wrote nothing to time.
-    fn flash(&self, image: &Flashable) -> Result<Option<Flashed>, Refusal> {
-        let began = std::time::Instant::now();
-        self.as_root("wiping the old signatures", Job::Wipe, None, None)?;
-        let wipe = began.elapsed().as_secs_f64();
-        let began = std::time::Instant::now();
-        let out = self.as_root("flashing the stick", Job::Flash, None, Some(&image.path))?;
-        let Some(out) = out else { return Ok(None) };
+    /// The machine as its SMBIOS names it, refused unless it is a recorded bench.
+    fn recorded_machine(&self) -> Result<Machine, Refusal> {
+        let machine = Machine::parse(&self.ssh("reading the machine's SMBIOS", Machine::QUERY)?)
+            .map_err(Refusal::Machine)?;
+        recorded(&timings::dir(), &machine)?;
+        Ok(machine)
+    }
+
+    /// `dd`'s own count of what one [`Driver::as_root`] fed it, held to the
+    /// feed's length: a short local read ends `ssh` and the remote `dd` exits 0
+    /// on the prefix it got.
+    fn fed(&self, what: &str, out: &Output, want: u64) -> Result<DdSaid, Refusal> {
         let stderr = String::from_utf8_lossy(&out.stderr).to_string();
         let dd = dd_said(&stderr).ok_or_else(|| Refusal::Remote {
-            what: "flashing the stick".to_string(),
+            what: what.to_string(),
             status: "printed no byte count and seconds".to_string(),
             stderr,
         })?;
-        if dd.bytes != image.bytes {
-            let what = "the byte count dd reported".to_string();
-            return Err(Refusal::Landed { what, want: image.bytes, got: dd.bytes });
+        if dd.bytes != want {
+            return Err(Refusal::Landed { what: format!("the byte count dd reported {what}"), want, got: dd.bytes });
         }
-        self.ssh("settling the new table", "udevadm settle")?;
-        for (name, part) in [("the ESP", image.esp), ("TOYOS-LOG", image.log)] {
-            let at = self.target.node.part_sysfs(part.index);
-            let read = self.ssh("reading the new table back", &format!("cat {at}/start {at}/size"))?;
-            let mut numbers = read.lines().map(str::trim).map(str::parse::<u64>);
-            let start = numbers.next().and_then(Result::ok).unwrap_or_default();
-            let sectors = numbers.next().and_then(Result::ok).unwrap_or_default();
-            for (what, want, got) in
-                [("first sector", part.start, start), ("sector count", part.sectors, sectors)]
-            {
-                if want != got {
-                    return Err(Refusal::Landed { what: format!("{name}'s {what}"), want, got });
-                }
-            }
-        }
-        Ok(Some(Flashed { wipe, flash: began.elapsed().as_secs_f64(), dd: dd.secs }))
+        Ok(dd)
     }
 
-    /// The boot entry for *this* image's ESP. An entry carrying the label but
-    /// another partition's GUID names a partition that is gone — every
-    /// `--build-only` draws a fresh one — so it is deleted rather than reused.
-    fn boot_entry(&self, esp: &Part) -> Result<String, Refusal> {
-        let want = esp.guid.to_string().to_ascii_lowercase();
+    /// **The kernel reads a disk's table only when asked to, so the loop asks**
+    /// once it has written one. The ask udevd makes when a writer closes the disk
+    /// is best effort and skipped while anything holds the disk's lock, as udevd's
+    /// own probing of it does. udev is settled first, so no ask of its own is
+    /// still to come; neither job opens the disk for writing, so neither starts
+    /// another.
+    fn reread(&self, sd: Sd) -> Result<(), Refusal> {
+        self.as_root("settling udev", Job::Settle, None)?;
+        self.as_root("re-reading the table", Job::Reread(sd), None)?;
+        Ok(())
+    }
+
+    /// The writes that make `sd` a scratch disk, and its read-back; `false` is a
+    /// dry run, which wrote nothing.
+    ///
+    /// **The new partition is wiped as well as the disk**: a wipe of the whole
+    /// disk erases its tables and nothing inside a partition, and the new
+    /// partition starts where the old first one did, so the old ESP's FAT would
+    /// otherwise be read as the scratch partition's.
+    fn make_scratch(&self, sd: Sd) -> Result<bool, Refusal> {
+        self.as_root("wiping its signatures", Job::Wipe(sd), None)?;
+        if self.as_root("writing the scratch table", Job::Scratch(sd), None)?.is_none() {
+            return Ok(false);
+        }
+        self.reread(sd)?;
+        self.as_root("wiping the new partition's signatures", Job::WipePartition { sd, part: 1 }, None)?;
+        // The listing is udev's record, of the re-read and the wipe.
+        self.as_root("settling udev", Job::Settle, None)?;
+        scratch_read_back(&self.ssh("listing the disks", DISKS)?, sd)?;
+        Ok(true)
+    }
+
+    /// The boot entry `create` makes under `label` for the ESP whose partition
+    /// GUID is `esp`. An entry carrying the label but another partition's GUID
+    /// names a partition that is gone, an install area made again, so it is
+    /// deleted rather than reused.
+    fn boot_entry(&self, label: &str, create: Job, esp: toyos_gpt::Guid) -> Result<String, Refusal> {
+        let want = esp.to_string().to_ascii_lowercase();
         let ours = |listing: &str| {
-            entries_labelled(listing, &self.target.label)
-                .into_iter()
-                .partition::<Vec<_>, _>(|(_, guid)| *guid == want)
+            entries_labelled(listing, label).into_iter().partition::<Vec<_>, _>(|(_, guid)| *guid == want)
         };
         let listing = self.ssh("listing boot entries", EFIBOOTMGR)?;
         let (mine, stale) = ours(&listing);
@@ -1176,35 +1129,35 @@ impl Driver {
             return Ok(id.clone());
         }
         for (id, _) in stale {
-            self.as_root("deleting a stale boot entry", Job::Delete, Some(&id), None)?;
+            self.as_root("deleting a stale boot entry", Job::Delete(id), None)?;
         }
         // Read after those deletions, because a delete takes its entry out of
         // the order too: what the create is judged against is the state the
         // create acts on.
         let before = self.ssh("listing boot entries", EFIBOOTMGR)?;
-        self.as_root("creating the boot entry", Job::Create, None, None)?;
+        self.as_root("creating the boot entry", create, None)?;
         // Read back rather than parsed out of the create's own output: the
         // firmware's list is what the next command names, and one parser reads
         // it.
         let after = self.ssh("listing boot entries", EFIBOOTMGR)?;
-        match entry_after_create(&before, &after, &self.target.label, &want) {
+        match entry_after_create(&before, &after, label, &want) {
             Ok(id) => Ok(id),
             // A dry run created nothing, so `0000` stands for the id the
             // firmware would have given it — the only value in the run that is
             // not the real run's.
             Err(Refusal::BootEntry(_)) if self.dry_run => Ok("0000".to_string()),
             Err(refusal) => {
-                // Every entry this create added under the loop's own label,
-                // whatever partition it names: one left behind is one the next
-                // run inherits. A failure to clear it does not replace the
-                // refusal being answered.
-                let had: Vec<String> = ids(&before, &self.target.label);
-                for id in ids(&after, &self.target.label) {
+                // Every entry this create added under the label, whatever
+                // partition it names: one left behind is one the next run
+                // inherits. A failure to clear it does not replace the refusal
+                // being answered.
+                let had: Vec<String> = ids(&before, label);
+                for id in ids(&after, label) {
                     if had.contains(&id) {
                         continue;
                     }
                     let what = "deleting the entry this create made";
-                    let _ = self.as_root(what, Job::Delete, Some(&id), None);
+                    let _ = self.as_root(what, Job::Delete(id), None);
                 }
                 Err(refusal)
             }
@@ -1213,34 +1166,13 @@ impl Driver {
 
     /// **`reboot` is `systemctl` and returns before the machine goes down**, so
     /// the machine is watched down before it is watched back up: a probe that
-    /// caught dying Ubuntu would read a stick ToyOS had never booted. Answers
+    /// caught dying Ubuntu would read a log ToyOS had never written. Answers
     /// the wall seconds going down took, and the whole seconds coming back did.
     fn ride_the_reboot(&self, secs: u64) -> Result<(f64, u64), Refusal> {
         let began = std::time::Instant::now();
         self.wait(GOING_DOWN_SECS, "go down", false)?;
         let down = began.elapsed().as_secs_f64();
         Ok((down, self.wait(secs, "come back", true)?))
-    }
-
-    /// Wait for the log partition's device node, and say how long it took.
-    ///
-    /// **A number and not an implication.** Whether the stick came back is what
-    /// the T14 alone can say about the ruling, and before this it was only ever
-    /// visible as `mount: special device /dev/sda3 does not exist` — a mount
-    /// that fails for a dozen other reasons too.
-    fn wait_for_the_stick(&self) -> Result<u64, Refusal> {
-        let node = self.target.node.partition(self.target.log_part);
-        let probe = format!("test -b {}", shell_word(&node));
-        let began = std::time::Instant::now();
-        loop {
-            if self.ssh("probing for the stick", &probe).is_ok() {
-                return Ok(began.elapsed().as_secs());
-            }
-            if began.elapsed().as_secs() >= STICK_SECS {
-                return Err(Refusal::Stick { node, secs: STICK_SECS });
-            }
-            std::thread::sleep(std::time::Duration::from_secs(1));
-        }
     }
 
     /// [`wait_on`] the machine's `ssh`.
@@ -1262,19 +1194,24 @@ impl Driver {
     /// Two strings and not one, because only the second is the boot's log and
     /// [`bootlog::verdict`] is about that.
     fn read_log(&self) -> Result<(String, String), Refusal> {
+        self.mounted(Owned::Log, Self::read_mounted)
+    }
+
+    /// `read` over volume `o`, mounted read-only for it alone.
+    fn mounted<T>(&self, o: Owned, read: impl FnOnce(&Self) -> Result<T, Refusal>) -> Result<T, Refusal> {
         self.ssh("making the mount point", &format!("mkdir -p {}", shell_word(&self.home.mount())))?;
-        self.as_root("mounting the log partition", Job::Mount, None, None)?;
-        let read = self.read_mounted();
+        self.as_root(&format!("mounting the {o:?} volume"), Job::Mount(o), None)?;
+        let read = read(self);
         // Unconditional, because a failure in the read would otherwise leave
         // the partition mounted and wedge the next run — and subordinate,
         // because the read's failure is the one worth answering with.
-        let unmounted = self.as_root("unmounting the log partition", Job::Umount, None, None);
+        let unmounted = self.as_root(&format!("unmounting the {o:?} volume"), Job::Umount, None);
         match (read, unmounted) {
-            (Ok(both), Ok(_)) => Ok(both),
+            (Ok(read), Ok(_)) => Ok(read),
             (Ok(_), Err(umount)) => Err(umount),
             (Err(read), Ok(_)) => Err(read),
             (Err(read), Err(umount)) => Err(Refusal::Remote {
-                what: format!("reading the log ({read}), and then unmounting it"),
+                what: format!("reading the {o:?} volume ({read}), and then unmounting it"),
                 status: "both failed".to_string(),
                 stderr: umount.to_string(),
             }),
@@ -1298,29 +1235,24 @@ impl Driver {
         Ok((loader, text))
     }
 
-    /// The log partition read whole, as bytes.
+    /// The log volume the image wrote, `bytes` long, read whole as bytes.
     ///
     /// **The outside judge needs the volume and not a listing of it.** `read_log`
     /// mounts read-only and `cat`s, so everything it can say has already been
     /// filtered through a FAT driver — the same family of code that wrote the
     /// volume. This reads the sectors.
-    fn raw_log(&self, sectors: u64) -> Result<Vec<u8>, Refusal> {
-        let line = self.target.remote(Job::ReadLog, None, &self.home)?;
-        println!("  run: {line}  ({sectors} sectors)");
+    fn raw_log(&self, bytes: u64) -> Result<Vec<u8>, Refusal> {
+        let line = self.target.remote(&Job::ReadLog { bytes }, &self.home);
+        println!("  run: {line}");
         let out = Command::new("ssh")
             .args(self.target.ssh_argv(&line))
             .stdin(Stdio::null())
             .output()
             .map_err(|e| unstarted("reading the log partition", &e))?;
         let out = answer("reading the log partition", out)?;
-        let want = sectors * u64::from(LBA);
         let got = out.stdout.len() as u64;
-        if got != want {
-            return Err(Refusal::Landed {
-                what: "the log partition read back off the stick".to_string(),
-                want,
-                got,
-            });
+        if got != bytes {
+            return Err(Refusal::Landed { what: "the log volume read back".to_string(), want: bytes, got });
         }
         Ok(out.stdout)
     }
@@ -1328,6 +1260,130 @@ impl Driver {
     fn cat(&self, name: &str) -> Result<String, Refusal> {
         let file = shell_word(&format!("{}/{name}", self.home.mount()));
         self.ssh("reading a log file", &format!("cat {file}"))
+    }
+
+    /// The internal disk's table, as `lsblk` reads it without root.
+    fn internal_disk(&self) -> Result<internal::Disk, Refusal> {
+        let node = &self.target.internal;
+        let text = self.ssh("reading the internal disk", &internal::query(node))?;
+        internal::Disk::parse(&text, node).map_err(Refusal::Layout)
+    }
+
+    /// The internal disk's install area, which must be there.
+    fn install_area(&self) -> Result<Vec<internal::Part>, Refusal> {
+        match internal::recognise(&self.internal_disk()?).map_err(Refusal::Layout)? {
+            internal::Area::Present(parts) => Ok(parts),
+            internal::Area::Absent => Err(Refusal::Layout(
+                "partitions 5 to 11 are not there, so nothing is installed".to_string(),
+            )),
+        }
+    }
+
+    /// Write `image` to the internal disk's install area, creating the area
+    /// first where it is absent, and answer the boot entry for it — `None` on
+    /// a dry run that stopped at the area it did not create.
+    ///
+    /// **Every write names an [`Owned`] partition or is the partition table**,
+    /// and runs only once [`internal::recognise`] has said what the disk holds:
+    /// the table is rewritten whole to give the area's partitions the GUIDs the
+    /// image's contents name before their bytes are written, and the boot entry
+    /// is made or refreshed last.
+    fn install_internal(&self, image: &internal::Install) -> Result<Option<Installed>, Refusal> {
+        let node = self.target.internal;
+        if internal::recognise(&self.internal_disk()?).map_err(Refusal::Layout)? == internal::Area::Absent {
+            self.make_area()?;
+            if self.dry_run {
+                println!(
+                    "dry run: the install area was not made, so the lines after it were not written"
+                );
+                return Ok(None);
+            }
+        }
+        let parts = self.install_area()?;
+        if let Some(mounted) = parts.iter().find(|p| p.mounted) {
+            return Err(Refusal::Layout(format!("{} is mounted", mounted.node)));
+        }
+        let own = |o: Owned| parts[Owned::ALL.iter().position(|x| *x == o).expect("listed")].clone();
+        let kept = |o: Owned| own(o).unique.expect("recognise refuses a partition with no GUID");
+        let named = image.guids(toyos_build::image::random_guid);
+        let mut every: Vec<toyos_gpt::Guid> = vec![kept(Owned::Esp), kept(Owned::Slots)];
+        every.extend(named.iter().map(|(_, guid)| *guid));
+        let holders = self.ssh("listing every partition's GUID", internal::HOLDERS)?;
+        let replaced: Vec<String> = Owned::ALL.iter().map(|o| o.node(&node)).collect();
+        internal::collision(&holders, &every, |name| replaced.iter().any(|r| r == name))
+            .map_err(Refusal::Collision)?;
+
+        self.as_root("giving the partitions the image's GUIDs", Job::Retag(named.clone()), None)?;
+        if !self.dry_run {
+            self.as_root("settling udev", Job::Settle, None)?;
+            let back = self.install_area()?;
+            for (o, guid) in &named {
+                let got = &back[Owned::ALL.iter().position(|x| x == o).expect("listed")];
+                if got.unique != Some(*guid) {
+                    return Err(Refusal::Layout(format!("{} does not read back as partition {guid}", got.node)));
+                }
+            }
+        }
+        let mut dd = 0.0;
+        for o in Owned::ALL {
+            let Some(piece) = image.piece(o) else { continue };
+            let part = own(o);
+            if piece.len > part.sectors * 512 {
+                return Err(Refusal::Layout(format!(
+                    "{} is {} sectors and the image's {o:?} is {} bytes",
+                    part.node, part.sectors, piece.len
+                )));
+            }
+            let what = format!("writing the image's {o:?} to {}", part.node);
+            let feed = Feed { path: &image.path, at: piece.at, len: piece.len };
+            if let Some(out) = self.as_root(&what, Job::Write(o), Some(feed))? {
+                dd += self.fed(&what, &out, piece.len)?.secs;
+            }
+        }
+        let create = Job::Create { label: INTERNAL_LABEL, loader: LOADER };
+        let entry = self.boot_entry(INTERNAL_LABEL, create, kept(Owned::Esp))?;
+        println!("installed {} on {}; Boot{entry} ({INTERNAL_LABEL}) boots it", image.path.display(), node.whole());
+        Ok(Some(Installed { entry, dd }))
+    }
+
+    /// Make the install area, which the kernel's view says is absent.
+    ///
+    /// **An area a run made and the kernel never added is added first**: a
+    /// `Job::Partition` that wrote the table, followed by a `Job::AddPartitions`
+    /// that failed, leaves partitions 5–11 in the table and out of the kernel's
+    /// view, where a second `Job::Partition` fails on numbers already taken.
+    /// So the add is asked first, and refused harmlessly where the table holds
+    /// no such range.
+    fn make_area(&self) -> Result<(), Refusal> {
+        let node = self.target.internal;
+        if !self.dry_run && self.as_root("adding an area the table may already hold", Job::AddPartitions, None).is_ok() {
+            self.as_root("settling udev", Job::Settle, None)?;
+            if internal::recognise(&self.internal_disk()?).map_err(Refusal::Layout)? != internal::Area::Absent {
+                println!("{}: the table already held the install area, and the kernel now does too", node.whole());
+                return Ok(());
+            }
+        }
+        println!("{}: no install area, so it is made after partition 4", node.whole());
+        self.as_root("making the install partitions", Job::Partition, None)?;
+        self.as_root("adding them to the kernel's view", Job::AddPartitions, None)?;
+        if !self.dry_run {
+            self.as_root("settling udev", Job::Settle, None)?;
+        }
+        Ok(())
+    }
+
+    /// The boot entry an earlier install made for the internal ESP.
+    fn internal_entry(&self) -> Result<String, Refusal> {
+        let esp = self.install_area()?[0].unique.expect("recognise refuses a partition with no GUID");
+        let want = esp.to_string().to_ascii_lowercase();
+        let listing = self.ssh("listing boot entries", EFIBOOTMGR)?;
+        entries_labelled(&listing, INTERNAL_LABEL)
+            .into_iter()
+            .find(|(_, guid)| *guid == want)
+            .map(|(id, _)| id)
+            .ok_or_else(|| {
+                Refusal::BootEntry(format!("no {INTERNAL_LABEL} entry names the internal ESP; install first"))
+            })
     }
 }
 
@@ -1337,7 +1393,7 @@ impl Driver {
 /// `answers`, since a listener can come up before the service behind it.
 /// **Going down is a dial refused or unanswered for [`CONNECT_SECS`]**, what
 /// `ssh`'s own connect is given: a SYN lost while Ubuntu is still up would
-/// otherwise read as down, and the stick be read before ToyOS booted it.
+/// otherwise read as down, and the log be read before ToyOS booted it.
 fn wait_on(
     secs: u64,
     what: &'static str,
@@ -1392,50 +1448,55 @@ declare_flags!(METAL = {
     IMAGE = "--image", Next;
     HOST = "--host", Next;
     KEY = "--key", Next;
-    DEVICE = "--device", Next;
-    INSTALL_SUDOERS = "--install-sudoers", Next;
+    ADOPT_SCRATCH = "--adopt-scratch", Next;
+    RECORD = "--record", None;
+    FALL_THROUGH = "--fall-through", Next;
     READBACK = "--readback", Next;
     FAT32_CHECK = "--fat32-check", None;
     DRY_RUN = "--dry-run", None;
+    INSTALL_INTERNAL = "--install-internal", Next;
+    BOOT_INTERNAL = "--boot-internal", None;
 });
 
-/// The flags that describe a boot, as against the ones that say which machine
-/// to reach: [`Args::parse`] refuses an `--install-sudoers` beside any of them.
-const ABOUT_A_BOOT: &[&Flag] = &[&DRY_RUN, &IMAGE, &READBACK, &FAT32_CHECK];
+/// The flags that describe a judged boot, which [`Args::parse`] refuses beside
+/// an install or boot that writes no readback.
+const ABOUT_THE_JUDGED_BOOT: &[&Flag] = &[&IMAGE, &READBACK, &FAT32_CHECK];
 
 /// What the binary was asked to do.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Args {
     /// **No default, and that is the second half of the fix.** A default was
-    /// something to fall through *to*: `--install-sudoers` installed the rule
-    /// and carried on into the ordinary loop with `target/bootable.img`, which
+    /// something to fall through *to*: a capture recorded the machine and
+    /// carried on into the ordinary loop with `target/bootable.img`, which
     /// in one worktree was a 184 MB image with no job list and no bound. There
     /// is nothing to fall through to now, and the gate below would refuse that
     /// image anyway — the loop flashes metal-staged images and nothing else.
     image: Option<PathBuf>,
     target: Target,
     dry_run: bool,
-    /// Where the account's password is read from, once, to install the rule.
-    ///
-    /// **An action of its own, and it writes no disk.** It records the machine
-    /// or checks its stick against the record, installs, checks with `visudo`,
-    /// says so and exits; every flag that describes a boot is a
-    /// usage refusal beside it. It used to fall through into the ordinary loop
-    /// with whatever `--image` defaulted to, and a reinstall in a worktree whose
-    /// `target/bootable.img` was a 184 MB image with no job list flashed that
-    /// image and booted the T14 into a boot that never ends.
-    install_sudoers: Option<PathBuf>,
-    /// The boot-describing flags this command line named, in the order given —
-    /// so a refusal can say which ones rather than that there were some.
-    about_a_boot: Vec<&'static str>,
-    /// Where the stick's two files and this boot's own facts are written, for a
+    /// Record the machine ([`record`]). **An action of its own, and it writes
+    /// no disk.**
+    record: bool,
+    /// Where the log's two files and this boot's own facts are written, for a
     /// judge that is not this process. Absent leaves the run's only account its
     /// standard output, which no per-test predicate can be held to.
     readback: Option<PathBuf>,
-    /// Read the log partition whole off the stick and hand it to
+    /// Read the log volume whole off the disk and hand it to
     /// `toyos-fat32-check`. The outside judge, and the only reader of that
     /// volume in this tree that is not the family of code that wrote it.
     fat32_check: bool,
+    /// The image an install writes to the bench's own NVMe with no readback,
+    /// such as a shipped image for a demo. An action of its own: it boots
+    /// nothing unless [`Args::boot_internal`] asks.
+    install_internal: Option<PathBuf>,
+    /// Boot the internal install once, through `BootNext`, and leave the
+    /// firmware's order — Ubuntu first — as it is.
+    boot_internal: bool,
+    /// The disk [`adopt_scratch`] erases into a scratch disk. An action of its
+    /// own, beside nothing but the flags that say which machine and `--dry-run`.
+    adopt_scratch: Option<Sd>,
+    /// The unbootable entry [`fall_through`] boots once. An action of its own.
+    fall_through: Option<Unbootable>,
 }
 
 impl Args {
@@ -1453,17 +1514,15 @@ impl Args {
         let value = |flag: &Flag| METAL.value(args, flag);
         let mut out = Args {
             image: value(&IMAGE).map(PathBuf::from),
-            target: Target::t14()?,
+            target: Target::bench_t14()?,
             dry_run: METAL.present(args, &DRY_RUN),
-            install_sudoers: value(&INSTALL_SUDOERS).map(PathBuf::from),
-            about_a_boot: line
-                .seen
-                .iter()
-                .map(|seen| seen.flag.name)
-                .filter(|name| ABOUT_A_BOOT.iter().any(|flag| flag.name == *name))
-                .collect(),
+            record: METAL.present(args, &RECORD),
             readback: value(&READBACK).map(PathBuf::from),
             fat32_check: METAL.present(args, &FAT32_CHECK),
+            install_internal: value(&INSTALL_INTERNAL).map(PathBuf::from),
+            boot_internal: METAL.present(args, &BOOT_INTERNAL),
+            adopt_scratch: value(&ADOPT_SCRATCH).map(Sd::parse).transpose()?,
+            fall_through: value(&FALL_THROUGH).map(Unbootable::parse).transpose()?,
         };
         if let Some(host) = value(&HOST) {
             let (user, machine) = host_of(host)?;
@@ -1473,124 +1532,202 @@ impl Args {
         if let Some(key) = value(&KEY) {
             out.target.key = PathBuf::from(key);
         }
-        if let Some(node) = value(&DEVICE) {
-            out.target.node = Node::parse(node).map_err(Refusal::Disk)?;
+        // **An action is not a mode**: it does its one thing and exits, so a
+        // flag beside it that describes anything else is refused rather than
+        // left for the action to fall through into — which is how a capture
+        // once flashed whatever `--image` defaulted to.
+        let actions: [(&Flag, &[&Flag]); 3] = [
+            (&RECORD, &[&HOST, &KEY]),
+            (&ADOPT_SCRATCH, &[&HOST, &KEY, &DRY_RUN]),
+            (&FALL_THROUGH, &[&HOST, &KEY, &DRY_RUN]),
+        ];
+        for (action, alone) in actions {
+            if !METAL.present(args, action) {
+                continue;
+            }
+            let beside: Vec<&str> = line
+                .seen
+                .iter()
+                .map(|seen| seen.flag.name)
+                .filter(|name| *name != action.name && !alone.iter().any(|flag| flag.name == *name))
+                .collect();
+            if !beside.is_empty() {
+                return Err(Refusal::Usage(format!(
+                    "{} does its one thing and exits, so {} is not done beside it",
+                    action.name,
+                    beside.join(" and ")
+                )));
+            }
         }
-        // **`--install-sudoers` is an action, not a mode.** It installs the
-        // rule and exits; a command line that also describes a boot is asking
-        // for two things and would get both, which is how a reinstall came to
-        // flash whatever `--image` defaulted to.
-        if out.install_sudoers.is_some() && !out.about_a_boot.is_empty() {
+        let judged: Vec<&str> = line
+            .seen
+            .iter()
+            .map(|seen| seen.flag.name)
+            .filter(|name| ABOUT_THE_JUDGED_BOOT.iter().any(|flag| flag.name == *name))
+            .collect();
+        if (out.install_internal.is_some() || out.boot_internal) && !judged.is_empty() {
             return Err(Refusal::Usage(format!(
-                "--install-sudoers installs the rule and exits; it writes no disk and boots \
-                 nothing, so {} describes a boot it will not make. Run it alone, then run \
-                 the boot.",
-                out.about_a_boot.join(" and ")
+                "--install-internal and --boot-internal write and boot an image nobody judges, \
+                 so {} describes a boot they will not make",
+                judged.join(" and ")
             )));
         }
         Ok(out)
     }
 }
 
-/// `--host`'s `<user>@<machine>`, split. Neither half may open with `-`, which
-/// `ssh` takes for a flag.
+/// `--host`'s `<user>@<machine>`, split: two non-empty words, neither opening
+/// with `-`, which `ssh` takes for a flag.
 pub fn host_of(host: &str) -> Result<(&str, &str), Refusal> {
     let usage = || Refusal::Usage(format!("--host wants <user>@<machine>, not {host:?}"));
     let (user, machine) = host.split_once('@').ok_or_else(usage)?;
-    user_word(user)?;
-    Word::literal(machine)?;
-    if [user, machine].iter().any(|half| half.starts_with('-')) {
+    let unfit = |half: &str| half.is_empty() || half.starts_with('-') || half.contains(|c: char| c.is_whitespace() || c == '@');
+    if unfit(user) || unfit(machine) {
         return Err(usage());
     }
     Ok((user, machine))
 }
 
-/// Set a machine up for the loop: its record, then the rule.
-///
-/// **The record before the rule**, so no rule is installed for a disk the
-/// record refuses. A machine with none is recorded with the disk the target
-/// names as its stick; one with a record has that disk checked against it.
-/// Either way it says which disk that is, and asks nothing: a bench holds
-/// nothing a wrong capture could lose, and the loop reaches no other machine.
-///
-/// The rule goes on with the account's password on one command's stdin and
-/// nowhere else — never in an argument, never in output.
-fn install_sudoers(target: &Target, password: &Path) -> Result<(), Refusal> {
+/// Record the machine `target` reaches where it has no record, by what its
+/// SMBIOS answers. It asks nothing: a bench holds nothing a wrong capture could
+/// lose, and the loop reaches no other machine.
+fn record(target: &Target) -> Result<(), Refusal> {
     let driver = Driver::reach(target.clone(), false)?;
     let machine = Machine::parse(&driver.ssh("reading the machine's SMBIOS", Machine::QUERY)?)
         .map_err(Refusal::Machine)?;
-    let disk = Identity::parse(&driver.ssh("reading the disk", &target.identity())?)?;
-    println!("{}", record_machine(&timings::dir(), &machine, &disk)?.said(&target.node));
-    // Staged in the account's own home rather than in a world-writable /tmp,
-    // where another user could win the race between `visudo -c` and `install`.
-    let staged = shell_word(&driver.home.staged());
-    // Cleared whichever way the install went: a refused rule left behind is a
-    // file the next run would `visudo -c` instead of the one it just wrote.
-    let installed = stage_and_install(&driver, password, &staged);
-    let cleared = driver.ssh("clearing the staged rule", &format!("rm -f {staged}"));
-    installed.and(cleared)?;
-    println!("installed /etc/sudoers.d/toyos-metal");
+    let (at, wrote) = record_machine(&timings::dir(), &machine)?;
+    let how = if wrote { "records this machine now" } else { "already recorded this machine" };
+    println!("{} {how}: {} {}, BIOS {}", at.display(), machine.vendor, machine.product, machine.bios);
     Ok(())
 }
 
-/// `staged` is one shell word already.
-fn stage_and_install(driver: &Driver, password: &Path, staged: &str) -> Result<String, Refusal> {
-    let target = &driver.target;
-    let rule = target.sudoers(&driver.home)?;
+/// `sd`'s partitions in `listing`, refused where the machine lists no `sd`.
+fn parts_of(listing: &str, sd: Sd) -> Result<Vec<Listed>, Refusal> {
+    sd_disks(listing)?
+        .into_iter()
+        .find(|(listed, _)| *listed == sd)
+        .map(|(_, parts)| parts)
+        .ok_or_else(|| Refusal::Adopt(format!("{} is no disk the machine lists", sd.node().whole())))
+}
 
-    let mut stage = Command::new("ssh")
-        .args(target.ssh_argv(&format!("umask 077 && cat > {staged}")))
-        .stdin(Stdio::piped())
-        .spawn()
-        .map_err(|e| unstarted("staging the rule", &e))?;
-    stage
-        .stdin
-        .take()
-        .expect("the pipe was just asked for")
-        .write_all(rule.as_bytes())
-        .map_err(|e| unstarted("staging the rule", &e))?;
-    let out = stage.wait_with_output().map_err(|e| unstarted("staging the rule", &e))?;
-    answer("staging the rule", out)?;
-    driver.ssh("checking the rule", &format!("/usr/sbin/visudo -c -f {staged}"))?;
-
-    // The password crosses this process as bytes on one pipe and reaches no
-    // argument, no formatter and no output; `sudo -S` reads one line, so the
-    // newline is supplied whether or not the file carries one.
-    let mut secret = std::fs::read(password)
-        .map_err(|e| Refusal::File { path: password.display().to_string(), why: e.to_string() })?;
-    while secret.last().is_some_and(|b| *b == b'\n' || *b == b'\r') {
-        secret.pop();
+/// Whether `sd` of `listing` may be erased to make it a scratch disk: listed,
+/// and holding no ToyOS image, which a disk somebody flashed may still be.
+fn adoptable(listing: &str, sd: Sd, image: Carrying) -> Result<(), Refusal> {
+    if image.holds(&parts_of(listing, sd)?) {
+        return Err(Refusal::Adopt(format!(
+            "{} carries {image}, and a scratch disk is never one",
+            sd.node().whole()
+        )));
     }
-    secret.push(b'\n');
-    let command = format!(
-        "sudo -S -p '' /usr/bin/install -m 0440 -o root -g root {staged} \
-         /etc/sudoers.d/toyos-metal"
+    Ok(())
+}
+
+/// Whether `sd` of `listing` reads back as [`make_scratch`](Driver::make_scratch)
+/// leaves it: a scratch disk whose one partition carries no filesystem.
+fn scratch_read_back(listing: &str, sd: Sd) -> Result<(), Refusal> {
+    let parts = parts_of(listing, sd)?;
+    let disk = sd.node().whole();
+    if !Carrying::Scratch.holds(&parts) {
+        return Err(Refusal::Adopt(format!("{disk} was written and does not read back as a scratch disk")));
+    }
+    if let Some(fs) = parts.iter().find_map(|p| p.filesystem.as_deref()) {
+        return Err(Refusal::Adopt(format!("{disk}'s scratch partition still carries a {fs} signature")));
+    }
+    Ok(())
+}
+
+/// Make `sd`, named by hand, a scratch disk of a recorded machine: its
+/// signatures wiped and a table of one [`Carrying::Scratch`] partition
+/// written, which the disk is then read back as carrying. The disk's contents
+/// are lost.
+fn adopt_scratch(target: &Target, dry_run: bool, sd: Sd) -> Result<(), Refusal> {
+    let driver = Driver::reach(target.clone(), dry_run)?;
+    driver.require_sudo()?;
+    driver.recorded_machine()?;
+    adoptable(&driver.ssh("listing the disks", DISKS)?, sd, Carrying::Layout)?;
+    let disk = Identity::parse(&driver.ssh("reading the disk", &sd.identity())?)?;
+    if !disk.removable {
+        return Err(Refusal::Identity { field: "removable", want: "1".to_string(), got: "0".to_string() });
+    }
+    if !driver.make_scratch(sd)? {
+        println!("dry run: nothing was erased");
+        return Ok(());
+    }
+    println!(
+        "{} is a scratch disk: {} sectors, {} {}",
+        sd.node().whole(),
+        disk.sectors,
+        disk.vendor,
+        disk.model
     );
-    let mut install = Command::new("ssh")
-        .args(target.ssh_argv(&command))
-        .stdin(Stdio::piped())
-        .stderr(Stdio::piped())
-        .spawn()
-        .map_err(|e| unstarted("installing the rule", &e))?;
-    install
-        .stdin
-        .take()
-        .expect("the pipe was just asked for")
-        .write_all(&secret)
-        .map_err(|e| unstarted("installing the rule", &e))?;
-    let out = install.wait_with_output().map_err(|e| unstarted("installing the rule", &e))?;
-    answer("installing the rule", out)?;
-    Ok(String::new())
+    Ok(())
+}
+
+/// Bytes of a local file one root command reads on its stdin.
+#[derive(Debug, Clone, Copy)]
+struct Feed<'a> {
+    path: &'a Path,
+    at: u64,
+    len: u64,
+}
+
+/// The image an internal install writes, admitted: its partitions as
+/// [`internal::admit`] matched them, and armed with nothing the owner's own
+/// flash path would refuse — a demo boots what ships, and no actuator.
+fn admit_install(path: &Path) -> Result<internal::Install, Refusal> {
+    let install = internal::admit(path).map_err(Refusal::Install)?;
+    let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+    let declared = toyos_build::build::declared_params(&root);
+    let armed = toyos_build::image::params_of(path).map_err(Refusal::Install)?;
+    if let Some(name) = armed.iter().find(|n| !declared.contains(n) && !toyos_build::build::is_valued_param(n)) {
+        return Err(Refusal::Install(format!(
+            "it is armed with {name:?}, which is no boot parameter the kernel declares, and an \
+             installed image carries no actuator"
+        )));
+    }
+    Ok(install)
+}
+
+/// An internal install, an internal boot, or both in that order.
+fn internal_action(args: &Args) -> Result<(), Refusal> {
+    let image = args.install_internal.as_deref().map(admit_install).transpose()?;
+    let driver = Driver::reach(args.target.clone(), args.dry_run)?;
+    driver.require_sudo()?;
+    let machine = driver.recorded_machine()?;
+    println!("machine {} {}, BIOS {}", machine.vendor, machine.product, machine.bios);
+    let entry = match &image {
+        Some(image) => match driver.install_internal(image)? {
+            Some(installed) => installed.entry,
+            None => return Ok(()),
+        },
+        None => driver.internal_entry()?,
+    };
+    if args.boot_internal {
+        driver.as_root("setting bootnext", Job::BootNext(entry.clone()), None)?;
+        driver.as_root("rebooting", Job::Reboot, None)?;
+        println!("Boot{entry} ({INTERNAL_LABEL}) is the next boot, once; the firmware's order is unchanged");
+    }
+    Ok(())
 }
 
 /// The whole loop, answering this boot's own millisecond count. `None` is a
-/// dry run, which reaches no boot record because it wrote nothing.
+/// dry run, which reaches no boot record because it wrote nothing, and every
+/// action that is not a judged boot.
 pub fn run(args: &Args) -> Result<Option<u64>, Refusal> {
-    // **First and last**: the rule is installed and this returns. Nothing below
-    // runs, no disk is touched and no machine is rebooted — which is what
-    // `Args::parse` refuses a boot-describing flag beside this one for.
-    if let Some(password) = &args.install_sudoers {
-        install_sudoers(&args.target, password)?;
+    if args.record {
+        record(&args.target)?;
+        return Ok(None);
+    }
+    if args.install_internal.is_some() || args.boot_internal {
+        internal_action(args)?;
+        return Ok(None);
+    }
+    if let Some(sd) = args.adopt_scratch {
+        adopt_scratch(&args.target, args.dry_run, sd)?;
+        return Ok(None);
+    }
+    if let Some(how) = args.fall_through {
+        fall_through(&args.target, args.dry_run, how)?;
         return Ok(None);
     }
     let began = std::time::Instant::now();
@@ -1602,7 +1739,8 @@ pub fn run(args: &Args) -> Result<Option<u64>, Refusal> {
              boots nothing could fall through to",
         )));
     };
-    let image = admit(asked, &args.target)?;
+    let image = internal::admit(asked).map_err(Refusal::Install)?;
+    let log = image.piece(Owned::Log).expect("an admitted image carries a log");
     // **Before the flash, and before anything can refuse.** Every refusal below
     // returns without reaching `write_readback`, so a directory left holding the
     // last run's files is one a judge reads as this run's — which is how a boot
@@ -1610,17 +1748,11 @@ pub fn run(args: &Args) -> Result<Option<u64>, Refusal> {
     if let Some(dir) = &args.readback {
         clear_readback(dir)?;
     }
-    println!(
-        "image {}: {} bytes, ESP p{} at {}+{}, log p{} at {}+{}",
-        image.path.display(),
-        image.bytes,
-        image.esp.index,
-        image.esp.start,
-        image.esp.sectors,
-        image.log.index,
-        image.log.start,
-        image.log.sectors
-    );
+    let pieces: Vec<String> = Owned::ALL
+        .iter()
+        .filter_map(|o| image.piece(*o).map(|p| format!("{o:?} {} bytes", p.len)))
+        .collect();
+    println!("image {}: {}", image.path.display(), pieces.join(", "));
     // The pre-flash gate, before the disk is even asked what it is: what this
     // image will arm, judged against the only table that has ruled on any of it.
     let (armed, deadline_ms) = arms_are_admissible(asked)?;
@@ -1637,53 +1769,39 @@ pub fn run(args: &Args) -> Result<Option<u64>, Refusal> {
     let policy =
         driver.ssh("reading the lid policy", "systemd-analyze cat-config systemd/logind.conf")?;
     lid_policy(&policy)?;
-    let machine = Machine::parse(&driver.ssh("reading the machine's SMBIOS", Machine::QUERY)?)
-        .map_err(Refusal::Machine)?;
+    let machine = driver.recorded_machine()?;
     println!("machine {} {}, BIOS {}", machine.vendor, machine.product, machine.bios);
-    let identity = Identity::parse(&driver.ssh("reading the disk", &args.target.identity())?)?;
-    recorded_stick(&timings::dir(), &machine, &identity)?;
-    println!(
-        "disk {}: {} sectors, {} {}, removable — the stick {} names",
-        args.target.node.whole(),
-        identity.sectors,
-        identity.vendor,
-        identity.model,
-        timings::dir().join(machine.file()).display()
-    );
     let preamble = began.elapsed().as_secs_f64();
 
-    let flashed = driver.flash(&image)?;
     let began = std::time::Instant::now();
-    let entry = driver.boot_entry(&image.esp)?;
-
-    driver.as_root("setting bootnext", Job::BootNext, Some(&entry), None)?;
-    driver.as_root("rebooting", Job::Reboot, None, None)?;
+    let Some(installed) = driver.install_internal(&image)? else { return Ok(None) };
+    let flash = began.elapsed().as_secs_f64();
+    let began = std::time::Instant::now();
+    let before = driver.ssh("listing boot entries", EFIBOOTMGR)?;
+    unordered(&before, &installed.entry)?;
+    driver.as_root("setting bootnext", Job::BootNext(installed.entry), None)?;
+    driver.as_root("rebooting", Job::Reboot, None)?;
     let entry = began.elapsed().as_secs_f64();
     if driver.dry_run {
-        driver.as_root("mounting the log partition", Job::Mount, None, None)?;
-        driver.as_root("unmounting the log partition", Job::Umount, None, None)?;
+        driver.as_root("mounting the log partition", Job::Mount(Owned::Log), None)?;
+        driver.as_root("unmounting the log partition", Job::Umount, None)?;
         println!("dry run: nothing was written and the machine was not rebooted");
         return Ok(None);
     }
-    let flashed = flashed.expect("only a dry run flashes nothing, and it has returned");
 
     let (down, back) = driver.ride_the_reboot(wait_secs)?;
     println!("the machine answered ssh again after {back} s");
-    // Before the mount, so the stick's own answer is a number rather than
-    // the reason a mount failed.
-    let stick = driver.wait_for_the_stick()?;
-    println!("the boot stick enumerated {stick} s after the machine answered");
     let began = std::time::Instant::now();
-    let (loader, log) = driver.read_log()?;
+    let (loader, log_text) = driver.read_log()?;
     let read_log = began.elapsed().as_secs_f64();
-    print!("{loader}{log}");
+    print!("{loader}{log_text}");
     // The outside judge, and it runs before the verdict: a volume this
     // cannot read is a finding about what the boot wrote, and the reason to
     // read the sectors rather than the mount is that a mount has already
     // had a FAT driver's opinion about them.
     let began = std::time::Instant::now();
     if args.fat32_check {
-        let bytes = driver.raw_log(image.log.sectors)?;
+        let bytes = driver.raw_log(log.len)?;
         if let Some(dir) = &args.readback {
             let at = dir.join(READBACK_VOLUME);
             std::fs::write(&at, &bytes).map_err(|e| Refusal::File {
@@ -1696,19 +1814,123 @@ pub fn run(args: &Args) -> Result<Option<u64>, Refusal> {
         println!("toyos-fat32-check: the log partition's {} bytes check out", bytes.len());
     }
     let raw_log = args.fat32_check.then(|| began.elapsed().as_secs_f64());
-    let phases = Phases {
-        preamble,
-        wipe: flashed.wipe,
-        flash: flashed.flash,
-        dd_secs: flashed.dd,
-        entry,
-        down,
-        read_log,
-        raw_log,
-    };
+    let phases = Phases { preamble, flash, dd_secs: installed.dd, entry, down, read_log, raw_log };
     println!("phases: {phases}");
-    let boot = BootFile { back, stick, machine, phases }.text();
-    judge_and_write_readback(&armed, &loader, &log, args.readback.as_deref(), &boot).map(Some)
+    let boot = BootFile { back, machine, phases }.text();
+    let verdict = judge_and_write_readback(&armed, &loader, &log_text, args.readback.as_deref(), &boot);
+    // After the readback, so a boot that moved the order is still judged; the
+    // order's refusal is the louder answer, since the next failure loops.
+    order_kept(&before, &driver.ssh("listing boot entries", EFIBOOTMGR)?)?;
+    verdict.map(Some)
+}
+
+/// Refused where the boot between `before` and `after` moved `BootOrder`.
+fn order_kept(before: &str, after: &str) -> Result<(), Refusal> {
+    let (was, now) = (boot_order(before), boot_order(after));
+    match was == now {
+        true => Ok(()),
+        false => Err(Refusal::BootOrder { during: "the boot", before: was, now }),
+    }
+}
+
+/// An entry on the internal ESP that no firmware can boot, as
+/// [`fall_through`] names it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Unbootable {
+    /// A loader path no file is at.
+    Missing,
+    /// A file that is no PE image: the image's own `\toyos\log.guid`.
+    Garbage,
+}
+
+impl Unbootable {
+    fn parse(word: &str) -> Result<Self, Refusal> {
+        match word {
+            "missing" => Ok(Self::Missing),
+            "garbage" => Ok(Self::Garbage),
+            _ => Err(Refusal::Usage(format!("--fall-through takes missing or garbage, not {word:?}"))),
+        }
+    }
+
+    /// The entry's loader path, as firmware reads it.
+    fn loader(self) -> &'static str {
+        match self {
+            Self::Missing => r"\EFI\TOYOS\ABSENT.EFI",
+            Self::Garbage => r"\toyos\log.guid",
+        }
+    }
+
+    /// The same file under the ESP's mount, and the size it has to have: none
+    /// for the missing one.
+    fn file(self) -> (&'static str, Option<u64>) {
+        match self {
+            Self::Missing => ("EFI/TOYOS/ABSENT.EFI", None),
+            Self::Garbage => ("toyos/log.guid", Some(16)),
+        }
+    }
+}
+
+/// **Boot an entry the firmware cannot load, once, and see Ubuntu come back.**
+/// UEFI 2.10 §3.1.2 has the boot manager try `BootNext` and then the
+/// `BootOrder` list; a firmware that prompts instead is a bench a failed
+/// install leaves waiting for a hand. The entry names a loader on the internal
+/// ESP that `how` says no firmware can boot, the ESP is first read to hold
+/// exactly that, and the entry is deleted once the machine is back.
+fn fall_through(target: &Target, dry_run: bool, how: Unbootable) -> Result<(), Refusal> {
+    let driver = Driver::reach(target.clone(), dry_run)?;
+    driver.require_sudo()?;
+    lid_policy(&driver.ssh("reading the lid policy", "systemd-analyze cat-config systemd/logind.conf")?)?;
+    let machine = driver.recorded_machine()?;
+    println!("machine {} {}, BIOS {}", machine.vendor, machine.product, machine.bios);
+    let esp = driver.install_area()?[0].unique.expect("recognise refuses a partition with no GUID");
+    let (file, size) = how.file();
+    let at = shell_word(&format!("{}/{file}", driver.home.mount()));
+    let said = driver.mounted(Owned::Esp, |d| d.ssh("reading the loader's file", &format!("stat -c %s {at} 2>/dev/null || echo none")))?;
+    let found = said.trim().parse::<u64>().ok();
+    if !dry_run && found != size {
+        return Err(Refusal::Layout(format!(
+            "the internal ESP's {file} is {} where this entry needs it {}",
+            found.map_or_else(|| "absent".to_string(), |n| format!("{n} bytes")),
+            size.map_or_else(|| "absent".to_string(), |n| format!("{n} bytes"))
+        )));
+    }
+    // Every one, since a run that refused after its create left one whose
+    // loader may be the other variant's.
+    for id in ids(&driver.ssh("listing boot entries", EFIBOOTMGR)?, UNBOOTABLE_LABEL) {
+        driver.as_root("deleting an earlier unbootable entry", Job::Delete(id), None)?;
+    }
+    let create = Job::Create { label: UNBOOTABLE_LABEL, loader: how.loader() };
+    let entry = driver.boot_entry(UNBOOTABLE_LABEL, create, esp)?;
+    let before = driver.ssh("listing boot entries", EFIBOOTMGR)?;
+    unordered(&before, &entry)?;
+    driver.as_root("setting bootnext", Job::BootNext(entry.clone()), None)?;
+    driver.as_root("rebooting", Job::Reboot, None)?;
+    if dry_run {
+        println!("dry run: nothing was created and the machine was not rebooted");
+        return Ok(());
+    }
+    let (_, back) = driver.ride_the_reboot(RETURN_ALLOWANCE_SECS)?;
+    let listing = driver.ssh("listing boot entries", EFIBOOTMGR)?;
+    let deleted = driver.as_root("deleting the unbootable entry", Job::Delete(entry.clone()), None);
+    let current = listing.lines().find_map(|l| l.strip_prefix("BootCurrent:")).map(str::trim);
+    if current == Some(entry.as_str()) {
+        return Err(Refusal::FellThrough(format!("BootCurrent is Boot{entry}, the unbootable entry")));
+    }
+    if let Some(next) = listing.lines().find_map(|l| l.strip_prefix("BootNext:")) {
+        return Err(Refusal::FellThrough(format!("BootNext still reads {}", next.trim())));
+    }
+    let first = boot_order(&listing).split(',').next().unwrap_or_default().trim().to_string();
+    if current != Some(first.as_str()) {
+        return Err(Refusal::FellThrough(format!("BootCurrent is {current:?} and BootOrder's first entry {first:?}")));
+    }
+    order_kept(&before, &listing)?;
+    deleted?;
+    println!(
+        "the firmware fell through past Boot{entry} ({}) to Boot{} and answered ssh after {back} s",
+        how.loader(),
+        current.unwrap_or("????")
+    );
+    Ok(())
 }
 
 /// The outside judge's verdict on the log partition. A boot that hands the
@@ -1733,12 +1955,11 @@ fn fat32_verdict(armed: &[String], complaints: &[toyos_fat32_check::Complaint]) 
     }
 }
 
-/// What [`Driver::flash`] took, on a run that was no rehearsal.
-struct Flashed {
-    wipe: f64,
-    /// The write and the table read back after it.
-    flash: f64,
-    /// `dd`'s own seconds for the write.
+/// What [`Driver::install_internal`] made.
+struct Installed {
+    /// The boot entry that boots it.
+    entry: String,
+    /// `dd`'s own seconds for every piece it wrote.
     dd: f64,
 }
 
@@ -1760,7 +1981,7 @@ fn judge_and_write_readback(
     verdict
 }
 
-/// The stick's own verdict on one boot, off what its image is armed with, the
+/// The log's own verdict on one boot, off what its image is armed with, the
 /// loader's file and the log.
 fn boot_verdict(armed: &[String], loader: &str, log: &str) -> Result<u64, Refusal> {
     let staged_hang = clears_its_own_page(armed);
@@ -1788,7 +2009,7 @@ fn boot_verdict(armed: &[String], loader: &str, log: &str) -> Result<u64, Refusa
     // and not this list's — the arm says a bound was staged, and two of them
     // can reach a staged boot.
     if ended_by_its_deadline(armed) {
-        return wedged_boot(loader, log);
+        return wedged_boot(watched(armed), loader, log);
     }
     let ms = bootlog::verdict(log).map_err(Refusal::Log)?;
     if staged_hang {
@@ -1811,17 +2032,21 @@ fn boot_verdict(armed: &[String], loader: &str, log: &str) -> Result<u64, Refusa
 /// and nothing else may: an arm staged for one of them is still a machine the
 /// other can reach first, and the T14 read back a `hard-lockup-probe` boot as a
 /// failure for exactly that reason — this judge knew one line and the page
-/// carried the other.
-fn wedged_boot(loader: &str, log: &str) -> Result<u64, Refusal> {
+/// carried the other. Under the chipset watchdog, its reset is the third
+/// ending: the pass after it finds a page no kernel sealed, and the chipset
+/// says its watchdog reset the machine. The wedge stops every feed, and the
+/// deadline stands past the watchdog's bound.
+fn wedged_boot(watched: bool, loader: &str, log: &str) -> Result<u64, Refusal> {
     if bootlog::handed_back(loader).is_ok() {
         return Err(Refusal::Wedge {
             why: "it reached the shutdown's own last word, so nothing about it was wedged",
         });
     }
-    let Some(said) = sealed_by(loader) else {
+    let Some(said) = sealed_by(loader).or_else(|| watched.then(|| reset_by_the_chipset(loader)).flatten()) else {
         return Err(Refusal::Wedge {
-            why: "the pass after the reset reports neither of this kernel's bounds, so what \
-                  ended this boot was not one of them",
+            why: "the pass after the reset reports neither of this kernel's bounds, nor a reset \
+                  by the chipset watchdog it may be armed with, so what ended this boot was not \
+                  one of them",
         });
     };
     let ms = bootlog::boot_millis(log).ok_or(Refusal::Wedge {
@@ -1838,6 +2063,17 @@ fn sealed_by(loader: &str) -> Option<&str> {
     loader
         .lines()
         .find(|l| l.contains(bootlog::DEADLINE_EXPIRED) || l.contains(bootlog::LOCKED_UP))
+}
+
+/// The line the pass after the reset printed where the chipset says its
+/// watchdog caused that reset, above a page no kernel sealed: a panicked
+/// kernel the watchdog then reset is a panic. Only an FCH says so.
+fn reset_by_the_chipset(loader: &str) -> Option<&str> {
+    if !bootlog::sealed_nothing(loader) {
+        return None;
+    }
+    let after = bootlog::after_the_reset(loader)?;
+    after.lines().find(|l| l.contains(toyos_tco::fch::RESET_SAID))
 }
 
 /// The lateness of a deadline that expired, in milliseconds past the bound it
@@ -1944,7 +2180,6 @@ pub const READBACK_VOLUME: &str = "log-partition.img";
 
 /// The keys [`READBACK_BOOT`] carries, one `<key> <value>` per line.
 pub const BACK_SECS: &str = "back_secs";
-pub const STICK_SECS_KEY: &str = "stick_secs";
 
 /// The machine the boot ran on, as [`Machine::QUERY`] answered before the flash.
 pub const VENDOR_KEY: &str = "machine_vendor";
@@ -1954,7 +2189,6 @@ pub const BIOS_KEY: &str = "machine_bios";
 /// [`Phases`]' keys, each in wall seconds; [`RAW_LOG_KEY`] reads [`NOT_READ`]
 /// on a run that read no volume.
 const PREAMBLE_KEY: &str = "preamble_secs";
-const WIPE_KEY: &str = "wipe_secs";
 const FLASH_KEY: &str = "flash_secs";
 const DD_SECS_KEY: &str = "dd_secs";
 const ENTRY_KEY: &str = "entry_secs";
@@ -1964,21 +2198,20 @@ const RAW_LOG_KEY: &str = "raw_log_secs";
 const NOT_READ: &str = "-";
 
 /// Where one run of the loop spent its wall time, by the host's clock, phase
-/// by phase; coming back and the stick are [`BACK_SECS`] and
-/// [`STICK_SECS_KEY`]. Any save of the log partition before the flash is no
-/// phase of this loop's.
+/// by phase; coming back is [`BACK_SECS`]. Any save of the log partition
+/// before the flash is no phase of this loop's.
 #[derive(Debug, Clone, PartialEq)]
 pub struct Phases {
-    /// Admitting the image, then the account's home, the rule, the lid policy,
-    /// the machine and the disk read off the machine.
+    /// Admitting the image, then the account's home, sudo, the lid policy and
+    /// the machine read off the machine.
     pub preamble: f64,
-    pub wipe: f64,
-    /// `dd` over `ssh`, and the table read back.
+    /// The install: the disk read and checked, the GUIDs given and read back,
+    /// each piece's `dd` over `ssh`, and the boot entry.
     pub flash: f64,
-    /// What `dd` itself said of the write. It reads `ssh`'s stdin, so this is
-    /// whichever of the wire and the stick is slower, and splits neither out.
+    /// What `dd` itself said of the writes. It reads `ssh`'s stdin, so this is
+    /// whichever of the wire and the disk is slower, and splits neither out.
     pub dd_secs: f64,
-    /// The boot entry, `--bootnext` and `reboot`.
+    /// `--bootnext` and `reboot`.
     pub entry: f64,
     pub down: f64,
     pub read_log: f64,
@@ -1991,10 +2224,9 @@ impl fmt::Display for Phases {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(
             f,
-            "preamble {:.1} s, wipe {:.1} s, flash {:.1} s (dd {:.1} s), entry {:.1} s, down {:.1} \
-             s, read_log {:.1} s, raw_log ",
+            "preamble {:.1} s, flash {:.1} s (dd {:.1} s), entry {:.1} s, down {:.1} s, read_log \
+             {:.1} s, raw_log ",
             self.preamble,
-            self.wipe,
             self.flash,
             self.dd_secs,
             self.entry,
@@ -2012,23 +2244,20 @@ impl fmt::Display for Phases {
 /// machine it ran on.
 pub struct BootFile {
     pub back: u64,
-    pub stick: u64,
     pub machine: Machine,
     pub phases: Phases,
 }
 
 impl BootFile {
     pub fn text(&self) -> String {
-        let Self { back, stick, machine, phases } = self;
+        let Self { back, machine, phases } = self;
         let secs = |s: f64| format!("{s:.3}");
         let rows = [
             (BACK_SECS, back.to_string()),
-            (STICK_SECS_KEY, stick.to_string()),
             (VENDOR_KEY, machine.vendor.clone()),
             (PRODUCT_KEY, machine.product.clone()),
             (BIOS_KEY, machine.bios.clone()),
             (PREAMBLE_KEY, secs(phases.preamble)),
-            (WIPE_KEY, secs(phases.wipe)),
             (FLASH_KEY, secs(phases.flash)),
             (DD_SECS_KEY, secs(phases.dd_secs)),
             (ENTRY_KEY, secs(phases.entry)),
@@ -2049,7 +2278,6 @@ pub fn phases(text: &str) -> Result<Phases, String> {
     };
     Ok(Phases {
         preamble: secs(PREAMBLE_KEY)?,
-        wipe: secs(WIPE_KEY)?,
         flash: secs(FLASH_KEY)?,
         dd_secs: secs(DD_SECS_KEY)?,
         entry: secs(ENTRY_KEY)?,
@@ -2075,9 +2303,9 @@ pub const READBACK_FILES: &[&str] = &[
 /// Empty a readback directory, before this run can leave any of it standing.
 ///
 /// **A file that is still there after this ran is one this boot wrote.**
-/// [`write_readback`] is reached only after the machine came back and the stick
+/// [`write_readback`] is reached only after the machine came back and the log
 /// was read, so every refusal before it — a machine that never returned, a
-/// stick that never enumerated, a volume the outside judge complained about —
+/// volume that would not mount, a volume the outside judge complained about —
 /// used to leave the *previous* run's `kernel.log` in place for a judge that
 /// cannot tell one boot's file from another's.
 pub fn clear_readback(dir: &Path) -> Result<(), Refusal> {
@@ -2153,13 +2381,6 @@ pub fn back_secs(text: &str) -> Option<u64> {
     key(text, BACK_SECS)
 }
 
-/// How long after the machine answered the boot stick was there again — the
-/// one thing only this machine can say about the ruling that no reset this
-/// kernel performs may leave a USB device its next host cannot enumerate.
-pub fn stick_secs(text: &str) -> Option<u64> {
-    key(text, STICK_SECS_KEY)
-}
-
 /// The machine a readback names, or why it names none.
 pub fn machine(text: &str) -> Result<Machine, String> {
     match (word(text, VENDOR_KEY), word(text, PRODUCT_KEY), word(text, BIOS_KEY)) {
@@ -2187,15 +2408,15 @@ fn key<T: std::str::FromStr>(text: &str, name: &str) -> Option<T> {
 mod tests {
     use super::*;
 
-    /// The T14's account's home, as its shell answers [`Home::QUERY`].
+    /// The bench account's home, as its shell answers [`Home::QUERY`].
     fn home() -> Home {
-        Home::parse("/home/t14").expect("a home")
+        Home::parse("/home/toyos").expect("a home")
     }
 
     fn target() -> Target {
         Target {
             key: PathBuf::from("/home/dev/.ssh/id_ed25519_toyos_runner"),
-            ..Target::t14().expect("a test run has HOME")
+            ..Target::bench_t14().expect("a test run has HOME")
         }
     }
 
@@ -2243,10 +2464,10 @@ mod tests {
         assert_eq!(said_refusal(&stderr[..stderr.find(REFUSAL_HEAD).unwrap()]), None, "cargo's lines are no refusal");
     }
 
-    /// **An image with no bound on its own boot never reaches the stick.**
+    /// **An image with no bound on its own boot never reaches the bench.**
     ///
     /// The case, measured twice: a kernel that hung after its job list, and a
-    /// `--install-sudoers` that fell through into flashing an ordinary
+    /// capture that fell through into flashing an ordinary
     /// `target/bootable.img` — 184 MB, no job list, no deadline — which booted
     /// the T14 into a boot that never ends and cost the owner a power cut. Every
     /// image the metal profile builds carries `boot-deadline=`; one that does
@@ -2318,39 +2539,25 @@ mod tests {
         format!("{}{}", toyos_tco::DEADLINE_PARAM, toyos_tco::wedge_bound_ms(toyos_tco::JOB_BOUND_MS))
     }
 
-    /// **`--install-sudoers` is an action and not a mode.** It installed the
-    /// rule and then fell through into the ordinary loop with whatever
-    /// `--image` defaulted to; in a worktree where that file existed, the
-    /// orchestrator's reinstall flashed it and rebooted the T14 into a boot
-    /// with no job list and no bound.
+    /// **An unjudged install or boot is an action of its own**: it takes the
+    /// flags that say which machine and a rehearsal, and refuses every flag
+    /// that describes a judged boot or a capture beside it.
     #[test]
-    fn installing_the_rule_is_not_also_a_boot() {
-        let alone = ["--install-sudoers", "/tmp/pw"].map(String::from);
-        let args = Args::parse(&alone).expect("installing the rule alone");
-        assert!(args.install_sudoers.is_some());
-        assert!(args.about_a_boot.is_empty());
-
-        for flag in [
-            vec!["--image", "target/bootable.img"],
-            vec!["--readback", "target/metal/x"],
-            vec!["--fat32-check"],
-            vec!["--dry-run"],
-        ] {
-            let mut words = vec!["--install-sudoers".to_string(), "/tmp/pw".to_string()];
-            words.extend(flag.iter().map(|w| (*w).to_string()));
-            let refusal = Args::parse(&words).unwrap_err();
-            let said = refusal.to_string();
-            assert!(said.contains(flag[0]), "{flag:?}: {said}");
-            assert!(said.contains("describes a boot it will not make"), "{said}");
-            // A command line and not a machine: exit 2.
-            assert!(!refusal.about_the_boot(), "{flag:?}");
+    fn an_unjudged_install_is_not_also_a_judged_boot() {
+        let words = |w: &[&str]| w.iter().map(|w| (*w).to_string()).collect::<Vec<_>>();
+        let both = Args::parse(&words(&["--install-internal", "demo.img", "--boot-internal", "--dry-run", "--host", "toyos@bench-amd"])).unwrap();
+        assert_eq!(both.install_internal.as_deref(), Some(Path::new("demo.img")));
+        assert!(both.boot_internal && both.dry_run);
+        assert!(Args::parse(&words(&["--boot-internal"])).unwrap().install_internal.is_none());
+        for judged in [&["--image", "x.img"][..], &["--readback", "r"], &["--fat32-check"]] {
+            for internal in [&["--install-internal", "demo.img"][..], &["--boot-internal"]] {
+                let line = [internal, judged].concat();
+                let said = Args::parse(&words(&line)).unwrap_err().to_string();
+                assert!(said.contains(judged[0]) && said.contains("describes a boot they will not make"), "{line:?}: {said}");
+            }
         }
-
-        // The flags that say *which machine* are not a boot, and the rule needs
-        // them: an install against another host or key is still an install.
-        let hosted = ["--install-sudoers", "/tmp/pw", "--host", "dev@t14", "--key", "/tmp/k"]
-            .map(String::from);
-        assert!(Args::parse(&hosted).is_ok());
+        let said = Args::parse(&words(&["--record", "--boot-internal"])).unwrap_err().to_string();
+        assert!(said.contains("--boot-internal"), "{said}");
     }
 
     /// **There is nothing to fall through to.** A default image was what let the
@@ -2371,7 +2578,7 @@ mod tests {
     /// The gate fails closed: a name nobody has ruled on is refused, and it is
     /// refused *by that name* rather than by a count.
     #[test]
-    fn an_arm_with_no_ruling_never_reaches_the_stick() {
+    fn an_arm_with_no_ruling_never_reaches_the_bench() {
         assert!(flashable("watchdog"));
         assert!(flashable("blackbox=0x8000000"));
         assert!(!flashable("nvme-write-selftest"));
@@ -2392,7 +2599,7 @@ mod tests {
     fn every_arm_that_stops_this_machine_is_cleared_and_judged_as_one() {
         let bound = alloc_deadline();
         for arm in WEDGE_ARMS {
-            assert!(flashable(arm), "{arm} reaches no stick");
+            assert!(flashable(arm), "{arm} reaches no bench");
             assert_eq!(judge_arms(&[arm.to_string(), bound.clone()]), Ok(toyos_tco::wedge_bound_ms(toyos_tco::JOB_BOUND_MS)), "{arm}");
             assert!(stages_a_wedge(&[arm.to_string()]), "{arm}");
             assert_eq!(bound_for(&[arm], 135_680), toyos_tco::STAGED_BOUND_MS, "{arm}");
@@ -2410,6 +2617,15 @@ mod tests {
         assert!(!stages_a_wedge(&["watchdog".to_string(), bound]));
         assert_eq!(bound_for(&["watchdog"], 60_000), 120_000);
         assert_eq!(bound_for(&["watchdog"], 135_680), 271_360);
+    }
+
+    /// Under the chipset watchdog a staged wedge's deadline is past the
+    /// watchdog's reset, which lands within one bound of the last feed.
+    #[test]
+    fn a_wedge_under_the_watchdog_is_the_watchdogs_to_end() {
+        assert_eq!(bound_for(&[WEDGE_ARM, toyos_tco::PARAM], 60_000), 29_200);
+        const { assert!(toyos_tco::WATCHED_WEDGE_BOUND_MS > toyos_tco::STAGED_BOUND_MS + toyos_tco::BOUND_MS) };
+        assert_eq!(bound_for(&[WEDGE_ARM], 60_000), toyos_tco::STAGED_BOUND_MS);
     }
 
     /// A row for a name the kernel no longer declares is a ruling about
@@ -2479,7 +2695,6 @@ mod tests {
     fn phased(raw_log: Option<f64>) -> Phases {
         Phases {
             preamble: 3.104,
-            wipe: 0.412,
             flash: 121.5,
             dd_secs: 117.234,
             entry: 2.25,
@@ -2491,7 +2706,7 @@ mod tests {
 
     #[test]
     fn the_machine_crosses_in_the_boot_file() {
-        let boot = BootFile { back: 47, stick: 0, machine: t14(), phases: phased(None) }.text();
+        let boot = BootFile { back: 47, machine: t14(), phases: phased(None) }.text();
         assert_eq!(machine(&boot), Ok(t14()));
         assert_eq!(back_secs(&boot), Some(47));
         assert!(machine("back_secs 47\nmachine_vendor LENOVO\n").is_err());
@@ -2502,20 +2717,19 @@ mod tests {
     #[test]
     fn the_phases_cross_in_the_boot_file() {
         for raw_log in [Some(9.875), None] {
-            let boot =
-                BootFile { back: 141, stick: 2, machine: t14(), phases: phased(raw_log) }.text();
+            let boot = BootFile { back: 141, machine: t14(), phases: phased(raw_log) }.text();
             assert_eq!(phases(&boot), Ok(phased(raw_log)), "{boot}");
-            assert_eq!((back_secs(&boot), stick_secs(&boot)), (Some(141), Some(2)));
+            assert_eq!(back_secs(&boot), Some(141));
             for line in boot.lines().filter(|line| line.contains("_secs ")) {
-                if line.starts_with(BACK_SECS) || line.starts_with(STICK_SECS_KEY) {
+                if line.starts_with(BACK_SECS) {
                     continue;
                 }
                 let short = boot.replace(&format!("{line}\n"), "");
                 assert!(phases(&short).is_err(), "{line:?} gone still names phases");
             }
         }
-        assert!(phases("back_secs 47\nstick_secs 0\n").is_err());
-        let garbled = BootFile { back: 1, stick: 0, machine: t14(), phases: phased(None) }
+        assert!(phases("back_secs 47\n").is_err());
+        let garbled = BootFile { back: 1, machine: t14(), phases: phased(None) }
             .text()
             .replace("flash_secs 121.500", "flash_secs later");
         assert!(phases(&garbled).is_err());
@@ -2541,7 +2755,7 @@ mod tests {
     fn the_readback_carries_the_verdict_the_loop_returns() {
         let dir = toyos_tmpdir::TempDir::new("verdict");
         let armed = [alloc_deadline()];
-        let boot = "back_secs 40\nstick_secs 0\n";
+        let boot = "back_secs 40\n";
         let written = || {
             let at = dir.join(READBACK_VERDICT);
             loop_verdict(&std::fs::read_to_string(&at).expect("the verdict is written"))
@@ -2578,130 +2792,161 @@ mod tests {
         assert_eq!(written(), Ok(()));
     }
 
-    /// **The stick a machine's loop writes is the one its record names.**
+    /// **A machine with no record is refused with how to make one, and a
+    /// record is written once**: a second capture finds it and moves nothing.
     #[test]
-    fn the_identity_is_the_recorded_stick_or_it_is_refused() {
-        let dir = toyos_tmpdir::TempDir::new("metal-record");
-        let root: &Path = &dir;
-        let t14 = t14();
-        let recorded = Stick { sectors: 60_062_500, vendor: "SanDisk".to_string(), model: "Ultra".to_string() };
-        Record::new(&t14, recorded.clone()).save(root).expect("a record");
-        let stick = Identity::parse("60062500\nSanDisk \nUltra           \n1\n").unwrap();
-        assert_eq!(stick.sectors, 60_062_500);
-        assert_eq!(recorded_stick(root, &t14, &stick), Ok(recorded));
-
-        let bigger = Identity::parse("500118192\nSanDisk \nUltra           \n1\n").unwrap();
-        assert_eq!(
-            recorded_stick(root, &t14, &bigger),
-            Err(Refusal::Identity {
-                field: "size",
-                want: "60062500".to_string(),
-                got: "500118192".to_string(),
-            })
-        );
-        for (answer, field) in [
-            ("60062500\nKingston\nUltra           \n1\n", "vendor"),
-            ("60062500\nSanDisk \nCruzer          \n1\n", "model"),
-            ("60062500\nSanDisk \nUltra           \n0\n", "removable"),
-        ] {
-            let disk = Identity::parse(answer).unwrap();
-            let refused = recorded_stick(root, &t14, &disk);
-            assert!(matches!(refused, Err(Refusal::Identity { field: f, .. }) if f == field), "{field}");
-        }
-        assert!(Identity::parse("60062500\nSanDisk \n").is_err());
-        assert!(Identity::parse("many\nSanDisk \nUltra\n1\n").is_err());
-    }
-
-    /// **A second bench is checked against its own record, and a machine with
-    /// none is refused with how to make one.** Recording writes the disk that
-    /// answered, refuses one that is not removable, and never moves a record
-    /// that is there: a second capture with another disk is refused by it.
-    #[test]
-    fn a_machine_is_recorded_once_and_then_checked_against_its_record() {
+    fn a_machine_is_recorded_once_and_then_found_recorded() {
         let root = toyos_tmpdir::TempDir::new("metal-record");
         let bench = Machine::parse("ACME\nBench 2\nX1.0\n").expect("three lines");
-        let stick = Identity::parse("120176640\nKingston\nDataTraveler    \n1\n").unwrap();
-
-        let refused = recorded_stick(&root, &bench, &stick);
         let at = root.join("acme-bench-2.toml");
         let path = at.display().to_string();
+        let refused = recorded(&root, &bench);
         assert_eq!(refused, Err(Refusal::Unrecorded { path: path.clone() }));
         let said = refused.unwrap_err().to_string();
-        assert!(said.contains("--install-sudoers") && said.contains(&path), "{said}");
-
-        let fixed = Identity::parse("120176640\nKingston\nDataTraveler    \n0\n").unwrap();
-        assert!(matches!(
-            record_machine(&root, &bench, &fixed),
-            Err(Refusal::Identity { field: "removable", .. })
-        ));
-        assert_eq!(Record::load(&root, &bench), Ok(None), "a refused capture wrote a record");
-
-        let want = Stick { sectors: 120_176_640, vendor: "Kingston".to_string(), model: "DataTraveler".to_string() };
-        assert_eq!(
-            record_machine(&root, &bench, &stick),
-            Ok(Captured { at: at.clone(), stick: want.clone(), wrote: true })
-        );
-        assert_eq!(recorded_stick(&root, &bench, &stick), Ok(want.clone()));
-        let record = Record::load(&root, &bench).expect("a readable record").expect("a record");
-        assert_eq!(record.stick, want);
-        assert!(record.measured.is_empty());
-        assert_eq!(record_machine(&root, &bench, &stick), Ok(Captured { at, stick: want, wrote: false }));
-
-        // The T14's stick is not this bench's.
-        let t14_stick = Identity::parse("60062500\nSanDisk \nUltra           \n1\n").unwrap();
-        assert!(matches!(
-            recorded_stick(&root, &bench, &t14_stick),
-            Err(Refusal::Identity { field: "size", .. })
-        ));
-        assert!(matches!(
-            record_machine(&root, &bench, &t14_stick),
-            Err(Refusal::Identity { field: "size", .. })
-        ));
-        assert_eq!(Record::load(&root, &bench), Ok(Some(record)), "a refused capture moved the record");
-        // Neither refusal is about a boot: the loop exits 2.
+        assert!(said.contains("--record --host") && said.contains(&path), "{said}");
         assert!(!Refusal::Unrecorded { path }.about_the_boot());
+
+        assert_eq!(record_machine(&root, &bench), Ok((at.clone(), true)));
+        let record = recorded(&root, &bench).expect("a record");
+        assert!(record.measured.is_empty());
+        let mut measured = record;
+        measured.measured.insert("boot.a.complete_ms".to_string(), 1166);
+        measured.save(&root).expect("a record with a number");
+        assert_eq!(record_machine(&root, &bench), Ok((at, false)));
+        assert_eq!(recorded(&root, &bench), Ok(measured), "a second capture moved the record");
     }
 
-    /// **The capture says which disk every later run writes**: the record's
-    /// path, the node, and the identity it recorded or found recorded.
-    #[test]
-    fn a_capture_says_the_disk_it_recorded_and_every_run_will_write() {
-        let root = toyos_tmpdir::TempDir::new("metal-record");
-        let bench = Machine::parse("ACME\nBench 2\nX1.0\n").expect("three lines");
-        let disk = Identity::parse("120176640\nKingston\nDataTraveler    \n1\n").unwrap();
-        let node = Node::parse("/dev/sdb").unwrap();
-        let at = root.join("acme-bench-2.toml").display().to_string();
-        let first = record_machine(&root, &bench, &disk).expect("recorded").said(&node);
-        let again = record_machine(&root, &bench, &disk).expect("checked").said(&node);
-        for (said, how) in [(first, "records this machine now"), (again, "already recorded this machine")] {
-            assert_eq!(
-                said,
-                format!(
-                    "{at} {how}: the stick is /dev/sdb, 120176640 sectors, Kingston DataTraveler, \
-                     removable; every run on this machine wipes and writes that disk"
-                )
+    /// `node` and its partitions as [`DISKS`] lists them, each `(type, GUID)`.
+    fn listed(node: &str, parts: &[(&str, &str)]) -> String {
+        let mut out = format!("NAME=\"{node}\" TYPE=\"disk\" PKNAME=\"\" PARTN=\"\" PARTTYPE=\"\" PARTUUID=\"\"\n");
+        for (i, (kind, unique)) in parts.iter().enumerate() {
+            let n = i + 1;
+            let part = if node.starts_with("/dev/nvme") { format!("{node}p{n}") } else { format!("{node}{n}") };
+            out += &format!(
+                "NAME=\"{part}\" TYPE=\"part\" PKNAME=\"{node}\" PARTN=\"{n}\" PARTTYPE=\"{kind}\" PARTUUID=\"{unique}\"\n"
             );
         }
+        out
     }
 
-    /// **The home is the one the machine names**: the rule, the argv, the
-    /// mount point and the staged rule all sit under it, and a home the
-    /// machine answers that is no normal absolute path is refused.
+    /// A ToyOS image's table, as a flashed stick carries one, its log carrying
+    /// `log`.
+    fn toyos(node: &str, log: &str) -> String {
+        listed(
+            node,
+            &[
+                ("c12a7328-f81f-11d2-ba4b-00a0c93ec93b", "10000000-0000-4000-8000-000000000000"),
+                ("94464329-e06e-4288-a9da-7fc7154f5e92", "20000000-0000-4000-8000-000000000000"),
+                ("ebd0a0a2-b9e5-4433-87c0-68b6b72699c7", log),
+                ("037719d7-dea5-481a-aa07-6af8be6d51e2", "40000000-0000-4000-8000-000000000000"),
+                ("b350bc93-bb6a-4c5e-9589-a5c3cfd555fd", "50000000-0000-4000-8000-000000000000"),
+            ],
+        )
+    }
+
+    /// A live ISO's hybrid table, which lsblk reads as MBR types.
+    fn iso(node: &str) -> String {
+        listed(node, &[("0x0", "0f1e2d3c-01"), ("0xef", "0f1e2d3c-02")])
+    }
+
+    const LOG: &str = "30000000-0000-4000-8000-000000000000";
+
+    const LAYOUT: Carrying = Carrying::Layout;
+
+    /// A disk adopted as scratch: one partition, of the scratch type.
+    fn scratch(node: &str) -> String {
+        listed(node, &[("51cc09f9-7442-435b-bc03-0fd8718b0fb5", "60000000-0000-4000-8000-000000000000")])
+    }
+
+    /// **A disk carrying an image and a scratch disk are never taken for each
+    /// other**, in either direction and whichever node each has.
     #[test]
-    fn the_mount_and_the_staged_rule_are_under_the_home_the_machine_named() {
+    fn an_image_and_a_scratch_disk_are_never_confused() {
+        for (boot, spare) in [("/dev/sda", "/dev/sdb"), ("/dev/sdb", "/dev/sda")] {
+            let listing = format!("{}{}", toyos(boot, LOG), scratch(spare));
+            let parts = |sd: &str| parts_of(&listing, Sd::parse(sd).unwrap()).unwrap();
+            assert!(Carrying::Scratch.holds(&parts(spare)) && !LAYOUT.holds(&parts(spare)));
+            assert!(!Carrying::Scratch.holds(&parts(boot)));
+        }
+        // A scratch partition beside anything else is no scratch disk.
+        let mut both = toyos("/dev/sda", LOG);
+        both += "NAME=\"/dev/sda6\" TYPE=\"part\" PKNAME=\"/dev/sda\" PARTN=\"6\" \
+                 PARTTYPE=\"51cc09f9-7442-435b-bc03-0fd8718b0fb5\" PARTUUID=\"\"\n";
+        assert!(!Carrying::Scratch.holds(&parts_of(&both, Sd(b'a')).unwrap()));
+    }
+
+    /// **An adoption reads back the wipe it made**: a scratch partition still
+    /// carrying the old ESP's FAT is refused, by name, as is a table that is
+    /// not a scratch disk's.
+    #[test]
+    fn an_adopted_disk_reads_back_as_scratch_with_no_filesystem() {
+        let sdb = Sd(b'b');
+        assert_eq!(scratch_read_back(&scratch("/dev/sdb"), sdb), Ok(()));
+        let stale = scratch("/dev/sdb").replace("PARTUUID=\"60000000-0000-4000-8000-000000000000\"", "PARTUUID=\"60000000-0000-4000-8000-000000000000\" FSTYPE=\"vfat\"");
+        assert_ne!(stale, scratch("/dev/sdb"));
+        let refused = scratch_read_back(&stale, sdb).unwrap_err();
+        assert!(matches!(refused, Refusal::Adopt(ref why) if why.ends_with("carries a vfat signature")), "{refused:?}");
+        let refused = scratch_read_back(&toyos("/dev/sdb", LOG), sdb).unwrap_err();
+        assert!(matches!(refused, Refusal::Adopt(ref why) if why.ends_with("does not read back as a scratch disk")), "{refused:?}");
+    }
+
+    /// **Adoption never erases a disk holding a ToyOS image**, nor a node the
+    /// machine lacks.
+    #[test]
+    fn a_disk_holding_a_toyos_image_is_never_adopted_as_scratch() {
+        let listing = format!("{}{}", toyos("/dev/sda", LOG), iso("/dev/sdb"));
+        let refused = adoptable(&listing, Sd(b'a'), LAYOUT).unwrap_err();
+        assert!(matches!(refused, Refusal::Adopt(ref why) if why.starts_with("/dev/sda carries")), "{refused:?}");
+        assert!(matches!(adoptable(&listing, Sd(b'c'), LAYOUT), Err(Refusal::Adopt(_))));
+        assert_eq!(adoptable(&listing, Sd(b'b'), LAYOUT), Ok(()));
+        assert_eq!(adoptable(&scratch("/dev/sdb"), Sd(b'b'), LAYOUT), Ok(()), "adopting again rewrites the table");
+    }
+
+    /// **A capture, an adoption and a fall-through are actions, not modes**:
+    /// each stands beside nothing but the flags that say which machine, and
+    /// the last two beside `--dry-run`. A capture once fell through into the
+    /// loop with whatever `--image` defaulted to, and booted the T14 into a
+    /// boot with no job list and no bound.
+    #[test]
+    fn a_capture_an_adoption_and_a_fall_through_are_actions_of_their_own() {
+        let words = |w: &[&str]| w.iter().map(|w| (*w).to_string()).collect::<Vec<_>>();
+        let adopt = Args::parse(&words(&["--adopt-scratch", "/dev/sdb", "--dry-run", "--host", "toyos@bench-amd"])).unwrap();
+        assert_eq!(adopt.adopt_scratch, Some(Sd(b'b')));
+        assert!(Args::parse(&words(&["--record", "--host", "dev@t14", "--key", "/tmp/k"])).unwrap().record);
+        for (word, how) in [("missing", Unbootable::Missing), ("garbage", Unbootable::Garbage)] {
+            let fall = Args::parse(&words(&["--fall-through", word, "--dry-run", "--host", "toyos@bench-amd"])).unwrap();
+            assert_eq!(fall.fall_through, Some(how));
+        }
+        assert!(matches!(Args::parse(&words(&["--fall-through", "pxe"])), Err(Refusal::Usage(_))));
+        let boot = [&["--image", "x.img"][..], &["--readback", "r"], &["--fat32-check"], &["--boot-internal"]];
+        for action in [&["--adopt-scratch", "/dev/sdb"][..], &["--record"], &["--fall-through", "missing"]] {
+            let dry: &[&str] = &["--dry-run"];
+            for beside in boot.iter().copied().chain([dry].into_iter().filter(|_| action[0] == "--record")) {
+                let line = [action, beside].concat();
+                let refused = Args::parse(&words(&line)).unwrap_err();
+                assert!(matches!(refused, Refusal::Usage(ref why) if why.contains(beside[0])), "{line:?}");
+                assert!(!refused.about_the_boot());
+            }
+        }
+        assert!(matches!(Args::parse(&words(&["--adopt-scratch", "/dev/mmcblk0"])), Err(Refusal::Usage(_))));
+        let both = Args::parse(&words(&["--record", "--adopt-scratch", "/dev/sdb"])).unwrap_err();
+        assert!(matches!(both, Refusal::Usage(_)));
+    }
+
+    /// **The mount point is under the home the machine names**, and a home
+    /// the machine answers that is no normal absolute path is refused.
+    #[test]
+    fn the_mount_is_under_the_home_the_machine_named() {
         let words = ["--host", "dev@box"].map(String::from);
         let target = Args::parse(&words).unwrap().target;
         let home = Home::parse("/var/home/dev").expect("a home");
         assert_eq!(home.mount(), "/var/home/dev/toyos-log");
-        assert_eq!(home.staged(), "/var/home/dev/.toyos-metal.sudoers");
         assert_eq!(
-            target.argv(Job::Mount, None, &home).unwrap(),
-            ["/usr/bin/mount", "-o", "ro", "/dev/sda3", "/var/home/dev/toyos-log"]
+            target.argv(&Job::Mount(Owned::Log), &home),
+            ["/usr/bin/mount", "-o", "ro", "/dev/nvme0n1p7", "/var/home/dev/toyos-log"]
         );
-        let rule = target.sudoers(&home).unwrap();
-        assert!(rule.contains("dev ALL=(root) NOPASSWD: /usr/bin/umount /var/home/dev/toyos-log\n"), "{rule}");
-        assert!(!rule.contains(" /home/"), "{rule}");
-        for answer in ["", "var/home/dev", "/", "/var/home/dev/", "/var//dev", "/var/./dev", "/var/../root", "/a b", "/a'b", "/a\n"]
+        assert_eq!(target.argv(&Job::Umount, &home), ["/usr/bin/umount", "/var/home/dev/toyos-log"]);
+        for answer in ["", "var/home/dev", "/", "/var/home/dev/", "/var//dev", "/var/./dev", "/var/../root", "/a\n"]
         {
             assert_eq!(Home::parse(answer), Err(Refusal::Home(answer.to_string())), "{answer:?}");
         }
@@ -2713,7 +2958,7 @@ mod tests {
         for host in ["box", "-oProxyCommand=x@box", "dev@-oProxyCommand=x", "dev@", "dev@a b"]
         {
             assert!(
-                matches!(host_of(host), Err(Refusal::Usage(_) | Refusal::Word(_))),
+                matches!(host_of(host), Err(Refusal::Usage(_))),
                 "{host}: {:?}",
                 host_of(host)
             );
@@ -2722,118 +2967,53 @@ mod tests {
         }
     }
 
+    /// **No root line names the bench's own partitions**: every write on the
+    /// internal disk is to one of partitions 5–11, and the table is touched
+    /// by the two `sgdisk` lines alone, each naming only those numbers.
     #[test]
-    fn the_rule_is_the_command_table_rendered() {
-        let hex = "[0-9A-Fa-f][0-9A-Fa-f][0-9A-Fa-f][0-9A-Fa-f]";
-        assert_eq!(
-            target().sudoers(&home()).unwrap(),
-            format!(
-                "# toyos-metal: the whole of what the metal loop runs as root.\n\
-                 t14 ALL=(root) NOPASSWD: /usr/sbin/wipefs --all /dev/sda\n\
-                 t14 ALL=(root) NOPASSWD: /usr/bin/dd of\\=/dev/sda bs\\=4M conv\\=fsync\n\
-                 t14 ALL=(root) NOPASSWD: /usr/bin/dd if\\=/dev/sda3 bs\\=4M\n\
-                 t14 ALL=(root) NOPASSWD: /usr/bin/efibootmgr --create-only --disk /dev/sda \
-                 --part 1 --label ToyOS --loader \\\\\\\\EFI\\\\\\\\BOOT\\\\\\\\BOOTX64.EFI\n\
-                 t14 ALL=(root) NOPASSWD: /usr/bin/efibootmgr --delete-bootnum --bootnum {hex}\n\
-                 t14 ALL=(root) NOPASSWD: /usr/bin/efibootmgr --bootnext {hex}\n\
-                 t14 ALL=(root) NOPASSWD: /usr/bin/mount -o ro /dev/sda3 /home/t14/toyos-log\n\
-                 t14 ALL=(root) NOPASSWD: /usr/bin/umount /home/t14/toyos-log\n\
-                 t14 ALL=(root) NOPASSWD: /usr/sbin/reboot \"\"\n\
-                 t14 ALL=(root) NOPASSWD: /usr/bin/true \"\"\n"
-            )
-        );
+    fn no_root_line_writes_the_benchs_own_partitions() {
+        let t = target();
+        let guid = Guid::parse("69DDC8F6-FAB2-423F-9818-93BB0BA7349C").unwrap();
+        let named = Owned::ALL.iter().filter(|o| o.named_by_image()).map(|o| (*o, guid)).collect();
+        let mut internal_jobs = vec![
+            Job::Partition,
+            Job::AddPartitions,
+            Job::Retag(named),
+            Job::Create { label: INTERNAL_LABEL, loader: LOADER },
+            Job::Create { label: UNBOOTABLE_LABEL, loader: Unbootable::Missing.loader() },
+            Job::Create { label: UNBOOTABLE_LABEL, loader: Unbootable::Garbage.loader() },
+            Job::ReadLog { bytes: 35_651_584 },
+        ];
+        internal_jobs.extend(Owned::ALL.map(Job::Write));
+        internal_jobs.extend(Owned::ALL.map(Job::Mount));
+        for job in internal_jobs {
+            let argv = t.argv(&job, &home());
+            let internal = argv.iter().any(|w| w.contains("/dev/nvme0n1"));
+            assert!(internal, "{job:?}: {argv:?}");
+            for word in &argv {
+                for bench in 1..=4 {
+                    assert_ne!(word, &format!("/dev/nvme0n1p{bench}"), "{job:?}: {argv:?}");
+                    assert_ne!(word, &format!("of=/dev/nvme0n1p{bench}"), "{job:?}: {argv:?}");
+                    assert!(!internal || !word.contains(&format!("={bench}:")), "{job:?}: {argv:?}");
+                }
+            }
+            if argv.iter().any(|w| w == "/dev/nvme0n1" || w == "of=/dev/nvme0n1") {
+                assert!(
+                    [SGDISK, PARTX, EFIBOOTMGR].contains(&argv[0].as_str()) && !argv.iter().any(|w| w.starts_with("of=/dev/nvme0n1")),
+                    "{job:?} writes the whole internal disk: {argv:?}"
+                );
+            }
+        }
     }
 
-    /// A one-field mutation has to move both renderings at once, which is what
-    /// makes them one table rather than two lists that agree today.
-    #[test]
-    fn one_table_feeds_the_rule_and_the_argv() {
-        let mut moved = target();
-        moved.node = Node::parse("/dev/sdb").unwrap();
-        moved.log_part = 2;
-        let rule = moved.sudoers(&home()).unwrap();
-        assert!(rule.contains("/usr/bin/mount -o ro /dev/sdb2 /home/t14/toyos-log"), "{rule}");
-        assert_eq!(
-            moved.argv(Job::Mount, None, &home()).unwrap(),
-            ["/usr/bin/mount", "-o", "ro", "/dev/sdb2", "/home/t14/toyos-log"]
-        );
-        assert!(rule.contains("/usr/sbin/wipefs --all /dev/sdb"), "{rule}");
-        assert_eq!(moved.argv(Job::Wipe, None, &home()).unwrap(), ["/usr/sbin/wipefs", "--all", "/dev/sdb"]);
-        // The outside judge's read moves with the same field the mount does,
-        // and it is a *partition*, spelled from the disk's own name.
-        assert!(rule.contains("/usr/bin/dd if\\=/dev/sdb2 bs\\=4M"), "{rule}");
-        assert_eq!(
-            moved.argv(Job::ReadLog, None, &home()).unwrap(),
-            ["/usr/bin/dd", "if=/dev/sdb2", "bs=4M"]
-        );
-        assert!(!rule.contains("/dev/sda"), "{rule}");
-    }
-
-    /// The read the outside judge needs is a read, and the rule says so: it
-    /// carries no `of=` and no `conv=`, so nothing that matches this line can
-    /// write to the disk it names.
+    /// The read the outside judge needs is a read: it carries no `of=` and no
+    /// `conv=`, so it cannot write to the disk it names, and it reads the
+    /// volume's bytes from the log partition and no more.
     #[test]
     fn the_outside_judges_read_can_write_nothing() {
-        let argv = target().argv(Job::ReadLog, None, &home()).unwrap();
-        assert!(argv.iter().any(|w| w.starts_with("if=")), "{argv:?}");
+        let argv = target().argv(&Job::ReadLog { bytes: 35_651_584 }, &home());
         assert!(!argv.iter().any(|w| w.starts_with("of=") || w.starts_with("conv=")), "{argv:?}");
-        // And it names a partition rather than the whole disk, so it cannot be
-        // the flash line with one word changed.
-        assert_eq!(argv[1], "if=/dev/sda3");
-    }
-
-    #[test]
-    fn a_boot_entry_the_firmware_did_not_name_cannot_be_filled_in() {
-        let t = target();
-        assert_eq!(t.argv(Job::BootNext, Some("001D"), &home()).unwrap().last().unwrap(), "001D");
-        assert_eq!(t.argv(Job::Delete, Some("ffff"), &home()).unwrap().last().unwrap(), "ffff");
-        for bad in ["12345", "00g1", "1", "", "0 1", "../."] {
-            assert_eq!(
-                t.argv(Job::BootNext, Some(bad), &home()),
-                Err(Refusal::BootEntry(bad.to_string())),
-                "{bad}"
-            );
-        }
-    }
-
-    #[test]
-    fn an_account_name_that_would_widen_the_rule_is_refused() {
-        for user in [
-            "t14,root",
-            "t14 root",
-            "t14:x",
-            "%sudo",
-            "+netgroup",
-            "",
-            "t*",
-            "t14 ALL=(root) NOPASSWD",
-            "t14\t",
-            // The three a word escapes differently from an argument, so the
-            // argument rendering can never reach the user field.
-            r"t14\root",
-            "t14(x",
-            "t14)x",
-        ] {
-            let mut t = target();
-            t.user = user.to_string();
-            assert_eq!(t.sudoers(&home()), Err(Refusal::Word(user.to_string())), "{user}");
-            let host = ["--host".to_string(), format!("{user}@box")];
-            assert!(
-                matches!(Args::parse(&host), Err(Refusal::Word(_) | Refusal::Usage(_))),
-                "{user}"
-            );
-        }
-    }
-
-    #[test]
-    fn a_sudoers_word_escapes_what_sudoers_reads() {
-        let escaped = |text: &str| Word::Is(text.to_string()).sudoers();
-        assert_eq!(escaped("of=/dev/sda"), r"of\=/dev/sda");
-        assert_eq!(escaped("a,b"), r"a\,b");
-        assert_eq!(escaped("a:b"), r"a\:b");
-        assert_eq!(escaped("^a"), r"\^a");
-        assert_eq!(Word::Hex4.sudoers(), "[0-9A-Fa-f][0-9A-Fa-f][0-9A-Fa-f][0-9A-Fa-f]");
-        assert_eq!(escaped(LOADER), r"\\\\EFI\\\\BOOT\\\\BOOTX64.EFI");
+        assert_eq!(argv[1..], ["if=/dev/nvme0n1p7", "bs=4M", "iflag=count_bytes", "count=35651584"]);
     }
 
     #[test]
@@ -2850,23 +3030,34 @@ mod tests {
                 "BatchMode=yes",
                 "-o",
                 "ConnectTimeout=10",
-                "t14@t14",
+                "toyos@bench-t14",
                 "true",
             ]
         );
         assert_eq!(
-            t.identity(),
+            Sd(b'a').identity(),
             "cat /sys/class/block/sda/size /sys/class/block/sda/device/vendor \
              /sys/class/block/sda/device/model /sys/class/block/sda/removable"
         );
         assert_eq!(
-            t.remote(Job::Flash, None, &home()).unwrap(),
-            "sudo -n '/usr/bin/dd' 'of=/dev/sda' 'bs=4M' 'conv=fsync'"
+            t.remote(&Job::Write(Owned::RootA), &home()),
+            "sudo -n '/usr/bin/dd' 'of=/dev/nvme0n1p9' 'bs=4M' 'conv=fsync,nocreat'"
+        );
+        assert_eq!(t.remote(&Job::Settle, &home()), "sudo -n '/usr/bin/udevadm' 'settle' '--timeout=180'");
+        assert_eq!(t.remote(&Job::Reread(Sd(b'a')), &home()), "sudo -n '/usr/sbin/blockdev' '--rereadpt' '/dev/sda'");
+        assert_eq!(
+            t.remote(&Job::WipePartition { sd: Sd(b'a'), part: 1 }, &home()),
+            "sudo -n '/usr/sbin/wipefs' '--all' '/dev/sda1'"
         );
         assert_eq!(
-            t.remote(Job::Create, None, &home()).unwrap(),
-            "sudo -n '/usr/bin/efibootmgr' '--create-only' '--disk' '/dev/sda' '--part' '1' \
-             '--label' 'ToyOS' '--loader' '\\EFI\\BOOT\\BOOTX64.EFI'"
+            t.remote(&Job::Create { label: INTERNAL_LABEL, loader: LOADER }, &home()),
+            "sudo -n '/usr/bin/efibootmgr' '--create-only' '--disk' '/dev/nvme0n1' '--part' '5' \
+             '--label' 'ToyOS-internal' '--loader' '\\EFI\\BOOT\\BOOTX64.EFI'"
+        );
+        assert_eq!(
+            t.remote(&Job::Create { label: UNBOOTABLE_LABEL, loader: Unbootable::Garbage.loader() }, &home()),
+            "sudo -n '/usr/bin/efibootmgr' '--create-only' '--disk' '/dev/nvme0n1' '--part' '5' \
+             '--label' 'ToyOS-unbootable' '--loader' '\\toyos\\log.guid'"
         );
     }
 
@@ -2887,6 +3078,7 @@ mod tests {
         assert_eq!(
             entry_after_create(before, &ordered, "ToyOS", guid),
             Err(Refusal::BootOrder {
+                during: "creating the boot entry",
                 before: "0001,001D".to_string(),
                 now: "0002,0001,001D".to_string(),
             })
@@ -2904,8 +3096,49 @@ mod tests {
 
         assert_eq!(boot_order("BootCurrent: 0001\n"), "");
         assert_eq!(boot_order(""), "");
-        assert!(!Refusal::BootOrder { before: String::new(), now: "0002".to_string() }
+        assert!(!Refusal::BootOrder { during: "the boot", before: String::new(), now: "0002".to_string() }
             .about_the_boot());
+    }
+
+    /// **An entry in the boot order is never bought with `BootNext`, and a
+    /// boot that moved the order is refused**: either is a bench whose next
+    /// failed ToyOS boot comes back to ToyOS and not to Ubuntu.
+    #[test]
+    fn the_boot_order_holds_no_toyos_entry_and_no_boot_moves_it() {
+        let listing = "BootCurrent: 0003\nBootOrder: 0003,2001,2002\n";
+        assert_eq!(unordered(listing, "0004"), Ok(()));
+        assert_eq!(
+            unordered(listing, "2001"),
+            Err(Refusal::Ordered { entry: "2001".to_string(), order: "0003,2001,2002".to_string() })
+        );
+        assert!(unordered("BootOrder: 0003,000a\n", "000A").is_err(), "the case efibootmgr prints is not the guard's");
+        assert_eq!(unordered("BootCurrent: 0003\n", "0003"), Ok(()));
+        assert_eq!(order_kept(listing, listing), Ok(()));
+        let moved = listing.replace("BootOrder: 0003,", "BootOrder: 0004,0003,");
+        assert_eq!(
+            order_kept(listing, &moved),
+            Err(Refusal::BootOrder {
+                during: "the boot",
+                before: "0003,2001,2002".to_string(),
+                now: "0004,0003,2001,2002".to_string(),
+            })
+        );
+    }
+
+    /// **A disk's identity is the four `sysfs` lines [`Sd::identity`] asks
+    /// for**, read as they come, and refused otherwise: adoption's refusal to
+    /// erase a fixed disk rests on `removable`.
+    #[test]
+    fn a_disks_identity_reads_four_lines_or_is_refused() {
+        let stick = Identity::parse("60062500\nSanDisk \nUltra           \n1\n").unwrap();
+        assert_eq!(
+            stick,
+            Identity { sectors: 60_062_500, vendor: "SanDisk".to_string(), model: "Ultra".to_string(), removable: true }
+        );
+        assert!(!Identity::parse("500118192\nATA     \nSSD             \n0\n").unwrap().removable);
+        for (answer, field) in [("60062500\nSanDisk \n", "the whole query"), ("many\nSanDisk \nUltra\n1\n", "size")] {
+            assert!(matches!(Identity::parse(answer), Err(Refusal::Identity { field: f, .. }) if f == field), "{answer:?}");
+        }
     }
 
     #[test]
@@ -2977,7 +3210,8 @@ mod tests {
         assert!(Refusal::Log(bootlog::Unfit::NoBootRecord).about_the_boot());
         assert!(Refusal::Log(bootlog::Unfit::Unfinished("x".to_string())).about_the_boot());
         assert!(Refusal::Silent { what: "come back", secs: 420 }.about_the_boot());
-        assert!(!Refusal::Disk(Unfit::Node("/dev/nvme0n1p1".to_string())).about_the_boot());
+        assert!(Refusal::FellThrough("BootNext still reads 0002".to_string()).about_the_boot());
+        assert!(!Refusal::Install("it carries no log".to_string()).about_the_boot());
         assert!(!Refusal::Sudo("a password is required".to_string()).about_the_boot());
         assert!(!Refusal::Landed { what: "dd".to_string(), want: 1, got: 2 }.about_the_boot());
         assert!(!Refusal::NoHome.about_the_boot());
@@ -3019,118 +3253,23 @@ mod tests {
     }
 
     #[test]
-    fn the_arguments_name_the_t14_by_default() {
+    fn the_arguments_name_the_t14_bench_by_default() {
         let args = Args::parse(&[]).unwrap();
-        assert_eq!(args.target.user, "t14");
-        assert_eq!(args.target.node.whole(), "/dev/sda");
+        assert_eq!((args.target.user.as_str(), args.target.host.as_str()), ("toyos", "bench-t14"));
+        assert_eq!(args.target.internal.whole(), "/dev/nvme0n1");
         assert!(!args.dry_run);
 
-        let words: Vec<String> = ["--dry-run", "--device", "/dev/sdb", "--host", "runner@box"]
-            .iter()
-            .map(|w| (*w).to_string())
-            .collect();
+        let words: Vec<String> = ["--dry-run", "--host", "runner@box"].iter().map(|w| (*w).to_string()).collect();
         let args = Args::parse(&words).unwrap();
         assert!(args.dry_run);
-        assert_eq!(args.target.node.whole(), "/dev/sdb");
         assert_eq!(args.target.user, "runner");
         assert_eq!(args.target.host, "box");
 
-        let nvme = ["--device".to_string(), "/dev/nvme0n1".to_string()];
-        assert_eq!(Args::parse(&nvme).unwrap().target.node.whole(), "/dev/nvme0n1");
-        let part = ["--device".to_string(), "/dev/nvme0n1p2".to_string()];
-        assert_eq!(Args::parse(&part), Err(Refusal::Disk(Unfit::Node("/dev/nvme0n1p2".to_string()))));
+        assert!(matches!(Args::parse(&["--device".to_string(), "/dev/sdb".to_string()]), Err(Refusal::Usage(_))));
         assert!(matches!(Args::parse(&["--image".to_string()]), Err(Refusal::Usage(_))));
         assert!(matches!(Args::parse(&["--flash".to_string()]), Err(Refusal::Usage(_))));
     }
 
-    /// A disk carrying `parts` in order, so `admit`'s refusals are exercised on
-    /// tables rather than on prose about tables.
-    fn disk(parts: &[(&str, toyos_gpt::Guid)]) -> Vec<u8> {
-        const TOTAL: u64 = 16 * 1024 * 1024;
-        const ALIGN: u64 = 2048;
-        let entries: Vec<toyos_build::gptwrite::Entry<'_>> = (1..)
-            .zip(parts)
-            .map(|(i, (name, kind))| toyos_build::gptwrite::Entry {
-                kind: *kind,
-                unique: toyos_build::gptwrite::random_guid(),
-                first_lba: i * ALIGN,
-                last_lba: i * ALIGN + 511,
-                name,
-            })
-            .collect();
-        let table = toyos_build::gptwrite::table(TOTAL / u64::from(LBA), toyos_build::gptwrite::random_guid(), &entries);
-        let mut out = vec![0u8; TOTAL as usize];
-        out[..table.primary.len()].copy_from_slice(&table.primary);
-        let back = out.len() - table.backup.len();
-        out[back..].copy_from_slice(&table.backup);
-        out
-    }
-
-    #[test]
-    fn an_image_admits_only_the_table_the_installed_rule_names() {
-        let dir = toyos_tmpdir::TempDir::new("metal");
-        let t = target();
-        let write = |name: &str, bytes: &[u8]| {
-            let at = dir.join(name);
-            std::fs::write(&at, bytes).expect("write");
-            at
-        };
-        let (esp, basic, slots, root) =
-            (toyos_gpt::Guid::EFI_SYSTEM, toyos_gpt::Guid::MICROSOFT_BASIC, toyos_gpt::Guid::TOYOS_SLOTS, toyos_gpt::Guid::TOYOS_ROOT);
-
-        assert_eq!(
-            admit(&write("ragged.img", &vec![0u8; 1000]), &t),
-            Err(Refusal::Disk(Unfit::Sectors { bytes: 1000 }))
-        );
-        assert_eq!(admit(&write("empty.img", &[]), &t), Err(Refusal::Disk(Unfit::Sectors { bytes: 0 })));
-        assert_eq!(
-            admit(&write("headless.img", &vec![0u8; 1024]), &t),
-            Err(Refusal::Disk(Unfit::BackupHeader { at: 512, saw: "\0\0\0\0\0\0\0\0".to_string() }))
-        );
-        // The signature in the *primary* header alone: the false pass a healthy
-        // front hides, which is why the check reads the final sector.
-        let mut front = vec![0u8; 1536];
-        front[512..520].copy_from_slice(b"EFI PART");
-        assert!(matches!(
-            admit(&write("front-only.img", &front), &t),
-            Err(Refusal::Disk(Unfit::BackupHeader { .. }))
-        ));
-
-        let two = disk(&[("a", esp), ("b", esp), ("log", basic), ("slots", slots)]);
-        assert_eq!(
-            admit(&write("two-esps.img", &two), &t),
-            Err(Refusal::Partitions { what: "ESP", matched: 2 })
-        );
-        let no_log = disk(&[("esp", esp), ("slots", slots)]);
-        assert_eq!(
-            admit(&write("no-log.img", &no_log), &t),
-            Err(Refusal::Partitions { what: "TOYOS-LOG", matched: 0 })
-        );
-        // The log where the installed rule does not name it: p2, not p3.
-        let moved = disk(&[("esp", esp), ("log", basic), ("slots", slots)]);
-        assert_eq!(
-            admit(&write("moved-log.img", &moved), &t),
-            Err(Refusal::PartitionIndex { what: "TOYOS-LOG", want: 3, got: 2 })
-        );
-        let rootless = disk(&[("esp", esp), ("slots", slots), ("log", basic)]);
-        assert_eq!(admit(&write("rootless.img", &rootless), &t), Err(Refusal::Roots { matched: 0 }));
-        let three = disk(&[("esp", esp), ("slots", slots), ("log", basic), ("a", root), ("b", root), ("c", root)]);
-        assert_eq!(admit(&write("three-roots.img", &three), &t), Err(Refusal::Roots { matched: 3 }));
-        let no_table = disk(&[("esp", esp), ("root", root), ("log", basic)]);
-        assert_eq!(
-            admit(&write("no-table.img", &no_table), &t),
-            Err(Refusal::Partitions { what: "TOYOS-SLOTS", matched: 0 })
-        );
-        // And the shapes `build/image.rs` writes, one slot or two, which are
-        // the ones admitted.
-        let two_slots = disk(&[("esp", esp), ("slots", slots), ("log", basic), ("a", root), ("b", root)]);
-        assert!(admit(&write("two-slots.img", &two_slots), &t).is_ok(), "a two-slot image is refused");
-        let built = disk(&[("esp", esp), ("slots", slots), ("log", basic), ("root", root)]);
-        let ok = admit(&write("built.img", &built), &t).expect("the built shape is admitted");
-        assert_eq!((ok.esp.index, ok.log.index), (1, 3));
-        assert_eq!(ok.bytes % u64::from(LBA), 0);
-        assert_ne!(ok.esp.guid, toyos_gpt::Guid::ZERO);
-    }
     /// The lateness comes off the line the kernel writes, counted from the
     /// record of arming the bound, and a boot that wrote none measures nothing
     /// rather than zero.
@@ -3167,7 +3306,7 @@ mod tests {
             bootlog::DEADLINE_EXPIRED
         );
         let booted = "[ 1.198 cpu0 kernel] Boot: complete (1198ms)\n";
-        assert_eq!(wedged_boot(&sealed, booted), Ok(1198));
+        assert_eq!(wedged_boot(false, &sealed, booted), Ok(1198));
 
         let done = format!(
             "Black box: {}\n| {}[ 1.300 cpu0 kernel] {}\n",
@@ -3175,14 +3314,43 @@ mod tests {
             bootlog::LOG_TAIL,
             bootlog::REBOOTING
         );
-        let why = wedged_boot(&done, booted).unwrap_err().to_string();
+        let why = wedged_boot(false, &done, booted).unwrap_err().to_string();
         assert!(why.contains("nothing about it was wedged"), "{why}");
 
-        let why = wedged_boot("no record here\n", booted).unwrap_err().to_string();
+        let why = wedged_boot(false, "no record here\n", booted).unwrap_err().to_string();
         assert!(why.contains("reports neither of this kernel's bounds"), "{why}");
 
-        let why = wedged_boot(&sealed, "nothing at all\n").unwrap_err().to_string();
+        let why = wedged_boot(false, &sealed, "nothing at all\n").unwrap_err().to_string();
         assert!(why.contains("no `Boot: complete`"), "{why}");
+    }
+
+    /// A wedge under the chipset watchdog ends in the chipset's reset, which
+    /// only the pass after it reports, and only an image armed with the
+    /// watchdog may end that way.
+    #[test]
+    fn a_watched_wedge_is_ended_by_the_chipsets_reset() {
+        let booted = "[ 1.300 cpu0 kernel] Boot: complete (1300ms)\n";
+        let said = format!("watchdog: watchdog_issue_reset=1 fired=0, so {}\n", toyos_tco::fch::RESET_SAID);
+        let after = format!(
+            "{}\n{said}Previous boot's panic: the page still reads ARMED, so that kernel died \
+             without reaching either its panic path or its shutdown\n",
+            bootlog::SEPARATOR
+        );
+        assert_eq!(wedged_boot(true, &after, booted), Ok(1300));
+        let why = wedged_boot(false, &after, booted).unwrap_err().to_string();
+        assert!(why.contains("reports neither of this kernel's bounds"), "{why}");
+        // The first pass's survey speaks of the boot before this one.
+        let before = format!("{said}{}\nPrevious boot's panic: the page still reads ARMED\n", bootlog::SEPARATOR);
+        let why = wedged_boot(true, &before, booted).unwrap_err().to_string();
+        assert!(why.contains("reports neither of this kernel's bounds"), "{why}");
+        // A kernel that panicked and then went unfed: the chipset's reset
+        // ends it, and the page says it was a panic.
+        let panicked = format!(
+            "{}\n{said}Previous boot's panic: 812 bytes off 0x8000000\n",
+            bootlog::SEPARATOR
+        );
+        let why = wedged_boot(true, &panicked, booted).unwrap_err().to_string();
+        assert!(why.contains("reports neither of this kernel's bounds"), "{why}");
     }
 
     /// **The record's own first line is what says which bound ended the boot.**
@@ -3198,7 +3366,7 @@ mod tests {
              |   pc=0xffff800060a5903f  <kernel::sync::Lock<..>>::lock+0x12f\n",
             bootlog::LOCKED_UP
         );
-        assert_eq!(wedged_boot(&locked, booted), Ok(1200));
+        assert_eq!(wedged_boot(false, &locked, booted), Ok(1200));
         assert_eq!(lockup_lateness_ms(&locked), Some(Ok(4)));
         // Each bound's lateness is read off its own record and off no other.
         assert_eq!(deadline_lateness_ms(&locked, booted), None);
@@ -3233,7 +3401,7 @@ mod tests {
     }
 
     /// A boot given a deadline below its runner's least bound is ended by it on
-    /// purpose, as `stick_survives_a_reset_under_load`'s is: judged by the
+    /// purpose, as `the_disk_survives_a_reset_under_load`'s is: judged by the
     /// record the deadline sealed, never by a supervisor's stop it was never
     /// going to reach. The same boot under the ordinary deadline is the
     /// unfinished boot it would be, and one that handed back was not ended

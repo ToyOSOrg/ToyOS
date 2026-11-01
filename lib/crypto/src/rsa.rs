@@ -78,7 +78,9 @@ impl PublicKey {
         if bits < 2048 || e < 3 || e & 1 == 0 || modulus[modulus.len() - 1] & 1 == 0 {
             return Err(Error::InvalidKey);
         }
-        let words = modulus.len().div_ceil(8);
+        // Whole groups of four words, which the instruction path takes; the
+        // zero words above the modulus only enlarge R.
+        let words = modulus.len().div_ceil(32) * 4;
         let m = read(modulus);
         let mut key = Self {
             modulus: m,
@@ -119,11 +121,23 @@ impl PublicKey {
             subtract(x, &self.modulus, self.words);
         }
     }
-    /// out = a * b / R mod n, for a, b < n: word-serial Montgomery
-    /// multiplication with the reduction step interleaved (CIOS; Koc, Acar and
-    /// Kaliski, "Analyzing and comparing Montgomery multiplication
-    /// algorithms", IEEE Micro 1996).
+    /// out = a * b / R mod n, for a, b < n, by the instruction path where
+    /// the CPU has one.
     fn mul(&self, a: &[u64; WORDS], b: &[u64; WORDS], out: &mut [u64; WORDS]) {
+        let n = self.words;
+        match crate::arch::rsa_mul(a, b, &self.modulus, self.n0, n, out) {
+            Some(top) => {
+                if top != 0 || !less(out, &self.modulus, n) {
+                    subtract(out, &self.modulus, n);
+                }
+            }
+            None => self.mul_portable(a, b, out),
+        }
+    }
+    /// Word-serial Montgomery multiplication with the reduction step
+    /// interleaved (CIOS; Koc, Acar and Kaliski, "Analyzing and comparing
+    /// Montgomery multiplication algorithms", IEEE Micro 1996).
+    fn mul_portable(&self, a: &[u64; WORDS], b: &[u64; WORDS], out: &mut [u64; WORDS]) {
         let n = self.words;
         let (a, b, m) = (&a[..n], &b[..n], &self.modulus[..n]);
         let mut t = [0u64; WORDS + 2];
@@ -327,6 +341,53 @@ mod tests {
                 assert_eq!(key.representative(&n_bytes), Err(Error::InvalidSignature));
                 n_bytes[len - 1] -= 1;
                 assert!(key.representative(&n_bytes).is_ok());
+            }
+        }
+    }
+
+    /// The instruction path, where the CPU has one, equals the portable
+    /// multiplication for the padded word counts 32 to 64 in steps of 8, and
+    /// at the largest residues.
+    #[test]
+    fn instruction_path_matches_the_portable_multiplication() {
+        // Which path this run compares, for a reader of `--nocapture` output.
+        let (zero, modulus) = ([0u64; WORDS], [u64::MAX; WORDS]);
+        let mut out = [0u64; WORDS];
+        let kernel = crate::arch::rsa_mul(&zero, &zero, &modulus, 1, 4, &mut out).is_some();
+        std::println!("instruction path: {}", if kernel { "the BMI2/ADX kernel" } else { "none; portable against itself" });
+        let mut seed = 0x2545f4914f6cdd1du64;
+        let mut next = move || {
+            seed ^= seed << 13;
+            seed ^= seed >> 7;
+            seed ^= seed << 17;
+            seed
+        };
+        for len in [256usize, 300, 384, 448, 512] {
+            let mut modulus: std::vec::Vec<u8> = (0..len).map(|_| next() as u8).collect();
+            modulus[0] |= 0x80;
+            modulus[len - 1] |= 1;
+            let key = PublicKey::from_components(&modulus, &[1, 0, 1]).unwrap();
+            let n = BigUint::from_bytes_be(&modulus);
+            for case in 0..64 {
+                let mut a = [0u64; WORDS];
+                let mut b = [0u64; WORDS];
+                let (x, y) = if case == 0 {
+                    (&n - 1u8, &n - 1u8)
+                } else {
+                    let x: std::vec::Vec<u8> = (0..len).map(|_| next() as u8).collect();
+                    let y: std::vec::Vec<u8> = (0..len).map(|_| next() as u8).collect();
+                    (BigUint::from_bytes_be(&x) % &n, BigUint::from_bytes_be(&y) % &n)
+                };
+                for (i, d) in x.to_u64_digits().iter().enumerate() {
+                    a[i] = *d;
+                }
+                for (i, d) in y.to_u64_digits().iter().enumerate() {
+                    b[i] = *d;
+                }
+                let (mut ours, mut portable) = ([0; WORDS], [0; WORDS]);
+                key.mul(&a, &b, &mut ours);
+                key.mul_portable(&a, &b, &mut portable);
+                assert_eq!(ours, portable, "{len} bytes, case {case}");
             }
         }
     }

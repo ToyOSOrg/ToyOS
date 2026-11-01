@@ -1,11 +1,12 @@
-//! The congestion window: slow start with appropriate byte counting (RFC 5681 §3.1), CUBIC in
-//! avoidance (RFC 9438), and the reductions a loss or a timeout makes. Growth happens only when
-//! the window, not the application or the peer, limited the last send (RFC 9438 §5.8), and CUBIC's
-//! clock skips the time that was so limited (§4.2). The cube is computed in fixed point: no float,
-//! no `libm`.
+//! The congestion window: HyStart++ in the initial slow start (RFC 9406, as RFC 9438 §4.10
+//! recommends) and RFC 5681 §3.1's slow start after it, CUBIC in avoidance (RFC 9438), and the
+//! reductions a loss or a timeout makes. The window grows only while [`Cc::limited`] says it is in
+//! use, and CUBIC's clock skips the time it was not (§4.2). The cube is computed in fixed point: no
+//! float, no `libm`.
 
 use core::time::Duration;
 
+use crate::seq::Seq;
 use crate::Instant;
 
 /// RFC 5681 §3.1: "arbitrarily high", the largest window a scaled peer can offer.
@@ -17,6 +18,14 @@ const FRACTION: u32 = 16;
 const CUBE_DENOMINATOR: i128 = 5_000_000_000_000_000_000;
 /// The farthest from `K` the cubic is evaluated, so the cube stays inside `i128`.
 const CUBE_SPAN_US: i128 = 1 << 34;
+
+/// RFC 9406 §4.3's constants; L is infinity, as for a paced sender (`pace`).
+const MIN_RTT_THRESH: Duration = Duration::from_millis(4);
+const MAX_RTT_THRESH: Duration = Duration::from_millis(16);
+const MIN_RTT_DIVISOR: u32 = 8;
+const N_RTT_SAMPLE: u32 = 8;
+const CSS_GROWTH_DIVISOR: u32 = 4;
+const CSS_ROUNDS: u32 = 5;
 
 /// RFC 6928 §2.
 pub fn initial_window(smss: u32) -> u32 {
@@ -42,6 +51,109 @@ fn cube_root(x: u128) -> u64 {
     low
 }
 
+/// An ACK outside loss recovery: `bytes` newly acknowledged, SND.UNA after it and SND.NXT, and
+/// the RTT sample it gave, if any.
+#[derive(Clone, Copy, Debug)]
+pub struct Ack {
+    pub now: Instant,
+    pub bytes: u32,
+    pub una: Seq,
+    pub nxt: Seq,
+    pub rtt: Option<Duration>,
+    pub srtt: Option<Duration>,
+}
+
+/// A HyStart++ transition an ACK made.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum SlowStart {
+    /// A round's minimum RTT rose past the threshold: Conservative Slow Start. The check runs on
+    /// every ACK of a round once it has its samples (RFC 9406 §4.2), so a round can enter more than
+    /// once; `first` is its first entry.
+    Conservative { first: bool },
+    /// A CSS round's minimum fell below its baseline: the exit was spurious.
+    Resumed,
+    /// CSS ran its rounds: ssthresh is cwnd, and avoidance follows.
+    Ended,
+}
+
+/// RFC 9406 §4.2's round and delay state. `None` is the RFC's infinity.
+#[derive(Clone, Copy, Debug, Default)]
+struct HyStart {
+    /// windowEnd: the round ends when it is acknowledged.
+    window_end: Option<Seq>,
+    last_round_min: Option<Duration>,
+    current_round_min: Option<Duration>,
+    samples: u32,
+    css: Option<Css>,
+    css_this_round: bool,
+}
+
+/// Conservative Slow Start: the baseline it compares against and the rounds it has begun.
+#[derive(Clone, Copy, Debug)]
+struct Css {
+    baseline: Duration,
+    rounds: u32,
+}
+
+/// RttThresh: how far a round's minimum RTT must rise over the last round's to leave slow start.
+fn rtt_thresh(last_round_min: Duration) -> Duration {
+    last_round_min.checked_div(MIN_RTT_DIVISOR).unwrap_or_default().clamp(MIN_RTT_THRESH, MAX_RTT_THRESH)
+}
+
+impl HyStart {
+    /// What the ACK grows cwnd by when the window was in use, of `bytes` newly acknowledged.
+    fn growth(&self, bytes: u32) -> u32 {
+        if self.css.is_some() { bytes / CSS_GROWTH_DIVISOR } else { bytes }
+    }
+
+    /// The ACK's RTT sample and round, after its growth.
+    fn observe(&mut self, ack: &Ack) -> Option<SlowStart> {
+        if let Some(rtt) = ack.rtt {
+            self.current_round_min = Some(self.current_round_min.map_or(rtt, |min| min.min(rtt)));
+            self.samples = self.samples.saturating_add(1);
+        }
+        let mut change = None;
+        if let (true, Some(current)) = (self.samples >= N_RTT_SAMPLE, self.current_round_min) {
+            match self.css {
+                None => {
+                    if let Some(last) = self.last_round_min {
+                        if current >= last.saturating_add(rtt_thresh(last)) {
+                            // The round the exit happens in is CSS's first.
+                            self.css = Some(Css { baseline: current, rounds: 1 });
+                            change = Some(SlowStart::Conservative { first: !core::mem::replace(&mut self.css_this_round, true) });
+                        }
+                    }
+                }
+                Some(css) if current < css.baseline => {
+                    self.css = None;
+                    change = Some(SlowStart::Resumed);
+                }
+                Some(_) => {}
+            }
+        }
+        match self.window_end {
+            Some(end) if ack.una.at_or_after(end) => {}
+            Some(_) => return change,
+            None => {
+                self.window_end = Some(ack.nxt);
+                return change;
+            }
+        }
+        self.window_end = Some(ack.nxt);
+        self.last_round_min = self.current_round_min.take();
+        self.samples = 0;
+        self.css_this_round = false;
+        match self.css.as_mut() {
+            Some(css) if css.rounds >= CSS_ROUNDS => Some(SlowStart::Ended),
+            Some(css) => {
+                css.rounds = css.rounds.saturating_add(1);
+                change
+            }
+            None => change,
+        }
+    }
+}
+
 #[derive(Clone, Copy, Debug)]
 struct Epoch {
     start: Instant,
@@ -65,7 +177,10 @@ pub struct Cc {
     pub cwnd: u32,
     pub ssthresh: u32,
     pub smss: u32,
-    /// A send was held by cwnd, with data waiting and the peer's window open, since the last growth.
+    /// The window is in use: cwnd stopped the sender's last transmit opportunity with data
+    /// waiting, or the caller's credit or the pacer ended it with at least half of cwnd in flight
+    /// (`hand_off`). Every ACK until the next opportunity grows the window, however many one pass
+    /// brings.
     pub limited: bool,
     w_max: Option<u32>,
     /// RFC 9438 §4.3's cwnd_prior: cwnd when ssthresh was last set, and before that the initial
@@ -74,6 +189,8 @@ pub struct Cc {
     after_timeout: bool,
     epoch: Option<Epoch>,
     last_ack: Option<Instant>,
+    /// Runs while ssthresh is still [`SSTHRESH_INITIAL`] (RFC 9406 §4.3).
+    hystart: HyStart,
 }
 
 impl Cc {
@@ -89,18 +206,31 @@ impl Cc {
             after_timeout: false,
             epoch: None,
             last_ack: None,
+            hystart: HyStart::default(),
         }
     }
 
-    /// An ACK that newly acknowledges `acked` bytes outside loss recovery.
-    pub fn on_ack(&mut self, now: Instant, acked: u32, srtt: Option<Duration>) {
-        let grow = core::mem::replace(&mut self.limited, false);
+    pub fn on_ack(&mut self, ack: &Ack) -> Option<SlowStart> {
+        let Ack { now, bytes: acked, srtt, .. } = *ack;
+        let grow = self.limited;
         let since_last = self.last_ack.replace(now).map_or(Duration::ZERO, |last| now.since(last));
+        if self.ssthresh == SSTHRESH_INITIAL {
+            if grow {
+                self.cwnd = self.cwnd.saturating_add(self.hystart.growth(acked));
+            }
+            let change = self.hystart.observe(ack);
+            if change == Some(SlowStart::Ended) {
+                // RFC 9438 §4.10: avoidance starts with K = 0 and W_max = cwnd_prior = cwnd.
+                self.ssthresh = self.cwnd;
+                self.prior = self.cwnd;
+            }
+            return change;
+        }
         if self.cwnd < self.ssthresh {
             if grow {
                 self.cwnd = self.cwnd.saturating_add(acked.min(self.smss)).min(self.ssthresh);
             }
-            return;
+            return None;
         }
         let smss = self.smss;
         let cwnd = self.cwnd;
@@ -118,7 +248,7 @@ impl Cc {
         self.after_timeout = false;
         if !grow {
             epoch.start = epoch.start.after(since_last).min(now);
-            return;
+            return None;
         }
         let t = us(now.since(epoch.start));
         let w_t = epoch.cubic(smss, t);
@@ -137,6 +267,7 @@ impl Cc {
             cwnd64.saturating_add(whole)
         };
         self.cwnd = u32::try_from(cwnd).unwrap_or(u32::MAX);
+        None
     }
 
     /// Entering fast or SACK recovery (RFC 9438 §4.6, §4.7). `flight` excludes Limited Transmit.
@@ -195,6 +326,10 @@ mod tests {
         Instant::from_millis(ms)
     }
 
+    fn ack(now: Instant, bytes: u32, srtt: Option<Duration>) -> Ack {
+        Ack { now, bytes, una: Seq::new(0), nxt: Seq::new(0), rtt: None, srtt }
+    }
+
     fn avoidance(cwnd: u32, w_max: u32) -> Cc {
         let mut cc = Cc::new(1460, 0);
         cc.cwnd = cwnd;
@@ -209,11 +344,11 @@ mod tests {
         cc.cwnd = 13_140;
         cc.ssthresh = 14_000;
         cc.limited = true;
-        cc.on_ack(at(0), 2920, None);
+        cc.on_ack(&ack(at(0), 2920, None));
         assert_eq!(cc.cwnd, 14_000);
         assert!(cc.epoch.is_none());
         cc.limited = true;
-        cc.on_ack(at(10), 1460, None);
+        cc.on_ack(&ack(at(10), 1460, None));
         assert!(cc.epoch.is_some(), "the next ACK is avoidance");
     }
 
@@ -226,11 +361,11 @@ mod tests {
         while cc.cwnd < cc.ssthresh {
             t += 1;
             cc.limited = true;
-            cc.on_ack(at(t), 1460, None);
+            cc.on_ack(&ack(at(t), 1460, None));
         }
         assert_eq!(cc.cwnd, 10_220);
         cc.limited = true;
-        cc.on_ack(at(t + 1), 1460, None);
+        cc.on_ack(&ack(at(t + 1), 1460, None));
         let epoch = cc.epoch.unwrap();
         assert_eq!((epoch.k_us, epoch.w_max), (0, 10_220));
     }
@@ -261,7 +396,7 @@ mod tests {
     fn s_cc_009_cubic_values() {
         let mut cc = avoidance(102_200, 146_000);
         cc.prior = 146_000;
-        cc.on_ack(at(0), 0, None);
+        cc.on_ack(&ack(at(0), 0, None));
         let epoch = cc.epoch.unwrap();
         assert!(epoch.k_us.abs_diff(4_217_200) <= 1_000, "K = {} µs", epoch.k_us);
         for (t, want) in [(0u64, 102_200f64), (1_000_000, 126_554.0), (2_000_000, 139_635.0), (epoch.k_us, 146_000.0), (5_000_000, 146_280.0)] {
@@ -277,21 +412,21 @@ mod tests {
     fn s_cc_011_reno_friendly_region() {
         let mut cc = Cc::new(1460, 0);
         let mut t = 0;
-        let ack = |cc: &mut Cc, t: &mut u64, step: u64, srtt: Option<Duration>| {
+        let segment = |cc: &mut Cc, t: &mut u64, step: u64, srtt: Option<Duration>| {
             *t += step;
             cc.limited = true;
-            cc.on_ack(at(*t), 1460, srtt);
+            cc.on_ack(&ack(at(*t), 1460, srtt));
         };
         while cc.cwnd < 21_900 {
-            ack(&mut cc, &mut t, 1, None);
+            segment(&mut cc, &mut t, 1, None);
         }
         cc.on_timeout(20_858, false);
         assert_eq!((cc.ssthresh, cc.prior), (14_600, 21_900));
         while cc.cwnd < cc.ssthresh {
-            ack(&mut cc, &mut t, 1, None);
+            segment(&mut cc, &mut t, 1, None);
         }
         for _ in 0..10 {
-            ack(&mut cc, &mut t, 5, Some(Duration::from_millis(5)));
+            segment(&mut cc, &mut t, 5, Some(Duration::from_millis(5)));
         }
         let epoch = cc.epoch.unwrap();
         assert_eq!((epoch.k_us, epoch.w_max), (0, 14_600));
@@ -301,13 +436,13 @@ mod tests {
     #[test]
     fn s_cc_013_application_limited_time_is_skipped() {
         let mut cc = avoidance(102_200, 146_000);
-        cc.on_ack(at(0), 0, None);
+        cc.on_ack(&ack(at(0), 0, None));
         for ms in (100..=2_000).step_by(100) {
-            cc.on_ack(at(ms), 1460, None);
+            cc.on_ack(&ack(at(ms), 1460, None));
         }
         let start = cc.epoch.unwrap().start;
         cc.limited = true;
-        cc.on_ack(at(3_000), 1460, None);
+        cc.on_ack(&ack(at(3_000), 1460, None));
         assert_eq!(at(3_000).since(start), Duration::from_secs(1));
     }
 
@@ -326,7 +461,7 @@ mod tests {
             let mut cc = avoidance(cwnd, w_max);
             let srtt = Duration::from_millis(1 + next(200));
             let mut now = 0;
-            cc.on_ack(at(now), 0, Some(srtt));
+            cc.on_ack(&ack(at(now), 0, Some(srtt)));
             for _ in 0..12 {
                 let round_start = cc.cwnd;
                 let mut acked = 0u32;
@@ -338,7 +473,7 @@ mod tests {
                     let t = us(at(now).since(epoch.start));
                     let target = epoch.cubic(1460, t + us(srtt)).clamp(u64::from(before), u64::from(before) * 3 / 2);
                     cc.limited = next(4) != 0;
-                    cc.on_ack(at(now), n, Some(srtt));
+                    cc.on_ack(&ack(at(now), n, Some(srtt)));
                     let reno = cc.epoch.unwrap().estimate >> FRACTION;
                     assert!(u64::from(cc.cwnd) <= target.max(reno), "cwnd {} above target {target}", cc.cwnd);
                     acked += n;
@@ -346,5 +481,122 @@ mod tests {
                 assert!(u64::from(cc.cwnd) * 2 <= u64::from(round_start) * 3 + 2 * 1460, "{} after {round_start}", cc.cwnd);
             }
         }
+    }
+
+    /// A sender keeping eight segments in flight, each ACK one segment with its RTT: after the
+    /// first ACK, which starts the first round, every eighth ACK ends one.
+    struct Rounds {
+        cc: Cc,
+        una: u32,
+        t: u64,
+        flight: u32,
+    }
+
+    impl Rounds {
+        fn new() -> Self {
+            let mut r = Self { cc: Cc::new(1460, 0), una: 0, t: 0, flight: 8 };
+            assert_eq!(r.ack(Some(10)), None);
+            r
+        }
+
+        fn ack(&mut self, rtt_ms: Option<u64>) -> Option<SlowStart> {
+            self.una += 1460;
+            self.t += 1;
+            self.cc.limited = true;
+            let rtt = rtt_ms.map(Duration::from_millis);
+            self.cc.on_ack(&Ack { now: at(self.t), bytes: 1460, una: Seq::new(self.una), nxt: Seq::new(self.una + self.flight * 1460), rtt, srtt: rtt })
+        }
+
+        /// A round of eight ACKs at `rtt_ms`: the transitions it made, by ACK.
+        fn round(&mut self, rtt_ms: u64) -> Vec<(usize, SlowStart)> {
+            self.acks(&[rtt_ms; 8])
+        }
+
+        fn acks(&mut self, rtts_ms: &[u64]) -> Vec<(usize, SlowStart)> {
+            rtts_ms.iter().enumerate().filter_map(|(i, &rtt)| self.ack(Some(rtt)).map(|c| (i, c))).collect()
+        }
+    }
+
+    #[test]
+    fn s_cc_019_rtt_thresh_is_an_eighth_clamped_to_4_and_16_ms() {
+        let ms = Duration::from_millis;
+        assert_eq!(rtt_thresh(ms(10)), ms(4));
+        assert_eq!(rtt_thresh(ms(64)), ms(8));
+        assert_eq!(rtt_thresh(ms(200)), ms(16));
+    }
+
+    /// RFC 9406 §4.2: the eighth sample of a round whose minimum rose by RttThresh starts CSS,
+    /// whose growth is a quarter; CSS's fifth round, counting the one it began in, ends slow start
+    /// with ssthresh at cwnd, and avoidance starts from it (RFC 9438 §4.10).
+    #[test]
+    fn s_cc_020_a_rising_round_trip_ends_slow_start_after_css() {
+        let mut r = Rounds::new();
+        assert_eq!(r.round(10), []);
+        assert_eq!(r.round(13), [], "under 10 ms + 4 ms");
+        for _ in 0..7 {
+            assert_eq!(r.ack(Some(17)), None, "fewer than eight samples");
+        }
+        assert_eq!(r.ack(Some(17)), Some(SlowStart::Conservative { first: true }), "and the round ends: CSS's first");
+        let before = r.cc.cwnd;
+        assert_eq!(r.ack(Some(17)), None);
+        assert_eq!(r.cc.cwnd - before, 365, "CSS grows by a quarter");
+        for _ in 0..7 {
+            assert_eq!(r.ack(Some(17)), None);
+        }
+        for round in 3..5 {
+            assert_eq!(r.round(17), [], "CSS round {round}");
+        }
+        assert_eq!(r.cc.ssthresh, SSTHRESH_INITIAL);
+        assert_eq!(r.round(17), [(7, SlowStart::Ended)]);
+        assert_eq!((r.cc.ssthresh, r.cc.prior), (r.cc.cwnd, r.cc.cwnd));
+        let cwnd = r.cc.cwnd;
+        r.ack(Some(17));
+        let epoch = r.cc.epoch.unwrap();
+        assert_eq!((epoch.k_us, epoch.w_max), (0, cwnd));
+    }
+
+    /// RFC 9406 §4.2: a CSS round whose minimum falls under the baseline resumes slow start.
+    #[test]
+    fn s_cc_021_a_round_trip_back_under_the_baseline_resumes_slow_start() {
+        let mut r = Rounds::new();
+        assert_eq!(r.round(10), []);
+        assert_eq!(r.round(20), [(7, SlowStart::Conservative { first: true })]);
+        assert_eq!(r.round(19), [(7, SlowStart::Resumed)]);
+        let before = r.cc.cwnd;
+        r.ack(Some(19));
+        assert_eq!(r.cc.cwnd - before, 1460);
+        assert_eq!(r.cc.ssthresh, SSTHRESH_INITIAL);
+    }
+
+    /// RFC 9406 runs only in the initial slow start, where a paced sender grows by all an ACK
+    /// acknowledged (L = infinity, §4.3): after a loss, slow start is RFC 5681 §3.1's, one SMSS per
+    /// ACK at most.
+    #[test]
+    fn s_cc_022_l_applies_only_to_the_initial_slow_start() {
+        let mut cc = Cc::new(1460, 0);
+        cc.limited = true;
+        cc.on_ack(&ack(at(0), 20_000, None));
+        assert_eq!(cc.cwnd, 14_600 + 20_000);
+        cc.on_timeout(cc.cwnd, false);
+        cc.limited = true;
+        cc.on_ack(&ack(at(1), 20_000, None));
+        assert_eq!(cc.cwnd, 2 * 1460);
+    }
+
+    /// RFC 9406 §4.2's checks on every ACK: in a round whose minimum keeps falling while it stays
+    /// past the threshold, each lower sample resumes slow start and the next re-enters CSS from it.
+    /// One round, four entries, one of them the round's first; a later round's entry is its own first.
+    #[test]
+    fn s_cc_023_a_falling_minimum_flaps_within_a_round() {
+        let mut r = Rounds::new();
+        assert_eq!(r.round(2), []);
+        r.flight = 16;
+        assert_eq!(r.round(2), [], "the last round before the rise, at 2 ms");
+        let entry = |first| SlowStart::Conservative { first };
+        let flaps = r.acks(&[9, 9, 9, 9, 9, 9, 9, 9, 8, 8, 7, 7, 6, 6, 6, 6]);
+        let want = [(7, entry(true)), (8, SlowStart::Resumed), (9, entry(false)), (10, SlowStart::Resumed), (11, entry(false)), (12, SlowStart::Resumed), (13, entry(false))];
+        assert_eq!(flaps, want);
+        assert_eq!(r.acks(&[5; 16]), [(7, SlowStart::Resumed)]);
+        assert_eq!(r.acks(&[12; 16]), [(7, entry(true))], "the next round's first entry");
     }
 }

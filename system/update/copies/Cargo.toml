@@ -14,11 +14,11 @@ publish = false
 doctest = false
 
 [dev-dependencies]
-toyos-disk = { path = "../../../lib/disk" }
+toyos-blockdev = { path = "../../../lib/blockdev" }
 # The tests sign the image they install, as the host that holds the key does.
 toyos-update = { path = "../../../lib/update", features = ["sign"] }
 toyos-fat32 = { path = "../../../lib/fat32" }
-toyos-sha2-hw = { path = "../../../lib/sha2-hw" }
+toyos-crypto = { path = "../../../lib/crypto" }
 # The volume an install wrote, judged by the checker that shares no code with
 # the driver it was written with.
 toyos-fat32-check = { path = "../../../lib/fat32/check" }

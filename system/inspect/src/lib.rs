@@ -6,7 +6,7 @@ use std::time::{Duration, Instant};
 
 use toyos::endow::{self, EndowError};
 use toyos::ipc::{self, FrameRx, RxStep};
-use toyos::poller::{Poller, READABLE};
+use toyos::poller::{wait_one, READABLE};
 use toyos_inspect::{Owner, Value, MAX_SNAPSHOT_BYTES, MSG_INSPECT, MSG_SNAPSHOT};
 
 /// How long one owner has to answer.
@@ -25,7 +25,7 @@ const _: () = assert!(
 pub fn ask(owner: Owner) -> Result<BTreeMap<String, Value>, String> {
     let conn = endow::service(owner.port).map_err(|e| match e {
         EndowError::NotEndowed => format!(
-            "this program holds no `{}` connector, so {} is not its to read",
+            "this program holds no `{}` connector, so {} is not its to read; run it with `launch inspect`",
             owner.port, owner.root
         ),
         EndowError::ServerGone => format!("`{}` is not running: its port is closed", owner.port),
@@ -34,7 +34,6 @@ pub fn ask(owner: Owner) -> Result<BTreeMap<String, Value>, String> {
     conn.signal(MSG_INSPECT)
         .map_err(|e| format!("`{}` would not take the request ({e:?})", owner.port))?;
 
-    let poller = Poller::new(1);
     let mut rx: Box<FrameRx<MAX_SNAPSHOT_BYTES>> = Box::new(FrameRx::new());
     let deadline = Instant::now() + ANSWER_BOUND;
     loop {
@@ -61,7 +60,8 @@ pub fn ask(owner: Owner) -> Result<BTreeMap<String, Value>, String> {
         if left.is_zero() {
             return Err(format!("`{}` did not answer within {ANSWER_BOUND:?}", owner.port));
         }
-        poller.watch(&conn, READABLE, 0);
-        poller.wait(1, left.as_nanos() as u64, |_| {});
+        // Ready or the deadline: the next pump and this check say which.
+        wait_one(&conn, READABLE, left.as_nanos() as u64)
+            .map_err(|e| format!("the kernel refused a wait on `{}`'s connection ({e:?})", owner.port))?;
     }
 }

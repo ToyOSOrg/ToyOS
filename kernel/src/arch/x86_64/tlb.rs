@@ -6,9 +6,10 @@
 //! memory-type translation surviving an early return is undefined per SDM
 //! Vol. 3A §11.12.4.
 //!
-//! **The target set is every other CPU the machine brought up**, not the CPUs
-//! sharing the initiator's address space: nothing a process does puts a CPU
-//! into it or takes one out.
+//! **A change to one user space's leaves reaches only the CPUs running it**
+//! ([`user_change`], over `crate::tlb_tags`): a CPU that ran it before flushes
+//! when it next enters it, if it changed since. Every other shootdown targets
+//! every other CPU the machine brought up.
 //!
 //! **A user-half change keeps global translations**: its flush is `INVPCID`
 //! type 3 or a `CR3` reload, and only a kernel-half change, whose leaves are
@@ -24,9 +25,90 @@ use crate::smp;
 
 static SHOOTDOWN: Shootdown = Shootdown::new();
 
+/// Which CPUs run each user space, by its PCID, and when each changed.
+static USER: crate::tlb_tags::Tags = crate::tlb_tags::Tags::new();
+
 /// An answer for each of the `cpus` CPUs the firmware names.
 pub fn size(cpus: usize) {
     SHOOTDOWN.size(cpus);
+    USER.size(usize::from(kernel::pcid::MAX_USER_PCID) + 1, cpus);
+}
+
+/// This CPU loads the root of the space tagged `to` with `load`: what
+/// `paging::Cr3::activate` owes the targeting. It runs `to` from before the
+/// load, flushing every user translation first where `to` changed since its
+/// last, and leaves the space it ran only after it.
+pub fn switching(to: u16, load: impl FnOnce()) {
+    const _: () = assert!(kernel::pcid::KERNEL_PCID == 0, "the targeting's tag 0 is no space");
+    if !USER.sized() {
+        return load();
+    }
+    let cpu = percpu::cpu_id() as usize;
+    let switched = USER.switch(cpu, usize::from(to));
+    if switched.flush {
+        flush(Reach::Narrow);
+    }
+    load();
+    USER.left(cpu, switched.from);
+}
+
+/// Pages a change flushes one at a time on the initiator; past this, its
+/// whole space.
+const BY_PAGE: u64 = 64;
+
+/// The user space tagged `tag` changed the leaves of `[start, end)`, already
+/// written: every CPU running it has flushed them before this returns, and
+/// every other flushes before it next enters the space. So the change's
+/// frames may go as soon as it returns.
+/// Answers whether it reached another CPU.
+pub fn user_change(origin: Origin, tag: u16, start: u64, end: u64) -> bool {
+    let me = percpu::cpu_id() as usize;
+    let mut targets = [0u64; 4];
+    let mut beyond = false;
+    USER.changed(usize::from(tag), |cpu| match targets.get_mut(cpu / 64) {
+        Some(word) => *word |= 1 << (cpu % 64),
+        None => beyond = true,
+    });
+    // A CPU past what the targets hold reaches every other, as before.
+    let Some(mine) = targets.get(me / 64).copied() else {
+        shootdown(origin, Half::User);
+        return true;
+    };
+    // This CPU first: it may be running the space.
+    if mine & (1 << (me % 64)) != 0 {
+        if (end - start) / crate::mm::PAGE_SIZE <= BY_PAGE {
+            (start..end).step_by(crate::mm::PAGE_SIZE as usize).for_each(|va| crate::mm::paging::flush_user_page(tag, va));
+        } else {
+            flush(Reach::Narrow);
+        }
+        targets[me / 64] &= !(1 << (me % 64));
+    }
+    if beyond {
+        // More CPUs than the targets hold: every one of them, as before.
+        shootdown(origin, Half::User);
+        return true;
+    }
+    if targets.iter().all(|&word| word == 0) || !smp::answering() {
+        return false;
+    }
+    ISSUED[origin as usize].fetch_add(1, Ordering::Relaxed);
+    let began = crate::clock::nanos_since_boot();
+    let generation = SHOOTDOWN.issue(Reach::Narrow);
+    let each = |f: &mut dyn FnMut(u32)| {
+        for (w, &word) in targets.iter().enumerate() {
+            let mut bits = word;
+            while bits != 0 {
+                f((w * 64 + bits.trailing_zeros() as usize) as u32);
+                bits &= bits - 1;
+            }
+        }
+    };
+    each(&mut |cpu| apic::tlb_ipi_to(cpu));
+    each(&mut |cpu| wait_for(me, cpu, generation));
+    let took = crate::clock::nanos_since_boot().saturating_sub(began);
+    WAIT_NS.fetch_add(took, Ordering::Relaxed);
+    MAX_NS.fetch_max(took, Ordering::Relaxed);
+    true
 }
 
 use crate::invalidation::{Half, Origin};
@@ -160,9 +242,13 @@ fn wait_for(me: usize, cpu: u32, generation: Generation) {
 /// What `reach` asks of this CPU: every translation, or every one but the
 /// global ones a user-half change leaves.
 fn flush(reach: Reach) {
+    let stamp = USER.flushing();
     match reach {
         Reach::Wide => crate::mm::paging::flush_tlb_all(),
         Reach::Narrow => crate::mm::paging::flush_tlb_user(),
+    }
+    if USER.sized() {
+        USER.flushed(percpu::cpu_id() as usize, stamp);
     }
 }
 
@@ -191,13 +277,15 @@ pub fn serve_ipi() {
 
 /// Answers a pending shootdown without taking a lock or allocating, so it is
 /// safe from inside `Lock::lock`'s spin; and, on the boot processor, a write
-/// to `SMI_CMD` asked of it, which a spinner with `IF` clear owes the same way.
+/// to `SMI_CMD` asked of it, and a demoted clock's handover, which a spinner
+/// with `IF` clear owes the same way.
 #[inline]
 pub fn poll() {
     super::smi_cmd::serve_here();
     if !smp::answering() {
         return;
     }
+    super::clocksource::serve_here();
     let cpu = percpu::cpu_id() as usize;
     SHOOTDOWN.serve_if_owed(cpu, answer(Answerer::Asked));
 }

@@ -5,7 +5,7 @@
 //! **Two tables, not one root with two halves.** `TTBR1_EL1` walks the
 //! kernel's tables — the direct map at `PHYS_OFFSET`, which every address
 //! space shares because every one runs under the same `TTBR1_EL1` — and
-//! `TTBR0_EL1` walks one [`AddressSpace`]'s user half, tagged with the ASID it
+//! `TTBR0_EL1` walks one [`UserTables`]' user half, tagged with the ASID it
 //! owns. A user space copies nothing of the kernel's, and switching to one is
 //! one register write.
 //!
@@ -26,18 +26,16 @@
 //! **No kernel leaf is both writable and executable**, and only the image's
 //! text is executable (`mm::audit_wx`).
 
-use alloc::boxed::Box;
-use alloc::vec::Vec;
 
 use toyos_bootmap::aarch64::{coverage, direct_map_end, Coverage, ATTR_DEVICE, ATTR_NORMAL, ATTR_NORMAL_NC};
+use alloc::sync::Arc;
 use kernel::pcid::{Alloc, Pcid, PcidPool};
+use kernel::sched::job::Job;
 
 use super::tlb;
-use crate::mm::policy::{CachePolicy, MmioPolicy, Prot, WindowProt};
-use crate::mm::{DirectMap, UserAddr, PAGE_2M, PHYS_OFFSET};
-use toyos_userbound::Leaf;
+use crate::mm::policy::{CachePolicy, MmioPolicy, Prot};
+use crate::mm::{DirectMap, PAGE_2M, PHYS_OFFSET};
 use crate::sync::{Lock, LockGuard};
-use crate::vma::{self, Occupancy, Region, RegionKind};
 use crate::MemoryMapEntry;
 
 const VALID: u64 = 1 << 0;
@@ -137,8 +135,22 @@ fn index(va: u64, level: u32) -> usize {
 struct Table([u64; 512]);
 
 impl Table {
-    fn new() -> Box<Self> {
-        Box::new(Self([0; 512]))
+    /// An empty table in a frame of its own, owned from here by the
+    /// descriptor that links it.
+    fn new() -> &'static mut Self {
+        let frame = crate::mm::pmm::alloc_frame().expect("paging: no frame for a translation table");
+        // SAFETY: a zeroed frame just allocated: a table of invalid
+        // descriptors nothing else names.
+        unsafe { Table::at_mut(frame.into_raw()) }
+    }
+
+    /// A table of a user space, counted to `job`, or `None` where taking a
+    /// frame would cut into what is held back (`pmm::alloc_table_frame`).
+    fn try_new(job: &Job) -> Option<&'static mut Self> {
+        let phys = crate::mm::pmm::alloc_table_frame(job)?;
+        // SAFETY: a zeroed frame just allocated: a table of invalid
+        // descriptors nothing else names.
+        Some(unsafe { Table::at_mut(phys) })
     }
 
     fn phys(&self) -> u64 {
@@ -180,36 +192,46 @@ fn published() {
     unsafe { core::arch::asm!("dsb ishst", "isb", options(nostack, preserves_flags)) };
 }
 
-/// A root and every table under it, freed with the space, or by an unmap
-/// once no walker can reach one ([`Detached`]).
+/// Give back a table of `job`'s user space [`Table::try_new`] made, which
+/// nothing links any more.
+fn free_table(job: &Job, phys: u64) {
+    // SAFETY: the caller unlinked the table, after the shootdown that let
+    // every CPU stop walking it.
+    unsafe { crate::mm::pmm::free_held(job, [phys]) };
+}
+
+/// A root and every table under it, each a frame the descriptor linking it
+/// owns.
 struct Tables {
-    root: Box<Table>,
-    children: Vec<Box<Table>>,
+    root: u64,
 }
 
 impl Tables {
     fn new() -> Self {
-        Self { root: Table::new(), children: Vec::new() }
+        Self { root: Table::new().phys() }
     }
 
-    fn adopt(&mut self, table: Box<Table>) -> u64 {
-        let phys = table.phys();
-        self.children.push(table);
-        phys
+    fn root(&self) -> &Table {
+        // SAFETY: the root is a table these tables made and own.
+        unsafe { Table::at(self.root) }
+    }
+
+    fn root_mut(&mut self) -> &mut Table {
+        // SAFETY: as `root`; `&mut self` gives the exclusivity.
+        unsafe { Table::at_mut(self.root) }
     }
 
     /// The level-2 table over `va`, built down to it where absent. Only an
     /// invalid entry is written, which owes no invalidation.
     fn directory(&mut self, va: u64) -> &mut Table {
-        let mut table: *mut Table = &mut *self.root;
+        let mut table: *mut Table = self.root_mut();
         for level in 0..2 {
             // SAFETY: `table` is this root or a table it linked, and
             // `&mut self` makes this the only reference.
             let current = unsafe { &mut *table };
             let i = index(va, level);
             if current.0[i] & VALID == 0 {
-                let phys = self.adopt(Table::new());
-                current.set(i, phys | TABLE | VALID);
+                current.set(i, Table::new().phys() | TABLE | VALID);
             }
             let entry = current.0[i];
             assert!(entry & TABLE != 0, "paging: a block at level {level} over {va:#x}, which this kernel never writes");
@@ -222,7 +244,7 @@ impl Tables {
 
     /// The level-2 table over `va`, if the walk reaches one.
     fn find_directory(&self, va: u64) -> Option<&Table> {
-        self.root.child(index(va, 0))?.child(index(va, 1))
+        self.root().child(index(va, 0))?.child(index(va, 1))
     }
 
     /// The leaf that maps `va` and the size it maps, if one does.
@@ -262,7 +284,7 @@ impl Tables {
                 continue;
             }
             let pages = if entry & VALID == 0 {
-                let phys = self.adopt(Table::new());
+                let phys = Table::new().phys();
                 self.directory(va).set(i, phys | TABLE | VALID);
                 phys
             } else {
@@ -356,274 +378,464 @@ fn alloc_asid() -> Option<AsidGuard> {
     }
 }
 
-/// A process's user half, walked through `TTBR0_EL1`: its tables, its
-/// regions and its ASID.
-pub struct AddressSpace {
-    tables: Tables,
-    regions: vma::Regions,
-    asid: Asid,
+/// Take the 4 KiB page at `phys` out of the direct map, for good: the
+/// caller owns it for the machine's life. The 2 MiB page around it is
+/// split break-before-make, so it must be one nothing is running from.
+pub fn guard_4k(phys: u64) {
+    assert!(phys & (PAGE_4K - 1) == 0, "guard_4k: phys {phys:#x} not 4 KiB-aligned");
+    let va = DirectMap::from_phys(phys).as_ptr::<u8>() as u64;
+    let mut high = high();
+    let high = high.as_mut().expect("guard_4k: before the kernel's tables exist");
+    let i = index(va, 2);
+    let entry = high.directory(va).0[i];
+    assert!(entry & VALID != 0, "guard_4k: {phys:#x} is not in the direct map");
+    if entry & TABLE == 0 {
+        let base = entry & ADDR_2M;
+        let pages = Table::new();
+        for (j, page) in pages.0.iter_mut().enumerate() {
+            *page = (base + j as u64 * PAGE_4K) | attributes(entry) | TABLE;
+        }
+        let pages = pages.phys();
+        let directory = high.directory(va);
+        directory.set(i, 0);
+        tlb::kernel_page(va);
+        directory.set(i, pages | TABLE | VALID);
+    }
+    let pages = high.directory(va).0[i] & ADDR;
+    // SAFETY: the table the kernel's root linked, just above or before.
+    let pages = unsafe { Table::at_mut(pages) };
+    let j = index(va, 3);
+    assert!(pages.0[j] & VALID != 0, "guard_4k: {phys:#x} is already unmapped");
+    pages.set(j, 0);
+    tlb::kernel_page(va);
 }
 
-impl AddressSpace {
-    /// An empty user half, or `None` when every user ASID is held.
-    pub fn new_user() -> Option<Self> {
-        let asid = alloc_asid()?;
-        Some(Self { tables: Tables::new(), regions: vma::Regions::default(), asid: Asid::User(asid) })
+/// The direct map's type for `phys`, read off the kernel's tables, which
+/// every space shares.
+pub fn direct_map_policy(phys: u64) -> Option<CachePolicy> {
+    high().as_ref()?.leaf(DirectMap::from_phys(phys).as_ptr::<u8>() as u64).map(|(leaf, _)| policy_of(leaf))
+}
+
+/// The kernel wrote instructions into the frame at `phys` that a user leaf
+/// executes: the data it wrote is cleaned to the point of unification and the
+/// stale instructions invalidated, as the Arm ARM requires before they run.
+pub fn wrote_code(phys: u64) {
+    super::cache::make_executable(DirectMap::from_phys(phys).as_ptr::<u8>() as u64, PAGE_4K as usize);
+}
+
+/// Marks a user leaf whose frame the space owns: one of the bits [58:55] a
+/// descriptor leaves to software (Arm ARM K.a, D8.3.2). Kept on a leaf that is
+/// not valid, so a frame no access may reach is still recorded.
+const OWNED: u64 = 1 << 55;
+
+/// What one user page's leaf says.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum Leaf {
+    Empty,
+    Mapped(Mapping),
+    /// A frame the space owns that no access reaches.
+    Held(u64),
+}
+
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub struct Mapping {
+    pub phys: u64,
+    pub prot: Prot,
+    /// The frame is the space's own, freed with the leaf; otherwise an
+    /// object's or a device's.
+    pub owned: bool,
+    pub cache: CachePolicy,
+}
+
+impl Leaf {
+    fn encode(self) -> u64 {
+        match self {
+            Leaf::Empty => 0,
+            Leaf::Held(phys) => phys | OWNED,
+            Leaf::Mapped(m) => m.phys | user_leaf(m.prot, m.cache) | TABLE | if m.owned { OWNED } else { 0 },
+        }
+    }
+
+    fn decode(descriptor: u64) -> Self {
+        if descriptor & VALID == 0 {
+            return if descriptor & OWNED != 0 { Leaf::Held(descriptor & ADDR) } else { Leaf::Empty };
+        }
+        let prot = match (descriptor & AP_READ_ONLY != 0, descriptor & UXN != 0) {
+            (false, _) => Prot::ReadWrite,
+            (true, true) => Prot::Read,
+            (true, false) => Prot::ReadExec,
+        };
+        Leaf::Mapped(Mapping {
+            phys: descriptor & ADDR,
+            prot,
+            owned: descriptor & OWNED != 0,
+            cache: policy_of(descriptor),
+        })
+    }
+}
+
+/// The indices of `[start, end)`'s entries in the table of entries `1 <<
+/// shift` bytes apart that covers `[base, base + 512 << shift)`.
+fn slots(start: u64, end: u64, base: u64, shift: u32) -> core::ops::Range<usize> {
+    let (lo, hi) = (start.max(base), end.min(base + (512 << shift)));
+    if lo >= hi {
+        return 0..0;
+    }
+    (((lo - base) >> shift) as usize)..(((hi - 1 - base) >> shift) as usize + 1)
+}
+
+/// The leaves of one 2 MiB of a user space, [`UserTables::leaf_table`]'s.
+/// Every write reaches the walkers before it returns.
+pub struct LeafTable<'a> {
+    base: u64,
+    table: &'a mut Table,
+}
+
+impl LeafTable<'_> {
+    /// Whether `va` is one of these leaves' pages.
+    pub fn covers(&self, va: u64) -> bool {
+        va & !(PAGE_2M - 1) == self.base
+    }
+
+    fn slot(&self, va: u64) -> usize {
+        assert!(self.covers(va), "paging: {va:#x} outside the leaves from {:#x}", self.base);
+        ((va - self.base) >> 12) as usize
+    }
+
+    pub fn get(&self, va: u64) -> Leaf {
+        Leaf::decode(self.table.0[self.slot(va)])
+    }
+
+    pub fn set(&mut self, va: u64, leaf: Leaf) {
+        let slot = self.slot(va);
+        self.write(slot, leaf);
+        published();
+    }
+
+    /// Write `fill`'s leaf into each empty leaf of `[start, end)`, all of
+    /// whose pages these leaves cover.
+    pub fn fill(&mut self, start: u64, end: u64, mut fill: impl FnMut(u64) -> Leaf) {
+        assert!(start < end && self.covers(start) && self.covers(end - 1), "paging: a fill of {start:#x}..{end:#x}");
+        for i in slots(start, end, self.base, 12) {
+            if Leaf::decode(self.table.0[i]) == Leaf::Empty {
+                let leaf = fill(self.base + ((i as u64) << 12));
+                self.write(i, leaf);
+            }
+        }
+        published();
+    }
+
+    fn write(&mut self, slot: usize, leaf: Leaf) {
+        if let Leaf::Mapped(Mapping { phys, prot: Prot::ReadExec, .. }) = leaf {
+            super::cache::make_executable(DirectMap::from_phys(phys).as_ptr::<u8>() as u64, PAGE_4K as usize);
+        }
+        self.table.set(slot, leaf.encode());
+    }
+}
+
+/// Tables [`UserTables::unlink`] took out of the tree, freed once no CPU can
+/// still walk into them. Each holds no leaf, so they are chained through
+/// their first entry, which holds the next one's frame: a value with its low
+/// bit clear, which a walker that still reaches one reads as no entry.
+pub struct Unlinked {
+    head: u64,
+}
+
+impl Unlinked {
+    /// No table: what a change that keeps every table owes.
+    pub fn none() -> Self {
+        Self { head: 0 }
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.head == 0
+    }
+
+    fn push(&mut self, phys: u64) {
+        // SAFETY: a table `unlink` just took out of the tree, which nothing
+        // else frees, holding no entry.
+        let table = unsafe { Table::at_mut(phys) };
+        assert!(table.0.iter().all(|&e| e == 0), "paging: a table unlinked at {phys:#x} still holds an entry");
+        table.set(0, self.head);
+        self.head = phys;
+    }
+
+    /// Free the tables of `job`'s space, only after the shootdown that
+    /// followed the unlink.
+    fn free(self, job: &Job) {
+        let mut at = self.head;
+        while at != 0 {
+            // SAFETY: a table of the chain, which only this frees.
+            let next = unsafe { Table::at_mut(at) }.0[0];
+            free_table(job, at);
+            at = next;
+        }
+    }
+}
+
+/// One user space's tables, walked through `TTBR0_EL1` and tagged with the
+/// ASID it owns. `mm::space` decides what every leaf holds; this only reads
+/// and writes them. A write here owes no invalidation when the entry was
+/// invalid, and the caller's [`shoot_down`](Self::shoot_down) otherwise.
+pub struct UserTables {
+    tables: Tables,
+    asid: Asid,
+    /// The job its tables are counted to.
+    job: Arc<Job>,
+}
+
+impl UserTables {
+    /// An empty user half, or `None` when every user ASID is held or no
+    /// frame is free for its root. Its tables are counted to `job`.
+    pub fn new(job: &Arc<Job>) -> Option<Self> {
+        let root = Table::try_new(job)?.phys();
+        let Some(asid) = alloc_asid() else {
+            free_table(job, root);
+            return None;
+        };
+        Some(Self { tables: Tables { root }, asid: Asid::User(asid), job: Arc::clone(job) })
+    }
+
+    /// The kernel's own space, whose user half is empty: what a kernel thread
+    /// and an idle CPU run under. Never dropped.
+    pub fn kernel() -> Self {
+        let root = KERNEL_TTBR0.load(core::sync::atomic::Ordering::Acquire) & ADDR;
+        assert!(root != 0, "paging: the kernel's space before `init`");
+        Self { tables: Tables { root }, asid: Asid::Kernel, job: Arc::clone(crate::mm::charge::boot()) }
     }
 
     pub fn root(&self) -> Root {
-        Root(u64::from(self.asid.value()) << 48 | self.tables.root.phys())
+        Root(u64::from(self.asid.value()) << 48 | self.tables.root)
     }
 
-    /// Replace the level-2 entry over `va`, break-before-make where it was
-    /// valid; a table it named stays owned by this space until it drops.
-    fn replace(&mut self, va: u64, value: u64) {
-        let asid = self.asid.value();
-        let directory = self.tables.directory(va);
-        let i = index(va, 2);
-        let prior = directory.0[i];
-        if prior & VALID != 0 {
-            directory.set(i, 0);
-            if prior & TABLE != 0 {
-                tlb::asid(asid);
-            } else {
-                tlb::page(asid, va);
-            }
-        }
-        directory.set(i, value);
-        published();
+    /// The table of leaves over `va`, if one is built.
+    fn leaves(&self, va: u64) -> Option<&Table> {
+        self.tables.find_directory(va)?.child(index(va, 2))
     }
 
-    /// Map `size` bytes of `phys` at `vaddr` in the leaves
-    /// [`toyos_userbound::leaves`] chooses, each table filled before it is
-    /// linked. Empty level-2 entries (asserted) mean nothing can be stale.
-    pub fn map_range(&mut self, vaddr: UserAddr, phys: u64, size: u64, prot: Prot, cache: CachePolicy) {
-        if prot == Prot::ReadExec {
-            super::cache::make_executable(DirectMap::from_phys(phys).as_ptr::<u8>() as u64, size as usize);
-        }
-        for leaf in toyos_userbound::leaves(vaddr.raw(), phys, size) {
-            let (va, entry) = match leaf {
-                Leaf::Block { va, pa } => (va, pa | user_leaf(prot, cache)),
-                Leaf::Pages { va, pa, count } => {
-                    let mut pages = Table::new();
-                    for (j, page) in pages.0.iter_mut().take(count as usize).enumerate() {
-                        *page = (pa + j as u64 * PAGE_4K) | user_leaf(prot, cache) | TABLE;
-                    }
-                    let table = self.tables.adopt(pages);
-                    // Filled before any walker can reach it through the link.
-                    published();
-                    (va, table | TABLE | VALID)
+    /// Build every table `[start, end)`'s leaves need; answers how many
+    /// frames that took, or `None` where a frame ran out, leaving what it
+    /// built linked for an [`unlink`](Self::unlink). Only an invalid entry is
+    /// written, which owes nothing.
+    pub fn build(&mut self, start: u64, end: u64) -> Option<u64> {
+        let job = Arc::clone(&self.job);
+        let mut built = 0;
+        let mut va = start & !(PAGE_2M - 1);
+        while va < end {
+            let mut level = self.tables.root;
+            for depth in 0..3 {
+                // SAFETY: this space's root or a table it linked; `&mut self`.
+                let table = unsafe { Table::at_mut(level) };
+                let i = index(va, depth);
+                if table.0[i] & VALID == 0 {
+                    let Some(child) = Table::try_new(&job) else {
+                        published();
+                        return None;
+                    };
+                    table.set(i, child.phys() | TABLE | VALID);
+                    built += 1;
                 }
-            };
-            let directory = self.tables.directory(va);
-            let i = index(va, 2);
-            assert!(directory.0[i] & VALID == 0, "map_range: an install at {va:#x} found the present entry {:#x}", directory.0[i]);
-            directory.set(i, entry);
+                level = table.0[i] & ADDR;
+            }
+            va += PAGE_2M;
         }
+        published();
+        Some(built)
+    }
+
+    /// The leaf over `va`, empty where no table holds one.
+    pub fn get(&self, va: u64) -> Leaf {
+        self.leaves(va).map_or(Leaf::Empty, |t| Leaf::decode(t.0[index(va, 3)]))
+    }
+
+    /// Write the leaf over `va`, whose table [`build`](Self::build) made.
+    pub fn set(&mut self, va: u64, leaf: Leaf) {
+        self.leaf_table(va).unwrap_or_else(|| panic!("paging: no table over {va:#x}")).set(va, leaf);
+    }
+
+    /// The table of leaves over `va`'s 2 MiB, if [`build`](Self::build) made
+    /// one: every leaf of it read and written for one walk.
+    pub fn leaf_table(&mut self, va: u64) -> Option<LeafTable<'_>> {
+        assert!(toyos_userbound::is_user_addr(va), "paging: a user leaf at {va:#x}");
+        let table = self.leaves(va).map(Table::phys)?;
+        // SAFETY: a table of leaves this space linked; `&mut self`.
+        Some(LeafTable { base: va & !(PAGE_2M - 1), table: unsafe { Table::at_mut(table) } })
+    }
+
+    /// Call `f` on every leaf in `[start, end)` that is not empty, with its
+    /// address; a `Some` it answers is written in its place.
+    pub fn edit(&mut self, start: u64, end: u64, mut f: impl FnMut(u64, Leaf) -> Option<Leaf>) {
+        self.each_table(start, end, |base, table| {
+            for i in slots(start, end, base, 12) {
+                let leaf = Leaf::decode(table.0[i]);
+                if leaf != Leaf::Empty {
+                    if let Some(new) = f(base + ((i as u64) << 12), leaf) {
+                        if let Leaf::Mapped(Mapping { phys, prot: Prot::ReadExec, .. }) = new {
+                            super::cache::make_executable(DirectMap::from_phys(phys).as_ptr::<u8>() as u64, PAGE_4K as usize);
+                        }
+                        table.set(i, new.encode());
+                    }
+                }
+            }
+        });
         published();
     }
 
-    fn unmap_range(&mut self, vaddr: UserAddr, size: u64) -> Detached {
-        let mut detached = Detached(Vec::new());
-        let mut offset = 0u64;
-        while offset < size {
-            detached.0.extend(self.unmap(UserAddr::new(vaddr.raw() + offset)));
-            offset += PAGE_2M;
-        }
-        detached
-    }
-
-    /// Replaces whatever maps `vaddr`, in this space only.
-    pub fn remap(&mut self, vaddr: UserAddr, phys: u64, prot: Prot) {
-        let va = vaddr.raw();
-        assert!(va & (PAGE_2M - 1) == 0, "remap: vaddr {va:#x} not 2MB-aligned");
-        assert!(phys & (PAGE_2M - 1) == 0, "remap: phys {phys:#x} not 2MB-aligned");
-        if prot == Prot::ReadExec {
-            super::cache::make_executable(DirectMap::from_phys(phys).as_ptr::<u8>() as u64, PAGE_2M as usize);
-        }
-        self.replace(va, phys | user_leaf(prot, CachePolicy::Normal));
-    }
-
-    /// A mixed window's table is filled before it is linked, so nothing walks
-    /// it half-written. Must not be called twice on one address.
-    pub fn map_window(&mut self, vaddr: UserAddr, phys: u64, prot: &WindowProt) {
-        if let Some(uniform) = prot.agreed() {
-            self.remap(vaddr, phys, uniform);
-            return;
-        }
-        let va = vaddr.raw();
-        assert!(va & (PAGE_2M - 1) == 0, "map_window: vaddr {va:#x} not 2MB-aligned");
-        assert!(phys & (PAGE_2M - 1) == 0, "map_window: phys {phys:#x} not 2MB-aligned");
-        let mut table = Table::new();
-        for (i, page_prot) in prot.pages().enumerate() {
-            let at = phys + i as u64 * PAGE_4K;
-            if page_prot == Prot::ReadExec {
-                super::cache::make_executable(DirectMap::from_phys(at).as_ptr::<u8>() as u64, PAGE_4K as usize);
+    /// [`take_owned`](Self::take_owned), where `decide` says of each frame of
+    /// a table's batch, with the address its leaf maps, whether the leaf
+    /// keeps it: a kept frame's leaf stays, every other is emptied.
+    pub fn discard_owned(&mut self, start: u64, end: u64, mut decide: impl FnMut(&[u64], &[u64], &mut [bool])) {
+        self.each_table(start, end, |base, table| {
+            let mut frames = [0u64; 512];
+            let mut vas = [0u64; 512];
+            let mut slot = [0usize; 512];
+            let mut n = 0;
+            for i in slots(start, end, base, 12) {
+                if let Leaf::Held(phys) | Leaf::Mapped(Mapping { phys, owned: true, .. }) = Leaf::decode(table.0[i]) {
+                    frames[n] = phys;
+                    vas[n] = base + ((i as u64) << 12);
+                    slot[n] = i;
+                    n += 1;
+                }
             }
-            table.0[i] = at | user_leaf(page_prot, CachePolicy::Normal) | TABLE;
-        }
-        let table = self.tables.adopt(table);
-        self.replace(va, table | TABLE | VALID);
+            if n == 0 {
+                return;
+            }
+            let mut kept = [false; 512];
+            decide(&frames[..n], &vas[..n], &mut kept[..n]);
+            for k in 0..n {
+                if !kept[k] {
+                    table.set(slot[k], Leaf::Empty.encode());
+                }
+            }
+        });
+        published();
     }
 
-    /// `false` leaves the mapping as found and `phys` the caller's to free:
-    /// the check and the write are one critical section under the caller's lock.
-    pub fn map_window_if_absent(&mut self, vaddr: UserAddr, phys: u64, prot: &WindowProt) -> bool {
-        if self.tables.leaf(vaddr.raw()).is_some() {
-            return false;
-        }
-        self.map_window(vaddr, phys, prot);
-        true
+    /// Empty every leaf of `[start, end)` holding a frame the space owns, one
+    /// table of leaves at a time, handing each table's frames to `taken`: at
+    /// most 512 at once, in a buffer of its own, so nothing is allocated.
+    pub fn take_owned(&mut self, start: u64, end: u64, mut taken: impl FnMut(&mut [u64])) {
+        self.each_table(start, end, |base, table| {
+            let mut frames = [0u64; 512];
+            let mut n = 0;
+            for i in slots(start, end, base, 12) {
+                if let Leaf::Held(phys) | Leaf::Mapped(Mapping { phys, owned: true, .. }) = Leaf::decode(table.0[i]) {
+                    table.set(i, Leaf::Empty.encode());
+                    frames[n] = phys;
+                    n += 1;
+                }
+            }
+            if n > 0 {
+                taken(&mut frames[..n]);
+            }
+        });
+        published();
     }
 
-    /// Ends any futex wait on the frame (its token is a physical address)
-    /// before the frame can reach the PMM and be reissued under a waiter.
-    /// A table of 4 KiB pages it unlinks is answered, with no walker left to
-    /// reach it: `tlb::asid` drops the ASID's translations on every CPU before
-    /// it returns.
-    fn unmap(&mut self, vaddr: UserAddr) -> Option<Box<Table>> {
-        let va = vaddr.raw();
-        assert!(va & (PAGE_2M - 1) == 0, "unmap: vaddr {va:#x} not 2MB-aligned");
+    fn each_table(&mut self, start: u64, end: u64, mut f: impl FnMut(u64, &mut Table)) {
+        let root = self.tables.root;
+        // SAFETY: this space's root, and every table below it one it linked;
+        // `&mut self` gives the exclusivity.
+        let root = unsafe { Table::at_mut(root) };
+        for a in slots(start, end, 0, 39) {
+            let base_a = (a as u64) << 39;
+            let Some(l1) = root.child(a).map(Table::phys) else { continue };
+            // SAFETY: as above.
+            let l1 = unsafe { Table::at_mut(l1) };
+            for b in slots(start, end, base_a, 30) {
+                let base_b = base_a + ((b as u64) << 30);
+                let Some(l2) = l1.child(b).map(Table::phys) else { continue };
+                // SAFETY: as above.
+                let l2 = unsafe { Table::at_mut(l2) };
+                for c in slots(start, end, base_b, 21) {
+                    if let Some(l3) = l2.child(c).map(Table::phys) {
+                        // SAFETY: as above.
+                        f(base_b + ((c as u64) << 21), unsafe { Table::at_mut(l3) });
+                    }
+                }
+            }
+        }
+    }
+
+    /// Unlink every table over `[start, end)` whose span `needed` answers
+    /// `false` for, and every table above one that is then empty. A table
+    /// unlinked holds no leaf: a span no range needs maps nothing. They are
+    /// freed by [`free`](Self::free), after the caller's shootdown.
+    /// Free tables [`unlink`](Self::unlink) took out, only after the
+    /// shootdown that followed it.
+    pub fn free(&self, unlinked: Unlinked) {
+        unlinked.free(&self.job);
+    }
+
+    pub fn unlink(&mut self, start: u64, end: u64, needed: impl Fn(u64, u64) -> bool) -> Unlinked {
+        let mut unlinked = Unlinked::none();
+        // SAFETY: as `each_table`'s.
+        let root = unsafe { Table::at_mut(self.tables.root) };
+        for a in slots(start, end, 0, 39) {
+            let base_a = (a as u64) << 39;
+            let Some(l1) = root.child(a).map(Table::phys) else { continue };
+            // SAFETY: as above.
+            let l1 = unsafe { Table::at_mut(l1) };
+            for b in slots(start, end, base_a, 30) {
+                let base_b = base_a + ((b as u64) << 30);
+                let Some(l2) = l1.child(b).map(Table::phys) else { continue };
+                // SAFETY: as above.
+                let l2 = unsafe { Table::at_mut(l2) };
+                for c in slots(start, end, base_b, 21) {
+                    let span = base_b + ((c as u64) << 21);
+                    if let Some(l3) = l2.child(c).map(Table::phys) {
+                        if !needed(span, span + PAGE_2M) {
+                            l2.set(c, 0);
+                            unlinked.push(l3);
+                        }
+                    }
+                }
+                if l2.0.iter().all(|&e| e == 0) && !needed(base_b, base_b + (1 << 30)) {
+                    let table = l2.phys();
+                    l1.set(b, 0);
+                    unlinked.push(table);
+                }
+            }
+            if l1.0.iter().all(|&e| e == 0) && !needed(base_a, base_a + (1 << 39)) {
+                let table = l1.phys();
+                root.set(a, 0);
+                unlinked.push(table);
+            }
+        }
+        published();
+        unlinked
+    }
+
+    /// Every CPU has dropped what it cached of `[start, end)` before this
+    /// returns, and of the tables `unlinked` took out: a walk cache entry for
+    /// another address under one of them is dropped only by the whole ASID.
+    /// Answers whether it reached another CPU by interrupt: never, since
+    /// the invalidations broadcast in hardware.
+    pub fn shoot_down(&self, start: u64, end: u64, unlinked: &Unlinked) -> bool {
+        const BY_PAGE: u64 = 64;
         let asid = self.asid.value();
-        let directory = self.tables.find_directory(va)?;
-        let i = index(va, 2);
-        let entry = directory.0[i];
-        if entry & VALID == 0 {
-            return None;
+        if !unlinked.is_empty() || (end - start) / PAGE_4K > BY_PAGE {
+            tlb::asid(asid);
+        } else {
+            (start..end).step_by(PAGE_4K as usize).for_each(|va| tlb::page(asid, va));
         }
-        self.tables.directory(va).set(i, 0);
-        if entry & TABLE == 0 {
-            tlb::page(asid, va);
-            crate::sched::futex::revoke_range(entry & ADDR_2M, PAGE_2M);
-            return None;
-        }
-        tlb::asid(asid);
-        let table = entry & ADDR;
-        // SAFETY: valid and a table, so one this space linked; still owned by
-        // `children`, and linked nowhere now.
-        let pages = unsafe { Table::at(table) };
-        crate::mm::revoke_frames(pages.0.iter().filter(|leaf| *leaf & VALID != 0).map(|leaf| leaf & ADDR));
-        let at = self.tables.children.iter().position(|child| child.phys() == table).expect("unmap: a linked table this space owns");
-        Some(self.tables.children.swap_remove(at))
-    }
-
-    /// Checked here, not at the callers: only a user address names user
-    /// memory, and a device's registers mapped there are no address the
-    /// direct map answers for.
-    pub fn translate(&self, vaddr: UserAddr) -> Option<DirectMap> {
-        self.walk(vaddr).map(|(at, _, _)| at)
-    }
-
-    /// `vaddr`'s physical address and the bytes from it to the end of the leaf
-    /// that maps it, which that one walk answers for. A `Write` is answered
-    /// only where an EL0 store would land: a leaf EL0 may write, and no table
-    /// descriptor this file writes sets `APTable`. A kernel copy into user
-    /// memory goes through this, so a syscall cannot write a page the process
-    /// itself may not — the clock page, a shared library's `.text`.
-    pub fn leaf(&self, vaddr: UserAddr, access: toyos_userbound::Access) -> Option<(u64, u64)> {
-        let (at, leaf, size) = self.walk(vaddr)?;
-        let granted = match access {
-            toyos_userbound::Access::Read => true,
-            toyos_userbound::Access::Write => leaf & (AP_EL0 | AP_READ_ONLY) == AP_EL0,
-        };
-        granted.then(|| (at.phys(), size - (vaddr.raw() & (size - 1))))
-    }
-
-    /// The direct-map address of `vaddr`, the leaf descriptor that maps it, and the size that leaf maps.
-    fn walk(&self, vaddr: UserAddr) -> Option<(DirectMap, u64, u64)> {
-        let va = vaddr.raw();
-        if !toyos_userbound::is_user_addr(va) {
-            return None;
-        }
-        let (leaf, size) = self.tables.leaf(va).filter(|&(leaf, _)| through_direct_map(leaf))?;
-        let base = leaf & if size == PAGE_2M { ADDR_2M } else { ADDR };
-        Some((DirectMap::from_phys(base + (va & (size - 1))), leaf, size))
-    }
-
-    pub fn alloc_region(&mut self, size: u64, kind: RegionKind) -> Option<UserAddr> {
-        self.regions.alloc(size, kind)
-    }
-
-    pub fn alloc_and_map(&mut self, phys: u64, size: u64, prot: Prot, cache: CachePolicy) -> Option<(UserAddr, u64)> {
-        let (addr, aligned) = self.regions.alloc_mapped(size)?;
-        self.map_range(addr, phys, size.next_multiple_of(PAGE_4K), prot, cache);
-        Some((addr, aligned))
-    }
-
-    /// Free a region and unmap it, answering the tables its unmapping unlinked.
-    pub fn free_and_unmap(&mut self, addr: UserAddr) -> Option<Detached> {
-        let size = self.regions.remove(addr)?;
-        Some(self.unmap_range(addr, size))
-    }
-
-    pub fn insert_region(&mut self, addr: UserAddr, region: Region) {
-        self.regions.insert(addr, region);
-    }
-
-    pub fn has_region_room(&self) -> bool {
-        self.regions.has_room()
-    }
-
-    pub fn find_region(&self, addr: UserAddr) -> Option<(UserAddr, &Region)> {
-        self.regions.find(addr)
-    }
-
-    pub fn occupancy(&self, addr: UserAddr, size: u64) -> Occupancy {
-        self.regions.occupancy(addr, size)
-    }
-
-    pub fn overlapping_regions(&self, start: UserAddr, end: UserAddr) -> impl Iterator<Item = (&UserAddr, &Region)> {
-        self.regions.overlapping(start, end)
-    }
-
-    /// The direct map's type for `phys`, read off the kernel's tables, which
-    /// every space shares.
-    pub fn direct_map_policy(&self, phys: u64) -> Option<CachePolicy> {
-        high().as_ref()?.leaf(DirectMap::from_phys(phys).as_ptr::<u8>() as u64).map(|(leaf, _)| policy_of(leaf))
-    }
-
-    pub fn user_policy(&self, addr: UserAddr) -> Option<CachePolicy> {
-        self.tables.leaf(addr.raw()).map(|(leaf, _)| policy_of(leaf))
-    }
-
-    /// Take the 4 KiB page at `phys` out of the direct map, for good: the
-    /// caller owns it for the machine's life. The 2 MiB page around it is
-    /// split break-before-make, so it must be one nothing is running from.
-    pub fn guard_4k(&mut self, phys: u64) {
-        assert!(phys & (PAGE_4K - 1) == 0, "guard_4k: phys {phys:#x} not 4 KiB-aligned");
-        let va = DirectMap::from_phys(phys).as_ptr::<u8>() as u64;
-        let mut high = high();
-        let high = high.as_mut().expect("guard_4k: before the kernel's tables exist");
-        let i = index(va, 2);
-        let entry = high.directory(va).0[i];
-        assert!(entry & VALID != 0, "guard_4k: {phys:#x} is not in the direct map");
-        if entry & TABLE == 0 {
-            let base = entry & ADDR_2M;
-            let mut pages = Table::new();
-            for (j, page) in pages.0.iter_mut().enumerate() {
-                *page = (base + j as u64 * PAGE_4K) | attributes(entry) | TABLE;
-            }
-            let pages = high.adopt(pages);
-            let directory = high.directory(va);
-            directory.set(i, 0);
-            tlb::kernel_page(va);
-            directory.set(i, pages | TABLE | VALID);
-        }
-        let pages = high.directory(va).0[i] & ADDR;
-        // SAFETY: the table the kernel's root linked, just above or before.
-        let pages = unsafe { Table::at_mut(pages) };
-        let j = index(va, 3);
-        assert!(pages.0[j] & VALID != 0, "guard_4k: {phys:#x} is already unmapped");
-        pages.set(j, 0);
-        tlb::kernel_page(va);
+        false
     }
 }
 
-/// Tables of 4 KiB pages an unmap unlinked, answered as x86-64's are, where
-/// a sibling's walk cache outlives the unlink; here `tlb::asid` already
-/// reached every CPU, so dropping them is safe anywhere.
-#[must_use = "the unmapped tables"]
-pub struct Detached(Vec<Box<Table>>);
+/// Frees every table under the root, and the root; the frames its leaves map
+/// were freed by their owners first. No CPU walks a space that drops: its
+/// last thread has left it, and its ASID is dropped everywhere before it is
+/// issued again.
+impl Drop for UserTables {
+    fn drop(&mut self) {
+        assert!(matches!(self.asid, Asid::User(_)), "paging: the kernel's address space dropped");
+        let all = self.unlink(0, toyos_userbound::USER_TOP, |_, _| false);
+        all.free(&self.job);
+        free_table(&self.job, self.tables.root);
+    }
+}
 
 /// The kernel's own tables, `TTBR1_EL1`'s.
 static HIGH: Lock<Option<Tables>> = Lock::new(None);
@@ -632,24 +844,12 @@ fn high() -> LockGuard<'static, Option<Tables>> {
     HIGH.lock()
 }
 
-/// The kernel's address space: the empty user half a kernel thread and an
-/// idle CPU run under, ASID 0. Leaked, since it outlives every task.
-static KERNEL: core::sync::atomic::AtomicPtr<alloc::sync::Arc<Lock<AddressSpace>>> =
-    core::sync::atomic::AtomicPtr::new(core::ptr::null_mut());
-
-/// Its root, cached for lock-free access from panic and crash paths.
+/// The kernel space's root, an empty user half, cached for lock-free access
+/// from panic and crash paths.
 static KERNEL_TTBR0: core::sync::atomic::AtomicU64 = core::sync::atomic::AtomicU64::new(0);
 
 /// The kernel's own root, which every CPU's `TTBR1_EL1` holds from [`join`] on.
 static KERNEL_TTBR1: core::sync::atomic::AtomicU64 = core::sync::atomic::AtomicU64::new(0);
-
-pub fn kernel() -> &'static alloc::sync::Arc<Lock<AddressSpace>> {
-    let ptr = KERNEL.load(core::sync::atomic::Ordering::Acquire);
-    assert!(!ptr.is_null(), "paging not initialized");
-    // SAFETY: written once in `init` with the `Release` this pairs with, never
-    // cleared, so the pointer is live for the machine's life.
-    unsafe { &*ptr }
-}
 
 pub fn kernel_root() -> Root {
     Root(KERNEL_TTBR0.load(core::sync::atomic::Ordering::Relaxed))
@@ -673,7 +873,7 @@ pub fn map_mmio(phys: u64, size: u64, policy: MmioPolicy) -> crate::mm::Mmio {
         .as_mut()
         .expect("map_mmio: before the kernel's tables exist")
         .map_direct(phys, size, kernel_leaf(policy.cache(), Prot::ReadWrite));
-    let installed = kernel().lock().direct_map_policy(phys).expect("map_mmio: the window was just mapped");
+    let installed = direct_map_policy(phys).expect("map_mmio: the window was just mapped");
     assert!(installed == policy.cache(), "map_mmio: {phys:#x} installed {installed:?}");
     crate::log!("mmio: {phys:#x}+{size:#x} {installed:?}");
     crate::mm::Mmio::new(DirectMap::from_phys(phys), size)
@@ -705,13 +905,13 @@ pub(crate) fn init(
                 blocks += 1;
             }
             held => {
-                let mut table = Table::new();
+                let table = Table::new();
                 for j in (0..512).filter(|&j| held.holds(j)) {
                     let page = at + j * PAGE_4K;
                     table.0[j as usize] = page | memory(page) | TABLE;
                     pages += 1;
                 }
-                let table = tables.adopt(table);
+                let table = table.phys();
                 tables.directory(va).set(index(va, 2), table | TABLE | VALID);
             }
         }
@@ -724,13 +924,10 @@ pub(crate) fn init(
         tables.map_direct(scanout, size, kernel_leaf(CachePolicy::WriteCombining, Prot::ReadWrite));
     }
 
-    KERNEL_TTBR1.store(tables.root.phys(), core::sync::atomic::Ordering::Release);
+    KERNEL_TTBR1.store(tables.root, core::sync::atomic::Ordering::Release);
     *high() = Some(tables);
-    let space = AddressSpace { tables: Tables::new(), regions: vma::Regions::default(), asid: Asid::Kernel };
-    KERNEL_TTBR0.store(space.root().0, core::sync::atomic::Ordering::Release);
-    let published: &'static alloc::sync::Arc<Lock<AddressSpace>> =
-        Box::leak(Box::new(alloc::sync::Arc::new(Lock::new(space))));
-    KERNEL.store(published as *const _ as *mut _, core::sync::atomic::Ordering::Release);
+    // ASID 0's, an empty table that lives forever.
+    KERNEL_TTBR0.store(Table::new().phys(), core::sync::atomic::Ordering::Release);
 
     join();
     crate::log!("paging: the direct map holds memory below {end:#x} in {blocks} 2 MiB blocks and {pages} 4 KiB pages");
@@ -826,15 +1023,15 @@ pub(crate) fn check_joined() {
 /// counted may walk it still.
 pub fn bringup_root() -> u64 {
     let high = high();
-    let kernel = &high.as_ref().expect("bringup_root: before the kernel's tables exist").root;
-    let mut root = Table::new();
+    let kernel = high.as_ref().expect("bringup_root: before the kernel's tables exist").root();
+    let root = Table::new();
     let from = index(PHYS_OFFSET, 0);
     for i in from..512 {
         root.0[i - from] = kernel.0[i];
         root.0[i] = kernel.0[i];
     }
     published();
-    Box::leak(root).phys()
+    root.phys()
 }
 
 /// Nothing to seal: every space runs under the one `TTBR1_EL1`, so no space
@@ -849,7 +1046,7 @@ pub fn audit_wx(text: core::ops::Range<u64>) -> kernel::wx::Verdict {
     // SAFETY: every table the kernel's root names is one this file linked, and
     // the lock held keeps them in place while they are read.
     let table = |phys: u64| unsafe { &Table::at(phys).0 };
-    kernel::wx::audit::<kernel::wx::Aarch64>(&tables.root.0, text, &table)
+    kernel::wx::audit::<kernel::wx::Aarch64>(&tables.root().0, text, &table)
 }
 
 /// `kernel-wx-leaf`: the direct map's leaf over `phys` made executable at

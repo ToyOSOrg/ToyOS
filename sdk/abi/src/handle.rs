@@ -5,6 +5,17 @@
 //! outside that table: a number lifted out of another process's log, or counted
 //! up from zero, resolves to that process's own slot or to nothing at all — so
 //! holding a number is never the authority.
+//!
+//! **Only an owner ends, moves, duplicates or lends a handle.** The calls that
+//! do (`close`, `message_send`'s handles, `dup`, `dup_narrowed`, `shm_sub`,
+//! `shm_map`, `device_dma_map` and a spawn's endowment) are `unsafe`
+//! here, since a safe type over the same slot (a mapping, an exclusive writer)
+//! would otherwise be undone by a number. A call that only acts on the object
+//! (`read`, `write`, `fstat`, a poll) stays safe over a number: misdirected, it
+//! reaches the wrong object's protocol, not freed memory. Above this crate,
+//! every API takes an owned or borrowed handle (`toyos::OwnedHandle`,
+//! `toyos::BorrowedHandle`, `std::os::toyos::io`), so a raw number reaches it
+//! only through a visible conversion.
 
 crate::user_safe! {
     /// One entry in a process's handle table.
@@ -78,11 +89,16 @@ pub enum ObjectKind {
     Null = 13,
     Job = 14,
     Notice = 15,
-    DeviceSet = 16,
+    WakeLatency = 16,
+    EventSignal = 17,
+    EventWait = 18,
+    Pager = 19,
+    Paged = 20,
+    DeviceSet = 21,
 }
 
 impl ObjectKind {
-    pub const ALL: [ObjectKind; 17] = [
+    pub const ALL: [ObjectKind; 22] = [
         Self::PipeRead,
         Self::PipeWrite,
         Self::Connection,
@@ -99,6 +115,11 @@ impl ObjectKind {
         Self::Null,
         Self::Job,
         Self::Notice,
+        Self::WakeLatency,
+        Self::EventSignal,
+        Self::EventWait,
+        Self::Pager,
+        Self::Paged,
         Self::DeviceSet,
     ];
 
@@ -135,8 +156,10 @@ impl Rights {
     /// May be endowed at spawn or sent over a connection.
     pub const TRANSFER: Rights = Rights(1 << 1);
     pub const READ: Rights = Rights(1 << 2);
+    /// On memory: map it writable, or lend it to a device; a holder without
+    /// it maps the region only readable.
     pub const WRITE: Rights = Rights(1 << 3);
-    /// Shared memory, a pipe's ring page, an [inbox](crate::inbox)'s rings.
+    /// Shared memory, an [inbox](crate::inbox)'s rings.
     pub const MAP: Rights = Rights(1 << 4);
     /// Block on it, or name it in an [`OP_WATCH`](crate::inbox::OP_WATCH).
     pub const WAIT: Rights = Rights(1 << 5);
@@ -214,8 +237,10 @@ impl Rights {
     ///
     /// Beside [`COUNTERS`](Self::COUNTERS), [`SYS_COUNTERS`] answers each
     /// CPU's `APERF` and `MPERF` — its frequency and busy fraction, the
-    /// Hertzbleed power channel — the kicks it took, the wake-ups that time
-    /// keystrokes, and the power envelope it runs under. [`SYS_TRACE_READ`]
+    /// Hertzbleed power channel — the package's energy and C-state
+    /// residency and each AMD core's energy, the RAPL power channel
+    /// (CVE-2020-8694), the kicks it took, the wake-ups that time keystrokes,
+    /// and the power envelope it runs under. [`SYS_TRACE_READ`]
     /// answers, on this alone, when every thread in the machine was woken, ran
     /// and parked, and on which CPU. Admin tools hold it, `inspect`, `trace`
     /// and `test-runner`; no
@@ -233,10 +258,35 @@ impl Rights {
     ///
     /// [`SYS_JOB_CREATE`]: crate::syscall::SYS_JOB_CREATE
     pub const JOBS: Rights = Rights(1 << 15);
+    /// On a `SysCap`: hold memory back for a job ([`SYS_JOB_FLOOR`]), which
+    /// every other job is then refused. What it holds is protected capacity
+    /// for the system's controls, so the supervisor alone holds it, and sets
+    /// what a signed `system.toml` row declares.
+    ///
+    /// [`SYS_JOB_FLOOR`]: crate::syscall::SYS_JOB_FLOOR
+    pub const FLOOR: Rights = Rights(1 << 16);
+    /// On a `SysCap`: hold every idle CPU to waking within a bound
+    /// ([`SYS_WAKE_LATENCY_HOLD`]). What it costs is the whole machine's
+    /// power, every CPU kept out of its deeper states while the hold lives,
+    /// which is why it rides a bit of its own and not [`RT`](Self::RT)'s:
+    /// one takes CPU from other programs, this takes power from the machine.
+    ///
+    /// [`SYS_WAKE_LATENCY_HOLD`]: crate::syscall::SYS_WAKE_LATENCY_HOLD
+    pub const WAKE_LATENCY: Rights = Rights(1 << 17);
+    /// On a `SysCap` named by [`SpawnArgs::pager`]: start the child as a
+    /// pager, which may make the one pager object that supplies paged
+    /// objects ([`SYS_PAGER_CREATE`]). A pager holds every reader of its
+    /// files to its answers, so the supervisor alone confers it, and only on
+    /// a row the signed `system.toml` marks as one; no `syscap` name in a
+    /// manifest maps to it.
+    ///
+    /// [`SpawnArgs::pager`]: crate::syscall::SpawnArgs::pager
+    /// [`SYS_PAGER_CREATE`]: crate::syscall::SYS_PAGER_CREATE
+    pub const PAGER: Rights = Rights(1 << 18);
 
     /// Every bit that has a caller. A wider set than this is a bug in whoever
     /// composed it, not a right nobody uses.
-    pub const ALL: Rights = Rights(0xffff);
+    pub const ALL: Rights = Rights(0x7_ffff);
 
     pub const fn from_bits(bits: u32) -> Option<Self> {
         if bits & !Self::ALL.0 == 0 { Some(Rights(bits)) } else { None }
@@ -267,7 +317,7 @@ impl Rights {
 /// refusal saying which right was missing.
 impl core::fmt::Debug for Rights {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
-        const NAMES: [(Rights, &str); 16] = [
+        const NAMES: [(Rights, &str); 19] = [
             (Rights::DUP, "DUP"),
             (Rights::TRANSFER, "TRANSFER"),
             (Rights::READ, "READ"),
@@ -284,6 +334,9 @@ impl core::fmt::Debug for Rights {
             (Rights::COUNTERS, "COUNTERS"),
             (Rights::TRACE, "TRACE"),
             (Rights::JOBS, "JOBS"),
+            (Rights::FLOOR, "FLOOR"),
+            (Rights::WAKE_LATENCY, "WAKE_LATENCY"),
+            (Rights::PAGER, "PAGER"),
         ];
         if self.0 == 0 {
             return f.write_str("NONE");

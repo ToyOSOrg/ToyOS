@@ -84,9 +84,10 @@ pub const SYNC_MS: u64 = 5_000;
 /// (`toyos_xhci::hc::STOP_NS`), so a driver that keeps its bound is waited out.
 pub const DRIVERS_MS: u64 = 3_000;
 
-/// The endowment a disk driver is told the machine stops by: a pipe the supervisor
-/// closes once every file server has synced. The driver hands its devices back,
-/// leaves its controller as firmware would find it, and ends.
+/// The endowment a disk driver is told the machine stops by: a bell whose
+/// waker the supervisor closes once every file server has synced; it is
+/// readable from then. The driver hands its devices back, leaves its
+/// controller as firmware would find it, and ends.
 pub const DRIVER_STOP: &str = "stop";
 
 /// The thread the kernel's quiesce-last actuators hold, by the name its

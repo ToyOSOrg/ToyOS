@@ -1,7 +1,7 @@
 //! Turning a compose plan into pixels.
 //!
-//! **Nothing here touches the scanout.** Everything composes into
-//! [`BackBuffer`], one screen of system RAM, and the finished rectangles are
+//! **Nothing here touches the scanout.** Everything composes into the back
+//! buffer, a [`Framebuffer`] of one screen of system RAM, and the finished rectangles are
 //! handed to the panel whole — which is why nothing on screen is ever
 //! half-composed, and why `fill_rect` no longer reads the row it is
 //! replicating back out of a mapping firmware made uncached.
@@ -48,7 +48,7 @@ pub struct TitleBarIcons {
 const ICON_COLOR: [u8; 3] = [255, 255, 255];
 
 /// A surface a [`Mask`] is blended onto.
-struct Canvas<'a>(&'a Framebuffer);
+struct Canvas<'a>(&'a Framebuffer<'a>);
 
 impl toyos_icon::Canvas for Canvas<'_> {
     fn size(&self) -> (usize, usize) {
@@ -62,28 +62,6 @@ impl toyos_icon::Canvas for Canvas<'_> {
 
     fn put(&self, x: usize, y: usize, [r, g, b]: [u8; 3]) {
         self.0.put_pixel(x, y, Color { r, g, b });
-    }
-}
-
-/// The desktop as it will look, one screen of system RAM.
-///
-/// `surface` points into `pixels`, so the two are replaced together and the
-/// vector is never grown.
-pub struct BackBuffer {
-    pixels: Vec<u8>,
-    pub surface: Framebuffer,
-}
-
-impl BackBuffer {
-    pub fn new(width: usize, height: usize, pixel_format: u32) -> Self {
-        let mut pixels = vec![0u8; width * height * 4];
-        let surface = Framebuffer::new(pixels.as_mut_ptr(), width, height, width, pixel_format);
-        Self { pixels, surface }
-    }
-
-    /// The rows of `region`, ready to hand to the panel.
-    pub fn region(&self, region: Rect) -> &[u8] {
-        &self.pixels[(region.y0 as usize * self.surface.width() + region.x0 as usize) * 4..]
     }
 }
 
@@ -213,15 +191,15 @@ fn draw_window(
     }
 
     if let Some(b) = content_blit(win, clip) {
-        let buffer = win.client.buffers.shown().shm.as_slice();
+        let buffer = win.client.buffers.shown().shm.bytes();
         let offset = (b.src_y as usize * win.buf_w as usize + b.src_x as usize) * 4;
-        surface.blit(
+        surface.blit_shared(
             b.dst.x0 as usize,
             b.dst.y0 as usize,
             b.dst.w() as usize,
             b.dst.h() as usize,
             win.buf_w as usize,
-            &buffer[offset..],
+            buffer.sub(offset, buffer.len().saturating_sub(offset)),
         );
     }
 }

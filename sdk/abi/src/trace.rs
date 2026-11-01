@@ -3,7 +3,7 @@
 //! always.
 //!
 //! A record's [`TraceRecord::stamp`] is the CPU's free-running counter (TSC,
-//! `CNTVCT_EL0`) in its own ticks, which [`crate::clock::ClockPage`] turns into
+//! `CNTVCT_EL0`) in its own ticks, which a [`crate::clock::Clock`] turns into
 //! nanoseconds since boot. A read takes a cursor laid out as the log's
 //! ([`crate::log::CursorHead`]), a position per CPU the firmware names, and
 //! answers records oldest first, merged across CPUs by stamp, with the

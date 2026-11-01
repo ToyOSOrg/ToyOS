@@ -26,7 +26,8 @@
 //! is the process that was endowed a handle to somebody else's child.
 
 use std::io::Read;
-use std::os::toyos::process::{ChildExt, CommandExt};
+use std::os::toyos::io::AsRawHandle;
+use std::os::toyos::process::CommandExt;
 use std::process::{Child, ChildStdin, Command, Stdio};
 use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 use std::sync::OnceLock;
@@ -85,8 +86,8 @@ fn test() {
 /// it had asked for a plain wait. The differential is the bit: the same call
 /// without it reads the code.
 fn an_undefined_wait_flag_bit_is_refused() {
-    const UNDEFINED: u64 = 2;
-    const _: () = assert!(UNDEFINED & syscall::WNOHANG == 0);
+    // The lowest bit the word does not define.
+    const UNDEFINED: u64 = 1 << syscall::PROCESS_WAIT_FLAGS_KNOWN.trailing_ones();
 
     let (mut child, release) = start(5);
     drop(release);
@@ -235,12 +236,11 @@ fn cap() -> &'static SysCap {
 /// code is.
 fn two_handles_answer_the_same() {
     let (mut child, release) = start(11);
-    let first = RawHandle(child.as_raw_handle());
-    let second = syscall::dup(first).expect("a Process handle duplicates");
+    let second = toyos::AsHandle::as_handle(&child).try_clone_to_owned().expect("a Process handle duplicates");
     drop(release);
     assert_eq!(child.wait().expect("wait").code(), Some(11), "through the first handle");
-    assert_eq!(syscall::process_wait(second), Ok(End::Exited(11)), "through the second handle");
-    syscall::close(second);
+    assert_eq!(syscall::process_wait(toyos::AsHandle::as_handle(&second).raw()), Ok(End::Exited(11)), "through the second handle");
+    drop(second);
     println!("  two handles to one process answer the same code");
 }
 
@@ -276,7 +276,7 @@ fn each_end_completes_its_own_watch() {
         CODES.iter().map(|&code| start(code)).map(|(child, stdin)| (child, Some(stdin))).collect();
     let poller = Poller::new(CODES.len() as u32);
     for (i, (child, _)) in held.iter().enumerate() {
-        poller.watch_raw(RawHandle(child.as_raw_handle()), READABLE, i as u64);
+        poller.watch(&child, READABLE, i as u64);
     }
     for released in [1, 2, 0] {
         poller.wait(0, 0, |token| panic!("child {token} is held, and its watch completed"));
@@ -300,8 +300,8 @@ fn a_watch_on_an_ended_child_completes_at_once() {
     assert_eq!(gone.wait().expect("wait").code(), Some(13), "the child that ends first");
     let (mut held, keep) = start(0);
     let poller = Poller::new(2);
-    poller.watch_raw(RawHandle(gone.as_raw_handle()), READABLE, GONE);
-    poller.watch_raw(RawHandle(held.as_raw_handle()), READABLE, HELD);
+    poller.watch(&gone, READABLE, GONE);
+    poller.watch(&held, READABLE, HELD);
     let mut ready = Vec::new();
     poller.wait(0, 0, |token| ready.push(token));
     assert_eq!(ready, [GONE], "a non-blocking submit of both watches");
@@ -352,7 +352,8 @@ fn watch_result_across(handle: RawHandle, end: impl FnOnce()) -> i32 {
         (base.add(COMPLETION_RING_OFF as usize + core::mem::size_of::<RingHeader>()) as *const Completion)
             .read_volatile()
     };
-    syscall::close(inbox);
+    // SAFETY: no type holds this number.
+    unsafe { syscall::close(inbox) };
     assert_eq!(completion.token, TOKEN, "the completion's token");
     completion.result
 }
@@ -361,11 +362,11 @@ fn watch_result_across(handle: RawHandle, end: impl FnOnce()) -> i32 {
 /// so nothing completes, and the watch still answers the end when it comes.
 fn closing_one_handle_ends_no_other_watch() {
     let (mut child, release) = start(17);
-    let second = syscall::dup(RawHandle(child.as_raw_handle())).expect("a Process handle duplicates");
+    let second = toyos::AsHandle::as_handle(&child).try_clone_to_owned().expect("a Process handle duplicates");
     let poller = Poller::new(1);
-    poller.watch_raw(RawHandle(child.as_raw_handle()), READABLE, 0);
+    poller.watch(&child, READABLE, 0);
     poller.wait(0, 0, |token| panic!("the held child's watch completed ({token})"));
-    syscall::close(second);
+    drop(second);
     poller.wait(0, 0, |token| panic!("closing a second handle answered the first's watch ({token})"));
     drop(release);
     let mut ended = Vec::new();
@@ -381,12 +382,11 @@ fn closing_one_handle_ends_no_other_watch() {
 /// somebody moved into its table — and that is enough.
 fn a_handle_is_the_whole_of_the_right() {
     let (mut subject, release) = start(9);
-    let for_waiter =
-        syscall::dup(RawHandle(subject.as_raw_handle())).expect("a handle for the waiter");
+    let for_waiter = toyos::AsHandle::as_handle(&subject).try_clone_to_owned().expect("a handle for the waiter");
 
     let mut waiter = Command::new(SELF_PATH)
         .arg("waiter")
-        .endow(SUBJECT_LABEL, for_waiter.0)
+        .endow(SUBJECT_LABEL, for_waiter.into())
         .stdout(Stdio::piped())
         .spawn()
         .expect("spawn the waiter");

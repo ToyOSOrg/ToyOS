@@ -55,7 +55,7 @@ the owner's challenge):
 and a directory `fsync`, which this track owns: SQLite syncs a directory after
 the unlink that commits a transaction in its default journal mode, and
 ignores only a directory it cannot open. WAL also needs coherent shared file
-mappings (`issues/process-memory-is-2-mib-pages-and-that-caps-the-process-count.md`).
+mappings (`issues/process-memory-in-4-kib-pages-still-copies-each-programs-text.md`).
 `issues/toyos-builds-itself.md` orders those cargo's SQLite needs too.
 
 **Exit**: SQLite's own test harness, built for ToyOS from upstream with the

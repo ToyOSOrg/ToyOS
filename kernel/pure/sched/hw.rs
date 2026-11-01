@@ -9,6 +9,7 @@
 //! transition or ordering-sensitive code may live behind them.
 
 use crate::sched::cpu::{RunToken, SleepToken};
+use crate::sched::idle;
 use crate::sched::task::{SchedPayload, TaskAccounting, TaskKey};
 
 /// CPU identity. Always a field or a parameter, never an ambient query —
@@ -96,6 +97,15 @@ pub trait Machine: Kicker + 'static {
     fn set_timer(&self, deadline: Nanos);
 
     fn stop_timer(&self);
+
+    /// The idle state this CPU waits in once the pass that asks ends, chosen
+    /// with the scheduler's timer due at `deadline` (`crate::sched::idle`).
+    /// The pass folds [`idle::Plan::wake_at`] into its one timer plan, and the
+    /// [`SleepToken`] carries the plan to the wait. A machine with no idle
+    /// states plans C1.
+    fn idle_plan(&self, deadline: Option<Nanos>, now: Nanos) -> idle::Plan {
+        idle::Plan::c1(deadline.map(|d| d.0), now.0)
+    }
 
     /// Enable interrupts and halt, atomically — on x86 the `sti;hlt` pair and
     /// its STI shadow, which is why this is one operation and not an

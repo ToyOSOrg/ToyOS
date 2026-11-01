@@ -26,6 +26,7 @@ use super::device::{
     sys_device_dma_limit, sys_device_dma_start, sys_device_dma_unmap,
     sys_device_reg_read,
 };
+use super::event::{sys_event_create, sys_event_signal, sys_event_take, sys_handle_wait};
 use super::fs::{
     spawn_cwd, sys_chdir, sys_delete, sys_getcwd, sys_mkdir, sys_open, sys_readdir, sys_readlink,
     sys_rename, sys_rmdir, sys_stat, sys_symlink,
@@ -35,22 +36,27 @@ use super::io::{
     sys_null, sys_random, sys_read, sys_read_nonblock, sys_write, sys_write_nonblock,
 };
 use super::ipc::{
-    sys_accept, sys_handle_recv, sys_inbox_setup, sys_message_send,
-    sys_inbox_submit, sys_namespace_build, sys_namespace_open, sys_pipe, sys_pipe_map,
-    sys_port_badge, sys_port_create, sys_port_mint, sys_shm_create, sys_shm_map,
+    Incoming, Outgoing,
+    sys_accept, sys_inbox_setup, sys_message_recv, sys_message_send,
+    sys_inbox_submit, sys_namespace_build, sys_namespace_open, sys_pipe,
+    sys_port_badge, sys_port_create, sys_port_mint, sys_shm_create, sys_shm_map, sys_shm_sub,
 };
 use super::machine::{
-    sys_counters, sys_device_inventory, sys_device_set, sys_device_set_read, sys_log_read, sys_reboot, sys_shutdown, sys_sysinfo,
-    sys_trace_read,
+    sys_boot_sources, sys_counters, sys_device_inventory, sys_device_set, sys_device_set_read, sys_log_read,
+    sys_machine_stops, sys_reboot, sys_shutdown, sys_sysinfo, sys_trace_read,
     MAX_INVENTORY_RECORDS,
 };
 #[cfg(feature = "test-actuators")]
 use super::machine::lower_sysinfo_bound;
+use super::paged::{sys_paged_create, sys_paged_holder, sys_paged_notices, sys_paged_op, sys_paged_read, sys_pager_create};
 use super::proc::{
-    spawn_place, sys_endowments, sys_exit, sys_nanosleep, sys_process_stats,
-    sys_job_create, sys_job_own, sys_process_quit, sys_process_wait, sys_rt_enter, sys_spawn, sys_thread_exit, sys_thread_join, sys_thread_spawn,
+    spawn_pager, spawn_place, sys_endowments, sys_exit, sys_nanosleep, sys_process_stats,
+    sys_account_info, sys_job_create, sys_job_floor, sys_job_own, sys_process_quit, sys_process_wait, sys_rt_enter, sys_spawn, sys_thread_exit, sys_thread_join, sys_thread_spawn, sys_wake_latency_hold,
 };
-use super::vm::{shared_image, sys_dlopen, sys_dlsym, sys_mmap, sys_munmap, sys_query_modules, sys_tls_alloc_block};
+use super::vm::{
+    shared_image, sys_dlopen, sys_dlsym, sys_query_modules, sys_tls_alloc_block, sys_vm_decommit, sys_vm_discard, sys_vm_remap,
+    sys_vm_protect, sys_vm_release, sys_vm_reserve,
+};
 
 /// `sysret-ss-probe`, run once a boot on the first syscall: a park that
 /// switches away from it and back.
@@ -67,13 +73,7 @@ fn task_probes() {
 pub(crate) fn syscall_dispatch(num: u64, a1: u64, a2: u64, a3: u64, a4: u64) -> u64 {
     #[cfg(feature = "boot-actuators")]
     task_probes();
-    let t0 = crate::clock::nanos_since_boot();
-
-    process::with_current_data(|data| {
-        data.syscall_total += 1;
-        // Clamped, not guarded: an unissued number still lands in the last bin, not nowhere.
-        data.syscall_counts[(num as usize).min(toyos_abi::syscall::SYSCALL_PROFILE_OTHER)] += 1;
-    });
+    let entered = crate::arch::cpu::counter();
 
     // SAFETY: current process's page tables remain active for the duration of this call.
     let ctx = unsafe { SyscallContext::new() };
@@ -156,6 +156,7 @@ pub(crate) fn syscall_dispatch(num: u64, a1: u64, a2: u64, a3: u64, a4: u64) -> 
         }
         SYS_SHUTDOWN => sys_shutdown(RawHandle(a1 as u32)),
         SYS_REBOOT => sys_reboot(RawHandle(a1 as u32)),
+        SYS_MACHINE_STOPS => sys_machine_stops(RawHandle(a1 as u32), a2),
         SYS_CHDIR => {
             let path = match ctx.user_str(UserAddr::new(a1), a2) { Ok(s) => s, Err(e) => return e.to_u64() };
             sys_chdir(&path)
@@ -181,6 +182,23 @@ pub(crate) fn syscall_dispatch(num: u64, a1: u64, a2: u64, a3: u64, a4: u64) -> 
                 Ok(parent) => parent,
                 Err(refused) => return refused,
             };
+            let pager = match spawn_pager(args.pager) {
+                Ok(pager) => pager,
+                Err(refused) => return refused,
+            };
+            // What is copied below past what a thread is charged for one
+            // call's copies, and the list of argv's strings, a pointer pair
+            // for every two bytes at most, held until the call returns; each
+            // length is refused past its bound below, so this charges no more
+            // than that.
+            let copies = [args.path_len, args.argv_len, args.cwd_len, args.labels_len, args.env_len]
+                .map(|len| len.min(crate::user_ptr::MAX_USER_STR) as usize);
+            let argv = crate::mm::charge::array::<&str>(copies[1] / 2 + 1);
+            let past = (copies.iter().sum::<usize>() + argv).saturating_sub(2 * crate::user_ptr::MAX_USER_STR as usize);
+            let _copies = match crate::mm::charge::Charge::current(past) {
+                Ok(charge) => charge,
+                Err(e) => return SyscallError::from(e).to_u64(),
+            };
             let path = match ctx.user_str(UserAddr::new(args.path_ptr), args.path_len) { Ok(s) => s, Err(e) => return e.to_u64() };
             let text = match ctx.user_str(UserAddr::new(args.argv_ptr), args.argv_len) { Ok(s) => s, Err(e) => return e.to_u64() };
             let cwd = match ctx.user_str(UserAddr::new(args.cwd_ptr), args.cwd_len).and_then(|p| spawn_cwd(&p)) {
@@ -204,7 +222,7 @@ pub(crate) fn syscall_dispatch(num: u64, a1: u64, a2: u64, a3: u64, a4: u64) -> 
                 Ok(bytes) => bytes,
                 Err(e) => return e.to_u64(),
             };
-            let pending = match process::build_child_handles(&endow, &labels) {
+            let pending = match process::build_child_handles(&endow, &labels, pager) {
                 Ok(built) => built,
                 Err(e) => return e.refuse(),
             };
@@ -271,6 +289,13 @@ pub(crate) fn syscall_dispatch(num: u64, a1: u64, a2: u64, a3: u64, a4: u64) -> 
             let len = count * toyos_abi::inventory::RECORD_BYTES as u64;
             let Some(mut buf) = ctx.user_bytes_mut(UserAddr::new(a2), len) else { return bad_addr };
             sys_device_set_read(RawHandle(a1 as u32), &mut buf)
+        }
+        // Where the machine booted from, part of its census like the
+        // inventory's partitions, so it costs Rights::INVENTORY too.
+        SYS_BOOT_SOURCES => {
+            let len = core::mem::size_of::<toyos_abi::boot::BootSources>() as u64;
+            let Some(mut buf) = ctx.user_bytes_mut(UserAddr::new(a2), len) else { return bad_addr };
+            sys_boot_sources(RawHandle(a1 as u32), &mut buf)
         }
         // What every CPU counts, so it costs Rights::COUNTERS; a CPU per record,
         // so the count is bounded by the most CPUs there can be.
@@ -352,8 +377,20 @@ pub(crate) fn syscall_dispatch(num: u64, a1: u64, a2: u64, a3: u64, a4: u64) -> 
             Some(addr) => process::futex_wake(addr, a2),
             None => bad_addr,
         },
-        SYS_MMAP => sys_mmap(a1, a2, MmapProt(a3), MmapFlags(a4)),
-        SYS_MUNMAP => sys_munmap(a1, a2),
+        SYS_VM_RESERVE => sys_vm_reserve(a1, a2, a3, a4),
+        SYS_VM_RELEASE => sys_vm_release(a1, a2),
+        SYS_VM_PROTECT => sys_vm_protect(a1, a2, a3),
+        SYS_VM_DISCARD => sys_vm_discard(a1, a2),
+        SYS_VM_DECOMMIT => sys_vm_decommit(a1, a2),
+        SYS_VM_REMAP => sys_vm_remap(a1, a2, a3, a4),
+        SYS_PREAD => {
+            let Some(mut buf) = ctx.user_bytes_mut(UserAddr::new(a2), a3) else { return bad_addr };
+            with_object(RawHandle(a1 as u32), Rights::READ, |o| ops::pread(o, a4, &mut buf))
+        }
+        SYS_PWRITE => {
+            let Some(buf) = ctx.user_bytes(UserAddr::new(a2), a3) else { return bad_addr };
+            with_object(RawHandle(a1 as u32), Rights::WRITE, |o| ops::pwrite(o, a4, &buf))
+        }
         SYS_READ_NONBLOCK => {
             let Some(mut buf) = ctx.user_bytes_mut(UserAddr::new(a2), a3) else { return bad_addr };
             sys_read_nonblock(RawHandle(a1 as u32), &mut buf)
@@ -374,7 +411,6 @@ pub(crate) fn syscall_dispatch(num: u64, a1: u64, a2: u64, a3: u64, a4: u64) -> 
                 copy_len as u64
             }
         }
-        SYS_PIPE_MAP => sys_pipe_map(RawHandle(a1 as u32)),
         // What a claimed PCI function's driver is built out of. Each is
         // gated by the claim handle alone: nothing here takes a bus/device/
         // function, so a process cannot name a device it was not given.
@@ -433,42 +469,22 @@ pub(crate) fn syscall_dispatch(num: u64, a1: u64, a2: u64, a3: u64, a4: u64) -> 
             };
             sys_trace_read(&ctx, RawHandle(a1 as u32), UserAddr::new(a2), &mut out, a4 as usize)
         }
-        SYS_ACCEPT => sys_accept(RawHandle(a1 as u32)),
+        SYS_ACCEPT => sys_accept(RawHandle(a1 as u32), a2),
         SYS_MESSAGE_SEND => {
             let Ok(args) = ctx.copy_in::<MessageSend>(UserAddr::new(a2)) else { return bad_addr };
-            let unknown_flags = args.flags & !MESSAGE_NONBLOCK != 0;
-            if unknown_flags || args.count as usize > MAX_TRANSFER_HANDLES || args.len as usize > MAX_MESSAGE_LEN {
-                return SyscallError::InvalidArgument.to_u64();
-            }
-            let Some(bytes) = ctx.user_bytes(UserAddr::new(args.bytes), args.len) else { return bad_addr };
-            let Some(handles) = (args.count as usize)
-                .checked_mul(HANDLE_LEN)
-                .and_then(|len| ctx.user_bytes(UserAddr::new(args.handles), len as u64))
-            else {
-                return bad_addr;
-            };
-            sys_message_send(
-                RawHandle(a1 as u32),
-                &bytes,
-                &handles,
-                args.count as usize,
-                args.flags & MESSAGE_NONBLOCK != 0,
-            )
+            let Ok(out) = outgoing(&ctx, &args) else { return SyscallError::InvalidArgument.to_u64() };
+            let Some(out) = out else { return bad_addr };
+            sys_message_send(RawHandle(a1 as u32), &out, args.flags & MESSAGE_NONBLOCK != 0)
         }
-        SYS_HANDLE_RECV => {
-            if a3 as usize > MAX_TRANSFER_HANDLES {
-                return SyscallError::InvalidArgument.to_u64();
-            }
-            let Some(mut out) = (a3 as usize)
-                .checked_mul(HANDLE_LEN)
-                .and_then(|len| ctx.user_bytes_mut(UserAddr::new(a2), len as u64))
-            else {
-                return bad_addr;
-            };
-            sys_handle_recv(RawHandle(a1 as u32), &mut out, a3 as usize)
+        SYS_MESSAGE_RECV => {
+            let Ok(args) = ctx.copy_in::<MessageRecv>(UserAddr::new(a2)) else { return bad_addr };
+            let Ok(into) = incoming(&ctx, &args) else { return SyscallError::InvalidArgument.to_u64() };
+            let Some(mut into) = into else { return bad_addr };
+            sys_message_recv(RawHandle(a1 as u32), &mut into, args.flags & MESSAGE_NONBLOCK != 0)
         }
-        SYS_SHM_CREATE => sys_shm_create(a1),
-        SYS_SHM_MAP => sys_shm_map(RawHandle(a1 as u32)),
+        SYS_SHM_CREATE => sys_shm_create(a1, a2, RawHandle(a3 as u32)),
+        SYS_SHM_MAP => sys_shm_map(RawHandle(a1 as u32), a2),
+        SYS_SHM_SUB => sys_shm_sub(RawHandle(a1 as u32), a2, a3),
         SYS_PORT_CREATE => sys_port_create(),
         SYS_PORT_MINT => {
             // Copied in before any handle is looked up: the kernel holds the badge, never the caller's page.
@@ -555,6 +571,7 @@ pub(crate) fn syscall_dispatch(num: u64, a1: u64, a2: u64, a3: u64, a4: u64) -> 
             DA::CANARY_CHANGED => canary::changed() as u64,
             DA::TLB_ACK_DELAY_ARM => crate::arch::tlb::debug_arm_ack_delay(a2),
             DA::TLB_ACK_DELAY_DISARM => crate::arch::tlb::debug_disarm_ack_delay(),
+            DA::SPACE_REACHED => crate::process::current_address_space().usage().reached(),
             // The two leaks this object model accepts — a stranded Arc, the cross-pair
             // connection cycle — are visible in no other way than this census.
             // Per kind, not total: a total would hide one kind's leak behind another's churn.
@@ -603,6 +620,18 @@ pub(crate) fn syscall_dispatch(num: u64, a1: u64, a2: u64, a3: u64, a4: u64) -> 
             DA::GLOBAL_LEAF_REWRITE => crate::mm::paging::debug_global_leaf(a2),
             _ => SyscallError::InvalidArgument.to_u64(),
         },
+        SYS_JOB_FLOOR => sys_job_floor(RawHandle(a1 as u32), RawHandle(a2 as u32), a3),
+        SYS_WAKE_LATENCY_HOLD => sys_wake_latency_hold(RawHandle(a1 as u32), a2),
+        SYS_EVENT_CREATE => sys_event_create(),
+        SYS_EVENT_SIGNAL => sys_event_signal(RawHandle(a1 as u32)),
+        SYS_EVENT_TAKE => sys_event_take(RawHandle(a1 as u32)),
+        SYS_HANDLE_WAIT => sys_handle_wait(RawHandle(a1 as u32), a2, a3),
+        SYS_CLOCK_NOW => crate::arch::clocksource::stamp_now(),
+        SYS_ACCOUNT_INFO => {
+            if a3 < core::mem::size_of::<toyos_abi::syscall::AccountInfo>() as u64 { return SyscallError::InvalidArgument.to_u64(); }
+            let Some(addr) = UserAddr::checked(a2) else { return bad_addr };
+            sys_account_info(&ctx, RawHandle(a1 as u32), addr)
+        },
         SYS_PROCESS_STATS => {
             let stats_size = core::mem::size_of::<toyos_abi::syscall::ProcessStats>() as u64;
             if a3 < stats_size { return SyscallError::InvalidArgument.to_u64(); }
@@ -629,6 +658,20 @@ pub(crate) fn syscall_dispatch(num: u64, a1: u64, a2: u64, a3: u64, a4: u64) -> 
         // kernel decides each access by what its address is.
         SYS_ACPI => sys_acpi(&ctx, RawHandle(a1 as u32), a2, a3),
         SYS_DEVICE_REG_READ => sys_device_reg_read(RawHandle(a1 as u32), a2, a3),
+        SYS_PAGER_CREATE => sys_pager_create(a1, a2, a3, a4),
+        SYS_PAGED_CREATE => sys_paged_create(RawHandle(a1 as u32), a2),
+        SYS_PAGED_HOLDER => sys_paged_holder(RawHandle(a1 as u32), a2),
+        SYS_PAGED_READ => {
+            let Some(mut buf) = ctx.user_bytes_mut(UserAddr::new(a2), a3) else { return bad_addr };
+            sys_paged_read(RawHandle(a1 as u32), &mut buf, a4)
+        }
+        SYS_PAGED_OP => sys_paged_op(&ctx, RawHandle(a1 as u32), a2, UserAddr::new(a3)),
+        SYS_PAGED_NOTICES => {
+            let size = core::mem::size_of::<PagedNotice>();
+            let Some(len) = (a3 as usize).checked_mul(size) else { return SyscallError::InvalidArgument.to_u64() };
+            let Some(mut buf) = ctx.user_bytes_mut(UserAddr::new(a2), len as u64) else { return bad_addr };
+            sys_paged_notices(RawHandle(a1 as u32), &mut buf)
+        }
         _ => SyscallError::InvalidArgument.to_u64(),
     } })();
 
@@ -638,10 +681,44 @@ pub(crate) fn syscall_dispatch(num: u64, a1: u64, a2: u64, a3: u64, a4: u64) -> 
     crate::object::drain_zero_handles();
 
     // Wall-clock, not CPU time: elapsed includes any preemption.
-    let elapsed = crate::clock::nanos_since_boot() - t0;
-    process::with_current_data(|data| {
-        data.syscall_total_ns += elapsed;
-    });
+    let elapsed = crate::arch::cpu::counter().saturating_sub(entered);
+    crate::sched::driver::note_syscall(num, elapsed);
 
     result
+}
+
+/// A send's buffers, bounded: `Err` for arguments past the ABI's bounds or an
+/// unknown flag, `None` for an address the caller does not have.
+fn outgoing<'a>(ctx: &SyscallContext<'a>, args: &MessageSend) -> Result<Option<Outgoing<'a>>, ()> {
+    if args.flags & !MESSAGE_NONBLOCK != 0 || args.count as usize > MAX_TRANSFER_HANDLES || args.len as usize > MAX_MESSAGE_LEN {
+        return Err(());
+    }
+    let count = args.count as usize;
+    Ok((|| {
+        Some(Outgoing {
+            bytes: ctx.user_bytes(UserAddr::new(args.bytes), args.len)?,
+            handles: ctx.user_bytes(UserAddr::new(args.handles), (count * HANDLE_LEN) as u64)?,
+            count,
+        })
+    })())
+}
+
+/// A receive's buffers, bounded the same way. No message is longer than
+/// [`MAX_MESSAGE_LEN`] or carries more than [`MAX_TRANSFER_HANDLES`], so only
+/// that much of the two byte windows (`head` first) and of `handles` is taken.
+fn incoming<'a>(ctx: &SyscallContext<'a>, args: &MessageRecv) -> Result<Option<Incoming<'a>>, ()> {
+    if args.flags & !MESSAGE_NONBLOCK != 0 {
+        return Err(());
+    }
+    let head_len = args.head_len.min(MAX_MESSAGE_LEN as u64);
+    let len = args.len.min(MAX_MESSAGE_LEN as u64 - head_len);
+    let cap = (args.cap as usize).min(MAX_TRANSFER_HANDLES);
+    Ok((|| {
+        Some(Incoming {
+            head: ctx.user_bytes_mut(UserAddr::new(args.head), head_len)?,
+            bytes: ctx.user_bytes_mut(UserAddr::new(args.bytes), len)?,
+            handles: ctx.user_bytes_mut(UserAddr::new(args.handles), (cap * HANDLE_LEN) as u64)?,
+            cap,
+        })
+    })())
 }

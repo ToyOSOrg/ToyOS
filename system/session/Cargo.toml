@@ -1,0 +1,17 @@
+[package]
+name = "session"
+description = "A login session's owner: its launcher, the parent of its detached apps, and its sign-out."
+version = "0.1.0"
+edition = "2021"
+license = "MIT OR Apache-2.0"
+
+[lib]
+doctest = false
+
+[dependencies]
+toyos = { path = "../../sdk/toyos" }
+toyos-abi = { path = "../../sdk/abi" }
+toyos-session = { path = "../../lib/session" }
+
+[package.metadata.toyos.host]
+exempt.owns = "a ToyOS login session: its launcher, which the supervisor serves, and the apps it parents"

@@ -17,7 +17,7 @@ model 60h) and AMD EPYC KVM guests, and a stage's correctness test runs on
 each that has its feature. A figure is the T14's, and the AMD bench's too
 where the stage's path differs there, since the EPYC guests are shared CI
 runners: the median of 11 runs with its spread, taken by the program of
-`issues/no-program-measures-toyos-against-linux-on-one-machine.md`.
+`issues/no-published-run-compares-toyos-with-linux-on-one-machine.md`.
 A stage that its hardware's manufacturers or the published state of the art
 back follows and cites them, and its figure is reported and never blocks it: a
 slowdown is filed as a defect carrying both figures and investigated. A stage nothing published covers is
@@ -43,32 +43,32 @@ and contention).
 - An MWAIT doorbell: the IPI's send and delivery and the kick's handler are
   at most 14.7 to 14.9 % of an idle wake on the T14 and 22.4 to 22.6 % on the
   AMD bench (`issues/idle-is-hlt-so-every-wake-of-an-idle-cpu-is-an-ipi.md`).
-- A TSC deadline: the re-arm is at most 11.7 to 12.1 % of a pass's pick and
-  switch on the T14, and at the AMD bench's TSC floor
+- A TSC deadline: before #1061 cut the arm to one register write, the
+  re-arm was at most 11.7 to 12.1 % of a pass's pick and switch on the T14,
+  and at the AMD bench's TSC floor; it is to be read again
   (`issues/the-timer-is-a-lapic-count-re-armed-every-pass-never-a-tsc-deadline.md`).
+- Deep idle: on the T14 `hlt` holds a one-thread load to the turbo ratio
+  for three or more active cores, 38 of `MSR_TURBO_RATIO_LIMIT`'s
+  `0x2626262626262a2a` against 42 for one or two (#866's dump,
+  https://github.com/ToyOSOrg/ToyOS/pull/866#issuecomment-6119512404), the
+  limit bit logged being multi-core turbo. HWP's request (maximum 42),
+  turbo, the power limits and C1E promotion were ruled out. Under `hlt`,
+  `cpu.clock` reads at most 3789 MHz in every osbench group. What deep idle
+  reads is `issues/idle-cpus-enter-the-c-states-cst-names.md`'s. The AMD
+  bench has no such gap: its one-thread `crunch.single` deflate, matmul and
+  sha256 run at 0.98 to 1.02 of Linux's; parse, faster under ToyOS on both
+  benches, is no clock reading.
 
 **Moot.** PCID on the AMD bench: its CPUs read `pcid=0 invpcid=0`, so there
 is nothing to enable.
 
 **Unexplained, and the measurement each needs next.**
 
-- **The T14's clock under load.** Intel rates the T14's i5-1135G7 at a Max
-  Turbo Frequency of 4.20 GHz, the most one core reaches under Turbo Boost,
-  over a base of 2.40 GHz at its 28 W configurable TDP-up and 900 MHz at its
-  12 W TDP-down (Intel's specification of the part,
-  https://www.intel.com/content/www/us/en/products/sku/208658/intel-core-i51135g7-processor-8m-cache-up-to-4-20-ghz/specifications.html).
-  Over the `internet_download` row's download windows ToyOS's median
-  effective clock reads 2.67 GHz (`wt/toyos-scout-clock` at `fa6a2a829`), and
-  read 2.53 GHz in round 1 of PR #861: above that base and 1.53 GHz short of
-  that turbo, and what holds it there is unread. Ruled out: the power limits
-  (5.65 W median against a 20 W PL1, no power, thermal or current limit bit
-  logged), the HWP request (`0x80002a04`) and C1E promotion (allowed); the one
-  limit bit logged is multi-core turbo, whose ceiling per active core count
-  that specification does not give. ToyOS's cores never go below C1/C1E,
-  its package never leaves PC0, and its idle package draws 3.16 W, which is
-  `issues/idle-cpus-enter-the-c-states-cst-names.md`'s to answer; that the
-  idle state reaches HWP's clock choice is inference. Next: a T14 scout whose
-  idle CPUs wait in a deep C-state, read over the same windows.
+- **The T14's effective clock over the `internet_download` row's download
+  windows**: its median is 2.67 GHz under ToyOS against 3.08 under Linux
+  (`wt/toyos-scout-clock` at `fa6a2a829`), and read 2.53 GHz in round 1 of
+  PR #861. The bin of 38 bounds it at 3.8 GHz and does not explain it. Next:
+  the same windows read again once idle CPUs leave `hlt`.
 - **Global-line contention** is bounded at 2 to 3 % of C0 on the T14 and not
   attributed; next, the HITM count attributed to its lines on both benches
   (`issues/per-cpu-scheduler-and-pmm-state-shares-lines-every-cpu-writes.md`).
@@ -80,7 +80,7 @@ taken: the instruments, then what is measured, then the design rounds not
 yet measured.
 
 - `issues/no-test-can-hold-a-thread-on-a-named-cpu.md`
-- `issues/no-program-measures-toyos-against-linux-on-one-machine.md`
+- `issues/no-published-run-compares-toyos-with-linux-on-one-machine.md`
 - `issues/no-row-holds-a-wake-beside-seven-spinners-to-100-us.md`
 - `issues/per-cpu-scheduler-and-pmm-state-shares-lines-every-cpu-writes.md`
 - `issues/a-wake-storm-costs-the-t14-twice-the-amd-benchs-time-per-waiter-and-nothing-says-why.md`
@@ -93,5 +93,6 @@ yet measured.
 - `issues/fsgsbase-is-taken.md`
 - `issues/idle-cpus-enter-the-c-states-cst-names.md`
 - `issues/diskserver-drives-nvme-apst.md`
-- `issues/every-syscall-takes-the-process-table-lock-twice-to-count-itself.md`
+- `issues/syscall-cost-is-unread-since-a-syscall-counts-itself-on-its-thread.md`
+- `issues/malloc-churn-across-eight-threads-fell-with-the-run-queue-arenas.md`
 - `issues/a-thread-resuming-on-the-cpu-that-holds-its-state-restores-it-again.md`

@@ -3,7 +3,7 @@ execve: -1, ENOSYS
 setsid: -1, ENOSYS
 getsid: -1, ENOSYS
 gethostname: -1, ENOSYS
-link: -1, ENOSYS
+link: -1, ENOTSUP
 symlink: -1, ENOSYS
 fchown: -1, ENOSYS
 chmod: -1, ENOSYS
@@ -13,8 +13,9 @@ fstatvfs: -1, ENOSYS
 getrlimit: -1, ENOSYS
 setrlimit: -1, ENOSYS
 msync: -1, ENOSYS
-mprotect: -1, ENOSYS
-utimes: -1, ENOSYS
+mprotect executable: -1, ENOTSUP
+mprotect off a page: -1, EINVAL
+utimes: -1, ENOTSUP
 wait: -1, ECHILD
 wait4: -1, ECHILD
 pathconf 12345: -1, EINVAL
@@ -41,16 +42,14 @@ mmap a file shared: -1, ENODEV
 mmap a file shared at a page: -1, ENODEV
 mmap executable: -1, ENOTSUP
 mmap nothing: -1, EINVAL
-mmap the first of two pages fixed: -1, ENOMEM
-pages after it: f s
-munmap the first of two pages: -1, EINVAL
-pages after it: f s
-munmap the second of two pages: -1, EINVAL
+mmap the first of two pages fixed: 0, no errno
+pages after it: 0 s
+munmap the first of two pages: 0, no errno
+the second page after it: s
 munmap no bytes: -1, EINVAL
-munmap a byte past two pages: -1, EINVAL
-pages after them: f s
-munmap two pages by a length into the second: 0, no errno
-munmap them again: -1, EINVAL
+munmap off a page: -1, EINVAL
+munmap the second of two pages: 0, no errno
+munmap them again: 0, no errno
 munmap 5000 bytes by 5000: 0, no errno
 munmap 5000 bytes by 8192: 0, no errno
 malloc SIZE_MAX: -1, ENOMEM
@@ -62,10 +61,10 @@ sysconf 12345: -1, EINVAL
 posix_madvise WILLNEED: 0
 posix_madvise 99: EINVAL
 madvise WILLNEED: 0, no errno
-madvise DONTNEED: -1, ENOSYS
+madvise DONTNEED: 0, no errno
 madvise off a page: -1, EINVAL
 madvise 99: -1, EINVAL
-page after madvise: x
+page after madvise: zeros
 file: 1 bytes; mode as it was through fstat, as it was through stat; second name: none
 page after mprotect: y
 limit after getrlimit: 0 0

@@ -6,14 +6,16 @@ opened: 2026-10-09
 
 # A link that goes and returns inside one pass of the Intel driver is reported as no change
 
-`toyos-i219`'s `begin_pass` (`system/netstack/i219/src/lib.rs`) reads the link only on
+`toyos-i219`'s `begin_pass` (`system/i219/driver/src/lib.rs`) reads the link only on
 a pass that acknowledged `LSC`, and answers `link_changed: self.link !=
 before`: the state after the pass compared with the state before it. `LSC` is
 one bit, so a link that went down and came back at the same speed and duplex
 before one pass acknowledged it is read as the link it was, and the pass
-answers no change. `Nic::begin_pass` (`system/netstack/src/i219.rs`) hands
-netstack a link only where that is true, so `main`'s `link_up` stays true and
-no pass tells the name's responder it had no link.
+answers no change. The driver's pass writes the link's word only when the
+link differs from the one it last said (`lib/link/src/driver.rs`), and
+netstack tells the node only of a change in whether it is up
+(`system/netstack/src/link.rs`), so no pass tells the name's responder it had
+no link.
 
 RFC 6762 §8 asks for probing and announcing whenever a responder "receives an indication of a network interface "Link Change"
 event". The part gave that indication, the `LSC` cause, and the driver held

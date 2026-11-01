@@ -66,9 +66,8 @@ pub unsafe fn unmap(ptr: *mut u8, len: usize) {
     assert_eq!(unsafe { libc::munmap(ptr.cast(), len) }, 0);
 }
 
-/// An anonymous mapping with transparent huge pages asked for, which
-/// ToyOS's anonymous mappings always are; [`huge_backing`] says what the
-/// kernel gave.
+/// An anonymous mapping with transparent huge pages asked for;
+/// [`huge_backing`] says what the kernel gave.
 pub fn map_anon_huge(len: usize) -> *mut u8 {
     let ptr = map_anon(len);
     // SAFETY: an advice changes no contents.
@@ -226,7 +225,8 @@ fn busy_permille(span: Duration) -> Option<u64> {
     (total > 0).then(|| (total - (idle1 - idle0)) * 1000 / total)
 }
 
-/// What a Linux number depends on, read and never changed.
+/// What a Linux number depends on, read and never changed. `README.md` says
+/// which of them a comparison sets.
 pub fn conditions() {
     condition("kernel", read("/proc/sys/kernel/osrelease").unwrap_or_default());
     let distro = fs::read_to_string("/etc/os-release").ok().and_then(|text| {
@@ -239,6 +239,7 @@ pub fn conditions() {
     condition("cpufreq_driver", per_cpu("cpufreq/scaling_driver"));
     condition("governor", per_cpu("cpufreq/scaling_governor"));
     condition("epp", per_cpu("cpufreq/energy_performance_preference"));
+    condition("min_khz", per_cpu("cpufreq/scaling_min_freq"));
     condition("max_khz", per_cpu("cpufreq/scaling_max_freq"));
     condition(
         "intel_no_turbo",
@@ -246,6 +247,11 @@ pub fn conditions() {
     );
     condition("boost", read("/sys/devices/system/cpu/cpufreq/boost").unwrap_or_else(|| "absent".into()));
     condition("amd_pstate", read("/sys/devices/system/cpu/amd_pstate/status").unwrap_or_else(|| "absent".into()));
+    condition("platform_profile", read("/sys/firmware/acpi/platform_profile").unwrap_or_else(|| "absent".into()));
+    // What every timestamp here is read from: one the vDSO cannot read costs
+    // each `Instant::now` a syscall.
+    let clocksource = read("/sys/devices/system/clocksource/clocksource0/current_clocksource");
+    condition("clocksource", clocksource.unwrap_or_else(|| "absent".into()));
     for supply in fs::read_dir("/sys/class/power_supply").into_iter().flatten().flatten() {
         let at = supply.path();
         let get = |f: &str| read(&at.join(f).to_string_lossy());
@@ -270,6 +276,147 @@ pub fn conditions() {
         read("/proc/loadavg").map(|l| l.split_whitespace().take(3).collect::<Vec<_>>().join(",")).unwrap_or_default(),
     );
     condition("busy_permille_1s", busy_permille(Duration::from_secs(1)).map_or("unknown".into(), |p| p.to_string()));
+}
+
+/// Model-specific register addresses, by [`crate::arch`]'s choice for the
+/// CPU's vendor.
+pub struct PowerRegisters {
+    pub energy: u32,
+    pub power_unit: u32,
+    pub package_residency: [Option<u32>; 4],
+    pub core_residency: [Option<u32>; 2],
+    pub core_energy: Option<u32>,
+}
+
+/// The power counters through the `msr` driver's `/dev/cpu/<n>/msr`, which
+/// takes root: the package's on whichever CPU the caller runs on, and each
+/// CPU's on that CPU, an IPI to each but the caller's.
+pub mod power {
+    use std::fs::File;
+    use std::os::unix::fs::FileExt;
+
+    use super::super::{CpuPower, Package, Refused, Round};
+    use super::PowerRegisters;
+
+    const IA32_TIME_STAMP_COUNTER: u32 = 0x10;
+    const IA32_MPERF: u32 = 0xe7;
+    const IA32_APERF: u32 = 0xe8;
+
+    fn registers() -> Result<PowerRegisters, Refused> {
+        crate::arch::power_registers().ok_or_else(|| Refused::Absent("no CPU vendor whose power registers osbench reads".into()))
+    }
+
+    fn device(cpu: u32) -> Result<File, Refused> {
+        let path = format!("/dev/cpu/{cpu}/msr");
+        File::open(&path).map_err(|e| match e.kind() {
+            std::io::ErrorKind::NotFound => Refused::Withheld(format!("{path}: {e}: `sudo modprobe msr`")),
+            std::io::ErrorKind::PermissionDenied => Refused::Withheld(format!("{path}: {e}: `sudo osbench energy` reads it")),
+            _ => Refused::Failed(format!("{path}: {e}")),
+        })
+    }
+
+    /// The register, or `None` where the CPU lacks it: the driver answers a
+    /// `#GP` with `EIO`.
+    fn msr(dev: &File, cpu: u32, at: u32) -> Result<Option<u64>, Refused> {
+        let mut word = [0u8; 8];
+        match dev.read_at(&mut word, u64::from(at)) {
+            Ok(8) => Ok(Some(u64::from_le_bytes(word))),
+            Err(e) if e.raw_os_error() == Some(libc::EIO) => Ok(None),
+            other => Err(Refused::Failed(format!("cpu{cpu}'s MSR {at:#x}: {other:?}"))),
+        }
+    }
+
+    fn each(dev: &File, cpu: u32, at: Option<u32>) -> Result<Option<u64>, Refused> {
+        at.map_or(Ok(None), |at| msr(dev, cpu, at))
+    }
+
+    /// The package's counters and then every CPU's, as ToyOS's round reads
+    /// them: a read of every CPU each time.
+    pub fn round() -> Result<Round, Refused> {
+        let r = registers()?;
+        Ok(Round { package: package(&r)?, cpus: cpus(&r)? })
+    }
+
+    fn package(r: &PowerRegisters) -> Result<Package, Refused> {
+        let cpu = super::current_cpu();
+        let dev = device(cpu)?;
+        let tsc = msr(&dev, cpu, IA32_TIME_STAMP_COUNTER)?.ok_or_else(|| Refused::Failed(format!("cpu{cpu} read no TSC")))?;
+        let mut residency = [None; 4];
+        for (slot, at) in residency.iter_mut().zip(r.package_residency) {
+            *slot = each(&dev, cpu, at)?;
+        }
+        Ok(Package { tsc, energy: msr(&dev, cpu, r.energy)?, power_unit: msr(&dev, cpu, r.power_unit)?, residency })
+    }
+
+    fn cpus(r: &PowerRegisters) -> Result<Vec<CpuPower>, Refused> {
+        super::allowed_cpus()
+            .into_iter()
+            .map(|cpu| {
+                let cpu = cpu as u32;
+                let dev = device(cpu)?;
+                Ok(CpuPower {
+                    cpu,
+                    core: super::core_of(cpu),
+                    tsc: msr(&dev, cpu, IA32_TIME_STAMP_COUNTER)?
+                        .ok_or_else(|| Refused::Failed(format!("cpu{cpu} read no TSC")))?,
+                    aperf: msr(&dev, cpu, IA32_APERF)?,
+                    mperf: msr(&dev, cpu, IA32_MPERF)?,
+                    core_c6: each(&dev, cpu, r.core_residency[0])?,
+                    core_c7: each(&dev, cpu, r.core_residency[1])?,
+                    core_energy: each(&dev, cpu, r.core_energy)?,
+                })
+            })
+            .collect()
+    }
+
+    /// The CPU time the whole machine has been busy for, in nanoseconds, off
+    /// `/proc/stat` at its tick's resolution: everything but idle and iowait,
+    /// this sleeping process included.
+    pub fn busy_ns() -> Result<u64, Refused> {
+        let stat = std::fs::read_to_string("/proc/stat").map_err(|e| Refused::Failed(format!("/proc/stat: {e}")))?;
+        let fields: Vec<u64> =
+            stat.lines().next().unwrap_or_default().split_whitespace().skip(1).filter_map(|f| f.parse().ok()).collect();
+        let (Some(idle), Some(iowait)) = (fields.get(3), fields.get(4)) else {
+            return Err(Refused::Failed("/proc/stat's first line has no idle and iowait".into()));
+        };
+        // SAFETY: sysconf takes a name and reads nothing else.
+        let hz = u64::try_from(unsafe { libc::sysconf(libc::_SC_CLK_TCK) }).unwrap_or(100).max(1);
+        Ok((fields.iter().sum::<u64>() - idle - iowait) * 1_000_000_000 / hz)
+    }
+
+    /// The panel and its light, the radios and the links, which the package's
+    /// draw depends on: each connected DRM connector's DPMS, each backlight's
+    /// level, each rfkill switch, and each network link's state.
+    pub fn conditions() {
+        use crate::report::condition;
+        let listed = |dir: &str, said: &dyn Fn(&std::path::Path) -> Option<String>| -> String {
+            let mut seen: Vec<String> = std::fs::read_dir(dir)
+                .into_iter()
+                .flatten()
+                .flatten()
+                .filter_map(|e| said(&e.path()).map(|s| format!("{}:{s}", e.file_name().to_string_lossy())))
+                .collect();
+            seen.sort();
+            if seen.is_empty() { "none".into() } else { seen.join(",") }
+        };
+        let get = |at: &std::path::Path, f: &str| super::read(&at.join(f).to_string_lossy());
+        condition(
+            "energy.display",
+            listed("/sys/class/drm", &|at| (get(at, "status")? == "connected").then(|| get(at, "dpms").unwrap_or_default())),
+        );
+        condition(
+            "energy.backlight",
+            listed("/sys/class/backlight", &|at| Some(format!("{}/{}", get(at, "actual_brightness")?, get(at, "max_brightness")?))),
+        );
+        condition(
+            "energy.radios",
+            listed("/sys/class/rfkill", &|at| {
+                let blocked = get(at, "soft")? == "1" || get(at, "hard")? == "1";
+                Some(format!("{}_{}", get(at, "type")?, if blocked { "blocked" } else { "unblocked" }))
+            }),
+        );
+        condition("energy.links", listed("/sys/class/net", &|at| if at.ends_with("lo") { None } else { get(at, "operstate") }));
+    }
 }
 
 /// The cgroup whose `cpu` controller governs this process: the deepest one
@@ -490,8 +637,9 @@ pub mod ipc {
 }
 
 /// The mount holding `path`, off `/proc/self/mountinfo`: its filesystem
-/// type, its source and its options.
-fn mount_of(path: &str) -> Option<(String, String, String)> {
+/// type, its source, its mount's options and its superblock's, where a
+/// filesystem's own options such as ext4's `nobarrier` are.
+fn mount_of(path: &str) -> Option<(String, String, String, String)> {
     let mounts = fs::read_to_string("/proc/self/mountinfo").ok()?;
     // `id parent major:minor root mountpoint options... - fstype source superoptions`
     mounts
@@ -503,23 +651,139 @@ fn mount_of(path: &str) -> Option<(String, String, String)> {
             let options = left.next()?;
             let mut right = right.split_whitespace();
             let (fstype, source) = (right.next()?, right.next()?);
+            let superblock = right.next().unwrap_or_default();
             let under = path == point || point == "/" || path.starts_with(&format!("{point}/"));
-            under.then(|| (point.len(), (fstype.to_string(), source.to_string(), options.to_string())))
+            under.then(|| (point.len(), (fstype.to_string(), source.to_string(), options.to_string(), superblock.to_string())))
         })
         .max_by_key(|(len, _)| *len)
         .map(|(_, mount)| mount)
 }
 
-/// How `dir` is mounted, for a condition: its filesystem and options.
+/// How `dir` is mounted, for a condition: its filesystem, its mount's
+/// options and its superblock's.
 pub fn mount_options(dir: &str) -> String {
-    mount_of(dir).map_or_else(|| "unknown".into(), |(fstype, _, options)| format!("{fstype} {options}"))
+    mount_of(dir).map_or_else(|| "unknown".into(), |(fstype, _, options, superblock)| format!("{fstype} {options} {superblock}"))
 }
 
-/// The runner's home, and the filesystem and disk model holding it; the
-/// path itself names the user and is never printed.
-pub fn persistent_dir() -> Option<(String, String)> {
+/// What a transfer row reports of the stack beneath it: the kernel's TCP segment counts and
+/// its loss recovery, from `/proc/net/snmp` and `/proc/net/netstat`.
+pub fn net_counters() -> Result<Vec<(String, u64)>, String> {
+    const READ: [(&str, &str); 6] = [
+        ("Tcp", "OutSegs"),
+        ("Tcp", "RetransSegs"),
+        ("TcpExt", "TCPTimeouts"),
+        ("TcpExt", "TCPSackRecovery"),
+        ("TcpExt", "TCPRenoRecovery"),
+        ("TcpExt", "TCPLossProbes"),
+    ];
+    let mut table = std::collections::BTreeMap::new();
+    for file in ["/proc/net/snmp", "/proc/net/netstat"] {
+        let text = fs::read_to_string(file).map_err(|e| format!("{file}: {e}"))?;
+        let lines: Vec<&str> = text.lines().collect();
+        // Each table is a line of names and a line of values, both led by its name.
+        for [names, values] in lines.as_chunks::<2>().0 {
+            let (Some((name, keys)), Some((again, values))) = (names.split_once(':'), values.split_once(':')) else {
+                return Err(format!("{file}: a table's line has no name"));
+            };
+            if name != again {
+                return Err(format!("{file}: {name}'s names are followed by {again}'s values"));
+            }
+            for (key, value) in keys.split_whitespace().zip(values.split_whitespace()) {
+                if let Ok(value) = value.parse::<u64>() {
+                    table.insert(format!("{name}.{key}"), value);
+                }
+            }
+        }
+    }
+    Ok(READ.iter().filter_map(|(name, key)| table.get(&format!("{name}.{key}")).map(|v| (format!("{name}.{key}"), *v))).collect())
+}
+
+/// How a reading adds up over a row's rounds: a time its total, a state its mean.
+#[derive(Clone, Copy)]
+enum Over {
+    Total,
+    Mean,
+}
+
+type Reading = Vec<(&'static str, u64, Over)>;
+
+/// What a row's own connections say of themselves in `TCP_INFO`, each read just before its
+/// end: RFC 4898's sender limits as Linux keeps them (`tcpi_busy_time`, `tcpi_rwnd_limited`,
+/// `tcpi_sndbuf_limited`, microseconds), its congestion window in segments and its smoothed round
+/// trip in microseconds.
+pub struct StreamLog(Vec<Result<Reading, String>>);
+
+impl StreamLog {
+    pub fn new() -> Self {
+        Self(Vec::new())
+    }
+
+    pub fn look(&mut self, stream: &std::net::TcpStream) {
+        self.0.push(tcp_info(stream));
+    }
+
+    /// Each reading as `stream_<name>_total` or `stream_<name>_mean` over the rounds; a reading
+    /// that failed is one field saying why.
+    pub fn fields(&self) -> Vec<(String, String)> {
+        let mut sums: Reading = Vec::new();
+        for reading in &self.0 {
+            match reading {
+                Ok(fields) => {
+                    for &(name, value, over) in fields {
+                        match sums.iter_mut().find(|(n, _, _)| *n == name) {
+                            Some((_, sum, _)) => *sum = sum.saturating_add(value),
+                            None => sums.push((name, value, over)),
+                        }
+                    }
+                }
+                Err(why) => return vec![("stream_unread".to_string(), why.clone())],
+            }
+        }
+        let rounds = self.0.len().max(1) as u64;
+        sums.into_iter()
+            .map(|(name, sum, over)| match over {
+                Over::Total => (format!("stream_{name}_total"), sum.to_string()),
+                Over::Mean => (format!("stream_{name}_mean"), (sum / rounds).to_string()),
+            })
+            .collect()
+    }
+}
+
+fn tcp_info(stream: &std::net::TcpStream) -> Result<Reading, String> {
+    use std::os::fd::AsRawFd;
+    use Over::{Mean, Total};
+    // SAFETY: plain old data, which the kernel fills.
+    let mut info: libc::tcp_info = unsafe { std::mem::zeroed() };
+    let mut len = std::mem::size_of::<libc::tcp_info>() as libc::socklen_t;
+    // SAFETY: `info` is `len` writable bytes, and the descriptor is the stream's own.
+    let rc = unsafe {
+        libc::getsockopt(stream.as_raw_fd(), libc::IPPROTO_TCP, libc::TCP_INFO, (&raw mut info).cast(), &mut len)
+    };
+    if rc != 0 {
+        return Err(format!("TCP_INFO: {}", std::io::Error::last_os_error()));
+    }
+    let full = std::mem::offset_of!(libc::tcp_info, tcpi_sndbuf_limited) + std::mem::size_of::<u64>();
+    if (len as usize) < full {
+        return Err(format!("TCP_INFO answered {len} bytes, short of the sender limits' {full}"));
+    }
+    Ok(vec![
+        ("busy_us", info.tcpi_busy_time, Total),
+        ("rwnd_limited_us", info.tcpi_rwnd_limited, Total),
+        ("sndbuf_limited_us", info.tcpi_sndbuf_limited, Total),
+        ("snd_cwnd_segments", u64::from(info.tcpi_snd_cwnd), Mean),
+        ("srtt_us", u64::from(info.tcpi_rtt), Mean),
+    ])
+}
+
+/// The runner's home, the filesystem and disk holding it, as `ext4, NVMe
+/// disk, model <model>, write cache write back` (the block layer's
+/// `queue/write_cache`: whether a sync must flush the device's cache), and
+/// the disk's kind as a medium: `nvme`, `usb`,
+/// `sata`, `mmc`, `virtio`, `other`, or `none` for no block device. The path
+/// itself names the user and is never printed.
+pub fn persistent_dir() -> Option<(String, String, String)> {
     let home = std::env::var("HOME").ok()?;
-    let (fstype, source, _) = mount_of(&home)?;
+    let (fstype, source, _, _) = mount_of(&home)?;
     // btrfs reports an anonymous `0:NN` that names no block device; its
     // source device's own number does.
     let sysfs = |devno: String| fs::canonicalize(format!("/sys/dev/block/{devno}")).ok();
@@ -530,19 +794,23 @@ pub fn persistent_dir() -> Option<(String, String)> {
         sysfs(format!("{}:{}", libc::major(rdev), libc::minor(rdev)))
     });
     let Some(device) = device else {
-        return Some((home, format!("{fstype}, on no block device")));
+        return Some((home, format!("{fstype}, on no block device"), "none".into()));
     };
     let (disk, mapped) = backing_disk(device);
     let model = read(&disk.join("device/model").to_string_lossy()).unwrap_or_else(|| "unknown".into());
+    let cache = read(&disk.join("queue/write_cache").to_string_lossy()).unwrap_or_else(|| "unknown".into());
     let name = disk.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
-    let kind = [("nvme", "NVMe"), ("sd", "SCSI, SATA or USB"), ("mmcblk", "MMC"), ("vd", "virtio")]
-        .iter()
+    // A SCSI disk is a USB one where sysfs puts it under a USB device.
+    let usb = disk.to_string_lossy().contains("/usb");
+    let sd = if usb { ("USB", "usb") } else { ("SCSI or SATA", "sata") };
+    let (kind, medium) = [("nvme", ("NVMe", "nvme")), ("sd", sd), ("mmcblk", ("MMC", "mmc")), ("vd", ("virtio", "virtio"))]
+        .into_iter()
         .find(|(prefix, _)| name.starts_with(prefix))
-        .map_or("other", |(_, kind)| kind);
+        .map_or(("other", "other"), |(_, kind)| kind);
     let through = if mapped { " through device-mapper" } else { "" };
     // The device's own name is never printed: an installer or a user chose
     // a mapper's (`luks-<UUID>`, a volume group named for the host).
-    Some((home, format!("{fstype}{through}, {kind} disk, model {model}")))
+    Some((home, format!("{fstype}{through}, {kind} disk, model {model}, write cache {cache}"), medium.into()))
 }
 
 /// The `major:minor` of the filesystem holding `path`, off mountinfo's third
@@ -582,4 +850,34 @@ fn backing_disk(mut device: std::path::PathBuf) -> (std::path::PathBuf, bool) {
         }
     }
     (device, mapped)
+}
+
+pub use osbench_lan::link::of as link_of;
+
+/// The package's temperature off hwmon: `coretemp`'s `Package id 0`, or
+/// `k10temp`'s `Tdie` where it has one and its `Tctl` otherwise.
+pub fn package_sensor() -> Result<super::Sensor, String> {
+    let mut chips: Vec<std::path::PathBuf> =
+        fs::read_dir("/sys/class/hwmon").map_err(|e| format!("/sys/class/hwmon: {e}"))?.flatten().map(|e| e.path()).collect();
+    chips.sort();
+    for chip in chips {
+        let name = read(&chip.join("name").to_string_lossy()).unwrap_or_default();
+        let wanted: &[&str] = match name.as_str() {
+            "coretemp" => &["Package id 0"],
+            "k10temp" => &["Tdie", "Tctl"],
+            _ => continue,
+        };
+        let labels: Vec<(String, String)> = (1..=64)
+            .filter_map(|i| read(&chip.join(format!("temp{i}_label")).to_string_lossy()).map(|l| (format!("temp{i}"), l)))
+            .collect();
+        for label in wanted {
+            if let Some((temp, _)) = labels.iter().find(|(_, l)| l == label) {
+                let input = chip.join(format!("{temp}_input"));
+                let crit_mc = read(&chip.join(format!("{temp}_crit")).to_string_lossy()).and_then(|v| v.parse().ok());
+                let reader = move || read(&input.to_string_lossy()).and_then(|v| v.parse().ok());
+                return Ok(super::Sensor { read: Box::new(reader), crit_mc, what: format!("{name} {label}") });
+            }
+        }
+    }
+    Err("no coretemp or k10temp package sensor in /sys/class/hwmon".into())
 }

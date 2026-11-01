@@ -133,6 +133,13 @@ what is left here is built on them.
    and ROOT), and a link that fails is refused by name.
 7. NTFS read-only, postponed here by the owner.
 
+**A file's pages are the kernel's paged objects'** (memory stage 7a, built by
+this track): one per file, supplied by its file server, read by its holders
+without a request (`system/fileserver/src/pages.rs`). The server's block cache
+keeps the volumes' structures alone. Mapping them is memory stage 7b, the
+process-memory track's
+(`issues/process-memory-in-4-kib-pages-still-copies-each-programs-text.md`).
+
 LOG stays its own FAT32 partition through the dev phase, because a Mac has to
 read the stick; folding it into DATA in the installed product is deferred by
 the owner's ruling of 2026-09-26, and no stage above owes it yet.

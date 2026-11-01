@@ -6,24 +6,35 @@ opened: 2026-09-29
 
 # A TLB shootdown reaches only the CPUs that ran the space
 
-A shootdown blocks on every other CPU (`kernel/src/mm/unmapped.rs:5`),
-whether or not it ever ran the address space. It waits on
-`issues/no-test-can-hold-a-thread-on-a-named-cpu.md`. A CPU that
-switches away keeps the space's entries: under PCID every CR3 load sets
-NOFLUSH (`kernel/src/arch/x86_64/paging.rs:295-306`), so a CPU leaves the
-target set only when those entries are gone, not when it stops running the
-space. The TCG model has no PCID (`build/arch.rs:169`), so only a machine with
-PCID can show a switched-out CPU still holding them.
+On x86 a change to one user space's leaves now reaches only the CPUs running
+that space (`kernel/src/arch/x86_64/tlb.rs`, `user_change`, over
+`kernel/src/tlb_tags.rs`). A CPU that switched away keeps the space's entries
+under PCID, since every CR3 load sets NOFLUSH, so it is not reached; it
+flushes every user translation before it next enters a space that changed
+since its own last such flush. The initiator flushes its own entries by page
+for up to 64 pages, and a change no other CPU runs sends no IPI. AArch64
+broadcasts its invalidations in hardware and needs none of this. Every other
+shootdown, a kernel-half change and a PCID reclaim among them, still reaches
+every CPU, and a reached CPU still answers with a flush of every user
+translation, not of the range.
 
-**Exit**: on every proving machine and under TCG, a sibling pinned on another
-CPU touches a page the initiator unmaps and then faults; on each proving
-machine with PCID, the sibling touches the page and blocks off its pinned CPU,
-the initiator unmaps it while the sibling is blocked and a thread of another
-space runs there, and the sibling faults on touching it again after it wakes
-there; cases in `kernel/loom/tests/tlb_shootdown.rs` switch a CPU into the
-space, and out of it, while the initiator reads the target set; the T14's
-munmap figure. **Mutation**, each red: a target set that omits a CPU the space
-ran on; a CPU that joins the set after loading CR3; a CPU cleared from the set
-when it switches away from the space, its red recorded over repeated runs,
-since it rests on the TLB keeping the entry across the block. **Oracle**: loom,
-and each proving machine's TLB.
+What holds it: `kernel/loom/tests/tlb_tags.rs` checks the pairing a CPU
+entering a space and a change reading who runs it rest on, and reds with the
+pairing's fence removed; `tlb_shootdown_waits` shows on the test kernel that
+a change waits for a CPU running a thread of the space and for none when no
+other CPU runs one, each half red under its mutation.
+
+What is owed, since it waits on
+`issues/no-test-can-hold-a-thread-on-a-named-cpu.md`: on a machine with PCID,
+a sibling that touches a page, blocks off its pinned CPU while a thread of
+another space runs there, and faults touching the page again after the
+initiator unmapped it meanwhile. The TCG model has no PCID
+(`build/arch.rs`), so only metal can show a switched-out CPU's entries.
+
+In the 2026-10-28 scoreboard (evidence branch `scoreboard-2026-10-28`) the
+T14 lost `mem.munmap_part.4k` at 1.22x Linux's (1,558 against 1,280 ns) and
+`mem.munmap_touched_remote.4k` at 1.32x (3,028 against 2,290 ns), each
+resolved; the AMD won both.
+
+**Exit**: that case, on each proving machine with PCID, red with the flush on
+entry removed; and the T14's munmap and `vm_protect` figures against Linux.

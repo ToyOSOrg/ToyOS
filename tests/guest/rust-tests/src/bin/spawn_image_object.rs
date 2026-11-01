@@ -23,9 +23,7 @@ const CWD: &str = "/";
 fn object_of(path: &str) -> (SharedMemory, u64) {
     let bytes = std::fs::read(path).unwrap_or_else(|e| panic!("read {path}: {e}"));
     let object = SharedMemory::create(bytes.len()).expect("a memory object");
-    // SAFETY: the region is at least `bytes.len()` long, mapped here, and not
-    // yet handed to anyone; `bytes` is not in it.
-    unsafe { core::ptr::copy_nonoverlapping(bytes.as_ptr(), object.as_ptr(), bytes.len()) };
+    object.bytes().write(0, &bytes);
     (object, bytes.len() as u64)
 }
 
@@ -49,13 +47,14 @@ fn spawn(image: RawHandle, len: u64) -> Result<RawHandle, SyscallError> {
             image: image.0 as u64,
             image_len: len,
             place: u64::from(toyos_abi::HANDLE_INVALID.0),
+            pager: u64::from(toyos_abi::HANDLE_INVALID.0),
         })
     }
 }
 
 fn runs(what: &str) {
     let (object, len) = object_of(SELF);
-    let child = spawn(object.as_handle(), len).unwrap_or_else(|e| panic!("{what}: spawn from an object: {e:?}"));
+    let child = spawn(object.as_handle().raw(), len).unwrap_or_else(|e| panic!("{what}: spawn from an object: {e:?}"));
     drop(object);
     let end = syscall::process_wait(child).unwrap_or_else(|e| panic!("{what}: wait: {e:?}"));
     assert_eq!(end, End::Exited(0), "{what}: the child spawned from an object ended {end}");
@@ -70,19 +69,20 @@ fn main() {
     runs("first");
 
     let (object, len) = object_of(SELF);
-    let unmappable = syscall::dup_narrowed(object.as_handle(), Rights::DUP.union(Rights::TRANSFER))
+    // SAFETY: nothing relies on being the source's only holder.
+    let unmappable = unsafe { syscall::dup_narrowed(object.as_handle().raw(), Rights::DUP.union(Rights::TRANSFER)) }
         .expect("a duplicate without MAP");
     assert_eq!(spawn(unmappable, len).err(), Some(SyscallError::PermissionDenied), "an object without MAP");
-    syscall::close(unmappable);
+    // SAFETY: no type holds this number.
+    unsafe { syscall::close(unmappable) };
     // Past the whole object, which the kernel rounds up to 2 MiB pages.
     let past = (len | ((2 << 20) - 1)) + 2;
-    assert_eq!(spawn(object.as_handle(), past).err(), Some(SyscallError::InvalidArgument), "a length past the object");
+    assert_eq!(spawn(object.as_handle().raw(), past).err(), Some(SyscallError::InvalidArgument), "a length past the object");
     println!("spawn_image_object: an object without MAP and a length past one are refused");
 
-    let child = spawn(object.as_handle(), len).expect("spawn from the object that is then overwritten");
-    // SAFETY: the region is `object.len()` long and mapped here; the kernel
-    // reads it only by copying, which is what this races.
-    unsafe { core::ptr::write_bytes(object.as_ptr(), 0xF4, object.len()) };
+    let child = spawn(object.as_handle().raw(), len).expect("spawn from the object that is then overwritten");
+    // The kernel reads the object only by copying, which is what this races.
+    object.bytes().write(0, &vec![0xF4; object.len()]);
     let end = syscall::process_wait(child).expect("the overwritten child is waited for");
     println!("spawn_image_object: a child whose object was overwritten after the spawn ended ({end})");
     drop(object);

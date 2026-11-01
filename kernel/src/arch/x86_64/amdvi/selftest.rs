@@ -43,7 +43,8 @@ pub fn run(devices: &[PciDevice]) {
 
     // Before any declaration, so clear of no window: QEMU routes nothing on
     // its root bus peer to peer, so the device's write reaches the unit.
-    let (space, at) = OwnSpace::create(PAGE_2M, &[]).expect("amdvi-selftest: a domain on the programmed unit");
+    let (space, at) =
+        OwnSpace::create(PAGE_2M, &[], moved.bus, moved.dev, moved.func).expect("amdvi-selftest: a domain on the programmed unit");
     space.place(at, phys, PAGE_2M).expect("amdvi-selftest: the domain's own first leaf");
     space.attach(moved.bus, moved.dev, moved.func);
     let landed = write(moved_regs, at + 0x40, phys + 0x40);

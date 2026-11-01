@@ -74,6 +74,11 @@ pub fn s5(_row: &isa::Row, _word: u64) -> Result<(), SyscallError> {
     Err(SyscallError::NotSupported)
 }
 
+/// No idle state deeper than the one a CPU waits in is entered here.
+pub fn idle(_row: &isa::Row, _declaration: &toyos_abi::acpi::IdleDeclaration) -> Result<(), SyscallError> {
+    Err(SyscallError::NotSupported)
+}
+
 #[cfg(feature = "test-actuators")]
 pub fn debug_firmware_lock(_act: u64) -> u64 {
     SyscallError::NotSupported.to_u64()

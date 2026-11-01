@@ -1,14 +1,18 @@
 //! A thread's TLS block, in this machine's psABI variant with the DTV in front of it. The layout
-//! arithmetic is `toyos_elf::tls`; this is the allocation, the template copies, the TCB and the DTV.
+//! arithmetic is `toyos_elf::tls`; this is the block's bytes, the template copies, the TCB and the
+//! DTV.
 //!
-//! A block is built in frames no user mapping reaches ([`crate::process::Unpublished`]), holding
-//! physical addresses, and rebased to the address it is given inside the one call that maps it:
-//! a process's other threads never see a pointer the kernel has yet to fix, and the kernel never
-//! reads the block once they can write it.
+//! A block is laid out on the kernel's heap with every pointer in it an offset from its start, and
+//! moved to the address it is given inside the one hold of the space that maps it: a process's
+//! other threads never see a pointer the kernel has yet to fix, and the kernel never reads the
+//! block once they can write it.
+
+use alloc::vec::Vec;
 
 use crate::elf::TlsModule;
-use crate::process::{MappedPages, OwnedAlloc, PageAlloc, PageTables, Unpublished};
-use crate::UserAddr;
+use crate::mm::space::At;
+use crate::object::shm::SharedMemObject;
+use crate::process::{OwnedAlloc, PageTables, KernelMapping};
 use toyos_elf::tls::{Static, Variant};
 use toyos_elf::{Layout, TlsSegment};
 
@@ -27,9 +31,11 @@ const DTV_UNALLOCATED: u64 = !0u64;
 
 /// One thread's TLS block, built and not yet mapped.
 pub struct TlsBlock {
-    frames: Unpublished,
+    bytes: Vec<u8>,
     /// Where the thread pointer goes, from the block's first byte.
     tp_offset: usize,
+    /// What its start is aligned to.
+    align: u64,
 }
 
 impl TlsBlock {
@@ -44,118 +50,85 @@ impl TlsBlock {
         build_combined(modules, tls)
     }
 
-    /// Map the block into `pt`, returning its mapping, the thread pointer, and
-    /// where that pointer lies in the block. `None`, with the frames freed,
-    /// when `pt` has no room.
-    pub fn publish(self, pt: &PageTables) -> Option<(MappedPages, u64, usize)> {
-        let tp_offset = self.tp_offset;
-        let pages = self.frames.publish(pt, crate::mm::policy::Prot::ReadWrite, |frames, at| {
-            // SAFETY: `frames` is the block `build_combined` wrote, reachable
-            // by no mapping until `publish` maps it after this returns.
-            unsafe { rebase(frames, tp_offset, at) }
-        })?;
-        let thread_pointer = (pages.vaddr() + tp_offset as u64).raw();
-        Some((pages, thread_pointer, tp_offset))
+    /// Map the block into `space`, counted to its job, answering its mapping, the thread pointer,
+    /// and where that pointer lies in the block. `None` when `space` has no
+    /// room or no memory is left for it.
+    pub fn publish(mut self, pt: &PageTables) -> Option<(KernelMapping, u64, usize)> {
+        let job = alloc::sync::Arc::clone(pt.lock().job());
+        let object = SharedMemObject::create(&job, self.bytes.len() as u64).ok()?;
+        let mut space = pt.lock();
+        let at = space.reserve(object.size(), At::Anywhere(self.align), kernel::vm::Prot::None).ok()?;
+        rebase(&mut self.bytes, self.tp_offset, at.raw());
+        object.write(0, &self.bytes);
+        let len = object.size();
+        space.map(object.clone(), 0, len, kernel::vm::Prot::ReadWrite, At::Fixed(at)).ok()?;
+        let thread_pointer = at.raw() + self.tp_offset as u64;
+        Some((KernelMapping { object, at }, thread_pointer, self.tp_offset))
     }
 }
 
 /// Every static module's template copied in, and the TCB and DTV pointing at
-/// the block's physical address, which [`rebase`] moves once it has another.
+/// offsets from the block's start, which [`rebase`] moves once it has an address.
 fn build_combined(modules: &[TlsModule], tls: Static) -> Option<TlsBlock> {
-    let plan = tls.plan(TCB_SIZE, DTV_BYTES, crate::mm::PAGE_2M as usize)?;
-    let frames = Unpublished::new(PageAlloc::new(plan.alloc_size)?);
-    let block = frames.ptr();
-
-    // SAFETY: `block` is the fresh, unpublished `plan.alloc_size`-byte allocation above.
-    unsafe {
-        core::ptr::write_bytes(block, 0, plan.alloc_size);
+    let plan = tls.plan(TCB_SIZE, DTV_BYTES, crate::mm::PAGE_SIZE as usize)?;
+    if plan.alloc_size > crate::mm::MAX_HEAP_ALLOC {
+        return None;
     }
-
+    let mut block = alloc::vec![0u8; plan.alloc_size];
     for module in modules.iter().filter(|m| m.is_static) {
         if let Some(template) = &module.template {
-            // SAFETY: `KernelSlice` is bounds-checked and `toyos_elf::tls` bounds the copy inside the unpublished `block`.
-            unsafe {
-                core::ptr::copy_nonoverlapping(
-                    template.base(),
-                    block.add(plan.tls_start + module.base_offset),
-                    template.size(),
-                );
-            }
+            let at = plan.tls_start + module.base_offset;
+            // SAFETY: a bounds-checked view of the template, which its module keeps alive.
+            let bytes = unsafe { template.as_slice() };
+            block[at..at + bytes.len()].copy_from_slice(bytes);
         }
     }
+    let mut put = |at: usize, value: u64| block[at..at + 8].copy_from_slice(&value.to_ne_bytes());
 
-    let block_phys = frames.phys();
-    let tp_phys = block_phys + plan.tp_offset as u64;
-    // SAFETY: the plan reserves `TCB_SIZE` bytes at `tp_offset` inside `alloc_size`.
-    let tp_kernel = unsafe { block.add(plan.tp_offset) } as *mut u64;
     // The thread's id (`toyos_abi::TCB_TID`) is TP+16 on variant II and TP+8 on
     // variant I, zero here — a process's first thread is tid 0 — and written by
     // `process::spawn_thread` for every other.
-    // SAFETY: two words of the TCB the plan reserves at `tp_kernel` (`TCB_SIZE`, or
-    // variant I's gap of at least 16); `block` is still unpublished.
-    unsafe {
-        match VARIANT {
-            // TP+0 the psABI self-pointer, TP+8 the DTV pointer.
-            Variant::II => {
-                *tp_kernel = tp_phys;
-                *tp_kernel.add(1) = block_phys;
-            }
-            // TP+0 the DTV pointer, TP+8 the implementation's word, the tid (zeroed above).
-            Variant::I => *tp_kernel = block_phys,
+    match VARIANT {
+        // TP+0 the psABI self-pointer, TP+8 the DTV pointer.
+        Variant::II => {
+            put(plan.tp_offset, plan.tp_offset as u64);
+            put(plan.tp_offset + 8, 0);
+        }
+        // TP+0 the DTV pointer, TP+8 the implementation's word, the tid (zeroed above).
+        Variant::I => put(plan.tp_offset, 0),
+    }
+
+    put(0, 1);
+    put(8, DTV_INITIAL_CAPACITY as u64);
+    for i in 0..DTV_INITIAL_CAPACITY {
+        put(16 + i * 8, DTV_UNALLOCATED);
+    }
+    // A `dlopen`ed module's slot stays unallocated until `__tls_get_addr` asks for it.
+    for module in modules.iter().filter(|m| m.is_static) {
+        let idx = module.module_id as usize;
+        if idx > 0 && idx <= DTV_INITIAL_CAPACITY {
+            put(16 + (idx - 1) * 8, (plan.tls_start + module.base_offset) as u64);
         }
     }
 
-    let dtv = block as *mut u64;
-    // SAFETY: every write lands in `[0, DTV_BYTES)`, reserved by the plan at the front of `block`.
-    unsafe {
-        *dtv = 1;
-        *dtv.add(1) = DTV_INITIAL_CAPACITY as u64;
-        for i in 0..DTV_INITIAL_CAPACITY {
-            *dtv.add(2 + i) = DTV_UNALLOCATED;
-        }
-        // A `dlopen`ed module's slot stays unallocated until `__tls_get_addr` asks for it.
-        for module in modules.iter().filter(|m| m.is_static) {
-            let idx = module.module_id as usize;
-            if idx > 0 && idx <= DTV_INITIAL_CAPACITY {
-                *dtv.add(2 + idx - 1) = block_phys + (plan.tls_start + module.base_offset) as u64;
-            }
-        }
-    }
-
-    Some(TlsBlock { frames, tp_offset: plan.tp_offset })
+    let align = (tls.align() as u64).max(crate::mm::PAGE_SIZE);
+    Some(TlsBlock { bytes: block, tp_offset: plan.tp_offset, align })
 }
 
-/// Move the block's self-referential pointers from its physical address to
-/// `at`, in place.
+/// Move the block's self-referential pointers from offsets to addresses at `at`.
 ///
-/// No Rust type expresses a DTV whose entries point into itself; this models the psABI layout
-/// directly. The walk is `DTV_INITIAL_CAPACITY` entries, the builder's own constant: the DTV's
-/// length word is the process's to rewrite once the block is mapped, and is never read here.
-///
-/// # Safety
-/// `frames` is a block [`build_combined`] wrote with its thread pointer at `tp_offset`, and no
-/// mapping reaches it.
-unsafe fn rebase(frames: &Unpublished, tp_offset: usize, at: UserAddr) {
-    let phys = frames.phys();
-    let moved = |p: u64| (at + (p - phys)).raw();
-    // SAFETY: the caller's contract; every access is inside the TCB and DTV the builder reserved.
-    unsafe {
-        let block = frames.ptr();
-        let tp = block.add(tp_offset) as *mut u64;
-        match VARIANT {
-            Variant::II => {
-                *tp = moved(*tp);
-                *tp.add(1) = moved(*tp.add(1));
-            }
-            Variant::I => *tp = moved(*tp),
-        }
-        let dtv = block as *mut u64;
-        for i in 0..DTV_INITIAL_CAPACITY {
-            let entry = *dtv.add(2 + i);
-            if entry != DTV_UNALLOCATED {
-                *dtv.add(2 + i) = moved(entry);
-            }
-        }
+/// The walk is `DTV_INITIAL_CAPACITY` entries, the builder's own constant: the DTV's length word is
+/// the process's to rewrite once the block is mapped, and is never read here.
+fn rebase(block: &mut [u8], tp_offset: usize, at: u64) {
+    let word = |block: &[u8], offset: usize| u64::from_ne_bytes(block[offset..offset + 8].try_into().expect("eight bytes"));
+    let mut offsets: Vec<usize> = match VARIANT {
+        Variant::II => alloc::vec![tp_offset, tp_offset + 8],
+        Variant::I => alloc::vec![tp_offset],
+    };
+    offsets.extend((0..DTV_INITIAL_CAPACITY).map(|i| 16 + i * 8).filter(|&offset| word(block, offset) != DTV_UNALLOCATED));
+    for offset in offsets {
+        let moved = word(block, offset) + at;
+        block[offset..offset + 8].copy_from_slice(&moved.to_ne_bytes());
     }
 }
 

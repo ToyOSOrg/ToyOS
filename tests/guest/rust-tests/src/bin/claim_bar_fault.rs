@@ -111,9 +111,22 @@ fn holder() {
             regs.read::<u64>(DMA_SOURCE) == MARK_SOURCE && regs.read::<u64>(DMA_DESTINATION) == MARK_DESTINATION,
             "claim_bar_fault: the refused read wrote into the BAR"
         );
-        syscall::close(pipe.read);
-        syscall::close(pipe.write);
-        println!("claim_bar_fault: a read into the BAR and a write from it were refused BadAddress, the registers untouched");
+        // SAFETY: no type holds this number.
+        unsafe { syscall::close(pipe.read) };
+        // SAFETY: no type holds this number.
+        unsafe { syscall::close(pipe.write) };
+        // A futex word the kernel would read through the direct map, which
+        // reaches no BAR. The expected value is the marker's low word, so a
+        // wait that read the register would park for ever.
+        let word = at as *const u32;
+        // SAFETY: an aligned word inside the live mapping; the kernel is what
+        // refuses it.
+        let waited = unsafe { syscall::futex_wait(word, MARK_SOURCE as u32, Some(0)) };
+        assert_eq!(SyscallError::from_u64(waited), Some(SyscallError::BadAddress), "claim_bar_fault: a futex wait on the BAR answered {waited:#x}");
+        // SAFETY: as above.
+        let woken = unsafe { syscall::futex_wake(word, 1) };
+        assert_eq!(SyscallError::from_u64(woken), Some(SyscallError::BadAddress), "claim_bar_fault: a futex wake on the BAR answered {woken:#x}");
+        println!("claim_bar_fault: a read into the BAR, a write from it and a futex on it were refused BadAddress, the registers untouched");
     }
 
     // `frame` runs an undefined instruction with its stack in the BAR; `jump`
@@ -121,7 +134,7 @@ fn holder() {
     for (role, fault) in [("frame", Fault::Instruction), ("jump", Fault::Memory)] {
         let status = Command::new(SELF_PATH)
             .arg(role)
-            .endow(SYSCAP_LABEL, cap.duplicate().expect("claim_bar_fault: a capability for the child").into_raw().0)
+            .endow(SYSCAP_LABEL, cap.duplicate().expect("claim_bar_fault: a capability for the child").into())
             .status()
             .expect("claim_bar_fault: spawn a child");
         assert_eq!(

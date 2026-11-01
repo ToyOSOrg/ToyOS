@@ -11,6 +11,10 @@ rustc-dep-of-std = ["core", "alloc", "toyos-abi/rustc-dep-of-std", "fd-table"]
 # This copy owns the process's descriptor table (`src/fd.rs`): on in std's
 # build and in libc's C-only build, and in no other.
 fd-table = []
+# std's handle types (`std::os::toyos::io`) converted to and from this crate's,
+# for a program's own copy, which links beside std. Never on in std's own
+# build or in libc's.
+std = []
 # The negative control for the log ring's publication. It makes the store that
 # publishes a record `Relaxed`, and `kernel-loom`'s `log_ring` model must red:
 #
@@ -67,6 +71,30 @@ transport-register-neither = ["transport-register-no-arm", "transport-register-n
 # only the room and not a failure, so a writer over a full ring sleeps through
 # a reset.
 transport-head-only = []
+# The gates of an end with several holders. A gate's release never rings the
+# server, so a holder asleep for the gate sleeps for good.
+transport-gate-no-want = []
+# A holder that finds the gate another's sets the gate's want and arms no want
+# of its direction, so the server's ring back after the release rings nobody.
+transport-contended-no-arm = []
+# A holder sets the gate's want before it arms its direction's, so a release
+# between the two rings the server while nothing is armed.
+transport-want-before-arm = []
+# A holder's write reads only its own process's shutdown, so it publishes past
+# another holder's.
+transport-shut-local = []
+# A departure frees the departed holder's gates and rings nobody, so a holder
+# asleep for one sleeps for good.
+transport-departure-no-pass = []
+# A departure frees a gate `Relaxed`, so the next owner's copy is not ordered
+# after the departed owner's.
+transport-departure-relaxed = []
+# A holder takes no cursor up from the words, so it copies from where its own
+# process last left the ring, not where the end is.
+transport-no-resume = []
+# A look without the gate is believed when it names a violation, so a cursor
+# another holder moved under it ends the call.
+transport-ungated-violation = []
 
 [lints.rust]
 # The guest's target: its stream sinks are compiled only for it.

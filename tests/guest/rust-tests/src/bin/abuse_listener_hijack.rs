@@ -71,7 +71,7 @@ fn test() {
     //    given access to a service cannot take that service's connections
     //    however it addresses the call.
     assert_eq!(
-        syscall::accept(connector.as_handle()).err(),
+        syscall::accept(connector.as_handle().raw()).err(),
         Some(SyscallError::PermissionDenied),
         "a connector accepted a connection"
     );
@@ -86,7 +86,7 @@ fn test() {
     // stops it being closed as a second owner, and it does not outlive
     // `smuggled`.
     let fake = core::mem::ManuallyDrop::new(unsafe {
-        port::Connector::from_raw(smuggled.as_handle())
+        port::Connector::from_raw(smuggled.as_handle().raw())
     });
     assert_eq!(
         namespace::build().add(NAME, &fake).finish().err(),
@@ -184,7 +184,7 @@ fn thief() -> ! {
 /// still holds it.
 fn victim() -> ! {
     let (acceptor, connector) = port::create().expect("victim: a port of its own");
-    println!("{}", acceptor.as_handle().0);
+    println!("{}", acceptor.as_handle().raw().0);
     std::io::stdout().flush().expect("victim: flush");
 
     let mut line = String::new();

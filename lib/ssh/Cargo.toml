@@ -1,0 +1,22 @@
+# A member of the host workspace (root `Cargo.toml`): its tests run on the
+# host. `system/sshserver` serves on it, and the build reads the image-signing
+# key with its `hostkey`.
+
+[package]
+name = "toyos-ssh"
+description = "An SSH server, sans-IO: the trust boundary of every network login — version exchange, packets, key exchange, publickey authentication, session channels and `authorized_keys` — with no socket, thread or clock of its own."
+version = "0.1.0"
+edition = "2021"
+license = "MIT OR Apache-2.0"
+publish = false
+
+[dependencies]
+# Every primitive the one algorithm set needs: ML-KEM-768 and its SSH
+# combiner, X25519, Ed25519 sign and verify, `chacha20-poly1305@openssh.com`
+# and SHA-256. Its randomness is the
+# caller's.
+toyos-crypto = { path = "../../lib/crypto", features = ["sign"] }
+# The one `SHA256:` fingerprint a key is named by, the one the package
+# repository's keys are named by too; and the public key of a seed, which the
+# image-signing key read through `hostkey` is derived with, which is `sign`'s.
+toyos-update = { path = "../../lib/update", features = ["sign"] }

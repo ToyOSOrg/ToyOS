@@ -1,12 +1,10 @@
 //! Everything between a client's pipe and a decision.
 //!
-//! **The compositor never reads a client with a blocking read**, and never
-//! writes one with a blocking write. `ipc::recv_header` and `ipc::recv_payload`
-//! park the caller until the peer sends the bytes it promised, which hands a
-//! client the decision of when the desktop runs again; a blocking `send` hands
-//! it the same decision by not reading. Here a peer that stops halfway through
-//! a frame costs a buffer and a deadline, and one that will not take a message
-//! costs itself.
+//! **The compositor never waits on a client**, to receive or to send. A
+//! blocking receive hands a client the decision of when the desktop runs
+//! again, and a blocking `send` hands it the same decision by not reading.
+//! Frames are taken with `ipc::FrameRx::pump`, and one a client will not take
+//! costs that client itself.
 //!
 //! **The compositor never receives a handle from a client.** A received handle's
 //! kind is unknowable, and using one of the wrong kind ends the process that
@@ -14,10 +12,9 @@
 //! handle a client sends stays queued until its connection closes.
 
 use std::fmt;
-use std::sync::atomic::Ordering;
 use std::time::{Duration, Instant};
 
-use toyos::shm::SharedMemory;
+use toyos::shm::ReadOnly;
 use toyos::{ipc, AsHandle, Connection, OwnedHandle};
 use toyos_abi::syscall::SyscallError;
 use toyos_abi::RawHandle;
@@ -57,10 +54,10 @@ pub struct Client {
     pub frames: u64,
 }
 
-/// A window's buffer, the compositor's own handle to it, its size in pixels
-/// and the scale its client draws into it at.
+/// A window's buffer, the compositor's own read-only mapping of it, its size
+/// in pixels and the scale its client draws into it at.
 pub struct Buffer {
-    pub shm: SharedMemory,
+    pub shm: ReadOnly,
     pub width: i32,
     pub height: i32,
     pub scale: window::Scale,
@@ -112,9 +109,8 @@ impl ClientFrame {
 
 /// A connection that has been accepted and has not yet said what it is for.
 ///
-/// It exists because `accept` and the first frame are two events, and the
-/// compositor used to fuse them with a blocking `recv_header` — so a client
-/// that connected and sent four bytes owned the desktop until it disconnected.
+/// It exists because `accept` and the first frame are two events: a client
+/// that connects and sends nothing must not hold the desktop.
 pub struct PendingConn {
     pub conn: Connection,
     pub rx: ClientRx,
@@ -134,16 +130,16 @@ pub struct PendingConn {
 ///
 /// **Read once, and only by being taken.** Its one method consumes it, so
 /// nothing here can read the region twice or validate it in place.
-pub struct CopyRegion(SharedMemory);
+pub struct CopyRegion(ReadOnly);
 
 impl CopyRegion {
-    pub fn new(region: SharedMemory) -> Self {
+    pub fn new(region: ReadOnly) -> Self {
         Self(region)
     }
 
     /// Every byte, each read once, into memory no client can write.
     pub fn take(self) -> Vec<u8> {
-        self.0.as_atomic().iter().map(|b| b.load(Ordering::Relaxed)).collect()
+        self.0.bytes().to_vec()
     }
 }
 
@@ -171,14 +167,13 @@ pub enum DropReason {
     /// `window::MSG_RETIRED_CLIPBOARD_SET_SHM`, whose handle this compositor
     /// never takes.
     Retired,
-    /// Its pipe would not take a whole frame — an entire pipe of messages it
-    /// has not read.
+    /// Its connection would not take a whole frame — a full queue of messages
+    /// it has not taken.
     NotReading,
     /// Its other end closed: the one send error that is a client's routine end.
     Gone,
-    /// The kernel refused a send to it for any other reason — a handle send
-    /// to a peer that leaves `MAX_QUEUED_BATCHES` unreceived is
-    /// `ResourceExhausted`.
+    /// The kernel refused a send to it for any other reason, such as no memory
+    /// for the frame's bytes (`ResourceExhausted`).
     Refused(SyscallError),
     /// A message to it that this end will not frame.
     TooLarge,
@@ -196,7 +191,7 @@ impl fmt::Display for DropReason {
                 f.write_str("it sent the retired clipboard region, whose handle is never taken")
             }
             Self::NotReading => {
-                f.write_str("its pipe will not take another message and it is not reading")
+                f.write_str("its connection will not take another message and it is not reading")
             }
             Self::Gone => f.write_str("its connection is gone"),
             Self::Refused(e) => write!(f, "the kernel refused a send to it: {e}"),
@@ -273,7 +268,7 @@ pub fn announce(dead: &[Dead]) {
 pub fn note_closed(by: &str, win: &Win, remaining: usize) {
     println!(
         "compositor: window closed client={} by {by}, {remaining} left, presents={} frames={}",
-        win.client.conn.as_handle().0,
+        win.client.conn.as_handle().raw().0,
         win.client.presents,
         win.client.frames
     );
@@ -298,7 +293,7 @@ pub fn note_opened(client: RawHandle, content: toyos_desktop::Rect, live: usize)
 /// is the price of never blocking on a client.
 pub fn deliver<T: ipc::IpcPayload>(dead: &mut Vec<Dead>, win: &Win, msg_type: u32, payload: &T) {
     if let Err(e) = win.client.conn.try_send(msg_type, payload) {
-        mark_dead(dead, win.client.conn.as_handle(), e.into());
+        mark_dead(dead, win.client.conn.as_handle().raw(), e.into());
     }
 }
 
@@ -312,13 +307,13 @@ pub fn deliver_with_handle<T: ipc::IpcPayload>(
     payload: &T,
 ) {
     if let Err(e) = win.client.conn.try_send_with(msg_type, payload, [handle]) {
-        mark_dead(dead, win.client.conn.as_handle(), e.into());
+        mark_dead(dead, win.client.conn.as_handle().raw(), e.into());
     }
 }
 
 /// [`deliver`] for a message that is only its own header.
 pub fn deliver_signal(dead: &mut Vec<Dead>, win: &Win, msg_type: u32) {
     if let Err(e) = win.client.conn.try_signal(msg_type) {
-        mark_dead(dead, win.client.conn.as_handle(), e.into());
+        mark_dead(dead, win.client.conn.as_handle().raw(), e.into());
     }
 }

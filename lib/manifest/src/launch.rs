@@ -3,24 +3,20 @@
 //! **A caller starts only the rows its own row's `starts` lists**: program
 //! keys, and [`APPS`] for any installed package. **A row that replaces what the
 //! machine runs starts only in a login session** ([`Program::login_only`]). Both
-//! are the owner's ruling. A launch by a row marked `login`, made in the
-//! machine's session, opens a login session of its own ([`Sessions`]); every
-//! other launch, a `login` row's in a login session included, is in its
-//! caller's session, and a row the supervisor starts itself is in the machine's.
+//! are the owner's ruling. A launch is in its caller's session: a row the
+//! supervisor starts itself is in the machine's, and a login session is opened
+//! for a `login` row ([`Sessions::open`]), never by a launch.
 //!
 //! **A share is what a file server bounds** ([`Session::share`]): each service
 //! the supervisor starts itself has one of its own, each login session has
-//! one, and every launch that opens no session spends its caller's. So no
-//! number of launches a service or a login session makes, through whatever
-//! its rows' `starts` reach, gives it more of a server: only the machine's
-//! session opens one.
+//! one, and every launch spends its caller's. So no number of launches a
+//! service or a login session makes, through whatever its rows' `starts`
+//! reach, gives it more of a server.
 //!
 //! **A login session holds the screen only where the screen's row opened it**
 //! ([`Screen`]): the row serving [`consent::PROMPT`], the one whose launches a
-//! person at the screen made. Every launch in that session holds it, but for
-//! one made by another `login` row, whose launches are never that person's:
-//! sshserver's shells, even one a desktop shell started, never hold it. Only a
-//! launch in a session holding it may ask the person at the screen anything.
+//! person at the screen made. Only a launch in a session holding it may ask
+//! the person at the screen anything.
 //!
 //! **The caller is the badge on its connection, not its word** ([`Authority`]):
 //! the supervisor mints it on the launcher it endows a row, the kernel stamps it
@@ -46,8 +42,8 @@ pub enum Session {
     /// A service the supervisor started itself, and every launch made from it
     /// that opens no session.
     Machine(Share),
-    /// One a `login` row's launch from the machine's session opened, and every
-    /// launch made in it.
+    /// One the supervisor opened for a `login` row, and every launch made in
+    /// it.
     Login(Share, Screen),
 }
 
@@ -60,8 +56,8 @@ pub enum Screen {
 }
 
 impl Screen {
-    /// What a session `opener`'s launch opens holds: the screen where `opener`
-    /// serves the prompt layer.
+    /// What a session `opener` opens holds: the screen where `opener` serves
+    /// the prompt layer.
     pub fn of(opener: &Program) -> Self {
         match opener.serves.iter().any(|name| name == consent::PROMPT) {
             true => Self::Held,
@@ -206,28 +202,8 @@ impl fmt::Display for Refusal {
     }
 }
 
-/// Which session a launch [`may_start`] allowed runs in.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum Starts {
-    /// Its caller's.
-    In(Session),
-    /// A login session it opens, holding the screen or not.
-    Opening(Screen),
-}
-
-impl Starts {
-    /// The session, opened from `sessions` when the launch opens one.
-    pub fn session(self, sessions: &mut Sessions) -> Session {
-        match self {
-            Self::In(session) => session,
-            Self::Opening(screen) => sessions.open(screen),
-        }
-    }
-}
-
-/// Where `target` starts when `caller`, running in `session`, asks for it, or
-/// why it does not start.
-pub fn may_start(caller: &Program, session: Session, target: Target<'_>) -> Result<Starts, Refusal> {
+/// Whether `caller`, running in `session`, may start `target`.
+pub fn may_start(caller: &Program, session: Session, target: Target<'_>) -> Result<(), Refusal> {
     let (listed, program) = match target {
         Target::Row(row) => (row.name.as_str(), row),
         Target::Package(row) => (APPS, row),
@@ -235,21 +211,10 @@ pub fn may_start(caller: &Program, session: Session, target: Target<'_>) -> Resu
     if !caller.starts.iter().any(|key| key == listed) {
         return Err(Refusal::NotListed);
     }
-    // Only from the machine's session: a login session reaching a `login` row
-    // through `starts` would otherwise hold a share per launch of it. A
-    // `login` row's launch in one keeps its share and holds the screen only
-    // where the row is the screen's.
-    let starts = match (caller.login, session) {
-        (true, Session::Machine(_)) => Starts::Opening(Screen::of(caller)),
-        (true, Session::Login(share, Screen::Held)) if Screen::of(caller) == Screen::Not => {
-            Starts::In(Session::Login(share, Screen::Not))
-        }
-        _ => Starts::In(session),
-    };
-    if program.login_only() && matches!(starts, Starts::In(Session::Machine(_))) {
+    if program.login_only() && matches!(session, Session::Machine(_)) {
         return Err(Refusal::OutsideLogin);
     }
-    Ok(starts)
+    Ok(())
 }
 
 #[cfg(test)]
@@ -270,106 +235,54 @@ mod tests {
         Program { slots: true, ..row("update") }
     }
 
-    fn caller(login: bool) -> Program {
-        Program {
-            starts: ["ordinary", "swap", "update", "caller", APPS].map(String::from).to_vec(),
-            login,
-            ..row("caller")
-        }
+    fn caller() -> Program {
+        Program { starts: ["ordinary", "swap", "update", "caller", APPS].map(String::from).to_vec(), ..row("caller") }
     }
 
-    /// Every target kind against every session and both kinds of caller.
+    /// Every target kind against both kinds of session.
     #[test]
     fn a_caller_starts_what_its_row_lists_and_swap_and_update_only_in_a_login_session() {
-        let (ordinary, unlisted, own, package) = (row("ordinary"), row("unlisted"), caller(false), row("gbae"));
+        let (ordinary, unlisted, own, package) = (row("ordinary"), row("unlisted"), caller(), row("gbae"));
         let (swap, update) = (swap(), update());
         let mut sessions = Sessions::default();
         let (machine, login) = (sessions.machine(), sessions.open(Screen::Not));
         use Refusal::*;
-        use Starts::*;
         #[rustfmt::skip]
-        let table: [(bool, Session, Target, Result<Starts, Refusal>); 24] = [
-            (false, machine, Target::Row(&ordinary), Ok(In(machine))),
-            (false, login, Target::Row(&ordinary), Ok(In(login))),
-            (false, machine, Target::Row(&unlisted), Err(NotListed)),
-            (false, login, Target::Row(&unlisted), Err(NotListed)),
-            (false, machine, Target::Row(&own), Ok(In(machine))),
-            (false, login, Target::Row(&own), Ok(In(login))),
-            (false, machine, Target::Package(&package), Ok(In(machine))),
-            (false, login, Target::Package(&package), Ok(In(login))),
-            (false, machine, Target::Row(&swap), Err(OutsideLogin)),
-            (false, login, Target::Row(&swap), Ok(In(login))),
-            (false, machine, Target::Row(&update), Err(OutsideLogin)),
-            (false, login, Target::Row(&update), Ok(In(login))),
-            (true, machine, Target::Row(&ordinary), Ok(Opening(Screen::Not))),
-            (true, login, Target::Row(&ordinary), Ok(In(login))),
-            (true, machine, Target::Row(&unlisted), Err(NotListed)),
-            (true, login, Target::Row(&unlisted), Err(NotListed)),
-            (true, machine, Target::Row(&own), Ok(Opening(Screen::Not))),
-            (true, login, Target::Row(&own), Ok(In(login))),
-            (true, machine, Target::Package(&package), Ok(Opening(Screen::Not))),
-            (true, login, Target::Package(&package), Ok(In(login))),
-            (true, machine, Target::Row(&swap), Ok(Opening(Screen::Not))),
-            (true, login, Target::Row(&swap), Ok(In(login))),
-            (true, machine, Target::Row(&update), Ok(Opening(Screen::Not))),
-            (true, login, Target::Row(&update), Ok(In(login))),
+        let table: [(Session, Target, Result<(), Refusal>); 12] = [
+            (machine, Target::Row(&ordinary), Ok(())),
+            (login, Target::Row(&ordinary), Ok(())),
+            (machine, Target::Row(&unlisted), Err(NotListed)),
+            (login, Target::Row(&unlisted), Err(NotListed)),
+            (machine, Target::Row(&own), Ok(())),
+            (login, Target::Row(&own), Ok(())),
+            (machine, Target::Package(&package), Ok(())),
+            (login, Target::Package(&package), Ok(())),
+            (machine, Target::Row(&swap), Err(OutsideLogin)),
+            (login, Target::Row(&swap), Ok(())),
+            (machine, Target::Row(&update), Err(OutsideLogin)),
+            (login, Target::Row(&update), Ok(())),
         ];
-        for (i, (opens, session, target, want)) in table.into_iter().enumerate() {
-            assert_eq!(may_start(&caller(opens), session, target), want, "row {i}");
+        for (i, (session, target, want)) in table.into_iter().enumerate() {
+            assert_eq!(may_start(&own, session, target), want, "row {i}");
         }
     }
 
-    fn launch(sessions: &mut Sessions, caller: &Program, session: Session, target: &Program) -> Session {
-        may_start(caller, session, Target::Row(target)).expect("listed").session(sessions)
-    }
-
-    /// The shipping rows' chains. Each start the supervisor makes itself has a
-    /// share of its own, which a launch by a row that is not `login` spends.
-    /// The compositor, a `login` row in the machine's session, opens a session
-    /// on each launch; every launch in that session spends its share, down a
-    /// chain of shells and through sshserver, a `login` row it reaches, and
-    /// the shell sshserver launches. No two of those shares are one, nor any
-    /// the supervisor's. The session the compositor, the screen's row, opens
-    /// holds the screen down the chain of shells, and sshserver's launches in
-    /// it never do.
+    /// Each service the supervisor starts and each session it opens has a share
+    /// of its own, none the supervisor's; only the screen's row's session
+    /// holds the screen.
     #[test]
-    fn a_sessions_launches_spend_its_one_share() {
-        let runner = Program { starts: vec!["toybox".into()], ..row("test-runner") };
-        let compositor = Program {
-            starts: vec!["terminal".into()],
-            login: true,
-            serves: vec![consent::PROMPT.into()],
-            ..row("compositor")
-        };
-        let terminal = Program { starts: vec!["shell".into()], ..row("terminal") };
-        let shell = Program { starts: vec!["shell".into(), "sshserver".into()], ..row("shell") };
-        let sshserver = Program { starts: vec!["shell".into()], login: true, ..row("sshserver") };
+    fn every_service_and_session_has_a_share_of_its_own() {
+        let compositor = Program { login: true, serves: vec![consent::PROMPT.into()], ..row("compositor") };
+        let sshserver = Program { login: true, ..row("sshserver") };
         let mut sessions = Sessions::default();
-        let (desktop, tests) = (sessions.machine(), sessions.machine());
-        assert_eq!(launch(&mut sessions, &runner, tests, &row("toybox")), tests, "a boot row's launch left its share");
-        let mut shares = vec![SUPERVISOR_SHARE, desktop.share(), tests.share()];
-        for _ in 0..2 {
-            let opened = launch(&mut sessions, &compositor, desktop, &terminal);
-            assert!(opened.at_screen(), "the compositor's launch opened {opened:?}");
-            let mut session = launch(&mut sessions, &terminal, opened, &shell);
-            for _ in 0..8 {
-                session = launch(&mut sessions, &shell, session, &shell);
-            }
-            assert_eq!(session, opened, "a login session's launches left it");
-            session = launch(&mut sessions, &shell, session, &sshserver);
-            assert_eq!(session, opened, "sshserver was not started in the desktop's session");
-            session = launch(&mut sessions, &sshserver, session, &shell);
-            assert_eq!(session.share(), opened.share(), "sshserver's launch left the session's share");
-            assert!(!session.at_screen(), "sshserver's launch holds the screen: {session:?}");
-            assert!(!launch(&mut sessions, &shell, session, &shell).at_screen(), "a shell regained the screen");
-            shares.push(opened.share());
-        }
+        let (a, b) = (sessions.machine(), sessions.machine());
+        let desktop = sessions.open(Screen::of(&compositor));
+        let remote = sessions.open(Screen::of(&sshserver));
+        assert!(desktop.at_screen() && !remote.at_screen());
+        assert!(!a.at_screen() && !b.at_screen());
+        let shares = [SUPERVISOR_SHARE, a.share(), b.share(), desktop.share(), remote.share()];
         let distinct: BTreeSet<u64> = shares.iter().copied().collect();
         assert_eq!(distinct.len(), shares.len(), "two shares are one: {shares:?}");
-        // sshserver started by the machine, and any `login` row but the
-        // screen's, opens a session that never holds it.
-        let ssh = launch(&mut sessions, &sshserver, tests, &shell);
-        assert!(matches!(ssh, Session::Login(_, Screen::Not)), "{ssh:?}");
     }
 
     /// A row that lists nothing starts nothing, a package included, and `/apps`
@@ -384,7 +297,7 @@ mod tests {
         }
         let apps_only = Program { starts: vec![APPS.into()], ..row("apps") };
         assert_eq!(may_start(&apps_only, machine, Target::Row(&ordinary)), Err(Refusal::NotListed));
-        assert_eq!(may_start(&apps_only, machine, Target::Package(&package)), Ok(Starts::In(machine)));
+        assert_eq!(may_start(&apps_only, machine, Target::Package(&package)), Ok(()));
     }
 
     #[test]

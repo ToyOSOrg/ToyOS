@@ -29,9 +29,9 @@ use toyos::poller::{Poller, READABLE, WRITABLE};
 use toyos::{AsHandle, PciDev};
 use toyos_abi::syscall::{SyscallError, DEV_PREFIX};
 use toyos_blockring::disk::Settled;
-use toyos_blockserve::link::Link;
+use toyos_blockserve::link::{Handed, Link};
 use toyos_blockserve::sessions::{Owner as Request, MAX_SESSIONS};
-use toyos_blockserve::{table, Device, Partition, Sessions};
+use toyos_blockserve::{table, Device, Sessions};
 use toyos_input::wire::{self, Record, MAX_PAYLOAD};
 use toyos_inspect::{Snapshot, MSG_INSPECT, MSG_SNAPSHOT};
 use toyos_pci_claim::{Bar, Grant};
@@ -70,7 +70,7 @@ impl Host for Process {
     }
 }
 
-type Driver = Usb<Bar, Grant, Process, Result<Vec<Partition>, String>>;
+type Driver = Usb<Bar, Grant, Process, table::Read>;
 
 /// The owner of input, over the `input` port.
 #[derive(Default)]
@@ -126,7 +126,7 @@ impl Device for Disk<'_> {
         }
         cached
     }
-    fn dma_map(&mut self, region: toyos::RawHandle) -> Result<u64, SyscallError> {
+    fn dma_map(&mut self, region: toyos::BorrowedHandle<'_>) -> Result<u64, SyscallError> {
         self.claim.dma_map(region).map(|m| m.device_addr)
     }
     fn dma_unmap(&mut self, device_addr: u64) -> Result<(), SyscallError> {
@@ -160,7 +160,7 @@ fn main() {
     let host = Process { began: Instant::now(), name: format!("usbd {at}") };
     let name = host.name.clone();
     let acceptor = endow::acceptor(toyos_inspect::USB.port);
-    let stop = Endowments::get().take::<toyos::Pipe>(toyos_quiesce::DRIVER_STOP);
+    let stop = Endowments::get().take::<toyos::wake::Bell>(toyos_quiesce::DRIVER_STOP);
     let link = Link::new(name.clone());
     // xHCI 1.2 §5.2.1: the capability registers are in BAR 0.
     let (bar, _bar) = match Bar::map(&dev, 0, info.bar_bytes[0]) {
@@ -198,7 +198,7 @@ fn main() {
 
 /// A refusal this driver can name, before it serves anything: said once, the
 /// block service told this controller is unusable, and nothing served.
-fn not_serving(name: &str, why: &str, mut link: Option<Link>, stop: Option<toyos::Pipe>) -> ! {
+fn not_serving(name: &str, why: &str, mut link: Option<Link>, stop: Option<toyos::wake::Bell>) -> ! {
     println!("{name}: NOT SERVING — {why}");
     if let Some(link) = &mut link {
         link.settle(Settled::Unusable);
@@ -208,7 +208,7 @@ fn not_serving(name: &str, why: &str, mut link: Option<Link>, stop: Option<toyos
 
 /// A controller that cannot be used: it keeps its link, so the service goes
 /// on saying so, and serves nothing; it ends when the machine stops.
-fn idle(mut link: Option<Link>, stop: Option<toyos::Pipe>) -> ! {
+fn idle(mut link: Option<Link>, stop: Option<toyos::wake::Bell>) -> ! {
     let poller = Poller::new(2);
     loop {
         if let Some(link) = &mut link {
@@ -222,9 +222,7 @@ fn idle(mut link: Option<Link>, stop: Option<toyos::Pipe>) -> ! {
         if stopping {
             std::process::exit(0);
         }
-        for handed in link.iter_mut().flat_map(Link::take) {
-            toyos_abi::syscall::close(handed.region);
-        }
+        link.iter_mut().flat_map(Link::take).for_each(drop);
     }
 }
 
@@ -247,7 +245,7 @@ fn serve(
     usb: &Driver,
     acceptor: Option<toyos::port::Acceptor>,
     mut link: Option<Link>,
-    stop: Option<toyos::Pipe>,
+    stop: Option<toyos::wake::Bell>,
 ) -> ! {
     let mut tasks = usb.tasks();
     let mut disks: BTreeMap<u32, Sessions> = BTreeMap::new();
@@ -268,7 +266,7 @@ fn serve(
             match event {
                 Event::Arrived { disk, name: disk_name, table } => {
                     let label = format!("{name} {disk_name}");
-                    let sessions = Sessions::new(label.clone(), table::say(&label, table));
+                    let sessions = Sessions::new(label.clone(), table);
                     if let Some(link) = &mut link {
                         link.offer(disk, sessions.offered());
                     }
@@ -299,15 +297,20 @@ fn serve(
             }
         }
         for handed in link.iter_mut().flat_map(Link::take) {
-            match disks.get_mut(&handed.session.disk) {
-                Some(sessions) => {
-                    let mut port = Disk { usb, disk: handed.session.disk, claim: dev };
-                    sessions.open(&mut port, handed.conn, handed.region, handed.session.unique, handed.session.writes);
-                }
-                None => {
-                    println!("{name}: the block service handed a session on disk {}, which is not served", handed.session.disk);
-                    toyos_abi::syscall::close(handed.region);
-                }
+            let on = match &handed {
+                Handed::Session { session, .. } => session.disk,
+                Handed::Describe { disk, .. } => *disk,
+                Handed::Designate { order, .. } => order.disk,
+            };
+            let Some(sessions) = disks.get_mut(&on) else {
+                println!("{name}: the block service handed work on disk {on}, which is not served");
+                continue;
+            };
+            let mut port = Disk { usb, disk: on, claim: dev };
+            match handed {
+                Handed::Session { session, conn, region } => sessions.open(&mut port, conn, region, session.unique, session.writes),
+                Handed::Describe { conn, .. } => sessions.describe(conn),
+                Handed::Designate { order, conn } => sessions.designate(&mut port, conn, order),
             }
         }
         let submitted = usb.disks.submitted();
@@ -328,7 +331,7 @@ fn serve(
         if let (true, Some(acceptor)) = (ready.contains(&TOKEN_ACCEPT), &acceptor) {
             match acceptor.accept() {
                 Ok(conn) if pending.len() < MAX_PENDING => pending.push(Pending { conn, rx: FrameRx::new(), since: Instant::now() }),
-                Ok(conn) => println!("{name}: refusing client {} — {MAX_PENDING} are already waiting", conn.as_handle().0),
+                Ok(conn) => println!("{name}: refusing client {} — {MAX_PENDING} are already waiting", conn.as_handle().raw().0),
                 Err(why) => println!("{name}: the kernel refused a client's connection: {why:?}"),
             }
         }
@@ -336,7 +339,7 @@ fn serve(
             if p.since.elapsed() >= HANDSHAKE_TIMEOUT {
                 return false;
             }
-            if !ready.contains(&(TOKEN_PENDING + u64::from(p.conn.as_handle().0))) {
+            if !ready.contains(&(TOKEN_PENDING + u64::from(p.conn.as_handle().raw().0))) {
                 return true;
             }
             match p.rx.pump(&p.conn) {
@@ -373,7 +376,7 @@ fn serve(
             sessions.watch(&poller, TOKEN_SESSION | u64::from(disk) << 16);
         }
         for p in &pending {
-            poller.watch(&p.conn, READABLE, TOKEN_PENDING + u64::from(p.conn.as_handle().0));
+            poller.watch(&p.conn, READABLE, TOKEN_PENDING + u64::from(p.conn.as_handle().raw().0));
         }
         let now = usb.wake.now();
         let mut timeout = wake_at.map_or(u64::MAX, |at| at.saturating_sub(now));
@@ -490,6 +493,6 @@ fn answer(conn: &Connection, usb: &Driver, wakes: &Wakes, wake_at: Option<Nanos>
     snap.put("input.opened", input.opened);
     let encoded = snap.encode().unwrap_or_else(|why| panic!("usbd: its snapshot: {why}"));
     if let Err(why) = conn.try_send_bytes(MSG_SNAPSHOT, &encoded) {
-        println!("usbd: dropping client {} — its answer would not go: {why:?}", conn.as_handle().0);
+        println!("usbd: dropping client {} — its answer would not go: {why:?}", conn.as_handle().raw().0);
     }
 }

@@ -3,7 +3,7 @@
 //! `toyos::files` routes it, follows its links and keeps what it opened. A
 //! `File` is one descriptor of the process's table either way.
 
-use toyos::files::{self, Open};
+use toyos::files::{self, At, Open};
 use toyos_abi::syscall::{self, SeekFrom as AbiSeek};
 
 use crate::ffi::OsString;
@@ -23,15 +23,22 @@ pub struct File(i32);
 pub struct FileAttr {
     size: u64,
     file_type: FileType,
+    nlink: u64,
+    atime: u64,
     mtime: u64,
     /// `toyos_abi::syscall::Stat`'s identity.
     volume: u64,
     node: u64,
 }
 
+/// A directory's listing, asked of its open descriptor a batch at a time.
 pub struct ReadDir {
-    entries: Vec<DirEntry>,
+    dir: File,
+    dir_path: PathBuf,
+    batch: Vec<DirEntry>,
     index: usize,
+    /// Where the next batch starts, `None` once the last was read.
+    cursor: Option<u64>,
 }
 
 pub struct DirEntry {
@@ -51,7 +58,10 @@ pub struct OpenOptions {
 }
 
 #[derive(Copy, Clone, Debug, Default)]
-pub struct FileTimes {}
+pub struct FileTimes {
+    accessed: Option<SystemTime>,
+    modified: Option<SystemTime>,
+}
 
 #[derive(Clone, PartialEq, Eq, Debug)]
 pub struct FilePermissions {
@@ -91,14 +101,20 @@ impl FileType {
 }
 
 impl FileAttr {
-    fn of_kernel(stat: syscall::Stat) -> FileAttr {
+    fn of(stat: files::Stat) -> FileAttr {
         FileAttr {
             size: stat.size,
             file_type: kernel_file_type(stat.file_type),
+            nlink: stat.nlink,
+            atime: stat.atime,
             mtime: stat.mtime,
             volume: stat.volume,
             node: stat.node,
         }
+    }
+
+    pub fn nlink(&self) -> u64 {
+        self.nlink
     }
 
     pub fn volume(&self) -> u64 {
@@ -129,7 +145,10 @@ impl FileAttr {
     }
 
     pub fn accessed(&self) -> io::Result<SystemTime> {
-        Err(io::Error::new(io::ErrorKind::Unsupported, "ToyOS does not track access time"))
+        match self.atime {
+            0 => Err(io::const_error!(io::ErrorKind::Unsupported, "the volume keeps no access time")),
+            nanos => Ok(SystemTime::from_nanos(nanos)),
+        }
     }
 
     pub fn created(&self) -> io::Result<SystemTime> {
@@ -148,8 +167,25 @@ impl FilePermissions {
 }
 
 impl FileTimes {
-    pub fn set_accessed(&mut self, _t: SystemTime) {}
-    pub fn set_modified(&mut self, _t: SystemTime) {}
+    pub fn set_accessed(&mut self, t: SystemTime) {
+        self.accessed = Some(t);
+    }
+    pub fn set_modified(&mut self, t: SystemTime) {
+        self.modified = Some(t);
+    }
+
+    /// The change `toyos::files` makes: a time past what a file keeps is
+    /// refused.
+    fn change(&self) -> io::Result<files::Change> {
+        let time = |t: Option<SystemTime>| match t {
+            None => Ok(None),
+            Some(t) => t.nanos().map(|n| Some(files::Time::At(n))).ok_or(io::const_error!(
+                io::ErrorKind::InvalidInput,
+                "a time past what a file keeps",
+            )),
+        };
+        Ok(files::Change { size: None, atime: time(self.accessed)?, mtime: time(self.modified)? })
+    }
 }
 
 impl fmt::Debug for ReadDir {
@@ -162,7 +198,27 @@ impl Iterator for ReadDir {
     type Item = io::Result<DirEntry>;
 
     fn next(&mut self) -> Option<io::Result<DirEntry>> {
-        let e = self.entries.get(self.index)?;
+        while self.index == self.batch.len() {
+            let cursor = self.cursor?;
+            let (listing, next) = match files::read_dir(self.dir.0, cursor) {
+                Ok(read) => read,
+                Err(e) => {
+                    self.cursor = None;
+                    return Some(Err(files_error(e)));
+                }
+            };
+            let (mut batch, dir_path) = (Vec::new(), &self.dir_path);
+            let decoded = toyos::fs::for_each_entry(&listing, |entry| {
+                let (name, file_type) = (OsString::from(entry.name), FileType::of_kind(entry.kind));
+                batch.push(DirEntry { dir_path: dir_path.clone(), name, file_type })
+            });
+            if let Err(e) = decoded {
+                self.cursor = None;
+                return Some(Err(served_error(e)));
+            }
+            (self.batch, self.index, self.cursor) = (batch, 0, next);
+        }
+        let e = &self.batch[self.index];
         self.index += 1;
         Some(Ok(DirEntry { dir_path: e.dir_path.clone(), name: e.name.clone(), file_type: e.file_type }))
     }
@@ -182,8 +238,13 @@ impl DirEntry {
         lstat(&self.path())
     }
 
+    /// What the listing said, or where it said only that the entry is no
+    /// directory, as the kernel's does, what the entry is asked.
     pub fn file_type(&self) -> io::Result<FileType> {
-        Ok(self.file_type)
+        match self.file_type {
+            FileType { is_file: false, is_dir: false, is_symlink: false } => lstat(&self.path()).map(|a| a.file_type),
+            known => Ok(known),
+        }
     }
 }
 
@@ -228,6 +289,8 @@ impl OpenOptions {
             create: self.create,
             create_new: self.create_new,
             truncate: self.truncate,
+            directory: false,
+            unnamed: false,
             cloexec: true,
         }
     }
@@ -267,7 +330,7 @@ impl File {
     /// The kernel handle behind this file, held for `f`: none for a file a
     /// file server holds.
     pub fn with_handle<T>(&self, f: impl FnOnce(toyos_abi::RawHandle) -> T) -> io::Result<T> {
-        crate::sys::on_fd(self.0, |h| Ok(f(h)))
+        crate::sys::on_fd(self.0, |h| Ok(f(h.raw())))
     }
 
     /// A kernel handle a child may use this file through: a copy of a kernel
@@ -278,11 +341,11 @@ impl File {
     }
 
     pub fn open(path: &Path, opts: &OpenOptions) -> io::Result<File> {
-        files::open(bytes(path), opts.how()).map(File).map_err(files_error)
+        files::open(At::Cwd, bytes(path), opts.how()).map(File).map_err(files_error)
     }
 
     pub fn file_attr(&self) -> io::Result<FileAttr> {
-        files::fstat(self.0).map(FileAttr::of_kernel).map_err(files_error)
+        files::fstat(self.0).map(FileAttr::of).map_err(files_error)
     }
 
     pub fn fsync(&self) -> io::Result<()> {
@@ -335,6 +398,17 @@ impl File {
         files::write(self.0, buf).map_err(files_error)
     }
 
+    /// Read at `offset`, leaving the file's offset where it is.
+    pub fn read_at(&self, buf: &mut [u8], offset: u64) -> io::Result<usize> {
+        files::pread(self.0, buf, offset).map_err(files_error)
+    }
+
+    /// Write at `offset`, leaving the file's offset where it is, whether or
+    /// not it appends.
+    pub fn write_at(&self, buf: &[u8], offset: u64) -> io::Result<usize> {
+        files::pwrite(self.0, buf, offset).map_err(files_error)
+    }
+
     pub fn write_vectored(&self, bufs: &[IoSlice<'_>]) -> io::Result<usize> {
         crate::io::default_write_vectored(|b| self.write(b), bufs)
     }
@@ -373,14 +447,15 @@ impl File {
         Ok(())
     }
 
-    pub fn set_times(&self, _times: FileTimes) -> io::Result<()> {
-        Ok(())
+    pub fn set_times(&self, times: FileTimes) -> io::Result<()> {
+        files::set_times(At::Fd(self.0), b"", false, &times.change()?).map_err(files_error)
     }
 }
 
 impl Drop for File {
     fn drop(&mut self) {
-        let _ = toyos::fd::close(self.0);
+        // SAFETY: the file owns its descriptor, and nothing names it after this.
+        let _ = unsafe { toyos::fd::close(self.0) };
     }
 }
 
@@ -390,7 +465,7 @@ impl DirBuilder {
     }
 
     pub fn mkdir(&self, p: &Path) -> io::Result<()> {
-        files::mkdir(bytes(p)).map_err(files_error)
+        files::mkdir(At::Cwd, bytes(p)).map_err(files_error)
     }
 }
 
@@ -410,21 +485,17 @@ fn kernel_file_type(ty: syscall::FileType) -> FileType {
 }
 
 pub fn readdir(p: &Path) -> io::Result<ReadDir> {
-    let listing = files::read_dir(bytes(p)).map_err(files_error)?;
-    let mut entries = Vec::new();
-    toyos::fs::for_each_entry(&listing, |kind, _, name| {
-        entries.push(DirEntry { dir_path: p.to_path_buf(), name: OsString::from(name), file_type: FileType::of_kind(kind) })
-    })
-    .map_err(served_error)?;
-    Ok(ReadDir { entries, index: 0 })
+    let how = Open { read: true, directory: true, cloexec: true, ..Open::default() };
+    let dir = files::open(At::Cwd, bytes(p), how).map(File).map_err(files_error)?;
+    Ok(ReadDir { dir, dir_path: p.to_path_buf(), batch: Vec::new(), index: 0, cursor: Some(0) })
 }
 
 pub fn unlink(p: &Path) -> io::Result<()> {
-    files::unlink(bytes(p)).map_err(files_error)
+    files::unlink(At::Cwd, bytes(p), false).map_err(files_error)
 }
 
 pub fn rename(old: &Path, new: &Path) -> io::Result<()> {
-    files::rename(bytes(old), bytes(new)).map_err(files_error)
+    files::rename((At::Cwd, bytes(old)), (At::Cwd, bytes(new))).map_err(files_error)
 }
 
 pub fn set_perm(_p: &Path, _perm: FilePermissions) -> io::Result<()> {
@@ -436,7 +507,7 @@ pub fn set_perm_nofollow(_p: &Path, _perm: FilePermissions) -> io::Result<()> {
 }
 
 pub fn rmdir(p: &Path) -> io::Result<()> {
-    files::rmdir(bytes(p)).map_err(files_error)
+    files::unlink(At::Cwd, bytes(p), true).map_err(files_error)
 }
 
 pub fn remove_dir_all(path: &Path) -> io::Result<()> {
@@ -461,25 +532,27 @@ pub fn exists(path: &Path) -> io::Result<bool> {
 }
 
 pub fn readlink(p: &Path) -> io::Result<PathBuf> {
-    let target = files::read_link(bytes(p)).map_err(files_error)?;
+    let target = files::read_link(At::Cwd, bytes(p)).map_err(files_error)?;
     // SAFETY: a link's target is the bytes a path was written as.
     Ok(PathBuf::from(unsafe { OsString::from_encoded_bytes_unchecked(target) }))
 }
 
 pub fn symlink(original: &Path, link: &Path) -> io::Result<()> {
-    files::symlink(bytes(original), bytes(link)).map_err(files_error)
+    files::symlink(bytes(original), (At::Cwd, bytes(link))).map_err(files_error)
 }
 
-pub fn link(_src: &Path, _dst: &Path) -> io::Result<()> {
-    Err(io::Error::new(io::ErrorKind::Unsupported, "no hard links on ToyOS"))
+/// `dst` a second name of what `src` names, a symlink itself and not what it
+/// leads to.
+pub fn link(src: &Path, dst: &Path) -> io::Result<()> {
+    files::link((At::Cwd, bytes(src)), false, (At::Cwd, bytes(dst))).map_err(files_error)
 }
 
 pub fn stat(path: &Path) -> io::Result<FileAttr> {
-    files::stat(bytes(path), true).map(FileAttr::of_kernel).map_err(files_error)
+    files::stat(At::Cwd, bytes(path), true).map(FileAttr::of).map_err(files_error)
 }
 
 pub fn lstat(path: &Path) -> io::Result<FileAttr> {
-    files::stat(bytes(path), false).map(FileAttr::of_kernel).map_err(files_error)
+    files::stat(At::Cwd, bytes(path), false).map(FileAttr::of).map_err(files_error)
 }
 
 pub fn canonicalize(p: &Path) -> io::Result<PathBuf> {
@@ -511,18 +584,18 @@ pub fn copy(from: &Path, to: &Path) -> io::Result<u64> {
     Ok(total)
 }
 
-pub fn set_times(_p: &Path, _times: FileTimes) -> io::Result<()> {
-    Ok(())
+pub fn set_times(p: &Path, times: FileTimes) -> io::Result<()> {
+    files::set_times(At::Cwd, bytes(p), true, &times.change()?).map_err(files_error)
 }
 
-pub fn set_times_nofollow(_p: &Path, _times: FileTimes) -> io::Result<()> {
-    Ok(())
+pub fn set_times_nofollow(p: &Path, times: FileTimes) -> io::Result<()> {
+    files::set_times(At::Cwd, bytes(p), false, &times.change()?).map_err(files_error)
 }
 
 /// The whole of the file at `path` as a program image: what a spawn of a
 /// program the kernel cannot open itself hands the kernel.
-pub fn read_image(path: &Path) -> io::Result<toyos::process::Image> {
-    files::read_image(bytes(path)).map_err(|refused| match refused {
+pub fn read_image(path: &Path, job: Option<toyos::BorrowedHandle<'_>>) -> io::Result<toyos::process::Image> {
+    files::read_image_for(bytes(path), job).map_err(|refused| match refused {
         toyos::process::ImageRefused::Empty => {
             io::const_error!(io::ErrorKind::InvalidData, "the program is an empty file")
         }

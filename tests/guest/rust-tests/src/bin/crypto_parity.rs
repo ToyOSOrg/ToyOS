@@ -616,20 +616,24 @@ fn ml_kem_rows(rows: &mut Vec<Box<dyn Row>>) {
 /// every batch, threshold and tail of every instruction path the bench
 /// admits runs against ring: AEAD seal, open and rejection with AAD of 0, 5,
 /// 16, 17 and 33 B; the OpenSSH packet construction; SHA-2 and HMAC, the
-/// latter with a key longer than a block too. A mismatch ends the job, and
-/// with it the boot's rows.
+/// latter with a key longer than a block too. AEADs also run at `LONG`. A
+/// mismatch ends the job, and with it the boot's rows.
 fn agrees_with_ring_at_every_length() {
     use ring::aead::chacha20_poly1305_openssh as ring_ssh;
     use toyos_crypto::ssh;
     const MAX: usize = 1153;
-    let source: Vec<u8> = (0..MAX + 64).map(|i| (i * 167 + 13) as u8).collect();
+    /// Five of the 512-bit path's 256-byte steps, which a reduction takes
+    /// three at a time, with a 1 B and a 255 B tail, and lengths past its
+    /// counter's first carry out of the low byte, at block 254.
+    const LONG: [usize; 4] = [1281, 1535, 4113, 16401];
+    let source: Vec<u8> = (0..LONG[3] + 64).map(|i| (i * 167 + 13) as u8).collect();
     let message = |len: usize| source[len % 61..][..len].to_vec();
     for alg in [Tls::Aes128, Tls::Aes256, Tls::ChaCha] {
         let ring_key = alg.ring();
         let opener = alg.opening();
         for aad_len in [0usize, 5, 16, 17, 33] {
             let aad = &source[7..7 + aad_len];
-            for len in 0..=MAX {
+            for len in (0..=MAX).chain(LONG) {
                 let plain = message(len);
                 let mut ours = plain.clone();
                 let (_, tag) = alg.sealing().seal(aad, &mut ours).expect("seal");
@@ -645,7 +649,7 @@ fn agrees_with_ring_at_every_length() {
                 forged[len % 16] ^= 1;
                 let mut refused = theirs.clone();
                 assert!(opener.open(&IV, aad, &mut refused, &forged).is_err(), "{} refuses a forged tag at {len} B", alg.name());
-                assert_eq!(refused, theirs, "{} leaves a refused record as it was", alg.name());
+                assert_eq!(refused, vec![0; len], "{} leaves no plaintext of a refused record", alg.name());
             }
         }
     }
@@ -663,6 +667,11 @@ fn agrees_with_ring_at_every_length() {
         let mut header: [u8; 4] = packet[..4].try_into().unwrap();
         let mut opened = packet[4..].to_vec();
         assert_eq!(opener.packet_length(sequence, header), len as u32);
+        let mut forged = ring_tag;
+        forged[len % 16] ^= 1;
+        let (mut refused_header, mut refused) = (header, opened.clone());
+        assert!(opener.open(sequence, &mut refused_header, &mut refused, &forged).is_err(), "OpenSSH refuses a forged tag at {len} B");
+        assert_eq!((refused_header, refused), (header, vec![0; len]), "OpenSSH leaves no plaintext of a refused packet");
         opener.open(sequence, &mut header, &mut opened, &ring_tag).expect("ours opens ring's packet");
         assert_eq!(opened, plain, "OpenSSH opens {len} B");
     }

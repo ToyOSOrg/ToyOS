@@ -243,8 +243,9 @@ pub(crate) enum Object {
     /// A predefined scope such as `\_SB` (§5.3.1), typeless (§19.6.96).
     Scope,
     Device,
-    /// The Processor object ACPI 6.4 deprecated (ACPI 6.3A §19.6.108).
-    Processor,
+    /// The Processor object ACPI 6.4 deprecated (ACPI 6.3A §19.6.108), with
+    /// its ProcID.
+    Processor(u8),
     ThermalZone,
     PowerResource,
     Method(Kept<Method>),
@@ -316,7 +317,7 @@ impl Object {
             Object::Mutex(_) => 9,
             Object::Region(_) => 10,
             Object::PowerResource => 11,
-            Object::Processor => 12,
+            Object::Processor(_) => 12,
             Object::ThermalZone => 13,
             Object::BufField(_) => 14,
         }

@@ -61,15 +61,15 @@ pub const ORIGINS: &str = "log-origins";
 /// `logkeeper`'s, where it puts every program's line with its head.
 pub const CONSOLE: &str = "log-console";
 
-/// The endowment label of a program's end of the pipe [`REGISTER`] hands
-/// `logkeeper` the other end of: nothing is written to it, and the program's end
-/// closing — which only its exit does — is how `logkeeper` knows the ring has no
-/// writer left to wait for. A label and not a slot, so no child inherits it.
+/// The endowment label of a program's waker of the bell [`REGISTER`] hands
+/// `logkeeper`: nothing rings it, and the program's waker closing — which only
+/// its exit does — is how `logkeeper` knows the ring has no writer left to wait
+/// for. A label and not a slot, so no child inherits it.
 pub const ALIVE: &str = "log-alive";
 
 /// The supervisor → `logkeeper`: a program's log ring. The payload is [`Registration`]; the
-/// frame carries two handles — the ring, and the read end of a pipe whose
-/// only writer is the program, so its end is the ring's.
+/// frame carries two handles — the ring, and the bell whose only waker is the
+/// program's, so its end is the ring's.
 pub const REGISTER: u32 = 1;
 
 /// `logkeeper`'s answer to a reader on [`SERVICE`]: one handle, the read end of the

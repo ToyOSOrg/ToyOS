@@ -1,6 +1,6 @@
 //! Memory protection, which the kernel used to discard in both directions.
 //!
-//! `sys_mmap`'s third argument was named `_prot`. Every mapping came back
+//! `sys_mmap`'s third argument was once named `_prot`. Every mapping came back
 //! readable and writable whatever the caller asked for, so
 //! `sdk/libc`'s translation of POSIX `PROT_NONE` produced a writable
 //! guard page and the stack-overflow detection a C program builds on it
@@ -25,7 +25,7 @@ use std::process::{Command, Stdio};
 use std::sync::mpsc;
 use std::thread;
 
-use toyos_abi::syscall::{mmap, munmap, MmapFlags, MmapProt, SyscallError};
+use toyos_abi::syscall::{self, SyscallError, VmAt, VmProt, PAGE_SIZE, VM_AT_ANYWHERE, VM_AT_FIXED};
 
 #[path = "../arch/mmap.rs"]
 mod mmap;
@@ -41,9 +41,9 @@ const RET: u8 = 0xC3;
 
 fn main() {
     match std::env::args().nth(1).as_deref() {
-        Some("write-none") => return touch(MmapProt::NONE, Access::Write),
-        Some("read-none") => return touch(MmapProt::NONE, Access::Read),
-        Some("write-ro") => return touch(MmapProt::READ, Access::Write),
+        Some("write-none") => return touch(VmProt::None, Access::Write),
+        Some("read-none") => return touch(VmProt::None, Access::Read),
+        Some("write-ro") => return touch(VmProt::Read, Access::Write),
         Some("exec-heap") => return exec_heap(),
         Some("exec-stack") => return exec_stack(),
         Some("write-text") => return write_text(),
@@ -68,22 +68,15 @@ fn main() {
     println!("all mmap protection tests passed");
 }
 
-fn map(prot: MmapProt) -> *mut u8 {
-    let p = unsafe {
-        mmap(core::ptr::null_mut(), SIZE, prot, MmapFlags::ANONYMOUS | MmapFlags::PRIVATE)
-    };
-    assert!(
-        !p.is_null() && (p as u64) < u64::MAX - 255,
-        "mmap(prot={:#x}) refused: {p:p}",
-        prot.0
-    );
-    p
+fn map(prot: VmProt) -> *mut u8 {
+    // SAFETY: placed anywhere, so it replaces nothing.
+    unsafe { syscall::vm_reserve(SIZE, prot, VmAt::ANYWHERE) }.unwrap_or_else(|e| panic!("vm_reserve({prot:?}) refused: {e:?}"))
 }
 
 /// The positive control for every refusal below: the ordinary mapping every
 /// allocator in the system asks for still works.
 fn readwrite_is_readable_and_writable() {
-    let p = map(MmapProt::READ | MmapProt::WRITE);
+    let p = map(VmProt::ReadWrite);
     unsafe {
         p.add(OFFSET).write_volatile(0x5A);
         assert_eq!(p.add(OFFSET).read_volatile(), 0x5A, "a RW mapping lost a byte");
@@ -94,7 +87,7 @@ fn readwrite_is_readable_and_writable() {
 /// Read-only means readable, not merely unwritable. A kernel that refused the
 /// mapping outright would satisfy the write test and fail this one.
 fn readonly_is_readable() {
-    let p = map(MmapProt::READ);
+    let p = map(VmProt::Read);
     assert_eq!(unsafe { p.add(OFFSET).read_volatile() }, 0, "a fresh mapping is not zeroed");
     println!("  PASS: PROT_READ is readable");
 }
@@ -102,8 +95,8 @@ fn readonly_is_readable() {
 /// `PROT_NONE` is a request for address space that faults, not a bad argument.
 /// The range has to be reserved — two of them in a row must not overlap.
 fn none_is_a_mapping_and_not_an_error() {
-    let a = map(MmapProt::NONE);
-    let b = map(MmapProt::NONE);
+    let a = map(VmProt::None);
+    let b = map(VmProt::None);
     let (lo, hi) = if a < b { (a, b) } else { (b, a) };
     assert!(
         (hi as usize) - (lo as usize) >= SIZE,
@@ -112,39 +105,34 @@ fn none_is_a_mapping_and_not_an_error() {
     println!("  PASS: PROT_NONE reserves address space and returns it");
 }
 
-/// A caller that sets a bit `MmapProt` or `MmapFlags` does not define is asking
-/// for something it will not get — an executable mapping, say — so the request
-/// is refused rather than served as the bits below it. The differential is the
-/// bit and nothing else: the same call without it is the mapping this returns.
+/// A protection word `VmProt` does not define, or a placement kind `VmAt`
+/// does not, asks for something the caller will not get — an executable
+/// mapping, say — so the request is refused rather than served as something
+/// near it. The differential is the word and nothing else: the same call with
+/// a defined one is the range this returns.
 fn an_undefined_bit_in_either_word_is_refused() {
-    const PROT: MmapProt = MmapProt(MmapProt::READ.0 | MmapProt::WRITE.0);
-    const FLAGS: MmapFlags = MmapFlags(MmapFlags::ANONYMOUS.0 | MmapFlags::PRIVATE.0);
     const UNDEFINED_PROT: u64 = 4;
-    const UNDEFINED_FLAG: u64 = 8;
-    const _: () = assert!(UNDEFINED_PROT & (MmapProt::READ.0 | MmapProt::WRITE.0) == 0);
-    const _: () = assert!(
-        UNDEFINED_FLAG & (MmapFlags::ANONYMOUS.0 | MmapFlags::PRIVATE.0 | MmapFlags::FIXED.0) == 0
-    );
+    const UNDEFINED_KIND: u64 = 2;
+    const _: () = assert!(UNDEFINED_KIND != VM_AT_ANYWHERE && UNDEFINED_KIND != VM_AT_FIXED);
+    assert_eq!(VmProt::from_u64(UNDEFINED_PROT), None);
 
-    for (prot, flags, what) in [
-        (MmapProt(PROT.0 | UNDEFINED_PROT), FLAGS, "a prot"),
-        (PROT, MmapFlags(FLAGS.0 | UNDEFINED_FLAG), "a flags"),
-    ] {
-        // SAFETY: not `FIXED`, so nothing of this process's is replaced.
-        let refused = unsafe { mmap::raw(0, SIZE as u64, prot, flags) };
+    let rw = VmProt::ReadWrite as u64;
+    for (prot, kind, what) in [(UNDEFINED_PROT, VM_AT_ANYWHERE, "a protection"), (rw, UNDEFINED_KIND, "a placement")] {
+        // SAFETY: not fixed, so nothing of this process's is replaced.
+        let refused = unsafe { mmap::raw(SIZE as u64, prot, PAGE_SIZE as u64, kind) };
         assert_eq!(
             refused,
             Err(SyscallError::InvalidArgument),
-            "{what} bit this ABI does not define was served: {refused:#x?}",
+            "{what} word this ABI does not define was served: {refused:#x?}",
         );
     }
 
-    // The control: the same request without either bit is the mapping the
+    // The control: the same request with defined words is the range the
     // refusals above must not have been about.
-    // SAFETY: not `FIXED`.
-    let served = unsafe { mmap::raw(0, SIZE as u64, PROT, FLAGS) }.expect("the defined request was refused");
-    unsafe { munmap(served as *mut u8, SIZE) }.expect("unmap the served request");
-    println!("  PASS: an undefined mmap prot or flags bit is InvalidArgument, and without it the same call maps");
+    // SAFETY: not fixed.
+    let served = unsafe { mmap::raw(SIZE as u64, rw, PAGE_SIZE as u64, VM_AT_ANYWHERE) }.expect("the defined request was refused");
+    unsafe { syscall::vm_release(served as *mut u8, SIZE) }.expect("release the served request");
+    println!("  PASS: an undefined protection or placement word is InvalidArgument, and a defined one maps");
 }
 
 /// Lengths past every placement window.
@@ -165,11 +153,11 @@ fn a_length_no_window_holds_is_refused_and_the_space_still_answers() {
         let mut rounds = 0u64;
         loop {
             let stopping = stop_rx.try_recv().is_ok();
-            let p = map(MmapProt::READ | MmapProt::WRITE);
+            let p = map(VmProt::ReadWrite);
             unsafe {
                 p.add(OFFSET).write_volatile(0x3C);
                 assert_eq!(p.add(OFFSET).read_volatile(), 0x3C, "the sibling's mapping lost a byte");
-                munmap(p, SIZE).expect("the sibling unmaps what it mapped");
+                syscall::vm_release(p, SIZE).expect("the sibling releases what it reserved");
             }
             rounds += 1;
             if rounds == 1 {
@@ -184,10 +172,10 @@ fn a_length_no_window_holds_is_refused_and_the_space_still_answers() {
     started_rx.recv().expect("the sibling never finished its first round");
 
     let mut answers = Vec::with_capacity(2 * UNPLACEABLE.len());
-    for prot in [MmapProt::NONE, MmapProt::READ | MmapProt::WRITE] {
+    for prot in [VmProt::None, VmProt::ReadWrite] {
         for size in UNPLACEABLE {
-            // SAFETY: not `FIXED`.
-            answers.push((prot, size, unsafe { mmap::raw(0, size, prot, MmapFlags::ANONYMOUS | MmapFlags::PRIVATE) }));
+            // SAFETY: not fixed.
+            answers.push((prot, size, unsafe { mmap::raw(size, prot as u64, PAGE_SIZE as u64, VM_AT_ANYWHERE) }));
         }
     }
 
@@ -200,8 +188,7 @@ fn a_length_no_window_holds_is_refused_and_the_space_still_answers() {
         assert_eq!(
             ret,
             Err(SyscallError::InvalidArgument),
-            "mmap(len={size:#x}, prot={:#x}) answered {ret:#x?}",
-            prot.0,
+            "vm_reserve(len={size:#x}, {prot:?}) answered {ret:#x?}",
         );
     }
     println!(
@@ -272,7 +259,7 @@ enum Access {
     Write,
 }
 
-fn touch(prot: MmapProt, access: Access) {
+fn touch(prot: VmProt, access: Access) {
     let p = map(prot);
     println!("armed at {p:p}");
     match access {
@@ -302,7 +289,7 @@ unsafe fn call(code: *const u8) {
 /// The heap: what a `PROT_READ | PROT_WRITE` mapping is, and where every
 /// allocation a program makes lives.
 fn exec_heap() {
-    let p = map(MmapProt::READ | MmapProt::WRITE);
+    let p = map(VmProt::ReadWrite);
     unsafe { p.add(OFFSET).write_volatile(RET) };
     println!("armed at {:p}", unsafe { p.add(OFFSET) });
     unsafe { call(p.add(OFFSET)) };

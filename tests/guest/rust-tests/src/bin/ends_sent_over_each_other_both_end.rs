@@ -54,7 +54,8 @@ fn main() {
 
 /// A second handle to `conn`'s end, to send.
 fn dup(conn: &Connection) -> OwnedHandle {
-    let raw = syscall::dup(conn.as_handle()).expect("a second handle to the end");
+    // SAFETY: nothing relies on being the source's only holder.
+    let raw = unsafe { syscall::dup(conn.as_handle().raw()) }.expect("a second handle to the end");
     // SAFETY: a fresh duplicate, answered for by nothing else.
     unsafe { OwnedHandle::from_raw(raw) }
 }

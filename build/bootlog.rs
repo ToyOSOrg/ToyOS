@@ -41,7 +41,7 @@ pub const DEADLINE_ARMED: &str = "boot deadline: ";
 /// What the `wedge-before-reset` actuator says before it stops every CPU, in
 /// `kernel/src/deadline.rs`. The witness that a deadline ended a wedge and not
 /// a boot merely slower than its bound, which is what makes that control one.
-pub const WEDGE_STAGED: &str = "wedge: staged, and only the boot deadline ends this machine";
+pub const WEDGE_STAGED: &str = "wedge: staged, and only a bound this machine runs under ends it";
 
 /// What each CPU the wedge takes says about the state it arrived in, also in
 /// `kernel/src/deadline.rs`: [`WEDGE_AWAKE`] with interrupts open, and
@@ -246,7 +246,7 @@ const NAME_LEN: usize = 28;
 /// truncated to what [`NAME_LEN`] holds.
 ///
 /// **A predicate looking for the whole name finds nothing on a good boot**:
-/// `test_rs_munmap_reissues_read_window` is `test_rs_munmap_reissues_rea` on the wire.
+/// `test_rs_lent_device_memory_refused` is `test_rs_lent_device_memory_` on the wire.
 pub fn recorded_name(binary: &str) -> String {
     let base = binary.rsplit('/').next().unwrap_or(binary);
     base[..base.len().min(NAME_LEN - 1)].to_string()
@@ -383,6 +383,14 @@ pub fn foreign_done(loader: &str) -> Result<(), Unfit> {
         Some(after) if after.contains(FOREIGN_DONE) => Ok(()),
         _ => Err(Unfit::NoForeignDone),
     }
+}
+
+/// Whether the pass after the reset found the page as the loader armed it: a
+/// kernel that sealed nothing, its panel census among it. What a reset from
+/// outside the kernel, such as the chipset watchdog's, leaves.
+pub fn sealed_nothing(loader: &str) -> bool {
+    let armed = format!("{PREVIOUS_PANIC} the page still reads {}", toyos_blackbox::State::Armed.named());
+    after_the_reset(loader).is_some_and(|after| after.contains(&armed))
 }
 
 /// `loader.log` from [`SEPARATOR`] on: the pass that read what this boot left,
@@ -653,6 +661,15 @@ mod tests {
         assert!(source.contains(&format), "{} formats no {format:?}", path.display());
     }
 
+    /// Only the pass after the reset speaks of this boot's page.
+    #[test]
+    fn a_page_no_kernel_sealed_is_read_off_the_pass_after_the_reset() {
+        let armed = format!("{PREVIOUS_PANIC} the page still reads {}, so that kernel died\n", toyos_blackbox::State::Armed.named());
+        assert!(sealed_nothing(&format!("first pass\n{SEPARATOR}\n{armed}")));
+        assert!(!sealed_nothing(&format!("{armed}{SEPARATOR}\n{PREVIOUS_PANIC} the last boot read WEDGED\n")));
+        assert!(!sealed_nothing(&armed), "a loader.log with no pass after the reset");
+    }
+
     #[test]
     fn the_loaders_file_is_told_from_logkeepers_however_a_driver_spelled_it() {
         let listing = "2026-09-06-084003.log\nloader.log\nunknown-00.log\nnotes.txt\n";
@@ -792,8 +809,8 @@ mod tests {
     /// The truncation, which is what a whole-name predicate would miss.
     #[test]
     fn a_long_binarys_record_is_the_prefix_the_kernel_keeps() {
-        assert_eq!(recorded_name("test_rs_mkdir_cap"), "test_rs_mkdir_cap");
-        assert_eq!(recorded_name("test_rs_munmap_reissues_read_window"), "test_rs_munmap_reissues_rea");
+        assert_eq!(recorded_name("test_rs_readdir_bound"), "test_rs_readdir_bound");
+        assert_eq!(recorded_name("test_rs_lent_device_memory_refused"), "test_rs_lent_device_memory_");
         assert_eq!(recorded_name("/system/bin/echo"), "echo");
         assert_eq!(recorded_name("").len(), 0);
     }

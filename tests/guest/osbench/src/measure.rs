@@ -21,6 +21,7 @@ pub fn each(
     mut op: impl FnMut(usize) -> Result<(), String>,
 ) {
     let mut run = || -> Result<Samples<'_>, String> {
+        let ran = crate::ran::start();
         for i in 0..warmup {
             op(i)?;
         }
@@ -32,7 +33,9 @@ pub fn each(
             op(warmup + i)?;
             ns.push(ns_since(t));
         }
-        Ok((ns, Counts::per_op(&before, samples as u64)))
+        let mut counts = Counts::per_op(&before, samples as u64);
+        counts.extend(ran.fields());
+        Ok((ns, counts))
     };
     match run() {
         Ok((mut ns, counts)) => {

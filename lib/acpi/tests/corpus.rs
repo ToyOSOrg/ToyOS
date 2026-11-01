@@ -137,7 +137,7 @@ fn a_madt_entry_of_zero_length_halts_the_walk_instead_of_looping() {
     assert_eq!(
         madt_entries(&table).take(8).collect::<Vec<_>>(),
         [
-            Ok(MadtEntry::LocalApic { apic_id: 0, enabled: true }),
+            Ok(MadtEntry::LocalApic { apic_id: 0, uid: 0, enabled: true }),
             Err(MadtHalt { at: 8, declared: 0, list_len: 18 }),
         ],
         "the entry after the halt is unreachable: a list that lied cannot be resynchronised"
@@ -180,7 +180,7 @@ fn a_trailing_byte_that_cannot_be_an_entry_header_ends_the_walk_quietly() {
     let table = find_table(Machine { regions }, RSDP_AT, b"APIC", MADT_ENTRIES).expect("MADT");
     assert_eq!(
         madt_entries(&table).collect::<Vec<_>>(),
-        [Ok(MadtEntry::LocalApic { apic_id: 3, enabled: true })]
+        [Ok(MadtEntry::LocalApic { apic_id: 3, uid: 0, enabled: true })]
     );
 }
 

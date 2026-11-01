@@ -2,49 +2,81 @@
 //!
 //! Owns the netstack IPC protocol and provides client functions for TCP, UDP, and DNS.
 //! All networking in ToyOS goes through the `netstack` daemon: a TCP stream is
-//! a region and a connection ([`stream`]), and a listener and a datagram socket
-//! carry their bytes and wakes in kernel pipes.
+//! a region and a connection ([`stream`]), and a listener and a datagram
+//! socket a connection and a bell ([`socket`]). **No request names a socket
+//! by a number**: each is named by the connection only its holders hold.
 
+mod ends;
+pub mod socket;
 pub mod stream;
 
-use crate::ipc::{IpcError, IpcHeader, IpcPayload};
-use crate::ipc_payload;
-use crate::{Connection, OwnedHandle, Pipe, RawHandle};
+/// A stream or a socket this process holds an end of, kept for as long as
+/// this lives, which makes a new holder for each other process that is to
+/// share it: what a spawn command keeps between spawns, where each child gets
+/// a holder of its own.
+pub struct Exporter {
+    slot: usize,
+    stream: bool,
+}
 
+impl Exporter {
+    /// The stream or socket `handle` reaches; `None` for a handle that
+    /// reaches neither.
+    pub fn of(handle: crate::BorrowedHandle<'_>) -> Option<Self> {
+        match stream::hold(handle) {
+            Some(slot) => Some(Self { slot, stream: true }),
+            None => socket::hold(handle).map(|slot| Self { slot, stream: false }),
+        }
+    }
+
+    /// A new holder, its end of the connection to give another process
+    /// ([`stream::export`], [`socket::export`]).
+    pub fn export(&self) -> Result<OwnedHandle, NetError> {
+        match self.stream {
+            true => stream::export_held(self.slot),
+            false => socket::export_held(self.slot),
+        }
+    }
+}
+
+impl Drop for Exporter {
+    fn drop(&mut self) {
+        match self.stream {
+            true => stream::release(self.slot),
+            false => socket::release(self.slot),
+        }
+    }
+}
+
+use crate::ipc::{Frame, FrameRx, IpcError, IpcPayload};
+use crate::ipc_payload;
+use crate::{Connection, OwnedHandle};
+
+/// The requests a new connection to netstack carries. Each that makes a
+/// socket makes the connection its first holder's; a request on a socket is
+/// that holder's own ([`socket`], [`stream`]).
 #[repr(u32)]
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum MsgType {
-    TcpClose = 4,
+    /// [`UdpBindRequest`], answered [`BoundResponse`] with the holder's bell
+    /// ([`socket::bind`]).
     UdpBind = 8,
-    UdpSendTo = 9,
-    UdpRecvFrom = 10,
-    UdpClose = 11,
     DnsLookup = 12,
-    TcpListenerSetOption = 14,
-    UdpSetOption = 15,
-    TcpBindPiped = 21,
-    /// A stream's region with [`TcpConnectRequest`], answered with its bell
-    /// ([`stream::connect`]).
+    /// A stream's region with [`TcpConnectRequest`], answered with its two
+    /// bells ([`stream::connect`]).
     TcpConnect = 23,
-    /// A stream's region with [`TcpAcceptRequest`], answered with its bell
-    /// ([`stream::accept`]).
-    TcpAccept = 24,
+    /// [`TcpListenRequest`], answered [`BoundResponse`] with the holder's
+    /// bell ([`socket::listen`]).
+    TcpListen = 25,
 }
 
 impl MsgType {
     pub fn from_u32(v: u32) -> Option<Self> {
         match v {
-            4 => Some(Self::TcpClose),
             8 => Some(Self::UdpBind),
-            9 => Some(Self::UdpSendTo),
-            10 => Some(Self::UdpRecvFrom),
-            11 => Some(Self::UdpClose),
             12 => Some(Self::DnsLookup),
-            14 => Some(Self::TcpListenerSetOption),
-            15 => Some(Self::UdpSetOption),
-            21 => Some(Self::TcpBindPiped),
             23 => Some(Self::TcpConnect),
-            24 => Some(Self::TcpAccept),
+            25 => Some(Self::TcpListen),
             _ => None,
         }
     }
@@ -83,15 +115,18 @@ pub const ERR_RESOURCE_EXHAUSTED: u32 = 7;
 /// broadcast address from a socket whose [`OPT_BROADCAST`] is off. The request
 /// was well formed, which is what keeps this apart from [`ERR_INVALID_INPUT`].
 pub const ERR_PERMISSION_DENIED: u32 = 8;
+/// A holder's accept or receive found nothing to take: its bell rings once
+/// there is something ([`socket`]).
+pub const ERR_WOULD_BLOCK: u32 = 9;
 pub const ERR_OTHER: u32 = 255;
 
-/// Nagle's algorithm off, on a listener: its bind's [`TcpOptions`] and then
-/// [`tcp_listener_set_option`], for every connection whose SYN arrives from
-/// then on, and one that began before keeps what it has. A connection says
-/// what it began with in its accept's answer; a stream's own is a word of its
-/// region ([`stream::NODELAY`]).
+/// Nagle's algorithm off, on a listener: its listen's [`TcpOptions`] and then
+/// [`socket::set_option`], for every connection whose SYN arrives from then
+/// on, and one that began before keeps what it has. A connection says what it
+/// began with in its accept's answer; a stream's own is a word of its region
+/// ([`stream::NODELAY`]).
 pub const OPT_NODELAY: u32 = 1;
-/// A datagram socket may send to a broadcast address: [`udp_set_option`].
+/// A datagram socket may send to a broadcast address: [`socket::set_option`].
 pub const OPT_BROADCAST: u32 = 2;
 
 /// The widest request payload netstack reads: a [`dns_lookup`]'s hostname,
@@ -112,6 +147,10 @@ pub enum NetError {
     ResourceExhausted,
     /// See [`ERR_PERMISSION_DENIED`].
     PermissionDenied,
+    /// See [`ERR_WOULD_BLOCK`], and a holder's call that does not wait.
+    WouldBlock,
+    /// A handle that reaches none of this process's sockets.
+    NotASocket,
     Protocol(u32),
     Io,
 }
@@ -127,6 +166,7 @@ impl NetError {
             ERR_INVALID_INPUT => NetError::InvalidInput,
             ERR_RESOURCE_EXHAUSTED => NetError::ResourceExhausted,
             ERR_PERMISSION_DENIED => NetError::PermissionDenied,
+            ERR_WOULD_BLOCK => NetError::WouldBlock,
             ERR_OTHER => NetError::Io,
             // An older client meets a newer netstack here rather than at a panic:
             // an unknown code is still an error, and still says which one.
@@ -134,30 +174,6 @@ impl NetError {
         }
     }
 }
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub struct TcpSocketId(pub u32);
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub struct UdpSocketId(pub u32);
-
-// Protocol request/response structs
-
-/// A duplex data path is **two pipe ends, sent with the request that opens
-/// it**, in this order. The client makes both pipes and keeps the ends facing
-/// itself.
-///
-/// Stated once because the two sides of the swap are in different programs: a
-/// reversed pair is two working pipes carrying each other's bytes, which no
-/// type here can catch.
-pub const DATA_HANDLES: usize = 2;
-/// The end netstack writes into and the client reads from.
-pub const DATA_TO_CLIENT: usize = 0;
-/// The end the client writes into and netstack reads from.
-pub const DATA_FROM_CLIENT: usize = 1;
-
-/// A bind sends one end: the one netstack writes an accept notification into.
-pub const NOTIFY_HANDLES: usize = 1;
 
 ipc_payload! {
     /// [`MsgType::TcpConnect`], with the stream's region.
@@ -168,17 +184,14 @@ ipc_payload! {
         pub timeout_ms: u32,
     }
 
-    /// The answer to [`MsgType::TcpConnect`], with the stream's bell.
+    /// The answer to [`MsgType::TcpConnect`], with the stream's bells
+    /// (`net::stream::BELLS`).
     pub struct TcpConnectResponse {
         pub local_port: u16,
         pub _pad: u16,
     }
 
-    pub struct SocketCloseRequest {
-        pub socket_id: u32,
-    }
-
-    pub struct TcpBindPipedRequest {
+    pub struct TcpListenRequest {
         pub addr: [u8; 4],
         pub port: u16,
         pub _pad: u16,
@@ -186,15 +199,11 @@ ipc_payload! {
         pub options: TcpOptions,
     }
 
-    pub struct TcpBindResponse {
-        pub socket_id: u32,
-        pub bound_port: u16,
+    /// The answer to [`MsgType::TcpListen`] and [`MsgType::UdpBind`], with the
+    /// first holder's bell.
+    pub struct BoundResponse {
+        pub port: u16,
         pub _pad: u16,
-    }
-
-    /// [`MsgType::TcpAccept`], with the stream's region.
-    pub struct TcpAcceptRequest {
-        pub listener: u32,
     }
 
     /// The options a listener holds, a word each: zero is off and anything
@@ -204,9 +213,10 @@ ipc_payload! {
         nodelay: u32,
     }
 
-    /// The answer to [`MsgType::TcpAccept`], with the stream's bell: the peer,
-    /// and whether Nagle's algorithm is off for the stream as its listener
-    /// had it, which netstack has written into the region's header too.
+    /// The answer to a listener holder's [`socket::ACCEPT`], with the stream's
+    /// connection and its bells: the peer, and whether Nagle's algorithm
+    /// is off for the stream as its listener had it, which netstack has
+    /// written into the region's header too.
     pub struct TcpAcceptResponse {
         pub remote_addr: [u8; 4],
         pub remote_port: u16,
@@ -220,44 +230,8 @@ ipc_payload! {
         pub _pad: u16,
     }
 
-    pub struct UdpBindResponse {
-        pub socket_id: u32,
-        pub bound_port: u16,
-        pub _pad: u16,
-    }
-
-    pub struct UdpSendToRequest {
-        pub socket_id: u32,
-        pub addr: [u8; 4],
-        pub port: u16,
-        pub len: u16,
-    }
-
-    pub struct UdpRecvFromRequest {
-        pub socket_id: u32,
-        pub max_len: u32,
-    }
-
-    pub struct UdpRecvResponse {
-        pub addr: [u8; 4],
-        pub port: u16,
-        pub len: u16,
-    }
-
-    /// [`MsgType::TcpListenerSetOption`] and [`MsgType::UdpSetOption`]: the
-    /// request's type says which kind of socket `socket_id` names.
-    pub struct SocketOptionRequest {
-        pub socket_id: u32,
-        pub option: u32,
-        pub value: u32,
-    }
-
     pub struct ErrorResponse {
         pub code: u32,
-    }
-
-    struct SentBytes {
-        value: u32,
     }
 }
 
@@ -270,21 +244,6 @@ impl TcpOptions {
     pub fn nodelay(&self) -> bool {
         self.nodelay != 0
     }
-}
-
-// Return types
-
-pub struct TcpBound {
-    pub notify: Pipe,
-    pub socket_id: TcpSocketId,
-    pub bound_port: u16,
-}
-
-pub struct UdpBound {
-    pub socket_id: UdpSocketId,
-    pub bound_port: u16,
-    pub tx: Pipe,
-    pub rx: Pipe,
 }
 
 // NetstackConn — per-operation IPC connection (typestate protocol)
@@ -343,34 +302,48 @@ impl NetstackConn {
     }
 }
 
+/// The widest first frame an exported end carries.
+const MAX_ADOPT: usize = {
+    let (stream, socket) = (core::mem::size_of::<stream::Adopt>(), core::mem::size_of::<socket::Adopt>());
+    if stream > socket { stream } else { socket }
+};
+
+/// An exported end taken up as this process's holder of what its first frame
+/// says it holds, a socket ([`socket::ADOPT`]) or else a stream
+/// (`stream::adopted`'s rules), as its descriptor's object. The frame
+/// is read without waiting: netstack queued it before it answered the export,
+/// so it is there or never sent. `None`, with everything closed, where the
+/// process takes up no holder of it.
+pub fn adopt_exported(end: OwnedHandle) -> Option<crate::fd::Object> {
+    let connection = Connection::received(end);
+    let mut frames: FrameRx<MAX_ADOPT> = FrameRx::new();
+    let first = match frames.pump(&connection) {
+        crate::ipc::RxStep::Frame { msg_type, payload_len, .. } => {
+            let handles = frames.take_batch();
+            Some((msg_type, frames.payload(payload_len), handles))
+        }
+        _ => None,
+    };
+    match first {
+        Some((socket::ADOPT, payload, handles)) => socket::adopted(connection, payload, handles).map(socket::descriptor),
+        first => {
+            let first = first.filter(|&(msg_type, ..)| msg_type == stream::ADOPT).map(|(_, payload, handles)| (payload, handles));
+            stream::adopted(connection, first).map(stream::descriptor)
+        }
+    }
+}
+
 /// A netstack that hung up mid-exchange is a netstack that is not there.
 ///
-/// **[`NetstackConn::connect`] already says so and the exchange did not, which is
-/// a distinction this architecture removed.** A connector is in the namespace
-/// from a program's first instruction, so connecting to a netstack that has
-/// already exited *succeeds* — the connection queues on a port nobody will
-/// ever accept from — and the hang-up arrives at the first send or the first
-/// read instead. Reporting that as [`NetError::Io`] left every caller unable
-/// to tell "this machine has no network" from "netstack failed", and `sshserver`
-/// panicked across the boot of every NIC-less machine that lost the race
-/// rather than exiting with the line it has for exactly this.
-///
-/// **`Disconnected` is only the word for a hang-up this endpoint *read*, and a
-/// request is sent before anything is read.** `IpcError::Disconnected` is
-/// raised in one place — `ipc::read_exact`, on a `read` that answered zero — so
-/// it is what a peer that left while this endpoint was waiting for the response
-/// looks like. A peer that left *before* the request went out is refused by the
-/// kernel at the send instead, which answers `Gone` on a connection whose
-/// handle is still live and still this process's: when the server end's last
-/// handle goes, `port::Acceptor::on_zero_handles` closes every queued
-/// connection's inbox — this end's *outbox*, so `SYS_MESSAGE_SEND` refuses a
-/// message rather than filling a queue nobody will drain — and drops the
-/// connection, which drops the server's read end, so the stream has no reader.
-///
-/// `Gone` cannot mean anything else here. This is applied only to `read` and
-/// `message_send` on a connection this process holds, and a handle a process
-/// does not hold ends it at the kernel rather than answering a word.
-fn hangup(e: IpcError) -> NetError {
+/// A connector is in the namespace from a program's first instruction, so
+/// connecting to a netstack that has already exited *succeeds*: the
+/// connection queues on a port nobody will accept from, and the hang-up
+/// arrives at the first send or receive instead. The kernel answers a send
+/// `Gone` once no receiver is left, and a receive `Gone` (`Disconnected`)
+/// once the peer has gone with nothing queued. Either is
+/// [`NetError::NetstackNotFound`], so a caller can tell "this machine has no
+/// network" from "netstack failed".
+pub(crate) fn hangup(e: IpcError) -> NetError {
     match e {
         IpcError::Disconnected
         | IpcError::Syscall(toyos_abi::syscall::SyscallError::Gone) => NetError::NetstackNotFound,
@@ -378,155 +351,71 @@ fn hangup(e: IpcError) -> NetError {
     }
 }
 
+/// netstack's answer on `connection`, taken into `rx`: a [`RespType::Result`],
+/// whose payload and handles are the caller's, or the error a
+/// [`RespType::Error`] carries.
+pub(crate) fn answer<const MAX: usize>(
+    connection: &impl crate::AsHandle,
+    rx: &mut FrameRx<MAX>,
+) -> Result<Frame, NetError> {
+    let frame = rx.recv(connection).map_err(hangup)?;
+    if frame.msg_type == RespType::Error as u32 {
+        let err: ErrorResponse = crate::ipc::decode_payload(rx.payload(frame.payload_len)).map_err(hangup)?;
+        return Err(NetError::from_error_code(err.code));
+    }
+    if frame.msg_type != RespType::Result as u32 {
+        return Err(NetError::Protocol(frame.msg_type));
+    }
+    Ok(frame)
+}
+
+/// The widest typed answer netstack sends.
+pub(crate) const MAX_ANSWER: usize = 64;
+
 pub struct PendingResponse(NetstackConn);
 
 impl PendingResponse {
     fn conn(&self) -> &Connection { &(self.0).0 }
 
-    fn recv_checked_header(&self) -> Result<IpcHeader, NetError> {
-        let header = self.conn().recv_header().map_err(hangup)?;
-        if header.msg_type == RespType::Error as u32 {
-            let err: ErrorResponse = self.conn().recv_payload(&header).map_err(hangup)?;
-            return Err(NetError::from_error_code(err.code));
-        }
-        if header.msg_type != RespType::Result as u32 {
-            return Err(NetError::Protocol(header.msg_type));
-        }
-        Ok(header)
-    }
-
     pub fn response<Resp: IpcPayload>(self) -> Result<Resp, NetError> {
-        let header = self.recv_checked_header()?;
-        self.conn().recv_payload(&header).map_err(hangup)
+        const { assert!(core::mem::size_of::<Resp>() <= MAX_ANSWER && core::mem::size_of::<ErrorResponse>() <= MAX_ANSWER) };
+        let mut rx = FrameRx::<MAX_ANSWER>::new();
+        let frame = answer(self.conn(), &mut rx)?;
+        crate::ipc::decode_payload(rx.payload(frame.payload_len)).map_err(hangup)
     }
 
+    /// The answer's bytes, taken straight into `buf`: their length. An
+    /// answer longer than `buf` is [`NetError::Io`], an error answer
+    /// included, so `buf` must hold an [`ErrorResponse`] too.
     pub fn response_bytes(self, buf: &mut [u8]) -> Result<usize, NetError> {
-        let header = self.recv_checked_header()?;
-        self.conn().recv_bytes(&header, buf).map_err(hangup)
-    }
-
-    /// The answer, the one handle it hands over, and the connection, which
-    /// is then the caller's.
-    pub fn answer_with_handle<Resp: IpcPayload>(self) -> Result<(Resp, RawHandle, Connection), NetError> {
-        let header = self.recv_checked_header()?;
-        let answer = self.conn().recv_payload(&header).map_err(hangup)?;
-        let [handle] = self.conn().recv_handles_exact::<1>(&header).ok_or(NetError::Protocol(header.msg_type))?;
-        Ok((answer, handle, (self.0).0))
-    }
-
-    pub fn status(self) -> Result<(), NetError> {
-        let header = self.recv_checked_header()?;
-        if !header.is_empty() {
-            let mut skip = [0u8; 128];
-            let _ = self.conn().recv_bytes(&header, &mut skip);
+        let (frame, _) = self.conn().recv_into(buf).map_err(hangup)?;
+        let payload = &buf[..frame.payload_len];
+        match frame.msg_type {
+            t if t == RespType::Error as u32 => {
+                let err: ErrorResponse = crate::ipc::decode_payload(payload).map_err(hangup)?;
+                Err(NetError::from_error_code(err.code))
+            }
+            t if t == RespType::Result as u32 => Ok(frame.payload_len),
+            other => Err(NetError::Protocol(other)),
         }
-        Ok(())
-    }
-}
-
-/// The two pipes behind a duplex data path, split into what the caller keeps
-/// and what netstack is given.
-///
-/// The `to_netstack` ends are owned here only until the send; a caller that errors
-/// out before then drops this and both pipes go with it.
-struct DataPath {
-    rx: Pipe,
-    tx: Pipe,
-    to_netstack: [Pipe; DATA_HANDLES],
-}
-
-impl DataPath {
-    fn create() -> Result<Self, NetError> {
-        let (rx, netstack_tx) = crate::pipe_pair().map_err(|_| NetError::Io)?;
-        let (netstack_rx, tx) = crate::pipe_pair().map_err(|_| NetError::Io)?;
-        Ok(Self { rx, tx, to_netstack: [netstack_tx, netstack_rx] })
     }
 
-    fn split(self) -> (Pipe, Pipe, [OwnedHandle; DATA_HANDLES]) {
-        (self.rx, self.tx, self.to_netstack.map(OwnedHandle::from))
+    /// The answer, the `N` handles it hands over, and the connection, which
+    /// is then the caller's.
+    pub fn answer_with_handles<Resp: IpcPayload, const N: usize>(self) -> Result<(Resp, [OwnedHandle; N], Connection), NetError> {
+        const { assert!(core::mem::size_of::<Resp>() <= MAX_ANSWER && core::mem::size_of::<ErrorResponse>() <= MAX_ANSWER) };
+        let mut rx = FrameRx::<MAX_ANSWER>::new();
+        let frame = answer(self.conn(), &mut rx)?;
+        let answer = crate::ipc::decode_payload(rx.payload(frame.payload_len)).map_err(hangup)?;
+        let handles = rx.take_handles::<N>().ok_or(NetError::Protocol(frame.msg_type))?;
+        Ok((answer, handles, (self.0).0))
     }
-}
 
-// TCP client functions: a listener's. A stream's are [`stream`]'s.
-
-/// A listener that holds no option.
-pub fn tcp_bind(addr: [u8; 4], port: u16) -> Result<TcpBound, NetError> {
-    tcp_bind_with(addr, port, TcpOptions::new(false))
-}
-
-/// A listener that holds `options` before any SYN can reach its port.
-pub fn tcp_bind_with(addr: [u8; 4], port: u16, options: TcpOptions) -> Result<TcpBound, NetError> {
-    let netstack = NetstackConn::connect()?;
-    let (notify, netstack_notify) = crate::pipe_pair().map_err(|_| NetError::Io)?;
-
-    let resp: TcpBindResponse = netstack
-        .request_with_handles(
-            [netstack_notify.into()],
-            MsgType::TcpBindPiped,
-            &TcpBindPipedRequest { addr, port, _pad: 0, options },
-        )?
-        .response()?;
-
-    Ok(TcpBound { notify, socket_id: TcpSocketId(resp.socket_id), bound_port: resp.bound_port })
-}
-
-/// The listener's owner lets go of it.
-pub fn tcp_close(socket_id: TcpSocketId) -> Result<(), NetError> {
-    NetstackConn::connect()?
-        .request(MsgType::TcpClose, &SocketCloseRequest { socket_id: socket_id.0 })?
-        .status()
-}
-
-pub fn tcp_listener_set_option(socket_id: TcpSocketId, option: u32, value: u32) -> Result<(), NetError> {
-    NetstackConn::connect()?
-        .request(MsgType::TcpListenerSetOption, &SocketOptionRequest { socket_id: socket_id.0, option, value })?
-        .status()
-}
-
-// UDP client functions
-
-pub fn udp_bind(addr: [u8; 4], port: u16) -> Result<UdpBound, NetError> {
-    let netstack = NetstackConn::connect()?;
-    let (rx, tx, handles) = DataPath::create()?.split();
-
-    let resp: UdpBindResponse = netstack
-        .request_with_handles(handles, MsgType::UdpBind, &UdpBindRequest { addr, port, _pad: 0 })?
-        .response()?;
-
-    Ok(UdpBound { socket_id: UdpSocketId(resp.socket_id), bound_port: resp.bound_port, tx, rx })
-}
-
-pub fn udp_send_to(socket_id: UdpSocketId, addr: [u8; 4], port: u16, len: u16) -> Result<u32, NetError> {
-    let resp: SentBytes = NetstackConn::connect()?
-        .request(MsgType::UdpSendTo, &UdpSendToRequest {
-            socket_id: socket_id.0,
-            addr,
-            port,
-            len,
-        })?
-        .response()?;
-    Ok(resp.value)
-}
-
-pub fn udp_recv_from(socket_id: UdpSocketId, max_len: u32) -> Result<UdpRecvResponse, NetError> {
-    NetstackConn::connect()?
-        .request(MsgType::UdpRecvFrom, &UdpRecvFromRequest {
-            socket_id: socket_id.0,
-            max_len,
-        })?
-        .response()
-}
-
-pub fn udp_close(socket_id: UdpSocketId) -> Result<(), NetError> {
-    NetstackConn::connect()?
-        .request(MsgType::UdpClose, &SocketCloseRequest { socket_id: socket_id.0 })?
-        .status()
-}
-
-pub fn udp_set_option(socket_id: UdpSocketId, option: u32, value: u32) -> Result<(), NetError> {
-    NetstackConn::connect()?
-        .request(MsgType::UdpSetOption, &SocketOptionRequest { socket_id: socket_id.0, option, value })?
-        .status()
+    /// An answer whose payload says nothing past its type.
+    pub fn status(self) -> Result<(), NetError> {
+        let mut rx = FrameRx::<MAX_ANSWER>::new();
+        answer(self.conn(), &mut rx).map(drop)
+    }
 }
 
 pub fn dns_lookup(hostname: &str, results: &mut [[u8; 4]]) -> Result<usize, NetError> {
@@ -573,7 +462,7 @@ mod tests {
     use toyos_abi::syscall::SyscallError;
 
     /// `SYS_MESSAGE_SEND` into a connection whose server end has gone: the
-    /// first refusal any request can meet, a `tcp_bind`'s included.
+    /// first refusal any request can meet, a listen's included.
     #[test]
     fn a_gone_handle_transfer_is_a_netstack_that_is_not_there() {
         assert_eq!(hangup(IpcError::Syscall(SyscallError::Gone)), NetError::NetstackNotFound);
@@ -625,41 +514,27 @@ mod tests {
         );
         assert_eq!(NetError::from_error_code(ERR_PERMISSION_DENIED), NetError::PermissionDenied);
         assert_eq!(NetError::from_error_code(ERR_INVALID_INPUT), NetError::InvalidInput);
+        assert_eq!(NetError::from_error_code(ERR_WOULD_BLOCK), NetError::WouldBlock);
         assert_eq!(NetError::from_error_code(ERR_OTHER), NetError::Io);
         assert_eq!(NetError::from_error_code(4242), NetError::Protocol(4242));
     }
 
-    /// The option request as netstack decodes it: three words in the order
-    /// socket, option, value, and nothing shorter.
-    #[test]
-    fn an_option_request_is_three_words_on_the_wire() {
-        let wire = [0x44, 0x33, 0x22, 0x11, 2, 0, 0, 0, 1, 0, 0, 0];
-        let request: SocketOptionRequest = crate::ipc::decode_payload(&wire).unwrap();
-        assert_eq!(request.socket_id, 0x1122_3344);
-        assert_eq!(request.option, OPT_BROADCAST);
-        assert_eq!(request.value, 1);
-        assert!(matches!(
-            crate::ipc::decode_payload::<SocketOptionRequest>(&wire[..11]),
-            Err(IpcError::Malformed)
-        ));
-    }
-
-    /// The bind's request as netstack decodes it: the options last, after
+    /// The listen's request as netstack decodes it: the options last, after
     /// the address and the port, any non-zero word an option that is on, and
     /// a request without them refused.
     #[test]
-    fn a_binds_request_ends_in_its_listeners_options() {
+    fn a_listens_request_ends_in_its_listeners_options() {
         let mut wire = [192, 0, 2, 7, 0x16, 0, 0, 0, 0, 0, 0, 0];
-        let request: TcpBindPipedRequest = crate::ipc::decode_payload(&wire).unwrap();
+        let request: TcpListenRequest = crate::ipc::decode_payload(&wire).unwrap();
         assert_eq!((request.addr, request.port, request.options), ([192, 0, 2, 7], 22, TcpOptions::new(false)));
         wire[8] = 1;
-        let request: TcpBindPipedRequest = crate::ipc::decode_payload(&wire).unwrap();
+        let request: TcpListenRequest = crate::ipc::decode_payload(&wire).unwrap();
         assert_eq!(request.options, TcpOptions::new(true));
         wire[8..].copy_from_slice(&[0, 0, 0, 0x80]);
-        let request: TcpBindPipedRequest = crate::ipc::decode_payload(&wire).unwrap();
+        let request: TcpListenRequest = crate::ipc::decode_payload(&wire).unwrap();
         assert!(request.options.nodelay());
         assert!(matches!(
-            crate::ipc::decode_payload::<TcpBindPipedRequest>(&wire[..8]),
+            crate::ipc::decode_payload::<TcpListenRequest>(&wire[..8]),
             Err(IpcError::Malformed)
         ));
     }

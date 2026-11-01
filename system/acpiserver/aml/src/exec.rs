@@ -825,7 +825,7 @@ impl<'a> Machine<'a> {
         // Processor, a Thermal Zone or a Power Resource.
         if !matches!(
             self.node_object(id)?,
-            Object::Scope | Object::Device | Object::Processor | Object::ThermalZone | Object::PowerResource
+            Object::Scope | Object::Device | Object::Processor(_) | Object::ThermalZone | Object::PowerResource
         ) {
             return Err(Error::Type("a Scope names an object that opens no scope (§19.6.120)"));
         }
@@ -856,10 +856,10 @@ impl<'a> Machine<'a> {
                 // DefProcessor := ProcessorOp PkgLength NameString ProcID
                 // PblkAddr PblkLen TermList (ACPI 6.3A §20.2.5.2), parsed by
                 // the owner's ruling to accept what real firmware ships.
-                body.byte()?;
+                let id = body.byte()?;
                 body.dword()?;
                 body.byte()?;
-                Object::Processor
+                Object::Processor(id)
             }
             _ => {
                 // SystemLevel and ResourceOrder, which only OSPM's power
@@ -1073,7 +1073,7 @@ impl<'a> Machine<'a> {
         let v = self.int_arg(f, c)?;
         let id = self.node_of(f, &t)?;
         // §19.6.94: a device, processor, or thermal zone.
-        if !matches!(self.node_object(id)?, Object::Device | Object::Processor | Object::ThermalZone) {
+        if !matches!(self.node_object(id)?, Object::Device | Object::Processor(_) | Object::ThermalZone) {
             return Err(Error::Type("Notify of an object that is not a device, processor or thermal zone (§19.6.94)"));
         }
         let path = self.path_of(id, None)?;

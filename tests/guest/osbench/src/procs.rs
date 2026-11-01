@@ -145,8 +145,8 @@ fn c_spawn_wait(path: &CString, argv: &[&CString]) -> Result<(), sys::Refused> {
 }
 
 pub fn suite() {
-    let memory = crate::files::memory_targets().remove(0).dir;
-    let dir = match Scratch::new(memory) {
+    let memory = crate::files::memory().dir;
+    let dir = match Scratch::new(&memory) {
         Ok(d) => d,
         Err(e) => return refuse("proc", format!("no scratch directory under {memory}: {e}")),
     };

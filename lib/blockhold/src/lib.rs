@@ -142,11 +142,7 @@ impl<H: Copy> Holds<H> {
     /// On an empty span: the caller refuses one before asking.
     pub fn hold(&mut self, first: u64, end: u64, holder: H) -> Result<(), H> {
         assert!(first < end, "an empty span is refused before it is held");
-        if let Some(held) = self
-            .spans
-            .iter()
-            .find_map(|span| span.holder.filter(|_| span.overlaps(first, end)))
-        {
+        if let Some(held) = self.holder(first, end) {
             return Err(held);
         }
         let mut account = Account::default();
@@ -168,6 +164,11 @@ impl<H: Copy> Holds<H> {
         kept.push(Span { first, end, holder: Some(holder), account });
         self.spans = kept;
         Ok(())
+    }
+
+    /// Who holds a block of `first..end`, if anyone does.
+    pub fn holder(&self, first: u64, end: u64) -> Option<H> {
+        self.spans.iter().find_map(|span| span.holder.filter(|_| span.overlaps(first, end)))
     }
 
     /// The hold beginning at `first` ends; an account owing a report stays

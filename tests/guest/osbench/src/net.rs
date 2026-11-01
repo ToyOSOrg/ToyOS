@@ -1,11 +1,8 @@
-//! Loopback networking through std's `net` on both systems: Linux's TCP and
-//! UDP in the kernel, ToyOS's in the netstack process. Netstack runs only
-//! beside a network card its row names, and a benchcase boot has none, so
-//! ToyOS's socket calls answer `NotConnected`: that answer alone is reported
-//! `unsupported`. Where netstack runs it refuses 127/8 and its own addresses
-//! as destinations (`system/netstack/ip/src/route.rs`,
-//! `RouteLocalDestination`; the UDP layer's `SendLoopback`), and that, like
-//! any failure on Linux, refuses the benchmark.
+//! Loopback networking through std's `net`: Linux's TCP and UDP in the
+//! kernel. ToyOS has no loopback, so every benchmark here is `unsupported`
+//! there: netstack refuses 127/8 and its own addresses as destinations
+//! (`system/netstack/ip/src/route.rs`, `RouteLocalDestination`; the UDP
+//! layer's `SendLoopback`). The link to another machine is `lan`'s.
 //!
 //! Every wait is bounded by [`PATIENCE`], so a stack that accepts a call and
 //! never answers it is refused rather than hung.
@@ -56,24 +53,25 @@ fn listen() -> std::io::Result<(TcpListener, SocketAddr)> {
     Ok((listener, addr))
 }
 
-/// Why loopback networking failed: absent only for the answer a system
-/// without it gives. A benchcase boot runs no netstack, and std's socket calls
-/// then answer `NotConnected`; Linux has loopback, so any failure there is one.
 fn refused(what: &str, e: std::io::Error) -> sys::Refused {
-    let why = format!("{what}: {e} ({:?})", e.kind());
-    if cfg!(target_os = "toyos") && e.kind() == std::io::ErrorKind::NotConnected {
-        sys::Refused::Absent(format!("no network stack answers: {why}"))
-    } else {
-        sys::Refused::Failed(why)
-    }
+    sys::Refused::Failed(format!("{what}: {e} ({:?})", e.kind()))
 }
 
+const BENCHES: [&str; 5] =
+    ["net.tcp.connect_accept_close", "net.tcp.reqrep.64", "net.tcp.stream.1", "net.tcp.stream.65536", "net.udp.reqrep.64"];
+
 pub fn suite() {
+    if cfg!(target_os = "toyos") {
+        for bench in BENCHES {
+            crate::report::unsupported(bench, "ToyOS's network stack has no loopback: netstack refuses 127/8 as a destination");
+        }
+        return;
+    }
     let (listener, addr) = match listen() {
         Ok(pair) => pair,
         Err(e) => {
             let why = refused("a loopback TCP listener and one connection to it", e);
-            for bench in ["net.tcp.connect_accept_close", "net.tcp.reqrep.64", "net.tcp.stream.1", "net.tcp.stream.65536"] {
+            for bench in &BENCHES[..4] {
                 why.clone().report(bench);
             }
             return udp();

@@ -8,6 +8,13 @@ repository = "https://github.com/ToyOSOrg/ToyOS"
 
 [features]
 rustc-dep-of-std = ["core"]
+# Declared, never enabled here: `kernel-loom` compiles `src/clock/latch.rs`
+# into its own crate with `loom` on, so its atomics resolve to loom's, and with
+# `clock-latch-fence-off`, its negative control, which drops the writer's
+# fence and must red `kernel/loom/tests/clock_latch.rs`. Declared only so `cfg`
+# checking knows the names.
+loom = []
+clock-latch-fence-off = []
 
 [dependencies]
 core = { version = "1.0.0", optional = true, package = "rustc-std-workspace-core" }

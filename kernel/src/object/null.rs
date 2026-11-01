@@ -6,6 +6,8 @@ use alloc::sync::Arc;
 
 use toyos_abi::handle::Rights;
 
+use crate::mm::charge::Exhausted;
+
 use super::{KObjectVariant, ObjectCore};
 
 pub struct NullObject {
@@ -20,7 +22,7 @@ impl NullObject {
         .union(Rights::READ)
         .union(Rights::WRITE);
 
-    pub fn new() -> Arc<Self> {
-        Arc::new(Self { core: Self::new_core() })
+    pub fn new() -> Result<Arc<Self>, Exhausted> {
+        Ok(Arc::new(Self { core: Self::new_core(0)? }))
     }
 }

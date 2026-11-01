@@ -20,6 +20,13 @@
 //! Entities sit in an AVL tree ordered by deadline, each node holding its
 //! subtree's least `v`, so a pick, an eligibility query and every update are
 //! O(log n) in the entities queued.
+//!
+//! A [`Queue`] is only the tree's root and its sums: its entities live in an
+//! [`Arena`], which several queues may share, and a caller names one by the
+//! [`Slot`] its join answered. So a queue costs nothing to make or drop, and
+//! an entity joins and leaves without a lookup or an allocation once its
+//! arena has held as many. [`Eevdf`] is one queue that names its entities by
+//! key instead.
 
 use alloc::collections::BTreeMap;
 use alloc::vec::Vec;
@@ -57,7 +64,15 @@ impl Lag {
 
 const NIL: u32 = u32::MAX;
 
-struct Entity<K> {
+/// The deepest an AVL tree of `u32`-indexed nodes can be: `1.44·log2(2^32)`.
+const MAX_HEIGHT: usize = 48;
+
+/// One entity's place in its [`Arena`], valid from the join that answered it
+/// to the leave that takes it.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub struct Slot(u32);
+
+struct Entity<K, P> {
     key: K,
     weight: u64,
     /// Absolute virtual time, in `2^VSHIFT`-scaled ns per unit weight.
@@ -75,11 +90,10 @@ struct Entity<K> {
     height: u8,
     /// The least `v` in this entity's subtree.
     min_v: i128,
-    /// Where it is in [`Eevdf::order`].
-    pos: u32,
+    payload: P,
 }
 
-/// What [`Eevdf::leave`] hands back: everything needed to rejoin elsewhere.
+/// What [`Queue::leave`] hands back: everything needed to rejoin elsewhere.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub struct Left {
     pub lag: Lag,
@@ -87,16 +101,16 @@ pub struct Left {
     pub request_left: i128,
 }
 
-pub struct Eevdf<K> {
-    /// Every entity queued, and the slots of those that left, which `free`
-    /// lists for reuse.
-    nodes: Vec<Entity<K>>,
+/// The entities of one or more queues, each carrying its caller's `P`.
+pub struct Arena<K, P> {
+    nodes: Vec<Option<Entity<K, P>>>,
     free: Vec<u32>,
-    slots: BTreeMap<K, u32>,
-    /// The queued slots in join order, a leave moving the last into its place:
-    /// the order [`Self::keys`] answers in.
-    order: Vec<u32>,
+}
+
+/// One EEVDF queue over entities kept in an [`Arena`].
+pub struct Queue {
     root: u32,
+    len: u32,
     total: i128,
     /// Origin of `sum`, kept within one virtual unit of `V`.
     base: i128,
@@ -118,59 +132,64 @@ fn fine(ns: u64) -> i128 {
     (ns as i128) << VSHIFT
 }
 
-impl<K: Copy + Ord> Eevdf<K> {
-    pub fn new() -> Self {
-        Self {
-            nodes: Vec::new(),
-            free: Vec::new(),
-            slots: BTreeMap::new(),
-            order: Vec::new(),
-            root: NIL,
-            total: 0,
-            base: 0,
-            sum: 0,
-            seq: 0,
+impl<K: Copy, P> Arena<K, P> {
+    pub const fn new() -> Self {
+        Self { nodes: Vec::new(), free: Vec::new() }
+    }
+
+    fn node(&self, i: u32) -> &Entity<K, P> {
+        self.nodes[i as usize].as_ref().expect("eevdf: a slot no entity holds")
+    }
+
+    fn node_mut(&mut self, i: u32) -> &mut Entity<K, P> {
+        self.nodes[i as usize].as_mut().expect("eevdf: a slot no entity holds")
+    }
+
+    fn take(&mut self, i: u32) -> Entity<K, P> {
+        let e = self.nodes[i as usize].take().expect("eevdf: a slot no entity holds");
+        self.free.push(i);
+        e
+    }
+
+    fn put(&mut self, e: Entity<K, P>) -> u32 {
+        match self.free.pop() {
+            Some(i) => {
+                self.nodes[i as usize] = Some(e);
+                i
+            }
+            None => {
+                self.nodes.push(Some(e));
+                (self.nodes.len() - 1) as u32
+            }
         }
     }
 
-    pub fn len(&self) -> usize {
-        self.order.len()
+    pub fn key(&self, s: Slot) -> K {
+        self.node(s.0).key
     }
 
-    pub fn is_empty(&self) -> bool {
-        self.order.is_empty()
+    pub fn weight(&self, s: Slot) -> u64 {
+        self.node(s.0).weight
     }
 
-    pub fn contains(&self, key: K) -> bool {
-        self.slots.contains_key(&key)
+    pub fn slice(&self, s: Slot) -> u64 {
+        self.node(s.0).slice
     }
 
-    pub fn keys(&self) -> impl Iterator<Item = K> + '_ {
-        self.order.iter().map(|&i| self.nodes[i as usize].key)
+    pub fn payload(&self, s: Slot) -> &P {
+        &self.node(s.0).payload
     }
 
-    pub fn total_weight(&self) -> u128 {
-        self.total as u128
+    pub fn payload_mut(&mut self, s: Slot) -> &mut P {
+        &mut self.node_mut(s.0).payload
     }
 
-    pub fn weight(&self, key: K) -> u64 {
-        self.get(key).weight
-    }
-
-    fn index(&self, key: K) -> u32 {
-        *self.slots.get(&key).expect("eevdf: entity is not queued")
-    }
-
-    fn get(&self, key: K) -> &Entity<K> {
-        &self.nodes[self.index(key) as usize]
-    }
-
-    fn node(&self, i: u32) -> &Entity<K> {
-        &self.nodes[i as usize]
-    }
-
-    fn node_mut(&mut self, i: u32) -> &mut Entity<K> {
-        &mut self.nodes[i as usize]
+    /// Service, in whole ns rounded up, until the entity's current request is done.
+    pub fn request_left_ns(&self, s: Slot) -> u64 {
+        let e = self.node(s.0);
+        let left = mul(e.vd - e.v, e.weight as i128) - e.rem as i128;
+        let ns = (left + (1 << VSHIFT) - 1) >> VSHIFT;
+        ns.max(1) as u64
     }
 
     /// Tree order: deadline, then issue order.
@@ -178,12 +197,6 @@ impl<K: Copy + Ord> Eevdf<K> {
         let e = self.node(i);
         (e.vd, e.seq)
     }
-
-    fn eligible(&self, v: i128) -> bool {
-        mul(self.total, v - self.base) <= self.sum
-    }
-
-    // ---- The tree ------------------------------------------------------------
 
     fn height(&self, i: u32) -> u8 {
         if i == NIL { 0 } else { self.node(i).height }
@@ -308,20 +321,39 @@ impl<K: Copy + Ord> Eevdf<K> {
         }
         self.update(t);
     }
+}
 
-    /// Give node `i` a fresh request, moving it to its new place in the tree.
-    fn reissue(&mut self, i: u32, request: i128) {
-        let at = self.order_of(i);
-        self.root = self.remove(self.root, at);
-        self.issue(i, request);
-        self.root = self.insert(self.root, i);
+impl<K: Copy, P> Default for Arena<K, P> {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl Queue {
+    pub const fn new() -> Self {
+        Self { root: NIL, len: 0, total: 0, base: 0, sum: 0, seq: 0 }
     }
 
-    // ---- The queue -----------------------------------------------------------
+    pub fn len(&self) -> usize {
+        self.len as usize
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.len == 0
+    }
+
+    pub fn total_weight(&self) -> u128 {
+        self.total as u128
+    }
+
+    fn eligible(&self, v: i128) -> bool {
+        mul(self.total, v - self.base) <= self.sum
+    }
 
     /// Move `base` to `⌊V⌋` so the sums stay small.
     fn rebase(&mut self) {
-        if self.total > 0 {
+        // `0 ≤ sum < total` is `⌊V⌋ = base` already, and the division is spared.
+        if self.total > 0 && !(0..self.total).contains(&self.sum) {
             let q = self.sum.div_euclid(self.total);
             self.base = add(self.base, q);
             self.sum -= mul(q, self.total);
@@ -329,24 +361,70 @@ impl<K: Copy + Ord> Eevdf<K> {
     }
 
     /// Set a detached node's request.
-    fn issue(&mut self, i: u32, request: i128) {
+    fn issue<K: Copy, P>(&mut self, arena: &mut Arena<K, P>, i: u32, request: i128) {
         self.seq += 1;
         let seq = self.seq;
-        let e = self.node_mut(i);
+        let e = arena.node_mut(i);
         e.vd = add(e.v, request.div_euclid(e.weight as i128).max(1));
         e.seq = seq;
     }
 
-    /// Enter with `lag` and a fresh request of `slice` ns. Returns the lag the
-    /// entity really holds afterwards: `lag` itself up to rounding, or zero in
-    /// an empty queue, where there is no one to owe or be owed.
-    pub fn join(&mut self, key: K, weight: u64, slice: u64, lag: Lag) -> Lag {
-        self.join_with_request(key, weight, slice, lag, fine(slice))
+    /// Give node `i` a fresh request, moving it to its new place in the tree.
+    fn reissue<K: Copy, P>(&mut self, arena: &mut Arena<K, P>, i: u32, request: i128) {
+        let at = arena.order_of(i);
+        self.root = arena.remove(self.root, at);
+        self.issue(arena, i, request);
+        self.root = arena.insert(self.root, i);
     }
 
-    fn join_with_request(&mut self, key: K, weight: u64, slice: u64, lag: Lag, request: i128) -> Lag {
+    /// Enter with `lag` and a fresh request of `slice` ns: the entity holds
+    /// `lag` itself afterwards up to rounding, or zero in an empty queue, where
+    /// there is no one to owe or be owed.
+    pub fn join<K: Copy, P>(&mut self, arena: &mut Arena<K, P>, key: K, weight: u64, slice: u64, lag: Lag, payload: P) -> Slot {
+        self.join_with_request(arena, key, weight, slice, lag, fine(slice), payload)
+    }
+
+    /// Enter carrying what [`Self::leave`] returned elsewhere: the lag and the
+    /// unfinished part of the request.
+    pub fn rejoin<K: Copy, P>(&mut self, arena: &mut Arena<K, P>, key: K, weight: u64, slice: u64, left: Left, payload: P) -> Slot {
+        let request = left.request_left.clamp(1, fine(slice));
+        self.join_with_request(arena, key, weight, slice, left.lag, request, payload)
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn join_with_request<K: Copy, P>(
+        &mut self,
+        arena: &mut Arena<K, P>,
+        key: K,
+        weight: u64,
+        slice: u64,
+        lag: Lag,
+        request: i128,
+        payload: P,
+    ) -> Slot {
+        let i = arena.put(Entity {
+            key,
+            weight,
+            v: 0,
+            rem: 0,
+            vd: 0,
+            slice,
+            seq: 0,
+            left: NIL,
+            right: NIL,
+            height: 1,
+            min_v: 0,
+            payload,
+        });
+        self.enter(arena, i, lag, request);
+        Slot(i)
+    }
+
+    /// Place the detached node `i`, whose weight and slice are set, with
+    /// `lag` and a fresh request of `request` fine units.
+    fn enter<K: Copy, P>(&mut self, arena: &mut Arena<K, P>, i: u32, lag: Lag, request: i128) {
+        let weight = arena.node(i).weight;
         assert!((1..=MAX_WEIGHT).contains(&weight), "eevdf: weight {weight} out of range");
-        assert!(!self.contains(key), "eevdf: entity joined twice");
         self.rebase();
         let w = weight as i128;
         let v_rel = if self.total == 0 {
@@ -357,73 +435,55 @@ impl<K: Copy + Ord> Eevdf<K> {
             let num = mul(w, self.sum - l) - mul(l, self.total);
             num.div_euclid(mul(self.total, w))
         };
-        let entity = Entity {
-            key,
-            weight,
-            v: add(self.base, v_rel),
-            rem: 0,
-            vd: 0,
-            slice,
-            seq: 0,
-            left: NIL,
-            right: NIL,
-            height: 1,
-            min_v: 0,
-            pos: self.order.len() as u32,
-        };
-        let i = match self.free.pop() {
-            Some(i) => {
-                self.nodes[i as usize] = entity;
-                i
-            }
-            None => {
-                self.nodes.push(entity);
-                (self.nodes.len() - 1) as u32
-            }
-        };
-        self.slots.insert(key, i);
-        self.order.push(i);
-        self.issue(i, request);
-        self.root = self.insert(self.root, i);
+        let e = arena.node_mut(i);
+        e.v = add(self.base, v_rel);
+        e.rem = 0;
+        self.issue(arena, i, request);
+        self.root = arena.insert(self.root, i);
         self.sum = add(self.sum, mul(w, v_rel));
         self.total += w;
-        self.lag(key)
+        self.len += 1;
     }
 
-    /// Leave, taking the entity's lag and unfinished request with it.
-    pub fn leave(&mut self, key: K) -> Left {
+    /// Detach node `i` from the tree and the sums, answering what it takes
+    /// away; the node stays in its arena.
+    fn exit<K: Copy, P>(&mut self, arena: &mut Arena<K, P>, i: u32) -> Left {
         self.rebase();
-        let lag = self.lag(key);
-        let i = self.slots.remove(&key).expect("eevdf: entity is not queued");
-        let at = self.order_of(i);
-        self.root = self.remove(self.root, at);
-        let pos = self.node(i).pos as usize;
-        self.order.swap_remove(pos);
-        if let Some(&moved) = self.order.get(pos) {
-            self.node_mut(moved).pos = pos as u32;
-        }
-        self.free.push(i);
-        let e = self.node(i);
+        let lag = self.lag_of(arena, i);
+        let at = arena.order_of(i);
+        self.root = arena.remove(self.root, at);
+        let e = arena.node(i);
         let w = e.weight as i128;
         let (v, vd) = (e.v, e.vd);
         self.sum -= mul(w, v - self.base);
         self.total -= w;
+        self.len -= 1;
         if self.total == 0 {
             self.sum = 0;
         }
         Left { lag, request_left: mul(vd - v, w) }
     }
 
-    /// Enter carrying what [`Self::leave`] returned elsewhere: the lag and the
-    /// unfinished part of the request.
-    pub fn rejoin(&mut self, key: K, weight: u64, slice: u64, left: Left) -> Lag {
-        let request = left.request_left.clamp(1, fine(slice));
-        self.join_with_request(key, weight, slice, left.lag, request)
+    /// Leave, taking the entity's lag and unfinished request with it, and its
+    /// payload out of the arena.
+    pub fn leave<K: Copy, P>(&mut self, arena: &mut Arena<K, P>, s: Slot) -> (Left, P) {
+        let left = self.exit(arena, s.0);
+        (left, arena.take(s.0).payload)
     }
 
-    /// `w·(V − v)`.
-    pub fn lag(&self, key: K) -> Lag {
-        let e = self.get(key);
+    /// Leave and enter again in place at `weight`, carrying the lag and the
+    /// unfinished request as `adjust` answers them: a reweight, or a lag
+    /// brought from elsewhere. The slot is the same.
+    pub fn readmit<K: Copy, P>(&mut self, arena: &mut Arena<K, P>, s: Slot, weight: u64, adjust: impl FnOnce(Left) -> Left) {
+        let left = adjust(self.exit(arena, s.0));
+        let e = arena.node_mut(s.0);
+        e.weight = weight;
+        let request = left.request_left.clamp(1, fine(e.slice));
+        self.enter(arena, s.0, left.lag, request);
+    }
+
+    fn lag_of<K: Copy, P>(&self, arena: &Arena<K, P>, i: u32) -> Lag {
+        let e = arena.node(i);
         if self.total == 0 {
             return Lag::ZERO;
         }
@@ -432,11 +492,16 @@ impl<K: Copy + Ord> Eevdf<K> {
         Lag(lag)
     }
 
+    /// `w·(V − v)`.
+    pub fn lag<K: Copy, P>(&self, arena: &Arena<K, P>, s: Slot) -> Lag {
+        self.lag_of(arena, s.0)
+    }
+
     /// The running entity received `ns`. A finished request is followed at
     /// once by the next, whose deadline counts from where service now stands.
-    pub fn charge(&mut self, key: K, ns: u64) {
-        let i = self.index(key);
-        let e = self.node_mut(i);
+    pub fn charge<K: Copy, P>(&mut self, arena: &mut Arena<K, P>, s: Slot, ns: u64) {
+        let i = s.0;
+        let e = arena.node_mut(i);
         let total = fine(ns) + e.rem as i128;
         let w = e.weight as i128;
         let dv = total / w;
@@ -445,22 +510,23 @@ impl<K: Copy + Ord> Eevdf<K> {
         let (v, vd, slice) = (e.v, e.vd, e.slice);
         self.sum = add(self.sum, mul(dv, w));
         if v >= vd {
-            self.reissue(i, fine(slice));
+            self.reissue(arena, i, fine(slice));
         } else {
-            self.refresh(self.root, self.order_of(i));
+            let at = arena.order_of(i);
+            arena.refresh(self.root, at);
         }
     }
 
     /// The eligible entity with the earliest deadline.
-    pub fn pick(&self) -> Option<K> {
+    pub fn pick<K: Copy, P>(&self, arena: &Arena<K, P>) -> Option<Slot> {
         let mut t = self.root;
         while t != NIL {
-            let e = self.node(t);
-            if e.left != NIL && self.eligible(self.node(e.left).min_v) {
+            let e = arena.node(t);
+            if e.left != NIL && self.eligible(arena.node(e.left).min_v) {
                 t = e.left;
             } else if self.eligible(e.v) {
-                return Some(e.key);
-            } else if e.right != NIL && self.eligible(self.node(e.right).min_v) {
+                return Some(Slot(t));
+            } else if e.right != NIL && self.eligible(arena.node(e.right).min_v) {
                 t = e.right;
             } else {
                 break;
@@ -474,16 +540,16 @@ impl<K: Copy + Ord> Eevdf<K> {
     /// whose request is due before `running`'s becomes eligible and so the
     /// pick: `V` advances by `1 / total` per unit of service, and an entity
     /// with lag `l < 0` becomes eligible once it has advanced `−l / w`.
-    pub fn overtaken_in(&self, running: K) -> Option<u64> {
-        let before = self.order_of(self.index(running));
+    pub fn overtaken_in<K: Copy, P>(&self, arena: &Arena<K, P>, running: Slot) -> Option<u64> {
+        let before = arena.order_of(running.0);
         let mut least: Option<i128> = None;
         let mut t = self.root;
         while t != NIL {
-            let e = self.node(t);
-            if self.order_of(t) < before {
+            let e = arena.node(t);
+            if arena.order_of(t) < before {
                 let here = match e.left {
                     NIL => e.v,
-                    l => e.v.min(self.node(l).min_v),
+                    l => e.v.min(arena.node(l).min_v),
                 };
                 least = Some(least.map_or(here, |m| m.min(here)));
                 t = e.right;
@@ -497,46 +563,171 @@ impl<K: Copy + Ord> Eevdf<K> {
         })
     }
 
-    /// Service, in whole ns rounded up, until `key`'s current request is done.
-    pub fn request_left_ns(&self, key: K) -> u64 {
-        let e = self.get(key);
-        let left = mul(e.vd - e.v, e.weight as i128) - e.rem as i128;
-        let ns = (left + (1 << VSHIFT) - 1) >> VSHIFT;
-        ns.max(1) as u64
-    }
-
-    /// End `key`'s current request where its service stands, and issue the
-    /// next: what a voluntary yield gives up.
-    pub fn end_request(&mut self, key: K) {
-        let i = self.index(key);
-        let slice = self.node(i).slice;
-        self.reissue(i, fine(slice));
+    /// End the entity's current request where its service stands, and issue
+    /// the next: what a voluntary yield gives up.
+    pub fn end_request<K: Copy, P>(&mut self, arena: &mut Arena<K, P>, s: Slot) {
+        let slice = arena.node(s.0).slice;
+        self.reissue(arena, s.0, fine(slice));
     }
 
     /// Change weight, keeping lag and the service left in the current request.
-    pub fn reweight(&mut self, key: K, weight: u64) {
-        let slice = self.get(key).slice;
-        if self.get(key).weight == weight {
-            return;
+    pub fn reweight<K: Copy, P>(&mut self, arena: &mut Arena<K, P>, s: Slot, weight: u64) {
+        if arena.node(s.0).weight != weight {
+            self.readmit(arena, s, weight, |left| left);
         }
-        let left = self.leave(key);
-        self.rejoin(key, weight, slice, left);
     }
 
     /// Change the request size; the current request is replaced by one of the
     /// new size if that ends sooner.
-    pub fn set_slice(&mut self, key: K, slice: u64) {
-        let i = self.index(key);
-        let e = self.node_mut(i);
+    pub fn set_slice<K: Copy, P>(&mut self, arena: &mut Arena<K, P>, s: Slot, slice: u64) {
+        let i = s.0;
+        let e = arena.node_mut(i);
         e.slice = slice;
         let request = mul(e.vd - e.v, e.weight as i128);
         if fine(slice) < request {
-            self.reissue(i, fine(slice));
+            self.reissue(arena, i, fine(slice));
         }
     }
 
+    /// Every entity queued, in no particular order.
+    pub fn slots<'a, K: Copy, P>(&self, arena: &'a Arena<K, P>) -> Slots<'a, K, P> {
+        let mut stack = [NIL; MAX_HEIGHT];
+        assert!(usize::from(arena.height(self.root)) < MAX_HEIGHT, "eevdf: a tree deeper than its index allows");
+        let depth = usize::from(self.root != NIL);
+        stack[0] = self.root;
+        Slots { arena, stack, depth }
+    }
+}
+
+impl Default for Queue {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+/// [`Queue::slots`]: a walk holding at most the right children along one path.
+pub struct Slots<'a, K, P> {
+    arena: &'a Arena<K, P>,
+    stack: [u32; MAX_HEIGHT],
+    depth: usize,
+}
+
+impl<K: Copy, P> Iterator for Slots<'_, K, P> {
+    type Item = Slot;
+
+    fn next(&mut self) -> Option<Slot> {
+        let t = *self.stack.get(self.depth.checked_sub(1)?)?;
+        self.depth -= 1;
+        let e = self.arena.node(t);
+        for child in [e.right, e.left] {
+            if child != NIL {
+                self.stack[self.depth] = child;
+                self.depth += 1;
+            }
+        }
+        Some(Slot(t))
+    }
+}
+
+/// One queue whose entities are named by key, with an arena of its own.
+pub struct Eevdf<K> {
+    arena: Arena<K, ()>,
+    queue: Queue,
+    slots: BTreeMap<K, Slot>,
+}
+
+impl<K: Copy + Ord> Eevdf<K> {
+    pub fn new() -> Self {
+        Self { arena: Arena::new(), queue: Queue::new(), slots: BTreeMap::new() }
+    }
+
+    fn slot(&self, key: K) -> Slot {
+        *self.slots.get(&key).expect("eevdf: entity is not queued")
+    }
+
+    pub fn len(&self) -> usize {
+        self.queue.len()
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.queue.is_empty()
+    }
+
+    pub fn contains(&self, key: K) -> bool {
+        self.slots.contains_key(&key)
+    }
+
+    pub fn keys(&self) -> impl Iterator<Item = K> + '_ {
+        self.slots.keys().copied()
+    }
+
+    pub fn total_weight(&self) -> u128 {
+        self.queue.total_weight()
+    }
+
+    pub fn weight(&self, key: K) -> u64 {
+        self.arena.weight(self.slot(key))
+    }
+
+    /// [`Queue::join`], answering the lag the entity really holds afterwards.
+    pub fn join(&mut self, key: K, weight: u64, slice: u64, lag: Lag) -> Lag {
+        assert!(!self.contains(key), "eevdf: entity joined twice");
+        let s = self.queue.join(&mut self.arena, key, weight, slice, lag, ());
+        self.slots.insert(key, s);
+        self.queue.lag(&self.arena, s)
+    }
+
+    pub fn leave(&mut self, key: K) -> Left {
+        let s = self.slots.remove(&key).expect("eevdf: entity is not queued");
+        self.queue.leave(&mut self.arena, s).0
+    }
+
+    /// [`Queue::rejoin`], answering the lag the entity really holds afterwards.
+    pub fn rejoin(&mut self, key: K, weight: u64, slice: u64, left: Left) -> Lag {
+        assert!(!self.contains(key), "eevdf: entity joined twice");
+        let s = self.queue.rejoin(&mut self.arena, key, weight, slice, left, ());
+        self.slots.insert(key, s);
+        self.queue.lag(&self.arena, s)
+    }
+
+    pub fn lag(&self, key: K) -> Lag {
+        self.queue.lag(&self.arena, self.slot(key))
+    }
+
+    pub fn charge(&mut self, key: K, ns: u64) {
+        let s = self.slot(key);
+        self.queue.charge(&mut self.arena, s, ns);
+    }
+
+    pub fn pick(&self) -> Option<K> {
+        self.queue.pick(&self.arena).map(|s| self.arena.key(s))
+    }
+
+    pub fn overtaken_in(&self, running: K) -> Option<u64> {
+        self.queue.overtaken_in(&self.arena, self.slot(running))
+    }
+
+    pub fn request_left_ns(&self, key: K) -> u64 {
+        self.arena.request_left_ns(self.slot(key))
+    }
+
+    pub fn end_request(&mut self, key: K) {
+        let s = self.slot(key);
+        self.queue.end_request(&mut self.arena, s);
+    }
+
+    pub fn reweight(&mut self, key: K, weight: u64) {
+        let s = self.slot(key);
+        self.queue.reweight(&mut self.arena, s, weight);
+    }
+
+    pub fn set_slice(&mut self, key: K, slice: u64) {
+        let s = self.slot(key);
+        self.queue.set_slice(&mut self.arena, s, slice);
+    }
+
     pub fn slice(&self, key: K) -> u64 {
-        self.get(key).slice
+        self.arena.slice(self.slot(key))
     }
 
     /// `Σ lag`, which is zero up to the mean's rounding: the conservation the
@@ -735,21 +926,21 @@ mod tests {
     #[test]
     fn the_tree_answers_as_a_scan_of_every_entity_does() {
         fn scan_pick(q: &Eevdf<u32>) -> Option<u32> {
-            q.order
-                .iter()
-                .map(|&i| q.node(i))
-                .filter(|e| q.eligible(e.v))
+            q.slots
+                .values()
+                .map(|s| q.arena.node(s.0))
+                .filter(|e| q.queue.eligible(e.v))
                 .min_by_key(|e| (e.vd, e.seq))
                 .map(|e| e.key)
         }
         fn scan_overtaken(q: &Eevdf<u32>, running: u32) -> Option<u64> {
-            let r = q.get(running);
-            q.order
-                .iter()
-                .map(|&i| q.node(i))
+            let r = q.arena.node(q.slot(running).0);
+            q.slots
+                .values()
+                .map(|s| q.arena.node(s.0))
                 .filter(|e| (e.vd, e.seq) < (r.vd, r.seq))
                 .map(|e| {
-                    let behind = mul(q.total, e.v - q.base) - q.sum;
+                    let behind = mul(q.queue.total, e.v - q.queue.base) - q.queue.sum;
                     ((behind.max(0) + (1 << VSHIFT) - 1) >> VSHIFT) as u64
                 })
                 .min()
@@ -759,7 +950,7 @@ mod tests {
             if t == NIL {
                 return (0, i128::MAX);
             }
-            let e = q.node(t);
+            let e = q.arena.node(t);
             let (hl, ml) = walk(q, e.left, out);
             out.push((e.vd, e.seq));
             let (hr, mr) = walk(q, e.right, out);
@@ -809,7 +1000,12 @@ mod tests {
                 }
             }
             let mut ordered = Vec::new();
-            walk(&q, q.root, &mut ordered);
+            walk(&q, q.queue.root, &mut ordered);
+            let mut walked: Vec<u32> = q.queue.slots(&q.arena).map(|s| s.0).collect();
+            let mut held: Vec<u32> = q.slots.values().map(|s| s.0).collect();
+            walked.sort_unstable();
+            held.sort_unstable();
+            assert_eq!(walked, held, "step {step}: the walk is not every queued slot once");
             assert!(ordered.windows(2).all(|w| w[0] < w[1]), "step {step}: out of deadline order");
             assert_eq!(ordered.len(), q.len());
             assert_eq!(q.pick(), scan_pick(&q), "step {step}: pick");

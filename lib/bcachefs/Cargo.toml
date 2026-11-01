@@ -1,9 +1,13 @@
 [package]
 name = "bcachefs"
-description = "The /home filesystem: a read side of the real bcachefs on-disk format."
+description = "bcachefs: the on-disk format's reader, mkfs and check, and the interim ToyOS format they replace."
 version = "0.1.0"
 edition = "2021"
 license = "MIT OR Apache-2.0"
+
+[dependencies]
+toyos-blockdev = { path = "../blockdev" }
+toyos-crypto = { path = "../crypto" }
 
 [features]
 default = ["std"]
@@ -13,3 +17,5 @@ std = []
 # dev-dependency only: nothing the kernel links pulls it in.
 [dev-dependencies]
 flate2 = { version = "1", default-features = false, features = ["rust_backend"] }
+# The crash model, for the journal's and the writer's crash suites.
+toyos-blockdev = { path = "../blockdev", features = ["model"] }

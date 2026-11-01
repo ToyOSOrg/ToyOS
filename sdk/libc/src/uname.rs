@@ -5,7 +5,7 @@
 
 use core::fmt::{self, Write};
 
-use toyos_abi::syscall::{self, OpenFlags};
+use toyos::files::{self, Open};
 
 use crate::errcode::EIO;
 use crate::errno;
@@ -27,7 +27,7 @@ pub unsafe extern "C" fn uname(buf: *mut Utsname) -> i32 {
     let mut file = [0u8; FILE_BYTES];
     let len = match read(toyos_osrelease::GUEST_PATH, &mut file) {
         Ok(len) => len,
-        Err(e) => return crate::posix_io::set_errno(e),
+        Err(e) => return crate::posix_io::refuse_files(e),
     };
     let Ok(release) = toyos_osrelease::parse(&file[..len]) else {
         errno::set(EIO);
@@ -70,11 +70,11 @@ impl Write for Field<'_> {
 }
 
 /// As much of the file at `path` as `into` holds.
-fn read(path: &str, into: &mut [u8]) -> Result<usize, syscall::SyscallError> {
-    let handle = syscall::open(path.as_bytes(), OpenFlags::READ)?;
+fn read(path: &str, into: &mut [u8]) -> Result<usize, files::Error> {
+    let fd = files::open(files::At::Cwd, path.as_bytes(), Open { read: true, ..Open::default() })?;
     let mut len = 0;
     let read = loop {
-        match syscall::read(handle, &mut into[len..]) {
+        match files::read(fd, &mut into[len..]) {
             Ok(0) => break Ok(len),
             Ok(n) => {
                 len += n;
@@ -85,6 +85,7 @@ fn read(path: &str, into: &mut [u8]) -> Result<usize, syscall::SyscallError> {
             Err(e) => break Err(e),
         }
     };
-    syscall::close(handle);
+    // SAFETY: the descriptor this function opened, named nowhere else.
+    let _ = unsafe { toyos::fd::close(fd) };
     read
 }

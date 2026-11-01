@@ -7,7 +7,7 @@ use toyos_metal::{
     verdict_file, BootFile, Phases, Refusal, READBACK_BOOT, READBACK_KERNEL, READBACK_LOADER,
     READBACK_VERDICT,
 };
-use toyos_metal::timings::{Machine, Record, Stick};
+use toyos_metal::timings::{Machine, Record};
 
 const PANEL: &str = "| panel: paints=10 px=8741248 us=21751 max_us=3851\n";
 const BOOTED: &str = "[2026-09-29 18:22:39  1.165 cpu0 kernel] Boot: complete (1165ms)\n";
@@ -20,15 +20,11 @@ fn t14() -> Machine {
     }
 }
 
-fn stick() -> Stick {
-    Stick { sectors: 60_062_500, vendor: "SanDisk".to_string(), model: "Ultra".to_string() }
-}
-
-/// A root holding the T14's record as `toyos-metal --install-sudoers` writes
-/// one, its stick and no number: what every run the loop made had.
+/// A root holding the T14's record as `toyos-metal --record` writes
+/// one, with no number: what every run the loop made had.
 fn recorded() -> toyos_tmpdir::TempDir {
     let root = toyos_tmpdir::TempDir::new("metal-records");
-    Record::new(&t14(), stick()).save(&root).expect("a recorded machine");
+    Record::new(&t14()).save(&root).expect("a recorded machine");
     root
 }
 
@@ -104,7 +100,6 @@ const STARTED: &str = "[2026-09-29 18:22:38  0.050 cpu0 kernel] spawn: /system/b
 pub(super) fn boot_file() -> String {
     let phases = Phases {
         preamble: 3.1,
-        wipe: 0.4,
         flash: 121.5,
         dd_secs: 117.2,
         entry: 2.3,
@@ -112,7 +107,7 @@ pub(super) fn boot_file() -> String {
         read_log: 1.4,
         raw_log: Some(9.9),
     };
-    BootFile { back: 40, stick: 0, machine: t14(), phases }.text()
+    BootFile { back: 40, machine: t14(), phases }.text()
 }
 
 /// One boot's readback as the loop writes it.
@@ -369,7 +364,6 @@ fn kept(bios: &str, complete_ms: u64) -> Record {
         vendor: machine.vendor,
         product: machine.product,
         bios: bios.to_string(),
-        stick: stick(),
         measured: [
             ("boot.passing.complete_ms", complete_ms),
             ("boot.passing.panel_max_us", 3851),
@@ -552,7 +546,8 @@ pub fn rows_run_before_members_under_a_bound_the_members_widen() {
     assert!(refused.contains("the kernel records both as \"test_rs_a_name_past_what_is\""), "{refused}");
 }
 
-/// **What a run's words take**: no word the whole profile; a name word every
+/// **What a run's words take**: no word the whole profile but its named-only
+/// rows, which only their whole name or their boot takes; a name word every
 /// row and member it is part of, and of a shared boot only the files its
 /// members name; a boot word that boot whole, with every row that rides it,
 /// whatever name words stand beside it; and a word that takes nothing is
@@ -560,7 +555,13 @@ pub fn rows_run_before_members_under_a_bound_the_members_widen() {
 pub fn words_take_rows_members_and_whole_boots() {
     static ROWS: [(&str, Metal); 2] = [
         ("alpha_row", Metal { arms: &[metal::once("own", "tests/images/testcases.toml", &[], &[])], judge: |_| Ok(()) }),
-        ("beta_row", Metal { arms: &[metal::once("shared", "tests/images/testcases.toml", &[], &[])], judge: |_| Ok(()) }),
+        (
+            "beta_row",
+            Metal {
+                arms: &[metal::Arm { named_only: true, ..metal::once("shared", "tests/images/testcases.toml", &[], &[]) }],
+                judge: |_| Ok(()),
+            },
+        ),
     ];
     let boot = |boot: &str, jobs: &[&str]| metal::SharedBoot {
         boot: boot.to_string(),
@@ -585,10 +586,11 @@ pub fn words_take_rows_members_and_whole_boots() {
         })
     };
     let took = |rows: &str, shared: &str| Ok::<_, String>((rows.to_string(), shared.to_string()));
-    assert_eq!(
-        taken(&[], &[]),
-        took("alpha_row,beta_row", "shared=test_rs_a1+test_rs_a2+test_rs_b1,ccorpus=c1+c2")
-    );
+    // `beta_row` is named-only: no word, a part of its name or a word for
+    // another row leaves it, its whole name or its boot takes it.
+    assert_eq!(taken(&[], &[]), took("alpha_row", "shared=test_rs_a1+test_rs_a2+test_rs_b1,ccorpus=c1+c2"));
+    assert_eq!(taken(&["_row"], &[]), took("alpha_row", ""));
+    assert_eq!(taken(&["beta_row"], &[]), took("beta_row", ""));
     assert_eq!(taken(&["b1"], &[]), took("", "shared=test_rs_b1"));
     assert_eq!(taken(&["alpha", "c1"], &[]), took("alpha_row", "ccorpus=c1"));
     assert_eq!(taken(&[], &["shared"]), took("beta_row", "shared=test_rs_a1+test_rs_a2+test_rs_b1"));
@@ -601,9 +603,10 @@ pub fn words_take_rows_members_and_whole_boots() {
     let paths: Vec<&str> = shared[0].files.iter().map(|(path, _)| path.as_str()).collect();
     assert_eq!(paths, ["expect/c2", "bin/test_c_c2"]);
     assert_eq!(shared[0].links, [("bin/c2".to_string(), "/system/bin/test_rs_ccheck".to_string())]);
-    let refused: [(&[&str], &[&str], &str); 3] = [
+    let refused: [(&[&str], &[&str], &str); 4] = [
         (&["a1", "nope"], &[], "\"nope\" is part of no"),
         (&["rs_a1"], &[], "\"rs_a1\" is part of no"),
+        (&["beta"], &[], "\"beta\" is part of no"),
         (&[], &["shared", "shared-2"], "boot:shared-2 names no boot"),
     ];
     for (names, boots, refusal) in refused {
@@ -712,4 +715,52 @@ pub fn an_exit_record_without_a_code_answers_no_code() {
         let answer = planted(PANEL, &kernel(end)).exit_code(job);
         assert!(answer.as_ref().is_err_and(|why| why.contains(end)), "{end}: {answer:?}");
     }
+}
+
+/// **On a bench booted off its own disk, the disk judge admits the volumes the
+/// loader named and DATA, and nothing else of that disk**: a session on the
+/// host's ESP, of the same type as ToyOS's, is refused, and so is every
+/// session but DATA's where the loader's lines are not read.
+pub fn the_bench_disk_judge_admits_data_and_the_loaders_volumes_alone() {
+    let guid = |text: &str| toyos_gpt::Guid::parse(text).expect("a GUID");
+    let (host_esp, data, esp, log) = (
+        guid("BACB3F81-3674-441E-80A9-643C279215E3"),
+        guid("771E4813-696F-4DEA-828A-522A0A822331"),
+        guid("855A1AD8-B730-4CD0-B949-19D93B0DEF53"),
+        guid("CC672C8C-965F-4C00-8E4C-C039D06C3CDB"),
+    );
+    let bytes = |g: toyos_gpt::Guid| g.0.iter().map(|b| format!("{b:02x}")).collect::<Vec<_>>().join(", ");
+    let loader = serial::Serial::named(
+        "loader.log",
+        format!(
+            "[10.405 cpu0 loader] Boot partition: LBA 2048+69632 signature [{}]\n\
+             [10.416 cpu0 loader] Log partition: signature [{}]\n",
+            bytes(esp),
+            bytes(log)
+        ),
+    );
+    let ours = common::hostdisk::loader_named(&loader).expect("the loader's two lines");
+    assert_eq!(ours, [esp, log]);
+    let part = |g: toyos_gpt::Guid, kind: toyos_gpt::Guid| format!("[16.267 nvme] nvme 04:00.0: partition {g} of type {kind} at block 256, 8704 blocks\n");
+    let session = |n: u32, g: toyos_gpt::Guid| format!("[16.578 nvme] nvme 04:00.0: session {n} opened {g} (8704 blocks)\n");
+    let table = [
+        BOOTED.to_string(),
+        "[16.219 nvme] nvme 04:00.0: up: 4 I/O queues of 63 commands\n".to_string(),
+        part(host_esp, toyos_gpt::Guid::EFI_SYSTEM),
+        part(data, toyos_gpt::Guid::TOYOS_DATA),
+        part(esp, toyos_gpt::Guid::EFI_SYSTEM),
+        part(log, toyos_gpt::Guid::MICROSOFT_BASIC),
+    ]
+    .concat();
+    let tail = "[16.600 diskserver] diskserver: every disk driver has settled\n\
+                [16.652 fileserver] fileserver: mounted the DATA volume\n\
+                [16.677 fileserver] fileserver: Data serving /apps — bcachefs, 14 names\n";
+    let booted = |sessions: &[String]| serial::Serial::named("the boot", format!("{table}{}{tail}", sessions.concat()));
+    let ours_and_data = booted(&[session(0, data), session(1, log), session(2, esp)]);
+    assert_eq!(common::hostdisk::left_alone(&ours_and_data, &ours), Ok((4, common::hostdisk::Data::Mounted)));
+    assert!(common::hostdisk::left_alone(&ours_and_data, &[]).is_err(), "the loader's volumes admitted unnamed");
+    let host = booted(&[session(0, data), session(1, host_esp)]);
+    let why = common::hostdisk::left_alone(&host, &ours).unwrap_err();
+    assert!(why.contains(&host_esp.to_string()), "{why}");
+    assert!(common::hostdisk::loader_named(&serial::Serial::named("loader.log", "Loading kernel elf...\n")).is_err());
 }

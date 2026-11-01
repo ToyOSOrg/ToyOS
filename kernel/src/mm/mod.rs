@@ -6,12 +6,13 @@ pub mod pmm;
 /// every caller asks it as memory management.
 pub use crate::arch::paging;
 mod alloc;
+pub mod charge;
 mod dma;
 mod image;
 mod mmio;
 pub mod policy;
 mod region;
-mod unmapped;
+pub mod space;
 
 /// Behind the same feature as its only caller, `sched::driver`'s ladder.
 #[cfg(feature = "heap-tripwire")]
@@ -26,7 +27,6 @@ pub use dma::{Dma, DmaPool, Unaligned};
 pub use image::Image;
 pub use mmio::Mmio;
 pub use region::{Allocation, KernelSlice};
-pub use unmapped::Unmapped;
 
 use crate::MemoryMapEntry;
 pub use pmm::Region;
@@ -35,7 +35,7 @@ pub use pmm::Region;
 pub const PHYS_OFFSET: u64 = 0xFFFF_8000_0000_0000;
 const _: () = assert!(toyos_bootmap::DIRECT_MAP_WINDOW == 0u64.wrapping_sub(PHYS_OFFSET));
 
-/// The kernel's one user page size and translation granularity.
+/// A superframe: what the kernel heap, device memory and grants are handed out in.
 pub use toyos_userbound::PAGE_2M;
 /// [`align_2m`] for a size that crossed a trust boundary, beside [`PAGE_2M`] in `toyos_userbound`.
 pub use toyos_userbound::align_2m_checked;
@@ -49,25 +49,6 @@ pub const PAGE_BYTES: usize = PAGE_SIZE as usize;
 /// Rounds `size` up to the next 2MB boundary; only for a size the kernel computed, not outside input.
 pub const fn align_2m(size: usize) -> usize {
     (size + PAGE_2M as usize - 1) & !(PAGE_2M as usize - 1)
-}
-
-/// End every futex wait on the 4 KiB frames a table of user leaves mapped, in
-/// address order, one call per physically contiguous run of them.
-pub fn revoke_frames(frames: impl IntoIterator<Item = u64>) {
-    let mut run: Option<(u64, u64)> = None;
-    for frame in frames {
-        run = match run {
-            Some((start, len)) if start + len == frame => Some((start, len + PAGE_SIZE)),
-            Some((start, len)) => {
-                crate::sched::futex::revoke_range(start, len);
-                Some((frame, PAGE_SIZE))
-            }
-            None => Some((frame, PAGE_SIZE)),
-        };
-    }
-    if let Some((start, len)) = run {
-        crate::sched::futex::revoke_range(start, len);
-    }
 }
 
 /// The largest single allocation the kernel heap can serve; untrusted-sized requests must check it themselves, since `KernelAllocator::alloc` only asserts it.
@@ -201,7 +182,9 @@ pub fn init(memory_map: &'static [MemoryMapEntry], reserved: &[Region], image: &
     pmm::init(memory_map, reserved);
     DIRECT_MAP_END.set(paging::init(memory_map, crate::drivers::panic_console::scanout(), image));
     alloc::init();
+    charge::init();
     paging::seal_kernel_half();
+    space::init_kernel();
 }
 
 /// Walk the kernel's tables and stop the boot on a leaf that is writable and

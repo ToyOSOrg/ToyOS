@@ -35,16 +35,6 @@ impl<K: IdKey, V> IdMap<K, V> {
         id
     }
 
-    /// Inserts the value `f` builds from the pre-assigned ID, returning it.
-    /// Avoids ever building the value with an invalid placeholder ID (e.g. `pid: 0`).
-    pub fn insert_with(&mut self, f: impl FnOnce(K) -> V) -> K {
-        let id = self.next;
-        self.next = self.next + K::ONE;
-        let value = f(id);
-        self.map.insert(id, value);
-        id
-    }
-
     pub fn get(&self, id: K) -> Option<&V> {
         self.map.get(&id)
     }

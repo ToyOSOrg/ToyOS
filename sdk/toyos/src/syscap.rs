@@ -2,7 +2,8 @@
 //!
 //! Some things are reachable no other way — minting a device claim, entering
 //! the real-time band, listing every process in the machine, reading what the
-//! machine is made of and what its CPUs count, and taking its power away, off or back to firmware —
+//! machine is made of and what its CPUs count, holding memory back for a job,
+//! and taking its power away, off or back to firmware —
 //! and each is one bit on a handle to this. The kernel makes exactly one at boot, for the supervisor, so the set of
 //! processes that can ever do any of them is exactly what the supervisor endowed.
 
@@ -14,6 +15,10 @@ use crate::endow::FromHandle;
 use crate::{AsHandle, OwnedHandle, RawHandle};
 
 pub struct SysCap(pub(crate) OwnedHandle);
+
+/// A bound on how long any idle CPU takes to wake, held until dropped
+/// ([`SysCap::hold_wake_latency`]).
+pub struct WakeLatencyHold(#[allow(dead_code, reason = "held for its drop, which closes the handle")] OwnedHandle);
 
 impl SysCap {
     /// Mint the claim for a device class, as whichever typed wrapper the caller
@@ -61,11 +66,17 @@ impl SysCap {
         Ok(crate::job::Job(unsafe { OwnedHandle::from_raw(raw) }))
     }
 
+    /// Hold `bytes` back for `job` however short every other job runs, for
+    /// as long as `job`'s handle and its duplicates live. Needs
+    /// [`Rights::FLOOR`], which the supervisor alone holds.
+    pub fn hold_floor(&self, job: &crate::job::Job, bytes: u64) -> Result<(), SyscallError> {
+        syscall::job_floor(self.0.raw(), job.as_handle().raw(), bytes)
+    }
+
     fn mint<T: FromHandle>(&self, request: DeviceRequest) -> Result<T, SyscallError> {
-        let raw = syscall::device_claim(self.0.raw(), request)?;
-        // SAFETY: the kernel installed this handle in this process's table for
-        // this call and no other, so nothing else answers for it.
-        Ok(unsafe { T::from_handle(raw) })
+        // The kernel installed this handle in this process's table for this
+        // call and no other, so nothing else answers for it.
+        Ok(T::from_handle(OwnedHandle(syscall::device_claim(self.0.raw(), request)?)))
     }
 
     /// A second handle to this capability, carrying the same rights.
@@ -74,13 +85,24 @@ impl SysCap {
     /// the whole tree is the test estate: its binaries mint their own claims,
     /// and one boot runs several that each need the keyboard.
     pub fn duplicate(&self) -> Result<Self, SyscallError> {
-        syscall::dup(self.0.raw()).map(|h| Self(OwnedHandle(h)))
+        self.0.try_clone().map(Self)
     }
 
     /// Enter the real-time band. A device claim was never enough to confer
     /// this; a right is.
     pub fn enter_rt(&self) -> Result<(), SyscallError> {
         syscall::rt_enter(self.0.raw())
+    }
+
+    /// Hold every idle CPU to waking within `bound` until the returned hold
+    /// is dropped ([`syscall::wake_latency_hold`]: it holds from when this
+    /// returns). Needs [`Rights::WAKE_LATENCY`]; a bound under a nanosecond
+    /// is refused `InvalidArgument`.
+    pub fn hold_wake_latency(&self, bound: core::time::Duration) -> Result<WakeLatencyHold, SyscallError> {
+        let nanos = u64::try_from(bound.as_nanos()).unwrap_or(u64::MAX);
+        let raw = syscall::wake_latency_hold(self.0.raw(), nanos)?;
+        // SAFETY: the kernel installed this handle for this call and no other.
+        Ok(WakeLatencyHold(unsafe { OwnedHandle::from_raw(raw) }))
     }
 
     /// Power the machine off.
@@ -96,6 +118,12 @@ impl SysCap {
     /// Back to firmware, on [`Self::shutdown`]'s right, refused the same way.
     pub fn reboot(&self) -> SyscallError {
         syscall::reboot(self.0.raw())
+    }
+
+    /// Whether [`Self::shutdown`] or [`Self::reboot`] would stop this machine:
+    /// the refusal it would answer before stopping anything, where not.
+    pub fn can_stop(&self, stop: syscall::MachineStop) -> Result<(), SyscallError> {
+        syscall::machine_stops(self.0.raw(), stop)
     }
 
     /// The machine's header, then one entry per live thread for as much of
@@ -124,6 +152,14 @@ impl SysCap {
         buf: &mut [toyos_abi::inventory::RawRecord],
     ) -> Result<usize, SyscallError> {
         syscall::device_inventory(self.0.raw(), buf)
+    }
+
+    /// Where firmware loaded this boot from, as the loader handed it: see
+    /// [`toyos_abi::boot::BootSources`].
+    ///
+    /// Needs [`Rights::INVENTORY`].
+    pub fn boot_sources(&self) -> Result<toyos_abi::boot::BootSources, SyscallError> {
+        syscall::boot_sources(self.0.raw())
     }
 
     /// One `toyos_abi::counters` record per online CPU, into `buf`; answers
@@ -185,7 +221,7 @@ impl SysCap {
     /// How the supervisor gives a program the RT band and nothing else: rights only
     /// shrink, so the dup can never mint a claim however the holder asks.
     pub fn narrowed(&self, rights: Rights) -> Result<Self, SyscallError> {
-        syscall::dup_narrowed(self.0.raw(), rights).map(|h| Self(OwnedHandle(h)))
+        self.0.as_handle().try_clone_narrowed(rights).map(Self)
     }
 
     /// Give up ownership, for a handle about to be endowed.
@@ -195,8 +231,8 @@ impl SysCap {
 }
 
 impl AsHandle for SysCap {
-    fn as_handle(&self) -> RawHandle {
-        self.0.raw()
+    fn as_handle(&self) -> crate::BorrowedHandle<'_> {
+        self.0.as_handle()
     }
 }
 

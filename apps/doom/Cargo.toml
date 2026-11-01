@@ -18,7 +18,12 @@ softbuffer = { version = "0.4", default-features = false, features = ["wayland",
 
 [build-dependencies]
 cc = "1.1"
-ureq = { version = "3", default-features = false, features = ["rustls"] }
+# doomgeneric's source, over rustls on toyos-crypto's provider with webpki's
+# roots, its entropy the host's.
+ureq = { version = "3", default-features = false, features = ["rustls-no-provider", "rustls-webpki-roots"] }
+toyos-crypto = { path = "../../lib/crypto", features = ["std", "rustls-provider"] }
+rustls = { version = "0.23.45", default-features = false }
+getrandom = "0.3"
 flate2 = { version = "1", default-features = false, features = ["rust_backend"] }
 tar = "0.4"
 

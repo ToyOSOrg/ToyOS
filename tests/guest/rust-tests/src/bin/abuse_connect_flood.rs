@@ -12,8 +12,8 @@
 //! The other half, which the depth alone does not give: each of those calls
 //! built two 2 MiB rings *eagerly*, so the allowance the kernel grants a
 //! server that has not answered yet cost 128 MiB of physical memory before a
-//! single byte had been sent. A pipe now allocates its page on first use, and
-//! the memory assertion below is what says so.
+//! single byte had been sent. A pipe now takes memory only as it holds bytes,
+//! and the memory assertion below is what says so.
 //!
 //! **The attack's "be your own service" clause is dead and this is now a bound
 //! check.** It used to `SYS_LISTEN` on a name of its own, because listening was
@@ -56,7 +56,7 @@ fn main() {
     let mut held: Vec<RawHandle> = Vec::new();
     let mut refused_after = None;
     for i in 0..ATTEMPTS {
-        match syscall::namespace_open(ns.as_handle(), NAME) {
+        match syscall::namespace_open(ns.as_handle().raw(), NAME) {
             Ok(handle) => held.push(handle),
             Err(SyscallError::ResourceExhausted) => {
                 refused_after = Some(i);
@@ -95,29 +95,31 @@ fn main() {
     println!("  {depth} unaccepted connections cost {} KiB of physical memory", grew / 1024);
 
     // A depth, not a permanent refusal: draining one must let one more in.
-    let accepted = syscall::accept(acceptor.as_handle()).expect("accept a queued connection");
+    let accepted = syscall::accept(acceptor.as_handle().raw()).expect("accept a queued connection");
 
-    // The other direction, without which "costs nothing" could be a pipe that
-    // never works: one byte on a live connection has to buy a ring. This is
-    // the negative control for the ceiling above — a kernel that allocated
-    // nothing ever would pass that assertion and fail this one.
+    // The other direction, without which "costs nothing" could be a
+    // connection that never works: one byte on a live connection has to buy a
+    // frame. This is the negative control for the ceiling above — a kernel
+    // that allocated nothing ever would pass that assertion and fail this one.
     let before_write = used_bytes();
-    let wrote = syscall::write(accepted, b"x").expect("write one byte to an accepted socket");
-    assert_eq!(wrote, 1);
-    let ring = used_bytes().saturating_sub(before_write);
+    // SAFETY: no handles travel.
+    unsafe { syscall::message_send(accepted, b"x", &[], false) }.expect("send one byte on an accepted connection");
+    let took = used_bytes().saturating_sub(before_write);
     assert!(
-        ring >= 2 * 1024 * 1024,
-        "the first write to a connection grew physical memory by {ring} bytes; a ring is 2 MiB"
+        took >= syscall::PAGE_SIZE as u64,
+        "the first message on a connection grew physical memory by {took} bytes; its bytes take a frame"
     );
-    println!("  the first write on a connection allocated {} KiB", ring / 1024);
+    println!("  the first message on a connection allocated {} KiB", took / 1024);
 
-    syscall::close(accepted);
-    let handle = syscall::namespace_open(ns.as_handle(), NAME)
+    // SAFETY: no type holds this number.
+    unsafe { syscall::close(accepted) };
+    let handle = syscall::namespace_open(ns.as_handle().raw(), NAME)
         .expect("an open must succeed once the server drains one");
     held.push(handle);
 
     for handle in held {
-        syscall::close(handle);
+        // SAFETY: no type holds this number.
+        unsafe { syscall::close(handle) };
     }
 
     println!("connect refused after {depth} unaccepted, and resumed once one was drained");

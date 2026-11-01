@@ -17,10 +17,12 @@
 //! positive arm is what makes that non-vacuous: the same region, reached by the
 //! peer that was sent it, with the secret in it.
 //!
-//! Three roles. `invited` is spawned holding a connector and is sent the
+//! Four roles. `invited` is spawned holding a connector and is sent the
 //! region; `uninvited` is spawned holding nothing and told the owner's handle
 //! value; `dropped` is the other end of the same fact — a region whose last
-//! handle is gone leaves a number that is not a name for what lands there next.
+//! handle is gone leaves a number that is not a name for what lands there next
+//! — and `dropped_sub` names that number to `shm_sub`, which makes a region
+//! over part of another's pages.
 
 use std::io::{BufRead, BufReader, Write};
 use std::os::toyos::process::CommandExt;
@@ -46,14 +48,15 @@ fn main() {
         Some("invited") => invited(),
         Some("uninvited") => uninvited(),
         Some("dropped") => dropped(),
+        Some("dropped_sub") => dropped_sub(),
         Some(other) => panic!("unknown role {other:?}"),
         None => owner(),
     }
 }
 
 fn owner() {
-    let mut region = SharedMemory::create(REGION).expect("a region of our own");
-    region.as_mut_slice()[..SECRET.len()].copy_from_slice(SECRET);
+    let region = SharedMemory::create(REGION).expect("a region of our own");
+    region.bytes().write(0, SECRET);
     let own_handle = region.as_handle();
 
     let (acceptor, connector) = port::create().expect("the kernel refused a port");
@@ -67,7 +70,7 @@ fn owner() {
         .expect("the kernel refused a namespace");
     let mut invited = Command::new(SELF_PATH)
         .arg("invited")
-        .endow(SVC_LABEL, ns.into_raw().0)
+        .endow(SVC_LABEL, ns.into())
         .stdout(Stdio::piped())
         .spawn()
         .expect("spawn the invited peer");
@@ -89,7 +92,7 @@ fn owner() {
     // handle value the owner is using — and no connection to this process at
     // all. It does not read the wrong bytes and it does not get an error word:
     // it is ended at the call.
-    killed("uninvited", &own_handle.0.to_string(), "a process that was sent nothing reached the region");
+    killed("uninvited", &own_handle.raw().0.to_string(), "a process that was sent nothing reached the region");
 
     // A region whose last handle is gone is gone. There is no `release` and no
     // list to take a name off: the drop is the whole of it, and the number that
@@ -97,13 +100,31 @@ fn owner() {
     // next. Raised in a child on its own region, because it is the same fatal
     // fact from the owning side.
     killed("dropped", "", "a handle its owner had closed still named a region");
+    killed("dropped_sub", "", "a handle its owner had closed still named a region to part of");
+
+    // Part of the owner's own region is the same pages, and a part that is no
+    // whole page in, holds nothing or runs past the region is refused.
+    // SAFETY: nothing relies on being the source's only holder.
+    let part = unsafe { syscall::shm_sub(own_handle.raw(), 0, SECRET.len() as u64) }.expect("part of our own region");
+    // SAFETY: the mapping is the part's, at least `SECRET.len()` bytes, and
+    // nothing here writes it meanwhile.
+    let seen = unsafe { core::slice::from_raw_parts(syscall::shm_map(part, syscall::VmProt::Read).expect("map the part"), SECRET.len()) };
+    assert_eq!(seen, SECRET, "part of a region is not its pages");
+    for (offset, len) in [(0, 0), (1, 1), (0, REGION as u64 + 1), (REGION as u64, 1)] {
+        assert_eq!(
+            // SAFETY: nothing relies on being the source's only holder.
+            unsafe { syscall::shm_sub(own_handle.raw(), offset, len) },
+            Err(syscall::SyscallError::InvalidArgument),
+            "{len} bytes at {offset} of a {REGION}-byte region",
+        );
+    }
 
     // And through all of it the owner's own region is still the owner's, and
     // the invited peer's mapping was its own handle's business rather than a
     // second name for this one.
-    assert_eq!(&region.as_slice()[..SECRET.len()], SECRET, "the owner's own region changed");
+    assert_eq!(region.bytes().sub(0, SECRET.len()).to_vec(), SECRET, "the owner's own region changed");
 
-    println!("the region reached the peer it was sent to and no other, and a closed handle names nothing");
+    println!("the region reached the peer it was sent to and no other, a closed handle names nothing, and part of one is its pages");
 }
 
 /// The one line a peer reports.
@@ -146,10 +167,11 @@ fn marker(role: &str) {
 
 fn invited() {
     let conn = toyos::endow::service(SERVICE).expect("the invited peer holds a connector");
-    let header = conn.recv_header().expect("the owner's announcement");
-    let [handle] = conn.recv_handles_exact::<1>(&header).expect("the region the owner sent");
+    let mut rx = toyos::ipc::FrameRx::<{ toyos::ipc::MAX_FRAME_LEN as usize }>::new();
+    rx.recv(&conn).expect("the owner's announcement");
+    let [handle] = rx.take_handles::<1>().expect("the region the owner sent");
     let region = SharedMemory::lent(handle, REGION).expect("take the region");
-    println!("read {}", String::from_utf8_lossy(&region.as_slice()[..SECRET.len()]));
+    println!("read {}", String::from_utf8_lossy(&region.bytes().sub(0, SECRET.len()).to_vec()));
     std::io::stdout().flush().expect("invited: flush the report");
 }
 
@@ -160,16 +182,27 @@ fn uninvited() -> ! {
         std::env::args().nth(2).expect("uninvited needs the owner's handle value").parse().unwrap(),
     );
     marker("uninvited");
-    let reached = unsafe { syscall::shm_map(guess) };
+    let reached = unsafe { syscall::shm_map(guess, syscall::VmProt::Read) };
     panic!("the owner's handle value answered {:?} here", reached.map(|_| ()));
+}
+
+/// Asks for part of a region of its own that it has closed.
+fn dropped_sub() -> ! {
+    let region = SharedMemory::create(REGION).expect("a region to close");
+    let closed = region.as_handle().raw();
+    drop(region);
+    marker("dropped_sub");
+    // SAFETY: a number this process closed, which nothing holds.
+    let reached = unsafe { syscall::shm_sub(closed, 0, REGION as u64) };
+    panic!("a closed handle answered {:?}", reached.map(|_| ()));
 }
 
 /// Names a region of its own that it has closed.
 fn dropped() -> ! {
     let region = SharedMemory::create(REGION).expect("a region to close");
-    let closed = region.as_handle();
+    let closed = region.as_handle().raw();
     drop(region);
     marker("dropped");
-    let reached = unsafe { syscall::shm_map(closed) };
+    let reached = unsafe { syscall::shm_map(closed, syscall::VmProt::Read) };
     panic!("a closed handle answered {:?}", reached.map(|_| ()));
 }

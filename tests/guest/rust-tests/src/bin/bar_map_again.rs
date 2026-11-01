@@ -85,14 +85,16 @@ fn main() {
     // Standard output fills the table: a claim's own handle carries no `DUP`.
     let mut filled = Vec::new();
     let full = loop {
-        match syscall::dup(stdout()) {
+        // SAFETY: nothing relies on being the source's only holder.
+        match unsafe { syscall::dup(stdout()) } {
             Ok(handle) => filled.push(handle),
             Err(why) => break why,
         }
     };
-    let refused = syscall::device_bar_map(nic.as_handle(), bar);
+    let refused = syscall::device_bar_map(nic.as_handle().raw(), bar);
     for handle in filled {
-        syscall::close(handle);
+        // SAFETY: no type holds this number.
+        unsafe { syscall::close(handle) };
     }
     // Judged once the table has room again, for the report.
     assert_eq!(full, SyscallError::ResourceExhausted, "bar_map_again: the table did not fill");
@@ -109,5 +111,5 @@ fn main() {
 
 /// The kernel handle this process's standard output is, descriptor 1's.
 fn stdout() -> RawHandle {
-    toyos::fd::with(1, |o| o.handle).expect("the test is given a standard output")
+    toyos::fd::with(1, |o| o.handle().map(toyos::BorrowedHandle::raw)).ok().flatten().expect("the test is given a standard output")
 }

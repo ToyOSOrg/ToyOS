@@ -30,6 +30,7 @@ pub fn main(args: Vec<String>) {
     };
     match shown {
         Ok(shown) => say(shown),
+        Err(e @ display::Error::NotEndowed) => fail(&format!("{e}; run it with `launch screen`")),
         Err(e) => fail(&e.to_string()),
     }
 }

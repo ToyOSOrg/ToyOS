@@ -9,12 +9,12 @@ use alloc::vec::Vec;
 use core::sync::atomic::{AtomicU64, Ordering};
 
 use crate::process::{
-    ElfInfo, Endowments, PageFaultTrace, ProcessAccounting, ProcessData, ProcessEntry, ThreadData,
+    ElfInfo, Endowments, ProcessAccounting, ProcessData, ProcessEntry, ThreadData,
     ThreadEntry, PROCESS_TABLE, THREAD_NAME_LEN,
 };
 use crate::scheduler::{self, TaskId};
 use crate::sync::Lock;
-use kernel::proclife::Processes;
+use toyos_proclife::Processes;
 
 use super::payload::ThreadSched;
 
@@ -74,7 +74,9 @@ pub fn is_kernel_task(id: TaskId) -> bool {
 
 /// Start a kernel thread running `body(arg)` on its own kernel stack and return its scheduler faces.
 pub fn spawn(name: &str, body: extern "C" fn(u64) -> !, arg: u64) -> ThreadSched {
-    let (stack, entry_sp) = crate::loader::alloc_kernel_stack(crate::loader::Start::Kernel { body, arg })
+    // A job of its own: a kernel thread is nobody's helper.
+    let job = crate::object::job::new_job();
+    let (stack, entry_sp) = crate::loader::alloc_kernel_stack(&job, crate::loader::Start::Kernel { body, arg })
         .unwrap_or_else(|| panic!("kthread: no kernel stack for {name}"));
 
     // Before the table lock: a panic holding the process table hangs the machine.
@@ -85,21 +87,18 @@ pub fn spawn(name: &str, body: extern "C" fn(u64) -> !, arg: u64) -> ThreadSched
     let mut short = [0u8; THREAD_NAME_LEN];
     let len = name.len().min(THREAD_NAME_LEN - 1);
     short[..len].copy_from_slice(&name.as_bytes()[..len]);
-    // A job of its own: a kernel thread is nobody's helper.
-    let job = crate::object::job::new_job();
-
     // One hold across insert and place: a visible pid already has its thread scheduled.
     let mut guard = PROCESS_TABLE.lock();
     let table = guard.as_mut().expect("kthread: spawned before process::init");
     table.insert(ProcessEntry::new(
-        crate::object::process::ProcessObject::new(pid),
+        crate::object::process::ProcessObject::new(pid).expect("kthread: no heap for its process object"),
         short,
         Arc::new(Lock::new(kernel_process_data(name, job.clone()))),
         // No user image: its frames resolve through `symbols::resolve_kernel`.
         None,
         ThreadEntry::new(Arc::new(Lock::new(kernel_thread_data()))),
-        kernel::proclife::Node::root(),
-        crate::object::notice::NoticeObject::new(),
+        toyos_proclife::Node::root(),
+        crate::object::notice::NoticeObject::new().expect("kthread: no heap for its notice"),
     ));
     let tid = table.get(pid).expect("kthread: the entry just inserted is gone").main_tid();
     claim.publish(TaskId(pid, tid));
@@ -108,7 +107,7 @@ pub fn spawn(name: &str, body: extern "C" fn(u64) -> !, arg: u64) -> ThreadSched
         TaskId(pid, tid),
         stack,
         entry_sp,
-        crate::mm::paging::kernel().clone(),
+        crate::mm::space::kernel(),
         0,
         None,
         job,
@@ -127,33 +126,25 @@ pub fn spawn(name: &str, body: extern "C" fn(u64) -> !, arg: u64) -> ThreadSched
 /// Every field is the empty value but its job: a kernel thread has no user half.
 fn kernel_process_data(name: &str, job: Arc<kernel::sched::job::Job>) -> ProcessData {
     ProcessData {
-        handles: crate::object::HandleTable::new(),
+        handles: crate::object::HandleTable::new(&job),
         cwd: String::from("/"),
         env: Vec::new(),
         elf: ElfInfo::none(),
-        mmap_regions: Vec::new(),
-        pipe_maps: Vec::new(),
-        demand_pages: Vec::new(),
-        fault_trace: PageFaultTrace::new(),
-        peak_memory: 0,
-        alloc_count: 0,
-        free_count: 0,
+        space: crate::mm::space::kernel(),
         exe_path: String::from(name),
         spawn_ns: crate::clock::nanos_since_boot(),
         accounting: ProcessAccounting::default(),
         endowments: Endowments::empty(),
+        charge: crate::mm::charge::Charge::none(&job),
+        pager: crate::process::PagerRole::None,
         job,
     }
 }
 
 fn kernel_thread_data() -> ThreadData {
     ThreadData {
-        tls_pages: None,
-        stack_pages: None,
+        tls: None,
         user_stack_base: crate::mm::UserAddr::new(0),
         user_stack_size: 0,
-        syscall_counts: [0; toyos_abi::syscall::SYSCALL_PROFILE_BINS],
-        syscall_total: 0,
-        syscall_total_ns: 0,
     }
 }

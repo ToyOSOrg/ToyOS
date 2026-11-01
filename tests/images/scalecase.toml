@@ -18,7 +18,7 @@ syscap = ["logread"]
 
 [programs.compositor]
 service = true
-serves = ["compositor", "prompt", "clipboard", "input", "display"]
+serves = ["compositor", "prompt", "clipboard", "input", "display", "display-output"]
 devices = ["framebuffer"]
 args = ["scale=2"]
 

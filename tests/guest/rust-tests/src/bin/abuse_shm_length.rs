@@ -1,5 +1,5 @@
 //! `SYS_SHM_CREATE`'s length is refused, never summed unchecked: one whose
-//! 2 MiB rounding wraps `u64` is `InvalidArgument`, and one whose rounding
+//! page rounding wraps `u64` is `InvalidArgument`, and one whose rounding
 //! fits but no memory could back is `ResourceExhausted`.
 //!
 //! The verdict is that this process reaches its last line: a trap in the
@@ -7,15 +7,15 @@
 
 use toyos_abi::syscall::{self, SyscallError};
 
-const PAGE_2M: u64 = 2 * 1024 * 1024;
+const PAGE: u64 = 4096;
 
 /// Zero, refused before any rounding; the largest length whose rounding fits
-/// `u64`, which a rounding that sums `size + PAGE_2M` before subtracting one
+/// `u64`, which a rounding that sums `size + PAGE` before subtracting one
 /// wraps on; then the first and last lengths whose rounding wraps.
 const LENGTHS: [(u64, SyscallError); 4] = [
     (0, SyscallError::InvalidArgument),
-    (u64::MAX - (PAGE_2M - 1), SyscallError::ResourceExhausted),
-    (u64::MAX - (PAGE_2M - 2), SyscallError::InvalidArgument),
+    (u64::MAX - (PAGE - 1), SyscallError::ResourceExhausted),
+    (u64::MAX - (PAGE - 2), SyscallError::InvalidArgument),
     (u64::MAX, SyscallError::InvalidArgument),
 ];
 
@@ -34,7 +34,8 @@ fn main() {
 
     // The control: the refusal is the length and not the call.
     let served = syscall::shm_create(4096).expect("a one-page region is served");
-    syscall::close(served);
+    // SAFETY: no type holds this number.
+    unsafe { syscall::close(served) };
 
     println!("an shm length past memory or past u64 is refused by name, and one page is served");
 }

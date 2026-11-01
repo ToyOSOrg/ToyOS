@@ -1,0 +1,16 @@
+[package]
+name = "toyos-session"
+description = "A login session's protocols: opening one, signing it out, and its owner's link to the supervisor."
+version = "0.1.0"
+edition = "2021"
+license = "MIT OR Apache-2.0"
+
+[lib]
+doctest = false
+
+[dependencies]
+# A login authority's open of a session, through its namespace.
+toyos = { path = "../../sdk/toyos" }
+
+[lints.rust]
+warnings = "deny"

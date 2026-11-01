@@ -28,7 +28,6 @@ The kernel, the loader and every program drive no fw_cfg, ramfb, pvpanic,
 isa-debug-exit, debugcon or Bochs display, and test for no hypervisor
 signature. What they do depend on, each filed:
 
-- `issues/diskserver-claims-qemus-nvme-by-its-pci-id.md`
 - `issues/the-virtio-drivers-match-only-a-non-transitional-device-id.md`
 - `issues/the-x86-clock-calibrates-against-an-hpet-or-the-boot-panics.md`
 - `issues/a-hardware-reduced-x86-machine-has-no-power-off-and-no-power-button.md`

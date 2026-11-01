@@ -12,9 +12,9 @@
 //! ```text
 //! pusher                             sleeper
 //! ------                             -------
-//! surplus.store(2)                   doorbell.fetch_or(SLEEPING)
+//! offering.fetch_or(bit)             doorbell.fetch_or(SLEEPING)
 //! balance_fence()                    balance_fence()
-//! doorbell.load()   -> asleep?       surplus.load()   -> anything to steal?
+//! doorbell.load()   -> asleep?       offering.load()  -> anything to steal?
 //! ```
 //!
 //! Each side stores to one location and loads the other, and with anything
@@ -47,9 +47,10 @@
 
 use loom::sync::atomic::{AtomicUsize, Ordering};
 use loom::sync::Arc;
-use kernel_loom::sched::cpu::{balance_fence, CpuHandle};
+use kernel_loom::sched::cpu::{balance_fence, CpuHandle, CpuHandles};
 use kernel_loom::sched::hw::CpuId;
 use kernel_loom::sched::mailbox::{mailbox, Kick, MailboxConsumer};
+use kernel_loom::sched::topology::Topology;
 use kernel_loom::sched_model::{model, Msg};
 
 /// The surplus at which a pass pushes and at which an idle pass probes — one
@@ -57,14 +58,12 @@ use kernel_loom::sched_model::{model, Msg};
 /// stages the shipped threshold.
 const THRESHOLD: u32 = kernel_loom::sched::cpu::PUSH_THRESHOLD;
 
-/// Two CPUs' shared faces: the one that gains surplus, and the one going to
-/// sleep. The `CpuHandle` is the real one, so `publish_surplus`, `surplus`,
-/// `doorbell` and `poke` are the shipped code and not a restatement of it.
+/// Two CPUs' shared faces: [`VICTIM`], which gains surplus, and [`THIEF`],
+/// which is going to sleep. The `CpuHandles` are the real ones, so
+/// `publish_surplus`, `offers_surplus`, `doorbell` and `poke` are the shipped
+/// code and not a restatement of it.
 struct World {
-    /// The CPU that gains surplus. Only its `surplus` matters here.
-    victim: CpuHandle<Msg>,
-    /// The CPU going to sleep. Only its doorbell matters here.
-    thief: CpuHandle<Msg>,
+    cpus: CpuHandles<Msg>,
     /// Targeted IPIs the push sent. As in `loom_sleep.rs`, an IPI's only
     /// relevant effect is "the target cannot stay halted".
     ipis: AtomicUsize,
@@ -74,15 +73,30 @@ struct World {
     pokes: AtomicUsize,
 }
 
+const VICTIM: CpuId = CpuId(0);
+const THIEF: CpuId = CpuId(1);
+
 impl World {
+    fn new(victim: CpuHandle<Msg>, thief: CpuHandle<Msg>) -> Self {
+        Self {
+            cpus: CpuHandles::new(vec![victim, thief], Topology::flat(2)),
+            ipis: AtomicUsize::new(0),
+            pokes: AtomicUsize::new(0),
+        }
+    }
+
+    fn thief(&self) -> &CpuHandle<Msg> {
+        self.cpus.get(THIEF)
+    }
+
     /// `SchedPass::push_on_surplus`, as the pass runs it: publish, fence, look
     /// for a sleeper, ring it.
     fn publish_and_push(&self) {
-        self.victim.publish_surplus(THRESHOLD);
+        self.cpus.publish_surplus(VICTIM, THRESHOLD);
         balance_fence();
-        if self.thief.doorbell().sleeping() {
+        if self.thief().doorbell().sleeping() {
             self.pokes.fetch_add(1, Ordering::AcqRel);
-            if self.thief.poke() == Kick::Send {
+            if self.thief().poke() == Kick::Send {
                 self.ipis.fetch_add(1, Ordering::AcqRel);
             }
         }
@@ -96,13 +110,13 @@ impl World {
     /// Returns `true` if the CPU halted **without** having seen the surplus —
     /// the state the push has to make impossible without a poke behind it.
     fn try_sleep(&self, rx: &MailboxConsumer<Msg>) -> bool {
-        self.thief.doorbell().begin_pass();
+        self.thief().doorbell().begin_pass();
         // `post_steal_probe`'s read, before SLEEPING is published. A stale
         // answer here is exactly what the re-read below exists to catch.
-        let probed = self.victim.surplus() >= THRESHOLD;
-        let arm = self.thief.doorbell().arm_sleep();
+        let probed = self.cpus.offers_surplus(VICTIM);
+        let arm = self.thief().doorbell().arm_sleep();
         balance_fence();
-        if self.victim.surplus() >= THRESHOLD {
+        if self.cpus.offers_surplus(VICTIM) {
             // Observed: the pass goes round again and posts a probe.
             arm.abandon();
             return false;
@@ -126,12 +140,7 @@ fn a_cpu_that_halts_without_seeing_the_surplus_was_pushed() {
     model(|| {
         let (victim_tx, _victim_rx) = mailbox::<Msg>();
         let (thief_tx, thief_rx) = mailbox::<Msg>();
-        let world = Arc::new(World {
-            victim: CpuHandle::new(CpuId(0), victim_tx),
-            thief: CpuHandle::new(CpuId(1), thief_tx),
-            ipis: AtomicUsize::new(0),
-            pokes: AtomicUsize::new(0),
-        });
+        let world = Arc::new(World::new(CpuHandle::new(VICTIM, victim_tx), CpuHandle::new(THIEF, thief_tx)));
 
         let pusher = {
             let world = world.clone();
@@ -163,18 +172,13 @@ fn a_push_rings_nobody_when_nobody_is_asleep() {
     model(|| {
         let (victim_tx, _victim_rx) = mailbox::<Msg>();
         let (thief_tx, _thief_rx) = mailbox::<Msg>();
-        let world = Arc::new(World {
-            victim: CpuHandle::new(CpuId(0), victim_tx),
-            thief: CpuHandle::new(CpuId(1), thief_tx),
-            ipis: AtomicUsize::new(0),
-            pokes: AtomicUsize::new(0),
-        });
+        let world = Arc::new(World::new(CpuHandle::new(VICTIM, victim_tx), CpuHandle::new(THIEF, thief_tx)));
 
         // The target runs a pass and stays awake: `begin_pass` clears SLEEPING
         // and nothing arms one.
         let target = {
             let world = world.clone();
-            loom::thread::spawn(move || world.thief.doorbell().begin_pass())
+            loom::thread::spawn(move || world.thief().doorbell().begin_pass())
         };
         world.publish_and_push();
         target.join().unwrap();

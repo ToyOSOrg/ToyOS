@@ -279,7 +279,7 @@ pub fn stage_a_wedge() -> ! {
     log!("{WEDGE_STAGED}: every CPU stops taking scheduler passes from here");
     STAGED.store(true, Relaxed);
     // A core still asleep is not a core this control has wedged.
-    crate::arch::irqchip::kick_all_but_self();
+    crate::sched::driver::ring_all_but_self();
     this_cpu()
 }
 
@@ -287,7 +287,7 @@ pub fn stage_a_wedge() -> ! {
 /// hold this line is a machine the deadline ended for some other reason. Judged
 /// by the harness, so it is a constant (`build/bootlog.rs`).
 #[cfg(feature = "boot-actuators")]
-pub const WEDGE_STAGED: &str = "wedge: staged, and only the boot deadline ends this machine";
+pub const WEDGE_STAGED: &str = "wedge: staged, and only a bound this machine runs under ends it";
 
 /// A scheduler pass's first statement, where a staged wedge takes the CPU.
 #[cfg(feature = "boot-actuators")]

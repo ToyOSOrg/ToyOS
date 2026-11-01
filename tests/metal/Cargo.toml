@@ -1,6 +1,6 @@
 [package]
 name = "toyos-metal"
-description = "The metal loop that flashes an image to a bench's stick, boots it once and reads back what the boot left; the suite's command line, and what the metal profile derives, times and reads off a boot."
+description = "The metal loop that writes an image to a bench's internal disk, boots it once and reads back what the boot left; the suite's command line, and what the metal profile derives, times and reads off a boot."
 version = "0.1.0"
 edition = "2021"
 license = "MIT OR Apache-2.0"
@@ -11,7 +11,7 @@ serde = { version = "1", features = ["derive"] }
 toml = "0.8"
 # The build system's reading of an image, a boot log and a command line.
 toyos-build = { path = "../.." }
-# The outside judge of the log partition the boot left on the stick.
+# The outside judge of the log volume the boot left on the bench's disk.
 toyos-fat32-check = { path = "../../lib/fat32/check" }
 toyos-gpt = { path = "../../lib/gpt" }
 toyos-quiesce = { path = "../../lib/quiesce" }
@@ -19,3 +19,5 @@ toyos-tco = { path = "../../lib/tco" }
 
 [dev-dependencies]
 toyos-tmpdir = { path = "../../lib/tmpdir" }
+# The slot table written into the test images `internal::admit` reads.
+toyos-update = { path = "../../lib/update" }

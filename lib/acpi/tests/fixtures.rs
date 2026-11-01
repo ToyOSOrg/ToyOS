@@ -7,7 +7,7 @@ use common::Machine;
 use toyos_abi::acpi::Block;
 use toyos_acpi::{
     century_of, definition_blocks, dsdt_address, ecam_allocations, find_table, fixed_hardware, hpet_base,
-    isa_line, madt_entries, pm1a_control, psci, reset_register, rtc_century, sci_line,
+    isa_line, madt_entries, pm1a_control, pm_timer, psci, reset_register, rtc_century, sci_line, PmTimer,
     Century, FixedHardware, IoApicEntry, Line, MadtEntry, Polarity, PowerButton, Psci, Reset, SmiCmd,
     SourceOverride, TableError, Trigger, FADT_FOR_FIXED_HARDWARE, FADT_PM1A_CNT_BLK,
     MADT_ENTRIES,
@@ -42,7 +42,7 @@ fn the_madt_names_the_two_cpus_that_boot_and_the_chip_that_interrupts_them() {
     let mut overrides = Vec::new();
     for item in madt_entries(&madt) {
         match item.expect("a table QEMU published walks to its end") {
-            MadtEntry::LocalApic { apic_id, enabled } => {
+            MadtEntry::LocalApic { apic_id, enabled, .. } => {
                 if enabled {
                     cpus.push(apic_id);
                 }
@@ -170,7 +170,8 @@ fn the_xsdt_walk_reaches_every_entry() {
 
 /// q35's ICH9 power-management block at the base QEMU's firmware put it,
 /// 0x600, as the FADT names it: the blocks the `acpi_press_is_one_sci` guest test
-/// takes its SCI through, and the 32-bit fields and their `X_` twins agreeing.
+/// takes its SCI through, and the 32-bit fields and their `X_` twins agreeing;
+/// and its 24-bit PM timer at 0x608, which the clock arbitrates with.
 #[test]
 fn the_q35_fadt_names_the_fixed_hardware_its_sci_is_served_through() {
     let fadt = find_table(machine(), RSDP, b"FACP", FADT_FOR_FIXED_HARDWARE).expect("FADT");
@@ -185,6 +186,7 @@ fn the_q35_fadt_names_the_fixed_hardware_its_sci_is_served_through() {
         })
     );
     assert_eq!(pm1a_control(&fadt), Ok(Block { port: 0x604, len: 2 }));
+    assert_eq!(pm_timer(&fadt), Ok(PmTimer { port: 0x608, bits: 24 }));
 }
 
 /// `ioapic: iso bus:irq->gsi [... 0:9->9 level/high ...]`: q35 names its SCI's

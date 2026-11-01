@@ -60,12 +60,21 @@ struct stat {
 #define S_IWOTH 0002
 #define S_IXOTH 0001
 
+/* utimensat's and futimens' tv_nsec: the time now, or left as it is. */
+#define UTIME_NOW  0x3fffffff
+#define UTIME_OMIT 0x3ffffffe
+
 int stat(const char *path, struct stat *buf);
+int fstatat(int dirfd, const char *path, struct stat *buf, int flags);
+int mkdirat(int dirfd, const char *path, mode_t mode);
+int utimensat(int dirfd, const char *path, const struct timespec times[2], int flags);
+int futimens(int fd, const struct timespec times[2]);
 int fstat(int fd, struct stat *buf);
 int lstat(const char *path, struct stat *buf);
 int mkdir(const char *path, mode_t mode);
 int chmod(const char *path, mode_t mode);
 int fchmod(int fd, mode_t mode);
+int fchmodat(int dirfd, const char *path, mode_t mode, int flags);
 mode_t umask(mode_t mask);
 
 #ifdef __cplusplus

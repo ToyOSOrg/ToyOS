@@ -6,17 +6,20 @@
 use toyos::fs::WINDOW_BYTES;
 use toyos::shm::{Lent, SharedMemory};
 use toyos_abi::syscall;
-use toyos_abi::RawHandle;
+use toyos::OwnedHandle;
 
 /// A region of `bytes`, as a peer lends it.
-fn region(bytes: usize) -> RawHandle {
-    syscall::shm_create(bytes).expect("lent_window_refused: a region")
+fn region(bytes: usize) -> OwnedHandle {
+    let made = syscall::shm_create(bytes).expect("lent_window_refused: a region");
+    // SAFETY: a fresh handle nothing else answers for.
+    unsafe { OwnedHandle::from_raw(made) }
 }
 
 fn main() {
     assert!(SharedMemory::lent(region(WINDOW_BYTES), WINDOW_BYTES).is_ok(), "lent_window_refused: a region of WINDOW_BYTES was refused");
     let (read, _write) = toyos::pipe_pair().expect("lent_window_refused: a pipe");
-    let pipe = SharedMemory::lent(read.into_raw(), WINDOW_BYTES).err();
+    // SAFETY: the pipe end gives up the handle it owned.
+    let pipe = SharedMemory::lent(unsafe { OwnedHandle::from_raw(read.into_raw()) }, WINDOW_BYTES).err();
     assert_eq!(pipe, Some(Lent::NotRam), "lent_window_refused: a pipe end lent as a window");
     let twice = SharedMemory::lent(region(2 * WINDOW_BYTES), WINDOW_BYTES).err();
     assert_eq!(

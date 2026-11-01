@@ -6,18 +6,22 @@ opened: 2026-10-22
 
 # Concurrent libc calls on one socket alias its entry
 
-libc keeps each socket's state in `static mut SOCKETS` (`sdk/libc/src/socket.rs`),
-and every socket call reaches its entry as `&mut Option<SocketEntry>` through
-`Socket::slot`. A descriptor held for the call keeps `release_socket` off the
-entry, but nothing serializes two calls on one socket: a `recv` blocked on one
-thread holds a reference to the entry while a `connect`, `bind`, `setsockopt`
-or a second `recv` on another thread makes its own `&mut` to it. Two live
-`&mut` to one place are undefined behaviour in Rust, and a `connect` that
-writes `stream` or `local_port` under a reader is a data race on plain memory.
+libc keeps the state of each socket that is no stream yet in `static mut SOCKETS`
+(`sdk/libc/src/socket.rs`), and every call on such a socket reaches its entry as
+`&mut Option<SocketEntry>` through `Socket::slot`. A descriptor held for the call keeps
+`release_socket` off the entry, but nothing serializes two calls on one socket: a
+`connect`, `bind`, `accept` or `setsockopt` on one thread makes its own `&mut` to the entry
+while another call on another thread holds one. Two live `&mut` to one place are undefined
+behaviour in Rust, and a write to the entry under another call's read is a data race on
+plain memory. A connected socket is its stream's handle and no entry, so `send`, `recv` and
+`read` on one touch no entry.
 
 **What it costs.**
-- Two concurrent `connect`s on one socket each open a stream and each write `entry.stream`. The second write overwrites the first, which leaks that stream's handle, its region and its netstack connection for the life of the process.
-- A `recv` that reads `stream` while a `connect` writes it is a real concurrent access to plain memory, and not only a rule of the type system.
+- Two concurrent `connect`s on one socket each open a stream, and the second's
+  `fd::replace` lets go of the first's: one connect answers 0 for a stream it no longer
+  holds, where POSIX answers the second `EALREADY` or `EISCONN`.
+- A `bind` or `setsockopt` racing a `connect` reads and writes the entry the `connect` is
+  reading.
 
 Read from the code, not reproduced.
 

@@ -17,7 +17,7 @@ mod install;
 
 use std::time::Instant;
 
-use diskserver::disk::{Disk, Served};
+use diskserver::disk::Served;
 use toyos::endow;
 use toyos_update::sig;
 use toyos_update::slots;
@@ -42,14 +42,14 @@ fn main() {
 
 /// One partition of the grant: its blocks, and its unique GUID.
 struct Held {
-    disk: Box<dyn Disk>,
+    disk: Served,
     unique: [u8; 16],
 }
 
 /// The partition endowed under `label`: a session through the connector of
 /// that name, which reaches one partition and lists it.
 fn held(label: &str) -> Result<Held, String> {
-    let none = || format!("this process holds no `{label}`: the supervisor grants the idle slot to one update at a time, and says why where it grants none");
+    let none = || format!("this process holds no `{label}`: the supervisor grants the idle slot to one update at a time, and says why where it grants none; run it with `launch update`");
     let names = endow::namespace().ok_or_else(none)?;
     let own = toyos::namespace::build().keep(names, &[label]).finish().map_err(|_| none())?;
     let listed = diskserver::list(&own, label).map_err(|why| format!("`{label}` would not list its partition: {why:?}"))?;
@@ -58,21 +58,27 @@ fn held(label: &str) -> Result<Held, String> {
     };
     let session = diskserver::Session::open(own, label, one.unique)
         .map_err(|why| format!("`{label}`'s partition would not open: {why:?}"))?;
-    Ok(Held { disk: Box::new(Served::new(session)), unique: one.unique })
+    Ok(Held { disk: Served::new(session), unique: one.unique })
 }
 
 fn run(began: Instant) -> Result<String, String> {
-    let (mut table, mut boot, mut root) = (held(slots::TABLE_LABEL)?, held(slots::BOOT_LABEL)?, held(slots::ROOT_LABEL)?);
+    let (table, boot, root) = (held(slots::TABLE_LABEL)?, held(slots::BOOT_LABEL)?, held(slots::ROOT_LABEL)?);
     let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0, |since| since.as_secs());
-    let installed = install::install(
+    let mut input = std::io::stdin().lock();
+    let installing = install::install(
         &KEY,
-        &mut *table.disk,
-        Partition { disk: &mut *boot.disk, unique: boot.unique },
-        Partition { disk: &mut *root.disk, unique: root.unique },
-        &mut std::io::stdin().lock(),
+        &table.disk,
+        Partition { disk: &boot.disk, unique: boot.unique },
+        Partition { disk: &root.disk, unique: root.unique },
+        &mut input,
         now,
         |line| println!("{line}"),
-    )?;
+    );
+    // The install asks one request at a time, so the disk waited on is the
+    // one it is asking.
+    let disks = [&table.disk, &boot.disk, &root.disk];
+    let wait = || disks.into_iter().find(|d| d.pending()).expect("update: the install stalled with nothing asked").wait();
+    let installed = toyos_blockdev::block_on(installing, wait)?;
     Ok(format!(
         "{INSTALLED} version {} in slot {} ({} bytes of ROOT in {} ms, {} ms in all); it boots at the next reboot",
         installed.version,

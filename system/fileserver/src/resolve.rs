@@ -2,15 +2,17 @@
 //! given, and nowhere else.
 //!
 //! **The root is a floor, not a starting point.** A connection is bound to one
-//! directory of the volume (its grant's root); a client's path is canonical
-//! and relative to it (`toyos::fs::canonical`), and each component is looked up
-//! in turn. A symlink met on the way is expanded where it stands: a relative
-//! target is read against the link's own directory, and a `..` that would
-//! climb above the connection's root is refused — [`Escape`] — rather than
-//! clamped, because a clamped path is a different file from the one the link
-//! named. An absolute target is not this server's to resolve: it names a path
-//! in the *client's* table, which may hold directories this connection does
-//! not, and the client resolves it again there ([`Resolved::Absolute`]).
+//! directory of the volume (its grant's root); a client's path is relative
+//! (`toyos::fs::relative`) to that directory or to one beneath it the client
+//! holds open, and each component is looked up in turn. A `..` is the parent
+//! of the directory resolved so far, and a symlink met on the way is expanded
+//! where it stands: a relative target is read against the link's own
+//! directory. A `..`, the client's or a link's, that would climb above the
+//! connection's root is refused — [`Escape`] — rather than clamped, because a
+//! clamped path is a different file from the one named. An absolute target
+//! is not this server's to resolve: it names a path in the *client's*
+//! table, which may hold directories this connection does not, and the client
+//! resolves it again there ([`Resolved::Absolute`]).
 //!
 //! **One resolution sees one volume.** The server is one thread and a request
 //! is answered before the next is read, so no rename can land between two
@@ -52,24 +54,26 @@ pub enum Found {
     Other,
 }
 
-/// Resolve `rel` under `root`. `follow_last` follows a symlink in the final
+/// Resolve `rel` from `start`, a directory at or beneath `root` that the
+/// caller has checked is. `follow_last` follows a symlink in the final
 /// component too; an operation on the link itself (`lstat`, `unlink`,
 /// `readlink`, a `rename`'s ends) passes `false`.
 pub fn resolve(
     root: &str,
+    start: &str,
     rel: &str,
     follow_last: bool,
     lookup: &mut dyn FnMut(&str) -> Result<Found, ()>,
 ) -> Result<Resolved, Refusal> {
     // What is resolved so far, as components under `root`, and what is left.
-    let mut done: Vec<String> = Vec::new();
+    let below = start.strip_prefix(root).expect("a start beneath the root").trim_start_matches('/');
+    let mut done: Vec<String> = below.split('/').filter(|c| !c.is_empty()).map(String::from).collect();
     let mut left: Vec<String> = rel.split('/').filter(|c| !c.is_empty()).rev().map(String::from).collect();
     let mut links = 0;
     while let Some(component) = left.pop() {
         match component.as_str() {
             "." => continue,
             ".." => {
-                // Only a link's target carries one: the wire refuses them.
                 if done.pop().is_none() {
                     return Err(Refusal::Escape);
                 }
@@ -119,7 +123,7 @@ mod tests {
     }
 
     fn run(links: &BTreeMap<String, String>, root: &str, rel: &str, follow: bool) -> Result<Resolved, Refusal> {
-        resolve(root, rel, follow, &mut |path| {
+        resolve(root, root, rel, follow, &mut |path| {
             Ok(links.get(path).map_or(Found::Other, |t| Found::Link(t.clone())))
         })
     }
@@ -204,6 +208,23 @@ mod tests {
     fn the_last_link_is_left_alone_when_asked() {
         let v = vol(&[("home/l", "../../etc")]);
         assert_eq!(run(&v, "home", "l", false), path("home/l"));
+    }
+
+    /// A client's `..` climbs from the directory it starts in, through the
+    /// directory a link resolved to rather than the link's own, and never
+    /// above the root.
+    #[test]
+    fn a_client_s_climb_is_by_directory_and_stops_at_the_root() {
+        let v = vol(&[("home/toy/docs", "a/b")]);
+        let from = |start: &str, rel: &str| {
+            resolve("home", start, rel, true, &mut |path| Ok(v.get(path).map_or(Found::Other, |t| Found::Link(t.clone()))))
+        };
+        assert_eq!(from("home/toy", "../x"), path("home/x"));
+        assert_eq!(from("home/toy", "docs/../c"), path("home/toy/a/c"), "`..` of the link's target, not of `docs`");
+        assert_eq!(from("home/toy/a", ".."), path("home/toy"));
+        assert_eq!(from("home", ".."), Err(Refusal::Escape));
+        assert_eq!(from("home/toy", "../.."), Err(Refusal::Escape));
+        assert_eq!(from("home/toy", "../../home/toy"), Err(Refusal::Escape), "an escape that would come back is refused");
     }
 
     #[test]

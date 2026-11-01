@@ -19,6 +19,8 @@ pub use toyos_acpi::{IoApicEntry, SourceOverride, TableError};
 
 pub struct MadtInfo {
     pub apic_ids: Vec<u32>,
+    /// Each enabled CPU's APIC ID and ACPI Processor UID.
+    pub processor_uids: Vec<(u32, u32)>,
     pub io_apics: Vec<IoApicEntry>,
     pub source_overrides: Vec<SourceOverride>,
 }
@@ -199,6 +201,13 @@ pub fn find_hpet_base(rsdp_addr: u64) -> Option<u64> {
     Some(base)
 }
 
+/// The ACPI PM timer the FADT names, or why there is none.
+pub fn pm_timer(rsdp_addr: u64) -> Result<toyos_acpi::PmTimer, alloc::string::String> {
+    let fadt = toyos_acpi::find_table(direct_phys(), rsdp_addr, b"FACP", toyos_acpi::FADT_FOR_FIXED_HARDWARE)
+        .map_err(|e| alloc::format!("the FADT is unusable ({e:?})"))?;
+    toyos_acpi::pm_timer(&fadt).map_err(|e| alloc::format!("{e:?}"))
+}
+
 /// How many processors the MADT enables, of either architecture's kind: its
 /// Local APIC and x2APIC entries, or its GICC entries. What every per-CPU
 /// table is sized by, before either architecture's own walk of the MADT.
@@ -223,14 +232,16 @@ pub fn parse_madt(rsdp_addr: u64) -> Option<MadtInfo> {
     };
 
     let mut apic_ids = Vec::new();
+    let mut processor_uids = Vec::new();
     let mut io_apics = Vec::new();
     let mut source_overrides = Vec::new();
 
     for item in toyos_acpi::madt_entries(&madt) {
         match item {
-            Ok(MadtEntry::LocalApic { apic_id, enabled }) => {
+            Ok(MadtEntry::LocalApic { apic_id, uid, enabled }) => {
                 if enabled {
                     apic_ids.push(apic_id);
+                    processor_uids.push((apic_id, uid));
                 }
             }
             Ok(MadtEntry::IoApic(entry)) => io_apics.push(entry),
@@ -255,5 +266,5 @@ pub fn parse_madt(rsdp_addr: u64) -> Option<MadtInfo> {
     }
 
     log!("ACPI: MADT cpus={:?}", apic_ids);
-    Some(MadtInfo { apic_ids, io_apics, source_overrides })
+    Some(MadtInfo { apic_ids, processor_uids, io_apics, source_overrides })
 }

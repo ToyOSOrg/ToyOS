@@ -6,10 +6,10 @@ opened: 2026-09-04
 
 # The exit record's `syscalls=` is one thread's counts under a process's name
 
-`ThreadData` holds `syscall_counts`, `syscall_total` and `syscall_total_ns`,
-and `teardown_resources` (`kernel/src/process.rs`) reads them from the one
-thread's data `teardown` hands it, the main thread's, and they go out as the
-process's: in its exit record (`exit: <name> pid=N code=N cpu=Nms peak=… allocs=…
+Each thread's `TaskHandle` holds its `SyscallProfile`
+(`kernel/src/sched/payload.rs`), and `teardown_resources`
+(`kernel/src/process.rs`) reads only the main thread's, which `teardown` hands
+it, and sends it out as the process's: in its exit record (`exit: <name> pid=N code=N cpu=Nms peak=… allocs=…
 frees=… syscalls=N syscall_wall=Nms <number>=<count> …`) and in the
 `ProcessStats` its exit publishes. Every other thread's calls are silently
 dropped.

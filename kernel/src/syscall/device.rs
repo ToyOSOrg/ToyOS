@@ -78,6 +78,13 @@ pub(super) fn sys_acpi(ctx: &SyscallContext, handle: RawHandle, op: u64, at: u64
         },
         _ => None,
     };
+    let declaration = match op {
+        ops::IDLE => match ctx.copy_in::<toyos_abi::acpi::IdleDeclaration>(UserAddr::new(at)) {
+            Ok(declaration) => Some(declaration),
+            Err(e) => return e.to_u64(),
+        },
+        _ => None,
+    };
     let declared = match op {
         ops::DECLARE => match ctx.copy_in::<toyos_abi::acpi::Apertures>(UserAddr::new(at)) {
             Ok(declared) => Some(declared),
@@ -98,14 +105,16 @@ pub(super) fn sys_acpi(ctx: &SyscallContext, handle: RawHandle, op: u64, at: u64
             }
             (ops::LOCK_RELEASE, _) => crate::arch::acpi_mode::lock_release(row).map(|()| 0),
             (ops::S5, _) => crate::arch::acpi_mode::s5(row, at).map(|()| 0),
-            (ops::DECLARE, _) => {
-                let declared = declared.as_ref().ok_or(SyscallError::InvalidArgument)?;
-                match crate::pcidev::declare(declared) {
-                    Ok(()) => Ok(0),
-                    Err(toyos_pci::aperture::Declined::Refused(_)) => Err(SyscallError::InvalidArgument),
-                    Err(toyos_pci::aperture::Declined::Late) => Err(SyscallError::AlreadyExists),
-                }
-            }
+            (ops::IDLE, _) => match &declaration {
+                Some(declaration) => crate::arch::acpi_mode::idle(row, declaration).map(|()| 0),
+                None => unreachable!("the declaration is copied in for IDLE"),
+            },
+            (ops::DECLARE, _) => match declared.as_ref().map(crate::pcidev::declare) {
+                Some(Ok(())) => Ok(0),
+                Some(Err(toyos_pci::aperture::Declined::Refused(_))) => Err(SyscallError::InvalidArgument),
+                Some(Err(toyos_pci::aperture::Declined::Late)) => Err(SyscallError::AlreadyExists),
+                None => unreachable!("the declaration is copied in for DECLARE"),
+            },
             _ => Err(SyscallError::InvalidArgument),
         }
     });
@@ -257,9 +266,9 @@ pub(super) fn sys_device_dma_alloc(
 
 /// A region the caller holds, put into the claimed function's domain.
 ///
-/// The caller must hold the region with [`Rights::MAP`]: a device writing into
-/// it is the same authority as a store through the caller's own mapping, and
-/// no more. The output window is taken before the mapping, as
+/// The caller must hold the region with [`Rights::MAP`] and [`Rights::WRITE`]:
+/// a device writing into it is the same authority as a store through the
+/// caller's own writable mapping, and no more. The output window is taken before the mapping, as
 /// [`sys_device_dma_alloc`] takes its own: a bad address must not leave the
 /// function reaching memory the caller was never told the address of.
 pub(super) fn sys_device_dma_map(
@@ -273,7 +282,7 @@ pub(super) fn sys_device_dma_map(
         Err(e) => return e.refuse(),
     };
     let memory = match process::with_process_data(|data| {
-        data.handles.get::<crate::object::shm::SharedMemObject>(region, Rights::MAP)
+        data.handles.get::<crate::object::shm::SharedMemObject>(region, Rights::MAP.union(Rights::WRITE))
     }) {
         Ok(memory) => memory,
         Err(e) => {

@@ -19,8 +19,9 @@
 //! anything else the caller passed — a terminal's pipes stay the terminal's.
 //!
 //! **The supervisor sequences the machine's stop** ([`toyos::power`]): a holder of the
-//! `power` connector asks, the supervisor has `logkeeper` flush and answer, and only then
-//! asks the kernel, which stops every process at once and waits for none.
+//! `power` connector asks, the supervisor signs every login session out and,
+//! once they have ended, has `logkeeper` flush and answer, and only then asks
+//! the kernel, which stops every process at once and waits for none.
 //!
 //! **A service the supervisor starts at boot outlives any one process serving it.** The supervisor
 //! keeps each of its acceptors and endows a duplicate, so a restart or a swap
@@ -31,6 +32,12 @@
 //! acceptors closed at once, so a client's next connect is `ServerGone` exactly
 //! as it is for a server nothing keeps. A program started through `launcher`
 //! still gets its acceptor by move and is started once per boot.
+//!
+//! **A service keeps one job across its starts**, its row's `system.toml`
+//! floor held on it, so a control path started again is owed what it was.
+//! **A start refused for memory waits for it to come back**: the service
+//! keeps its ports, and its job's readiness, posted when what it lacked is
+//! free, is what starts it again ([`Supervisor::memory_returned`]).
 //!
 //! **A `drives` row has one process per PCI function it names**, each holding
 //! that function's claim and started when the kernel's device set
@@ -61,7 +68,8 @@
 //! **Every program it starts holds the directories its row's view names**
 //! (`Program::view`), each a grant minted for that start ([`Grants`]): an
 //! installed package its own directory read-only and its own folder
-//! read-write, and every other row the whole tree.
+//! read-write, and every other row the whole tree but `/state`, of which it
+//! holds its own directory alone, where it keeps any (`Program::state_dir`).
 //! A launch of a program no row names is answered with the session's, which
 //! the caller's direct spawn carries in place of its own.
 //!
@@ -90,12 +98,18 @@
 //! that asks for the supervisor is the one way to outlive the caller, and one naming
 //! neither is refused.
 
+mod sessions;
+mod stopping;
+
 use std::cell::{Cell, RefCell};
 use std::collections::BTreeMap;
-use std::os::toyos::process::{ChildExt, CommandExt};
+use std::os::toyos::io::AsRawHandle;
+use std::os::toyos::process::CommandExt;
 use std::path::Path;
 use std::process::{Child, Command, Stdio};
 use std::rc::Rc;
+use std::sync::atomic::{AtomicU32, Ordering};
+use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use toyos_swap::{Refusal, Request as SwapRequest, Word};
@@ -109,19 +123,20 @@ use toyos_manifest::{Manifest, Program, Source, View};
 use toyos_supervisor::claims::{self, Missing, Unresolved};
 use toyos_supervisor::drives::{self, Act, Drives};
 use toyos_supervisor::restart::{self, AfterEnd, Budget};
-use toyos::endow::Endowments;
+use toyos::endow::{Endowments, FromHandle};
 use toyos::fs::{Access, Grant, CAPABILITY_PREFIX};
 use toyos::ipc::{self, Connection, RxStep};
 use toyos::launch::{self, Parent, Request, LAUNCHER};
 use toyos::namespace::{self, Namespace};
-use toyos::poller::{Poller, READABLE};
+use toyos::poller::{Poller, READABLE, WRITABLE};
 use toyos::port::{self, Acceptor, Connector};
 use toyos::log::region::{Ring, RING_BYTES};
-use toyos::power::{self, Stop};
+use toyos::power;
 use toyos::say;
+use toyos::wake::{self, Bell, Waker};
 use toyos::shm::SharedMemory;
 use toyos::syscap::SysCap;
-use toyos::{AsHandle, Pipe};
+use toyos::AsHandle;
 use toyos_abi::Rights;
 use toyos_blockring::wire::{Grant as BlockGrant, Scope};
 use toyos_logstream::{
@@ -159,13 +174,9 @@ const MAX_PENDING_LAUNCHES: usize = 32;
 /// sends it, and it is what guarantees the table above drains.
 const HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(2);
 
-/// One caller's inbound framing.
-///
-/// **The supervisor never reads a client with a blocking read.** `recv_header` and
-/// `recv_bytes` park the caller until the peer sends the bytes it promised. The
-/// whole request blob is kept because a launch carries the child's argv,
-/// environment and working directory, and a truncated one is a launch refused
-/// for a reason the caller did not cause.
+/// One caller's inbound frames, taken without waiting: the supervisor never
+/// waits on a client. Room for the largest frame, because a launch carries
+/// the child's argv, environment and working directory.
 type LaunchRx = ipc::FrameRx<{ ipc::MAX_FRAME_LEN as usize }>;
 
 /// A connection that has been accepted and has not yet said what to start.
@@ -191,6 +202,10 @@ enum Port {
     Launcher(Caller),
     /// Who asks to read or change the grants, off the connection's badge.
     Grants(Caller),
+    /// The login authority asking for a session, off its badge.
+    Login(&'static Program),
+    /// The `logout` asking about the sessions open, off its badge.
+    Admin(Caller),
     Swap,
     Power,
 }
@@ -201,6 +216,30 @@ enum Port {
 struct Minted {
     launcher: Acceptor,
     grants: Acceptor,
+    /// [`toyos_session::LOGIN_PORT`], minted with a `login` row's key.
+    login: Acceptor,
+    /// [`toyos_session::ADMIN_PORT`], minted with its holder's row and session.
+    admin: Acceptor,
+}
+
+/// What one start is minted: the session its files and grants are in, and
+/// the launcher port its launches are minted on with their session.
+#[derive(Clone, Copy)]
+struct Minting<'m> {
+    minted: &'m Minted,
+    session: Session,
+    /// `None` for a start that holds no launcher minted here: a `login` row
+    /// outside a login session, whose launches are a session's alone.
+    launches: Option<(&'m Acceptor, Session)>,
+}
+
+impl<'m> Minting<'m> {
+    /// A start in the machine's session, its launches on the machine's
+    /// launcher, but for a `login` row's, which hold none of it.
+    fn machine(minted: &'m Minted, program: &Program, session: Session) -> Self {
+        let launches = toyos_supervisor::sessions::holds_machine_launcher(program).then_some((&minted.launcher, session));
+        Self { minted, session, launches }
+    }
 }
 
 /// The poll tokens for the `launcher`, `swap`, `power` and `grants` acceptors, for the
@@ -218,14 +257,27 @@ const TOKEN_GRANTS_ACCEPTOR: u64 = 5;
 /// The parked launch's caller, and its question's connection ([`Parked`]).
 const TOKEN_PARKED_CALLER: u64 = 6;
 const TOKEN_CONSENT: u64 = 7;
+const TOKEN_LOGIN_ACCEPTOR: u64 = 8;
+const TOKEN_ADMIN_ACCEPTOR: u64 = 9;
+/// Every session owner's link, and the ends of every session's apps.
+const TOKEN_LINKS: u64 = 10;
+const TOKEN_APPS: u64 = 11;
+/// The job of every service waiting for memory to come back to start again,
+/// watched in the place of the process it has none of.
+const TOKEN_MEMORY: u64 = 12;
 /// The device set changed.
-const TOKEN_DEVICES: u64 = 8;
-const TOKEN_PENDING_BASE: u64 = 9;
+const TOKEN_DEVICES: u64 = 13;
+const TOKEN_PENDING_BASE: u64 = 14;
+/// Above every pending connection's token, which is a handle's past the base.
+const TOKEN_POWER_WATCHERS: u64 = u64::MAX;
 
 /// The processes whose end the supervisor watches at once: its services and
 /// its `drives` processes, in what a poller holds beside the loop's own
 /// watches. A `drives` process past it is not started, and says so.
-const MAX_CHILDREN: usize = Poller::MAX_HANDLES as usize - TOKEN_PENDING_BASE as usize - MAX_PENDING_LAUNCHES;
+const MAX_CHILDREN: usize = Poller::MAX_HANDLES as usize
+    - TOKEN_PENDING_BASE as usize
+    - MAX_PENDING_LAUNCHES
+    - 2 * sessions::MAX_SESSIONS;
 
 /// How long a stop waits for `logkeeper` to say the log is whole.
 ///
@@ -249,7 +301,7 @@ struct Log {
     /// The supervisor's console as every program but `logkeeper` gets it for its stdin: one
     /// it may read and not write, so no program puts a line on the console but
     /// through `logkeeper` and under its name.
-    stdin: toyos::RawHandle,
+    stdin: toyos::OwnedHandle,
     /// What `logkeeper` answers on the connection, kept across flushes.
     rx: RefCell<ipc::FrameRx<8>>,
     /// Flushes asked for and not answered yet: one waited out past
@@ -272,6 +324,24 @@ fn new_ring() -> SharedMemory {
     region
 }
 
+/// [`new_ring`] for a program started in `job`, counted to it: a ring is the
+/// program's output, and the supervisor's own floor pays for none of it.
+/// Refused where `job` has no memory for it.
+fn ring_for(job: toyos::BorrowedHandle<'_>) -> std::io::Result<SharedMemory> {
+    let region = SharedMemory::create_for(job, RING_BYTES).map_err(memory_refused)?;
+    view(&region).lay_out_with_placeholder_owner();
+    Ok(region)
+}
+
+/// A refusal the kernel answered as an `io::Error` of the kind std gives it,
+/// so a start refused for memory is told apart from one refused otherwise.
+fn memory_refused(e: SyscallError) -> std::io::Error {
+    match e {
+        SyscallError::ResourceExhausted => std::io::Error::new(std::io::ErrorKind::OutOfMemory, "no memory left for it"),
+        other => std::io::Error::other(format!("{other:?}")),
+    }
+}
+
 fn view(region: &SharedMemory) -> Ring {
     let base = core::ptr::NonNull::new(region.as_ptr()).expect("a mapped region is not null");
     // SAFETY: `region` maps `RING_BYTES` for as long as it is held, and the
@@ -287,7 +357,9 @@ impl Log {
             .finish()
             .expect("supervisor: no namespace for the log's origins");
         let conn = names.open(ORIGINS).expect("supervisor: the log's origins port refused the supervisor");
-        let stdin = toyos::fd::with(0, |o| toyos_abi::syscall::dup_narrowed(o.handle, STDIN_RIGHTS))
+        let stdin = toyos::fd::with(0, |o| o.handle().map(|console| console.try_clone_narrowed(STDIN_RIGHTS)))
+            .ok()
+            .flatten()
             .expect("supervisor: the kernel gave it no console as descriptor 0")
             .expect("supervisor: its console would not narrow");
         let log = Self {
@@ -300,15 +372,18 @@ impl Log {
         // The supervisor's own lines: a ring like every program's, as the two
         // descriptors the kernel gave its console.
         let ring = new_ring();
-        let copy = toyos_abi::syscall::dup(ring.as_handle()).expect("supervisor: its ring would not duplicate");
+        let copy = ring.as_handle().try_clone_to_owned().expect("supervisor: its ring would not duplicate");
         let held = toyos::fd::install(toyos::fd::Object::handle(copy), false, 0)
             .expect("supervisor: no descriptor for its own ring");
         for (fd, stream) in [(1, toyos::log::stdio::Stream::Out), (2, toyos::log::stdio::Stream::Err)] {
-            toyos::fd::dup2(held, fd, false).expect("supervisor: its ring would not take its own descriptor");
+            // SAFETY: the kernel's console descriptors, which nothing in this
+            // process owns: std's stdio names them by number and asks again.
+            unsafe { toyos::fd::dup2(held, fd, false) }.expect("supervisor: its ring would not take its own descriptor");
             toyos::log::stdio::forget(stream);
         }
-        toyos::fd::close(held).expect("supervisor: the ring's descriptor it just made");
-        let (alive, keep) = toyos::pipe_pair().expect("supervisor: no pipe to say it lives");
+        // SAFETY: the descriptor installed above, named nowhere else.
+        unsafe { toyos::fd::close(held) }.expect("supervisor: the ring's descriptor it just made");
+        let (keep, alive) = wake::pair().expect("supervisor: no event to say it lives");
         // Held for the machine's life: the supervisor's end is the machine's.
         core::mem::forget(keep);
         log.register("supervisor", toyos_abi::syscall::getpid().0, ring, alive);
@@ -316,9 +391,9 @@ impl Log {
     }
 
     /// Name program `pid` the owner of `ring`, its log, and move the ring to
-    /// `logkeeper` under `name`, with the read end of the pipe whose only writer is
-    /// that program.
-    fn register(&self, name: &str, pid: u32, ring: SharedMemory, alive: Pipe) {
+    /// `logkeeper` under `name`, with the bell whose only waker is that
+    /// program's.
+    fn register(&self, name: &str, pid: u32, ring: SharedMemory, alive: Bell) {
         let Some(tag) = Tag::new(name) else {
             panic!("supervisor: `{name}` is not a name a line of the log can carry");
         };
@@ -345,7 +420,6 @@ impl Log {
             return;
         }
         self.unanswered.set(self.unanswered.get() + 1);
-        let poller = Poller::new(1);
         let began = Instant::now();
         loop {
             let step = self.rx.borrow_mut().pump(&self.conn);
@@ -376,8 +450,11 @@ impl Log {
                 );
                 return;
             }
-            poller.watch(&self.conn, READABLE, 0);
-            poller.wait(1, left.as_nanos() as u64, |_| {});
+            // Ready or the bound: the next pump and the check above say which.
+            if let Err(e) = toyos::poller::wait_one(&self.conn, READABLE, left.as_nanos() as u64) {
+                toyos::warn!("supervisor: the kernel refused a wait on logkeeper's answer ({e:?}); stopping without it");
+                return;
+            }
         }
     }
 }
@@ -415,6 +492,12 @@ fn main() {
         .take(SYSCAP_LABEL)
         .expect("supervisor: the kernel spawns this program holding the system capability");
     let boot: &'static Boot = Box::leak(Box::new(Boot::take()));
+    let sources = syscap.boot_sources().expect("supervisor: the kernel answers the system capability its boot sources");
+    let booted = toyos_supervisor::boot::read(&sources);
+    for line in &booted.lines {
+        say!("{line}");
+    }
+    BOOT_CONTROLLER.set(booted.controller).expect("supervisor: the boot sources are read once");
 
     // **Everything the supervisor's own files and the SYSTEM server need is
     // made before a file is read**, since the manifest is a file of `/system`
@@ -446,8 +529,7 @@ fn main() {
             }
             builder.finish().expect("supervisor: no namespace for its own files")
         };
-        // SAFETY: a namespace handle built here and used nowhere else.
-        if let Err(e) = unsafe { std::os::toyos::fs::adopt_namespace(build().into_raw().0) } {
+        if let Err(e) = std::os::toyos::fs::adopt_namespace(build().into()) {
             panic!("supervisor: std would not take its namespace ({e}), and the supervisor is endowed none");
         }
         Box::leak(Box::new(build()))
@@ -456,7 +538,9 @@ fn main() {
     // with that program's row.
     let (launcher, _) = port::create().expect("supervisor: no port for `launcher`");
     let (grants_port, grants_connector) = port::create().expect("supervisor: no port for `grants`");
-    let minted = Minted { launcher, grants: grants_port };
+    let (login, _) = port::create().expect("supervisor: no port for `login`");
+    let (admin, _) = port::create().expect("supervisor: no port for `session-admin`");
+    let minted = Minted { launcher, grants: grants_port, login, admin };
     let mut sessions = Sessions::default();
 
     // SYSTEM, from the file server's boot image: what serves `/system`. No
@@ -492,6 +576,16 @@ fn main() {
     // For the machine's life, and `'static` so a launch's path can be resolved
     // against it on the supervisor's file worker.
     let system: &'static Manifest = Box::leak(Box::new(toyos_manifest::parse(&text)));
+    // Its own floor, the protected capacity of the machine's controls: held
+    // through a handle to its own job, kept for the machine's life.
+    let own = toyos::job::own().expect("supervisor: no handle to its own job");
+    if system.supervisor_floor > 0 {
+        match syscap.hold_floor(&own, system.supervisor_floor) {
+            Ok(()) => say!("supervisor: {} MiB held back for its own job", system.supervisor_floor >> 20),
+            Err(e) => toyos::error!("supervisor: its floor of {} MiB could not be held ({e:?}); the controls run unprotected", system.supervisor_floor >> 20),
+        }
+    }
+    let _own: &'static toyos::job::Job = Box::leak(Box::new(own));
     // A role no row serves: closed before anything asks it, so a connect to it
     // answers `ServerGone` rather than waiting in a queue nothing will ever
     // accept from.
@@ -512,7 +606,7 @@ fn main() {
         .served_names()
         .into_iter()
         .chain(system.supervisor_serves.iter().map(String::as_str))
-        .filter(|name| *name != grants::PORT);
+        .filter(|name| ![grants::PORT, toyos_session::ADMIN_PORT].contains(name));
     for name in names {
         let (acceptor, connector) =
             port::create().unwrap_or_else(|e| panic!("supervisor: no port for `{name}`: {e:?}"));
@@ -556,6 +650,10 @@ fn main() {
         log,
         worker: Worker::start(),
         restarting: false,
+        logins: sessions::Logins::default(),
+        stops: Default::default(),
+        watchers: Vec::new(),
+        watch: sessions::Watch::new(),
     };
     supervisor.boot(&mut role_acceptors);
 
@@ -596,8 +694,10 @@ type Job = Box<dyn FnOnce() + Send>;
 /// and the loop waits on it and on the end together ([`Supervisor::files`]).
 struct Worker {
     jobs: std::sync::mpsc::Sender<Job>,
-    /// Readable once per job finished.
-    done: Pipe,
+    /// Rung as a job finishes.
+    done: Bell,
+    /// Jobs finished since last counted.
+    finished: Arc<AtomicU32>,
     /// Jobs handed over and not seen finished: one that outlived its bound is
     /// still here, and the worker takes no other until it finishes.
     owed: u32,
@@ -610,28 +710,28 @@ struct Worker {
 impl Worker {
     fn start() -> Self {
         let (jobs, queue) = std::sync::mpsc::channel::<Job>();
-        let (done, finished) = toyos::pipe_pair().expect("supervisor: no pipe for its file worker");
+        let (ring, done) = wake::pair().expect("supervisor: no event for its file worker");
+        let finished = Arc::new(AtomicU32::new(0));
+        let count = Arc::clone(&finished);
         std::thread::Builder::new()
             .name("files".into())
             .spawn(move || {
                 for job in queue {
                     job();
-                    finished.write(&[1]).expect("supervisor: its file worker could not say a job finished");
+                    count.fetch_add(1, Ordering::Release);
+                    ring.wake();
                 }
             })
             .expect("supervisor: its file worker could not be started");
-        Self { jobs, done, owed: 0, owed_what: String::new(), poller: Poller::new(1 + MAX_CHILDREN as u32) }
+        let poller = Poller::new((1 + MAX_CHILDREN + sessions::MAX_SESSIONS) as u32);
+        Self { jobs, done, finished, owed: 0, owed_what: String::new(), poller }
     }
 
-    /// Count the jobs that have finished since last asked.
+    /// Count the jobs that have finished since last asked: the bell is taken
+    /// first, so a job counted after it rings it again.
     fn settle(&mut self) {
-        let mut seen = [0u8; 8];
-        while self.owed > 0 {
-            match self.done.read_nonblock(&mut seen) {
-                Ok(n) if n > 0 => self.owed -= n as u32,
-                _ => return,
-            }
-        }
+        self.done.try_take().expect("supervisor: its file worker has ended");
+        self.owed -= self.finished.swap(0, Ordering::Acquire);
     }
 }
 
@@ -706,6 +806,14 @@ struct Supervisor<'a> {
     /// Inside [`Supervisor::ended`]: a file call made there leaves an end for
     /// the loop, which is the one caller that acts on it.
     restarting: bool,
+    /// The login sessions open, each with its owner.
+    logins: sessions::Logins,
+    /// The ends of every app started in a login session.
+    watch: sessions::Watch,
+    /// The machine's stop, if one is pending.
+    stops: toyos_supervisor::stop::Stops,
+    /// The requesters told what the stop waits for, as it changes.
+    watchers: Vec<stopping::Watcher>,
 }
 
 /// One `drives` process, and the function it holds.
@@ -713,9 +821,11 @@ struct Instance {
     row: &'static Program,
     function: Pci,
     child: Child,
-    /// A disk driver's [`toyos_quiesce::DRIVER_STOP`] pipe: closing it tells the
-    /// driver the machine stops.
-    stop: Option<Pipe>,
+    /// The job it runs in, kept while it runs: what holds its row's floor.
+    _job: toyos::job::Job,
+    /// The waker of a disk driver's [`toyos_quiesce::DRIVER_STOP`] bell:
+    /// closing it tells the driver the machine stops.
+    stop: Option<Waker>,
 }
 
 /// A service's kept acceptors, shared with what [`Grants`] mints on them.
@@ -744,6 +854,15 @@ struct Service<'a> {
     session: Session,
     /// The starts after an end it has spent.
     budget: Budget,
+    /// The screen's row's desktop session's launcher and control, minted for
+    /// its next start, which takes them.
+    desktop: Option<sessions::Desktop>,
+    /// The job every process serving it runs in, made at its first start and
+    /// kept: its floor, where its row has one, outlives each process, so a
+    /// start after an end is not refused what the row was held.
+    job: Option<toyos::job::Job>,
+    /// Since when a start after its end has waited for memory to come back.
+    starved: Option<Instant>,
 }
 
 impl<'a> Service<'a> {
@@ -758,6 +877,9 @@ impl<'a> Service<'a> {
             swapping: false,
             session,
             budget: Budget::default(),
+            desktop: None,
+            job: None,
+            starved: None,
         }
     }
 
@@ -793,13 +915,23 @@ impl<'a> Service<'a> {
         if is_block(self.program) {
             storage.args.extend(block);
         }
+        // The screen's row's desktop session, minted for this start alone.
+        if let Some(desktop) = self.desktop.take() {
+            storage.endow.push((LAUNCHER, desktop.launcher.into()));
+            storage.endow.push((toyos_session::CONTROL_LABEL, desktop.control.into()));
+        }
+        let job = match &self.job {
+            Some(job) => job,
+            None => self.job.insert(job_for(syscap, self.program)?),
+        };
+        let endowed = job.duplicate().map_err(memory_refused)?;
         let ports = self.ports.borrow();
         let served = Served::Keep { acceptors: &ports, owed };
         let command = match source {
             Source::Path(path) => Command::new(path),
             Source::BootFileServer => {
                 let mut command = Command::new(&self.program.name);
-                command.boot_image(boot.fileserver.as_handle().0);
+                command.boot_image(boot.fileserver.as_handle().into());
                 command
             }
         };
@@ -813,8 +945,8 @@ impl<'a> Service<'a> {
             grants,
             &[],
             storage,
-            (minted, self.session),
-            Output::Boot(log),
+            Minting::machine(minted, self.program, self.session),
+            Output::Boot { log, job: endowed },
         )?;
         drop(ports);
         let pid = child.id();
@@ -826,6 +958,22 @@ impl<'a> Service<'a> {
 
     fn pid(&self) -> Option<u32> {
         self.child.as_ref().map(Child::id)
+    }
+
+    /// How many requests its job was refused for memory: a start that raised
+    /// it waits for memory, and one refused anything else was refused that.
+    fn refusals(&self) -> u64 {
+        self.job.as_ref().and_then(|job| job.account().ok()).map_or(0, |account| account.refusals)
+    }
+
+    /// What its job's account says it would have held had its last refused
+    /// request been granted, for a line that says why it waits.
+    fn wanted(&self) -> String {
+        match self.job.as_ref().map(toyos::job::Job::account) {
+            Some(Ok(account)) => format!("{} KiB, to hold {} KiB in all", account.wanted.saturating_sub(account.committed + account.kernel) >> 10, account.wanted >> 10),
+            Some(Err(e)) => format!("what its account would not say: {e:?}"),
+            None => String::from("memory before it had a job"),
+        }
     }
 
     /// The name its lines and the supervisor's say it under: a file server's role
@@ -977,7 +1125,7 @@ impl<'a> Supervisor<'a> {
         if !homes_made {
             self.make_session_home();
             for early in self.services.iter().map(|s| s.program).filter(|p| declares(p)).collect::<Vec<_>>() {
-                self.make_home(early);
+                self.make_state_dir(early);
             }
         }
         self.load_grants();
@@ -993,12 +1141,13 @@ impl<'a> Supervisor<'a> {
             self.make_session_home();
             *homes_made = true;
             for early in self.services.iter().map(|s| s.program).filter(|p| declares(p)).collect::<Vec<_>>() {
-                self.make_home(early);
+                self.make_state_dir(early);
             }
         }
         if !declares(program) {
-            self.make_home(program);
+            self.make_state_dir(program);
         }
+        self.desktop_for(at);
         let block = self.block_args();
         let service = &mut self.services[at];
         // SYSTEM was started before the manifest was read.
@@ -1021,6 +1170,7 @@ impl<'a> Supervisor<'a> {
             Ok(_) => {}
             Err(StartError::Refused(why)) => {
                 service.ports.borrow_mut().clear();
+                service.job = None;
                 say!("supervisor: {} did not start ({why}); its ports are closed this boot", service.label());
             }
             Err(e) => panic!("supervisor: cannot start {}: {e}", program.name),
@@ -1061,10 +1211,10 @@ impl<'a> Supervisor<'a> {
             say!("supervisor: PCI {} (arrival {}) left the device set", pci_at(gone.at), gone.arrival.0);
         }
         self.listed = records;
-        for act in self.drives.decide(&rows, &self.listed, Instant::now()) {
+        for act in self.drives.decide(&rows, &self.listed, boot_controller(), Instant::now()) {
             match act {
                 Act::Start { row, entry, function } => match self.start_instance(row, entry, function) {
-                    Ok((child, stop)) => self.instances.push(Instance { row, function, child, stop }),
+                    Ok((child, stop, job)) => self.instances.push(Instance { row, function, child, stop, _job: job }),
                     Err(why) => {
                         say!("supervisor: {} was not started on PCI {}: {why}", row.name, pci_at(function.at));
                         refused.push(format!("{entry} at PCI {}", pci_at(function.at)));
@@ -1084,8 +1234,9 @@ impl<'a> Supervisor<'a> {
     }
 
     /// What the block service is started with: each disk driver running, by
-    /// its badge, which it waits for, and every disk driver's function the
-    /// boot started none on.
+    /// its badge, which it waits for; every disk driver's function the boot
+    /// started none on; and every partition the loader named, which the
+    /// running system is on and no designation changes.
     fn block_args(&self) -> Vec<String> {
         let mut args = Vec::new();
         for instance in self.instances.iter().filter(|i| is_disk_driver(i.row)) {
@@ -1094,19 +1245,34 @@ impl<'a> Supervisor<'a> {
         for undriven in &self.undriven {
             args.extend(["--undriven".to_string(), undriven.clone()]);
         }
+        match inventory(self.syscap) {
+            Ok(records) => {
+                let named = records.iter().filter_map(|r| match r {
+                    Record::Loaded(l) => Some(l.unique_guid),
+                    _ => None,
+                });
+                for guid in named {
+                    args.extend(["--active".to_string(), guid_text(guid)]);
+                }
+            }
+            Err(why) => {
+                say!("supervisor: the inventory was not read ({why}), so the block service designates nothing");
+                args.push("--active-unknown".to_string());
+            }
+        }
         args
     }
 
     /// One `drives` process of `row`, holding `function`'s claim under
     /// `entry`'s spelling.
-    fn start_instance(&mut self, row: &'static Program, entry: PciMatch, function: Pci) -> Result<(Child, Option<Pipe>), String> {
+    fn start_instance(&mut self, row: &'static Program, entry: PciMatch, function: Pci) -> Result<(Child, Option<Waker>, toyos::job::Job), String> {
         if self.services.len() + self.instances.len() >= MAX_CHILDREN {
             return Err(format!("the supervisor watches {MAX_CHILDREN} processes already"));
         }
         let name = entry.to_string();
         let claim = self.syscap.claim_function::<toyos::Device>(function.arrival).map_err(|e| refused(&name, e))?;
         let claim = translated(claim, &function).map_err(|why| missing(&name, &why))?;
-        self.make_home(row);
+        self.make_state_dir(row);
         let mut extra = Extra { claims: vec![(format!("{DEV_PREFIX}{name}"), claim)], ..Extra::default() };
         // A disk driver is who this start says it is: its `disk` connector
         // carries the function's arrival, which the block service keys it by.
@@ -1114,16 +1280,18 @@ impl<'a> Supervisor<'a> {
         let mut stop = None;
         if is_disk_driver(row) {
             extra.ports.push((toyos_blockring::disk::PORT.to_string(), self.grants.disk(function.arrival)?));
-            let (read, write) = toyos::pipe_pair().map_err(|e| format!("no pipe for its stop: {e:?}"))?;
-            extra.stop = Some(read);
-            stop = Some(write);
+            let (waker, bell) = wake::pair().map_err(|e| format!("no event for its stop: {e:?}"))?;
+            extra.stop = Some(bell);
+            stop = Some(waker);
         }
-        let launcher = (&self.minted, self.sessions.machine());
+        let launcher = Minting::machine(&self.minted, row, self.sessions.machine());
         let served = Served::Keep { acceptors: &[], owed: &[] };
-        let output = Output::Boot(&mut self.log);
         let path = row.source.path().ok_or_else(|| format!("{} runs {}, and a `drives` row runs a file", row.name, row.source))?;
+        let job = job_for(self.syscap, row).map_err(|e| e.to_string())?;
+        let endowed = job.duplicate().map_err(|e| format!("its job would not duplicate: {e:?}"))?;
+        let output = Output::Boot { log: &mut self.log, job: endowed };
         start(Command::new(path), row, self.system, self.syscap, served, &self.connectors, &self.grants, &[], extra, launcher, output)
-            .map(|(child, _)| (child, stop))
+            .map(|(child, _)| (child, stop, job))
             .map_err(|e| e.to_string())
     }
 
@@ -1227,18 +1395,15 @@ impl<'a> Supervisor<'a> {
         }
     }
 
-    /// A service's own `HOME`, made before it first runs; the `acpi` claim's
-    /// holder's once storage is up, after it ([`Supervisor::boot`]).
-    fn make_home(&mut self, program: &Program) {
-        if !program.service || is_storage(program) {
-            return;
-        }
-        let home = program.home();
-        let asked = home.clone();
-        match self.files("a service's home", move || make_dir(&asked)) {
+    /// A row's own directory of machine state, a service's `HOME` among them,
+    /// made before it first runs.
+    fn make_state_dir(&mut self, program: &Program) {
+        let Some(dir) = program.state_dir().filter(|_| !is_storage(program)) else { return };
+        let asked = dir.clone();
+        match self.files("a row's state directory", move || make_dir(&asked)) {
             Ok(Ok(())) => {}
-            Ok(Err(e)) => say!("supervisor: {}: {home} could not be made: {e}", program.name),
-            Err(why) => say!("supervisor: {}: {home} was not made: {why}", program.name),
+            Ok(Err(e)) => say!("supervisor: {}: {dir} could not be made: {e}", program.name),
+            Err(why) => say!("supervisor: {}: {dir} was not made: {why}", program.name),
         }
     }
 
@@ -1322,14 +1487,17 @@ impl<'a> Supervisor<'a> {
     /// call a server's end left waiting in the port's queue goes on to the
     /// process started in its place.
     /// `Err` is the call still unanswered at [`FILES_BOUND`], which the worker
-    /// goes on waiting for alone, or the worker still waiting on an earlier
-    /// one.
+    /// goes on waiting for alone, the worker still waiting on an earlier
+    /// one, or a storage service waiting for memory to start again: no call
+    /// may be answered until it has, and the loop answers the controls
+    /// meanwhile.
     fn files<T: Send + 'static>(&mut self, what: &str, work: impl FnOnce() -> T + Send + 'static) -> Result<T, String> {
         const DONE: u64 = 0;
         self.worker.settle();
         if self.worker.owed > 0 {
             return Err(format!("the supervisor's file worker still waits on {}", self.worker.owed_what));
         }
+        self.storage_fed()?;
         let (answer, answered) = std::sync::mpsc::channel();
         let job: Job = Box::new(move || {
             // The receiver is gone once the bound has passed.
@@ -1354,6 +1522,7 @@ impl<'a> Supervisor<'a> {
             if self.worker.owed == 0 {
                 return Ok(answered.recv().expect("supervisor: a finished file job answered"));
             }
+            self.storage_fed()?;
             if Instant::now() >= deadline {
                 return Err(format!("{what} was not answered in {} s", FILES_BOUND.as_secs()));
             }
@@ -1374,6 +1543,7 @@ impl<'a> Supervisor<'a> {
     /// service it has just killed to finish ending, which is the kernel's
     /// teardown and no client's.
     fn serve_forever(&mut self, swap: &Acceptor, power: &Acceptor) -> ! {
+        self.say_floors();
         let poller = Poller::new(Poller::MAX_HANDLES);
         let mut pending: Vec<Pending> = Vec::new();
         let mut flight: Option<Flight> = None;
@@ -1382,10 +1552,24 @@ impl<'a> Supervisor<'a> {
         loop {
             poller.watch(&self.minted.launcher, READABLE, TOKEN_ACCEPTOR);
             poller.watch(&self.minted.grants, READABLE, TOKEN_GRANTS_ACCEPTOR);
+            poller.watch(&self.minted.login, READABLE, TOKEN_LOGIN_ACCEPTOR);
+            poller.watch(&self.minted.admin, READABLE, TOKEN_ADMIN_ACCEPTOR);
+            poller.watch(&self.watch.ended, READABLE, TOKEN_APPS);
+            for login in &self.logins.open {
+                poller.watch(&login.link.handle(), READABLE, TOKEN_LINKS);
+            }
             poller.watch(swap, READABLE, TOKEN_SWAP_ACCEPTOR);
             poller.watch(power, READABLE, TOKEN_POWER_ACCEPTOR);
             poller.watch(&self.devices, READABLE, TOKEN_DEVICES);
+            for watcher in &self.watchers {
+                let writable = if watcher.owes() { WRITABLE } else { 0 };
+                poller.watch(&watcher.conn, READABLE | writable, TOKEN_POWER_WATCHERS);
+            }
             self.watch_children(&poller);
+            for service in self.services.iter().filter(|service| service.starved.is_some()) {
+                let job = service.job.as_ref().expect("supervisor: a service waiting for memory has its job");
+                poller.watch(job, READABLE, TOKEN_MEMORY);
+            }
             if let Some(Flight { phase: Phase::Answered { conn, .. }, .. }) = &flight {
                 poller.watch(conn, READABLE, TOKEN_HANGUP);
             }
@@ -1394,7 +1578,7 @@ impl<'a> Supervisor<'a> {
                 poller.watch(&asked.consent, READABLE, TOKEN_CONSENT);
             }
             for p in &pending {
-                poller.watch(&p.conn, READABLE, TOKEN_PENDING_BASE + p.conn.as_handle().0 as u64);
+                poller.watch(&p.conn, READABLE, TOKEN_PENDING_BASE + p.conn.as_handle().raw().0 as u64);
             }
             // A client that connects and then says nothing wakes nothing, so
             // the deadline that removes it has to be a wake in its own right —
@@ -1418,6 +1602,7 @@ impl<'a> Supervisor<'a> {
                 .map_or(u64::MAX, |left| left.as_nanos() as u64);
             ready.clear();
             poller.wait(1, timeout, |token| ready.push(token));
+            let open = self.logins.open.len();
 
             // Accept and the request are two events. Nothing is read here.
             for (token, acceptor, port) in [
@@ -1427,6 +1612,8 @@ impl<'a> Supervisor<'a> {
                     (|s, c| s.caller(&s.minted.launcher, c).map(Port::Launcher)) as fn(&Self, &Connection) -> _,
                 ),
                 (TOKEN_GRANTS_ACCEPTOR, &self.minted.grants, |s, c| s.caller(&s.minted.grants, c).map(Port::Grants)),
+                (TOKEN_LOGIN_ACCEPTOR, &self.minted.login, |s, c| s.opener(c).map(Port::Login)),
+                (TOKEN_ADMIN_ACCEPTOR, &self.minted.admin, |s, c| s.caller(&s.minted.admin, c).map(Port::Admin)),
                 (TOKEN_SWAP_ACCEPTOR, swap, |_, _| Ok(Port::Swap)),
                 (TOKEN_POWER_ACCEPTOR, power, |_, _| Ok(Port::Power)),
             ] {
@@ -1441,14 +1628,14 @@ impl<'a> Supervisor<'a> {
                     say!(
                         "supervisor: launcher: refusing client {} — {MAX_PENDING_LAUNCHES} connections \
                          are already waiting to say what they want",
-                        conn.as_handle().0
+                        conn.as_handle().raw().0
                     );
                     continue;
                 }
                 let port = match port(self, &conn) {
                     Ok(port) => port,
                     Err(why) => {
-                        say!("supervisor: launcher: dropping client {} — {why}", conn.as_handle().0);
+                        say!("supervisor: launcher: dropping client {} — {why}", conn.as_handle().raw().0);
                         continue;
                     }
                 };
@@ -1459,7 +1646,7 @@ impl<'a> Supervisor<'a> {
             // down, so leaving `i` alone visits each connection exactly once.
             let mut i = 0;
             while i < pending.len() {
-                let handle = pending[i].conn.as_handle();
+                let handle = pending[i].conn.as_handle().raw();
                 if !ready.contains(&(TOKEN_PENDING_BASE + handle.0 as u64)) {
                     i += 1;
                     continue;
@@ -1493,7 +1680,12 @@ impl<'a> Supervisor<'a> {
                                 self.serve_launch(p.conn, &caller, msg_type, &payload, carried, &mut parked)
                             }
                             Port::Grants(caller) => self.serve_grants(&p.conn, &caller, msg_type, p.rx.payload(payload_len)),
-                            Port::Power => self.stop(&p.conn, msg_type),
+                            Port::Login(opener) => self.serve_login(&p.conn, opener, msg_type),
+                            Port::Admin(caller) => self.serve_admin(&p.conn, &caller, msg_type, p.rx.payload(payload_len)),
+                            Port::Power => {
+                                let payload = p.rx.payload(payload_len).to_vec();
+                                self.serve_power(p.conn, msg_type, &payload)
+                            }
                             Port::Swap => {
                                 let payload = p.rx.payload(payload_len).to_vec();
                                 if let Some(accepted) =
@@ -1514,7 +1706,7 @@ impl<'a> Supervisor<'a> {
             for p in pending.iter().filter(|p| now.duration_since(p.since) >= HANDSHAKE_TIMEOUT) {
                 say!(
                     "supervisor: launcher: dropping client {} — it never finished its launch",
-                    p.conn.as_handle().0
+                    p.conn.as_handle().raw().0
                 );
             }
             pending.retain(|p| now.duration_since(p.since) < HANDSHAKE_TIMEOUT);
@@ -1523,13 +1715,36 @@ impl<'a> Supervisor<'a> {
             let (caller_ready, consent_ready) = (ready.contains(&TOKEN_PARKED_CALLER), ready.contains(&TOKEN_CONSENT));
             parked = parked.and_then(|asked| self.advance_parked(asked, caller_ready, consent_ready));
 
+            if ready.contains(&TOKEN_LINKS) {
+                self.pump_links(&mut pending);
+            }
+            if ready.contains(&TOKEN_APPS) {
+                self.apps_ended();
+            }
+            if ready.contains(&TOKEN_MEMORY) {
+                self.memory_returned();
+            }
             if ready.contains(&TOKEN_ENDED) {
                 self.ended();
+            }
+            if ready.contains(&TOKEN_POWER_WATCHERS) {
+                self.pump_watchers();
+            }
+            if ready.contains(&TOKEN_LINKS) || self.logins.open.len() != open {
+                self.sessions_changed();
             }
             if ready.contains(&TOKEN_DEVICES) || self.settle.is_some_and(|at| at <= Instant::now()) {
                 self.drive();
             }
         }
+    }
+
+    /// The `login` row the badge of a connection on [`Minted::login`] names.
+    fn opener(&self, conn: &Connection) -> Result<&'static Program, String> {
+        let mut badge = [0u8; MAX_BADGE];
+        let badge = self.minted.login.badge(conn, &mut badge).map_err(|e| format!("its connection has no badge ({e:?})"))?;
+        let row = std::str::from_utf8(badge).map_err(|_| format!("its badge is not one this supervisor writes: {badge:?}"))?;
+        self.system.program(row).filter(|p| p.login).ok_or_else(|| format!("its badge names `{row}`, which is no `login` row"))
     }
 
     /// The row and session the badge of a connection on `acceptor`, one of
@@ -1659,7 +1874,8 @@ impl<'a> Supervisor<'a> {
         // binary a failed swap starts again are each owed.
         let owed = self.services[index].devices.clone();
         let program = self.services[index].program;
-        self.make_home(program);
+        self.make_state_dir(program);
+        self.desktop_for(index);
         let block = self.block_args();
         let service = &mut self.services[index];
         swapped(
@@ -1750,31 +1966,6 @@ impl<'a> Supervisor<'a> {
         }
     }
 
-    /// A request on `power`: `logkeeper` flushed, then the kernel asked with the
-    /// machine's capability. Answers only a refusal: a stop that happens takes
-    /// the supervisor, and the requester, with it.
-    fn stop(&mut self, conn: &Connection, msg_type: u32) {
-        let Some(how) = Stop::from_message(msg_type) else {
-            say!("supervisor: power: dropping client {} — frame {msg_type} is no stop", conn.as_handle().0);
-            return;
-        };
-        say!("{STOPPING} ({how:?})");
-        self.log.flush();
-        self.sync_files();
-        let stopped = self.stop_drivers();
-        let refused = match how {
-            Stop::Reboot => self.syscap.reboot(),
-            Stop::Shutdown => self.syscap.shutdown(),
-        };
-        self.log.resume();
-        toyos::error!("supervisor: power: the kernel refused {how:?}: {refused:?}");
-        // Their functions are owed another driver, as after any end.
-        if stopped {
-            self.drive();
-        }
-        let _ = conn.try_send_bytes(power::MSG_REFUSED, &refused.to_u64().to_le_bytes());
-    }
-
     /// Tell every disk driver the machine stops, after the sync that wrote
     /// through it, and wait for each to end, within
     /// [`toyos_quiesce::DRIVERS_MS`]: usbd hands its devices back with a port
@@ -1786,7 +1977,7 @@ impl<'a> Supervisor<'a> {
         let until = Instant::now() + Duration::from_millis(toyos_quiesce::DRIVERS_MS);
         let mut waiting: Vec<Arrival> = Vec::new();
         for instance in &mut self.instances {
-            // The pipe's end closing is the word.
+            // The waker's closing is the word.
             if instance.stop.take().is_some() {
                 waiting.push(instance.function.arrival);
             }
@@ -1813,7 +2004,7 @@ impl<'a> Supervisor<'a> {
                 break;
             }
             for instance in self.instances.iter().filter(|i| waiting.contains(&i.function.arrival)) {
-                poller.watch_raw(toyos::RawHandle(instance.child.as_raw_handle()), READABLE, TOKEN_ENDED);
+                poller.watch(&instance.child, READABLE, TOKEN_ENDED);
             }
             poller.wait(1, left.as_nanos() as u64, |_| {});
         }
@@ -1872,8 +2063,8 @@ impl<'a> Supervisor<'a> {
     /// end, but a swapping service's: its swap watches that.
     fn watch_children(&self, poller: &Poller) {
         let services = self.services.iter().filter(|service| !service.swapping).filter_map(|service| service.child.as_ref());
-        for child in services.chain(self.instances.iter().map(|instance| &instance.child)) {
-            poller.watch_raw(toyos::RawHandle(child.as_raw_handle()), READABLE, TOKEN_ENDED);
+        for child in services.chain(self.instances.iter().map(|instance| &instance.child)).chain(self.owners()) {
+            poller.watch(&child, READABLE, TOKEN_ENDED);
         }
     }
 
@@ -1892,29 +2083,34 @@ impl<'a> Supervisor<'a> {
             let (label, pid) = (service.label(), service.pid().unwrap_or(0));
             service.child = None;
             match restart::after_end(service.program, exit, &mut service.budget, Instant::now()) {
-                AfterEnd::Close => service.ports.borrow_mut().clear(),
+                AfterEnd::Close => {
+                    service.ports.borrow_mut().clear();
+                    service.job = None;
+                }
                 AfterEnd::GiveUp => {
                     service.ports.borrow_mut().clear();
+                    service.job = None;
                     say!(
                         "supervisor: {label} ended {} times in {} s; its ports are closed, its clients answered Gone, and a program started from now on is given none of its directories",
                         restart::RESTARTS + 1,
                         restart::WINDOW.as_secs()
                     );
                 }
-                AfterEnd::Restart => {
-                    let (source, owed, program) = (service.source.clone(), service.devices.clone(), service.program);
-                    self.make_home(program);
-                    let block = self.block_args();
-                    let service = &mut self.services[index];
-                    let (system, syscap, connectors, grants) = (self.system, self.syscap, &self.connectors, &self.grants);
-                    match service.spawn(&source, &owed, block, system, syscap, connectors, grants, &self.minted, self.boot, &mut self.log) {
-                        Ok(new) => say!("supervisor: {label} (pid {pid}) ended; started again as pid {new}"),
-                        Err(e) => {
-                            service.ports.borrow_mut().clear();
-                            say!("supervisor: {label} ended and would not start again ({e}); its ports are closed");
-                        }
+                AfterEnd::Restart => match self.start_again(index) {
+                    Ok(new) => say!("supervisor: {label} (pid {pid}) ended; started again as pid {new}"),
+                    Err((e, true)) => {
+                        let wanted = self.services[index].wanted();
+                        self.services[index].starved = Some(Instant::now());
+                        say!(
+                            "supervisor: {label} (pid {pid}) ended and could not start again for want of memory ({e}; it lacked {wanted}); \
+                             it starts again once memory comes back, and its clients wait on its ports meanwhile"
+                        );
                     }
-                }
+                    Err((e, false)) => {
+                        self.close_for_good(index);
+                        say!("supervisor: {label} ended and would not start again ({e}{}); its ports are closed", unrecorded(&e));
+                    }
+                },
             }
         }
         let mut at = 0;
@@ -1931,14 +2127,90 @@ impl<'a> Supervisor<'a> {
         if any {
             self.drive();
         }
+        self.sessions_ended();
         self.restarting = false;
+    }
+
+    /// What each floor job holds of its floor once the boot is done: the margin
+    /// a floor's size is judged by.
+    fn say_floors(&self) {
+        let own = toyos::job::own().and_then(|job| job.account());
+        let services = self.services.iter().filter_map(|s| Some((s.label(), s.job.as_ref()?.account().ok()?)));
+        for (name, account) in own.ok().map(|a| ("the supervisor".to_string(), a)).into_iter().chain(services) {
+            if account.floor > 0 {
+                say!("supervisor: {name} holds {} KiB of its {} KiB floor, at most {} KiB so far", (account.committed + account.kernel) >> 10, account.floor >> 10, account.peak >> 10);
+            }
+        }
+    }
+
+    /// Service `index` serves no more: its ports close, and its job goes, and
+    /// with it any floor its row was held.
+    fn close_for_good(&mut self, index: usize) {
+        let service = &mut self.services[index];
+        service.ports.borrow_mut().clear();
+        service.starved = None;
+        service.job = None;
+    }
+
+    /// `Err` naming a storage service that waits for memory to start again.
+    fn storage_fed(&self) -> Result<(), String> {
+        match self.services.iter().find(|s| s.starved.is_some() && is_storage(s.program)) {
+            Some(starved) => Err(format!("{} waits for memory to start again", starved.label())),
+            None => Ok(()),
+        }
+    }
+
+    /// Start service `index` again on the ports and devices it kept, from
+    /// what it last ran. A refusal says whether its job was refused memory
+    /// meanwhile, which is what a wait for memory to come back can answer.
+    fn start_again(&mut self, index: usize) -> Result<u32, (StartError, bool)> {
+        let before = self.services[index].refusals();
+        let started = self.start_from(index);
+        started.map_err(|e| (e, self.services[index].refusals() > before))
+    }
+
+    fn start_from(&mut self, index: usize) -> Result<u32, StartError> {
+        let service = &self.services[index];
+        let (source, owed, program) = (service.source.clone(), service.devices.clone(), service.program);
+        self.make_state_dir(program);
+        self.desktop_for(index);
+        let block = self.block_args();
+        let service = &mut self.services[index];
+        let (system, syscap, connectors, grants) = (self.system, self.syscap, &self.connectors, &self.grants);
+        service.spawn(&source, &owed, block, system, syscap, connectors, grants, &self.minted, self.boot, &mut self.log)
+    }
+
+    /// Memory came back that a service waiting to start again lacked: each
+    /// is tried again, and one still short waits for the next time, said
+    /// with what it lacks now.
+    fn memory_returned(&mut self) {
+        for index in 0..self.services.len() {
+            let Some(since) = self.services[index].starved else { continue };
+            let label = self.services[index].label();
+            let waited = since.elapsed().as_millis();
+            match self.start_again(index) {
+                Ok(pid) => {
+                    self.services[index].starved = None;
+                    say!("supervisor: {label} started again as pid {pid} once memory came back, {waited} ms after its start was refused");
+                }
+                Err((e, true)) => {
+                    let wanted = self.services[index].wanted();
+                    say!("supervisor: {label} is still short of memory after {waited} ms ({e}; it lacks {wanted}); it waits on");
+                }
+                Err((e, false)) => {
+                    self.close_for_good(index);
+                    say!("supervisor: {label} would not start again once memory came back ({e}{}); its ports are closed", unrecorded(&e));
+                }
+            }
+        }
     }
 
     /// Start the binary a failed swap replaced, or close the service's ports
     /// when that will not start either.
     fn restore(&mut self, index: usize, previous: &Source, owed: &[String]) {
         let program = self.services[index].program;
-        self.make_home(program);
+        self.make_state_dir(program);
+        self.desktop_for(index);
         let block = self.block_args();
         let service = &mut self.services[index];
         let name = service.program.name.clone();
@@ -1950,6 +2222,7 @@ impl<'a> Supervisor<'a> {
             Err(e) => {
                 service.swapping = false;
                 service.ports.borrow_mut().clear();
+                service.job = None;
                 swapped(
                     &name,
                     Word::Gone,
@@ -2066,15 +2339,11 @@ impl Supervisor<'_> {
         if msg_type != launch::MSG_LAUNCH {
             return;
         }
-        let (batch, received) = carried.into_raw();
-
-        // **Owned on the statement after they arrive, and before anything can
-        // refuse.** The send moved them into the supervisor's table, so every path out of
-        // here releases them — a launcher that leaked a handle per refused launch
-        // would exhaust the one table the machine cannot do without, and a client
-        // picks which refusal it takes.
-        let mut held = Moved(batch[..received].to_vec());
-
+        // Owned from the frame on, so every path out of here releases them: a
+        // launcher that leaked a handle per refused launch would exhaust the
+        // one table the machine cannot do without, and a client picks which
+        // refusal it takes.
+        let received = carried.len();
         let Some(request) = Request::decode(payload) else { return };
         // `extra_names` drops an empty or non-UTF-8 name, so its count is what
         // will actually be paired with a handle. A frame whose two counts
@@ -2089,28 +2358,20 @@ impl Supervisor<'_> {
             return;
         }
 
-        // Past every refusal that does not know which handle is which, so ownership
-        // can be split. Every part still releases on every path below.
-        let all = held.take();
-        let (fd_handles, rest) = all.split_at(request.fd_count());
-        let (extra_handles, rest) = rest.split_at(request.extra_count);
-        let (place_handle, job_handle) = rest.split_at(rest.len() - 1);
-        let fds = Moved(fd_handles.to_vec());
-        let place = Moved(place_handle.to_vec());
-        let job = Moved(job_handle.to_vec());
-        // Owned, so they close when the launch is done with: `SYS_NAMESPACE_BUILD`
-        // copies a connector into the namespace and leaves the caller's handle,
-        // and the supervisor's copy of a client's connector has no life beyond
-        // this launch.
-        let extras: Vec<(String, Connector)> = names
-            .into_iter()
-            .zip(extra_handles.iter().copied())
-            // SAFETY: the kernel moved these into the supervisor's table with the frame, and
-            // nothing else answers for them. **Not a claim about the type** — a
-            // client sends what it likes, and everything below treats a wrong one
-            // as a refused launch rather than as the supervisor's own bug.
-            .map(|(name, handle)| (name.to_string(), unsafe { Connector::from_raw(handle) }))
-            .collect();
+        // Past every refusal that does not know which handle is which: the
+        // descriptors, the extras, the place if it names one, and the job.
+        let mut carried = carried;
+        let fds: Vec<toyos::OwnedHandle> = carried.by_ref().take(request.fd_count()).collect();
+        // `SYS_NAMESPACE_BUILD` copies a connector into the namespace and
+        // leaves the caller's handle, and the supervisor's copy of a client's
+        // connector has no life beyond this launch. **Not a claim about the
+        // type** — a client sends what it likes, and everything below treats a
+        // wrong one as a refused launch rather than as the supervisor's own bug.
+        let extras: Vec<(String, Connector)> =
+            names.into_iter().zip(carried.by_ref()).map(|(name, handle)| (name.to_string(), Connector::from_handle(handle))).collect();
+        let mut rest: Vec<toyos::OwnedHandle> = carried.collect();
+        let job = toyos::job::Job::from_handle(rest.pop().expect("a launch's batch ends with its job"));
+        let place = rest.pop();
 
         // std joins a relative `current_dir` onto the supervisor's own cwd, so passing one
         // on would start the child in the supervisor's `/` — the default this field removes.
@@ -2121,11 +2382,19 @@ impl Supervisor<'_> {
         }
 
         // **A launch names its parent**: the place it carries, spawned under, or
-        // the supervisor. One that names neither is refused rather than given to the supervisor,
-        // which would let it outlive a caller that never asked it to.
+        // detached, under the supervisor. One that names neither is refused rather than
+        // detached, which would let it outlive a caller that never asked it to.
         let under = match request.parent() {
-            Some(Parent::Place(())) => Some(place.0[0]),
-            Some(Parent::Supervisor) => None,
+            Some(Parent::Place(())) => place.as_ref().map(toyos::AsHandle::as_handle),
+            // Under the session's owner, or in the machine's session the supervisor.
+            Some(Parent::Detached) => match self.logins.detached_place(caller.session) {
+                Ok(place) => place,
+                Err(why) => {
+                    say!("supervisor: launcher: refused a detached launch: {why}");
+                    let _ = conn.try_signal(launch::MSG_REFUSED);
+                    return;
+                }
+            },
             None => {
                 say!("supervisor: launcher: refused a launch that names no parent");
                 let _ = conn.try_signal(launch::MSG_REFUSED);
@@ -2153,14 +2422,50 @@ impl Supervisor<'_> {
             }
         }
         command.current_dir(request.cwd);
+        let placed = under.is_some();
         if let Some(place) = under {
-            command.under(place.0);
+            command.under(place.into());
         }
+        drop(place);
         for arg in request.argv.split(|&b| b == 0).skip(1).filter(|a| !a.is_empty()) {
             if let Ok(arg) = std::str::from_utf8(arg) {
                 command.arg(arg);
             }
         }
+
+        // A descriptor naming the caller's own log ring is replaced by the
+        // program's, which is made for the job it joins.
+        let fds: Option<Vec<(u32, LaunchFd)>> = request
+            .fds()
+            .zip(fds)
+            .map(|((fd, kind), handle)| {
+                let caller_ring = matches!(fd, 1 | 2)
+                    && kind == Some(toyos::fd::Kind::Handle)
+                    && toyos_abi::syscall::fstat(handle.as_handle().raw())
+                        .is_ok_and(|stat| stat.file_type == FileType::SharedMemory);
+                Some((fd, if caller_ring { LaunchFd::Ring } else { LaunchFd::Caller(handle, kind?) }))
+            })
+            .collect();
+        let Some(fds) = fds else {
+            say!("supervisor: launcher: refused a descriptor of a kind no launch carries");
+            let _ = conn.try_signal(launch::MSG_REFUSED);
+            return;
+        };
+        let ring = match fds.iter().any(|(_, given)| matches!(given, LaunchFd::Ring)) {
+            true => match ring_for(job.as_handle()) {
+                Ok(ring) => Some(ring),
+                Err(e) => {
+                    say!("supervisor: launcher: {} was not started: no ring for its log: {e}", request.program);
+                    let _ = conn.try_signal(launch::MSG_REFUSED);
+                    return;
+                }
+            },
+            false => None,
+        };
+
+        // Endowed before `prepare` reads the program, so its image is read for the
+        // job the child runs in, which keeps it as long as the child runs.
+        command.endow(JOB_LABEL, job.into());
 
         // On the worker, every file the launch reads: a path under `/apps` is
         // read off its package, and the program and its working directory may
@@ -2173,7 +2478,7 @@ impl Supervisor<'_> {
         let (row, session) = (caller.row, caller.session);
         let found = self.files("a launch's files", move || {
             resolve(system, &path, |target| -> Result<_, authority::Refusal> {
-                let starts = authority::may_start(row, session, target)?;
+                authority::may_start(row, session, target)?;
                 let (Target::Row(program) | Target::Package(program)) = target;
                 let prepared = match program.source.path() {
                     Some(path) => command.image_from(Path::new(path)).prepare().map(drop),
@@ -2185,7 +2490,7 @@ impl Supervisor<'_> {
                         .map(|bytes| toyos_swap::hex(&toyos_swap::digest(bytes)))
                         .ok_or_else(|| format!("{} was not read before its start, so no grant can name it", program.source))
                 });
-                Ok((starts, binary, prepared.map(|()| command)))
+                Ok((binary, prepared.map(|()| command)))
             })
         });
         let resolved = match found {
@@ -2199,28 +2504,25 @@ impl Supervisor<'_> {
         let (program, verdict) = match resolved {
             Resolved::Row(row, verdict) => (row.clone(), verdict),
             Resolved::Package(row, verdict) => (row, verdict),
+            // **`try_signal` and not `signal`.** A blocking write is the other
+            // half of the rule that made the read side an event loop: a client
+            // that never drains its end decides when the supervisor runs again.
             Resolved::NotDeclared => {
-                // **`try_send_bytes` and not `send`.** A blocking write is the
-                // other half of the rule that made the read side an event loop: a
-                // client that never drains its end decides when the supervisor runs again.
-                // The `HOME` is the session's: a program no row names is no service.
-                let home = toyos_manifest::session_home();
-                let _ = conn.try_send_bytes(launch::MSG_NOT_DECLARED, home.as_bytes());
+                say!("supervisor: launcher: no row declares {}", request.program);
+                let _ = conn.try_signal(launch::MSG_NOT_PERMITTED);
                 return;
             }
             Resolved::Refused(why) => {
                 say!("supervisor: launcher: {why}");
-                let _ = conn.try_signal(launch::MSG_REFUSED);
+                let _ = conn.try_signal(launch::MSG_NOT_PERMITTED);
                 return;
             }
         };
-        // **`MSG_REFUSED`, never `MSG_NOT_DECLARED`**: the latter is std's cue to
-        // spawn the program itself.
-        let (starts, binary, prepared) = match verdict {
+        let (binary, prepared) = match verdict {
             Ok(judged) => judged,
             Err(why) => {
                 say!("supervisor: launcher: {} in {} may not start {}: {why}", caller.row.name, caller.session, program.name);
-                let _ = conn.try_signal(launch::MSG_REFUSED);
+                let _ = conn.try_signal(launch::MSG_NOT_PERMITTED);
                 return;
             }
         };
@@ -2240,19 +2542,15 @@ impl Supervisor<'_> {
                 return;
             }
         };
-        let session = starts.session(&mut self.sessions);
-        let caller_fds: Vec<(u32, toyos::RawHandle)> =
-            request.fd_numbers().zip(fds.0.iter().copied()).collect();
+        let session = caller.session;
         let launch = Launch {
             conn,
             program,
             command,
             session,
             fds,
-            caller_fds,
-            _place: place,
-            placed: under.is_some(),
-            job,
+            ring,
+            placed,
             extras,
             cwd: request.cwd.to_string(),
         };
@@ -2355,8 +2653,7 @@ impl Supervisor<'_> {
     /// Start `launch`, holding `folder` and in it ([`grants::cwd`]) where it
     /// holds one, and answer its caller.
     fn start_launch(&mut self, launch: Launch, folder: Option<grants::Folder>) {
-        let Launch { conn, mut program, mut command, session, fds, caller_fds, _place, placed, mut job, extras, cwd } =
-            launch;
+        let Launch { conn, mut program, mut command, session, fds, ring, placed, extras, cwd } = launch;
         if let Some(folder) = folder {
             // The image `prepare` read is kept: only the working directory is
             // judged again.
@@ -2380,7 +2677,7 @@ impl Supervisor<'_> {
 
         // `inherit_handle` duplicates into the child, so the supervisor's own copies go with
         // `fds` when this returns.
-        self.make_home(program);
+        self.make_state_dir(program);
         if program.package().is_some() {
             if let Err(why) = self.make_app_home(program) {
                 say!("supervisor: launcher: {} was not started: {why}", program.name);
@@ -2389,6 +2686,17 @@ impl Supervisor<'_> {
             }
         }
         let storage = self.slot_storage(program);
+        let launches = match session {
+            Session::Login(..) => match self.logins.launcher_of(session) {
+                Some(launcher) => Some((launcher, session)),
+                None => {
+                    say!("supervisor: launcher: {} was not started: its session has ended", program.name);
+                    let _ = conn.try_signal(launch::MSG_REFUSED);
+                    return;
+                }
+            },
+            Session::Machine(_) => Minting::machine(&self.minted, program, session).launches,
+        };
         let started = start(
             command,
             program,
@@ -2399,14 +2707,14 @@ impl Supervisor<'_> {
             &self.grants,
             &extras,
             storage,
-            (&self.minted, session),
-            Output::Launch { log: &mut self.log, fds: &caller_fds, job: job.take()[0] },
+            Minting { minted: &self.minted, session, launches },
+            Output::Launch { log: &mut self.log, fds: &fds, ring },
         );
         drop(fds);
         match started {
             Ok((child, _)) => {
-                // SAFETY: `into_raw_handle` gave up the child's one handle in this table.
-                let handle = unsafe { toyos::OwnedHandle::from_raw(toyos::RawHandle(child.into_raw_handle())) };
+                self.started_in(session, &program.name, toyos::AsHandle::as_handle(&child));
+                let handle = toyos::OwnedHandle::from(std::os::toyos::io::OwnedHandle::from(child));
                 // Consumed either way, so the supervisor keeps no `Process` handle from a
                 // launch, or a client launching `/system/bin/true` in a loop exhausts the
                 // one table the machine cannot do without.
@@ -2437,15 +2745,12 @@ struct Launch {
     /// Prepared: its image read and hashed, its working directory judged.
     command: Command,
     session: Session,
-    /// The caller's stdio, owned until the spawn duplicates it.
-    fds: Moved,
-    caller_fds: Vec<(u32, toyos::RawHandle)>,
-    /// The place the child is spawned under, owned until then.
-    _place: Moved,
+    /// The descriptors its caller sent, copied into the program.
+    fds: Vec<(u32, LaunchFd)>,
+    /// The program's own log ring, where its caller sent its own.
+    ring: Option<SharedMemory>,
     /// Whether it names a place, or the supervisor.
     placed: bool,
-    /// The job its caller named, owned until the spawn moves it.
-    job: Moved,
     extras: Vec<(String, Connector)>,
     /// The caller's working directory, which a granted folder's launch keeps
     /// where it lies inside the folder.
@@ -2490,27 +2795,6 @@ fn said(reply: &consent::Reply) -> String {
     }
 }
 
-/// Handles a launch moved into the supervisor, released on every path out of it.
-///
-/// A `Drop` and not a close at each `return`: a client picks which way out of
-/// `serve_launch` it takes by what it sends.
-struct Moved(Vec<toyos::RawHandle>);
-
-impl Moved {
-    /// Give up the obligation, for a caller taking it on itself.
-    fn take(&mut self) -> Vec<toyos::RawHandle> {
-        std::mem::take(&mut self.0)
-    }
-}
-
-impl Drop for Moved {
-    fn drop(&mut self) {
-        for handle in &self.0 {
-            toyos_abi::syscall::close(*handle);
-        }
-    }
-}
-
 /// The `[programs]` row a launch's path names, following one symlink.
 ///
 /// `/system/bin/ls` is a symlink to `/system/bin/toybox`, and what an applet may hold is
@@ -2537,7 +2821,7 @@ enum Resolved<'a, V> {
     Row(&'a Program, V),
     /// An installed package, whose row is the image's `[apps]` list.
     Package(Program, V),
-    /// Nothing in the image declares it, and the caller spawns it itself.
+    /// Nothing in the image declares it.
     NotDeclared,
     /// A path under `/apps` whose package does not answer for it.
     Refused(String),
@@ -2553,11 +2837,8 @@ enum Resolved<'a, V> {
 /// classifies as one thing and opens as another, and `start` spawns the string
 /// the client sent, so the two need not even name one file.
 ///
-/// A path under `/apps` that no manifest answers for is refused rather than
-/// answered undeclared, because the caller's fallback for undeclared is a
-/// direct spawn carrying the caller's own namespace.
 fn resolve<'a, V>(system: &'a Manifest, path: &str, judge: impl FnOnce(Target<'_>) -> V) -> Resolved<'a, V> {
-    if !package::is_canonical(path) {
+    if !toyos::launch::is_canonical(path) {
         return Resolved::Refused(format!("{path:?} is not a canonical path"));
     }
     let Some(name) = package::package_of(path) else {
@@ -2596,7 +2877,7 @@ fn served_slots(
     boots: Connector,
     roots: Connector,
 ) -> Result<(toyos_update::slots::Table, [u8; 16], Vec<toyos_update::slots::Listed>), String> {
-    use diskserver::disk::Disk as _;
+    use toyos_blockdev::{BlockDev as _, BLOCK};
     let names = |connector: &Connector| {
         namespace::build()
             .add(toyos_blockring::PORT, connector)
@@ -2621,9 +2902,12 @@ fn served_slots(
     let session = diskserver::Session::open(names(&tables)?, toyos_blockring::PORT, table_part.unique)
         .map_err(|why| format!("the slot table would not open: {why:?}"))?;
     let table_unique = table_part.unique;
-    let mut disk = diskserver::disk::Served::new(session);
-    let (table, _) =
-        toyos_update::slots::read(|copies| disk.read(0, copies.as_flattened_mut())).map_err(|why| why.to_string())?;
+    let disk = diskserver::disk::Served::new(session);
+    let mut copies = [[0; BLOCK]; toyos_update::slots::COPIES as usize];
+    toyos_blockdev::block_on(disk.read(0, &mut copies), || disk.wait())
+        .map_err(|why| format!("the slot table would not read: {why:?}"))?;
+    let (table, _) = toyos_update::slots::current([&copies[0], &copies[1]])
+        .map_err(|why| format!("the slot table's partition holds {why}"))?;
     let mut listed = table_parts;
     listed.extend(list(&boots)?);
     listed.extend(root_parts);
@@ -2685,11 +2969,9 @@ fn translated(claim: toyos::Device, function: &Pci) -> Result<toyos::Device, Mis
     if !claims::is_virtio(function) {
         return Ok(claim);
     }
-    // SAFETY: the claim is this process's own, just minted, and moves in whole.
-    let dev = unsafe { <toyos::PciDev as toyos::endow::FromHandle>::from_handle(claim.into_raw()) };
+    let dev = toyos::PciDev::from_handle(claim.into());
     let offered = toyos_pci_claim::virtio::offers_access_platform(&dev);
-    // SAFETY: the same handle, moving back out whole.
-    let claim = unsafe { <toyos::Device as toyos::endow::FromHandle>::from_handle(dev.into_raw()) };
+    let claim = toyos::Device::from_handle(dev.into());
     match offered {
         Ok(true) => Ok(claim),
         Ok(false) => Err(Missing::Untranslated(None)),
@@ -2737,78 +3019,57 @@ fn start<'a>(
     grants: &Grants<'_>,
     extras: &[(String, Connector)],
     extra: Extra,
-    launcher: (&Minted, Session),
+    minting: Minting<'_>,
     output: Output<'_>,
 ) -> Result<(Child, Vec<String>), StartError> {
-    let Extra { args, claims, root, ports, stop } = extra;
+    let Extra { args, claims, root, ports, stop, endow } = extra;
     // A storage row's own arguments first: a file server's role leads its argv.
     command.args(&args);
     command.args(&program.args);
-    let booting = matches!(output, Output::Boot(_));
+    let booting = matches!(output, Output::Boot { .. });
 
     // **Set here, over whatever a launching caller carried**: the row decides
     // where a program's home is, and a service's is made before this
-    // (`Supervisor::make_home`), on the supervisor's file worker.
+    // (`Supervisor::make_state_dir`), on the supervisor's file worker.
     command.env("HOME", program.home());
 
-    // **Everything endowed stays owned until the spawn that moves it
-    // succeeds.** `endow` records a number; a refused spawn moves nothing
-    // (`build_child_handles` is all-or-nothing), so a handle whose owner had
-    // already been forgotten would be one the supervisor holds for ever and a device
-    // class nothing can mint again. A client picks whether a spawn fails — an
-    // unreachable `cwd` is enough — so this is its path as much as a bug's.
-    let mut held = Moved(Vec::new());
-    // **Every service the supervisor starts is a job of its own**, made with the
-    // system capability's `JOBS`; a launch's program joins the job its caller
-    // named, which is the caller's own unless it holds that right itself.
-    let job = match &output {
-        Output::Boot(_) => {
-            syscap.new_job().map_err(|e| std::io::Error::other(format!("no job for it: {e:?}")))?.into_raw()
-        }
-        Output::Launch { job, .. } => *job,
-    };
-    command.endow(JOB_LABEL, job.0);
-    held.0.push(job);
-    // Acceptors are given *back* rather than closed: a `serves` port whose
-    // acceptor is gone can never be served again.
-    let mut taken: Vec<(&'a str, Acceptor)> = Vec::new();
-
+    // Everything endowed is the command's: a refused spawn closes it, so an
+    // acceptor the supervisor must keep for a later start is endowed as a copy.
     for (label, claim) in claims {
-        let raw = claim.into_raw();
-        command.endow(&label, raw.0);
-        held.0.push(raw);
+        command.endow(&label, claim.into());
     }
     if let Some(stop) = stop {
-        let raw = stop.into_raw();
-        command.endow(toyos_quiesce::DRIVER_STOP, raw.0);
-        held.0.push(raw);
+        command.endow(toyos_quiesce::DRIVER_STOP, stop.into());
     }
     if let Some(root) = root {
-        command.endow(ROOT_IMAGE_LABEL, root.0);
-        held.0.push(root);
+        command.endow(ROOT_IMAGE_LABEL, root.into());
     }
-    let mut view = grants.view(program, launcher.1);
+    for (label, handle) in endow {
+        command.endow(label, handle.into());
+    }
+    let mut view = grants.view(program, minting.session);
     view.extend(ports);
-    view.extend(grants.netstack(program, launcher.1));
+    view.extend(grants.authorizations(program).map_err(StartError::Refused)?);
+    view.extend(grants.netstack(program, minting.session));
     if let Some(ns) = build_namespace(program, system, connectors, view, extras)? {
-        let raw = ns.into_raw();
-        command.endow(SVC_LABEL, raw.0);
-        held.0.push(raw);
+        command.endow(SVC_LABEL, ns.into());
     }
     if let Some(ns) = swap_namespace(program, connectors) {
-        let raw = ns.into_raw();
-        command.endow(toyos_swap::LABEL, raw.0);
-        held.0.push(raw);
+        command.endow(toyos_swap::LABEL, ns.into());
     }
-    if let Some(ns) = launcher_namespace(program, launcher) {
-        let raw = ns.into_raw();
-        command.endow(LAUNCHER, raw.0);
-        held.0.push(raw);
+    if let Some(ns) = minting.launches.and_then(|launches| launcher_namespace(program, launches)) {
+        command.endow(LAUNCHER, ns.into());
     }
-    if let Some(ns) = grants_namespace(program, launcher) {
-        let raw = ns.into_raw();
-        command.endow(grants::PORT, raw.0);
-        held.0.push(raw);
+    let minted = minting.minted;
+    let badged = [
+        (grants::PORT, program.receives.iter().any(|name| name == grants::PORT), &minted.grants),
+        (toyos_session::ADMIN_PORT, program.receives.iter().any(|name| name == toyos_session::ADMIN_PORT), &minted.admin),
+    ];
+    for (name, _, acceptor) in badged.into_iter().filter(|(_, receives, _)| *receives) {
+        command.endow(name, badged_namespace(program, name, acceptor, minting.session).into());
+    }
+    if program.login {
+        command.endow(toyos_session::LOGIN_PORT, login_namespace(program, &minted.login).into());
     }
 
     // The namespace answers with connections, so a child holding `surface`
@@ -2822,51 +3083,43 @@ fn start<'a>(
         let Ok(handed) = connector.duplicate() else {
             return Err(std::io::Error::other("a provided connector cannot be duplicated").into());
         };
-        let raw = handed.into_raw();
-        command.endow(&format!("{PROVIDE_PREFIX}{name}"), raw.0);
-        held.0.push(raw);
+        command.endow(&format!("{PROVIDE_PREFIX}{name}"), handed.into());
     }
 
-    let mut given_back = None;
+    // A `serves` port whose acceptor is gone can never be served again, so
+    // the child is endowed copies, and a launch's leave the map only once it
+    // runs.
     let owed: &[String] = match &served {
         Served::Keep { owed, .. } => owed,
         Served::Move(_) => &[],
     };
-    match served {
+    let moved = match served {
         Served::Move(acceptors) => {
             for name in &program.serves {
-                // `remove_entry` and not `remove`: the key is the map's own
-                // `&'a str`, which is what lets a package's synthesized row
-                // start through here.
-                let (key, acceptor) = acceptors.remove_entry(name.as_str()).unwrap_or_else(|| {
-                    // An acceptor is endowed by move, so a `serves` program
-                    // started this way is started exactly once per boot. A
-                    // second start with no acceptor left is refused by name
-                    // rather than spawned with a hole where its own service
-                    // should be.
+                // A `serves` program started this way is started exactly once
+                // per boot. A second start with no acceptor left is refused by
+                // name rather than spawned with a hole where its own service
+                // should be.
+                let acceptor = acceptors.get(name.as_str()).unwrap_or_else(|| {
                     panic!("supervisor: `{}` has already been given the `{name}` acceptor", program.name)
                 });
-                command.endow(&format!("{SERVE_PREFIX}{name}"), acceptor.as_handle().0);
-                taken.push((key, acceptor));
+                endow_served(&mut command, name, acceptor)?;
             }
-            given_back = Some(acceptors);
+            Some(acceptors)
         }
-        Served::Keep { acceptors: kept, .. } => {
+        Served::Keep { acceptors, .. } => {
             // Every acceptor the service keeps: its row's `serves`, or the
             // directories of a file server's role. None left is a service
             // whose ports closed for good.
-            if kept.is_empty() && (!program.serves.is_empty() || !program.roles.is_empty()) {
+            if acceptors.is_empty() && (!program.serves.is_empty() || !program.roles.is_empty()) {
                 return Err(std::io::Error::other("its ports are closed for good").into());
             }
-            for (name, acceptor) in kept {
-                let handed = toyos_abi::syscall::dup(acceptor.as_handle()).map_err(|e| {
-                    std::io::Error::other(format!("the `{name}` acceptor did not duplicate: {e:?}"))
-                })?;
-                command.endow(&format!("{SERVE_PREFIX}{name}"), handed.0);
-                held.0.push(handed);
+            for (name, acceptor) in acceptors {
+                endow_served(&mut command, name, acceptor)?;
             }
+            None
         }
-    }
+    };
 
     let mut endowed: Vec<String> = Vec::new();
     // Read at the first PCI matcher, and once.
@@ -2882,7 +3135,7 @@ fn start<'a>(
                     Some(records) => records,
                     None => functions.insert(pci_records(syscap).map_err(StartError::Refused)?),
                 };
-                let found = claims::function(&matcher, records);
+                let found = claims::function(&matcher, records, boot_controller());
                 let function = found.as_ref().ok().and_then(|at| records.iter().find(|pci| pci.arrival == *at)).copied();
                 (found.map(DeviceRequest::Function).map_err(Missing::Unresolved), function)
             }
@@ -2897,15 +3150,13 @@ fn start<'a>(
         // claimant looks the claim up by: one string, written once.
         let why = match minted {
             Ok(claim) => {
-                let raw = claim.into_raw();
-                command.endow(&format!("{DEV_PREFIX}{name}"), raw.0);
-                held.0.push(raw);
+                command.endow(&format!("{DEV_PREFIX}{name}"), claim.into());
                 endowed.push(name.clone());
                 continue;
             }
             Err(why) => why,
         };
-        // Nothing was spawned, so everything minted goes back with `held`.
+        // Nothing was spawned, so everything minted closes with the command.
         if !claims::goes_on_without(name, &why, owed) {
             let held_before = if owed.contains(name) { ", and the process it replaces held it" } else { "" };
             return Err(StartError::Refused(format!("{}{held_before}", missing(name, &why))));
@@ -2917,6 +3168,12 @@ fn start<'a>(
         say!("supervisor: {}: {}", program.name, missing(name, &why));
     }
 
+    // The signed image's row alone starts a pager: the right stays here, and
+    // the child holds only what it was started as.
+    if program.pager {
+        command.pager(syscap.as_handle().into());
+    }
+
     if !program.syscap.is_empty() {
         // A duplicate carrying exactly what the manifest asked for and nothing
         // else. Rights only shrink, so soundserver's `rt` cap can never mint a claim
@@ -2926,112 +3183,122 @@ fn start<'a>(
         let narrowed = syscap
             .narrowed(rights)
             .expect("supervisor: the system capability refused a narrowed duplicate");
-        let raw = narrowed.into_raw();
-        command.endow(SYSCAP_LABEL, raw.0);
-        held.0.push(raw);
+        command.endow(SYSCAP_LABEL, narrowed.into());
     }
 
-    // Where the program's output goes. Last before the spawn, so nothing above
-    // can refuse with a ring or `logkeeper`'s acceptor in flight.
+    // Where the program's output goes.
     //
     // A service the supervisor starts gets a ring of its own as its stdout and stderr
     // and the supervisor's console to read as its stdin; `logkeeper` also gets the acceptor
     // the rings reach it on and the one console handle that may write. A
     // launch keeps the descriptors its caller sent, but for a ring among them
-    // — the caller's own log — which is replaced by the program's, and a stdio
-    // descriptor it sent nothing for is a null, never this process's own.
-    let mut ring: Option<SharedMemory> = None;
-    let mut origins: Option<Acceptor> = None;
-    let log: &mut Log = match output {
-        Output::Boot(log) => {
-            let own = ring.insert(new_ring()).as_handle();
-            command.inherit_handle(0, log.stdin.0);
-            command.inherit_handle(1, own.0);
-            command.inherit_handle(2, own.0);
+    // — the caller's own log — which is replaced by the program's
+    // ([`LaunchFd::Ring`]), and a stdio descriptor it sent nothing for is a
+    // null, never this process's own.
+    let mut starts_logkeeper = false;
+    let (log, ring) = match output {
+        Output::Boot { log, job } => {
+            // **Every service the supervisor starts is a job of its own**,
+            // which its caller made ([`job_for`]).
+            let ring = ring_for(job.as_handle())?;
+            command.endow(JOB_LABEL, job.into());
+            command.inherit_handle(0, log.stdin.as_handle().into());
+            command.inherit_handle(1, ring.as_handle().into());
+            command.inherit_handle(2, ring.as_handle().into());
             if program.name == LOGKEEPER {
-                let Some(acceptor) = log.acceptor.take() else {
+                let Some(acceptor) = &log.acceptor else {
                     panic!("supervisor: `{LOGKEEPER}` is started twice, and the log's origins are the first's");
                 };
-                command.endow(ORIGINS, acceptor.as_handle().0);
-                origins = Some(acceptor);
-                let console = toyos::fd::with(0, |o| toyos_abi::syscall::dup(o.handle))
+                let origins = acceptor
+                    .as_handle()
+                    .try_clone_to_owned()
+                    .map_err(|e| std::io::Error::other(format!("the log's origins did not duplicate: {e:?}")))?;
+                command.endow(ORIGINS, origins.into());
+                let console = toyos::fd::with(0, |o| o.handle().map(|console| console.try_clone_to_owned()))
+                    .ok()
+                    .flatten()
                     .expect("supervisor: its console is descriptor 0")
                     .expect("supervisor: its console would not duplicate for logkeeper");
-                command.endow(CONSOLE, console.0);
-                held.0.push(console);
+                command.endow(CONSOLE, console.into());
+                starts_logkeeper = true;
             }
-            log
+            (log, Some(ring))
         }
-        Output::Launch { log, fds, .. } => {
+        Output::Launch { log, fds, ring } => {
             command.stdin(Stdio::null()).stdout(Stdio::null()).stderr(Stdio::null());
-            for &(fd, handle) in fds {
-                let caller_ring = matches!(fd, 1 | 2)
-                    && toyos_abi::syscall::fstat(handle)
-                        .is_ok_and(|stat| stat.file_type == FileType::SharedMemory);
-                if caller_ring {
-                    let own = ring.get_or_insert_with(new_ring).as_handle();
-                    command.inherit_handle(fd, own.0);
-                } else {
-                    command.inherit_handle(fd, handle.0);
+            for (fd, given) in fds {
+                match given {
+                    LaunchFd::Ring => {
+                        let ring = ring.as_ref().expect("a launch naming its caller's ring has the program's");
+                        command.inherit_handle(*fd, ring.as_handle().into());
+                    }
+                    LaunchFd::Caller(handle, toyos::fd::Kind::Handle) => {
+                        command.inherit_handle(*fd, handle.as_handle().into());
+                    }
+                    LaunchFd::Caller(handle, toyos::fd::Kind::Exported) => {
+                        command.inherit_exported(*fd, handle.as_handle().into());
+                    }
                 }
             }
-            log
+            (log, ring)
         }
     };
-    // The ring's end is its writer's: a pipe whose one write end the program
+    // The ring's end is its writer's: an event whose one waker the program
     // holds under a label no child inherits.
     let mut alive = None;
     if ring.is_some() {
-        let (read, write) = toyos::pipe_pair()
-            .map_err(|e| std::io::Error::other(format!("no pipe for its log's end: {e:?}")))?;
-        let write = write.into_raw();
-        command.endow(ALIVE, write.0);
-        held.0.push(write);
-        alive = Some(read);
+        let (waker, bell) = wake::pair()
+            .map_err(|e| std::io::Error::other(format!("no event for its log's end: {e:?}")))?;
+        command.endow(ALIVE, waker.into());
+        alive = Some(bell);
     }
 
-    match command.spawn() {
-        Ok(child) => {
-            // The spawn moved every one of them into the child's table, so
-            // nothing here may close them.
-            held.take();
-            for (_, acceptor) in taken {
-                let _ = acceptor.into_raw();
-            }
-            if let Some(acceptor) = origins {
-                let _ = acceptor.into_raw();
-            }
-            if let (Some(ring), Some(alive)) = (ring, alive) {
-                log.register(&program.name, child.id(), ring, alive);
-            }
-            // A launch is answered to its caller and recorded in the kernel's
-            // `spawn:`; a line of the supervisor's for each would be a line on the
-            // console beside every command typed at it.
-            if booting {
-                say!("supervisor: started {}", program.name);
-            }
-            Ok((child, endowed))
-        }
-        Err(e) => {
-            if let Some(acceptors) = given_back {
-                for (name, acceptor) in taken {
-                    acceptors.insert(name, acceptor);
-                }
-            }
-            if let Some(acceptor) = origins {
-                log.acceptor = Some(acceptor);
-            }
-            Err(e.into())
+    let child = command.spawn()?;
+    if let Some(acceptors) = moved {
+        for name in &program.serves {
+            acceptors.remove(name.as_str());
         }
     }
+    if starts_logkeeper {
+        log.acceptor = None;
+    }
+    if let (Some(ring), Some(alive)) = (ring, alive) {
+        log.register(&program.name, child.id(), ring, alive);
+    }
+    // A launch is answered to its caller and recorded in the kernel's
+    // `spawn:`; a line of the supervisor's for each would be a line on the
+    // console beside every command typed at it.
+    if booting {
+        say!("supervisor: started {}", program.name);
+    }
+    Ok((child, endowed))
 }
 
-/// Where a started program's output goes: a service's own ring, or a
-/// launch's caller's descriptors with any ring among them replaced — and, for
-/// a launch, the job its caller named, which `start` owns from its first line.
+/// Endow a copy of `acceptor`, the `name` port's, which the supervisor keeps
+/// until the start succeeds.
+fn endow_served(command: &mut Command, name: &str, acceptor: &Acceptor) -> Result<(), StartError> {
+    let handed = acceptor
+        .as_handle()
+        .try_clone_to_owned()
+        .map_err(|e| std::io::Error::other(format!("the `{name}` acceptor did not duplicate: {e:?}")))?;
+    command.endow(&format!("{SERVE_PREFIX}{name}"), handed.into());
+    Ok(())
+}
+
+/// Where a started program's output goes: a service's own ring, made for the
+/// job it joins, or a launch's caller's descriptors with any ring among them
+/// replaced by the program's.
 enum Output<'l> {
-    Boot(&'l mut Log),
-    Launch { log: &'l mut Log, fds: &'l [(u32, toyos::RawHandle)], job: toyos::RawHandle },
+    Boot { log: &'l mut Log, job: toyos::job::Job },
+    Launch { log: &'l mut Log, fds: &'l [(u32, LaunchFd)], ring: Option<SharedMemory> },
+}
+
+/// A launched program's descriptor.
+enum LaunchFd {
+    /// A handle its caller sent, a copy of which the program gets.
+    Caller(toyos::OwnedHandle, toyos::fd::Kind),
+    /// Its caller's own log ring, for which the program gets its own.
+    Ring,
 }
 
 /// The namespace this program's `receives` names, [`toyos_swap::PORT`] and
@@ -3052,7 +3319,7 @@ fn build_namespace(
     extras: &[(String, Connector)],
 ) -> std::io::Result<Option<Namespace>> {
     // Never the swap port nor the grants port: [`swap_namespace`] and
-    // [`grants_namespace`] say why. Never the block port's own connector,
+    // [`badged_namespace`] say why. Never the block port's own connector,
     // which reaches nothing: a holder of `block` holds one minted for what it
     // reaches, in `view`, and a disk driver one of `disk` minted for who it
     // is; nor netstack's, which nothing holds: a holder of `netstack` holds
@@ -3061,7 +3328,8 @@ fn build_namespace(
         .receives
         .iter()
         .filter(|name| {
-            ![toyos_swap::PORT, grants::PORT, toyos_blockring::PORT, toyos_blockring::disk::PORT, NETSTACK].contains(&name.as_str())
+            ![toyos_swap::PORT, grants::PORT, toyos_session::ADMIN_PORT, toyos_blockring::PORT, toyos_blockring::disk::PORT, NETSTACK]
+                .contains(&name.as_str())
         })
         .collect();
     if receives.is_empty() && extras.is_empty() && view.is_empty() {
@@ -3133,6 +3401,32 @@ impl Grants<'_> {
             .mint(&grant.encode())
             .map(Some)
             .map_err(|e| format!("no connector to the block service could be minted: {e:?}"))
+    }
+
+    /// What `program`'s row is authorized for on the machine's disks
+    /// (`toyos_manifest::authorize`), each a connector to the block service
+    /// minted with that one authorization's badge, under its name. The block
+    /// service resolves and judges each when it is used, so nothing here
+    /// waits for a disk.
+    fn authorizations(&self, program: &Program) -> Result<Vec<(String, Connector)>, String> {
+        use toyos_manifest::authorize::Authorization;
+        let mut minted = Vec::new();
+        for word in &program.authorize {
+            let authorization = Authorization::parse(word).unwrap_or_else(|| panic!("supervisor: `{word}` is no authorization the build admits"));
+            let badge = match authorization {
+                Authorization::Tables => toyos_blockring::wire::Badge::Tables,
+                Authorization::DesignateData => toyos_blockring::wire::Badge::DesignateData,
+            };
+            let Some(ports) = &self.block else { return Err(format!("`{word}` is authorized and no block service runs")) };
+            let ports = ports.borrow();
+            let Some((_, acceptor)) = ports.iter().find(|(name, _)| name == toyos_blockring::PORT) else {
+                return Err("the block service's port has closed for good".into());
+            };
+            let connector = acceptor.mint(&badge.encode()).map_err(|e| format!("no `{word}` connector could be minted: {e:?}"))?;
+            say!("supervisor: {} is authorized for `{word}`", program.name);
+            minted.push((authorization.name().to_string(), connector));
+        }
+        Ok(minted)
     }
 
     /// The block service's `disk` port minted for the disk driver of the
@@ -3239,43 +3533,43 @@ fn swap_namespace(program: &Program, connectors: &BTreeMap<&str, Connector>) -> 
     Some(ns)
 }
 
-/// A `launcher` minted with `program`'s row and the session it runs in, in a
-/// namespace of its own, for a row whose `starts` lists anything; endowed under
-/// [`LAUNCHER`] and never an entry of `svc`, for [`swap_namespace`]'s reason.
-fn launcher_namespace(program: &Program, (minted, session): (&Minted, Session)) -> Option<Namespace> {
+/// A `launcher` minted with `program`'s row and the session its launches run
+/// in, on that session's launcher port, in a namespace of its own, for a row
+/// whose `starts` lists anything; endowed under [`LAUNCHER`] and never an
+/// entry of `svc`, for [`swap_namespace`]'s reason.
+fn launcher_namespace(program: &Program, (launcher, session): (&Acceptor, Session)) -> Option<Namespace> {
     if program.starts.is_empty() {
         return None;
     }
-    let badge = Authority { row: program.name.clone(), session }.encode();
-    let connector = minted
-        .launcher
-        .mint(&badge)
-        .unwrap_or_else(|e| panic!("supervisor: no launcher for {}: {e:?}", program.name));
-    let ns = namespace::build()
-        .add(LAUNCHER, &connector)
-        .finish()
-        .unwrap_or_else(|e| panic!("supervisor: no launcher namespace for {}: {e:?}", program.name));
-    Some(ns)
+    Some(badged_namespace(program, LAUNCHER, launcher, session))
 }
 
-/// [`grants::PORT`] minted with `program`'s row and the session it runs in, in
-/// a namespace of its own, for the row whose `receives` names it; endowed under
-/// that name and never an entry of `svc`, for [`swap_namespace`]'s reason.
-/// The badge is who asks: the supervisor honours a login session's alone.
-fn grants_namespace(program: &Program, (minted, session): (&Minted, Session)) -> Option<Namespace> {
-    if !program.receives.iter().any(|name| name == grants::PORT) {
-        return None;
-    }
+/// `name`, minted on `acceptor` with `program`'s row and `session`, in a
+/// namespace of its own: endowed under that name and never an entry of `svc`,
+/// for [`swap_namespace`]'s reason. The badge is who asks: the supervisor
+/// honours a login session's alone on [`grants::PORT`] and
+/// [`toyos_session::ADMIN_PORT`].
+fn badged_namespace(program: &Program, name: &str, acceptor: &Acceptor, session: Session) -> Namespace {
     let badge = Authority { row: program.name.clone(), session }.encode();
-    let connector = minted
-        .grants
+    let connector = acceptor
         .mint(&badge)
-        .unwrap_or_else(|e| panic!("supervisor: no grants connector for {}: {e:?}", program.name));
-    let ns = namespace::build()
-        .add(grants::PORT, &connector)
+        .unwrap_or_else(|e| panic!("supervisor: no `{name}` connector for {}: {e:?}", program.name));
+    namespace::build()
+        .add(name, &connector)
         .finish()
-        .unwrap_or_else(|e| panic!("supervisor: no grants namespace for {}: {e:?}", program.name));
-    Some(ns)
+        .unwrap_or_else(|e| panic!("supervisor: no `{name}` namespace for {}: {e:?}", program.name))
+}
+
+/// [`toyos_session::LOGIN_PORT`] minted with a `login` row's key, the login
+/// authority whose sessions it opens.
+fn login_namespace(program: &Program, login: &Acceptor) -> Namespace {
+    let connector = login
+        .mint(program.name.as_bytes())
+        .unwrap_or_else(|e| panic!("supervisor: no `login` connector for {}: {e:?}", program.name));
+    namespace::build()
+        .add(toyos_session::LOGIN_PORT, &connector)
+        .finish()
+        .unwrap_or_else(|e| panic!("supervisor: no `login` namespace for {}: {e:?}", program.name))
 }
 
 /// One of the supervisor's words on a swap: its line in the log.
@@ -3291,11 +3585,21 @@ fn swapped(service: &str, word: Word, detail: &str) {
 struct Extra {
     args: Vec<String>,
     claims: Vec<(String, toyos::Device)>,
-    /// SYSTEM's ROOT image: a duplicate the start owns until the spawn moves it.
-    root: Option<toyos::RawHandle>,
+    /// SYSTEM's ROOT image, a duplicate.
+    root: Option<toyos::OwnedHandle>,
     ports: Vec<(String, Connector)>,
-    /// A disk driver's end of its [`toyos_quiesce::DRIVER_STOP`] pipe.
-    stop: Option<Pipe>,
+    /// The bell of a disk driver's [`toyos_quiesce::DRIVER_STOP`].
+    stop: Option<Bell>,
+    /// Handles endowed by label.
+    endow: Vec<(&'static str, toyos::OwnedHandle)>,
+}
+
+/// The controller a `@boot` entry names, read once at start
+/// ([`toyos_supervisor::boot`]).
+static BOOT_CONTROLLER: std::sync::OnceLock<Option<PciAddr>> = std::sync::OnceLock::new();
+
+fn boot_controller() -> Option<PciAddr> {
+    *BOOT_CONTROLLER.get().expect("supervisor: the boot sources are read before any start")
 }
 
 /// Every record the kernel's inventory answers.
@@ -3335,38 +3639,28 @@ fn guid_text(guid: [u8; 16]) -> String {
 
 /// A file server's arguments and the volume it is endowed for one start.
 ///
-/// A file server is told its role. SYSTEM is handed ROOT's image. For LOG and BOOT, the partition's GUID
-/// the loader named, with `block` minted for that partition alone, writing for
-/// the log and reading for the boot volume; DATA it finds by type, through
-/// `block` minted for every DATA partition. A log or boot role the loader
-/// named no partition for, and a block port closed for good, each refuse the
-/// start: the role is then absent, never served from memory.
+/// A file server is told its role. SYSTEM is handed ROOT's image; every other
+/// role `block` minted with its grant (`toyos_supervisor::storage`), and LOG
+/// and BOOT the GUID of the partition the loader named. A log or boot role the
+/// loader named no partition for, and a block port closed for good, each
+/// refuse the start: the role is then absent, never served from memory.
 fn storage_endowment(role: Option<&str>, syscap: &SysCap, grants: &Grants<'_>, boot: &Boot) -> Result<Extra, StartError> {
-    use toyos_abi::inventory::Role;
     let mut storage = Extra::default();
     let Some(role) = role else {
         return Ok(storage);
     };
     storage.args.push(role.to_string());
-    let served = match role {
-        toyos_manifest::SYSTEM => {
-            let root = toyos_abi::syscall::dup(boot.root.as_handle())
-                .map_err(|e| std::io::Error::other(format!("ROOT's image did not duplicate: {e:?}")))?;
-            storage.root = Some(root);
-            return Ok(storage);
-        }
-        "data" => BlockGrant { scope: Scope::Kind(toyos_gpt::Guid::TOYOS_DATA.0), writes: true },
-        "log" | "boot" => {
-            let records = inventory(syscap).map_err(|why| StartError::Other(std::io::Error::other(why)))?;
-            let which = if role == "log" { Role::Log } else { Role::Boot };
-            let Some(guid) = loaded(&records, which) else {
-                return Err(StartError::Refused(format!("the loader named no `{role}` partition")));
-            };
-            storage.args.push(guid_text(guid));
-            BlockGrant { scope: Scope::Unique(guid), writes: role == "log" }
-        }
-        other => panic!("supervisor: `{other}` is no role; the build refuses it"),
-    };
+    if role == toyos_manifest::SYSTEM {
+        let root = boot.root.try_clone()
+            .map_err(|e| std::io::Error::other(format!("ROOT's image did not duplicate: {e:?}")))?;
+        storage.root = Some(root);
+        return Ok(storage);
+    }
+    let records = inventory(syscap).map_err(|why| StartError::Other(std::io::Error::other(why)))?;
+    let served = toyos_supervisor::storage::grant(role, |which| loaded(&records, which)).map_err(StartError::Refused)?;
+    if let Scope::Unique(guid) = served.scope {
+        storage.args.push(guid_text(guid));
+    }
     if let Some(port) = grants.partitions(served).map_err(StartError::Refused)? {
         storage.ports.push((toyos_blockring::PORT.to_string(), port));
     }
@@ -3427,7 +3721,7 @@ fn read_system(path: &'static str, server: &Service<'_>) -> String {
 /// the console the kernel gave the supervisor, then a panic like any other.
 fn bootstrap_fails(why: String) -> ! {
     let line = format!("supervisor: {why}\n");
-    let _ = toyos::fd::with(0, |console| toyos_abi::syscall::write(console.handle, line.as_bytes()));
+    let _ = toyos::fd::with(0, |console| console.handle().map(|console| toyos_abi::syscall::write(console.raw(), line.as_bytes())));
     panic!("supervisor: {why}");
 }
 
@@ -3448,7 +3742,7 @@ impl Boot {
             let handle: toyos::OwnedHandle = Endowments::get()
                 .take(label)
                 .unwrap_or_else(|| panic!("supervisor: the kernel spawns this program holding `{label}`"));
-            let kind = toyos_abi::syscall::fstat(handle.as_handle()).map(|stat| stat.file_type);
+            let kind = toyos_abi::syscall::fstat(handle.as_handle().raw()).map(|stat| stat.file_type);
             assert_eq!(kind, Ok(FileType::ImmutableMemory), "supervisor: `{label}` is no image nobody writes");
             handle
         };
@@ -3467,4 +3761,35 @@ fn system_row() -> Program {
         restart: true,
         ..Program::default()
     }
+}
+
+/// What a refusal no memory was recorded for is, beside its own words: a
+/// `ResourceExhausted` the job's account did not count is a limit, or the
+/// supervisor's own memory, and waiting for memory would not end it.
+fn unrecorded(e: &StartError) -> &'static str {
+    match e {
+        StartError::Other(e) if e.kind() == std::io::ErrorKind::OutOfMemory => {
+            "; its job was refused no memory, so it is a limit or the supervisor's own refusal"
+        }
+        _ => "",
+    }
+}
+
+/// A job of its own for a service or driver `row` starts: made with the system
+/// capability's `JOBS`, and held its row's floor, which only a signed image's
+/// `system.toml` declares. A floor refused is a start refused: a control path
+/// started without the memory it is owed would answer until memory ran out
+/// and then not.
+fn job_for(syscap: &SysCap, row: &Program) -> std::io::Result<toyos::job::Job> {
+    let job = syscap.new_job().map_err(memory_refused)?;
+    if row.memory_floor > 0 {
+        syscap.hold_floor(&job, row.memory_floor).map_err(|e| match e {
+            SyscallError::ResourceExhausted => std::io::Error::new(
+                std::io::ErrorKind::OutOfMemory,
+                format!("its floor of {} MiB cannot be held", row.memory_floor >> 20),
+            ),
+            other => std::io::Error::other(format!("its floor would not be held: {other:?}")),
+        })?;
+    }
+    Ok(job)
 }

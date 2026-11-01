@@ -8,7 +8,7 @@ opened: 2026-10-03
 
 `tests/guest/rust-tests/src/bin/hda_client_stall.rs` hands cpal an error
 callback that prints `audio error: …` and does nothing else. The fork reports
-two things through it: a stream whose signal pipe went away, and a dropped
+two things through it: a stream whose signal event went away, and a dropped
 stream soundd did not let go of within its fade and a ring of periods. Either
 leaves the job exiting 0, and the `hda_client_stall` T14 row reads the job's
 exit code. `tone.rs`'s `play_tone` asserts on the same callback.

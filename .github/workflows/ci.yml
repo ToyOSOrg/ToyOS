@@ -17,8 +17,29 @@ permissions:
   contents: read
 
 jobs:
+  # The required check: green when every part of the host checks is. The parts
+  # run in parallel (build/ci.rs's `Part`); a part that failed, was cancelled or
+  # never ran reds it. `always()`, so a cancelled run reaches this job too: a
+  # required job its condition skipped would read as success.
   host:
+    needs: host-part
+    if: ${{ always() && github.event_name != 'pull_request' }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    steps:
+      - if: needs.host-part.result != 'success'
+        env:
+          RESULT: ${{ needs.host-part.result }}
+        run: |
+          echo "a part of the host checks concluded $RESULT"
+          exit 1
+
+  host-part:
     if: github.event_name != 'pull_request'
+    strategy:
+      fail-fast: false
+      matrix:
+        part: [tests, lint, models, userland]
     runs-on: ubuntu-24.04
     timeout-minutes: 45
     env:
@@ -42,7 +63,10 @@ jobs:
           key: host-sealed-${{ runner.os }}-${{ runner.arch }}-${{ github.run_id }}
           restore-keys: host-sealed-${{ runner.os }}-${{ runner.arch }}-
 
-      - run: cargo run -- --ci host
+      # `--locked`: this cargo resolves before the driver runs, so it alone sees
+      # the committed `Cargo.lock`. A merge that is clean as text can leave one
+      # cargo would rewrite.
+      - run: cargo run --locked -- --ci host ${{ matrix.part }}
 
   scope:
     if: github.event_name != 'pull_request'

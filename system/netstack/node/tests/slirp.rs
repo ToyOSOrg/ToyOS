@@ -109,9 +109,9 @@ fn slirps_ack_is_the_lease_its_bytes_name() {
     let mut wire = requesting();
     let requested = wire.now;
     wire.deliver(&hex(SLIRP_ACK));
-    assert_eq!((wire.node.lease(), wire.address(LEASED)), (None, Some(AddrState::Tentative)));
-    assert!(wire.run_until(Duration::from_secs(10), |wire| wire.node.lease().is_some()), "the lease is held");
-    let lease = wire.node.lease().unwrap();
+    assert_eq!((wire.node.lease(wire.link), wire.address(LEASED)), (None, Some(AddrState::Tentative)));
+    assert!(wire.run_until(Duration::from_secs(10), |wire| wire.node.lease(wire.link).is_some()), "the lease is held");
+    let lease = wire.node.lease(wire.link).unwrap();
     assert_eq!((lease.address, lease.prefix_len, lease.router, lease.dns.as_slice(), lease.server), (LEASED, 24, Some(SERVER), &[RESOLVER][..], SERVER));
     let expiry: Option<Instant> = lease.timers.map(|timers| timers.expiry);
     assert_eq!(expiry, Some(requested.after(Duration::from_secs(86_400))));
@@ -133,6 +133,6 @@ fn the_lease_is_read_from_the_acks_own_mask() {
     // With none (RFC 768), the changed mask is the lease's.
     ack[UDP_CHECKSUM].fill(0);
     wire.deliver(&ack);
-    assert!(wire.run_until(Duration::from_secs(10), |wire| wire.node.lease().is_some()), "the lease is held");
-    assert_eq!(wire.node.lease().map(|lease| lease.prefix_len), Some(23));
+    assert!(wire.run_until(Duration::from_secs(10), |wire| wire.node.lease(wire.link).is_some()), "the lease is held");
+    assert_eq!(wire.node.lease(wire.link).map(|lease| lease.prefix_len), Some(23));
 }

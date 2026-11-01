@@ -143,7 +143,7 @@ const AUTO_TRAIT_IMPLS: &[(&str, usize)] = &[
     ("kernel/src/arch/x86_64/hw.rs", 1),
     ("kernel/src/mm/mmio.rs", 2),
     ("kernel/src/mm/region.rs", 2),
-    ("kernel/src/pipe.rs", 1),
+    ("kernel/src/object/paged.rs", 1),
     ("kernel/src/process.rs", 1),
     ("kernel/src/sched/driver.rs", 2),
     ("kernel/src/symbols.rs", 2),
@@ -292,7 +292,7 @@ fn host_files() -> Vec<PathBuf> {
 /// `bytes` as lower-case hex SHA-256, the spelling `NOTICE` records.
 #[cfg(test)]
 fn digest(bytes: &[u8]) -> String {
-    toyos_sha2_hw::sha256_digest(bytes).iter().map(|b| format!("{b:02x}")).collect()
+    crate::sha256_hex(bytes)
 }
 
 /// The shapes of a value that identifies a machine or the network it is on,
@@ -682,14 +682,11 @@ mod tests {
     }
 
     /// A page a process can write while the kernel is inside it never becomes a
-    /// slice, and never an exclusive reference. Two files, named rather than
+    /// slice, and never an exclusive reference. The file is named rather than
     /// walked: both spellings are ordinary elsewhere.
-    ///
-    /// A *shared* reference is not banned: `Ring::header` soundly takes one over
-    /// the same page, its whole subject being an `AtomicU32`.
     #[test]
     fn no_slice_or_exclusive_reference_is_built_over_a_mapped_page() {
-        const OVER_A_MAPPING: &[&str] = &["sdk/abi/src/ring.rs", "kernel/src/user_ptr.rs"];
+        const OVER_A_MAPPING: &[&str] = &["kernel/src/user_ptr.rs"];
         const SLICES: &[&str] =
             &["from_raw_parts", "from_raw_parts_mut", "from_ptr_range", "from_ptr_range_mut"];
         const EXCLUSIVE: &str = "&mut *";
@@ -809,15 +806,20 @@ mod tests {
     /// Only text has a shape. A value spelled as bytes, a GUID, and a serial
     /// that nothing on its line calls a serial number are the reader's to see.
     /// A home-directory path carrying the owner's first name is not private,
-    /// and is no shape here.
+    /// and is no shape here. Vendor firmware is not read: its row's digest
+    /// pins it unmodified, and its licence leaves only the container a loader
+    /// parses to be read.
     #[test]
     fn no_tracked_file_identifies_a_machine_or_its_network() {
         let root = repo_root();
         let listing = crate::sysroot::tracked_files(&root, &[]).unwrap_or_else(|e| panic!("{e}"));
         let mut complaints = Vec::new();
         let mut kept = std::collections::BTreeSet::new();
+        let firmware = |name: &str| {
+            COMMITTED_FILES.iter().any(|(f, _, _, terms)| *f == name && matches!(terms, crate::licence::Terms::Firmware(_)))
+        };
         // The fork's gitlink is a commit, and every other tracked path a file.
-        for name in listing.iter().filter(|name| *name != NOT_OURS) {
+        for name in listing.iter().filter(|name| *name != NOT_OURS && !firmware(name)) {
             let bytes = std::fs::read(root.join(name)).unwrap_or_else(|e| panic!("{name}: {e}"));
             for (n, line) in String::from_utf8_lossy(&bytes).lines().enumerate() {
                 for (shape, value) in identifying(line) {

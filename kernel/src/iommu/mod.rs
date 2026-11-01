@@ -233,8 +233,19 @@ impl OwnSpace {
     /// answered, clear of the root bridges' declared `windows`, or the reason
     /// there is none: a machine with no unit and a machine out of domains are
     /// both refusals.
-    pub fn create(room: u64, windows: &[toyos_abi::acpi::RootBridgeWindow]) -> Result<(Self, u64), IommuError> {
-        unit::domain::create(room, Some(windows)).map(|(id, at)| (Self(id), at.raw()))
+    ///
+    /// What firmware reserved for function `bus:device.function` is mapped in
+    /// it at its own addresses, before the function can attach.
+    pub fn create(
+        room: u64,
+        windows: &[toyos_abi::acpi::RootBridgeWindow],
+        bus: u8,
+        device: u8,
+        function: u8,
+    ) -> Result<(Self, u64), IommuError> {
+        let (id, at) = unit::domain::create(room, Some(windows))?;
+        unit::domain::keep_reserved(id, StreamId::pci(bus, device, function));
+        Ok((Self(id), at.raw()))
     }
 
     /// [`DeviceSpace::map`].
@@ -279,8 +290,10 @@ impl core::fmt::Display for StreamId {
 ///
 /// The device list must be the complete enumeration: enabling translation with an unenumerated device left off it can brick the machine's own boot disk.
 ///
-pub fn init(rsdp_addr: u64, devices: &[crate::drivers::pci::PciDevice]) {
-    unit::init(rsdp_addr, devices);
+/// `kernel` is this kernel's image, `[start, end)` physical: what a unit's
+/// hand-over keeps out of every device's reach where it can.
+pub fn init(rsdp_addr: u64, devices: &[crate::drivers::pci::PciDevice], kernel: (u64, u64)) {
+    unit::init(rsdp_addr, devices, kernel);
 }
 
 /// Once, after every kernel driver has taken its functions from firmware and

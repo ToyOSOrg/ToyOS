@@ -98,9 +98,8 @@ pub struct Layout {
     pub lba_count: u64,
     pub primary: Table,
     pub backup: Option<Table>,
-    /// What the device answers for its block count, and the granularity it floors by.
+    /// What the device answers for its block count.
     pub reported_lba_count: u64,
-    pub granularity: u64,
     pub mbr_type: u8,
     pub mbr_signature: [u8; 2],
 }
@@ -112,8 +111,6 @@ pub struct Shape<'a> {
     pub entry_sizes: &'a [u32],
     /// Some layouts carry no backup copy.
     pub backup: bool,
-    /// Some devices floor their block count, as the kernel's 4 KiB reader does.
-    pub floored: bool,
 }
 
 /// A table UEFI 2.11 §5.3 accepts, with up to eight disjoint partitions at random indices.
@@ -164,14 +161,12 @@ pub fn valid(rng: &mut Rng, shape: &Shape<'_>) -> Layout {
         entries,
     };
     let backup = (shape.backup && !rng.one_in(3)).then(|| primary.mirror(lba_bytes, lba_count));
-    let granularity = if shape.floored && lba_bytes == 512 && rng.one_in(4) { 8 } else { 1 };
     Layout {
         lba_bytes,
         lba_count,
         primary,
         backup,
-        reported_lba_count: lba_count / granularity * granularity,
-        granularity,
+        reported_lba_count: lba_count,
         mbr_type: 0xEE,
         mbr_signature: [0x55, 0xAA],
     }
@@ -334,7 +329,6 @@ pub fn image(layout: &Layout) -> Image {
     Image {
         lba_bytes: layout.lba_bytes,
         lba_count: layout.reported_lba_count,
-        granularity: layout.granularity,
         bytes: disk,
         fail_at: None,
     }
@@ -343,7 +337,6 @@ pub fn image(layout: &Layout) -> Image {
 pub struct Image {
     pub lba_bytes: u32,
     pub lba_count: u64,
-    pub granularity: u64,
     pub bytes: Vec<u8>,
     /// The one block whose read does not happen.
     pub fail_at: Option<u64>,
@@ -355,9 +348,6 @@ impl Sectors for Image {
     }
     fn lba_count(&self) -> u64 {
         self.lba_count
-    }
-    fn lba_count_granularity(&self) -> core::num::NonZeroU64 {
-        core::num::NonZeroU64::new(self.granularity).expect("1 or 8")
     }
     fn read_lba(&mut self, lba: u64, buf: &mut [u8]) -> bool {
         if self.fail_at == Some(lba) {

@@ -136,7 +136,7 @@ impl Stdin {
 
 impl io::Read for Stdin {
     fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
-        let stat = on_fd(STDIN, syscall::fstat).ok();
+        let stat = on_fd(STDIN, |h| syscall::fstat(h.raw())).ok();
         let interactive = stat.is_some_and(|s| s.file_type == FileType::Tty);
         if STDIN_RAW.load(Ordering::Relaxed) || !interactive {
             read_stdin(buf)

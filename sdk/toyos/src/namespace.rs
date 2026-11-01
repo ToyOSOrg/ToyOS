@@ -30,6 +30,19 @@ impl Namespace {
         self.0.into_raw()
     }
 
+    /// A second handle to the same namespace, for a holder handing one on or
+    /// using one while another thread may replace its own.
+    pub fn duplicate(&self) -> Result<Self, SyscallError> {
+        self.0.try_clone().map(Self)
+    }
+
+    /// A namespace a peer sent, consumed. Its type is the sender's word: the
+    /// kernel refuses each namespace call on a handle of another type, as it
+    /// does a connection's ([`Connection::received`]).
+    pub fn received(handle: OwnedHandle) -> Self {
+        Self(handle)
+    }
+
     /// # Safety
     /// `raw` must be a live namespace handle this process owns and nothing else
     /// answers for.
@@ -39,8 +52,8 @@ impl Namespace {
 }
 
 impl AsHandle for Namespace {
-    fn as_handle(&self) -> RawHandle {
-        self.0.raw()
+    fn as_handle(&self) -> crate::BorrowedHandle<'_> {
+        self.0.as_handle()
     }
 }
 
@@ -167,7 +180,7 @@ impl<'a> Builder<'a> {
                 let entry = NamespaceEntry {
                     off,
                     len,
-                    connector: connector.as_handle(),
+                    connector: connector.as_handle().raw(),
                     _pad: 0,
                 };
                 self.overflowed |= !self.add.push(entry);

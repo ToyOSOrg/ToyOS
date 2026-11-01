@@ -16,14 +16,14 @@
 
 use alloc::alloc::Layout;
 use alloc::string::String;
-use core::num::NonZeroU64;
 
 use crate::payload::Payload;
 
 use toyos_gpt::{Guid, Located, Sectors};
 use toyos_rootimage::chunk;
 use toyos_update::slots::{self, Table};
-use crate::efi::{BlockIo, BootServices, DevicePath, Handle, HardDrive, LoadedImage, Scoped, Status};
+use toyos_devicepath::{HardDrive, Node};
+use crate::efi::{BlockIo, BootServices, DevicePath, Handle, LoadedImage, Scoped, Status};
 
 /// The unit ROOT's filesystem is written in, and the alignment every buffer
 /// here is allocated at.
@@ -59,12 +59,13 @@ pub fn boot_disk(handle: Handle, bs: &BootServices) -> Result<Handle, String> {
         .exclusive::<LoadedImage>(handle)
         .map_err(|e| alloc::format!("this image's LoadedImage: {e:?}"))?;
     let device = image.device().ok_or("firmware names no device this image was loaded from")?;
-    let path = bs.get::<DevicePath>(device).map_err(|e| alloc::format!("the boot device's path: {e:?}"))?;
-    let nodes: alloc::vec::Vec<&[u8]> = path.nodes().collect();
+    let firmware = bs.get::<DevicePath>(device).map_err(|e| alloc::format!("the boot device's path: {e:?}"))?;
+    let path = firmware.path().map_err(|why| alloc::format!("the boot device's path is not read: {why}"))?;
+    let nodes: alloc::vec::Vec<Node<'_>> = path.nodes().collect();
     let Some((last, disk_nodes)) = nodes.split_last() else {
         return Err("the boot device's path is empty".into());
     };
-    if (last[0], last[1]) != HardDrive::TYPE {
+    if last.kind() != HardDrive::TYPE {
         return Err("the boot device is not a partition, so there is no disk to find the slots on".into());
     }
 
@@ -77,8 +78,8 @@ pub fn boot_disk(handle: Handle, bs: &BootServices) -> Result<Handle, String> {
         // close then fails.
         .filter(|&candidate| candidate != device)
         .filter(|&candidate| {
-            let Ok(path) = bs.get::<DevicePath>(candidate) else { return false };
-            path.nodes().eq(disk_nodes.iter().copied())
+            let Ok(firmware) = bs.get::<DevicePath>(candidate) else { return false };
+            firmware.path().is_ok_and(|path| path.nodes().eq(disk_nodes.iter().copied()))
         })
         .collect();
     match disks[..] {
@@ -232,10 +233,6 @@ impl Sectors for Disk<'_> {
 
     fn lba_count(&self) -> u64 {
         self.lba_count
-    }
-
-    fn lba_count_granularity(&self) -> NonZeroU64 {
-        NonZeroU64::MIN
     }
 
     fn read_lba(&mut self, lba: u64, buf: &mut [u8]) -> bool {

@@ -22,7 +22,7 @@
 //! to the stick, and a second begun then measures that write.
 //!
 //! **Then `loaded`: how late the round's kick reaches each CPU** while a thread
-//! per CPU spawns a program that exits at once, the load
+//! per CPU spawns a program that exits at once, [`CHILDREN`] of them, the load
 //! `issues/toyos-beats-linuxs-latency-on-the-t14.md` sets its bar under. A
 //! round's reader kicks every other CPU and then stamps its own block, and each
 //! CPU stamps its block in its kick handler, so a CPU's stamp less the round's
@@ -31,7 +31,7 @@
 //! is dropped, since an SMI stops every CPU, and so is one with a CPU stale.
 
 use std::process::Command;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 use std::time::{Duration, Instant};
 
 use toyos::endow::{Endowments, SYSCAP_LABEL};
@@ -55,9 +55,17 @@ const IDLE: Duration = Duration::from_secs(1);
 /// the frequency.
 const SPIN: u64 = 4_000_000_000;
 
-/// How long `loaded` samples rounds for: a share of the job list's bound
+/// The longest `loaded` samples rounds for: a share of the job list's bound
 /// (`toyos_tco::JOB_BOUND_MS`) the reads before it leave.
 const LOADED: Duration = Duration::from_secs(20);
+
+/// How many children `loaded`'s spawners start between them: what the T14
+/// started in [`LOADED`] when a spawn cost 0.7 ms, about 22,000. The load is a
+/// count and not a time because the kernel logs one line per child that
+/// ends, and the boot's log has a fixed room: a load as long as before, at a
+/// spawn of 45 µs, was 49,000 lines, which pushed logkeeper past its 16 logs
+/// and lost the lines later jobs of the same boot wait for.
+const CHILDREN: u32 = 22_000;
 
 /// How long [`settle`] waits for each of its lines: two of logkeeper's rounds
 /// at its write budget (`system/logkeeper/src/policy.rs`, 5 s).
@@ -86,25 +94,32 @@ fn rank(sorted: &[u64], q: f64) -> u64 {
 fn loaded(cap: &SysCap) {
     let cpus = syscall::cpu_count() as usize;
     let stop = AtomicBool::new(false);
+    let left = AtomicU32::new(CHILDREN);
+    let spawning = AtomicU32::new(cpus as u32);
     let mut late: Vec<Vec<u64>> = vec![Vec::new(); cpus];
     let (mut smi, mut stale) = (0u64, 0u64);
     let (first, last) = std::thread::scope(|s| {
         for _ in 0..cpus {
             s.spawn(|| {
-                while !stop.load(Ordering::Relaxed) {
+                while !stop.load(Ordering::Relaxed)
+                    && left.try_update(Ordering::Relaxed, Ordering::Relaxed, |n| n.checked_sub(1)).is_ok()
+                {
                     let status = Command::new("/system/bin/test_rs_counters_metal")
                         .arg(EXIT_AT_ONCE)
                         .status()
                         .expect("this binary spawns itself");
                     assert!(status.success(), "a child that exits at once exited {status:?}");
                 }
+                spawning.fetch_sub(1, Ordering::Relaxed);
             });
         }
         let begun = Instant::now();
         let mut before = round(cap);
         let first = (toyos_abi::clock::nanos_since_boot(), before.iter().filter_map(|r| r.get(Counter::Stamp)).max());
         let mut last = first;
-        while begun.elapsed() < LOADED {
+        // While the load lasts: a round after the last spawner stopped is
+        // a round of an idle machine.
+        while begun.elapsed() < LOADED && spawning.load(Ordering::Relaxed) > 0 {
             let records = round(cap);
             last = (toyos_abi::clock::nanos_since_boot(), records.iter().filter_map(|r| r.get(Counter::Stamp)).max());
             let moved = records.iter().zip(&before).any(|(r, b)| r.get(Counter::Smi) != b.get(Counter::Smi));

@@ -1,9 +1,10 @@
 //! ToyOS's TCP (RFC 9293) with RFC 5961's blind-attack checks, MSS, window scaling, timestamps
-//! with PAWS (RFC 7323), SACK and D-SACK (RFC 2018, 2883), RFC 6298's timer, CUBIC (RFC 9438),
-//! NewReno (RFC 6582) and SACK-based recovery (RFC 6675), keyed initial sequence numbers and ports
-//! (RFC 6528, 6056), and TIME-WAIT hardened against assassination (RFC 1337). Pure: the caller hands
-//! in the time, the secrets, parsed segments, classified ICMP errors, user calls and transmit
-//! credit; nothing here reads a clock, draws randomness or does I/O.
+//! with PAWS (RFC 7323), SACK and D-SACK (RFC 2018, 2883), RFC 6298's timer, CUBIC (RFC 9438)
+//! after HyStart++ (RFC 9406), pacing (RFC 9002 §7.7), NewReno (RFC 6582) and SACK-based recovery
+//! (RFC 6675), keyed initial sequence numbers and ports (RFC 6528, 6056), and TIME-WAIT hardened
+//! against assassination (RFC 1337). Pure: the caller hands in the time, the secrets, parsed
+//! segments, classified ICMP errors, user calls and transmit credit; nothing here reads a clock,
+//! draws randomness or does I/O.
 //!
 //! **Pull egress.** A segment exists only while [`Tcp::transmit_owed`] or [`Tcp::serve`] hands it
 //! to the caller's sink, built from the state of that moment, once the caller has answered that its
@@ -38,6 +39,7 @@ mod cc;
 mod conn;
 mod counters;
 mod open;
+mod pace;
 #[cfg(test)]
 mod props;
 mod ring;
@@ -210,6 +212,8 @@ pub enum Failure {
     Unreachable(SoftError),
     /// ICMP destination unreachable, administratively prohibited, during the handshake.
     Prohibited,
+    /// The host gave up the connection's local address ([`Tcp::lose_address`]).
+    AddressGone,
 }
 
 /// An ICMP error that did not end the connection; reported as the reason if it later gives up.
@@ -312,10 +316,11 @@ impl<T> Hop<T> {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Event {
     Refused(Refusal),
-    /// An ACK advanced SND.UNA: the next hop to this address answers (RFC 1122 §3.3.1.4).
-    Reachable(Ipv4Addr),
-    /// Three expiries without progress: re-verify the next hop to this address.
-    Reverify(Ipv4Addr),
+    /// An ACK advanced SND.UNA: the next hop to `remote` from `local` answers (RFC 1122
+    /// §3.3.1.4). The local address names the link: one remote may be reached by several.
+    Reachable { local: Ipv4Addr, remote: Ipv4Addr },
+    /// Three expiries without progress: re-verify the next hop to `remote` from `local`.
+    Reverify { local: Ipv4Addr, remote: Ipv4Addr },
 }
 
 // Each compile_fail block sits beside one that compiles, so a typo cannot pass it.

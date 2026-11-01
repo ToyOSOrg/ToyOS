@@ -14,9 +14,10 @@ The ACPI server loads a machine's DSDT and SSDTs, evaluates `\_S5` and hands
 the kernel its sleep type, which the kernel powers the machine off with and
 has from nowhere else. It initialises the namespace, negotiates `_OSC`,
 serves the runtime GPEs and delivers Notifies (#875), and declares each PCI
-root bridge's `_CRS` windows and `_OSC` offer to the kernel
-(`system/acpiserver/src/apertures.rs`). Nothing reads `_CST`, which names a
-CPU's C-states.
+root bridge's `_CRS` windows and `_OSC` answer to the kernel
+(`system/acpiserver/src/apertures.rs`). The processors' `_CST`, which names
+their C-states, is the idle track's
+(`issues/idle-cpus-enter-the-c-states-cst-names.md`).
 
 **Ruled** (owner, 2026-10-03, on the scout in #681's comment 5966817345): the
 switch to ACPI mode lands as stage 1, together with a userland server that
@@ -472,7 +473,9 @@ after the initialisation has run, before the press.
 deep idle states take the interpreter's missing `Load` and `_OSC`/`_PDC`
 first or wait for this track: "finish aml then continue working on deep idle
 states". What finished is, and the slices below and their order, are #875's
-design, not his.
+design, not his. **Superseded** (owner, 2026-10-27): deep idle is built now,
+not after this track, on branch `deep-idle`
+(`issues/idle-cpus-enter-the-c-states-cst-names.md`).
 
 **Finished** is held to ACPI 6.5, and to Intel's Processor Vendor-Specific
 ACPI Interface Specification (302223-007) for a processor's `_OSC` on Intel:
@@ -484,8 +487,12 @@ ACPI Interface Specification (302223-007) for a processor's `_OSC` on Intel:
 - The server does OSPM's side of the protocol. It:
   - loads every block, static and loaded at run time;
   - initialises the namespace;
-  - negotiates `\_SB._OSC` and each processor's `_OSC` with only what ToyOS
-    honours;
+  - negotiates `\_SB._OSC`, query then commit, and commits each
+    processor's `_OSC` with only what ToyOS honours and no query (the
+    orchestrator's ruling of 2026-10-27, under the owner's direction for
+    deep idle that day: 302223-007 §2.1 makes a processor's bits statements
+    of what OSPM does, and ACPI 6.5 §6.2.11.1.1 only recommends the query;
+    the T14's processor query answers 0x1 whatever is asked);
   - runs every runtime GPE's method;
   - delivers every Notify.
 - On the T14 and the AMD bench, in the state the owner ruled, ACPI 6.5
@@ -502,8 +509,8 @@ Not in finished:
 - concurrent method execution, which §5.5.2 permits and does not require;
 - the PCI host bridges' `_OSC`;
 - sleep states;
-- `_CST`, which no part of this track reads: idle CPUs entering the states
-  it names read it (`issues/idle-cpus-enter-the-c-states-cst-names.md`);
+- `_CST`, which the idle track reads (`system/acpiserver/src/cst.rs`,
+  `issues/idle-cpus-enter-the-c-states-cst-names.md`);
 - `_PDC`, which Intel deprecated in favour of `_OSC` in ACPI 3.0 and which
   ACPI 6.5 does not define.
 

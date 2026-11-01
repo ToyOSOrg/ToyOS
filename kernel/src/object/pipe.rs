@@ -3,45 +3,45 @@
 //! [`PipeReadEnd`] has no write path and [`PipeWriteEnd`] has no read path,
 //! so the wrong direction is refused by the type before any policy runs.
 //!
-//! The ring, its refcounts and `PipeId` stay in `crate::pipe`: adding them
-//! here would double their ownership. These two types each own one counted
-//! reference, released on the last handle so EOF rides `handle_count`.
+//! The ring and its refcounts stay in `crate::pipe`: adding them here would
+//! double their ownership. These two types each own one counted reference,
+//! released on the last handle so EOF rides `handle_count`.
 
 use alloc::sync::Arc;
 use core::sync::atomic::{AtomicBool, Ordering};
 
-use crate::pipe::{PipeId, PipeReader, PipeWriter};
+use crate::mm::charge::Exhausted;
+use crate::pipe::{PipeReader, PipeRef, PipeWriter};
 
 use super::{Held, KObjectVariant, ObjectCore, ZeroHandles};
 
 pub struct PipeReadEnd {
     pub(super) core: ObjectCore,
-    /// A plain copy, not an `Arc` clone: the hot read path can't pay for one,
-    /// and a released `PipeId` is never reissued.
-    id: PipeId,
+    /// The pipe, which outlives the counted reference's release.
+    pipe: PipeRef,
     tty: AtomicBool,
     reference: Held<PipeReader>,
 }
 
 pub struct PipeWriteEnd {
     pub(super) core: ObjectCore,
-    id: PipeId,
+    pipe: PipeRef,
     tty: AtomicBool,
     reference: Held<PipeWriter>,
 }
 
 impl PipeReadEnd {
-    pub fn new(reader: PipeReader) -> Arc<Self> {
-        Arc::new(Self {
-            core: Self::new_core(),
-            id: reader.id(),
+    pub fn new(reader: PipeReader) -> Result<Arc<Self>, Exhausted> {
+        Ok(Arc::new(Self {
+            core: Self::new_core(0)?,
+            pipe: reader.pipe().clone(),
             tty: AtomicBool::new(false),
             reference: Held::new(reader),
-        })
+        }))
     }
 
-    pub fn id(&self) -> PipeId {
-        self.id
+    pub fn pipe(&self) -> &PipeRef {
+        &self.pipe
     }
 
     pub fn is_tty(&self) -> bool {
@@ -56,17 +56,17 @@ impl PipeReadEnd {
 }
 
 impl PipeWriteEnd {
-    pub fn new(writer: PipeWriter) -> Arc<Self> {
-        Arc::new(Self {
-            core: Self::new_core(),
-            id: writer.id(),
+    pub fn new(writer: PipeWriter) -> Result<Arc<Self>, Exhausted> {
+        Ok(Arc::new(Self {
+            core: Self::new_core(0)?,
+            pipe: writer.pipe().clone(),
             tty: AtomicBool::new(false),
             reference: Held::new(writer),
-        })
+        }))
     }
 
-    pub fn id(&self) -> PipeId {
-        self.id
+    pub fn pipe(&self) -> &PipeRef {
+        &self.pipe
     }
 
     pub fn is_tty(&self) -> bool {

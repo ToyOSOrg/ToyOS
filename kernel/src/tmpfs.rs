@@ -7,6 +7,8 @@ use core::sync::atomic::{AtomicBool, Ordering};
 use crate::file_backing::FileBacking;
 use crate::file_cache::{self, FileId};
 use crate::fs_rename::{self, Committed, ReplaceRename};
+use crate::mm::charge::{self, Charge};
+use crate::mm::space::CopySource;
 use crate::mm::PAGE_BYTES;
 use toyos_abi::syscall::SyscallError;
 
@@ -39,6 +41,13 @@ impl FileBacking for TmpfsBacking {
     fn file_size(&self) -> u64 {
         file_cache::size(self.file_id)
     }
+
+    fn source(&self) -> Result<Arc<dyn CopySource>, SyscallError> {
+        if !self.alive.load(Ordering::Acquire) {
+            return Err(SyscallError::NotFound);
+        }
+        Ok(Arc::new(file_cache::snapshot(self.file_id)?))
+    }
 }
 
 /// Ends a file entry's life: cleared first (so every backing fails), pages after.
@@ -58,7 +67,19 @@ pub(crate) enum Entry {
 
 /// In-memory filesystem: file data lives in the file cache.
 pub struct TmpFs {
-    entries: BTreeMap<String, Entry>,
+    /// Each name with the charge of what it keeps here: its place, its bytes
+    /// and its entry's.
+    entries: BTreeMap<String, (Entry, Charge)>,
+}
+
+/// The charge of `name` holding an entry that keeps `kept` heap bytes besides.
+fn name_charge(name: &str, kept: usize) -> Result<Charge, SyscallError> {
+    Ok(Charge::current(charge::map_entry::<String, (Entry, Charge)>() + charge::array::<u8>(name.len()) + kept)?)
+}
+
+/// The heap a file's entry keeps besides its name.
+fn file_heap() -> usize {
+    charge::arc::<AtomicBool>()
 }
 
 impl TmpFs {
@@ -80,9 +101,16 @@ impl ReplaceRename for TmpFs {
     }
 
     fn commit(&mut self, old: &str, new: &str) -> Result<Committed<Option<Entry>>, SyscallError> {
-        let Some(moved) = self.entries.remove(old) else { return Err(SyscallError::NotFound) };
-        let displaced = self.entries.remove(new);
-        self.entries.insert(String::from(new), moved);
+        let kept = match self.entries.get(old) {
+            Some((Entry::File { .. }, _)) => file_heap(),
+            Some((Entry::Symlink { target, .. }, _)) => charge::array::<u8>(target.len()),
+            None => return Err(SyscallError::NotFound),
+        };
+        // Charged under its new name before anything moves.
+        let charge = name_charge(new, kept)?;
+        let (moved, _) = self.entries.remove(old).expect("the name just found");
+        let displaced = self.entries.remove(new).map(|(entry, _)| entry);
+        self.entries.insert(String::from(new), (moved, charge));
         Ok(Committed::new(displaced))
     }
 
@@ -101,9 +129,9 @@ impl ReplaceRename for TmpFs {
 
 impl FileSystem for TmpFs {
     // Nothing else caps file count here.
-    fn list(&mut self, dir: &str, limit: usize) -> Result<Vec<String>, SyscallError> {
+    fn list(&mut self, dir: &str, limit: usize, charge: &mut Charge) -> Result<Vec<String>, SyscallError> {
         let mut out = Vec::new();
-        for (name, entry) in &self.entries {
+        for (name, (entry, _)) in &self.entries {
             if let Entry::File { .. } = entry {
                 if !crate::vfs::under_directory(name, dir) {
                     continue;
@@ -111,6 +139,7 @@ impl FileSystem for TmpFs {
                 if out.len() == limit {
                     return Err(SyscallError::ResourceExhausted);
                 }
+                charge.grow(crate::vfs::listed_heap::<String>(name))?;
                 out.push(name.clone());
             }
         }
@@ -119,8 +148,8 @@ impl FileSystem for TmpFs {
 
     fn node(&mut self, name: &str) -> Result<u64, SyscallError> {
         match self.entries.get(name) {
-            Some(Entry::File { id, .. }) => Ok(*id),
-            Some(Entry::Symlink { node, .. }) => Ok(*node),
+            Some((Entry::File { id, .. }, _)) => Ok(*id),
+            Some((Entry::Symlink { node, .. }, _)) => Ok(*node),
             None => Err(SyscallError::NotFound),
         }
     }
@@ -139,21 +168,21 @@ impl FileSystem for TmpFs {
 
     fn file_mtime(&mut self, name: &str) -> Result<u64, SyscallError> {
         match self.entries.get(name) {
-            Some(Entry::File { id, .. }) => Ok(file_cache::mtime(*id)),
+            Some((Entry::File { id, .. }, _)) => Ok(file_cache::mtime(*id)),
             _ => Err(SyscallError::NotFound),
         }
     }
 
     fn read_link(&mut self, name: &str) -> Result<Option<String>, SyscallError> {
         Ok(match self.entries.get(name) {
-            Some(Entry::Symlink { target, .. }) => Some(target.clone()),
+            Some((Entry::Symlink { target, .. }, _)) => Some(target.clone()),
             _ => None,
         })
     }
 
     fn open_file(&mut self, name: &str) -> Result<(FileId, Option<Arc<dyn FileBacking>>), SyscallError> {
         match self.entries.get(name) {
-            Some(Entry::File { id, .. }) => {
+            Some((Entry::File { id, .. }, _)) => {
                 file_cache::open(*id).commit();
                 Ok((*id, None)) // tmpfs: no backing, data is in the file cache
             }
@@ -162,22 +191,23 @@ impl FileSystem for TmpFs {
     }
 
     fn create(&mut self, name: &str, mtime: u64) -> Result<FileId, SyscallError> {
-        if let Some(Entry::File { id, .. }) = self.entries.get(name) {
+        if let Some((Entry::File { id, .. }, _)) = self.entries.get(name) {
             return Ok(*id);
         }
+        let charge = name_charge(name, file_heap())?;
         // A dangling symlink of this name is displaced: one name, one entry.
-        let id = file_cache::create_file(false, mtime); // non-evictable
-        self.entries.insert(String::from(name), Entry::File { id, alive: Arc::new(AtomicBool::new(true)) });
+        let id = file_cache::create_file(false, mtime)?; // non-evictable
+        self.entries.insert(String::from(name), (Entry::File { id, alive: Arc::new(AtomicBool::new(true)) }, charge));
         Ok(id)
     }
 
     fn delete(&mut self, name: &str) -> Result<(), SyscallError> {
         match self.entries.remove(name) {
-            Some(Entry::File { id, alive, .. }) => {
+            Some((Entry::File { id, alive, .. }, _)) => {
                 retire(id, &alive);
                 Ok(())
             }
-            Some(Entry::Symlink { .. }) => Ok(()),
+            Some((Entry::Symlink { .. }, _)) => Ok(()),
             None => Err(SyscallError::NotFound),
         }
     }
@@ -197,10 +227,10 @@ impl FileSystem for TmpFs {
     }
 
     fn create_symlink(&mut self, name: &str, target: &str) -> Result<(), SyscallError> {
+        let charge = name_charge(name, charge::array::<u8>(target.len()))?;
         // Displaces whatever answered to this name: one name, one entry.
         let link = Entry::Symlink { target: String::from(target), node: file_cache::draw_node() };
-        if let Some(Entry::File { id, alive, .. }) = self.entries.insert(String::from(name), link)
-        {
+        if let Some((Entry::File { id, alive, .. }, _)) = self.entries.insert(String::from(name), (link, charge)) {
             retire(id, &alive);
         }
         Ok(())
@@ -208,7 +238,7 @@ impl FileSystem for TmpFs {
 
     fn open_backing(&mut self, name: &str) -> Result<Arc<dyn FileBacking>, SyscallError> {
         match self.entries.get(name) {
-            Some(Entry::File { id, alive, .. }) => {
+            Some((Entry::File { id, alive, .. }, _)) => {
                 Ok(Arc::new(TmpfsBacking { file_id: *id, alive: Arc::clone(alive) }))
             }
             _ => Err(SyscallError::NotFound),

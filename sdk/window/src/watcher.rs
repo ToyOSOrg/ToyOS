@@ -17,7 +17,7 @@
 
 use toyos::endow;
 use toyos::ipc::{FrameRx, RxStep, TrySendError};
-use toyos::shm::SharedMemory;
+use toyos::shm::{ReadOnly, SharedMemory};
 use toyos::Connection;
 
 use crate::{
@@ -130,16 +130,16 @@ impl Watcher {
                     return Err(WatchError::TooLong(len));
                 }
                 let [region] = self.rx.take_handles::<1>().ok_or(CreateError::NoHandle)?;
-                let region = SharedMemory::lent(region, len).map_err(CreateError::Lent)?;
-                let text = String::from_utf8(region.as_slice().to_vec()).map_err(|_| WatchError::NotText)?;
+                let region = ReadOnly::lent(region, len).map_err(CreateError::Lent)?;
+                let text = String::from_utf8(region.bytes().to_vec()).map_err(|_| WatchError::NotText)?;
                 self.conn.try_signal(MSG_CLIPBOARD_WATCH)?;
                 Ok(Watched::Copy(text))
             }
             MSG_COPY_REGION if len == 0 => {
                 let text = self.region_owed.take().ok_or(CreateError::Protocol(msg_type))?;
                 let [region] = self.rx.take_handles::<1>().ok_or(CreateError::NoHandle)?;
-                let mut region = SharedMemory::lent(region, text.len()).map_err(CreateError::Lent)?;
-                region.as_mut_slice().copy_from_slice(text.as_bytes());
+                let region = SharedMemory::lent(region, text.len()).map_err(CreateError::Lent)?;
+                region.bytes().write(0, text.as_bytes());
                 self.conn.try_signal(MSG_COPY_COMMIT)?;
                 Ok(Watched::Committed)
             }

@@ -41,12 +41,6 @@ pub unsafe extern "C" fn gethostname(_name: *mut u8, _len: usize) -> i32 {
     refuse()
 }
 
-/// No filesystem ToyOS mounts keeps a second name for a file.
-#[no_mangle]
-pub unsafe extern "C" fn link(_existing: *const u8, _new: *const u8) -> i32 {
-    refuse()
-}
-
 /// A file has no owner.
 #[no_mangle]
 pub extern "C" fn fchown(_fd: i32, _owner: u32, _group: u32) -> i32 {
@@ -65,9 +59,9 @@ pub extern "C" fn fchmod(_fd: i32, _mode: u32) -> i32 {
     refuse()
 }
 
-/// No call sets a file's times.
+/// As [`chmod`].
 #[no_mangle]
-pub unsafe extern "C" fn utimes(_path: *const u8, _times: *const u8) -> i32 {
+pub unsafe extern "C" fn fchmodat(_dirfd: i32, _path: *const u8, _mode: u32, _flags: i32) -> i32 {
     refuse()
 }
 
@@ -123,8 +117,3 @@ pub unsafe extern "C" fn msync(_addr: *mut u8, _len: usize, _flags: i32) -> i32 
     refuse()
 }
 
-/// A mapping's protection is fixed when it is made.
-#[no_mangle]
-pub unsafe extern "C" fn mprotect(_addr: *mut u8, _len: usize, _prot: i32) -> i32 {
-    refuse()
-}

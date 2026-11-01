@@ -100,6 +100,19 @@ impl<S: Copy> Domains<S> {
         assert!(window.handed_out(at.raw(), bytes), "iommu: domain{} never handed out {:#x}+{bytes:#x}", id.raw(), at.raw());
         Ok(*space)
     }
+
+    /// The domain's tables, for `start..end`, a range firmware reserved,
+    /// placed at its own address: one inside the union of what every domain's
+    /// window avoids (one range may join several reserved regions), which is
+    /// what makes the placement collide with nothing.
+    pub fn reserved_space(&self, id: DomainId, start: u64, end: u64) -> S {
+        assert!(
+            kernel::rmrr::covered(&self.reserved, start, end),
+            "iommu: domain{} placing {start:#x}..{end:#x} at its own address, which no domain avoids",
+            id.raw()
+        );
+        self.live[usize::from(id.raw() - self.first)].0
+    }
 }
 
 fn aligned(phys: u64) -> Result<(), IommuError> {

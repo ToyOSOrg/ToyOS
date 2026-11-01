@@ -1,5 +1,5 @@
 //! A holder's end gives its claim back before anyone can see it end: a
-//! function no `drives` row names ([`SPARES`]) is handed to a child that holds
+//! function no `drives` row drives ([`SPARES`]) is handed to a child that holds
 //! it, the child is killed and waited for, and the claim is asked for at once, for
 //! [`ROUNDS`] rounds. Any refusal is red; how long each step took is printed
 //! and not judged.
@@ -23,9 +23,9 @@ use toyos_abi::syscall::PciId;
 
 const SELF_PATH: &str = "/system/bin/test_rs_end_returns_claims";
 
-/// The controllers a boot of this job leaves to a claim: QEMU's `qemu-xhci`
-/// and the T14's Type-C controller, as `usbd_spare`'s.
-const SPARES: [PciId; 3] = [
+/// The controllers a boot of this job can leave to a claim, as `usbd_spare`'s.
+const SPARES: [PciId; 4] = [
+    PciId { vendor: 0x8086, device: 0xa0ed },
     PciId { vendor: 0x1b36, device: 0x000d },
     PciId { vendor: 0x8086, device: 0x9a13 },
     PciId { vendor: 0x1022, device: 0x1639 },
@@ -54,7 +54,7 @@ fn spelled(id: PciId) -> String {
 /// The spare this machine has, as `usbd_spare` chooses it, named by its
 /// arrival, so every round claims that function and no other of its card.
 fn spare(cap: &SysCap) -> (PciId, Arrival) {
-    let pci = spare::of(cap, &SPARES).expect("end_returns_claims: no one spare controller on this machine");
+    let pci = spare::of(cap, &SPARES).expect("end_returns_claims: no spare controller on this machine");
     (PciId { vendor: pci.vendor, device: pci.device }, pci.arrival)
 }
 
@@ -71,12 +71,10 @@ fn rounds() {
     for round in 0..ROUNDS {
         let mut child = Command::new(SELF_PATH)
             .arg("hold")
-            .endow(CLAIM_LABEL, toyos::AsHandle::as_handle(&dev).0)
+            .endow(CLAIM_LABEL, dev.into())
             .stdout(Stdio::piped())
             .spawn()
             .expect("end_returns_claims: spawn the holder");
-        // Moved: the spawn holds it now.
-        std::mem::forget(dev);
         let mut said = String::new();
         BufReader::new(child.stdout.take().expect("the holder's piped stdout"))
             .read_line(&mut said)

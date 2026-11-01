@@ -25,3 +25,5 @@ ranks it with the three.
 **Exit:** the order is refused by something that fails (a type or a
 checked lock level), or every caller is shown to hold none of the three and
 the invariant is one line in `user_ptr.rs`'s header.
+
+This is stage S0-a of `issues/anonymous-memory-swaps-to-an-encrypted-partition.md`.

@@ -19,14 +19,15 @@ pub struct Region {
 }
 
 impl Region {
-    /// A fresh region, for a client opening a session.
+    /// A fresh region, for a client opening a session: memory the disk's
+    /// driver can lend its device.
     pub fn create() -> Result<Self, SyscallError> {
-        Ok(Self { memory: SharedMemory::create(SESSION_BYTES)? })
+        Ok(Self { memory: SharedMemory::create_for_device(SESSION_BYTES)? })
     }
 
     /// A region a client sent, refused unless it is memory the kernel
     /// allocated and exactly a session long.
-    pub fn lent(handle: toyos::RawHandle) -> Result<Self, Lent> {
+    pub fn lent(handle: toyos::OwnedHandle) -> Result<Self, Lent> {
         Ok(Self { memory: SharedMemory::lent(handle, SESSION_BYTES)? })
     }
 
@@ -50,13 +51,18 @@ impl Region {
         whole.sub(run.span().offset, run.span().len)
     }
 
+    /// The whole region, for the driver's own work on a region it made.
+    pub fn window(&self) -> Window {
+        // SAFETY: as `arena`'s.
+        unsafe { Window::new(self.memory.as_ptr(), SESSION_BYTES) }
+    }
+
     /// A second handle to the region, for a send.
     pub fn share(&self) -> Result<toyos::OwnedHandle, SyscallError> {
         self.memory.share()
     }
 
-    pub fn handle(&self) -> toyos::RawHandle {
-        use toyos::AsHandle;
-        self.memory.as_handle()
+    pub fn handle(&self) -> toyos::BorrowedHandle<'_> {
+        toyos::AsHandle::as_handle(&self.memory)
     }
 }

@@ -32,8 +32,6 @@ pub fn to_io_error(e: toyos_abi::syscall::SyscallError) -> crate::io::Error {
         SyscallError::NotSupported => ErrorKind::Unsupported,
         SyscallError::Io => ErrorKind::Other,
         SyscallError::Gone => ErrorKind::BrokenPipe,
-        // A read of a connection met handles the peer sent with no frame announcing them.
-        SyscallError::HandlesPending => ErrorKind::InvalidData,
     };
     crate::io::Error::from(kind)
 }
@@ -43,11 +41,11 @@ pub fn to_io_error(e: toyos_abi::syscall::SyscallError) -> crate::io::Error {
 /// and one a library keeps as no kernel handle is no file to a kernel call.
 pub fn on_fd<T>(
     fd: i32,
-    f: impl FnOnce(toyos_abi::RawHandle) -> Result<T, toyos_abi::syscall::SyscallError>,
+    f: impl FnOnce(toyos::BorrowedHandle<'_>) -> Result<T, toyos_abi::syscall::SyscallError>,
 ) -> crate::io::Result<T> {
-    let answer = toyos::fd::with(fd, |object| match object.release {
-        None => f(object.handle).map_err(to_io_error),
-        Some(_) => Err(crate::io::const_error!(
+    let answer = toyos::fd::with(fd, |object| match object.kernel_handle() {
+        Some(handle) => f(handle).map_err(to_io_error),
+        None => Err(crate::io::const_error!(
             crate::io::ErrorKind::Unsupported,
             "the descriptor names an object of a library's own",
         )),
@@ -90,14 +88,16 @@ pub fn served_error(e: toyos::fs::Error) -> crate::io::Error {
         Error::Io => io::const_error!(Kind::Other, "the volume's device failed, or its structures do not decode"),
         Error::Stale => io::const_error!(
             Kind::StaleNetworkFileHandle,
-            "the file was removed, or its file server restarted, since it was opened",
+            "the file was removed or replaced, or its file server restarted, since it was opened",
         ),
         Error::UnknownFile => io::const_error!(Kind::InvalidInput, "the file server holds no such open file"),
         Error::InvalidPath => io::const_error!(Kind::InvalidInput, "the path is not one the file server takes"),
         Error::InvalidRequest => io::const_error!(Kind::InvalidInput, "the file server takes no such request"),
         Error::Unsupported => io::const_error!(Kind::Unsupported, "the volume's format has no such thing"),
         Error::OutOfResources => io::const_error!(Kind::OutOfMemory, "the kernel had no room for the request"),
-        Error::NoDirectory => io::const_error!(Kind::NotADirectory, "the connection was given files and no directory"),
+        Error::NoDirectory => {
+            io::const_error!(Kind::NotADirectory, "the connection was given open files and no directory")
+        }
         Error::Gone => io::const_error!(Kind::StaleNetworkFileHandle, "the file server is gone"),
         Error::NotHeld => io::const_error!(Kind::NotFound, "this process holds no such directory"),
         Error::Malformed => io::const_error!(Kind::InvalidData, "the file server answered outside its protocol"),
@@ -118,6 +118,10 @@ pub fn files_error(e: toyos::files::Error) -> crate::io::Error {
             io::const_error!(io::ErrorKind::CrossesDevices, "the two paths are on different servers")
         }
         files::Error::NotAFile => io::const_error!(io::ErrorKind::InvalidInput, "the descriptor names no file"),
+        files::Error::NotADirectory => {
+            io::const_error!(io::ErrorKind::NotADirectory, "the descriptor names no directory")
+        }
+        files::Error::Stream(refused) => crate::sys::net::stream_refused(refused),
     }
 }
 
@@ -132,6 +136,11 @@ pub fn refused(refused: toyos::spawn::Refused) -> crate::io::Error {
         Refused::Stream(handle) => {
             Error::new(ErrorKind::InvalidInput, toyos::net::stream::Misuse::Moved(handle).to_string())
         }
+        Refused::Export(e) => match e {
+            toyos::net::NetError::NetstackNotFound => Error::from(ErrorKind::ConnectionAborted),
+            toyos::net::NetError::ResourceExhausted => Error::from(ErrorKind::QuotaExceeded),
+            _ => Error::from(ErrorKind::Other),
+        },
         Refused::NotStarted => Error::from(ErrorKind::Other),
         Refused::Syscall(e) => to_io_error(e),
     }
@@ -139,7 +148,7 @@ pub fn refused(refused: toyos::spawn::Refused) -> crate::io::Error {
 
 /// A kernel handle this process just got, as a descriptor of its own: std
 /// creates descriptors not inherited, as std is close-on-exec on unix.
-pub fn new_fd(handle: toyos_abi::RawHandle) -> crate::io::Result<i32> {
+pub fn new_fd(handle: toyos::OwnedHandle) -> crate::io::Result<i32> {
     toyos::fd::install(toyos::fd::Object::handle(handle), false, 0).map_err(fd_error)
 }
 

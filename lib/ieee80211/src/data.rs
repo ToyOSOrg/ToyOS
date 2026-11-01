@@ -1,7 +1,6 @@
 //! Data frame bodies: the CCMP header (§12.5.2.2), A-MSDU (§9.3.2.2), and translation between an
-//! MSDU and an Ethernet II frame as §5.1.4 recommends, by ISO/IEC TR 11802-5:1997 (formerly IEEE
-//! Std 802.1H): an RFC 1042 LLC/SNAP header, or the bridge-tunnel one for the two EtherTypes its
-//! selective translation table sends that way.
+//! MSDU and an Ethernet II frame under RFC 1042's LLC/SNAP header alone, every EtherType alike:
+//! §5.1.4's bridge-tunnel translation is not implemented, and its OUI is refused as any other.
 
 use crate::frame::Data;
 use crate::read::Reader;
@@ -109,10 +108,6 @@ pub struct Ethernet<'a> {
 }
 
 const SNAP: [u8; 6] = [0xAA, 0xAA, 0x03, 0x00, 0x00, 0x00];
-const BRIDGE_TUNNEL: [u8; 6] = [0xAA, 0xAA, 0x03, 0x00, 0x00, 0xF8];
-/// The EtherTypes the selective translation table carries under the bridge-tunnel OUI: AppleTalk
-/// AARP and IPX.
-const TUNNELED: [u16; 2] = [0x80F3, 0x8137];
 /// The least type: IEEE Std 802.3-2022 §3.2.6 reads a Length/Type value of at most 1500 as a
 /// length and one of at least 1536 (0x0600) as a type.
 const MIN_ETHERTYPE: u16 = 0x0600;
@@ -128,10 +123,7 @@ impl<'a> Ethernet<'a> {
         if [llc0, llc1, llc2] != [0xAA, 0xAA, 0x03] {
             return Err(Refused::NotSnap);
         }
-        if header == SNAP && TUNNELED.contains(&ethertype) {
-            return Err(Refused::TranslatedType);
-        }
-        if header != SNAP && header != BRIDGE_TUNNEL {
+        if header != SNAP {
             return Err(Refused::UnknownOui);
         }
         if ethertype < MIN_ETHERTYPE {
@@ -146,7 +138,7 @@ pub fn llc_snap(ethertype: u16) -> Result<[u8; LLC_SNAP_LEN], Refused> {
     if ethertype < MIN_ETHERTYPE {
         return Err(Refused::LengthField);
     }
-    let [oui0, oui1, oui2, oui3, oui4, oui5] = if TUNNELED.contains(&ethertype) { BRIDGE_TUNNEL } else { SNAP };
+    let [oui0, oui1, oui2, oui3, oui4, oui5] = SNAP;
     let [t0, t1] = ethertype.to_be_bytes();
     Ok([oui0, oui1, oui2, oui3, oui4, oui5, t0, t1])
 }

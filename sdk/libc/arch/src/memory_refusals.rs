@@ -30,8 +30,7 @@ fn mmap_refuses_what_the_kernel_cannot_map_and_nothing_else() {
     }
 }
 
-/// The kernel unmaps a mapping only by the length it was asked to map, so
-/// `munmap` names the mapping exactly when both lengths are the same pages.
+/// A length names the whole pages it reaches into, as POSIX maps and unmaps.
 #[test]
 fn a_length_names_the_pages_it_reaches_into() {
     for (len, want) in [
@@ -47,14 +46,6 @@ fn a_length_names_the_pages_it_reaches_into() {
     ] {
         assert_eq!(memreq::whole_pages(len), want, "{len:#x}");
     }
-    // Two pages mapped: their first page alone is another length, and so is a
-    // byte past them; a length ending anywhere in the second page is theirs.
-    let mapped = memreq::whole_pages(8192);
-    for (len, whole) in [(4096, false), (4097, true), (8000, true), (8192, true), (8193, false)] {
-        assert_eq!(memreq::whole_pages(len) == mapped, whole, "munmap of {len} bytes of an 8192-byte mapping");
-    }
-    // And a mapping asked for by a length off a page is named by its pages.
-    assert_eq!(memreq::whole_pages(5000), memreq::whole_pages(8192));
 }
 
 #[test]
@@ -64,19 +55,34 @@ fn posix_madvise_takes_its_five_and_only_them() {
 }
 
 #[test]
-fn madvise_takes_its_hints_and_refuses_its_discard() {
-    use memreq::AdviceRefusal::{Discard, Invalid};
+fn madvise_takes_its_hints_and_discards_for_dontneed() {
+    use memreq::Advice::{Discard, Hint};
     let page = 0x4000_0000;
     for (addr, advice, want) in [
-        (page, 0, None),
-        (page, 1, None),
-        (page, 2, None),
-        (page, 3, None),
+        (page, 0, Some(Hint)),
+        (page, 1, Some(Hint)),
+        (page, 2, Some(Hint)),
+        (page, 3, Some(Hint)),
         (page, 4, Some(Discard)),
-        (page, 5, Some(Invalid)),
-        (page, -1, Some(Invalid)),
-        (page + 1, 3, Some(Invalid)),
+        (page, 5, None),
+        (page, -1, None),
+        (page + 1, 3, None),
     ] {
-        assert_eq!(memreq::madvise_refusal(addr, advice), want, "madvise({addr:#x}, {advice})");
+        assert_eq!(memreq::madvise(addr, advice), want, "madvise({addr:#x}, {advice})");
+    }
+}
+
+#[test]
+fn a_protection_word_names_one_access_or_is_refused() {
+    use memreq::Access;
+    for (prot, want) in [
+        (0, Some(Access::None)),
+        (PROT_READ, Some(Access::Read)),
+        (PROT_WRITE, Some(Access::ReadWrite)),
+        (PROT_READ | PROT_WRITE, Some(Access::ReadWrite)),
+        (PROT_READ | PROT_EXEC, Some(Access::Exec)),
+        (0x8, None),
+    ] {
+        assert_eq!(memreq::access(prot), want, "prot {prot:#x}");
     }
 }

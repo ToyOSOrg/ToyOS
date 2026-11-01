@@ -34,8 +34,8 @@ fn backend() -> Backend {
 const MAX_PHYS: u64 = 1 << 52;
 
 /// The units of whichever table firmware published.
-pub fn init(rsdp_addr: u64, devices: &[PciDevice]) {
-    let found = if super::vtd::init(rsdp_addr, devices) {
+pub fn init(rsdp_addr: u64, devices: &[PciDevice], kernel: (u64, u64)) {
+    let found = if super::vtd::init(rsdp_addr, devices, kernel) {
         Backend::Vtd
     } else if super::amdvi::init(rsdp_addr, devices) {
         Backend::AmdVi
@@ -146,10 +146,19 @@ pub mod domain {
         }
     }
 
+    /// Map what firmware reserved for `stream` at its own addresses in `id`,
+    /// before `stream` attaches to it. AMD-Vi refuses such a function a claim
+    /// ([`unclaimable`]), so it has nothing to map.
+    pub fn keep_reserved(id: DomainId, stream: StreamId) {
+        if backend() == Backend::Vtd {
+            vtd::domain::keep_reserved(id, stream);
+        }
+    }
+
     /// Why `stream` keeps the machine's own addresses rather than a domain of
     /// its own, if it does: AMD-Vi's reasons. VT-d answers `None` for every
-    /// function, an RMRR's included, which it moves off the identity domain
-    /// like any other.
+    /// function: one an RMRR keeps moves off the identity domain with the
+    /// range mapped in its own.
     pub fn untranslated(stream: StreamId) -> Option<&'static str> {
         match backend() {
             Backend::AmdVi => amdvi::domain::untranslated(stream),
@@ -158,12 +167,13 @@ pub mod domain {
     }
 
     /// Why no claim may have `stream`, if none may: [`untranslated`]'s
-    /// reasons and the requester ids AMD-Vi's platform speaks as. VT-d
-    /// answers `None`.
+    /// reasons and the requester ids AMD-Vi's platform speaks as; on VT-d, an
+    /// RMRR that names it and does not keep it (`vtd::classify`).
     pub fn unclaimable(stream: StreamId) -> Option<&'static str> {
         match backend() {
             Backend::AmdVi => amdvi::domain::unclaimable(stream),
-            Backend::Vtd | Backend::None => None,
+            Backend::Vtd => vtd::domain::unclaimable(stream),
+            Backend::None => None,
         }
     }
 

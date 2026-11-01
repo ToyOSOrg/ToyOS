@@ -157,7 +157,7 @@ pub fn stop() -> (Record, Stopping) {
     // Last: a gate that sees the stop sees the caller it must not stop.
     STAGE.open(STOPPING);
 
-    crate::arch::irqchip::kick_all_but_self();
+    crate::sched::driver::ring_all_but_self();
     let cpus = crate::smp::cpu_count();
 
     let began = crate::clock::now();

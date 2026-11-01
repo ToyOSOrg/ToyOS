@@ -1,14 +1,15 @@
 use std::io::{self, BufRead, Write};
-use std::os::toyos::process::{ChildExt, CommandExt};
+use std::os::toyos::process::CommandExt;
 use std::process::{Command, Stdio};
-use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
-use std::sync::Mutex;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Mutex, PoisonError};
 use std::time::Duration;
 
-use toyos::endow::{Endowments, SYSCAP_LABEL};
-use toyos::power::Stop;
+use toyos::endow::{Endowments, FromHandle, SYSCAP_LABEL};
+use toyos::power::{Mode, Pending, Refused, Stop, Update};
 use toyos::process::Process;
 use toyos::syscap::SysCap;
+use toyos_session::LOGIN_PORT;
 
 /// The job the runner is inside, and whether the list got through: written by
 /// the loop, read by the deadline watching it.
@@ -16,14 +17,36 @@ static RUNNING: Mutex<String> = Mutex::new(String::new());
 static FINISHED: AtomicBool = AtomicBool::new(false);
 
 /// A second handle to the job now running, for the deadline to end it with, or
-/// zero between jobs.
+/// none between jobs.
 ///
-/// **Taken out with a swap, by whichever of the two gets there first**, so the
-/// handle has exactly one owner and the loop closing it cannot leave the
-/// deadline killing whatever the slot was handed to next. A duplicate and not
-/// the `Child`'s own handle, because a `Child` has one owner and the loop is
-/// blocked inside its `wait`.
-static JOB: AtomicU32 = AtomicU32::new(0);
+/// **Taken out by whichever of the two gets there first**, so the loop closing
+/// it cannot leave the deadline killing whatever the slot was handed to next. A
+/// duplicate and not the `Child`'s own handle, because a `Child` has one owner
+/// and the loop is blocked inside its `wait`.
+static JOB: Mutex<Option<Process>> = Mutex::new(None);
+
+/// What this row is endowed as a login authority, where it is one: its `login`
+/// connector, which each job is handed a copy of, and the launcher of the
+/// session it opens for its jobs, which a login authority's launches are in.
+struct Login {
+    connector: toyos::namespace::Namespace,
+    session: toyos::namespace::Namespace,
+    _control: toyos::ipc::Connection,
+}
+
+static LOGIN: std::sync::OnceLock<Option<Login>> = std::sync::OnceLock::new();
+
+fn login() -> Option<&'static Login> {
+    LOGIN
+        .get_or_init(|| {
+            let connector = Endowments::get().take::<toyos::namespace::Namespace>(LOGIN_PORT)?;
+            match toyos_session::open(&connector) {
+                Ok((session, control)) => Some(Login { connector, session, _control: control }),
+                Err(why) => panic!("test-runner: a login authority with no session for its jobs: {why}"),
+            }
+        })
+        .as_ref()
+}
 
 /// Set by the deadline before it kills the job it was watching, so the loop
 /// that kill releases does not start another one.
@@ -50,12 +73,7 @@ fn stand_down() -> ! {
 
 /// Take the running job, if it is still this thread's to take.
 fn claim_the_job() -> Option<Process> {
-    match JOB.swap(0, Ordering::AcqRel) {
-        0 => None,
-        // SAFETY: the swap is what makes this the only holder of the duplicate
-        // `run_one` made; nothing else answers for it after this.
-        raw => Some(unsafe { Process::from_raw(toyos::RawHandle(raw)) }),
-    }
+    JOB.lock().unwrap_or_else(PoisonError::into_inner).take()
 }
 
 fn main() {
@@ -72,7 +90,8 @@ fn main() {
     let _ = io::stdout().flush();
 
     // **A machine with no host on the other end runs the jobs its manifest
-    // names**, one binary name per argument through the stdin path's own [`run_one`].
+    // names**, one job per argument — a binary name and its arguments —
+    // through the stdin path's own [`run_one`].
     let mut jobs: Vec<String> = std::env::args().skip(1).collect();
     // The one argument that is not a job: what the whole list gets.
     let mut bound_ms = toyos_tco::JOB_BOUND_MS;
@@ -84,13 +103,14 @@ fn main() {
     if !jobs.is_empty() {
         deadline(bound_ms);
         for job in &jobs {
-            // Fatal by name: nobody is reading this console, so a job that did not run must end the boot.
-            if job.split_whitespace().count() != 1 {
-                give_the_machine_back(&format!("job {job:?} is not one binary name"));
-            }
+            // A binary name and its arguments. Fatal by name: nobody is
+            // reading this console, so a job that did not run must end the boot.
+            let mut words = job.split_whitespace();
+            let Some(name) = words.next() else { give_the_machine_back("an empty job") };
+            let args: Vec<&str> = words.collect();
             *RUNNING.lock().expect("the deadline thread does not panic holding this") =
                 job.clone();
-            match run_one(job, &[], cap.as_ref()) {
+            match run_one(name, &args, cap.as_ref()) {
                 Ran::No => {
                     give_the_machine_back(&format!("job {job:?} did not run"))
                 }
@@ -156,7 +176,7 @@ fn deadline(bound_ms: u64) {
             let _ = job.kill();
             let _ = job.wait();
         }
-        fatal(&format!("the reboot was refused: {:?}", toyos::power::stop(Stop::Reboot)));
+        fatal(&format!("the reboot was refused: {:?}", reboot()));
     });
 }
 
@@ -177,10 +197,17 @@ fn deadline(bound_ms: u64) {
 fn give_the_machine_back(why: &str) -> ! {
     println!("test-runner: {why}");
     let _ = io::stdout().flush();
-    let refused = toyos::power::stop(Stop::Reboot);
+    let refused = reboot();
     println!("test-runner: the reboot was refused: {refused:?}");
     let _ = io::stdout().flush();
     std::process::exit(1);
+}
+
+/// The machine back to firmware, at once: the harness owns it, so its stop
+/// is the explicit decision and waits for no session. Comes back only where
+/// the machine did not stop.
+fn reboot() -> Result<Update, Refused> {
+    toyos::power::stop(Stop::Reboot, Mode::Terminate).map(Pending::outcome)
 }
 
 /// Say why, on a console that may have nobody on it, and end this process —
@@ -247,7 +274,7 @@ fn run_one(name: &str, args: &[&str], cap: Option<&SysCap>) -> Ran {
     // assertion about the log rather than about the handle.
     match cap.map(SysCap::duplicate) {
         Some(Ok(dup)) => {
-            command.endow(SYSCAP_LABEL, dup.into_raw().0);
+            command.endow(SYSCAP_LABEL, dup.into());
         }
         Some(Err(toyos_abi::syscall::SyscallError::PermissionDenied)) | None => {}
         Some(Err(e)) => {
@@ -256,15 +283,20 @@ fn run_one(name: &str, args: &[&str], cap: Option<&SysCap>) -> Ran {
             return Ran::No;
         }
     }
-    // Its launcher too, where its row starts anything: a job is a direct spawn,
-    // and a direct spawn inherits none.
-    if let Some(launcher) = toyos::endow::launcher() {
-        match toyos_abi::syscall::dup(toyos::AsHandle::as_handle(launcher)) {
+    // Its launcher too, where its row starts anything, and its `login`
+    // connector where its row is a login authority, whose launcher is the
+    // session it opened for its jobs: a job is a helper, and a helper
+    // inherits neither.
+    let login = login();
+    let launcher = login.map(|l| &l.session).or(toyos::endow::launcher());
+    for (label, held) in [(toyos::launch::LAUNCHER, launcher), (LOGIN_PORT, login.map(|l| &l.connector))] {
+        let Some(held) = held else { continue };
+        match toyos::AsHandle::as_handle(held).try_clone_to_owned() {
             Ok(dup) => {
-                command.endow(toyos::launch::LAUNCHER, dup.0);
+                command.endow(label, dup.into());
             }
             Err(e) => {
-                println!("===TEST_END {name} error=the launcher would not duplicate: {e:?}===");
+                println!("===TEST_END {name} error=its {label} would not duplicate: {e:?}===");
                 let _ = io::stdout().flush();
                 return Ran::No;
             }
@@ -281,8 +313,8 @@ fn run_one(name: &str, args: &[&str], cap: Option<&SysCap>) -> Ran {
             // outlives its bound and the machine is reset around it — and on a
             // machine with no console nothing anywhere says why. The list ends
             // here instead, by handing the machine back.
-            match toyos_abi::syscall::dup(toyos_abi::RawHandle(child.as_raw_handle())) {
-                Ok(watch) => JOB.store(watch.0, Ordering::Release),
+            match toyos::AsHandle::as_handle(&child).try_clone_to_owned() {
+                Ok(watch) => *JOB.lock().unwrap_or_else(PoisonError::into_inner) = Some(Process::from_handle(watch)),
                 Err(e) => give_the_machine_back(&format!(
                     "job {name:?} started and its handle would not duplicate ({e:?}), so the \
                      deadline has nothing to end it with"

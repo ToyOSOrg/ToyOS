@@ -17,6 +17,7 @@ use crate::{acd, igmp, limits, nud, IfIndex, Ip};
 
 pub(crate) struct Interface {
     pub mac: IndividualMac,
+    pub rank: crate::Rank,
     pub up: bool,
     /// In the order they were added.
     pub addresses: Vec<Address>,

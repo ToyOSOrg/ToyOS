@@ -106,14 +106,15 @@ resets every connected port and its controller before the kernel's stop
 (`toyos_xhci::hc::Hc::stop`). The boot deadline, the hard-lockup detector and
 a panic reset with no USB register touched, as #901 §6 accepted, and so does
 a stop whose usbd died, its function reset by its claim's release. The
-guard for that path is `stick_survives_a_reset_under_load`: `stick_load`
-writes the stick through usbd until the boot deadline resets the machine,
-judged on `boot.usbload.stick_secs` against the bench's record. It has not
-run yet.
+guard for that path was `stick_survives_a_reset_under_load`'s
+`boot.usbload.stick_secs`, `stick_load` writing the stick through usbd until
+the boot deadline reset the machine. Since the benches boot off their NVMe it
+writes the NVMe, and no row writes a stick on a bench
+(`issues/no-bench-row-drives-usb-storage-since-the-benches-boot-off-nvme.md`).
 
 ## Exit condition
 
 A reproduction of the hang itself — not of a reset — that leaves evidence off
 the stick, and an account of what the controller and the device were in when it
-happened. The regression guard is `stick_survives_a_reset_under_load`'s
-`boot.usbload.stick_secs`.
+happened. The regression guard is a reset under a write to a stick a bench
+row drives, which that issue's exit owes.

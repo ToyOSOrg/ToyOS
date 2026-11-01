@@ -15,7 +15,7 @@ other format is refused.
 
 **Client liveness waits on the same fork, not on soundserver alone.** The
 ambiguity between a paused and a wedged client is designed in: pausing is the
-client's stream thread simply not reading its signal pipe, with no
+client's stream thread simply not taking its signal event, with no
 coordination of any kind, and the cpal backend's `pause()` is a purely local
 store soundserver is never told about. No change confined to soundserver can
 separate the two, and landing the soundserver and SDK halves alone would kill

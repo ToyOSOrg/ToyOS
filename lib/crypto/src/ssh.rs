@@ -4,6 +4,7 @@
 //! without padding or length trailers. The nonce is the big-endian SSH packet
 //! sequence in eight bytes. Secret operations have fixed schedules; lengths
 //! and sequence exhaustion are public. Re-key before the sequence wraps.
+//! Opening may decrypt as it authenticates, and a refusal zeroes the payload.
 
 use crate::{Error, chacha, ct, poly1305::Poly1305, secret::Secret};
 /// The payload key, then the header key.
@@ -29,18 +30,22 @@ impl Keys {
             return false;
         }
         let nonce = u64::from(seq).to_be_bytes();
-        let mut states = Secret([[0u32; 16]; 4]);
-        for (i, state) in states.0.iter_mut().enumerate() {
-            let (key, counter) = if i == 0 { (self.header(), 0) } else { (self.payload(), i as u64 - 1) };
-            chacha::fill_legacy_state(state, key, &nonce, counter);
-        }
-        chacha::blocks(&states.0, 2 + length.div_ceil(64), stream);
+        let payload = self.payload();
+        chacha::blocks([self.header(), payload, payload, payload], [0, 0, 1, 2], &nonce, 2 + length.div_ceil(64), stream);
         true
     }
-    fn crypt(&self, seq: u32, header: &mut [u8; 4], payload: &mut [u8]) -> Result<(), Error> {
-        let nonce = u64::from(seq).to_be_bytes();
-        chacha::legacy_xor(self.header(), &nonce, 0, header)?;
-        chacha::legacy_xor(self.payload(), &nonce, 1, payload)
+    fn crypt_header(&self, seq: u32, header: &mut [u8; 4]) {
+        // Four bytes from block 0 cannot exhaust the counter.
+        chacha::legacy_xor(self.header(), &u64::from(seq).to_be_bytes(), 0, header).unwrap();
+    }
+    fn crypt_payload(&self, seq: u32, payload: &mut [u8]) -> Result<(), Error> {
+        chacha::legacy_xor(self.payload(), &u64::from(seq).to_be_bytes(), 1, payload)
+    }
+    /// The payload XORed and the tag over `header` and the payload's
+    /// ciphertext, in one pass where an instruction path runs.
+    fn one_pass(&self, seq: u32, header: &[u8; 4], payload: &mut [u8], seal: bool) -> Option<Secret<16>> {
+        let mac = chacha::openssh(self.payload(), &u64::from(seq).to_be_bytes(), header, payload, seal)?;
+        Some(Secret(mac.finish()))
     }
 }
 fn mac(key: &[u8; 32], header: &[u8; 4], payload: &[u8]) -> Secret<16> {
@@ -87,8 +92,14 @@ impl SealingKey {
                 mac(stream.0[64..96].try_into().unwrap(), header, payload)
             }
             false => {
-                self.keys.crypt(seq, header, payload)?;
-                self.keys.tag(seq, header, payload)
+                self.keys.crypt_header(seq, header);
+                match self.keys.one_pass(seq, header, payload, true) {
+                    Some(tag) => tag,
+                    None => {
+                        self.keys.crypt_payload(seq, payload)?;
+                        self.keys.tag(seq, header, payload)
+                    }
+                }
             }
         };
         self.next = seq.checked_add(1);
@@ -105,13 +116,7 @@ impl OpeningKey {
     /// allocations and authenticate the complete packet before using plaintext.
     pub fn packet_length(&self, seq: u32, encrypted: [u8; 4]) -> u32 {
         let mut header = encrypted;
-        chacha::legacy_xor(
-            self.keys.header(),
-            &u64::from(seq).to_be_bytes(),
-            0,
-            &mut header,
-        )
-        .unwrap();
+        self.keys.crypt_header(seq, &mut header);
         u32::from_be_bytes(header)
     }
     pub fn open(
@@ -125,19 +130,77 @@ impl OpeningKey {
             return Err(Error::Length);
         }
         let mut stream = Secret([0u8; 256]);
-        let short = self.keys.short(seq, payload.len(), &mut stream.0);
-        let expected = match short {
-            true => mac(stream.0[64..96].try_into().unwrap(), header, payload),
-            false => self.keys.tag(seq, header, payload),
+        // Without the one-pass path, the MAC comes first and only an
+        // authentic packet is decrypted.
+        let opened = if self.keys.short(seq, payload.len(), &mut stream.0) {
+            let opened = ct::equal(&mac(stream.0[64..96].try_into().unwrap(), header, payload).0, tag);
+            if opened {
+                crypt_short(&stream.0, header, payload);
+            }
+            opened
+        } else if let Some(expected) = self.keys.one_pass(seq, header, payload, false) {
+            let opened = ct::equal(&expected.0, tag);
+            if opened {
+                self.keys.crypt_header(seq, header);
+            }
+            opened
+        } else {
+            let opened = ct::equal(&self.keys.tag(seq, header, payload).0, tag);
+            if opened {
+                self.keys.crypt_header(seq, header);
+                self.keys.crypt_payload(seq, payload)?;
+            }
+            opened
         };
-        if !ct::equal(&expected.0, tag) {
+        if !opened {
+            crate::secret::wipe(payload);
             return Err(Error::Authentication);
         }
-        if short {
-            crypt_short(&stream.0, header, payload);
-            Ok(())
-        } else {
-            self.keys.crypt(seq, header, payload)
+        Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::vec::Vec;
+
+    /// Packets against the construction composed from portable blocks and
+    /// `poly1305::tag`, at every length the paths divide at; a forged one
+    /// opens to zeros. On an AVX2 host without AVX-512 the packets past 128
+    /// bytes take the one-pass kernel.
+    #[test]
+    fn packets_match_the_construction_composed_from_blocks() {
+        let key: [u8; 64] = core::array::from_fn(|i| (i * 29 + 5) as u8);
+        let seq = 0x0102_0304;
+        let nonce = u64::from(seq).to_be_bytes();
+        let stream = |key: &[u8], counter: u64, data: &mut [u8]| {
+            for (i, chunk) in data.chunks_mut(64).enumerate() {
+                let block = chacha::legacy_block(key.try_into().unwrap(), &nonce, counter + i as u64);
+                for (byte, mask) in chunk.iter_mut().zip(block.0) {
+                    *byte ^= mask;
+                }
+            }
+        };
+        for len in [0, 1, 11, 12, 13, 128, 129, 447, 448, 449, 575, 576, 577, 588, 589, 1100, 4096, 4097] {
+            let plain: Vec<u8> = (0..len).map(|i| (i * 7 + 3) as u8).collect();
+            let mut want_header = (len as u32).to_be_bytes();
+            stream(&key[32..], 0, &mut want_header);
+            let mut want = plain.clone();
+            stream(&key[..32], 1, &mut want);
+            let poly_key = chacha::legacy_block(key[..32].try_into().unwrap(), &nonce, 0);
+            let want_tag = crate::poly1305::tag(poly_key.0[..32].try_into().unwrap(), &[&want_header[..], &want].concat());
+            let (mut header, mut sealed) = ((len as u32).to_be_bytes(), plain.clone());
+            let (_, tag) = SealingKey::new(key, seq).seal(&mut header, &mut sealed).unwrap();
+            assert_eq!((header, &sealed, tag), (want_header, &want, want_tag), "{len} bytes");
+            let opener = OpeningKey::new(key);
+            let (mut forged_header, mut forged) = (header, sealed.clone());
+            let mut bad = tag;
+            bad[len % 16] ^= 1;
+            assert_eq!(opener.open(seq, &mut forged_header, &mut forged, &bad), Err(Error::Authentication), "{len} bytes");
+            assert_eq!((forged_header, forged), (header, std::vec![0; len]), "{len} bytes: the refusal left more than zeros");
+            opener.open(seq, &mut header, &mut sealed, &tag).unwrap();
+            assert_eq!(sealed, plain, "{len} bytes");
         }
     }
 }

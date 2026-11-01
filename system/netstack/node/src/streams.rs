@@ -13,28 +13,34 @@
 //! **Every word read from the region is the client's, and judged**: a cursor past its bound, or
 //! text published after its own shutdown, is a [`Violation`] that resets that stream alone.
 //!
-//! **A stream ends with its connection or its client.** Ended, the stream is let go and the
-//! client reads what the region holds. The client's hang-up ([`Node::left`]) closes the
-//! connection, which [tcp] finishes alone: what was published is sent before the FIN (§3.10.4),
-//! or a reset is sent where text is unread (§3.6.1).
+//! **A stream has holders**: the client that connected or accepted it, and one more for each
+//! [`Node::export`], each a process of its own over the one region, each taking a place past
+//! the first. A holder that leaves while others stay ([`Node::departed`]) has the gates it held
+//! let go and the rings it may have skipped rung, and a pass takes up every cursor it moved, so
+//! no holder that stays waits on it.
+//!
+//! **A stream ends with its connection or its last holder.** Ended, the stream is let go and
+//! the holders read what the region holds. The last holder's leaving closes the connection,
+//! which [tcp] finishes alone: what was published is sent before the FIN (§3.10.4), or a reset
+//! is sent where text is unread (§3.6.1).
 
 use alloc::boxed::Box;
 use alloc::collections::{BTreeMap, VecDeque};
 use core::sync::atomic::Ordering;
 use core::time::Duration;
 
-use toyos::net::stream::{Server, Words, LAYOUT, NODELAY, RECEIVE_BYTES, RESET, TIMED_OUT, UNREACHABLE};
+use toyos::net::stream::{Server, Words, ADDRESS_GONE, LAYOUT, NODELAY, RECEIVE_BYTES, RESET, TIMED_OUT, UNREACHABLE};
 use toyos_net_shard::ConnectError;
 use toyos_net_tcp::{ConnId, Endpoint, Error, Failure, Lent, Options, State, Status};
 use toyos_net_wire::{Instant, Port};
-use toyos::transport::session::Rings;
+use toyos::transport::session::{Holder, Rings};
 use toyos::transport::Violation;
 
 use crate::lease::Stack;
 use crate::Node;
 
-/// A client's session: the region it lent and its two doorbells. Dropped, the node holds
-/// neither, and the client's next look finds the `end` or the hang-up.
+/// A stream's session: the region its client lent and every holder's two doorbells. Dropped,
+/// the node holds none of them, and each holder's next look finds the `end` or the hang-up.
 pub trait Session {
     /// The region's header.
     fn words(&self) -> &Words;
@@ -42,7 +48,7 @@ pub trait Session {
     fn receive(&self) -> Box<dyn Lent>;
     /// The region's send ring, as [tcp]'s send buffer.
     fn send(&self) -> Box<dyn Lent>;
-    /// Rings the client's doorbells `rings` names, never waiting.
+    /// Rings the doorbells `rings` names, of every holder, never waiting.
     fn ring(&self, rings: Rings);
 }
 
@@ -52,6 +58,15 @@ pub enum ConnectRefused {
     /// The node holds all it has places for (`places`).
     Full,
     Stack(ConnectError),
+}
+
+/// Why an export made no holder.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ExportRefused {
+    /// The node holds all it has places for, and a holder past a socket's first takes one.
+    Full,
+    /// The id names no established stream, listener or datagram socket the node holds.
+    Gone,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
@@ -77,6 +92,7 @@ const fn code(failure: Failure) -> u32 {
         Failure::TimedOut => TIMED_OUT,
         Failure::Unreachable(_) | Failure::Prohibited => UNREACHABLE,
         Failure::Refused | Failure::Reset => RESET,
+        Failure::AddressGone => ADDRESS_GONE,
     }
 }
 
@@ -109,8 +125,10 @@ struct Stream {
     fin_queued: bool,
     /// The options last written to [tcp].
     options: Options,
-    /// The client rang since the last pass.
+    /// A holder rang since the last pass.
     rung: bool,
+    /// Its holders past the first, each of which takes a place.
+    more_holders: usize,
 }
 
 impl Stream {
@@ -257,9 +275,14 @@ impl Streams {
     /// has, `nodelay` among them written into the region's header.
     pub(crate) fn accepted(&mut self, stack: &mut Stack, conn: ConnId, options: Options, session: Box<dyn Session>) -> StreamId {
         session.words()[NODELAY].store(u32::from(options.nodelay), Ordering::Relaxed);
-        let mut stream = Stream { conn, session, server: None, deadline: None, held: 0, queued: 0, fin_queued: false, options, rung: false };
+        let mut stream = Stream { conn, session, server: None, deadline: None, held: 0, queued: 0, fin_queued: false, options, rung: false, more_holders: 0 };
         stream.lent(stack);
         self.hold(stream)
+    }
+
+    /// The holders past each stream's first, which take places of their own.
+    pub(crate) fn more_holders(&self) -> usize {
+        self.live.values().map(|stream| stream.more_holders).fold(0, usize::saturating_add)
     }
 
     pub(crate) fn next_deadline(&self) -> Option<Instant> {
@@ -279,7 +302,7 @@ impl Node {
         let options = Options { nodelay: session.words()[NODELAY].load(Ordering::Relaxed) != 0, ..Options::default() };
         self.stack.tcp_set_options(now, conn, options);
         let deadline = timeout.map(|within| now.after(within));
-        Ok(self.streams.hold(Stream { conn, session, server: None, deadline, held: 0, queued: 0, fin_queued: false, options, rung: false }))
+        Ok(self.streams.hold(Stream { conn, session, server: None, deadline, held: 0, queued: 0, fin_queued: false, options, rung: false, more_holders: 0 }))
     }
 
     /// One pass over every stream: netstack calls it once the kernel answered the connections it
@@ -298,11 +321,41 @@ impl Node {
         let Streams { live, events, .. } = &mut self.streams;
         let stack = &mut self.stack;
         live.retain(|id, stream| (connects && stream.server.is_some()) || stream.pass(*id, now, stack, events));
-        self.wake_owners(now);
+        self.tell_holders();
     }
 
-    /// The client hung up its connection: what it published is queued and [tcp] closes the
-    /// connection. A connect not yet answered is answered [`StreamEvent::Closed`].
+    /// A holder more for established stream `id`, which takes a place: the stream's peer and
+    /// its local port, for the holder to be told.
+    pub fn export(&mut self, id: StreamId) -> Result<(Endpoint, Port), ExportRefused> {
+        if self.room() == 0 {
+            return Err(ExportRefused::Full);
+        }
+        let stream = self.streams.live.get_mut(&id).filter(|stream| stream.server.is_some()).ok_or(ExportRefused::Gone)?;
+        stream.more_holders = stream.more_holders.saturating_add(1);
+        Ok(self.stack.tcp_endpoints(stream.conn))
+    }
+
+    /// `holder` of stream `id` left. Its last holder's leaving is the stream's ([`Self::left`]).
+    /// Another's lets go of the gates it held, rings each holder whose direction is ready, as
+    /// the departed holder's skipped rings would have, and runs a pass, which takes up every
+    /// cursor it moved.
+    pub fn departed(&mut self, now: Instant, id: StreamId, holder: Holder) {
+        let Some(stream) = self.streams.live.get_mut(&id) else { return };
+        let Some(more) = stream.more_holders.checked_sub(1) else { return self.left(now, id) };
+        stream.more_holders = more;
+        if let Some(server) = stream.server.as_mut() {
+            match server.departed(stream.session.words(), holder) {
+                Ok(rings) => stream.session.ring(rings),
+                // A word the departure judged is no client's: the pass meets it again, and resets
+                // the stream.
+                Err(_) => stream.rung = true,
+            }
+        }
+        self.pass(now, false);
+    }
+
+    /// The last holder hung up its connection: what it published is queued and [tcp] closes
+    /// the connection. A connect not yet answered is answered [`StreamEvent::Closed`].
     pub fn left(&mut self, now: Instant, id: StreamId) {
         let Some(mut stream) = self.streams.live.remove(&id) else { return };
         if stream.server.is_none() {

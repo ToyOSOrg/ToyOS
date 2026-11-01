@@ -18,7 +18,7 @@
 //! (`SYS_DEBUG` actions 10 and 11): where they are, and whether they still say
 //! what it put there.
 
-use toyos_abi::syscall::{self, DlopenArgs, MmapFlags, MmapProt, SyscallError};
+use toyos_abi::syscall::{self, DlopenArgs, VmAt, VmProt, SyscallError};
 
 use toyos_abi::syscall::debug_action::{CANARY_ADDR, CANARY_CHANGED};
 
@@ -26,7 +26,7 @@ use toyos_abi::syscall::debug_action::{CANARY_ADDR, CANARY_CHANGED};
 /// an `init_array` — so a successful call has something to report.
 const LIB: &[u8] = b"/system/lib/libtls_dlopen_lib.so";
 
-const PAGE_2M: u64 = 2 * 1024 * 1024;
+const PAGE: u64 = syscall::PAGE_SIZE as u64;
 
 /// `dl_open` builds its own `init_info` on the stack, so the typed wrapper
 /// cannot express the argument under test: `SYS_DLOPEN` of [`LIB`], read once
@@ -69,24 +69,13 @@ fn main() {
     }
     assert!(canary_intact(), "the canary changed while other kernel addresses were tried");
 
-    // 3. A user address is still refused unless the kernel can write the whole
-    //    16 bytes at it: misaligned, and straddling the 2 MiB page the one
-    //    translation answers for.
-    let region = unsafe {
-        syscall::mmap(
-            core::ptr::null_mut(),
-            2 * PAGE_2M as usize,
-            MmapProt::READ | MmapProt::WRITE,
-            MmapFlags::ANONYMOUS | MmapFlags::PRIVATE,
-        )
-    };
-    assert!(!region.is_null(), "mmap failed");
+    // 3. A user address off the value's alignment is still refused.
+    // SAFETY: placed anywhere, so it replaces nothing.
+    let region = unsafe { syscall::vm_reserve(2 * PAGE as usize, VmProt::ReadWrite, VmAt::ANYWHERE) }.expect("reserve two pages");
     let base = region as u64;
-    let boundary = (base + PAGE_2M) & !(PAGE_2M - 1);
-    for &addr in &[base + 4, boundary - 8] {
-        let ret = dlopen_raw(LIB, addr);
-        assert_eq!(err(ret), Some(SyscallError::BadAddress), "dlopen took {addr:#x}");
-    }
+    let boundary = base + PAGE;
+    let ret = dlopen_raw(LIB, base + 4);
+    assert_eq!(err(ret), Some(SyscallError::BadAddress), "dlopen took {:#x}", base + 4);
 
     // 3b. A refused dlopen must register nothing: the library loads and maps
     //     before the copy-out, so a `BadAddress` used to leave a module in the
@@ -103,18 +92,19 @@ fn main() {
     );
 
     // 4. And the syscall still does its job, which is what none of the above
-    //    may cost. Poisoned first, because a library with an empty init_array
-    //    is written two zeros and that is not distinguishable from a write that
-    //    never happened.
+    //    may cost, at an `init_out` whose two words lie on two pages. Poisoned
+    //    first, because a library with an empty init_array is written two
+    //    zeros and that is not distinguishable from a write that never
+    //    happened.
     const POISON: u64 = 0x_DEAD_BEEF_DEAD_BEEF;
-    let out = boundary - 16;
+    let out = boundary - 8;
     let words = out as *mut u64;
     unsafe {
         words.write_volatile(POISON);
         words.add(1).write_volatile(POISON);
     }
     let ret = dlopen_raw(LIB, out);
-    assert!(err(ret).is_none(), "dlopen refused an init_out ending at a page boundary: {ret:#x}");
+    assert!(err(ret).is_none(), "dlopen refused an init_out across two pages: {ret:#x}");
     let info = unsafe { [words.read_volatile(), words.add(1).read_volatile()] };
     assert!(
         info[0] != POISON && info[1] != POISON,
@@ -155,7 +145,7 @@ fn main() {
     let ret = unsafe { syscall::futex_wake(word, 1) };
     assert!(err(ret).is_none(), "futex_wake refused a word of this process's own: {ret:#x}");
 
-    unsafe { syscall::munmap(region, 2 * PAGE_2M as usize) }.expect("munmap");
+    unsafe { syscall::vm_release(region, 2 * PAGE as usize) }.expect("release");
     assert!(canary_intact(), "the canary changed during the run");
     println!("dlopen and futex refuse an address they may not reach, and kernel memory is untouched");
 }

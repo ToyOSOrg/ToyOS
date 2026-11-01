@@ -5,7 +5,7 @@
 
 use toyos::fs::Error;
 
-use crate::volume::{Kind, Meta, Node, OpenHow, Out, Volume};
+use crate::volume::{Kind, Listed, Meta, Node, OpenHow, Out, Reserved, Volume};
 
 pub struct Absent {
     roots: Vec<String>,
@@ -38,7 +38,7 @@ impl Volume for Absent {
         Err(Error::NotFound)
     }
 
-    fn list(&mut self, dir: &str) -> Result<Vec<(String, Meta)>, Error> {
+    fn list(&mut self, dir: &str) -> Result<Vec<Listed>, Error> {
         match self.is_root(dir) {
             true => Ok(Vec::new()),
             false => Err(Error::NotFound),
@@ -70,11 +70,19 @@ impl Volume for Absent {
         Err(Error::NotFound)
     }
 
-    fn write(&mut self, _node: Node, _offset: u64, _data: &[u8]) -> Result<(), Error> {
+    fn reserve(&mut self, _node: Node, _offset: u64, _len: u64) -> Result<Reserved, Error> {
+        Err(Error::NotFound)
+    }
+
+    fn write_back(&mut self, _node: Node, _offset: u64, _data: &[u8]) -> Result<(), Error> {
         Err(Error::NotFound)
     }
 
     fn truncate(&mut self, _node: Node, _size: u64) -> Result<(), Error> {
+        Err(Error::NotFound)
+    }
+
+    fn set_mtime(&mut self, _node: Node, _mtime: u64) -> Result<(), Error> {
         Err(Error::NotFound)
     }
 

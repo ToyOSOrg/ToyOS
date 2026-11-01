@@ -7,5 +7,16 @@ use crate::counters::Hardware;
 pub fn bring_up() {}
 
 pub fn read() -> Hardware {
-    Hardware { smi: None, aperf: None, mperf: None, envelope: None, firmware: None }
+    Hardware {
+        smi: None,
+        aperf: None,
+        mperf: None,
+        envelope: None,
+        firmware: None,
+        core_c6: None,
+        core_c7: None,
+        package: None,
+        package_residency: None,
+        core_energy: None,
+    }
 }

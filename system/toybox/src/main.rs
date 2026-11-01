@@ -16,6 +16,7 @@ mod roster;
 mod screen;
 mod shutdown;
 mod stats;
+mod stopping;
 mod tone;
 
 macro_rules! commands {

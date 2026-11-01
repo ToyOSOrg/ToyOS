@@ -1,5 +1,6 @@
 //! Every refusal, every drop that is not a plain duplicate, and every recovery event has a counter
-//! named `tcp.<name>`. A refusal of legacy or insecure input is also an event naming the rule and
+//! named `tcp.<name>`, as do the bytes sent and the time senders waited on the user, the peer's
+//! window or congestion. A refusal of legacy or insecure input is also an event naming the rule and
 //! both endpoints; [`RefusalLog`] decides which of those become a log line.
 
 use alloc::vec::Vec;
@@ -31,6 +32,8 @@ toyos_net_wire::counters! {
     TsMissing = "tcp.ts-missing", logged;
     PawsReject = "tcp.paws-reject";
     TsEcrInvalid = "tcp.ts-ecr-invalid";
+    RttFromDeparture = "tcp.rtt.departure";
+    RttFromEcho = "tcp.rtt.echo";
     RstChallenged = "tcp.rst-challenged", logged;
     SynChallenged = "tcp.syn-challenged", logged;
     AckOutOfRange = "tcp.ack-out-of-range", logged;
@@ -60,6 +63,7 @@ toyos_net_wire::counters! {
     NextHopFailed = "tcp.next-hop-failed";
     Rto = "tcp.rto";
     RtoUnsent = "tcp.rto-unsent";
+    SentBytes = "tcp.sent.bytes";
     RetransmitBytes = "tcp.retransmit.bytes";
     FastRecovery = "tcp.fast-recovery";
     SackRecovery = "tcp.sack-recovery";
@@ -68,6 +72,21 @@ toyos_net_wire::counters! {
     LossProbe = "tcp.loss-probe";
     LossProbeRecovery = "tcp.loss-probe-recovery";
     KeepaliveProbe = "tcp.keepalive-probe";
+    SendLimitedByUserNanos = "tcp.send-limited.user.ns";
+    SendLimitedByWindowNanos = "tcp.send-limited.window.ns";
+    SendLimitedByCongestionNanos = "tcp.send-limited.congestion.ns";
+    SendLimitedByPacingNanos = "tcp.send-limited.pacing.ns";
+    CongestionStops = "tcp.congestion-stops";
+    CongestionStopsCwndBytes = "tcp.congestion-stops.cwnd.bytes";
+    CongestionStopsSrttMicros = "tcp.congestion-stops.srtt.us";
+    AcksCwndLimited = "tcp.acks.cwnd-limited";
+    AcksNotLimited = "tcp.acks.not-limited";
+    CwndGrownBytes = "tcp.cwnd.grown.bytes";
+    HyStartCss = "tcp.hystart.css";
+    HyStartCssEntryRounds = "tcp.hystart.css.entry-rounds";
+    HyStartResumed = "tcp.hystart.resumed";
+    HyStartExits = "tcp.hystart.exits";
+    HyStartExitCwndBytes = "tcp.hystart.exit.cwnd.bytes";
     EventOverflow = "tcp.event-overflow";
 }
 
@@ -97,18 +116,18 @@ impl Log {
 
     /// Past [`limits::EVENTS`] undrained, an event is refused and counted: a peer never grows
     /// the list. A `Reachable` is not repeated while it is the newest advice pending for its
-    /// address: one peer's ACKs never crowd out another's refusals, and [ip] still reads each
-    /// address's advice in order.
+    /// pair of addresses: one peer's ACKs never crowd out another's refusals, and [ip] still
+    /// reads each pair's advice in order.
     pub fn event(&mut self, event: Event) {
         match event {
-            Event::Reachable(addr) if self.newest_advice(addr) == Some(&event) => {}
+            Event::Reachable { local, remote } if self.newest_advice(local, remote) == Some(&event) => {}
             _ if self.events.len() >= limits::EVENTS => self.count(Counter::EventOverflow),
             _ => self.events.push(event),
         }
     }
 
-    fn newest_advice(&self, addr: Ipv4Addr) -> Option<&Event> {
-        self.events.iter().rev().find(|e| matches!(e, Event::Reachable(a) | Event::Reverify(a) if *a == addr))
+    fn newest_advice(&self, local: Ipv4Addr, remote: Ipv4Addr) -> Option<&Event> {
+        self.events.iter().rev().find(|e| matches!(e, Event::Reachable { local: l, remote: r } | Event::Reverify { local: l, remote: r } if *l == local && *r == remote))
     }
 
     pub fn drain(&mut self) -> alloc::vec::Drain<'_, Event> {

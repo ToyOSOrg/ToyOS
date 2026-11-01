@@ -2,10 +2,12 @@
 //! `toyos-blockring`.
 //!
 //! **What a request means is `toyos_blockring::client::Client`'s to decide**;
-//! this is the mapping, the arena, the doorbell and the connection around it.
-//! A write's data is copied into the arena and stays there until a flush
-//! covers it, because after a loss it is the only copy there is; a read's is
-//! copied out when it is answered.
+//! this is the mapping, the arena and the doorbells around it.
+//! A request takes arena blocks only while it is on the wire. A write's blocks
+//! are the caller's, shared: the client keeps them with the write until a
+//! flush covers it, at most [`KEPT_BLOCKS`] before it flushes for them, and
+//! the session copies them into the arena each time the write goes out. A
+//! read's data is copied out when it is answered.
 //!
 //! **A service that ends is survivable and not invisible.** [`Session::wait`]
 //! reads every completion the server posted before it hung up, answers what
@@ -17,17 +19,25 @@
 
 use std::collections::BTreeMap;
 
-use toyos::ipc::Connection;
+use toyos::ipc::{Connection, Frame, FrameRx};
 use toyos::namespace::Namespace;
-use toyos::poller::{Poller, READABLE};
+use toyos::poller::READABLE;
+use toyos::wake::{Bell, Waker};
 use toyos_abi::syscall::SyscallError;
-use toyos_blockring::client::{Client, Outcome, Ticket};
-use toyos_blockring::entry::{Completion, Op};
+use toyos_blockdev::SharedBlock;
+use toyos_blockring::client::{Ask, Client, Outcome, Placing, Ticket};
+use toyos_blockring::entry::Completion;
 use toyos_blockring::layout::{self, ClientRings, ARENA, MAX_REQUEST_BLOCKS};
 use toyos_blockring::wire::{self, Opened, Refusal};
 use toyos_blockring::{Run, BLOCK_BYTES};
 
 use toyos_blockserve::region::Region;
+
+/// The most blocks of acknowledged writes a session keeps before the caller's
+/// next write waits for a flush of its own: 32 MiB, no less than a file
+/// server cache's dirty bound, so a cache that flushes by that bound is never
+/// made to flush by this one.
+pub const KEPT_BLOCKS: u64 = 8 * 1024;
 
 /// Why a session could not be opened or go on.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -69,8 +79,6 @@ pub struct Waited {
 /// caller that gave up on it would find it done under writes it made since.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Unsent {
-    /// The arena has no room: a flush releases what acknowledged writes hold.
-    ArenaFull,
     /// The session has ended: [`Session::reconnect`] first.
     Ended,
 }
@@ -109,7 +117,7 @@ impl Arena {
 }
 
 enum Pending {
-    Read { run: Run },
+    Read,
     Write,
     Flush,
 }
@@ -119,19 +127,18 @@ pub struct Session {
     service: String,
     guid: [u8; wire::GUID_BYTES],
     region: Region,
-    conn: Option<Connection>,
+    /// The open session's doorbells, `None` once it ended.
+    bells: Option<Bells>,
     rings: ClientRings,
-    client: Client,
+    client: Client<Vec<SharedBlock>>,
     opened: Opened,
     arena: Arena,
     next_ticket: Ticket,
     pending: BTreeMap<Ticket, Pending>,
-    poller: Poller,
+    /// Each read on the wire's arena blocks.
+    reads: BTreeMap<Ticket, Run>,
     /// The most requests this session has had on the wire at once.
     peak: usize,
-    /// Answers a synchronous call read on its way to its own, handed out by
-    /// the next [`Session::wait`].
-    stash: Vec<Answer>,
 }
 
 impl Session {
@@ -140,24 +147,23 @@ impl Session {
     pub fn open(names: Namespace, service: &str, guid: [u8; wire::GUID_BYTES]) -> Result<Self, Error> {
         let region = Region::create().map_err(Error::Kernel)?;
         let rings = layout::client(region.words());
-        let (conn, opened) = handshake(&names, service, guid, &region)?;
-        let mut client = Client::new();
+        let (bells, opened) = handshake(&names, service, guid, &region)?;
+        let mut client = Client::new(KEPT_BLOCKS);
         client.session_started();
         Ok(Self {
             names,
             service: service.to_string(),
             guid,
             region,
-            conn: Some(conn),
+            bells: Some(bells),
             rings,
             client,
             opened,
             arena: Arena::new(),
             next_ticket: 0,
             pending: BTreeMap::new(),
-            poller: Poller::new(1),
+            reads: BTreeMap::new(),
             peak: 0,
-            stash: Vec::new(),
         })
     }
 
@@ -182,40 +188,39 @@ impl Session {
         t
     }
 
-    /// Ask for `data` (whole blocks) written at `lba`.
-    pub fn submit_write(&mut self, lba: u64, data: &[u8]) -> Result<Ticket, Unsent> {
-        let blocks = whole_blocks(data.len());
-        if self.conn.is_none() {
+    /// Ask for `blocks` written at `lba`, which the session keeps a share of
+    /// until a flush covers the write. With [`KEPT_BLOCKS`] kept, it goes out
+    /// after a flush of the session's own.
+    pub fn submit_write(&mut self, lba: u64, blocks: &[SharedBlock]) -> Result<Ticket, Unsent> {
+        let count = transfer_blocks(blocks.len());
+        if self.bells.is_none() {
             return Err(Unsent::Ended);
         }
-        let run = self.arena.alloc(blocks).ok_or(Unsent::ArenaFull)?;
-        self.region.arena(&run).copy_in(0, data);
         let ticket = self.ticket();
-        self.client.submit(ticket, Op::Write { run, lba });
+        self.client.submit(ticket, Ask::Write { lba, blocks: count, payload: blocks.to_vec() });
         self.pending.insert(ticket, Pending::Write);
         Ok(ticket)
     }
 
     /// Ask for `blocks` read from `lba`; the answer carries the data.
     pub fn submit_read(&mut self, lba: u64, blocks: u32) -> Result<Ticket, Unsent> {
-        assert!((1..=MAX_REQUEST_BLOCKS).contains(&blocks), "a read of {blocks} blocks");
-        if self.conn.is_none() {
+        transfer_blocks(blocks as usize);
+        if self.bells.is_none() {
             return Err(Unsent::Ended);
         }
-        let run = self.arena.alloc(blocks).ok_or(Unsent::ArenaFull)?;
         let ticket = self.ticket();
-        self.client.submit(ticket, Op::Read { run, lba });
-        self.pending.insert(ticket, Pending::Read { run });
+        self.client.submit(ticket, Ask::Read { lba, blocks });
+        self.pending.insert(ticket, Pending::Read);
         Ok(ticket)
     }
 
     /// Ask for every write acknowledged so far to be made durable.
     pub fn submit_flush(&mut self) -> Result<Ticket, Unsent> {
-        if self.conn.is_none() {
+        if self.bells.is_none() {
             return Err(Unsent::Ended);
         }
         let ticket = self.ticket();
-        self.client.submit(ticket, Op::Flush);
+        self.client.submit(ticket, Ask::Flush);
         self.pending.insert(ticket, Pending::Flush);
         Ok(ticket)
     }
@@ -223,34 +228,49 @@ impl Session {
     /// Put what the client will send on the ring, and ring the doorbell once
     /// for all of it.
     fn pump(&mut self) {
-        let Some(conn) = &self.conn else { return };
-        let page = self.region.words();
+        let Self { bells, region, rings, client, arena, reads, .. } = self;
+        let Some(bells) = bells else { return };
+        let page = region.words();
+        let mut place = |p: Placing<'_, Vec<SharedBlock>>| match p {
+            Placing::Read { ticket, blocks } => {
+                let run = arena.alloc(blocks)?;
+                reads.insert(ticket, run);
+                Some(run)
+            }
+            Placing::Write { payload, blocks } => {
+                let run = arena.alloc(blocks)?;
+                let window = region.arena(&run);
+                for (k, block) in payload.iter().enumerate() {
+                    window.copy_in(k * BLOCK_BYTES, &***block);
+                }
+                Some(run)
+            }
+        };
         loop {
-            match self.rings.0.space(page) {
+            match rings.0.space(page) {
                 Ok(0) => break,
                 Ok(_) => {}
                 // The server wrote an index no server writes: the session is
-                // over, and the next read of the connection is where that is
-                // acted on.
+                // over, and the next drain is where that is acted on.
                 Err(_) => break,
             }
-            let Some(request) = self.client.next_request() else { break };
-            let pushed = self.rings.0.push(page, request.encode());
+            let Some(request) = client.next_request(&mut place) else { break };
+            let pushed = rings.0.push(page, request.encode());
             assert_eq!(pushed, Ok(true), "diskserver: a request past the room just counted");
         }
-        self.peak = self.peak.max(self.client.on_the_wire().count());
-        if self.rings.0.publish(page) {
-            // A full pipe is a doorbell already rung; a gone one is a server
-            // that has ended, which the wait finds.
-            let _ = conn.write_nonblock(&[1]);
+        let on_the_wire = client.on_the_wire().count();
+        if rings.0.publish(page) {
+            // A server that has ended is found by the wait.
+            bells.ring.wake();
         }
+        self.peak = self.peak.max(on_the_wire);
     }
 
     /// Every answer there is; with `block`, wait until there is at least one
     /// or the service has ended.
     pub fn wait(&mut self, block: bool) -> Waited {
-        let mut waited = Waited { answers: core::mem::take(&mut self.stash), ended: false };
-        if self.conn.is_none() {
+        let mut waited = Waited::default();
+        if self.bells.is_none() {
             waited.ended = true;
             return waited;
         }
@@ -269,13 +289,11 @@ impl Session {
             if !waited.answers.is_empty() || !block {
                 return waited;
             }
-            let Some(conn) = &self.conn else {
+            let Some(bells) = &self.bells else {
                 waited.ended = true;
                 return waited;
             };
-            self.poller.watch(conn, READABLE, 0);
-            self.poller.wait(1, u64::MAX, |_| {});
-            if !self.take_doorbells() {
+            if bells.answered.wait_for(u64::MAX).is_err() {
                 // What the server posted before it went is real: read it
                 // before the rest is answered refused.
                 self.drain();
@@ -310,31 +328,23 @@ impl Session {
         violated
     }
 
-    /// Consume the doorbell bytes; `false` if the server has hung up.
-    fn take_doorbells(&mut self) -> bool {
-        let Some(conn) = &self.conn else { return false };
-        let mut sink = [0u8; 64];
-        loop {
-            match conn.read_nonblock(&mut sink) {
-                Ok(0) => return false,
-                Ok(_) => continue,
-                Err(SyscallError::WouldBlock) => return true,
-                Err(_) => return false,
-            }
-        }
-    }
-
     fn collect(&mut self, answers: &mut Vec<Answer>) {
         let decided: Vec<_> = self.client.take_answers().collect();
         for (ticket, outcome) in decided {
             let pending = self.pending.remove(&ticket).expect("diskserver: an answer for no ticket");
             let data = match (pending, outcome) {
-                (Pending::Read { run }, Outcome::Done) => {
-                    let mut data = vec![0u8; run.span().len];
-                    self.region.arena(&run).copy_out(0, &mut data);
-                    Some(data)
+                (Pending::Read, outcome) => {
+                    let run = self.reads.remove(&ticket);
+                    match (run, outcome) {
+                        (Some(run), Outcome::Done) => {
+                            let mut data = vec![0u8; run.span().len];
+                            self.region.arena(&run).copy_out(0, &mut data);
+                            Some(data)
+                        }
+                        _ => None,
+                    }
                 }
-                _ => None,
+                (Pending::Write | Pending::Flush, _) => None,
             };
             answers.push(Answer { ticket, outcome, data });
         }
@@ -345,7 +355,7 @@ impl Session {
     }
 
     fn end(&mut self, waited: &mut Waited) {
-        self.conn = None;
+        self.bells = None;
         self.client.session_ended();
         self.collect(&mut waited.answers);
         waited.ended = true;
@@ -358,117 +368,73 @@ impl Session {
     /// name whose server is being restarted queues the connection until the
     /// new one accepts it.
     pub fn reconnect(&mut self) -> Result<(), Error> {
-        assert!(self.conn.is_none(), "diskserver: reconnect while a session is open");
+        assert!(self.bells.is_none(), "diskserver: reconnect while a session is open");
         // Before the region goes to the new server: it must find this end's
         // two indices at zero, as it will set its own.
         self.rings = layout::client(self.region.words());
-        let (conn, opened) = handshake(&self.names, &self.service, self.guid, &self.region)?;
+        let (bells, opened) = handshake(&self.names, &self.service, self.guid, &self.region)?;
         if opened != self.opened {
             return Err(Error::Protocol);
         }
-        self.conn = Some(conn);
+        self.bells = Some(bells);
         self.client.session_started();
         self.pump();
         Ok(())
     }
-
-    /// Wait for one ticket, across nothing: an end is an error here.
-    pub fn run(&mut self, ticket: Ticket) -> Result<Answer, Error> {
-        loop {
-            let waited = self.wait(true);
-            let mut found = None;
-            for answer in waited.answers {
-                if answer.ticket == ticket {
-                    found = Some(answer);
-                } else {
-                    self.stash.push(answer);
-                }
-            }
-            if let Some(answer) = found {
-                return Ok(answer);
-            }
-            if waited.ended {
-                return Err(Error::Ended);
-            }
-        }
-    }
-
-    /// Write `data` at `lba` and wait for its answer; a full arena is made
-    /// room in by a flush first.
-    pub fn write(&mut self, lba: u64, data: &[u8]) -> Result<Outcome, Error> {
-        let ticket = match self.submit_write(lba, data) {
-            Ok(ticket) => ticket,
-            Err(Unsent::Ended) => return Err(Error::Ended),
-            Err(Unsent::ArenaFull) => {
-                self.flush()?;
-                self.submit_write(lba, data).map_err(|_| Error::Ended)?
-            }
-        };
-        self.run(ticket).map(|a| a.outcome)
-    }
-
-    /// Read `blocks` from `lba`.
-    pub fn read(&mut self, lba: u64, blocks: u32) -> Result<(Outcome, Option<Vec<u8>>), Error> {
-        let ticket = match self.submit_read(lba, blocks) {
-            Ok(ticket) => ticket,
-            Err(Unsent::Ended) => return Err(Error::Ended),
-            Err(Unsent::ArenaFull) => {
-                self.flush()?;
-                self.submit_read(lba, blocks).map_err(|_| Error::Ended)?
-            }
-        };
-        self.run(ticket).map(|a| (a.outcome, a.data))
-    }
-
-    /// Flush, and wait for it.
-    pub fn flush(&mut self) -> Result<Outcome, Error> {
-        let ticket = self.submit_flush().map_err(|_| Error::Ended)?;
-        self.run(ticket).map(|a| a.outcome)
-    }
 }
 
-fn whole_blocks(len: usize) -> u32 {
-    assert!(len > 0 && len % BLOCK_BYTES == 0, "diskserver: a transfer of {len} bytes is no whole blocks");
-    let blocks = (len / BLOCK_BYTES) as u32;
-    assert!(blocks <= MAX_REQUEST_BLOCKS, "diskserver: a transfer of {blocks} blocks");
-    blocks
+fn transfer_blocks(blocks: usize) -> u32 {
+    assert!((1..=MAX_REQUEST_BLOCKS as usize).contains(&blocks), "diskserver: a transfer of {blocks} blocks");
+    blocks as u32
 }
 
-fn connect(names: &Namespace, service: &str) -> Result<Connection, Error> {
+pub(crate) fn connect(names: &Namespace, service: &str) -> Result<Connection, Error> {
     names.open(service).map_err(|e| match e {
         SyscallError::NotFound => Error::NotHeld,
         e => Error::Kernel(e),
     })
 }
 
-/// The header of the service's answer on `conn`, once it is there, within
+/// The service's answer on `conn`, taken into `rx` once it is there, within
 /// [`wire::ANSWER_BOUND_NS`].
-fn answer(conn: &Connection) -> Result<toyos::ipc::IpcHeader, Error> {
-    let poller = Poller::new(1);
-    poller.watch(conn, READABLE, 0);
-    let mut ready = false;
-    poller.wait(1, wire::ANSWER_BOUND_NS, |_| ready = true);
-    if !ready {
+pub(crate) fn answer<const MAX: usize>(conn: &Connection, rx: &mut FrameRx<MAX>) -> Result<Frame, Error> {
+    if !toyos::poller::wait_one(conn, READABLE, wire::ANSWER_BOUND_NS).map_err(Error::Kernel)? {
         return Err(Error::Unanswered);
     }
-    conn.recv_header().map_err(|_| Error::Ended)
+    rx.recv(conn).map_err(|e| match e {
+        toyos::ipc::IpcError::Malformed => Error::Protocol,
+        _ => Error::Ended,
+    })
 }
 
-/// Connect, send the region with an open, and wait for the answer.
+/// An open session's two doorbells, which the server made and sent with its
+/// answer: the one this end rings for requests, and the one it rings for
+/// answers, whose waker going is the server's end.
+struct Bells {
+    ring: Waker,
+    answered: Bell,
+}
+
+/// Connect, send the region with an open, and wait for the answer, which
+/// carries the session's doorbells: the session is theirs from here, and the
+/// connection goes.
 fn handshake(
     names: &Namespace,
     service: &str,
     guid: [u8; wire::GUID_BYTES],
     region: &Region,
-) -> Result<(Connection, Opened), Error> {
+) -> Result<(Bells, Opened), Error> {
     let conn = connect(names, service)?;
     conn.send_bytes_with(wire::MSG_OPEN, &guid, [region.share().map_err(Error::Kernel)?]).map_err(|_| Error::Ended)?;
-    let header = answer(&conn)?;
-    let mut payload = [0u8; Opened::BYTES];
-    let len = conn.recv_bytes(&header, &mut payload).map_err(|_| Error::Ended)?;
-    match header.msg_type {
-        wire::MSG_OPENED => Opened::decode(&payload[..len]).map(|o| (conn, o)).ok_or(Error::Protocol),
-        wire::MSG_REFUSED => Err(Refusal::decode(&payload[..len]).map_or(Error::Protocol, Error::Refused)),
+    let mut rx = Box::new(FrameRx::<{ toyos::ipc::MAX_FRAME_LEN as usize }>::new());
+    let frame = answer(&conn, &mut rx)?;
+    match frame.msg_type {
+        wire::MSG_OPENED => {
+            let [ring, answered] = rx.take_handles::<{ wire::OPENED_HANDLES }>().ok_or(Error::Protocol)?;
+            let opened = Opened::decode(rx.payload(frame.payload_len)).ok_or(Error::Protocol)?;
+            Ok((Bells { ring: Waker::from(ring), answered: Bell::from(answered) }, opened))
+        }
+        wire::MSG_REFUSED => Err(Refusal::decode(rx.payload(frame.payload_len)).map_or(Error::Protocol, Error::Refused)),
         _ => Err(Error::Protocol),
     }
 }
@@ -478,14 +444,12 @@ fn handshake(
 pub fn list(names: &Namespace, service: &str) -> Result<Vec<wire::Listed>, Error> {
     let conn = connect(names, service)?;
     conn.signal(wire::MSG_LIST).map_err(|_| Error::Ended)?;
-    let header = answer(&conn)?;
-    let mut payload = vec![0u8; header.len() as usize];
-    let len = conn.recv_bytes(&header, &mut payload).map_err(|_| Error::Ended)?;
-    match header.msg_type {
-        wire::MSG_LISTED => {
-            wire::Listed::decode_all(&payload[..len]).map(Iterator::collect).ok_or(Error::Protocol)
-        }
-        wire::MSG_REFUSED => Err(Refusal::decode(&payload[..len]).map_or(Error::Protocol, Error::Refused)),
+    let mut rx = Box::new(FrameRx::<{ toyos::ipc::MAX_FRAME_LEN as usize }>::new());
+    let frame = answer(&conn, &mut rx)?;
+    let payload = rx.payload(frame.payload_len);
+    match frame.msg_type {
+        wire::MSG_LISTED => wire::Listed::decode_all(payload).map(Iterator::collect).ok_or(Error::Protocol),
+        wire::MSG_REFUSED => Err(Refusal::decode(payload).map_or(Error::Protocol, Error::Refused)),
         _ => Err(Error::Protocol),
     }
 }

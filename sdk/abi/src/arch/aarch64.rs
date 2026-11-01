@@ -17,21 +17,22 @@ pub fn current_tid() -> Tid {
     Tid(unsafe { core::ptr::read_volatile((tp as usize + TCB_TID) as *const u32) })
 }
 
-/// The counter the clock page's two words describe: the generic timer's
-/// virtual count, which EL0 may read, read after every earlier instruction, as
-/// the x86-64 one is.
+/// The counter the clock page's line describes: the generic timer's
+/// virtual count, which EL0 may read, read after every earlier instruction and
+/// before any later one, as the x86-64 one is.
 #[inline]
 pub fn counter() -> u64 {
     let now: u64;
-    // SAFETY: an `isb` and a read of `CNTVCT_EL0` into a register; neither
-    // touches memory.
-    unsafe { core::arch::asm!("isb", "mrs {now}, cntvct_el0", now = out(reg) now, options(nomem, nostack)) };
+    // SAFETY: two `isb`s and a read of `CNTVCT_EL0` into a register; none
+    // touches memory. Not `nomem`, which would let the compiler move memory
+    // accesses, the clock page's loads among them, across the read.
+    unsafe { core::arch::asm!("isb", "mrs {now}, cntvct_el0", "isb", now = out(reg) now, options(nostack, preserves_flags)) };
     now
 }
 
-/// Whether the processor is Intel's: no Intel processor implements AArch64.
-pub fn processor_is_intel() -> bool {
-    false
+/// AArch64 has no CPUID identity.
+pub fn processor_id() -> Option<crate::ProcessorId> {
+    None
 }
 
 /// AArch64 has no port space, and no grant names a port on it: each of these

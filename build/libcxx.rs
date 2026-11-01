@@ -40,9 +40,9 @@ pub(crate) const OPTIONS: [(&str, &str); 18] = [
     ("LIBCXXABI_HAS_CXA_THREAD_ATEXIT_IMPL", "ON"),
     // The C library has no `dladdr`, so libunwind names no function it unwinds.
     ("LIBUNWIND_ADDITIONAL_COMPILE_FLAGS", "-D_LIBUNWIND_USE_DLADDR=0"),
-    // `open` refuses every directory, so no descriptor names one for `openat`
-    // and `unlinkat` to resolve against: `remove_all` walks a directory
-    // iterator, as libc++'s Windows does
+    // The C library has no `O_NOFOLLOW`, which libc++'s descriptor walk opens
+    // each directory with so a link swapped in is not followed: `remove_all`
+    // walks a directory iterator, as libc++'s Windows does
     // (`issues/remove-all-follows-a-link-swapped-in-mid-walk.md`).
     ("LIBCXX_ADDITIONAL_COMPILE_FLAGS", "-DREMOVE_ALL_USE_DIRECTORY_ITERATOR"),
     ("LIBCXX_INCLUDE_BENCHMARKS", "OFF"),

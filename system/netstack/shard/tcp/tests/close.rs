@@ -459,3 +459,18 @@ fn s_cl_032_rst_in_last_ack_and_closing() {
     nothing(&h.input(10, seg(5002).rst()));
     assert!(!held(&mut h));
 }
+
+/// A connection whose local address the host gave up ends at once, named for
+/// it, and sends nothing: no reset can leave from an address it no longer
+/// holds. One from another address is untouched.
+#[test]
+fn a_connection_from_a_lost_address_ends_and_sends_nothing() {
+    let mut h = fixture_e();
+    let other = h.tcp.connect(h.now(), std::net::Ipv4Addr::new(198, 51, 100, 1), Some(port(49153)), ep(B, 80)).unwrap();
+    h.transmit();
+    h.tcp.lose_address(A);
+    nothing(&h.transmit());
+    assert_eq!(h.call(10, |tcp, now, id| tcp.send(now, id, b"x")).0, Err(Error::Failed(Failure::AddressGone)));
+    let status = h.tcp.status(other).unwrap();
+    assert_eq!(status.state, State::SynSent, "the other address's connection is left");
+}

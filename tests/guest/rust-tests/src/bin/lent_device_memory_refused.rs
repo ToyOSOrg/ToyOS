@@ -22,8 +22,9 @@ fn main() {
     let nic: PciDev = function::claim(&cap, NIC).expect("lent_device_memory_refused: the virtio NIC's claim");
     let info = nic.describe().expect("lent_device_memory_refused: the claim's description");
     let bar = info.bar_bytes.iter().position(|&bytes| bytes != 0).expect("lent_device_memory_refused: a memory BAR");
-    let bar = syscall::device_bar_map(nic.as_handle(), bar as u32).expect("lent_device_memory_refused: the BAR's region");
-    let answer = SharedMemory::lent(bar, WINDOW_BYTES).err();
+    let bar = syscall::device_bar_map(nic.as_handle().raw(), bar as u32).expect("lent_device_memory_refused: the BAR's region");
+    // SAFETY: a fresh handle nothing else answers for.
+    let answer = SharedMemory::lent(unsafe { toyos::OwnedHandle::from_raw(bar) }, WINDOW_BYTES).err();
     assert_eq!(answer, Some(Lent::NotRam), "lent_device_memory_refused: a device's BAR lent as a window");
     println!("lent_device_memory_refused: a device's BAR lent as a window is not memory the kernel allocated");
 }

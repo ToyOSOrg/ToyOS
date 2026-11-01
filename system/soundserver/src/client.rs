@@ -1,7 +1,7 @@
 //! One stream: its ring, its ramp, and how it ended.
 //!
 //! A client is a control connection, a shared-memory ring soundserver made for it, a
-//! signal pipe soundserver kept the write end of, and a gain. This module is where
+//! signal soundserver kept the signal side of, and a gain. This module is where
 //! all four are assembled ([`open_stream`]) and where one period of the result
 //! reaches the bus ([`mix_client`]).
 //!
@@ -20,7 +20,6 @@ use toyos::audio::{
 use toyos::shm::SharedMemory;
 use toyos::Connection;
 use toyos_abi::audio::AudioSlotHeader;
-use toyos_abi::RawHandle;
 use toyos_mixer::{
     accumulate, append_planar, client_period_frames, decode_i16_to_f32, interleave,
     mix_interleaved, Gain, GainRamp,
@@ -39,7 +38,7 @@ pub(crate) struct ClientResampler {
 /// How a stream ended, as far as soundserver can honestly tell.
 ///
 /// Two things witness a client leaving and they race: the control thread reads
-/// the peer, and the mix loop finds the signal pipe gone on its next write.
+/// the peer, and the mix loop finds the client's signal gone on its next ring.
 /// Both start the same ramp, so no audio differs — but only the first of them
 /// *knows* anything. A clean exit and a crash tear down the same descriptors the
 /// same way; the kernel's `exit:` line carries the code and nothing on this side
@@ -56,10 +55,10 @@ pub(crate) enum Departure {
     /// The control connection ended without a close. The client's process is
     /// gone; whether it exited or crashed is not knowable here.
     Disconnected,
-    /// The signal pipe broke, which says the client's descriptor table is gone
+    /// The client's signal has no wait side left, which says its handle table is gone
     /// and nothing about why. The weakest of the four, and the only one the
     /// others replace.
-    SignalPipeGone,
+    SignalGone,
 }
 
 impl Departure {
@@ -80,7 +79,7 @@ impl Departure {
             Departure::Closed => 0,
             Departure::Refused => 1,
             Departure::Disconnected => 2,
-            Departure::SignalPipeGone => 3,
+            Departure::SignalGone => 3,
         }
     }
 }
@@ -91,7 +90,7 @@ impl core::fmt::Display for Departure {
             Departure::Closed => "closed",
             Departure::Refused => "refused",
             Departure::Disconnected => "disconnected",
-            Departure::SignalPipeGone => "signal pipe gone",
+            Departure::SignalGone => "its signal is gone",
         })
     }
 }
@@ -99,11 +98,13 @@ impl core::fmt::Display for Departure {
 pub(crate) struct ClientStream {
     pub(crate) client_id: usize,
     pub(crate) slot_reader: AudioSlotReader,
-    /// The write end of the signal pipe. soundserver makes both ends and sends the
-    /// read end to the client, so crash detection is by construction:
-    /// the moment the client's table goes, the read end goes with it and the
-    /// next signal breaks.
-    pub(crate) signal_write: RawHandle,
+    /// One period of the ring, copied out of the slot it is decoded from.
+    period: Vec<u8>,
+    /// The signal side of the client's event. soundserver makes both sides and
+    /// sends the wait side to the client, so crash detection is by
+    /// construction: the moment the client's table goes, the wait side goes
+    /// with it and the next ring answers `Hungup`.
+    pub(crate) signal: toyos::wake::Waker,
     pub(crate) gain: GainRamp,
     pub(crate) client_channels: u16,
     pub(crate) client_period_frames: u32,
@@ -190,15 +191,13 @@ pub(crate) fn open_stream(
         hdr.read_idx.store(0, core::sync::atomic::Ordering::Relaxed);
     }
 
-    // **soundserver makes the pipe and keeps the write end.** That is what makes a
-    // dead client detectable without bookkeeping: the read end it is sent goes
-    // when its table does, and the next signal answers `Gone`. The client used
-    // to make the pipe and name it by an id, because an id was only openable
-    // by a peer of its creator and the peer relation ran one way.
-    let (signal_read, signal_write) = match toyos::pipe_pair() {
+    // **soundserver makes the event and keeps the signal side.** That is what
+    // makes a dead client detectable without bookkeeping: the wait side it is
+    // sent goes when its table does, and the next ring answers `Hungup`.
+    let (signal, signal_bell) = match toyos::wake::pair() {
         Ok(ends) => ends,
         Err(e) => {
-            say!("soundserver: no signal pipe for client {client_id} ({e:?})");
+            say!("soundserver: no signal event for client {client_id} ({e:?})");
             return None;
         }
     };
@@ -214,7 +213,7 @@ pub(crate) fn open_stream(
         slot_count: slot_count as u16,
         fade_frames: ramp_frames,
     };
-    if control.send_with(MSG_STREAM_OPENED, &opened, [client_shm, signal_read.into()]).is_err() {
+    if control.send_with(MSG_STREAM_OPENED, &opened, [client_shm, signal_bell.into()]).is_err() {
         // Client died mid-open; the dropped control connection removes it.
         say!("soundserver: client {client_id} vanished during stream open");
     }
@@ -244,7 +243,8 @@ pub(crate) fn open_stream(
     Some(ClientStream {
         client_id,
         slot_reader,
-        signal_write: signal_write.into_raw(),
+        period: vec![0; client_period_bytes as usize],
+        signal,
         gain,
         client_channels: req.channels,
         client_period_frames,
@@ -258,7 +258,7 @@ pub(crate) fn open_stream(
 /// ring could not supply a full period (silence mixed instead).
 ///
 /// Slots are consumed peek→copy-out→advance: read_idx is published only after
-/// the slot data has been decoded out of shared memory, so a concurrently
+/// the slot data has been copied out of shared memory, so a concurrently
 /// filling client can never overwrite a slot soundserver is still reading.
 pub(crate) fn mix_client(
     stream: &mut ClientStream,
@@ -287,8 +287,9 @@ pub(crate) fn mix_client(
                 stream.gain.advance_frames(device_period_frames as u32);
                 return false;
             };
-            decode_i16_to_f32(slot.data(), &mut decode_buf[..client_samples]);
+            slot.read(&mut stream.period);
             slot.advance();
+            decode_i16_to_f32(&stream.period, &mut decode_buf[..client_samples]);
             append_planar(&decode_buf[..client_samples], client_channels, &mut rs.accum);
         }
 
@@ -311,8 +312,9 @@ pub(crate) fn mix_client(
         stream.gain.advance_frames(device_period_frames as u32);
         return false;
     };
-    decode_i16_to_f32(slot.data(), &mut decode_buf[..client_samples]);
+    slot.read(&mut stream.period);
     slot.advance();
+    decode_i16_to_f32(&stream.period, &mut decode_buf[..client_samples]);
 
     mix_interleaved(
         mix_f32,
@@ -334,11 +336,11 @@ mod tests {
     /// The control thread read the peer; the mix loop only found a descriptor
     /// missing. Whichever arrives first, the removal must be reported with what
     /// was actually established — and a clean exit must never be reported as a
-    /// death, which is what `SignalPipeGone` refuses to claim.
+    /// death, which is what `SignalGone` refuses to claim.
     #[test]
     fn the_stronger_witness_wins_in_either_order() {
         use Departure::*;
-        for (a, b) in [(Closed, SignalPipeGone), (Refused, SignalPipeGone), (Disconnected, SignalPipeGone)] {
+        for (a, b) in [(Closed, SignalGone), (Refused, SignalGone), (Disconnected, SignalGone)] {
             assert_eq!(a.refine(b), a, "{b} must not replace {a}");
             assert_eq!(b.refine(a), a, "{a} must replace {b}");
         }
@@ -346,9 +348,9 @@ mod tests {
         // then dropped.
         assert_eq!(Closed.refine(Disconnected), Closed);
         assert_eq!(Disconnected.refine(Closed), Closed);
-        // Idempotent, so a repeated witness — the mix loop writes a broken pipe
+        // Idempotent, so a repeated witness — the mix loop rings a gone signal
         // every period until the ramp finishes — changes nothing.
-        for how in [Closed, Refused, Disconnected, SignalPipeGone] {
+        for how in [Closed, Refused, Disconnected, SignalGone] {
             assert_eq!(how.refine(how), how);
         }
     }

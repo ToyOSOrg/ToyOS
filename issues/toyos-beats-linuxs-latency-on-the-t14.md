@@ -53,5 +53,5 @@ and of the thread it wakes under Linux's loaded longest on those seven CPUs,
 masked windows. Two files owe it: step 2 of
 `issues/the-diary-computes-no-lateness-and-records-no-slow-system-call.md`, a
 reader that computes timer and thread lateness from the ring, and
-`issues/no-program-measures-toyos-against-linux-on-one-machine.md`,
+`issues/no-published-run-compares-toyos-with-linux-on-one-machine.md`,
 one program that reads lateness past a 1 ms timer under both systems.

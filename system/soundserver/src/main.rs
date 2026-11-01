@@ -23,8 +23,8 @@
 
 use toyos::endow;
 use toyos::port::Acceptor;
+use toyos::wake::{self, Bell, Waker};
 use toyos::PciDev;
-use toyos_abi::syscall;
 use toyos_mixer::{period_frames, ramp_frames, DEVICE_RATES};
 use toyos_sound_output as sound_output;
 
@@ -122,9 +122,9 @@ fn run(ports: Ports, own: Option<(VirtioBackend, Device)>) {
     let device = own.as_ref().map_or(NULL_SINK, |(_, device)| *device);
     let outputs = Outputs::new(ports.output, own.is_some());
     let cmd_ring = Arc::new(CommandRing::new());
-    let cmd_pipe = syscall::pipe().expect("soundserver: failed to create the command pipe");
+    let (cmd_wake, cmd_bell) = wake::pair().expect("soundserver: no event for its commands");
     // The mix thread's word that it ended a device loop on its own finding.
-    let ended = syscall::pipe().expect("soundserver: failed to create the ended pipe");
+    let (ended_wake, ended_bell) = wake::pair().expect("soundserver: no event for a device loop's end");
     let initial = if own.is_some() { State::Suspended } else { State::Idle };
     let published = Arc::new(Published::new(initial));
 
@@ -138,8 +138,8 @@ fn run(ports: Ports, own: Option<(VirtioBackend, Device)>) {
                 ports.volume,
                 outputs,
                 &cmd_ring2,
-                cmd_pipe.write,
-                ended.read,
+                &cmd_wake,
+                &ended_bell,
                 device,
                 &published2,
             );
@@ -148,7 +148,7 @@ fn run(ports: Ports, own: Option<(VirtioBackend, Device)>) {
 
     if let Some((mut backend, device)) = own {
         let period_bytes = toyos_virtio_sound::PERIOD_BYTES;
-        let why = serve_device(&mut backend, &cmd_ring, &published, cmd_pipe.read, &device, period_bytes, 0, ended.write);
+        let why = serve_device(&mut backend, &cmd_ring, &published, &cmd_bell, &device, period_bytes, 0, &ended_wake);
         panic!("soundserver: its own virtio-sound device loop ended ({why})");
     }
     let mut generation = 0;
@@ -157,7 +157,7 @@ fn run(ports: Ports, own: Option<(VirtioBackend, Device)>) {
             "soundserver: no output yet, presenting a null sink ({}Hz {}ch, {} frames/period, streams discarded)",
             device.rate, device.channels, device.period_frames
         );
-        let attached = null_sink_thread(&cmd_ring, &published, cmd_pipe.read, &device, generation);
+        let attached = null_sink_thread(&cmd_ring, &published, &cmd_bell, &device, generation);
         let Attached { mut backend, offer, period_frames, generation: playing } = *attached;
         let output = output_device(&offer, period_frames);
         say!(
@@ -165,7 +165,7 @@ fn run(ports: Ports, own: Option<(VirtioBackend, Device)>) {
             output.rate, output.channels, output.period_frames
         );
         let period_bytes = offer.period_bytes as usize;
-        let why = serve_device(&mut backend, &cmd_ring, &published, cmd_pipe.read, &output, period_bytes, playing, ended.write);
+        let why = serve_device(&mut backend, &cmd_ring, &published, &cmd_bell, &output, period_bytes, playing, &ended_wake);
         say!("soundserver: the output is gone ({why})");
         generation = playing + 1;
     }
@@ -186,11 +186,11 @@ fn serve_device(
     backend: &mut dyn Backend,
     cmd_ring: &CommandRing,
     published: &Published,
-    cmd_pipe_read: toyos_abi::RawHandle,
+    cmd_bell: &Bell,
     device: &Device,
     period_bytes: usize,
     generation: u32,
-    ended_write: toyos_abi::RawHandle,
+    ended_wake: &Waker,
 ) -> String {
     say!(
         "soundserver: ready, {} buffers, {}Hz {}ch, {} bytes/period, {} frames/period",
@@ -200,7 +200,7 @@ fn serve_device(
         backend,
         cmd_ring,
         published,
-        cmd_pipe_read,
+        cmd_bell,
         device.buffers as usize,
         device.rate,
         device.channels,
@@ -208,6 +208,6 @@ fn serve_device(
         device.period_frames as usize,
         ramp_frames(device.rate),
         generation,
-        ended_write,
+        ended_wake,
     )
 }

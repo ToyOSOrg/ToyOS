@@ -1,7 +1,8 @@
-//! A client's end of a stream: `toyos::transport::session`'s own client sequences over a region
-//! on the heap, laid out as `toyos::net::stream` lays one out, and the session the node is lent.
-//! No call waits: a doorbell is a count, the client's ring of netstack a flag the test reads to
-//! say which streams a pass is owed.
+//! A holder of a stream: `toyos::transport::session`'s own client sequences over a region on the
+//! heap, laid out as `toyos::net::stream` lays one out, and the session the node is lent. A
+//! region may have several holders, each with doorbells of its own, which every ring of the
+//! node's reaches. No call waits: a doorbell is a count, a holder's ring of netstack a flag the
+//! test reads to say which streams a pass is owed.
 
 use std::cell::{Cell, RefCell};
 use std::rc::Rc;
@@ -10,21 +11,31 @@ use std::sync::atomic::{AtomicU32, Ordering};
 use toyos::net::stream::{Words, LAYOUT, NODELAY, RECEIVE_BYTES, RECEIVE_RING, REGION_BYTES, SEND_BYTES, SEND_RING};
 use toyos_net_node::Session;
 use toyos_net_tcp::Lent;
-use toyos::transport::session::{self, Bells, Doorbell, Lock, Mode, Receiving, Refused, Rings, Sending, Took, Waited};
+use toyos::transport::session::{self, Bells, Doorbell, Holder, HungUp, Lock, Mode, Receiving, Refused, Rings, Sending, Took, Waited};
 
-/// The region and its doorbells, which the client and the node share.
+/// The region and its holders' doorbells, which the holders and the node share.
 pub struct Region {
     words: Box<Words>,
     bytes: RefCell<Vec<u8>>,
-    /// netstack's rings of the client's connection and bell, not yet drained.
-    connection: Cell<u32>,
-    bell: Cell<u32>,
-    /// Every ring of netstack's, of either doorbell.
-    rung: Cell<u32>,
-    /// The client rang netstack since the test last asked.
+    holders: RefCell<Vec<Rc<Doorbells>>>,
+    /// A holder rang netstack since the test last asked.
     rang: Cell<bool>,
     /// The node lets go of the session.
     dropped: Cell<bool>,
+}
+
+/// One holder's doorbells: netstack's rings of each, not yet drained, and every ring of either.
+#[derive(Default)]
+struct Doorbells {
+    receive: Cell<u32>,
+    send: Cell<u32>,
+    rung: Cell<u32>,
+}
+
+/// A holder's doorbells and its ring of netstack.
+struct Ringing {
+    region: Rc<Region>,
+    bells: Rc<Doorbells>,
 }
 
 struct Held<T>(RefCell<T>);
@@ -35,28 +46,34 @@ impl<T> Lock<T> for Held<T> {
     }
 }
 
-impl Bells for Region {
+impl Bells for Ringing {
     type Until = ();
 
     fn drain(&self, bell: Doorbell) -> Took {
         let count = match bell {
-            Doorbell::Connection => &self.connection,
-            Doorbell::Bell => &self.bell,
+            Doorbell::Receive => &self.bells.receive,
+            Doorbell::Send => &self.bells.send,
         };
         if count.replace(0) > 0 { Took::Rung } else { Took::Nothing }
     }
 
     fn wait(&self, _: Doorbell, _: Option<()>) -> Waited {
+        unreachable!("a test's holder never waits")
+    }
+
+    fn wait_gate(&self, _: Doorbell, _: Option<()>, _: u16) -> Waited {
         unreachable!("a test's client never waits")
     }
 
-    fn ring(&self) {
-        self.rang.set(true);
+    fn ring(&self) -> Result<(), HungUp> {
+        self.region.rang.set(true);
+        Ok(())
     }
 }
 
 pub struct Client {
     pub region: Rc<Region>,
+    ringing: Ringing,
     rx: Held<Receiving<RECEIVE_BYTES, { toyos::net::stream::WORDS }>>,
     tx: Held<Sending<SEND_BYTES, { toyos::net::stream::WORDS }>>,
 }
@@ -108,11 +125,12 @@ impl Session for Lend {
     }
 
     fn ring(&self, rings: Rings) {
-        let region = &self.0;
-        for (rung, count) in [(rings.connection, &region.connection), (rings.bell, &region.bell)] {
-            if rung {
-                count.set(count.get() + 1);
-                region.rung.set(region.rung.get() + 1);
+        for bells in self.0.holders.borrow().iter() {
+            for (rung, count) in [(rings.receive, &bells.receive), (rings.send, &bells.send)] {
+                if rung {
+                    count.set(count.get() + 1);
+                    bells.rung.set(bells.rung.get() + 1);
+                }
             }
         }
     }
@@ -131,20 +149,34 @@ impl std::fmt::Debug for Client {
 }
 
 impl Client {
-    /// A client with a fresh region, and the session a connect or an accept lends the node.
+    /// A client with a fresh region, its first holder, and the session a connect or an accept
+    /// lends the node.
     pub fn new() -> (Rc<Client>, Box<dyn Session>) {
         let region = Rc::new(Region {
             words: Box::new(std::array::from_fn(|_| AtomicU32::new(0))),
             bytes: RefCell::new(vec![0; REGION_BYTES]),
-            connection: Cell::new(0),
-            bell: Cell::new(0),
-            rung: Cell::new(0),
+            holders: RefCell::new(Vec::new()),
             rang: Cell::new(false),
             dropped: Cell::new(false),
         });
-        let (rx, tx) = session::client(&region.words, LAYOUT);
-        let client = Client { region: region.clone(), rx: Held(RefCell::new(rx)), tx: Held(RefCell::new(tx)) };
-        (Rc::new(client), Box::new(Lend(region)))
+        let halves = session::client(&region.words, LAYOUT);
+        (Self::holding(&region, halves), Box::new(Lend(region)))
+    }
+
+    /// Another holder of this client's region, numbered `number`, as an export makes one.
+    pub fn holder(&self, number: u16) -> Rc<Client> {
+        let halves = session::holder(LAYOUT, Holder::new(number).expect("a holder's number is not 0"));
+        Self::holding(&self.region, halves)
+    }
+
+    fn holding(
+        region: &Rc<Region>,
+        (rx, tx): (Receiving<RECEIVE_BYTES, { toyos::net::stream::WORDS }>, Sending<SEND_BYTES, { toyos::net::stream::WORDS }>),
+    ) -> Rc<Client> {
+        let bells = Rc::new(Doorbells::default());
+        region.holders.borrow_mut().push(bells.clone());
+        let ringing = Ringing { region: region.clone(), bells };
+        Rc::new(Client { region: region.clone(), ringing, rx: Held(RefCell::new(rx)), tx: Held(RefCell::new(tx)) })
     }
 
     /// A client that set Nagle's algorithm off before it connected.
@@ -158,7 +190,7 @@ impl Client {
     pub fn read(&self, max: usize) -> Result<Vec<u8>, Refused> {
         let mut out = vec![0; max];
         let region = &self.region;
-        let n = session::read(&region.words, &self.rx, &**region, Mode::Nonblocking, u32::try_from(max).unwrap(), |span, at| {
+        let n = session::read(&region.words, &self.rx, &self.ringing, Mode::Nonblocking, u32::try_from(max).unwrap(), |span, at| {
             out[at..at + span.len].copy_from_slice(&region.bytes.borrow()[span.offset..][..span.len]);
         })?;
         out.truncate(n as usize);
@@ -180,25 +212,25 @@ impl Client {
     /// A write that does not wait: how much of `data` the send ring took.
     pub fn write(&self, data: &[u8]) -> Result<usize, Refused> {
         let region = &self.region;
-        let n = session::write(&region.words, &self.tx, &**region, Mode::Nonblocking, u32::try_from(data.len()).unwrap(), |span, at| {
+        let n = session::write(&region.words, &self.tx, &self.ringing, Mode::Nonblocking, u32::try_from(data.len()).unwrap(), |span, at| {
             region.bytes.borrow_mut()[span.offset..][..span.len].copy_from_slice(&data[at..at + span.len]);
         })?;
         Ok(n as usize)
     }
 
     pub fn shutdown(&self) {
-        session::shutdown(&self.region.words, &self.tx, &*self.region);
+        session::shutdown(&self.region.words, &self.tx, &self.ringing);
     }
 
     /// Nagle's algorithm off or on, and netstack rung to read it.
     pub fn set_nodelay(&self, nodelay: bool) {
         self.region.words[NODELAY].store(u32::from(nodelay), Ordering::Relaxed);
-        self.region.ring();
+        LAYOUT.ring(&self.region.words, &self.ringing);
     }
 
     /// The source registered for both ways.
     pub fn register(&self) {
-        session::register(&self.region.words, Some(&self.rx), Some(&self.tx), &*self.region).expect("netstack keeps the protocol");
+        session::register(&self.region.words, Some(&self.rx), Some(&self.tx), &self.ringing);
     }
 
     /// Whether the client rang netstack since the last call.
@@ -206,14 +238,20 @@ impl Client {
         self.region.rang.replace(false)
     }
 
-    /// netstack's rings of either doorbell so far.
+    /// netstack's rings of either of this holder's doorbells so far.
     pub fn rung(&self) -> u32 {
-        self.region.rung.get()
+        self.ringing.bells.rung.get()
     }
 
-    /// netstack's rings of the bell, which a writer waits on, not yet drained.
+    /// netstack's rings of this holder's send bell, which a writer waits on, not yet drained.
     pub fn bell(&self) -> u32 {
-        self.region.bell.get()
+        self.ringing.bells.send.get()
+    }
+
+    /// netstack's rings of this holder's receive bell, which a reader waits on, not yet
+    /// drained.
+    pub fn receive_bell(&self) -> u32 {
+        self.ringing.bells.receive.get()
     }
 
     /// The node let go of the session.
@@ -223,7 +261,7 @@ impl Client {
 
     /// Rings netstack as the client's own calls do, for a word written past them.
     pub fn region_ring(&self) {
-        self.region.ring();
+        LAYOUT.ring(&self.region.words, &self.ringing);
     }
 
     /// The region's word `at`, which a hostile client may write.

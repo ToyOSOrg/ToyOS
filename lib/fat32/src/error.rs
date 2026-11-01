@@ -1,5 +1,3 @@
-use crate::device::IoError;
-
 /// Everything that can go wrong, as data rather than a panic.
 ///
 /// Exhaustive on purpose: an adapter mapping these to `SyscallError` should
@@ -47,11 +45,11 @@ pub enum Error {
     LimitExceeded,
 }
 
-impl From<IoError> for Error {
-    fn from(e: IoError) -> Self {
-        match e {
-            IoError::Device => Error::Io,
-        }
+/// Every device refusal is one word here: this crate reads every refused
+/// write as of unknown outcome (`crate::repair`), whatever the device said.
+impl From<toyos_blockdev::Error> for Error {
+    fn from(_: toyos_blockdev::Error) -> Self {
+        Error::Io
     }
 }
 

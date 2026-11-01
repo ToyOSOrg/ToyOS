@@ -1,62 +1,34 @@
-//! The interface's address, gateway and resolvers as one state, and its one writer.
+//! Each link's address, gateway and resolvers as one state, and its one writer.
 //!
-//! The state is `Unaddressed`, `Probing` an address a server acknowledged, or `Held`: a lease
-//! whose address [ip] verified. The shard is private to this module, so nothing else in the crate
-//! reaches `add_address`, `remove_address` or `set_gateways`:
+//! A link's state is `Unaddressed`, `Probing` an address a server acknowledged, or `Held`: a
+//! lease whose address [ip] verified. The shard is private to this module, so nothing else in the
+//! crate reaches `add_address`, `remove_address` or `set_gateways`:
 //!
-//! - the gateway is written only with a held lease, and [ip] withdraws it with the address, so no
-//!   route outlives its address;
+//! - a link's gateway is written only with its held lease, and [ip] withdraws it with the
+//!   address, so no route outlives its address;
 //! - a lease is held only against a [`Verified`], which only [`Stack::report`] makes, from [ip]'s
-//!   report for the address under probe, so no address is in use before conflict detection ends;
-//! - the resolvers are the held lease's, so they come and go with it, and the answers they gave
-//!   go with every write of the state and every link that goes down ([`network::Network`]): after
-//!   either the next lookup may be asking another network, so none is answered from this one's.
+//!   report for the link's address under probe, so no address is in use before conflict
+//!   detection ends;
+//! - the resolvers lookups ask are one link's held lease's: of the links up and holding one, the
+//!   first by rank and then arrival, and with none up the link asked before ([`Stack::asked`]).
+//!   The answers they gave go with every write of any link's state, every link that goes down
+//!   and every change of the link asked: after any of them the next lookup may be asking another
+//!   network, so none is answered from this one's.
 //!
-//! [ip] reports on no address but the one this module added, and one report at a time: each is
-//! read against the state as it stands.
+//! [ip] reports on no address but those this module added, and one report at a time: each is
+//! read against its link's state as it stands.
 
 mod tcp;
 
-mod network {
-    use toyos_dns::Cache;
-
-    use super::State;
-
-    /// The state and the answers its resolvers gave, written together: the state only by
-    /// [`Network::set`], which empties the answers as it writes it.
-    pub(super) struct Network {
-        state: State,
-        answers: Cache,
-    }
-
-    impl Network {
-        pub(super) fn new() -> Self {
-            Self { state: State::Unaddressed, answers: Cache::default() }
-        }
-
-        pub(super) fn state(&self) -> &State {
-            &self.state
-        }
-
-        pub(super) fn set(&mut self, state: State) {
-            self.state = state;
-            self.answers.empty();
-        }
-
-        pub(super) fn answers(&mut self) -> &mut Cache {
-            &mut self.answers
-        }
-    }
-}
-
 use alloc::collections::VecDeque;
+use alloc::vec::Vec;
 use core::net::Ipv4Addr;
 
 use toyos_dhcp::{Lease, Transmission};
 use toyos_dns::Cache;
-use toyos_net_shard::{Config, Event, Refusal, Shard};
+use toyos_net_shard::{Config, Credit, Event, IfIndex, Origin, Rank, Refusal, Shard};
 use toyos_net_udp::{Received, SocketId};
-use toyos_net_wire::ethernet::MacAddr;
+use toyos_net_wire::ethernet::{IndividualMac, MacAddr};
 use toyos_net_wire::ipv4::{MulticastAddr, Ttl};
 use toyos_net_wire::{Instant, Port};
 
@@ -71,37 +43,52 @@ enum State {
     Held(Lease),
 }
 
-/// Proof that [ip] finished conflict detection for the address under probe.
+/// Proof that [ip] finished conflict detection for a link's address under probe.
 pub(crate) struct Verified(Ipv4Addr);
 
-/// What [ip] said became of an address, one event at a time.
+/// What [ip] said became of a link's address, one event at a time.
 pub(crate) enum Report {
     Verified(Verified),
-    /// Another host holds the address, at this MAC: [ip] removed it, and the state is
+    /// Another host holds the address, at this MAC: [ip] removed it, and the link's state is
     /// `Unaddressed`.
     Conflict(MacAddr),
-    /// The link went down under the probe: [ip] removed the address, and the state is
+    /// The link went down under the probe: [ip] removed the address, and the link's state is
     /// `Unaddressed`.
     NotVerified,
 }
 
-pub(crate) struct Stack {
-    shard: Shard,
-    /// The DHCP client's socket.
-    socket: SocketId,
-    network: network::Network,
-    /// What [ip] reported of an address and [`Stack::report`] has not read: never a log line.
-    inbox: VecDeque<Fate>,
+/// One link's part.
+struct Link {
+    iface: IfIndex,
+    rank: Rank,
+    up: bool,
+    state: State,
 }
 
-/// [ip]'s report on the address this module added.
+pub(crate) struct Stack {
+    shard: Shard,
+    /// The DHCP clients' one socket, each datagram for the client of the link it came by.
+    socket: SocketId,
+    /// In the order they were added.
+    links: Vec<Link>,
+    /// The link lookups ask ([`Stack::asked`]), kept as each write of a link's state or link
+    /// leaves it.
+    asked: Option<IfIndex>,
+    /// What the asked link's resolvers answered: emptied with every write of a link's state,
+    /// every link that goes down and every change of the link asked.
+    answers: Cache,
+    /// What [ip] reported of an address and [`Stack::report`] has not read: never a log line.
+    inbox: VecDeque<(IfIndex, Fate)>,
+}
+
+/// [ip]'s report on an address this module added.
 enum Fate {
     Verified(Ipv4Addr),
     /// Removed by [ip]: for the host at this MAC, or with none, for a link that went down.
     Taken(Ipv4Addr, Option<MacAddr>),
 }
 
-/// [ip] refuses nothing about the one interface and the one address this module gave it.
+/// [ip] refuses nothing about an interface and an address this module gave it.
 fn agreed<T>(answer: Result<T, toyos_net_ip::Counter>) -> T {
     match answer {
         Ok(value) => value,
@@ -110,39 +97,95 @@ fn agreed<T>(answer: Result<T, toyos_net_ip::Counter>) -> T {
 }
 
 impl Stack {
-    /// One interface, link down, unaddressed.
+    /// No link yet.
     pub(crate) fn new(now: Instant, config: Config) -> Result<Self, toyos_net_tcp::ConfigError> {
         let mut shard = Shard::new(now, config)?;
         let Ok(socket) = shard.acquisition() else { unreachable!("a new shard has no socket on port 68") };
-        Ok(Self { shard, socket, network: network::Network::new(), inbox: VecDeque::new() })
+        Ok(Self { shard, socket, links: Vec::new(), asked: None, answers: Cache::default(), inbox: VecDeque::new() })
+    }
+
+    /// A link's interface, down and unaddressed.
+    pub(crate) fn add_link(&mut self, now: Instant, mac: IndividualMac, rank: Rank) -> IfIndex {
+        let iface = self.shard.add_interface(now, mac, rank);
+        self.links.push(Link { iface, rank, up: false, state: State::Unaddressed });
+        iface
     }
 
     pub(crate) fn shard(&self) -> &Shard {
         &self.shard
     }
 
-    pub(crate) fn lease(&self) -> Option<&Lease> {
-        match self.network.state() {
+    /// Every link, in the order added.
+    pub(crate) fn links(&self) -> impl Iterator<Item = IfIndex> + '_ {
+        self.links.iter().map(|link| link.iface)
+    }
+
+    fn link_of(&self, iface: IfIndex) -> &Link {
+        self.links.iter().find(|link| link.iface == iface).unwrap_or_else(|| unreachable!("{iface:?} is no link of the node's"))
+    }
+
+    fn link_mut(&mut self, iface: IfIndex) -> &mut Link {
+        self.links.iter_mut().find(|link| link.iface == iface).unwrap_or_else(|| unreachable!("{iface:?} is no link of the node's"))
+    }
+
+    pub(crate) fn up(&self, iface: IfIndex) -> bool {
+        self.link_of(iface).up
+    }
+
+    /// `iface`'s held lease.
+    pub(crate) fn lease(&self, iface: IfIndex) -> Option<&Lease> {
+        match &self.link_of(iface).state {
             State::Held(lease) => Some(lease),
             State::Unaddressed | State::Probing(_) => None,
         }
     }
 
-    fn address(&self) -> Option<Ipv4Addr> {
-        match self.network.state() {
+    /// The link lookups ask: of the links up and holding a lease, the first by rank and then by
+    /// when it was added. With none such, the link asked before while it still holds its lease,
+    /// since a link down keeps it; and failing that the first by rank holding one.
+    pub(crate) fn asked(&self) -> Option<IfIndex> {
+        self.asked
+    }
+
+    /// [`Self::asked`] chosen again after a link's state or link changed; `true` when it moved.
+    fn choose_asked(&mut self) -> bool {
+        let held = |link: &&Link| matches!(link.state, State::Held(_));
+        let up = self.links.iter().filter(held).filter(|link| link.up).min_by_key(|link| link.rank);
+        let kept = self.asked.and_then(|asked| self.links.iter().filter(held).find(|link| link.iface == asked));
+        let any = self.links.iter().filter(held).min_by_key(|link| link.rank);
+        let asked = up.or(kept).or(any).map(|link| link.iface);
+        let moved = asked != self.asked;
+        self.asked = asked;
+        moved
+    }
+
+    /// The asked link's lease, whose resolvers lookups ask.
+    pub(crate) fn asked_lease(&self) -> Option<&Lease> {
+        self.asked().and_then(|iface| self.lease(iface))
+    }
+
+    fn address(&self, iface: IfIndex) -> Option<Ipv4Addr> {
+        match &self.link_of(iface).state {
             State::Unaddressed => None,
             State::Probing(address) => Some(*address),
             State::Held(lease) => Some(lease.address),
         }
     }
 
-    // ---- the device and the clock ----
-
-    pub(crate) fn receive(&mut self, now: Instant, frame: &[u8]) {
-        self.shard.receive(now, frame);
+    /// Writes `iface`'s state; the answers go with it.
+    fn set(&mut self, iface: IfIndex, state: State) {
+        self.link_mut(iface).state = state;
+        self.choose_asked();
+        self.answers.empty();
     }
 
-    pub(crate) fn transmit(&mut self, now: Instant, credit: usize, sink: impl FnMut(&[u8])) -> usize {
+    // ---- the device and the clock ----
+
+    pub(crate) fn receive(&mut self, now: Instant, iface: IfIndex, frame: &[u8]) {
+        self.shard.receive(now, iface, frame);
+    }
+
+    pub(crate) fn transmit(&mut self, now: Instant, credit: impl Credit, sink: impl FnMut(IfIndex, &[u8])) -> usize {
         self.shard.transmit(now, credit, sink)
     }
 
@@ -155,34 +198,37 @@ impl Stack {
     }
 
     /// Down, the answers go and a held lease stays: the link may come back on another network
-    /// that the lease's verification never hears from.
-    pub(crate) fn link(&mut self, now: Instant, up: bool) {
-        agreed(if up { self.shard.link_up(now) } else { self.shard.link_down(now) });
-        if !up {
-            self.network.answers().empty();
+    /// that the lease's verification never hears from. Up or down, a change of the link asked
+    /// empties them too.
+    pub(crate) fn link(&mut self, now: Instant, iface: IfIndex, up: bool) {
+        agreed(if up { self.shard.link_up(now, iface) } else { self.shard.link_down(now, iface) });
+        self.link_mut(iface).up = up;
+        if self.choose_asked() || !up {
+            self.answers.empty();
         }
     }
 
-    /// What the held lease's resolvers answered, kept by the view that asked.
+    /// What the asked link's resolvers answered, kept by the view that asked.
     pub(crate) fn answers(&mut self) -> &mut Cache {
-        self.network.answers()
+        &mut self.answers
     }
 
-    // ---- the DHCP client's socket ----
+    // ---- the DHCP clients' socket ----
 
-    /// Queues a message of the client's; a refusal is [udp]'s, by the rule it counted.
-    pub(crate) fn send(&mut self, now: Instant, message: &Transmission) -> Result<(), toyos_net_udp::Error> {
-        self.shard.send_from(now, self.socket, message.source, message.destination, SERVER_PORT, &message.payload)
+    /// Queues a message of `iface`'s client; a refusal is [udp]'s, by the rule it counted.
+    pub(crate) fn send(&mut self, now: Instant, iface: IfIndex, message: &Transmission) -> Result<(), toyos_net_udp::Error> {
+        let origin = Origin { iface, source: message.source };
+        self.shard.send_from(now, self.socket, origin, message.destination, SERVER_PORT, &message.payload)
     }
 
-    /// The oldest datagram that reached the client's socket, in `out`, and the address it came
-    /// from.
-    pub(crate) fn recv<'a>(&mut self, out: &'a mut [u8]) -> Option<(&'a [u8], Ipv4Addr)> {
+    /// The oldest datagram that reached the clients' socket, in `out`, the address it came from
+    /// and the link it came by.
+    pub(crate) fn recv<'a>(&mut self, out: &'a mut [u8]) -> Option<(&'a [u8], Ipv4Addr, IfIndex)> {
         let Ok(received) = self.shard.recv_from(self.socket, out) else {
-            unreachable!("the client's socket is never closed and never connected")
+            unreachable!("the clients' socket is never closed and never connected")
         };
         let received = received?;
-        Some((out.get(..received.len)?, received.source))
+        Some((out.get(..received.len)?, received.source, received.iface))
     }
 
     // ---- datagram sockets: [udp]'s calls passed on, none of which writes the lease ----
@@ -209,6 +255,28 @@ impl Stack {
         self.shard.recv_from(id, out)
     }
 
+    /// The port a socket holds.
+    pub(crate) fn port(&mut self, id: SocketId) -> Result<Port, toyos_net_udp::Error> {
+        self.shard.udp_port(id)
+    }
+
+    pub(crate) fn readable(&mut self, id: SocketId) -> Result<bool, toyos_net_udp::Error> {
+        self.shard.udp_readable(id)
+    }
+
+    pub(crate) fn peer(&mut self, id: SocketId) -> Result<Option<(Ipv4Addr, Port)>, toyos_net_udp::Error> {
+        self.shard.udp_peer(id)
+    }
+
+    /// Queues a datagram for a connected socket's peer.
+    pub(crate) fn send_connected(&mut self, now: Instant, id: SocketId, payload: &[u8]) -> Result<(), toyos_net_udp::Error> {
+        self.shard.udp_send(now, id, payload)
+    }
+
+    pub(crate) fn broadcast(&mut self, id: SocketId) -> Result<bool, toyos_net_udp::Error> {
+        self.shard.udp_broadcast(id)
+    }
+
     pub(crate) fn close(&mut self, now: Instant, id: SocketId) -> Result<(), toyos_net_udp::Error> {
         self.shard.udp_close(now, id)
     }
@@ -221,15 +289,20 @@ impl Stack {
         self.shard.udp_set_ttl(id, unicast, multicast)
     }
 
-    pub(crate) fn join(&mut self, now: Instant, group: MulticastAddr) {
-        agreed(self.shard.join(now, group));
+    /// Queues a datagram that leaves by `iface` alone.
+    pub(crate) fn send_via(&mut self, now: Instant, id: SocketId, iface: IfIndex, destination: Ipv4Addr, port: u16, payload: &[u8]) -> Result<(), toyos_net_udp::Error> {
+        self.shard.send_via(now, id, iface, destination, port, payload)
+    }
+
+    pub(crate) fn join(&mut self, now: Instant, iface: IfIndex, group: MulticastAddr) {
+        agreed(self.shard.join(now, iface, group));
     }
 
     // ---- the lease ----
 
     /// Takes what the shard has reported: each log line goes to `line`, ahead of the reports
-    /// before it since none is read against the state, and each report on the address waits its
-    /// turn for [`Self::report`].
+    /// before it since none is read against a state, and each report on an address waits its turn
+    /// for [`Self::report`].
     pub(crate) fn refusals(&mut self, mut line: impl FnMut(Refusal, u64)) {
         for event in self.shard.drain_events() {
             self.inbox.push_back(match event {
@@ -237,84 +310,86 @@ impl Stack {
                     line(refusal, suppressed);
                     continue;
                 }
-                Event::Verified(addr) => Fate::Verified(addr),
-                Event::Conflict { addr, mac } | Event::Lost { addr, mac } => Fate::Taken(addr, Some(mac)),
-                Event::NotVerified(addr) => Fate::Taken(addr, None),
+                Event::Verified { iface, addr } => (iface, Fate::Verified(addr)),
+                Event::Conflict { iface, addr, mac } | Event::Lost { iface, addr, mac } => (iface, Fate::Taken(addr, Some(mac))),
+                Event::NotVerified { iface, addr } => (iface, Fate::Taken(addr, None)),
             });
         }
     }
 
-    /// The next report [`Self::refusals`] took, read against the state.
-    pub(crate) fn report(&mut self) -> Option<Report> {
-        Some(match self.inbox.pop_front()? {
-            Fate::Verified(addr) => match self.network.state() {
-                State::Probing(address) if *address == addr => Report::Verified(Verified(addr)),
+    /// The next report [`Self::refusals`] took, read against its link's state, and the link.
+    pub(crate) fn report(&mut self) -> Option<(IfIndex, Report)> {
+        let (iface, fate) = self.inbox.pop_front()?;
+        Some((iface, match fate {
+            Fate::Verified(addr) => match self.link_of(iface).state {
+                State::Probing(address) if address == addr => Report::Verified(Verified(addr)),
                 _ => unreachable!("[ip] verified {addr}, which is not under probe"),
             },
             Fate::Taken(addr, by) => {
-                self.taken(addr);
+                self.taken(iface, addr);
                 by.map_or(Report::NotVerified, Report::Conflict)
             }
-        })
+        }))
     }
 
     /// [ip] removed `addr` itself, its gateways with it.
-    fn taken(&mut self, addr: Ipv4Addr) {
-        if self.address() != Some(addr) {
-            unreachable!("[ip] removed {addr}, which the lease does not name");
+    fn taken(&mut self, iface: IfIndex, addr: Ipv4Addr) {
+        if self.address(iface) != Some(addr) {
+            unreachable!("[ip] removed {addr}, which the link's lease does not name");
         }
-        self.network.set(State::Unaddressed);
+        self.set(iface, State::Unaddressed);
     }
 
-    /// Nothing is held: the address goes, and [ip] withdraws the gateway with it.
-    pub(crate) fn release(&mut self, now: Instant) {
-        if let Some(address) = self.address() {
-            agreed(self.shard.remove_address(now, address));
+    /// Nothing is held on `iface`: its address goes, and [ip] withdraws the gateway and ends the
+    /// TCP connections with it.
+    pub(crate) fn release(&mut self, now: Instant, iface: IfIndex) {
+        if let Some(address) = self.address(iface) {
+            agreed(self.shard.remove_address(now, iface, address));
         }
-        self.network.set(State::Unaddressed);
+        self.set(iface, State::Unaddressed);
     }
 
-    /// A server acknowledged `address`: [ip] probes it, and nothing uses it yet. Refused, the
-    /// state is `Unaddressed`.
-    pub(crate) fn probe(&mut self, now: Instant, address: Ipv4Addr, prefix_len: u8) -> Result<(), toyos_net_ip::Counter> {
-        self.release(now);
-        self.shard.add_address(now, address, prefix_len)?;
-        self.network.set(State::Probing(address));
+    /// A server acknowledged `address` on `iface`: [ip] probes it, and nothing uses it yet.
+    /// Refused, the link's state is `Unaddressed`.
+    pub(crate) fn probe(&mut self, now: Instant, iface: IfIndex, address: Ipv4Addr, prefix_len: u8) -> Result<(), toyos_net_ip::Counter> {
+        self.release(now, iface);
+        self.shard.add_address(now, iface, address, prefix_len)?;
+        self.set(iface, State::Probing(address));
         Ok(())
     }
 
     /// The verified address's lease is in use from here: [ip] holds the address at the prefix
     /// `probe` gave it, and the router is written with the lease. Returns whether [ip] refused the
     /// router.
-    pub(crate) fn hold(&mut self, now: Instant, verified: Verified, mut lease: Lease) -> bool {
+    pub(crate) fn hold(&mut self, now: Instant, iface: IfIndex, verified: Verified, mut lease: Lease) -> bool {
         if lease.address != verified.0 {
             unreachable!("the client configured {}, having probed {}", lease.address, verified.0);
         }
-        let refused = self.route(now, &mut lease);
-        self.network.set(State::Held(lease));
+        let refused = self.route(now, iface, &mut lease);
+        self.set(iface, State::Held(lease));
         refused
     }
 
     /// The held address acknowledged again, with new times or a new prefix, router or resolvers.
     /// Returns whether [ip] refused its router. A prefix [ip] refuses changes nothing: the lease
     /// stays as it was held.
-    pub(crate) fn renew(&mut self, now: Instant, mut lease: Lease) -> Result<bool, toyos_net_ip::Counter> {
-        if !matches!(self.network.state(), State::Held(held) if held.address == lease.address) {
+    pub(crate) fn renew(&mut self, now: Instant, iface: IfIndex, mut lease: Lease) -> Result<bool, toyos_net_ip::Counter> {
+        if !matches!(&self.link_of(iface).state, State::Held(held) if held.address == lease.address) {
             unreachable!("the client renewed {}, which is not held", lease.address);
         }
-        self.shard.add_address(now, lease.address, lease.prefix_len)?;
-        let refused = self.route(now, &mut lease);
-        self.network.set(State::Held(lease));
+        self.shard.add_address(now, iface, lease.address, lease.prefix_len)?;
+        let refused = self.route(now, iface, &mut lease);
+        self.set(iface, State::Held(lease));
         Ok(refused)
     }
 
     /// Writes `lease`'s router, which [ip] takes only on a usable prefix. One [ip] refuses is no
     /// router: the lease is left without one, and so is [ip]. Returns whether it was refused.
-    fn route(&mut self, now: Instant, lease: &mut Lease) -> bool {
-        let refused = self.shard.set_gateways(now, lease.router.as_slice()).is_err();
+    fn route(&mut self, now: Instant, iface: IfIndex, lease: &mut Lease) -> bool {
+        let refused = self.shard.set_gateways(now, iface, lease.router.as_slice()).is_err();
         if refused {
             // [ip] kept the list it had.
-            agreed(self.shard.set_gateways(now, &[]));
+            agreed(self.shard.set_gateways(now, iface, &[]));
             lease.router = None;
         }
         refused
@@ -346,11 +421,12 @@ mod tests {
         };
         let Some(mac) = IndividualMac::new(MacAddr([2, 0, 0, 0, 0, 0x0a])) else { unreachable!("an individual address") };
         let mut now = Instant::from_millis(3_600_000);
-        let Ok(mut stack) = Stack::new(now, Config { mac, receive_buffer: 65_535, send_buffer: 65_535, secrets }) else { unreachable!("a configuration [tcp] takes") };
-        stack.link(now, true);
-        assert_eq!(stack.probe(now, A, 24), Ok(()));
-        while stack.shard.ip().address(stack.shard.iface(), A) == Some(toyos_net_ip::AddrState::Tentative) {
-            stack.transmit(now, usize::MAX, |_| {});
+        let Ok(mut stack) = Stack::new(now, Config { receive_buffer: 65_535, send_buffer: 65_535, secrets }) else { unreachable!("a configuration [tcp] takes") };
+        let link = stack.add_link(now, mac, Rank(0));
+        stack.link(now, link, true);
+        assert_eq!(stack.probe(now, link, A, 24), Ok(()));
+        while stack.shard.ip().address(link, A) == Some(toyos_net_ip::AddrState::Tentative) {
+            stack.transmit(now, usize::MAX, |_, _| {});
             let Some(next) = stack.next_deadline() else { unreachable!("conflict detection is still running") };
             now = next;
             stack.fire(now);
@@ -361,7 +437,7 @@ mod tests {
         let mut lines = Vec::new();
         stack.refusals(|refusal, _| lines.push(refusal));
         assert!(matches!(lines.as_slice(), [Refusal::Udp(refusal)] if refusal.rule == Counter::SendUnspecifiedDestination), "{lines:?}");
-        assert!(matches!(stack.report(), Some(Report::Verified(Verified(A)))), "the verification is still to be read");
+        assert!(matches!(stack.report(), Some((_, Report::Verified(Verified(A))))), "the verification is still to be read");
         assert!(stack.report().is_none());
         stack.refusals(|refusal, _| lines.push(refusal));
         assert_eq!((lines.len(), stack.report().is_none()), (1, true), "each was handed over once");

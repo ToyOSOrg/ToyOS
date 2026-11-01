@@ -6,9 +6,9 @@ edition = "2021"
 license = "MIT OR Apache-2.0"
 
 [dependencies]
-toyos = { path = "../../sdk/toyos" }
-# `launch_path`, which is the other half of the gate the supervisor refuses a launch on.
-toyos-manifest = { path = "../../lib/manifest" }
+toyos = { path = "../../sdk/toyos", features = ["std"] }
+# The quit a `-c` shell asks of a child spawned past its own interrupt.
+toyos-abi = { path = "../../sdk/abi" }
 
 [package.metadata.toyos.host]
 fails = ["linux", "macos", "windows"]

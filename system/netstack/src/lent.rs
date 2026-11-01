@@ -1,6 +1,5 @@
 //! A region a client lent, as the node's [`Session`]: its header as words, its two rings as
-//! [tcp]'s buffers, and the client's two doorbells, the connection the region came on and the
-//! stream's bell.
+//! [tcp]'s buffers, and the stream's [`Holders`], every one of whose two bells a ring reaches.
 //!
 //! **A region is judged before it is mapped** ([`SharedMemory::lent`]): a handle that is no
 //! region, one that is not memory the kernel allocated, and one that is not exactly
@@ -12,16 +11,22 @@
 //! only its own stream. The header is reached only as atomics.
 //!
 //! The mapping lives as long as anything holds it: the session, and [tcp]'s buffers, which
-//! outlive the session where [tcp] finishes a connection its client left.
+//! outlive the session where [tcp] finishes a connection its holders left. The holders live as
+//! long as the session: dropped, every holder's connection and bells hang up.
 
+use std::cell::RefCell;
+use std::collections::BTreeMap;
 use std::rc::Rc;
 
+use toyos::ipc::FrameRx;
 use toyos::net::stream::{Words, RECEIVE_BYTES, RECEIVE_RING, REGION_BYTES, SEND_BYTES, SEND_RING};
 use toyos::shm::{self, SharedMemory};
-use toyos::{Connection, Pipe};
+use toyos::transport::session::{Holder, Rings};
+use toyos::wake::{Bell, Waker};
+use toyos::{Connection, OwnedHandle};
+use toyos_abi::syscall::SyscallError;
 use toyos_net_node::Session;
 use toyos_net_tcp::Lent;
-use toyos::transport::session::Rings;
 
 /// The region's mapping.
 struct Mapping(SharedMemory);
@@ -68,20 +73,51 @@ impl Lent for Ring {
     }
 }
 
+/// One holder of a stream, as netstack keeps it.
+pub struct Holding {
+    /// What it asks on.
+    pub connection: Connection,
+    /// Its frames, each a bare export.
+    pub frames: FrameRx<0>,
+    /// The wakers of the two bells the holder holds, rung for a reader and for a writer.
+    pub receive: Waker,
+    pub send: Waker,
+    /// The bell the holder rings, whose wakers going is its leaving.
+    pub rung: Bell,
+}
+
+/// A stream's holders by number, and a handle of its region for the holders netstack makes.
+pub struct Holders {
+    region: OwnedHandle,
+    pub by_number: RefCell<BTreeMap<Holder, Holding>>,
+}
+
+impl Holders {
+    /// A second handle of the region, for a holder's [`ADOPT`](toyos::net::stream::ADOPT).
+    pub fn region(&self) -> Result<OwnedHandle, SyscallError> {
+        self.region.try_clone()
+    }
+}
+
 /// A stream's session as netstack holds it.
 pub struct Region {
     mapping: Rc<Mapping>,
-    connection: Rc<Connection>,
-    /// The bell's write end: the client holds the read end.
-    bell: Pipe,
+    holders: Rc<Holders>,
 }
 
 impl Region {
-    /// The region `handle` names, judged and mapped, on `connection`, with `bell` netstack rings
-    /// a writer on. Refused, nothing is mapped and the handle is closed.
-    pub fn lent(handle: toyos::RawHandle, connection: Rc<Connection>, bell: Pipe) -> Result<Self, shm::Lent> {
-        let region = SharedMemory::lent(handle, REGION_BYTES)?;
-        Ok(Self { mapping: Rc::new(Mapping(region)), connection, bell })
+    /// The region `handle` names, judged and mapped. Refused, nothing is mapped and the handle
+    /// is closed.
+    pub fn judged(handle: toyos::OwnedHandle) -> Result<SharedMemory, shm::Lent> {
+        SharedMemory::lent(handle, REGION_BYTES)
+    }
+
+    /// The session over `mapping`, `first` its first holder, and its holders, which `serve`
+    /// adds to and takes from as long as the session lives.
+    pub fn new(mapping: SharedMemory, first: Holding) -> Result<(Self, Rc<Holders>), SyscallError> {
+        let region = mapping.share()?;
+        let holders = Rc::new(Holders { region, by_number: RefCell::new(BTreeMap::from([(Holder::FIRST, first)])) });
+        Ok((Self { mapping: Rc::new(Mapping(mapping)), holders: holders.clone() }, holders))
     }
 }
 
@@ -100,14 +136,16 @@ impl Session for Region {
         Box::new(Ring { mapping: self.mapping.clone(), base: SEND_RING, len: SEND_BYTES as usize })
     }
 
-    /// A doorbell that is full is rung already, and one whose reader is gone has a client the
-    /// connection's hang-up reports.
+    /// A ring into a bell its holder no longer holds is dropped: that
+    /// holder's leaving is its rung bell's end.
     fn ring(&self, rings: Rings) {
-        if rings.connection {
-            let _ = self.connection.write_nonblock(&[1]);
-        }
-        if rings.bell {
-            let _ = self.bell.write_nonblock(&[1]);
+        for holding in self.holders.by_number.borrow().values() {
+            if rings.receive {
+                holding.receive.wake();
+            }
+            if rings.send {
+                holding.send.wake();
+            }
         }
     }
 }

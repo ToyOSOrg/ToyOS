@@ -18,12 +18,10 @@
 use std::process::Command;
 
 use toyos::poller::{Poller, READABLE};
-use toyos_abi::syscall;
 
 const SELF_PATH: &str = "/system/bin/test_rs_poller_capacity";
 
-/// Each pipe is one 2 MiB kernel page, so this is 128 MiB of ring — enough to
-/// be a real batch, small enough to leave the machine alone.
+/// Enough to be a real batch, small enough to leave the machine alone.
 const CAP: u32 = 64;
 
 /// Printed by a child immediately before the call that must not return.
@@ -51,16 +49,16 @@ fn main() {
 fn full_capacity_delivers_everything() {
     let mut pipes = Vec::new();
     for _ in 0..CAP {
-        let p = syscall::pipe().expect("a pipe to poll");
+        let p = toyos::pipe_pair().expect("a pipe to poll");
         // Readable before it is ever registered, which is the case that used
         // to post a completion mid-registration.
-        syscall::write(p.write, b"x").expect("write into a fresh pipe");
+        p.1.write(b"x").expect("write into a fresh pipe");
         pipes.push(p);
     }
 
     let poller = Poller::new(CAP);
     for (i, p) in pipes.iter().enumerate() {
-        poller.watch_raw(p.read, READABLE, i as u64);
+        poller.watch(&p.0, READABLE, i as u64);
     }
 
     let mut seen = vec![false; CAP as usize];
@@ -75,11 +73,6 @@ fn full_capacity_delivers_everything() {
         "{} of {CAP} ready handles never completed: {missing:?}",
         missing.len()
     );
-
-    for p in pipes {
-        syscall::close(p.read);
-        syscall::close(p.write);
-    }
 }
 
 /// A capacity above what the kernel will build must be refused. Clamping it
@@ -98,16 +91,16 @@ fn over_register() {
     let poller = Poller::new(SMALL);
     let mut pipes = Vec::new();
     for _ in 0..=SMALL {
-        let p = syscall::pipe().expect("a pipe to poll");
-        syscall::write(p.write, b"x").expect("write into a fresh pipe");
+        let p = toyos::pipe_pair().expect("a pipe to poll");
+        p.1.write(b"x").expect("write into a fresh pipe");
         pipes.push(p);
     }
     for (i, p) in pipes.iter().enumerate().take(SMALL as usize) {
-        poller.watch_raw(p.read, READABLE, i as u64);
+        poller.watch(&p.0, READABLE, i as u64);
     }
     println!("{ABOUT_TO}");
-    poller.watch_raw(pipes[SMALL as usize].read, READABLE, SMALL as u64);
-    println!("watch_raw accepted registration {} of a {SMALL}-handle poller", SMALL + 1);
+    poller.watch(&pipes[SMALL as usize].0, READABLE, SMALL as u64);
+    println!("watch accepted registration {} of a {SMALL}-handle poller", SMALL + 1);
 }
 
 /// Run this binary again with `arg` and require that it died at the contract

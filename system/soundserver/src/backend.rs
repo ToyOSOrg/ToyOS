@@ -8,8 +8,8 @@
 //! that honest, because the two differ in *who owns a period soundserver has not
 //! refilled* and nothing else in the loop can be written without knowing which.
 
+use toyos::shm::Bytes;
 use toyos::AsHandle;
-use toyos_abi::RawHandle;
 
 use crate::virtio;
 
@@ -62,11 +62,11 @@ pub(crate) trait Backend {
     fn pipeline(&self) -> Pipeline;
 
     /// The handle a completion arrives on.
-    fn handle(&self) -> RawHandle;
+    fn handle(&self) -> toyos::BorrowedHandle<'_>;
 
-    /// Where period `idx`'s samples go. Device memory this process may write,
-    /// mapped once at claim.
-    fn buffer(&self, idx: usize) -> *mut u8;
+    /// Period `idx` of the memory the device plays from, mapped once at
+    /// claim, which the driver or the device may reach meanwhile.
+    fn period(&self, idx: usize) -> Bytes<'_>;
 
     /// The periods given back since the last call, or `None` for none.
     fn completion(&mut self) -> Option<Completion>;
@@ -107,12 +107,12 @@ impl Backend for VirtioBackend {
         Pipeline::Queue
     }
 
-    fn handle(&self) -> RawHandle {
+    fn handle(&self) -> toyos::BorrowedHandle<'_> {
         self.virtio.dev().as_handle()
     }
 
-    fn buffer(&self, idx: usize) -> *mut u8 {
-        self.virtio.buffer(idx)
+    fn period(&self, idx: usize) -> Bytes<'_> {
+        self.virtio.period(idx)
     }
 
     fn completion(&mut self) -> Option<Completion> {

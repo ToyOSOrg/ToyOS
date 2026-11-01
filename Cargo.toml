@@ -23,7 +23,6 @@ members = [
     "apps/snake",
     "apps/toyfetch",
     "build/root",
-    "build/ssh",
     "kernel",
     "kernel/amdvi",
     "kernel/dma",
@@ -32,20 +31,23 @@ members = [
     "kernel/loom",
     "kernel/pci",
     "kernel/phys",
+    "kernel/proclife",
     "kernel/sim",
     "kernel/smmu",
     "lib/acpi",
     "lib/acpiserver-api",
     "lib/bcachefs",
     "lib/blackbox",
+    "lib/blockdev",
     "lib/blockhold",
     "lib/blockring",
     "lib/blockserve",
     "lib/bootmap",
     "lib/crypto",
     "lib/device-memory",
-    "lib/disk",
+    "lib/devicepath",
     "lib/elf",
+    "lib/display-output",
     "lib/edid",
     "lib/elide",
     "lib/fat32",
@@ -54,6 +56,7 @@ members = [
     "lib/ieee80211",
     "lib/input",
     "lib/inspect",
+    "lib/link",
     "lib/logkeeper-api",
     "lib/logstream",
     "lib/manifest",
@@ -64,8 +67,8 @@ members = [
     "lib/random",
     "lib/rootimage",
     "lib/scsi",
-    "lib/sha2",
-    "lib/sha2-hw",
+    "lib/session",
+    "lib/ssh",
     "lib/swap",
     "lib/symbols",
     "lib/tco",
@@ -90,21 +93,25 @@ members = [
     "sdk/window",
     "system/acpiserver",
     "system/acpiserver/aml",
+    "system/ax2xx/driver",
     "system/compositor",
     "system/compositor/desktop",
     "system/compositor/virtio-gpu",
     "system/console",
+    "system/disks",
     "system/diskserver",
     "system/filepicker",
     "system/fileserver",
     "system/grants",
     "system/host",
+    "system/i219",
+    "system/i219/driver",
     "system/inspect",
     "system/logkeeper",
+    "system/logout",
     "system/netstack",
     "system/netstack/dhcp",
     "system/netstack/dns",
-    "system/netstack/i219",
     "system/netstack/ip",
     "system/netstack/mdns",
     "system/netstack/node",
@@ -119,6 +126,7 @@ members = [
     "system/ps2server/ps2",
     "system/hda",
     "system/hda/driver",
+    "system/session",
     "system/shell",
     "system/soundserver",
     "system/soundserver/mixer",
@@ -131,6 +139,8 @@ members = [
     "system/swap",
     "system/symbolize",
     "system/terminal",
+    "system/tgl-display",
+    "system/tgl-display/driver",
     "system/toybox",
     "system/toybox/copies",
     "system/trace",
@@ -140,10 +150,19 @@ members = [
     "system/usbd/xhci",
     "system/vdagent",
     "system/vdagent/bridge",
+    "system/virtio-net",
+    "system/wlan/handshake",
+    "tests/guest/hangupholder",
+    "tests/guest/inputsink",
     "tests/guest/kernelprobe",
     "tests/guest/metalprobe",
     "tests/guest/osbench",
+    "tests/guest/osbench/compare",
+    "tests/guest/osbench/lan",
+    "tests/guest/osbench/rules",
+    "tests/guest/pagerprobe",
     "tests/guest/pciholder",
+    "tests/guest/starveling",
     "tests/guest/test-runner",
     "tests/metal",
 ]
@@ -222,6 +241,9 @@ toyos-symbols = { path = "lib/symbols" }
 # `llvm-objdump`, is a C++ tool where a Rust one does the job.
 iced-x86 = { version = "1.21", default-features = false, features = ["std", "decoder", "instr_info"] }
 toyos-fat32 = { path = "lib/fat32" }
+# The device `toyos-fat32` writes and reads a volume through: here, the bytes
+# being built.
+toyos-blockdev = { path = "lib/blockdev" }
 # The names the loader looks a CPU's microcode up by, which `microcode` writes
 # each patch it splits out of a vendor's file under.
 toyos-microcode = { path = "lib/microcode" }
@@ -242,6 +264,7 @@ toyos-osrelease = { path = "sdk/osrelease" }
 # The swap port's name and the one program the image may give it to, so the
 # gate on every manifest reads what the supervisor reads.
 toyos-swap = { path = "lib/swap" }
+toyos-session = { path = "lib/session" }
 # QEMU's clipboard channel's port name, id and port count, so the launch reads
 # the declaration the guest's agent drives.
 toyos-vdagent = { path = "lib/vdagent" }
@@ -263,22 +286,23 @@ getrandom = "0.3"
 libm = "0.2.16"
 # The one `openssh-key-v1` reader and writer, shared with the SSH server's
 # host key, and the `SHA256:` fingerprint the owner's key is named by.
-toyos-ssh = { path = "build/ssh" }
+toyos-ssh = { path = "lib/ssh" }
 # `classify`, so the host reading a log volume and `logkeeper` writing it cannot
 # disagree about which files on it are `logkeeper`'s.
 toyos-wallclock = { path = "lib/wallclock" }
-# Every SHA-256 the build takes: `NOTICE`'s record of a committed file, a
-# store key, a ROOT's name and a release asset's digest.
-toyos-sha2-hw = { path = "lib/sha2-hw" }
+# Every SHA-256 the build takes (`toyos_build::sha256`), and the TLS provider of
+# every request it makes (`release::agent`).
+toyos-crypto = { path = "lib/crypto", features = ["std", "rustls-provider"] }
+# The provider's types: its random source and its key-exchange groups.
+rustls = { version = "0.23.45", default-features = false }
 # The toolchain release's tarball, packed in-process (`build/release.rs`): Rust's
 # own tar and gzip, where the binaries are hosts' tools.
 tar = { version = "0.4.46", default-features = false }
 flate2 = { version = "1", default-features = false, features = ["rust_backend"] }
 # Every request the build system makes, GitHub's API and the crates.io index,
-# where curl is a host's tool: rustls on ring, the one TLS provider the tree
-# takes (`issues/the-internet-clients-work-unchanged.md`), whose C
-# and assembly the host's `cc` compiles.
-ureq = { version = "3", default-features = false, features = ["rustls"] }
+# where curl is a host's tool: rustls on toyos-crypto's provider, with webpki's
+# roots.
+ureq = { version = "3", default-features = false, features = ["rustls-no-provider", "rustls-webpki-roots"] }
 # The authorities `build::trust_roots` writes to ROOT, as the rustls project
 # publishes the Mozilla root program, and the PEM it writes them in.
 webpki-root-certs = "1"
@@ -287,8 +311,6 @@ pem = "4"
 [dev-dependencies]
 # The FAT implementation `build/fatformat.rs` is judged against, byte for byte.
 fatfs = "0.3.6"
-# The GPT writer `build/gptwrite.rs` is judged against, byte for byte.
-gpt = "3.1.0"
 # `USER_TOP`, so the harness judges a held `rsp` against the bound the kernel
 # checks every user pointer against and not against a second copy of it.
 toyos-userbound = { path = "lib/userbound" }
@@ -306,6 +328,9 @@ toyos-metal = { path = "tests/metal" }
 toyos-quiesce = { path = "lib/quiesce" }
 # The parity table `crypto_parity` prints and the judge reads, under one rule.
 toyos-parity = { path = "lib/parity" }
+# The package energy counter's decode, so the `counters` judge's reading of
+# it is osbench's rule and not a second one.
+osbench-rules = { path = "tests/guest/osbench/rules" }
 
 [patch.crates-io]
 loom = { git = "https://github.com/ToyOSOrg/loom", branch = "toyos" }
@@ -321,9 +346,6 @@ getrandom = { git = "https://github.com/ToyOSOrg/getrandom", branch = "toyos-0.2
 getrandom_03 = { git = "https://github.com/ToyOSOrg/getrandom", branch = "toyos-0.3-sdk-0.12", package = "getrandom" }
 getrandom_04 = { git = "https://github.com/ToyOSOrg/getrandom", branch = "toyos-0.4", package = "getrandom" }
 mio = { git = "https://github.com/ToyOSOrg/mio", branch = "toyos" }
-tokio = { git = "https://github.com/ToyOSOrg/tokio", branch = "toyos" }
-russh = { git = "https://github.com/ToyOSOrg/russh", branch = "toyos" }
-russh-cryptovec = { git = "https://github.com/ToyOSOrg/russh", branch = "toyos" }
 socket2 = { git = "https://github.com/ToyOSOrg/socket2", branch = "toyos" }
 raw-window-handle = { git = "https://github.com/ToyOSOrg/raw-window-handle", branch = "toyos-0.6.2" }
 cpal = { git = "https://github.com/ToyOSOrg/cpal", branch = "toyos-0.18.0" }

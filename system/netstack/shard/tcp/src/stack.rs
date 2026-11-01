@@ -1112,6 +1112,22 @@ impl Tcp {
         Ok(())
     }
 
+    /// The host no longer holds `local`: every connection from it ends with
+    /// [`Failure::AddressGone`], with no reset, since nothing can be sent from it. A connection
+    /// cannot move to another address, so waiting would only end it later by its timeout.
+    pub fn lose_address(&mut self, local: Ipv4Addr) {
+        let lost: Vec<u32> = self
+            .conns
+            .iter()
+            .enumerate()
+            .filter_map(|(index, slot)| slot.value.as_ref().filter(|c| c.tuple.local.addr == local && !matches!(c.state, Tcb::Ended(_))).map(|_| index))
+            .filter_map(|index| u32::try_from(index).ok())
+            .collect();
+        for index in lost {
+            self.end(index, Some(Failure::AddressGone), None);
+        }
+    }
+
     /// RFC 9293 §3.10.5.
     pub fn abort(&mut self, now: Instant, id: ConnId) -> Result<(), Error> {
         let conn = self.conn(id)?;

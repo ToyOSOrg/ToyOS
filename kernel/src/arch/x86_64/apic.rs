@@ -136,7 +136,18 @@ fn enable(cpu_id: u32) -> ApicMode {
     Reg::SVR.write(SVR);
     let held = Reg::SVR.read();
     assert!(held == SVR, "LAPIC: SVR reads {held:#x} after {SVR:#x} was written");
+    timer_one_shot();
     mode
+}
+
+/// The timer counting at the bus clock, one-shot on [`TIMER_VECTOR`] and
+/// stopped: what every arm after it writes only the count into. The LVT resets
+/// masked and nothing here disables the APIC again, so once per CPU holds it.
+fn timer_one_shot() {
+    // Divide by 1 for maximum resolution.
+    Reg::TIMER_DIVIDE.write(0b1011);
+    Reg::TIMER_INIT.write(0);
+    Reg::LVT_TIMER.write(u32::from(TIMER_VECTOR));
 }
 
 /// Enable the BSP's local APIC.
@@ -251,6 +262,13 @@ pub(super) fn tlb_ipi() {
     }
 }
 
+/// Ask one CPU to flush its TLB.
+pub(super) fn tlb_ipi_to(cpu_id: u32) {
+    if ENABLED.load(Ordering::Relaxed) {
+        send(Some(crate::smp::hardware_id(cpu_id)), 0x4000 | 0xFE);
+    }
+}
+
 /// Send the kick IPI to one CPU, waking it if halted.
 // Targeted, not broadcast: a broadcast kick would preempt every sibling per wake and cannot scale.
 pub fn kick_cpu(cpu_id: u32) {
@@ -259,7 +277,7 @@ pub fn kick_cpu(cpu_id: u32) {
     send(Some(apic_id), 0x4000 | u32::from(super::idt::KICK_VECTOR));
 }
 
-// Kicked, and not left to arrive on their own: a CPU halted in the idle path has stopped its own timer, so nothing else brings it to the next scheduler pass.
+// Kicked, and not left to arrive on their own: a CPU halted in the idle path has stopped its own timer, so nothing else brings it to the counters round it is asked to serve.
 pub fn kick_all_but_self() {
     let me = percpu::cpu_id();
     for cpu in 0..crate::smp::cpu_count() {
@@ -305,10 +323,7 @@ pub fn stop_other_cpus() {
 
 /// Calibrate the LAPIC timer on the BSP (requires HPET); does not start it.
 pub fn init_timer() {
-    // Divide by 1 for maximum resolution.
-    Reg::TIMER_DIVIDE.write(0b1011);
-
-    // Masked one-shot mode for calibration.
+    // Masked one-shot mode for calibration, at `timer_one_shot`'s divide.
     Reg::LVT_TIMER.write(1 << 16);
     Reg::TIMER_INIT.write(0xFFFF_FFFF);
 
@@ -324,7 +339,7 @@ pub fn init_timer() {
     let ticks_elapsed = 0xFFFF_FFFFu32.wrapping_sub(remaining);
     let ticks_10ms = (ticks_elapsed as u64 * 10_000_000 / elapsed) as u32;
 
-    Reg::TIMER_INIT.write(0);
+    timer_one_shot();
     TIMER_TICKS.store(ticks_10ms, Ordering::Release);
     // Fallback for any Ring 0 fire before the scheduler arms its first quantum.
     percpu::set_last_armed_ticks(OneShot::ticks(ticks_10ms as u64).0);
@@ -347,15 +362,16 @@ impl OneShot {
         Self(ticks.clamp(floor, u32::MAX as u64) as u32)
     }
 
+    /// `⌊nanos · per_10ms / 10⁷⌋`, split at 10⁷ ns so both halves stay in 64
+    /// bits and divide by a constant (`per_10ms` is a `u32`).
     fn after(nanos: u64) -> Self {
-        let per_10ms = TIMER_TICKS.load(Ordering::Relaxed) as u128;
-        Self::ticks((nanos as u128 * per_10ms / 10_000_000) as u64)
+        const NS_PER_10MS: u64 = 10_000_000;
+        let per_10ms = u64::from(TIMER_TICKS.load(Ordering::Relaxed));
+        Self::ticks((nanos / NS_PER_10MS).saturating_mul(per_10ms).saturating_add(nanos % NS_PER_10MS * per_10ms / NS_PER_10MS))
     }
 
+    /// The count alone: [`timer_one_shot`] set the rest on this CPU.
     fn arm(self) {
-        Reg::TIMER_DIVIDE.write(0b1011);
-        // LVT resets masked; an AP may reach here before this register was ever written.
-        Reg::LVT_TIMER.write(u32::from(TIMER_VECTOR));
         percpu::set_last_armed_ticks(self.0);
         Reg::TIMER_INIT.write(self.0);
     }

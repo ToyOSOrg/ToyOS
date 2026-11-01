@@ -1,0 +1,13 @@
+[package]
+name = "logout"
+description = "logout [<session> [--force]]: the login sessions open, listed, or one of them signed out, asked of the supervisor."
+version = "0.1.0"
+edition = "2021"
+license = "MIT OR Apache-2.0"
+
+[dependencies]
+toyos = { path = "../../sdk/toyos" }
+toyos-session = { path = "../../lib/session" }
+
+[package.metadata.toyos.host]
+exempt.manages = "ToyOS's login sessions, through the supervisor's `session-admin` port"

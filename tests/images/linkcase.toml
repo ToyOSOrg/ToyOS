@@ -1,0 +1,46 @@
+# The boot `a_link_ends_under_a_held_stream_and_comes_back` runs alone:
+# netstack and no NIC driver row, so the job claims the virtio NIC itself,
+# starts `/system/bin/virtio-net` on it and ends it, and only it does.
+
+[boot]
+start = ["logkeeper", "diskserver", "fileserver", "netstack", "test-runner"]
+
+# `log` is the port the job reads netstack's lines on.
+[programs.logkeeper]
+service = true
+syscap = ["logread"]
+serves = ["log"]
+
+[programs.netstack]
+service = true
+serves = ["netstack", "link"]
+
+# Declared so the image carries it, and started by no row: the job starts it.
+[programs.virtio-net]
+
+# `inventory` and `device`, to find the NIC and claim it, and `dup`, because
+# test-runner hands a job its capability as a duplicate; `link`, which the
+# job's driver says hello on; `netstack`, which holds the job's stream; and
+# `log`.
+[programs.test-runner]
+receives = ["netstack", "link", "log"]
+syscap = ["device", "dup", "inventory"]
+
+[programs.diskserver]
+service = true
+restart = true
+serves = ["block", "disk"]
+
+[programs.nvme]
+drives = ["pci:01:08:02"]
+receives = ["disk"]
+
+[programs.usbd]
+drives = ["pci:0c:03:30/1033:0194", "pci:0c:03:30@boot"]
+receives = ["disk"]
+
+[programs.fileserver]
+pager = true
+restart = true
+roles = ["data", "log", "boot"]
+receives = ["block"]

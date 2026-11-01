@@ -7,6 +7,9 @@ use core::ptr::{self, NonNull};
 
 use alloc::vec;
 
+use toyos_abi::boot::DEVICE_PATH_BYTES;
+use toyos_devicepath::{Malformed, Path};
+
 use super::boot::{Exclusive, Protocol};
 use super::{CStr16, Guid, Handle, Status};
 
@@ -103,65 +106,49 @@ const NODE_HEADER: usize = 4;
 const END_ENTIRE: (u8, u8) = (0x7f, 0xff);
 
 impl DevicePath {
-    /// Each node, whole, up to the End of Entire node.
-    ///
-    /// # Panics
-    /// Where a node's length does not cover its own header: the walk could
-    /// not step past it.
-    pub fn nodes(&self) -> impl Iterator<Item = &[u8]> {
-        let mut at = ptr::from_ref(self).cast::<u8>();
-        core::iter::from_fn(move || {
-            // SAFETY: firmware's path is a run of nodes ending in End of
-            // Entire, and `at` is the start of one of them.
-            let header = unsafe { core::slice::from_raw_parts(at, NODE_HEADER) };
-            if (header[0], header[1]) == END_ENTIRE {
-                return None;
+    /// The path, walked no further than [`DEVICE_PATH_BYTES`] and held to
+    /// [`Path::parse`].
+    pub fn path(&self) -> Result<Path<'_>, Unread> {
+        let start = ptr::from_ref(self).cast::<u8>();
+        let mut len = 0;
+        loop {
+            if DEVICE_PATH_BYTES - len < NODE_HEADER {
+                return Err(Unread::Past);
             }
-            let len = usize::from(u16::from_le_bytes([header[2], header[3]]));
-            assert!(len >= NODE_HEADER, "firmware's device path has a {len}-byte node");
-            // SAFETY: the node's own length, which counts its header.
-            let node = unsafe { core::slice::from_raw_parts(at, len) };
-            // SAFETY: the next node follows this one.
-            at = unsafe { at.add(len) };
-            Some(node)
-        })
+            // SAFETY: firmware's path is a run of nodes ending in End of
+            // Entire, and `len` is where one of them starts.
+            let header = unsafe { core::slice::from_raw_parts(start.add(len), NODE_HEADER) };
+            let node = usize::from(u16::from_le_bytes([header[2], header[3]]));
+            if node < NODE_HEADER {
+                return Err(Unread::Malformed(Malformed::Short { at: len, len: node }));
+            }
+            if DEVICE_PATH_BYTES - len < node {
+                return Err(Unread::Past);
+            }
+            len += node;
+            if (header[0], header[1]) == END_ENTIRE {
+                // SAFETY: the nodes walked above.
+                let bytes = unsafe { core::slice::from_raw_parts(start, len) };
+                return Path::parse(bytes).map_err(Unread::Malformed);
+            }
+        }
     }
 }
 
-/// The MEDIA/HARDDRIVE node (§10.3.5.1).
-pub struct HardDrive {
-    pub start: u64,
-    pub size: u64,
-    pub signature: [u8; 16],
-    /// `MBRType`: 2 for a GPT partition.
-    pub format: u8,
-    /// `SignatureType`: 2 for a GUID signature.
-    pub signature_type: u8,
+/// Why a handle's device path was not read.
+#[derive(Clone, Copy, Debug)]
+pub enum Unread {
+    /// It runs past [`DEVICE_PATH_BYTES`].
+    Past,
+    Malformed(Malformed),
 }
 
-impl HardDrive {
-    pub const TYPE: (u8, u8) = (4, 1);
-    /// `MBRType` of a GPT partition.
-    pub const GPT: u8 = 2;
-    /// `SignatureType` of a GUID signature.
-    pub const GUID_SIGNATURE: u8 = 2;
-    const LEN: usize = 42;
-
-    /// `node`, where it is a HARDDRIVE node of the length §10.3.5.1 gives it:
-    /// a node of a device path firmware built. A load option's path is any
-    /// writer's bytes, and `bootnext` walks it by its own rule.
-    pub fn parse(node: &[u8]) -> Option<HardDrive> {
-        if node.len() != Self::LEN || (node[0], node[1]) != Self::TYPE {
-            return None;
+impl core::fmt::Display for Unread {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        match self {
+            Self::Past => write!(f, "it runs past {DEVICE_PATH_BYTES} bytes"),
+            Self::Malformed(why) => why.fmt(f),
         }
-        let u64_at = |at: usize| u64::from_le_bytes(node[at..at + 8].try_into().expect("eight bytes"));
-        Some(HardDrive {
-            start: u64_at(8),
-            size: u64_at(16),
-            signature: node[24..40].try_into().expect("sixteen bytes"),
-            format: node[40],
-            signature_type: node[41],
-        })
     }
 }
 
@@ -645,5 +632,58 @@ impl super::Scoped<'_, Rng> {
     pub fn get_rng(&self, into: &mut [u8]) -> Result<(), Status> {
         // SAFETY: the open interface, and `into` is its length of writable bytes.
         unsafe { (self.get_rng)(self.this(), ptr::null(), into.len(), into.as_mut_ptr()) }.ok()
+    }
+}
+
+/// `EFI_PCI_IO_PROTOCOL` (UEFI 2.10 §14.4.1), on one handle per PCI function:
+/// only `GetLocation()` is called.
+#[repr(C)]
+pub struct PciIo {
+    poll_mem: Unused,
+    poll_io: Unused,
+    mem_read: Unused,
+    mem_write: Unused,
+    io_read: Unused,
+    io_write: Unused,
+    pci_read: Unused,
+    pci_write: Unused,
+    copy_mem: Unused,
+    map: Unused,
+    unmap: Unused,
+    allocate_buffer: Unused,
+    free_buffer: Unused,
+    flush: Unused,
+    get_location: unsafe extern "efiapi" fn(
+        this: *mut PciIo,
+        segment: *mut usize,
+        bus: *mut usize,
+        device: *mut usize,
+        function: *mut usize,
+    ) -> Status,
+    attributes: Unused,
+    get_bar_attributes: Unused,
+    set_bar_attributes: Unused,
+    rom_size: u64,
+    rom_image: Unused,
+}
+
+const _: () = {
+    assert!(offset_of!(PciIo, get_location) == 14 * 8);
+    assert!(size_of::<PciIo>() == 20 * 8);
+};
+
+// SAFETY: §14.4.1's layout, under its GUID.
+unsafe impl Protocol for PciIo {
+    const GUID: Guid = Guid::new(0x4cf5b200, 0x68b8, 0x4ca5, [0x9e, 0xec, 0xb2, 0x3e, 0x3f, 0x50, 0x02, 0x9a]);
+}
+
+impl super::Scoped<'_, PciIo> {
+    /// `GetLocation()` (§14.4.13): the function's segment, bus, device and
+    /// function numbers.
+    pub fn location(&self) -> Result<[usize; 4], Status> {
+        let mut at = [0usize; 4];
+        let [segment, bus, device, function] = &mut at;
+        // SAFETY: the open interface, and four live out parameters.
+        unsafe { (self.get_location)(self.this(), segment, bus, device, function) }.ok().map(|()| at)
     }
 }

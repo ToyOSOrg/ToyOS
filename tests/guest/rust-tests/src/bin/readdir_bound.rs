@@ -49,26 +49,43 @@ fn plain_entries_are_all_returned() {
     }
 }
 
-/// Exactly `MAX_LIST_ENTRIES` entries, in the shape that costs the most.
+/// Exactly `MAX_LIST_ENTRIES` entries, nearly all in the shape that costs the
+/// most.
 ///
-/// Every name is `d<i>/f`, so listing `/tmp` puts one entry per distinct
-/// subdirectory into the kernel's dedup set — the allocation the bound is
-/// derived against, at the count it is derived for. It succeeding is what says
-/// the bound is not above the real ceiling; deriving it on paper does not.
+/// Every name but [`PLAIN_AT_LIMIT`] is `d<i>/f`, so listing `/tmp` puts one
+/// entry per distinct subdirectory into the kernel's dedup set — the
+/// allocation the bound is derived against. A directory opened is numbered
+/// (`kernel/pure/dirnodes.rs`, `MAX_DIRECTORIES`, the same count), and this
+/// test opens two more than it fills, `/tmp` here and `/tmp/empty` below, so
+/// those two entries are plain files. It succeeding is what says the bound is
+/// not above the real ceiling; deriving it on paper does not.
 fn subdirectories_at_the_limit() {
-    for i in 0..MAX_LIST_ENTRIES {
+    for i in 0..MAX_LIST_ENTRIES - PLAIN_AT_LIMIT {
         fs::write(format!("/tmp/d{i}/f"), b"").expect("create failed");
+    }
+    for i in 0..PLAIN_AT_LIMIT {
+        fs::write(format!("/tmp/plain{i}"), b"").expect("create failed");
     }
     let n = fs::read_dir("/tmp").expect("read_dir at the limit failed").count();
     assert_eq!(n, MAX_LIST_ENTRIES, "listing at the limit returned {n}");
-    println!("  PASS: {n} distinct subdirectories listed at the limit");
+    println!("  PASS: {n} entries listed at the limit, {} of them distinct subdirectories", n - PLAIN_AT_LIMIT);
+}
+
+/// The entries at the limit that are files, leaving a directory number each
+/// for the two directories the test opens.
+const PLAIN_AT_LIMIT: usize = 2;
+
+/// The whole listing of `path`, or the error that ended it: opening the
+/// directory or any read of its listing.
+fn listing(path: &str) -> std::io::Result<usize> {
+    fs::read_dir(path)?.collect::<std::io::Result<Vec<_>>>().map(|entries| entries.len())
 }
 
 /// One more, and the answer is an error rather than a panic or a short list.
 fn one_past_the_limit_is_refused() {
     fs::write(format!("/tmp/d{MAX_LIST_ENTRIES}/f"), b"").expect("create failed");
-    match fs::read_dir("/tmp") {
-        Ok(it) => panic!("listing past the limit returned {} entries", it.count()),
+    match listing("/tmp") {
+        Ok(n) => panic!("listing past the limit returned {n} entries"),
         Err(e) => println!("  PASS: one past the limit refused ({e})"),
     }
 }
@@ -91,8 +108,8 @@ fn a_directory_still_lists_in_a_mount_past_the_bound() {
     println!("  PASS: /tmp serves a directory and an empty one while its own root is refused");
 
     // The mount root is a directory too, and its bound is still the same one.
-    match fs::read_dir("/tmp") {
-        Ok(it) => panic!("/tmp listed {} entries after the per-directory bound", it.count()),
+    match listing("/tmp") {
+        Ok(n) => panic!("/tmp listed {n} entries after the per-directory bound"),
         Err(e) => println!("  PASS: /tmp's own root is still refused ({e})"),
     }
 }

@@ -1,7 +1,8 @@
 use alloc::string::String;
 
 use crate::boot::Cluster;
-use crate::device::BlockAccess;
+use toyos_blockdev::BlockDev;
+use crate::device::Volume as _;
 use crate::error::Error;
 use crate::fat::END_OF_CHAIN;
 use crate::fs::{Fat32, Loc};
@@ -163,7 +164,7 @@ impl EntryCursor {
         EntryCursor { dir_start, cluster: dir_start, cluster_index: 0 }
     }
 
-    pub fn offset_of<D: BlockAccess>(
+    pub async fn offset_of<D: BlockDev>(
         &mut self,
         fs: &mut Fat32<D>,
         index: u32,
@@ -177,7 +178,7 @@ impl EntryCursor {
             self.cluster_index = 0;
         }
         while self.cluster_index < want_cluster {
-            match fs.next_cluster(self.cluster)? {
+            match fs.next_cluster(self.cluster).await? {
                 Some(next) => {
                     self.cluster = next;
                     self.cluster_index += 1;
@@ -248,7 +249,7 @@ impl DirScan {
 
     /// The next real entry, skipping free slots, long-name runs, volume
     /// labels and the dot entries.
-    pub fn next<D: BlockAccess>(&mut self, fs: &mut Fat32<D>) -> Result<Option<Located>, Error> {
+    pub async fn next<D: BlockDev>(&mut self, fs: &mut Fat32<D>) -> Result<Option<Located>, Error> {
         if self.done {
             return Ok(None);
         }
@@ -257,11 +258,11 @@ impl DirScan {
                 self.done = true;
                 return Err(Error::CorruptDirectory);
             }
-            let Some(offset) = self.cursor.offset_of(fs, self.index)? else {
+            let Some(offset) = self.cursor.offset_of(fs, self.index).await? else {
                 self.done = true;
                 return Ok(None);
             };
-            let raw = fs.read_entry_at(offset)?;
+            let raw = fs.read_entry_at(offset).await?;
             let index = self.index;
             self.index += 1;
 
@@ -368,12 +369,12 @@ impl DirScan {
     }
 }
 
-impl<D: BlockAccess> Fat32<D> {
-    pub(crate) fn read_entry_at(&mut self, offset: u64) -> Result<RawEntry, Error> {
+impl<D: BlockDev> Fat32<D> {
+    pub(crate) async fn read_entry_at(&mut self, offset: u64) -> Result<RawEntry, Error> {
         let bps = self.geometry().bytes_per_sector as u64;
         let sector = offset / bps * bps;
         let within = (offset - sector) as usize;
-        self.load_sector(sector)?;
+        self.load_sector(sector).await?;
         let bytes = self
             .sector()
             .get(within..within + ENTRY_SIZE as usize)
@@ -384,34 +385,34 @@ impl<D: BlockAccess> Fat32<D> {
     }
 
     /// Write a directory entry, queueing what it held as the repair.
-    pub(crate) fn write_entry_at(&mut self, offset: u64, entry: &RawEntry) -> Result<(), Error> {
-        let raw = self.read_entry_at(offset)?;
+    pub(crate) async fn write_entry_at(&mut self, offset: u64, entry: &RawEntry) -> Result<(), Error> {
+        let raw = self.read_entry_at(offset).await?;
         self.queue(Repair::Entry { offset, raw });
-        self.put_entry_at(offset, entry)
+        self.put_entry_at(offset, entry).await
     }
 
     /// Write a directory entry with no repair: for the repair itself, and for
     /// a cluster this call claimed, which nothing reaches until it succeeds.
-    pub(crate) fn put_entry_at(&mut self, offset: u64, entry: &RawEntry) -> Result<(), Error> {
+    pub(crate) async fn put_entry_at(&mut self, offset: u64, entry: &RawEntry) -> Result<(), Error> {
         self.invalidate_sector();
-        self.device().write_at(offset, &entry.0)?;
+        self.dev.write_at(offset, &entry.0).await?;
         Ok(())
     }
 
     /// Entries the directory's currently allocated clusters can hold.
-    fn dir_capacity(&mut self, dir_start: Cluster) -> Result<u32, Error> {
+    async fn dir_capacity(&mut self, dir_start: Cluster) -> Result<u32, Error> {
         let per_cluster = self.geometry().bytes_per_cluster() / ENTRY_SIZE;
         let max_clusters = (MAX_DIR_ENTRIES / per_cluster).max(1) as u64;
-        let clusters = self.chain_len(dir_start, max_clusters)?;
+        let clusters = self.chain_len(dir_start, max_clusters).await?;
         Ok((clusters as u32).saturating_mul(per_cluster).min(MAX_DIR_ENTRIES))
     }
 
     /// The index of the first run of `count` consecutive free slots, growing
     /// the directory by a cluster if there is no such run.
-    fn find_free_run(&mut self, dir_start: Cluster, count: u32) -> Result<u32, Error> {
-        let mut capacity = self.dir_capacity(dir_start)?;
+    async fn find_free_run(&mut self, dir_start: Cluster, count: u32) -> Result<u32, Error> {
+        let mut capacity = self.dir_capacity(dir_start).await?;
         loop {
-            if let Some(index) = self.scan_free_run(dir_start, count, capacity)? {
+            if let Some(index) = self.scan_free_run(dir_start, count, capacity).await? {
                 return Ok(index);
             }
             let per_cluster = self.geometry().bytes_per_cluster() / ENTRY_SIZE;
@@ -419,15 +420,15 @@ impl<D: BlockAccess> Fat32<D> {
                 return Err(Error::NoSpace);
             }
             let max_clusters = (MAX_DIR_ENTRIES / per_cluster).max(1) as u64;
-            let last = self.chain_last(dir_start, max_clusters)?;
-            let new = self.alloc_zeroed_cluster()?;
+            let last = self.chain_last(dir_start, max_clusters).await?;
+            let new = self.alloc_zeroed_cluster().await?;
             self.queue(Repair::Put { cluster: last, value: END_OF_CHAIN });
-            self.set_fat_entry(last, new.raw())?;
+            self.set_fat_entry(last, new.raw()).await?;
             capacity += per_cluster;
         }
     }
 
-    fn scan_free_run(
+    async fn scan_free_run(
         &mut self,
         dir_start: Cluster,
         count: u32,
@@ -437,8 +438,8 @@ impl<D: BlockAccess> Fat32<D> {
         let mut run_start: Option<u32> = None;
         let mut index = 0;
         while index < capacity {
-            let Some(offset) = cursor.offset_of(self, index)? else { break };
-            let raw = self.read_entry_at(offset)?;
+            let Some(offset) = cursor.offset_of(self, index).await? else { break };
+            let raw = self.read_entry_at(offset).await?;
             if raw.is_free() {
                 let start = *run_start.get_or_insert(index);
                 if raw.is_end() {
@@ -457,9 +458,9 @@ impl<D: BlockAccess> Fat32<D> {
         Ok(None)
     }
 
-    fn short_name_taken(&mut self, dir_start: Cluster, short: &ShortName) -> Result<bool, Error> {
+    async fn short_name_taken(&mut self, dir_start: Cluster, short: &ShortName) -> Result<bool, Error> {
         let mut scan = DirScan::new(dir_start);
-        while let Some(loc) = scan.next(self)? {
+        while let Some(loc) = scan.next(self).await? {
             if &loc.raw.short() == short {
                 return Ok(true);
             }
@@ -479,7 +480,7 @@ impl<D: BlockAccess> Fat32<D> {
     /// `groups` entries too high for any name with a long-name run, and would
     /// have orphaned those entries the first time something erased through a
     /// handle.
-    pub(crate) fn insert_entry(
+    pub(crate) async fn insert_entry(
         &mut self,
         dir_start: Cluster,
         name: &str,
@@ -493,7 +494,7 @@ impl<D: BlockAccess> Fat32<D> {
         let mut found = false;
         for n in 0..MAX_SHORT_NAME_CANDIDATES {
             let candidate = name::candidate(&basis, name, n);
-            if !self.short_name_taken(dir_start, &candidate)? {
+            if !self.short_name_taken(dir_start, &candidate).await? {
                 short = candidate;
                 found = true;
                 break;
@@ -509,7 +510,7 @@ impl<D: BlockAccess> Fat32<D> {
             name::lfn_groups(name)?
         };
         let total = groups as u32 + 1;
-        let start = self.find_free_run(dir_start, total)?;
+        let start = self.find_free_run(dir_start, total).await?;
 
         let checksum = name::lfn_checksum(&short);
         let mut cursor = EntryCursor::new(dir_start);
@@ -528,41 +529,41 @@ impl<D: BlockAccess> Fat32<D> {
                 }
             }
             let index = start + (groups - 1 - g) as u32;
-            let offset = cursor.offset_of(self, index)?.ok_or(Error::NoSpace)?;
-            self.write_entry_at(offset, &raw)?;
+            let offset = cursor.offset_of(self, index).await?.ok_or(Error::NoSpace)?;
+            self.write_entry_at(offset, &raw).await?;
         }
 
         let mut entry = *template;
         entry.set_short(&short);
         entry.0[12] = 0;
         let index = start + groups as u32;
-        let offset = cursor.offset_of(self, index)?.ok_or(Error::NoSpace)?;
-        self.write_entry_at(offset, &entry)?;
+        let offset = cursor.offset_of(self, index).await?.ok_or(Error::NoSpace)?;
+        self.write_entry_at(offset, &entry).await?;
         Ok((Loc { dir_start, first_index: start, index, entry_offset: offset }, entry))
     }
 
     /// Mark every entry of a run free. Does not touch the cluster chain — a
     /// rename moves an entry and must not free what it still points at.
-    pub(crate) fn erase_entries(&mut self, loc: Loc) -> Result<(), Error> {
+    pub(crate) async fn erase_entries(&mut self, loc: Loc) -> Result<(), Error> {
         let mut cursor = EntryCursor::new(loc.dir_start);
         for index in loc.first_index..=loc.index {
-            let Some(offset) = cursor.offset_of(self, index)? else { break };
-            let mut raw = self.read_entry_at(offset)?;
+            let Some(offset) = cursor.offset_of(self, index).await? else { break };
+            let mut raw = self.read_entry_at(offset).await?;
             raw.0[0] = FREE;
-            self.write_entry_at(offset, &raw)?;
+            self.write_entry_at(offset, &raw).await?;
         }
         Ok(())
     }
 
     /// Whether a directory holds nothing but `.`, `..` and free slots.
-    pub(crate) fn dir_is_empty(&mut self, dir_start: Cluster) -> Result<bool, Error> {
+    pub(crate) async fn dir_is_empty(&mut self, dir_start: Cluster) -> Result<bool, Error> {
         let mut scan = DirScan::new(dir_start);
-        Ok(scan.next(self)?.is_none())
+        Ok(scan.next(self).await?.is_none())
     }
 
     /// Write the `.` and `..` pair a new directory must begin with, into a
     /// cluster this call claimed and nothing reaches yet.
-    pub(crate) fn init_dot_entries(
+    pub(crate) async fn init_dot_entries(
         &mut self,
         cluster: Cluster,
         parent: Cluster,
@@ -579,8 +580,8 @@ impl<D: BlockAccess> Fat32<D> {
             raw.set_first_cluster(target);
             raw.set_create_time(time);
             raw.set_write_time(time);
-            let offset = cursor.offset_of(self, index as u32)?.ok_or(Error::NoSpace)?;
-            self.put_entry_at(offset, &raw)?;
+            let offset = cursor.offset_of(self, index as u32).await?.ok_or(Error::NoSpace)?;
+            self.put_entry_at(offset, &raw).await?;
         }
         Ok(())
     }
@@ -593,16 +594,16 @@ impl<D: BlockAccess> Fat32<D> {
     }
 
     /// Repoint a directory's `..` entry after it moves to a new parent.
-    pub(crate) fn set_dot_dot(&mut self, cluster: Cluster, parent: Cluster) -> Result<(), Error> {
+    pub(crate) async fn set_dot_dot(&mut self, cluster: Cluster, parent: Cluster) -> Result<(), Error> {
         let parent = self.dotdot_target(parent);
         let mut cursor = EntryCursor::new(cluster);
-        let Some(offset) = cursor.offset_of(self, 1)? else { return Err(Error::CorruptDirectory) };
-        let mut raw = self.read_entry_at(offset)?;
+        let Some(offset) = cursor.offset_of(self, 1).await? else { return Err(Error::CorruptDirectory) };
+        let mut raw = self.read_entry_at(offset).await?;
         if raw.0[..2] != *b".." {
             return Err(Error::CorruptDirectory);
         }
         raw.set_first_cluster(parent);
-        self.write_entry_at(offset, &raw)
+        self.write_entry_at(offset, &raw).await
     }
 }
 

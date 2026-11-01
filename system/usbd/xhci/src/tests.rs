@@ -493,6 +493,32 @@ fn a_stick_is_offered_once_its_table_is_read_and_the_bus_settles_only_then() {
     assert_eq!(arrived, Some((0, Some((2048, 8192)))));
 }
 
+/// A stick whose sector count is not whole 4 KiB blocks keeps its backup
+/// table on its true last sector (UEFI 2.10 §5.3.1), past the last whole
+/// block: with the primary header torn, the table is still read, from there.
+#[test]
+fn a_stick_s_backup_past_its_last_whole_block_is_read() {
+    let sectors = 16384 + 4;
+    let mut bytes = gpt_disk(sectors, UNIQUE, 2048, 8192);
+    bytes[512 + 40] ^= 1;
+    let stick = Stick::new(bytes, "SERIAL1");
+    let w = World::new(vec![(FakePort::occupied(QUICK), Some(Box::new(stick)))], 1);
+    let usb = w.start(BOTH);
+    let mut tasks = usb.tasks();
+    let _end = End(&usb);
+    let mut owner = Mock::default();
+    let mut arrived = None;
+    for step in 1..=60 {
+        w.run(&usb, &mut tasks, &mut owner, step * 10 * MS).unwrap();
+        for event in usb.disks.take_events() {
+            if let Event::Arrived { disk, table, .. } = event {
+                arrived = Some((disk, table));
+            }
+        }
+    }
+    assert_eq!(arrived, Some((0, Some((2048, 8192)))), "the backup on sector {} was not read", sectors - 1);
+}
+
 /// A session's read and write move straight between the stick and the
 /// client's lent region, and a flush is SYNCHRONIZE CACHE.
 #[test]

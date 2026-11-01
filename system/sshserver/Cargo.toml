@@ -5,10 +5,23 @@ edition = "2024"
 license = "MIT OR Apache-2.0"
 
 [dependencies]
-rand = "0.10"
-russh = { version = "0.60", default-features = false, features = ["rustcrypto", "flate2", "rsa"] }
-tokio = { version = "1", features = ["rt", "net", "macros", "io-util", "sync", "time"] }
+# The protocol: everything a client's bytes touch before a program runs.
+toyos-ssh = { path = "../../lib/ssh" }
+# `Random`'s error, which the operating system's randomness answers with.
+toyos-crypto = { path = "../../lib/crypto" }
+# The operating system's randomness, for the protocol and a minted host key.
+getrandom = "0.3"
 
 [dev-dependencies]
 # Test scratch that is gone on every way out; `--ci host` reds on any left behind.
 toyos-tmpdir = { path = "../../lib/tmpdir" }
+
+[lints.rust]
+unexpected_cfgs = { level = "warn", check-cfg = ['cfg(target_os, values("toyos"))'] }
+
+[target.'cfg(target_os = "toyos")'.dependencies]
+toyos = { path = "../../sdk/toyos", features = ["std"] }
+# The handle a channel's end asks its program to quit through.
+toyos-abi = { path = "../../sdk/abi" }
+# Opening a login session per connection, and signing it out.
+toyos-session = { path = "../../lib/session" }

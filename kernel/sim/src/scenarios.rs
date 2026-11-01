@@ -868,6 +868,7 @@ pub fn all() -> Vec<Scenario> {
         wakeup_storm(2, 16),
         busy_home(),
         sleep_spin_siblings(),
+        turn_taking_pair(),
     ]
 }
 
@@ -1161,6 +1162,37 @@ pub fn busy_home() -> Scenario {
 
 /// How many times [`busy_home`]'s sleeper wakes in one run.
 pub const BUSY_HOME_ROUNDS: usize = 8;
+
+/// **Two threads of one process taking turns on one CPU beside an idle one**:
+/// each posts the other's wake and parks next, so neither ever queues behind
+/// the other.
+///
+/// Both start on cpu0 and the balance path is off, so a migration is a
+/// forward: one that hands a wake to cpu1 while its poster is parking in the
+/// pass that drained it.
+pub fn turn_taking_pair() -> Scenario {
+    let turn = MS / 10;
+    let wake = |queue| Op::Wake { queue, all: false, boost: None };
+    let block = |queue| Op::Block { queue, deadline: None };
+    scenario(
+        "turn_taking_pair",
+        2,
+        vec![queue(WaitClass::Io), queue(WaitClass::Io)],
+        vec![process(
+            "pair",
+            vec![0, 1],
+            vec![
+                Script::looping(vec![Op::Run(turn), wake(1), block(0)], TURN_TAKING_ROUNDS),
+                Script::looping(vec![block(1), Op::Run(turn), wake(0)], TURN_TAKING_ROUNDS),
+            ],
+        )],
+    )
+    .with_placement(PlacementShape::AllOn(0))
+    .with_balance(Balance::None)
+}
+
+/// How many turns each of [`turn_taking_pair`]'s threads takes.
+pub const TURN_TAKING_ROUNDS: usize = 8;
 
 /// **Two threads of one process on one CPU: one that sleeps a microsecond
 /// between millisecond bursts, and one that never sleeps.**

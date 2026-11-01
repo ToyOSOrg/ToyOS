@@ -238,7 +238,7 @@ pub mod first_entry {
     }
 }
 
-/// Reads the word at `page`, unmaps the `len` bytes there with `SYS_MUNMAP`
+/// Reads the word at `page`, unmaps the `len` bytes there with `SYS_VM_RELEASE`
 /// and reads the word again, in one block, so nothing but the unmap itself
 /// can switch the CPU between the reads. Answers the first read, the unmap's
 /// answer and the second read.
@@ -259,7 +259,7 @@ pub unsafe fn read_unmap_read(page: *const u64, len: usize) -> (u64, u64, u64) {
             page = in(reg) page,
             first = out(reg) first,
             second = lateout(reg) second,
-            inlateout("x0") toyos_abi::syscall::SYS_MUNMAP => answer,
+            inlateout("x0") toyos_abi::syscall::SYS_VM_RELEASE => answer,
             in("x1") page,
             in("x2") len,
             in("x3") 0u64,

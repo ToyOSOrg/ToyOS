@@ -3,10 +3,33 @@
 //! bits of each 32-bit word (Bernstein, "The Poly1305-AES message-authentication
 //! code", FSE 2005), so r1·2^128 ≡ s1 = r1 + r1/4 (mod 2^130 - 5) exactly, and
 //! every product sum below fits in 128 bits without reduction. No key-indexed
-//! table or content-dependent branch.
+//! table or content-dependent branch. [`tag`] and [`verify`] are Poly1305
+//! alone, for formats that compose it their own way.
 
+use crate::Error;
 use crate::block::{padded, place, terminated};
 use crate::secret::{Secret, erase};
+
+/// RFC 8439 §2.5's tag of `message` under the one-time `key`.
+pub fn tag(key: &[u8; 32], message: &[u8]) -> [u8; 16] {
+    let mut mac = Poly1305::new(key);
+    mac.update(message);
+    mac.finish()
+}
+
+/// `Ok` when `expected` is [`tag`], compared in constant time.
+pub fn verify(key: &[u8; 32], message: &[u8], expected: &[u8; 16]) -> Result<(), Error> {
+    verify_truncated(key, message, expected)
+}
+
+/// `Ok` when `expected` is the first `N` bytes of [`tag`], compared in
+/// constant time: for a format that fixes a truncated tag's length. `N` is 1
+/// to 16.
+pub fn verify_truncated<const N: usize>(key: &[u8; 32], message: &[u8], expected: &[u8; N]) -> Result<(), Error> {
+    const { assert!(N >= 1 && N <= 16) };
+    let tag = Secret(tag(key, message));
+    if crate::ct::equal(&tag.0[..N], expected) { Ok(()) } else { Err(Error::Authentication) }
+}
 
 pub(crate) struct Poly1305 {
     /// r0, r1 and s1, each below 2^61.
@@ -79,6 +102,10 @@ impl Poly1305 {
 
     /// The key and the accumulator, for absorbing whole blocks elsewhere;
     /// `None` while a partial block is buffered.
+    #[cfg_attr(
+        not(all(target_arch = "x86_64", not(target_os = "uefi"))),
+        expect(dead_code, reason = "hosted x86-64's stitched ChaCha20 alone absorbs blocks elsewhere")
+    )]
     pub(crate) fn parts(&mut self) -> Option<(&[u64; 3], &mut [u64; 3])> {
         (self.filled == 0).then_some((&self.r, &mut self.h))
     }
@@ -164,46 +191,28 @@ impl Drop for Poly1305 {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use fiat_crypto::poly1305_64::*;
+    use num_bigint::BigUint;
 
-    /// RFC 8439 §2.5.1 over fiat-crypto's field: h = (h + m)·r, then h + s.
+    /// RFC 8439 §2.5.1 over integers: h = (h + m)·r mod 2^130 - 5, then
+    /// (h + s) mod 2^128.
     fn reference(key: &[u8; 32], message: &[u8]) -> [u8; 16] {
-        let element = |bytes: &[u8], top: u8| {
-            let mut wide = [0u8; 17];
-            wide[..bytes.len()].copy_from_slice(bytes);
-            wide[bytes.len()] |= top;
-            let mut out = fiat_poly1305_tight_field_element([0; 3]);
-            fiat_poly1305_from_bytes(&mut out, &wide);
-            out
-        };
-        let loose = |x: &fiat_poly1305_tight_field_element| {
-            let mut out = fiat_poly1305_loose_field_element([0; 3]);
-            fiat_poly1305_relax(&mut out, x);
-            out
-        };
-        let mut r = key[..16].to_vec();
-        for i in [3, 7, 11, 15] {
-            r[i] &= 15;
-        }
-        for i in [4, 8, 12] {
-            r[i] &= 252;
-        }
-        let r = loose(&element(&r, 0));
-        let mut h = element(&[], 0);
+        let p = (BigUint::from(1u8) << 130) - 5u8;
+        let clamp = BigUint::from(0x0fff_fffc_0fff_fffc_0fff_fffc_0fff_ffffu128);
+        let r = BigUint::from_bytes_le(&key[..16]) & clamp;
+        let mut h = BigUint::from(0u8);
         for chunk in message.chunks(16) {
-            let m = element(chunk, 1);
-            let mut sum = fiat_poly1305_loose_field_element([0; 3]);
-            fiat_poly1305_add(&mut sum, &h, &m);
-            fiat_poly1305_carry_mul(&mut h, &sum, &r);
+            let m = BigUint::from_bytes_le(chunk) + (BigUint::from(1u8) << (8 * chunk.len()));
+            h = (h + m) * &r % &p;
         }
-        let mut bytes = [0u8; 17];
-        fiat_poly1305_to_bytes(&mut bytes, &h);
-        let h = u128::from_le_bytes(bytes[..16].try_into().unwrap());
-        h.wrapping_add(u128::from_le_bytes(key[16..].try_into().unwrap())).to_le_bytes()
+        let tag: BigUint = (h + BigUint::from_bytes_le(&key[16..])) % (BigUint::from(1u8) << 128u32);
+        let mut out = [0; 16];
+        let bytes = tag.to_bytes_le();
+        out[..bytes.len()].copy_from_slice(&bytes);
+        out
     }
 
     #[test]
-    fn matches_fiat_crypto_on_seeded_and_extreme_inputs() {
+    fn matches_integers_on_seeded_and_extreme_inputs() {
         let mut seed = 0x9e37_79b9_7f4a_7c15u64;
         let mut next = move || {
             seed ^= seed << 13;
@@ -212,7 +221,7 @@ mod tests {
             seed
         };
         let mut message = std::vec![0u8; 600];
-        for case in 0..10_000 {
+        for case in 0..if cfg!(miri) { 16 } else { 10_000 } {
             let mut key: [u8; 32] = core::array::from_fn(|_| next() as u8);
             let len = next() as usize % message.len();
             // Every fourth case pushes h and r to their bounds: all-ones key
@@ -242,13 +251,16 @@ mod tests {
             0x85, 0xd6, 0xbe, 0x78, 0x57, 0x55, 0x6d, 0x33, 0x7f, 0x44, 0x52, 0xfe, 0x42, 0xd5, 0x06, 0xa8, 0x01, 0x03,
             0x80, 0x8a, 0xfb, 0x0d, 0xb2, 0xfd, 0x4a, 0xbf, 0xf6, 0xaf, 0x41, 0x49, 0xf5, 0x1b,
         ];
-        let mut mac = Poly1305::new(&key);
-        mac.update(b"Cryptographic Forum Research Group");
-        assert_eq!(
-            mac.finish(),
-            [
-                0xa8, 0x06, 0x1d, 0xc1, 0x30, 0x51, 0x36, 0xc6, 0xc2, 0x2b, 0x8b, 0xaf, 0x0c, 0x01, 0x27, 0xa9
-            ]
-        );
+        let message = b"Cryptographic Forum Research Group";
+        let expected = [0xa8, 0x06, 0x1d, 0xc1, 0x30, 0x51, 0x36, 0xc6, 0xc2, 0x2b, 0x8b, 0xaf, 0x0c, 0x01, 0x27, 0xa9];
+        assert_eq!(tag(&key, message), expected);
+        assert_eq!(verify(&key, message, &expected), Ok(()));
+        assert_eq!(verify_truncated::<10>(&key, message, expected.first_chunk().unwrap()), Ok(()), "a truncated tag is its prefix");
+        let mut forged = expected;
+        forged[9] ^= 1;
+        assert_eq!(verify_truncated::<10>(&key, message, forged.first_chunk().unwrap()), Err(Error::Authentication));
+        forged = expected;
+        forged[15] ^= 1;
+        assert_eq!(verify(&key, message, &forged), Err(Error::Authentication), "the full tag's last byte");
     }
 }

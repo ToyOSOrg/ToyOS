@@ -3,8 +3,8 @@
 //! **One way in, one answer.** On the service's port a client opens a
 //! partition by its unique GUID ([`MSG_OPEN`]), sending the session's region
 //! with it, and is answered [`MSG_OPENED`] or [`MSG_REFUSED`] with a
-//! [`Refusal`]. After `MSG_OPENED` the connection carries nothing but doorbell
-//! bytes, each way.
+//! [`Refusal`]. `MSG_OPENED` carries the session's doorbells, and the
+//! connection carries nothing after it.
 //!
 //! **What a connection may open is its [`Grant`]**, the badge the holder of
 //! the service's acceptor minted its connector with, which the kernel stamps
@@ -18,6 +18,10 @@
 //! server's ends and its answer together: nothing else makes the ends, and an
 //! answer is otherwise only read off the wire ([`Opened::decode`]).
 
+use alloc::string::String;
+use alloc::vec;
+use alloc::vec::Vec;
+
 use toyos::transport::Word;
 
 use crate::layout::{self, ServerRings, RING_WORDS};
@@ -25,8 +29,12 @@ use crate::layout::{self, ServerRings, RING_WORDS};
 /// Open the partition whose unique GUID is the payload, over the region sent
 /// with it, if the connection's [`Grant`] admits it. Handles: the region.
 pub const MSG_OPEN: u32 = 1;
-/// The session is open; the payload is [`Opened`].
+/// The session is open; the payload is [`Opened`], and the handles are
+/// [`OPENED_HANDLES`].
 pub const MSG_OPENED: u32 = 2;
+/// What [`MSG_OPENED`] carries, in order: the waker the client rings for its
+/// requests, and the bell the server rings for its answers.
+pub const OPENED_HANDLES: usize = 2;
 /// Refused; the payload is a [`Refusal`]'s word.
 pub const MSG_REFUSED: u32 = 3;
 /// What partitions the service serves that the connection's [`Grant`]
@@ -35,6 +43,23 @@ pub const MSG_REFUSED: u32 = 3;
 pub const MSG_LIST: u32 = 4;
 /// The answer to [`MSG_LIST`]: one [`Listed`] after another.
 pub const MSG_LISTED: u32 = 5;
+/// What one disk's table holds, for a [`Badge::Tables`] connection: the
+/// payload is the service's number for the disk, four bytes. Its driver
+/// answers [`MSG_DISK`], a [`MSG_SLOT`] for each used entry and
+/// [`MSG_DESCRIBED`]; or [`MSG_REFUSED`].
+pub const MSG_DESCRIBE: u32 = 6;
+/// A [`DiskHead`].
+pub const MSG_DISK: u32 = 7;
+/// A [`SlotLine`].
+pub const MSG_SLOT: u32 = 8;
+/// The description is whole. No payload.
+pub const MSG_DESCRIBED: u32 = 9;
+/// Designate the machine's DATA partition, for a [`Badge::DesignateData`]
+/// connection: payload one byte, 1 to write the stamp and 0 to judge only.
+/// Answered [`MSG_DESIGNATED`] or [`MSG_REFUSED`].
+pub const MSG_DESIGNATE: u32 = 10;
+/// A [`Designated`].
+pub const MSG_DESIGNATED: u32 = 11;
 
 /// The bytes of a GUID payload.
 pub const GUID_BYTES: usize = 16;
@@ -235,6 +260,11 @@ pub enum Refusal {
     /// minter of this protocol stamps, reaches none, and its listing is
     /// refused the same.
     NotGranted,
+    /// The partition backs the running system, which no authorization
+    /// changes beneath it.
+    Active,
+    /// The device did not do what the operation needed of it.
+    Device,
 }
 
 impl Refusal {
@@ -247,6 +277,8 @@ impl Refusal {
             Self::Exhausted => 5,
             Self::ClaimRefused => 6,
             Self::NotGranted => 7,
+            Self::Active => 8,
+            Self::Device => 9,
         }
     }
 
@@ -259,6 +291,8 @@ impl Refusal {
             5 => Some(Self::Exhausted),
             6 => Some(Self::ClaimRefused),
             7 => Some(Self::NotGranted),
+            8 => Some(Self::Active),
+            9 => Some(Self::Device),
             _ => None,
         }
     }
@@ -269,6 +303,217 @@ impl Refusal {
 
     pub fn decode(bytes: &[u8]) -> Option<Self> {
         Self::from_word(u32::from_le_bytes(bytes.try_into().ok()?))
+    }
+}
+
+/// What a connector to the block service reaches: the badge the supervisor
+/// minted it with.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Badge {
+    /// Sessions on the partitions a [`Grant`] admits.
+    Partitions(Grant),
+    /// Every disk's table, read: a listing of every partition and each disk's
+    /// description. No session and no change.
+    Tables,
+    /// Designations of the machine's DATA partition, resolved when one is
+    /// asked for: the one partition of `TOYOS_DATA`'s type the service
+    /// serves. Nothing else.
+    DesignateData,
+}
+
+impl Badge {
+    pub fn encode(&self) -> Vec<u8> {
+        match self {
+            Self::Partitions(grant) => grant.encode().to_vec(),
+            Self::Tables => vec![3],
+            Self::DesignateData => vec![4],
+        }
+    }
+
+    /// `None` for bytes no minter of this protocol stamps.
+    pub fn decode(bytes: &[u8]) -> Option<Self> {
+        match bytes.first()? {
+            1 | 2 => Grant::decode(bytes).map(Self::Partitions),
+            3 => (bytes.len() == 1).then_some(Self::Tables),
+            4 => (bytes.len() == 1).then_some(Self::DesignateData),
+            _ => None,
+        }
+    }
+
+    /// Whether a listing through it names the partition `unique` of type `kind`.
+    pub fn lists(&self, unique: [u8; GUID_BYTES], kind: [u8; GUID_BYTES]) -> bool {
+        match self {
+            Self::Partitions(grant) => grant.admits(unique, kind),
+            Self::Tables => true,
+            Self::DesignateData => false,
+        }
+    }
+}
+
+/// The longest copy state a [`DiskHead`] carries.
+pub const MAX_STATE: usize = 200;
+
+/// One disk as its driver describes it: its size, and what each copy of its
+/// table is — `valid` or why not.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct DiskHead {
+    pub lba_bytes: u32,
+    pub sectors: u64,
+    /// Both copies valid and the same table.
+    pub agree: bool,
+    pub primary: String,
+    pub backup: String,
+}
+
+impl DiskHead {
+    pub fn encode(&self) -> Vec<u8> {
+        let mut out = Vec::with_capacity(18 + self.primary.len() + self.backup.len() + 4);
+        out.extend_from_slice(&self.lba_bytes.to_le_bytes());
+        out.extend_from_slice(&self.sectors.to_le_bytes());
+        out.push(u8::from(self.agree));
+        for state in [&self.primary, &self.backup] {
+            let state = &state.as_bytes()[..floor_char(state, MAX_STATE)];
+            out.extend_from_slice(&(state.len() as u16).to_le_bytes());
+            out.extend_from_slice(state);
+        }
+        out
+    }
+
+    pub fn decode(bytes: &[u8]) -> Option<Self> {
+        let (lba_bytes, rest) = bytes.split_first_chunk::<4>()?;
+        let (sectors, rest) = rest.split_first_chunk::<8>()?;
+        let (&[agree], rest) = rest.split_first_chunk::<1>()?;
+        let agree = match agree {
+            0 => false,
+            1 => true,
+            _ => return None,
+        };
+        let (primary, rest) = text(rest)?;
+        let (backup, rest) = text(rest)?;
+        rest.is_empty().then(|| Self {
+            lba_bytes: u32::from_le_bytes(*lba_bytes),
+            sectors: u64::from_le_bytes(*sectors),
+            agree,
+            primary,
+            backup,
+        })
+    }
+}
+
+/// The longest prefix of `s` within `max` bytes that ends on a character.
+fn floor_char(s: &str, max: usize) -> usize {
+    (0..=s.len().min(max)).rev().find(|&i| s.is_char_boundary(i)).unwrap_or(0)
+}
+
+/// A length-prefixed UTF-8 string of at most [`MAX_STATE`] bytes, and what follows it.
+fn text(bytes: &[u8]) -> Option<(String, &[u8])> {
+    let (len, rest) = bytes.split_first_chunk::<2>()?;
+    let len = u16::from_le_bytes(*len) as usize;
+    if len > MAX_STATE {
+        return None;
+    }
+    let (s, rest) = rest.split_at_checked(len)?;
+    Some((core::str::from_utf8(s).ok()?.into(), rest))
+}
+
+/// One used entry of the table in force, as [`MSG_SLOT`] carries it.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct SlotLine {
+    pub index: u32,
+    pub kind: [u8; GUID_BYTES],
+    pub unique: [u8; GUID_BYTES],
+    pub first: u64,
+    pub last: u64,
+    pub attributes: u64,
+    pub name: [u16; 36],
+    /// A session or the driver's own work holds it now.
+    pub held: bool,
+    /// The driver serves sessions on it.
+    pub served: bool,
+}
+
+impl SlotLine {
+    pub const BYTES: usize = 4 + 2 * GUID_BYTES + 3 * 8 + 72 + 2;
+
+    pub fn encode(&self) -> [u8; Self::BYTES] {
+        let mut out = [0u8; Self::BYTES];
+        out[..4].copy_from_slice(&self.index.to_le_bytes());
+        out[4..20].copy_from_slice(&self.kind);
+        out[20..36].copy_from_slice(&self.unique);
+        out[36..44].copy_from_slice(&self.first.to_le_bytes());
+        out[44..52].copy_from_slice(&self.last.to_le_bytes());
+        out[52..60].copy_from_slice(&self.attributes.to_le_bytes());
+        for (pair, unit) in out[60..132].as_chunks_mut::<2>().0.iter_mut().zip(self.name) {
+            *pair = unit.to_le_bytes();
+        }
+        out[132] = u8::from(self.held);
+        out[133] = u8::from(self.served);
+        out
+    }
+
+    pub fn decode(bytes: &[u8]) -> Option<Self> {
+        let b: &[u8; Self::BYTES] = bytes.try_into().ok()?;
+        let flag = |v: u8| match v {
+            0 => Some(false),
+            1 => Some(true),
+            _ => None,
+        };
+        let mut name = [0u16; 36];
+        for (unit, pair) in name.iter_mut().zip(b[60..132].as_chunks::<2>().0) {
+            *unit = u16::from_le_bytes(*pair);
+        }
+        Some(Self {
+            index: u32::from_le_bytes(b[..4].try_into().ok()?),
+            kind: b[4..20].try_into().ok()?,
+            unique: b[20..36].try_into().ok()?,
+            first: u64::from_le_bytes(b[36..44].try_into().ok()?),
+            last: u64::from_le_bytes(b[44..52].try_into().ok()?),
+            attributes: u64::from_le_bytes(b[52..60].try_into().ok()?),
+            name,
+            held: flag(b[132])?,
+            served: flag(b[133])?,
+        })
+    }
+}
+
+/// What a designation came to, once it was admitted.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum Designated {
+    /// The stamp is on the medium and read back.
+    Written,
+    /// A judge-only request: the stamp would be written.
+    WouldWrite,
+    /// A stamp naming this partition's size is there already; nothing written.
+    Already,
+    /// The partition holds a volume of ToyOS's own; nothing written.
+    Volume,
+    /// The partition carries another format's signature, named; nothing written.
+    Foreign(String),
+}
+
+impl Designated {
+    pub fn encode(&self) -> Vec<u8> {
+        let (word, text): (u32, &str) = match self {
+            Self::Written => (1, ""),
+            Self::WouldWrite => (2, ""),
+            Self::Already => (3, ""),
+            Self::Volume => (4, ""),
+            Self::Foreign(name) => (5, &name[..floor_char(name, MAX_STATE)]),
+        };
+        [&word.to_le_bytes()[..], text.as_bytes()].concat()
+    }
+
+    pub fn decode(bytes: &[u8]) -> Option<Self> {
+        let (word, text) = bytes.split_first_chunk::<4>()?;
+        let empty = text.is_empty();
+        match u32::from_le_bytes(*word) {
+            1 if empty => Some(Self::Written),
+            2 if empty => Some(Self::WouldWrite),
+            3 if empty => Some(Self::Already),
+            4 if empty => Some(Self::Volume),
+            5 if text.len() <= MAX_STATE => Some(Self::Foreign(core::str::from_utf8(text).ok()?.into())),
+            _ => None,
+        }
     }
 }
 

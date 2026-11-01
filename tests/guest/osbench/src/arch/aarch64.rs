@@ -1,6 +1,11 @@
 //! What osbench needs written for AArch64 in particular, on Linux: a chain of
-//! dependent adds to time the clock with, and the bytes of a program that
-//! exits. ToyOS on AArch64 is refused by the selector.
+//! dependent adds to time the clock with, the bytes of a program that exits,
+//! and no power registers. ToyOS on AArch64 is refused by the selector.
+
+/// The energy group reads no AArch64 power counter.
+pub fn power_registers() -> Option<crate::sys::PowerRegisters> {
+    None
+}
 
 /// `turns` turns of 100 dependent register adds, each waiting on the one
 /// before it. Inline assembly, so the chain is the one written whatever the
@@ -41,3 +46,12 @@ pub const EXIT_CODE: [u8; 16] = [
 ];
 
 const _: () = assert!(libc::SYS_exit_group == 94);
+
+/// AArch64 names a CPU to EL0 by no register: `MPIDR_EL1` is EL1's.
+pub fn cpu_id() -> Result<u32, &'static str> {
+    Err("AArch64 has no register naming the CPU that EL0 can read")
+}
+
+pub fn cpu_id_is() -> &'static str {
+    "none"
+}

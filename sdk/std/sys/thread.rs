@@ -1,6 +1,5 @@
 use toyos_abi::syscall;
 
-use crate::alloc::Layout;
 use crate::cell::UnsafeCell;
 use crate::ffi::CStr;
 use crate::io;
@@ -25,8 +24,9 @@ unsafe impl Sync for Thread {}
 struct Block {
     tid: AtomicU32,
     state: AtomicU32,
-    stack: *mut u8,
-    layout: Layout,
+    /// The stack's reservation: [`GUARD`] reserved, then the stack committed.
+    reservation: *mut u8,
+    reserved: usize,
     /// Taken by the thread as it starts.
     init: UnsafeCell<Option<Box<ThreadInit>>>,
     /// The next block on [`REAPED`].
@@ -43,6 +43,11 @@ static REAPED: AtomicPtr<Block> = AtomicPtr::new(ptr::null_mut());
 
 pub const DEFAULT_MIN_STACK_SIZE: usize = 2 * 1024 * 1024;
 
+/// Reserved pages below a thread's stack, so that running off it faults: one
+/// page is enough, since every frame larger than a page probes each page it
+/// spans (the target's inline stack probes).
+const GUARD: usize = syscall::PAGE_SIZE;
+
 /// Wait for `block`'s thread to be gone, then free its stack and `block`. A
 /// join the kernel refuses frees nothing, since the stack may still be in use.
 ///
@@ -52,7 +57,7 @@ unsafe fn reap(block: *mut Block) {
     let b = unsafe { &*block };
     if syscall::thread_join(b.tid.load(Ordering::Relaxed) as u64) == 0 {
         unsafe {
-            crate::alloc::dealloc(b.stack, b.layout);
+            let _ = syscall::vm_release(b.reservation, b.reserved);
             drop(Box::from_raw(block));
         }
     }
@@ -68,21 +73,30 @@ impl Thread {
             ended = next;
         }
 
-        let stack_size = stack.max(DEFAULT_MIN_STACK_SIZE);
-        let layout = Layout::from_size_align(stack_size, 4096).unwrap();
-        let stack_base = unsafe { crate::alloc::alloc(layout) };
-        if stack_base.is_null() {
-            return Err(io::const_error!(
-                io::ErrorKind::OutOfMemory,
-                "thread stack allocation failed"
-            ));
+        // The size asked for, in whole pages, committed before the thread
+        // starts so that no touch of it can find no memory.
+        let Some(stack_size) = stack.max(1).checked_next_multiple_of(syscall::PAGE_SIZE) else {
+            return Err(io::const_error!(io::ErrorKind::InvalidInput, "thread stack size too large"));
+        };
+        let reserved = stack_size.checked_add(GUARD).ok_or(io::const_error!(
+            io::ErrorKind::InvalidInput,
+            "thread stack size too large"
+        ))?;
+        // SAFETY: placed anywhere, so it replaces nothing, and the stack is
+        // inside the reservation.
+        let reservation = unsafe { syscall::vm_reserve(reserved, syscall::VmProt::None, syscall::VmAt::ANYWHERE) }
+            .map_err(|_| io::const_error!(io::ErrorKind::OutOfMemory, "no room for a thread stack"))?;
+        let stack_base = reservation.wrapping_add(GUARD);
+        if unsafe { syscall::vm_protect(stack_base, stack_size, syscall::VmProt::ReadWrite) }.is_err() {
+            let _ = unsafe { syscall::vm_release(reservation, reserved) };
+            return Err(io::const_error!(io::ErrorKind::OutOfMemory, "thread stack commit failed"));
         }
         let stack_top = stack_base.expose_provenance() as u64 + stack_size as u64;
         let block = Box::into_raw(Box::new(Block {
             tid: AtomicU32::new(0),
             state: AtomicU32::new(JOINABLE),
-            stack: stack_base,
-            layout,
+            reservation,
+            reserved,
             init: UnsafeCell::new(Some(init)),
             next: ptr::null_mut(),
         }));
@@ -100,7 +114,7 @@ impl Thread {
         if syscall::SyscallError::from_u64(tid).is_some() {
             unsafe {
                 drop(Box::from_raw(block));
-                crate::alloc::dealloc(stack_base, layout);
+                let _ = syscall::vm_release(reservation, reserved);
             }
             return Err(io::const_error!(io::ErrorKind::Uncategorized, "thread spawn failed"));
         }

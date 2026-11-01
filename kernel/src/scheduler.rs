@@ -10,9 +10,9 @@ use kernel::sched::hw::{CpuId, Machine, Nanos};
 use kernel::sched::task::{Refused, SafePoint, WaitClass, QUANTUM_NS};
 
 use crate::arch::percpu;
-use crate::watch::{self, Cancel};
+use crate::watch::{self, Cancel, Watch};
 use crate::hw::HW;
-use crate::pipe::PipeId;
+use crate::pipe::PipeRef;
 use crate::process::{self, Pid, Tid};
 use crate::sched::driver::{self, cpus, preempt_off, Dispose, NewTask};
 use crate::sched::payload::ThreadSched;
@@ -253,14 +253,17 @@ pub fn exit_current() -> ! {
     unreachable!("exit_current: returned from the exit pass");
 }
 
-/// Wake pipe readers, lending each an RT window if the writer holds one; the
-/// pipe is also marked, so a runnable reader takes the window too.
-pub fn wake_pipe_readers(pipe_id: PipeId) {
-    let Some(watch) = crate::pipe::read_watch(pipe_id) else {
-        return;
-    };
+/// Wake pipe readers, lending each an RT window if the writer holds one.
+pub fn wake_pipe_readers(pipe: &PipeRef) {
+    post_lending(pipe.read_watch(), || pipe.set_rt_boost_pending());
+}
+
+/// Post `watch`, lending whoever it wakes one [`boost_window`] if the poster
+/// is real-time; `mark` records the loan for a consumer already runnable,
+/// which takes it with [`boost_current_rt_inherited`].
+pub fn post_lending(watch: &Watch, mark: impl FnOnce()) {
     if driver::current_is_rt() {
-        crate::pipe::set_rt_boost_pending(pipe_id);
+        mark();
         watch.post_boosted(boost_window());
     } else {
         watch.post();
@@ -268,10 +271,8 @@ pub fn wake_pipe_readers(pipe_id: PipeId) {
 }
 
 /// Wake pipe writers, and complete every poll on the write end.
-pub fn wake_pipe_writers(pipe_id: PipeId) {
-    if let Some(watch) = crate::pipe::write_watch(pipe_id) {
-        watch.post();
-    }
+pub fn wake_pipe_writers(pipe: &PipeRef) {
+    pipe.write_watch().post();
 }
 
 /// How long a lent RT priority lasts: one quantum, a wall-clock bound on time held.
@@ -306,8 +307,7 @@ pub fn futex_wait(
         let Some(pt) = current_address_space() else {
             return true;
         };
-        let same_frame =
-            pt.lock().translate(addr).is_some_and(|now| now.phys() == phys_addr.phys());
+        let same_frame = pt.lock().get(addr.raw()).is_some_and(|(now, _)| now == phys_addr.phys());
         if !same_frame {
             return true;
         }
@@ -327,8 +327,10 @@ pub fn futex_wait(
         read,
     );
     // `wait_until` answers `Ok(())` for a satisfied predicate and an expired
-    // deadline alike, so the word itself is what tells them apart.
-    if read() {
+    // deadline alike, so the word itself is what tells them apart. With no
+    // deadline the word or its frame changed, or a kill ended it, whose answer
+    // never reaches Ring 3.
+    if deadline.is_never() || read() {
         FutexEnd::Changed
     } else {
         FutexEnd::Timeout

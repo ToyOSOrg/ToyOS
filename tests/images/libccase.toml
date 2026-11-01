@@ -8,7 +8,10 @@ start = ["logkeeper", "test-runner"]
 service = true
 syscap = ["logread"]
 
+# `roster` for `libc_read_restarts`, which orders a child's end after its
+# own read is parked by the kernel's roster, and `dup` to hand it on.
 [programs.test-runner]
+syscap = ["dup", "roster"]
 
 [programs.toybox]
 
@@ -16,3 +19,4 @@ syscap = ["logread"]
 
 [symlinks]
 "bin/echo" = "/system/bin/toybox"
+"bin/cat" = "/system/bin/toybox"

@@ -12,10 +12,9 @@ use crate::{chunk, ns_since};
 
 const MIB: usize = 1 << 20;
 
-/// What one chunk of the fairness work costs one thread, 200 after one: the
-/// same instructions on both systems, so a difference between them is the
-/// clock that thread ran at. It is a 2 ms single-threaded burst, so it reads
-/// the clock a CPU leaving idle has, not the clock it settles at.
+/// What one chunk of the fairness work costs one thread, 200 after a settle:
+/// the same instructions on both systems, so a difference between them is the
+/// clock that thread ran at.
 pub fn chunk_rate() {
     chunk();
     crate::clock::settle();
@@ -142,9 +141,7 @@ pub fn pipe_throughput(size: usize) {
 
 /// Anonymous memory made usable and given back, ns per MiB of a 32 MiB
 /// mapping: the `mmap`, a write to every 4 KiB page, and the `munmap`, each
-/// timed alone and summed. Where the cost lands differs by design — Linux faults
-/// each page on first touch, ToyOS commits and zeroes the range in `mmap` —
-/// so only `total` compares like for like. One unread round, then ten.
+/// timed alone and summed. Both systems fault each page in on its first touch. One unread round, then ten.
 pub fn anon_memory() {
     const LEN: usize = 32 * MIB;
     const MIBS: u64 = (LEN / MIB) as u64;
@@ -194,11 +191,11 @@ pub fn map_unmap_small() {
 
 /// One thread's bandwidth over two 64 MiB buffers, far past either bench's
 /// last-level cache, in MB/s of buffer covered: `read` sums it, `write`
-/// stores a pattern, `copy` stores the source xor a constant — a loop the
+/// stores a pattern, and `copy` stores the source xor a constant — a loop the
 /// compiler cannot turn into a `memcpy` call, so both systems run the same
-/// instructions — and `memcpy` is `copy_from_slice`, each system's own.
-/// Linux is asked for huge pages, which every ToyOS anonymous mapping is; the
-/// line says how much Linux gave. One unread round, then seven, per kind.
+/// instructions. Each system's own `memcpy` is `mem.memcpy.*`'s.
+/// Both are asked for huge pages; the line says how much each gave, and
+/// ToyOS gives none yet. One unread round, then seven, per kind.
 pub fn bandwidth() {
     const LEN: usize = 64 * MIB;
     let mut src = Mapping::huge(LEN);
@@ -237,10 +234,6 @@ pub fn bandwidth() {
         for (d, s) in d.iter_mut().zip(s.iter()) {
             *d = *s ^ 0x9e37_79b9_7f4a_7c15;
         }
-        std::hint::black_box(dst.ptr());
-    });
-    kind("memcpy", &mut || {
-        dst.words().copy_from_slice(src.words());
         std::hint::black_box(dst.ptr());
     });
 }

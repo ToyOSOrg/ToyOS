@@ -101,7 +101,7 @@ fn take(args: &[String]) -> Result<Asked, Refusal> {
 fn ask(asked: &Asked) -> (Answer, Option<toyos::ipc::Connection>) {
     let unasked = |why: String| (Answer::Unasked(why), None);
     let Some(held) = Endowments::get().take::<Namespace>(toyos_swap::LABEL) else {
-        return unasked(Refusal::NoAuthority.to_string());
+        return unasked(format!("{}; run it with `launch swap`", Refusal::NoAuthority));
     };
     let supervisor = match held.open(toyos_swap::PORT) {
         Ok(conn) => conn,
@@ -118,15 +118,12 @@ fn ask(asked: &Asked) -> (Answer, Option<toyos::ipc::Connection>) {
         let _ = std::fs::remove_file(&request.staged);
         return unasked(format!("the supervisor did not take the request: {e:?}"));
     }
-    let answer = match supervisor.recv_header() {
+    let mut rx = Box::new(toyos::ipc::FrameRx::<{ toyos::ipc::MAX_FRAME_LEN as usize }>::new());
+    let answer = match rx.recv(&supervisor) {
         Ok(answer) => answer,
         Err(e) => return (Answer::Refused(format!("the supervisor did not answer: {e:?}")), None),
     };
-    let mut text = vec![0u8; answer.len() as usize];
-    let said = match supervisor.recv_bytes(&answer, &mut text) {
-        Ok(n) => String::from_utf8_lossy(&text[..n]).into_owned(),
-        Err(e) => return (Answer::Refused(format!("the supervisor's answer did not arrive whole: {e:?}")), None),
-    };
+    let said = String::from_utf8_lossy(rx.payload(answer.payload_len)).into_owned();
     match answer.msg_type {
         toyos_swap::MSG_ACCEPTED => (Answer::Accepted(said), Some(supervisor)),
         toyos_swap::MSG_REFUSED => (Answer::Refused(said), None),

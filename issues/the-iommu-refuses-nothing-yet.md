@@ -52,8 +52,9 @@ a unit firmware left translating:
   scalable or abort-DMA mode, with `CAP.ESRTPS` clear, may not have its root
   table switched under translation (VT-d Rev. 4.1 §6.6), so translation goes
   off for that one switch. The older protection registers are `PMEN`'s
-  protected memory regions (§11.4.8.1). The weakness is
-  `issues/a-unit-in-scalable-or-abort-mode-loses-translation-for-its-root-table-switch.md`.
+  protected memory regions (§11.4.8.1). Every hand-over now takes
+  translation off inside them where every unit has them; what remains is
+  `issues/a-unit-passes-dma-untranslated-outside-its-protected-memory-regions-while-it-is-handed-over.md`.
 - **"Apply it at hand-over"**, on reserved memory: "From the hand-over on,
   only display and USB controllers keep access to their reserved region; any
   other device's access is refused. A device that firmware was still using
@@ -67,6 +68,21 @@ a unit firmware left translating:
   boot, he answered: "You can do with the t14 what you want." The grant goes
   beyond the question asked.
 
+**Proposed, for the owner** (pull request #1086's review): a fault from an
+enumerated function that no driver runs halts the machine only when the
+address is one its domain maps. A mapped address means the unit contradicted
+tables this kernel wrote, which the shared identity domain does not confine
+to one unit. An unmapped address is firmware's DMA straying outside its
+grant: the function is stopped, the fault logged, and the machine goes on, as
+"Apply it at hand-over" already rules for reserved regions. An unclaimed
+function sits in the identity domain, which maps all of `[0, top)` with
+nothing carved out, so "unmapped" is `address >= top` and the handler stays
+bounded and lock-free. The change is to the representation: `Owner::Kernel`
+today merges functions this kernel drives with functions nobody drives, and
+the split gives the second its own arm. One caveat: the iGPU is not wholly
+undriven. Its scanout reads the firmware framebuffer the kernel's panic
+console draws into, so stopping it blanks that console.
+
 Owner: the orchestrator.
 
 **Exit**: a test or a T14 row reads each ruled refusal, each with its
@@ -79,7 +95,11 @@ negative control:
   `00:07.0` or `00:07.2`) is refused by name;
 - a claim of a function an RMRR names is refused unless it is a display or USB
   controller that RMRR names alone, whose region is then mapped into its
-  driver's domain (the T14's iGPU row);
+  driver's domain (the T14's iGPU row). **Built:**
+  - VT-d's `unclaimable` refuses the rest by name, from `kernel::rmrr::verdict`.
+  - Host tests cover the verdict.
+  - The T14 row is `tgl-display`'s claim (pull request #1125). Its boot reads `iommu: domainN keeps 00:02.0's reserved 0x9c000000..0xa0800000`.
+  - Still owed: the refusal read on a machine whose RMRR names another class or several devices.
 - from the hand-over on, a device that is neither a display nor a USB
   controller faults on its own RMRR region, is logged and stopped, and the
   machine keeps running; a display or USB controller whose RMRR also names

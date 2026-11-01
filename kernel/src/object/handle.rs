@@ -6,6 +6,10 @@
 //! Not a file-descriptor table — `fd` names only `sdk/libc`'s POSIX
 //! surface (owner ruling) — and a slot at its last generation retires
 //! rather than wrapping, so a stale handle can never resolve again.
+//!
+//! The table is charged its storage as it grows (`mm::charge`), doubling,
+//! so a table that cannot grow refuses the install, and removing a handle
+//! never allocates.
 
 use alloc::sync::Arc;
 use alloc::vec::Vec;
@@ -14,9 +18,11 @@ use core::sync::atomic::Ordering;
 use toyos_abi::handle::{RawHandle, Rights};
 use toyos_abi::syscall::SyscallError;
 
+use crate::mm::charge::{self, Charge};
+
 use super::{KObjectRef, KObjectVariant};
 
-/// The table has no slot left — its own type since `install` runs under the process's own lock, where [`HandleError::refuse`] must not be called.
+/// The table has no slot left, or no memory to grow by one — its own type since `install` runs under the process's own lock, where [`HandleError::refuse`] must not be called.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub struct TableFull;
 
@@ -168,18 +174,46 @@ pub const MAX_HANDLES: usize = RawHandle::MAX_SLOTS;
 pub struct HandleTable {
     slots: Vec<Slot>,
     // A retired slot is never on this list — it is simply never offered again.
+    // Its capacity is the slots', so a retire never grows it.
     free: Vec<u16>,
+    /// Both lists' storage.
+    charge: Charge,
 }
 
 impl HandleTable {
-    pub const fn new() -> Self {
-        Self { slots: Vec::new(), free: Vec::new() }
+    /// An empty table, its storage charged to `job` as it grows.
+    pub fn new(job: &Arc<kernel::sched::job::Job>) -> Self {
+        Self { slots: Vec::new(), free: Vec::new(), charge: Charge::none(job) }
     }
 
-    /// Whether `n` more `install`s can all succeed.
+    /// The job its storage is charged to.
+    pub fn job(&self) -> &Arc<kernel::sched::job::Job> {
+        self.charge.job()
+    }
+
+    /// Make sure `n` more `install`s all succeed: `false`, with nothing
+    /// changed that an install could see, where there are not `n` slots left
+    /// or no memory to grow the table by them.
     // A retired slot counts in neither term, so it permanently costs one slot of room.
-    pub fn has_room(&self, n: usize) -> bool {
-        self.free.len() + (MAX_HANDLES - self.slots.len()) >= n
+    pub fn make_room(&mut self, n: usize) -> bool {
+        if self.free.len() + (MAX_HANDLES - self.slots.len()) < n {
+            return false;
+        }
+        self.grow_for(self.slots.len() + n.saturating_sub(self.free.len()))
+    }
+
+    /// Storage for `len` slots, doubling: `false` where it cannot be charged.
+    fn grow_for(&mut self, len: usize) -> bool {
+        if len <= self.slots.capacity() {
+            return true;
+        }
+        let capacity = len.next_power_of_two().clamp(8, MAX_HANDLES);
+        if self.charge.resize(charge::array::<Slot>(capacity) + charge::array::<u16>(capacity)).is_err() {
+            return false;
+        }
+        self.slots.reserve_exact(capacity - self.slots.len());
+        self.free.reserve_exact(capacity - self.free.len());
+        true
     }
 
     pub fn install(&mut self, entry: HandleEntry) -> Result<RawHandle, TableFull> {
@@ -193,7 +227,7 @@ impl HandleTable {
             *vacancy = Some(entry);
             return Ok(RawHandle::new(slot, *generation));
         }
-        if self.slots.len() >= MAX_HANDLES {
+        if self.slots.len() >= MAX_HANDLES || !self.grow_for(self.slots.len() + 1) {
             return Err(TableFull);
         }
         let slot = self.slots.len() as u16;
@@ -344,21 +378,6 @@ impl HandleTable {
                 Err(e)
             }
         }
-    }
-
-    /// Empty the table; the caller drops what it gets with nothing held.
-    #[must_use = "the drained entries must be dropped by the caller"]
-    pub fn drain(&mut self) -> Vec<HandleEntry> {
-        let mut out = Vec::new();
-        for slot in &mut self.slots {
-            match slot {
-                Slot::Serving { entry, .. } => out.extend(entry.take()),
-                // A retired slot's entry was already taken when it retired.
-                Slot::Retired => {}
-            }
-        }
-        self.free.clear();
-        out
     }
 
     pub fn iter(&self) -> impl Iterator<Item = (RawHandle, &HandleEntry)> {

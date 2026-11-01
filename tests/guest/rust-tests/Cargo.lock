@@ -297,6 +297,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "inspect"
+version = "0.1.0"
+dependencies = [
+ "toyos",
+ "toyos-abi",
+ "toyos-inspect",
+]
+
+[[package]]
 name = "jni"
 version = "0.22.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -434,6 +443,18 @@ version = "0.9.11"
 source = "git+https://github.com/ToyOSOrg/memmap2-rs?branch=toyos-0.9.11#ad0d890512c14f3f42236b0ef032f310c40084e0"
 dependencies = [
  "libc",
+]
+
+[[package]]
+name = "mio"
+version = "1.2.0"
+source = "git+https://github.com/ToyOSOrg/mio?branch=toyos#fe42def7bec9a1f01bfff764256fcdce77e7f7e1"
+dependencies = [
+ "libc",
+ "log",
+ "toyos-abi",
+ "wasi",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
@@ -968,9 +989,11 @@ dependencies = [
  "acpiserver-api",
  "cpal",
  "getrandom",
+ "inspect",
  "libloading",
  "logkeeper-api",
  "memmap2",
+ "mio",
  "ml-kem",
  "ring",
  "toyos",
@@ -983,9 +1006,17 @@ dependencies = [
  "toyos-parity",
  "toyos-pci",
  "toyos-pci-claim",
+ "toyos-session",
  "toyos-tco",
  "toyos-trace",
  "toyos-window",
+]
+
+[[package]]
+name = "toyos-session"
+version = "0.1.0"
+dependencies = [
+ "toyos",
 ]
 
 [[package]]

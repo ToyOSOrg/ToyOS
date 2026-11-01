@@ -230,7 +230,7 @@ mod target {
         use why::Why;
         // A descriptor that is not open, or names a file a server holds, is
         // written as a descriptor.
-        let asked = crate::fd::with(stream as i32, |o| o.release.is_none().then(|| syscall::fstat(o.handle)));
+        let asked = crate::fd::with(stream as i32, |o| o.kernel_handle().map(|h| syscall::fstat(h.raw())));
         let Ok(Some(stat)) = asked else { return Ok(DESCRIPTOR) };
         let stat = stat.map_err(Why::Fstat)?;
         if stat.file_type != FileType::SharedMemory {
@@ -239,12 +239,15 @@ mod target {
         if (stat.size as usize) < RING_BYTES {
             return Err(Why::Small(stat.size));
         }
-        let own = crate::fd::with(stream as i32, |o| syscall::dup(o.handle))
+        let own = crate::fd::with(stream as i32, |o| o.handle().map(|h| h.try_clone_to_owned()))
+            .ok()
+            .flatten()
             .unwrap_or(Err(SyscallError::NotFound))
-            .map_err(Why::Dup)?;
+            .map_err(Why::Dup)?
+            .into_raw();
         // SAFETY: `own` is a live shared-memory handle this process holds and
         // never closes, so the mapping stays for the process's life.
-        let at = unsafe { syscall::shm_map(own) }.map_err(Why::Map)?;
+        let at = unsafe { syscall::shm_map(own, syscall::VmProt::ReadWrite) }.map_err(Why::Map)?;
         let at = NonNull::new(at).ok_or(Why::Null)?;
         // SAFETY: a fresh mapping of a region at least `RING_BYTES` long.
         if !unsafe { Ring::at(at) }.is_laid_out() {
@@ -372,16 +375,29 @@ mod target {
         })
     }
 
+    /// Some of `bytes` written to the descriptor's `object`: a stream's as
+    /// its bytes, without waiting, since a line may be said from inside a call
+    /// waiting on that very stream; a handle's by a plain write. `None` for
+    /// nothing, and for a stream another copy of this crate holds.
+    fn write_line(object: crate::fd::Lent<'_>, bytes: &[u8]) -> Option<usize> {
+        let wait = crate::net::stream::Wait::Nonblocking;
+        match object.kernel_handle() {
+            Some(handle) if object.tag() == crate::fd::STREAM => crate::net::stream::write(handle, bytes, wait).ok(),
+            Some(handle) => syscall::write(handle.raw(), bytes).ok(),
+            None => None,
+        }
+    }
+
     /// One line of this program's own, at `severity`, onto its stderr.
     pub fn say(severity: Severity, args: core::fmt::Arguments<'_>) {
         match sink(Stream::Err) {
             Sink::Ring(ring) => compose(severity, args, &mut push(&ring)),
             Sink::Descriptor(fd) => compose(severity, args, &mut |body: &mut Body| {
-                let write = |bytes: &[u8]| crate::fd::with(fd, |o| syscall::write(o.handle, bytes));
+                let write = |bytes: &[u8]| crate::fd::with(fd, |o| write_line(o, bytes));
                 let mut rest = body.text();
                 while !rest.is_empty() {
                     match write(rest) {
-                        Ok(Ok(n @ 1..)) => rest = &rest[n..],
+                        Ok(Some(n @ 1..)) => rest = &rest[n..],
                         _ => return,
                     }
                 }

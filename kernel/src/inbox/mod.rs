@@ -1,7 +1,7 @@
 //! The kernel side of an [inbox](toyos_abi::inbox) — shared-memory submission
 //! and completion rings. `inbox_setup` creates one; `inbox_submit` submits
-//! and waits. The rings and submission array live in one 2 MiB page mapped
-//! into both kernel and userspace. `OP_WATCH` fires once; userspace re-submits to re-arm.
+//! and waits. The rings and submission array live in one memory object mapped
+//! into userspace, which the kernel reaches through its pages. `OP_WATCH` fires once; userspace re-submits to re-arm.
 //!
 //! **A watch is a poll registered on the watched object's own
 //! [`Watch`](crate::watch::Watch)**, one entry per watch its interest names, and
@@ -37,9 +37,10 @@ use core::sync::atomic::Ordering;
 use kernel::sched::task::WaitClass;
 use kernel::sched::watch::{Fire, Ring};
 
+use crate::mm::charge::{self, Charge};
 use crate::object::shm::SharedMemObject;
 use crate::object::{ops, HandleError, KObjectRef};
-use crate::process::{self, Pid};
+use crate::process;
 use crate::scheduler;
 use crate::sync::Lock;
 use crate::time::{Deadline, Duration};
@@ -80,8 +81,11 @@ impl Drop for InboxRef {
             unreachable!("an inbox is torn down by its one reference, once");
         };
         state.polls.withdraw_all();
-        // `Unmapped`'s drop flushes; the `Arc` drop after it frees the pages.
-        drop(completions.shm.unmap_from(state.owner_pid));
+        // Unless the process replaced the mapping itself; the pages go once
+        // neither the mapping nor these hold the object.
+        if let Some(space) = state.owner_space.upgrade() {
+            completions.mapping.release(&space);
+        }
     }
 }
 
@@ -110,15 +114,11 @@ impl WatchFlags {
     pub const READABLE: Self = Self(toyos_abi::inbox::READABLE);
     pub const WRITABLE: Self = Self(toyos_abi::inbox::WRITABLE);
     pub const OTHER_END_GONE: Self = Self(toyos_abi::inbox::OTHER_END_GONE);
-    /// Every bit `toyos_abi::inbox` defines for `Submission::op_flags`;
-    /// hand-copied and unchecked, for the reason `syscall/vm.rs`'s
-    /// `MMAP_PROT_KNOWN` gives for all four of these masks.
-    const KNOWN: u32 = Self::READABLE.0 | Self::WRITABLE.0 | Self::OTHER_END_GONE.0;
-
-    /// A bit outside [`Self::KNOWN`] is an interest this kernel would register
-    /// for neither direction, so the whole watch is refused rather than served.
+    /// A bit outside `WATCH_FLAGS_KNOWN` is an interest this kernel would
+    /// register for neither direction, so the whole watch is refused rather
+    /// than served.
     fn from_raw(raw: u32) -> Result<Self, SyscallError> {
-        if raw & !Self::KNOWN != 0 {
+        if raw & !toyos_abi::inbox::WATCH_FLAGS_KNOWN != 0 {
             return Err(SyscallError::InvalidArgument);
         }
         Ok(Self(raw))
@@ -191,54 +191,71 @@ pub struct Inbox {
     completions: Lock<Option<Completions>>,
     /// Threads parked in `submit`; never a poll — see the module header.
     watch: IrqWatch,
+    /// Itself and its polls at their cap: a poll is made at a submission,
+    /// which has no call of its own to refuse.
+    _charge: Charge,
+}
+
+/// The heap an inbox and [`MAX_PENDING_WATCHES`] polls take: each poll's
+/// place in the list, the poll, and its entries on up to three watches, which
+/// double their lists as they grow.
+fn heap() -> usize {
+    let places = core::alloc::Layout::from_size_align(Polls::<Arc<Inbox>>::place_bytes() * MAX_PENDING_WATCHES, 8)
+        .expect("inbox: the poll list's layout");
+    let per_poll = charge::arc::<Poll>() + 3 * 2 * core::mem::size_of::<PollEntry>();
+    charge::arc::<Inbox>() + charge::heap(places) + MAX_PENDING_WATCHES * per_poll
 }
 
 struct RingState {
-    /// The page's address. The page is [`Completions`]'s, which the teardown
-    /// lets go of only after it has taken this.
-    shm_phys: DirectMap,
+    /// The rings' object, which [`Completions`] holds as well.
+    ring: Arc<SharedMemObject>,
     submission_size: u32,
     polls: Polls<Arc<Inbox>>,
-    owner_pid: Pid,
+    /// The space the rings are mapped in, which the teardown takes them out
+    /// of: held weakly, so an inbox sent on does not keep an ended process's
+    /// space alive.
+    owner_space: alloc::sync::Weak<crate::mm::space::Space>,
 }
 
 // No accessor below returns a Rust reference into a ring's page — the process
 // maps it writable, so only atomics or `read_volatile` are sound here.
 
 /// One atomic word of one ring header; never `&RingHeader` — see the block above.
-fn ring_word(page: &DirectMap, ring_off: u64, field_off: usize) -> &core::sync::atomic::AtomicU32 {
-    let ptr = page.as_mut_ptr::<u8>();
-    // SAFETY: offset is in-bounds and 4-aligned within the 2 MiB page, which outlives both of the ring's halves that name it; `AtomicU32` is sound over memory the process also writes.
-    unsafe {
-        core::sync::atomic::AtomicU32::from_ptr(
-            ptr.add(ring_off as usize + field_off) as *mut u32,
-        )
-    }
+fn ring_word(ring: &SharedMemObject, ring_off: u64, field_off: usize) -> &core::sync::atomic::AtomicU32 {
+    let at = ring_off + field_off as u64;
+    let word = DirectMap::from_phys(ring.page(at) + at % crate::mm::PAGE_SIZE);
+    // SAFETY: the offset is in-bounds and 4-aligned, so inside one page of the
+    // object, which outlives the borrow; `AtomicU32` is sound over memory the
+    // process also writes.
+    unsafe { core::sync::atomic::AtomicU32::from_ptr(word.as_mut_ptr::<u32>()) }
 }
 
 impl RingState {
     fn submission_head(&self) -> &core::sync::atomic::AtomicU32 {
-        ring_word(&self.shm_phys, SUBMISSION_RING_OFF, core::mem::offset_of!(RingHeader, head))
+        ring_word(&self.ring, SUBMISSION_RING_OFF, core::mem::offset_of!(RingHeader, head))
     }
 
     fn submission_tail(&self) -> &core::sync::atomic::AtomicU32 {
-        ring_word(&self.shm_phys, SUBMISSION_RING_OFF, core::mem::offset_of!(RingHeader, tail))
+        ring_word(&self.ring, SUBMISSION_RING_OFF, core::mem::offset_of!(RingHeader, tail))
     }
 
-    /// One submission entry, copied out by value via `read_volatile` — never a `&Submission`.
+    /// One submission entry, copied out by value — never a `&Submission`.
     fn submission_at(&self, index: u32) -> Submission {
-        let ptr = self.shm_phys.as_mut_ptr::<u8>();
-        // SAFETY: `index` is masked by `submission_size` (≤256), keeping the read in-bounds and aligned within the page.
-        unsafe { (ptr.add(SUBMISSIONS_OFF as usize + index as usize * core::mem::size_of::<Submission>()) as *const Submission).read_volatile() }
+        let mut entry = core::mem::MaybeUninit::<Submission>::uninit();
+        // SAFETY: `entry` is `size_of::<Submission>()` bytes of this stack's own.
+        let bytes = unsafe { core::slice::from_raw_parts_mut(entry.as_mut_ptr().cast::<u8>(), core::mem::size_of::<Submission>()) };
+        // `index` is masked by `submission_size` (≤256), keeping the read inside the rings.
+        self.ring.read(SUBMISSIONS_OFF + u64::from(index) * core::mem::size_of::<Submission>() as u64, bytes);
+        // SAFETY: every byte was written, and `Submission` is `UserSafe`: every bit pattern is one.
+        unsafe { entry.assume_init() }
     }
 }
 
 /// What a poll's completion writes, and the ring's page, which goes only
 /// with these.
 struct Completions {
-    /// A ring's page has no lifetime of its own; it goes with the last handle to the ring.
-    shm: Arc<SharedMemObject>,
-    page: DirectMap,
+    /// The rings and where they are mapped; they go with the last handle to the ring.
+    mapping: crate::process::KernelMapping,
     completion_size: u32,
     /// The kernel's own copy of the completion tail, the only one it reads.
     completion_tail: u32,
@@ -246,23 +263,17 @@ struct Completions {
 
 impl Completions {
     fn completion_head(&self) -> &core::sync::atomic::AtomicU32 {
-        ring_word(&self.page, COMPLETION_RING_OFF, core::mem::offset_of!(RingHeader, head))
+        ring_word(&self.mapping.object, COMPLETION_RING_OFF, core::mem::offset_of!(RingHeader, head))
     }
 
     fn completion_tail_word(&self) -> &core::sync::atomic::AtomicU32 {
-        ring_word(&self.page, COMPLETION_RING_OFF, core::mem::offset_of!(RingHeader, tail))
+        ring_word(&self.mapping.object, COMPLETION_RING_OFF, core::mem::offset_of!(RingHeader, tail))
     }
 
     fn completion_dropped(&self) -> &core::sync::atomic::AtomicU32 {
-        ring_word(&self.page, COMPLETION_RING_OFF, core::mem::offset_of!(RingHeader, dropped))
+        ring_word(&self.mapping.object, COMPLETION_RING_OFF, core::mem::offset_of!(RingHeader, dropped))
     }
 
-    /// The address of one completion entry — a pointer, never a `&mut` minted from a shared borrow.
-    fn completion_at(&self, index: u32) -> *mut Completion {
-        let ptr = self.page.as_mut_ptr::<u8>();
-        // SAFETY: `index` is masked by `completion_size` (≤512), keeping the offset inside the page.
-        unsafe { ptr.add(COMPLETION_RING_OFF as usize + core::mem::size_of::<RingHeader>() + index as usize * core::mem::size_of::<Completion>()) as *mut Completion }
-    }
 
     /// Posts a completion, or records a drop if the ring reports itself full.
     fn post_completion(&mut self, user_data: u64, result: i32, flags: u32) {
@@ -272,8 +283,10 @@ impl Completions {
             return;
         }
         let idx = tail & (self.completion_size - 1);
-        // SAFETY: `idx` is masked to ring size; the completions' lock serializes kernel writers.
-        unsafe { self.completion_at(idx).write(Completion { token: user_data, result, flags }) };
+        // `idx` is masked to ring size, keeping the write inside the rings; the
+        // completions' lock serializes kernel writers.
+        let at = COMPLETION_RING_OFF + core::mem::size_of::<RingHeader>() as u64 + u64::from(idx) * core::mem::size_of::<Completion>() as u64;
+        self.mapping.object.write(at, value_bytes(&Completion { token: user_data, result, flags }));
         self.completion_tail = tail.wrapping_add(1);
         self.completion_tail_word().store(tail.wrapping_add(1), Ordering::Release);
     }
@@ -308,33 +321,32 @@ impl Inbox {
 /// Largest submission ring a process may ask for.
 const MAX_SUBMISSION_DEPTH: u32 = 256;
 
-/// Lays out a freshly allocated inbox page before `map_into` makes it shared.
-fn write_ring_page(base: DirectMap, submission_size: u32, completion_size: u32) {
-    use core::sync::atomic::AtomicU32;
+/// The rings' first bytes, laid out before the object is mapped.
+fn ring_layout(submission_size: u32, completion_size: u32) -> alloc::vec::Vec<u8> {
+    let mut page = alloc::vec![0u8; SUBMISSION_RING_OFF as usize];
+    let layout = RingLayout {
+        submission_ring_off: SUBMISSION_RING_OFF,
+        completion_ring_off: COMPLETION_RING_OFF,
+        submissions_off: SUBMISSIONS_OFF,
+        submission_ring_size: submission_size,
+        completion_ring_size: completion_size,
+        features: 0,
+        _pad: 0,
+    };
+    page[..core::mem::size_of::<RingLayout>()].copy_from_slice(value_bytes(&layout));
+    page
+}
 
-    let base = base.as_mut_ptr::<u8>();
-    // SAFETY: `base` is a freshly allocated page not yet mapped anywhere; these are exclusive writes.
-    unsafe {
-        (base as *mut RingLayout).write(RingLayout {
-            submission_ring_off: SUBMISSION_RING_OFF,
-            completion_ring_off: COMPLETION_RING_OFF,
-            submissions_off: SUBMISSIONS_OFF,
-            submission_ring_size: submission_size,
-            completion_ring_size: completion_size,
-            features: 0,
-            _pad: 0,
-        });
-        for (off, ring_size) in
-            [(SUBMISSION_RING_OFF, submission_size), (COMPLETION_RING_OFF, completion_size)]
-        {
-            (base.add(off as usize) as *mut RingHeader).write(RingHeader {
-                head: AtomicU32::new(0),
-                tail: AtomicU32::new(0),
-                ring_size,
-                dropped: AtomicU32::new(0),
-            });
-        }
-    }
+/// A ring layout or a completion as the bytes the rings hold.
+fn value_bytes<T: Copy>(value: &T) -> &[u8] {
+    // SAFETY: both types are `repr(C)` with every byte a field's: `toyos_abi::inbox`
+    // asserts their sizes against their fields.
+    unsafe { core::slice::from_raw_parts((value as *const T).cast::<u8>(), core::mem::size_of::<T>()) }
+}
+
+/// A ring header's size word, at `ring_off`: head, tail and dropped start at zero.
+fn ring_size_word(ring_off: u64) -> u64 {
+    ring_off + core::mem::offset_of!(RingHeader, ring_size) as u64
 }
 
 /// Creates an inbox and maps its rings into the caller.
@@ -346,32 +358,34 @@ pub fn create(depth: u32) -> Result<(InboxRef, u64), SyscallError> {
     let submission_size = depth;
     let completion_size = depth * 2;
 
-    let pid = process::current_process();
-    let addr_space = process::current_address_space();
-    let shm = SharedMemObject::create(crate::mm::PAGE_2M)?;
-
-    // Built before mapped: mapping first lets a sibling thread write the page while the kernel initializes it.
-    write_ring_page(shm.phys_before_mapping(), submission_size, completion_size);
-
-    let shm_vaddr = shm.map_into(pid, &addr_space)?;
-    let shm_phys = shm.phys();
+    let charge = Charge::current(heap())?;
+    let space = process::current_address_space();
+    let bytes = SUBMISSIONS_OFF + u64::from(MAX_SUBMISSION_DEPTH) * core::mem::size_of::<Submission>() as u64;
+    let ring = SharedMemObject::create(&crate::mm::charge::current(), bytes)?;
+    // Laid out before mapped: mapping first lets a sibling thread write the
+    // rings while the kernel initializes them.
+    ring.write(0, &ring_layout(submission_size, completion_size));
+    ring.write(ring_size_word(SUBMISSION_RING_OFF), &submission_size.to_ne_bytes());
+    ring.write(ring_size_word(COMPLETION_RING_OFF), &completion_size.to_ne_bytes());
+    let len = ring.size();
+    let at = space.lock().map(Arc::clone(&ring), 0, len, kernel::vm::Prot::ReadWrite, crate::mm::space::At::ANYWHERE)?;
 
     let inbox = Arc::new(Inbox {
         state: Lock::new(Some(RingState {
-            shm_phys,
+            ring: Arc::clone(&ring),
             submission_size,
             polls: Polls::new(),
-            owner_pid: pid,
+            owner_space: Arc::downgrade(&space),
         })),
         completions: Lock::new(Some(Completions {
-            shm,
-            page: shm_phys,
+            mapping: process::KernelMapping { object: ring, at },
             completion_size,
             completion_tail: 0,
         })),
         watch: IrqWatch::new(),
+        _charge: charge,
     });
-    Ok((InboxRef(inbox), shm_vaddr))
+    Ok((InboxRef(inbox), at.raw()))
 }
 
 /// Processes submissions and waits for completions; called from the syscall handler.
@@ -663,13 +677,18 @@ fn process_accept(inbox: &Arc<Inbox>, submission: &Submission) {
         }
     };
 
+    // Charged before a connection is taken, so a refusal leaves it queued.
+    let core = match crate::object::service::ConnectionEnd::accept_core() {
+        Ok(core) => core,
+        Err(e) => {
+            polls::complete(inbox, user_data, -(SyscallError::from(e) as i32));
+            return;
+        }
+    };
     match acceptor.pop() {
         Some(conn) => {
             let installed = process::with_process_data(|data| {
-                ops::install(
-                    &mut data.handles,
-                    KObjectRef::Connection(crate::object::service::ConnectionEnd::accepted(conn)),
-                )
+                ops::install(&mut data.handles, KObjectRef::Connection(crate::object::service::ConnectionEnd::accepted(core, conn)))
             });
             match installed {
                 Ok(h) => polls::complete(inbox, user_data, h.0 as i32),

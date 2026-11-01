@@ -15,6 +15,7 @@ pub use mm::{UserAddr, DirectMap, PHYS_OFFSET};
 mod invalidation;
 mod seqlock;
 mod shootdown;
+mod tlb_tags;
 mod cpu_local;
 mod cpu_slice;
 mod sleeplock;
@@ -61,6 +62,7 @@ mod loader;
 mod scheduler;
 mod sched;
 mod hw;
+mod idle;
 mod iommu;
 mod preempt;
 mod counters;
@@ -76,12 +78,13 @@ mod watch;
 mod object;
 mod inbox;
 mod pipe;
+mod frame_bytes;
+mod message;
 
 mod device;
 mod pcidev;
 mod isa;
 mod user_ptr;
-mod vma;
 mod syscall;
 
 /// Nested generic forces a demangled symbol wider than the console grid.
@@ -431,7 +434,11 @@ pub(crate) unsafe extern "C" fn kernel_main(loader_args: &mut KernelArgs) -> ! {
     }
     // After ACPI is readable and PCI is enumerable, before any driver `init`: each enumerated device needs a context entry before it can DMA.
     // Refuses nothing — a machine with no usable IOMMU boots exactly as one without it.
-    iommu::init(kernel_args.rsdp_addr, &pci_devices);
+    iommu::init(
+        kernel_args.rsdp_addr,
+        &pci_devices,
+        (kernel_args.kernel_memory_addr, kernel_args.kernel_memory_addr + kernel_args.kernel_memory_size),
+    );
     // Before storage and everything under it: what it covers is the rest of this
     // boot, and a wedge down there is the reason to have one.
     arch::watchdog::init(&pci_devices);
@@ -446,7 +453,6 @@ pub(crate) unsafe extern "C" fn kernel_main(loader_args: &mut KernelArgs) -> ! {
     vfs::init();
     process::init();
     scheduler::init();
-    pipe::init();
 
     vfs::lock().mount(&["tmp"], Box::new(crate::tmpfs::TmpFs::new()));
 

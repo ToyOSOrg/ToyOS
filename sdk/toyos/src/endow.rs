@@ -43,22 +43,19 @@ pub enum EndowError {
     Refused(SyscallError),
 }
 
-/// A typed wrapper that can be built from a handle this process already owns.
-///
-/// The `unsafe` is the whole contract: the caller is asserting that the handle
-/// is live, is this process's, and that nothing else answers for it.
+/// A typed wrapper over a handle it owns, as whoever gave the handle says it
+/// is: the kernel refuses each call on a handle of another type, so the type
+/// is trusted only as far as the giver's protocol says.
 pub trait FromHandle {
-    /// # Safety
-    /// `raw` must be a live handle of the right type that nothing else owns.
-    unsafe fn from_handle(raw: RawHandle) -> Self;
+    fn from_handle(handle: OwnedHandle) -> Self;
 }
 
 macro_rules! from_handle {
     ($($ty:ty => $make:expr),+ $(,)?) => {
         $(impl FromHandle for $ty {
-            unsafe fn from_handle(raw: RawHandle) -> Self {
+            fn from_handle(handle: OwnedHandle) -> Self {
                 let make: fn(OwnedHandle) -> Self = $make;
-                make(OwnedHandle(raw))
+                make(handle)
             }
         })+
     };
@@ -74,6 +71,9 @@ from_handle! {
     Device => Device,
     crate::Console => crate::Console,
     crate::Pipe => crate::Pipe,
+    crate::wake::Waker => crate::wake::Waker::from,
+    crate::wake::Bell => crate::wake::Bell::from,
+    crate::ipc::Connection => crate::ipc::Connection,
     crate::FramebufferDev => |h| crate::FramebufferDev(Device(h)),
     crate::PciDev => |h| crate::PciDev(Device(h)),
     crate::AcpiDev => |h| crate::AcpiDev(Device(h)),
@@ -105,9 +105,9 @@ impl Endowments {
         if raw == HANDLE_INVALID.0 {
             return None;
         }
-        // SAFETY: the swap is what makes this the only caller to see the
-        // handle, and the kernel put it in this process's table at spawn.
-        Some(unsafe { T::from_handle(RawHandle(raw)) })
+        // The swap is what makes this the only caller to see the handle, and
+        // the kernel put it in this process's table at spawn.
+        Some(T::from_handle(OwnedHandle(RawHandle(raw))))
     }
 
     /// Whether `label` names something this process still holds.

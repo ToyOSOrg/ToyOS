@@ -1,6 +1,6 @@
 use std::sync::atomic::AtomicU32;
 
-use toyos_abi::syscall::{self, MmapFlags, MmapProt};
+use toyos_abi::syscall::{self, VmAt, VmProt};
 
 /// ToyOS has no call that says which CPU runs a thread, so CPUs are named as
 /// the architecture's own instructions name them.
@@ -29,23 +29,21 @@ pub fn futex_wake(word: &AtomicU32, count: u32) -> u32 {
     u32::try_from(woken).expect("a wake count fits the count asked for")
 }
 
-/// ToyOS commits, zeroes and maps an anonymous range whole, in 2 MiB pages,
-/// before `mmap` answers.
+/// ToyOS commits an anonymous range whole and populates it a 4 KiB page at a
+/// time as it is touched.
 pub fn map_anon(len: usize) -> *mut u8 {
     // SAFETY: a fresh anonymous mapping aliases nothing.
-    let ptr =
-        unsafe { syscall::mmap(std::ptr::null_mut(), len, MmapProt::READ | MmapProt::WRITE, MmapFlags::ANONYMOUS) };
-    assert!(!ptr.is_null(), "mmap of {len} bytes was refused");
-    ptr
+    unsafe { syscall::vm_reserve(len, VmProt::ReadWrite, VmAt::ANYWHERE) }
+        .unwrap_or_else(|e| panic!("vm_reserve of {len} bytes was refused: {e:?}"))
 }
 
-/// Every ToyOS anonymous mapping is in 2 MiB pages.
+/// ToyOS maps no user memory in large pages yet: the same 4 KiB mapping.
 pub fn map_anon_huge(len: usize) -> *mut u8 {
     map_anon(len)
 }
 
 pub fn huge_backing() -> String {
-    "all".into()
+    "0KiB".into()
 }
 
 /// # Safety
@@ -53,7 +51,7 @@ pub fn huge_backing() -> String {
 /// reaches it afterwards.
 pub unsafe fn unmap(ptr: *mut u8, len: usize) {
     // SAFETY: as the caller promises.
-    unsafe { syscall::munmap(ptr, len) }.expect("munmap of a whole mapping");
+    unsafe { syscall::vm_release(ptr, len) }.expect("vm_release of a whole mapping");
 }
 
 /// Nothing a program can read: the kernel's frequency request and the
@@ -73,9 +71,8 @@ pub fn log_time_ns(monotonic: u64) -> u64 {
     monotonic + toyos_abi::clock::page().stamp_at_boot
 }
 
-/// ToyOS raises every thread stack to std's floor (`sys/thread.rs`'s
-/// `DEFAULT_MIN_STACK_SIZE`), whatever the builder asks.
-pub const STACK_FLOOR: &str = "2MiB";
+/// ToyOS gives a thread the stack its builder asks for, in whole pages.
+pub const STACK_FLOOR: &str = "none";
 
 /// What [`current_cpu`] names a CPU by, for the fields that print one.
 pub const CPU_NAMING: &str = "apic";
@@ -127,12 +124,18 @@ pub mod ipc {
         pub fn recv(&self, buf: &mut [u8]) -> io::Result<()> {
             let mut at = 0;
             loop {
-                let header = self.0.recv_header().map_err(|e| failed("receive", e))?;
-                at += self.0.recv_bytes(&header, &mut buf[at..]).map_err(|e| failed("receive", e))?;
+                at += self.take(&mut buf[at..])?;
                 if at >= buf.len() {
                     return Ok(());
                 }
             }
+        }
+
+        /// One frame into the front of `buf`, straight from the kernel: the
+        /// bytes it held.
+        fn take(&self, buf: &mut [u8]) -> io::Result<usize> {
+            let (frame, _) = self.0.recv_into(buf).map_err(|e| failed("receive", e))?;
+            Ok(frame.payload_len)
         }
 
         /// One frame of `data` (at most one frame's worth) and `token`, moved.
@@ -141,12 +144,10 @@ pub mod ipc {
         }
 
         pub fn recv_with(&self, buf: &mut [u8]) -> io::Result<Token> {
-            let header = self.0.recv_header().map_err(|e| failed("receive", e))?;
-            self.0.recv_bytes(&header, buf).map_err(|e| failed("receive", e))?;
-            let [raw] = self.0.recv_handles_exact::<1>(&header).ok_or_else(|| io::Error::other("no handle came"))?;
-            // SAFETY: the kernel moved this handle into this process's table
-            // for this frame alone, and the peer sends only pipe ends.
-            Ok(unsafe { Pipe::from_handle(raw) })
+            let (_, handles) = self.0.recv_into(buf).map_err(|e| failed("receive", e))?;
+            let [handle] = handles.exact::<1>().ok_or_else(|| io::Error::other("no handle came"))?;
+            // The peer sends only pipe ends.
+            Ok(Pipe::from_handle(handle))
         }
     }
 
@@ -163,7 +164,7 @@ pub mod ipc {
         let conn = names.open(NAME).map_err(|e| failed("connect", e))?;
         let child = Command::new(exe)
             .arg("ipc-serve")
-            .endow(LABEL, acceptor.into_raw().0)
+            .endow(LABEL, acceptor.into())
             .stdin(Stdio::null())
             .spawn()?;
         Ok((child, Peer(conn)))
@@ -200,6 +201,14 @@ pub mod ipc {
     }
 }
 
+/// The capability the runner endowed this process, `None` where the boot
+/// endows none. The endowment is taken once per process, so every row that
+/// uses the capability borrows it here.
+pub fn syscap() -> Option<&'static toyos::syscap::SysCap> {
+    static CAP: std::sync::OnceLock<Option<toyos::syscap::SysCap>> = std::sync::OnceLock::new();
+    CAP.get_or_init(|| toyos::endow::Endowments::get().take(toyos::endow::SYSCAP_LABEL)).as_ref()
+}
+
 /// What the tail group reads to say where a late wake's time went, through
 /// the runner's capability: each CPU's firmware interrupts and clock, the
 /// scheduler's diary and the roster's names. Read-only observation rights;
@@ -207,7 +216,6 @@ pub mod ipc {
 pub mod diag {
     use std::collections::BTreeMap;
 
-    use toyos::endow::{Endowments, SYSCAP_LABEL};
     use toyos::syscap::{SysCap, TraceCursor};
     use toyos_abi::counters::{Counter, RawRecord, Record};
     use toyos_abi::syscall::{SYSINFO_ENTRY_SIZE, SYSINFO_HEADER_SIZE};
@@ -215,7 +223,7 @@ pub mod diag {
     use toyos_trace::{Entry, Event};
 
     pub struct Diag {
-        cap: SysCap,
+        cap: &'static SysCap,
         cursor: Option<TraceCursor<Vec<u64>>>,
     }
 
@@ -224,16 +232,40 @@ pub mod diag {
     /// names it by.
     #[derive(Clone)]
     pub struct CpuCounts {
+        /// The CPU did not answer within the read's bound: its values are the
+        /// last it published.
+        pub stale: bool,
         pub cpu: u32,
         pub apic: u32,
+        /// The CPU's own counter when it read the rest (the TSC).
+        pub stamp: Option<u64>,
         pub smi: Option<u64>,
         pub aperf: Option<u64>,
         pub mperf: Option<u64>,
         pub kicks: Option<u64>,
+        /// Core C6 and C7 residency in TSC ticks, where the CPU counts it.
+        pub core_c6: Option<u64>,
+        pub core_c7: Option<u64>,
+        /// Idle periods the kernel chose a declared deep state for, counted
+        /// as each ends.
+        pub deep_idles: Option<u64>,
+        /// The package's counters, on the CPU that reads them.
+        pub package_energy: Option<u64>,
+        pub rapl_power_unit: Option<u64>,
+        pub package_residency: [Option<u64>; 4],
+        pub core_energy: Option<u64>,
+    }
+
+    /// The capability's diagnostics for the rows that read the counters
+    /// around them ([`crate::around`]): opened once a process, and `None`
+    /// where the boot endows no capability.
+    pub fn shared() -> Option<&'static Diag> {
+        static SHARED: std::sync::OnceLock<Option<Diag>> = std::sync::OnceLock::new();
+        SHARED.get_or_init(open).as_ref()
     }
 
     pub fn open() -> Option<Diag> {
-        let cap: SysCap = Endowments::get().take(SYSCAP_LABEL)?;
+        let cap = super::syscap()?;
         let cursor = cap.trace_cursor_words().ok().map(|n| TraceCursor::new(vec![0u64; n]));
         Some(Diag { cap, cursor })
     }
@@ -248,12 +280,22 @@ pub mod diag {
                 .map(|r| {
                     let r = Record::decode(r).map_err(|e| format!("a counters record did not decode: {e:?}"))?;
                     Ok(CpuCounts {
+                        stale: r.stale,
                         cpu: r.cpu,
                         apic: r.hardware_id,
+                        stamp: r.get(Counter::Stamp),
                         smi: r.get(Counter::Smi),
                         aperf: r.get(Counter::Aperf),
                         mperf: r.get(Counter::Mperf),
                         kicks: r.get(Counter::Kicks),
+                        core_c6: r.get(Counter::CoreC6),
+                        core_c7: r.get(Counter::CoreC7),
+                        deep_idles: r.get(Counter::DeepIdles),
+                        package_energy: r.get(Counter::PackageEnergy),
+                        rapl_power_unit: r.get(Counter::RaplPowerUnit),
+                        package_residency: [Counter::PackageC2, Counter::PackageC3, Counter::PackageC6, Counter::PackageC7]
+                            .map(|c| r.get(c)),
+                        core_energy: r.get(Counter::CoreEnergy),
                     })
                 })
                 .collect()
@@ -284,7 +326,7 @@ pub mod diag {
                 };
                 for raw in &buf[..n] {
                     if let Ok(entry) = Entry::decode(raw) {
-                        let since_boot = page.stamp_of(entry.stamp).saturating_sub(page.stamp_at_boot);
+                        let since_boot = page.nanos_since_boot(entry.stamp);
                         out.push((since_boot, entry));
                     }
                 }
@@ -342,35 +384,257 @@ pub mod diag {
     }
 }
 
-/// ToyOS has no call that changes a mapping's protection: `toyos_abi`
-/// declares none.
-pub fn protect(_ptr: *mut u8, _len: usize, _writable: bool) -> Result<(), super::Refused> {
-    Err(super::Refused::Absent("toyos_abi has no mprotect: a mapping keeps the protection mmap gave it".into()))
+/// The power counters, through the runner's capability: `SYS_COUNTERS`
+/// under `Rights::TRACE`, the package's held by the boot processor. Every read
+/// kicks every CPU (`toyos_abi::counters`), the package's too.
+pub mod power {
+    use super::super::{CpuPower, Package, Refused, Round};
+    use super::diag::{self, CpuCounts};
+
+    fn read() -> Result<Vec<CpuCounts>, Refused> {
+        let d = diag::shared().ok_or_else(|| Refused::Withheld("this boot endows osbench no capability".into()))?;
+        d.counters().map_err(Refused::Failed)
+    }
+
+    /// One `SYS_COUNTERS` round, which kicks every CPU.
+    pub fn round() -> Result<Round, Refused> {
+        let read = read()?;
+        Ok(Round { package: package(&read)?, cpus: cpus(read)? })
+    }
+
+    fn package(cpus: &[CpuCounts]) -> Result<Package, Refused> {
+        let held = cpus.iter().find(|c| c.package_energy.is_some() || c.package_residency.iter().any(Option::is_some));
+        let Some(c) = held else {
+            return Err(Refused::Absent(
+                "no CPU's record carries the package's counters: the kernel's `counters: cpu0 reads` line says whether it \
+                 reads them, or the capability holds no TRACE"
+                    .into(),
+            ));
+        };
+        if c.stale {
+            return Err(Refused::Failed(format!("cpu{}, which reads the package, answered stale", c.cpu)));
+        }
+        Ok(Package {
+            tsc: c.stamp.ok_or_else(|| Refused::Failed(format!("cpu{}'s record carries no stamp", c.cpu)))?,
+            energy: c.package_energy,
+            power_unit: c.rapl_power_unit,
+            residency: c.package_residency,
+        })
+    }
+
+    fn cpus(read: Vec<CpuCounts>) -> Result<Vec<CpuPower>, Refused> {
+        read.into_iter()
+            .map(|c| {
+                if c.stale {
+                    return Err(Refused::Failed(format!("cpu{} answered stale", c.cpu)));
+                }
+                Ok(CpuPower {
+                    cpu: c.cpu,
+                    core: crate::arch::core_of(c.apic),
+                    tsc: c.stamp.ok_or_else(|| Refused::Failed(format!("cpu{}'s record carries no stamp", c.cpu)))?,
+                    aperf: c.aperf,
+                    mperf: c.mperf,
+                    core_c6: c.core_c6,
+                    core_c7: c.core_c7,
+                    core_energy: c.core_energy,
+                })
+            })
+            .collect()
+    }
+
+    /// The CPU time every process but this one has run for, in nanoseconds,
+    /// by the roster.
+    pub fn busy_ns() -> Result<u64, Refused> {
+        let d = diag::shared().ok_or_else(|| Refused::Withheld("this boot endows osbench no capability".into()))?;
+        let me = std::process::id();
+        Ok(d.roster().iter().filter(|((pid, _), _)| *pid != me).map(|(_, (_, ns))| ns).sum())
+    }
 }
 
-/// Give back part of a mapping, which ToyOS refuses: `munmap` takes a whole
-/// mapping (`toyos_abi::syscall::munmap`).
-///
+pub fn protect(ptr: *mut u8, len: usize, writable: bool) -> Result<(), super::Refused> {
+    let prot = if writable { VmProt::ReadWrite } else { VmProt::Read };
+    // SAFETY: the caller's mapping; a protection change moves no memory.
+    unsafe { syscall::vm_protect(ptr, len, prot) }.map_err(|e| super::Refused::Failed(format!("vm_protect: {e:?}")))
+}
+
 /// # Safety
 /// `ptr` and `len` lie inside one mapping from [`map_anon`] that nothing
 /// reaches in that range afterwards.
 pub unsafe fn unmap_part(ptr: *mut u8, len: usize) -> Result<(), super::Refused> {
     // SAFETY: as the caller promises.
-    unsafe { syscall::munmap(ptr, len) }.map_err(|e| match e {
-        syscall::SyscallError::InvalidArgument => {
-            super::Refused::Absent("munmap takes a whole mapping and answers InvalidArgument for a part".into())
-        }
-        e => super::Refused::Failed(format!("munmap of a part answered {e:?}")),
-    })
+    unsafe { syscall::vm_release(ptr, len) }.map_err(|e| super::Refused::Failed(format!("vm_release: {e:?}")))
 }
 
-/// A mapping whose first touch of each 4 KiB page is what is measured: every
-/// ToyOS anonymous mapping is in 2 MiB pages, committed inside `mmap`.
+/// A mapping that faults in 4 KiB pages, which every ToyOS anonymous mapping does.
 pub fn map_anon_4k(len: usize) -> *mut u8 {
     map_anon(len)
 }
 
-/// The one writable persistent volume a benchcase boot has, and what it is.
-pub fn persistent_dir() -> Option<(String, String)> {
-    Some(("/log".into(), "boot USB stick TOYOS-LOG partition, FAT32, LOG file server over usbd mass storage".into()))
+/// DATA's `/home`, what serves it, and its medium. A program cannot ask
+/// which disk DATA is on, or whether it is memory instead; the `osbench` row
+/// refuses a boot whose DATA was not the NVMe's partition, so that is the
+/// medium a measured run's lines name.
+pub fn persistent_dir() -> Option<(String, String, String)> {
+    let served_by = "DATA volume, bcachefs crate's format, DATA file server over the block service";
+    Some(("/home".into(), served_by.into(), "nvme".into()))
+}
+
+/// What a transfer row reports of the stack beneath it, as netstack's `inspect` answers it: [tcp]'s
+/// counters, and the cards' summed over netstack's links. Those no card reports are left out.
+pub fn net_counters() -> Result<Vec<(String, u64)>, String> {
+    const READ: [&str; 25] = [
+        "net.tcp.sent.bytes",
+        "net.tcp.retransmit.bytes",
+        "net.tcp.rto",
+        "net.tcp.fast-recovery",
+        "net.tcp.sack-recovery",
+        "net.tcp.loss-probe",
+        "net.tcp.loss-probe-recovery",
+        "net.tcp.dsack-rcvd",
+        "net.tcp.rtt.departure",
+        "net.tcp.rtt.echo",
+        "net.tcp.send-limited.user.ns",
+        "net.tcp.send-limited.window.ns",
+        "net.tcp.send-limited.congestion.ns",
+        "net.tcp.send-limited.pacing.ns",
+        "net.tcp.congestion-stops",
+        "net.tcp.congestion-stops.cwnd.bytes",
+        "net.tcp.congestion-stops.srtt.us",
+        "net.tcp.acks.cwnd-limited",
+        "net.tcp.acks.not-limited",
+        "net.tcp.cwnd.grown.bytes",
+        "net.tcp.hystart.css",
+        "net.tcp.hystart.css.entry-rounds",
+        "net.tcp.hystart.resumed",
+        "net.tcp.hystart.exits",
+        "net.tcp.hystart.exit.cwnd.bytes",
+    ];
+    /// Each link's, under `net.link.<n>.`.
+    const CARD: [&str; 8] = [
+        "transmit.full",
+        "transmit.wake_armed",
+        "transmit.wake_taken",
+        "transmit.full.ns",
+        "transmit.unreported",
+        "errors.missed",
+        "wire.sent",
+        "wire.received",
+    ];
+    let snap = inspect::ask(toyos_inspect::NET)?;
+    let number = |key: &str| match snap.get(key) {
+        Some(toyos_inspect::Value::U64(v)) => Some(*v),
+        _ => None,
+    };
+    let links = number("net.links").unwrap_or(0);
+    let tcp = READ.iter().filter_map(|key| number(key).map(|v| (key.to_string(), v)));
+    let cards = CARD.iter().filter_map(|key| {
+        let each: Vec<u64> = (0..links).filter_map(|n| number(&format!("net.link.{n}.{key}"))).collect();
+        (!each.is_empty()).then(|| (format!("net.{key}"), each.iter().sum()))
+    });
+    Ok(tcp.chain(cards).collect())
+}
+
+/// What a row's own connections say of themselves: nothing on ToyOS, whose
+/// stack's counters ([`net_counters`]) say it for every connection.
+pub struct StreamLog;
+
+impl StreamLog {
+    pub fn new() -> Self {
+        Self
+    }
+
+    pub fn look(&mut self, _stream: &std::net::TcpStream) {}
+
+    pub fn fields(&self) -> Vec<(String, String)> {
+        Vec::new()
+    }
+}
+
+/// What carries a connection on ToyOS: the netstack link whose lease holds its local address.
+pub fn link_of(local: std::net::IpAddr) -> Result<(osbench_lan::link::Link, String), String> {
+    let snap = inspect::ask(toyos_inspect::NET)?;
+    let text = |key: String| match snap.get(&key) {
+        Some(toyos_inspect::Value::Text(t)) => Some(t.clone()),
+        _ => None,
+    };
+    let links = match snap.get("net.links") {
+        Some(toyos_inspect::Value::U64(n)) => *n,
+        _ => 0,
+    };
+    let held = (0..links).find(|n| text(format!("net.link.{n}.lease.address")).is_some_and(|a| a.split('/').next() == Some(&local.to_string())));
+    let Some(n) = held else { return Err(format!("no netstack link holds {local}")) };
+    let driver = text(format!("net.link.{n}.driver")).unwrap_or_default();
+    match text(format!("net.link.{n}.medium")).as_deref() {
+        Some("wired") => Ok((osbench_lan::link::Link::Wired, format!("netstack's wired link, {driver}"))),
+        Some("wireless") => Ok((osbench_lan::link::Link::Wifi, format!("netstack's wireless link, {driver}"))),
+        other => Err(format!("netstack's link {n} is carried over {other:?}")),
+    }
+}
+
+/// ToyOS reads no temperature: the kernel counts none
+/// (`toyos_abi::counters::Counter`) and no driver serves one.
+pub fn package_sensor() -> Result<super::Sensor, String> {
+    Err("no counter or service carries the package's temperature".into())
+}
+
+/// Requests straight through the file server's client (`toyos::fs::Dir`),
+/// under none of std's descriptor table and path routing: beside the same
+/// rows through std, what that layer costs. Only for a directory a file
+/// server serves; the kernel's `/tmp` has no client to go around.
+pub mod direct {
+    use toyos::fs::{Base, Dir, Error, O_READ, SEEK_START};
+
+    use crate::measure::each;
+    use crate::report::refuse;
+
+    /// `dir`'s capability, connected: `None` where no file server serves it,
+    /// and why where its server would not take this second connection.
+    pub fn connect(dir: &str) -> Result<Option<Dir>, String> {
+        let Some(names) = toyos::endow::namespace() else { return Ok(None) };
+        match Dir::connect(names, &format!("{}{dir}", toyos::fs::CAPABILITY_PREFIX)) {
+            Ok(d) => Ok(Some(d)),
+            Err(Error::NotHeld) => Ok(None),
+            Err(e) => Err(format!("{dir}'s file server would not take a second connection: {e:?}")),
+        }
+    }
+
+    fn word(e: impl core::fmt::Debug) -> String {
+        format!("{e:?}")
+    }
+
+    /// The `direct` rows, each on the file its std twin uses: `small`, with
+    /// the target's `fields`, and `big`, with `big_fields`; each a path
+    /// under the directory `dir` serves.
+    pub fn rows(
+        dir: &mut Dir,
+        name: &dyn Fn(&str) -> String,
+        fields: &[(&'static str, String)],
+        big_fields: &[(&'static str, String)],
+        small: &str,
+        big: &str,
+        at: impl Fn(usize) -> u64,
+    ) {
+        let opened = match dir.open(Base::Root, big, O_READ) {
+            Ok(o) => o.fid,
+            Err(e) => return refuse(&name("direct"), word(e)),
+        };
+        let held = match dir.open(Base::Root, small, O_READ) {
+            Ok(o) => o.fid,
+            Err(e) => {
+                dir.close(opened);
+                return refuse(&name("direct"), word(e));
+            }
+        };
+        let mut buf = vec![0u8; 4096];
+        each(&name("direct.seek"), 100, 2000, big_fields, |i| dir.seek(opened, SEEK_START, at(i) as i64).map(drop).map_err(word));
+        each(&name("direct.read_4k_at"), 100, 2000, big_fields, |i| {
+            dir.seek(opened, SEEK_START, at(i) as i64).map_err(word)?;
+            dir.read(opened, &mut buf).map(drop).map_err(word)
+        });
+        each(&name("direct.pread_4k"), 100, 2000, big_fields, |i| dir.pread(opened, at(i), &mut buf).map(drop).map_err(word));
+        each(&name("direct.fstat"), 100, 2000, fields, |_| dir.fstat(held).map(drop).map_err(word));
+        each(&name("direct.stat"), 100, 2000, fields, |_| dir.stat(Base::Root, small, true).map(drop).map_err(word));
+        dir.close(opened);
+        dir.close(held);
+    }
 }

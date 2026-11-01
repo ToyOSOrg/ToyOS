@@ -26,7 +26,7 @@ serves = ["log"]
 
 [programs.compositor]
 service = true
-serves = ["compositor", "prompt", "clipboard", "input", "display"]
+serves = ["compositor", "prompt", "clipboard", "input", "display", "display-output"]
 receives = ["soundserver"]
 devices = ["framebuffer"]
 
@@ -34,7 +34,7 @@ devices = ["framebuffer"]
 service = true
 serves = ["soundserver", "volume", "sound-output"]
 devices = ["pci:04:01:00/1af4:1059"]
-syscap = ["rt"]
+syscap = ["rt", "wake-latency"]
 
 # The Intel HD Audio driver: one process per HDA function the kernel does not
 # drive, each walking its own controller's codecs and offering soundserver the
@@ -45,12 +45,23 @@ drives = ["pci:04:03:*"]
 receives = ["sound-output"]
 syscap = ["rt"]
 
-# netstack holds the NIC's PCI function and drives it: the virtqueues, the register
-# window and the interrupt are its own, and the kernel keeps only the claim.
+# The T14's display driver: the firmware's output on `display-output`, and
+# PG3, which holds `hda`'s display codec, powered down beside `hda`. No other
+# bench has its iGPU, so none starts it.
+[programs.tgl-display]
+drives = ["pci:03:00:00/8086:9a49"]
+receives = ["display-output"]
+
+# netstack over every link a NIC driver brings; on a machine with no virtio NIC
+# the supervisor starts no driver, and netstack serves with no address.
 [programs.netstack]
 service = true
-serves = ["netstack"]
-devices = ["pci:02:00:00/1af4:1041"]
+serves = ["netstack", "link"]
+
+[programs.virtio-net]
+drives = ["pci:02:00:00/1af4:1041"]
+receives = ["link"]
+restart = true
 
 [programs.sshserver]
 service = true
@@ -70,7 +81,7 @@ devices = ["isa:0060,0064:1,12"]
 # The union its guest binaries need on this machine shape; `log` is what
 # `ps2server_hold` reads ps2server's probe off.
 [programs.test-runner]
-receives = ["compositor", "soundserver", "netstack", "log"]
+receives = ["compositor", "soundserver", "volume", "netstack", "log"]
 syscap = ["logread"]
 
 # The block service: every disk a driver offers on `disk`, listed and opened
@@ -81,19 +92,18 @@ service = true
 restart = true
 serves = ["block", "disk"]
 
-# The NVMe driver: one process per such controller, reading its own table and
-# offering its disk to the block service. QEMU's controller alone, so a metal
-# boot leaves the bench's own NVMe disk to its firmware.
+# The NVMe driver: one process per NVMe controller, whatever its maker, reading
+# its own table and offering its disk to the block service. Another system's
+# partitions on that disk are reached by no grant (`toyos_supervisor::storage`).
 [programs.nvme]
-drives = ["pci:01:08:02/1b36:0010"]
+drives = ["pci:01:08:02"]
 receives = ["disk"]
 
-# The USB driver, one process per boot controller: QEMU's `nec-usb-xhci`, the
-# T14's 00:14.0 and the AMD bench's 03:00.3. QEMU's spare, the T14's Type-C
-# controller and the AMD bench's 03:00.4 stay free for the tests that claim
-# them.
+# The USB driver: QEMU's `nec-usb-xhci`, and the controller firmware booted
+# through where that is an xHCI, which on a bench booted off its NVMe is none.
+# Every other xHCI controller stays free for the tests that claim one.
 [programs.usbd]
-drives = ["pci:0c:03:30/1033:0194", "pci:0c:03:30/8086:a0ed", "pci:0c:03:30/1022:1639@03:00.3"]
+drives = ["pci:0c:03:30/1033:0194", "pci:0c:03:30@boot"]
 receives = ["disk", "input"]
 
 # The file servers: DATA, the log and the boot volume, one process
@@ -101,6 +111,7 @@ receives = ["disk", "input"]
 # one ends, on the same ports.
 [programs.fileserver]
 restart = true
+pager = true
 roles = ["data", "log", "boot"]
 receives = ["block"]
 

@@ -56,7 +56,7 @@ int main(int argc, char **argv) {
     errno = 0;
     CHECK(kill(other, 0) == -1 && errno == ESRCH, "kill(%d, 0) of a child waited for", other);
     errno = 0;
-    CHECK(kill(other, SIGTERM) == -1 && errno == EINVAL, "kill with a signal no process takes yet");
+    CHECK(kill(other, SIGUSR1) == -1 && errno == EINVAL, "kill with a signal no process takes");
     close(held[0]);
     close(held[1]);
     printf("spawn_kill_group: kill(-pgid) ended the group's two children and not the third; kill(pid, 0) probed\n");

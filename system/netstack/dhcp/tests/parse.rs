@@ -318,3 +318,18 @@ fn s_dhcp_dh_063_a_refused_offer_then_another() {
     let payload = &sent(&out).payload;
     assert_eq!(payload[243..249], [54, 4, 192, 0, 2, 253]);
 }
+
+/// A reply names the client it is for, which a host with several links reads to tell which
+/// link's client is to have it; a message that is no Ethernet reply names none.
+#[test]
+fn a_reply_names_its_client_and_nothing_else_does() {
+    let reply = offer();
+    assert_eq!(toyos_dhcp::addressed_to(&reply), Some(MAC_A));
+    let mut request = reply.clone();
+    request[0] = 1;
+    assert_eq!(toyos_dhcp::addressed_to(&request), None, "a request");
+    let mut token_ring = reply.clone();
+    token_ring[1] = 6;
+    assert_eq!(toyos_dhcp::addressed_to(&token_ring), None, "another hardware type");
+    assert_eq!(toyos_dhcp::addressed_to(&reply[..33]), None, "short of its chaddr");
+}

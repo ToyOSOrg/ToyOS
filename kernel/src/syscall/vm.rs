@@ -1,221 +1,107 @@
-//! The caller's own address space: `mmap`/`munmap` place and remove anonymous
-//! regions, `dlopen` maps a library image, `SYS_TLS_ALLOC_BLOCK` maps a
-//! thread's per-module TLS block, `SYS_QUERY_MODULES` reports what is loaded.
-//! Exhausting address space is an error return, never an `.expect`.
+//! The caller's own address space: `vm_*` reserve, commit, protect, discard,
+//! resize and take away private memory, `dlopen` maps a library image, `SYS_TLS_ALLOC_BLOCK`
+//! maps a thread's per-module TLS block, `SYS_QUERY_MODULES` reports what is
+//! loaded. Exhausting address space is an error return, never an `.expect`.
 //!
-//! **A length from userland is refused before any arithmetic touches it, and
-//! before any lock.** Every arm that places goes through `vma::window().span`,
-//! the bound `find_gap` places in: one no placement window could hold is
-//! `InvalidArgument`, one that could but finds no room is `ResourceExhausted`.
-//! `munmap` does no arithmetic on its length: it is equal to the one the
-//! mapping's `mmap` was asked for, or it is refused.
-//!
-//! A removed mapping's `Unmapped` drops outside `with_process_data`: the drop
-//! shoots down and waits, and a sibling thread can be spinning on that same
-//! lock.
+//! **A length from userland is refused before any arithmetic touches it**:
+//! rounding it to pages is the checked sum, and one no page count holds is
+//! `InvalidArgument`.
 
-use crate::mm::policy::{CachePolicy, Prot};
-use crate::vma::Occupancy;
+use kernel::vm::Prot;
+
+use crate::mm::charge::{self, Charge};
+use crate::mm::space::At;
 use crate::user_ptr::UserBytesMut;
 use crate::UserAddr;
 use crate::process;
 
 use toyos_abi::syscall::*;
 
-/// Every bit `MmapProt` defines; `NONE` is the empty word and needs no bit.
-///
-/// **Hand-copied from `toyos-abi` and nothing checks the copy**: a bit added
-/// there and not here is refused although the ABI defines it, measured in
-/// `issues/a-known-mask-is-copied-out-of-toyos-abi-by-hand.md`.
-const MMAP_PROT_KNOWN: u64 = MmapProt::READ.0 | MmapProt::WRITE.0;
-/// Every bit `MmapFlags` defines; hand-copied, as `MMAP_PROT_KNOWN` says.
-const MMAP_FLAGS_KNOWN: u64 = MmapFlags::ANONYMOUS.0 | MmapFlags::PRIVATE.0 | MmapFlags::FIXED.0;
+/// `size` bytes in whole pages, or `None` for none or a size no page count holds.
+fn whole_pages(size: u64) -> Option<u64> {
+    size.checked_next_multiple_of(crate::mm::PAGE_SIZE).filter(|&bytes| bytes != 0)
+}
 
-/// Map anonymous memory honouring `prot`; `MmapFlags::FIXED` places it at
-/// exactly `req_addr`, replacing at most one whole mapping this process made.
-pub(super) fn sys_mmap(req_addr: u64, size: u64, prot: MmapProt, flags: MmapFlags) -> u64 {
-    // First, so the answer is the bit and not whichever other refusal came
-    // first: a bit this kernel does not define is a request it cannot serve.
-    if prot.0 & !MMAP_PROT_KNOWN != 0 || flags.0 & !MMAP_FLAGS_KNOWN != 0 {
-        return SyscallError::InvalidArgument.to_u64();
-    }
-    // `FIXED` with a null `req_addr` places anywhere, same as the non-FIXED
-    // arm below: this is the one condition that decides which placement runs.
-    let places_at_req_addr = flags.contains(MmapFlags::FIXED) && req_addr != 0;
-    // Refused here, before either lock is taken.
-    let Some(aligned) = crate::vma::window().span(size).map(|span| span.bytes() as usize) else {
-        return SyscallError::InvalidArgument.to_u64();
-    };
-    // Anonymous memory is never executable: `MmapProt` has no bit for it and
-    // there is no `mprotect` to add one later.
-    let mapping_prot = if prot.contains(MmapProt::WRITE) { Prot::ReadWrite } else { Prot::Read };
-
-    // A misaligned or kernel-half `req_addr` is refused, not rounded or
-    // clamped: `ensure_table` would OR `PAGE_USER` onto the shared kernel PML4
-    // entry, opening a user-writable window in every process's page tables.
-    // The floor guards against NULL-ish addresses below it.
-    let fixed_start = if places_at_req_addr {
-        let Some(end) = req_addr.checked_add(aligned as u64) else {
-            return SyscallError::InvalidArgument.to_u64();
-        };
-        if req_addr & (crate::mm::PAGE_2M - 1) != 0
-            || req_addr < crate::vma::window().floor()
-            || end > crate::vma::ALLOC_CEILING
-            || !toyos_userbound::in_user_half(req_addr, aligned as u64)
-        {
-            return SyscallError::InvalidArgument.to_u64();
-        }
-        // Never rounded: `mmap_regions` and `munmap` key on this exact address.
-        Some(req_addr)
-    } else {
-        None
-    };
-
-    // Allocate only once the request is known to be satisfiable, so a refused
-    // fixed mapping leaks no pages.
-    let pages = if prot == MmapProt::NONE {
-        // No physical page is pinned behind a reservation whose purpose is to
-        // fault: `handle_page_fault` refuses to fill a `Mapped` region.
-        None
-    } else {
-        match process::PageAlloc::new(aligned) {
-            Some(pages) => Some(pages),
-            None => return SyscallError::ResourceExhausted.to_u64(),
-        }
-    };
-
-    if let Some(start) = fixed_start {
-        let pt = process::current_address_space();
-        let start = UserAddr::new(start);
-        // Both ledgers move together, under both locks, in the same order as
-        // the arm below: process data, then address space.
-        let replaced = process::with_process_data(|data| {
-            let mut as_guard = pt.lock();
-            // Only a whole mapping this process itself made may be replaced;
-            // a partial overlap is refused — `map_range` would otherwise
-            // assert on an already-present PDE.
-            let replacing = match as_guard.occupancy(start, aligned as u64) {
-                // A replacement (`Whole`) grows no ledger and is never refused here.
-                Occupancy::Free if !as_guard.has_region_room() => {
-                    return Err(SyscallError::ResourceExhausted)
-                }
-                Occupancy::Free => None,
-                Occupancy::Whole => {
-                    // By the length it was asked for, as `munmap` names it: a
-                    // shorter request that rounds to the same span would
-                    // replace pages its caller did not name.
-                    let mine = data
-                        .mmap_regions
-                        .iter()
-                        .position(|r| r.addr == start && r.len == size);
-                    match mine {
-                        Some(idx) => Some(idx),
-                        None => return Err(SyscallError::InvalidArgument),
-                    }
-                }
-                Occupancy::Partial => return Err(SyscallError::InvalidArgument),
-            };
-            // Out of both ledgers before the new mapping goes into either, so
-            // `insert_region` never overlaps.
-            let old = replacing.map(|idx| {
-                let old = data.mmap_regions.swap_remove(idx);
-                let detached = as_guard
-                    .free_and_unmap(old.addr)
-                    .expect("an mmap region is registered in the address space it was placed in");
-                (old, detached)
-            });
-            as_guard.insert_region(
-                start,
-                crate::vma::Region {
-                    size: aligned as u64,
-                    kind: crate::vma::RegionKind::Mapped,
-                },
-            );
-            if let Some(pages) = &pages {
-                as_guard.map_range(
-                    start,
-                    pages.phys(),
-                    aligned as u64,
-                    mapping_prot,
-                    CachePolicy::Normal,
-                );
-            }
-            data.mmap_regions.push(process::MmapRegion {
-                addr: start, size: aligned, len: size, _pages: pages,
-            });
-            data.alloc_count += 1;
-            let mem = data.mmap_regions.iter().map(|r| r.size as u64).sum::<u64>();
-            if mem > data.peak_memory { data.peak_memory = mem; }
-            Ok(old.map(crate::mm::Unmapped::new))
-        });
-        match replaced {
-            // Dropped here with no lock held: the drop shoots down and waits,
-            // and only a replaced mapping owes that wait.
-            Ok(old) => {
-                drop(old);
-                req_addr
-            }
-            Err(e) => e.to_u64(),
-        }
-    } else {
-        let pt = process::current_address_space();
-        let vaddr = process::with_process_data(|data| {
-            let placed = match &pages {
-                Some(pages) => pt.lock().alloc_and_map(pages.phys(), aligned as u64, mapping_prot, CachePolicy::Normal).map(|(v, _)| v),
-                None => pt.lock().alloc_region(aligned as u64, crate::vma::RegionKind::Mapped),
-            };
-            let Some(vaddr) = placed else { return Err(()) };
-            data.mmap_regions.push(process::MmapRegion {
-                addr: vaddr, size: aligned, len: size, _pages: pages,
-            });
-            data.alloc_count += 1;
-            let mem = data.mmap_regions.iter().map(|r| r.size as u64).sum::<u64>();
-            if mem > data.peak_memory { data.peak_memory = mem; }
-            Ok(vaddr)
-        });
-        match vaddr {
-            Ok(v) => v.raw(),
-            Err(()) => SyscallError::ResourceExhausted.to_u64(),
-        }
+/// The protection a `VmProt` word names. Executable memory is not yet one a
+/// program may ask for: `ReadExec` is `NotSupported`.
+fn vm_prot(word: u64) -> Result<Prot, SyscallError> {
+    match VmProt::from_u64(word).ok_or(SyscallError::InvalidArgument)? {
+        VmProt::None => Ok(Prot::None),
+        VmProt::Read => Ok(Prot::Read),
+        VmProt::ReadWrite => Ok(Prot::ReadWrite),
+        VmProt::ReadExec => Err(SyscallError::NotSupported),
     }
 }
 
-/// Frees the anonymous mapping that starts at `addr`, whole, and shoots down
-/// every sibling thread's translation for its range. `size` is the length its
-/// `mmap` was asked for, to the byte: any other is `InvalidArgument` and
-/// unmaps nothing, a mapping being one region with no part to take away.
-///
-/// The two lengths are compared as they were given and never as what they
-/// round to: a shorter one that rounds to the same pages names a part its
-/// caller means to keep, and which lengths those are would move with the page
-/// size. A caller that counts in pages rounds both of its own lengths, as
-/// `sdk/libc` does.
-pub(super) fn sys_munmap(addr: u64, size: u64) -> u64 {
-    let pt = process::current_address_space();
-    let taken = process::with_process_data(|data| {
-        let Some(idx) = data.mmap_regions.iter().position(|r| r.addr.raw() == addr) else {
-            return Err(SyscallError::NotFound);
-        };
-        if data.mmap_regions[idx].len != size {
-            return Err(SyscallError::InvalidArgument);
-        }
-        let region = data.mmap_regions.swap_remove(idx);
-        data.free_count += 1;
-        let detached = pt
-            .lock()
-            .free_and_unmap(region.addr)
-            .expect("an mmap region is registered in the address space it was placed in");
-        Ok(crate::mm::Unmapped::new((region, detached)))
-    });
-    // Dropped here, outside the closure: the drop shoots down and waits, and a
-    // sibling can be spinning on the process-data lock.
-    match taken {
-        Ok(unmapped) => {
-            drop(unmapped);
-            0
-        }
-        Err(e) => e.to_u64(),
+/// `[addr, addr + len)` as a page-aligned start and whole pages.
+fn range(addr: u64, len: u64) -> Result<(UserAddr, u64), SyscallError> {
+    match (UserAddr::checked(addr), whole_pages(len)) {
+        (Some(start), Some(len)) if addr.is_multiple_of(crate::mm::PAGE_SIZE) => Ok((start, len)),
+        _ => Err(SyscallError::InvalidArgument),
     }
+}
+
+fn answer(done: Result<(), SyscallError>) -> u64 {
+    done.map_or_else(SyscallError::to_u64, |()| 0)
+}
+
+/// Private memory, committed unless `prot` is `None` and populated as it is
+/// touched, placed anywhere at a multiple of `place` or, for `VM_AT_FIXED`,
+/// exactly at `place` in place of whatever those pages held.
+pub(super) fn sys_vm_reserve(len: u64, prot: u64, place: u64, kind: u64) -> u64 {
+    let reserved = (|| {
+        let prot = vm_prot(prot)?;
+        let len = whole_pages(len).ok_or(SyscallError::InvalidArgument)?;
+        let at = match kind {
+            VM_AT_ANYWHERE => At::Anywhere(place),
+            VM_AT_FIXED => At::Fixed(range(place, len)?.0),
+            _ => return Err(SyscallError::InvalidArgument),
+        };
+        process::current_address_space().lock().reserve(len, at, prot)
+    })();
+    reserved.map_or_else(SyscallError::to_u64, UserAddr::raw)
+}
+
+/// Take every page of `[addr, addr + len)` away, as POSIX `munmap` does.
+pub(super) fn sys_vm_release(addr: u64, len: u64) -> u64 {
+    answer(range(addr, len).and_then(|(start, len)| {
+        let space = process::current_address_space();
+        let mut space = space.lock();
+        space.room(start.raw(), start.raw() + len, 0)?;
+        space.release(start, len);
+        Ok(())
+    }))
+}
+
+pub(super) fn sys_vm_protect(addr: u64, len: u64, prot: u64) -> u64 {
+    answer((|| {
+        let prot = vm_prot(prot)?;
+        let (start, len) = range(addr, len)?;
+        process::current_address_space().lock().protect(start, len, prot)
+    })())
+}
+
+pub(super) fn sys_vm_discard(addr: u64, len: u64) -> u64 {
+    answer(range(addr, len).and_then(|(start, len)| process::current_address_space().lock().discard(start, len)))
+}
+
+pub(super) fn sys_vm_decommit(addr: u64, len: u64) -> u64 {
+    answer(range(addr, len).and_then(|(start, len)| process::current_address_space().lock().decommit(start, len)))
+}
+
+/// Resize committed private memory in place, or move it when `may_move` is 1.
+pub(super) fn sys_vm_remap(addr: u64, old: u64, new: u64, may_move: u64) -> u64 {
+    let remapped = (|| {
+        let may_move = match may_move {
+            0 => false,
+            1 => true,
+            _ => return Err(SyscallError::InvalidArgument),
+        };
+        let (start, old) = range(addr, old)?;
+        let new = whole_pages(new).ok_or(SyscallError::InvalidArgument)?;
+        process::current_address_space().lock().remap(start, old, new, may_move)
+    })();
+    remapped.map_or_else(SyscallError::to_u64, UserAddr::raw)
 }
 
 /// The first `len` bytes of the shared memory object `handle` names, as a
@@ -264,33 +150,23 @@ pub(super) fn sys_dlopen(
     };
 
     let pt = process::current_address_space();
-    let mapped = process::with_process_data(|_data| {
-        // The module's own program headers decide which pages are writable
-        // and which executable; mapping the whole image writable would make
-        // it executable too.
-        let vaddr = lib.map_into(&pt).ok_or(SyscallError::ResourceExhausted)?;
-        if vaddr != lib.user_base {
-            lib.user_base = vaddr;
-            crate::elf::rebase_relative_relocs(&lib);
-        }
-        Ok::<UserAddr, SyscallError>(vaddr)
-    });
-    let base = match mapped {
-        Ok(base) => base,
-        Err(e) => {
-            log!("dlopen: {}: out of virtual address space", resolved);
-            return e.to_u64();
-        }
+    // The module's own program headers decide which pages are writable and
+    // which executable; mapping the whole image writable would make it
+    // executable too.
+    let Some(base) = lib.map_into(&pt) else {
+        log!("dlopen: {}: out of virtual address space", resolved);
+        return SyscallError::ResourceExhausted.to_u64();
     };
+    if base != lib.user_base {
+        lib.user_base = base;
+        crate::elf::rebase_relative_relocs(&lib);
+    }
 
     // The mapping is committed before the fallible copy-out below; this guard
-    // unwinds it — VA region and its shootdown — if the copy-out refuses, so a
-    // refused dlopen leaves no library mapped or registered.
-    let mapping = crate::rollback::Rollback::new(move || {
-        let detached = process::with_process_data(|_data| pt.lock().free_and_unmap(base));
-        crate::arch::tlb::shootdown(crate::invalidation::Origin::Dlopen, crate::invalidation::Half::User);
-        drop(detached);
-    });
+    // takes it back if the copy-out refuses, so a refused dlopen leaves no
+    // library mapped or registered.
+    let span = lib.image.size() as u64;
+    let mapping = crate::rollback::Rollback::new(move || pt.lock().release(base, span));
 
     let lib_tls = lib.tls().and_then(toyos_elf::TlsSegment::occupied);
     let data_arc = process::process_data();
@@ -352,9 +228,10 @@ pub(super) fn sys_dlopen(
         }
         return idx as u64;
     }
-    // Asked here for the same reason, so a load past the bound is refused
-    // having registered nothing; its mapping goes down with the guard.
-    if data.elf.loaded_libs.len() >= MAX_LIBRARIES {
+    // Asked here for the same reason, so a load past the bound, or one whose
+    // records the process cannot be charged, is refused having registered
+    // nothing; its mapping goes down with the guard.
+    if data.elf.loaded_libs.len() >= MAX_LIBRARIES || data.charge.grow(library_heap(&resolved)).is_err() {
         drop(data);
         return SyscallError::ResourceExhausted.to_u64();
     }
@@ -384,6 +261,15 @@ pub(super) fn sys_dlopen(
     data.elf.lib_paths.push(resolved);
     data.elf.loaded_libs.push(lib);
     idx as u64
+}
+
+/// The heap a module's records take in its process, which keeps them for its
+/// life: its place in the lists of libraries, paths and TLS modules, each of
+/// which doubles, and its path.
+fn library_heap(path: &str) -> usize {
+    use core::mem::size_of;
+    2 * (size_of::<crate::elf::LoadedLib>() + size_of::<alloc::string::String>() + size_of::<crate::elf::TlsModule>())
+        + charge::array::<u8>(path.len())
 }
 
 /// Allocates a TLS block for the current thread's DTV entry for `module_id`,
@@ -420,49 +306,39 @@ fn tls_alloc_block(module_id: u64) -> Result<u64, SyscallError> {
     // USER and writable, over whatever the PMM hands out next.
     let tid = process::current_tid();
     let existing = process::with_process_data(|data| {
-        data.elf.dynamic_tls_blocks.get(&(tid, module_id)).map(|b| b.vaddr())
+        data.elf.dynamic_tls_blocks.get(&(tid, module_id)).map(|(b, _)| b.at)
     });
 
     let tls_vaddr = match existing {
         Some(vaddr) => vaddr,
         None => {
-            let page_alloc = process::PageAlloc::new(tls_memsz.max(1))
-                .ok_or(SyscallError::ResourceExhausted)?;
-            // SAFETY: `page_alloc` is a fresh, unaliased allocation of at
-            // least `tls_memsz.max(1)` bytes; `template.size()` comes from the
-            // same program header as `m.memsz`; the two regions (a fresh
-            // physical page, kernel ELF image data) cannot overlap.
-            unsafe {
-                if let Some(template) = &tls_template {
-                    core::ptr::copy_nonoverlapping(template.base(), page_alloc.ptr(), template.size());
-                }
+            let place = Charge::current(charge::map_entry::<(process::Tid, u64), (process::KernelMapping, Charge)>())?;
+            let block = crate::object::shm::SharedMemObject::create(&crate::mm::charge::current(), tls_memsz.max(1) as u64)?;
+            if let Some(template) = &tls_template {
+                // SAFETY: the template is a bounds-checked view of the module's
+                // own image, which its `LoadedLib` keeps alive.
+                block.write(0, unsafe { template.as_slice() });
             }
-
-            let block_phys = page_alloc.phys();
             let pt = process::current_address_space();
+            let len = block.size();
+            let vaddr = pt.lock().map(block.clone(), 0, len, kernel::vm::Prot::ReadWrite, crate::mm::space::At::ANYWHERE)?;
+            // A thread asks for its own blocks alone, so none raced this one in.
             process::with_process_data(|data| {
-                let (vaddr, _) = process::vma_map(&pt, block_phys, page_alloc.size() as u64, Prot::ReadWrite)
-                    .ok_or(SyscallError::ResourceExhausted)?;
-                data.alloc_count += 1;
-                data.elf.dynamic_tls_blocks
-                    .insert((tid, module_id), process::MappedPages::new(vaddr, page_alloc));
-                Ok(vaddr)
-            })?
+                data.elf.dynamic_tls_blocks.insert((tid, module_id), (process::KernelMapping { object: block, at: vaddr }, place))
+            });
+            vaddr
         }
     };
 
-    // Found through the thread's own kernel-side TLS allocation, never by
-    // chasing a pointer out of the FS base, which addresses user-writable
-    // memory.
-    process::with_current_data(|data| {
-        let tls = data.tls_pages.as_ref().expect("sys_tls_alloc_block: thread has no TLS allocation");
-        let dtv_kern = tls.ptr() as *mut u64;
-        // SAFETY: `module_id` is bounded non-zero and at most
-        // `DTV_INITIAL_CAPACITY` at the top of this function, so
-        // `2 + (module_id - 1)` indexes within the DTV's entries after its two
-        // header words, in this thread's own allocation.
-        unsafe { *dtv_kern.add(2 + (module_id - 1) as usize) = tls_vaddr.raw(); }
+    // Through the thread's own TLS object, never by chasing a pointer out of
+    // the FS base, which addresses user-writable memory.
+    let tls = process::with_current_data(|data| {
+        data.tls.as_ref().map(|tls| alloc::sync::Arc::clone(&tls.object)).expect("sys_tls_alloc_block: thread has no TLS block")
     });
+    // `module_id` is bounded non-zero and at most `DTV_INITIAL_CAPACITY` at the
+    // top of this function, so the slot is inside the DTV after its two
+    // header words, which the block's first bytes hold.
+    tls.write((2 + (module_id - 1)) * 8, &tls_vaddr.raw().to_ne_bytes());
     Ok(tls_vaddr.raw())
 }
 

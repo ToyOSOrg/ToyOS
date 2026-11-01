@@ -13,14 +13,12 @@ So four shares at their parts take each bound whole, and a fifth's first
 connection or `STREAM` on that server is refused `ResourceExhausted`.
 
 A share is a service the supervisor started or a login session
-(`toyos_manifest::launch`), and neither gets a second by launching: a launch
-opens a session only when a `login` row makes it from the machine's session.
-What is left is how many shares there are. The shipping boot starts more than
-four services that hold DATA's directories, and the compositor's row opens a
-session for each program its taskbar starts, so four of them, each at its
-parts, refuse the rest. Nothing counts the sessions open, and no session ever
-ends (`issues/every-program-sees-only-the-files-it-was-given.md`, "Known
-weaknesses").
+(`toyos_manifest::launch`), and neither gets a second by launching: the
+supervisor opens a session only for a `login` row, the desktop's as it starts
+the screen's row and any other on its `login` port, at most 16 at once, each
+ending with its owner. What is left is how many shares there are. The shipping
+boot starts more than four services that hold DATA's directories, so four of
+them, each at its parts, refuse the rest.
 
 The parts are sized against what was measured, not against a share's need:
 every boot of the guest suite, the shipping desktop booted under QEMU, and
@@ -34,11 +32,11 @@ so a `make -j16` whose jobs each stream to a log of their own holds all 16,
 and separate stdout and stderr files per job need 32. Inferred, not
 measured: the share's 32 served connections, spent by every process of the
 session at one per directory, are probably the first bound such a build
-reaches. Raising `STREAM_SHARE` doubles the uncharged rings a share can pin,
-2 MiB each (`issues/nothing-charges-kernel-memory-to-a-process.md`), so it
-waits for one of two exits: a measured parallel build on ToyOS shows which
-bound it reaches and by how much, or kernel memory is charged and a share's
-streams are bounded by bytes rather than by count.
+reaches. Raising `STREAM_SHARE` doubles the rings a share can pin, 2 MiB
+each, counted to the job whose write first needs each (`kernel/src/pipe.rs`),
+so it waits for one of two exits: a measured parallel build on ToyOS shows
+which bound it reaches and by how much, or a share's streams are bounded by
+the bytes they cost its client's job rather than by count.
 
 Owner: the file server.
 
@@ -53,13 +51,11 @@ that does exactly that.
 
 No shipped image starts sshserver at boot (`build/build.rs`,
 `no_shipped_boot_config_starts_sshserver`), so on a shipped machine it is
-detached from a desktop shell and runs in that shell's login session. Its
-`login` row opens no session there, so every remote login's programs spend
-one share with each other and with the terminal that started the server: one
-login at its parts has every other's next connection or stream on that server
-refused, and that terminal's. Only where a boot config starts sshserver as a
-service (`tests/images/metalcase.toml`) does each launch it makes
-open a session of its own.
+detached from a desktop shell and runs in that shell's login session. Each
+connection it serves opens a login session of its own on the supervisor's
+`login` port, so two logins hold two shares; but that is a session opened from
+inside another, which the ruling below forbids, since a `login` row is endowed
+the port however it was started.
 
 **Ruled** (owner, 2026-10-07):
 

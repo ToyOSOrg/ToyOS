@@ -91,6 +91,7 @@ pub fn interrupts(rsdp_addr: u64) -> Platform {
     // allows: a fault in any later phase then diagnoses instead of stopping in
     // a handler the firmware left behind.
     let madt = acpi::parse_madt(rsdp_addr).expect("ACPI: MADT not found");
+    super::idle::note_uids(&madt.processor_uids);
     // Off the same tables as the MADT, and before the IDT below makes a panic
     // reportable: a panic that can be reported but not ended leaves the machine
     // holding its panel for a hand that may not be in the room.
@@ -106,12 +107,10 @@ pub fn interrupts(rsdp_addr: u64) -> Platform {
     Platform { madt, facs }
 }
 
-/// The clock: the TSC, calibrated against the HPET, and the CMOS wall clock.
+/// The clock: the TSC, held to the HPET, and the CMOS wall clock.
 pub fn clock(args: &KernelArgs) {
-    // HPET clock — enables profiling for everything from here on
-    let hpet_base = acpi::find_hpet_base(args.rsdp_addr)
-        .expect("ACPI: HPET not found");
-    super::hpet::calibrate_counter(hpet_base);
+    let hpet_base = acpi::find_hpet_base(args.rsdp_addr).expect("ACPI: HPET not found");
+    super::clocksource::start(hpet_base, acpi::pm_timer(args.rsdp_addr));
     let century_reg = match acpi::rtc_century_register(args.rsdp_addr) {
         Ok(reg) => reg,
         Err(e) => {
@@ -123,16 +122,14 @@ pub fn clock(args: &KernelArgs) {
 }
 
 /// Where the TSC counts from: `IA32_TSC_ADJUST`, where CPUID says the CPU has
-/// it. Every write to the TSC since reset is added to it (Intel SDM Vol. 3B,
-/// "Time-Stamp Counter Adjustment"), so zero is a counter firmware never wrote
-/// and the TSC is time since power-on.
+/// it, which is zero on a counter firmware never wrote, so the TSC is time
+/// since power-on.
 pub fn report_counter_origin() {
-    const IA32_TSC_ADJUST: u32 = 0x3b;
-    if super::cpu::leaf_7().1 & (1 << 1) == 0 {
+    if !super::cpu::has_tsc_adjust() {
         log!("boot: IA32_TSC_ADJUST not on this CPU");
         return;
     }
-    log!("boot: IA32_TSC_ADJUST {}", super::cpu::rdmsr(IA32_TSC_ADJUST) as i64);
+    log!("boot: IA32_TSC_ADJUST {}", super::cpu::rdmsr(super::cpu::IA32_TSC_ADJUST) as i64);
 }
 
 /// The per-CPU timer, once the clock converts its bound.
@@ -144,6 +141,9 @@ pub fn timer() {
 pub fn platform_devices(platform: &Platform, rsdp_addr: u64) {
     super::pio::fill_i8042_row();
     super::acpi_mode::init(rsdp_addr, platform.facs);
+    if let Err(why) = super::rtc::arm_update_edges() {
+        log!("clock: no RTC edges time the TSC: {why}");
+    }
 }
 
 /// Every other CPU, running.

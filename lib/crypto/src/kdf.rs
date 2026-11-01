@@ -1,6 +1,10 @@
-//! HMAC (RFC 2104) and HKDF (RFC 5869), for TLS and SSH key schedules.
-//! Contents do not control branches or addresses. Key/message/output lengths
-//! are public. Keys, chaining values and temporary digest material are wiped.
+//! HMAC (RFC 2104), HKDF (RFC 5869) and PBKDF2 (RFC 8018), for TLS and SSH
+//! key schedules and passphrase-derived keys. Contents do not control
+//! branches or addresses. Key/message/output lengths and PBKDF2's iteration
+//! count are public. Keys, chaining values and temporary digest material are
+//! wiped.
+
+use core::num::NonZeroU32;
 
 use crate::{Error, hash::Digest, secret::Secret};
 
@@ -10,7 +14,6 @@ pub struct Hmac<H: Digest> {
 }
 
 impl<H: Digest> Hmac<H> {
-    #[cfg(feature = "rustls-provider")]
     pub(crate) fn fork(&self) -> Self {
         Self {
             inner: self.inner.fork(),
@@ -146,4 +149,46 @@ impl<H: Digest> Hkdf<H> {
         }
         Ok(())
     }
+}
+
+/// PBKDF2 (RFC 8018 §5.2) with HMAC over `H` as its PRF, filling `output`,
+/// which is 1 to (2^32 - 1) * `H::OUTPUT_LEN` bytes.
+pub fn pbkdf2<H: Digest>(password: &[u8], salt: &[u8], iterations: NonZeroU32, output: &mut [u8]) -> Result<(), Error> {
+    let keyed = Hmac::<H>::new(password)?;
+    let mut salted = keyed.fork();
+    salted.update(salt)?;
+    pbkdf2_blocks(&keyed, &salted, 1, iterations, output)
+}
+
+/// PBKDF2's blocks `first`, `first + 1`, ... into `output`: `keyed` is the PRF
+/// keyed with the password, `salted` the same after absorbing the salt.
+pub(crate) fn pbkdf2_blocks<H: Digest>(
+    keyed: &Hmac<H>,
+    salted: &Hmac<H>,
+    first: u32,
+    iterations: NonZeroU32,
+    output: &mut [u8],
+) -> Result<(), Error> {
+    let blocks = output.len().div_ceil(H::OUTPUT_LEN);
+    if blocks == 0 || u64::from(first) + blocks as u64 - 1 > u64::from(u32::MAX) {
+        return Err(Error::Length);
+    }
+    let mut u = Secret([0u8; 64]);
+    let mut t = Secret([0u8; 64]);
+    for (k, chunk) in output.chunks_mut(H::OUTPUT_LEN).enumerate() {
+        let mut mac = salted.fork();
+        mac.update(&(first + k as u32).to_be_bytes())?;
+        mac.finish(&mut u.0[..H::OUTPUT_LEN])?;
+        t.0 = u.0;
+        for _ in 1..iterations.get() {
+            let mut mac = keyed.fork();
+            mac.update(&u.0[..H::OUTPUT_LEN])?;
+            mac.finish(&mut u.0[..H::OUTPUT_LEN])?;
+            for (t, u) in t.0.iter_mut().zip(&u.0) {
+                *t ^= u;
+            }
+        }
+        chunk.copy_from_slice(&t.0[..chunk.len()]);
+    }
+    Ok(())
 }

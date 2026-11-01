@@ -59,7 +59,7 @@ pub fn hosted_clang_hello() -> Result<(), String> {
     stage("src/hello.c", &sources.join("hello.c"))?;
     for (name, product) in [("hello.o", &object), ("a.out", &linked)] {
         let bytes = fs::read(product).map_err(|e| format!("read {}: {e}", product.display()))?;
-        let sha256: String = toyos_sha2_hw::sha256_digest(&bytes).iter().map(|b| format!("{b:02x}")).collect();
+        let sha256 = toyos_build::sha256_hex(&bytes);
         eprintln!("  [{JOB}] the host's {name}: {} bytes, sha256 {sha256}", bytes.len());
         stage(&format!("host/{name}"), product)?;
     }

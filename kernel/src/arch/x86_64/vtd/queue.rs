@@ -1,9 +1,9 @@
 //! Queued invalidation: submits a descriptor and an Invalidation Wait
 //! descriptor, then polls the wait's status write to completion.
 //! Acknowledgement timeout is a panic — the kernel cannot say what a device
-//! can reach past it. Only the queued-invalidation path is implemented: every
-//! unit reachable here has it, so a `CCMD_REG`/`IOTLB_REG` fallback would be
-//! dead code; a unit without `ECAP.QI` is left unprogrammed.
+//! can reach past it. A hand-over inside protected memory invalidates through
+//! the unit's registers instead, before the queue is enabled. A unit without
+//! `ECAP.QI` is left unprogrammed.
 
 use crate::mm::Mmio;
 use crate::time::{Duration, Tripwire};

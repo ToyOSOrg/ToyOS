@@ -48,8 +48,8 @@ fn main() {
 
     let mut regions = Vec::new();
     for _ in 0..ROUNDS {
-        let mut region = SharedMemory::create(REGION).expect("a region of our own");
-        region.as_mut_slice()[0] = 0xA5;
+        let region = SharedMemory::create(REGION).expect("a region of our own");
+        region.bytes().write(0, &[0xA5]);
         regions.push(region);
     }
     let held = Census::now();
@@ -76,15 +76,16 @@ fn main() {
         .expect("the kernel refused a namespace");
     let mut donor = Command::new(SELF_PATH)
         .arg("donor")
-        .endow(SVC_LABEL, ns.into_raw().0)
+        .endow(SVC_LABEL, ns.into())
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .spawn()
         .expect("spawn donor");
 
     let conn = acceptor.accept().expect("the donor connects");
-    let header = conn.recv_header().expect("the donor announces its region");
-    let [sent] = conn.recv_handles_exact::<1>(&header).expect("the donor sent the region with the frame");
+    let mut rx = toyos::ipc::FrameRx::<{ toyos::ipc::MAX_FRAME_LEN as usize }>::new();
+    rx.recv(&conn).expect("the donor announces its region");
+    let [sent] = rx.take_handles::<1>().expect("the donor sent the region with the frame");
 
     // Only now, after the donor has let go — its line says so.
     let mut out = BufReader::new(donor.stdout.take().expect("donor stdout"));
@@ -95,7 +96,7 @@ fn main() {
     let region = SharedMemory::lent(sent, REGION)
         .expect("a region this process holds a handle to was reclaimed under it");
     assert_eq!(
-        &region.as_slice()[..PAYLOAD.len()],
+        region.bytes().sub(0, PAYLOAD.len()).to_vec(),
         PAYLOAD,
         "the sent region no longer holds the donor's payload"
     );
@@ -114,8 +115,8 @@ fn main() {
 
 fn donor() {
     let conn = toyos::endow::service(SERVICE).expect("donor: the port it was given");
-    let mut region = SharedMemory::create(REGION).expect("donor: a region of its own");
-    region.as_mut_slice()[..PAYLOAD.len()].copy_from_slice(PAYLOAD);
+    let region = SharedMemory::create(REGION).expect("donor: a region of its own");
+    region.bytes().write(0, PAYLOAD);
 
     let shared = region.share().expect("donor: a second handle");
     conn.signal_with(1, [shared]).expect("donor: send the region");

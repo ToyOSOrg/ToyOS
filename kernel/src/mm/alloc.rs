@@ -19,7 +19,7 @@ use super::pmm;
 /// Invariant: no method here may panic — it runs inside `dlmalloc.lock()`, which cannot unwind.
 struct KernelPageSource {
     /// Set and taken back inside one hold of `dlmalloc.lock()`.
-    offer: Cell<Option<pmm::PhysPage>>,
+    offer: Cell<Option<pmm::HeapPage>>,
 }
 
 // SAFETY: `alloc` only ever hands out the whole `PAGE_2M` frame `offer` holds, and `free` is the only path that returns one.
@@ -51,7 +51,7 @@ unsafe impl dlmalloc::Allocator for KernelPageSource {
         #[cfg(feature = "heap-sweep")]
         pages::remove(ptr as u64);
         let phys = ptr as u64 - PHYS_OFFSET;
-        drop(pmm::PhysPage::from_raw(phys));
+        drop(pmm::HeapPage::from_raw(phys));
         true
     }
 
@@ -507,6 +507,16 @@ unsafe fn inspect(found: Found) -> Option<Bad> {
     None
 }
 
+/// The heap bytes an allocation of `layout` takes: what `dlmalloc` carves
+/// for it (a word of header, rounded to its 16-byte alignment, 32 bytes at
+/// least, and the alignment again past 16, which a carve for it may leave
+/// unused), bands included.
+pub(super) fn chunk(layout: Layout) -> usize {
+    let outer = tripwire::outer(layout);
+    let carved = (outer.size() + 8).next_multiple_of(16).max(32);
+    if outer.align() > 16 { carved + outer.align() } else { carved }
+}
+
 struct KernelAllocator {
     dlmalloc: Lock<dlmalloc::Dlmalloc<KernelPageSource>>,
     phase: AtomicU8,
@@ -538,7 +548,7 @@ unsafe impl GlobalAlloc for KernelAllocator {
             PHASE_EARLY => early_alloc(layout),
             PHASE_READY => {
                 assert!(layout.align() < PAGE_2M as usize,
-                    "GlobalAlloc: {:#x} bytes with {:#x} align — use PageAlloc", layout.size(), layout.align());
+                    "GlobalAlloc: {:#x} bytes with {:#x} align — take frames from `mm::pmm`", layout.size(), layout.align());
                 // Checked before the lock: a panic inside `dlmalloc.lock()` would abandon the heap with the lock held.
                 assert!(layout.size() <= MAX_HEAP_ALLOC,
                     "GlobalAlloc: {} bytes exceeds MAX_HEAP_ALLOC ({}) — a caller is using alloc for page-scale memory",
@@ -557,7 +567,7 @@ unsafe impl GlobalAlloc for KernelAllocator {
                 };
                 let mut base = malloc(None);
                 if base.is_null() {
-                    if let Some(frame) = pmm::claim() {
+                    if let Some(frame) = pmm::HeapPage::grow() {
                         base = malloc(Some(frame));
                     }
                 }

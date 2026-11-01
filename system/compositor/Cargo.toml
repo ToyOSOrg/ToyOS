@@ -6,15 +6,18 @@ edition = "2021"
 license = "MIT OR Apache-2.0"
 
 [dependencies]
-toyos = { path = "../../sdk/toyos" }
+toyos = { path = "../../sdk/toyos", features = ["std"] }
 toyos-abi = { path = "../../sdk/abi" }
 toyos-desktop = { path = "desktop" }
+toyos-display-output = { path = "../../lib/display-output" }
 toyos-edid = { path = "../../lib/edid" }
 toyos-input = { path = "../../lib/input" }
 toyos-inspect = { path = "../../lib/inspect" }
 toyos-font = { path = "../../sdk/font" }
 toyos-icon = { path = "../../sdk/icon" }
 toyos-manifest = { path = "../../lib/manifest" }
+# Its desktop session: signing it out, and opening it again.
+toyos-session = { path = "../../lib/session" }
 toyos-pci-claim = { path = "../../lib/pci-claim" }
 toyos-virtio = { path = "../../lib/virtio" }
 toyos-virtio-gpu = { path = "virtio-gpu" }

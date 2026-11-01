@@ -6,7 +6,7 @@ opened: 2026-09-02
 
 # A hole on bcachefs costs one block write per page, because the extent list cannot say "hole"
 
-`Mounted::resolve_or_alloc_block` (`lib/bcachefs/src/fs.rs`) now zeroes every block
+`Mounted::allocate` (`lib/bcachefs/src/fs.rs`) now zeroes every block
 it allocates only to bridge a gap, because the allocator hands back the blocks a
 shrink most recently freed and a hole that reads the previous tenant's bytes is
 a data leak. That is correct and it is what FAT32 already does (`Fat32::set_len`

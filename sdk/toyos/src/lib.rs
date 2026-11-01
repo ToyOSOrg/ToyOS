@@ -14,6 +14,8 @@
 
 extern crate alloc;
 
+mod arch;
+
 pub mod audio;
 pub mod census;
 pub mod device;
@@ -28,6 +30,7 @@ pub mod wake;
 pub mod ipc;
 pub mod job;
 pub mod namespace;
+pub mod paged;
 pub mod launch;
 pub mod log;
 pub mod net;
@@ -52,17 +55,65 @@ pub use device::{
 pub use toyos_abi::RawHandle;
 pub use toyos_abi::ioport;
 
-/// Trait for types that wrap a kernel handle.
+/// A type that owns or borrows a kernel handle, lent for as long as `self`.
 ///
-/// Used by [`poller`] and other APIs that accept any handle type.
-///
-/// **One thing, one name.** Six of the typed wrappers below and in [`device`]
-/// and [`ipc`] carried a second public accessor with an identical body until
-/// 2026-08-20, when the wave that confined libc's descriptor vocabulary to
-/// `sdk/libc` deleted them rather than renaming them: a second word for
-/// what `as_handle` already says is the blur that ruling exists to remove.
+/// Used by [`poller`] and every other API that takes any handle: a number
+/// reaches them only through [`BorrowedHandle::borrow_raw`]
+/// (`toyos_abi::handle`).
 pub trait AsHandle {
-    fn as_handle(&self) -> RawHandle;
+    fn as_handle(&self) -> BorrowedHandle<'_>;
+}
+
+impl<T: AsHandle + ?Sized> AsHandle for &T {
+    fn as_handle(&self) -> BorrowedHandle<'_> {
+        (**self).as_handle()
+    }
+}
+
+/// A handle this process holds, lent for `'a` by what owns it.
+///
+/// `Copy`, and closes nothing: the owner outlives every borrow. Its number is
+/// [`raw`](Self::raw)'s to read, which acts on nothing.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+#[repr(transparent)]
+pub struct BorrowedHandle<'a> {
+    raw: RawHandle,
+    _owner: core::marker::PhantomData<&'a OwnedHandle>,
+}
+
+impl BorrowedHandle<'_> {
+    /// Borrow a handle by number.
+    ///
+    /// # Safety
+    /// `raw` is live in this process's table for the borrow's whole life, and
+    /// whatever owns it does not close or give it away meanwhile.
+    pub const unsafe fn borrow_raw(raw: RawHandle) -> Self {
+        Self { raw, _owner: core::marker::PhantomData }
+    }
+
+    pub const fn raw(self) -> RawHandle {
+        self.raw
+    }
+
+    /// A second handle to the same object, carrying what this one carries.
+    pub fn try_clone_to_owned(self) -> Result<OwnedHandle, toyos_abi::syscall::SyscallError> {
+        // SAFETY: a borrow is live for the call, and its owner answers for the
+        // object's other holders.
+        unsafe { toyos_abi::syscall::dup(self.raw) }.map(OwnedHandle)
+    }
+
+    /// [`try_clone_to_owned`](Self::try_clone_to_owned), carrying only
+    /// `rights`; `PermissionDenied` for any this one does not carry.
+    pub fn try_clone_narrowed(self, rights: toyos_abi::handle::Rights) -> Result<OwnedHandle, toyos_abi::syscall::SyscallError> {
+        // SAFETY: as in `try_clone_to_owned`.
+        unsafe { toyos_abi::syscall::dup_narrowed(self.raw, rights) }.map(OwnedHandle)
+    }
+}
+
+impl AsHandle for BorrowedHandle<'_> {
+    fn as_handle(&self) -> BorrowedHandle<'_> {
+        *self
+    }
 }
 
 /// The two ends of a fresh pipe.
@@ -97,17 +148,22 @@ impl OwnedHandle {
     /// `raw` must be a live handle in this process's table that nothing else
     /// answers for: this closes it when it drops. A handle
     /// [`net::stream`](crate::net::stream) answers for, a stream's, is never
-    /// one: it reaches its end only through that module, and a stream does not
-    /// move between processes.
+    /// one: it reaches its end only through that module, and it stays in its
+    /// process, which another reaches only through an export.
     pub unsafe fn from_raw(raw: RawHandle) -> Self {
         Self(raw)
     }
 
     pub(crate) fn raw(&self) -> RawHandle { self.0 }
 
+    /// [`BorrowedHandle::try_clone_to_owned`].
+    pub fn try_clone(&self) -> Result<OwnedHandle, toyos_abi::syscall::SyscallError> {
+        self.as_handle().try_clone_to_owned()
+    }
+
     /// Give up ownership: the handle stays open and this stops answering for
     /// it.
-    pub(crate) fn into_raw(self) -> RawHandle {
+    pub fn into_raw(self) -> RawHandle {
         let raw = self.0;
         #[allow(clippy::disallowed_methods, reason = "the handle is the caller's from here, so this drop must not close it")]
         core::mem::forget(self);
@@ -131,14 +187,24 @@ impl OwnedHandle {
     }
 }
 
+impl core::fmt::Debug for OwnedHandle {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        f.debug_tuple("OwnedHandle").field(&self.0).finish()
+    }
+}
+
 impl Drop for OwnedHandle {
     fn drop(&mut self) {
-        toyos_abi::syscall::close(self.0);
+        // SAFETY: this owns the handle, and nothing uses it once it drops.
+        unsafe { toyos_abi::syscall::close(self.0) };
     }
 }
 
 impl AsHandle for OwnedHandle {
-    fn as_handle(&self) -> RawHandle { self.0 }
+    fn as_handle(&self) -> BorrowedHandle<'_> {
+        // SAFETY: owned by `self`, which outlives the borrow.
+        unsafe { BorrowedHandle::borrow_raw(self.0) }
+    }
 }
 
 /// A claimed hardware device, out of this process's endowment table.
@@ -159,7 +225,7 @@ impl Device {
 }
 
 impl AsHandle for Device {
-    fn as_handle(&self) -> RawHandle { self.0.raw() }
+    fn as_handle(&self) -> BorrowedHandle<'_> { self.0.as_handle() }
 }
 
 /// One end of a kernel pipe.
@@ -185,10 +251,6 @@ impl Pipe {
         self.0.write_nonblock(buf)
     }
 
-    pub fn pipe_map(&self) -> Result<*mut u8, toyos_abi::syscall::SyscallError> {
-        toyos_abi::syscall::pipe_map(self.0.raw())
-    }
-
     /// Consume the `Pipe`, giving up the handle without closing it.
     pub fn into_raw(self) -> RawHandle {
         self.0.into_raw()
@@ -205,11 +267,133 @@ impl Pipe {
 }
 
 impl AsHandle for Pipe {
-    fn as_handle(&self) -> RawHandle { self.0.raw() }
+    fn as_handle(&self) -> BorrowedHandle<'_> { self.0.as_handle() }
 }
 
-impl From<Pipe> for OwnedHandle {
-    fn from(pipe: Pipe) -> Self { pipe.0 }
+/// A pipe end a peer sent: its type is the sender's word, as a connection's
+/// is ([`Connection::received`]).
+impl From<OwnedHandle> for Pipe {
+    fn from(handle: OwnedHandle) -> Self { Self(handle) }
+}
+
+/// Each typed handle, given up as the handle it owns: to send, endow or
+/// provide it.
+macro_rules! owned_from {
+    ($($ty:ty => |$this:ident| $owned:expr);+ $(;)?) => {$(
+        impl From<$ty> for OwnedHandle {
+            fn from($this: $ty) -> Self { $owned }
+        }
+    )+};
+}
+
+owned_from! {
+    Pipe => |p| p.0;
+    Device => |d| d.0;
+    Console => |c| c.0;
+    ipc::Connection => |c| c.0;
+    port::Acceptor => |a| a.0;
+    port::Connector => |c| c.0;
+    namespace::Namespace => |n| n.0;
+    syscap::SysCap => |c| c.0;
+    job::Job => |j| j.0;
+    process::Process => |p| p.0;
+    device::FramebufferDev => |d| d.0 .0;
+    device::PciDev => |d| d.0 .0;
+    device::AcpiDev => |d| d.0 .0;
+}
+
+#[cfg(all(feature = "std", target_os = "toyos", not(test)))]
+extern crate std;
+
+/// std's handle types (`std::os::toyos::io`), which a copy of this crate
+/// linked beside std converts to and from: std links a copy of its own, so
+/// only a number crosses, owned or lent as it was.
+#[cfg(all(feature = "std", target_os = "toyos", not(test)))]
+mod std_io {
+    use std::os::toyos::io as sio;
+    use sio::{FromRawHandle, IntoRawHandle};
+
+    use super::{BorrowedHandle, OwnedHandle, RawHandle};
+
+    impl From<OwnedHandle> for sio::OwnedHandle {
+        fn from(handle: OwnedHandle) -> Self {
+            // SAFETY: given up by its one owner, to this one.
+            unsafe { sio::OwnedHandle::from_raw_handle(handle.into_raw().0) }
+        }
+    }
+
+    impl From<sio::OwnedHandle> for OwnedHandle {
+        fn from(handle: sio::OwnedHandle) -> Self {
+            // SAFETY: as above.
+            unsafe { OwnedHandle::from_raw(RawHandle(handle.into_raw_handle())) }
+        }
+    }
+
+    impl<'a> From<BorrowedHandle<'a>> for sio::BorrowedHandle<'a> {
+        fn from(handle: BorrowedHandle<'a>) -> Self {
+            // SAFETY: lent for `'a` by its owner, as the source was.
+            unsafe { sio::BorrowedHandle::borrow_raw(handle.raw().0) }
+        }
+    }
+
+    impl<'a> From<sio::BorrowedHandle<'a>> for BorrowedHandle<'a> {
+        fn from(handle: sio::BorrowedHandle<'a>) -> Self {
+            // SAFETY: as above.
+            unsafe { BorrowedHandle::borrow_raw(RawHandle(sio::AsRawHandle::as_raw_handle(&handle))) }
+        }
+    }
+
+    /// std's handles and descriptors that name a kernel handle, lent for a
+    /// poll or a copy as this crate's are: closed only with their owner.
+    macro_rules! std_as_handle {
+        ($($ty:ty),+ $(,)?) => {$(
+            impl super::AsHandle for $ty {
+                fn as_handle(&self) -> BorrowedHandle<'_> {
+                    // SAFETY: `self` owns or borrows the handle for as long as
+                    // it is borrowed.
+                    unsafe { BorrowedHandle::borrow_raw(RawHandle(sio::AsRawHandle::as_raw_handle(self))) }
+                }
+            }
+        )+};
+    }
+
+    std_as_handle!(
+        sio::OwnedHandle,
+        sio::BorrowedHandle<'_>,
+        std::process::Child,
+        std::process::ChildStdin,
+        std::process::ChildStdout,
+        std::process::ChildStderr,
+        std::net::TcpStream,
+        std::net::TcpListener,
+        std::net::UdpSocket,
+    );
+
+    macro_rules! std_owned_from {
+        ($($ty:ty),+ $(,)?) => {$(
+            impl From<$ty> for sio::OwnedHandle {
+                fn from(typed: $ty) -> Self { OwnedHandle::from(typed).into() }
+            }
+        )+};
+    }
+
+    std_owned_from!(
+        super::Pipe,
+        super::wake::Waker,
+        super::wake::Bell,
+        super::Device,
+        super::Console,
+        super::ipc::Connection,
+        super::port::Acceptor,
+        super::port::Connector,
+        super::namespace::Namespace,
+        super::syscap::SysCap,
+        super::job::Job,
+        super::process::Process,
+        super::device::FramebufferDev,
+        super::device::PciDev,
+        super::device::AcpiDev,
+    );
 }
 
 /// A console handle: the one the supervisor endows `/system/bin/logkeeper` with,
@@ -228,5 +412,5 @@ impl Console {
 }
 
 impl AsHandle for Console {
-    fn as_handle(&self) -> RawHandle { self.0.raw() }
+    fn as_handle(&self) -> BorrowedHandle<'_> { self.0.as_handle() }
 }

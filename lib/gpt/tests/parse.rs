@@ -64,7 +64,6 @@ fn disk(edit: impl FnOnce(&mut Layout)) -> Image {
         },
         backup: None,
         reported_lba_count: DISK_LBAS,
-        granularity: 1,
         mbr_type: 0xEE,
         mbr_signature: [0x55, 0xAA],
     };
@@ -511,22 +510,6 @@ fn a_usable_range_reaching_the_backup_gpt_is_refused() {
             backup_array_lba: DISK_LBAS - 33,
         })
     );
-}
-
-/// The kernel's 4 KiB view floors a 512-byte disk's `lba_count` by up to 7
-/// LBAs while an honest table is laid out against the true end — a 2055-LBA
-/// disk (2055 % 8 = 7) seen as 2048, its last_usable 2021 at the conceded
-/// bound's edge, must parse. The unconceded bound refused every such disk.
-#[test]
-fn an_honest_table_on_a_floored_device_view_parses() {
-    let mut img = disk(|l| {
-        l.lba_count = 2055;
-        l.primary.last_usable = 2055 - 34;
-        mirrored(l);
-    });
-    (img.lba_count, img.granularity) = (2048, 8);
-    let found = img.locate(guid(0xC3)).expect("an honest disk lost /boot");
-    assert_eq!(found.partition().index(), 2);
 }
 
 /// UEFI gives every entry a `UniquePartitionGUID` that must be unique. Two

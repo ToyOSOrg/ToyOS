@@ -3,12 +3,12 @@
 //!
 //! **A growing write is two writes: the chain, then the directory entry.**
 //! Between them the volume holds clusters its entry does not reach, which
-//! fatgen103 refuses, so every open file is brought level — its entry written,
-//! its chain reconciled — at its last close, at an fsync and at a sync, as
-//! the kernel's adapter did. **The two are a cache flush apart**: the cache
-//! writes lowest block first and the disk keeps no order until a flush, so an
-//! entry put into the cache beside its chain and data would reach the disk
-//! before the clusters it names.
+//! fatgen103 refuses, so an open file changed since it was last level is
+//! brought level — its entry written and stamped, its chain reconciled — at
+//! its last close, at an fsync and at a sync. **The two are a cache flush
+//! apart**: the cache writes lowest block first and the disk keeps no order
+//! until a flush, so an entry put into the cache beside its chain and data
+//! would reach the disk before the clusters it names.
 //!
 //! **A create makes the directories on its way**, as the kernel's did: a log
 //! file's path is its own, and FAT has the directories to carry it. A
@@ -24,78 +24,32 @@ use std::collections::BTreeMap;
 use std::rc::Rc;
 
 use toyos::fs;
-use toyos_fat32::{BlockAccess, Error, Fat32, FatTime, IoError};
+use toyos_blockdev::BlockDev;
+use toyos_fat32::{Error, Fat32, FatTime};
 
-use crate::cache::Cache;
-use diskserver::disk::{Disk, BLOCK};
-use crate::volume::{parent, Identities, Kind, Meta, Node, OpenHow, Out, Volume, NANOS_PER_SEC};
+use crate::cache::{Cache, Disk};
+use crate::volume::{parent, Identities, Kind, Listed, Meta, Node, OpenHow, Out, Reserved, Volume, NANOS_PER_SEC};
 
 /// The most entries one directory listing materialises.
 const MAX_LIST: usize = 16_384;
-
-/// The volume as `toyos-fat32` reads it: bytes, over the cache's blocks.
-pub struct Bytes<D> {
-    cache: Rc<Cache<D>>,
-    /// The volume's own length, which is at most the partition's.
-    len: u64,
-}
-
-// The disk's `ReadOnly` is `Device` here because it never arrives: the one
-// read-only grant is the BOOT server's, whose volume is mounted unwritable,
-// whose clients are refused every changing operation before it, and whose
-// close and sync write nothing. `toyos-fat32` has the one device word since it
-// reads every refused write as of unknown outcome.
-impl<D: Disk> BlockAccess for Bytes<D> {
-    fn capacity(&self) -> u64 {
-        self.len
-    }
-
-    fn read_at(&mut self, offset: u64, buf: &mut [u8]) -> Result<(), IoError> {
-        let end = offset.checked_add(buf.len() as u64).ok_or(IoError::Device)?;
-        if end > self.len {
-            return Err(IoError::Device);
-        }
-        let first = offset / BLOCK as u64;
-        let last = end.div_ceil(BLOCK as u64);
-        let mut span = vec![0u8; ((last - first) as usize) * BLOCK];
-        self.cache.read(first, &mut span).map_err(|_| IoError::Device)?;
-        let at = (offset % BLOCK as u64) as usize;
-        buf.copy_from_slice(&span[at..at + buf.len()]);
-        Ok(())
-    }
-
-    fn write_at(&mut self, offset: u64, buf: &[u8]) -> Result<(), IoError> {
-        let end = offset.checked_add(buf.len() as u64).ok_or(IoError::Device)?;
-        if end > self.len {
-            return Err(IoError::Device);
-        }
-        let first = offset / BLOCK as u64;
-        let last = end.div_ceil(BLOCK as u64);
-        let mut span = vec![0u8; ((last - first) as usize) * BLOCK];
-        let at = (offset % BLOCK as u64) as usize;
-        // What the write does not cover is another file's, or the table's:
-        // read before it is written back.
-        if at != 0 || buf.len() % BLOCK != 0 {
-            self.cache.read(first, &mut span).map_err(|_| IoError::Device)?;
-        }
-        span[at..at + buf.len()].copy_from_slice(buf);
-        self.cache.write(first, &span).map_err(|_| IoError::Device)
-    }
-
-    fn flush(&mut self) -> Result<(), IoError> {
-        self.cache.flush().map_err(|_| IoError::Device)
-    }
-}
 
 struct Open {
     path: String,
     file: toyos_fat32::File,
     holders: u32,
     gone: bool,
+    /// Written, resized or opened truncating since its entry was last
+    /// brought level.
+    dirty: bool,
 }
 
+/// The disk's `ReadOnly` reaches `toyos-fat32` as a refused write, which it
+/// takes as of unknown outcome: it never arrives here, since the one read-only
+/// grant is the BOOT server's, whose volume is mounted unwritable, whose
+/// clients are refused every changing operation before it, and whose close and
+/// sync write nothing.
 pub struct FatVolume<D: Disk> {
-    fs: Fat32<Bytes<D>>,
+    fs: Fat32<Rc<Cache<D>>>,
     cache: Rc<Cache<D>>,
     writable: bool,
     open: BTreeMap<Node, Open>,
@@ -141,14 +95,10 @@ fn logged(what: &str, path: &str, e: Error) -> fs::Error {
 impl<D: Disk> FatVolume<D> {
     /// Mount the FAT32 volume on `disk`, or say why not; nothing is written
     /// before the volume is known to be FAT32.
-    pub fn mount(disk: D, writable: bool, clock: fn() -> u64) -> Result<Self, String> {
-        let cache = Rc::new(Cache::new(disk));
-        let len = cache.blocks() * BLOCK as u64;
-        let mut bytes = Bytes { cache: Rc::clone(&cache), len };
-        let geom = Fat32::probe(&mut bytes).map_err(|e| format!("no FAT32 here: {e}"))?;
-        // Tightened from the partition to the volume before anything writes.
-        bytes.len = geom.total_sectors as u64 * geom.bytes_per_sector as u64;
-        let fs = Fat32::mount(bytes).map_err(|e| format!("no FAT32 here: {e}"))?;
+    pub fn mount(disk: D, clean_limit: usize, writable: bool, clock: fn() -> u64) -> Result<Self, String> {
+        let cache = Rc::new(Cache::new(disk, clean_limit));
+        let fs = cache.block_on(Fat32::mount(Rc::clone(&cache))).map_err(|e| format!("no FAT32 here: {e}"))?;
+        let geom = fs.geometry();
         println!(
             "fileserver: FAT32 mounted, {} bytes, {}-byte sectors, {}-byte clusters",
             geom.total_sectors as u64 * geom.bytes_per_sector as u64,
@@ -180,22 +130,25 @@ impl<D: Disk> FatVolume<D> {
         Ok(open)
     }
 
-    /// Bring one open file's entry level with its chain.
+    /// Bring one open file's entry level with its chain, stamped now, when
+    /// it changed since the entry was last written.
     fn level(&mut self, node: Node) -> Result<(), fs::Error> {
-        let time = self.time();
-        let Some(open) = self.open.get_mut(&node) else { return Ok(()) };
-        if open.gone {
-            return Ok(());
+        match self.open.get(&node) {
+            Some(open) if !open.gone && (open.dirty || open.file.needs_reconcile()) => {}
+            _ => return Ok(()),
         }
+        let time = self.time();
+        let open = self.open.get_mut(&node).expect("just found");
         // The chain and the data on the disk before the entry that reaches
         // them is in the cache.
         if open.file.needs_reconcile() {
-            self.cache.flush().map_err(|_| logged("the chain", &open.path, Error::Io))?;
+            self.cache.block_on(self.cache.flush()).map_err(|_| logged("the chain", &open.path, Error::Io))?;
         }
-        self.fs.flush_meta(&mut open.file, time).map_err(|e| logged("the entry", &open.path, e))?;
+        self.cache.block_on(self.fs.flush_meta(&mut open.file, time)).map_err(|e| logged("the entry", &open.path, e))?;
         if open.file.needs_reconcile() {
-            self.fs.reconcile(&mut open.file, time).map_err(|e| logged("a reconcile", &open.path, e))?;
+            self.cache.block_on(self.fs.reconcile(&mut open.file, time)).map_err(|e| logged("a reconcile", &open.path, e))?;
         }
+        open.dirty = false;
         Ok(())
     }
 
@@ -216,7 +169,7 @@ impl<D: Disk> FatVolume<D> {
     }
 
     fn entry_offset(&mut self, path: &str) -> Result<u64, fs::Error> {
-        self.fs.entry_offset(path).map_err(|e| match e {
+        self.cache.block_on(self.fs.entry_offset(path)).map_err(|e| match e {
             Error::NotADirectory => fs::Error::NotFound,
             e => logged("entry_offset", path, e),
         })
@@ -234,10 +187,10 @@ impl<D: Disk> Volume for FatVolume<D> {
         }
         if let Some(open) = self.by_path.get(path).and_then(|n| self.open.get(n)) {
             let len = open.file.len();
-            let mtime = self.fs.metadata(path).map_err(|e| logged("metadata", path, e))?.modified_unix;
+            let mtime = self.cache.block_on(self.fs.metadata(path)).map_err(|e| logged("metadata", path, e))?.modified_unix;
             return Ok(Meta { kind: Kind::File, size: len, mtime: mtime * NANOS_PER_SEC });
         }
-        let meta = self.fs.metadata(path).map_err(|e| match e {
+        let meta = self.cache.block_on(self.fs.metadata(path)).map_err(|e| match e {
             Error::NotADirectory => fs::Error::NotFound,
             e => logged("metadata", path, e),
         })?;
@@ -250,13 +203,14 @@ impl<D: Disk> Volume for FatVolume<D> {
         Err(fs::Error::NotALink)
     }
 
-    fn list(&mut self, dir: &str) -> Result<Vec<(String, Meta)>, fs::Error> {
-        let entries = self.fs.read_dir(dir, MAX_LIST).map_err(|e| logged("list", dir, e))?;
+    fn list(&mut self, dir: &str) -> Result<Vec<Listed>, fs::Error> {
+        let entries = self.cache.block_on(self.fs.read_dir(dir, MAX_LIST)).map_err(|e| logged("list", dir, e))?;
         Ok(entries
             .into_iter()
             .map(|e| {
                 let kind = if e.is_dir { Kind::Dir } else { Kind::File };
-                (e.name, Meta { kind, size: if e.is_dir { 0 } else { e.len }, mtime: e.modified_unix * NANOS_PER_SEC })
+                let meta = Meta { kind, size: if e.is_dir { 0 } else { e.len }, mtime: e.modified_unix * NANOS_PER_SEC };
+                Listed { name: e.name, meta, identity: self.ids.of(e.entry_offset) }
             })
             .collect())
     }
@@ -269,7 +223,7 @@ impl<D: Disk> Volume for FatVolume<D> {
             Some(_) if how.create_new => return Err(fs::Error::AlreadyExists),
             Some(node) => node,
             None => {
-                let existing = match self.fs.metadata(path) {
+                let existing = match self.cache.block_on(self.fs.metadata(path)) {
                     Ok(meta) if meta.is_dir => return Err(fs::Error::IsADirectory),
                     Ok(_) => true,
                     Err(Error::NotFound | Error::NotADirectory) => false,
@@ -277,27 +231,29 @@ impl<D: Disk> Volume for FatVolume<D> {
                 };
                 let file = match existing {
                     true if how.create_new => return Err(fs::Error::AlreadyExists),
-                    true => self.fs.open(path).map_err(|e| logged("open", path, e))?,
+                    true => self.cache.block_on(self.fs.open(path)).map_err(|e| logged("open", path, e))?,
                     false if !(how.create || how.create_new) => return Err(fs::Error::NotFound),
                     false if !self.writable => return Err(fs::Error::ReadOnly),
                     false => {
                         let time = self.time();
                         let dir = parent(path);
                         if !dir.is_empty() {
-                            self.fs.create_dir_all(dir, time).map_err(|e| logged("mkdir -p", dir, e))?;
+                            self.cache.block_on(self.fs.create_dir_all(dir, time)).map_err(|e| logged("mkdir -p", dir, e))?;
                         }
-                        self.fs.create(path, time).map_err(|e| logged("create", path, e))?
+                        self.cache.block_on(self.fs.create(path, time)).map_err(|e| logged("create", path, e))?
                     }
                 };
                 let node = self.next;
                 self.next += 1;
-                self.open.insert(node, Open { path: path.to_string(), file, holders: 0, gone: false });
+                self.open.insert(node, Open { path: path.to_string(), file, holders: 0, gone: false, dirty: false });
                 self.by_path.insert(path.to_string(), node);
                 node
             }
         };
         self.open.get_mut(&node).expect("just found or made").holders += 1;
         if how.truncate {
+            // POSIX's `open` stamps a truncated file even when it was empty.
+            self.open.get_mut(&node).expect("just found or made").dirty = true;
             if let Err(e) = self.truncate(node, 0) {
                 // A refused close is said, and its node kept for the next sync.
                 let _ = self.close(node);
@@ -326,7 +282,7 @@ impl<D: Disk> Volume for FatVolume<D> {
     fn node_meta(&mut self, node: Node) -> Result<Meta, fs::Error> {
         let open = self.entry(node)?;
         let (path, size) = (open.path.clone(), open.file.len());
-        let mtime = self.fs.metadata(&path).map_err(|e| logged("metadata", &path, e))?.modified_unix;
+        let mtime = self.cache.block_on(self.fs.metadata(&path)).map_err(|e| logged("metadata", &path, e))?.modified_unix;
         Ok(Meta { kind: Kind::File, size, mtime: mtime * NANOS_PER_SEC })
     }
 
@@ -344,17 +300,30 @@ impl<D: Disk> Volume for FatVolume<D> {
             self.scratch.resize(out.len(), 0);
         }
         let buf = &mut self.scratch[..out.len()];
-        let n = self.fs.read(&mut open.file, offset, buf).map_err(|e| logged("read", &open.path, e))?;
+        let n = self.cache.block_on(self.fs.read(&mut open.file, offset, buf)).map_err(|e| logged("read", &open.path, e))?;
         out.put(0, &buf[..n]);
         Ok(n)
     }
 
-    fn write(&mut self, node: Node, offset: u64, data: &[u8]) -> Result<(), fs::Error> {
+    fn reserve(&mut self, node: Node, offset: u64, len: u64) -> Result<Reserved, fs::Error> {
         let open = self.open.get_mut(&node).ok_or(fs::Error::Stale)?;
         if open.gone {
             return Err(fs::Error::Stale);
         }
-        self.fs.write(&mut open.file, offset, data).map_err(|e| logged("write", &open.path, e))
+        open.dirty = true;
+        // A chain has no holes: it holds a block for every page of its size.
+        let reserved = Reserved { size: open.file.len(), held: open.file.len().div_ceil(toyos_blockdev::BLOCK as u64) };
+        self.cache.block_on(self.fs.reserve(&mut open.file, offset, len)).map_err(|e| logged("reserve", &open.path, e))?;
+        Ok(reserved)
+    }
+
+    fn write_back(&mut self, node: Node, offset: u64, data: &[u8]) -> Result<(), fs::Error> {
+        let open = self.open.get_mut(&node).ok_or(fs::Error::Stale)?;
+        if open.gone {
+            return Err(fs::Error::Stale);
+        }
+        open.dirty = true;
+        self.cache.block_on(self.fs.write_back(&mut open.file, offset, data)).map_err(|e| logged("write-back", &open.path, e))
     }
 
     fn truncate(&mut self, node: Node, size: u64) -> Result<(), fs::Error> {
@@ -365,12 +334,18 @@ impl<D: Disk> Volume for FatVolume<D> {
         if open.file.len() == size {
             return Ok(());
         }
-        self.fs.set_len(&mut open.file, size).map_err(|e| logged("set_len", &open.path, e))
+        open.dirty = true;
+        self.cache.block_on(self.fs.set_len(&mut open.file, size)).map_err(|e| logged("set_len", &open.path, e))
+    }
+
+    /// FAT stamps a file at the flush that writes it, at its own resolution.
+    fn set_mtime(&mut self, _node: Node, _mtime: u64) -> Result<(), fs::Error> {
+        Err(fs::Error::Unsupported)
     }
 
     fn mkdir(&mut self, path: &str) -> Result<(), fs::Error> {
         let time = self.time();
-        self.fs.create_dir(path, time).map_err(|e| logged("mkdir", path, e))
+        self.cache.block_on(self.fs.create_dir(path, time)).map_err(|e| logged("mkdir", path, e))
     }
 
     fn rmdir(&mut self, path: &str) -> Result<(), fs::Error> {
@@ -378,19 +353,19 @@ impl<D: Disk> Volume for FatVolume<D> {
             return Err(fs::Error::Root);
         }
         let key = self.entry_offset(path)?;
-        self.fs.remove_dir(path).map_err(|e| logged("rmdir", path, e))?;
+        self.cache.block_on(self.fs.remove_dir(path)).map_err(|e| logged("rmdir", path, e))?;
         self.ids.forget(&key);
         Ok(())
     }
 
     fn unlink(&mut self, path: &str) -> Result<(), fs::Error> {
-        if self.fs.metadata(path).map_err(|e| logged("metadata", path, e))?.is_dir {
+        if self.cache.block_on(self.fs.metadata(path)).map_err(|e| logged("metadata", path, e))?.is_dir {
             return Err(fs::Error::IsADirectory);
         }
         let key = self.entry_offset(path)?;
         // Asked of the volume first: a delete the device refused leaves every
         // holder of the file its file.
-        self.fs.remove(path).map_err(|e| logged("unlink", path, e))?;
+        self.cache.block_on(self.fs.remove(path)).map_err(|e| logged("unlink", path, e))?;
         self.orphan(path);
         self.ids.forget(&key);
         Ok(())
@@ -401,7 +376,7 @@ impl<D: Disk> Volume for FatVolume<D> {
         // rename onto the entry it already is — FAT names one entry by strings
         // that differ in case — is POSIX's no-op and never a delete of it.
         self.lstat(from)?;
-        if from == to || self.fs.same_entry(from, to).map_err(|e| logged("same_entry", from, e))? {
+        if from == to || self.cache.block_on(self.fs.same_entry(from, to)).map_err(|e| logged("same_entry", from, e))? {
             return Ok(());
         }
         if let Some(node) = self.by_path.get(from).copied() {
@@ -413,14 +388,14 @@ impl<D: Disk> Volume for FatVolume<D> {
             Err(fs::Error::NotFound) => None,
             Err(e) => return Err(e),
         };
-        let replaced = self.fs.replace_rename(from, to).map_err(|e| {
+        let replaced = self.cache.block_on(self.fs.replace_rename(from, to)).map_err(|e| {
             if let Some(stranded) = &e.stranded {
                 println!("fileserver: {to} could not be put back and is under {stranded}");
             }
             logged("rename", from, e.cause)
         })?;
         self.orphan(to);
-        let released = self.fs.release_replaced(replaced).map_err(|e| logged("release", to, e));
+        let released = self.cache.block_on(self.fs.release_replaced(replaced)).map_err(|e| logged("release", to, e));
         if let Some(node) = self.by_path.remove(from) {
             self.open.get_mut(&node).expect("indexed").path = to.to_string();
             self.by_path.insert(to.to_string(), node);
@@ -454,7 +429,7 @@ impl<D: Disk> Volume for FatVolume<D> {
                 Ok(()) => {}
             }
         }
-        self.fs.sync().map_err(|e| logged("sync", "", e))?;
+        self.cache.block_on(self.fs.sync()).map_err(|e| logged("sync", "", e))?;
         Ok(unlevel)
     }
 
@@ -463,7 +438,7 @@ impl<D: Disk> Volume for FatVolume<D> {
         if !self.writable {
             return Ok(fs::Room { free: 0, unit });
         }
-        let free = self.fs.free_bytes().map_err(|e| logged("free space", "", e))?;
+        let free = self.cache.block_on(self.fs.free_bytes()).map_err(|e| logged("free space", "", e))?;
         Ok(fs::Room { free, unit })
     }
 
@@ -492,9 +467,14 @@ mod tests {
     use std::cell::Cell;
 
     use super::*;
-    use crate::cache::CLEAN_LIMIT;
+    use crate::volume::Writes;
     use crate::ram::Ram;
-    use diskserver::disk::DiskError;
+    use toyos_blockdev::{block_on_ready, Block, Bytes, BLOCK};
+
+    impl Disk for Bytes<Vec<u8>> {}
+
+    /// The clean blocks every volume's cache here keeps.
+    const CLEAN_LIMIT: usize = 4096;
 
     /// A disk that refuses every read of one block, after the fixture's own
     /// bytes are on it.
@@ -503,60 +483,33 @@ mod tests {
         refused: Rc<Cell<u64>>,
     }
 
-    impl Disk for Refusing {
+    impl BlockDev for Refusing {
         fn blocks(&self) -> u64 {
             self.ram.blocks()
         }
-        fn read(&mut self, first: u64, out: &mut [u8]) -> Result<(), DiskError> {
-            let count = (out.len() / BLOCK) as u64;
-            if (first..first + count).contains(&self.refused.get()) {
-                return Err(DiskError::Device);
+        async fn read(&self, lba: u64, out: &mut [Block]) -> Result<(), toyos_blockdev::Error> {
+            if (lba..lba + out.len() as u64).contains(&self.refused.get()) {
+                return Err(toyos_blockdev::Error::Device);
             }
-            self.ram.read(first, out)
+            self.ram.read(lba, out).await
         }
-        fn write(&mut self, first: u64, data: &[u8]) -> Result<(), DiskError> {
-            self.ram.write(first, data)
+        async fn write(&self, lba: u64, data: &[Block]) -> Result<(), toyos_blockdev::Error> {
+            self.ram.write(lba, data).await
         }
-        fn flush(&mut self) -> Result<(), DiskError> {
-            self.ram.flush()
+        async fn flush(&self) -> Result<(), toyos_blockdev::Error> {
+            self.ram.flush().await
         }
     }
 
-    /// Four blocks holding `0x5A`, the second of which refuses every read.
-    fn bytes() -> Bytes<Refusing> {
-        let mut ram = Ram::new(4);
-        ram.write(0, &[0x5A; 4 * BLOCK]).unwrap();
-        let cache = Rc::new(Cache::new(Refusing { ram, refused: Rc::new(Cell::new(1)) }));
-        Bytes { cache, len: 4 * BLOCK as u64 }
-    }
+    impl Disk for Refusing {}
 
-    /// A read the device refused is the device's word to the caller, never a
-    /// buffer of zeros: a caller that took zeros for data merges its bytes
-    /// into them and writes the result over what the medium held.
-    #[test]
-    fn a_refused_read_is_an_error_and_never_zeros() {
-        let mut b = bytes();
-        let mut buf = [0xEEu8; 100];
-        assert_eq!(b.read_at(BLOCK as u64 + 10, &mut buf), Err(IoError::Device));
-        let mut fine = [0u8; 100];
-        b.read_at(10, &mut fine).unwrap();
-        assert!(fine.iter().all(|&x| x == 0x5A), "the readable block reads as written");
-    }
-
-    /// A write that covers part of a block reads the rest of it first; when
-    /// that read is refused the write is refused whole, and nothing reaches
-    /// the block — the rest of it is another file's, or the table's.
-    #[test]
-    fn a_partial_write_over_an_unreadable_block_writes_nothing() {
-        let mut b = bytes();
-        assert_eq!(b.write_at(BLOCK as u64 + 10, &[1, 2, 3]), Err(IoError::Device));
-        b.flush().unwrap();
-        let cache = Rc::try_unwrap(b.cache).ok().expect("the one holder");
-        let mut disk = cache.into_disk();
-        disk.refused.set(u64::MAX);
-        let mut block = [0u8; BLOCK];
-        disk.read(1, &mut block).unwrap();
-        assert!(block.iter().all(|&x| x == 0x5A), "the unreadable block was written over");
+    /// `image`, padded to whole blocks, on a disk of `blocks` blocks.
+    fn ram_with(image: &[u8], blocks: usize) -> Ram {
+        let ram = Ram::new(blocks as u64);
+        let mut padded = image.to_vec();
+        padded.resize(image.len().div_ceil(BLOCK) * BLOCK, 0);
+        block_on_ready(ram.write(0, padded.as_chunks::<BLOCK>().0)).unwrap();
+        ram
     }
 
     /// The specification's fixture volume, writable, on a disk with room past
@@ -568,13 +521,9 @@ mod tests {
     /// [`spec_fat`], stamping by `clock`.
     fn spec_fat_on(clock: fn() -> u64) -> (FatVolume<Refusing>, Rc<Cell<u64>>, spec_volume::Volume) {
         let spec = spec_volume::fixture();
-        let blocks = spec.bytes.len().div_ceil(BLOCK);
-        let mut image = spec.bytes.clone();
-        image.resize(blocks * BLOCK, 0);
-        let mut ram = Ram::new((blocks + 2 * CLEAN_LIMIT) as u64);
-        ram.write(0, &image).unwrap();
+        let ram = ram_with(&spec.bytes, spec.bytes.len().div_ceil(BLOCK) + 2 * CLEAN_LIMIT);
         let refused = Rc::new(Cell::new(u64::MAX));
-        let v = FatVolume::mount(Refusing { ram, refused: Rc::clone(&refused) }, true, clock).unwrap();
+        let v = FatVolume::mount(Refusing { ram, refused: Rc::clone(&refused) }, CLEAN_LIMIT, true, clock).unwrap();
         (v, refused, spec)
     }
 
@@ -600,12 +549,56 @@ mod tests {
         assert_eq!(v.lstat("a.txt").unwrap().mtime, 1_717_245_300 * NANOS_PER_SEC);
     }
 
+    /// What [`a_sync_of_files_nothing_changed_asks_the_disk_nothing`]'s volume
+    /// reads as the time, which only that test sets.
+    static LATER: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
+    /// Once a sync has made a file durable, a sync, an fsync or a close that
+    /// finds it and every other file unchanged asks the disk for nothing and
+    /// restamps no entry; the next write is stamped and written at its sync.
+    #[test]
+    fn a_sync_of_files_nothing_changed_asks_the_disk_nothing() {
+        use std::sync::atomic::Ordering::Relaxed;
+        const CREATE: OpenHow = OpenHow { create: true, create_new: false, truncate: false };
+        const OPEN: OpenHow = OpenHow { create: false, create_new: false, truncate: false };
+        let spec = spec_volume::fixture();
+        let mut image = spec.bytes.clone();
+        image.resize(spec.bytes.len().div_ceil(BLOCK) * BLOCK, 0);
+        let epochs: Epochs = Rc::new(std::cell::RefCell::new(vec![Vec::new()]));
+        let disk = Traced { image: Bytes::new(image), epochs: Rc::clone(&epochs) };
+        LATER.store(1_717_245_296 * NANOS_PER_SEC, Relaxed);
+        let mut v = FatVolume::mount(disk, CLEAN_LIMIT, true, || LATER.load(Relaxed)).unwrap();
+        let a = v.open("a.txt", CREATE).unwrap();
+        v.write(a, 0, &[1; 3000]).unwrap();
+        assert_eq!(v.sync(), Ok(Vec::new()));
+        let durable = epochs.borrow().clone();
+        assert!(durable.last().is_some_and(Vec::is_empty), "the sync ended with a flush");
+
+        LATER.store(1_717_245_310 * NANOS_PER_SEC, Relaxed);
+        let stamped = v.lstat("short.txt").unwrap().mtime;
+        let short = v.open("short.txt", OPEN).unwrap();
+        let mut out = vec![0u8; 100];
+        assert_eq!(v.read(short, 0, &mut crate::volume::Buf(&mut out)), Ok(100));
+        v.close(short).unwrap();
+        assert_eq!(v.sync(), Ok(Vec::new()));
+        assert_eq!(v.sync(), Ok(Vec::new()));
+        assert!(*epochs.borrow() == durable, "a sync with nothing changed wrote or flushed the disk");
+        assert_eq!(v.lstat("a.txt").unwrap().mtime, 1_717_245_296 * NANOS_PER_SEC);
+        assert_eq!(v.lstat("short.txt").unwrap().mtime, stamped, "a file only read is not restamped");
+
+        v.write(a, 0, &[2; 10]).unwrap();
+        assert_eq!(v.sync(), Ok(Vec::new()));
+        assert_eq!(epochs.borrow().len(), durable.len() + 1, "the write's sync is one flush");
+        v.close(a).unwrap();
+        assert_eq!(epochs.borrow().len(), durable.len() + 1, "a close after the sync writes nothing");
+        assert_eq!(v.lstat("a.txt").unwrap().mtime, 1_717_245_310 * NANOS_PER_SEC);
+    }
+
     /// Every clean block out of the cache, so the next read of one asks the disk.
     fn evict(v: &FatVolume<Refusing>) {
-        let mut block = [0u8; BLOCK];
-        for b in v.cache.blocks() - 2 * CLEAN_LIMIT as u64..v.cache.blocks() {
-            v.cache.read_block(b, &mut block).unwrap();
-        }
+        let blocks = v.cache.blocks();
+        let mut out = vec![[0; BLOCK]; 2 * CLEAN_LIMIT];
+        block_on_ready(v.cache.read(blocks - out.len() as u64, &mut out)).unwrap();
     }
 
     /// One file whose entry will not read back leaves every other file's sync
@@ -697,36 +690,54 @@ mod tests {
         assert!(!all.contains(&again), "a file made where one was removed is a new one: {again} of {all:?}");
     }
 
+    /// A listing names each entry by the identity a stat of its path
+    /// answers, asked before or after the stat.
+    #[test]
+    fn a_listing_names_each_entry_by_its_identity() {
+        const CREATE: OpenHow = OpenHow { create: true, create_new: false, truncate: false };
+        let (mut v, _, _) = spec_fat();
+        for path in ["a.txt", "sub/b.txt"] {
+            let n = v.open(path, CREATE).unwrap();
+            v.close(n).unwrap();
+        }
+        let b = v.identity("sub/b.txt").unwrap();
+        for dir in ["", "sub"] {
+            for e in v.list(dir).unwrap() {
+                let path = if dir.is_empty() { e.name.clone() } else { format!("{dir}/{}", e.name) };
+                assert_eq!(Ok(e.identity), v.identity(&path), "{path}");
+            }
+        }
+        assert!(v.list("sub").unwrap().iter().any(|e| e.identity == b));
+    }
+
     /// A disk whose grant does not write: every write and flush is refused.
     struct Granted(Ram);
 
-    impl Disk for Granted {
+    impl BlockDev for Granted {
         fn blocks(&self) -> u64 {
             self.0.blocks()
         }
-        fn read(&mut self, first: u64, out: &mut [u8]) -> Result<(), DiskError> {
-            self.0.read(first, out)
+        async fn read(&self, lba: u64, out: &mut [Block]) -> Result<(), toyos_blockdev::Error> {
+            self.0.read(lba, out).await
         }
-        fn write(&mut self, _: u64, _: &[u8]) -> Result<(), DiskError> {
+        async fn write(&self, _: u64, _: &[Block]) -> Result<(), toyos_blockdev::Error> {
             panic!("a read-only volume wrote to its disk")
         }
-        fn flush(&mut self) -> Result<(), DiskError> {
+        async fn flush(&self) -> Result<(), toyos_blockdev::Error> {
             panic!("a read-only volume flushed its disk")
         }
     }
 
+    impl Disk for Granted {}
+
     /// A volume mounted unwritable never asks its disk to write or flush, so
-    /// the read-only grant's refusal never reaches [`Bytes`].
+    /// the read-only grant's refusal never reaches `toyos-fat32`.
     #[test]
     fn a_read_only_volume_never_writes_its_disk() {
         const OPEN: OpenHow = OpenHow { create: false, create_new: false, truncate: false };
         let spec = spec_volume::fixture();
-        let blocks = spec.bytes.len().div_ceil(BLOCK);
-        let mut ram = Ram::new(blocks as u64);
-        let mut image = spec.bytes.clone();
-        image.resize(blocks * BLOCK, 0);
-        ram.write(0, &image).unwrap();
-        let mut v = FatVolume::mount(Granted(ram), false, || 1_717_245_296 * NANOS_PER_SEC).unwrap();
+        let ram = ram_with(&spec.bytes, spec.bytes.len().div_ceil(BLOCK));
+        let mut v = FatVolume::mount(Granted(ram), CLEAN_LIMIT, false, || 1_717_245_296 * NANOS_PER_SEC).unwrap();
 
         assert_eq!(v.lstat("short.txt").unwrap().size, 100);
         v.list("sub").unwrap();
@@ -738,28 +749,6 @@ mod tests {
         assert_eq!(v.sync(), Ok(Vec::new()));
     }
 
-    /// A disk whose bytes are the volume's, whole in memory.
-    struct Image(Vec<u8>);
-
-    impl Disk for Image {
-        fn blocks(&self) -> u64 {
-            (self.0.len() / BLOCK) as u64
-        }
-        fn read(&mut self, first: u64, out: &mut [u8]) -> Result<(), DiskError> {
-            let at = first as usize * BLOCK;
-            out.copy_from_slice(&self.0[at..at + out.len()]);
-            Ok(())
-        }
-        fn write(&mut self, first: u64, data: &[u8]) -> Result<(), DiskError> {
-            let at = first as usize * BLOCK;
-            self.0[at..at + data.len()].copy_from_slice(data);
-            Ok(())
-        }
-        fn flush(&mut self) -> Result<(), DiskError> {
-            Ok(())
-        }
-    }
-
     /// The blocks a disk was written, in order, one epoch to each flush: the
     /// disk keeps no order among one epoch's writes, and has all of an epoch
     /// before any of the next.
@@ -768,30 +757,34 @@ mod tests {
     /// A disk that keeps every block it is written in its flush epoch, so a
     /// test can stop it with any of one epoch's writes on it.
     struct Traced {
-        image: Image,
+        image: Bytes<Vec<u8>>,
         epochs: Epochs,
     }
 
-    impl Disk for Traced {
+    impl BlockDev for Traced {
         fn blocks(&self) -> u64 {
             self.image.blocks()
         }
-        fn read(&mut self, first: u64, out: &mut [u8]) -> Result<(), DiskError> {
-            self.image.read(first, out)
+        async fn read(&self, lba: u64, out: &mut [Block]) -> Result<(), toyos_blockdev::Error> {
+            self.image.read(lba, out).await
         }
-        fn write(&mut self, first: u64, data: &[u8]) -> Result<(), DiskError> {
-            let mut epochs = self.epochs.borrow_mut();
-            let epoch = epochs.last_mut().expect("an epoch is always open");
-            for (i, block) in data.chunks_exact(BLOCK).enumerate() {
-                epoch.push((first + i as u64, block.to_vec()));
+        async fn write(&self, lba: u64, data: &[Block]) -> Result<(), toyos_blockdev::Error> {
+            {
+                let mut epochs = self.epochs.borrow_mut();
+                let epoch = epochs.last_mut().expect("an epoch is always open");
+                for (block, data) in (lba..).zip(data) {
+                    epoch.push((block, data.to_vec()));
+                }
             }
-            self.image.write(first, data)
+            self.image.write(lba, data).await
         }
-        fn flush(&mut self) -> Result<(), DiskError> {
+        async fn flush(&self) -> Result<(), toyos_blockdev::Error> {
             self.epochs.borrow_mut().push(Vec::new());
-            self.image.flush()
+            self.image.flush().await
         }
     }
+
+    impl Disk for Traced {}
 
     fn written<'a>(image: &mut [u8], writes: impl IntoIterator<Item = &'a (u64, Vec<u8>)>) {
         for (block, data) in writes {
@@ -817,7 +810,7 @@ mod tests {
         let mut image = spec.bytes.clone();
         image.resize(spec.bytes.len().div_ceil(BLOCK) * BLOCK, 0);
         let epochs: Epochs = Rc::new(std::cell::RefCell::new(vec![Vec::new()]));
-        let mut v = FatVolume::mount(Traced { image: Image(image.clone()), epochs: Rc::clone(&epochs) }, true, clock)
+        let mut v = FatVolume::mount(Traced { image: Bytes::new(image.clone()), epochs: Rc::clone(&epochs) }, CLEAN_LIMIT, true, clock)
             .unwrap();
         let held: Vec<u8> = (0..3000u32).map(|i| (i % 251 + 1) as u8).collect();
         let appended: Vec<u8> = (0..3 * BLOCK as u32).map(|i| (i % 241 + 2) as u8).collect();
@@ -855,7 +848,7 @@ mod tests {
                     })
                     .collect();
                 assert!(refused.is_empty(), "{stop}: {}", describe(&refused));
-                let mut after = FatVolume::mount(Image(bytes), false, clock).unwrap_or_else(|e| panic!("{stop}: {e}"));
+                let mut after = FatVolume::mount(Bytes::new(bytes), CLEAN_LIMIT, false, clock).unwrap_or_else(|e| panic!("{stop}: {e}"));
                 let n = after.open("a.txt", OPEN).unwrap();
                 let size = after.lstat("a.txt").unwrap().size as usize;
                 let mut out = vec![0u8; size];

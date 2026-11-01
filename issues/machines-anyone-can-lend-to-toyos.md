@@ -12,9 +12,10 @@ could boot ToyOS for the suite with no one standing next to it.
 
 **What exists.**
 - `--metal-host` targets any bench.
-- `--install-sudoers` captures a machine and its stick into the host store
+- `toyos-metal --record` captures a machine into the host store
   (`timings::dir()`), never into the tree.
-- The loop wipes and writes the stick over `ssh` and sets a one-shot `BootNext`.
+- The loop writes the image to the machine's internal install area over
+  `ssh` and sets a one-shot `BootNext`.
 - The machine comes back to its own OS, and the loop reads the log partition
   back.
 
@@ -22,8 +23,8 @@ The second bench (an AMD laptop) went from first contact to a green row
 through this loop with no hand on it.
 
 **What a machine has to give.**
-- An ssh-reachable Linux as its resident OS, and an account with the narrow
-  sudo rule.
+- An ssh-reachable Linux as its resident OS, and an account with
+  passwordless sudo.
 - A USB stick that stays plugged in.
 - Firmware that honours an OS-set `BootNext` and falls back to the resident
   OS.

@@ -21,10 +21,12 @@ lacks:
   waker (shared data stays warm — pipe/IPC pairs) and away from it
   (parallelism). Every wake still ignores the waker.
 - **An idle-state input**: see `issues/the-scheduler-and-the-clocks-never-talk.md`.
-- **Bounded scans.** Each choice walks the rings it needs whole, so an idle
-  CPU's steal probe on a machine with nothing to steal reads every CPU's
-  handle, a cost on the idle path that grows with the CPU count. Derived from
-  the code, not measured; both benches have at most 16 CPUs.
+- **Bounded scans.** Each choice walks the rings it needs whole. A steal
+  probe reads the machine's offering mask first, so a machine with nothing to
+  steal costs an idle pass one line; once a CPU offers surplus, the probe and
+  every wake forward still read every handle in their rings, a cost that grows
+  with the CPU count. Derived from the code, not measured; both benches have
+  at most 16 CPUs.
 
 Composes with the reservation model (placement decides *where*, reservations
 decide *how much*) and with the scheduler simulator (`kernel/sim`), which runs

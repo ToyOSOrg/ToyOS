@@ -1,102 +1,93 @@
-//! A partition as `toyos-fat32` reads one: byte-addressed, over 4 KiB
-//! blocks, with every write held until [`Cached::flush`] writes the blocks it
-//! touched in runs.
+//! A partition with every write held until [`Cached`]'s flush writes the
+//! blocks it touched in runs, then flushes the partition. A held block is read
+//! from here and never from the partition.
 //!
 //! **Held, because FAT writes a cluster at a time**, and a slot volume's
-//! clusters are smaller than a block: written through, a kernel image would be
-//! a read and a write of one block per 512 bytes. Held, the volume's writes are
-//! as many requests as the blocks it touched need, and the partition's own
-//! flush is what makes them durable — which is the caller's, after this.
+//! clusters are smaller than a block: `toyos-fat32` reads a block before it
+//! writes part of it, so written through, a kernel image would be a read and a
+//! write of one block per 512 bytes. Held, the volume's writes are as many
+//! requests as the blocks it touched need, and its reads only of the blocks it
+//! has not written.
 
+use std::cell::RefCell;
 use std::collections::BTreeMap;
 
-use toyos_disk::{Disk, BLOCK};
-use toyos_fat32::{BlockAccess, IoError};
+use toyos_blockdev::{within, Block, BlockDev, Error};
 
-pub struct Cached<'a> {
-    disk: &'a mut dyn Disk,
+/// The longest run one write to the partition carries, in blocks.
+const RUN: usize = 32;
+
+pub struct Cached<'a, D> {
+    disk: &'a D,
     /// Every block written since the last flush, by block number.
-    dirty: BTreeMap<u64, Box<[u8; BLOCK]>>,
+    dirty: RefCell<BTreeMap<u64, Box<Block>>>,
 }
 
-impl<'a> Cached<'a> {
-    pub fn new(disk: &'a mut dyn Disk) -> Self {
-        Self { disk, dirty: BTreeMap::new() }
-    }
-
-    /// Block `n` as the volume now reads: the held write, or the device's.
-    fn block(&mut self, n: u64) -> Result<[u8; BLOCK], IoError> {
-        if let Some(held) = self.dirty.get(&n) {
-            return Ok(**held);
-        }
-        let mut one = [0u8; BLOCK];
-        self.disk.read(n, &mut one).map_err(|_| IoError::Device)?;
-        Ok(one)
-    }
-
-    /// Each block `[offset, offset + len)` touches, with the part of it that
-    /// range covers and where in the caller's buffer that part begins.
-    fn spans(&self, offset: u64, len: usize) -> Result<Vec<(u64, std::ops::Range<usize>, usize)>, IoError> {
-        let end = offset.checked_add(len as u64).ok_or(IoError::Device)?;
-        if end > self.capacity() {
-            return Err(IoError::Device);
-        }
-        let mut out = Vec::new();
-        let mut at = offset;
-        while at < end {
-            let n = at / BLOCK as u64;
-            let from = (at % BLOCK as u64) as usize;
-            let to = BLOCK.min(from + (end - at) as usize);
-            out.push((n, from..to, (at - offset) as usize));
-            at += (to - from) as u64;
-        }
-        Ok(out)
+impl<'a, D: BlockDev> Cached<'a, D> {
+    pub fn new(disk: &'a D) -> Self {
+        Self { disk, dirty: RefCell::default() }
     }
 }
 
-impl BlockAccess for Cached<'_> {
-    fn capacity(&self) -> u64 {
-        self.disk.blocks() * BLOCK as u64
+impl<D: BlockDev> BlockDev for Cached<'_, D> {
+    fn blocks(&self) -> u64 {
+        self.disk.blocks()
     }
 
-    fn read_at(&mut self, offset: u64, buf: &mut [u8]) -> Result<(), IoError> {
-        for (n, range, into) in self.spans(offset, buf.len())? {
-            let block = self.block(n)?;
-            buf[into..into + range.len()].copy_from_slice(&block[range]);
+    /// Each held block from here, and each run of the others from the
+    /// partition.
+    async fn read(&self, lba: u64, out: &mut [Block]) -> Result<(), Error> {
+        within(lba, out.len(), self.disk.blocks())?;
+        let mut unheld = Vec::new();
+        {
+            let dirty = self.dirty.borrow();
+            let mut run: Option<(usize, usize)> = None;
+            for (k, out) in out.iter_mut().enumerate() {
+                match dirty.get(&(lba + k as u64)) {
+                    Some(held) => {
+                        *out = **held;
+                        unheld.extend(run.take());
+                    }
+                    None => run = Some(run.map_or((k, k + 1), |(from, _)| (from, k + 1))),
+                }
+            }
+            unheld.extend(run);
+        }
+        for (from, to) in unheld {
+            self.disk.read(lba + from as u64, &mut out[from..to]).await?;
         }
         Ok(())
     }
 
-    fn write_at(&mut self, offset: u64, buf: &[u8]) -> Result<(), IoError> {
-        for (n, range, from) in self.spans(offset, buf.len())? {
-            // A whole block's write needs nothing read under it.
-            let mut block = if range.len() == BLOCK { [0u8; BLOCK] } else { self.block(n)? };
-            block[range.clone()].copy_from_slice(&buf[from..from + range.len()]);
-            self.dirty.insert(n, Box::new(block));
+    async fn write(&self, lba: u64, data: &[Block]) -> Result<(), Error> {
+        within(lba, data.len(), self.disk.blocks())?;
+        let mut dirty = self.dirty.borrow_mut();
+        for (block, data) in (lba..).zip(data) {
+            dirty.insert(block, Box::new(*data));
         }
         Ok(())
     }
 
-    /// Write every held block, a run of consecutive ones per request. Durable
-    /// is the partition's flush, which the caller asks once every volume is
-    /// written.
-    fn flush(&mut self) -> Result<(), IoError> {
-        let held = std::mem::take(&mut self.dirty);
-        let mut run: Vec<u8> = Vec::new();
-        let mut first = 0u64;
-        for (n, block) in held {
-            if !run.is_empty() && n != first + (run.len() / BLOCK) as u64 {
-                self.disk.write(first, &run).map_err(|_| IoError::Device)?;
+    /// Every held block written, a run of consecutive ones per request, then
+    /// the partition flushed. A block whose write was refused is no longer
+    /// held: the install that asked is refused.
+    async fn flush(&self) -> Result<(), Error> {
+        let held = std::mem::take(&mut *self.dirty.borrow_mut());
+        let mut run: Vec<Block> = Vec::with_capacity(RUN);
+        let mut first = 0;
+        for (block, data) in held {
+            if !run.is_empty() && (block != first + run.len() as u64 || run.len() == RUN) {
+                self.disk.write(first, &run).await?;
                 run.clear();
             }
             if run.is_empty() {
-                first = n;
+                first = block;
             }
-            run.extend_from_slice(&block[..]);
+            run.push(*data);
         }
         if !run.is_empty() {
-            self.disk.write(first, &run).map_err(|_| IoError::Device)?;
+            self.disk.write(first, &run).await?;
         }
-        Ok(())
+        self.disk.flush().await
     }
 }

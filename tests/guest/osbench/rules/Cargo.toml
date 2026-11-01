@@ -1,0 +1,13 @@
+[package]
+name = "osbench-rules"
+description = "osbench's pure rules, host-tested: when a munmap pair's x2APIC readings admit its figure, where the CPU crunch stops for heat, the package energy counter's span, unit and power, when a machine is quiet, whether two counters readings describe their row, and when a CPU's clock has settled."
+version = "0.1.0"
+edition = "2021"
+license = "MIT OR Apache-2.0"
+publish = false
+
+# A package of its own because osbench builds for ToyOS and Linux alone: this
+# is the part of it a host tests.
+
+[lib]
+doctest = false

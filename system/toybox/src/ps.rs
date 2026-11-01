@@ -64,7 +64,7 @@ fn state_str(s: u8) -> &'static str {
 
 pub fn main(_args: Vec<String>) {
     let Some(cap) = Endowments::get().take::<SysCap>(SYSCAP_LABEL) else {
-        eprintln!("ps: this program was endowed no system capability");
+        eprintln!("ps: this program was endowed no system capability; run it with `launch ps`");
         std::process::exit(1);
     };
     let mut buf = vec![0u8; HEADER + ENTRY * 128];

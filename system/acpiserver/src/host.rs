@@ -92,7 +92,7 @@ use std::collections::BTreeMap;
 use std::fmt;
 use std::time::{Duration, Instant};
 
-use toyos_abi::acpi::{pci_address, Access, Refused, Space, Width, UNLISTED};
+use toyos_abi::acpi::{pci_address, Access, IdleDeclaration, Refused, Space, Width, UNLISTED};
 use toyos_aml::{Address, Denied, Host, RuntimeLoad, Transfer};
 
 use crate::devices::Ec;
@@ -134,6 +134,16 @@ pub enum Take {
     Unusable,
 }
 
+/// What the kernel did with a processor's idle states.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum Declared {
+    Kept,
+    /// The processor's UID names no CPU the kernel runs.
+    NoCpu,
+    /// The CPU cannot enter them as declared; the kernel's log says why.
+    Refused,
+}
+
 /// The `acpi` claim as this server asks it, its mediated access and its SCI,
 /// and the power-off it asks of the supervisor.
 pub trait Kernel {
@@ -151,7 +161,9 @@ pub trait Kernel {
     /// no fixed hardware, and a power-off that writes no sleep type.
     fn hardware_reduced(&self) -> bool;
     /// Declare the PCI root bridges, once ([`crate::apertures`]).
-    fn declare(&self, roots: &[crate::apertures::Root]) -> Result<Declared, Stopping>;
+    fn declare(&self, roots: &[crate::apertures::Root]) -> Result<RootsDeclared, Stopping>;
+    /// Hand the kernel one processor's idle states (`crate::cst`).
+    fn idle(&self, declaration: &IdleDeclaration) -> Result<Declared, Stopping>;
     /// Waits until `until`, serving the SCI as `sci::await_sleep` does for
     /// the fixed power button where the claim serves it and the controller's
     /// GPE `ec_gpe`: what latched and was taken.
@@ -161,9 +173,14 @@ pub trait Kernel {
     fn latched(&self) -> Option<u32>;
     /// Acknowledge the SCI, whose status this server has cleared.
     fn ack(&self);
-    /// Ask the supervisor to power the machine off
-    /// (`toyos::power::stop`), which answers only where it did not.
-    fn power_off(&self) -> toyos::power::Refused;
+    /// Ask the supervisor to power the machine off once its sessions have
+    /// ended (`toyos::power::stop`, waiting): answered at once, the stop
+    /// pending or refused.
+    fn power_off(&self) -> Result<(), toyos::power::Refused>;
+    /// Force the stop the last [`Self::power_off`] asked, and no other
+    /// (`toyos::power::Pending::terminate`): refused `NoStopPending` once it
+    /// has ended, whatever stop is pending since.
+    fn terminate(&self) -> Result<(), toyos::power::Refused>;
 }
 
 /// What the kernel did with `\_S5`'s `SLP_TYPa`.
@@ -176,7 +193,7 @@ pub enum Handed {
 
 /// What the kernel did with a declaration of the root bridges' memory.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
-pub enum Declared {
+pub enum RootsDeclared {
     Held,
     /// Refused whole, said in the kernel's log by name.
     Refused,
@@ -783,18 +800,35 @@ pub mod tests {
         /// The machine is hardware-reduced.
         pub reduced: bool,
         /// The roots it was declared, once.
-        pub declared: RefCell<Option<Vec<crate::apertures::Root>>>,
+        pub roots: RefCell<Option<Vec<crate::apertures::Root>>>,
+        /// Each processor's idle states it was handed, all kept.
+        pub declared: RefCell<Vec<IdleDeclaration>>,
         /// What each Sleep's wait takes, in turn; nothing once it runs out.
         /// Each served set a Sleep was asked to serve.
         pub sleeps: RefCell<VecDeque<Latched>>,
         pub slept: RefCell<Vec<Option<u16>>>,
+        /// What each power-off and terminate answers, in turn; each asked.
+        pub stops: RefCell<VecDeque<Result<(), toyos::power::Refused>>>,
+        pub stopped: RefCell<Vec<Stop>>,
     }
 
-    /// What [`Scripted`] panics with where it is asked to power off: the
-    /// machine stops there, and nothing after the ask runs.
+    /// What the server asked the supervisor.
+    #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+    pub enum Stop {
+        PowerOff,
+        Terminate,
+    }
+
+    /// What [`Scripted`] panics with where it is asked to power off with no
+    /// answer scripted: the machine stops there, and nothing after the ask runs.
     pub const POWERED_OFF: &str = "the scripted machine powered off";
 
     impl Scripted {
+        fn stop(&self, asked: Stop) -> Result<(), toyos::power::Refused> {
+            self.stopped.borrow_mut().push(asked);
+            self.stops.borrow_mut().pop_front().unwrap_or_else(|| panic!("{POWERED_OFF}"))
+        }
+
         fn stopping(&self) -> Result<(), Stopping> {
             match self.stops_after.get() {
                 Some(0) => Err(Stopping),
@@ -914,14 +948,20 @@ pub mod tests {
             self.reduced
         }
 
-        fn declare(&self, roots: &[crate::apertures::Root]) -> Result<Declared, Stopping> {
+        fn declare(&self, roots: &[crate::apertures::Root]) -> Result<RootsDeclared, Stopping> {
             self.stopping()?;
-            let mut declared = self.declared.borrow_mut();
+            let mut declared = self.roots.borrow_mut();
             if declared.is_some() {
-                return Ok(Declared::Late);
+                return Ok(RootsDeclared::Late);
             }
             *declared = Some(roots.to_vec());
-            Ok(if roots.is_empty() { Declared::Refused } else { Declared::Held })
+            Ok(if roots.is_empty() { RootsDeclared::Refused } else { RootsDeclared::Held })
+        }
+
+        fn idle(&self, declaration: &IdleDeclaration) -> Result<Declared, Stopping> {
+            self.stopping()?;
+            self.declared.borrow_mut().push(*declaration);
+            Ok(Declared::Kept)
         }
 
         fn latched(&self) -> Option<u32> {
@@ -932,8 +972,12 @@ pub mod tests {
             panic!("an SCI acknowledged where none latched");
         }
 
-        fn power_off(&self) -> toyos::power::Refused {
-            panic!("{POWERED_OFF}");
+        fn power_off(&self) -> Result<(), toyos::power::Refused> {
+            self.stop(Stop::PowerOff)
+        }
+
+        fn terminate(&self) -> Result<(), toyos::power::Refused> {
+            self.stop(Stop::Terminate)
         }
     }
 

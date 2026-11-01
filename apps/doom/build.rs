@@ -157,12 +157,33 @@ fn main() {
     println!("cargo:rerun-if-changed=doomgeneric");
 }
 
+/// The host's random bytes, which the provider's key exchanges draw.
+#[derive(Debug)]
+struct SystemRandom;
+
+impl rustls::crypto::SecureRandom for SystemRandom {
+    fn fill(&self, bytes: &mut [u8]) -> Result<(), rustls::crypto::GetRandomFailed> {
+        getrandom::fill(bytes).map_err(|_| rustls::crypto::GetRandomFailed)
+    }
+}
+
+static TLS: toyos_crypto::rustls_provider::Backend = toyos_crypto::rustls_provider::Backend::new(&SystemRandom);
+
+/// toyos-crypto's provider, exchanging keys on X25519 alone, hybrid or not,
+/// as the build's own client does (`build/release.rs`).
+fn tls_provider() -> std::sync::Arc<rustls::crypto::CryptoProvider> {
+    let mut provider = TLS.provider();
+    provider.kx_groups.retain(|group| matches!(group.name(), rustls::NamedGroup::X25519MLKEM768 | rustls::NamedGroup::X25519));
+    std::sync::Arc::new(provider)
+}
+
 /// Root `CLAUDE.md`'s: the only `User-Agent` ToyOS sends.
 const USER_AGENT: &str = "toyos-build (https://github.com/ToyOSOrg/ToyOS)";
 
 fn download_doomgeneric(root: &Path) {
     println!("Downloading doomgeneric {DOOMGENERIC_COMMIT}...");
-    let agent = ureq::Agent::config_builder().user_agent(USER_AGENT).build().new_agent();
+    let tls = ureq::tls::TlsConfig::builder().unversioned_rustls_crypto_provider(tls_provider()).build();
+    let agent = ureq::Agent::config_builder().user_agent(USER_AGENT).tls_config(tls).build().new_agent();
     // The commit is the checksum: GitHub's archive of a sha is that sha's tree
     // and can be nothing else, so pinning the URL needs no second hash of ours.
     let resp = agent

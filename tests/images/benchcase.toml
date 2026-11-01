@@ -1,35 +1,60 @@
 # The boot `osbench` measures ToyOS on, for a comparison with the same program
 # on the bench's own Linux (`tests/guest/osbench`).
 #
-# Only what a job list needs to run and to reach the log on the boot stick: no
-# compositor, sound or network, so little but the measurement asks for a CPU.
-# The ACPI server is that need too: the stick's claim waits for its
-# declaration. DATA is memory here, the stick having no DATA partition, and
-# the log volume is the one persistent volume a job can write (`osbench
-# persist`).
+# Only what a job list needs to run and to reach the log, the ACPI server, and
+# netstack for `osbench lan` and `osbench internet`, each its own metal row
+# (`tests/toyos.rs`): no compositor or sound, so little but the measurement
+# asks for a CPU. The image has no DATA partition, so DATA is the bench's: the
+# TOYOS-DATA partition on its NVMe, which `osbench persist` writes, and which
+# the `osbench` row refuses a boot to be without.
 #
 # The runner's capability carries `jobs`, for the fairness run that starts each
 # workload as a job of its own; `counters`, `trace` and `roster`, so `osbench
 # tail` can read each CPU's SMIs and clock, the scheduler's diary and each
-# process's name and CPU time around a late wake; and `dup`, so each job is
-# handed a duplicate. No other benchmark's path uses them. An unprivileged
+# process's name and CPU time around a late wake; `inventory`, so `osbench
+# identity` lists the PCI functions; and `dup`, so each job is handed a
+# duplicate. No other benchmark's path uses them. An unprivileged
 # Linux program has no observation rights to match, which the report says.
 [boot]
-start = ["acpiserver", "logkeeper", "diskserver", "fileserver", "test-runner"]
+start = ["logkeeper", "diskserver", "fileserver", "acpiserver", "netstack", "test-runner"]
 
+# `log`, which `lan_lease` waits for netstack's lease on.
 [programs.logkeeper]
 service = true
 syscap = ["logread"]
+serves = ["log"]
+
+# ACPI mode, as a shipped image and the bench's Linux run it. In the legacy
+# mode the T14's firmware hands over, it stops every CPU for 4.5 ms every 2.2 s
+# (`issues/the-t14s-firmware-interrupts-every-cpu-every-2-2-s-under-toyos.md`).
+# Started before `test-runner`, so its claim's enable precedes every job.
+[programs.acpiserver]
+service = true
+devices = ["acpi"]
+receives = ["power"]
+
+# netstack over the T14's wired I219, the only card a bench has that ToyOS
+# drives: `osbench lan` reaches its peer and `osbench internet` the internet
+# through it. On the AMD bench, which has none, the supervisor starts no
+# driver, netstack has no address, and both say so.
+[programs.netstack]
+service = true
+serves = ["netstack", "link"]
+
+[programs.i219]
+drives = ["pci:02:00:00/8086:15fc"]
+receives = ["link"]
 
 # The order `osbench all` runs the groups in. The bound is the metal row's, its
-# 240 s on the 60 s every list has (`tests/toyos.rs`), restated for a boot of
+# 465 s on the 60 s every list has (`tests/toyos.rs`), restated for a boot of
 # this config built without the row; a derived metal config states its own.
 [programs.test-runner]
-receives = ["power"]
-syscap = ["jobs", "counters", "trace", "roster", "dup"]
+receives = ["power", "netstack", "log"]
+syscap = ["jobs", "counters", "trace", "roster", "inventory", "dup"]
 args = [
-    "--bound-ms=300000",
+    "--bound-ms=525000",
     "osbench_boot",
+    "osbench_identity",
     "osbench_system",
     "osbench_sched",
     "osbench_fair",
@@ -41,7 +66,9 @@ args = [
     "osbench_time",
     "osbench_work",
     "osbench_tail",
+    "osbench_nvme",
     "osbench_persist",
+    "osbench_crunch",
     "reboot",
 ]
 
@@ -51,6 +78,8 @@ args = [
 
 [symlinks]
 "bin/osbench_boot" = "/system/bin/osbench"
+"bin/osbench_identity" = "/system/bin/osbench"
+"bin/osbench_energy" = "/system/bin/osbench"
 "bin/osbench_system" = "/system/bin/osbench"
 "bin/osbench_sched" = "/system/bin/osbench"
 "bin/osbench_fair" = "/system/bin/osbench"
@@ -62,6 +91,10 @@ args = [
 "bin/osbench_time" = "/system/bin/osbench"
 "bin/osbench_work" = "/system/bin/osbench"
 "bin/osbench_tail" = "/system/bin/osbench"
+"bin/osbench_nvme" = "/system/bin/osbench"
+"bin/osbench_lan" = "/system/bin/osbench"
+"bin/osbench_internet" = "/system/bin/osbench"
+"bin/osbench_crunch" = "/system/bin/osbench"
 "bin/osbench_persist" = "/system/bin/osbench"
 "bin/reboot" = "/system/bin/toybox"
 
@@ -73,19 +106,18 @@ service = true
 restart = true
 serves = ["block", "disk"]
 
-# The NVMe driver: one process per such controller, reading its own table and
-# offering its disk to the block service. QEMU's controller alone, so a metal
-# boot leaves the bench's own NVMe disk to its firmware.
+# The NVMe driver: one process per NVMe controller, whatever its maker, reading
+# its own table and offering its disk to the block service. Another system's
+# partitions on that disk are reached by no grant (`toyos_supervisor::storage`).
 [programs.nvme]
-drives = ["pci:01:08:02/1b36:0010"]
+drives = ["pci:01:08:02"]
 receives = ["disk"]
 
-# The USB driver, one process per boot controller: QEMU's `nec-usb-xhci`, the
-# T14's 00:14.0 and the AMD bench's 03:00.3. QEMU's spare, the T14's Type-C
-# controller and the AMD bench's 03:00.4 stay free for the tests that claim
-# them.
+# The USB driver: QEMU's `nec-usb-xhci`, and the controller firmware booted
+# through where that is an xHCI, which on a bench booted off its NVMe is none.
+# Every other xHCI controller stays free for the tests that claim one.
 [programs.usbd]
-drives = ["pci:0c:03:30/1033:0194", "pci:0c:03:30/8086:a0ed", "pci:0c:03:30/1022:1639@03:00.3"]
+drives = ["pci:0c:03:30/1033:0194", "pci:0c:03:30@boot"]
 receives = ["disk"]
 
 # The file servers: DATA, the log and the boot volume, one process
@@ -93,12 +125,6 @@ receives = ["disk"]
 # one ends, on the same ports.
 [programs.fileserver]
 restart = true
+pager = true
 roles = ["data", "log", "boot"]
 receives = ["block"]
-
-# Started before every PCI claimant: it declares the memory the root bridges
-# decode, which every claim of a PCI function waits for.
-[programs.acpiserver]
-service = true
-devices = ["acpi"]
-receives = ["power"]

@@ -15,12 +15,13 @@ outside the tree it was asked to remove. libc++ says so of that walk
 https://reviews.llvm.org/D118134), the class of CVE-2022-21658. Its other walk
 holds a descriptor for each directory and resolves every name against it
 (`openat`, `fdopendir`, `unlinkat`, `O_DIRECTORY`, `O_NOFOLLOW`,
-`AT_REMOVEDIR`), and ToyOS has no such descriptor: `open` refuses every
-directory, and the kernel resolves every path from the root.
+`AT_REMOVEDIR`). libc has each of those but `O_NOFOLLOW`, and a descriptor of
+a directory the kernel's `/tmp` holds names its path, which the kernel
+resolves from the root (`sdk/toyos/src/files.rs`).
 
 Owner: `issues/toyos-builds-itself.md`, beside its path, since no exit there
 needs it; its M2 clang brought `std::filesystem` in.
 
-**Exit**: a directory opens as a handle that the kernel resolves names
-against, libc defines `openat`, `fdopendir` and `unlinkat` over it, and
+**Exit**: libc's `openat` takes `O_NOFOLLOW`, a descriptor of every
+directory names the directory itself and not its path, and
 `build/libcxx.rs` passes no `REMOVE_ALL_USE_DIRECTORY_ITERATOR`.

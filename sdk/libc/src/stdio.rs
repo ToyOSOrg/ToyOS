@@ -4,7 +4,12 @@ use toyos_abi::syscall::SeekFrom;
 
 // Platform fd operations
 
-fn sys_close(fd: i32) { let _ = toyos::fd::close(fd); }
+/// # Safety
+/// The `FILE` closing owns `fd`.
+unsafe fn sys_close(fd: i32) {
+    // SAFETY: the caller's.
+    let _ = unsafe { toyos::fd::close(fd) };
+}
 
 fn sys_read(fd: i32, buf: &mut [u8]) -> isize {
     match files::read(fd, buf) {
@@ -34,11 +39,6 @@ fn sys_seek(fd: i32, offset: i64, whence: i32) -> i64 {
 }
 
 fn sys_fsync(fd: i32) { let _ = files::fsync(fd); }
-
-/// `0`, or `-1` with `errno` set for the refusal.
-fn answered(done: Result<(), files::Error>) -> i32 {
-    done.map_or_else(super::posix_io::refuse_files, |()| 0)
-}
 
 // FILE struct
 
@@ -302,11 +302,6 @@ pub static mut stdin: *mut FILE = &raw mut STDIN_FILE;
 
 // FILE I/O
 
-unsafe fn c_str_bytes(s: *const u8) -> &'static [u8] {
-    let len = super::string::strlen(s);
-    unsafe { core::slice::from_raw_parts(s, len) }
-}
-
 #[no_mangle]
 pub unsafe extern "C" fn fopen(path: *const u8, mode: *const u8) -> *mut FILE {
     use super::posix_io::{O_APPEND, O_CREAT, O_RDONLY, O_RDWR, O_TRUNC, O_WRONLY};
@@ -331,7 +326,8 @@ pub unsafe extern "C" fn fopen(path: *const u8, mode: *const u8) -> *mut FILE {
 
     let f = super::memory::malloc(core::mem::size_of::<FILE>()) as *mut FILE;
     if f.is_null() {
-        sys_close(fd);
+        // SAFETY: the descriptor `open` answered above, which no `FILE` took.
+        unsafe { sys_close(fd) };
         return ptr::null_mut();
     }
     unsafe { ptr::write(f, new_stream(fd)); register_stream(f); }
@@ -616,12 +612,12 @@ pub(crate) unsafe fn unget(f: *mut FILE, bytes: &[u8]) -> bool {
 
 #[no_mangle]
 pub unsafe extern "C" fn remove(path: *const u8) -> i32 {
-    answered(files::unlink(unsafe { c_str_bytes(path) }))
+    unsafe { super::posix_io::unlinkat(crate::atreq::AT_FDCWD, path, 0) }
 }
 
 #[no_mangle]
 pub unsafe extern "C" fn rename(old: *const u8, new: *const u8) -> i32 {
-    answered(files::rename(unsafe { c_str_bytes(old) }, unsafe { c_str_bytes(new) }))
+    unsafe { super::posix_io::renameat(crate::atreq::AT_FDCWD, old, crate::atreq::AT_FDCWD, new) }
 }
 
 #[no_mangle]
@@ -648,7 +644,7 @@ pub unsafe extern "C" fn atof(s: *const u8) -> f64 {
 
 #[no_mangle]
 pub unsafe extern "C" fn mkdir(path: *const u8, _mode: u32) -> i32 {
-    answered(files::mkdir(unsafe { c_str_bytes(path) }))
+    unsafe { super::posix_io::mkdirat(crate::atreq::AT_FDCWD, path, 0) }
 }
 
 #[no_mangle]

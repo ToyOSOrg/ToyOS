@@ -6,7 +6,9 @@ edition = "2021"
 license = "MIT OR Apache-2.0"
 
 [dependencies]
-toyos = { path = "../../sdk/toyos" }
+toyos = { path = "../../sdk/toyos", features = ["std"] }
+# The quit a closed window asks of the shell, by the handle std's `Child` holds.
+toyos-abi = { path = "../../sdk/abi" }
 toyos-font = { path = "../../sdk/font" }
 toyos-window = { path = "../../sdk/window" }
 

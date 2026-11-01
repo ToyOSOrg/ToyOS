@@ -805,13 +805,13 @@ mod tests {
     #[test]
     fn the_icons_are_the_pixels_compared_with_resvg() {
         let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
-        let mut digest = toyos_sha2_hw::sha256();
+        let mut digest = toyos_crypto::hash::Sha256::new();
         for &(stem, edge) in SHIPPED {
             let svg = std::fs::read(root.join(format!("assets/icons/{stem}.svg"))).expect("a committed icon");
             let mask = Icon::parse(std::str::from_utf8(&svg).unwrap()).mask(edge as usize);
-            digest.update(edge.to_le_bytes());
-            digest.update(edge.to_le_bytes());
-            digest.update(mask.alpha());
+            digest.update(&edge.to_le_bytes()).unwrap();
+            digest.update(&edge.to_le_bytes()).unwrap();
+            digest.update(mask.alpha()).unwrap();
         }
         let hex: String = digest.finalize().iter().map(|b| format!("{b:02x}")).collect();
         assert_eq!(

@@ -12,8 +12,9 @@
 //! - A round every CPU answered, read until there is one: each CPU's record
 //!   is in its place, carries its stamp, and names a hardware id no other
 //!   does — a reader that filled every block itself would name its own on
-//!   each. The next round: every stamp moved on, and every CPU but at most
-//!   the reader's own took a kick in between, which a kick counted as anything
+//!   each. The read straight after: every stamp moved on, since every answer
+//!   is taken after its read was called, and every CPU but at most the
+//!   reader's own took a kick in between, which a kick counted as anything
 //!   else would not show.
 //! - The rights: on `COUNTERS` alone the counters that time programs are
 //!   absent and the rest as before; without it, and on a handle that is no
@@ -57,13 +58,7 @@ fn main() {
     assert_eq!(cap().counters(&mut []), Ok(cpus), "the empty buffer's count");
 
     let first = answered(cap());
-    let second = loop {
-        let next = answered(cap());
-        // Equal stamps are the same round, joined; a later one is the next.
-        if next.iter().zip(&first).any(|(n, f)| n.get(Counter::Stamp) != f.get(Counter::Stamp)) {
-            break next;
-        }
-    };
+    let second = answered(cap());
     for (cpu, (f, s)) in first.iter().zip(&second).enumerate() {
         assert!(s.get(Counter::Stamp) > f.get(Counter::Stamp), "cpu{cpu}'s stamp did not move: {f:?} then {s:?}");
         assert_eq!(f.hardware_id, s.hardware_id, "cpu{cpu} named two hardware ids");
@@ -171,5 +166,5 @@ fn unheld() {
 
 /// The kernel handle this process's standard output is, descriptor 1's.
 fn stdout() -> RawHandle {
-    toyos::fd::with(1, |o| o.handle).expect("the test is given a standard output")
+    toyos::fd::with(1, |o| o.handle().map(toyos::BorrowedHandle::raw)).ok().flatten().expect("the test is given a standard output")
 }

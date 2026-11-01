@@ -2,7 +2,7 @@
 
 use core::sync::atomic::Ordering;
 use toyos_abi::audio::AudioSlotHeader;
-use crate::ipc::IpcError;
+use crate::ipc::{self, FrameRx, IpcError};
 use crate::shm::SharedMemory;
 
 pub const MSG_STREAM_OPEN: u32 = 1;
@@ -39,8 +39,8 @@ crate::ipc_payload! {
         pub format: u16,
     }
 
-    /// What the ring is shaped like. **The ring itself and the signal pipe
-    /// arrive as handles**, sent ahead of this frame — see
+    /// What the ring is shaped like. **The ring itself and the signal
+    /// arrive as handles**, sent with this frame — see
     /// [`STREAM_OPENED_HANDLES`].
     pub struct StreamOpenResponse {
         pub client_period_frames: u32,
@@ -83,15 +83,13 @@ crate::ipc_payload! {
 }
 
 /// The two handles `MSG_STREAM_OPENED` is sent with: the slot ring, then the
-/// read end of the pipe soundserver signals on.
+/// wait side of the event soundserver signals on.
 ///
 /// **Both travel soundserver → client**, which is the direction that makes a dead
-/// client detectable: the last `PipeReadEnd` handle goes with the client's
-/// table and soundserver's next signal answers `Gone`, by construction rather than
-/// by bookkeeping.
+/// client detectable: the wait side goes with the client's table and
+/// soundserver's next signal answers `Gone`, by construction rather than by
+/// bookkeeping.
 pub const STREAM_OPENED_HANDLES: usize = 2;
-pub const STREAM_OPENED_SHM: usize = 0;
-pub const STREAM_OPENED_SIGNAL: usize = 1;
 
 pub struct AudioSlotWriter {
     shm: SharedMemory,
@@ -99,23 +97,22 @@ pub struct AudioSlotWriter {
     slot_count: u32,
 }
 
-/// Exclusive access to one ring slot. Holding the guard mutably borrows the
-/// writer, so a second slot cannot be handed out until this one is committed
-/// or dropped — the aliasing that made repeated `slot_data_mut` calls unsound
-/// is unrepresentable.
+/// The next free slot, held until it is committed or dropped. Holding it
+/// mutably borrows the writer, so a second one cannot be handed out meanwhile.
 pub struct SlotWriteGuard<'a> {
     writer: &'a mut AudioSlotWriter,
     idx: u32,
 }
 
 impl SlotWriteGuard<'_> {
-    pub fn data(&mut self) -> &mut [u8] {
+    /// Copy one period of `data` into the slot and publish it to soundserver.
+    ///
+    /// # Panics
+    /// Unless `data` is one period long.
+    pub fn commit(self, data: &[u8]) {
         let slot = self.idx % self.writer.slot_count;
-        self.writer.slot_data_mut(slot)
-    }
-
-    /// Publish the filled slot to soundserver.
-    pub fn commit(self) {
+        assert_eq!(data.len(), self.writer.period_bytes as usize, "audio: a slot filled with part of a period");
+        self.writer.slot(slot).write(0, data);
         self.writer
             .header()
             .write_idx
@@ -132,11 +129,8 @@ impl AudioSlotWriter {
         unsafe { &*(self.shm.as_ptr() as *const AudioSlotHeader) }
     }
 
-    fn slot_data_mut(&mut self, slot_idx: u32) -> &mut [u8] {
-        let offset = AudioSlotHeader::SIZE + slot_idx as usize * self.period_bytes as usize;
-        unsafe {
-            core::slice::from_raw_parts_mut(self.shm.as_ptr().add(offset), self.period_bytes as usize)
-        }
+    fn slot(&self, slot_idx: u32) -> crate::shm::Bytes<'_> {
+        slot_bytes(&self.shm, slot_idx, self.period_bytes)
     }
 
     /// Acquire the next free slot for writing. Returns None if the ring is full.
@@ -152,6 +146,12 @@ impl AudioSlotWriter {
     }
 }
 
+/// Slot `slot_idx`'s period of the ring.
+fn slot_bytes(shm: &SharedMemory, slot_idx: u32, period_bytes: u32) -> crate::shm::Bytes<'_> {
+    let offset = AudioSlotHeader::SIZE + slot_idx as usize * period_bytes as usize;
+    shm.bytes().sub(offset, period_bytes as usize)
+}
+
 pub struct AudioSlotReader {
     shm: SharedMemory,
     period_bytes: u32,
@@ -165,13 +165,6 @@ impl AudioSlotReader {
 
     fn header(&self) -> &AudioSlotHeader {
         unsafe { &*(self.shm.as_ptr() as *const AudioSlotHeader) }
-    }
-
-    fn slot_data(&self, slot_idx: u32) -> &[u8] {
-        let offset = AudioSlotHeader::SIZE + slot_idx as usize * self.period_bytes as usize;
-        unsafe {
-            core::slice::from_raw_parts(self.shm.as_ptr().add(offset), self.period_bytes as usize)
-        }
     }
 
     /// The oldest filled slot, or None if the ring is empty (underrun).
@@ -202,8 +195,15 @@ pub struct SlotReadGuard<'a> {
 }
 
 impl SlotReadGuard<'_> {
-    pub fn data(&self) -> &[u8] {
-        self.reader.slot_data(self.idx % self.reader.slot_count)
+    /// Copy the slot's period out: the client may be writing it, whatever the
+    /// protocol says.
+    ///
+    /// # Panics
+    /// Unless `out` is one period long.
+    pub fn read(&self, out: &mut [u8]) {
+        assert_eq!(out.len(), self.reader.period_bytes as usize, "audio: a slot read into part of a period");
+        let slot = self.idx % self.reader.slot_count;
+        slot_bytes(&self.reader.shm, slot, self.reader.period_bytes).read(0, out);
     }
 
     /// Release the slot back to the client.
@@ -220,10 +220,10 @@ pub enum AudioError {
     NotFound,
     /// soundserver rejected the requested format/channels/rate.
     Rejected,
-    /// soundserver closed the signal pipe (daemon exit or client removal).
+    /// soundserver let go of the stream's signal (daemon exit or client removal).
     Disconnected,
     /// soundserver announced the stream and did not send the ring and the signal
-    /// pipe with it. Handles travel in the frame that names them, so a short
+    /// with it. Handles travel in the frame that names them, so a short
     /// batch is a protocol violation and never something to wait for.
     MissingHandles,
     /// The slot ring soundserver sent is refused ([`SharedMemory::lent`]).
@@ -235,7 +235,9 @@ pub enum AudioError {
 pub struct AudioStream {
     control: crate::Connection,
     slot_writer: AudioSlotWriter,
-    signal: crate::Pipe,
+    /// The period the fill callback writes, copied into each slot it commits.
+    period: alloc::vec::Vec<u8>,
+    signal: crate::wake::Bell,
     period_frames: u32,
     device_sample_rate: u32,
     device_channels: u16,
@@ -248,9 +250,10 @@ pub struct AudioStream {
 pub fn describe_device() -> Result<DeviceDescription, AudioError> {
     let control = AudioStream::connect_soundserver()?;
     control.signal(MSG_DEVICE_DESCRIBE).map_err(AudioError::Ipc)?;
-    let header = control.recv_header().map_err(AudioError::Ipc)?;
-    match header.msg_type {
-        MSG_DEVICE_DESCRIBED => control.recv_payload(&header).map_err(AudioError::Ipc),
+    let mut rx = FrameRx::<{ core::mem::size_of::<DeviceDescription>() }>::new();
+    let frame = rx.recv(&control).map_err(AudioError::Ipc)?;
+    match frame.msg_type {
+        MSG_DEVICE_DESCRIBED => ipc::decode_payload(rx.payload(frame.payload_len)).map_err(AudioError::Ipc),
         other => Err(AudioError::Protocol(other)),
     }
 }
@@ -261,26 +264,27 @@ impl AudioStream {
         let req = StreamOpenRequest { sample_rate, channels, format };
         control.send(MSG_STREAM_OPEN, &req).map_err(AudioError::Ipc)?;
 
-        let header = control.recv_header().map_err(AudioError::Ipc)?;
-        let resp: StreamOpenResponse = match header.msg_type {
-            MSG_STREAM_OPENED => control.recv_payload(&header).map_err(AudioError::Ipc)?,
+        let mut rx = FrameRx::<{ core::mem::size_of::<StreamOpenResponse>() }>::new();
+        let frame = rx.recv(&control).map_err(AudioError::Ipc)?;
+        let resp: StreamOpenResponse = match frame.msg_type {
+            MSG_STREAM_OPENED => ipc::decode_payload(rx.payload(frame.payload_len)).map_err(AudioError::Ipc)?,
             MSG_STREAM_ERROR => return Err(AudioError::Rejected),
             other => return Err(AudioError::Protocol(other)),
         };
 
-        let batch = control
-            .recv_handles_exact::<STREAM_OPENED_HANDLES>(&header)
-            .ok_or(AudioError::MissingHandles)?;
-        let signal = crate::Pipe(crate::OwnedHandle(batch[STREAM_OPENED_SIGNAL]));
+        let [shm, signal] = rx.take_handles::<STREAM_OPENED_HANDLES>().ok_or(AudioError::MissingHandles)?;
+        let signal = crate::wake::Bell::from(signal);
 
         let slot_count = resp.slot_count as u32;
         let shm_size = AudioSlotHeader::SIZE + slot_count as usize * resp.client_period_bytes as usize;
-        let shm = SharedMemory::lent(batch[STREAM_OPENED_SHM], shm_size).map_err(AudioError::Lent)?;
+        let shm = SharedMemory::lent(shm, shm_size)
+            .map_err(AudioError::Lent)?;
         let slot_writer = AudioSlotWriter::new(shm, resp.client_period_bytes, slot_count);
 
         Ok(Self {
             control,
             slot_writer,
+            period: alloc::vec![0; resp.client_period_bytes as usize],
             signal,
             period_frames: resp.client_period_frames,
             device_sample_rate: resp.device_sample_rate,
@@ -293,18 +297,16 @@ impl AudioStream {
     /// Block until soundserver signals, then fill all available ring slots via the
     /// callback. Each callback invocation receives one period-sized buffer.
     ///
-    /// Returns `Err(Disconnected)` on signal-pipe EOF (soundserver is gone or
-    /// removed this client) — the caller must stop the stream, not retry.
+    /// Returns `Err(Disconnected)` once soundserver has let go of the signal
+    /// (it is gone or removed this client) — the caller must stop the stream,
+    /// not retry.
     pub fn wait_and_fill(&mut self, mut callback: impl FnMut(&mut [u8])) -> Result<(), AudioError> {
-        let mut buf = [0u8; 64];
-        match self.signal.read(&mut buf) {
-            Ok(0) => return Err(AudioError::Disconnected),
-            Ok(_) => {}
-            Err(e) => return Err(AudioError::Ipc(IpcError::Syscall(e))),
+        if self.signal.wait_for(u64::MAX).is_err() {
+            return Err(AudioError::Disconnected);
         }
-        while let Some(mut slot) = self.slot_writer.begin_fill() {
-            callback(slot.data());
-            slot.commit();
+        while let Some(slot) = self.slot_writer.begin_fill() {
+            callback(&mut self.period);
+            slot.commit(&self.period);
         }
         Ok(())
     }

@@ -1,7 +1,7 @@
 use crate::layout::Desk;
 use crate::rect::Rect;
 use crate::window::Level;
-use toyos_abi::syscall::SHM_PAGE;
+use toyos_abi::syscall::PAGE_SIZE;
 
 /// Share of physical memory the compositor will hold in window buffers.
 ///
@@ -21,13 +21,13 @@ pub const WINDOW_BUDGET_SHARE: u64 = 8;
 /// bounded by the screen too. **A window holds two from a resize until its
 /// client presents into the new one, and never more** ([`crate::Buffers`]) —
 /// every window at once on a change of scale, and for as long as a client
-/// that never presents again lives. A buffer costs whole [`SHM_PAGE`]s, so a
-/// one-pixel window still costs two.
+/// that never presents again lives. A buffer costs whole [`PAGE_SIZE`]s, so a
+/// one-pixel window still costs two of them.
 ///
 /// Deliberately a function of the screen — a bigger screen means bigger
 /// windows means fewer of them — which no bare constant expresses.
 pub fn window_bytes(screen: Rect) -> u64 {
-    let page = SHM_PAGE as u64;
+    let page = PAGE_SIZE as u64;
     2 * (screen.area() * 4).div_ceil(page).max(1) * page
 }
 
@@ -153,11 +153,11 @@ mod tests {
     /// Two buffers, each of whole pages.
     #[test]
     fn a_window_costs_two_buffers_of_whole_pages() {
-        let page = SHM_PAGE as u64;
+        let page = PAGE_SIZE as u64;
         assert_eq!(window_bytes(Rect::new(0, 0, 1, 1)), 2 * page);
-        // 1920*1080*4 = 8_294_400, which is three pages and most of a fourth.
-        assert_eq!(window_bytes(HD), 2 * 4 * page);
-        assert_eq!(window_bytes(Rect::new(0, 0, 2048, 2048)), 2 * 8 * page);
+        // 1920*1080*4 = 8_294_400, which is 2,025 pages exactly.
+        assert_eq!(window_bytes(HD), 2 * 2025 * page);
+        assert_eq!(window_bytes(Rect::new(0, 0, 2048, 2048)), 2 * 4096 * page);
     }
 
     #[test]

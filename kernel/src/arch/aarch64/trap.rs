@@ -215,7 +215,7 @@ fn irq(frame: &Frame, from_el0: bool) -> bool {
         irqchip::SGI_KICK => {
             percpu::irq_took(Source::Kick);
             crate::counters::serve_here();
-            true
+            crate::sched::driver::pass_owed()
         }
         #[cfg(feature = "boot-actuators")]
         irqchip::SGI_STORM => {
@@ -308,7 +308,13 @@ fn user_abort(frame: &mut Frame) {
             user_fatal(frame);
         }
         cpu::enable_interrupts();
-        let served = crate::process::handle_page_fault(frame.far, frame.esr);
+        // `WnR`, bit 6 of a data abort's syndrome: the access was a write.
+        let access = match (frame.esr >> 26 == EC_IABT_LOWER, frame.esr & (1 << 6) != 0) {
+            (true, _) => kernel::vm::Access::Exec,
+            (false, true) => kernel::vm::Access::Write,
+            (false, false) => kernel::vm::Access::Read,
+        };
+        let served = crate::process::handle_page_fault(frame.far, access);
         cpu::disable_interrupts();
         if served {
             percpu::set_fault_state(CpuFaultState::Normal);

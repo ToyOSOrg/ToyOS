@@ -22,21 +22,21 @@ in turn, each carrying at most `SHARED_BOOT_BYTES` (64 MiB) of test binaries;
 carries `tests/images/testcases.toml`'s own programs, 13 MiB (3328 blocks), where every test
 boot carried the whole 619 MiB catalogue before.
 
-**A running `/system` program's pages are in RAM three times.** Its spawn
-reads the whole binary through SYSTEM into a memory object of the spawner's
-(`toyos::process::Image`, rounded up to 2 MiB), which lives as long as the
-child pages from it, and `SharedImage::read_page`
-(`kernel/src/file_backing.rs`) copies each page the child touches out of that
-object: ROOT's copy, the image's and the page's are all held. Before ROOT
-left the kernel, the kernel paged a program from ROOT and the image's copy was
-not there. Measured on QEMU's x86-64 machine booting
+**A running `/system` program's pages are in RAM twice.** Its spawn names
+SYSTEM's object for the file, a subrange of ROOT's own pages (`fs::IMAGE`,
+`SYS_SHM_SUB`), and `SharedImage::read_page` (`kernel/src/file_backing.rs`)
+copies each page the child touches out of it: ROOT's copy and the page's are
+held. Until SYSTEM handed that object out, each spawn also read the whole
+binary into an image object of the spawner's, a third copy, and the
+measurements below are of that design. Measured on QEMU's x86-64 machine booting
 `tests/images/testcases.toml`, toybox's `free` after the boot: 330 MiB in use
 at `b9e4c5862`, 384 MiB once ROOT left the kernel, one boot each, the same
 session; the 54 MiB are the running services' images, each rounded up to
 2 MiB, and the SYSTEM file server.
 
-**Per held child, the image is 2 MiB of a 16 MiB cost, and it is what puts
-255 children past a 4 GiB guest.** `libc_children`'s `spawn_children_cap`
+**Per held child, the image was 2 MiB of a 16 MiB cost, and it was what put
+255 children past a 4 GiB guest**, while each spawn read one; a `/system`
+program's spawn now holds no image object of its own. `libc_children`'s `spawn_children_cap`
 holds 255 unwaited children of one `/system` program. Measured on QEMU's x86-64
 machine, `tests/images/libccase.toml`, 4 GiB, toybox's `free` every 50 held
 children, one boot each in the same session (a scratch patch to the case, not
@@ -79,7 +79,7 @@ Not measured: the T14. What that run owes is that line off the stick and off
 NVMe, against the base's `Boot: complete`.
 
 Exit: a program's pages mapped from ROOT's own read-only pages rather than
-copied, before the self-update's signature check makes the whole read a fixed
+copied into each process, before the self-update's signature check makes the whole read a fixed
 cost. The orchestrator ruled the mechanism (2026-10-22): the memory design's
 stages 2, 4 and 6, namely 4 KiB pages, so an image is a program's size and not
 2 MiB; memory-object subranges; and immutable file objects shared across

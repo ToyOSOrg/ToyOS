@@ -1,0 +1,3 @@
+a block grown to 64 MiB keeps its bytes: yes
+shrunk back to a kibibyte, it keeps its bytes: yes
+a large calloc reads zeros: yes

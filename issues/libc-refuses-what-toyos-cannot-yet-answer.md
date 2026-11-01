@@ -10,25 +10,20 @@ These answer failure in their POSIX form and do nothing
 (`sdk/libc/src/refused.rs`, `posix_io.rs`), each asserted by
 `tests/corpus/tinycc/206_libc_refusals.c`. Each waits on what it names:
 
-- `link`, `ENOSYS`: no call gives a file a second name.
 - `symlink` of a link the kernel would hold, `ENOSYS`: `SYS_SYMLINK`
   displaces what its name held
   (`issues/a-symbolic-link-on-tmp-displaces-its-name-and-lists-nowhere.md`). A
   file server makes one and refuses a name that exists, as POSIX has it.
-- `chmod` and `fchmod`, `ENOSYS`: a file has no mode bits to set.
-- `utimes`, `ENOSYS`: no call sets a file's times.
+- `chmod`, `fchmod` and `fchmodat`, `ENOSYS`: a file has no mode bits to set.
 - `statvfs` and `fstatvfs`, `ENOSYS`: no call answers a filesystem's size or
   free space.
 - `getrlimit` and `setrlimit`, `ENOSYS`: no call answers a process's limits.
   LLVM's `getDefaultStackSize` (`llvm/lib/Support/ProgramStack.cpp`) ignores
   the failure and reads the `rlimit` it did not get.
 - `gethostname`, `ENOSYS`: no host name is published to a process.
-- `msync` and `mprotect`, `ENOSYS`: no call answers which pages of a range are
-  mapped, and a mapping's protection is fixed when it is made.
-- `mmap` of a file, `ENODEV`, and of executable memory, `ENOTSUP`: the kernel
-  maps neither.
-- `madvise`'s `MADV_DONTNEED`, `ENOSYS`: no call discards a range's pages and
-  keeps it mapped, so it cannot read back as zeros as Linux's does.
+- `msync`, `ENOSYS`: no mapping is of a file, so there is nothing to write back.
+- `mmap` of a file, `ENODEV`, and `mmap` or `mprotect` of executable memory,
+  `ENOTSUP`: the kernel maps neither.
 - `fcntl` (`sdk/libc/src/fdreq.rs`): a record lock, `EINVAL`, POSIX's answer
   for a file that supports no locking; `F_GETFL`, `F_SETFL`, `F_GETOWN` and
   `F_SETOWN`, `ENOSYS`.

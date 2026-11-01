@@ -63,11 +63,19 @@ mod tests {
         Record { cpu, hardware_id: cpu * 2, stale, values }
     }
 
-    /// The T14's shape: every counter on every CPU, and the firmware's
-    /// calls on the boot processor, which makes them.
+    /// Every counter on every CPU, and the firmware's calls on the boot
+    /// processor, which makes them.
     fn whole(cpu: u32) -> Record {
         let (calls, nanos) = if cpu == 0 { (Some(1), Some(15_968)) } else { (None, None) };
-        record(cpu, false, [Some(10), Some(4817), Some(100), Some(200), Some(3), Some(0x8000_2a04), Some(0x8000_ff01), Some(6), calls, nanos])
+        record(
+            cpu,
+            false,
+            [
+                Some(10), Some(4817), Some(100), Some(200), Some(3), Some(0x8000_2a04), Some(0x8000_ff01), Some(6), calls,
+                nanos, Some(40), Some(1_000), Some(3_000), Some(77_000), Some(0xa_0e03), Some(5), Some(6), Some(7), Some(8),
+                Some(900),
+            ],
+        )
     }
 
     #[test]
@@ -88,7 +96,9 @@ mod tests {
     /// `TRACE`: only what the record carries, and no zero in place of the rest.
     #[test]
     fn an_absent_counter_has_no_path() {
-        let got = render(&[record(0, false, [Some(10), None, None, None, None, None, None, None, None, None])]).unwrap();
+        let mut values = [None; Counter::COUNT];
+        values[Counter::Stamp as usize] = Some(10);
+        let got = render(&[record(0, false, values)]).unwrap();
         let paths: Vec<&str> = got.keys().map(String::as_str).collect();
         assert_eq!(paths, vec!["kernel.cpu.0.hardware_id", "kernel.cpu.0.stale", "kernel.cpu.0.stamp"]);
     }

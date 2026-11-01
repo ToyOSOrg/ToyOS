@@ -23,6 +23,15 @@ read p99 5 µs on the T14 and 25 µs on the AMD bench, with 200 of 200 wakes run
 off the busy CPU on each. With the kick reverted it read p99 10,001 µs on both
 (https://github.com/ToyOSOrg/ToyOS/pull/874).
 
+**The row's staging can be undone by the kernel.** On the T14, at PR #1071's
+`4f19eae7e`, whose branch changes no kernel, abi, std or scheduler code,
+`wake_onto_busy` refused `NotStaged` (exit -5) with "the waker left CPU 3 for
+6": the kernel moved the spinning waker after staging, so that run measured
+nothing. The 36 T14 readbacks of it from 2026-10-13 to 2026-10-27 each measured
+a p99 (4 to 30 µs). Why a CPU-bound thread was moved while other CPUs sat idle
+is not established; a row that reds on it would be reading placement, not the
+wake.
+
 **What is still owed.** This file's own arm is a wake beside seven CPU-bound
 spinners on eight CPUs, so one CPU is left idle, held to a post-to-dispatch
 p99 under 100 µs. No row runs that shape or holds that bound: `wake_onto_busy`

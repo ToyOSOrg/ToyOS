@@ -18,21 +18,19 @@
 #[path = "../image.rs"]
 mod image;
 
-use std::os::toyos::process::ChildExt;
+use std::os::toyos::io::AsRawHandle;
 use std::process::Command;
 
-use toyos_abi::clock::{ClockPage, CLOCK_MAGIC, CLOCK_PAGE};
-use toyos_abi::syscall::{self, MmapFlags, MmapProt, OpenFlags, ProcessStats, SeekFrom, SyscallError};
+use toyos_abi::clock::{ClockPage, CLOCK_PAGE};
+use toyos_abi::syscall::{self, OpenFlags, VmAt, VmProt, ProcessStats, SeekFrom, SyscallError};
 use toyos_abi::RawHandle;
 
 const SELF_PATH: &str = "/system/bin/test_rs_abuse_readonly_copyout";
 const CHILD_ARG: &str = "reads-the-clock";
-const PAGE_2M: usize = 2 * 1024 * 1024;
 const PAGE_4K: u64 = 4096;
 /// Covers a `ProcessStats`, and ends inside the file this reads.
 const LEN: usize = core::mem::size_of::<ProcessStats>();
-/// Bytes `0..=255`, so a probe can offer any page its own byte back, then the
-/// bytes the straddling `read` offers, at [`STRADDLE_AT`].
+/// The bytes the straddling `read` offers, at [`STRADDLE_AT`].
 const PROBE_PATH: &[u8] = b"/tmp/abuse_readonly_copyout.bin";
 const STRADDLE_AT: u64 = 256;
 /// The straddling `read`: half on the last writable page, half on the next.
@@ -43,10 +41,6 @@ const MMAP_BIT: i32 = 1;
 const TEXT_BIT: i32 = 2;
 const STRADDLE_BIT: i32 = 4;
 const CLOCK_BIT: i32 = 8;
-
-/// In `.bss`, so its 2 MiB window also holds the pages past the image's end,
-/// which the pager maps read-only.
-static mut BSS: u8 = 0;
 
 fn snapshot(addr: u64) -> [u8; LEN] {
     let mut out = [0u8; LEN];
@@ -79,7 +73,8 @@ fn refused(what: &str, addr: u64, stats: RawHandle) -> Result<(), String> {
     let before = snapshot(addr);
     let fd = open_self();
     let ret = syscall::read(fd, unsafe { target(addr, LEN) });
-    syscall::close(fd);
+    // SAFETY: no type holds this number.
+    unsafe { syscall::close(fd) };
     if before != snapshot(addr) {
         return Err(format!("read wrote into {what}"));
     }
@@ -98,81 +93,42 @@ fn refused(what: &str, addr: u64, stats: RawHandle) -> Result<(), String> {
 }
 
 fn refused_mmap(stats: RawHandle) -> Result<(), String> {
-    let ro = unsafe {
-        syscall::mmap(
-            core::ptr::null_mut(),
-            PAGE_2M,
-            MmapProt::READ,
-            MmapFlags::ANONYMOUS | MmapFlags::PRIVATE,
-        )
-    };
-    assert!(!ro.is_null(), "mmap a read-only page");
+    // SAFETY: placed anywhere, so it replaces nothing.
+    let ro = unsafe { syscall::vm_reserve(PAGE_4K as usize, VmProt::Read, VmAt::ANYWHERE) }.expect("reserve a read-only page");
     let verdict = refused("a read-only mmap", ro as u64, stats);
-    unsafe { syscall::munmap(ro, PAGE_2M) }.expect("munmap");
+    unsafe { syscall::vm_release(ro, PAGE_4K as usize) }.expect("release");
     verdict
 }
 
-/// The first page at or above [`BSS`], inside its 2 MiB window, a `read` may
-/// not write; each page below it took a 1-byte `read` of its own first byte.
-fn first_unwritable_page(probe: RawHandle) -> Option<u64> {
-    let pipe = syscall::pipe().expect("pipe");
-    let bss = &raw const BSS as u64;
-    let window_end = (bss & !(PAGE_2M as u64 - 1)) + PAGE_2M as u64;
-    let mut page = bss & !(PAGE_4K - 1);
-    let mut found = None;
-    while page < window_end {
-        let from = unsafe { core::slice::from_raw_parts(page as *const u8, 1) };
-        assert_eq!(syscall::write(pipe.write, from), Ok(1), "write from {page:#x}, in .bss's window");
-        syscall::read(pipe.read, &mut [0u8; 1]).expect("drain the pipe");
-        let own = unsafe { (page as *const u8).read_volatile() };
-        syscall::seek(probe, SeekFrom::Start(own as u64)).expect("seek the probe");
-        let ret = syscall::read(probe, unsafe { target(page, 1) });
-        if ret == Err(SyscallError::BadAddress) {
-            found = Some(page);
-            break;
-        }
-        assert_eq!(ret, Ok(1), "a 1-byte read into {page:#x}");
-        page += PAGE_4K;
-    }
-    syscall::close(pipe.read);
-    syscall::close(pipe.write);
-    found
-}
-
 /// A `read` that starts on a writable page and runs into the read-only page
-/// after it, in one 2 MiB window, is refused whole.
+/// after it is refused whole.
 fn refused_across_pages() -> Result<(), String> {
     let flags = OpenFlags::READ | OpenFlags::WRITE | OpenFlags::CREATE | OpenFlags::TRUNCATE;
     let probe = syscall::open(PROBE_PATH, flags).expect("create the probe file");
-    let every: Vec<u8> = (0..=255).collect();
-    syscall::write(probe, &every).expect("fill the probe file");
-    let verdict = match first_unwritable_page(probe) {
-        None => Err(format!(
-            "no page above .bss at {:#x} refuses a write in its 2 MiB window",
-            &raw const BSS as u64
-        )),
-        Some(page) => {
-            assert!(page > &raw const BSS as u64, "BSS's own page refuses a write");
-            let at = page - (STRADDLE / 2) as u64;
-            let before = snapshot(at);
-            // The writable half is offered its own bytes and the read-only half their
-            // complement, so a write to the read-only page shows and one below harms nothing.
-            let offered: [u8; STRADDLE] =
-                core::array::from_fn(|i| if i < STRADDLE / 2 { before[i] } else { !before[i] });
-            syscall::seek(probe, SeekFrom::Start(STRADDLE_AT)).expect("seek the probe");
-            syscall::write(probe, &offered).expect("write the straddle's bytes");
-            syscall::seek(probe, SeekFrom::Start(STRADDLE_AT)).expect("seek the probe");
-            let ret = syscall::read(probe, unsafe { target(at, STRADDLE) });
-            if before != snapshot(at) {
-                Err(format!("read wrote across a writable page into the read-only one at {page:#x}"))
-            } else if ret != Err(SyscallError::BadAddress) {
-                Err(format!("read across into {page:#x}: {ret:?}"))
-            } else {
-                Ok(())
-            }
-        }
+    // SAFETY: placed anywhere, so it replaces nothing.
+    let pages = unsafe { syscall::vm_reserve(2 * PAGE_4K as usize, VmProt::ReadWrite, VmAt::ANYWHERE) }.expect("reserve two pages");
+    let page = pages as u64 + PAGE_4K;
+    // SAFETY: nothing holds a reference into the page.
+    unsafe { syscall::vm_protect(page as *mut u8, PAGE_4K as usize, VmProt::Read) }.expect("make the second page read-only");
+    let at = page - (STRADDLE / 2) as u64;
+    let before = snapshot(at);
+    // The writable half is offered its own bytes and the read-only half their
+    // complement, so a write to the read-only page shows and one below harms nothing.
+    let offered: [u8; STRADDLE] = core::array::from_fn(|i| if i < STRADDLE / 2 { before[i] } else { !before[i] });
+    syscall::seek(probe, SeekFrom::Start(STRADDLE_AT)).expect("seek the probe");
+    syscall::write(probe, &offered).expect("write the straddle's bytes");
+    syscall::seek(probe, SeekFrom::Start(STRADDLE_AT)).expect("seek the probe");
+    let ret = syscall::read(probe, unsafe { target(at, STRADDLE) });
+    let verdict = if before != snapshot(at) {
+        Err(format!("read wrote across a writable page into the read-only one at {page:#x}"))
+    } else if ret != Err(SyscallError::BadAddress) {
+        Err(format!("read across into {page:#x}: {ret:?}"))
+    } else {
+        Ok(())
     };
-    syscall::close(probe);
+    unsafe { syscall::vm_release(pages, 2 * PAGE_4K as usize) }.expect("release");
+    // SAFETY: no type holds this number.
+    unsafe { syscall::close(probe) };
     syscall::delete(PROBE_PATH).expect("delete the probe file");
     verdict
 }
@@ -184,8 +140,10 @@ fn second_reader() -> bool {
 
 fn main() {
     if std::env::args().nth(1).as_deref() == Some(CHILD_ARG) {
-        let page = unsafe { core::ptr::read_volatile(CLOCK_PAGE as *const ClockPage) };
-        assert_eq!(page.magic, CLOCK_MAGIC, "a second process found the clock page rewritten");
+        // SAFETY: the kernel maps the page read-only here in every address
+        // space, and every field of it is an atomic.
+        let page = unsafe { &*(CLOCK_PAGE as *const ClockPage) };
+        assert!(page.read().is_some(), "a second process found the clock page rewritten");
         std::process::exit(0);
     }
 
@@ -199,7 +157,8 @@ fn main() {
     let fd = open_self();
     assert_eq!(syscall::read(fd, &mut ok), Ok(LEN), "read into a writable buffer");
     assert_eq!(&ok[..4], b"\x7fELF", "read put something other than this file in the buffer");
-    syscall::close(fd);
+    // SAFETY: no type holds this number.
+    unsafe { syscall::close(fd) };
     syscall::process_stats(stats, &mut ProcessStats::default()).expect("process_stats into a writable value");
 
     let mut wrote = 0;
@@ -215,7 +174,11 @@ fn main() {
     }
 
     // Last, and said by its bit alone: its harm reaches every stamping reader.
-    if refused("the clock page", CLOCK_PAGE, stats).is_err() || !second_reader() {
+    // Half a page in, past the clock's own words, which the kernel rewrites
+    // when it retunes: the same frame, and bytes nothing moves.
+    const CLOCK_SPARE: u64 = CLOCK_PAGE + PAGE_4K / 2;
+    const _: () = assert!(core::mem::size_of::<ClockPage>() <= (PAGE_4K / 2) as usize && LEN <= (PAGE_4K / 2) as usize);
+    if refused("the clock page", CLOCK_SPARE, stats).is_err() || !second_reader() {
         wrote |= CLOCK_BIT;
     }
     if wrote != 0 {

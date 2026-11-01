@@ -38,7 +38,7 @@ use core::marker::PhantomData;
 use crate::sched::cpu::CpuHandles;
 use crate::sched::hw::Kicker;
 use crate::sched::mailbox::{PreemptGuard, SchedMsg};
-use crate::sched::park::{notify, revoke};
+use crate::sched::park::{notify, revoke, Deferred};
 use crate::sched::sync::{fence, Arc, AtomicU32, CellLock, Ordering};
 use crate::sched::task::{TaskShared, WakeCause};
 
@@ -156,9 +156,10 @@ impl<M: SchedMsg, R: Ring, L: CellLock<Waiters<M, R>>> Watch<M, R, L> {
     /// every ring entry, with the list lock let go.
     pub fn post<K: Kicker, P: PreemptGuard>(&self, cause: WakeCause, env: &Poster<'_, M, K, P>) {
         let mut few: [Option<R>; FEW] = [const { None }; FEW];
+        let kicks = Deferred::new(env.kicker);
         let many = self.list.with(|w| {
             for waiter in &w.threads {
-                notify(&waiter.task, cause, env.cpus, env.kicker, env.preempt);
+                notify(&waiter.task, cause, env.cpus, &kicks, env.preempt);
             }
             // [`FEW`] leave the list's buffer to the next registration.
             if w.rings.len() > FEW {
@@ -171,6 +172,7 @@ impl<M: SchedMsg, R: Ring, L: CellLock<Waiters<M, R>>> Watch<M, R, L> {
             }
             Vec::new()
         });
+        drop(kicks);
         for ring in few.iter().flatten().chain(&many) {
             ring.fire(Fire::Ready);
         }
@@ -184,9 +186,10 @@ impl<M: SchedMsg, R: Ring, L: CellLock<Waiters<M, R>>> Watch<M, R, L> {
         cause: WakeCause,
         env: &Poster<'_, M, K, P>,
     ) {
+        let kicks = Deferred::new(env.kicker);
         self.list.with(|w| {
             for waiter in &w.threads {
-                notify(&waiter.task, cause, env.cpus, env.kicker, env.preempt);
+                notify(&waiter.task, cause, env.cpus, &kicks, env.preempt);
             }
             for ring in &w.rings {
                 ring.fire(Fire::Ready);
@@ -241,10 +244,11 @@ impl<M: SchedMsg, R: Ring, L: CellLock<Waiters<M, R>>> Watch<M, R, L> {
         if limit == 0 {
             return 0;
         }
+        let kicks = Deferred::new(env.kicker);
         self.list.with(|w| {
             let mut woken = 0;
             for waiter in w.threads.iter().filter(|t| t.token == token) {
-                if notify(&waiter.task, cause, env.cpus, env.kicker, env.preempt).woke() {
+                if notify(&waiter.task, cause, env.cpus, &kicks, env.preempt).woke() {
                     woken += 1;
                     if woken == limit {
                         break;
@@ -266,6 +270,7 @@ impl<M: SchedMsg, R: Ring, L: CellLock<Waiters<M, R>>> Watch<M, R, L> {
         cause: WakeCause,
         env: &Poster<'_, M, K, P>,
     ) -> usize {
+        let kicks = Deferred::new(env.kicker);
         self.list.with(|w| {
             let mut ended = 0;
             let mut at = 0;
@@ -275,7 +280,7 @@ impl<M: SchedMsg, R: Ring, L: CellLock<Waiters<M, R>>> Watch<M, R, L> {
                     continue;
                 }
                 let waiter = w.threads.remove(at);
-                revoke(&waiter.task, cause, env.cpus, env.kicker, env.preempt);
+                revoke(&waiter.task, cause, env.cpus, &kicks, env.preempt);
                 ended += 1;
             }
             ended
@@ -529,6 +534,41 @@ mod tests {
         for t in &tasks {
             w.unregister(t);
         }
+    }
+
+    /// Records each kick and whether the list lock was held when it was sent.
+    struct LockedKicks<'w> {
+        watch: &'w TestWatch,
+        kicks: Mutex<std::vec::Vec<(CpuId, bool)>>,
+    }
+    impl Kicker for LockedKicks<'_> {
+        fn kick(&self, target: CpuId) {
+            let held = self.watch.list.0.try_lock().is_err();
+            self.kicks.lock().unwrap().push((target, held));
+        }
+        fn runs_on(&self, _cpu: CpuId) -> bool {
+            false
+        }
+    }
+
+    /// **A post that wakes two threads parked on one CPU kicks it once, with
+    /// the list lock let go**: the second ring finds the first's edge raised
+    /// and its kick still owed.
+    #[test]
+    fn a_post_kicks_each_cpu_once_after_its_lock() {
+        let (handles, mut rx) = cpus();
+        let w = watch();
+        let kicker = LockedKicks { watch: &w, kicks: Mutex::new(vec![]) };
+        let env = Poster { cpus: &handles, kicker: &kicker, preempt: &NoPreempt };
+        let (a, b) = (task(1), task(2));
+        for t in [&a, &b] {
+            w.register(t, 7);
+            parked(t);
+        }
+        assert_eq!(w.post_n(7, usize::MAX, woken(), &env), 2);
+        assert_eq!(*kicker.kicks.lock().unwrap(), vec![(C0, false)]);
+        assert_eq!(rx.pop(&NoPreempt), Some(Msg::Wake(TaskKey(1))));
+        assert_eq!(rx.pop(&NoPreempt), Some(Msg::Wake(TaskKey(2))));
     }
 
     /// A bounded post spends nothing on a thread that was not parked, and

@@ -78,13 +78,8 @@ fn test() {
 /// kernel has no name for, so the open is refused before the path is resolved.
 /// The differential is the bit: the same open without it is the handle below.
 fn an_undefined_open_flag_bit_is_refused() {
-    const UNDEFINED: u64 = 32;
-    const KNOWN: u64 = OpenFlags::READ.0
-        | OpenFlags::WRITE.0
-        | OpenFlags::CREATE.0
-        | OpenFlags::TRUNCATE.0
-        | OpenFlags::APPEND.0;
-    const _: () = assert!(UNDEFINED & KNOWN == 0);
+    // The lowest bit the ABI does not define.
+    const UNDEFINED: u64 = 1 << OpenFlags::KNOWN.0.trailing_ones();
 
     let asked = OpenFlags(OpenFlags::WRITE.0 | OpenFlags::CREATE.0 | OpenFlags::TRUNCATE.0);
     assert_eq!(
@@ -93,16 +88,19 @@ fn an_undefined_open_flag_bit_is_refused() {
         "an open carrying a flag bit this ABI does not define was served",
     );
     let handle = syscall::open(PATH, asked).expect("the same open without the bit");
-    syscall::close(handle);
+    // SAFETY: no type holds this number.
+    unsafe { syscall::close(handle) };
     println!("  an undefined OpenFlags bit is InvalidArgument, and without it the same open works");
 }
 
 fn file_survives_one_close() {
     let a = syscall::open(PATH, OpenFlags::WRITE | OpenFlags::CREATE | OpenFlags::TRUNCATE)
         .expect("create the file");
-    let b = syscall::dup(a).expect("dup a file handle");
+    // SAFETY: nothing relies on being the source's only holder.
+    let b = unsafe { syscall::dup(a) }.expect("dup a file handle");
     syscall::write(b, PAYLOAD).expect("write through the dup");
-    syscall::close(a);
+    // SAFETY: no type holds this number.
+    unsafe { syscall::close(a) };
 
     // Reading through the survivor is what says the first close did not take
     // the file's cache entry with it.
@@ -110,7 +108,8 @@ fn file_survives_one_close() {
     let mut buf = [0u8; 128];
     let n = syscall::read(b, &mut buf).expect("read through the surviving handle");
     assert_eq!(&buf[..n], PAYLOAD, "the surviving handle no longer names the file");
-    syscall::close(b);
+    // SAFETY: no type holds this number.
+    unsafe { syscall::close(b) };
 }
 
 fn acceptor_survives_one_close() {
@@ -118,22 +117,27 @@ fn acceptor_survives_one_close() {
     let ns = namespace::build().add(SERVICE, &connector).finish().expect("a namespace for it");
 
     let a = acceptor.into_raw();
-    let b = syscall::dup(a).expect("dup an acceptor handle");
-    syscall::close(a);
+    // SAFETY: nothing relies on being the source's only holder.
+    let b = unsafe { syscall::dup(a) }.expect("dup an acceptor handle");
+    // SAFETY: no type holds this number.
+    unsafe { syscall::close(a) };
 
     // The survivor still serves: a client's connection is queued on the port
     // and this handle takes it.
-    let client = syscall::namespace_open(ns.as_handle(), SERVICE)
+    let client = syscall::namespace_open(ns.as_handle().raw(), SERVICE)
         .expect("open through the connector of a live port");
     let accepted = syscall::accept(b).expect("accept on the surviving acceptor handle");
-    syscall::close(accepted);
-    syscall::close(client);
+    // SAFETY: no type holds this number.
+    unsafe { syscall::close(accepted) };
+    // SAFETY: no type holds this number.
+    unsafe { syscall::close(client) };
 
     // And the last close is what closes the port. `Gone` and not `NotFound`:
     // the name is still in the namespace, and it is the server that has left.
-    syscall::close(b);
+    // SAFETY: no type holds this number.
+    unsafe { syscall::close(b) };
     assert_eq!(
-        syscall::namespace_open(ns.as_handle(), SERVICE).err(),
+        syscall::namespace_open(ns.as_handle().raw(), SERVICE).err(),
         Some(SyscallError::Gone),
         "the last close of an acceptor did not close the port"
     );
@@ -141,8 +145,10 @@ fn acceptor_survives_one_close() {
 
 fn ring_survives_one_close() {
     let (a, base) = unsafe { syscall::inbox_setup(8) }.expect("inbox_setup");
-    let b = syscall::dup(a).expect("dup a ring handle");
-    syscall::close(a);
+    // SAFETY: nothing relies on being the source's only holder.
+    let b = unsafe { syscall::dup(a) }.expect("dup a ring handle");
+    // SAFETY: no type holds this number.
+    unsafe { syscall::close(a) };
 
     // Two independent witnesses that the instance is alive: it still accepts an
     // `enter`, and its own page is still mapped. The page is the ring's now —
@@ -154,7 +160,8 @@ fn ring_survives_one_close() {
     let params = unsafe { core::ptr::read_volatile(base as *const RingLayout) };
     assert_eq!(params.submission_ring_size, 8, "the ring's page no longer describes the ring");
 
-    syscall::close(b);
+    // SAFETY: no type holds this number.
+    unsafe { syscall::close(b) };
 
     // **And the last close leaves no handle behind, which is now a fact about
     // the caller rather than a word it is handed.** Naming a slot a process
@@ -185,15 +192,15 @@ fn kill_releases_acceptor() {
     let (acceptor, connector) = port::create().expect("a port for the holder");
     let ns = namespace::build().add(SERVICE, &connector).finish().expect("a namespace for it");
     assert!(
-        syscall::namespace_open(ns.as_handle(), SERVICE).is_ok(),
+        syscall::namespace_open(ns.as_handle().raw(), SERVICE).is_ok(),
         "the port was not live before its holder was killed"
     );
 
-    let mut child = spawn_holder_endowed("acceptor", &acceptor.into_raw()).0;
+    let mut child = spawn_holder_endowed("acceptor", acceptor).0;
     kill_and_reap(&mut child);
 
     assert_eq!(
-        syscall::namespace_open(ns.as_handle(), SERVICE).err(),
+        syscall::namespace_open(ns.as_handle().raw(), SERVICE).err(),
         Some(SyscallError::Gone),
         "a killed process did not give its acceptor back"
     );
@@ -258,7 +265,8 @@ fn kill_flushes_file() {
         .expect("the killed holder's file does not exist");
     let mut buf = [0u8; 128];
     let n = syscall::read(handle, &mut buf).expect("read the killed holder's file");
-    syscall::close(handle);
+    // SAFETY: no type holds this number.
+    unsafe { syscall::close(handle) };
     assert_eq!(
         &buf[..n],
         KILLED_PAYLOAD,
@@ -272,9 +280,9 @@ fn spawn_holder(kind: &str) -> (Child, BufReader<ChildStdout>) {
 
 /// The same, with an acceptor moved into the child under the label
 /// `endow::acceptor` looks up.
-fn spawn_holder_endowed(kind: &str, acceptor: &toyos_abi::RawHandle) -> (Child, BufReader<ChildStdout>) {
+fn spawn_holder_endowed(kind: &str, acceptor: port::Acceptor) -> (Child, BufReader<ChildStdout>) {
     let mut command = Command::new(SELF_PATH);
-    command.endow(&format!("{SERVE_PREFIX}{SERVICE}"), acceptor.0);
+    command.endow(&format!("{SERVE_PREFIX}{SERVICE}"), acceptor.into());
     spawn_with(kind, command)
 }
 
@@ -300,9 +308,12 @@ fn kill_and_reap(child: &mut Child) {
 /// Both handles to one ring, both closed, and then the number presented again.
 fn closed_ring() -> ! {
     let (a, _base) = unsafe { syscall::inbox_setup(8) }.expect("closed-ring: inbox_setup");
-    let b = syscall::dup(a).expect("closed-ring: dup");
-    syscall::close(a);
-    syscall::close(b);
+    // SAFETY: nothing relies on being the source's only holder.
+    let b = unsafe { syscall::dup(a) }.expect("closed-ring: dup");
+    // SAFETY: no type holds this number.
+    unsafe { syscall::close(a) };
+    // SAFETY: no type holds this number.
+    unsafe { syscall::close(b) };
     println!("closed");
     std::io::stdout().flush().expect("closed-ring: flush");
     let answered = syscall::inbox_submit(b, 0, 0, 0);

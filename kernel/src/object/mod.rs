@@ -14,10 +14,12 @@ use alloc::vec::Vec;
 use core::num::NonZeroU64;
 use core::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
 
+use crate::mm::charge::{self, Charge, Exhausted};
 use crate::sync::Lock;
 
 pub mod device;
 pub mod devset;
+pub mod event;
 pub mod file;
 pub mod handle;
 pub mod inbox;
@@ -26,6 +28,7 @@ pub mod namespace;
 pub mod notice;
 pub mod null;
 pub mod ops;
+pub mod paged;
 pub mod pipe;
 pub mod port;
 pub mod process;
@@ -33,6 +36,7 @@ mod releases;
 pub mod service;
 pub mod shm;
 pub mod syscap;
+pub mod wake_latency;
 
 pub use handle::{HandleEntry, HandleError, HandleTable, Refusal};
 pub(crate) use releases::{Released, Releases};
@@ -86,6 +90,8 @@ impl Koid {
 /// What every object embeds; built only by the macro-generated `core()`, so
 /// nothing is constructed outside the census.
 pub struct ObjectCore {
+    /// The object's own allocation and what its constructor said it keeps besides.
+    _charge: Charge,
     koid: Koid,
     /// Table slots, in-flight transfers and spawn endowments — never the `Arc` strong count.
     handle_count: AtomicU32,
@@ -104,9 +110,16 @@ impl ObjectCore {
         self.retired.load(Ordering::Acquire)
     }
 
-    fn enrol(live: &'static AtomicU64) -> Self {
+    /// The job the object is charged to: the caller's that made it, or the
+    /// one it was made for ([`KObjectVariant::new_core_for`]).
+    pub fn job(&self) -> &Arc<kernel::sched::job::Job> {
+        self._charge.job()
+    }
+
+    fn enrol(live: &'static AtomicU64, charge: Charge) -> Self {
         live.fetch_add(1, Ordering::Relaxed);
         Self {
+            _charge: charge,
             koid: Koid::mint(),
             handle_count: AtomicU32::new(0),
             retired: AtomicBool::new(false),
@@ -135,8 +148,16 @@ pub trait KObjectVariant: ZeroHandles + Send + Sync + Sized + 'static {
     const NAME: &'static str;
     fn from_ref(r: &KObjectRef) -> Option<&Arc<Self>>;
     fn core(&self) -> &ObjectCore;
-    /// A fresh core, enrolled in this type's census — the only way to build one.
-    fn new_core() -> ObjectCore;
+    /// A fresh core, enrolled in this type's census — the only way to build
+    /// one — charged to the caller's job the object's own `Arc` and the
+    /// `extra` heap bytes its constructor keeps besides; refused before
+    /// anything is allocated.
+    fn new_core(extra: usize) -> Result<ObjectCore, Exhausted> {
+        Self::new_core_for(&charge::current(), extra)
+    }
+
+    /// [`new_core`](Self::new_core), charged to `job`.
+    fn new_core_for(job: &Arc<kernel::sched::job::Job>, extra: usize) -> Result<ObjectCore, Exhausted>;
 }
 
 /// Declares the closed set of object types; each row says whether its last
@@ -197,8 +218,9 @@ macro_rules! kobject {
                     &self.core
                 }
 
-                fn new_core() -> ObjectCore {
-                    ObjectCore::enrol(&census::$variant)
+                fn new_core_for(job: &Arc<kernel::sched::job::Job>, extra: usize) -> Result<ObjectCore, Exhausted> {
+                    let charge = Charge::new(job, charge::arc::<$ty>().saturating_add(extra))?;
+                    Ok(ObjectCore::enrol(&census::$variant, charge))
                 }
             }
         )+
@@ -243,6 +265,9 @@ kobject! {
     deferred Device => device::DeviceClaim,
     deferred Acceptor => port::Acceptor,
     deferred Inbox => inbox::InboxObject,
+    // Each side's last handle is that side's end, which the other side reads.
+    deferred EventSignal => event::EventSignal,
+    deferred EventWait => event::EventWait,
     // The flush that makes releasing it safe waits for every CPU, so it runs from the queue, never inline.
     deferred SharedMem => shm::SharedMemObject,
     // A service with no clients right now is not a service that has stopped.
@@ -261,6 +286,12 @@ kobject! {
     immediate Job => job::JobObject,
     // Its one handle is its process's, and goes with it.
     immediate Notice => notice::NoticeObject,
+    // What it holds is released by its last reference: nothing waits on it.
+    immediate WakeLatency => wake_latency::WakeLatencyObject,
+    // Its one handle is its process's: its last ends every object it serves.
+    deferred Pager => paged::PagerObject,
+    // Its last handle may be its object's last holder, which its pager is told.
+    deferred Paged => paged::PagedHolderObject,
     // A view of the kernel's set: losing it changes nothing in the set.
     immediate DeviceSet => devset::DeviceSet,
 }

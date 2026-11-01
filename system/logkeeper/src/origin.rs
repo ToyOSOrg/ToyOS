@@ -23,7 +23,7 @@ use toyos::log::region::{Body, Ring, LANES, RING_BYTES};
 use toyos::log::ring::Reader;
 use toyos::log::Severity;
 use toyos::shm::SharedMemory;
-use toyos::Pipe;
+use toyos::wake::Bell;
 use toyos_elide::limit::{Admit, Limit};
 use toyos_logstream::Tag;
 
@@ -152,7 +152,7 @@ pub struct Origin {
     /// The mapping; the view below is over it.
     _region: SharedMemory,
     ring: Ring,
-    pub alive: Pipe,
+    pub alive: Bell,
     shared: Reader,
     lanes: [Reader; LANES],
     /// The allowance of the process the supervisor started, and of every other writer.
@@ -163,7 +163,7 @@ pub struct Origin {
 
 impl Origin {
     /// Map a ring the supervisor sent, under the name and pid it sent with it.
-    pub fn open(tag: Tag<'_>, pid: u32, ring: toyos::RawHandle, alive: Pipe) -> Result<Self, String> {
+    pub fn open(tag: Tag<'_>, pid: u32, ring: toyos::OwnedHandle, alive: Bell) -> Result<Self, String> {
         let region = SharedMemory::lent(ring, RING_BYTES)
             .map_err(|why| format!("{}'s ring is refused: {why}", tag.as_str()))?;
         let base = core::ptr::NonNull::new(region.as_ptr()).ok_or("a mapped ring at null")?;

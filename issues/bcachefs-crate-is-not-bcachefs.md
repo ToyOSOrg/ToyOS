@@ -32,10 +32,31 @@ default filesystem.** The name stops being wrong by the crate growing into it.
 
 This entry therefore stops being a question and becomes work: what is owed is the
 implementation, and the gap between the two formats recorded above is the measure
-of it. The upstream research this tree used to carry went with the documents, so
-whoever picks this up reads the format out of upstream's own source and
-specification again — that reading is part of the work now, not a head start on
-it.
+of it. The format is implemented clean-room (root `CLAUDE.md`): an analyst reads
+upstream and writes the specification, and a different agent implements from it.
+
+**Where it stands.** `lib/bcachefs/src/engine` reads single-device 1.39
+volumes, crc32c and ChaCha20/Poly1305, replaying the journal of one not cleanly
+unmounted, and formats a clean volume holding a tree
+of directories, files, symlinks and hard links (directories alone when
+encrypted), with all its allocator and accounting state, that upstream's
+`bcachefs fsck -n -K` passes. Its fsck derives
+that state from a volume's keys and compares, and the derivation agrees with
+what upstream stored in its own volumes, a replayed journal's included; it
+checks the journal against the superblock. It mounts a volume read-write
+(`Mount`): namespace operations as journaled transactions, nodes appended to or
+split by reclaim, a crash replayed and a clean unmount, which upstream's fsck
+also passes. It refuses to write a volume of blocks under 4 KiB or nodes under
+32 KiB (`issues/the-bcachefs-writer-refuses-small-blocks-and-nodes.md`). It
+reuses a btree bucket once the entry that emptied it is durable. File data is
+not yet written (B7), so symlinks are not yet created online, and its reclaim reserves are
+sized for common rewrites
+(`issues/bcachefs-reclaim-reserves-are-sized-for-common-rewrites.md`). It
+replaced a read side written from upstream's headers. Its tests read volumes upstream's tools wrote
+(`lib/bcachefs/tests/fixtures/`). The build writes ROOT with it, at the
+smallest size that leaves no bucket free, and the loader, `imgstat` and the
+SYSTEM file server read ROOT through its reader. The rest of the crate is
+still the interim format, which DATA uses until the engine replaces it.
 
 The track itself is not planned here.
 

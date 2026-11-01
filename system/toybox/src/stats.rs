@@ -1,4 +1,4 @@
-use std::os::toyos::process::ChildExt;
+use std::os::toyos::io::AsRawHandle;
 use std::process::Command;
 use toyos_abi::syscall::{process_stats, ProcessStats};
 use toyos_abi::RawHandle;
@@ -36,17 +36,9 @@ pub fn main(args: Vec<String>) {
     println!("  cpu       {}", fmt_ns(s.cpu_ns));
     println!();
 
-    let fault_total = s.fault_demand_count + s.fault_zero_count;
-    if fault_total > 0 || s.fault_ns > 0 {
-        println!("  faults    {:>6}  ({} demand, {} zero)",
-            fault_total, s.fault_demand_count, s.fault_zero_count);
+    if s.faults > 0 || s.fault_ns > 0 {
+        println!("  faults    {:>6}", s.faults);
         println!("  fault time  {}", fmt_ns(s.fault_ns));
-        println!();
-    }
-
-    if s.io_read_ops > 0 {
-        println!("  io ops    {:>6}", s.io_read_ops);
-        println!("  io bytes  {}", fmt_bytes(s.io_read_bytes));
         println!();
     }
 

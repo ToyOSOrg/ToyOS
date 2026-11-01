@@ -127,7 +127,11 @@ fn record_adapters_interoperate_and_refuse_reused_sequences() {
                 )
                 .is_err()
             );
-            assert_eq!(payload, before);
+            // A refusal zeroes the record's data.
+            let mut left = before.clone();
+            left[offset..last - 15].fill(0);
+            assert_eq!(payload, left);
+            let mut payload = before;
             payload[last] ^= 1;
             assert_eq!(
                 open.decrypt(
