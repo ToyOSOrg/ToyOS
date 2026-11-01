@@ -235,9 +235,9 @@ impl Commit for PendingHandles {
         let mut entries = Vec::with_capacity(moving.len());
         // Moved-out console handles, dropped once the parent's lock is let go.
         let mut displaced = Vec::new();
-        // Device claims moving into the child, whose mappings in the caller
-        // are taken back once the caller's lock is let go.
-        let mut claims = Vec::new();
+        // What each device claim moving into the child handed out, taken off
+        // it under the caller's lock and revoked once that lock is let go.
+        let mut handed = Vec::new();
         for (mut entry, parent_handle) in moving {
             let moved = data
                 .handles
@@ -253,7 +253,7 @@ impl Commit for PendingHandles {
                     HandleEntry::new(object, rights)
                 }
                 KObjectRef::Device(claim) => {
-                    claims.push(claim.clone());
+                    handed.extend(claim.take_mappings());
                     moved
                 }
                 _ => moved,
@@ -268,8 +268,8 @@ impl Commit for PendingHandles {
             .expect("a caller's table with verified room refused its child");
         drop(data);
         drop(displaced);
-        for claim in claims {
-            claim.revoke_mappings();
+        for handed in handed {
+            handed.revoke();
         }
         own.endow(&mut table, &mut entries, &mut labels);
         Ok((table, Endowments::new(entries, labels), held))
