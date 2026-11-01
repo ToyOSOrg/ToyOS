@@ -795,6 +795,32 @@ pub struct TaskAccounting {
 /// a raw context pointer taken before a container move stays valid.
 pub struct Task<X: SchedPayload>(Box<TaskInner<X>>);
 
+/// The LLC a task's last wakes came from
+/// ([`crate::sched::topology::Topology::llc_index`]) and how many came from
+/// it in a row, in one `u16`: the LLC in the low ten bits and the run,
+/// saturating, in the high six. A run of 0 is no wake counted yet. The one
+/// per-task placement state the scheduling model admits.
+#[derive(Clone, Copy, Default, Debug, PartialEq, Eq)]
+pub struct WakerStreak(u16);
+
+impl WakerStreak {
+    const LLC_BITS: u32 = 10;
+    const LLC: u16 = (1 << Self::LLC_BITS) - 1;
+    const MAX_RUN: u16 = u16::MAX >> Self::LLC_BITS;
+
+    /// Count a wake from `llc` and answer the run it extends or starts.
+    pub fn count(&mut self, llc: u16) -> u16 {
+        assert!(llc <= Self::LLC, "an LLC index past {}", Self::LLC);
+        let run = self.0 >> Self::LLC_BITS;
+        let run = if run > 0 && self.0 & Self::LLC == llc { (run + 1).min(Self::MAX_RUN) } else { 1 };
+        self.0 = run << Self::LLC_BITS | llc;
+        run
+    }
+}
+
+// Every LLC index is the position of a CPU a mask can name.
+const _: () = assert!(crate::sched::affinity::MAX_CPUS <= 1 << WakerStreak::LLC_BITS);
+
 struct TaskInner<X: SchedPayload> {
     key: TaskKey,
     shared: Arc<TaskShared<Msg<X>>>,
@@ -807,11 +833,9 @@ struct TaskInner<X: SchedPayload> {
     /// loaded at. Changed only by [`Task::refresh_affinity`].
     affinity: CpuMask,
     affinity_version: u64,
-    /// The LLC ([`crate::sched::topology::Topology::llc_index`]) of the CPU
-    /// whose thread posted this task's last wake that named one. Kept by the
-    /// owner CPU, as the mask copy is. The one per-task placement state the
-    /// scheduling model admits (owner, 2026-11-01).
-    last_waker_llc: Option<u16>,
+    /// Where this task's recent wakes came from. Kept by the owner CPU, as
+    /// the mask copy is.
+    waker_streak: WakerStreak,
     /// When the current residency began: enqueue time while ready, dispatch
     /// time while running, park time while blocked. One field, because a task
     /// is in exactly one state.
@@ -1030,7 +1054,7 @@ impl<X: SchedPayload> TaskBuilder<X> {
             acct: TaskAccounting::default(),
             affinity: self.mask,
             affinity_version: 0,
-            last_waker_llc: None,
+            waker_streak: WakerStreak::default(),
             since: now,
             adopt_node: MailboxNode::new(),
             ext: Some(self.ext),
@@ -1068,9 +1092,10 @@ impl<X: SchedPayload> ReadyTask<X> {
         self.0.refresh_affinity()
     }
 
-    /// Record `llc` as the last waker's, and answer the one it replaces.
-    pub(crate) fn swap_waker_llc(&mut self, llc: u16) -> Option<u16> {
-        self.0 .0.last_waker_llc.replace(llc)
+    /// Count a wake whose waker ran in `llc`, and answer how many wakes in a
+    /// row have come from it.
+    pub(crate) fn count_waker_llc(&mut self, llc: u16) -> u16 {
+        self.0 .0.waker_streak.count(llc)
     }
 
     pub(crate) fn standing_mut(&mut self) -> &mut Standing {

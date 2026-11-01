@@ -79,18 +79,18 @@ impl Watch {
     /// Something about the object changed: wake every thread waiting on it and
     /// fire every poll.
     pub fn post(&self) {
-        self.post_as(WakeCause::new(WakeReason::Woken).from(waker()));
+        self.post_as(WakeCause::new(WakeReason::Woken));
     }
 
     /// The same, lending the poster's real-time window to whoever it wakes.
     pub fn post_boosted(&self, until: Nanos) {
-        self.post_as(WakeCause::boosted(WakeReason::Woken, until).from(waker()));
+        self.post_as(WakeCause::boosted(WakeReason::Woken, until));
     }
 
     fn post_as(&self, cause: WakeCause) {
         preempt_off(|p| {
             let env = Poster { cpus: cpus(), kicker: &HW, preempt: p };
-            self.0.post(cause, &env);
+            self.0.post(cause.from(waker()), &env);
         });
     }
 
