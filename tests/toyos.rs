@@ -7687,7 +7687,7 @@ fn clock_report(line: &str) -> Option<ClockReport> {
 /// left out and every step it waited on the RTC for is printed, and a
 /// demotion fails the row, since a demoted boot's processes read the HPET.
 fn clock_kept_its_counter(log: &str) -> Result<(), String> {
-    const SAID: [&str; 3] = ["clock: TSC STEP: ", "left out", "the RTC's edges after it will say which moved"];
+    const SAID: [&str; 4] = ["clock: TSC STEP: ", "so this span is left out", "so the span was left out", "the RTC's edges after it will say which moved"];
     for line in log.lines().filter(|line| SAID.iter().any(|said| line.contains(said))) {
         eprintln!("  [clock] {}", line.trim());
     }
