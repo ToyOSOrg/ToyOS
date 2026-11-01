@@ -18,6 +18,9 @@ pub struct Region {
     bytes: RefCell<Vec<u8>>,
     /// Each commit's range, the client's and the node's.
     committed: RefCell<Vec<(usize, usize)>>,
+    /// Whether the client's and the node's commits make memory: one that makes none leaves
+    /// every page the other's to commit, so a test shows the other's commits alone suffice.
+    commits: Cell<(bool, bool)>,
     holders: RefCell<Vec<Rc<Doorbells>>>,
     /// A holder rang netstack since the test last asked.
     rang: Cell<bool>,
@@ -77,9 +80,6 @@ pub struct Client {
     ringing: Ringing,
     rx: Held<Receiving<RECEIVE_BYTES, { toyos::net::stream::WORDS }>>,
     tx: Held<Sending<SEND_BYTES, { toyos::net::stream::WORDS }>>,
-    /// Its reads commit what a grown receive ring reaches, as the SDK's do; a client breaking
-    /// the protocol commits nothing, and reads only what netstack committed.
-    commits: Cell<bool>,
 }
 
 impl std::fmt::Debug for Region {
@@ -100,12 +100,32 @@ impl Memory for Region {
     }
 
     fn commit(&self, at: usize, len: usize) -> bool {
-        self.committed.borrow_mut().push((at, at + len));
+        if self.commits.get().1 {
+            self.committed.borrow_mut().push((at, at + len));
+        }
         true
     }
 }
 
 impl Region {
+    /// The client's commit of `[at, at + len)`.
+    fn client_commit(&self, at: usize, len: usize) -> bool {
+        if self.commits.get().0 {
+            self.committed.borrow_mut().push((at, at + len));
+        }
+        true
+    }
+
+    /// From here on the client's commits make no memory.
+    pub fn client_commits_nothing(&self) {
+        self.commits.set((false, self.commits.get().1));
+    }
+
+    /// From here on the node's commits make no memory.
+    pub fn netstack_commits_nothing(&self) {
+        self.commits.set((self.commits.get().0, false));
+    }
+
     /// Whether `[at, at + len)` lies in what a commit made memory, as a fault would ask.
     fn reaches(&self, at: usize, len: usize) -> bool {
         self.committed.borrow().iter().any(|&(start, end)| start <= at && at + len <= end)
@@ -161,6 +181,7 @@ impl Client {
             words: Box::new(std::array::from_fn(|_| AtomicU32::new(0))),
             bytes: RefCell::new(vec![0; REGION_BYTES]),
             committed: RefCell::new(vec![(0, RECEIVE_RING + RECEIVE_INITIAL as usize), (SEND_RING, SEND_RING + SEND_INITIAL as usize)]),
+            commits: Cell::new((true, true)),
             holders: RefCell::new(Vec::new()),
             rang: Cell::new(false),
             dropped: Cell::new(false),
@@ -182,7 +203,7 @@ impl Client {
         let bells = Rc::new(Doorbells::default());
         region.holders.borrow_mut().push(bells.clone());
         let ringing = Ringing { region: region.clone(), bells };
-        Rc::new(Client { region: region.clone(), ringing, rx: Held(RefCell::new(rx)), tx: Held(RefCell::new(tx)), commits: Cell::new(true) })
+        Rc::new(Client { region: region.clone(), ringing, rx: Held(RefCell::new(rx)), tx: Held(RefCell::new(tx)) })
     }
 
     /// A client that set Nagle's algorithm off before it connected.
@@ -192,16 +213,11 @@ impl Client {
         (client, session)
     }
 
-    /// From here on its reads commit nothing.
-    pub fn commit_nothing(&self) {
-        self.commits.set(false);
-    }
-
     /// A read of at most `max` bytes that does not wait.
     pub fn read(&self, max: usize) -> Result<Vec<u8>, Refused> {
         let mut out = vec![0; max];
         let region = &self.region;
-        let reach = |cap: u32| !self.commits.get() || region.commit(RECEIVE_RING, cap as usize);
+        let reach = |cap: u32| region.client_commit(RECEIVE_RING, cap as usize);
         let n = session::read(&region.words, &self.rx, &self.ringing, Mode::Nonblocking, u32::try_from(max).unwrap(), reach, |span, at| {
             assert!(region.reaches(span.offset, span.len), "a read of {span:?} past what was committed");
             out[at..at + span.len].copy_from_slice(&region.bytes.borrow()[span.offset..][..span.len]);
@@ -225,7 +241,7 @@ impl Client {
     /// A write that does not wait: how much of `data` the send ring took.
     pub fn write(&self, data: &[u8]) -> Result<usize, Refused> {
         let region = &self.region;
-        let reach = |cap: u32| region.commit(SEND_RING, cap as usize);
+        let reach = |cap: u32| region.client_commit(SEND_RING, cap as usize);
         let n = session::write(&region.words, &self.tx, &self.ringing, Mode::Nonblocking, u32::try_from(data.len()).unwrap(), reach, |span, at| {
             assert!(region.reaches(span.offset, span.len), "a write of {span:?} past what was committed");
             region.bytes.borrow_mut()[span.offset..][..span.len].copy_from_slice(&data[at..at + span.len]);

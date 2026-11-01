@@ -1,14 +1,14 @@
 //! A stream carries 4 MiB each way, every byte where it was written, while
 //! this end's send ring grows, at the first write its room cannot take, here
-//! the third: each page committed by this process before it writes it, and
-//! by netstack before it reads it. A missing commit ends this process or
-//! netstack; a byte laid out by the wrong size arrives out of place. The
-//! receive ring grows only as [tcp] wants more buffer, which QEMU's user
-//! network's round trips seldom ask for: the node's host test
-//! `a_download_a_reader_keeps_up_with_grows_the_receive_ring_and_keeps_every_byte`
-//! holds that growth.
+//! the third: netstack's mapping of the region read past the ring's first
+//! size, over pages the kernel committed after both ends mapped it. A page
+//! neither end committed ends this process or netstack; a byte laid out by
+//! the wrong size arrives out of place. Which end's commit suffices, and the
+//! receive ring's growth, which QEMU's user network's round trips seldom
+//! make [tcp] want, are the node's host tests'.
 //!
-//! It needs the guest: the commits and the refused touch are the kernel's.
+//! It needs the guest: the commits and the mappings are the kernel's, and the
+//! region's adapter is netstack's own.
 //! ToyOS has no loopback, so the harness is the peer, as for `socket_export`:
 //! this job's argument is the port of its datagram socket, which QEMU's user
 //! network reaches as `10.0.2.2`. The job listens on the port the boot
