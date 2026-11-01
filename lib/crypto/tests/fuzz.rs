@@ -228,7 +228,6 @@ macro_rules! der_case {
 }
 
 #[test]
-#[cfg_attr(not(feature = "portable"), ignore = "the same code in every form: run in the portable one")]
 fn der_signatures() {
     seeded(CASES, 0xde5, |case, rng| {
         der_case!(p256, 32, ECDSA_P256_SHA256_ASN1, b"ffffffff00000000ffffffffffffffffbce6faada7179e84f3b9cac2fc632551", case, rng)
