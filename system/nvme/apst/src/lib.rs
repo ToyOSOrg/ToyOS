@@ -10,14 +10,12 @@
 //! sum of the target's entry and exit latencies. A state that does not report
 //! both (`0h` is "not reported") has no stated bound and is never a target.
 //!
-//! **A state is entered only after an idle period [`IDLE_PER_LATENCY`] times
-//! its round trip**, so the time the drive spends waking is at most that
-//! fraction of the idle time it was given.
-//!
-//! The states are descended in steps: each state's entry names the shallowest
-//! admitted non-operational state deeper than itself, by round-trip latency,
-//! that reports no higher idle power. A drive's table is taken as it states
-//! it; there is no table of drives.
+//! **Each state goes to the deepest admitted state of the first [`TIERS`]
+//! tier that holds one deeper than itself**, by round-trip latency, reporting
+//! no higher idle power, after that tier's idle time: a state within 15 ms
+//! after 100 ms idle, one within 100 ms after 2 s. These are Linux's tiers,
+//! so a drive idles as it does under Linux. A drive's table is taken as it
+//! states it; there is no table of drives.
 
 #![forbid(unsafe_code)]
 
@@ -34,12 +32,10 @@ pub const STATES: usize = 32;
 /// person notices as a pause.
 pub const EXIT_BOUND_US: u64 = 100_000;
 
-/// Idle time before a transition, per unit of its round-trip latency: the
-/// drive spends at most 1/500 of an idle period waking from it.
-pub const IDLE_PER_LATENCY: u64 = 500;
-
-/// ITPT's width: bits 31:08 of an entry, in milliseconds (Figure 393).
-const ITPT_MAX_MS: u64 = (1 << 24) - 1;
+/// The tiers, shallowest first: the most round-trip latency a target may
+/// have, in microseconds, and the idle time before the transition, in
+/// milliseconds. The last tier's latency is [`EXIT_BOUND_US`].
+pub const TIERS: [(u64, u64); 2] = [(15_000, 100), (EXIT_BOUND_US, 2_000)];
 
 /// One power state as its descriptor states it (Figure 313).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -115,20 +111,21 @@ pub fn plan(states: &[PowerState]) -> [Option<Transition>; STATES] {
     let mut out = [None; STATES];
     for (n, from) in states.iter().enumerate() {
         let floor = if from.non_operational { from.round_trip_us() } else { None };
-        let target = states
+        let deeper: Vec<(usize, u64)> = states
             .iter()
             .enumerate()
             .filter(|&(t, to)| t != n && to.admitted())
-            .filter(|(_, to)| floor.is_none_or(|f| to.round_trip_us().is_some_and(|t| t > f)))
-            .filter(|(_, to)| match (to.idle_power, from.idle_power) {
+            .filter_map(|(t, to)| Some((t, to, to.round_trip_us()?)))
+            .filter(|&(_, _, trip)| floor.is_none_or(|f| trip > f))
+            .filter(|(_, to, _)| match (to.idle_power, from.idle_power) {
                 (Some(to), Some(from)) => to <= from,
                 _ => true,
             })
-            .min_by_key(|(_, to)| to.round_trip_us());
-        out[n] = target.map(|(t, to)| {
-            let round_trip = to.round_trip_us().expect("an admitted state states both latencies");
-            let after_ms = (round_trip * IDLE_PER_LATENCY).div_ceil(1000).clamp(1, ITPT_MAX_MS);
-            Transition { to: t as u8, after_ms }
+            .map(|(t, _, trip)| (t, trip))
+            .collect();
+        out[n] = TIERS.iter().find_map(|&(within_us, after_ms)| {
+            let (t, _) = deeper.iter().filter(|&&(_, trip)| trip <= within_us).max_by_key(|&&(_, trip)| trip)?;
+            Some(Transition { to: *t as u8, after_ms })
         });
     }
     out
@@ -212,12 +209,12 @@ mod tests {
     }
 
     #[test]
-    fn every_operational_state_steps_to_the_shallowest_admitted_one_and_that_to_the_next() {
+    fn a_state_past_the_first_tier_is_reached_from_the_first_tiers_after_the_second_tiers_time() {
         let (_, s) = states(&identify(&client(), true)).unwrap();
         let plan = plan(&s);
-        let three = Some(Transition { to: 3, after_ms: 1_500 });
+        let three = Some(Transition { to: 3, after_ms: 100 });
         assert_eq!(plan[..3], [three, three, three]);
-        assert_eq!(plan[3], Some(Transition { to: 4, after_ms: 22_500 }));
+        assert_eq!(plan[3], Some(Transition { to: 4, after_ms: 2_000 }));
         assert_eq!(plan[4], None);
         assert!(plan[5..].iter().all(Option::is_none));
     }
@@ -234,7 +231,7 @@ mod tests {
         // Exactly the bound is within it.
         d[4] = descriptor(1, true, 10_000, 90_000, 0);
         let (_, s) = states(&identify(&d, true)).unwrap();
-        assert_eq!(super::plan(&s)[3], Some(Transition { to: 4, after_ms: 50_000 }));
+        assert_eq!(super::plan(&s)[3], Some(Transition { to: 4, after_ms: 2_000 }));
     }
 
     #[test]
@@ -262,23 +259,33 @@ mod tests {
         ];
         let (_, s) = states(&identify(&d, true)).unwrap();
         let plan = plan(&s);
-        assert_eq!(plan[0], Some(Transition { to: 2, after_ms: 7_500 }));
-        assert_eq!(plan[1], Some(Transition { to: 2, after_ms: 7_500 }));
+        assert_eq!(plan[0], Some(Transition { to: 2, after_ms: 100 }));
+        assert_eq!(plan[1], Some(Transition { to: 2, after_ms: 100 }));
     }
 
     #[test]
     fn the_table_encodes_itpt_in_bits_31_8_and_itps_in_7_3() {
         let (_, s) = states(&identify(&client(), true)).unwrap();
         let table = encode(&plan(&s));
-        assert_eq!(u64::from_le_bytes(table[0..8].try_into().unwrap()), (1_500 << 8) | (3 << 3));
-        assert_eq!(u64::from_le_bytes(table[24..32].try_into().unwrap()), (22_500 << 8) | (4 << 3));
+        assert_eq!(u64::from_le_bytes(table[0..8].try_into().unwrap()), (100 << 8) | (3 << 3));
+        assert_eq!(u64::from_le_bytes(table[24..32].try_into().unwrap()), (2_000 << 8) | (4 << 3));
         assert!(table[32..].iter().all(|&b| b == 0));
     }
 
+    /// The T14's SK hynix BC501, as its descriptors state it, gets the table
+    /// Linux set on it (evidence `pr-1131` r5): every state straight to PS4
+    /// after 100 ms, past PS3, both within the first tier.
     #[test]
-    fn a_tiny_round_trip_still_waits_a_millisecond() {
-        let d = [descriptor(650, false, 0, 0, 0), descriptor(4, true, 1, 1, 0)];
+    fn the_deepest_state_within_a_tier_is_the_target_past_shallower_ones() {
+        let d = [
+            descriptor(350, false, 5, 5, 0),
+            descriptor(240, false, 30, 30, 0),
+            descriptor(190, false, 100, 100, 0),
+            descriptor(4, true, 1_000, 1_000, 0),
+            descriptor(1, true, 1_000, 5_000, 0),
+        ];
         let (_, s) = states(&identify(&d, true)).unwrap();
-        assert_eq!(plan(&s)[0], Some(Transition { to: 1, after_ms: 1 }));
+        let four = Some(Transition { to: 4, after_ms: 100 });
+        assert_eq!(plan(&s)[..5], [four, four, four, four, None]);
     }
 }
