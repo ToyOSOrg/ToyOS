@@ -38,6 +38,14 @@ static PAGE: AtomicPtr<Arc<SharedMemObject>> = AtomicPtr::new(core::ptr::null_mu
 /// The page's one writer at a time.
 static RETUNING: Lock<()> = Lock::new(());
 
+/// The line the one in force replaced, for [`floor_at`]; zeros before the
+/// first retune, which no floor exceeds. Published under [`RETUNING`].
+static REPLACED: crate::seqlock::Published<3> = crate::seqlock::Published::new();
+
+/// From [`demote`] to [`handed_over`] no retune publishes: the line in force
+/// and the one it replaced are what every page reader read.
+static HELD: AtomicBool = AtomicBool::new(false);
+
 /// Take the rate the CPU states, the loader's, for the stamps the log carries
 /// before [`set_counter`]. The kernel's entry calls this before its first record.
 pub fn state() {
@@ -68,14 +76,21 @@ pub fn set_counter(boot: u64, mult: u64) {
 }
 
 /// Go on at `mult` from the counter reading `at`: the line from there starts
-/// where the clock stands, so it bends and never steps. The line now in force.
-pub fn retune(at: u64, mult: u64) -> Line {
-    let page = lines().expect("clock: retuned before it started");
+/// where the clock stands, so it bends and never steps. Nothing while a
+/// demotion is handed over ([`demote`]); the caller retunes again later.
+pub fn retune(at: u64, mult: u64) {
     let _one = RETUNING.lock();
-    let stamp = page.read().expect("clock: the page `set_counter` laid out carries no clock").stamp_of(at);
-    let line = Line { counter: at, stamp, mult };
-    page.publish(line);
-    line
+    if !HELD.load(Relaxed) {
+        publish(at, mult);
+    }
+}
+
+/// [`retune`]'s publication, under [`RETUNING`].
+fn publish(at: u64, mult: u64) {
+    let page = lines().expect("clock: retuned before it started");
+    let old = page.read().expect("clock: the page `set_counter` laid out carries no clock").line;
+    REPLACED.publish([old.counter, old.stamp, old.mult]);
+    page.publish(Line { counter: at, stamp: old.stamp_of(at), mult });
 }
 
 /// The rate the line in force runs at.
@@ -89,9 +104,29 @@ pub fn stamp_at(at: u64) -> u64 {
 }
 
 /// Send every process's reading of now to the kernel from here on
-/// (`toyos_abi::clock::ClockPage::demoted`).
+/// (`toyos_abi::clock::ClockPage::demoted`), and hold every retune until
+/// [`handed_over`]: a page reader that found the page unmarked read the line
+/// in force or an older one, and [`floor_at`] reads the latest two.
 pub fn demote() {
+    let _one = RETUNING.lock();
+    HELD.store(true, Relaxed);
     lines().expect("clock: demoted before it started").demote();
+}
+
+/// The clock at the counter reading `at` by the line in force and by the one
+/// it replaced, whichever is later: no earlier than a page reader's reading
+/// of a counter before `at` along either. Lock-free, for a kick handler.
+pub fn floor_at(at: u64) -> u64 {
+    let now = stamp_at(at);
+    let [counter, stamp, mult] = REPLACED.snapshot().expect("clock: the replaced line is published only under `RETUNING`, which a hold keeps");
+    now.max(Line { counter, stamp, mult }.stamp_of(at))
+}
+
+/// End [`demote`]'s hold, going on at `mult` from the counter reading `at`.
+pub fn handed_over(at: u64, mult: u64) {
+    let _one = RETUNING.lock();
+    HELD.store(false, Relaxed);
+    publish(at, mult);
 }
 
 fn lines() -> Option<&'static ClockPage> {

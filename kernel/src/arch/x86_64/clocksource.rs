@@ -247,8 +247,11 @@ static DEMOTED_LATEST: AtomicU64 = AtomicU64::new(0);
 /// The demotion's one round: each online CPU, once the page is marked, floors
 /// [`DEMOTED_LATEST`] at its own clock ([`floor_here`]).
 static HANDOVER: Shootdown = Shootdown::new();
-/// Every online CPU has answered [`HANDOVER`]: no process is answered before.
+/// Every CPU a process may have read the page on has floored
+/// [`DEMOTED_LATEST`]: no process is answered before.
 static HANDED_OVER: AtomicBool = AtomicBool::new(false);
+/// A finding after the demotion has been logged; later ones are not.
+static FOUND_SINCE: AtomicBool = AtomicBool::new(false);
 static DEMOTED_ANSWERED: AtomicBool = AtomicBool::new(false);
 /// The rate the watch keeps, for a demotion on any CPU to retune the line to.
 static KEPT_MULT: AtomicU64 = AtomicU64::new(0);
@@ -548,7 +551,10 @@ pub fn check(now_ns: u64) {
 /// the kernel's own clock and deadlines stay on it.
 fn demote(why: core::fmt::Arguments) {
     if IS_DEMOTED.swap(true, Ordering::SeqCst) {
-        return log!("clock: DEMOTED TSC: {why}");
+        if !FOUND_SINCE.swap(true, Ordering::Relaxed) {
+            log!("clock: DEMOTED TSC: {why}; later findings are not logged");
+        }
+        return;
     }
     // A publication in progress ends within its few stores.
     let [held_tsc, held_hpet, held_stamp] = loop {
@@ -568,7 +574,7 @@ fn demote(why: core::fmt::Arguments) {
     hand_over();
     let after = cpu::counter_ordered();
     let on_line = crate::clock::stamp_at(after);
-    crate::clock::retune(after, mult);
+    crate::clock::handed_over(after, mult);
     HANDED_OVER.store(true, Ordering::Release);
     log!(
         "clock: DEMOTED: {why}, so the TSC no longer keeps the clock: every process's reading of now asks the kernel, \
@@ -581,50 +587,60 @@ fn demote(why: core::fmt::Arguments) {
 /// The handover's round, on the page marked: every online CPU floors
 /// [`DEMOTED_LATEST`] at its own clock, this one first. A page reader that
 /// found the page unmarked read its counter before its CPU's floor, on that
-/// CPU's TSC, so no answer reads before it however far that TSC leads; one
-/// that read a line replaced since is ahead of the floor only by the bend
-/// every retune makes, the change of rate over that CPU's lead. Before the
-/// APs are released no other CPU has run a process, and none is asked.
+/// CPU's TSC, so no answer reads before it however far that TSC leads.
+/// Before the APs are released no process has run on them, so this CPU
+/// floors alone and none is asked.
 ///
 /// Never logs, as `tlb::wait_for`: a CPU blocked on the console's lock with
 /// interrupts closed could not answer.
 fn hand_over() {
+    if !crate::smp::answering() {
+        return floor_here();
+    }
     let generation = HANDOVER.issue(Reach::Narrow);
     serve_here();
-    if !crate::smp::answering() {
-        return;
-    }
     super::apic::kick_all_but_self();
     for cpu in 0..crate::smp::cpu_count() as usize {
-        awaiting("answer to the handover from every CPU", || {
-            serve_here();
-            HANDOVER.served(cpu, generation)
-        });
+        awaiting("answer to the handover from every CPU", || HANDOVER.served(cpu, generation));
     }
 }
 
-/// This CPU's answer to the handover, if it owes one: the kick handler's, and
-/// every waiter's on its own CPU.
+/// This CPU's answer to the handover, if it owes one: the kick handler's and
+/// `tlb::poll`'s, so every spinner with interrupts closed answers it.
 pub fn serve_here() {
+    // The hint before the mask: with no round in flight a kick pays two loads.
+    if !HANDOVER.owes(super::percpu::cpu_id() as usize) {
+        return;
+    }
     let _closed = super::IrqGuard::close();
     HANDOVER.serve_if_owed(super::percpu::cpu_id() as usize, |_| floor_here());
 }
 
-/// Floor every answer after the demotion at this CPU's clock now: after the
-/// mark, so after the counter of every page reader on this CPU that found
-/// the page unmarked.
+/// Floor every answer after the demotion at this CPU's clock now, along the
+/// line in force and the one it replaced (`clock::floor_at`): after the mark,
+/// so after the counter of every page reader on this CPU that found the page
+/// unmarked, whichever of the two it read.
 fn floor_here() {
-    DEMOTED_LATEST.fetch_max(crate::clock::stamp_at(cpu::counter_ordered()), Ordering::AcqRel);
+    DEMOTED_LATEST.fetch_max(crate::clock::floor_at(cpu::counter_ordered()), Ordering::AcqRel);
 }
 
-/// Spin until `done`, which serves this CPU's handover itself, and panic past
-/// `time::DEAF_CPU`: a CPU that takes no kick in five seconds is wedged.
-fn awaiting(what: &str, mut done: impl FnMut() -> bool) {
+/// Spin until `done`, answering every round this CPU owes meanwhile
+/// (`tlb::poll`: the TLB's, `SMI_CMD`'s and the handover's), as every spinner
+/// with interrupts closed must; and panic past `time::DEAF_CPU`: a CPU that
+/// takes no kick in five seconds is wedged.
+fn awaiting(what: &str, done: impl Fn() -> bool) {
+    const SPINS_PER_DEADLINE_CHECK: u32 = 1024;
     let deaf = crate::time::DEAF_CPU.nanos();
     let deadline = crate::clock::nanos_since_boot().saturating_add(deaf);
+    let mut spins = 0u32;
     while !done() {
-        assert!(crate::clock::nanos_since_boot() < deadline, "clock: no {what} in {deaf} ns since the TSC was demoted");
+        super::tlb::poll();
         core::hint::spin_loop();
+        spins += 1;
+        if spins == SPINS_PER_DEADLINE_CHECK {
+            spins = 0;
+            assert!(crate::clock::nanos_since_boot() < deadline, "clock: no {what} in {deaf} ns since the TSC was demoted");
+        }
     }
 }
 
@@ -640,10 +656,7 @@ pub fn stamp_now() -> u64 {
     if !IS_DEMOTED.load(Ordering::SeqCst) {
         return on_line;
     }
-    awaiting("end to the handover", || {
-        serve_here();
-        HANDED_OVER.load(Ordering::Acquire)
-    });
+    awaiting("end to the handover", || HANDED_OVER.load(Ordering::Acquire));
     let stamp = {
         let mut demoted = DEMOTED.lock();
         let d = demoted.as_mut().expect("handed over before the demotion was recorded");

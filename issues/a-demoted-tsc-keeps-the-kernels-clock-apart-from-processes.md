@@ -25,12 +25,22 @@ After a forward second step, processes' time holds at the TSC's clock until
 the HPET's count reaches it, then follows the HPET. The kernel's clock stays
 ahead by the step.
 
-Where one CPU's TSC is apart from the others' (written, found behind, or an
-offset an AP's start proves), processes' time holds at the furthest-ahead
-CPU's clock at the demotion until the HPET's count reaches it. The kernel's
-clock on each CPU stays apart by that CPU's offset.
+Where one CPU's TSC is apart from the others' (written or found behind),
+processes' time holds at the furthest-ahead CPU's clock at the handover until
+the HPET's count reaches it. An offset an AP's start proves demotes before any
+process runs, so processes' time starts on the HPET's count. Either way the
+kernel's clock on each CPU stays apart by that CPU's offset.
+
+The handover floors each CPU along the line in force and the one it replaced.
+A process that read the page along an older line, at least two retunes before
+the demotion, is above its CPU's floor only if that CPU leads the sampling
+CPU by more than the time between those retunes over their change of rate.
+At a slew's 500 ppm and samples a second apart, that is a lead past about
+2000 s. Its answer then reads behind that process's last reading by at most
+the change of rate times the lead.
 
 **Owner:** the clock.
 
 **Exit:** after a demotion, the kernel's clock follows the reference too, so
-the kernel and processes read one clock again.
+the kernel and processes read one clock again, and the handover floors along
+every line a process could have read.
