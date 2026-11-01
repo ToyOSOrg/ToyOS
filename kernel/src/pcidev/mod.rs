@@ -552,6 +552,12 @@ impl Drop for Binding {
 
 /// Every function in the device set, and who drives it now: a kernel driver,
 /// a process holding a claim, or nobody. In rising arrival order.
+/// Whether `function`, whose record says `identity`, is in the device set:
+/// its arrival is the record's, and a record of no arrival is in it never.
+fn listed(function: &Function, identity: &toyos_abi::inventory::Pci) -> bool {
+    identity.arrival.0 != 0 && function.arrival.load(Ordering::Acquire) == identity.arrival.0
+}
+
 pub fn inventory() -> Vec<toyos_abi::inventory::Pci> {
     use toyos_abi::inventory::Driven;
     let (identities, kernel_driven) = {
@@ -560,9 +566,7 @@ pub fn inventory() -> Vec<toyos_abi::inventory::Pci> {
     };
     let mut out = Vec::with_capacity(identities.len());
     for (mut pci, function) in identities.into_iter().zip(functions()) {
-        // A record whose function left, or one whose arrival was refused
-        // before it was listed, which carries arrival 0.
-        if pci.arrival.0 == 0 || function.arrival.load(Ordering::Acquire) != pci.arrival.0 {
+        if !listed(function, &pci) {
             continue;
         }
         pci.driven = if kernel_driven.contains(&function.who) {
@@ -589,7 +593,7 @@ pub fn enumerated(bus: u8, dev: u8, func: u8) -> Option<toyos_userbound::firmwar
         let number = machine.identities.iter().position(|pci| requester_of(pci.at) == who)?;
         (machine.identities[number], machine.kernel_driven.contains(&who), function(number))
     };
-    if function.arrival.load(Ordering::Acquire) != pci.arrival.0 {
+    if !listed(function, &pci) {
         return None;
     }
     let held = driven || function.held.load(Ordering::Acquire);
@@ -973,14 +977,16 @@ impl core::fmt::Display for Refusal {
 pub fn claim(arrival: Arrival) -> Result<(PciFunctionInfo, Claim), ClaimError> {
     let (number, pci, id, driven) = {
         let machine = MACHINE.lock();
-        let number = machine.identities.iter().position(|pci| pci.arrival == arrival).ok_or(ClaimError::Absent)?;
+        let number = machine
+            .identities
+            .iter()
+            .zip(functions())
+            .position(|(pci, function)| pci.arrival == arrival && listed(function, pci))
+            .ok_or(ClaimError::Absent)?;
         let (pci, identity) = (function(number).pci, &machine.identities[number]);
         let driven = machine.kernel_driven.contains(&requester(&pci));
         (number, pci, PciId { vendor: identity.vendor, device: identity.device }, driven)
     };
-    if function(number).arrival.load(Ordering::Acquire) != arrival.0 {
-        return Err(ClaimError::Absent);
-    }
     if driven {
         log!("pcidev: PCI {:02x}:{:02x}.{} is driven by this kernel and cannot be claimed", pci.bus, pci.dev, pci.func);
         return Err(ClaimError::KernelDriven);

@@ -140,9 +140,12 @@ started. Nothing reaches userland when a device arrives or leaves.
      and posts the set's watch. Powering a slot, §6.6.1's 100 ms and reading
      the functions below it run on the set's reader.
    - One record per requester, carrying its live arrival: a device that
-     returns is a new arrival on the same record and domain. Every arrival is
-     attached to a domain of its own before it is listed, so one on a record
-     no claim held leaves the identity domain its requester had at boot. A claim of an
+     returns is a new arrival on the same record and domain. A slot is armed
+     only once every function enumerated behind it at boot is on a domain of
+     its own, and a slot with one behind it that a driver in this kernel
+     drives or the unit cannot isolate is not armed: every requester first
+     seen after boot is blocked at the unit until a claim attaches it, so a
+     card seated behind an armed slot reaches nothing until it is claimed. A claim of an
      older arrival answers `Gone` on every call, and its release asks the
      device nothing. The last release behind a removed slot powers it off.
    - An arrived endpoint's BARs are assigned once, before it is listed: each
@@ -198,12 +201,15 @@ started. Nothing reaches userland when a device arrives or leaves.
      its BARs from `Machine::decoded`, so the next arrival behind the port
      can be assigned the same addresses while a process still holds a
      mapping made through the departed claim
-     (`issues/a-bars-mapping-outlives-the-claim-it-was-asked-on.md`). Exit:
-     that issue's revocation at a claim's end covers a departed function's
-     release.
+     (`issues/a-bars-mapping-outlives-the-claim-it-was-asked-on.md`). Its
+     addresses are not reassigned while the claim is held, since `retire`
+     waits for the release. Exit: that issue's revocation at a claim's
+     release, and at departure from the set's reader (`slot::refresh`'s
+     per-record loop, never the slot's interrupt), wired by whichever of the
+     two lands second.
    - On AArch64's SMMUv3 a function that arrived after the unit was
-     programmed is refused a claim by name: its routes are read for the
-     functions enumerated at boot.
+     programmed is listed and refused a claim by name: its routes are read
+     for the functions enumerated at boot.
 3. **Drivers leave the shared services.** netstack, soundserver and diskserver
    each become a driver per function plus the service its clients use. The
    client port carries a per-device source and `gone`.
