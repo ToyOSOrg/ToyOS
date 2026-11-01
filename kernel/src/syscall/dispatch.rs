@@ -672,17 +672,19 @@ fn outgoing<'a>(ctx: &SyscallContext<'a>, args: &MessageSend) -> Result<Option<O
     })())
 }
 
-/// A receive's buffers, bounded the same way. A buffer larger than any
-/// message or batch holds every one, so only its first
-/// [`MAX_MESSAGE_LEN`] bytes and [`MAX_TRANSFER_HANDLES`] slots are taken.
+/// A receive's buffers, bounded the same way. Room past any message's or
+/// batch's holds nothing, so only [`MAX_MESSAGE_LEN`] bytes across `head`
+/// and `bytes`, `head`'s first, and [`MAX_TRANSFER_HANDLES`] slots are taken.
 fn incoming<'a>(ctx: &SyscallContext<'a>, args: &MessageRecv) -> Result<Option<Incoming<'a>>, ()> {
     if args.flags & !MESSAGE_NONBLOCK != 0 {
         return Err(());
     }
-    let len = args.len.min(MAX_MESSAGE_LEN as u64);
+    let head_len = args.head_len.min(MAX_MESSAGE_LEN as u64);
+    let len = args.len.min(MAX_MESSAGE_LEN as u64 - head_len);
     let cap = (args.cap as usize).min(MAX_TRANSFER_HANDLES);
     Ok((|| {
         Some(Incoming {
+            head: ctx.user_bytes_mut(UserAddr::new(args.head), head_len)?,
             bytes: ctx.user_bytes_mut(UserAddr::new(args.bytes), len)?,
             handles: ctx.user_bytes_mut(UserAddr::new(args.handles), (cap * HANDLE_LEN) as u64)?,
             cap,

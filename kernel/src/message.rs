@@ -162,21 +162,24 @@ impl QueueRef {
         Ok(())
     }
 
-    /// Take the front message into `buf` and at most `cap` handles, each
-    /// installed in `table` under this queue's lock.
-    pub fn recv(&self, buf: &mut UserBytesMut, cap: usize, table: &mut HandleTable) -> Taken {
+    /// Take the front message into `head` and then `body`, its first bytes
+    /// filling `head`, and at most `cap` handles, each installed in `table`
+    /// under this queue's lock.
+    pub fn recv(&self, head: &mut UserBytesMut, body: &mut UserBytesMut, cap: usize, table: &mut HandleTable) -> Taken {
         let (taken, boost) = {
             let mut guard = self.0.state.lock();
             let State { bytes, queue, holders, rt_boost_pending } = &mut *guard;
             // Bound, not the block's tail: a tail match's temporaries outlive `guard`.
-            let taken = match queue.pop(buf.len(), cap, |width| table.make_room(width)) {
-                Some(Ok((head, handles))) => {
+            let taken = match queue.pop(head.len() + body.len(), cap, |width| table.make_room(width)) {
+                Some(Ok((message, handles))) => {
                     let mut installed = [RawHandle(0); MAX_TRANSFER_HANDLES];
                     for (slot, entry) in installed.iter_mut().zip(handles) {
                         *slot = table.install(entry).expect("room was made first");
                     }
-                    bytes.read(buf, head.len);
-                    (Taken::Message(head, installed), core::mem::take(rt_boost_pending))
+                    let first = message.len.min(head.len());
+                    bytes.read(head, first);
+                    bytes.read(body, message.len - first);
+                    (Taken::Message(message, installed), core::mem::take(rt_boost_pending))
                 }
                 Some(Err(untaken)) => (Taken::Untaken(untaken), false),
                 None if holders.held(End::Write) => (Taken::Empty, false),

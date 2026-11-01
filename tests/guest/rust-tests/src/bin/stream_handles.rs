@@ -227,7 +227,7 @@ fn refuses_a_foreign_handle_writing_nothing() {
     let stderr = String::from_utf8_lossy(&said.stderr);
     assert!(!said.status.success(), "the foreign handle was taken: {}", String::from_utf8_lossy(&said.stdout));
     assert!(stderr.contains("is no stream of this process's"), "refused, but not by name: {stderr}");
-    let taken = syscall::message_recv(conn.as_handle().raw(), &mut bytes, &mut [], false);
+    let taken = syscall::message_recv(conn.as_handle().raw(), &mut [], &mut bytes, &mut [], false);
     assert_eq!(taken, Err(SyscallError::Gone), "the refusal sent on the stream's connection before its end");
     assert_eq!(rung.try_take(), Err(Hungup), "the refusal rang the stream before its end");
     println!("  a foreign handle: refused by name, nothing written");

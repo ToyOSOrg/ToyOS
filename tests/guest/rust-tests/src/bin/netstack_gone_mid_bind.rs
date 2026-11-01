@@ -191,7 +191,7 @@ fn mid_flight(request: Request) -> ! {
     say("connected");
 
     let mut byte = [0u8; 1];
-    let taken = syscall::message_recv(watch.as_handle().raw(), &mut byte, &mut [], false);
+    let taken = syscall::message_recv(watch.as_handle().raw(), &mut [], &mut byte, &mut [], false);
     assert_eq!(taken, Err(SyscallError::Gone), "the watch connection carried a message; nobody ever sent one");
 
     let err = match request {

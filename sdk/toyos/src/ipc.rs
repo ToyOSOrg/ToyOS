@@ -90,19 +90,12 @@ const TYPE_LEN: usize = 4;
 
 const _: () = assert!(TYPE_LEN + MAX_FRAME_LEN as usize <= syscall::MAX_MESSAGE_LEN);
 
-/// A frame as the kernel carries it: the message type, then its payload.
-/// Bytes only, so no padding.
+/// A frame as a send lays it out for the kernel: the message type, then
+/// its payload. Bytes only, so no padding.
 #[repr(C)]
 struct Wire<P> {
     msg_type: [u8; TYPE_LEN],
     payload: P,
-}
-
-impl<const MAX: usize> Wire<[u8; MAX]> {
-    fn bytes_mut(&mut self) -> &mut [u8] {
-        // SAFETY: a `Wire` of initialised bytes, whole.
-        unsafe { core::slice::from_raw_parts_mut(self as *mut Self as *mut u8, core::mem::size_of::<Self>()) }
-    }
 }
 
 #[derive(Debug)]
@@ -241,6 +234,16 @@ impl Connection {
         message(self.as_handle(), msg_type, &[], handles, true).map_err(nonblocking)
     }
 
+
+    /// Wait for the next frame and take its payload straight into
+    /// `payload`, with the handles it carried. For a caller that keeps the
+    /// payload in its own buffer: a [`FrameRx`] would be one more copy. A
+    /// payload longer than `payload` is [`IpcError::Malformed`] and stays
+    /// queued; otherwise it fails as [`FrameRx::recv`] does.
+    pub fn recv_into(&self, payload: &mut [u8]) -> Result<(Frame, Batch), IpcError> {
+        let mut msg_type = [0; TYPE_LEN];
+        receive(self.as_handle(), &mut msg_type, payload, false).map_err(Refused::blocking)
+    }
 }
 
 // Free functions, for a connection a caller holds by something other than a
@@ -427,7 +430,8 @@ pub struct Frame {
 /// [`pump`]: Self::pump
 /// [`recv`]: Self::recv
 pub struct FrameRx<const MAX: usize> {
-    wire: Wire<[u8; MAX]>,
+    msg_type: [u8; TYPE_LEN],
+    payload: [u8; MAX],
     held: Batch,
 }
 
@@ -459,12 +463,12 @@ impl Refused {
 
 impl<const MAX: usize> FrameRx<MAX> {
     pub const fn new() -> Self {
-        Self { wire: Wire { msg_type: [0; TYPE_LEN], payload: [0; MAX] }, held: Batch::EMPTY }
+        Self { msg_type: [0; TYPE_LEN], payload: [0; MAX], held: Batch::EMPTY }
     }
 
     /// The payload of the frame the last [`RxStep::Frame`] announced.
     pub fn payload(&self, len: usize) -> &[u8] {
-        &self.wire.payload[..len]
+        &self.payload[..len]
     }
 
     /// The handles the last frame carried, now the caller's to claim.
@@ -494,25 +498,38 @@ impl<const MAX: usize> FrameRx<MAX> {
 
     fn take(&mut self, conn: BorrowedHandle<'_>, nonblock: bool) -> Result<Frame, Refused> {
         self.held = Batch::EMPTY;
-        let mut handles = [toyos_abi::HANDLE_INVALID; syscall::MAX_TRANSFER_HANDLES];
-        let got = syscall::message_recv(conn.raw(), self.wire.bytes_mut(), &mut handles, nonblock);
-        self.taken(got, handles)
+        let (frame, batch) = receive(conn, &mut self.msg_type, &mut self.payload, nonblock)?;
+        self.held = batch;
+        Ok(frame)
     }
+}
 
-    /// A receive's answer, the handles it installed now this receiver's.
-    fn taken(
-        &mut self,
-        got: Result<Received, SyscallError>,
-        handles: [RawHandle; syscall::MAX_TRANSFER_HANDLES],
-    ) -> Result<Frame, Refused> {
-        let got = got.map_err(Refused::Kernel)?;
-        // The kernel installed each number in this process's table for this
-        // call, so this batch is the only thing that answers for them.
-        self.held = Batch { handles, next: 0, len: got.handles };
-        let payload_len = got.len.checked_sub(TYPE_LEN).ok_or(Refused::Malformed)?;
-        let msg_type = u32::from_ne_bytes(self.wire.msg_type);
-        Ok(Frame { msg_type, payload_len, handles: got.handles })
-    }
+/// One frame off `conn`: its type into `msg_type` and its payload into
+/// `payload`, straight from the kernel, and the handles it carried.
+fn receive(
+    conn: BorrowedHandle<'_>,
+    msg_type: &mut [u8; TYPE_LEN],
+    payload: &mut [u8],
+    nonblock: bool,
+) -> Result<(Frame, Batch), Refused> {
+    let mut handles = [toyos_abi::HANDLE_INVALID; syscall::MAX_TRANSFER_HANDLES];
+    let got = syscall::message_recv(conn.raw(), msg_type, payload, &mut handles, nonblock);
+    taken(got, *msg_type, handles)
+}
+
+/// A receive's answer, the handles it installed now the caller's.
+fn taken(
+    got: Result<Received, SyscallError>,
+    msg_type: [u8; TYPE_LEN],
+    handles: [RawHandle; syscall::MAX_TRANSFER_HANDLES],
+) -> Result<(Frame, Batch), Refused> {
+    let got = got.map_err(Refused::Kernel)?;
+    // The kernel installed each number in this process's table for this
+    // call, so this batch is the only thing that answers for them: dropped
+    // with a malformed frame, it closes them.
+    let batch = Batch { handles, next: 0, len: got.handles };
+    let payload_len = got.len.checked_sub(TYPE_LEN).ok_or(Refused::Malformed)?;
+    Ok((Frame { msg_type: u32::from_ne_bytes(msg_type), payload_len, handles: got.handles }, batch))
 }
 
 /// What a non-blocking receive's answer is to a server.
@@ -661,12 +678,11 @@ mod tests {
     #[test]
     fn a_message_shorter_than_a_type_is_malformed() {
         let none = [toyos_abi::HANDLE_INVALID; syscall::MAX_TRANSFER_HANDLES];
-        let mut rx = FrameRx::<8>::new();
-        rx.wire.msg_type = 7u32.to_ne_bytes();
-        assert!(matches!(rx.taken(Ok(Received { len: TYPE_LEN - 1, handles: 0 }), none), Err(Refused::Malformed)));
-        let frame = rx.taken(Ok(Received { len: TYPE_LEN, handles: 0 }), none).ok().unwrap();
+        let seven = 7u32.to_ne_bytes();
+        assert!(matches!(taken(Ok(Received { len: TYPE_LEN - 1, handles: 0 }), seven, none), Err(Refused::Malformed)));
+        let (frame, _) = taken(Ok(Received { len: TYPE_LEN, handles: 0 }), seven, none).ok().unwrap();
         assert_eq!(frame, Frame { msg_type: 7, payload_len: 0, handles: 0 });
-        let frame = rx.taken(Ok(Received { len: TYPE_LEN + 8, handles: 0 }), none).ok().unwrap();
+        let (frame, _) = taken(Ok(Received { len: TYPE_LEN + 8, handles: 0 }), seven, none).ok().unwrap();
         assert_eq!(frame.payload_len, 8);
     }
 
@@ -674,14 +690,13 @@ mod tests {
     #[test]
     fn a_receive_refused_is_the_step_a_server_acts_on() {
         let none = [toyos_abi::HANDLE_INVALID; syscall::MAX_TRANSFER_HANDLES];
-        let mut rx = FrameRx::<0>::new();
         for (e, idle, eof) in [
             (SyscallError::WouldBlock, true, false),
             (SyscallError::Gone, false, true),
             (SyscallError::InvalidArgument, false, false),
             (SyscallError::ResourceExhausted, false, false),
         ] {
-            let step = step(rx.taken(Err(e), none));
+            let step = step(taken(Err(e), [0; TYPE_LEN], none).map(|(frame, _)| frame));
             assert_eq!(matches!(step, RxStep::Idle), idle, "{e:?} answered {step:?}");
             assert_eq!(matches!(step, RxStep::Eof), eof, "{e:?} answered {step:?}");
         }
@@ -693,8 +708,7 @@ mod tests {
     #[test]
     fn a_receive_refused_is_the_error_a_client_acts_on() {
         let none = [toyos_abi::HANDLE_INVALID; syscall::MAX_TRANSFER_HANDLES];
-        let mut rx = FrameRx::<0>::new();
-        let mut blocking = |got| rx.taken(got, none).map_err(Refused::blocking);
+        let blocking = |got| taken(got, [0; TYPE_LEN], none).map(|(frame, _)| frame).map_err(Refused::blocking);
         assert!(matches!(blocking(Err(SyscallError::InvalidArgument)), Err(IpcError::Malformed)));
         assert!(matches!(blocking(Ok(Received { len: TYPE_LEN - 1, handles: 0 })), Err(IpcError::Malformed)));
         assert!(matches!(blocking(Err(SyscallError::Gone)), Err(IpcError::Disconnected)));
