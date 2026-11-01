@@ -36,7 +36,7 @@ on its head than its base
 (`issues/a-64-kib-pipe-write-is-two-percent-below-the-two-mebibyte-ring.md`),
 so the `pipe` rows' current state against Linux is owed a new reading.
 The scheduler's pair-wake records bear on both kinds:
-`issues/a-wake-whose-waker-parks-next-is-forwarded-to-an-idle-cpu.md` and
+`issues/a-wake-held-for-its-posters-park-is-unpriced-on-metal.md` and
 `issues/an-ordinary-wake-posted-on-its-own-cpu-waits-for-that-cpus-next-pass.md`.
 
 **Exit**: `pingpong.*` within Linux's on both benches in a labelled

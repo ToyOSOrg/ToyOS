@@ -27,8 +27,8 @@ process's fair-share lock, which the storm's other waiters were taking as
 they re-parked.
 
 Owned by stage S3 of the scheduler design (#872), which decides where a
-pair's wakes go: a wake whose waker parks next is cheapest left here
-(`issues/a-wake-whose-waker-parks-next-is-forwarded-to-an-idle-cpu.md`).
+pair's wakes go: a wake whose waker parks next is held and left here
+(`issues/a-wake-held-for-its-posters-park-is-unpriced-on-metal.md`).
 
 **Exit**: a wake posted on its own CPU by a poster that keeps running reaches
 a CPU within the bound `wake_onto_busy` holds for other CPUs' wakes, on the
