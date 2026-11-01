@@ -77,6 +77,9 @@ pub struct Client {
     ringing: Ringing,
     rx: Held<Receiving<RECEIVE_BYTES, { toyos::net::stream::WORDS }>>,
     tx: Held<Sending<SEND_BYTES, { toyos::net::stream::WORDS }>>,
+    /// Its reads commit what a grown receive ring reaches, as the SDK's do; a client breaking
+    /// the protocol commits nothing, and reads only what netstack committed.
+    commits: Cell<bool>,
 }
 
 impl std::fmt::Debug for Region {
@@ -179,7 +182,7 @@ impl Client {
         let bells = Rc::new(Doorbells::default());
         region.holders.borrow_mut().push(bells.clone());
         let ringing = Ringing { region: region.clone(), bells };
-        Rc::new(Client { region: region.clone(), ringing, rx: Held(RefCell::new(rx)), tx: Held(RefCell::new(tx)) })
+        Rc::new(Client { region: region.clone(), ringing, rx: Held(RefCell::new(rx)), tx: Held(RefCell::new(tx)), commits: Cell::new(true) })
     }
 
     /// A client that set Nagle's algorithm off before it connected.
@@ -189,11 +192,16 @@ impl Client {
         (client, session)
     }
 
+    /// From here on its reads commit nothing.
+    pub fn commit_nothing(&self) {
+        self.commits.set(false);
+    }
+
     /// A read of at most `max` bytes that does not wait.
     pub fn read(&self, max: usize) -> Result<Vec<u8>, Refused> {
         let mut out = vec![0; max];
         let region = &self.region;
-        let reach = |cap: u32| region.commit(RECEIVE_RING, cap as usize);
+        let reach = |cap: u32| !self.commits.get() || region.commit(RECEIVE_RING, cap as usize);
         let n = session::read(&region.words, &self.rx, &self.ringing, Mode::Nonblocking, u32::try_from(max).unwrap(), reach, |span, at| {
             assert!(region.reaches(span.offset, span.len), "a read of {span:?} past what was committed");
             out[at..at + span.len].copy_from_slice(&region.bytes.borrow()[span.offset..][..span.len]);

@@ -1,18 +1,21 @@
 //! A stream carries 4 MiB each way, every byte where it was written, while
-//! its rings grow: the send ring at the first write its room cannot take,
-//! here the third, and the receive ring as [tcp] asks for more buffer, every
-//! page committed by the end that touches it before it does. A missing
-//! commit ends this process or netstack; a byte laid out by the wrong size
-//! arrives out of place.
+//! this end's send ring grows, at the first write its room cannot take, here
+//! the third: each page committed by this process before it writes it, and
+//! by netstack before it reads it. A missing commit ends this process or
+//! netstack; a byte laid out by the wrong size arrives out of place. The
+//! receive ring grows only as [tcp] wants more buffer, which QEMU's user
+//! network's round trips seldom ask for: the node's host test
+//! `a_download_a_reader_keeps_up_with_grows_the_receive_ring_and_keeps_every_byte`
+//! holds that growth.
 //!
-//! It needs the guest: the commits are the kernel's, and the receive ring's
-//! growth is the real netstack's. ToyOS has no loopback, so the harness is
-//! the peer, as for `socket_export`: this job's argument is the port of its
-//! datagram socket, which QEMU's user network reaches as `10.0.2.2`. The job
-//! listens on the port the boot forwards, says it is ready in a datagram,
-//! accepts the harness's connection, and both ends send [`BYTES`] and check
-//! what they receive. `netstack_holders_exported_to_children`'s boot runs it,
-//! on tests/images/netcase.toml.
+//! It needs the guest: the commits and the refused touch are the kernel's.
+//! ToyOS has no loopback, so the harness is the peer, as for `socket_export`:
+//! this job's argument is the port of its datagram socket, which QEMU's user
+//! network reaches as `10.0.2.2`. The job listens on the port the boot
+//! forwards, says it is ready in a datagram, accepts the harness's
+//! connection, and both ends send [`BYTES`] and check what they receive.
+//! `netstack_holders_exported_to_children`'s boot runs it, on
+//! tests/images/netcase.toml.
 
 use std::io::{Read, Write};
 use std::net::{Ipv4Addr, Shutdown, SocketAddr, TcpListener, TcpStream, UdpSocket};
@@ -76,6 +79,6 @@ fn main() {
         scope.spawn(|| send(&stream));
         receive(&stream);
     });
-    println!("  PASS: 4 MiB each way arrived in order through the rings' growth");
-    println!("stream_grows: a stream's rings grow under load and keep every byte in place");
+    println!("  PASS: 4 MiB each way arrived in order through the send ring's growth");
+    println!("stream_grows: a stream's send ring grows under load and keeps every byte in place");
 }

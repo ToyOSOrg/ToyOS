@@ -90,15 +90,31 @@ struct Far {
     snd_nxt: u32,
     /// The node's next sequence number the peer has everything before.
     rcv_nxt: u32,
-    /// The node's last acknowledgment, and the window it came with.
+    /// The node's last acknowledgment, and the window it came with, scaled.
     acked: u32,
-    window: u16,
+    window: u32,
+    /// The peer offers window scaling in its SYN-ACK (RFC 7323 §2.2).
+    scales: bool,
+    /// The shift the node's SYN asked for, where both scale.
+    shift: u8,
     received: Vec<u8>,
     /// The node's FIN arrived, after everything before it.
     fin: bool,
     resets: Vec<Segment>,
     /// Every segment the node emitted, in order.
     segments: Vec<Segment>,
+}
+
+/// The window scale a SYN the node emitted asks for, or 0 where it asks none.
+fn window_shift(frame: &[u8]) -> u8 {
+    let packet = SlicedPacket::from_ethernet(frame).expect("Ethernet II");
+    let Some(TransportSlice::Tcp(tcp)) = &packet.transport else { panic!("a TCP segment") };
+    tcp.options_iterator()
+        .find_map(|option| match option {
+            Ok(TcpOptionElement::WindowScale(shift)) => Some(shift),
+            _ => None,
+        })
+        .unwrap_or(0)
 }
 
 fn v4(bytes: &[u8]) -> Ipv4Addr {
@@ -123,6 +139,8 @@ impl Far {
             rcv_nxt: 0,
             acked: 0,
             window: 0,
+            scales: false,
+            shift: 0,
             received: Vec::new(),
             fin: false,
             resets: Vec::new(),
@@ -133,7 +151,9 @@ impl Far {
     /// A segment from the peer in its frame, built by `etherparse`: PSH with text.
     fn frame(&self, seq: u32, ack: Option<u32>, syn: bool, fin: bool, rst: bool, text: &[u8]) -> Vec<u8> {
         let mut step = PacketBuilder::ethernet2(self.mac, MAC).ipv4(self.addr.octets(), A.octets(), 64).tcp(PORT, self.port, seq, 65_535);
-        if syn {
+        if syn && self.scales {
+            step = step.syn().options(&[TcpOptionElement::MaximumSegmentSize(1460), TcpOptionElement::WindowScale(7)]).unwrap();
+        } else if syn {
             step = step.syn().options(&[TcpOptionElement::MaximumSegmentSize(1460)]).unwrap();
         }
         if let Some(ack) = ack {
@@ -174,7 +194,7 @@ impl Far {
 
     /// How many bytes the node's window still lets the peer send.
     fn open(&self) -> usize {
-        self.acked.wrapping_add(u32::from(self.window)).wrapping_sub(self.snd_nxt) as usize
+        self.acked.wrapping_add(self.window).wrapping_sub(self.snd_nxt) as usize
     }
 
     /// The outside reading of a frame the node emitted, and the frames it is answered with.
@@ -193,6 +213,7 @@ impl Far {
                 self.port = segment.from_port;
                 self.received.clear();
                 self.fin = false;
+                self.shift = if self.scales { window_shift(frame) } else { 0 };
             } else if segment.from_port != self.port {
                 return Vec::new();
             }
@@ -221,7 +242,9 @@ impl Far {
             return Vec::new();
         }
         if let Some(ack) = segment.ack {
-            (self.acked, self.window) = (ack, segment.window);
+            // A SYN's window is never scaled (RFC 7323 §2.2).
+            let shift = if segment.syn { 0 } else { self.shift };
+            (self.acked, self.window) = (ack, u32::from(segment.window) << shift);
         }
         match self.manner {
             Manner::Deaf => return Vec::new(),
@@ -1160,4 +1183,42 @@ fn an_upload_larger_than_its_send_ring_grows_it_to_its_place() {
     assert_eq!(client.region.committed(SEND_RING), SEND_BYTES as usize, "the send ring after {offset} bytes");
     let heard = &net.far.received;
     assert!(!heard.is_empty() && heard.iter().enumerate().all(|(i, &b)| b == byte(i)), "the peer's stream is the client's");
+}
+
+// RFC 7323 §2: a peer that scales windows lets [tcp] want a receive buffer past the receive
+// ring's first size as the client keeps reading a round trip's worth; the node commits the
+// region below twice the ring and doubles it, and the client reads every byte in place across
+// each switch. Each round trip the peer fills the window it was offered over a millisecond, the
+// round trip [tcp] measures, and the client reads all of it. The client commits nothing itself,
+// so every page either end touches is one the node committed.
+#[test]
+fn a_download_a_reader_keeps_up_with_grows_the_receive_ring_and_keeps_every_byte() {
+    use toyos::net::stream::{RECEIVE_INITIAL, RECEIVE_RING};
+    const GROWN: usize = 4 * RECEIVE_INITIAL as usize;
+    let mut net = Net::new();
+    net.far.scales = true;
+    let (id, client) = net.connect(None);
+    client.commit_nothing();
+    let local = Port::new(net.far.port).expect("the SYN's source port");
+    assert_eq!(net.events(), [StreamEvent::Connected { id, local }]);
+    assert!(net.far.shift > 0, "the node's SYN asked to scale its window");
+    let sent = text(16 << 20);
+    let (mut offset, mut got) = (0, Vec::new());
+    for _ in 0..1_000 {
+        if client.region.committed(RECEIVE_RING) >= GROWN {
+            break;
+        }
+        while let len @ 1.. = net.far.open().min(1_460).min(sent.len() - offset) {
+            net.now = net.now.after(Duration::from_micros(20));
+            let frame = net.far.text(&sent[offset..offset + len]);
+            offset += len;
+            net.deliver(&frame);
+        }
+        net.now = net.now.after(Duration::from_millis(1));
+        got.extend(inbox(&client));
+        net.bridge();
+    }
+    assert!(client.region.committed(RECEIVE_RING) >= GROWN, "the receive ring after {offset} bytes: {}", client.region.committed(RECEIVE_RING));
+    got.extend(inbox(&client));
+    assert!(got.len() > GROWN && got[..] == sent[..got.len()], "the client's stream is the peer's: {} bytes", got.len());
 }

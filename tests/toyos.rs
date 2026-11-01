@@ -260,7 +260,7 @@ const RUST_SKIP: &[&str] = &[
     // A connect whose region nothing committed, to real netstack, which goes
     // on serving: `netstack_holders_exported_to_children`'s boot runs it.
     "stream_region_refused",
-    // A stream's bytes through its rings' growth, the harness its peer:
+    // A stream's bytes through its send ring's growth, the harness its peer:
     // `netstack_holders_exported_to_children`'s boot runs it.
     "stream_grows",
     // A stream's holders across processes, as their own netstack: it spawns a
@@ -5795,7 +5795,7 @@ const SOCKET_EXPORT_PORT: u16 = 7070;
 /// child's line, then its parent's, then the FIN once both holders are gone;
 /// then a listener's and a datagram socket's child's datagram, its accept and
 /// its line, and the parent's after it; then a connect whose region nothing
-/// committed, and a stream to the harness through its rings' growth. Once over
+/// committed, and a stream to the harness through its send ring's growth. Once over
 /// virtio, and once over QEMU's `e1000e`, which the image's rows name no
 /// machine for: the I219 driver's row matches it, and its link is the one
 /// netstack opens.
