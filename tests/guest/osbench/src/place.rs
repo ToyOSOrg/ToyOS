@@ -62,6 +62,7 @@ pub fn spawn_on(wanted: impl Fn(u32) -> bool, body: impl FnOnce() + Send + 'stat
     let mut tried = 0;
     while std::time::Instant::now() < deadline {
         tried += 1;
+        diag::count(&diag::PLACER_ON, sys::current_cpu());
         let (said, heard) = mpsc::channel();
         let (verdict, judged) = mpsc::channel::<Option<Box<dyn FnOnce() + Send>>>();
         let thread = std::thread::spawn(move || {
@@ -71,6 +72,7 @@ pub fn spawn_on(wanted: impl Fn(u32) -> bool, body: impl FnOnce() + Send + 'stat
             }
         });
         let on = heard.recv().map_err(|_| "a candidate ended before it said where it ran")?;
+        diag::count(&diag::LANDED_ON, on);
         if wanted(on) {
             let body = body.take().expect("a body is kept once");
             verdict.send(Some(Box::new(body))).map_err(|_| "a kept candidate ended")?;
@@ -86,3 +88,35 @@ pub fn spawn_on(wanted: impl Fn(u32) -> bool, body: impl FnOnce() + Send + 'stat
 /// so a machine of `n` usually needs about `n` candidates for any one CPU.
 #[cfg(target_os = "toyos")]
 const STAGE: std::time::Duration = std::time::Duration::from_secs(5);
+
+/// Measurement only (placement diagnosis, never committed to main): where the
+/// placer ran at each try, and where its candidates first ran.
+#[cfg(target_os = "toyos")]
+pub mod diag {
+    use std::sync::atomic::{AtomicU32, Ordering};
+    pub const CPUS: usize = 64;
+    pub static PLACER_ON: [AtomicU32; CPUS] = [const { AtomicU32::new(0) }; CPUS];
+    pub static LANDED_ON: [AtomicU32; CPUS] = [const { AtomicU32::new(0) }; CPUS];
+    pub fn count(of: &[AtomicU32; CPUS], cpu: u32) {
+        if let Some(slot) = of.get(cpu as usize) {
+            slot.fetch_add(1, Ordering::Relaxed);
+        }
+    }
+    pub fn reset() {
+        for slot in PLACER_ON.iter().chain(&LANDED_ON) {
+            slot.store(0, Ordering::Relaxed);
+        }
+    }
+    /// `cpu:count` pairs of the nonzero slots, `/`-separated.
+    pub fn take(of: &[AtomicU32; CPUS]) -> String {
+        let pairs: Vec<String> = of
+            .iter()
+            .enumerate()
+            .filter_map(|(cpu, slot)| match slot.swap(0, Ordering::Relaxed) {
+                0 => None,
+                n => Some(format!("{cpu}:{n}")),
+            })
+            .collect();
+        if pairs.is_empty() { "-".into() } else { pairs.join("/") }
+    }
+}
