@@ -354,7 +354,7 @@ struct Call {
 impl Call {
     /// Make a ring's first `cap` bytes, at `ring`, memory.
     fn commit(&self, ring: usize, cap: u32) -> bool {
-        self.end.region.is_some_and(|(region, _)| syscall::shm_commit(region, ring, cap as usize).is_ok())
+        self.end.region.is_some_and(|mapped| syscall::shm_commit(mapped.handle, ring, cap as usize).is_ok())
     }
 
     fn words(&self) -> &Words {

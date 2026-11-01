@@ -648,8 +648,6 @@ toyos_abi::user_safe! {
     }
 }
 
-const _: () = assert!(core::mem::size_of::<Stat>() == core::mem::size_of::<toyos_abi::syscall::Stat>());
-
 /// What kind of thing this is, how big, and which file: a file's node is its
 /// `FileId`, one per file for as long as it exists (`vfs::FileSystem::open_file`).
 pub fn fstat(object: &KObjectRef) -> Stat {

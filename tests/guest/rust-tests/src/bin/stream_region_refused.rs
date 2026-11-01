@@ -10,7 +10,7 @@
 
 use std::net::{Ipv4Addr, SocketAddrV4, TcpListener};
 
-use toyos::net::stream::REGION_BYTES;
+use toyos::net::stream::{BELLS, REGION_BYTES};
 use toyos::net::{MsgType, NetstackConn, TcpConnectRequest, TcpConnectResponse};
 use toyos::OwnedHandle;
 use toyos_abi::syscall;
@@ -22,7 +22,7 @@ fn main() {
     let request = TcpConnectRequest { addr: [192, 0, 2, 9], port: 9, _pad: 0, timeout_ms: 1_000 };
     let answer = NetstackConn::connect()
         .and_then(|conn| conn.request_with_handles([region], MsgType::TcpConnect, &request))
-        .and_then(|pending| pending.answer_with_handles::<TcpConnectResponse, 2>());
+        .and_then(|pending| pending.answer_with_handles::<TcpConnectResponse, BELLS>());
     match answer {
         Err(refused) => println!("  PASS: a connect with no page of its region committed was refused: {refused:?}"),
         Ok(_) => println!("  PASS: a connect with no page of its region committed had its first pages made memory, and was answered"),

@@ -11,7 +11,7 @@
 
 use std::process::{Command, Stdio};
 
-use toyos_abi::syscall::{self, SpawnArgs, SyscallError, PAGE_SIZE};
+use toyos_abi::syscall::{self, SpawnArgs, SyscallError, VmProt, PAGE_SIZE};
 
 const ME: &str = "/system/bin/test_rs_shm_commit";
 const PAGES: usize = 4;
@@ -26,7 +26,7 @@ fn main() {
     let shm = syscall::shm_reserve(PAGES * PAGE_SIZE, PAGE_SIZE).expect("a region of four pages, one committed");
     assert_eq!(account() - before, PAGE_SIZE as u64, "a region made with one page committed counts one");
     // SAFETY: a fresh region, mapped whole, which nothing else names.
-    let at = unsafe { syscall::shm_map(shm) }.expect("map the region");
+    let at = unsafe { syscall::shm_map(shm, VmProt::ReadWrite) }.expect("map the region");
     // SAFETY: the first page is committed.
     unsafe {
         assert_eq!(at.read_volatile(), 0, "a committed page is zeroed");
@@ -134,7 +134,7 @@ fn dies() {
 fn touch() {
     let shm = syscall::shm_reserve(2 * PAGE_SIZE, PAGE_SIZE).expect("a region of two pages, one committed");
     // SAFETY: a fresh region, mapped whole; page 1 is past what is committed, which is the test.
-    let at = unsafe { syscall::shm_map(shm) }.expect("map the region");
+    let at = unsafe { syscall::shm_map(shm, VmProt::ReadWrite) }.expect("map the region");
     println!("armed");
     // SAFETY: as above.
     let byte = unsafe { at.add(PAGE_SIZE).read_volatile() };

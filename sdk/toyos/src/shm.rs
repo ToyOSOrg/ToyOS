@@ -65,7 +65,7 @@ impl SharedMemory {
     /// [`create`](Self::create), only the pages of its first `committed`
     /// bytes memory until [`Self::commit`] makes more of it.
     pub fn reserve(size: usize, committed: usize) -> Result<Self, SyscallError> {
-        Self::adopt(syscall::shm_reserve(size, committed)?, size)
+        Self::adopt(OwnedHandle(syscall::shm_reserve(size, committed)?), size)
     }
 
     /// Make every page `[offset, offset + len)` of the region touches memory
