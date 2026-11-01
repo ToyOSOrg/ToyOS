@@ -295,6 +295,14 @@ pub struct CpuSched<X: SchedPayload> {
     /// In no fair band, as [`Self::dying`]'s tasks are not; excluded from the
     /// published load, because nothing queues behind work that will never run.
     stopped: VecDeque<ReadyTask<X>>,
+    /// Tasks the pass's opening (its drain and its deadlines) found behind
+    /// the running task, held for [`SchedPass`]'s disposition: whether that
+    /// task leaves the CPU in this pass decides whether they run here or are
+    /// forwarded. Empty outside a pass; the buffer is kept between passes.
+    held: Vec<ReadyTask<X>>,
+    /// Set by [`SchedPass::begin`] and cleared by the disposition, so only
+    /// the pass's opening holds.
+    holding: bool,
     /// The task that exited on this CPU, freed by the NEXT pass — a pass
     /// cannot free the stack it is running on.
     zombie: Option<DeadTask<X>>,
@@ -393,6 +401,8 @@ impl<X: SchedPayload> CpuSched<X> {
             parked: Parked::new(),
             dying: VecDeque::new(),
             stopped: VecDeque::new(),
+            held: Vec::new(),
+            holding: false,
             zombie: None,
             mailbox,
             steal_probe: MailboxNode::new(),
@@ -615,6 +625,8 @@ impl<X: SchedPayload> CpuSched<X> {
                 (core::mem::offset_of!(Self, parked), "parked (the park map)"),
                 (core::mem::offset_of!(Self, dying), "dying"),
                 (core::mem::offset_of!(Self, stopped), "stopped"),
+                (core::mem::offset_of!(Self, held), "held"),
+                (core::mem::offset_of!(Self, holding), "holding"),
                 (core::mem::offset_of!(Self, zombie), "zombie"),
                 (core::mem::offset_of!(Self, mailbox), "mailbox"),
                 (core::mem::offset_of!(Self, steal_probe), "steal_probe (excluded: a sibling writes it)"),
@@ -1013,7 +1025,8 @@ impl<X: SchedPayload> CpuSched<X> {
     /// Wake placement: keep the task local — that is where its cache lines
     /// are — unless it would queue behind the running task in its own band, RT
     /// behind RT or fair behind fair, in which case an idle sibling gets it: it
-    /// displaces nobody there.
+    /// displaces nobody there. A pass's opening holds such a task until the
+    /// pass's disposition and then places it with [`Self::place_settled`].
     ///
     /// A fair task that stays and is what the fair band would now run in place
     /// of the running fair thread takes the CPU [`MIN_SLICE_NS`] after that
@@ -1023,6 +1036,34 @@ impl<X: SchedPayload> CpuSched<X> {
     fn place<H: Hw<Payload = X>, P: PreemptGuard>(
         &mut self,
         task: ReadyTask<X>,
+        env: Env<'_, H, P>,
+        now: Nanos,
+    ) {
+        self.place_behind(task, false, env, now);
+    }
+
+    /// [`Self::place`] for a task the pass's opening held, once the
+    /// disposition has left the running task: a task its poster parked or
+    /// exited behind runs here, where it was posted, unless another task of
+    /// its band is already queued, an earlier held one included. So a burst
+    /// posted just before its poster parks keeps one task here and forwards
+    /// the rest, as it would have behind the poster.
+    fn place_settled<H: Hw<Payload = X>, P: PreemptGuard>(
+        &mut self,
+        task: ReadyTask<X>,
+        env: Env<'_, H, P>,
+        now: Nanos,
+    ) {
+        let queued_ahead = if task.is_rt() { self.rq.has_rt() } else { self.rq.fair_len() > 0 };
+        self.place_behind(task, queued_ahead, env, now);
+    }
+
+    /// [`Self::place`], where `queued_ahead` says a task of `task`'s band is
+    /// already queued here.
+    fn place_behind<H: Hw<Payload = X>, P: PreemptGuard>(
+        &mut self,
+        task: ReadyTask<X>,
+        queued_ahead: bool,
         env: Env<'_, H, P>,
         now: Nanos,
     ) {
@@ -1049,7 +1090,11 @@ impl<X: SchedPayload> CpuSched<X> {
             && self.rq.running_is_fair()
             && self.running.as_ref().is_some_and(|r| !r.shared().kill_pending());
         let behind_rt = task.is_rt() && self.running.as_ref().is_some_and(|r| r.is_rt());
-        if behind_fair || behind_rt {
+        if behind_fair || behind_rt || queued_ahead {
+            if self.holding {
+                self.held.push(task);
+                return;
+            }
             if let Some(dst) = self.forward_target(env) {
                 self.hand_off(task, dst, env, now);
                 return;
@@ -1569,6 +1614,8 @@ impl<'c, 'e, H: Hw, P: PreemptGuard> SchedPass<'c, 'e, H, P, Undisposed> {
                 cpu.rq.charge_running(ns);
             }
         }
+        assert!(!cpu.holding && cpu.held.is_empty(), "the previous pass on cpu{} was never disposed", cpu.id.0);
+        cpu.holding = true;
         cpu.drain(env, now);
         cpu.fire_deadlines(env, now);
         Self {
@@ -1577,6 +1624,17 @@ impl<'c, 'e, H: Hw, P: PreemptGuard> SchedPass<'c, 'e, H, P, Undisposed> {
             now,
             _state: PhantomData,
         }
+    }
+
+    /// Place what the opening drain held, against the running task as the
+    /// disposition has left it.
+    fn settle(&mut self) {
+        self.cpu.holding = false;
+        let mut held = core::mem::take(&mut self.cpu.held);
+        for task in held.drain(..) {
+            self.cpu.place_settled(task, self.env, self.now);
+        }
+        self.cpu.held = held;
     }
 
     pub fn cpu(&self) -> &CpuSched<H::Payload> {
@@ -1589,12 +1647,16 @@ impl<'c, 'e, H: Hw, P: PreemptGuard> SchedPass<'c, 'e, H, P, Undisposed> {
 
     /// The current task keeps its claim on the CPU (subject to the preemption
     /// decision in `finish`).
-    pub fn dispose_none(self) -> SchedPass<'c, 'e, H, P, Disposed> {
+    pub fn dispose_none(mut self) -> SchedPass<'c, 'e, H, P, Disposed> {
+        self.settle();
         self.dispose()
     }
 
     /// Voluntary yield: a fair thread gives up the rest of its request.
-    pub fn dispose_yield(self) -> SchedPass<'c, 'e, H, P, Disposed> {
+    pub fn dispose_yield(mut self) -> SchedPass<'c, 'e, H, P, Disposed> {
+        // Before the yield: the yielder stays runnable here, so what queues
+        // behind it is forwarded as it would be behind a running task.
+        self.settle();
         if let Some(current) = self.cpu.running.take() {
             let mut task = current.preempt(self.cpu.id, self.now);
             if task.shared().kill_pending() {
@@ -1613,7 +1675,7 @@ impl<'c, 'e, H: Hw, P: PreemptGuard> SchedPass<'c, 'e, H, P, Undisposed> {
     /// necessarily runs after the switch completes. The stack-reuse race is
     /// sequentially impossible, not locked away.
     pub fn dispose_block(
-        self,
+        mut self,
         ticket: CommittedTicket<Msg<H::Payload>>,
         deadline: Option<Nanos>,
     ) -> SchedPass<'c, 'e, H, P, Disposed> {
@@ -1643,6 +1705,7 @@ impl<'c, 'e, H: Hw, P: PreemptGuard> SchedPass<'c, 'e, H, P, Undisposed> {
         );
         self.cpu
             .trace(self.env, self.now, TraceKind::ParkCommit { task: key, name });
+        self.settle();
         self.dispose()
     }
 
@@ -1654,7 +1717,7 @@ impl<'c, 'e, H: Hw, P: PreemptGuard> SchedPass<'c, 'e, H, P, Undisposed> {
     /// only the caller knows it is standing somewhere it holds nothing, and
     /// this is where that knowledge is spent. Everything else a stopped task
     /// meets — a wake, an adopt, a retire — reads the bit in `place`.
-    pub fn dispose_stop(self) -> SchedPass<'c, 'e, H, P, Disposed> {
+    pub fn dispose_stop(mut self) -> SchedPass<'c, 'e, H, P, Disposed> {
         let current = self
             .cpu
             .running
@@ -1664,12 +1727,13 @@ impl<'c, 'e, H: Hw, P: PreemptGuard> SchedPass<'c, 'e, H, P, Undisposed> {
         self.cpu.rq.leave_running(task.key(), task.standing_mut());
         task.shared().mark_stop();
         self.cpu.keep_stopped(task);
+        self.settle();
         self.dispose()
     }
 
     /// The current task exits. Its record survives as the zombie until the
     /// next pass, which runs on another stack.
-    pub fn dispose_exit(self) -> SchedPass<'c, 'e, H, P, Disposed> {
+    pub fn dispose_exit(mut self) -> SchedPass<'c, 'e, H, P, Disposed> {
         let mut current = self
             .cpu
             .running
@@ -1682,6 +1746,7 @@ impl<'c, 'e, H: Hw, P: PreemptGuard> SchedPass<'c, 'e, H, P, Undisposed> {
         self.cpu.dispose_dead(dead, self.env);
         self.cpu
             .trace(self.env, self.now, TraceKind::Retire { task: key, name });
+        self.settle();
         self.dispose()
     }
 
@@ -4169,6 +4234,103 @@ mod tests {
         assert_eq!(sleeper_shared.state(), TaskState::InTransit(C1), "{sleeper:?} was forwarded");
         assert!(w.hw.state().kicks.contains(&C1), "and its adopt kicked the sibling");
         assert_eq!(w.cpus[0].running().map(|t| t.key()), Some(hog));
+        w.abandon();
+    }
+
+    /// The forward test's setup: `sleeper` parked on cpu0, a hog running
+    /// there, cpu1 asleep. Answers the hog and the sleeper.
+    fn hog_and_a_parked_sleeper(w: &mut World) -> (TaskKey, Arc<TaskShared<Msg<TestPayload>>>) {
+        let (_, sleeper) = w.spawn(C0);
+        w.run_a_pass(C0);
+        w.park_running(C0);
+        let (hog, _) = w.spawn(C0);
+        w.run_a_pass(C0);
+        w.run_a_pass(C1);
+        assert!(w.handles.get(C1).doorbell().sleeping(), "cpu1 has published SLEEPING");
+        (hog, sleeper)
+    }
+
+    /// **A burst its poster parks behind keeps one task where it was posted**:
+    /// the freed CPU runs the first, and the rest, which would queue behind it,
+    /// are forwarded to idle siblings as they would have been behind the
+    /// poster, in the RT band when `rt`.
+    fn a_burst_its_poster_parks_behind(rt: bool) {
+        let spawn = |w: &mut World, cpu| if rt { w.spawn_rt(cpu) } else { w.spawn(cpu) };
+        let mut w = World::new(2);
+        let mut sleepers = Vec::new();
+        for _ in 0..2 {
+            let (_, sleeper) = spawn(&mut w, C0);
+            w.run_a_pass(C0);
+            w.park_running(C0);
+            sleepers.push(sleeper);
+        }
+        spawn(&mut w, C0);
+        w.run_a_pass(C0);
+        w.run_a_pass(C1);
+        assert!(w.handles.get(C1).doorbell().sleeping(), "cpu1 has published SLEEPING");
+
+        for sleeper in &sleepers {
+            wake(&w, C0, sleeper);
+        }
+        w.park_running(C0);
+        let states: Vec<_> = sleepers.iter().map(|s| s.state()).collect();
+        w.abandon();
+        assert!(states.contains(&TaskState::Running(C0)), "one runs where it was posted: {states:?}");
+        assert!(states.contains(&TaskState::InTransit(C1)), "and the other went to the idle sibling: {states:?}");
+    }
+
+    #[test]
+    fn a_fair_burst_its_poster_parks_behind_keeps_one_here() {
+        a_burst_its_poster_parks_behind(false);
+    }
+
+    #[test]
+    fn an_rt_burst_its_poster_parks_behind_keeps_one_here() {
+        a_burst_its_poster_parks_behind(true);
+    }
+
+    /// **A wake whose poster parks in the pass that drains it runs where it was
+    /// posted**: the CPU is free once the poster has gone, so a forward would
+    /// buy an IPI and a cold cache for nothing.
+    #[test]
+    fn a_wake_its_poster_parks_behind_runs_where_it_was_posted() {
+        let mut w = World::new(2);
+        let (_, sleeper) = hog_and_a_parked_sleeper(&mut w);
+        wake(&w, C0, &sleeper);
+        w.park_running(C0);
+        assert_eq!(w.cpus[0].running().map(|t| t.key()), Some(sleeper.key()), "the wake ran here");
+        assert!(!w.hw.state().kicks.contains(&C1), "and the sibling was not woken for it");
+        w.abandon();
+    }
+
+    /// **The same for a poster that exits**: a thread started and joined, the
+    /// join's wake drained in the pass the thread ends in.
+    #[test]
+    fn a_wake_its_poster_exits_behind_runs_where_it_was_posted() {
+        let mut w = World::new(2);
+        let (_, sleeper) = hog_and_a_parked_sleeper(&mut w);
+        wake(&w, C0, &sleeper);
+        {
+            let (cpus, env) = w.split();
+            let _ = SchedPass::begin(&mut cpus[0], env, Nanos(NOW.0 + 1)).dispose_exit().finish();
+        }
+        assert_eq!(w.cpus[0].running().map(|t| t.key()), Some(sleeper.key()), "the wake ran here");
+        assert!(!w.hw.state().kicks.contains(&C1), "and the sibling was not woken for it");
+        w.abandon();
+    }
+
+    /// **A poster that yields stays runnable**, so what queues behind it is
+    /// forwarded as it is behind a poster that keeps the CPU.
+    #[test]
+    fn a_wake_its_poster_yields_behind_is_still_forwarded() {
+        let mut w = World::new(2);
+        let (_, sleeper) = hog_and_a_parked_sleeper(&mut w);
+        wake(&w, C0, &sleeper);
+        {
+            let (cpus, env) = w.split();
+            let _ = SchedPass::begin(&mut cpus[0], env, Nanos(NOW.0 + 1)).dispose_yield().finish();
+        }
+        assert_eq!(sleeper.state(), TaskState::InTransit(C1), "the wake was forwarded");
         w.abandon();
     }
 
