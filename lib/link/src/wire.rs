@@ -1,8 +1,8 @@
 //! The frames a link is opened with, before the region carries anything.
 //!
 //! **One way in, one answer.** A driver says who it is ([`MSG_HELLO`]) and
-//! sends the region it made and the bell it rings with it; the stack answers
-//! [`MSG_OPENED`] with the bell it rings, or [`MSG_REFUSED`] with a
+//! sends the region it made with it; the stack answers [`MSG_OPENED`] with
+//! the link's two bells, both of which it made, or [`MSG_REFUSED`] with a
 //! [`Refusal`]. After `MSG_OPENED` the connection has nothing left to carry,
 //! and either side's waker going ends the link.
 
@@ -25,14 +25,14 @@ impl Address {
     }
 }
 
-/// Driver to stack: a [`Hello`]. Handles: the region, then the bell the
-/// driver rings.
+/// Driver to stack: a [`Hello`]. Handles: the region.
 pub const MSG_HELLO: u32 = 1;
-/// Driver to stack: the hello's handles.
-pub const HELLO_HANDLES: usize = 2;
-/// Stack to driver: the link is open. No payload. Handles: the bell the
-/// stack rings.
+/// Stack to driver: the link is open. No payload. Handles
+/// ([`OPENED_HANDLES`]): the waker the driver rings the stack with, then the
+/// bell the stack rings the driver on.
 pub const MSG_OPENED: u32 = 2;
+/// Stack to driver: the opened answer's handles.
+pub const OPENED_HANDLES: usize = 2;
 /// Stack to driver: refused, a [`Refusal`]'s word.
 pub const MSG_REFUSED: u32 = 3;
 

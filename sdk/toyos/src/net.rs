@@ -385,7 +385,8 @@ impl PendingResponse {
     }
 
     /// The answer's bytes, taken straight into `buf`: their length. An
-    /// answer longer than `buf` is [`NetError::Io`].
+    /// answer longer than `buf` is [`NetError::Io`], an error answer
+    /// included, so `buf` must hold an [`ErrorResponse`] too.
     pub fn response_bytes(self, buf: &mut [u8]) -> Result<usize, NetError> {
         let (frame, _) = self.conn().recv_into(buf).map_err(hangup)?;
         let payload = &buf[..frame.payload_len];

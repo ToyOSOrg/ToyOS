@@ -348,7 +348,7 @@ fn answer_inspect(request: &Request, links: &[Held], counters: &[(IfIndex, Count
 /// the boot, and say so.
 fn open(asked: Asked, iface: IfIndex, n: usize, groups: &[Group]) -> Option<Session> {
     let label = asked.hello.label.clone();
-    let opened = Session::open(asked.hello, iface, asked.conn, asked.region, asked.rung, groups);
+    let opened = Session::open(asked.hello, iface, asked.conn, asked.region, groups);
     match &opened {
         Some(_) => say!("netstack: {label}'s link is open, as link {n}"),
         None => say!("netstack: {label} went before its link {n} was opened"),
@@ -375,9 +375,9 @@ fn hear_links(pending: &mut Vec<Pending>) -> Vec<Asked> {
             Heard::Gone => {
                 pending.remove(i);
             }
-            Heard::Hello(hello, mac, region, rung) => {
+            Heard::Hello(hello, mac, region) => {
                 let conn = pending.remove(i).into_conn();
-                asked.push(Asked { hello, mac, conn, region, rung });
+                asked.push(Asked { hello, mac, conn, region });
             }
         }
     }
@@ -463,8 +463,6 @@ struct Asked {
     mac: IndividualMac,
     conn: toyos::Connection,
     region: toyos_link::region::Region,
-    /// The bell the driver rings.
-    rung: toyos::wake::Bell,
 }
 
 /// An `inspect` waiting for the drivers' counters.
