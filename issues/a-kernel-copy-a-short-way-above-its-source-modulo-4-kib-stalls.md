@@ -8,7 +8,8 @@ opened: 2026-11-01
 
 The kernel's `memcpy` is `compiler_builtins`' one `rep movsb`
 (`issues/kernel-forward-copies-and-fills-are-one-rep-movsb-or-stosb-on-every-cpu.md`).
-`osbench copyat` (measurement only, branch `amd-memcpy-ab`) timed `rep movsb`
+`osbench copyat` (measurement only; evidence
+`ToyOSOrg/evidence` branch `pr-1133`, `amd-memcpy/round-2-copyat/`) timed `rep movsb`
 over 8 KiB with the destination `d` bytes above the source modulo 4096, p50:
 
 | bench | d = 0 | d = 16 | d = 64 | d = 256 | d >= 1024 |

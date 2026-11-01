@@ -25,18 +25,40 @@ unsafe extern "C" fn _start() -> ! {
 ///
 /// A destination less than [`SHORT_ALIAS`] above its source modulo 4 KiB makes
 /// each load of a forward copy match an older, unrelated store on address bits
-/// 11:0, which the load/store unit takes as a possible dependence: AMD's Family
-/// 17h judges store-to-load forwarding by those bits alone (Software
-/// Optimization Guide for AMD EPYC 7002, 56305 rev. 3.02, §2.12), and the
-/// T14's Tiger Lake measures the same stall. Copied highest first, every store such a load
-/// could match is 4 KiB minus the distance behind it and long retired.
+/// 11:0, which the load/store unit takes as a possible dependence: AMD's
+/// Family 17h judges store-to-load forwarding by those bits alone (Software
+/// Optimization Guide for AMD EPYC 7002, 56305 rev. 3.02, §2.12), as Intel's
+/// 4K aliasing does (Intel 64 and IA-32 Architectures Optimization Reference
+/// Manual). Copied highest first, every store such a load could match is
+/// 4 KiB minus the distance behind it and long retired.
 pub(crate) unsafe fn copy_forward(dest: *mut u8, src: *const u8, n: usize) {
     let distance = (dest as usize).wrapping_sub(src as usize) % 4096;
-    let disjoint = (dest as usize).abs_diff(src as usize) >= n;
-    if n >= 64 && distance != 0 && distance < SHORT_ALIAS && disjoint {
-        unsafe { copy_down_64(dest, src, n) };
-        return;
+    // `distance` in 1..SHORT_ALIAS, as one compare.
+    if n >= 64 && distance.wrapping_sub(1) < SHORT_ALIAS - 1 {
+        // SAFETY: as this function's caller promises.
+        return unsafe { copy_short_alias(dest, src, n) };
     }
+    unsafe { movsb(dest, src, n) };
+}
+
+/// [`copy_forward`] at a short distance: down where the ranges are disjoint,
+/// out of line so the common copy carries none of it.
+#[inline(never)]
+unsafe fn copy_short_alias(dest: *mut u8, src: *const u8, n: usize) {
+    // SAFETY: `n` is at least 64; down only between disjoint ranges.
+    unsafe {
+        if (dest as usize).abs_diff(src as usize) < n {
+            movsb(dest, src, n);
+        } else if has_avx() {
+            copy_down_avx(dest, src, n);
+        } else {
+            copy_down_sse2(dest, src, n);
+        }
+    }
+}
+
+#[inline(always)]
+unsafe fn movsb(dest: *mut u8, src: *const u8, n: usize) {
     unsafe {
         core::arch::asm!(
             "rep movsb",
@@ -48,14 +70,36 @@ pub(crate) unsafe fn copy_forward(dest: *mut u8, src: *const u8, n: usize) {
     }
 }
 
-/// The distances below which [`copy_forward`] copies highest first: as far as
-/// either bench was measured slower forward than down (the T14 to 256 bytes).
+/// The distance under which [`copy_forward`] copies highest first.
 const SHORT_ALIAS: usize = 512;
+
+/// Whether this CPU runs AVX and its system saves the YMM state: CPUID.1:ECX
+/// AVX (bit 28) and OSXSAVE (bit 27), and XCR0's SSE and AVX bits (1 and 2).
+/// Asked once; a racing first call asks twice and stores the same answer.
+pub(crate) fn has_avx() -> bool {
+    use core::sync::atomic::{AtomicU8, Ordering};
+    static AVX: AtomicU8 = AtomicU8::new(0);
+    match AVX.load(Ordering::Relaxed) {
+        1 => false,
+        2 => true,
+        _ => {
+            let ecx = core::arch::x86_64::__cpuid(1).ecx;
+            let avx = ecx & (1 << 28) != 0 && ecx & (1 << 27) != 0 && {
+                let (lo, _hi): (u32, u32);
+                // SAFETY: OSXSAVE says XGETBV exists; XCR0 is readable at every privilege level.
+                unsafe { core::arch::asm!("xgetbv", in("ecx") 0, out("eax") lo, out("edx") _hi, options(nomem, nostack, preserves_flags)) };
+                lo & 0b110 == 0b110
+            };
+            AVX.store(if avx { 2 } else { 1 }, Ordering::Relaxed);
+            avx
+        }
+    }
+}
 
 /// Copy `n` bytes, at least 64, between disjoint ranges, 64 bytes a step by
 /// SSE2 from the top; the lowest 64 are loaded first and stored last, so the
 /// last step may overlap them.
-unsafe fn copy_down_64(dest: *mut u8, src: *const u8, n: usize) {
+pub(crate) unsafe fn copy_down_sse2(dest: *mut u8, src: *const u8, n: usize) {
     unsafe {
         core::arch::asm!(
             "movups xmm4, [{s}]", "movups xmm5, [{s} + 16]", "movups xmm6, [{s} + 32]", "movups xmm7, [{s} + 48]",
@@ -75,6 +119,40 @@ unsafe fn copy_down_64(dest: *mut u8, src: *const u8, n: usize) {
             p = inout(reg) n => _,
             out("xmm0") _, out("xmm1") _, out("xmm2") _, out("xmm3") _,
             out("xmm4") _, out("xmm5") _, out("xmm6") _, out("xmm7") _,
+            options(nostack),
+        );
+    }
+}
+
+/// [`copy_down_sse2`] 32 bytes a load and store, half the stores: a CPU
+/// retiring one store a cycle copies at twice the rate. `vzeroupper` ends it,
+/// so SSE code after it pays no transition (56305 rev. 3.02, §2.11.6).
+///
+/// # Safety
+/// As [`copy_down_sse2`], on a CPU [`has_avx`] answers for.
+#[target_feature(enable = "avx")]
+pub(crate) unsafe fn copy_down_avx(dest: *mut u8, src: *const u8, n: usize) {
+    unsafe {
+        core::arch::asm!(
+            "vmovdqu ymm2, [{s}]", "vmovdqu ymm3, [{s} + 32]",
+            "2:",
+            "cmp {p}, 64",
+            "jbe 3f",
+            "sub {p}, 64",
+            "vmovdqu ymm0, [{s} + {p}]", "vmovdqu ymm1, [{s} + {p} + 32]",
+            "vmovdqu [{d} + {p}], ymm0", "vmovdqu [{d} + {p} + 32], ymm1",
+            "jmp 2b",
+            "3:",
+            "vmovdqu [{d}], ymm2", "vmovdqu [{d} + 32], ymm3",
+            "vzeroupper",
+            s = in(reg) src,
+            d = in(reg) dest,
+            p = inout(reg) n => _,
+            // `vzeroupper` clears every YMM register's upper half.
+            out("ymm0") _, out("ymm1") _, out("ymm2") _, out("ymm3") _,
+            out("ymm4") _, out("ymm5") _, out("ymm6") _, out("ymm7") _,
+            out("ymm8") _, out("ymm9") _, out("ymm10") _, out("ymm11") _,
+            out("ymm12") _, out("ymm13") _, out("ymm14") _, out("ymm15") _,
             options(nostack),
         );
     }
