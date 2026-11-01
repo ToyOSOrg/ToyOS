@@ -18,6 +18,12 @@ belongs in the idle states and in device power management: none of this gap
 may be closed by slowing work. The AMD bench's smaller gap is
 `issues/the-amd-benchs-idle-package-draws-15-percent-over-linuxs.md`.
 
+Every Linux figure here had its display on as software holds it: the eDP
+connector's DPMS On, and the backlight at its setting. The one exception is
+the display-off step. The lid's physical state before 2026-11-01 is unknown;
+it has been closed since then. The ToyOS-against-Linux figures therefore hold
+for one lid state, whichever it was (evidence `pr-1131` `lid/`).
+
 Intel's datasheet (631121 Vol. 1 §3.2.5, Table 3-5) holds the package in PC2
 when its cores are in C6 or deeper and its graphics in RC6, but an LTR, a
 near timer or a device memory access refuses any deeper state. Table 3-8
