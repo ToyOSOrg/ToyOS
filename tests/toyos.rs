@@ -1243,6 +1243,20 @@ const METAL: &[(&str, metal::Metal)] = &[
         metal::Metal { arms: BENCHCASE, judge: |b| clock_holds_over_minutes(b[0]) },
     ),
     (
+        // `osbench files`, `nvme` and `persist` alone: the disk's figures, on
+        // the bench's NVMe, for a change to the disk's path or its power
+        // states that the whole suite's boot need not measure. The T14 and
+        // the AMD bench.
+        "osbench_disk",
+        metal::Metal {
+            arms: OSBENCH_DISK,
+            judge: |b| {
+                data_on_the_nvme(b[0])?;
+                osbench_ran(b[0], &OSBENCH_DISK_GROUPS)
+            },
+        },
+    ),
+    (
         // `osbench lan` against the `osbench-peer` the other bench's Linux runs,
         // compared with the same program under this bench's Linux on the same
         // path. A pass names it: the other bench has to be running the peer.
@@ -1826,9 +1840,10 @@ const OSBENCH_GROUPS: [&str; 16] = [
 /// under 30 s of memcpy sizes, pipe sizes and 1 ms timers. Each of the some
 /// ninety benchmarks that settle the clock settles it before and after
 /// itself, 50 ms where the clock holds and 0.5 s at most (`clock::settle`):
-/// under 95 s. So a list bound of 525 s leaves that stall 136 s.
+/// under 95 s. `persist`'s after-idle row adds its 80 s of idle. So a list
+/// bound of 605 s leaves that stall 136 s.
 const BENCHCASE: &[metal::Arm] = &[metal::Arm {
-    adds_ms: 465_000,
+    adds_ms: 545_000,
     ..metal::once("benchcase", "tests/images/benchcase.toml", &[], &OSBENCH_GROUPS)
 }];
 
@@ -1838,6 +1853,16 @@ const BENCHCASE: &[metal::Arm] = &[metal::Arm {
 const OSBENCH_ENERGY: &[metal::Arm] = &[metal::Arm {
     adds_ms: 300_000,
     ..metal::once("energybenchcase", "tests/images/benchcase.toml", &[], &["osbench_energy"])
+}];
+
+/// The groups that write the disk, in the suite's order.
+const OSBENCH_DISK_GROUPS: [&str; 3] = ["osbench_files", "osbench_nvme", "osbench_persist"];
+
+/// No boot has timed the disk's groups apart from the rest of the suite, so
+/// they take the whole suite's bound, [`BENCHCASE`]'s, which covers them.
+const OSBENCH_DISK: &[metal::Arm] = &[metal::Arm {
+    adds_ms: 545_000,
+    ..metal::once("diskbenchcase", "tests/images/benchcase.toml", &[], &OSBENCH_DISK_GROUPS)
 }];
 
 /// The two groups that need another party share one boot when one pass names
@@ -5007,7 +5032,8 @@ fn the_compositor_drives_the_virtio_gpu() -> Result<(), String> {
 }
 
 /// A machine with one NVMe disk and no USB controller boots the image off
-/// that disk to ready, and says nothing a clean boot does not.
+/// that disk to ready, says nothing a clean boot does not, and its driver
+/// says what it made of the controller's idle power states.
 fn nvme_disk_boots(test_config: &Path) -> Result<(), String> {
     let options = BootOptions { profile: qemu::Profile::HeadlessNoUsb, ..Default::default() };
     if let Some(usb) = qemu::profile_argv(&options).iter().find(|arg| arg.contains("usb") || arg.contains("xhci")) {
@@ -5021,6 +5047,9 @@ fn nvme_disk_boots(test_config: &Path) -> Result<(), String> {
     for role in NVME_ROLES {
         log.must_say(&format!("fileserver: {role}"))?;
     }
+    // The driver says what it made of the controller's idle power states.
+    let power = log.must_say("autonomous power state transitions")?;
+    eprintln!("  [nvme] {}", power.trim());
     Ok(())
 }
 

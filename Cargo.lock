@@ -1921,6 +1921,7 @@ dependencies = [
 name = "nvme"
 version = "0.0.0"
 dependencies = [
+ "nvme-apst",
  "toyos",
  "toyos-abi",
  "toyos-blockring",
@@ -1928,6 +1929,10 @@ dependencies = [
  "toyos-gpt",
  "toyos-quiesce",
 ]
+
+[[package]]
+name = "nvme-apst"
+version = "0.1.0"
 
 [[package]]
 name = "objc-sys"

@@ -231,6 +231,14 @@ What makes the disk rows one comparison, and what stays each system's own:
   `fs.disk.seq_write.*` rounds write the disk. Its cache keeps 64 MiB clean,
   evicting in insertion order, and the 4 KiB sequential read misses
   (`issues/a-sequential-read-of-a-file-as-large-as-datas-clean-cache-reads-the-disk.md`).
+- **Each system's own idle power states.** `persist.write_4k_fsync_after_idle`
+  repeats `persist.write_4k_fsync` eight times, each after 10 s in which the
+  program touches nothing. The difference between the two rows is what the
+  drive's idle power states, as each system configures them, cost the first
+  I/O that wakes it.
+
+The `osbench_disk` metal row runs `files`, `nvme` and `persist` alone, on
+the benchcase image.
 
 ## What is not a comparison
 

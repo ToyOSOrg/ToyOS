@@ -21,6 +21,12 @@
 //! volatile cache a completed write is on the medium, and a flush has nothing
 //! to issue.
 //!
+//! **The controller is let into its own idle power states** by Autonomous
+//! Power State Transitions (§5.1.25.1.6, §8.1.17.2), where it supports them,
+//! with the table `nvme_apst` builds from its power state descriptors under
+//! that crate's latency bound. It is set at bring-up and again after every
+//! reset, which returns features to their defaults.
+//!
 //! **A command the controller does not answer is reclaimed by a controller
 //! reset** (§3.7.2): `CC.EN` cleared, every command it held is gone, the queues
 //! are made again. Whoever owned one is told it was not done.
@@ -70,6 +76,7 @@ const ADMIN_CREATE_IO_CQ: u8 = 0x05;
 const ADMIN_IDENTIFY: u8 = 0x06;
 const ADMIN_SET_FEATURES: u8 = 0x09;
 const FEATURE_NUMBER_OF_QUEUES: u32 = 0x07;
+const FEATURE_APST: u32 = 0x0C;
 const IO_FLUSH: u8 = 0x00;
 const IO_WRITE: u8 = 0x01;
 const IO_READ: u8 = 0x02;
@@ -89,6 +96,17 @@ const _: () = assert!(OFF_IO + MAX_IO_QUEUES as usize * 2 * PAGE <= OFF_PRP);
 const _: () = assert!(OFF_PRP + MAX_IO_QUEUES as usize * IO_DEPTH as usize * PAGE <= GRANT_BYTES as usize);
 const _: () = assert!(ADMIN_DEPTH as usize * SQE_BYTES <= PAGE);
 const _: () = assert!(IO_DEPTH as usize * SQE_BYTES <= PAGE);
+
+/// What the controller's idle power states came to at the last bring-up.
+#[derive(Clone, Debug)]
+pub enum Power {
+    /// APSTA's bit 0 is clear: the controller makes no autonomous transition.
+    Unsupported,
+    /// The table set, and the states it was built from.
+    Autonomous { states: Vec<nvme_apst::PowerState>, plan: [Option<nvme_apst::Transition>; nvme_apst::STATES] },
+    /// The controller refused the Set Features, with this status.
+    Refused(u16),
+}
 
 /// Whose a command is.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -208,6 +226,10 @@ pub struct Controller {
     pub vwc: bool,
     /// The most 4 KiB blocks one command may move (`MDTS`).
     pub max_blocks: u32,
+    /// The power states Identify Controller states, and whether APST is
+    /// supported, read once at bring-up.
+    states: (bool, Vec<nvme_apst::PowerState>),
+    pub power: Power,
     poller: Poller,
     /// A device answer naming no waiting slot, said once.
     stray: bool,
@@ -269,6 +291,8 @@ impl Controller {
             sectors: 0,
             vwc: false,
             max_blocks: 0,
+            states: (false, Vec::new()),
+            power: Power::Unsupported,
             poller: Poller::new(1),
             stray: false,
             peak: 0,
@@ -277,6 +301,7 @@ impl Controller {
         ctrl.enable()?;
         ctrl.identify()?;
         ctrl.make_io_queues()?;
+        ctrl.power = ctrl.set_power()?;
         Ok(ctrl)
     }
 
@@ -348,6 +373,9 @@ impl Controller {
         let id = self.dma.sub(OFF_IDENTIFY, PAGE);
         id.zero();
         self.admin_command("Identify Controller", Command { opcode: ADMIN_IDENTIFY, prp1: buf, cdw10: 1, ..Command::default() })?;
+        let mut whole = vec![0u8; PAGE];
+        id.copy_out(0, &mut whole);
+        self.states = nvme_apst::states(&whole).expect("Identify Controller is a page");
         let mdts: u8 = id.read(77);
         let vwc: u8 = id.read(525);
         self.vwc = vwc & 1 != 0;
@@ -384,6 +412,30 @@ impl Controller {
         self.lba_bytes = 1 << lbads;
         self.sectors = nsze;
         Ok(())
+    }
+
+    /// Set the APST table, through the identify page, which nothing reads
+    /// after bring-up. A refusal is the controller's answer and is reported;
+    /// the controller then serves from its operational state.
+    fn set_power(&mut self) -> Result<Power, Refusal> {
+        let (supported, states) = self.states.clone();
+        if !supported {
+            return Ok(Power::Unsupported);
+        }
+        let plan = nvme_apst::plan(&states);
+        self.dma.copy_in(OFF_IDENTIFY, &nvme_apst::encode(&plan));
+        let cmd = Command {
+            opcode: ADMIN_SET_FEATURES,
+            prp1: self.dma_addr + OFF_IDENTIFY as u64,
+            cdw10: FEATURE_APST,
+            cdw11: 1,
+            ..Command::default()
+        };
+        match self.admin_command("Set Features (Autonomous Power State Transition)", cmd) {
+            Ok(_) => Ok(Power::Autonomous { states, plan }),
+            Err(Refusal::Admin(_, status)) => Ok(Power::Refused(status)),
+            Err(why) => Err(why),
+        }
     }
 
     fn make_io_queues(&mut self) -> Result<(), Refusal> {
@@ -662,6 +714,7 @@ impl Controller {
             .collect();
         self.enable()?;
         self.make_io_queues()?;
+        self.power = self.set_power()?;
         Ok(aborted)
     }
 
