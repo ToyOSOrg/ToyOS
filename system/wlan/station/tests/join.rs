@@ -200,7 +200,7 @@ fn a_handshake_that_does_not_finish_in_time_is_left_and_refused() {
     let (mut h, mut ap) = associated(b"not the passphrase", PASSPHRASE);
     h.eapol(AA, &ap.message_1().seal(), SNONCE);
     h.sent();
-    h.advance(HANDSHAKE_BOUND - Duration::from_millis(1));
+    h.advance(HANDSHAKE_BOUND.saturating_sub(Duration::from_millis(1)));
     assert_eq!(h.answered(), []);
     h.advance(Duration::from_millis(1));
     assert_eq!(h.sent(), [Sent::Leave]);

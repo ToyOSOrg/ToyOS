@@ -124,13 +124,13 @@ fn frames_out_of_the_protocol_s_order_end_the_radio() {
 fn a_radio_that_misses_a_bound_is_ended() {
     let mut h = Harness::new();
     h.station.radio_connected(h.now);
-    h.advance(HELLO_BOUND - Duration::from_millis(1));
+    h.advance(HELLO_BOUND.saturating_sub(Duration::from_millis(1)));
     assert!(h.ended.is_empty());
     h.advance(Duration::from_millis(1));
     assert_eq!(h.ended, ["the radio said no hello"]);
 
     let mut h = scanning();
-    h.advance(SCAN_BOUND - Duration::from_millis(1));
+    h.advance(SCAN_BOUND.saturating_sub(Duration::from_millis(1)));
     assert!(h.ended.is_empty());
     h.advance(Duration::from_millis(1));
     ended(h, "did not finish a scan in time");
