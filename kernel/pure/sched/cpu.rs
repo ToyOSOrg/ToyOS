@@ -2680,7 +2680,7 @@ pub struct CpuHandles<M> {
 /// ([`CpuSched::toward_its_waker`]). A split pair pays this many split round
 /// trips once; a task whose parked wakes come from two LLCs independently
 /// and evenly moves on about one in 2^(n+1) - 2, 1 in 510 at 8.
-pub const WAKER_RUN: u16 = 8;
+pub const WAKER_RUN: u16 = 2;
 
 /// The CPUs an idle CPU is chosen among, nearest first: `me`'s LLC, then the
 /// rest of its package, then the machine. A choice stays in the first group
