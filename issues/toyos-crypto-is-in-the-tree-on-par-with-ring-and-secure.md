@@ -660,12 +660,10 @@ Not consumers:
   its data. The T14's store-forwarding predictor once timed P-256 by its
   data, which DOITM, PSFD or SSBD removed
   (`issues/intels-store-forwarding-predictor-times-constant-time-code-by-its-data.md`).
-  Intel's MXCSR-dependent timing can also delay `VPMULUDQ`, which the AVX2
-  Poly1305 kernel runs, by up to a cycle on its data, on a CPU that does not
-  enumerate `MCDT_NO` (CPUID.(07H,2):EDX[5]); the T14 does not, and the
-  kernel runs under the default MXCSR. **Owner**: this track. **Exit**: that
-  issue's, and the AVX2 Poly1305 kernel runs under Intel's MXCSR 0x1FBF
-  sequence where `MCDT_NO` is clear, its cost measured on the T14.
+  Intel's MXCSR-dependent timing can delay the AVX2 Poly1305's `VPMULUDQ`
+  on its data
+  (`issues/the-avx2-poly1305-runs-under-intels-mxcsr-dependent-timing.md`).
+  **Owner**: this track. **Exit**: both issues'.
 - Erasure is what `lib/crypto/src/secret.rs`'s contract states: secret
   owners, each key agreement's shared value and named workspaces are
   erased. Since the parity work's 5x51 field (#992), 2^255 - 19 field
