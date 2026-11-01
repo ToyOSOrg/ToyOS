@@ -26,18 +26,22 @@ the HPET's count reaches it, then follows the HPET. The kernel's clock stays
 ahead by the step.
 
 Where one CPU's TSC is apart from the others' (written or found behind),
-processes' time holds at the furthest-ahead CPU's clock at the handover until
-the HPET's count reaches it. An offset an AP's start proves demotes before any
-process runs, so processes' time starts on the HPET's count. Either way the
-kernel's clock on each CPU stays apart by that CPU's offset.
+processes' time holds at the furthest-ahead CPU's clock at the handover, or
+up to the last retune's change of rate times the time since it past that,
+until the HPET's count reaches it. An offset an AP's start proves demotes
+before any process runs, so processes' time starts on the HPET's count.
+Either way the kernel's clock on each CPU stays apart by that CPU's offset.
 
-The handover floors each CPU along the line in force and the one it replaced.
-A process that read the page along an older line, at least two retunes before
-the demotion, is above its CPU's floor only if that CPU leads the sampling
-CPU by more than the time between those retunes over their change of rate.
-At a slew's 500 ppm and samples a second apart, that is a lead past about
-2000 s. Its answer then reads behind that process's last reading by at most
-the change of rate times the lead.
+The handover floors each CPU along the line in force and the one it replaced,
+which covers a process that read either. A process that read the page along
+an older line, at least two retunes before the demotion, can read behind its
+last reading. Retunes come a second apart by the sampling CPU's clock, so a
+CPU that leads the previous sampler by λ samples about 1 s − λ after it. A
+reading on a leading CPU is then covered only while the lead stays under
+about a second, where consecutive samples come from CPUs that far apart.
+Past that, the answer reads behind the process's last reading by at most the
+change of rate times the lead: 0.5 ms per second of lead at a slew's
+500 ppm.
 
 **Owner:** the clock.
 

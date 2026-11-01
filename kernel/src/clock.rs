@@ -42,8 +42,8 @@ static RETUNING: Lock<()> = Lock::new(());
 /// first retune, which no floor exceeds. Published under [`RETUNING`].
 static REPLACED: crate::seqlock::Published<3> = crate::seqlock::Published::new();
 
-/// From [`demote`] to [`handed_over`] no retune publishes: the line in force
-/// and the one it replaced are what every page reader read.
+/// From [`demote`] to [`handed_over`] no retune publishes, so the two lines
+/// [`floor_at`] reads stay unchanged through the handover.
 static HELD: AtomicBool = AtomicBool::new(false);
 
 /// Take the rate the CPU states, the loader's, for the stamps the log carries

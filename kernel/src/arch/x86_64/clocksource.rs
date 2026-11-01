@@ -587,7 +587,11 @@ fn demote(why: core::fmt::Arguments) {
 /// The handover's round, on the page marked: every online CPU floors
 /// [`DEMOTED_LATEST`] at its own clock, this one first. A page reader that
 /// found the page unmarked read its counter before its CPU's floor, on that
-/// CPU's TSC, so no answer reads before it however far that TSC leads.
+/// CPU's TSC, so no answer reads before its reading along the line in force
+/// or the one it replaced, however far that TSC leads. A reading along an
+/// older line is the remainder
+/// `issues/a-demoted-tsc-keeps-the-kernels-clock-apart-from-processes.md`
+/// records.
 /// Before the APs are released no process has run on them, so this CPU
 /// floors alone and none is asked.
 ///
@@ -606,9 +610,11 @@ fn hand_over() {
 }
 
 /// This CPU's answer to the handover, if it owes one: the kick handler's and
-/// `tlb::poll`'s, so every spinner with interrupts closed answers it.
+/// `tlb::poll`'s, so a `Lock` spinner answers it. Not every spinner with
+/// interrupts closed does; the round ends because the demoter answers every
+/// round it is asked meanwhile ([`awaiting`]).
 pub fn serve_here() {
-    // The hint before the mask: with no round in flight a kick pays two loads.
+    // The hint, not the mask, with no round in flight.
     if !HANDOVER.owes(super::percpu::cpu_id() as usize) {
         return;
     }
@@ -630,6 +636,9 @@ fn floor_here() {
 /// takes no kick in five seconds is wedged.
 fn awaiting(what: &str, done: impl Fn() -> bool) {
     const SPINS_PER_DEADLINE_CHECK: u32 = 1024;
+    if done() {
+        return;
+    }
     let deaf = crate::time::DEAF_CPU.nanos();
     let deadline = crate::clock::nanos_since_boot().saturating_add(deaf);
     let mut spins = 0u32;
