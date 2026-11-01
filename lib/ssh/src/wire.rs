@@ -203,15 +203,20 @@ pub(crate) fn put_string(out: &mut Vec<u8>, bytes: &[u8]) {
 
 /// An `mpint` holding the unsigned big-endian integer `magnitude`: no leading
 /// zero bytes, and one zero byte where the top bit would read as a sign
-/// (RFC 4251 §5).
+/// (RFC 4251 §5). `magnitude` may be secret, as K is: the scan for its first
+/// nonzero byte branches on no byte and reads every one. What the encoding's
+/// length says of it, the format publishes.
 pub(crate) fn put_mpint(out: &mut Vec<u8>, magnitude: &[u8]) {
-    let first = magnitude.iter().position(|&b| b != 0).unwrap_or(magnitude.len());
-    let digits = &magnitude[first..];
-    let sign = digits.first().is_some_and(|&b| b & 0x80 != 0);
-    put_u32(out, u32::try_from(digits.len() + usize::from(sign)).expect("an mpint the server writes fits a u32"));
-    if sign {
-        out.push(0);
+    let (mut zeros, mut sign, mut seen) = (0usize, 0usize, 0usize);
+    for &byte in magnitude {
+        let nonzero = (usize::from(byte) | usize::from(byte).wrapping_neg()) >> (usize::BITS - 1);
+        sign |= nonzero & !seen & usize::from(byte >> 7);
+        seen |= nonzero;
+        zeros += 1 - seen;
     }
+    let digits = &magnitude[zeros..];
+    put_u32(out, u32::try_from(digits.len() + sign).expect("an mpint the server writes fits a u32"));
+    out.resize(out.len() + sign, 0);
     out.extend_from_slice(digits);
 }
 
@@ -231,6 +236,11 @@ mod tests {
         assert_eq!(mpint(&[0x09, 0xa3, 0x78, 0xf9, 0xb2, 0xe3, 0x32, 0xa7]), [0, 0, 0, 8, 0x09, 0xa3, 0x78, 0xf9, 0xb2, 0xe3, 0x32, 0xa7]);
         assert_eq!(mpint(&[0x80]), [0, 0, 0, 2, 0, 0x80]);
         assert_eq!(mpint(&[0, 0, 0x7f]), [0, 0, 0, 1, 0x7f]);
+        // A zero after the first nonzero byte is a digit, and only the first
+        // nonzero byte's top bit asks for the sign byte.
+        assert_eq!(mpint(&[0, 0x01, 0x00, 0x80]), [0, 0, 0, 3, 0x01, 0x00, 0x80]);
+        assert_eq!(mpint(&[0, 0, 0xff, 0x00]), [0, 0, 0, 3, 0, 0xff, 0x00]);
+        assert_eq!(mpint(&[]), [0, 0, 0, 0]);
     }
 
     #[test]

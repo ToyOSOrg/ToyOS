@@ -181,27 +181,65 @@ pub(super) fn rsa_mul(a: &[u64], b: &[u64], m: &[u64], n0: u64, n: usize, out: &
     Some(unsafe { montgomery::mul(a, b, m, n0, n, out) })
 }
 
-/// P-256 field multiplication by `p256::mul` where BMI2 and ADX are
-/// admitted.
+/// P-256's field arithmetic on `p256`'s kernels. The type is private to this
+/// module and named only by [`p256`] once CPUID admitted BMI2 and ADX: that
+/// is what makes its safe operations sound.
 #[cfg(not(target_os = "uefi"))]
-#[inline]
-pub(super) fn p256_mul(a: &[u64; 4], b: &[u64; 4]) -> Option<[u64; 4]> {
-    if !features().bmi2_adx() {
-        return None;
+struct P256Kernels;
+
+#[cfg(not(target_os = "uefi"))]
+impl crate::montgomery::Modulus<4> for P256Kernels {
+    const P: [u64; 4] = <crate::nist::P256Field as crate::montgomery::Modulus<4>>::P;
+    const FORM: crate::montgomery::Form = crate::montgomery::Form::P256;
+    #[inline(always)]
+    fn add(a: &[u64; 4], b: &[u64; 4]) -> [u64; 4] {
+        p256::add(a, b)
     }
-    // CPUID admitted BMI2 and ADX.
-    Some(unsafe { p256::mul(a, b) })
+    #[inline(always)]
+    fn double(a: &[u64; 4]) -> [u64; 4] {
+        p256::double(a)
+    }
+    #[inline(always)]
+    fn sub(a: &[u64; 4], b: &[u64; 4]) -> [u64; 4] {
+        p256::sub(a, b)
+    }
+    #[inline(always)]
+    fn mul(a: &[u64; 4], b: &[u64; 4]) -> [u64; 4] {
+        // SAFETY: the type is only named once CPUID admitted BMI2 and ADX.
+        unsafe { p256::mul(a, b) }
+    }
+    #[inline(always)]
+    fn square(a: &[u64; 4]) -> [u64; 4] {
+        // SAFETY: as `mul`.
+        unsafe { p256::square(a) }
+    }
+    #[inline(always)]
+    fn select<T, const W: usize>(table: &[T; 16], words: impl Fn(&T) -> [&[u64; 4]; W], index: u64) -> [[u64; 4]; W] {
+        if features().avx2() {
+            // SAFETY: CPUID and XCR0 admitted AVX2.
+            return unsafe { p256::select(table, words, index) };
+        }
+        crate::montgomery::select(table, words, index)
+    }
 }
 
-/// P-256 field squaring by `p256::square`, as [`p256_mul`].
+/// `computation` over [`P256Kernels`] where CPUID admits BMI2 and ADX.
 #[cfg(not(target_os = "uefi"))]
-#[inline]
-pub(super) fn p256_square(a: &[u64; 4]) -> Option<[u64; 4]> {
-    if !features().bmi2_adx() {
-        return None;
+#[inline(always)]
+pub(super) fn p256<C: crate::montgomery::Computation<4>>(computation: C) -> C::Output {
+    if features().bmi2_adx() {
+        // SAFETY: CPUID admitted BMI2 and ADX.
+        return unsafe { p256_kernels(computation) };
     }
-    // CPUID admitted BMI2 and ADX.
-    Some(unsafe { p256::square(a) })
+    computation.run::<crate::nist::P256Field>()
+}
+
+/// # Safety
+/// The CPU has BMI2 and ADX.
+#[cfg(not(target_os = "uefi"))]
+#[target_feature(enable = "bmi2,adx")]
+unsafe fn p256_kernels<C: crate::montgomery::Computation<4>>(computation: C) -> C::Output {
+    computation.run::<P256Kernels>()
 }
 
 /// 2^255 - 19 multiplication by `f25519::mul` where BMI2 and ADX are
@@ -586,6 +624,45 @@ mod tests {
             crate::hash::sha256_rounds(&mut portable, blocks);
             assert_eq!(saving, portable, "{n} blocks");
         }
+    }
+
+    /// The AVX2 masked read against the portable one, for every index in
+    /// the table, either side of it and far past it.
+    #[test]
+    fn the_avx2_table_read_matches_the_portable_one() {
+        assert!(
+            features().avx2() || cfg!(feature = "portable"),
+            "this host's CPU has no AVX2, so nothing here can test the vector table read"
+        );
+        if !features().avx2() {
+            return;
+        }
+        let table: [[[u64; 4]; 3]; 16] =
+            core::array::from_fn(|j| core::array::from_fn(|w| core::array::from_fn(|i| ((j * 12 + w * 4 + i) as u64).wrapping_mul(0x9e37_79b9_7f4a_7c15))));
+        for index in (0..18).chain([u64::MAX, 1 << 63]) {
+            let portable = crate::montgomery::select(&table, |e| [&e[0], &e[1], &e[2]], index);
+            // CPUID and XCR0 admitted AVX2.
+            assert_eq!(unsafe { p256::select(&table, |e| [&e[0], &e[1], &e[2]], index) }, portable, "index {index}");
+            assert_eq!(portable, table[if index < 16 { index as usize } else { 0 }], "index {index}");
+        }
+    }
+
+    /// P-256 computations run on the kernels exactly where CPUID admits
+    /// BMI2 and ADX.
+    #[test]
+    fn p256_computations_run_on_the_kernels_the_cpu_admits() {
+        struct Arithmetic;
+        impl crate::montgomery::Computation<4> for Arithmetic {
+            type Output = &'static str;
+            fn run<F: crate::montgomery::Modulus<4>>(self) -> &'static str {
+                core::any::type_name::<F>()
+            }
+        }
+        let expected = match features().bmi2_adx() {
+            true => core::any::type_name::<P256Kernels>(),
+            false => core::any::type_name::<crate::nist::P256Field>(),
+        };
+        assert_eq!(p256(Arithmetic), expected);
     }
 
     #[test]

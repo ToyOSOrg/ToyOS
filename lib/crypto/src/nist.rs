@@ -14,7 +14,7 @@
 
 use crate::{
     Error,
-    montgomery::{self, Form, Modulus, Residue, below, from_be, to_be},
+    montgomery::{self, Computation, Form, Modulus, Residue, below, from_be, to_be},
     secret::{Workspace, wipe64},
 };
 
@@ -34,7 +34,7 @@ pub(crate) trait Curve<const N: usize>: Sized + 'static {
     /// G, 3G, ..., 63G, for verification's width-7 recoding of u1.
     fn odd_multiples_of_g() -> &'static [Affine<Self, N>; 32];
     /// scalar G, on a fixed schedule.
-    fn base_mul(scalar: &Scalar<Self, N>) -> Point<Self, N> {
+    fn base_mul<F: Modulus<N>>(scalar: &Scalar<Self, N>) -> Point<Self, N, F> {
         Point::base().mul(scalar)
     }
 }
@@ -134,6 +134,10 @@ fn magnitude(d: i8) -> (u64, u64) {
 struct PublicScalar<const N: usize>([u64; N]);
 
 impl<const N: usize> PublicScalar<N> {
+    /// k^-1 mod n for 0 < k < n, in variable time.
+    fn inverse<M: Modulus<N>>(&self) -> Residue<M, N> {
+        Residue::inverse_of_public(&self.0)
+    }
     /// The width-w NAF; k < n < 2^(64N) - 2^7, and 385 digits hold N = 6.
     fn naf(&self, w: u32) -> [i8; 385] {
         let mut digits = [0i8; 385];
@@ -148,41 +152,41 @@ const fn windows(n: usize) -> usize {
     (64 * n + 2) / 5 + 1
 }
 
-/// An affine point (x, y), a table entry.
-pub(crate) struct Affine<C: Curve<N>, const N: usize> {
-    x: Coord<C, N>,
-    y: Coord<C, N>,
+/// An affine point (x, y), a table entry, in the arithmetic of `F`, a
+/// modulus type of the curve's p.
+pub(crate) struct Affine<C: Curve<N>, const N: usize, F: Modulus<N> = <C as Curve<N>>::Field> {
+    x: Residue<F, N>,
+    y: Residue<F, N>,
+    curve: core::marker::PhantomData<C>,
 }
-impl<C: Curve<N>, const N: usize> Clone for Affine<C, N> {
+impl<C: Curve<N>, const N: usize, F: Modulus<N>> Clone for Affine<C, N, F> {
     fn clone(&self) -> Self {
         *self
     }
 }
-impl<C: Curve<N>, const N: usize> Copy for Affine<C, N> {}
+impl<C: Curve<N>, const N: usize, F: Modulus<N>> Copy for Affine<C, N, F> {}
 
-impl<C: Curve<N>, const N: usize> Affine<C, N> {
+impl<C: Curve<N>, const N: usize, F: Modulus<N>> Affine<C, N, F> {
+    fn new(x: Residue<F, N>, y: Residue<F, N>) -> Self {
+        Self { x, y, curve: core::marker::PhantomData }
+    }
+    /// A table entry in `F`'s arithmetic.
+    fn from_table(entry: &Affine<C, N>) -> Self {
+        Self::new(entry.x.cast(), entry.y.cast())
+    }
     /// row[|d| - 1], with y negated by mask when d < 0, reading every entry.
     /// For d = 0 it is row[0], which the caller discards by mask: no entry
     /// is the identity, so no arithmetic runs on it.
-    fn lookup(row: &[Self; 16], d: i8) -> Self {
+    fn lookup(row: &[Affine<C, N>; 16], d: i8) -> Self {
         let (magnitude, negative) = magnitude(d);
-        let mut chosen = row[0];
-        // Indexing, not an iterator adaptor, which the shipped profile keeps
-        // out of line.
-        for j in 1..16 {
-            let take = 1 ^ crate::ct::nonzero(magnitude ^ (j as u64 + 1));
-            chosen.x = Residue::select(&chosen.x, &row[j].x, take);
-            chosen.y = Residue::select(&chosen.y, &row[j].y, take);
-        }
+        let [x, y] = F::select(row, |e| [e.x.words(), e.y.words()], magnitude.wrapping_sub(1));
+        let entry = Affine::<C, N>::new(Residue::from_montgomery(x), Residue::from_montgomery(y));
+        let mut chosen = Self::from_table(&entry);
         chosen.y = Residue::select(&chosen.y, &Residue::zero().sub(&chosen.y), negative);
         chosen
     }
-    fn point(&self) -> Point<C, N> {
-        Point {
-            x: self.x,
-            y: self.y,
-            z: Residue::one(),
-        }
+    fn point(&self) -> Point<C, N, F> {
+        Point::new(self.x, self.y, Residue::one())
     }
 }
 
@@ -240,10 +244,7 @@ impl<C: Curve<N>, const N: usize> Build<C, N> {
             i += 1;
         }
         let mut inverse = prefix[K - 1].inverted();
-        let mut out = [Affine {
-            x: Residue::zero(),
-            y: Residue::zero(),
-        }; K];
+        let mut out = [Affine { x: Residue::zero(), y: Residue::zero(), curve: core::marker::PhantomData }; K];
         let mut i = K;
         while i > 0 {
             i -= 1;
@@ -253,6 +254,7 @@ impl<C: Curve<N>, const N: usize> Build<C, N> {
             out[i] = Affine {
                 x: points[i][0].times(&z2),
                 y: points[i][1].times(&z2.times(&z_inverse)),
+                curve: core::marker::PhantomData,
             };
         }
         out
@@ -298,10 +300,7 @@ impl<C: Curve<N>, const N: usize> Build<C, N> {
             i += 1;
         }
         let mut inverse = running.inverted();
-        let mut out = [[Affine {
-            x: Residue::zero(),
-            y: Residue::zero(),
-        }; 16]; R];
+        let mut out = [[Affine { x: Residue::zero(), y: Residue::zero(), curve: core::marker::PhantomData }; 16]; R];
         let mut i = 16 * R;
         while i > 0 {
             i -= 1;
@@ -312,6 +311,7 @@ impl<C: Curve<N>, const N: usize> Build<C, N> {
             out[i / 16][i % 16] = Affine {
                 x: p[0].times(&z2),
                 y: p[1].times(&z2.times(&z_inverse)),
+                curve: core::marker::PhantomData,
             };
         }
         out
@@ -326,44 +326,45 @@ static P256_G_ODD: [Affine<P256, 4>; 32] = Build::<P256, 4>::odd_multiples();
 static P384_G_ODD: [Affine<P384, 6>; 32] = Build::<P384, 6>::odd_multiples();
 
 /// The odd multiples P, 3P, ..., 15P of a public point, for verification.
-type OddMultiples<C, const N: usize> = [Point<C, N>; 8];
+type OddMultiples<C, const N: usize, F> = [Point<C, N, F>; 8];
 
-/// Jacobian coordinates (X : Y : Z) for x = X/Z^2, y = Y/Z^3; Z = 0 is the
-/// point at infinity.
-pub(crate) struct Point<C: Curve<N>, const N: usize> {
-    x: Coord<C, N>,
-    y: Coord<C, N>,
-    z: Coord<C, N>,
+/// Jacobian coordinates (X : Y : Z) for x = X/Z^2, y = Y/Z^3, in the
+/// arithmetic of `F`, a modulus type of the curve's p; Z = 0 is the point at
+/// infinity.
+pub(crate) struct Point<C: Curve<N>, const N: usize, F: Modulus<N> = <C as Curve<N>>::Field> {
+    x: Residue<F, N>,
+    y: Residue<F, N>,
+    z: Residue<F, N>,
+    curve: core::marker::PhantomData<C>,
 }
-impl<C: Curve<N>, const N: usize> Clone for Point<C, N> {
+impl<C: Curve<N>, const N: usize, F: Modulus<N>> Clone for Point<C, N, F> {
     fn clone(&self) -> Self {
         *self
     }
 }
-impl<C: Curve<N>, const N: usize> Copy for Point<C, N> {}
+impl<C: Curve<N>, const N: usize, F: Modulus<N>> Copy for Point<C, N, F> {}
 // SAFETY: three residues, and zero is a valid point representation.
-unsafe impl<C: Curve<N>, const N: usize> crate::secret::Zeroable for Point<C, N> {}
-impl<C: Curve<N>, const N: usize> Point<C, N> {
+unsafe impl<C: Curve<N>, const N: usize, F: Modulus<N>> crate::secret::Zeroable for Point<C, N, F> {}
+impl<C: Curve<N>, const N: usize, F: Modulus<N>> Point<C, N, F> {
+    fn new(x: Residue<F, N>, y: Residue<F, N>, z: Residue<F, N>) -> Self {
+        Self { x, y, z, curve: core::marker::PhantomData }
+    }
     fn identity() -> Self {
-        Self {
-            x: Residue::zero(),
-            y: Residue::one(),
-            z: Residue::zero(),
-        }
+        Self::new(Residue::zero(), Residue::one(), Residue::zero())
     }
     pub(crate) fn base() -> Self {
-        Self {
-            x: Residue::from_montgomery(C::GX),
-            y: Residue::from_montgomery(C::GY),
-            z: Residue::one(),
-        }
+        Self::new(Residue::from_montgomery(C::GX), Residue::from_montgomery(C::GY), Residue::one())
+    }
+    /// The same point in another modulus type's arithmetic.
+    fn cast<G: Modulus<N>>(&self) -> Point<C, N, G> {
+        Point::new(self.x.cast(), self.y.cast(), self.z.cast())
     }
     fn select(a: &Self, b: &Self, bit: u64) -> Self {
-        Self {
-            x: Residue::select(&a.x, &b.x, bit),
-            y: Residue::select(&a.y, &b.y, bit),
-            z: Residue::select(&a.z, &b.z, bit),
-        }
+        Self::new(
+            Residue::select(&a.x, &b.x, bit),
+            Residue::select(&a.y, &b.y, bit),
+            Residue::select(&a.z, &b.z, bit),
+        )
     }
     /// "dbl-2001-b" for a = -3 (Bernstein and Lange, Explicit-Formulas
     /// Database), 3M + 5S. Infinity doubles to Z = 0, and no point of a
@@ -379,7 +380,7 @@ impl<C: Curve<N>, const N: usize> Point<C, N> {
         let z = self.y.add(&self.z).square().sub(&gamma).sub(&delta);
         let gamma2 = gamma.square().double();
         let y = alpha.mul(&beta4.sub(&x)).sub(&gamma2.double().double());
-        Self { x, y, z }
+        Self::new(x, y, z)
     }
     /// scalar * self on a fixed schedule, for a point of prime order n:
     /// Booth's signed 5-bit windows of the odd representative k' over the
@@ -399,11 +400,7 @@ impl<C: Curve<N>, const N: usize> Point<C, N> {
     /// That last addition can double, and does so by mask; it cannot cancel,
     /// since k' is not 0 mod n.
     pub(crate) fn mul(&self, scalar: &Scalar<C, N>) -> Self {
-        let mut table = [*self; 16];
-        table[1] = self.double();
-        for j in 2..16 {
-            table[j] = table[j - 1].add_public(self);
-        }
+        let table = self.multiples();
         let k = scalar.representative();
         let top = windows(N) - 1;
         let mut r = Self::lookup(&table, booth(&k.0, top));
@@ -419,6 +416,18 @@ impl<C: Curve<N>, const N: usize> Point<C, N> {
             r = Self::select(&r, &sum, crate::ct::nonzero(d as u8 as u64));
         }
         r
+    }
+    /// table[j] = (j + 1) self for the public self: each even multiple a
+    /// doubling, each odd one the even one below it plus self.
+    fn multiples(&self) -> [Self; 16] {
+        let mut table = [*self; 16];
+        for j in (1..16).step_by(2) {
+            table[j] = table[j / 2].double();
+            if j + 1 < 16 {
+                table[j + 1] = table[j].add_public(self);
+            }
+        }
+        table
     }
     /// self + q for points that are not the identity, 12M + 4S, and one when
     /// they are equal (h = r = 0), where the formula fails.
@@ -437,24 +446,22 @@ impl<C: Curve<N>, const N: usize> Point<C, N> {
         let x = r.square().sub(&h3).sub(&u.double());
         let y = r.mul(&u.sub(&x)).sub(&s1.mul(&h3));
         let z = h.mul(&self.z.mul(&q.z));
-        (Self { x, y, z }, h.is_zero() & r.is_zero())
+        (Self::new(x, y, z), h.is_zero() & r.is_zero())
     }
     /// table[|d| - 1] for table[j] = (j + 1) P, with Y negated by mask for
     /// d < 0, reading every entry. For d = 0 it is table[0], which the caller
     /// discards by mask.
     fn lookup(table: &[Self; 16], d: i8) -> Self {
         let (magnitude, negative) = magnitude(d);
-        let mut chosen = table[0];
-        for j in 1..16 {
-            chosen = Self::select(&chosen, &table[j], 1 ^ crate::ct::nonzero(magnitude ^ (j as u64 + 1)));
-        }
+        let [x, y, z] = F::select(table, |e| [e.x.words(), e.y.words(), e.z.words()], magnitude.wrapping_sub(1));
+        let mut chosen = Self::new(Residue::from_montgomery(x), Residue::from_montgomery(y), Residue::from_montgomery(z));
         let negated = Residue::zero().sub(&chosen.y);
         chosen.y = Residue::select(&chosen.y, &negated, negative);
         chosen
     }
     /// self + q for an affine q, 8M + 3S, and one when the operands are
     /// equal (h = r = 0), where the formula fails. self is not the identity.
-    fn add_affine(&self, q: &Affine<C, N>) -> (Self, u64) {
+    fn add_affine(&self, q: &Affine<C, N, F>) -> (Self, u64) {
         let z1 = self.z.square();
         let u2 = q.x.mul(&z1);
         let s2 = q.y.mul(&self.z.mul(&z1));
@@ -466,7 +473,7 @@ impl<C: Curve<N>, const N: usize> Point<C, N> {
         let x = r.square().sub(&h3).sub(&u.double());
         let y = r.mul(&u.sub(&x)).sub(&self.y.mul(&h3));
         let z = h.mul(&self.z);
-        (Self { x, y, z }, h.is_zero() & r.is_zero())
+        (Self::new(x, y, z), h.is_zero() & r.is_zero())
     }
     /// scalar G by a comb, with no doublings: the odd representative's Booth
     /// digit i selects from row i, j 2^(5i) G, and one mixed addition adds
@@ -484,7 +491,7 @@ impl<C: Curve<N>, const N: usize> Point<C, N> {
     fn comb_mul<const R: usize>(table: &[[Affine<C, N>; 16]; R], scalar: &Scalar<C, N>) -> Self {
         let k = scalar.representative();
         // k' is odd, so digit 0 is nonzero.
-        let mut r = Affine::lookup(&table[0], booth(&k.0, 0)).point();
+        let mut r = Affine::<C, N, F>::lookup(&table[0], booth(&k.0, 0)).point();
         for i in 1..R {
             let d = booth(&k.0, i);
             let (mut sum, equal) = r.add_affine(&Affine::lookup(&table[i], d));
@@ -496,7 +503,7 @@ impl<C: Curve<N>, const N: usize> Point<C, N> {
         r
     }
     /// self + q for a public affine q, branching on the values.
-    fn add_affine_public(&self, q: &Affine<C, N>) -> Self {
+    fn add_affine_public(&self, q: &Affine<C, N, F>) -> Self {
         if self.z.is_zero() == 1 {
             return q.point();
         }
@@ -522,13 +529,9 @@ impl<C: Curve<N>, const N: usize> Point<C, N> {
         sum
     }
     fn neg(&self) -> Self {
-        Self {
-            x: self.x,
-            y: Residue::zero().sub(&self.y),
-            z: self.z,
-        }
+        Self::new(self.x, Residue::zero().sub(&self.y), self.z)
     }
-    fn odd_multiples(&self) -> OddMultiples<C, N> {
+    fn odd_multiples(&self) -> OddMultiples<C, N, F> {
         let twice = self.double();
         let mut odd = [*self; 8];
         for j in 1..8 {
@@ -549,13 +552,10 @@ impl<C: Curve<N>, const N: usize> Point<C, N> {
             r = r.double();
             let d = d1[i];
             if d > 0 {
-                r = r.add_affine_public(&g[d as usize / 2]);
+                r = r.add_affine_public(&Affine::from_table(&g[d as usize / 2]));
             } else if d < 0 {
-                let entry = g[(-d) as usize / 2];
-                r = r.add_affine_public(&Affine {
-                    x: entry.x,
-                    y: Residue::zero().sub(&entry.y),
-                });
+                let entry = Affine::<C, N, F>::from_table(&g[(-d) as usize / 2]);
+                r = r.add_affine_public(&Affine::new(entry.x, Residue::zero().sub(&entry.y)));
             }
             let d = d2[i];
             if d > 0 {
@@ -578,7 +578,7 @@ impl<C: Curve<N>, const N: usize> Point<C, N> {
         Ok(())
     }
     /// The uncompressed SEC 1 encoding, 1 + 16N bytes.
-    pub(crate) fn encode(&self, out: &mut [u8]) -> Result<(), Error> {
+    fn encode(&self, out: &mut [u8]) -> Result<(), Error> {
         if out.len() != 1 + N * 16 {
             return Err(Error::Length);
         }
@@ -588,6 +588,88 @@ impl<C: Curve<N>, const N: usize> Point<C, N> {
         to_be(&x, &mut out[1..1 + N * 8]);
         to_be(&y, &mut out[1 + N * 8..]);
         Ok(())
+    }
+    /// Whether this verification result's x is r mod n: x(R) = X / Z^2 is
+    /// r mod n exactly when X = r' Z^2 for r' = r, or r' = r + n where that
+    /// is still below p: no inversion.
+    fn x_is(&self, r: &[u64; N]) -> bool {
+        if self.z.is_zero() == 1 {
+            return false;
+        }
+        let z2 = self.z.square();
+        let r_field = Residue::<F, N>::from_integer(r).expect("r < n < p");
+        if self.x.eq(&r_field.mul(&z2)) == 1 {
+            return true;
+        }
+        let mut r_plus_n = [0; N];
+        let mut carry = false;
+        for i in 0..N {
+            let (sum, c1) = r[i].overflowing_add(C::Order::P[i]);
+            let (sum, c2) = sum.overflowing_add(u64::from(carry));
+            r_plus_n[i] = sum;
+            carry = c1 | c2;
+        }
+        match (carry, Residue::<F, N>::from_integer(&r_plus_n)) {
+            (false, Some(r_field)) => self.x.eq(&r_field.mul(&z2)) == 1,
+            _ => false,
+        }
+    }
+}
+
+/// The dispatched computations: each runs in the arithmetic
+/// `Modulus::dispatch` chooses for the curve's field, its points cast into
+/// it, so no field operation inside checks the CPU.
+struct Agree<'a, C: Curve<N>, const N: usize> {
+    peer: &'a Point<C, N>,
+    scalar: &'a Scalar<C, N>,
+    output: &'a mut [u8],
+}
+impl<C: Curve<N>, const N: usize> Computation<N> for Agree<'_, C, N> {
+    type Output = ();
+    fn run<F: Modulus<N>>(self) {
+        let product = Workspace(self.peer.cast::<F>().mul(self.scalar));
+        let mut coordinates = Workspace([[0; N]; 2]);
+        let [x, y] = &mut coordinates.0;
+        // Both curves have prime order and cofactor one; validated nonzero
+        // scalars and finite peers cannot multiply to infinity.
+        product.0.affine(x, y).expect("validated prime-order point and nonzero scalar");
+        to_be(x, self.output);
+    }
+}
+
+struct PublicKey<'a, C: Curve<N>, const N: usize> {
+    scalar: &'a Scalar<C, N>,
+    encoded: &'a mut [u8],
+}
+impl<C: Curve<N>, const N: usize> Computation<N> for PublicKey<'_, C, N> {
+    type Output = Point<C, N>;
+    fn run<F: Modulus<N>>(self) -> Point<C, N> {
+        let point = C::base_mul::<F>(self.scalar);
+        // The base point's multiple by a nonzero scalar below n is finite.
+        point.encode(self.encoded).expect("nonzero prime-order scalar");
+        point.cast()
+    }
+}
+
+struct Verify<'a, C: Curve<N>, const N: usize> {
+    key: &'a Point<C, N>,
+    u1: PublicScalar<N>,
+    u2: PublicScalar<N>,
+    r: [u64; N],
+}
+impl<C: Curve<N>, const N: usize> Computation<N> for Verify<'_, C, N> {
+    type Output = bool;
+    fn run<F: Modulus<N>>(self) -> bool {
+        self.key.cast::<F>().joint(&self.u1, &self.u2).x_is(&self.r)
+    }
+}
+
+impl<C: Curve<N>, const N: usize> Point<C, N> {
+    /// scalar G and its uncompressed SEC 1 encoding into `encoded`, 1 + 16N
+    /// bytes, for a valid secret scalar.
+    pub(crate) fn public_key(scalar: &Scalar<C, N>, encoded: &mut [u8]) -> Self {
+        assert_eq!(encoded.len(), 1 + N * 16);
+        C::Field::dispatch(PublicKey { scalar, encoded })
     }
     /// An uncompressed SEC 1 point on the curve.
     pub(crate) fn decode(encoded: &[u8]) -> Result<Self, Error> {
@@ -610,26 +692,13 @@ impl<C: Curve<N>, const N: usize> Point<C, N> {
         if y.square().eq(&rhs) != 1 {
             return Err(Error::InvalidPoint);
         }
-        Ok(Point {
-            x,
-            y,
-            z: Residue::one(),
-        })
+        Ok(Point::new(x, y, Residue::one()))
     }
     /// The x-coordinate of scalar * self into `output`, 8N bytes. The product
-    /// and its affine coordinates are the shared secret's, erased here once
+    /// and its affine coordinates are the shared secret's, erased once
     /// `output` is written.
     pub(crate) fn agree(&self, scalar: &Scalar<C, N>, output: &mut [u8]) {
-        let product = Workspace(self.mul(scalar));
-        let mut coordinates = Workspace([[0; N]; 2]);
-        let [x, y] = &mut coordinates.0;
-        // Both curves have prime order and cofactor one; validated nonzero
-        // scalars and finite peers cannot multiply to infinity.
-        product
-            .0
-            .affine(x, y)
-            .expect("validated prime-order point and nonzero scalar");
-        to_be(x, output);
+        C::Field::dispatch(Agree { peer: self, scalar, output })
     }
     /// ECDSA verification of a DER signature over an 8N-byte digest. All
     /// inputs are public.
@@ -641,31 +710,12 @@ impl<C: Curve<N>, const N: usize> Point<C, N> {
         let r = Scalar::<C, N>::from_bytes(&r[..N * 8]).map_err(|_| Error::InvalidSignature)?;
         let s = Scalar::<C, N>::from_bytes(&s[..N * 8]).map_err(|_| Error::InvalidSignature)?;
         let z = ModN::<C, N>::from_wide(&from_be(digest));
-        let inverse = ModN::<C, N>::from_wide(&s.0).invert();
+        let inverse = PublicScalar(s.0).inverse::<C::Order>();
         let u1 = PublicScalar(z.mul(&inverse).integer());
         let u2 = PublicScalar(ModN::<C, N>::from_wide(&r.0).mul(&inverse).integer());
-        let result = self.joint(&u1, &u2);
-        if result.z.is_zero() == 1 {
-            return Err(Error::InvalidSignature);
-        }
-        // x(R) = X / Z^2 is r mod n exactly when X = r' Z^2 for r' = r, or
-        // r' = r + n where that is still below p: no inversion.
-        let z2 = result.z.square();
-        let r_field = Coord::<C, N>::from_integer(&r.0).expect("r < n < p");
-        if result.x.eq(&r_field.mul(&z2)) == 1 {
-            return Ok(());
-        }
-        let mut r_plus_n = [0; N];
-        let mut carry = false;
-        for i in 0..N {
-            let (sum, c1) = r.0[i].overflowing_add(C::Order::P[i]);
-            let (sum, c2) = sum.overflowing_add(u64::from(carry));
-            r_plus_n[i] = sum;
-            carry = c1 | c2;
-        }
-        match (carry, Coord::<C, N>::from_integer(&r_plus_n)) {
-            (false, Some(r_field)) if result.x.eq(&r_field.mul(&z2)) == 1 => Ok(()),
-            _ => Err(Error::InvalidSignature),
+        match C::Field::dispatch(Verify { key: self, u1, u2, r: r.0 }) {
+            true => Ok(()),
+            false => Err(Error::InvalidSignature),
         }
     }
 }
@@ -715,11 +765,32 @@ macro_rules! modulus {
         }
     };
 }
-/// P-256's prime, with its special reduction step.
+/// P-256's prime, with its special reduction step, its arithmetic word by
+/// word, and kernels where the CPU has them (`arch::p256`).
 pub(crate) struct P256Field;
 impl Modulus<4> for P256Field {
     const P: [u64; 4] = [0xffffffffffffffff, 0x00000000ffffffff, 0, 0xffffffff00000001];
     const FORM: Form = Form::P256;
+    #[inline(always)]
+    fn add(a: &[u64; 4], b: &[u64; 4]) -> [u64; 4] {
+        montgomery::p256::add(a, b)
+    }
+    #[inline(always)]
+    fn sub(a: &[u64; 4], b: &[u64; 4]) -> [u64; 4] {
+        montgomery::p256::sub(a, b)
+    }
+    #[inline(always)]
+    fn mul(a: &[u64; 4], b: &[u64; 4]) -> [u64; 4] {
+        montgomery::p256::mul(a, b)
+    }
+    #[inline(always)]
+    fn square(a: &[u64; 4]) -> [u64; 4] {
+        montgomery::p256::square(a)
+    }
+    #[inline(always)]
+    fn dispatch<C: Computation<4>>(computation: C) -> C::Output {
+        crate::arch::p256(computation)
+    }
 }
 modulus!(P256Order, 4, [0xf3b9cac2fc632551, 0xbce6faada7179e84, 0xffffffffffffffff, 0xffffffff00000000]);
 modulus!(
@@ -757,7 +828,7 @@ impl Curve<4> for P256 {
     fn odd_multiples_of_g() -> &'static [Affine<Self, 4>; 32] {
         &P256_G_ODD
     }
-    fn base_mul(scalar: &Scalar<Self, 4>) -> Point<Self, 4> {
+    fn base_mul<F: Modulus<4>>(scalar: &Scalar<Self, 4>) -> Point<Self, 4, F> {
         Point::comb_mul(&P256_COMB, scalar)
     }
     const B: [u64; 4] = montgomery::encode(
@@ -919,12 +990,12 @@ mod tests {
     /// The fixed-schedule Booth multiplication equals the public joint
     /// multiplication, a different recoding and addition, for scalars below
     /// n including those with extreme digits.
-    fn check_mul<C: Curve<N>, const N: usize>() {
+    fn check_mul<C: Curve<N>, const N: usize, F: Modulus<N>>() {
         let zero = PublicScalar([0; N]);
         for k in scalars(&C::Order::P) {
             let k = ModN::<C, N>::from_wide(&k).integer();
-            let ours = Point::<C, N>::base().mul(&Scalar(k, core::marker::PhantomData));
-            let theirs = Point::<C, N>::identity().joint(&PublicScalar(k), &zero);
+            let ours = Point::<C, N, F>::base().mul(&Scalar(k, core::marker::PhantomData));
+            let theirs = Point::<C, N, F>::identity().joint(&PublicScalar(k), &zero);
             let (mut a, mut b) = ([0; N], [0; N]);
             let (mut c, mut d) = ([0; N], [0; N]);
             match (ours.affine(&mut a, &mut b), theirs.affine(&mut c, &mut d)) {
@@ -937,12 +1008,12 @@ mod tests {
 
     /// The public path's exceptional sums: equal summands double, and
     /// opposite ones cancel to the identity.
-    fn check_exceptional_sums<C: Curve<N>, const N: usize>() {
+    fn check_exceptional_sums<C: Curve<N>, const N: usize, F: Modulus<N>>() {
         let mut one = [0; N];
         one[0] = 1;
         let (mut a, mut b) = ([0; N], [0; N]);
         let (mut c, mut d) = ([0; N], [0; N]);
-        let g = Point::<C, N>::base();
+        let g = Point::<C, N, F>::base();
         g.joint(&PublicScalar(one), &PublicScalar(one)).affine(&mut a, &mut b).unwrap();
         g.double().affine(&mut c, &mut d).unwrap();
         assert_eq!((a, b), (c, d));
@@ -951,11 +1022,11 @@ mod tests {
 
     #[test]
     fn public_sums_of_equal_and_opposite_points() {
-        check_exceptional_sums::<P256, 4>();
-        check_exceptional_sums::<P384, 6>();
+        check_exceptional_sums::<P256, 4, P256Field>();
+        check_exceptional_sums::<P384, 6, P384Field>();
     }
 
-    fn affine_of<C: Curve<N>, const N: usize>(p: &Point<C, N>) -> ([u64; N], [u64; N]) {
+    fn affine_of<C: Curve<N>, const N: usize, F: Modulus<N>>(p: &Point<C, N, F>) -> ([u64; N], [u64; N]) {
         let (mut x, mut y) = ([0; N], [0; N]);
         p.affine(&mut x, &mut y).unwrap();
         (x, y)
@@ -997,6 +1068,10 @@ mod tests {
     /// addition doubles.
     #[test]
     fn the_comb_matches_the_public_path() {
+        check_comb::<P256Field>();
+    }
+
+    fn check_comb<F: Modulus<4>>() {
         use num_bigint::BigInt;
         let n = integer(&P256Order::P);
         let mut ks: std::vec::Vec<BigInt> =
@@ -1012,7 +1087,7 @@ mod tests {
                 b[..chunk.len()].copy_from_slice(chunk);
                 words[i] = u64::from_le_bytes(b);
             }
-            let comb = P256::base_mul(&Scalar(words, core::marker::PhantomData));
+            let comb = P256::base_mul::<F>(&Scalar(words, core::marker::PhantomData));
             assert_eq!(affine_of(&comb), reference::<P256, 4>(&k), "k = {k:x}");
         }
     }
@@ -1020,7 +1095,7 @@ mod tests {
     /// The scalars k = 2d mod n whose representative's first digit is d,
     /// for which the last addition of [`Point::mul`] doubles: at least one
     /// exists per curve, and each multiplies as the public path does.
-    fn check_last_addition_doubles<C: Curve<N>, const N: usize>() {
+    fn check_last_addition_doubles<C: Curve<N>, const N: usize, F: Modulus<N>>() {
         use num_bigint::BigInt;
         let n = integer(&C::Order::P);
         let mut found = 0;
@@ -1038,20 +1113,38 @@ mod tests {
                 continue;
             }
             found += 1;
-            assert_eq!(affine_of(&Point::<C, N>::base().mul(&scalar)), reference::<C, N>(&k), "d = {d}");
+            assert_eq!(affine_of(&Point::<C, N, F>::base().mul(&scalar)), reference::<C, N>(&k), "d = {d}");
         }
         assert!(found > 0);
     }
 
     #[test]
     fn the_last_addition_doubles_where_it_must() {
-        check_last_addition_doubles::<P256, 4>();
-        check_last_addition_doubles::<P384, 6>();
+        check_last_addition_doubles::<P256, 4, P256Field>();
+        check_last_addition_doubles::<P384, 6, P384Field>();
     }
 
     #[test]
     fn booth_multiplication_matches_the_public_path() {
-        check_mul::<P256, 4>();
-        check_mul::<P384, 6>();
+        check_mul::<P256, 4, P256Field>();
+        check_mul::<P384, 6, P384Field>();
+    }
+
+    /// The point checks above in the arithmetic P-256's dispatch chooses:
+    /// the kernels, on a CPU that has them.
+    #[test]
+    fn p256_points_in_the_dispatched_arithmetic() {
+        struct Checks;
+        impl Computation<4> for Checks {
+            type Output = &'static str;
+            fn run<F: Modulus<4>>(self) -> &'static str {
+                check_mul::<P256, 4, F>();
+                check_exceptional_sums::<P256, 4, F>();
+                check_last_addition_doubles::<P256, 4, F>();
+                check_comb::<F>();
+                core::any::type_name::<F>()
+            }
+        }
+        std::println!("p-256 points in {}", P256Field::dispatch(Checks));
     }
 }

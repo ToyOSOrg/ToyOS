@@ -75,3 +75,59 @@ pub(crate) unsafe fn zero(dst: *mut u8, len: usize) {
         );
     }
 }
+
+/// `crate::timing`'s mode: `PSTATE.DIT`, through the `DIT` register's view
+/// (`S3_3_C4_C2_5`, bit 24), which assembles without FEAT_DIT's name.
+pub(crate) mod timing {
+    use core::sync::atomic::{AtomicU8, Ordering::Relaxed};
+
+    /// Whether the machine has FEAT_DIT, once a thread has asked the kernel:
+    /// `DIT` is an undefined register without it. A machine fact, so every
+    /// copy of this crate in a process may keep its own.
+    static SUPPORT: AtomicU8 = AtomicU8::new(UNKNOWN);
+    const UNKNOWN: u8 = 0;
+    const ABSENT: u8 = 1;
+    const PRESENT: u8 = 2;
+
+    const DIT: u64 = 1 << 24;
+
+    /// That every CPU has FEAT_DIT, so `DIT` may be read and written.
+    #[derive(Clone, Copy)]
+    pub(crate) struct Mode(());
+
+    /// The mode, `None` without FEAT_DIT.
+    #[inline]
+    pub(crate) fn mode() -> Option<Mode> {
+        let present = match SUPPORT.load(Relaxed) {
+            PRESENT => true,
+            ABSENT => false,
+            _ => {
+                let present = toyos_abi::syscall::timing_control();
+                SUPPORT.store(if present { PRESENT } else { ABSENT }, Relaxed);
+                present
+            }
+        };
+        present.then_some(Mode(()))
+    }
+
+    impl Mode {
+        /// The thread's `PSTATE.DIT`.
+        #[inline]
+        pub(crate) fn is_on(self) -> bool {
+            let value: u64;
+            // SAFETY: `DIT` is readable at EL0 on a CPU with FEAT_DIT, which
+            // a `Mode` says every CPU has.
+            unsafe { core::arch::asm!("mrs {}, s3_3_c4_c2_5", out(reg) value, options(nomem, nostack, preserves_flags)) };
+            value & DIT != 0
+        }
+
+        /// Set the thread's `PSTATE.DIT`. Not `nomem`, so no memory access of
+        /// the bracketed work moves across it; work held in registers alone
+        /// still may.
+        #[inline]
+        pub(crate) fn set(self, on: bool) {
+            // SAFETY: as `is_on`'s; the write changes `PSTATE.DIT` alone.
+            unsafe { core::arch::asm!("msr s3_3_c4_c2_5, {}", in(reg) if on { DIT } else { 0 }, options(nostack, preserves_flags)) };
+        }
+    }
+}

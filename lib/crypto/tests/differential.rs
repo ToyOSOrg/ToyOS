@@ -550,7 +550,6 @@ macro_rules! nist_case {
 }
 
 #[test]
-#[cfg_attr(not(feature = "portable"), ignore = "the same code in every form: run in the portable one")]
 fn seeded_p256_against_rustcrypto_and_ring() {
     support::seeded(CASES, 0x9256, |case, rng| nist_case!(p256, 32, ECDSA_P256_SHA256_ASN1, case, rng));
 }
