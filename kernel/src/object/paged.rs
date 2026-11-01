@@ -31,8 +31,7 @@
 //! and kept for its life, every frame of it either promised, in the index or
 //! held aside for the next supply; the rest of `capacity` promised a page at
 //! a time and given back as each goes. Its index, objects and the frames it
-//! holds aside are charged with it, so no call on it allocates but the
-//! transient lists a removal collects.
+//! holds aside are charged with it, so no call on it allocates.
 
 use alloc::sync::Arc;
 use core::cell::{Cell, UnsafeCell};
@@ -428,15 +427,24 @@ impl PagerObject {
     /// The owner's read of object `id`: `out.len()` bytes from `offset`,
     /// answered `WouldBlock` where the first page is absent.
     pub fn owner_read(&self, id: u64, out: &mut UserBytesMut, offset: u64) -> u64 {
-        let live = self.state.lock().live(id);
+        let live = {
+            let mut state = self.state.lock();
+            state.live(id).inspect(|&slot| state.entry_mut(slot).refs += 1)
+        };
         match live {
-            Ok(slot) => self.read(slot, out, offset, false),
+            Ok(slot) => {
+                // A release by another of the pager's threads leaves the entry
+                // to this read until it ends.
+                let _held = Ref { pager: self, slot };
+                self.read(slot, out, offset, false)
+            }
             Err(e) => e.to_u64(),
         }
     }
 
     /// Read `out.len()` bytes of the object at `slot` from `offset`; a holder
-    /// waits for absent pages, an owner is answered `WouldBlock`.
+    /// waits for absent pages, an owner is answered `WouldBlock`. The caller
+    /// holds a reference on `slot` for the call.
     fn read(&self, slot: u32, out: &mut UserBytesMut, offset: u64, waits: bool) -> u64 {
         let want = out.len();
         let mut done = 0usize;
@@ -955,6 +963,18 @@ impl Drop for PagerObject {
         assert!(state.requests.is_null(), "paged: a pager went with a reader still linked");
         assert!(state.held.spare.is_empty() && state.held.draining.is_empty(), "paged: a pager went holding frames aside");
         pmm::unpromise(self.core.job(), state.held.core.pool());
+    }
+}
+
+/// One call's reference to its pager's object.
+struct Ref<'a> {
+    pager: &'a PagerObject,
+    slot: u32,
+}
+
+impl Drop for Ref<'_> {
+    fn drop(&mut self) {
+        self.pager.unref(self.slot);
     }
 }
 

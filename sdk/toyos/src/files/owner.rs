@@ -512,8 +512,9 @@ fn is_a_directory<T>(_: &str) -> Result<T, Error> {
 
 #[no_mangle]
 unsafe extern "C" fn toyos_fs_read(fd: Fd, buf: *mut u8, len: usize) -> i64 {
-    // SAFETY: the caller lends `len` writable bytes for the call, and only
-    // one of the closures runs.
+    // SAFETY: the caller lends `len` writable bytes for the call. The
+    // closures that run, run one after another, and each slice is dead
+    // before the next is made, so no two live at once.
     let out = || unsafe { core::slice::from_raw_parts_mut(buf, len) };
     let blocking = crate::net::stream::Wait::Blocking(None);
     if let Some(n) = on_stream(fd, |h| crate::net::stream::read(h, out(), blocking)) {
@@ -543,8 +544,9 @@ unsafe extern "C" fn toyos_fs_write(fd: Fd, buf: *const u8, len: usize) -> i64 {
 
 #[no_mangle]
 unsafe extern "C" fn toyos_fs_pread(fd: Fd, buf: *mut u8, len: usize, offset: u64) -> i64 {
-    // SAFETY: the caller lends `len` writable bytes for the call, and only
-    // one of the closures runs.
+    // SAFETY: the caller lends `len` writable bytes for the call. The
+    // closures that run, run one after another, and each slice is dead
+    // before the next is made, so no two live at once.
     let out = || unsafe { core::slice::from_raw_parts_mut(buf, len) };
     let n = on_fd_held(
         fd,

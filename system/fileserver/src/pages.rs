@@ -14,9 +14,7 @@
 //! **The volume's size is the object's.** A write reserves on the volume
 //! first, so the volume's size runs past the object's only for the bytes the
 //! write then puts in before it returns; nothing reads the volume for them
-//! meanwhile, and a write refused part way is cut back to what it put. A
-//! truncation shrinks the object before the volume frees the blocks its
-//! dirty pages would have gone to.
+//! meanwhile, and a write refused part way is cut back to what it put.
 //!
 //! **A server with no pager** (ROOT's, whose files are immutable) reads and
 //! writes the volume directly, and each open holds its own node.
