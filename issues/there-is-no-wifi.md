@@ -374,6 +374,8 @@ W2.
     per radio function. The orchestrator accepted this on #1140, as the
     owner's split ruling's pattern. The build lets only `ax2xx` receive `radio` and only
     `wifi` receive `wifi`.
+  - **`Join` names its BSS whole**: the SSID, and the elements of the Beacon
+    or Probe Response it was chosen by, so a driver keeps no scan results.
   - **Host tests** of BSS choice (joinable security, band, signal, every
     refusal by name), connect, disconnect and status, the wrong-credential
     refusal (the AP did not answer message 2), a lost connection joined
@@ -388,8 +390,9 @@ W2.
   - **Not joined:** an open network (by design), a hidden one (no directed
     probe), and a 64-digit hexadecimal PSK, which `lib/crypto` gives no PMK
     constructor for. `wlan` drives one radio at a time.
-  - No image ships `ax2xx`, so no radio says hello until W5; `wlan` runs in
-    every image and answers "no radio is present".
+  - No image ships `ax2xx`, so no radio says hello until W5. `wlan` runs in
+    the system image (`images/system.toml`), where `wifi status` says
+    `no radio`.
 
 **W5, bring-up and passive scan on the T14**, the first stage that ships
 `ax2xx`. Depends on: S1 (met), P1, P4 (its match table), W3, W4; and the test

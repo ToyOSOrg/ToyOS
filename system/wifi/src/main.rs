@@ -10,7 +10,7 @@
 //! The answer is printed on standard output, with exit status 0 where it was done and 1 where
 //! it was refused.
 
-use std::io::{Read, Write};
+use std::io::Write;
 
 use toyos_crypto::Secret;
 
@@ -24,26 +24,32 @@ const USAGE: &str = "usage: wifi status | scan | connect <network> | disconnect"
 /// it whole.
 const LINE: usize = toyos_wifi::MAX_PASSPHRASE + 1;
 
-/// Standard input's first line into `line`, without its line ending: its length, or `None`
-/// where input ends before a line does. A line longer than `line` is cut.
+/// Standard input's first line into `line`: its length, or `None` where input ends before any
+/// of it. A line longer than `line` is cut.
+///
+/// **Read from the descriptor itself**, never through std's `Stdin`: on a terminal that would
+/// echo the passphrase as it is typed, and keep it in std's line buffer. A backspace erases
+/// the octet before it, and other control octets are dropped.
 fn passphrase(line: &mut [u8; LINE]) -> Option<usize> {
-    let mut stdin = std::io::stdin().lock();
     let (mut len, mut byte) = (0, [0u8; 1]);
     loop {
-        match stdin.read(&mut byte) {
-            Ok(1) if byte[0] == b'\n' => break,
-            Ok(1) => {
-                if let Some(at) = line.get_mut(len) {
-                    *at = byte[0];
+        match toyos::files::read(0, &mut byte) {
+            Ok(1) => match byte[0] {
+                b'\n' | b'\r' => break,
+                0x08 | 0x7f => len = len.saturating_sub(1).min(LINE),
+                b if b < 0x20 => {}
+                b => {
+                    if let Some(at) = line.get_mut(len) {
+                        *at = b;
+                    }
+                    len += 1;
                 }
-                len += 1;
-            }
+            },
             Ok(_) if len > 0 => break,
             _ => return None,
         }
     }
-    let len = len.min(LINE);
-    Some(if line[..len].ends_with(b"\r") { len - 1 } else { len })
+    Some(len.min(LINE))
 }
 
 /// How long an answer may take: longer than every bound `wlan` keeps on a join together.
