@@ -1222,15 +1222,16 @@ pub fn split_pair() -> Scenario {
 
 /// **One server woken from both LLCs in turn**: a server on cpu0 answers a
 /// client pinned to cpu1, in its LLC, and one pinned to cpu9, in the other,
-/// with balancing off. Which client's request finds the server parked is
-/// the run's timing, so following each wake's LLC would move it back and
-/// forth.
-pub fn server_of_two_llcs() -> Scenario {
+/// with balancing off, each taking `rounds` turns. A request that finds the
+/// server running is never counted, and which client's request finds it
+/// parked is the run's timing: following each wake's LLC would move it back
+/// and forth.
+pub fn server_of_two_llcs(rounds: usize) -> Scenario {
     let turn = MS / 10;
     let wake = |queue| Op::Wake { queue, all: false, boost: None };
     let block = |queue| Op::Block { queue, deadline: None };
-    let client = |cpu: u64, reply| Script::looping(vec![Op::SetAffinity(1 << cpu), Op::Run(turn), wake(0), block(reply)], WAKE_LLC_ROUNDS);
-    scenario(
+    let client = |cpu: u64, reply| Script::looping(vec![Op::SetAffinity(1 << cpu), Op::Run(turn), wake(0), block(reply)], rounds);
+    let mut scenario = scenario(
         "server_of_two_llcs",
         16,
         vec![queue(WaitClass::Io), queue(WaitClass::Io), queue(WaitClass::Io)],
@@ -1238,7 +1239,7 @@ pub fn server_of_two_llcs() -> Scenario {
             "served",
             vec![0, 1, 2],
             vec![
-                Script::looping(vec![block(0), Op::Run(turn), wake(1), block(0), Op::Run(turn), wake(2)], WAKE_LLC_ROUNDS),
+                Script::looping(vec![block(0), Op::Run(turn), wake(1), block(0), Op::Run(turn), wake(2)], rounds),
                 client(1, 1),
                 client(9, 2),
             ],
@@ -1246,10 +1247,13 @@ pub fn server_of_two_llcs() -> Scenario {
     )
     .with_placement(PlacementShape::Listed(&[0, 1, 9]))
     .with_topology(Shape::amd_bench())
-    .with_balance(Balance::None)
+    .with_balance(Balance::None);
+    scenario.max_steps *= rounds.div_ceil(WAKE_LLC_ROUNDS);
+    scenario
 }
 
-/// How many turns [`split_pair`]'s and [`server_of_two_llcs`]' threads take.
+/// How many turns [`split_pair`]'s threads take, and the rounds
+/// [`server_of_two_llcs`] is measured at.
 pub const WAKE_LLC_ROUNDS: usize = 24;
 
 /// **Masks under stealing**, every thread spawned on cpu0 of four with the

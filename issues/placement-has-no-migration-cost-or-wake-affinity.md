@@ -27,11 +27,13 @@ lacks:
     its way to, so a pair split across LLCs shares one after 8 round trips.
     A split pair costs about 25% on the AMD bench's `ipc.reqrep.8` and
     `fs.disk.read_4k_at`.
-  - A server whose parked wakes come from both LLCs still moves when 8 in a
-    row come from the other one: about one parked wake in 510 when they are
-    independent and even, and 5 moves in 40 runs of the simulator's
-    `server_of_two_llcs`. No metal row has a server with clients in both
-    LLCs.
+  - Only a wake that finds the task parked is counted. A server with a
+    client in each LLC therefore follows the far one when the near one's
+    requests keep finding it running: 5 of 40 runs of the simulator's
+    `server_of_two_llcs` move it once, whatever the run length from 8 to
+    12, and none moves it back at ten times the rounds; a run of 4 does.
+    Parked wakes from both LLCs, independent and even, move it on about one
+    in 510. No metal row has a server with clients in both LLCs.
   - The task's home CPU makes the move after its own wake, so a move costs
     two wakes in series.
   - Spreading a waker's partners for parallelism is still undecided.

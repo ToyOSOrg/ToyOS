@@ -495,16 +495,22 @@ fn a_split_pair_moves_once_into_one_llc() {
     });
 }
 
-/// **A server with a client in each LLC seldom follows them**: on
-/// `scenarios::server_of_two_llcs` no run moves the server twice, and at most
-/// a quarter of the runs move it at all. A run half as long as
-/// `WAKER_RUN` already moves it more often than that, and following every
-/// wake moves it hundreds of times over these seeds.
+/// **A server with a client in each LLC seldom follows them, and never
+/// back**: on `scenarios::server_of_two_llcs` at most a quarter of the runs
+/// move the server, and no run moves it twice, even at ten times the rounds.
+/// A server moves when one client's requests keep finding it running, so
+/// that only the other's are counted; after the move both are, and nothing
+/// moves it back. A run half as long as `WAKER_RUN` already moves it more
+/// often than the bound, and following every wake moves it hundreds of times
+/// over these seeds.
 #[test]
 fn a_server_with_a_client_in_each_llc_seldom_follows_them() {
     const SEEDS: u64 = 40;
+    sweep(&scenarios::server_of_two_llcs(10 * scenarios::WAKE_LLC_ROUNDS), SEEDS, |outcome| {
+        assert!(outcome.migrations <= 1, "the server moved {} times in one run: {}", outcome.migrations, outcome.report());
+    });
     let mut moves = 0;
-    sweep(&scenarios::server_of_two_llcs(), SEEDS, |outcome| {
+    sweep(&scenarios::server_of_two_llcs(scenarios::WAKE_LLC_ROUNDS), SEEDS, |outcome| {
         assert!(outcome.migrations <= 1, "the server moved {} times in one run: {}", outcome.migrations, outcome.report());
         moves += outcome.migrations;
     });
