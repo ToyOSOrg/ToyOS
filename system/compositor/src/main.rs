@@ -18,6 +18,7 @@
 
 mod client;
 mod display;
+mod output;
 mod render;
 mod session;
 mod signout;
@@ -64,6 +65,7 @@ pub const MAX_WINDOW_SLOTS: u32 = Poller::MAX_HANDLES
     - PROMPT_POLL_HANDLES
     - CLIPBOARD_POLL_HANDLES
     - DISPLAY_PORT_POLL_HANDLES
+    - DISPLAY_OUTPUT_POLL_HANDLES
     - INPUT_POLL_HANDLES
     - VOLUME_POLL_HANDLES;
 
@@ -79,6 +81,9 @@ pub const CLIPBOARD_POLL_HANDLES: u32 = 2;
 /// The display port's own: its acceptor, and the one request waiting for its
 /// first frame (`toyos_desktop::pending_admits`).
 pub const DISPLAY_PORT_POLL_HANDLES: u32 = 2;
+
+/// The `display-output` port's own: its acceptor, and its one driver.
+pub const DISPLAY_OUTPUT_POLL_HANDLES: u32 = 2;
 
 /// soundserver's `volume` port: the one connection the volume keys' requests go on.
 pub const VOLUME_POLL_HANDLES: u32 = 1;

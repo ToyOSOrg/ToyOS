@@ -48,6 +48,8 @@ pub struct Engine {
     pub preempted: Cell<bool>,
     stale: Cell<Option<u32>>,
     jump: Cell<u64>,
+    /// DISPLAY_INT_CTL categories pending beyond pipe A's.
+    pub other_pending: Cell<u32>,
 }
 
 impl Engine {
@@ -94,6 +96,7 @@ impl Engine {
             preempted: Cell::new(false),
             stale: Cell::new(None),
             jump: Cell::new(0),
+            other_pending: Cell::new(0),
         }
     }
 
@@ -106,7 +109,7 @@ impl Engine {
     }
 
     pub fn written(&self) -> Vec<(usize, u32)> {
-        self.writes.borrow().iter().copied().filter(|(at, _)| !(regs::MAILBOX_INTERFACE..regs::SPAN).contains(at)).collect()
+        self.writes.borrow().iter().copied().filter(|(at, _)| !(regs::MAILBOX_INTERFACE..=regs::MAILBOX_DATA1).contains(at)).collect()
     }
 
     fn command(&self, interface: u32) {
@@ -120,6 +123,21 @@ impl Engine {
         self.set(regs::MAILBOX_DATA0, answer);
         self.set(regs::MAILBOX_INTERFACE, regs::RUN_BUSY | self.pcode.error);
         self.busy.set(self.pcode.busy_reads);
+    }
+}
+
+impl Engine {
+    /// A vertical blank begins: pipe A's identity bit is set where its mask
+    /// lets it through.
+    pub fn vblank(&self) {
+        if self.get(regs::PIPE_A_IMR) & regs::VBLANK == 0 {
+            self.set(regs::PIPE_A_IIR, self.get(regs::PIPE_A_IIR) | regs::VBLANK);
+        }
+    }
+
+    fn display_pending(&self) -> u32 {
+        let pipe_a = self.get(regs::PIPE_A_IIR) & self.get(regs::PIPE_A_IER) != 0;
+        self.other_pending.get() | if pipe_a { regs::PIPE_A_PENDING } else { 0 }
     }
 }
 
@@ -158,6 +176,13 @@ impl Registers for Engine {
                 return stale;
             }
         }
+        if at == regs::DISPLAY_INT_CTL {
+            return self.get(at) & regs::DISPLAY_INTERRUPT_ENABLE | self.display_pending();
+        }
+        if at == regs::GFX_MSTR_INTR {
+            let display = self.get(regs::DISPLAY_INT_CTL) & regs::DISPLAY_INTERRUPT_ENABLE != 0 && self.display_pending() != 0;
+            return self.get(at) & regs::PRIMARY_INTERRUPT | if display { regs::DISPLAY_PENDING } else { 0 };
+        }
         if at == regs::PIPE_FRMCNT_A {
             return self.frame_nanos.map_or(0x276, |period| (self.now.get() / period) as u32);
         }
@@ -188,6 +213,10 @@ impl Registers for Engine {
         }
         if at == regs::PWR_WELL_CTL1 || at == regs::PWR_WELL_CTL2 {
             self.request(at, value);
+            return;
+        }
+        if at == regs::PIPE_A_IIR {
+            self.set(at, self.get(at) & !value);
             return;
         }
         if self.storage_drops.get() && crate::dmc::WINDOW.contains(&at) {

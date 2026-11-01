@@ -9,6 +9,7 @@ license = "MIT OR Apache-2.0"
 toyos = { path = "../../sdk/toyos", features = ["std"] }
 toyos-abi = { path = "../../sdk/abi" }
 toyos-desktop = { path = "desktop" }
+toyos-display-output = { path = "../../lib/display-output" }
 toyos-edid = { path = "../../lib/edid" }
 toyos-input = { path = "../../lib/input" }
 toyos-inspect = { path = "../../lib/inspect" }

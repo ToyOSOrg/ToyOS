@@ -84,7 +84,12 @@ The kernel keeps only generic mechanisms:
    - DC6 is allowed only with the panel on DDI A, since Vol 12 says only port A's PHY programming survives it.
    - With the pipe lit, the engine enters DC5 only while PSR is active (Vol 12, "Display C5 and C6"), so this stage alone saves little.
    - What it can show alone is the program held in storage, PG3-PG5 off, and the scan-out and `hda` unharmed. `hda`'s display codec is in PG3.
-3. **Present and damage.** The `display-output` piece PSR needs is the compositor telling the driver which frame changed, and where. Otherwise PSR1 sees a CPU write only through FBC host tracking of a graphics-aperture fence (Vol 12 "CPU Host Front Buffer Tracking", "on projects that support that"). Whether that reaches the GOP's surface is unverified. This is ordered before PSR, rather than an interim signal. Its shape goes to the orchestrator before it is built, because it crosses the compositor.
+3. **Present and damage.** The `display-output` piece PSR needs is the compositor telling the driver which frame changed, and where. Without it, PSR1 sees a CPU write only through FBC host tracking of a graphics-aperture fence (Vol 12 "CPU Host Front Buffer Tracking", "on projects that support that"). It is ordered before PSR, rather than an interim signal. Shape approved by the orchestrator, 2026-11-01.
+   - `lib/display-output` owns the wire types and the compositor's state: `Hello{size}`, `Present{sequence, damage}` and `Presented{sequence, vblank_nanos, refresh_interval_nanos}`.
+   - One present is outstanding at a time. Damage composed meanwhile is merged, past 8 rectangles into their bounding box, and sent when the answer arrives.
+   - The compositor serves `display-output`, one driver at a time, and never waits on it.
+   - `tgl-display` answers each present at the vblank after it arrived. That vblank is pipe A's interrupt, enabled only while a present waits, and its wait has a hang ceiling.
+   - The compositor does not yet pace frames by `Presented`. It still blits the firmware's framebuffer itself until stage 5.
 4. **PSR on the eDP panel**, measured together with stage 2. PSR's first-frame exit latency goes to the owner in absolute numbers before PSR lands.
 5. **The rest of `display-output`.** virtio-gpu and the framebuffer become drivers. The panic surface lands here.
 6. **Intel modesetting**: combo-PHY DDIs, DPLLs and CDCLK, DP link training with DSC, HDMI 2.0 with SCDC, EDID over AUX and GMBUS, several outputs.

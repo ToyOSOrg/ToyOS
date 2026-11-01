@@ -92,12 +92,13 @@ receives = ["power"]
 # `screen`. `volume` is soundserver's master level and mute, which the volume
 # keys set and no other row receives. The display is a virtio-gpu function the
 # compositor drives, where the machine has one, and the firmware's framebuffer
-# otherwise. `jobs` makes each program it starts a job of its own, with its own
-# share of the CPU. `power` is its stop view's: Esc cancels the machine's stop,
-# Enter forces it.
+# otherwise; `display-output` is where a display driver offers the output it
+# scans out and is told each frame composed into it. `jobs` makes each
+# program it starts a job of its own, with its own share of the CPU. `power` is
+# its stop view's: Esc cancels the machine's stop, Enter forces it.
 [programs.compositor]
 service = true
-serves = ["compositor", "prompt", "clipboard", "input", "display"]
+serves = ["compositor", "prompt", "clipboard", "input", "display", "display-output"]
 receives = ["soundserver", "filepicker", "volume", "power"]
 devices = ["pci:03:80:00/1af4:1050", "framebuffer"]
 starts = ["terminal", "files", "/apps"]
@@ -134,11 +135,13 @@ syscap = ["rt"]
 
 # The Tiger Lake display driver: the T14's iGPU, held for the boot. It keeps
 # the firmware's mode and surface, which the compositor draws on through the
-# kernel's framebuffer claim, and programs the display engine's power. Not
-# started again: the claim's release resets the function, which ends the
-# firmware's scan-out (`issues/each-gpu-drives-its-displays-from-a-userland-driver.md`).
+# kernel's framebuffer claim, programs the display engine's power and answers
+# the compositor's presents on `display-output`. Not started again: the
+# claim's release resets the function, which ends the firmware's scan-out
+# (`issues/each-gpu-drives-its-displays-from-a-userland-driver.md`).
 [programs.tgl-display]
 drives = ["pci:03:00:00/8086:9a49"]
+receives = ["display-output"]
 
 # The network stack, over every link a NIC driver brings on `link`; it claims
 # no device. It serves from the start, links or none.

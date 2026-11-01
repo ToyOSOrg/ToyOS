@@ -68,6 +68,8 @@ fn the_t14s_gop_gets_levels_one_to_seven_and_its_surface_rearmed_last() {
     let engine = Engine::t14();
     let done = keep_memory_low_power(&engine, &engine).expect("the T14's GOP is programmed");
     assert!(done.pixel_rate_khz.abs_diff(138_778) < 139, "pixel rate {} kHz", done.pixel_rate_khz);
+    assert_eq!((done.scanout.width, done.scanout.height), (1920, 1080));
+    assert!(done.refresh_interval_nanos().abs_diff(16_666_667) < 20_000, "{} ns a frame", done.refresh_interval_nanos());
     assert_eq!(done.before[0], 0x8000_4011);
     let wm = |level| regs::plane_wm(0, 1, level);
     let expected = [

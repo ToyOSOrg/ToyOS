@@ -26,7 +26,7 @@ serves = ["log"]
 
 [programs.compositor]
 service = true
-serves = ["compositor", "prompt", "clipboard", "input", "display"]
+serves = ["compositor", "prompt", "clipboard", "input", "display", "display-output"]
 receives = ["soundserver"]
 devices = ["framebuffer"]
 
@@ -44,6 +44,13 @@ syscap = ["rt", "wake-latency"]
 drives = ["pci:04:03:*"]
 receives = ["sound-output"]
 syscap = ["rt"]
+
+# The T14's display driver: the firmware's output on `display-output`, and
+# PG3, which holds `hda`'s display codec, powered down beside `hda`. No other
+# bench has its iGPU, so none starts it.
+[programs.tgl-display]
+drives = ["pci:03:00:00/8086:9a49"]
+receives = ["display-output"]
 
 # netstack over every link a NIC driver brings; on a machine with no virtio NIC
 # the supervisor starts no driver, and netstack serves with no address.

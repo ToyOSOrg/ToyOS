@@ -1395,6 +1395,16 @@ const METAL: &[(&str, metal::Metal)] = &[
             },
         },
     ),
+    (
+        // The T14's display driver offers the compositor the firmware's
+        // output on `display-output`, and the compositor's presents are
+        // answered at their vblanks, which only the iGPU's interrupt raises.
+        // Beside it `hda` still plays to the analog codec with the display
+        // engine's PG3, which holds the display codec, powered down. The T14
+        // alone: no other bench has a Tiger Lake iGPU.
+        "display_output_presents",
+        metal::Metal { arms: METALCASE, judge: |b| display_output_presents(&b[0].log()) },
+    ),
     // ---- the `SYS_DEBUG` members' boot, armed ----
     // The cheapest cluster there is: every one of these arms a check that runs
     // at init, logs its verdict and does nothing else, so they cost no flash
@@ -1989,6 +1999,28 @@ const LOG_WRITE: &str = "test_rs_log_write";
 /// The head of the kernel's record of `job`'s exit.
 fn exited(job: &str) -> String {
     format!("{}{} pid=", toyos_build::bootlog::EXIT, toyos_build::bootlog::recorded_name(job))
+}
+
+/// What [`display_output_presents`] reads off the T14's metalcase boot: the
+/// driver's DMC line and its hello taken, a present answered, nothing
+/// dropped, and soundserver playing to `hda`'s output. Whether `hda` walked
+/// its codecs before or after PG3 went down is said, since only the later
+/// order tests the display codec's power.
+fn display_output_presents(log: &serial::Serial) -> Result<(), String> {
+    let dc6 = log.must_say("tgl-display: DMC package")?;
+    log.must_say("compositor: a display driver scans out the 1920x1080 output")?;
+    log.must_say("compositor: the display driver answered its first present")?;
+    for refused in ["compositor: dropping the display driver", "tgl-display: presents go unanswered", "tgl-display: no vblank within"] {
+        if let Some(line) = log.text().lines().find(|line| line.contains(refused)) {
+            return Err(format!("the driver's presents stopped: {line}"));
+        }
+    }
+    log.must_say(audio::PLAYING)?;
+    let offered = log.must_say("offered to soundserver")?;
+    let at = |line: &str| log.text().find(line).expect("a line said is in the log");
+    let order = if at(offered) > at(dc6) { "after" } else { "before" };
+    println!("display_output_presents: hda offered its output {order} PG3 went down");
+    Ok(())
 }
 
 /// `tests/images/metalcase.toml`, ended once ps2server's probe has: a boot

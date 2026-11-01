@@ -2,21 +2,26 @@
 //! (a `drives` row) for the life of the boot.
 //!
 //! **Every decision is `toyos-tgl-display`'s**; this file is the claim, its
-//! register window and the clock. The firmware's mode and surface stay the
-//! GOP's, which the compositor draws on through the kernel's framebuffer
-//! claim; the claim's domain keeps the firmware's reserved memory mapped, so
-//! the scan-out reaches the framebuffer across the hand-over.
+//! register window, the clock and the compositor's `display-output`
+//! connection. The firmware's mode and surface stay the GOP's, which the
+//! compositor draws on through the kernel's framebuffer claim; the claim's
+//! domain keeps the firmware's reserved memory mapped, so the scan-out reaches
+//! the framebuffer across the hand-over. Each present the compositor sends is
+//! answered at the vblank after it.
 //!
 //! **The process never exits**: the claim's release resets the function,
 //! which ends the scan-out it was given.
 
-use toyos::{endow, say, PciDev};
-use toyos_abi::syscall::{PciId, RegWidth};
+use toyos::ipc::{FrameRx, RxStep};
+use toyos::poller::{Poller, READABLE};
+use toyos::{endow, say, Connection, PciDev};
+use toyos_abi::syscall::{PciId, RegWidth, SyscallError};
+use toyos_display_output::{Hello, Present, Presented, Size, MAX_FRAME, MSG_HELLO, MSG_PRESENTED, PORT};
 use toyos_device_memory::Registers;
 use toyos_manifest::device::PciMatch;
 use toyos_pci_claim::Bar;
 use toyos_tgl_display::dmc::{Package, Stepping, TGL_PACKAGE};
-use toyos_tgl_display::Refusal;
+use toyos_tgl_display::{interrupt, Programmed, Refusal, FRAME_CEILING_NANOS};
 
 /// The T14's iGPU, Tiger Lake GT2 (`8086:9a49`), a VGA-compatible display
 /// controller, class `03:00:00`, as the row spells it.
@@ -96,10 +101,92 @@ fn main() {
                 ),
                 Err(why) => say!("tgl-display: DC5 and DC6 stay disallowed — {why}"),
             }
+            serve(&dev, &regs, &done);
         }
         Err(why) => say!("tgl-display: the firmware's display is left as found — {why}"),
     }
+    park()
+}
+
+fn park() -> ! {
     loop {
         std::thread::park();
+    }
+}
+
+const TOKEN_CLAIM: u64 = 0;
+const TOKEN_COMPOSITOR: u64 = 1;
+
+/// The firmware's output offered on `display-output`, once: when the
+/// connection ends, for whatever reason is said, presents stop and the
+/// scan-out stays. A connection the compositor refused would only be refused
+/// again.
+fn serve(dev: &PciDev, regs: &Bar, done: &Programmed) {
+    let size = Size { width: done.scanout.width as u32, height: done.scanout.height as u32 };
+    interrupt::claim(regs);
+    let conn = match endow::service(PORT) {
+        Ok(conn) => conn,
+        Err(why) => return say!("tgl-display: no `{PORT}` connection ({why:?}); presents go unanswered"),
+    };
+    if let Err(why) = conn.send_bytes(MSG_HELLO, &Hello { size }.encode()) {
+        return say!("tgl-display: the compositor took no hello ({why:?}); presents go unanswered");
+    }
+    say!("tgl-display: offered the compositor its {}x{} output", size.width, size.height);
+    let why = answer(dev, regs, &conn, size, done.refresh_interval_nanos());
+    say!("tgl-display: presents go unanswered — {why}");
+}
+
+/// Every present on `conn` answered at the vblank after it arrived, until
+/// one cannot be: why.
+fn answer(dev: &PciDev, regs: &Bar, conn: &Connection, size: Size, refresh_interval_nanos: u64) -> String {
+    let poller = Poller::new(2);
+    let mut rx = FrameRx::<MAX_FRAME>::new();
+    // The present waiting for its vblank, and when that vblank is overdue.
+    let mut outstanding: Option<(u64, u64)> = None;
+    loop {
+        poller.watch(dev, READABLE, TOKEN_CLAIM);
+        poller.watch(conn, READABLE, TOKEN_COMPOSITOR);
+        let timeout = outstanding.map_or(u64::MAX, |(_, overdue)| overdue.saturating_sub(toyos_abi::clock::nanos_since_boot()));
+        poller.wait(1, timeout, |_| {});
+
+        match dev.irq() {
+            Ok(record) => match interrupt::serve(regs) {
+                Ok(true) => {
+                    if let Some((sequence, _)) = outstanding.take() {
+                        let presented = Presented { sequence, vblank_nanos: record.last_nanos, refresh_interval_nanos };
+                        if let Err(why) = conn.send_bytes(MSG_PRESENTED, &presented.encode()) {
+                            return format!("the compositor took no answer ({why:?})");
+                        }
+                    }
+                }
+                Ok(false) => {}
+                Err(why) => return why.to_string(),
+            },
+            Err(SyscallError::WouldBlock) => {}
+            Err(why) => panic!("tgl-display: the claim's interrupt record: {why:?}"),
+        }
+        if outstanding.is_some_and(|(_, overdue)| toyos_abi::clock::nanos_since_boot() >= overdue) {
+            return format!("no vblank within {} ms of a present", FRAME_CEILING_NANOS / 1_000_000);
+        }
+
+        loop {
+            let (msg_type, payload_len) = match rx.pump(conn) {
+                RxStep::Idle => break,
+                RxStep::Frame { msg_type, payload_len, .. } => (msg_type, payload_len),
+                RxStep::Eof => return format!("the compositor hung up `{PORT}`"),
+                RxStep::Malformed => return "the compositor sent a frame no protocol here can make".into(),
+            };
+            let present = Present::decode(msg_type, rx.payload(payload_len), size);
+            match (present, outstanding) {
+                (Some(present), None) => {
+                    interrupt::arm(regs);
+                    outstanding = Some((present.sequence, toyos_abi::clock::nanos_since_boot() + FRAME_CEILING_NANOS));
+                }
+                (Some(present), Some((waiting, _))) => {
+                    return format!("the compositor sent present {} while {waiting} waits", present.sequence);
+                }
+                (None, _) => return format!("the compositor sent frame {msg_type}, which `{PORT}` has not"),
+            }
+        }
     }
 }
