@@ -138,7 +138,7 @@ pub mod domain {
     use crate::arch::x86_64::{amdvi, vtd};
     use crate::iommu::{DomainId, IommuError, Iova, Limit, StreamId};
 
-    pub fn create(room: u64, windows: Option<&[toyos_abi::acpi::RootBridgeWindow]>) -> Result<(DomainId, Iova), IommuError> {
+    pub fn create(room: u64, windows: &[toyos_abi::acpi::RootBridgeWindow]) -> Result<(DomainId, Iova), IommuError> {
         match backend() {
             Backend::Vtd => vtd::domain::create(room, windows),
             Backend::AmdVi => amdvi::domain::create(room, windows),

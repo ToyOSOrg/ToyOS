@@ -140,7 +140,9 @@ started. Nothing reaches userland when a device arrives or leaves.
      and posts the set's watch. Powering a slot, §6.6.1's 100 ms and reading
      the functions below it run on the set's reader.
    - One record per requester, carrying its live arrival: a device that
-     returns is a new arrival on the same record and domain. A claim of an
+     returns is a new arrival on the same record and domain. Every arrival is
+     attached to a domain of its own before it is listed, so one on a record
+     no claim held leaves the identity domain its requester had at boot. A claim of an
      older arrival answers `Gone` on every call, and its release asks the
      device nothing. The last release behind a removed slot powers it off.
    - An arrived endpoint's BARs are assigned once, before it is listed: each

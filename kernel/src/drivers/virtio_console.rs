@@ -232,11 +232,9 @@ pub fn init(devices: &[PciDevice]) -> bool {
     };
     log!("virtio-console: found at PCI {:02x}:{:02x}.{}", pci_dev.bus, pci_dev.dev, pci_dev.func);
 
-    // The machine's own addresses, as for every driver in this kernel
-    // (`DeviceSpace`), and refused where the unit gives a function no domain
-    // reaches nothing — unless it does not offer ACCESS_PLATFORM: then it
-    // uses physical addresses whatever translates the bus, and a driver MUST
-    // give it physical ones (virtio 1.2 §6.1).
+    // Without ACCESS_PLATFORM the device uses physical addresses, whatever
+    // translates the bus (virtio 1.2 §6.1); with it, a unit that aborts a
+    // function with no domain of its own refuses this one.
     let space = if offered.features & VIRTIO_F_ACCESS_PLATFORM != 0 {
         crate::iommu::DeviceSpace::create(&[pci_dev])
     } else {

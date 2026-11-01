@@ -118,9 +118,6 @@ pub enum IommuError {
     DomainsExhausted(u32),
     /// Every allowed address below this limit is handed out.
     AddressesExhausted(Limit),
-    /// No declaration of the root bridges' windows is held, so no address is
-    /// known to be clear of them.
-    Undeclared,
     /// Less than a new domain was asked to hand out is allowed below 4 GiB.
     NoRoom { room: u64 },
     /// Not a whole number of the 2 MiB leaves this kernel writes.
@@ -141,11 +138,6 @@ impl core::fmt::Display for IommuError {
             Self::AddressesExhausted(limit) => {
                 write!(f, "a domain's device addresses below {:#x} are all handed out", limit.end())
             }
-            Self::Undeclared => write!(
-                f,
-                "no declaration of the root bridges' windows is held, so no device address is known \
-                 to be clear of them"
-            ),
             Self::NoRoom { room } => {
                 write!(f, "less than the {room:#x} bytes a new domain hands out first is allowed below 4 GiB")
             }
@@ -216,7 +208,7 @@ impl OwnSpace {
         device: u8,
         function: u8,
     ) -> Result<(Self, u64), IommuError> {
-        let (id, at) = unit::domain::create(room, Some(windows))?;
+        let (id, at) = unit::domain::create(room, windows)?;
         unit::domain::keep_reserved(id, StreamId::pci(bus, device, function));
         Ok((Self(id), at.raw()))
     }

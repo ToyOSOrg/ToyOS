@@ -25,6 +25,9 @@
 //! Nothing reads through the BAR to prove it; the port's windows are
 //! firmware's, inside its root's.
 //!
+//! **An arrival is attached to a domain of its own before it is listed**
+//! ([`isolate`]), which maps nothing until a claim grants it memory.
+//!
 //! **Removal is the button's or the card's**: a press on a powered slot whose
 //! functions are listed removes them at once, and the slot is powered off when
 //! the last claim on them is released. §6.7.1.5's five seconds in which a
@@ -48,7 +51,8 @@ static SLOTS: Lock<Vec<&'static HotPlug>> = Lock::new(Vec::new());
 
 /// Held across a [`refresh`], so two readers of the set never enumerate one
 /// arrival twice: a spinlock over at most one enumeration, eight functions'
-/// BAR sizing, which a second reader waits out.
+/// BAR sizing and a domain for each new record, which a second reader waits
+/// out.
 static REFRESHING: Lock<()> = Lock::new(());
 
 /// One armed slot: its port's registers, and what its handler and the device
@@ -224,6 +228,7 @@ impl HotPlug {
     /// Take every function behind the slot out of the device set, and wake
     /// whoever waits on one so it reads `Gone`.
     fn depart(&self) {
+        self.link_since.store(0, Ordering::Release);
         for function in functions().filter(|function| self.behind(function)) {
             let arrival = function.arrival.swap(0, Ordering::AcqRel);
             if arrival != 0 {
@@ -242,6 +247,11 @@ impl HotPlug {
             return;
         }
         self.write_status(events);
+        // A card pulled and another seated between two reads is a new link,
+        // owed §6.6.1's wait from its own training, not the last card's.
+        if events & hotplug::PRESENCE_CHANGED != 0 {
+            self.link_since.store(0, Ordering::Release);
+        }
         if events & hotplug::PRESENCE_CHANGED != 0 && !hotplug::occupied(status) {
             self.removing.store(false, Ordering::Release);
             self.depart();
@@ -351,6 +361,12 @@ impl HotPlug {
         };
         let first = PciDevice::at(window, bus, 0, 0);
         if first.vendor_id() == crate::drivers::pci::INVALID_VENDOR {
+            log!(
+                "pcidev: PCI {:02x}:{:02x}.{}'s slot is occupied and powered with its link up past \
+                 §6.6.1's 100 ms, and {bus:02x}:00.0 answers no vendor, so this read lists nothing \
+                 below it",
+                self.pci.bus, self.pci.dev, self.pci.func
+            );
             return;
         }
         let functions = if first.multi_function() { 8 } else { 1 };
@@ -387,7 +403,7 @@ impl HotPlug {
             (declared, taken.collect())
         };
         let bars = self.assign(&pci, &declared, taken);
-        arrive(pci, bars);
+        arrive(pci, bars, &declared);
     }
 
     /// Size every memory BAR of `pci`, which nothing drives yet, and give
@@ -473,6 +489,22 @@ impl HotPlug {
     }
 }
 
+/// Attach record `number`'s requester to a domain of its own where it has
+/// none yet, so an arrival reaches nothing until a claim grants it memory: a
+/// record a claim never held keeps what the unit gave its requester at boot,
+/// which on VT-d and AMD-Vi is the identity domain over all of memory. A
+/// record a claim held already is on its own domain, which its release
+/// emptied.
+fn isolate(number: usize, pci: &PciDevice, declared: &[RootBridgeWindow]) -> Result<(), String> {
+    crate::iommu::isolates(pci).map_err(ToString::to_string)?;
+    let made = function(number).space.lock().is_none();
+    let space = super::function_space(number, declared).map_err(|why| why.to_string())?;
+    if made {
+        space.space.attach(pci.bus, pci.dev, pci.func);
+    }
+    Ok(())
+}
+
 /// Where an arrived function's BAR may go: inside its port's `windows` and
 /// the `declared` root bridges' memory, clear of what is `taken`.
 #[derive(Clone, Copy)]
@@ -482,31 +514,42 @@ struct Room<'a> {
     taken: &'a [(u64, u64)],
 }
 
-/// `pci` in the device set as a new arrival, decoding `bars`.
-fn arrive(pci: PciDevice, bars: Vec<Decoded>) {
+/// `pci` in the device set as a new arrival, decoding `bars`, once it is
+/// attached to a domain of its own clear of the `declared` windows.
+fn arrive(pci: PciDevice, bars: Vec<Decoded>, declared: &[RootBridgeWindow]) {
+    let (b, d, f) = (pci.bus, pci.dev, pci.func);
+    let number = {
+        let mut machine = MACHINE.lock();
+        if machine.kernel_driven.contains(&requester(&pci)) {
+            log!("pcidev: PCI {b:02x}:{d:02x}.{f} arrived where a driver in this kernel drives what it found at boot, and is not listed");
+            return;
+        }
+        match (0..super::RECORDED.load(Ordering::Acquire)).find(|n| function(*n).who == requester(&pci)) {
+            Some(number) => number,
+            None => {
+                let unlisted = pci.identity(Arrival(0), super::addr_of(machine.segment, requester(&pci)));
+                match record(&mut machine, super::new_record(pci, Arrival(0)), unlisted) {
+                    Some(number) => number,
+                    None => {
+                        log!("pcidev: PCI {b:02x}:{d:02x}.{f} arrived past the {} functions this kernel keeps, and is not listed", super::MAX_FUNCTIONS);
+                        return;
+                    }
+                }
+            }
+        }
+    };
+    if let Err(why) = isolate(number, &pci, declared) {
+        log!("pcidev: PCI {b:02x}:{d:02x}.{f} arrived and is not listed: it is given no domain of its own ({why})");
+        return;
+    }
     let mut machine = MACHINE.lock();
     let arrival = Arrival(machine.next_arrival);
     let identity = pci.identity(arrival, super::addr_of(machine.segment, requester(&pci)));
-    let number = match (0..super::RECORDED.load(Ordering::Acquire)).find(|n| function(*n).who == requester(&pci)) {
-        Some(number) => {
-            machine.identities[number] = identity;
-            number
-        }
-        None => match record(&mut machine, super::new_record(pci, Arrival(0)), identity) {
-            Some(number) => number,
-            None => {
-                log!(
-                    "pcidev: PCI {:02x}:{:02x}.{} arrived past the {} functions this kernel keeps, and is not listed",
-                    pci.bus,
-                    pci.dev,
-                    pci.func,
-                    super::MAX_FUNCTIONS
-                );
-                return;
-            }
-        },
-    };
+    machine.identities[number] = identity;
     machine.next_arrival += 1;
+    // What a departed arrival on this record decoded, where the release of
+    // its last claim let this enumeration in before its `retire` ran.
+    machine.decoded.retain(|bar| bar.who != requester(&pci));
     machine.decoded.extend(bars);
     function(number).arrival.store(arrival.0, Ordering::Release);
     drop(machine);

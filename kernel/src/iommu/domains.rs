@@ -45,14 +45,12 @@ impl<S: Copy> Domains<S> {
     /// The next domain's id and its addresses over `translatable` bits, clear
     /// of the root bridges' declared `windows`, with `room` bytes below 4 GiB
     /// handed out first, which any holder can reach; refused, with no id
-    /// spent, where no declaration is held (`None`), ids reach `ceiling` or
-    /// the room is not there.
-    pub fn prepare(&self, translatable: u8, ceiling: u32, room: u64, windows: Option<&[RootBridgeWindow]>) -> Result<Next, IommuError> {
+    /// spent, where ids reach `ceiling` or the room is not there.
+    pub fn prepare(&self, translatable: u8, ceiling: u32, room: u64, windows: &[RootBridgeWindow]) -> Result<Next, IommuError> {
         let id = u16::try_from(usize::from(self.first) + self.live.len())
             .ok()
             .filter(|id| u32::from(*id) < ceiling)
             .ok_or(IommuError::DomainsExhausted(ceiling))?;
-        let windows = windows.ok_or(IommuError::Undeclared)?;
         let reserved: Vec<(u64, u64)> = windows.iter().map(|w| (w.base, w.end())).chain(self.reserved.iter().copied()).collect();
         let mut addresses = Window::new(translatable, &reserved);
         let first = match room {

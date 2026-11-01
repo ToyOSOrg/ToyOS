@@ -224,7 +224,8 @@ pub fn buses(dword: u32) -> (u8, u8) {
 
 /// The memory a port forwards below it, each window as `(start, end)` with
 /// `end` exclusive; `None` for a window whose base is above its limit, which
-/// forwards nothing.
+/// forwards nothing, or whose limit is the last megabyte of the address
+/// space, which no exclusive end can name.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub struct Windows {
     pub memory: Option<(u64, u64)>,
@@ -237,7 +238,10 @@ impl Windows {
     /// halves count only where the prefetchable window says it is 64-bit
     /// (bits 3:0 of its base word, 1).
     pub fn read(memory: u32, prefetchable: u32, base_upper: u32, limit_upper: u32) -> Self {
-        let window = |base: u64, limit: u64| (base <= limit).then_some((base, limit + WINDOW_GRANULE));
+        let window = |base: u64, limit: u64| match base <= limit {
+            true => limit.checked_add(WINDOW_GRANULE).map(|end| (base, end)),
+            false => None,
+        };
         let low = |word: u32| u64::from(word & 0xFFF0) << 16;
         let wide = prefetchable & 0xF == 1;
         let upper = |word: u32| if wide { u64::from(word) << 32 } else { 0 };
@@ -406,6 +410,13 @@ mod tests {
         // and a base past its limit forwards nothing.
         assert_eq!(Windows::read(QEMU_MEMORY, 0x1ff0_0000, 0x8, 0x8).prefetchable, Some((0, 0x2000_0000)));
         assert_eq!(Windows::read(0x0000_fff0, 0x0000_fff1, 0, 0), Windows { memory: None, prefetchable: None });
+        // A 64-bit limit in the address space's last megabyte has no
+        // exclusive end, and is refused rather than wrapped; the megabyte
+        // below it is a window like any other.
+        let top = Windows::read(QEMU_MEMORY, 0xfff0_0001, 0xffff_ffff, 0xffff_ffff);
+        assert_eq!(top.prefetchable, None);
+        let below = Windows::read(QEMU_MEMORY, 0xffe0_ffe1, 0xffff_ffff, 0xffff_ffff);
+        assert_eq!(below.prefetchable, Some((0xffff_ffff_ffe0_0000, 0xffff_ffff_fff0_0000)));
     }
 
     fn qemu_windows() -> Windows {

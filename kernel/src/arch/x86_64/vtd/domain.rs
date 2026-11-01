@@ -64,9 +64,9 @@ pub fn unit_agrees(width: AddressWidth, ceiling: u32, mgaw: u8) {
 }
 
 /// A new domain, with `room` bytes of it handed out first, clear of the root
-/// bridges' declared `windows`, `None` where none are held: refused, with no
-/// id spent, where it would have less than that.
-pub fn create(room: u64, windows: Option<&[toyos_abi::acpi::RootBridgeWindow]>) -> Result<(DomainId, Iova), IommuError> {
+/// bridges' declared `windows`: refused, with no id spent, where it would
+/// have less than that.
+pub fn create(room: u64, windows: &[toyos_abi::acpi::RootBridgeWindow]) -> Result<(DomainId, Iova), IommuError> {
     let mut held = DOMAINS.lock();
     let (width, ceiling, mgaw) = match held.agreement {
         Agreement::None => return Err(IommuError::NoUnit),

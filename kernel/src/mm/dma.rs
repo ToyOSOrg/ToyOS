@@ -33,7 +33,7 @@ impl Discipline for Unaligned {}
 /// A bounds-checked, `Copy` view of DMA memory, scoped to its [`DmaPool`]'s lifetime.
 pub struct Dma<'pool, D: Discipline = Volatile> {
     base: *mut u8,
-    /// An address in the device's domain, or the physical one where nothing translates.
+    /// The address the device is told for the first byte.
     device: u64,
     size: usize,
     pool: PhantomData<&'pool DmaPool>,
@@ -58,8 +58,7 @@ impl<'pool, D: Discipline> Dma<'pool, D> {
         Self { base, device, size, pool: PhantomData, how: PhantomData }
     }
 
-    /// The address to program a device with for the first byte; never a
-    /// physical address once a unit translates this pool's domain.
+    /// The address to program a device with for the first byte.
     #[inline]
     pub fn device_addr(self) -> u64 {
         self.device

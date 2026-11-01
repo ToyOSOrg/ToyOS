@@ -560,7 +560,9 @@ pub fn inventory() -> Vec<toyos_abi::inventory::Pci> {
     };
     let mut out = Vec::with_capacity(identities.len());
     for (mut pci, function) in identities.into_iter().zip(functions()) {
-        if function.arrival.load(Ordering::Acquire) != pci.arrival.0 {
+        // A record whose function left, or one whose arrival was refused
+        // before it was listed, which carries arrival 0.
+        if pci.arrival.0 == 0 || function.arrival.load(Ordering::Acquire) != pci.arrival.0 {
             continue;
         }
         pci.driven = if kernel_driven.contains(&function.who) {
@@ -1538,6 +1540,11 @@ fn retire(number: usize) {
     let who = function.who;
     {
         let mut machine = MACHINE.lock();
+        // Again under the lock an arrival is published under: one that
+        // landed since the check above owns these BARs now.
+        if function.arrival.load(Ordering::Acquire) != 0 {
+            return;
+        }
         machine.decoded.retain(|bar| bar.who != who);
         machine.resetting.retain(|(w, ..)| *w != who);
     }
