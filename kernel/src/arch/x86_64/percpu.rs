@@ -115,6 +115,10 @@ pub struct PerCpu {
     /// Non-zero inside this CPU's NMI handler, written only by `arch::idt::nmi`'s entry; IST2 isn't re-entrant, so this proves no second NMI lands on it.
     nmi_active: u32,
     ap_token: u32,
+    /// Non-zero while this CPU runs a device interrupt's handler, written only
+    /// by `device_irq_entry` through `gs:`: a wake posted there is the
+    /// device's, not the interrupted thread's.
+    irq_depth: AtomicU32,
     /// Interrupt deliveries, one counter per `irq_census::Source`; written only by `irq_census::irq_took!`, kept last so a new source moves nothing else.
     pub irq_counts: [AtomicU64; crate::irq_census::Source::COUNT],
 }
@@ -203,6 +207,7 @@ pub(crate) const OFF_LAST_ARMED_TICKS: u32 = offset_of!(PerCpu, last_armed_ticks
 const OFF_LOG_SHARD: u32 = offset_of!(PerCpu, log_shard) as u32;
 /// Opened/closed by `arch::syscall`'s and `arch::idt`'s naked stubs; `preempt` is the Rust half.
 pub(crate) const OFF_PREEMPT_COUNT: u32 = offset_of!(PerCpu, preempt_count) as u32;
+pub(crate) const OFF_IRQ_DEPTH: u32 = offset_of!(PerCpu, irq_depth) as u32;
 /// Set by the timer ISR, cleared by the deferred-preempt epilogue — `preempt`.
 pub(crate) const OFF_NEED_RESCHED: u32 = offset_of!(PerCpu, need_resched) as u32;
 /// Read by `preempt::enable`'s slow path to decline rescheduling a faulting CPU.
@@ -376,6 +381,7 @@ fn alloc_percpu(cpu_id: u32) -> *mut PerCpu {
                 log_shard: log::shard_for(cpu_id) as *const log::Shard as u64,
                 nmi_active: 0,
                 ap_token: 0,
+                irq_depth: AtomicU32::new(0),
                 irq_counts: [const { AtomicU64::new(0) }; crate::irq_census::Source::COUNT],
             },
         );
@@ -594,6 +600,11 @@ pub fn cpu_id() -> u32 {
 
 pub fn ap_token() -> u32 {
     gs::read_u32::<OFF_AP_TOKEN>()
+}
+
+/// Whether this CPU is inside a device interrupt's handler.
+pub fn in_device_irq() -> bool {
+    gs::read_u32::<OFF_IRQ_DEPTH>() != 0
 }
 
 /// Read the Tid of the thread currently running on this CPU. None means idle.

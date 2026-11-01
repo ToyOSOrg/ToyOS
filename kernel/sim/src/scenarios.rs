@@ -1195,6 +1195,62 @@ pub fn turn_taking_pair() -> Scenario {
 /// How many turns each of [`turn_taking_pair`]'s threads takes.
 pub const TURN_TAKING_ROUNDS: usize = 8;
 
+/// **A request/reply pair split across the AMD bench's two LLCs**: one thread
+/// on cpu0 and its partner on cpu8, each waking the other and parking, with
+/// balancing off. Only wake placement can bring them together.
+pub fn split_pair() -> Scenario {
+    let turn = MS / 10;
+    let wake = |queue| Op::Wake { queue, all: false, boost: None };
+    let block = |queue| Op::Block { queue, deadline: None };
+    scenario(
+        "split_pair",
+        16,
+        vec![queue(WaitClass::Io), queue(WaitClass::Io)],
+        vec![process(
+            "pair",
+            vec![0, 1],
+            vec![
+                Script::looping(vec![Op::Run(turn), wake(1), block(0)], WAKE_LLC_ROUNDS),
+                Script::looping(vec![block(1), Op::Run(turn), wake(0)], WAKE_LLC_ROUNDS),
+            ],
+        )],
+    )
+    .with_placement(PlacementShape::Listed(&[0, 8]))
+    .with_topology(Shape::amd_bench())
+    .with_balance(Balance::None)
+}
+
+/// **One server woken from both LLCs in turn**: a server on cpu0 answers a
+/// client pinned to cpu1, in its LLC, and one pinned to cpu9, in the other,
+/// with balancing off. Following each wake's LLC would move the server on
+/// every other request.
+pub fn server_of_two_llcs() -> Scenario {
+    let turn = MS / 10;
+    let wake = |queue| Op::Wake { queue, all: false, boost: None };
+    let block = |queue| Op::Block { queue, deadline: None };
+    let client = |cpu: u64, reply| Script::looping(vec![Op::SetAffinity(1 << cpu), Op::Run(turn), wake(0), block(reply)], WAKE_LLC_ROUNDS);
+    scenario(
+        "server_of_two_llcs",
+        16,
+        vec![queue(WaitClass::Io), queue(WaitClass::Io), queue(WaitClass::Io)],
+        vec![process(
+            "served",
+            vec![0, 1, 2],
+            vec![
+                Script::looping(vec![block(0), Op::Run(turn), wake(1), block(0), Op::Run(turn), wake(2)], WAKE_LLC_ROUNDS),
+                client(1, 1),
+                client(9, 2),
+            ],
+        )],
+    )
+    .with_placement(PlacementShape::Listed(&[0, 1, 9]))
+    .with_topology(Shape::amd_bench())
+    .with_balance(Balance::None)
+}
+
+/// How many turns [`split_pair`]'s and [`server_of_two_llcs`]' threads take.
+pub const WAKE_LLC_ROUNDS: usize = 12;
+
 /// **Masks under stealing**, every thread spawned on cpu0 of four with the
 /// shipped balance policy: two threads pinned to cpu0, two masked to cpu1 and
 /// cpu2, one that moves itself between halves of the machine as it runs, and
