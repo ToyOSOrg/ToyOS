@@ -71,8 +71,13 @@ fn on_an_output(log: &str, job: &str) -> Result<(), String> {
 /// The tone client played to its end through the HDA controller an `hda`
 /// driver drives, played to before it ran, and no period of it went unfilled.
 pub fn tone_on_metal(log: &Serial) -> Result<(), String> {
-    on_an_output(log.text(), "test_rs_audio_tone")?;
-    let window = job_window(log.text(), "test_rs_audio_tone")?;
+    tone_played(log, "test_rs_audio_tone")
+}
+
+/// `job`'s tone played to an output whole, every period its own.
+pub fn tone_played(log: &Serial, job: &str) -> Result<(), String> {
+    on_an_output(log.text(), job)?;
+    let window = job_window(log.text(), job)?;
     let underruns = sum_field(window, "underruns");
     if underruns != 0 {
         return Err(format!(

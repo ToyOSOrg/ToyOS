@@ -81,7 +81,7 @@ devices = ["isa:0060,0064:1,12"]
 # The union its guest binaries need on this machine shape; `log` is what
 # `ps2server_hold` reads ps2server's probe off.
 [programs.test-runner]
-receives = ["compositor", "soundserver", "netstack", "log"]
+receives = ["compositor", "soundserver", "volume", "netstack", "log"]
 syscap = ["logread"]
 
 # The block service: every disk a driver offers on `disk`, listed and opened

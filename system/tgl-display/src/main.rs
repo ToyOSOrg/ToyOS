@@ -143,6 +143,7 @@ fn answer(dev: &PciDev, regs: &Bar, conn: &Connection, size: Size, refresh_inter
     let mut rx = FrameRx::<MAX_FRAME>::new();
     // The present waiting for its vblank, and when that vblank is overdue.
     let mut outstanding: Option<(u64, u64)> = None;
+    let mut answered = false;
     loop {
         poller.watch(dev, READABLE, TOKEN_CLAIM);
         poller.watch(conn, READABLE, TOKEN_COMPOSITOR);
@@ -156,6 +157,10 @@ fn answer(dev: &PciDev, regs: &Bar, conn: &Connection, size: Size, refresh_inter
                         let presented = Presented { sequence, vblank_nanos: record.last_nanos, refresh_interval_nanos };
                         if let Err(why) = conn.send_bytes(MSG_PRESENTED, &presented.encode()) {
                             return format!("the compositor took no answer ({why:?})");
+                        }
+                        if !answered {
+                            answered = true;
+                            say!("tgl-display: first present answered at pipe A frame {}", regs.read32(toyos_tgl_display::regs::PIPE_FRMCNT_A));
                         }
                     }
                 }
