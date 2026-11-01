@@ -225,7 +225,7 @@ impl Net {
     fn leased_for(seconds: u32, servers: &[Ipv4Addr], router: Option<Ipv4Addr>) -> Self {
         let mut lan = Lan::new();
         lan.lease_on(&lease_of(seconds, servers, router));
-        assert_eq!(lan.node.lease().expect("held").dns, servers, "the premise: the lease names these resolvers");
+        assert_eq!(lan.node.lease(lan.link).expect("held").dns, servers, "the premise: the lease names these resolvers");
         // `toyos-dns` keeps whole milliseconds and conflict detection's waits are drawn finer: the
         // origin is the next whole one, so a wait counted from it ends on the millisecond named.
         let whole = u64::try_from(lan.now.since(Instant::from_millis(0)).as_millis()).unwrap() + 1;
@@ -741,7 +741,7 @@ fn a_lookup_with_no_resolver_to_ask_is_refused_as_not_connected() {
     let mut lan = Lan::new();
     lan.lease(600);
     lan.node.resolve(lan.now, ONE, name("www.example"), sequence([1, 2])).expect("the premise: a held lease's resolver is asked");
-    assert!(lan.run_until(Duration::from_secs(700), |lan| lan.node.lease().is_none()), "the lease runs out");
+    assert!(lan.run_until(Duration::from_secs(700), |lan| lan.node.lease(lan.link).is_none()), "the lease runs out");
     assert_eq!(lan.node.resolve(lan.now, ONE, name("www.example"), undrawn), Err(NotStarted::NotConnected), "after the lease");
 }
 
@@ -837,14 +837,14 @@ fn a_query_with_no_port_to_leave_from_ends_its_lookup_by_name() {
 fn a_burst_at_a_resolver_not_yet_resolved_is_on_the_wire_once_the_resolver_answers_arp() {
     let mut net = Net::leased(&[ANSWERS], Some(R));
     let names: Vec<String> = (0..MAX_LOOKUPS).map(|n| format!("n{n}.example")).collect();
-    let ip = |net: &Net| net.lan.node.shard().ip().neighbour(net.lan.node.shard().iface(), ANSWERS).map(toyos_net_ip::Nud::mac);
+    let ip = |net: &Net| net.lan.node.shard().ip().neighbour(net.lan.link, ANSWERS).map(toyos_net_ip::Nud::mac);
     assert_eq!(ip(&net), None, "the premise: [ip] holds no entry for the resolver");
     for asked in &names {
         net.resolve(asked).unwrap();
     }
     assert!(net.queried.is_empty(), "the premise: nothing has left");
     assert_eq!(net.lan.opportunity(), 1, "the request for the resolver, and no query");
-    let held = match net.lan.node.shard().ip().neighbour(net.lan.node.shard().iface(), ANSWERS) {
+    let held = match net.lan.node.shard().ip().neighbour(net.lan.link, ANSWERS) {
         Some(toyos_net_ip::Nud::Incomplete(asking)) => Some(asking.pending.queued()),
         _ => None,
     };
@@ -1009,7 +1009,7 @@ fn the_query_asked_in_a_dropped_querys_place_leaves_in_the_same_opportunity() {
     assert_eq!(net.run(first, 10 * WAIT_MS), Some(Ok(vec![ADDRESS])));
     net.until(3_000);
     let shard = net.lan.node.shard();
-    assert!(matches!(shard.ip().neighbour(shard.iface(), SILENT), Some(toyos_net_ip::Nud::Failed)), "the premise: [ip] gave the first resolver up");
+    assert!(matches!(shard.ip().neighbour(net.lan.link, SILENT), Some(toyos_net_ip::Nud::Failed)), "the premise: [ip] gave the first resolver up");
     let asked = net.queried.len();
 
     let id = net.resolve("other.example").unwrap();
@@ -1052,7 +1052,7 @@ fn lease_of(seconds: u32, servers: &[Ipv4Addr], router: Option<Ipv4Addr>) -> Vec
 #[test]
 fn a_lookup_outlives_a_renewal_that_names_the_same_resolvers() {
     let (mut net, id, renewal) = renewing_under_a_lookup();
-    let expiry = |net: &Net| net.lan.node.lease().and_then(|lease| lease.timers).map(|timers| timers.expiry);
+    let expiry = |net: &Net| net.lan.node.lease(net.lan.link).and_then(|lease| lease.timers).map(|timers| timers.expiry);
     let before = expiry(&net);
     net.lan.deliver(&from_server(MAC, A, &message_of(ACK, renewal, &naming(ANSWERS))));
     assert_ne!(expiry(&net), before, "the premise: the renewal was taken, and the lease runs from it");
@@ -1068,7 +1068,7 @@ fn a_lookup_outlives_a_renewal_that_names_the_same_resolvers() {
 fn a_lookup_ends_when_its_leases_resolvers_change() {
     let (mut net, id, renewal) = renewing_under_a_lookup();
     net.lan.deliver(&from_server(MAC, A, &message_of(ACK, renewal, &naming(SILENT))));
-    assert_eq!(net.lan.node.lease().expect("held").dns, [SILENT], "the premise: the renewed lease names another resolver");
+    assert_eq!(net.lan.node.lease(net.lan.link).expect("held").dns, [SILENT], "the premise: the renewed lease names another resolver");
     assert_eq!(net.lan.node.take_resolved(), [Resolved { id, result: Err(Ended::LeaseChanged) }]);
     let left = net.queried[0].udp.source_port;
     assert!(!net.port_held(left), "port {left} of the ended lookup");
@@ -1079,7 +1079,7 @@ fn a_lookup_ends_when_its_leases_resolvers_change() {
 fn a_lookup_ends_when_its_lease_is_lost() {
     let (mut net, id, renewal) = renewing_under_a_lookup();
     net.lan.deliver(&from_server(common::BROADCAST, Ipv4Addr::BROADCAST, &message(NAK, renewal, Ipv4Addr::UNSPECIFIED, &[(54, R.octets().to_vec())])));
-    assert_eq!(net.lan.node.lease(), None, "the premise: the lease is gone");
+    assert_eq!(net.lan.node.lease(net.lan.link), None, "the premise: the lease is gone");
     assert_eq!(net.lan.node.take_resolved(), [Resolved { id, result: Err(Ended::LeaseChanged) }]);
 }
 
@@ -1166,7 +1166,7 @@ fn a_link_that_goes_down_empties_what_every_view_keeps_though_the_lease_stays() 
     net.until(100_000);
     let requests = net.lan.sent[up..].iter().filter(|(_, seen)| matches!(seen, Seen::Udp(udp) if udp.port == 67)).count();
     assert_eq!(requests, usize::try_from(toyos_dhcp::limits::REQUEST_TRANSMISSIONS).unwrap(), "the premise: every INIT-REBOOT went unanswered");
-    assert_eq!(net.lan.node.lease().map(|lease| lease.dns.clone()), Some(vec![ANSWERS]), "the premise: the lease is in use, its resolver the same");
+    assert_eq!(net.lan.node.lease(net.lan.link).map(|lease| lease.dns.clone()), Some(vec![ANSWERS]), "the premise: the lease is in use, its resolver the same");
     asks_again(&mut net);
 }
 
@@ -1176,14 +1176,14 @@ fn a_link_that_goes_down_empties_what_every_view_keeps_though_the_lease_stays() 
 fn a_lease_lost_and_another_naming_the_same_resolver_empty_what_every_view_keeps() {
     let (mut net, renewal) = renewing();
     net.lan.deliver(&from_server(BROADCAST, Ipv4Addr::BROADCAST, &message(NAK, renewal, Ipv4Addr::UNSPECIFIED, &[(54, R.octets().to_vec())])));
-    assert_eq!(net.lan.node.lease(), None, "the premise: the lease is gone");
+    assert_eq!(net.lan.node.lease(net.lan.link), None, "the premise: the lease is gone");
     let discover = last_dhcp(&net);
     assert_eq!(option(&discover, 53), Some(&[DISCOVER][..]));
     let terms = lease_of(600, &[ANSWERS], Some(R));
     net.lan.deliver(&from_server(MAC, A, &message_of(OFFER, xid(&discover), &terms)));
     net.lan.deliver(&from_server(BROADCAST, Ipv4Addr::BROADCAST, &message_of(ACK, xid(&discover), &terms)));
-    assert!(net.lan.run_until(Duration::from_secs(10), |lan| lan.node.lease().is_some()), "the new lease is held");
-    assert_eq!(net.lan.node.lease().expect("held").dns, [ANSWERS], "the premise: it names the same resolver");
+    assert!(net.lan.run_until(Duration::from_secs(10), |lan| lan.node.lease(lan.link).is_some()), "the new lease is held");
+    assert_eq!(net.lan.node.lease(net.lan.link).expect("held").dns, [ANSWERS], "the premise: it names the same resolver");
     asks_again(&mut net);
 }
 
@@ -1192,7 +1192,7 @@ fn a_lease_lost_and_another_naming_the_same_resolver_empty_what_every_view_keeps
 #[test]
 fn a_renewal_with_the_same_terms_empties_what_every_view_keeps() {
     let (mut net, renewal) = renewing();
-    let expiry = |net: &Net| net.lan.node.lease().and_then(|lease| lease.timers).map(|timers| timers.expiry);
+    let expiry = |net: &Net| net.lan.node.lease(net.lan.link).and_then(|lease| lease.timers).map(|timers| timers.expiry);
     let before = expiry(&net);
     net.lan.deliver(&from_server(MAC, A, &message_of(ACK, renewal, &lease_of(600, &[ANSWERS], Some(R)))));
     assert_ne!(expiry(&net), before, "the premise: the renewal was taken");

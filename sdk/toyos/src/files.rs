@@ -537,7 +537,7 @@ mod tests {
         every.extend((0..=255u8).filter_map(fs::Error::from_byte).map(Error::Served));
         let streams: alloc::vec::Vec<Error> =
             (0..=255u8).filter_map(crate::net::stream::Refused::from_byte).map(Error::Stream).collect();
-        assert_eq!(streams.len(), 7, "every stream refusal but a foreign handle's");
+        assert_eq!(streams.len(), 8, "every stream refusal but a foreign handle's");
         every.extend(streams);
         assert!(every.len() > 40, "only {} errors", every.len());
         for e in every {

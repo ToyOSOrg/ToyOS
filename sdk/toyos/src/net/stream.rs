@@ -4,7 +4,8 @@
 //! with the connect or the accept. [`LAYOUT`] is its one declaration: a header
 //! of [`WORDS`] words, each on a 64-byte line of its own, then the receive ring
 //! netstack fills and the send ring the client fills. The receive ring's `end`
-//! is the peer's FIN, [`RESET`], [`TIMED_OUT`] or [`UNREACHABLE`]; the send
+//! is the peer's FIN, [`RESET`], [`TIMED_OUT`], [`UNREACHABLE`] or
+//! [`ADDRESS_GONE`]; the send
 //! ring's is the client's shutdown; [`NODELAY`] is the client's Nagle switch
 //! (RFC 9293 §3.7.4). The rest of the header is the session's: the gates, the
 //! receiving half's shutdown and the hang-up any holder saw.
@@ -111,6 +112,9 @@ pub const RESET: u32 = 2;
 pub const TIMED_OUT: u32 = 3;
 /// The receive ring's `end`: an ICMP error ended the connection.
 pub const UNREACHABLE: u32 = 4;
+/// The receive ring's `end`: this machine gave up the connection's local
+/// address, its link's lease ended or another host took it.
+pub const ADDRESS_GONE: u32 = 5;
 
 // ---- a holder's connection ----
 
@@ -239,6 +243,8 @@ pub enum Refused {
     ConnectionTimedOut,
     /// An ICMP error ended the connection.
     Unreachable,
+    /// This machine gave up the connection's local address.
+    AddressGone,
     /// netstack went away, or wrote what no netstack writes.
     Aborted,
     /// The sending half was shut down.
@@ -259,6 +265,7 @@ impl Refused {
             Self::Unreachable => 4,
             Self::Aborted => 5,
             Self::Shut => 6,
+            Self::AddressGone => 7,
         })
     }
 
@@ -271,6 +278,7 @@ impl Refused {
             4 => Self::Unreachable,
             5 => Self::Aborted,
             6 => Self::Shut,
+            7 => Self::AddressGone,
             _ => return None,
         })
     }
@@ -283,6 +291,7 @@ impl From<Answer> for Refused {
             Answer::TimedOut => Self::TimedOut,
             Answer::Failed(TIMED_OUT) => Self::ConnectionTimedOut,
             Answer::Failed(UNREACHABLE) => Self::Unreachable,
+            Answer::Failed(ADDRESS_GONE) => Self::AddressGone,
             Answer::Failed(_) => Self::Reset,
             Answer::Shut => Self::Shut,
             Answer::Gone | Answer::Violation(_) => Self::Aborted,

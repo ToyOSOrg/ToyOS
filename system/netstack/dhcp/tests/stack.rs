@@ -57,7 +57,7 @@ impl Stack {
     /// A's interface up with no address, netstack's acquisition socket on port 68.
     fn new() -> Self {
         let mut ip = Ip::new(Instant::from_nanos(0), [0x5a; 16]);
-        let if0 = ip.add_interface(Instant::from_nanos(0), IndividualMac::new(MAC_A).unwrap());
+        let if0 = ip.add_interface(Instant::from_nanos(0), IndividualMac::new(MAC_A).unwrap(), toyos_net_ip::Rank(0));
         ip.link_up(Instant::from_nanos(0), if0).unwrap();
         let mut udp = Udp::new();
         let socket = udp.bind(&ip, Ipv4Addr::UNSPECIFIED, Port::new(68), || 0).unwrap();

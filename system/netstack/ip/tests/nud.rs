@@ -123,7 +123,7 @@ fn s_ip_nud_007_positive_advice_moves_the_confirmation() {
     let reachable = h.ip.reachable_time(h.if0).unwrap();
     let ms = |d: std::time::Duration| d.as_millis() as u64;
     h.at(10_000);
-    h.ip.advise(h.clock(), REMOTE, Advice::Confirmed);
+    h.ip.advise(h.clock(), REMOTE, toyos_net_ip::Source::Any, Advice::Confirmed);
     h.run(ms(reachable) + 1);
     assert!(h.is_reachable(R), "the original deadline re-arms");
     h.run(10_000 + ms(reachable) - 1);
@@ -152,7 +152,7 @@ fn s_ip_nud_009_advice_ends_delay() {
     h.stale(R, MAC_R);
     h.udp_to(REMOTE).unwrap();
     h.at(4_000);
-    h.ip.advise(h.clock(), REMOTE, Advice::Confirmed);
+    h.ip.advise(h.clock(), REMOTE, toyos_net_ip::Source::Any, Advice::Confirmed);
     assert!(h.is_reachable(R));
     assert!(h.run(5_000).is_empty());
 }
@@ -161,7 +161,7 @@ fn s_ip_nud_009_advice_ends_delay() {
 fn s_ip_nud_010_a_reply_confirms_probe() {
     let mut h = H::fixture_i_with(R, MAC_R);
     h.at(100);
-    h.ip.advise(h.clock(), REMOTE, Advice::Reverify);
+    h.ip.advise(h.clock(), REMOTE, toyos_net_ip::Source::Any, Advice::Reverify);
     assert!(matches!(h.state(R), Some(Nud::Probe(_))));
     h.out();
     h.frame(&hex(V_ARP_REPLY_R));
@@ -261,10 +261,10 @@ fn s_ip_nud_015_an_assertion_revives_failed() {
 fn s_ip_nud_016_requests_are_spaced() {
     let mut h = H::fixture_i_with(R, MAC_R);
     h.at(100);
-    h.ip.advise(h.clock(), REMOTE, Advice::Reverify);
+    h.ip.advise(h.clock(), REMOTE, toyos_net_ip::Source::Any, Advice::Reverify);
     let first = h.out();
     h.at(600);
-    h.ip.advise(h.clock(), REMOTE, Advice::Reverify);
+    h.ip.advise(h.clock(), REMOTE, toyos_net_ip::Source::Any, Advice::Reverify);
     let second = h.out();
     let later = h.run(1_100);
     assert_eq!(first.iter().map(|o| o.frame.clone()).collect::<Vec<_>>(), [hex(V_ARP_POLL_R)]);
@@ -279,7 +279,7 @@ fn s_ip_nud_016_requests_are_spaced() {
     h.reply_from(R, MAC_R);
     assert!(h.is_reachable(R));
     h.at(100);
-    h.ip.advise(h.clock(), R, Advice::Reverify);
+    h.ip.advise(h.clock(), R, toyos_net_ip::Source::Any, Advice::Reverify);
     assert!(matches!(h.state(R), Some(Nud::Probe(_))));
     assert!(h.out().is_empty(), "100 ms after the last request");
     let later = h.run(1_000);
@@ -290,7 +290,7 @@ fn s_ip_nud_016_requests_are_spaced() {
 fn s_ip_nud_017_negative_advice_probes() {
     let mut h = H::fixture_i_with(R, MAC_R);
     h.at(100);
-    h.ip.advise(h.clock(), REMOTE, Advice::Reverify);
+    h.ip.advise(h.clock(), REMOTE, toyos_net_ip::Source::Any, Advice::Reverify);
     assert!(matches!(h.state(R), Some(Nud::Probe(_))));
     assert_eq!(h.out().iter().map(|o| o.frame.clone()).collect::<Vec<_>>(), [hex(V_ARP_POLL_R)]);
 }
@@ -299,10 +299,10 @@ fn s_ip_nud_017_negative_advice_probes() {
 fn s_ip_nud_018_negative_advice_leaves_probe_incomplete_and_failed() {
     let mut h = H::fixture_i_with(R, MAC_R);
     h.at(100);
-    h.ip.advise(h.clock(), REMOTE, Advice::Reverify);
+    h.ip.advise(h.clock(), REMOTE, toyos_net_ip::Source::Any, Advice::Reverify);
     h.out();
     h.at(200);
-    h.ip.advise(h.clock(), REMOTE, Advice::Reverify);
+    h.ip.advise(h.clock(), REMOTE, toyos_net_ip::Source::Any, Advice::Reverify);
     assert!(matches!(h.state(R), Some(Nud::Probe(p)) if p.requests() == 1));
     assert!(h.out().is_empty());
 
@@ -310,12 +310,12 @@ fn s_ip_nud_018_negative_advice_leaves_probe_incomplete_and_failed() {
     h.ip.set_gateways(h.clock(), h.if0, &[]).unwrap();
     h.udp_to(B).unwrap();
     h.out();
-    h.ip.advise(h.clock(), B, Advice::Reverify);
+    h.ip.advise(h.clock(), B, toyos_net_ip::Source::Any, Advice::Reverify);
     assert!(matches!(h.state(B), Some(Nud::Incomplete(s)) if s.requests() == 1));
     assert!(h.out().is_empty());
     h.run(3_000);
     h.at(3_500);
-    h.ip.advise(h.clock(), B, Advice::Reverify);
+    h.ip.advise(h.clock(), B, toyos_net_ip::Source::Any, Advice::Reverify);
     assert!(matches!(h.state(B), Some(Nud::Failed)));
     assert!(h.out().is_empty());
 }
@@ -325,14 +325,14 @@ fn s_ip_nud_019_positive_advice_needs_a_mac() {
     let mut h = H::fixture_i();
     h.udp_to(B).unwrap();
     h.out();
-    h.ip.advise(h.clock(), B, Advice::Confirmed);
+    h.ip.advise(h.clock(), B, toyos_net_ip::Source::Any, Advice::Confirmed);
     assert!(matches!(h.state(B), Some(Nud::Incomplete(_))));
     h.run(3_000);
-    h.ip.advise(h.clock(), B, Advice::Confirmed);
+    h.ip.advise(h.clock(), B, toyos_net_ip::Source::Any, Advice::Confirmed);
     assert!(matches!(h.state(B), Some(Nud::Failed)));
     let (mut h, t0) = unreachable_r();
     h.at(t0 + 10);
-    h.ip.advise(h.clock(), REMOTE, Advice::Confirmed);
+    h.ip.advise(h.clock(), REMOTE, toyos_net_ip::Source::Any, Advice::Confirmed);
     assert!(h.is_reachable(R));
     assert_eq!(h.mac_of(R), Some(MAC_R));
 }
@@ -341,7 +341,7 @@ fn s_ip_nud_019_positive_advice_needs_a_mac() {
 fn s_ip_nud_020_advice_lands_on_the_gateway() {
     let mut h = H::fixture_i_with(R, MAC_R);
     h.at(100);
-    h.ip.advise(h.clock(), REMOTE, Advice::Reverify);
+    h.ip.advise(h.clock(), REMOTE, toyos_net_ip::Source::Any, Advice::Reverify);
     assert!(matches!(h.state(R), Some(Nud::Probe(_))));
     assert!(h.state(REMOTE).is_none());
 }
@@ -404,7 +404,7 @@ fn s_ip_nud_022_a_full_table_evicts_in_order() {
     let (failed, unreachable, stale) = (neighbour(0), neighbour(1), neighbour(2));
     let _ = h.ip.resolve(h.clock(), h.if0, failed, A);
     reach_wide(&mut h, unreachable);
-    h.ip.advise(h.clock(), unreachable, Advice::Reverify);
+    h.ip.advise(h.clock(), unreachable, toyos_net_ip::Source::Any, Advice::Reverify);
     ask_wide(&mut h, stale);
     h.run(5_000);
     assert!(matches!(h.state(failed), Some(Nud::Failed)));
@@ -742,7 +742,7 @@ fn b_holds_two_behind_a_full_queue() -> H {
 /// requests, each lost to the full queue, leave B quiescent UNREACHABLE from 4,000.
 fn unreachable_b(h: &mut H) {
     h.frame(&hex(V_ARP_REPLY));
-    h.ip.advise(h.clock(), B, Advice::Reverify);
+    h.ip.advise(h.clock(), B, toyos_net_ip::Source::Any, Advice::Reverify);
     for t in [1_000, 2_000, 3_000, 4_000] {
         h.ip.fire(H::instant(t));
     }
@@ -789,7 +789,7 @@ fn s_ip_nud_030_released_datagrams_keep_their_entry() {
     h.at(5);
     h.frame(&hex(V_ARP_REPLY));
     h.at(1_000);
-    h.ip.advise(h.clock(), B, Advice::Reverify);
+    h.ip.advise(h.clock(), B, toyos_net_ip::Source::Any, Advice::Reverify);
     assert!(matches!(h.state(B), Some(Nud::Probe(_))));
     h.frame(&eth(MacAddr::BROADCAST, MAC_X, 0x0806, &arp_packet(1, MAC_X, B, MacAddr::ZERO, B)));
     h.ip.fire(H::instant(601_000));

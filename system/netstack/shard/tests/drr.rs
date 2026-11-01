@@ -10,7 +10,7 @@ use std::net::Ipv4Addr;
 use std::time::Duration;
 
 use common::*;
-use toyos_net_shard::Event;
+
 use toyos_net_tcp::{ConnId, State};
 use toyos_net_testnet::{Credit, Net};
 use toyos_net_wire::ethernet::MacAddr;
@@ -39,7 +39,7 @@ fn fixture() -> Fixture {
     let mut net = Net::new(Instant::from_millis(3_600_000));
     let a = net.add_node(MAC_A, A, 24);
     let peers = [(net.add_node(MAC_B, B, 24), B), (net.add_node(MAC_C, C, 24), C), (net.add_node(MAC_D, D, 24), D)];
-    let verified = |net: &mut Net| [(a, A)].into_iter().chain(peers).all(|(n, addr)| net.nodes[n].events.contains(&Event::Verified(addr)));
+    let verified = |net: &mut Net| [(a, A)].into_iter().chain(peers).all(|(n, addr)| net.nodes[n].verified(addr));
     assert!(net.run_until(Duration::from_secs(1), verified), "every address verified");
     net.advance(toyos_net_ip::limits::acd::ANNOUNCE_INTERVAL * 2);
     for (n, addr) in peers {
@@ -57,7 +57,7 @@ fn fixture() -> Fixture {
 fn opportunity(f: &mut Fixture, credit: usize) -> Vec<(String, usize)> {
     let now = f.net.now();
     let mut out = Vec::new();
-    f.net.nodes[f.a].shard.transmit(now, credit, |frame| out.push((name(frame), frame.len())));
+    f.net.nodes[f.a].shard.transmit(now, credit, |_, frame| out.push((name(frame), frame.len())));
     out
 }
 
@@ -164,8 +164,8 @@ fn s_shard_drr_003_ip_and_owed_resets_go_first_and_the_round_resumes() {
     let (mut f, first) = bulk();
     assert_eq!(names(&first), [B_BULK, C_BULK, D_BULK, B_BULK]);
     let now = f.net.now();
-    f.net.nodes[f.a].shard.receive(now, &echo_request());
-    f.net.nodes[f.a].shard.receive(now, &arp_request_from_d());
+    f.net.nodes[f.a].receive(now, &echo_request());
+    f.net.nodes[f.a].receive(now, &arp_request_from_d());
     f.net.nodes[f.a].shard.abort(now, f.conns[4]).unwrap();
     let out = opportunity(&mut f, 6);
     assert_eq!(
@@ -187,7 +187,7 @@ fn a_connection_that_takes_a_freed_slot_takes_one_turn() {
     let third = f.net.nodes[a].shard.connect(now, Some(port(49158)), ep(C, 81)).unwrap();
     let syn = opportunity_frames(&mut f, 1);
     assert_eq!(syn.len(), 1);
-    f.net.nodes[c].shard.receive(now, &syn[0]);
+    f.net.nodes[c].receive(now, &syn[0]);
     let established = |net: &mut Net| net.nodes[a].shard.status(third).unwrap().state == State::Established;
     assert!(f.net.run_until(Duration::from_secs(1), established), "the SYN-ACK arrives");
     let now = f.net.now();
@@ -200,7 +200,7 @@ fn a_connection_that_takes_a_freed_slot_takes_one_turn() {
 fn opportunity_frames(f: &mut Fixture, credit: usize) -> Vec<Vec<u8>> {
     let now = f.net.now();
     let mut out = Vec::new();
-    f.net.nodes[f.a].shard.transmit(now, credit, |frame| out.push(frame.to_vec()));
+    f.net.nodes[f.a].shard.transmit(now, credit, |_, frame| out.push(frame.to_vec()));
     out
 }
 

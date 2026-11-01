@@ -153,6 +153,16 @@ fn addresses(bytes: &[u8]) -> Vec<Ipv4Addr> {
     bytes.as_chunks::<4>().0.iter().map(|&a| Ipv4Addr::from(a)).collect()
 }
 
+/// The client hardware address a server's reply names (RFC 2131 §2), where it is a reply over
+/// Ethernet: which of a host's links' clients it is for. Nothing else of it is read.
+pub fn addressed_to(bytes: &[u8]) -> Option<MacAddr> {
+    let (&[op, htype, hlen, ..], _) = bytes.split_first_chunk::<4>()?;
+    if (op, htype, hlen) != (2, 1, 6) {
+        return None;
+    }
+    bytes.get(28..34)?.first_chunk::<6>().map(|&mac| MacAddr(mac))
+}
+
 impl Reply {
     pub fn parse(bytes: &[u8], mac: MacAddr) -> Result<Self, Counter> {
         let (fixed, options) = bytes.split_at_checked(OPTIONS_AT).ok_or(Counter::Truncated)?;

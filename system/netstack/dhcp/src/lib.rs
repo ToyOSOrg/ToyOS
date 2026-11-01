@@ -38,6 +38,7 @@ use toyos_net_wire::addr::{is_host, Cidr};
 use toyos_net_wire::ethernet::{IndividualMac, MacAddr};
 use toyos_net_wire::Instant;
 
+pub use message::addressed_to;
 use message::{Build, Kind, Reply, ReplyKind};
 
 toyos_net_wire::counters! {

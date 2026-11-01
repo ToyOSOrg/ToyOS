@@ -92,10 +92,10 @@ fn s_gu_001_three_expiries_raise_advice() {
     h.send(0, 100);
     h.at(1399);
     assert!(!h.status().delivery_problem);
-    assert!(!h.events.contains(&Event::Reverify(B)));
+    assert!(!h.events.contains(&Event::Reverify { local: A, remote: B }));
     h.at(1400);
     assert!(h.status().delivery_problem);
-    assert_eq!(h.events.iter().filter(|e| **e == Event::Reverify(B)).count(), 1);
+    assert_eq!(h.events.iter().filter(|e| **e == Event::Reverify { local: A, remote: B }).count(), 1);
 }
 
 #[test]
@@ -163,7 +163,7 @@ fn s_gu_006_progress_confirms_the_next_hop() {
     h.input(10, seg(5001).ack(2461));
     h.input(11, seg(5001).ack(2461));
     h.input(12, seg(5001).ack(3921));
-    assert_eq!(h.events.iter().filter(|e| **e == Event::Reachable(B)).count(), 2);
+    assert_eq!(h.events.iter().filter(|e| **e == Event::Reachable { local: A, remote: B }).count(), 2);
 }
 
 /// [ip] reads the advice in order: an advance after a pending re-verify confirms the next hop again.
@@ -182,7 +182,7 @@ fn s_gu_006_a_confirmation_after_a_reverify_is_kept() {
     }
     h.arrive(seg(5001).ack(3921));
     let events: Vec<Event> = h.tcp.drain_events().collect();
-    assert_eq!(events, [Event::Reachable(B), Event::Reverify(B), Event::Reachable(B)]);
+    assert_eq!(events, [Event::Reachable { local: A, remote: B }, Event::Reverify { local: A, remote: B }, Event::Reachable { local: A, remote: B }]);
 }
 
 /// [ip] reads each address's own advice: B's repeated confirmation never crowds out C's, and a
@@ -204,5 +204,5 @@ fn s_gu_006_b_advice_is_kept_per_address() {
     h.arrive(seg(5001).ack(1101).from(C, 80).to(A, 49153));
     h.arrive(seg(5001).ack(1201));
     let events: Vec<Event> = h.tcp.drain_events().collect();
-    assert_eq!(events, [Event::Reachable(B), Event::Reachable(C)]);
+    assert_eq!(events, [Event::Reachable { local: A, remote: B }, Event::Reachable { local: A, remote: C }]);
 }

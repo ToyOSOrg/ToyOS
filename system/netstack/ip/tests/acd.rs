@@ -7,7 +7,7 @@ use std::time::Duration;
 
 use common::*;
 use toyos_net_ip::limits::acd::{ANNOUNCE_WAIT, PROBE_MAX, PROBE_MIN, PROBE_WAIT};
-use toyos_net_ip::{limits, AddrState, Counter, Event, IfIndex, Instant, Peer, Source};
+use toyos_net_ip::{limits, AddrState, Counter, Event, Instant, Peer, Source};
 use toyos_net_wire::ethernet::MacAddr;
 
 fn ip4(a: u8, b: u8, c: u8, d: u8) -> Ipv4Addr {
@@ -268,20 +268,29 @@ fn s_ip_acd_017_detection_starts_at_the_first_announcement() {
     assert_eq!(h.count(Counter::AcdDefended), 1);
 }
 
-/// if1 at 198.51.100.1/24 beside if0, which holds no address.
-fn beside_if1() -> (H, IfIndex) {
+/// The address on if0 whose ARP replies fill its share of the control queue.
+const ANSWERING: Ipv4Addr = Ipv4Addr::new(198, 51, 100, 1);
+
+/// if0 holding [`ANSWERING`] and nothing else yet: its share of the control queue, which is
+/// its own, for the tests to fill with answers to it.
+fn answering() -> H {
     let mut h = H::raw();
-    let if1 = h.add_if1();
-    h.assign(if1, ip4(198, 51, 100, 1), 24, 0);
+    let if0 = h.if0;
+    h.assign(if0, ANSWERING, 24, 0);
     h.settle();
-    (h, if1)
+    h
+}
+
+/// An ARP reply's frame: EtherType 0x0806, operation 2.
+fn is_arp_reply(frame: &[u8]) -> bool {
+    frame.get(12..14) == Some(&[0x08, 0x06]) && frame.get(20..22) == Some(&[0, 2])
 }
 
 #[test]
 fn s_ip_acd_018_a_full_control_queue_holds_probes_and_announcements() {
-    let (mut h, if1) = beside_if1();
+    let mut h = answering();
     let t0 = h.clock();
-    h.fill_control_queue(if1, t0, ip4(198, 51, 100, 1));
+    h.fill_control_queue(h.if0, t0, ANSWERING);
     h.ip.add_address(t0, h.if0, A, 24).unwrap();
     let at = t0.after(Duration::from_secs(1));
     while let Some(d) = h.ip.next_deadline().filter(|d| *d <= at) {
@@ -295,7 +304,7 @@ fn s_ip_acd_018_a_full_control_queue_holds_probes_and_announcements() {
     let mut out = Vec::new();
     h.ip.transmit(at, limits::CONTROL_QUEUE, |iface, f| out.push((iface, f.to_vec())));
     assert_eq!(out.len(), limits::CONTROL_QUEUE);
-    assert!(out.iter().all(|(iface, _)| *iface == if1), "the replies queued first");
+    assert!(out.iter().all(|(iface, f)| *iface == h.if0 && is_arp_reply(f)), "the replies queued first");
     out.clear();
     h.ip.transmit(at, 1, |iface, f| out.push((iface, f.to_vec())));
     assert_eq!(out, [(h.if0, hex(V_ARP_PROBE))]);
@@ -304,12 +313,13 @@ fn s_ip_acd_018_a_full_control_queue_holds_probes_and_announcements() {
     assert!(h.events.contains(&Event::Verified { iface: h.if0, addr: A }));
     assert_eq!(h.ip.address(h.if0, A), Some(AddrState::Assigned));
 
-    // A probes with credit until its third probe leaves; then if1 fills the queue, and the first
-    // announcement it owes waits there, counted toward nothing until it leaves.
-    let (mut h, if1) = beside_if1();
+    // A probes with credit until its third probe leaves; then answers to ANSWERING fill if0's
+    // share of the queue, and the first announcement A owes waits there, counted toward nothing
+    // until it leaves.
+    let mut h = answering();
     h.ip.add_address(h.clock(), h.if0, A, 24).unwrap();
     let p3 = third_probe(&mut h);
-    h.fill_control_queue(if1, p3, ip4(198, 51, 100, 1));
+    h.fill_control_queue(h.if0, p3, ANSWERING);
     let verified = p3.after(ANNOUNCE_WAIT);
     h.ip.fire(verified);
     h.collect();
@@ -324,7 +334,7 @@ fn s_ip_acd_018_a_full_control_queue_holds_probes_and_announcements() {
     let mut out = Vec::new();
     h.ip.transmit(t1, usize::MAX, |iface, f| out.push((iface, f.to_vec())));
     assert_eq!(out.len(), limits::CONTROL_QUEUE + 1, "nothing more was queued");
-    assert!(out[..limits::CONTROL_QUEUE].iter().all(|(iface, _)| *iface == if1), "the replies queued first");
+    assert!(out[..limits::CONTROL_QUEUE].iter().all(|(iface, f)| *iface == h.if0 && is_arp_reply(f)), "the replies queued first");
     assert_eq!(out[limits::CONTROL_QUEUE], (h.if0, hex(V_ARP_ANNOUNCE)));
     assert!(run_exact(&mut h, t1.after(Duration::from_millis(1_999))).is_empty());
     assert_eq!(h.ip.address(h.if0, A), Some(AddrState::Announcing), "ANNOUNCE_INTERVAL runs from the hand-off");

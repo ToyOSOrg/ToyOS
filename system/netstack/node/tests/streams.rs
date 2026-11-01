@@ -19,7 +19,7 @@ use std::time::Duration;
 use common::client::Client;
 use common::{arp, batch, terms, Segment, Wire, A, BUDGET, MAC, MAC_B, MAC_R, R};
 use etherparse::{ArpOperation, LinkSlice, NetSlice, PacketBuilder, SlicedPacket, TcpOptionElement, TransportSlice};
-use toyos::net::stream::RESET;
+use toyos::net::stream::{ADDRESS_GONE, RESET};
 use toyos_net_node::{ConnectRefused, ExportRefused, Node, StreamEvent, StreamId};
 use toyos_net_shard::ConnectError;
 use toyos_net_tcp::{Counter, Endpoint, Failure};
@@ -257,6 +257,7 @@ impl Far {
 
 struct Net {
     node: Node,
+    link: toyos_net_node::IfIndex,
     now: Instant,
     draws: u32,
     far: Far,
@@ -276,8 +277,8 @@ fn draw(draws: &mut u32) -> impl FnMut() -> u32 + '_ {
 impl Net {
     /// The node holding its lease of 192.0.2.1/24 for an hour.
     fn new() -> Self {
-        let Wire { node, now, .. } = Wire::leased(&terms(3_600, Some(R)));
-        Self { node, now, draws: 0x7c00_0000, far: Far::new(), parked: Vec::new(), clients: Vec::new() }
+        let Wire { node, link, now, .. } = Wire::leased(&terms(3_600, Some(R)));
+        Self { node, link, now, draws: 0x7c00_0000, far: Far::new(), parked: Vec::new(), clients: Vec::new() }
     }
 
     /// Leaves the present peer with the connection it has and makes `next` the peer the test
@@ -321,17 +322,17 @@ impl Net {
     /// the opportunity is over. Returns how many frames left.
     fn opportunity(&mut self) -> usize {
         let mut frames = Vec::new();
-        self.node.transmit(self.now, usize::MAX, |frame| frames.push(frame.to_vec()), draw(&mut self.draws));
+        self.node.transmit(self.now, usize::MAX, |_, frame| frames.push(frame.to_vec()), draw(&mut self.draws));
         for frame in &frames {
             for answer in self.hears(frame) {
-                self.node.receive(self.now, BUDGET, batch(&[&answer]), draw(&mut self.draws));
+                self.node.receive(self.now, self.link, BUDGET, batch(&[&answer]), draw(&mut self.draws));
             }
         }
         frames.len()
     }
 
     fn deliver(&mut self, frame: &[u8]) {
-        self.node.receive(self.now, BUDGET, batch(&[frame]), draw(&mut self.draws));
+        self.node.receive(self.now, self.link, BUDGET, batch(&[frame]), draw(&mut self.draws));
         self.pump();
     }
 
@@ -532,7 +533,7 @@ fn a_batch_of_frames_moves_an_established_stream_once_with_no_opportunity_after_
     assert_eq!(client.read(64), Err(Refused::WouldBlock), "the read arms its want");
     let frames = [net.far.text(b"all "), net.far.text(b"at "), net.far.text(b"once")];
     let rung = client.rung();
-    net.node.receive(net.now, BUDGET, batch(&[&frames[0], &frames[1], &frames[2]]), draw(&mut net.draws));
+    net.node.receive(net.now, net.link, BUDGET, batch(&[&frames[0], &frames[1], &frames[2]]), draw(&mut net.draws));
     assert_eq!(client.rung() - rung, 1, "one ring for the batch");
     assert_eq!(inbox(&client), b"all at once");
 }
@@ -550,13 +551,13 @@ fn a_batch_stops_at_its_budget_and_says_a_pass_is_owed() {
         sink(&frame);
         true
     };
-    let owed = net.node.receive(net.now, BUDGET, endless, draw(&mut net.draws));
+    let owed = net.node.receive(net.now, net.link, BUDGET, endless, draw(&mut net.draws));
     assert_eq!((owed, handed), (true, BUDGET), "the batch is the budget, and a pass is owed");
     assert_eq!(inbox(&client), b"again", "the rest of the batch was the same segment again");
 
     let next = net.far.text(b"once");
     let short: Vec<&[u8]> = vec![&next; BUDGET - 1];
-    assert!(!net.node.receive(net.now, BUDGET, batch(&short), draw(&mut net.draws)), "the ring was emptied");
+    assert!(!net.node.receive(net.now, net.link, BUDGET, batch(&short), draw(&mut net.draws)), "the ring was emptied");
     assert_eq!(inbox(&client), b"once");
 }
 
@@ -830,6 +831,23 @@ fn a_reset_after_the_clients_shutdown_is_the_end_the_client_reads() {
     assert_eq!(reads(&client), (Vec::new(), Err(Refused::Failed(RESET))));
 }
 
+// A connection cannot move to another address, so one whose address the machine loses ends
+// at once, named for it, rather than retransmitting until it gives up: here another host takes
+// the address after one defence (RFC 5227 §2.4 (b)). Nothing is sent from the lost address.
+#[test]
+fn a_stream_whose_address_is_lost_ends_as_address_gone() {
+    let (mut net, _, client) = established();
+    let conflict = arp([0xff; 6], false, MAC_B, A, A);
+    net.fire(net.now.after(Duration::from_secs(100)));
+    net.deliver(&conflict);
+    net.fire(net.now.after(Duration::from_secs(5)));
+    let heard = net.far.segments.len();
+    net.deliver(&conflict);
+    assert_eq!(net.node.lease(net.link), None, "the premise: the address is lost");
+    assert_eq!(reads(&client), (Vec::new(), Err(Refused::Failed(ADDRESS_GONE))));
+    assert_eq!(net.far.segments.len(), heard, "no reset from an address the machine gave up");
+}
+
 // RFC 9293 §3.10.7.4 and §3.10.2: a reset after the peer's FIN flushes what was queued, and a
 // write after it, with room in the send ring, answers the reset and copies nothing.
 #[test]
@@ -892,7 +910,7 @@ fn a_reset_in_the_batch_of_the_text_before_it_is_read_after_the_text() {
     let (mut net, _, client) = established();
     let text = net.far.text(b"last");
     let rst = net.far.rst();
-    net.node.receive(net.now, BUDGET, batch(&[&text, &rst]), draw(&mut net.draws));
+    net.node.receive(net.now, net.link, BUDGET, batch(&[&text, &rst]), draw(&mut net.draws));
     assert_eq!(reads(&client), (b"last".to_vec(), Err(Refused::Failed(RESET))));
 }
 

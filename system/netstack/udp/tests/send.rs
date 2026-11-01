@@ -458,19 +458,19 @@ fn acquisition() -> (U, toyos_net_udp::SocketId) {
 #[test]
 fn s_udp_us_028_only_the_acquisition_socket_sends_from_nowhere() {
     let (mut u, id) = acquisition();
-    u.udp.send_from(&mut u.ip, id, ANY, LIMITED, 67, b"discover").unwrap();
+    u.udp.send_from(&mut u.ip, id, toyos_net_udp::Origin { iface: u.if0, source: ANY }, LIMITED, 67, b"discover").unwrap();
     let out = u.out();
     assert_eq!(ip_of(&out[0]).unwrap().source(), ANY);
-    assert_eq!(u.udp.send_from(&mut u.ip, id, ANY, R, 67, b"x"), refused(Counter::SourceNotPermitted));
+    assert_eq!(u.udp.send_from(&mut u.ip, id, toyos_net_udp::Origin { iface: u.if0, source: ANY }, R, 67, b"x"), refused(Counter::SourceNotPermitted));
     let other = u.bind(ANY, 5_000).unwrap();
     u.udp.set_broadcast(other, true).unwrap();
-    assert_eq!(u.udp.send_from(&mut u.ip, other, ANY, LIMITED, 67, b"x"), refused(Counter::SourceNotPermitted));
+    assert_eq!(u.udp.send_from(&mut u.ip, other, toyos_net_udp::Origin { iface: u.if0, source: ANY }, LIMITED, 67, b"x"), refused(Counter::SourceNotPermitted));
 }
 
 #[test]
 fn s_udp_us_029_the_discover_byte_for_byte() {
     let (mut u, id) = acquisition();
     let discover = hex(V_DHCP_DISCOVER);
-    u.udp.send_from(&mut u.ip, id, ANY, LIMITED, 67, &discover[42..]).unwrap();
+    u.udp.send_from(&mut u.ip, id, toyos_net_udp::Origin { iface: u.if0, source: ANY }, LIMITED, 67, &discover[42..]).unwrap();
     assert_eq!(u.out(), [discover]);
 }

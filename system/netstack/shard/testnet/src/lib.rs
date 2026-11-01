@@ -19,7 +19,7 @@ use std::collections::BTreeMap;
 use std::net::Ipv4Addr;
 use std::time::Duration;
 
-use toyos_net_shard::{Config, Event, Secrets, Shard};
+use toyos_net_shard::{Config, Event, IfIndex, Rank, Secrets, Shard};
 use toyos_net_tcp::{ConnId, Endpoint, Error, Failure, ListenerId, Received, Tuple};
 use toyos_net_wire::ethernet::{Frame, IndividualMac, MacAddr, MacClass};
 use toyos_net_wire::{Instant, Port};
@@ -82,11 +82,40 @@ impl Link {
 
 pub struct Node {
     pub shard: Shard,
+    /// Its one interface, on the segment.
+    pub iface: IfIndex,
     pub mac: MacAddr,
     pub credit: Credit,
     /// What the shard reported, oldest first.
     pub events: Vec<Event>,
     budget: (u64, usize),
+}
+
+impl Node {
+    pub fn receive(&mut self, now: Instant, frame: &[u8]) {
+        self.shard.receive(now, self.iface, frame);
+    }
+
+    pub fn link_up(&mut self, now: Instant) -> Result<(), toyos_net_ip::Counter> {
+        self.shard.link_up(now, self.iface)
+    }
+
+    pub fn link_down(&mut self, now: Instant) -> Result<(), toyos_net_ip::Counter> {
+        self.shard.link_down(now, self.iface)
+    }
+
+    pub fn add_address(&mut self, now: Instant, addr: Ipv4Addr, prefix_len: u8) -> Result<(), toyos_net_ip::Counter> {
+        self.shard.add_address(now, self.iface, addr, prefix_len)
+    }
+
+    pub fn set_gateways(&mut self, now: Instant, gateways: &[Ipv4Addr]) -> Result<(), toyos_net_ip::Counter> {
+        self.shard.set_gateways(now, self.iface, gateways)
+    }
+
+    /// Whether the shard has reported `addr` verified.
+    pub fn verified(&self, addr: Ipv4Addr) -> bool {
+        self.events.iter().any(|e| matches!(e, Event::Verified { addr: a, .. } if *a == addr))
+    }
 }
 
 /// A frame as a node's device put it on the wire.
@@ -245,15 +274,16 @@ impl Net {
                 port_table: [0; 16],
             },
         };
-        let config = Config { mac: IndividualMac::new(mac).expect("an individual MAC"), receive_buffer: 65_535, send_buffer: 65_535, secrets };
+        let config = Config { receive_buffer: 65_535, send_buffer: 65_535, secrets };
         let mut shard = Shard::new(self.now, config).expect("a valid configuration");
-        shard.link_up(self.now).expect("its own interface");
-        shard.add_address(self.now, addr, prefix_len).expect("a valid address");
+        let iface = shard.add_interface(self.now, IndividualMac::new(mac).expect("an individual MAC"), Rank(0));
+        shard.link_up(self.now, iface).expect("its own interface");
+        shard.add_address(self.now, iface, addr, prefix_len).expect("a valid address");
         for other in 0..index {
             self.links.insert((index, other), Link::default());
             self.links.insert((other, index), Link::default());
         }
-        self.nodes.push(Node { shard, mac, credit: Credit::Unlimited, events: Vec::new(), budget: (u64::MAX, 0) });
+        self.nodes.push(Node { shard, iface, mac, credit: Credit::Unlimited, events: Vec::new(), budget: (u64::MAX, 0) });
         index
     }
 
@@ -319,7 +349,8 @@ impl Net {
         let due = self.due();
         let mut busy = !due.is_empty();
         for flight in due {
-            self.nodes[flight.to].shard.receive(self.now, &flight.frame);
+            let node = &mut self.nodes[flight.to];
+            node.shard.receive(self.now, node.iface, &flight.frame);
         }
         for node in &mut self.nodes {
             node.shard.fire(self.now);
@@ -363,7 +394,8 @@ impl Net {
             }
         };
         let mut frames = Vec::new();
-        let spent = node.shard.transmit(now, credit, |frame| frames.push(frame.to_vec()));
+        let mut credit = credit;
+        let spent = node.shard.transmit(now, &mut credit, |_, frame| frames.push(frame.to_vec()));
         if let Credit::PerMs(_) = node.credit {
             node.budget.1 -= spent;
         }

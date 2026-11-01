@@ -36,7 +36,7 @@ receives = ["power"]
 # netstack over the T14's wired I219, the only card a bench has that ToyOS
 # drives: `osbench lan` reaches its peer and `osbench internet` the internet
 # through it. On the AMD bench, which has none, the supervisor starts no
-# driver, netstack leaves, and both say so.
+# driver, netstack has no address, and both say so.
 [programs.netstack]
 service = true
 serves = ["netstack", "link"]

@@ -52,6 +52,7 @@ pub(crate) const ENOTCONN: i32 = 107;
 pub(crate) const ETIMEDOUT: i32 = 110;
 pub(crate) const ECONNREFUSED: i32 = 111;
 pub(crate) const EHOSTUNREACH: i32 = 113;
+pub(crate) const EADDRNOTAVAIL: i32 = 99;
 pub(crate) const ESTALE: i32 = 116;
 
 /// The errno a kernel refusal is answered with.
@@ -111,6 +112,7 @@ pub(crate) fn of_stream(refused: toyos::net::stream::Refused) -> i32 {
         Refused::TimedOut | Refused::ConnectionTimedOut => ETIMEDOUT,
         Refused::Reset => ECONNRESET,
         Refused::Unreachable => EHOSTUNREACH,
+        Refused::AddressGone => EADDRNOTAVAIL,
         Refused::Aborted => ECONNABORTED,
         Refused::Shut => EPIPE,
     }

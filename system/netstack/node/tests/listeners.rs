@@ -150,6 +150,7 @@ fn draw(draws: &mut u32) -> impl FnMut() -> u32 + '_ {
 
 struct Net {
     node: Node,
+    link: toyos_net_node::IfIndex,
     now: Instant,
     draws: u32,
     /// The addresses a peer is at: 192.0.2.2, and each one a SYN has come from.
@@ -161,8 +162,8 @@ struct Net {
 impl Net {
     /// The node holding its lease of 192.0.2.1/24 for an hour, with `common::PLACES` places.
     fn new() -> Self {
-        let Wire { node, now, .. } = Wire::leased(&terms(3_600, Some(R)));
-        Self { node, now, draws: 0x7e00_0000, at: BTreeSet::from([B]), heard: Vec::new() }
+        let Wire { node, link, now, .. } = Wire::leased(&terms(3_600, Some(R)));
+        Self { node, link, now, draws: 0x7e00_0000, at: BTreeSet::from([B]), heard: Vec::new() }
     }
 
     /// Offers the node all the credit it wants until it sends nothing more, its ARP requests
@@ -170,13 +171,13 @@ impl Net {
     fn pump(&mut self) {
         for _ in 0..100_000 {
             let mut frames = Vec::new();
-            self.node.transmit(self.now, usize::MAX, |frame| frames.push(frame.to_vec()), draw(&mut self.draws));
+            self.node.transmit(self.now, usize::MAX, |_, frame| frames.push(frame.to_vec()), draw(&mut self.draws));
             if frames.is_empty() {
                 return;
             }
             for frame in &frames {
                 if let Some(answer) = self.hears(frame) {
-                    self.node.receive(self.now, BUDGET, batch(&[&answer]), draw(&mut self.draws));
+                    self.node.receive(self.now, self.link, BUDGET, batch(&[&answer]), draw(&mut self.draws));
                 }
             }
         }
@@ -212,7 +213,7 @@ impl Net {
     }
 
     fn deliver(&mut self, frame: &[u8]) {
-        self.node.receive(self.now, BUDGET, batch(&[frame]), draw(&mut self.draws));
+        self.node.receive(self.now, self.link, BUDGET, batch(&[frame]), draw(&mut self.draws));
         self.pump();
     }
 

@@ -16,7 +16,7 @@ use toyos_link::layout::{RX_DEPTH, SLOT_BYTES};
 use toyos_link::region::Region;
 use toyos_link::state::{Counters, Group, Link};
 use toyos_link::wire::{self, Hello, Refusal};
-use toyos_net_node::Node;
+use toyos_net_node::{Credit, IfIndex, Node};
 use toyos_net_wire::ethernet::{IndividualMac, MacAddr};
 use toyos_net_wire::Instant;
 
@@ -96,7 +96,10 @@ pub struct Session {
     region: Region,
     end: Stack,
     hello: Hello,
-    mac: IndividualMac,
+    /// The node's interface for the link.
+    iface: IfIndex,
+    /// Frames the stack handed the link: its own count, not the driver's.
+    sent: u64,
     /// The link as the node was last told it.
     said: Link,
     frame: Box<[u8; SLOT_BYTES]>,
@@ -106,24 +109,19 @@ pub struct Session {
 }
 
 impl Session {
-    /// Open the link `hello` asked for over `region`, and say so to the
-    /// driver; `None` for a driver gone before it heard.
-    pub fn open(hello: Hello, mac: IndividualMac, conn: Connection, region: Region, groups: &[Group]) -> Option<Self> {
+    /// Open the link `hello` asked for over `region` as the node's `iface`,
+    /// and say so to the driver; `None` for a driver gone before it heard.
+    pub fn open(hello: Hello, iface: IfIndex, conn: Connection, region: Region, groups: &[Group]) -> Option<Self> {
         let mut end = Stack::new(region.words());
         for group in groups {
             assert!(end.join(region.words(), *group), "netstack: more groups than a link holds");
         }
         conn.try_send_bytes(wire::MSG_OPENED, &[]).ok()?;
-        Some(Self { conn, region, end, hello, mac, said: Link::Down, frame: Box::new([0; SLOT_BYTES]), asked: false, ring: true })
+        Some(Self { conn, region, end, hello, iface, sent: 0, said: Link::Down, frame: Box::new([0; SLOT_BYTES]), asked: false, ring: true })
     }
 
-    pub fn hello(&self) -> &Hello {
-        &self.hello
-    }
-
-    /// The driver's address, as the node takes one.
-    pub fn mac(&self) -> IndividualMac {
-        self.mac
+    pub fn iface(&self) -> IfIndex {
+        self.iface
     }
 
     /// The link's end if its driver has hung up, read now.
@@ -147,13 +145,14 @@ impl Session {
         self.hear()?;
         let link = self.end.link(self.region.words()).map_err(Ended::Fault)?;
         if link.is_up() != self.said.is_up() {
-            node.link(now, link.is_up(), draw);
+            node.link(now, self.iface, link.is_up(), draw);
         }
         self.said = link;
         let (words, bytes, end, frame) = (self.region.words(), self.region.bytes(), &mut self.end, &mut self.frame);
         let mut fault = None;
         let owed = node.receive(
             now,
+            self.iface,
             RX_DEPTH as usize,
             |sink| match end.received(words) {
                 Ok(Some(span)) => {
@@ -177,36 +176,26 @@ impl Session {
         }
     }
 
-    /// Offer the node the transmit ring's room until it has no frame left or
-    /// the ring no room, and ring the driver for what was sent.
-    pub fn transmit(&mut self, node: &mut Node, now: Instant, draw: fn() -> u32) -> Result<(), Ended> {
+    /// The transmit ring's room, armed to be rung for when there is none.
+    fn room(&mut self) -> Result<usize, Fault> {
         let words = self.region.words();
-        loop {
-            let room = match self.end.room(words).map_err(Ended::Fault)? {
-                0 => self.end.want_room(words).map_err(Ended::Fault)?,
-                room => room,
-            } as usize;
-            let (bytes, end) = (self.region.bytes(), &mut self.end);
-            let mut fault = None;
-            let sent = node.transmit(
-                now,
-                room,
-                |frame| {
-                    bytes.write(end.slot().offset, frame);
-                    if let Err(why) = end.send(words, frame.len()) {
-                        fault.get_or_insert(why);
-                    }
-                },
-                draw,
-            );
-            if let Some(why) = fault {
-                return Err(Ended::Fault(why));
-            }
-            self.ring |= self.end.publish(words);
-            if room == 0 || sent < room {
-                return Ok(());
-            }
-        }
+        Ok(match self.end.room(words)? {
+            0 => self.end.want_room(words)?,
+            room => room,
+        } as usize)
+    }
+
+    /// One frame into the transmit ring's next slot.
+    fn send(&mut self, frame: &[u8]) -> Result<(), Fault> {
+        self.region.bytes().write(self.end.slot().offset, frame);
+        self.end.send(self.region.words(), frame.len())?;
+        self.sent = self.sent.saturating_add(1);
+        Ok(())
+    }
+
+    /// What was sent reaches the driver, which is rung for it.
+    fn publish(&mut self) {
+        self.ring |= self.end.publish(self.region.words());
     }
 
     /// Ask the driver for its counters, which [`Self::counters`] reads once
@@ -261,21 +250,87 @@ impl Session {
     /// **An unreported link is `unreported`, not `up`**: the device tells the
     /// stack nothing about one, and the stack serving as though it were up is
     /// its assumption rather than something it measured.
-    pub fn inspect(&self, counters: Option<&Counters>, snap: &mut Snapshot) {
+    pub fn inspect(&self, at: &str, counters: Option<&Counters>, snap: &mut Snapshot) {
         let m = self.hello.mac.bytes();
-        snap.put("mac", format!("{:02x}:{:02x}:{:02x}:{:02x}:{:02x}:{:02x}", m[0], m[1], m[2], m[3], m[4], m[5]));
-        snap.put("driver", self.hello.label.as_str());
+        snap.put(&format!("{at}.mac"), format!("{:02x}:{:02x}:{:02x}:{:02x}:{:02x}:{:02x}", m[0], m[1], m[2], m[3], m[4], m[5]));
+        snap.put(&format!("{at}.driver"), self.hello.label.as_str());
+        snap.put(
+            &format!("{at}.medium"),
+            match self.hello.medium {
+                wire::Medium::Wired => "wired",
+                wire::Medium::Wireless => "wireless",
+            },
+        );
+        snap.put(&format!("{at}.sent"), self.sent);
         match self.said {
-            Link::Down => snap.put("link.state", "down"),
-            Link::Unreported => snap.put("link.state", "unreported"),
+            Link::Down => snap.put(&format!("{at}.state"), "down"),
+            Link::Unreported => snap.put(&format!("{at}.state"), "unreported"),
+            Link::UpWithoutSpeed => snap.put(&format!("{at}.state"), "up"),
             Link::Up { mbps, full_duplex } => {
-                snap.put("link.state", "up");
-                snap.put("link.speed_mbps", mbps);
-                snap.put("link.duplex", if full_duplex { "full" } else { "half" });
+                snap.put(&format!("{at}.state"), "up");
+                snap.put(&format!("{at}.speed_mbps"), mbps);
+                snap.put(&format!("{at}.duplex"), if full_duplex { "full" } else { "half" });
             }
         }
         for (counter, value) in counters.into_iter().flat_map(Counters::iter) {
-            snap.put(counter.name(), value);
+            snap.put(&format!("{at}.{}", counter.name()), value);
+        }
+    }
+}
+
+/// Each open link's transmit room in one opportunity, a frame of it spent as
+/// the node hands the link one.
+struct Rooms(Vec<(IfIndex, usize)>);
+
+impl Credit for Rooms {
+    fn room(&self, iface: IfIndex) -> bool {
+        self.0.iter().any(|&(at, room)| at == iface && room > 0)
+    }
+    fn spend(&mut self, iface: IfIndex) {
+        if let Some((_, room)) = self.0.iter_mut().find(|(at, _)| *at == iface) {
+            *room = room.saturating_sub(1);
+        }
+    }
+}
+
+/// Offer the node every open link's transmit room until it has no frame left
+/// or no link room, and ring each driver for what was sent. Returns each link
+/// whose driver wrote what no driver writes, which is to end.
+pub fn transmit(sessions: &mut [&mut Session], node: &mut Node, now: Instant, draw: fn() -> u32) -> Vec<(IfIndex, Fault)> {
+    let mut faults: Vec<(IfIndex, Fault)> = Vec::new();
+    loop {
+        let mut rooms = Rooms(Vec::new());
+        for session in sessions.iter_mut() {
+            if faults.iter().any(|(at, _)| *at == session.iface) {
+                continue;
+            }
+            match session.room() {
+                Ok(room) => rooms.0.push((session.iface, room)),
+                Err(why) => faults.push((session.iface, why)),
+            }
+        }
+        let offered: usize = rooms.0.iter().map(|(_, room)| room).sum();
+        if offered == 0 {
+            return faults;
+        }
+        let sent = node.transmit(
+            now,
+            &mut rooms,
+            |iface, frame| {
+                let Some(session) = sessions.iter_mut().find(|s| s.iface == iface) else { unreachable!("the node sent by a link netstack does not hold") };
+                if let Err(why) = session.send(frame)
+                    && !faults.iter().any(|(at, _)| *at == iface)
+                {
+                    faults.push((iface, why));
+                }
+            },
+            draw,
+        );
+        for session in sessions.iter_mut() {
+            session.publish();
+        }
+        if sent < offered {
+            return faults;
         }
     }
 }

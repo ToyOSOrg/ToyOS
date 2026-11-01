@@ -3,7 +3,7 @@
 mod common;
 
 use common::*;
-use toyos_net_ip::{limits, AddrState, Counter, Instant, Nud};
+use toyos_net_ip::{limits, AddrState, Counter, Instant, Nud, Rank};
 
 fn incomplete_b() -> H {
     let mut h = H::fixture_i();
@@ -87,7 +87,7 @@ type Trace = (Vec<(u64, Vec<u8>)>, Vec<String>, Vec<u64>, std::time::Duration);
 
 fn trace(secret: [u8; 16], seed: u64) -> Trace {
     let mut ip = toyos_net_ip::Ip::new(Instant::from_nanos(0), secret);
-    let if0 = ip.add_interface(Instant::from_nanos(0), mac(MAC_A));
+    let if0 = ip.add_interface(Instant::from_nanos(0), mac(MAC_A), Rank(0));
     ip.link_up(Instant::from_nanos(0), if0).unwrap();
     let mut rng = Rng(seed);
     let mut frames = Vec::new();
@@ -118,8 +118,8 @@ fn trace(secret: [u8; 16], seed: u64) -> Trace {
                     destination: toyos_net_wire::Port::new(5001).unwrap(),
                     data: b"x",
                 };
-                let out = toyos_net_ip::UdpOut { source: A, destination, ttl: toyos_net_wire::ipv4::Ttl::DEFAULT, broadcast: false, datagram };
-                if let Ok(toyos_net_ip::Sent::Frame(n)) = ip.send_udp(at, &out, &mut frame) {
+                let out = toyos_net_ip::UdpOut { source: A, destination, ttl: toyos_net_wire::ipv4::Ttl::DEFAULT, broadcast: false, iface: None, datagram };
+                if let Ok(toyos_net_ip::Sent::Frame { len: n, .. }) = ip.send_udp(at, &usize::MAX, &out, &mut frame) {
                     frames.push((now, frame[..n].to_vec()));
                 }
             }
@@ -223,8 +223,8 @@ fn s_ip_clk_010_a_deadline_saturates() {
         destination: toyos_net_wire::Port::new(5001).unwrap(),
         data: b"hi",
     };
-    let out = toyos_net_ip::UdpOut { source: A, destination: B, ttl: toyos_net_wire::ipv4::Ttl::DEFAULT, broadcast: false, datagram };
-    assert_eq!(h.ip.send_udp(late, &out, &mut frame), Ok(toyos_net_ip::Sent::Pending(B)));
+    let out = toyos_net_ip::UdpOut { source: A, destination: B, ttl: toyos_net_wire::ipv4::Ttl::DEFAULT, broadcast: false, iface: None, datagram };
+    assert_eq!(h.ip.send_udp(late, &usize::MAX, &out, &mut frame), Ok(toyos_net_ip::Sent::Pending { iface: h.if0, next_hop: B }));
     assert_eq!(h.ip.transmit(late, usize::MAX, |_, _| {}), 1);
     assert!(matches!(h.state(B), Some(Nud::Incomplete(_))));
     assert_eq!(h.ip.next_deadline(), Some(Instant::from_nanos(u64::MAX)));

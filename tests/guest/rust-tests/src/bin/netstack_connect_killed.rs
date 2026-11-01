@@ -49,7 +49,10 @@ fn main() {
 }
 
 fn test() {
-    until(|snapshot| snapshot.get("net.lease.held") == Some(&Value::Bool(true)), "netstack held a lease");
+    until(
+        |snapshot| snapshot.iter().any(|(key, value)| key.starts_with("net.link.") && key.ends_with(".lease.held") && *value == Value::Bool(true)),
+        "netstack held a lease on a link",
+    );
     let before = held(&snapshot());
     let connect = || Command::new(SELF_PATH).arg("connect").stdin(Stdio::null()).spawn().expect("a connecting child");
     let (mut killed, mut survivor) = (connect(), connect());

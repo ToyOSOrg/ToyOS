@@ -68,7 +68,7 @@ use toyos_net_wire::Port;
 
 pub use addr::AddrState;
 pub use counters::{Counter, Counters, RefusalLog};
-pub use egress::{Sent, UdpOut, FRAME};
+pub use egress::{Credit, Sent, UdpOut, FRAME};
 pub use igmp::IgmpMode;
 pub use limiter::Limiter;
 pub use nud::{Delaying, Held, Incomplete, Nud, Pending, Probing, Reachable, Released, Stale, Unreachable};
@@ -79,6 +79,11 @@ pub use toyos_net_wire::Instant;
 /// index names an interface of the [`Ip`] that returned it and nothing in another.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct IfIndex(usize);
+
+/// Where an interface stands among the others for every choice between them:
+/// the lower first, and among equals the one added first.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct Rank(pub u8);
 
 /// The IP MTU of every interface: an Ethernet body.
 pub const MTU: usize = toyos_net_wire::ethernet::MAX_BODY;
@@ -315,6 +320,8 @@ pub enum Resolution {
 pub struct Ip {
     draws: draw::Draws,
     ifaces: Vec<iface::Interface>,
+    /// Every interface's index, by rank and then by when it was added.
+    order: Vec<usize>,
     timers: timers::Timers,
     control: egress::Control,
     limiter: Limiter,
@@ -330,6 +337,7 @@ impl Ip {
         Self {
             draws,
             ifaces: Vec::new(),
+            order: Vec::new(),
             timers: timers::Timers::default(),
             control: egress::Control::default(),
             limiter,
@@ -339,11 +347,15 @@ impl Ip {
         }
     }
 
-    pub fn add_interface(&mut self, now: Instant, mac: IndividualMac) -> IfIndex {
+    pub fn add_interface(&mut self, now: Instant, mac: IndividualMac, rank: Rank) -> IfIndex {
         let now = self.clock(now);
         let reachable = self.draws.reachable_time();
+        let index = self.ifaces.len();
+        let at = self.order.iter().position(|&n| self.ifaces.get(n).is_some_and(|i| i.rank > rank)).unwrap_or(self.order.len());
+        self.order.insert(at, index);
         self.ifaces.push(iface::Interface {
             mac,
+            rank,
             up: false,
             addresses: Vec::new(),
             gateways: Vec::new(),
@@ -356,7 +368,12 @@ impl Ip {
             acd: acd::Conflicts::default(),
             igmp: igmp::Igmp::default(),
         });
-        IfIndex(self.ifaces.len().saturating_sub(1))
+        IfIndex(index)
+    }
+
+    /// The link address of `iface`.
+    pub fn mac(&self, iface: IfIndex) -> Option<IndividualMac> {
+        self.ifaces.get(iface.0).map(|i| i.mac)
     }
 
     pub fn counters(&self) -> &Counters {

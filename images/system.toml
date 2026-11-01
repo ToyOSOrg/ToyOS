@@ -132,9 +132,8 @@ drives = ["pci:04:03:*"]
 receives = ["sound-output"]
 syscap = ["rt"]
 
-# The network stack, over the link a NIC driver brings on `link`; it claims no
-# device. It serves once the first driver says hello, and leaves a machine
-# none says hello on within 30 s.
+# The network stack, over every link a NIC driver brings on `link`; it claims
+# no device. It serves from the start, links or none.
 [programs.netstack]
 service = true
 serves = ["netstack", "link"]

@@ -8,11 +8,15 @@ pub enum Link {
     /// The device reports no link at all, as virtio's network device without
     /// `VIRTIO_NET_F_STATUS` does; the stack takes it as up.
     Unreported,
+    /// The device reports its link up and no speed, as virtio's network
+    /// device with `VIRTIO_NET_F_STATUS` and without `VIRTIO_NET_F_SPEED_DUPLEX`.
+    UpWithoutSpeed,
 }
 
 const DOWN: u32 = 0;
 const UNREPORTED: u32 = 1;
 const UP: u32 = 2;
+const UP_WITHOUT_SPEED: u32 = 3;
 const FULL_DUPLEX: u32 = 1 << 2;
 const MBPS_SHIFT: u32 = 8;
 
@@ -27,6 +31,7 @@ impl Link {
         match self {
             Self::Down => DOWN,
             Self::Unreported => UNREPORTED,
+            Self::UpWithoutSpeed => UP_WITHOUT_SPEED,
             Self::Up { mbps, full_duplex } => {
                 let mbps = mbps.clamp(1, u32::MAX >> MBPS_SHIFT);
                 UP | if full_duplex { FULL_DUPLEX } else { 0 } | mbps << MBPS_SHIFT
@@ -41,6 +46,7 @@ impl Link {
         match word & 0b11 {
             DOWN if word == DOWN => Some(Self::Down),
             UNREPORTED if word == UNREPORTED => Some(Self::Unreported),
+            UP_WITHOUT_SPEED if word == UP_WITHOUT_SPEED => Some(Self::UpWithoutSpeed),
             UP if reserved == 0 && mbps > 0 => Some(Self::Up { mbps, full_duplex: word & FULL_DUPLEX != 0 }),
             _ => None,
         }
@@ -175,6 +181,7 @@ mod tests {
         for link in [
             Link::Down,
             Link::Unreported,
+            Link::UpWithoutSpeed,
             Link::Up { mbps: 10, full_duplex: false },
             Link::Up { mbps: 1000, full_duplex: true },
             Link::Up { mbps: u32::MAX >> 8, full_duplex: true },
@@ -185,10 +192,10 @@ mod tests {
     }
 
     /// Every word no driver writes is refused: an up link of no speed, a
-    /// reserved bit, a down or unreported link carrying fields, a fourth tag.
+    /// reserved bit, a down, unreported or speedless link carrying fields.
     #[test]
     fn a_word_no_driver_writes_names_no_link() {
-        for word in [UP, UP | FULL_DUPLEX, UP | 1 << 3 | 1 << 8, DOWN | 1 << 8, UNREPORTED | FULL_DUPLEX, 3, 3 | 1 << 8, u32::MAX] {
+        for word in [UP, UP | FULL_DUPLEX, UP | 1 << 3 | 1 << 8, DOWN | 1 << 8, UNREPORTED | FULL_DUPLEX, UP_WITHOUT_SPEED | 1 << 8, UP_WITHOUT_SPEED | FULL_DUPLEX, u32::MAX] {
             assert_eq!(Link::decode(word), None, "{word:#x}");
         }
     }

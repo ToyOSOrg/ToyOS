@@ -281,6 +281,8 @@ fn connect_failed(failure: Failure) -> u32 {
         Failure::Refused => ERR_CONNECTION_REFUSED,
         Failure::Reset => ERR_CONNECTION_RESET,
         Failure::TimedOut => ERR_TIMED_OUT,
+        // The address it was made from went under it: as no address at all.
+        Failure::AddressGone => ERR_NOT_CONNECTED,
         Failure::Unreachable(_) | Failure::Prohibited => {
             say!("netstack: a connect ended {failure:?}");
             ERR_OTHER
@@ -513,8 +515,8 @@ impl Sockets {
 
     /// Everything the node has to say since the last call, to the log and to
     /// the clients that waited for it, and the table entries of what the node
-    /// let go.
-    pub fn settle(&mut self, node: &mut Node) {
+    /// let go. `label` names a link in a line.
+    pub fn settle(&mut self, node: &mut Node, label: impl Fn(toyos_net_node::IfIndex) -> String) {
         let events: Vec<StreamEvent> = node.drain_stream_events().collect();
         for event in events {
             let (id, answer) = match event {
@@ -549,13 +551,16 @@ impl Sockets {
             match event {
                 Event::Stack { refusal, suppressed: 0 } => say!("netstack: refused {refusal:?}"),
                 Event::Stack { refusal, suppressed } => say!("netstack: refused {refusal:?}, and {suppressed} more by its rule"),
-                Event::Dhcp { refusal, suppressed: 0 } => say!("netstack: DHCP: refused {refusal:?}"),
-                Event::Dhcp { refusal, suppressed } => say!("netstack: DHCP: refused {refusal:?}, and {suppressed} more by its rule"),
-                Event::Name(toyos_mdns::Event::Claimed) => {
-                    say!("netstack: mDNS: no host answered for {HOSTNAME}.local; this machine answers as it")
+                Event::Dhcp { link, refusal, suppressed: 0 } => say!("netstack: DHCP on {}: refused {refusal:?}", label(link)),
+                Event::Dhcp { link, refusal, suppressed } => {
+                    say!("netstack: DHCP on {}: refused {refusal:?}, and {suppressed} more by its rule", label(link))
                 }
-                Event::Name(toyos_mdns::Event::Lost) => say!(
-                    "netstack: mDNS: another host answered for {HOSTNAME}.local; this machine answers to no name and asks for {HOSTNAME}.local again every {} s",
+                Event::Name { link, event: toyos_mdns::Event::Claimed } => {
+                    say!("netstack: mDNS on {}: no host answered for {HOSTNAME}.local; this machine answers as it there", label(link))
+                }
+                Event::Name { link, event: toyos_mdns::Event::Lost } => say!(
+                    "netstack: mDNS on {}: another host answered for {HOSTNAME}.local; this machine answers to no name there and asks for {HOSTNAME}.local again every {} s",
+                    label(link),
                     toyos_mdns::RETRY_MS / 1000
                 ),
             }

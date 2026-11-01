@@ -7,7 +7,7 @@
 
 use std::net::Ipv4Addr;
 
-use toyos_net_ip::{AddrState, Counter, Event, IfIndex, Instant, Ip, Nud, Sent, UdpOut, FRAME};
+use toyos_net_ip::{AddrState, Counter, Event, IfIndex, Instant, Ip, Nud, Rank, Sent, UdpOut, FRAME};
 use toyos_net_wire::ipv4::Ttl;
 use toyos_net_wire::udp::UdpBuilder;
 use toyos_net_wire::Port;
@@ -217,7 +217,7 @@ impl H {
     /// Interface `if0` with MAC A and its link up at time 0, nothing settled.
     pub fn raw() -> Self {
         let mut ip = Ip::new(Instant::from_nanos(0), SECRET);
-        let if0 = ip.add_interface(Instant::from_nanos(0), mac(MAC_A));
+        let if0 = ip.add_interface(Instant::from_nanos(0), mac(MAC_A), Rank(0));
         ip.link_up(Instant::from_nanos(0), if0).unwrap();
         Self { ip, if0, now: 0, events: Vec::new(), counters: Vec::new(), wire: std::collections::BTreeMap::default() }
     }
@@ -300,7 +300,7 @@ impl H {
         let reply = eth(MAC_A, m, 0x0806, &arp_packet(2, m, addr, MAC_A, A));
         let _ = h.ip.receive(setup, h.if0, &reply);
         h.settle();
-        h.ip.advise(h.clock(), addr, toyos_net_ip::Advice::Confirmed);
+        h.ip.advise(h.clock(), addr, toyos_net_ip::Source::Any, toyos_net_ip::Advice::Confirmed);
         assert!(matches!(h.ip.neighbour(h.if0, addr), Some(Nud::Reachable(r)) if r.confirmed() == H::instant(0)));
         h.rebase();
         h
@@ -745,12 +745,13 @@ impl H {
     pub fn send_as(&mut self, source: Ipv4Addr, destination: Ipv4Addr, sport: u16, dport: u16, data: &[u8], ttl: Ttl, broadcast: bool) -> Result<Option<Vec<u8>>, Counter> {
         let mut frame = [0u8; FRAME];
         let datagram = UdpBuilder { source: Port::new(sport).unwrap(), destination: Port::new(dport).unwrap(), data };
-        let out = UdpOut { source, destination, ttl, broadcast, datagram };
-        let sent = self.ip.send_udp(self.clock(), &out, &mut frame);
+        let out = UdpOut { source, destination, ttl, broadcast, iface: None, datagram };
+        let sent = self.ip.send_udp(self.clock(), &usize::MAX, &out, &mut frame);
         self.collect();
         sent.map(|s| match s {
-            Sent::Frame(n) => Some(frame[..n].to_vec()),
-            Sent::Pending(_) => None,
+            Sent::Frame { len: n, .. } => Some(frame[..n].to_vec()),
+            Sent::Pending { .. } => None,
+            Sent::NoRoom { .. } => unreachable!("every interface has room"),
         })
     }
 
@@ -788,7 +789,7 @@ pub const MAC_A1: MacAddr = MacAddr([2, 0, 0, 0, 0, 0x1a]);
 impl H {
     /// A second interface with its own MAC and link up, at setup time 0.
     pub fn add_if1(&mut self) -> IfIndex {
-        let if1 = self.ip.add_interface(Instant::from_nanos(0), mac(MAC_A1));
+        let if1 = self.ip.add_interface(Instant::from_nanos(0), mac(MAC_A1), Rank(0));
         self.ip.link_up(Instant::from_nanos(0), if1).unwrap();
         if1
     }
@@ -796,7 +797,7 @@ impl H {
     /// ToyOS as B: MAC B, 192.0.2.2/24, A resolved at setup.
     pub fn as_b() -> Self {
         let mut ip = Ip::new(Instant::from_nanos(0), SECRET);
-        let if0 = ip.add_interface(Instant::from_nanos(0), mac(MAC_B));
+        let if0 = ip.add_interface(Instant::from_nanos(0), mac(MAC_B), Rank(0));
         ip.link_up(Instant::from_nanos(0), if0).unwrap();
         let mut h = Self { ip, if0, now: 0, events: Vec::new(), counters: Vec::new(), wire: std::collections::BTreeMap::default() };
         h.assign(if0, B, 24, 0);
@@ -826,7 +827,7 @@ impl H {
     /// A host with MAC `m` holding `addr/len`, assigned through conflict detection, nothing learned.
     pub fn host(m: MacAddr, addr: Ipv4Addr, len: u8) -> Self {
         let mut ip = Ip::new(Instant::from_nanos(0), SECRET);
-        let if0 = ip.add_interface(Instant::from_nanos(0), mac(m));
+        let if0 = ip.add_interface(Instant::from_nanos(0), mac(m), Rank(0));
         ip.link_up(Instant::from_nanos(0), if0).unwrap();
         let mut h = Self { ip, if0, now: 0, events: Vec::new(), counters: Vec::new(), wire: std::collections::BTreeMap::default() };
         h.assign(if0, addr, len, 0);

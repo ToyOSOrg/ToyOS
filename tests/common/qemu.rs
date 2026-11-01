@@ -701,6 +701,9 @@ pub enum Profile {
     /// [`Profile::Headless`] with an `e1000e`, QEMU's 82574L, where its virtio
     /// NIC was: a NIC the image's rows name no machine for.
     HeadlessE1000e,
+    /// [`Profile::Headless`] with two virtio NICs, each on a user network of
+    /// its own: [`TWO_NICS`].
+    HeadlessTwoNics,
     /// [`Profile::Headless`] with the kernel's virtio console created without
     /// `iommu_platform=on`: a device the kernel itself must tell physical
     /// addresses.
@@ -809,6 +812,7 @@ impl Profile {
             | Self::HeadlessNicBehindPort
             | Self::HeadlessNicUntranslated
             | Self::HeadlessE1000e
+            | Self::HeadlessTwoNics
             | Self::HeadlessConsoleUntranslated
             | Self::HeadlessTwoEdu
             | Self::Metal
@@ -938,7 +942,14 @@ enum Nic {
     /// QEMU's `e1000e`, which the unit decodes as it does every function
     /// that is not virtio.
     E1000e,
+    /// Two virtio NICs: [`TWO_NICS`].
+    VirtioPair,
 }
+
+/// [`Profile::HeadlessTwoNics`]'s NICs, in the order QEMU creates them: each
+/// device's id, which QMP's `set_link` names, and its user network, which
+/// QEMU's host is `.2` of. The first is QEMU's default network.
+pub const TWO_NICS: [(&str, &str); 2] = [("nic0", "10.0.2.0/24"), ("nic1", "10.0.3.0/24")];
 
 /// Everything a profile decides about the machine, in one table. A new
 /// variant answers every question here or does not compile — which `self !=
@@ -1142,6 +1153,7 @@ impl Profile {
             Self::HeadlessNicBehindPort => Shape { nic: Nic::BehindPort, ..Self::Headless.shape() },
             Self::HeadlessNicUntranslated => Shape { nic: Nic::Untranslated, ..Self::Headless.shape() },
             Self::HeadlessE1000e => Shape { nic: Nic::E1000e, ..Self::Headless.shape() },
+            Self::HeadlessTwoNics => Shape { nic: Nic::VirtioPair, ..Self::Headless.shape() },
             Self::HeadlessConsoleUntranslated => Shape { console_bypasses: true, ..Self::Headless.shape() },
             Self::HeadlessTwoEdu => Shape { probes: Probes::Edus, ..Self::Headless.shape() },
             Self::HeadlessUsbSpare => Shape {
@@ -2175,6 +2187,21 @@ fn shutdown_reason(bytes: &[u8]) -> Option<String> {
     Some(value.to_string())
 }
 
+/// An open QMP connection for a NIC's link: the carrier its guest driver
+/// reads.
+pub struct QmpLink(Qmp);
+
+impl QmpLink {
+    pub fn open(socket: &Path) -> Self {
+        Self(Qmp::connect(socket))
+    }
+
+    /// The NIC `id`'s link up or down, as its driver will read it.
+    pub fn set(&mut self, id: &str, up: bool) {
+        self.0.execute(&format!("{{\"execute\":\"set_link\",\"arguments\":{{\"name\":\"{id}\",\"up\":{up}}}}}"));
+    }
+}
+
 /// An open QMP connection to QEMU's human monitor, for the questions QMP has
 /// no command of its own for.
 pub struct QmpMonitor(Qmp);
@@ -2513,6 +2540,15 @@ fn qemu_command(
         // No option ROM: firmware has no use for the NIC.
         Nic::E1000e => {
             qemu.arg("-netdev").arg(&netdev).arg("-device").arg("e1000e,netdev=net0,romfile=");
+        }
+        Nic::VirtioPair => {
+            for (n, (id, net)) in TWO_NICS.iter().enumerate() {
+                let netdev = if n == 0 { netdev.clone() } else { format!("user,id=net{n},net={net}") };
+                qemu.arg("-netdev").arg(&netdev).arg("-device").arg(format!(
+                    "virtio-net-pci-non-transitional,netdev=net{n},id={id},mac=52:54:00:12:34:5{}{platform}",
+                    6 + n
+                ));
+            }
         }
         Nic::BehindPort => {
             qemu.arg("-device").arg("pcie-root-port,id=nicport,chassis=9");

@@ -145,7 +145,7 @@ impl Retransmit {
         self.owed = true;
         self.stalled = self.stalled.saturating_add(1);
         if self.stalled == 3 {
-            ctx.log.event(crate::Event::Reverify(ctx.tuple.remote.addr));
+            ctx.log.event(crate::Event::Reverify { local: ctx.tuple.local.addr, remote: ctx.tuple.remote.addr });
         }
         false
     }

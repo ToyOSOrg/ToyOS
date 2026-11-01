@@ -144,7 +144,7 @@ fn each_refusal_is_answered_in_the_pipes_word_for_it() {
     lan.pump();
     lan.node.udp_send_to(lan.now, any, B, 7, b"later").expect("the same call, once the queue has left");
 
-    assert!(lan.run_until(Duration::from_secs(700), |lan| lan.node.lease().is_none()), "the lease runs out");
+    assert!(lan.run_until(Duration::from_secs(700), |lan| lan.node.lease(lan.link).is_none()), "the lease runs out");
     refused_send(&mut lan, any, B, 7, b"late", Refused::NotConnected, Counter::NoSourceAddress);
     refused_send(&mut lan, held, B, 7, b"late", Refused::NotConnected, Counter::SourceAddressNotAssigned);
 
@@ -218,13 +218,13 @@ fn a_datagram_accepted_for_a_host_is_no_broadcast_after_the_server_renews_a_narr
     lan.node.udp_send_to(lan.now, id, edge, 5_001, b"hi").expect("one host of the /24");
     let narrower = [(54, R.octets().to_vec()), (51, 600u32.to_be_bytes().to_vec()), (1, vec![255, 255, 255, 128]), (6, DNS.octets().to_vec())];
     lan.deliver(&from_server(MAC, A, &message_of(ACK, renewal, &narrower)));
-    assert_eq!(lan.node.lease().map(|lease| lease.prefix_len), Some(25), "the server's prefix is the lease's");
+    assert_eq!(lan.node.lease(lan.link).map(|lease| lease.prefix_len), Some(25), "the server's prefix is the lease's");
     assert_eq!(lan.sent[frames..], [], "nothing left for it: no broadcast, and no request for a link address");
 
     let rule = toyos_net_ip::Counter::IpBroadcastNotPermitted;
     let shard = lan.node.shard();
     assert_eq!(shard.ip().counters().get(rule), 1);
-    let refusal = toyos_net_ip::Refusal { rule, iface: shard.iface(), peer: toyos_net_ip::Peer::Ip(edge) };
+    let refusal = toyos_net_ip::Refusal { rule, iface: lan.link, peer: toyos_net_ip::Peer::Ip(edge) };
     let logged: Vec<Event> = lan.node.drain_events().collect();
     assert_eq!(logged, [Event::Stack { refusal: Refusal::Ip(refusal), suppressed: 0 }]);
 }

@@ -153,8 +153,9 @@ fn main() {
     let Some(mut listener) = listen() else { return };
 
     // Identity and trust are settled after the bind, so that a machine with no
-    // NIC still reports the network as the reason it is leaving rather than
-    // minting a key it will never present.
+    // netstack reports the network as the reason it is leaving rather than
+    // minting a key it will never present. A machine with no NIC has a
+    // netstack, which binds the port: it serves once a link brings one.
     let host = match host_key() {
         Ok(key) => Arc::new(key),
         Err(why) => return println!("sshserver: {why}, exiting"),

@@ -518,22 +518,22 @@ fn untranslated_nic() -> String {
 
 /// A virtio NIC that bypasses the unit ([`Profile::HeadlessNicUntranslated`])
 /// is never handed to its driver: the supervisor reads its offer through the
-/// claim, refuses it by name, starts no NIC driver, and netstack leaves once
-/// its wait for a link is out. Only a QEMU machine can make one: every bench
-/// function is behind its unit.
+/// claim, refuses it by name and starts no NIC driver, and netstack serves
+/// with no link, saying so once its bound on a first lease is out. Only a
+/// QEMU machine can make one: every bench function is behind its unit.
 pub fn a_virtio_function_without_access_platform_is_refused() -> Result<(), String> {
     let options = BootOptions { profile: Profile::HeadlessNicUntranslated, ..Default::default() };
     let mut qemu = QemuInstance::boot_with_options(&netcase(), &[], &[], options);
     let refused = untranslated_nic();
-    let gone = "netstack: no NIC driver brought a link in 30 s; this machine has no network, exiting";
+    let gone = "netstack: DHCP: no lease as toyos-t14 on any link in";
     let mut text = qemu.boot_log().to_string();
     qemu::await_guest(&mut qemu, &mut text, "the supervisor's refusal", |t| t.contains(&refused)).map_err(|e| format!("{e}\n{text}"))?;
-    // A quiet guest, for netstack's bound on its first link: a ceiling past it.
+    // A quiet guest, for netstack's bound on its first lease: a ceiling past it.
     if !text.contains(gone) {
         text.push_str(&qemu.drain_until(std::time::Duration::from_secs(90), |l| l.contains(gone)));
     }
     if !text.contains(gone) {
-        return Err(format!("netstack did not leave a machine whose NIC has no driver\n{text}"));
+        return Err(format!("netstack did not say a machine whose NIC has no driver has no address\n{text}"));
     }
     let log = Serial::named("boot console", text);
     log.must_be_clean()?;

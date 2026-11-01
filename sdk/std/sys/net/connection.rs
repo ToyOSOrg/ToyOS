@@ -93,6 +93,7 @@ pub fn stream_refused(refusal: Refused) -> io::Error {
         Refused::Reset => io::const_error!(io::ErrorKind::ConnectionReset, "connection reset"),
         Refused::ConnectionTimedOut => io::const_error!(io::ErrorKind::TimedOut, "the connection timed out"),
         Refused::Unreachable => io::const_error!(io::ErrorKind::HostUnreachable, "the peer is unreachable"),
+        Refused::AddressGone => io::const_error!(io::ErrorKind::AddrNotAvailable, "this machine gave up the connection's address"),
         Refused::Aborted => io::const_error!(io::ErrorKind::ConnectionAborted, "netstack ended the stream"),
         Refused::Shut => SHUT_DOWN,
     }

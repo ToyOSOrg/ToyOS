@@ -212,6 +212,8 @@ pub enum Failure {
     Unreachable(SoftError),
     /// ICMP destination unreachable, administratively prohibited, during the handshake.
     Prohibited,
+    /// The host gave up the connection's local address ([`Tcp::lose_address`]).
+    AddressGone,
 }
 
 /// An ICMP error that did not end the connection; reported as the reason if it later gives up.
@@ -314,10 +316,11 @@ impl<T> Hop<T> {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Event {
     Refused(Refusal),
-    /// An ACK advanced SND.UNA: the next hop to this address answers (RFC 1122 §3.3.1.4).
-    Reachable(Ipv4Addr),
-    /// Three expiries without progress: re-verify the next hop to this address.
-    Reverify(Ipv4Addr),
+    /// An ACK advanced SND.UNA: the next hop to `remote` from `local` answers (RFC 1122
+    /// §3.3.1.4). The local address names the link: one remote may be reached by several.
+    Reachable { local: Ipv4Addr, remote: Ipv4Addr },
+    /// Three expiries without progress: re-verify the next hop to `remote` from `local`.
+    Reverify { local: Ipv4Addr, remote: Ipv4Addr },
 }
 
 // Each compile_fail block sits beside one that compiles, so a typo cannot pass it.

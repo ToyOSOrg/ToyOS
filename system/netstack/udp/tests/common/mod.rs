@@ -189,7 +189,7 @@ impl U {
     /// A's interface up with MAC A and nothing configured.
     pub fn bare() -> Self {
         let mut ip = Ip::new(Instant::from_nanos(0), [0x5a; 16]);
-        let if0 = ip.add_interface(Instant::from_nanos(0), IndividualMac::new(MAC_A).unwrap());
+        let if0 = ip.add_interface(Instant::from_nanos(0), IndividualMac::new(MAC_A).unwrap(), toyos_net_ip::Rank(0));
         ip.link_up(Instant::from_nanos(0), if0).unwrap();
         ip.join(Instant::from_nanos(0), if0, MulticastAddr::new(MDNS).unwrap()).unwrap();
         Self::setup_until(&mut ip, Self::instant(0));
@@ -203,7 +203,7 @@ impl U {
     pub fn uf() -> Self {
         let mut ip = Ip::new(Instant::from_nanos(0), [0x5a; 16]);
         let t = Instant::from_nanos(0);
-        let if0 = ip.add_interface(t, IndividualMac::new(MAC_A).unwrap());
+        let if0 = ip.add_interface(t, IndividualMac::new(MAC_A).unwrap(), toyos_net_ip::Rank(0));
         ip.link_up(t, if0).unwrap();
         ip.add_address(t, if0, A, 24).unwrap();
         Self::setup_until(&mut ip, Instant::from_millis(3_000));
@@ -277,8 +277,8 @@ impl U {
         for event in &events {
             match event {
                 Event::Unreachable(flow) => self.udp.unreachable(flow),
-                Event::Resolved { next_hop, .. } => self.udp.wake(*next_hop),
-                Event::Failed { next_hop, .. } => self.udp.fail(*next_hop),
+                Event::Resolved { iface, next_hop } => self.udp.wake(*iface, *next_hop),
+                Event::Failed { iface, next_hop } => self.udp.fail(*iface, *next_hop),
                 _ => {}
             }
         }
@@ -308,13 +308,14 @@ impl U {
             let mut framed = false;
             let served = udp.serve(sender, |out| {
                 let mut buf = [0u8; FRAME];
-                match ip.send_udp(now, out, &mut buf) {
-                    Ok(Sent::Frame(n)) => {
+                match ip.send_udp(now, &usize::MAX, out, &mut buf) {
+                    Ok(Sent::Frame { len: n, .. }) => {
                         frames.push(buf[..n].to_vec());
                         framed = true;
                         Offer::Taken
                     }
-                    Ok(Sent::Pending(next_hop)) => Offer::Waits(next_hop),
+                    Ok(Sent::Pending { iface, next_hop }) => Offer::Waits { iface, hop: next_hop },
+                    Ok(Sent::NoRoom { .. }) => unreachable!("every interface has room"),
                     Err(_) => Offer::Taken,
                 }
             });
