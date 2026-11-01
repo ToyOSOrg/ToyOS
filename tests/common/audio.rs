@@ -54,19 +54,28 @@ fn is_soundserver_stats(text: &str, at: usize) -> bool {
     text[line_start..at].contains("soundserver: wakes=")
 }
 
-/// soundserver played to an output driver's device before `job` ran, so the
-/// job's stream did not play to the null sink.
+/// soundserver played to an output driver's device before `job` opened its
+/// stream, so the stream did not play to the null sink. The stream's
+/// opening and not the job's spawn: a job may wait for something before it
+/// plays.
 fn on_an_output(log: &str, job: &str) -> Result<(), String> {
     let playing = log
         .find(PLAYING)
         .ok_or_else(|| format!("soundserver never said `{PLAYING}`: no output was offered, and it stayed the null sink"))?;
     let head = format!("spawn: /system/bin/{job} ");
     let spawned = log.find(&head).ok_or_else(|| format!("no `{head}` record: {job} never ran"))?;
-    if playing > spawned {
-        return Err(format!("soundserver played to an output only after {job} spawned, so its stream played to the null sink"));
+    let opened = log[spawned..]
+        .find(OPENING)
+        .map(|at| spawned + at)
+        .ok_or_else(|| format!("soundserver never said `{OPENING}` after {job} spawned: it opened no stream"))?;
+    if playing > opened {
+        return Err(format!("soundserver played to an output only after {job} opened its stream, so it played to the null sink"));
     }
     Ok(())
 }
+
+/// What soundserver says as a client's stream opens.
+const OPENING: &str = "soundserver: opening stream";
 
 /// The tone client played to its end through the HDA controller an `hda`
 /// driver drives, played to before it ran, and no period of it went unfilled.
