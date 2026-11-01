@@ -145,10 +145,9 @@ enum Phase {
 struct Join {
     ssid: Ssid,
     passphrase: Passphrase,
-    /// Who waits for its answer: none for a join made again after a loss.
+    /// Who waits for its answer: none for a join made again after a loss. A join that fails
+    /// is not made again.
     client: Option<Client>,
-    /// A join made again after a loss: one that fails is not made again.
-    again: bool,
     phase: Phase,
 }
 
@@ -277,7 +276,6 @@ impl Station {
             if matches!(join.phase, Phase::Connected { .. }) {
                 self.say("wlan: the radio ended while connected; joining again once a radio says hello");
                 join.phase = Phase::Scanning;
-                join.again = true;
                 self.resume = Some(join);
             } else {
                 self.fail(join, Refusal::RadioFailed, &detail);
@@ -577,7 +575,6 @@ impl Station {
                 unreachable!("matched above")
             };
             join.phase = Phase::Connected { bss, supplicant };
-            join.again = false;
             if let Some(client) = join.client.take() {
                 self.answer(client, Answer::Connected { band, channel, signal });
             }
@@ -610,10 +607,9 @@ impl Station {
                 let (refusal, detail) = unanswered(message2s, &detail);
                 self.fail(join, refusal, &detail);
             }
-            Phase::Connected { .. } if join.again => self.fail(join, Refusal::Lost, &detail),
             Phase::Connected { .. } => {
                 self.say(&format!("wlan: the association ended ({detail}); joining again"));
-                self.join = Some(Join { phase: Phase::Scanning, again: true, ..join });
+                self.join = Some(Join { phase: Phase::Scanning, ..join });
                 self.scan(now);
             }
             Phase::Scanning | Phase::Associating { .. } => unreachable!("matched above"),
@@ -689,7 +685,7 @@ impl Station {
                 self.refuse(waiting, Refusal::Superseded, "another connect");
             }
         }
-        self.join = Some(Join { ssid, passphrase, client: Some(client), again: false, phase: Phase::Scanning });
+        self.join = Some(Join { ssid, passphrase, client: Some(client), phase: Phase::Scanning });
         self.scan(now);
     }
 

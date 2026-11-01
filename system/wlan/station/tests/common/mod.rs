@@ -177,6 +177,13 @@ impl Harness {
         self.event(Event::Left(left));
     }
 
+    /// The radio commands `f` sent.
+    pub fn radio_after(&mut self, f: impl FnOnce(&mut Self)) -> Vec<Sent> {
+        self.sent();
+        f(self);
+        self.sent()
+    }
+
     /// The radio commands sent since the last call.
     pub fn sent(&mut self) -> Vec<Sent> {
         std::mem::take(&mut self.radio)

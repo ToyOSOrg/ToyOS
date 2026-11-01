@@ -152,6 +152,11 @@ fn completes(h: &mut Harness, ap: &mut Authenticator) {
     h.eapol(AA, &ap.message_1().seal(), SNONCE);
     let [Sent::Eapol(m2)] = &h.sent()[..] else { panic!("message 2") };
     ap.message_2(m2);
+    completes_from_3(h, ap);
+}
+
+/// The handshake completed from message 3, message 2 answered.
+fn completes_from_3(h: &mut Harness, ap: &mut Authenticator) {
     h.eapol(AA, &ap.message_3().seal(), [0; 32]);
     let sent = h.sent();
     assert_eq!(sent[1], Sent::Pairwise(ap.tk()));
@@ -239,11 +244,19 @@ fn eapol_frames_the_air_spoils_are_dropped_and_counted() {
     m1.key_length = 32;
     h.eapol(AA, &m1.seal(), SNONCE);
     h.eapol(AA, &ap.message_1().seal(), SNONCE);
+    assert_eq!(h.sent().len(), 1, "the first message 1 alone was answered");
+    // A message 3 anyone can forge: its MIC does not verify, so it is no reason to leave.
+    let [Sent::Eapol(m2)] = &h.radio_after(|h| h.eapol(AA, &ap.message_1().seal(), SNONCE))[..] else { panic!() };
+    ap.message_2(m2);
+    let mut forged = ap.message_3();
+    forged.kck = [0; 16];
+    h.eapol(AA, &forged.seal(), [0; 32]);
     let c = h.station.counters();
-    assert_eq!((c.stray_eapol, c.refused_eapol), (1, 2));
+    assert_eq!((c.stray_eapol, c.refused_eapol), (1, 3));
     assert!(h.ended.is_empty());
     assert_eq!(h.answered(), []);
-    assert_eq!(h.sent().len(), 1, "the first message 1 alone was answered");
+    assert_eq!(h.sent(), [], "nothing is left or installed");
+    completes_from_3(&mut h, &mut ap);
 }
 
 #[test]

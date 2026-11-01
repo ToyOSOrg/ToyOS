@@ -48,7 +48,7 @@ fn an_answer_past_its_bounds_is_cut_to_fit() {
     assert!(p.len() <= MAX_PAYLOAD);
     assert_eq!(Answer::decode(t, &p), Ok(Answer::Networks(vec![network; MAX_NETWORKS])));
     let long = "é".repeat(MAX_DETAIL);
-    let (t, p) = Answer::Refused { refusal: Refusal::Lost, detail: &long }.encode();
+    let (t, p) = Answer::Refused { refusal: Refusal::RadioFailed, detail: &long }.encode();
     let Ok(Answer::Refused { detail, .. }) = Answer::decode(t, &p) else { panic!() };
     assert_eq!(detail, &long[..MAX_DETAIL]);
 }

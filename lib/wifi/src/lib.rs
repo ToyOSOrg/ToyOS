@@ -208,9 +208,8 @@ refusals! {
     NoMessage1 = 7, "the access point began no 4-way handshake";
     NoAnswerToMessage2 = 8, "the AP did not answer message 2: the passphrase is probably wrong, or the link lost it";
     Handshake = 9, "the access point's handshake broke a rule after its MIC verified";
-    Lost = 10, "the association ended";
-    RadioFailed = 11, "the radio broke the radio protocol, or did not answer it";
-    Superseded = 12, "another connect or a disconnect replaced this one";
+    RadioFailed = 10, "the radio went, broke the radio protocol or did not answer it";
+    Superseded = 11, "another connect or a disconnect replaced this one";
 }
 
 /// A request to `wlan`.

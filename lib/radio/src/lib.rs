@@ -14,7 +14,11 @@
 //!   [`Command::Integrity`]. **An install takes effect after every frame sent before it has
 //!   left**, so message 4 goes out under the keys message 3 came under. [`Command::Authorize`]
 //!   opens the link to data;
-//! - [`Event::Left`] ends an association, whether [`Command::Leave`] asked or not.
+//! - every [`Command::Leave`] is answered by its own [`Left::Asked`], associated or not; any
+//!   other [`Event::Left`] ends the association that is up. Before [`Event::Associated`] there
+//!   is none, and a failed join is [`Event::JoinFailed`].
+//!
+//! `wlan` bounds each answer it waits for, and ends a driver that misses one.
 //!
 //! **Every frame is decoded here, once**: one that does not decode is the peer's protocol error,
 //! and the reader ends the connection by name. What a frame carries off the air (a Seen's or an
@@ -372,7 +376,8 @@ impl<'a> Event<'a> {
         })
     }
 
-    /// The frame's message type, and its payload's length in `out`.
+    /// The frame's message type, and its payload's length in `out`. A frame past [`MAX_FRAME`]
+    /// panics: it is the sender's to drop.
     pub fn encode(&self, out: &mut [u8; MAX_PAYLOAD]) -> (u32, usize) {
         let mut o = Out { buf: out, len: 0 };
         let msg_type = match *self {
@@ -465,8 +470,9 @@ impl<'a> Command<'a> {
         })
     }
 
-    /// The frame's message type, and its payload's length in `out`. A key command's payload
-    /// holds the key: the caller wipes `out` once it is sent.
+    /// The frame's message type, and its payload's length in `out`. A frame or elements past
+    /// [`MAX_FRAME`] panic. A key command's payload holds the key: the caller wipes `out` once
+    /// it is sent.
     pub fn encode(&self, out: &mut [u8; MAX_PAYLOAD]) -> (u32, usize) {
         let mut o = Out { buf: out, len: 0 };
         let msg_type = match *self {
