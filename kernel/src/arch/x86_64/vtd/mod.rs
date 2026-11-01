@@ -160,6 +160,8 @@ pub fn init(rsdp_addr: u64, devices: &[PciDevice], windows: Option<&[RootBridgeW
     let mut ready: Vec<(Unit, Plan)> = Vec::new();
     // Every RMRR, which no protected region may cover during the hand-over.
     let mut rmrrs: Vec<(u64, u64)> = Vec::new();
+    // Every RMRR with its scopes resolved, classified once the walk is whole.
+    let mut reservations: Vec<kernel::rmrr::Region> = Vec::new();
     // What no domain's addresses may reach, RMRRs added below as the walk
     // meets them; nothing where no declaration is held.
     let mut reserved: Option<Vec<(u64, u64)>> = windows
@@ -215,7 +217,12 @@ pub fn init(rsdp_addr: u64, devices: &[PciDevice], windows: Option<&[RootBridgeW
                 }
                 rmrrs.push((base, limit.saturating_add(1)));
                 describe_scopes("rmrr", regions, rmrr.scopes());
-                classify(regions, rmrr.scopes(), devices, base, limit.saturating_add(1));
+                let scopes = rmrr.scopes().map(|scope| scope.ok()).collect::<Vec<_>>();
+                reservations.push(kernel::rmrr::Region {
+                    start: base,
+                    end: limit.saturating_add(1),
+                    scopes: resolved(regions, &scopes, devices),
+                });
                 regions += 1;
                 held_regions += usize::from(held);
             }
@@ -234,6 +241,8 @@ pub fn init(rsdp_addr: u64, devices: &[PciDevice], windows: Option<&[RootBridgeW
             }
         }
     }
+
+    classify(&reservations, devices);
 
     if units == 0 {
         log!("iommu: DMAR describes no remapping unit");
@@ -738,38 +747,49 @@ fn describe_scopes(owner: &str, index: usize, scopes: Scopes) {
 const SCOPE_ENDPOINT: u8 = 1;
 const SCOPE_SUBHIERARCHY: u8 = 2;
 
-/// Each function an RMRR over `start..end` names, kept or refused by
-/// `kernel::rmrr::verdict`, which no claim of it then crosses
-/// (`domain::unclaimable`). A scope whose path this kernel cannot follow, or
-/// a bridge's sub-hierarchy, is another device sharing the range, and every
-/// function below such a bridge is named.
-fn classify(index: usize, scopes: Scopes, devices: &[PciDevice], start: u64, end: u64) {
-    let mut named: Vec<StreamId> = Vec::new();
-    let mut shared = false;
-    for scope in scopes.filter_map(Result::ok) {
-        let kind = scope.kind();
-        if kind != SCOPE_ENDPOINT && kind != SCOPE_SUBHIERARCHY {
-            continue;
-        }
-        let Some(at) = resolve(&scope, devices) else {
-            log!("iommu: rmrr{index} names a function behind a bridge this kernel enumerated no path to");
-            shared = true;
-            continue;
+/// Each scope of RMRR `index` resolved against the functions this kernel
+/// enumerated. A malformed entry stands for itself and every entry after it.
+fn resolved(index: usize, scopes: &[Option<Scope>], devices: &[PciDevice]) -> Vec<kernel::rmrr::Scope> {
+    use kernel::rmrr::Scope as Resolved;
+    let mut out = Vec::new();
+    for scope in scopes {
+        let Some(scope) = scope else {
+            log!("iommu: rmrr{index}'s scope list is malformed past here; what it names is unknown");
+            out.push(Resolved::Unknown);
+            break;
         };
-        if kind == SCOPE_SUBHIERARCHY {
-            shared = true;
-            let (secondary, subordinate) = (at.read_config_u8(0x19), at.read_config_u8(0x1A));
-            named.extend(devices.iter().filter(|d| (secondary..=subordinate).contains(&d.bus)).map(stream_of));
-        }
-        named.push(stream_of(at));
+        let resolved = match (scope.kind(), resolve(scope, devices)) {
+            (SCOPE_ENDPOINT, Some(at)) => Resolved::Endpoint(stream_of(at).requester()),
+            (SCOPE_SUBHIERARCHY, Some(at)) if bridged(at) => {
+                let (secondary, subordinate) = (at.read_config_u8(0x19), at.read_config_u8(0x1A));
+                Resolved::SubHierarchy(
+                    devices
+                        .iter()
+                        .filter(|d| (secondary..=subordinate).contains(&d.bus))
+                        .chain(core::iter::once(at))
+                        .map(|d| stream_of(d).requester())
+                        .collect(),
+                )
+            }
+            _ => {
+                log!("iommu: rmrr{index} names a {} this kernel cannot follow to a function", scope.kind_name());
+                Resolved::Unknown
+            }
+        };
+        out.push(resolved);
     }
-    let alone = named.len() == 1 && !shared;
-    for stream in named {
-        let class = devices.iter().find(|d| stream_of(d) == stream).map(|d| d.read_config_u32(0x08) >> 8);
-        let verdict = kernel::rmrr::verdict(alone, class, start, end);
-        match verdict {
-            kernel::rmrr::Verdict::Kept(..) => log!("iommu: rmrr{index} is {stream}'s alone, kept in its own domain"),
-            kernel::rmrr::Verdict::Refused(why) => log!("iommu: rmrr{index} makes {stream} unclaimable: {why}"),
+    out
+}
+
+/// Every function the RMRRs name, kept or refused by `kernel::rmrr::classify`,
+/// which no claim of it then crosses (`domain::unclaimable`).
+fn classify(reservations: &[kernel::rmrr::Region], devices: &[PciDevice]) {
+    let class = |id: u16| devices.iter().find(|d| stream_of(d).requester() == id).map(|d| d.read_config_u32(0x08) >> 8);
+    for (id, verdict) in kernel::rmrr::classify(reservations, class) {
+        let stream = StreamId::pci((id >> 8) as u8, ((id >> 3) & 0x1F) as u8, (id & 7) as u8);
+        match &verdict {
+            kernel::rmrr::Verdict::Kept(ranges) => log!("iommu: {stream}'s reserved memory is its alone, kept in its own domain: {ranges:x?}"),
+            kernel::rmrr::Verdict::Refused(why) => log!("iommu: {stream} is unclaimable: {why}"),
         }
         domain::reserve(stream, verdict);
     }
@@ -779,9 +799,16 @@ fn stream_of(device: &PciDevice) -> StreamId {
     StreamId::pci(device.bus, device.dev, device.func)
 }
 
-/// The function a scope's path ends at: each step but the last a bridge this
-/// kernel enumerated, whose secondary bus the next step is on (VT-d Rev. 4.0
-/// §8.3.1).
+/// A configured PCI-to-PCI bridge: header type 1 (PCI Local Bus 3.0 §6.1,
+/// 0Eh bits 6:0) with a secondary bus assigned (19h). Anything else names
+/// no bus this kernel can follow.
+fn bridged(device: &PciDevice) -> bool {
+    device.read_config_u8(0x0E) & 0x7F == 1 && device.read_config_u8(0x19) != 0
+}
+
+/// The function a scope's path ends at: each step but the last a configured
+/// bridge this kernel enumerated, whose secondary bus the next step is on
+/// (VT-d Rev. 4.0 §8.3.1).
 fn resolve<'a>(scope: &Scope, devices: &'a [PciDevice]) -> Option<&'a PciDevice> {
     let mut bus = scope.start_bus();
     let mut path = scope.path().peekable();
@@ -789,6 +816,9 @@ fn resolve<'a>(scope: &Scope, devices: &'a [PciDevice]) -> Option<&'a PciDevice>
         let found = devices.iter().find(|d| (d.bus, d.dev, d.func) == (bus, device, function))?;
         if path.peek().is_none() {
             return Some(found);
+        }
+        if !bridged(found) {
+            return None;
         }
         bus = found.read_config_u8(0x19);
     }

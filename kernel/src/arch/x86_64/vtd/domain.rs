@@ -94,17 +94,18 @@ pub fn unclaimable(stream: StreamId) -> Option<&'static str> {
 /// Map every RMRR kept for `stream` at its own address in `id`, which
 /// `stream` attaches to next: firmware requires each stay identity-mapped for
 /// the devices in its scope (VT-d Rev. 4.0 §8.4), and on the T14 the iGPU's
-/// scan-out reads the firmware's framebuffer there. Whole 2 MiB leaves where
-/// the range covers one, 4 KiB pages at its ends; no domain's window hands
-/// out the 2 MiB leaves a range touches ([`avoid`]), so nothing granted or
-/// lent is ever placed beside them.
+/// scan-out reads the firmware's framebuffer there. `kernel::rmrr` merged
+/// them, so each address is placed once, in the leaves `kernel::rmrr::leaves`
+/// names; no domain's window hands out the 2 MiB leaves a range touches
+/// ([`avoid`]), so nothing granted or lent is ever placed beside them.
 pub fn keep_reserved(id: DomainId, stream: StreamId) {
     let kept: Vec<(u64, u64)> = RESERVED
         .lock()
         .iter()
-        .filter_map(|(named, reserved)| match reserved {
-            Reserved::Kept(start, end) if *named == stream => Some((*start, *end)),
-            _ => None,
+        .filter(|(named, _)| *named == stream)
+        .flat_map(|(_, reserved)| match reserved {
+            Reserved::Kept(ranges) => ranges.clone(),
+            Reserved::Refused(_) => Vec::new(),
         })
         .collect();
     for (start, end) in kept {
@@ -112,14 +113,10 @@ pub fn keep_reserved(id: DomainId, stream: StreamId) {
         let space = held.domains.reserved_space(id, start, end);
         let mut units = UNITS.lock();
         let mut tables = TABLES.lock();
-        let mut at = start;
-        while at < end {
-            if at.is_multiple_of(crate::mm::PAGE_2M) && at + crate::mm::PAGE_2M <= end {
-                table::put(&mut tables, space, at, at);
-                at += crate::mm::PAGE_2M;
-            } else {
-                table::put_4k(&mut tables, space, at, at);
-                at += crate::mm::PAGE_SIZE;
+        for leaf in kernel::rmrr::leaves(start, end) {
+            match leaf {
+                kernel::rmrr::Leaf::Large(at) => table::put(&mut tables, space, at, at),
+                kernel::rmrr::Leaf::Page(at) => table::put_4k(&mut tables, space, at, at),
             }
         }
         for unit in units.iter_mut() {

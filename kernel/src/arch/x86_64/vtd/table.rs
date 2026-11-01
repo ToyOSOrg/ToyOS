@@ -19,7 +19,7 @@ const LINE_BYTES: usize = 64;
 
 const SL_READ: u64 = 1 << 0;
 const SL_WRITE: u64 = 1 << 1;
-/// Bit 7 at a page-directory level: a 2 MiB leaf rather than a pointer to the next level — the kernel's only leaf size.
+/// Bit 7 at a page-directory level: a 2 MiB leaf rather than a pointer to the next level.
 const SL_LARGE: u64 = 1 << 7;
 
 /// Root, context and second-level entries share this pointer field, bounded by x86-64's 52-bit physical ceiling.
