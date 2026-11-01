@@ -49,8 +49,9 @@ test depends on the public internet.
 
 The first paired session (`ToyOSOrg/evidence` branch `pr-1065`, `r3/`) put
 ToyOS's T14 LAN download and 64 B round trip at Linux's and its upload at
-a third of it (`issues/tcp-opens-a-connections-window-slower-than-linux-in-its-first-300-ms.md`,
-where what remains of that is now recorded).
+a third of it. That gap was closed by #1069, #1102, #1112 and #1114, and
+the T14 parity session of #1147 read the upload and its first 300 ms at
+Linux's ([evidence](https://github.com/ToyOSOrg/evidence/tree/1c9f4c83c362a1b30746f1e096ad412a2d5f25f9/r2/session)).
 
 The cryptographic rows are not osbench's. AES-GCM, ChaCha20-Poly1305,
 SHA-256 and the rest were measured under Linux on both benches against ring,
