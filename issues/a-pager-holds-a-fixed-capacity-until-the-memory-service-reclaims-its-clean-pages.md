@@ -20,6 +20,12 @@ which 32 MiB may be dirty. The eighth is the bound netstack and the
 compositor take for want of a kernel memory limit
 (`issues/no-physical-memory-fairness.md`); it is an interim, not a sizing.
 
+A pager also serves at most the objects it was made for: DATA one per 16
+pages of its capacity, between 1,024 and 65,536, LOG and BOOT 1,024 each. So
+the DATA server holds at most that many files' objects machine-wide; past it,
+a file nobody holds goes to make room, and an open is refused `NoSpace` only
+while every one is held open.
+
 No other job can take a pager's clean pages back. A pager withdraws them
 only for its own sake (`system/fileserver/src/pages.rs`, `Files::make_room`),
 so with every pager full an ordinary job can be refused memory while an eighth

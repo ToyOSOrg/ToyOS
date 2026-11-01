@@ -35,7 +35,6 @@
 //! transient lists a removal collects.
 
 use alloc::sync::Arc;
-use alloc::vec::Vec;
 use core::cell::{Cell, UnsafeCell};
 use core::marker::PhantomPinned;
 use core::pin::Pin;
@@ -56,6 +55,9 @@ use crate::watch::{self, Watch};
 use crate::DirectMap;
 
 use super::{KObjectVariant, ObjectCore, ZeroHandles};
+
+// Two pieces of a table and their allocator headers share one superframe.
+const _: () = assert!(2 * kernel::chunked::CHUNK_BYTES < crate::mm::MAX_HEAP_ALLOC);
 
 /// Pages one copy pins, and one supply or write draws, at once.
 const CHUNK: usize = 16;
@@ -103,13 +105,49 @@ struct State {
     requests: *mut Request,
     /// Entries whose `no_holders` is set.
     no_holders: usize,
-    /// The frames the core holds, wherever each is.
+    held: Held,
+    gone: bool,
+}
+
+/// The frames the core holds, counted, and those it holds aside for the
+/// next supply: `spare` unpinned, `draining` still pinned by a copy that
+/// read them.
+struct Held {
     core: Core,
-    /// Frames out of the index the core holds aside for the next supply:
-    /// `spare` unpinned, `draining` still pinned by a copy that read them.
     spare: Stack<u64>,
     draining: Stack<u64>,
-    gone: bool,
+}
+
+impl Held {
+    /// A frame drawn for the index gives up its place: kept aside while the
+    /// core would hold less without it, given back otherwise, and always once
+    /// the pager has ended. `drawn` where it was in the index.
+    fn give_back(&mut self, job: &kernel::sched::job::Job, gone: bool, phys: u64, drawn: bool) {
+        if !gone && self.core.leave(drawn) == Leave::Aside {
+            // Out of the index, so no copy can pin it from here.
+            match pmm::pinned(phys) {
+                true => self.draining.push(phys),
+                false => self.spare.push(phys),
+            }
+            return;
+        }
+        // SAFETY: `phys` is a frame this pager drew, out of its index or never
+        // in it, which nothing maps; a reader's pin defers its reuse.
+        unsafe { pmm::free_drawn(job, &[phys]) };
+    }
+
+    /// Move each held-aside frame no copy pins any more to the spare ones.
+    fn settle(&mut self) {
+        let mut k = 0;
+        while k < self.draining.len() {
+            if pmm::pinned(self.draining.get(k)) {
+                k += 1;
+            } else {
+                let phys = self.draining.swap_remove(k);
+                self.spare.push(phys);
+            }
+        }
+    }
 }
 
 // SAFETY: `requests` and every `Request` linked from it are reached only under
@@ -144,18 +182,6 @@ impl State {
         (&mut self.pages, &mut entry.object)
     }
 
-    /// Move each held-aside frame no copy pins any more to the spare ones.
-    fn settle(&mut self) {
-        let mut k = 0;
-        while k < self.draining.len() {
-            if pmm::pinned(self.draining.get(k)) {
-                k += 1;
-            } else {
-                let phys = self.draining.swap_remove(k);
-                self.spare.push(phys);
-            }
-        }
-    }
 }
 
 pub struct PagerObject {
@@ -213,9 +239,7 @@ impl PagerObject {
             free,
             requests: ptr::null_mut(),
             no_holders: 0,
-            core: Core::new(core_pages),
-            spare,
-            draining,
+            held: Held { core: Core::new(core_pages), spare, draining },
             gone: false,
         };
         let report = Duration::from_nanos(report_ns.clamp(1, REPORT_CEILING.nanos()));
@@ -259,61 +283,46 @@ impl PagerObject {
         u64::from(slot)
     }
 
-    /// A frame drawn for the index gives up its place: kept aside while the
-    /// core would hold less without it, given back otherwise. `drawn` where
-    /// it was in the index.
-    fn give_back(&self, state: &mut State, phys: u64, drawn: bool) {
-        if !state.gone && state.core.leave(drawn) == Leave::Aside {
-            // Out of the index, so no copy can pin it from here.
-            match pmm::pinned(phys) {
-                true => state.draining.push(phys),
-                false => state.spare.push(phys),
-            }
-            return;
-        }
-        // SAFETY: `phys` is a frame this pager drew, out of its index or never
-        // in it, which nothing maps; a reader's pin defers its reuse.
-        unsafe { pmm::free_drawn(self.core.job(), &[phys]) };
-    }
-
-    /// Frames the index answered as removed, each given back.
-    fn removed(&self, state: &mut State, frames: &[u64]) {
-        for &phys in frames {
-            self.give_back(state, phys, true);
-        }
-    }
-
-    /// `f` over the index and the live object `id`, collecting each frame it
-    /// removes, which goes back after; waiters read again.
+    /// `f` over the index and the live object `id`, each frame it removes
+    /// given back as it goes; waiters read again.
     fn removing<R>(&self, id: u64, f: impl FnOnce(&mut Pages<u64>, &mut Object, &mut dyn FnMut(u64)) -> R) -> Result<R, SyscallError> {
         let mut state = self.state.lock();
         let slot = state.live(id)?;
-        let mut frames = Vec::new();
-        let answer = {
-            let (pages, object) = state.split(slot);
-            f(pages, object, &mut |phys| frames.push(phys))
-        };
-        self.removed(&mut state, &frames);
+        let job = self.core.job();
+        let State { pages, entries, held, gone, .. } = &mut *state;
+        let object = &mut entries[slot as usize].as_mut().expect("live").object;
+        let answer = f(pages, object, &mut |phys| held.give_back(job, *gone, phys, true));
+        drop(state);
         self.changed.post();
         Ok(answer)
     }
 
-    /// The pager lets object `id` go: it answers `Gone` from now on, its
-    /// pages go, and its slot with its last holder.
+    /// The pager lets object `id` go, in one hold of the lock: it answers
+    /// `Gone` from now on, its pages go, and its slot with its last holder. A
+    /// second release, or one racing the pager's end, finds it released.
     pub fn release(&self, id: u64) -> u64 {
-        let freed = self.removing(id, |pages, object, out| pages.invalidate(object, &mut |f| out(f)));
-        if let Err(e) = freed {
-            return e.to_u64();
-        }
         let mut state = self.state.lock();
-        let slot = u32::try_from(id).expect("live above");
-        let entry = state.entry_mut(slot);
-        entry.owned = false;
-        let no_holders = core::mem::take(&mut entry.no_holders);
-        state.no_holders -= usize::from(no_holders);
+        let slot = match state.live(id) {
+            Ok(slot) => slot,
+            Err(e) => return e.to_u64(),
+        };
+        self.let_go(&mut state, slot);
         drop(state);
-        self.unref(slot);
+        self.changed.post();
         0
+    }
+
+    /// Under the lock, `state`: the unreleased object at `slot` released.
+    fn let_go(&self, state: &mut State, slot: u32) {
+        let job = self.core.job();
+        let State { pages, entries, held, gone, no_holders, .. } = state;
+        let entry = entries[slot as usize].as_mut().expect("paged: a slot an object names is held");
+        pages.invalidate(&mut entry.object, &mut |phys| held.give_back(job, *gone, phys, true));
+        assert!(core::mem::take(&mut entry.owned), "paged: an object released twice");
+        if core::mem::take(&mut entry.no_holders) {
+            *no_holders -= 1;
+        }
+        self.unref_locked(state, slot);
     }
 
     /// A holder of object `id`, which counts as one once its handle is
@@ -343,7 +352,10 @@ impl PagerObject {
     /// A reference to `slot` went; its entry goes with the last, and the slot
     /// is free for another object.
     fn unref(&self, slot: u32) {
-        let mut state = self.state.lock();
+        self.unref_locked(&mut self.state.lock(), slot);
+    }
+
+    fn unref_locked(&self, state: &mut State, slot: u32) {
         let entry = state.entry_mut(slot);
         entry.refs -= 1;
         if entry.refs > 0 {
@@ -351,9 +363,9 @@ impl PagerObject {
         }
         let entry = state.entries[slot as usize].take().expect("paged: a slot an object names is held");
         state.no_holders -= usize::from(entry.no_holders);
-        let mut frames = Vec::new();
-        state.pages.release(entry.object, &mut |phys| frames.push(phys));
-        self.removed(&mut state, &frames);
+        let job = self.core.job();
+        let State { pages, held, gone, .. } = state;
+        pages.release(entry.object, &mut |phys| held.give_back(job, *gone, phys, true));
         state.free.push(slot);
     }
 
@@ -561,14 +573,14 @@ impl PagerObject {
                     Ok(slot) => slot,
                     Err(e) => return refusal(installed, e),
                 };
-                state.settle();
+                state.held.settle();
                 let mut reserved = 0;
                 while reserved < pages {
-                    let ready = !state.spare.is_empty();
-                    match state.core.draw(ready) {
-                        Draw::Aside => aside[reserved] = state.spare.pop(),
+                    let ready = !state.held.spare.is_empty();
+                    match state.held.core.draw(ready) {
+                        Draw::Aside => aside[reserved] = state.held.spare.pop(),
                         Draw::Pool => {}
-                        Draw::Beyond if pmm::promise(self.core.job(), 1) => state.core.promised(),
+                        Draw::Beyond if pmm::promise(self.core.job(), 1) => state.held.core.promised(),
                         Draw::Beyond => break,
                     }
                     reserved += 1;
@@ -615,12 +627,16 @@ impl PagerObject {
                     };
                     match answer {
                         Ok(Supplied::Installed) => {
-                            state.core.installed();
+                            state.held.core.installed();
                             installed += 1;
                         }
-                        Ok(Supplied::Present) => self.give_back(&mut state, frames[k], false),
+                        Ok(Supplied::Present) => {
+                            let gone = state.gone;
+                            state.held.give_back(self.core.job(), gone, frames[k], false);
+                        }
                         Err(why) => {
-                            self.give_back(&mut state, frames[k], false);
+                            let gone = state.gone;
+                            state.held.give_back(self.core.job(), gone, frames[k], false);
                             refused.get_or_insert(why);
                         }
                     }
@@ -912,32 +928,23 @@ impl ZeroHandles for PagerObject {
     fn on_zero_handles(&self) {
         let mut state = self.state.lock();
         state.gone = true;
-        let mut frames = Vec::new();
-        let mut released = Vec::new();
-        let State { pages, entries, .. } = &mut *state;
-        for slot in 0..entries.len() {
-            let Some(entry) = entries[slot].as_mut() else { continue };
-            pages.invalidate(&mut entry.object, &mut |phys| frames.push(phys));
+        for slot in 0..state.entries.len() as u32 {
+            let Some(entry) = state.entries[slot as usize].as_mut() else { continue };
             entry.no_holders = false;
-            if core::mem::take(&mut entry.owned) {
-                released.push(slot as u32);
+            if entry.owned {
+                self.let_go(&mut state, slot);
             }
         }
         state.no_holders = 0;
-        self.removed(&mut state, &frames);
-        let mut aside = Vec::new();
-        while let Some(phys) = state.spare.pop().or_else(|| state.draining.pop()) {
-            aside.push(phys);
+        let job = self.core.job();
+        while let Some(phys) = state.held.spare.pop().or_else(|| state.held.draining.pop()) {
+            // SAFETY: a frame this pager drew and held aside, which nothing
+            // maps; a pin defers its free to its last unpin.
+            unsafe { pmm::free_drawn(job, &[phys]) };
         }
-        // SAFETY: frames this pager drew and holds aside, which nothing maps;
-        // a pin defers a free to its last unpin.
-        unsafe { pmm::free_drawn(self.core.job(), &aside) };
-        let pool = state.core.end();
-        pmm::unpromise(self.core.job(), pool);
+        let pool = state.held.core.end();
+        pmm::unpromise(job, pool);
         drop(state);
-        for slot in released {
-            self.unref(slot);
-        }
         self.changed.post();
     }
 }
@@ -946,8 +953,8 @@ impl Drop for PagerObject {
     fn drop(&mut self) {
         let state = self.state.lock();
         assert!(state.requests.is_null(), "paged: a pager went with a reader still linked");
-        assert!(state.spare.is_empty() && state.draining.is_empty(), "paged: a pager went holding frames aside");
-        pmm::unpromise(self.core.job(), state.core.pool());
+        assert!(state.held.spare.is_empty() && state.held.draining.is_empty(), "paged: a pager went holding frames aside");
+        pmm::unpromise(self.core.job(), state.held.core.pool());
     }
 }
 

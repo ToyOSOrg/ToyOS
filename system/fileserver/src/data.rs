@@ -9,8 +9,8 @@
 //! entry exists, since volumes written before these entries carry none.
 //!
 //! **Every name is indexed in memory at mount** ([`DataVolume::names`]), with
-//! what its entry records, so a lookup, a stat, a listing and "is this a
-//! directory" are map queries and never a search of the tree.
+//! what it is, kept as an open file changes, so a lookup, a stat, a listing
+//! and "is this a directory" are map queries and never a search of the tree.
 //!
 //! **A file's data lives in the blocks its extents name**, read and written
 //! past the cache ([`crate::cache`]). A reserve resolves (allocating where it
@@ -67,8 +67,8 @@ pub struct DataVolume<D: Disk> {
     fs: Mounted<Shared<D>, ReadWrite>,
     cache: Rc<Cache<D>>,
     /// Every name on the volume, a directory entry's without its `/`, and
-    /// what its entry records: for a file the length and time its last
-    /// written entry holds, which an open node's own supersede.
+    /// what it is: for a file its length and time, an open node's as it
+    /// changes ([`noted`]), which its entry holds once written.
     names: BTreeMap<String, Meta>,
     /// Directories that exist whatever the volume holds: each connection's root.
     roots: Vec<String>,
@@ -159,6 +159,14 @@ fn disk_word(e: toyos_blockdev::Error) -> Error {
 
 /// What a directory is: the format keeps no length or time for one.
 const DIR: Meta = Meta { kind: Kind::Dir, size: 0, mtime: 0 };
+
+/// An open file's length and time, now its name's too: a lookup or a listing
+/// reads the index alone.
+fn noted(names: &mut BTreeMap<String, Meta>, open: &Open) {
+    if let Some(meta) = names.get_mut(&open.path) {
+        (meta.size, meta.mtime) = (open.size, open.mtime);
+    }
+}
 
 /// The block holding page `page`, if the extents reach it.
 fn block_for(extents: &[Extent], page: u64) -> Option<u64> {
@@ -312,15 +320,6 @@ impl<D: Disk> DataVolume<D> {
             || (!self.names.contains_key(path) && self.has_children(path))
     }
 
-    /// What `path`'s file or symlink is: its open node's length and time
-    /// where it has one, and its entry's otherwise.
-    fn current(&self, path: &str, recorded: Meta) -> Meta {
-        match self.by_path.get(path).and_then(|n| self.open.get(n)) {
-            Some(open) => Meta { kind: recorded.kind, size: open.size, mtime: open.mtime },
-            None => recorded,
-        }
-    }
-
     fn entry(&mut self, node: Node) -> Result<&mut Open, Error> {
         let open = self.open.get_mut(&node).ok_or(Error::Stale)?;
         if open.gone {
@@ -390,7 +389,7 @@ impl<D: Disk> Volume for DataVolume<D> {
 
     fn lstat(&mut self, path: &str) -> Result<Meta, Error> {
         match self.names.get(path) {
-            Some(&recorded) => Ok(self.current(path, recorded)),
+            Some(&recorded) => Ok(recorded),
             None if self.is_dir(path) => Ok(DIR),
             None => Err(Error::NotFound),
         }
@@ -417,7 +416,7 @@ impl<D: Disk> Volume for DataVolume<D> {
             for (name, &recorded) in self.names.range::<str, _>((Bound::Included(from.as_str()), Bound::Unbounded)) {
                 let Some(rest) = name.strip_prefix(&prefix) else { break };
                 let Some((child, _)) = rest.split_once('/') else {
-                    children.push((rest.to_string(), self.current(name, recorded)));
+                    children.push((rest.to_string(), recorded));
                     continue;
                 };
                 // A child with an entry of its own was listed at it.
@@ -580,6 +579,7 @@ impl<D: Disk> Volume for DataVolume<D> {
         open.size = open.size.max(end);
         open.mtime = now;
         open.dirty = true;
+        noted(&mut self.names, open);
         Ok(())
     }
 
@@ -626,6 +626,7 @@ impl<D: Disk> Volume for DataVolume<D> {
             open.size = size;
             open.mtime = now;
             open.dirty = true;
+            noted(&mut self.names, open);
             return Ok(());
         }
         // What the last kept page holds past the new end is zeroed, so a file
@@ -653,9 +654,10 @@ impl<D: Disk> Volume for DataVolume<D> {
     }
 
     fn set_mtime(&mut self, node: Node, mtime: u64) -> Result<(), Error> {
-        let open = self.entry(node)?;
+        let open = self.open.get_mut(&node).filter(|open| !open.gone).ok_or(Error::Stale)?;
         open.mtime = mtime;
         open.dirty = true;
+        noted(&mut self.names, open);
         Ok(())
     }
 

@@ -6,8 +6,10 @@
 
 use alloc::vec::Vec;
 
-/// The most bytes one piece holds: half the kernel heap's largest allocation.
-pub const CHUNK_BYTES: usize = 1 << 20;
+/// The most bytes one piece holds, 1 MiB less 8 KiB: under half the kernel
+/// heap's largest allocation (2 MiB less 4 KiB), so two pieces and their
+/// allocator headers share one 2 MiB superframe and none takes one alone.
+pub const CHUNK_BYTES: usize = (1 << 20) - (8 << 10);
 
 pub struct Chunked<T> {
     chunks: Vec<Vec<T>>,
@@ -16,9 +18,13 @@ pub struct Chunked<T> {
 }
 
 impl<T> Chunked<T> {
-    /// `len` elements, each `fill()`; `None` where the heap refuses a piece.
+    /// `len` elements, each `fill()`; `None` where the heap refuses a piece,
+    /// or where the list of pieces would itself pass [`CHUNK_BYTES`].
     pub fn new(len: usize, mut fill: impl FnMut() -> T) -> Option<Self> {
         let per = (CHUNK_BYTES / core::mem::size_of::<T>().max(1)).max(1);
+        if len.div_ceil(per) * core::mem::size_of::<Vec<T>>() > CHUNK_BYTES {
+            return None;
+        }
         let mut chunks = Vec::new();
         chunks.try_reserve_exact(len.div_ceil(per)).ok()?;
         let mut left = len;
@@ -126,13 +132,15 @@ mod tests {
     /// No piece is larger than the bound, and every element is reached.
     #[test]
     fn a_long_array_is_pieces_none_past_the_bound() {
-        let len = 3 * CHUNK_BYTES / 8 + 5;
+        let len = 3 * (CHUNK_BYTES / 8) + 5;
         let mut a: Chunked<u64> = Chunked::new(len, || 7).unwrap();
         assert!(a.chunks.iter().all(|c| c.len() * 8 <= CHUNK_BYTES));
         assert_eq!(a.chunks.len(), 4);
         a[len - 1] = 9;
         assert_eq!((a[0], a[len - 1], a.len()), (7, 9, len));
         assert_eq!(a.iter_mut().count(), len);
+        let pieces = CHUNK_BYTES / core::mem::size_of::<Vec<u8>>();
+        assert!(Chunked::<[u8; 4096]>::new(pieces * 255 + 1, || [0; 4096]).is_none(), "a list of pieces past the bound");
     }
 
     #[test]

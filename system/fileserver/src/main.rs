@@ -294,7 +294,9 @@ fn pager(role: Role) -> Option<toyos::paged::Pager> {
         Role::Data => {
             let share = toyos::system::memory_total() / PAGES_SHARE / toyos::paged::PAGE;
             let capacity = share.saturating_sub(2 * SMALL_PAGES).max(SMALL_PAGES);
-            (capacity, DATA_DIRTY.min(capacity / 2), 64 * 1024)
+            // A file held for every 16 pages, the table's own cost a small
+            // part of the pages': at most 65,536.
+            (capacity, DATA_DIRTY.min(capacity / 2), (capacity / 16).clamp(1024, 64 * 1024))
         }
         Role::Log => (SMALL_PAGES, 512, 1024),
         Role::Boot => (SMALL_PAGES, 0, 1024),
@@ -1178,9 +1180,22 @@ impl Server {
         }
         let write = r.flags & (O_WRITE | O_APPEND) != 0;
         let append = r.flags & O_APPEND != 0;
+        let node = match held {
+            Held::File(node) => Some(node),
+            Held::Dir { .. } => None,
+        };
         let file = Description { held, identity, write, append, offset: 0 };
         let client = self.clients.get_mut(&id).expect("pumped");
-        let fid = client.fids.insert(Rc::new(RefCell::new(file)))?;
+        let fid = match client.fids.insert(Rc::new(RefCell::new(file))) {
+            Ok(fid) => fid,
+            Err(e) => {
+                // The open counted is undone, as the close it will never have.
+                if let Some(node) = node {
+                    let _ = self.files.closed(&mut *self.volume, identity, node);
+                }
+                return Err(e);
+            }
+        };
         let reply = Reply { value: fid, ..stat_reply(meta, identity, self.volume_id) };
         Ok(match holder {
             Some(handle) => {

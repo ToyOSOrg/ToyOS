@@ -3235,8 +3235,10 @@ pub const PAGED_WRITTEN: u64 = 1;
 
 crate::user_safe! {
     /// [`SYS_PAGED_OP`]'s arguments: what each word means is its
-    /// [`PagedOp`]'s. Every offset and length ends at or below the last page
-    /// a `u64` can end, or the call is refused `InvalidArgument`.
+    /// [`PagedOp`]'s. A byte range — a read's, a supply's, a write's — and a
+    /// size end at or below the last page a `u64` can end, or the call is
+    /// refused `InvalidArgument`; a page range — a withdrawal's, a failure's,
+    /// a write-back's — is clipped to the object.
     #[derive(Clone, Copy, Default, Debug)]
     pub struct PagedArgs {
         pub object: u64,
@@ -3296,7 +3298,9 @@ pub fn paged_holder(pager: RawHandle, object: u64) -> Result<RawHandle, SyscallE
 /// or fails it, the object shrinks or is released, or the pager ends: `Io`
 /// for a failed page before any byte was read (a short count after some),
 /// `Gone` once the object or the pager ended. A pager's process is refused,
-/// `PermissionDenied`; any handle but a holder, `NotSupported`.
+/// `PermissionDenied`, as is a holder without `READ`; any other kind of
+/// handle, `InvalidArgument`, so a peer's claim that a handle is a holder
+/// can be checked.
 pub fn paged_read(holder: RawHandle, out: &mut [u8], offset: u64) -> Result<usize, SyscallError> {
     check(syscall(SYS_PAGED_READ, holder.0 as u64, out.as_mut_ptr() as u64, out.len() as u64, offset)).map(|n| n as usize)
 }

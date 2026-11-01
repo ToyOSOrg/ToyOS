@@ -173,10 +173,12 @@ impl AsHandle for Pager {
 /// Why a received handle is no holder this process can read.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum NotAHolder {
-    /// It is a holder, and this process is a pager, which the kernel refuses
-    /// a holder's read.
-    Pager,
-    /// It is some other object.
+    /// A holder this process may not read: it is a pager, which the kernel
+    /// refuses a holder's read, or the holder carries no `READ`.
+    Refused,
+    /// A holder whose object or pager has ended since it was sent.
+    Ended,
+    /// Some other object.
     Other,
 }
 
@@ -189,7 +191,8 @@ impl Paged {
     pub fn received(handle: OwnedHandle) -> Result<Self, NotAHolder> {
         match syscall::paged_read(handle.raw(), &mut [], 0) {
             Ok(0) => Ok(Self(handle)),
-            Err(SyscallError::PermissionDenied) => Err(NotAHolder::Pager),
+            Err(SyscallError::PermissionDenied) => Err(NotAHolder::Refused),
+            Err(SyscallError::Gone) => Err(NotAHolder::Ended),
             _ => Err(NotAHolder::Other),
         }
     }

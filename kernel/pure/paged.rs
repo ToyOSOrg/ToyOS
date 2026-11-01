@@ -22,8 +22,6 @@
 
 #![forbid(unsafe_code)]
 
-use alloc::vec::Vec;
-
 use crate::chunked::Chunked;
 
 pub use crate::vm::PAGE;
@@ -41,8 +39,8 @@ pub fn within_reach(offset: u64, len: u64) -> bool {
 /// The most pages one write-back range covers: a 64-byte bitmap.
 pub const RANGE_PAGES: u64 = 512;
 
-/// The write-back ranges one object has open at once.
-pub const OPEN_RANGES: usize = 8;
+/// The write-back ranges a pager has open at once, across its objects.
+pub const OPEN_RANGES: usize = 64;
 
 const NONE: u32 = u32::MAX;
 
@@ -206,14 +204,13 @@ struct Slot<F> {
 }
 
 /// One object's part of the table: its size, whether its pager ended, the
-/// list of its slots and its open write-back ranges.
+/// list of its slots.
 pub struct Object {
     id: u32,
     size: u64,
     gone: bool,
     head: u32,
     pages: usize,
-    open: [Option<(u64, u64)>; OPEN_RANGES],
 }
 
 impl Object {
@@ -244,6 +241,8 @@ pub struct Pages<F> {
     buckets: Chunked<u32>,
     dirty_ceiling: usize,
     dirty_held: usize,
+    /// Each write-back range open: its object, first page and count.
+    open: [Option<(u32, u64, u64)>; OPEN_RANGES],
     /// Probes [`find`](Self::find) made, which a test bounds a walk by.
     #[cfg(test)]
     probes: core::cell::Cell<usize>,
@@ -276,6 +275,7 @@ impl<F: Copy> Pages<F> {
             buckets,
             dirty_ceiling,
             dirty_held: 0,
+            open: [None; OPEN_RANGES],
             #[cfg(test)]
             probes: core::cell::Cell::new(0),
         })
@@ -307,7 +307,7 @@ impl<F: Copy> Pages<F> {
     /// [`release`](Self::release) takes every page it held.
     pub fn object(&mut self, id: u32, size: u64) -> Object {
         assert!(size <= LAST_END, "an object of {size} bytes past the last page");
-        Object { id, size, gone: false, head: NONE, pages: 0, open: [None; OPEN_RANGES] }
+        Object { id, size, gone: false, head: NONE, pages: 0 }
     }
 
     fn hash(&self, object: u32, page: u64) -> usize {
@@ -517,11 +517,12 @@ impl<F: Copy> Pages<F> {
     /// Begin writing back `count` pages from `first`: each dirty page is
     /// cleaned and keeps its slot until the end. The pages begun, as a bitmap.
     pub fn writeback_begin(&mut self, o: &mut Object, first: u64, count: u64) -> Result<[u64; 8], Refused> {
-        if !Self::range_ok(o, first, count) || o.open.iter().flatten().any(|&r| Self::overlaps(r, (first, count))) {
+        let overlapping = self.open.iter().flatten().any(|&(id, a, n)| id == o.id && Self::overlaps((a, n), (first, count)));
+        if !Self::range_ok(o, first, count) || overlapping {
             return Err(Refused::InvalidArgument);
         }
-        let at = o.open.iter().position(Option::is_none).ok_or(Refused::InvalidArgument)?;
-        o.open[at] = Some((first, count));
+        let at = self.open.iter().position(Option::is_none).ok_or(Refused::InvalidArgument)?;
+        self.open[at] = Some((o.id, first, count));
         let mut begun = [0u64; 8];
         for k in 0..count {
             let Some(i) = self.find(o.id, first + k) else { continue };
@@ -539,8 +540,8 @@ impl<F: Copy> Pages<F> {
     /// End the write-back of exactly a range begun: a bit per page still
     /// dirty, holding its slot. A page removed meanwhile is clear.
     pub fn writeback_end(&mut self, o: &mut Object, first: u64, count: u64, written: bool) -> Result<[u64; 8], Refused> {
-        let at = o.open.iter().position(|r| *r == Some((first, count))).ok_or(Refused::InvalidArgument)?;
-        o.open[at] = None;
+        let at = self.open.iter().position(|r| *r == Some((o.id, first, count))).ok_or(Refused::InvalidArgument)?;
+        self.open[at] = None;
         let mut kept = [0u64; 8];
         for k in 0..count {
             let Some(i) = self.find(o.id, first + k) else { continue };
@@ -566,29 +567,33 @@ impl<F: Copy> Pages<F> {
     /// A range longer than the object holds pages walks its pages, not the range.
     pub fn withdraw(&mut self, o: &mut Object, first: u64, count: u64, out: &mut impl FnMut(F)) -> usize {
         let end = first.saturating_add(count);
-        let mut held = Vec::new();
+        let mut removed = 0;
+        let mut take = |pages: &mut Self, o: &mut Object, i: u32| {
+            let s = pages.slot(i);
+            if s.state.counts_dirty() || s.state.write_pins > 0 {
+                return;
+            }
+            if let Some(frame) = pages.remove(o, i) {
+                out(frame);
+            }
+            removed += 1;
+        };
         if count > o.pages as u64 {
             let mut at = o.head;
             while at != NONE {
                 let s = self.slot(at);
-                if (first..end).contains(&s.page) {
-                    held.push(at);
+                let (next, page) = (s.next, s.page);
+                if (first..end).contains(&page) {
+                    take(self, o, at);
                 }
-                at = s.next;
+                at = next;
             }
         } else {
-            held.extend((first..end).filter_map(|page| self.find(o.id, page)));
-        }
-        let mut removed = 0;
-        for i in held {
-            let s = self.slot(i);
-            if s.state.counts_dirty() || s.state.write_pins > 0 {
-                continue;
+            for page in first..end {
+                if let Some(i) = self.find(o.id, page) {
+                    take(self, o, i);
+                }
             }
-            if let Some(frame) = self.remove(o, i) {
-                out(frame);
-            }
-            removed += 1;
         }
         removed
     }
@@ -646,7 +651,11 @@ impl<F: Copy> Pages<F> {
             }
         }
         o.gone = true;
-        o.open = [None; OPEN_RANGES];
+        for range in &mut self.open {
+            if range.is_some_and(|(id, _, _)| id == o.id) {
+                *range = None;
+            }
+        }
     }
 
     /// The object is let go: every page goes, as at [`invalidate`](Self::invalidate).
