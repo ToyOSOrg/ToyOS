@@ -6,7 +6,7 @@
 
 use alloc::vec::Vec;
 
-/// A declared version the file leaves unknown.
+/// A declared version that means the caller's default, as if the file listed no entry (§6.5).
 pub const UNKNOWN: u8 = 99;
 
 /// A message's group and its identifier within the group.
@@ -23,9 +23,9 @@ pub struct Entry {
     pub notification: u8,
 }
 
-/// A file's command-version record, its entries in the file's order. Both
-/// pinned files list (0x0e, 0x17) twice, so a message may have several; what
-/// several entries mean together no source states.
+/// A file's command-version record, its entries in the file's order. A lookup takes the first
+/// entry whose group and identifier match (§6.5): both pinned files list (0x0e, 0x17) twice, a
+/// pair no message here is in.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Declared(Vec<(Id, Entry)>);
 
@@ -47,25 +47,18 @@ impl Declared {
         self.0.iter().copied()
     }
 
-    /// What the file declares of one side of `id`: `None` where it lists no
-    /// entry, as it lists none for a message with one layout, and `Err` where
-    /// it lists more than one.
-    pub fn of(&self, id: Id, side: Side) -> Result<Option<u8>, Repeated> {
-        let mut entries = self.0.iter().filter(|&&(at, _)| at == id).map(|&(_, entry)| match side {
+    /// What the file declares of one side of `id`, by its first entry for `id`: `None` where it
+    /// lists none, as it lists none for a message with one layout, or where the entry says
+    /// [`UNKNOWN`].
+    pub fn of(&self, id: Id, side: Side) -> Option<u8> {
+        let entry = self.0.iter().find(|&&(at, _)| at == id).map(|&(_, entry)| entry)?;
+        let version = match side {
             Side::Command => entry.command,
             Side::Notification => entry.notification,
-        });
-        let first = entries.next();
-        match entries.next() {
-            None => Ok(first),
-            Some(_) => Err(Repeated(id)),
-        }
+        };
+        (version != UNKNOWN).then_some(version)
     }
 }
-
-/// A message the command-version record lists more than once.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub struct Repeated(pub Id);
 
 /// Which of an entry's two versions a message is: a command the driver sends,
 /// or what the firmware sends, a notification or a command's answer.
@@ -161,8 +154,6 @@ pub const EXCHANGED: &[Message] = &[
 pub enum Unsupported {
     /// Declared at a version no layout here is written for.
     Version { message: &'static str, declared: Option<u8> },
-    /// Declared more than once.
-    Repeated { message: &'static str },
 }
 
 /// The scan request's channel entry (§10.15): below version 17 the band is
@@ -192,9 +183,7 @@ pub struct Versions {
 impl Versions {
     pub fn of(declared: &Declared) -> Result<Versions, Unsupported> {
         let at = |message: Message| {
-            let version = declared
-                .of(message.id, message.side)
-                .map_err(|Repeated(_)| Unsupported::Repeated { message: message.name })?;
+            let version = declared.of(message.id, message.side);
             match message.layouts.contains(&version) {
                 true => Ok(version),
                 false => Err(Unsupported::Version { message: message.name, declared: version }),

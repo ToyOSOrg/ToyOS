@@ -290,7 +290,7 @@ W1, P6.
   - an SAE Commit with an invalid scalar or element;
   - a PSK handshake for a network marked by Transition Disable.
 
-**W3, the firmware.** Depends on: the specification's first revision.
+**W3, the firmware: done.** Depends on: the specification, revision 2.
 - **Scope:**
   - the firmware containers;
   - commands and notifications typed per declared version;
@@ -308,15 +308,23 @@ W1, P6.
   sent is declared at a typed version; that sizes match those the
   specification asserts; and that recorded bench traces, addresses
   scrubbed, are answered.
-- **Built, but not done** (`system/ax2xx/driver`, `toyos-ax2xx`). The first
-  three exits are host tests. The fourth waits for a specification revision
-  that carries a trace's bytes: revision 1 states measured values and no
-  bytes, and the writer reads no demo log.
-- **Revision 1 leaves two container facts unsaid.** Both pinned files list
-  (0x0e, 0x17) twice in their command-version record (c1 n0 and c99 n1,
-  read here as one entry per side), and §6.5 does not say how two entries combine; the driver exchanges nothing of
-  it, and refuses a file that repeats a message it does. The hardware-type
-  record is 12 bytes, and §6.3 names only its first four.
+- **Done** (`system/ax2xx/driver`, `toyos-ax2xx`). The first three exits
+  are host tests. The fourth is `tests/traces.rs`, over the AX200's two
+  recorded runs (§15): Run13 through a passive scan, Run11 through a
+  refused command.
+  - Each device payload's decisions are the same with every unrecorded bit
+    complemented.
+  - From those decisions and the file, Run13's commands 0 to 11 and its
+    scan request, and Run11's 0 to 8, are built byte for byte.
+  - Not built: commands 12 to 14, which are the demo's (§15.3), and the
+    scan request's probe template and segments, which are the caller's and
+    are taken from the run.
+  - Run11's error tables name the refused command and both its lengths.
+  - A version lookup takes a message's first entry and reads 99 as no
+    entry (§6.5).
+- **No AX210 trace exists**: no run drove one (§15.1). The AX210's own paths,
+  its alive SKU and platform NVM among them, are first checked by W5's T14
+  rows.
 
 **W4, `wlan`, `radio`, `wifi` and the settings program.** Depends on: W1,
 W2.

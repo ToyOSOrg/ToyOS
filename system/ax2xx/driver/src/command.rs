@@ -1,7 +1,7 @@
 //! The commands the driver sends through a passive scan (§10), each encoded
 //! to its payload and carrying the message it is, so nothing sends one
-//! payload under another's identifier. The 8-byte header in front of it is
-//! the command channel's (§8.2).
+//! payload under another's identifier, and the command channel's 8-byte
+//! header in front of it (§8.2).
 
 use alloc::vec::Vec;
 
@@ -13,6 +13,16 @@ use crate::versions::{self, Message, ScanForm, Versions};
 pub struct Command {
     pub message: Message,
     pub payload: Vec<u8>,
+}
+
+impl Command {
+    /// The command's 8-byte header (§8.2): its identifier and group, its sequence, the payload's
+    /// length, a reserved byte and version 0. The sequence is the descriptor's `slot` on command
+    /// queue 0, its reserved bits clear. `None` for a payload past what the length field holds.
+    pub fn header(&self, slot: u8) -> Option<[u8; 8]> {
+        let [l0, l1] = u16::try_from(self.payload.len()).ok()?.to_le_bytes();
+        Some([self.message.id.id, self.message.id.group, slot, 0, l0, l1, 0, 0])
+    }
 }
 
 /// A payload as it is written, field by field.

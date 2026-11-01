@@ -1,5 +1,6 @@
 //! Which radio a function is, and whether its firmware file serves it (§1).
 
+use crate::command::Band;
 use crate::container::Firmware;
 
 pub const INTEL: u16 = 0x8086;
@@ -28,6 +29,31 @@ impl Part {
         match self {
             Part::Ax200 => "iwlwifi-cc-a0-77.ucode",
             Part::Ax210 => "iwlwifi-ty-a0-gf-a0-89.ucode",
+        }
+    }
+
+    /// The NVM profile's entries the part has (§10.5): the 2.4 and 5 GHz channels on the AX200,
+    /// and the 6 GHz channels after them on the AX210. Entries past them say nothing.
+    pub const fn profile_channels(self) -> usize {
+        match self {
+            Part::Ax200 => 51,
+            Part::Ax210 => crate::notification::PROFILE_CHANNELS,
+        }
+    }
+
+    /// The channel the NVM profile's entry `index` is for (§10.5): 2.4 GHz channels 1 to 14, 5 GHz
+    /// channels 36 to 144 and 149 to 181 by fours, then on the AX210 6 GHz channels 1 to 233 by
+    /// fours. `None` past the part's entries.
+    pub fn profile_channel(self, index: usize) -> Option<(Band, u8)> {
+        let n = |offset: usize, first: u8, step: u8| -> Option<u8> { u8::try_from(offset).ok()?.checked_mul(step)?.checked_add(first) };
+        if index >= self.profile_channels() {
+            return None;
+        }
+        match index {
+            0..14 => Some((Band::Ghz2_4, n(index, 1, 1)?)),
+            14..42 => Some((Band::Ghz5, n(index.checked_sub(14)?, 36, 4)?)),
+            42..51 => Some((Band::Ghz5, n(index.checked_sub(42)?, 149, 4)?)),
+            _ => Some((Band::Ghz6, n(index.checked_sub(51)?, 1, 4)?)),
         }
     }
 
