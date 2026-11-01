@@ -27,9 +27,10 @@ const LINE: usize = toyos_wifi::MAX_PASSPHRASE + 1;
 /// Standard input's first line into `line`: its length, or `None` where input ends before any
 /// of it. A line longer than `line` is cut.
 ///
-/// **Read from the descriptor itself**, never through std's `Stdin`: on a terminal that would
-/// echo the passphrase as it is typed, and keep it in std's line buffer. A backspace erases
-/// the octet before it, and other control octets are dropped.
+/// **Read from the descriptor itself**, never through std's `Stdin`, which on a terminal
+/// echoes the passphrase as it is typed and keeps it in a line buffer: a workaround for
+/// `issues/toyos-std-echoes-stdin-and-keeps-each-line.md`, deleted when it closes. A
+/// backspace erases the octet before it, and other control octets are dropped.
 fn passphrase(line: &mut [u8; LINE]) -> Option<usize> {
     let (mut len, mut byte) = (0usize, [0u8; 1]);
     loop {

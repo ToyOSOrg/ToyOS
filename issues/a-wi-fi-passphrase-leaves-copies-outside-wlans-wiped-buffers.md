@@ -11,7 +11,7 @@ driver the temporal keys it derives. Both programs keep their own copies in
 buffers they wipe with volatile stores: `toyos_crypto::Secret` in `wifi` and in
 `toyos-wlan-station`, and `FrameRx::wipe` on `wlan`'s receive buffers. `wifi`
 reads the passphrase from its descriptor itself, so std neither echoes it nor
-keeps it. Some copies are still made outside those buffers:
+keeps it (`issues/toyos-std-echoes-stdin-and-keeps-each-line.md`). Some copies are still made outside those buffers:
 
 - **The kernel's message frames.** A frame's bytes are queued in 4 KiB frames
   that `kernel/src/frame_bytes.rs` says are "never zeroed", and they go back to
