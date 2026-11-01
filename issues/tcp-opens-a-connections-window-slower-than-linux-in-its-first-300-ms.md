@@ -6,12 +6,13 @@ opened: 2026-10-24
 
 # [tcp] opens a connection's window slower than Linux in its first 300 ms
 
-On the T14's wired path to the AMD bench's Wi-Fi peer, a ToyOS TCP sender
-delivers 2.1–3.3 MB in a new connection's first 100 ms and 24–25 MB by
-300 ms, where the bench's Linux delivers 6.4–6.5 MB and 29.7 MB. From then on
-both run at line rate. The upload row reads 112 MB/s against Linux's 113 in
-the same session (#1102's A/B, at the end of this record). Received TCP is at
-parity on that path.
+On the T14's wired path to the AMD bench's Wi-Fi peer, a paced ToyOS TCP
+sender (#1114) delivers 6.07 MB in a new connection's first 100 ms and
+29.2 MB by 300 ms. In the same session the bench's Linux delivered
+6.10–6.38 MB and 28.6–29.6 MB. The upload row reads 114 MB/s against
+Linux's 113. Only the 100 ms mark is short, by 30 KB in one boot (the
+parity boot, at the end of this record). Before #1114, ToyOS delivered
+2.0–3.3 MB and 23.8–25.6 MB. Received TCP is at parity on that path.
 
 This record began as the upload at a third of Linux's (41 MB/s against 113).
 What follows is that history, the causes found and removed, and the residual.
@@ -288,6 +289,30 @@ own processes (#1106):
   a short round trip is more than the window. #1114's pacer, as of
   3a0744d34, holds at most half the window. The parity read waits on a boot
   of that head, on current main.
+
+**The parity boot, 2026-11-01**
+([evidence](https://github.com/ToyOSOrg/evidence/tree/8f08a8e9399817fc669e395dc717ee236a18ed35/r7/t14)).
+One boot of #1114 at 3a0744d34, on main after #1106, with Linux before and
+after it:
+
+| | upload p50, MB/s | received by 100 ms | 300 ms | 1 s | 2 s |
+|---|---|---|---|---|---|
+| Linux (2 runs) | 113, 113 | 6.10, 6.38 MB | 28.63, 29.56 MB | 109.1, 110.5 MB | 224.6, 226.1 MB |
+| ToyOS | 114 | 6.07 MB | 29.19 MB | 110.7 MB | 227.0 MB |
+
+- The rule set before the run asked for the 100 ms and 300 ms marks at or
+  above the lower Linux run's, p50 within 1 MB/s, and nothing resent. The
+  300 ms mark, p50 and loss passed. The 100 ms mark missed by 30 KB, 0.5 %,
+  so the rule is not met and this record stays open.
+- That gap is smaller than the spread of the marks across runs: Linux's two
+  runs differ by 280 KB, and the A/B's three P runs by 260 KB. One boot does
+  not separate it from noise.
+- Nothing was resent, and no RTO, recovery or loss probe occurred. Every RTT
+  sample came from a departure (33,319, none from the echo). CSS entered in
+  134 rounds, 420 times, and never exited.
+- The pacer held 73 ms over the row, against 33–41 ms with the A/B's
+  bucket. The half-window bound holds more on the short round trip, as
+  expected.
 
 **Exit**: `osbench_lan` on the T14 reads `lan.wired.tcp.upload` at Linux's
 in the same session, with the first 300 ms read at the receiver no slower, or
