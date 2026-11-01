@@ -12,7 +12,7 @@
 //! DMC's program ([`dmc`]), powers down the wells the scan-out does not use and
 //! lets the engine enter DC5 and DC6. Anything it does not understand of the
 //! firmware's state is refused by name. A refusal before a write leaves the
-//! state as found, and no refusal leaves DC6 allowed.
+//! state as found, and no refusal allows DC6.
 
 #![no_std]
 #![forbid(unsafe_code)]
