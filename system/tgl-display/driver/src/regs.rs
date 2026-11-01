@@ -119,6 +119,84 @@ pub const MAILBOX_DATA0: usize = 0x13_8128;
 pub const MAILBOX_DATA1: usize = 0x13_812C;
 pub const RUN_BUSY: u32 = 1 << 31;
 
+/// TRANS_VBLANK_A, 60010h: 12:0 Vertical Blank Start, in lines minus one.
+/// TRANS_VTOTAL_A's 12:0 is Vertical Active, in lines minus one.
+pub const TRANS_VBLANK_A: usize = 0x6_0010;
+pub const LINES: u32 = 0x1FFF;
+
+/// PWR_WELL_CTL_AUX1, 45440h, generally the BIOS's, and PWR_WELL_CTL_AUX2,
+/// 45444h, the driver's: bit 1 AUX A IO Power Request, bit 0 its state.
+pub const PWR_WELL_CTL_AUX1: usize = 0x4_5440;
+pub const PWR_WELL_CTL_AUX2: usize = 0x4_5444;
+pub const AUX_A_REQUEST: u32 = 1 << 1;
+pub const AUX_A_STATE: u32 = 1 << 0;
+
+/// DDI_AUX_CTL_A, 64010h: 31 Send Busy, 30 Done, 28 Time out error, 27:26
+/// Time out timer value, 25 Receive error, 24:20 Message Size, 9:5 Fast Wake
+/// Sync Pulse Count, 4:0 Sync Pulse Count. DDI_AUX_DATA_A, five dwords from
+/// 64014h, "The MSbyte is transmitted first".
+pub const DDI_AUX_CTL_A: usize = 0x6_4010;
+pub const DDI_AUX_DATA_A: usize = 0x6_4014;
+pub const AUX_SEND_BUSY: u32 = 1 << 31;
+pub const AUX_DONE: u32 = 1 << 30;
+pub const AUX_TIMEOUT: u32 = 1 << 28;
+pub const AUX_RECEIVE_ERROR: u32 = 1 << 25;
+/// 11b, 4000 µs: Vol 12 "AUX Functional Sequence" step 4 asks for the
+/// maximum.
+pub const AUX_TIMEOUT_MAX: u32 = 0b11 << 26;
+pub const AUX_SIZE_SHIFT: u32 = 20;
+pub const AUX_SIZE: u32 = 0x1F;
+/// "SW must always program this field to the value of decimal 7."
+pub const AUX_FAST_WAKE_SYNC: u32 = 7 << 5;
+/// At least 25 ("the minimum amount of pulses required for a standard
+/// transaction"); 31 is 32 pulses.
+pub const AUX_SYNC: u32 = 31;
+/// The most bytes a message holds, header included.
+pub const AUX_BYTES: usize = 20;
+
+/// SRD_CTL_A, 60800h: 31 SRD Enable, 29 Context restore to PSR Active
+/// (hardware's, kept), 24:20 Max Sleep Time, 11 TP2 TP3 Select, 9:8 TP2 TP3
+/// Time, 7:6 TP4 time ("Always program TP4 to 11b"), 5:4 TP1 Time, 3:0 Idle
+/// Frames.
+pub const SRD_CTL_A: usize = 0x6_0800;
+pub const SRD_ENABLE: u32 = 1 << 31;
+pub const SRD_CONTEXT_RESTORE: u32 = 1 << 29;
+/// All ones, about 3.875 s; all zeros is invalid.
+pub const SRD_MAX_SLEEP: u32 = 0x1F << 20;
+/// 10b, 2.5 ms, for TP1 and for TP2: the longest training a wake can need.
+pub const SRD_TP2_TIME: u32 = 0b10 << 8;
+pub const SRD_TP4_SKIP: u32 = 0b11 << 6;
+pub const SRD_TP1_TIME: u32 = 0b10 << 4;
+pub const SRD_IDLE_FRAMES: u32 = 0xF;
+
+/// SRD_STATUS_A, 60840h: 31:29 SRD State, 27:26 Link Status, 19:16 SRD Entry
+/// Count. SRD_PERF_CNT_A, 60844h, 23:0: milliseconds in SRD.
+pub const SRD_STATUS_A: usize = 0x6_0840;
+pub const SRD_PERF_CNT_A: usize = 0x6_0844;
+pub const SRD_STATE_SHIFT: u32 = 29;
+
+/// PSR_IMR_A, 60814h, and PSR_IIR_A, 60818h: 2 PSR Aux Error, 1 PSR Exit
+/// ("set on the first blank start after PSR exit").
+pub const PSR_IMR_A: usize = 0x6_0814;
+pub const PSR_IIR_A: usize = 0x6_0818;
+pub const PSR_AUX_ERROR: u32 = 1 << 2;
+pub const PSR_EXIT: u32 = 1 << 1;
+
+/// PSR_MASK_A, 60860h: 28 Mask Max Sleep, 26 Mask Memup, 25 Mask Hotplug.
+/// None but 31:30 may change while PSR is enabled.
+pub const PSR_MASK_A: usize = 0x6_0860;
+pub const PSR_MASKED: u32 = 1 << 28 | 1 << 26 | 1 << 25;
+
+/// PSR2_CTL_A, 60900h: bit 31 PSR2 Enable.
+pub const PSR2_CTL_A: usize = 0x6_0900;
+pub const PSR2_ENABLE: u32 = 1 << 31;
+
+/// VIDEO_DIP_CTL_A, 60200h: 26:25 VSC select, 00b "Header and Data", and bit
+/// 20 VDIP Enable VSC.
+pub const VIDEO_DIP_CTL_A: usize = 0x6_0200;
+pub const VSC_SELECT: u32 = 0b11 << 25;
+pub const VSC_ENABLE: u32 = 1 << 20;
+
 /// DE_PIPE_INTERRUPT_A (Vol 2c), 44400h-4440Fh: ISR, IMR, IIR and IER, bit 0
 /// Vblank. The other categories this driver enables nothing in, at their IER:
 /// pipes B-D, DE_PORT_INTERRUPT, DE_MISC_INTERRUPT, DE_HPD_INTERRUPT and

@@ -21,13 +21,17 @@ use core::fmt;
 
 use toyos_device_memory::Registers;
 
+pub mod aux;
 pub mod dmc;
 pub mod interrupt;
+pub mod psr;
 pub mod regs;
 pub mod watermark;
 
 #[cfg(test)]
 mod dc_tests;
+#[cfg(test)]
+mod psr_tests;
 #[cfg(test)]
 mod model;
 #[cfg(test)]
@@ -105,6 +109,34 @@ pub enum Refusal {
     /// DISPLAY_INT_CTL named a pending category this driver enabled nothing
     /// in.
     Interrupts(u32),
+    /// PSR or PSR2 was already enabled.
+    PsrOn,
+    /// PSR_IIR named an AUX error of PSR's own.
+    PsrAuxError,
+    /// Pipe A's vertical blank starts after vertical active. PSR there needs
+    /// a latency-reporting change this driver does not make.
+    DelayedVblank { start: u64, active: u64 },
+    /// A watermark level of the plane is disabled. PSR there needs the same
+    /// change.
+    WatermarkLevelOff(usize),
+    /// AUX A's IO power did not come on.
+    AuxPower,
+    /// An AUX transaction with the panel failed.
+    Aux(aux::Fault),
+    /// The panel's DPCD 00000h, its DPCD revision, reads 0: no receiver
+    /// answered with its capabilities.
+    NoReceiver,
+    /// The panel's DPCD 00070h names no PSR version.
+    NoPsr,
+    /// The panel cannot be set to D0 over DPCD 00600h.
+    NoSetPower,
+    /// The panel's PSR setup time field is the reserved value.
+    SinkSetupReserved,
+    /// The panel reported PSR errors, or an internal error, before enable.
+    SinkErrors { errors: u8, status: u8 },
+    /// The panel's setup time, in lines, does not fit vertical blank less a
+    /// line.
+    SetupTime { lines: u64, vblank: u64 },
 }
 
 impl fmt::Display for Refusal {
@@ -134,6 +166,24 @@ impl fmt::Display for Refusal {
             }
             Self::PowerWellHeld(well) => write!(f, "power well {well} stayed on with its requests withdrawn"),
             Self::Interrupts(pending) => write!(f, "DISPLAY_INT_CTL names pending categories {pending:#010x} beyond pipe A's"),
+            Self::PsrOn => write!(f, "PSR or PSR2 is already enabled"),
+            Self::PsrAuxError => write!(f, "PSR_IIR names a PSR AUX error"),
+            Self::DelayedVblank { start, active } => {
+                write!(f, "vertical blank starts at line {start}, past vertical active's {active}")
+            }
+            Self::WatermarkLevelOff(level) => write!(f, "watermark level {level} is disabled"),
+            Self::AuxPower => write!(f, "AUX A's IO power did not come on"),
+            Self::Aux(fault) => write!(f, "an AUX transaction with the panel failed: {fault:?}"),
+            Self::NoReceiver => write!(f, "the panel's DPCD revision reads 0"),
+            Self::NoPsr => write!(f, "the panel names no PSR version"),
+            Self::NoSetPower => write!(f, "the panel cannot be set to D0"),
+            Self::SinkSetupReserved => write!(f, "the panel's PSR setup time is the reserved value"),
+            Self::SinkErrors { errors, status } => {
+                write!(f, "the panel reports PSR errors {errors:#04x}, status {status:#04x}")
+            }
+            Self::SetupTime { lines, vblank } => {
+                write!(f, "the panel's PSR setup takes {lines} lines of a {vblank}-line vertical blank")
+            }
         }
     }
 }

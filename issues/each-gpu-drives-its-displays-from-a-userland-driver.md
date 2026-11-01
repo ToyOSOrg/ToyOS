@@ -92,6 +92,12 @@ The kernel keeps only generic mechanisms:
    - When a connection a present arrived on ends from the compositor's side (a restart, a `swap`, or the compositor dropping the driver), the driver connects again, at most 8 times a boot. A protocol refusal, or a connection that ended before any present arrived on it, ends presents for the boot, by name.
    - The compositor does not yet pace frames by `Presented`. It still blits the firmware's framebuffer itself until stage 5.
 4. **PSR on the eDP panel**, measured together with stage 2. PSR's first-frame exit latency goes to the owner in absolute numbers before PSR lands.
+   - PSR1 first. The source side follows Vol 2c/12. The panel's side (AUX framing, DPCD 00070h-00071h, 00170h, 00600h, 02006h-02009h) comes from a clean-room brief of VESA facts, with no VESA text, and is recorded in the PR's evidence.
+   - Vol 2c says transcoder A's SRD "only operate[s] in standby", while the brief's vendor-code fact says Tiger Lake turns the link off. The driver follows the PRM and tells the panel the main link stays active. The first boot reads SRD_STATUS's state and link on entry and exit.
+   - The VSC SDP is hardware's (VSC select 00b), every AUX transaction comes before DC6 and PSR, and a present ends SRD by flipping the surface to itself.
+   - PSR is enabled only from the compositor's first present, the whole output, and disabled when the connection ends.
+   - Out until PSR1 is measured: PSR2 and selective fetch. They have a Tiger Lake flicker history.
+   - Out until the firmware mechanism is decided: the VBT's PSR entry, which lives in the IGD OpRegion. No ToyOS mechanism reaches it today, so the TP times are 2.5 ms, the brief's safest.
 5. **The rest of `display-output`.** virtio-gpu and the framebuffer become drivers. The panic surface lands here.
 6. **Intel modesetting**: combo-PHY DDIs, DPLLs and CDCLK, DP link training with DSC, HDMI 2.0 with SCDC, EDID over AUX and GMBUS, several outputs.
 7. **Intel Type-C DP alt mode**: FIA/IOM state, TCCOLD, the Dekel PHY, hotplug.

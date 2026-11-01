@@ -11,6 +11,7 @@ extern crate std;
 
 use std::cell::{Cell, RefCell};
 use std::collections::BTreeMap;
+use std::vec;
 use std::vec::Vec;
 
 use toyos_device_memory::Registers;
@@ -50,6 +51,53 @@ pub struct Engine {
     jump: Cell<u64>,
     /// DISPLAY_INT_CTL categories pending beyond pipe A's.
     pub other_pending: Cell<u32>,
+    pub panel: Panel,
+}
+
+/// The eDP panel on AUX A: its DPCD, and how it answers.
+#[derive(Default)]
+pub struct Panel {
+    pub dpcd: RefCell<BTreeMap<u32, u8>>,
+    /// Every native write, in order.
+    pub written: RefCell<Vec<(u32, u8)>>,
+    /// Requests answered DEFER before the next is served.
+    pub defers: Cell<u32>,
+    /// No reply at all: every transaction times out.
+    pub silent: Cell<bool>,
+}
+
+impl Panel {
+    /// A PSR1 panel: DPCD 1.4, eDP 1.4, SET_POWER capable, a 330 µs setup time, no
+    /// errors. The T14's own values are read on the bench.
+    fn psr1() -> Self {
+        let panel = Self::default();
+        panel.dpcd.borrow_mut().extend([(0x000, 0x14), (0x070, 0x01), (0x071, 0x00), (0x700, 0x03), (0x701, 0x80)]);
+        panel
+    }
+
+    /// The reply to `request`.
+    fn answer(&self, request: &[u8]) -> Vec<u8> {
+        if self.defers.get() > 0 {
+            self.defers.set(self.defers.get() - 1);
+            return vec![0x20];
+        }
+        let address = u32::from(request[0] & 0xF) << 16 | u32::from(request[1]) << 8 | u32::from(request[2]);
+        let len = usize::from(request[3]) + 1;
+        match request[0] >> 4 {
+            0x9 => {
+                let dpcd = self.dpcd.borrow();
+                core::iter::once(0).chain((0..len as u32).map(|n| dpcd.get(&(address + n)).copied().unwrap_or(0))).collect()
+            }
+            0x8 => {
+                for (n, &byte) in request[4..4 + len].iter().enumerate() {
+                    self.dpcd.borrow_mut().insert(address + n as u32, byte);
+                    self.written.borrow_mut().push((address + n as u32, byte));
+                }
+                vec![0x00]
+            }
+            other => panic!("the model's panel has no command {other:#x}"),
+        }
+    }
 }
 
 impl Engine {
@@ -59,6 +107,9 @@ impl Engine {
         r.insert(regs::trans_conf(0), 0xc000_0024);
         r.insert(regs::TRANS_HTOTAL_A, 0x081f_077f);
         r.insert(regs::TRANS_VTOTAL_A, 0x0457_0437);
+        // Vertical blank starting at vertical active is assumed; the scout
+        // did not read TRANS_VBLANK.
+        r.insert(regs::TRANS_VBLANK_A, 0x0457_0437);
         r.insert(regs::WM_LINETIME_A, 0x78);
         r.insert(regs::plane_ctl(0, 1), 0x8400_0008);
         r.insert(regs::plane_size(0, 1), 0x0437_077f);
@@ -97,6 +148,7 @@ impl Engine {
             stale: Cell::new(None),
             jump: Cell::new(0),
             other_pending: Cell::new(0),
+            panel: Panel::psr1(),
         }
     }
 
@@ -127,6 +179,25 @@ impl Engine {
 }
 
 impl Engine {
+    /// One AUX transaction: the request out of the data registers, the
+    /// panel's reply into them, and the control register done.
+    fn aux(&self, control: u32) {
+        let size = ((control >> regs::AUX_SIZE_SHIFT) & regs::AUX_SIZE) as usize;
+        let request: Vec<u8> = (0..5).flat_map(|n| self.get(regs::DDI_AUX_DATA_A + 4 * n).to_be_bytes()).take(size).collect();
+        let idle = control & !(regs::AUX_SEND_BUSY | regs::AUX_DONE | regs::AUX_TIMEOUT | regs::AUX_RECEIVE_ERROR) & !(regs::AUX_SIZE << regs::AUX_SIZE_SHIFT);
+        if self.panel.silent.get() {
+            self.set(regs::DDI_AUX_CTL_A, idle | regs::AUX_DONE | regs::AUX_TIMEOUT);
+            return;
+        }
+        let reply = self.panel.answer(&request);
+        for (n, chunk) in reply.chunks(4).enumerate() {
+            let mut word = [0u8; 4];
+            word[..chunk.len()].copy_from_slice(chunk);
+            self.set(regs::DDI_AUX_DATA_A + 4 * n, u32::from_be_bytes(word));
+        }
+        self.set(regs::DDI_AUX_CTL_A, idle | regs::AUX_DONE | (reply.len() as u32) << regs::AUX_SIZE_SHIFT);
+    }
+
     /// A vertical blank begins: pipe A's identity bit is set where its mask
     /// lets it through.
     pub fn vblank(&self) {
@@ -217,6 +288,14 @@ impl Registers for Engine {
         }
         if at == regs::PIPE_A_IIR {
             self.set(at, self.get(at) & !value);
+            return;
+        }
+        if at == regs::PWR_WELL_CTL_AUX2 {
+            self.set(at, value & regs::AUX_A_REQUEST | (value & regs::AUX_A_REQUEST) >> 1);
+            return;
+        }
+        if at == regs::DDI_AUX_CTL_A && value & regs::AUX_SEND_BUSY != 0 {
+            self.aux(value);
             return;
         }
         if self.storage_drops.get() && crate::dmc::WINDOW.contains(&at) {

@@ -58,7 +58,10 @@ impl Driver {
             };
             let now = self.now();
             match self.output.received(now, msg_type, self.rx.payload(payload_len), handles, drawn) {
-                Ok(Received::Offered(_)) => println!("compositor: a display driver scans out the {mode} output"),
+                Ok(Received::Offered { first, .. }) => {
+                    println!("compositor: a display driver scans out the {mode} output");
+                    send(&self.conn, &first)?;
+                }
                 Ok(Received::Answered { first, presented, next }) => {
                     if first {
                         println!(

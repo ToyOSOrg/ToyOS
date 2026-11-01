@@ -2,8 +2,9 @@
 //! per GPU function, is a client of the compositor's [`PORT`].
 //!
 //! **One connection per output.** The driver's first frame is [`Hello`], the
-//! output it scans out. From then on the compositor sends [`Present`] when
-//! the frame it composed into the output changed, naming where, and the
+//! output it scans out. The compositor's first [`Present`] is the whole
+//! output, as it stands when the hello is read. From then on it presents
+//! when the frame it composed into the output changed, naming where, and the
 //! driver answers [`Presented`] once that frame reached the output's next
 //! vertical blank. **One present is outstanding at a time**: damage the
 //! compositor composes meanwhile is merged ([`Presenting`]) and sent when the
@@ -321,8 +322,10 @@ pub enum Ended {
 /// What a frame from the driver did.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum Received {
-    /// The hello was taken.
-    Offered(Size),
+    /// The hello was taken: the output, and the first present, which is the
+    /// whole of it as it stands, since what was composed before the hello was
+    /// read reached the driver in no present.
+    Offered { size: Size, first: Present },
     /// A present was answered: the driver's first answer or a later one, and
     /// the present owed since, if any.
     Answered { first: bool, presented: Presented, next: Option<Present> },
@@ -373,8 +376,11 @@ impl Output {
                 if hello.size != drawn {
                     return Err(Ended::Size { offered: hello.size, drawn });
                 }
-                self.serving = Some(Serving { size: hello.size, presenting: Presenting::new(), answered: false });
-                Ok(Received::Offered(hello.size))
+                let mut presenting = Presenting::new();
+                let whole = Rect { x: 0, y: 0, width: hello.size.width, height: hello.size.height };
+                let first = presenting.damaged([whole]).expect("nothing is outstanding on a new output");
+                self.serving = Some(Serving { size: hello.size, presenting, answered: false });
+                Ok(Received::Offered { size: hello.size, first })
             }
             (FromDriver::Presented(presented), Some(serving)) => {
                 let next = serving.presenting.presented(&presented).map_err(Ended::Unasked)?;
@@ -501,7 +507,8 @@ mod tests {
         assert!(output.overdue(2_001));
         assert_eq!(output.received(2_001, MSG_HELLO, &hello, 0, HD), Err(Ended::Late));
         let mut output = Output::new(2_000);
-        assert_eq!(output.received(1_999, MSG_HELLO, &hello, 0, HD), Ok(Received::Offered(HD)));
+        let whole = Present { sequence: 1, damage: Damage::of(rect(0, 0, 1920, 1080)) };
+        assert_eq!(output.received(1_999, MSG_HELLO, &hello, 0, HD), Ok(Received::Offered { size: HD, first: whole }));
         assert!(!output.overdue(u64::MAX), "a hello taken is never overdue");
     }
 
@@ -517,17 +524,23 @@ mod tests {
         let mut output = Output::new(10);
         output.received(0, MSG_HELLO, &hello, 0, HD).expect("taken");
         assert_eq!(output.received(0, MSG_HELLO, &hello, 0, HD), Err(Ended::OutOfState(MSG_HELLO)), "a second hello");
-        assert_eq!(output.received(0, MSG_PRESENTED, &answer, 0, HD), Err(Ended::Unasked(Unasked { sequence: 1, outstanding: None })));
+        let wrong = Presented { sequence: 2, vblank_nanos: 5, refresh_interval_nanos: 16_666_667 }.encode();
+        assert_eq!(output.received(0, MSG_PRESENTED, &wrong, 0, HD), Err(Ended::Unasked(Unasked { sequence: 2, outstanding: Some(1) })), "not the whole first present");
     }
 
     #[test]
     fn a_served_output_is_presented_to_and_its_first_answer_is_said() {
         let mut output = Output::new(10);
         assert_eq!(output.composed([rect(0, 0, 1, 1)]), None, "nothing before the hello");
-        output.received(0, MSG_HELLO, &Hello { size: HD }.encode(), 0, HD).expect("taken");
-        let first = output.composed([rect(0, 0, 1, 1)]).expect("a present");
+        let Ok(Received::Offered { first, .. }) = output.received(0, MSG_HELLO, &Hello { size: HD }.encode(), 0, HD) else {
+            panic!("the hello is taken");
+        };
+        assert_eq!(output.composed([rect(0, 0, 1, 1)]), None, "merged while the whole first present is outstanding");
         let presented = Presented { sequence: first.sequence, vblank_nanos: 5, refresh_interval_nanos: 16_666_667 };
-        assert_eq!(output.received(100, MSG_PRESENTED, &presented.encode(), 0, HD), Ok(Received::Answered { first: true, presented, next: None }));
+        let owed = Present { sequence: 2, damage: Damage::of(rect(0, 0, 1, 1)) };
+        assert_eq!(output.received(100, MSG_PRESENTED, &presented.encode(), 0, HD), Ok(Received::Answered { first: true, presented, next: Some(owed) }));
+        let presented = Presented { sequence: owed.sequence, ..presented };
+        assert_eq!(output.received(150, MSG_PRESENTED, &presented.encode(), 0, HD), Ok(Received::Answered { first: false, presented, next: None }));
         let second = output.composed([rect(1, 1, 1, 1)]).expect("a present");
         let presented = Presented { sequence: second.sequence, ..presented };
         assert!(matches!(output.received(200, MSG_PRESENTED, &presented.encode(), 0, HD), Ok(Received::Answered { first: false, .. })));

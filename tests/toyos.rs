@@ -1408,6 +1408,15 @@ const METAL: &[(&str, metal::Metal)] = &[
         "display_output_presents",
         metal::Metal { arms: METALCASE_TONE, judge: |b| display_output_presents(b[0]) },
     ),
+    (
+        // PSR1 on the T14's panel, enabled at the compositor's first present:
+        // every present after it reaches the panel, and how long the first
+        // frame after an update takes when SRD has to end first is said in
+        // absolute numbers, with SRD_STATUS's state and link status on entry
+        // and exit. The T14 alone, in the same boot.
+        "psr_exit_latency",
+        metal::Metal { arms: METALCASE_TONE, judge: |b| psr_exit_latency(&b[0].log()) },
+    ),
     // ---- the `SYS_DEBUG` members' boot, armed ----
     // The cheapest cluster there is: every one of these arms a check that runs
     // at init, logs its verdict and does nothing else, so they cost no flash
@@ -2044,6 +2053,37 @@ fn display_output_presents(boot: &metal::Readback) -> Result<(), String> {
     println!(
         "display_output_presents: pipe A frames {allowed_at} -> {answered_at}; hda offered its output {order} PG3 went down, and the tone played after"
     );
+    Ok(())
+}
+
+/// What [`psr_exit_latency`] reads: the panel's PSR DPCD, PSR1 enabled at
+/// the first present and never disabled while presents came, and at least
+/// one present that arrived with the source in SRD, whose latency is the
+/// exit's.
+///
+/// SRD_STATUS 31:29 is its state: 000b IDLE and 001b waiting to send a frame
+/// before entry are awake, 010b is entry with the link off, 111b with it on.
+/// 27:26 is the link: 00b full off, 01b full on.
+fn psr_exit_latency(log: &serial::Serial) -> Result<(), String> {
+    println!("psr_exit_latency: {}", log.must_say("tgl-display: panel DPCD 00000h")?);
+    log.must_say("tgl-display: PSR1 enabled at the first present")?;
+    if let Some(line) = log.text().lines().find(|line| line.contains("tgl-display: PSR disabled —")) {
+        return Err(format!("PSR was disabled while presents came: {line}"));
+    }
+    let samples: Vec<&str> = log.text().lines().filter(|line| line.contains("to its vblank; SRD_STATUS Some(")).collect();
+    let in_srd = |line: &str| {
+        line.split_once("SRD_STATUS Some(")
+            .and_then(|(_, rest)| u32::from_str_radix(rest.get(..8)?, 16).ok())
+            .is_some_and(|status| !matches!(status >> 29, 0b000 | 0b001))
+    };
+    let exits = samples.iter().filter(|line| in_srd(line)).count();
+    for line in samples.iter().chain(log.text().lines().filter(|line| line.contains("tgl-display: present latency, SRD ending first:")).collect::<Vec<_>>().iter()) {
+        println!("psr_exit_latency: {line}");
+    }
+    if exits == 0 {
+        return Err(format!("none of {} presents found the source in SRD, so no exit was measured", samples.len()));
+    }
+    println!("psr_exit_latency: {exits} of {} presents ended SRD first", samples.len());
     Ok(())
 }
 

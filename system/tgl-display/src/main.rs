@@ -21,6 +21,7 @@ use toyos_device_memory::Registers;
 use toyos_manifest::device::PciMatch;
 use toyos_pci_claim::Bar;
 use toyos_tgl_display::dmc::{Package, Stepping, TGL_PACKAGE};
+use toyos_tgl_display::psr::{self, Prepared, Psr};
 use toyos_tgl_display::{interrupt, Programmed, Refusal, FRAME_CEILING_NANOS};
 
 /// The T14's iGPU, Tiger Lake GT2 (`8086:9a49`), a VGA-compatible display
@@ -79,6 +80,25 @@ fn main() {
                 .map(|level| format!("{:08x}", regs.read32(toyos_tgl_display::regs::plane_wm(0, done.scanout.plane, level))))
                 .collect();
             say!("tgl-display: WM levels now {}", now.join(" "));
+            // Every AUX transaction comes before DC6 is allowed and PSR enabled.
+            let prepared = psr::read_sink(&regs, &Monotonic).and_then(|sink| {
+                say!(
+                    "tgl-display: panel DPCD 00000h {:02x?}, 00070h {:02x?}, 00700h {:02x?}, 02006h {:02x?}",
+                    sink.receiver,
+                    sink.psr,
+                    sink.edp,
+                    sink.status,
+                );
+                psr::prepare(&regs, &Monotonic, &done, sink)
+            });
+            match &prepared {
+                Ok(p) => say!(
+                    "tgl-display: PSR setup {} of {} vblank lines; configured for PSR1 with the main link active",
+                    p.setup_lines,
+                    p.vblank_lines,
+                ),
+                Err(why) => say!("tgl-display: PSR stays off — {why}"),
+            }
             let allowed = Stepping::of_9a49(revision)
                 .ok_or(Refusal::Revision(revision))
                 .and_then(|stepping| package.main_program(stepping).ok_or(Refusal::NoProgram(stepping)))
@@ -101,7 +121,7 @@ fn main() {
                 ),
                 Err(why) => say!("tgl-display: DC5 and DC6 stay disallowed — {why}"),
             }
-            serve(&dev, &regs, &done);
+            serve(&dev, &regs, &done, prepared.ok());
         }
         Err(why) => say!("tgl-display: the firmware's display is left as found — {why}"),
     }
@@ -141,7 +161,13 @@ enum Ended {
 /// compositor serves yet; the next present is the event that it does.
 /// Presents stop, and say why, at a refusal, or a connection that ended
 /// before any present arrived on it; the scan-out stays either way.
-fn serve(dev: &PciDev, regs: &Bar, done: &Programmed) {
+///
+/// PSR is enabled only while a connection carries presents, from its first,
+/// which is the whole output as the compositor stands, and disabled when the
+/// connection ends: nothing else would end SRD for a change. The panel stays
+/// configured, so the next connection's first present enables it again. A
+/// PSR fault disables it for the boot.
+fn serve(dev: &PciDev, regs: &Bar, done: &Programmed, mut prepared: Option<Prepared>) {
     let size = Size { width: done.scanout.width as u32, height: done.scanout.height as u32 };
     interrupt::claim(regs);
     let mut reconnects = 0;
@@ -154,7 +180,21 @@ fn serve(dev: &PciDev, regs: &Bar, done: &Programmed) {
             break say!("tgl-display: the compositor took no hello ({why:?}); presents go unanswered");
         }
         say!("tgl-display: offered the compositor its {}x{} output", size.width, size.height);
-        match answer(dev, regs, &conn, size, done.refresh_interval_nanos()) {
+        let frame = done.refresh_interval_nanos();
+        let mut psr = None;
+        let ended = answer(dev, regs, &conn, size, frame, &mut prepared, &mut psr);
+        if let Some(psr) = psr {
+            let (idle, again) = psr.disable(regs, &Monotonic, frame);
+            prepared = Some(again);
+            match idle {
+                true => say!("tgl-display: PSR disabled with the connection"),
+                false => say!(
+                    "tgl-display: PSR disabled with the connection, and SRD_STATUS {:08x} is not IDLE",
+                    regs.read32(toyos_tgl_display::regs::SRD_STATUS_A)
+                ),
+            }
+        }
+        match ended {
             Ended::Gone { presented: true, why } if reconnects < RECONNECTS => {
                 reconnects += 1;
                 say!("tgl-display: {why}; connecting again ({reconnects} of {RECONNECTS})");
@@ -168,33 +208,109 @@ fn serve(dev: &PciDev, regs: &Bar, done: &Programmed) {
     interrupt::release(regs);
 }
 
-/// Every present on `conn` answered at the vblank after it arrived, until
-/// one cannot be: why.
-fn answer(dev: &PciDev, regs: &Bar, conn: &Connection, size: Size, refresh_interval_nanos: u64) -> Ended {
+/// A present waiting for the vblank that carries it.
+struct Waiting {
+    sequence: u64,
+    arrived_nanos: u64,
+    /// SRD_STATUS when it arrived, where PSR is enabled.
+    srd: Option<u32>,
+    overdue_nanos: u64,
+}
+
+/// Presents' latencies from arrival to the vblank that carried them: each of
+/// the first [`WINDOW`] said, then windows of it, apart by whether SRD had to
+/// end first.
+#[derive(Default)]
+struct Latencies {
+    asleep: Vec<u64>,
+    awake: Vec<u64>,
+    said: u32,
+}
+
+const WINDOW: usize = 16;
+
+impl Latencies {
+    fn record(&mut self, regs: &Bar, waiting: &Waiting, vblank_nanos: u64) {
+        let latency = vblank_nanos.saturating_sub(waiting.arrived_nanos);
+        let asleep = waiting.srd.is_some_and(|srd| !matches!(srd >> toyos_tgl_display::regs::SRD_STATE_SHIFT, 0b000 | 0b001));
+        if self.said < WINDOW as u32 {
+            self.said += 1;
+            say!(
+                "tgl-display: present {} took {latency} ns to its vblank; SRD_STATUS {:08x?} at arrival, {:08x} after",
+                waiting.sequence,
+                waiting.srd,
+                regs.read32(toyos_tgl_display::regs::SRD_STATUS_A),
+            );
+        }
+        if asleep { &mut self.asleep } else { &mut self.awake }.push(latency);
+        if self.asleep.len() + self.awake.len() == WINDOW {
+            let spread = |v: &mut Vec<u64>| {
+                v.sort_unstable();
+                match (v.first(), v.last()) {
+                    (Some(min), Some(max)) => format!("{} min {min} p50 {} max {max} ns", v.len(), v[v.len() / 2]),
+                    _ => "none".into(),
+                }
+            };
+            say!(
+                "tgl-display: present latency, SRD ending first: {}; awake: {}; {} ms in SRD so far",
+                spread(&mut self.asleep),
+                spread(&mut self.awake),
+                regs.read32(toyos_tgl_display::regs::SRD_PERF_CNT_A) & 0xFF_FFFF,
+            );
+            self.asleep.clear();
+            self.awake.clear();
+        }
+    }
+}
+
+/// Every present on `conn` answered at the first vblank after it arrived at
+/// which the source is out of SRD, until one cannot be: why. PSR is enabled
+/// out of `prepared` at the first present, into `psr`.
+fn answer(
+    dev: &PciDev,
+    regs: &Bar,
+    conn: &Connection,
+    size: Size,
+    refresh_interval_nanos: u64,
+    prepared: &mut Option<Prepared>,
+    psr: &mut Option<Psr>,
+) -> Ended {
     let poller = Poller::new(2);
     let mut rx = FrameRx::<MAX_FRAME>::new();
-    // The present waiting for its vblank, and when that vblank is overdue.
-    let mut outstanding: Option<(u64, u64)> = None;
+    let mut waiting: Option<Waiting> = None;
+    let mut latencies = Latencies::default();
     let mut answered = false;
     let mut presented = false;
     loop {
         poller.watch(dev, READABLE, TOKEN_CLAIM);
         poller.watch(conn, READABLE, TOKEN_COMPOSITOR);
-        let timeout = outstanding.map_or(u64::MAX, |(_, overdue)| overdue.saturating_sub(toyos_abi::clock::nanos_since_boot()));
-        poller.wait(1, timeout, |_| {});
+        let now = toyos_abi::clock::nanos_since_boot();
+        poller.wait(1, waiting.as_ref().map_or(u64::MAX, |w| w.overdue_nanos.saturating_sub(now)), |_| {});
 
         match dev.irq() {
             Ok(record) => match interrupt::serve(regs) {
                 Ok(true) => {
-                    if let Some((sequence, _)) = outstanding.take() {
-                        let answer = Presented { sequence, vblank_nanos: record.last_nanos, refresh_interval_nanos };
-                        if let Err(why) = conn.send_bytes(MSG_PRESENTED, &answer.encode()) {
-                            return Ended::Gone { presented, why: format!("the compositor took no answer ({why:?})") };
+                    if let Some(why) = psr.as_ref().and_then(|p| p.fault(regs)) {
+                        say!("tgl-display: PSR disabled for the boot — {why}");
+                        *psr = None;
+                    }
+                    match (&*psr, waiting.take()) {
+                        (Some(p), Some(w)) if !p.awake(regs) => {
+                            interrupt::arm(regs);
+                            waiting = Some(w);
                         }
-                        if !answered {
-                            answered = true;
-                            say!("tgl-display: first present answered at pipe A frame {}", regs.read32(toyos_tgl_display::regs::PIPE_FRMCNT_A));
+                        (_, Some(w)) => {
+                            let answer = Presented { sequence: w.sequence, vblank_nanos: record.last_nanos, refresh_interval_nanos };
+                            if let Err(why) = conn.send_bytes(MSG_PRESENTED, &answer.encode()) {
+                                return Ended::Gone { presented, why: format!("the compositor took no answer ({why:?})") };
+                            }
+                            if !answered {
+                                answered = true;
+                                say!("tgl-display: first present answered at pipe A frame {}", regs.read32(toyos_tgl_display::regs::PIPE_FRMCNT_A));
+                            }
+                            latencies.record(regs, &w, record.last_nanos);
                         }
+                        (_, None) => {}
                     }
                 }
                 Ok(false) => {}
@@ -203,8 +319,8 @@ fn answer(dev: &PciDev, regs: &Bar, conn: &Connection, size: Size, refresh_inter
             Err(SyscallError::WouldBlock) => {}
             Err(why) => panic!("tgl-display: the claim's interrupt record: {why:?}"),
         }
-        if outstanding.is_some_and(|(_, overdue)| toyos_abi::clock::nanos_since_boot() >= overdue) {
-            return Ended::Refused(format!("no vblank within {} ms of a present", FRAME_CEILING_NANOS / 1_000_000));
+        if waiting.as_ref().is_some_and(|w| toyos_abi::clock::nanos_since_boot() >= w.overdue_nanos) {
+            return Ended::Refused(format!("no vblank carried a present within {} ms", FRAME_CEILING_NANOS / 1_000_000));
         }
 
         loop {
@@ -218,14 +334,20 @@ fn answer(dev: &PciDev, regs: &Bar, conn: &Connection, size: Size, refresh_inter
                 RxStep::Malformed => return Ended::Refused("the compositor sent a frame no protocol here can make".into()),
             };
             let present = Present::decode(msg_type, rx.payload(payload_len), size);
-            match (present, outstanding) {
+            match (present, &waiting) {
                 (Some(present), None) => {
                     presented = true;
+                    if let Some(p) = prepared.take() {
+                        *psr = Some(p.activate(regs));
+                        say!("tgl-display: PSR1 enabled at the first present, SRD_CTL {:08x}", regs.read32(toyos_tgl_display::regs::SRD_CTL_A));
+                    }
+                    let arrived_nanos = toyos_abi::clock::nanos_since_boot();
+                    let srd = psr.as_ref().map(|p| p.update(regs));
                     interrupt::arm(regs);
-                    outstanding = Some((present.sequence, toyos_abi::clock::nanos_since_boot() + FRAME_CEILING_NANOS));
+                    waiting = Some(Waiting { sequence: present.sequence, arrived_nanos, srd, overdue_nanos: arrived_nanos + FRAME_CEILING_NANOS });
                 }
-                (Some(present), Some((waiting, _))) => {
-                    return Ended::Refused(format!("the compositor sent present {} while {waiting} waits", present.sequence));
+                (Some(present), Some(w)) => {
+                    return Ended::Refused(format!("the compositor sent present {} while {} waits", present.sequence, w.sequence));
                 }
                 (None, _) => return Ended::Refused(format!("the compositor sent frame {msg_type}, which `{PORT}` has not")),
             }
