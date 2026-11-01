@@ -215,7 +215,29 @@ fn rounds_onto_busy() -> Measured {
                 }
             }
         };
-        match place::spawn_on(wanted, body) {
+        #[cfg(target_os = "toyos")]
+        place::diag::reset();
+        let placer_before = sys::current_cpu();
+        let staging = place::spawn_on(wanted, body);
+        #[cfg(target_os = "toyos")]
+        {
+            let placer_after = sys::current_cpu();
+            let fields = [
+                ("partner", partners.len().to_string()),
+                ("ok", staging.is_ok().to_string()),
+                ("waker_on", waker_on.to_string()),
+                ("busy", busy.map_or("-".into(), |b: u32| b.to_string())),
+                ("placer_before", placer_before.to_string()),
+                ("placer_after", placer_after.to_string()),
+                ("placer_on", place::diag::take(&place::diag::PLACER_ON)),
+                ("landed_on", place::diag::take(&place::diag::LANDED_ON)),
+            ];
+            if staging.is_err() || placer_before != waker_on || placer_after != waker_on || partners.len() < 8 {
+                crate::report::note("placediag.onto_busy", &fields);
+            }
+        }
+        let _ = placer_before;
+        match staging {
             Ok(placed) => {
                 busy = Some(placed.cpu);
                 partners.push((placed, seat));
