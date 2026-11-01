@@ -1159,7 +1159,8 @@ fn the_last_holder_leaving_is_the_streams_close() {
 
 // A client that writes more than its send ring holds doubles the ring at each write the room
 // cannot take whole, to its place, and netstack reads the grown ring by the size the client
-// stored: the peer's stream is the client's, byte for byte.
+// stored: the peer's stream is the client's, byte for byte. Netstack's commits make no memory
+// here, so every page either end touches is one the client committed.
 #[test]
 fn an_upload_larger_than_its_send_ring_grows_it_to_its_place() {
     use toyos::net::stream::{SEND_BYTES, SEND_RING};
@@ -1168,6 +1169,7 @@ fn an_upload_larger_than_its_send_ring_grows_it_to_its_place() {
     const WRITE: usize = 2 * SEND_BYTES as usize;
     let pattern: Vec<u8> = (0..WRITE + PERIOD).map(byte).collect();
     let (mut net, _, client) = established();
+    client.region.netstack_commits_nothing();
     let mut offset = 0;
     for _ in 0..1_000 {
         if client.region.committed(SEND_RING) == SEND_BYTES as usize {
@@ -1198,7 +1200,7 @@ fn a_download_a_reader_keeps_up_with_grows_the_receive_ring_and_keeps_every_byte
     let mut net = Net::new();
     net.far.scales = true;
     let (id, client) = net.connect(None);
-    client.commit_nothing();
+    client.region.client_commits_nothing();
     let local = Port::new(net.far.port).expect("the SYN's source port");
     assert_eq!(net.events(), [StreamEvent::Connected { id, local }]);
     assert!(net.far.shift > 0, "the node's SYN asked to scale its window");
