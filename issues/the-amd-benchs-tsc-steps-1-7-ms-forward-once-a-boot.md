@@ -30,15 +30,13 @@ hand-over. The trigger is the package's deep idle with every core in 0x415.
 Whether the TSC's jump across it is the platform's or the state's entry is
 not known.
 
-**What the clock does meanwhile.** A forward step that the HPET and the PM
-timer agree on is slewed away at no more than 500 ppm. This happens whether
-the RTC confirms the step or cannot tell. The 1.7 ms takes 3.4 s, and
-monotonic time never steps. A second step, or a backward one, demotes the TSC:
-processes then read now through the kernel, which counts by the HPET.
-
-Two things stay on the TSC after a demotion: the kernel's own deadlines and
-its log stamps. A later step therefore moves them apart from what processes
-read.
+**What the clock does meanwhile.** Readers see the forward step: the clock
+reads up to 1.7 ms ahead from the step until the sampler finds it, within a
+second, and through the RTC's few seconds after. A forward step the HPET and
+the PM timer agree on is then slewed away at no more than 500 ppm. This
+happens whether the RTC confirms the step or cannot tell, and the correction
+never steps back. A second step, or a backward one, demotes the TSC
+(`issues/a-demoted-tsc-keeps-the-kernels-clock-apart-from-processes.md`).
 
 **Not read.** AMD's *Processor Programming Reference for Family 17h Model 60h*
 (55922), which would cover the TSC in deep C-states and the TSC's relation to

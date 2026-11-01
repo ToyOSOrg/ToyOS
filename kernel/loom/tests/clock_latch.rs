@@ -59,3 +59,39 @@ fn a_later_read_is_never_an_older_line() {
         writer.join().unwrap();
     });
 }
+
+/// The counter a reader turns a line into a time with, modelled as memory the
+/// writer advances only once the line that starts there is published.
+fn superseded(read: impl Fn(&Latch<WORDS>, &loom::sync::atomic::AtomicU64) -> ([u64; WORDS], u64) + Sync + Send + 'static) {
+    use loom::sync::atomic::{AtomicU64, Ordering};
+    model(move || {
+        let latch = Arc::new(Latch::<WORDS>::new());
+        let counter = Arc::new(AtomicU64::new(0));
+        latch.publish([1; WORDS]);
+        let writer = {
+            let (latch, counter) = (latch.clone(), counter.clone());
+            thread::spawn(move || {
+                latch.publish([2; WORDS]);
+                counter.store(2, Ordering::Release);
+            })
+        };
+        let (line, now) = read(&latch, &counter);
+        assert!(now < 2 || line == [2; WORDS], "a reading at {now} extrapolated the superseded line {line:?}");
+        writer.join().unwrap();
+    });
+}
+
+/// A counter read inside the section, after the line's words, is read again
+/// with the line when a publication lands between them.
+#[test]
+fn a_counter_read_inside_the_section_never_extrapolates_a_superseded_line() {
+    superseded(|latch, counter| latch.read_with(|| counter.load(loom::sync::atomic::Ordering::Acquire)));
+}
+
+/// What the clock read before: the counter after the section, which a reader
+/// preempted between the two pairs with a line replaced meanwhile.
+#[test]
+#[should_panic(expected = "extrapolated the superseded line")]
+fn a_counter_read_after_the_section_can_extrapolate_a_superseded_line() {
+    superseded(|latch, counter| (latch.read(), counter.load(loom::sync::atomic::Ordering::Acquire)));
+}

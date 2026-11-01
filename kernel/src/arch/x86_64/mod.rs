@@ -9,6 +9,18 @@
 //! AMD-Vi. Generic code reaches each through the concept it serves
 //! (`watchdog`, `iommu_unit`, …), never by its name.
 
+/// The interrupt sources only this architecture counts, handed to the
+/// census's list (`irq_census`).
+macro_rules! census_sources {
+    ($list:ident) => {
+        $list! {
+            /// Vector 0x26, the RTC's update-ended interrupt, once a second.
+            Rtc => "rtc",
+        }
+    };
+}
+pub(crate) use census_sources;
+
 pub mod acpi_mode;
 pub mod amdvi;
 pub mod apic;

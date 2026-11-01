@@ -112,8 +112,14 @@ impl Hpet {
     /// Where the counter should read now, from `last` and the rate the clock
     /// keeps: what a 32-bit counter's wraps are counted against.
     fn near(&self, last: Sample, mult: u64) -> u64 {
-        let nanos = Line { counter: 0, stamp: 0, mult }.nanos(cpu::counter().saturating_sub(last.before));
-        last.reference + (u128::from(nanos) * 1_000_000 / u128::from(self.reference.period_fs)) as u64
+        self.ahead_of(last.reference, last.before, cpu::counter(), mult)
+    }
+
+    /// Where the counter should read at the TSC's `now`, from its reading
+    /// `reading` at the TSC's `then`.
+    fn ahead_of(&self, reading: u64, then: u64, now: u64, mult: u64) -> u64 {
+        let nanos = Line { counter: 0, stamp: 0, mult }.nanos(now.saturating_sub(then));
+        reading + (u128::from(nanos) * 1_000_000 / u128::from(self.reference.period_fs)) as u64
     }
 }
 
@@ -220,20 +226,25 @@ static HELD: Lock<Option<Held>> = Lock::new(None);
 /// clock counts on from by the HPET. Published by the sampler.
 static LAST_HELD: crate::seqlock::Published<3> = crate::seqlock::Published::new();
 
-/// The HPET and the clock where the TSC was demoted, and the latest reading
-/// the kernel has answered since, which none after reads before.
+/// Where the TSC was demoted: the HPET, its reading then and the clock by it,
+/// and its last reading since, which the next extends from.
 struct Demoted {
     hpet: Hpet,
     at_hpet: u64,
     at_stamp: u64,
-    tsc: u64,
+    last_tsc: u64,
+    last_hpet: u64,
     mult: u64,
 }
 
 static DEMOTED: Lock<Option<Demoted>> = Lock::new(None);
 static IS_DEMOTED: AtomicBool = AtomicBool::new(false);
+/// The latest reading the kernel has answered a process since the demotion,
+/// which no later answer reads before.
 static DEMOTED_LATEST: AtomicU64 = AtomicU64::new(0);
 static DEMOTED_ANSWERED: AtomicBool = AtomicBool::new(false);
+/// The rate the watch keeps, for a demotion on any CPU to retune the line to.
+static KEPT_MULT: AtomicU64 = AtomicU64::new(0);
 
 /// Whether CPUID states `IA32_TSC_ADJUST`, read once on the BSP.
 static TSC_ADJUST: AtomicBool = AtomicBool::new(false);
@@ -299,6 +310,7 @@ pub fn start(hpet_base: u64, pm_timer: Result<toyos_acpi::PmTimer, alloc::string
     }
     LAST_HELD.publish([anchor.before, anchor.reference, crate::clock::stamp_at(anchor.before)]);
     *HPET_COPY.lock() = Some(hpet);
+    KEPT_MULT.store(kept.mult, Ordering::Relaxed);
     *HELD.lock() = Some(Held {
         watch: Watch::new(hpet.reference, anchor, kept),
         hpet,
@@ -475,7 +487,7 @@ pub fn answer_offset() {
 /// the difference (`reference::Offset`'s argument, one way).
 pub fn check(now_ns: u64) {
     let local = &crate::cpu_local::here().arch.clock;
-    if now_ns < local.due_ns.load(Ordering::Relaxed) || IS_DEMOTED.load(Ordering::Relaxed) {
+    if now_ns < local.due_ns.load(Ordering::Relaxed) {
         return;
     }
     local.due_ns.store(now_ns + CHECK_EVERY_NS, Ordering::Relaxed);
@@ -484,8 +496,9 @@ pub fn check(now_ns: u64) {
         let started = local.adjust.load(Ordering::Relaxed);
         let adjust = cpu::rdmsr(cpu::IA32_TSC_ADJUST);
         if adjust != started {
-            return demote(format_args!(
-                "cpu{cpu_id}'s TSC was written: IA32_TSC_ADJUST reads {} and read {} when it started",
+            local.adjust.store(adjust, Ordering::Relaxed);
+            demote(format_args!(
+                "cpu{cpu_id}'s TSC was written: IA32_TSC_ADJUST reads {} and read {} before",
                 adjust as i64,
                 started as i64,
             ));
@@ -494,12 +507,14 @@ pub fn check(now_ns: u64) {
     let latest = LATEST.0.load(Ordering::Acquire);
     let mine = cpu::rdtsc_ordered();
     if mine < latest {
-        return demote(format_args!(
-            "cpu{cpu_id}'s TSC read {mine}, {} cycles behind the {latest} another CPU's check read before it",
+        demote(format_args!(
+            "cpu{cpu_id}'s TSC read {mine}, {} cycles behind the latest another CPU's check read: this CPU's TSC \
+             trails another's, or every CPU's stepped back",
             latest - mine,
         ));
+    } else {
+        LATEST.0.fetch_max(mine, Ordering::AcqRel);
     }
-    LATEST.0.fetch_max(mine, Ordering::AcqRel);
 
     let due = NEXT_SAMPLE_NS.load(Ordering::Relaxed);
     if now_ns < due || NEXT_SAMPLE_NS.compare_exchange(due, now_ns + CHECK_EVERY_NS, Ordering::Relaxed, Ordering::Relaxed).is_err() {
@@ -513,15 +528,18 @@ pub fn check(now_ns: u64) {
     }
 }
 
-/// Leave the TSC for the HPET for the rest of the boot: every process's
-/// reading of now asks the kernel ([`stamp_now`]), which counts on by the
-/// HPET from the later of the clock now and the last held sample's clock and
-/// the HPET's count since, so no reading after reads before one already
-/// answered. The kernel's own deadlines stay on the TSC.
+/// Leave the TSC for the HPET for the rest of the boot, or, after that, log
+/// what was found. Every process's reading of now then asks the kernel
+/// ([`stamp_now`]), which counts by the HPET from the last held sample's clock;
+/// and none answers before the clock at the first counter read after the page
+/// was marked, which is after every counter a page reader that found it
+/// unmarked read. The line goes back to the kept rate, unslewed, and the
+/// kernel's own clock and deadlines stay on it.
 fn demote(why: core::fmt::Arguments) {
     let mut demoted = DEMOTED.lock();
     if demoted.is_some() {
-        return;
+        drop(demoted);
+        return log!("clock: DEMOTED TSC: {why}");
     }
     // A publication in progress ends within its few stores.
     let [held_tsc, held_hpet, held_stamp] = loop {
@@ -531,38 +549,45 @@ fn demote(why: core::fmt::Arguments) {
         core::hint::spin_loop();
     };
     let hpet = HPET_COPY.lock().expect("the clock started before any check");
-    let mult = crate::clock::mult();
-    let tsc = cpu::counter();
-    let near = held_hpet + (u128::from(Line { counter: 0, stamp: 0, mult }.nanos(tsc.saturating_sub(held_tsc))) * 1_000_000 / u128::from(hpet.reference.period_fs)) as u64;
-    let at_hpet = hpet.read(near);
-    let by_hpet = held_stamp + hpet.reference.ns_of(at_hpet.saturating_sub(held_hpet));
-    let at_stamp = by_hpet.max(crate::clock::stamp_at(tsc));
-    DEMOTED_LATEST.store(at_stamp, Ordering::Relaxed);
-    *demoted = Some(Demoted { hpet, at_hpet, at_stamp, tsc, mult });
-    IS_DEMOTED.store(true, Ordering::Release);
+    let mult = KEPT_MULT.load(Ordering::Relaxed);
+    let first = cpu::counter_ordered();
+    let at_hpet = hpet.read(hpet.ahead_of(held_hpet, held_tsc, first, mult));
+    let at_stamp = held_stamp + hpet.reference.ns_of(at_hpet.saturating_sub(held_hpet));
+    *demoted = Some(Demoted { hpet, at_hpet, at_stamp, last_tsc: first, last_hpet: at_hpet, mult });
+    IS_DEMOTED.store(true, Ordering::SeqCst);
     crate::clock::demote();
+    core::sync::atomic::fence(Ordering::SeqCst);
+    let after = cpu::counter_ordered();
+    let on_line = crate::clock::stamp_at(after);
+    DEMOTED_LATEST.fetch_max(on_line, Ordering::AcqRel);
+    crate::clock::retune(after, mult);
+    drop(demoted);
     log!(
         "clock: DEMOTED: {why}, so the TSC no longer keeps the clock: every process's reading of now asks the kernel, \
-         which counts by the HPET from {at_stamp} ns, {} ns from the TSC's clock; the kernel's deadlines stay on the TSC",
-        at_stamp as i64 - crate::clock::stamp_at(tsc) as i64,
+         which counts by the HPET from {at_stamp} ns, {} ns from the TSC's clock and held at that clock till it \
+         catches up; the kernel's own clock and deadlines stay on the TSC, at the kept rate",
+        at_stamp as i64 - on_line as i64,
     );
 }
 
 /// The HPET, for [`demote`] on whichever CPU's check finds the TSC moved.
 static HPET_COPY: Lock<Option<Hpet>> = Lock::new(None);
 
-/// Now as a log line's time, for a process: the TSC's clock, or the HPET's
-/// count on from where the TSC was demoted.
+/// Now as a log line's time, for a process: the TSC's clock, or, once
+/// demoted, the HPET's count on from where the TSC was demoted. The counter is
+/// read before the mark, as a page reader reads it.
 pub fn stamp_now() -> u64 {
-    if !IS_DEMOTED.load(Ordering::Acquire) {
-        return crate::clock::stamp_at(cpu::counter());
+    let on_line = crate::clock::stamp_at(cpu::counter_ordered());
+    if !IS_DEMOTED.load(Ordering::SeqCst) {
+        return on_line;
     }
     let stamp = {
-        let demoted = DEMOTED.lock();
-        let d = demoted.as_ref().expect("demoted before the flag");
-        let elapsed = Line { counter: 0, stamp: 0, mult: d.mult }.nanos(cpu::counter().saturating_sub(d.tsc));
-        let near = d.at_hpet + (u128::from(elapsed) * 1_000_000 / u128::from(d.hpet.reference.period_fs)) as u64;
-        d.at_stamp + d.hpet.reference.ns_of(d.hpet.read(near).saturating_sub(d.at_hpet))
+        let mut demoted = DEMOTED.lock();
+        let d = demoted.as_mut().expect("demoted before the mark");
+        let now = cpu::counter_ordered();
+        let reading = d.hpet.read(d.hpet.ahead_of(d.last_hpet, d.last_tsc, now, d.mult));
+        (d.last_tsc, d.last_hpet) = (now, reading);
+        d.at_stamp + d.hpet.reference.ns_of(reading.saturating_sub(d.at_hpet))
     };
     let answered = DEMOTED_LATEST.fetch_max(stamp, Ordering::AcqRel).max(stamp);
     if !DEMOTED_ANSWERED.swap(true, Ordering::Relaxed) {
@@ -592,10 +617,6 @@ fn sample(held: &mut Held, now_ns: u64) {
     });
     if let (Some(timer), Some((_, to))) = (held.pm.as_mut(), pm) {
         timer.last = to;
-    }
-    if IS_DEMOTED.load(Ordering::Acquire) {
-        let _ = held.watch.take(hpet, false);
-        return;
     }
     match held.watch.take(hpet, true) {
         Ok(report) => {
@@ -641,9 +662,8 @@ fn sample(held: &mut Held, now_ns: u64) {
         held.pending = None;
         settle(held, pending);
     }
-    if !IS_DEMOTED.load(Ordering::Acquire) {
-        slew(held);
-    }
+    KEPT_MULT.store(held.watch.kept().mult, Ordering::Relaxed);
+    slew(held);
 }
 
 /// What the RTC says of a pending step, and what the clock does about it.
@@ -665,13 +685,16 @@ fn settle(held: &mut Held, pending: Pending) {
         Third::Counter => "confirmed by the RTC",
         Third::Unsure => "unconfirmed by the RTC",
     };
+    if IS_DEMOTED.load(Ordering::Acquire) {
+        return log!("clock: TSC STEP: the demoted TSC stepped {step} ns against the HPET and the PM timer, {confirmed} ({rtc}); not slewed");
+    }
     match reference::respond(step, held.slewed) {
         Response::Slew => {
             held.slewed += 1;
             held.slew = Some(Slewing { slew: Slew::new(step), since: cpu::counter(), ran: crate::clock::mult(), kept: kept.mult });
             log!(
                 "clock: TSC STEP: the TSC stepped {step} ns forward against the HPET and the PM timer, {confirmed} \
-                 ({rtc}); the clock slews it away at most {} ppm, in about {} ms",
+                 ({rtc}); the clock slews it away at most {} ppm, most of it in about {} ms",
                 reference::SLEW_MOST_PPB / 1_000,
                 u128::from(step.unsigned_abs()) * u128::from(reference::PPB) / reference::SLEW_MOST_PPB as u128 / 1_000_000,
             );
@@ -689,6 +712,9 @@ fn settle(held: &mut Held, pending: Pending) {
 /// none, the kept rate where the watch retuned it.
 fn slew(held: &mut Held) {
     let kept = held.watch.kept().mult;
+    if IS_DEMOTED.load(Ordering::Acquire) {
+        held.slew = None;
+    }
     let Some(mut slewing) = held.slew else {
         if crate::clock::mult() != kept {
             crate::clock::retune(cpu::counter(), kept);

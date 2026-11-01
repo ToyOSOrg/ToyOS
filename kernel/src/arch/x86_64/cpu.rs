@@ -488,6 +488,12 @@ pub fn counter() -> u64 {
     rdtsc()
 }
 
+/// [`counter`] ordered after every earlier instruction and before every later
+/// one: the read the clock takes inside its line's read section.
+pub fn counter_ordered() -> u64 {
+    rdtsc_ordered()
+}
+
 /// This function's caller's frame pointer: `rbp`, which `-Cforce-frame-pointers=yes` makes one.
 #[inline(always)]
 pub fn frame_pointer() -> u64 {

@@ -3,11 +3,13 @@
 //! measure and how far it can be off, and whether the counter still keeps the
 //! rate a clock was given.
 //!
-//! Every bound here is derived from the readings themselves: the counter
-//! readings either side of a reference reading bracket the moment it latched,
-//! and the reference's tick bounds where in that tick it was. Nothing is a
-//! statistic, so a bound that fails is a counter, a reference or a read that
-//! did not do what it says.
+//! Every bound on a rate and a step is derived from the readings themselves:
+//! the counter readings either side of a reference reading bracket the moment
+//! it latched, and the reference's tick bounds where in that tick it was, so a
+//! bound that fails is a counter, a reference or a read that did not do what
+//! it says. The one estimate is a third reference read by its interrupts
+//! ([`Edges`]): their least latency, and its crystal's drift carried across a
+//! span, which only choose between a step and none ([`third_says`]).
 
 use toyos_abi::clock::MULT_SHIFT;
 
@@ -462,21 +464,31 @@ impl Edges {
     /// `from` to after `to`: from the least-latency of the [`EDGES_EACH_SIDE`]
     /// edges before `from` to that of those after `to`. An edge reads late by
     /// its interrupt's latency and never early, so the least on each side is
-    /// the nearest its edge. `None` without an edge either side.
+    /// the nearest its edge. Less the RTC crystal's own drift from the
+    /// counter, where edges at least [`DRIFT_BASE_NS`] before give it: the
+    /// least-latency of the oldest kept to that before `from`, carried on
+    /// across the span. `None` without an edge either side.
     pub fn apart_across(&self, from: u64, to: u64, mult: u64) -> Option<i64> {
         let kept = &self.kept[..self.len];
-        let before = kept.iter().rev().filter(|&&(_, at)| at <= from).take(EDGES_EACH_SIDE);
-        let after = kept.iter().filter(|&&(_, at)| at >= to).take(EDGES_EACH_SIDE);
         let &(seen_ref, at_ref) = kept.iter().rev().find(|&&(_, at)| at <= from)?;
         let offset = |&(seen, at): &(u64, u64)| {
             let ns = ((at as i128 - at_ref as i128) * mult as i128) >> MULT_SHIFT;
-            ns - (seen as i128 - seen_ref as i128) * 1_000_000_000
+            (ns - (seen as i128 - seen_ref as i128) * 1_000_000_000, at)
         };
-        let least_before = before.map(offset).min()?;
-        let least_after = after.map(offset).min()?;
-        Some((least_after - least_before) as i64)
+        let least = |edges: &mut dyn Iterator<Item = &(u64, u64)>| edges.map(offset).min_by_key(|&(ns, _)| ns);
+        let before = least(&mut kept.iter().rev().filter(|&&(_, at)| at <= from).take(EDGES_EACH_SIDE))?;
+        let after = least(&mut kept.iter().filter(|&&(_, at)| at >= to).take(EDGES_EACH_SIDE))?;
+        let base_ticks = ((DRIFT_BASE_NS as u128) << MULT_SHIFT) / mult as u128;
+        let older = least(&mut kept.iter().filter(|&&(_, at)| (at as u128) + base_ticks <= before.1 as u128).take(EDGES_EACH_SIDE));
+        let drift = older.map_or(0, |older| (before.0 - older.0) * (after.1 as i128 - before.1 as i128) / (before.1 as i128 - older.1 as i128));
+        Some((after.0 - before.0 - drift) as i64)
     }
 }
+
+/// How far back edges must reach for [`Edges::apart_across`] to measure the
+/// RTC crystal's drift from the counter: over this, a few microseconds of
+/// latency are a part per million.
+pub const DRIFT_BASE_NS: u64 = 4_000_000_000;
 
 impl Default for Edges {
     fn default() -> Self {
@@ -525,7 +537,8 @@ pub const fn respond(step_ns: i64, slewed_before: u32) -> Response {
 /// The most a slew moves the clock's rate: 500 ppm, the frequency tolerance
 /// NTP disciplines a clock within (RFC 5905, Appendix A.1.1, `MAXFREQ`), so
 /// a reader that tolerates an NTP-disciplined clock tolerates this one. A
-/// step of `d` is slewed away in `2000 d`: 1.7 ms in 3.4 s.
+/// step of `d` is slewed at this rate for `2000 d` less the last millisecond
+/// or so, which halves each period: 1.7 ms in about 12 s.
 pub const SLEW_MOST_PPB: i64 = 500_000;
 /// A debt this small is paid.
 const SLEW_SETTLED_NS: u64 = 1_000;
@@ -557,13 +570,15 @@ impl Slew {
         self.debt_ns -= (line(kept) - line(ran)) as i64;
     }
 
-    /// The rate to run at for the next `period_ns`: the debt paid over that
-    /// period, at most [`SLEW_MOST_PPB`] from `kept`, and `kept` once settled.
+    /// The rate to run at until the next sample, due in `period_ns`: the debt
+    /// paid over two periods, at most [`SLEW_MOST_PPB`] from `kept`, and `kept`
+    /// once settled. A sample up to a period late pays no more than the debt;
+    /// a later one pays more, which the next pays back.
     pub fn mult(&self, kept: u64, period_ns: u64) -> u64 {
         if self.settled() {
             return kept;
         }
-        let ppb = (self.debt_ns as i128 * 1_000_000_000 / period_ns as i128).clamp(-(SLEW_MOST_PPB as i128), SLEW_MOST_PPB as i128);
+        let ppb = (self.debt_ns as i128 * 1_000_000_000 / (2 * period_ns as i128)).clamp(-(SLEW_MOST_PPB as i128), SLEW_MOST_PPB as i128);
         (kept as i128 - kept as i128 * ppb / 1_000_000_000) as u64
     }
 }
@@ -910,7 +925,7 @@ mod tests {
         let mut slew = Slew::new(debt);
         let gaps = [1_000_000_000u64, 1_400_000_000, 800_000_000, 1_200_000_000, 1_000_000_000, 1_300_000_000];
         let mut elapsed = 0u64;
-        for gap in gaps.iter().cycle().take(32) {
+        for gap in gaps.iter().cycle().take(64) {
             if slew.settled() {
                 break;
             }
@@ -921,6 +936,45 @@ mod tests {
             elapsed += gap;
         }
         assert!(slew.settled(), "{} ns left", slew.debt_ns());
-        assert!(elapsed <= 2_000 * debt as u64 + 2 * 1_400_000_000, "took {elapsed} ns");
+        // At the most rate down to two periods' worth, then halving at worst
+        // to six tenths a period, from a millisecond to the settled microsecond.
+        assert!(elapsed <= 2_000 * debt as u64 + 14 * 1_400_000_000, "took {elapsed} ns");
+    }
+
+    /// A sample a period late pays the debt and no more; one ten periods late
+    /// pays more, and the next runs the clock faster to pay it back.
+    #[test]
+    fn a_late_sample_does_not_overpay_and_a_later_one_is_paid_back() {
+        let kept = toyos_abi::clock::Line::mult_of_hz(1_000_000_000);
+        let period = 1_000_000_000u64;
+        let mut late = Slew::new(300_000);
+        late.ran(2 * period, kept, late.mult(kept, period));
+        assert!(late.debt_ns() >= 0 && late.settled(), "{} ns left", late.debt_ns());
+        let mut later = Slew::new(300_000);
+        later.ran(10 * period, kept, later.mult(kept, period));
+        assert!(later.debt_ns() < 0);
+        assert!(later.mult(kept, period) > kept, "an overpaid slew runs the clock faster");
+    }
+
+    /// An RTC crystal 60 ppm off the counter drifts 420 µs over the edges
+    /// either side of a span, about a quarter of a 1.7 ms step: corrected by
+    /// its own earlier edges, it reads the step and reads a stall as none.
+    #[test]
+    fn the_rtcs_crystal_drift_is_taken_out() {
+        let drifting = |step: u64| {
+            let mut edges = Edges::new();
+            for n in 0..EDGES_KEPT as u64 {
+                let edge = 10_000_000_000 + n * 1_000_060_000;
+                let latency = [3_000, 650_000, 20_000][n as usize % 3];
+                edges.push(n + 1, edge + latency + if n >= 11 { step } else { 0 });
+            }
+            edges
+        };
+        let (from, to) = (20_900_000_000, 21_900_000_000);
+        let apart = drifting(1_700_000).apart_across(from, to + 1_700_000, NS).expect("edges either side");
+        assert_eq!(third_says(1_700_000, Some(apart)), Third::Counter, "read {apart} ns");
+        let apart = drifting(0).apart_across(from, to, NS).expect("edges either side");
+        assert!(apart.unsigned_abs() <= 30_000, "a stall read {apart} ns through the drift");
+        assert_eq!(third_says(1_700_000, Some(apart)), Third::References);
     }
 }

@@ -575,6 +575,15 @@ mod checks {
         Ok(())
     }
 
+    /// A slewed step passes the clock's rows and a demotion fails them.
+    #[test]
+    fn a_demoted_clock_fails_its_rows() {
+        let slewed = "[ 20.778 cpu12 kernel] clock: TSC STEP: the TSC stepped 1695132 ns forward against the HPET\n";
+        assert_eq!(clock_kept_its_counter(slewed), Ok(()));
+        let demoted = format!("{slewed}[ 33.252 cpu1 kernel] clock: DEMOTED: the TSC stepped 10000110 ns\n");
+        assert!(clock_kept_its_counter(&demoted).is_err());
+    }
+
     /// [`irq_census`] over two censuses, X's from cpu2 and Y's from cpu3, whose
     /// lines are in no read order: a CPU's census is the largest count each
     /// source reaches on any of its lines, and the largest issuer total bounds

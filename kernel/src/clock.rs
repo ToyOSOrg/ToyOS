@@ -105,14 +105,21 @@ fn clock() -> Option<Clock> {
     lines().and_then(ClockPage::read)
 }
 
+/// The clock and the counter read inside its line's read section, so a line
+/// replaced while this CPU was interrupted is read again. The kernel's own
+/// clock stays on the counter whether or not the page is demoted.
+fn now_on_line() -> Option<(Clock, u64)> {
+    lines().and_then(|page| page.read_now(cpu::counter_ordered)).map(|(clock, now, _)| (clock, now))
+}
+
 /// Now as a log line's time: nanoseconds since the counter's zero — power-on,
 /// or the reset since — at the clock's rate, and before [`set_counter`] at the
 /// rate the CPU states. `None` where it states none and the clock has not
 /// started: no rate reads the counter yet. Never panics, as
 /// [`nanos_since_boot`].
 pub fn stamp() -> Option<LogStamp> {
-    if let Some(clock) = clock() {
-        return Some(LogStamp::since_zero(clock.stamp_of(cpu::counter())));
+    if let Some((clock, now)) = now_on_line() {
+        return Some(LogStamp::since_zero(clock.stamp_of(now)));
     }
     let stated = STATED_MULT.load(Relaxed);
     (stated != 0).then(|| LogStamp::since_zero(Line { counter: 0, stamp: 0, mult: stated }.nanos(cpu::counter())))
@@ -140,7 +147,7 @@ pub fn calibrated() -> bool {
 /// reads it from inside a bracket where panicking would reenter the log.
 /// Zero before [`set_counter`], and a CPU whose counter trails boot reads boot.
 pub fn nanos_since_boot() -> u64 {
-    clock().map_or(0, |clock| clock.nanos_since_boot(cpu::counter()))
+    now_on_line().map_or(0, |(clock, now)| clock.nanos_since_boot(now))
 }
 
 /// The same reading as an [`Instant`], the type arithmetic on it is allowed in.

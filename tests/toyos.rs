@@ -7454,6 +7454,7 @@ fn number_between(log: &str, head: &str, tail: &str) -> Result<u64, String> {
 /// prints the widest. **QEMU cannot refute it**: every guest TSC is
 /// synthesised from one host clock, which is why it runs on metal.
 fn smp_roster_and_tsc_trail(log: &str, cpus: u32) -> Result<(), String> {
+    clock_kept_its_counter(log)?;
     let online = number_between(log, "SMP: ", " of ")?;
     let named = number_between(log, " of ", " MADT cpus online")?;
     if online != u64::from(cpus) || named != u64::from(cpus) {
@@ -7631,6 +7632,7 @@ fn timer_calibration(log: &str) -> Result<(), String> {
 /// measured with its bound, which on the bench is a rate the clock can keep at
 /// all. Its bound is held against minutes by [`clock_holds_over_minutes`].
 fn tsc_rate_at_boot(log: &str) -> Result<(), String> {
+    clock_kept_its_counter(log)?;
     let boot = boot_rate(log)?;
     if boot.millihertz == 0 {
         return Err("the TSC was started at no rate at all".to_string());
@@ -7681,15 +7683,30 @@ fn clock_report(line: &str) -> Option<ClockReport> {
     })
 }
 
+/// Whether the boot's clock kept the TSC: every step it slewed, every span it
+/// left out and every step it waited on the RTC for is printed, and a
+/// demotion fails the row, since a demoted boot's processes read the HPET.
+fn clock_kept_its_counter(log: &str) -> Result<(), String> {
+    const SAID: [&str; 3] = ["clock: TSC STEP: ", "left out", "the RTC's edges after it will say which moved"];
+    for line in log.lines().filter(|line| SAID.iter().any(|said| line.contains(said))) {
+        eprintln!("  [clock] {}", line.trim());
+    }
+    match log.lines().find(|line| line.contains("clock: DEMOTED")) {
+        Some(demoted) => Err(format!("the clock demoted the TSC: {}", demoted.trim())),
+        None => Ok(()),
+    }
+}
+
 /// Parts per billion `a` is from `b`.
 fn ppb_apart(a: u64, b: u64) -> u64 {
     (u128::from(a.abs_diff(b)) * 1_000_000_000 / u128::from(b)) as u64
 }
 
-/// **The clock over minutes.** The kernel holds every CPU's TSC to the HPET
-/// once a second and panics on a step or a drift, so a boot that ran its list
-/// to the end held; what this row reads is whether the rate the boot started at
-/// was within the bound it derived, against the rate the HPET measured over
+/// **The clock over minutes.** The kernel holds the TSC to the HPET once a
+/// second, panics on a drift and demotes the TSC on a step it does not slew, so
+/// a boot that ran its list to the end without a demotion held; what this row
+/// reads is whether the rate the boot started at was within the bound it
+/// derived, against the rate the HPET measured over
 /// the longest span the boot reached, which must be two minutes or more. A
 /// stated rate is CPUID 15H's, and against it the HPET's own 0.05% is all a
 /// document allows (IA-PC HPET Specification 1.0a, §2.2), so its distance is
@@ -7697,6 +7714,7 @@ fn ppb_apart(a: u64, b: u64) -> u64 {
 fn clock_holds_over_minutes(boot: &metal::Readback) -> Result<(), String> {
     let kernel = boot.kernel();
     let text = kernel.text();
+    clock_kept_its_counter(text)?;
     let started = boot_rate(text)?;
     let longest = text
         .lines()

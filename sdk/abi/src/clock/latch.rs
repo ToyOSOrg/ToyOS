@@ -53,15 +53,26 @@ impl<const N: usize> Latch<N> {
 
     /// The value one publication left, whole.
     pub fn read(&self) -> [u64; N] {
+        self.read_with(|| ()).0
+    }
+
+    /// The value one publication left, whole, and what `inside` read while
+    /// that publication was in force: a publication that lands between the
+    /// value's loads and the recheck after `inside` sends the read round
+    /// again. `inside` orders whatever it reads that is not memory, such as a
+    /// counter, after the loads before it and before the recheck after it.
+    pub fn read_with<T>(&self, mut inside: impl FnMut() -> T) -> ([u64; N], T) {
         loop {
             let seq = self.seq.load(Ordering::Acquire);
             let copy = &self.copies[(seq & 1) as usize];
             let words = core::array::from_fn(|i| copy[i].load(Ordering::Relaxed));
-            // Orders the word loads before the recheck: a word a later
-            // publication wrote is one whose move the recheck sees.
+            let read = inside();
+            // Orders the word loads, and `inside`'s, before the recheck: a
+            // word a later publication wrote is one whose move the recheck
+            // sees.
             fence(Ordering::Acquire);
             if self.seq.load(Ordering::Relaxed) == seq {
-                return words;
+                return (words, read);
             }
         }
     }

@@ -9,13 +9,17 @@
 //! new one where the old one stands, so the clock never steps. [`page`] reads
 //! the line in force through the page's [`latch`], which the kernel's own
 //! clock reads too, so a stamp taken here and one taken by the kernel's log
-//! order against each other.
+//! order against each other until the kernel demotes the page.
 //!
-//! **A demoted page sends every reading to the kernel.** Where the counter
-//! steps again after a slewed step, or steps back, the kernel marks the page
-//! demoted ([`ClockPage::demoted`]); [`nanos_since_boot`] and [`stamp_ns`]
-//! then ask [`crate::syscall::clock_now`], which reads the reference instead.
-//! The line stays, for a recorded counter reading.
+//! **A demoted page sends every reading to the kernel.** The kernel demotes
+//! the page when it stops trusting the counter ([`ClockPage::demoted`]);
+//! [`nanos_since_boot`] and [`stamp_ns`] then ask
+//! [`crate::syscall::clock_now`], which reads the reference instead. The line
+//! stays, for a recorded counter reading.
+//!
+//! **A reading takes the counter inside the latch's read section**, and the
+//! page's demoted word after the counter, so a line replaced or a demotion
+//! made while the reader was preempted sends it round again or to the kernel.
 //!
 //! **Every word of the page is atomic.** The kernel writes it while processes
 //! read it, so it is reached as atomics and never as plain memory.
@@ -155,6 +159,20 @@ impl ClockPage {
         self.demoted.load(Ordering::Acquire) != 0
     }
 
+    /// The clock, a counter reading `counter` took inside the line's read
+    /// section, and whether the page was demoted after it; `None` on a page
+    /// that carries none.
+    pub fn read_now(&self, counter: impl Fn() -> u64) -> Option<(Clock, u64, bool)> {
+        if self.magic.load(Ordering::Acquire) != CLOCK_MAGIC {
+            return None;
+        }
+        let (words, (now, demoted)) = self.line.read_with(|| {
+            let now = counter();
+            (now, self.demoted())
+        });
+        Some((Clock { line: Line::of_words(words), stamp_at_boot: self.stamp_at_boot.load(Ordering::Relaxed) }, now, demoted))
+    }
+
     /// The clock now, or `None` on a page that carries none.
     pub fn read(&self) -> Option<Clock> {
         if self.magic.load(Ordering::Acquire) != CLOCK_MAGIC {
@@ -171,12 +189,11 @@ impl ClockPage {
 /// # Panics
 /// As [`page`].
 pub fn nanos_since_boot() -> u64 {
-    let page = mapped();
-    let clock = read(page);
-    if page.demoted() {
+    let (clock, now, demoted) = read_now();
+    if demoted {
         return crate::syscall::clock_now().saturating_sub(clock.stamp_at_boot);
     }
-    clock.nanos_since_boot(crate::arch::counter())
+    clock.nanos_since_boot(now)
 }
 
 /// Now as a log line's time: nanoseconds since the counter's zero, the kernel
@@ -186,11 +203,17 @@ pub fn nanos_since_boot() -> u64 {
 /// # Panics
 /// As [`page`].
 pub fn stamp_ns() -> u64 {
-    let page = mapped();
-    if page.demoted() {
+    let (clock, now, demoted) = read_now();
+    if demoted {
         return crate::syscall::clock_now();
     }
-    read(page).stamp_of(crate::arch::counter())
+    clock.stamp_of(now)
+}
+
+fn read_now() -> (Clock, u64, bool) {
+    mapped()
+        .read_now(crate::arch::counter)
+        .unwrap_or_else(|| panic!("the clock page at {CLOCK_PAGE:#x} carries no clock"))
 }
 
 /// The clock, off this process's page: its line, for a counter reading.
