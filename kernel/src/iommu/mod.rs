@@ -304,6 +304,13 @@ pub fn isolates(function: &crate::drivers::pci::PciDevice) -> Result<(), &'stati
     }
 }
 
+/// Whether the unit blocks every requester on `buses` it has not seen, so
+/// a function arriving there reaches nothing until a claim attaches it, or
+/// why not.
+pub fn governs(buses: (u8, u8)) -> Result<(), &'static str> {
+    unit::domain::governs(buses)
+}
+
 /// A claimed function's message, raising an interrupt of its own and
 /// translated for [`Self::function`] alone.
 ///

@@ -126,6 +126,10 @@ struct Live {
     /// Every function enumerated when the unit was programmed: the ones
     /// [`Self::routes`] was read for.
     enumerated: Vec<StreamId>,
+    /// Its registers' base, as its IORT node names it, and the RSDP the IORT
+    /// was found by: what a route read after boot is held against.
+    base: u64,
+    rsdp: u64,
     domains: crate::iommu::domains::Domains<domain::Space>,
 }
 
@@ -282,6 +286,7 @@ pub fn init(rsdp_addr: u64, devices: &[PciDevice], _kernel: (u64, u64)) {
         return;
     };
     live.enumerated = devices.iter().map(|device| StreamId::pci(device.bus, device.dev, device.func)).collect();
+    live.rsdp = rsdp_addr;
     *UNIT.lock() = Some(live);
     #[cfg(feature = "boot-actuators")]
     if crate::actuator::smmu_selftest() {
@@ -410,6 +415,8 @@ fn program(
         memory,
         routes,
         enumerated: Vec::new(),
+        base,
+        rsdp: 0,
         domains: crate::iommu::domains::Domains::new(domain::FIRST),
     };
     live.domains.avoid(reserved);

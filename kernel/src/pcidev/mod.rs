@@ -424,8 +424,6 @@ struct Machine {
     /// declaration is ever read from**, and a function is handed over on no
     /// other state.
     apertures: aperture::Held<Vec<RootBridgeWindow>>,
-    /// The root bridges the declaration was made of, kept with it.
-    roots: Vec<RootBridge>,
     /// Functions this module has reset, when each may be touched again (PCIe
     /// §6.6.2), and what the reset cleared that the next claim puts back. One
     /// entry per function ever released, so a re-claim cannot start reading a
@@ -478,7 +476,6 @@ static MACHINE: Lock<Machine> = Lock::new(Machine {
     decoded: Vec::new(),
     kernel_driven: Vec::new(),
     apertures: aperture::Held::Unknown,
-    roots: Vec::new(),
     resetting: Vec::new(),
 });
 
@@ -550,14 +547,14 @@ impl Drop for Binding {
     }
 }
 
-/// Every function in the device set, and who drives it now: a kernel driver,
-/// a process holding a claim, or nobody. In rising arrival order.
 /// Whether `function`, whose record says `identity`, is in the device set:
-/// its arrival is the record's, and a record of no arrival is in it never.
+/// the record's arrival is the function's live one.
 fn listed(function: &Function, identity: &toyos_abi::inventory::Pci) -> bool {
-    identity.arrival.0 != 0 && function.arrival.load(Ordering::Acquire) == identity.arrival.0
+    function.arrival.load(Ordering::Acquire) == identity.arrival.0
 }
 
+/// Every function in the device set, and who drives it now: a kernel driver,
+/// a process holding a claim, or nobody. In rising arrival order.
 pub fn inventory() -> Vec<toyos_abi::inventory::Pci> {
     use toyos_abi::inventory::Driven;
     let (identities, kernel_driven) = {
@@ -721,80 +718,83 @@ fn slot_of(device: &PciDevice) -> Option<(u64, hotplug::Slot)> {
     Some((cap.offset(), slot))
 }
 
+/// Serialises a declaration, the arming of the slots it commits and its
+/// publication against one another and against [`withhold`], so no claim sees
+/// a declaration before its slots are armed and isolated.
+static DECLARING: Lock<()> = Lock::new(());
+
 /// Hold the roots `declared` carries and their windows, together, as the
 /// root bridges' memory: the `acpi` claim holder's declaration, from
 /// `Unknown` alone. A record the ABI does not name ([`aperture::records`]),
 /// and a window over memory firmware's map gives the kernel in any root
 /// ([`aperture::check`]), refuse the whole of it, and the refusal is the
-/// answer. Each root's `_OSC` offer is said.
+/// answer. Each root's `_OSC` offer is said, and the hot-plug slots a held
+/// declaration commits are armed ([`slot::arm`]) before it is published.
+/// On the declarer's thread, outside the `acpi` claim's borrow.
 pub fn declare(declared: &toyos_abi::acpi::Apertures) -> Result<(), aperture::Declined> {
+    let _declaring = DECLARING.lock();
+    if MACHINE.lock().apertures.answer().is_some() {
+        log!("pcidev: a declaration of the root bridges' memory after the first answer is refused");
+        return Err(aperture::Declined::Late);
+    }
     let memory: Vec<(u64, u64)> = crate::mm::firmware_map()
         .iter()
         .filter(|entry| toyos_bootmap::is_read_as_memory(entry.uefi_type))
         .map(|entry| (entry.start, entry.end))
         .collect();
-    let mut machine = MACHINE.lock();
-    let answer = match aperture::records(declared) {
-        Err(why) => machine.apertures.refuse(why),
-        Ok(()) => {
-            let bridges = declared.bridges().expect("`records` read every bridge");
-            let windows: Vec<RootBridgeWindow> =
-                bridges.iter().flat_map(|bridge| declared.windows_of(bridge).expect("`records` read every run")).copied().collect();
-            let answer = machine.apertures.declare(windows, &memory);
-            if answer != Err(aperture::Declined::Late) {
-                machine.roots = bridges
-                    .iter()
-                    .map(|b| RootBridge {
-                        segment: b.segment,
-                        buses: (b.first_bus, b.last_bus),
-                        osc: b.osc().expect("`records` read every word"),
-                        committed: b.commit().expect("`records` read every word"),
-                    })
-                    .collect();
-                for root in &machine.roots {
-                    let offered = match root.osc {
-                        toyos_abi::acpi::Osc::Absent => "no _OSC",
-                        toyos_abi::acpi::Osc::Offered(offered) if offered & toyos_abi::acpi::NATIVE_HOT_PLUG != 0 => "native hot-plug offered",
-                        toyos_abi::acpi::Osc::Offered(_) | toyos_abi::acpi::Osc::Refused => "not offered",
-                    };
-                    let committed = match root.committed {
-                        None => String::from("no commit"),
-                        Some(committed) => alloc::format!("committed {committed:#x}"),
-                    };
-                    log!(
-                        "pci: root {:04x}:{:02x} _OSC: {offered}, buses {:#04x}..={:#04x}, {committed}",
-                        root.segment,
-                        root.buses.0,
-                        root.buses.0,
-                        root.buses.1
-                    );
-                }
-            }
-            answer
+    let staged = aperture::records(declared).and_then(|()| {
+        let bridges = declared.bridges().expect("`records` read every bridge");
+        let roots: Vec<RootBridge> = bridges
+            .iter()
+            .map(|b| RootBridge {
+                segment: b.segment,
+                buses: (b.first_bus, b.last_bus),
+                osc: b.osc().expect("`records` read every word"),
+                committed: b.commit().expect("`records` read every word"),
+            })
+            .collect();
+        for root in &roots {
+            let offered = match root.osc {
+                toyos_abi::acpi::Osc::Absent => "no _OSC",
+                toyos_abi::acpi::Osc::Offered(offered) if offered & toyos_abi::acpi::NATIVE_HOT_PLUG != 0 => "native hot-plug offered",
+                toyos_abi::acpi::Osc::Offered(_) | toyos_abi::acpi::Osc::Refused => "not offered",
+            };
+            let committed = match root.committed {
+                None => String::from("no commit"),
+                Some(committed) => alloc::format!("committed {committed:#x}"),
+            };
+            log!(
+                "pci: root {:04x}:{:02x} _OSC: {offered}, buses {:#04x}..={:#04x}, {committed}",
+                root.segment,
+                root.buses.0,
+                root.buses.0,
+                root.buses.1
+            );
         }
+        let windows: Vec<RootBridgeWindow> =
+            bridges.iter().flat_map(|bridge| declared.windows_of(bridge).expect("`records` read every run")).copied().collect();
+        aperture::check(windows.as_slice(), &memory)?;
+        Ok((roots, windows))
+    });
+    if let Ok((roots, windows)) = &staged {
+        slot::arm(roots, windows);
+    }
+    let mut machine = MACHINE.lock();
+    let answer = match staged {
+        Err(why) => machine.apertures.refuse(why),
+        Ok((_, windows)) => machine.apertures.declare(windows, &memory),
     };
     match (&answer, machine.apertures.answer()) {
         (Ok(()), Some(Ok(declaration))) => survey(declaration.windows(), &machine.decoded),
         (Err(aperture::Declined::Refused(why)), _) => {
             log!("pcidev: the root bridges' memory is refused as declared: {why}, so no function is handed over")
         }
-        (Err(aperture::Declined::Late), _) => log!("pcidev: a declaration of the root bridges' memory after the first answer is refused"),
+        (Err(aperture::Declined::Late), _) => unreachable!("DECLARING keeps the answer Unknown since it was read"),
         (Ok(()), _) => unreachable!("a declaration taken is the answer"),
     }
     drop(machine);
-    if answer != Err(aperture::Declined::Late) {
-        DECLARATION.post();
-    }
+    DECLARATION.post();
     answer
-}
-
-/// Arm the hot-plug slots below the roots a held declaration commits, on the
-/// declarer's thread once [`declare`] has answered, outside the `acpi`
-/// claim's borrow: arming claims a message from the units and writes each
-/// port's configuration.
-pub fn arm_slots() {
-    let roots = MACHINE.lock().roots.clone();
-    slot::arm(&roots);
 }
 
 /// The `acpi` claim went: where it declared nothing, nothing will be.
@@ -803,6 +803,7 @@ pub fn declarer_gone() {
 }
 
 fn withhold(why: aperture::Withheld) {
+    let _declaring = DECLARING.lock();
     if MACHINE.lock().apertures.withhold(why) {
         log!("pcidev: no declaration of the root bridges' memory will be held: {why}, so no function is handed over");
         DECLARATION.post();

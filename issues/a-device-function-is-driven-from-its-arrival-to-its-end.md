@@ -141,11 +141,16 @@ started. Nothing reaches userland when a device arrives or leaves.
      the functions below it run on the set's reader.
    - One record per requester, carrying its live arrival: a device that
      returns is a new arrival on the same record and domain. A slot is armed
-     only once every function enumerated behind it at boot is on a domain of
-     its own, and a slot with one behind it that a driver in this kernel
-     drives or the unit cannot isolate is not armed: every requester first
-     seen after boot is blocked at the unit until a claim attaches it, so a
-     card seated behind an armed slot reaches nothing until it is claimed. A claim of an
+     before the declaration is published, so before any claim runs, and only
+     where the unit blocks every requester on the port's buses it has not
+     seen (a VT-d unit including every PCI device; AMD-Vi units serving every
+     id there, none kept on identity by an IVMD; the IORT routing every id
+     through the armed SMMUv3), and once every function enumerated behind it
+     at boot is on a domain of its own. A slot over a function a driver in
+     this kernel drives, or one the unit cannot isolate, is not armed. So a
+     card seated behind an armed slot reaches nothing until it is claimed,
+     but, on VT-d, the regions firmware reserved for its requester, which
+     its domain maps at their own addresses. A claim of an
      older arrival answers `Gone` on every call, and its release asks the
      device nothing. The last release behind a removed slot powers it off.
    - An arrived endpoint's BARs are assigned once, before it is listed: each
@@ -158,7 +163,8 @@ started. Nothing reaches userland when a device arrives or leaves.
    - The supervisor diffs the set (`toyos-supervisor`): a departed arrival
      is never started again, and the restart budget is the address's.
    - `a_function_arrives_and_leaves` is the guest arm, on
-     `Profile::HeadlessHotplugPort` (q35, `acpi-pci-hotplug-with-bridge-support=off`).
+     `Profile::HeadlessHotplugPort` (q35, `acpi-pci-hotplug-with-bridge-support=off`,
+     an `edu` behind the port from boot).
 
    Gaps it records:
    - **Physical arrival is QEMU's alone**: no bench has a hot-plug port the

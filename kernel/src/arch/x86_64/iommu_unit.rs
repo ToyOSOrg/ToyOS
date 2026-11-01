@@ -166,6 +166,16 @@ pub mod domain {
         }
     }
 
+    /// Whether the unit blocks every requester on `buses` it has not seen,
+    /// or why not.
+    pub fn governs(buses: (u8, u8)) -> Result<(), &'static str> {
+        match backend() {
+            Backend::Vtd => vtd::domain::governs(buses),
+            Backend::AmdVi => amdvi::domain::governs(buses),
+            Backend::None => Err("no unit translates"),
+        }
+    }
+
     /// Whether a function with no domain of its own reaches nothing: never,
     /// since both backends leave it on the identity domain.
     pub fn aborts_undomained(_stream: StreamId) -> bool {

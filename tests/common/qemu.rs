@@ -712,9 +712,9 @@ pub enum Profile {
     /// neither of: two identical functions, each a `drives` row's to start a
     /// process on.
     HeadlessTwoEdu,
-    /// [`Profile::Headless`] with an empty `pcie-root-port` whose slot the
-    /// firmware's `_OSC` grants native hot-plug of: the machine a test plugs
-    /// an `edu` into and pulls it out of over QMP.
+    /// [`Profile::Headless`] with a `pcie-root-port` whose slot the
+    /// firmware's `_OSC` grants native hot-plug of, an `edu` behind it from
+    /// boot: the machine a test pulls it out of and plugs one into over QMP.
     HeadlessHotplugPort,
     /// M1 metal-sim: GOP, NVMe, xHCI with the boot stick on it, i8042 from
     /// q35, and nothing else -- no virtio device and no USB HID. This is the
@@ -1014,6 +1014,8 @@ struct Shape {
 /// The `id` of [`Probes::HotplugPort`]'s root port, which a hot-added
 /// device names as its bus.
 pub const HOTPLUG_PORT: &str = "hpslot";
+/// The `id` of the `edu` behind [`HOTPLUG_PORT`] from boot.
+pub const HOTPLUG_PRESENT: &str = "present";
 
 /// The devices a machine has for a test to aim a DMA or a message from, and
 /// on `virt` the SMMUv3 that comes with them: a unit no function writes
@@ -1027,8 +1029,9 @@ enum Probes {
     /// Two of QEMU's `edu`, behind the machine's unit: identical functions a
     /// claim tells apart only by their arrivals.
     Edus,
-    /// An empty `pcie-root-port`, [`HOTPLUG_PORT`], behind the machine's unit,
-    /// on a q35 whose DSDT leaves its slot to native hot-plug:
+    /// A `pcie-root-port`, [`HOTPLUG_PORT`], with an `edu` behind it from boot
+    /// ([`HOTPLUG_PRESENT`]), behind the machine's unit, on a q35 whose DSDT
+    /// leaves its slot to native hot-plug:
     /// `acpi-pci-hotplug-with-bridge-support=off`, without which the `_OSC`
     /// keeps hot-plug for ACPI and the kernel arms no slot.
     HotplugPort,
@@ -2570,6 +2573,7 @@ fn qemu_command(
     if shape.probes == Probes::HotplugPort {
         qemu.arg("-global").arg("ICH9-LPC.acpi-pci-hotplug-with-bridge-support=off");
         qemu.arg("-device").arg(format!("pcie-root-port,id={HOTPLUG_PORT},chassis=3,slot=3"));
+        qemu.arg("-device").arg(format!("edu,bus={HOTPLUG_PORT},id={HOTPLUG_PRESENT}"));
     }
     if shape.probes == Probes::Its {
         qemu.arg("-device").arg("edu");

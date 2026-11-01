@@ -103,6 +103,26 @@ pub fn aborts_undomained(function: StreamId) -> bool {
     UNIT.lock().as_ref().is_some_and(|live| live.routes.iter().any(|(stream, ..)| *stream == function))
 }
 
+/// Whether the armed unit governs every requester on `buses`, so one seen
+/// first after boot is aborted: the IORT routes each of their RIDs through
+/// it, where an invalid STE or a StreamID past the table aborts what no
+/// claim attached (`super`'s module header). Read from
+/// the IORT again, on the arming's thread: routes were read at boot for the
+/// functions enumerated then alone.
+pub fn governs(buses: (u8, u8)) -> Result<(), &'static str> {
+    let (base, rsdp) = match UNIT.lock().as_ref() {
+        Some(live) => (live.base, live.rsdp),
+        None => return Err("no SMMUv3 is armed"),
+    };
+    let iort = toyos_acpi::iort(crate::drivers::acpi::direct_phys(), rsdp).map_err(|_| "the IORT is not read again")?;
+    let segment = u32::from(toyos_acpi::SEGMENT_GROUP);
+    let (first, last) = (u16::from(buses.0) << 8, u16::from(buses.1) << 8 | 0xff);
+    match (first..=last).all(|rid| matches!(iort.route(segment, rid), Ok(toyos_acpi::Route::Translated { smmu, .. }) if smmu.base == base)) {
+        true => Ok(()),
+        false => Err("the IORT routes a requester id behind it through no armed SMMUv3"),
+    }
+}
+
 /// Why no claim may have `function`: it arrived after the unit was
 /// programmed, and its IORT route was read only for the functions enumerated
 /// then.

@@ -1,7 +1,7 @@
 # The boot `a_function_arrives_and_leaves` reads, on
 # `Profile::HeadlessHotplugPort`: acpiserver declares the host bridge's `_OSC`
-# grant, the kernel arms the empty port's slot, and one `pciholder` holds each
-# `edu` the test plugs into it until the function leaves.
+# grant, the kernel arms the port's slot over the `edu` behind it from boot,
+# and one `pciholder` holds each `edu` there until the function leaves.
 
 [boot]
 start = ["logkeeper", "acpiserver", "test-runner"]
