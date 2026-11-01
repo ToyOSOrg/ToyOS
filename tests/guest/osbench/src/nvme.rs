@@ -3,6 +3,11 @@
 //! touched. Linux reads its first NVMe namespace's block device with
 //! `O_DIRECT`, past its page cache, which takes root; ToyOS grants a program
 //! no disk's blocks outside a file server's role and the idle slot.
+//!
+//! On Linux the group also says the Autonomous Power State Transition table
+//! the controller holds (Get Features 0Ch, NVM Express Base 2.1 §5.1.25.1.6),
+//! read through the admin passthrough, also root: what ToyOS's driver logs of
+//! its own table, for the same drive.
 
 const BENCHES: [&str; 2] = ["nvme.read.4k.random", "nvme.read.1m.seq"];
 
@@ -54,6 +59,7 @@ mod imp {
         condition("nvme.namespace", disk);
         condition("nvme.model", sys("device/model"));
         condition("nvme.logical_block", sys("queue/logical_block_size"));
+        apst(disk);
         if bytes < 4 * SEQ_BYTES {
             return refuse("nvme", format!("the namespace is {bytes} bytes, under the {} the sequential rounds read", 4 * SEQ_BYTES));
         }
@@ -70,6 +76,77 @@ mod imp {
         let mut buf = Mapping::huge(MIB);
         random(&file, bytes, &mut buf);
         sequential(&file, &mut buf);
+    }
+
+    /// `struct nvme_passthru_cmd` of Linux's UAPI `linux/nvme_ioctl.h`, which
+    /// `NVME_IOCTL_ADMIN_CMD` takes as `struct nvme_admin_cmd`.
+    #[repr(C)]
+    #[derive(Default)]
+    struct PassthruCmd {
+        opcode: u8,
+        flags: u8,
+        rsvd1: u16,
+        nsid: u32,
+        cdw2: u32,
+        cdw3: u32,
+        metadata: u64,
+        addr: u64,
+        metadata_len: u32,
+        data_len: u32,
+        cdw10: u32,
+        cdw11: u32,
+        cdw12: u32,
+        cdw13: u32,
+        cdw14: u32,
+        cdw15: u32,
+        timeout_ms: u32,
+        result: u32,
+    }
+    const _: () = assert!(std::mem::size_of::<PassthruCmd>() == 72);
+
+    /// `_IOWR('N', 0x41, struct nvme_admin_cmd)`.
+    const NVME_IOCTL_ADMIN_CMD: u32 = (3 << 30) | (72 << 16) | ((b'N' as u32) << 8) | 0x41;
+
+    /// The controller's APST table and whether it is enabled, as a note: each
+    /// state with a transition, `from->to after <ITPT> ms` (Figure 393).
+    fn apst(disk: &str) {
+        use std::os::fd::AsRawFd;
+        // `nvmeXnY` is namespace Y of controller `nvmeX`.
+        let Some(index) = disk.strip_prefix("nvme").and_then(|rest| rest.split('n').next()) else {
+            return unmeasured("nvme.apst", &format!("{disk} names no controller"), &[]);
+        };
+        let controller = format!("/dev/nvme{index}");
+        let file = match File::open(&controller) {
+            Ok(f) => f,
+            Err(e) => return unmeasured("nvme.apst", &format!("{controller}: {e}"), &[]),
+        };
+        let mut table = [0u8; 256];
+        let mut cmd = PassthruCmd {
+            opcode: 0x0A,
+            addr: table.as_mut_ptr() as u64,
+            data_len: table.len() as u32,
+            cdw10: 0x0C,
+            ..PassthruCmd::default()
+        };
+        // SAFETY: `cmd` is the UAPI's layout and names `table`, live for the call, as its data buffer.
+        let rc = unsafe { libc::ioctl(file.as_raw_fd(), NVME_IOCTL_ADMIN_CMD as _, &mut cmd as *mut PassthruCmd) };
+        if rc != 0 {
+            let why = if rc < 0 { std::io::Error::last_os_error().to_string() } else { format!("status {rc:#x}") };
+            return unmeasured("nvme.apst", &format!("Get Features 0Ch on {controller}: {why}"), &[]);
+        }
+        let steps: Vec<String> = table
+            .as_chunks::<8>()
+            .0
+            .iter()
+            .enumerate()
+            .filter_map(|(n, e)| {
+                let entry = u64::from_le_bytes(*e);
+                let (itps, itpt) = ((entry >> 3) & 0x1F, (entry >> 8) & 0xFF_FFFF);
+                (itpt != 0).then(|| format!("{n}->{itps} after {itpt} ms"))
+            })
+            .collect();
+        condition("nvme.apst", if cmd.result & 1 != 0 { "on" } else { "off" });
+        crate::report::note("nvme.apst", &[("table", steps.join(","))]);
     }
 
     /// 4 KiB at a page-aligned offset an LCG picks over the whole namespace,
