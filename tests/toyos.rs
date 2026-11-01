@@ -544,6 +544,8 @@ const MACHINE_TESTS: &[&str] = &[
     // endowments a job gets is the image's and the supervisor's, which no
     // host build has, and the benches run osbench only nightly.
     "osbench_capability_groups_exit_0",
+    // Measurement only, never lands.
+    "kcopyat_runs",
     // What the kernel reads and writes for the `acpi` claim's holder and what
     // it refuses. A red here is a write the kernel made — to RAM, to the
     // firmware's tables, to COM1, to `PM1a_CNT`, to a function's configuration
@@ -1226,6 +1228,14 @@ const METAL: &[(&str, metal::Metal)] = &[
         "osbench_energy",
         metal::Metal { arms: OSBENCH_ENERGY, judge: |b| osbench_energy_measured(b[0]) },
     ),
+    // Measurement only, never lands: the kernel's copy by where its ends sit.
+    (
+        "kcopyat",
+        metal::Metal {
+            arms: KCOPYAT,
+            judge: |b| osbench_ran(b[0], &["osbench_kcopyat", "osbench_files", "osbench_ipc", "osbench_system"]),
+        },
+    ),
     (
         // The clock's boot rate against the HPET's over the minutes the suite
         // runs, through its idle, busy and hot phases: the T14 and the AMD
@@ -1821,6 +1831,13 @@ const OSBENCH_GROUPS: [&str; 16] = [
 const BENCHCASE: &[metal::Arm] = &[metal::Arm {
     adds_ms: 465_000,
     ..metal::once("benchcase", "tests/images/benchcase.toml", &[], &OSBENCH_GROUPS)
+}];
+
+/// Measurement only, never lands.
+const KCOPYAT: &[metal::Arm] = &[metal::Arm {
+    adds_ms: 360_000,
+    named_only: true,
+    ..metal::once("kcopyat", "tests/images/benchcase.toml", &[], &["osbench_kcopyat", "osbench_files", "osbench_ipc", "osbench_system"])
 }];
 
 /// `energy` waits up to 120 s for the machine to go quiet, then measures 60 s
@@ -3028,6 +3045,29 @@ fn osbench_capability_groups_exit_0() -> Result<(), String> {
     let mut console = format!("{}\n", qemu.boot_log());
     let last = format!("===TEST_END {} ", JOBS[JOBS.len() - 1]);
     await_guest(&mut qemu, &mut console, "osbench's groups to end", |said| said.contains(&last))?;
+    let said = serial::Serial::named("osbench boot", console);
+    for job in JOBS {
+        said.must_say(&format!("===TEST_END {job} exit=0==="))?;
+    }
+    Ok(())
+}
+
+/// Measurement only, never lands: `osbench kcopyat` and `files` exit 0.
+fn kcopyat_runs() -> Result<(), String> {
+    const JOBS: [&str; 2] = ["osbench_kcopyat", "osbench_files"];
+    let committed = compile::repo_root().join("tests/images/benchcase.toml");
+    let text = fs::read_to_string(&committed).map_err(|e| format!("{}: {e}", committed.display()))?;
+    let derived = toyos_metal::image::derive(&text, 600_000, &JOBS, &[]).map_err(|why| why.to_string())?;
+    let config = common::lane::dir().join("kcopyat-runs.toml");
+    fs::write(&config, derived).map_err(|e| format!("{}: {e}", config.display()))?;
+    let mut qemu = QemuInstance::boot_with_options(&config, &[], &[], BootOptions { ready_marker: bootlog::COMPLETE, ..Default::default() });
+    let mut console = format!("{}\n", qemu.boot_log());
+    let last = format!("===TEST_END {} ", JOBS[JOBS.len() - 1]);
+    let ended = await_guest(&mut qemu, &mut console, "kcopyat and files to end", |said| said.contains(&last));
+    if let Ok(path) = std::env::var("KCOPYAT_LOG") {
+        fs::write(path, &console).map_err(|e| e.to_string())?;
+    }
+    ended?;
     let said = serial::Serial::named("osbench boot", console);
     for job in JOBS {
         said.must_say(&format!("===TEST_END {job} exit=0==="))?;
@@ -4763,6 +4803,7 @@ fn run_machine_test(name: &str, test_config: &Path) -> Result<(), String> {
         "a_stalled_hpet_is_left_out" => faults::a_stalled_hpet_is_left_out(test_config),
         "acpi_press_is_one_sci" => acpi_press_is_one_sci(),
         "osbench_capability_groups_exit_0" => osbench_capability_groups_exit_0(),
+        "kcopyat_runs" => kcopyat_runs(),
         "acpi_mediated_access" => acpi_mediated_access(2),
         "acpi_lock_given_back_on_one_cpu" => acpi_mediated_access(1),
         "acpi_supply_outlives_holder" => acpi_supply_outlives_holder(),

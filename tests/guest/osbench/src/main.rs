@@ -35,6 +35,11 @@ mod files;
 mod identity;
 mod internet;
 mod ipc;
+#[cfg(target_arch = "x86_64")]
+mod kcopyat;
+#[cfg(target_arch = "x86_64")]
+#[allow(dead_code)]
+mod kernel_copy;
 mod lan;
 mod measure;
 mod mem;
@@ -157,6 +162,10 @@ const GROUPS: [(&str, fn()); 16] = [
 /// The groups that run only by name: `lan` needs the `osbench-peer` on the
 /// other bench, `internet` the public internet, and `energy` a machine
 /// running nothing else, in a ToyOS boot of its own and as root on Linux.
+#[cfg(target_arch = "x86_64")]
+const BY_NAME: [(&str, fn()); 4] =
+    [("lan", lan::suite), ("internet", internet::suite), ("energy", energy::suite), ("kcopyat", kcopyat::suite)];
+#[cfg(not(target_arch = "x86_64"))]
 const BY_NAME: [(&str, fn()); 3] = [("lan", lan::suite), ("internet", internet::suite), ("energy", energy::suite)];
 
 /// A group between its first and last lines, after the machine's conditions

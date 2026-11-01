@@ -96,6 +96,7 @@ args = [
 "bin/osbench_internet" = "/system/bin/osbench"
 "bin/osbench_crunch" = "/system/bin/osbench"
 "bin/osbench_persist" = "/system/bin/osbench"
+"bin/osbench_kcopyat" = "/system/bin/osbench"
 "bin/reboot" = "/system/bin/toybox"
 
 # The block service: every disk a driver offers on `disk`, listed and opened
