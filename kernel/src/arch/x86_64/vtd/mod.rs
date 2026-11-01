@@ -160,6 +160,8 @@ pub fn init(rsdp_addr: u64, devices: &[PciDevice], windows: Option<&[RootBridgeW
     let mut ready: Vec<(Unit, Plan)> = Vec::new();
     // Every RMRR, which no protected region may cover during the hand-over.
     let mut rmrrs: Vec<(u64, u64)> = Vec::new();
+    // Every RMRR with its scopes resolved, classified once the walk is whole.
+    let mut reservations: Vec<kernel::rmrr::Region> = Vec::new();
     // What no domain's addresses may reach, RMRRs added below as the walk
     // meets them; nothing where no declaration is held.
     let mut reserved: Option<Vec<(u64, u64)>> = windows
@@ -180,18 +182,18 @@ pub fn init(rsdp_addr: u64, devices: &[PciDevice], windows: Option<&[RootBridgeW
                     }
                 }
             }
-            // Kernel devices get RMRR regions for free and userspace handoff of
-            // one is refused elsewhere; QEMU publishes none, so this arm is
-            // untested by the harness.
+            // A kernel device reaches its RMRRs through the identity domain; a
+            // claimed one only where [`classify`] keeps them, in its own domain.
+            // QEMU publishes none, so this arm is untested by the harness.
             //
-            // **"For free" is a claim about one address range, and it is
-            // checked here.** The identity domain is built over `[0, top)`
-            // exactly (`table::identity_domain`), so a region whose limit falls
-            // at or above `top` is one firmware requires stay mapped and this
-            // kernel does not map — a device in its scope would fault on the
-            // access firmware reserved the range for. The other half, that it
-            // is mapped *nowhere else*, is structural: every domain's addresses
-            // are built clear of it (`domain::avoid`).
+            // **The identity domain's half is checked here.** It is built over
+            // `[0, top)` exactly (`table::identity_domain`), so a region whose
+            // limit falls at or above `top` is one firmware requires stay
+            // mapped and this kernel does not map — a device in its scope would
+            // fault on the access firmware reserved the range for. No domain
+            // hands these addresses out (`domain::avoid`); the only one that
+            // maps them is the own domain of the one function [`classify`]
+            // keeps them for, at their own address.
             Ok(Structure::Rmrr(rmrr)) => {
                 let held = rmrr.limit() < identity_top;
                 // Spelled whole in each arm rather than with the verdict as a
@@ -215,6 +217,15 @@ pub fn init(rsdp_addr: u64, devices: &[PciDevice], windows: Option<&[RootBridgeW
                 }
                 rmrrs.push((base, limit.saturating_add(1)));
                 describe_scopes("rmrr", regions, rmrr.scopes());
+                // Functions are enumerated on one segment group: a region on
+                // another names devices this kernel cannot tell from its own.
+                let scopes = if seg == toyos_acpi::SEGMENT_GROUP {
+                    resolved(regions, &rmrr.scopes().map(|scope| scope.ok()).collect::<Vec<_>>(), devices)
+                } else {
+                    log!("iommu: rmrr{regions} is on segment {seg}, which this kernel enumerates no function on");
+                    alloc::vec![kernel::rmrr::Scope::Unknown]
+                };
+                reservations.push(kernel::rmrr::Region { start: base, end: limit.saturating_add(1), scopes });
                 regions += 1;
                 held_regions += usize::from(held);
             }
@@ -233,6 +244,8 @@ pub fn init(rsdp_addr: u64, devices: &[PciDevice], windows: Option<&[RootBridgeW
             }
         }
     }
+
+    classify(&reservations, devices);
 
     if units == 0 {
         log!("iommu: DMAR describes no remapping unit");
@@ -730,6 +743,89 @@ fn describe_scopes(owner: &str, index: usize, scopes: Scopes) {
             ),
         }
     }
+}
+
+/// Device scope type 1, a PCI endpoint, whose path names one function, and
+/// type 2, a bridge and every function below it (VT-d Rev. 4.0 §8.3.1).
+const SCOPE_ENDPOINT: u8 = 1;
+const SCOPE_SUBHIERARCHY: u8 = 2;
+
+/// Each scope of RMRR `index` resolved against the functions this kernel
+/// enumerated. A malformed entry stands for itself and every entry after it.
+fn resolved(index: usize, scopes: &[Option<Scope>], devices: &[PciDevice]) -> Vec<kernel::rmrr::Scope> {
+    use kernel::rmrr::Scope as Resolved;
+    let mut out = Vec::new();
+    for scope in scopes {
+        let Some(scope) = scope else {
+            log!("iommu: rmrr{index}'s scope list is malformed past here; what it names is unknown");
+            out.push(Resolved::Unknown);
+            break;
+        };
+        let resolved = match (scope.kind(), resolve(scope, devices)) {
+            (SCOPE_ENDPOINT, Some(at)) => Resolved::Endpoint(stream_of(at).requester()),
+            (SCOPE_SUBHIERARCHY, Some(at)) if bridged(at) => {
+                let (secondary, subordinate) = (at.read_config_u8(0x19), at.read_config_u8(0x1A));
+                Resolved::SubHierarchy(
+                    devices
+                        .iter()
+                        .filter(|d| (secondary..=subordinate).contains(&d.bus))
+                        .chain(core::iter::once(at))
+                        .map(|d| stream_of(d).requester())
+                        .collect(),
+                )
+            }
+            _ => {
+                log!("iommu: rmrr{index} names a {} this kernel cannot follow to a function", scope.kind_name());
+                Resolved::Unknown
+            }
+        };
+        out.push(resolved);
+    }
+    out
+}
+
+/// Every function the RMRRs name, kept or refused by `kernel::rmrr::classify`,
+/// which no claim of it then crosses (`domain::unclaimable`).
+fn classify(reservations: &[kernel::rmrr::Region], devices: &[PciDevice]) {
+    let class = |id: u16| devices.iter().find(|d| stream_of(d).requester() == id).map(|d| d.read_config_u32(0x08) >> 8);
+    for (id, verdict) in kernel::rmrr::classify(reservations, class) {
+        let stream = StreamId::pci((id >> 8) as u8, ((id >> 3) & 0x1F) as u8, (id & 7) as u8);
+        match &verdict {
+            kernel::rmrr::Verdict::Kept(ranges) => log!("iommu: {stream}'s reserved memory is its alone, kept in its own domain: {ranges:x?}"),
+            kernel::rmrr::Verdict::Refused(why) => log!("iommu: {stream} is unclaimable: {why}"),
+        }
+        domain::reserve(stream, verdict);
+    }
+}
+
+fn stream_of(device: &PciDevice) -> StreamId {
+    StreamId::pci(device.bus, device.dev, device.func)
+}
+
+/// A configured PCI-to-PCI bridge: header type 1 (PCI Local Bus 3.0 §6.1,
+/// 0Eh bits 6:0) with a secondary bus assigned (19h). Anything else names
+/// no bus this kernel can follow.
+fn bridged(device: &PciDevice) -> bool {
+    device.read_config_u8(0x0E) & 0x7F == 1 && device.read_config_u8(0x19) != 0
+}
+
+/// The function a scope's path ends at: each step but the last a configured
+/// bridge this kernel enumerated, whose secondary bus the next step is on
+/// (VT-d Rev. 4.0 §8.3.1).
+fn resolve<'a>(scope: &Scope, devices: &'a [PciDevice]) -> Option<&'a PciDevice> {
+    let mut bus = scope.start_bus();
+    let mut path = scope.path().peekable();
+    while let Some((device, function)) = path.next() {
+        let found = devices.iter().find(|d| (d.bus, d.dev, d.func) == (bus, device, function))?;
+        if path.peek().is_none() {
+            return Some(found);
+        }
+        if !bridged(found) {
+            return None;
+        }
+        bus = found.read_config_u8(0x19);
+    }
+    None
 }
 
 /// Device scope type 3, whose enumeration id is an I/O APIC's MADT id.

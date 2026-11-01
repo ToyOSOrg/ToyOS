@@ -230,8 +230,13 @@ impl OwnSpace {
     /// One with `room` bytes of it below 4 GiB handed out at the address
     /// answered, or the reason there is none: a machine with no unit and a
     /// machine out of domains are both refusals.
-    pub fn create(room: u64) -> Result<(Self, u64), IommuError> {
-        unit::domain::create(room).map(|(id, at)| (Self(id), at.raw()))
+    ///
+    /// What firmware reserved for function `bus:device.function` is mapped in
+    /// it at its own addresses, before the function can attach.
+    pub fn create(room: u64, bus: u8, device: u8, function: u8) -> Result<(Self, u64), IommuError> {
+        let (id, at) = unit::domain::create(room)?;
+        unit::domain::keep_reserved(id, StreamId::pci(bus, device, function));
+        Ok((Self(id), at.raw()))
     }
 
     /// [`DeviceSpace::map`].
