@@ -1002,6 +1002,68 @@ fn a_tail_past_the_send_rings_room_resets_that_stream() {
     assert_eq!((client.dropped(), net.node.streams(), net.far.resets.len()), (true, 0, 1));
 }
 
+/// The send ring's size word, which only the client writes.
+const TX_SIZE: usize = 16 * 16;
+
+/// A client that claims its send ring grown to its place without committing a page of it, and
+/// publishes `len` bytes, past the ring's first size.
+fn grown_without_a_commit(client: &Client, len: usize) {
+    client.region.client_commits_nothing();
+    client.word(TX_SIZE).store(toyos::net::stream::SEND_BYTES.trailing_zeros(), Ordering::Release);
+    client.word(TX_TAIL).store(u32::try_from(len).unwrap(), Ordering::Release);
+    client.region_ring();
+}
+
+// netstack commits what a client's size claims before [tcp] reads by it: every read stays inside
+// netstack's own commits, and the peer hears the bytes, a fresh commit's zeros, past the first
+// size.
+#[test]
+fn a_send_ring_a_client_grew_without_committing_is_read_through_netstacks_own_commit() {
+    let (mut net, id, client) = established();
+    const LEN: usize = 100_000;
+    grown_without_a_commit(&client, LEN);
+    for _ in 0..1_000 {
+        if net.far.received.len() == LEN {
+            break;
+        }
+        let before = net.far.received.len();
+        net.bridge();
+        if net.far.received.len() == before {
+            let at = net.node.next_deadline().expect("a timer, if nothing else");
+            net.fire(at);
+        }
+    }
+    assert!(net.far.received == vec![0; LEN], "the peer heard {} bytes", net.far.received.len());
+    assert!(net.events().iter().all(|event| !matches!(event, StreamEvent::Violated { id: v, .. } if *v == id)));
+}
+
+// A size netstack cannot make memory, the kernel refusing the commit, is a violation of that
+// stream alone, before [tcp] reads a byte by it.
+#[test]
+fn a_send_ring_size_netstack_cannot_commit_resets_that_stream() {
+    let (mut net, id, client) = established();
+    client.region.refuse_netstacks_commits();
+    grown_without_a_commit(&client, 100_000);
+    net.bridge();
+    assert_eq!(net.events(), [StreamEvent::Violated { id, violation: Violation::Size }]);
+    assert_eq!((client.dropped(), net.node.streams(), net.far.received.len()), (true, 0, 0));
+}
+
+// The client, as the receive ring's consumer, commits what a size claims before it reads by it:
+// a size netstack stored without committing, here written in its place, is read only through
+// the client's own commit.
+#[test]
+fn a_receive_ring_grown_without_netstacks_commit_is_read_through_the_clients_own() {
+    const RX_TAIL: usize = 16;
+    const RX_SIZE: usize = 15 * 16;
+    const LEN: usize = 100_000;
+    let (_net, _, client) = established();
+    client.region.netstack_commits_nothing();
+    client.word(RX_SIZE).store(toyos::net::stream::RECEIVE_BYTES.trailing_zeros(), Ordering::Release);
+    client.word(RX_TAIL).store(u32::try_from(LEN).unwrap(), Ordering::Release);
+    assert!(inbox(&client) == vec![0; LEN]);
+}
+
 // Text published after the client's own shutdown is past the FIN [tcp] queued: a violation.
 #[test]
 fn text_published_after_the_shutdown_resets_that_stream() {

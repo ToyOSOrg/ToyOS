@@ -21,6 +21,8 @@ pub struct Region {
     /// Whether the client's and the node's commits make memory: one that makes none leaves
     /// every page the other's to commit, so a test shows the other's commits alone suffice.
     commits: Cell<(bool, bool)>,
+    /// The node's commits are refused, as the kernel refuses one past the job's memory.
+    refused: Cell<bool>,
     holders: RefCell<Vec<Rc<Doorbells>>>,
     /// A holder rang netstack since the test last asked.
     rang: Cell<bool>,
@@ -100,6 +102,9 @@ impl Memory for Region {
     }
 
     fn commit(&self, at: usize, len: usize) -> bool {
+        if self.refused.get() {
+            return false;
+        }
         if self.commits.get().1 {
             self.committed.borrow_mut().push((at, at + len));
         }
@@ -124,6 +129,11 @@ impl Region {
     /// From here on the node's commits make no memory.
     pub fn netstack_commits_nothing(&self) {
         self.commits.set((self.commits.get().0, false));
+    }
+
+    /// From here on the node's commits are refused.
+    pub fn refuse_netstacks_commits(&self) {
+        self.refused.set(true);
     }
 
     /// Whether `[at, at + len)` lies in what a commit made memory, as a fault would ask.
@@ -182,6 +192,7 @@ impl Client {
             bytes: RefCell::new(vec![0; REGION_BYTES]),
             committed: RefCell::new(vec![(0, RECEIVE_RING + RECEIVE_INITIAL as usize), (SEND_RING, SEND_RING + SEND_INITIAL as usize)]),
             commits: Cell::new((true, true)),
+            refused: Cell::new(false),
             holders: RefCell::new(Vec::new()),
             rang: Cell::new(false),
             dropped: Cell::new(false),
