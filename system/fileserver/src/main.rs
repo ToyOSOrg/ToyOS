@@ -1130,7 +1130,7 @@ impl Server {
                 // The volume truncated first, so a refused open changed
                 // nothing; the object follows before anything writes back.
                 if how.truncate && found.is_some() {
-                    let truncated = self.volume.identity(&path).and_then(|identity| self.files.truncated(identity));
+                    let truncated = self.volume.identity(&path).and_then(|identity| self.files.truncated(&mut *self.volume, identity, node));
                     if let Err(e) = truncated {
                         let _ = self.volume.close(node);
                         return Err(e);
@@ -1239,8 +1239,13 @@ impl Server {
             Time::At(nanos) => nanos,
         };
         if held {
-            let node = self.fid(id, r.fid)?.borrow().node().map_err(|_| Error::Unsupported)?;
+            let file = self.fid(id, r.fid)?;
+            let (node, identity) = {
+                let f = file.borrow();
+                (f.node().map_err(|_| Error::Unsupported)?, f.identity)
+            };
             self.volume.set_mtime(node, mtime)?;
+            self.files.stamped(&mut *self.volume, identity, node)?;
         } else {
             let path = match self.resolve(id, r.fid, &rel, r.flags & FOLLOW_LAST != 0)? {
                 Resolved::Absolute(p) => return self.follow(id, r, &p),
@@ -1249,8 +1254,9 @@ impl Server {
             if self.volume.lstat(&path)?.kind != Kind::File {
                 return Err(Error::Unsupported);
             }
+            let identity = self.volume.identity(&path)?;
             let node = self.volume.open(&path, OpenHow { create: false, create_new: false, truncate: false })?;
-            let set = self.volume.set_mtime(node, mtime);
+            let set = self.volume.set_mtime(node, mtime).and_then(|()| self.files.stamped(&mut *self.volume, identity, node));
             let closed = self.volume.close(node);
             set.and(closed)?;
         }

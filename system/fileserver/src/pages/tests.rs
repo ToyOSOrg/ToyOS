@@ -20,6 +20,7 @@ struct Model {
     next: u64,
     pages: BTreeMap<(u64, u64), Page>,
     sizes: BTreeMap<u64, u64>,
+    mtimes: BTreeMap<u64, u64>,
     supplies: u32,
     /// Every supply from here is refused.
     refusing: bool,
@@ -127,7 +128,7 @@ impl Fake {
 }
 
 impl Pager for Fake {
-    fn object(&self, size: u64) -> Result<u64, Refused> {
+    fn object(&self, size: u64, mtime: u64) -> Result<u64, Refused> {
         let mut m = self.0.borrow_mut();
         if m.sizes.len() >= m.objects {
             return Err(Refused::NoRoom);
@@ -135,6 +136,7 @@ impl Pager for Fake {
         m.next += 1;
         let id = m.next;
         m.sizes.insert(id, size);
+        m.mtimes.insert(id, mtime);
         Ok(id)
     }
 
@@ -170,7 +172,8 @@ impl Pager for Fake {
         answer
     }
 
-    fn write(&self, id: u64, offset: u64, bytes: &[u8]) -> Result<usize, Refused> {
+    fn write(&self, id: u64, offset: u64, bytes: &[u8], mtime: u64) -> Result<usize, Refused> {
+        self.0.borrow_mut().mtimes.insert(id, mtime);
         let answer = self.write_pages(id, offset, bytes);
         self.0.borrow_mut().changed(id, answer == Ok(bytes.len()));
         answer
@@ -196,8 +199,14 @@ impl Pager for Fake {
         Ok(())
     }
 
-    fn resize(&self, id: u64, size: u64) -> Result<(), Refused> {
+    fn stamp(&self, id: u64, mtime: u64) -> Result<(), Refused> {
+        self.0.borrow_mut().mtimes.insert(id, mtime);
+        Ok(())
+    }
+
+    fn resize(&self, id: u64, size: u64, mtime: u64) -> Result<(), Refused> {
         let mut m = self.0.borrow_mut();
+        m.mtimes.insert(id, mtime);
         m.pages.retain(|(c, p), _| *c != id || *p < size.div_ceil(PAGE));
         if let Some(page) = m.pages.get_mut(&(id, size / PAGE)) {
             page.bytes[(size % PAGE) as usize..].fill(0);
@@ -459,7 +468,7 @@ fn a_truncating_open_leaves_the_object_no_page_of_before() {
     
     let truncate = OpenHow { create: false, create_new: false, truncate: true };
     let again = v.open("home/f", truncate).unwrap();
-    files.truncated(id).unwrap();
+    files.truncated(&mut v, id, again).unwrap();
     files.opened(&mut v, id, again).unwrap();
     let object = files.object(id).unwrap();
     assert_eq!((fake.0.borrow().sizes[&object], fake.pages_of(object)), (0, 0), "a holder reads the object, and finds nothing of before");
@@ -623,4 +632,42 @@ fn a_directorys_fsync_makes_a_new_name_durable() {
     files.fsync(&mut v, None).unwrap();
     let mut v = after_a_stop(v);
     assert_eq!(v.lstat("home/d").map(|m| m.kind), Ok(crate::volume::Kind::Dir));
+}
+
+static NOW: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1_000_000_000);
+
+/// A clock a step ahead at each reading, so each change stamps a new time.
+fn ticking() -> u64 {
+    NOW.fetch_add(1_000_000_007, std::sync::atomic::Ordering::Relaxed)
+}
+
+/// What a holder's `fstat` reads is the object's size and mtime: after an
+/// open, a write, one refused, a truncate and a stamp, each is the volume's.
+#[test]
+fn an_objects_size_and_mtime_are_the_volumes_after_every_change() {
+    let mut v = DataVolume::format(Ram::new(4096), 256, &["home"], ticking).unwrap();
+    let fake = Fake::new(64, 16);
+    let mut files = Files::new(Some(fake.clone()));
+    let n = v.open("home/f", CREATE).unwrap();
+    v.write(n, 0, b"before").unwrap();
+    v.close(n).unwrap();
+    let (node, id) = open(&mut files, &mut v, "home/f");
+    let object = files.object(id).unwrap();
+    let published = |v: &mut DataVolume<Ram>, what: &str| {
+        let m = fake.0.borrow();
+        let meta = v.node_meta(node).unwrap();
+        assert_eq!((m.sizes[&object], m.mtimes[&object]), (meta.size, meta.mtime), "after {what}");
+    };
+    published(&mut v, "the open");
+    files.write(&mut v, id, node, 3 * PAGE, b"after").unwrap();
+    published(&mut v, "a write");
+    fake.0.borrow_mut().refusing = true;
+    assert!(files.write(&mut v, id, node, 9 * PAGE, &pattern(2 * PAGE as usize, 1)).is_err());
+    fake.0.borrow_mut().refusing = false;
+    published(&mut v, "a refused write");
+    files.truncate(&mut v, id, node, 100).unwrap();
+    published(&mut v, "a truncate");
+    v.set_mtime(node, 42_000_000_000).unwrap();
+    files.stamped(&mut v, id, node).unwrap();
+    published(&mut v, "a stamp");
 }

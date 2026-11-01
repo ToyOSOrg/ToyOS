@@ -34,7 +34,7 @@ enum Place {
 enum Held {
     /// A file or directory a file server holds open, and the holder of its
     /// paged object where the server sent one.
-    Served { cap: Arc<Capability>, fid: Fid, position: Position, holder: Option<crate::paged::Paged> },
+    Served { cap: Arc<Capability>, fid: Fid, position: Position, holder: Option<Holder> },
     /// A directory the kernel serves, by its absolute path.
     KernelDir(String),
 }
@@ -44,6 +44,22 @@ impl Drop for Held {
         if let Held::Served { cap, fid, .. } = self {
             cap.dir.lock().close(*fid);
         }
+    }
+}
+
+/// A served file's paged object, and what its open answered of it: an
+/// `fstat` is the object's size and mtime over the rest of that, which no
+/// change to the file moves.
+struct Holder {
+    paged: crate::paged::Paged,
+    opened: fs::Stat,
+}
+
+impl Holder {
+    /// `None` while a write is under way, and the server is asked.
+    fn stat(&self) -> Option<fs::Stat> {
+        let published = self.paged.stat().ok()?;
+        Some(fs::Stat { size: published.size, mtime: published.mtime, ..self.opened })
     }
 }
 
@@ -302,7 +318,7 @@ fn on_fd_held<T>(
     match named.map_err(Error::Fd)?? {
         Err(answer) => answer,
         Ok(held) => match &*held {
-            Held::Served { cap, fid, position, holder } => match holder.as_ref().and_then(|h| holding(h, position)) {
+            Held::Served { cap, fid, position, holder } => match holder.as_ref().and_then(|h| holding(&h.paged, position)) {
                 Some(answer) => Ok(answer),
                 None => served(&mut cap.dir.lock(), *fid, position).map_err(Error::Served),
             },
@@ -445,7 +461,7 @@ unsafe extern "C" fn toyos_fs_open(at: Fd, path: *const u8, len: usize, how: Ope
             // it; a pager's process reads through the server.
             let holder = match opened.holder.map(crate::paged::Paged::received) {
                 None | Some(Err(crate::paged::NotAHolder::Refused | crate::paged::NotAHolder::Ended)) => None,
-                Some(Ok(holder)) => Some(holder),
+                Some(Ok(paged)) => Some(Holder { paged, opened: opened.stat }),
                 Some(Err(crate::paged::NotAHolder::Other)) => {
                     dir.close(opened.fid);
                     return Err(Refused::Error(fs::Error::Malformed));
@@ -476,7 +492,10 @@ unsafe extern "C" fn toyos_fs_stat(at: Fd, path: *const u8, len: usize, follow: 
         (At::Fd(fd), true) => match named(fd) {
             Ok(Named::Handle(handle)) => syscall::fstat(handle).map(Stat::of_kernel).map_err(Error::Kernel),
             Ok(Named::Held(held)) => match &*held {
-                Held::Served { cap, fid, .. } => cap.dir.lock().fstat(*fid).map(stat_of).map_err(Error::Served),
+                Held::Served { cap, fid, holder, .. } => match holder.as_ref().and_then(Holder::stat) {
+                    Some(stat) => Ok(stat_of(stat)),
+                    None => cap.dir.lock().fstat(*fid).map(stat_of).map_err(Error::Served),
+                },
                 Held::KernelDir(dir) => syscall::stat(dir.as_bytes(), true).map(Stat::of_kernel).map_err(Error::Kernel),
             },
             Err(e) => Err(e),

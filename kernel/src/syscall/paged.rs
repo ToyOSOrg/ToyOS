@@ -10,7 +10,7 @@ use kernel::paged::within_reach;
 use toyos_abi::handle::{RawHandle, Rights};
 use toyos_abi::syscall::{PagedArgs, PagedOp, SyscallError, PAGED_DIRTY, PAGED_RANGE_PAGES, PAGED_WRITTEN};
 
-use crate::object::paged::{PagerObject, Unmade};
+use crate::object::paged::{PagedHolderObject, PagerObject, Unmade};
 use crate::object::{ops, KObjectRef};
 use crate::process::{self, PagerRole};
 use crate::user_ptr::{SyscallContext, UserBytesMut};
@@ -48,9 +48,9 @@ fn pager(h: RawHandle, rights: Rights) -> Result<Arc<PagerObject>, u64> {
     process::with_process_data(|data| data.handles.get::<PagerObject>(h, rights)).map_err(|e| e.refuse())
 }
 
-pub(super) fn sys_paged_create(h: RawHandle, size: u64) -> u64 {
+pub(super) fn sys_paged_create(h: RawHandle, size: u64, mtime: u64) -> u64 {
     match pager(h, Rights::WRITE) {
-        Ok(pager) => pager.add(size),
+        Ok(pager) => pager.add(size, mtime),
         Err(refused) => refused,
     }
 }
@@ -80,6 +80,28 @@ pub(super) fn sys_paged_holder(h: RawHandle, object: u64) -> u64 {
 /// on itself or on another pager. The handle is often a peer's, sent as a
 /// holder, so another kind is refused `InvalidArgument`, never a fault.
 pub(super) fn sys_paged_read(h: RawHandle, out: &mut UserBytesMut, offset: u64) -> u64 {
+    match holder(h) {
+        Ok(holder) => holder.read(out, offset),
+        Err(refused) => refused,
+    }
+}
+
+/// A holder's stat, refused as its read is.
+pub(super) fn sys_paged_stat(ctx: &SyscallContext<'_>, h: RawHandle, out: UserAddr) -> u64 {
+    let stat = match holder(h) {
+        Ok(holder) => holder.stat(),
+        Err(refused) => return refused,
+    };
+    match stat {
+        Ok(stat) => match ctx.copy_out(out, &stat) {
+            Ok(()) => 0,
+            Err(_) => SyscallError::BadAddress.to_u64(),
+        },
+        Err(e) => e.to_u64(),
+    }
+}
+
+fn holder(h: RawHandle) -> Result<Arc<PagedHolderObject>, u64> {
     let resolved = process::with_process_data(|data| {
         let KObjectRef::Paged(holder) = data.handles.get_ref(h, Rights::NONE)? else {
             return Ok(Err(SyscallError::InvalidArgument));
@@ -91,9 +113,9 @@ pub(super) fn sys_paged_read(h: RawHandle, out: &mut UserBytesMut, offset: u64) 
         Ok(if data.pager.is_pager() { Err(SyscallError::PermissionDenied) } else { Ok(holder) })
     });
     match resolved {
-        Ok(Ok(holder)) => holder.read(out, offset),
-        Ok(Err(e)) => e.to_u64(),
-        Err(e) => crate::object::HandleError::refuse(e),
+        Ok(Ok(holder)) => Ok(holder),
+        Ok(Err(e)) => Err(e.to_u64()),
+        Err(e) => Err(crate::object::HandleError::refuse(e)),
     }
 }
 
@@ -125,12 +147,13 @@ pub(super) fn sys_paged_op(ctx: &SyscallContext<'_>, h: RawHandle, op: u64, args
             let Some(src) = ctx.user_bytes(UserAddr::new(args.buf), args.len) else { return SyscallError::BadAddress.to_u64() };
             match x == PagedOp::Supply as u64 {
                 true => pager.supply(id, args.offset, &src, args.flags & PAGED_DIRTY != 0),
-                false => pager.write(id, args.offset, &src),
+                false => pager.write(id, args.offset, &src, args.time),
             }
         }
         x if x == PagedOp::Withdraw as u64 => pager.withdraw(id, args.offset, args.len),
         x if x == PagedOp::Fail as u64 => pager.fail(id, args.offset, args.len),
-        x if x == PagedOp::Resize as u64 => pager.resize(id, args.offset),
+        x if x == PagedOp::Resize as u64 => pager.resize(id, args.offset, args.time),
+        x if x == PagedOp::Stamp as u64 => pager.stamp(id, args.time),
         x if x == PagedOp::Release as u64 => pager.release(id),
         x if x == PagedOp::EndWrite as u64 => pager.end_write(id),
         x if x == PagedOp::WritebackBegin as u64 || x == PagedOp::WritebackEnd as u64 => {

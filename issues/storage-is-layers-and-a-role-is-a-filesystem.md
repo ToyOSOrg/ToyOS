@@ -140,6 +140,23 @@ keeps the volumes' structures alone. Mapping them is memory stage 7b, the
 process-memory track's
 (`issues/process-memory-in-4-kib-pages-still-copies-each-programs-text.md`).
 
+**A served file's metadata without a request**, in two stages:
+
+- **3a:** a held descriptor's `fstat` is its paged object's size, mtime and
+  version (`SYS_PAGED_STAT`). The version is the object's write span, and the
+  one data generation.
+- **3b, deferred until memory stage 7b's mappings:** a client cache of names,
+  validated by a per-connection page the file server writes. The page carries
+  generations of the directories in the connection's view and of the files
+  it has answered about, so that `stat` of an existing file's path hits the
+  cache; that row is what stands against Linux's 1.5 µs. Its slots carry
+  identity and generation, and a client compares both under acquire. Server
+  death clears the page through the paged object's `Gone`.
+  - Why deferred: building it before mappings means reading slots by
+    syscall, plus a names-only pager for SYSTEM and a dirty allowance for
+    BOOT. That is an interim mechanism the mappings would replace.
+  - Exit: `fsrtt.std.stat` and `open_close`, measured on both benches.
+
 LOG stays its own FAT32 partition through the dev phase, because a Mac has to
 read the stick; folding it into DATA in the installed product is deferred by
 the owner's ruling of 2026-09-26, and no stage above owes it yet.
