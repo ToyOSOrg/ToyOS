@@ -1,0 +1,25 @@
+# A member of the host workspace (root `Cargo.toml`): pure, and its tests run
+# on the host. Every decision `wlan` makes, sans-IO.
+
+[package]
+name = "toyos-wlan-station"
+description = "The station wlan runs over a radio: scans heard, the BSS chosen, the join and its handshakes, and the answers to the settings programs, sans-IO (no_std with alloc, forbid(unsafe_code))."
+version = "0.1.0"
+edition = "2024"
+license = "MIT OR Apache-2.0"
+publish = false
+
+[dependencies]
+toyos-crypto = { path = "../../../lib/crypto", features = ["wpa2"] }
+toyos-ieee80211 = { path = "../../../lib/ieee80211" }
+toyos-radio = { path = "../../../lib/radio" }
+toyos-wifi = { path = "../../../lib/wifi" }
+toyos-wlan-handshake = { path = "../handshake" }
+
+# The tests' authenticator, as the handshake's tests have it.
+[dev-dependencies]
+ring = "0.17.14"
+aes = "0.8.4"
+
+[lints.rust]
+warnings = "deny"

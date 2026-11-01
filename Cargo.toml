@@ -64,6 +64,7 @@ members = [
     "lib/parity",
     "lib/pci-claim",
     "lib/quiesce",
+    "lib/radio",
     "lib/random",
     "lib/rootimage",
     "lib/scsi",
@@ -81,6 +82,7 @@ members = [
     "lib/vdagent",
     "lib/virtio",
     "lib/wallclock",
+    "lib/wifi",
     "loader",
     "sdk/abi",
     "sdk/filepicker",
@@ -151,7 +153,10 @@ members = [
     "system/vdagent",
     "system/vdagent/bridge",
     "system/virtio-net",
+    "system/wifi",
+    "system/wlan",
     "system/wlan/handshake",
+    "system/wlan/station",
     "tests/guest/hangupholder",
     "tests/guest/inputsink",
     "tests/guest/kernelprobe",
@@ -265,6 +270,9 @@ toyos-osrelease = { path = "sdk/osrelease" }
 # gate on every manifest reads what the supervisor reads.
 toyos-swap = { path = "lib/swap" }
 toyos-session = { path = "lib/session" }
+# The radio and wifi ports and the rows alone that may hold them.
+toyos-radio = { path = "lib/radio" }
+toyos-wifi = { path = "lib/wifi" }
 # QEMU's clipboard channel's port name, id and port count, so the launch reads
 # the declaration the guest's agent drives.
 toyos-vdagent = { path = "lib/vdagent" }

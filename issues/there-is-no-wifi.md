@@ -312,7 +312,7 @@ W1, P6.
     Group message 1 is tested only against the tests' authenticator, and is
     first met for real in W6's T14 rows.
   - Its readings of the text are
-    `issues/the-wlan-handshakes-readings-of-802-11-are-unchecked-against-its-text.md`.
+    `issues/wlans-readings-of-802-11-are-unchecked-against-its-text.md`.
   - **W2b waits for P6:** SAE, AES-CMAC, AKM 6 (PSK-SHA256), and the
     Transition Disable KDE with its PSK refusal. RFCs 4493 and 9380 are its
     vectors.
@@ -363,7 +363,32 @@ W2.
   - connect, disconnect and status;
   - the wrong-credential refusal, on evidence the station holds;
   - hostile `radio` answers.
-- The pull request landing it files the Transition Disable weakness below.
+- The pull request landing the mark files the Transition Disable weakness below.
+- **W4a, WPA2-Personal: built.** `wlan` (`system/wlan`, its decisions
+  `toyos-wlan-station` in `system/wlan/station`), the `radio` and `wifi`
+  protocols (`toyos-radio`, `toyos-wifi`) and the settings program `wifi`
+  (`system/wifi`).
+  - **The ports run the other way from #876 §2's table**: `wlan` serves
+    `radio` and each driver connects to it, as each NIC driver connects to
+    netstack's `link`, because a port has one server and there is one driver
+    per radio function. The build lets only `ax2xx` receive `radio` and only
+    `wifi` receive `wifi`.
+  - **Host tests** of BSS choice (joinable security, band, signal, every
+    refusal by name), connect, disconnect and status, the wrong-credential
+    refusal (the AP did not answer message 2), a lost connection joined
+    again, and hostile `radio` answers: every frame that does not decode,
+    every frame out of the protocol's order and every bound missed ends the
+    radio by name. A whole join runs against both of W2a's recorded
+    handshakes, with the recorded keys installed and the recorded message 4
+    sent.
+  - **Not built, with W2b:** SAE before PSK (a transition-mode network is
+    joined by PSK, an SAE-only one refused "this station does not run SAE
+    yet"), the mark, and its refusal of a PSK-only BSS.
+  - **Not joined:** an open network (by design), a hidden one (no directed
+    probe), and a 64-digit hexadecimal PSK, which `lib/crypto` gives no PMK
+    constructor for. `wlan` drives one radio at a time.
+  - No image ships `ax2xx`, so no radio says hello until W5; `wlan` runs in
+    every image and answers "no radio is present".
 
 **W5, bring-up and passive scan on the T14**, the first stage that ships
 `ax2xx`. Depends on: S1 (met), P1, P4 (its match table), W3, W4; and the test

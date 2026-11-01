@@ -1,0 +1,12 @@
+[package]
+name = "wifi"
+description = "wifi status | scan | connect <network> | disconnect: the machine's Wi-Fi, asked of wlan; connect reads the passphrase from standard input."
+edition = "2024"
+license = "MIT OR Apache-2.0"
+
+[dependencies]
+toyos = { path = "../../sdk/toyos" }
+toyos-wifi = { path = "../../lib/wifi" }
+
+[package.metadata.toyos.host]
+exempt.manages = "ToyOS's Wi-Fi networks, through wlan's `wifi` port"

@@ -29,7 +29,7 @@ memory-floor-mib = 96
 # while the compositor had no way to ask for a program's *declared* authority —
 # the launcher gives it one, and starting a service from `[boot] start` is not
 # the thing that needed fixing.
-start = ["logkeeper", "diskserver", "fileserver", "compositor", "soundserver", "netstack", "filepicker", "acpiserver", "ps2server"]
+start = ["logkeeper", "diskserver", "fileserver", "compositor", "soundserver", "netstack", "filepicker", "acpiserver", "ps2server", "wlan"]
 
 # What every program launched out of `/apps` holds, whatever its own directory
 # says. A package is unpacked by `/system/bin/pkg` into a writable directory, so
@@ -166,6 +166,18 @@ restart = true
 drives = ["pci:02:00:00/8086:15fc", "pci:02:00:00/8086:10d3"]
 receives = ["link"]
 
+# The Wi-Fi supplicant: it alone holds a network's passphrase and runs its
+# handshakes, over each radio driver's connection to `radio`. `wifi` is how the
+# settings programs ask it to scan, join and leave; only they hold it.
+[programs.wlan]
+service = true
+serves = ["radio", "wifi"]
+
+# The network settings program: `wifi connect <network>` reads the passphrase
+# from standard input. A row of its own, so no toybox applet holds `wifi`.
+[programs.wifi]
+receives = ["wifi"]
+
 # The shared clipboard with QEMU's host: one process per virtio-serial
 # function the kernel does not drive (the kernel's console is `1af4:1043` too),
 # holding the function its vdagent chardev is on, and the compositor's
@@ -257,7 +269,7 @@ starts = ["shell"]
 
 [programs.shell]
 receives = ["surface"]
-starts = ["toybox", "shell", "terminal", "doom", "snake", "calc", "editor", "paint", "files", "host", "inspect", "pkg", "sshserver", "swap", "toyfetch", "update", "grants", "logout", "disks", "/apps"]
+starts = ["toybox", "shell", "terminal", "doom", "snake", "calc", "editor", "paint", "files", "host", "inspect", "pkg", "sshserver", "swap", "toyfetch", "update", "grants", "logout", "disks", "wifi", "/apps"]
 
 [programs.doom]
 receives = ["compositor", "soundserver"]
