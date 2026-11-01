@@ -11,8 +11,9 @@
 //! `arch::copies`: `movsb`, `dstal` and `srcal` (`rep movsb` from the
 //! destination's or the source's first 64-byte boundary), `up` and `down`
 //! (SSE2, 64 bytes a step, lowest or highest first).
-//! `copyat.<bytes>.heap`: `libc` between two 64 KiB `Vec`s as the heap
-//! places them, with their offsets noted.
+//! `downavx` is `down` 32 bytes a step. `copyat.<bytes>.heap`: `libc` between
+//! two 64 KiB `Vec`s as the heap places them, with their offsets noted; and
+//! `libc` at 1 MiB and 64 MiB, d = 0, 16 and 256, past the caches.
 
 use std::time::Instant;
 
@@ -28,13 +29,14 @@ const DISTANCES: [usize; 16] = [0, 16, 32, 64, 256, 384, 512, 640, 768, 1024, 15
 pub fn suite() {
     let mut map = Mapping::huge(4 * MIB);
     let base = map.ptr();
-    let hows: [(&str, CopyFn); 6] = [
+    let hows: [(&str, CopyFn); 7] = [
         ("libc", libc),
         ("movsb", copies::movsb),
         ("dstal", copies::movsb_dst_aligned),
         ("srcal", copies::movsb_src_aligned),
         ("up", copies::sse_up),
         ("down", copies::sse_down),
+        ("downavx", copies::avx_down),
     ];
     for (i, w) in map.words()[..MIB / 8].iter_mut().enumerate() {
         *w = (i as u64).wrapping_mul(0x9E37_79B9_7F4A_7C15);
@@ -67,7 +69,21 @@ pub fn suite() {
     for size in [4096usize, 8192] {
         measure(&format!("copyat.{size}.heap"), libc, s, d, size);
     }
+    drop(map);
+    // Past the caches: 1 MiB and 64 MiB, the destination 64 MiB + 4 KiB + `d` above the source.
+    let mut big = Mapping::huge(2 * LARGE + 8192);
+    big.words().fill(3);
+    let base = big.ptr();
+    for (size, rounds) in [(MIB, 200), (LARGE, 20)] {
+        for d in [0usize, 16, 256] {
+            // SAFETY: both ranges lie inside the mapping and are 64 MiB + 4 KiB + `d` apart.
+            let (src, dst) = unsafe { (base, base.add(LARGE + 4096 + d)) };
+            measure_n(&format!("copyat.{size}.libc.s0.d{d}"), libc, src, dst, size, rounds);
+        }
+    }
 }
+
+const LARGE: usize = 64 * MIB;
 
 type CopyFn = unsafe fn(*mut u8, *const u8, usize);
 
@@ -78,14 +94,19 @@ unsafe fn libc(d: *mut u8, s: *const u8, n: usize) {
 }
 
 fn measure(bench: &str, copy: CopyFn, src: *const u8, dst: *mut u8, size: usize) {
+    measure_n(bench, copy, src, dst, size, ROUNDS)
+}
+
+fn measure_n(bench: &str, copy: CopyFn, src: *const u8, dst: *mut u8, size: usize, rounds: usize) {
+    let warmup = WARMUP.min(rounds / 10).max(1);
     // SAFETY: the destination range is `size` long and only this reaches it.
     unsafe { std::ptr::write_bytes(dst, 0xA5, size) };
-    let mut ns = Vec::with_capacity(ROUNDS);
-    for r in 0..WARMUP + ROUNDS {
+    let mut ns = Vec::with_capacity(rounds);
+    for r in 0..warmup + rounds {
         let t = Instant::now();
         // SAFETY: the caller's two ranges are `size` (at least 64) long and disjoint.
         unsafe { copy(dst, src, size) };
-        if r >= WARMUP {
+        if r >= warmup {
             ns.push(t.elapsed().as_nanos() as u64);
         }
     }

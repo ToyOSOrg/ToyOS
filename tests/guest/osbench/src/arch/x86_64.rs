@@ -278,4 +278,30 @@ pub mod copies {
             )
         };
     }
+
+    /// As [`sse_down`], 32 bytes a load and store.
+    #[target_feature(enable = "avx")]
+    pub unsafe fn avx_down(d: *mut u8, s: *const u8, n: usize) {
+        unsafe {
+            asm!(
+                "vmovdqu ymm2, [{s}]", "vmovdqu ymm3, [{s} + 32]",
+                "2:",
+                "cmp {p}, 64",
+                "jbe 3f",
+                "sub {p}, 64",
+                "vmovdqu ymm0, [{s} + {p}]", "vmovdqu ymm1, [{s} + {p} + 32]",
+                "vmovdqu [{d} + {p}], ymm0", "vmovdqu [{d} + {p} + 32], ymm1",
+                "jmp 2b",
+                "3:",
+                "vmovdqu [{d}], ymm2", "vmovdqu [{d} + 32], ymm3",
+                "vzeroupper",
+                s = in(reg) s, d = in(reg) d, p = inout(reg) n => _,
+                out("ymm0") _, out("ymm1") _, out("ymm2") _, out("ymm3") _,
+                out("ymm4") _, out("ymm5") _, out("ymm6") _, out("ymm7") _,
+                out("ymm8") _, out("ymm9") _, out("ymm10") _, out("ymm11") _,
+                out("ymm12") _, out("ymm13") _, out("ymm14") _, out("ymm15") _,
+                options(nostack),
+            )
+        };
+    }
 }
