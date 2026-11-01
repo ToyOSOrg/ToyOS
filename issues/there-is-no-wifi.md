@@ -371,7 +371,8 @@ W2.
   - **The ports run the other way from #876 §2's table**: `wlan` serves
     `radio` and each driver connects to it, as each NIC driver connects to
     netstack's `link`, because a port has one server and there is one driver
-    per radio function. The build lets only `ax2xx` receive `radio` and only
+    per radio function. The orchestrator accepted this on #1140, as the
+    owner's split ruling's pattern. The build lets only `ax2xx` receive `radio` and only
     `wifi` receive `wifi`.
   - **Host tests** of BSS choice (joinable security, band, signal, every
     refusal by name), connect, disconnect and status, the wrong-credential
@@ -398,6 +399,13 @@ the orchestrator owns. Exit: a T14 row reads the firmware up, its MAC
 address, and the test network seen, its beacon's Country element read: a
 missing pad (`CountryPad`) refuses the whole beacon. The network's name arrives per run
 through a test job holding `wifi`, so no shipping path reads the ESP.
+- **The test networks** (the orchestrator's): the AMD bench's AX200 as the
+  access point under Linux, `wpa_supplicant` in `mode=2`, installing nothing
+  and running only for the run, while the AMD bench sits in Linux. Its SSID
+  and passphrase are generated per run and never published. Unread until
+  the orchestrator's bench read when W5 is planned: whether that access
+  point offers SAE by hash-to-element, PMF and HE, which W5's WPA3 network
+  and W6's HE row need.
 
 **W6, the first version: a full-rate join.** Depends on: W5 and its test
 networks, P4, P5, P6, P8.
@@ -424,9 +432,23 @@ networks, P4, P5, P6, P8.
 - `issues/a-platform-with-no-transmit-power-table-joins-no-wifi-network.md`
   is its.
 
-**W7, the AX200 on the AMD bench.** Depends on: P2, P3, W6, and W5's test
-networks in reach of the AMD bench. Exit: W5's and W6's rows on the AMD
-bench, all but the I219's.
+**W12, AP mode on the AX2xx**, directly after W6: ToyOS as the access point,
+Linux the independent station (the owner's direction). Scope: beacons,
+association, and the authenticator's side of the 4-way and group key
+handshakes. Depends on: W6; and a specification revision stating the
+firmware's AP-mode support and its band and regulatory limits, a reader's
+question.
+- **Exit:** a Linux station joins a ToyOS access point on the bench.
+- **ToyOS to ToyOS** is a later regression row, never the exit: Linux is
+  the oracle.
+
+**W7, the AX200 on the AMD bench.** Depends on: P2, P3, W6, and its test
+networks. Exit: W5's and W6's rows on the AMD bench, all but the I219's.
+- **Its test networks** swap W5's roles: the T14's AX210 is the access point
+  under Linux, `wpa_supplicant` in `mode=2`, installing nothing and running
+  only for the run, while the AMD bench runs ToyOS. Its SSID and passphrase
+  are generated per run and never published. Unread, as for W5's: whether
+  that access point offers SAE by hash-to-element, PMF and HE.
 
 **W8, power save, background scan, roaming, beacon loss and RF-kill.**
 Depends on: W6; W7, for the AMD bench's rows; and, at each bench, two
