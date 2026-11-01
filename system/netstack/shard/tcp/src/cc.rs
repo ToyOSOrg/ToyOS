@@ -19,8 +19,7 @@ const CUBE_DENOMINATOR: i128 = 5_000_000_000_000_000_000;
 /// The farthest from `K` the cubic is evaluated, so the cube stays inside `i128`.
 const CUBE_SPAN_US: i128 = 1 << 34;
 
-/// RFC 9406 §4.3's constants. L is the non-paced value: this sender does not pace.
-const L: u32 = 8;
+/// RFC 9406 §4.3's constants; L is infinity, as for a paced sender (`pace`).
 const MIN_RTT_THRESH: Duration = Duration::from_millis(4);
 const MAX_RTT_THRESH: Duration = Duration::from_millis(16);
 const MIN_RTT_DIVISOR: u32 = 8;
@@ -103,9 +102,8 @@ fn rtt_thresh(last_round_min: Duration) -> Duration {
 
 impl HyStart {
     /// What the ACK grows cwnd by when the window was in use, of `bytes` newly acknowledged.
-    fn growth(&self, bytes: u32, smss: u32) -> u32 {
-        let capped = bytes.min(smss.saturating_mul(L));
-        if self.css.is_some() { capped / CSS_GROWTH_DIVISOR } else { capped }
+    fn growth(&self, bytes: u32) -> u32 {
+        if self.css.is_some() { bytes / CSS_GROWTH_DIVISOR } else { bytes }
     }
 
     /// The ACK's RTT sample and round, after its growth.
@@ -180,8 +178,9 @@ pub struct Cc {
     pub ssthresh: u32,
     pub smss: u32,
     /// The window is in use: cwnd stopped the sender's last transmit opportunity with data
-    /// waiting, or the caller's credit ended it with at least half of cwnd in flight (`hand_off`).
-    /// Every ACK until the next opportunity grows the window, however many one pass brings.
+    /// waiting, or the caller's credit or the pacer ended it with at least half of cwnd in flight
+    /// (`hand_off`). Every ACK until the next opportunity grows the window, however many one pass
+    /// brings.
     pub limited: bool,
     w_max: Option<u32>,
     /// RFC 9438 §4.3's cwnd_prior: cwnd when ssthresh was last set, and before that the initial
@@ -217,7 +216,7 @@ impl Cc {
         let since_last = self.last_ack.replace(now).map_or(Duration::ZERO, |last| now.since(last));
         if self.ssthresh == SSTHRESH_INITIAL {
             if grow {
-                self.cwnd = self.cwnd.saturating_add(self.hystart.growth(acked, self.smss));
+                self.cwnd = self.cwnd.saturating_add(self.hystart.growth(acked));
             }
             let change = self.hystart.observe(ack);
             if change == Some(SlowStart::Ended) {
@@ -569,14 +568,15 @@ mod tests {
         assert_eq!(r.cc.ssthresh, SSTHRESH_INITIAL);
     }
 
-    /// RFC 9406 runs only in the initial slow start: after a loss, slow start is RFC 5681 §3.1's,
-    /// one SMSS per ACK at most.
+    /// RFC 9406 runs only in the initial slow start, where a paced sender grows by all an ACK
+    /// acknowledged (L = infinity, §4.3): after a loss, slow start is RFC 5681 §3.1's, one SMSS per
+    /// ACK at most.
     #[test]
     fn s_cc_022_l_applies_only_to_the_initial_slow_start() {
         let mut cc = Cc::new(1460, 0);
         cc.limited = true;
         cc.on_ack(&ack(at(0), 20_000, None));
-        assert_eq!(cc.cwnd, 14_600 + 8 * 1460);
+        assert_eq!(cc.cwnd, 14_600 + 20_000);
         cc.on_timeout(cc.cwnd, false);
         cc.limited = true;
         cc.on_ack(&ack(at(1), 20_000, None));
