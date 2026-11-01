@@ -4,8 +4,6 @@
 //! Exception: [`Parkable`] lives here because the park token has no public
 //! constructor outside the door this module defines.
 
-use alloc::sync::Arc;
-
 use kernel::sched::hw::{CpuId, Machine, Nanos};
 use kernel::sched::task::{Refused, SafePoint, WaitClass, QUANTUM_NS};
 
@@ -14,7 +12,7 @@ use crate::watch::{self, Cancel, Watch};
 use crate::hw::HW;
 use crate::pipe::PipeRef;
 use crate::process::{self, Pid, Tid};
-use crate::sched::driver::{self, cpus, preempt_off, Dispose, NewTask};
+use crate::sched::driver::{self, cpus, preempt_off, Dispose};
 use crate::sched::payload::ThreadSched;
 use crate::sched::reap_gate::ReapGate;
 use crate::sched::futex;
@@ -23,7 +21,7 @@ use crate::DirectMap;
 
 pub use crate::sched::driver::{
     current_address_space, enter_idle_loop, in_pass as in_schedule_self, started, total_cpu_ns,
-    write_stack_canary, Ticket,
+    write_stack_canary, NewTask, Ticket,
 };
 
 /// Panics unless the preempt depth equals `baseline`: a mismatch means a
@@ -107,24 +105,8 @@ pub fn init() {
 }
 
 /// Build and place a new task; returns the CPU it was placed on.
-pub fn enqueue_new(
-    id: TaskId,
-    kernel_stack: crate::loader::KernelStack,
-    entry_sp: u64,
-    address_space: crate::process::PageTables,
-    thread_pointer: u64,
-    image: Option<alloc::sync::Arc<crate::process::UserImage>>,
-    job: Arc<kernel::sched::job::Job>,
-) -> (ThreadSched, CpuId) {
-    driver::spawn(NewTask {
-        id,
-        kernel_stack,
-        entry_sp,
-        address_space,
-        thread_pointer,
-        job,
-        image,
-    })
+pub fn enqueue_new(new: NewTask) -> (ThreadSched, CpuId) {
+    driver::spawn(new)
 }
 
 /// Phase 1 of the wait handshake on the running thread's own word, or

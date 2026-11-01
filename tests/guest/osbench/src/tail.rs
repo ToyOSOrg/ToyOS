@@ -123,7 +123,6 @@ fn periodic(bench: &str, span: Duration, on_late: &mut dyn FnMut(&Late)) -> Vec<
 /// Each outlier as a note, and the spacing between them: a source that
 /// strikes on a period shows as gaps that agree.
 fn print_outliers(bench: &str, late: &[Late]) {
-    let (slept, woke) = (format!("slept_{}", sys::CPU_NAMING), format!("woke_{}", sys::CPU_NAMING));
     for (i, l) in late.iter().take(PRINTED).enumerate() {
         note(
             &format!("{bench}.outlier"),
@@ -131,8 +130,8 @@ fn print_outliers(bench: &str, late: &[Late]) {
                 ("i", i.to_string()),
                 ("log_s", log_s(l.target_ns)),
                 ("late_us", (l.late_ns / 1000).to_string()),
-                (&slept, l.slept_on.to_string()),
-                (&woke, l.woke_on.to_string()),
+                ("slept_cpu", l.slept_on.to_string()),
+                ("woke_cpu", l.woke_on.to_string()),
             ],
         );
     }
@@ -198,7 +197,7 @@ fn stolen(span: Duration) {
                 ("i", i.to_string()),
                 ("log_s", log_s(*at)),
                 ("gap_us", (gap / 1000).to_string()),
-                (sys::CPU_NAMING, cpu.to_string()),
+                ("cpu", cpu.to_string()),
             ],
         );
     }
@@ -223,10 +222,6 @@ fn diary_run(mut d: sys::diag::Diag) {
     const BENCH: &str = "tail.diag.periodic.30s";
     const SHOWN: usize = 16;
     let before = crate::around::read(&d);
-    // The diary names a CPU by the kernel's index, and the sleeper's CPUs
-    // are APIC ids: the counters records carry both.
-    let index_of: std::collections::BTreeMap<u32, u32> =
-        before.iter().flat_map(|r| &r.cpus).map(|c| (c.apic, c.cpu)).collect();
     let names_before = d.roster();
     d.diary();
     let mut shown = 0usize;
@@ -254,18 +249,15 @@ fn diary_run(mut d: sys::diag::Diag) {
                     ("i", shown.to_string()),
                     ("log_s", log_s(l.target_ns)),
                     ("late_us", (l.late_ns / 1000).to_string()),
-                    ("slept_apic", l.slept_on.to_string()),
-                    ("woke_apic", l.woke_on.to_string()),
-                    ("slept_cpu", index_of.get(&l.slept_on).map_or("-".into(), u32::to_string)),
-                    ("woke_cpu", index_of.get(&l.woke_on).map_or("-".into(), u32::to_string)),
+                    ("slept_cpu", l.slept_on.to_string()),
+                    ("woke_cpu", l.woke_on.to_string()),
                     ("records", records.len().to_string()),
                     ("lost", lost.to_string()),
                     ("read_failed", failed.unwrap_or_else(|| "no".into())),
                 ],
             ));
             for (cpu, events) in by_cpu {
-                let first =
-                    [l.slept_on, l.woke_on].iter().any(|apic| index_of.get(apic) == Some(&u32::from(cpu)));
+                let first = [l.slept_on, l.woke_on].contains(&u32::from(cpu));
                 let keep = if first { 120 } else { 24 };
                 let dropped = events.len().saturating_sub(keep);
                 let tail: Vec<String> = events.into_iter().rev().take(keep).rev().collect();

@@ -1,11 +1,12 @@
 //! What osbench needs written for x86-64 in particular: CPU identity and
-//! topology as CPUID reads them (on ToyOS, which has no call that says, and
-//! on both for the munmap pair's APIC IDs), a chain of dependent adds to time
-//! the clock with, and the bytes of a program that exits.
+//! topology as CPUID reads them (on ToyOS, which has no call that says which
+//! core a CPU is in, and on both for the munmap pair's APIC IDs), a chain of
+//! dependent adds to time the clock with, and the bytes of a program that
+//! exits.
 
 pub use cpuid::{cpu_id, cpu_id_is};
 #[cfg(target_os = "toyos")]
-pub use cpuid::{core_of, cpu_model, current_cpu, threads_per_core};
+pub use cpuid::{apic_id, core_of_apic, cpu_model, threads_per_core};
 #[cfg(target_os = "linux")]
 pub use cpuid::power_registers;
 #[cfg(target_os = "toyos")]
@@ -142,7 +143,7 @@ mod cpuid {
     /// The APIC ID of the CPU that ran this: leaf 0BH's EDX, or leaf 01H's
     /// EBX[31:24] where leaf 0BH enumerates nothing. Stale as soon as the
     /// scheduler moves the thread.
-    pub fn current_cpu() -> u32 {
+    pub fn apic_id() -> u32 {
         if topology().x2apic {
             __cpuid_count(0xb, 0).edx
         } else {
@@ -150,9 +151,9 @@ mod cpuid {
         }
     }
 
-    /// [`current_cpu`], as the munmap pair reads it on either system.
+    /// [`apic_id`], as the munmap pair reads it on either system.
     pub fn cpu_id() -> Result<u32, &'static str> {
-        Ok(current_cpu())
+        Ok(apic_id())
     }
 
     /// Which register [`cpu_id`] reads on this CPU.
@@ -162,7 +163,7 @@ mod cpuid {
 
     /// The core an APIC ID belongs to: two CPUs of one core are SMT siblings.
     #[cfg(target_os = "toyos")]
-    pub fn core_of(apic: u32) -> u32 {
+    pub fn core_of_apic(apic: u32) -> u32 {
         apic >> topology().smt_shift
     }
 

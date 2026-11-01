@@ -14,6 +14,7 @@
 use std::collections::BTreeMap;
 use std::sync::Arc as StdArc;
 
+use kernel::sched::hw::CpuId;
 use kernel::sched::invariants::{residents, Container};
 use kernel::sched::queue::{LAG_BOUND_NS, SLICE_NS};
 use kernel::sched::task::{TaskKey, TaskState, QUANTUM_NS};
@@ -172,6 +173,7 @@ fn check_single_ownership(vm: &mut Vm<'_>) {
                 (Container::Running, TaskState::Running(c))
                 | (Container::Ready, TaskState::Ready(c))
                 | (Container::Dying, TaskState::Ready(c))
+                | (Container::Outbound, TaskState::Ready(c))
                 | (Container::Parked, TaskState::Blocked(c))
                 | (Container::Parked, TaskState::WakeQueued(c)) => c.0 as usize == cpu,
                 // A task that has registered on a watch and not yet parked
@@ -585,7 +587,7 @@ fn check_waits(vm: &mut Vm<'_>) {
 /// I15: **work conservation.** No CPU spends more than
 /// [`work_conservation_bound`] protocol rounds ([`crate::vm::Vm::round`]) idle
 /// while another holds a task a probe would be handed — a fair band at least
-/// [`PROBE_WORTH_IT`] deep.
+/// [`PROBE_WORTH_IT`] deep in tasks whose masks name the idle CPU.
 ///
 /// The bounded form of the rule rather than a predicate over one step, and the
 /// reason is what a step lets the simulator see. Its safety form — no CPU parks
@@ -611,15 +613,21 @@ fn check_waits(vm: &mut Vm<'_>) {
 /// being the modelled fault `stopped_cpu` measures.
 fn check_work_conservation(vm: &mut Vm<'_>) {
     let cpus = vm.scenario.cpus();
-    let victim = (0..cpus).find(|&cpu| {
-        !vm.is_stopped(cpu) && vm.cpus[cpu].rq().fair_len() as u32 >= PROBE_WORTH_IT
-    });
+    let takes = |vm: &Vm<'_>, victim: usize, thief: usize, enough: usize| {
+        let tasks = vm.cpus[victim].rq().tasks();
+        tasks.filter(|t| !t.rt().is_rt() && t.affinity().contains(CpuId(thief as u32))).take(enough).count()
+    };
+    let worth = PROBE_WORTH_IT as usize;
+    let deep: Vec<usize> = (0..cpus)
+        .filter(|&cpu| !vm.is_stopped(cpu) && vm.cpus[cpu].rq().fair_len() as u32 >= PROBE_WORTH_IT)
+        .collect();
+    let victim_for = |vm: &Vm<'_>, thief: usize| deep.iter().copied().find(|&cpu| takes(vm, cpu, thief, worth) == worth);
     let bound = work_conservation_bound(vm.scenario.balance, cpus).unwrap_or(u64::MAX);
     let completed = vm.round - std::mem::replace(&mut vm.wc_round_seen, vm.round);
     let mut problems = Vec::new();
     for cpu in 0..cpus {
         let idle = !vm.is_stopped(cpu) && vm.cpus[cpu].running().is_none();
-        let Some(victim) = victim.filter(|_| idle) else {
+        let Some(victim) = idle.then(|| victim_for(vm, cpu)).flatten() else {
             vm.wc_idle[cpu] = None;
             continue;
         };
@@ -630,8 +638,8 @@ fn check_work_conservation(vm: &mut Vm<'_>) {
         if rounds > bound {
             problems.push(format!(
                 "I15: cpu{cpu} has been idle for {rounds} rounds while cpu{victim} holds {} \
-                 queued fair task(s) (bound {bound} rounds)",
-                vm.cpus[victim].rq().fair_len(),
+                 queued fair task(s) it may run (bound {bound} rounds)",
+                takes(vm, victim, cpu, usize::MAX),
             ));
         }
     }
@@ -720,11 +728,13 @@ fn note_run_latency(vm: &mut Vm<'_>) {
                     None => ReadyCause::Fresh,
                     // A task cannot arrive in a run queue *from* one, and the
                     // remaining containers are terminal for this instrument —
-                    // `Stopped` most of all, which nothing leaves.
+                    // `Stopped` most of all, which nothing leaves. `Outbound`
+                    // leaves by an `Adopt`, so it is never the last seen.
                     Some(
                         Container::Ready
                         | Container::Dying
                         | Container::Stopped
+                        | Container::Outbound
                         | Container::Zombie,
                     ) => ReadyCause::Fresh,
                 };

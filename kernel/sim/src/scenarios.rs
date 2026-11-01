@@ -869,6 +869,7 @@ pub fn all() -> Vec<Scenario> {
         busy_home(),
         sleep_spin_siblings(),
         turn_taking_pair(),
+        masked_steals(),
     ]
 }
 
@@ -1193,6 +1194,77 @@ pub fn turn_taking_pair() -> Scenario {
 
 /// How many turns each of [`turn_taking_pair`]'s threads takes.
 pub const TURN_TAKING_ROUNDS: usize = 8;
+
+/// **Masks under stealing**, every thread spawned on cpu0 of four with the
+/// shipped balance policy: two threads pinned to cpu0, two masked to cpu1 and
+/// cpu2, one that moves itself between halves of the machine as it runs, and
+/// one that spawns a child under its mask. Every thread naps between bursts,
+/// so wakes and steals both place it.
+pub fn masked_steals() -> Scenario {
+    let run = Op::Run(MS / 2);
+    let nap = Op::Block { queue: 0, deadline: Some(MS / 4) };
+    let looped = |first: Op| Script::looping(vec![first, run, nap, run], MASKED_STEALS_ROUNDS);
+    scenario(
+        "masked_steals",
+        4,
+        vec![queue(WaitClass::Other)],
+        vec![
+            process("pinned", vec![0, 0], vec![looped(Op::SetAffinity(0b0001))]),
+            process("partial", vec![0, 0], vec![looped(Op::SetAffinity(0b0110))]),
+            process(
+                "wanderer",
+                vec![0],
+                vec![Script::looping(
+                    vec![Op::SetAffinity(0b0011), run, nap, Op::SetAffinity(0b1100), run, nap],
+                    MASKED_STEALS_ROUNDS,
+                )],
+            ),
+            process(
+                "parent",
+                vec![0],
+                vec![
+                    Script::looping(vec![Op::SetAffinity(0b1000), Op::Spawn { template: 1 }, run, nap], 1),
+                    Script::looping(vec![run, nap, run], MASKED_STEALS_ROUNDS),
+                ],
+            ),
+        ],
+    )
+    .with_placement(PlacementShape::AllOn(0))
+}
+
+/// How many bursts each of [`masked_steals`]' threads runs.
+pub const MASKED_STEALS_ROUNDS: usize = 6;
+
+/// **Masks across SMT siblings**, on the T14's cores {0,4} {1,5}: cpu4 runs
+/// one thread masked to {1,4} and queues a second, and cpu5 does the same
+/// with threads masked to {0,5}. cpu0 and cpu1 are idle. A CPU may take
+/// only the queue across from its sibling: cpu1 takes from cpu4, and cpu0
+/// from cpu5. The sibling each one probes first holds nothing it may run.
+/// Nothing blocks, so only a steal moves work, and I15 sees an idle CPU
+/// left beside a thread it may run.
+pub fn masked_siblings() -> Scenario {
+    const WORK: u64 = 20 * MS;
+    let (on4, on5) = (1 << 1 | 1 << 4, 1 | 1 << 5);
+    let spawn = Op::Spawn { template: 1 };
+    let mut scenario = scenario(
+        "masked_siblings",
+        8,
+        Vec::new(),
+        vec![process(
+            "masked",
+            vec![0],
+            vec![
+                // Each child starts with the mask its parent held when it spawned it.
+                Script::new(vec![Op::SetAffinity(on4), spawn, spawn, Op::SetAffinity(on5), spawn, spawn, Op::Exit]),
+                Script::new(vec![Op::Run(WORK)]),
+            ],
+        )],
+    )
+    .with_placement(PlacementShape::Listed(&[2, 4, 4, 5, 5]))
+    .with_topology(Shape::t14());
+    scenario.max_steps = 20_000 + 40 * (WORK / RUN_CHUNK_NS) as usize;
+    scenario
+}
 
 /// **Two threads of one process on one CPU: one that sleeps a microsecond
 /// between millisecond bursts, and one that never sleeps.**

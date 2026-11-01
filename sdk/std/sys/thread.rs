@@ -169,9 +169,12 @@ extern "C" fn thread_trampoline(data: u64) {
     syscall::thread_exit(0);
 }
 
+/// The CPUs the calling thread may run on, as Linux's counts its affinity.
 pub fn available_parallelism() -> io::Result<NonZero<usize>> {
-    NonZero::new(syscall::cpu_count() as usize)
-        .ok_or(io::const_error!(io::ErrorKind::NotFound, "the kernel counts no CPU"))
+    let mask = syscall::thread_affinity(u64::from(toyos_abi::current_tid().0))
+        .map_err(|_| io::const_error!(io::ErrorKind::NotFound, "the kernel reads no mask for this thread"))?;
+    NonZero::new(mask.iter().map(|word| word.count_ones() as usize).sum())
+        .ok_or(io::const_error!(io::ErrorKind::NotFound, "the thread's mask names no CPU"))
 }
 
 pub fn current_os_id() -> Option<u64> {

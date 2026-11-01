@@ -437,8 +437,8 @@ neither bench's dump does AML write a port the kernel refuses.
   count either side of one, are read on the T14 alone, and there only for
   the enable and the disable.
 - **`acpi_mediated_access` needs one of three calls to be asked off the boot
-  processor**, each from a thread that read itself there first. The tree
-  has no affinity (`issues/no-test-can-hold-a-thread-on-a-named-cpu.md`), so
+  processor**, each from a thread that read itself there first. The job
+  does not pin that thread, though a mask now could, so
   a thread preempted between that read and the kernel's lock may be taken by
   the boot processor, the window
   `issues/no-t14-row-arranges-an-acpi-disable-asked-off-the-boot-processor.md`

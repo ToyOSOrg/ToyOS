@@ -17,6 +17,7 @@
 
 use std::sync::Arc as StdArc;
 
+use kernel::sched::affinity::CpuMask;
 use kernel::sched::cpu::{Action, Balance, CpuHandle, CpuHandles, CpuSched, Env, SchedPass};
 use kernel::sched::topology::Topology;
 use kernel::sched::hw::{CpuId, Kicker, Nanos};
@@ -95,6 +96,7 @@ fn boot() -> (Machine1, CpuSched<SimPayload>, Arc<TaskShared<SimMsg>>) {
             inherited: None,
             lends: 0,
         },
+        mask: CpuMask::ANY,
     }
     .build(CPU0, Nanos::ZERO);
     let shared = task.shared().clone();

@@ -1,5 +1,5 @@
 ---
-status: open
+status: assigned
 kind: defect
 opened: 2026-10-28
 ---
@@ -29,26 +29,23 @@ one-sided Fisher exact p = 0.36. The readbacks are PR #1074's sessions 1–5
 and its diagnostic sessions 1–3. diag2's first base2 attempt is left out:
 that boot never came back, because the I219 was left in ULP.
 
-**What could cause it.** `placement` (`kernel/src/sched/driver.rs`) picks a
-global rotating start, and `CpuHandles::place` (`kernel/pure/sched/cpu.rs`)
-scans the CPUs from it. Among the CPUs still answering, it takes the least
-`load`, then prefers a sleeping CPU, then the one with the fewest busy SMT
-siblings. So:
+**The cause is the bench's premise.** `CpuHandles::place`
+(`kernel/pure/sched/cpu.rs`) takes, among the CPUs still answering, the least
+`load`, then a sleeping CPU, then the fewest busy SMT siblings. A slow boot of
+a diagnostic image (`370d7d9f6` with placement counters, T14, diag2
+boot 3) shows the spawner running on the wanted CPU itself: the
+kernel's cpu1, which osbench named by APIC ID 2. About 7,200 spawns per 250 ms
+window were made from cpu1, none of them chose it while another CPU slept, and
+no CPU stopped answering, had a kick pending or had anything queued. A
+candidate reached cpu1 only through a rare wake forward of a parked one. The
+scheduler followed its rule; what was false is `place::spawn_on`'s premise
+that spawns rotate over the CPUs.
 
-- If the wanted CPU stays awake or loaded while another answering CPU
-  sleeps, for example with netstack's bring-up running there, the rule never
-  chooses it. The scheduler would be following its specification, and what
-  is false is `place::spawn_on`'s premise that spawns rotate over the CPUs
-  (`STAGE`). The work would then belong to the bench, or to
-  `issues/no-test-can-hold-a-thread-on-a-named-cpu.md`, which is why the
-  bench stages at all.
-- If the wanted CPU stops answering for seconds, that is a kernel defect,
-  and it is the scheduler's.
+**The fix is the bench's.** osbench and `wake_onto_busy` now pin every
+placed thread through `toyos_abi::syscall::thread_set_affinity`, and the
+staging is gone.
 
-Owner: the scheduler track, `issues/placement-has-no-migration-cost-or-wake-affinity.md`,
-for the diagnosis that decides which of the two it is.
+Owner: the scheduler track (`sched-place`).
 
-Exit: one of the two alternatives is named from a boot log that records
-the spawn's choices while it misses. Then it is fixed, or moved to the
-bench's record, and every `wake.onto_busy` row in 20 consecutive main
-`benchcase` boots completes within 250 ms.
+Exit: every `wake.onto_busy` row in 20 consecutive main `benchcase` boots
+completes within 250 ms.

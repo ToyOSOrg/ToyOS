@@ -51,7 +51,7 @@ use super::machine::lower_sysinfo_bound;
 use super::paged::{sys_paged_create, sys_paged_holder, sys_paged_notices, sys_paged_op, sys_paged_read, sys_pager_create};
 use super::proc::{
     spawn_pager, spawn_place, sys_endowments, sys_exit, sys_nanosleep, sys_process_stats,
-    sys_account_info, sys_job_create, sys_job_floor, sys_job_own, sys_process_quit, sys_process_wait, sys_rt_enter, sys_spawn, sys_thread_exit, sys_thread_join, sys_thread_spawn, sys_wake_latency_hold,
+    sys_account_info, sys_job_create, sys_job_floor, sys_job_own, sys_process_quit, sys_process_wait, sys_rt_enter, sys_spawn, sys_thread_exit, sys_thread_get_affinity, sys_thread_join, sys_thread_set_affinity, sys_thread_spawn, sys_wake_latency_hold,
 };
 use super::vm::{
     shared_image, sys_dlopen, sys_dlsym, sys_query_modules, sys_tls_alloc_block, sys_vm_decommit, sys_vm_discard, sys_vm_remap,
@@ -633,6 +633,37 @@ pub(crate) fn syscall_dispatch(num: u64, a1: u64, a2: u64, a3: u64, a4: u64) -> 
             // ctx carries the copy-out: sys_process_stats writes its answer only once the read succeeds.
             sys_process_stats(&ctx, RawHandle(a1 as u32), addr)
         },
+        SYS_THREAD_SET_AFFINITY => {
+            if a3 > CPU_MASK_WORDS as u64 {
+                return SyscallError::InvalidArgument.to_u64();
+            }
+            let Some(bytes) = ctx.user_bytes(UserAddr::new(a2), a3 * 8) else {
+                return bad_addr;
+            };
+            let mut raw = [0u8; CPU_MASK_WORDS * 8];
+            bytes.read_at(0, &mut raw[..a3 as usize * 8]);
+            let words: [u64; CPU_MASK_WORDS] =
+                core::array::from_fn(|i| u64::from_le_bytes(raw[i * 8..][..8].try_into().unwrap()));
+            sys_thread_set_affinity(a1, &words[..a3 as usize])
+        },
+        SYS_THREAD_GET_AFFINITY => {
+            if a3 < CPU_MASK_WORDS as u64 {
+                return SyscallError::InvalidArgument.to_u64();
+            }
+            let Some(mut out) = ctx.user_bytes_mut(UserAddr::new(a2), CPU_MASK_WORDS as u64 * 8) else {
+                return bad_addr;
+            };
+            match sys_thread_get_affinity(a1) {
+                Ok(words) => {
+                    for (i, word) in words.iter().enumerate() {
+                        out.write_at(i * 8, &word.to_le_bytes());
+                    }
+                    0
+                }
+                Err(e) => e.to_u64(),
+            }
+        },
+        SYS_CURRENT_CPU => crate::arch::percpu::cpu_id() as u64,
         SYS_SET_THREAD_NAME => {
             // Refused by name, not clamped: a length past the bound is the caller's
             // bad argument, not a shorter name to silently write.

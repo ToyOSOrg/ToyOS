@@ -11,7 +11,7 @@ the kernel loads into every CPU, and encrypts with the handle, so the key
 itself need not stay in memory. Linux at `Ubuntu-6.8.0-142.142` has none:
 nothing under its `arch/x86` names Key Locker. It is blocked on its first
 consumer, a program that keeps an AES key for a session's life, and lands with
-it, after `issues/no-test-can-hold-a-thread-on-a-named-cpu.md`.
+it.
 
 **Exit**: on each proving machine that enumerates CPUID.19H:EBX bits 0 and 4
 and ECX bit 1, a handle wrapped on one pinned CPU gives FIPS-197 C.1's
