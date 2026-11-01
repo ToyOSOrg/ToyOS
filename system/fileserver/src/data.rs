@@ -549,11 +549,14 @@ impl<D: Disk> Volume for DataVolume<D> {
         // Every page past the extents is allocated before a byte is written,
         // so a write the file's one entry could not name is refused whole.
         let covered: u64 = open.extents.iter().map(|e| e.block_count as u64).sum();
-        for page in (offset / BLOCK as u64).max(covered)..end.div_ceil(BLOCK as u64) {
-            let grown = u32::try_from(page)
+        let last = end.div_ceil(BLOCK as u64).saturating_sub(1);
+        if !data.is_empty() && last >= covered {
+            let grown = u32::try_from(offset / BLOCK as u64)
+                .and_then(|first| Ok(first..=u32::try_from(last)?))
                 .map_err(|_| Error::FileTooLarge)
-                .and_then(|p| mapped("an allocation", &open.path, self.fs.resolve_or_alloc_block(&mut open.extents, p)))
-                .and_then(|_| match bcachefs::file_entry_fits(&open.path, &open.extents) {
+                // Runs a block-ring request long, so each costs the flush one request.
+                .and_then(|pages| mapped("an allocation", &open.path, self.fs.allocate(&mut open.extents, pages, toyos_blockring::MAX_REQUEST_BLOCKS)))
+                .and_then(|()| match bcachefs::file_entry_fits(&open.path, &open.extents) {
                     true => Ok(()),
                     false => {
                         println!(
@@ -1128,7 +1131,7 @@ mod tests {
         let mut v = DataVolume::format(Ram::new(1024), CLEAN_LIMIT, &["home"], clock).unwrap();
         let mut run = Vec::new();
         let mut page = 0;
-        while v.fs.resolve_or_alloc_block(&mut run, page).is_ok() {
+        while v.fs.allocate(&mut run, page..=page, 1).is_ok() {
             page += 1;
         }
         let taken: Vec<u64> = run.iter().flat_map(|e| e.start_block..e.start_block + e.block_count as u64).collect();
@@ -1136,7 +1139,7 @@ mod tests {
             taken.iter().step_by(2).map(|&b| Extent { start_block: b, block_count: 1, _reserved: 0 }).collect();
         v.fs.free_extents(&holes).unwrap();
         let mut tail = vec![Extent { start_block: *taken.last().unwrap(), block_count: 1, _reserved: 0 }];
-        v.fs.resolve_or_alloc_block(&mut tail, 16).unwrap();
+        v.fs.allocate(&mut tail, 16..=16, 1).unwrap();
         v
     }
 
