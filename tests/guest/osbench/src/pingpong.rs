@@ -114,6 +114,7 @@ fn bench(kind: &str, at: Where) -> String {
 /// Neither side is put on the interrupts' CPU.
 fn run(kind: &str, at: Where, mut pinger: impl Channel, mut ponger: impl Channel) {
     let bench = bench(kind, at);
+    let ran = crate::ran::start();
     let (go_ping, ping_go) = mpsc::channel::<bool>();
     let (go_pong, pong_go) = mpsc::channel::<bool>();
     let (ping_said, ping_heard) = mpsc::channel();
@@ -186,14 +187,11 @@ fn run(kind: &str, at: Where, mut pinger: impl Channel, mut ponger: impl Channel
     let pong_seen = pong_heard.recv().unwrap_or_default();
     let checks = ping_seen.len().min(pong_seen.len());
     let held = ping_seen.iter().zip(&pong_seen).filter(|(&ping, &pong)| ping == ping_cpu && wanted(pong)).count();
-    result(
-        &bench,
-        "ns",
-        &mut kept,
-        &[
-            ("ping_cpu", ping_cpu.to_string()),
-            ("pong_cpu", pong_side.cpu.to_string()),
-            ("placed_held", format!("{held}/{checks}")),
-        ],
-    );
+    let mut fields = vec![
+        ("ping_cpu", ping_cpu.to_string()),
+        ("pong_cpu", pong_side.cpu.to_string()),
+        ("placed_held", format!("{held}/{checks}")),
+    ];
+    fields.extend(ran.fields());
+    result(&bench, "ns", &mut kept, &fields);
 }
