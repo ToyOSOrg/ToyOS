@@ -143,7 +143,8 @@ started. Nothing reaches userland when a device arrives or leaves.
      returns is a new arrival on the same record and domain. A slot is armed
      before the declaration is published, so before any claim runs, and only
      where the unit blocks every requester on the port's buses it has not
-     seen (a VT-d unit including every PCI device; AMD-Vi units serving every
+     seen (a VT-d unit including every PCI device or naming a bridge over
+     those buses, on the enumerated segment; AMD-Vi units serving every
      id there, none kept on identity by an IVMD; the IORT routing every id
      through the armed SMMUv3), and once every function enumerated behind it
      at boot is on a domain of its own. A slot over a function a driver in

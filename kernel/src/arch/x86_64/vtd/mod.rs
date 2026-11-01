@@ -101,8 +101,7 @@ pub(super) struct Live {
     /// A descriptor type a unit does not implement stalls its queue, so the
     /// interrupt-entry-cache type goes only to a unit that remaps.
     remaps: bool,
-    /// Its DRHD's INCLUDE_PCI_ALL: it serves every requester on its segment
-    /// no other unit's device scope names (VT-d Rev. 4.0 §8.3).
+    /// [`Unit::pci_all`].
     pci_all: bool,
     /// [`Unit::hierarchies`].
     hierarchies: Vec<(u8, u8)>,
@@ -180,7 +179,12 @@ pub fn init(rsdp_addr: u64, devices: &[PciDevice], kernel: (u64, u64)) -> bool {
                     break;
                 }
                 if let Some(mut unit) = describe_unit(units - 1, &drhd) {
-                    unit.hierarchies = hierarchies(&drhd, devices);
+                    // Functions are enumerated on one segment group: a unit on
+                    // another serves none of them.
+                    if drhd.segment() == toyos_acpi::SEGMENT_GROUP {
+                        unit.pci_all = drhd.include_pci_all();
+                        unit.hierarchies = hierarchies(&drhd, devices);
+                    }
                     if let Some(plan) = plan(&unit) {
                         ready.push((unit, plan));
                     }
@@ -409,9 +413,12 @@ struct Unit {
     caps: Capabilities,
     /// `VER_REG`'s major version.
     major: u32,
+    /// Its DRHD's INCLUDE_PCI_ALL, on the segment functions are enumerated
+    /// on: it serves every requester there no other unit's device scope
+    /// names (VT-d Rev. 4.0 §8.3).
     pci_all: bool,
-    /// The buses below each bridge its device scope names with its whole
-    /// sub-hierarchy, as `(secondary, subordinate)` (§8.3.1).
+    /// On that segment, the buses below each bridge its device scope names
+    /// with its whole sub-hierarchy, as `(secondary, subordinate)` (§8.3.1).
     hierarchies: Vec<(u8, u8)>,
 }
 
@@ -573,7 +580,7 @@ fn describe_unit(index: usize, drhd: &dmar::Drhd) -> Option<Unit> {
     );
 
     describe_scopes("unit", index, drhd.scopes());
-    Some(Unit { index, base, regs, caps, major: (version >> 4) & 0xF, pci_all: drhd.include_pci_all(), hierarchies: Vec::new() })
+    Some(Unit { index, base, regs, caps, major: (version >> 4) & 0xF, pci_all: false, hierarchies: Vec::new() })
 }
 
 /// What a unit's capabilities let this kernel program, or `None` with the

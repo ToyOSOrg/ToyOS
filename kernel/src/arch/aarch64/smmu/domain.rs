@@ -93,20 +93,22 @@ pub fn keep_reserved(_id: DomainId, _function: StreamId) {}
 /// Whether the armed unit governs every requester on `buses`, so one seen
 /// first after boot is aborted: the IORT routes each of their RIDs through
 /// it, where an invalid STE or a StreamID past the table aborts what no
-/// claim attached (`super`'s module header). Read from
-/// the IORT again, on the arming's thread: routes were read at boot for the
-/// functions enumerated then alone.
+/// claim attached (`super`'s module header). Read from the IORT again, on
+/// the arming's thread, since routes were read at boot for the functions
+/// enumerated then alone; judged over the RID range by its mappings, so the
+/// time it takes under the declaration's lock, preemption off, is the
+/// table's to bound and not the bus count's.
 pub fn governs(buses: (u8, u8)) -> Result<(), &'static str> {
     let (base, rsdp) = match UNIT.lock().as_ref() {
         Some(live) => (live.base, live.rsdp),
         None => return Err("no SMMUv3 is armed"),
     };
     let iort = toyos_acpi::iort(crate::drivers::acpi::direct_phys(), rsdp).map_err(|_| "the IORT is not read again")?;
-    let segment = u32::from(toyos_acpi::SEGMENT_GROUP);
-    let (first, last) = (u16::from(buses.0) << 8, u16::from(buses.1) << 8 | 0xff);
-    match (first..=last).all(|rid| matches!(iort.route(segment, rid), Ok(toyos_acpi::Route::Translated { smmu, .. }) if smmu.base == base)) {
-        true => Ok(()),
-        false => Err("the IORT routes a requester id behind it through no armed SMMUv3"),
+    let rids = u16::from(buses.0) << 8..=u16::from(buses.1) << 8 | 0xff;
+    match iort.translates(u32::from(toyos_acpi::SEGMENT_GROUP), rids, base) {
+        Ok(true) => Ok(()),
+        Ok(false) => Err("the IORT routes a requester id behind it through no armed SMMUv3"),
+        Err(_) => Err("the IORT refuses a route behind it"),
     }
 }
 

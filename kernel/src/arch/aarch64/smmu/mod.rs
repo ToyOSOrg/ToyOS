@@ -282,11 +282,10 @@ pub fn init(rsdp_addr: u64, devices: &[PciDevice], _kernel: (u64, u64)) {
     // The ITS's doorbell page is mapped at its own address in every domain
     // (`domain::create`), so no grant may be handed out over it.
     let doorbell = super::irqchip::its::doorbell_page().map(|page| (page, page + crate::mm::PAGE_SIZE));
-    let Some(mut live) = program(regs, smmu.base, smmu.coherent_override, smmu.event, routes, doorbell.into_iter().collect()) else {
+    let Some(mut live) = program(regs, smmu.base, rsdp_addr, smmu.coherent_override, smmu.event, routes, doorbell.into_iter().collect()) else {
         return;
     };
     live.enumerated = devices.iter().map(|device| StreamId::pci(device.bus, device.dev, device.func)).collect();
-    live.rsdp = rsdp_addr;
     *UNIT.lock() = Some(live);
     #[cfg(feature = "boot-actuators")]
     if crate::actuator::smmu_selftest() {
@@ -338,6 +337,7 @@ fn abort_unprogrammed(regs: Registers, base: u64) {
 fn program(
     regs: Registers,
     base: u64,
+    rsdp: u64,
     coherent_override: bool,
     event: Option<core::num::NonZeroU32>,
     routes: Vec<(StreamId, u32, Option<ItsDevice>)>,
@@ -416,7 +416,7 @@ fn program(
         routes,
         enumerated: Vec::new(),
         base,
-        rsdp: 0,
+        rsdp,
         domains: crate::iommu::domains::Domains::new(domain::FIRST),
     };
     live.domains.avoid(reserved);

@@ -93,7 +93,8 @@ pub(super) fn sys_acpi(ctx: &SyscallContext, handle: RawHandle, op: u64, at: u64
         _ => None,
     };
     let pid = process::current_process();
-    // The holder's check and the act are one borrow of the row, as a read's are.
+    // The holder's check and the act are one borrow of the row, as a read's
+    // are, but for `DECLARE`'s act, made below.
     let done = claim.isa(|row| {
         if !crate::isa::held_by(row, pid) {
             return Err(SyscallError::PermissionDenied);

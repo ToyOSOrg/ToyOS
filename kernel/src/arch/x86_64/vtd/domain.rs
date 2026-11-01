@@ -83,7 +83,6 @@ pub fn reserve(stream: StreamId, reserved: Reserved) {
     RESERVED.lock().push((stream, reserved));
 }
 
-/// Why no claim may have `stream`, if an RMRR refuses it.
 /// Whether a programmed unit governs every requester on `buses`, so one
 /// seen first after boot is blocked: every unit's root and context tables
 /// carry an entry only for a requester enumerated at boot or attached since
@@ -91,8 +90,9 @@ pub fn reserve(stream: StreamId, reserved: Reserved) {
 /// not-present entry is blocked and faulted (VT-d Rev. 4.0 §3.4.3). Which
 /// unit serves a requester is its DRHD's (§8.3): one whose device scope
 /// names a bridge's sub-hierarchy over `buses`, or one that includes every
-/// PCI device no other names. Every unit is programmed where the claim path
-/// remaps at all (`super::remappable`).
+/// PCI device no other names, on the segment functions are enumerated on.
+/// Every unit is programmed where the claim path remaps at all
+/// (`super::remappable`).
 pub fn governs(buses: (u8, u8)) -> Result<(), &'static str> {
     let covers = |unit: &super::Live| {
         unit.pci_all || unit.hierarchies.iter().any(|&(first, last)| first <= buses.0 && buses.1 <= last)
@@ -103,6 +103,7 @@ pub fn governs(buses: (u8, u8)) -> Result<(), &'static str> {
     }
 }
 
+/// Why no claim may have `stream`, if an RMRR refuses it.
 pub fn unclaimable(stream: StreamId) -> Option<&'static str> {
     RESERVED.lock().iter().find_map(|(named, reserved)| match reserved {
         Reserved::Refused(why) if *named == stream => Some(*why),

@@ -70,9 +70,6 @@ pub(super) fn start(
     *DOMAINS.lock() = Some(Amd { domains, settings, kept, translated, platform });
 }
 
-/// Why no claim may have `stream`, if none may: [`untranslated`]'s reasons,
-/// and a requester id the platform speaks as, an I/O APIC's, an HPET's, or
-/// one whose SMIs the unit's filter passes.
 /// Whether a programmed unit governs every requester on `buses`, so one
 /// seen first after boot is blocked: the device table holds every id, each
 /// blocked but the enumerated ones (`super::build`), and only a programmed
@@ -92,6 +89,9 @@ pub fn governs(buses: (u8, u8)) -> Result<(), &'static str> {
     Ok(())
 }
 
+/// Why no claim may have `stream`, if none may: [`untranslated`]'s reasons,
+/// and a requester id the platform speaks as, an I/O APIC's, an HPET's, or
+/// one whose SMIs the unit's filter passes.
 pub fn unclaimable(stream: StreamId) -> Option<&'static str> {
     untranslated(stream).or_else(|| {
         let id = stream.requester();

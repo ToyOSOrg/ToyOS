@@ -65,6 +65,9 @@ pub(super) struct HotPlug {
     slot: hotplug::Slot,
     secondary: u8,
     subordinate: u8,
+    /// The root bridges' memory the declaration that armed it holds, which
+    /// an arrival's BARs are placed inside.
+    declared: Vec<RootBridgeWindow>,
     /// Kept for the boot: the port's message, and its MSI-X entry, the
     /// kernel's alone.
     _armed: Armed,
@@ -125,7 +128,7 @@ pub(super) fn arm(roots: &[RootBridge], windows: &[RootBridgeWindow]) {
             log!("pcidev: {port}'s hot-plug slot is not armed: a claim holds the port");
             continue;
         }
-        let armed = isolate_behind(buses, windows).and_then(|()| arm_one(number, port, express, slot, buses, remapping));
+        let armed = isolate_behind(buses, windows).and_then(|()| arm_one(number, port, express, slot, buses, windows, remapping));
         match armed {
             Ok(armed) => {
                 {
@@ -199,6 +202,7 @@ fn arm_one(
     express: u64,
     slot: hotplug::Slot,
     buses: (u8, u8),
+    windows: &[RootBridgeWindow],
     remapping: crate::iommu::Remapping,
 ) -> Result<&'static HotPlug, String> {
     let pci = port.pci;
@@ -218,6 +222,7 @@ fn arm_one(
         slot,
         secondary: buses.0,
         subordinate: buses.1,
+        declared: windows.to_vec(),
         _armed: armed,
         removing: AtomicBool::new(false),
         link_since: AtomicU64::new(0),
@@ -443,20 +448,16 @@ impl HotPlug {
 
     /// `pci` in the device set as a new arrival, its BARs assigned first.
     fn arrive(&self, pci: PciDevice) {
-        let (declared, taken): (Vec<RootBridgeWindow>, Vec<(u64, u64)>) = {
-            let machine = MACHINE.lock();
-            let declared = match machine.apertures.answer() {
-                Some(Ok(declaration)) => declaration.windows().to_vec(),
-                _ => unreachable!("pcidev: a slot is armed only once the root bridges' memory is held"),
-            };
+        let taken: Vec<(u64, u64)> = {
             let who = requester(&pci);
+            let machine = MACHINE.lock();
             let taken = machine.decoded.iter().filter(|bar| bar.who != who).map(|bar| {
                 let (_, start, end) = bar.extent();
                 (start, end)
             });
-            (declared, taken.collect())
+            taken.collect()
         };
-        let bars = self.assign(&pci, &declared, taken);
+        let bars = self.assign(&pci, &self.declared, taken);
         arrive(pci, bars);
     }
 
