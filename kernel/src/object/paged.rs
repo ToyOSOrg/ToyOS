@@ -22,6 +22,11 @@
 //! A pager's own process is refused a holder's read, so no pager waits on a
 //! pager.
 //!
+//! **A holder's read is atomic against its pager's writes**
+//! ([`kernel::paged::Object::read_begin`]): one that meets a write is answered
+//! `WouldBlock`, and the holder asks the pager, whose own reads its writes
+//! order.
+//!
 //! **Lock order.** The pager's lock is innermost but for the allocator's. A
 //! copy to or from user memory holds pins, never the lock; no wait holds a
 //! pin.
@@ -41,7 +46,7 @@ use core::ptr;
 use core::sync::atomic::{AtomicU32, Ordering};
 
 use kernel::chunked::{Chunked, Stack};
-use kernel::paged::{Core, Draw, Leave, Lookup, Object, Pages, Refused, Supplied, PAGE};
+use kernel::paged::{Core, Draw, Leave, Lookup, Object, Pages, Refused, Supplied, Version, PAGE};
 use kernel::sched::task::WaitClass;
 use toyos_abi::syscall::{PagedNotice, SyscallError, NOTICE_NO_HOLDERS, NOTICE_REQUESTED};
 
@@ -450,21 +455,26 @@ impl PagerObject {
         let mut done = 0usize;
         let waiting = core::pin::pin!(Waiting::new(self, slot));
         let mut pieces = [Piece::default(); CHUNK];
+        // A holder's: what its bytes count against.
+        let mut since: Option<Version> = None;
         loop {
             let at = offset.saturating_add(done as u64);
             let step = {
                 let mut state = self.state.lock();
+                let size = state.entry(slot).object.size();
                 if state.gone || state.entry(slot).object.gone() {
                     Step::Gone
+                } else if done == want || (done == 0 && at >= size) {
+                    // Whole, each copy counted as it ended; or nothing to copy.
+                    Step::Done
+                } else if waits && !Self::unwritten(&state.entry(slot).object, &mut since) {
+                    Step::Written
+                } else if at >= size {
+                    Step::Done
                 } else {
-                    let size = state.entry(slot).object.size();
-                    if done == want || at >= size {
-                        Step::Done
-                    } else {
-                        let end = size.min(offset.saturating_add(want as u64));
-                        let waiter = waits.then_some(waiting.as_ref());
-                        self.pin_chunk(&mut state, slot, at..end, &mut pieces, waiter)
-                    }
+                    let end = size.min(offset.saturating_add(want as u64));
+                    let waiter = waits.then_some(waiting.as_ref());
+                    self.pin_chunk(&mut state, slot, at..end, &mut pieces, waiter)
                 }
             };
             match step {
@@ -478,15 +488,20 @@ impl PagerObject {
                     for piece in &pieces[..count] {
                         pmm::unpin_range(piece.phys, PAGE as usize);
                     }
-                    let gone = {
+                    let (gone, written) = {
                         let state = self.state.lock();
-                        state.gone || state.entry(slot).object.gone()
+                        let object = &state.entry(slot).object;
+                        (state.gone || object.gone(), waits && !Self::unwritten(object, &mut since))
                     };
                     // A frame copied as its pager ended is no byte to report.
                     if gone {
                         return SyscallError::Io.to_u64();
                     }
+                    if written {
+                        return SyscallError::WouldBlock.to_u64();
+                    }
                 }
+                Step::Written => return SyscallError::WouldBlock.to_u64(),
                 Step::Done => return done as u64,
                 Step::Gone if done > 0 => return done as u64,
                 Step::Gone => return SyscallError::Gone.to_u64(),
@@ -515,6 +530,18 @@ impl PagerObject {
                         }
                     }
                 }
+            }
+        }
+    }
+
+    /// Under the lock: whether no write met a holder's read of `object` that
+    /// began at `since`, or begins now where it is `None`.
+    fn unwritten(object: &Object, since: &mut Option<Version>) -> bool {
+        match *since {
+            Some(v) => object.unchanged(v),
+            None => {
+                *since = object.read_begin();
+                since.is_some()
             }
         }
     }
@@ -561,13 +588,55 @@ impl PagerObject {
         Step::Copy(count)
     }
 
+    /// A write call on object `id` begins: its slot, held by a reference until
+    /// [`Self::write_end`], so no release can hand it to another object.
+    fn write_begin(&self, id: u64) -> Result<u32, SyscallError> {
+        let mut state = self.state.lock();
+        let slot = state.live(id)?;
+        let entry = state.entry_mut(slot);
+        entry.refs += 1;
+        entry.object.write_begin();
+        Ok(slot)
+    }
+
+    /// The write call [`Self::write_begin`] began ends, `whole` where it took
+    /// everything it was given: its reference goes.
+    fn write_end(&self, slot: u32, whole: bool) {
+        let mut state = self.state.lock();
+        state.entry_mut(slot).object.write_end(whole);
+        self.unref_locked(&mut state, slot);
+    }
+
+    /// The pager ends the write of object `id` a short call left under way.
+    pub fn end_write(&self, id: u64) -> u64 {
+        let mut state = self.state.lock();
+        let ended = state.live(id).and_then(|slot| state.entry_mut(slot).object.end_write().map_err(word));
+        match ended {
+            Ok(()) => 0,
+            Err(e) => e.to_u64(),
+        }
+    }
+
     /// Copy `src` into fresh pages of object `id` from page-aligned `offset`,
-    /// clean or dirty: the pages installed. The caller checked the span is in
-    /// reach.
+    /// clean or dirty: the pages installed. A dirty supply is a write. The
+    /// caller checked the span is in reach.
     pub fn supply(&self, id: u64, offset: u64, src: &UserBytes, dirty: bool) -> u64 {
         if !offset.is_multiple_of(PAGE) || src.len() == 0 {
             return SyscallError::InvalidArgument.to_u64();
         }
+        if !dirty {
+            return self.supply_pages(id, offset, src, false);
+        }
+        let slot = match self.write_begin(id) {
+            Ok(slot) => slot,
+            Err(e) => return e.to_u64(),
+        };
+        let answer = self.supply_pages(id, offset, src, true);
+        self.write_end(slot, answer == (src.len() as u64).div_ceil(PAGE));
+        answer
+    }
+
+    fn supply_pages(&self, id: u64, offset: u64, src: &UserBytes, dirty: bool) -> u64 {
         let mut installed = 0u64;
         let mut done = 0usize;
         while done < src.len() {
@@ -663,6 +732,16 @@ impl PagerObject {
     /// the bytes written, up to the first absent page. The caller checked the
     /// span is in reach.
     pub fn write(&self, id: u64, offset: u64, src: &UserBytes) -> u64 {
+        let slot = match self.write_begin(id) {
+            Ok(slot) => slot,
+            Err(e) => return e.to_u64(),
+        };
+        let answer = self.write_pages(id, offset, src);
+        self.write_end(slot, answer == src.len() as u64);
+        answer
+    }
+
+    fn write_pages(&self, id: u64, offset: u64, src: &UserBytes) -> u64 {
         let mut done = 0usize;
         while done < src.len() {
             let mut pinned = [(0u64, 0u64, 0usize, 0usize); CHUNK];
@@ -799,6 +878,8 @@ enum Step {
     /// This many pieces were pinned.
     Copy(usize),
     Absent(u64),
+    /// A write met a holder's read.
+    Written,
     Failed,
     Gone,
     Done,

@@ -11,6 +11,10 @@
 //! sake until room is wanted: then a file nobody holds and nothing dirties
 //! goes first, oldest first.
 //!
+//! **A write is one write of the object's**, however many calls it takes:
+//! a call that stops short leaves it under way until its end, so no holder
+//! reads the file half written (`toyos::paged::Pager::end_write`).
+//!
 //! **The volume's size is the object's.** A write reserves on the volume
 //! first, so the volume's size runs past the object's only for the bytes the
 //! write then puts in before it returns; nothing reads the volume for them
@@ -36,6 +40,7 @@ pub trait Pager {
     fn read(&self, id: u64, out: Bytes<'_>, offset: u64) -> Result<usize, Refused>;
     fn supply(&self, id: u64, offset: u64, bytes: &[u8], dirty: bool) -> Result<u64, Refused>;
     fn write(&self, id: u64, offset: u64, bytes: &[u8]) -> Result<usize, Refused>;
+    fn end_write(&self, id: u64) -> Result<(), Refused>;
     fn withdraw(&self, id: u64, first: u64, count: u64) -> Result<u64, Refused>;
     fn fail(&self, id: u64, first: u64, count: u64) -> Result<(), Refused>;
     fn resize(&self, id: u64, size: u64) -> Result<(), Refused>;
@@ -56,6 +61,9 @@ impl Pager for toyos::paged::Pager {
     }
     fn write(&self, id: u64, offset: u64, bytes: &[u8]) -> Result<usize, Refused> {
         toyos::paged::Pager::write(self, id, offset, bytes)
+    }
+    fn end_write(&self, id: u64) -> Result<(), Refused> {
+        toyos::paged::Pager::end_write(self, id)
     }
     fn withdraw(&self, id: u64, first: u64, count: u64) -> Result<u64, Refused> {
         toyos::paged::Pager::withdraw(self, id, first, count)
@@ -369,31 +377,42 @@ impl<P: Pager> Files<P> {
         let reserved = volume.reserve(node, offset, data.len() as u64)?;
         let old = reserved.size;
         self.touch(identity);
-        let mut done = 0;
-        let put = self.put(volume, &Writing { identity, node, old, contents: reserved.contents(), offset, data }, &mut done);
         let id = self.files[&identity].object;
-        if let Err(e) = put {
+        let mut put = Put { done: 0, held: false };
+        let written = self.put(volume, &Writing { identity, node, old, contents: reserved.contents(), offset, data }, &mut put);
+        if let Err(e) = &written {
             // What was reserved and not put would read as the blocks' old bytes.
-            let landed = if done > 0 { offset + done as u64 } else { 0 };
+            let landed = if put.done > 0 { offset + put.done as u64 } else { 0 };
             let cut = old.max(landed);
             let resized = self.pg().resize(id, cut).map_err(word).and(volume.unreserve(node, reserved, landed));
             if let Err(again) = resized {
-                println!("fileserver: a refused write of file {identity} was not cut back to {cut} ({again:?})");
+                println!("fileserver: a refused write of file {identity} was not cut back to {cut} ({again:?}), after {e:?}");
             }
-            return Err(e);
         }
-        Ok(())
+        if put.held {
+            match self.pg().end_write(id) {
+                Ok(()) | Err(Refused::Gone) => {}
+                Err(why) => println!("fileserver: file {identity}'s write would not end ({why:?}); its holders ask this server"),
+            }
+        }
+        written
     }
 
     /// The bytes of a write into the object, each absent page supplied dirty,
-    /// counting into `done` what landed.
-    fn put(&mut self, volume: &mut dyn Volume, w: &Writing<'_>, done: &mut usize) -> Result<(), Error> {
+    /// counting into `put` what landed and whether a call left the write
+    /// under way.
+    fn put(&mut self, volume: &mut dyn Volume, w: &Writing<'_>, put: &mut Put) -> Result<(), Error> {
         let Writing { identity, node, old, contents, offset, data } = *w;
         let end = offset + data.len() as u64;
+        let done = &mut put.done;
         while *done < data.len() {
             let at = offset + *done as u64;
             let id = self.files.get(&identity).ok_or(Error::Stale)?.object;
-            match self.pg().write(id, at, &data[*done..]) {
+            let wrote = self.pg().write(id, at, &data[*done..]);
+            // A first call that takes everything is the whole write; any later
+            // call is under the write a short first one left under way.
+            put.held |= wrote != Ok(data.len() - *done);
+            match wrote {
                 Ok(n) => {
                     self.landed(identity, at, n);
                     *done += n;
@@ -556,6 +575,13 @@ impl<P: Pager> Files<P> {
             }
         }
     }
+}
+
+/// How far a write got: the bytes that landed, and whether a call left the
+/// object's write under way.
+struct Put {
+    done: usize,
+    held: bool,
 }
 
 /// A write under way: its file, at `offset`, which was `old` bytes long.

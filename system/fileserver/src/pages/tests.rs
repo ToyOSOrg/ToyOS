@@ -1,5 +1,5 @@
 use std::cell::RefCell;
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::rc::Rc;
 
 use toyos_abi::syscall::SyscallError;
@@ -23,6 +23,11 @@ struct Model {
     supplies: u32,
     /// Every supply from here is refused.
     refusing: bool,
+    /// Objects a call that did not take all it was given left written.
+    held: BTreeSet<u64>,
+    /// Each object's pages as a holder could read them after each change
+    /// that left no write under way.
+    views: Vec<(u64, BTreeMap<u64, Vec<u8>>)>,
 }
 
 struct Page {
@@ -34,6 +39,18 @@ struct Page {
 impl Model {
     fn held(&self) -> usize {
         self.pages.values().filter(|p| p.dirty || p.writeback).count()
+    }
+
+    /// A change to `id` ended, `whole` where the call took all it was given:
+    /// the kernel's rule (`kernel::paged::Object::write_end`).
+    fn changed(&mut self, id: u64, whole: bool) {
+        if !whole {
+            self.held.insert(id);
+        }
+        if !self.held.contains(&id) {
+            let view = self.pages.iter().filter(|((c, _), _)| *c == id).map(|(&(_, p), page)| (p, page.bytes.clone())).collect();
+            self.views.push((id, view));
+        }
     }
 }
 
@@ -47,6 +64,65 @@ impl Fake {
 
     fn pages_of(&self, object: u64) -> usize {
         self.0.borrow().pages.keys().filter(|(c, _)| *c == object).count()
+    }
+
+    fn supply_pages(&self, id: u64, offset: u64, bytes: &[u8], dirty: bool) -> Result<u64, Refused> {
+        let mut m = self.0.borrow_mut();
+        m.supplies += 1;
+        if m.refusing {
+            return Err(Refused::Kernel(SyscallError::Io));
+        }
+        let mut installed = 0;
+        for (k, chunk) in bytes.chunks(PAGE as usize).enumerate() {
+            let page = offset / PAGE + k as u64;
+            let size = m.sizes[&id];
+            let why = if !dirty && page >= size.div_ceil(PAGE) {
+                Some(Refused::Kernel(SyscallError::InvalidArgument))
+            } else if m.pages.contains_key(&(id, page)) {
+                continue;
+            } else if m.pages.len() >= m.capacity {
+                Some(Refused::NoRoom)
+            } else if dirty && m.held() >= m.ceiling {
+                Some(Refused::DirtyFull)
+            } else {
+                None
+            };
+            if let Some(why) = why {
+                return if installed > 0 { Ok(installed) } else { Err(why) };
+            }
+            let mut held = vec![0u8; PAGE as usize];
+            let n = if dirty { chunk.len() } else { chunk.len().min((size - page * PAGE) as usize) };
+            held[..n].copy_from_slice(&chunk[..n]);
+            m.pages.insert((id, page), Page { bytes: held, dirty, writeback: false });
+            if dirty {
+                let s = m.sizes.get_mut(&id).unwrap();
+                *s = (*s).max(page * PAGE + chunk.len() as u64);
+            }
+            installed += 1;
+        }
+        Ok(installed)
+    }
+
+    fn write_pages(&self, id: u64, offset: u64, bytes: &[u8]) -> Result<usize, Refused> {
+        let mut m = self.0.borrow_mut();
+        let mut done = 0;
+        while done < bytes.len() {
+            let at = offset + done as u64;
+            let key = (id, at / PAGE);
+            let Some(page) = m.pages.get(&key) else { break };
+            if !page.dirty && !page.writeback && m.held() >= m.ceiling {
+                return if done > 0 { Ok(done) } else { Err(Refused::DirtyFull) };
+            }
+            let within = (at % PAGE) as usize;
+            let n = (PAGE as usize - within).min(bytes.len() - done);
+            let page = m.pages.get_mut(&key).unwrap();
+            page.bytes[within..within + n].copy_from_slice(&bytes[done..done + n]);
+            page.dirty = true;
+            let s = m.sizes.get_mut(&id).unwrap();
+            *s = (*s).max(at + n as u64);
+            done += n;
+        }
+        if done == 0 { Err(Refused::Absent) } else { Ok(done) }
     }
 }
 
@@ -87,62 +163,24 @@ impl Pager for Fake {
     }
 
     fn supply(&self, id: u64, offset: u64, bytes: &[u8], dirty: bool) -> Result<u64, Refused> {
-        let mut m = self.0.borrow_mut();
-        m.supplies += 1;
-        if m.refusing {
-            return Err(Refused::Kernel(SyscallError::Io));
+        let answer = self.supply_pages(id, offset, bytes, dirty);
+        if dirty {
+            self.0.borrow_mut().changed(id, answer == Ok(bytes.len().div_ceil(PAGE as usize) as u64));
         }
-        let mut installed = 0;
-        for (k, chunk) in bytes.chunks(PAGE as usize).enumerate() {
-            let page = offset / PAGE + k as u64;
-            let size = m.sizes[&id];
-            let why = if !dirty && page >= size.div_ceil(PAGE) {
-                Some(Refused::Kernel(SyscallError::InvalidArgument))
-            } else if m.pages.contains_key(&(id, page)) {
-                continue;
-            } else if m.pages.len() >= m.capacity {
-                Some(Refused::NoRoom)
-            } else if dirty && m.held() >= m.ceiling {
-                Some(Refused::DirtyFull)
-            } else {
-                None
-            };
-            if let Some(why) = why {
-                return if installed > 0 { Ok(installed) } else { Err(why) };
-            }
-            let mut held = vec![0u8; PAGE as usize];
-            let n = if dirty { chunk.len() } else { chunk.len().min((size - page * PAGE) as usize) };
-            held[..n].copy_from_slice(&chunk[..n]);
-            m.pages.insert((id, page), Page { bytes: held, dirty, writeback: false });
-            if dirty {
-                let s = m.sizes.get_mut(&id).unwrap();
-                *s = (*s).max(page * PAGE + chunk.len() as u64);
-            }
-            installed += 1;
-        }
-        Ok(installed)
+        answer
     }
 
     fn write(&self, id: u64, offset: u64, bytes: &[u8]) -> Result<usize, Refused> {
+        let answer = self.write_pages(id, offset, bytes);
+        self.0.borrow_mut().changed(id, answer == Ok(bytes.len()));
+        answer
+    }
+
+    fn end_write(&self, id: u64) -> Result<(), Refused> {
         let mut m = self.0.borrow_mut();
-        let mut done = 0;
-        while done < bytes.len() {
-            let at = offset + done as u64;
-            let key = (id, at / PAGE);
-            let Some(page) = m.pages.get(&key) else { break };
-            if !page.dirty && !page.writeback && m.held() >= m.ceiling {
-                return if done > 0 { Ok(done) } else { Err(Refused::DirtyFull) };
-            }
-            let within = (at % PAGE) as usize;
-            let n = (PAGE as usize - within).min(bytes.len() - done);
-            let page = m.pages.get_mut(&key).unwrap();
-            page.bytes[within..within + n].copy_from_slice(&bytes[done..done + n]);
-            page.dirty = true;
-            let s = m.sizes.get_mut(&id).unwrap();
-            *s = (*s).max(at + n as u64);
-            done += n;
-        }
-        if done == 0 { Err(Refused::Absent) } else { Ok(done) }
+        assert!(m.held.remove(&id), "a write ended that no short call left under way");
+        m.changed(id, true);
+        Ok(())
     }
 
     fn withdraw(&self, id: u64, first: u64, count: u64) -> Result<u64, Refused> {
@@ -165,6 +203,7 @@ impl Pager for Fake {
             page.bytes[(size % PAGE) as usize..].fill(0);
         }
         m.sizes.insert(id, size);
+        m.changed(id, true);
         Ok(())
     }
 
@@ -474,4 +513,45 @@ fn an_object_refused_for_room_is_made_by_a_closed_files_going() {
     let n = v.open("home/d", CREATE).unwrap();
     let identity = v.identity("home/d").unwrap();
     assert_eq!(files.opened(&mut v, identity, n), Err(Error::NoSpace), "both held open: refused, by name");
+}
+
+/// XSH 2.9.7, the server's half: a write that takes many calls — an absent
+/// page supplied, the dirty ceiling written back, a last page in part — is
+/// one write of the object's, so every state a holder can read between calls
+/// is the file before it or after it, and the write ends whether it lands
+/// or is refused.
+#[test]
+fn a_write_of_many_calls_is_read_whole_or_not_at_all() {
+    const PAGES: usize = 8;
+    let page = PAGE as usize;
+    let old = pattern(PAGES * page, 10);
+    let mut v = volume();
+    let n = v.open("home/f", CREATE).unwrap();
+    v.write(n, 0, &old).unwrap();
+    v.close(n).unwrap();
+    let fake = Fake::new(64, 4);
+    let mut files = Files::new(Some(fake.clone()));
+    let at = open(&mut files, &mut v, "home/f");
+    read(&mut files, &mut v, at, 0, PAGES * page);
+    let object = files.object(at.1).unwrap();
+    assert_eq!(fake.withdraw(object, 3, 1), Ok(1));
+    fake.0.borrow_mut().views.clear();
+    let supplies = fake.0.borrow().supplies;
+
+    let new = pattern(6 * page + 100, 11);
+    files.write(&mut v, at.1, at.0, 0, &new).unwrap();
+    let mut after = old.clone();
+    after[..new.len()].copy_from_slice(&new);
+    let m = fake.0.borrow();
+    assert!(m.held.is_empty(), "the write was left under way");
+    assert!(m.supplies > supplies, "the write supplied no absent page: one call, nothing to tear");
+    for (k, (_, view)) in m.views.iter().filter(|(id, _)| *id == object).enumerate() {
+        let as_of = |file: &[u8]| view.iter().all(|(&p, bytes)| p as usize >= PAGES || bytes[..] == file[p as usize * page..][..page]);
+        assert!(as_of(&old) || as_of(&after), "view {k} of {} is neither the file before the write nor after it", m.views.len());
+    }
+    drop(m);
+
+    fake.0.borrow_mut().refusing = true;
+    assert!(files.write(&mut v, at.1, at.0, 7 * page as u64 + 50, &pattern(3 * page, 12)).is_err());
+    assert!(fake.0.borrow().held.is_empty(), "a refused write was left under way");
 }

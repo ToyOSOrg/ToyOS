@@ -17,6 +17,12 @@
 //! it in the same step, so the size never covers bytes not yet in the object;
 //! a shrink removes every page past it, dirty or not.
 //!
+//! **A holder's read is atomic against every write** (POSIX XSH 2.9.7): it
+//! begins only while no write is under way ([`Object::read_begin`]), and its
+//! bytes count only where no write has begun since ([`Object::unchanged`]).
+//! A write is one call, or, where a call does not take all it was given, every
+//! call until [`Object::end_write`]: the pager's whole write.
+//!
 //! What a removed frame owes (the last pin's free, a zeroed tail) is the
 //! caller's: every removal answers its frames.
 
@@ -204,14 +210,24 @@ struct Slot<F> {
 }
 
 /// One object's part of the table: its size, whether its pager ended, the
-/// list of its slots.
+/// list of its slots, and its writes under way.
 pub struct Object {
     id: u32,
     size: u64,
     gone: bool,
     head: u32,
     pages: usize,
+    /// Moved at every write's begin and end, and at every resize.
+    version: u64,
+    /// Writes under way: each call's, and the held one.
+    writing: u32,
+    /// A call that did not take all it was given left its write under way.
+    held: bool,
 }
+
+/// What a holder's read began at ([`Object::read_begin`]).
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub struct Version(u64);
 
 impl Object {
     pub fn size(&self) -> u64 {
@@ -229,6 +245,43 @@ impl Object {
 
     fn page_end(&self) -> u64 {
         self.size.div_ceil(PAGE)
+    }
+
+    /// Where a holder's read begins: `None` while a write is under way.
+    pub fn read_begin(&self) -> Option<Version> {
+        (self.writing == 0).then_some(Version(self.version))
+    }
+
+    /// Whether no write or resize has begun since the read began at `v`.
+    pub fn unchanged(&self, v: Version) -> bool {
+        self.version == v.0
+    }
+
+    /// A write call begins, before its first byte lands.
+    pub fn write_begin(&mut self) {
+        self.writing = self.writing.checked_add(1).expect("an object's writes overflowed");
+        self.version += 1;
+    }
+
+    /// A write call ends, after its last byte landed. One that did not take
+    /// all it was given leaves the write under way until
+    /// [`end_write`](Self::end_write), unless an earlier call's already is.
+    pub fn write_end(&mut self, whole: bool) {
+        if !whole && !self.held {
+            self.held = true;
+            return;
+        }
+        self.writing = self.writing.checked_sub(1).expect("a write ended that never began");
+        self.version += 1;
+    }
+
+    /// The pager ends the write a short call left under way.
+    pub fn end_write(&mut self) -> Result<(), Refused> {
+        if !core::mem::take(&mut self.held) {
+            return Err(Refused::InvalidArgument);
+        }
+        self.write_end(true);
+        Ok(())
     }
 }
 
@@ -307,7 +360,7 @@ impl<F: Copy> Pages<F> {
     /// [`release`](Self::release) takes every page it held.
     pub fn object(&mut self, id: u32, size: u64) -> Object {
         assert!(size <= LAST_END, "an object of {size} bytes past the last page");
-        Object { id, size, gone: false, head: NONE, pages: 0 }
+        Object { id, size, gone: false, head: NONE, pages: 0, version: 0, writing: 0, held: false }
     }
 
     fn hash(&self, object: u32, page: u64) -> usize {
@@ -617,6 +670,7 @@ impl<F: Copy> Pages<F> {
     /// answers the frame of a partial last page, whose tail past the size the
     /// caller zeroes.
     pub fn resize(&mut self, o: &mut Object, size: u64, out: &mut impl FnMut(F)) -> Option<F> {
+        o.version += 1;
         let keep = size.div_ceil(PAGE);
         if size < o.size {
             let mut at = o.head;
@@ -675,6 +729,47 @@ mod tests {
 
     fn sink(freed: &mut Vec<u64>) -> impl FnMut(u64) + '_ {
         |f| freed.push(f)
+    }
+
+    /// XSH 2.9.7: a read that began before a write, or while one was under
+    /// way, never counts; one that began after it does.
+    #[test]
+    fn a_read_counts_only_where_no_write_began_or_was_under_way() {
+        let mut p = Pages::<u64>::new(8, 4).unwrap();
+        let mut o = p.object(1, PAGE);
+        let before = o.read_begin().expect("nothing writes yet");
+        o.write_begin();
+        assert_eq!(o.read_begin(), None, "a read meets the write in flight");
+        assert!(!o.unchanged(before), "a read that began before it meets it");
+        o.write_end(true);
+        assert!(!o.unchanged(before), "and still does once it ended");
+        let after = o.read_begin().expect("the write ended");
+        assert!(o.unchanged(after));
+        p.resize(&mut o, 0, &mut none);
+        assert!(!o.unchanged(after), "a shrink is a change a read meets");
+    }
+
+    /// A pager's write that takes several calls is one write: the first short
+    /// call leaves it under way, later ones nest in it, and only its end lets
+    /// a read begin.
+    #[test]
+    fn a_short_call_holds_the_write_until_its_end() {
+        let mut p = Pages::<u64>::new(8, 4).unwrap();
+        let mut o = p.object(2, PAGE);
+        assert_eq!(o.end_write(), Err(Refused::InvalidArgument), "nothing is held");
+        o.write_begin();
+        o.write_end(false);
+        assert_eq!(o.read_begin(), None, "a short call's write is under way");
+        o.write_begin();
+        o.write_end(false);
+        o.write_begin();
+        o.write_end(true);
+        assert_eq!(o.read_begin(), None, "a later call, short or whole, ends no held write");
+        let held = o.version;
+        assert_eq!(o.end_write(), Ok(()));
+        let v = o.read_begin().expect("the end lets a read begin");
+        assert!(o.unchanged(v) && v != Version(held), "the end moved the version");
+        assert_eq!(o.end_write(), Err(Refused::InvalidArgument), "a write ends once");
     }
 
     #[test]
