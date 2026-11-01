@@ -4,8 +4,8 @@
 //! **A growing write is two writes: the chain, then the directory entry.**
 //! Between them the volume holds clusters its entry does not reach, which
 //! fatgen103 refuses, so an open file changed since it was last level is
-//! brought level — its entry written and stamped, its chain reconciled — at
-//! its last close, at an fsync and at a sync. **The two are a cache flush
+//! brought level — its entry written and stamped with its last write, its
+//! chain reconciled — at its last close, at an fsync and at a sync. **The two are a cache flush
 //! apart**: the cache writes lowest block first and the disk keeps no order
 //! until a flush, so an entry put into the cache beside its chain and data
 //! would reach the disk before the clusters it names.
@@ -41,6 +41,9 @@ struct Open {
     /// Written, resized or opened truncating since its entry was last
     /// brought level.
     dirty: bool,
+    /// When it was last written or resized, which its level stamps: its
+    /// mtime meanwhile.
+    written: Option<FatTime>,
 }
 
 /// The disk's `ReadOnly` reaches `toyos-fat32` as a refused write, which it
@@ -122,6 +125,12 @@ impl<D: Disk> FatVolume<D> {
         FatTime::from_unix_secs((self.clock)() / NANOS_PER_SEC)
     }
 
+    /// Now as an entry's write time keeps it: the even second at or before.
+    fn write_time(&self) -> FatTime {
+        let secs = (self.clock)() / NANOS_PER_SEC;
+        FatTime::from_unix_secs(secs - secs % 2)
+    }
+
     fn entry(&mut self, node: Node) -> Result<&mut Open, fs::Error> {
         let open = self.open.get_mut(&node).ok_or(fs::Error::Stale)?;
         if open.gone {
@@ -130,15 +139,17 @@ impl<D: Disk> FatVolume<D> {
         Ok(open)
     }
 
-    /// Bring one open file's entry level with its chain, stamped now, when
-    /// it changed since the entry was last written.
+    /// Bring one open file's entry level with its chain, stamped with its
+    /// last write (or now, for a chain alone), when it changed since the
+    /// entry was last written.
     fn level(&mut self, node: Node) -> Result<(), fs::Error> {
         match self.open.get(&node) {
             Some(open) if !open.gone && (open.dirty || open.file.needs_reconcile()) => {}
             _ => return Ok(()),
         }
-        let time = self.time();
+        let now = self.time();
         let open = self.open.get_mut(&node).expect("just found");
+        let time = open.written.unwrap_or(now);
         // The chain and the data on the disk before the entry that reaches
         // them is in the cache.
         if open.file.needs_reconcile() {
@@ -149,6 +160,7 @@ impl<D: Disk> FatVolume<D> {
             self.cache.block_on(self.fs.reconcile(&mut open.file, time)).map_err(|e| logged("a reconcile", &open.path, e))?;
         }
         open.dirty = false;
+        open.written = None;
         Ok(())
     }
 
@@ -185,10 +197,10 @@ impl<D: Disk> Volume for FatVolume<D> {
         if path.is_empty() {
             return Ok(Meta { kind: Kind::Dir, size: 0, mtime: 0 });
         }
-        if let Some(open) = self.by_path.get(path).and_then(|n| self.open.get(n)) {
-            let len = open.file.len();
-            let mtime = self.cache.block_on(self.fs.metadata(path)).map_err(|e| logged("metadata", path, e))?.modified_unix;
-            return Ok(Meta { kind: Kind::File, size: len, mtime: mtime * NANOS_PER_SEC });
+        if let Some(&node) = self.by_path.get(path) {
+            if self.open.contains_key(&node) {
+                return self.node_meta(node);
+            }
         }
         let meta = self.cache.block_on(self.fs.metadata(path)).map_err(|e| match e {
             Error::NotADirectory => fs::Error::NotFound,
@@ -245,7 +257,7 @@ impl<D: Disk> Volume for FatVolume<D> {
                 };
                 let node = self.next;
                 self.next += 1;
-                self.open.insert(node, Open { path: path.to_string(), file, holders: 0, gone: false, dirty: false });
+                self.open.insert(node, Open { path: path.to_string(), file, holders: 0, gone: false, dirty: false, written: None });
                 self.by_path.insert(path.to_string(), node);
                 node
             }
@@ -253,7 +265,10 @@ impl<D: Disk> Volume for FatVolume<D> {
         self.open.get_mut(&node).expect("just found or made").holders += 1;
         if how.truncate {
             // POSIX's `open` stamps a truncated file even when it was empty.
-            self.open.get_mut(&node).expect("just found or made").dirty = true;
+            let now = self.write_time();
+            let open = self.open.get_mut(&node).expect("just found or made");
+            open.dirty = true;
+            open.written = Some(now);
             if let Err(e) = self.truncate(node, 0) {
                 // A refused close is said, and its node kept for the next sync.
                 let _ = self.close(node);
@@ -281,6 +296,9 @@ impl<D: Disk> Volume for FatVolume<D> {
 
     fn node_meta(&mut self, node: Node) -> Result<Meta, fs::Error> {
         let open = self.entry(node)?;
+        if let Some(written) = open.written {
+            return Ok(Meta { kind: Kind::File, size: open.file.len(), mtime: written.to_unix_secs() * NANOS_PER_SEC });
+        }
         let (path, size) = (open.path.clone(), open.file.len());
         let mtime = self.cache.block_on(self.fs.metadata(&path)).map_err(|e| logged("metadata", &path, e))?.modified_unix;
         Ok(Meta { kind: Kind::File, size, mtime: mtime * NANOS_PER_SEC })
@@ -306,11 +324,13 @@ impl<D: Disk> Volume for FatVolume<D> {
     }
 
     fn reserve(&mut self, node: Node, offset: u64, len: u64) -> Result<Reserved, fs::Error> {
+        let now = self.write_time();
         let open = self.open.get_mut(&node).ok_or(fs::Error::Stale)?;
         if open.gone {
             return Err(fs::Error::Stale);
         }
         open.dirty = true;
+        open.written = Some(now);
         // A chain has no holes: it holds a block for every page of its size.
         let reserved = Reserved { size: open.file.len(), held: open.file.len().div_ceil(toyos_blockdev::BLOCK as u64) };
         self.cache.block_on(self.fs.reserve(&mut open.file, offset, len)).map_err(|e| logged("reserve", &open.path, e))?;
@@ -327,6 +347,7 @@ impl<D: Disk> Volume for FatVolume<D> {
     }
 
     fn truncate(&mut self, node: Node, size: u64) -> Result<(), fs::Error> {
+        let now = self.write_time();
         let open = self.open.get_mut(&node).ok_or(fs::Error::Stale)?;
         if open.gone {
             return Err(fs::Error::Stale);
@@ -335,6 +356,7 @@ impl<D: Disk> Volume for FatVolume<D> {
             return Ok(());
         }
         open.dirty = true;
+        open.written = Some(now);
         self.cache.block_on(self.fs.set_len(&mut open.file, size)).map_err(|e| logged("set_len", &open.path, e))
     }
 
@@ -551,26 +573,32 @@ mod tests {
         (v, refused, spec)
     }
 
-    /// What [`the_flush_stamps_its_even_second_and_not_the_write_s`]'s volume
-    /// reads as the time, which only that test sets.
+    /// What [`a_files_mtime_is_its_last_write_s_through_its_handle_and_after_a_reopen`]'s
+    /// volume reads as the time, which only that test sets.
     static NOW: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
 
-    /// FAT stamps a file's entry with the flush that levels it, read back off
-    /// the disk: the whole second of that flush, kept to the even one at or
-    /// before it (`FatTime`'s two-second resolution), and never the write's.
+    /// A FAT file's mtime is its last write's, kept to the even second at or
+    /// before it (`FatTime`'s two-second resolution): through its handle
+    /// before its entry is level, and read back off the disk after a sync
+    /// later and a reopen, alike.
     #[test]
-    fn the_flush_stamps_its_even_second_and_not_the_write_s() {
+    fn a_files_mtime_is_its_last_write_s_through_its_handle_and_after_a_reopen() {
         use std::sync::atomic::Ordering::Relaxed;
         const CREATE: OpenHow = OpenHow { create: true, create_new: false, truncate: false };
         let (mut v, _, _) = spec_fat_on(|| NOW.load(Relaxed));
-        NOW.store(1_717_245_296 * NANOS_PER_SEC, Relaxed);
+        NOW.store(1_717_245_101 * NANOS_PER_SEC, Relaxed);
         let a = v.open("a.txt", CREATE).unwrap();
+        NOW.store(1_717_245_297 * NANOS_PER_SEC, Relaxed);
         v.write(a, 0, &[1; 3000]).unwrap();
+        let written = 1_717_245_296 * NANOS_PER_SEC;
+        assert_eq!(v.node_meta(a).unwrap().mtime, written, "through the handle");
         NOW.store(1_717_245_301 * NANOS_PER_SEC + 500_000_000, Relaxed);
         assert_eq!(v.sync(), Ok(Vec::new()));
         v.close(a).unwrap();
         evict(&v);
-        assert_eq!(v.lstat("a.txt").unwrap().mtime, 1_717_245_300 * NANOS_PER_SEC);
+        assert_eq!(v.lstat("a.txt").unwrap().mtime, written, "off the disk, a sync later");
+        let again = v.open("a.txt", CREATE).unwrap();
+        assert_eq!(v.node_meta(again).unwrap().mtime, written, "through a handle after a reopen");
     }
 
     /// What [`a_sync_of_files_nothing_changed_asks_the_disk_nothing`]'s volume
