@@ -91,8 +91,14 @@ pub(crate) mod timing {
 
     const DIT: u64 = 1 << 24;
 
-    fn supported() -> bool {
-        match SUPPORT.load(Relaxed) {
+    /// That every CPU has FEAT_DIT, so `DIT` may be read and written.
+    #[derive(Clone, Copy)]
+    pub(crate) struct Mode(());
+
+    /// The mode, `None` without FEAT_DIT.
+    #[inline]
+    pub(crate) fn mode() -> Option<Mode> {
+        let present = match SUPPORT.load(Relaxed) {
             PRESENT => true,
             ABSENT => false,
             _ => {
@@ -100,29 +106,28 @@ pub(crate) mod timing {
                 SUPPORT.store(if present { PRESENT } else { ABSENT }, Relaxed);
                 present
             }
-        }
+        };
+        present.then_some(Mode(()))
     }
 
-    /// The thread's `PSTATE.DIT`, `None` without FEAT_DIT.
-    #[inline]
-    pub(crate) fn mode() -> Option<bool> {
-        if !supported() {
-            return None;
+    impl Mode {
+        /// The thread's `PSTATE.DIT`.
+        #[inline]
+        pub(crate) fn is_on(self) -> bool {
+            let value: u64;
+            // SAFETY: `DIT` is readable at EL0 on a CPU with FEAT_DIT, which
+            // a `Mode` says every CPU has.
+            unsafe { core::arch::asm!("mrs {}, s3_3_c4_c2_5", out(reg) value, options(nomem, nostack, preserves_flags)) };
+            value & DIT != 0
         }
-        let value: u64;
-        // SAFETY: `DIT` is readable at EL0 on a CPU with FEAT_DIT, which
-        // `supported` established for every CPU.
-        unsafe { core::arch::asm!("mrs {}, s3_3_c4_c2_5", out(reg) value, options(nomem, nostack, preserves_flags)) };
-        Some(value & DIT != 0)
-    }
 
-    /// Set the thread's `PSTATE.DIT`. Called only once [`mode`] answered one.
-    /// Not `nomem`, so that the compiler moves no memory access of the work
-    /// it brackets across it.
-    #[inline]
-    pub(crate) fn set_mode(on: bool) {
-        // SAFETY: as `mode`'s, which found FEAT_DIT before any call here; the
-        // write changes `PSTATE.DIT` alone.
-        unsafe { core::arch::asm!("msr s3_3_c4_c2_5, {}", in(reg) if on { DIT } else { 0 }, options(nostack, preserves_flags)) };
+        /// Set the thread's `PSTATE.DIT`. Not `nomem`, so no memory access of
+        /// the bracketed work moves across it; work held in registers alone
+        /// still may.
+        #[inline]
+        pub(crate) fn set(self, on: bool) {
+            // SAFETY: as `is_on`'s; the write changes `PSTATE.DIT` alone.
+            unsafe { core::arch::asm!("msr s3_3_c4_c2_5, {}", in(reg) if on { DIT } else { 0 }, options(nostack, preserves_flags)) };
+        }
     }
 }

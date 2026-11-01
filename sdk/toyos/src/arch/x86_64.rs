@@ -36,15 +36,24 @@ pub(crate) unsafe fn zero(dst: *mut u8, len: usize) {
     }
 }
 
-/// `crate::timing`'s mode: none a thread sets on x86-64.
+/// `crate::timing`'s mode: none a thread sets on x86-64, so no [`Mode`]
+/// exists.
 pub(crate) mod timing {
-    /// The thread's mode: `None`, as there is none.
+    #[derive(Clone, Copy)]
+    pub(crate) enum Mode {}
+
     #[inline(always)]
-    pub(crate) fn mode() -> Option<bool> {
+    pub(crate) fn mode() -> Option<Mode> {
         None
     }
 
-    pub(crate) fn set_mode(_on: bool) {
-        unreachable!("x86-64 has no timing mode a thread sets, so nothing found one to set")
+    impl Mode {
+        pub(crate) fn is_on(self) -> bool {
+            match self {}
+        }
+
+        pub(crate) fn set(self, _on: bool) {
+            match self {}
+        }
     }
 }

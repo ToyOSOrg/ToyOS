@@ -54,10 +54,14 @@ review has been done, and passing vectors does not show it is safer than ring.
   2.6 GB/s against the portable rounds' 0.52, and SHA-512 at 1.36 against
   0.83. ToyOS's own AArch64 targets do not promise them and nothing detects
   them at run time, so they hash portably; see the weaknesses.
-- **On ToyOS each secret operation runs under the thread's timing
-  protection** (`src/timing.rs`, `toyos::timing`): `PSTATE.DIT` on AArch64.
-  x86-64 has no such mode a thread sets, and ToyOS turns Intel's DOITM on for
-  none, so constant time there rests on the code, as on AMD.
+- **On ToyOS every operation that takes a secret runs under the thread's
+  timing protection** (`src/timing.rs`, `toyos::timing`): `PSTATE.DIT` on
+  AArch64. That covers ciphers, MACs, KDFs, keyed SipHash, `ct::equal` and
+  the key operations. A plain hash takes none, so a caller hashing a secret
+  takes `toyos_crypto::timing::protect` itself, as `toyos-ssh`'s exchange
+  hash and key derivation do. x86-64 has no such mode a thread sets, and
+  ToyOS turns Intel's DOITM on for none, so constant time there rests on the
+  code, as on AMD.
 
 ## Consumers and what each needs
 
