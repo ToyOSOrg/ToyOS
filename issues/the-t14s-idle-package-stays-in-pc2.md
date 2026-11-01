@@ -54,7 +54,8 @@ The two causes, each reproduced on Linux by putting ToyOS's state there:
   - Linux's driver reaches PC8 with the panel lit. The fix is ToyOS's own display programming, with the panel lit; turning it off is not the fix. Per Intel's Tiger Lake display reference (Vol. 12), that means watermarks, SAGV, DMC firmware for DC5/DC6, and PSR for PC9/PC10. A driver for it is an owner decision.
 
 Under ToyOS, APST did not lower the package (PR #1131, evidence `pr-1131`
-r1-r3).
+r1-r3). These boots ran the benchmark image, which started no display driver
+until #1149, so the display was as the GOP left it.
 - The drive reaches PS4 between I/Os, yet the package stays in PC2 at 6-7 W
   either way, so the display holds it.
 - Two things remain unexplained, with or without APST:
