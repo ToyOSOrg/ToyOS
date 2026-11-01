@@ -1,7 +1,8 @@
 //! XSH 2.9.7: a read and a write of one regular file are atomic with respect
 //! to each other. A writer puts whole generations of a served file, each byte
-//! the generation's number, while a reader on its own description reads the
-//! whole file through its paged object; every read is one generation.
+//! the generation's number mod 256, while a reader on its own description
+//! reads the whole file through its paged object; every read is one
+//! generation.
 //!
 //! A guest test because the tear is an interleaving of the kernel's copy of a
 //! holder's read with the file server's write into the same frames, on two

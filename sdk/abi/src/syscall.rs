@@ -3262,9 +3262,8 @@ pub enum PagedOp {
     /// Copy `len` bytes from `buf` into the present pages at `offset`, dirty,
     /// growing the size to their end as each page's bytes land. Answers the
     /// bytes written, stopping at the first absent page; `NotFound` when the
-    /// first is absent, `WouldBlock` at the dirty ceiling. A holder's read
-    /// that meets a write is answered `WouldBlock`; a write that does not take
-    /// all it was given stays under way until [`PagedOp::EndWrite`].
+    /// first is absent, `WouldBlock` at the dirty ceiling. A write that does
+    /// not take all it was given stays under way until [`PagedOp::EndWrite`].
     Write = 1,
     /// Remove the clean pages of `len` pages from page `offset` that no
     /// write-back or write holds. Answers how many went.
@@ -3364,7 +3363,9 @@ pub fn paged_holder(pager: RawHandle, object: u64) -> Result<RawHandle, SyscallE
 /// 0 at or past it. It waits for every absent page until its pager supplies
 /// or fails it, the object shrinks or is released, or the pager ends: `Io`
 /// for a failed page before any byte was read (a short count after some),
-/// `Gone` once the object or the pager ended. A pager's process is refused,
+/// `Gone` once the object or the pager ended. A read a write of the pager's
+/// met, or that began while one was under way, is `WouldBlock`, and the
+/// holder asks the pager instead. A pager's process is refused,
 /// `PermissionDenied`, as is a holder without `READ`; any other kind of
 /// handle, `InvalidArgument`, so a peer's claim that a handle is a holder
 /// can be checked.
