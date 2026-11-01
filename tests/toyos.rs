@@ -260,6 +260,9 @@ const RUST_SKIP: &[&str] = &[
     // A connect whose region nothing committed, to real netstack, which goes
     // on serving: `netstack_holders_exported_to_children`'s boot runs it.
     "stream_region_refused",
+    // A loopback stream's bytes through its rings' growth, which needs the
+    // real netstack: `netstack_holders_exported_to_children`'s boot runs it.
+    "stream_grows",
     // A stream's holders across processes, as their own netstack: it spawns a
     // child that faults, which a shared boot's other members must not watch,
     // and `stream_holders` runs it.
@@ -5791,9 +5794,11 @@ const SOCKET_EXPORT_PORT: u16 = 7070;
 /// `tests/images/netcase.toml`, the harness every socket's peer: a stream's
 /// child's line, then its parent's, then the FIN once both holders are gone;
 /// then a listener's and a datagram socket's child's datagram, its accept and
-/// its line, and the parent's after it. Once over virtio, and once over QEMU's
-/// `e1000e`, which the image's rows name no machine for: the I219 driver's
-/// row matches it, and its link is the one netstack opens.
+/// its line, and the parent's after it; then a connect whose region nothing
+/// committed, and a loopback stream through its rings' growth. Once over
+/// virtio, and once over QEMU's `e1000e`, which the image's rows name no
+/// machine for: the I219 driver's row matches it, and its link is the one
+/// netstack opens.
 fn netstack_holders_exported_to_children() -> Result<(), String> {
     for (profile, driver) in [(qemu::Profile::Headless, "virtio-net"), (qemu::Profile::HeadlessE1000e, "82574")] {
         holders_exported_over(profile, driver)?;
@@ -5807,7 +5812,7 @@ fn holders_exported_over(profile: qemu::Profile, driver: &str) -> Result<(), Str
     const LEASED: &str = "netstack: ready, at most";
     let tests = compile::repo_root().join("tests/guest/rust-tests");
     let bins: Vec<(String, Vec<u8>)> =
-        ["stream_export", "socket_export", "stream_region_refused"].iter().map(|job| (job.to_string(), qemu::build_toyos_bin(qemu::SUITE_ARCH, &tests, job))).collect();
+        ["stream_export", "socket_export", "stream_region_refused", "stream_grows"].iter().map(|job| (job.to_string(), qemu::build_toyos_bin(qemu::SUITE_ARCH, &tests, job))).collect();
     // The host's end of the forward: a port found free and given up, which
     // QEMU binds as it starts and refuses to start without. Another process
     // can take it between the two, which fails the boot by name.
@@ -5832,11 +5837,13 @@ fn holders_exported_over(profile: qemu::Profile, driver: &str) -> Result<(), Str
     }
     stream_exported_to_a_child(&mut qemu)?;
     sockets_exported_to_a_child(&mut qemu, forwarded)?;
-    let result = qemu.run_test("test_rs_stream_region_refused", Duration::from_secs(60));
-    match (&result.error, result.exit_code) {
-        (None, Some(0)) => Ok(()),
-        _ => Err(format!("{:?}, ended {:?}; the job said:\n{}", result.error, result.exit_code, result.stdout)),
+    for job in ["test_rs_stream_region_refused", "test_rs_stream_grows"] {
+        let result = qemu.run_test(job, Duration::from_secs(120));
+        if result.error.is_some() || result.exit_code != Some(0) {
+            return Err(format!("{driver}: {job}: {:?}, ended {:?}; the job said:\n{}", result.error, result.exit_code, result.stdout));
+        }
     }
+    Ok(())
 }
 
 /// `test_rs_stream_export`: the child's line, then the parent's, then the FIN
