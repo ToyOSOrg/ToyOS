@@ -705,16 +705,21 @@ pub fn batches(
     for (label, batch) in &out {
         let mut recorded: BTreeMap<String, &str> = BTreeMap::new();
         for job in &batch.jobs {
-            if let Some(other) = recorded.insert(bootlog::recorded_name(job), job) {
+            let name = bootlog::recorded_name(binary(job));
+            if let Some(other) = recorded.insert(name.clone(), job) {
                 return Err(format!(
-                    "the boot {label:?} runs {other} and {job}, and the kernel records both as {:?}: one \
-                     boot's log cannot tell their verdicts apart",
-                    bootlog::recorded_name(job)
+                    "the boot {label:?} runs {other} and {job}, and the kernel records both as {name:?}: one \
+                     boot's log cannot tell their verdicts apart"
                 ));
             }
         }
     }
     Ok(out)
+}
+
+/// The binary a job runs: a job is a command line, and this is its first word.
+fn binary(job: &str) -> &str {
+    job.split_whitespace().next().unwrap_or_default()
 }
 
 /// What `reachable`, a batch's text, names beside its `jobs`: every binary it
