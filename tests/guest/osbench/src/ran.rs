@@ -34,6 +34,41 @@ pub fn start() -> Ran {
 }
 
 impl Ran {
+    /// Diagnostic: this process's migrations in the span, how many crossed
+    /// an LLC, and its wakes and picks, as `m/x/w/p` with `lost` beside it.
+    pub fn moves(self) -> String {
+        #[cfg(target_os = "toyos")]
+        {
+            let Some(mut d) = self.diag else { return "-".to_string() };
+            let (entries, lost, failed) = d.diary();
+            if failed.is_some() {
+                return "-".to_string();
+            }
+            let apics: std::collections::BTreeMap<u32, u32> =
+                d.counters().unwrap_or_default().into_iter().map(|c| (c.cpu, c.apic)).collect();
+            let llc = |cpu: u32| apics.get(&cpu).and_then(|&apic| crate::arch::llc_of_apic(apic));
+            let me = std::process::id();
+            let (mut moved, mut crossed, mut woken, mut picked) = (0u64, 0u64, 0u64, 0u64);
+            for (_, entry) in &entries {
+                if entry.thread.is_none_or(|t| t.pid != me) {
+                    continue;
+                }
+                match entry.event {
+                    toyos_trace::Event::Migrate { to } => {
+                        moved += 1;
+                        crossed += u64::from(llc(u32::from(entry.cpu)) != llc(to));
+                    }
+                    toyos_trace::Event::Wake => woken += 1,
+                    toyos_trace::Event::Pick => picked += 1,
+                    _ => {}
+                }
+            }
+            format!("{moved}/{crossed}/{woken}/{picked}:lost{lost}")
+        }
+        #[cfg(not(target_os = "toyos"))]
+        "-".to_string()
+    }
+
     /// The span's fields, ending it.
     pub fn fields(self) -> Vec<(&'static str, String)> {
         #[cfg(target_os = "toyos")]
