@@ -21,8 +21,9 @@ data-dependent prefetcher.
   https://github.com/ToyOSOrg/evidence/tree/56a9678bcec3939074783b0f0a363eb14c1a25da/combined/fsfp-attribution.
 - Intel lists FSFP on Ice Lake U/Y and SP, Lakefield, Tiger Lake U/H, Rocket
   Lake and Alder Lake P/M/S, and says later parts declare it by enumerating
-  PSFD (CPUID.(7,2).EDX[0]), as the T14 does too (EDX 0x1). It does not document what makes the predictor
-  forward wrongly, so no coding rule avoids it.
+  PSFD (CPUID.(7,2).EDX[0]), as the T14 does too (EDX 0x1). It does not
+  document what makes the predictor forward wrongly, so no coding rule
+  avoids it.
 - Current code passes on the T14 with every such control off. That rests on
   avoiding the value pattern that triggered it (#1013 keeps the running point
   off the identity), which a test of chosen secrets cannot extend to every
@@ -35,5 +36,5 @@ data-dependent prefetcher.
 with FSFP runs with it disabled, by PSFD or SSBD through the per-program flag
 of `issues/no-program-runs-with-speculative-store-bypass-disabled.md`, or
 Intel documents which data the predictor depends on and toyos-crypto is shown
-to keep secrets out of it. **Oracle**: `crypto_secret_timing_curves` on the T14
-at a revision that leaked, with the control on and off.
+to keep secrets out of it. **Oracle**: `crypto_secret_timing_curves` on the
+T14 at a revision that leaked, with the control on and off.
