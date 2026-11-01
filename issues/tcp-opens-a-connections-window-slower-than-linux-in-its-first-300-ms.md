@@ -285,9 +285,9 @@ own processes (#1106):
   stays.
 - In C every RTT sample but two came from a segment's departure.
 - That session's bucket could hold up to a millisecond at the rate, which on
-  a short round trip is more than the window. The landed pacer holds at most
-  half the window. The parity read waits on a boot of that head, on current
-  main.
+  a short round trip is more than the window. #1114's pacer, as of
+  3a0744d34, holds at most half the window. The parity read waits on a boot
+  of that head, on current main.
 
 **Exit**: `osbench_lan` on the T14 reads `lan.wired.tcp.upload` at Linux's
 in the same session, with the first 300 ms read at the receiver no slower, or

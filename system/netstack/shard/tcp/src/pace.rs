@@ -3,21 +3,26 @@
 //!
 //! The bucket holds what the rate brings in [`GRANULARITY`], at most half of cwnd, and never less
 //! than the initial window. §7.7 bounds a burst at the initial window unless the path is known to
-//! absorb more. The millisecond departs from that so that a fast sender is woken at most every
-//! half millisecond. The half-window bound keeps the bucket below cwnd at any srtt, so a window
-//! past the initial one always leaves in more than one burst. That is what lets HyStart++ take
-//! L = infinity (RFC 9406 §4.3) whatever the path's round trip.
+//! absorb more. The millisecond departs from that so that a fast sender's bursts, and its wakes,
+//! are sized by time rather than by the initial window. The half-window bound keeps the bucket
+//! below cwnd at any srtt, so a window past the initial one always leaves in more than one burst.
+//! That is what lets HyStart++ take L = infinity (RFC 9406 §4.3) whatever the path's round trip.
 //!
 //! Some data spends from the bucket but is never held:
-//! - retransmissions: recovery's pipe and a timeout's one-segment window bound them;
-//! - new data in SACK recovery: RFC 6675's pipe sends it a segment at a time;
+//! - retransmissions: recovery's pipe, and the window after a timeout from one segment, bound
+//!   them;
+//! - new data in SACK recovery: RFC 6675's pipe and the ACK clock bound it, as they do
+//!   retransmissions;
 //! - a loss probe of new data: RFC 8985 §7.3's single segment at the PTO, which a hold would only
-//!   delay.
+//!   delay;
+//! - a persist probe of new data: one segment into a closed window (RFC 9293 §3.8.6.1).
 //!
-//! A held sender is offered its data again once the bucket holds half its capacity, so a wake up
-//! to half a [`GRANULARITY`] late loses no rate. In a small window that wait is half the initial
-//! window's time at the rate, even when one segment would do. Without a smoothed RTT nothing is
-//! paced; cwnd is at most the initial window until the first sample.
+//! A held sender is offered its data again once the bucket holds half its capacity: it wakes once
+//! per half the bucket's refill time, and a wake up to that much late loses no rate. That is half
+//! a [`GRANULARITY`] while the millisecond sets the bucket, and less where half the window or the
+//! initial window does. In a small window the wait is half the initial window's time at the rate,
+//! even when one segment would do. Without a smoothed RTT nothing is paced; cwnd is at most the
+//! initial window until the first sample.
 
 use core::num::{NonZeroU128, NonZeroU64};
 use core::time::Duration;
