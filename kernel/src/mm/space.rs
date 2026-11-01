@@ -850,23 +850,19 @@ impl AddressSpace {
     /// Whether every page of `[start, end)` is in a range that allows
     /// `access` and is memory the kernel can copy through the direct map:
     /// what a copy the kernel makes for a thread asks first. A device's
-    /// registers or firmware's framebuffer, an aperture, are no buffer.
+    /// registers or firmware's framebuffer, an aperture, are no buffer. A
+    /// page an object maps is one only once its object committed it: a copy
+    /// into one that is not would be lost, and a fault on it is refused.
     pub fn allows(&self, start: u64, end: u64, access: Access) -> bool {
         let start = start & !(PAGE_SIZE - 1);
-        self.inventory.covered_where(start, end, |entry| entry.prot.allows(access) && entry.backed() && copyable(entry))
-            && self.committed(start, end)
-    }
-
-    /// Whether every page of `[start, end)` an object maps is one its
-    /// object committed: a copy into one that is not would be lost, and a
-    /// fault on it is refused.
-    fn committed(&self, start: u64, end: u64) -> bool {
-        self.inventory.meeting(start, end).all(|(at, entry)| match &entry.kind {
-            Kind::Object { object, offset, .. } => {
-                let (lo, hi) = (start.max(at), end.min(entry.end));
-                (lo..hi).step_by(PAGE_SIZE as usize).all(|page| object.page(offset + (page - at)).is_some())
-            }
-            Kind::Private { .. } | Kind::Copy { .. } => true,
+        self.inventory.covered_where(start, end, |at, entry| {
+            let committed = || match &entry.kind {
+                Kind::Object { object, offset, .. } => (start.max(at)..end.min(entry.end))
+                    .step_by(PAGE_SIZE as usize)
+                    .all(|page| object.page(offset + (page - at)).is_some()),
+                Kind::Private { .. } | Kind::Copy { .. } => true,
+            };
+            entry.prot.allows(access) && entry.backed() && copyable(entry) && committed()
         })
     }
 
