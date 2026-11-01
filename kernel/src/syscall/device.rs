@@ -122,12 +122,16 @@ pub(super) fn sys_device_claim(syscap: RawHandle, class: u64, selector: [u64; 2]
     let Some(class) = device::DeviceType::from_raw(class) else {
         return SyscallError::InvalidArgument.to_u64();
     };
+    // A PCI function's second word is the firmware windows its claim is
+    // granted at the mint (`toyos_abi::pci::FirmwareWindows`).
     let read = match class {
         device::DeviceType::Framebuffer | device::DeviceType::Acpi => 0,
-        device::DeviceType::PciFunction => 1,
+        device::DeviceType::PciFunction => 2,
         device::DeviceType::Isa => 2,
     };
-    if selector[read..].iter().any(|&word| word != 0) {
+    let windows_known = class != device::DeviceType::PciFunction
+        || toyos_abi::pci::FirmwareWindows::from_mask(selector[1]).is_some();
+    if !windows_known || selector[read..].iter().any(|&word| word != 0) {
         return SyscallError::InvalidArgument.to_u64();
     }
     if let Err(e) = demand_syscap(syscap, Rights::DEVICE) {
@@ -195,9 +199,63 @@ pub(super) fn sys_device_bar_map(handle: RawHandle, index: u64) -> u64 {
         Ok(object) => object,
         Err(e) => return e.to_u64(),
     };
+    let object = KObjectRef::SharedMem(object);
+    let rights = ops::initial_rights(&object);
+    handle_result(install_handed(handle, &claim, crate::object::HandleEntry::new(object, rights)))
+}
+
+/// `entry`, an aperture `claim` handed out, installed only while the
+/// caller's table still holds `claim` at `handle`, under the one lock its
+/// release or move takes it out under. That move or release revokes what the
+/// claim handed out once the lock is let go, so every aperture either met
+/// that revoke or is refused here, `Gone`, and its object ends unmapped.
+fn install_handed(
+    handle: RawHandle,
+    claim: &Arc<DeviceClaim>,
+    entry: crate::object::HandleEntry,
+) -> Result<RawHandle, SyscallError> {
     process::with_process_data(|data| {
-        handle_result(ops::install(&mut data.handles, KObjectRef::SharedMem(object)))
+        let held = data.handles.get::<DeviceClaim>(handle, Rights::NONE).is_ok_and(|held| Arc::ptr_eq(&held, claim));
+        if !held {
+            return Err(SyscallError::Gone);
+        }
+        data.handles.install(entry).map_err(|_| SyscallError::ResourceExhausted)
     })
+}
+
+/// A firmware window the claim was granted, as an object its holder can map
+/// and neither duplicate nor move: [`Rights::MAP`] and [`Rights::WRITE`]
+/// alone. A refusal of what firmware set up goes back in the grant's word.
+pub(super) fn sys_device_firmware_window(ctx: &SyscallContext, handle: RawHandle, window: u64, out: UserAddr) -> u64 {
+    let claim = match pci_claim(handle) {
+        Ok(claim) => claim,
+        Err(e) => return e.refuse(),
+    };
+    let Some(window) = toyos_abi::pci::FirmwareWindow::from_raw(window) else {
+        return SyscallError::InvalidArgument.to_u64();
+    };
+    let len = core::mem::size_of::<toyos_abi::pci::WindowGrant>() as u64;
+    let Some(mut out) = ctx.user_bytes_mut(out, len) else {
+        return SyscallError::BadAddress.to_u64();
+    };
+    let mut grant = toyos_abi::pci::WindowGrant { shm: toyos_abi::HANDLE_INVALID, refused: 0, offset: 0, len: 0 };
+    match on_function(&claim, |function| crate::pcidev::firmware_window(function, window)) {
+        Err(e) => return e.to_u64(),
+        Ok(Err(refused)) => grant.refused = refused as u32,
+        Ok(Ok(crate::pcidev::Opened { object, offset, len })) => {
+            let entry = crate::object::HandleEntry::new(KObjectRef::SharedMem(object), Rights::MAP.union(Rights::WRITE));
+            match install_handed(handle, &claim, entry) {
+                Ok(shm) => grant = toyos_abi::pci::WindowGrant { shm, refused: 0, offset, len },
+                Err(e) => return e.to_u64(),
+            }
+        }
+    }
+    // SAFETY: `grant` is a live reference readable for its own size, and the
+    // layout assertion beside its declaration proves every byte of it is an
+    // initialised field.
+    let bytes = unsafe { core::slice::from_raw_parts(&grant as *const _ as *const u8, len as usize) };
+    out.write_at(0, bytes);
+    0
 }
 
 /// Memory the claimed function may reach and nothing else may.

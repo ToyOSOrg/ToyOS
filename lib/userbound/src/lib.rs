@@ -29,6 +29,7 @@ pub mod idle;
 pub mod firmware;
 pub mod port;
 pub mod span;
+pub mod window;
 
 pub use fault::Ring;
 pub use port::{port_access, IoBitmap, KeptCommands, Mediated, PortAccess, Ports, Reserved, Undeclared, IO_PORTS};

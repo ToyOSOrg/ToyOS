@@ -150,8 +150,9 @@ impl From<crate::mm::charge::Exhausted> for ClaimError {
 /// failure after `acquire` cannot leave a device held by nobody.
 ///
 /// `selector` says *which* device where the class alone does not — a PCI
-/// function's arrival in its first word, an ISA set's ports and lines — and the
-/// syscall has refused a word the class does not read.
+/// function's arrival in its first word and its firmware windows in its
+/// second, an ISA set's ports and lines — and the syscall has refused a word
+/// the class does not read and a window there is none of.
 pub fn try_claim(class: DeviceType, selector: [u64; 2]) -> Result<Arc<DeviceClaim>, ClaimError> {
     // Availability is checked before acquiring, so an absent device reports `Absent`, not `Owned`.
     match class {
@@ -167,7 +168,10 @@ pub fn try_claim(class: DeviceType, selector: [u64; 2]) -> Result<Arc<DeviceClai
             // The function's own guard, taken inside: a PCI claim's exclusivity is
             // per function rather than per class, so there is no flag here to
             // acquire first.
-            let (info, claim) = crate::pcidev::claim(toyos_abi::inventory::Arrival(arrival))?;
+            // A window is the mint's, and nothing after it can add one.
+            let windows = toyos_abi::pci::FirmwareWindows::from_mask(selector[1])
+                .expect("the syscall refused a window bit there is none of");
+            let (info, claim) = crate::pcidev::claim(toyos_abi::inventory::Arrival(arrival), windows)?;
             Ok(DeviceClaim::new(class, DeviceInfo::PciFunction(info), claim)?)
         }
         DeviceType::Isa => {

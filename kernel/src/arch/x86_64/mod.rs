@@ -42,6 +42,7 @@ pub mod iommu_unit;
 pub mod ioapic;
 pub mod microcode;
 pub mod mtrr;
+pub mod opregion;
 pub mod paging;
 pub mod pat;
 pub mod percpu;

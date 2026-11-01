@@ -1426,6 +1426,15 @@ const METAL: &[(&str, metal::Metal)] = &[
         "display_output_presents",
         metal::Metal { arms: METALCASE_TONE, judge: |b| display_output_presents(b[0]) },
     ),
+    (
+        // The IGD OpRegion the signed image grants tgl-display's claim: the
+        // kernel finds it at the iGPU's ASLS register, holds it to its
+        // signature, its 8 KB and firmware's own memory, and maps it; the
+        // driver's copy validates as the specification lays it out. Only the
+        // T14's firmware sets one up, and QEMU's has no IGD.
+        "igd_opregion_window",
+        metal::Metal { arms: METALCASE, judge: |b| igd_opregion_window(&b[0].log()) },
+    ),
     // ---- the `SYS_DEBUG` members' boot, armed ----
     // The cheapest cluster there is: every one of these arms a check that runs
     // at init, logs its verdict and does nothing else, so they cost no flash
@@ -2062,6 +2071,15 @@ fn display_output_presents(boot: &metal::Readback) -> Result<(), String> {
     println!(
         "display_output_presents: pipe A frames {allowed_at} -> {answered_at}; hda offered its output {order} PG3 went down, and the tone played after"
     );
+    Ok(())
+}
+
+/// What [`igd_opregion_window`] reads: the window granted at the mint,
+/// mapped, and the driver's copy valid. Any refusal on the way leaves this
+/// line unsaid, and `must_say` prints the log.
+fn igd_opregion_window(log: &serial::Serial) -> Result<(), String> {
+    let read = log.must_say("tgl-display: IGD OpRegion, 8192 bytes")?;
+    println!("igd_opregion_window: {read}");
     Ok(())
 }
 
@@ -6090,6 +6108,8 @@ fn bar_map_again(test_config: &Path) -> Result<(), String> {
         "bar_map_again: two answers held at once map apart, and the later outlives the earlier",
         "bar_map_again: answered with a handle that maps",
         "bar_map_again: answered after the refusal with a handle that maps",
+        "bar_map_again: a BAR's handle kept past its claim's move maps nothing, and the new holder's maps",
+        "bar_map_again: a BAR's handle kept past its claim's end maps nothing",
     ] {
         let Some(line) = result.stdout.lines().find(|l| l.contains(answered)) else {
             return Err(format!("the job never said `{answered}`:\n{}", result.stdout));

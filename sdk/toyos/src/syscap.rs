@@ -43,7 +43,18 @@ impl SysCap {
         &self,
         arrival: toyos_abi::inventory::Arrival,
     ) -> Result<T, SyscallError> {
-        self.mint(DeviceRequest::Function(arrival))
+        self.mint(DeviceRequest::Function(arrival, toyos_abi::pci::FirmwareWindows::NONE))
+    }
+
+    /// [`Self::claim_function`], its claim granted `windows` at the mint: the
+    /// firmware windows the signed image's `drives` row names. `NotSupported`
+    /// where the function has none of one.
+    pub fn claim_function_granted<T: FromHandle>(
+        &self,
+        arrival: toyos_abi::inventory::Arrival,
+        windows: toyos_abi::pci::FirmwareWindows,
+    ) -> Result<T, SyscallError> {
+        self.mint(DeviceRequest::Function(arrival, windows))
     }
 
     /// Mint the claim for one legacy ISA function, by exactly its ports and

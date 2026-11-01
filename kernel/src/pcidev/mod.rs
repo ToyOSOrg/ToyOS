@@ -122,7 +122,7 @@ use core::sync::atomic::{AtomicBool, AtomicPtr, Ordering};
 use record::Interrupt;
 use toyos_abi::boot::RootBridgeWindow;
 use toyos_abi::inventory::Arrival;
-use toyos_abi::pci::{DeviceIrqRecord, PciFunctionInfo, BARS, LEND_WINDOW};
+use toyos_abi::pci::{DeviceIrqRecord, FirmwareWindow, FirmwareWindows, PciFunctionInfo, WindowRefused, BARS, LEND_WINDOW};
 use toyos_abi::syscall::{PciId, RegWidth, SyscallError};
 use toyos_dma::Register;
 use toyos_pci::{af, aperture, bar, express, pages, pm};
@@ -312,6 +312,11 @@ struct Bound {
     /// holder's or firmware's queue addresses acts on none of them before its
     /// holder has stopped it.
     mastering: bool,
+    /// The firmware windows this claim was granted at its mint.
+    firmware: FirmwareWindows,
+    /// Every aperture this claim handed out, BARs and firmware windows: each
+    /// is revoked when the claim ends or moves ([`Handed`]).
+    handed: Vec<alloc::sync::Weak<SharedMemObject>>,
 }
 
 impl Bound {
@@ -749,14 +754,20 @@ impl core::fmt::Display for Refusal {
 
 /// Claim the function that arrived as `arrival`, bring it up to the point a
 /// driver takes over, and answer what that driver needs to know.
-pub fn claim(arrival: Arrival) -> Result<(PciFunctionInfo, Claim), ClaimError> {
-    let (number, pci, id, driven) = {
+pub fn claim(arrival: Arrival, firmware: FirmwareWindows) -> Result<(PciFunctionInfo, Claim), ClaimError> {
+    let (number, pci, id, driven, fenced) = {
         let machine = MACHINE.lock();
         let number = machine.identities.iter().position(|pci| pci.arrival == arrival).ok_or(ClaimError::Absent)?;
         let (pci, identity) = (machine.functions[number], &machine.identities[number]);
         let driven = machine.kernel_driven.contains(&requester(&pci));
-        (number, pci, PciId { vendor: identity.vendor, device: identity.device }, driven)
+        let fenced = firmware.iter().find(|&window| !has_window(identity, window));
+        (number, pci, PciId { vendor: identity.vendor, device: identity.device }, driven, fenced)
     };
+    // Before the function is touched, as every refusal here is.
+    if let Some(window) = fenced {
+        log!("pcidev: PCI {:02x}:{:02x}.{} has no {window:?}, which its claim was to be granted", pci.bus, pci.dev, pci.func);
+        return Err(ClaimError::Unusable);
+    }
     if driven {
         log!("pcidev: PCI {:02x}:{:02x}.{} is driven by this kernel and cannot be claimed", pci.bus, pci.dev, pci.func);
         return Err(ClaimError::KernelDriven);
@@ -789,6 +800,7 @@ pub fn claim(arrival: Arrival) -> Result<(PciFunctionInfo, Claim), ClaimError> {
     match bring_up(pci, id, number, declaration.windows()) {
         Ok(mut bound) => {
             bound.residue = take_residue(number);
+            bound.firmware = firmware;
             let info = PciFunctionInfo {
                 bar_bytes: bound.bar_bytes,
                 bus: pci.bus,
@@ -886,6 +898,8 @@ fn bring_up(pci: PciDevice, id: PciId, number: usize, windows: &[RootBridgeWindo
         residue: Vec::new(),
         limit: None,
         mastering: false,
+        firmware: FirmwareWindows::NONE,
+        handed: Vec::new(),
     })
 }
 
@@ -1360,12 +1374,128 @@ pub fn bar_object(binding: &Binding, index: u64) -> Result<Arc<SharedMemObject>,
             return Err(SyscallError::InvalidArgument);
         }
         // Registers, and the memory type is not firmware's to decide.
-        Ok(SharedMemObject::aperture(
+        let object = SharedMemObject::aperture(
             bound.bar_at[index],
             bound.bar_bytes[index].next_multiple_of(pages::PAGE),
             CachePolicy::Uncacheable,
-        )?)
+        )?;
+        bound.hand(&object);
+        Ok(object)
     })
+}
+
+impl Bound {
+    /// Record an aperture handed out on this claim; the ones gone already are
+    /// let go, so the list holds only what may still be mapped.
+    fn hand(&mut self, object: &Arc<SharedMemObject>) {
+        self.handed.retain(|weak| weak.strong_count() > 0);
+        self.handed.push(Arc::downgrade(object));
+    }
+}
+
+/// The apertures a claim handed out, taken off it ([`take_handed`]): each
+/// revoked by [`Self::revoke`], or given back by [`restore_handed`] where the
+/// move they were taken for is refused.
+#[must_use]
+pub struct Handed(Vec<alloc::sync::Weak<SharedMemObject>>);
+
+impl Handed {
+    /// Each aperture taken out of every space that maps it, so no mapping
+    /// made through the claim outlives what it was taken for.
+    ///
+    /// Thread context only, with no `MACHINE` held: the shootdown waits on
+    /// other CPUs, which an interrupt handler cannot. The order is the
+    /// aperture's `Held`, then its spaces.
+    pub fn revoke(self) {
+        for object in self.0.iter().filter_map(alloc::sync::Weak::upgrade) {
+            object.revoke();
+        }
+    }
+}
+
+/// What `function`'s claim handed out, taken off it. Under the lock
+/// alone and not `with_bound`, which refuses a faulted function: that one's
+/// mappings go too.
+fn take(function: &Function) -> Handed {
+    Handed(function.bound.lock().as_mut().map(|bound| core::mem::take(&mut bound.handed)).unwrap_or_default())
+}
+
+/// What the claim handed out so far, taken off it. A move takes it under the
+/// lock that moves the claim, before the new holder can hand out its own.
+pub fn take_handed(binding: &Binding) -> Handed {
+    take(binding.function())
+}
+
+/// `handed` given back to the claim it was taken off, for a move refused.
+pub fn restore_handed(binding: &Binding, handed: Handed) {
+    if let Some(bound) = binding.function().bound.lock().as_mut() {
+        bound.handed.extend(handed.0);
+    }
+}
+
+/// Every aperture function `number`'s claim handed out, revoked: at the
+/// claim's last handle, and at its function's departure, which has no
+/// binding. Under [`Handed::revoke`]'s terms: never from the hot-plug
+/// interrupt, and never with `MACHINE` held.
+pub fn revoke_handed(number: usize) {
+    take(function(number)).revoke();
+}
+
+impl Binding {
+    /// Its index in the functions, for [`revoke_handed`].
+    pub fn number(&self) -> usize {
+        self.number
+    }
+}
+
+/// Whether the function `identity` names has `window`: a bug fence on the
+/// row that grants it, decided before the claim touches the function.
+fn has_window(identity: &toyos_abi::inventory::Pci, window: FirmwareWindow) -> bool {
+    match window {
+        // An Intel function of class 03h, display controller.
+        FirmwareWindow::IgdOpRegion => identity.vendor == 0x8086 && identity.class == 0x03,
+    }
+}
+
+/// The ASL Storage register (IGD OpRegion specification §5.1.2): "The
+/// system BIOS places the memory offset of the OpRegion in this register".
+const ASLS: u64 = 0xFC;
+
+/// A firmware window, mapped: an object over its whole pages, and where in
+/// them the window lies.
+pub struct Opened {
+    pub object: Arc<SharedMemObject>,
+    pub offset: u64,
+    pub len: u64,
+}
+
+/// The firmware window `window` this claim was granted, as an object over
+/// its whole pages, its offset into them and its length; or why it was
+/// refused (`toyos_userbound::window`). A fresh object for every ask.
+pub fn firmware_window(
+    binding: &Binding,
+    window: FirmwareWindow,
+) -> Result<Result<Opened, WindowRefused>, SyscallError> {
+    let asls = with_bound(binding, |bound| {
+        if !bound.firmware.contains(window) {
+            return Err(SyscallError::PermissionDenied);
+        }
+        Ok(bound.pci.read_config_u32(ASLS))
+    })?;
+    if asls == 0 {
+        return Err(SyscallError::NotFound);
+    }
+    let window = match crate::arch::opregion::window(asls) {
+        Ok(window) => window,
+        Err(refused) => return Ok(Err(refused)),
+    };
+    // Cacheable, as the direct map has it and §2.3 types it.
+    let object = SharedMemObject::aperture(window.start, window.bytes, CachePolicy::Normal)?;
+    with_bound(binding, |bound| {
+        bound.hand(&object);
+        Ok(())
+    })?;
+    Ok(Ok(Opened { object, offset: window.offset, len: window.len }))
 }
 
 /// Memory this function may reach, and nothing else may.

@@ -4,7 +4,9 @@
 //! answer is still held, where the two are two mappings and the later one
 //! outlives the earlier; after a close; and after an ask a full handle table
 //! refused, which is an object whose only handle went before its holder ever
-//! had it.
+//! had it. And a BAR handle kept past its claim's move, here over a
+//! connection to this process itself, maps nothing, while the claim's new
+//! holder maps the BAR; and one kept past the claim's end maps nothing.
 //!
 //! The function is QEMU's virtio NIC, which no program of `tests/images/testcases.toml`
 //! holds.
@@ -13,9 +15,10 @@
 mod function;
 
 use toyos::endow::Endowments;
+use toyos::ipc::FrameRx;
 use toyos::shm::SharedMemory;
 use toyos::syscap::SysCap;
-use toyos::{AsHandle, PciDev};
+use toyos::{namespace, port, AsHandle, OwnedHandle, PciDev};
 use toyos_abi::handle::RawHandle;
 use toyos_abi::syscall::{self, PciId, SyscallError, SYSCAP_LABEL};
 
@@ -107,6 +110,46 @@ fn main() {
     let after = ask(&nic, bar, bytes);
     assert_eq!(after, first, "bar_map_again: the ask after the refusal maps another window");
     println!("bar_map_again: answered after the refusal with a handle that maps");
+
+    // A BAR's handle kept past its claim's move maps nothing: the move revoked
+    // every aperture the claim had handed out. The claim's new holder, which
+    // is this process again, maps the BAR afresh.
+    let kept = syscall::device_bar_map(nic.as_handle().raw(), bar).expect("bar_map_again: the BAR, asked for");
+    let (acceptor, connector) = port::create().expect("bar_map_again: a port");
+    let names = namespace::build().add("conn", &connector).finish().expect("bar_map_again: a namespace");
+    let client = names.open("conn").expect("bar_map_again: a connection");
+    let server = acceptor.accept().expect("bar_map_again: the connection accepted");
+    let claim = nic.as_handle().raw();
+    // The claim's handle goes with the frame: nothing may close it here.
+    core::mem::forget(nic);
+    // SAFETY: the claim's live handle, which the forgotten `PciDev` no longer
+    // answers for.
+    client.signal_with(1, [unsafe { OwnedHandle::from_raw(claim) }]).expect("bar_map_again: the claim sent");
+    assert_eq!(map(kept).err(), Some(SyscallError::Gone), "bar_map_again: a BAR's handle mapped after its claim moved");
+    let mut rx = FrameRx::<0>::new();
+    let frame = rx.recv(&server).expect("bar_map_again: the claim received");
+    assert_eq!(frame.handles, 1, "bar_map_again: the frame carries no claim");
+    let [claim] = rx.take_handles::<1>().expect("bar_map_again: the claim's handle");
+    let fresh = syscall::device_bar_map(claim.as_handle().raw(), bar).expect("bar_map_again: the BAR, asked for on the moved claim");
+    let window = map(fresh).expect("bar_map_again: the moved claim's BAR mapped");
+    // SAFETY: as in `read`, through the mapping just made.
+    let answered = unsafe { window.add(DEVICE_FEATURE).cast::<u32>().read_volatile() };
+    assert_eq!(answered, first, "bar_map_again: the moved claim's mapping is another window");
+    println!("bar_map_again: a BAR's handle kept past its claim's move maps nothing, and the new holder's maps");
+
+    // A BAR's handle kept past its claim's end maps nothing: the claim's end
+    // revoked every aperture it handed out.
+    let kept = syscall::device_bar_map(claim.as_handle().raw(), bar).expect("bar_map_again: the BAR, asked for");
+    drop(claim);
+    assert_eq!(map(kept).err(), Some(SyscallError::Gone), "bar_map_again: a BAR's handle mapped after its claim ended");
+    println!("bar_map_again: a BAR's handle kept past its claim's end maps nothing");
+}
+
+/// `shm` mapped, or why not.
+fn map(shm: RawHandle) -> Result<*mut u8, SyscallError> {
+    // SAFETY: a refused map makes no mapping; one made is only read, as a
+    // device register.
+    unsafe { syscall::shm_map(shm, toyos_abi::syscall::VmProt::ReadWrite) }
 }
 
 /// The kernel handle this process's standard output is, descriptor 1's.
