@@ -130,8 +130,9 @@ fn read_sysreg_pmr() -> u64 {
 pub struct Gic {
     /// Every GIC CPU interface the MADT names and enables, in its order.
     pub cpus: Vec<Gicc>,
-    /// Each redistributor range's physical base, and the range, mapped whole.
-    ranges: Vec<(u64, Mmio)>,
+    /// Each redistributor range's physical base and length, and the range,
+    /// mapped whole.
+    ranges: Vec<(u64, u64, Mmio)>,
 }
 
 impl Gic {
@@ -146,8 +147,8 @@ impl Gic {
         }
         self.ranges
             .iter()
-            .find_map(|&(base, range)| {
-                toyos_gicv3::find_redistributor(range.size(), affinity, |at| range.read_u64(at + GICR_TYPER))
+            .find_map(|&(base, length, range)| {
+                toyos_gicv3::find_redistributor(length, affinity, |at| range.read_u64(at + GICR_TYPER))
                     .map(|offset| base + offset)
             })
             .unwrap_or_else(|| panic!("GIC: no redistributor answers for MPIDR affinity {affinity:#x}"))
@@ -169,6 +170,7 @@ pub fn init(rsdp_addr: u64) -> Gic {
             MadtEntry::Gicd { base, .. } => gicd = Some(base),
             MadtEntry::Gicr { base, length } => ranges.push((
                 base,
+                u64::from(length),
                 crate::mm::paging::map_mmio(base, u64::from(length), MmioPolicy::Uncacheable),
             )),
             MadtEntry::Gicc(gicc) if gicc.enabled => cpus.push(gicc),

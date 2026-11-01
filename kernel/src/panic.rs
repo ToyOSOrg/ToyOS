@@ -346,6 +346,7 @@ pub fn last_words(
 /// path's one funnel.
 // panic_flush bypasses the log-ring and serial locks — once the others are stopped a wedged holder never releases them, so taking them normally could deadlock.
 pub fn halt_all_cpus() -> ! {
+    crate::log::console::on_the_uart_for_good();
     // Before the halt and the panel: from here this machine holds a report for
     // whoever is in front of it, with interrupts masked and under a bound of its
     // own — which to a hard-lockup sample or a deadline poll is

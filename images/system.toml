@@ -29,7 +29,7 @@ memory-floor-mib = 96
 # while the compositor had no way to ask for a program's *declared* authority —
 # the launcher gives it one, and starting a service from `[boot] start` is not
 # the thing that needed fixing.
-start = ["logkeeper", "diskserver", "fileserver", "compositor", "soundserver", "netstack", "filepicker", "acpiserver", "ps2server", "wlan"]
+start = ["logkeeper", "diskserver", "fileserver", "compositor", "soundserver", "netstack", "filepicker", "acpiserver", "ps2server", "wlan", "vdagent"]
 
 # What every program launched out of `/apps` holds, whatever its own directory
 # says. A package is unpacked by `/system/bin/pkg` into a writable directory, so
@@ -61,11 +61,12 @@ pkg = { state = true }
 # image does. The kernel keeps the record ring and the console and writes no
 # file at all, so a boot config without `logkeeper` is a boot whose `/log` is empty —
 # `every_boot_config_runs_logkeeper` is what refuses one. It claims no device, and
-# `log` is the port it answers `inspect` on.
+# `log` is the port it answers `inspect` on. `log-carrier` is where the VM's
+# console asks to carry the log, which quiets the UART while it does.
 [programs.logkeeper]
 service = true
 syscap = ["logread"]
-serves = ["log"]
+serves = ["log", "log-carrier"]
 
 # The machine's ACPI fixed hardware: the kernel puts the machine in ACPI mode
 # when it mints the `acpi` claim and back when the claim goes, so the SCI,
@@ -178,13 +179,22 @@ serves = ["radio", "wifi"]
 [programs.wifi]
 receives = ["wifi"]
 
-# The shared clipboard with QEMU's host: one process per virtio-serial
-# function the kernel does not drive (the kernel's console is `1af4:1043` too),
-# holding the function its vdagent chardev is on, and the compositor's
-# clipboard port. A machine with no such function, the T14 among them, starts
-# none.
-[programs.vdagent]
+# The virtio console device's driver: one process per virtio-serial
+# function, holding its claim and handing the function's one named port to
+# the service the name is for — the VM's console to `logkeeper` as its
+# carrier, QEMU's clipboard channel to `vdagent`. It holds the device and
+# those two endpoints, which no other row may receive, and not the clipboard.
+# A machine with no such function, the T14 among them, starts none.
+[programs.virtio-console]
 drives = ["pci:07:80:00/1af4:1043"]
+receives = ["log-carrier", "vdagent"]
+
+# The shared clipboard with QEMU's host: the agent, on the port the driver
+# above hands it, holding the compositor's clipboard and no device. On a
+# machine with no clipboard channel it serves nothing and waits.
+[programs.vdagent]
+service = true
+serves = ["vdagent"]
 receives = ["clipboard"]
 
 # A login authority: each authenticated connection opens a login session, and

@@ -108,8 +108,8 @@ started. Nothing reaches userland when a device arrives or leaves.
       the kernel does not drive and holds no `serves`, `roles` or `devices`.
       The decisions are `toyos-supervisor` (`system/supervisor/lifecycle`),
       the refusal law among its host tests; the supervisor watches each
-      child's `Process` handle and its waiter threads went; vdagent is a
-      `drives` row. `a_drives_row_holds_one_process_per_function` is the
+      child's `Process` handle and its waiter threads went; the virtio-serial
+      driver (`virtio-console`) is a `drives` row. `a_drives_row_holds_one_process_per_function` is the
       guest arm, on `Profile::HeadlessTwoEdu`.
 2. **Functions arrive and leave.**
    - Readers get a device-set object, minted from `DEVICE`.

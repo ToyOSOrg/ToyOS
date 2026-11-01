@@ -7,6 +7,7 @@ start = ["logkeeper", "test-runner"]
 [programs.logkeeper]
 service = true
 syscap = ["logread"]
+serves = ["log-carrier"]
 
 # `roster` for `libc_read_restarts`, which orders a child's end after its
 # own read is parked by the kernel's roster, and `dup` to hand it on.
@@ -20,3 +21,8 @@ syscap = ["dup", "roster"]
 [symlinks]
 "bin/echo" = "/system/bin/toybox"
 "bin/cat" = "/system/bin/toybox"
+
+# The virtio-serial driver, for the VM's console alone: this image runs no agent.
+[programs.virtio-console]
+drives = ["pci:07:80:00/1af4:1043"]
+receives = ["log-carrier"]

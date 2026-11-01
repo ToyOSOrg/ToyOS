@@ -499,10 +499,11 @@ const MACHINE_TESTS: &[&str] = &[
     // its DMA bypasses the unit: the supervisor refuses it to netstack by
     // name. Only QEMU can create such a function; q35 only.
     "a_virtio_function_without_access_platform_is_refused",
-    // The kernel's own virtio console created without `iommu_platform=on`
-    // on q35 with VT-d: the kernel tells it physical addresses, and the boot
-    // runs over it. q35 only.
-    "the_kernel_tells_a_bypassing_console_physical_addresses",
+    // The VM's console port unplugged under a running guest: its driver
+    // ends, logkeeper sees its carrier gone and the UART carries the log
+    // again. Three processes, the kernel and QEMU's hot-unplug, which no host
+    // build has. q35 only: no other machine carries a console port.
+    "the_uart_carries_the_log_again_once_the_console_carrier_goes",
     // An AMD-Vi unit left blocking every device, switched off and programmed
     // before the boot disk is driven behind it: the register sequence and the
     // DMA it lets through are no host test's, and the AMD bench is staged by
@@ -4751,8 +4752,8 @@ fn run_machine_test(name: &str, test_config: &Path) -> Result<(), String> {
         "a_virtio_function_without_access_platform_is_refused" => {
             common::iommu::a_virtio_function_without_access_platform_is_refused()
         }
-        "the_kernel_tells_a_bypassing_console_physical_addresses" => {
-            common::iommu::the_kernel_tells_a_bypassing_console_physical_addresses()
+        "the_uart_carries_the_log_again_once_the_console_carrier_goes" => {
+            common::vmconsole::the_uart_carries_the_log_again_once_the_console_carrier_goes(test_config)
         }
         "amdvi_firmware_left" => common::iommu::amdvi_firmware_left(test_config),
         "vtd_firmware_left" => common::iommu::vtd_firmware_left(test_config),
@@ -4915,11 +4916,13 @@ fn window_drawn(dump: &screen::Ppm, fill: [u8; 3]) -> Result<((usize, usize), us
     Ok(((w, h), title))
 }
 
-/// The clipboard agent opens its port and QEMU's vdagent answers its opening
-/// `REQUEST` with no data, since `-display none` gives QEMU's clipboard no
-/// peer: the agent said both, in this order.
+/// The virtio-serial driver hands the clipboard's port to the agent, the host
+/// announces its capabilities through it, and QEMU's vdagent answers the
+/// agent's opening `REQUEST` with no data, since `-display none` gives QEMU's
+/// clipboard no peer: the driver and the agent said each, in this order.
 fn the_opening_exchange_with_qemus_agent_completes() -> Result<(), String> {
-    const OPEN: &str = "vdagent: port 1 open, the host announces capabilities 0x00020060";
+    const HANDED: &str = "virtio-console: carrying the clipboard's channel on port 1";
+    const OPEN: &str = "vdagent: the host announces capabilities 0x00020060";
     const ANSWERED: &str = "vdagent: the host's clipboard, 0 bytes";
     let mut qemu = QemuInstance::boot_with_options(
         &compile::repo_root().join("tests/images/clipboardcase.toml"),
@@ -4933,9 +4936,9 @@ fn the_opening_exchange_with_qemus_agent_completes() -> Result<(), String> {
     let said = serial::Serial::named("the clipboard boot", console);
     said.must_be_clean()?;
     let text = said.text();
-    match (text.find(OPEN), text.find(ANSWERED)) {
-        (Some(open), Some(answered)) if open < answered => Ok(()),
-        _ => Err(format!("the agent did not say {OPEN:?} before {ANSWERED:?}:\n{text}")),
+    match (text.find(HANDED), text.find(OPEN), text.find(ANSWERED)) {
+        (Some(handed), Some(open), Some(answered)) if handed < open && open < answered => Ok(()),
+        _ => Err(format!("the boot did not say {HANDED:?}, {OPEN:?} and {ANSWERED:?} in that order:\n{text}")),
     }
 }
 
@@ -6341,7 +6344,7 @@ fn pci_cap_selftest(log: &str) -> Result<(), String> {
             return Err(format!("the walk's self-test never ran:\n{log}"));
         };
         // The count, not the absence of a FAILED line, which zero cases satisfy too.
-        if !verdict.contains("15/15") {
+        if !verdict.contains("selftest 6/6") {
             return Err(format!("not every crafted capability layout was answered: {verdict}"));
         }
         // And how those layouts *ended*, which is the split a claimed function's

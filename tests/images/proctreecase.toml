@@ -27,6 +27,7 @@ folder = "read-write"
 [programs.logkeeper]
 service = true
 syscap = ["logread"]
+serves = ["log-carrier"]
 
 # `roster` because the guest asks which of its tree still runs, and `dup`
 # because test-runner hands each binary a duplicate of its capability.
@@ -82,3 +83,8 @@ restart = true
 pager = true
 roles = ["data", "log", "boot"]
 receives = ["block"]
+
+# The virtio-serial driver, for the VM's console alone: this image runs no agent.
+[programs.virtio-console]
+drives = ["pci:07:80:00/1af4:1043"]
+receives = ["log-carrier"]

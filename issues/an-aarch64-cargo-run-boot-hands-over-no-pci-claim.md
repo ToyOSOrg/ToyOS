@@ -10,7 +10,8 @@ opened: 2026-10-13
 QEMU's own GIC under HVF (`Arch::irqchip`), which arms it and maps each
 claim's DeviceID to its slot's LPI: the same launch by hand with
 `its=on,kernel-irqchip=off` (QEMU 11.1.1) showed it. It still hands over
-none: diskserver's NVMe, soundserver, netstack and vdagent are each
+none: diskserver's NVMe, soundserver, netstack and the clipboard's
+virtio-serial function (vdagent's when that boot ran) are each
 refused with `its BAR was moved onto 8 64-bit address(es) inside the
 windows firmware declared and the function answered at none of them` (lines 343, 418, 450, 487 of
 [the boot's log](https://github.com/ToyOSOrg/evidence/blob/e626cced7ab73c04efdbbfd0b98a2f0a0ff8d86b/fix2-60f08b937/aarch64-its-boot.log)).
@@ -25,11 +26,11 @@ in this kernel is given no LPI`) and initialises no controller, so no USB
 keyboard reaches the compositor, which panics on "the manifest gives this
 program the keyboard".
 
-So on aarch64 the clipboard agent's claim and its handshake are unbooted:
-its function is declined by the console driver and the console comes up
-on the next one, and the agent itself exits on "no virtio-serial function
-was handed to this program". Its handshake on aarch64 rests on the code
-that passes on q35.
+So on aarch64 the virtio-serial driver's claims and handshakes are unbooted:
+it is handed neither the console's function nor the clipboard's, so the
+console port `cargo run`'s terminal shows carries nothing, and the boot's
+whole log is on the UART's file (`/tmp/toyos-uart-early.log`). Its
+handshakes on aarch64 rest on the code that passes on q35.
 
 The windows a claim's BAR is checked against come from the loader's list, which takes every
 memory range firmware's map types MMIO and nobody owns, ECAM and flash among
@@ -45,4 +46,4 @@ cannot meet until this is fixed.
 
 **Exit condition.** A `cargo run -- --arch aarch64` boot hands over a
 claim: its console shows diskserver serving its NVMe partitions and
-`vdagent: port 1 open`.
+`vdagent: the host announces capabilities`.

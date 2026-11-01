@@ -673,7 +673,9 @@ const SUPERVISOR_SERVED: &[&str] = &[toyos_swap::PORT, "power", toyos_manifest::
 /// display port, whose holder sets the mode and the scale every window is
 /// drawn at, the session-admin port, whose holder signs its user's sessions
 /// out, the wifi port, whose holder joins networks and hands over their
-/// passphrases, and the radio port, whose holder is sent a network's keys.
+/// passphrases, the radio port, whose holder is sent a network's keys, the
+/// log's carrier port, for whose holder the console UART goes quiet, and the
+/// clipboard agent's port, whose holder speaks to the agent as the host.
 const HELD_ALONE: &[(&str, &[&str])] = &[
     (toyos_swap::PORT, &[toyos_swap::HOLDER]),
     (toyos_manifest::grants::PORT, &[toyos_manifest::grants::HOLDER]),
@@ -684,6 +686,8 @@ const HELD_ALONE: &[(&str, &[&str])] = &[
     (toyos_session::ADMIN_PORT, &[toyos_session::ADMIN_HOLDER]),
     (toyos_wifi::PORT, toyos_wifi::HOLDERS),
     (toyos_radio::PORT, toyos_radio::HOLDERS),
+    (toyos_logstream::CARRIER, &[toyos_logstream::CARRIER_HOLDER]),
+    (toyos_vdagent::endpoint::SERVICE, &[toyos_vdagent::endpoint::SERVICE_HOLDER]),
 ];
 
 /// Rows, as a refusal names them.
@@ -3397,6 +3401,17 @@ mod tests {
         assert!(held_by_their_holders_alone(&vdagent).is_ok());
         let editor: SystemConfig = toml::from_str("[programs.editor]\nreceives = [\"clipboard\"]\n").unwrap();
         assert!(held_by_their_holders_alone(&editor).is_err());
+        let console: SystemConfig =
+            toml::from_str("[programs.virtio-console]\nreceives = [\"log-carrier\", \"vdagent\"]\n").unwrap();
+        assert!(held_by_their_holders_alone(&console).is_ok());
+        let agent: SystemConfig = toml::from_str("[programs.vdagent]\nreceives = [\"clipboard\", \"log-carrier\"]\n").unwrap();
+        assert!(held_by_their_holders_alone(&agent).unwrap_err().contains("only `virtio-console`"));
+        let host: SystemConfig = toml::from_str("[programs.editor]\nreceives = [\"vdagent\"]\n").unwrap();
+        assert!(held_by_their_holders_alone(&host).unwrap_err().contains("only `virtio-console`"));
+        // The driver holds the device and the agent's port, never the clipboard itself.
+        let union: SystemConfig =
+            toml::from_str("[programs.virtio-console]\nreceives = [\"vdagent\", \"clipboard\"]\n").unwrap();
+        assert!(held_by_their_holders_alone(&union).unwrap_err().contains("only `vdagent`"));
     }
 
     /// The prompt port reaches its server alone, and the consent port no row,

@@ -22,7 +22,7 @@ start = ["logkeeper", "diskserver", "fileserver", "acpiserver", "netstack", "tes
 [programs.logkeeper]
 service = true
 syscap = ["logread"]
-serves = ["log"]
+serves = ["log", "log-carrier"]
 
 # ACPI mode, as a shipped image and the bench's Linux run it. In the legacy
 # mode the T14's firmware hands over, it stops every CPU for 4.5 ms every 2.2 s
@@ -128,3 +128,9 @@ restart = true
 pager = true
 roles = ["data", "log", "boot"]
 receives = ["block"]
+
+# The virtio-serial driver, for the VM's console alone: `osbench_capability_groups_exit_0`
+# boots this image on QEMU. A bench has no such function and starts none.
+[programs.virtio-console]
+drives = ["pci:07:80:00/1af4:1043"]
+receives = ["log-carrier"]

@@ -1,7 +1,6 @@
-//! `iommu_virtio_platform`: whether each virtio function the kernel drives
-//! itself negotiated `VIRTIO_F_ACCESS_PLATFORM` behind QEMU's emulated VT-d
-//! unit and none without one, and that a process's claim on one is handed
-//! over behind the unit and refused where no unit is.
+//! `iommu_virtio_platform`: whether every virtio function QEMU creates
+//! carries `iommu_platform=on` exactly where a unit is, and a process's claim
+//! on one is handed over behind the unit and refused where no unit is.
 //! `amdvi_firmware_left`: whether an AMD-Vi unit firmware left blocking is
 //! switched off before the boot stick is driven.
 //! `vtd_firmware_left`: whether a VT-d unit firmware left translating, with no
@@ -10,7 +9,7 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::Path;
 
-use super::qemu::{self, is_kernel_line, BootOptions, Profile, QemuInstance};
+use super::qemu::{self, BootOptions, Profile, QemuInstance};
 use super::serial::Serial;
 
 /// The function `tests/images/netcase.toml`'s virtio-net row drives, as the row spells it.
@@ -27,12 +26,8 @@ fn netcase() -> std::path::PathBuf {
 /// whatever the tables say — unless it is created with `iommu_platform=on`
 /// (`hw/virtio/virtio-bus.c:86-99`, `hw/virtio/virtio-pci.c:1400-1405` at
 /// v11.1.1), and under identity mapping the two are indistinguishable. So the
-/// argv says which functions were created behind a unit and the kernel's
-/// records say which of those it drives negotiated `VIRTIO_F_ACCESS_PLATFORM`;
-/// the NIC's and the sound function's drivers are processes', whose
-/// negotiation is `toyos-virtio`'s and host-tested there. On [`Profile::HeadlessNoIommu`]
-/// the guest reports `n` because QEMU never *offers* the bit
-/// (`hw/virtio/virtio-bus.c:87-94`), not because the driver declined.
+/// argv says which functions were created behind a unit; every driver is a
+/// process's, whose negotiation is `toyos-virtio`'s and host-tested there.
 pub fn iommu_virtio_platform() -> Result<(), String> {
     for profile in [Profile::Headless, Profile::HeadlessNoIommu] {
         let name = if profile.iommu().is_some() { "headless" } else { "headless-no-iommu" };
@@ -109,47 +104,9 @@ pub fn iommu_virtio_platform() -> Result<(), String> {
             no_unit_is_no_claim(&log)?;
         }
 
-        // Every function the kernel drives itself: all QEMU created but the
-        // NIC, the sound function and the clipboard's channel, whose drivers
-        // are processes.
-        let expected = created.len() - 3;
-        let mut negotiated = Vec::new();
-        for line in log.text().lines().filter(|line| is_kernel_line(line)) {
-            let Some(rest) = line.split("VirtIO: PCI ").nth(1) else { continue };
-            let Some((who, _)) = rest.split_once(' ') else {
-                return Err(format!("{name}: unreadable feature line: {line:?}"));
-            };
-            let fields = unit_fields(line);
-            let Some(accepted) = fields.get("access_platform") else { continue };
-            negotiated.push((who.to_string(), accepted == "y"));
-        }
-        if negotiated.len() != expected {
-            return Err(format!(
-                "{name}: QEMU created {} virtio function(s), {expected} of them for the kernel's \
-                 own drivers, and the kernel negotiated features with {} — \
-                 {negotiated:?} against {created:?}",
-                created.len(),
-                negotiated.len()
-            ));
-        }
-        let enumerated = enumerated_functions(&log);
-        for (who, accepted) in &negotiated {
-            if *accepted != behind_unit {
-                return Err(format!(
-                    "{name}: {who} negotiated VIRTIO_F_ACCESS_PLATFORM = {accepted} where \
-                     {behind_unit} is owed — the unit exists = {behind_unit}"
-                ));
-            }
-            if !enumerated.contains(who) {
-                return Err(format!(
-                    "{name}: {who} negotiated features and the PCI walk enumerated \
-                     {enumerated:?} — the driver is naming a function this machine does not have"
-                ));
-            }
-        }
         eprintln!(
-            "  [iommu] {name}: the kernel's {} virtio function(s) negotiated, behind a unit = {behind_unit}; {}",
-            negotiated.len(),
+            "  [iommu] {name}: {} virtio function(s), behind a unit = {behind_unit}; {}",
+            created.len(),
             if behind_unit { "the NIC's claim handed over" } else { "every claim refused for want of a unit" }
         );
     }
@@ -167,6 +124,11 @@ const XHCI_AT: &str = "00:01.0";
 /// The slot QEMU's `-device` order puts the virtio-sound function on, the one
 /// `tests/images/netcase.toml`'s soundserver row claims.
 const SOUND_AT: &str = "00:04.0";
+
+/// The slot QEMU's `-device` order puts the clipboard's virtio-serial
+/// function on, which `tests/images/netcase.toml`'s virtio-console row is
+/// started on in turn.
+const AGENT_AT: &str = "00:05.0";
 
 /// Why a machine with no unit hands no function over, in the kernel's words.
 const NOT_REMAPPED: &str = "its interrupts would not be remapped on this machine";
@@ -189,7 +151,7 @@ fn not_handed_over(at: &str, why: &str) -> String {
 /// would fail. The NVMe controller and the virtio-sound function are refused
 /// the same.
 fn no_unit_is_no_claim(log: &Serial) -> Result<(), String> {
-    refused_claim(log, NIC_CLAIMS, NOT_REMAPPED, &[XHCI_AT, NVME_AT, SOUND_AT])?;
+    refused_claim(log, NIC_CLAIMS, NOT_REMAPPED, &[XHCI_AT, NVME_AT, SOUND_AT, AGENT_AT])?;
     log.must_say(&not_handed_over(XHCI_AT, NOT_REMAPPED))?;
     log.must_say(&format!(
         "supervisor: usbd was not started on PCI {XHCI_AT}: pci:0c:03:30/1033:0194 is on this machine and could not be handed over"
@@ -199,6 +161,10 @@ fn no_unit_is_no_claim(log: &Serial) -> Result<(), String> {
     log.must_say(&not_handed_over(NVME_AT, NOT_REMAPPED))?;
     log.must_say(&format!(
         "supervisor: nvme was not started on PCI {NVME_AT}: pci:01:08:02 is on this machine and could not be handed over"
+    ))?;
+    log.must_say(&not_handed_over(AGENT_AT, NOT_REMAPPED))?;
+    log.must_say(&format!(
+        "supervisor: virtio-console was not started on PCI {AGENT_AT}: pci:07:80:00/1af4:1043 is on this machine and could not be handed over"
     ))?;
     // And this machine handed *nothing* over, which is more than the claim's
     // own refusal says: with no unit there is no function any process could be
@@ -318,18 +284,6 @@ pub(crate) fn unit_fields(line: &str) -> BTreeMap<String, String> {
     line.split_whitespace()
         .filter_map(|word| word.split_once('='))
         .map(|(k, v)| (k.to_string(), v.to_string()))
-        .collect()
-}
-
-/// Every function `pci::enumerate` printed. Anchored on the class field that
-/// follows the address, so `pcidev: PCI 00:02.0 [...]` is not one of them.
-fn enumerated_functions(log: &Serial) -> BTreeSet<String> {
-    log.text()
-        .lines()
-        .filter_map(|line| {
-            let (bdf, tail) = line.split("PCI ").nth(1)?.split_once(' ')?;
-            tail.starts_with('[').then(|| bdf.to_string())
-        })
         .collect()
 }
 
@@ -539,22 +493,5 @@ pub fn a_virtio_function_without_access_platform_is_refused() -> Result<(), Stri
     log.must_be_clean()?;
     log.must_not_say("virtio-net: VirtIO: PCI")?;
     eprintln!("  [iommu] {refused}");
-    Ok(())
-}
-
-/// The kernel's virtio console created without `iommu_platform=on`
-/// ([`Profile::HeadlessConsoleUntranslated`]) bypasses the unit, so the kernel
-/// tells it physical addresses and the boot reaches its ready marker over it.
-/// Given a domain's addresses instead, it reads and writes whatever memory
-/// those are, and the boot's console is lost. q35 only: no bench has a virtio
-/// function.
-pub fn the_kernel_tells_a_bypassing_console_physical_addresses() -> Result<(), String> {
-    let options = BootOptions { profile: Profile::HeadlessConsoleUntranslated, ..Default::default() };
-    let qemu = QemuInstance::boot_with_options(&netcase(), &[], &[], options);
-    let log = Serial::named("boot console", qemu.boot_log().to_string());
-    log.must_be_clean()?;
-    log.must_say("offers no ACCESS_PLATFORM, so it is told physical addresses")?;
-    log.must_say("Boot: complete")?;
-    eprintln!("  [iommu] the console bypassing the unit was told physical addresses and carried the boot");
     Ok(())
 }

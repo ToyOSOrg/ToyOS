@@ -102,13 +102,15 @@ mod late_panic {
 
 use alloc::boxed::Box;
 use arch::{cpu, percpu};
-use drivers::{acpi, gop, pci, serial, virtio_console};
+use drivers::{acpi, gop, pci, serial};
 use toyos_abi::boot::{KernelArgs, MemoryMapEntry};
 use toyos_rootimage::handoff::{held, Descriptor};
 
 #[panic_handler]
 fn panic(info: &core::panic::PanicInfo) -> ! {
     cpu::disable_interrupts();
+    // Before the first record of the report: no holder carries it off the UART.
+    log::console::on_the_uart_for_good();
     // A handler's own panic reports through locks like any other.
     #[cfg(feature = "mask-windows")]
     windows::stand_down();
@@ -430,7 +432,7 @@ pub(crate) unsafe extern "C" fn kernel_main(loader_args: &mut KernelArgs) -> ! {
     pcidev::publish(&pci_devices, toyos_acpi::SEGMENT_GROUP, kernel_args.root_bridge_windows());
     #[cfg(feature = "boot-actuators")]
     if actuator::pci_cap_selftest() {
-        drivers::virtio::cap_selftest();
+        drivers::pci::cap_selftest();
     }
     // After ACPI is readable and PCI is enumerable, before any driver `init`: each enumerated device needs a context entry before it can DMA.
     // Refuses nothing — a machine with no usable IOMMU boots exactly as one without it.
@@ -478,8 +480,6 @@ pub(crate) unsafe extern "C" fn kernel_main(loader_args: &mut KernelArgs) -> ! {
 
     #[cfg(feature = "boot-actuators")]
     arch::boot::interrupt_selftests();
-
-    virtio_console::init(&pci_devices);
 
     if kernel_args.gop_framebuffer != 0 {
         log!("GPU: using UEFI GOP");

@@ -18,15 +18,15 @@ The tree matches the `0x1040`-based id alone:
 
 - netstack's `CARDS` (`system/netstack/src/main.rs`) and its row in
   `images/system.toml`, `pci:1af4:1041`;
-- the kernel's console, `VIRTIO_CONSOLE_DEVICE` `0x1043`
-  (`kernel/src/drivers/virtio_console.rs`).
+- virtio-console's row in `images/system.toml`, `pci:07:80:00/1af4:1043`,
+  and the matcher its claim is endowed under.
 
 The launcher and the harness hide it: each asks QEMU for
 `virtio-net-pci-non-transitional` and `virtio-serial-pci-non-transitional`
 (`build/qemu.rs`, `tests/common/qemu.rs`). QEMU's own default is transitional
 on q35's root bus — `disable-legacy=auto` resolves to off for a device not
 behind a PCIe port — and VirtualBox's virtio-net is `1af4:1000`. On either,
-netstack has no card and the kernel no virtio console. Cloud Hypervisor and
+netstack has no card and the machine no virtio console. Cloud Hypervisor and
 crosvm use the `0x1040`-based ids. bhyve's virtio-net and virtio-blk are
 legacy-only, an I/O BAR and no virtio capability, so a conforming driver
 matches them and refuses them by name.
@@ -39,11 +39,11 @@ devices offer the bit nowhere. So behind a unit such a NIC is one the
 supervisor refuses every holder (`translated` in `system/supervisor/src/main.rs`);
 the matches reach a card only on the path
 `issues/a-machine-without-an-iommu-refuses-every-claim.md` rules for a machine
-with no unit, and the kernel's console on every machine.
+with no unit.
 
 **Owner**: whoever holds `issues/toyos-runs-in-any-open-source-hypervisor.md`.
 
-**Exit**: netstack's row, its `CARDS` and the kernel's console each name both
-ids of their type; the kernel's console carries a guest boot whose console is
+**Exit**: netstack's row, its `CARDS` and the two virtio-serial rows each name
+both ids of their type; virtio-console carries a guest boot whose console is
 QEMU's transitional `virtio-serial-pci`, and refuses the same device under
 `disable-modern=on` by name.

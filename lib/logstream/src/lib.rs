@@ -33,6 +33,8 @@ extern crate alloc;
 #[cfg(test)]
 extern crate std;
 
+pub mod death;
+
 use alloc::vec::Vec;
 use core::fmt::{self, Display, Write};
 
@@ -46,6 +48,27 @@ pub const SERVICE: &str = "log";
 
 /// A reader's request on [`SERVICE`]: a bare frame, answered by [`SERVED`].
 pub const READ: u32 = 3;
+
+/// The name of the port the machine's console carrier asks `logkeeper` for the
+/// log on: the one reader the console UART goes quiet for, once its channel has
+/// taken the log's first bytes, and back from once it goes or the machine
+/// stops. Its row alone receives it.
+pub const CARRIER: &str = "log-carrier";
+
+/// The one row that may receive [`CARRIER`]: the virtio console device's driver.
+pub const CARRIER_HOLDER: &str = "virtio-console";
+
+/// What `logkeeper` says once the carrier's channel has taken nothing it is
+/// owed for its bound and the UART carries the log beside it: lines can then
+/// reach both channels, out of order.
+pub const CARRIER_STALLED: &str = "logkeeper: the console carrier's channel has taken none of";
+
+/// A carrier's request on [`CARRIER`]: a bare frame, answered by [`SERVED`].
+pub const CARRY: u32 = 8;
+
+/// The carrier → `logkeeper`, on [`CARRIER`]: how many bytes of its pipe its
+/// channel has taken, counted from the pipe's first byte, as a `u64` payload.
+pub const DELIVERED: u32 = 9;
 
 /// The manifest's name for the program that is the log: the supervisor endows it the
 /// [`ORIGINS`] acceptor and a console it may write ([`CONSOLE`]), and gives
