@@ -22,49 +22,40 @@ use core::sync::atomic::{AtomicUsize, Ordering};
 pub struct Rule {
     /// Distances below this, modulo 4 KiB, go down.
     pub window: usize,
-    /// The longest copy that does.
-    pub most: usize,
 }
 
 /// The shortest copy that ever goes down: below it the stall is a few loads.
 const LEAST: usize = 64;
 
 impl Rule {
-    pub const NEVER: Self = Self { window: 0, most: 0 };
+    /// Intel's and an unmeasured vendor's: on Tiger Lake [`copy_down`] is
+    /// slower than `rep movsb` at every distance and length measured.
+    pub const NEVER: Self = Self { window: 0 };
 
-    /// Zen 2 loads and stores 32 bytes at a time (56305 §2.12), and only a
-    /// load overlapping the store before it in part waits, at every length.
-    pub const AMD: Self = Self { window: 32, most: usize::MAX };
-
-    /// Tiger Lake's loads wait on stores hundreds of bytes back, less the
-    /// farther; [`copy_down`], a store a cycle, beats `rep movsb` under 192.
-    /// Past its L1 cache the wait fades, and the fast string, which need not
-    /// read a line it writes whole, outruns [`copy_down`].
-    pub const INTEL: Self = Self { window: 192, most: 16 * 1024 };
+    /// Zen 2's: there, `rep movsb` waits at every distance under 32 bytes,
+    /// at every length measured from 4 to 64 KiB, and at none from 32 up.
+    pub const AMD: Self = Self { window: 32 };
 
     /// Whether a copy of `n` bytes from `src` to `dest` goes down.
     pub fn goes_down(self, dest: usize, src: usize, n: usize) -> bool {
         let d = dest.wrapping_sub(src) % 4096;
-        (LEAST..=self.most).contains(&n) && d != 0 && d < self.window.min(n)
+        n >= LEAST && d != 0 && d < self.window
     }
 }
 
 /// The rule `memcpy` copies by, [`Rule::NEVER`] until [`set_rule`].
 #[cfg(target_os = "none")]
 static WINDOW: AtomicUsize = AtomicUsize::new(0);
-#[cfg(target_os = "none")]
-static MOST: AtomicUsize = AtomicUsize::new(0);
 
 /// Set the rule every later copy goes by, before another CPU runs.
 #[cfg(target_os = "none")]
 pub fn set_rule(rule: Rule) {
     WINDOW.store(rule.window, Ordering::Relaxed);
-    MOST.store(rule.most, Ordering::Relaxed);
 }
 
 #[cfg(target_os = "none")]
 fn rule() -> Rule {
-    Rule { window: WINDOW.load(Ordering::Relaxed), most: MOST.load(Ordering::Relaxed) }
+    Rule { window: WINDOW.load(Ordering::Relaxed) }
 }
 
 /// Copy `n` bytes from `src` to `dest` as `rule` says.

@@ -45,8 +45,8 @@ mod tests {
 
     #[test]
     fn every_rule_copies_at_every_page_distance() {
-        let everything = Rule { window: 4096, most: usize::MAX };
-        for rule in [Rule::NEVER, Rule::AMD, Rule::INTEL, everything] {
+        let everything = Rule { window: 4096 };
+        for rule in [Rule::NEVER, Rule::AMD, everything] {
             for distance in (0..1024).chain([2048, 4032, 4095]) {
                 for n in [0, 1, 63, 64, 65, 200, 1000, 4096, 16384] {
                     // SAFETY: as above, `n` any length.
@@ -57,19 +57,16 @@ mod tests {
     }
 
     #[test]
-    fn each_rule_sends_down_only_a_short_distance_closer_than_the_copy_is_long() {
+    fn each_rule_sends_down_only_a_short_distance() {
         let down = |rule: Rule, distance: usize, n: usize| rule.goes_down(0x10_0000 + 4096 * 3 + distance, 0x10_0000, n);
-        for rule in [Rule::NEVER, Rule::AMD, Rule::INTEL] {
+        for rule in [Rule::NEVER, Rule::AMD] {
             assert!(!down(rule, 0, 8192), "{rule:?}: distance 0");
             assert!(!down(rule, 16, 63), "{rule:?}: under 64 bytes");
-            assert!(!down(rule, 100, 100), "{rule:?}: a distance as long as the copy");
             assert!(!down(rule, 4080, 8192), "{rule:?}: 16 bytes below modulo 4 KiB");
         }
         assert!(!down(Rule::NEVER, 16, 8192));
         assert!(down(Rule::AMD, 1, 64) && down(Rule::AMD, 31, 8192) && down(Rule::AMD, 16, 64 << 20));
         assert!(!down(Rule::AMD, 32, 8192));
-        assert!(down(Rule::INTEL, 16, 4096) && down(Rule::INTEL, 191, 16384) && down(Rule::INTEL, 99, 100));
-        assert!(!down(Rule::INTEL, 192, 8192) && !down(Rule::INTEL, 16, 16385));
         // A destination a page less 16 below its source is 16 above it modulo 4 KiB.
         assert!(Rule::AMD.goes_down(0x10_0000, 0x10_0000 + 4080, 4080));
     }

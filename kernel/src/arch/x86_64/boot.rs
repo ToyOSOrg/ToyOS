@@ -65,9 +65,8 @@ pub fn after_console(args: &KernelArgs, _maps: &[MemoryMapEntry]) {
     microcode::load(0);
 
     let rule = match cpu::vendor() {
-        kernel::cpu::Vendor::Intel => copy::Rule::INTEL,
         kernel::cpu::Vendor::Amd => copy::Rule::AMD,
-        kernel::cpu::Vendor::Other(_) => copy::Rule::NEVER,
+        kernel::cpu::Vendor::Intel | kernel::cpu::Vendor::Other(_) => copy::Rule::NEVER,
     };
     copy::set_rule(rule);
     log!("memcpy: highest first {rule:?}");

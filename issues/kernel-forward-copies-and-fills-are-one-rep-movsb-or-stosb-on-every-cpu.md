@@ -9,10 +9,14 @@ opened: 2026-09-29
 The kernel's `memcpy` is its own (`kernel/src/arch/x86_64/copy.rs`): one
 `rep movsb` on every CPU, but for a copy it sends highest first. It replaced
 `compiler_builtins`' `rep movsb; rep movsq; rep movsb`, so every forward copy
-changed with it, on Zen 2 without ERMS too. Which copies go down is one rule
-per CPUID vendor, each measured on one microarchitecture only: AMD's on Zen 2,
-Intel's on Tiger Lake. Another AMD or Intel core takes its vendor's rule
-unmeasured, until its own figures confirm or replace it. Its `memset`
+changed with it, on Zen 2 without ERMS too: a kernel tmpfs read of 4 or 8 KiB
+took 0.92-0.96 times as long on both benches, at every distance outside the
+window, and no file, IPC or pipe row slowed in both pairs (evidence
+`ToyOSOrg/evidence` branch `pr-1139`, `kmemcpy/round-3`). Which copies go down
+is one rule per CPUID vendor, each measured on one microarchitecture only:
+AMD's window on Zen 2, Intel's none on Tiger Lake. Another AMD or Intel core
+takes its vendor's rule unmeasured, until its own figures confirm or replace
+it. Its `memset`
 and `memmove` are `compiler_builtins`', which
 frame `rep movsq` or `rep stosq` with two byte strings, and take one `rep movsb`
 or `rep stosb` only when built with the `ermsb` target feature
