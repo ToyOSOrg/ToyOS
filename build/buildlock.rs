@@ -74,7 +74,7 @@ const HEARTBEAT: Duration = Duration::from_millis(300);
 /// toolchain, the longest phase any of these locks covers.
 const CEILING: Duration = Duration::from_secs(6 * 60 * 60);
 
-/// The longest a waiter sleeps between two tries ([`take`]).
+/// The longest a waiter sleeps between two tries ([`poll`]).
 const MAX_PAUSE: Duration = Duration::from_millis(50);
 
 const LOCK_DIR: &str = ".build-locks";
@@ -236,13 +236,20 @@ fn keyed_building(store: &Path, kind: Keyed, key: &Key) -> Option<Guard> {
 /// builder of it is waited for, and a sweep cannot remove it; and dated now,
 /// which a sweep reads as its last use.
 pub(crate) fn keyed_using(store: &Path, kind: Keyed, key: &Key) -> Guard {
+    let (lock, what) = (format!("{} lock", kind.name()), format!("using {} {key}", kind.name()));
+    let path = keyed_lock_path(store, kind, key);
+    poll(&path, &lock, &what, UNNOTED, Instant::now() + CEILING, || keyed_try_using(store, kind, key))
+}
+
+/// [`keyed_using`], if nobody is making it now.
+fn keyed_try_using(store: &Path, kind: Keyed, key: &Key) -> Option<Guard> {
     let path = keyed_lock_path(store, kind, key);
     let file = open_lock_file(&path);
-    let lock = format!("{} lock", kind.name());
-    let what = format!("using {} {key}", kind.name());
-    take(&file, Mode::Shared, &path, &lock, &what, UNNOTED, Instant::now() + CEILING);
+    if !try_lock(&file, Mode::Shared) {
+        return None;
+    }
     file.set_modified(SystemTime::now()).unwrap_or_else(|e| panic!("build lock: date {}: {e}", path.display()));
-    Guard { file, records_holder: false }
+    Some(Guard { file, records_holder: false })
 }
 
 /// What `key` names, held in use and whole: made by `make` under
@@ -257,32 +264,37 @@ pub fn keyed_made(
     kind: Keyed,
     key: &Key,
     defect: impl Fn() -> Option<String>,
-    mut make: impl FnMut(),
+    make: impl FnMut(),
 ) -> Guard {
-    let deadline = Instant::now() + CEILING;
-    let mut pause = Duration::from_millis(1);
-    loop {
-        let using = keyed_using(store, kind, key);
-        if defect().is_none() {
-            return using;
+    keyed_made_by(store, kind, key, defect, make, Instant::now() + CEILING)
+}
+
+/// [`keyed_made`], failing at `deadline`.
+fn keyed_made_by(
+    store: &Path,
+    kind: Keyed,
+    key: &Key,
+    defect: impl Fn() -> Option<String>,
+    mut make: impl FnMut(),
+    deadline: Instant,
+) -> Guard {
+    let (lock, what) = (format!("{} lock", kind.name()), format!("using {} {key}", kind.name()));
+    poll(&keyed_lock_path(store, kind, key), &lock, &what, UNNOTED, deadline, || {
+        if let Some(using) = keyed_try_using(store, kind, key) {
+            if defect().is_none() {
+                return Some(using);
+            }
         }
-        drop(using);
-        let Some(_building) = keyed_building(store, kind, key) else {
-            // Another is making it, or deciding to, as this one just was.
-            let path = keyed_lock_path(store, kind, key);
-            let holder = describe_holder(&path).unwrap_or_else(|| UNNOTED.to_string());
-            assert!(Instant::now() < deadline, "build lock: gave up making {} {key} after {CEILING:?} — {holder}", kind.name());
-            std::thread::sleep(pause);
-            pause = (pause * 2).min(MAX_PAUSE);
-            continue;
-        };
+        let building = keyed_building(store, kind, key)?;
         if defect().is_some() {
             make();
             if let Some(defect) = defect() {
                 panic!("{} {key} was made, and is not whole: {defect}", kind.name());
             }
         }
-    }
+        drop(building);
+        keyed_try_using(store, kind, key).filter(|_| defect().is_none())
+    })
 }
 
 /// What `key` names, exclusively and only if nobody is making or using it: what
@@ -343,7 +355,7 @@ const BUILD: Lock = Lock {
 /// host, four shared churners kept an exclusive waiter out for the whole 5.5 s
 /// they ran — and the exclusive phases are exactly the long, silent ones an
 /// agent kills and retries. So an exclusive acquirer holds `intent` while it
-/// queues for `state`, which makes later shared acquirers line up behind it
+/// waits for `state`, which makes later shared acquirers wait behind it
 /// instead of overtaking it. `intent` is always taken before `state` and
 /// dropped as soon as `state` is held, so nothing ever waits on `intent` while
 /// holding `state`.
@@ -369,27 +381,29 @@ fn acquire(dir: &Path, mode: Mode, what: &str, lock: Lock) -> Guard {
 /// What a waiter is told of a holder that left no note it can read.
 const UNNOTED: &str = "held, but the holder left no readable note";
 
-/// Take `mode` of `file`, the lock at `path`, or fail at `deadline` naming the
-/// holder. A wait says what it waits for and who has it, when that can be
-/// established ([`describe_holder`], else `unnoted`), and says so again every
-/// [`HEARTBEAT`]: an agent staring at silence kills and retries.
-///
-/// A poll and not a blocking `flock`, which has no timed wait, and whose
-/// shared waiters macOS lets in one at a time: measured on Darwin 27.0.0, of
-/// shared waiters queued behind an exclusive holder, one is let in when it
-/// lets go and each of the others only once the shared holder before it lets
-/// go, though a new shared try succeeds at once. A build holds its uses for its
-/// whole length, so one waiting there waits on every other build.
+/// Take `mode` of `file`, the lock at `path`, by `deadline` ([`poll`]).
 fn take(file: &fs::File, mode: Mode, path: &Path, lock: &str, label: &str, unnoted: &str, deadline: Instant) {
-    if try_lock(file, mode) {
-        return;
+    poll(path, lock, label, unnoted, deadline, || try_lock(file, mode).then_some(()));
+}
+
+/// What `attempt` gets, tried until it gets it or `deadline` passes, which
+/// fails naming the holder of `path`. A wait says what it waits for and who
+/// has it, when that can be established ([`describe_holder`], else `unnoted`),
+/// and says so again every [`HEARTBEAT`]: an agent staring at silence kills and
+/// retries.
+///
+/// A poll, not a blocking `flock`: macOS lets blocked shared waiters in one at
+/// a time (`issues/macos-lets-blocked-shared-flock-waiters-in-one-at-a-time.md`).
+fn poll<T>(path: &Path, lock: &str, label: &str, unnoted: &str, deadline: Instant, mut attempt: impl FnMut() -> Option<T>) -> T {
+    if let Some(got) = attempt() {
+        return got;
     }
     let holder = || describe_holder(path).unwrap_or_else(|| unnoted.to_string());
     eprintln!("[build-lock] waiting for the {lock} ({label}) — {}", holder());
     let began = Instant::now();
     let mut said = began;
     let mut pause = Duration::from_millis(1);
-    while !try_lock(file, mode) {
+    loop {
         let now = Instant::now();
         if now >= deadline {
             panic!("build lock: gave up waiting for the {lock} ({label}) after {:.0?} — {}", began.elapsed(), holder());
@@ -400,8 +414,11 @@ fn take(file: &fs::File, mode: Mode, path: &Path, lock: &str, label: &str, unnot
         }
         std::thread::sleep(pause.min(deadline - now));
         pause = (pause * 2).min(MAX_PAUSE);
+        if let Some(got) = attempt() {
+            eprintln!("[build-lock] acquired the {lock} ({label}) after {:.1?}", began.elapsed());
+            return got;
+        }
     }
-    eprintln!("[build-lock] acquired the {lock} ({label}) after {:.1?}", began.elapsed());
 }
 
 /// What the last exclusive holder of `path` recorded, if it is still running.
@@ -489,9 +506,10 @@ pub(crate) mod tests {
     use std::time::Duration;
     use toyos_tmpdir::TempDir;
 
-    // Two processes are the point. `flock` is per open file description, so a
-    // single-process test would prove nothing about the thing that actually
-    // races in this tree. The child is this same test binary, re-run with one
+    // A lock is per open file description, so threads that each open the file
+    // contend as processes do. A child process is for what a thread cannot
+    // show: a holder that dies, and a lock whose release no copy of this
+    // process's descriptors delays (see [`Elsewhere`]). The child is this same test binary, re-run with one
     // `#[ignore]`d test selected by name and its role in the environment, so an
     // ordinary `cargo test` never runs the child half on its own.
     const ROLE: &str = "TOYOS_BUILDLOCK_TEST_ROLE";
@@ -821,8 +839,8 @@ pub(crate) mod tests {
     }
 
     /// **One key is built once, and two keys never meet.** A second process
-    /// wanting the key being built waits on the builder's lock — not on a
-    /// timer — and gets it only once the build is done; a process making
+    /// wanting the key being built waits for it, and gets it only once the
+    /// build is done; a process making
     /// another key is not held at all; and a sweep cannot take a key that
     /// somebody is making or using.
     #[test]
@@ -902,18 +920,27 @@ pub(crate) mod tests {
         );
     }
 
-    /// **A build failing while others wait for its key lets every one of them
-    /// in, and none waits on another's use.** One thread's make of a sysroot
-    /// fails while eight others wait for the key; one of them makes it, and
-    /// every one then holds its use at once, as builds hold theirs for their
-    /// whole length. The waiters are threads of one process, as a test run's
-    /// builds are.
+    /// **Builds waiting on a key's making all get in, whether the making
+    /// succeeds or fails, and none waits on another's use.** Eight threads
+    /// wait while one makes a sysroot; once it is made, by that one or, when
+    /// that one fails, by a waiter, every one holds its use at once, as builds
+    /// hold theirs for their whole length. The waiters are threads of one
+    /// process, as a test run's builds are.
     #[test]
-    fn waiters_on_a_failed_build_all_get_in() {
+    fn waiters_on_a_build_all_get_in() {
+        waiters_on_a_build_get_in(false);
+        waiters_on_a_build_get_in(true);
+    }
+
+    const WAITERS: usize = 8;
+
+    /// Whether all [`WAITERS`] waiters on a make that `fails` or not hold
+    /// their use within 20 s, the maker's own use held beside them. Asserted
+    /// here, before the store goes: waiters still waiting write in it.
+    fn waiters_on_a_build_get_in(fails: bool) {
         use std::sync::mpsc::channel;
-        const WAITERS: usize = 8;
-        let store = scratch("failed-build");
-        let key = Key::of(b"a build that fails");
+        let store = scratch("waited-build");
+        let key = Key::of(b"a build waited on");
         let whole = Keyed::Sysroot.store(&store).join(&key);
         let defect = {
             let whole = whole.clone();
@@ -921,20 +948,22 @@ pub(crate) mod tests {
         };
 
         let (started, has_started) = channel();
-        let (fail, failed) = channel::<()>();
-        let failing = {
-            let (store, key, defect) = (store.to_path_buf(), key.clone(), defect.clone());
+        let (finish, finished) = channel::<()>();
+        let (used, uses) = channel();
+        let first = {
+            let (store, key, defect, whole) = (store.to_path_buf(), key.clone(), defect.clone(), whole.clone());
             std::thread::spawn(move || {
-                keyed_made(&store, Keyed::Sysroot, &key, defect, || {
+                let using = keyed_made(&store, Keyed::Sysroot, &key, defect, || {
                     started.send(()).unwrap();
-                    failed.recv().unwrap();
-                    panic!("the build failed");
-                })
+                    finished.recv().unwrap();
+                    assert!(!fails, "the build failed");
+                    fs::create_dir_all(&whole).unwrap();
+                });
+                using
             })
         };
-        has_started.recv_timeout(Duration::from_secs(20)).expect("the failing build never began");
+        has_started.recv_timeout(Duration::from_secs(20)).expect("the first build never began");
 
-        let (used, uses) = channel();
         for _ in 0..WAITERS {
             let (store, key, defect, whole, used) = (store.to_path_buf(), key.clone(), defect.clone(), whole.clone(), used.clone());
             std::thread::spawn(move || {
@@ -942,11 +971,12 @@ pub(crate) mod tests {
                 used.send(using).unwrap();
             });
         }
-        // Long enough for every waiter to be waiting before the build fails;
+        // Long enough for every waiter to be waiting before the build ends;
         // one that is not yet only makes this test weaker.
         std::thread::sleep(Duration::from_millis(300));
-        fail.send(()).unwrap();
-        assert!(failing.join().is_err(), "the failing build did not fail");
+        finish.send(()).unwrap();
+        let first = first.join();
+        assert_eq!(first.is_err(), fails, "the first build did not end as staged");
 
         let deadline = Instant::now() + Duration::from_secs(20);
         let mut held = Vec::new();
@@ -956,7 +986,9 @@ pub(crate) mod tests {
                 Err(_) => break,
             }
         }
-        assert_eq!(held.len(), WAITERS, "of {WAITERS} builds waiting on a failed one, only {} got their sysroot in 20 s", held.len());
+        let ended = if fails { "failed" } else { "succeeded" };
+        assert_eq!(held.len(), WAITERS, "of {WAITERS} builds waiting on one that {ended}, only {} got their sysroot in 20 s", held.len());
+        drop(first);
     }
 
     /// **A build that found the key unmade, while another made it, does not
@@ -978,30 +1010,34 @@ pub(crate) mod tests {
                 let _ = tx.send(using);
             });
         }
-        let got = rx.recv_timeout(Duration::from_secs(20));
+        // Within the holder's own 20 s, so the verdict is this test's.
+        let using = rx.recv_timeout(Duration::from_secs(10)).expect("a build that found the key unmade waited out another's use of it for 10 s");
         user.release();
-        drop(got.expect("a build that found the key unmade waited out another's use of it for 20 s"));
+        drop(using);
     }
 
-    /// **A wait that outlasts its deadline fails, naming the holder.**
+    /// **A wait that outlasts its deadline fails, naming the holder**: a build
+    /// wanting a key that another holds in the making for longer.
     #[test]
     fn a_wait_past_its_deadline_names_the_holder() {
-        let root = scratch("deadline");
+        let store = scratch("deadline");
         let key = Key::of(b"never made");
-        let _building = keyed_building(&root, Keyed::Sysroot, &key).expect("nobody else has the key");
-        let path = keyed_lock_path(&root, Keyed::Sysroot, &key);
+        let _building = keyed_building(&store, Keyed::Sysroot, &key).expect("nobody else has the key");
         let (tx, rx) = std::sync::mpsc::channel();
-        std::thread::spawn(move || {
-            let file = open_lock_file(&path);
-            let waited = std::panic::catch_unwind(|| {
-                take(&file, Mode::Shared, &path, "sysroot lock", "using it", UNNOTED, Instant::now() + Duration::from_millis(500))
+        {
+            let (store, key) = (store.to_path_buf(), key.clone());
+            std::thread::spawn(move || {
+                let waited = std::panic::catch_unwind(|| {
+                    let defect = || Some("not made".to_string());
+                    keyed_made_by(&store, Keyed::Sysroot, &key, defect, || panic!("made under another's making"), Instant::now() + Duration::from_millis(500))
+                });
+                let _ = tx.send(waited.map(drop).map_err(|e| e.downcast_ref::<String>().cloned().unwrap_or_default()));
             });
-            let _ = tx.send(waited.map_err(|e| e.downcast_ref::<String>().cloned().unwrap_or_default()));
-        });
+        }
         let refusal = rx
             .recv_timeout(Duration::from_secs(20))
             .expect("a wait with a 500 ms deadline had not ended 20 s later")
-            .expect_err("a wait on a lock nobody let go of succeeded");
+            .expect_err("a wait on a key nobody let go of succeeded");
         let holder = format!("held by pid {} (building sysroot {key})", std::process::id());
         assert!(refusal.contains("gave up") && refusal.contains(&holder), "the refusal does not name the holder: {refusal}");
     }
