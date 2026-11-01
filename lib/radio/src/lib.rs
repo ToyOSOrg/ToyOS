@@ -7,8 +7,10 @@
 //! - [`Command::Scan`] is answered by any number of [`Event::Seen`], each a Beacon or Probe
 //!   Response heard, and then one [`Event::ScanDone`];
 //! - [`Command::Join`] by [`Event::Associated`] or [`Event::JoinFailed`]; the driver
-//!   authenticates by Open System and associates, its request carrying the elements the command
-//!   names;
+//!   authenticates by Open System and associates, its request carrying the SSID and the elements
+//!   the command names. **The driver keeps no scan results**: a join carries the elements of the
+//!   Beacon or Probe Response the BSS was chosen by, whose operation elements the driver
+//!   configures the association from;
 //! - once associated, EAPOL frames go both ways ([`Command::Eapol`], [`Event::Eapol`]), and the
 //!   keys `wlan` derives are installed by [`Command::Pairwise`], [`Command::Group`] and
 //!   [`Command::Integrity`]. **An install takes effect after every frame sent before it has
@@ -38,8 +40,15 @@ pub const HOLDERS: &[&str] = &["ax2xx"];
 /// this is the driver's to drop.
 pub const MAX_FRAME: usize = 4096;
 
-/// The widest payload either side sends.
-pub const MAX_PAYLOAD: usize = 8 + MAX_FRAME;
+/// The most octets of an SSID (IEEE Std 802.11-2024 §9.4.2.2).
+pub const MAX_SSID: usize = 32;
+
+/// The most octets of the elements a join adds to its association request: an RSNE and an
+/// RSNXE, each at most an element's 257.
+pub const MAX_REQUEST: usize = 2 * 257;
+
+/// The widest payload either side sends: a join's.
+pub const MAX_PAYLOAD: usize = 6 + 2 + 1 + MAX_SSID + 2 + MAX_REQUEST + MAX_FRAME;
 
 // Driver to wlan.
 pub const MSG_HELLO: u32 = 1;
@@ -101,7 +110,8 @@ reasons! {
         GroupKeyId = "a group key ID other than 1, 2 or 3";
         IntegrityKeyId = "an integrity key ID other than 4 or 5";
         PacketNumber = "a packet number past 48 bits";
-        Elements = "association request elements that are not whole elements";
+        Ssid = "an SSID of 0 or more than 32 octets";
+        Elements = "a join's elements that are empty, too long or not whole elements";
     }
 }
 
@@ -263,8 +273,9 @@ pub enum Command<'a> {
     /// Scan every channel of the radio's bands.
     Scan,
     /// Authenticate with the BSS by Open System and associate with it, the request carrying
-    /// `elements` (its RSNE, and its RSNXE when it has one) whole.
-    Join { bssid: Address, channel: Channel, elements: &'a [u8] },
+    /// `ssid` and `request` (the station's RSNE, and its RSNXE when it has one) whole. `heard`
+    /// is the elements of the Beacon or Probe Response the BSS was chosen by.
+    Join { bssid: Address, channel: Channel, ssid: &'a [u8], request: &'a [u8], heard: &'a [u8] },
     /// Send an EAPOL PDU to the access point joined.
     Eapol { frame: &'a [u8] },
     /// The pairwise temporal key, CCMP-128.
@@ -435,15 +446,24 @@ impl<'a> Command<'a> {
         Ok(match msg_type {
             MSG_SCAN => empty(payload).map(|()| Self::Scan)?,
             MSG_JOIN => {
-                let (head, elements) = payload.split_first_chunk::<8>().ok_or(Violation::Length)?;
-                let [b0, b1, b2, b3, b4, b5, f0, f1] = *head;
-                let whole = !elements.is_empty()
-                    && elements.len() <= MAX_FRAME
-                    && toyos_ieee80211::element::iter(elements).all(|e| e.is_ok());
-                if !whole {
+                let (&[b0, b1, b2, b3, b4, b5, f0, f1, ssid_len], rest) =
+                    payload.split_first_chunk::<9>().ok_or(Violation::Length)?;
+                let bssid = address([b0, b1, b2, b3, b4, b5])?;
+                let channel = Channel::decode([f0, f1])?;
+                let (ssid, rest) = rest.split_at_checked(usize::from(ssid_len)).ok_or(Violation::Length)?;
+                if ssid.is_empty() || ssid.len() > MAX_SSID {
+                    return Err(Violation::Ssid);
+                }
+                let (&request_len, rest) = rest.split_first_chunk::<2>().ok_or(Violation::Length)?;
+                let (request, heard) =
+                    rest.split_at_checked(usize::from(u16::from_le_bytes(request_len))).ok_or(Violation::Length)?;
+                let whole = |e: &[u8], most: usize| {
+                    !e.is_empty() && e.len() <= most && toyos_ieee80211::element::iter(e).all(|e| e.is_ok())
+                };
+                if !whole(request, MAX_REQUEST) || !whole(heard, MAX_FRAME) {
                     return Err(Violation::Elements);
                 }
-                Self::Join { bssid: address([b0, b1, b2, b3, b4, b5])?, channel: Channel::decode([f0, f1])?, elements }
+                Self::Join { bssid, channel, ssid, request, heard }
             }
             MSG_EAPOL_SEND => Self::Eapol { frame: frame(payload)? },
             MSG_PAIRWISE => Self::Pairwise { key: payload.try_into().map_err(|_| Violation::Length)? },
@@ -470,17 +490,22 @@ impl<'a> Command<'a> {
         })
     }
 
-    /// The frame's message type, and its payload's length in `out`. A frame or elements past
-    /// [`MAX_FRAME`] panic. A key command's payload holds the key: the caller wipes `out` once
-    /// it is sent.
+    /// The frame's message type, and its payload's length in `out`. A frame, SSID or elements
+    /// past their bounds panic. A key command's payload holds the key: the caller wipes `out`
+    /// once it is sent.
     pub fn encode(&self, out: &mut [u8; MAX_PAYLOAD]) -> (u32, usize) {
         let mut o = Out { buf: out, len: 0 };
         let msg_type = match *self {
             Self::Scan => MSG_SCAN,
-            Self::Join { bssid, channel, elements } => {
+            Self::Join { bssid, channel, ssid, request, heard } => {
+                assert!(ssid.len() <= MAX_SSID && request.len() <= MAX_REQUEST && heard.len() <= MAX_FRAME);
                 o.put(&bssid.0);
                 o.put(&channel.mhz().to_le_bytes());
-                o.put(elements);
+                o.put(&[ssid.len() as u8]);
+                o.put(ssid);
+                o.put(&(request.len() as u16).to_le_bytes());
+                o.put(request);
+                o.put(heard);
                 MSG_JOIN
             }
             Self::Eapol { frame } => {

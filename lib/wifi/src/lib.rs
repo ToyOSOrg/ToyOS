@@ -51,6 +51,9 @@ pub const MAX_SSID: usize = 32;
 /// The longest passphrase, as typed: 63 characters (Annex J.4.1).
 pub const MAX_PASSPHRASE: usize = 63;
 
+/// The widest request: a connect's, its passphrase one octet past [`MAX_PASSPHRASE`] at most.
+pub const REQUEST_PAYLOAD: usize = 1 + MAX_SSID + MAX_PASSPHRASE + 1;
+
 /// A frame of this protocol that does not decode.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Malformed;
@@ -105,7 +108,26 @@ pub enum Security {
 }
 
 impl Security {
-    const ALL: [Self; 5] = [Self::Open, Self::Wpa2, Self::Wpa3, Self::Wpa2Wpa3, Self::Other];
+    const fn code(self) -> u8 {
+        match self {
+            Self::Open => 0,
+            Self::Wpa2 => 1,
+            Self::Wpa3 => 2,
+            Self::Wpa2Wpa3 => 3,
+            Self::Other => 4,
+        }
+    }
+
+    fn of(code: u8) -> Result<Self, Malformed> {
+        Ok(match code {
+            0 => Self::Open,
+            1 => Self::Wpa2,
+            2 => Self::Wpa3,
+            3 => Self::Wpa2Wpa3,
+            4 => Self::Other,
+            _ => return Err(Malformed),
+        })
+    }
 
     pub const fn name(self) -> &'static str {
         match self {
@@ -249,21 +271,23 @@ impl<'a> Request<'a> {
         }
     }
 
-    /// The frame's message type and payload. A connect's payload holds the passphrase: the
-    /// caller wipes it once sent.
-    pub fn encode(&self) -> (u32, Vec<u8>) {
-        let mut out = Vec::new();
-        let msg_type = match self {
-            Self::Scan => MSG_SCAN,
-            Self::Disconnect => MSG_DISCONNECT,
-            Self::Status => MSG_STATUS,
+    /// The frame's message type, and its payload's length in `out`. A connect's payload holds
+    /// the passphrase, so the caller encodes into a buffer it wipes; one past
+    /// [`MAX_PASSPHRASE`] is cut there, which `wlan` refuses as it would the whole.
+    pub fn encode(&self, out: &mut [u8; REQUEST_PAYLOAD]) -> (u32, usize) {
+        match self {
+            Self::Scan => (MSG_SCAN, 0),
+            Self::Disconnect => (MSG_DISCONNECT, 0),
+            Self::Status => (MSG_STATUS, 0),
             Self::Connect { ssid, passphrase } => {
-                ssid.put(&mut out);
-                out.extend_from_slice(passphrase);
-                MSG_CONNECT
+                let ssid = ssid.as_bytes();
+                let passphrase = &passphrase[..passphrase.len().min(MAX_PASSPHRASE + 1)];
+                out[0] = ssid.len() as u8;
+                out[1..1 + ssid.len()].copy_from_slice(ssid);
+                out[1 + ssid.len()..][..passphrase.len()].copy_from_slice(passphrase);
+                (MSG_CONNECT, 1 + ssid.len() + passphrase.len())
             }
-        };
-        (msg_type, out)
+        }
     }
 }
 
@@ -282,7 +306,7 @@ impl<'a> Answer<'a> {
                     r = rest;
                     networks.push(Network {
                         ssid,
-                        security: *Security::ALL.get(usize::from(security)).ok_or(Malformed)?,
+                        security: Security::of(security)?,
                         band: band_of(band)?,
                         signal: signal_of(signal)?,
                         joinable: match joinable {
@@ -344,8 +368,7 @@ impl<'a> Answer<'a> {
             Self::Networks(networks) => {
                 for n in networks.iter().take(MAX_NETWORKS) {
                     n.ssid.put(&mut out);
-                    let security = Security::ALL.iter().position(|s| *s == n.security).unwrap_or(0) as u8;
-                    out.extend_from_slice(&[security, band_code(n.band), signal_octet(n.signal), u8::from(n.joinable)]);
+                    out.extend_from_slice(&[n.security.code(), band_code(n.band), signal_octet(n.signal), u8::from(n.joinable)]);
                 }
                 MSG_NETWORKS
             }

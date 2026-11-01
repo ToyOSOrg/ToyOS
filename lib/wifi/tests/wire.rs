@@ -14,8 +14,9 @@ fn requests_and_answers_round_trip() {
         Request::Status,
         Request::Connect { ssid: ssid(b"home"), passphrase: b"secret passphrase" },
     ] {
-        let (t, p) = r.encode();
-        assert_eq!(Request::decode(t, &p), Ok(r));
+        let mut buf = [0; REQUEST_PAYLOAD];
+        let (t, n) = r.encode(&mut buf);
+        assert_eq!(Request::decode(t, &buf[..n]), Ok(r));
     }
     let s = Signal::new(-55).unwrap();
     let network = Network { ssid: ssid(&[0xff; 32]), security: Security::Wpa2Wpa3, band: Band::Six, signal: s, joinable: false };

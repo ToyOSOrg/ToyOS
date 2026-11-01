@@ -4750,6 +4750,7 @@ name = "wifi"
 version = "0.0.0"
 dependencies = [
  "toyos",
+ "toyos-crypto",
  "toyos-wifi",
 ]
 

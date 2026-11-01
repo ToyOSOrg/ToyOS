@@ -17,7 +17,7 @@ pub const PASSPHRASE: &[u8] = b"correct horse battery";
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Sent {
     Scan,
-    Join { bssid: Address, channel: Channel, elements: Vec<u8> },
+    Join { bssid: Address, channel: Channel, ssid: Vec<u8>, elements: Vec<u8>, heard: Vec<u8> },
     Eapol(Vec<u8>),
     Pairwise([u8; 16]),
     Group { id: u8, key: [u8; 16], rsc: u64 },
@@ -29,7 +29,9 @@ pub enum Sent {
 fn sent(msg_type: u32, payload: &[u8]) -> Sent {
     match Command::decode(msg_type, payload).expect("the station sends what decodes") {
         Command::Scan => Sent::Scan,
-        Command::Join { bssid, channel, elements } => Sent::Join { bssid, channel, elements: elements.to_vec() },
+        Command::Join { bssid, channel, ssid, request, heard } => {
+            Sent::Join { bssid, channel, ssid: ssid.to_vec(), elements: request.to_vec(), heard: heard.to_vec() }
+        }
         Command::Eapol { frame } => Sent::Eapol(frame.to_vec()),
         Command::Pairwise { key } => Sent::Pairwise(*key),
         Command::Group { id, key, rsc } => Sent::Group { id, key: *key, rsc },
@@ -146,8 +148,9 @@ impl Harness {
     }
 
     pub fn ask(&mut self, client: Client, request: Request<'_>) {
-        let (msg_type, payload) = request.encode();
-        self.station.request(client, msg_type, &payload, self.now);
+        let mut buf = [0; toyos_wifi::REQUEST_PAYLOAD];
+        let (msg_type, len) = request.encode(&mut buf);
+        self.station.request(client, msg_type, &buf[..len], self.now);
         self.collect();
     }
 

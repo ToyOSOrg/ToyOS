@@ -8,7 +8,11 @@
 //! at a time so no peer keeps the others waiting; then every bound that passed; then what the
 //! station has to send is sent with `try_send`, a peer that cannot take it ended by name; and
 //! the loop sleeps until a connection or the station's next deadline wakes it.
+//!
+//! **A settings program's frame is read where it was received**, and its buffer wiped once the
+//! station has it: a connect carries a passphrase.
 
+use std::collections::BTreeSet;
 use std::time::{Duration, Instant};
 
 use toyos::endow;
@@ -29,6 +33,14 @@ const TOKEN_CLIENTS: u64 = 1;
 const TOKEN_RADIO: u64 = 2;
 const TOKEN_CLIENT_BASE: u64 = 16;
 
+/// The most watches one pass registers. Each token is handled once a pass: an acceptor's
+/// watches itself and the connection it accepted, and the radio and each client's connection
+/// itself.
+const MAX_WATCHES: u32 = 2 * 2 + 1 + MAX_CLIENTS as u32;
+
+const _: () = assert!(toyos_radio::MAX_PAYLOAD <= toyos::ipc::MAX_FRAME_LEN as usize);
+const _: () = assert!(toyos_wifi::MAX_PAYLOAD <= toyos::ipc::MAX_FRAME_LEN as usize);
+
 struct Peer<const MAX: usize> {
     conn: Connection,
     rx: Box<FrameRx<MAX>>,
@@ -43,36 +55,14 @@ impl<const MAX: usize> Peer<MAX> {
 type RadioPeer = Peer<{ toyos_radio::MAX_PAYLOAD }>;
 type ClientPeer = Peer<{ toyos_wifi::MAX_PAYLOAD }>;
 
-/// A frame a peer sent, or its end.
-enum Heard {
-    Frame(u32, Vec<u8>),
-    End(&'static str),
-}
-
-/// Up to [`FRAMES_PER_PASS`] of a peer's frames.
-fn hear<const MAX: usize>(peer: &mut Peer<MAX>) -> Vec<Heard> {
-    let mut heard = Vec::new();
-    for _ in 0..FRAMES_PER_PASS {
-        match peer.rx.pump(&peer.conn) {
-            RxStep::Idle => break,
-            RxStep::Frame { handles: 0, msg_type, payload_len } => {
-                heard.push(Heard::Frame(msg_type, peer.rx.payload(payload_len).to_vec()))
-            }
-            RxStep::Frame { .. } => {
-                heard.push(Heard::End("it sent a handle, which no frame of its protocol carries"));
-                break;
-            }
-            RxStep::Eof => {
-                heard.push(Heard::End("its connection ended"));
-                break;
-            }
-            RxStep::Malformed => {
-                heard.push(Heard::End("it sent a frame wider than its protocol's"));
-                break;
-            }
-        }
+/// Why a peer's connection is over, if what it sent ends it.
+fn ended(step: RxStep) -> Option<&'static str> {
+    match step {
+        RxStep::Idle | RxStep::Frame { handles: 0, .. } => None,
+        RxStep::Frame { .. } => Some("it sent a handle, which no frame of its protocol carries"),
+        RxStep::Eof => Some("its connection ended"),
+        RxStep::Malformed => Some("it sent a frame wider than its protocol's"),
     }
-    heard
 }
 
 fn nonce() -> [u8; 32] {
@@ -130,25 +120,28 @@ impl Wlan {
 
     fn end_client(&mut self, client: Client) {
         if let Some(slot) = self.clients.iter_mut().find(|s| s.as_ref().is_some_and(|(c, _)| *c == client)) {
+            if let Some((_, peer)) = slot {
+                peer.rx.wipe();
+            }
             *slot = None;
             self.station.client_gone(client);
         }
     }
 
     fn radio_ready(&mut self, poller: &Poller) {
-        let Some(peer) = &mut self.radio else { return };
-        for heard in hear(peer) {
-            match heard {
-                Heard::Frame(msg_type, payload) => {
-                    let now = self.now();
-                    self.station.radio(msg_type, &payload, now, nonce);
-                    if !self.station.has_radio() {
-                        // The station ended it for what it sent.
-                        self.radio = None;
-                        return;
-                    }
-                }
-                Heard::End(why) => return self.end_radio(why),
+        for _ in 0..FRAMES_PER_PASS {
+            let now = self.now();
+            let Some(peer) = &mut self.radio else { return };
+            let step = peer.rx.pump(&peer.conn);
+            if let Some(why) = ended(step) {
+                return self.end_radio(why);
+            }
+            let RxStep::Frame { msg_type, payload_len, .. } = step else { break };
+            self.station.radio(msg_type, peer.rx.payload(payload_len), now, nonce);
+            if !self.station.has_radio() {
+                // The station ended it for what it sent.
+                self.radio = None;
+                return;
             }
         }
         if let Some(peer) = &self.radio {
@@ -157,21 +150,19 @@ impl Wlan {
     }
 
     fn client_ready(&mut self, slot: usize, poller: &Poller) {
-        let Some(Some((client, peer))) = self.clients.get_mut(slot) else { return };
-        let client = *client;
-        for heard in hear(peer) {
-            match heard {
-                Heard::Frame(msg_type, mut payload) => {
-                    let now = self.now();
-                    self.station.request(client, msg_type, &payload, now);
-                    payload.iter_mut().for_each(|b| *b = 0);
-                }
-                Heard::End(_) => return self.end_client(client),
+        for _ in 0..FRAMES_PER_PASS {
+            let now = self.now();
+            let Some(Some((client, peer))) = self.clients.get_mut(slot) else { return };
+            let client = *client;
+            let step = peer.rx.pump(&peer.conn);
+            if ended(step).is_some() {
+                return self.end_client(client);
             }
+            let RxStep::Frame { msg_type, payload_len, .. } = step else { break };
+            self.station.request(client, msg_type, peer.rx.payload(payload_len), now);
+            peer.rx.wipe();
         }
-        if let Some(Some((c, peer))) = self.clients.get(slot)
-            && *c == client
-        {
+        if let Some(Some((_, peer))) = self.clients.get(slot) {
             poller.watch(&peer.conn, READABLE, TOKEN_CLIENT_BASE + slot as u64);
         }
     }
@@ -191,6 +182,7 @@ impl Wlan {
                             self.end_radio(&format!("it took no frame: {why:?}"));
                         }
                     }
+                    // The station said why in its log line.
                     Out::EndRadio(_) => self.radio = None,
                     Out::Answer { client, msg_type, payload } => {
                         let peer = self.clients.iter().flatten().find(|(c, _)| *c == client);
@@ -217,7 +209,7 @@ fn main() {
     // is queued on it whether or not this program has reached `accept`.
     let radios = endow::acceptor(toyos_radio::PORT).expect("the manifest declares this program serves `radio`");
     let clients = endow::acceptor(toyos_wifi::PORT).expect("the manifest declares this program serves `wifi`");
-    let poller = Poller::new(3 + MAX_CLIENTS as u32);
+    let poller = Poller::new(MAX_WATCHES);
     poller.watch(&radios, READABLE, TOKEN_RADIOS);
     poller.watch(&clients, READABLE, TOKEN_CLIENTS);
     let mut wlan = Wlan {
@@ -233,8 +225,12 @@ fn main() {
             Some(at) => u64::try_from(at.saturating_sub(wlan.now()).as_nanos()).unwrap_or(u64::MAX),
             None => u64::MAX,
         };
-        let mut ready = Vec::new();
-        poller.wait(1, timeout, |token| ready.push(token));
+        // A watch left on a connection that has since ended can answer beside its slot's new
+        // one: each token is handled once a pass.
+        let mut ready = BTreeSet::new();
+        poller.wait(1, timeout, |token| {
+            ready.insert(token);
+        });
         for token in ready {
             match token {
                 TOKEN_RADIOS => {

@@ -37,20 +37,21 @@ use toyos_ieee80211::Address;
 use toyos_ieee80211::frame::{Frame, ManagementSubtype};
 use toyos_ieee80211::mgmt::Body;
 use toyos_radio::{Bands, Channel, Command, Event, JoinCause, JoinStep, Left, Signal, Violation};
-use toyos_wifi::{Answer, Network, Refusal, Request, Ssid, State};
+use toyos_wifi::{Answer, MAX_PASSPHRASE, Network, Refusal, Request, Ssid, State};
 use toyos_wlan_handshake::{Join as Keyed, Supplicant};
 
 pub use choice::{Bss, STRONG, Unjoinable};
 
 /// How long a radio has to say hello once it connects.
 pub const HELLO_BOUND: Duration = Duration::from_secs(5);
-/// How long a scan may take: a passive dwell of about a beacon interval and a half on each of
-/// the 2.4, 5 and 6 GHz bands' channels, some 80, is under 10 s.
+/// How long a scan may take: a passive dwell of some 150 ms on each of the about 97 20 MHz
+/// channels of 2.4, 5 and 6 GHz (13, 25 and 59) is about 15 s. Policy, as the dwell is the
+/// driver's.
 pub const SCAN_BOUND: Duration = Duration::from_secs(20);
 /// How long the radio may take to authenticate and associate, its own retries included.
 pub const JOIN_BOUND: Duration = Duration::from_secs(5);
-/// How long the 4-way handshake may take once associated: an authenticator resends message 1
-/// and message 3 a few times, a second or so apart, before it gives up.
+/// How long the 4-way handshake may take once associated, the authenticator's resends of
+/// message 1 and message 3 among it. Policy.
 pub const HANDSHAKE_BOUND: Duration = Duration::from_secs(10);
 /// How long the radio may take to answer a leave.
 pub const LEAVE_BOUND: Duration = Duration::from_secs(5);
@@ -61,19 +62,22 @@ pub const MAX_BSS: usize = 256;
 /// A settings program's connection, as the program numbers them.
 pub type Client = u64;
 
-/// A payload that wipes itself when dropped: a key command's or an answer's.
-pub struct Payload(Vec<u8>);
+/// The most octets of a key command's payload: an integrity key's ID, key and packet number.
+const KEY_PAYLOAD: usize = 2 + 16 + 8;
+
+/// A frame's payload. A key command's is held in a [`Secret`], wiped when it is dropped; no
+/// other payload carries a secret.
+pub enum Payload {
+    Plain(Vec<u8>),
+    Key { bytes: Secret<KEY_PAYLOAD>, len: usize },
+}
 
 impl Payload {
     pub fn bytes(&self) -> &[u8] {
-        &self.0
-    }
-}
-
-impl Drop for Payload {
-    fn drop(&mut self) {
-        self.0.iter_mut().for_each(|b| *b = 0);
-        core::hint::black_box(&self.0);
+        match self {
+            Self::Plain(bytes) => bytes,
+            Self::Key { bytes, len } => &bytes.expose()[..*len],
+        }
     }
 }
 
@@ -89,7 +93,8 @@ pub enum Out {
     Log(String),
 }
 
-/// What the station counted of what the air sent.
+/// What the station dropped of what the air sent: the scan's counts since it began, logged when
+/// it is done, and the join's since it was asked, logged when it ends.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct Counters {
     /// Seen frames that were no Beacon or Probe Response, or did not parse.
@@ -106,16 +111,16 @@ pub struct Counters {
 
 /// A passphrase as typed: 8 to 63 printable ASCII characters (IEEE Std 802.11-2024 Annex J.4.1).
 struct Passphrase {
-    octets: Secret<63>,
+    octets: Secret<MAX_PASSPHRASE>,
     len: usize,
 }
 
 impl Passphrase {
     fn new(typed: &[u8]) -> Option<Self> {
-        if !(8..=63).contains(&typed.len()) || !typed.iter().all(|b| (32..=126).contains(b)) {
+        if !(8..=MAX_PASSPHRASE).contains(&typed.len()) || !typed.iter().all(|b| (32..=126).contains(b)) {
             return None;
         }
-        let mut octets = Secret::new([0; 63]);
+        let mut octets = Secret::new([0; MAX_PASSPHRASE]);
         octets.expose_mut()[..typed.len()].copy_from_slice(typed);
         Some(Self { octets, len: typed.len() })
     }
@@ -181,6 +186,8 @@ pub struct Station {
     resume: Option<Join>,
     /// The clients whose request is not answered yet.
     asking: Vec<Client>,
+    /// The clients ended for what they sent, whose later frames are not acted on.
+    ended: Vec<Client>,
     counters: Counters,
     out: Vec<Out>,
 }
@@ -208,6 +215,7 @@ impl Station {
             join: None,
             resume: None,
             asking: Vec::new(),
+            ended: Vec::new(),
             counters: Counters::default(),
             out: Vec::new(),
         }
@@ -295,13 +303,22 @@ impl Station {
     fn command(&mut self, command: Command<'_>) {
         let mut buf = Secret::new([0u8; toyos_radio::MAX_PAYLOAD]);
         let (msg_type, len) = command.encode(buf.expose_mut());
-        self.out.push(Out::Radio { msg_type, payload: Payload(buf.expose()[..len].to_vec()) });
+        let encoded = &buf.expose()[..len];
+        let payload = match command {
+            Command::Pairwise { .. } | Command::Group { .. } | Command::Integrity { .. } => {
+                let mut bytes = Secret::new([0; KEY_PAYLOAD]);
+                bytes.expose_mut()[..len].copy_from_slice(encoded);
+                Payload::Key { bytes, len }
+            }
+            _ => Payload::Plain(encoded.to_vec()),
+        };
+        self.out.push(Out::Radio { msg_type, payload });
     }
 
     fn answer(&mut self, client: Client, answer: Answer<'_>) {
         self.asking.retain(|c| *c != client);
         let (msg_type, payload) = answer.encode();
-        self.out.push(Out::Answer { client, msg_type, payload: Payload(payload) });
+        self.out.push(Out::Answer { client, msg_type, payload: Payload::Plain(payload) });
     }
 
     fn refuse(&mut self, client: Client, refusal: Refusal, detail: &str) {
@@ -311,9 +328,22 @@ impl Station {
     /// A join that failed: its client is told, and nothing is joined again.
     fn fail(&mut self, join: Join, refusal: Refusal, detail: &str) {
         self.say(&format!("wlan: a join failed: {}: {detail}", refusal.reason()));
+        self.eapol_dropped();
         if let Some(client) = join.client {
             self.refuse(client, refusal, detail);
         }
+    }
+
+    /// What the join that ended dropped of its access point's EAPOL frames, if anything.
+    fn eapol_dropped(&mut self) {
+        let c = self.counters;
+        if c.stray_eapol != 0 || c.refused_eapol != 0 {
+            self.say(&format!(
+                "wlan: the join dropped {} EAPOL frames from another address and refused {}",
+                c.stray_eapol, c.refused_eapol
+            ));
+        }
+        (self.counters.stray_eapol, self.counters.refused_eapol) = (0, 0);
     }
 
     /// Leave the BSS a join was associated with, if it was.
@@ -329,6 +359,8 @@ impl Station {
     fn scan(&mut self, now: Duration) {
         if self.scanning.is_none() {
             self.heard.clear();
+            let c = &mut self.counters;
+            (c.malformed_seen, c.off_channel, c.dropped_bss) = (0, 0, 0);
             self.scanning = Some(now);
             self.command(Command::Scan);
         }
@@ -421,6 +453,14 @@ impl Station {
         if self.scanning.take().is_none() {
             return self.violation(broke("finished a scan nobody asked"));
         }
+        let c = self.counters;
+        self.say(&format!(
+            "wlan: a scan heard {} BSSes, and dropped {} malformed frames, {} heard off their channel and {} past its bound",
+            self.heard.len(),
+            c.malformed_seen,
+            c.off_channel,
+            c.dropped_bss
+        ));
         let networks = self.networks();
         for client in core::mem::take(&mut self.scan_waiters) {
             self.answer(client, Answer::Networks(networks.clone()));
@@ -484,7 +524,13 @@ impl Station {
             Ok(s) => s,
             Err(why) => return self.fail(join, Refusal::Unjoinable, why.reason()),
         };
-        self.command(Command::Join { bssid: bss.bssid, channel: bss.channel, elements: &own_rsne });
+        self.command(Command::Join {
+            bssid: bss.bssid,
+            channel: bss.channel,
+            ssid: join.ssid.as_bytes(),
+            request: &own_rsne,
+            heard: &bss.elements,
+        });
         let chosen = Chosen { bssid: bss.bssid, channel: bss.channel, signal: bss.signal };
         join.phase = Phase::Associating { bss: chosen, supplicant, since: now };
         self.join = Some(join);
@@ -609,6 +655,7 @@ impl Station {
             }
             Phase::Connected { .. } => {
                 self.say(&format!("wlan: the association ended ({detail}); joining again"));
+                self.eapol_dropped();
                 self.join = Some(Join { phase: Phase::Scanning, ..join });
                 self.scan(now);
             }
@@ -619,6 +666,7 @@ impl Station {
     /// A settings program's connection ended: nothing waits on it any more.
     pub fn client_gone(&mut self, client: Client) {
         self.asking.retain(|c| *c != client);
+        self.ended.retain(|c| *c != client);
         self.scan_waiters.retain(|c| *c != client);
         if let Some(join) = &mut self.join
             && join.client == Some(client)
@@ -629,13 +677,16 @@ impl Station {
 
     /// One frame from a settings program.
     pub fn request(&mut self, client: Client, msg_type: u32, payload: &[u8], now: Duration) {
-        let request = match Request::decode(msg_type, payload) {
-            Ok(r) => r,
-            Err(_) => return self.out.push(Out::EndClient(client)),
-        };
-        if self.asking.contains(&client) {
-            return self.out.push(Out::EndClient(client));
+        if self.ended.contains(&client) {
+            return;
         }
+        let request = match Request::decode(msg_type, payload) {
+            Ok(r) if !self.asking.contains(&client) => r,
+            _ => {
+                self.ended.push(client);
+                return self.out.push(Out::EndClient(client));
+            }
+        };
         self.asking.push(client);
         match request {
             Request::Status => {
@@ -648,6 +699,7 @@ impl Station {
                 self.resume = None;
                 if let Some(join) = self.join.take() {
                     self.leave(&join, now);
+                    self.eapol_dropped();
                     if let Some(waiting) = join.client {
                         self.refuse(waiting, Refusal::Superseded, "a disconnect");
                     }
@@ -681,6 +733,7 @@ impl Station {
         self.resume = None;
         if let Some(old) = self.join.take() {
             self.leave(&old, now);
+            self.eapol_dropped();
             if let Some(waiting) = old.client {
                 self.refuse(waiting, Refusal::Superseded, "another connect");
             }

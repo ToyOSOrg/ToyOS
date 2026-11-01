@@ -10,13 +10,41 @@
 //! The answer is printed on standard output, with exit status 0 where it was done and 1 where
 //! it was refused.
 
-use std::io::{BufRead, Write};
+use std::io::{Read, Write};
+
+use toyos_crypto::Secret;
 
 use toyos::ipc::FrameRx;
 use toyos::poller::{READABLE, wait_one};
 use toyos_wifi::{Answer, Band, Network, Request, Ssid, State};
 
 const USAGE: &str = "usage: wifi status | scan | connect <network> | disconnect";
+
+/// The most of standard input's first line kept: past the longest passphrase, `wlan` refuses
+/// it whole.
+const LINE: usize = toyos_wifi::MAX_PASSPHRASE + 1;
+
+/// Standard input's first line into `line`, without its line ending: its length, or `None`
+/// where input ends before a line does. A line longer than `line` is cut.
+fn passphrase(line: &mut [u8; LINE]) -> Option<usize> {
+    let mut stdin = std::io::stdin().lock();
+    let (mut len, mut byte) = (0, [0u8; 1]);
+    loop {
+        match stdin.read(&mut byte) {
+            Ok(1) if byte[0] == b'\n' => break,
+            Ok(1) => {
+                if let Some(at) = line.get_mut(len) {
+                    *at = byte[0];
+                }
+                len += 1;
+            }
+            Ok(_) if len > 0 => break,
+            _ => return None,
+        }
+    }
+    let len = len.min(LINE);
+    Some(if line[..len].ends_with(b"\r") { len - 1 } else { len })
+}
 
 /// How long an answer may take: longer than every bound `wlan` keeps on a join together.
 const ANSWER_BOUND_NANOS: u64 = 60_000_000_000;
@@ -39,15 +67,11 @@ fn run(args: &[String]) -> (bool, String) {
             let Some(ssid) = Ssid::new(name.as_bytes()) else {
                 return (false, "a network's name is 1 to 32 octets".to_string());
             };
-            let mut line = Vec::new();
-            if std::io::stdin().lock().read_until(b'\n', &mut line).is_err() {
-                return (false, "standard input held no passphrase".to_string());
-            }
-            let typed = line.strip_suffix(b"\n").unwrap_or(&line);
-            let typed = typed.strip_suffix(b"\r").unwrap_or(typed);
-            let answer = ask(Request::Connect { ssid, passphrase: typed });
-            line.iter_mut().for_each(|b| *b = 0);
-            return answer;
+            let mut line = Secret::new([0u8; LINE]);
+            let Some(len) = passphrase(line.expose_mut()) else {
+                return (false, "standard input held no passphrase line".to_string());
+            };
+            return ask(Request::Connect { ssid, passphrase: &line.expose()[..len] });
         }
         _ => return (false, USAGE.to_string()),
     };
@@ -59,10 +83,9 @@ fn ask(request: Request<'_>) -> (bool, String) {
         Ok(conn) => conn,
         Err(e) => return (false, format!("wlan's wifi port did not answer: {e:?}")),
     };
-    let (msg_type, mut payload) = request.encode();
-    let sent = wlan.send_bytes(msg_type, &payload);
-    payload.iter_mut().for_each(|b| *b = 0);
-    if let Err(e) = sent {
+    let mut payload = Secret::new([0u8; toyos_wifi::REQUEST_PAYLOAD]);
+    let (msg_type, len) = request.encode(payload.expose_mut());
+    if let Err(e) = wlan.send_bytes(msg_type, &payload.expose()[..len]) {
         return (false, format!("wlan did not take the request: {e:?}"));
     }
     match wait_one(&wlan, READABLE, ANSWER_BOUND_NANOS) {

@@ -148,6 +148,8 @@ fn malformed_beacons_and_other_frames_are_dropped_and_counted() {
     }
     assert_eq!(h.station.counters().malformed_seen, 5);
     assert!(h.ended.is_empty());
+    h.event(Event::ScanDone);
+    assert!(h.log.iter().any(|l| l == "wlan: a scan heard 0 BSSes, and dropped 5 malformed frames, 0 heard off their channel and 0 past its bound"), "{:?}", h.log);
 }
 
 #[test]

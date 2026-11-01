@@ -33,7 +33,7 @@ fn every_event_and_command_round_trips() {
     let key = [7; 16];
     let commands = [
         Command::Scan,
-        Command::Join { bssid: A, channel: ch, elements: &[48, 2, 1, 0] },
+        Command::Join { bssid: A, channel: ch, ssid: b"home", request: &[48, 2, 1, 0], heard: &[0, 4, b'h', b'o', b'm', b'e'] },
         Command::Eapol { frame: &[1, 3, 0, 0] },
         Command::Pairwise { key: &key },
         Command::Group { id: 3, key: &key, rsc: (1 << 48) - 1 },
@@ -51,13 +51,22 @@ fn every_event_and_command_round_trips() {
 #[test]
 fn commands_wlan_never_sends_are_refused() {
     let key = [7u8; 16];
-    let join = |elements: &[u8]| [&A.0[..], &5180u16.to_le_bytes(), elements].concat();
+    let join = |ssid: &[u8], request: &[u8], heard: &[u8]| {
+        let request_len = u16::try_from(request.len()).unwrap().to_le_bytes();
+        [&A.0[..], &5180u16.to_le_bytes(), &[u8::try_from(ssid.len()).unwrap()], ssid, &request_len, request, heard].concat()
+    };
+    let (rsne, beacon) = ([48u8, 2, 1, 0], [0u8, 1, b'x']);
     for (t, payload, why) in [
         (MSG_SCAN, vec![0], Violation::Length),
-        (MSG_JOIN, join(&[]), Violation::Elements),
-        (MSG_JOIN, join(&[48, 5, 1]), Violation::Elements),
-        (MSG_JOIN, [&[1u8, 0, 0, 0, 0, 1][..], &5180u16.to_le_bytes(), &[48, 0]].concat(), Violation::Address),
-        (MSG_JOIN, [&A.0[..], &5181u16.to_le_bytes(), &[48, 0]].concat(), Violation::Frequency),
+        (MSG_JOIN, join(b"x", &[], &beacon), Violation::Elements),
+        (MSG_JOIN, join(b"x", &[48, 5, 1], &beacon), Violation::Elements),
+        (MSG_JOIN, join(b"x", &rsne, &[]), Violation::Elements),
+        (MSG_JOIN, join(b"x", &rsne, &[0, 9]), Violation::Elements),
+        (MSG_JOIN, join(b"", &rsne, &beacon), Violation::Ssid),
+        (MSG_JOIN, join(&[b'x'; 33], &rsne, &beacon), Violation::Ssid),
+        (MSG_JOIN, join(b"x", &rsne, &beacon)[..12].to_vec(), Violation::Length),
+        (MSG_JOIN, [&[1u8, 0, 0, 0, 0, 1][..], &join(b"x", &rsne, &beacon)[6..]].concat(), Violation::Address),
+        (MSG_JOIN, [&A.0[..], &5181u16.to_le_bytes(), &join(b"x", &rsne, &beacon)[8..]].concat(), Violation::Frequency),
         (MSG_PAIRWISE, key[..15].to_vec(), Violation::Length),
         (MSG_GROUP, [&[0u8][..], &key, &0u64.to_le_bytes()].concat(), Violation::GroupKeyId),
         (MSG_GROUP, [&[1u8][..], &key, &(1u64 << 48).to_le_bytes()].concat(), Violation::PacketNumber),

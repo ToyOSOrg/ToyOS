@@ -96,6 +96,11 @@ fn a_client_that_breaks_the_wifi_protocol_is_ended() {
     h.ask(5, Request::Scan);
     h.ask(5, Request::Status);
     assert_eq!(h.ended_clients, [1, 2, 3, 4, 5]);
+    // What an ended client sends before its connection is gone is not acted on.
+    (h.answered(), h.sent());
+    h.ask(1, Request::Status);
+    h.connect(4, SSID, PASSPHRASE);
+    assert_eq!((h.answered(), h.sent()), (vec![], vec![]));
 }
 
 #[test]

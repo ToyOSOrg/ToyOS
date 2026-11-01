@@ -70,6 +70,9 @@ pub struct Bss {
     pub rsne: Vec<u8>,
     /// Its RSNXE whole, if it sent one.
     pub rsnxe: Option<Vec<u8>>,
+    /// Every element of the Beacon or Probe Response it was heard by, which a join hands the
+    /// driver.
+    pub elements: Vec<u8>,
     plan: Result<Plan, Unjoinable>,
 }
 
@@ -127,6 +130,7 @@ impl Bss {
             security,
             rsne: whole(elements, 48).unwrap_or_default(),
             rsnxe: whole(elements, 244),
+            elements: elements.to_vec(),
             plan: plan(&e, security),
         }))
     }
@@ -172,7 +176,8 @@ fn plan(e: &Elements<'_>, security: Security) -> Result<Plan, Unjoinable> {
     if rsn.mfp_required() && !protection {
         return Err(Unjoinable::Management);
     }
-    // Rates run to 54 Mb/s, 108 in units of 500 kb/s; a value above is a selector.
+    // Rates run to 54 Mb/s, 108 in units of 500 kb/s; a value above is a selector. The radios
+    // `radio` serves, the AX200 and AX210, are HE stations, so they meet HT, VHT and HE's.
     let met = [Rate::HT_PHY, Rate::VHT_PHY, Rate::HE_PHY];
     if e.rates.is_some_and(|r| r.iter().any(|r| r.basic && r.value > 108 && !met.contains(&r.value))) {
         return Err(Unjoinable::Selector);

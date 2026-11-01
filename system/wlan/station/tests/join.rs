@@ -80,8 +80,9 @@ fn join_recorded(pcap: &[u8], tk: &str, gtk: &str, igtk: Option<&str>) {
     let on = channel(2412);
     h.seen(on, -30, &r.probe_response);
     h.event(Event::ScanDone);
-    let [Sent::Join { bssid, channel: joined, elements }] = &h.sent()[..] else { panic!("a join") };
-    assert_eq!((*bssid, *joined), (r.authenticator, on));
+    let [Sent::Join { bssid, channel: joined, ssid, elements, heard }] = &h.sent()[..] else { panic!("a join") };
+    assert_eq!((*bssid, *joined, &ssid[..]), (r.authenticator, on, &b"toyos-w2a"[..]));
+    assert_eq!(heard[..], r.probe_response[24 + 12..], "the Probe Response's elements, whole");
     let own = [48, 20, 1, 0, 0, 0x0f, 0xac, 4, 1, 0, 0, 0x0f, 0xac, 4, 1, 0, 0, 0x0f, 0xac, 2, 0x80, 0];
     assert_eq!(elements[..], own, "PSK and CCMP-128, management frame protection capable");
     h.event(Event::Associated);
@@ -257,6 +258,8 @@ fn eapol_frames_the_air_spoils_are_dropped_and_counted() {
     assert_eq!(h.answered(), []);
     assert_eq!(h.sent(), [], "nothing is left or installed");
     completes_from_3(&mut h, &mut ap);
+    h.ask(2, Request::Disconnect);
+    assert!(h.log.iter().any(|l| l == "wlan: the join dropped 1 EAPOL frames from another address and refused 3"), "{:?}", h.log);
 }
 
 #[test]
