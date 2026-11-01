@@ -26,7 +26,7 @@ mod aes;
 mod arch;
 mod block;
 pub mod chacha;
-mod ct;
+pub mod ct;
 pub mod ecc;
 pub mod ed25519;
 mod field25519;
@@ -46,6 +46,7 @@ pub mod rustls_provider;
 mod scalar25519;
 pub mod scrypt;
 mod secret;
+pub use secret::{Secret, Zeroable};
 pub mod siphash;
 pub mod ssh;
 #[cfg(feature = "wpa2")]

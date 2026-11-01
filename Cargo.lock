@@ -4179,6 +4179,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "toyos-wlan-handshake"
+version = "0.1.0"
+dependencies = [
+ "aes",
+ "ring",
+ "toyos-crypto",
+ "toyos-ieee80211",
+]
+
+[[package]]
 name = "toyos-xhci"
 version = "0.1.0"
 dependencies = [
