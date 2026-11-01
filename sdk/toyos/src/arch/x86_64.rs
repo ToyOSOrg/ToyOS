@@ -35,3 +35,16 @@ pub(crate) unsafe fn zero(dst: *mut u8, len: usize) {
         );
     }
 }
+
+/// `crate::timing`'s mode: none a thread sets on x86-64.
+pub(crate) mod timing {
+    /// The thread's mode: `None`, as there is none.
+    #[inline(always)]
+    pub(crate) fn mode() -> Option<bool> {
+        None
+    }
+
+    pub(crate) fn set_mode(_on: bool) {
+        unreachable!("x86-64 has no timing mode a thread sets, so nothing found one to set")
+    }
+}
