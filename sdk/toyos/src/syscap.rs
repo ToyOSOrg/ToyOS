@@ -208,6 +208,14 @@ impl SysCap {
         read_whole(|buf| self.inventory(buf), buffer)
     }
 
+    /// A handle to the device set ([`crate::devset`]).
+    ///
+    /// Needs [`Rights::DEVICE`], the right that mints the claims the set's
+    /// functions are handed out by.
+    pub fn device_set(&self) -> Result<crate::devset::DeviceSet, SyscallError> {
+        syscall::device_set(self.0.raw()).map(|h| crate::devset::DeviceSet(OwnedHandle(h)))
+    }
+
     /// A second handle to this capability carrying **less**.
     ///
     /// How the supervisor gives a program the RT band and nothing else: rights only

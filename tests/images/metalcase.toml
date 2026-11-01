@@ -9,7 +9,7 @@
 assets = ["assets"]
 
 [boot]
-start = ["logkeeper", "diskserver", "fileserver", "compositor", "soundserver", "netstack", "sshserver", "test-runner", "ps2server"]
+start = ["acpiserver", "logkeeper", "diskserver", "fileserver", "compositor", "soundserver", "netstack", "sshserver", "test-runner", "ps2server"]
 
 # **Every image that carries a `TOYOS-LOG` partition runs this**, and every
 # image does. The kernel keeps the record ring and writes no file at all, so a
@@ -114,3 +114,10 @@ restart = true
 pager = true
 roles = ["data", "log", "boot"]
 receives = ["block"]
+
+# Started before every PCI claimant: it declares the memory the root bridges
+# decode, which every claim of a PCI function waits for.
+[programs.acpiserver]
+service = true
+devices = ["acpi"]
+receives = ["power"]

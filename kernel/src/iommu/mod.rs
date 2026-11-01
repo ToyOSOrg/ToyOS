@@ -118,9 +118,6 @@ pub enum IommuError {
     DomainsExhausted(u32),
     /// Every allowed address below this limit is handed out.
     AddressesExhausted(Limit),
-    /// No declaration of the root bridges' windows is held, so no address is
-    /// known to be clear of them.
-    Undeclared,
     /// Less than a new domain was asked to hand out is allowed below 4 GiB.
     NoRoom { room: u64 },
     /// Not a whole number of the 2 MiB leaves this kernel writes.
@@ -141,11 +138,6 @@ impl core::fmt::Display for IommuError {
             Self::AddressesExhausted(limit) => {
                 write!(f, "a domain's device addresses below {:#x} are all handed out", limit.end())
             }
-            Self::Undeclared => write!(
-                f,
-                "no declaration of the root bridges' windows is held, so no device address is known \
-                 to be clear of them"
-            ),
             Self::NoRoom { room } => {
                 write!(f, "less than the {room:#x} bytes a new domain hands out first is allowed below 4 GiB")
             }
@@ -155,67 +147,42 @@ impl core::fmt::Display for IommuError {
     }
 }
 
-/// Where a device's addresses come from. Not a bare `DomainId`: a machine with no
-/// unit has to be something this type can say, or every driver grows the branch.
+/// Where a device's addresses come from, for a driver **in this kernel**: the
+/// machine's own, since every domain is built clear of the root bridges'
+/// declared windows and a driver here comes up before they are declared.
+/// Until the last one moves to userland
+/// (`issues/an-aarch64-cargo-run-boot-shows-nothing-on-its-terminal.md`).
 #[derive(Clone, Copy)]
 pub enum DeviceSpace {
     /// Nothing translates here, so a device address is a physical address.
     Untranslated,
-    /// The device reaches exactly what is mapped in this and nothing else.
-    Own(DomainId),
 }
 
 impl DeviceSpace {
-    /// One for whichever of `functions` is attached to it, or the machine's
-    /// own with the reason: the machine's own where any of them keeps it, so
-    /// the one attached reaches what its device addresses name. For a driver
-    /// **in this kernel**, whose addresses are the kernel's either way.
-    pub fn create(functions: &[crate::drivers::pci::PciDevice]) -> Self {
+    /// The machine's own addresses for `functions`, or `None` where the unit
+    /// lets a function with no domain of its own reach nothing, which is said.
+    pub fn create(functions: &[crate::drivers::pci::PciDevice]) -> Option<Self> {
         for function in functions {
             let stream = StreamId::pci(function.bus, function.dev, function.func);
             if let Some(why) = unit::domain::untranslated(stream) {
                 log!("iommu: {stream} keeps the machine's addresses: {why}");
-                return Self::Untranslated;
+                continue;
+            }
+            if unit::domain::aborts_undomained(stream) {
+                log!("iommu: {stream} reaches nothing: the unit aborts a function with no domain, and none is made before the root bridges are declared");
+                return None;
             }
         }
-        match unit::domain::create(0) {
-            Ok((id, _)) => Self::Own(id),
-            Err(why) => {
-                log!("iommu: no domain of its own for a device: {why}");
-                Self::Untranslated
-            }
-        }
+        Some(Self::Untranslated)
     }
 
     /// Put `bytes` at `phys` in this space, ending at or below `limit`, the
     /// device's own address width; returns what to program the device with.
-    ///
-    /// Read and write both, always: nothing here can give a permission set a
-    /// second value. The only leaf is 2 MiB, coarser than any split a driver's
-    /// pools offer, and QEMU drops an access its cached translation denies
-    /// rather than recording a fault — unexpressible and unobservable both.
     pub fn map(self, phys: u64, bytes: u64, limit: Limit) -> Result<u64, IommuError> {
         match self {
             // The pages are the address, so nothing chooses one the device reaches.
             Self::Untranslated if phys.saturating_add(bytes) > limit.end() => Err(IommuError::AddressesExhausted(limit)),
             Self::Untranslated => Ok(phys),
-            Self::Own(id) => unit::domain::map(id, phys, bytes, limit).map(Iova::raw),
-        }
-    }
-
-    /// Take `bytes` at `at` back, so the pages behind them can be reused.
-    pub fn unmap(self, at: u64, bytes: u64) -> Result<(), IommuError> {
-        match self {
-            Self::Untranslated => Ok(()),
-            Self::Own(id) => unit::domain::unmap(id, Iova::translated(at), bytes),
-        }
-    }
-
-    /// Move `bus:device.function` onto this space, every mapping it needs already
-    /// in place: the device is translating the moment this returns.
-    pub fn attach(self, bus: u8, device: u8, function: u8) {
-        if let Self::Own(id) = self {
-            OwnSpace(id).attach(bus, device, function);
         }
     }
 }
@@ -228,13 +195,20 @@ pub struct OwnSpace(DomainId);
 
 impl OwnSpace {
     /// One with `room` bytes of it below 4 GiB handed out at the address
-    /// answered, or the reason there is none: a machine with no unit and a
-    /// machine out of domains are both refusals.
+    /// answered, clear of the root bridges' declared `windows`, or the reason
+    /// there is none: a machine with no unit and a machine out of domains are
+    /// both refusals.
     ///
     /// What firmware reserved for function `bus:device.function` is mapped in
     /// it at its own addresses, before the function can attach.
-    pub fn create(room: u64, bus: u8, device: u8, function: u8) -> Result<(Self, u64), IommuError> {
-        let (id, at) = unit::domain::create(room)?;
+    pub fn create(
+        room: u64,
+        windows: &[toyos_abi::acpi::RootBridgeWindow],
+        bus: u8,
+        device: u8,
+        function: u8,
+    ) -> Result<(Self, u64), IommuError> {
+        let (id, at) = unit::domain::create(room, windows)?;
         unit::domain::keep_reserved(id, StreamId::pci(bus, device, function));
         Ok((Self(id), at.raw()))
     }
@@ -281,17 +255,10 @@ impl core::fmt::Display for StreamId {
 ///
 /// The device list must be the complete enumeration: enabling translation with an unenumerated device left off it can brick the machine's own boot disk.
 ///
-/// No domain's addresses reach into one of `windows`, the root bridges'
-/// declared memory, or `None` where no declaration is held ([`window`]).
 /// `kernel` is this kernel's image, `[start, end)` physical: what a unit's
 /// hand-over keeps out of every device's reach where it can.
-pub fn init(
-    rsdp_addr: u64,
-    devices: &[crate::drivers::pci::PciDevice],
-    windows: Option<&toyos_pci::aperture::Declaration<alloc::vec::Vec<toyos_abi::boot::RootBridgeWindow>>>,
-    kernel: (u64, u64),
-) {
-    unit::init(rsdp_addr, devices, windows.map(|declared| declared.windows()), kernel);
+pub fn init(rsdp_addr: u64, devices: &[crate::drivers::pci::PciDevice], kernel: (u64, u64)) {
+    unit::init(rsdp_addr, devices, kernel);
 }
 
 /// Once, after every kernel driver has taken its functions from firmware and

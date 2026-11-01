@@ -1,8 +1,13 @@
-# The ACPI server's death, judged on the T14 by `acpi_server_death`: the server
-# is built into the image and started by nothing but the one job, which holds
-# the claim it hands it. A boot that ends itself, as `tests/images/jobcase.toml` does.
+# The `acpi` claim's own holders: jobs that claim it, starting with the first,
+# on a boot the ACPI server is built into and started by nothing but a job
+# (`acpi_mediated_access` and the rows beside it). A boot that ends itself, as
+# `tests/images/jobcase.toml` does. No row holds the claim, so none declares
+# the root bridges' memory before the supervisor's own claims, and nothing
+# here claims a PCI function: the boot has no storage, and on the T14 its log
+# has no way to its stick
+# (`issues/the-acpi-servers-death-has-no-readback-on-the-t14.md`).
 [boot]
-start = ["logkeeper", "diskserver", "fileserver", "test-runner"]
+start = ["logkeeper", "test-runner"]
 
 [programs.logkeeper]
 service = true
@@ -28,34 +33,3 @@ args = ["test_rs_acpi_mediated", "reboot"]
 
 [symlinks]
 "bin/reboot" = "/system/bin/toybox"
-
-# The block service: every disk a driver offers on `disk`, listed and opened
-# for the clients `block` grants, each session handed to its disk's driver.
-# Started again when it ends; its drivers connect again and offer again.
-[programs.diskserver]
-service = true
-restart = true
-serves = ["block", "disk"]
-
-# The NVMe driver: one process per NVMe controller, whatever its maker, reading
-# its own table and offering its disk to the block service. Another system's
-# partitions on that disk are reached by no grant (`toyos_supervisor::storage`).
-[programs.nvme]
-drives = ["pci:01:08:02"]
-receives = ["disk"]
-
-# The USB driver: QEMU's `nec-usb-xhci`, and the controller firmware booted
-# through where that is an xHCI, which on a bench booted off its NVMe is none.
-# Every other xHCI controller stays free for the tests that claim one.
-[programs.usbd]
-drives = ["pci:0c:03:30/1033:0194", "pci:0c:03:30@boot"]
-receives = ["disk"]
-
-# The file servers: DATA, the log and the boot volume, one process
-# each, serving every program the directories of its role. Started again when
-# one ends, on the same ports.
-[programs.fileserver]
-restart = true
-pager = true
-roles = ["data", "log", "boot"]
-receives = ["block"]

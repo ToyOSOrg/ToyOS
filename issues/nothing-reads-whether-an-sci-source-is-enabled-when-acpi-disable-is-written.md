@@ -24,6 +24,7 @@ Owned by `issues/toyos-runs-the-machine-in-acpi-mode-and-interprets-its-aml.md`.
 
 **Exit**: the release's `legacy mode again` line says what the PM1 enable
 register and the GPE0 enable bytes read at the write on the T14's
-`acpi_server_death` boot, and either every one reads zero there by the
+`acpi_server_death` boot, once it is registered again
+(`issues/the-acpi-servers-death-has-no-readback-on-the-t14.md`), and either every one reads zero there by the
 release's own doing or this file is promoted with what the firmware did with
 the ones that did not.

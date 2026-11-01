@@ -1,0 +1,14 @@
+# A boot no `acpi` claim holder declares on: two `edu` a `drives` row claims,
+# and no acpiserver. `a_claim_waits_out_an_undeclared_machine` judges the
+# first claim waiting its deadline out and both refused by name.
+[boot]
+start = ["logkeeper", "test-runner"]
+
+[programs.logkeeper]
+service = true
+syscap = ["logread"]
+
+[programs.pciholder]
+drives = ["pci:00:ff:00/1234:11e8"]
+
+[programs.test-runner]

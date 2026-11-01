@@ -96,19 +96,30 @@ pub fn untranslated(_function: StreamId) -> Option<&'static str> {
     None
 }
 
-/// Why no claim may have `function`: never, as [`untranslated`].
-pub fn unclaimable(_function: StreamId) -> Option<&'static str> {
-    None
+/// Whether `function`, given no domain of its own, reaches nothing: the IORT
+/// routes it through the armed unit, whose stream table aborts every stream
+/// no claim gave a domain.
+pub fn aborts_undomained(function: StreamId) -> bool {
+    UNIT.lock().as_ref().is_some_and(|live| live.routes.iter().any(|(stream, ..)| *stream == function))
 }
 
-/// A new domain, with `room` bytes of it handed out first: refused, with no id
-/// spent, where it would have less than that.
-pub fn create(room: u64) -> Result<(DomainId, Iova), IommuError> {
+/// Why no claim may have `function`: it arrived after the unit was
+/// programmed, and its IORT route was read only for the functions enumerated
+/// then.
+pub fn unclaimable(function: StreamId) -> Option<&'static str> {
+    let arrived = UNIT.lock().as_ref().is_some_and(|live| !live.enumerated.contains(&function));
+    arrived.then_some("it arrived after the SMMUv3 was programmed, and its IORT route is read for the functions enumerated then")
+}
+
+/// A new domain, with `room` bytes of it handed out first, clear of the root
+/// bridges' declared `windows`: refused, with no id spent, where it would
+/// have less than that.
+pub fn create(room: u64, windows: &[toyos_abi::acpi::RootBridgeWindow]) -> Result<(DomainId, Iova), IommuError> {
     let doorbell = super::super::irqchip::its::doorbell_page();
     let mut held = UNIT.lock();
     let live = held.as_mut().ok_or(IommuError::NoUnit)?;
     let ceiling = if live.unit.asid(0x100).is_some() { 1 << 16 } else { 1 << 8 };
-    let next = live.domains.prepare(INPUT_BITS as u8, ceiling, room)?;
+    let next = live.domains.prepare(INPUT_BITS as u8, ceiling, room, windows)?;
     let asid = live.unit.asid(next.id).expect("SMMU: an id below the unit's ASIDs");
     let root = Phys::new(live.memory.alloc(PAGE_SIZE)).expect("SMMU: a table below the unit's output size");
     let context = Phys::new(live.memory.alloc(64)).expect("SMMU: a descriptor below the unit's output size");

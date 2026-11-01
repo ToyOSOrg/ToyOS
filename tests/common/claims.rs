@@ -121,29 +121,44 @@ pub fn reuses_its_entry(log: &Serial) -> Result<(), String> {
     Ok(())
 }
 
-/// Every address a domain mapped lies outside every root-bridge window
-/// firmware declared: a bridge may route a request in one of those before the
-/// unit sees it.
-pub fn clear_of_host_bridges(log: &Serial) -> Result<(), String> {
-    const DECLARED: &str = "pcidev: firmware declared root bridge memory: ";
+/// The kernel's record of a declaration it refused.
+pub const REFUSED_DECLARATION: &str = "pcidev: the root bridges' memory is refused as declared";
+
+/// What the `acpi` claim's holder declared the root bridges decode.
+pub const DECLARED: &str = "pcidev: the acpi claim declared root bridge memory: ";
+
+fn hex(text: &str) -> Option<u64> {
+    u64::from_str_radix(text.trim().strip_prefix("0x")?, 16).ok()
+}
+
+/// `a..b` in hex, as the kernel's records write a span.
+fn span(text: &str) -> Option<(u64, u64)> {
+    let (from, to) = text.split_once("..")?;
+    Some((hex(from)?, hex(to)?))
+}
+
+/// The declared windows, as `(start, end)`.
+fn declared(log: &Serial) -> Result<Vec<(u64, u64)>, String> {
     let declared = records(log)
         .find_map(|m| m.strip_prefix(DECLARED))
         .ok_or_else(|| format!("no `{DECLARED}` record:\n{}", log.text()))?;
-    let hex = |t: &str| u64::from_str_radix(t.trim().strip_prefix("0x")?, 16).ok();
-    let range = |text: &str| -> Option<(u64, u64)> {
-        let (from, to) = text.split_once("..")?;
-        Some((hex(from)?, hex(to)?))
-    };
-    let windows = declared
+    declared
         .split(", ")
-        .map(|w| w.strip_prefix("mem ").and_then(range).ok_or_else(|| format!("{w:?} in {declared:?}")))
-        .collect::<Result<Vec<_>, _>>()?;
+        .map(|w| w.strip_prefix("mem ").and_then(span).ok_or_else(|| format!("{w:?} in {declared:?}")))
+        .collect()
+}
+
+/// Every address a domain mapped lies outside every root-bridge window the
+/// `acpi` claim's holder declared: a bridge may route a request in one before
+/// the unit sees it.
+pub fn clear_of_host_bridges(log: &Serial) -> Result<(), String> {
+    let windows = declared(log)?;
     let mut mapped = 0;
     // `iommu: domainN maps <phys>..<end> at <device address>[ again]`.
     for record in records(log).filter(|m| m.starts_with("iommu: domain") && m.contains(" maps ")) {
         let parsed = record.split_once(" maps ").and_then(|(_, rest)| {
             let (phys, at) = rest.split_once(" at ")?;
-            let (from, to) = range(phys)?;
+            let (from, to) = span(phys)?;
             let at = hex(at.trim_end_matches(" again"))?;
             Some((at, at + (to - from)))
         });

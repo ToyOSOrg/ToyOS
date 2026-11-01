@@ -74,7 +74,9 @@ serves = ["log"]
 # firmware's own access: the kernel makes the AML's reads and writes for it,
 # inside the fences of `toyos_userbound::firmware`. `power` is how a press
 # stops the machine: through the supervisor, which has `logkeeper` make the
-# log whole.
+# log whole. It declares the memory the PCI root bridges decode out of each
+# root's `_CRS`, which every PCI claim waits for, so the supervisor starts it
+# before every other row; an image that claims a PCI function starts it.
 [programs.acpiserver]
 service = true
 devices = ["acpi"]

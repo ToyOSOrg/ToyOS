@@ -232,10 +232,9 @@ pub fn init(devices: &[PciDevice]) -> bool {
     };
     log!("virtio-console: found at PCI {:02x}:{:02x}.{}", pci_dev.bus, pci_dev.dev, pci_dev.func);
 
-    // An address space of this device's own, holding one pool and nothing
-    // else — unless it does not offer ACCESS_PLATFORM: then it uses physical
-    // addresses whatever translates the bus, and a driver MUST give it physical
-    // ones (virtio 1.2 §6.1); a domain's addresses would be other memory's.
+    // Without ACCESS_PLATFORM the device uses physical addresses, whatever
+    // translates the bus (virtio 1.2 §6.1); with it, a unit that aborts a
+    // function with no domain of its own refuses this one.
     let space = if offered.features & VIRTIO_F_ACCESS_PLATFORM != 0 {
         crate::iommu::DeviceSpace::create(&[pci_dev])
     } else {
@@ -243,7 +242,15 @@ pub fn init(devices: &[PciDevice]) -> bool {
             "virtio-console: PCI {:02x}:{:02x}.{} offers no ACCESS_PLATFORM, so it is told physical addresses",
             pci_dev.bus, pci_dev.dev, pci_dev.func
         );
-        crate::iommu::DeviceSpace::Untranslated
+        Some(crate::iommu::DeviceSpace::Untranslated)
+    };
+    let Some(space) = space else {
+        log!(
+            "virtio-console: PCI {:02x}:{:02x}.{} would reach no memory — device refused, and the console stays on the UART",
+            pci_dev.bus, pci_dev.dev, pci_dev.func
+        );
+        offered.decline();
+        return false;
     };
     // Leaked, not held in a `static`: the console is never unbound.
     // Virtio 1.x carries every buffer address as 64 bits (§2.7.5).
@@ -255,8 +262,6 @@ pub fn init(devices: &[PciDevice]) -> bool {
             return false;
         }
     };
-    // Before the device is told an address, and after the only mapping it gets.
-    space.attach(pci_dev.bus, pci_dev.dev, pci_dev.func);
 
     let device = match offered.accept(&pci_dev, VIRTIO_F_VERSION_1) {
         Ok(device) => device,

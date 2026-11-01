@@ -13,10 +13,10 @@ every CPU every 2.2 s
 The ACPI server loads a machine's DSDT and SSDTs, evaluates `\_S5` and hands
 the kernel its sleep type, which the kernel powers the machine off with and
 has from nowhere else. It initialises the namespace, negotiates `_OSC`,
-serves the runtime GPEs and delivers Notifies (#875). What else
-ToyOS takes from them it takes another way: the loader asks UEFI for the root
-bridges' windows `_CRS` would name (`loader/src/rootbridge.rs`). The
-processors' `_CST`, which names their C-states, is the idle track's
+serves the runtime GPEs and delivers Notifies (#875), and declares each PCI
+root bridge's `_CRS` windows and `_OSC` answer to the kernel
+(`system/acpiserver/src/apertures.rs`). The processors' `_CST`, which names
+their C-states, is the idle track's
 (`issues/idle-cpus-enter-the-c-states-cst-names.md`).
 
 **Ruled** (owner, 2026-10-03, on the scout in #681's comment 5966817345): the
@@ -110,9 +110,10 @@ and that stop in the boot's log. On the T14, `counters` reads
 and holds the count to what ToyOS asked for over the interval the firmware
 issue's exit defines, every CPU's delta equal to the boot processor's
 `firmware_calls` delta, and the machine still in ACPI mode; `acpi_server_events` reads each EC query number
-once with its count; and `acpi_server_death` kills the server and reads
+once with its count; and `acpi_server_death` killed the server and read
 `SCI_EN` clear in `PM1_CNT` afterwards, the kernel having written
-`ACPI_DISABLE` to `SMI_CMD`.
+`ACPI_DISABLE` to `SMI_CMD`, a row unregistered until its boot has a log
+again (`issues/the-acpi-servers-death-has-no-readback-on-the-t14.md`).
 
 Two things stage 1 lands are read by no T14 row, and neither is in its exit.
 The T14's own button, and that every press of it stops the machine, is

@@ -123,6 +123,9 @@ struct Live {
     /// StreamID, and the DeviceID the unit's own node maps that stream on to
     /// at an ITS.
     routes: Vec<(StreamId, u32, Option<ItsDevice>)>,
+    /// Every function enumerated when the unit was programmed: the ones
+    /// [`Self::routes`] was read for.
+    enumerated: Vec<StreamId>,
     domains: crate::iommu::domains::Domains<domain::Space>,
 }
 
@@ -211,12 +214,7 @@ pub fn drivers_settled() {}
 /// The SMMUv3, armed; a refusal leaves every unit the IORT names aborting
 /// what it is given, or says why one could not be told to.
 /// `_kernel` is the VT-d hand-over's to guard; this backend has no use for it.
-pub fn init(
-    rsdp_addr: u64,
-    devices: &[PciDevice],
-    windows: Option<&[toyos_abi::boot::RootBridgeWindow]>,
-    _kernel: (u64, u64),
-) {
+pub fn init(rsdp_addr: u64, devices: &[PciDevice], _kernel: (u64, u64)) {
     let iort = match toyos_acpi::iort(direct_phys(), rsdp_addr) {
         Ok(iort) => iort,
         Err(IortRefused::Table(TableError::Absent)) => {
@@ -280,10 +278,10 @@ pub fn init(
     // The ITS's doorbell page is mapped at its own address in every domain
     // (`domain::create`), so no grant may be handed out over it.
     let doorbell = super::irqchip::its::doorbell_page().map(|page| (page, page + crate::mm::PAGE_SIZE));
-    let reserved = windows.map(|w| w.iter().map(|w| (w.base, w.end())).chain(doorbell).collect());
-    let Some(live) = program(regs, smmu.base, smmu.coherent_override, smmu.event, routes, reserved) else {
+    let Some(mut live) = program(regs, smmu.base, smmu.coherent_override, smmu.event, routes, doorbell.into_iter().collect()) else {
         return;
     };
+    live.enumerated = devices.iter().map(|device| StreamId::pci(device.bus, device.dev, device.func)).collect();
     *UNIT.lock() = Some(live);
     #[cfg(feature = "boot-actuators")]
     if crate::actuator::smmu_selftest() {
@@ -338,7 +336,7 @@ fn program(
     coherent_override: bool,
     event: Option<core::num::NonZeroU32>,
     routes: Vec<(StreamId, u32, Option<ItsDevice>)>,
-    reserved: Option<Vec<(u64, u64)>>,
+    reserved: Vec<(u64, u64)>,
 ) -> Option<Live> {
     let refused = |why: core::fmt::Arguments<'_>| log!("IOMMU: the SMMUv3 at {base:#x} is left aborting: {why}");
     let (idr0, idr1, idr5) = (regs.read(reg::IDR0), regs.read(reg::IDR1), regs.read(reg::IDR5));
@@ -411,6 +409,7 @@ fn program(
         streams,
         memory,
         routes,
+        enumerated: Vec::new(),
         domains: crate::iommu::domains::Domains::new(domain::FIRST),
     };
     live.domains.avoid(reserved);

@@ -289,6 +289,16 @@ impl Readback {
         bootlog::one_clock(&self.loader, &self.log).map_err(|why| format!("{}: {why}", self.label))
     }
 
+    /// No declaration of the PCI root bridges this boot made was refused: a
+    /// refused one leaves every claim refused, which a row that claims
+    /// nothing would never see.
+    pub fn declaration_not_refused(&self) -> Result<(), String> {
+        match self.kernel.lines().find(|line| line.contains(super::claims::REFUSED_DECLARATION)) {
+            Some(line) => Err(format!("{}: the kernel refused the root bridges' declaration: {}", self.label, line.trim())),
+            None => Ok(()),
+        }
+    }
+
     /// When `Boot: complete` was written, on the same clock.
     pub fn complete_record_ms(&self) -> Option<u64> {
         self.kernel.lines().find(|line| line.contains(bootlog::COMPLETE)).and_then(bootlog::record_millis)
@@ -1212,6 +1222,7 @@ pub fn judge_readbacks(
         findings.extend(back.deadline_on_time().err());
         findings.extend(back.lockup_on_time().err());
         findings.extend(back.one_clock().err());
+        findings.extend(back.declaration_not_refused().err());
         for why in &findings {
             eprintln!("    FAIL {why}");
         }

@@ -13,7 +13,7 @@
 assets = ["assets"]
 
 [boot]
-start = ["logkeeper", "compositor", "test-runner"]
+start = ["acpiserver", "logkeeper", "compositor", "test-runner"]
 
 # `every_boot_config_runs_logkeeper` is what refuses a boot config without it.
 [programs.logkeeper]
@@ -33,3 +33,10 @@ drives = ["pci:07:80:00/1af4:1043"]
 receives = ["clipboard"]
 
 [programs.test-runner]
+
+# Started before every PCI claimant: it declares the memory the root bridges
+# decode, which every claim of a PCI function waits for.
+[programs.acpiserver]
+service = true
+devices = ["acpi"]
+receives = ["power"]

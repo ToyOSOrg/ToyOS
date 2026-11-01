@@ -2,7 +2,7 @@
 # from the package staged on its ROOT: a ROOT of its own, since the package is
 # a hundred megabytes and no other test reads it, and DATA, where `/apps` is.
 [boot]
-start = ["logkeeper", "diskserver", "fileserver", "test-runner"]
+start = ["acpiserver", "logkeeper", "diskserver", "fileserver", "test-runner"]
 
 [programs.logkeeper]
 service = true
@@ -29,3 +29,10 @@ restart = true
 pager = true
 roles = ["data", "log", "boot"]
 receives = ["block"]
+
+# Started before every PCI claimant: it declares the memory the root bridges
+# decode, which every claim of a PCI function waits for.
+[programs.acpiserver]
+service = true
+devices = ["acpi"]
+receives = ["power"]

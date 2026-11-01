@@ -341,7 +341,7 @@ impl Displaced {
     }
 }
 
-/// The entry that moves `requester`'s present entry `old` onto domain `id`
+/// The entry that moves `requester`'s entry `old`, present or not, onto domain `id`
 /// at `root`, and what that leaves the unit holding: the id `old` named, never
 /// `id`.
 const fn rebind(old: (u64, u64), requester: u16, root: Table, id: u16, width: AddressWidth) -> ((u64, u64), Displaced) {
@@ -357,32 +357,31 @@ pub fn bind_identity(
     domain: Table,
     width: AddressWidth,
 ) {
-    let bus = stream.bus() as usize;
-    let entry = root.read(bus * 2);
-    let context = if entry & PRESENT != 0 {
-        Table { phys: entry & ADDR_MASK }
-    } else {
-        let table = tables.alloc();
-        root.write_pair(bus, table.phys | PRESENT, 0);
-        table
-    };
     let (lo, hi) = context_entry(domain, KERNEL_DOMAIN, width);
-    context.write_pair(stream.devfn() as usize, lo, hi);
+    context_table(tables, root, stream.bus()).write_pair(stream.devfn() as usize, lo, hi);
 }
 
-/// Moves `stream`'s present context entry in one unit's root table onto a
-/// domain of its own, and answers what that unit may still hold for the old one.
-pub fn bind(root: Table, stream: StreamId, id: u16, space: Space) -> Displaced {
-    let entry = root.read(stream.bus() as usize * 2);
-    let context = Table { phys: entry & ADDR_MASK };
+/// The context table `bus`'s root entry names, made and named there first
+/// where it names none.
+fn context_table(tables: &mut Tables, root: Table, bus: u8) -> Table {
+    let entry = root.read(usize::from(bus) * 2);
+    if entry & PRESENT != 0 {
+        return Table { phys: entry & ADDR_MASK };
+    }
+    let table = tables.alloc();
+    root.write_pair(usize::from(bus), table.phys | PRESENT, 0);
+    table
+}
+
+/// Moves `stream`'s context entry in one unit's root table onto a domain of
+/// its own, and answers what that unit may still hold for the old one. A
+/// function that arrived after the unit was programmed has none yet, and a
+/// not-present entry is cached under domain 0 where a unit caches one at all
+/// (VT-d 3.4 §6.1, Caching Mode): what it displaces is named that.
+pub fn bind(tables: &mut Tables, root: Table, stream: StreamId, id: u16, space: Space) -> Displaced {
+    let context = context_table(tables, root, stream.bus());
     let index = stream.devfn() as usize;
-    let old = if entry & PRESENT != 0 { context.read_pair(index) } else { (0, 0) };
-    // `bind_identity` gave every enumerated function one before `TE`.
-    assert!(
-        old.0 & PRESENT != 0,
-        "iommu: {stream} has no context entry to move — it was not enumerated when its unit \
-         was programmed"
-    );
+    let old = context.read_pair(index);
     let (new, displaced) = rebind(old, stream.requester(), space.root, id, space.width);
     context.replace_pair(index, old, new);
     displaced

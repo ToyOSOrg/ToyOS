@@ -3,7 +3,7 @@
 # starts `/system/bin/virtio-net` on it and ends it, and only it does.
 
 [boot]
-start = ["logkeeper", "diskserver", "fileserver", "netstack", "test-runner"]
+start = ["acpiserver", "logkeeper", "diskserver", "fileserver", "netstack", "test-runner"]
 
 # `log` is the port the job reads netstack's lines on.
 [programs.logkeeper]
@@ -44,3 +44,10 @@ pager = true
 restart = true
 roles = ["data", "log", "boot"]
 receives = ["block"]
+
+# Started before every PCI claimant: it declares the memory the root bridges
+# decode, which every claim of a PCI function waits for.
+[programs.acpiserver]
+service = true
+devices = ["acpi"]
+receives = ["power"]

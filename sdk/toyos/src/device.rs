@@ -252,6 +252,12 @@ impl AcpiDev {
     pub fn idle(&self, declaration: &toyos_abi::acpi::IdleDeclaration) -> Result<(), SyscallError> {
         syscall::acpi_idle(self.as_handle().raw(), declaration)
     }
+
+    /// Declare the PCI root bridges
+    /// ([`syscall::acpi_declare`]).
+    pub fn declare(&self, declared: &toyos_abi::acpi::Apertures) -> Result<(), SyscallError> {
+        syscall::acpi_declare(self.as_handle().raw(), declared)
+    }
 }
 
 impl AsHandle for AcpiDev {

@@ -85,6 +85,13 @@ pub(super) fn sys_acpi(ctx: &SyscallContext, handle: RawHandle, op: u64, at: u64
         },
         _ => None,
     };
+    let declared = match op {
+        ops::DECLARE => match ctx.copy_in::<toyos_abi::acpi::Apertures>(UserAddr::new(at)) {
+            Ok(declared) => Some(declared),
+            Err(e) => return e.to_u64(),
+        },
+        _ => None,
+    };
     let pid = process::current_process();
     // The holder's check and the act are one borrow of the row, as a read's are.
     let done = claim.isa(|row| {
@@ -102,9 +109,18 @@ pub(super) fn sys_acpi(ctx: &SyscallContext, handle: RawHandle, op: u64, at: u64
                 Some(declaration) => crate::arch::acpi_mode::idle(row, declaration).map(|()| 0),
                 None => unreachable!("the declaration is copied in for IDLE"),
             },
+            (ops::DECLARE, _) => match declared.as_ref().map(crate::pcidev::declare) {
+                Some(Ok(())) => Ok(0),
+                Some(Err(toyos_pci::aperture::Declined::Refused(_))) => Err(SyscallError::InvalidArgument),
+                Some(Err(toyos_pci::aperture::Declined::Late)) => Err(SyscallError::AlreadyExists),
+                None => unreachable!("the declaration is copied in for DECLARE"),
+            },
             _ => Err(SyscallError::InvalidArgument),
         }
     });
+    if op == ops::DECLARE && done == Some(Ok(0)) {
+        crate::pcidev::arm_slots();
+    }
     let done = done.unwrap_or(Err(SyscallError::Gone)).and_then(|word| match &request {
         Some(request) => ctx.copy_out(UserAddr::new(at), request).map(|()| word),
         None => Ok(word),

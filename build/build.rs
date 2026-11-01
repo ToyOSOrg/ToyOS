@@ -3204,6 +3204,55 @@ mod tests {
         }
     }
 
+    /// A config whose rows claim a PCI function starts the `acpi` claim's
+    /// holder: every such claim waits for the root bridges' memory it declares,
+    /// and one made on a boot where nothing does is refused, as are all after
+    /// it. `undeclaredcase` is that boot, booted to judge the refusal. A claim
+    /// a program makes at run time through a `device` syscap is not a row's
+    /// and is not seen here: its image's own test meets the refusal.
+    #[test]
+    fn every_config_that_claims_a_pci_function_starts_its_declarer() {
+        const UNDECLARED: &str = "tests/images/undeclaredcase.toml";
+        let root = Path::new(env!("CARGO_MANIFEST_DIR"));
+        for config in ALL_CONFIGS {
+            let parsed = parse_config(&root.join(config));
+            let claimants: Vec<&String> = parsed
+                .programs
+                .iter()
+                .filter(|(name, program)| {
+                    !program.drives.is_empty()
+                        || (parsed.boot.start.contains(name) && program.devices.iter().any(|d| d.starts_with("pci:")))
+                })
+                .map(|(name, _)| name)
+                .collect();
+            let declares = parsed
+                .boot
+                .start
+                .iter()
+                .any(|name| parsed.programs.get(name).is_some_and(|p| p.devices.iter().any(|d| d == "acpi")));
+            assert_eq!(
+                declares || claimants.is_empty(),
+                *config != UNDECLARED,
+                "{config}: {claimants:?} claim PCI functions, and starting the `acpi` claim's holder is {declares}",
+            );
+        }
+    }
+
+    /// Only the hot-plug test's image declares its hot-plug ports internal to
+    /// acpiserver: anywhere else it would hand native hot-plug of a port that
+    /// may face outside the machine to a kernel that refuses no claim behind
+    /// one yet.
+    #[test]
+    fn only_the_hot_plug_test_declares_its_ports_internal() {
+        const DECLARES: &str = "tests/images/hotplugcase.toml";
+        let root = Path::new(env!("CARGO_MANIFEST_DIR"));
+        for config in ALL_CONFIGS {
+            let parsed = parse_config(&root.join(config));
+            let declared = parsed.programs.values().any(|p| p.args.iter().any(|a| a == "--hot-plug-ports-internal"));
+            assert_eq!(declared, *config == DECLARES, "{config} declares its hot-plug ports internal: {declared}");
+        }
+    }
+
     /// Every config renders, so a row the manifest refuses — one that serves a
     /// port and is not marked `service` — reds here rather than at a build.
     #[test]
@@ -3285,6 +3334,7 @@ mod tests {
         "tests/images/designatecase.toml",
         "tests/images/drivescase.toml",
         "tests/images/hostedclangcase.toml",
+        "tests/images/hotplugcase.toml",
         "tests/images/jobcase.toml",
         "tests/images/latencycase.toml",
         "tests/images/launchcase.toml",
@@ -3299,6 +3349,7 @@ mod tests {
         "tests/images/proctreecase.toml",
         "tests/images/scalecase.toml",
         "tests/images/testcases.toml",
+        "tests/images/undeclaredcase.toml",
         "tests/images/virtclaimcase.toml",
         "tests/images/virtjobcase.toml",
         "tests/images/virtpaniccase.toml",

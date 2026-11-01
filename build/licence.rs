@@ -406,15 +406,15 @@ pub const COMMITTED_FILES: &[(&str, &str, &str, Terms)] = &[
         Terms::Spdx("MIT OR Apache-2.0"),
     ),
     (
-        "lib/acpi/fixtures/qemu-11.1.1-virt-pptt/pptt.bin",
-        "fff116c865c8081e748e03fee505f2ed4fc1b01b8fbd3b131a8d1720552c86ec",
-        "ours: QEMU `virt`'s own PPTT, captured by the commit that decodes it",
+        "lib/acpi/fixtures/qemu-11.1.1-virt/dsdt.bin",
+        "908d068d6d70db725bd139ac5a8fe9511373ab59a0570a0f285c3c59d60cd227",
+        "ours: QEMU `virt`'s own DSDT, captured by the commit that declares its root bridge's `_CRS`",
         Terms::Spdx("MIT OR Apache-2.0"),
     ),
     (
-        "lib/acpi/fixtures/ovmf-pure-efi/root-bridge-0.bin",
-        "eb00e68be746a09ac7f0ce1ca492ce8c858e3af1152112b49ffb4708883acbfb",
-        "ours: OVMF's answer on a q35 guest, read off that boot's own loader log",
+        "lib/acpi/fixtures/qemu-11.1.1-virt-pptt/pptt.bin",
+        "fff116c865c8081e748e03fee505f2ed4fc1b01b8fbd3b131a8d1720552c86ec",
+        "ours: QEMU `virt`'s own PPTT, captured by the commit that decodes it",
         Terms::Spdx("MIT OR Apache-2.0"),
     ),
     // bcachefs volumes upstream's own tools wrote, gzipped. The bytes inside

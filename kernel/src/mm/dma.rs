@@ -33,7 +33,7 @@ impl Discipline for Unaligned {}
 /// A bounds-checked, `Copy` view of DMA memory, scoped to its [`DmaPool`]'s lifetime.
 pub struct Dma<'pool, D: Discipline = Volatile> {
     base: *mut u8,
-    /// An address in the device's domain, or the physical one where nothing translates.
+    /// The address the device is told for the first byte.
     device: u64,
     size: usize,
     pool: PhantomData<&'pool DmaPool>,
@@ -58,8 +58,7 @@ impl<'pool, D: Discipline> Dma<'pool, D> {
         Self { base, device, size, pool: PhantomData, how: PhantomData }
     }
 
-    /// The address to program a device with for the first byte; never a
-    /// physical address once a unit translates this pool's domain.
+    /// The address to program a device with for the first byte.
     #[inline]
     pub fn device_addr(self) -> u64 {
         self.device
@@ -168,17 +167,14 @@ pub struct DmaPool {
     pages: Vec<PhysPage>,
     base: DirectMap,
     size: usize,
-    /// The space and where the pool sits in it: the pages go back to the
-    /// allocator on drop, so the device loses them first.
-    space: DeviceSpace,
+    /// Where the pool sits in its device's space.
     device: u64,
 }
 
 impl DmaPool {
-    /// Take enough contiguous 2 MiB pages to cover `size` bytes, mapped into
-    /// `space` below `limit`, the device's address width, and reachable by
-    /// nothing outside it; refused where none below it is left — for an
-    /// untranslated device, where the pages lie above it.
+    /// Take enough contiguous 2 MiB pages to cover `size` bytes, at the
+    /// addresses `space` gives them below `limit`, the device's address width;
+    /// refused where the pages lie above it.
     pub fn alloc_in(size: usize, space: DeviceSpace, limit: Limit) -> Result<Self, IommuError> {
         let pages_2m = size.div_ceil(super::PAGE_2M as usize);
         let pages = super::pmm::alloc_contiguous_for_kernel(pages_2m)
@@ -192,7 +188,7 @@ impl DmaPool {
             Err(why @ IommuError::AddressesExhausted(_)) => return Err(why),
             Err(why) => panic!("DmaPool: {why}"),
         };
-        Ok(Self { pages, base, size, space, device })
+        Ok(Self { pages, base, size, device })
     }
 
     /// The whole pool as a view, borrowed so it cannot outlive `self`: the
@@ -205,7 +201,6 @@ impl DmaPool {
     /// Consumes the pool and leaks its pages and its mapping for a `'static` view; never freed, deliberately.
     pub fn leak(mut self) -> Dma<'static> {
         let (base, device, size) = (self.base, self.device, self.size);
-        self.space = DeviceSpace::Untranslated;
         for page in core::mem::take(&mut self.pages) {
             #[expect(clippy::disallowed_methods, reason = "a bound device keeps its pool for the boot, which `Dma<'static>` says")]
             core::mem::forget(page);
@@ -214,12 +209,3 @@ impl DmaPool {
     }
 }
 
-impl Drop for DmaPool {
-    fn drop(&mut self) {
-        // Before the pages go back: a device still holding these addresses
-        // would reach whatever the allocator hands out next.
-        self.space
-            .unmap(self.device, self.size as u64)
-            .unwrap_or_else(|why| panic!("DmaPool: {why}"));
-    }
-}

@@ -91,6 +91,17 @@ started. Nothing reaches userland when a device arrives or leaves.
     `DEVICE_DELETED` follows a `device_del` within 6 s.
   - With `ICH9-LPC.acpi-pci-hotplug-with-bridge-support=off`, the delete
     completes at once.
+- **QEMU's `pcie-root-port` slot** (QEMU 11.1.1 q35, OVMF, read from the UEFI
+  shell; evidence
+  https://github.com/ToyOSOrg/evidence/tree/f66e82195fdd3e318663530e3d665db1465dc97d/lifecycle-2/slot-qemu):
+  - One MSI-X entry and no MSI, its hot-plug message entry 0; Slot
+    Capabilities `0x001a007b`: button, power controller, both indicators,
+    surprise, hot-plug capable, command completion. Link Changed Enable
+    does not stick.
+  - OVMF leaves the empty slot powered off, and a plugged function's
+    configuration space reads all ones until the slot is powered.
+  - With the slot powered and its power indicator on, `device_del` presses
+    the button, and the device stays until the guest powers the slot off.
 
 ## Stages
 
@@ -111,17 +122,94 @@ started. Nothing reaches userland when a device arrives or leaves.
       child's `Process` handle and its waiter threads went; vdagent is a
       `drives` row. `a_drives_row_holds_one_process_per_function` is the
       guest arm, on `Profile::HeadlessTwoEdu`.
-2. **Functions arrive and leave.**
-   - Readers get a device-set object, minted from `DEVICE`.
-   - The kernel provides native PCIe hot-plug on a port whose host bridge
-     `_OSC` granted it.
-   - A removed function's claim answers `Gone`.
-   - An arrived endpoint's BARs are placed inside its port's window. No
-     BAR-moving path is left to build on (P1 of `issues/there-is-no-wifi.md`):
-     `place_unassigned` on `wt/toyos-lifecycle-2` is rewritten as one
-     assignment inside the port's window with no probe, and an arrived
-     function's BARs enter `Machine::decoded`, which `pages::of_bar`'s
-     sharing check reads.
+2. **Functions arrive and leave** (#934, which carries the apertures track's
+   stage B, #935: its declaration carries each root bridge's `_OSC` commit).
+   - Readers get a device-set object (`toyos_abi::devset`): a
+     level-triggered snapshot of every PCI function the kernel hands out,
+     minted from `DEVICE`, carrying `READ` and `WAIT` and neither `DUP` nor
+     `TRANSFER`, so the supervisor alone holds it. Its header names the time
+     by which a slot may change with no interrupt; the supervisor waits to it
+     and reads again.
+   - The kernel provides native PCIe hot-plug on a port whose root bridge's
+     `_OSC` commit granted native hot-plug and capability structure control.
+     acpiserver commits both where the query offered both and the image
+     declares its ports internal (below). The port is the
+     kernel's, its MSI-X entry on the claim path's remapped message; its
+     handler reads and clears Slot Status, takes a lost or button-removed
+     slot's functions out of the set, makes at most one Slot Control write
+     and posts the set's watch. Powering a slot, §6.6.1's 100 ms and reading
+     the functions below it run on the set's reader.
+   - One record per requester, carrying its live arrival: a device that
+     returns is a new arrival on the same record and domain. A slot is armed
+     only once every function enumerated behind it at boot is on a domain of
+     its own, and a slot with one behind it that a driver in this kernel
+     drives or the unit cannot isolate is not armed: every requester first
+     seen after boot is blocked at the unit until a claim attaches it, so a
+     card seated behind an armed slot reaches nothing until it is claimed. A claim of an
+     older arrival answers `Gone` on every call, and its release asks the
+     device nothing. The last release behind a removed slot powers it off.
+   - An arrived endpoint's BARs are assigned once, before it is listed: each
+     one it leaves unassigned is given the lowest address inside its port's
+     windows that no other function decodes in and that lies inside the
+     declared root bridges' memory, kept where the register reads it back,
+     with no probe through it. They enter `Machine::decoded`, which
+     `pages::of_bar`'s sharing check reads. No BAR is moved (P1 of
+     `issues/there-is-no-wifi.md`).
+   - The supervisor diffs the set (`toyos-supervisor`): a departed arrival
+     is never started again, and the restart budget is the address's.
+   - `a_function_arrives_and_leaves` is the guest arm, on
+     `Profile::HeadlessHotplugPort` (q35, `acpi-pci-hotplug-with-bridge-support=off`).
+
+   Gaps it records:
+   - **Physical arrival is QEMU's alone**: no bench has a hot-plug port the
+     owner lets a driver claim behind, so a metal row reads only the boot set
+     and each bridge's commit. That comes through
+     `issues/toyos-supports-thunderbolt-and-usb4.md`.
+   - QEMU's `device_del` presses the slot's button, so a surprise removal
+     (presence lost) is reached by `toyos_pci::hotplug`'s host tests and no
+     guest.
+   - A machine whose `_OSC` keeps hot-plug for ACPI, q35's default, has no
+     slot armed, and says so by port.
+   - acpiserver commits native hot-plug before the kernel knows whether a
+     slot can be armed; a machine whose units remap no interrupt has its
+     slots left unserved after firmware gave them up.
+   - **No machine's hot-plug slot is armed** (orchestrator, 2026-10-22,
+     holding the owner's "refuse external"): no claim behind an
+     external-facing port is refused in code yet
+     (`issues/the-iommu-refuses-nothing-yet.md`), and no firmware signal says
+     a port is internal. ACPI 6.5 defines none, and Microsoft's
+     `ExternalFacingPort` `_DSD` property ("Kernel DMA Protection") marks
+     the external ports alone. So acpiserver commits native hot-plug only
+     where its image declares every hot-plug port internal
+     (`--hot-plug-ports-internal`), which only the QEMU hot-plug test's image
+     does, and even then not on a root with a port marked external or one
+     whose `_DSD` it cannot read. Exit: claims behind an external-facing port
+     are refused by name, and a machine's own ports are then armed.
+   - §6.7.1.5's five seconds in which a second press cancels a removal are
+     not offered: a press removes at once.
+   - A bridge below a slot (a switch) is not read: the kernel assigns no bus
+     numbers.
+   - A powered, occupied slot whose link never comes up is owed nothing and
+     says nothing: no settle time asks again, and no line names the stall,
+     where its port enables no Link Changed interrupt (QEMU's does not).
+     Exit: such a slot is given a deadline, and its stall is said once the
+     deadline passes, with the bound cited from PCIe base spec 6.0.
+   - §6.6.1's 100 ms after the link comes up is waited out on every port;
+     Readiness Notifications (§6.23), which end it early where a port and
+     device support them, are not read.
+   - **A departed function's BAR mapping outlives it**: a departure drops
+     its BARs from `Machine::decoded`, so the next arrival behind the port
+     can be assigned the same addresses while a process still holds a
+     mapping made through the departed claim
+     (`issues/a-bars-mapping-outlives-the-claim-it-was-asked-on.md`). Its
+     addresses are not reassigned while the claim is held, since `retire`
+     waits for the release. Exit: that issue's revocation at a claim's
+     release, and at departure from the set's reader (`slot::refresh`'s
+     per-record loop, never the slot's interrupt), wired by whichever of the
+     two lands second.
+   - On AArch64's SMMUv3 a function that arrived after the unit was
+     programmed is listed and refused a claim by name: its routes are read
+     for the functions enumerated at boot.
 3. **Drivers leave the shared services.** netstack, soundserver and diskserver
    each become a driver per function plus the service its clients use. The
    client port carries a per-device source and `gone`.

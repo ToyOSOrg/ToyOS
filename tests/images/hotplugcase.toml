@@ -1,0 +1,26 @@
+# The boot `a_function_arrives_and_leaves` reads, on
+# `Profile::HeadlessHotplugPort`: acpiserver declares the host bridge's `_OSC`
+# grant, the kernel arms the empty port's slot, and one `pciholder` holds each
+# `edu` the test plugs into it until the function leaves.
+
+[boot]
+start = ["logkeeper", "acpiserver", "test-runner"]
+
+# `every_boot_config_runs_logkeeper` is what refuses a boot config without it.
+[programs.logkeeper]
+service = true
+syscap = ["logread"]
+
+# QEMU's `pcie-root-port` is no port a device outside the machine plugs
+# into, and no firmware property can say so: this image declares it, and no
+# other image does (`system/acpiserver/src/apertures.rs`).
+[programs.acpiserver]
+service = true
+devices = ["acpi"]
+args = ["--hot-plug-ports-internal"]
+
+# Started on each function the kernel does not drive, never by `[boot] start`.
+[programs.pciholder]
+drives = ["pci:00:ff:00/1234:11e8"]
+
+[programs.test-runner]

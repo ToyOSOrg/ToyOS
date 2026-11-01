@@ -83,17 +83,17 @@ impl Names {
     }
 }
 
-fn is_device(kind: Kind) -> bool {
+pub fn is_device(kind: Kind) -> bool {
     matches!(kind, Kind::Device | Kind::Processor { .. })
 }
 
 /// The scope an object's path is in.
-fn parent(path: &str) -> &str {
+pub fn parent(path: &str) -> &str {
     path.rsplit_once('.').map_or("\\", |(scope, _)| scope)
 }
 
 /// `_STA`'s Present and Functional bits (§6.3.7).
-const PRESENT: u64 = 1 << 0;
+pub const PRESENT: u64 = 1 << 0;
 const FUNCTIONAL: u64 = 1 << 3;
 
 /// What the initialisation ran, and what of it was refused.
@@ -141,7 +141,7 @@ impl Census {
 }
 
 /// Evaluate `path`, counted in `census` under `method` where refused.
-fn evaluate<K: Kernel>(aml: &mut Aml<'_, K>, census: &mut Census, method: &str, path: &str, args: &[Value]) -> Option<Value> {
+pub fn evaluate<K: Kernel>(aml: &mut Aml<'_, K>, census: &mut Census, method: &str, path: &str, args: &[Value]) -> Option<Value> {
     let answer = aml.interpreter.evaluate(&mut aml.host, path, args);
     census.longest_wait_us = census.longest_wait_us.max(aml.interpreter.usage().waited_us);
     match answer {
@@ -241,7 +241,7 @@ fn announce_config<K: Kernel>(aml: &mut Aml<'_, K>, names: &Names, since: u32, c
 
 /// Whether `device` is a PCI host bridge by its `_HID` or a `_CID` (§6.1.5,
 /// §6.1.2): PNP0A03 or PNP0A08.
-fn host_bridge<K: Kernel>(aml: &mut Aml<'_, K>, names: &Names, device: &str, census: &mut Census) -> bool {
+pub fn host_bridge<K: Kernel>(aml: &mut Aml<'_, K>, names: &Names, device: &str, census: &mut Census) -> bool {
     for id in ["_HID", "_CID"] {
         if !names.has(device, id) {
             continue;

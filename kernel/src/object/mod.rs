@@ -18,6 +18,7 @@ use crate::mm::charge::{self, Charge, Exhausted};
 use crate::sync::Lock;
 
 pub mod device;
+pub mod devset;
 pub mod event;
 pub mod file;
 pub mod handle;
@@ -291,6 +292,8 @@ kobject! {
     deferred Pager => paged::PagerObject,
     // Its last handle may be its object's last holder, which its pager is told.
     deferred Paged => paged::PagedHolderObject,
+    // A view of the kernel's set: losing it changes nothing in the set.
+    immediate DeviceSet => devset::DeviceSet,
 }
 
 /// Objects whose last handle has gone, waiting for release with nothing held;

@@ -63,8 +63,7 @@ only by the `watchdog` parameter and refused by name elsewhere), netstack's
 with no PMU, `kernel::cpu`'s reading of `CPUID.1:ECX[31]`, which Intel
 defines as "Not Used: Intel processors always return 0. Allocated for use by
 software emulation" (Intel SDM Vol. 1, 253665-093US, Table 21-9) and AMD as
-the hypervisor's (APM Vol. 3 §E.3.2), and the loader's read of PI's DXE services (`loader/src/gcd.rs`),
-which hands over the root bridges' windows alone where firmware has none.
+the hypervisor's (APM Vol. 3 §E.3.2).
 
 ## Each hypervisor, x86-64
 

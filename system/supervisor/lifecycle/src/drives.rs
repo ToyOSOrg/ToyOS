@@ -1,15 +1,23 @@
 //! Which PCI functions a `drives` row has a process on.
 //!
 //! **One process per function a `drives` matcher names and the kernel does not
-//! drive**, keyed by the function's arrival. The supervisor reads the inventory
-//! at boot and after every end of a process it started, hands each reading to
-//! [`Drives::decide`], and performs what it answers.
+//! drive**, keyed by the function's arrival. The supervisor reads the kernel's
+//! device set whenever it changes and after every end of a process it started,
+//! hands each reading to [`Drives::decide`], and performs what it answers.
 //!
 //! **A reading that changed nothing starts nothing.** A start that was refused
 //! — the claim, the hand-over or the spawn — and an end owed no restart leave
-//! the function alone until its inventory record differs from the first one
-//! read after. Every start of a function after its first spends its
-//! [`Budget`], and a function whose budget is spent is given up on.
+//! the function alone until its record differs from the first one read after.
+//!
+//! **A function that leaves the set is never started again.** Its process, if
+//! one runs, is left to end on its claim's `Gone`, and its arrival is forgotten
+//! once nothing runs on it; a device that returns is a new arrival.
+//!
+//! **The restart budget is the address's, not the arrival's**: every start at
+//! an address after its first spends that address's [`Budget`], so a device
+//! that keeps leaving and returning is given up on like one that keeps
+//! crashing. Giving up is the arrival's: a later arrival there is tried again
+//! once the budget has room.
 
 use std::collections::BTreeMap;
 use std::time::Instant;
@@ -37,20 +45,16 @@ pub enum Act<'m> {
     /// Start a process of `row` holding `function`'s claim, endowed under
     /// `entry`'s spelling.
     Start { row: &'m Program, entry: PciMatch, function: Pci },
-    /// `function`'s budget is spent: it gets no process again.
+    /// `function`'s address has spent its budget: this arrival gets no process
+    /// again.
     GiveUp { row: &'m Program, function: Pci },
 }
 
 #[derive(Default)]
 pub struct Drives {
-    functions: BTreeMap<Arrival, Function>,
-}
-
-#[derive(Default)]
-struct Function {
-    budget: Budget,
-    started: bool,
-    phase: Phase,
+    functions: BTreeMap<Arrival, Phase>,
+    /// Every address a process was started at, and what its starts spent.
+    addresses: BTreeMap<PciAddr, Budget>,
 }
 
 #[derive(Default)]
@@ -67,7 +71,8 @@ enum Phase {
 
 impl Drives {
     /// What to do about the functions `records` lists, which `rows` match on
-    /// a machine whose boot controller is `boot`.
+    /// a machine whose boot controller is `boot`. `records` is the whole set:
+    /// an arrival it does not list has left.
     pub fn decide<'m>(
         &mut self,
         rows: &[(&'m Program, PciMatch)],
@@ -75,30 +80,36 @@ impl Drives {
         boot: Option<PciAddr>,
         now: Instant,
     ) -> Vec<Act<'m>> {
-        self.functions.retain(|arrival, function| {
-            matches!(function.phase, Phase::Running) || records.iter().any(|pci| pci.arrival == *arrival)
+        self.functions.retain(|arrival, phase| {
+            matches!(phase, Phase::Running) || records.iter().any(|pci| pci.arrival == *arrival)
         });
         let mut acts = Vec::new();
         for pci in records.iter().filter(|pci| pci.driven != Driven::Kernel) {
             let Some(&(row, entry)) = rows.iter().find(|(_, matcher)| matcher.matches(pci, boot)) else { continue };
-            let function = self.functions.entry(pci.arrival).or_default();
-            if let Phase::Held(seen) = &mut function.phase {
+            let phase = self.functions.entry(pci.arrival).or_default();
+            if let Phase::Held(seen) = phase {
                 match seen {
                     None => *seen = Some(*pci),
-                    Some(seen) if seen != pci => function.phase = Phase::Owed,
+                    Some(seen) if seen != pci => *phase = Phase::Owed,
                     Some(_) => {}
                 }
             }
-            if !matches!(function.phase, Phase::Owed) || pci.driven != Driven::Free {
+            if !matches!(phase, Phase::Owed) || pci.driven != Driven::Free {
                 continue;
             }
-            if function.started && !function.budget.spend(now) {
-                function.phase = Phase::GivenUp;
+            let spent = match self.addresses.get_mut(&pci.at) {
+                Some(budget) => budget.spend(now),
+                None => {
+                    self.addresses.insert(pci.at, Budget::default());
+                    true
+                }
+            };
+            if !spent {
+                *phase = Phase::GivenUp;
                 acts.push(Act::GiveUp { row, function: *pci });
                 continue;
             }
-            function.started = true;
-            function.phase = Phase::Running;
+            *phase = Phase::Running;
             acts.push(Act::Start { row, entry, function: *pci });
         }
         acts
@@ -110,7 +121,9 @@ impl Drives {
     }
 
     /// The process on `arrival` ended; `owed` is whether its row owes it
-    /// another ([`crate::restart::owed`]).
+    /// another ([`crate::restart::owed`]). One whose function has left is
+    /// owed nothing whatever its row says: the next [`Self::decide`] forgets
+    /// the arrival.
     pub fn ended(&mut self, arrival: Arrival, owed: bool) {
         match owed {
             true => self.set(arrival, Phase::Owed),
@@ -123,8 +136,8 @@ impl Drives {
     }
 
     fn set(&mut self, arrival: Arrival, phase: Phase) {
-        let function = self.functions.get_mut(&arrival).expect("supervisor: an arrival it decided nothing about");
-        function.phase = phase;
+        let held = self.functions.get_mut(&arrival).expect("supervisor: an arrival it decided nothing about");
+        *held = phase;
     }
 }
 
@@ -241,6 +254,85 @@ mod tests {
         drives.ended(Arrival(4), false);
         assert_eq!(started(&drives.decide(&rows, &machine, None, now)), [3]);
         assert!(drives.decide(&rows, &machine, None, now).is_empty());
+    }
+
+    /// `edu(arrival, ..)` at the address of another arrival: the same device
+    /// returning.
+    fn at(pci: Pci, dev: u8) -> Pci {
+        Pci { at: PciAddr { segment: 0, bus: 1, dev, func: 0 }, ..pci }
+    }
+
+    /// A function that arrives gets a process; one that leaves gets none
+    /// again, its process is left to end, and its arrival is forgotten; the
+    /// device returning is a new arrival with a process of its own.
+    #[test]
+    fn an_arrival_starts_a_departure_retires_and_a_return_is_new() {
+        let (row, now) = (row(), Instant::now());
+        let rows = [(&row, EDU)];
+        let mut drives = Drives::default();
+        assert!(drives.decide(&rows, &[], None, now).is_empty());
+        let first = at(edu(7, Driven::Free), 0);
+        assert_eq!(started(&drives.decide(&rows, &[first], None, now)), [7]);
+        // Gone from the set while its process still runs: nothing is started.
+        assert!(drives.decide(&rows, &[], None, now).is_empty());
+        // Its process ends on `Gone` with a crash its row would restart.
+        drives.ended(Arrival(7), true);
+        assert!(drives.decide(&rows, &[], None, now).is_empty());
+        assert!(!drives.functions.contains_key(&Arrival(7)), "a departed arrival is forgotten");
+        // The device back at the same address, after its budget's window.
+        let back = at(edu(8, Driven::Free), 0);
+        assert_eq!(started(&drives.decide(&rows, &[back], None, now + WINDOW + WINDOW)), [8]);
+    }
+
+    /// A function that leaves between the decision to start on it and the
+    /// start's refusal is never started again, and a refusal of a start whose
+    /// function has left is no error.
+    #[test]
+    fn a_departure_while_a_start_is_pending_starts_nothing() {
+        let (row, now) = (row(), Instant::now());
+        let rows = [(&row, EDU)];
+        let mut drives = Drives::default();
+        assert_eq!(started(&drives.decide(&rows, &[edu(3, Driven::Free)], None, now)), [3]);
+        // The set changed before the start was performed: it is still the
+        // supervisor's to answer for.
+        assert!(drives.decide(&rows, &[], None, now).is_empty());
+        // Its claim answered `Gone`.
+        drives.refused(Arrival(3));
+        for _ in 0..3 {
+            assert!(drives.decide(&rows, &[], None, now).is_empty());
+        }
+        assert!(drives.functions.is_empty());
+    }
+
+    /// Every start at an address after its first spends that address's
+    /// budget, so a device that keeps returning is given up on, and an
+    /// arrival there after the window is started again.
+    #[test]
+    fn a_returning_device_spends_its_addresss_budget() {
+        let (row, now) = (row(), Instant::now());
+        let rows = [(&row, EDU)];
+        let mut drives = Drives::default();
+        let mut starts = 0;
+        let mut arrival = 10;
+        for _ in 0..=RESTARTS {
+            let acts = drives.decide(&rows, &[at(edu(arrival, Driven::Free), 0)], None, now);
+            assert_eq!(started(&acts), [arrival], "arrival {arrival} at the same address");
+            starts += 1;
+            drives.decide(&rows, &[], None, now);
+            drives.ended(Arrival(arrival), false);
+            arrival += 1;
+        }
+        let acts = drives.decide(&rows, &[at(edu(arrival, Driven::Free), 0)], None, now);
+        assert!(matches!(acts[..], [Act::GiveUp { function, .. }] if function.arrival == Arrival(arrival)), "{acts:?}");
+        assert_eq!(starts, RESTARTS + 1);
+        // Given up on is this arrival's: it is never started again.
+        assert!(drives.decide(&rows, &[at(edu(arrival, Driven::Free), 0)], None, now + 2 * WINDOW).is_empty());
+        // Another address has a budget of its own.
+        assert_eq!(started(&drives.decide(&rows, &[at(edu(arrival + 1, Driven::Free), 1)], None, now)), [arrival + 1]);
+        // And the next arrival at the first address, after the window, starts.
+        drives.decide(&rows, &[], None, now);
+        let later = at(edu(arrival + 2, Driven::Free), 0);
+        assert_eq!(started(&drives.decide(&rows, &[later], None, now + 2 * WINDOW)), [arrival + 2]);
     }
 
     #[test]

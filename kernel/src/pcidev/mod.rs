@@ -30,10 +30,20 @@
 //! touches only the MSI-X entry it arms.
 //!
 //! **A BAR is handed over only inside the memory the root bridges are declared
-//! to decode** ([`Apertures`]), because a load no bridge forwards does not
-//! answer all-ones on real hardware: it does not complete, and the CPU cannot
-//! be interrupted out of it. With no declaration held no function is handed
-//! over.
+//! to decode**, because a load no bridge forwards does not answer all-ones on
+//! real hardware: it does not complete, and the CPU cannot be interrupted out
+//! of it. The declaration is the one the holder of the `acpi` claim makes,
+//! once, out of each root's `_CRS` ([`declare`]), and with none held no
+//! function is handed over. **A claim made before one waits for it**, on
+//! [`DECLARATION`], for at most [`DECLARATION_DEADLINE`]; a claim that waits it
+//! out, the holder's claim ending without one, and a declaration refused each
+//! leave every claim of the boot refused by name.
+//!
+//! **A function behind an armed hot-plug slot arrives and leaves** ([`slot`]):
+//! every arrival is a new number on its requester's one record, and every call
+//! a claim of an older arrival makes answers `Gone`. An arrived function's
+//! BARs are assigned once, inside its port's windows, and recorded beside the
+//! boot's; firmware's are never moved.
 //!
 //! **A BAR that cannot be handed over is withheld, and its function still is**:
 //! its holder is given no window for that BAR, and a function with none left
@@ -111,21 +121,22 @@
 /// No `crate::` reference, so `kernel-loom` compiles it and models the
 /// interleaving no guest test lands on.
 pub(crate) mod record;
+mod slot;
 
 use alloc::boxed::Box;
 use alloc::string::String;
 use alloc::sync::Arc;
 use alloc::vec::Vec;
 use core::fmt::Write;
-use core::sync::atomic::{AtomicBool, AtomicPtr, Ordering};
+use core::sync::atomic::{AtomicBool, AtomicPtr, AtomicU32, AtomicU64, AtomicUsize, Ordering};
 
 use record::Interrupt;
-use toyos_abi::boot::RootBridgeWindow;
+use toyos_abi::acpi::RootBridgeWindow;
 use toyos_abi::inventory::Arrival;
 use toyos_abi::pci::{DeviceIrqRecord, PciFunctionInfo, BARS, LEND_WINDOW};
 use toyos_abi::syscall::{PciId, RegWidth, SyscallError};
 use toyos_dma::Register;
-use toyos_pci::{af, aperture, bar, express, pages, pm};
+use toyos_pci::{af, aperture, bar, express, hotplug, pages, pm};
 
 use crate::device::{Claim, ClaimError};
 use crate::drivers::pci::{arm_claimed_msi, arm_claimed_msix, mask_claimed_msix, NoCapability, NoEntry, PciDevice};
@@ -135,7 +146,7 @@ use crate::mm::{align_2m, PAGE_2M};
 use crate::object::shm::SharedMemObject;
 use crate::sync::Lock;
 use crate::inbox::PollEntry;
-use crate::watch::IrqWatch;
+use crate::watch::{IrqWatch, Watch};
 
 /// The most one grant may be. A driver's rings and buffers are kilobytes to a
 /// megabyte; this is room for a queue depth nothing in reach uses, and a bound
@@ -151,12 +162,23 @@ const MAX_GRANT_TOTAL: u64 = 32 * 1024 * 1024;
 /// (PCIe base spec §7.2.2: 4 KiB per function under ECAM).
 const CONFIG_BYTES: u64 = 4096;
 
-/// One enumerated function's claims, for the life of the boot: what its holder
-/// drives, and what outlives a holder.
+/// One requester's record, for the life of the boot: the function enumerated
+/// there, what its holder drives, and what outlives a holder. A device that
+/// leaves and returns at the same requester is a new arrival on the same
+/// record, so its domain is the one the last arrival's release emptied.
 struct Function {
     who: u16,
     /// Its configuration space, which the reset's stop writes with no lock.
     pci: PciDevice,
+    /// The arrival the device set lists it under, or 0 once it has left:
+    /// every call a claim of an older arrival makes answers `Gone`.
+    arrival: AtomicU32,
+    /// The hot-plug slot this function is the port of, once armed; null for
+    /// every other function. Leaked when armed and never freed.
+    slot: AtomicPtr<slot::HotPlug>,
+    /// The arrival its slot took out of the device set and the reader of the
+    /// set has not said yet; 0 for none.
+    left: AtomicU32,
     /// Whether a claim holds it: taken by [`claim`] before the function is
     /// touched, and given back last by [`release`].
     ///
@@ -186,20 +208,51 @@ impl core::fmt::Display for Function {
     }
 }
 
-/// Exactly the functions [`publish`] took, in [`Machine::functions`]' order,
-/// leaked once: null until then and never written again, so a handler reaches
-/// a function's record with no lock. A function's place here is its
-/// [`Arrival`]'s ([`arrival_of`]), which is therefore never another's.
-static FUNCTIONS: AtomicPtr<&'static [Function]> = AtomicPtr::new(core::ptr::null_mut());
+/// The most requesters this kernel keeps a record of, enumerated at boot and
+/// behind hot-plug slots together. A function arriving past it is refused by
+/// name: a record is never freed, because a handler reaches it with no lock.
+const MAX_FUNCTIONS: usize = 512;
 
-fn functions() -> &'static [Function] {
-    let published = FUNCTIONS.load(Ordering::Acquire);
-    if published.is_null() {
-        return &[];
+/// Every record, by its number, in the order each requester was first
+/// enumerated; [`RECORDED`] of them are written. Each slot is written once,
+/// under [`MACHINE`], with a leaked box, before [`RECORDED`] is released past
+/// it, so a handler reaches any record below it with no lock.
+static RECORDS: [AtomicPtr<Function>; MAX_FUNCTIONS] = [const { AtomicPtr::new(core::ptr::null_mut()) }; MAX_FUNCTIONS];
+static RECORDED: AtomicUsize = AtomicUsize::new(0);
+
+fn functions() -> impl Iterator<Item = &'static Function> {
+    (0..RECORDED.load(Ordering::Acquire)).map(function)
+}
+
+/// Keep `function` as the next record; `machine` is held, which makes this
+/// the slots' one writer. `None` once [`MAX_FUNCTIONS`] are kept.
+fn record(machine: &mut Machine, function: Function, identity: toyos_abi::inventory::Pci) -> Option<usize> {
+    let number = RECORDED.load(Ordering::Relaxed);
+    if number == MAX_FUNCTIONS {
+        return None;
     }
-    // SAFETY: non-null only as `publish` stored it: a leaked box, never freed
-    // or written again, published with Release once it was whole.
-    unsafe { *published }
+    machine.identities.push(identity);
+    RECORDS[number].store(Box::into_raw(Box::new(function)), Ordering::Release);
+    RECORDED.store(number + 1, Ordering::Release);
+    Some(number)
+}
+
+/// A function's record, as enumeration makes it.
+fn new_record(pci: PciDevice, arrival: Arrival) -> Function {
+    Function {
+        who: requester(&pci),
+        pci,
+        arrival: AtomicU32::new(arrival.0),
+        slot: AtomicPtr::new(core::ptr::null_mut()),
+        left: AtomicU32::new(0),
+        held: AtomicBool::new(false),
+        irq: Interrupt::new(),
+        watch: IrqWatch::new(),
+        space: Lock::new(None),
+        bound: Lock::new(None),
+        retired: Lock::new(None),
+        residue: Lock::new(Vec::new()),
+    }
 }
 
 /// Every function a claim holds, stopped before the machine resets or powers
@@ -209,22 +262,19 @@ fn functions() -> &'static [Function] {
 /// (§7.7.2) as well. Registers alone, with no lock and no allocation: a panic
 /// and a wedge reach it.
 pub fn stop_before_reset() {
-    for function in functions().iter().filter(|f| f.held.load(Ordering::Acquire)) {
+    for function in functions().filter(|f| f.held.load(Ordering::Acquire)) {
         function.pci.disable_bus_master();
         function.pci.disable_msi();
         function.pci.mask_msix_function();
     }
 }
 
-/// The arrival of function `number`, counted from 1 so a zeroed record names
-/// none.
-fn arrival_of(number: usize) -> Arrival {
-    Arrival(u32::try_from(number + 1).expect("pcidev: fewer functions than a u32 counts"))
-}
-
 /// Function `number`, which a claim or an interrupt named.
 fn function(number: usize) -> &'static Function {
-    functions().get(number).unwrap_or_else(|| panic!("pcidev: function {number} was never enumerated"))
+    assert!(number < RECORDED.load(Ordering::Acquire), "pcidev: function {number} was never enumerated");
+    // SAFETY: below `RECORDED`, so written once by `record` with a leaked box,
+    // never freed or written again, before the Release that published it.
+    unsafe { &*RECORDS[number].load(Ordering::Acquire) }
 }
 
 /// A function's address space, and the room in it every holder's lent regions go.
@@ -339,31 +389,43 @@ impl Bound {
     }
 }
 
-/// Every function this machine enumerated.
+/// Every function this machine enumerated, at boot or since.
 struct Machine {
-    functions: Vec<PciDevice>,
-    /// What each of [`Self::functions`] said it was, read once in [`publish`]:
-    /// the inventory is answered from here and never by reading config space
-    /// of a function a reset may be in the middle of. The requester id is not
-    /// stored beside it — a `Pci`'s own `at` already names the function, and
-    /// [`requester_of`] is its inverse.
+    /// What each record's function said it was, by the record's number, read
+    /// once as it arrived: the inventory is answered from here and never by
+    /// reading config space of a function a reset may be in the middle of.
+    /// Its arrival is the one it was listed under; [`Function::arrival`] says
+    /// whether it still is. The requester id is not stored beside it — a
+    /// `Pci`'s own `at` already names the function, and [`requester_of`] is
+    /// its inverse.
     identities: Vec<toyos_abi::inventory::Pci>,
-    /// The PCI segment group every one of [`Self::functions`] is on: the one
-    /// the ECAM window they were enumerated through serves.
+    /// The arrival the next function enumerated is listed under: counted from
+    /// 1, so a zeroed record names none, and never given twice.
+    next_arrival: u32,
+    /// Every port with a hot-plug slot, armed or not.
+    ports: Vec<Port>,
+    /// The PCI segment group every function is on: the one the ECAM window
+    /// they were enumerated through serves.
     segment: u16,
-    /// Every memory BAR every function decodes where firmware put it.
+    /// Every memory BAR every function decodes: where firmware put it, or
+    /// for a function that arrived since, where its arrival assigned it.
     ///
-    /// Recorded in [`publish`] and never re-derived: reading a BAR's *size*
-    /// means writing all-ones into it and reading back, with memory decode off
-    /// for the length of the probe — safe before any driver `init` and nothing
-    /// to do to a live function while a claim is being minted.
+    /// Recorded once and never re-derived: reading a BAR's *size* means
+    /// writing all-ones into it and reading back, with memory decode off for
+    /// the length of the probe — safe before any driver `init` or before an
+    /// arrival is listed, and nothing to do to a live function while a claim
+    /// is being minted.
     decoded: Vec<Decoded>,
     /// Requester ids the kernel's own drivers bound. A claim on one of them
     /// would be two drivers on one device.
     kernel_driven: Vec<u16>,
     /// What this kernel holds of the memory the root bridges decode: the
-    /// necessary condition for any BAR this module hands over.
-    apertures: Apertures,
+    /// necessary condition for any BAR this module hands over. **Only a
+    /// declaration is ever read from**, and a function is handed over on no
+    /// other state.
+    apertures: aperture::Held<Vec<RootBridgeWindow>>,
+    /// The root bridges the declaration was made of, kept with it.
+    roots: Vec<RootBridge>,
     /// Functions this module has reset, when each may be touched again (PCIe
     /// §6.6.2), and what the reset cleared that the next claim puts back. One
     /// entry per function ever released, so a re-claim cannot start reading a
@@ -371,7 +433,7 @@ struct Machine {
     resetting: Vec<(u16, Resetting, Kept)>,
 }
 
-/// One memory BAR firmware assigned, as [`publish`] read it.
+/// One memory BAR, as [`publish`] or an arrival read it.
 #[derive(Clone, Copy)]
 struct Decoded {
     who: u16,
@@ -389,28 +451,75 @@ impl Decoded {
     }
 }
 
-/// The memory the root bridges decode, as far as this kernel has been told.
-///
-/// **Only a declaration is ever read from**, so an address inside none of its
-/// windows is never touched, and a function is handed over on no other state:
-/// a machine that has not declared, or whose declaration was refused, is one
-/// where nothing is known to be routed.
-enum Apertures {
-    Unknown,
-    /// Never replaced.
-    Declared(aperture::Declaration<Vec<RootBridgeWindow>>),
-    Refused(aperture::Refused),
+/// One PCI root bridge as the `acpi` claim's holder declared it: what its
+/// `_OSC` query offered, and what a commit was granted where one was made.
+#[derive(Clone, Copy)]
+struct RootBridge {
+    segment: u16,
+    buses: (u8, u8),
+    osc: toyos_abi::acpi::Osc,
+    committed: Option<u32>,
 }
 
+/// Posted once, when [`Machine::apertures`] leaves `Unknown`.
+static DECLARATION: Watch = Watch::new();
+
+/// How long a claim made before the declaration waits for it: a failure
+/// ceiling, not an expectation, since the server that declares is started
+/// before every claimant. A claim that waits it out answers every claim of
+/// the boot, so no later one waits again.
+const DECLARATION_DEADLINE: crate::time::Duration = crate::time::Duration::from_secs(30);
+
 static MACHINE: Lock<Machine> = Lock::new(Machine {
-    functions: Vec::new(),
     identities: Vec::new(),
+    next_arrival: 1,
+    ports: Vec::new(),
     segment: 0,
     decoded: Vec::new(),
     kernel_driven: Vec::new(),
-    apertures: Apertures::Unknown,
+    apertures: aperture::Held::Unknown,
+    roots: Vec::new(),
     resetting: Vec::new(),
 });
+
+/// A port with a hot-plug slot, as [`publish`] found it.
+#[derive(Clone, Copy)]
+struct Port {
+    number: usize,
+    /// Where its PCI Express capability is.
+    express: u64,
+    slot: hotplug::Slot,
+    /// Its secondary and subordinate bus numbers.
+    buses: (u8, u8),
+    armed: bool,
+}
+
+/// Rises with every change to the device set: a function's arrival or
+/// departure, a claim taken or let go, and every event a slot raises.
+static GENERATION: AtomicU64 = AtomicU64::new(1);
+
+/// What a reader of the device set waits on; posted with every rise of
+/// [`GENERATION`], from a slot's handler too.
+pub static SET_WATCH: IrqWatch = IrqWatch::new();
+
+fn changed() {
+    GENERATION.fetch_add(1, Ordering::AcqRel);
+    SET_WATCH.post_in_place();
+}
+
+/// The device set's generation now.
+pub fn generation() -> u64 {
+    GENERATION.load(Ordering::Acquire)
+}
+
+/// The device set, after acting on what every armed slot is owed — the work
+/// a slot's arrival costs is its reader's: its generation, every function in
+/// it, and how long until it may change with no interrupt to say so.
+pub fn snapshot() -> (u64, Option<u64>, Vec<toyos_abi::inventory::Pci>) {
+    let settle = slot::refresh();
+    let generation = generation();
+    (generation, settle, inventory())
+}
 
 /// One claim's hold on a function, from its reservation to the release its
 /// drop is: what every call on the claim is made with.
@@ -418,24 +527,37 @@ static MACHINE: Lock<Machine> = Lock::new(Machine {
 /// Neither `Copy` nor `Clone` and made only by [`claim`], so there is one per
 /// reservation, and a reference to it is a function no other claim holds.
 pub struct Binding {
-    /// Its index in [`functions`].
+    /// Its record's number.
     number: usize,
+    /// The arrival it was claimed under.
+    arrival: Arrival,
 }
 
 impl Binding {
     fn function(&self) -> &'static Function {
         function(self.number)
     }
+
+    /// Whether the function it was claimed under is still in the device set.
+    fn here(&self) -> bool {
+        self.function().arrival.load(Ordering::Acquire) == self.arrival.0
+    }
 }
 
 impl Drop for Binding {
     fn drop(&mut self) {
-        release(self.number);
+        release(self.number, self.arrival);
     }
 }
 
-/// Every function this machine enumerated, and who drives it now: a kernel
-/// driver, a process holding a claim, or nobody.
+/// Every function in the device set, and who drives it now: a kernel driver,
+/// a process holding a claim, or nobody. In rising arrival order.
+/// Whether `function`, whose record says `identity`, is in the device set:
+/// its arrival is the record's, and a record of no arrival is in it never.
+fn listed(function: &Function, identity: &toyos_abi::inventory::Pci) -> bool {
+    identity.arrival.0 != 0 && function.arrival.load(Ordering::Acquire) == identity.arrival.0
+}
+
 pub fn inventory() -> Vec<toyos_abi::inventory::Pci> {
     use toyos_abi::inventory::Driven;
     let (identities, kernel_driven) = {
@@ -444,6 +566,9 @@ pub fn inventory() -> Vec<toyos_abi::inventory::Pci> {
     };
     let mut out = Vec::with_capacity(identities.len());
     for (mut pci, function) in identities.into_iter().zip(functions()) {
+        if !listed(function, &pci) {
+            continue;
+        }
         pci.driven = if kernel_driven.contains(&function.who) {
             Driven::Kernel
         } else if function.held.load(Ordering::Acquire) {
@@ -453,6 +578,7 @@ pub fn inventory() -> Vec<toyos_abi::inventory::Pci> {
         };
         out.push(pci);
     }
+    out.sort_unstable_by_key(|pci| pci.arrival);
     out
 }
 
@@ -462,12 +588,15 @@ pub fn inventory() -> Vec<toyos_abi::inventory::Pci> {
 /// holds it.
 pub fn enumerated(bus: u8, dev: u8, func: u8) -> Option<toyos_userbound::firmware::Enumerated> {
     let who = ((bus as u16) << 8) | ((dev as u16) << 3) | func as u16;
-    let (pci, driven) = {
+    let (pci, driven, function) = {
         let machine = MACHINE.lock();
-        let pci = *machine.identities.iter().find(|pci| requester_of(pci.at) == who)?;
-        (pci, machine.kernel_driven.contains(&who))
+        let number = machine.identities.iter().position(|pci| requester_of(pci.at) == who)?;
+        (machine.identities[number], machine.kernel_driven.contains(&who), function(number))
     };
-    let held = driven || functions().iter().any(|f| f.who == who && f.held.load(Ordering::Acquire));
+    if !listed(function, &pci) {
+        return None;
+    }
+    let held = driven || function.held.load(Ordering::Acquire);
     Some(toyos_userbound::firmware::Enumerated { vendor: pci.vendor, device: pci.device, class: pci.class, subclass: pci.subclass, held })
 }
 
@@ -528,7 +657,7 @@ pub fn note_kernel_driver(pci: &PciDevice) {
 /// **Before any driver `init`**, because the sizing probe below takes memory
 /// decode off the function it is probing for the length of the probe, and a
 /// driver mid-transfer must not meet that.
-pub fn publish(devices: &[PciDevice], segment: u16, firmware: &[RootBridgeWindow]) {
+pub fn publish(devices: &[PciDevice], segment: u16) {
     let mut decoded = Vec::new();
     for device in devices {
         // Bounded by the header's own declaration: a bridge has two BAR slots
@@ -547,60 +676,163 @@ pub fn publish(devices: &[PciDevice], segment: u16, firmware: &[RootBridgeWindow
             index += if wide { 2 } else { 1 };
         }
     }
-    let apertures = match aperture::check(firmware.to_vec()) {
-        Ok(declaration) => {
-            survey(declaration.windows(), &decoded);
-            Apertures::Declared(declaration)
-        }
-        Err(why) => {
-            log!("pcidev: the root bridges' memory is refused as declared: {why}, so no function is handed over");
-            Apertures::Refused(why)
-        }
-    };
     log!("pcidev: {} functions", devices.len());
-    let records: Vec<Function> = devices
-        .iter()
-        .map(|device| Function {
-            who: requester(device),
-            pci: *device,
-            held: AtomicBool::new(false),
-            irq: Interrupt::new(),
-            watch: IrqWatch::new(),
-            space: Lock::new(None),
-            bound: Lock::new(None),
-            retired: Lock::new(None),
-            residue: Lock::new(Vec::new()),
-        })
-        .collect();
-    let records: &'static [Function] = Box::leak(records.into_boxed_slice());
-    let first = FUNCTIONS.compare_exchange(
-        core::ptr::null_mut(),
-        Box::leak(Box::new(records)),
-        Ordering::Release,
-        Ordering::Relaxed,
-    );
-    assert!(first.is_ok(), "pcidev: the functions were published twice");
-    let mut machine = MACHINE.lock();
-    machine.functions = devices.to_vec();
-    machine.identities = devices
+    let ports: Vec<Port> = devices
         .iter()
         .enumerate()
-        .map(|(number, d)| d.identity(arrival_of(number), addr_of(segment, requester(d))))
+        .filter_map(|(number, device)| {
+            let (express, slot) = slot_of(device)?;
+            let buses = hotplug::buses(device.read_config_u32(hotplug::BUS_NUMBERS));
+            log!(
+                "pcidev: PCI {:02x}:{:02x}.{} has a hot-plug slot over buses {:#04x}..={:#04x} ({slot:?}), \
+                 armed once a host bridge declaration commits native hot-plug",
+                device.bus,
+                device.dev,
+                device.func,
+                buses.0,
+                buses.1,
+            );
+            Some(Port { number, express, slot, buses, armed: false })
+        })
         .collect();
+    let mut machine = MACHINE.lock();
+    assert!(RECORDED.load(Ordering::Relaxed) == 0, "pcidev: the functions were published twice");
+    for device in devices {
+        let arrival = Arrival(machine.next_arrival);
+        machine.next_arrival += 1;
+        let identity = device.identity(arrival, addr_of(segment, requester(device)));
+        record(&mut machine, new_record(*device, arrival), identity)
+            .unwrap_or_else(|| panic!("pcidev: {} functions enumerated, past the {MAX_FUNCTIONS} kept", devices.len()));
+    }
+    machine.ports = ports;
     machine.segment = segment;
     machine.decoded = decoded;
-    machine.apertures = apertures;
 }
 
-/// The root bridges' memory, where a declaration of it is held.
-pub fn declared() -> Option<aperture::Declaration<Vec<RootBridgeWindow>>> {
-    match &MACHINE.lock().apertures {
-        Apertures::Declared(declaration) => Some(declaration.clone()),
-        Apertures::Unknown | Apertures::Refused(_) => None,
+/// The hot-plug slot `device` is the port of, and where its PCI Express
+/// capability is: `None` for a function with no such slot.
+fn slot_of(device: &PciDevice) -> Option<(u64, hotplug::Slot)> {
+    let cap = device.capability(express::CAP_ID).ok()?;
+    let slot = hotplug::slot(
+        cap.read_u16(express::CAPABILITIES),
+        cap.read_u32(hotplug::LINK_CAPABILITIES),
+        cap.read_u32(hotplug::SLOT_CAPABILITIES),
+    )?;
+    Some((cap.offset(), slot))
+}
+
+/// Hold the roots `declared` carries and their windows, together, as the
+/// root bridges' memory: the `acpi` claim holder's declaration, from
+/// `Unknown` alone. A record the ABI does not name ([`aperture::records`]),
+/// and a window over memory firmware's map gives the kernel in any root
+/// ([`aperture::check`]), refuse the whole of it, and the refusal is the
+/// answer. Each root's `_OSC` offer is said.
+pub fn declare(declared: &toyos_abi::acpi::Apertures) -> Result<(), aperture::Declined> {
+    let memory: Vec<(u64, u64)> = crate::mm::firmware_map()
+        .iter()
+        .filter(|entry| toyos_bootmap::is_read_as_memory(entry.uefi_type))
+        .map(|entry| (entry.start, entry.end))
+        .collect();
+    let mut machine = MACHINE.lock();
+    let answer = match aperture::records(declared) {
+        Err(why) => machine.apertures.refuse(why),
+        Ok(()) => {
+            let bridges = declared.bridges().expect("`records` read every bridge");
+            let windows: Vec<RootBridgeWindow> =
+                bridges.iter().flat_map(|bridge| declared.windows_of(bridge).expect("`records` read every run")).copied().collect();
+            let answer = machine.apertures.declare(windows, &memory);
+            if answer != Err(aperture::Declined::Late) {
+                machine.roots = bridges
+                    .iter()
+                    .map(|b| RootBridge {
+                        segment: b.segment,
+                        buses: (b.first_bus, b.last_bus),
+                        osc: b.osc().expect("`records` read every word"),
+                        committed: b.commit().expect("`records` read every word"),
+                    })
+                    .collect();
+                for root in &machine.roots {
+                    let offered = match root.osc {
+                        toyos_abi::acpi::Osc::Absent => "no _OSC",
+                        toyos_abi::acpi::Osc::Offered(offered) if offered & toyos_abi::acpi::NATIVE_HOT_PLUG != 0 => "native hot-plug offered",
+                        toyos_abi::acpi::Osc::Offered(_) | toyos_abi::acpi::Osc::Refused => "not offered",
+                    };
+                    let committed = match root.committed {
+                        None => String::from("no commit"),
+                        Some(committed) => alloc::format!("committed {committed:#x}"),
+                    };
+                    log!(
+                        "pci: root {:04x}:{:02x} _OSC: {offered}, buses {:#04x}..={:#04x}, {committed}",
+                        root.segment,
+                        root.buses.0,
+                        root.buses.0,
+                        root.buses.1
+                    );
+                }
+            }
+            answer
+        }
+    };
+    match (&answer, machine.apertures.answer()) {
+        (Ok(()), Some(Ok(declaration))) => survey(declaration.windows(), &machine.decoded),
+        (Err(aperture::Declined::Refused(why)), _) => {
+            log!("pcidev: the root bridges' memory is refused as declared: {why}, so no function is handed over")
+        }
+        (Err(aperture::Declined::Late), _) => log!("pcidev: a declaration of the root bridges' memory after the first answer is refused"),
+        (Ok(()), _) => unreachable!("a declaration taken is the answer"),
+    }
+    drop(machine);
+    if answer != Err(aperture::Declined::Late) {
+        DECLARATION.post();
+    }
+    answer
+}
+
+/// Arm the hot-plug slots below the roots a held declaration commits, on the
+/// declarer's thread once [`declare`] has answered, outside the `acpi`
+/// claim's borrow: arming claims a message from the units and writes each
+/// port's configuration.
+pub fn arm_slots() {
+    let roots = MACHINE.lock().roots.clone();
+    slot::arm(&roots);
+}
+
+/// The `acpi` claim went: where it declared nothing, nothing will be.
+pub fn declarer_gone() {
+    withhold(aperture::Withheld::Ended);
+}
+
+fn withhold(why: aperture::Withheld) {
+    if MACHINE.lock().apertures.withhold(why) {
+        log!("pcidev: no declaration of the root bridges' memory will be held: {why}, so no function is handed over");
+        DECLARATION.post();
     }
 }
 
-/// Say what memory firmware declared the root bridges decode, and every
+/// The root bridges' memory, or why none is held; waited for, up to
+/// [`DECLARATION_DEADLINE`], where nothing is held yet. `None` is a
+/// claimant killed while it waited.
+fn answered() -> Option<Result<aperture::Declaration<Vec<RootBridgeWindow>>, aperture::Withheld>> {
+    let answer = || MACHINE.lock().apertures.answer().map(|answer| answer.cloned());
+    if let Some(answer) = answer() {
+        return Some(answer);
+    }
+    let began = crate::clock::now();
+    let deadline = crate::time::Deadline::at(began + DECLARATION_DEADLINE);
+    let parkable = crate::scheduler::Parkable::at_entry();
+    let waited = crate::watch::wait_until(&parkable, &DECLARATION, 0, kernel::sched::task::WaitClass::Other, deadline, || {
+        MACHINE.lock().apertures.answer().is_some()
+    });
+    waited.ok()?;
+    if answer().is_none() {
+        withhold(aperture::Withheld::Unanswered);
+    }
+    let answer = answer().expect("pcidev: the declaration is answered or withheld");
+    log!("pcidev: a claim waited {} for the root bridges' memory", crate::clock::now() - began);
+    Some(answer)
+}
+
+/// Say what memory the root bridges were declared to decode, and every
 /// memory BAR no claim could be given: one inside none of it, and one whose
 /// pages another function decodes in, with how many of those there are.
 fn survey(firmware: &[RootBridgeWindow], decoded: &[Decoded]) {
@@ -611,7 +843,7 @@ fn survey(firmware: &[RootBridgeWindow], decoded: &[Decoded]) {
         }
         let _ = write!(said, "mem {:#x}..{:#x}", window.base, window.end());
     }
-    log!("pcidev: firmware declared root bridge memory: {said}");
+    log!("pcidev: the acpi claim declared root bridge memory: {said}");
 
     let mut withheld = 0;
     for bar in decoded {
@@ -645,10 +877,8 @@ fn others(decoded: &[Decoded], who: u16) -> impl Iterator<Item = (u16, u64, u64)
 /// place.
 #[derive(Clone, Copy)]
 enum Refusal {
-    /// Nothing has declared the memory the root bridges decode yet.
-    Undeclared,
-    /// The declaration of the memory the root bridges decode was refused.
-    AperturesRefused(aperture::Refused),
+    /// No declaration of the memory the root bridges decode is held.
+    Withheld(aperture::Withheld),
     NotRemapped(crate::iommu::NotRemapped),
     /// This machine remaps and translates, and not for this function.
     NotIsolated(&'static str),
@@ -676,14 +906,9 @@ enum Refusal {
 impl core::fmt::Display for Refusal {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
         match self {
-            Self::Undeclared => write!(
+            Self::Withheld(why) => write!(
                 f,
-                "nothing has declared the memory the root bridges decode, so no address on this \
-                 machine is known to be routed"
-            ),
-            Self::AperturesRefused(why) => write!(
-                f,
-                "the declaration of the memory the root bridges decode was refused ({why}), so no \
+                "no declaration of the memory the root bridges decode is held ({why}), so no \
                  address on this machine is known to be routed"
             ),
             Self::NotRemapped(crate::iommu::NotRemapped::Unremapped) => write!(
@@ -752,8 +977,13 @@ impl core::fmt::Display for Refusal {
 pub fn claim(arrival: Arrival) -> Result<(PciFunctionInfo, Claim), ClaimError> {
     let (number, pci, id, driven) = {
         let machine = MACHINE.lock();
-        let number = machine.identities.iter().position(|pci| pci.arrival == arrival).ok_or(ClaimError::Absent)?;
-        let (pci, identity) = (machine.functions[number], &machine.identities[number]);
+        let number = machine
+            .identities
+            .iter()
+            .zip(functions())
+            .position(|(pci, function)| pci.arrival == arrival && listed(function, pci))
+            .ok_or(ClaimError::Absent)?;
+        let (pci, identity) = (function(number).pci, &machine.identities[number]);
         let driven = machine.kernel_driven.contains(&requester(&pci));
         (number, pci, PciId { vendor: identity.vendor, device: identity.device }, driven)
     };
@@ -764,15 +994,10 @@ pub fn claim(arrival: Arrival) -> Result<(PciFunctionInfo, Claim), ClaimError> {
 
     // Before anything is taken or touched: with no declaration held, no
     // read this claim would make is known to reach the bus.
-    let declared = match &MACHINE.lock().apertures {
-        Apertures::Declared(declaration) => Ok(declaration.clone()),
-        Apertures::Unknown => Err(Refusal::Undeclared),
-        Apertures::Refused(why) => Err(Refusal::AperturesRefused(*why)),
-    };
-    let declaration = match declared {
+    let declaration = match answered().ok_or(ClaimError::Unusable)? {
         Ok(declaration) => declaration,
         Err(why) => {
-            log!("pcidev: PCI {:02x}:{:02x}.{} NOT HANDED OVER — {why}", pci.bus, pci.dev, pci.func);
+            log!("pcidev: PCI {:02x}:{:02x}.{} NOT HANDED OVER — {}", pci.bus, pci.dev, pci.func, Refusal::Withheld(why));
             return Err(ClaimError::Unusable);
         }
     };
@@ -784,7 +1009,12 @@ pub fn claim(arrival: Arrival) -> Result<(PciFunctionInfo, Claim), ClaimError> {
         return Err(ClaimError::Owned);
     }
     // Dropped by every refusal below, which is what gives the function back.
-    let binding = Binding { number };
+    let binding = Binding { number, arrival };
+    // It may have left between the look above and the take: nothing of a
+    // function that is not there is touched.
+    if !binding.here() {
+        return Err(ClaimError::Absent);
+    }
 
     match bring_up(pci, id, number, declaration.windows()) {
         Ok(mut bound) => {
@@ -818,6 +1048,7 @@ pub fn claim(arrival: Arrival) -> Result<(PciFunctionInfo, Claim), ClaimError> {
             let function = binding.function();
             *function.bound.lock() = Some(bound);
             function.irq.clear();
+            changed();
             Ok((info, Claim::pci(binding)))
         }
         Err(why) => {
@@ -854,7 +1085,7 @@ fn bring_up(pci: PciDevice, id: PciId, number: usize, windows: &[RootBridgeWindo
     // else — and a refusal where this machine has none to give, because the
     // alternative is handing a process physical addresses to write into
     // descriptors.
-    let Space { space, lend } = function_space(number).map_err(Refusal::Untranslated)?;
+    let Space { space, lend } = function_space(number, windows).map_err(Refusal::Untranslated)?;
     let (bar_at, bar_bytes) = bars(&pci, windows)?;
 
     // Decode must be on for the table's BAR to take the entry, and for the
@@ -935,18 +1166,19 @@ fn bars(pci: &PciDevice, windows: &[RootBridgeWindow]) -> Result<([u64; BARS], [
     Ok((bar_at, bar_bytes))
 }
 
-/// Function `number`'s address space, made on its first claim with what
-/// firmware reserved for the function already mapped, so a function firmware
-/// left running against that memory, a scan-out among them, keeps reaching it
-/// across the attach.
-fn function_space(number: usize) -> Result<Space, IommuError> {
+/// Function `number`'s address space, made on its first claim clear of the
+/// declared `windows`, with what firmware reserved for the function already
+/// mapped, so a function firmware left running against that memory, a
+/// scan-out among them, keeps reaching it across the attach.
+fn function_space(number: usize, windows: &[RootBridgeWindow]) -> Result<Space, IommuError> {
     let function = function(number);
     let mut held = function.space.lock();
     match *held {
         Some(space) => Ok(space),
         None => {
             let who = function.who;
-            let (space, lend) = OwnSpace::create(LEND_WINDOW, (who >> 8) as u8, ((who >> 3) & 0x1f) as u8, (who & 7) as u8)?;
+            let (space, lend) =
+                OwnSpace::create(LEND_WINDOW, windows, (who >> 8) as u8, ((who >> 3) & 0x1f) as u8, (who & 7) as u8)?;
             *held = Some(Space { space, lend });
             Ok(Space { space, lend })
         }
@@ -1247,19 +1479,91 @@ fn take_residue(number: usize) -> Vec<Aimed> {
 /// The order is what makes a dying driver safe. A page freed while the function
 /// could still reach it is a device writing into memory the allocator has
 /// already handed to somebody else.
-fn release(number: usize) {
+///
+/// **A function that left the device set is never asked anything here**
+/// ([`tear_down_departed`]): what it held is undone at the units, and its
+/// slot is powered off once nothing behind it is held. Only a fault it still
+/// raises reaches its configuration space, to clear its bus mastering
+/// ([`note_fault`]), since a card its button asked out may still be powered.
+fn release(number: usize, arrival: Arrival) {
     let function = function(number);
+    let departed = function.arrival.load(Ordering::Acquire) != arrival.0;
     // Two statements, because edition 2021 keeps an `if let`'s scrutinee
     // temporaries alive to the end of its block: the bound guard would be
     // held across the unmaps, the reset and the watch's answer.
     let bound = function.bound.lock().take();
-    if let Some(bound) = bound {
-        tear_down(function, bound);
+    match (bound, departed) {
+        (Some(bound), false) => tear_down(function, bound),
+        (Some(bound), true) => tear_down_departed(function, bound),
+        (None, _) => {}
     }
     // Unconditional and last: a hand-over refused inside [`bring_up`] bound
     // nothing and still holds its reservation, and the function comes back
     // only once it can no longer reach memory.
     function.held.store(false, Ordering::Release);
+    if departed {
+        retire(number);
+        if let Some(slot) = slot::above(function) {
+            slot.settle_released();
+        }
+    }
+    changed();
+}
+
+/// What a claim held on a function that is no longer there, undone without a
+/// word to the device: its message's entry and vector go, and its grants
+/// leave its domain before their pages go back. A card its slot's button
+/// asked out may still be powered; whatever it still issues meets a domain
+/// that maps nothing and a message that is not present.
+fn tear_down_departed(function: &Function, bound: Bound) {
+    let Bound { space, armed, grants, id, .. } = bound;
+    drop(armed);
+    for grant in grants.iter() {
+        if let Err(why) = space.unmap(grant.at, grant.bytes) {
+            panic!("pcidev: {function} could not take {:#x} back: {why}", grant.at);
+        }
+    }
+    // The pages go back with this drop, after the unmaps above.
+    drop(grants);
+    function.irq.clear();
+    function.watch.cancel_polls();
+    log!(
+        "pcidev: {function} [{:04x}:{:04x}] released after it left the device set; nothing was asked of it",
+        id.vendor,
+        id.device,
+    );
+}
+
+/// Forget what the boot kept about a function that left and that no claim
+/// holds: its BARs stop being anybody's addresses, what its last release
+/// parked is freed, since nothing behind a slot that lost it can write any
+/// more, and nothing is left aimed. Idempotent.
+fn retire(number: usize) {
+    let function = function(number);
+    if function.arrival.load(Ordering::Acquire) != 0 || function.held.load(Ordering::Acquire) {
+        return;
+    }
+    let who = function.who;
+    {
+        let mut machine = MACHINE.lock();
+        // Again under the lock an arrival is published under: one that
+        // landed since the check above owns these BARs now.
+        if function.arrival.load(Ordering::Acquire) != 0 {
+            return;
+        }
+        machine.decoded.retain(|bar| bar.who != who);
+        machine.resetting.retain(|(w, ..)| *w != who);
+    }
+    let retired = function.retired.lock().take();
+    if let Some(retired) = retired {
+        for grant in retired.grants.iter() {
+            if let Err(why) = retired.space.unmap(grant.at, grant.bytes) {
+                panic!("pcidev: {function} could not take {:#x} back: {why}", grant.at);
+            }
+        }
+        drop(retired);
+    }
+    function.residue.lock().clear();
 }
 
 fn tear_down(function: &Function, mut bound: Bound) {
@@ -1340,6 +1644,9 @@ fn with_bound<T>(
     f: impl FnOnce(&mut Bound) -> Result<T, SyscallError>,
 ) -> Result<T, SyscallError> {
     let function = binding.function();
+    if !binding.here() {
+        return Err(SyscallError::Gone);
+    }
     if function.irq.faulted() {
         return Err(SyscallError::Io);
     }
@@ -1559,11 +1866,14 @@ pub fn config_read(binding: &Binding, at: Register, width: RegWidth) -> Result<u
     })
 }
 
-/// The interrupts since the last read, or `None` for none; `Io` once the unit
-/// has refused the function, which is the one answer its holder cannot take
-/// for a quiet device.
+/// The interrupts since the last read, or `None` for none; `Gone` once the
+/// function has left the device set, and `Io` once the unit has refused it:
+/// the two answers its holder cannot take for a quiet device.
 pub fn take_record(binding: &Binding) -> Result<Option<DeviceIrqRecord>, SyscallError> {
     let function = binding.function();
+    if !binding.here() {
+        return Err(SyscallError::Gone);
+    }
     if function.irq.faulted() {
         return Err(SyscallError::Io);
     }
@@ -1576,11 +1886,11 @@ pub fn take_record(binding: &Binding) -> Result<Option<DeviceIrqRecord>, Syscall
     Ok(taken)
 }
 
-/// Whether a read of the claim answers at once: a message is waiting, or the
+/// Whether a read of the claim answers at once: a message is waiting, or a
 /// refusal is.
 pub fn has_irq(binding: &Binding) -> bool {
     let function = binding.function();
-    function.irq.armed() || function.irq.faulted()
+    !binding.here() || function.irq.armed() || function.irq.faulted()
 }
 
 /// Records one message and posts the claim's watch. Called from the
@@ -1594,19 +1904,34 @@ pub fn has_irq(binding: &Binding) -> bool {
 pub fn isr(number: usize) {
     let function = function(number);
     assert!(crate::preempt::count() > 0, "pcidev: {function}'s interrupt arrived with the preempt count at zero");
+    if let Some(slot) = slot::of(function) {
+        return slot.isr();
+    }
     function.irq.took(crate::clock::nanos_since_boot());
     function.watch.post_in_place();
 }
 
-/// The unit refused requester `who` an access: `true` where a claim holds it.
+/// The unit refused requester `who` an access: `true` where a claim holds it
+/// or it has left the device set, so that no driver of this kernel's is to
+/// blame, and its bus mastering is then cleared.
 ///
 /// Called from the fault handler, so it takes no lock: every call the claim
 /// answers refuses from here on, its interrupt read included, and the post
 /// wakes whoever waits on the claim to read that refusal, as a message's does.
 pub fn note_fault(who: u16) -> bool {
-    let Some(function) = held(who) else {
+    let Some(function) = functions().find(|function| function.who == who) else {
         return false;
     };
+    let gone = function.arrival.load(Ordering::Acquire) == 0;
+    if !gone && !function.held.load(Ordering::Acquire) {
+        return false;
+    }
+    // A function that arrived after the fault handler's table was published
+    // is not in it, so this is the one place its mastering is stopped.
+    crate::drivers::pci::stop_bus_mastering(function.pci.config_window());
+    if gone {
+        return true;
+    }
     function.irq.fault();
     function.watch.post_in_place();
     crate::preempt::set_need_resched();
@@ -1615,7 +1940,7 @@ pub fn note_fault(who: u16) -> bool {
 
 /// Requester `who`'s function, where a claim holds it; takes no lock.
 fn held(who: u16) -> Option<&'static Function> {
-    functions().iter().find(|function| function.who == who && function.held.load(Ordering::Acquire))
+    functions().find(|function| function.who == who && function.held.load(Ordering::Acquire))
 }
 
 /// Whether a claim holds requester `who`; takes no lock.

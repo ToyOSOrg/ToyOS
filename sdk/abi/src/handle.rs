@@ -94,10 +94,11 @@ pub enum ObjectKind {
     EventWait = 18,
     Pager = 19,
     Paged = 20,
+    DeviceSet = 21,
 }
 
 impl ObjectKind {
-    pub const ALL: [ObjectKind; 21] = [
+    pub const ALL: [ObjectKind; 22] = [
         Self::PipeRead,
         Self::PipeWrite,
         Self::Connection,
@@ -119,6 +120,7 @@ impl ObjectKind {
         Self::EventWait,
         Self::Pager,
         Self::Paged,
+        Self::DeviceSet,
     ];
 
     pub const fn from_word(word: u32) -> Option<Self> {
