@@ -17,8 +17,8 @@
 //! refused, that the table has room: a waiting flow costs one question per such change. A UDP
 //! datagram [ip] does not take, its next hop unresolved, stays in its sender's queue in [udp],
 //! spending nothing and charged nothing, while the sender's datagrams to other next hops leave:
-//! it is handed to [ip] again when [ip] reports that hop resolved or the routes changed, and
-//! dropped by [udp] when [ip] reports the hop failed. One [ip] refuses, for want of a route or
+//! it is handed to [ip] again when [ip] reports the hop on its interface resolved or the routes
+//! changed, and dropped by [udp] when [ip] reports the hop on its interface failed. One [ip] refuses, for want of a route or
 //! for a next hop it holds failed or has no room for, is [ip]'s to count and report. A flow
 //! whose route leaves by a link with no room waits on that link as on a next hop, and asks again
 //! at the next opportunity that link has room in.

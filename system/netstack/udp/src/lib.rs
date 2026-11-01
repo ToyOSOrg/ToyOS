@@ -15,8 +15,9 @@
 //!
 //! **A datagram waits for its next hop where it was accepted.** One the caller answers
 //! [`Offer::Waits`] stays in its sender's queue, under that queue's bound, and is passed over
-//! until [`Udp::wake`] names the hop: the sender's datagrams to other hops leave meanwhile, and
-//! those to one hop leave in the order they were accepted. One whose hop [`Udp::fail`] names is
+//! until [`Udp::wake`] names the hop on its interface: the sender's datagrams to other hops leave
+//! meanwhile, and those to one hop leave in the order they were accepted. One whose hop on its
+//! interface [`Udp::fail`] names is
 //! dropped, counted, and reported to a connected socket; nothing is kept for another try.
 //!
 //! **Refusals are values.** Every refusal is a named [`Counter`] and the [`Error`] the call

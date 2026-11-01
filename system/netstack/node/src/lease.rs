@@ -10,9 +10,10 @@
 //!   report for the link's address under probe, so no address is in use before conflict
 //!   detection ends;
 //! - the resolvers lookups ask are one link's held lease's: of the links up and holding one, the
-//!   first by rank and then arrival, and with none up the link asked before ([`Stack::asked`]). The answers they gave go with every write of any
-//!   link's state, every link that goes down and every change of the link asked: after any of
-//!   them the next lookup may be asking another network, so none is answered from this one's.
+//!   first by rank and then arrival, and with none up the link asked before ([`Stack::asked`]).
+//!   The answers they gave go with every write of any link's state, every link that goes down
+//!   and every change of the link asked: after any of them the next lookup may be asking another
+//!   network, so none is answered from this one's.
 //!
 //! [ip] reports on no address but those this module added, and one report at a time: each is
 //! read against its link's state as it stands.

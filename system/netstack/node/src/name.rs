@@ -9,7 +9,10 @@
 //! - **A message from one of this machine's own addresses never reaches a responder**: [ip]
 //!   refuses a datagram whose source any of its interfaces holds (`ip.own-source`), so on one LAN
 //!   two links share, as a wired and a wireless link bridged (§14), this machine hears its own
-//!   messages from neither and never conflicts with itself.
+//!   messages from neither and never conflicts with itself. The one exception is a message that
+//!   crosses the bridge as its sending link loses the address it came from: [ip] no longer holds
+//!   that source, a millisecond's race, and the other link's responder may read it as another
+//!   host's.
 //! - The record is the link's held lease's on a link that is up: its address and prefix are what the
 //!   responder is told, and it is told it has no link from the moment the lease goes or the link
 //!   does. Nothing is probed for, announced or answered for an address still under probe, or on a

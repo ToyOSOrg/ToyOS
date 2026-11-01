@@ -683,7 +683,7 @@ const MACHINE_TESTS: &[&str] = &[
     // shard's host tests of rank, failover and return hold below the drivers.
     // QEMU x86-64 (`qemu::SUITE_ARCH`), on two user networks; the datagrams go
     // to RFC 5737's TEST-NET-1, which answers nothing, and the harness is the
-    // peer on the host's loopback, so no public network. The networks are not
+    // peer on the host's loopback, so it depends on no public network. The networks are not
     // `restrict=on`: with it the job's first datagram off both networks was
     // refused for want of a route, and the default route is what is tested.
     // Order and counts only.
@@ -1232,7 +1232,7 @@ const METAL: &[(&str, metal::Metal)] = &[
         // full reset, which the stub only assumes. The T14 only: the AMD bench
         // has no card ToyOS drives. It rides `osbench`'s boot, whose i219 row
         // drives the card, and reads two of the driver's lines once its job
-        // has had netstack answer, which it does only after the bring-up.
+        // has seen the lease, which follows the bring-up.
         "i219_leaves_ulp_unarmed",
         metal::Metal { arms: BENCHCASE_ALONE, judge: |b| i219_leaves_ulp_unarmed(b[0]) },
     ),
