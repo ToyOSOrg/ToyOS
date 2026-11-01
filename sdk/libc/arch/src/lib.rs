@@ -77,6 +77,9 @@ mod pollreq;
 #[path = "../../src/resolve.rs"]
 mod resolve;
 #[cfg(test)]
+#[path = "../../src/affinity.rs"]
+mod affinity;
+#[cfg(test)]
 #[path = "../../src/sigmask.rs"]
 mod sigmask;
 #[cfg(test)]
