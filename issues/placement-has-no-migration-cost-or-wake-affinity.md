@@ -22,9 +22,11 @@ lacks:
   (parallelism). The first half is in `CpuSched::toward_its_waker`:
   - Every wake a thread posts names its CPU; one a device interrupt's
     handler, a deadline or a retire posts names none.
-  - The wake that makes `WAKER_RUN` (8) in a row from one other LLC moves
-    the task to a sleeping CPU there that its mask names and no kick is on
-    its way to, so a pair split across LLCs shares one after 8 round trips.
+  - A run of `WAKER_RUN` (8) or more wakes from one other LLC moves the
+    task to a sleeping CPU there that its mask names, that no kick is on
+    its way to and that is off the waker's own core. A pair split across
+    LLCs shares one after 8 round trips; on one core it would read about
+    as slow as split.
     A split pair costs about 25% on the AMD bench's `ipc.reqrep.8` and
     `fs.disk.read_4k_at`.
   - Only a wake that finds the task parked is counted. A server with a

@@ -1186,8 +1186,11 @@ impl<X: SchedPayload> CpuSched<X> {
 
     /// **A woken partner follows its waker's LLC.** A wake from another LLC
     /// whose run from it is at or past [`WAKER_RUN`] goes to a CPU of that
-    /// LLC the task's mask names, [`Doorbell::sleeping_unrung`], nearest the
-    /// waker and quickest to wake. Only a wake that finds the task parked
+    /// LLC the task's mask names, [`Doorbell::sleeping_unrung`] and off the
+    /// waker's own core, nearest the waker and quickest to wake. A waker that
+    /// has parked leaves its SMT sibling looking like a free core, and a pair
+    /// on one core contends for it: on the AMD bench a request/reply pair
+    /// there reads about as slow as one split across LLCs. Only a wake that finds the task parked
     /// reaches here, so only those are counted: one that finds it running or
     /// about to park is a flag the task consumes unseen. A request/reply pair
     /// split across LLCs shares one after [`WAKER_RUN`] round trips. A server
@@ -1216,7 +1219,7 @@ impl<X: SchedPayload> CpuSched<X> {
         }
         let mask = task.affinity();
         env.cpus.idle_in_llc(waker, topology.position(waker), |cpu| {
-            mask.contains(cpu.id()) && cpu.doorbell().sleeping_unrung()
+            mask.contains(cpu.id()) && cpu.doorbell().sleeping_unrung() && topology.level(cpu.id(), waker) != Some(Level::Core)
         })
     }
 
@@ -4726,6 +4729,23 @@ mod tests {
         let task = parked_in_llc_0(&mut w, llc_0);
         woken_at_home(&mut w, &task, 1, 2 * WAKER_RUN);
         w.abandon();
+    }
+
+    /// **The move stays off the waker's core**: a waker that has parked
+    /// leaves its SMT sibling asleep and first in the scan, and the task goes
+    /// to the other core of the waker's LLC instead.
+    #[test]
+    fn a_move_stays_off_the_wakers_core() {
+        let mut w = World::on(two_llcs());
+        let task = parked_in_llc_0(&mut w, CpuMask::ANY);
+        woken_at_home(&mut w, &task, 1, WAKER_RUN - 1);
+        woken_from(&mut w, &task, 1);
+        let state = task.state();
+        w.abandon();
+        assert!(
+            matches!(state, TaskState::InTransit(cpu) if cpu.0 == 3 || cpu.0 == 7),
+            "the task went to cpu3 or cpu7, off cpu1's core with cpu5, and it is {state:?}",
+        );
     }
 
     /// **Two runs ending in one drain go to two CPUs**: the first move rings
