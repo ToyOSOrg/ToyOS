@@ -97,6 +97,10 @@ const RUST_SKIP: &[&str] = &[
     // Its product is a cycle count per syscall and the clock rate beside it,
     // which a guest's host sets: the `syscall_cost` metal row runs it.
     "syscall_cost",
+    // Its subject is AArch64's `PSTATE.DIT`, of which x86-64 has nothing:
+    // `virt_smp` builds it for AArch64 and runs it on that architecture's SMP
+    // case.
+    "timing_protection",
     // Its product is how long a spawn of `toybox` takes to its exit, which a
     // guest's host sets: the `spawn_cost` metal row runs it.
     "spawn_cost",
@@ -2708,6 +2712,9 @@ const VIRT_COUNTERS_READ: &str = "counters_read";
 /// `test_rs_trace_read`.
 const VIRT_TRACE_READ: &str = "trace_read";
 
+/// The same for its job `test_rs_timing_protection`.
+const VIRT_TIMING: &str = "timing_protection";
+
 /// `tests/guest/rust-tests`' binary `name` built for `arch`, once a run, as a
 /// file a case's job list names on ROOT.
 fn suite_bin(arch: toyos_build::arch::Arch, name: &'static str) -> (String, Vec<u8>) {
@@ -3791,6 +3798,7 @@ fn boot_virt_smp(options: BootOptions) -> QemuInstance {
             extra_root_files: vec![
                 suite_bin(options.profile.arch(), VIRT_COUNTERS_READ),
                 suite_bin(options.profile.arch(), VIRT_TRACE_READ),
+                suite_bin(options.profile.arch(), VIRT_TIMING),
             ],
             ..options
         },
@@ -3803,11 +3811,16 @@ const COUNTERS_READ_SAID: &str = "counters_read: every cpu answered for itself, 
 /// What `trace_read` says once the diary read back as the scheduler wrote it.
 const TRACE_READ_SAID: &str = "trace_read: a wake precedes its pick, a cursor is its reader's own, and the diary is TRACE's";
 
+/// What `timing_protection` says once `PSTATE.DIT`, which every emulated CPU
+/// of the case has, followed each of its threads.
+const TIMING_DIT_SAID: &str = "timing_protection: PSTATE.DIT followed ";
+
 /// Boot `tests/images/virtsmpcase.toml` on [`VIRT_CPUS`] CPUs under `profile`, whose
 /// firmware enters every CPU at EL`el` and whose FADT names PSCI's `conduit`:
 /// each CPU is started by `CPU_ON`, holds the control-register declaration as
 /// entered there and joins the scheduler, and the case's jobs `unmap_touch`,
-/// `test_rs_counters_read` and `test_rs_trace_read` end with exit 0. Then its job `shutdown` stops the machine and powers it
+/// `test_rs_counters_read`, `test_rs_trace_read` and `test_rs_timing_protection`
+/// end with exit 0. Then its job `shutdown` stops the machine and powers it
 /// off, every other CPU turned off first ([`psci_powered_off`]).
 fn virt_smp(profile: qemu::Profile, conduit: &str, el: u32) -> Result<(), String> {
     let trace = common::lane::dir().join(format!("virt_smp-{conduit}.psci"));
@@ -3851,6 +3864,7 @@ fn virt_smp(profile: qemu::Profile, conduit: &str, el: u32) -> Result<(), String
     eprintln!("  [virt] {VIRT_CPUS} CPUs entered at EL{el}, started through {conduit}, and scheduling");
     judge_virt_job(&mut qemu, &mut serial, "test_rs_counters_read", COUNTERS_READ_SAID)?;
     judge_virt_job(&mut qemu, &mut serial, "test_rs_trace_read", TRACE_READ_SAID)?;
+    judge_virt_job(&mut qemu, &mut serial, "test_rs_timing_protection", TIMING_DIT_SAID)?;
     let (console, calls) =
         ended_through_psci(&mut qemu, &mut stop, serial, power::SHUTTING_DOWN, "guest-shutdown", &trace, |_| Vec::new())?;
     let record = console

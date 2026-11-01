@@ -31,9 +31,11 @@ impl SecretKey {
         Ok(Self::from_bytes(b.0))
     }
     pub fn public_key(&self) -> PublicKey {
+        let _protection = crate::timing::protect();
         PublicKey(crate::ed25519::x25519_public(&self.0.0))
     }
     pub fn agree(self, peer: &PublicKey) -> Result<SharedSecret, Error> {
+        let _protection = crate::timing::protect();
         let mut result = Secret([0; 32]);
         multiply(&self.0.0, &peer.0, &mut result.0);
         if ct::equal(&result.0, &[0; 32]) {

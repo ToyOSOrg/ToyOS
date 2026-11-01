@@ -921,6 +921,9 @@ version = "0.16.0"
 [[package]]
 name = "toyos-crypto"
 version = "0.1.0"
+dependencies = [
+ "toyos",
+]
 
 [[package]]
 name = "toyos-device-memory"

@@ -3,9 +3,9 @@
 #[cfg(target_arch = "aarch64")]
 mod aarch64;
 #[cfg(target_arch = "aarch64")]
-pub(crate) use aarch64::{copy, zero};
+pub(crate) use aarch64::{copy, timing, zero};
 
 #[cfg(target_arch = "x86_64")]
 mod x86_64;
 #[cfg(target_arch = "x86_64")]
-pub(crate) use x86_64::{copy, zero};
+pub(crate) use x86_64::{copy, timing, zero};

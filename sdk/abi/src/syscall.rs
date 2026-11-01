@@ -363,6 +363,9 @@ pub const SYS_PAGED_NOTICES: u64 = 158;
 pub const SYS_MESSAGE_RECV: u64 = 159;
 /// Whether a console holder carries the log off the machine. See [`console_carried`].
 pub const SYS_CONSOLE_CARRIED: u64 = 160;
+/// Whether the calling thread can set its own data-independent timing. See
+/// [`timing_control`].
+pub const SYS_TIMING_CONTROL: u64 = 161;
 
 /// Bins in the per-process syscall profile — one for every number this ABI
 /// issues, and one at the end for every number it does not.
@@ -370,13 +373,13 @@ pub const SYS_CONSOLE_CARRIED: u64 = 160;
 /// **The profile's parts sum to its total, and that is the whole requirement.**
 /// A bin array narrower than the ABI reaches drops calls out of the line while
 /// the total goes on counting them.
-pub const SYSCALL_PROFILE_BINS: usize = 162;
+pub const SYSCALL_PROFILE_BINS: usize = 163;
 
 /// Where a number this ABI does not issue is counted. Merging is a degradation
 /// a reader can see in the line; dropping is one nobody can.
 pub const SYSCALL_PROFILE_OTHER: usize = SYSCALL_PROFILE_BINS - 1;
 
-const _: () = assert!(SYS_CONSOLE_CARRIED < SYSCALL_PROFILE_OTHER as u64);
+const _: () = assert!(SYS_TIMING_CONTROL < SYSCALL_PROFILE_OTHER as u64);
 
 pub const WNOHANG: u64 = 1;
 /// Every bit `SYS_PROCESS_WAIT`'s flag word defines; a wait carrying another
@@ -2627,6 +2630,15 @@ pub fn stack_info() -> Option<(u64, u64)> {
 /// Return the number of available CPUs.
 pub fn cpu_count() -> u32 {
     syscall(SYS_CPU_COUNT, 0, 0, 0, 0) as u32
+}
+
+/// Whether every CPU lets a thread turn on data-independent timing for
+/// itself: Arm's `PSTATE.DIT` (FEAT_DIT), which EL0 writes and every exception
+/// from EL0 keeps in the thread's saved state, so it is the thread's own across
+/// switches and CPUs. False on x86-64, where no such mode is a thread's to set.
+/// `toyos::timing` is the interface.
+pub fn timing_control() -> bool {
+    syscall(SYS_TIMING_CONTROL, 0, 0, 0, 0) != 0
 }
 
 /// `len` bytes of private memory, rounded up to whole [`PAGE_SIZE`]s, placed

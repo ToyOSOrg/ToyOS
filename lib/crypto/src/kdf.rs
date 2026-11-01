@@ -57,20 +57,24 @@ impl<H: Digest> Hmac<H> {
     }
     #[inline(always)]
     pub fn new(key: &[u8]) -> Result<Self, Error> {
+        let _protection = crate::timing::protect();
         let mut mac = Self::unkeyed();
         mac.key(key)?;
         Ok(mac)
     }
     #[inline]
     pub fn update(&mut self, message: &[u8]) -> Result<(), Error> {
+        let _protection = crate::timing::protect();
         self.inner.update(message)
     }
     #[inline(always)]
     pub fn finalize(mut self, output: &mut [u8]) -> Result<(), Error> {
+        let _protection = crate::timing::protect();
         self.finish(output)
     }
     #[inline(always)]
     pub fn authenticate(key: &[u8], message: &[u8], output: &mut [u8]) -> Result<(), Error> {
+        let _protection = crate::timing::protect();
         let mut mac = Self::unkeyed();
         mac.key(key)?;
         mac.update(message)?;
@@ -78,6 +82,7 @@ impl<H: Digest> Hmac<H> {
     }
     #[inline(always)]
     pub fn verify(mut self, tag: &[u8]) -> Result<(), Error> {
+        let _protection = crate::timing::protect();
         if tag.len() != H::OUTPUT_LEN {
             return Err(Error::Length);
         }
@@ -100,6 +105,7 @@ pub struct Hkdf<H: Digest> {
 impl<H: Digest> Hkdf<H> {
     #[inline]
     pub fn extract(salt: &[u8], input_key_material: &[u8]) -> Result<Self, Error> {
+        let _protection = crate::timing::protect();
         let mut prk = Secret([0u8; 64]);
         Hmac::<H>::authenticate(salt, input_key_material, &mut prk.0[..H::OUTPUT_LEN])?;
         Ok(Self {
@@ -121,6 +127,7 @@ impl<H: Digest> Hkdf<H> {
     }
     #[inline]
     pub fn expand(&self, info: &[&[u8]], output: &mut [u8]) -> Result<(), Error> {
+        let _protection = crate::timing::protect();
         if output.len() > 255 * H::OUTPUT_LEN {
             return Err(Error::Length);
         }
@@ -154,6 +161,7 @@ impl<H: Digest> Hkdf<H> {
 /// PBKDF2 (RFC 8018 §5.2) with HMAC over `H` as its PRF, filling `output`,
 /// which is 1 to (2^32 - 1) * `H::OUTPUT_LEN` bytes.
 pub fn pbkdf2<H: Digest>(password: &[u8], salt: &[u8], iterations: NonZeroU32, output: &mut [u8]) -> Result<(), Error> {
+    let _protection = crate::timing::protect();
     let keyed = Hmac::<H>::new(password)?;
     let mut salted = keyed.fork();
     salted.update(salt)?;

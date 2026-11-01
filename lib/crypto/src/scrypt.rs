@@ -76,6 +76,7 @@ impl Params {
 /// (2^32 - 1) * 32 bytes. `workspace` is exactly
 /// [`Params::workspace_len`] words.
 pub fn derive(passphrase: &[u8], salt: &[u8], params: Params, workspace: &mut [u32], output: &mut [u8]) -> Result<(), Error> {
+    let _protection = crate::timing::protect();
     let workspace = Erased(workspace);
     if workspace.0.len() != params.workspace_len() || output.is_empty() || output.len().div_ceil(32) > u32::MAX as usize {
         return Err(Error::Length);

@@ -43,6 +43,7 @@ pub mod spawn;
 pub mod syscap;
 pub mod sync;
 pub mod system;
+pub mod timing;
 pub mod transport;
 pub mod volatile;
 

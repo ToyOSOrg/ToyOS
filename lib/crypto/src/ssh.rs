@@ -81,6 +81,7 @@ impl SealingKey {
         header: &mut [u8; 4],
         payload: &mut [u8],
     ) -> Result<(u32, [u8; 16]), Error> {
+        let _protection = crate::timing::protect();
         if payload.len() > u32::MAX as usize {
             return Err(Error::Length);
         }
@@ -115,6 +116,7 @@ impl OpeningKey {
     /// Unauthenticated length is only a framing hint. The caller must bound
     /// allocations and authenticate the complete packet before using plaintext.
     pub fn packet_length(&self, seq: u32, encrypted: [u8; 4]) -> u32 {
+        let _protection = crate::timing::protect();
         let mut header = encrypted;
         self.keys.crypt_header(seq, &mut header);
         u32::from_be_bytes(header)
@@ -126,6 +128,7 @@ impl OpeningKey {
         payload: &mut [u8],
         tag: &[u8],
     ) -> Result<(), Error> {
+        let _protection = crate::timing::protect();
         if tag.len() != 16 || payload.len() > u32::MAX as usize {
             return Err(Error::Length);
         }
