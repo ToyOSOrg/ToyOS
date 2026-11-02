@@ -407,15 +407,10 @@ fn a_window_spanning_2_62_sequences_is_checked_entry_by_entry() {
     assert_eq!(window_of(&gap), Err(Error::Corrupt("a journal entry missing from the replay window")));
 }
 
-/// A window whose keys a replay installs into one leaf past seven nodes'
-/// worth: 110 inodes per 16 KiB of the volume's buckets, which are its
-/// nodes, journaled across 13 entries, none yet in a node, as an upstream
-/// volume a crash left can hold them. The reader replays it; the read-write
-/// mount stops by name at its first write, since reclaim cannot split the
-/// leaf in one transaction
-/// (`issues/a-replayed-bcachefs-node-past-seven-nodes-is-refused.md`).
+/// More than seven nodes' worth of replay keys target one physical leaf.
+/// They remain journal-owned until bounded materialization splits the leaf.
 #[test]
-fn a_replayed_leaf_past_seven_nodes_is_read_but_not_mounted_read_write() {
+fn a_replay_larger_than_seven_nodes_materializes_in_bounded_ranges() {
     let dev = formatted(64 << 20, None);
     let bucket_bytes = u64::from(block_on_ready(Volume::open(&dev)).unwrap().superblock().member.bucket_sectors) * SECTOR as u64;
     unclean(&dev);
@@ -439,7 +434,9 @@ fn a_replayed_leaf_past_seven_nodes_is_read_but_not_mounted_read_write() {
     assert!(block_on_ready(v.inode(ino - 1)).is_ok(), "the reader replays the window");
     drop(v);
     let m = block_on_ready(Mount::open(&dev, MountOptions { cache_nodes: 256 }, super::mount::random())).unwrap();
-    let why = "a btree node whose keys fill more than seven nodes";
-    assert_eq!(block_on_ready(m.create(m.root(), b"f", New::File, super::mount::OWNER, super::mount::NOW)).err(), Some(Error::Unsupported(why)));
-    assert_eq!(block_on_ready(m.unmount()).err(), Some(Error::ReadOnly(why)));
+    block_on_ready(m.create(m.root(), b"f", New::File, super::mount::OWNER, super::mount::NOW)).unwrap();
+    block_on_ready(m.unmount()).unwrap();
+    let v = block_on_ready(Volume::open(&dev)).unwrap();
+    assert!(block_on_ready(v.inode(ino - 1)).is_ok(), "the final replay key reached a physical leaf");
+    assert!(block_on_ready(v.lookup(v.root(), b"f")).unwrap().is_some());
 }

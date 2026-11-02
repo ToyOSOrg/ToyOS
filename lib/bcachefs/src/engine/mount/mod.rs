@@ -1,7 +1,6 @@
 //! A volume mounted read-write: one transaction at a time under the writer
-//! slot (§3.3), the btree nodes it changes held in memory, the journal that
-//! makes each transaction durable, and the reclaim that writes the nodes so
-//! the journal can move on.
+//! slot (§3.3), journal-owned logical changes, and bounded materialization
+//! into btree nodes so the journal can move on.
 //!
 //! **Order of waits.** A transaction takes admission first — journal space
 //! and cache room at its bound — and the slot second. Nothing waits under the
@@ -26,11 +25,12 @@ use toyos_crypto::{scrypt, Random};
 
 use super::bkey::{Bpos, Key, Version, KEY_U64S};
 use super::bucket::Bucket;
-use super::cache::{key_bytes, Cache, Cached, Keys, NodeId};
+use super::cache::{key_bytes, Cache, Cached, Change, Keys, NodeId};
 use super::crypt::MasterKey;
 use super::journal::{self, Class, Closed, Jset, Replayed, Writer, SKIP};
 use super::mkfs::{self, COMPAT_CLEAN, ROOT_SNAPSHOT};
 use super::node::{self, Build, FIRST_KEYS};
+use super::pending::Pending;
 use super::read::{self, Inode, Parts, Source, Volume};
 use super::superblock::{field_type, Field, Header, Member, Root, Superblock};
 use super::sync::{Broadcast, Queue};
@@ -51,7 +51,7 @@ pub(crate) use reclaim::Order;
 pub(crate) use reclaim::Plan;
 use reclaim::{fresh_cost, node_ptr, MAX_GROUPS, MAX_REWRITE, RECLAIM_ROOM, REWRITTEN};
 
-/// How much a mount may hold in memory.
+/// The mount's node cache capacity. Pending journal keys are held separately.
 #[derive(Clone, Copy, Debug)]
 pub struct MountOptions {
     /// Btree nodes cached. Dirty and unpointed nodes are bounded well below
@@ -117,6 +117,7 @@ struct State {
     member: Member,
     blacklist: Vec<(u64, u64)>,
     cache: Cache,
+    pending: Pending,
     roots: BTreeMap<Btree, Root>,
     /// Btrees given a root in memory, not yet written.
     new_roots: BTreeMap<Btree, NodeId>,
@@ -160,6 +161,8 @@ struct State {
     /// room, as tests construct them.
     #[cfg(test)]
     waits: [usize; 2],
+    #[cfg(test)]
+    journal_bytes: [usize; 3],
 }
 
 /// A volume mounted read-write.
@@ -238,7 +241,7 @@ struct Txn {
 /// A written node, made reachable by the transaction that holds it.
 enum Install {
     /// `id`'s appended bset, now `sectors` long in all.
-    Append { id: NodeId, sectors: u16 },
+    Append { id: NodeId, sectors: u16, journal_seq: u64 },
     /// Sources replaced by nodes covering their combined range, with a new
     /// root when the old root split.
     Replace { ids: Vec<NodeId>, by: Vec<Planned>, root: Option<Planned> },
@@ -255,6 +258,7 @@ struct Planned {
     sector: u64,
     gen: u8,
     sectors: u16,
+    journal_seq: u64,
     keys: Vec<(Key, Vec<u8>)>,
 }
 
@@ -432,6 +436,7 @@ impl<D: BlockDev> Mount<D> {
             member: sb.member.clone(),
             blacklist,
             cache: Cache::new(options.cache_nodes, sb.node_sectors() as usize * SECTOR - FIRST_KEYS),
+            pending: Pending::default(),
             roots: roots.into_iter().map(|r| (r.btree, r)).collect(),
             new_roots: BTreeMap::new(),
             journal,
@@ -458,6 +463,8 @@ impl<D: BlockDev> Mount<D> {
             peak: 0,
             #[cfg(test)]
             waits: [0; 2],
+            #[cfg(test)]
+            journal_bytes: [0; 3],
         };
         let mount = Mount {
             dev,
@@ -677,6 +684,7 @@ impl<D: BlockDev> Mount<D> {
             written: ptr.written,
             on_disk: ptr.written,
             bsets: node.bset_seqs.len() as u16,
+            journal_seq: node.bset_seqs.iter().copied().max().unwrap_or(0),
             bytes: node.keys.iter().map(|(_, v)| key_bytes(v)).sum(),
             keys: Rc::new(node.keys),
             unwritten: BTreeMap::new(),
@@ -722,7 +730,8 @@ impl<D: BlockDev> Mount<D> {
                 if n.level < level {
                     return Err(Error::Corrupt("a key above its btree's root"));
                 }
-                let (key, value) = n.keys.get(n.at(pos)).ok_or(Error::Corrupt("interior node short of its range"))?;
+                let keys = st.keys(id)?;
+                let (key, value) = keys.get(keys.partition_point(|(k, _)| k.pos < pos)).ok_or(Error::Corrupt("interior node short of its range"))?;
                 (n.level - 1, NodePtr::decode(value)?, key.pos)
             };
             id = self.load(btree, child, &ptr, max).await?;
@@ -746,6 +755,7 @@ impl<D: BlockDev> Mount<D> {
             written: 0,
             on_disk: 0,
             bsets: 0,
+            journal_seq: 0,
             bytes: 0,
             keys: Rc::new(Vec::new()),
             unwritten: BTreeMap::new(),
@@ -779,7 +789,8 @@ impl<D: BlockDev> Mount<D> {
                 } else if n.level < level {
                     return Err(Error::Corrupt("a key above its btree's root"));
                 } else {
-                    let (key, value) = n.keys.get(n.at(pos)).ok_or(Error::Corrupt("interior node short of its range"))?;
+                    let keys = st.keys(id)?;
+                    let (key, value) = keys.get(keys.partition_point(|(k, _)| k.pos < pos)).ok_or(Error::Corrupt("interior node short of its range"))?;
                     Some((n.level - 1, NodePtr::decode(value)?, key.pos))
                 }
             };
@@ -853,12 +864,22 @@ impl<D: BlockDev> Mount<D> {
 }
 
 impl State {
+    fn keys(&self, id: NodeId) -> Result<Keys> {
+        let n = self.cache.node(id);
+        if self.pending.range(n.btree, n.level, n.min, n.max).next().is_none() { return Ok(Rc::clone(&n.keys)); }
+        Ok(Rc::new(self.pending.over(n.btree, n.level, n.min, n.max, n.keys.to_vec())?))
+    }
+
+    fn oldest_pin(&self) -> Option<u64> {
+        self.cache.oldest_pin().into_iter().chain(self.pending.oldest_pin()).min()
+    }
+
     /// Whether writing the journal now would free a bucket of its ring: the
     /// last sequence an entry closed now carries passes some bucket's newest.
     fn journal_frees(&self) -> bool {
         let j = &self.journal;
         let next = j.open.as_ref().map_or(j.next_seq, |o| o.seq);
-        let last = self.cache.oldest_pin().map_or(next, |p| p.min(next));
+        let last = self.oldest_pin().map_or(next, |p| p.min(next));
         j.newest.iter().enumerate().any(|(i, n)| i != j.head && n.is_some_and(|n| n < last))
     }
 }
@@ -882,7 +903,8 @@ fn held(st: &State, btree: Btree, level: u8, pos: Bpos) -> NodeId {
         if n.level == level {
             return id;
         }
-        let (_, value) = &n.keys[n.at(pos)];
+        let keys = st.keys(id).expect("a held logical node decodes");
+        let (_, value) = &keys[keys.partition_point(|(k, _)| k.pos < pos)];
         let ptr = NodePtr::decode(value).expect("a pointer the cache holds decodes");
         id = st.cache.id_at(ptr.ptr.sector).expect("a held node in the cache");
     }
@@ -917,12 +939,12 @@ impl<D: BlockDev> Source for Mount<D> {
 
     fn rootless(&self, btree: Btree) -> Result<Vec<(Key, Vec<u8>)>> {
         let st = self.st.borrow();
-        Ok(st.new_roots.get(&btree).map_or_else(Vec::new, |&id| st.cache.node(id).keys.to_vec()))
+        st.new_roots.get(&btree).map_or_else(|| Ok(Vec::new()), |&id| st.keys(id).map(|keys| keys.to_vec()))
     }
 
     async fn keys(&self, btree: Btree, level: u8, ptr: &NodePtr, max: Bpos) -> Result<Keys> {
         let id = self.load(btree, level, ptr, max).await?;
-        Ok(Rc::clone(&self.st.borrow().cache.node(id).keys))
+        self.st.borrow().keys(id)
     }
 
     fn begin_read(&self) -> u64 {
@@ -996,7 +1018,7 @@ impl<D: BlockDev> Mount<D> {
                 let keeps = st.alloc.keeps(st.metadata_buckets, stable, nodes, st.reclaim_room, draw, false);
                 let physical = st.alloc.fits(nodes, st.reclaim_room, draw);
                 let can_compact = st.sparse_metadata.iter().any(|&b| !st.alloc.metadata_open(b));
-                if (!keeps || (!physical && !can_compact)) && held == 0 && st.reclaim_granted == 0 && !st.alloc.returning() {
+                if (!keeps || (!physical && !can_compact)) && held == 0 && st.pending.oldest_pin().is_none() && st.reclaim_granted == 0 && !st.alloc.returning() {
                     return Err(Error::NoSpace(match draw {
                         Draw::Ordinary | Draw::Reserved(_) => "no room left for the btree nodes a change may write",
                         Draw::Freeing => "no room left for the btree nodes a removal may write",
@@ -1028,7 +1050,7 @@ impl<D: BlockDev> Mount<D> {
     fn can_free(&self) -> bool {
         let st = self.st.borrow();
         let flush = st.journal_frees() || st.alloc.returning();
-        !st.journal.closed.is_empty() || (flush && st.journal.open.is_some() && st.journal.may_close()) || st.sparse_metadata.iter().any(|&b| !st.alloc.metadata_open(b)) || st.cache.ids().into_iter().any(|id| {
+        st.pending.oldest_pin().is_some() || !st.journal.closed.is_empty() || (flush && st.journal.open.is_some() && st.journal.may_close()) || st.sparse_metadata.iter().any(|&b| !st.alloc.metadata_open(b)) || st.cache.ids().into_iter().any(|id| {
             let n = st.cache.node(id);
             n.dirty() && !n.writing && n.captured.is_none() && n.held == 0
         })
@@ -1095,6 +1117,7 @@ impl<D: BlockDev> Mount<D> {
             }
             self.ungrant(&mut st, Class::Ordinary, bound, nodes);
         };
+        self.prepare_pending(Class::Ordinary, bound, nodes)?;
         let mut txn = Txn::default();
         let out = prepare(&mut txn).await;
         self.finish(txn, out.is_ok(), Class::Ordinary, bound, nodes)?;
@@ -1102,6 +1125,16 @@ impl<D: BlockDev> Mount<D> {
             if let Draw::Reserved(id) = draw { self.reservations.borrow_mut().active.remove(&id).expect("a completed reserved write consumes its reservation"); }
         }
         out
+    }
+
+    fn prepare_pending(&self, class: Class, bound: u64, nodes: usize) -> Result<()> {
+        let mut st = self.st.borrow_mut();
+        if let Err(error) = st.pending.reserve(bound as usize / KEY_U64S) {
+            self.ungrant(&mut st, class, bound, nodes);
+            self.written.wake();
+            return Err(error);
+        }
+        Ok(())
     }
 
     /// Applies `txn` when `apply`, else drops it; either way releases its
@@ -1135,8 +1168,8 @@ impl<D: BlockDev> Mount<D> {
             }
             for (&(btree, level, pos), update) in &txn.updates {
                 if level != 0 { continue; }
-                let node = st.cache.node(held(st, btree, level, pos));
-                let prior = node.keys.get(node.at(pos)).filter(|(k, _)| k.pos == pos);
+                let keys = st.keys(held(st, btree, level, pos)).expect("a prepared logical node decodes");
+                let prior = keys.get(keys.partition_point(|(k, _)| k.pos < pos)).filter(|(k, _)| k.pos == pos);
                 let charge = |entry: Option<&(Key, Vec<u8>)>| entry.map_or(0, |(_, v)| allocator::charge(btree, v));
                 st.metadata_bytes = st.metadata_bytes + charge(update.as_ref()) - charge(prior);
                 if btree == Btree::Backpointers {
@@ -1147,8 +1180,8 @@ impl<D: BlockDev> Mount<D> {
                 }
             }
             for (&pos, delta) in &txn.accounting {
-                let node = st.cache.node(held(st, Btree::Accounting, 0, pos));
-                let prior = node.keys.get(node.at(pos)).filter(|(k, _)| k.pos == pos);
+                let keys = st.keys(held(st, Btree::Accounting, 0, pos)).expect("a prepared accounting node decodes");
+                let prior = keys.get(keys.partition_point(|(k, _)| k.pos < pos)).filter(|(k, _)| k.pos == pos);
                 let before = prior.map_or(0, |(_, v)| key_bytes(v) as u64);
                 let counters = prior.map_or(0, |(_, v)| v.len() / 8).max(delta.len());
                 st.metadata_bytes = st.metadata_bytes + (KEY_U64S * 8 + counters * 8) as u64 - before;
@@ -1172,10 +1205,9 @@ impl<D: BlockDev> Mount<D> {
         }
     }
 
-    /// Installs `txn`: its records appended to the open entry at the sequence
-    /// that entry has, then its keys in their nodes, its roots and its
-    /// written nodes. No await: what the slot's holder prepared, the cache
-    /// holds.
+    /// Appends the transaction's records, transfers its keys to pending
+    /// ownership, and publishes roots and completed node writes. No await
+    /// separates these logical changes.
     fn apply(&self, st: &mut State, mut txn: Txn, bound: u64) {
         let installs = core::mem::take(&mut txn.installs);
         let holds = core::mem::take(&mut txn.held);
@@ -1203,32 +1235,15 @@ impl<D: BlockDev> Mount<D> {
             self.readers.borrow_mut().emptied(b);
         }
 
-        // Every change's node is found before any changes: a pointer update
-        // this transaction makes would lead the descent to a node not yet
-        // installed.
-        let updates: Vec<_> = core::mem::take(&mut txn.updates).into_iter().map(|((btree, level, pos), kv)| (held(st, btree, level, pos), pos, kv)).collect();
-        let accounting: Vec<_> = core::mem::take(&mut txn.accounting).into_iter().map(|(pos, delta)| (held(st, Btree::Accounting, 0, pos), pos, delta)).collect();
-        for (id, pos, kv) in updates {
-            st.cache.change(id, |n| n.put(pos, kv, seq));
-        }
-        for (id, pos, delta) in accounting {
-            let version = versions[&pos];
-            st.cache.change(id, |n| {
-                let i = n.at(pos);
-                let mut sums = match n.keys.get(i) {
-                    Some((k, v)) if k.pos == pos => journal::counters(v).expect("a cached accounting key decodes"),
-                    _ => Vec::new(),
-                };
-                sums.resize(sums.len().max(delta.len()), 0);
-                for (sum, d) in sums.iter_mut().zip(&delta) {
-                    *sum = sum.wrapping_add(*d);
-                }
-                let key = Key { version, ..Key::new(kind::ACCOUNTING, pos) };
-                // A total of zero stays, its version with it, so a replay
-                // never adds the delta that made it zero again (A7.23, A7.24).
-                n.put(pos, Some((key, value::counters(&sums))), seq);
-            });
-        }
+        let updates = core::mem::take(&mut txn.updates).into_iter().map(|((btree, level, pos), kv)| {
+            let (key, value) = kv.unwrap_or_else(|| (Key::new(kind::DELETED, pos), Vec::new()));
+            (btree, level, key, value)
+        });
+        let accounting = core::mem::take(&mut txn.accounting).into_iter().map(|(pos, delta)| {
+            let key = Key { version: versions[&pos], ..Key::new(kind::ACCOUNTING, pos) };
+            (Btree::Accounting, 0, key, value::counters(&delta))
+        });
+        st.pending.apply(seq, updates.chain(accounting));
         for root in core::mem::take(&mut txn.roots) {
             st.roots.insert(root.btree, root);
         }
@@ -1253,13 +1268,19 @@ impl<D: BlockDev> Mount<D> {
     /// a clean unmount's last (A1.42).
     fn close(&self, st: &mut State, own: bool) {
         let mut open = st.journal.open.take().expect("an entry open");
-        let pinned = st.cache.oldest_pin().map_or(open.seq, |p| p.min(open.seq));
+        let pinned = st.oldest_pin().map_or(open.seq, |p| p.min(open.seq));
         let last_seq = if own { pinned } else { pinned.min(st.journal.durable) };
         assert!(last_seq >= st.journal.durable_last, "a journal entry's last sequence moved back");
         let roots = encoded_roots(&st.roots);
         journal::tail(&mut open.area, roots.iter().map(|(b, l, k)| (*b, *l, &k[..])), Some(st.now), st.key_version, st.clocks);
         let entry = Jset { seq: open.seq, last_seq, area: &open.area };
         let bytes = journal::encode(&st.header.internal_uuid, self.sb.block_bytes(), self.key.as_ref(), &entry).expect("a journal entry encrypts");
+        #[cfg(test)]
+        {
+            st.journal_bytes[0] += 1;
+            st.journal_bytes[1] += open.area.len();
+            st.journal_bytes[2] += bytes.len();
+        }
         st.journal.closed.push_back(Closed { seq: open.seq, last_seq, bytes });
     }
 
@@ -1486,10 +1507,10 @@ impl<D: BlockDev> Mount<D> {
         self.write_superblock(Some(clean)).await
     }
 
-    /// Whether any node is dirty or unpointed.
+    /// Whether journal-owned keys or unfinished node writes remain.
     fn busy(&self) -> bool {
         let st = self.st.borrow();
-        st.cache.dirty > 0 || st.cache.unpointed > 0
+        st.pending.oldest_pin().is_some() || st.cache.dirty > 0 || st.cache.unpointed > 0
     }
 }
 
@@ -1508,12 +1529,23 @@ impl<D: BlockDev> Mount<D> {
         self.st.borrow().alloc.reused
     }
 
+    pub(crate) fn pending_pressure(&self) -> (usize, usize, usize) {
+        let st = self.st.borrow();
+        (st.pending.iter().count(), st.pending.allocated_bytes(), st.cache.dirty + st.cache.unpointed)
+    }
+
     /// What a stalled test reports: the counts admission and reclaim look
     /// at, and every node not clean.
     pub(crate) fn dump(&self) -> alloc::string::String {
         let st = self.st.borrow();
         let j = &st.journal;
         let dirty: Vec<_> = st.cache.ids().into_iter().map(|id| st.cache.node(id)).filter(|n| n.dirty() || n.captured.is_some() || n.writing || n.held > 0).map(|n| (n.btree, n.level, n.dirty(), n.pin(), n.captured, n.writing, n.held, n.bytes)).collect();
-        alloc::format!("dirty={} unp={} over={} granted={} rg={} limit={} room={} open={:?} closed={} ring_free={} openable={} reclaim_entries={} durable_last={} newest={:?} head={} hs={} pins={:?} slot={} admitq_empty={} reclq={} nodes={:?}", st.cache.dirty, st.cache.unpointed, st.cache.oversized, st.granted, st.reclaim_granted, st.limit, st.reclaim_room, j.open.as_ref().map(|o| (o.seq, o.area.len()/8)), j.closed.len(), j.ring_free(), j.openable(), j.reclaim_entries, j.durable_last, j.newest, j.head, j.head_sectors, st.cache.oldest_pin(), self.slot_held.get(), self.admit.is_empty(), self.admit_reclaim.is_empty(), dirty)
+        let mut owners = BTreeMap::new();
+        for entry in st.pending.iter().filter(|e| Some(e.capture().first) == st.pending.oldest_pin()) {
+            let position = entry.position();
+            *owners.entry((position.0, position.1)).or_insert(0) += 1;
+        }
+        let geometry = (st.alloc.capacity(st.metadata_buckets), st.alloc.ready(0), st.btree_nodes, st.alloc.occupied_metadata(st.metadata_buckets), st.metadata_bytes, st.baseline_nodes.len(), self.metadata_nodes(&st, K_TX * 8));
+        alloc::format!("stopped={:?} capacity_free_live_occupied_bytes_baseline_stable={geometry:?} pending={} pending_bytes={} pending_pin={:?} pending_owners={owners:?} journal_entries_payload_encoded={:?} dirty={} unp={} over={} granted={} rg={} limit={} room={} open={:?} closed={} ring_free={} openable={} reclaim_entries={} durable_last={} newest={:?} head={} hs={} pins={:?} slot={} admitq_empty={} reclq={} nodes={:?}", st.read_only, st.pending.iter().count(), st.pending.allocated_bytes(), st.pending.oldest_pin(), st.journal_bytes, st.cache.dirty, st.cache.unpointed, st.cache.oversized, st.granted, st.reclaim_granted, st.limit, st.reclaim_room, j.open.as_ref().map(|o| (o.seq, o.area.len()/8)), j.closed.len(), j.ring_free(), j.openable(), j.reclaim_entries, j.durable_last, j.newest, j.head, j.head_sectors, st.oldest_pin(), self.slot_held.get(), self.admit.is_empty(), self.admit_reclaim.is_empty(), dirty)
     }
 }

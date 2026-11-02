@@ -415,7 +415,8 @@ fn retained_small_files_reclaim_their_truncated_data_buckets() {
     let mut inodes = Vec::new();
     for i in 0..1600 {
         let ino = block_on_ready(m.create(m.root(), format!("f{i}").as_bytes(), New::File, OWNER, NOW)).unwrap().ino;
-        assert_eq!(block_on_ready(m.write(ino, 0, &[i as u8; 32_768], NOW)).unwrap(), 32_768);
+        let written = block_on_ready(m.write(ino, 0, &[i as u8; 32_768], NOW)).unwrap();
+        assert_eq!(written, 32_768, "file {i}: {}", m.dump());
         block_on_ready(m.truncate(ino, 4096, NOW)).unwrap();
         inodes.push(ino);
         if i % 32 == 0 { block_on_ready(m.commit()).unwrap(); }
@@ -425,6 +426,32 @@ fn retained_small_files_reclaim_their_truncated_data_buckets() {
     let v = block_on_ready(Volume::open(&dev)).unwrap();
     for (i, ino) in inodes.into_iter().enumerate() { assert_eq!(read_all(&v, ino).unwrap(), [i as u8; 4096]); }
     assert_eq!(block_on_ready(fsck(&v)).unwrap(), []);
+}
+
+#[test]
+fn pending_allocation_failure_precedes_data_reservation_and_reserved_write_preparation() {
+    let dev = formatted(64 << 20, None);
+    let mount = block_on_ready(Mount::open(&dev, MEMORY, random())).unwrap();
+    let ino = block_on_ready(mount.create(mount.root(), b"retry", New::File, OWNER, NOW)).unwrap().ino;
+    assert_eq!(block_on_ready(mount.write(ino, 0, &[0x11; 4096], NOW)).unwrap(), 4096);
+    let before = mount.space();
+    let out = super::super::pending::fail_pending_allocation_after(0, || block_on_ready(mount.reserve(ino, 0, 4096)));
+    assert!(matches!(out, Err(Error::NoMemory)));
+    assert_eq!(mount.space(), before, "a refused preflight takes no DATA slot");
+    let mut reservation = block_on_ready(mount.reserve(ino, 0, 4096)).unwrap();
+    block_on_ready(mount.set_mtime(ino, NOW + 1)).unwrap();
+    let out = super::super::pending::fail_pending_allocation_after(0, || block_on_ready(mount.write_reserved(&mut reservation, 0, &[0x22; 4096], NOW)));
+    assert_eq!(out, Err(Error::NoMemory));
+    let mut old = [0; 4096];
+    assert_eq!(block_on_ready(mount.read(ino, 0, &mut old)).unwrap(), old.len());
+    assert_eq!(old, [0x11; 4096]);
+    assert_eq!(block_on_ready(mount.write_reserved(&mut reservation, 0, &[0x22; 4096], NOW)).unwrap(), 4096);
+    drop(reservation);
+    block_on_ready(mount.check_metadata_budget());
+    block_on_ready(mount.unmount()).unwrap();
+    let volume = block_on_ready(Volume::open(&dev)).unwrap();
+    assert_eq!(read_all(&volume, ino).unwrap(), [0x22; 4096]);
+    assert_eq!(block_on_ready(fsck(&volume)).unwrap(), []);
 }
 
 fn interrupted_user_evacuation(encrypted: bool) {

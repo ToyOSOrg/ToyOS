@@ -1,9 +1,11 @@
 //! Journal-owned keys, independent of the leaves that will materialize them.
 
 use alloc::vec::Vec;
+use alloc::collections::BTreeMap;
 
 use super::bkey::{Bpos, Key};
 use super::{Btree, Error, Result};
+use super::{journal, kind};
 
 pub(crate) type Position = (Btree, u8, Bpos);
 pub(crate) type Update = (Btree, u8, Key, Vec<u8>);
@@ -15,8 +17,25 @@ struct Entry {
     key: Key,
     value: Vec<u8>,
     first: u64,
+    last: u64,
     order: u64,
     live: bool,
+}
+
+struct Run {
+    entries: Vec<Entry>,
+    pins: Vec<usize>,
+    oldest: usize,
+}
+
+impl Run {
+    fn oldest(&self) -> Option<&Entry> {
+        self.pins.get(self.oldest).map(|&i| &self.entries[i])
+    }
+
+    fn retire(&mut self) {
+        while self.pins.get(self.oldest).is_some_and(|&i| !self.entries[i].live) { self.oldest += 1; }
+    }
 }
 
 impl Entry {
@@ -50,36 +69,41 @@ pub(crate) struct Transferred {
     pub key: Key,
     pub value: Vec<u8>,
     pub first: u64,
+    pub last: u64,
 }
 
 pub(crate) struct Pending {
-    runs: [Option<Vec<Entry>>; LEVELS],
+    runs: [Option<Run>; LEVELS],
     incoming: Vec<Entry>,
     merged: Vec<Entry>,
+    pins: Vec<usize>,
     next: u64,
     prepared: usize,
 }
 
 impl Default for Pending {
     fn default() -> Self {
-        Self { runs: core::array::from_fn(|_| None), incoming: Vec::new(), merged: Vec::new(), next: 0, prepared: 0 }
+        Self { runs: core::array::from_fn(|_| None), incoming: Vec::new(), merged: Vec::new(), pins: Vec::new(), next: 0, prepared: 0 }
     }
 }
 
 impl Pending {
     /// Reserve all workspace before making a logical batch visible.
     pub fn reserve(&mut self, additional: usize) -> Result<()> {
+        #[cfg(test)]
+        let _allocations = tests::allocation::Scope::enter();
         assert!(self.incoming.is_empty() && self.merged.is_empty());
         let mut total = additional;
         for run in &self.runs {
             let Some(run) = run else { break };
-            total = total.checked_add(run.iter().filter(|e| e.live).count()).ok_or(Error::NoMemory)?;
+            total = total.checked_add(run.entries.iter().filter(|e| e.live).count()).ok_or(Error::NoMemory)?;
         }
         if self.runs.iter().all(Option::is_some) || u64::try_from(additional).ok().and_then(|n| self.next.checked_add(n)).is_none() {
             return Err(Error::NoMemory);
         }
         self.incoming.try_reserve(additional).map_err(|_| Error::NoMemory)?;
         self.merged.try_reserve(total).map_err(|_| Error::NoMemory)?;
+        self.pins.try_reserve(total).map_err(|_| Error::NoMemory)?;
         self.prepared = additional;
         Ok(())
     }
@@ -89,7 +113,7 @@ impl Pending {
     pub fn apply(&mut self, seq: u64, updates: impl IntoIterator<Item = Update>) {
         for (btree, level, key, value) in updates {
             assert!(self.incoming.len() < self.prepared, "pending batch exceeded its reservation");
-            self.incoming.push(Entry { btree, level, key, value, first: seq, order: self.next, live: true });
+            self.incoming.push(Entry { btree, level, key, value, first: seq, last: seq, order: self.next, live: true });
             self.next += 1;
         }
         self.prepared = 0;
@@ -102,7 +126,7 @@ impl Pending {
             let mut chosen = None;
             let mut best = self.incoming.get(incoming_at).map(Entry::ordering);
             for (i, cursor) in at.iter_mut().enumerate().take(level) {
-                let run = self.runs[i].as_ref().expect("preceding run occupied");
+                let run = &self.runs[i].as_ref().expect("preceding run occupied").entries;
                 while run.get(*cursor).is_some_and(|e| !e.live) { *cursor += 1; }
                 if let Some(e) = run.get(*cursor) {
                     if best.is_none_or(|old| e.ordering() < old) {
@@ -114,7 +138,7 @@ impl Pending {
             if best.is_none() { break; }
             let source = match chosen {
                 Some(i) => {
-                    let e = &mut self.runs[i].as_mut().unwrap()[at[i]];
+                    let e = &mut self.runs[i].as_mut().unwrap().entries[at[i]];
                     at[i] += 1;
                     e
                 }
@@ -135,24 +159,73 @@ impl Pending {
         }
         self.incoming.clear();
         for run in &mut self.runs[..level] { *run = None; }
-        self.runs[level] = Some(core::mem::take(&mut self.merged));
+        self.pins.extend(0..self.merged.len());
+        self.pins.sort_unstable_by_key(|&i| (self.merged[i].first, self.merged[i].order));
+        self.runs[level] = Some(Run { entries: core::mem::take(&mut self.merged), pins: core::mem::take(&mut self.pins), oldest: 0 });
     }
 
     pub fn oldest_pin(&self) -> Option<u64> {
-        self.runs.iter().flatten().flat_map(|r| r.iter()).filter(|e| e.live).map(|e| e.first).min()
+        self.oldest().map(|c| c.first)
     }
 
+    pub fn oldest(&self) -> Option<Capture> {
+        self.runs.iter().flatten().filter_map(Run::oldest).min_by_key(|e| (e.first, e.order))
+            .map(|e| Capture { position: e.position(), order: e.order, first: e.first })
+    }
+
+    #[cfg(test)]
+    pub fn allocated_bytes(&self) -> usize {
+        let entries = |entries: &Vec<Entry>| entries.capacity() * core::mem::size_of::<Entry>() + entries.iter().map(|e| e.value.capacity()).sum::<usize>();
+        core::mem::size_of::<Self>() + entries(&self.incoming) + entries(&self.merged) + self.pins.capacity() * core::mem::size_of::<usize>()
+            + self.runs.iter().flatten().map(|r| entries(&r.entries) + r.pins.capacity() * core::mem::size_of::<usize>()).sum::<usize>()
+    }
+
+    #[cfg(test)]
     pub fn iter(&self) -> Iter<'_> { self.between(None) }
 
     pub fn range(&self, btree: Btree, level: u8, min: Bpos, max: Bpos) -> Iter<'_> {
         self.between(Some(((btree, level, min), (btree, level, max))))
     }
 
+    /// The logical range, preserving zero accounting values and their
+    /// versions so materialization cannot apply an old delta twice.
+    pub fn over(&self, btree: Btree, level: u8, min: Bpos, max: Bpos, keys: Vec<(Key, Vec<u8>)>) -> Result<Vec<(Key, Vec<u8>)>> {
+        let mut merged: BTreeMap<_, _> = keys.into_iter().map(|(k, v)| (k.pos, (k, v))).collect();
+        let mut pending = self.range(btree, level, min, max).peekable();
+        if btree == Btree::Accounting && level == 0 {
+            while let Some(first) = pending.peek() {
+                let pos = first.key().pos;
+                let (mut key, mut sums) = match merged.remove(&pos) {
+                    Some((key, value)) => (key, journal::counters(&value)?),
+                    None => (Key::new(kind::ACCOUNTING, pos), Vec::new()),
+                };
+                let since = key.version;
+                while pending.peek().is_some_and(|entry| entry.key().pos == pos) {
+                    let entry = pending.next().unwrap();
+                    let version = entry.key().version;
+                    if version <= since { continue; }
+                    let delta = journal::counters(entry.value())?;
+                    sums.resize(sums.len().max(delta.len()), 0);
+                    for (sum, d) in sums.iter_mut().zip(delta) { *sum = sum.wrapping_add(d); }
+                    key.version = key.version.max(version);
+                }
+                merged.insert(pos, (key, super::value::counters(&sums)));
+            }
+        } else {
+            for entry in pending {
+                let key = *entry.key();
+                if key.kind == kind::DELETED { merged.remove(&key.pos); }
+                else { merged.insert(key.pos, (key, entry.value().to_vec())); }
+            }
+        }
+        Ok(merged.into_values().collect())
+    }
+
     fn between(&self, bounds: Option<(Position, Position)>) -> Iter<'_> {
         let mut at = [0; LEVELS];
         if let Some((min, _)) = bounds {
             for (i, run) in self.runs.iter().enumerate() {
-                if let Some(run) = run { at[i] = run.partition_point(|e| e.position() < min); }
+                if let Some(run) = run { at[i] = run.entries.partition_point(|e| e.position() < min); }
             }
         }
         Iter { pending: self, at, end: bounds.map(|(_, max)| max), saved: None }
@@ -163,21 +236,22 @@ impl Pending {
     pub fn transfer(&mut self, capture: Capture, install: impl FnOnce(Transferred)) -> bool {
         let wanted = (capture.position, capture.order);
         let source = self.runs.iter_mut().flatten().find_map(|run| {
-            let at = run.partition_point(|e| e.ordering() < wanted);
-            run.get_mut(at).filter(|e| e.live && e.ordering() == wanted)
+            let at = run.entries.partition_point(|e| e.ordering() < wanted);
+            run.entries.get_mut(at).filter(|e| e.live && e.ordering() == wanted)
         });
         let Some(source) = source else { return false };
         let accounting = source.accounting();
         let value = core::mem::take(&mut source.value);
-        install(Transferred { key: source.key, value, first: capture.first });
+        install(Transferred { key: source.key, value, first: capture.first, last: source.last });
         for run in self.runs.iter_mut().flatten() {
-            let at = run.partition_point(|e| e.position() < capture.position);
-            for entry in run[at..].iter_mut().take_while(|e| e.position() == capture.position && e.order <= capture.order) {
+            let at = run.entries.partition_point(|e| e.position() < capture.position);
+            for entry in run.entries[at..].iter_mut().take_while(|e| e.position() == capture.position && e.order <= capture.order) {
                 if entry.live && (entry.order == capture.order || !accounting) {
                     entry.live = false;
                     entry.value = Vec::new();
                 }
             }
+            run.retire();
         }
         true
     }
@@ -196,7 +270,7 @@ impl<'a> Iter<'a> {
         let mut chosen = None;
         let mut best = None;
         for (i, run) in self.pending.runs.iter().enumerate() {
-            let Some(run) = run else { continue };
+            let Some(Run { entries: run, .. }) = run else { continue };
             while run.get(self.at[i]).is_some_and(|e| !e.live) { self.at[i] += 1; }
             if let Some(entry) = run.get(self.at[i]) {
                 if self.end.is_none_or(|end| entry.position() <= end) && best.is_none_or(|old| entry.ordering() < old) {
@@ -206,7 +280,7 @@ impl<'a> Iter<'a> {
             }
         }
         let i = chosen?;
-        let entry = &self.pending.runs[i].as_ref().unwrap()[self.at[i]];
+        let entry = &self.pending.runs[i].as_ref().unwrap().entries[self.at[i]];
         self.at[i] += 1;
         Some(entry)
     }
@@ -232,23 +306,36 @@ impl<'a> Iterator for Iter<'a> {
 }
 
 #[cfg(test)]
+pub(crate) use tests::allocation::after as fail_pending_allocation_after;
+
+#[cfg(test)]
 mod tests {
     use super::*;
     use super::super::{journal, value, Version};
     use alloc::vec;
     use std::collections::BTreeMap;
 
-    mod allocation {
+    pub(super) mod allocation {
         use core::cell::Cell;
         use std::alloc::{GlobalAlloc, Layout, System};
 
-        std::thread_local! { static FAIL: Cell<Option<usize>> = const { Cell::new(None) }; }
+        std::thread_local! {
+            static FAIL: Cell<Option<usize>> = const { Cell::new(None) };
+            static PENDING: Cell<bool> = const { Cell::new(false) };
+        }
+
+        pub struct Scope;
+        impl Scope {
+            pub fn enter() -> Self { PENDING.set(true); Self }
+        }
+        impl Drop for Scope { fn drop(&mut self) { PENDING.set(false); } }
 
         struct Allocator;
         #[global_allocator]
         static ALLOCATOR: Allocator = Allocator;
 
         fn fail() -> bool {
+            if !PENDING.try_with(Cell::get).unwrap_or(false) { return false; }
             FAIL.try_with(|f| match f.get() {
                 None => false,
                 Some(0) => { f.set(None); true }
@@ -348,8 +435,8 @@ mod tests {
     }
 
     #[test]
-    fn either_workspace_allocation_can_fail_before_any_key_or_pin_changes() {
-        for successful in 0..2 {
+    fn any_workspace_allocation_can_fail_before_any_key_or_pin_changes() {
+        for successful in 0..3 {
             let mut pending = Pending::default();
             add(&mut pending, 3, vec![update(1, 11)]);
             let extra = pending.incoming.capacity() + 1;

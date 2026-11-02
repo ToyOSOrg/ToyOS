@@ -95,6 +95,37 @@ fn writers(dev: &Image, cache_nodes: usize, dirs: &[u64], writers: usize, per: u
 /// The least cache a mount takes: one maximum transaction beside reclaim.
 const SMALL_CACHE: usize = super::super::mount::MIN_CACHE;
 
+#[test]
+fn committed_keys_survive_without_resident_dirty_leaves_and_replay_stays_pending() {
+    let dev = formatted(64 << 20, None);
+    let options = MountOptions { cache_nodes: SMALL_CACHE };
+    let mount = block_on_ready(Mount::open(&dev, options, random())).unwrap();
+    for i in 0..64 { block_on_ready(mount.create(mount.root(), format!("pending{i}").as_bytes(), New::File, OWNER, NOW)).unwrap(); }
+    let before = mount.pending_pressure();
+    assert!(before.0 >= 128);
+    assert_eq!(before.2, 0, "logical updates need no resident dirty leaf");
+    block_on_ready(mount.commit()).unwrap();
+    assert_eq!(mount.pending_pressure(), before, "commit journals the updates without a global materialization pass");
+    eprintln!("64-name pending workload: {} records, {} allocated bytes", before.0, before.1);
+    drop(mount);
+
+    let mount = block_on_ready(Mount::open(&dev, options, random())).unwrap();
+    assert!(mount.pending_pressure().0 >= 128, "replay keeps journal ownership");
+    assert_eq!(mount.pending_pressure().2, 0);
+    for i in 0..64 {
+        let name = format!("pending{i}");
+        assert!(block_on_ready(mount.lookup(mount.root(), name.as_bytes())).unwrap().is_some());
+        if i % 2 == 0 { block_on_ready(mount.unlink(mount.root(), name.as_bytes(), false, NOW)).unwrap(); }
+    }
+    block_on_ready(mount.check_metadata_budget());
+    block_on_ready(mount.unmount()).unwrap();
+    let volume = block_on_ready(Volume::open(&dev)).unwrap();
+    for i in 0..64 {
+        assert_eq!(block_on_ready(volume.lookup(volume.root(), format!("pending{i}").as_bytes())).unwrap().is_some(), i % 2 != 0);
+    }
+    assert_eq!(block_on_ready(fsck(&volume)).unwrap(), []);
+}
+
 /// Creates past what the journal holds, with no commit: entries fill and are
 /// written, the ring fills with entries the dirty nodes pin, and a writer
 /// waits for journal space until reclaim writes the nodes. Red when a

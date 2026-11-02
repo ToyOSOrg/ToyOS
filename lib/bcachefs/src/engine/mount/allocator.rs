@@ -204,7 +204,9 @@ impl Allocator {
     }
 
     pub(super) fn keeps(&self, metadata_buckets: u64, stable: u64, nodes: usize, reclaim_room: usize, draw: Draw, data: bool) -> bool {
-        self.stable_slots(stable) + Self::transient(nodes, reclaim_room, draw) + if data { self.per_bucket } else { 0 } <= self.capacity(metadata_buckets)
+        // Imported packing debt must not prevent its own removal. Freeing
+        // still draws on the physical reserve checked by fits/data_fits.
+        matches!(draw, Draw::Freeing) || self.stable_slots(stable) + Self::transient(nodes, reclaim_room, draw) + if data { self.per_bucket } else { 0 } <= self.capacity(metadata_buckets)
     }
 
     /// The open bucket's next slot: its sector and generation.

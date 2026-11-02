@@ -23,6 +23,12 @@ pub(crate) type Keys = Rc<Vec<(Key, Vec<u8>)>>;
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
 pub(crate) struct NodeId(usize);
 
+#[derive(Clone, Copy)]
+pub(crate) struct Change {
+    pub first: u64,
+    pub last: u64,
+}
+
 /// One node in memory.
 pub(crate) struct Cached {
     pub btree: Btree,
@@ -40,12 +46,14 @@ pub(crate) struct Cached {
     pub on_disk: u16,
     /// Bsets on the medium.
     pub bsets: u16,
+    /// Maximum dependency of the materialized bsets, not a replay watermark.
+    pub journal_seq: u64,
     pub keys: Keys,
     /// The bytes its keys take in a bset.
     pub bytes: usize,
-    /// Positions changed since the last capture, each with the sequence of
-    /// its first change since.
-    pub unwritten: BTreeMap<Bpos, u64>,
+    /// Positions changed since capture, with their oldest lifetime pin and
+    /// latest represented journal dependency.
+    pub unwritten: BTreeMap<Bpos, Change>,
     /// The oldest sequence a written bset holds whose pointer update is not
     /// applied.
     pub captured: Option<u64>,
@@ -64,7 +72,7 @@ pub(crate) struct Cached {
 
 impl Cached {
     pub(crate) fn pin(&self) -> Option<u64> {
-        let oldest = self.unwritten.values().copied().chain(self.compact).min();
+        let oldest = self.unwritten.values().map(|c| c.first).chain(self.compact).min();
         match (oldest, self.captured) {
             (Some(a), Some(b)) => Some(a.min(b)),
             (a, b) => a.or(b),
@@ -86,8 +94,8 @@ impl Cached {
         self.keys.partition_point(|(k, _)| k.pos < pos)
     }
 
-    /// Sets the key at `pos`, or removes it; `seq` is the change's sequence.
-    pub(crate) fn put(&mut self, pos: Bpos, kv: Option<(Key, Vec<u8>)>, seq: u64) {
+    /// `first` owns the original pin; `last` is the represented dependency.
+    pub(crate) fn put(&mut self, pos: Bpos, kv: Option<(Key, Vec<u8>)>, first: u64, last: u64) {
         let keys = Rc::make_mut(&mut self.keys);
         let i = keys.partition_point(|(k, _)| k.pos < pos);
         let here = keys.get(i).is_some_and(|(k, _)| k.pos == pos);
@@ -105,7 +113,7 @@ impl Cached {
             }
             (None, false) => {}
         }
-        self.unwritten.entry(pos).or_insert(seq);
+        self.unwritten.entry(pos).and_modify(|c| { c.first = c.first.min(first); c.last = c.last.max(last); }).or_insert(Change { first, last });
     }
 }
 
@@ -286,6 +294,7 @@ mod tests {
             written: 1,
             on_disk: 1,
             bsets: 1,
+            journal_seq: 1,
             keys: Rc::new(Vec::new()),
             bytes: 0,
             unwritten: BTreeMap::new(),
@@ -302,9 +311,9 @@ mod tests {
     fn a_node_just_inserted_outlives_its_own_insert_when_only_it_is_clean() {
         let mut cache = Cache::new(1, usize::MAX);
         let dirty = cache.insert(clean(8));
-        cache.change(dirty, |n| n.put(Bpos::MAX, Some((Key::new(kind::SET, Bpos::MAX), Vec::new())), 3));
+        cache.change(dirty, |n| n.put(Bpos::MAX, Some((Key::new(kind::SET, Bpos::MAX), Vec::new())), 3, 3));
         let new = cache.insert(clean(16));
-        cache.change(new, |n| n.put(Bpos::MAX, None, 4));
+        cache.change(new, |n| n.put(Bpos::MAX, None, 4, 4));
         assert_eq!((cache.id_at(16), cache.dirty, cache.oldest_pin()), (Some(new), 2, Some(3)));
     }
 }
