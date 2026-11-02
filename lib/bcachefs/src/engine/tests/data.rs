@@ -1,5 +1,6 @@
 use super::mount::{mounted, random, MEMORY, NOW, OWNER};
 use super::*;
+use super::super::read::Source;
 
 #[test]
 fn file_data_overwrites_sparse_ranges_and_truncation_survive_remount() {
@@ -316,5 +317,93 @@ fn a_large_imported_extent_is_sliced_without_rewriting_its_neighbors() {
     let mut want = original;
     want[4500..4600].fill(0x66);
     assert_eq!(read_all(&v, ino).unwrap(), want);
+    assert_eq!(block_on_ready(fsck(&v)).unwrap(), []);
+}
+
+#[test]
+fn small_and_large_geometries_reserve_an_ordinary_dirty_window() {
+    use super::buckets::Sparse;
+    for bytes in [64 << 20, 4u64 << 30] {
+        let dev = Sparse::new(bytes);
+        block_on_ready(mkfs(&dev, &Options { label: b"data", time: NOW as u64, encryption: None }, &Tree::new(), &mut Seeded(7))).unwrap();
+        let m = block_on_ready(Mount::open(&dev, MEMORY, random())).unwrap();
+        let ino = block_on_ready(m.create(m.root(), b"f", New::File, OWNER, NOW)).unwrap().ino;
+        let before = m.space().1;
+        let mut tokens = Vec::new();
+        for i in 0..64 { tokens.push(block_on_ready(m.reserve(ino, i * BLOCK as u64, BLOCK)).unwrap()); }
+        let reserved = before - m.space().1;
+        std::println!("{} MiB: pending 256 KiB consumes {reserved} reported available bytes", bytes >> 20);
+        assert!(reserved < 16 << 20);
+        for (i, token) in tokens.iter_mut().enumerate() {
+            block_on_ready(m.write_reserved(token, (i * BLOCK) as u64, &[i as u8; BLOCK], NOW)).unwrap();
+        }
+        block_on_ready(m.check_metadata_budget());
+        block_on_ready(m.unmount()).unwrap();
+        let v = block_on_ready(Volume::open(&dev)).unwrap();
+        let got = read_all(&v, ino).unwrap();
+        assert_eq!(got.len(), 64 * BLOCK);
+        for (i, block) in got.chunks_exact(BLOCK).enumerate() { assert_eq!(block, &[i as u8; BLOCK]); }
+        assert_eq!(block_on_ready(fsck(&v)).unwrap(), []);
+    }
+}
+
+#[test]
+fn metadata_bucket_evacuation_returns_sparse_bucket_capacity() {
+    use super::buckets::Sparse;
+    let dev = Sparse::new(4 << 30);
+    block_on_ready(mkfs(&dev, &Options { label: b"gc", time: NOW as u64, encryption: None }, &Tree::new(), &mut Seeded(7))).unwrap();
+    let v = block_on_ready(Volume::open(&dev)).unwrap();
+    let bucket = u64::from(v.superblock().member.bucket_sectors);
+    let mut roots = std::collections::BTreeMap::<u64, Vec<_>>::new();
+    for root in v.roots() { roots.entry(root.ptr.ptr.sector / bucket).or_default().push(*root); }
+    let (victim, sources) = roots.into_iter().max_by_key(|(_, roots)| roots.len()).unwrap();
+    assert!(sources.len() >= 4);
+    drop(v);
+    let m = block_on_ready(Mount::open(&dev, MEMORY, random())).unwrap();
+    for root in sources.iter().take(sources.len() / 2) {
+        assert!(block_on_ready(m.relocate_node(root.btree, root.level, Bpos::MAX, root.ptr.ptr.sector)).unwrap());
+    }
+    let pos = Bpos::new(0, victim, 0);
+    let mut moved = 0;
+    while block_on_ready(m.get(Btree::Alloc, pos)).unwrap().is_some_and(|(_, v)| value::AllocV4::decode(&v).unwrap().data_type == value::data_type::BTREE) {
+        assert!(block_on_ready(m.compact_metadata()).unwrap(), "a sparse closed bucket has a reachable victim");
+        moved += 1;
+        assert!(moved < 64);
+    }
+    assert!(moved > 0);
+    block_on_ready(m.check_metadata_budget());
+    block_on_ready(m.unmount()).unwrap();
+    let v = block_on_ready(Volume::open(&dev)).unwrap();
+    assert_eq!(block_on_ready(fsck(&v)).unwrap(), []);
+}
+
+#[test]
+fn a_full_data_volume_can_release_a_large_orphan_and_use_its_capacity_again() {
+    let dev = formatted(64 << 20, None);
+    let m = block_on_ready(Mount::open(&dev, MEMORY, random())).unwrap();
+    let ino = block_on_ready(m.create(m.root(), b"full", New::File, OWNER, NOW)).unwrap().ino;
+    let start = m.space().1;
+    let bytes = vec![0x62; 1 << 20];
+    let mut written = 0;
+    loop {
+        match block_on_ready(m.write(ino, written, &bytes, NOW)) {
+            Ok(n) => written += n as u64,
+            Err(Error::NoSpace(_)) => break,
+            Err(error) => panic!("fill: {error:?}"),
+        }
+        assert!(written <= 64 << 20);
+    }
+    assert!(written > 16 << 20);
+    block_on_ready(m.commit()).unwrap();
+    block_on_ready(m.unlink(m.root(), b"full", false, NOW)).unwrap();
+    block_on_ready(m.release(ino)).unwrap();
+    block_on_ready(m.commit()).unwrap();
+    assert!(m.space().1 > start / 2);
+    let ino = block_on_ready(m.create(m.root(), b"again", New::File, OWNER, NOW)).unwrap().ino;
+    assert_eq!(block_on_ready(m.write(ino, 0, &bytes, NOW)).unwrap(), bytes.len());
+    block_on_ready(m.check_metadata_budget());
+    block_on_ready(m.unmount()).unwrap();
+    let v = block_on_ready(Volume::open(&dev)).unwrap();
+    assert_eq!(read_all(&v, ino).unwrap(), bytes);
     assert_eq!(block_on_ready(fsck(&v)).unwrap(), []);
 }

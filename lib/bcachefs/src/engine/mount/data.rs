@@ -229,7 +229,9 @@ impl<D: BlockDev> Mount<D> {
         let structural = buckets * (104 + 3 * 40) + buckets.div_ceil(256) * 296 + slots * 72 + (Btree::ALL.len() * 9 * 64) as u128;
         let bytes = u128::from(st.metadata_bytes) + structural + u128::from(pending_bytes);
         let minimum = self.minimum_fill();
-        let stable = st.baseline_nodes.len() as u128 + 2 * (Btree::ALL.len() as u128 + bytes.div_ceil(minimum as u128));
+        // A tree may retain its at-most-four-node whole-range root spine.
+        // Other interior nodes have at least two children after rebalance.
+        let stable = st.baseline_nodes.len() as u128 + 4 * Btree::ALL.len() as u128 + 2 * bytes.div_ceil(minimum as u128);
         stable.min(u128::from(u64::MAX)) as u64
     }
 
